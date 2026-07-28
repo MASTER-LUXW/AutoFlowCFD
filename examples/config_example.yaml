@@ -1,0 +1,99 @@
+# AutoFlowCFD Configuration Example
+# This file demonstrates the configuration structure for CFD simulations
+
+solver:
+  # Simulation mode: steady or transient
+  mode: steady
+  
+  # Turbulence model: sst_kw, des, ddes
+  turbulence: sst_kw
+  
+  # Compute backend: cpu or gpu
+  backend: cpu
+  
+  # FR discretization order (1, 2, or 3)
+  order: 2
+
+mesh:
+  # Path to ANSA .nas grid file
+  file: examples/ahmed_body.nas
+  
+  # Geometry scale factor (1.0 = no scaling)
+  scale: 1.0
+  
+  # Coordinate system rotation (degrees)
+  rotation:
+    x: 0.0
+    y: 0.0
+    z: 0.0
+
+numerics:
+  # Maximum iterations for steady, time steps for transient
+  max_iterations: 10000
+  
+  # Convergence tolerance (residual reduction)
+  convergence_tol: 1.0e-6
+  
+  # CFL number (Courant-Friedrichs-Lewy)
+  cfl: 1.0
+  
+  # Time step size (for transient only, in seconds)
+  dt: 1.0e-4
+  
+  # Total physical time (for transient only, in seconds)
+  total_time: 0.1
+
+boundary_conditions:
+  # Inlet velocity (m/s)
+  inlet_velocity: 30.0
+  
+  # Outlet pressure (Pa, gauge)
+  outlet_pressure: 0.0
+  
+  # Wall treatment: standard_wf, enhanced_wf
+  wall_treatment: standard_wf
+  
+  # Farfield distance (m)
+  farfield_distance: 10.0
+
+reference:
+  # Reference area for coefficient calculation (m²)
+  area: 2.2
+  
+  # Reference length (m)
+  length: 4.0
+  
+  # Fluid density (kg/m³)
+  density: 1.225
+  
+  # Dynamic viscosity (Pa·s)
+  viscosity: 1.789e-5
+
+output:
+  # Output directory
+  directory: ./results
+  
+  # Output formats: json, csv, vtk
+  formats:
+    - json
+    - csv
+    - vtk
+  
+  # Output interval (every N iterations)
+  interval: 100
+  
+  # Save checkpoint for restart
+  checkpoint: true
+  
+  # Checkpoint interval (every N iterations)
+  checkpoint_interval: 500
+
+logging:
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  level: INFO
+  
+  # Log to file
+  file: autoflowcfd.log
+  
+  # Console output
+  console: true

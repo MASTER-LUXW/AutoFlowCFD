@@ -1,0 +1,104 @@
+"""Command-line interface for AutoFlowCFD.
+
+This module provides the main CLI entry point using Click framework.
+It supports subcommands for grid processing, solving, postprocessing,
+configuration management, and utilities.
+
+Example:
+    $ autoflowcfd --version
+    AutoFlowCFD v0.1.0
+    
+    $ autoflowcfd grid parse --help
+    Usage: autoflowcfd grid parse [OPTIONS] INPUT_FILE
+    
+    Parse ANSA .nas grid file.
+    
+    $ autoflowcfd solve run --help
+    Usage: autoflowcfd solve run [OPTIONS] INPUT_FILE
+    
+    Run steady-state RANS simulation.
+"""
+
+import click
+from loguru import logger
+
+from .. import __version__
+from .grid_commands import grid
+from .solve_commands import solve
+from .post_commands import post
+from .config_commands import config
+from .utils_commands import utils
+
+
+@click.group()
+@click.version_option(version=__version__, prog_name="AutoFlowCFD")
+@click.option("--verbose", "-v", is_flag=True, help="Enable verbose output")
+def cli(verbose: bool) -> None:
+    """AutoFlowCFD - High-performance CFD for automotive aerodynamics.
+    
+    AutoFlowCFD is an open-source Computational Fluid Dynamics software
+    specialized for automotive external flow field simulation.
+    
+    Features:
+        - FR (Flux Reconstruction) high-order discretization
+        - SST k-ω, DES, DDES turbulence models
+        - CPU (Numba) and GPU (CUDA) backends
+        - ANSA .nas grid file support
+        - Comprehensive post-processing tools
+    
+    Command Groups:
+        grid     Grid processing (parse, validate, info, convert)
+        solve    Solver commands (run, transient, resume, status)
+        post     Post-processing (coefficients, export-vtk, report, etc.)
+        config   Configuration management (init, show, validate)
+        utils    Utilities (version, doctor, benchmark)
+    
+    Examples:
+        # Parse grid file
+        $ autoflowcfd grid parse sedan.nas
+        
+        # Run steady-state simulation
+        $ autoflowcfd solve run sedan.nas --backend gpu --order 3
+        
+        # Run transient DES simulation
+        $ autoflowcfd solve transient sedan.nas --physical-time 0.3
+        
+        # Calculate aerodynamic coefficients
+        $ autoflowcfd post coefficients --case results/
+        
+        # Generate config template
+        $ autoflowcfd config init --template steady
+        
+        # Check environment
+        $ autoflowcfd utils doctor
+    
+    For more information on a specific command, use:
+        $ autoflowcfd <command> --help
+        $ autoflowcfd <command> <subcommand> --help
+    """
+    if verbose:
+        logger.remove()
+        logger.add(
+            lambda msg: click.echo(msg),
+            level="DEBUG",
+            format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+        )
+    else:
+        logger.remove()
+        logger.add(
+            lambda msg: click.echo(msg),
+            level="INFO",
+            format="<level>{message}</level>",
+        )
+
+
+# Register subcommand groups
+cli.add_command(grid)
+cli.add_command(solve)
+cli.add_command(post)
+cli.add_command(config)
+cli.add_command(utils)
+
+
+if __name__ == "__main__":
+    cli()

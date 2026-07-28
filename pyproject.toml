@@ -1,0 +1,120 @@
+[tool.poetry]
+name = "autoflowcfd"
+version = "0.1.0"
+description = "High-performance open-source CFD software for automotive external aerodynamics"
+authors = ["AutoFlowCFD Team <contact@autoflowcfd.org>"]
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/AutoFlowCFD/AutoFlowCFD"
+documentation = "https://autoflowcfd.readthedocs.io"
+keywords = ["cfd", "automotive", "aerodynamics", "flux-reconstruction", "gpu-computing"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+numpy = "^1.26.0"
+scipy = {version = "^1.10.0", python = ">=3.10,<3.12"}
+click = "^8.1.0"
+pyyaml = "^6.0.0"
+h5py = "^3.9.0"
+loguru = "^0.7.0"
+pyvista = {version = "^0.42.0", optional = true}
+numba = "^0.60.0"
+llvmlite = "0.43.0"
+
+# GPU support (optional)
+cupy-cuda12x = {version = "^12.2.0", optional = true}
+
+[tool.poetry.group.dev.dependencies]
+black = "^23.7.0"
+isort = "^5.12.0"
+flake8 = "^6.1.0"
+mypy = "^1.5.0"
+pylint = "^2.17.0"
+pytest = "^7.4.0"
+pytest-cov = "^4.1.0"
+pre-commit = "^3.3.0"
+
+[tool.poetry.extras]
+viz = ["pyvista"]
+gpu = ["cupy-cuda12x"]
+
+[tool.poetry.scripts]
+autoflowcfd = "autoflowcfd.cli.main:cli"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 88
+target-version = ['py310', 'py311']
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+line_length = 88
+known_first_party = "autoflowcfd"
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+
+[[tool.mypy.overrides]]
+module = [
+    "tests.*",
+    "examples.*"
+]
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra -q --cov=autoflowcfd --cov-report=term-missing"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.coverage.run]
+source = ["autoflowcfd"]
+omit = ["*/tests/*", "*/__init__.py"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "pass",
+    "raise ImportError",
+]
+fail_under = 80
+show_missing = true

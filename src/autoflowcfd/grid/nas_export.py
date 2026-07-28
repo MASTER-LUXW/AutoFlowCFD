@@ -1,0 +1,301 @@
+"""NAS file export module.
+
+Exports VolumeMeshData to Nastran (.nas) format for visualization and post-processing.
+
+Key Components:
+    - export_volume_mesh_to_nas: Main export function
+    - _write_header: Write NAS file header
+    - _write_nodes: Write GRID cards
+    - _write_tetrahedra: Write CTETRA cards
+    - _write_boundaries: Write boundary group information
+"""
+
+import numpy as np
+from typing import Optional
+from pathlib import Path
+from loguru import logger
+
+
+def export_volume_mesh_to_nas(
+    volume_mesh,
+    output_path: str,
+    include_boundaries: bool = True,
+    scale_factor: float = 1.0
+) -> str:
+    """Export VolumeMeshData to Nastran (.nas) format.
+    
+    Converts tetrahedral volume mesh to Nastran format with:
+    - GRID cards for nodes (default: meters, same as input)
+    - CTETRA cards for tetrahedral elements
+    - PSHELL/PSET cards for boundary groups (optional)
+    
+    Args:
+        volume_mesh: VolumeMeshData object with nodes, cells, boundaries
+        output_path: Output file path (.nas extension)
+        include_boundaries: Whether to include boundary group info
+        scale_factor: Coordinate scaling factor (default 1.0 for meters)
+                      Use 1000.0 to convert to millimeters if needed
+        
+    Returns:
+        str: Path to exported file
+        
+    Example:
+        >>> from autoflowcfd.grid import NASParser
+        >>> parser = NASParser('surface.nas')
+        >>> volume_mesh = parser.parse(generate_volume_mesh=True)
+        >>> export_volume_mesh_to_nas(volume_mesh, 'volume_mesh.nas')
+    """
+    output_path = Path(output_path)
+    
+    # Ensure .nas extension
+    if output_path.suffix.lower() != '.nas':
+        output_path = output_path.with_suffix('.nas')
+    
+    logger.info(f"Exporting volume mesh to NAS: {output_path}")
+    logger.info(f"  Nodes: {volume_mesh.node_count:,}")
+    logger.info(f"  Cells: {volume_mesh.cell_count:,}")
+    logger.info(f"  Total volume: {volume_mesh.total_volume:.6e} m³")
+    
+    try:
+        with open(output_path, 'w') as f:
+            # Write header
+            _write_header(f, volume_mesh)
+            
+            # Write nodes (GRID cards)
+            logger.info("Writing nodes...")
+            _write_nodes(f, volume_mesh.nodes, scale_factor)
+            
+            # Write tetrahedral elements (CTETRA cards)
+            logger.info("Writing tetrahedral elements...")
+            _write_tetrahedra(f, volume_mesh.cells.connectivity)
+            
+            # Write boundary information (optional)
+            if include_boundaries and volume_mesh.boundaries:
+                logger.info("Writing boundary groups...")
+                _write_boundaries(f, volume_mesh.boundaries)
+            
+            # Write footer
+            f.write("$ End of file\n")
+        
+        file_size = output_path.stat().st_size / (1024 * 1024)  # MB
+        logger.success(
+            f"Volume mesh exported successfully: {output_path}\n"
+            f"  File size: {file_size:.2f} MB"
+        )
+        
+        return str(output_path)
+        
+    except Exception as e:
+        logger.error(f"Failed to export volume mesh: {e}")
+        raise RuntimeError(f"NAS export failed: {e}")
+
+
+def _write_header(f, volume_mesh) -> None:
+    """Write NAS file header with metadata.
+    
+    Args:
+        f: File handle
+        volume_mesh: VolumeMeshData object
+    """
+    from datetime import datetime
+    
+    # ANSA-style header
+    f.write("$ANSA_VERSION;21.0.1;\n")
+    f.write("$\n")
+    f.write("$\n")
+    timestamp = datetime.now().strftime("%a %b %d %H:%M:%S %Y")
+    f.write(f"$ file created by  A N S A  {timestamp}\n")
+    f.write("$\n")
+    f.write("$ output from :\n")
+    f.write("$\n")
+    f.write("$ AutoFlowCFD Volume Mesh Export\n")
+    f.write(f"$ Nodes: {volume_mesh.node_count:,}\n")
+    f.write(f"$ Elements: {volume_mesh.cell_count:,}\n")
+    f.write(f"$ Total Volume: {volume_mesh.total_volume:.6e} m^3\n")
+    f.write("$\n")
+    f.write("$\n")
+    f.write("$\n")
+    f.write("BEGIN BULK                                                                      \n")
+
+
+def _write_nodes(f, nodes, scale_factor: float) -> None:
+    """Write GRID cards for all nodes.
+    
+    Nastran standard fixed-column format
+    Columns 1-4:   "GRID"
+    Columns 5-8:   (blank)
+    Columns 9-16:  Node ID (right-aligned, 8 chars)
+    Columns 17-24: Coordinate system ID (blank, 8 chars)
+    Columns 25-40: X coordinate (right-aligned, 16 chars)
+    Columns 41-56: Y coordinate (right-aligned, 16 chars)
+    Columns 57-72: Z coordinate (right-aligned, 16 chars)
+    
+    Args:
+        f: File handle
+        nodes: NodeArray with x, y, z coordinates
+        scale_factor: Scaling factor for coordinates
+    """
+    n_nodes = len(nodes.x)
+    
+    # Batch write for performance (1000 nodes per batch)
+    batch_size = 1000
+    
+    for start_idx in range(0, n_nodes, batch_size):
+        end_idx = min(start_idx + batch_size, n_nodes)
+        
+        for i in range(start_idx, end_idx):
+            node_id = i + 1  # Nastran IDs start from 1
+            x = nodes.x[i] * scale_factor
+            y = nodes.y[i] * scale_factor
+            z = nodes.z[i] * scale_factor
+            
+            # Format coordinates with controlled precision to fit in 8-char fields
+            # Maximum format: "-X.XXXXXX" (9 chars) or "XX.XXXXX" (8 chars)
+            # Strategy: Use dynamic precision based on magnitude
+            
+            def format_coord_8char(value: float) -> str:
+                """Format coordinate to fit in 8-character field.
+                
+                Args:
+                    value: Coordinate value
+                    
+                Returns:
+                    Formatted string <= 8 characters
+                """
+                # Try different precisions until we find one that fits
+                for precision in [6, 5, 4, 3, 2]:
+                    formatted = f"{value:.{precision}f}"
+                    if len(formatted) <= 8:
+                        return formatted
+                
+                # Fallback: use scientific notation if still too long
+                return f"{value:.4e}"
+            
+            x_str = format_coord_8char(x)
+            y_str = format_coord_8char(y)
+            z_str = format_coord_8char(z)
+            
+            # Small Field Format: each field is exactly 8 characters
+            # Field 1 (cols 1-8):   "GRID" keyword
+            # Field 2 (cols 9-16):  Node ID (right-aligned)
+            # Field 3 (cols 17-24): Coordinate system ID (0 = global, explicitly set)
+            # Field 4 (cols 25-32): X coordinate (right-aligned, max 8 chars)
+            # Field 5 (cols 33-40): Y coordinate (right-aligned, max 8 chars)
+            # Field 6 (cols 41-48): Z coordinate (right-aligned, max 8 chars)
+            # Fields 7-9: Omitted (trailing fields can be truncated)
+            
+            line = f"GRID    {node_id:>8}{0:>8}{x_str:>8}{y_str:>8}{z_str:>8}\n"
+            f.write(line)
+        
+        if (start_idx + batch_size) % 10000 == 0:
+            logger.debug(f"  Written {start_idx + batch_size}/{n_nodes} nodes")
+    
+    logger.info(f"  Total nodes written: {n_nodes:,}")
+
+
+def _write_tetrahedra(f, connectivity: np.ndarray) -> None:
+    """Write CTETRA cards for tetrahedral elements.
+    
+    ANSA Nastran CTETRA card format (fixed-width fields):
+    CTETRA      EID       PID      G1       G2       G3       G4
+    
+    Field widths: 8-8-8-8-8-8 characters
+    
+    Args:
+        f: File handle
+        connectivity: Tetrahedral connectivity array, shape=(n_tets, 4)
+    """
+    n_tets = len(connectivity)
+    property_id = 4  # PSOLID property ID for volume mesh (fixed)
+    
+    # Batch write for performance
+    batch_size = 1000
+    
+    for start_idx in range(0, n_tets, batch_size):
+        end_idx = min(start_idx + batch_size, n_tets)
+        
+        for i in range(start_idx, end_idx):
+            elem_id = i + 1  # Nastran IDs start from 1
+            g1 = int(connectivity[i, 0]) + 1  # Convert 0-indexed to 1-indexed
+            g2 = int(connectivity[i, 1]) + 1
+            g3 = int(connectivity[i, 2]) + 1
+            g4 = int(connectivity[i, 3]) + 1
+            
+            # ANSA format: fixed-width fields
+            line = f"CTETRA{elem_id:>10}{property_id:>8}{g1:>8}{g2:>8}{g3:>8}{g4:>8}\n"
+            f.write(line)
+        
+        if (start_idx + batch_size) % 10000 == 0:
+            logger.debug(f"  Written {start_idx + batch_size}/{n_tets} elements")
+    
+    logger.info(f"  Total elements written: {n_tets:,}")
+
+
+def _write_boundaries(f, boundaries) -> None:
+    """Write boundary group information as PSHELL/PSOLID property definitions.
+    
+    Creates proper Nastran property cards compatible with ANSA.
+    
+    Args:
+        f: File handle
+        boundaries: BoundaryMap with groups and bc_types
+    """
+    if not boundaries.groups:
+        logger.warning("No boundary groups found, skipping boundary export")
+        return
+    
+    # Write PSHELL cards for surface boundaries (PIDs 1-3)
+    pid_counter = 1
+    mid_counter = 1
+    
+    for group_name, cell_indices in boundaries.groups.items():
+        bc_type = boundaries.bc_types.get(group_name, "WALL")
+        
+        # Map boundary type to ANSA-compatible name
+        ansa_name = bc_type.lower()
+        
+        # Write PSHELL card (8-character fields with continuation)
+        f.write(f"PSHELL{pid_counter:>8}{mid_counter:>7}      1.{mid_counter:>7}      1.{mid_counter:>7}                +{pid_counter:07d}\n")
+        f.write(f"+{pid_counter:07d}\n")
+        
+        # Write ANSA name comment
+        f.write(f"$ANSA_NAME_COMMENT;{pid_counter};PSHELL;{ansa_name};;NO;NO;NO;NO;\n")
+        
+        pid_counter += 1
+        mid_counter += 1
+    
+    # Write PSOLID card for volume mesh (FIXED PID = 4 to match CTETRA)
+    solid_pid = 4  # Fixed PID for volume elements
+    solid_mid = mid_counter
+    f.write(f"PSOLID{solid_pid:>8}{solid_mid:>8}\n")
+    f.write(f"$ANSA_NAME_COMMENT;{solid_pid};PSOLID;Auto Detected Volume;;NO;NO;NO;NO;\n")
+    
+    # Write MAT1 material cards
+    for i in range(1, mid_counter + 1):
+        f.write(f"$ANSA_COLOR;{i};MAT1;.725490212440491;.035294119268656;0.20392157137394;1.;\n")
+    
+    f.write(f"$ANSA_COLOR;{solid_mid};MAT1;.635294139385223;0.34901961684227;.341176480054855;1.;\n")
+    
+    # Write PART definitions
+    f.write("$ANSA_PART;GROUP;ID;2;NAME;Auto Detected Volumes Group;BELONGS_HERE;YES;PID_OFFS\n")
+    f.write("$ET;0;COLOR;137;211;69;0;IS_COLOR_ACTIVE;0;PART_TYPE;Undefined;ATTRIBUTES;2;DM/F\n")
+    f.write("$ile Type;ANSA;DM/Status;WIP;CONTAINS;ANSAPART;3;\n")
+    
+    # Surface parts
+    if pid_counter > 1:
+        shell_range = f"1-{pid_counter-1}" if pid_counter > 2 else "1"
+        f.write(f"$ANSA_PART;PART;ID;1;NAME;Untitled;BELONGS_HERE;YES;STUDY_VERSION;0;PID_OFFSET;0\n")
+        f.write("$;COLOR;185;9;52;0;IS_COLOR_ACTIVE;1;PART_TYPE;Undefined;ATTRIBUTES;2;DM/File Ty\n")
+        f.write(f"$pe;ANSA;DM/Status;WIP;CONTAINS;PSHELL;{shell_range};\n")
+    
+    # Volume part
+    f.write(f"$ANSA_PART;PART;ID;3;NAME;Untitled_Volume_1;BELONGS_HERE;YES;STUDY_VERSION;0;PID\n")
+    f.write("$_OFFSET;0;COLOR;215;68;166;0;IS_COLOR_ACTIVE;1;PART_TYPE;Undefined;ATTRIBUTES;2\n")
+    f.write(f"$;DM/File Type;ANSA;DM/Status;WIP;CONTAINS;PSOLID;{solid_pid};\n")
+    
+    # Write ENDDATA marker
+    f.write("ENDDATA\n")
+    f.write("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$\n")
+    f.write("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$\n")
+    
+    logger.info(f"  Boundary groups written: {len(boundaries.groups)}")
