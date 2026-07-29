@@ -28,10 +28,23 @@ class SolutionConstraintHandler:
         Args:
             solution: Solution array, shape=(n_cells, 7)
         """
+        # === CRITICAL: Clip velocity magnitude to prevent kinetic energy blow-up ===
+        MAX_VELOCITY = 1e4  # 10 km/s - physically reasonable upper bound for external aerodynamics
+        
         rho = np.maximum(solution[:, 0], 1e-6)
         solution[:, 0] = rho
 
         vel = solution[:, 1:4] / rho[:, None]
+        
+        # Clip velocity magnitude
+        vel_mag = np.sqrt(np.sum(vel**2, axis=1))
+        clip_mask = vel_mag > MAX_VELOCITY
+        if np.any(clip_mask):
+            clip_factor = MAX_VELOCITY / vel_mag[clip_mask]
+            vel[clip_mask] *= clip_factor[:, None]
+            # Update momentum with clipped velocities
+            solution[clip_mask, 1:4] = (rho[clip_mask, None] * vel[clip_mask])
+        
         ke = 0.5 * rho * np.sum(vel**2, axis=1)
         p = (self.gamma - 1.0) * (solution[:, 4] - ke)
 

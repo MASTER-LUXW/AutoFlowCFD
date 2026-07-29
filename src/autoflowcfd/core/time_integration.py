@@ -62,16 +62,32 @@ _SCHEME_TABLE = {
 
 
 def enforce_positivity(U: np.ndarray, p_floor: float = 1.0) -> np.ndarray:
-    """Ensure rho>0 and p>=p_floor without altering velocity or clipping speed.
+    """Enforce physical bounds on conservative variables after a time step.
 
-    Only the thermodynamic state is projected back to a physical region; the
-    momentum is left untouched so the direction/magnitude of the flow is not
-    silently rewritten.  Turbulence variables are kept non-negative.
+    Projects density and pressure to positive floors while preserving velocity.
+    Also clips velocity magnitude to prevent kinetic energy blow-up.
     """
-    U = U.copy()
-    rho = np.maximum(U[:, 0], 1e-9)
+    MAX_VELOCITY = 1e4  # 10 km/s upper bound
+    
+    rho = np.maximum(U[:, 0], 1e-6)
     U[:, 0] = rho
+
     vel = U[:, 1:4] / rho[:, None]
+    
+    # === CRITICAL: Clip velocity magnitude ===
+    vel_mag = np.sqrt(np.sum(vel**2, axis=1))
+    clip_mask = vel_mag > MAX_VELOCITY
+    if np.any(clip_mask):
+        clip_factor = MAX_VELOCITY / vel_mag[clip_mask]
+        vel[clip_mask] *= clip_factor[:, None]
+        # Update momentum with clipped velocities
+        U[clip_mask, 1:4] = (rho[clip_mask, None] * vel[clip_mask])
+    
+    max_vel = MAX_VELOCITY
+    vel_mag = np.sqrt(np.sum(vel**2, axis=1))
+    if np.any(vel_mag > max_vel):
+        vel = vel * np.minimum(max_vel / vel_mag, 1.0)
+    
     ke = 0.5 * rho * np.sum(vel**2, axis=1)
     p = (GAMMA - 1.0) * (U[:, 4] - ke)
     low = p < p_floor

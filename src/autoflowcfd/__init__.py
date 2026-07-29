@@ -21,6 +21,20 @@ Example:
     >>> print(f"Drag Coefficient: {coeffs['Cd']:.4f}")
 """
 
+# ============================================================================
+# CRITICAL: Set BLAS/linear algebra threading BEFORE importing NumPy
+# This ensures maximum multi-core utilization for vectorized operations
+# ============================================================================
+import os
+import multiprocessing
+
+_cpu_count = multiprocessing.cpu_count()
+os.environ.setdefault('MKL_NUM_THREADS', str(_cpu_count))
+os.environ.setdefault('OPENBLAS_NUM_THREADS', str(_cpu_count))
+os.environ.setdefault('NUMEXPR_NUM_THREADS', str(_cpu_count))
+os.environ.setdefault('VECLIB_MAXIMUM_THREADS', str(_cpu_count))
+os.environ.setdefault('OMP_NUM_THREADS', str(_cpu_count))
+
 __version__ = "0.1.0"
 __author__ = "AutoFlowCFD Team"
 __email__ = "contact@autoflowcfd.org"

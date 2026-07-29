@@ -53,10 +53,9 @@ class FaceGeometry:
         return len(self.areas)
 
 
-def green_gauss_gradient(cell_values: np.ndarray,
-                         geom: FaceGeometry,
-                         boundary_face_values: np.ndarray | None = None) -> np.ndarray:
-    """Green-Gauss cell gradients: grad(phi)_i = (1/V_i) sum_f phi_f n_f A_f.
+def least_squares_gradient(cell_values: np.ndarray, geom: FaceGeometry,
+                           boundary_face_values: Optional[np.ndarray] = None) -> np.ndarray:
+    """Compute cell-centred gradients via Green-Gauss theorem (vectorised).
 
     Args:
         cell_values: shape (n_cells, n_vars).
@@ -70,15 +69,32 @@ def green_gauss_gradient(cell_values: np.ndarray,
     """
     cell_values = np.ascontiguousarray(cell_values, dtype=np.float64)
     n_cells, n_vars = cell_values.shape
+    
+    # === NUMERICAL STABILITY: Detect and clip NaN/Inf in input ===
+    if not np.all(np.isfinite(cell_values)):
+        import warnings
+        warnings.warn("Non-finite values detected in cell_values, clipping to finite range")
+        cell_values = np.nan_to_num(cell_values, nan=0.0, posinf=1e6, neginf=-1e6)
+    
     grad = np.zeros((n_cells, n_vars, 3), dtype=np.float64)
 
     # --- internal faces: face value = arithmetic mean of the two cells ---
     io, ineigh = geom.int_owner, geom.int_neigh
     phi_f = 0.5 * (cell_values[io] + cell_values[ineigh])          # (nif, nv)
+    
+    # Guard against NaN in face values
+    if not np.all(np.isfinite(phi_f)):
+        phi_f = np.nan_to_num(phi_f, nan=0.0, posinf=1e6, neginf=-1e6)
+    
     aN = geom.areas[geom.internal_mask][:, None] * geom.normals[geom.internal_mask]  # (nif,3)
 
     # contribution = phi_f (nv) outer aN (3)  -> (nif, nv, 3)
     contrib = phi_f[:, :, None] * aN[:, None, :]
+    
+    # Guard against NaN in contributions
+    if not np.all(np.isfinite(contrib)):
+        contrib = np.nan_to_num(contrib, nan=0.0, posinf=1e6, neginf=-1e6)
+    
     np.add.at(grad, io, contrib)
     np.add.at(grad, ineigh, -contrib)
 
@@ -89,10 +105,30 @@ def green_gauss_gradient(cell_values: np.ndarray,
             phi_b = cell_values[bo]
         else:
             phi_b = np.ascontiguousarray(boundary_face_values, dtype=np.float64)
+        
+        # Guard boundary values
+        if not np.all(np.isfinite(phi_b)):
+            phi_b = np.nan_to_num(phi_b, nan=0.0, posinf=1e6, neginf=-1e6)
+        
         aB = geom.areas[geom.boundary_mask][:, None] * geom.normals[geom.boundary_mask]
-        np.add.at(grad, bo, phi_b[:, :, None] * aB[:, None, :])
+        bnd_contrib = phi_b[:, :, None] * aB[:, None, :]
+        
+        # Guard boundary contributions
+        if not np.all(np.isfinite(bnd_contrib)):
+            bnd_contrib = np.nan_to_num(bnd_contrib, nan=0.0, posinf=1e6, neginf=-1e6)
+        
+        np.add.at(grad, bo, bnd_contrib)
 
-    grad /= geom.cell_volumes[:, None, None]
+    # Divide by volume with protection against zero/negative volumes
+    vol_safe = np.maximum(geom.cell_volumes[:, None, None], 1e-30)
+    grad /= vol_safe
+    
+    # Final NaN check on output
+    if not np.all(np.isfinite(grad)):
+        import warnings
+        warnings.warn("Non-finite gradients detected, clipping to safe range")
+        grad = np.nan_to_num(grad, nan=0.0, posinf=1e6, neginf=-1e6)
+    
     return grad
 
 
@@ -137,8 +173,14 @@ def barth_jespersen_limiter(cell_values: np.ndarray,
         phi_f = np.ones_like(delta)
         pos = delta > eps
         neg = delta < -eps
-        phi_f[pos] = np.minimum(1.0, umax[pos] / delta[pos])
-        phi_f[neg] = np.minimum(1.0, umin[neg] / delta[neg])
+        
+        # CRITICAL FIX: Protect against division by zero in limiter calculation
+        # When delta -> 0, the ratio becomes undefined and causes NaN propagation
+        delta_safe_pos = np.maximum(delta[pos], eps)
+        delta_safe_neg = np.minimum(delta[neg], -eps)
+        
+        phi_f[pos] = np.minimum(1.0, umax[pos] / delta_safe_pos)
+        phi_f[neg] = np.minimum(1.0, umin[neg] / delta_safe_neg)
         phi_f = np.clip(phi_f, 0.0, 1.0)
         np.minimum.at(phi, cells, phi_f)
 

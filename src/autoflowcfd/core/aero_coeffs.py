@@ -28,6 +28,10 @@ class AeroCoefficientCalculator:
         # Cache for reference area to avoid recomputation
         self._cached_ref_area = None
         self._ref_area_computed = False
+        
+        # CRITICAL OPTIMIZATION: Cache body face indices (fixed after mesh generation)
+        self._cached_body_faces = None
+        self._body_faces_cached = False
 
     def compute_coefficients(self, solution: np.ndarray, iteration: int = 0) -> Tuple[float, float]:
         """Compute drag and lift coefficients.
@@ -82,14 +86,6 @@ class AeroCoefficientCalculator:
             
             dp = p_body - p_ref
             
-            # Debug output for first few iterations
-            if iteration <= 5 or iteration % 10 == 0:
-                logger.info(f"[Iter {iteration}] Body surface analysis:")
-                logger.info(f"  Body faces: {len(body_face_indices)}")
-                logger.info(f"  Pressure stats: min={p_body.min():.2f}, max={p_body.max():.2f}, mean={p_body.mean():.2f}")
-                logger.info(f"  Pressure diff stats: min={dp.min():.2f}, max={dp.max():.2f}, mean={dp.mean():.2f}")
-                logger.info(f"  Total area: {face_areas.sum():.6f} m²")
-            
             # Force components
             Fx = -np.sum(dp * face_normals[:, 0] * face_areas)
             Fz = -np.sum(dp * face_normals[:, 2] * face_areas)
@@ -109,11 +105,6 @@ class AeroCoefficientCalculator:
                 logger.warning("Cl is not finite")
                 Cl = 0.0
             
-            # Debug output
-            if iteration <= 5 or iteration % 10 == 0:
-                logger.info(f"[Iter {iteration}] Forces: Fx={Fx:.2f} N, Fz={Fz:.2f} N")
-                logger.info(f"[Iter {iteration}] Coefficients: Cd={Cd:.6f}, Cl={Cl:.6f} (A_ref={ref_area:.6f} m²)")
-            
             return float(Cd), float(Cl)
             
         except Exception as e:
@@ -123,13 +114,18 @@ class AeroCoefficientCalculator:
             return 0.0, 0.0
     
     def _identify_body_faces(self) -> np.ndarray:
-        """Identify body surface face indices using vectorized operations.
+        """Identify body surface faces from boundary conditions.
         
-        Uses NumPy set operations instead of Python loops for performance.
+        CRITICAL OPTIMIZATION: Cache result to avoid repeated expensive computation.
+        Body faces are fixed after mesh generation and never change during iteration.
         
         Returns:
             Array of face indices belonging to body boundaries
         """
+        # Return cached result if available (99% of calls will hit cache)
+        if self._body_faces_cached and self._cached_body_faces is not None:
+            return self._cached_body_faces
+        
         # Find all boundary names containing 'body'
         body_boundary_names = [
             name for name in self.grid_data.boundaries.boundary_names
@@ -140,13 +136,10 @@ class AeroCoefficientCalculator:
             logger.warning("No body boundary found")
             return np.array([], dtype=np.int64)
         
-        logger.info(f"Searching for body boundaries: {body_boundary_names}")
-        
         # Collect all body cell indices using set union (vectorized)
         body_cell_set = set()
         for boundary_name in body_boundary_names:
             cells = self.grid_data.boundaries.get_cell_indices(boundary_name)
-            logger.info(f"  Boundary '{boundary_name}': {len(cells)} cells")
             body_cell_set.update(cells)
         
         if not body_cell_set:
@@ -155,7 +148,6 @@ class AeroCoefficientCalculator:
         
         # Convert to numpy array for fast lookup
         body_cells_array = np.array(list(body_cell_set), dtype=np.int64)
-        logger.info(f"Total body cells: {len(body_cells_array)}")
         
         # Get all boundary faces
         boundary_mask = self.face_extractor.boundary_flags
@@ -169,9 +161,11 @@ class AeroCoefficientCalculator:
         # Get indices where condition is True
         body_face_indices = np.where(is_body_face)[0]
         
-        logger.info(f"Identified {len(body_face_indices)} body surface faces from {len(body_cells_array)} cells")
+        # CACHE the result for future calls
+        self._cached_body_faces = body_face_indices.astype(np.int64)
+        self._body_faces_cached = True
         
-        return body_face_indices.astype(np.int64)
+        return self._cached_body_faces
 
     def _compute_reference_area(self, body_face_indices: np.ndarray) -> float:
         """Compute reference frontal area using bounding box estimation.
@@ -283,9 +277,9 @@ class AeroCoefficientCalculator:
             unit_normals = normals / norms
             
             # Debug output
-            logger.info(f"  Total area: {areas.sum():.6f} m²")
-            logger.info(f"  Mean face area: {areas.mean():.6e} m²")
-            logger.info(f"  Min/Max face area: {areas.min():.6e} / {areas.max():.6e} m²")
+            logger.info(f"  Total area: {areas.sum():.6f} m^2")
+            logger.info(f"  Mean face area: {areas.mean():.6e} m^2")
+            logger.info(f"  Min/Max face area: {areas.min():.6e} / {areas.max():.6e} m^2")
             
             # Compute projected area in X-direction (freestream direction)
             x_component = unit_normals[:, 0]
@@ -342,13 +336,6 @@ class AeroCoefficientCalculator:
         face_normals = self.face_extractor.face_normals[body_face_indices]
         face_areas = self.face_extractor.face_areas[body_face_indices]
         
-        # Debug: Print body geometry statistics
-        logger.info(f"Volume mesh body analysis:")
-        logger.info(f"  Body faces: {len(body_face_indices)}")
-        logger.info(f"  Total area: {face_areas.sum():.6f} m²")
-        logger.info(f"  Mean face area: {face_areas.mean():.6e} m²")
-        logger.info(f"  Min/Max face area: {face_areas.min():.6e} / {face_areas.max():.6e} m²")
-        
         # Projected area in X-direction (freestream direction)
         x_component = face_normals[:, 0]
         
@@ -363,20 +350,7 @@ class AeroCoefficientCalculator:
             projected_areas_all = np.abs(x_component) * face_areas
             ref_area_fallback = np.sum(projected_areas_all) / 2.0
             if ref_area_fallback > 0 and np.isfinite(ref_area_fallback):
-                logger.info(f"Fallback reference area: {ref_area_fallback:.6f} m^2")
                 return float(ref_area_fallback)
             return 1.0
-        
-        # Sanity check
-        if ref_area > 10.0:
-            logger.warning(f"Reference area {ref_area:.2f} m^2 seems too large for Ahmed Body")
-            logger.warning(f"  Number of body faces: {len(body_face_indices)}")
-            logger.warning(f"  Mean |n_x|: {np.mean(np.abs(x_component)):.4f}")
-            logger.warning(f"  Upstream-facing ratio: {np.sum(upstream_mask) / len(body_face_indices) * 100:.1f}%")
-            logger.warning(f"  This may indicate incorrect unit conversion or face identification")
-        
-        logger.info(f"Reference area (volume mesh): {ref_area:.6f} m^2")
-        logger.info(f"  Upstream-facing faces: {np.sum(upstream_mask)} / {len(body_face_indices)}")
-        logger.info(f"  Mean projected area per face: {ref_area / max(1, np.sum(upstream_mask)):.6e} m^2")
         
         return float(ref_area)

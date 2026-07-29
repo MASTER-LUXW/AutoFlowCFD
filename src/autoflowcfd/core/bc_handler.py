@@ -19,6 +19,9 @@ class BoundaryConditionHandler:
         self.grid_data = grid_data
         self.face_extractor = face_extractor
         
+        # Thermodynamic constants
+        self.gamma = 1.4  # Ratio of specific heats for air
+        
         # Ramp mechanism for smooth velocity transition
         self.ramp_factor = 0.0  # Start from 0, will increase to 1.0
         self.base_inlet_velocity = 30.0  # Base inlet velocity (m/s)
@@ -232,11 +235,186 @@ class BoundaryConditionHandler:
 
         Interior-face rows are left as zeros (unused by the residual); boundary
         rows hold the ghost state from :meth:`apply_boundary_condition`.
+        
+        OPTIMIZED: Vectorized implementation replacing Python loop over boundary faces.
+        Processes all boundary faces grouped by type for maximum performance.
         """
         n_faces = len(self.face_extractor.boundary_flags)
         states = np.zeros((n_faces, 7), dtype=np.float64)
-        bfaces = np.where(self.face_extractor.boundary_flags)[0]
-        for f in bfaces:
-            owner = int(self.face_extractor.face_connectivity[f, 0])
-            states[f] = self.apply_boundary_condition(solution, owner, int(f))
+        
+        # Get all boundary face indices at once
+        bface_mask = self.face_extractor.boundary_flags
+        if not np.any(bface_mask):
+            return states
+        
+        bfaces = np.where(bface_mask)[0]
+        n_bfaces = len(bfaces)
+        
+        # Batch extract owner cell indices for all boundary faces
+        owner_indices = self.face_extractor.face_connectivity[bfaces, 0].astype(np.int32)
+        
+        # Batch extract interior conservative states for owner cells
+        U_interior = solution[owner_indices]  # (n_bfaces, 7)
+        
+        # Decompose to primitive variables for all boundary faces at once
+        rho = np.maximum(U_interior[:, 0], 1e-9)
+        vel = U_interior[:, 1:4] / rho[:, None]  # (n_bfaces, 3)
+        u, v, w = vel[:, 0], vel[:, 1], vel[:, 2]
+        ke = 0.5 * rho * np.sum(vel**2, axis=1)
+        p = np.maximum((self.gamma - 1.0) * (U_interior[:, 4] - ke), 100.0)
+        k = np.maximum(U_interior[:, 5] / rho, 0.0)
+        omega = np.maximum(U_interior[:, 6] / rho, 1e-6)
+        
+        # Get face normals for all boundary faces
+        normals = self.face_extractor.face_normals[bfaces]  # (n_bfaces, 3)
+        
+        # Get boundary types for all faces (vectorized lookup)
+        if self._face_types is None:
+            self._precompute_face_types()
+        
+        # Create mapping from face index to array position
+        face_to_idx = {int(f): i for i, f in enumerate(bfaces)}
+        btypes = np.array([self._face_types.get(int(f), "WALL") for f in bfaces])
+        
+        # Process each boundary type separately (vectorized within each group)
+        unique_types = np.unique(btypes)
+        
+        for btype in unique_types:
+            type_mask = (btypes == btype)
+            if not np.any(type_mask):
+                continue
+            
+            # Indices within bfaces array for this boundary type
+            type_indices_in_bfaces = np.where(type_mask)[0]
+            # Actual face indices
+            type_face_indices = bfaces[type_indices_in_bfaces]
+            
+            # Extract data for this boundary type
+            rho_t = rho[type_mask]
+            u_t, v_t, w_t = u[type_mask], v[type_mask], w[type_mask]
+            p_t = p[type_mask]
+            k_t = k[type_mask]
+            omega_t = omega[type_mask]
+            normals_t = normals[type_mask]
+            U_int_t = U_interior[type_indices_in_bfaces]
+            
+            # Apply boundary condition based on type
+            if btype in ["WALL", "GROUND"]:
+                ghost_states = self._wall_bc_vectorized(
+                    rho_t, u_t, v_t, w_t, p_t, k_t, omega_t, 
+                    normals_t, btype
+                )
+            elif btype in ["INLET", "FARFIELD"]:
+                # Inlet/farfield uses fixed freestream values
+                n_type = np.sum(type_mask)
+                ghost_states = np.tile(self._inlet_farfield_bc(), (n_type, 1))
+            elif btype == "OUTLET":
+                ghost_states = self._outlet_bc_vectorized(
+                    rho_t, u_t, v_t, w_t, p_t, k_t, omega_t
+                )
+            elif btype == "SYMMETRY":
+                # Need total energy E for symmetry BC
+                E_t = U_int_t[:, 4]
+                ghost_states = self._symmetry_bc_vectorized(
+                    rho_t, u_t, v_t, w_t, E_t, k_t, omega_t, normals_t
+                )
+            else:
+                # Default: copy interior state
+                ghost_states = U_int_t.copy()
+            
+            # Assign ghost states to output array
+            states[type_face_indices] = ghost_states
+        
         return states
+    
+    def _wall_bc_vectorized(self, rho: np.ndarray, u: np.ndarray, v: np.ndarray,
+                           w: np.ndarray, p: np.ndarray, k: np.ndarray,
+                           omega: np.ndarray, normals: np.ndarray,
+                           wall_type: str = "WALL") -> np.ndarray:
+        """Vectorized wall boundary condition with numerical stability protection."""
+        gamma = self.gamma
+        
+        # === NUMERICAL STABILITY: Clip velocity to prevent blow-up ===
+        MAX_VELOCITY = 1e4  # 10 km/s physical upper bound
+        vel_mag = np.sqrt(u**2 + v**2 + w**2)
+        clip_factor = np.minimum(1.0, MAX_VELOCITY / np.maximum(vel_mag, 1e-12))
+        
+        u = u * clip_factor
+        v = v * clip_factor
+        w = w * clip_factor
+        
+        # Recompute kinetic energy with clipped velocities
+        ke = 0.5 * rho * (u**2 + v**2 + w**2)
+        
+        # Ensure pressure positivity and reasonable bounds
+        p = np.maximum(p, 100.0)
+        p = np.minimum(p, 1e8)  # Prevent extreme pressure
+        
+        # Target wall velocity
+        u_wall, v_wall, w_wall = 0.0, 0.0, 0.0
+        if wall_type == "GROUND":
+            u_wall = self.get_current_farfield_velocity()
+        
+        # Ghost = 2*wall - interior (mirror reflection)
+        u_ghost = 2.0 * u_wall - u
+        v_ghost = 2.0 * v_wall - v
+        w_ghost = 2.0 * w_wall - w
+        
+        # Clip ghost velocities as well
+        vel_ghost_mag = np.sqrt(u_ghost**2 + v_ghost**2 + w_ghost**2)
+        ghost_clip = np.minimum(1.0, MAX_VELOCITY / np.maximum(vel_ghost_mag, 1e-12))
+        u_ghost *= ghost_clip
+        v_ghost *= ghost_clip
+        w_ghost *= ghost_clip
+        
+        rho_ghost = rho
+        rhou_ghost = rho_ghost * u_ghost
+        rhov_ghost = rho_ghost * v_ghost
+        rhow_ghost = rho_ghost * w_ghost
+        
+        # Compute ghost energy with clipped values
+        E_ghost = p / (gamma - 1.0) + 0.5 * rho_ghost * (u_ghost**2 + v_ghost**2 + w_ghost**2)
+        
+        # Turbulence: k -> 0 at wall (mirror), omega extrapolated
+        rhok_ghost = -rho_ghost * k
+        rhow_ghost_sst = rho_ghost * omega
+        
+        return np.column_stack([
+            rho_ghost, rhou_ghost, rhov_ghost, rhow_ghost,
+            E_ghost, rhok_ghost, rhow_ghost_sst
+        ])
+    
+    def _outlet_bc_vectorized(self, rho: np.ndarray, u: np.ndarray, v: np.ndarray,
+                             w: np.ndarray, p: np.ndarray, k: np.ndarray,
+                             omega: np.ndarray) -> np.ndarray:
+        """Vectorized outlet boundary condition."""
+        gamma = self.gamma
+        p_outlet = 101325.0
+        
+        rhou = rho * u
+        rhov = rho * v
+        rhow = rho * w
+        E = p_outlet / (gamma - 1.0) + 0.5 * rho * (u**2 + v**2 + w**2)
+        
+        return np.column_stack([rho, rhou, rhov, rhow, E, rho * k, rho * omega])
+    
+    def _symmetry_bc_vectorized(self, rho: np.ndarray, u: np.ndarray, v: np.ndarray,
+                               w: np.ndarray, E: np.ndarray, k: np.ndarray,
+                               omega: np.ndarray, normal: np.ndarray) -> np.ndarray:
+        """Vectorized symmetry boundary condition."""
+        # Normal velocity component
+        u_n = u * normal[:, 0] + v * normal[:, 1] + w * normal[:, 2]
+        
+        # Mirror normal velocity: u_ghost = u - 2*u_n*n
+        u_ghost = u - 2.0 * u_n * normal[:, 0]
+        v_ghost = v - 2.0 * u_n * normal[:, 1]
+        w_ghost = w - 2.0 * u_n * normal[:, 2]
+        
+        rhou_ghost = rho * u_ghost
+        rhov_ghost = rho * v_ghost
+        rhow_ghost = rho * w_ghost
+        
+        return np.column_stack([
+            rho, rhou_ghost, rhov_ghost, rhow_ghost, E,
+            rho * k, rho * omega
+        ])

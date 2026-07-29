@@ -8,6 +8,7 @@ Key Components:
     - FRSolver: Main steady-state solver class (coordinator)
 """
 
+import time
 import numpy as np
 from typing import Dict, Optional, List, Union
 from dataclasses import dataclass, field
@@ -195,8 +196,8 @@ class FRSolver:
         self.solution[:, 6] = rho_0 * omega_0  # conservative specific dissipation
 
         logger.info(f"Solution initialized: {n_cells} cells")
-        logger.info(f"  Initial conditions: rho={rho_0:.3f} kg/m³, u={u_0:.1f} m/s, p={p_0:.0f} Pa")
-        logger.info(f"  Turbulence: k={k_0:.4e} m²/s², omega={omega_0:.2f} 1/s")
+        logger.info(f"  Initial conditions: rho={rho_0:.3f} kg/m^3, u={u_0:.1f} m/s, p={p_0:.0f} Pa")
+        logger.info(f"  Turbulence: k={k_0:.4e} m^2/s^2, omega={omega_0:.2f} 1/s")
 
     def _setup_boundary_conditions(self):
         """Setup boundary conditions."""
@@ -245,7 +246,6 @@ class FRSolver:
         Returns:
             SteadyResult with solution and history
         """
-        import time
 
         # Initialize
         if self.solution is None:
@@ -253,21 +253,49 @@ class FRSolver:
 
         self._setup_boundary_conditions()
 
-        # Build oriented face connectivity/geometry.
-        nodes = np.column_stack([
+        # CRITICAL FIX: Use optimized face extraction from VolumeMeshData instead of slow FVMFaceExtractor
+        logger.info("Using pre-computed face data from VolumeMeshData (optimized radix-sort)...")
+        t_face_start = time.perf_counter()
+        
+        # Ensure faces exist (uses optimized FaceExtractor with argsort)
+        face_data_obj = self.grid_data.ensure_faces_exist()
+        
+        # Compute cell centroids FIRST (needed for gradient reconstruction)
+        nodes_array = np.column_stack([
             self.grid_data.nodes.x,
             self.grid_data.nodes.y,
             self.grid_data.nodes.z,
         ])
-        face_data = self.face_extractor.build_from_tetrahedra(
-            self.grid_data.cells.connectivity, nodes
-        )
+        connectivity_int64 = self.grid_data.cells.connectivity.astype(np.int64)
+        cell_centroids = nodes_array[connectivity_int64].mean(axis=1)
+        
+        # Store in face_extractor for later use
+        self.face_extractor.cell_centroids = cell_centroids
+        
+        # Convert FaceData to dictionary format expected by flux_calculator
+        face_data = {
+            'connectivity': face_data_obj.connectivity,
+            'normals': face_data_obj.normal,
+            'areas': face_data_obj.area,
+            'centers': face_data_obj.center,
+            'boundary_flags': (face_data_obj.connectivity[:, 1] < 0).astype(np.int32),
+            'cell_centroids': cell_centroids,
+        }
+        
+        t_face_end = time.perf_counter()
+        logger.success(f"Face data prepared in {t_face_end - t_face_start:.2f}s (optimized)")
 
         # Expose face data on the flux calculator (used by aero/bc helpers).
         self.flux_calculator.face_connectivity = face_data['connectivity']
         self.flux_calculator.face_normals = face_data['normals']
         self.flux_calculator.face_areas = face_data['areas']
         self.flux_calculator.boundary_flags = face_data['boundary_flags']
+        
+        # CRITICAL: Also expose face data on face_extractor for aero coefficient calculation
+        self.face_extractor.face_connectivity = face_data['connectivity']
+        self.face_extractor.face_normals = face_data['normals']
+        self.face_extractor.face_areas = face_data['areas']
+        self.face_extractor.boundary_flags = face_data['boundary_flags']
 
         # Assemble shared geometry bundle for the residual.
         cell_volumes = self._get_cell_volumes()
@@ -282,12 +310,20 @@ class FRSolver:
         )
 
         # Wall distance from viscous-wall boundary faces (WALL/GROUND).
-        self.bc_handler._precompute_face_types()
-        wall_face_mask = np.zeros(geom.n_faces, dtype=bool)
-        for f, t in self.bc_handler._face_types.items():
-            if t in ("WALL", "GROUND"):
-                wall_face_mask[f] = True
-        wall_distance = estimate_wall_distance(geom, wall_face_mask)
+        try:
+            self.bc_handler._precompute_face_types()
+            wall_face_mask = np.zeros(geom.n_faces, dtype=bool)
+            for f, t in self.bc_handler._face_types.items():
+                if t in ("WALL", "GROUND"):
+                    wall_face_mask[f] = True
+            logger.info(f"Wall face mask computed: {np.sum(wall_face_mask)} wall faces")
+            wall_distance = estimate_wall_distance(geom, wall_face_mask)
+            logger.info(f"Wall distance estimated: min={wall_distance.min():.4e}, max={wall_distance.max():.4e}")
+        except Exception as e:
+            logger.error(f"Failed to compute wall distance: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise
 
         # Molecular viscosity (Sutherland at 288 K ~ 1.79e-5 Pa s).
         mu_lam = 1.7894e-5
@@ -323,14 +359,41 @@ class FRSolver:
                                                self.bc_handler.build_boundary_states(self.solution))
             mu_t = residual._eddy_viscosity(rho_c, k_c, w_c, gvel) if turbulent \
                 else np.zeros(geom.n_cells)
+            
+            # Compute local time step with current CFL
             dt_local = self.time_integrator.local_time_step(self.solution, geom, mu_lam + mu_t)
-
+            
             # One SSP-RK pseudo-time step.
             R = residual_func(self.solution)
             self.solution = self.time_integrator.step(self.solution, residual_func, dt_local)
 
+            # Check for numerical divergence immediately after update
             if not np.all(np.isfinite(self.solution)):
-                raise RuntimeError(f"Solver diverged at iteration {iteration}: non-finite state")
+                logger.error(f"Solver diverged at iteration {iteration}: non-finite state detected")
+                logger.error("  Possible causes:")
+                logger.error("    1. CFL number too high for current grid/solution")
+                logger.error("    2. Boundary condition inconsistency")
+                logger.error("    3. Turbulence model stiffness (try reducing CFL)")
+                logger.error(f"  Current CFL: {self.time_integrator.cfl_target:.4f}")
+                
+                # === AUTOMATIC RECOVERY ATTEMPT ===
+                if self.time_integrator.cfl_target > 0.01:
+                    old_cfl = self.time_integrator.cfl_target
+                    self.time_integrator.cfl_target = max(old_cfl * 0.1, 0.005)
+                    logger.warning(f"[AUTO-RECOVERY] Attempting automatic recovery by reducing CFL to {self.time_integrator.cfl_target:.4f}")
+                    
+                    # Restore solution from previous step if available
+                    if iteration > 1 and hasattr(self, '_last_stable_solution'):
+                        self.solution = self._last_stable_solution.copy()
+                        logger.info("[AUTO-RECOVERY] Restored solution from last stable state")
+                    
+                    continue  # Retry this iteration with lower CFL
+                else:
+                    raise RuntimeError(f"Solver diverged at iteration {iteration}: non-finite state")
+            
+            # Save stable solution for potential recovery
+            if iteration % 5 == 0:
+                self._last_stable_solution = self.solution.copy()
 
             # Normalised multi-equation residual (RMS over mass/momentum/energy).
             res_vec = np.sqrt(np.mean(R[:, :5]**2, axis=0))     # per-equation RMS
@@ -339,20 +402,51 @@ class FRSolver:
                 initial_res = max(res_norm, 1e-30)
             rel_res = res_norm / initial_res
             res_history.append(rel_res)
+            
+            # === EARLY DIVERGENCE WARNING ===
+            if len(res_history) >= 3:
+                recent_growth = res_history[-1] / max(res_history[-3], 1e-30)
+                if recent_growth > 1e6:  # Explosive growth detected
+                    logger.warning(
+                        f"[DIVERGENCE WARNING] Residual grew by factor {recent_growth:.2e} in 3 steps! "
+                        f"Current CFL={self.time_integrator.cfl_target:.4f}. "
+                        f"Consider manual intervention."
+                    )
+                    # Force aggressive CFL reduction
+                    self.time_integrator.cfl_target = max(self.time_integrator.cfl_target * 0.2, 0.005)
+                    logger.warning(f"[AUTO-FIX] Aggressively reduced CFL to {self.time_integrator.cfl_target:.4f}")
 
-            # Coefficients every few iterations.
-            if iteration % 5 == 0 or iteration == 1:
-                Cd, Cl = self.aero_calculator.compute_coefficients(self.solution, iteration)
-                cd_history.append(Cd)
-                cl_history.append(Cl)
+            # Adaptive CFL adjustment based on residual trend
+            if iteration > 1 and len(res_history) >= 3:
+                recent_trend = (res_history[-1] - res_history[-3]) / (res_history[-3] + 1e-30)
+                
+                if recent_trend > 0.2:  # Residuals increasing rapidly
+                    old_cfl = self.time_integrator.cfl_target
+                    self.time_integrator.cfl_target = max(old_cfl * 0.5, 0.01)
+                    logger.warning(
+                        f"  [CFL ADJUST] Residuals increasing (trend={recent_trend:.2f}), "
+                        f"reducing CFL: {old_cfl:.3f} -> {self.time_integrator.cfl_target:.3f}"
+                    )
+                elif recent_trend < -0.15 and self.time_integrator.cfl_target < self.config.cfl_max:
+                    old_cfl = self.time_integrator.cfl_target
+                    self.time_integrator.cfl_target = min(old_cfl * 1.2, self.config.cfl_max)
+                    logger.info(
+                        f"  [CFL ADJUST] Residuals decreasing well (trend={recent_trend:.2f}), "
+                        f"increasing CFL: {old_cfl:.3f} -> {self.time_integrator.cfl_target:.3f}"
+                    )
 
-            if iteration <= 10 or iteration % 20 == 0:
-                logger.info(
-                    f"Iter {iteration:5d}/{actual_max_iter} | "
-                    f"Res(rel): {rel_res:.4e} | "
-                    f"Cd: {cd_history[-1] if cd_history else 0.0:.4f} | "
-                    f"Cl: {cl_history[-1] if cl_history else 0.0:.4f}"
-                )
+            # Coefficients every iteration for accurate monitoring.
+            Cd, Cl = self.aero_calculator.compute_coefficients(self.solution, iteration)
+            cd_history.append(Cd)
+            cl_history.append(Cl)
+
+            # Output coefficients every iteration to show latest values.
+            logger.info(
+                f"Iter {iteration:5d}/{actual_max_iter} | "
+                f"Res(rel): {rel_res:.4e} | "
+                f"Cd: {Cd:.4f} | "
+                f"Cl: {Cl:.4f}"
+            )
 
             # Convergence: normalised residual below tolerance.
             if rel_res < self.config.convergence_tol:

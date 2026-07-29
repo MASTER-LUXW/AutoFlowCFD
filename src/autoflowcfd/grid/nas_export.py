@@ -54,7 +54,7 @@ def export_volume_mesh_to_nas(
     logger.info(f"Exporting volume mesh to NAS: {output_path}")
     logger.info(f"  Nodes: {volume_mesh.node_count:,}")
     logger.info(f"  Cells: {volume_mesh.cell_count:,}")
-    logger.info(f"  Total volume: {volume_mesh.total_volume:.6e} m³")
+    logger.info(f"  Total volume: {volume_mesh.total_volume:.6e} m^3")
 
     write_boundaries = bool(
         include_boundaries and volume_mesh.boundaries and volume_mesh.boundaries.groups

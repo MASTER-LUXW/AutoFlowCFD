@@ -261,28 +261,52 @@ class ConvergenceMonitor:
         if len(self.history.residuals) < 3:
             return
         
-        # Get recent residual trend
-        recent = self.history.residuals[-3:]
+        # Get recent residual trend (use last 5 points for better signal)
+        n_points = min(5, len(self.history.residuals))
+        recent = self.history.residuals[-n_points:]
         
-        # Compute trend
-        if len(recent) >= 3:
-            trend = (recent[-1] - recent[0]) / recent[0]
+        # Compute trend using log scale for better sensitivity to large changes
+        if recent[0] > 1e-30:
+            log_trend = np.log(recent[-1] / recent[0]) / (n_points - 1)
         else:
-            trend = 0.0
+            log_trend = 0.0
         
-        # Adapt CFL
-        if trend < -0.1:  # Rapid decrease
+        # === AGGRESSIVE DIVERGENCE PREVENTION ===
+        # Check for exponential growth
+        if len(recent) >= 3:
+            growth_rates = [recent[i+1]/max(recent[i], 1e-30) for i in range(len(recent)-1)]
+            avg_growth = np.mean(growth_rates)
+            
+            # If growing exponentially, drastically reduce CFL
+            if avg_growth > 10.0:
+                self.cfl_current = max(self.cfl_current * 0.1, self.cfl_min)
+                print(f"[CFL ADJUST] Exponential growth detected (rate={avg_growth:.2f}), "
+                      f"drastically reducing CFL: {self.cfl_current:.4f}")
+                return
+            
+            elif avg_growth > 2.0:
+                self.cfl_current = max(self.cfl_current * 0.3, self.cfl_min)
+                print(f"[CFL ADJUST] Rapid growth detected (rate={avg_growth:.2f}), "
+                      f"reducing CFL: {self.cfl_current:.4f}")
+                return
+        
+        # Adapt CFL based on log trend
+        if log_trend < -0.2:  # Rapid decrease (>20% per step)
             # Increase CFL for faster convergence
-            self.cfl_current = min(self.cfl_current * 1.2, self.cfl_max)
+            self.cfl_current = min(self.cfl_current * 1.3, self.cfl_max)
         
-        elif trend > 0.1:  # Increasing
+        elif log_trend > 0.1:  # Increasing
             # Decrease CFL for stability
-            self.cfl_current = max(self.cfl_current * 0.5, self.cfl_min)
+            self.cfl_current = max(self.cfl_current * 0.4, self.cfl_min)
         
-        elif abs(trend) < 0.01:  # Stagnant
+        elif abs(log_trend) < 0.02:  # Stagnant
             # Slight increase to accelerate
             self.cfl_current = min(self.cfl_current * 1.05, self.cfl_max)
         
+        # Log CFL adjustment
+        if len(self.history.residuals) % 10 == 0:
+            print(f"[CFL INFO] Iteration {len(self.history.residuals)}, "
+                  f"CFL={self.cfl_current:.4f}, log_trend={log_trend:.4f}")
     
     def check_divergence(self, residual_norm: float) -> bool:
         """Check if simulation is diverging.

@@ -116,7 +116,7 @@ class SteadyConfig(SolverConfig):
     
     Attributes:
         max_iter: Maximum iteration steps
-        cfl_init: Initial CFL number
+        cfl_init: Initial CFL number (recommended: 0.05-0.1 for complex grids)
         cfl_max: Maximum CFL number
         convergence_tol: Convergence tolerance (residual)
         monitor_coefficients: Monitor aerodynamic coefficients during iteration
@@ -137,7 +137,7 @@ class SteadyConfig(SolverConfig):
         ... )
     """
     max_iter: int = 50
-    cfl_init: float = 1.0
+    cfl_init: float = 0.05  # Conservative default for complex grids (was 1.0)
     cfl_max: float = 10.0
     convergence_tol: float = 1e-3
     monitor_coefficients: bool = True

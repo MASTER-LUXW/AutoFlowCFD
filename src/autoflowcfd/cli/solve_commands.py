@@ -45,7 +45,7 @@ def solve() -> None:
 @click.option("--turbulence", "-t", type=click.Choice(["sst_kw", "sa"]),
               default="sst_kw", help="Turbulence model")
 @click.option("--max-iter", "-n", default=500, help="Maximum iterations")
-@click.option("--cfl-init", type=float, default=1.0, help="Initial CFL number")
+@click.option("--cfl-init", type=float, default=0.05, help="Initial CFL number (recommended: 0.05-0.1 for complex grids)")
 @click.option("--cfl-max", type=float, default=50.0, help="Maximum CFL number")
 @click.option("--convergence-tol", type=float, default=1e-6,
               help="Convergence tolerance")
