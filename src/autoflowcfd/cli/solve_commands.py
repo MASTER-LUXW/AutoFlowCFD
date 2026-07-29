@@ -15,6 +15,7 @@ Example:
 
 import click
 import json
+from typing import Optional
 from pathlib import Path
 from loguru import logger
 
@@ -58,6 +59,10 @@ def solve() -> None:
               help="CPU thread count (-1 for auto)")
 @click.option("--gpu-device", type=int, default=0,
               help="GPU device ID")
+@click.option("--max-layers", type=int, default=None,
+              help="Maximum boundary layer layers (overrides config)")
+@click.option("--min-cell-size", type=float, default=None,
+              help="Minimum cell size in meters (overrides config)")
 @click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
 def run(
     input_file: str,
@@ -73,6 +78,8 @@ def run(
     checkpoint_interval: int,
     threads: int,
     gpu_device: int,
+    max_layers: Optional[int],
+    min_cell_size: Optional[float],
     json_output: bool
 ) -> None:
     """Run steady-state RANS simulation.
@@ -139,28 +146,40 @@ def run(
                 n_threads=threads if threads > 0 else -1,
                 gpu_device=gpu_device,
             )
-        
+
+        # --max-layers/--min-cell-size are CLI-only overrides: when passed,
+        # they win over whatever steady_config carries (defaults, or values
+        # loaded from --config yaml).
+        if max_layers is not None:
+            steady_config.max_layers = max_layers
+        if min_cell_size is not None:
+            steady_config.min_cell_size = min_cell_size
+
         logger.info(f"Configuration: backend={steady_config.backend}, "
                    f"order={steady_config.order}, turbulence={steady_config.turbulence}")
-        
+
         # Parse grid and generate volume mesh
         logger.info("Parsing grid file...")
         parser = NASParser(input_file)
-        
-        # Enable volume mesh generation by default for accurate CFD
-        # Use very conservative BL parameters to avoid self-intersection on sharp features
-        # For Ahmed Body with potential tight gaps:
-        # - Only 6 layers to strictly limit cumulative thickness
-        # - Small initial cell size (3mm) for better near-wall resolution
-        # - Low growth rate (1.15) for smooth transition
-        # This should keep total BL thickness under ~25mm
+
+        logger.info(
+            f"Using BL parameters: growth_rate={steady_config.growth_rate}, "
+            f"max_layers={steady_config.max_layers}, "
+            f"min_cell_size={steady_config.min_cell_size}m"
+        )
+
+        # Enable volume mesh generation by default for accurate CFD.
+        # Defaults are conservative BL parameters chosen to avoid
+        # self-intersection on sharp features (e.g. Ahmed Body's tight
+        # underbody gaps): few layers, small initial cell size, low growth
+        # rate -- see SteadyConfig field docs for the full rationale.
         grid_data = parser.parse(
             generate_volume_mesh=True,
             volume_mesh_params={
-                'growth_rate': 1.15,
-                'max_layers': 6,
-                'min_cell_size': 0.003,
-                'target_cells': 500000
+                'growth_rate': steady_config.growth_rate,
+                'max_layers': steady_config.max_layers,
+                'min_cell_size': steady_config.min_cell_size,
+                'target_cells': steady_config.target_cells,
             }
         )
         

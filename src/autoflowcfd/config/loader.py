@@ -14,6 +14,7 @@ Example:
 """
 
 import yaml
+from enum import Enum
 from pathlib import Path
 from typing import Union, Dict, Any
 from loguru import logger
@@ -327,6 +328,10 @@ class ConfigLoader:
             'time_scheme': 'Time integration scheme: backward_euler, rk2, rk3, ab3 (transient only)',
             'output_dir': 'Output directory for results',
             'checkpoint_interval': 'Checkpoint save interval in steps',
+            'growth_rate': 'Boundary-layer geometric growth rate (steady only)',
+            'max_layers': 'Max boundary-layer + transition layer count (steady only)',
+            'min_cell_size': 'First (near-wall) layer thickness in meters (steady only)',
+            'target_cells': 'Target total cell count (steady only; ignored by the tetgen hybrid mesh path)',
         }
         return comments.get(param, '')
 

@@ -11,6 +11,7 @@ orientation is what makes the residual accumulation convention
 the aerodynamic-force integration the correct sign.
 """
 
+import time
 import numpy as np
 from typing import Dict
 from loguru import logger
@@ -44,6 +45,7 @@ class FVMFaceExtractor:
 
         n_cells = len(connectivity)
         logger.info(f"Building face connectivity from {n_cells} tetrahedra...")
+        t_start = time.perf_counter()
 
         # Cell centroids (mean of the four vertices) -- used for orientation.
         self.cell_centroids = nodes[connectivity].mean(axis=1)
@@ -75,12 +77,16 @@ class FVMFaceExtractor:
             + sorted_faces[:, 2].astype(np.uint64) * M * M
         )
 
-        logger.info("Finding unique faces...")
+        logger.info("Finding unique faces (np.unique on hash array, single-threaded)...")
+        t_unique_start = time.perf_counter()
         unique_hashes, inverse_indices, counts = np.unique(
             face_hashes, return_inverse=True, return_counts=True
         )
         n_faces = len(unique_hashes)
-        logger.info(f"Extracted {n_faces} unique faces from {n_total_faces} total faces")
+        logger.info(
+            f"Extracted {n_faces} unique faces from {n_total_faces} total faces "
+            f"({time.perf_counter() - t_unique_start:.2f}s)"
+        )
 
         # Output arrays.
         self.face_connectivity = np.full((n_faces, 2), -1, dtype=np.int64)
@@ -94,6 +100,7 @@ class FVMFaceExtractor:
         # ------------------------------------------------------------------
         # Boundary faces (appear exactly once).
         # ------------------------------------------------------------------
+        t_boundary_start = time.perf_counter()
         boundary_mask = counts[inverse_indices] == 1
         if np.any(boundary_mask):
             logger.info(f"Processing {int(np.sum(boundary_mask))} boundary faces...")
@@ -119,10 +126,12 @@ class FVMFaceExtractor:
             self.face_centers[unique_bf] = centers
             self.face_normals[unique_bf] = normals
             self.face_areas[unique_bf] = areas
+            logger.debug(f"Boundary faces processed ({time.perf_counter() - t_boundary_start:.2f}s)")
 
         # ------------------------------------------------------------------
         # Internal faces (appear exactly twice).
         # ------------------------------------------------------------------
+        t_internal_start = time.perf_counter()
         internal_mask = counts[inverse_indices] == 2
         if np.any(internal_mask):
             logger.info(f"Processing {int(np.sum(internal_mask))} internal faces...")
@@ -160,10 +169,14 @@ class FVMFaceExtractor:
                 self.face_centers[face_indices] = centers
                 self.face_normals[face_indices] = normals
                 self.face_areas[face_indices] = areas
+            logger.debug(f"Internal faces processed ({time.perf_counter() - t_internal_start:.2f}s)")
 
         n_boundary = int(np.sum(self.boundary_flags))
         n_internal = n_faces - n_boundary
-        logger.info(f"Face mapping: {n_faces} total ({n_internal} internal, {n_boundary} boundary)")
+        logger.info(
+            f"Face mapping: {n_faces} total ({n_internal} internal, {n_boundary} boundary) "
+            f"[{time.perf_counter() - t_start:.2f}s total]"
+        )
 
         return self.get_face_data()
 

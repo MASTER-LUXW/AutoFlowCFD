@@ -120,7 +120,13 @@ class SteadyConfig(SolverConfig):
         cfl_max: Maximum CFL number
         convergence_tol: Convergence tolerance (residual)
         monitor_coefficients: Monitor aerodynamic coefficients during iteration
-        
+        growth_rate: Boundary-layer geometric growth rate (surface -> volume mesh)
+        max_layers: Maximum boundary-layer + transition layer count
+        min_cell_size: First (near-wall) layer thickness, in meters
+        target_cells: Target total cell count (currently only consulted by the
+            pure-extrusion volume mesh path; the tetgen-based hybrid path
+            ignores it)
+
     Example:
         >>> config = SteadyConfig(
         ...     backend="gpu",
@@ -135,15 +141,19 @@ class SteadyConfig(SolverConfig):
     cfl_max: float = 10.0
     convergence_tol: float = 1e-3
     monitor_coefficients: bool = True
-    
+    growth_rate: float = 1.15
+    max_layers: int = 6
+    min_cell_size: float = 0.003
+    target_cells: int = 500000
+
     def __post_init__(self):
         """Validate steady configuration."""
         super().__post_init__()
-        
+
         # Validate iterations
         if self.max_iter < 1:
             raise ValueError(f"Max iterations must be positive, got {self.max_iter}")
-        
+
         # Validate CFL numbers
         if self.cfl_init <= 0:
             raise ValueError(f"Initial CFL must be positive, got {self.cfl_init}")
@@ -151,10 +161,20 @@ class SteadyConfig(SolverConfig):
             raise ValueError(f"Max CFL must be positive, got {self.cfl_max}")
         if self.cfl_init > self.cfl_max:
             raise ValueError(f"Initial CFL ({self.cfl_init}) cannot exceed max CFL ({self.cfl_max})")
-        
+
         # Validate convergence tolerance
         if self.convergence_tol <= 0:
             raise ValueError(f"Convergence tolerance must be positive, got {self.convergence_tol}")
+
+        # Validate volume mesh parameters
+        if self.growth_rate <= 1.0:
+            raise ValueError(f"growth_rate must be > 1.0, got {self.growth_rate}")
+        if self.max_layers < 1:
+            raise ValueError(f"max_layers must be positive, got {self.max_layers}")
+        if self.min_cell_size <= 0:
+            raise ValueError(f"min_cell_size must be positive, got {self.min_cell_size}")
+        if self.target_cells < 1:
+            raise ValueError(f"target_cells must be positive, got {self.target_cells}")
 
 
 @dataclass
