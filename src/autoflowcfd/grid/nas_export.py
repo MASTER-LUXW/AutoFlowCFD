@@ -11,7 +11,7 @@ Key Components:
 """
 
 import numpy as np
-from typing import Optional
+from typing import Dict, Optional, Tuple
 from pathlib import Path
 from loguru import logger
 
@@ -46,45 +46,63 @@ def export_volume_mesh_to_nas(
         >>> export_volume_mesh_to_nas(volume_mesh, 'volume_mesh.nas')
     """
     output_path = Path(output_path)
-    
+
     # Ensure .nas extension
     if output_path.suffix.lower() != '.nas':
         output_path = output_path.with_suffix('.nas')
-    
+
     logger.info(f"Exporting volume mesh to NAS: {output_path}")
     logger.info(f"  Nodes: {volume_mesh.node_count:,}")
     logger.info(f"  Cells: {volume_mesh.cell_count:,}")
     logger.info(f"  Total volume: {volume_mesh.total_volume:.6e} m³")
-    
+
+    write_boundaries = bool(
+        include_boundaries and volume_mesh.boundaries and volume_mesh.boundaries.groups
+    )
+    n_boundary_groups = len(volume_mesh.boundaries.groups) if write_boundaries else 0
+    # PSHELL PIDs 1..n_boundary_groups are used for boundary groups below, so the
+    # PSOLID property for the volume mesh must live past that range - otherwise
+    # it collides with a boundary's PSHELL PID as soon as there are >= 4 groups
+    # (a very common case: inlet/outlet/wall/symmetry/ground).
+    solid_pid = n_boundary_groups + 1
+
     try:
         with open(output_path, 'w') as f:
             # Write header
             _write_header(f, volume_mesh)
-            
+
             # Write nodes (GRID cards)
             logger.info("Writing nodes...")
             _write_nodes(f, volume_mesh.nodes, scale_factor)
-            
+
             # Write tetrahedral elements (CTETRA cards)
             logger.info("Writing tetrahedral elements...")
-            _write_tetrahedra(f, volume_mesh.cells.connectivity)
-            
-            # Write boundary information (optional)
-            if include_boundaries and volume_mesh.boundaries:
+            n_tets = _write_tetrahedra(f, volume_mesh.cells.connectivity, solid_pid)
+
+            # Write boundary information (optional): boundary faces as CTRIA3
+            # elements referencing per-group PSHELL properties, so the groups
+            # are actually selectable in ANSA/Nastran instead of being empty
+            # property definitions.
+            if write_boundaries:
                 logger.info("Writing boundary groups...")
-                _write_boundaries(f, volume_mesh.boundaries)
-            
-            # Write footer
+                _write_boundaries(
+                    f, volume_mesh.boundaries, volume_mesh.cells.connectivity,
+                    solid_pid=solid_pid, start_eid=n_tets + 1
+                )
+
+            # Every Bulk Data deck must end with ENDDATA regardless of whether
+            # boundary groups were written.
+            f.write("ENDDATA\n")
             f.write("$ End of file\n")
-        
+
         file_size = output_path.stat().st_size / (1024 * 1024)  # MB
         logger.success(
             f"Volume mesh exported successfully: {output_path}\n"
             f"  File size: {file_size:.2f} MB"
         )
-        
+
         return str(output_path)
-        
+
     except Exception as e:
         logger.error(f"Failed to export volume mesh: {e}")
         raise RuntimeError(f"NAS export failed: {e}")
@@ -193,109 +211,182 @@ def _write_nodes(f, nodes, scale_factor: float) -> None:
     logger.info(f"  Total nodes written: {n_nodes:,}")
 
 
-def _write_tetrahedra(f, connectivity: np.ndarray) -> None:
+def _write_tetrahedra(f, connectivity: np.ndarray, solid_pid: int) -> int:
     """Write CTETRA cards for tetrahedral elements.
-    
+
     ANSA Nastran CTETRA card format (fixed-width fields):
     CTETRA      EID       PID      G1       G2       G3       G4
-    
+
     Field widths: 8-8-8-8-8-8 characters
-    
+
     Args:
         f: File handle
         connectivity: Tetrahedral connectivity array, shape=(n_tets, 4)
+        solid_pid: PSOLID property ID for the volume elements. Must match the
+            PSOLID card written by _write_boundaries (or be free of any
+            PSHELL PID) to avoid a duplicate-PID Bulk Data entry.
+
+    Returns:
+        int: Number of tetrahedra written (elem IDs used are 1..n_tets), so
+        callers can continue element numbering (e.g. boundary CTRIA3 cards)
+        without colliding with these element IDs.
     """
     n_tets = len(connectivity)
-    property_id = 4  # PSOLID property ID for volume mesh (fixed)
-    
+
     # Batch write for performance
     batch_size = 1000
-    
+
     for start_idx in range(0, n_tets, batch_size):
         end_idx = min(start_idx + batch_size, n_tets)
-        
+
         for i in range(start_idx, end_idx):
             elem_id = i + 1  # Nastran IDs start from 1
             g1 = int(connectivity[i, 0]) + 1  # Convert 0-indexed to 1-indexed
             g2 = int(connectivity[i, 1]) + 1
             g3 = int(connectivity[i, 2]) + 1
             g4 = int(connectivity[i, 3]) + 1
-            
+
             # ANSA format: fixed-width fields
-            line = f"CTETRA{elem_id:>10}{property_id:>8}{g1:>8}{g2:>8}{g3:>8}{g4:>8}\n"
+            line = f"CTETRA{elem_id:>10}{solid_pid:>8}{g1:>8}{g2:>8}{g3:>8}{g4:>8}\n"
             f.write(line)
-        
+
         if (start_idx + batch_size) % 10000 == 0:
             logger.debug(f"  Written {start_idx + batch_size}/{n_tets} elements")
-    
+
     logger.info(f"  Total elements written: {n_tets:,}")
+    return n_tets
 
 
-def _write_boundaries(f, boundaries) -> None:
-    """Write boundary group information as PSHELL/PSOLID property definitions.
-    
-    Creates proper Nastran property cards compatible with ANSA.
-    
+def _extract_boundary_faces_by_group(
+    connectivity: np.ndarray,
+    boundary_groups: Dict[str, np.ndarray]
+) -> Dict[str, np.ndarray]:
+    """Recover each boundary group's actual exterior triangular faces.
+
+    ``boundary_groups`` maps a boundary name to indices of the *owning
+    tetrahedra* (see mesh_boundary.identify_boundaries_from_surface), not
+    face geometry. To write a CTRIA3 element that a PSHELL property can
+    actually reference, we need the specific 3 nodes of each such cell's
+    exterior face - found the same way FaceExtractor/identify_boundaries_from_surface
+    do: a tet face that occurs exactly once across the whole mesh is a
+    boundary face.
+
+    Args:
+        connectivity: Tetrahedral connectivity, shape=(n_cells, 4)
+        boundary_groups: boundary name -> owning cell indices
+
+    Returns:
+        Dict[str, np.ndarray]: boundary name -> face node indices (0-indexed),
+        shape=(n_faces_in_group, 3)
+    """
+    n_cells = len(connectivity)
+    face_templates = np.array([
+        [0, 1, 2],
+        [0, 1, 3],
+        [0, 2, 3],
+        [1, 2, 3]
+    ])
+    all_faces = connectivity[:, face_templates].reshape(-1, 3)
+    owner_cells = np.repeat(np.arange(n_cells), 4)
+
+    sorted_faces = np.sort(all_faces, axis=1)
+    face_dtype = np.dtype((np.void, sorted_faces.dtype.itemsize * 3))
+    face_voids = np.ascontiguousarray(sorted_faces).view(face_dtype).reshape(-1)
+    _, inverse, counts = np.unique(face_voids, return_inverse=True, return_counts=True)
+    is_boundary_face = counts[inverse] == 1
+
+    boundary_faces = all_faces[is_boundary_face]
+    boundary_owners = owner_cells[is_boundary_face]
+
+    faces_by_group = {}
+    for name, cell_indices in boundary_groups.items():
+        owner_in_group = np.zeros(n_cells, dtype=bool)
+        owner_in_group[cell_indices] = True
+        faces_by_group[name] = boundary_faces[owner_in_group[boundary_owners]]
+
+    return faces_by_group
+
+
+def _write_boundaries(
+    f, boundaries, connectivity: np.ndarray, solid_pid: int, start_eid: int
+) -> None:
+    """Write boundary groups as PSHELL properties with real CTRIA3 face
+    elements, plus the PSOLID card for the volume mesh.
+
     Args:
         f: File handle
         boundaries: BoundaryMap with groups and bc_types
+        connectivity: Tetrahedral connectivity, used to recover each
+            boundary group's actual exterior triangular faces
+        solid_pid: PSOLID property ID already used for the CTETRA elements
+            (reserved by the caller so it can't collide with a PSHELL PID)
+        start_eid: First free Nastran element ID (n_tets + 1), so boundary
+            CTRIA3 elements don't collide with CTETRA element IDs
     """
     if not boundaries.groups:
         logger.warning("No boundary groups found, skipping boundary export")
         return
-    
-    # Write PSHELL cards for surface boundaries (PIDs 1-3)
+
+    faces_by_group = _extract_boundary_faces_by_group(connectivity, boundaries.groups)
+
     pid_counter = 1
     mid_counter = 1
-    
+    eid_counter = start_eid
+
     for group_name, cell_indices in boundaries.groups.items():
         bc_type = boundaries.bc_types.get(group_name, "WALL")
-        
+
         # Map boundary type to ANSA-compatible name
         ansa_name = bc_type.lower()
-        
+
         # Write PSHELL card (8-character fields with continuation)
         f.write(f"PSHELL{pid_counter:>8}{mid_counter:>7}      1.{mid_counter:>7}      1.{mid_counter:>7}                +{pid_counter:07d}\n")
         f.write(f"+{pid_counter:07d}\n")
-        
+
         # Write ANSA name comment
         f.write(f"$ANSA_NAME_COMMENT;{pid_counter};PSHELL;{ansa_name};;NO;NO;NO;NO;\n")
-        
+
+        # Write the group's actual boundary faces so the property above
+        # references real geometry instead of being an empty definition.
+        for face in faces_by_group.get(group_name, ()):
+            n1, n2, n3 = int(face[0]) + 1, int(face[1]) + 1, int(face[2]) + 1
+            f.write(f"CTRIA3{eid_counter:>10}{pid_counter:>8}{n1:>8}{n2:>8}{n3:>8}\n")
+            eid_counter += 1
+
         pid_counter += 1
         mid_counter += 1
-    
-    # Write PSOLID card for volume mesh (FIXED PID = 4 to match CTETRA)
-    solid_pid = 4  # Fixed PID for volume elements
+
+    logger.info(f"  Boundary face elements written: {eid_counter - start_eid:,}")
+
+    # Write PSOLID card for volume mesh (PID reserved by the caller so it
+    # never collides with the PSHELL PIDs written above)
     solid_mid = mid_counter
     f.write(f"PSOLID{solid_pid:>8}{solid_mid:>8}\n")
     f.write(f"$ANSA_NAME_COMMENT;{solid_pid};PSOLID;Auto Detected Volume;;NO;NO;NO;NO;\n")
-    
+
     # Write MAT1 material cards
     for i in range(1, mid_counter + 1):
         f.write(f"$ANSA_COLOR;{i};MAT1;.725490212440491;.035294119268656;0.20392157137394;1.;\n")
-    
+
     f.write(f"$ANSA_COLOR;{solid_mid};MAT1;.635294139385223;0.34901961684227;.341176480054855;1.;\n")
-    
+
     # Write PART definitions
     f.write("$ANSA_PART;GROUP;ID;2;NAME;Auto Detected Volumes Group;BELONGS_HERE;YES;PID_OFFS\n")
     f.write("$ET;0;COLOR;137;211;69;0;IS_COLOR_ACTIVE;0;PART_TYPE;Undefined;ATTRIBUTES;2;DM/F\n")
     f.write("$ile Type;ANSA;DM/Status;WIP;CONTAINS;ANSAPART;3;\n")
-    
+
     # Surface parts
     if pid_counter > 1:
         shell_range = f"1-{pid_counter-1}" if pid_counter > 2 else "1"
         f.write(f"$ANSA_PART;PART;ID;1;NAME;Untitled;BELONGS_HERE;YES;STUDY_VERSION;0;PID_OFFSET;0\n")
         f.write("$;COLOR;185;9;52;0;IS_COLOR_ACTIVE;1;PART_TYPE;Undefined;ATTRIBUTES;2;DM/File Ty\n")
         f.write(f"$pe;ANSA;DM/Status;WIP;CONTAINS;PSHELL;{shell_range};\n")
-    
+
     # Volume part
     f.write(f"$ANSA_PART;PART;ID;3;NAME;Untitled_Volume_1;BELONGS_HERE;YES;STUDY_VERSION;0;PID\n")
     f.write("$_OFFSET;0;COLOR;215;68;166;0;IS_COLOR_ACTIVE;1;PART_TYPE;Undefined;ATTRIBUTES;2\n")
     f.write(f"$;DM/File Type;ANSA;DM/Status;WIP;CONTAINS;PSOLID;{solid_pid};\n")
-    
-    # Write ENDDATA marker
-    f.write("ENDDATA\n")
     f.write("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$\n")
     f.write("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$\n")
-    
+
     logger.info(f"  Boundary groups written: {len(boundaries.groups)}")

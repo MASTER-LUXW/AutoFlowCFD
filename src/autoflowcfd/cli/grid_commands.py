@@ -7,12 +7,14 @@ Commands:
     - parse: Parse .nas grid files
     - validate: Validate grid quality
     - info: Display grid statistics
+    - generate-volume: Generate + export a volume mesh from a surface .nas
     - convert: Convert grid formats (v1.0)
 
 Example:
     $ autoflowcfd grid parse model.nas
     $ autoflowcfd grid validate model.nas --report report.json
     $ autoflowcfd grid info model.nas --json
+    $ autoflowcfd grid generate-volume model.nas -o model_volume.nas
 """
 
 import click
@@ -87,11 +89,11 @@ def parse(
         parser = NASParser(input_file, encoding=encoding)
         
         if streaming:
-            logger.info("Using streaming mode for large file")
-            # TODO: Implement streaming parsing
-            grid_data = parser.parse_streaming()
-        else:
-            grid_data = parser.parse()
+            logger.info(
+                "NASParser already parses node/cell cards line-by-line; "
+                "--streaming has no additional effect"
+            )
+        grid_data = parser.parse()
         
         # Get grid statistics
         result = {
@@ -186,47 +188,42 @@ def validate(
         $ autoflowcfd grid validate sedan.nas --fix-duplicates --fix-normals
     """
     from autoflowcfd.grid import NASParser, GridValidator
-    
+
     logger.info(f"Validating grid: {input_file}")
-    
+
     try:
         # Parse grid
         parser = NASParser(input_file)
         grid_data = parser.parse()
-        
-        # Validate
-        validator = GridValidator(
-            grid_data,
-            threshold_aspect_ratio=threshold_aspect_ratio,
-            threshold_area=threshold_area
-        )
-        
+
+        # Validate (GridValidator only checks aspect ratio / skewness /
+        # Jacobian; there is no per-cell area threshold or auto-fix support)
+        validator = GridValidator(grid_data)
+        validator.thresholds['aspect_ratio_max'] = threshold_aspect_ratio
+
+        if threshold_area != 1e-12:
+            logger.warning(
+                "--threshold-area is not supported by GridValidator and will be ignored"
+            )
         if fix_duplicates or fix_normals:
-            logger.info("Applying automatic fixes...")
-            validator.fix_issues(fix_duplicates=fix_duplicates, fix_normals=fix_normals)
-        
+            logger.warning(
+                "--fix-duplicates/--fix-normals are not implemented; "
+                "no automatic fixes were applied"
+            )
+
         quality_report = validator.validate()
-        
+
         # Determine status
-        error_count = quality_report.get('error_count', 0)
-        warning_count = quality_report.get('warning_count', 0)
-        
-        if error_count > 0:
-            status = "error"
-            exit_code = 2
-        elif warning_count > 10:
-            status = "warning"
-            exit_code = 1
-        else:
-            status = "success"
-            exit_code = 0
-        
+        passed = quality_report['passed']
+        status = "success" if passed else "error"
+        exit_code = 0 if passed else 2
+
         result = {
             "command": "grid.validate",
             "status": status,
             "result": quality_report,
         }
-        
+
         # Output
         if json_output:
             click.echo(json.dumps(result, indent=2))
@@ -234,26 +231,16 @@ def validate(
             # Save report
             report_path = Path(report)
             report_path.parent.mkdir(parents=True, exist_ok=True)
-            
+
             with open(report_path, 'w', encoding='utf-8') as f:
                 json.dump(quality_report, f, indent=2)
-            
+
             logger.info(f"Quality report saved to {report_path}")
-            
+
             # Print summary
-            click.echo(f"\nGrid Quality Report")
-            click.echo(f"{'='*50}")
-            click.echo(f"Status: {status.upper()}")
-            click.echo(f"Errors: {error_count}")
-            click.echo(f"Warnings: {warning_count}")
-            
-            if quality_report.get('recommendations'):
-                click.echo(f"\nRecommendations:")
-                for rec in quality_report['recommendations']:
-                    click.echo(f"  • {rec}")
-            
+            click.echo(quality_report['summary'])
             click.echo(f"\n✓ Report saved to {report}")
-        
+
         if exit_code != 0:
             raise SystemExit(exit_code)
     
@@ -267,6 +254,126 @@ def validate(
             }
             click.echo(json.dumps(error_result, indent=2))
         raise click.ClickException(f"Grid validation failed: {e}")
+
+
+@grid.command(name="generate-volume")
+@click.argument("input_file", type=click.Path(exists=True))
+@click.option("--output", "-o", type=click.Path(), required=True,
+              help="Output volume mesh .nas file path")
+@click.option("--growth-rate", type=float, default=1.2, help="Boundary layer growth rate")
+@click.option("--max-layers", type=int, default=12, help="Maximum extrusion layers")
+@click.option("--min-cell-size", type=float, default=0.01, help="Minimum cell size (m)")
+@click.option("--target-cells", type=int, default=400000, help="Target total volume cell count")
+@click.option("--skip-quality-report", is_flag=True, help="Skip volume mesh quality report")
+@click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
+def generate_volume(
+    input_file: str,
+    output: str,
+    growth_rate: float,
+    max_layers: int,
+    min_cell_size: float,
+    target_cells: int,
+    skip_quality_report: bool,
+    json_output: bool
+) -> None:
+    """Generate a volume mesh from a surface .nas file and export it.
+
+    Runs the full grid pipeline: parse surface mesh -> validate surface
+    quality -> generate hybrid volume mesh (BL extrusion + Cartesian
+    background) -> validate volume mesh quality -> export to Nastran .nas.
+
+    Args:
+        input_file: Path to surface .nas grid file
+        output: Output volume mesh .nas file path
+        growth_rate: Boundary layer growth rate
+        max_layers: Maximum extrusion layers
+        min_cell_size: Minimum cell size (m)
+        target_cells: Target total volume cell count
+        skip_quality_report: Skip volume mesh quality report
+        json_output: Output result as JSON
+
+    Examples:
+        # Basic volume mesh generation
+        $ autoflowcfd grid generate-volume sedan.nas -o sedan_volume.nas
+
+        # Coarser mesh for a quick check
+        $ autoflowcfd grid generate-volume sedan.nas -o sedan_volume.nas --target-cells 100000
+    """
+    from autoflowcfd.grid import (
+        NASParser, GridValidator, MeshQualityValidator, export_volume_mesh_to_nas
+    )
+
+    logger.info(f"Generating volume mesh: {input_file}")
+
+    try:
+        parser = NASParser(input_file)
+
+        logger.info("Step 1/4: Parsing surface mesh...")
+        surface_grid = parser.parse()
+
+        logger.info("Step 2/4: Validating surface mesh quality...")
+        surface_report = GridValidator(surface_grid).validate()
+        if not surface_report['passed']:
+            logger.warning(
+                "Surface mesh quality validation failed; "
+                "continuing with volume mesh generation anyway"
+            )
+
+        logger.info("Step 3/4: Generating volume mesh (BL extrusion + background)...")
+        volume_mesh = parser.parse(
+            generate_volume_mesh=True,
+            volume_mesh_params={
+                'growth_rate': growth_rate,
+                'max_layers': max_layers,
+                'min_cell_size': min_cell_size,
+                'target_cells': target_cells,
+            }
+        )
+
+        quality_report = None
+        if not skip_quality_report:
+            logger.info("Validating volume mesh quality...")
+            quality_report = MeshQualityValidator().validate_volume_mesh(volume_mesh)
+
+        logger.info("Step 4/4: Exporting volume mesh to NAS...")
+        output_path = export_volume_mesh_to_nas(volume_mesh, output)
+
+        boundary_names = list(volume_mesh.boundaries.groups.keys())
+        result = {
+            "command": "grid.generate-volume",
+            "status": "success",
+            "surface_quality_passed": surface_report['passed'],
+            "node_count": volume_mesh.node_count,
+            "cell_count": volume_mesh.cell_count,
+            "total_volume_m3": volume_mesh.total_volume,
+            "boundary_groups": boundary_names,
+            "volume_quality_passed": quality_report.passed if quality_report else None,
+            "output_file": output_path,
+        }
+
+        if json_output:
+            click.echo(json.dumps(result, indent=2))
+        else:
+            click.echo(f"\nVolume Mesh Generated: {Path(input_file).name}")
+            click.echo("=" * 50)
+            click.echo(f"Nodes: {volume_mesh.node_count:,}")
+            click.echo(f"Cells: {volume_mesh.cell_count:,}")
+            click.echo(f"Total volume: {volume_mesh.total_volume:.6e} m^3")
+            click.echo(f"Boundary groups: {', '.join(boundary_names)}")
+            if quality_report is not None:
+                click.echo(quality_report.summary())
+            click.echo(f"\n✓ Exported to: {output_path}")
+
+    except Exception as e:
+        logger.error(f"Volume mesh generation failed: {e}")
+        if json_output:
+            error_result = {
+                "command": "grid.generate-volume",
+                "status": "error",
+                "error": str(e)
+            }
+            click.echo(json.dumps(error_result, indent=2))
+        raise click.ClickException(f"Volume mesh generation failed: {e}")
 
 
 @grid.command()

@@ -112,11 +112,11 @@ class AutoFlowCFDAPI:
             logger.info("Validating grid quality...")
             validator = GridValidator(grid_data)
             quality_report = validator.validate()
-            
-            if quality_report.get('error_count', 0) > 0:
+
+            if not quality_report['passed']:
                 logger.warning(
-                    f"Grid has {quality_report['error_count']} errors. "
-                    f"See quality report for details."
+                    "Grid quality validation failed. "
+                    "See quality report for details."
                 )
         
         logger.info(
@@ -163,7 +163,7 @@ class AutoFlowCFDAPI:
             
         Example:
             >>> report = api.validate_grid(grid)
-            >>> if report['error_count'] == 0:
+            >>> if report['passed']:
             ...     print("Grid is valid")
         """
         validator = GridValidator(grid_data)

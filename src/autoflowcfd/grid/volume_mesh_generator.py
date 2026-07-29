@@ -106,7 +106,8 @@ class VolumeMeshGenerator:
                     growth_rate=self.growth_rate,
                     max_layers=self.max_layers,
                     min_cell_size=self.min_cell_size,
-                    target_cells=self.target_cells
+                    target_cells=self.target_cells,
+                    surface_boundaries=surface_boundaries
                 )
             else:
                 # Pure extrusion mode
@@ -120,7 +121,8 @@ class VolumeMeshGenerator:
                 growth_rate=self.growth_rate,
                 max_layers=self.max_layers,
                 min_cell_size=self.min_cell_size,
-                target_cells=self.target_cells
+                target_cells=self.target_cells,
+                surface_boundaries=surface_boundaries
             )
         else:
             raise ValueError(f"Unknown method: {method}")

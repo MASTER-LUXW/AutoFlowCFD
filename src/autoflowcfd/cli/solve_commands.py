@@ -148,12 +148,18 @@ def run(
         parser = NASParser(input_file)
         
         # Enable volume mesh generation by default for accurate CFD
+        # Use very conservative BL parameters to avoid self-intersection on sharp features
+        # For Ahmed Body with potential tight gaps:
+        # - Only 6 layers to strictly limit cumulative thickness
+        # - Small initial cell size (3mm) for better near-wall resolution
+        # - Low growth rate (1.15) for smooth transition
+        # This should keep total BL thickness under ~25mm
         grid_data = parser.parse(
             generate_volume_mesh=True,
             volume_mesh_params={
-                'growth_rate': 1.2,
-                'max_layers': 15,
-                'min_cell_size': 0.01,
+                'growth_rate': 1.15,
+                'max_layers': 6,
+                'min_cell_size': 0.003,
                 'target_cells': 500000
             }
         )

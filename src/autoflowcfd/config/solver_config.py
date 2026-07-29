@@ -32,6 +32,7 @@ class BackendType(str, Enum):
 
 class TurbulenceModel(str, Enum):
     """Turbulence model enumeration."""
+    NONE = "none"       # laminar Navier-Stokes (no turbulence model)
     SST_KW = "sst_kw"
     SA = "sa"
     DES = "des"

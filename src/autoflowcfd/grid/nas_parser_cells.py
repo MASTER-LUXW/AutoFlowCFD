@@ -5,6 +5,7 @@ specifically CTRIA3 triangular surface elements.
 """
 
 import re
+from typing import Tuple
 import numpy as np
 from loguru import logger
 
@@ -16,25 +17,29 @@ def parse_cells_from_nas(
     file_path: str,
     node_id_to_index: dict,
     encoding: str = 'UTF-8'
-) -> CellArray:
+) -> Tuple[CellArray, np.ndarray]:
     """解析单元数据(流式)
-    
+
     Parses CTRIA3 cards from NAS file using streaming approach.
     Supports both comma-separated and fixed-format Nastran CTRIA3 cards.
-    
+
     Args:
         file_path: Path to NAS file
         node_id_to_index: Mapping from NAS node IDs to array indices
         encoding: File encoding
-        
+
     Returns:
-        CellArray: Parsed cell connectivity and types
-        
+        Tuple[CellArray, np.ndarray]: Parsed cell connectivity/types, and the
+        Property ID (PID) for each surviving cell, in the same order and
+        length as the CellArray. Cells skipped due to missing node references
+        are excluded from both, so index i always refers to the same cell.
+
     Raises:
         NASParseError: If cell parsing fails
     """
     connectivity_list = []
     cell_types = []
+    cell_pids = []
     cell_count = 0
     parse_errors = 0
     skipped_cells = 0
@@ -65,65 +70,71 @@ def parse_cells_from_nas(
                     match = ctria3_pattern_comma.match(line_stripped)
                     
                     if match:
+                        pid = int(match.group(2))
                         n1 = int(match.group(3))
                         n2 = int(match.group(4))
                         n3 = int(match.group(5))
-                        
+
                         if n1 in node_id_to_index and n2 in node_id_to_index and n3 in node_id_to_index:
                             idx1 = node_id_to_index[n1]
                             idx2 = node_id_to_index[n2]
                             idx3 = node_id_to_index[n3]
                             connectivity_list.append([idx1, idx2, idx3])
                             cell_types.append(0)
+                            cell_pids.append(pid)
                             cell_count += 1
-                            
+
                             if cell_count % 10000 == 0:
                                 logger.debug(f"Parsed {cell_count:,} cells...")
                             continue
                         else:
                             skipped_cells += 1
                             continue
-                    
+
                     # Try fixed-format
                     match = ctria3_pattern_fixed.match(line_stripped)
-                    
+
                     if match:
+                        pid = int(match.group(2))
                         n1 = int(match.group(3))
                         n2 = int(match.group(4))
                         n3 = int(match.group(5))
-                        
+
                         if n1 in node_id_to_index and n2 in node_id_to_index and n3 in node_id_to_index:
                             idx1 = node_id_to_index[n1]
                             idx2 = node_id_to_index[n2]
                             idx3 = node_id_to_index[n3]
                             connectivity_list.append([idx1, idx2, idx3])
                             cell_types.append(0)
+                            cell_pids.append(pid)
                             cell_count += 1
-                            
+
                             if cell_count % 10000 == 0:
                                 logger.debug(f"Parsed {cell_count:,} cells...")
                             continue
                         else:
                             skipped_cells += 1
                             continue
-                    
+
                     # Flexible parsing
                     parts = line_stripped[6:].split()
-                    
+
                     if len(parts) >= 5:
                         try:
+                            pid = int(parts[1])
                             n1 = int(parts[2])
                             n2 = int(parts[3])
                             n3 = int(parts[4])
-                            
+
                             if n1 in node_id_to_index and n2 in node_id_to_index and n3 in node_id_to_index:
                                 idx1 = node_id_to_index[n1]
                                 idx2 = node_id_to_index[n2]
                                 idx3 = node_id_to_index[n3]
                                 connectivity_list.append([idx1, idx2, idx3])
                                 cell_types.append(0)
+                                cell_pids.append(pid)
                                 cell_count += 1
-                                
+
                                 if cell_count % 10000 == 0:
                                     logger.debug(f"Parsed {cell_count:,} cells...")
                                 continue
@@ -152,18 +163,19 @@ def parse_cells_from_nas(
         return CellArray(
             connectivity=np.array([], dtype=np.int32).reshape(0, 3),
             cell_type=np.array([], dtype=np.int32)
-        )
-    
+        ), np.array([], dtype=np.int32)
+
     if parse_errors > 0:
         logger.warning(f"Encountered {parse_errors} parsing errors")
     if skipped_lines > 0:
         logger.info(f"Skipped {skipped_lines} CTRIA3 lines")
     if skipped_cells > 0:
         logger.info(f"Skipped {skipped_cells} CTRIA3 cells due to missing nodes")
-    
+
     connectivity_array = np.array(connectivity_list, dtype=np.int32)
     cell_type_array = np.array(cell_types, dtype=np.int32)
-    
+    pid_array = np.array(cell_pids, dtype=np.int32)
+
     logger.info(f"Successfully parsed {cell_count:,} cells")
-    
-    return CellArray(connectivity=connectivity_array, cell_type=cell_type_array)
+
+    return CellArray(connectivity=connectivity_array, cell_type=cell_type_array), pid_array

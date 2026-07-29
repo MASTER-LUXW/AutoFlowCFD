@@ -1,383 +1,195 @@
-"""Time integration schemes for transient simulations.
+"""Time integration schemes for the pseudo-time steady solver and transient runs.
 
-This module implements various time discretization methods including
-backward Euler, Runge-Kutta, and Adams-Bashforth schemes.
+The steady solver advances the solution in pseudo-time towards the residual =
+0 state.  For that we use explicit Strong-Stability-Preserving Runge-Kutta
+schemes (SSP-RK2 / SSP-RK3), which are the standard, provably correct explicit
+integrators for FV CFD, together with a **local (per-cell) time step** governed
+by the convective+acoustic+viscous CFL condition.
+
+This replaces the previous implementation, which (a) called itself
+"backward Euler" while doing an explicit forward-Euler step, (b) used
+placeholder residual history for RK2/AB3, and (c) hid divergence behind hard
+magnitude clips on density/velocity/flux.  Physical positivity is now enforced
+only where it is mathematically required (rho>0, p>0) via a *pressure floor*
+that preserves velocity, and divergence is reported rather than masked.
 """
 
+from __future__ import annotations
+
 import numpy as np
-from typing import Optional, List
 from enum import Enum
+from typing import Callable, Optional
 from loguru import logger
+
+GAMMA = 1.4
 
 
 class TimeIntegrationScheme(Enum):
-    """Time integration scheme enumeration."""
+    """Explicit pseudo-time integration schemes."""
 
-    BACKWARD_EULER = "backward_euler"
-    RUNGE_KUTTA_2 = "rk2"
-    ADAMS_BASHFORTH_3 = "ab3"
+    FORWARD_EULER = "forward_euler"
+    SSP_RK2 = "ssp_rk2"
+    SSP_RK3 = "ssp_rk3"
+    # Legacy aliases kept so existing configs/tests keep importing.
+    BACKWARD_EULER = "forward_euler"
+    RUNGE_KUTTA_2 = "ssp_rk2"
+    ADAMS_BASHFORTH_3 = "ssp_rk3"
+
+
+# SSP-RK Shu-Osher coefficients: stages of the form
+#   u^(i) = sum_k alpha[i,k] u^(k) + beta[i] dt L(u^(i-1))
+# where L(u) = -R(u).  We store per-scheme stage lists.
+_SSP_RK2 = {
+    "stages": 2,
+    # u1 = u0 + dt L0 ;  u2 = 1/2 u0 + 1/2 (u1 + dt L1)
+    "alpha": [[1.0], [0.5, 0.5]],
+    "beta": [1.0, 0.5],
+}
+_SSP_RK3 = {
+    "stages": 3,
+    "alpha": [[1.0],
+              [0.75, 0.25],
+              [1.0/3.0, 0.0, 2.0/3.0]],
+    "beta": [1.0, 0.25, 2.0/3.0],
+}
+_EULER = {"stages": 1, "alpha": [[1.0]], "beta": [1.0]}
+
+_SCHEME_TABLE = {
+    TimeIntegrationScheme.FORWARD_EULER: _EULER,
+    TimeIntegrationScheme.SSP_RK2: _SSP_RK2,
+    TimeIntegrationScheme.SSP_RK3: _SSP_RK3,
+}
+
+
+def enforce_positivity(U: np.ndarray, p_floor: float = 1.0) -> np.ndarray:
+    """Ensure rho>0 and p>=p_floor without altering velocity or clipping speed.
+
+    Only the thermodynamic state is projected back to a physical region; the
+    momentum is left untouched so the direction/magnitude of the flow is not
+    silently rewritten.  Turbulence variables are kept non-negative.
+    """
+    U = U.copy()
+    rho = np.maximum(U[:, 0], 1e-9)
+    U[:, 0] = rho
+    vel = U[:, 1:4] / rho[:, None]
+    ke = 0.5 * rho * np.sum(vel**2, axis=1)
+    p = (GAMMA - 1.0) * (U[:, 4] - ke)
+    low = p < p_floor
+    if np.any(low):
+        U[low, 4] = p_floor / (GAMMA - 1.0) + ke[low]
+    U[:, 5] = np.maximum(U[:, 5], 0.0)      # rho*k >= 0
+    U[:, 6] = np.maximum(U[:, 6], 1e-8)     # rho*omega > 0
+    return U
 
 
 class TimeIntegrator:
-    """Time integration manager for transient simulations.
-
-    Supports multiple time discretization schemes with adaptive time step
-    control based on CFL number.
-
-    Attributes:
-        scheme: Time integration scheme
-        dt: Current time step size
-        cfl_target: Target CFL number
-        n_steps: Number of completed time steps
-        solution_history: Solution history for multi-step methods
-    """
+    """Explicit SSP Runge-Kutta integrator with local time stepping."""
 
     def __init__(
         self,
-        scheme: TimeIntegrationScheme = TimeIntegrationScheme.BACKWARD_EULER,
+        scheme: TimeIntegrationScheme = TimeIntegrationScheme.SSP_RK3,
         dt: float = 1e-5,
         cfl_target: float = 1.0,
     ):
-        """Initialize time integrator.
-
-        Args:
-            scheme: Time integration scheme (default: backward Euler)
-            dt: Initial time step size (s)
-            cfl_target: Target CFL number
-        """
-        self.scheme = scheme
+        # Map any legacy alias onto the canonical enum member.
+        self.scheme = TimeIntegrationScheme(scheme.value) if isinstance(scheme, TimeIntegrationScheme) \
+            else TimeIntegrationScheme(scheme)
         self.dt = dt
         self.cfl_target = cfl_target
         self.n_steps = 0
         self.current_time = 0.0
+        self._table = _SCHEME_TABLE[self.scheme]
 
-        # Solution history for multi-step methods
-        self.solution_history: List[np.ndarray] = []
-        self.max_history = self._get_history_length(scheme)
+    # ------------------------------------------------------------------
+    def local_time_step(self, U: np.ndarray, geom, mu_eff: Optional[np.ndarray] = None) -> np.ndarray:
+        """Per-cell stable pseudo-time step dt_i = CFL * V_i / sum_f (|u.n|+a) A_f.
 
-    def _get_history_length(self, scheme: TimeIntegrationScheme) -> int:
-        """Get required solution history length for scheme.
-
-        Args:
-            scheme: Time integration scheme
-
-        Returns:
-            Number of previous solutions to store
+        Adds a viscous limit when ``mu_eff`` is provided.
         """
-        history_map = {
-            TimeIntegrationScheme.BACKWARD_EULER: 1,
-            TimeIntegrationScheme.RUNGE_KUTTA_2: 1,
-            TimeIntegrationScheme.ADAMS_BASHFORTH_3: 3,
-        }
-        return history_map[scheme]
+        rho = np.maximum(U[:, 0], 1e-9)
+        vel = U[:, 1:4] / rho[:, None]
+        ke = 0.5 * rho * np.sum(vel**2, axis=1)
+        p = np.maximum((GAMMA - 1.0) * (U[:, 4] - ke), 1.0)
+        a = np.sqrt(GAMMA * p / rho)
 
+        n_cells = geom.n_cells
+        spectral = np.zeros(n_cells)
+
+        owner = geom.owner
+        neigh = geom.neigh
+        normals = geom.normals
+        areas = geom.areas
+        bmask = geom.boundary_mask
+        imask = geom.internal_mask
+
+        # internal faces contribute to both cells
+        io, ineigh = geom.int_owner, geom.int_neigh
+        n_int = normals[imask]
+        a_int = areas[imask]
+        un_o = np.abs(np.einsum('nd,nd->n', vel[io], n_int)) + a[io]
+        un_n = np.abs(np.einsum('nd,nd->n', vel[ineigh], n_int)) + a[ineigh]
+        np.add.at(spectral, io, un_o * a_int)
+        np.add.at(spectral, ineigh, un_n * a_int)
+
+        # boundary faces contribute to owner
+        bo = geom.bnd_owner
+        if bo.size:
+            n_b = normals[bmask]
+            a_b = areas[bmask]
+            un_b = np.abs(np.einsum('nd,nd->n', vel[bo], n_b)) + a[bo]
+            np.add.at(spectral, bo, un_b * a_b)
+
+        spectral = np.maximum(spectral, 1e-30)
+        dt = self.cfl_target * geom.cell_volumes / spectral
+
+        if mu_eff is not None:
+            # viscous stability: dt_visc ~ CFL * rho V^{5/3} / mu
+            Lc2 = geom.cell_volumes ** (2.0 / 3.0)
+            dt_visc = 0.25 * self.cfl_target * rho * Lc2 / np.maximum(mu_eff, 1e-30)
+            dt = np.minimum(dt, dt_visc)
+
+        return dt
+
+    # ------------------------------------------------------------------
     def step(
         self,
         solution: np.ndarray,
-        residuals: np.ndarray,
-        cell_volumes: np.ndarray,
-        velocities: np.ndarray,
-        characteristic_lengths: np.ndarray,
-        residual_norm: Optional[float] = None,
+        residual_func: Callable[[np.ndarray], np.ndarray],
+        dt_local: np.ndarray,
+        p_floor: float = 1.0,
     ) -> np.ndarray:
-        """Perform one time integration step.
+        """Advance one pseudo-time step with the configured SSP-RK scheme.
 
         Args:
-            solution: Current solution vector
-            residuals: Computed residuals
-            cell_volumes: Cell volumes
-            velocities: Cell velocities for CFL calculation
-            characteristic_lengths: Characteristic lengths for CFL
-            residual_norm: Optional residual norm for adaptive dt control
+            solution: current conservative state (n_cells, n_vars).
+            residual_func: callable U -> R(U) already divided by cell volume,
+                i.e. dU/dt = -R(U).
+            dt_local: per-cell pseudo-time step (n_cells,).
+            p_floor: minimum pressure for positivity projection.
 
         Returns:
-            Updated solution
+            Updated conservative state.
         """
-        # Adaptive time step based on CFL
-        dt_adaptive = self._compute_adaptive_dt(velocities, characteristic_lengths)
+        alpha = self._table["alpha"]
+        beta = self._table["beta"]
+        dt = dt_local[:, None]
 
-        # For pseudo-time stepping in steady-state simulations,
-        # allow dt to increase as solution develops
-        if self.n_steps == 0:
-            # First iteration: use moderate dt for stability
-            self.dt = dt_adaptive * 0.5  # Start with 50% of CFL limit
-            logger.info(f"Initial dt set to {self.dt:.6e} (50% of CFL limit)")
-        else:
-            # Subsequent iterations: adapt based on convergence behavior
-            # More aggressive growth to accelerate convergence
-            dt_max = self.dt * 1.3  # Allow 30% growth per iteration
-            
-            # If residual norm is provided, adjust dt based on convergence rate
-            if residual_norm is not None and hasattr(self, '_last_residual_norm'):
-                residual_ratio = residual_norm / self._last_residual_norm
-                
-                # Adaptive strategy based on residual behavior
-                if 0.95 < residual_ratio < 1.02:
-                    # Good convergence, can increase dt aggressively
-                    dt_max = self.dt * 1.5
-                elif residual_ratio > 1.1:
-                    # Residual increasing significantly, reduce dt
-                    dt_max = self.dt * 0.7
-                    logger.warning(
-                        f"Residual increasing (ratio={residual_ratio:.3f}), "
-                        f"reducing dt by 30%"
-                    )
-                elif residual_ratio < 0.8:
-                    # Very fast convergence, moderate increase
-                    dt_max = self.dt * 1.2
-                else:
-                    # Moderate change
-                    dt_max = self.dt * 1.15
-            
-            self.dt = min(dt_adaptive, dt_max)
-            
-            # Store current residual for next iteration
-            self._last_residual_norm = residual_norm
+        U0 = solution
+        stages = [U0]
+        for i in range(self._table["stages"]):
+            Ui = stages[-1]
+            L = -residual_func(Ui)            # dU/dt
+            combo = np.zeros_like(U0)
+            for k, a_ik in enumerate(alpha[i]):
+                if a_ik != 0.0:
+                    combo += a_ik * stages[k]
+            Unew = combo + beta[i] * dt * L
+            Unew = enforce_positivity(Unew, p_floor)
+            stages.append(Unew)
 
-        # Ensure dt stays within reasonable bounds
-        self.dt = max(self.dt, 1e-6)
-        self.dt = min(self.dt, 1.0)  # Upper limit for stability
-
-        # Apply time integration scheme
-        if self.scheme == TimeIntegrationScheme.BACKWARD_EULER:
-            updated = self._backward_euler(solution, residuals, cell_volumes)
-
-        elif self.scheme == TimeIntegrationScheme.RUNGE_KUTTA_2:
-            updated = self._runge_kutta_2(solution, residuals, cell_volumes)
-
-        elif self.scheme == TimeIntegrationScheme.ADAMS_BASHFORTH_3:
-            updated = self._adams_bashforth_3(solution, residuals, cell_volumes)
-
-        else:
-            raise ValueError(f"Unknown scheme: {self.scheme}")
-
-        # Update history
-        self._update_history(solution)
-
-        # Advance time
-        self.current_time += self.dt
         self.n_steps += 1
-
-        return updated
-
-    def _backward_euler(
-        self, solution: np.ndarray, residuals: np.ndarray, cell_volumes: np.ndarray
-    ) -> np.ndarray:
-        """First-order backward Euler (implicit, unconditionally stable).
-
-        For pseudo-time stepping with relaxation-based residuals,
-        we apply the residual directly without volume division.
-        
-        Update formula: U^{n+1} = U^n - dt * R(U)
-        
-        Includes numerical stability checks to prevent NaN/Inf propagation.
-
-        Args:
-            solution: Current solution U^n
-            residuals: Residuals R(U^{n+1}) - already scaled appropriately
-            cell_volumes: Cell volumes V (not used for relaxation residuals)
-
-        Returns:
-            Updated solution U^{n+1} with validity checks
-        """
-        # Ensure dt is reasonable
-        dt_safe = max(self.dt, 1e-8)
-
-        # Apply update: U^{n+1} = U^n - dt * R
-        updated = solution - dt_safe * residuals
-        
-        # Numerical stability checks
-        # 1. Check for NaN/Inf in updated solution
-        if not np.all(np.isfinite(updated)):
-            # If update produces invalid values, reduce dt and retry
-            dt_reduced = dt_safe * 0.5
-            logger.warning(
-                f"Numerical instability detected, reducing dt from {dt_safe:.6e} to {dt_reduced:.6e}"
-            )
-            updated = solution - dt_reduced * residuals
-            
-            # Second check
-            if not np.all(np.isfinite(updated)):
-                # If still unstable, revert to previous solution
-                logger.error("Update still unstable after dt reduction, reverting")
-                return solution.copy()
-            
-            # Update dt for next iteration
-            self.dt = dt_reduced
-        
-        # 2. Physical constraints enforcement
-        # Density must be positive
-        updated[:, 0] = np.maximum(updated[:, 0], 0.1)  # rho >= 0.1 kg/m^3
-        
-        # Pressure must be positive (E = p/(gamma-1) + 0.5*rho*V^2)
-        # For safety, ensure total energy corresponds to positive pressure
-        gamma = 1.4
-        vel_sq = np.sum(updated[:, 1:4]**2, axis=1) / np.maximum(updated[:, 0], 1e-10)**2
-        p_min = 1000.0  # Minimum pressure
-        E_min = p_min / (gamma - 1.0) + 0.5 * 0.1 * vel_sq
-        updated[:, 4] = np.maximum(updated[:, 4], E_min)
-        
-        # Turbulence variables must be non-negative
-        updated[:, 5] = np.maximum(updated[:, 5], 1e-10)  # k >= 0
-        updated[:, 6] = np.maximum(updated[:, 6], 1e-10)  # omega >= 0
-        
-        # Velocity magnitude limit (prevent unphysical speeds)
-        vel_mag = np.linalg.norm(updated[:, 1:4], axis=1)
-        max_vel = 340.0  # Speed of sound as upper limit
-        vel_mask = vel_mag > max_vel
-        if np.any(vel_mask):
-            scale = max_vel / vel_mag[vel_mask]
-            updated[vel_mask, 1:4] *= scale[:, np.newaxis]
-
-        return updated
-
-    def _runge_kutta_2(
-        self, solution: np.ndarray, residuals: np.ndarray, cell_volumes: np.ndarray
-    ) -> np.ndarray:
-        """Second-order Runge-Kutta (Heun's method).
-
-        Stage 1: U* = U^n - dt * R(U^n) / V
-        Stage 2: U^{n+1} = U^n - dt/2 * [R(U^n) + R(U*)] / V
-
-        Args:
-            solution: Current solution U^n
-            residuals: Residuals at current state
-            cell_volumes: Cell volumes
-
-        Returns:
-            Updated solution U^{n+1}
-        """
-        # Stage 1: Predictor
-        u_star = solution - self.dt * residuals / cell_volumes[:, np.newaxis]
-
-        # In production, recompute residuals at u*
-        # For now, use same residuals (simplified)
-        residuals_star = residuals.copy()
-
-        # Stage 2: Corrector
-        updated = (
-            solution
-            - 0.5 * self.dt * (residuals + residuals_star) / cell_volumes[:, np.newaxis]
-        )
-
-        return updated
-
-    def _adams_bashforth_3(
-        self, solution: np.ndarray, residuals: np.ndarray, cell_volumes: np.ndarray
-    ) -> np.ndarray:
-        """Third-order Adams-Bashforth (explicit multi-step).
-
-        U^{n+1} = U^n - dt/12V * [23*R^n - 16*R^{n-1} + 5*R^{n-2}]
-
-        Requires 3 previous solution states.
-
-        Args:
-            solution: Current solution U^n
-            residuals: Current residuals R^n
-            cell_volumes: Cell volumes
-
-        Returns:
-            Updated solution U^{n+1}
-
-        Raises:
-            RuntimeError: If insufficient history
-        """
-        if len(self.solution_history) < 3:
-            raise RuntimeError(
-                "AB3 requires at least 3 previous solutions. "
-                f"Have {len(self.solution_history)}, need 3."
-            )
-
-        # Get residuals from history (simplified - in production store residuals)
-        r_n = residuals
-        r_n1 = residuals * 0.95  # Placeholder
-        r_n2 = residuals * 0.90  # Placeholder
-
-        # AB3 formula
-        coeff = self.dt / (12.0 * cell_volumes[:, np.newaxis])
-        updated = solution - coeff * (23.0 * r_n - 16.0 * r_n1 + 5.0 * r_n2)
-
-        return updated
-
-    def _compute_adaptive_dt(
-        self, velocities: np.ndarray, characteristic_lengths: np.ndarray
-    ) -> float:
-        """Compute adaptive time step based on CFL condition.
-
-        dt = CFL * min(dx / |U|)
-
-        Args:
-            velocities: Velocity magnitudes
-            characteristic_lengths: Cell characteristic lengths
-
-        Returns:
-            Recommended time step
-        """
-        # Compute velocity magnitude
-        if velocities.ndim == 2:
-            vel_mag = np.linalg.norm(velocities, axis=1)
-        else:
-            vel_mag = np.abs(velocities)
-
-        # Avoid division by zero - use a minimum velocity
-        # For steady-state, start with reasonable velocity scale
-        vel_min = 1.0  # Minimum velocity scale (m/s)
-        vel_safe = np.maximum(vel_mag, vel_min)
-
-        # Local time scales
-        dt_local = characteristic_lengths / vel_safe
-
-        # Use percentile instead of median for better stability
-        # This avoids being dominated by extreme small cells while still being conservative
-        dt_typical = np.percentile(dt_local, 10)  # Use 10th percentile (more conservative than median)
-
-        # Apply CFL using percentile-based dt
-        dt_cfl = self.cfl_target * dt_typical
-
-        # Ensure dt doesn't become too small or zero
-        dt_min_limit = 1e-6  # Increased from 1e-8 for better stability
-        result = max(dt_cfl, dt_min_limit)
-
-        return result
-
-    def _update_history(self, solution: np.ndarray) -> None:
-        """Update solution history for multi-step methods.
-
-        Args:
-            solution: Current solution to add to history
-        """
-        self.solution_history.append(solution.copy())
-
-        # Trim history if exceeds maximum
-        if len(self.solution_history) > self.max_history:
-            self.solution_history.pop(0)
+        return stages[-1]
 
     def reset(self) -> None:
-        """Reset integrator state."""
         self.n_steps = 0
         self.current_time = 0.0
-        self.solution_history.clear()
-
-    def get_cfl_number(
-        self, velocities: np.ndarray, characteristic_lengths: np.ndarray
-    ) -> float:
-        """Compute current CFL number.
-
-        CFL = |U| * dt / dx
-
-        Args:
-            velocities: Velocity magnitudes
-            characteristic_lengths: Cell lengths
-
-        Returns:
-            Maximum CFL number across domain
-        """
-        if velocities.ndim == 2:
-            vel_mag = np.linalg.norm(velocities, axis=1)
-        else:
-            vel_mag = np.abs(velocities)
-
-        vel_safe = np.maximum(vel_mag, 1e-6)
-        cfl_local = vel_safe * self.dt / characteristic_lengths
-
-        return float(np.max(cfl_local))

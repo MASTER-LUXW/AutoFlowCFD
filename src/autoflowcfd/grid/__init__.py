@@ -52,12 +52,7 @@ from .mesh_extrusion import (
     extrude_single_layer,
     convert_layers_to_tetrahedra
 )
-from .mesh_background import (
-    generate_hybrid_mesh,
-    generate_cartesian_grid,
-    remove_overlapping_cells,
-    merge_meshes
-)
+from .mesh_background import generate_hybrid_mesh
 from .mesh_boundary import (
     identify_boundaries_from_surface,
     map_surface_boundaries
@@ -107,9 +102,6 @@ __all__ = [
     "convert_layers_to_tetrahedra",
     # mesh_background
     "generate_hybrid_mesh",
-    "generate_cartesian_grid",
-    "remove_overlapping_cells",
-    "merge_meshes",
     # mesh_boundary
     "identify_boundaries_from_surface",
     "map_surface_boundaries",

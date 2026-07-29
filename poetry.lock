@@ -2234,6 +2234,40 @@ files = [
 ]
 
 [[package]]
+name = "tetgen"
+version = "0.8.4"
+description = "Python interface to tetgen"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "tetgen-0.8.4-cp310-cp310-macosx_10_14_x86_64.whl", hash = "sha256:19d17b859cebfae974d613fd7a3afbf6817538047b5a9541349fc2c0bf245d66"},
+    {file = "tetgen-0.8.4-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:e0d98fb56a6e782e9490dfda3f99f2902d4f3733c1eb4bdd9876d13bf22574f1"},
+    {file = "tetgen-0.8.4-cp310-cp310-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:95b2df04a868ce9ac800b051f4641471af576997ee8519614f0b55eb134eae9a"},
+    {file = "tetgen-0.8.4-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:bc605762e5d3b8dea44c81de508118a5c4420fb911c5aebe69000c1e9deb738f"},
+    {file = "tetgen-0.8.4-cp310-cp310-win_amd64.whl", hash = "sha256:ef9a8a950baa9caddb6a4de34ff402426f652e43fead71dfa5b4fdee862bbef4"},
+    {file = "tetgen-0.8.4-cp311-cp311-macosx_10_14_x86_64.whl", hash = "sha256:2d20488f92709cb4db4e5e83bb2440067c762b14419727a15fb91ec1d8870084"},
+    {file = "tetgen-0.8.4-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:1bc405ee5dbfd944a9cee3e62da072e724851562fa0d279933caa91afae0eb8c"},
+    {file = "tetgen-0.8.4-cp311-cp311-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:adc6cf4af5e90250e9619a4a160468e408edb4307e55c4688c9a0a8ed1394cba"},
+    {file = "tetgen-0.8.4-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:b3a6e7bad3ef934c8780531fb1b063901472bfde3fca3d4426fc85e9e79ee1bf"},
+    {file = "tetgen-0.8.4-cp311-cp311-win_amd64.whl", hash = "sha256:22993175186927ad4be8c73b678b2c4fa3654a5bff5ec31c0410c78494a58644"},
+    {file = "tetgen-0.8.4-cp312-abi3-macosx_10_14_x86_64.whl", hash = "sha256:2ceff7d99c4c4777ba605b7726a021d51c7e76fce35b524551a160379fa45981"},
+    {file = "tetgen-0.8.4-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:eb74efee0950fdc4cdd65e3eac2b8ae8f37d9a08a8d5e366e52ed052b86e44a4"},
+    {file = "tetgen-0.8.4-cp312-abi3-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:58125b8c81b56869d26ba69d5404bacb0ae320ce9b8b45116aee0753dc89edc8"},
+    {file = "tetgen-0.8.4-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:e24f383fdd5d12660fd85cea937506ca2d81cca20fb92945a61f658e3719bc76"},
+    {file = "tetgen-0.8.4-cp312-abi3-win_amd64.whl", hash = "sha256:de38fc1e9e684546862f0795f3e91c19450c6d11961542a6035bab249c65b51f"},
+    {file = "tetgen-0.8.4.tar.gz", hash = "sha256:b6ca979ccecf43ddc0d31fa4f5a05da3cfeb4ab0705b8128530745bbab38bb86"},
+]
+
+[package.dependencies]
+numpy = "*"
+
+[package.extras]
+docs = ["Sphinx", "imageio", "matplotlib", "pyacvd", "pydata-sphinx-theme", "pymeshfix", "pyvista", "pyvista[trame]", "sphinx-copybutton", "sphinx-notfound-page (>=0.3.0)", "sphinx_gallery"]
+extras = ["meshio", "pymeshfix (>=0.18.0)", "pyvista"]
+tests = ["meshio", "pymeshfix (>=0.18.0)", "pytest", "pytest-cov", "pyvista"]
+
+[[package]]
 name = "tomli"
 version = "2.4.1"
 description = "A lil' TOML parser"
@@ -2517,4 +2551,4 @@ viz = ["pyvista"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.10"
-content-hash = "7b94994c49b5392191dbd97818949a8020d271998f89f87cb88b6061fc52b847"
+content-hash = "f0de13515e92d9661f9ad3e6adfa562b8696d6eb9b8f6d8e048a099626edaac3"

@@ -10,7 +10,7 @@ from typing import Optional, Dict
 import numpy as np
 from loguru import logger
 
-from .structures import GridData, NodeArray, CellArray, BoundaryMap, GridMetadata, VolumeMeshData
+from .structures import GridData, NodeArray, GridMetadata, VolumeMeshData
 from .nas_parser_exceptions import NASParserError, NASFormatError, NASParseError
 from .nas_parser_nodes import parse_nodes_from_nas
 from .nas_parser_cells import parse_cells_from_nas
@@ -112,29 +112,35 @@ class NASParser:
             
             # Step 3: Parse cells (delegated)
             logger.info("Parsing cells...")
-            surface_cells = parse_cells_from_nas(
+            surface_cells, cell_pids = parse_cells_from_nas(
                 str(self.file_path), node_id_to_index, self.encoding
             )
             logger.info(f"Parsed {surface_cells.count:,} surface cells")
-            
+
             if surface_cells.count == 0:
                 raise NASParseError("No cells found in NAS file")
-            
+
             # Step 4: Parse boundaries (delegated)
+            # Pass the PID already resolved for each surviving cell (cells_data)
+            # instead of letting parse_boundary_properties re-scan CTRIA3 cards
+            # independently. A second independent scan does not know which
+            # cells parse_cells_from_nas skipped (missing node references), so
+            # its cell indices would drift out of alignment with surface_cells
+            # as soon as any cell is skipped.
             logger.info("Parsing boundary conditions...")
+            cells_data = list(enumerate(cell_pids.tolist()))
             boundaries = parse_boundary_properties(
                 str(self.file_path),
                 self.encoding,
-                cell_count=surface_cells.count
+                cell_count=surface_cells.count,
+                cells_data=cells_data
             )
             logger.info(f"Parsed {len(boundaries.groups)} boundary groups")
-            
+
             # Step 5: Compute bounding box
             bounding_box = self._compute_bounding_box(nodes)
-            
+
             # Step 6: Generate volume mesh if requested
-            generate_volume_mesh = True
-            
             if generate_volume_mesh:
                 logger.info("Generating volume mesh from surface geometry...")
                 
@@ -247,38 +253,28 @@ class NASParser:
             raise NASFormatError(f"Failed to detect NAS version: {str(e)}") from e
     
     def _compute_bounding_box(self, nodes: NodeArray):
-        """计算包围盒，并添加buffer以容纳boundary layer extrusion
-        
+        """计算表面网格的精确包围盒（不加buffer）
+
+        The input surface mesh is a closed, watertight domain boundary (car
+        body + ground + inlet/outlet + tunnel/farfield) - it already defines
+        the exact computational domain, so this returns the plain node
+        extent with no padding. Padding it (as this used to do) would let
+        the volume mesh extend outside the domain the surface actually
+        encloses (e.g. straight through the ground plane). The result is
+        used only for boundary-group classification (mesh_domain_classify)
+        and as a BL growth-cap reference, never to define fill geometry.
+
         Returns:
-            Tuple of (min_x, max_x, min_y, max_y, min_z, max_z) with buffer
+            Tuple of (min_x, max_x, min_y, max_y, min_z, max_z)
         """
         min_x, max_x = float(nodes.x.min()), float(nodes.x.max())
         min_y, max_y = float(nodes.y.min()), float(nodes.y.max())
         min_z, max_z = float(nodes.z.min()), float(nodes.z.max())
-        
-        # Calculate characteristic length
-        L_x = max_x - min_x
-        L_y = max_y - min_y
-        L_z = max_z - min_z
-        L_char = max(L_x, L_y, L_z)
-        
-        # Add buffer for boundary layer extrusion and far-field
-        # Buffer should be at least 5-10 times the expected boundary layer thickness
-        # For automotive CFD at Re~1e6, delta ~ 0.01-0.05 * L_char
-        buffer_ratio = 0.15  # 15% buffer on each side
-        buffer = L_char * buffer_ratio
-        
-        # Expand bounding box symmetrically
-        min_x -= buffer
-        max_x += buffer
-        min_y -= buffer
-        max_y += buffer
-        min_z -= buffer
-        max_z += buffer
-        
+
         logger.debug(
-            f"Bounding box computed with buffer: "
-            f"L_char={L_char:.4f}m, buffer={buffer:.4f}m ({buffer_ratio*100:.0f}%)"
+            f"Bounding box (exact, unpadded): "
+            f"x=[{min_x:.4f}, {max_x:.4f}], y=[{min_y:.4f}, {max_y:.4f}], "
+            f"z=[{min_z:.4f}, {max_z:.4f}]"
         )
-        
+
         return (min_x, max_x, min_y, max_y, min_z, max_z)

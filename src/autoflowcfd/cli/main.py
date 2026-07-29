@@ -19,6 +19,7 @@ Example:
     Run steady-state RANS simulation.
 """
 
+import sys
 import click
 from loguru import logger
 
@@ -28,6 +29,16 @@ from .solve_commands import solve
 from .post_commands import post
 from .config_commands import config
 from .utils_commands import utils
+
+# Log messages and click.echo() calls throughout this CLI use Unicode symbols
+# (checkmarks, °, ³, ...). On Windows, stdout/stderr default to the active
+# console codepage (e.g. GBK/936 on Chinese locales) rather than UTF-8, so
+# those characters raise UnicodeEncodeError and abort the command. Force
+# UTF-8 with a safe fallback so output never crashes the CLI regardless of
+# the host console's codepage.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 @click.group()

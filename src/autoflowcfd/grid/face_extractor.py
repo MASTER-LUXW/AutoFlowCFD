@@ -238,8 +238,10 @@ class FaceExtractor:
         Args:
             cell_connectivity: Cell-node connectivity array, shape=(n_cells, 4), dtype=int32
             nodes: Node coordinate array with x, y, z attributes
-            boundary_groups: Optional mapping of boundary names to cell indices
-            
+            boundary_groups: Unused; FaceData carries no per-face boundary-type
+                field, so callers must classify boundary faces via their
+                owner cell against BoundaryMap.groups (see bc_handler.py)
+
         Returns:
             FaceData: Complete face data structure for FVM
             
@@ -411,19 +413,6 @@ class FaceExtractor:
                 boundary_flags[face_idx] = True
             
             face_areas[face_idx] = area_vec
-        
-        # Step 5: Map boundary conditions
-        boundary_types_map: Dict[int, str] = {}
-        if boundary_groups is not None:
-            for bname, cell_indices in boundary_groups.items():
-                cell_set = set(cell_indices.tolist())
-                
-                for face_idx in range(n_unique_faces):
-                    if boundary_flags[face_idx]:
-                        left_cell = face_connectivity[face_idx, 0]
-                        if left_cell in cell_set:
-                            boundary_types_map[face_idx] = bname
-                            break
         
         # Compute scalar areas and unit normals from area vectors
         face_scalar_areas = np.linalg.norm(face_areas, axis=1)

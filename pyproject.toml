@@ -31,6 +31,7 @@ llvmlite = "0.43.0"
 
 # GPU support (optional)
 cupy-cuda12x = {version = "^12.2.0", optional = true}
+tetgen = "^0.8.4"
 
 [tool.poetry.group.dev.dependencies]
 black = "^23.7.0"
