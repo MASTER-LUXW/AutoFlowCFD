@@ -24,6 +24,7 @@ from .fvm_gradients import FaceGeometry
 from .fvm_viscous_residual import ViscousRANSResidual, estimate_wall_distance
 from .bc_handler import BoundaryConditionHandler
 from .aero_coeffs import AeroCoefficientCalculator
+from .checkpoint import CheckpointManager
 
 
 @dataclass
@@ -37,6 +38,7 @@ class SteadyResult:
     cl_history: List[float] = field(default_factory=list)
     residuals_history: List[float] = field(default_factory=list)
     solution_final: Optional[np.ndarray] = None
+    checkpoint_path: Optional[str] = None
     
     def get_mean_coefficients(self) -> Dict[str, float]:
         """Compute mean aerodynamic coefficients."""
@@ -141,6 +143,13 @@ class FRSolver:
             grid_data, self.face_extractor,
             rho_inf=config.rho_inf, vel_inf=config.vel_inf,
         )
+        
+        # Checkpoint manager
+        self.checkpoint_manager = CheckpointManager(
+            config=config,
+            output_dir=config.output_dir,
+            checkpoint_interval=config.checkpoint_interval
+        )
 
         logger.info("FRSolver initialization complete")
     
@@ -236,7 +245,7 @@ class FRSolver:
         
         logger.info(f"Boundary conditions setup: {len(boundary_names)} boundaries")
     
-    def solve(self, max_iter: Optional[int] = None):
+    def solve(self, max_iter: Optional[int] = None, start_iteration: int = 0):
         """Execute steady-state simulation.
 
         Drives an explicit SSP-RK pseudo-time march of the second-order viscous
@@ -244,7 +253,18 @@ class FRSolver:
         convergence criterion.
 
         Args:
-            max_iter: Maximum iterations (overrides config if provided)
+            max_iter: Maximum TOTAL iteration count (overrides config if
+                provided). This is an absolute target, not a count of
+                additional steps - when resuming with start_iteration=50,
+                max_iter=2500 means "run up to iteration 2500 total"
+                (2450 more steps), matching the CLI's documented semantics.
+            start_iteration: Iteration count already completed (e.g. loaded
+                from a checkpoint). Iteration numbering, logging, and the
+                inlet/farfield velocity ramp (BoundaryConditionHandler.
+                update_ramp_factor) all continue from here instead of
+                restarting at 1 - otherwise resuming would snap the ramp
+                factor back down to ~0 and reintroduce a boundary-condition
+                discontinuity at the resume point.
 
         Returns:
             SteadyResult with solution and history
@@ -336,18 +356,32 @@ class FRSolver:
         ref_area = self.aero_calculator._compute_reference_area(body_face_indices)
 
         actual_max_iter = max_iter if max_iter is not None else self.config.max_iter
-        logger.info(f"Starting steady RANS solve (max_iter={actual_max_iter}, turbulent={turbulent})")
+        if start_iteration >= actual_max_iter:
+            logger.warning(
+                f"start_iteration ({start_iteration}) >= max_iter ({actual_max_iter}); "
+                f"nothing to do."
+            )
+        logger.info(
+            f"Starting steady RANS solve (start_iteration={start_iteration}, "
+            f"max_iter={actual_max_iter}, turbulent={turbulent})"
+        )
 
         cd_history, cl_history, res_history = [], [], []
         initial_res = None
         converged = False
         start = time.time()
+        # If start_iteration >= actual_max_iter the loop body below never
+        # runs; keep `iteration` defined (as the last completed iteration)
+        # so the post-loop logging/checkpoint code doesn't reference an
+        # unbound local.
+        iteration = start_iteration
 
         def residual_func(U):
             bstates = self.bc_handler.build_boundary_states(U)
             return residual.compute(U, bstates)
 
-        for iteration in range(1, actual_max_iter + 1):
+        for step in range(1, actual_max_iter - start_iteration + 1):
+            iteration = start_iteration + step
             if self.bc_handler is not None:
                 self.bc_handler.update_ramp_factor(iteration, actual_max_iter)
 
@@ -358,12 +392,41 @@ class FRSolver:
 
             # Effective viscosity for viscous time-step limit.
             rho_c, vel_c, p_c, T_c, k_c, w_c = residual.to_primitive(self.solution)
-            gvel = residual._velocity_gradient(vel_c, self.solution, bstates)
-            mu_t = residual._eddy_viscosity(rho_c, k_c, w_c, gvel) if turbulent \
-                else np.zeros(geom.n_cells)
+            
+            # Diagnostic: log shapes before gradient computation
+            if iteration <= 5 or iteration % 10 == 0:
+                logger.debug(
+                    f"[Iter {iteration}] Primitive variables shapes:\n"
+                    f"  rho_c: {rho_c.shape}, vel_c: {vel_c.shape}\n"
+                    f"  k_c: {k_c.shape}, w_c (omega): {w_c.shape}\n"
+                    f"  wall_distance: {residual.wall_distance.shape}"
+                )
+            
+            try:
+                gvel = residual._velocity_gradient(vel_c, self.solution, bstates)
+                
+                if iteration <= 5 or iteration % 10 == 0:
+                    logger.debug(f"[Iter {iteration}] Velocity gradient shape: {gvel.shape}")
+                
+                mu_t = residual._eddy_viscosity(rho_c, k_c, w_c, gvel) if turbulent \
+                    else np.zeros(geom.n_cells)
+                    
+                if iteration <= 5 or iteration % 10 == 0:
+                    logger.debug(f"[Iter {iteration}] Eddy viscosity shape: {mu_t.shape}")
+            except Exception as e:
+                logger.error(f"[Iter {iteration}] Failed to compute viscosity: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                raise
 
-            # Compute local time step with current CFL
-            dt_local = self.time_integrator.local_time_step(self.solution, geom, mu_lam + mu_t)
+            # Compute local time step with current CFL. omega=w_c adds the
+            # SST source-term stiffness limit (see local_time_step docstring)
+            # - without it, near-wall cells with large omega can be unstable
+            # for the k/omega equations even at a CFL that's comfortably
+            # safe for the convective/viscous mean-flow terms.
+            dt_local = self.time_integrator.local_time_step(
+                self.solution, geom, mu_lam + mu_t, omega=(w_c if turbulent else None)
+            )
 
             # One SSP-RK pseudo-time step. R is both the residual used for
             # convergence monitoring below and the RK scheme's own stage-0
@@ -450,11 +513,31 @@ class FRSolver:
             # iteration lag that's a good trade against doubling the
             # gradient+eddy-viscosity cost every iteration just for
             # monitoring output.
-            Cd, Cl = self.aero_calculator.compute_coefficients(
-                self.solution, iteration,
-                viscous_residual=residual, grad_vel=gvel, mu_t=mu_t,
-                boundary_states=bstates,
-            )
+            
+            # Diagnostic: log shapes before computing coefficients
+            if iteration <= 5 or iteration % 10 == 0:
+                logger.debug(
+                    f"[Iter {iteration}] Pre-compute diagnostics:\n"
+                    f"  Solution shape: {self.solution.shape}\n"
+                    f"  gvel shape: {gvel.shape if gvel is not None else 'None'}\n"
+                    f"  mu_t shape: {mu_t.shape if mu_t is not None else 'None'}\n"
+                    f"  bstates shape: {bstates.shape if bstates is not None else 'None'}\n"
+                    f"  Face normals shape: {self.face_extractor.face_normals.shape}\n"
+                    f"  Face areas shape: {self.face_extractor.face_areas.shape}"
+                )
+            
+            try:
+                Cd, Cl = self.aero_calculator.compute_coefficients(
+                    self.solution, iteration,
+                    viscous_residual=residual, grad_vel=gvel, mu_t=mu_t,
+                    boundary_states=bstates,
+                )
+            except Exception as e:
+                logger.error(f"[Iter {iteration}] Failed to compute aerodynamic coefficients: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                raise
+            
             cd_history.append(Cd)
             cl_history.append(Cl)
 
@@ -466,6 +549,27 @@ class FRSolver:
                 f"Cl: {Cl:.4f}"
             )
 
+            # Save checkpoint periodically
+            if self.checkpoint_manager.should_save(iteration):
+                history_dict = {
+                    'iterations': list(range(1, iteration + 1)),
+                    'residuals': {'continuity': res_history.copy()},
+                    'coefficients': {'Cd': cd_history.copy(), 'Cl': cl_history.copy()},
+                    'cfl_history': [self.time_integrator.cfl_target] * len(res_history),
+                }
+                
+                ckpt_path = self.checkpoint_manager.save(
+                    solution=self.solution,
+                    history=history_dict,
+                    iteration=iteration
+                )
+                
+                if ckpt_path:
+                    logger.info(f"Checkpoint saved at iteration {iteration}")
+                    
+                    # Cleanup old checkpoints
+                    self.checkpoint_manager.cleanup_old_checkpoints(keep_last=3)
+
             # Convergence: normalised residual below tolerance.
             if rel_res < self.config.convergence_tol:
                 logger.success(f"Converged at iteration {iteration} (rel residual {rel_res:.3e})")
@@ -475,6 +579,33 @@ class FRSolver:
         elapsed = time.time() - start
         logger.info(f"Solve finished: {len(res_history)} iters, {elapsed:.1f}s, converged={converged}")
 
+        # Save final checkpoint
+        try:
+            logger.debug("Preparing final checkpoint data...")
+            final_history = {
+                'iterations': list(range(1, iteration + 1)),
+                'residuals': {'continuity': res_history.copy()},
+                'coefficients': {'Cd': cd_history.copy(), 'Cl': cl_history.copy()},
+                'cfl_history': [self.time_integrator.cfl_target] * len(res_history),
+            }
+            
+            logger.debug(f"Final history keys: {final_history.keys()}")
+            logger.debug(f"Cd history length: {len(cd_history)}, Cl history length: {len(cl_history)}")
+            
+            final_ckpt = self.checkpoint_manager.save(
+                solution=self.solution,
+                history=final_history,
+                iteration=iteration
+            )
+            
+            if final_ckpt:
+                logger.info(f"Final checkpoint saved: {final_ckpt}")
+        except Exception as e:
+            logger.error(f"Failed to save final checkpoint: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise
+
         return SteadyResult(
             converged=converged,
             iterations=len(res_history),
@@ -483,4 +614,5 @@ class FRSolver:
             cl_history=cl_history,
             residuals_history=res_history,
             solution_final=self.solution.copy(),
+            checkpoint_path=final_ckpt,
         )

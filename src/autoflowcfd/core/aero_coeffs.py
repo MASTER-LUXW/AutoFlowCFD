@@ -105,12 +105,35 @@ class AeroCoefficientCalculator:
             face_normals = self.face_extractor.face_normals[body_face_indices]
             face_areas = self.face_extractor.face_areas[body_face_indices]
             
+            # Validate shapes
+            if len(body_face_indices) != len(face_normals):
+                logger.error(
+                    f"[Iter {iteration}] CRITICAL: body_face_indices length ({len(body_face_indices)}) "
+                    f"!= face_normals length ({len(face_normals)})"
+                )
+                return 0.0, 0.0
+            
+            if len(body_face_indices) != len(face_areas):
+                logger.error(
+                    f"[Iter {iteration}] CRITICAL: body_face_indices length ({len(body_face_indices)}) "
+                    f"!= face_areas length ({len(face_areas)})"
+                )
+                return 0.0, 0.0
+            
             # Get pressure on body surface
             body_cell_indices = self.face_extractor.face_connectivity[body_face_indices, 0]
             p_body = pressure[body_cell_indices]
             p_ref = 101325.0
             
             dp = p_body - p_ref
+            
+            # Validate dp shape
+            if len(dp) != len(face_areas):
+                logger.error(
+                    f"[Iter {iteration}] CRITICAL: dp length ({len(dp)}) "
+                    f"!= face_areas length ({len(face_areas)})"
+                )
+                return 0.0, 0.0
 
             # Pressure (form) drag/lift.
             Fx_p = -np.sum(dp * face_normals[:, 0] * face_areas)
@@ -132,14 +155,67 @@ class AeroCoefficientCalculator:
                     and mu_t is not None and boundary_states is not None):
                 vel = np.column_stack([velocity_x, velocity_y, velocity_z])
                 tau_n_all = viscous_residual.wall_shear_stress(vel, mu_t, grad_vel, boundary_states)
-                # tau_n_all is indexed over boundary faces in the same order
-                # as geom.boundary_mask; map body_face_indices into that order.
+                
+                # tau_n_all shape: (n_boundary_faces, 3)
+                # Map body_face_indices to boundary face positions
+                
+                # Get all boundary face global indices
                 boundary_face_ids = np.where(self.face_extractor.boundary_flags)[0]
-                body_pos_in_boundary = np.searchsorted(boundary_face_ids, body_face_indices)
-                tau_n_body = tau_n_all[body_pos_in_boundary]
-                Fx_f = -np.sum(tau_n_body[:, 0] * face_areas)
-                Fz_f = -np.sum(tau_n_body[:, 2] * face_areas)
-
+                
+                # CRITICAL FIX: Ensure body_face_indices are actually boundary faces
+                # Use np.isin to find valid indices, then map to boundary face positions
+                mask_valid = np.isin(body_face_indices, boundary_face_ids)
+                
+                if np.any(mask_valid):
+                    valid_body_faces = body_face_indices[mask_valid]
+                    
+                    # CRITICAL FIX: Map global face indices to boundary face array positions
+                    # Use dictionary-based mapping instead of searchsorted (which returns insertion positions, not actual positions)
+                    
+                    # Build position map: global_face_id -> boundary_array_position
+                    face_to_pos = {int(face_id): pos for pos, face_id in enumerate(boundary_face_ids)}
+                    
+                    # Map valid body faces to their positions in tau_n_all
+                    try:
+                        body_pos_in_boundary = np.array([face_to_pos[int(face_id)] for face_id in valid_body_faces], dtype=np.int64)
+                    except KeyError as e:
+                        logger.error(
+                            f"[Iter {iteration}] Face ID {e} not found in boundary face list. "
+                            f"This indicates a mismatch between body_face_indices and boundary_flags."
+                        )
+                        return 0.0, 0.0
+                    
+                    # Safety check: ensure indices are within bounds
+                    if len(body_pos_in_boundary) > 0 and np.max(body_pos_in_boundary) < len(tau_n_all):
+                        tau_n_body = tau_n_all[body_pos_in_boundary]
+                        
+                        # CRITICAL FIX: Ensure shapes match for broadcasting
+                        # tau_n_body: (n_valid, 3), need to extract x and z components
+                        # face_areas should have same length as valid_body_faces
+                        valid_face_areas = face_areas[mask_valid]
+                        
+                        # Verify shapes match before computation
+                        if tau_n_body.shape[0] != valid_face_areas.shape[0]:
+                            logger.warning(
+                                f"[Iter {iteration}] Shape mismatch: tau_n_body has "
+                                f"{tau_n_body.shape[0]} faces but face_areas has "
+                                f"{valid_face_areas.shape[0]} faces"
+                            )
+                            # Use minimum length to avoid error
+                            min_len = min(tau_n_body.shape[0], valid_face_areas.shape[0])
+                            tau_n_body = tau_n_body[:min_len]
+                            valid_face_areas = valid_face_areas[:min_len]
+                        
+                        # Compute friction forces with matching shapes
+                        # tau_n_body[:, 0]: x-component of wall shear stress (shape: n_valid,)
+                        # valid_face_areas: area of each face (shape: n_valid,)
+                        # Element-wise multiplication then sum
+                        Fx_f = -np.sum(tau_n_body[:, 0] * valid_face_areas)
+                        Fz_f = -np.sum(tau_n_body[:, 2] * valid_face_areas)
+                    else:
+                        logger.warning(f"[Iter {iteration}] Invalid boundary face indices detected")
+                else:
+                    logger.warning(f"[Iter {iteration}] No valid body boundary faces found for friction calculation")
             Fx = Fx_p + Fx_f
             Fz = Fz_p + Fz_f
 
@@ -157,10 +233,25 @@ class AeroCoefficientCalculator:
             # (separately, longer-established) pressure integration.
             Cd_p = Fx_p / (q_inf * ref_area)
             Cd_f = Fx_f / (q_inf * ref_area)
+            
+            # Enhanced diagnostic logging
             logger.info(
                 f"[Iter {iteration}] Cd breakdown: pressure={Cd_p:.4f}, "
                 f"friction={Cd_f:.4f}, total={Cd:.4f}"
             )
+            
+            # Log force magnitudes for debugging
+            if iteration <= 10 or iteration % 50 == 0:
+                logger.debug(
+                    f"[Iter {iteration}] Force details:\n"
+                    f"  Pressure force (Fx_p): {Fx_p:.4e} N\n"
+                    f"  Friction force (Fx_f): {Fx_f:.4e} N\n"
+                    f"  Total force (Fx):      {Fx:.4e} N\n"
+                    f"  Dynamic pressure (q):  {q_inf:.2f} Pa\n"
+                    f"  Reference area (A):    {ref_area:.4f} m^2\n"
+                    f"  Friction/Pressure ratio: {abs(Fx_f/Fx_p)*100:.2f}%"
+                )
+            
             if abs(Fx_f) > abs(Fx_p) and abs(Fx_f) > 1e-9:
                 logger.warning(
                     f"[Iter {iteration}] Skin-friction drag ({Fx_f:.4e} N) exceeds "

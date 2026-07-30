@@ -12,18 +12,24 @@ from loguru import logger
 def identify_boundaries_from_surface(
     volume_cells: np.ndarray,
     surface_faces: np.ndarray,
-    surface_boundaries: Optional['BoundaryMap'] = None
+    surface_boundaries: Optional['BoundaryMap'] = None,
+    direct_cell_groups: Optional[np.ndarray] = None,
 ) -> 'BoundaryMap':
     """Identify boundary faces from volume mesh and inherit surface boundaries.
-    
+
     Boundary faces are those that belong to only one cell (exterior faces).
     This method maps the original surface face boundaries to the volume mesh.
-    
+
     Args:
         volume_cells: Tetrahedral connectivity, shape=(n_cells, 4)
         surface_faces: Original surface face connectivity with boundary info
         surface_boundaries: Optional boundary mapping from surface mesh
-        
+        direct_cell_groups: Optional (n_cells,) str array giving each cell's
+            source boundary-group name directly (empty string if unknown),
+            e.g. from mesh_background.generate_hybrid_mesh's BL-extrusion
+            face tracking. Takes priority over node-index matching below,
+            which cannot work for BL-extruded groups (see map_surface_boundaries).
+
     Returns:
         BoundaryMap object with identified boundary groups
     """
@@ -88,7 +94,8 @@ def identify_boundaries_from_surface(
         )
         return map_surface_boundaries(
             boundary_faces, boundary_cell_indices,
-            surface_faces, surface_boundaries
+            surface_faces, surface_boundaries,
+            direct_cell_groups=direct_cell_groups,
         )
     
     # Fallback: create a single "wall" boundary group with all boundary cells
@@ -112,26 +119,36 @@ def map_surface_boundaries(
     boundary_faces: np.ndarray,
     boundary_cell_indices: np.ndarray,
     surface_faces: np.ndarray,
-    surface_boundaries: 'BoundaryMap'
+    surface_boundaries: 'BoundaryMap',
+    direct_cell_groups: Optional[np.ndarray] = None,
 ) -> 'BoundaryMap':
     """Map surface mesh boundaries to volume mesh boundary cells.
-    
+
     Uses node-based matching to identify which volume boundary cells
-    correspond to which surface boundary groups.
-    
+    correspond to which surface boundary groups. Node-based matching only
+    works for cells whose boundary-face nodes are literally unchanged from
+    the input surface mesh; it structurally cannot match BL-extruded faces,
+    since extrusion displaces their nodes to new coordinates/indices. For
+    those, `direct_cell_groups` (built during BL extrusion in
+    mesh_domain_classify.classify_boundary_groups / mesh_background) gives
+    each cell's source group directly and is used first, in preference to
+    node matching.
+
     Args:
         boundary_faces: Volume mesh boundary faces, shape=(n_faces, 3)
         boundary_cell_indices: Cell indices for each boundary face
         surface_faces: Original surface faces, shape=(n_surf_faces, 3)
         surface_boundaries: Surface mesh boundary mapping
-        
+        direct_cell_groups: Optional (n_cells,) str array, empty string
+            where unknown; takes priority over node matching below
+
     Returns:
         BoundaryMap with inherited boundary groups
     """
     from .structures import BoundaryMap
-    
+
     logger.info("Mapping surface boundaries to volume mesh...")
-    
+
     # Build a mapping from surface face nodes to boundary groups
     # For efficiency, use a dictionary keyed by sorted node tuples
     surface_face_to_boundary = {}
@@ -140,22 +157,33 @@ def map_surface_boundaries(
             if cell_idx < len(surface_faces):
                 face_nodes = tuple(sorted(surface_faces[cell_idx]))
                 surface_face_to_boundary[face_nodes] = boundary_name
-    
+
     # Map volume boundary faces to surface boundaries
     volume_cell_to_boundary = {}  # cell_idx -> boundary_name
-    
+
+    n_direct = 0
+    if direct_cell_groups is not None:
+        for cell_idx in np.unique(boundary_cell_indices):
+            if cell_idx < len(direct_cell_groups):
+                name = direct_cell_groups[cell_idx]
+                if name:
+                    volume_cell_to_boundary[cell_idx] = name
+                    n_direct += 1
+        if n_direct:
+            logger.info(
+                f"  {n_direct} boundary cells attributed directly from "
+                f"BL-extrusion group tracking"
+            )
+
     for i, face in enumerate(boundary_faces):
+        cell_idx = boundary_cell_indices[i]
+        if cell_idx in volume_cell_to_boundary:
+            continue  # already attributed directly (BL-extruded cell)
         face_key = tuple(sorted(face))
         if face_key in surface_face_to_boundary:
             boundary_name = surface_face_to_boundary[face_key]
-            cell_idx = boundary_cell_indices[i]
-            
-            if cell_idx not in volume_cell_to_boundary:
-                volume_cell_to_boundary[cell_idx] = boundary_name
-            else:
-                # If cell already assigned, keep the first assignment
-                pass
-    
+            volume_cell_to_boundary[cell_idx] = boundary_name
+
     # Group cells by boundary name
     groups = {}
     bc_types = {}

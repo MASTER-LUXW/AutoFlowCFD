@@ -87,6 +87,126 @@ def _connected_components(faces: np.ndarray, inverse: np.ndarray, face_of_edge: 
     return labels
 
 
+def _ray_triangle_intersect_count(
+    origin: np.ndarray, direction: np.ndarray,
+    v0: np.ndarray, v1: np.ndarray, v2: np.ndarray,
+) -> int:
+    """Count Moller-Trumbore ray/triangle intersections ahead of `origin`
+    (vectorized over all triangles), used for a ray-casting parity
+    inside/outside test."""
+    eps = 1e-9
+    edge1 = v1 - v0
+    edge2 = v2 - v0
+    h = np.cross(direction, edge2)
+    a = np.einsum('ij,ij->i', edge1, h)
+    valid = np.abs(a) > eps
+    f = np.zeros_like(a)
+    f[valid] = 1.0 / a[valid]
+    s = origin - v0
+    u = f * np.einsum('ij,ij->i', s, h)
+    valid &= (u >= -eps) & (u <= 1 + eps)
+    q = np.cross(s, edge1)
+    v = f * np.einsum('j,ij->i', direction, q)
+    valid &= (v >= -eps) & (u + v <= 1 + eps)
+    t = f * np.einsum('ij,ij->i', edge2, q)
+    valid &= t > eps
+    return int(np.sum(valid))
+
+
+def _min_dist_to_edges(p: np.ndarray, v0: np.ndarray, v1: np.ndarray, v2: np.ndarray) -> float:
+    """Min distance from p to any triangle edge - a cheap, slightly
+    conservative proxy for distance-to-surface. Needed because a candidate
+    can sit exactly on an edge (e.g. a symmetric shell's vertex-average
+    centroid landing precisely on a concave feature) without being close to
+    any single *vertex*, which a vertex-only distance check would miss."""
+    best = np.inf
+    for a, b in ((v0, v1), (v1, v2), (v2, v0)):
+        ab = b - a
+        denom = np.maximum(np.einsum('ij,ij->i', ab, ab), 1e-30)
+        t = np.clip(np.einsum('ij,ij->i', p - a, ab) / denom, 0.0, 1.0)
+        closest = a + t[:, None] * ab
+        d = np.linalg.norm(p - closest, axis=1)
+        best = min(best, float(d.min()))
+    return best
+
+
+def find_point_inside_closed_shell(
+    nodes: np.ndarray,
+    faces: np.ndarray,
+    n_attempts: int = 20,
+    n_directions: int = 5,
+    seed: int = 0,
+) -> Optional[np.ndarray]:
+    """Find a point strictly inside a closed (watertight) triangle shell,
+    for use as a tetgen hole seed (mesh_tetgen_core.fill_core_volume) so an
+    isolated embedded solid's own interior - and by extension its BL
+    block's enclosed cavity - is excluded from the core fill instead of
+    being filled with spurious tetrahedra that overlap the BL prisms
+    already occupying that space.
+
+    Tries the shell's vertex-average centroid first (correct for the
+    common case: a reasonably convex/star-shaped solid), then falls back to
+    points just inside each of several randomly sampled faces (offset
+    inward along that face's own normal), for non-convex shapes where the
+    centroid can fall outside the solid entirely.
+
+    Each candidate is verified two ways before being accepted: it must not
+    sit too close to the shell surface itself (a degenerate case a vertex
+    centroid can hit exactly, e.g. landing precisely on a concave edge -
+    ordinary vertex-distance checks miss this since the nearest *vertex*
+    can still be far away), and a ray-casting parity (odd intersection
+    count = inside) test must agree across several independent random ray
+    directions, not just one (a single ray can graze an edge/vertex and
+    give a wrong answer by chance).
+
+    Args:
+        nodes: (n_nodes, 3) coordinates (shared array; only rows referenced
+            by `faces` are used)
+        faces: (n_faces, 3) closed, watertight triangle connectivity
+        n_attempts: number of per-face fallback candidates to try
+        n_directions: number of independent ray directions each candidate
+            must agree on before being accepted
+        seed: RNG seed (deterministic candidate/direction sampling)
+
+    Returns:
+        A point inside the shell, or None if no candidate could be
+        verified (caller should skip hole-marking for this shell rather
+        than risk an incorrect point, which would corrupt the whole fill)
+    """
+    rng = np.random.default_rng(seed)
+    node_idx = np.unique(faces)
+    pts = nodes[node_idx]
+    v0, v1, v2 = nodes[faces[:, 0]], nodes[faces[:, 1]], nodes[faces[:, 2]]
+
+    face_centroids = (v0 + v1 + v2) / 3.0
+    normals = np.cross(v1 - v0, v2 - v0)
+    norms = np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-12)
+    normals = normals / norms
+    edge_len = float(np.median(np.linalg.norm(v1 - v0, axis=1)))
+    if edge_len <= 0.0:
+        return None
+
+    candidates = [pts.mean(axis=0)]
+    n_face_try = min(n_attempts, len(faces))
+    for i in rng.choice(len(faces), size=n_face_try, replace=False):
+        candidates.append(face_centroids[i] - normals[i] * edge_len * 0.5)
+
+    directions = rng.normal(size=(n_directions, 3))
+    directions /= np.linalg.norm(directions, axis=1, keepdims=True)
+
+    min_clearance = edge_len * 0.05
+    for cand in candidates:
+        if _min_dist_to_edges(cand, v0, v1, v2) < min_clearance:
+            continue
+        hit_parities = [
+            _ray_triangle_intersect_count(cand, d, v0, v1, v2) % 2
+            for d in directions
+        ]
+        if all(p == 1 for p in hit_parities):
+            return cand
+    return None
+
+
 def _signed_volume(nodes: np.ndarray, faces: np.ndarray) -> float:
     """Enclosed volume of a (near-)closed surface, using raw (unnormalized)
     face winding. Sign follows the same convention as
@@ -141,7 +261,7 @@ def classify_boundary_groups(
     boundaries: 'BoundaryMap',
     bbox_min: np.ndarray,
     bbox_max: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, List[str]]:
+) -> Tuple[np.ndarray, np.ndarray, List[str], np.ndarray, List[np.ndarray]]:
     """Split every boundary group's faces into extrude-eligible vs. core-only,
     with extrude-eligible faces winding-corrected for correct BL growth
     direction.
@@ -158,13 +278,30 @@ def classify_boundary_groups(
             (m + k == n_faces; every input face appears in exactly one)
         extruded_group_names: names of boundary groups that got at least
             some faces extruded (for logging/diagnostics)
+        extrude_face_groups: (m,) str array, the original boundary-group name
+            for each row of extrude_faces (same order/length) - lets the
+            caller attribute BL-extruded tets back to their source group
+            directly via face position, instead of matching node indices
+            against the pre-extrusion surface (which cannot work for
+            genuinely-displaced BL nodes; see mesh_boundary.py).
+        hole_points: one point per closed embedded-solid sub-component found
+            (e.g. a car body, isolated from the domain's outer shell) - must
+            be passed to mesh_tetgen_core.fill_core_volume as tetgen hole
+            seeds, or tetgen fills that solid's own interior (and its BL
+            block's enclosed cavity) with spurious tetrahedra that overlap
+            the BL prisms already occupying that space, instead of
+            correctly excluding it. A bbox-touching wall (ground/tunnel) is
+            never a hole - it's an open sheet terminating at the domain's
+            own outer boundary, with no enclosed interior to exclude.
     """
     L_char = float(np.max(bbox_max - bbox_min))
     tol = L_char * _BBOX_TOUCH_RTOL
 
     extrude_face_rows: List[np.ndarray] = []
+    extrude_face_group_rows: List[np.ndarray] = []
     core_face_rows: List[np.ndarray] = []
     extruded_group_names: List[str] = []
+    hole_points: List[np.ndarray] = []
 
     for name, cell_idx in boundaries.groups.items():
         bc_type = boundaries.bc_types.get(name)
@@ -183,9 +320,41 @@ def classify_boundary_groups(
             comp_face_mask = labels == comp_id
             comp_faces = group_faces[comp_face_mask]
 
-            # Recompute edge stats scoped to this sub-component alone so the
-            # open-edge fraction reflects only its own boundary, not the
-            # whole group's.
+            # Check bounding-box touch FIRST, before the open-edge-fraction
+            # test below. That fraction is not a topological invariant: a
+            # large flat sheet (ground/tunnel wall) has far more internal
+            # edges than perimeter edges once meshed finely enough, so it
+            # can fall under the "closed" threshold by mesh density alone -
+            # empirically confirmed to misclassify a >=150x150-division
+            # flat plane as a "closed embedded solid", which then gets its
+            # orientation decided by a near-zero (numerically-noisy) signed
+            # volume instead of the bbox-direction check meant for exactly
+            # this shape, and gets BL-extruded when it should stay core-only.
+            # A real embedded solid (car body) never predominantly touches a
+            # single bbox face even when welded to the ground at a small
+            # contact patch (_BBOX_TOUCH_MAJORITY=0.9 of its own nodes), so
+            # checking this first doesn't change that case's outcome.
+            comp_node_idx = np.unique(comp_faces)
+            direction = _bbox_touch_fraction(nodes, comp_node_idx, bbox_min, bbox_max, tol)
+
+            if direction is not None:
+                # Predominantly sits on one bbox face: a floor/wall-like
+                # sheet that's part of the domain's outer shell. Orientation
+                # comes from that bbox direction, not face winding (which is
+                # unreliable for a sheet with a real free boundary).
+                from .mesh_utils import compute_face_normals
+                comp_normals = compute_face_normals(nodes, comp_faces)
+                mean_normal = comp_normals.mean(axis=0)
+                if np.dot(mean_normal, direction) < 0:
+                    comp_faces = comp_faces[:, [1, 0, 2]]  # flip winding
+                extrude_face_rows.append(comp_faces)
+                extrude_face_group_rows.append(np.full(len(comp_faces), name))
+                any_extruded_in_group = True
+                continue
+
+            # Doesn't predominantly sit on a single bbox face. Recompute edge
+            # stats scoped to this sub-component alone so the open-edge
+            # fraction reflects only its own boundary, not the whole group's.
             _, sub_counts, _ = _face_edges(comp_faces)
             n_unique_edges = len(sub_counts)
             n_open_edges = int(np.count_nonzero(sub_counts == 1))
@@ -199,30 +368,25 @@ def classify_boundary_groups(
                 if volume < 0:
                     comp_faces = comp_faces[:, [1, 0, 2]]  # flip winding
                 extrude_face_rows.append(comp_faces)
+                extrude_face_group_rows.append(np.full(len(comp_faces), name))
                 any_extruded_in_group = True
+
+                hole_pt = find_point_inside_closed_shell(nodes, comp_faces)
+                if hole_pt is not None:
+                    hole_points.append(hole_pt)
+                else:
+                    logger.warning(
+                        f"Could not find a reliable interior point for closed "
+                        f"solid '{name}' (component with {len(comp_faces)} "
+                        f"faces) - skipping its tetgen hole marker. The core "
+                        f"fill may include spurious tetrahedra inside this "
+                        f"solid's own BL block."
+                    )
             else:
-                # Open-like (a flat sheet touching the domain boundary, e.g.
-                # ground): direction comes from which single bbox face this
-                # sub-component's nodes predominantly sit on - not from face
-                # winding, which is unreliable for a sheet with a real free
-                # boundary.
-                comp_node_idx = np.unique(comp_faces)
-                direction = _bbox_touch_fraction(nodes, comp_node_idx, bbox_min, bbox_max, tol)
-
-                if direction is None:
-                    # Doesn't predominantly sit on a single bbox face - this
-                    # is an outer-shell wall (inlet/outlet/tunnel-like),
-                    # not a floor. Use unmodified as part of the core PLC.
-                    core_face_rows.append(comp_faces)
-                    continue
-
-                from .mesh_utils import compute_face_normals
-                comp_normals = compute_face_normals(nodes, comp_faces)
-                mean_normal = comp_normals.mean(axis=0)
-                if np.dot(mean_normal, direction) < 0:
-                    comp_faces = comp_faces[:, [1, 0, 2]]  # flip winding
-                extrude_face_rows.append(comp_faces)
-                any_extruded_in_group = True
+                # Open and not bbox-touching: an outer-shell wall
+                # (inlet/outlet/tunnel-like) with a genuine free boundary
+                # elsewhere. Use unmodified as part of the core PLC.
+                core_face_rows.append(comp_faces)
 
         if any_extruded_in_group:
             extruded_group_names.append(name)
@@ -230,6 +394,10 @@ def classify_boundary_groups(
     extrude_faces = (
         np.vstack(extrude_face_rows) if extrude_face_rows
         else np.empty((0, 3), dtype=surface_faces.dtype)
+    )
+    extrude_face_groups = (
+        np.concatenate(extrude_face_group_rows) if extrude_face_group_rows
+        else np.empty((0,), dtype=object)
     )
     core_faces = (
         np.vstack(core_face_rows) if core_face_rows
@@ -239,7 +407,8 @@ def classify_boundary_groups(
     logger.info(
         f"Boundary classification: {len(extrude_faces)} faces eligible for "
         f"BL extrusion (groups: {extruded_group_names}), "
-        f"{len(core_faces)} faces used as-is for the outer domain shell"
+        f"{len(core_faces)} faces used as-is for the outer domain shell, "
+        f"{len(hole_points)} isolated embedded solid(s) marked as tetgen holes"
     )
 
-    return extrude_faces, core_faces, extruded_group_names
+    return extrude_faces, core_faces, extruded_group_names, extrude_face_groups, hole_points

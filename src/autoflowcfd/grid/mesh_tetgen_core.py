@@ -8,7 +8,7 @@ construction exactly the closed surface the input mesh already describes, so
 the result can never extend outside the real domain.
 """
 
-from typing import Tuple
+from typing import List, Optional, Tuple
 
 import numpy as np
 from scipy.sparse import coo_matrix
@@ -99,6 +99,132 @@ def build_seam_taper_scale(
     return scale
 
 
+def compute_local_thickness_limit(
+    nodes: np.ndarray,
+    extrude_faces: np.ndarray,
+    extrude_node_idx: np.ndarray,
+    domain_size: float,
+    safety_factor: float = 0.45,
+    angle_threshold_deg: float = 60.0,
+) -> np.ndarray:
+    """Cap each extrude-eligible node's *cumulative* BL thickness to a
+    fraction of its local geometric gap to the nearest facing surface, so
+    two BL fronts growing toward each other across a tight feature (e.g. a
+    body's underbody a few cm above the ground) stop before they can cross
+    - instead of growing at a uniform rate and relying on
+    repair_nonmanifold_cells to clean up the resulting overlap afterward.
+
+    The gap is measured on the undeformed (layer-0) surface: for each node,
+    search nearby surface nodes within `domain_size * 0.4` (the same
+    cumulative-height cap extrude_layers already stops at, so nothing
+    farther than that could ever be reached anyway) and keep only those
+    roughly "ahead" of the node along its own outward normal (within
+    `angle_threshold_deg`) - this is what distinguishes a genuine facing
+    gap from the node's own immediately-neighbouring mesh (which is always
+    spatially close simply from local mesh resolution, not a real gap, and
+    lies roughly in-plane rather than ahead of the normal). The nearest
+    qualifying point's distance is the local gap; `safety_factor` (< 0.5)
+    leaves margin for the facing surface's own BL growth toward this one.
+
+    This is a geometric heuristic, not a formal proof of non-intersection:
+    it's evaluated once on the undeformed surface, so a strongly curved
+    front whose true closest-approach point shifts as both sides extrude
+    could still, in principle, converge faster than estimated. It's a
+    substantial reduction in how often crossings occur, not a guarantee -
+    repair_nonmanifold_cells remains in place as a safety net for whatever
+    it doesn't catch.
+
+    Args:
+        nodes: (n_nodes, 3) ALL surface node coordinates (whole surface,
+            not just the extrude-eligible subset - the nearest feature
+            limiting a wall's BL growth may be a different wall entirely)
+        extrude_faces: (m, 3) faces eligible for BL extrusion, used only to
+            compute each node's own outward (extrusion) normal
+        extrude_node_idx: node indices that will actually be extruded
+        domain_size: overall domain characteristic length (bounding-box
+            diagonal), bounding both the search radius and the fallback cap
+        safety_factor: fraction of the raw gap distance kept as the cap
+        angle_threshold_deg: half-angle of the "ahead of the normal" cone
+            used to separate a facing gap from same-sheet mesh neighbors
+
+    Returns:
+        (n_nodes,) float array: max cumulative BL thickness in meters for
+        each node (np.inf where no nearby facing feature was found)
+    """
+    from scipy.spatial import cKDTree
+
+    n_nodes = len(nodes)
+    limit = np.full(n_nodes, np.inf, dtype=np.float64)
+    if len(extrude_node_idx) == 0:
+        return limit
+
+    face_normals = _face_normals(nodes, extrude_faces)
+    avg_normal = _average_node_normals(n_nodes, extrude_faces, face_normals)
+
+    search_radius = domain_size * 0.4
+    cos_threshold = np.cos(np.radians(angle_threshold_deg))
+
+    tree = cKDTree(nodes)
+    query_points = nodes[extrude_node_idx]
+    neighbor_lists = tree.query_ball_point(query_points, r=search_radius, workers=-1)
+
+    n_capped = 0
+    for local_i in range(len(extrude_node_idx)):
+        node_idx = extrude_node_idx[local_i]
+        candidates = np.asarray(neighbor_lists[local_i], dtype=np.int64)
+        if len(candidates) <= 1:
+            continue
+
+        p = nodes[node_idx]
+        n_p = avg_normal[node_idx]
+        if not np.any(n_p):
+            continue
+
+        d = nodes[candidates] - p
+        dist = np.linalg.norm(d, axis=1)
+        real = dist > 1e-9
+        if not np.any(real):
+            continue
+
+        cosang = (d[real] @ n_p) / dist[real]
+        ahead = cosang > cos_threshold
+        if not np.any(ahead):
+            continue
+
+        gap = float(dist[real][ahead].min())
+        limit[node_idx] = gap * safety_factor
+        n_capped += 1
+
+    if n_capped:
+        logger.info(
+            f"Local BL thickness limiting: {n_capped} nodes capped by a "
+            f"nearby facing feature (min cap {np.min(limit[np.isfinite(limit)]):.4e} m)"
+        )
+    return limit
+
+
+def _face_normals(nodes: np.ndarray, faces: np.ndarray) -> np.ndarray:
+    v0, v1, v2 = nodes[faces[:, 0]], nodes[faces[:, 1]], nodes[faces[:, 2]]
+    normals = np.cross(v1 - v0, v2 - v0)
+    norms = np.maximum(np.linalg.norm(normals, axis=1, keepdims=True), 1e-10)
+    return normals / norms
+
+
+def _average_node_normals(n_nodes: int, faces: np.ndarray, face_normals: np.ndarray) -> np.ndarray:
+    sums = np.zeros((n_nodes, 3), dtype=np.float64)
+    counts = np.zeros(n_nodes, dtype=np.int64)
+    flat_nodes = faces.ravel()
+    np.add.at(sums, flat_nodes, np.repeat(face_normals, 3, axis=0))
+    np.add.at(counts, flat_nodes, 1)
+
+    mask = counts > 0
+    avg = np.zeros_like(sums)
+    avg[mask] = sums[mask] / counts[mask, np.newaxis]
+    norms = np.maximum(np.linalg.norm(avg, axis=1, keepdims=True), 1e-10)
+    avg[mask] = avg[mask] / norms[mask]
+    return avg
+
+
 def _dedupe_coincident_points(
     points: np.ndarray,
     faces: np.ndarray,
@@ -141,11 +267,121 @@ def _dedupe_coincident_points(
     return unique_points, new_faces
 
 
+def _tet_volumes(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
+    """Unsigned tetrahedron volumes (orientation-independent)."""
+    p0 = nodes[cells[:, 0]]
+    p1 = nodes[cells[:, 1]]
+    p2 = nodes[cells[:, 2]]
+    p3 = nodes[cells[:, 3]]
+    return np.abs(np.einsum('ij,ij->i', p1 - p0, np.cross(p2 - p0, p3 - p0))) / 6.0
+
+
+def repair_nonmanifold_cells(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
+    """Detect tetrahedra that make some triangular face shared by more than
+    2 cells (non-manifold) and mark the redundant ones for removal.
+
+    The main known cause is fixed at the source now: an isolated embedded
+    solid (e.g. a car body) needs a tetgen hole seed or its own interior
+    gets filled with spurious tetrahedra that overlap the BL prisms already
+    occupying that space (see mesh_domain_classify.find_point_inside_closed_shell
+    and fill_core_volume's `holes` parameter). This function remains as a
+    safety net for whatever that doesn't catch (e.g. a hole point that
+    couldn't be found for a very non-convex solid, or a genuinely tight BL
+    seam producing a near-degenerate boundary facet that tetgen's
+    `nobisect=True` core fill can't resolve by inserting a boundary point
+    there). Left unrepaired, this is a real conservation violation: a
+    finite-volume face extraction can only ever attribute a shared face to
+    2 of the 3+ cells touching it, silently dropping flux through it for
+    the rest (see face_extractor.py's hard failure on exactly this
+    condition).
+
+    A triangular face has at most one legitimate neighbouring cell per
+    side (the tet whose 4th vertex, the "apex", lies on that side of the
+    face's plane). When more than one cell shares an apex-side, they are
+    physically overlapping duplicates of each other - keep only the
+    largest-volume one and drop the rest, independently per over-shared
+    face.
+
+    Args:
+        nodes: (n_nodes, 3) node coordinates
+        cells: (n_cells, 4) tetrahedral connectivity
+
+    Returns:
+        Boolean keep-mask, shape=(n_cells,); False marks a cell to remove
+    """
+    n_cells = len(cells)
+    keep = np.ones(n_cells, dtype=bool)
+    if n_cells == 0:
+        return keep
+
+    face_templates = np.array([
+        [0, 1, 2],
+        [0, 1, 3],
+        [0, 2, 3],
+        [1, 2, 3],
+    ], dtype=np.int64)
+    apex_of_face = np.array([3, 2, 1, 0], dtype=np.int64)
+
+    all_faces = cells[:, face_templates].reshape(-1, 3)
+    apex_nodes = cells[:, apex_of_face].reshape(-1)
+    cell_of_face = np.repeat(np.arange(n_cells), 4)
+
+    sorted_faces = np.sort(all_faces, axis=1)
+    face_dtype = np.dtype((np.void, sorted_faces.dtype.itemsize * 3))
+    face_voids = np.ascontiguousarray(sorted_faces).view(face_dtype).reshape(-1)
+
+    order = np.argsort(face_voids, kind='stable')
+    sorted_voids = face_voids[order]
+    sorted_cells = cell_of_face[order]
+    sorted_apex = apex_nodes[order]
+    sorted_face_nodes = sorted_faces[order]
+
+    change = np.flatnonzero(sorted_voids[1:] != sorted_voids[:-1]) + 1
+    group_starts = np.concatenate([[0], change])
+    group_ends = np.concatenate([change, [len(sorted_voids)]])
+    counts = group_ends - group_starts
+
+    invalid_groups = np.flatnonzero(counts > 2)
+    if len(invalid_groups) == 0:
+        return keep
+
+    volumes = _tet_volumes(nodes, cells)
+    n_removed = 0
+
+    for gi in invalid_groups:
+        s, e = group_starts[gi], group_ends[gi]
+        face_cells = sorted_cells[s:e]
+        n0, n1, n2 = sorted_face_nodes[s]
+        p0 = nodes[n0]
+        normal = np.cross(nodes[n1] - p0, nodes[n2] - p0)
+
+        apexes = sorted_apex[s:e]
+        signed_dist = (nodes[apexes] - p0) @ normal
+
+        for side_mask in (signed_dist > 0, signed_dist <= 0):
+            side_cells = face_cells[side_mask]
+            if len(side_cells) <= 1:
+                continue
+            best = side_cells[np.argmax(volumes[side_cells])]
+            for c in side_cells:
+                if c != best and keep[c]:
+                    keep[c] = False
+                    n_removed += 1
+
+    if n_removed:
+        logger.warning(
+            f"Repaired {len(invalid_groups)} non-manifold faces by removing "
+            f"{n_removed} redundant overlapping tetrahedra"
+        )
+    return keep
+
+
 def fill_core_volume(
     points: np.ndarray,
     faces: np.ndarray,
     minratio: float = 1.4,
     mindihedral: float = 15.0,
+    holes: Optional[List[np.ndarray]] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Constrained-tetrahedralize the volume enclosed by a closed PLC.
 
@@ -155,6 +391,13 @@ def fill_core_volume(
         minratio: max radius-edge ratio quality bound (tetgen convention;
             lower = higher quality, 1.0 is a perfect tet)
         mindihedral: min dihedral angle quality bound (degrees)
+        holes: points, one strictly inside each isolated embedded solid in
+            the PLC (mesh_domain_classify.find_point_inside_closed_shell).
+            Without these, tetgen has no way to know an internal closed
+            surface bounds a solid rather than just another constraint -
+            it fills the fluid region around it AND that solid's own
+            (BL-extruded) interior, producing spurious tetrahedra that
+            overlap the BL prisms already occupying that cavity.
 
     Returns:
         (nodes, tets): nodes shape=(n, 3) float64 (boundary points preserved
@@ -171,6 +414,10 @@ def fill_core_volume(
     )
 
     tgen = tetgen.TetGen(points, faces)
+    if holes:
+        for hole_pt in holes:
+            tgen.add_hole(hole_pt)
+        logger.info(f"Marked {len(holes)} tetgen hole seed(s) for isolated embedded solids")
     try:
         nodes, elems, _attr, _markers = tgen.tetrahedralize(
             plc=True, nobisect=True, quality=True,

@@ -86,7 +86,7 @@ def enforce_positivity(U: np.ndarray, p_floor: float = 1.0) -> np.ndarray:
     max_vel = MAX_VELOCITY
     vel_mag = np.sqrt(np.sum(vel**2, axis=1))
     if np.any(vel_mag > max_vel):
-        vel = vel * np.minimum(max_vel / vel_mag, 1.0)
+        vel = vel * np.minimum(max_vel / vel_mag, 1.0)[:, None]
     
     ke = 0.5 * rho * np.sum(vel**2, axis=1)
     p = (GAMMA - 1.0) * (U[:, 4] - ke)
@@ -117,10 +117,26 @@ class TimeIntegrator:
         self._table = _SCHEME_TABLE[self.scheme]
 
     # ------------------------------------------------------------------
-    def local_time_step(self, U: np.ndarray, geom, mu_eff: Optional[np.ndarray] = None) -> np.ndarray:
+    def local_time_step(
+        self, U: np.ndarray, geom, mu_eff: Optional[np.ndarray] = None,
+        omega: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
         """Per-cell stable pseudo-time step dt_i = CFL * V_i / sum_f (|u.n|+a) A_f.
 
-        Adds a viscous limit when ``mu_eff`` is provided.
+        Adds a viscous limit when ``mu_eff`` is provided, and an SST
+        turbulence-source stiffness limit when ``omega`` is provided.
+
+        The k/omega destruction terms (Dk = beta_star*rho*k*omega,
+        Dw = beta*rho*omega^2) are ODEs of the form dy/dt ~ -c*omega*y,
+        whose explicit-Euler stability bound is dt < ~1/(c*omega) -
+        completely independent of the convective/viscous limits above. Near
+        walls (or wherever omega is large - e.g. thin boundary-layer cells,
+        or a solution that's already drifting), this can be far tighter
+        than either of them; without it, the timestep can silently be too
+        large for the turbulence equations even while comfortably CFL-safe
+        for the mean flow, which is a plausible mechanism for a residual
+        that looks merely "stuck" for many iterations before a stiff mode
+        it was never limiting suddenly runs away.
         """
         rho = np.maximum(U[:, 0], 1e-9)
         vel = U[:, 1:4] / rho[:, None]
@@ -163,6 +179,16 @@ class TimeIntegrator:
             Lc2 = geom.cell_volumes ** (2.0 / 3.0)
             dt_visc = 0.25 * self.cfl_target * rho * Lc2 / np.maximum(mu_eff, 1e-30)
             dt = np.minimum(dt, dt_visc)
+
+        if omega is not None:
+            # SST source-term stiffness limit (see docstring). beta_star
+            # (0.09) is used as a single conservative constant since it is
+            # the largest of the three SST destruction coefficients
+            # (beta_star=0.09 > beta2=0.0828 > beta1=0.075), giving the
+            # tightest (safest) bound of the three.
+            SST_BETA_STAR = 0.09
+            dt_turb = self.cfl_target / np.maximum(SST_BETA_STAR * omega, 1e-30)
+            dt = np.minimum(dt, dt_turb)
 
         return dt
 

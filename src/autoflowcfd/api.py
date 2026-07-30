@@ -323,27 +323,102 @@ class AutoFlowCFDAPI:
     def resume_simulation(
         self,
         checkpoint_file: Union[str, Path],
+        grid_data = None,
+        config = None,
         max_iter: int = 5000,
-        output_dir: Optional[str] = None
+        output_dir: Optional[str] = None,
+        backend: Optional[str] = None
     ) -> Any:
         """Resume simulation from checkpoint.
         
         Args:
             checkpoint_file: Path to checkpoint file
-            max_iter: Additional iterations
+            grid_data: Grid data (required for resume)
+            config: Solver configuration (optional, will load from checkpoint if not provided)
+            max_iter: Additional iterations to run
             output_dir: Override output directory
+            backend: Backend override ("cpu" or "gpu")
             
         Returns:
-            SolverResult: Simulation result
+            SteadyResult: Simulation result
+            
+        Raises:
+            FileNotFoundError: Checkpoint file not found
+            ValueError: Missing required parameters
             
         Example:
-            >>> result = api.resume_simulation("results/checkpoint.h5")
+            >>> # Basic resume
+            >>> result = api.resume_simulation("results/checkpoint.h5", grid_data)
+            >>> 
+            >>> # Resume with more iterations and GPU
+            >>> result = api.resume_simulation(
+            ...     "checkpoint.h5", 
+            ...     grid_data, 
+            ...     max_iter=2000,
+            ...     backend="gpu"
+            ... )
         """
+        from pathlib import Path
+        from .core.checkpoint import CheckpointManager
+        
         logger.info(f"Resuming from checkpoint: {checkpoint_file}")
         
-        # TODO: Implement checkpoint loading and resumption
-        raise NotImplementedError("Checkpoint resume not yet implemented")
-    
+        # Validate inputs
+        checkpoint_path = Path(checkpoint_file)
+        if not checkpoint_path.exists():
+            raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_file}")
+        
+        if grid_data is None:
+            raise ValueError(
+                "grid_data is required for resume operation. "
+                "Please provide the grid data used in the original simulation."
+            )
+        
+        if config is None:
+            logger.warning(
+                "No config provided. Using default configuration. "
+                "This may cause issues if checkpoint was created with different settings."
+            )
+            # TODO: Load config from checkpoint or use defaults
+            from .config.solver_config import SteadyConfig
+            config = SteadyConfig()
+        
+        # Override output directory if specified
+        if output_dir:
+            config.output_dir = output_dir
+        
+        # Override backend if specified
+        if backend:
+            config.backend.value = backend
+        
+        try:
+            # Create solver
+            from .core.solver_steady import FRSolver
+            solver = FRSolver(grid_data, config)
+            
+            # Load checkpoint
+            solution, history, iteration, metadata = solver.checkpoint_manager.load(
+                checkpoint_path,
+                target_backend=backend
+            )
+            
+            # Set initial solution
+            solver.solution = solution
+            
+            logger.info(f"Resumed from iteration {iteration}")
+            logger.info(f"Running additional {max_iter} iterations...")
+            
+            # Continue solving
+            result = solver.solve(max_iter=max_iter + iteration)
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Resume simulation failed: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            raise RuntimeError(f"Failed to resume simulation: {e}")
+
     # ========================================================================
     # Post-processing Operations
     # ========================================================================

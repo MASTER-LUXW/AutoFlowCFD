@@ -186,6 +186,22 @@ def run(
         logger.info(f"Grid loaded: {grid_data.node_count} nodes, "
                    f"{grid_data.cell_count} cells")
         
+        # Save volume mesh for future resume operations
+        import pickle
+        from pathlib import Path
+        output_dir = Path(steady_config.output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        volume_mesh_path = output_dir / "volume_mesh.pkl"
+        
+        try:
+            with open(volume_mesh_path, 'wb') as f:
+                pickle.dump(grid_data, f)
+            logger.success(f"Volume mesh saved to: {volume_mesh_path}")
+            logger.info("This file can be used for resume operations with --grid option")
+        except Exception as e:
+            logger.warning(f"Failed to save volume mesh: {e}")
+            logger.warning("Resume will require re-generating the volume mesh")
+        
         # Create solver
         logger.info("Initializing solver...")
         solver = FRSolver(grid_data, steady_config)
@@ -222,6 +238,8 @@ def run(
     
     except Exception as e:
         logger.error(f"Simulation failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         if json_output:
             error_result = {
                 "command": "solve.run",
@@ -327,18 +345,28 @@ def transient(
                 backend=BackendType(backend),
                 order=order,
                 turbulence=turbulence_map[mode],
-                time_integration=TimeIntegrationScheme(time_integration),
+                time_scheme=TimeIntegrationScheme(time_integration),
                 dt=dt,
                 total_time=physical_time,
                 output_dir=output,
                 sample_interval=sample_interval,
             )
-        
-        # Parse grid
+
+        # Parse grid and generate volume mesh (same conservative BL defaults
+        # as `solve run` - see SteadyConfig field docs for the rationale).
         logger.info("Parsing grid file...")
         parser = NASParser(input_file)
-        grid_data = parser.parse()
-        
+        grid_data = parser.parse(
+            generate_volume_mesh=True,
+            volume_mesh_params={
+                'growth_rate': transient_config.growth_rate,
+                'max_layers': transient_config.max_layers,
+                'min_cell_size': transient_config.min_cell_size,
+                'target_cells': transient_config.target_cells,
+            }
+        )
+        logger.info(f"Grid loaded: {grid_data.node_count} nodes, {grid_data.cell_count} cells")
+
         # Create solver
         logger.info("Initializing transient solver...")
         solver = TransientSolver(grid_data, transient_config)
@@ -352,28 +380,30 @@ def transient(
         logger.info(f"Starting transient simulation ({total_steps} steps)...")
         result = solver.solve()
         
-        # Output results
+        # Output results (field names match TransientResult - see transient_result.py).
         result_dict = {
             "command": "solve.transient",
             "status": "success",
-            "physical_time": result.physical_time,
-            "time_steps": result.time_steps,
+            "physical_time": result.total_time,
+            "time_steps": result.n_steps,
             "output_dir": output,
         }
-        
+
         if json_output:
             click.echo(json.dumps(result_dict, indent=2))
         else:
             click.echo(f"\n{'='*60}")
             click.echo(f"Transient Simulation Complete")
             click.echo(f"{'='*60}")
-            click.echo(f"Physical Time: {result.physical_time:.6f}s")
-            click.echo(f"Time Steps: {result.time_steps}")
+            click.echo(f"Physical Time: {result.total_time:.6f}s")
+            click.echo(f"Time Steps: {result.n_steps}")
             click.echo(f"Output Directory: {output}")
             click.echo(f"{'='*60}")
-    
+
     except Exception as e:
         logger.error(f"Transient simulation failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         if json_output:
             error_result = {
                 "command": "solve.transient",
@@ -386,15 +416,24 @@ def transient(
 
 @solve.command()
 @click.argument("checkpoint_file", type=click.Path(exists=True))
-@click.option("--output", "-o", type=click.Path(), default="results/",
-              help="Output directory")
-@click.option("--max-iter", "-n", default=5000,
-              help="Additional iterations")
+@click.option("--grid", "-g", "grid_file", type=click.Path(exists=True), default=None,
+              help="Grid file path (required for resume)")
+@click.option("--config", "-c", "config_file", type=click.Path(exists=True), default=None,
+              help="Configuration file path")
+@click.option("--output", "-o", type=click.Path(), default=None,
+              help="Output directory (overrides config)")
+@click.option("--max-iter", "-n", type=int, default=None,
+              help="Total iterations to run (not additional)")
+@click.option("--backend", "-b", type=click.Choice(["cpu", "gpu"]), default=None,
+              help="Backend to use (overrides checkpoint backend)")
 @click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
 def resume(
     checkpoint_file: str,
-    output: str,
-    max_iter: int,
+    grid_file: Optional[str],
+    config_file: Optional[str],
+    output: Optional[str],
+    max_iter: Optional[int],
+    backend: Optional[str],
     json_output: bool
 ) -> None:
     """Resume simulation from checkpoint.
@@ -403,36 +442,212 @@ def resume(
     
     Args:
         checkpoint_file: Path to checkpoint file (.h5)
-        output: Output directory
-        max_iter: Additional iterations to run
+        grid_file: Grid file path (required)
+        config_file: Configuration file path (optional)
+        output: Output directory (overrides config)
+        max_iter: Total iterations to run (not additional)
+        backend: Backend override ("cpu" or "gpu")
         json_output: Output as JSON
     
     Examples:
-        # Resume from checkpoint
-        $ autoflowcfd solve resume results/checkpoint_1000.h5
+        # Resume with grid file
+        $ autoflowcfd solve resume checkpoint.h5 --grid mesh.nas
         
-        # With more iterations
-        $ autoflowcfd solve resume checkpoint.h5 --max-iter 2000
+        # With config file and more iterations
+        $ autoflowcfd solve resume checkpoint.h5 --config config.yaml --max-iter 2000
+        
+        # Switch to GPU backend
+        $ autoflowcfd solve resume checkpoint.h5 --grid mesh.nas --backend gpu
     """
     logger.info(f"Resuming from checkpoint: {checkpoint_file}")
     
     try:
-        # TODO: Implement checkpoint loading and resumption
-        logger.warning("Checkpoint resume functionality is under development")
+        import h5py
+        from pathlib import Path
+        from ..core.checkpoint import CheckpointManager
+        from ..config.loader import load_config
+        from ..grid.parser_core import NASParser
+        from ..core.solver_steady import FRSolver
         
-        result_dict = {
-            "command": "solve.resume",
-            "status": "pending",
-            "message": "Checkpoint resume not fully implemented",
-        }
+        # Step 1: Load checkpoint metadata
+        logger.info("\n[1/5] Loading checkpoint metadata...")
+        with h5py.File(checkpoint_file, 'r') as f:
+            iteration = int(f['metadata'].attrs['iteration'])
+            original_backend = f['metadata'].attrs['backend']
+            config_hash = f['metadata'].attrs['config_hash']
+            
+            # Decode bytes to string if necessary
+            if isinstance(original_backend, bytes):
+                original_backend = original_backend.decode('utf-8')
         
-        if json_output:
-            click.echo(json.dumps(result_dict, indent=2))
+        logger.info(f"✓ Checkpoint loaded:")
+        logger.info(f"  - Last iteration: {iteration}")
+        logger.info(f"  - Original backend: {original_backend}")
+        logger.info(f"  - Config hash: {config_hash[:16]}...")
+        
+        # Step 2: Determine target backend
+        target_backend = backend if backend else original_backend
+        if backend and backend != original_backend:
+            logger.warning(f"⚠ Backend override: {original_backend} → {target_backend}")
+        
+        # Step 3: Load grid data (required)
+        if not grid_file:
+            raise ValueError(
+                "Grid file is required for resume operation. "
+                "Please specify with --grid option.\n"
+                "IMPORTANT: For volume mesh resume, you must provide the SAME "
+                "volume mesh file used in the original simulation, NOT the "
+                "surface NAS file."
+            )
+        
+        logger.info(f"\n[2/5] Loading grid data...")
+        
+        # Check if grid_file is a saved volume mesh (pkl) or surface mesh (nas)
+        from pathlib import Path
+        grid_path = Path(grid_file)
+        
+        if grid_path.suffix.lower() == '.pkl':
+            # Load saved volume mesh
+            logger.info(f"Loading saved volume mesh: {grid_file}")
+            import pickle
+            try:
+                with open(grid_file, 'rb') as f:
+                    grid_data = pickle.load(f)
+                logger.success(f"✓ Volume mesh loaded: {grid_data.node_count} nodes, {grid_data.cell_count} cells")
+            except Exception as e:
+                raise ValueError(f"Failed to load volume mesh from {grid_file}: {e}")
         else:
-            click.echo("⚠ Checkpoint resume feature coming in next update")
+            # Parse surface mesh and generate volume mesh (NOT recommended for resume)
+            logger.warning(f"⚠ Parsing surface mesh file: {grid_file}")
+            logger.warning("  This will RE-GENERATE the volume mesh, which may differ from the original!")
+            logger.warning("  For accurate resume, use the saved volume_mesh.pkl file instead.")
+            
+            parser = NASParser(grid_file)
+            grid_data = parser.parse(generate_volume_mesh=True)
+            logger.info(f"✓ Grid generated: {grid_data.node_count} nodes, {grid_data.cell_count} cells")
+        
+        # Step 4: Load or create configuration
+        logger.info(f"\n[3/5] Loading configuration...")
+        if config_file:
+            logger.info(f"  Loading from: {config_file}")
+            config = load_config(config_file)
+        else:
+            from ..config.solver_config import SteadyConfig
+            logger.warning("  No config file provided, using defaults")
+            config = SteadyConfig()
+        
+        # Override output directory if specified
+        if output:
+            config.output_dir = output
+            logger.info(f"  Output directory: {output}")
+        
+        # Override max_iter if specified
+        if max_iter:
+            config.max_iter = max_iter
+            logger.info(f"  Max iterations: {max_iter}")
+        
+        # Set backend
+        if target_backend:
+            from ..config.solver_config import BackendType
+            config.backend = BackendType(target_backend.lower())
+            logger.info(f"  Backend: {target_backend}")
+        
+        # Step 5: Create solver and load checkpoint
+        logger.info(f"\n[4/5] Creating solver and loading checkpoint...")
+        solver = FRSolver(grid_data, config)
+        
+        solution, history, loaded_iteration, metadata = solver.checkpoint_manager.load(
+            checkpoint_file,
+            target_backend=target_backend
+        )
+        
+        # Validate grid size matches checkpoint solution shape
+        expected_cells = solution.shape[0]
+        if grid_data.cell_count != expected_cells:
+            raise ValueError(
+                f"Grid cell count mismatch!\n"
+                f"  Checkpoint solution expects {expected_cells} cells\n"
+                f"  Current grid has {grid_data.cell_count} cells\n"
+                f"  Please provide the SAME volume mesh file used in the original simulation."
+            )
+        
+        logger.info(f"✓ Checkpoint restored:")
+        logger.info(f"  - Iteration: {loaded_iteration}")
+        logger.info(f"  - Solution shape: {solution.shape}")
+        logger.info(f"  - History entries: {len(history.get('iterations', []))}")
+        logger.info(f"✓ Grid validated: {grid_data.cell_count} cells matches checkpoint")
+        
+        # Set initial solution
+        solver.solution = solution
+        
+        # Restore convergence history
+        if history:
+            solver.convergence_history = history
+            logger.info(f"  - Convergence history restored")
+        
+        # Step 6: Continue solving
+        logger.info(
+            f"\n[5/5] Resuming simulation from iteration {loaded_iteration} "
+            f"to iteration {config.max_iter}..."
+        )
+        logger.info("="*60)
+
+        result = solver.solve(max_iter=config.max_iter, start_iteration=loaded_iteration)
+
+        # Output results (field names match SteadyResult - see solver_steady.py).
+        final_cd = result.cd_history[-1] if result.cd_history else 0.0
+        final_cl = result.cl_history[-1] if result.cl_history else 0.0
+        logger.info("\n" + "="*60)
+        logger.info("✓ Simulation completed successfully!")
+        logger.info("="*60)
+        logger.info(f"Final iteration: {result.iterations}")
+        logger.info(f"Final residual: {result.final_residual:.6e}")
+        logger.info(f"Final Cd: {final_cd:.6f}")
+        logger.info(f"Final Cl: {final_cl:.6f}")
+        logger.info(f"Output directory: {config.output_dir}")
+        logger.info("="*60)
+
+        if json_output:
+            result_dict = {
+                "command": "solve.resume",
+                "status": "success",
+                "final_iteration": result.iterations,
+                "final_residual": float(result.final_residual),
+                "final_Cd": float(final_cd),
+                "final_Cl": float(final_cl),
+                "output_dir": str(config.output_dir),
+            }
+            click.echo(json.dumps(result_dict, indent=2))
+    
+    except ValueError as e:
+        logger.error(f"Configuration error: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        error_result = {
+            "command": "solve.resume",
+            "status": "error",
+            "error": str(e)
+        }
+        if json_output:
+            click.echo(json.dumps(error_result, indent=2))
+        raise click.ClickException(str(e))
+    
+    except ImportError as e:
+        logger.error(f"Missing dependency: {e}")
+        error_result = {
+            "command": "solve.resume",
+            "status": "error",
+            "error": f"Missing dependency: {str(e)}"
+        }
+        if json_output:
+            click.echo(json.dumps(error_result, indent=2))
+        raise click.ClickException(f"Resume failed: {e}")
     
     except Exception as e:
         logger.error(f"Resume failed: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+
         if json_output:
             error_result = {
                 "command": "solve.resume",

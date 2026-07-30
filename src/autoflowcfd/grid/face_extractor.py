@@ -347,7 +347,46 @@ class FaceExtractor:
         )
         
         if n_invalid > 0:
-            logger.warning(f"Found {n_invalid} faces shared by >2 cells (topology error)")
+            # NOTE: the dedup scan above only ever records the first 2 cells
+            # touching a given face key (see _deduplicate_and_build_connectivity);
+            # for a face shared by 3+ cells, every cell beyond the first two
+            # never gets connected to it at all, silently dropping that
+            # cell's flux through this face from the residual - a genuine
+            # local conservation violation, not a numerical-stability issue.
+            # This can (and has been observed to) produce a residual that
+            # diverges unboundedly regardless of how low CFL is pushed,
+            # while integrated body forces stay comparatively normal since
+            # they don't depend on these (typically interior/core-mesh)
+            # faces. Continuing to solve on a topologically invalid mesh
+            # wastes potentially hours of compute on a result that was
+            # never going to be physically meaningful - fail immediately
+            # instead, pointing at the volume mesh generation step that
+            # produced overlapping/duplicate tetrahedra.
+            invalid_mask = occurrence_count > 2
+            invalid_node_ids = np.unique(face_nodes_sorted[invalid_mask])
+            bad_x = nodes.x[invalid_node_ids]
+            bad_y = nodes.y[invalid_node_ids]
+            bad_z = nodes.z[invalid_node_ids]
+            logger.error(
+                f"Invalid faces are spatially bounded by "
+                f"x=[{bad_x.min():.4g}, {bad_x.max():.4g}], "
+                f"y=[{bad_y.min():.4g}, {bad_y.max():.4g}], "
+                f"z=[{bad_z.min():.4g}, {bad_z.max():.4g}] - check this region "
+                f"(e.g. a BL-extruded surface's seam with a core-only boundary, "
+                f"or two extruded surfaces close enough for their layers to "
+                f"overlap) in the volume mesh generation log/geometry."
+            )
+            raise RuntimeError(
+                f"Invalid mesh topology: {n_invalid} faces are shared by more than "
+                f"2 cells (expected exactly 1 for boundary or 2 for interior faces). "
+                f"This means the volume mesh contains overlapping/duplicate "
+                f"tetrahedra - almost certainly from the boundary-layer/core "
+                f"tetgen merge (see mesh_background.generate_hybrid_mesh). "
+                f"Solving on this mesh would silently drop flux through the "
+                f"affected faces and is not physically meaningful; regenerate "
+                f"the volume mesh (e.g. with different BL parameters) rather "
+                f"than proceeding."
+            )
         
         # Expected ratio: ~2x cells for interior-dominated mesh
         expected_ratio = n_unique_faces / n_cells

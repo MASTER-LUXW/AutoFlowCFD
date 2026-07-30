@@ -206,7 +206,12 @@ class TransientConfig(SolverConfig):
         sample_interval: Data sampling interval (steps)
         warmup_time: Warmup time to skip (seconds, for statistics)
         init_from_checkpoint: Initialize from steady-state checkpoint
-        
+        growth_rate, max_layers, min_cell_size, target_cells: Volume mesh
+            generation parameters, same meaning as SteadyConfig.
+        rho_inf, vel_inf, p_inf: Freestream conditions, same meaning and
+            role as SteadyConfig (single source of truth for the initial
+            condition, boundary conditions, and Cd/Cl normalization).
+
     Example:
         >>> config = TransientConfig(
         ...     backend="gpu",
@@ -222,27 +227,52 @@ class TransientConfig(SolverConfig):
     sample_interval: int = 10
     warmup_time: float = 0.05
     init_from_checkpoint: Optional[str] = None
-    
+    growth_rate: float = 1.15
+    max_layers: int = 6
+    min_cell_size: float = 0.003
+    target_cells: int = 500000
+    rho_inf: float = 1.225
+    vel_inf: float = 30.0
+    p_inf: float = 101325.0
+
     def __post_init__(self):
         """Validate transient configuration."""
         super().__post_init__()
-        
+
         # Validate time step
         if self.dt <= 0:
             raise ValueError(f"Time step must be positive, got {self.dt}")
-        
+
         # Validate total time
         if self.total_time <= 0:
             raise ValueError(f"Total time must be positive, got {self.total_time}")
-        
+
         # Validate warmup time
         if self.warmup_time < 0:
             raise ValueError(f"Warmup time must be non-negative, got {self.warmup_time}")
         if self.warmup_time >= self.total_time:
             raise ValueError(f"Warmup time ({self.warmup_time}) cannot exceed total time ({self.total_time})")
-        
+
         # Calculate total steps
         self.total_steps = int(self.total_time / self.dt)
+
+        # Validate volume mesh parameters
+        if self.growth_rate <= 1.0:
+            raise ValueError(f"growth_rate must be > 1.0, got {self.growth_rate}")
+        if self.max_layers < 1:
+            raise ValueError(f"max_layers must be positive, got {self.max_layers}")
+        if self.min_cell_size <= 0:
+            raise ValueError(f"min_cell_size must be positive, got {self.min_cell_size}")
+        if self.target_cells < 1:
+            raise ValueError(f"target_cells must be positive, got {self.target_cells}")
+
+        # Validate freestream conditions
+        if self.rho_inf <= 0:
+            raise ValueError(f"rho_inf must be positive, got {self.rho_inf}")
+        if self.vel_inf <= 0:
+            raise ValueError(f"vel_inf must be positive, got {self.vel_inf}")
+        if self.p_inf <= 0:
+            raise ValueError(f"p_inf must be positive, got {self.p_inf}")
         if self.total_steps < 1:
             raise ValueError(
                 f"Total steps must be at least 1, got {self.total_steps} "

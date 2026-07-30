@@ -19,7 +19,8 @@ def extrude_layers(
     growth_rate: float = 1.2,
     max_layers: int = 30,
     min_cell_size: float = 0.001,
-    taper_scale: 'Optional[np.ndarray]' = None
+    taper_scale: 'Optional[np.ndarray]' = None,
+    thickness_limit: 'Optional[np.ndarray]' = None,
 ) -> Tuple[np.ndarray, List[np.ndarray]]:
     """Extrude surface along normals to create layered mesh with boundary layer resolution.
 
@@ -49,6 +50,13 @@ def extrude_layers(
             with a non-extruded boundary group, instead of either moving the
             seam (tearing the mesh open) or hard-pinning it (which collapses
             the seam's own triangles into zero-area slivers).
+        thickness_limit: Optional float array in meters, shape=(n_nodes,)
+            (np.inf where unconstrained), from
+            mesh_tetgen_core.compute_local_thickness_limit. Caps each
+            node's *cumulative* displacement across all layers so BL fronts
+            converging on a tight local feature (e.g. a body's underbody
+            close to the ground) freeze before they can cross, instead of
+            growing at the uniform rate and overlapping.
 
     Returns:
         all_nodes: Concatenated nodes from all layers, shape=(total_nodes, 3)
@@ -97,6 +105,14 @@ def extrude_layers(
     current_thickness = base_thickness
     current_growth_rate = 1.2  # Start with BL growth rate
 
+    remaining_budget = thickness_limit.copy() if thickness_limit is not None else None
+    if remaining_budget is not None:
+        n_limited = int(np.sum(np.isfinite(remaining_budget)))
+        logger.info(
+            f"Local BL thickness limiting active for {n_limited} nodes "
+            f"near tight facing features"
+        )
+
     n_layers_generated = 0
     cumulative_height = 0.0
 
@@ -120,7 +136,7 @@ def extrude_layers(
         # Extrude nodes along averaged normals
         new_nodes = extrude_single_layer(
             current_nodes, surface_faces, normals, current_thickness,
-            taper_scale=taper_scale
+            taper_scale=taper_scale, remaining_budget=remaining_budget
         )
 
         all_nodes.append(new_nodes)
@@ -165,7 +181,8 @@ def extrude_single_layer(
     faces: np.ndarray,
     normals: np.ndarray,
     thickness: float,
-    taper_scale: 'Optional[np.ndarray]' = None
+    taper_scale: 'Optional[np.ndarray]' = None,
+    remaining_budget: 'Optional[np.ndarray]' = None,
 ) -> np.ndarray:
     """Extrude one layer of nodes.
 
@@ -179,6 +196,10 @@ def extrude_single_layer(
         thickness: Extrusion distance in meters
         taper_scale: Optional float array in [0, 1], shape=(n_nodes,),
             scaling each node's displacement (see extrude_layers).
+        remaining_budget: Optional float array in meters, shape=(n_nodes,),
+            mutated in place - each node's displacement this layer is
+            capped to what's left of its budget, which is then decremented
+            by the same amount (see extrude_layers' thickness_limit).
 
     Returns:
         New node positions after extrusion, shape=(n_nodes, 3)
@@ -187,18 +208,13 @@ def extrude_single_layer(
     new_nodes = nodes.copy()
 
     # Build node-to-face mapping using vectorized operations
-    logger.info("Building node-normal mapping (vectorized)...")
     node_normal_sum = np.zeros((n_nodes, 3))
-    node_normal_count = np.zeros(n_nodes, dtype=int)
-
-    # Vectorized accumulation - much faster than nested loops
-    for face_idx in range(len(faces)):
-        node_indices = faces[face_idx]
-        node_normal_sum[node_indices] += normals[face_idx]
-        node_normal_count[node_indices] += 1
+    node_normal_count = np.zeros(n_nodes, dtype=np.int64)
+    flat_nodes = faces.ravel()
+    np.add.at(node_normal_sum, flat_nodes, np.repeat(normals, 3, axis=0))
+    np.add.at(node_normal_count, flat_nodes, 1)
 
     # Compute average normals (avoid division by zero)
-    logger.info("Computing averaged normals...")
     mask = node_normal_count > 0
     avg_normals = np.zeros_like(node_normal_sum)
     avg_normals[mask] = node_normal_sum[mask] / node_normal_count[mask, np.newaxis]
@@ -208,9 +224,16 @@ def extrude_single_layer(
     norms = np.maximum(norms, 1e-10)
     avg_normals = avg_normals / norms
 
-    displacement = thickness * avg_normals
     if taper_scale is not None:
-        displacement *= taper_scale[:, np.newaxis]
+        node_thickness = thickness * taper_scale
+    else:
+        node_thickness = np.full(n_nodes, thickness, dtype=np.float64)
+
+    if remaining_budget is not None:
+        node_thickness = np.minimum(node_thickness, remaining_budget)
+        remaining_budget -= node_thickness
+
+    displacement = node_thickness[:, np.newaxis] * avg_normals
 
     # Extrude all nodes at once
     logger.info(f"Extruding layer with thickness={thickness:.6f}...")

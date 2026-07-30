@@ -187,19 +187,39 @@ class ViscousRANSResidual:
     # SST eddy viscosity  mu_t = rho a1 k / max(a1 omega, S F2)
     # ------------------------------------------------------------------
     def _eddy_viscosity(self, rho, k, omega, grad_vel):
-        _, Smag = self._strain(grad_vel)
-        nu = self.mu_lam / rho
-        d = self.wall_distance
-        
-        # CRITICAL FIX: Protect against division by zero
-        omega_safe = np.maximum(omega, 1e-8)  # Minimum physical omega (1/s)
-        
-        arg2 = np.maximum(2.0 * np.sqrt(np.maximum(k, 0.0)) / (SST_BETA_STAR * omega_safe * d),
-                          500.0 * nu / (d**2 * omega_safe))
-        F2 = np.tanh(arg2**2)
-        denom = np.maximum(SST_A1 * omega_safe, Smag * F2)
-        mu_t = rho * SST_A1 * np.maximum(k, 0.0) / np.maximum(denom, 1e-12)
-        return np.clip(mu_t, 0.0, 1e5 * self.mu_lam)
+        """SST eddy viscosity calculation with diagnostic logging."""
+        try:
+            _, Smag = self._strain(grad_vel)
+            nu = self.mu_lam / rho
+            d = self.wall_distance
+            
+            # Diagnostic: log shapes for debugging
+            import logging
+            logger = logging.getLogger(__name__)
+            if hasattr(self, '_debug_iter') and self._debug_iter > 0:
+                logger.debug(
+                    f"  _eddy_viscosity shapes:\n"
+                    f"    rho: {rho.shape}, k: {k.shape}, omega: {omega.shape}\n"
+                    f"    grad_vel: {grad_vel.shape}, Smag: {Smag.shape}\n"
+                    f"    wall_distance: {d.shape}"
+                )
+            
+            # CRITICAL FIX: Protect against division by zero
+            omega_safe = np.maximum(omega, 1e-8)  # Minimum physical omega (1/s)
+            
+            arg2 = np.maximum(2.0 * np.sqrt(np.maximum(k, 0.0)) / (SST_BETA_STAR * omega_safe * d),
+                              500.0 * nu / (d**2 * omega_safe))
+            F2 = np.tanh(arg2**2)
+            denom = np.maximum(SST_A1 * omega_safe, Smag * F2)
+            mu_t = rho * SST_A1 * np.maximum(k, 0.0) / np.maximum(denom, 1e-12)
+            return np.clip(mu_t, 0.0, 1e5 * self.mu_lam)
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error in _eddy_viscosity: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise
 
     def _f1_blend(self, rho, k, omega, grad_k, grad_omega):
         """SST F1 blending function."""
