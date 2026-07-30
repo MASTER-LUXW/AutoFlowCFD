@@ -8,23 +8,30 @@ Key Components:
 """
 
 import numpy as np
-from typing import Tuple
+from typing import Optional, Tuple
 from loguru import logger
 
 
 class AeroCoefficientCalculator:
     """Computes aerodynamic coefficients from solution field."""
     
-    def __init__(self, grid_data, face_extractor):
+    def __init__(self, grid_data, face_extractor, rho_inf: float = 1.225, vel_inf: float = 30.0):
         """Initialize aerodynamic coefficient calculator.
-        
+
         Args:
             grid_data: Volume mesh data (VolumeMeshData)
             face_extractor: Face extractor for volume mesh
+            rho_inf: Freestream density (kg/m^3), shared with the solver's
+                initial condition and inlet/farfield BCs via SteadyConfig -
+                must match those for Cd/Cl to be normalized against the
+                actual freestream, not an independent guess.
+            vel_inf: Freestream velocity magnitude (m/s), same role as rho_inf.
         """
         self.grid_data = grid_data
         self.face_extractor = face_extractor
-        
+        self.rho_inf = rho_inf
+        self.vel_inf = vel_inf
+
         # Cache for reference area to avoid recomputation
         self._cached_ref_area = None
         self._ref_area_computed = False
@@ -33,13 +40,31 @@ class AeroCoefficientCalculator:
         self._cached_body_faces = None
         self._body_faces_cached = False
 
-    def compute_coefficients(self, solution: np.ndarray, iteration: int = 0) -> Tuple[float, float]:
+    def compute_coefficients(
+        self,
+        solution: np.ndarray,
+        iteration: int = 0,
+        viscous_residual: Optional[object] = None,
+        grad_vel: Optional[np.ndarray] = None,
+        mu_t: Optional[np.ndarray] = None,
+        boundary_states: Optional[np.ndarray] = None,
+    ) -> Tuple[float, float]:
         """Compute drag and lift coefficients.
-        
+
         Args:
             solution: Solution array, shape=(n_cells, 7)
             iteration: Current iteration number (for debugging)
-            
+            viscous_residual: Optional ViscousRANSResidual instance, used to
+                compute skin-friction (viscous shear) drag/lift on body faces
+                via its wall_shear_stress() method - the exact same stress
+                the momentum residual balances against, so Cd/Cl stay
+                consistent with what the solver actually solved. If None
+                (or grad_vel/mu_t/boundary_states are None), only pressure
+                (form) drag is returned - skin friction is skipped.
+            grad_vel, mu_t, boundary_states: Per-iteration quantities the
+                solve loop already computes; reused here to avoid
+                recomputing the velocity gradient / eddy viscosity.
+
         Returns:
             Tuple of (Cd, Cl)
         """
@@ -59,9 +84,10 @@ class AeroCoefficientCalculator:
             V_squared = velocity_x**2 + velocity_y**2 + velocity_z**2
             pressure = (gamma - 1.0) * (E - 0.5 * rho * V_squared)
             
-            # Freestream conditions
-            rho_inf = 1.225
-            vel_inf = 30.0
+            # Freestream conditions (from SteadyConfig, shared with the
+            # solver's initial condition and boundary conditions).
+            rho_inf = self.rho_inf
+            vel_inf = self.vel_inf
             q_inf = 0.5 * rho_inf * vel_inf**2
             
             if q_inf < 1e-6:
@@ -85,17 +111,62 @@ class AeroCoefficientCalculator:
             p_ref = 101325.0
             
             dp = p_body - p_ref
-            
-            # Force components
-            Fx = -np.sum(dp * face_normals[:, 0] * face_areas)
-            Fz = -np.sum(dp * face_normals[:, 2] * face_areas)
-            
+
+            # Pressure (form) drag/lift.
+            Fx_p = -np.sum(dp * face_normals[:, 0] * face_areas)
+            Fz_p = -np.sum(dp * face_normals[:, 2] * face_areas)
+
+            # Skin-friction (viscous shear) contribution, if the caller
+            # supplied what's needed to compute it. tau_n = tau.n (n
+            # outward from the fluid, i.e. from owner cell into the body)
+            # is the traction the WALL exerts ON THE FLUID (Cauchy
+            # convention); by Newton's third law the force the FLUID
+            # exerts ON THE BODY is -tau_n. Sign verified numerically
+            # against a trivial Couette-like case (fluid moving at U>0
+            # over a stationary wall must produce a positive, downstream
+            # skin-friction drag) before wiring this in - the naive '+='
+            # gives the force with the wrong sign.
+            Fx_f = 0.0
+            Fz_f = 0.0
+            if (viscous_residual is not None and grad_vel is not None
+                    and mu_t is not None and boundary_states is not None):
+                vel = np.column_stack([velocity_x, velocity_y, velocity_z])
+                tau_n_all = viscous_residual.wall_shear_stress(vel, mu_t, grad_vel, boundary_states)
+                # tau_n_all is indexed over boundary faces in the same order
+                # as geom.boundary_mask; map body_face_indices into that order.
+                boundary_face_ids = np.where(self.face_extractor.boundary_flags)[0]
+                body_pos_in_boundary = np.searchsorted(boundary_face_ids, body_face_indices)
+                tau_n_body = tau_n_all[body_pos_in_boundary]
+                Fx_f = -np.sum(tau_n_body[:, 0] * face_areas)
+                Fz_f = -np.sum(tau_n_body[:, 2] * face_areas)
+
+            Fx = Fx_p + Fx_f
+            Fz = Fz_p + Fz_f
+
             # Reference area
             ref_area = self._compute_reference_area(body_face_indices)
-            
+
             # Coefficients
             Cd = Fx / (q_inf * ref_area)
             Cl = Fz / (q_inf * ref_area)
+
+            # Diagnostic breakdown: skin friction should be a modest fraction
+            # of total drag for a bluff body (Ahmed Body is pressure-drag
+            # dominated). If friction dominates or is wildly out of scale,
+            # that points at the boundary viscous flux term rather than the
+            # (separately, longer-established) pressure integration.
+            Cd_p = Fx_p / (q_inf * ref_area)
+            Cd_f = Fx_f / (q_inf * ref_area)
+            logger.info(
+                f"[Iter {iteration}] Cd breakdown: pressure={Cd_p:.4f}, "
+                f"friction={Cd_f:.4f}, total={Cd:.4f}"
+            )
+            if abs(Fx_f) > abs(Fx_p) and abs(Fx_f) > 1e-9:
+                logger.warning(
+                    f"[Iter {iteration}] Skin-friction drag ({Fx_f:.4e} N) exceeds "
+                    f"pressure drag ({Fx_p:.4e} N) in magnitude - unexpected for a "
+                    f"bluff body, check wall_shear_stress/near-wall mesh scaling."
+                )
             
             # Validate
             if not np.isfinite(Cd):

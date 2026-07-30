@@ -2,6 +2,14 @@
 
 Implements cell-centered residual calculation using HLLC flux solver.
 Optimized with Numba JIT for high performance on large meshes.
+
+NOT CURRENTLY USED: FRSolver.solve() (solver_steady.py) computes residuals
+via ViscousRANSResidual (fvm_viscous_residual.py) directly - first-order,
+inviscid-only, with no MUSCL/viscous/turbulence terms, unlike that path.
+FVMResidualComputer is constructed nowhere in the live solve; the Numba
+kernel here (_compute_residuals_kernel) never runs. If this is revived
+(e.g. as a GPU/Numba fast path), it needs the viscous+SST terms added to
+match ViscousRANSResidual before it can replace it.
 """
 
 import numpy as np

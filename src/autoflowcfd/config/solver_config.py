@@ -126,6 +126,11 @@ class SteadyConfig(SolverConfig):
         target_cells: Target total cell count (currently only consulted by the
             pure-extrusion volume mesh path; the tetgen-based hybrid path
             ignores it)
+        rho_inf: Freestream density (kg/m^3) - single source of truth for
+            the initial condition, inlet/farfield boundary conditions, and
+            Cd/Cl normalization, so the three always stay consistent.
+        vel_inf: Freestream velocity magnitude (m/s), same role as rho_inf.
+        p_inf: Freestream static pressure (Pa), same role as rho_inf.
 
     Example:
         >>> config = SteadyConfig(
@@ -145,6 +150,9 @@ class SteadyConfig(SolverConfig):
     max_layers: int = 6
     min_cell_size: float = 0.003
     target_cells: int = 500000
+    rho_inf: float = 1.225
+    vel_inf: float = 30.0
+    p_inf: float = 101325.0
 
     def __post_init__(self):
         """Validate steady configuration."""
@@ -175,6 +183,14 @@ class SteadyConfig(SolverConfig):
             raise ValueError(f"min_cell_size must be positive, got {self.min_cell_size}")
         if self.target_cells < 1:
             raise ValueError(f"target_cells must be positive, got {self.target_cells}")
+
+        # Validate freestream conditions
+        if self.rho_inf <= 0:
+            raise ValueError(f"rho_inf must be positive, got {self.rho_inf}")
+        if self.vel_inf <= 0:
+            raise ValueError(f"vel_inf must be positive, got {self.vel_inf}")
+        if self.p_inf <= 0:
+            raise ValueError(f"p_inf must be positive, got {self.p_inf}")
 
 
 @dataclass

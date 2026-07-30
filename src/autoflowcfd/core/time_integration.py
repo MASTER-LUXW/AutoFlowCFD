@@ -173,6 +173,7 @@ class TimeIntegrator:
         residual_func: Callable[[np.ndarray], np.ndarray],
         dt_local: np.ndarray,
         p_floor: float = 1.0,
+        residual0: Optional[np.ndarray] = None,
     ) -> np.ndarray:
         """Advance one pseudo-time step with the configured SSP-RK scheme.
 
@@ -182,6 +183,12 @@ class TimeIntegrator:
                 i.e. dU/dt = -R(U).
             dt_local: per-cell pseudo-time step (n_cells,).
             p_floor: minimum pressure for positivity projection.
+            residual0: optional precomputed R(solution) - every stage-0 of
+                every scheme here evaluates Ui=U0=solution, so if the caller
+                already has R(solution) (e.g. for convergence monitoring),
+                passing it in avoids re-running the residual (MUSCL + HLLC +
+                viscous + SST source terms - the most expensive part of an
+                iteration) a second time for no new information.
 
         Returns:
             Updated conservative state.
@@ -194,7 +201,10 @@ class TimeIntegrator:
         stages = [U0]
         for i in range(self._table["stages"]):
             Ui = stages[-1]
-            L = -residual_func(Ui)            # dU/dt
+            if i == 0 and residual0 is not None:
+                L = -residual0                 # dU/dt, reuse caller's R(U0)
+            else:
+                L = -residual_func(Ui)         # dU/dt
             combo = np.zeros_like(U0)
             for k, a_ik in enumerate(alpha[i]):
                 if a_ik != 0.0:

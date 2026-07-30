@@ -9,6 +9,11 @@ Key features:
 - CSR sparse matrix format for efficient neighbor access
 - Multiple limiter functions (Van Leer, Minmod, SuperBee, MC)
 - Fallback to pure NumPy when Numba is unavailable
+
+NOT CURRENTLY USED: FRSolver.solve() (solver_steady.py) never constructs
+MUSCLReconstructor - its reconstruction is done directly in
+ViscousRANSResidual._inviscid_flux (fvm_viscous_residual.py) via
+green_gauss_gradient + barth_jespersen_limiter (fvm_gradients.py).
 """
 
 import numpy as np

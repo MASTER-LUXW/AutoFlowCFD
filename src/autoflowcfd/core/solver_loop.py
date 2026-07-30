@@ -5,6 +5,9 @@ including solution update, convergence monitoring, and result collection.
 
 Key Components:
     - SteadySolverLoop: Main solver iteration controller
+
+NOT CURRENTLY USED: FRSolver.solve() (solver_steady.py) has its own inline
+pseudo-time iteration loop and never constructs or calls SteadySolverLoop.
 """
 
 import numpy as np

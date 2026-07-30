@@ -88,6 +88,24 @@ class ViscousRANSResidual:
         self._dist = np.maximum(np.linalg.norm(d, axis=1), 1e-12)
         self._e_ON = d / self._dist[:, None]           # unit owner->neighbour
 
+        # Precompute owner->ghost geometric quantities for boundary faces
+        # (same role as _dist/_e_ON above, but the "neighbour" is the mirror
+        # ghost state). Ghost states are constructed (see
+        # BoundaryConditionHandler) so that the *face* value is the midpoint
+        # average of owner and ghost - i.e. the ghost is assumed to sit at
+        # the mirror point across the face, twice the owner->face distance
+        # away, not at the face itself. Using the face distance directly
+        # here would halve the true owner->ghost separation and double the
+        # inferred near-wall gradient.
+        self._bo = geom.bnd_owner
+        if self._bo.size:
+            db = geom.centers[geom.boundary_mask] - geom.cell_centroids[self._bo]
+            self._bdist = np.maximum(2.0 * np.linalg.norm(db, axis=1), 1e-12)
+            self._e_OB = db / (0.5 * self._bdist[:, None])
+        else:
+            self._bdist = np.zeros(0)
+            self._e_OB = np.zeros((0, 3))
+
     # ------------------------------------------------------------------
     # primitive <-> conservative
     # ------------------------------------------------------------------
@@ -359,6 +377,58 @@ class ViscousRANSResidual:
         return F
 
     # ------------------------------------------------------------------
+    # boundary-face helpers (owner -> face-centre, ghost state as target)
+    # ------------------------------------------------------------------
+    def _boundary_face_grad(self, cell_grad: np.ndarray, cell_val: np.ndarray,
+                            ghost_val: np.ndarray) -> np.ndarray:
+        """One-sided corrected gradient at boundary faces.
+
+        Same over-relaxed correction as the internal-face treatment (see
+        ``_viscous_flux``), except the "neighbour" is the ghost/wall value at
+        the face centre rather than a real neighbour cell.
+
+        Args:
+            cell_grad: per-cell gradient, shape (n_cells, 3) for a scalar
+                field or (n_cells, ncomp, 3) for a vector field.
+            cell_val, ghost_val: owner-cell and ghost values at every
+                boundary face, shape (n_bf,) / (n_bf,) or (n_bf, ncomp).
+
+        Returns:
+            Corrected face gradient, same trailing shape as ``cell_grad``.
+        """
+        bo = self._bo
+        g_owner = cell_grad[bo]
+        d_val = ghost_val - cell_val
+        if g_owner.ndim == 2:
+            proj = np.einsum('nd,nd->n', g_owner, self._e_OB)
+            corr = d_val / self._bdist - proj
+            return g_owner + corr[:, None] * self._e_OB
+        proj = np.einsum('nij,nj->ni', g_owner, self._e_OB)
+        corr = d_val / self._bdist[:, None] - proj
+        return g_owner + corr[:, :, None] * self._e_OB[:, None, :]
+
+    def wall_shear_stress(self, vel: np.ndarray, mu_t: np.ndarray,
+                          grad_vel: np.ndarray, boundary_states: np.ndarray) -> np.ndarray:
+        """Viscous stress tensor dotted with the outward normal, per boundary
+        face: ``tau . n``, shape (n_boundary_faces, 3).
+
+        Shared by :meth:`_viscous_flux` (the residual's own boundary viscous
+        term) and by aerodynamic force integration (skin-friction drag),
+        so both consistently use whatever force the momentum equation
+        actually balances against.
+        """
+        geom = self.geom
+        bo = self._bo
+        if not bo.size:
+            return np.zeros((0, 3))
+        n_b = geom.normals[geom.boundary_mask]
+        mu_eff = self.mu_lam + mu_t
+        rho_b = np.maximum(boundary_states[geom.boundary_mask, 0], 1e-9)
+        vel_ghost = boundary_states[geom.boundary_mask, 1:4] / rho_b[:, None]
+        gv_face_b = self._boundary_face_grad(grad_vel, vel[bo], vel_ghost)
+        return self._stress_dot_normal(gv_face_b, n_b, mu_eff[bo])
+
+    # ------------------------------------------------------------------
     # viscous flux
     # ------------------------------------------------------------------
     def _viscous_flux(self, rho, vel, T, k, omega, mu_t, grad_vel,
@@ -419,6 +489,50 @@ class ViscousRANSResidual:
         # inviscid one: R = (1/V)[sum F_inv.nA - sum F_visc.nA].
         np.add.at(flux_accum, io, -fvisc)
         np.add.at(flux_accum, ineigh, fvisc)
+
+        # --- boundary faces: molecular + turbulent viscous flux -----------
+        # Previously missing entirely: with no boundary contribution here,
+        # solid walls got zero shear stress, zero heat conduction, and zero
+        # turbulent diffusion from the momentum/energy/k-omega equations, so
+        # skin friction never actually entered the solved system despite the
+        # wall ghost-state velocity mirror being specifically built to make
+        # it possible (see BoundaryConditionHandler._wall_bc docstring).
+        bo = self._bo
+        if bo.size:
+            n_b = geom.normals[geom.boundary_mask]
+            a_b = geom.areas[geom.boundary_mask]
+
+            rho_b = np.maximum(boundary_states[geom.boundary_mask, 0], 1e-9)
+            vel_ghost = boundary_states[geom.boundary_mask, 1:4] / rho_b[:, None]
+            tau_n_b = self.wall_shear_stress(vel, mu_t, grad_vel, boundary_states)
+
+            E_ghost = boundary_states[geom.boundary_mask, 4]
+            ke_ghost = 0.5 * rho_b * np.sum(vel_ghost**2, axis=1)
+            p_ghost = np.maximum((GAMMA - 1.0) * (E_ghost - ke_ghost), 1.0)
+            T_ghost = p_ghost / (rho_b * R_GAS)
+            gT_face_b = self._boundary_face_grad(gT, T[bo], T_ghost)
+            cond_b = CP * (self.mu_lam / PRANDTL_LAMINAR + mu_t[bo] / PRANDTL_TURBULENT)
+            qn_b = cond_b * np.einsum('nd,nd->n', gT_face_b, n_b)
+
+            vel_face_b = 0.5 * (vel[bo] + vel_ghost)
+            work_b = np.einsum('nd,nd->n', tau_n_b, vel_face_b)
+
+            fvisc_b = np.zeros((len(bo), 7))
+            fvisc_b[:, 1:4] = tau_n_b
+            fvisc_b[:, 4] = work_b + qn_b
+
+            k_ghost = np.maximum(boundary_states[geom.boundary_mask, 5] / rho_b, 0.0)
+            omega_ghost = np.maximum(boundary_states[geom.boundary_mask, 6] / rho_b, 1e-6)
+            gk_face_b = self._boundary_face_grad(gk, k[bo], k_ghost)
+            gw_face_b = self._boundary_face_grad(gw, omega[bo], omega_ghost)
+            mut_b = mu_t[bo]
+            diff_k_b = (self.mu_lam + SST_SIGMA_K1 * mut_b) * np.einsum('nd,nd->n', gk_face_b, n_b)
+            diff_w_b = (self.mu_lam + SST_SIGMA_W1 * mut_b) * np.einsum('nd,nd->n', gw_face_b, n_b)
+            fvisc_b[:, 5] = diff_k_b
+            fvisc_b[:, 6] = diff_w_b
+
+            fvisc_b *= a_b[:, None]
+            np.add.at(flux_accum, bo, -fvisc_b)
 
     @staticmethod
     def _stress_dot_normal(grad_vel, normal, mu):

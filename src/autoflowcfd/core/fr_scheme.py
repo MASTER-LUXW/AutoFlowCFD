@@ -2,6 +2,11 @@
 
 This module implements the Flux Reconstruction high-order spatial discretization
 scheme for AutoFlowCFD solver, supporting 1st to 3rd order accuracy.
+
+NOT CURRENTLY USED: FRSolver.solve() (solver_steady.py) never constructs
+FRScheme - --order is accepted by the CLI/config but has no effect on the
+steady solve, which always uses ViscousRANSResidual's fixed 2nd-order MUSCL
+reconstruction (see the warning FRSolver.__init__ logs when order != 2).
 """
 
 import numpy as np

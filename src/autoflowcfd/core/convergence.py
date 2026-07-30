@@ -2,6 +2,10 @@
 
 This module provides real-time convergence monitoring, residual tracking,
 and adaptive CFL number adjustment for stable simulations.
+
+NOT CURRENTLY USED: FRSolver.solve() (solver_steady.py) never constructs
+ConvergenceMonitor - it hand-rolls equivalent residual-trend/CFL-adaptation
+logic inline in its iteration loop instead.
 """
 
 import numpy as np

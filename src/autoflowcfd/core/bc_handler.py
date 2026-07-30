@@ -15,17 +15,22 @@ from loguru import logger
 class BoundaryConditionHandler:
     """Handles boundary condition application for FVM solver."""
     
-    def __init__(self, grid_data, face_extractor):
+    def __init__(self, grid_data, face_extractor, rho_inf: float = 1.225, p_inf: float = 101325.0):
         self.grid_data = grid_data
         self.face_extractor = face_extractor
-        
+
         # Thermodynamic constants
         self.gamma = 1.4  # Ratio of specific heats for air
-        
+
+        # Freestream reference conditions (shared with FRSolver._initialize_solution
+        # and AeroCoefficientCalculator via SteadyConfig - single source of truth).
+        self.rho_inf = rho_inf
+        self.p_inf = p_inf
+
         # Ramp mechanism for smooth velocity transition
         self.ramp_factor = 0.0  # Start from 0, will increase to 1.0
-        self.base_inlet_velocity = 30.0  # Base inlet velocity (m/s)
-        self.base_farfield_velocity = 30.0  # Base farfield velocity (m/s)
+        self.base_inlet_velocity = 30.0  # Base inlet velocity (m/s); overwritten by FRSolver from config
+        self.base_farfield_velocity = 30.0  # Base farfield velocity (m/s); overwritten by FRSolver from config
         self.ramp_iterations = 0  # Will be set during solve
         # Cached boundary-face -> type map (built lazily).
         self._face_types = None
@@ -128,9 +133,14 @@ class BoundaryConditionHandler:
         # Zero-gradient pressure at the wall (dp/dn = 0).
         E_ghost = p / (gamma - 1.0) + 0.5 * rho_ghost * (u_ghost**2 + v_ghost**2 + w_ghost**2)
 
-        # Turbulence (conservative): k -> 0 at the wall (mirror to enforce zero
-        # face value), omega convected from interior.
-        rhok_ghost = -rho_ghost * k
+        # Turbulence (conservative): k -> 0 at the wall. NOTE: this used to be
+        # mirrored as -rho*k (intending a zero face-average), but every
+        # consumer decodes ghost states through to_primitive(), which clamps
+        # k = max(rho_k/rho, 0.0) - the negative mirror value was always
+        # floored back to 0 before use, so the actual boundary value is (and
+        # always effectively was) a direct k=0 Dirichlet ghost, not a mirror.
+        # omega is convected from interior (zero-gradient), not mirrored.
+        rhok_ghost = 0.0
         rhow_ghost_sst = rho_ghost * omega
         return np.array([rho_ghost, rhou_ghost, rhov_ghost, rhow_ghost,
                         E_ghost, rhok_ghost, rhow_ghost_sst])
@@ -142,11 +152,11 @@ class BoundaryConditionHandler:
         giving a small free-stream eddy viscosity.
         """
         gamma = 1.4
-        rho_inf = 1.225
+        rho_inf = self.rho_inf
 
         # Apply ramp factor to velocity
         u_inf = self.get_current_inlet_velocity()
-        p_inf = 101325.0
+        p_inf = self.p_inf
 
         rhou_inf = rho_inf * u_inf
         E_inf = p_inf / (gamma - 1.0) + 0.5 * rho_inf * u_inf**2
@@ -161,7 +171,7 @@ class BoundaryConditionHandler:
                   p: float, k: float, omega: float) -> np.ndarray:
         """Outlet boundary condition (static pressure specified, rest extrapolated)."""
         gamma = 1.4
-        p_outlet = 101325.0
+        p_outlet = self.p_inf
 
         rhou = rho * u
         rhov = rho * v
@@ -375,8 +385,10 @@ class BoundaryConditionHandler:
         # Compute ghost energy with clipped values
         E_ghost = p / (gamma - 1.0) + 0.5 * rho_ghost * (u_ghost**2 + v_ghost**2 + w_ghost**2)
         
-        # Turbulence: k -> 0 at wall (mirror), omega extrapolated
-        rhok_ghost = -rho_ghost * k
+        # Turbulence: k -> 0 at wall (direct Dirichlet ghost - see the scalar
+        # _wall_bc for why mirroring doesn't survive the to_primitive clamp),
+        # omega extrapolated from interior.
+        rhok_ghost = np.zeros_like(rho_ghost)
         rhow_ghost_sst = rho_ghost * omega
         
         return np.column_stack([
@@ -389,7 +401,7 @@ class BoundaryConditionHandler:
                              omega: np.ndarray) -> np.ndarray:
         """Vectorized outlet boundary condition."""
         gamma = self.gamma
-        p_outlet = 101325.0
+        p_outlet = self.p_inf
         
         rhou = rho * u
         rhov = rho * v

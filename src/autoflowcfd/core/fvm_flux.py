@@ -2,6 +2,12 @@
 
 Implements numerical flux calculation for compressible flows with turbulence modeling.
 Supports 7-equation system: continuity, momentum (3), energy, k, omega.
+
+NOT CURRENTLY USED: FRSolver.solve() (solver_steady.py) uses the HLLC
+implementation in fvm_viscous_residual.py (ViscousRANSResidual._hllc)
+instead. This module's FVMFluxCalculator is only reachable when Numba is
+unavailable, via FVMResidualComputer's Python fallback path - itself unused
+by the live steady solve. A fix here will not affect solve() behaviour.
 """
 
 import numpy as np

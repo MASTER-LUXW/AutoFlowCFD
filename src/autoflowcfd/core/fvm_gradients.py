@@ -53,8 +53,8 @@ class FaceGeometry:
         return len(self.areas)
 
 
-def least_squares_gradient(cell_values: np.ndarray, geom: FaceGeometry,
-                           boundary_face_values: Optional[np.ndarray] = None) -> np.ndarray:
+def green_gauss_gradient(cell_values: np.ndarray, geom: FaceGeometry,
+                         boundary_face_values: Optional[np.ndarray] = None) -> np.ndarray:
     """Compute cell-centred gradients via Green-Gauss theorem (vectorised).
 
     Args:

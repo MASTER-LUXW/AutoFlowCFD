@@ -15,20 +15,15 @@ from dataclasses import dataclass, field
 from loguru import logger
 
 from ..grid.structures import GridData, VolumeMeshData
-from ..config.solver_config import SteadyConfig, TurbulenceModel
-from .fr_scheme import FRScheme, FROrder
-from .turbulence import SSTKOmegaModel
-from .convergence import ConvergenceMonitor
+from ..config.solver_config import SteadyConfig, TurbulenceModel, BackendType
 from .time_integration import TimeIntegrator, TimeIntegrationScheme
 from .backend import create_backend
 from ..boundary.manager import BoundaryManager
-from .fvm_core import FVMFaceExtractor, FVMFluxCalculator, FVMResidualComputer
+from .fvm_core import FVMFaceExtractor
 from .fvm_gradients import FaceGeometry
 from .fvm_viscous_residual import ViscousRANSResidual, estimate_wall_distance
-from .solver_loop import SteadySolverLoop
 from .bc_handler import BoundaryConditionHandler
 from .aero_coeffs import AeroCoefficientCalculator
-from .solution_constraints import SolutionConstraintHandler
 
 
 @dataclass
@@ -79,11 +74,15 @@ class FRSolver:
         """Initialize steady-state solver."""
         self.grid_data = grid_data
         self.config = config
-        
+
         logger.info(f"Initializing FRSolver")
         logger.info(f"  Grid: {grid_data.node_count} nodes, {grid_data.cell_count} cells")
-        
-        # Initialize backend
+
+        # Backend selection. NOTE: the actual residual (ViscousRANSResidual)
+        # is a fixed pure-NumPy CPU implementation - it does not currently
+        # read from or dispatch through this backend object at all, so
+        # --backend gpu silently runs on CPU. Warn loudly rather than let
+        # a user believe they're getting GPU acceleration they aren't.
         try:
             self.backend = create_backend(
                 backend_type=config.backend.value,
@@ -92,57 +91,57 @@ class FRSolver:
             )
         except Exception as e:
             raise RuntimeError(f"Failed to initialize backend: {e}")
-        
-        # Initialize FR scheme
-        self.fr_scheme = FRScheme(order=FROrder(config.order))
-        
-        # Initialize turbulence model
-        self.turbulence_model = SSTKOmegaModel() if config.turbulence == TurbulenceModel.SST_KW else SSTKOmegaModel()
-        
-        # Initialize convergence monitor
-        self.convergence_monitor = ConvergenceMonitor(
-            max_iterations=config.max_iter,
-            convergence_threshold=config.convergence_tol,
-            cfl_initial=config.cfl_init,
-            cfl_max=config.cfl_max,
-        )
-        
-        # Initialize time integrator (explicit SSP-RK3 in pseudo-time).
+
+        if config.backend == BackendType.GPU:
+            logger.warning(
+                "--backend gpu was requested, but the steady RANS residual "
+                "(ViscousRANSResidual) is not yet wired to any GPU backend - "
+                "the solve will run on CPU (NumPy) regardless. This is a "
+                "known gap, not a silent failure: see backend/gpu_backend.py."
+            )
+        if config.order != 2:
+            logger.warning(
+                f"--order {config.order} was requested, but the residual's "
+                "MUSCL reconstruction (Green-Gauss gradient + Barth-Jespersen "
+                "limiter) is fixed at 2nd order - the FR order setting "
+                "currently has no effect on the steady solve."
+            )
+        if config.turbulence not in (TurbulenceModel.SST_KW, TurbulenceModel.NONE):
+            logger.warning(
+                f"--turbulence {config.turbulence.value} was requested, but "
+                "the residual's turbulence closure is a fixed SST k-omega "
+                "model - only 'sst_kw' (on) or 'none' (off) currently apply."
+            )
+
+        # Time integrator (explicit SSP-RK3 in pseudo-time).
         self.time_integrator = TimeIntegrator(
             scheme=TimeIntegrationScheme.SSP_RK3,
             dt=1e-4,
             cfl_target=config.cfl_init,
         )
-        
-        # Initialize boundary manager
+
+        # Boundary manager
         self.boundary_manager = BoundaryManager(grid_data.boundaries)
-        
-        # Initialize MUSCL reconstructor
-        if config.order >= 2:
-            from .reconstruction_v2 import MUSCLReconstructor, LimiterType
-            self.muscl_reconstructor = MUSCLReconstructor(LimiterType.VAN_LEER)
-        
+
         # Solution vector
         self.solution = None
-        
-        # Initialize FVM components
+
+        # FVM face data holder (build_from_tetrahedra() is not used - see
+        # solve(): face data comes from grid_data.ensure_faces_exist(), the
+        # Numba-accelerated path; this instance is kept only as the shared
+        # data-holder that bc_handler/aero_calculator read face arrays from).
         self.face_extractor = FVMFaceExtractor()
-        self.flux_calculator = FVMFluxCalculator(gamma=1.4)
-        self.residual_computer = FVMResidualComputer(self.flux_calculator)
-        
-        # Initialize helper modules
-        self.bc_handler = BoundaryConditionHandler(grid_data, self.face_extractor)
-        self.aero_calculator = AeroCoefficientCalculator(grid_data, self.face_extractor)
-        self.constraint_handler = SolutionConstraintHandler(gamma=1.4)
-        
-        # Initialize solver loop
-        self.solver_loop = SteadySolverLoop(
-            config=config,
-            residual_computer=self.residual_computer,
-            convergence_monitor=self.convergence_monitor,
-            time_integrator=self.time_integrator,
+
+        # Helper modules
+        self.bc_handler = BoundaryConditionHandler(
+            grid_data, self.face_extractor,
+            rho_inf=config.rho_inf, p_inf=config.p_inf,
         )
-        
+        self.aero_calculator = AeroCoefficientCalculator(
+            grid_data, self.face_extractor,
+            rho_inf=config.rho_inf, vel_inf=config.vel_inf,
+        )
+
         logger.info("FRSolver initialization complete")
     
     def _get_cell_volumes(self) -> np.ndarray:
@@ -164,13 +163,15 @@ class FRSolver:
         logger.info("Initializing solution field...")
         
         n_cells = self.grid_data.cell_count
-        
-        # Freestream conditions for stable initialization
-        rho_0 = 1.225  # kg/m^3
-        u_0 = 30.0     # m/s - use freestream velocity for stability
+
+        # Freestream conditions for stable initialization (single source of
+        # truth: self.config, shared with boundary conditions and Cd/Cl
+        # normalization so all three always agree).
+        rho_0 = self.config.rho_inf
+        u_0 = self.config.vel_inf     # use freestream velocity for stability
         v_0 = 0.0
         w_0 = 0.0
-        p_0 = 101325.0 # Pa
+        p_0 = self.config.p_inf
         gamma = 1.4
         
         # Compute conservative variables
@@ -202,34 +203,36 @@ class FRSolver:
     def _setup_boundary_conditions(self):
         """Setup boundary conditions."""
         logger.info("Setting up boundary conditions...")
-        
+
         boundary_names = self.grid_data.boundaries.boundary_names
-        
+        vel_inf = self.config.vel_inf
+        p_inf = self.config.p_inf
+
         for boundary_name in boundary_names:
             name_upper = boundary_name.upper()
-            
+
             if "INLET" in name_upper or "INFLOW" in name_upper:
                 # Store base velocity for ramping (now handled by bc_handler)
-                self.bc_handler.base_inlet_velocity = 30.0
+                self.bc_handler.base_inlet_velocity = vel_inf
                 self.boundary_manager.add_bc(
                     boundary_name, bc_type="INLET",
-                    velocity_x=30.0, pressure=101325.0, temperature=288.15,
+                    velocity_x=vel_inf, pressure=p_inf, temperature=288.15,
                 )
             elif "OUTLET" in name_upper:
-                self.boundary_manager.add_bc(boundary_name, bc_type="OUTLET", pressure=101325.0)
+                self.boundary_manager.add_bc(boundary_name, bc_type="OUTLET", pressure=p_inf)
             elif "BODY" in name_upper or "CAR" in name_upper:
                 self.boundary_manager.add_bc(boundary_name, bc_type="WALL")
             elif "GROUND" in name_upper:
-                self.bc_handler.base_farfield_velocity = 30.0
-                self.boundary_manager.add_bc(boundary_name, bc_type="GROUND", moving_wall_velocity=30.0)
+                self.bc_handler.base_farfield_velocity = vel_inf
+                self.boundary_manager.add_bc(boundary_name, bc_type="GROUND", moving_wall_velocity=vel_inf)
             elif "TUNNEL" in name_upper or "FARFIELD" in name_upper:
-                self.bc_handler.base_farfield_velocity = 30.0
-                self.boundary_manager.add_bc(boundary_name, bc_type="FARFIELD", velocity_x=30.0, pressure=101325.0)
+                self.bc_handler.base_farfield_velocity = vel_inf
+                self.boundary_manager.add_bc(boundary_name, bc_type="FARFIELD", velocity_x=vel_inf, pressure=p_inf)
             elif "SYMMETRY" in name_upper:
                 self.boundary_manager.add_bc(boundary_name, bc_type="SYMMETRY")
             else:
-                self.bc_handler.base_farfield_velocity = 30.0
-                self.boundary_manager.add_bc(boundary_name, bc_type="FARFIELD", velocity_x=30.0, pressure=101325.0)
+                self.bc_handler.base_farfield_velocity = vel_inf
+                self.boundary_manager.add_bc(boundary_name, bc_type="FARFIELD", velocity_x=vel_inf, pressure=p_inf)
         
         logger.info(f"Boundary conditions setup: {len(boundary_names)} boundaries")
     
@@ -272,7 +275,7 @@ class FRSolver:
         # Store in face_extractor for later use
         self.face_extractor.cell_centroids = cell_centroids
         
-        # Convert FaceData to dictionary format expected by flux_calculator
+        # Convert FaceData to the plain-dict format the rest of solve() uses
         face_data = {
             'connectivity': face_data_obj.connectivity,
             'normals': face_data_obj.normal,
@@ -285,13 +288,8 @@ class FRSolver:
         t_face_end = time.perf_counter()
         logger.success(f"Face data prepared in {t_face_end - t_face_start:.2f}s (optimized)")
 
-        # Expose face data on the flux calculator (used by aero/bc helpers).
-        self.flux_calculator.face_connectivity = face_data['connectivity']
-        self.flux_calculator.face_normals = face_data['normals']
-        self.flux_calculator.face_areas = face_data['areas']
-        self.flux_calculator.boundary_flags = face_data['boundary_flags']
-        
-        # CRITICAL: Also expose face data on face_extractor for aero coefficient calculation
+        # Expose face data on face_extractor - bc_handler/aero_calculator
+        # both read face arrays from this shared holder.
         self.face_extractor.face_connectivity = face_data['connectivity']
         self.face_extractor.face_normals = face_data['normals']
         self.face_extractor.face_areas = face_data['areas']
@@ -353,19 +351,29 @@ class FRSolver:
             if self.bc_handler is not None:
                 self.bc_handler.update_ramp_factor(iteration, actual_max_iter)
 
+            # Boundary ghost states for this solution - computed once and
+            # reused below (gradients, residual, aero coefficients) instead
+            # of being rebuilt from scratch for each consumer.
+            bstates = self.bc_handler.build_boundary_states(self.solution)
+
             # Effective viscosity for viscous time-step limit.
             rho_c, vel_c, p_c, T_c, k_c, w_c = residual.to_primitive(self.solution)
-            gvel = residual._velocity_gradient(vel_c, self.solution,
-                                               self.bc_handler.build_boundary_states(self.solution))
+            gvel = residual._velocity_gradient(vel_c, self.solution, bstates)
             mu_t = residual._eddy_viscosity(rho_c, k_c, w_c, gvel) if turbulent \
                 else np.zeros(geom.n_cells)
-            
+
             # Compute local time step with current CFL
             dt_local = self.time_integrator.local_time_step(self.solution, geom, mu_lam + mu_t)
-            
-            # One SSP-RK pseudo-time step.
-            R = residual_func(self.solution)
-            self.solution = self.time_integrator.step(self.solution, residual_func, dt_local)
+
+            # One SSP-RK pseudo-time step. R is both the residual used for
+            # convergence monitoring below and the RK scheme's own stage-0
+            # residual (Ui=U0 at i=0) - computed once and reused via
+            # residual0= instead of letting step() recompute the same
+            # (expensive: MUSCL+HLLC+viscous+SST) evaluation a second time.
+            R = residual.compute(self.solution, bstates)
+            self.solution = self.time_integrator.step(
+                self.solution, residual_func, dt_local, residual0=R
+            )
 
             # Check for numerical divergence immediately after update
             if not np.all(np.isfinite(self.solution)):
@@ -435,8 +443,18 @@ class FRSolver:
                         f"increasing CFL: {old_cfl:.3f} -> {self.time_integrator.cfl_target:.3f}"
                     )
 
-            # Coefficients every iteration for accurate monitoring.
-            Cd, Cl = self.aero_calculator.compute_coefficients(self.solution, iteration)
+            # Coefficients every iteration for accurate monitoring. Includes
+            # skin-friction drag/lift via wall_shear_stress(), reusing this
+            # iteration's gvel/mu_t/bstates (computed pre-step above) rather
+            # than recomputing them for the post-step solution - a one-
+            # iteration lag that's a good trade against doubling the
+            # gradient+eddy-viscosity cost every iteration just for
+            # monitoring output.
+            Cd, Cl = self.aero_calculator.compute_coefficients(
+                self.solution, iteration,
+                viscous_residual=residual, grad_vel=gvel, mu_t=mu_t,
+                boundary_states=bstates,
+            )
             cd_history.append(Cd)
             cl_history.append(Cl)
 

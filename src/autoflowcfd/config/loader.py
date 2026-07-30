@@ -332,6 +332,9 @@ class ConfigLoader:
             'max_layers': 'Max boundary-layer + transition layer count (steady only)',
             'min_cell_size': 'First (near-wall) layer thickness in meters (steady only)',
             'target_cells': 'Target total cell count (steady only; ignored by the tetgen hybrid mesh path)',
+            'rho_inf': 'Freestream density in kg/m^3 (steady only)',
+            'vel_inf': 'Freestream velocity magnitude in m/s (steady only)',
+            'p_inf': 'Freestream static pressure in Pa (steady only)',
         }
         return comments.get(param, '')
 

@@ -5,6 +5,10 @@ numerical blow-up during iterations.
 
 Key Components:
     - SolutionConstraintHandler: Enforces physical bounds on solution variables
+
+NOT CURRENTLY USED: FRSolver.solve() (solver_steady.py) never constructs
+SolutionConstraintHandler - equivalent positivity enforcement is done by
+time_integration.enforce_positivity() after every RK stage instead.
 """
 
 import numpy as np

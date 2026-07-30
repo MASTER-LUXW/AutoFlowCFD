@@ -2,6 +2,11 @@
 
 This module implements turbulence models for RANS and hybrid RANS-LES simulations,
 including SST k-omega model for steady-state RANS.
+
+NOT CURRENTLY USED: FRSolver.solve() (solver_steady.py) never constructs
+SSTKOmegaModel - its own SST k-omega closure (production, dissipation,
+cross-diffusion, F1/F2 blending) is implemented directly inside
+ViscousRANSResidual (fvm_viscous_residual.py).
 """
 
 import numpy as np
