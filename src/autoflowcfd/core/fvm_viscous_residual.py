@@ -27,6 +27,7 @@ from scipy.spatial import cKDTree
 from loguru import logger
 
 from .fvm_gradients import FaceGeometry, green_gauss_gradient, barth_jespersen_limiter
+from .low_mach_preconditioning import preconditioned_acoustic_eigs
 
 GAMMA = 1.4
 R_GAS = 287.058          # J/(kg K), dry air
@@ -66,14 +67,29 @@ class ViscousRANSResidual:
     turbulent:
         If False, k/omega source terms and eddy viscosity are disabled
         (laminar Navier-Stokes).
+    mach_ref:
+        Reference (freestream) Mach number for low-Mach preconditioning of
+        the HLLC wave-speed estimates (see low_mach_preconditioning.py).
+        None (default) disables preconditioning entirely, matching prior
+        behaviour exactly - pass the freestream Mach number to enable it
+        for low-speed (M << 1) steady flows.
     """
 
     def __init__(self, geom: FaceGeometry, mu_lam: float = 1.7894e-5,
                  wall_distance: np.ndarray | None = None,
-                 turbulent: bool = True):
+                 turbulent: bool = True,
+                 mach_ref: float | None = None):
         self.geom = geom
         self.mu_lam = float(mu_lam)
         self.turbulent = turbulent
+        # Low-Mach preconditioning reference Mach number (see
+        # low_mach_preconditioning.py). None disables preconditioning
+        # entirely (the HLLC wave speeds use the raw physical sound speed,
+        # exactly matching prior behaviour) - this is the default so
+        # existing callers (e.g. the transient solver, which needs the
+        # unpreconditioned acoustic eigenvalues for genuine time-accurate
+        # integration) are unaffected unless they opt in explicitly.
+        self.mach_ref = mach_ref
         n = geom.n_cells
         if wall_distance is None:
             self.wall_distance = np.full(n, 1.0e9, dtype=np.float64)
@@ -368,9 +384,22 @@ class ViscousRANSResidual:
         EL = np.minimum(EL, MAX_ENERGY)
         ER = np.minimum(ER, MAX_ENERGY)
 
-        # Wave speed estimates (Davis / Einfeldt).
-        SL = np.minimum(unL - aL, unR - aR)
-        SR = np.maximum(unL + aL, unR + aR)
+        # Wave speed estimates (Davis / Einfeldt), optionally low-Mach
+        # preconditioned (see low_mach_preconditioning.py module docstring).
+        # HLLC's flux stays exactly consistent (F(U,U)=F(U)) regardless of
+        # how SL/SR are computed, so this never changes the converged
+        # steady-state answer - only how much numerical dissipation is
+        # added en route, which is what causes excess low-Mach noise
+        # (destabilizing near-stagnation/separated regions) when using the
+        # raw acoustic speed unconditionally.
+        if self.mach_ref is not None:
+            lamP_L, lamM_L, _ = preconditioned_acoustic_eigs(unL, aL, self.mach_ref)
+            lamP_R, lamM_R, _ = preconditioned_acoustic_eigs(unR, aR, self.mach_ref)
+            SL = np.minimum(lamM_L, lamM_R)
+            SR = np.maximum(lamP_L, lamP_R)
+        else:
+            SL = np.minimum(unL - aL, unR - aR)
+            SR = np.maximum(unL + aL, unR + aR)
         denom = rhoL * (SL - unL) - rhoR * (SR - unR)
         denom = np.where(np.abs(denom) < 1e-12, np.sign(denom) * 1e-12 + 1e-12, denom)
         Sstar = (pR - pL + rhoL * unL * (SL - unL) - rhoR * unR * (SR - unR)) / denom

@@ -21,6 +21,8 @@ from enum import Enum
 from typing import Callable, Optional
 from loguru import logger
 
+from .low_mach_preconditioning import preconditioned_acoustic_eigs
+
 GAMMA = 1.4
 
 
@@ -120,6 +122,7 @@ class TimeIntegrator:
     def local_time_step(
         self, U: np.ndarray, geom, mu_eff: Optional[np.ndarray] = None,
         omega: Optional[np.ndarray] = None,
+        mach_ref: Optional[float] = None,
     ) -> np.ndarray:
         """Per-cell stable pseudo-time step dt_i = CFL * V_i / sum_f (|u.n|+a) A_f.
 
@@ -137,6 +140,17 @@ class TimeIntegrator:
         for the mean flow, which is a plausible mechanism for a residual
         that looks merely "stuck" for many iterations before a stiff mode
         it was never limiting suddenly runs away.
+
+        Args:
+            mach_ref: reference (freestream) Mach number for low-Mach
+                preconditioning (see low_mach_preconditioning.py). None
+                (default) uses the raw physical acoustic speed `a`,
+                matching prior behaviour exactly. When given, replaces the
+                `|u.n|+a` acoustic contribution with its preconditioned
+                equivalent, relaxing the CFL restriction where the local
+                flow is far slower than the speed of sound - the same
+                acoustic-vs-convective stiffness that otherwise forces a
+                very small CFL for any genuinely low-speed (M << 1) case.
         """
         rho = np.maximum(U[:, 0], 1e-9)
         vel = U[:, 1:4] / rho[:, None]
@@ -154,12 +168,22 @@ class TimeIntegrator:
         bmask = geom.boundary_mask
         imask = geom.internal_mask
 
+        def _face_spectral(cell_idx, n_face):
+            """|lambda|_max contribution for one cell's own state at a face."""
+            un_signed = np.einsum('nd,nd->n', vel[cell_idx], n_face)
+            if mach_ref is not None:
+                lam_plus, lam_minus, _ = preconditioned_acoustic_eigs(
+                    un_signed, a[cell_idx], mach_ref
+                )
+                return np.maximum(np.abs(lam_plus), np.abs(lam_minus))
+            return np.abs(un_signed) + a[cell_idx]
+
         # internal faces contribute to both cells
         io, ineigh = geom.int_owner, geom.int_neigh
         n_int = normals[imask]
         a_int = areas[imask]
-        un_o = np.abs(np.einsum('nd,nd->n', vel[io], n_int)) + a[io]
-        un_n = np.abs(np.einsum('nd,nd->n', vel[ineigh], n_int)) + a[ineigh]
+        un_o = _face_spectral(io, n_int)
+        un_n = _face_spectral(ineigh, n_int)
         np.add.at(spectral, io, un_o * a_int)
         np.add.at(spectral, ineigh, un_n * a_int)
 
@@ -168,7 +192,7 @@ class TimeIntegrator:
         if bo.size:
             n_b = normals[bmask]
             a_b = areas[bmask]
-            un_b = np.abs(np.einsum('nd,nd->n', vel[bo], n_b)) + a[bo]
+            un_b = _face_spectral(bo, n_b)
             np.add.at(spectral, bo, un_b * a_b)
 
         spectral = np.maximum(spectral, 1e-30)

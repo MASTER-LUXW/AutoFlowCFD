@@ -99,7 +99,7 @@ class BoundaryConditionHandler:
         elif boundary_type == "FARFIELD":
             return self._farfield_bc(rho, u, v, w, p, k, omega, normal)
         elif boundary_type == "OUTLET":
-            return self._outlet_bc(rho, u, v, w, p, k, omega)
+            return self._outlet_bc(rho, u, v, w, p, k, omega, normal)
         elif boundary_type == "SYMMETRY":
             return self._symmetry_bc(rho, u, v, w, E, k, omega, normal)
         else:
@@ -241,17 +241,38 @@ class BoundaryConditionHandler:
         return np.array([rho_b, rhou_b, rhov_b, rhow_b, E_b, rho_b * k_b, rho_b * omega_b])
 
     def _outlet_bc(self, rho: float, u: float, v: float, w: float,
-                  p: float, k: float, omega: float) -> np.ndarray:
-        """Outlet boundary condition (static pressure specified, rest extrapolated)."""
+                  p: float, k: float, omega: float, normal: np.ndarray) -> np.ndarray:
+        """Outlet boundary condition (static pressure specified, rest extrapolated).
+
+        Backflow-safe: if the local interior velocity actually points INTO
+        the domain through this outflow-only face (un < 0 - common
+        whenever a separated/vortex-shedding wake, e.g. a bluff body's,
+        hasn't settled into attached axial flow by the time it reaches the
+        outlet plane), a plain zero-gradient extrapolation of velocity and
+        density directly re-injects that reversed, wake-disturbed state
+        back into the domain with no bound - a self-reinforcing
+        instability (observed directly: density piling up to >10x
+        freestream exactly at the outlet plane on a cube case whose wake
+        reached the outlet only ~7 body-widths downstream). On backflow,
+        fall back to freestream density and zero velocity - a safe,
+        bounded "stagnant reservoir" assumption - instead of extrapolating
+        the disturbed interior state.
+        """
         gamma = 1.4
         p_outlet = self.p_inf
 
-        rhou = rho * u
-        rhov = rho * v
-        rhow = rho * w
-        E = p_outlet / (gamma - 1.0) + 0.5 * rho * (u**2 + v**2 + w**2)
+        un = u * normal[0] + v * normal[1] + w * normal[2]
+        if un < 0.0:
+            rho_g, u_g, v_g, w_g = self.rho_inf, 0.0, 0.0, 0.0
+        else:
+            rho_g, u_g, v_g, w_g = rho, u, v, w
 
-        return np.array([rho, rhou, rhov, rhow, E, rho * k, rho * omega])
+        rhou = rho_g * u_g
+        rhov = rho_g * v_g
+        rhow = rho_g * w_g
+        E = p_outlet / (gamma - 1.0) + 0.5 * rho_g * (u_g**2 + v_g**2 + w_g**2)
+
+        return np.array([rho_g, rhou, rhov, rhow, E, rho_g * k, rho_g * omega])
 
     def _symmetry_bc(self, rho: float, u: float, v: float, w: float,
                     E: float, k: float, omega: float, normal: np.ndarray) -> np.ndarray:
@@ -397,7 +418,7 @@ class BoundaryConditionHandler:
                 )
             elif btype == "OUTLET":
                 ghost_states = self._outlet_bc_vectorized(
-                    rho_t, u_t, v_t, w_t, p_t, k_t, omega_t
+                    rho_t, u_t, v_t, w_t, p_t, k_t, omega_t, normals_t
                 )
             elif btype == "SYMMETRY":
                 # Need total energy E for symmetry BC
@@ -535,17 +556,26 @@ class BoundaryConditionHandler:
 
     def _outlet_bc_vectorized(self, rho: np.ndarray, u: np.ndarray, v: np.ndarray,
                              w: np.ndarray, p: np.ndarray, k: np.ndarray,
-                             omega: np.ndarray) -> np.ndarray:
-        """Vectorized outlet boundary condition."""
+                             omega: np.ndarray, normals: np.ndarray) -> np.ndarray:
+        """Vectorized outlet boundary condition - see the scalar `_outlet_bc`
+        for why the backflow clamp is needed."""
         gamma = self.gamma
         p_outlet = self.p_inf
-        
-        rhou = rho * u
-        rhov = rho * v
-        rhow = rho * w
-        E = p_outlet / (gamma - 1.0) + 0.5 * rho * (u**2 + v**2 + w**2)
-        
-        return np.column_stack([rho, rhou, rhov, rhow, E, rho * k, rho * omega])
+
+        un = u * normals[:, 0] + v * normals[:, 1] + w * normals[:, 2]
+        backflow = un < 0.0
+
+        rho_g = np.where(backflow, self.rho_inf, rho)
+        u_g = np.where(backflow, 0.0, u)
+        v_g = np.where(backflow, 0.0, v)
+        w_g = np.where(backflow, 0.0, w)
+
+        rhou = rho_g * u_g
+        rhov = rho_g * v_g
+        rhow = rho_g * w_g
+        E = p_outlet / (gamma - 1.0) + 0.5 * rho_g * (u_g**2 + v_g**2 + w_g**2)
+
+        return np.column_stack([rho_g, rhou, rhov, rhow, E, rho_g * k, rho_g * omega])
     
     def _symmetry_bc_vectorized(self, rho: np.ndarray, u: np.ndarray, v: np.ndarray,
                                w: np.ndarray, E: np.ndarray, k: np.ndarray,

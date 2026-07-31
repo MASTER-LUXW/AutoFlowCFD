@@ -354,8 +354,23 @@ class FRSolver:
         mu_lam = 1.7894e-5
         turbulent = self.config.turbulence != TurbulenceModel.NONE
 
+        # Low-Mach preconditioning reference Mach number (see
+        # low_mach_preconditioning.py): at the freestream conditions this
+        # steady solve is set up for, a non-preconditioned density-based
+        # scheme is forced to resolve the acoustic speed (~340 m/s) even
+        # though the physical flow itself is far slower - artificially
+        # restricting CFL and adding excess numerical dissipation right
+        # where it's least wanted (near-stagnation/separated regions,
+        # where the LOCAL Mach number can be near zero even in an overall
+        # low-speed flow). Passing this through relaxes both without
+        # changing the converged steady-state answer.
+        gamma_air = 1.4
+        a_inf = np.sqrt(gamma_air * self.config.p_inf / self.config.rho_inf)
+        mach_ref = self.config.vel_inf / max(a_inf, 1e-30)
+
         residual = ViscousRANSResidual(
-            geom, mu_lam=mu_lam, wall_distance=wall_distance, turbulent=turbulent
+            geom, mu_lam=mu_lam, wall_distance=wall_distance, turbulent=turbulent,
+            mach_ref=mach_ref,
         )
 
         # Aerodynamic reference area.
@@ -460,7 +475,8 @@ class FRSolver:
             # for the k/omega equations even at a CFL that's comfortably
             # safe for the convective/viscous mean-flow terms.
             dt_local = self.time_integrator.local_time_step(
-                self.solution, geom, mu_lam + mu_t, omega=(w_c if turbulent else None)
+                self.solution, geom, mu_lam + mu_t, omega=(w_c if turbulent else None),
+                mach_ref=mach_ref,
             )
 
             # One SSP-RK pseudo-time step. R is both the residual used for
