@@ -299,8 +299,23 @@ class ConfigLoader:
             comment = self._get_parameter_comment(key, mode)
             if comment:
                 lines.append(f"# {comment}")
-            
-            lines.append(f"{key}: {value}")
+
+            # Serialize the value through yaml.safe_dump itself instead of
+            # an f-string, or a None value (e.g. the default max_cell_size)
+            # renders as the literal text "None" - PyYAML does not
+            # recognize a bare "None" as null (only null/Null/NULL/~ /
+            # empty do), so safe_load reads it back as the STRING "None",
+            # not Python None, and it silently fails validation with a
+            # confusing type error instead of loading as the real default.
+            # Dumping as a single-key {key: value} flow mapping (then
+            # stripping the braces) - rather than dumping `value` alone -
+            # avoids PyYAML appending a "...\n" document-end marker after
+            # a bare top-level scalar, which would otherwise land in the
+            # middle of this hand-assembled multi-line file as a stray
+            # line and break every parse of the whole template.
+            dumped = yaml.safe_dump({key: value}, default_flow_style=True).strip()
+            assert dumped.startswith("{") and dumped.endswith("}")
+            lines.append(dumped[1:-1])
             lines.append("")
         
         return "\n".join(lines)
@@ -332,6 +347,7 @@ class ConfigLoader:
             'max_layers': 'Max boundary-layer + transition layer count (steady only)',
             'min_cell_size': 'First (near-wall) layer thickness in meters (steady only)',
             'target_cells': 'Target total cell count (steady only; ignored by the tetgen hybrid mesh path)',
+            'max_cell_size': 'Max core-region cell size in meters, graded outward from the near-wall size (unset = no cap)',
             'rho_inf': 'Freestream density in kg/m^3',
             'vel_inf': 'Freestream velocity magnitude in m/s',
             'p_inf': 'Freestream static pressure in Pa',

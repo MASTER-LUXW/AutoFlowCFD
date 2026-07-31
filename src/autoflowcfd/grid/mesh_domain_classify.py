@@ -261,7 +261,7 @@ def classify_boundary_groups(
     boundaries: 'BoundaryMap',
     bbox_min: np.ndarray,
     bbox_max: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, List[str], np.ndarray, List[np.ndarray]]:
+) -> Tuple[np.ndarray, np.ndarray, List[str], np.ndarray, List[np.ndarray], np.ndarray, np.ndarray]:
     """Split every boundary group's faces into extrude-eligible vs. core-only,
     with extrude-eligible faces winding-corrected for correct BL growth
     direction.
@@ -293,13 +293,33 @@ def classify_boundary_groups(
             correctly excluding it. A bbox-touching wall (ground/tunnel) is
             never a hole - it's an open sheet terminating at the domain's
             own outer boundary, with no enclosed interior to exclude.
+        core_face_groups: (k,) str array, the original boundary-group name
+            for each row of core_faces (same order/length) - lets the
+            caller attribute core (tetgen-filled) boundary tets back to
+            their source group via tetgen facet markers, which survive
+            boundary subdivision unlike node-index matching (see
+            mesh_tetgen_core.fill_core_volume's `face_markers`/nobisect=False
+            path, needed for graded max-cell-size regions to actually
+            refine cells near a coarse far-field wall).
+        is_closed_solid_face: (m,) bool array, parallel to extrude_faces -
+            True for rows from a closed embedded solid (the `hole_points`
+            branch, e.g. a car body), False for a bbox-touching wall sheet
+            (ground/tunnel-like). Lets the caller build max-cell-size
+            grading spheres centered on just the isolated solid's own
+            geometry (mesh_tetgen_core.build_graded_regions) - a
+            bbox-touching wall can span nearly the whole domain footprint,
+            so including it in the same center/radius model risks a
+            grading sphere geometrically crossing the wall's own BL
+            surface partway through the domain.
     """
     L_char = float(np.max(bbox_max - bbox_min))
     tol = L_char * _BBOX_TOUCH_RTOL
 
     extrude_face_rows: List[np.ndarray] = []
     extrude_face_group_rows: List[np.ndarray] = []
+    is_closed_solid_rows: List[np.ndarray] = []
     core_face_rows: List[np.ndarray] = []
+    core_face_group_rows: List[np.ndarray] = []
     extruded_group_names: List[str] = []
     hole_points: List[np.ndarray] = []
 
@@ -309,6 +329,7 @@ def classify_boundary_groups(
 
         if bc_type in NEVER_EXTRUDE_BC_TYPES:
             core_face_rows.append(group_faces)
+            core_face_group_rows.append(np.full(len(group_faces), name))
             continue
 
         inverse, counts, face_of_edge = _face_edges(group_faces)
@@ -349,6 +370,7 @@ def classify_boundary_groups(
                     comp_faces = comp_faces[:, [1, 0, 2]]  # flip winding
                 extrude_face_rows.append(comp_faces)
                 extrude_face_group_rows.append(np.full(len(comp_faces), name))
+                is_closed_solid_rows.append(np.zeros(len(comp_faces), dtype=bool))
                 any_extruded_in_group = True
                 continue
 
@@ -369,6 +391,7 @@ def classify_boundary_groups(
                     comp_faces = comp_faces[:, [1, 0, 2]]  # flip winding
                 extrude_face_rows.append(comp_faces)
                 extrude_face_group_rows.append(np.full(len(comp_faces), name))
+                is_closed_solid_rows.append(np.ones(len(comp_faces), dtype=bool))
                 any_extruded_in_group = True
 
                 hole_pt = find_point_inside_closed_shell(nodes, comp_faces)
@@ -387,6 +410,7 @@ def classify_boundary_groups(
                 # (inlet/outlet/tunnel-like) with a genuine free boundary
                 # elsewhere. Use unmodified as part of the core PLC.
                 core_face_rows.append(comp_faces)
+                core_face_group_rows.append(np.full(len(comp_faces), name))
 
         if any_extruded_in_group:
             extruded_group_names.append(name)
@@ -403,6 +427,14 @@ def classify_boundary_groups(
         np.vstack(core_face_rows) if core_face_rows
         else np.empty((0, 3), dtype=surface_faces.dtype)
     )
+    core_face_groups = (
+        np.concatenate(core_face_group_rows) if core_face_group_rows
+        else np.empty((0,), dtype=object)
+    )
+    is_closed_solid_face = (
+        np.concatenate(is_closed_solid_rows) if is_closed_solid_rows
+        else np.empty((0,), dtype=bool)
+    )
 
     logger.info(
         f"Boundary classification: {len(extrude_faces)} faces eligible for "
@@ -411,4 +443,7 @@ def classify_boundary_groups(
         f"{len(hole_points)} isolated embedded solid(s) marked as tetgen holes"
     )
 
-    return extrude_faces, core_faces, extruded_group_names, extrude_face_groups, hole_points
+    return (
+        extrude_faces, core_faces, extruded_group_names, extrude_face_groups,
+        hole_points, core_face_groups, is_closed_solid_face,
+    )

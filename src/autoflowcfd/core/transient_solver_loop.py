@@ -306,7 +306,7 @@ class TransientSolver:
             gvel = residual._velocity_gradient(vel_c, self.solution, bstates)
             mu_t = residual._eddy_viscosity(rho_c, k_c, w_c, gvel) if self.turbulent \
                 else np.zeros(geom.n_cells)
-            Cd, Cl = self.aero_calculator.compute_coefficients(
+            Cd, Cl, Cd_p, Cd_f = self.aero_calculator.compute_coefficients(
                 self.solution, self.n_steps,
                 viscous_residual=residual, grad_vel=gvel, mu_t=mu_t,
                 boundary_states=bstates,
@@ -319,6 +319,12 @@ class TransientSolver:
                 logger.info(
                     f"Step {self.n_steps:6d} | t={self.current_time:.6f}s | "
                     f"Cd={Cd:.4f} | Cl={Cl:.4f}"
+                )
+                # Second line: Cd breakdown (aligned with first |)
+                prefix_len = len(f"Step {self.n_steps:6d}")
+                logger.info(
+                    f"{'':>{prefix_len + 2}s}  "
+                    f"Cd breakdown: pressure={Cd_p:.4f}, friction={Cd_f:.4f}"
                 )
 
             if self.checkpoint_manager.should_save(self.n_steps):

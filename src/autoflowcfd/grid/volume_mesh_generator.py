@@ -41,25 +41,33 @@ class VolumeMeshGenerator:
         growth_rate: float = 1.2,
         max_layers: int = 30,
         min_cell_size: float = 0.001,
-        target_cells: int = 500000
+        target_cells: int = 500000,
+        max_cell_size: Optional[float] = None,
     ):
         """Initialize volume mesh generator.
-        
+
         Args:
             growth_rate: Geometric growth rate for layer thickness (1.2 typical)
             max_layers: Maximum number of boundary layers (30 for automotive CFD)
             min_cell_size: Minimum allowable cell size in meters (1mm default)
             target_cells: Target total cell count
+            max_cell_size: Optional hard cap (meters) on core-region cell size,
+                graded outward from the BL's near-wall size
+                (mesh_background.generate_hybrid_mesh). None leaves the core
+                fill's cell size unbounded (only tetgen's own shape-quality
+                bounds apply, cells can grow as large as a coarse far-field
+                input facet allows).
         """
         self.growth_rate = growth_rate
         self.max_layers = max_layers
         self.min_cell_size = min_cell_size
         self.target_cells = target_cells
-        
+        self.max_cell_size = max_cell_size
+
         logger.info(
             f"VolumeMeshGenerator initialized: growth_rate={growth_rate}, "
             f"max_layers={max_layers}, min_cell_size={min_cell_size}m, "
-            f"target_cells={target_cells}"
+            f"target_cells={target_cells}, max_cell_size={max_cell_size}"
         )
     
     def generate_from_surface(
@@ -107,7 +115,8 @@ class VolumeMeshGenerator:
                     max_layers=self.max_layers,
                     min_cell_size=self.min_cell_size,
                     target_cells=self.target_cells,
-                    surface_boundaries=surface_boundaries
+                    surface_boundaries=surface_boundaries,
+                    max_cell_size=self.max_cell_size,
                 )
             else:
                 # Pure extrusion mode
@@ -122,7 +131,8 @@ class VolumeMeshGenerator:
                 max_layers=self.max_layers,
                 min_cell_size=self.min_cell_size,
                 target_cells=self.target_cells,
-                surface_boundaries=surface_boundaries
+                surface_boundaries=surface_boundaries,
+                max_cell_size=self.max_cell_size,
             )
         else:
             raise ValueError(f"Unknown method: {method}")

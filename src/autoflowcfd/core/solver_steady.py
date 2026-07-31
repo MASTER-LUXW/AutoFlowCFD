@@ -128,6 +128,13 @@ class FRSolver:
         # Solution vector
         self.solution = None
 
+        # Convergence history restored from a checkpoint on resume (set by
+        # the CLI before calling solve() - see resume path in
+        # cli/solve_commands.py). Used by solve() to restore the adaptive
+        # CFL state (cfl_history) instead of always resetting to
+        # config.cfl_init on resume.
+        self.convergence_history = None
+
         # FVM face data holder (build_from_tetrahedra() is not used - see
         # solve(): face data comes from grid_data.ensure_faces_exist(), the
         # Numba-accelerated path; this instance is kept only as the shared
@@ -366,10 +373,33 @@ class FRSolver:
             f"max_iter={actual_max_iter}, turbulent={turbulent})"
         )
 
+        # Restore adaptive CFL state on resume. Without this, the CFL always
+        # resets to config.cfl_init when resuming from a checkpoint,
+        # discarding whatever the adaptive mechanism had converged to (e.g.
+        # a CFL reduced far below cfl_init to survive a stiff region) - the
+        # first post-resume iterations would then re-attempt the original,
+        # already-known-risky cfl_init and could immediately diverge again.
+        if self.convergence_history and self.convergence_history.get('cfl_history'):
+            restored_cfl = float(self.convergence_history['cfl_history'][-1])
+            if restored_cfl > 0:
+                logger.info(
+                    f"Restoring adaptive CFL from checkpoint history: "
+                    f"{self.time_integrator.cfl_target:.4f} -> {restored_cfl:.4f}"
+                )
+                self.time_integrator.cfl_target = restored_cfl
+
         cd_history, cl_history, res_history = [], [], []
-        initial_res = None
+        initial_res_vec = None
         converged = False
         start = time.time()
+        # Coordination state shared by the three CFL-adjustment mechanisms
+        # below (divergence auto-recovery, explosive-growth guard, and the
+        # residual-trend adaptive rule) so they can't fight each other -
+        # e.g. the trend rule increasing CFL right back up in the same or
+        # very next iteration after a safety mechanism just cut it, before
+        # the lower CFL has had any chance to actually take effect.
+        last_cfl_cut_iteration = -10**9
+        cfl_cut_cooldown = 20
         # If start_iteration >= actual_max_iter the loop body below never
         # runs; keep `iteration` defined (as the last completed iteration)
         # so the post-loop logging/checkpoint code doesn't reference an
@@ -382,6 +412,11 @@ class FRSolver:
 
         for step in range(1, actual_max_iter - start_iteration + 1):
             iteration = start_iteration + step
+            # Reset per-iteration flag: was CFL already cut by a safety
+            # mechanism (divergence recovery / explosive-growth guard) this
+            # iteration? If so, the trend-based rule below skips entirely
+            # rather than potentially reversing the cut in the same step.
+            cfl_cut_this_iter = False
             if self.bc_handler is not None:
                 self.bc_handler.update_ramp_factor(iteration, actual_max_iter)
 
@@ -451,8 +486,9 @@ class FRSolver:
                 if self.time_integrator.cfl_target > 0.01:
                     old_cfl = self.time_integrator.cfl_target
                     self.time_integrator.cfl_target = max(old_cfl * 0.1, 0.005)
+                    last_cfl_cut_iteration = iteration
                     logger.warning(f"[AUTO-RECOVERY] Attempting automatic recovery by reducing CFL to {self.time_integrator.cfl_target:.4f}")
-                    
+
                     # Restore solution from previous step if available
                     if iteration > 1 and hasattr(self, '_last_stable_solution'):
                         self.solution = self._last_stable_solution.copy()
@@ -467,11 +503,28 @@ class FRSolver:
                 self._last_stable_solution = self.solution.copy()
 
             # Normalised multi-equation residual (RMS over mass/momentum/energy).
-            res_vec = np.sqrt(np.mean(R[:, :5]**2, axis=0))     # per-equation RMS
-            res_norm = float(np.linalg.norm(res_vec))
-            if initial_res is None or iteration == 1:
-                initial_res = max(res_norm, 1e-30)
-            rel_res = res_norm / initial_res
+            #
+            # Volume-weighted, not a plain per-cell mean: R is already
+            # per-unit-volume (residual.compute() divides by cell_volumes),
+            # but an unweighted mean still counts every cell equally
+            # regardless of how much of the domain it represents - a
+            # boundary layer can hold thousands of tiny cells with locally
+            # noisy residuals that would otherwise swamp the signal from
+            # the much larger (but far fewer) far-field cells.
+            cell_volumes = geom.cell_volumes
+            total_volume = float(np.sum(cell_volumes))
+            res_vec = np.sqrt(np.sum(R[:, :5]**2 * cell_volumes[:, None], axis=0) / total_volume)
+
+            # Each of the 5 equations is normalised by ITS OWN initial-
+            # iteration RMS before being combined into one scalar. Without
+            # this, the energy equation's residual - intrinsically
+            # ~rho*vel_inf^3 in scale, orders of magnitude larger than the
+            # continuity/momentum residuals - dominates a plain combined
+            # L2 norm, so "convergence" would really only track the energy
+            # equation while mass/momentum are still moving.
+            if initial_res_vec is None or iteration == 1:
+                initial_res_vec = np.maximum(res_vec, 1e-30)
+            rel_res = float(np.linalg.norm(res_vec / initial_res_vec)) / np.sqrt(len(res_vec))
             res_history.append(rel_res)
             
             # === EARLY DIVERGENCE WARNING ===
@@ -485,27 +538,77 @@ class FRSolver:
                     )
                     # Force aggressive CFL reduction
                     self.time_integrator.cfl_target = max(self.time_integrator.cfl_target * 0.2, 0.005)
+                    last_cfl_cut_iteration = iteration
+                    cfl_cut_this_iter = True
                     logger.warning(f"[AUTO-FIX] Aggressively reduced CFL to {self.time_integrator.cfl_target:.4f}")
 
-            # Adaptive CFL adjustment based on residual trend
-            if iteration > 1 and len(res_history) >= 3:
-                recent_trend = (res_history[-1] - res_history[-3]) / (res_history[-3] + 1e-30)
+            # Adaptive CFL adjustment based on residual trend (IMPROVED)
+            # Use longer window and log-scale for better stability. Skipped
+            # entirely if a safety mechanism already cut CFL this iteration
+            # (cfl_cut_this_iter) - otherwise this rule could immediately
+            # increase CFL right back up in the very same step, since the
+            # 8-iteration trend window doesn't yet reflect the cut's effect.
+            if not cfl_cut_this_iter and iteration > 10 and len(res_history) >= 8:
+                # Use last 8 iterations for trend analysis (smoother signal)
+                n_window = min(8, len(res_history))
+                recent = res_history[-n_window:]
                 
-                if recent_trend > 0.2:  # Residuals increasing rapidly
+                # Compute log-scale trend (better for exponential decay/growth)
+                # trend = ln(res_final/res_initial) / n_steps
+                # Negative = decreasing, Positive = increasing
+                if recent[0] > 1e-30 and recent[-1] > 1e-30:
+                    log_trend = np.log(recent[-1] / recent[0]) / (n_window - 1)
+                else:
+                    log_trend = 0.0
+                
+                # Add hysteresis to prevent oscillation
+                # Only adjust if trend is significant AND sustained
+                cfl_adjusted = False
+                
+                # Check for divergence or rapid increase
+                if log_trend > 0.15:  # ~16% increase per step (aggressive threshold)
                     old_cfl = self.time_integrator.cfl_target
-                    self.time_integrator.cfl_target = max(old_cfl * 0.5, 0.01)
+                    # More conservative reduction: ×0.6 instead of ×0.5
+                    self.time_integrator.cfl_target = max(old_cfl * 0.6, 0.01)
+                    last_cfl_cut_iteration = iteration
                     logger.warning(
-                        f"  [CFL ADJUST] Residuals increasing (trend={recent_trend:.2f}), "
+                        f"  [CFL ADJUST] Residuals increasing (log_trend={log_trend:.3f}/step), "
                         f"reducing CFL: {old_cfl:.3f} -> {self.time_integrator.cfl_target:.3f}"
                     )
-                elif recent_trend < -0.15 and self.time_integrator.cfl_target < self.config.cfl_max:
-                    old_cfl = self.time_integrator.cfl_target
-                    self.time_integrator.cfl_target = min(old_cfl * 1.2, self.config.cfl_max)
-                    logger.info(
-                        f"  [CFL ADJUST] Residuals decreasing well (trend={recent_trend:.2f}), "
-                        f"increasing CFL: {old_cfl:.3f} -> {self.time_integrator.cfl_target:.3f}"
-                    )
+                    cfl_adjusted = True
 
+                # Check for good convergence (can increase CFL) - only once
+                # the CFL has been stable (no safety cut) for a cooldown
+                # window, so an increase can't immediately undo a cut made
+                # before the lower CFL has had a chance to prove itself.
+                elif (log_trend < -0.25
+                      and self.time_integrator.cfl_target < self.config.cfl_max
+                      and iteration - last_cfl_cut_iteration >= cfl_cut_cooldown):
+                    # Require sustained decrease over the window
+                    # Check that most points are decreasing
+                    decreases = sum(1 for i in range(len(recent)-1) 
+                                   if recent[i+1] < recent[i])
+                    decrease_ratio = decreases / (len(recent) - 1)
+                    
+                    if decrease_ratio > 0.7:  # At least 70% of steps decreasing
+                        old_cfl = self.time_integrator.cfl_target
+                        # Moderate increase: ×1.15 instead of ×1.2
+                        self.time_integrator.cfl_target = min(old_cfl * 1.15, self.config.cfl_max)
+                        logger.info(
+                            f"  [CFL ADJUST] Residuals decreasing well (log_trend={log_trend:.3f}/step, "
+                            f"decrease_ratio={decrease_ratio:.0%}), "
+                            f"increasing CFL: {old_cfl:.3f} -> {self.time_integrator.cfl_target:.3f}"
+                        )
+                        cfl_adjusted = True
+                
+                if not cfl_adjusted and iteration % 50 == 0:
+                    # Log status every 50 iterations even when not adjusting
+                    logger.debug(
+                        f"  [CFL STATUS] log_trend={log_trend:.3f}/step, "
+                        f"CFL={self.time_integrator.cfl_target:.3f}, "
+                        f"no adjustment needed"
+                    )
+            
             # Coefficients every iteration for accurate monitoring. Includes
             # skin-friction drag/lift via wall_shear_stress(), reusing this
             # iteration's gvel/mu_t/bstates (computed pre-step above) rather
@@ -527,7 +630,7 @@ class FRSolver:
                 )
             
             try:
-                Cd, Cl = self.aero_calculator.compute_coefficients(
+                Cd, Cl, Cd_p, Cd_f = self.aero_calculator.compute_coefficients(
                     self.solution, iteration,
                     viscous_residual=residual, grad_vel=gvel, mu_t=mu_t,
                     boundary_states=bstates,
@@ -541,12 +644,22 @@ class FRSolver:
             cd_history.append(Cd)
             cl_history.append(Cl)
 
-            # Output coefficients every iteration to show latest values.
+            # Output coefficients with improved formatting
+            # Main line: iteration info
             logger.info(
-                f"Iter {iteration:5d}/{actual_max_iter} | "
-                f"Res(rel): {rel_res:.4e} | "
-                f"Cd: {Cd:.4f} | "
+                f"Iter {iteration:5d}/{actual_max_iter}  |  "
+                f"Res(rel): {rel_res:.4e}  |  "
+                f"Cd: {Cd:.4f}  |  "
                 f"Cl: {Cl:.4f}"
+            )
+            
+            # Second line: Cd breakdown (aligned with first |)
+            # Calculate indentation to align 'Cd' with the first '|'
+            # "Iter XXXX/XXXX  |  " = ~20 chars, so indent to position of first |
+            prefix_len = len(f"Iter {iteration:5d}/{actual_max_iter}")
+            logger.info(
+                f"{'':>{prefix_len + 2}s}  "
+                f"Cd breakdown: pressure={Cd_p:.4f}, friction={Cd_f:.4f}"
             )
 
             # Save checkpoint periodically

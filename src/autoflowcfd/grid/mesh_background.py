@@ -21,6 +21,7 @@ from .mesh_domain_classify import classify_boundary_groups
 from .mesh_tetgen_core import (
     build_seam_taper_scale, fill_core_volume,
     compute_local_thickness_limit, repair_nonmanifold_cells,
+    attribute_cells_from_trifaces,
 )
 
 
@@ -32,7 +33,8 @@ def generate_hybrid_mesh(
     max_layers: int = 30,
     min_cell_size: float = 0.001,
     target_cells: int = 500000,
-    surface_boundaries: Optional['BoundaryMap'] = None
+    surface_boundaries: Optional['BoundaryMap'] = None,
+    max_cell_size: Optional[float] = None,
 ) -> 'VolumeMeshData':
     """Generate a volume mesh that conforms exactly to the closed input surface.
 
@@ -68,6 +70,19 @@ def generate_hybrid_mesh(
         surface_boundaries: Boundary mapping from the surface mesh (inlet/
             outlet/wall/symmetry groups); required to classify which faces
             get BL-extruded and to inherit boundary groups on the result
+        max_cell_size: Optional hard cap (meters) on core-region cell size,
+            applied uniformly across the whole core fill via a single
+            tetgen region constraint. tetgen's core fill otherwise has no
+            size cap at all beyond shape-quality bounds, so cells can grow
+            as large as whatever coarse far-field input facet (e.g. a
+            sparsely-triangulated tunnel/inlet/outlet wall) happens to
+            allow. None disables the cap entirely (unbounded core cell
+            size, matching prior behavior exactly). A distance-graded
+            (fine near the wall, coarsening outward) version was tried and
+            abandoned - tetgen's per-region refinement does not reliably
+            converge multiple simultaneous regions at real-world scale;
+            see the comment at this parameter's use site below for the
+            specific evidence.
 
     Returns:
         VolumeMeshData with a domain-conforming hybrid mesh (BL + core)
@@ -85,18 +100,46 @@ def generate_hybrid_mesh(
     bbox_max = np.asarray(bounding_box['max'], dtype=np.float64)
 
     logger.info("Step 1/4: Classifying boundary groups (extrude vs. core-only)...")
-    extrude_faces, core_faces, extruded_groups, extrude_face_groups, hole_points = classify_boundary_groups(
+    (extrude_faces, core_faces, extruded_groups, extrude_face_groups,
+     hole_points, core_face_groups, _is_closed_solid_face) = classify_boundary_groups(
         surface_nodes, surface_faces, surface_boundaries, bbox_min, bbox_max
     )
+
+    # Marker IDs for tetgen's facet-marker mechanism (attribute_cells_from_trifaces)
+    # - only needed when max_cell_size grading is active (it's the only thing
+    # that switches fill_core_volume's nobisect off, which is what breaks the
+    # plain node-index-matching boundary attribution for subdivided facets).
+    # 0 is reserved by tetgen for "no marker" (an unmarked/interior facet).
+    group_name_to_marker = {name: i + 1 for i, name in enumerate(surface_boundaries.groups.keys())}
+    marker_to_name = {v: k for k, v in group_name_to_marker.items()}
 
     if len(extrude_faces) == 0:
         logger.warning(
             "No boundary group was eligible for BL extrusion; filling the "
             "entire closed surface directly with tetgen (no boundary layer)"
         )
-        core_nodes, core_tets = fill_core_volume(surface_nodes, surface_faces, holes=hole_points)
+        face_markers = None
+        regions = None
+        if max_cell_size is not None:
+            face_group_name = np.full(len(surface_faces), '', dtype=object)
+            for name, idx in surface_boundaries.groups.items():
+                face_group_name[idx] = name
+            face_markers = np.array(
+                [group_name_to_marker.get(n, 0) for n in face_group_name], dtype=np.int32
+            )
+            center = surface_nodes.mean(axis=0)
+            regions = [(center, 1, max_cell_size ** 3 * 0.15)]
+        core_nodes, core_tets, trifaces, triface_markers = fill_core_volume(
+            surface_nodes, surface_faces, holes=hole_points,
+            regions=regions, face_markers=face_markers,
+        )
         merged_nodes, merged_cells = core_nodes, core_tets
-        cell_groups = np.full(len(merged_cells), '', dtype=object)
+        if face_markers is not None:
+            cell_groups = attribute_cells_from_trifaces(
+                core_tets, trifaces, triface_markers, marker_to_name
+            )
+        else:
+            cell_groups = np.full(len(merged_cells), '', dtype=object)
     else:
         logger.info(
             f"Step 2/4: Extruding BL layers from {len(extrude_faces)} faces "
@@ -161,7 +204,58 @@ def generate_hybrid_mesh(
         )
         plc_points = outer_nodes
         plc_faces = np.vstack([bl_outer_surface, core_faces])
-        core_nodes, core_tets = fill_core_volume(plc_points, plc_faces, holes=hole_points)
+
+        # bl_outer_surface's portion is marked with its own source group
+        # too (extrude_face_groups), not left at 0/unmarked. It's normally
+        # a purely internal BL/core interface (a face there is shared
+        # between one BL cell and one core cell, never exposed to the
+        # domain exterior) so this is usually redundant with bl_cell_groups
+        # - but a wall entirely pinned by the seam taper (e.g. every node
+        # of a coarse, corner-only wall facet happens to sit within
+        # taper_rings hops of a seam) can collapse to zero BL thickness,
+        # at which point its "outer surface" IS the real exposed boundary.
+        # Marking it directly makes attribute_cells_from_trifaces recover
+        # that case correctly too, instead of only the node-index-matching
+        # fallback (which breaks once nobisect=False lets tetgen subdivide
+        # that now-oversized, previously-2-triangle wall facet, producing
+        # sub-triangles the pre-fill node lookup was never built to match).
+        face_markers = None
+        regions = None
+        if max_cell_size is not None:
+            # A distance-graded multi-tier sphere scheme was tried and
+            # abandoned: tetgen's per-region variable-volume refinement
+            # does not reliably converge multiple simultaneous regions to
+            # their own targets when they compete for one shared Steiner
+            # budget - small/aggressive inner regions can starve a
+            # necessary large outer/far-field region of the points it
+            # needs (and vice versa). A single flat region covering the
+            # entire core sidesteps that competition entirely (only one
+            # region to fund), and its actual accuracy is governed by
+            # fill_core_volume's own Steiner-point budget, which is now
+            # sized from the region's real volume/max_cell_size ratio
+            # rather than a fixed constant (a fixed budget was accurate
+            # to ~1.2x target only for domain/max_cell_size ratios small
+            # enough for it to be sufficient; measured directly on a
+            # 5.5x3x3 m domain capped at 0.05 m, a fixed 300,000-point
+            # budget left a worst-case cell ~5.8x over target - see
+            # mesh_tetgen_core.fill_core_volume's steinerleft comment).
+            bl_outer_markers = np.array(
+                [group_name_to_marker.get(n, 0) for n in extrude_face_groups], dtype=np.int32
+            )
+            core_markers = np.array(
+                [group_name_to_marker.get(n, 0) for n in core_face_groups], dtype=np.int32
+            )
+            face_markers = np.concatenate([bl_outer_markers, core_markers])
+            regions = [(outer_nodes.mean(axis=0), 1, max_cell_size ** 3 * 0.15)]
+
+        core_nodes, core_tets, trifaces, triface_markers = fill_core_volume(
+            plc_points, plc_faces, holes=hole_points, regions=regions, face_markers=face_markers,
+        )
+        core_cell_groups = (
+            attribute_cells_from_trifaces(core_tets, trifaces, triface_markers, marker_to_name)
+            if face_markers is not None
+            else np.full(len(core_tets), '', dtype=object)
+        )
 
         # Merge: BL nodes/cells keep their own indexing untouched. core_tets
         # reference the shared boundary (indices < n_surface_nodes) plus any
@@ -196,14 +290,15 @@ def generate_hybrid_mesh(
         new_core_nodes = core_nodes[n_shared:]
         merged_nodes = np.vstack([bl_nodes, new_core_nodes])
         merged_cells = np.vstack([bl_cells, core_tets_remapped])
-        # Core cells get an empty placeholder here - their boundary-group
-        # attribution (tunnel/inlet/outlet-type groups, never displaced by
-        # extrusion) still goes through identify_boundaries_from_surface's
-        # node-index matching below, which works correctly for them since
-        # their nodes were never remapped.
-        cell_groups = np.concatenate([
-            bl_cell_groups, np.full(len(core_tets_remapped), '', dtype=object)
-        ])
+        # core_cell_groups (from facet markers, populated above whenever
+        # max_cell_size grading is active) already identifies core cells'
+        # source groups directly. When grading isn't active, it's all ''
+        # placeholders instead - those core-only groups (tunnel/inlet/
+        # outlet-type, never displaced by extrusion) still go through
+        # identify_boundaries_from_surface's node-index matching below,
+        # which works correctly for them since their nodes were never
+        # remapped in that case (nobisect=True preserves them verbatim).
+        cell_groups = np.concatenate([bl_cell_groups, core_cell_groups])
         logger.info(
             f"  Merged mesh: {len(merged_nodes)} nodes, {len(merged_cells)} cells "
             f"({len(bl_cells)} BL + {len(core_tets_remapped)} core)"

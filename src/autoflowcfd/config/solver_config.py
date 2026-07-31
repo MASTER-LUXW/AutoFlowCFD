@@ -126,6 +126,12 @@ class SteadyConfig(SolverConfig):
         target_cells: Target total cell count (currently only consulted by the
             pure-extrusion volume mesh path; the tetgen-based hybrid path
             ignores it)
+        max_cell_size: Optional hard cap (meters) on core-region cell size,
+            graded outward from the BL's own near-wall size instead of
+            applied uniformly. None leaves the core fill's cell size
+            unbounded (only tetgen's own shape-quality bounds apply, so
+            cells can grow as large as a coarse far-field input facet, e.g.
+            a sparsely-triangulated tunnel/inlet/outlet wall, allows).
         rho_inf: Freestream density (kg/m^3) - single source of truth for
             the initial condition, inlet/farfield boundary conditions, and
             Cd/Cl normalization, so the three always stay consistent.
@@ -150,6 +156,7 @@ class SteadyConfig(SolverConfig):
     max_layers: int = 6
     min_cell_size: float = 0.003
     target_cells: int = 500000
+    max_cell_size: Optional[float] = None
     rho_inf: float = 1.225
     vel_inf: float = 30.0
     p_inf: float = 101325.0
@@ -183,6 +190,14 @@ class SteadyConfig(SolverConfig):
             raise ValueError(f"min_cell_size must be positive, got {self.min_cell_size}")
         if self.target_cells < 1:
             raise ValueError(f"target_cells must be positive, got {self.target_cells}")
+        if self.max_cell_size is not None:
+            if self.max_cell_size <= 0:
+                raise ValueError(f"max_cell_size must be positive, got {self.max_cell_size}")
+            if self.max_cell_size < self.min_cell_size:
+                raise ValueError(
+                    f"max_cell_size ({self.max_cell_size}) cannot be smaller than "
+                    f"min_cell_size ({self.min_cell_size})"
+                )
 
         # Validate freestream conditions
         if self.rho_inf <= 0:
@@ -206,8 +221,8 @@ class TransientConfig(SolverConfig):
         sample_interval: Data sampling interval (steps)
         warmup_time: Warmup time to skip (seconds, for statistics)
         init_from_checkpoint: Initialize from steady-state checkpoint
-        growth_rate, max_layers, min_cell_size, target_cells: Volume mesh
-            generation parameters, same meaning as SteadyConfig.
+        growth_rate, max_layers, min_cell_size, target_cells, max_cell_size:
+            Volume mesh generation parameters, same meaning as SteadyConfig.
         rho_inf, vel_inf, p_inf: Freestream conditions, same meaning and
             role as SteadyConfig (single source of truth for the initial
             condition, boundary conditions, and Cd/Cl normalization).
@@ -231,6 +246,7 @@ class TransientConfig(SolverConfig):
     max_layers: int = 6
     min_cell_size: float = 0.003
     target_cells: int = 500000
+    max_cell_size: Optional[float] = None
     rho_inf: float = 1.225
     vel_inf: float = 30.0
     p_inf: float = 101325.0
@@ -265,6 +281,14 @@ class TransientConfig(SolverConfig):
             raise ValueError(f"min_cell_size must be positive, got {self.min_cell_size}")
         if self.target_cells < 1:
             raise ValueError(f"target_cells must be positive, got {self.target_cells}")
+        if self.max_cell_size is not None:
+            if self.max_cell_size <= 0:
+                raise ValueError(f"max_cell_size must be positive, got {self.max_cell_size}")
+            if self.max_cell_size < self.min_cell_size:
+                raise ValueError(
+                    f"max_cell_size ({self.max_cell_size}) cannot be smaller than "
+                    f"min_cell_size ({self.min_cell_size})"
+                )
 
         # Validate freestream conditions
         if self.rho_inf <= 0:

@@ -20,6 +20,7 @@ Example:
 import click
 import json
 from pathlib import Path
+from typing import Optional
 from loguru import logger
 
 
@@ -264,6 +265,10 @@ def validate(
 @click.option("--max-layers", type=int, default=12, help="Maximum extrusion layers")
 @click.option("--min-cell-size", type=float, default=0.01, help="Minimum cell size (m)")
 @click.option("--target-cells", type=int, default=400000, help="Target total volume cell count")
+@click.option("--max-cell-size", type=float, default=None,
+              help="Max core-region cell size (m), graded outward from the BL's near-wall "
+                   "size; unset means the core fill has no size cap beyond tetgen's own "
+                   "shape-quality bounds")
 @click.option("--skip-quality-report", is_flag=True, help="Skip volume mesh quality report")
 @click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
 def generate_volume(
@@ -273,6 +278,7 @@ def generate_volume(
     max_layers: int,
     min_cell_size: float,
     target_cells: int,
+    max_cell_size: Optional[float],
     skip_quality_report: bool,
     json_output: bool
 ) -> None:
@@ -327,6 +333,7 @@ def generate_volume(
                 'max_layers': max_layers,
                 'min_cell_size': min_cell_size,
                 'target_cells': target_cells,
+                'max_cell_size': max_cell_size,
             }
         )
 

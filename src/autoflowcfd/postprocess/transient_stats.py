@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 
 from ..grid.structures import GridData
 from ..core.backend.base import SolutionVector
+from ._field_utils import cell_to_node
 
 
 @dataclass
@@ -144,27 +145,44 @@ class TransientStatistics:
     
     def _update_online_stats(self, solution: SolutionVector) -> None:
         """Update running statistics using Welford's algorithm
-        
+
         This allows computing mean and variance in a single pass
         without storing all samples.
-        
+
         Args:
             solution: Current solution snapshot
         """
-        # Extract fields from solution
-        # Placeholder: assuming solution has velocity and pressure
-        # Actual implementation depends on SolutionVector structure
-        
-        fields = {
-            'velocity_u': np.zeros(self.grid_data.metadata.node_count),
-            'velocity_v': np.zeros(self.grid_data.metadata.node_count),
-            'velocity_w': np.zeros(self.grid_data.metadata.node_count),
-            'pressure': np.zeros(self.grid_data.metadata.node_count)
-        }
-        
-        # TODO: Extract actual field values from solution
-        # For now, use placeholder zeros
-        
+        n_points = self.grid_data.metadata.node_count
+
+        if solution.data is not None and solution.n_cells > 0:
+            u, v, w = solution.get_velocity()
+            p = solution.get_pressure()
+            conn = np.asarray(self.grid_data.cells.connectivity)
+            volumes = getattr(self.grid_data.cells, "volumes", None)
+
+            if solution.n_cells == n_points:
+                # Already node-resolution data - use directly.
+                fields = {'velocity_u': u, 'velocity_v': v, 'velocity_w': w, 'pressure': p}
+            else:
+                # Cell-centered FVM data - interpolate to nodes (this used
+                # to just build all-zero arrays here regardless of the
+                # actual solution passed in, so every mean/RMS statistic
+                # came out exactly zero no matter what flow was simulated).
+                fields = {
+                    'velocity_u': cell_to_node(conn, u, n_points, volumes=volumes),
+                    'velocity_v': cell_to_node(conn, v, n_points, volumes=volumes),
+                    'velocity_w': cell_to_node(conn, w, n_points, volumes=volumes),
+                    'pressure': cell_to_node(conn, p, n_points, volumes=volumes, fallback=101325.0),
+                }
+        else:
+            logger.warning("Solution data not available for this sample - accumulating zeros.")
+            fields = {
+                'velocity_u': np.zeros(n_points),
+                'velocity_v': np.zeros(n_points),
+                'velocity_w': np.zeros(n_points),
+                'pressure': np.zeros(n_points),
+            }
+
         if self.mean_accumulator is None:
             # First sample: initialize accumulators
             self.mean_accumulator = {k: v.copy() for k, v in fields.items()}

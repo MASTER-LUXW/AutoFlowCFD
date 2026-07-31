@@ -94,8 +94,10 @@ class BoundaryConditionHandler:
         
         if boundary_type in ["WALL", "GROUND"]:
             return self._wall_bc(rho, u, v, w, p, k, omega, normal, boundary_type)
-        elif boundary_type in ["INLET", "FARFIELD"]:
-            return self._inlet_farfield_bc()
+        elif boundary_type == "INLET":
+            return self._inlet_bc()
+        elif boundary_type == "FARFIELD":
+            return self._farfield_bc(rho, u, v, w, p, k, omega, normal)
         elif boundary_type == "OUTLET":
             return self._outlet_bc(rho, u, v, w, p, k, omega)
         elif boundary_type == "SYMMETRY":
@@ -145,8 +147,13 @@ class BoundaryConditionHandler:
         return np.array([rho_ghost, rhou_ghost, rhov_ghost, rhow_ghost,
                         E_ghost, rhok_ghost, rhow_ghost_sst])
     
-    def _inlet_farfield_bc(self) -> np.ndarray:
-        """Inlet/farfield boundary condition with ramp factor.
+    def _inlet_bc(self) -> np.ndarray:
+        """Prescribed-velocity inlet boundary condition with ramp factor.
+
+        Unlike FARFIELD, an INLET is an explicit prescribed-inflow face (the
+        user named it "inlet"), so a hard Dirichlet freestream state is the
+        physically intended condition here - there is no ambiguity about
+        flow direction to resolve.
 
         Freestream turbulence (conservative form): a low k and a moderate omega
         giving a small free-stream eddy viscosity.
@@ -166,6 +173,72 @@ class BoundaryConditionHandler:
         omega_inf = 5.0 * max(u_inf, 1.0) / 0.1     # length scale ~0.1 m
         return np.array([rho_inf, rhou_inf, 0.0, 0.0, E_inf,
                         rho_inf * k_inf, rho_inf * omega_inf])
+
+    def _farfield_bc(self, rho: float, u: float, v: float, w: float, p: float,
+                     k: float, omega: float, normal: np.ndarray) -> np.ndarray:
+        """Characteristic (Riemann-invariant) subsonic far-field boundary condition.
+
+        A box-shaped far-field/tunnel boundary is local inflow on the
+        front/sides but local outflow on the rear/top - imposing the full
+        freestream Dirichlet state everywhere (the previous behaviour) forces
+        mass through what are physically outflow faces and biases the
+        pressure field there, which feeds back into Cd/Cl and slows/
+        destabilizes convergence. This applies the standard 1-D
+        Riemann-invariant extrapolation along the face normal: the outgoing
+        invariant R+ is taken from the interior, the incoming invariant R-
+        is taken from the fixed freestream state, and whichever side the
+        resulting normal velocity implies (inflow vs. outflow) supplies the
+        tangential velocity and entropy (rho, p), matching the standard
+        subsonic far-field BC used in e.g. SU2/OpenFOAM's characteristic
+        far-field condition. Assumes the freestream direction is +x, matching
+        `_inlet_bc`/`_precompute_face_types`'s convention (v_inf = w_inf = 0).
+        """
+        gamma = self.gamma
+        rho_inf = self.rho_inf
+        p_inf = self.p_inf
+        u_inf = self.get_current_farfield_velocity()
+
+        rho_safe = max(rho, 1e-10)
+        c = np.sqrt(gamma * max(p, 100.0) / rho_safe)
+        c_inf = np.sqrt(gamma * p_inf / max(rho_inf, 1e-10))
+
+        vel = np.array([u, v, w])
+        vel_inf = np.array([u_inf, 0.0, 0.0])
+
+        un = float(np.dot(vel, normal))
+        un_inf = float(np.dot(vel_inf, normal))
+
+        R_plus = un + 2.0 * c / (gamma - 1.0)
+        R_minus = un_inf - 2.0 * c_inf / (gamma - 1.0)
+
+        un_b = 0.5 * (R_plus + R_minus)
+        c_b = max((gamma - 1.0) / 4.0 * (R_plus - R_minus), 1e-6)
+
+        if un_b < 0.0:
+            # Local inflow: tangential velocity & entropy come from freestream.
+            vel_tang = vel_inf - un_inf * normal
+            rho_side, p_side = rho_inf, p_inf
+            k_b = 1.5 * (0.01 * max(u_inf, 1.0))**2
+            omega_b = 5.0 * max(u_inf, 1.0) / 0.1
+        else:
+            # Local outflow: tangential velocity & entropy extrapolated from interior.
+            vel_tang = vel - un * normal
+            rho_side, p_side = rho_safe, max(p, 100.0)
+            k_b, omega_b = k, omega
+
+        s = p_side / (rho_side ** gamma)
+        rho_b = max(c_b**2 / (gamma * s), 1e-10) ** (1.0 / (gamma - 1.0))
+        p_b = rho_b * c_b**2 / gamma
+
+        vel_b = vel_tang + un_b * normal
+        u_b, v_b, w_b = vel_b
+
+        rhou_b = rho_b * u_b
+        rhov_b = rho_b * v_b
+        rhow_b = rho_b * w_b
+        E_b = p_b / (gamma - 1.0) + 0.5 * rho_b * (u_b**2 + v_b**2 + w_b**2)
+
+        return np.array([rho_b, rhou_b, rhov_b, rhow_b, E_b, rho_b * k_b, rho_b * omega_b])
 
     def _outlet_bc(self, rho: float, u: float, v: float, w: float,
                   p: float, k: float, omega: float) -> np.ndarray:
@@ -314,10 +387,14 @@ class BoundaryConditionHandler:
                     rho_t, u_t, v_t, w_t, p_t, k_t, omega_t, 
                     normals_t, btype
                 )
-            elif btype in ["INLET", "FARFIELD"]:
-                # Inlet/farfield uses fixed freestream values
+            elif btype == "INLET":
+                # Prescribed inflow: fixed freestream Dirichlet state.
                 n_type = np.sum(type_mask)
-                ghost_states = np.tile(self._inlet_farfield_bc(), (n_type, 1))
+                ghost_states = np.tile(self._inlet_bc(), (n_type, 1))
+            elif btype == "FARFIELD":
+                ghost_states = self._farfield_bc_vectorized(
+                    rho_t, u_t, v_t, w_t, p_t, k_t, omega_t, normals_t
+                )
             elif btype == "OUTLET":
                 ghost_states = self._outlet_bc_vectorized(
                     rho_t, u_t, v_t, w_t, p_t, k_t, omega_t
@@ -396,6 +473,66 @@ class BoundaryConditionHandler:
             E_ghost, rhok_ghost, rhow_ghost_sst
         ])
     
+    def _farfield_bc_vectorized(self, rho: np.ndarray, u: np.ndarray, v: np.ndarray,
+                               w: np.ndarray, p: np.ndarray, k: np.ndarray,
+                               omega: np.ndarray, normals: np.ndarray) -> np.ndarray:
+        """Vectorized characteristic far-field BC - see `_farfield_bc` for the
+        per-face derivation (Riemann-invariant inflow/outflow split)."""
+        gamma = self.gamma
+        rho_inf = self.rho_inf
+        p_inf = self.p_inf
+        u_inf = self.get_current_farfield_velocity()
+
+        rho_safe = np.maximum(rho, 1e-10)
+        p_safe = np.maximum(p, 100.0)
+        c = np.sqrt(gamma * p_safe / rho_safe)
+        c_inf = np.sqrt(gamma * p_inf / max(rho_inf, 1e-10))
+
+        nx, ny, nz = normals[:, 0], normals[:, 1], normals[:, 2]
+        un = u * nx + v * ny + w * nz
+        un_inf = u_inf * nx  # freestream direction is +x: v_inf = w_inf = 0
+
+        R_plus = un + 2.0 * c / (gamma - 1.0)
+        R_minus = un_inf - 2.0 * c_inf / (gamma - 1.0)
+
+        un_b = 0.5 * (R_plus + R_minus)
+        c_b = np.maximum((gamma - 1.0) / 4.0 * (R_plus - R_minus), 1e-6)
+
+        inflow = un_b < 0.0
+
+        u_tang = u - un * nx
+        v_tang = v - un * ny
+        w_tang = w - un * nz
+        u_tang_inf = u_inf - un_inf * nx
+        v_tang_inf = -un_inf * ny
+        w_tang_inf = -un_inf * nz
+
+        u_tang_b = np.where(inflow, u_tang_inf, u_tang)
+        v_tang_b = np.where(inflow, v_tang_inf, v_tang)
+        w_tang_b = np.where(inflow, w_tang_inf, w_tang)
+
+        rho_side = np.where(inflow, rho_inf, rho_safe)
+        p_side = np.where(inflow, p_inf, p_safe)
+        k_inf = 1.5 * (0.01 * max(u_inf, 1.0))**2
+        omega_inf = 5.0 * max(u_inf, 1.0) / 0.1
+        k_b = np.where(inflow, k_inf, k)
+        omega_b = np.where(inflow, omega_inf, omega)
+
+        s = p_side / rho_side ** gamma
+        rho_b = np.maximum(c_b**2 / (gamma * s), 1e-10) ** (1.0 / (gamma - 1.0))
+        p_b = rho_b * c_b**2 / gamma
+
+        u_b = u_tang_b + un_b * nx
+        v_b = v_tang_b + un_b * ny
+        w_b = w_tang_b + un_b * nz
+
+        rhou_b = rho_b * u_b
+        rhov_b = rho_b * v_b
+        rhow_b = rho_b * w_b
+        E_b = p_b / (gamma - 1.0) + 0.5 * rho_b * (u_b**2 + v_b**2 + w_b**2)
+
+        return np.column_stack([rho_b, rhou_b, rhov_b, rhow_b, E_b, rho_b * k_b, rho_b * omega_b])
+
     def _outlet_bc_vectorized(self, rho: np.ndarray, u: np.ndarray, v: np.ndarray,
                              w: np.ndarray, p: np.ndarray, k: np.ndarray,
                              omega: np.ndarray) -> np.ndarray:

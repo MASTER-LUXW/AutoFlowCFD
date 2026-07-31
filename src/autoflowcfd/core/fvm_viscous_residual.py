@@ -145,13 +145,26 @@ class ViscousRANSResidual:
         mu_t = self._eddy_viscosity(rho, k, omega, grad_vel) if self.turbulent \
             else np.zeros(n_cells)
 
+        # k/omega gradient, computed once here and shared by _viscous_flux
+        # (turbulent diffusion term, needed regardless of self.turbulent -
+        # see below) and _sst_sources (production/cross-diffusion, only
+        # when turbulent). Previously each of those computed its own
+        # independent copy of this same Green-Gauss gradient (with no
+        # boundary contribution), on top of the k/omega columns ALSO
+        # carried through _inviscid_flux's separate 7-variable MUSCL-
+        # reconstruction gradient - 3 evaluations of the same physical
+        # quantity per residual call. This shared version additionally
+        # includes the boundary (ghost-state) contribution, which the two
+        # duplicated computations were missing.
+        grad_turb = self._turbulence_gradient(k, omega, boundary_states)
+
         flux_accum = np.zeros((n_cells, 7), dtype=np.float64)
 
         # --- inviscid flux via MUSCL + HLLC ---
         self._inviscid_flux(U, boundary_states, flux_accum)
 
         # --- viscous flux (molecular + turbulent) ---
-        self._viscous_flux(rho, vel, T, k, omega, mu_t, grad_vel,
+        self._viscous_flux(rho, vel, T, k, omega, mu_t, grad_vel, grad_turb,
                            boundary_states, flux_accum)
 
         # Convert surface-integral of fluxes into a residual (divide by V).
@@ -159,9 +172,27 @@ class ViscousRANSResidual:
 
         # --- SST source terms (volumetric, added directly to residual) ---
         if self.turbulent:
-            self._sst_sources(rho, k, omega, mu_t, grad_vel, residual)
+            self._sst_sources(rho, k, omega, mu_t, grad_vel, grad_turb, residual)
 
         return residual
+
+    def _turbulence_gradient(self, k: np.ndarray, omega: np.ndarray,
+                             boundary_states: np.ndarray) -> np.ndarray:
+        """Green-Gauss gradient of [k, omega], shape (n_cells, 2, 3).
+
+        Computed once per residual evaluation and shared by _viscous_flux
+        and _sst_sources (see compute()'s docstring note on why this used
+        to be duplicated).
+        """
+        bo = self.geom.bnd_owner
+        turb_b = None
+        if bo.size:
+            rho_b = np.maximum(boundary_states[self.geom.boundary_mask, 0], 1e-9)
+            k_b = np.maximum(boundary_states[self.geom.boundary_mask, 5] / rho_b, 0.0)
+            omega_b = np.maximum(boundary_states[self.geom.boundary_mask, 6] / rho_b, 1e-6)
+            turb_b = np.column_stack([k_b, omega_b])
+        turb_vars = np.column_stack([k, omega])
+        return green_gauss_gradient(turb_vars, self.geom, turb_b)
 
     # ------------------------------------------------------------------
     # velocity gradient (for strain rate & viscous stress)
@@ -451,7 +482,7 @@ class ViscousRANSResidual:
     # ------------------------------------------------------------------
     # viscous flux
     # ------------------------------------------------------------------
-    def _viscous_flux(self, rho, vel, T, k, omega, mu_t, grad_vel,
+    def _viscous_flux(self, rho, vel, T, k, omega, mu_t, grad_vel, grad_turb,
                       boundary_states, flux_accum):
         geom = self.geom
         io, ineigh = geom.int_owner, geom.int_neigh
@@ -490,11 +521,9 @@ class ViscousRANSResidual:
         fvisc[:, 4] = work + qn
 
         # turbulent variable diffusion: (mu + sigma*mu_t) grad(k or omega).n
-        # OPTIMIZED: Batch compute k and omega gradients together
-        turb_vars = np.column_stack([k, omega])  # (n_cells, 2)
-        gturb = green_gauss_gradient(turb_vars, geom)  # (n_cells, 2, 3)
-        gk, gw = gturb[:, 0, :], gturb[:, 1, :]  # Each (n_cells, 3)
-        
+        # gk/gw: shared gradient computed once in compute() (see _turbulence_gradient).
+        gk, gw = grad_turb[:, 0, :], grad_turb[:, 1, :]  # Each (n_cells, 3)
+
         gk_face = 0.5*(gk[io]+gk[ineigh])
         gw_face = 0.5*(gw[io]+gw[ineigh])
         # blend sigma with F1 (approx face value)
@@ -567,15 +596,13 @@ class ViscousRANSResidual:
     # ------------------------------------------------------------------
     # SST source terms
     # ------------------------------------------------------------------
-    def _sst_sources(self, rho, k, omega, mu_t, grad_vel, residual):
+    def _sst_sources(self, rho, k, omega, mu_t, grad_vel, grad_turb, residual):
         geom = self.geom
         S, Smag = self._strain(grad_vel)
 
-        # OPTIMIZED: Batch compute k and omega gradients together
-        turb_vars = np.column_stack([k, omega])  # (n_cells, 2)
-        gturb = green_gauss_gradient(turb_vars, geom)  # (n_cells, 2, 3)
-        gk, gw = gturb[:, 0, :], gturb[:, 1, :]  # Each (n_cells, 3)
-        
+        # gk/gw: shared gradient computed once in compute() (see _turbulence_gradient).
+        gk, gw = grad_turb[:, 0, :], grad_turb[:, 1, :]  # Each (n_cells, 3)
+
         F1, CDkw = self._f1_blend(rho, k, omega, gk, gw)
 
         beta = _blend(F1, SST_BETA1, SST_BETA2)

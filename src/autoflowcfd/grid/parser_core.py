@@ -32,21 +32,42 @@ class NASParser:
     
     SUPPORTED_VERSIONS = {"v22", "v23", "v24"}
     
-    def __init__(self, file_path: str, encoding: str = 'UTF-8'):
+    # Below this raw (pre-scale) bounding-box max dimension, a file is
+    # assumed to already be in meters when units='auto'; above it, assumed
+    # to be in millimeters. A single-vehicle external-aero domain is
+    # typically a few meters (car) to a few tens of meters (surrounding
+    # tunnel/farfield) - the same geometry expressed in mm would read in
+    # the thousands, comfortably on the other side of this threshold.
+    AUTO_UNITS_MM_THRESHOLD = 50.0
+
+    def __init__(self, file_path: str, encoding: str = 'UTF-8', units: str = 'mm'):
         """初始化解析器
-        
+
         Args:
             file_path: .nas文件路径
             encoding: 文件编码,默认UTF-8
-            
+            units: Length unit of the coordinates in the file: 'mm'
+                (default - matches ANSA's typical export convention, scales
+                by 1e-3 to meters), 'm' (no scaling, use as-is), or 'auto'
+                (heuristic based on the raw bounding-box size - see
+                AUTO_UNITS_MM_THRESHOLD). Previously the mm->m scale factor
+                was hardcoded unconditionally with no way to override or
+                detect a file already in meters, silently corrupting
+                geometry (e.g. a 1m car shrinking to a 1mm dot, or vice
+                versa) for any file not in millimeters.
+
         Raises:
             FileNotFoundError: 文件不存在
-            ValueError: 文件扩展名不正确
+            ValueError: 文件扩展名不正确, or units is not 'mm'/'m'/'auto'
         """
         self.file_path = Path(file_path)
         self.encoding = encoding
         self.version: Optional[str] = None
-        
+
+        if units not in ('mm', 'm', 'auto'):
+            raise ValueError(f"units must be 'mm', 'm', or 'auto', got {units!r}")
+        self.units = units
+
         if not self.file_path.exists():
             raise FileNotFoundError(f"NAS file not found: {file_path}")
         
@@ -104,11 +125,62 @@ class NASParser:
             if nodes.count == 0:
                 raise NASParseError("No nodes found in NAS file")
             
-            # Convert units from mm to meters
-            scale_factor = 1e-3
+            # Convert units to meters (or detect them, if units='auto').
+            raw_extent = float(max(
+                nodes.x.max() - nodes.x.min(),
+                nodes.y.max() - nodes.y.min(),
+                nodes.z.max() - nodes.z.min(),
+            ))
+
+            if self.units == 'mm':
+                scale_factor = 1e-3
+            elif self.units == 'm':
+                scale_factor = 1.0
+            else:  # 'auto'
+                if raw_extent > self.AUTO_UNITS_MM_THRESHOLD:
+                    scale_factor = 1e-3
+                    logger.info(
+                        f"units='auto': raw bounding-box max extent={raw_extent:.4g} > "
+                        f"{self.AUTO_UNITS_MM_THRESHOLD:g} -> assuming millimeters "
+                        f"(scaling by 1e-3)"
+                    )
+                else:
+                    scale_factor = 1.0
+                    logger.info(
+                        f"units='auto': raw bounding-box max extent={raw_extent:.4g} <= "
+                        f"{self.AUTO_UNITS_MM_THRESHOLD:g} -> assuming the file is "
+                        f"already in meters (no scaling)"
+                    )
+
             nodes.x = nodes.x * scale_factor
             nodes.y = nodes.y * scale_factor
             nodes.z = nodes.z * scale_factor
+
+            # Sanity-check the resulting (meters) domain size against a
+            # plausible automotive external-aero range. This never changes
+            # any value - it only turns a silent unit mismatch (which would
+            # otherwise proceed straight into meshing/solving on a
+            # physically nonsensical geometry) into a loud, actionable
+            # warning.
+            scaled_extent = raw_extent * scale_factor
+            if scaled_extent < 0.1:
+                logger.warning(
+                    f"After unit conversion (units={self.units!r}, scale={scale_factor:g}), "
+                    f"the mesh's largest bounding-box dimension is only "
+                    f"{scaled_extent:.4g} m - implausibly small for automotive "
+                    f"external-aero (expect several meters for the vehicle and "
+                    f"tens of meters for the surrounding domain). This usually "
+                    f"means the file's actual units don't match units={self.units!r} "
+                    f"- try units='m' or units='auto'."
+                )
+            elif scaled_extent > 1000.0:
+                logger.warning(
+                    f"After unit conversion (units={self.units!r}, scale={scale_factor:g}), "
+                    f"the mesh's largest bounding-box dimension is "
+                    f"{scaled_extent:.4g} m - implausibly large for automotive "
+                    f"external-aero. This usually means the file's actual units "
+                    f"don't match units={self.units!r} - try units='mm'."
+                )
             
             # Step 3: Parse cells (delegated)
             logger.info("Parsing cells...")
@@ -156,7 +228,8 @@ class NASParser:
                     'growth_rate': params.get('growth_rate', 1.2),
                     'max_layers': params.get('max_layers', 12),  # 8 BL + 4 transition
                     'min_cell_size': params.get('min_cell_size', 0.01),
-                    'target_cells': params.get('target_cells', 400000)  # Balanced target
+                    'target_cells': params.get('target_cells', 400000),  # Balanced target
+                    'max_cell_size': params.get('max_cell_size'),
                 }
                 
                 logger.info(

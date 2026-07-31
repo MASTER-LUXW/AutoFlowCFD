@@ -9,15 +9,25 @@ from dataclasses import dataclass
 @dataclass
 class SolutionVector:
     """Solution vector data structure.
-    
-    Stores the flow field solution variables for all cells.
-    For compressible flow, typically includes:
-    - rho: density
-    - u, v, w: velocity components
-    - p: pressure
-    - k: turbulent kinetic energy (optional)
-    - omega: specific dissipation rate (optional)
-    
+
+    Stores the flow field solution in CONSERVED form for all cells (this is
+    what the solver actually integrates and what checkpoints save under
+    `solution/conserved`):
+    - data[:, 0]: rho (density)
+    - data[:, 1:4]: rho*u, rho*v, rho*w (momentum)
+    - data[:, 4]: rho*E (total energy density)
+    - data[:, 5:7]: rho*k, rho*omega (turbulence, optional)
+
+    The get_velocity()/get_pressure()/get_turbulence() accessors below
+    convert these to the PRIMITIVE quantities their names promise (actual
+    velocity, static pressure, k and omega) - they used to return the raw
+    conserved columns unconverted (e.g. "velocity" was really momentum,
+    "pressure" was really total energy density), silently mislabeling
+    values by orders of magnitude for any caller. Kept for backward
+    compatibility, but note the solver's own residual/BC code does NOT use
+    these - it derives primitives inline with its own gamma/floor
+    conventions (see e.g. core/aero_coeffs.py).
+
     Attributes:
         data: Solution array, shape=(n_cells, n_variables)
         n_cells: Number of cells
@@ -26,36 +36,55 @@ class SolutionVector:
     data: Optional[np.ndarray] = None
     n_cells: int = 0
     n_variables: int = 5
-    
+
+    # Ratio of specific heats, matching the equation of state used
+    # throughout the solver (e.g. core/aero_coeffs.py).
+    GAMMA = 1.4
+    _RHO_FLOOR = 1e-10
+
     def __post_init__(self):
         """Initialize data array if not provided"""
         if self.data is None and self.n_cells > 0:
             self.data = np.zeros((self.n_cells, self.n_variables))
-    
+
     @property
     def shape(self):
         """Get shape of solution array"""
         if self.data is not None:
             return self.data.shape
         return (0, 0)
-    
+
     def get_density(self) -> np.ndarray:
         """Get density field"""
         if self.data is not None and self.data.shape[1] > 0:
             return self.data[:, 0]
         return np.array([])
-    
+
     def get_velocity(self) -> tuple:
-        """Get velocity components (u, v, w)"""
+        """Get primitive velocity components (u, v, w), i.e. momentum/rho."""
         if self.data is not None and self.data.shape[1] >= 4:
-            return (self.data[:, 1], self.data[:, 2], self.data[:, 3])
+            rho = np.maximum(self.data[:, 0], self._RHO_FLOOR)
+            return (self.data[:, 1] / rho, self.data[:, 2] / rho, self.data[:, 3] / rho)
         return (np.array([]), np.array([]), np.array([]))
-    
+
     def get_pressure(self) -> np.ndarray:
-        """Get pressure field"""
+        """Get static pressure via the ideal-gas equation of state,
+        p = (gamma-1) * (rho*E - 0.5*rho*|V|^2) - NOT the raw rho*E column."""
         if self.data is not None and self.data.shape[1] >= 5:
-            return self.data[:, 4]
+            rho = np.maximum(self.data[:, 0], self._RHO_FLOOR)
+            rhoE = self.data[:, 4]
+            V_sq = (self.data[:, 1]**2 + self.data[:, 2]**2 + self.data[:, 3]**2) / rho**2
+            return (self.GAMMA - 1.0) * (rhoE - 0.5 * rho * V_sq)
         return np.array([])
+
+    def get_turbulence(self) -> tuple:
+        """Get primitive turbulence quantities (k, omega), i.e. their
+        conserved (rho*k, rho*omega) columns divided by density. Returns
+        two empty arrays if this solution has no turbulence columns."""
+        if self.data is not None and self.data.shape[1] >= 7:
+            rho = np.maximum(self.data[:, 0], self._RHO_FLOOR)
+            return (self.data[:, 5] / rho, self.data[:, 6] / rho)
+        return (np.array([]), np.array([]))
 
 
 class BackendBase(ABC):

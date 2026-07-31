@@ -63,6 +63,9 @@ def solve() -> None:
               help="Maximum boundary layer layers (overrides config)")
 @click.option("--min-cell-size", type=float, default=None,
               help="Minimum cell size in meters (overrides config)")
+@click.option("--max-cell-size", type=float, default=None,
+              help="Max core-region cell size in meters, graded outward from the BL's "
+                   "near-wall size (overrides config); unset means no cap")
 @click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
 def run(
     input_file: str,
@@ -80,6 +83,7 @@ def run(
     gpu_device: int,
     max_layers: Optional[int],
     min_cell_size: Optional[float],
+    max_cell_size: Optional[float],
     json_output: bool
 ) -> None:
     """Run steady-state RANS simulation.
@@ -126,11 +130,45 @@ def run(
             logger.info(f"Loading config from {config}")
             loader = ConfigLoader()
             steady_config = loader.load(config)
-            
-            # Override with CLI options
-            steady_config.backend = BackendType(backend)
-            steady_config.order = order
-            steady_config.turbulence = TurbulenceModel(turbulence)
+
+            # Only apply a CLI flag if the user actually typed it - every
+            # one of these options carries a click default (e.g. max_iter
+            # defaults to 500), so unconditionally applying them would
+            # silently clobber whatever the YAML config specifies even
+            # when the user never asked to override it. This previously
+            # caused two different bugs at once: backend/order/turbulence
+            # were force-applied from their CLI defaults regardless of the
+            # config file's values, while every other flag (max-iter,
+            # cfl-init, cfl-max, convergence-tol, output, checkpoint-
+            # interval, threads, gpu-device) was silently ignored even when
+            # explicitly passed alongside --config.
+            ctx = click.get_current_context()
+
+            def _explicit(name: str) -> bool:
+                return ctx.get_parameter_source(name) == click.core.ParameterSource.COMMANDLINE
+
+            if _explicit('backend'):
+                steady_config.backend = BackendType(backend)
+            if _explicit('order'):
+                steady_config.order = order
+            if _explicit('turbulence'):
+                steady_config.turbulence = TurbulenceModel(turbulence)
+            if _explicit('max_iter'):
+                steady_config.max_iter = max_iter
+            if _explicit('cfl_init'):
+                steady_config.cfl_init = cfl_init
+            if _explicit('cfl_max'):
+                steady_config.cfl_max = cfl_max
+            if _explicit('convergence_tol'):
+                steady_config.convergence_tol = convergence_tol
+            if _explicit('output'):
+                steady_config.output_dir = output
+            if _explicit('checkpoint_interval'):
+                steady_config.checkpoint_interval = checkpoint_interval
+            if _explicit('threads'):
+                steady_config.n_threads = threads if threads > 0 else -1
+            if _explicit('gpu_device'):
+                steady_config.gpu_device = gpu_device
         else:
             # Create config from CLI options
             steady_config = SteadyConfig(
@@ -154,6 +192,8 @@ def run(
             steady_config.max_layers = max_layers
         if min_cell_size is not None:
             steady_config.min_cell_size = min_cell_size
+        if max_cell_size is not None:
+            steady_config.max_cell_size = max_cell_size
 
         logger.info(f"Configuration: backend={steady_config.backend}, "
                    f"order={steady_config.order}, turbulence={steady_config.turbulence}")
@@ -180,9 +220,10 @@ def run(
                 'max_layers': steady_config.max_layers,
                 'min_cell_size': steady_config.min_cell_size,
                 'target_cells': steady_config.target_cells,
+                'max_cell_size': steady_config.max_cell_size,
             }
         )
-        
+
         logger.info(f"Grid loaded: {grid_data.node_count} nodes, "
                    f"{grid_data.cell_count} cells")
         
@@ -206,8 +247,10 @@ def run(
         logger.info("Initializing solver...")
         solver = FRSolver(grid_data, steady_config)
         
-        # Run simulation
-        logger.info(f"Starting simulation (max_iter={max_iter})...")
+        # Run simulation. Log the config's effective max_iter (not the raw
+        # CLI variable) since --config may have set a different value that
+        # the CLI flag didn't explicitly override.
+        logger.info(f"Starting simulation (max_iter={steady_config.max_iter})...")
         result = solver.solve()
         
         # Output results
@@ -317,30 +360,56 @@ def transient(
         $ autoflowcfd solve transient sedan.nas --physical-time 0.3 \
           --init-from steady_results/checkpoint.h5
     """
-    from autoflowcfd.config import TransientConfig, BackendType, TurbulenceModel, TimeIntegrationScheme
+    from autoflowcfd.config import ConfigLoader, TransientConfig, BackendType, TurbulenceModel, TimeIntegrationScheme
     from autoflowcfd.grid import NASParser
     from autoflowcfd.core import TransientSolver
-    
+
     logger.info(f"Starting transient simulation")
     logger.info(f"Physical time: {physical_time}s, dt: {dt}s")
-    
+
     try:
-        # Calculate total steps
-        total_steps = int(physical_time / dt)
-        logger.info(f"Total time steps: {total_steps}")
-        
+        # Map mode to turbulence model
+        turbulence_map = {
+            'des': TurbulenceModel.DES,
+            'ddes': TurbulenceModel.DDES,
+            'les': TurbulenceModel.LES,
+        }
+
         # Load or create configuration
         if config:
             loader = ConfigLoader()
             transient_config = loader.load(config)
+
+            # Only apply a CLI flag if the user actually typed it - see the
+            # matching comment in `run()` above for why: every one of these
+            # options carries a click default, so applying them
+            # unconditionally would silently clobber the YAML config's
+            # values. Previously --config to `transient` ignored EVERY CLI
+            # flag (backend/order/mode/time-integration/dt/output/
+            # sample-interval all silently dropped) - worse than `run`,
+            # which at least applied backend/order/turbulence.
+            ctx = click.get_current_context()
+
+            def _explicit(name: str) -> bool:
+                return ctx.get_parameter_source(name) == click.core.ParameterSource.COMMANDLINE
+
+            if _explicit('backend'):
+                transient_config.backend = BackendType(backend)
+            if _explicit('order'):
+                transient_config.order = order
+            if _explicit('mode'):
+                transient_config.turbulence = turbulence_map[mode]
+            if _explicit('time_integration'):
+                transient_config.time_scheme = TimeIntegrationScheme(time_integration)
+            if _explicit('dt'):
+                transient_config.dt = dt
+            if _explicit('physical_time'):
+                transient_config.total_time = physical_time
+            if _explicit('output'):
+                transient_config.output_dir = output
+            if _explicit('sample_interval'):
+                transient_config.sample_interval = sample_interval
         else:
-            # Map mode to turbulence model
-            turbulence_map = {
-                'des': TurbulenceModel.DES,
-                'ddes': TurbulenceModel.DDES,
-                'les': TurbulenceModel.LES,
-            }
-            
             transient_config = TransientConfig(
                 backend=BackendType(backend),
                 order=order,
@@ -351,6 +420,12 @@ def transient(
                 output_dir=output,
                 sample_interval=sample_interval,
             )
+
+        # Calculate total steps from the EFFECTIVE config values (not the
+        # raw CLI variables), which may differ if --config set its own
+        # dt/total_time and the CLI didn't explicitly override them.
+        total_steps = int(transient_config.total_time / transient_config.dt)
+        logger.info(f"Total time steps: {total_steps}")
 
         # Parse grid and generate volume mesh (same conservative BL defaults
         # as `solve run` - see SteadyConfig field docs for the rationale).
@@ -363,6 +438,7 @@ def transient(
                 'max_layers': transient_config.max_layers,
                 'min_cell_size': transient_config.min_cell_size,
                 'target_cells': transient_config.target_cells,
+                'max_cell_size': transient_config.max_cell_size,
             }
         )
         logger.info(f"Grid loaded: {grid_data.node_count} nodes, {grid_data.cell_count} cells")

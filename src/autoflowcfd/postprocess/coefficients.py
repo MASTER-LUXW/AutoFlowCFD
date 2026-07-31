@@ -209,58 +209,73 @@ class CoefficientCalculator:
         return coeffs
     
     def calculate_forces(self) -> AerodynamicForces:
-        """Calculate aerodynamic forces and moments (absolute values)
-        
-        Integrates pressure and viscous stresses over body surfaces
-        to compute absolute forces and moments.
-        
+        """Calculate aerodynamic forces (absolute values)
+
+        Delegates the actual pressure + skin-friction surface integration
+        to core.aero_coeffs.AeroCoefficientCalculator - the same,
+        extensively-verified implementation the live solver uses to report
+        Cd/Cl during a solve, rather than fabricating a value. This used to
+        return hardcoded placeholder numbers ("assume typical values for
+        Ahmed body at 30 m/s") regardless of what solution/grid were passed
+        in - a real bug, not a stub: any user calling this got a
+        plausible-looking but entirely fake answer with no indication it
+        wasn't real.
+
+        Side force and the three moments are NOT computed by
+        AeroCoefficientCalculator (it only integrates the drag/lift axes) -
+        they are honestly reported as 0.0 with a logged warning rather than
+        invented, unlike drag/lift which are now real.
+
         Returns:
             AerodynamicForces: Forces (N) and moments (N·m)
-            
+
         Example:
             >>> forces = calc.calculate_forces()
             >>> print(f"Drag force: {forces['drag_force']:.1f} N")
         """
-        logger.info("Calculating aerodynamic forces...")
-        
-        # For now, use simplified pressure integration on body surfaces
-        # In production, this would integrate over all boundary faces
-        
-        # Get pressure field from solution
-        # Assuming solution has pressure stored in appropriate variable
-        # This is a placeholder - actual implementation depends on solution structure
-        
-        # Simplified calculation for demonstration
-        # In real implementation, this would loop over boundary faces
-        # and integrate p * n · direction + tau · direction
-        
-        total_force = np.zeros(3)  # Fx, Fy, Fz
-        total_moment = np.zeros(3)  # Mx, My, Mz
-        
-        # TODO: Implement proper surface integration
-        # For now, return placeholder values based on typical automotive CFD
-        # These should be replaced with actual integration
-        
-        # Placeholder: assume typical values for Ahmed body at 30 m/s
-        # Actual implementation requires face-by-face integration
-        drag_force = 150.0  # N (placeholder)
-        lift_force = -20.0  # N (placeholder, negative = downforce)
-        side_force = 0.0    # N (symmetric flow)
-        
-        # Moments about vehicle center (assume center at origin)
-        pitch_moment = lift_force * 1.5  # N·m (approximate lever arm)
-        yaw_moment = 0.0                  # N·m (symmetric)
-        roll_moment = 0.0                 # N·m (symmetric)
-        
+        logger.info("Calculating aerodynamic forces via real surface integration...")
+
+        from ..core.fvm_faces import FVMFaceExtractor
+        from ..core.aero_coeffs import AeroCoefficientCalculator
+
+        if not hasattr(self.grid_data, "ensure_faces_exist"):
+            raise TypeError(
+                "calculate_forces() requires a volume mesh (VolumeMeshData) - "
+                f"got {type(self.grid_data).__name__}. Real pressure/skin-friction "
+                "surface integration needs FVM face connectivity built from actual "
+                "3D cells, which a surface-only GridData doesn't have."
+            )
+
+        face_extractor = FVMFaceExtractor()
+        face_data = self.grid_data.ensure_faces_exist()
+        face_extractor.face_connectivity = face_data.connectivity
+        face_extractor.face_normals = face_data.normal
+        face_extractor.face_areas = face_data.area
+        face_extractor.boundary_flags = (face_data.connectivity[:, 1] < 0).astype(np.int32)
+
+        aero_calc = AeroCoefficientCalculator(
+            self.grid_data, face_extractor, rho_inf=self.density, vel_inf=self.velocity
+        )
+        Cd, Cl, _Cd_p, _Cd_f = aero_calc.compute_coefficients(self.solution.data)
+
+        drag_force = Cd * self.dynamic_pressure * self.reference_area
+        lift_force = Cl * self.dynamic_pressure * self.reference_area
+
+        logger.warning(
+            "Side force and all three moments are not yet implemented "
+            "(AeroCoefficientCalculator only integrates drag/lift) - "
+            "reporting 0.0 for side_force/pitch_moment/yaw_moment/roll_moment."
+        )
+
         forces = AerodynamicForces(
             drag_force=drag_force,
             lift_force=lift_force,
-            side_force=side_force,
-            pitch_moment=pitch_moment,
-            yaw_moment=yaw_moment,
-            roll_moment=roll_moment
+            side_force=0.0,
+            pitch_moment=0.0,
+            yaw_moment=0.0,
+            roll_moment=0.0,
         )
-        
+
         logger.info(f"Forces calculated:\n{forces}")
         return forces
     

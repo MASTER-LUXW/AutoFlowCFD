@@ -27,12 +27,12 @@ def extrude_layers(
     Strategy (Two-stage extrusion):
     Stage 1 - Boundary Layer (Layers 1-8):
       - Fine resolution for y+ control
-      - Growth rate: 1.2
+      - Growth rate: `growth_rate` (as passed in)
       - Target thickness: ~0.05-0.1m
 
     Stage 2 - Transition/Far-field (Layers 9-20):
       - Coarse resolution for domain filling
-      - Growth rate: 1.5-2.0
+      - Growth rate: `growth_rate * 1.25`
       - Extend to far-field boundary
 
     Args:
@@ -40,7 +40,12 @@ def extrude_layers(
         surface_faces: Surface connectivity, shape=(n_faces, 3)
         normals: Face normals for extrusion direction, shape=(n_faces, 3)
         bounding_box: Domain limits to prevent overshoot
-        growth_rate: Geometric growth rate for layer thickness
+        growth_rate: Geometric growth rate for stage-1 (BL) layer
+            thickness; stage-2 (transition) layers grow at
+            `growth_rate * 1.25`. Previously hardcoded to 1.2/1.5
+            regardless of this argument - every caller's requested
+            growth_rate (CLI --growth-rate, config growth_rate) had zero
+            effect on the actual mesh.
         max_layers: Maximum number of layers to generate
         min_cell_size: Minimum allowable cell size in meters
         taper_scale: Optional float array in [0, 1], shape=(n_nodes,).
@@ -89,11 +94,20 @@ def extrude_layers(
     bl_layers = min(8, max_layers)  # Use at most 8 layers for BL
     transition_layers = min(4, max_layers - bl_layers)  # Remaining layers for transition
     bl_target_thickness = domain_size * 0.02  # 2% of domain size for BL region
-    
+
+    # Stage 2 (transition) grows faster than stage 1 (BL) to reach the
+    # far field in fewer layers - preserve the same relative step-up the
+    # original hardcoded values had (1.2 -> 1.5 is a 1.25x jump) instead
+    # of hardcoding both stages outright, which silently ignored the
+    # caller's `growth_rate` (e.g. CLI --growth-rate / config growth_rate)
+    # entirely regardless of what was requested.
+    bl_growth_rate = growth_rate
+    transition_growth_rate = growth_rate * 1.25
+
     logger.info(
         f"Two-stage extrusion strategy (optimized):\n"
-        f"  Stage 1 (BL): {bl_layers} layers, growth_rate=1.2\n"
-        f"  Stage 2 (Transition): {transition_layers} layers, growth_rate=1.5\n"
+        f"  Stage 1 (BL): {bl_layers} layers, growth_rate={bl_growth_rate}\n"
+        f"  Stage 2 (Transition): {transition_layers} layers, growth_rate={transition_growth_rate}\n"
         f"  Initial thickness: {base_thickness:.6f}m\n"
         f"  Expected total cells: ~{len(surface_faces) * 3 * (bl_layers + transition_layers):,}"
     )
@@ -103,7 +117,7 @@ def extrude_layers(
 
     current_nodes = surface_nodes.copy()
     current_thickness = base_thickness
-    current_growth_rate = 1.2  # Start with BL growth rate
+    current_growth_rate = bl_growth_rate  # Start with BL growth rate
 
     remaining_budget = thickness_limit.copy() if thickness_limit is not None else None
     if remaining_budget is not None:
@@ -126,8 +140,8 @@ def extrude_layers(
             break
 
         # Switch to Stage 2 (Transition) after boundary layer
-        if n_layers_generated == bl_layers and current_growth_rate < 1.5:
-            current_growth_rate = 1.5
+        if n_layers_generated == bl_layers and current_growth_rate < transition_growth_rate:
+            current_growth_rate = transition_growth_rate
             logger.info(
                 f"Switching to Stage 2 (transition) at layer {layer_idx + 1}, "
                 f"growth_rate increased to {current_growth_rate}"

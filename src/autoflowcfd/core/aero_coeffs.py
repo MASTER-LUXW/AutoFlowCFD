@@ -48,7 +48,7 @@ class AeroCoefficientCalculator:
         grad_vel: Optional[np.ndarray] = None,
         mu_t: Optional[np.ndarray] = None,
         boundary_states: Optional[np.ndarray] = None,
-    ) -> Tuple[float, float]:
+    ) -> Tuple[float, float, float, float]:
         """Compute drag and lift coefficients.
 
         Args:
@@ -66,7 +66,7 @@ class AeroCoefficientCalculator:
                 recomputing the velocity gradient / eddy viscosity.
 
         Returns:
-            Tuple of (Cd, Cl)
+            Tuple of (Cd, Cl, Cd_pressure, Cd_friction)
         """
         try:
             # Extract primitive variables
@@ -92,14 +92,14 @@ class AeroCoefficientCalculator:
             
             if q_inf < 1e-6:
                 logger.warning("Dynamic pressure too small")
-                return 0.0, 0.0
+                return 0.0, 0.0, 0.0, 0.0
             
             # Identify body faces
             body_face_indices = self._identify_body_faces()
             
             if len(body_face_indices) == 0:
                 logger.warning(f"[Iter {iteration}] No body faces found - returning Cd=0, Cl=0")
-                return 0.0, 0.0
+                return 0.0, 0.0, 0.0, 0.0
             
             # Get face data
             face_normals = self.face_extractor.face_normals[body_face_indices]
@@ -111,14 +111,14 @@ class AeroCoefficientCalculator:
                     f"[Iter {iteration}] CRITICAL: body_face_indices length ({len(body_face_indices)}) "
                     f"!= face_normals length ({len(face_normals)})"
                 )
-                return 0.0, 0.0
+                return 0.0, 0.0, 0.0, 0.0
             
             if len(body_face_indices) != len(face_areas):
                 logger.error(
                     f"[Iter {iteration}] CRITICAL: body_face_indices length ({len(body_face_indices)}) "
                     f"!= face_areas length ({len(face_areas)})"
                 )
-                return 0.0, 0.0
+                return 0.0, 0.0, 0.0, 0.0
             
             # Get pressure on body surface
             body_cell_indices = self.face_extractor.face_connectivity[body_face_indices, 0]
@@ -133,7 +133,7 @@ class AeroCoefficientCalculator:
                     f"[Iter {iteration}] CRITICAL: dp length ({len(dp)}) "
                     f"!= face_areas length ({len(face_areas)})"
                 )
-                return 0.0, 0.0
+                return 0.0, 0.0, 0.0, 0.0
 
             # Pressure (form) drag/lift.
             Fx_p = -np.sum(dp * face_normals[:, 0] * face_areas)
@@ -183,7 +183,7 @@ class AeroCoefficientCalculator:
                             f"[Iter {iteration}] Face ID {e} not found in boundary face list. "
                             f"This indicates a mismatch between body_face_indices and boundary_flags."
                         )
-                        return 0.0, 0.0
+                        return 0.0, 0.0, 0.0, 0.0
                     
                     # Safety check: ensure indices are within bounds
                     if len(body_pos_in_boundary) > 0 and np.max(body_pos_in_boundary) < len(tau_n_all):
@@ -233,13 +233,7 @@ class AeroCoefficientCalculator:
             # (separately, longer-established) pressure integration.
             Cd_p = Fx_p / (q_inf * ref_area)
             Cd_f = Fx_f / (q_inf * ref_area)
-            
-            # Enhanced diagnostic logging
-            logger.info(
-                f"[Iter {iteration}] Cd breakdown: pressure={Cd_p:.4f}, "
-                f"friction={Cd_f:.4f}, total={Cd:.4f}"
-            )
-            
+
             # Log force magnitudes for debugging
             if iteration <= 10 or iteration % 50 == 0:
                 logger.debug(
@@ -267,13 +261,13 @@ class AeroCoefficientCalculator:
                 logger.warning("Cl is not finite")
                 Cl = 0.0
             
-            return float(Cd), float(Cl)
+            return float(Cd), float(Cl), float(Cd_p), float(Cd_f)
             
         except Exception as e:
             logger.error(f"Failed to compute coefficients: {e}")
             import traceback
             logger.error(traceback.format_exc())
-            return 0.0, 0.0
+            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
     
     def _identify_body_faces(self) -> np.ndarray:
         """Identify body surface faces from boundary conditions.
@@ -288,10 +282,15 @@ class AeroCoefficientCalculator:
         if self._body_faces_cached and self._cached_body_faces is not None:
             return self._cached_body_faces
         
-        # Find all boundary names containing 'body'
+        # Find all boundary names matching bc_handler.py's own WALL/vehicle-
+        # body classification (BoundaryConditionHandler._classify treats a
+        # name as the vehicle body if it contains "BODY" *or* "CAR" - this
+        # used to only check for "body", so a mesh naming its wall boundary
+        # "CAR" got correct no-slip BCs applied but zero body faces here,
+        # hitting the early-exit return every iteration).
         body_boundary_names = [
             name for name in self.grid_data.boundaries.boundary_names
-            if 'body' in name.lower()
+            if 'BODY' in name.upper() or 'CAR' in name.upper()
         ]
         
         if not body_boundary_names:
@@ -400,7 +399,7 @@ class AeroCoefficientCalculator:
             
             body_boundary_names = [
                 name for name in surface_boundaries.boundary_names
-                if 'body' in name.lower()
+                if 'BODY' in name.upper() or 'CAR' in name.upper()
             ]
             
             if not body_boundary_names:

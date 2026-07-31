@@ -12,6 +12,17 @@ from loguru import logger
 from .structures import CellArray
 from .nas_parser_exceptions import NASParseError
 
+# Above this fraction of CTRIA3 lines dropped (parse errors, unparseable
+# lines, or dangling node references), treat it as a systematic
+# format/encoding mismatch - or GRID/CTRIA3 sections out of sync - rather
+# than incidental noise, and fail loudly instead of silently returning a
+# surface mesh missing a large chunk of its true geometry while still
+# reporting success. Only enforced once there's a meaningful sample size
+# (MIN_LINES_FOR_DROP_CHECK) - see the matching constant in
+# nas_parser_nodes.py for why.
+MAX_DROP_FRACTION = 0.05
+MIN_LINES_FOR_DROP_CHECK = 20
+
 
 def parse_cells_from_nas(
     file_path: str,
@@ -164,6 +175,23 @@ def parse_cells_from_nas(
             connectivity=np.array([], dtype=np.int32).reshape(0, 3),
             cell_type=np.array([], dtype=np.int32)
         ), np.array([], dtype=np.int32)
+
+    total_ctria3_lines = cell_count + parse_errors + skipped_lines + skipped_cells
+    dropped = parse_errors + skipped_lines + skipped_cells
+    drop_fraction = dropped / total_ctria3_lines if total_ctria3_lines else 0.0
+    if total_ctria3_lines >= MIN_LINES_FOR_DROP_CHECK and drop_fraction > MAX_DROP_FRACTION:
+        raise NASParseError(
+            f"{dropped}/{total_ctria3_lines} ({drop_fraction:.1%}) CTRIA3 lines "
+            f"could not be parsed or reference missing nodes - this exceeds the "
+            f"{MAX_DROP_FRACTION:.0%} threshold for incidental noise. A large "
+            f"dangling-node-reference count ({skipped_cells} cells skipped) "
+            f"usually means the GRID and CTRIA3 sections are out of sync (e.g. "
+            f"nodes parsed with a different ID range/format than the elements "
+            f"reference). Proceeding would silently produce a surface mesh "
+            f"missing a large fraction of its true geometry while still "
+            f"reporting 'success' - check the file's GRID/CTRIA3 card layout "
+            f"and encoding."
+        )
 
     if parse_errors > 0:
         logger.warning(f"Encountered {parse_errors} parsing errors")

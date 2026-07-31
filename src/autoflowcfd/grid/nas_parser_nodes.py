@@ -11,6 +11,17 @@ from .structures import NodeArray
 from .nas_parser_exceptions import NASParseError
 from .nas_parser_utils import parse_nastran_float
 
+# Above this fraction of GRID lines dropped (parse errors + unparseable
+# lines), treat it as a systematic format/encoding mismatch rather than
+# incidental noise and fail loudly instead of silently returning a mesh
+# missing a large chunk of its true geometry while still reporting success.
+# Only enforced once there's a meaningful sample size
+# (MIN_LINES_FOR_DROP_CHECK) - a handful of GRID lines in a small file
+# having one bad line is not evidence of systematic corruption the way the
+# same ratio would be across the tens of thousands of lines in a real mesh.
+MAX_DROP_FRACTION = 0.05
+MIN_LINES_FOR_DROP_CHECK = 20
+
 
 def parse_nodes_from_nas(
     file_path: str,
@@ -146,7 +157,22 @@ def parse_nodes_from_nas(
     if node_count == 0:
         logger.error("No valid GRID cards found")
         return (NodeArray(x=np.array([]), y=np.array([]), z=np.array([])), {})
-    
+
+    total_grid_lines = node_count + parse_errors + skipped_lines
+    dropped = parse_errors + skipped_lines
+    drop_fraction = dropped / total_grid_lines if total_grid_lines else 0.0
+    if total_grid_lines >= MIN_LINES_FOR_DROP_CHECK and drop_fraction > MAX_DROP_FRACTION:
+        raise NASParseError(
+            f"{dropped}/{total_grid_lines} ({drop_fraction:.1%}) GRID lines could "
+            f"not be parsed - this exceeds the {MAX_DROP_FRACTION:.0%} threshold "
+            f"for incidental noise, and almost always means the file's actual "
+            f"GRID card format/encoding doesn't match what this parser expects "
+            f"(e.g. wrong column alignment for fixed-width cards, or a wrong "
+            f"--encoding). Proceeding would silently produce a mesh missing a "
+            f"large fraction of its true node count while still reporting "
+            f"'success' - check the file's actual GRID card layout and encoding."
+        )
+
     if parse_errors > 0:
         logger.warning(f"Encountered {parse_errors} parsing errors")
     if skipped_lines > 0:
