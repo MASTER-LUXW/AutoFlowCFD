@@ -82,7 +82,7 @@ class NumbaBackend(BackendBase):
 
         if use_muscl and cell_centers is not None and cell_volumes is not None:
             # Step 1: Compute gradients using Green-Gauss
-            from ..reconstruction import GradientComputer, LimiterType
+            from ..legacy.reconstruction import GradientComputer, LimiterType
             
             limiter_enum = LimiterType(limiter_type)
             
@@ -98,7 +98,7 @@ class NumbaBackend(BackendBase):
             )
             
             # Step 2: Apply slope limiting to gradients
-            from ..reconstruction import MUSCLReconstructor
+            from ..legacy.reconstruction import MUSCLReconstructor
             reconstructor = MUSCLReconstructor(limiter_enum)
             limited_gradients = reconstructor.apply_limiting_to_gradients(
                 solution, gradients, cell_connectivity

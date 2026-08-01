@@ -127,13 +127,25 @@ def coefficients(
               help="Grid file path (if not in case directory)")
 @click.option("--checkpoint", type=click.Path(exists=True),
               help="Checkpoint file path (defaults to latest)")
+@click.option("--binary/--ascii", "binary", default=None,
+              help="Write binary payloads instead of ASCII text (much smaller/"
+                   "faster for real mesh sizes). Default: ASCII for .vtk, "
+                   "binary+compressed for .vtu.")
+@click.option("--boundaries-only", is_flag=True, default=False,
+              help="Export only the named boundary patches (WALL/INLET/OUTLET/"
+                   "...), tagged with BoundaryID/BoundaryTypeID + a name "
+                   "legend, instead of the full volume mesh - lets you filter/"
+                   "color by named zone in ParaView (Fluent/OpenFOAM-style "
+                   "patch workflow). Requires a volume mesh (VolumeMeshData).")
 def export_vtk(
     case: str,
     output: str,
     variables: tuple,
     time_step: int,
     grid: Optional[str],
-    checkpoint: Optional[str]
+    checkpoint: Optional[str],
+    binary: Optional[bool],
+    boundaries_only: bool,
 ) -> None:
     """Export field data to VTK format.
     
@@ -327,12 +339,18 @@ def export_vtk(
             )
         
         # Step 6: Create VTK exporter and export
+        # mu_t (exact solver eddy viscosity), if the checkpoint has it -
+        # see CheckpointManager.save's extra_fields / VTKExporter's mu_t
+        # param. Absent for checkpoints written before this was added, in
+        # which case 'nut' falls back to a logged-as-approximate estimate.
+        mu_t = metadata.get('fields', {}).get('mu_t')
         logger.info("Creating VTK exporter...")
         exporter = VTKExporter(
             grid_data=grid_data,
-            solution=solution
+            solution=solution,
+            mu_t=mu_t,
         )
-        
+
         # Determine output format based on extension
         output_path = Path(output)
         if output_path.suffix == '.vtu':
@@ -343,13 +361,22 @@ def export_vtk(
                 output_path = output_path.with_suffix('.vtk')
         else:
             raise ValueError(f"Unsupported file format: {output_path.suffix}")
-        
-        logger.info(f"Exporting to: {output_path} (format: {fmt})")
-        vtk_path = exporter.export(
-            output_path=str(output_path),
-            fields=var_list,
-            format=fmt
-        )
+
+        logger.info(f"Exporting to: {output_path} (format: {fmt}, boundaries_only: {boundaries_only})")
+        if boundaries_only:
+            vtk_path = exporter.export_boundaries(
+                output_path=str(output_path),
+                fields=var_list,
+                format=fmt,
+                binary=binary,
+            )
+        else:
+            vtk_path = exporter.export(
+                output_path=str(output_path),
+                fields=var_list,
+                format=fmt,
+                binary=binary,
+            )
         
         # Success message
         click.echo("\n" + "="*70)

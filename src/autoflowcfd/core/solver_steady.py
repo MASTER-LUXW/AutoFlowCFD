@@ -385,7 +385,14 @@ class FRSolver:
         residual = ViscousRANSResidual(
             geom, mu_lam=mu_lam, wall_distance=wall_distance, turbulent=turbulent,
             mach_ref=mach_ref,
+            wall_face_mask=wall_face_mask if self.config.use_wall_functions else None,
         )
+        if self.config.use_wall_functions:
+            logger.info(
+                "Wall functions enabled (Menter scalable/automatic wall treatment) "
+                f"on {np.sum(wall_face_mask)} WALL/GROUND faces - near-wall mesh no "
+                "longer needs y+~1 to be accurate."
+            )
 
         # Aerodynamic reference area.
         body_face_indices = self.aero_calculator._identify_body_faces()
@@ -704,7 +711,8 @@ class FRSolver:
                 ckpt_path = self.checkpoint_manager.save(
                     solution=self.solution,
                     history=history_dict,
-                    iteration=iteration
+                    iteration=iteration,
+                    extra_fields={'mu_t': mu_t},
                 )
                 
                 if ckpt_path:
@@ -738,7 +746,8 @@ class FRSolver:
             final_ckpt = self.checkpoint_manager.save(
                 solution=self.solution,
                 history=final_history,
-                iteration=iteration
+                iteration=iteration,
+                extra_fields={'mu_t': mu_t},
             )
             
             if final_ckpt:

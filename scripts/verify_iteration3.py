@@ -19,12 +19,13 @@ def verify_imports():
     print("=" * 70)
     
     modules_to_test = [
-        ("autoflowcfd.core.fr_scheme", ["FRScheme", "FROrder"]),
-        ("autoflowcfd.core.turbulence", ["SSTKOmegaModel"]),
-        ("autoflowcfd.core.wall_functions", ["WallFunctionModel"]),
+        ("autoflowcfd.core.legacy.fr_scheme", ["FRScheme", "FROrder"]),
+        ("autoflowcfd.core.legacy.turbulence", ["SSTKOmegaModel"]),
+        ("autoflowcfd.core.legacy.wall_functions", ["WallFunctionModel"]),
         ("autoflowcfd.core.time_integration", ["TimeIntegrator", "TimeIntegrationScheme"]),
-        ("autoflowcfd.core.convergence", ["ConvergenceMonitor", "ConvergenceHistory"]),
-        ("autoflowcfd.core.solver_transient", ["TransientSolver", "TransientResult"]),
+        ("autoflowcfd.core.legacy.convergence", ["ConvergenceMonitor", "ConvergenceHistory"]),
+        ("autoflowcfd.core.transient_solver_loop", ["TransientSolver"]),
+        ("autoflowcfd.core.transient_result", ["TransientResult"]),
         ("autoflowcfd.core.coupling", ["SteadyTransientCoupler", "SyntheticTurbulenceGenerator"]),
         ("autoflowcfd.core.backend", ["create_backend", "get_available_backends"]),
     ]

@@ -16,7 +16,7 @@ Performance Optimization:
     - Memory-efficient data structures
 
 Example:
-    >>> from autoflowcfd.grid.face_extractor import FaceExtractor
+    >>> from autoflowcfd.grid.mesh_gen.face_extractor import FaceExtractor
     >>> face_data = FaceExtractor.extract_faces(
     ...     cell_connectivity=cells.connectivity,
     ...     nodes=grid.nodes,
@@ -42,7 +42,7 @@ except ImportError:
         return decorator
     prange = range
 
-from .structures import NodeArray, FaceData
+from ..structures import NodeArray, FaceData
 
 
 @njit(parallel=False)
@@ -487,12 +487,18 @@ class FaceExtractor:
             face_scalar_areas[valid_area_mask][:, np.newaxis]
         )
         
-        # Create FaceData object
+        # Create FaceData object. node_connectivity is the triangle-corner
+        # node indices already computed above (face_nodes_sorted) purely to
+        # derive area/normal/center - kept here too so callers that need
+        # the actual boundary surface mesh (e.g. VTKExporter.export_boundaries,
+        # for per-zone/per-patch visualization) don't have to re-extract it
+        # from the tetrahedra a second time.
         face_data = FaceData(
             connectivity=face_connectivity,
             area=face_scalar_areas,
             normal=face_normals,
-            center=face_centers
+            center=face_centers,
+            node_connectivity=face_nodes_sorted.astype(np.int32),
         )
         
         # Validate output

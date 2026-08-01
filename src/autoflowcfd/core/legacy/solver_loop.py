@@ -15,10 +15,10 @@ from typing import Optional, List
 import time
 from loguru import logger
 
-from .fvm_core import FVMResidualComputer
-from ..config.solver_config import SteadyConfig
+from ..fvm_core import FVMResidualComputer
+from ...config.solver_config import SteadyConfig
 from .convergence import ConvergenceMonitor
-from .time_integration import TimeIntegrator, TimeIntegrationScheme
+from ..time_integration import TimeIntegrator, TimeIntegrationScheme
 
 
 class SteadySolverLoop:

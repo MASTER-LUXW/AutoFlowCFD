@@ -7,7 +7,7 @@ import re
 import numpy as np
 from loguru import logger
 
-from .structures import NodeArray
+from ..structures import NodeArray
 from .nas_parser_exceptions import NASParseError
 from .nas_parser_utils import parse_nastran_float
 

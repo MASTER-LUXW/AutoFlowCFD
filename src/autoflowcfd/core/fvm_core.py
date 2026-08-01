@@ -7,10 +7,12 @@ For new code, import directly from:
     - autoflowcfd.core.fvm_residuals
 """
 
-# Re-export from submodules for backward compatibility
+# Re-export from submodules for backward compatibility. FVMFluxCalculator/
+# FVMResidualComputer live under core/legacy/ (not on the live solve path -
+# see core/legacy/__init__.py); FVMFaceExtractor is live.
 from .fvm_faces import FVMFaceExtractor
-from .fvm_flux import FVMFluxCalculator
-from .fvm_residuals import FVMResidualComputer, _compute_residuals_kernel
+from .legacy.fvm_flux import FVMFluxCalculator
+from .legacy.fvm_residuals import FVMResidualComputer, _compute_residuals_kernel
 
 __all__ = [
     'FVMFaceExtractor',

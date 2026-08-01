@@ -143,7 +143,7 @@ def check_mesh_quality(volume_mesh: 'VolumeMeshData') -> None:
     Raises:
         ValueError: If mesh quality is unacceptable
     """
-    from .structures import TetrahedralCells
+    from ..structures import TetrahedralCells
     
     # Check for negative volumes (should not happen)
     if np.any(volume_mesh.cells.volumes <= 0):

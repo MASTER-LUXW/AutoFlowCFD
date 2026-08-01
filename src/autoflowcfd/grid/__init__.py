@@ -22,44 +22,44 @@ Example:
 """
 
 # Re-export from modularized submodules
-from .grid_nodes import NodeArray, CupyNodeArray
-from .grid_cells import CellArray, CupyCellArray, TetrahedralCells
-from .grid_boundaries import BoundaryMap
-from .grid_metadata import GridMetadata
-from .grid_faces import FaceData
-from .grid_data import GridData, CupyGridData, VolumeMeshData
+from .schema.grid_nodes import NodeArray, CupyNodeArray
+from .schema.grid_cells import CellArray, CupyCellArray, TetrahedralCells
+from .schema.grid_boundaries import BoundaryMap
+from .schema.grid_metadata import GridMetadata
+from .schema.grid_faces import FaceData
+from .schema.grid_data import GridData, CupyGridData, VolumeMeshData
 
 # Parser modules (modularized)
-from .parser_core import NASParser
-from .nas_parser_exceptions import NASParserError, NASFormatError, NASParseError
+from .nas_io.parser_core import NASParser
+from .nas_io.nas_parser_exceptions import NASParserError, NASFormatError, NASParseError
 
 # Other modules
-from .validator import GridValidator
-from .volume_mesh_generator import VolumeMeshGenerator
-from .quality_validator import MeshQualityValidator, MeshQualityReport
-from .face_extractor import FaceExtractor, extract_faces_from_tetrahedra
+from .validation.validator import GridValidator
+from .mesh_gen.volume_mesh_generator import VolumeMeshGenerator
+from .validation.quality_validator import MeshQualityValidator, MeshQualityReport
+from .mesh_gen.face_extractor import FaceExtractor, extract_faces_from_tetrahedra
 
 # New mesh generation submodules (for internal use)
-from .mesh_utils import (
+from .mesh_gen.mesh_utils import (
     validate_surface_mesh,
     validate_bounding_box,
     compute_face_normals,
     check_reached_boundary,
     check_mesh_quality
 )
-from .mesh_extrusion import (
+from .mesh_gen.mesh_extrusion import (
     extrude_layers,
     extrude_single_layer,
     convert_layers_to_tetrahedra
 )
-from .mesh_background import generate_hybrid_mesh
-from .mesh_boundary import (
+from .mesh_gen.mesh_background import generate_hybrid_mesh
+from .mesh_gen.mesh_boundary import (
     identify_boundaries_from_surface,
     map_surface_boundaries
 )
 
 # NAS export module
-from .nas_export import export_volume_mesh_to_nas
+from .nas_io.nas_export import export_volume_mesh_to_nas
 
 __all__ = [
     # Data structures (modularized)

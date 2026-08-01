@@ -10,7 +10,7 @@ from typing import Optional, Dict
 import numpy as np
 from loguru import logger
 
-from .structures import GridData, NodeArray, GridMetadata, VolumeMeshData
+from ..structures import GridData, NodeArray, GridMetadata, VolumeMeshData
 from .nas_parser_exceptions import NASParserError, NASFormatError, NASParseError
 from .nas_parser_nodes import parse_nodes_from_nas
 from .nas_parser_cells import parse_cells_from_nas
@@ -216,7 +216,7 @@ class NASParser:
             if generate_volume_mesh:
                 logger.info("Generating volume mesh from surface geometry...")
                 
-                from .volume_mesh_generator import VolumeMeshGenerator
+                from ..mesh_gen.volume_mesh_generator import VolumeMeshGenerator
                 
                 params = volume_mesh_params or {}
                 

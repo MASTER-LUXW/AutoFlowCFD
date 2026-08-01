@@ -230,7 +230,7 @@ class VolumeMeshData:
         if self.faces is None:
             logger.info("Extracting face data from volume mesh...")
             try:
-                from .face_extractor import FaceExtractor
+                from ..mesh_gen.face_extractor import FaceExtractor
                 
                 boundary_groups = self.boundaries.groups if self.boundaries else None
                 

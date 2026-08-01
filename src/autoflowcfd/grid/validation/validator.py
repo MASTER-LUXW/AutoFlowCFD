@@ -13,7 +13,7 @@ Key Features:
     - Performance-optimized for large meshes
 
 Example:
-    >>> from autoflowcfd.grid.validator import GridValidator
+    >>> from autoflowcfd.grid.validation.validator import GridValidator
     >>> validator = GridValidator(grid_data)
     >>> results = validator.validate()
     >>> if results['passed']:
@@ -26,7 +26,7 @@ import numpy as np
 from typing import Dict, Any, Tuple
 from loguru import logger
 
-from .structures import GridData
+from ..structures import GridData
 
 
 class GridValidator:

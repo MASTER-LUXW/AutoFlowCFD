@@ -53,8 +53,8 @@ def test_project_modules():
     
     modules = [
         "autoflowcfd.grid.structures",
-        "autoflowcfd.grid.parser",
-        "autoflowcfd.grid.validator",
+        "autoflowcfd.grid.nas_io.parser",
+        "autoflowcfd.grid.validation.validator",
     ]
     
     all_ok = True

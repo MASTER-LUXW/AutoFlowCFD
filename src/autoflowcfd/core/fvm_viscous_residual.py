@@ -51,6 +51,19 @@ _AUSM_KU = 0.75      # pressure-velocity coupling coefficient
 _AUSM_SIGMA = 1.0    # Mp cutoff coefficient
 _AUSM_BETA = 1.0 / 8.0  # Mach-splitting shape parameter
 
+# Menter scalable/automatic wall treatment constants (log-law of the
+# wall). E=9.8 is the smooth-wall log-law intercept for kappa=0.41;
+# WALL_YPLUS_SWITCH=11.06 is the (kappa,E)-consistent intersection of the
+# linear viscous-sublayer profile u+=y+ and the log law u+=(1/kappa)ln(E
+# y+) - below it the sublayer formula is used directly, at/above it the
+# log law is solved for iteratively. This is the standard two-branch
+# "scalable" wall function switch (Menter), not the single continuous
+# Spalding formula - simpler to implement/verify while still being
+# mesh-independent across the y+ range it's designed for.
+WALL_LOG_KAPPA = SST_KAPPA
+WALL_LOG_E = 9.8
+WALL_YPLUS_SWITCH = 11.06
+
 
 def _blend(f1, a1_val, a2_val):
     """SST blend: f1*phi1 + (1-f1)*phi2."""
@@ -83,12 +96,25 @@ class ViscousRANSResidual:
         solver) that don't compute a case-specific value; pass the
         solve's actual freestream Mach for a physically-consistent
         scaling.
+    wall_face_mask:
+        Boolean array, shape (n_faces,) aligned with `geom`'s full face
+        ordering (same convention as `wall_distance`'s wall_face_mask
+        argument to estimate_wall_distance) - True for boundary faces
+        classified WALL/GROUND (viscous no-slip walls), False everywhere
+        else (SYMMETRY/INLET/OUTLET/FARFIELD boundaries, and all interior
+        faces). None (default) disables wall-function treatment entirely,
+        falling back to resolving all the way to the wall (matching prior
+        behaviour exactly) - pass this to enable Menter's scalable/
+        automatic wall treatment (see _wall_function_targets) on those
+        faces, letting a coarser near-wall mesh (y+ up to ~100+, not just
+        y+~1) still give physically meaningful skin friction and k/omega.
     """
 
     def __init__(self, geom: FaceGeometry, mu_lam: float = 1.7894e-5,
                  wall_distance: np.ndarray | None = None,
                  turbulent: bool = True,
-                 mach_ref: float = 0.1):
+                 mach_ref: float = 0.1,
+                 wall_face_mask: np.ndarray | None = None):
         self.geom = geom
         self.mu_lam = float(mu_lam)
         self.turbulent = turbulent
@@ -98,6 +124,15 @@ class ViscousRANSResidual:
             self.wall_distance = np.full(n, 1.0e9, dtype=np.float64)
         else:
             self.wall_distance = np.maximum(np.asarray(wall_distance, np.float64), 1e-9)
+
+        # Subset wall_face_mask to just the boundary faces, in the same
+        # order as self._bo/geom.bnd_owner (set up right below) - this is
+        # the ordering wall_shear_stress()/_viscous_flux's boundary
+        # section actually iterate over.
+        if wall_face_mask is not None:
+            self._wall_face_mask_b = np.asarray(wall_face_mask, dtype=bool)[geom.boundary_mask]
+        else:
+            self._wall_face_mask_b = None
 
         # Precompute owner->neighbour geometric quantities for internal faces.
         self._im = geom.internal_mask
@@ -648,7 +683,89 @@ class ViscousRANSResidual:
         corr = d_val / self._bdist[:, None] - proj
         return g_owner + corr[:, :, None] * self._e_OB[:, None, :]
 
-    def wall_shear_stress(self, vel: np.ndarray, mu_t: np.ndarray,
+    def _wall_tangential_velocity(self, rho: np.ndarray, vel: np.ndarray,
+                                  boundary_states: np.ndarray):
+        """Owner-cell velocity relative to the wall, decomposed into its
+        component tangential to the wall face, for WALL/GROUND boundary
+        faces only (shape (n_wall_faces, 3)), plus the wall-tangent unit
+        vectors and magnitude.
+
+        The wall's own velocity is recovered as the face-averaged
+        (owner+ghost)/2 value rather than needing separate access to
+        BoundaryConditionHandler's ramp/ground-speed state: `_wall_bc`
+        constructs the ghost specifically so this average equals the
+        prescribed wall velocity exactly (mirror construction) - reusing
+        that instead of threading wall-velocity state into this class.
+        """
+        geom = self.geom
+        bo = self._bo
+        wm = self._wall_face_mask_b
+        n_wb = geom.normals[geom.boundary_mask][wm]
+        rho_gw = np.maximum(boundary_states[geom.boundary_mask, 0][wm], 1e-9)
+        vel_ghost_w = boundary_states[geom.boundary_mask, 1:4][wm] / rho_gw[:, None]
+        vel_owner_w = vel[bo][wm]
+        vel_wall = 0.5 * (vel_owner_w + vel_ghost_w)
+        vel_rel = vel_owner_w - vel_wall
+        un_rel = np.einsum('nd,nd->n', vel_rel, n_wb)
+        vel_tang = vel_rel - un_rel[:, None] * n_wb
+        tang_mag = np.maximum(np.linalg.norm(vel_tang, axis=1), 1e-8)
+        tang_dir = vel_tang / tang_mag[:, None]
+        return tang_dir, tang_mag
+
+    def _wall_function_targets(self, rho_owner: np.ndarray, u_tang_mag: np.ndarray,
+                               y_p: np.ndarray):
+        """Menter scalable/automatic wall treatment: friction velocity
+        u_tau (via a laminar-sublayer/log-law switch at y+=WALL_YPLUS_SWITCH),
+        and the corresponding wall shear magnitude + near-wall k/omega
+        targets.
+
+        Args:
+            rho_owner: owner-cell density at each wall face
+            u_tang_mag: owner-cell velocity magnitude tangential to the
+                wall (relative to the wall's own motion), see
+                _wall_tangential_velocity
+            y_p: owner-cell centroid distance to the wall
+
+        Returns:
+            (tau_w, k_wall, omega_wall): each shape (n_wall_faces,).
+            tau_w is a magnitude (>=0); the caller applies it opposing
+            the tangential relative-velocity direction.
+        """
+        rho_s = np.maximum(rho_owner, 1e-9)
+        y_s = np.maximum(y_p, 1e-12)
+        u_p = np.maximum(u_tang_mag, 1e-8)
+
+        # Laminar-sublayer estimate: tau_w = mu*u_p/y_p = rho*u_tau^2.
+        u_tau_lam = np.sqrt(self.mu_lam * u_p / (rho_s * y_s))
+        yplus_lam = rho_s * u_tau_lam * y_s / self.mu_lam
+
+        # Log-law branch: Newton-iterate u_tau*[(1/kappa)ln(E*y+)] = u_p,
+        # y+ = rho*u_tau*y_p/mu (both factors depend on u_tau).
+        u_tau_log = np.maximum(u_tau_lam, 1e-8)
+        for _ in range(8):
+            yplus = np.maximum(rho_s * u_tau_log * y_s / self.mu_lam, 1e-3)
+            f = u_tau_log * (1.0 / WALL_LOG_KAPPA) * np.log(WALL_LOG_E * yplus) - u_p
+            dfdu = (1.0 / WALL_LOG_KAPPA) * (np.log(WALL_LOG_E * yplus) + 1.0)
+            dfdu = np.where(np.abs(dfdu) < 1e-8, 1e-8, dfdu)
+            u_tau_log = np.maximum(u_tau_log - f / dfdu, 1e-8)
+
+        u_tau = np.where(yplus_lam <= WALL_YPLUS_SWITCH, u_tau_lam, u_tau_log)
+        u_tau = np.maximum(u_tau, 1e-8)
+
+        tau_w = rho_s * u_tau ** 2
+
+        # Blended omega (Menter): sqrt(omega_viscous^2 + omega_log^2) -
+        # smoothly spans the near-wall asymptote (small y+) and the
+        # log-law value (large y+) without a hard switch.
+        omega_vis = 6.0 * self.mu_lam / (rho_s * SST_BETA1 * y_s ** 2)
+        omega_log = u_tau / (np.sqrt(SST_BETA_STAR) * SST_KAPPA * y_s)
+        omega_wall = np.sqrt(omega_vis ** 2 + omega_log ** 2)
+
+        k_wall = u_tau ** 2 / np.sqrt(SST_BETA_STAR)
+
+        return tau_w, k_wall, omega_wall
+
+    def wall_shear_stress(self, rho: np.ndarray, vel: np.ndarray, mu_t: np.ndarray,
                           grad_vel: np.ndarray, boundary_states: np.ndarray) -> np.ndarray:
         """Viscous stress tensor dotted with the outward normal, per boundary
         face: ``tau . n``, shape (n_boundary_faces, 3).
@@ -657,6 +774,15 @@ class ViscousRANSResidual:
         term) and by aerodynamic force integration (skin-friction drag),
         so both consistently use whatever force the momentum equation
         actually balances against.
+
+        For WALL/GROUND faces where a wall-function mask was supplied at
+        construction (see wall_face_mask), the CFD-resolved gradient-based
+        stress is replaced with the log-law-model value (Menter scalable
+        wall treatment) - the resolved-gradient estimate is only accurate
+        when the first cell truly sits in the viscous sublayer (y+~1);
+        with a coarser near-wall mesh it silently underestimates skin
+        friction rather than erroring, which the wall-function value
+        corrects for regardless of actual y+.
         """
         geom = self.geom
         bo = self._bo
@@ -667,7 +793,21 @@ class ViscousRANSResidual:
         rho_b = np.maximum(boundary_states[geom.boundary_mask, 0], 1e-9)
         vel_ghost = boundary_states[geom.boundary_mask, 1:4] / rho_b[:, None]
         gv_face_b = self._boundary_face_grad(grad_vel, vel[bo], vel_ghost)
-        return self._stress_dot_normal(gv_face_b, n_b, mu_eff[bo])
+        tau_resolved = self._stress_dot_normal(gv_face_b, n_b, mu_eff[bo])
+
+        wm = self._wall_face_mask_b
+        if wm is None or not np.any(wm):
+            return tau_resolved
+
+        tang_dir, tang_mag = self._wall_tangential_velocity(rho, vel, boundary_states)
+        y_p = self.wall_distance[bo][wm]
+        tau_w_mag, _, _ = self._wall_function_targets(rho[bo][wm], tang_mag, y_p)
+
+        tau_wf = tau_resolved.copy()
+        # Wall shear opposes the fluid's tangential motion relative to the
+        # wall (drag on the fluid), magnitude from the log-law model.
+        tau_wf[wm] = -tau_w_mag[:, None] * tang_dir
+        return tau_wf
 
     # ------------------------------------------------------------------
     # viscous flux
@@ -743,7 +883,7 @@ class ViscousRANSResidual:
 
             rho_b = np.maximum(boundary_states[geom.boundary_mask, 0], 1e-9)
             vel_ghost = boundary_states[geom.boundary_mask, 1:4] / rho_b[:, None]
-            tau_n_b = self.wall_shear_stress(vel, mu_t, grad_vel, boundary_states)
+            tau_n_b = self.wall_shear_stress(rho, vel, mu_t, grad_vel, boundary_states)
 
             E_ghost = boundary_states[geom.boundary_mask, 4]
             ke_ghost = 0.5 * rho_b * np.sum(vel_ghost**2, axis=1)
@@ -762,6 +902,24 @@ class ViscousRANSResidual:
 
             k_ghost = np.maximum(boundary_states[geom.boundary_mask, 5] / rho_b, 0.0)
             omega_ghost = np.maximum(boundary_states[geom.boundary_mask, 6] / rho_b, 1e-6)
+
+            wm = self._wall_face_mask_b
+            if wm is not None and np.any(wm):
+                # Wall-function k/omega targets, imposed as Dirichlet ghost
+                # values (mirrored so the face average equals the target -
+                # same mechanic as the existing k=0 no-slip Dirichlet, just
+                # with the log-law model's near-wall value instead of 0 /
+                # plain zero-gradient extrapolation).
+                tang_dir, tang_mag = self._wall_tangential_velocity(rho, vel, boundary_states)
+                y_p = self.wall_distance[bo][wm]
+                _, k_wall, omega_wall = self._wall_function_targets(rho[bo][wm], tang_mag, y_p)
+                # Same mirror-then-clamp pattern as the rest of the ghost-
+                # state machinery: the mirror formula can dip below the
+                # physical floor when the interior value is already far
+                # from the target, so re-clamp after overwriting.
+                k_ghost[wm] = np.maximum(2.0 * k_wall - k[bo][wm], 0.0)
+                omega_ghost[wm] = np.maximum(2.0 * omega_wall - omega[bo][wm], 1e-6)
+
             gk_face_b = self._boundary_face_grad(gk, k[bo], k_ghost)
             gw_face_b = self._boundary_face_grad(gw, omega[bo], omega_ghost)
             mut_b = mu_t[bo]

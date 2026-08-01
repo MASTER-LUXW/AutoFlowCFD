@@ -347,6 +347,7 @@ class TransientSolver:
                 ckpt = self.checkpoint_manager.save(
                     solution=self.solution, history=history_dict, iteration=self.n_steps,
                     metadata={'current_time': self.current_time},
+                    extra_fields={'mu_t': mu_t},
                 )
                 if ckpt:
                     self.checkpoint_path = ckpt

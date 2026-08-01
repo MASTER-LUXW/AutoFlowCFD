@@ -96,10 +96,11 @@ class CheckpointManager:
         solution: np.ndarray,
         history: dict,
         iteration: int,
-        metadata: Optional[dict] = None
+        metadata: Optional[dict] = None,
+        extra_fields: Optional[Dict[str, np.ndarray]] = None,
     ) -> Optional[str]:
         """Save checkpoint to HDF5 file.
-        
+
         Args:
             solution: Solution array, shape=(n_cells, n_vars)
             history: Convergence history dict with keys:
@@ -109,10 +110,18 @@ class CheckpointManager:
                 - cfl_history: List[float]
             iteration: Current iteration number
             metadata: Additional metadata (optional)
-            
+            extra_fields: Additional per-cell solver-derived fields to persist
+                alongside the conserved solution, e.g. {'mu_t': mu_t} - the
+                turbulent eddy viscosity the solver actually computed that
+                iteration. Without this, post-processing (VTKExporter) has
+                no way to recover the exact SST-blended value and has to
+                fall back to a cruder k/omega estimate. None-valued entries
+                are skipped (e.g. a caller passing mu_t=None because
+                turbulence is disabled that run).
+
         Returns:
             Path to checkpoint file, or None if failed
-            
+
         Example:
             >>> path = manager.save(solution, history, iteration=500)
             >>> print(f"Checkpoint saved: {path}")
@@ -145,6 +154,11 @@ class CheckpointManager:
                 sol_group.create_dataset("conserved", data=solution)
                 sol_group.attrs['shape'] = solution.shape
                 sol_group.attrs['dtype'] = np.string_(str(solution.dtype))
+
+                if extra_fields:
+                    for name, arr in extra_fields.items():
+                        if arr is not None:
+                            sol_group.create_dataset(name, data=np.asarray(arr, dtype=np.float64))
                 
                 # === Convergence History ===
                 conv_group = f.create_group("convergence/history")
@@ -271,7 +285,17 @@ class CheckpointManager:
                 # === Load Solution ===
                 sol_group = f["solution"]
                 solution = sol_group["conserved"][:]
-                
+
+                # Any extra per-cell fields saved alongside the conserved
+                # solution (see save()'s extra_fields, e.g. 'mu_t') - kept
+                # under metadata['fields'] rather than a 5th return value so
+                # existing (solution, history, iteration, metadata) callers
+                # are unaffected; absent for checkpoints written before this
+                # was added, or if extra_fields was never passed to save().
+                extra_field_names = [k for k in sol_group.keys() if k != "conserved"]
+                if extra_field_names:
+                    metadata['fields'] = {name: sol_group[name][:] for name in extra_field_names}
+
                 # Backend conversion if needed
                 if target_backend and target_backend != original_backend:
                     logger.info(

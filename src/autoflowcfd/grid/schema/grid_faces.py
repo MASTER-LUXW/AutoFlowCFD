@@ -39,6 +39,7 @@ class FaceData:
     area: np.ndarray  # float64, shape=(N_faces,) - scalar face areas (m^2)
     normal: np.ndarray  # float64, shape=(N_faces, 3) - unit normal vectors
     center: np.ndarray  # float64, shape=(N_faces, 3) - face center coordinates
+    node_connectivity: Optional[np.ndarray] = None  # int32, shape=(N_faces, 3) - triangle corner node indices (see FaceExtractor.extract_faces); None for callers that never populate it
     _area_vectors: Optional[np.ndarray] = None  # float64, shape=(N_faces, 3) - area vectors (normal * area), internal use
     
     def __post_init__(self):
@@ -81,6 +82,11 @@ class FaceData:
                 f"Internal area_vectors shape {self._area_vectors.shape} doesn't match "
                 f"connectivity count {n_faces}"
             )
+        if self.node_connectivity is not None and self.node_connectivity.shape != (n_faces, 3):
+            raise ValueError(
+                f"node_connectivity shape {self.node_connectivity.shape} doesn't match "
+                f"connectivity count {n_faces}"
+            )
         
         # Check dtypes
         if self.connectivity.dtype != np.int32:
@@ -109,6 +115,8 @@ class FaceData:
             self.normal = np.ascontiguousarray(self.normal)
         if not self.center.flags['C_CONTIGUOUS']:
             self.center = np.ascontiguousarray(self.center)
+        if self.node_connectivity is not None and not self.node_connectivity.flags['C_CONTIGUOUS']:
+            self.node_connectivity = np.ascontiguousarray(self.node_connectivity)
     
     @property
     def count(self) -> int:

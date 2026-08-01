@@ -14,7 +14,7 @@ import numpy as np
 from typing import Dict, Optional
 from loguru import logger
 
-from .structures import GridData
+from ..structures import GridData
 from .mesh_utils import validate_surface_mesh, validate_bounding_box
 from .mesh_extrusion import extrude_layers, convert_layers_to_tetrahedra
 from .mesh_boundary import identify_boundaries_from_surface
@@ -162,7 +162,7 @@ class VolumeMeshGenerator:
             VolumeMeshData with volume mesh
         """
         from .mesh_utils import compute_face_normals, check_mesh_quality
-        from .structures import NodeArray, TetrahedralCells, GridMetadata, VolumeMeshData
+        from ..structures import NodeArray, TetrahedralCells, GridMetadata, VolumeMeshData
         
         logger.info("Starting pure extrusion-based mesh generation...")
         

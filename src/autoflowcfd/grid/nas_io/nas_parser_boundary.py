@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 from loguru import logger
 
-from .structures import BoundaryMap
+from ..structures import BoundaryMap
 from .nas_parser_exceptions import NASParseError
 
 

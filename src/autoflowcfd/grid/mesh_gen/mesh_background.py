@@ -305,7 +305,7 @@ def generate_hybrid_mesh(
         )
 
     # Build VolumeMeshData structure
-    from .structures import NodeArray, TetrahedralCells, GridMetadata, VolumeMeshData
+    from ..structures import NodeArray, TetrahedralCells, GridMetadata, VolumeMeshData
 
     nodes_obj = NodeArray(
         x=merged_nodes[:, 0],

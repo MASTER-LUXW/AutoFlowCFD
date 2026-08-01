@@ -80,8 +80,8 @@ def main():
         ("autoflowcfd", "主包"),
         ("autoflowcfd.grid", "网格模块"),
         ("autoflowcfd.grid.structures", "数据结构"),
-        ("autoflowcfd.grid.parser", "NAS解析器"),
-        ("autoflowcfd.grid.validator", "质量校验器"),
+        ("autoflowcfd.grid.nas_io.parser", "NAS解析器"),
+        ("autoflowcfd.grid.validation.validator", "质量校验器"),
     ]
     
     for module_name, desc in modules_to_test:

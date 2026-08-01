@@ -9,7 +9,7 @@ from typing import Tuple
 import numpy as np
 from loguru import logger
 
-from .structures import CellArray
+from ..structures import CellArray
 from .nas_parser_exceptions import NASParseError
 
 # Above this fraction of CTRIA3 lines dropped (parse errors, unparseable

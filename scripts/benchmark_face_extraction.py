@@ -99,7 +99,7 @@ def benchmark_old_algorithm(cell_connectivity: np.ndarray):
 def benchmark_new_algorithm(cell_connectivity: np.ndarray):
     """Benchmark the new radix-sort approach."""
     try:
-        from autoflowcfd.grid.face_extractor import (
+        from autoflowcfd.grid.mesh_gen.face_extractor import (
             _build_face_dict_numba,
             _deduplicate_and_build_connectivity,
             NUMBA_AVAILABLE

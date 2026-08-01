@@ -33,7 +33,7 @@ def identify_boundaries_from_surface(
     Returns:
         BoundaryMap object with identified boundary groups
     """
-    from .structures import BoundaryMap
+    from ..structures import BoundaryMap
     
     logger.info("Identifying boundary conditions from surface mesh...")
     
@@ -145,7 +145,7 @@ def map_surface_boundaries(
     Returns:
         BoundaryMap with inherited boundary groups
     """
-    from .structures import BoundaryMap
+    from ..structures import BoundaryMap
 
     logger.info("Mapping surface boundaries to volume mesh...")
 

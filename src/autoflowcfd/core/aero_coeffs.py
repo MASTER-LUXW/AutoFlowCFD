@@ -154,7 +154,7 @@ class AeroCoefficientCalculator:
             if (viscous_residual is not None and grad_vel is not None
                     and mu_t is not None and boundary_states is not None):
                 vel = np.column_stack([velocity_x, velocity_y, velocity_z])
-                tau_n_all = viscous_residual.wall_shear_stress(vel, mu_t, grad_vel, boundary_states)
+                tau_n_all = viscous_residual.wall_shear_stress(rho, vel, mu_t, grad_vel, boundary_states)
                 
                 # tau_n_all shape: (n_boundary_faces, 3)
                 # Map body_face_indices to boundary face positions

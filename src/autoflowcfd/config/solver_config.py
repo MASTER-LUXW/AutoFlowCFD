@@ -137,6 +137,19 @@ class SteadyConfig(SolverConfig):
             Cd/Cl normalization, so the three always stay consistent.
         vel_inf: Freestream velocity magnitude (m/s), same role as rho_inf.
         p_inf: Freestream static pressure (Pa), same role as rho_inf.
+        use_wall_functions: Enable Menter scalable/automatic wall
+            treatment (log-law based) on WALL/GROUND boundary faces,
+            instead of resolving all the way to the wall. False (default)
+            preserves prior behaviour exactly - the resolved-gradient wall
+            shear/k/omega treatment, which requires y+~1 at the first
+            cell to be accurate. True lets a coarser near-wall mesh
+            (y+ up to ~100+) still give physically meaningful skin
+            friction and near-wall turbulence, at the cost of the log-law
+            model's own equilibrium-boundary-layer assumption being less
+            accurate than a resolved gradient in strongly separated flow.
+            Default off since this is new, not yet used-in-anger physics -
+            opt in explicitly rather than silently changing existing
+            fine-mesh cases' results.
 
     Example:
         >>> config = SteadyConfig(
@@ -160,6 +173,7 @@ class SteadyConfig(SolverConfig):
     rho_inf: float = 1.225
     vel_inf: float = 30.0
     p_inf: float = 101325.0
+    use_wall_functions: bool = False
 
     def __post_init__(self):
         """Validate steady configuration."""

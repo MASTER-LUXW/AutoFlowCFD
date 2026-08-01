@@ -68,6 +68,12 @@ def solve() -> None:
 @click.option("--max-cell-size", type=float, default=None,
               help="Max core-region cell size in meters, graded outward from the BL's "
                    "near-wall size (overrides config); unset means no cap")
+@click.option("--wall-functions", is_flag=True, default=False,
+              help="Enable Menter scalable/automatic wall treatment (log-law based) "
+                   "on WALL/GROUND faces, instead of resolving all the way to the "
+                   "wall - lets a coarser near-wall mesh (y+ up to ~100+, not just "
+                   "y+~1) still give physically meaningful skin friction and "
+                   "near-wall turbulence (overrides config)")
 @click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
 def run(
     input_file: str,
@@ -87,6 +93,7 @@ def run(
     max_layers: Optional[int],
     min_cell_size: Optional[float],
     max_cell_size: Optional[float],
+    wall_functions: bool,
     json_output: bool
 ) -> None:
     """Run steady-state RANS simulation.
@@ -172,6 +179,8 @@ def run(
                 steady_config.n_threads = threads if threads > 0 else -1
             if _explicit('gpu_device'):
                 steady_config.gpu_device = gpu_device
+            if _explicit('wall_functions'):
+                steady_config.use_wall_functions = wall_functions
         else:
             # Create config from CLI options
             steady_config = SteadyConfig(
@@ -186,6 +195,7 @@ def run(
                 checkpoint_interval=checkpoint_interval,
                 n_threads=threads if threads > 0 else -1,
                 gpu_device=gpu_device,
+                use_wall_functions=wall_functions,
             )
 
         # --growth-rate/--max-layers/--min-cell-size are CLI-only overrides:
@@ -547,7 +557,7 @@ def resume(
         from pathlib import Path
         from ..core.checkpoint import CheckpointManager
         from ..config.loader import load_config
-        from ..grid.parser_core import NASParser
+        from ..grid.nas_io.parser_core import NASParser
         from ..core.solver_steady import FRSolver
         
         # Step 1: Load checkpoint metadata
