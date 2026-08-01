@@ -310,7 +310,18 @@ class BoundaryConditionHandler:
             return "OUTLET"
         elif "SYMMETRY" in name_upper:
             return "SYMMETRY"
-        elif "TUNNEL" in name_upper or "FARFIELD" in name_upper:
+        elif "TUNNEL" in name_upper:
+            # A named "tunnel" boundary is a physical (if frictionless) duct
+            # wall - zero-penetration, free-slip - not an open domain
+            # boundary. Reuses the SYMMETRY ghost state (mirror the normal
+            # velocity component, no viscous shear enforced), which is
+            # mathematically identical to a slip wall for an inviscid-wall
+            # treatment. Previously grouped with FARFIELD (an open,
+            # characteristic boundary letting mass freely cross), which is
+            # the wrong physics for an actual tunnel wall and let flow
+            # leak through what should have been a solid boundary.
+            return "SYMMETRY"
+        elif "FARFIELD" in name_upper:
             return "FARFIELD"
         return "WALL"
 

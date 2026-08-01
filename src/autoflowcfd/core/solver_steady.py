@@ -241,7 +241,13 @@ class FRSolver:
             elif "GROUND" in name_upper:
                 self.bc_handler.base_farfield_velocity = vel_inf
                 self.boundary_manager.add_bc(boundary_name, bc_type="GROUND", moving_wall_velocity=vel_inf)
-            elif "TUNNEL" in name_upper or "FARFIELD" in name_upper:
+            elif "TUNNEL" in name_upper:
+                # A named "tunnel" boundary is a physical (frictionless)
+                # duct wall, not an open domain boundary - see
+                # bc_handler.py's _classify for the matching live-path
+                # reclassification (SYMMETRY = free-slip, zero-penetration).
+                self.boundary_manager.add_bc(boundary_name, bc_type="SYMMETRY")
+            elif "FARFIELD" in name_upper:
                 self.bc_handler.base_farfield_velocity = vel_inf
                 self.boundary_manager.add_bc(boundary_name, bc_type="FARFIELD", velocity_x=vel_inf, pressure=p_inf)
             elif "SYMMETRY" in name_upper:
@@ -354,16 +360,24 @@ class FRSolver:
         mu_lam = 1.7894e-5
         turbulent = self.config.turbulence != TurbulenceModel.NONE
 
-        # Low-Mach preconditioning reference Mach number (see
-        # low_mach_preconditioning.py): at the freestream conditions this
-        # steady solve is set up for, a non-preconditioned density-based
-        # scheme is forced to resolve the acoustic speed (~340 m/s) even
-        # though the physical flow itself is far slower - artificially
-        # restricting CFL and adding excess numerical dissipation right
-        # where it's least wanted (near-stagnation/separated regions,
-        # where the LOCAL Mach number can be near zero even in an overall
-        # low-speed flow). Passing this through relaxes both without
-        # changing the converged steady-state answer.
+        # Reference (freestream) Mach number, used two ways:
+        #  1. ViscousRANSResidual's inviscid flux: AUSM+up (see
+        #     fvm_viscous_residual.py's _ausm_up), which replaced HLLC as
+        #     the live flux specifically for its low-Mach robustness. It
+        #     has a built-in low-Mach scaling function f_a that this
+        #     reference Mach regularizes so f_a stays bounded away from
+        #     zero at genuine stagnation points, instead of a wave-speed-
+        #     bracket-based preconditioner (tried first, reverted - it
+        #     narrowed HLLC's SL/SR margin around the star-state wave
+        #     speed Sstar by ~10x at this case's M~0.09 everywhere in the
+        #     domain at once, causing a much faster, more widespread
+        #     numerical blow-up than the unpreconditioned scheme; see
+        #     fvm_viscous_residual.py's _hllc docstring for the history).
+        #  2. TimeIntegrator.local_time_step below: relaxes the pseudo-
+        #     time CFL restriction that a density-based scheme otherwise
+        #     inherits from the acoustic speed (~340 m/s) even though the
+        #     physical flow here is far slower - this part never touches
+        #     the flux itself, only how big a step is stable to take.
         gamma_air = 1.4
         a_inf = np.sqrt(gamma_air * self.config.p_inf / self.config.rho_inf)
         mach_ref = self.config.vel_inf / max(a_inf, 1e-30)

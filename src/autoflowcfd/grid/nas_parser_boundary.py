@@ -238,13 +238,27 @@ def _map_properties_to_boundaries(
     bc_types = {}
     property_ids = {}
     
-    # Boundary keyword mapping for automatic detection
+    # Boundary keyword mapping for automatic detection. Order matters:
+    # _detect_boundary_type returns the FIRST matching bc_type, so more
+    # specific keyword sets are listed before the generic 'WALL' bucket -
+    # otherwise a compound name like "TUNNEL_WALL" would match the plain
+    # 'wall' substring before ever reaching the 'tunnel' keyword below.
     boundary_keywords = {
         'VELOCITY_INLET': ['inlet', 'inflow', 'entrance', '入口'],
         'PRESSURE_OUTLET': ['outlet', 'outflow', 'exit', '出口'],
-        'WALL': ['wall', 'body', 'surface', '车体', '车身', '壁面'],
         'SYMMETRY': ['symmetry', 'sym', '对称'],
-        'SLIP_WALL': ['slip', 'farfield', 'freestream']
+        # A "tunnel" boundary is a frictionless duct wall (see
+        # bc_handler.py's _classify: TUNNEL -> SYMMETRY/free-slip), not a
+        # viscous no-slip wall - it must never get BL extrusion (there is
+        # no velocity gradient at a slip wall to resolve). Previously
+        # "tunnel" matched none of these keywords and silently fell
+        # through to the 'WALL' default below, making it BL-extrude-
+        # eligible - extruding a boundary layer on a domain-spanning
+        # tunnel wall collapses almost immediately (hits the opposite
+        # wall/body within 1-2 layers), producing hundreds of degenerate
+        # tetrahedra and a non-manifold surface that crashes tetgen.
+        'SLIP_WALL': ['slip', 'farfield', 'freestream', 'tunnel', '风洞', '洞壁'],
+        'WALL': ['wall', 'body', 'surface', '车体', '车身', '壁面'],
     }
     
     for pid, name in pid_to_name.items():

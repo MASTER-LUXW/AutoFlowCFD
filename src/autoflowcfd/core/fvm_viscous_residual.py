@@ -27,7 +27,6 @@ from scipy.spatial import cKDTree
 from loguru import logger
 
 from .fvm_gradients import FaceGeometry, green_gauss_gradient, barth_jespersen_limiter
-from .low_mach_preconditioning import preconditioned_acoustic_eigs
 
 GAMMA = 1.4
 R_GAS = 287.058          # J/(kg K), dry air
@@ -44,6 +43,13 @@ SST_SIGMA_W1, SST_SIGMA_W2 = 0.5, 0.856
 SST_BETA1, SST_BETA2 = 0.075, 0.0828
 SST_GAMMA1 = SST_BETA1 / SST_BETA_STAR - SST_SIGMA_W1 * SST_KAPPA**2 / np.sqrt(SST_BETA_STAR)
 SST_GAMMA2 = SST_BETA2 / SST_BETA_STAR - SST_SIGMA_W2 * SST_KAPPA**2 / np.sqrt(SST_BETA_STAR)
+
+# AUSM+up constants (Liou 2006, JCP 214:137-170, "A sequel to AUSM, Part
+# II: AUSM+-up for all speeds").
+_AUSM_KP = 0.25      # velocity-pressure coupling coefficient
+_AUSM_KU = 0.75      # pressure-velocity coupling coefficient
+_AUSM_SIGMA = 1.0    # Mp cutoff coefficient
+_AUSM_BETA = 1.0 / 8.0  # Mach-splitting shape parameter
 
 
 def _blend(f1, a1_val, a2_val):
@@ -68,28 +74,25 @@ class ViscousRANSResidual:
         If False, k/omega source terms and eddy viscosity are disabled
         (laminar Navier-Stokes).
     mach_ref:
-        Reference (freestream) Mach number for low-Mach preconditioning of
-        the HLLC wave-speed estimates (see low_mach_preconditioning.py).
-        None (default) disables preconditioning entirely, matching prior
-        behaviour exactly - pass the freestream Mach number to enable it
-        for low-speed (M << 1) steady flows.
+        Reference (freestream) Mach number, used only by the AUSM+up
+        inviscid flux's low-Mach scaling function f_a (see _ausm_up) to
+        regularize its stagnation-point behaviour - NOT a preconditioner
+        on the pseudo-time step or wave-speed structure (that approach
+        was tried and reverted; see solver_steady.py's comment). Default
+        0.1 is a generic, safe fallback for callers (e.g. the transient
+        solver) that don't compute a case-specific value; pass the
+        solve's actual freestream Mach for a physically-consistent
+        scaling.
     """
 
     def __init__(self, geom: FaceGeometry, mu_lam: float = 1.7894e-5,
                  wall_distance: np.ndarray | None = None,
                  turbulent: bool = True,
-                 mach_ref: float | None = None):
+                 mach_ref: float = 0.1):
         self.geom = geom
         self.mu_lam = float(mu_lam)
         self.turbulent = turbulent
-        # Low-Mach preconditioning reference Mach number (see
-        # low_mach_preconditioning.py). None disables preconditioning
-        # entirely (the HLLC wave speeds use the raw physical sound speed,
-        # exactly matching prior behaviour) - this is the default so
-        # existing callers (e.g. the transient solver, which needs the
-        # unpreconditioned acoustic eigenvalues for genuine time-accurate
-        # integration) are unaffected unless they opt in explicitly.
-        self.mach_ref = mach_ref
+        self.mach_ref = float(mach_ref)
         n = geom.n_cells
         if wall_distance is None:
             self.wall_distance = np.full(n, 1.0e9, dtype=np.float64)
@@ -326,7 +329,7 @@ class ViscousRANSResidual:
 
         n_int = geom.normals[geom.internal_mask]
         a_int = geom.areas[geom.internal_mask]
-        f_int = self._hllc(pL, pR, n_int) * a_int[:, None]
+        f_int = self._ausm_up(pL, pR, n_int) * a_int[:, None]
 
         # R = (1/V) * sum_outward F.nA.  The face normal is outward for the
         # owner and inward for the neighbour, hence the opposite signs.
@@ -339,11 +342,163 @@ class ViscousRANSResidual:
             # ghost primitives already computed as prim_b
             n_b = geom.normals[geom.boundary_mask]
             a_b = geom.areas[geom.boundary_mask]
-            f_b = self._hllc(pOwner, prim_b, n_b) * a_b[:, None]
+            f_b = self._ausm_up(pOwner, prim_b, n_b) * a_b[:, None]
             np.add.at(flux_accum, bo, f_b)
+
+    def _ausm_up(self, primL: np.ndarray, primR: np.ndarray, normal: np.ndarray) -> np.ndarray:
+        """Vectorised AUSM+up all-speed flux (Liou 2006) for the 7-equation
+        system - the live inviscid flux, replacing HLLC (kept below,
+        unused, for reference/comparison).
+
+        Unlike HLLC's wave-speed-bracketed Riemann solver - whose middle
+        wave speed Sstar becomes ill-conditioned if its SL/SR bracket is
+        artificially narrowed by low-Mach preconditioning, see _hllc's own
+        comment for the failure this caused - AUSM+up is a flux-vector-
+        splitting scheme built from an explicit interface Mach number and
+        an explicit low-Mach scaling function f_a. It has proper O(M^2)
+        low-Mach pressure-velocity decoupling built into its own
+        formulation with no wave-speed bracket to destabilize, and reduces
+        smoothly to standard upwind behaviour as the local Mach number
+        approaches/exceeds 1 (so locally-accelerated regions, e.g. around
+        a body's sharp edges, are handled correctly too).
+
+        primL/primR columns: [rho, u, v, w, p, k, omega].
+        Returns flux array (n, 7).
+        """
+        rhoL, uL, vL, wL, pL, kL, wkL = primL.T
+        rhoR, uR, vR, wR, pR, kR, wkR = primR.T
+        nx, ny, nz = normal[:, 0], normal[:, 1], normal[:, 2]
+
+        # === NUMERICAL STABILITY: same clipping as _hllc. ===
+        MAX_VELOCITY = 1e4  # 10 km/s, physically reasonable upper bound
+        vel_mag_L = np.sqrt(uL**2 + vL**2 + wL**2)
+        vel_mag_R = np.sqrt(uR**2 + vR**2 + wR**2)
+        clip_factor_L = np.minimum(1.0, MAX_VELOCITY / np.maximum(vel_mag_L, 1e-12))
+        clip_factor_R = np.minimum(1.0, MAX_VELOCITY / np.maximum(vel_mag_R, 1e-12))
+        uL = uL * clip_factor_L; vL = vL * clip_factor_L; wL = wL * clip_factor_L
+        uR = uR * clip_factor_R; vR = vR * clip_factor_R; wR = wR * clip_factor_R
+
+        rhoL = np.maximum(rhoL, 1e-9)
+        rhoR = np.maximum(rhoR, 1e-9)
+        pL = np.maximum(pL, 1.0)
+        pR = np.maximum(pR, 1.0)
+
+        unL = uL * nx + vL * ny + wL * nz
+        unR = uR * nx + vR * ny + wR * nz
+
+        EL = pL / (GAMMA - 1.0) + 0.5 * rhoL * (uL**2 + vL**2 + wL**2)
+        ER = pR / (GAMMA - 1.0) + 0.5 * rhoR * (uR**2 + vR**2 + wR**2)
+        MAX_ENERGY = 1e12
+        EL = np.minimum(EL, MAX_ENERGY)
+        ER = np.minimum(ER, MAX_ENERGY)
+        HL = (EL + pL) / rhoL
+        HR = (ER + pR) / rhoR
+
+        # --- interface (critical) speed of sound, Liou 2006 eq. 30-33.
+        # Ensures a consistent, correctly-behaved interface sound speed
+        # for both compression and expansion, rather than a plain average.
+        a_crit_L = np.sqrt(np.maximum(2.0 * (GAMMA - 1.0) / (GAMMA + 1.0) * HL, 1e-12))
+        a_crit_R = np.sqrt(np.maximum(2.0 * (GAMMA - 1.0) / (GAMMA + 1.0) * HR, 1e-12))
+        a_hat_L = a_crit_L**2 / np.maximum(a_crit_L, unL)
+        a_hat_R = a_crit_R**2 / np.maximum(a_crit_R, -unR)
+        a_half = np.maximum(np.minimum(a_hat_L, a_hat_R), 1e-6)
+
+        ML = unL / a_half
+        MR = unR / a_half
+
+        # --- low-Mach reference scaling function f_a (the "up" in
+        # AUSM+up): regularized by self.mach_ref so f_a stays bounded away
+        # from zero at genuine stagnation points (where local Mbar -> 0),
+        # instead of letting the 1/f_a term in Mp below blow up there.
+        rho_half = 0.5 * (rhoL + rhoR)
+        Mbar2 = (unL**2 + unR**2) / (2.0 * a_half**2)
+        M0_2 = np.clip(np.maximum(Mbar2, self.mach_ref**2), 0.0, 1.0)
+        f_a = np.maximum(np.sqrt(M0_2) * (2.0 - np.sqrt(M0_2)), 1e-6)
+        alpha = 3.0 / 16.0 * (-4.0 + 5.0 * f_a**2)
+
+        # --- Mach-number splitting polynomials (Liou 2006 eq. 19, 21). ---
+        def M1_plus(M): return 0.5 * (M + np.abs(M))
+        def M1_minus(M): return 0.5 * (M - np.abs(M))
+        def M2_plus(M): return 0.25 * (M + 1.0) ** 2
+        def M2_minus(M): return -0.25 * (M - 1.0) ** 2
+
+        subL = np.abs(ML) < 1.0
+        subR = np.abs(MR) < 1.0
+
+        M4_plus = np.where(
+            subL,
+            M2_plus(ML) * (1.0 - 16.0 * _AUSM_BETA * M2_minus(ML)),
+            M1_plus(ML),
+        )
+        M4_minus = np.where(
+            subR,
+            M2_minus(MR) * (1.0 + 16.0 * _AUSM_BETA * M2_plus(MR)),
+            M1_minus(MR),
+        )
+
+        # --- pressure splitting polynomials (Liou 2006 eq. 24). The
+        # |M|>=1 branch (M1_plus/M) is only ever SELECTED where M!=0 (that
+        # region excludes M=0 by definition), but np.where evaluates both
+        # branches eagerly for every element - guard the division so
+        # M=0 elements (which always take the other, 5th-order branch)
+        # don't raise a spurious "invalid value in divide" warning from a
+        # 0/0 that gets computed and immediately discarded.
+        ML_safe = np.where(ML != 0.0, ML, 1.0)
+        MR_safe = np.where(MR != 0.0, MR, 1.0)
+        P5_plus = np.where(
+            subL,
+            M2_plus(ML) * ((2.0 - ML) - 16.0 * alpha * ML * M2_minus(ML)),
+            M1_plus(ML) / ML_safe,
+        )
+        P5_minus = np.where(
+            subR,
+            M2_minus(MR) * ((-2.0 - MR) + 16.0 * alpha * MR * M2_plus(MR)),
+            M1_minus(MR) / MR_safe,
+        )
+
+        # --- velocity-pressure coupling (Liou 2006 eq. 8, 15) - this is
+        # what gives AUSM+up its correct low-Mach asymptotic behaviour,
+        # unlike a plain upwind AUSM. ---
+        Mp = (-_AUSM_KP / f_a) * np.maximum(1.0 - _AUSM_SIGMA * Mbar2, 0.0) \
+            * (pR - pL) / (rho_half * a_half ** 2)
+        M_half = M4_plus + M4_minus + Mp
+
+        pu = -_AUSM_KU * P5_plus * P5_minus * (rhoL + rhoR) * f_a * a_half * (unR - unL)
+        p_half = P5_plus * pL + P5_minus * pR + pu
+
+        # --- mass flux and upwinded convected variables. ---
+        mdot = a_half * M_half * np.where(M_half > 0, rhoL, rhoR)
+
+        pos = mdot >= 0
+        u_up = np.where(pos, uL, uR)
+        v_up = np.where(pos, vL, vR)
+        w_up = np.where(pos, wL, wR)
+        H_up = np.where(pos, HL, HR)
+        k_up = np.where(pos, kL, kR)
+        wk_up = np.where(pos, wkL, wkR)
+
+        return np.column_stack([
+            mdot,
+            mdot * u_up + p_half * nx,
+            mdot * v_up + p_half * ny,
+            mdot * w_up + p_half * nz,
+            mdot * H_up,
+            mdot * k_up,
+            mdot * wk_up,
+        ])
 
     def _hllc(self, primL: np.ndarray, primR: np.ndarray, normal: np.ndarray) -> np.ndarray:
         """Vectorised HLLC flux for the 7-equation system.
+
+        NOT used by the live solve path (see _ausm_up, which replaced it
+        as _inviscid_flux's flux function) - kept for reference/comparison
+        and because it's a legitimate, independently-correct Riemann
+        solver in its own right (its flux consistency F(U,U)=F(U) still
+        holds). See _ausm_up's docstring and solver_steady.py's mach_ref
+        comment for why AUSM+up was adopted instead: HLLC's Sstar
+        computation is uniquely sensitive to any narrowing of the SL/SR
+        wave-speed bracket (as low-Mach preconditioning would do), which
+        AUSM+up's flux-vector-splitting formulation doesn't have at all.
 
         primL/primR columns: [rho, u, v, w, p, k, omega].
         Returns flux array (n, 7).
@@ -384,22 +539,28 @@ class ViscousRANSResidual:
         EL = np.minimum(EL, MAX_ENERGY)
         ER = np.minimum(ER, MAX_ENERGY)
 
-        # Wave speed estimates (Davis / Einfeldt), optionally low-Mach
-        # preconditioned (see low_mach_preconditioning.py module docstring).
-        # HLLC's flux stays exactly consistent (F(U,U)=F(U)) regardless of
-        # how SL/SR are computed, so this never changes the converged
-        # steady-state answer - only how much numerical dissipation is
-        # added en route, which is what causes excess low-Mach noise
-        # (destabilizing near-stagnation/separated regions) when using the
-        # raw acoustic speed unconditionally.
-        if self.mach_ref is not None:
-            lamP_L, lamM_L, _ = preconditioned_acoustic_eigs(unL, aL, self.mach_ref)
-            lamP_R, lamM_R, _ = preconditioned_acoustic_eigs(unR, aR, self.mach_ref)
-            SL = np.minimum(lamM_L, lamM_R)
-            SR = np.maximum(lamP_L, lamP_R)
-        else:
-            SL = np.minimum(unL - aL, unR - aR)
-            SR = np.maximum(unL + aL, unR + aR)
+        # Wave speed estimates (Davis / Einfeldt) - deliberately NOT low-Mach
+        # preconditioned, unlike the pseudo-time step (see
+        # TimeIntegrator.local_time_step). Preconditioning SL/SR here was
+        # tried and reverted: HLLC's middle wave speed Sstar is
+        #   Sstar = (pR-pL + rhoL*unL*(SL-unL) - rhoR*unR*(SR-unR)) / denom
+        #   denom = rhoL*(SL-unL) - rhoR*(SR-unR)
+        # With the raw acoustic SL/SR, (SL-unL) and (SR-unR) are O(a)
+        # (~340 m/s for air), giving `denom` a comfortable margin against
+        # cancellation. Preconditioning deliberately shrinks SL/SR toward
+        # un at low Mach (that's the whole point, for the CFL/dissipation
+        # benefit) - but that shrinks this same margin by the same factor
+        # (~beta, e.g. ~10x at M~0.09) at every face in the ENTIRE
+        # low-speed flow field, not just near-stagnation regions, making
+        # Sstar's denominator far more sensitive to noise everywhere at
+        # once. Observed directly: applying it here caused a much faster,
+        # more widespread numerical blow-up (velocity hitting the 1e4 m/s
+        # clip within 200 iterations) than the unpreconditioned scheme,
+        # consistent with this being a real conditioning regression, not
+        # an improvement - so only the timestep is preconditioned, never
+        # the flux's own wave-speed estimates.
+        SL = np.minimum(unL - aL, unR - aR)
+        SR = np.maximum(unL + aL, unR + aR)
         denom = rhoL * (SL - unL) - rhoR * (SR - unR)
         denom = np.where(np.abs(denom) < 1e-12, np.sign(denom) * 1e-12 + 1e-12, denom)
         Sstar = (pR - pL + rhoL * unL * (SL - unL) - rhoR * unR * (SR - unR)) / denom

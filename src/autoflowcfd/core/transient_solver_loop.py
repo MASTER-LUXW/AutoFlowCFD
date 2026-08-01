@@ -136,9 +136,13 @@ class TransientSolver:
             u = name.upper()
             if "INLET" in u or "INFLOW" in u:
                 self.bc_handler.base_inlet_velocity = vel_inf
-            elif "GROUND" in u or "TUNNEL" in u or "FARFIELD" in u:
+            elif "GROUND" in u or "FARFIELD" in u:
                 self.bc_handler.base_farfield_velocity = vel_inf
-            elif "BODY" in u or "CAR" in u or "OUTLET" in u or "SYMMETRY" in u:
+            elif "BODY" in u or "CAR" in u or "OUTLET" in u or "SYMMETRY" in u or "TUNNEL" in u:
+                # TUNNEL is classified as SYMMETRY (free-slip duct wall) by
+                # bc_handler.py's _classify - it doesn't use
+                # base_farfield_velocity at all, unlike a real open FARFIELD
+                # boundary.
                 pass
             else:
                 self.bc_handler.base_farfield_velocity = vel_inf
@@ -189,8 +193,16 @@ class TransientSolver:
                 wall_face_mask[f] = True
         wall_distance = estimate_wall_distance(self._geom, wall_face_mask)
 
+        # Reference Mach number for AUSM+up's low-Mach scaling function
+        # f_a (see fvm_viscous_residual.py's _ausm_up / solver_steady.py's
+        # matching comment) - same role here as in the steady solver.
+        gamma_air = 1.4
+        a_inf = np.sqrt(gamma_air * self.config.p_inf / self.config.rho_inf)
+        mach_ref = self.config.vel_inf / max(a_inf, 1e-30)
+
         self._residual = ViscousRANSResidual(
-            self._geom, mu_lam=MU_LAM, wall_distance=wall_distance, turbulent=self.turbulent
+            self._geom, mu_lam=MU_LAM, wall_distance=wall_distance, turbulent=self.turbulent,
+            mach_ref=mach_ref,
         )
         self._des_delta = np.cbrt(cell_volumes)
 

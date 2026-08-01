@@ -22,9 +22,17 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 from loguru import logger
 
-# Boundary types that are always open-flow boundaries (never solid walls),
-# so their faces are never BL-extruded regardless of geometry.
-NEVER_EXTRUDE_BC_TYPES = {'VELOCITY_INLET', 'PRESSURE_OUTLET', 'SYMMETRY'}
+# Boundary types that are always open-flow boundaries or frictionless
+# (slip) walls, so their faces are never BL-extruded regardless of
+# geometry: there is no near-wall velocity gradient to resolve at a
+# free-slip/symmetry surface, and no wall at all at a genuine open
+# boundary. SLIP_WALL covers e.g. "tunnel"/"farfield"-named boundaries
+# (see nas_parser_boundary.py's keyword table and bc_handler.py's
+# _classify) - previously missing here, so a tunnel wall (falling through
+# to the 'WALL' bc_type default before that keyword-table fix) could still
+# get BL-extruded, which collapses almost immediately for a domain-
+# spanning wall (hits the opposite wall/body within 1-2 layers).
+NEVER_EXTRUDE_BC_TYPES = {'VELOCITY_INLET', 'PRESSURE_OUTLET', 'SYMMETRY', 'SLIP_WALL'}
 
 # A sub-shell whose own open-edge fraction is below this is treated as a
 # closed (embedded) solid for orientation purposes, even with a small real

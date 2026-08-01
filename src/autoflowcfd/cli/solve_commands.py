@@ -59,6 +59,8 @@ def solve() -> None:
               help="CPU thread count (-1 for auto)")
 @click.option("--gpu-device", type=int, default=0,
               help="GPU device ID")
+@click.option("--growth-rate", type=float, default=None,
+              help="Boundary-layer geometric growth rate (overrides config)")
 @click.option("--max-layers", type=int, default=None,
               help="Maximum boundary layer layers (overrides config)")
 @click.option("--min-cell-size", type=float, default=None,
@@ -81,6 +83,7 @@ def run(
     checkpoint_interval: int,
     threads: int,
     gpu_device: int,
+    growth_rate: Optional[float],
     max_layers: Optional[int],
     min_cell_size: Optional[float],
     max_cell_size: Optional[float],
@@ -185,9 +188,11 @@ def run(
                 gpu_device=gpu_device,
             )
 
-        # --max-layers/--min-cell-size are CLI-only overrides: when passed,
-        # they win over whatever steady_config carries (defaults, or values
-        # loaded from --config yaml).
+        # --growth-rate/--max-layers/--min-cell-size are CLI-only overrides:
+        # when passed, they win over whatever steady_config carries
+        # (defaults, or values loaded from --config yaml).
+        if growth_rate is not None:
+            steady_config.growth_rate = growth_rate
         if max_layers is not None:
             steady_config.max_layers = max_layers
         if min_cell_size is not None:
