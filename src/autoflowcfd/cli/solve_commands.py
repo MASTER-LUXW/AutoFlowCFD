@@ -63,6 +63,10 @@ def solve() -> None:
               help="Boundary-layer geometric growth rate (overrides config)")
 @click.option("--max-layers", type=int, default=None,
               help="Maximum boundary layer layers (overrides config)")
+@click.option("--bl-layers", type=int, default=None,
+              help="How many of --max-layers count as the fine boundary-layer stage "
+                   "before switching to the faster-growing transition stage; unset "
+                   "keeps the default min(8, max_layers) split (overrides config)")
 @click.option("--min-cell-size", type=float, default=None,
               help="Minimum cell size in meters (overrides config)")
 @click.option("--max-cell-size", type=float, default=None,
@@ -98,6 +102,7 @@ def run(
     gpu_device: int,
     growth_rate: Optional[float],
     max_layers: Optional[int],
+    bl_layers: Optional[int],
     min_cell_size: Optional[float],
     max_cell_size: Optional[float],
     wall_functions: bool,
@@ -207,13 +212,15 @@ def run(
                 use_wall_functions=wall_functions,
             )
 
-        # --growth-rate/--max-layers/--min-cell-size are CLI-only overrides:
-        # when passed, they win over whatever steady_config carries
-        # (defaults, or values loaded from --config yaml).
+        # --growth-rate/--max-layers/--bl-layers/--min-cell-size are CLI-only
+        # overrides: when passed, they win over whatever steady_config
+        # carries (defaults, or values loaded from --config yaml).
         if growth_rate is not None:
             steady_config.growth_rate = growth_rate
         if max_layers is not None:
             steady_config.max_layers = max_layers
+        if bl_layers is not None:
+            steady_config.bl_layers = bl_layers
         if min_cell_size is not None:
             steady_config.min_cell_size = min_cell_size
         if max_cell_size is not None:
@@ -242,6 +249,7 @@ def run(
             volume_mesh_params={
                 'growth_rate': steady_config.growth_rate,
                 'max_layers': steady_config.max_layers,
+                'bl_layers': steady_config.bl_layers,
                 'min_cell_size': steady_config.min_cell_size,
                 'target_cells': steady_config.target_cells,
                 'max_cell_size': steady_config.max_cell_size,
@@ -492,6 +500,7 @@ def transient(
             volume_mesh_params={
                 'growth_rate': transient_config.growth_rate,
                 'max_layers': transient_config.max_layers,
+                'bl_layers': transient_config.bl_layers,
                 'min_cell_size': transient_config.min_cell_size,
                 'target_cells': transient_config.target_cells,
                 'max_cell_size': transient_config.max_cell_size,

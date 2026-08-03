@@ -122,6 +122,11 @@ class SteadyConfig(SolverConfig):
         monitor_coefficients: Monitor aerodynamic coefficients during iteration
         growth_rate: Boundary-layer geometric growth rate (surface -> volume mesh)
         max_layers: Maximum boundary-layer + transition layer count
+        bl_layers: Optional override for how many of max_layers count as the
+            fine boundary-layer stage before switching to the faster-growing
+            transition stage (see mesh_extrusion.extrude_layers' own
+            bl_layers doc). None (default) keeps the hardcoded
+            min(8, max_layers) split.
         min_cell_size: First (near-wall) layer thickness, in meters
         target_cells: Target total cell count (currently only consulted by the
             pure-extrusion volume mesh path; the tetgen-based hybrid path
@@ -167,6 +172,7 @@ class SteadyConfig(SolverConfig):
     monitor_coefficients: bool = True
     growth_rate: float = 1.15
     max_layers: int = 6
+    bl_layers: Optional[int] = None
     min_cell_size: float = 0.003
     target_cells: int = 500000
     max_cell_size: Optional[float] = None
@@ -235,8 +241,9 @@ class TransientConfig(SolverConfig):
         sample_interval: Data sampling interval (steps)
         warmup_time: Warmup time to skip (seconds, for statistics)
         init_from_checkpoint: Initialize from steady-state checkpoint
-        growth_rate, max_layers, min_cell_size, target_cells, max_cell_size:
-            Volume mesh generation parameters, same meaning as SteadyConfig.
+        growth_rate, max_layers, bl_layers, min_cell_size, target_cells,
+            max_cell_size: Volume mesh generation parameters, same meaning
+            as SteadyConfig.
         rho_inf, vel_inf, p_inf: Freestream conditions, same meaning and
             role as SteadyConfig (single source of truth for the initial
             condition, boundary conditions, and Cd/Cl normalization).
@@ -258,6 +265,7 @@ class TransientConfig(SolverConfig):
     init_from_checkpoint: Optional[str] = None
     growth_rate: float = 1.15
     max_layers: int = 6
+    bl_layers: Optional[int] = None
     min_cell_size: float = 0.003
     target_cells: int = 500000
     max_cell_size: Optional[float] = None

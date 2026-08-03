@@ -345,6 +345,7 @@ class ConfigLoader:
             'checkpoint_interval': 'Checkpoint save interval in steps',
             'growth_rate': 'Boundary-layer geometric growth rate (steady only)',
             'max_layers': 'Max boundary-layer + transition layer count (steady only)',
+            'bl_layers': 'How many of max_layers count as the fine BL stage before the transition stage (unset = default split)',
             'min_cell_size': 'First (near-wall) layer thickness in meters (steady only)',
             'target_cells': 'Target total cell count (steady only; ignored by the tetgen hybrid mesh path)',
             'max_cell_size': 'Max core-region cell size in meters, graded outward from the near-wall size (unset = no cap)',
