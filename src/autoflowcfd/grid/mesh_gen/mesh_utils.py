@@ -5,8 +5,11 @@ All functions are stateless and can be used independently.
 """
 
 import numpy as np
-from typing import Dict, Optional
+from typing import Dict, Optional, TYPE_CHECKING
 from loguru import logger
+
+if TYPE_CHECKING:
+    from ..structures import VolumeMeshData
 
 
 def validate_surface_mesh(

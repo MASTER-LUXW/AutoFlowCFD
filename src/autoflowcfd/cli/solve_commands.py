@@ -74,6 +74,13 @@ def solve() -> None:
                    "wall - lets a coarser near-wall mesh (y+ up to ~100+, not just "
                    "y+~1) still give physically meaningful skin friction and "
                    "near-wall turbulence (overrides config)")
+@click.option("--skip-quality-check", is_flag=True, default=False,
+              help="Skip the pre-solve volume mesh quality gate (MeshQualityValidator) "
+                   "and solve regardless of a failing report - e.g. negative-volume "
+                   "or extreme volume-ratio cells, which are diagnostic of degenerate "
+                   "(sliver) tetrahedra that reliably seed a divergence once solved. "
+                   "By default a failing report aborts before any solve iterations "
+                   "run, instead of burning compute on a doomed case.")
 @click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
 def run(
     input_file: str,
@@ -94,6 +101,7 @@ def run(
     min_cell_size: Optional[float],
     max_cell_size: Optional[float],
     wall_functions: bool,
+    skip_quality_check: bool,
     json_output: bool
 ) -> None:
     """Run steady-state RANS simulation.
@@ -115,8 +123,9 @@ def run(
         checkpoint_interval: Checkpoint interval
         threads: CPU thread count
         gpu_device: GPU device ID
+        skip_quality_check: Skip the pre-solve mesh quality gate
         json_output: Output as JSON
-    
+
     Examples:
         # Basic steady RANS
         $ autoflowcfd solve run sedan.nas
@@ -241,7 +250,35 @@ def run(
 
         logger.info(f"Grid loaded: {grid_data.node_count} nodes, "
                    f"{grid_data.cell_count} cells")
-        
+
+        # Pre-solve mesh quality gate. Degenerate (sliver) tetrahedra -
+        # near-zero volume relative to the mesh's typical cell size - are
+        # numerically ill-conditioned for gradient reconstruction and flux
+        # computation, and reliably seed a local blow-up that spreads
+        # through the domain over iterations (root-caused this way for a
+        # real case: BL extrusion at a body's sharp convex edges/corners
+        # produced sliver cells whose positions matched the eventual
+        # divergence's pressure/velocity hotspots almost exactly). Catching
+        # this before solve() burns any iterations is much cheaper than
+        # discovering it from a diverged run's checkpoint history.
+        if not skip_quality_check:
+            from autoflowcfd.grid import MeshQualityValidator
+            logger.info("Validating volume mesh quality before solving...")
+            quality_report = MeshQualityValidator().validate_volume_mesh(grid_data)
+            if quality_report.passed:
+                logger.info(f"\n{quality_report.summary()}")
+            else:
+                logger.error(f"\n{quality_report.summary()}")
+                raise click.ClickException(
+                    "Volume mesh quality check failed (see report above) - solving "
+                    "would very likely diverge. Common causes: sharp convex edges/"
+                    "corners on the body (BL extrusion degrades there; consider a "
+                    "small chamfer/fillet in the source geometry, or fewer/thicker "
+                    "--max-layers), or an overly aggressive --growth-rate/"
+                    "--min-cell-size for this geometry's feature sizes. Pass "
+                    "--skip-quality-check to solve anyway."
+                )
+
         # Save volume mesh for future resume operations
         import pickle
         from pathlib import Path
@@ -329,6 +366,9 @@ def run(
               help="Output directory")
 @click.option("--sample-interval", type=int, default=10,
               help="Sampling interval for statistics")
+@click.option("--skip-quality-check", is_flag=True, default=False,
+              help="Skip the pre-solve volume mesh quality gate (see `solve run --help` "
+                   "for the same option's rationale).")
 @click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
 def transient(
     input_file: str,
@@ -342,6 +382,7 @@ def transient(
     config: str,
     output: str,
     sample_interval: int,
+    skip_quality_check: bool,
     json_output: bool
 ) -> None:
     """Run transient LES/DES simulation.
@@ -458,6 +499,26 @@ def transient(
         )
         logger.info(f"Grid loaded: {grid_data.node_count} nodes, {grid_data.cell_count} cells")
 
+        # Pre-solve mesh quality gate - see `run`'s (solve run) identical
+        # check for the full rationale.
+        if not skip_quality_check:
+            from autoflowcfd.grid import MeshQualityValidator
+            logger.info("Validating volume mesh quality before solving...")
+            quality_report = MeshQualityValidator().validate_volume_mesh(grid_data)
+            if quality_report.passed:
+                logger.info(f"\n{quality_report.summary()}")
+            else:
+                logger.error(f"\n{quality_report.summary()}")
+                raise click.ClickException(
+                    "Volume mesh quality check failed (see report above) - solving "
+                    "would very likely diverge. Common causes: sharp convex edges/"
+                    "corners on the body (BL extrusion degrades there; consider a "
+                    "small chamfer/fillet in the source geometry, or fewer/thicker "
+                    "--max-layers), or an overly aggressive --growth-rate/"
+                    "--min-cell-size for this geometry's feature sizes. Pass "
+                    "--skip-quality-check to solve anyway."
+                )
+
         # Create solver
         logger.info("Initializing transient solver...")
         solver = TransientSolver(grid_data, transient_config)
@@ -517,6 +578,11 @@ def transient(
               help="Total iterations to run (not additional)")
 @click.option("--backend", "-b", type=click.Choice(["cpu", "gpu"]), default=None,
               help="Backend to use (overrides checkpoint backend)")
+@click.option("--skip-quality-check", is_flag=True, default=False,
+              help="Skip the mesh quality gate when --grid points at a surface .nas "
+                   "that gets re-tetrahedralized (see `solve run --help` for the "
+                   "rationale). No effect when --grid is a cached volume_mesh.pkl - "
+                   "that mesh already solved successfully up to this checkpoint.")
 @click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
 def resume(
     checkpoint_file: str,
@@ -525,6 +591,7 @@ def resume(
     output: Optional[str],
     max_iter: Optional[int],
     backend: Optional[str],
+    skip_quality_check: bool,
     json_output: bool
 ) -> None:
     """Resume simulation from checkpoint.
@@ -538,8 +605,10 @@ def resume(
         output: Output directory (overrides config)
         max_iter: Total iterations to run (not additional)
         backend: Backend override ("cpu" or "gpu")
+        skip_quality_check: Skip the mesh quality gate (only relevant when
+            --grid is a surface .nas that gets re-tetrahedralized)
         json_output: Output as JSON
-    
+
     Examples:
         # Resume with grid file
         $ autoflowcfd solve resume checkpoint.h5 --grid mesh.nas
@@ -616,6 +685,22 @@ def resume(
             parser = NASParser(grid_file)
             grid_data = parser.parse(generate_volume_mesh=True)
             logger.info(f"✓ Grid generated: {grid_data.node_count} nodes, {grid_data.cell_count} cells")
+
+            if not skip_quality_check:
+                from ..grid import MeshQualityValidator
+                logger.info("Validating volume mesh quality before resuming...")
+                quality_report = MeshQualityValidator().validate_volume_mesh(grid_data)
+                if quality_report.passed:
+                    logger.info(f"\n{quality_report.summary()}")
+                else:
+                    logger.error(f"\n{quality_report.summary()}")
+                    raise click.ClickException(
+                        "Volume mesh quality check failed (see report above) - this "
+                        "freshly re-generated mesh differs from the one the checkpoint "
+                        "was actually solved on (see the warning above about using "
+                        "volume_mesh.pkl instead) and is likely to diverge on resume. "
+                        "Pass --skip-quality-check to resume anyway."
+                    )
         
         # Step 4: Load or create configuration
         logger.info(f"\n[3/5] Loading configuration...")

@@ -110,12 +110,14 @@ def parse(
                 result["boundary_groups"][name] = len(nodes)
         
         # Quality report (if not skipped)
+        quality_passed = True
         if not skip_validation:
             from autoflowcfd.grid import GridValidator
             validator = GridValidator(grid_data)
             quality_report = validator.validate()
             result["quality_report"] = quality_report
-        
+            quality_passed = quality_report['passed']
+
         # Output
         if json_output:
             click.echo(json.dumps(result, indent=2))
@@ -123,15 +125,26 @@ def parse(
             # Save to file
             output_path = Path(output)
             output_path.parent.mkdir(parents=True, exist_ok=True)
-            
+
             with open(output_path, 'w', encoding='utf-8') as f:
                 json.dump(result, f, indent=2)
-            
+
             logger.info(f"Grid info saved to {output_path}")
             click.echo(f"✓ Parsed {result['node_count']} nodes, {result['cell_count']} cells")
             click.echo(f"✓ Boundaries: {len(result['boundary_groups'])} groups")
             click.echo(f"✓ Output saved to {output}")
-    
+            if not quality_passed:
+                click.echo("✗ Quality validation failed - see quality_report for details")
+
+        # Exit non-zero when the embedded quality_report failed, matching
+        # `grid validate`'s identical-shaped report (which does gate on
+        # this). Previously `parse` always exited 0 regardless of
+        # quality_report['passed'], so a caller relying on the exit code
+        # alone (rather than digging into the JSON) had no signal that
+        # quality failed.
+        if not quality_passed:
+            raise SystemExit(2)
+
     except Exception as e:
         logger.error(f"Failed to parse grid: {e}")
         if json_output:
@@ -269,7 +282,16 @@ def validate(
               help="Max core-region cell size (m), graded outward from the BL's near-wall "
                    "size; unset means the core fill has no size cap beyond tetgen's own "
                    "shape-quality bounds")
-@click.option("--skip-quality-report", is_flag=True, help="Skip volume mesh quality report")
+@click.option("--bl-layers", type=int, default=None,
+              help="How many of --max-layers count as the fine boundary-layer stage "
+                   "before switching to the faster-growing transition stage; unset "
+                   "keeps the default min(8, max_layers) split. The transition stage "
+                   "always gets whatever remains (max_layers - bl_layers), so setting "
+                   "this equal to or above --max-layers leaves zero transition layers")
+@click.option("--skip-quality-report", is_flag=True,
+              help="Skip computing/printing the post-generation mesh quality "
+                   "report (the volume mesh is always exported either way - "
+                   "this only saves the validation pass itself)")
 @click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
 def generate_volume(
     input_file: str,
@@ -279,6 +301,7 @@ def generate_volume(
     min_cell_size: float,
     target_cells: int,
     max_cell_size: Optional[float],
+    bl_layers: Optional[int],
     skip_quality_report: bool,
     json_output: bool
 ) -> None:
@@ -287,6 +310,12 @@ def generate_volume(
     Runs the full grid pipeline: parse surface mesh -> validate surface
     quality -> generate hybrid volume mesh (BL extrusion + Cartesian
     background) -> validate volume mesh quality -> export to Nastran .nas.
+    The volume mesh is always exported, whether or not it passes the
+    quality report - a case that genuinely can't converge (see
+    mesh_repair.py's documented limits) should still produce a mesh file to
+    inspect or hand off, not nothing at all. `autoflowcfd solve run` is the
+    actual enforcement point that blocks solving a mesh that fails this
+    check.
 
     Args:
         input_file: Path to surface .nas grid file
@@ -295,7 +324,11 @@ def generate_volume(
         max_layers: Maximum extrusion layers
         min_cell_size: Minimum cell size (m)
         target_cells: Target total volume cell count
-        skip_quality_report: Skip volume mesh quality report
+        bl_layers: How many of max_layers count as the BL stage before
+            switching to the transition growth rate; None keeps the
+            default min(8, max_layers) split
+        skip_quality_report: Skip computing/printing the quality report
+            (export always happens regardless)
         json_output: Output result as JSON
 
     Examples:
@@ -326,14 +359,18 @@ def generate_volume(
             )
 
         logger.info("Step 3/4: Generating volume mesh (BL extrusion + background)...")
-        volume_mesh = parser.parse(
-            generate_volume_mesh=True,
+        # Reuses surface_grid (already parsed above for the Step 2 quality
+        # check) directly - parser.parse(generate_volume_mesh=True) would
+        # re-parse the same NAS file from scratch a second time.
+        volume_mesh = parser.generate_volume_mesh_from_surface(
+            surface_grid,
             volume_mesh_params={
                 'growth_rate': growth_rate,
                 'max_layers': max_layers,
                 'min_cell_size': min_cell_size,
                 'target_cells': target_cells,
                 'max_cell_size': max_cell_size,
+                'bl_layers': bl_layers,
             }
         )
 
@@ -341,6 +378,32 @@ def generate_volume(
         if not skip_quality_report:
             logger.info("Validating volume mesh quality...")
             quality_report = MeshQualityValidator().validate_volume_mesh(volume_mesh)
+            # Stage A/B/C (mesh_gen/mesh_repair.py, volume_mesh_generator.py's
+            # backoff loop) already ran to completion during generation above -
+            # this is purely informational on their outcome, not an export
+            # gate: the volume mesh file is always written below regardless
+            # of pass/fail, since a case that genuinely can't converge (e.g.
+            # a real sharp convex corner - see mesh_repair.py's own
+            # documented, measured limits here) would otherwise never
+            # produce any output at all to inspect or hand-fix. The
+            # solve-time quality gate (cli/solve_commands.py) is the actual
+            # enforcement point before any iterations run.
+            if quality_report.passed:
+                logger.info(f"\n{quality_report.summary()}")
+            else:
+                logger.error(
+                    f"\n{quality_report.summary()}\n"
+                    "Volume mesh quality check failed after Stage A/B/C repair - "
+                    "exporting anyway (see report above). This mesh would very "
+                    "likely diverge if solved as-is; common causes: sharp convex "
+                    "edges/corners on the body (BL extrusion degrades there; "
+                    "consider a small chamfer/fillet in the source geometry, or "
+                    "fewer/thicker --max-layers), or an overly aggressive "
+                    "--growth-rate/--min-cell-size for this geometry's feature "
+                    "sizes. 'autoflowcfd solve run' will still enforce this gate "
+                    "before any iterations run, unless --skip-quality-check is "
+                    "passed there too."
+                )
 
         logger.info("Step 4/4: Exporting volume mesh to NAS...")
         output_path = export_volume_mesh_to_nas(volume_mesh, output)
@@ -367,8 +430,6 @@ def generate_volume(
             click.echo(f"Cells: {volume_mesh.cell_count:,}")
             click.echo(f"Total volume: {volume_mesh.total_volume:.6e} m^3")
             click.echo(f"Boundary groups: {', '.join(boundary_names)}")
-            if quality_report is not None:
-                click.echo(quality_report.summary())
             click.echo(f"\n✓ Exported to: {output_path}")
 
     except Exception as e:
@@ -467,26 +528,45 @@ def info(input_file: str, json_output: bool) -> None:
 @click.option("--format", "-f", type=click.Choice(["vtk", "cgns", "stl"]),
               required=True, help="Output format")
 @click.option("--output", "-o", type=click.Path(), help="Output file path")
-def convert(input_file: str, format: str, output: str) -> None:
+@click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
+def convert(input_file: str, format: str, output: str, json_output: bool) -> None:
     """Convert grid to different format.
-    
+
     Convert .nas grid to VTK, CGNS, or STL format.
-    
+
     Args:
         input_file: Path to .nas grid file
         format: Output format (vtk/cgns/stl)
         output: Output file path
-    
+        json_output: Output result as JSON
+
     Examples:
         # Convert to VTK
         $ autoflowcfd grid convert sedan.nas -f vtk -o sedan.vtk
-        
+
         # Convert to STL
         $ autoflowcfd grid convert sedan.nas -f stl -o sedan.stl
-    
+
     Note:
-        This feature is planned for v1.0 release.
+        This feature is planned for v1.0 release. Every other grid/solve
+        subcommand supports --json and emits real JSON on both success and
+        error paths; this one previously had neither (no --json flag, and
+        click.echo({...}) prints Python's dict repr - single-quoted keys,
+        not parseable by json.loads()) despite otherwise matching their
+        {"command", "status", ...} shape, which would misinform a caller
+        that reasonably expects the same contract as every sibling command.
+        This command still isn't implemented; it just now fails that way
+        loudly and machine-readably instead of silently.
     """
     logger.warning("Grid conversion is planned for v1.0 release")
-    click.echo({"status": "pending", "message": "Grid conversion not yet implemented"})
+    result = {
+        "command": "grid.convert",
+        "status": "not_implemented",
+        "message": "Grid conversion not yet implemented",
+    }
+    if json_output:
+        click.echo(json.dumps(result, indent=2))
+    else:
+        click.echo(f"{result['status']}: {result['message']}")
+    raise click.ClickException("Grid conversion is not yet implemented (planned for v1.0)")
     # TODO: Implement grid conversion in v1.0

@@ -40,9 +40,12 @@ def parse_nastran_float(value_str: str) -> float:
         pass
     
     # Handle Nastran compact scientific notation
-    # Pattern: [sign]digits.digits[exponent_sign]exponent_digits
-    # Example: 5.635257-127, -7.5-14, 1.23+4
-    pattern = re.compile(r'^([+-]?\d+\.?\d*)([+-]\d+)$')
+    # Pattern: [sign]mantissa[exponent_sign]exponent_digits, where mantissa
+    # is either "digits[.digits]" or a leading-dot form ".digits" (both are
+    # legal Nastran reals, e.g. Nastran commonly emits "-.5-3" for -0.0005;
+    # the mandatory "\d+" before the dot previously rejected this form).
+    # Example: 5.635257-127, -7.5-14, 1.23+4, -.5-3
+    pattern = re.compile(r'^([+-]?(?:\d+\.?\d*|\.\d+))([+-]\d+)$')
     match = pattern.match(value_str)
     
     if match:

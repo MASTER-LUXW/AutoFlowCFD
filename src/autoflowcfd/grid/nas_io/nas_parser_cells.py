@@ -55,7 +55,32 @@ def parse_cells_from_nas(
     parse_errors = 0
     skipped_cells = 0
     skipped_lines = 0
-    
+    eid_to_cell_idx: dict = {}
+    duplicate_eids = 0
+
+    def _record_cell(eid: int, pid: int, idx1: int, idx2: int, idx3: int) -> None:
+        """Store a parsed CTRIA3 card, applying Nastran's documented
+        "last element ID wins" convention on a repeated EID instead of
+        appending a second, coincident triangle (which previously happened
+        silently - the EID was parsed but never tracked, so re-exported or
+        duplicated element cards inflated cell_count and could leave a
+        non-manifold surface for the volume mesher).
+        """
+        nonlocal cell_count, duplicate_eids
+        existing_idx = eid_to_cell_idx.get(eid)
+        if existing_idx is not None:
+            connectivity_list[existing_idx] = [idx1, idx2, idx3]
+            cell_pids[existing_idx] = pid
+            duplicate_eids += 1
+            return
+        connectivity_list.append([idx1, idx2, idx3])
+        cell_types.append(0)
+        cell_pids.append(pid)
+        eid_to_cell_idx[eid] = cell_count
+        cell_count += 1
+        if cell_count % 10000 == 0:
+            logger.debug(f"Parsed {cell_count:,} cells...")
+
     ctria3_pattern_comma = re.compile(
         r'^\s*CTRIA3\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)',
         re.IGNORECASE
@@ -81,6 +106,7 @@ def parse_cells_from_nas(
                     match = ctria3_pattern_comma.match(line_stripped)
                     
                     if match:
+                        eid = int(match.group(1))
                         pid = int(match.group(2))
                         n1 = int(match.group(3))
                         n2 = int(match.group(4))
@@ -90,13 +116,7 @@ def parse_cells_from_nas(
                             idx1 = node_id_to_index[n1]
                             idx2 = node_id_to_index[n2]
                             idx3 = node_id_to_index[n3]
-                            connectivity_list.append([idx1, idx2, idx3])
-                            cell_types.append(0)
-                            cell_pids.append(pid)
-                            cell_count += 1
-
-                            if cell_count % 10000 == 0:
-                                logger.debug(f"Parsed {cell_count:,} cells...")
+                            _record_cell(eid, pid, idx1, idx2, idx3)
                             continue
                         else:
                             skipped_cells += 1
@@ -106,6 +126,7 @@ def parse_cells_from_nas(
                     match = ctria3_pattern_fixed.match(line_stripped)
 
                     if match:
+                        eid = int(match.group(1))
                         pid = int(match.group(2))
                         n1 = int(match.group(3))
                         n2 = int(match.group(4))
@@ -115,13 +136,7 @@ def parse_cells_from_nas(
                             idx1 = node_id_to_index[n1]
                             idx2 = node_id_to_index[n2]
                             idx3 = node_id_to_index[n3]
-                            connectivity_list.append([idx1, idx2, idx3])
-                            cell_types.append(0)
-                            cell_pids.append(pid)
-                            cell_count += 1
-
-                            if cell_count % 10000 == 0:
-                                logger.debug(f"Parsed {cell_count:,} cells...")
+                            _record_cell(eid, pid, idx1, idx2, idx3)
                             continue
                         else:
                             skipped_cells += 1
@@ -132,6 +147,7 @@ def parse_cells_from_nas(
 
                     if len(parts) >= 5:
                         try:
+                            eid = int(parts[0])
                             pid = int(parts[1])
                             n1 = int(parts[2])
                             n2 = int(parts[3])
@@ -141,13 +157,7 @@ def parse_cells_from_nas(
                                 idx1 = node_id_to_index[n1]
                                 idx2 = node_id_to_index[n2]
                                 idx3 = node_id_to_index[n3]
-                                connectivity_list.append([idx1, idx2, idx3])
-                                cell_types.append(0)
-                                cell_pids.append(pid)
-                                cell_count += 1
-
-                                if cell_count % 10000 == 0:
-                                    logger.debug(f"Parsed {cell_count:,} cells...")
+                                _record_cell(eid, pid, idx1, idx2, idx3)
                                 continue
                             else:
                                 skipped_cells += 1
@@ -176,7 +186,7 @@ def parse_cells_from_nas(
             cell_type=np.array([], dtype=np.int32)
         ), np.array([], dtype=np.int32)
 
-    total_ctria3_lines = cell_count + parse_errors + skipped_lines + skipped_cells
+    total_ctria3_lines = cell_count + duplicate_eids + parse_errors + skipped_lines + skipped_cells
     dropped = parse_errors + skipped_lines + skipped_cells
     drop_fraction = dropped / total_ctria3_lines if total_ctria3_lines else 0.0
     if total_ctria3_lines >= MIN_LINES_FOR_DROP_CHECK and drop_fraction > MAX_DROP_FRACTION:
@@ -199,6 +209,12 @@ def parse_cells_from_nas(
         logger.info(f"Skipped {skipped_lines} CTRIA3 lines")
     if skipped_cells > 0:
         logger.info(f"Skipped {skipped_cells} CTRIA3 cells due to missing nodes")
+    if duplicate_eids > 0:
+        logger.warning(
+            f"{duplicate_eids} CTRIA3 cards reused an already-seen element ID; "
+            f"kept the last card's connectivity for each (Nastran convention) "
+            f"instead of creating a duplicate coincident triangle"
+        )
 
     connectivity_array = np.array(connectivity_list, dtype=np.int32)
     cell_type_array = np.array(cell_types, dtype=np.int32)

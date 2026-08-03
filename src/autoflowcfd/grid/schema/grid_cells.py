@@ -5,9 +5,12 @@ including triangular surface cells and tetrahedral volume cells.
 """
 
 import numpy as np
-from typing import Tuple
+from typing import Tuple, TYPE_CHECKING
 from dataclasses import dataclass
 from loguru import logger
+
+if TYPE_CHECKING:
+    from .grid_nodes import NodeArray
 
 
 @dataclass

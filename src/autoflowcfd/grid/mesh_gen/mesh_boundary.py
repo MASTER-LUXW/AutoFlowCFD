@@ -5,8 +5,11 @@ to volume mesh cells.
 """
 
 import numpy as np
-from typing import Dict, Optional
+from typing import Dict, Optional, TYPE_CHECKING
 from loguru import logger
+
+if TYPE_CHECKING:
+    from ..structures import BoundaryMap
 
 
 def identify_boundaries_from_surface(
@@ -184,10 +187,31 @@ def map_surface_boundaries(
             boundary_name = surface_face_to_boundary[face_key]
             volume_cell_to_boundary[cell_idx] = boundary_name
 
+    # A boundary cell matched by neither direct_cell_groups nor node-triplet
+    # lookup used to just silently vanish from every group - it still has an
+    # exterior face in the mesh, but no boundary condition at all, and
+    # nothing downstream (the solver's BC handler) would know why. Put such
+    # cells in an explicit catch-all group instead so a solver setup that
+    # can't find a BC for some cells has a concrete, loud reason.
+    unique_boundary_cells = np.unique(boundary_cell_indices)
+    unmatched = np.setdiff1d(unique_boundary_cells, np.fromiter(
+        volume_cell_to_boundary.keys(), dtype=np.int64, count=len(volume_cell_to_boundary)
+    ), assume_unique=True)
+    if len(unmatched) > 0:
+        logger.warning(
+            f"{len(unmatched)}/{len(unique_boundary_cells)} boundary cells matched "
+            f"neither BL-extrusion group tracking nor a surface boundary face "
+            f"(likely a remeshed/subdivided face whose nodes no longer match the "
+            f"original surface) - placed in an 'UNCLASSIFIED' group as WALL "
+            f"instead of being silently dropped from every boundary condition"
+        )
+        for cell_idx in unmatched:
+            volume_cell_to_boundary[int(cell_idx)] = 'UNCLASSIFIED'
+
     # Group cells by boundary name
     groups = {}
     bc_types = {}
-    
+
     for cell_idx, boundary_name in volume_cell_to_boundary.items():
         if boundary_name not in groups:
             groups[boundary_name] = []

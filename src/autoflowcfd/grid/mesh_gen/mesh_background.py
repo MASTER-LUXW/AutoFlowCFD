@@ -9,20 +9,30 @@ outer surface plus the unmodified non-wall surfaces (inlet/outlet/tunnel/
 symmetry-like boundaries). Because the tetgen fill is bounded by the real
 closed surface rather than a padded bounding box, the result can never
 extend outside the domain the input surface actually describes.
+
+The actual per-attempt assembly work (classify -> extrude -> tetgen-fill ->
+splice) lives in mesh_background_merge._build_merged_mesh; this module is
+the retry/repair orchestration around it (Stage A smoothing, Stage B/B'
+targeted repair, Stage C-adjacent backoff-retry recursion) - see
+generate_hybrid_mesh's own docstring.
 """
 
 import numpy as np
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 from loguru import logger
 
-from .mesh_extrusion import extrude_layers, convert_layers_to_tetrahedra, orient_tetrahedra
-from .mesh_utils import compute_face_normals
+if TYPE_CHECKING:
+    from ..structures import BoundaryMap, VolumeMeshData
+
+from .mesh_extrusion import extrude_layers
+from .mesh_prism_to_tet import orient_tetrahedra
 from .mesh_domain_classify import classify_boundary_groups
 from .mesh_tetgen_core import (
-    build_seam_taper_scale, fill_core_volume,
-    compute_local_thickness_limit, repair_nonmanifold_cells,
-    attribute_cells_from_trifaces,
+    fill_core_volume, compute_local_thickness_limit, repair_nonmanifold_cells,
+    _dedupe_coincident_points,
 )
+from .mesh_repair import smooth_bad_cells, compute_bl_thickness_limit_override, remesh_core_cavity
+from .mesh_background_merge import _build_merged_mesh
 
 
 def generate_hybrid_mesh(
@@ -35,6 +45,9 @@ def generate_hybrid_mesh(
     target_cells: int = 500000,
     surface_boundaries: Optional['BoundaryMap'] = None,
     max_cell_size: Optional[float] = None,
+    extra_thickness_limit: Optional[np.ndarray] = None,
+    bl_layers: Optional[int] = None,
+    _is_stage_b_retry: bool = False,
 ) -> 'VolumeMeshData':
     """Generate a volume mesh that conforms exactly to the closed input surface.
 
@@ -83,9 +96,39 @@ def generate_hybrid_mesh(
             converge multiple simultaneous regions at real-world scale;
             see the comment at this parameter's use site below for the
             specific evidence.
+        extra_thickness_limit: Stage B (mesh quality repair) internal use -
+            (n_surface_nodes,) per-vertex cumulative-BL-thickness cap,
+            merged via elementwise minimum into the thickness_limit this
+            function computes on its own (see compute_local_thickness_limit)
+            - forces early BL termination at specific vertices implicated
+            in still-bad cells after Stage A smoothing, without affecting
+            the rest of the surface. None (default) leaves the internally-
+            computed limit untouched.
+        bl_layers: Optional override for how many of max_layers count as
+            "Stage 1 (BL)" before switching to the transition growth rate
+            (see mesh_extrusion.extrude_layers' own bl_layers doc). None
+            (default) keeps the previous hardcoded `min(8, max_layers)`
+            split - in particular, any max_layers <= 8 then leaves ZERO
+            layers for the transition stage, silently disabling
+            target_handoff_size's size-matching behavior above regardless
+            of max_cell_size.
+        _is_stage_b_retry: internal - True on the single recursive call
+            this function makes to itself after computing extra_thickness_
+            limit from Stage A's residual bad cells, to
+            cap retry depth at exactly 1 rather than potentially recursing
+            forever if a Stage B attempt doesn't fully resolve every bad
+            cell (Stage C's coarser global-parameter backoff, one level up
+            in volume_mesh_generator.py, is the fallback beyond this).
 
     Returns:
-        VolumeMeshData with a domain-conforming hybrid mesh (BL + core)
+        VolumeMeshData with a domain-conforming hybrid mesh (BL + core).
+        Mesh quality (see quality_validator.MeshQualityValidator) is
+        checked and repaired (Stage A smoothing, Stage B targeted
+        regeneration - see module mesh_repair.py) before this returns;
+        the final quality report (including any repair actions taken) is
+        logged, not returned - callers that need the gate result run their
+        own MeshQualityValidator().validate_volume_mesh() pass, which is
+        cheap relative to generation itself.
     """
     if surface_boundaries is None or not surface_boundaries.groups:
         raise ValueError(
@@ -96,226 +139,22 @@ def generate_hybrid_mesh(
 
     logger.info("Starting domain-conforming hybrid mesh generation...")
 
-    bbox_min = np.asarray(bounding_box['min'], dtype=np.float64)
-    bbox_max = np.asarray(bounding_box['max'], dtype=np.float64)
-
-    logger.info("Step 1/4: Classifying boundary groups (extrude vs. core-only)...")
-    (extrude_faces, core_faces, extruded_groups, extrude_face_groups,
-     hole_points, core_face_groups, _is_closed_solid_face) = classify_boundary_groups(
-        surface_nodes, surface_faces, surface_boundaries, bbox_min, bbox_max
+    (merged_nodes, merged_cells, cell_groups, n_bl_cells, bl_source_vertex,
+     bl_extrude_faces) = _build_merged_mesh(
+        surface_nodes, surface_faces, bounding_box,
+        growth_rate, max_layers, min_cell_size, surface_boundaries, max_cell_size,
+        extra_thickness_limit, bl_layers,
     )
-
-    # Marker IDs for tetgen's facet-marker mechanism (attribute_cells_from_trifaces)
-    # - only needed when max_cell_size grading is active (it's the only thing
-    # that switches fill_core_volume's nobisect off, which is what breaks the
-    # plain node-index-matching boundary attribution for subdivided facets).
-    # 0 is reserved by tetgen for "no marker" (an unmarked/interior facet).
-    group_name_to_marker = {name: i + 1 for i, name in enumerate(surface_boundaries.groups.keys())}
-    marker_to_name = {v: k for k, v in group_name_to_marker.items()}
-
-    if len(extrude_faces) == 0:
-        logger.warning(
-            "No boundary group was eligible for BL extrusion; filling the "
-            "entire closed surface directly with tetgen (no boundary layer)"
-        )
-        face_markers = None
-        regions = None
-        if max_cell_size is not None:
-            face_group_name = np.full(len(surface_faces), '', dtype=object)
-            for name, idx in surface_boundaries.groups.items():
-                face_group_name[idx] = name
-            face_markers = np.array(
-                [group_name_to_marker.get(n, 0) for n in face_group_name], dtype=np.int32
-            )
-            center = surface_nodes.mean(axis=0)
-            regions = [(center, 1, max_cell_size ** 3 * 0.15)]
-        core_nodes, core_tets, trifaces, triface_markers = fill_core_volume(
-            surface_nodes, surface_faces, holes=hole_points,
-            regions=regions, face_markers=face_markers,
-        )
-        merged_nodes, merged_cells = core_nodes, core_tets
-        if face_markers is not None:
-            cell_groups = attribute_cells_from_trifaces(
-                core_tets, trifaces, triface_markers, marker_to_name
-            )
-        else:
-            cell_groups = np.full(len(merged_cells), '', dtype=object)
-    else:
-        logger.info(
-            f"Step 2/4: Extruding BL layers from {len(extrude_faces)} faces "
-            f"(groups: {extruded_groups})..."
-        )
-        n_surface_nodes = len(surface_nodes)
-        taper_scale = build_seam_taper_scale(n_surface_nodes, extrude_faces, core_faces)
-
-        # Cap each node's cumulative BL thickness near tight facing features
-        # (e.g. a body's underbody close to the ground) so the two fronts
-        # freeze before they can cross, instead of relying entirely on
-        # repair_nonmanifold_cells to clean up the resulting overlap after
-        # the fact (see compute_local_thickness_limit's own docstring for
-        # why this is a strong mitigation, not a formal guarantee).
-        domain_size = float(np.linalg.norm(bbox_max - bbox_min))
-        thickness_limit = compute_local_thickness_limit(
-            surface_nodes, extrude_faces, np.unique(extrude_faces), domain_size
-        )
-
-        normals = compute_face_normals(surface_nodes, extrude_faces)
-        bl_nodes, bl_layer_conn = extrude_layers(
-            surface_nodes, extrude_faces, normals,
-            bounding_box={'min': bbox_min, 'max': bbox_max},
-            growth_rate=growth_rate, max_layers=max_layers, min_cell_size=min_cell_size,
-            taper_scale=taper_scale, thickness_limit=thickness_limit
-        )
-        bl_cells = convert_layers_to_tetrahedra(bl_nodes, bl_layer_conn, extrude_faces)
-        logger.info(f"  BL mesh: {len(bl_nodes)} nodes, {len(bl_cells)} cells")
-
-        # Attribute each BL cell directly back to its source boundary group
-        # via position, not node-index matching against the pre-extrusion
-        # surface: convert_layers_to_tetrahedra emits, for every (layer,
-        # quad) pair, one contiguous block of len(extrude_faces) tets in the
-        # SAME face order as extrude_faces - so cell i always corresponds to
-        # extrude_faces[i % len(extrude_faces)], regardless of how many
-        # layers or quads there are. This is exact for every BL cell,
-        # including the vast majority of body/ground's own outer surface
-        # that node-index matching can never reach (see mesh_boundary.py -
-        # those nodes get a brand-new offset index once genuinely displaced
-        # by extrusion, so their post-extrusion face can't match anything in
-        # a lookup built from the original, pre-extrusion node indices).
-        n_base_faces = len(extrude_faces)
-        n_tets_per_face = len(bl_cells) // n_base_faces
-        bl_cell_groups = np.tile(extrude_face_groups, n_tets_per_face)
-
-        n_layers = len(bl_layer_conn)
-        nodes_per_layer = len(bl_nodes) // n_layers
-        outer_offset = (n_layers - 1) * nodes_per_layer
-
-        # Layer 0 keeps bare surface-node indices unchanged (see
-        # convert_layers_to_tetrahedra); every later layer's block uses the
-        # SAME local numbering, just offset by layer_idx * nodes_per_layer.
-        # So the outer (last) layer's node-index space already matches
-        # surface_faces'/core_faces' own indexing directly - no arithmetic
-        # needed to align them.
-        outer_nodes = bl_nodes[outer_offset:outer_offset + nodes_per_layer]
-        bl_outer_surface = bl_layer_conn[-1]
-
-        logger.info(
-            f"Step 3/4: Tetrahedralizing core volume "
-            f"({len(core_faces)} core-only faces + BL outer surface)..."
-        )
-        plc_points = outer_nodes
-        plc_faces = np.vstack([bl_outer_surface, core_faces])
-
-        # bl_outer_surface's portion is marked with its own source group
-        # too (extrude_face_groups), not left at 0/unmarked. It's normally
-        # a purely internal BL/core interface (a face there is shared
-        # between one BL cell and one core cell, never exposed to the
-        # domain exterior) so this is usually redundant with bl_cell_groups
-        # - but a wall entirely pinned by the seam taper (e.g. every node
-        # of a coarse, corner-only wall facet happens to sit within
-        # taper_rings hops of a seam) can collapse to zero BL thickness,
-        # at which point its "outer surface" IS the real exposed boundary.
-        # Marking it directly makes attribute_cells_from_trifaces recover
-        # that case correctly too, instead of only the node-index-matching
-        # fallback (which breaks once nobisect=False lets tetgen subdivide
-        # that now-oversized, previously-2-triangle wall facet, producing
-        # sub-triangles the pre-fill node lookup was never built to match).
-        face_markers = None
-        regions = None
-        if max_cell_size is not None:
-            # A distance-graded multi-tier sphere scheme was tried and
-            # abandoned: tetgen's per-region variable-volume refinement
-            # does not reliably converge multiple simultaneous regions to
-            # their own targets when they compete for one shared Steiner
-            # budget - small/aggressive inner regions can starve a
-            # necessary large outer/far-field region of the points it
-            # needs (and vice versa). A single flat region covering the
-            # entire core sidesteps that competition entirely (only one
-            # region to fund), and its actual accuracy is governed by
-            # fill_core_volume's own Steiner-point budget, which is now
-            # sized from the region's real volume/max_cell_size ratio
-            # rather than a fixed constant (a fixed budget was accurate
-            # to ~1.2x target only for domain/max_cell_size ratios small
-            # enough for it to be sufficient; measured directly on a
-            # 5.5x3x3 m domain capped at 0.05 m, a fixed 300,000-point
-            # budget left a worst-case cell ~5.8x over target - see
-            # mesh_tetgen_core.fill_core_volume's steinerleft comment).
-            bl_outer_markers = np.array(
-                [group_name_to_marker.get(n, 0) for n in extrude_face_groups], dtype=np.int32
-            )
-            core_markers = np.array(
-                [group_name_to_marker.get(n, 0) for n in core_face_groups], dtype=np.int32
-            )
-            face_markers = np.concatenate([bl_outer_markers, core_markers])
-            regions = [(outer_nodes.mean(axis=0), 1, max_cell_size ** 3 * 0.15)]
-
-        core_nodes, core_tets, trifaces, triface_markers = fill_core_volume(
-            plc_points, plc_faces, holes=hole_points, regions=regions, face_markers=face_markers,
-        )
-        core_cell_groups = (
-            attribute_cells_from_trifaces(core_tets, trifaces, triface_markers, marker_to_name)
-            if face_markers is not None
-            else np.full(len(core_tets), '', dtype=object)
-        )
-
-        # Merge: BL nodes/cells keep their own indexing untouched. core_tets
-        # reference the shared boundary (indices < n_surface_nodes) plus any
-        # new interior Steiner points (indices >= n_surface_nodes) tetgen
-        # added. A shared index maps to its outer-layer position if that
-        # node was actually displaced by extrusion (taper_scale > 0), or to
-        # its bare/layer-0 position otherwise (core-only-exclusive nodes and
-        # exact-seam nodes with taper_scale == 0 - both cases hold the
-        # identical coordinate at either position, so routing them to the
-        # bare index is what lets identify_boundaries_from_surface keep
-        # matching core-only boundary faces against the original
-        # surface_faces indices unchanged).
-        # taper_scale defaults to 1.0 for nodes never touched by
-        # extrude_faces at all (core-only-exclusive) - restrict "moved" to
-        # nodes actually referenced by an extruded face, or they'd get
-        # incorrectly routed to the outer-layer slot despite never moving.
-        in_extrude = np.zeros(n_surface_nodes, dtype=bool)
-        in_extrude[np.unique(extrude_faces)] = True
-        moved_mask = in_extrude & (taper_scale > 0.0)
-        shared_target = np.where(
-            moved_mask,
-            outer_offset + np.arange(n_surface_nodes),
-            np.arange(n_surface_nodes),
-        )
-
-        n_shared = n_surface_nodes
-        core_tets_remapped = core_tets.copy()
-        is_shared = core_tets < n_shared
-        core_tets_remapped[is_shared] = shared_target[core_tets[is_shared]]
-        core_tets_remapped[~is_shared] = core_tets[~is_shared] - n_shared + len(bl_nodes)
-
-        new_core_nodes = core_nodes[n_shared:]
-        merged_nodes = np.vstack([bl_nodes, new_core_nodes])
-        merged_cells = np.vstack([bl_cells, core_tets_remapped])
-        # core_cell_groups (from facet markers, populated above whenever
-        # max_cell_size grading is active) already identifies core cells'
-        # source groups directly. When grading isn't active, it's all ''
-        # placeholders instead - those core-only groups (tunnel/inlet/
-        # outlet-type, never displaced by extrusion) still go through
-        # identify_boundaries_from_surface's node-index matching below,
-        # which works correctly for them since their nodes were never
-        # remapped in that case (nobisect=True preserves them verbatim).
-        cell_groups = np.concatenate([bl_cell_groups, core_cell_groups])
-        logger.info(
-            f"  Merged mesh: {len(merged_nodes)} nodes, {len(merged_cells)} cells "
-            f"({len(bl_cells)} BL + {len(core_tets_remapped)} core)"
-        )
 
     # Build VolumeMeshData structure
     from ..structures import NodeArray, TetrahedralCells, GridMetadata, VolumeMeshData
 
-    nodes_obj = NodeArray(
-        x=merged_nodes[:, 0],
-        y=merged_nodes[:, 1],
-        z=merged_nodes[:, 2]
-    )
-
     logger.info("Step 4/4: Re-orienting and computing tetrahedral volumes...")
     merged_cells = orient_tetrahedra(merged_nodes, merged_cells.astype(np.int64))
-    volumes = TetrahedralCells.compute_volumes(nodes_obj, merged_cells.astype(np.int32))
+    _nodes_obj_tmp = NodeArray(
+        x=merged_nodes[:, 0].copy(), y=merged_nodes[:, 1].copy(), z=merged_nodes[:, 2].copy()
+    )
+    volumes = TetrahedralCells.compute_volumes(_nodes_obj_tmp, merged_cells.astype(np.int32))
 
     # Drop any still-degenerate (near-zero volume) cells - these cannot be
     # fixed by re-orientation and indicate collapsed/duplicate geometry
@@ -338,6 +177,7 @@ def generate_hybrid_mesh(
             f"Found {n_invalid} degenerate (near-zero volume, "
             f"< {degenerate_threshold:.3e} m^3) cells, removing them..."
         )
+        n_bl_cells = int(np.sum(valid_mask[:n_bl_cells]))
         merged_cells = merged_cells[valid_mask]
         volumes = volumes[valid_mask]
         cell_groups = cell_groups[valid_mask]
@@ -352,12 +192,208 @@ def generate_hybrid_mesh(
     # raises a hard error rather than silently dropping flux through it.
     nonmanifold_keep = repair_nonmanifold_cells(merged_nodes, merged_cells)
     if not nonmanifold_keep.all():
+        n_bl_cells = int(np.sum(nonmanifold_keep[:n_bl_cells]))
         merged_cells = merged_cells[nonmanifold_keep]
         volumes = volumes[nonmanifold_keep]
         cell_groups = cell_groups[nonmanifold_keep]
 
+    # ------------------------------------------------------------------
+    # Mesh quality repair: Stage A (quality-gated smoothing, in-place on
+    # merged_nodes - see mesh_repair.py) then, if bad cells remain, Stage B
+    # (one targeted regeneration retry with a local BL thickness cap or
+    # core refinement region derived from exactly which cells are still
+    # bad). Stage C (global parameter backoff) is one level up, in
+    # VolumeMeshGenerator.generate_from_surface, for when even Stage B
+    # isn't enough.
+    # ------------------------------------------------------------------
+    from ..validation.quality_validator import MeshQualityValidator
+    from .face_extractor import FaceExtractor
+
+    merged_cells = merged_cells.astype(np.int32)
+    validator = MeshQualityValidator()
+    logger.info("Checking volume mesh quality (pre-repair)...")
+    # Extracted once and handed to both validate() and smooth_bad_cells()
+    # below - both would otherwise independently re-extract faces from this
+    # exact same (unmoved) geometry, a real duplicated cost on a multi-
+    # million-cell mesh (face extraction alone measured at several seconds
+    # on a ~2-7M cell mesh).
+    _pre_repair_node_arr = NodeArray(
+        x=merged_nodes[:, 0].copy(), y=merged_nodes[:, 1].copy(), z=merged_nodes[:, 2].copy()
+    )
+    pre_repair_faces = FaceExtractor.extract_faces(merged_cells, _pre_repair_node_arr)
+    initial_report = validator.validate(
+        merged_nodes, merged_cells, cell_type="tetrahedron", faces=pre_repair_faces
+    )
+
+    # Cells physically overlapping a different, non-adjacent cell
+    # (mesh_overlap_check.py, run as part of validate() above - reusing its
+    # result rather than checking again) are folded into Stage A/B''s own
+    # "bad cell" criteria alongside skew/orthogonality/volume-ratio, so an
+    # overlap actually drives repair action instead of only being visible
+    # in the quality report.
+    overlap_bad_mask = None
+    if initial_report.overlapping_cell_ids is not None and len(initial_report.overlapping_cell_ids):
+        overlap_bad_mask = np.zeros(len(merged_cells), dtype=bool)
+        overlap_bad_mask[initial_report.overlapping_cell_ids] = True
+
+    nodes_before_repair = merged_nodes
+    merged_nodes, bad_mask, repair_actions = smooth_bad_cells(
+        merged_nodes, merged_cells, validator, max_passes=5, initial_faces=pre_repair_faces,
+        extra_bad_mask=overlap_bad_mask, n_bl_cells=n_bl_cells,
+    )
+    mesh_changed_by_repair = not np.array_equal(nodes_before_repair, merged_nodes)
+
+    if np.any(bad_mask):
+        # Stage B': local cavity remesh (core cells, and BL cells including
+        # ones touching the wall - see mesh_repair.py's module docstring).
+        # Not gated on _is_stage_b_retry (unlike the BL-
+        # side retry below): it never recurses into a fresh
+        # generate_hybrid_mesh call, it's a one-shot local patch on the
+        # mesh already in hand, so there's no unbounded-recursion risk from
+        # also attempting it on the single BL-side retry pass.
+        # pre_repair_faces' CONNECTIVITY (owner/neighbor, node_connectivity)
+        # is still valid here even though Stage A may have moved node
+        # coordinates - smoothing never changes cell/face topology, only
+        # positions.
+        n_cells_before_cavity = len(merged_cells)
+        merged_nodes, merged_cells, cell_groups, bad_mask, cavity_actions = remesh_core_cavity(
+            merged_nodes, merged_cells, cell_groups, n_bl_cells, pre_repair_faces, bad_mask, validator,
+        )
+        repair_actions.extend(cavity_actions)
+        if len(merged_cells) != n_cells_before_cavity:
+            mesh_changed_by_repair = True
+
+        # Re-check for non-manifold faces (the same check already run once
+        # above, right after degenerate-cell removal) - Stage B' is a new
+        # potential SOURCE of this failure mode that didn't exist when that
+        # first check was scoped to run only once, before any repair stage:
+        # a cavity's own local retile can pass its own boundary-point-
+        # preservation check (verbatim node positions) while still
+        # producing tets that overlap the kept mesh just outside the
+        # cavity, if the cavity's fixed boundary itself sits on nearly-
+        # degenerate geometry (observed directly: a BL-side cavity retiled
+        # near a Stage B thickness-capped vertex, where capping had already
+        # collapsed a neighbouring layer to near-zero height, produced 12
+        # such faces on a real case - not caught here previously because
+        # Stage B' extending to BL/wall-adjacent cells is new; a core-only
+        # cavity's boundary is never that close to a capped-thickness BL
+        # seam). Left unrepaired, this crashes downstream (face_extractor
+        # raises a hard error on a >2-cell-shared face) instead of failing
+        # gracefully via the quality gate like every other residual defect
+        # here does.
+        nonmanifold_keep = repair_nonmanifold_cells(merged_nodes, merged_cells)
+        if not nonmanifold_keep.all():
+            n_bl_cells = int(np.sum(nonmanifold_keep[:n_bl_cells]))
+            merged_cells = merged_cells[nonmanifold_keep]
+            cell_groups = cell_groups[nonmanifold_keep]
+            bad_mask = bad_mask[nonmanifold_keep]
+            mesh_changed_by_repair = True
+
+    if np.any(bad_mask) and not _is_stage_b_retry:
+        n_bad = int(np.sum(bad_mask))
+        cap_thickness = min_cell_size * 3.0
+        extra_limit, bl_verts = compute_bl_thickness_limit_override(
+            bad_mask, n_bl_cells, merged_cells, len(surface_nodes), cap_thickness,
+            nodes_per_layer=len(bl_source_vertex), node_original_vertex=bl_source_vertex,
+            local_surface_faces=bl_extrude_faces,
+        )
+        # Core-side local repair regions were tried here too and removed:
+        # tetgen's per-region refinement does not confine itself to a small
+        # added region's local footprint when a domain-wide grading region
+        # is also active in the same connected volume - a handful of small
+        # local regions ballooned the whole core fill several-fold (1.2M ->
+        # 6.1M tets on a real case) without improving quality there. See
+        # mesh_repair.py's module docstring for the full account. BL-side
+        # thickness capping has no equivalent failure mode, so it remains.
+        if extra_limit is not None:
+            logger.warning(
+                f"Stage A left {n_bad} cells still bad ({len(bl_verts)} BL vertices "
+                f"implicated) - retrying generation once with a targeted local BL "
+                f"thickness cap (Stage B)..."
+            )
+            # Explicitly drop this attempt's large arrays before recursing:
+            # `return generate_hybrid_mesh(...)` keeps this frame (and every
+            # local in it - merged_nodes/merged_cells/volumes/cell_groups,
+            # plus the earlier bl_*/core_*/plc_* intermediates, all sized to
+            # a multi-million-cell mesh) alive on the call stack for the
+            # entire duration of the retry, since Python doesn't do tail-
+            # call elimination. Observed directly on a real 2.6M-cell case:
+            # left implicit, process RSS climbed past 11GB and a step that
+            # normally takes ~2s (compute_local_thickness_limit) started
+            # taking 10+ minutes, consistent with the retry now running
+            # under severe memory pressure from a frame it never needed to
+            # keep alive - only extra_limit (a tiny, derived array) is
+            # actually needed past this point.
+            del merged_nodes, merged_cells, volumes, cell_groups, bad_mask, initial_report
+            import gc
+            gc.collect()
+            return generate_hybrid_mesh(
+                surface_nodes, surface_faces, bounding_box,
+                growth_rate=growth_rate, max_layers=max_layers, min_cell_size=min_cell_size,
+                target_cells=target_cells, surface_boundaries=surface_boundaries,
+                max_cell_size=max_cell_size,
+                extra_thickness_limit=extra_limit,
+                bl_layers=bl_layers,
+                _is_stage_b_retry=True,
+            )
+        else:
+            logger.warning(
+                f"Stage A left {n_bad} cells still bad, but none are traceable to a "
+                f"specific BL vertex Stage B can target - leaving as-is for the "
+                f"caller's own quality gate to report"
+            )
+
+    # ------------------------------------------------------------------
+    # Final defensive pass: merge any geometrically-coincident points that
+    # ended up under different global node indices (see
+    # mesh_tetgen_core._dedupe_coincident_points's docstring for the
+    # specific failure mode - a widespread Stage B thickness cap freezing
+    # many BL nodes at an identical coordinate for their remaining layers,
+    # each still getting its own index). Cheap to run unconditionally (a
+    # KD-tree query_pairs at a tight 1e-9 tolerance is a no-op cost-wise
+    # when there's nothing to merge) and this is the only point in the
+    # pipeline that looks at the WHOLE merged mesh's geometry rather than
+    # one local piece of it.
+    # ------------------------------------------------------------------
+    n_nodes_before_merge = len(merged_nodes)
+    merged_nodes, merged_cells, _remap = _dedupe_coincident_points(merged_nodes, merged_cells)
+    if len(merged_nodes) != n_nodes_before_merge:
+        mesh_changed_by_repair = True
+        merged_cells = merged_cells.astype(np.int32)
+
+        # Merging can turn a cell degenerate (2+ of its 4 vertices now
+        # identical) - same threshold/reasoning as the earlier degenerate-
+        # cell removal above.
+        _tmp_nodes_obj = NodeArray(
+            x=merged_nodes[:, 0].copy(), y=merged_nodes[:, 1].copy(), z=merged_nodes[:, 2].copy()
+        )
+        post_merge_volumes = TetrahedralCells.compute_volumes(_tmp_nodes_obj, merged_cells)
+        degenerate_threshold = (min_cell_size ** 3) * 1e-6
+        valid_mask = post_merge_volumes > degenerate_threshold
+        n_invalid = int(np.sum(~valid_mask))
+        if n_invalid > 0:
+            logger.warning(
+                f"Coincident-point merge left {n_invalid} newly-degenerate cells "
+                f"(2+ vertices merged into the same node), removing them..."
+            )
+            merged_cells = merged_cells[valid_mask]
+            cell_groups = cell_groups[valid_mask]
+
+        # And merging can reveal non-manifold structure that was previously
+        # hidden behind two different index sets (see the docstring above -
+        # the whole point of this pass is to expose exactly that).
+        nonmanifold_keep = repair_nonmanifold_cells(merged_nodes, merged_cells)
+        if not nonmanifold_keep.all():
+            merged_cells = merged_cells[nonmanifold_keep]
+            cell_groups = cell_groups[nonmanifold_keep]
+
+    nodes_obj = NodeArray(
+        x=merged_nodes[:, 0].copy(), y=merged_nodes[:, 1].copy(), z=merged_nodes[:, 2].copy()
+    )
+    volumes = TetrahedralCells.compute_volumes(nodes_obj, merged_cells)
+
     cells_obj = TetrahedralCells(
-        connectivity=merged_cells.astype(np.int32),
+        connectivity=merged_cells,
         volumes=volumes
     )
 
@@ -385,5 +421,29 @@ def generate_hybrid_mesh(
         f"{volume_mesh.node_count} nodes, {volume_mesh.cell_count} cells, "
         f"total volume: {volume_mesh.total_volume:.6e} m^3"
     )
+
+    if mesh_changed_by_repair:
+        # log_summary=False: the explicit logger.info(final_report.summary())
+        # below prints a strictly more complete version of the same report
+        # (with the before/after comparison and repair-actions sections
+        # attached, set just after this call) - letting validate() also log
+        # its own copy here would print the same content twice in a row.
+        final_report = validator.validate(
+            merged_nodes, merged_cells, cell_type="tetrahedron", log_summary=False
+        )
+    else:
+        # Stage A made no changes (the common case whenever it can't find a
+        # safe move at all - see mesh_repair.smooth_bad_cells) - the mesh is
+        # bit-for-bit identical to what initial_report already evaluated, so
+        # re-running a full validate() (another face extraction + all
+        # quality checks) would just recompute the exact same numbers.
+        # dataclasses.replace makes an independent copy rather than
+        # aliasing initial_report itself, so the before/after fields set
+        # below don't turn it into a self-reference.
+        from dataclasses import replace as _dc_replace
+        final_report = _dc_replace(initial_report)
+    final_report.repair_stages_applied = repair_actions
+    final_report.initial_report = initial_report
+    logger.info(f"\n{final_report.summary()}")
 
     return volume_mesh

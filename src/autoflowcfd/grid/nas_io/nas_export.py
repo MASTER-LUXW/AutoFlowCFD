@@ -10,10 +10,66 @@ Key Components:
     - _write_boundaries: Write boundary group information
 """
 
+import math
 import numpy as np
 from typing import Dict, Optional, Tuple
 from pathlib import Path
 from loguru import logger
+
+
+def _format_nastran_compact_exponent(value: float, width: int = 8) -> str:
+    """Format a float in Nastran's compact exponent notation (no 'e'),
+    e.g. "-1.23+05" for -123000.0, guaranteed to fit within `width` chars.
+
+    This is what nas_parser_utils.parse_nastran_float already knows how to
+    read back, so a round-tripped file stays self-consistent. It exists as
+    the last-resort fallback in format_coord_8char below, for coordinates
+    where even 2-decimal fixed notation doesn't fit an 8-character Nastran
+    Small Field - which Python's "%e" (used previously) does not fit
+    either: "-5.0000e+04" is 11 characters, itself overflowing the field
+    it was supposed to protect. Automotive external-aero domains routinely
+    have +/-tens-of-meters extents, i.e. +/-tens-of-thousands of mm once
+    exported at scale_factor=1000, so this path is realistically reachable,
+    not just a theoretical edge case.
+    """
+    if value == 0.0:
+        return "0.0"
+
+    sign = '-' if value < 0 else ''
+    abs_value = abs(value)
+    exponent = int(math.floor(math.log10(abs_value)))
+    mantissa = abs_value / (10.0 ** exponent)
+    # Guard against log10 rounding landing exactly on a power-of-ten boundary.
+    if mantissa >= 10.0:
+        mantissa /= 10.0
+        exponent += 1
+    elif mantissa < 1.0:
+        mantissa *= 10.0
+        exponent -= 1
+
+    def _render(mantissa: float, exponent: int) -> str:
+        exp_sign = '+' if exponent >= 0 else '-'
+        exp_str = f"{abs(exponent):02d}"
+        avail = width - len(sign) - 1 - len(exp_str)  # 1 for exp_sign
+        decimals = max(avail - 2, 0)  # 2 = one leading digit + '.'
+        mantissa_str = f"{mantissa:.{decimals}f}" if decimals > 0 else f"{mantissa:.0f}"
+        return mantissa_str, exp_sign, exp_str
+
+    mantissa_str, exp_sign, exp_str = _render(mantissa, exponent)
+    if float(mantissa_str) >= 10.0:
+        # Rounding pushed the mantissa back up to two digits; re-render one
+        # exponent higher so the field width budget stays correct.
+        exponent += 1
+        mantissa /= 10.0
+        mantissa_str, exp_sign, exp_str = _render(mantissa, exponent)
+
+    result = f"{sign}{mantissa_str}{exp_sign}{exp_str}"
+    if len(result) > width:
+        # Only reachable for 3+ digit exponents (|value| >= 1e100 or
+        # <= 1e-100) - nonsensical for physical mesh coordinates, but clip
+        # rather than silently overflow the fixed-width field.
+        result = result[:width]
+    return result
 
 
 def export_volume_mesh_to_nas(
@@ -138,16 +194,16 @@ def _write_header(f, volume_mesh) -> None:
 
 def _write_nodes(f, nodes, scale_factor: float) -> None:
     """Write GRID cards for all nodes.
-    
-    Nastran standard fixed-column format
-    Columns 1-4:   "GRID"
-    Columns 5-8:   (blank)
+
+    Nastran Small Field format (what this function actually writes below -
+    see the Field 1-6 comments inline for the authoritative column layout):
+    Columns 1-8:   "GRID" keyword
     Columns 9-16:  Node ID (right-aligned, 8 chars)
-    Columns 17-24: Coordinate system ID (blank, 8 chars)
-    Columns 25-40: X coordinate (right-aligned, 16 chars)
-    Columns 41-56: Y coordinate (right-aligned, 16 chars)
-    Columns 57-72: Z coordinate (right-aligned, 16 chars)
-    
+    Columns 17-24: Coordinate system ID (right-aligned, 8 chars)
+    Columns 25-32: X coordinate (right-aligned, 8 chars)
+    Columns 33-40: Y coordinate (right-aligned, 8 chars)
+    Columns 41-48: Z coordinate (right-aligned, 8 chars)
+
     Args:
         f: File handle
         nodes: NodeArray with x, y, z coordinates
@@ -185,9 +241,11 @@ def _write_nodes(f, nodes, scale_factor: float) -> None:
                     formatted = f"{value:.{precision}f}"
                     if len(formatted) <= 8:
                         return formatted
-                
-                # Fallback: use scientific notation if still too long
-                return f"{value:.4e}"
+
+                # Fallback: Nastran compact exponent notation (no 'e', so
+                # it actually fits 8 chars - Python's "%e"/.4e is itself
+                # 10-11 characters and would silently overflow the field).
+                return _format_nastran_compact_exponent(value, width=8)
             
             x_str = format_coord_8char(x)
             y_str = format_coord_8char(y)

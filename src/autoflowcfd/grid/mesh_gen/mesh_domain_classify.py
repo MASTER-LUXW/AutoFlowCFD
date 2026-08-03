@@ -15,12 +15,15 @@ the ability to tell them apart. Scoping the analysis to each group's own
 face subset avoids that.
 """
 
-from typing import Dict, List, NamedTuple, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple, TYPE_CHECKING
 
 import numpy as np
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 from loguru import logger
+
+if TYPE_CHECKING:
+    from ..structures import BoundaryMap
 
 # Boundary types that are always open-flow boundaries or frictionless
 # (slip) walls, so their faces are never BL-extruded regardless of
@@ -218,7 +221,7 @@ def find_point_inside_closed_shell(
 def _signed_volume(nodes: np.ndarray, faces: np.ndarray) -> float:
     """Enclosed volume of a (near-)closed surface, using raw (unnormalized)
     face winding. Sign follows the same convention as
-    mesh_extrusion.orient_tetrahedra (positive = outward-consistent winding).
+    mesh_prism_to_tet.orient_tetrahedra (positive = outward-consistent winding).
     Meaningful even with a small opening (missing caps contribute ~0 net
     volume relative to the whole shell).
     """
@@ -312,13 +315,16 @@ def classify_boundary_groups(
         is_closed_solid_face: (m,) bool array, parallel to extrude_faces -
             True for rows from a closed embedded solid (the `hole_points`
             branch, e.g. a car body), False for a bbox-touching wall sheet
-            (ground/tunnel-like). Lets the caller build max-cell-size
-            grading spheres centered on just the isolated solid's own
-            geometry (mesh_tetgen_core.build_graded_regions) - a
-            bbox-touching wall can span nearly the whole domain footprint,
-            so including it in the same center/radius model risks a
-            grading sphere geometrically crossing the wall's own BL
-            surface partway through the domain.
+            (ground/tunnel-like). Currently unused by mesh_background.py
+            (received as `_is_closed_solid_face`) - it was meant to let the
+            caller build max-cell-size grading spheres centered on just the
+            isolated solid's own geometry, distinct from a bbox-touching
+            wall sheet that can span nearly the whole domain footprint, but
+            that per-solid grading-sphere approach was abandoned (see
+            mesh_tetgen_core.py's note where those functions used to live)
+            in favor of one flat core-fill region. Kept here since it's a
+            cheap, already-computed byproduct that a future per-solid
+            grading scheme could reuse.
     """
     L_char = float(np.max(bbox_max - bbox_min))
     tol = L_char * _BBOX_TOUCH_RTOL

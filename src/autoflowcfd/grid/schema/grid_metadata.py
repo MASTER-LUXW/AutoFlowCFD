@@ -21,7 +21,8 @@ class GridMetadata:
         cell_count: 单元数量
         boundary_groups: 边界组名称列表
         file_format: 文件格式版本 (e.g., "v22", "v23", "v24")
-        bounding_box: 包围盒信息 (min_x, min_y, min_z, max_x, max_y, max_z), optional
+        bounding_box: 包围盒信息 (min_x, max_x, min_y, max_y, min_z, max_z), optional -
+            this matches parser_core.py's _compute_bounding_box() producer order
         creation_time: 网格创建时间戳, optional
     
     Example:
@@ -71,7 +72,11 @@ class GridMetadata:
         ]
         
         if self.bounding_box:
-            min_x, min_y, min_z, max_x, max_y, max_z = self.bounding_box
+            # Order matches the producer (parser_core.py's
+            # _compute_bounding_box): (min_x, max_x, min_y, max_y, min_z,
+            # max_z), NOT the grouped-by-axis order this used to assume -
+            # that mismatch silently mislabeled every axis in this summary.
+            min_x, max_x, min_y, max_y, min_z, max_z = self.bounding_box
             lines.append(
                 f"  Bounding Box: [{min_x:.3f}, {max_x:.3f}] x "
                 f"[{min_y:.3f}, {max_y:.3f}] x [{min_z:.3f}, {max_z:.3f}]"

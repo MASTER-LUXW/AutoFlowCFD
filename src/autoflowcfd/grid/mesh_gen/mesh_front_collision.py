@@ -1,0 +1,516 @@
+"""Reactive per-layer self-collision prevention for BL front extrusion.
+
+extrude_single_layer's miter-join compensation (mesh_layer_step.py's own
+MITER_LIMIT) and mesh_tetgen_core.compute_local_thickness_limit's
+a-priori cone-angle budget both reduce how often an extruded front folds
+over itself, but neither *guarantees* it: the miter join is a fixed
+per-node scale computed once from the UNDEFORMED surface, and the
+thickness-limit budget is a static, whole-run estimate from that same
+undeformed geometry - neither one looks at the actual, current geometry
+of the layer it is about to produce. A sharp CONCAVE curve (offset lines
+converging once thickness exceeds the local radius of curvature) or a
+valence-3+ corner (three or more patches meeting, not the simple
+two-patch edge the miter compensation models) can still fold over
+regardless of parameters - confirmed directly: cube_demo still showed
+hundreds of overlapping cells across several different layer-count/
+growth-rate combinations.
+
+Two complementary mechanisms close that gap, mirroring how advancing-
+front methods (e.g. Pointwise's T-Rex) handle it - both independent of
+growth_rate, bl_layers, max_layers or any other extrusion parameter:
+
+  clamp_budget_for_convergence - BEFORE each layer's step, measure the
+      CURRENT distance between candidate non-adjacent face pairs and cap
+      each involved node's remaining lifetime displacement to at most
+      half of it. This is the primary defence, and matters even for a
+      single, well-behaved pair of converging fronts: an AFTER-the-fact
+      check alone can "tunnel" - two clean, non-intersecting end-of-layer
+      snapshots can still have their SWEPT PRISMS fully overlap in
+      between if a single step is large relative to the remaining gap
+      (confirmed directly: this project's own test suite caught exactly
+      this on two flat facing patches closing a tight gap over a handful
+      of geometrically-growing layers - see
+      test_mesh_front_collision.py). Recomputing from real geometry every
+      layer (not a one-time undeformed-surface estimate) means the cap
+      only ever tightens as fronts approach, converging them toward
+      meeting near the midpoint of whatever gap remains, never past it.
+
+  freeze_self_colliding_nodes - AFTER each layer's step, check the
+      layer's actual resulting geometry for genuine self-intersection
+      TWO ways and roll back + permanently freeze only the offending
+      nodes:
+        (a) find_self_colliding_faces - the new layer against itself
+            (same snapshot, same as a single-pair tunneling check but
+            for the whole mesh at once).
+        (b) find_cross_state_colliding_faces - the new layer against the
+            PREVIOUS layer - catches a fast-advancing face sweeping
+            through space a different, slower/frozen neighbour was still
+            occupying at the start of that same step, which (a) alone
+            cannot see (neither snapshot it compares is self-
+            intersecting on its own) and which clamp_budget_for_
+            convergence's own first-order/instantaneous approximation is
+            not guaranteed to predict ahead of time for a large enough
+            step (confirmed directly: found real cases on cube_demo,
+            spread across most of the BL stack's depth, that (a) alone
+            missed entirely).
+      Both are a backstop for whatever the pre-step clamp's pairwise,
+      broad-phase-radius-bounded search doesn't happen to cover - defence
+      in depth, not the primary mechanism.
+
+See mesh_extrusion.py's extrude_layers for how both functions compose
+with the pre-existing remaining_budget mechanism (tightening/freezing a
+node is literally lowering/zeroing that node's remaining_budget).
+"""
+
+import numpy as np
+
+from ..validation.overlap_geometry import triangle_triangle_intersect, triangle_triangle_min_distance
+
+# clamp_budget_for_convergence caps each side of a converging pair to this
+# fraction of their CURRENT distance, not exactly 0.5. Mathematically any
+# fraction <= 0.5 already guarantees the gap can never go negative (see
+# that function's own docstring); strictly below 0.5 additionally
+# guarantees it never fully closes to exactly 0 either, whenever a single
+# layer's step is what exhausts a node's budget (the common case - see
+# "Dropped tets" in mesh_prism_to_tet.py, and confirmed directly by this
+# project's own test suite: with exactly 0.5, two perfectly symmetric
+# facing fronts converge to exactly-coincident, duplicate geometry at the
+# limit, which is a degenerate PLC input tetgen can reject (the same
+# "vertices are coplanar" class of error already seen on a real case, see
+# ProjectFiles Part5) even though the resulting zero-volume tets would
+# themselves be handled fine by the dropping logic downstream). 0.45
+# leaves a comfortable margin below the 0.5 boundary without materially
+# changing how many layers convergence takes.
+CONVERGENCE_SAFETY_FRACTION = 0.45
+
+# clamp_budget_for_convergence must only restrict a candidate pair that is
+# actually converging - being merely CLOSE is not enough. Proximity alone
+# was tried first and confirmed directly (on cube_demo, a plain cube
+# body) to be a serious bug, not just an over-conservative heuristic:
+# every pair of small triangles straddling one of the cube's own CONVEX
+# edges (ordinary, correctly-shaped mesh refinement near a feature, not a
+# defect) sits well within a few face-widths of each other from the very
+# first layer, exactly like a genuinely converging pair does - without a
+# directional filter, clamp_budget_for_convergence could not tell that
+# apart from real convergence and froze nodes along essentially every
+# edge of the cube, producing a mesh with 131x MORE overlapping cells
+# than the unfixed baseline (132,260 vs. 1,004) once the resulting mass
+# of degenerate/near-duplicate frozen geometry reached tetgen.
+#
+# A plain dot(normal_a, normal_b) < 0 ("normals point back toward each
+# other") test was tried next and is ALSO wrong, just for a narrower and
+# sneakier class of case: a sharp CONVEX wedge (a thin fin/blade, e.g. an
+# airfoil trailing edge) has near-OPPOSITE face normals purely because of
+# how acute the wedge angle is (verified directly: a symmetric 10 degree
+# wedge gives dot=-0.98), yet its two surfaces genuinely DIVERGE as they
+# extrude outward, same as any other convex feature - the thinness of the
+# material is irrelevant to which way the offset surfaces move. What
+# actually matters is not the two normals' absolute directions but
+# whether moving along them SHRINKS the distance between the two
+# candidate faces: for centroid separation vector d = centroid_b -
+# centroid_a and normal difference dn = normal_b - normal_a, the
+# instantaneous rate of change of squared separation as both faces
+# advance along their own normals is proportional to dot(d, dn) - and a
+# pair is converging iff that is negative (verified directly against all
+# four cases that matter: facing plates -0.1, convex 90deg edge +0.25,
+# concave 90deg notch -0.25, sharp convex wedge +0.35 - each with the
+# physically expected sign, including the wedge case the simpler normal-
+# only test got backwards).
+CONVERGING_CLOSING_RATE_THRESHOLD = 0.0
+
+
+def _face_geometry(nodes: np.ndarray, faces: np.ndarray):
+    tri = nodes[faces]  # (n_faces, 3, 3)
+    centroids = tri.mean(axis=1)
+    cross = np.cross(tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    cross_norm = np.linalg.norm(cross, axis=1)
+    face_size = np.sqrt(np.maximum(0.5 * cross_norm, 1e-300))
+    normal = cross / np.maximum(cross_norm, 1e-300)[:, np.newaxis]
+    return tri, centroids, face_size, normal
+
+
+def _iter_candidate_pairs(
+    faces: np.ndarray,
+    centroids: np.ndarray,
+    face_size: np.ndarray,
+    search_multiplier: float,
+    chunk_size: int,
+):
+    """Yield (row_idx, col_idx) int64 arrays, one pair of chunk-local
+    candidate-index arrays per chunk: non-self, non-node-sharing face
+    pairs whose centroids are within `search_multiplier * own sqrt(area)`
+    of each other. Shared broad phase for both find_self_colliding_faces
+    and clamp_budget_for_convergence - see either's docstring for why the
+    radius is per-face (local mesh scale), not a single domain constant,
+    and why chunking bounds memory instead of materializing every
+    candidate pair at once (same rationale as mesh_overlap_check.py's
+    identical pattern, on a real multi-million-face mesh).
+    """
+    from scipy.spatial import cKDTree
+
+    n_faces = len(faces)
+    tree = cKDTree(centroids)
+    search_radius = search_multiplier * face_size
+
+    for start in range(0, n_faces, chunk_size):
+        end = min(start + chunk_size, n_faces)
+        idx_chunk = np.arange(start, end)
+        neighbor_lists = tree.query_ball_point(
+            centroids[idx_chunk], r=search_radius[idx_chunk], workers=-1
+        )
+        counts = np.fromiter(
+            (len(lst) for lst in neighbor_lists), dtype=np.int64, count=len(neighbor_lists)
+        )
+        if counts.sum() == 0:
+            continue
+
+        row_idx = np.repeat(idx_chunk, counts)
+        col_idx = np.concatenate(
+            [np.asarray(lst, dtype=np.int64) for lst in neighbor_lists if len(lst) > 0]
+        )
+        keep = row_idx != col_idx
+        row_idx, col_idx = row_idx[keep], col_idx[keep]
+        if len(row_idx) == 0:
+            continue
+
+        # Faces sharing a node are ordinary adjacent topology, not a
+        # defect (same rule as mesh_overlap_check.py's node-sharing filter).
+        fi, fj = faces[row_idx], faces[col_idx]
+        shares_node = np.zeros(len(row_idx), dtype=bool)
+        for a in range(3):
+            for b in range(3):
+                shares_node |= fi[:, a] == fj[:, b]
+        keep = ~shares_node
+        if not np.any(keep):
+            continue
+        row_idx, col_idx = row_idx[keep], col_idx[keep]
+
+        yield row_idx, col_idx
+
+
+def find_self_colliding_faces(
+    nodes: np.ndarray,
+    faces: np.ndarray,
+    search_multiplier: float = 2.0,
+    chunk_size: int = 2000,
+) -> np.ndarray:
+    """Indices into `faces` of every face involved in a genuine (exact,
+    not proximity-based - there is no "closeness" threshold to tune here)
+    self-intersection with another, non-adjacent face of the SAME
+    triangle soup.
+
+    Narrow phase only: exact triangle_triangle_intersect on each
+    broad-phase candidate from _iter_candidate_pairs. No "close" case -
+    only an actual intersection is reported; see clamp_budget_for_
+    convergence for the complementary, proximity-based, BEFORE-the-step
+    mechanism.
+
+    Args:
+        nodes: (n_nodes, 3) current node positions
+        faces: (n_faces, 3) triangle connectivity (int)
+        search_multiplier: broad-phase KD-tree query radius as a multiple
+            of each face's own sqrt(area)
+        chunk_size: faces processed per KD-tree batch
+
+    Returns:
+        int64 array of face indices with at least one genuine
+        intersection (empty if none, never None)
+    """
+    n_faces = len(faces)
+    if n_faces == 0:
+        return np.array([], dtype=np.int64)
+
+    tri, centroids, face_size, _normal = _face_geometry(nodes, faces)
+    colliding = np.zeros(n_faces, dtype=bool)
+
+    for row_idx, col_idx in _iter_candidate_pairs(
+        faces, centroids, face_size, search_multiplier, chunk_size
+    ):
+        a_nodes, b_nodes = tri[row_idx], tri[col_idx]
+        intersects = triangle_triangle_intersect(
+            a_nodes[:, 0], a_nodes[:, 1], a_nodes[:, 2],
+            b_nodes[:, 0], b_nodes[:, 1], b_nodes[:, 2],
+        )
+        if np.any(intersects):
+            colliding[row_idx[intersects]] = True
+            colliding[col_idx[intersects]] = True
+
+    return np.flatnonzero(colliding)
+
+
+def find_cross_state_colliding_faces(
+    new_nodes: np.ndarray,
+    current_nodes: np.ndarray,
+    faces: np.ndarray,
+    search_multiplier: float = 2.0,
+    chunk_size: int = 2000,
+) -> np.ndarray:
+    """Indices into `faces` of every face whose NEW position genuinely
+    intersects some other, non-adjacent face's CURRENT (this layer's
+    starting, pre-step) position.
+
+    find_self_colliding_faces alone - comparing `new_nodes` against
+    itself - misses a real failure mode confirmed directly on cube_demo:
+    a fast-advancing triangle A and a slow (or differently-curving)
+    neighbour triangle B can each individually look fine at both
+    snapshots (A-new vs B-new doesn't intersect, by definition it passed
+    this same check when B was itself "new" last layer) while A's own
+    large step this layer sweeps it through the space B was still
+    occupying at the START of that same step - neither the same-layer
+    check (only ever compares same-snapshot state) nor clamp_budget_for_
+    convergence (a first-order/instantaneous linear approximation
+    evaluated once at the step's start - see CONVERGING_CLOSING_RATE_
+    THRESHOLD's own comment) is guaranteed to catch this when a single
+    step is large relative to the local feature size (Stage 2 transition
+    layers can grow up to 4x/layer - see extrude_layers' target_handoff_
+    size solve). This is the cross-triangle generalisation of the same
+    tunneling concern CONVERGENCE_SAFETY_FRACTION exists for on a single
+    pair; verified directly to find real cases on cube_demo that the
+    other two mechanisms did not (up to ~20% of surface triangles
+    implicated across most of the BL stack's depth - a "whole nearby
+    column swept through a slower column" pattern, not isolated slivers).
+
+    A face's own new-vs-current pairing (comparing a triangle against
+    ITSELF across the step) is excluded the same way self-pairs always
+    are - a triangle's own sweep containing its own prior position is
+    exactly what a prism is, not a defect.
+
+    Args:
+        new_nodes: (n_nodes, 3) this layer's tentative node positions
+        current_nodes: (n_nodes, 3) previous (already-accepted) positions
+        faces: (n_faces, 3) triangle connectivity (int)
+        search_multiplier: broad-phase KD-tree query radius as a multiple
+            of the QUERYING (new-state) face's own sqrt(area)
+        chunk_size: faces processed per KD-tree batch
+
+    Returns:
+        int64 array of face indices (empty if none, never None)
+    """
+    n_faces = len(faces)
+    if n_faces == 0:
+        return np.array([], dtype=np.int64)
+
+    from scipy.spatial import cKDTree
+
+    tri_new, centroids_new, face_size_new, _n1 = _face_geometry(new_nodes, faces)
+    tri_cur, centroids_cur, _face_size_cur, _n2 = _face_geometry(current_nodes, faces)
+
+    tree = cKDTree(centroids_cur)
+    search_radius = search_multiplier * face_size_new
+
+    colliding = np.zeros(n_faces, dtype=bool)
+
+    for start in range(0, n_faces, chunk_size):
+        end = min(start + chunk_size, n_faces)
+        idx_chunk = np.arange(start, end)
+        neighbor_lists = tree.query_ball_point(
+            centroids_new[idx_chunk], r=search_radius[idx_chunk], workers=-1
+        )
+        counts = np.fromiter(
+            (len(lst) for lst in neighbor_lists), dtype=np.int64, count=len(neighbor_lists)
+        )
+        if counts.sum() == 0:
+            continue
+
+        row_idx = np.repeat(idx_chunk, counts)  # indexes new-state (query side)
+        col_idx = np.concatenate(
+            [np.asarray(lst, dtype=np.int64) for lst in neighbor_lists if len(lst) > 0]
+        )  # indexes current-state (tree side)
+        keep = row_idx != col_idx  # a face's own sweep is not a defect
+        row_idx, col_idx = row_idx[keep], col_idx[keep]
+        if len(row_idx) == 0:
+            continue
+
+        fi, fj = faces[row_idx], faces[col_idx]
+        shares_node = np.zeros(len(row_idx), dtype=bool)
+        for a in range(3):
+            for b in range(3):
+                shares_node |= fi[:, a] == fj[:, b]
+        keep = ~shares_node
+        if not np.any(keep):
+            continue
+        row_idx, col_idx = row_idx[keep], col_idx[keep]
+
+        a_nodes = tri_new[row_idx]
+        b_nodes = tri_cur[col_idx]
+        intersects = triangle_triangle_intersect(
+            a_nodes[:, 0], a_nodes[:, 1], a_nodes[:, 2],
+            b_nodes[:, 0], b_nodes[:, 1], b_nodes[:, 2],
+        )
+        if np.any(intersects):
+            colliding[row_idx[intersects]] = True
+            colliding[col_idx[intersects]] = True
+
+    return np.flatnonzero(colliding)
+
+
+def clamp_budget_for_convergence(
+    nodes: np.ndarray,
+    faces: np.ndarray,
+    remaining_budget: np.ndarray,
+    search_multiplier: float = 3.0,
+    chunk_size: int = 2000,
+) -> None:
+    """Tighten `remaining_budget` in place so no node is allowed to
+    advance, over all remaining layers combined, further than
+    CONVERGENCE_SAFETY_FRACTION (0.45) of its CURRENT distance to the
+    nearest non-adjacent face it is actually converging with (relative
+    closing rate below CONVERGING_CLOSING_RATE_THRESHOLD - see that
+    constant's own comment for why this filter is required, not
+    optional). Call this BEFORE extruding a layer, on that layer's
+    starting (`current_nodes`) geometry - see module docstring for why a
+    purely AFTER-the-fact check is not sufficient on its own.
+
+    Every candidate pair found tightens BOTH sides' budgets to at most
+    ~45% of their own current distance - symmetric, so if both sides
+    spend their full allowance moving straight toward each other they
+    stop just short of the midpoint, a strictly positive gap remains
+    (never exactly 0, never crossing - see CONVERGENCE_SAFETY_FRACTION's
+    own comment for why stopping strictly short of the midpoint matters).
+    A node touching several converging pairs at once (e.g. a valence-3+
+    concave corner where three fronts meet) ends up bounded by the
+    MINIMUM over all of them, since each pairwise bound is enforced
+    independently via a single vectorized scatter-min (np.minimum.at) -
+    correct regardless of how many other pairs a node also participates
+    in. Recomputed fresh every layer from the mesh's actual current
+    geometry (not a one-time estimate), so as two fronts approach this
+    only ever tightens further, converging them toward - never past -
+    each other.
+
+    A candidate pair already (exactly) intersecting on `current_nodes`
+    should not occur in practice - `current_nodes` is always the
+    previous layer's already-accepted, by-induction collision-free
+    result - but is handled defensively by clamping straight to zero
+    rather than calling triangle_triangle_min_distance, which (per its
+    own docstring) is only meaningful for a non-intersecting pair.
+
+    Args:
+        nodes: (n_nodes, 3) CURRENT (pre-step) node positions
+        faces: (n_faces, 3) triangle connectivity (int)
+        remaining_budget: (n_nodes,) float, meters - mutated in place,
+            only ever lowered, never raised
+        search_multiplier: broad-phase KD-tree query radius as a multiple
+            of each face's own sqrt(area) - larger than find_self_
+            colliding_faces' default since this must also catch pairs
+            that are merely close, not yet touching
+        chunk_size: faces processed per KD-tree batch
+    """
+    n_faces = len(faces)
+    if n_faces == 0:
+        return
+
+    tri, centroids, face_size, normal = _face_geometry(nodes, faces)
+
+    for row_idx, col_idx in _iter_candidate_pairs(
+        faces, centroids, face_size, search_multiplier, chunk_size
+    ):
+        # Only a pair actually converging - moving along their own
+        # normals shrinks the distance between them - gets restricted;
+        # see CONVERGING_CLOSING_RATE_THRESHOLD's own comment for why
+        # this must be the relative closing rate and not just whether the
+        # two normals point at each other. Applied before the (more
+        # expensive) exact geometric tests, both to skip work on excluded
+        # pairs and because it is what makes this function safe to use at
+        # all (see module docstring / this function's own name).
+        d_vec = centroids[col_idx] - centroids[row_idx]
+        n_diff = normal[col_idx] - normal[row_idx]
+        closing_rate = np.einsum('ij,ij->i', d_vec, n_diff)
+        converging = closing_rate < CONVERGING_CLOSING_RATE_THRESHOLD
+        if not np.any(converging):
+            continue
+        row_idx, col_idx = row_idx[converging], col_idx[converging]
+
+        a_nodes, b_nodes = tri[row_idx], tri[col_idx]
+        intersects = triangle_triangle_intersect(
+            a_nodes[:, 0], a_nodes[:, 1], a_nodes[:, 2],
+            b_nodes[:, 0], b_nodes[:, 1], b_nodes[:, 2],
+        )
+
+        safe_budget = np.zeros(len(row_idx), dtype=np.float64)
+        safe = ~intersects
+        if np.any(safe):
+            dists = triangle_triangle_min_distance(
+                a_nodes[safe, 0], a_nodes[safe, 1], a_nodes[safe, 2],
+                b_nodes[safe, 0], b_nodes[safe, 1], b_nodes[safe, 2],
+            )
+            safe_budget[safe] = CONVERGENCE_SAFETY_FRACTION * dists
+        # intersecting pairs keep safe_budget == 0: clamp straight to zero.
+
+        pair_nodes = np.concatenate([faces[row_idx], faces[col_idx]], axis=1)  # (M, 6)
+        pair_budget = np.repeat(safe_budget, 6).reshape(-1, 6)
+        np.minimum.at(remaining_budget, pair_nodes.ravel(), pair_budget.ravel())
+
+
+def freeze_self_colliding_nodes(
+    new_nodes: np.ndarray,
+    current_nodes: np.ndarray,
+    faces: np.ndarray,
+    remaining_budget: np.ndarray,
+    max_iterations: int = 5,
+) -> np.ndarray:
+    """Roll back and permanently freeze every node on a self-intersecting
+    face, in place on `new_nodes` and `remaining_budget`.
+
+    `current_nodes` is the PREVIOUS layer's already-accepted geometry -
+    by induction it is itself collision-free, since this same check ran
+    on it too when it was the "new" layer. Rolling a guilty node back to
+    its `current_nodes` position can therefore only return that node's
+    faces to a state already known to be collision-free with each other;
+    it cannot make anything worse. Freezing is `remaining_budget = 0`:
+    extrude_single_layer already clamps every node's per-layer
+    displacement to what's left of its budget (see mesh_extrusion.py), so
+    a frozen node simply stops moving for the remainder of the run -
+    T-Rex's "terminate locally, continue elsewhere" semantics, with every
+    other node unaffected.
+
+    Iterates (bounded by `max_iterations`) because undoing one pair's
+    collision can occasionally leave a still-moving neighbour
+    intersecting something else that only became a problem once its
+    neighbour rolled back (a cascade). Each iteration either freezes at
+    least one additional node or finds nothing and stops, so this always
+    terminates on its own; the cap only bounds worst-case per-layer cost
+    - an unresolved cascade beyond the cap is still re-examined on the
+    NEXT layer's own call, and caught regardless by the final mesh-wide
+    overlap validation (mesh_overlap_check.py) that runs after
+    tetrahedralization.
+
+    Args:
+        new_nodes: This layer's tentative node positions - mutated in
+            place for any newly frozen node
+        current_nodes: Previous (already-accepted) layer's node positions
+        faces: (n_faces, 3) triangle connectivity, the same one used to
+            extrude both layers
+        remaining_budget: Per-node remaining extrusion budget (meters) -
+            mutated in place, set to 0 for newly frozen nodes
+        max_iterations: cascade-resolution cap (see above)
+
+    Returns:
+        int64 array of node indices frozen during this call (empty if
+        none)
+    """
+    frozen = np.zeros(len(new_nodes), dtype=bool)
+
+    for _ in range(max_iterations):
+        colliding_faces = find_self_colliding_faces(new_nodes, faces)
+        # Also check for a fast-advancing face sweeping through a
+        # different, slower/frozen neighbour's territory this same step -
+        # see find_cross_state_colliding_faces' own docstring for why the
+        # same-snapshot check above cannot see this on its own. Both
+        # sides of a flagged pair are frozen (not just the "aggressor"),
+        # matching the same-layer check's own all-nodes-of-both-faces
+        # policy - simpler to reason about and never less safe.
+        cross_faces = find_cross_state_colliding_faces(new_nodes, current_nodes, faces)
+        colliding_faces = np.union1d(colliding_faces, cross_faces)
+        if len(colliding_faces) == 0:
+            break
+
+        guilty = np.unique(faces[colliding_faces].ravel())
+        guilty = guilty[remaining_budget[guilty] > 0]
+        if len(guilty) == 0:
+            break
+
+        new_nodes[guilty] = current_nodes[guilty]
+        remaining_budget[guilty] = 0.0
+        frozen[guilty] = True
+
+    return np.flatnonzero(frozen)

@@ -214,62 +214,17 @@ class NASParser:
 
             # Step 6: Generate volume mesh if requested
             if generate_volume_mesh:
-                logger.info("Generating volume mesh from surface geometry...")
-                
-                from ..mesh_gen.volume_mesh_generator import VolumeMeshGenerator
-                
-                params = volume_mesh_params or {}
-                
-                # Optimized three-stage hybrid mesh strategy
-                # Stage 1: Boundary Layer (8 layers, fine resolution for y+ control)
-                # Stage 2: Transition Layer (4 layers, medium resolution)
-                # Stage 3: Far-field Background (coarse Cartesian grid)
-                optimized_params = {
-                    'growth_rate': params.get('growth_rate', 1.2),
-                    'max_layers': params.get('max_layers', 12),  # 8 BL + 4 transition
-                    'min_cell_size': params.get('min_cell_size', 0.01),
-                    'target_cells': params.get('target_cells', 400000),  # Balanced target
-                    'max_cell_size': params.get('max_cell_size'),
-                }
-                
-                logger.info(
-                    f"Using three-stage hybrid mesh strategy:\n"
-                    f"  Stage 1 (BL): 8 layers, growth_rate=1.2\n"
-                    f"  Stage 2 (Transition): 4 layers, growth_rate=1.5\n"
-                    f"  Stage 3 (Background): Coarse Cartesian grid\n"
-                    f"  Target total cells: ~{optimized_params['target_cells']:,}"
+                metadata = GridMetadata(
+                    node_count=nodes.count,
+                    cell_count=surface_cells.count,
+                    boundary_groups=list(boundaries.groups.keys()),
+                    file_format=self.version,
+                    bounding_box=bounding_box
                 )
-                
-                generator = VolumeMeshGenerator(**optimized_params)
-                
-                surface_nodes_np = np.column_stack([nodes.x, nodes.y, nodes.z])
-                
-                volume_mesh = generator.generate_from_surface(
-                    surface_nodes=surface_nodes_np,
-                    surface_faces=surface_cells.connectivity,
-                    bounding_box={
-                        'min': np.array([bounding_box[0], bounding_box[2], bounding_box[4]]),
-                        'max': np.array([bounding_box[1], bounding_box[3], bounding_box[5]])
-                    },
-                    method="extrusion",
-                    surface_boundaries=boundaries,
-                    use_hybrid_mesh=True  # Enable hybrid mesh (BL + background)
+                surface_grid = GridData(
+                    nodes=nodes, cells=surface_cells, boundaries=boundaries, metadata=metadata
                 )
-                
-                # Save original surface mesh data
-                volume_mesh.surface_mesh = {
-                    'nodes': surface_nodes_np,
-                    'faces': surface_cells.connectivity,
-                    'boundaries': boundaries
-                }
-                
-                logger.success(
-                    f"Volume mesh generated: {volume_mesh.node_count} nodes, "
-                    f"{volume_mesh.cell_count} cells, "
-                    f"total volume: {volume_mesh.total_volume:.6e} m^3"
-                )
-                
-                return volume_mesh
+                return self.generate_volume_mesh_from_surface(surface_grid, volume_mesh_params)
             else:
                 # Use surface mesh
                 metadata = GridMetadata(
@@ -300,6 +255,99 @@ class NASParser:
         except Exception as e:
             raise NASParseError(f"Unexpected error during parsing: {str(e)}") from e
     
+    def generate_volume_mesh_from_surface(
+        self,
+        surface_grid: GridData,
+        volume_mesh_params: Optional[Dict] = None,
+    ) -> 'VolumeMeshData':
+        """Generate a volume mesh from an already-parsed surface GridData.
+
+        Extracted out of parse()'s own generate_volume_mesh=True path so a
+        caller that already has a parsed surface_grid on hand (e.g. after
+        running GridValidator on it for a pre-generation quality check)
+        can feed it straight into volume mesh generation without a second,
+        redundant raw-NAS-file re-parse - parse() itself now just builds
+        the surface GridData and delegates here.
+
+        Args:
+            surface_grid: Already-parsed surface mesh (nodes/cells/
+                boundaries/metadata.bounding_box)
+            volume_mesh_params: Volume mesh generation parameters (see
+                parse()'s volume_mesh_params)
+
+        Returns:
+            VolumeMeshData
+        """
+        from ..mesh_gen.volume_mesh_generator import VolumeMeshGenerator
+
+        logger.info("Generating volume mesh from surface geometry...")
+
+        params = volume_mesh_params or {}
+
+        # Optimized three-stage hybrid mesh strategy
+        # Stage 1: Boundary Layer (8 layers, fine resolution for y+ control)
+        # Stage 2: Transition Layer (4 layers, medium resolution)
+        # Stage 3: Far-field Background (coarse Cartesian grid)
+        optimized_params = {
+            'growth_rate': params.get('growth_rate', 1.2),
+            'max_layers': params.get('max_layers', 12),  # 8 BL + 4 transition
+            'min_cell_size': params.get('min_cell_size', 0.01),
+            'target_cells': params.get('target_cells', 400000),  # Balanced target
+            'max_cell_size': params.get('max_cell_size'),
+            'bl_layers': params.get('bl_layers'),
+        }
+
+        # Reflect the actual resolved parameters, not fixed placeholder
+        # numbers - this used to always print "8 layers, growth_rate=1.2 /
+        # 4 layers, growth_rate=1.5" even when --growth-rate/--max-layers/
+        # --bl-layers were overridden, misleading anyone (human or agent)
+        # trying to correlate this log with what was actually generated.
+        resolved_bl_layers = optimized_params['bl_layers'] or min(8, optimized_params['max_layers'])
+        resolved_transition_layers = max(optimized_params['max_layers'] - resolved_bl_layers, 0)
+        transition_growth_rate = optimized_params['growth_rate'] * 1.25
+        logger.info(
+            f"Using three-stage hybrid mesh strategy:\n"
+            f"  Stage 1 (BL): {resolved_bl_layers} layers, "
+            f"growth_rate={optimized_params['growth_rate']}\n"
+            f"  Stage 2 (Transition): {resolved_transition_layers} layers, "
+            f"growth_rate={transition_growth_rate}\n"
+            f"  Stage 3 (Background): Coarse Cartesian grid\n"
+            f"  Target total cells: ~{optimized_params['target_cells']:,}"
+        )
+
+        generator = VolumeMeshGenerator(**optimized_params)
+
+        nodes = surface_grid.nodes
+        surface_nodes_np = np.column_stack([nodes.x, nodes.y, nodes.z])
+        bounding_box = surface_grid.metadata.bounding_box
+
+        volume_mesh = generator.generate_from_surface(
+            surface_nodes=surface_nodes_np,
+            surface_faces=surface_grid.cells.connectivity,
+            bounding_box={
+                'min': np.array([bounding_box[0], bounding_box[2], bounding_box[4]]),
+                'max': np.array([bounding_box[1], bounding_box[3], bounding_box[5]])
+            },
+            method="extrusion",
+            surface_boundaries=surface_grid.boundaries,
+            use_hybrid_mesh=True  # Enable hybrid mesh (BL + background)
+        )
+
+        # Save original surface mesh data
+        volume_mesh.surface_mesh = {
+            'nodes': surface_nodes_np,
+            'faces': surface_grid.cells.connectivity,
+            'boundaries': surface_grid.boundaries
+        }
+
+        logger.success(
+            f"Volume mesh generated: {volume_mesh.node_count} nodes, "
+            f"{volume_mesh.cell_count} cells, "
+            f"total volume: {volume_mesh.total_volume:.6e} m^3"
+        )
+
+        return volume_mesh
+
     def _detect_version(self) -> str:
         """检测NAS文件版本"""
         try:

@@ -205,7 +205,30 @@ class VolumeMeshData:
     metadata: GridMetadata
     faces: Optional[FaceData] = None
     surface_mesh: Optional[Dict] = None
-    
+
+    def __post_init__(self):
+        """验证体网格数据一致性
+
+        Unlike GridData, VolumeMeshData is not a subclass of it (it carries
+        TetrahedralCells plus faces/surface_mesh instead), so it never
+        inherited GridData's node/cell count check. That left the object
+        that actually flows into quality validation and NAS/VTK/HDF5 export
+        able to silently carry a metadata.node_count/cell_count that no
+        longer matched the real nodes/cells arrays if a repair or generation
+        step mutated one without updating the other.
+        """
+        if self.metadata.node_count != self.nodes.count:
+            raise ValueError(
+                f"Metadata node count ({self.metadata.node_count}) doesn't match "
+                f"actual node count ({self.nodes.count})"
+            )
+
+        if self.metadata.cell_count != self.cells.count:
+            raise ValueError(
+                f"Metadata cell count ({self.metadata.cell_count}) doesn't match "
+                f"actual cell count ({self.cells.count})"
+            )
+
     @property
     def node_count(self) -> int:
         """获取节点数量"""

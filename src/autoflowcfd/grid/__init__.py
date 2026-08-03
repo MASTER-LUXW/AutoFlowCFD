@@ -47,11 +47,9 @@ from .mesh_gen.mesh_utils import (
     check_reached_boundary,
     check_mesh_quality
 )
-from .mesh_gen.mesh_extrusion import (
-    extrude_layers,
-    extrude_single_layer,
-    convert_layers_to_tetrahedra
-)
+from .mesh_gen.mesh_extrusion import extrude_layers
+from .mesh_gen.mesh_layer_step import extrude_single_layer
+from .mesh_gen.mesh_prism_to_tet import convert_layers_to_tetrahedra
 from .mesh_gen.mesh_background import generate_hybrid_mesh
 from .mesh_gen.mesh_boundary import (
     identify_boundaries_from_surface,

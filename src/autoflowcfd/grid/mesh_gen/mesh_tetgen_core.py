@@ -183,39 +183,67 @@ def compute_local_thickness_limit(
 
     tree = cKDTree(nodes)
     query_points = nodes[extrude_node_idx]
-    neighbor_lists = tree.query_ball_point(query_points, r=search_radius, workers=-1)
 
+    # Query and process in chunks rather than all at once, and vectorize the
+    # per-candidate angle/distance test across each chunk instead of a
+    # Python-level per-node loop. On a fine surface mesh, a domain-scale
+    # search_radius can enclose tens of thousands of same-sheet candidates
+    # per query (the angle test below discards nearly all of them - they're
+    # in-plane neighbors, not a genuine facing feature) - materializing
+    # every query's full candidate list at once (the previous unchunked
+    # behavior) scales memory with n_queries * avg_candidates, which reached
+    # multi-GB transient usage on a ~25k-surface-node case, and the
+    # per-node Python loop that followed (34k+ iterations, each doing
+    # several small numpy calls) dominated runtime - 100+ seconds per call,
+    # repeated every BL-extrusion attempt. This produces numerically
+    # identical results (same radius, same angle test, same nearest-ahead-
+    # point selection) - it only changes how the work is batched.
+    chunk_size = 200
     n_capped = 0
-    for local_i in range(len(extrude_node_idx)):
-        node_idx = extrude_node_idx[local_i]
-        candidates = np.asarray(neighbor_lists[local_i], dtype=np.int64)
-        if len(candidates) <= 1:
+    min_cap_seen = np.inf
+
+    for start in range(0, len(query_points), chunk_size):
+        end = min(start + chunk_size, len(query_points))
+        chunk_node_idx = extrude_node_idx[start:end]
+        neighbor_lists = tree.query_ball_point(
+            query_points[start:end], r=search_radius, workers=-1
+        )
+        counts = np.fromiter(
+            (len(lst) for lst in neighbor_lists), dtype=np.int64, count=len(neighbor_lists)
+        )
+        if counts.sum() == 0:
             continue
 
-        p = nodes[node_idx]
-        n_p = avg_normal[node_idx]
-        if not np.any(n_p):
-            continue
+        row_idx = np.repeat(np.arange(len(chunk_node_idx)), counts)
+        flat_candidates = np.concatenate(
+            [np.asarray(lst, dtype=np.int64) for lst in neighbor_lists if len(lst) > 0]
+        )
 
-        d = nodes[candidates] - p
+        node_idx_per_row = chunk_node_idx[row_idx]
+        d = nodes[flat_candidates] - nodes[node_idx_per_row]
         dist = np.linalg.norm(d, axis=1)
         real = dist > 1e-9
-        if not np.any(real):
-            continue
-
-        cosang = (d[real] @ n_p) / dist[real]
-        ahead = cosang > cos_threshold
+        safe_dist = np.where(real, dist, 1.0)
+        cosang = np.einsum('ij,ij->i', d, avg_normal[node_idx_per_row]) / safe_dist
+        ahead = real & (cosang > cos_threshold)
         if not np.any(ahead):
             continue
 
-        gap = float(dist[real][ahead].min())
-        limit[node_idx] = gap * safety_factor
-        n_capped += 1
+        dist_masked = np.where(ahead, dist, np.inf)
+        seg_min = np.full(len(chunk_node_idx), np.inf)
+        np.minimum.at(seg_min, row_idx, dist_masked)
+
+        has_match = np.isfinite(seg_min)
+        if np.any(has_match):
+            capped_vals = seg_min[has_match] * safety_factor
+            limit[chunk_node_idx[has_match]] = capped_vals
+            n_capped += int(has_match.sum())
+            min_cap_seen = min(min_cap_seen, float(capped_vals.min()))
 
     if n_capped:
         logger.info(
             f"Local BL thickness limiting: {n_capped} nodes capped by a "
-            f"nearby facing feature (min cap {np.min(limit[np.isfinite(limit)]):.4e} m)"
+            f"nearby facing feature (min cap {min_cap_seen:.4e} m)"
         )
     return limit
 
@@ -246,13 +274,41 @@ def _dedupe_coincident_points(
     points: np.ndarray,
     faces: np.ndarray,
     tolerance: float = 1e-9,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Collapse coincident points (within tolerance) and remap faces.
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Collapse coincident points (within tolerance) and remap faces (or
+    tetrahedral cells - `faces` is just an (n, k) index array, remapped via
+    plain fancy indexing, so this works unmodified for k=3 or k=4).
+
+    Also returns `remap` (shape=(len(points),), old index -> new index) so
+    a caller holding ANY OTHER index array into the same original `points`
+    (e.g. fill_core_volume's separately-read `tgen.trifaces`) can apply the
+    identical remapping and stay consistent with the returned
+    `unique_points`/`new_faces` - passing `remap[some_other_array]` does
+    that. `remap` is the identity when no coincident points were found.
 
     Fully transitive (uses scipy connected_components over the coincidence
     graph, not a one-hop union), unlike the older `merge_conforming_meshes`
-    node-dedup logic elsewhere in this package. Only invoked as a fallback
-    when tetgen doesn't return a fully conformal boundary.
+    node-dedup logic elsewhere in this package.
+
+    Two call sites: the original fallback here in fill_core_volume, for
+    when tetgen doesn't return a fully conformal boundary; and
+    mesh_background.generate_hybrid_mesh's final defensive pass over the
+    WHOLE merged mesh, for a distinct failure mode found on a real case -
+    when mesh_repair.compute_bl_thickness_limit_override's reactive BL
+    thickness cap needs to cap a very large fraction of surface vertices
+    (itself a symptom of something upstream producing widespread, not
+    localized, bad cells), many nodes' `remaining_budget` hits exactly zero
+    within the same few layers, freezing them at an identical coordinate
+    for every subsequent layer - each still gets its own distinct global
+    node index (one new index per layer, unconditionally), so the result
+    is a large number of geometrically-coincident points under different
+    indices. That doesn't trip repair_nonmanifold_cells (which matches by
+    exact node index, not geometry) and doesn't reliably trip the
+    degenerate-volume filter either (a tet mixing a frozen node with a
+    still-growing neighbour can have a small but non-negligible volume) -
+    it's a silent topological tear (two geometrically-identical faces under
+    different index sets, each independently counted as a normal boundary
+    face) rather than a crash, so nothing upstream of this catches it.
     """
     from scipy.spatial import cKDTree
 
@@ -261,7 +317,7 @@ def _dedupe_coincident_points(
 
     n_points = len(points)
     if not pairs:
-        return points, faces
+        return points, faces, np.arange(n_points, dtype=np.int64)
 
     rows = [p[0] for p in pairs]
     cols = [p[1] for p in pairs]
@@ -281,7 +337,7 @@ def _dedupe_coincident_points(
         f"Coincident-point fallback stitch: {n_points} -> {len(unique_points)} points "
         f"({n_points - len(unique_points)} merged)"
     )
-    return unique_points, new_faces
+    return unique_points, new_faces, remap
 
 
 def _tet_volumes(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
@@ -462,279 +518,88 @@ def attribute_cells_from_trifaces(
 # Rough conversion from a target edge length to a tetgen maxvolume cap
 # (regular-tet volume/edge^3 is ~0.118; Delaunay-refined tets are less
 # regular and tetgen's own region cap isn't strictly tight in practice -
-# see build_graded_regions - so this is deliberately generous, not exact).
+# so this is deliberately generous, not exact).
 _VOLUME_SHAPE_FACTOR = 0.15
 
 
-def _generate_icosphere(
-    center: np.ndarray, radius: float, subdivisions: int = 2
-) -> Tuple[np.ndarray, np.ndarray]:
-    """A simple closed, outward-wound icosphere triangulation (a
-    subdivided icosahedron, not a UV-sphere).
+# NOTE: an earlier version of this module graded the core fill's max
+# cell size outward from the wall via nested icosphere regions
+# (build_graded_regions/_generate_icosphere). It was abandoned - tetgen's
+# per-region variable-volume refinement does not reliably converge
+# multiple simultaneous regions to their own targets when they compete
+# for one shared Steiner budget (see fill_core_volume's `regions` doc) -
+# in favor of the single flat region mesh_background.py builds directly.
+# Removed rather than left unreferenced to avoid it being wired back in
+# without that context.
 
-    Used as an internal grading-region boundary (build_graded_regions) - a
-    sphere is always convex and simple regardless of the actual body's
-    shape, so unlike offsetting the body's own (possibly non-convex)
-    surface, it can never self-intersect. A UV-sphere was tried first and
-    rejected: its pole vertices are shared by many (n_lon) triangles in a
-    tight fan, and that pole singularity reproducibly segfaults tetgen's
-    `add_hole` + `nobisect=True` + `quality=True` combination even on a
-    trivial synthetic case (isolated, not related to the bgmesh crash
-    elsewhere in this module) - a small hole box with ordinary box topology
-    doesn't crash, isolating the pole fan as the trigger. An icosphere has
-    uniform vertex valence (~5-6) everywhere with no singular vertex.
+def estimate_steinerleft(
+    points: np.ndarray,
+    regions: Optional[List[Tuple[np.ndarray, int, float]]],
+) -> int:
+    """Estimate a Steiner-point budget (tetgen's `steinerleft`) generous
+    enough for the requested region(s), scaled to the actual problem size
+    rather than a fixed constant.
 
-    Returns:
-        (points, faces): points shape=(n,3), faces shape=(m,3) int64,
-        node indices local to this sphere (caller must offset them when
-        merging into a larger shared point array)
-    """
-    t = (1.0 + np.sqrt(5.0)) / 2.0
-    base_verts = np.array([
-        [-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0],
-        [0, -1, t], [0, 1, t], [0, -1, -t], [0, 1, -t],
-        [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1],
-    ], dtype=np.float64)
-    base_verts /= np.linalg.norm(base_verts[0])
+    tetgen's default steinerleft=100000 is a global cap on how many Steiner
+    points it will ever insert, shared across the WHOLE mesh - with a
+    region's own maxvolume target well below the PLC's natural
+    (unconstrained) tet size, it can run out long before that target is
+    reached everywhere, silently leaving a long tail of oversized cells in
+    whatever pockets happened to refine last (measured directly: a 5.5x3x3
+    m domain capped at 0.05 m with a fixed 300,000 budget left 6-10% of
+    cells over 1.5x the target and a worst-case cell ~5-6x over).
 
-    base_faces = np.array([
-        [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
-        [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
-        [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
-        [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
-    ], dtype=np.int64)
+    The domain-wide grading region (present whenever max_cell_size is set -
+    see mesh_background._build_merged_mesh) always has the LARGEST maxvol
+    of any region passed here, so bbox_volume / coarsest_maxvol estimates
+    how many cells it alone needs to fill the core - that's the number this
+    behaves identically to when there is exactly one region (unchanged from
+    the original single-region formula, and - as of Stage B's core-side
+    local repair regions being removed, see mesh_repair.py's module
+    docstring - the only case `regions` now ever actually contains in
+    practice: at most 1 entry).
 
-    verts = base_verts
-    faces = base_faces
-    for _ in range(subdivisions):
-        edge_cache: dict = {}
-        new_faces = []
-
-        def midpoint(i: int, j: int) -> int:
-            key = (i, j) if i < j else (j, i)
-            if key in edge_cache:
-                return edge_cache[key]
-            m = verts[i] + verts[j]
-            m /= np.linalg.norm(m)
-            idx = len(verts_list)
-            verts_list.append(m)
-            edge_cache[key] = idx
-            return idx
-
-        verts_list = list(verts)
-        for a, b, c in faces:
-            ab = midpoint(a, b)
-            bc = midpoint(b, c)
-            ca = midpoint(c, a)
-            new_faces.append([a, ab, ca])
-            new_faces.append([b, bc, ab])
-            new_faces.append([c, ca, bc])
-            new_faces.append([ab, bc, ca])
-        verts = np.array(verts_list, dtype=np.float64)
-        faces = np.array(new_faces, dtype=np.int64)
-
-    return verts * radius + center, faces
-
-
-def build_graded_regions(
-    center: np.ndarray,
-    base_radius: float,
-    domain_radius: float,
-    near_wall_cell_size: float,
-    max_cell_size: float,
-    blocked_points: np.ndarray,
-    n_tiers: int = 5,
-    seed: int = 0,
-    max_sphere_radius: Optional[float] = None,
-) -> Tuple[np.ndarray, np.ndarray, List[Tuple[np.ndarray, int, float]]]:
-    """Build nested concentric sphere surfaces + tetgen region specs that
-    grade the core fill's max cell size outward from the wall (continuing
-    the BL's own near-wall size) up to `max_cell_size` far from the body,
-    instead of leaving the whole core region uniformly unconstrained (see
-    fill_core_volume) or uniformly capped everywhere (which would force
-    the far-field just as fine as near the body, ballooning cell count).
-
-    Each sphere is a genuinely simple, always-convex closed surface
-    (_generate_icosphere) - unlike offsetting the body's own (possibly
-    non-convex) surface outward, it can never self-intersect regardless of
-    the body's actual shape.
+    The `n_extra_regions` handling below is dead in current usage but kept
+    rather than special-cased away, in case a future caller legitimately
+    passes more than one region again: dividing the FULL bbox by the
+    smallest maxvol among several regions (an earlier version of this
+    function, using `min(maxvol for ...)`) badly overestimates whenever one
+    of them is a small local patch rather than a domain-wide target -
+    observed directly on a real case with Stage B's now-removed core
+    regions, an estimate of ~17.8 BILLION target-sized tets for a domain
+    whose single-region core fill converged around 1.2M tets. Note this
+    estimate is advisory only, not a hard constraint: tetgen was confirmed
+    to converge to the *identical* actual tet count regardless of whether
+    steinerleft was the (buggy) inflated value or this function's corrected
+    one - the real 5x core-fill blowup that estimate coincided with
+    (1.2M -> 6.1M tets) turned out to be a separate, still-unresolved
+    tetgen multi-region-refinement behavior (see mesh_repair.py), not
+    something this budget number was ever actually causing.
 
     Args:
-        center: (3,) grading center - typically the BL outer surface's own
-            centroid
-        base_radius: bounding radius of the BL outer surface from `center`
-            - the innermost sphere is placed strictly outside this (with a
-            safety margin) so it can't coincide/interfere with the BL
-            surface itself
-        domain_radius: distance from `center` to the farthest domain
-            corner - radii and cell sizes are log-spaced from the BL
-            surface out to this distance over exactly `n_tiers` bands (see
-            below for why this is always true regardless of base_radius);
-            the outermost band needs no bounding sphere of its own, the
-            domain's real outer PLC shell already terminates it
-        near_wall_cell_size: the BL's own final (outermost) layer
-            thickness - the core fill's first tier continues growing from
-            here, not from scratch
-        max_cell_size: the hard cap the outermost tier converges to exactly
-        blocked_points: (n, 3) points of real near-body geometry (the BL
-            outer surface) - tier 0's seed point is verified to keep a
-            minimum clearance from these via nearest-neighbor distance, so
-            it can't accidentally land inside/on the real (possibly
-            elongated/non-convex) BL block despite being outside its
-            bounding sphere
-        n_tiers: number of graded tiers to generate, ALWAYS exactly this
-            many regardless of how base_radius compares to domain_radius
-            (log-spaced, not geometric growth from base_radius - see the
-            implementation note below for why that matters)
-        seed: RNG seed for sampling candidate seed-point directions
-        max_sphere_radius: Optional hard cap on how far any actual sphere
-            surface may reach (e.g. the measured distance to the nearest
-            OTHER extruded surface, such as a ground plane, that a sphere
-            must not cross). When smaller than `domain_radius`, the
-            n_tiers spheres are confined to [start_r, max_sphere_radius],
-            and one additional sphere-less region is added covering
-            [max_sphere_radius, domain_radius] at `max_cell_size` - so the
-            true far-field (beyond the safe sphere zone) still gets capped,
-            it just isn't graded within that outer region.
+        points: PLC boundary points, shape=(n, 3) - only used for its
+            bounding-box volume
+        regions: (seed_point, region_id, maxvol) tuples, or None/empty for
+            an unconstrained (nobisect=True) fill
 
     Returns:
-        extra_points: (p, 3) new points (the sphere surfaces' own
-            vertices) - caller must append these to the shared PLC point
-            array and offset extra_faces' indices accordingly
-        extra_faces: (q, 3) int64, LOCAL indices into extra_points only
-        region_specs: list of (seed_point_xyz, region_id, maxvolume) for
-            tgen.add_region - includes the final (sphere-less) outer band
+        steinerleft, clamped to [300_000, 20_000_000] - or 100_000
+        (tetgen's own default) when no regions are active at all.
     """
-    from scipy.spatial import cKDTree
+    if not regions:
+        return 100_000
 
-    tree = cKDTree(blocked_points)
-    rng = np.random.default_rng(seed)
-
-    def find_band_seed(r_inner: float, r_outer: float, min_clearance: float) -> Optional[np.ndarray]:
-        r_mid = 0.5 * (r_inner + r_outer)
-        for _ in range(30):
-            direction = rng.normal(size=3)
-            direction /= np.linalg.norm(direction)
-            candidate = center + direction * r_mid
-            dist, _ = tree.query(candidate)
-            if dist >= min_clearance:
-                return candidate
-        return None
-
-    extra_point_rows: List[np.ndarray] = []
-    extra_face_rows: List[np.ndarray] = []
-    region_specs: List[Tuple[np.ndarray, int, float]] = []
-    point_offset = 0
-    region_id = 1
-
-    # Radii and cell-size caps are log-spaced over exactly n_tiers bands,
-    # from the BL surface out to the domain edge, REGARDLESS of how large
-    # base_radius happens to be relative to domain_radius. A naive
-    # "multiply by tier_growth until >= domain_radius" schedule (tried
-    # first) can jump straight past domain_radius on its very first step
-    # whenever the near-wall geometry itself already spans most of the
-    # domain (e.g. a ground plane covering nearly the whole footprint,
-    # common for a car underbody/ground pair) - collapsing to a single
-    # region governing the entire remaining volume. That's a real
-    # correctness problem, not just lost grading: tetgen's per-region
-    # refinement queue does not reliably reach a tight cap when one region
-    # spans that much of the domain from a single seed point (observed
-    # ~1000x overshoot vs. a spatially compact region's ~1.2x), so a
-    # requested cap can end up essentially unenforced. Always dividing
-    # into n_tiers keeps every individual region small enough to refine
-    # reliably.
-    sphere_limit = domain_radius if max_sphere_radius is None else min(max_sphere_radius, domain_radius)
-
-    start_r = base_radius * 1.15
-    if start_r <= 0.0 or start_r >= sphere_limit:
-        start_r = sphere_limit * 0.1
-    # The sphere_limit*0.1 fallback is a blind fraction, not a measured
-    # clearance - `center` itself can end up nowhere near the wall/body's
-    # own centroid when the near-wall surfaces span wildly different
-    # scales (e.g. a small isolated body's few hundred points averaged
-    # together with a domain-spanning ground plane's own corner points),
-    # so a sphere at that radius can slice straight through the real
-    # geometry it was supposed to stay clear of. Grounding it in the
-    # actual nearest measured distance from `center` to real near-wall
-    # geometry closes that gap.
-    min_dist_to_wall = float(tree.query(center)[0])
-    start_r = max(start_r, min_dist_to_wall * 1.2)
-    start_r = min(start_r, sphere_limit * 0.95)
-    radii = np.geomspace(max(start_r, sphere_limit * 1e-6), sphere_limit, n_tiers + 1)
-
-    # Cell-size caps are log-interpolated by RADIUS (not tier index) over
-    # the FULL [start_r, domain_radius] span, even though the spheres
-    # themselves stop at sphere_limit - so a tight sphere_limit (a nearby
-    # wall) doesn't also truncate the size grading itself; the final
-    # sphere-less region beyond sphere_limit still converges to exactly
-    # max_cell_size at the true domain edge.
-    start_size = min(near_wall_cell_size * 2.5, max_cell_size)
-
-    def size_at_radius(r: float) -> float:
-        if domain_radius <= start_r:
-            return max_cell_size
-        t = float(np.clip(
-            (np.log(max(r, 1e-12)) - np.log(start_r)) / (np.log(domain_radius) - np.log(start_r)),
-            0.0, 1.0,
-        ))
-        log_s0, log_s1 = np.log(max(start_size, 1e-12)), np.log(max_cell_size)
-        return float(np.exp(log_s0 + t * (log_s1 - log_s0)))
-
-    min_clearance = max(base_radius * 0.05, domain_radius * 0.01)
-    prev_r = 0.0
-    reaches_domain_edge = sphere_limit >= domain_radius
-
-    for tier in range(n_tiers):
-        inner_r = float(radii[tier + 1])
-        cell_size = size_at_radius(inner_r)
-
-        seed_r_inner = prev_r if tier > 0 else base_radius
-        seed_pt = find_band_seed(seed_r_inner, inner_r, min_clearance)
-        if seed_pt is not None:
-            maxvol = cell_size ** 3 * _VOLUME_SHAPE_FACTOR
-            region_specs.append((seed_pt, region_id, maxvol))
-            region_id += 1
-
-        if tier < n_tiers - 1 or not reaches_domain_edge:
-            # A sphere is needed here unless this tier's outer edge already
-            # IS the true domain edge (reaches_domain_edge and it's the
-            # last tier) - the real domain PLC bounds that case already.
-            sphere_pts, sphere_faces = _generate_icosphere(center, inner_r)
-            extra_point_rows.append(sphere_pts)
-            extra_face_rows.append(sphere_faces + point_offset)
-            point_offset += len(sphere_pts)
-
-        prev_r = inner_r
-
-    if not reaches_domain_edge:
-        # sphere_limit < domain_radius: there's real, uncovered domain
-        # volume beyond the safe sphere zone (e.g. the rest of the way to
-        # a far-off tunnel/inlet/outlet wall) - cap it too, just without
-        # any further grading inside it (no sphere can safely subdivide
-        # this band without risking the same wall-crossing this whole
-        # `max_sphere_radius` mechanism exists to avoid).
-        final_seed = find_band_seed(sphere_limit, domain_radius, min_clearance)
-        if final_seed is not None:
-            region_specs.append(
-                (final_seed, region_id, max_cell_size ** 3 * _VOLUME_SHAPE_FACTOR)
-            )
-            region_id += 1
-
-    extra_points = (
-        np.vstack(extra_point_rows) if extra_point_rows else np.empty((0, 3), dtype=np.float64)
-    )
-    extra_faces = (
-        np.vstack(extra_face_rows) if extra_face_rows else np.empty((0, 3), dtype=np.int64)
-    )
+    bbox_volume = float(np.prod(np.max(points, axis=0) - np.min(points, axis=0)))
+    coarsest_maxvol = max(maxvol for _, _, maxvol in regions)
+    estimated_tets = bbox_volume / max(coarsest_maxvol, 1e-30)
+    n_extra_regions = len(regions) - 1
+    extra_tets = n_extra_regions * 200_000
 
     logger.info(
-        f"Graded core sizing: {len(region_specs)} region tier(s), "
-        f"sphere radii {radii[0]:.3f} -> {radii[-1]:.3f} m"
-        + (f" (+1 flat-capped band to {domain_radius:.3f} m)" if not reaches_domain_edge else "")
-        + f", cell size {near_wall_cell_size:.4f} -> {max_cell_size:.4f} m"
+        f"Steiner-point budget estimate: ~{estimated_tets:,.0f} domain-wide target-sized tets"
+        + (f" + {n_extra_regions} local repair region(s) x 200,000" if n_extra_regions else "")
     )
-
-    return extra_points, extra_faces, region_specs
+    return int(np.clip((estimated_tets + extra_tets) * 3.0, 300_000, 20_000_000))
 
 
 def fill_core_volume(
@@ -745,6 +610,7 @@ def fill_core_volume(
     holes: Optional[List[np.ndarray]] = None,
     regions: Optional[List[Tuple[np.ndarray, int, float]]] = None,
     face_markers: Optional[np.ndarray] = None,
+    verbose: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
     """Constrained-tetrahedralize the volume enclosed by a closed PLC.
 
@@ -761,9 +627,9 @@ def fill_core_volume(
             it fills the fluid region around it AND that solid's own
             (BL-extruded) interior, producing spurious tetrahedra that
             overlap the BL prisms already occupying that cavity.
-        regions: (seed_point, region_id, maxvolume) tuples from
-            build_graded_regions, for capping max cell size per graded
-            tier. Note: tetgen's own background-mesh sizing (`bgmesh`/
+        regions: (seed_point, region_id, maxvolume) tuples (built by the
+            caller, mesh_background.py) for capping max cell size per
+            graded tier. Note: tetgen's own background-mesh sizing (`bgmesh`/
             `metric`, tetgen 0.8.4) is not used here - it segfaults
             unconditionally in this environment and package version
             regardless of settings (reproducible on a trivial cube,
@@ -790,6 +656,19 @@ def fill_core_volume(
             it uses tetgen's own facet markers instead, which are inherited
             by every sub-facet a marked facet gets split into and are
             returned via this function's 3rd/4th outputs.
+        verbose: log this call's own routine per-call progress (boundary
+            point/face counts, Steiner budget, completion) at INFO level
+            (default, matching prior behavior exactly). False drops those
+            same lines entirely (not merely demoted to DEBUG - this
+            project's default loguru sink shows DEBUG and above, so a
+            demotion alone would not actually reduce visible output) - for
+            a caller that makes many small calls in a loop
+            (mesh_repair.remesh_core_cavity, one call per repaired cavity)
+            where each individual call's own progress isn't interesting on
+            its own, only the caller's own summary is. Warnings (non-
+            conformal boundary, self-intersection) always stay at their
+            normal level regardless of this flag - they indicate something
+            a caller needs to see, not routine progress.
 
     Returns:
         (nodes, tets, trifaces, triface_markers): nodes shape=(n, 3)
@@ -806,8 +685,9 @@ def fill_core_volume(
     points = np.ascontiguousarray(points, dtype=np.float64)
     faces = np.ascontiguousarray(faces, dtype=np.int32)
     nobisect = not bool(regions)
+    log = logger.info if verbose else (lambda *_a, **_k: None)
 
-    logger.info(
+    log(
         f"Tetrahedralizing core volume: {len(points)} boundary points, "
         f"{len(faces)} boundary faces (tetgen, nobisect={nobisect})..."
     )
@@ -819,47 +699,14 @@ def fill_core_volume(
     if holes:
         for hole_pt in holes:
             tgen.add_hole(hole_pt)
-        logger.info(f"Marked {len(holes)} tetgen hole seed(s) for isolated embedded solids")
+        log(f"Marked {len(holes)} tetgen hole seed(s) for isolated embedded solids")
     if regions:
         for seed_pt, region_id, maxvol in regions:
             tgen.add_region(region_id, seed_pt, maxvol)
-        logger.info(f"Marked {len(regions)} graded max-cell-size region(s)")
+        log(f"Marked {len(regions)} graded max-cell-size region(s)")
 
-    # tetgen's default steinerleft=100000 is a global cap on how many
-    # Steiner points it will ever insert, shared across the WHOLE mesh -
-    # with a region's own maxvolume target well below the PLC's natural
-    # (unconstrained) tet size, it can run out long before that target is
-    # reached everywhere, silently leaving a long tail of oversized cells
-    # in whatever pockets happened to refine last (measured directly: a
-    # 5.5x3x3 m domain capped at 0.05 m with the previous fixed 300,000
-    # budget left 6-10% of cells over 1.5x the target and a worst-case
-    # cell ~5-6x over; the true fix is scaling the budget to the actual
-    # problem size, not a fixed constant that only happens to be enough
-    # for some domain/max_cell_size ratios).
-    #
-    # Estimate the number of target-sized tets the requested region(s)
-    # imply from the PLC's own bounding-box volume (an upper bound on the
-    # true fillable volume, so this errs toward *more* budget, never
-    # less) divided by the smallest requested maxvol, then apply a
-    # generous safety multiplier - empirically, tetgen's actual converged
-    # tet count for a single flat max-cell-size region over a whole core
-    # runs ~2-2.5x this naive packing estimate. Confirmed empirically that
-    # tetgen stops on its own once its internal quality/size criteria are
-    # satisfied well before exhausting a generous budget (identical tet
-    # count and runtime whether the budget was 1e6, 2e6, or 8e6 for the
-    # measured case above) - so a high ceiling costs nothing when it isn't
-    # needed, it only matters for the cases that actually need the room.
-    if regions:
-        bbox_volume = float(np.prod(np.max(points, axis=0) - np.min(points, axis=0)))
-        min_maxvol = min(maxvol for _, _, maxvol in regions)
-        estimated_tets = bbox_volume / max(min_maxvol, 1e-30)
-        steinerleft = int(np.clip(estimated_tets * 3.0, 300_000, 20_000_000))
-        logger.info(
-            f"Steiner-point budget: {steinerleft:,} (estimated ~{estimated_tets:,.0f} "
-            f"target-sized tets needed, x3 safety margin)"
-        )
-    else:
-        steinerleft = 100_000
+    steinerleft = estimate_steinerleft(points, regions)
+    log(f"Steiner-point budget: {steinerleft:,}")
 
     try:
         nodes, elems, _attr, _markers = tgen.tetrahedralize(
@@ -879,7 +726,32 @@ def fill_core_volume(
                 f"thickness must stay well under the tightest local gap in "
                 f"the geometry."
             ) from e
+        if "removevertexbyflips" in str(e).lower() or "internal tetgen error" in str(e).lower():
+            # Observed on a real case when Stage B's reactive BL thickness
+            # cap (mesh_repair.compute_bl_thickness_limit_override) needs to
+            # cap a very large fraction of surface vertices - itself already
+            # a symptom of Stage A leaving widespread, not localized, bad
+            # cells - producing a boundary facet with enough near-coincident
+            # points to exceed tetgen's own numerical robustness limits
+            # internally (a tetgen implementation limitation, not a
+            # meshing-strategy error on this codebase's side) rather than
+            # failing with a clearer diagnostic like the self-intersection
+            # case above.
+            raise RuntimeError(
+                f"{e}. tetgen hit an internal robustness limit - on a case "
+                f"seen directly, this followed a very widespread Stage B "
+                f"BL-thickness cap (a sign Stage A already found bad cells "
+                f"across much of the surface, not just a few corners). Try "
+                f"loosening --growth-rate/--min-cell-size/--max-layers so "
+                f"Stage A has fewer bad cells to begin with."
+            ) from e
         raise
+
+    trifaces = None
+    triface_markers = None
+    if face_markers is not None:
+        trifaces = tgen.trifaces.astype(np.int64)
+        triface_markers = tgen.triface_markers.astype(np.int32)
 
     n_input = len(points)
     conformal = nodes.shape[0] >= n_input and np.array_equal(nodes[:n_input], points)
@@ -890,14 +762,18 @@ def fill_core_volume(
             "(likely near-duplicate/degenerate input facets); "
             "falling back to coincident-point stitching"
         )
-        nodes, elems = _dedupe_coincident_points(nodes, elems)
+        nodes, elems, remap = _dedupe_coincident_points(nodes, elems)
+        if trifaces is not None:
+            # trifaces was read from tgen.trifaces in the PRE-dedupe index
+            # space (same node array `nodes` was in before the line above).
+            # Left unremapped, it desynced from the now-renumbered
+            # nodes/elems - mesh_background.attribute_cells_from_trifaces
+            # matches trifaces against core_tets by sorted-node-triple, so
+            # a stale index space made that matching silently miss or
+            # misattribute boundary cells whenever this fallback and
+            # face_markers (i.e. max_cell_size) were both active.
+            trifaces = remap[trifaces]
 
-    logger.info(f"Core tetrahedralization complete: {len(nodes)} nodes, {len(elems)} tets")
-
-    trifaces = None
-    triface_markers = None
-    if face_markers is not None:
-        trifaces = tgen.trifaces.astype(np.int64)
-        triface_markers = tgen.triface_markers.astype(np.int32)
+    log(f"Core tetrahedralization complete: {len(nodes)} nodes, {len(elems)} tets")
 
     return nodes.astype(np.float64), elems.astype(np.int64), trifaces, triface_markers

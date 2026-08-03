@@ -5,193 +5,188 @@ including volume checks, aspect ratio analysis, skewness evaluation, and
 orthogonality assessment.
 
 Key Metrics:
-    - Volume quality (negative volumes, extreme ratios)
-    - Aspect ratio (cell shape quality)
-    - Skewness (deviation from ideal shape)
-    - Orthogonality (face normal alignment)
-    - Smoothness (gradual size transitions)
+    - Volume quality (negative volumes)
+    - Adjacent-cell volume ratio (Green-Gauss gradient conditioning)
+    - Aspect ratio (cell shape quality, BL-region vs core-region thresholds)
+    - Skewness (radius-ratio shape measure)
+    - Orthogonality (face normal vs. cell-centroid-connector angle)
+
+Metric choices are calibrated for this project's specific solver, not
+generic defaults - see the module-level comparison this was derived from:
+    - Gradient reconstruction is Green-Gauss (core/fvm_gradients.py),
+      grad ~ (face-value sum) / V_cell - a cell whose volume is orders of
+      magnitude below its neighbours gets its gradient amplified by that
+      same factor, regardless of local pseudo-time-step size (local
+      time-stepping protects *stability* at that cell, not the *accuracy*
+      of quantities it hands to neighbours). This is why adjacent-cell
+      volume ratio and non-orthogonality (both of which directly govern
+      Green-Gauss conditioning) are checked here, not just a global
+      min/max volume ratio - a BL mesh's global range from near-wall to
+      far-field legitimately spans many orders of magnitude and is not by
+      itself a defect.
+    - Mesh is tetrahedra-only (no hex/prism), generated as BL-extruded
+      prisms-split-to-tets near walls plus a tetgen core fill elsewhere -
+      aspect ratio is checked separately for each region since BL cells
+      are expected to be far more stretched than core cells.
 
 References:
     - Knupp, P. "Advances in grid quality metrics", 2000
     - Field, D.A. "Qualitative measures for initial mesh generation", 1988
+    - Verdict Geometric Quality Library (Sandia) - TetRadiusRatio metric
 """
 
 import numpy as np
-from typing import Dict, List, Tuple, Optional
-from dataclasses import dataclass, field
+from typing import Dict, List, Tuple, Optional, TYPE_CHECKING
 from loguru import logger
 
+from .quality_report import MeshQualityReport
+from . import quality_metrics as _qm
 
-@dataclass
-class MeshQualityReport:
-    """Comprehensive mesh quality report.
-    
-    Attributes:
-        n_cells: Total number of cells
-        n_nodes: Total number of nodes
-        passed: Overall quality check result
-        negative_volumes: Count of cells with negative volume
-        min_volume: Minimum cell volume
-        max_volume: Maximum cell volume
-        mean_volume: Mean cell volume
-        std_volume: Standard deviation of volumes
-        volume_ratio: Max/Min volume ratio
-        min_aspect_ratio: Minimum aspect ratio
-        max_aspect_ratio: Maximum aspect ratio
-        mean_aspect_ratio: Mean aspect ratio
-        max_skewness: Maximum skewness value
-        mean_skewness: Mean skewness
-        orthogonality_min: Minimum orthogonality angle
-        warnings: List of quality warnings
-        recommendations: List of improvement recommendations
-    """
-    n_cells: int = 0
-    n_nodes: int = 0
-    passed: bool = True
-    
-    # Volume metrics
-    negative_volumes: int = 0
-    min_volume: float = float('inf')
-    max_volume: float = 0.0
-    mean_volume: float = 0.0
-    std_volume: float = 0.0
-    volume_ratio: float = 0.0
-    
-    # Aspect ratio metrics
-    min_aspect_ratio: float = float('inf')
-    max_aspect_ratio: float = 0.0
-    mean_aspect_ratio: float = 0.0
-    
-    # Skewness metrics
-    max_skewness: float = 0.0
-    mean_skewness: float = 0.0
-    
-    # Orthogonality metrics
-    orthogonality_min: float = 180.0
-    
-    # Qualitative feedback
-    warnings: List[str] = field(default_factory=list)
-    recommendations: List[str] = field(default_factory=list)
-    
-    def summary(self) -> str:
-        """Generate human-readable quality summary."""
-        lines = [
-            "=" * 70,
-            "MESH QUALITY REPORT",
-            "=" * 70,
-            f"Overall Status: {'PASSED ✓' if self.passed else 'FAILED ✗'}",
-            "",
-            f"Grid Size:",
-            f"  Cells: {self.n_cells:,}",
-            f"  Nodes: {self.n_nodes:,}",
-            "",
-            f"Volume Quality:",
-            f"  Negative volumes: {self.negative_volumes}",
-            f"  Volume range: [{self.min_volume:.6e}, {self.max_volume:.6e}]",
-            f"  Mean ± Std: {self.mean_volume:.6e} ± {self.std_volume:.6e}",
-            f"  Max/Min ratio: {self.volume_ratio:.2f}",
-            "",
-            f"Aspect Ratio:",
-            f"  Range: [{self.min_aspect_ratio:.3f}, {self.max_aspect_ratio:.3f}]",
-            f"  Mean: {self.mean_aspect_ratio:.3f}",
-            "",
-            f"Skewness:",
-            f"  Max: {self.max_skewness:.4f}",
-            f"  Mean: {self.mean_skewness:.4f}",
-            "",
-            f"Orthogonality:",
-            f"  Min angle: {self.orthogonality_min:.2f}°",
-        ]
-        
-        if self.warnings:
-            lines.append("")
-            lines.append("Warnings:")
-            for i, warning in enumerate(self.warnings, 1):
-                lines.append(f"  {i}. {warning}")
-        
-        if self.recommendations:
-            lines.append("")
-            lines.append("Recommendations:")
-            for i, rec in enumerate(self.recommendations, 1):
-                lines.append(f"  {i}. {rec}")
-        
-        lines.append("=" * 70)
-        
-        return "\n".join(lines)
+if TYPE_CHECKING:
+    from ..structures import FaceData, VolumeMeshData
 
 
 class MeshQualityValidator:
     """Validate mesh quality for CFD simulations.
-    
+
     Computes various quality metrics to ensure the mesh is suitable for
     accurate and stable CFD simulations.
-    
+
     Attributes:
         thresholds: Quality metric thresholds for pass/fail criteria
     """
-    
+
     def __init__(self):
         """Initialize validator with default quality thresholds."""
         self.thresholds = {
-            'max_negative_volumes': 0,  # No negative volumes allowed
-            'max_volume_ratio': 1e6,    # Max/min volume ratio
-            'min_aspect_ratio': 0.1,    # Minimum acceptable aspect ratio
-            'max_aspect_ratio': 100.0,  # Maximum acceptable aspect ratio
-            'max_skewness': 0.95,       # Maximum skewness (0-1 scale)
-            'min_orthogonality': 10.0,  # Minimum orthogonality angle (degrees)
+            'max_negative_volumes': 0,       # No negative volumes allowed
+            'max_volume_ratio': 1e6,         # Global range - informational only, see MeshQualityReport docstring
+            'min_aspect_ratio': 0.1,
+            'max_aspect_ratio': 100.0,       # fallback when no BL/core split is available
+            'bl_max_aspect_ratio': 50.0,     # BL cells: expected to be stretched
+            'core_max_aspect_ratio': 10.0,   # core-fill cells: should be close to isotropic
+            'max_skewness': 0.95,            # radius-ratio based (Fluent-equivalent severity)
+            'max_orthogonality_angle': 70.0, # degrees; OpenFOAM-aligned (Green-Gauss is more
+                                              # sensitive to non-orthogonality than surface-normal-
+                                              # correction schemes, so this is deliberately tighter
+                                              # than Fluent's permissive orthogonal-quality floor)
+            'max_adjacent_volume_ratio': 5.0,  # STAR-CCM+-aligned "Volume Change" guidance;
+                                                # this is what actually governs Green-Gauss's 1/V
+                                                # gradient-amplification conditioning
+            'max_overlapping_cells': 0,        # any physically-overlapping cell pair fails -
+                                                # see mesh_overlap_check.py; "close but not yet
+                                                # overlapping" is informational only, doesn't gate
         }
-        
+
         logger.info("MeshQualityValidator initialized with default thresholds")
-    
+
     def validate(
         self,
         nodes: np.ndarray,
         cells: np.ndarray,
-        cell_type: str = "tetrahedron"
+        cell_type: str = "tetrahedron",
+        faces: Optional['FaceData'] = None,
+        bl_cell_mask: Optional[np.ndarray] = None,
+        log_summary: bool = True,
+        check_overlap: bool = True,
     ) -> MeshQualityReport:
         """Perform comprehensive mesh quality validation.
-        
+
         Args:
             nodes: Node coordinates, shape=(n_nodes, 3)
             cells: Cell connectivity, shape=(n_cells, n_vertices)
             cell_type: Type of cells ('tetrahedron' or 'triangle')
-            
+            faces: Optional precomputed FaceData (owner/neighbour
+                connectivity + normals). Orthogonality, adjacent-volume-
+                ratio, and overlap/proximity checks need face connectivity;
+                if not supplied it is derived internally via
+                FaceExtractor.extract_faces (a real but non-trivial cost
+                for large meshes - callers that already have this, e.g.
+                the mesh generation/repair pipeline, should pass it through
+                to avoid redundant work). Ignored for cell_type='triangle'.
+            bl_cell_mask: Optional bool array, shape=(n_cells,), True for
+                BL-region cells - enables the separate BL-region/core-
+                region aspect ratio breakdown. None falls back to a single
+                whole-mesh aspect ratio check (previous behaviour).
+            log_summary: Log the full formatted report via logger.info.
+                False for callers that will print a more complete version
+                of this same report themselves right after (e.g. one with
+                a before/after comparison attached) - avoids the same
+                report text appearing twice in a row.
+            check_overlap: Run the cell overlap/proximity check (see
+                mesh_overlap_check.py). Unlike every other check here, its
+                cost scales with local mesh density (broad-phase spatial
+                search + exact geometric tests on survivors), not purely
+                cell count - opt-out (not silently skipped) for a caller
+                that needs the fastest possible turnaround and is willing
+                to accept an overlap going undetected until the next full
+                validate() call.
+
         Returns:
             MeshQualityReport with all quality metrics
         """
         logger.info(f"Validating mesh quality: {len(cells)} {cell_type}s...")
-        
+
         report = MeshQualityReport(
             n_cells=len(cells),
             n_nodes=len(nodes)
         )
-        
+
         # Compute all quality metrics
         self._check_volumes(report, nodes, cells, cell_type)
-        self._check_aspect_ratios(report, nodes, cells, cell_type)
+        self._check_aspect_ratios(report, nodes, cells, cell_type, bl_cell_mask)
         self._check_skewness(report, nodes, cells, cell_type)
-        self._check_orthogonality(report, nodes, cells)
-        
+        if cell_type == "tetrahedron":
+            # Extracted (at most) once and shared with both checks below -
+            # _check_orthogonality_and_adjacency and _check_overlap_and_proximity
+            # would otherwise each independently call self._extract_faces
+            # when the caller didn't pre-supply `faces`, paying for a full
+            # face extraction over the WHOLE mesh twice in a row for no
+            # reason (confirmed directly: "Extracting faces from N
+            # tetrahedral cells..." logged twice back-to-back in one
+            # validate() call on a real 1.5M-cell mesh, since neither
+            # sub-check's own internally-extracted FaceData was cached back
+            # here for the other to reuse).
+            if faces is None:
+                faces = self._extract_faces(nodes, cells)
+            self._check_orthogonality_and_adjacency(report, nodes, cells, faces)
+            if check_overlap:
+                self._check_overlap_and_proximity(report, nodes, cells, faces)
+
         # Evaluate pass/fail criteria
         self._evaluate_quality(report)
-        
+
         # Generate recommendations
         self._generate_recommendations(report)
-        
+
         # Log summary
-        logger.info(f"\n{report.summary()}")
-        
+        if log_summary:
+            logger.info(f"\n{report.summary()}")
+
         return report
-    
-    def validate_volume_mesh(self, volume_mesh: 'VolumeMeshData') -> MeshQualityReport:
+
+    def validate_volume_mesh(
+        self,
+        volume_mesh: 'VolumeMeshData',
+        faces: Optional['FaceData'] = None,
+        bl_cell_mask: Optional[np.ndarray] = None,
+        check_overlap: bool = True,
+    ) -> MeshQualityReport:
         """Validate VolumeMeshData object (convenience method).
-        
+
         Args:
             volume_mesh: VolumeMeshData with tetrahedral cells
-            
+            faces: Optional precomputed FaceData - if not supplied and
+                volume_mesh.faces is already populated (ensure_faces_exist
+                was called), that gets reused instead of re-extracting.
+            bl_cell_mask: Optional BL/core region split, see validate()
+            check_overlap: see validate()
+
         Returns:
             MeshQualityReport with all quality metrics
         """
+        if faces is None:
+            faces = volume_mesh.faces
         return self.validate(
             nodes=np.column_stack([
                 volume_mesh.nodes.x,
@@ -199,9 +194,28 @@ class MeshQualityValidator:
                 volume_mesh.nodes.z
             ]),
             cells=volume_mesh.cells.connectivity,
-            cell_type="tetrahedron"
+            cell_type="tetrahedron",
+            faces=faces,
+            bl_cell_mask=bl_cell_mask,
+            check_overlap=check_overlap,
         )
-    
+
+    @staticmethod
+    def _extract_faces(nodes: np.ndarray, cells: np.ndarray) -> 'FaceData':
+        """Derive face connectivity when the caller didn't already have it.
+        Lazy-imported (mesh_gen -> validation is a one-way dependency
+        elsewhere in this package; importing the other direction here only
+        at call time avoids ever needing to reason about import order)."""
+        from ..mesh_gen.face_extractor import FaceExtractor
+        from ..schema.grid_nodes import NodeArray
+
+        node_arr = NodeArray(
+            x=np.ascontiguousarray(nodes[:, 0]),
+            y=np.ascontiguousarray(nodes[:, 1]),
+            z=np.ascontiguousarray(nodes[:, 2]),
+        )
+        return FaceExtractor.extract_faces(cells.astype(np.int32), node_arr)
+
     def _check_volumes(
         self,
         report: MeshQualityReport,
@@ -222,9 +236,9 @@ class MeshQualityValidator:
             cell_type: Type of cells
         """
         if cell_type == "tetrahedron":
-            volumes_array = self._compute_tetrahedron_volumes(nodes, cells)
+            volumes_array = _qm.compute_tetrahedron_volumes(nodes, cells)
         elif cell_type == "triangle":
-            volumes_array = self._compute_triangle_areas(nodes, cells)
+            volumes_array = _qm.compute_triangle_areas(nodes, cells)
         else:
             raise ValueError(f"Unsupported cell type: {cell_type}")
 
@@ -249,56 +263,31 @@ class MeshQualityValidator:
                 report.std_volume = float(np.std(positive_volumes))
                 report.volume_ratio = report.max_volume / max(report.min_volume, 1e-12)
 
-    @staticmethod
-    def _compute_tetrahedron_volumes(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
-        """Signed volume of every tetrahedron: det(p1-p0, p2-p0, p3-p0) / 6.
+    def _compute_tetrahedron_volumes(self, nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
+        """Thin instance-method wrapper over quality_metrics.compute_tetrahedron_volumes
+        - kept for external callers (mesh_gen/mesh_repair.py's Stage A) that
+        reach into this validator instance directly rather than importing
+        the metric function themselves."""
+        return _qm.compute_tetrahedron_volumes(nodes, cells)
 
-        Note: kept signed (not absolute) so a negative-volume/inverted-cell
-        check upstream is meaningful; magnitude statistics below use the
-        positive subset regardless.
-        """
-        p0 = nodes[cells[:, 0]]
-        p1 = nodes[cells[:, 1]]
-        p2 = nodes[cells[:, 2]]
-        p3 = nodes[cells[:, 3]]
-
-        v1 = p1 - p0
-        v2 = p2 - p0
-        v3 = p3 - p0
-
-        return np.einsum('ij,ij->i', v1, np.cross(v2, v3)) / 6.0
-
-    @staticmethod
-    def _compute_triangle_areas(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
-        """Area of every triangle: 0.5 * |cross(p1-p0, p2-p0)|."""
-        p0 = nodes[cells[:, 0]]
-        p1 = nodes[cells[:, 1]]
-        p2 = nodes[cells[:, 2]]
-
-        cross = np.cross(p1 - p0, p2 - p0)
-        return 0.5 * np.linalg.norm(cross, axis=1)
-    
     def _check_aspect_ratios(
         self,
         report: MeshQualityReport,
         nodes: np.ndarray,
         cells: np.ndarray,
-        cell_type: str
+        cell_type: str,
+        bl_cell_mask: Optional[np.ndarray] = None,
     ) -> None:
-        """Check cell aspect ratios (vectorized).
+        """Check cell aspect ratios (vectorized), optionally split by
+        BL-region vs. core-region (see MeshQualityReport docstring for why
+        these need separate thresholds).
 
         Aspect ratio = longest edge / shortest edge, for every cell at once.
-
-        Args:
-            report: Quality report to update
-            nodes: Node coordinates
-            cells: Cell connectivity
-            cell_type: Type of cells
         """
         if cell_type == "triangle":
-            ar_array = self._compute_triangle_aspect_ratios(nodes, cells)
+            ar_array = _qm.compute_triangle_aspect_ratios(nodes, cells)
         elif cell_type == "tetrahedron":
-            ar_array = self._compute_tetrahedron_aspect_ratios(nodes, cells)
+            ar_array = _qm.compute_tetrahedron_aspect_ratios(nodes, cells)
         else:
             return
 
@@ -307,34 +296,16 @@ class MeshQualityValidator:
             report.max_aspect_ratio = float(np.max(ar_array))
             report.mean_aspect_ratio = float(np.mean(ar_array))
 
-    @staticmethod
-    def _triangle_edge_lengths(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
-        """Edge lengths for every triangle, shape=(n_cells, 3)."""
-        p0, p1, p2 = nodes[cells[:, 0]], nodes[cells[:, 1]], nodes[cells[:, 2]]
-        e1 = np.linalg.norm(p1 - p0, axis=1)
-        e2 = np.linalg.norm(p2 - p1, axis=1)
-        e3 = np.linalg.norm(p0 - p2, axis=1)
-        return np.stack([e1, e2, e3], axis=1)
-
-    @staticmethod
-    def _tetrahedron_edge_lengths(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
-        """All 6 edge lengths for every tetrahedron, shape=(n_cells, 6)."""
-        pts = nodes[cells]  # (n_cells, 4, 3)
-        edges = []
-        for i in range(4):
-            for j in range(i + 1, 4):
-                edges.append(np.linalg.norm(pts[:, i] - pts[:, j], axis=1))
-        return np.stack(edges, axis=1)
-
-    def _compute_triangle_aspect_ratios(self, nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
-        """AR = longest_edge / shortest_edge for every triangle (1.0 = equilateral)."""
-        edges = self._triangle_edge_lengths(nodes, cells)
-        return np.max(edges, axis=1) / (np.min(edges, axis=1) + 1e-12)
-
-    def _compute_tetrahedron_aspect_ratios(self, nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
-        """AR = longest_edge / shortest_edge across all 6 edges of every tet."""
-        edges = self._tetrahedron_edge_lengths(nodes, cells)
-        return np.max(edges, axis=1) / (np.min(edges, axis=1) + 1e-12)
+        if bl_cell_mask is not None and len(bl_cell_mask) == len(ar_array):
+            bl_cell_mask = np.asarray(bl_cell_mask, dtype=bool)
+            bl_ar = ar_array[bl_cell_mask]
+            core_ar = ar_array[~bl_cell_mask]
+            if len(bl_ar) > 0:
+                report.bl_max_aspect_ratio = float(np.max(bl_ar))
+                report.bl_mean_aspect_ratio = float(np.mean(bl_ar))
+            if len(core_ar) > 0:
+                report.core_max_aspect_ratio = float(np.max(core_ar))
+                report.core_mean_aspect_ratio = float(np.mean(core_ar))
 
     def _check_skewness(
         self,
@@ -345,19 +316,14 @@ class MeshQualityValidator:
     ) -> None:
         """Check cell skewness (vectorized).
 
-        Skewness measures deviation from ideal shape.
-        For triangles: based on angles deviation from 60°
-
-        Args:
-            report: Quality report to update
-            nodes: Node coordinates
-            cells: Cell connectivity
-            cell_type: Type of cells
+        Triangles: based on angle deviation from 60 deg.
+        Tetrahedra: radius-ratio shape measure (see
+        _compute_tetrahedron_skewness_values).
         """
         if cell_type == "triangle":
-            sk_array = self._compute_triangle_skewness_values(nodes, cells)
+            sk_array = _qm.compute_triangle_skewness_values(nodes, cells)
         elif cell_type == "tetrahedron":
-            sk_array = self._compute_tetrahedron_skewness_values(nodes, cells)
+            sk_array = _qm.compute_tetrahedron_skewness_values(nodes, cells)
         else:
             return
 
@@ -365,70 +331,101 @@ class MeshQualityValidator:
             report.max_skewness = float(np.max(sk_array))
             report.mean_skewness = float(np.mean(sk_array))
 
-    def _compute_triangle_skewness_values(self, nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
-        """Skewness for every triangle: max(|angle - 60°|) / 60°, in [0, 1].
+    def compute_cell_skewness(self, nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
+        """Public per-cell radius-ratio skewness array, shape=(n_cells,) -
+        the raw values behind max_skewness/mean_skewness, for callers (e.g.
+        the mesh repair loop in mesh_gen/mesh_repair.py) that need to know
+        *which* cells are bad, not just aggregate statistics."""
+        return _qm.compute_tetrahedron_skewness_values(nodes, cells)
 
-        Based on angle deviation from equilateral (60° each), via the law of
-        cosines on each triangle's 3 edge lengths.
+    def compute_face_diagnostics(
+        self,
+        nodes: np.ndarray,
+        cells: np.ndarray,
+        faces: Optional['FaceData'] = None,
+    ) -> Dict[str, np.ndarray]:
+        """Public per-internal-face diagnostics - the raw arrays behind
+        orthogonality_max/adjacent_volume_ratio_max, for callers that need
+        to know which faces/cells are implicated, not just aggregates.
+
+        Returns a dict with, for every internal face:
+            'owner', 'neighbor': cell indices (n_internal_faces,)
+            'angle_deg': non-orthogonality angle, degrees (0=ideal)
+            'volume_ratio': max(V)/min(V) between the two cells
         """
-        p0, p1, p2 = nodes[cells[:, 0]], nodes[cells[:, 1]], nodes[cells[:, 2]]
-        a = np.linalg.norm(p1 - p2, axis=1)
-        b = np.linalg.norm(p0 - p2, axis=1)
-        c = np.linalg.norm(p0 - p1, axis=1)
+        if faces is None:
+            faces = self._extract_faces(nodes, cells)
 
-        degenerate = (a < 1e-12) | (b < 1e-12) | (c < 1e-12)
-        # Guard the law-of-cosines division for degenerate triangles; their
-        # skewness is overridden to the worst value (1.0) below regardless.
-        safe_b = np.where(degenerate, 1.0, b)
-        safe_c = np.where(degenerate, 1.0, c)
-        safe_a = np.where(degenerate, 1.0, a)
+        conn = faces.connectivity  # (n_faces, 2): [owner, neighbour], neighbour=-1 for boundary
+        internal_mask = conn[:, 1] >= 0
+        if not np.any(internal_mask):
+            empty = np.array([], dtype=np.int64)
+            return {'owner': empty, 'neighbor': empty, 'angle_deg': np.array([]), 'volume_ratio': np.array([])}
 
-        cos0 = np.clip((safe_b**2 + safe_c**2 - safe_a**2) / (2 * safe_b * safe_c), -1.0, 1.0)
-        cos1 = np.clip((safe_a**2 + safe_c**2 - safe_b**2) / (2 * safe_a * safe_c), -1.0, 1.0)
-        angle_0 = np.arccos(cos0)
-        angle_1 = np.arccos(cos1)
-        angle_2 = np.pi - angle_0 - angle_1
+        owner = conn[internal_mask, 0]
+        neigh = conn[internal_mask, 1]
+        normal = faces.normal[internal_mask]
 
-        angles_deg = np.degrees(np.stack([angle_0, angle_1, angle_2], axis=1))
-        max_dev = np.max(np.abs(angles_deg - 60.0), axis=1)
-        skewness = np.minimum(max_dev / 60.0, 1.0)
-        skewness[degenerate] = 1.0
+        centroids = nodes[cells].mean(axis=1)
+        d = centroids[neigh] - centroids[owner]
+        d_norm = np.maximum(np.linalg.norm(d, axis=1), 1e-300)
+        cos_angle = np.einsum('ij,ij->i', d, normal) / d_norm
+        angle_deg = np.degrees(np.arccos(np.clip(np.abs(cos_angle), 0.0, 1.0)))
 
-        return skewness
+        volumes = np.abs(_qm.compute_tetrahedron_volumes(nodes, cells))
+        v_owner = volumes[owner]
+        v_neigh = volumes[neigh]
+        vmax = np.maximum(v_owner, v_neigh)
+        vmin = np.maximum(np.minimum(v_owner, v_neigh), 1e-300)
+        ratio = vmax / vmin
 
-    def _compute_tetrahedron_skewness_values(self, nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
-        """Skewness for every tetrahedron (simplified: aspect-ratio proxy).
+        return {'owner': owner, 'neighbor': neigh, 'angle_deg': angle_deg, 'volume_ratio': ratio}
 
-        AR=1 -> skewness=0, AR>=10 -> skewness=1.
-        """
-        ar = self._compute_tetrahedron_aspect_ratios(nodes, cells)
-        skewness = np.minimum((ar - 1.0) / 9.0, 1.0)
-        return np.maximum(skewness, 0.0)
-    
-    def _check_orthogonality(
+    def _check_orthogonality_and_adjacency(
         self,
         report: MeshQualityReport,
         nodes: np.ndarray,
-        cells: np.ndarray
+        cells: np.ndarray,
+        faces: Optional['FaceData'],
     ) -> None:
-        """Check face orthogonality.
-        
-        Measures angle between face normal and vector connecting cell centers.
-        Perfect orthogonality = 90°.
-        
-        Args:
-            report: Quality report to update
-            nodes: Node coordinates
-            cells: Cell connectivity
+        """Check face non-orthogonality and adjacent-cell (face-neighbour)
+        volume ratio - the two metrics that directly govern Green-Gauss
+        gradient conditioning for this project's solver (see module
+        docstring). Both need face owner/neighbour connectivity, so they
+        share a single face-extraction pass (compute_face_diagnostics).
         """
-        # This requires connectivity information (which faces belong to which cells)
-        # For now, skip this check
-        # TODO: Implement when face-to-cell connectivity is available
-        pass
-    
+        diag = self.compute_face_diagnostics(nodes, cells, faces)
+        if len(diag['angle_deg']) == 0:
+            return
+
+        report.orthogonality_max = float(np.max(diag['angle_deg']))
+        report.orthogonality_mean = float(np.mean(diag['angle_deg']))
+        report.adjacent_volume_ratio_max = float(np.max(diag['volume_ratio']))
+        report.adjacent_volume_ratio_mean = float(np.mean(diag['volume_ratio']))
+
+    def _check_overlap_and_proximity(
+        self,
+        report: MeshQualityReport,
+        nodes: np.ndarray,
+        cells: np.ndarray,
+        faces: Optional['FaceData'],
+    ) -> None:
+        """Detect cells whose faces physically overlap a different, non-
+        adjacent cell's faces, or sit close enough to be one parameter
+        change away from it - see mesh_overlap_check.py for the exact
+        geometric tests and why this is a distinct defect class from
+        negative/degenerate volume."""
+        from .mesh_overlap_check import check_face_overlap_and_proximity
+
+        overlap_report = check_face_overlap_and_proximity(nodes, cells, faces=faces)
+        report.n_overlapping_cells = len(overlap_report.overlapping_cell_ids)
+        report.n_close_cell_pairs = overlap_report.n_close_pairs
+        report.overlap_min_gap = overlap_report.min_gap_found
+        report.overlapping_cell_ids = overlap_report.overlapping_cell_ids
+
     def _evaluate_quality(self, report: MeshQualityReport) -> None:
         """Evaluate overall quality based on thresholds.
-        
+
         Args:
             report: Quality report to evaluate
         """
@@ -438,29 +435,73 @@ class MeshQualityValidator:
             report.warnings.append(
                 f"CRITICAL: {report.negative_volumes} cells with negative volume"
             )
-        
+
+        # Global volume ratio is informational only now - see
+        # MeshQualityReport docstring for why it doesn't gate.
         if report.volume_ratio > self.thresholds['max_volume_ratio']:
+            report.warnings.append(
+                f"INFO: Global volume ratio {report.volume_ratio:.2e} exceeds "
+                f"{self.thresholds['max_volume_ratio']:.2e} - expected for a "
+                f"graded BL mesh, not itself a defect. See adjacent-cell "
+                f"volume ratio below for the metric that actually matters."
+            )
+
+        if report.adjacent_volume_ratio_max > self.thresholds['max_adjacent_volume_ratio']:
             report.passed = False
             report.warnings.append(
-                f"HIGH: Volume ratio {report.volume_ratio:.2e} exceeds threshold "
-                f"{self.thresholds['max_volume_ratio']:.2e}"
+                f"HIGH: Max adjacent-cell volume ratio {report.adjacent_volume_ratio_max:.2f} "
+                f"exceeds threshold {self.thresholds['max_adjacent_volume_ratio']:.2f} - "
+                f"Green-Gauss gradient reconstruction (grad ~ 1/V) will be severely "
+                f"ill-conditioned at these cells, and will pollute their neighbours' fluxes"
             )
-        
-        if report.max_aspect_ratio > self.thresholds['max_aspect_ratio']:
+
+        if report.orthogonality_max > self.thresholds['max_orthogonality_angle']:
+            report.passed = False
+            report.warnings.append(
+                f"HIGH: Max non-orthogonality {report.orthogonality_max:.1f} deg exceeds "
+                f"threshold {self.thresholds['max_orthogonality_angle']:.1f} deg"
+            )
+
+        if report.bl_max_aspect_ratio is not None and report.bl_max_aspect_ratio > self.thresholds['bl_max_aspect_ratio']:
+            report.warnings.append(
+                f"MEDIUM: BL-region max aspect ratio {report.bl_max_aspect_ratio:.2f} exceeds "
+                f"threshold {self.thresholds['bl_max_aspect_ratio']:.2f}"
+            )
+        if report.core_max_aspect_ratio is not None and report.core_max_aspect_ratio > self.thresholds['core_max_aspect_ratio']:
+            report.warnings.append(
+                f"MEDIUM: Core-region max aspect ratio {report.core_max_aspect_ratio:.2f} exceeds "
+                f"threshold {self.thresholds['core_max_aspect_ratio']:.2f}"
+            )
+        if report.bl_max_aspect_ratio is None and report.max_aspect_ratio > self.thresholds['max_aspect_ratio']:
             report.warnings.append(
                 f"MEDIUM: Max aspect ratio {report.max_aspect_ratio:.2f} exceeds "
                 f"threshold {self.thresholds['max_aspect_ratio']:.2f}"
             )
-        
+
         if report.max_skewness > self.thresholds['max_skewness']:
+            report.passed = False
             report.warnings.append(
-                f"MEDIUM: Max skewness {report.max_skewness:.4f} exceeds "
-                f"threshold {self.thresholds['max_skewness']:.4f}"
+                f"HIGH: Max skewness {report.max_skewness:.4f} exceeds threshold "
+                f"{self.thresholds['max_skewness']:.4f}"
             )
-    
+
+        if report.n_overlapping_cells > self.thresholds['max_overlapping_cells']:
+            report.passed = False
+            report.warnings.append(
+                f"CRITICAL: {report.n_overlapping_cells} cells physically overlap a "
+                f"different, non-adjacent cell's faces"
+            )
+        if report.n_close_cell_pairs > 0:
+            report.warnings.append(
+                f"INFO: {report.n_close_cell_pairs} cell pair(s) are close enough to "
+                f"overlap with a small further parameter change "
+                + (f"(min gap {report.overlap_min_gap:.3e} m)" if report.overlap_min_gap is not None else "")
+                + " - not a defect by itself, see summary for details"
+            )
+
     def _generate_recommendations(self, report: MeshQualityReport) -> None:
         """Generate improvement recommendations based on quality issues.
-        
+
         Args:
             report: Quality report with identified issues
         """
@@ -469,24 +510,44 @@ class MeshQualityValidator:
                 "Fix negative volumes: Check surface mesh orientation and repair "
                 "self-intersecting elements"
             )
-        
-        if report.volume_ratio > 1e4:
+
+        if report.n_overlapping_cells > 0:
             report.recommendations.append(
-                "Reduce volume ratio: Use smoother mesh grading or adaptive "
-                "refinement to avoid abrupt size changes"
+                "Fix overlapping cells: usually a BL extrusion front crossing a "
+                "facing surface (tight underbody-to-ground gaps) or a core-fill "
+                "artifact at a tight BL seam - see the mesh repair loop "
+                "(mesh_gen/mesh_repair.py) for automated local cavity re-tiling"
             )
-        
-        if report.max_aspect_ratio > 50:
+
+        if report.adjacent_volume_ratio_max > self.thresholds['max_adjacent_volume_ratio']:
             report.recommendations.append(
-                "Improve aspect ratio: Refine highly stretched cells, especially "
-                "near curved surfaces and sharp corners"
+                "Reduce adjacent-cell volume ratio: usually caused by degenerate "
+                "(sliver) tetrahedra at sharp convex edges/corners of the body, or "
+                "abrupt tetgen size-grading transitions in the core fill - see the "
+                "mesh repair loop (mesh_gen/mesh_repair.py) for automated fixes"
             )
-        
+
+        if report.orthogonality_max > self.thresholds['max_orthogonality_angle']:
+            report.recommendations.append(
+                "Reduce non-orthogonality: smooth or locally re-mesh the implicated "
+                "cells - Green-Gauss gradient accuracy degrades sharply beyond this"
+            )
+
+        if (report.bl_max_aspect_ratio or 0) > self.thresholds['bl_max_aspect_ratio']:
+            report.recommendations.append(
+                "Improve BL-region aspect ratio: reduce growth_rate or first-layer "
+                "min_cell_size"
+            )
+        if (report.core_max_aspect_ratio or report.max_aspect_ratio) > self.thresholds.get('core_max_aspect_ratio', self.thresholds['max_aspect_ratio']):
+            report.recommendations.append(
+                "Improve core-region aspect ratio: tighten max_cell_size grading"
+            )
+
         if report.max_skewness > 0.9:
             report.recommendations.append(
-                "Reduce skewness: Improve mesh generation parameters, consider "
+                "Reduce skewness: improve mesh generation parameters, consider "
                 "using different algorithm or smoothing"
             )
-        
+
         if not report.recommendations and report.passed:
             report.recommendations.append("Mesh quality is good - no immediate action needed")
