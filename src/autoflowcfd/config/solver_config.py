@@ -247,6 +247,8 @@ class TransientConfig(SolverConfig):
         rho_inf, vel_inf, p_inf: Freestream conditions, same meaning and
             role as SteadyConfig (single source of truth for the initial
             condition, boundary conditions, and Cd/Cl normalization).
+        use_wall_functions: Enable Menter scalable/automatic wall treatment
+            on WALL/GROUND faces, same meaning as SteadyConfig.
 
     Example:
         >>> config = TransientConfig(
@@ -272,6 +274,7 @@ class TransientConfig(SolverConfig):
     rho_inf: float = 1.225
     vel_inf: float = 30.0
     p_inf: float = 101325.0
+    use_wall_functions: bool = False
 
     def __post_init__(self):
         """Validate transient configuration."""

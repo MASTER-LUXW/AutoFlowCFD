@@ -203,7 +203,14 @@ class TransientSolver:
         self._residual = ViscousRANSResidual(
             self._geom, mu_lam=MU_LAM, wall_distance=wall_distance, turbulent=self.turbulent,
             mach_ref=mach_ref,
+            wall_face_mask=wall_face_mask if self.config.use_wall_functions else None,
         )
+        if self.config.use_wall_functions:
+            logger.info(
+                "Wall functions enabled (Menter scalable/automatic wall treatment) "
+                f"on {np.sum(wall_face_mask)} WALL/GROUND faces - near-wall mesh no "
+                "longer needs y+~1 to be accurate."
+            )
         self._des_delta = np.cbrt(cell_volumes)
 
         self._warn_if_dt_unstable()

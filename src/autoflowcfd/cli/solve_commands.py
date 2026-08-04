@@ -374,9 +374,39 @@ def run(
               help="Output directory")
 @click.option("--sample-interval", type=int, default=10,
               help="Sampling interval for statistics")
+@click.option("--checkpoint-interval", type=int, default=None,
+              help="Checkpoint save interval (steps; overrides config)")
+@click.option("--threads", type=int, default=None,
+              help="CPU thread count (-1 for auto; overrides config)")
+@click.option("--gpu-device", type=int, default=None,
+              help="GPU device ID (overrides config)")
+@click.option("--growth-rate", type=float, default=None,
+              help="Boundary-layer geometric growth rate (overrides config; ignored "
+                   "when input_file is a cached volume_mesh.pkl)")
+@click.option("--max-layers", type=int, default=None,
+              help="Maximum boundary layer layers (overrides config; ignored when "
+                   "input_file is a cached volume_mesh.pkl)")
+@click.option("--bl-layers", type=int, default=None,
+              help="How many of --max-layers count as the fine boundary-layer stage "
+                   "before switching to the faster-growing transition stage; unset "
+                   "keeps the default min(8, max_layers) split (overrides config; "
+                   "ignored when input_file is a cached volume_mesh.pkl)")
+@click.option("--min-cell-size", type=float, default=None,
+              help="Minimum cell size in meters (overrides config; ignored when "
+                   "input_file is a cached volume_mesh.pkl)")
+@click.option("--max-cell-size", type=float, default=None,
+              help="Max core-region cell size in meters, graded outward from the BL's "
+                   "near-wall size (overrides config); unset means no cap. Ignored "
+                   "when input_file is a cached volume_mesh.pkl")
+@click.option("--wall-functions", is_flag=True, default=False,
+              help="Enable Menter scalable/automatic wall treatment (log-law based) "
+                   "on WALL/GROUND faces, instead of resolving all the way to the "
+                   "wall (overrides config; see `solve run --help` for the same "
+                   "option's rationale)")
 @click.option("--skip-quality-check", is_flag=True, default=False,
               help="Skip the pre-solve volume mesh quality gate (see `solve run --help` "
-                   "for the same option's rationale).")
+                   "for the same option's rationale). No effect when input_file is a "
+                   "cached volume_mesh.pkl.")
 @click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
 def transient(
     input_file: str,
@@ -390,16 +420,32 @@ def transient(
     config: str,
     output: str,
     sample_interval: int,
+    checkpoint_interval: Optional[int],
+    threads: Optional[int],
+    gpu_device: Optional[int],
+    growth_rate: Optional[float],
+    max_layers: Optional[int],
+    bl_layers: Optional[int],
+    min_cell_size: Optional[float],
+    max_cell_size: Optional[float],
+    wall_functions: bool,
     skip_quality_check: bool,
     json_output: bool
 ) -> None:
     """Run transient LES/DES simulation.
-    
+
     Solve unsteady flow using Large Eddy Simulation or Detached
     Eddy Simulation.
-    
+
     Args:
-        input_file: Path to .nas grid file
+        input_file: Path to a .nas surface grid file, OR a saved
+            volume_mesh.pkl (from a prior `solve run`/`solve transient`).
+            Passing the .pkl is strongly recommended whenever --init-from
+            points at a checkpoint produced on a specific volume mesh:
+            re-parsing the .nas here regenerates the volume mesh from
+            scratch using THIS command's own BL parameters, which reliably
+            produces a different cell count than the
+            checkpoint's solution array and fails to load.
         backend: Compute backend
         order: FR order
         mode: Turbulence mode (des/ddes/les)
@@ -410,19 +456,30 @@ def transient(
         config: YAML config file
         output: Output directory
         sample_interval: Sampling interval
+        checkpoint_interval: Checkpoint save interval (steps)
+        threads: CPU thread count
+        gpu_device: GPU device ID
+        growth_rate, max_layers, bl_layers, min_cell_size, max_cell_size:
+            Volume mesh generation parameters (same meaning as `solve run`);
+            ignored when input_file is a cached volume_mesh.pkl
+        wall_functions: Enable Menter scalable/automatic wall treatment
+        skip_quality_check: Skip the pre-solve volume mesh quality gate
         json_output: Output as JSON
-    
+
     Examples:
         # Basic DES simulation
         $ autoflowcfd solve transient sedan.nas --physical-time 0.3
-        
+
         # DDES with RK2
         $ autoflowcfd solve transient sedan.nas --mode ddes \
           --time-integration rk2 --physical-time 0.5
-        
-        # Initialize from steady solution
-        $ autoflowcfd solve transient sedan.nas --physical-time 0.3 \
-          --init-from steady_results/checkpoint.h5
+
+        # Initialize from steady solution - reuse the EXACT volume mesh the
+        # checkpoint was solved on (see `solve run`'s "Volume mesh saved
+        # to" log line for its path) instead of re-generating from the
+        # surface .nas, so cell counts are guaranteed to match
+        $ autoflowcfd solve transient steady_results/volume_mesh.pkl \
+          --physical-time 0.3 --init-from steady_results/checkpoint.h5
     """
     from autoflowcfd.config import ConfigLoader, TransientConfig, BackendType, TurbulenceModel, TimeIntegrationScheme
     from autoflowcfd.grid import NASParser
@@ -473,6 +530,14 @@ def transient(
                 transient_config.output_dir = output
             if _explicit('sample_interval'):
                 transient_config.sample_interval = sample_interval
+            if _explicit('checkpoint_interval'):
+                transient_config.checkpoint_interval = checkpoint_interval
+            if _explicit('threads'):
+                transient_config.n_threads = threads if threads > 0 else -1
+            if _explicit('gpu_device'):
+                transient_config.gpu_device = gpu_device
+            if _explicit('wall_functions'):
+                transient_config.use_wall_functions = wall_functions
         else:
             transient_config = TransientConfig(
                 backend=BackendType(backend),
@@ -483,7 +548,28 @@ def transient(
                 total_time=physical_time,
                 output_dir=output,
                 sample_interval=sample_interval,
+                n_threads=threads if (threads is not None and threads > 0) else -1,
+                gpu_device=gpu_device if gpu_device is not None else 0,
+                checkpoint_interval=checkpoint_interval if checkpoint_interval is not None else 100,
+                use_wall_functions=wall_functions,
             )
+
+        # --growth-rate/--max-layers/--bl-layers/--min-cell-size/--max-cell-size
+        # are CLI-only overrides (same convention as `run()` above): when
+        # passed, they win over whatever transient_config carries (defaults,
+        # or values loaded from --config yaml). No effect when input_file
+        # below turns out to be a cached volume_mesh.pkl - that mesh is
+        # loaded as-is, not regenerated from these parameters.
+        if growth_rate is not None:
+            transient_config.growth_rate = growth_rate
+        if max_layers is not None:
+            transient_config.max_layers = max_layers
+        if bl_layers is not None:
+            transient_config.bl_layers = bl_layers
+        if min_cell_size is not None:
+            transient_config.min_cell_size = min_cell_size
+        if max_cell_size is not None:
+            transient_config.max_cell_size = max_cell_size
 
         # Calculate total steps from the EFFECTIVE config values (not the
         # raw CLI variables), which may differ if --config set its own
@@ -491,42 +577,72 @@ def transient(
         total_steps = int(transient_config.total_time / transient_config.dt)
         logger.info(f"Total time steps: {total_steps}")
 
-        # Parse grid and generate volume mesh (same conservative BL defaults
-        # as `solve run` - see SteadyConfig field docs for the rationale).
-        logger.info("Parsing grid file...")
-        parser = NASParser(input_file)
-        grid_data = parser.parse(
-            generate_volume_mesh=True,
-            volume_mesh_params={
-                'growth_rate': transient_config.growth_rate,
-                'max_layers': transient_config.max_layers,
-                'bl_layers': transient_config.bl_layers,
-                'min_cell_size': transient_config.min_cell_size,
-                'target_cells': transient_config.target_cells,
-                'max_cell_size': transient_config.max_cell_size,
-            }
-        )
-        logger.info(f"Grid loaded: {grid_data.node_count} nodes, {grid_data.cell_count} cells")
-
-        # Pre-solve mesh quality gate - see `run`'s (solve run) identical
-        # check for the full rationale.
-        if not skip_quality_check:
-            from autoflowcfd.grid import MeshQualityValidator
-            logger.info("Validating volume mesh quality before solving...")
-            quality_report = MeshQualityValidator().validate_volume_mesh(grid_data)
-            if quality_report.passed:
-                logger.info(f"\n{quality_report.summary()}")
-            else:
-                logger.error(f"\n{quality_report.summary()}")
-                raise click.ClickException(
-                    "Volume mesh quality check failed (see report above) - solving "
-                    "would very likely diverge. Common causes: sharp convex edges/"
-                    "corners on the body (BL extrusion degrades there; consider a "
-                    "small chamfer/fillet in the source geometry, or fewer/thicker "
-                    "--max-layers), or an overly aggressive --growth-rate/"
-                    "--min-cell-size for this geometry's feature sizes. Pass "
-                    "--skip-quality-check to solve anyway."
+        # Load grid: a saved volume_mesh.pkl is loaded as-is (same
+        # convention as `solve resume`'s --grid); a .nas surface file is
+        # parsed and tetrahedralized fresh using THIS config's own BL
+        # parameters (which default differently from `solve run`'s, and
+        # aren't exposed as CLI flags here) - see the pkl-vs-nas rationale
+        # in this command's docstring. Re-generating is what silently
+        # produced a different cell count than an --init-from checkpoint's
+        # solution array, which then fails at load_checkpoint() below with
+        # a confusing-looking mismatch error far from its actual cause.
+        input_path = Path(input_file)
+        if input_path.suffix.lower() == '.pkl':
+            logger.info(f"Loading saved volume mesh: {input_file}")
+            import pickle
+            try:
+                with open(input_path, 'rb') as f:
+                    grid_data = pickle.load(f)
+                logger.success(
+                    f"Volume mesh loaded: {grid_data.node_count} nodes, "
+                    f"{grid_data.cell_count} cells"
                 )
+            except Exception as e:
+                raise ValueError(f"Failed to load volume mesh from {input_file}: {e}")
+
+            # No quality gate here: this mesh already passed (or had
+            # --skip-quality-check explicitly accepted) whatever solve
+            # generated it in the first place - re-validating an
+            # already-accepted mesh on every subsequent transient run adds
+            # cost without new information. Matches `solve resume`'s
+            # identical treatment of a cached volume_mesh.pkl.
+            if skip_quality_check:
+                logger.debug("--skip-quality-check has no effect when input_file is a cached volume_mesh.pkl")
+        else:
+            logger.info("Parsing grid file...")
+            parser = NASParser(input_file)
+            grid_data = parser.parse(
+                generate_volume_mesh=True,
+                volume_mesh_params={
+                    'growth_rate': transient_config.growth_rate,
+                    'max_layers': transient_config.max_layers,
+                    'bl_layers': transient_config.bl_layers,
+                    'min_cell_size': transient_config.min_cell_size,
+                    'target_cells': transient_config.target_cells,
+                    'max_cell_size': transient_config.max_cell_size,
+                }
+            )
+            logger.info(f"Grid loaded: {grid_data.node_count} nodes, {grid_data.cell_count} cells")
+
+            # Pre-solve mesh quality gate - see `run`'s (solve run) identical
+            # check for the full rationale.
+            if not skip_quality_check:
+                from autoflowcfd.grid import MeshQualityValidator
+                logger.info("Validating volume mesh quality before solving...")
+                quality_report = MeshQualityValidator().validate_volume_mesh(grid_data)
+                if quality_report.passed:
+                    logger.info(f"\n{quality_report.summary()}")
+                else:
+                    logger.error(f"\n{quality_report.summary()}")
+                    raise click.ClickException(
+                        "Volume mesh quality check failed (see report above) - solving "
+                        "would very likely diverge. Common causes: sharp convex edges/"
+                        "corners on the body (BL extrusion degrades there; consider a "
+                        "small chamfer/fillet in the source geometry, or fewer/thicker "
+                        "--max-layers), or an overly aggressive --growth-rate/"
+                        "--min-cell-size for this geometry's feature sizes. Pass "
+                        "--skip-quality-check to solve anyway."
+                    )
 
         # Create solver
         logger.info("Initializing transient solver...")
