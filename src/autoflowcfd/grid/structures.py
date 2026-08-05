@@ -12,7 +12,7 @@ For new code, import directly from:
 
 # Re-export from submodules for backward compatibility
 from .schema.grid_nodes import NodeArray, CupyNodeArray
-from .schema.grid_cells import CellArray, CupyCellArray, TetrahedralCells
+from .schema.grid_cells import CellArray, CupyCellArray, TetrahedralCells, PrismCells
 from .schema.grid_boundaries import BoundaryMap
 from .schema.grid_metadata import GridMetadata
 from .schema.grid_faces import FaceData
@@ -24,6 +24,7 @@ __all__ = [
     'CellArray',
     'CupyCellArray',
     'TetrahedralCells',
+    'PrismCells',
     'BoundaryMap',
     'GridMetadata',
     'FaceData',

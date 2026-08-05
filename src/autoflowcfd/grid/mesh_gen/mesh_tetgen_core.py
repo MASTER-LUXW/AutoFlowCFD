@@ -15,6 +15,25 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 from loguru import logger
 
+# Core-fill tetgen quality/grading knobs, shared by every caller of
+# fill_core_volume that wants this project's own tightened standard rather
+# than tetgen's out-of-the-box defaults (minratio~2.0, mindihedral~0
+# effectively unconstrained). Originally lived only in
+# mesh_background_merge.py (the main core fill's own caller) - moved here,
+# the lowest-level module every one of fill_core_volume's callers already
+# imports from, specifically so mesh_repair_cavity.py's Stage B' (local
+# cavity re-tiling) can use the SAME standard for its own, much smaller
+# fill_core_volume calls instead of silently falling back to tetgen's
+# looser defaults. That inconsistency was a real, measured gap, not
+# theoretical: Stage B' was rejecting ~72% of its own cavity retile
+# attempts as "not an improvement" on a real case, and the retile itself
+# had no reason to actually BE an improvement over the original (already
+# badly-graded) cavity while using looser shape-quality bounds than what
+# produced that cavity's own neighbours in the first place.
+CORE_TETGEN_MINRATIO = 1.15  # was 1.4; tetgen default ~2.0 (lower = stricter)
+CORE_TETGEN_MINDIHEDRAL = 15.0  # unchanged - dihedral wasn't the implicated metric
+CORE_VOLUME_CAP_FRACTION = 0.08  # was 0.15, of max_cell_size**3
+
 
 def build_seam_taper_scale(
     n_nodes: int,

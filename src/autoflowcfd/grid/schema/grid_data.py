@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from loguru import logger
 
 from .grid_nodes import NodeArray, CupyNodeArray
-from .grid_cells import CellArray, CupyCellArray, TetrahedralCells
+from .grid_cells import CellArray, CupyCellArray, TetrahedralCells, PrismCells
 from .grid_boundaries import BoundaryMap
 from .grid_metadata import GridMetadata
 from .grid_faces import FaceData
@@ -193,11 +193,16 @@ class VolumeMeshData:
     
     Attributes:
         nodes: 节点数组
-        cells: 四面体单元数组（包含真实体积）
+        cells: 四面体单元数组（核心区 tetgen 填充 + 未转换为棱柱的 BL 单元）
         boundaries: 边界映射
         metadata: 网格元数据
         faces: 面数据数组（用于FVM通量计算）
         surface_mesh: 原始表面网格数据，用于参考面积计算
+        prism_cells: 边界层三棱柱单元（可选）。存在时，全局单元索引约定为
+            [0, prism_cells.count) 是棱柱，[prism_cells.count, cell_count)
+            是 cells（四面体）——与既有 n_bl_cells "BL 单元在前、核心单元在后"
+            的约定完全一致，只是 n_bl_cells 此时数的是真棱柱个数而不是
+            拆分后的四面体个数。None（默认）时行为与之前完全一样，纯四面体。
     """
     nodes: NodeArray
     cells: TetrahedralCells
@@ -205,6 +210,7 @@ class VolumeMeshData:
     metadata: GridMetadata
     faces: Optional[FaceData] = None
     surface_mesh: Optional[Dict] = None
+    prism_cells: Optional[PrismCells] = None
 
     def __post_init__(self):
         """验证体网格数据一致性
@@ -223,46 +229,60 @@ class VolumeMeshData:
                 f"actual node count ({self.nodes.count})"
             )
 
-        if self.metadata.cell_count != self.cells.count:
+        total_cells = self.cells.count + (self.prism_cells.count if self.prism_cells else 0)
+        if self.metadata.cell_count != total_cells:
             raise ValueError(
                 f"Metadata cell count ({self.metadata.cell_count}) doesn't match "
-                f"actual cell count ({self.cells.count})"
+                f"actual cell count ({total_cells})"
             )
 
     @property
     def node_count(self) -> int:
         """获取节点数量"""
         return self.nodes.count
-    
+
     @property
     def cell_count(self) -> int:
-        """获取单元数量"""
-        return self.cells.count
-    
+        """获取单元数量（棱柱 + 四面体）"""
+        return self.cells.count + (self.prism_cells.count if self.prism_cells else 0)
+
     @property
     def total_volume(self) -> float:
         """获取总体积（m³）"""
-        return float(np.sum(self.cells.volumes))
-    
+        total = float(np.sum(self.cells.volumes))
+        if self.prism_cells is not None:
+            total += float(np.sum(self.prism_cells.volumes))
+        return total
+
     def get_cell_volumes(self) -> np.ndarray:
-        """获取单元体积数组"""
-        return self.cells.volumes
-    
+        """获取单元体积数组，按全局单元索引顺序（棱柱在前、四面体在后，
+        与 n_bl_cells 约定一致）"""
+        if self.prism_cells is None:
+            return self.cells.volumes
+        return np.concatenate([self.prism_cells.volumes, self.cells.volumes])
+
     def ensure_faces_exist(self) -> FaceData:
         """确保面数据存在，如不存在则从体网格中提取"""
         if self.faces is None:
             logger.info("Extracting face data from volume mesh...")
             try:
                 from ..mesh_gen.face_extractor import FaceExtractor
-                
+
                 boundary_groups = self.boundaries.groups if self.boundaries else None
-                
-                self.faces = FaceExtractor.extract_faces(
-                    cell_connectivity=self.cells.connectivity,
-                    nodes=self.nodes,
-                    boundary_groups=boundary_groups
-                )
-                
+
+                if self.prism_cells is not None:
+                    self.faces = FaceExtractor.extract_faces_mixed(
+                        prism_connectivity=self.prism_cells.connectivity,
+                        tet_connectivity=self.cells.connectivity,
+                        nodes=self.nodes,
+                    )
+                else:
+                    self.faces = FaceExtractor.extract_faces(
+                        cell_connectivity=self.cells.connectivity,
+                        nodes=self.nodes,
+                        boundary_groups=boundary_groups
+                    )
+
                 logger.info(
                     f"Face extraction completed: {self.faces.count} total faces "
                     f"({self.faces.n_interior_faces} interior, "
@@ -271,5 +291,5 @@ class VolumeMeshData:
             except Exception as e:
                 logger.error(f"Failed to extract face data: {e}")
                 raise RuntimeError(f"Face extraction failed: {e}")
-        
+
         return self.faces

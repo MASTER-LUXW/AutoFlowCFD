@@ -302,8 +302,22 @@ class FRSolver:
             self.grid_data.nodes.y,
             self.grid_data.nodes.z,
         ])
-        connectivity_int64 = self.grid_data.cells.connectivity.astype(np.int64)
-        cell_centroids = nodes_array[connectivity_int64].mean(axis=1)
+        # Prism cells (if any - see VolumeMeshData.prism_cells) occupy the
+        # front of the global cell-index space, tets the rest (same
+        # convention grid_data.get_cell_volumes() below already follows) -
+        # centroids must be built the same way, or they'd misalign against
+        # cell_volumes/geom.cell_centroids for every BL cell once a prism
+        # mesh is in play (a plain tets-only average silently produced only
+        # n_tet rows, not n_prism+n_tet, for a mixed mesh here previously).
+        tet_connectivity_int64 = self.grid_data.cells.connectivity.astype(np.int64)
+        tet_centroids = nodes_array[tet_connectivity_int64].mean(axis=1)
+        prism_cells_obj = getattr(self.grid_data, 'prism_cells', None)
+        if prism_cells_obj is not None:
+            prism_connectivity_int64 = prism_cells_obj.connectivity.astype(np.int64)
+            prism_centroids = nodes_array[prism_connectivity_int64].mean(axis=1)
+            cell_centroids = np.vstack([prism_centroids, tet_centroids])
+        else:
+            cell_centroids = tet_centroids
         
         # Store in face_extractor for later use
         self.face_extractor.cell_centroids = cell_centroids

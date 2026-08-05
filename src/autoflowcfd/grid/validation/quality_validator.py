@@ -46,6 +46,20 @@ if TYPE_CHECKING:
     from ..structures import FaceData, VolumeMeshData
 
 
+def _compute_tet_centroids(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
+    """Vertex-average centroid of every tetrahedron, shape=(n_cells, 3)."""
+    if len(cells) == 0:
+        return np.zeros((0, 3), dtype=np.float64)
+    return nodes[cells].mean(axis=1)
+
+
+def _compute_prism_centroids(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
+    """Vertex-average centroid of every triangular prism, shape=(n_cells, 3)."""
+    if len(cells) == 0:
+        return np.zeros((0, 3), dtype=np.float64)
+    return nodes[cells].mean(axis=1)
+
+
 class MeshQualityValidator:
     """Validate mesh quality for CFD simulations.
 
@@ -175,11 +189,16 @@ class MeshQualityValidator:
         """Validate VolumeMeshData object (convenience method).
 
         Args:
-            volume_mesh: VolumeMeshData with tetrahedral cells
+            volume_mesh: VolumeMeshData with tetrahedral cells (and,
+                optionally, prism_cells - dispatches to validate_mixed()
+                when present, see that method)
             faces: Optional precomputed FaceData - if not supplied and
                 volume_mesh.faces is already populated (ensure_faces_exist
                 was called), that gets reused instead of re-extracting.
-            bl_cell_mask: Optional BL/core region split, see validate()
+            bl_cell_mask: Optional BL/core region split, see validate().
+                Ignored when volume_mesh.prism_cells is set - validate_mixed
+                derives this itself (prisms ARE the BL region, tets are all
+                core, by this project's global cell-index convention).
             check_overlap: see validate()
 
         Returns:
@@ -187,6 +206,10 @@ class MeshQualityValidator:
         """
         if faces is None:
             faces = volume_mesh.faces
+
+        if volume_mesh.prism_cells is not None:
+            return self.validate_mixed(volume_mesh, faces=faces, check_overlap=check_overlap)
+
         return self.validate(
             nodes=np.column_stack([
                 volume_mesh.nodes.x,
@@ -199,6 +222,111 @@ class MeshQualityValidator:
             bl_cell_mask=bl_cell_mask,
             check_overlap=check_overlap,
         )
+
+    def validate_mixed(
+        self,
+        volume_mesh: 'VolumeMeshData',
+        faces: Optional['FaceData'] = None,
+        log_summary: bool = True,
+        check_overlap: bool = True,
+    ) -> MeshQualityReport:
+        """Validate a mixed prism(BL) + tetrahedron(core) VolumeMeshData.
+
+        Mirrors validate()'s structure, but every per-cell metric is
+        computed separately per region (prism cells via quality_metrics'
+        prism functions, tet cells via the existing tetrahedron functions -
+        the two shapes need genuinely different formulas, see quality_
+        metrics.py) and then concatenated in the SAME global cell-index
+        order every other prism-aware piece of this codebase uses (prisms
+        [0, n_prism), tets [n_prism, n_prism+n_tet) - see PrismCells/
+        face_extractor.extract_faces_mixed). Orthogonality and adjacent-
+        volume-ratio (face-based, so they inherently span the BL/core
+        interface) use ONE combined pass over the global face graph, via
+        compute_face_diagnostics' cell_centroids/cell_volumes parameters
+        (added specifically so it doesn't have to re-derive a per-cell
+        centroid/volume from a single uniform connectivity array, which a
+        mixed mesh doesn't have).
+
+        bl_cell_mask is not a parameter here (unlike validate()) - it's
+        exactly [True]*n_prism + [False]*n_tet by construction, not
+        something a caller could meaningfully override.
+        """
+        nodes = np.column_stack([volume_mesh.nodes.x, volume_mesh.nodes.y, volume_mesh.nodes.z])
+        prism_conn = volume_mesh.prism_cells.connectivity
+        tet_conn = volume_mesh.cells.connectivity
+        n_prism = len(prism_conn)
+        n_tet = len(tet_conn)
+        n_cells = n_prism + n_tet
+
+        logger.info(f"Validating mesh quality: {n_prism} prism + {n_tet} tetrahedron cells...")
+
+        report = MeshQualityReport(n_cells=n_cells, n_nodes=len(nodes))
+
+        # --- Volumes ---
+        prism_vol = _qm.compute_prism_volumes(nodes, prism_conn)
+        tet_vol_signed = _qm.compute_tetrahedron_volumes(nodes, tet_conn)
+        negative_mask = tet_vol_signed < 0  # prism volumes are unsigned by construction - see
+                                            # compute_prism_volumes' docstring for why an
+                                            # inversion check isn't available for them yet
+        report.negative_volumes = int(np.sum(negative_mask))
+        all_volumes = np.concatenate([prism_vol, np.abs(tet_vol_signed)])
+        positive_volumes = all_volumes[all_volumes > 0]
+        if len(positive_volumes) > 0:
+            report.min_volume = float(np.min(positive_volumes))
+            report.max_volume = float(np.max(positive_volumes))
+            report.mean_volume = float(np.mean(positive_volumes))
+            report.std_volume = float(np.std(positive_volumes))
+            report.volume_ratio = report.max_volume / max(report.min_volume, 1e-12)
+
+        # --- Aspect ratio (BL/core split is exact here, not heuristic) ---
+        prism_ar = _qm.compute_prism_aspect_ratios(nodes, prism_conn)
+        tet_ar = _qm.compute_tetrahedron_aspect_ratios(nodes, tet_conn)
+        all_ar = np.concatenate([prism_ar, tet_ar])
+        if len(all_ar) > 0:
+            report.min_aspect_ratio = float(np.min(all_ar))
+            report.max_aspect_ratio = float(np.max(all_ar))
+            report.mean_aspect_ratio = float(np.mean(all_ar))
+        if n_prism > 0:
+            report.bl_max_aspect_ratio = float(np.max(prism_ar))
+            report.bl_mean_aspect_ratio = float(np.mean(prism_ar))
+        if n_tet > 0:
+            report.core_max_aspect_ratio = float(np.max(tet_ar))
+            report.core_mean_aspect_ratio = float(np.mean(tet_ar))
+
+        # --- Skewness ---
+        prism_sk = _qm.compute_prism_skewness_values(nodes, prism_conn)
+        tet_sk = _qm.compute_tetrahedron_skewness_values(nodes, tet_conn)
+        all_sk = np.concatenate([prism_sk, tet_sk])
+        if len(all_sk) > 0:
+            report.max_skewness = float(np.max(all_sk))
+            report.mean_skewness = float(np.mean(all_sk))
+
+        # --- Orthogonality / adjacent-volume-ratio / overlap (face-based) ---
+        if faces is None:
+            faces = volume_mesh.ensure_faces_exist()
+        cell_centroids = np.vstack([
+            _compute_prism_centroids(nodes, prism_conn),
+            _compute_tet_centroids(nodes, tet_conn),
+        ]) if n_prism > 0 else _compute_tet_centroids(nodes, tet_conn.astype(np.int64))
+        cell_volumes = all_volumes  # already concatenated prism+tet, same global order
+
+        self._check_orthogonality_and_adjacency(
+            report, nodes, tet_conn, faces, cell_centroids=cell_centroids, cell_volumes=cell_volumes
+        )
+        if check_overlap:
+            # `cells` is unused by check_face_overlap_and_proximity whenever
+            # faces is already supplied (which it always is here) - see
+            # mesh_overlap_check.py, it only ever reads `cells` to derive
+            # faces itself when the caller didn't already have them.
+            self._check_overlap_and_proximity(report, nodes, tet_conn, faces)
+
+        self._evaluate_quality(report)
+        self._generate_recommendations(report)
+
+        if log_summary:
+            logger.info(f"\n{report.summary()}")
+
+        return report
 
     @staticmethod
     def _extract_faces(nodes: np.ndarray, cells: np.ndarray) -> 'FaceData':
@@ -343,10 +471,29 @@ class MeshQualityValidator:
         nodes: np.ndarray,
         cells: np.ndarray,
         faces: Optional['FaceData'] = None,
+        cell_centroids: Optional[np.ndarray] = None,
+        cell_volumes: Optional[np.ndarray] = None,
     ) -> Dict[str, np.ndarray]:
         """Public per-internal-face diagnostics - the raw arrays behind
         orthogonality_max/adjacent_volume_ratio_max, for callers that need
         to know which faces/cells are implicated, not just aggregates.
+
+        Args:
+            cells: single uniform-width (n_cells, k) connectivity array,
+                used to derive per-cell centroid/volume via the tet-only
+                formula (nodes[cells].mean(axis=1), compute_tetrahedron_
+                volumes) - IGNORED if cell_centroids/cell_volumes are both
+                given directly instead (only the row count needs to match).
+            cell_centroids, cell_volumes: optional pre-computed (n_cells,3)
+                / (n_cells,) arrays, in the SAME global cell-index order
+                `faces`' owner/neighbour indices use. Required for a mixed
+                prism+tet mesh, where cells isn't a single uniform-width
+                array at all (a prism's 6-node row and a tet's 4-node row
+                can't share one connectivity array) - the caller (e.g.
+                MeshQualityValidator.validate_volume_mesh's mixed-mesh
+                path) computes these once per region with each region's
+                own correct formula (PrismCells.compute_volumes vs.
+                TetrahedralCells.compute_volumes) and concatenates.
 
         Returns a dict with, for every internal face:
             'owner', 'neighbor': cell indices (n_internal_faces,)
@@ -366,13 +513,13 @@ class MeshQualityValidator:
         neigh = conn[internal_mask, 1]
         normal = faces.normal[internal_mask]
 
-        centroids = nodes[cells].mean(axis=1)
+        centroids = cell_centroids if cell_centroids is not None else nodes[cells].mean(axis=1)
         d = centroids[neigh] - centroids[owner]
         d_norm = np.maximum(np.linalg.norm(d, axis=1), 1e-300)
         cos_angle = np.einsum('ij,ij->i', d, normal) / d_norm
         angle_deg = np.degrees(np.arccos(np.clip(np.abs(cos_angle), 0.0, 1.0)))
 
-        volumes = np.abs(_qm.compute_tetrahedron_volumes(nodes, cells))
+        volumes = cell_volumes if cell_volumes is not None else np.abs(_qm.compute_tetrahedron_volumes(nodes, cells))
         v_owner = volumes[owner]
         v_neigh = volumes[neigh]
         vmax = np.maximum(v_owner, v_neigh)
@@ -387,14 +534,22 @@ class MeshQualityValidator:
         nodes: np.ndarray,
         cells: np.ndarray,
         faces: Optional['FaceData'],
+        cell_centroids: Optional[np.ndarray] = None,
+        cell_volumes: Optional[np.ndarray] = None,
     ) -> None:
         """Check face non-orthogonality and adjacent-cell (face-neighbour)
         volume ratio - the two metrics that directly govern Green-Gauss
         gradient conditioning for this project's solver (see module
         docstring). Both need face owner/neighbour connectivity, so they
         share a single face-extraction pass (compute_face_diagnostics).
+
+        cell_centroids/cell_volumes: see compute_face_diagnostics - pass
+        through for a mixed prism+tet mesh, where `cells` alone can't
+        describe every cell's shape.
         """
-        diag = self.compute_face_diagnostics(nodes, cells, faces)
+        diag = self.compute_face_diagnostics(
+            nodes, cells, faces, cell_centroids=cell_centroids, cell_volumes=cell_volumes
+        )
         if len(diag['angle_deg']) == 0:
             return
 

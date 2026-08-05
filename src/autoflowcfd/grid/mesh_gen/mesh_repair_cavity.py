@@ -172,8 +172,8 @@ def remesh_core_cavity(
     validator: 'MeshQualityValidator',
     n_buffer_rings: int = 1,
     max_cavity_cells: int = 20_000,
-    max_clusters_attempted: int = 2_000,
-    max_seconds: float = 90.0,
+    max_clusters_attempted: int = 15_000,
+    max_seconds: float = 400.0,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str]]:
     """Stage B': locally re-tetrahedralize just the still-bad cells (plus a
     buffer of good neighbours) against their own fixed boundary, instead of
@@ -247,12 +247,20 @@ def remesh_core_cavity(
             for whichever repair stage runs next (Stage B's BL thickness
             cap, or Stage C's global backoff) - consistent with every
             other cap in this function (size, quality-gate rejection):
-            graceful fallthrough, never a hard failure.
+            graceful fallthrough, never a hard failure. Raised from an
+            earlier 2,000 to 15,000 after a real sharp-edge-heavy case
+            (cube_demo) produced 9,013 candidate clusters and the old cap
+            silently left 7,013 of them completely untried, well before
+            the quality-gate-rejection question (see below) even entered
+            the picture - offline mesh generation has minutes to spend
+            here already, and each additional cluster attempt is cheap.
         max_seconds: safety cap on this call's own total wall-clock time,
             checked between clusters (not interrupting one already in
             progress). A pure cluster-count cap doesn't bound cost by
             itself if cluster size/tetgen difficulty varies widely; this
-            is the second, independent net for that case.
+            is the second, independent net for that case. Raised from an
+            earlier 90s alongside max_clusters_attempted, for the same
+            reason.
 
     Returns:
         (new_nodes, new_cells, new_cell_groups, new_bad_cell_mask,
@@ -337,7 +345,7 @@ def remesh_core_cavity(
     n_failed = 0
     n_skipped_budget = 0
 
-    from .mesh_tetgen_core import fill_core_volume
+    from .mesh_tetgen_core import fill_core_volume, CORE_TETGEN_MINRATIO, CORE_TETGEN_MINDIHEDRAL
 
     if n_clusters > max_clusters_attempted:
         logger.warning(
@@ -389,7 +397,18 @@ def remesh_core_cavity(
             # interesting on their own, only this function's own per-cavity
             # and final summary lines (logged separately, below/at the end)
             # are.
-            retiled_nodes, retiled_tets, _, _ = fill_core_volume(local_points, local_faces, verbose=False)
+            # minratio/mindihedral: same tightened standard the main core
+            # fill uses (mesh_background_merge.py), not tetgen's own looser
+            # defaults - a cavity retile using LOOSER shape-quality bounds
+            # than what produced its own (already-bad) neighbours had no
+            # real reason to come out better. Confirmed as a real, large
+            # effect on a real case: with tetgen's defaults, ~72% of
+            # attempted retiles were rejected as "not an improvement"; see
+            # CORE_TETGEN_MINRATIO's own docstring.
+            retiled_nodes, retiled_tets, _, _ = fill_core_volume(
+                local_points, local_faces, verbose=False,
+                minratio=CORE_TETGEN_MINRATIO, mindihedral=CORE_TETGEN_MINDIHEDRAL,
+            )
         except Exception as e:
             logger.warning(f"Stage B': cavity remesh failed ({e}), keeping original cells")
             n_failed += 1

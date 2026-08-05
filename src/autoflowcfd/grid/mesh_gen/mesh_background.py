@@ -35,6 +35,74 @@ from .mesh_repair import smooth_bad_cells, compute_bl_thickness_limit_override, 
 from .mesh_background_merge import _build_merged_mesh
 
 
+def _prism_aware_overlap_bad_tet_mask(
+    merged_nodes: np.ndarray, prism_cells: np.ndarray, merged_cells: np.ndarray,
+) -> Optional[np.ndarray]:
+    """Physical-overlap check over the FULL mixed (prism+tet) face set,
+    returning a (len(merged_cells),) bool mask of which TET cells are
+    implicated - the only side Stage A/B'/D can act on (true prisms are
+    entirely outside their scope, see this module's own n_bl_cells comment
+    above - merged_cells here is transition tets followed by core tets,
+    never prisms).
+
+    Why this is necessary and not redundant with the ordinary tet-only
+    overlap check already run as part of validator.validate(...): a
+    tet-only check can only ever see merged_cells (transition + core
+    tets), so a badly-graded sliver tet at the BL/core interface (see
+    ProjectFiles Part6's P14 for how common these are - abrupt tetgen
+    size-grading transitions right at the interface) that's elongated
+    enough to physically reach back into a nearby true-prism cell is
+    invisible to it as an overlap defect - it has no OTHER tet in
+    merged_cells to overlap with from its own region. And since prisms are
+    outside smooth_bad_cells'/collapse_bad_cells' own skew/orthogonality/
+    adjacent-ratio criteria too (those only ever see merged_cells), nothing
+    in Stage A/B'/D would otherwise ever learn this cell is bad from the
+    overlap angle at all - it would silently pass every mid-pipeline check
+    and only show up in the FINAL validate_mixed report, too late for any
+    repair stage to act on.
+    Confirmed as a large, not marginal, real-case effect: before this
+    function existed, the final report flagged 72,209 cells (12,541 prism +
+    59,668 tet) - every sampled example a prism-tet pair with ZERO shared
+    node indices at a genuine millimetre-scale (not floating-point-
+    tolerance-scale) geometric distance, i.e. real physical collisions
+    between an oversized core sliver and the BL region, not a coincident-
+    point indexing artifact.
+
+    Returns None if there are no prism cells (nothing this adds over the
+    ordinary tet-only check) or nothing was found.
+    """
+    n_prism = len(prism_cells)
+    if n_prism == 0:
+        return None
+    from ..schema.grid_nodes import NodeArray as _NodeArray
+    from .face_extractor import FaceExtractor as _FaceExtractor
+    from ..validation.mesh_overlap_check import check_face_overlap_and_proximity as _check_overlap
+
+    node_arr = _NodeArray(
+        x=np.ascontiguousarray(merged_nodes[:, 0]),
+        y=np.ascontiguousarray(merged_nodes[:, 1]),
+        z=np.ascontiguousarray(merged_nodes[:, 2]),
+    )
+    mixed_faces = _FaceExtractor.extract_faces_mixed(
+        prism_cells, merged_cells.astype(np.int64), node_arr
+    )
+    mixed_report = _check_overlap(merged_nodes, merged_cells, faces=mixed_faces)
+    if not len(mixed_report.overlapping_cell_ids):
+        return None
+    global_ids = mixed_report.overlapping_cell_ids
+    tet_ids = global_ids[global_ids >= n_prism] - n_prism
+    if len(tet_ids) == 0:
+        return None
+    mask = np.zeros(len(merged_cells), dtype=bool)
+    mask[tet_ids] = True
+    logger.warning(
+        f"Prism-aware overlap check: {len(tet_ids)} core tet cell(s) physically "
+        f"overlap a BL prism or another tet across the full mixed mesh - "
+        f"invisible to the tet-only overlap check, added to the repair target set"
+    )
+    return mask
+
+
 def generate_hybrid_mesh(
     surface_nodes: np.ndarray,
     surface_faces: np.ndarray,
@@ -139,15 +207,34 @@ def generate_hybrid_mesh(
 
     logger.info("Starting domain-conforming hybrid mesh generation...")
 
-    (merged_nodes, merged_cells, cell_groups, n_bl_cells, bl_source_vertex,
-     bl_extrude_faces) = _build_merged_mesh(
+    (merged_nodes, prism_cells, merged_cells, cell_groups, n_bl_prisms,
+     bl_source_vertex, bl_extrude_faces, bl_cell_groups, n_bl_cells) = _build_merged_mesh(
         surface_nodes, surface_faces, bounding_box,
         growth_rate, max_layers, min_cell_size, surface_boundaries, max_cell_size,
         extra_thickness_limit, bl_layers,
     )
+    # Only the fine near-wall BL stage is genuine prisms now (prism_cells,
+    # tracked separately - see PrismCells/_build_merged_mesh's docstrings),
+    # entirely outside merged_cells; every repair stage below (Stage
+    # A/B'/D) - all written for a single (n,4) tet array with n_bl_cells as
+    # a row-index split within it - therefore never sees a prism cell.
+    # This is a deliberate scope boundary (prisms bypass this repair
+    # pipeline for now, see _build_merged_mesh's docstring), not a bug.
+    #
+    # The faster-growing TRANSITION stage (bl_layers..max_layers) is still
+    # tetrahedra, occupying merged_cells[:n_bl_cells] (see
+    # _build_merged_mesh's docstring for why - this is the original,
+    # pre-existing design; an earlier revision of this function mistakenly
+    # hardcoded n_bl_cells=0 unconditionally here, treating the ENTIRE
+    # extruded stack as prism-only and leaving the transition tets with no
+    # BL-origin protection/threshold at all - confirmed and restored).
+    # n_bl_cells is exactly 0 only when there's genuinely no transition
+    # stage (bl_layers >= max_layers) or no BL region at all - both already
+    # the pre-existing "no BL region" code path every one of these
+    # functions already handles correctly.
 
     # Build VolumeMeshData structure
-    from ..structures import NodeArray, TetrahedralCells, GridMetadata, VolumeMeshData
+    from ..structures import NodeArray, TetrahedralCells, PrismCells, GridMetadata, VolumeMeshData
 
     logger.info("Step 4/4: Re-orienting and computing tetrahedral volumes...")
     merged_cells = orient_tetrahedra(merged_nodes, merged_cells.astype(np.int64))
@@ -197,6 +284,62 @@ def generate_hybrid_mesh(
         volumes = volumes[nonmanifold_keep]
         cell_groups = cell_groups[nonmanifold_keep]
 
+    # Merge geometrically-coincident points BEFORE the pre-repair quality
+    # check below - the BL extrusion and the core tetgen fill are two
+    # independently-generated pieces stitched together right above
+    # (_build_merged_mesh), and their shared interface routinely ends up
+    # with two coincident-but-differently-indexed points on either side of
+    # the seam. initial_report's overlap check (right below) has no
+    # tolerance for that: two faces that are actually the same physical
+    # face but reference different node indices look like a genuine
+    # physical overlap. Confirmed directly as a real, severe effect, not a
+    # theoretical one: on a real case this produced 208,512 cells flagged
+    # "overlapping" (of ~2.7M total) before this dedup pass existed - two
+    # orders of magnitude more than the ~2 cells every fully-processed
+    # (post-repair, post-dedup) quality report on the same case ever
+    # showed. Left unfixed, that inflated overlap_bad_mask (below) feeds
+    # straight into Stage A as extra_bad_mask, so EVERY downstream repair
+    # stage (A, B', B, D) inherits a bad_cell count dominated by this one
+    # false-positive class rather than genuine skew/orthogonality/volume-
+    # ratio defects - directly responsible for repair actions elsewhere in
+    # this pipeline reporting hundreds of thousands of "bad cells" that
+    # were never actually bad. See the near-identical pass just before
+    # Stage D, and the "Final defensive pass" at the very end, for the
+    # same fix applied at the two other points a fresh coincidence can be
+    # introduced (Stage B' cavity splicing, Stage B thickness capping).
+    n_nodes_before_seam_merge = len(merged_nodes)
+    merged_nodes, merged_cells, _seam_remap = _dedupe_coincident_points(merged_nodes, merged_cells)
+    if len(merged_nodes) != n_nodes_before_seam_merge:
+        merged_cells = merged_cells.astype(np.int32)
+        # prism_cells lives entirely outside merged_cells (Stage A/B'/D's
+        # view) but can share nodes at the BL/core interface with what this
+        # dedup pass just merged - its indices must follow the same remap
+        # or they silently point at the wrong (or, if a node was actually
+        # dropped by index-collapse, a stale) row of the now-shorter
+        # merged_nodes array.
+        prism_cells = _seam_remap[prism_cells]
+        _tmp_nodes_obj_seam = NodeArray(
+            x=merged_nodes[:, 0].copy(), y=merged_nodes[:, 1].copy(), z=merged_nodes[:, 2].copy()
+        )
+        post_merge_volumes_seam = TetrahedralCells.compute_volumes(_tmp_nodes_obj_seam, merged_cells)
+        degenerate_threshold_seam = (min_cell_size ** 3) * 1e-6
+        valid_mask_seam = post_merge_volumes_seam > degenerate_threshold_seam
+        if int(np.sum(~valid_mask_seam)) > 0:
+            logger.warning(
+                f"Pre-repair coincident-point merge (BL/core seam) left "
+                f"{int(np.sum(~valid_mask_seam))} newly-degenerate cells, removing them..."
+            )
+            n_bl_cells = int(np.sum(valid_mask_seam[:n_bl_cells]))
+            merged_cells = merged_cells[valid_mask_seam]
+            volumes = volumes[valid_mask_seam]
+            cell_groups = cell_groups[valid_mask_seam]
+        nonmanifold_keep_seam = repair_nonmanifold_cells(merged_nodes, merged_cells)
+        if not nonmanifold_keep_seam.all():
+            n_bl_cells = int(np.sum(nonmanifold_keep_seam[:n_bl_cells]))
+            merged_cells = merged_cells[nonmanifold_keep_seam]
+            volumes = volumes[nonmanifold_keep_seam]
+            cell_groups = cell_groups[nonmanifold_keep_seam]
+
     # ------------------------------------------------------------------
     # Mesh quality repair: Stage A (quality-gated smoothing, in-place on
     # merged_nodes - see mesh_repair.py) then, if bad cells remain, Stage B
@@ -207,7 +350,7 @@ def generate_hybrid_mesh(
     # isn't enough.
     # ------------------------------------------------------------------
     from ..validation.quality_validator import MeshQualityValidator
-    from .face_extractor import FaceExtractor
+    from .face_extractor import FaceExtractor, repair_nonmanifold_mixed
 
     merged_cells = merged_cells.astype(np.int32)
     validator = MeshQualityValidator()
@@ -235,6 +378,16 @@ def generate_hybrid_mesh(
     if initial_report.overlapping_cell_ids is not None and len(initial_report.overlapping_cell_ids):
         overlap_bad_mask = np.zeros(len(merged_cells), dtype=bool)
         overlap_bad_mask[initial_report.overlapping_cell_ids] = True
+
+    # Supplement with the prism-aware check (see its own docstring) - a bad
+    # core tet overlapping a BL prism is invisible to the tet-only check
+    # above but still needs to reach Stage A/D's target set.
+    prism_overlap_mask = _prism_aware_overlap_bad_tet_mask(merged_nodes, prism_cells, merged_cells)
+    if prism_overlap_mask is not None:
+        if overlap_bad_mask is None:
+            overlap_bad_mask = prism_overlap_mask
+        else:
+            overlap_bad_mask |= prism_overlap_mask
 
     nodes_before_repair = merged_nodes
     merged_nodes, bad_mask, repair_actions = smooth_bad_cells(
@@ -325,6 +478,7 @@ def generate_hybrid_mesh(
             # keep alive - only extra_limit (a tiny, derived array) is
             # actually needed past this point.
             del merged_nodes, merged_cells, volumes, cell_groups, bad_mask, initial_report
+            del prism_cells, bl_cell_groups
             import gc
             gc.collect()
             return generate_hybrid_mesh(
@@ -343,6 +497,190 @@ def generate_hybrid_mesh(
                 f"caller's own quality gate to report"
             )
 
+    # Merge geometrically-coincident points BEFORE the overlap re-check
+    # below - Stage B' cavity splices routinely leave two cavities' new
+    # interior points sitting at (or extremely near) the same physical
+    # location under different node indices, since each cavity's own
+    # standalone tetgen call has no visibility into any other cavity's
+    # result. check_face_overlap_and_proximity has no tolerance for that:
+    # two faces that are actually the same physical face but reference
+    # different-indexed-but-coincident points look like a genuine
+    # overlap. Confirmed directly as the actual cause of a wildly inflated
+    # count on a real case: 208,512 cells flagged "overlapping" here
+    # before this dedup pass existed - two orders of magnitude more than
+    # the ~2 cells every fully-processed (post-dedup) quality report on
+    # the same mesh ever showed. This duplicates the logic of the "Final
+    # defensive pass" further below (which still needs to run again at
+    # the very end - Stage D's own edge collapses are watertight by
+    # construction and shouldn't reintroduce coincident points, but this
+    # is cheap enough to not skip out of caution).
+    n_nodes_before_early_merge = len(merged_nodes)
+    merged_nodes, merged_cells, _early_remap = _dedupe_coincident_points(merged_nodes, merged_cells)
+    if len(merged_nodes) != n_nodes_before_early_merge:
+        mesh_changed_by_repair = True
+        merged_cells = merged_cells.astype(np.int32)
+        prism_cells = _early_remap[prism_cells]
+        _tmp_nodes_obj_early = NodeArray(
+            x=merged_nodes[:, 0].copy(), y=merged_nodes[:, 1].copy(), z=merged_nodes[:, 2].copy()
+        )
+        post_merge_volumes_early = TetrahedralCells.compute_volumes(_tmp_nodes_obj_early, merged_cells)
+        degenerate_threshold_early = (min_cell_size ** 3) * 1e-6
+        valid_mask_early = post_merge_volumes_early > degenerate_threshold_early
+        if int(np.sum(~valid_mask_early)) > 0:
+            logger.warning(
+                f"Pre-Stage-D coincident-point merge left {int(np.sum(~valid_mask_early))} "
+                f"newly-degenerate cells, removing them..."
+            )
+            n_bl_cells = int(np.sum(valid_mask_early[:n_bl_cells]))
+            merged_cells = merged_cells[valid_mask_early]
+            cell_groups = cell_groups[valid_mask_early]
+            bad_mask = bad_mask[valid_mask_early]
+        nonmanifold_keep_early = repair_nonmanifold_cells(merged_nodes, merged_cells)
+        if not nonmanifold_keep_early.all():
+            n_bl_cells = int(np.sum(nonmanifold_keep_early[:n_bl_cells]))
+            merged_cells = merged_cells[nonmanifold_keep_early]
+            cell_groups = cell_groups[nonmanifold_keep_early]
+            bad_mask = bad_mask[nonmanifold_keep_early]
+
+    # Re-check physical cell overlap fresh, on the CURRENT mesh (post Stage
+    # A/B'/nonmanifold-repair), before deciding whether Stage D has
+    # anything to do. The overlap signal Stage A originally received
+    # (overlap_bad_mask, above) does not survive this far: Stage B''s own
+    # internal "is this cavity still bad" re-evaluation only re-derives
+    # skew/orthogonality/adjacent-ratio (mesh_repair._bad_cell_mask's own
+    # criteria - a spatial overlap check is too expensive to re-run per
+    # cavity), so a cell that was never touched by Stage A/B' but is still
+    # physically overlapping a distant cell silently drops out of bad_mask.
+    # Reusing the ORIGINAL overlap_bad_mask by index isn't safe either -
+    # cell indices have shifted from nonmanifold-repair/Stage B' cell-count
+    # changes since it was computed - so this re-derives it from scratch on
+    # the mesh as it stands right now, the only way to get CURRENT indices
+    # right. Confirmed as a real, not just theoretical, gap: on a real
+    # case Stage D left 2 CRITICAL-severity overlapping cells completely
+    # untouched end to end for exactly this reason.
+    collapse_faces = FaceExtractor.extract_faces(merged_cells, NodeArray(
+        x=merged_nodes[:, 0].copy(), y=merged_nodes[:, 1].copy(), z=merged_nodes[:, 2].copy()
+    ))
+    from ..validation.mesh_overlap_check import check_face_overlap_and_proximity
+    current_overlap_report = check_face_overlap_and_proximity(merged_nodes, merged_cells, faces=collapse_faces)
+    if len(current_overlap_report.overlapping_cell_ids):
+        bad_mask = bad_mask.copy()
+        bad_mask[current_overlap_report.overlapping_cell_ids] = True
+        logger.warning(
+            f"Stage D: {len(current_overlap_report.overlapping_cell_ids)} cell(s) still "
+            f"physically overlap a distant cell after Stage A/B' - adding them to Stage D's "
+            f"target set (skew/orthogonality/adjacent-ratio checks alone wouldn't have caught them)"
+        )
+
+    # Same prism-aware supplement as the pre-Stage-A check above, re-derived
+    # fresh (cell indices have shifted since then from Stage A/B'/nonmanifold
+    # repair, same reasoning as current_overlap_report just above).
+    prism_overlap_mask_d = _prism_aware_overlap_bad_tet_mask(merged_nodes, prism_cells, merged_cells)
+    if prism_overlap_mask_d is not None:
+        bad_mask = bad_mask.copy()
+        bad_mask |= prism_overlap_mask_d
+
+    if np.any(bad_mask):
+        # --- TEMPORARY DIAGNOSTIC: break down bad_mask by criterion, region,
+        # and BL/core-interface adjacency, to root-cause the core-region
+        # share of bad cells (tetgen grading vs BL-splitting artifacts).
+        # Remove once the core-region investigation concludes.
+        skew_arr = validator.compute_cell_skewness(merged_nodes, merged_cells)
+        diag = validator.compute_face_diagnostics(merged_nodes, merged_cells, collapse_faces)
+        ortho_bad_face = diag['angle_deg'] > validator.thresholds['max_orthogonality_angle']
+        adjratio_bad_face = diag['volume_ratio'] > validator.thresholds['max_adjacent_volume_ratio']
+        cell_ortho_bad = np.zeros(len(merged_cells), dtype=bool)
+        cell_ortho_bad[diag['owner'][ortho_bad_face]] = True
+        cell_ortho_bad[diag['neighbor'][ortho_bad_face]] = True
+        cell_adjratio_bad = np.zeros(len(merged_cells), dtype=bool)
+        cell_adjratio_bad[diag['owner'][adjratio_bad_face]] = True
+        cell_adjratio_bad[diag['neighbor'][adjratio_bad_face]] = True
+        cell_skew_bad = skew_arr > validator.thresholds['max_skewness']
+
+        conn = collapse_faces.connectivity
+        owner_f, neighbor_f = conn[:, 0], conn[:, 1]
+        interior_f = neighbor_f >= 0
+        crosses_interface = interior_f & ((owner_f < n_bl_cells) != (neighbor_f < n_bl_cells))
+        interface_cells = np.zeros(len(merged_cells), dtype=bool)
+        interface_cells[owner_f[crosses_interface]] = True
+        interface_cells[neighbor_f[crosses_interface]] = True
+
+        core_bad_idx = np.flatnonzero(bad_mask & (np.arange(len(merged_cells)) >= n_bl_cells))
+        bl_bad_idx = np.flatnonzero(bad_mask & (np.arange(len(merged_cells)) < n_bl_cells))
+        core_vol = validator._compute_tetrahedron_volumes(merged_nodes, merged_cells)
+
+        def _summ(idx, label):
+            if len(idx) == 0:
+                logger.info(f"Stage D DIAGNOSTIC [{label}]: 0 cells")
+                return
+            n_skew = int(np.sum(cell_skew_bad[idx]))
+            n_ortho = int(np.sum(cell_ortho_bad[idx]))
+            n_adjr = int(np.sum(cell_adjratio_bad[idx]))
+            n_iface = int(np.sum(interface_cells[idx]))
+            vol_idx = core_vol[idx]
+            logger.info(
+                f"Stage D DIAGNOSTIC [{label}]: n={len(idx)}, "
+                f"skew-bad={n_skew} ({100*n_skew/len(idx):.0f}%), "
+                f"ortho-bad={n_ortho} ({100*n_ortho/len(idx):.0f}%), "
+                f"adjratio-bad={n_adjr} ({100*n_adjr/len(idx):.0f}%), "
+                f"touches BL/core interface={n_iface} ({100*n_iface/len(idx):.0f}%), "
+                f"volume range=[{vol_idx.min():.3e}, {vol_idx.max():.3e}], "
+                f"mean={vol_idx.mean():.3e}"
+            )
+
+        _summ(bl_bad_idx, "BL-region bad cells")
+        _summ(core_bad_idx, "core-region bad cells")
+        # Same breakdown restricted to core cells NOT touching the interface
+        # (i.e. genuinely "deep core", away from any BL-splicing seam) - if
+        # this count is small relative to core_bad_idx, the core-region
+        # problem is concentrated at the seam, not spread through tetgen's
+        # far-field fill.
+        core_bad_far = core_bad_idx[~interface_cells[core_bad_idx]]
+        _summ(core_bad_far, "core-region bad cells NOT touching BL interface")
+        # --- END TEMPORARY DIAGNOSTIC
+
+        # Stage D: last-resort local edge collapse (mesh_repair_collapse.py)
+        # for cells that are STILL bad at this point - i.e. Stage A
+        # (smoothing) and Stage B' (cavity re-tiling) already couldn't fix
+        # them, and Stage B's full regeneration retry either doesn't apply
+        # here (extra_limit was None above) or has already been spent (this
+        # call itself IS that one retry, _is_stage_b_retry=True, so it will
+        # never recurse into another). Unlike every stage above, this
+        # changes cell COUNT (not just node positions or a cavity's local
+        # tetrahedralization) - see that module's docstring for why an edge
+        # collapse is safe here (never touches physical-boundary geometry,
+        # never introduces a negative-volume or newly-bad neighbour cell,
+        # stays watertight by construction) where naively deleting a cell
+        # would not be. NOTE: an edge collapse is a purely local, shape-
+        # driven operation - it has no notion of "does this fix the
+        # overlap with some distant cell" and isn't guaranteed to (the
+        # overlap might not even involve a short edge at all). Cells added
+        # to bad_mask above purely for overlap, with no accompanying
+        # skew/orthogonality/adjacent-ratio defect, likely have no short
+        # edge to collapse and will end up in collapse_bad_cells' own
+        # "unresolved" count - left for the caller's quality gate to still
+        # report, same as any other unfixable defect.
+        from .mesh_repair_collapse import collapse_bad_cells
+        n_cells_before_collapse = len(merged_cells)
+        n_nodes_before_collapse = len(merged_nodes)
+        # prism_cells is entirely outside collapse_bad_cells' own view (it
+        # only ever operates on the tet portion) but can share BL/core-
+        # interface nodes with it - protect them from its final compaction
+        # dropping a node whose only surviving references are prism cells
+        # (confirmed as a real crash on a real case: PrismCells.compute_
+        # volumes later indexing past the end of the compacted node array).
+        prism_referenced_nodes = np.unique(prism_cells.ravel()) if len(prism_cells) else None
+        merged_nodes, merged_cells, cell_groups, n_bl_cells, collapse_actions, collapse_node_remap = collapse_bad_cells(
+            merged_nodes, merged_cells, cell_groups, n_bl_cells, collapse_faces, bad_mask, validator,
+            extra_referenced_nodes=prism_referenced_nodes,
+        )
+        repair_actions.extend(collapse_actions)
+        if len(merged_nodes) != n_nodes_before_collapse:
+            prism_cells = collapse_node_remap[prism_cells]
+        if len(merged_cells) != n_cells_before_collapse:
+            mesh_changed_by_repair = True
+            merged_cells = merged_cells.astype(np.int32)
+
     # ------------------------------------------------------------------
     # Final defensive pass: merge any geometrically-coincident points that
     # ended up under different global node indices (see
@@ -360,6 +698,7 @@ def generate_hybrid_mesh(
     if len(merged_nodes) != n_nodes_before_merge:
         mesh_changed_by_repair = True
         merged_cells = merged_cells.astype(np.int32)
+        prism_cells = _remap[prism_cells]
 
         # Merging can turn a cell degenerate (2+ of its 4 vertices now
         # identical) - same threshold/reasoning as the earlier degenerate-
@@ -390,6 +729,27 @@ def generate_hybrid_mesh(
     nodes_obj = NodeArray(
         x=merged_nodes[:, 0].copy(), y=merged_nodes[:, 1].copy(), z=merged_nodes[:, 2].copy()
     )
+
+    # Non-manifold check across the FULL mixed mesh (prism+tet together) -
+    # the tet-only repair_nonmanifold_cells pass(es) above structurally
+    # cannot see a face shared by, e.g., 2 tets + 1 prism (or any
+    # multiplicity involving a prism cell at all), since they only ever
+    # look at merged_cells. Confirmed as a real gap on a real case: 37
+    # such faces survived every check above and only surfaced as a hard
+    # crash in FaceExtractor.extract_faces_mixed the first time anything
+    # tried to build a face graph over the true combined mesh. Cheap when
+    # clean (mirrors the tet-only checks' own no-op cost when nothing is
+    # wrong) so run unconditionally rather than only after this mesh is
+    # already suspected bad.
+    if len(prism_cells):
+        prism_keep_mm, tet_keep_mm = repair_nonmanifold_mixed(nodes_obj, prism_cells, merged_cells.astype(np.int64))
+        if not prism_keep_mm.all() or not tet_keep_mm.all():
+            mesh_changed_by_repair = True
+            prism_cells = prism_cells[prism_keep_mm]
+            bl_cell_groups = bl_cell_groups[prism_keep_mm]
+            merged_cells = merged_cells[tet_keep_mm]
+            cell_groups = cell_groups[tet_keep_mm]
+
     volumes = TetrahedralCells.compute_volumes(nodes_obj, merged_cells)
 
     cells_obj = TetrahedralCells(
@@ -397,14 +757,90 @@ def generate_hybrid_mesh(
         volumes=volumes
     )
 
+    prism_cells = prism_cells.astype(np.int32)
+    n_prism = len(prism_cells)
+    prism_cells_obj = None
+    if n_prism > 0:
+        prism_volumes = PrismCells.compute_volumes(nodes_obj, prism_cells)
+        prism_cells_obj = PrismCells(connectivity=prism_cells, volumes=prism_volumes)
+
     from .mesh_boundary import identify_boundaries_from_surface
-    boundaries_obj = identify_boundaries_from_surface(
+    tet_boundaries = identify_boundaries_from_surface(
         merged_cells, surface_faces, surface_boundaries, direct_cell_groups=cell_groups
     )
 
+    # Merge prism-side boundary groups into tet_boundaries' global index
+    # space. Prisms occupy [0, n_prism) already (this module's global-index
+    # convention, matching FaceExtractor.extract_faces_mixed); tet_boundaries'
+    # own cell indices are LOCAL to merged_cells (tets only) and must be
+    # shifted by +n_prism to land in the same shared space. Built directly
+    # from bl_cell_groups (known exactly per prism cell from BL-extrusion
+    # tracking - see _build_merged_mesh) rather than routed through
+    # identify_boundaries_from_surface at all: that function's own boundary-
+    # face derivation is tet-specific (4-face templates), and re-deriving
+    # it for prisms is unnecessary work when the group name is already
+    # known per-cell directly, the same reasoning direct_cell_groups
+    # already uses for BL-extruded tet cells prior to this change.
+    groups: Dict[str, np.ndarray] = {}
+    bc_types: Dict[str, str] = {}
+    final_mixed_faces = None
+    if n_prism > 0:
+        for name in np.unique(bl_cell_groups):
+            if not name:
+                continue
+            idx = np.flatnonzero(bl_cell_groups == name).astype(np.int32)
+            groups[name] = idx
+            bc_types[name] = surface_boundaries.bc_types.get(name, 'WALL')
+
+        # Untagged (bl_cell_groups=='') prisms that still own a genuine
+        # boundary face are the early-BL-column-termination artifacts
+        # described where bl_cell_groups is built above (a column that
+        # stopped growing at a sharp/complex feature, layers past the first
+        # deliberately left untagged) - a real exterior face, but not the
+        # physical wall. Route them into the same 'UNCLASSIFIED' catch-all
+        # mesh_boundary.map_surface_boundaries already uses for the
+        # analogous tet-side gap, instead of leaving them in no group at
+        # all - the exact "silently dropped from every boundary condition"
+        # failure mode that fallback exists to prevent (confirmed as a
+        # real, not theoretical, gap on a real case - see ProjectFiles
+        # Part6/7 P21: 33,448 such faces on cube_demo, concentrated at
+        # sharp cube edges).
+        untagged_mask = bl_cell_groups == ''
+        if untagged_mask.any():
+            final_mixed_faces = FaceExtractor.extract_faces_mixed(
+                prism_cells, merged_cells.astype(np.int64), nodes_obj
+            )
+            boundary_idx = final_mixed_faces.get_boundary_face_indices()
+            owners = final_mixed_faces.connectivity[boundary_idx, 0]
+            prism_owners = owners[owners < n_prism]
+            orphaned_prisms = np.unique(prism_owners[untagged_mask[prism_owners]]).astype(np.int32)
+            if len(orphaned_prisms):
+                logger.warning(
+                    f"{len(orphaned_prisms)} prism cell(s) own a boundary face from "
+                    f"early BL-column termination (sharp/complex geometry feature) "
+                    f"but aren't the physical wall - placed in 'UNCLASSIFIED' instead "
+                    f"of the real wall group, same fallback mesh_boundary.py already "
+                    f"uses for the analogous tet-side gap"
+                )
+                if 'UNCLASSIFIED' in groups:
+                    groups['UNCLASSIFIED'] = np.union1d(groups['UNCLASSIFIED'], orphaned_prisms).astype(np.int32)
+                else:
+                    groups['UNCLASSIFIED'] = orphaned_prisms
+                    bc_types['UNCLASSIFIED'] = 'WALL'
+    for name, idx in tet_boundaries.groups.items():
+        shifted = (idx.astype(np.int64) + n_prism).astype(np.int32)
+        if name in groups:
+            groups[name] = np.union1d(groups[name], shifted).astype(np.int32)
+        else:
+            groups[name] = shifted
+            bc_types[name] = tet_boundaries.bc_types.get(name, 'WALL')
+
+    from ..structures import BoundaryMap
+    boundaries_obj = BoundaryMap(groups=groups, bc_types=bc_types)
+
     metadata = GridMetadata(
         node_count=len(merged_nodes),
-        cell_count=len(merged_cells),
+        cell_count=n_prism + len(merged_cells),
         boundary_groups=list(boundaries_obj.groups.keys()),
         file_format="hybrid"
     )
@@ -413,12 +849,22 @@ def generate_hybrid_mesh(
         nodes=nodes_obj,
         cells=cells_obj,
         boundaries=boundaries_obj,
-        metadata=metadata
+        metadata=metadata,
+        prism_cells=prism_cells_obj,
+        # Reuse the mixed face graph already built just above (to find
+        # orphaned-prism boundary faces for the UNCLASSIFIED fallback)
+        # instead of paying for extract_faces_mixed a second time the
+        # moment anything calls ensure_faces_exist() - None when there was
+        # nothing untagged to check (no BL region, or every prism already
+        # correctly grouped), in which case ensure_faces_exist() computes
+        # it lazily as before.
+        faces=final_mixed_faces,
     )
 
     logger.success(
         f"Domain-conforming hybrid mesh generation complete: "
-        f"{volume_mesh.node_count} nodes, {volume_mesh.cell_count} cells, "
+        f"{volume_mesh.node_count} nodes, {volume_mesh.cell_count} cells "
+        f"({n_prism} BL prisms + {len(merged_cells)} core tets), "
         f"total volume: {volume_mesh.total_volume:.6e} m^3"
     )
 

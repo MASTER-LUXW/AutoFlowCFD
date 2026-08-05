@@ -122,6 +122,9 @@ def export_volume_mesh_to_nas(
     # (a very common case: inlet/outlet/wall/symmetry/ground).
     solid_pid = n_boundary_groups + 1
 
+    prism_cells = getattr(volume_mesh, 'prism_cells', None)
+    has_prisms = prism_cells is not None and prism_cells.count > 0
+
     try:
         with open(output_path, 'w') as f:
             # Write header
@@ -131,9 +134,20 @@ def export_volume_mesh_to_nas(
             logger.info("Writing nodes...")
             _write_nodes(f, volume_mesh.nodes, scale_factor)
 
-            # Write tetrahedral elements (CTETRA cards)
+            # Write volume elements. Prisms (BL region, CPENTA) first, then
+            # tetrahedra (core region, CTETRA) - element IDs follow the same
+            # global ordering convention as the mesh's own cell indices
+            # ([0, n_prism) prism, [n_prism, n_prism+n_tet) tet - see
+            # PrismCells/face_extractor.extract_faces_mixed), so a boundary
+            # group's cell indices (below) line up directly with element IDs
+            # without any extra remapping.
+            n_prism = 0
+            if has_prisms:
+                logger.info("Writing pentahedral (BL prism) elements...")
+                n_prism = _write_pentahedra(f, prism_cells.connectivity, solid_pid)
+
             logger.info("Writing tetrahedral elements...")
-            n_tets = _write_tetrahedra(f, volume_mesh.cells.connectivity, solid_pid)
+            n_tets = _write_tetrahedra(f, volume_mesh.cells.connectivity, solid_pid, start_eid=n_prism + 1)
 
             # Write boundary information (optional): boundary faces as CTRIA3
             # elements referencing per-group PSHELL properties, so the groups
@@ -142,8 +156,7 @@ def export_volume_mesh_to_nas(
             if write_boundaries:
                 logger.info("Writing boundary groups...")
                 _write_boundaries(
-                    f, volume_mesh.boundaries, volume_mesh.cells.connectivity,
-                    solid_pid=solid_pid, start_eid=n_tets + 1
+                    f, volume_mesh, solid_pid=solid_pid, start_eid=n_prism + n_tets + 1
                 )
 
             # Every Bulk Data deck must end with ENDDATA regardless of whether
@@ -269,7 +282,7 @@ def _write_nodes(f, nodes, scale_factor: float) -> None:
     logger.info(f"  Total nodes written: {n_nodes:,}")
 
 
-def _write_tetrahedra(f, connectivity: np.ndarray, solid_pid: int) -> int:
+def _write_tetrahedra(f, connectivity: np.ndarray, solid_pid: int, start_eid: int = 1) -> int:
     """Write CTETRA cards for tetrahedral elements.
 
     ANSA Nastran CTETRA card format (fixed-width fields):
@@ -283,11 +296,18 @@ def _write_tetrahedra(f, connectivity: np.ndarray, solid_pid: int) -> int:
         solid_pid: PSOLID property ID for the volume elements. Must match the
             PSOLID card written by _write_boundaries (or be free of any
             PSHELL PID) to avoid a duplicate-PID Bulk Data entry.
+        start_eid: First element ID to use (default 1) - non-1 when prism
+            (CPENTA) elements were already written before this call and
+            occupy [1, start_eid) (see export_volume_mesh_to_nas: prisms
+            occupy the same [0, n_prism) global cell-index range here that
+            they do everywhere else in this codebase, so element IDs stay
+            consistent with boundary group cell indices).
 
     Returns:
-        int: Number of tetrahedra written (elem IDs used are 1..n_tets), so
-        callers can continue element numbering (e.g. boundary CTRIA3 cards)
-        without colliding with these element IDs.
+        int: Number of tetrahedra written (elem IDs used are
+        start_eid..start_eid+n_tets-1), so callers can continue element
+        numbering (e.g. boundary CTRIA3 cards) without colliding with these
+        element IDs.
     """
     n_tets = len(connectivity)
 
@@ -298,7 +318,7 @@ def _write_tetrahedra(f, connectivity: np.ndarray, solid_pid: int) -> int:
         end_idx = min(start_idx + batch_size, n_tets)
 
         for i in range(start_idx, end_idx):
-            elem_id = i + 1  # Nastran IDs start from 1
+            elem_id = start_eid + i
             g1 = int(connectivity[i, 0]) + 1  # Convert 0-indexed to 1-indexed
             g2 = int(connectivity[i, 1]) + 1
             g3 = int(connectivity[i, 2]) + 1
@@ -315,46 +335,99 @@ def _write_tetrahedra(f, connectivity: np.ndarray, solid_pid: int) -> int:
     return n_tets
 
 
+def _write_pentahedra(f, connectivity: np.ndarray, solid_pid: int, start_eid: int = 1) -> int:
+    """Write CPENTA cards for triangular-prism (BL region) elements.
+
+    ANSA Nastran CPENTA card format (fixed-width fields):
+    CPENTA      EID       PID      G1       G2       G3       G4       G5       G6
+
+    G1-G3 are one triangular cap, G4-G6 the other, with Gi+3 "above" Gi -
+    exactly PrismCells' own (v0,v1,v2,w0,w1,w2) convention (w_i is the
+    extrusion of v_i), so connectivity needs no reordering here.
+
+    Card name + EID + PID + 6 grid IDs = 9 fields, fitting Nastran's 10
+    (8-char) fields-per-line Small Field layout with room to spare - no
+    continuation card needed (unlike PSHELL elsewhere in this file, which
+    has more data than fits on one line).
+
+    Args:
+        f: File handle
+        connectivity: Prism connectivity array, shape=(n_prism, 6)
+        solid_pid: PSOLID property ID for the volume elements (shared with
+            _write_tetrahedra - both regions belong to the same solid part)
+        start_eid: First element ID to use (default 1)
+
+    Returns:
+        int: Number of prisms written (elem IDs used are
+        start_eid..start_eid+n_prism-1)
+    """
+    n_prism = len(connectivity)
+    batch_size = 1000
+
+    for start_idx in range(0, n_prism, batch_size):
+        end_idx = min(start_idx + batch_size, n_prism)
+
+        for i in range(start_idx, end_idx):
+            elem_id = start_eid + i
+            g = [int(connectivity[i, k]) + 1 for k in range(6)]
+
+            line = (
+                f"CPENTA{elem_id:>10}{solid_pid:>8}{g[0]:>8}{g[1]:>8}{g[2]:>8}"
+                f"{g[3]:>8}{g[4]:>8}{g[5]:>8}\n"
+            )
+            f.write(line)
+
+        if (start_idx + batch_size) % 10000 == 0:
+            logger.debug(f"  Written {start_idx + batch_size}/{n_prism} elements")
+
+    logger.info(f"  Total pentahedral elements written: {n_prism:,}")
+    return n_prism
+
+
 def _extract_boundary_faces_by_group(
-    connectivity: np.ndarray,
+    volume_mesh,
     boundary_groups: Dict[str, np.ndarray]
 ) -> Dict[str, np.ndarray]:
     """Recover each boundary group's actual exterior triangular faces.
 
-    ``boundary_groups`` maps a boundary name to indices of the *owning
-    tetrahedra* (see mesh_boundary.identify_boundaries_from_surface), not
-    face geometry. To write a CTRIA3 element that a PSHELL property can
-    actually reference, we need the specific 3 nodes of each such cell's
-    exterior face - found the same way FaceExtractor/identify_boundaries_from_surface
-    do: a tet face that occurs exactly once across the whole mesh is a
-    boundary face.
+    ``boundary_groups`` maps a boundary name to *owning cell* indices (see
+    mesh_boundary.identify_boundaries_from_surface) in this mesh's GLOBAL
+    cell-index convention - prisms [0, n_prism), tets [n_prism,
+    n_prism+n_tet) whenever volume_mesh has a BL prism region (see
+    PrismCells/face_extractor.extract_faces_mixed) - NOT bare 0-based
+    indices into a single tet-only connectivity array. Deriving boundary
+    faces from volume_mesh.ensure_faces_exist() (rather than re-deriving
+    "occurs exactly once" face dedup from a raw tet-only connectivity array
+    here, as an earlier version of this function did) gets this right for
+    free, reusing the SAME face graph the mesh's own quality validation
+    computes and already gets right in both the tet-only and mixed cases.
+
+    That earlier version was a real, confirmed bug for any mesh with a BL
+    prism region: it built cell adjacency purely from `cells.connectivity`
+    (tet-only) but was handed `boundary_groups`' GLOBAL indices, most of
+    which (the wall/body group especially - it's now owned by prisms, not
+    tets) point at prism cells entirely outside that tet-only array. Wrong
+    faces got attributed to each boundary group (silently, when a prism
+    index happened to be < n_tets - no crash to notice it by), which is why
+    an exported volume mesh's boundary surface stopped matching the
+    original input surface once the BL region became true prisms.
 
     Args:
-        connectivity: Tetrahedral connectivity, shape=(n_cells, 4)
-        boundary_groups: boundary name -> owning cell indices
+        volume_mesh: VolumeMeshData - faces are extracted (or reused, if
+            already cached) from this directly
+        boundary_groups: boundary name -> owning cell indices, in
+            volume_mesh's own global cell-index convention
 
     Returns:
         Dict[str, np.ndarray]: boundary name -> face node indices (0-indexed),
         shape=(n_faces_in_group, 3)
     """
-    n_cells = len(connectivity)
-    face_templates = np.array([
-        [0, 1, 2],
-        [0, 1, 3],
-        [0, 2, 3],
-        [1, 2, 3]
-    ])
-    all_faces = connectivity[:, face_templates].reshape(-1, 3)
-    owner_cells = np.repeat(np.arange(n_cells), 4)
+    faces = volume_mesh.ensure_faces_exist()
+    n_cells = volume_mesh.cell_count
 
-    sorted_faces = np.sort(all_faces, axis=1)
-    face_dtype = np.dtype((np.void, sorted_faces.dtype.itemsize * 3))
-    face_voids = np.ascontiguousarray(sorted_faces).view(face_dtype).reshape(-1)
-    _, inverse, counts = np.unique(face_voids, return_inverse=True, return_counts=True)
-    is_boundary_face = counts[inverse] == 1
-
-    boundary_faces = all_faces[is_boundary_face]
-    boundary_owners = owner_cells[is_boundary_face]
+    boundary_face_idx = faces.get_boundary_face_indices()
+    boundary_owners = faces.connectivity[boundary_face_idx, 0]
+    boundary_faces = faces.node_connectivity[boundary_face_idx]
 
     faces_by_group = {}
     for name, cell_indices in boundary_groups.items():
@@ -366,26 +439,30 @@ def _extract_boundary_faces_by_group(
 
 
 def _write_boundaries(
-    f, boundaries, connectivity: np.ndarray, solid_pid: int, start_eid: int
+    f, volume_mesh, solid_pid: int, start_eid: int
 ) -> None:
     """Write boundary groups as PSHELL properties with real CTRIA3 face
     elements, plus the PSOLID card for the volume mesh.
 
     Args:
         f: File handle
-        boundaries: BoundaryMap with groups and bc_types
-        connectivity: Tetrahedral connectivity, used to recover each
-            boundary group's actual exterior triangular faces
-        solid_pid: PSOLID property ID already used for the CTETRA elements
-            (reserved by the caller so it can't collide with a PSHELL PID)
-        start_eid: First free Nastran element ID (n_tets + 1), so boundary
-            CTRIA3 elements don't collide with CTETRA element IDs
+        volume_mesh: VolumeMeshData - supplies both `boundaries` (BoundaryMap
+            with groups and bc_types) and the face data needed to recover
+            each group's actual exterior triangular faces (see
+            _extract_boundary_faces_by_group)
+        solid_pid: PSOLID property ID already used for the CTETRA/CPENTA
+            elements (reserved by the caller so it can't collide with a
+            PSHELL PID)
+        start_eid: First free Nastran element ID (n_prism + n_tets + 1), so
+            boundary CTRIA3 elements don't collide with CPENTA/CTETRA
+            element IDs
     """
+    boundaries = volume_mesh.boundaries
     if not boundaries.groups:
         logger.warning("No boundary groups found, skipping boundary export")
         return
 
-    faces_by_group = _extract_boundary_faces_by_group(connectivity, boundaries.groups)
+    faces_by_group = _extract_boundary_faces_by_group(volume_mesh, boundaries.groups)
 
     pid_counter = 1
     mid_counter = 1

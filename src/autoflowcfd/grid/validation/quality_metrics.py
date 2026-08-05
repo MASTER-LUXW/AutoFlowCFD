@@ -153,3 +153,109 @@ def compute_tetrahedron_skewness_values(nodes: np.ndarray, cells: np.ndarray) ->
     skewness[degenerate] = 1.0
 
     return skewness
+
+
+# ---------------------------------------------------------------------------
+# Triangular prism (BL cell) metrics.
+#
+# Connectivity convention, shape=(n_cells, 6): (v0, v1, v2, w0, w1, w2) -
+# v0..v2 is the bottom-layer triangle, w0..w2 the top-layer triangle, with
+# w_i the extrusion of v_i (same convention mesh_extrusion.py/
+# mesh_prism_to_tet.py already use for a layer's node correspondence -
+# w_i is "directly above" v_i, not an arbitrary vertex permutation).
+# ---------------------------------------------------------------------------
+
+def compute_prism_volumes(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
+    """Unsigned volume of every triangular prism, via the exact
+    3-tetrahedron decomposition T1=(v0,v1,v2,w2), T2=(v0,v1,w1,w2),
+    T3=(v0,w0,w1,w2) - the same diagonal-consistent split mesh_prism_to_tet.
+    convert_layers_to_tetrahedra uses, so a prism's volume here is always
+    exactly the sum of what the old split-to-3-tets representation would
+    have used, whether or not the prism is a "right" prism (planar quad
+    sides, no twist).
+
+    Each sub-tet's contribution is taken as |signed volume|: the raw
+    (v0,v1,v2,w2)-style vertex tuples above are NOT individually oriented
+    for a consistently-signed result (mesh_prism_to_tet's own tetrahedra
+    only get that guarantee from a separate orient_tetrahedra pass this
+    function doesn't replicate) - confirmed directly, one of the three
+    comes out negative on an ordinary non-degenerate prism. Summing
+    magnitudes is still exact for volume (the three sub-tets tile the
+    prism without overlap regardless of each one's own index-order sign),
+    it just means this function - unlike compute_tetrahedron_volumes -
+    cannot double as an inversion/negative-volume check; that needs a
+    dedicated orientation test if ever required.
+    """
+    v0, v1, v2 = nodes[cells[:, 0]], nodes[cells[:, 1]], nodes[cells[:, 2]]
+    w0, w1, w2 = nodes[cells[:, 3]], nodes[cells[:, 4]], nodes[cells[:, 5]]
+
+    def tet_vol(p0, p1, p2, p3):
+        return np.abs(np.einsum('ij,ij->i', p1 - p0, np.cross(p2 - p0, p3 - p0))) / 6.0
+
+    return tet_vol(v0, v1, v2, w2) + tet_vol(v0, v1, w1, w2) + tet_vol(v0, w0, w1, w2)
+
+
+def prism_edge_lengths(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
+    """All 9 edge lengths for every prism, shape=(n_cells, 9): 3 bottom-cap
+    + 3 top-cap + 3 vertical (wall-normal-ish) edges, in that order."""
+    pts = nodes[cells]  # (n_cells, 6, 3)
+    v0, v1, v2 = pts[:, 0], pts[:, 1], pts[:, 2]
+    w0, w1, w2 = pts[:, 3], pts[:, 4], pts[:, 5]
+    edges = [
+        np.linalg.norm(v1 - v0, axis=1), np.linalg.norm(v2 - v1, axis=1), np.linalg.norm(v0 - v2, axis=1),
+        np.linalg.norm(w1 - w0, axis=1), np.linalg.norm(w2 - w1, axis=1), np.linalg.norm(w0 - w2, axis=1),
+        np.linalg.norm(w0 - v0, axis=1), np.linalg.norm(w1 - v1, axis=1), np.linalg.norm(w2 - v2, axis=1),
+    ]
+    return np.stack(edges, axis=1)
+
+
+def compute_prism_aspect_ratios(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
+    """AR = longest_edge / shortest_edge across all 9 edges of every prism.
+
+    Unlike a tet, a HIGH aspect ratio here is often intentional and correct
+    (a near-wall BL prism is *supposed* to be thin: cap edges ~mm, vertical
+    edge similarly small but the ratio between successive LAYERS' vertical
+    edges, not this per-cell ratio, is what governs growth-rate sanity) -
+    this is why the validator applies a separate, more permissive BL-region
+    threshold to prism aspect ratio (see quality_validator.py), the same
+    way it already does for BL-region tet aspect ratio.
+
+    The denominator is floored at a small FRACTION of this cell's own
+    longest edge, not a fixed absolute epsilon - a mesh's edge lengths span
+    mm to metres depending on min_cell_size, so a constant like 1e-12 is
+    orders of magnitude below any legitimate edge and provides no real
+    floor at all. This matters concretely for a "collapsed-corner" prism
+    (a BL column whose growth froze at exactly one base vertex - see
+    mesh_prism_to_tet.py / ProjectFiles Part6 Bug 4 - a valid, nonzero-
+    volume cell with one genuinely near-zero vertical edge): with the old
+    epsilon this reported a physically meaningless ratio (measured on a
+    real case: 5.11e10) that swamped every other number in the quality
+    report. Flooring relative to the cell's own scale instead caps any
+    such cell's reported ratio at 1e6 - still unambiguously flagged as bad
+    (nothing legitimate needs a 6-order-of-magnitude edge spread), just
+    bounded and not misleading.
+    """
+    edges = prism_edge_lengths(nodes, cells)
+    max_edge = np.max(edges, axis=1)
+    min_edge = np.min(edges, axis=1)
+    return max_edge / np.maximum(min_edge, max_edge * 1e-6)
+
+
+def compute_prism_skewness_values(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
+    """Skewness for every prism: max(bottom-cap, top-cap) triangle skewness
+    (equilateral-deviation, same formula as compute_triangle_skewness_values).
+
+    Deliberately does NOT fold in "verticality" (how close the 3 vertical
+    edges are to the cap normal, i.e. shear/twist) - that is a genuinely
+    different defect class (governs non-orthogonality of the prism's own
+    side faces, not the sliver-ness of its cross-section) and is covered by
+    the existing face-based orthogonality check instead (compute_face_
+    diagnostics), which works unchanged on a prism's triangulated side
+    faces same as it does on any other internal face. Folding both into one
+    number would let a prism with a perfectly regular cap but severe shear
+    (or vice versa) hide its worst dimension behind the other's better one.
+    """
+    n = len(cells)
+    bottom = compute_triangle_skewness_values(nodes, cells[:, 0:3])
+    top = compute_triangle_skewness_values(nodes, cells[:, 3:6])
+    return np.maximum(bottom, top)

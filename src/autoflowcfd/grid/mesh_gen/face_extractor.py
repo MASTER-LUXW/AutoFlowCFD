@@ -43,6 +43,7 @@ except ImportError:
     prange = range
 
 from ..structures import NodeArray, FaceData
+from ..validation import quality_metrics as _qm
 
 
 @njit(parallel=False)
@@ -227,6 +228,295 @@ def _scan_sorted_faces_numba(
     return face_nodes_decoded, face_conn, occurrence_count, n_unique_faces, n_interior
 
 
+def _compute_tet_cell_centers(cell_connectivity: np.ndarray, nodes: NodeArray) -> np.ndarray:
+    """Vertex-average centroid of every tetrahedron, shape=(n_cells, 3)."""
+    x, y, z = nodes.x, nodes.y, nodes.z
+    centers = np.zeros((len(cell_connectivity), 3), dtype=np.float64)
+    for k in range(4):
+        idx = cell_connectivity[:, k]
+        centers[:, 0] += x[idx]
+        centers[:, 1] += y[idx]
+        centers[:, 2] += z[idx]
+    centers /= 4.0
+    return centers
+
+
+def _compute_prism_cell_centers(prism_connectivity: np.ndarray, nodes: NodeArray) -> np.ndarray:
+    """Vertex-average centroid of every triangular prism, shape=(n_cells, 3).
+
+    Same vertex-average convention as _compute_tet_cell_centers (not a true
+    volumetric centroid) - consistent with how the rest of this module
+    already treats a tet's "center" for orientation-flip purposes; only
+    used to decide which side of a face is "inside" the owner cell, not
+    for any quantity that needs to be volumetrically exact.
+    """
+    if len(prism_connectivity) == 0:
+        return np.zeros((0, 3), dtype=np.float64)
+    x, y, z = nodes.x, nodes.y, nodes.z
+    centers = np.zeros((len(prism_connectivity), 3), dtype=np.float64)
+    for k in range(6):
+        idx = prism_connectivity[:, k]
+        centers[:, 0] += x[idx]
+        centers[:, 1] += y[idx]
+        centers[:, 2] += z[idx]
+    centers /= 6.0
+    return centers
+
+
+def _encode_face_keys(face_nodes: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Vectorized numpy equivalent of _build_face_dict_numba's per-face
+    encoding: sort each face's 3 node indices, pack (min, mid) into one
+    int64 key (min<<32 | mid), keep max separate as the lexsort tie-break.
+    face_nodes: (n_faces, 3) int32/int64 -> (key1, max), each (n_faces,)."""
+    sorted_nodes = np.sort(face_nodes.astype(np.int64), axis=1)
+    key1 = (sorted_nodes[:, 0] << 32) | sorted_nodes[:, 1]
+    return key1, sorted_nodes[:, 2].astype(np.int32)
+
+
+def _build_prism_face_occurrences(
+    prism_connectivity: np.ndarray, cell_index_offset: int
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Enumerate the 8 boundary triangles of every prism (2 caps + 3 side
+    quads, each split into 2 triangles) directly - see extract_faces_mixed's
+    docstring for why this is equivalent to, but cheaper and simpler than,
+    materializing 3 sub-tets per prism and merging them after the fact.
+
+    Diagonal rule for each side quad (derived from, and required to exactly
+    match, mesh_prism_to_tet.convert_layers_to_tetrahedra's own "v0-w1,
+    v1-w2, v0-w2" rule so a prism's faces are bit-identical to what the old
+    split-to-tets path would have produced): after sorting the bottom
+    triangle's vertices to v0<v1<v2 (and carrying the SAME row permutation
+    over to the top triangle, so w_i stays "above" v_i), the 8 faces are:
+        bottom cap:  (v0, v1, v2)
+        top cap:     (w0, w1, w2)
+        quad(v0,v1/w0,w1):  (v0, v1, w1), (v0, w0, w1)
+        quad(v1,v2/w1,w2):  (v1, v2, w2), (v1, w1, w2)
+        quad(v0,v2/w0,w2):  (v0, v2, w2), (v0, w0, w2)
+
+    Args:
+        prism_connectivity: (n_prism, 6) int32/int64, (v0,v1,v2,w0,w1,w2) -
+            NOT required to already be bottom-sorted; sorted here.
+        cell_index_offset: added to every owner index (0 if prisms occupy
+            the start of the global cell index space, as they always do
+            per this module's convention - kept as a parameter rather than
+            a hardcoded 0 for the same reason every other per-region
+            offset in this codebase is explicit, not assumed)
+
+    Returns:
+        (key1, max, owner): each shape=(n_prism*8,) - same encoding
+        _build_face_dict_numba produces, ready to concatenate with a tet
+        occurrence list and feed straight into the existing lexsort +
+        dedup scan.
+    """
+    n_prism = len(prism_connectivity)
+    if n_prism == 0:
+        return (np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int32), np.zeros(0, dtype=np.int64))
+
+    bottom = prism_connectivity[:, 0:3].astype(np.int64)
+    top = prism_connectivity[:, 3:6].astype(np.int64)
+    order = np.argsort(bottom, axis=1)
+    row_idx = np.arange(n_prism)[:, None]
+    sb = bottom[row_idx, order]
+    st = top[row_idx, order]
+    v0, v1, v2 = sb[:, 0], sb[:, 1], sb[:, 2]
+    w0, w1, w2 = st[:, 0], st[:, 1], st[:, 2]
+
+    faces = np.stack([
+        np.stack([v0, v1, v2], axis=1),
+        np.stack([w0, w1, w2], axis=1),
+        np.stack([v0, v1, w1], axis=1),
+        np.stack([v0, w0, w1], axis=1),
+        np.stack([v1, v2, w2], axis=1),
+        np.stack([v1, w1, w2], axis=1),
+        np.stack([v0, v2, w2], axis=1),
+        np.stack([v0, w0, w2], axis=1),
+    ], axis=1)  # (n_prism, 8, 3)
+
+    faces_flat = faces.reshape(-1, 3)
+    owner = np.repeat(np.arange(n_prism, dtype=np.int64) + cell_index_offset, 8)
+
+    # A prism whose BL extrusion stopped growing at exactly one base vertex
+    # (v_i == w_i - a valid "collapsed to wedge" cell, total volume still
+    # nonzero since the other 2 corners have real height) makes exactly 2 of
+    # these 8 faces zero-area duplicate-vertex triangles (the two side-quad
+    # diagonal faces that pair v_i with w_i). The old split-into-3-sub-tets
+    # path never hit this because it silently dropped the corresponding
+    # near-zero-volume sub-tet; this direct enumeration has to filter them
+    # explicitly or they reach FaceData.__post_init__'s positive-area check
+    # as hard zero-area faces (confirmed on a real case: 78426 such faces).
+    degenerate = (
+        (faces_flat[:, 0] == faces_flat[:, 1])
+        | (faces_flat[:, 0] == faces_flat[:, 2])
+        | (faces_flat[:, 1] == faces_flat[:, 2])
+    )
+    if np.any(degenerate):
+        faces_flat = faces_flat[~degenerate]
+        owner = owner[~degenerate]
+
+    key1, fmax = _encode_face_keys(faces_flat)
+    return key1, fmax, owner
+
+
+def _build_tet_face_occurrences_numpy(
+    tet_connectivity: np.ndarray, cell_index_offset: int
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Vectorized-numpy fallback for building tet face occurrences when
+    numba is unavailable (mirrors _build_face_dict_numba's 4-faces-per-tet
+    enumeration, only used by extract_faces_mixed's no-numba path)."""
+    n_tet = len(tet_connectivity)
+    if n_tet == 0:
+        return (np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.int32), np.zeros(0, dtype=np.int64))
+    c = tet_connectivity.astype(np.int64)
+    faces = np.stack([
+        c[:, [0, 1, 2]], c[:, [0, 1, 3]], c[:, [0, 2, 3]], c[:, [1, 2, 3]],
+    ], axis=1).reshape(-1, 3)
+    key1, fmax = _encode_face_keys(faces)
+    owner = np.repeat(np.arange(n_tet, dtype=np.int64) + cell_index_offset, 4)
+    return key1, fmax, owner
+
+
+def _scan_sorted_faces_python(
+    sorted_key1: np.ndarray, sorted_max: np.ndarray, sorted_cells: np.ndarray, n_faces_raw: int
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, int]:
+    """Pure-Python transliteration of _scan_sorted_faces_numba (same
+    algorithm), for the no-numba fallback used by extract_faces_mixed."""
+    alloc_size = n_faces_raw
+    unique_key1 = np.zeros(alloc_size, dtype=np.int64)
+    unique_max = np.zeros(alloc_size, dtype=np.int32)
+    face_conn = np.full((alloc_size, 2), -1, dtype=np.int32)
+    occurrence_count = np.zeros(alloc_size, dtype=np.int32)
+
+    uniq_idx = 0
+    unique_key1[0] = sorted_key1[0]
+    unique_max[0] = sorted_max[0]
+    face_conn[0, 0] = sorted_cells[0]
+    occurrence_count[0] = 1
+
+    for i in range(1, n_faces_raw):
+        if sorted_key1[i] != sorted_key1[i - 1] or sorted_max[i] != sorted_max[i - 1]:
+            uniq_idx += 1
+            unique_key1[uniq_idx] = sorted_key1[i]
+            unique_max[uniq_idx] = sorted_max[i]
+            face_conn[uniq_idx, 0] = sorted_cells[i]
+            occurrence_count[uniq_idx] = 1
+        else:
+            if occurrence_count[uniq_idx] < 2:
+                face_conn[uniq_idx, occurrence_count[uniq_idx]] = sorted_cells[i]
+            occurrence_count[uniq_idx] += 1
+
+    n_unique_faces = uniq_idx + 1
+    unique_key1 = unique_key1[:n_unique_faces]
+    unique_max = unique_max[:n_unique_faces]
+    face_conn = face_conn[:n_unique_faces]
+    occurrence_count = occurrence_count[:n_unique_faces]
+
+    n_interior = int(np.sum(occurrence_count == 2))
+
+    face_nodes_decoded = np.zeros((n_unique_faces, 3), dtype=np.int32)
+    face_nodes_decoded[:, 0] = (unique_key1 >> 32).astype(np.int32)
+    face_nodes_decoded[:, 1] = (unique_key1 & 0xFFFFFFFF).astype(np.int32)
+    face_nodes_decoded[:, 2] = unique_max
+
+    return face_nodes_decoded, face_conn, occurrence_count, n_unique_faces, n_interior
+
+
+def repair_nonmanifold_mixed(
+    nodes: NodeArray,
+    prism_connectivity: np.ndarray,
+    tet_connectivity: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Detect faces shared by more than 2 cells across a MIXED prism+tet
+    mesh and resolve each by keeping only the largest-volume owner,
+    dropping the rest - the same "duplicates are overlapping copies, keep
+    the biggest" philosophy mesh_tetgen_core.repair_nonmanifold_cells
+    already uses, generalized across cell types.
+
+    mesh_tetgen_core.repair_nonmanifold_cells is tet-specific (hardcoded
+    4-face/apex-vertex logic) and only ever sees the tet portion of a
+    mixed mesh - a face shared by, say, 2 tets + 1 prism (or any
+    multiplicity involving a prism) is completely invisible to it. This
+    was confirmed as a real, not just theoretical, gap: on a real case,
+    37 such faces survived the entire generation/repair pipeline
+    undetected and only surfaced as a hard RuntimeError in
+    FaceExtractor.extract_faces_mixed's own conformality check, at the
+    point something finally tried to build a face graph over the FULL
+    mixed mesh for the first time.
+
+    Args:
+        nodes: full node array (shared coordinate space for both cell types)
+        prism_connectivity, tet_connectivity: current cell arrays
+
+    Returns:
+        (prism_keep_mask, tet_keep_mask): bool arrays, False marks a cell
+        to drop. Both all-True (no-op) if no over-shared face was found.
+    """
+    n_prism = len(prism_connectivity)
+    n_tet = len(tet_connectivity)
+    prism_keep = np.ones(n_prism, dtype=bool)
+    tet_keep = np.ones(n_tet, dtype=bool)
+    if n_prism + n_tet == 0:
+        return prism_keep, tet_keep
+
+    prism_key1, prism_max, prism_owner = _build_prism_face_occurrences(prism_connectivity, cell_index_offset=0)
+    if NUMBA_AVAILABLE:
+        tet_key1, tet_max, tet_owner_local, _ = _build_face_dict_numba(
+            tet_connectivity.astype(np.int32), n_tet
+        )
+        tet_owner = tet_owner_local.astype(np.int64) + n_prism
+    else:
+        tet_key1, tet_max, tet_owner = _build_tet_face_occurrences_numpy(tet_connectivity, cell_index_offset=n_prism)
+
+    key1 = np.concatenate([prism_key1, tet_key1])
+    fmax = np.concatenate([prism_max, tet_max])
+    owner = np.concatenate([prism_owner, tet_owner])
+    if len(key1) == 0:
+        return prism_keep, tet_keep
+
+    order = np.lexsort((fmax, key1))
+    key1_s, fmax_s, owner_s = key1[order], fmax[order], owner[order]
+
+    change = np.ones(len(key1_s), dtype=bool)
+    change[1:] = (key1_s[1:] != key1_s[:-1]) | (fmax_s[1:] != fmax_s[:-1])
+    run_start = np.flatnonzero(change)
+    run_len = np.diff(np.append(run_start, len(key1_s)))
+
+    over_shared = np.flatnonzero(run_len > 2)
+    if len(over_shared) == 0:
+        return prism_keep, tet_keep
+
+    pts = np.column_stack([nodes.x, nodes.y, nodes.z])
+    n_dropped = 0
+    for r in over_shared:
+        start = int(run_start[r])
+        length = int(run_len[r])
+        cand_cells = owner_s[start:start + length]
+        vols = np.empty(length)
+        for i, c in enumerate(cand_cells):
+            c = int(c)
+            if c < n_prism:
+                vols[i] = _qm.compute_prism_volumes(pts, prism_connectivity[c:c + 1])[0]
+            else:
+                t = c - n_prism
+                vols[i] = abs(float(_qm.compute_tetrahedron_volumes(pts, tet_connectivity[t:t + 1])[0]))
+        best = int(np.argmax(vols))
+        for i, c in enumerate(cand_cells):
+            if i == best:
+                continue
+            c = int(c)
+            if c < n_prism:
+                prism_keep[c] = False
+            else:
+                tet_keep[c] = False
+            n_dropped += 1
+
+    logger.warning(
+        f"Mixed-mesh non-manifold repair: {len(over_shared)} face(s) shared by >2 cells "
+        f"(spanning prism+tet, invisible to the tet-only repair_nonmanifold_cells check) - "
+        f"dropped {n_dropped} redundant cell(s), keeping the largest-volume owner per face"
+    )
+    return prism_keep, tet_keep
+
+
 class FaceExtractor:
     """Extract face data from tetrahedral meshes for FVM computations.
     
@@ -353,9 +643,125 @@ class FaceExtractor:
             
             n_interior = np.sum(occurrence_count == 2)
         
+        all_cell_centers = _compute_tet_cell_centers(cell_connectivity, nodes)
+        return FaceExtractor._finalize_faces(
+            face_nodes_sorted, face_connectivity, occurrence_count,
+            n_unique_faces, n_interior, n_faces_raw, nodes, all_cell_centers, n_cells,
+        )
+
+    @staticmethod
+    def extract_faces_mixed(
+        prism_connectivity: np.ndarray,
+        tet_connectivity: np.ndarray,
+        nodes: NodeArray,
+    ) -> FaceData:
+        """Extract face data from a mixed prism(BL) + tetrahedron(core) mesh.
+
+        Global cell index convention (matches the pre-existing n_bl_cells
+        convention used throughout mesh_gen/mesh_repair.py): prisms occupy
+        [0, n_prism), tets occupy [n_prism, n_prism + n_tet).
+
+        Each prism contributes its 8 boundary triangles directly (2 caps +
+        3 side quads, each quad split along the same "lower bottom-index to
+        higher corresponding top-index" diagonal mesh_prism_to_tet.
+        convert_layers_to_tetrahedra already uses) rather than being
+        materialized as 3 separate tets and merged after the fact - see
+        _build_prism_face_occurrences for the derivation. This guarantees
+        two prisms sharing a side face pick the same diagonal (the rule
+        depends only on global node-index comparison, not per-prism
+        choice), and a prism's cap face dedupes against a neighbouring
+        prism's or tet's face purely by matching sorted node triple, same
+        as any other face here - no special-casing needed for the prism/
+        core-tet interface.
+
+        Args:
+            prism_connectivity: (n_prism, 6) int32, see PrismCells docstring
+                for the (v0,v1,v2,w0,w1,w2) convention
+            tet_connectivity: (n_tet, 4) int32
+            nodes: node coordinates
+
+        Returns:
+            FaceData with owner/neighbor cell indices in the combined
+            global index space described above.
+        """
+        n_prism = len(prism_connectivity)
+        n_tet = len(tet_connectivity)
+        n_cells = n_prism + n_tet
+        logger.info(
+            f"Extracting faces from {n_prism} prism + {n_tet} tetrahedral cells "
+            f"({n_cells} total)..."
+        )
+
+        prism_key1, prism_max, prism_owner = _build_prism_face_occurrences(
+            prism_connectivity, cell_index_offset=0
+        )
+
+        if NUMBA_AVAILABLE:
+            tet_key1, tet_max, tet_owner_local, n_tet_faces_raw = _build_face_dict_numba(
+                tet_connectivity.astype(np.int32), n_tet
+            )
+            tet_owner = tet_owner_local.astype(np.int64) + n_prism
+        else:
+            # Fallback: reuse the same vectorized approach as the prism
+            # path (numba unavailable) rather than duplicating the slow
+            # Python-dict fallback a third time.
+            tet_key1, tet_max, tet_owner = _build_tet_face_occurrences_numpy(
+                tet_connectivity, cell_index_offset=n_prism
+            )
+
+        face_key1_raw = np.concatenate([prism_key1, tet_key1])
+        face_max_raw = np.concatenate([prism_max, tet_max])
+        face_cell_map_raw = np.concatenate([prism_owner, tet_owner]).astype(np.int32)
+        n_faces_raw = len(face_key1_raw)
+
+        logger.debug("Sorting faces via lexsort...")
+        sort_indices = np.lexsort((face_max_raw, face_key1_raw))
+        sorted_key1 = face_key1_raw[sort_indices]
+        sorted_max = face_max_raw[sort_indices]
+        sorted_cells = face_cell_map_raw[sort_indices]
+
+        logger.debug("Deduplicating faces via single-pass scan...")
+        if NUMBA_AVAILABLE:
+            (face_nodes_sorted, face_connectivity,
+             occurrence_count, n_unique_faces, n_interior) = _scan_sorted_faces_numba(
+                sorted_key1, sorted_max, sorted_cells, n_faces_raw
+            )
+        else:
+            (face_nodes_sorted, face_connectivity,
+             occurrence_count, n_unique_faces, n_interior) = _scan_sorted_faces_python(
+                sorted_key1, sorted_max, sorted_cells, n_faces_raw
+            )
+
+        all_cell_centers = np.vstack([
+            _compute_prism_cell_centers(prism_connectivity, nodes),
+            _compute_tet_cell_centers(tet_connectivity, nodes),
+        ]) if n_prism > 0 else _compute_tet_cell_centers(tet_connectivity, nodes)
+
+        return FaceExtractor._finalize_faces(
+            face_nodes_sorted, face_connectivity, occurrence_count,
+            n_unique_faces, n_interior, n_faces_raw, nodes, all_cell_centers, n_cells,
+        )
+
+    @staticmethod
+    def _finalize_faces(
+        face_nodes_sorted: np.ndarray,
+        face_connectivity: np.ndarray,
+        occurrence_count: np.ndarray,
+        n_unique_faces: int,
+        n_interior: int,
+        n_faces_raw: int,
+        nodes: NodeArray,
+        all_cell_centers: np.ndarray,
+        n_cells: int,
+    ) -> FaceData:
+        """Shared post-dedup geometry/orientation/validation, used by both
+        extract_faces (tet-only) and extract_faces_mixed (prism+tet) -
+        genuinely cell-shape-agnostic from this point on: everything below
+        only ever consumes a face's 3 corner node indices, its owner/
+        neighbour cell index, and that cell's already-computed centroid."""
         n_boundary = n_unique_faces - n_interior
         n_invalid = np.sum(occurrence_count > 2)
-        
+
         logger.info(
             f"Identified {n_unique_faces} unique faces from {n_faces_raw} occurrences"
         )
@@ -363,7 +769,7 @@ class FaceExtractor:
             f"Face topology: {n_interior} interior, {n_boundary} boundary, "
             f"{n_invalid} invalid (>2 cells)"
         )
-        
+
         if n_invalid > 0:
             # NOTE: the dedup scan above only ever records the first 2 cells
             # touching a given face key (see _deduplicate_and_build_connectivity);
@@ -439,16 +845,11 @@ class FaceExtractor:
         # Determine face orientation and flip if needed
         left_cells = face_connectivity[:, 0]
         right_cells = face_connectivity[:, 1]
-        
-        # Compute cell centers for all cells at once (vectorized)
-        all_cell_centers = np.zeros((n_cells, 3), dtype=np.float64)
-        for k in range(4):
-            node_indices = cell_connectivity[:, k]
-            all_cell_centers[:, 0] += x[node_indices]
-            all_cell_centers[:, 1] += y[node_indices]
-            all_cell_centers[:, 2] += z[node_indices]
-        all_cell_centers /= 4.0
-        
+
+        # all_cell_centers is already computed by the caller (tet-only or
+        # mixed prism+tet - see _compute_tet_cell_centers/
+        # _compute_prism_cell_centers), passed in as a parameter.
+
         # Get left and right cell centers
         center_left = all_cell_centers[left_cells]
         

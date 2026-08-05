@@ -181,3 +181,91 @@ def orient_tetrahedra(nodes: np.ndarray, tets: np.ndarray) -> np.ndarray:
         )
 
     return tets
+
+
+def convert_layers_to_prisms(
+    all_nodes: np.ndarray,
+    layer_connectivity: List[np.ndarray],
+    base_faces: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Convert layered prism mesh into genuine triangular-prism cells - the
+    true-prism counterpart to convert_layers_to_tetrahedra, kept in this
+    same module since the two share the exact same per-layer node-
+    correspondence bookkeeping (only the final cell shape emitted differs).
+
+    Emits ONE prism per (layer, base face) pair, using the SAME sorted-
+    vertex convention (v0<v1<v2 by global node index, w_i the corresponding
+    vertex one layer up) the old tet path already relies on for diagonal
+    consistency - see PrismCells' and face_extractor.extract_faces_mixed's
+    docstrings for why this makes a prism's 8 boundary faces bit-identical
+    to what convert_layers_to_tetrahedra's 3-tet split of the same slab
+    would have produced, and therefore automatically conformal with a
+    neighbouring prism (or, at the BL/core interface, a neighbouring core
+    tet) without this function needing any cross-cell coordination beyond
+    the same global-index sort every prism applies independently.
+
+    Args:
+        all_nodes: All nodes from all layers, shape=(total_nodes, 3)
+        layer_connectivity: Face indices per layer (only its LENGTH is used
+            - see convert_layers_to_tetrahedra's identical treatment - every
+            layer shares base_faces' own local face topology, just offset
+            by nodes_per_layer)
+        base_faces: Original surface faces, shape=(n_faces, 3)
+
+    Returns:
+        (prisms, face_of_prism): prism connectivity, shape=(n_prisms, 6) as
+        (v0,v1,v2,w0,w1,w2); face_of_prism, shape=(n_prisms,), maps each
+        surviving prism back to its base_faces row index (n_prisms may be
+        less than n_base_faces*(n_layers-1) - exactly zero-volume prisms,
+        from a taper_scale of 0 collapsing a layer to zero thickness, are
+        dropped; the resulting coordinate-duplicate-but-index-distinct seam
+        this leaves behind is cleaned up by the caller's coincident-point
+        merge pass, same as it already was for the equivalent tet case).
+    """
+    n_layers = len(layer_connectivity)
+    n_base_faces = len(base_faces)
+
+    if n_layers < 2:
+        raise ValueError("Need at least 2 layers to create volume")
+
+    n_total_nodes = len(all_nodes)
+    nodes_per_layer = n_total_nodes // n_layers
+
+    logger.info(f"Converting {n_layers-1} layer pairs to {n_base_faces} boundary-layer prism(s) each...")
+
+    sorted_base = np.sort(base_faces, axis=1)  # (n_faces, 3) -> v0<v1<v2, same per layer
+
+    n_prisms = n_base_faces * (n_layers - 1)
+    prisms = np.empty((n_prisms, 6), dtype=np.int64)
+    face_of_prism = np.empty(n_prisms, dtype=np.int64)
+    face_range = np.arange(n_base_faces)
+
+    prism_idx = 0
+    for layer_idx in range(n_layers - 1):
+        off_lo = layer_idx * nodes_per_layer
+        off_hi = (layer_idx + 1) * nodes_per_layer
+        sl = slice(prism_idx, prism_idx + n_base_faces)
+        prisms[sl, 0] = off_lo + sorted_base[:, 0]
+        prisms[sl, 1] = off_lo + sorted_base[:, 1]
+        prisms[sl, 2] = off_lo + sorted_base[:, 2]
+        prisms[sl, 3] = off_hi + sorted_base[:, 0]
+        prisms[sl, 4] = off_hi + sorted_base[:, 1]
+        prisms[sl, 5] = off_hi + sorted_base[:, 2]
+        face_of_prism[sl] = face_range
+        prism_idx += n_base_faces
+
+    # Drop exactly-zero-volume prisms (same philosophy, same threshold, as
+    # convert_layers_to_tetrahedra's dropped-tets handling above).
+    from ..validation.quality_metrics import compute_prism_volumes
+    volumes = compute_prism_volumes(all_nodes, prisms)
+    drop = volumes < 1e-20
+
+    n_dropped = int(np.count_nonzero(drop))
+    if n_dropped:
+        logger.info(f"Dropped {n_dropped} exactly-zero-volume prisms (collapsed layer)")
+        keep = ~drop
+        prisms = prisms[keep]
+        face_of_prism = face_of_prism[keep]
+
+    logger.info(f"Total prisms generated: {len(prisms)}")
+    return prisms, face_of_prism

@@ -301,5 +301,89 @@ class TetrahedralCells:
         
         # Volume = |det| / 6
         volumes = np.abs(det) / 6.0
-        
+
         return volumes
+
+
+@dataclass
+class PrismCells:
+    """边界层三棱柱单元数组（BL 区域专用，不再拆分为四面体）
+
+    Stores triangular-prism connectivity for the BL region. A prism's 6
+    nodes are (v0, v1, v2, w0, w1, w2): v0..v2 the bottom-layer (near-wall
+    side) triangle, w0..w2 the top-layer triangle, with w_i the extrusion
+    of v_i (w_i directly "above" v_i - NOT an arbitrary permutation; this
+    is the same per-layer node correspondence mesh_extrusion.py/
+    mesh_prism_to_tet.py already rely on). Column order within (v0,v1,v2)
+    and (w0,w1,w2) need not be pre-sorted by node index - face extraction
+    (face_extractor.extract_faces_mixed) re-derives the canonical sort
+    itself, the same way mesh_prism_to_tet.convert_layers_to_tetrahedra
+    already does, so two prisms sharing a side face agree on its diagonal
+    regardless of storage order.
+
+    Kept as a sibling to TetrahedralCells (not merged into one padded
+    array) so every existing tet-only consumer of TetrahedralCells keeps
+    working completely unchanged on the core-region cells; only code that
+    is explicitly BL/prism-aware needs to know this class exists at all.
+
+    Attributes:
+        connectivity: 单元连接关系, int32, shape=(N_cells, 6)
+        volumes: 单元体积数组（无符号，见 compute_volumes）, float64, shape=(N_cells,)
+    """
+    connectivity: np.ndarray  # int32, shape=(N_cells, 6)
+    volumes: np.ndarray  # float64, shape=(N_cells,)
+
+    def __post_init__(self):
+        if len(self.connectivity.shape) != 2:
+            raise ValueError(
+                f"Connectivity must be 2D array, got shape {self.connectivity.shape}"
+            )
+        if self.connectivity.shape[1] != 6:
+            raise ValueError(
+                f"Prism connectivity must have 6 columns, "
+                f"got {self.connectivity.shape[1]}"
+            )
+
+        if len(self.volumes.shape) != 1:
+            raise ValueError(
+                f"Volumes must be 1D array, got shape {self.volumes.shape}"
+            )
+        if self.volumes.shape[0] != self.connectivity.shape[0]:
+            raise ValueError(
+                f"Volumes count ({self.volumes.shape[0]}) doesn't match "
+                f"cell count ({self.connectivity.shape[0]})"
+            )
+
+        if self.connectivity.dtype != np.int32:
+            raise ValueError(f"Connectivity must be int32, got {self.connectivity.dtype}")
+        if self.volumes.dtype != np.float64:
+            raise ValueError(f"Volumes must be float64, got {self.volumes.dtype}")
+
+        if np.any(self.volumes <= 0):
+            n_negative = np.sum(self.volumes <= 0)
+            raise ValueError(
+                f"All prism volumes must be positive, "
+                f"found {n_negative} non-positive volumes"
+            )
+
+        if not self.connectivity.flags['C_CONTIGUOUS']:
+            self.connectivity = np.ascontiguousarray(self.connectivity)
+        if not self.volumes.flags['C_CONTIGUOUS']:
+            self.volumes = np.ascontiguousarray(self.volumes)
+
+    @property
+    def count(self) -> int:
+        return self.connectivity.shape[0]
+
+    @staticmethod
+    def compute_volumes(nodes: 'NodeArray', connectivity: np.ndarray) -> np.ndarray:
+        """棱柱体积（无符号）：拆成 3 个子四面体分别取 |signed volume| 后求和。
+
+        Delegates to quality_metrics.compute_prism_volumes for the actual
+        formula (kept in one place - see that function's docstring for why
+        each sub-tet's contribution must be taken as an absolute value,
+        not summed with its raw index-order sign).
+        """
+        from ..validation.quality_metrics import compute_prism_volumes
+        pts = np.column_stack([nodes.x, nodes.y, nodes.z])
+        return compute_prism_volumes(pts, connectivity)

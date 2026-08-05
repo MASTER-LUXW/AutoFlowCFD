@@ -56,6 +56,9 @@ from ._field_utils import cell_to_node
 # VTK legacy cell-type codes (see VTK file format spec).
 _VTK_TRIANGLE = 5
 _VTK_TETRA = 10
+_VTK_WEDGE = 13  # triangular prism - VTK's own node order matches this
+                 # project's (v0,v1,v2,w0,w1,w2) convention directly (two
+                 # triangle "caps" listed consecutively), no reordering needed
 
 _VALID_FIELDS = {'velocity', 'pressure', 'k', 'omega', 'nut', 'turbulence'}
 
@@ -347,7 +350,7 @@ class VTKExporter:
             'nut') to its raw per-cell array - exactly what CELL_DATA
             writes, and what POINT_DATA interpolates from.
         """
-        n_cells = self.grid_data.cells.count
+        n_cells = self.grid_data.cell_count
         has_data = self.solution.data is not None and self.solution.n_cells > 0
         out: Dict[str, np.ndarray] = {}
 
@@ -443,7 +446,7 @@ class VTKExporter:
         logger.info(f"Exporting to legacy VTK format ({'binary' if binary else 'ASCII'}): {output_path}")
 
         n_points = self.grid_data.nodes.count
-        n_cells = self.grid_data.cells.count
+        n_cells = self.grid_data.cell_count
         cell_fields = self._cell_fields(fields)
         point_fields = self._point_fields(cell_fields, n_points)
 
@@ -497,9 +500,60 @@ class VTKExporter:
         """Write cell connectivity to VTK file.
 
         Detects the actual node count per cell from the connectivity
-        array's own shape (3 = triangle, 4 = tetrahedron).
+        array's own shape (3 = triangle, 4 = tetrahedron) - or, when
+        grid_data.prism_cells is set, writes prisms (6-node wedge, global
+        indices [0, n_prism)) followed by tets ([n_prism, n_prism+n_tet)),
+        matching this project's global cell-index convention (see
+        PrismCells/face_extractor.extract_faces_mixed).
         """
-        self._write_cells_from(f, self.grid_data.cells.connectivity, binary)
+        prism_cells_obj = getattr(self.grid_data, 'prism_cells', None)
+        if prism_cells_obj is not None:
+            self._write_cells_mixed(f, prism_cells_obj.connectivity, self.grid_data.cells.connectivity, binary)
+        else:
+            self._write_cells_from(f, self.grid_data.cells.connectivity, binary)
+
+    def _write_cells_mixed(self, f, prism_conn: np.ndarray, tet_conn: np.ndarray, binary: bool) -> None:
+        """Write CELLS/CELL_TYPES for a mixed prism(wedge) + tetrahedron
+        mesh - each row can have a different vertex count in legacy VTK's
+        CELLS format (the leading integer per row IS that row's count), so
+        prisms and tets simply concatenate into one block; CELL_TYPES
+        carries the per-row type code (_VTK_WEDGE vs _VTK_TETRA)."""
+        prism_conn = np.asarray(prism_conn, dtype=np.int32)
+        tet_conn = np.asarray(tet_conn, dtype=np.int32)
+        n_prism = len(prism_conn)
+        n_tet = len(tet_conn)
+        n_cells = n_prism + n_tet
+        total_ints = n_prism * 7 + n_tet * 5  # (1 count + 6 verts) or (1 count + 4 verts)
+
+        self._wl(f, f"CELLS {n_cells} {total_ints}\n", binary)
+        if binary:
+            if n_prism:
+                prism_lines = np.hstack([np.full((n_prism, 1), 6, dtype=np.int32), prism_conn])
+                f.write(prism_lines.astype('>i4').tobytes())
+            if n_tet:
+                tet_lines = np.hstack([np.full((n_tet, 1), 4, dtype=np.int32), tet_conn])
+                f.write(tet_lines.astype('>i4').tobytes())
+            f.write(b'\n')
+        else:
+            if n_prism:
+                prism_lines = np.hstack([np.full((n_prism, 1), 6, dtype=np.int32), prism_conn])
+                np.savetxt(f, prism_lines, fmt="%d")
+            if n_tet:
+                tet_lines = np.hstack([np.full((n_tet, 1), 4, dtype=np.int32), tet_conn])
+                np.savetxt(f, tet_lines, fmt="%d")
+        self._wl(f, "\n", binary)
+
+        cell_types = np.concatenate([
+            np.full(n_prism, _VTK_WEDGE, dtype=np.int32),
+            np.full(n_tet, _VTK_TETRA, dtype=np.int32),
+        ])
+        self._wl(f, f"CELL_TYPES {n_cells}\n", binary)
+        if binary:
+            f.write(cell_types.astype('>i4').tobytes())
+            f.write(b'\n')
+        else:
+            np.savetxt(f, cell_types.reshape(-1, 1), fmt="%d")
+        self._wl(f, "\n", binary)
 
     def _write_cells_from(self, f, conn: np.ndarray, binary: bool) -> None:
         """Write CELLS/CELL_TYPES from an explicit connectivity array -
