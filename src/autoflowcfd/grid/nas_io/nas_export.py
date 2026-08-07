@@ -72,6 +72,24 @@ def _format_nastran_compact_exponent(value: float, width: int = 8) -> str:
     return result
 
 
+def _format_coord_8char(value: float) -> str:
+    """Format a coordinate to fit an 8-character Nastran Small Field.
+
+    Module-level (not a per-node closure) since it captures nothing from
+    its caller - previously redefined on every node inside _write_nodes'
+    loop, needlessly constructing a new function object per node.
+    """
+    for precision in [6, 5, 4, 3, 2]:
+        formatted = f"{value:.{precision}f}"
+        if len(formatted) <= 8:
+            return formatted
+
+    # Fallback: Nastran compact exponent notation (no 'e', so it actually
+    # fits 8 chars - Python's "%e"/.4e is itself 10-11 characters and would
+    # silently overflow the field).
+    return _format_nastran_compact_exponent(value, width=8)
+
+
 def export_volume_mesh_to_nas(
     volume_mesh,
     output_path: str,
@@ -223,47 +241,28 @@ def _write_nodes(f, nodes, scale_factor: float) -> None:
         scale_factor: Scaling factor for coordinates
     """
     n_nodes = len(nodes.x)
-    
-    # Batch write for performance (1000 nodes per batch)
+
+    # Batch write for performance (1000 nodes per batch): lines are
+    # accumulated in a list and flushed via a single writelines() call per
+    # batch, instead of one f.write() per node - an actual batched I/O
+    # pattern, not just batched progress-logging cadence around individual
+    # per-line writes.
     batch_size = 1000
-    
+
     for start_idx in range(0, n_nodes, batch_size):
         end_idx = min(start_idx + batch_size, n_nodes)
-        
+
+        lines = []
         for i in range(start_idx, end_idx):
             node_id = i + 1  # Nastran IDs start from 1
             x = nodes.x[i] * scale_factor
             y = nodes.y[i] * scale_factor
             z = nodes.z[i] * scale_factor
-            
-            # Format coordinates with controlled precision to fit in 8-char fields
-            # Maximum format: "-X.XXXXXX" (9 chars) or "XX.XXXXX" (8 chars)
-            # Strategy: Use dynamic precision based on magnitude
-            
-            def format_coord_8char(value: float) -> str:
-                """Format coordinate to fit in 8-character field.
-                
-                Args:
-                    value: Coordinate value
-                    
-                Returns:
-                    Formatted string <= 8 characters
-                """
-                # Try different precisions until we find one that fits
-                for precision in [6, 5, 4, 3, 2]:
-                    formatted = f"{value:.{precision}f}"
-                    if len(formatted) <= 8:
-                        return formatted
 
-                # Fallback: Nastran compact exponent notation (no 'e', so
-                # it actually fits 8 chars - Python's "%e"/.4e is itself
-                # 10-11 characters and would silently overflow the field).
-                return _format_nastran_compact_exponent(value, width=8)
-            
-            x_str = format_coord_8char(x)
-            y_str = format_coord_8char(y)
-            z_str = format_coord_8char(z)
-            
+            x_str = _format_coord_8char(x)
+            y_str = _format_coord_8char(y)
+            z_str = _format_coord_8char(z)
+
             # Small Field Format: each field is exactly 8 characters
             # Field 1 (cols 1-8):   "GRID" keyword
             # Field 2 (cols 9-16):  Node ID (right-aligned)
@@ -272,13 +271,14 @@ def _write_nodes(f, nodes, scale_factor: float) -> None:
             # Field 5 (cols 33-40): Y coordinate (right-aligned, max 8 chars)
             # Field 6 (cols 41-48): Z coordinate (right-aligned, max 8 chars)
             # Fields 7-9: Omitted (trailing fields can be truncated)
-            
-            line = f"GRID    {node_id:>8}{0:>8}{x_str:>8}{y_str:>8}{z_str:>8}\n"
-            f.write(line)
-        
+
+            lines.append(f"GRID    {node_id:>8}{0:>8}{x_str:>8}{y_str:>8}{z_str:>8}\n")
+
+        f.writelines(lines)
+
         if (start_idx + batch_size) % 10000 == 0:
             logger.debug(f"  Written {start_idx + batch_size}/{n_nodes} nodes")
-    
+
     logger.info(f"  Total nodes written: {n_nodes:,}")
 
 
@@ -499,8 +499,12 @@ def _write_boundaries(
     f.write(f"PSOLID{solid_pid:>8}{solid_mid:>8}\n")
     f.write(f"$ANSA_NAME_COMMENT;{solid_pid};PSOLID;Auto Detected Volume;;NO;NO;NO;NO;\n")
 
-    # Write MAT1 material cards
-    for i in range(1, mid_counter + 1):
+    # Write $ANSA_COLOR display-color comments, one per shell MID [1,
+    # solid_mid) - NOT including solid_mid itself, which gets its own
+    # (different) volume color right below; range(1, mid_counter + 1) used
+    # to double-count it (solid_mid == mid_counter here), emitting two
+    # conflicting color entries for the same MID.
+    for i in range(1, mid_counter):
         f.write(f"$ANSA_COLOR;{i};MAT1;.725490212440491;.035294119268656;0.20392157137394;1.;\n")
 
     f.write(f"$ANSA_COLOR;{solid_mid};MAT1;.635294139385223;0.34901961684227;.341176480054855;1.;\n")

@@ -9,7 +9,7 @@ from typing import Dict, Optional, TYPE_CHECKING
 from loguru import logger
 
 if TYPE_CHECKING:
-    from ..structures import BoundaryMap
+    from ..structures import BoundaryMap, GridData, VolumeMeshData
 
 
 def identify_boundaries_from_surface(
@@ -232,5 +232,148 @@ def map_surface_boundaries(
         f"Surface boundary mapping completed: {len(groups)} boundary groups, "
         f"{sum(len(cells) for cells in groups.values())} total cells"
     )
-    
+
+    return boundaries
+
+
+def map_boundaries_by_geometry(
+    volume_mesh: 'VolumeMeshData',
+    surface_grid: 'GridData',
+    distance_tolerance_factor: float = 0.75,
+) -> 'BoundaryMap':
+    """Attribute boundary groups to an EXTERNALLY-generated volume mesh's
+    own exterior faces, by nearest-centroid geometric matching against a
+    companion surface mesh's boundary groups.
+
+    Unlike map_surface_boundaries (node-INDEX matching - only correct
+    when both meshes share the same node numbering, which holds for this
+    project's own generation pipeline but not for a volume mesh some
+    other tool produced, e.g. ANSA's own volume export: its node ids have
+    no relationship at all to the original surface .nas file's), this
+    matches by POSITION: every exterior face of `volume_mesh` is matched
+    to whichever surface boundary group has a face closest to it. Exact
+    coincidence isn't expected (a volume mesher may retriangulate/insert
+    Steiner points, so a volume boundary face is rarely identical to any
+    single original surface face) - only proximity, gated by
+    `distance_tolerance_factor` so a face that's suspiciously far from
+    every surface boundary face (e.g. a genuine tetgen/mesher interior
+    artifact incorrectly exposed, or a mismatched pair of files) falls
+    through to 'UNCLASSIFIED' instead of being silently mis-attributed to
+    whatever happens to be geometrically nearest.
+
+    Args:
+        volume_mesh: The externally-parsed volume mesh (e.g.
+            nas_parser_volume.parse_volume_mesh_nas's own output) -
+            `ensure_faces_exist()` is called on it if faces aren't
+            already computed.
+        surface_grid: The companion surface mesh (NASParser.parse()'s
+            own output) - its `boundaries.groups` supplies the inlet/
+            outlet/wall/... groups to match against, and its `bc_types`
+            is inherited unchanged for any matched group.
+        distance_tolerance_factor: A volume boundary face's nearest
+            surface-boundary-face centroid must be within this many
+            multiples of that surface face's own circumradius to count
+            as a match - scales with local mesh density automatically
+            instead of a single fixed absolute distance, since a fine
+            region's surface faces are much smaller (and so need a much
+            tighter tolerance) than a coarse region's.
+
+    Returns:
+        BoundaryMap with cell indices in `volume_mesh`'s own global
+        mixed-cell convention (prisms [0, n_prism), tets
+        [n_prism, n_prism + n_tet) - see face_extractor.extract_faces_
+        mixed's own docstring), same convention map_surface_boundaries'
+        own output already uses. Unmatched exterior faces' owning cells
+        go into 'UNCLASSIFIED' (WALL), the same fallback
+        map_surface_boundaries uses for its own unmatched case.
+    """
+    from scipy.spatial import cKDTree
+    from ..structures import BoundaryMap
+
+    logger.info("Mapping surface boundaries to external volume mesh by geometry...")
+
+    faces = volume_mesh.ensure_faces_exist()
+    boundary_face_idx = faces.get_boundary_face_indices()
+    if len(boundary_face_idx) == 0:
+        logger.warning("External volume mesh has no exterior faces at all - returning empty BoundaryMap")
+        return BoundaryMap(groups={}, bc_types={})
+
+    vol_nodes = np.column_stack([volume_mesh.nodes.x, volume_mesh.nodes.y, volume_mesh.nodes.z])
+    vol_face_verts = faces.node_connectivity[boundary_face_idx]
+    vol_face_centroids = vol_nodes[vol_face_verts].mean(axis=1)
+    vol_face_owner = faces.connectivity[boundary_face_idx, 0]
+
+    surf_nodes = np.column_stack([
+        surface_grid.nodes.x, surface_grid.nodes.y, surface_grid.nodes.z
+    ])
+    surf_faces = surface_grid.cells.connectivity
+
+    surf_centroids_list = []
+    surf_radius_list = []
+    surf_group_list = []
+    for name, face_idx in surface_grid.boundaries.groups.items():
+        face_idx = face_idx[face_idx < len(surf_faces)]
+        if len(face_idx) == 0:
+            continue
+        verts = surf_faces[face_idx]
+        pts = surf_nodes[verts]
+        centroids = pts.mean(axis=1)
+        # Circumradius proxy: max distance from centroid to any of its
+        # own 3 vertices - a cheap, sufficient local-scale estimate (no
+        # need for the exact circumradius, just something proportional
+        # to "how big is this face").
+        radius = np.linalg.norm(pts - centroids[:, None, :], axis=2).max(axis=1)
+        surf_centroids_list.append(centroids)
+        surf_radius_list.append(radius)
+        surf_group_list.extend([name] * len(face_idx))
+
+    if not surf_centroids_list:
+        logger.warning(
+            "Surface mesh has no boundary groups at all - every external "
+            "volume mesh exterior face will fall through to UNCLASSIFIED"
+        )
+        groups = {'UNCLASSIFIED': np.unique(vol_face_owner).astype(np.int32)}
+        bc_types = {'UNCLASSIFIED': 'WALL'}
+        return BoundaryMap(groups=groups, bc_types=bc_types)
+
+    surf_centroids = np.vstack(surf_centroids_list)
+    surf_radius = np.concatenate(surf_radius_list)
+    surf_group_arr = np.array(surf_group_list, dtype=object)
+
+    tree = cKDTree(surf_centroids)
+    dist, nearest_idx = tree.query(vol_face_centroids)
+    tolerance = np.maximum(surf_radius[nearest_idx] * distance_tolerance_factor, 1e-12)
+    matched = dist <= tolerance
+
+    volume_cell_to_boundary: Dict[int, str] = {}
+    for i in np.flatnonzero(matched):
+        volume_cell_to_boundary[int(vol_face_owner[i])] = str(surf_group_arr[nearest_idx[i]])
+
+    unique_owners = np.unique(vol_face_owner)
+    n_matched_cells = len(volume_cell_to_boundary)
+    n_unmatched = len(unique_owners) - n_matched_cells
+    if n_unmatched > 0:
+        logger.warning(
+            f"{n_unmatched}/{len(unique_owners)} exterior-face-owning cells matched no "
+            f"surface boundary group within tolerance - placed in an 'UNCLASSIFIED' "
+            f"group as WALL instead of being silently dropped from every boundary condition"
+        )
+        for cell_idx in unique_owners:
+            if int(cell_idx) not in volume_cell_to_boundary:
+                volume_cell_to_boundary[int(cell_idx)] = 'UNCLASSIFIED'
+
+    groups: Dict[str, list] = {}
+    bc_types: Dict[str, str] = {}
+    for cell_idx, name in volume_cell_to_boundary.items():
+        groups.setdefault(name, []).append(cell_idx)
+        if name not in bc_types:
+            bc_types[name] = surface_grid.boundaries.bc_types.get(name, 'WALL')
+
+    groups_arr = {name: np.array(idx, dtype=np.int32) for name, idx in groups.items()}
+    boundaries = BoundaryMap(groups=groups_arr, bc_types=bc_types)
+    logger.info(
+        f"Geometric boundary mapping completed: {len(groups_arr)} boundary groups, "
+        f"{sum(len(c) for c in groups_arr.values())} total cells "
+        f"({n_matched_cells} matched by proximity, {max(n_unmatched, 0)} UNCLASSIFIED)"
+    )
     return boundaries

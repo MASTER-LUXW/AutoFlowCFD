@@ -199,6 +199,13 @@ class ViscousRANSResidual:
         mu_t = self._eddy_viscosity(rho, k, omega, grad_vel) if self.turbulent \
             else np.zeros(n_cells)
 
+        # Wall-function-aware k/omega boundary ghost, shared by
+        # _turbulence_gradient and _viscous_flux (see
+        # _turbulence_wall_ghost's own docstring for why this replaced two
+        # independent derivations of the boundary k/omega that disagreed
+        # with each other whenever wall functions were enabled).
+        k_ghost_b, omega_ghost_b = self._turbulence_wall_ghost(rho, vel, k, omega, boundary_states)
+
         # k/omega gradient, computed once here and shared by _viscous_flux
         # (turbulent diffusion term, needed regardless of self.turbulent -
         # see below) and _sst_sources (production/cross-diffusion, only
@@ -210,7 +217,7 @@ class ViscousRANSResidual:
         # quantity per residual call. This shared version additionally
         # includes the boundary (ghost-state) contribution, which the two
         # duplicated computations were missing.
-        grad_turb = self._turbulence_gradient(k, omega, boundary_states)
+        grad_turb = self._turbulence_gradient(k, omega, k_ghost_b, omega_ghost_b)
 
         flux_accum = np.zeros((n_cells, 7), dtype=np.float64)
 
@@ -219,7 +226,7 @@ class ViscousRANSResidual:
 
         # --- viscous flux (molecular + turbulent) ---
         self._viscous_flux(rho, vel, T, k, omega, mu_t, grad_vel, grad_turb,
-                           boundary_states, flux_accum)
+                           boundary_states, flux_accum, k_ghost_b, omega_ghost_b)
 
         # Convert surface-integral of fluxes into a residual (divide by V).
         residual = flux_accum / geom.cell_volumes[:, None]
@@ -230,21 +237,71 @@ class ViscousRANSResidual:
 
         return residual
 
+    def _turbulence_wall_ghost(self, rho: np.ndarray, vel: np.ndarray,
+                               k: np.ndarray, omega: np.ndarray,
+                               boundary_states: np.ndarray):
+        """Boundary k/omega ghost values, shape (n_bf,) each - wall-function
+        aware, and the single source of truth for both _turbulence_gradient
+        and _viscous_flux's turbulent diffusion term.
+
+        For every boundary face this starts from the ghost already encoded
+        in `boundary_states` (k=0 Dirichlet / zero-gradient omega at solid
+        walls - see BoundaryConditionHandler._wall_bc - freestream at
+        INLET/FARFIELD/OUTLET). When a wall-function mask was supplied at
+        construction, WALL/GROUND faces additionally get overwritten with
+        the log-law model's near-wall target (mirrored the same way
+        boundary_states' own ghosts are, so the face-averaged value equals
+        the target exactly) - same mechanic _viscous_flux used to apply
+        entirely on its own, LOCALLY, with no effect outside that one
+        function.
+
+        That was a real bug: _turbulence_gradient (called separately, once
+        per residual evaluation) kept computing its own k/omega ghost
+        straight from `boundary_states`, i.e. always the resolved-wall
+        (k=0, zero-gradient omega) values, even when wall functions were
+        enabled and the diffusion flux was already using the log-law
+        target. The k/omega GRADIENT that feeds SST's F1 blend,
+        cross-diffusion, and (indirectly) production at every near-wall
+        cell was therefore silently inconsistent with the wall treatment
+        actually being modelled - it kept assuming a resolved, y+~1 first
+        cell even on the coarser mesh wall functions are specifically for,
+        which forces an artificially steep k/omega gradient over
+        whatever (now larger) near-wall cell height is actually in play.
+        Computing both consumers from this one shared, correctly-adjusted
+        ghost keeps them consistent by construction.
+        """
+        bo = self.geom.bnd_owner
+        if not bo.size:
+            return np.zeros(0), np.zeros(0)
+        rho_b = np.maximum(boundary_states[self.geom.boundary_mask, 0], 1e-9)
+        k_b = np.maximum(boundary_states[self.geom.boundary_mask, 5] / rho_b, 0.0)
+        omega_b = np.maximum(boundary_states[self.geom.boundary_mask, 6] / rho_b, 1e-6)
+
+        wm = self._wall_face_mask_b
+        if wm is not None and np.any(wm):
+            tang_dir, tang_mag = self._wall_tangential_velocity(rho, vel, boundary_states)
+            y_p = self.wall_distance[bo][wm]
+            _, k_wall, omega_wall = self._wall_function_targets(rho[bo][wm], tang_mag, y_p)
+            k_b = k_b.copy()
+            omega_b = omega_b.copy()
+            k_b[wm] = np.maximum(2.0 * k_wall - k[bo][wm], 0.0)
+            omega_b[wm] = np.maximum(2.0 * omega_wall - omega[bo][wm], 1e-6)
+        return k_b, omega_b
+
     def _turbulence_gradient(self, k: np.ndarray, omega: np.ndarray,
-                             boundary_states: np.ndarray) -> np.ndarray:
+                             k_ghost_b: np.ndarray, omega_ghost_b: np.ndarray) -> np.ndarray:
         """Green-Gauss gradient of [k, omega], shape (n_cells, 2, 3).
 
         Computed once per residual evaluation and shared by _viscous_flux
         and _sst_sources (see compute()'s docstring note on why this used
-        to be duplicated).
+        to be duplicated). Boundary ghost values come from
+        _turbulence_wall_ghost (wall-function aware - see its own
+        docstring), not recomputed here.
         """
         bo = self.geom.bnd_owner
         turb_b = None
         if bo.size:
-            rho_b = np.maximum(boundary_states[self.geom.boundary_mask, 0], 1e-9)
-            k_b = np.maximum(boundary_states[self.geom.boundary_mask, 5] / rho_b, 0.0)
-            omega_b = np.maximum(boundary_states[self.geom.boundary_mask, 6] / rho_b, 1e-6)
-            turb_b = np.column_stack([k_b, omega_b])
+            turb_b = np.column_stack([k_ghost_b, omega_ghost_b])
         turb_vars = np.column_stack([k, omega])
         return green_gauss_gradient(turb_vars, self.geom, turb_b)
 
@@ -813,7 +870,7 @@ class ViscousRANSResidual:
     # viscous flux
     # ------------------------------------------------------------------
     def _viscous_flux(self, rho, vel, T, k, omega, mu_t, grad_vel, grad_turb,
-                      boundary_states, flux_accum):
+                      boundary_states, flux_accum, k_ghost_b, omega_ghost_b):
         geom = self.geom
         io, ineigh = geom.int_owner, geom.int_neigh
         n_int = geom.normals[geom.internal_mask]
@@ -900,28 +957,12 @@ class ViscousRANSResidual:
             fvisc_b[:, 1:4] = tau_n_b
             fvisc_b[:, 4] = work_b + qn_b
 
-            k_ghost = np.maximum(boundary_states[geom.boundary_mask, 5] / rho_b, 0.0)
-            omega_ghost = np.maximum(boundary_states[geom.boundary_mask, 6] / rho_b, 1e-6)
-
-            wm = self._wall_face_mask_b
-            if wm is not None and np.any(wm):
-                # Wall-function k/omega targets, imposed as Dirichlet ghost
-                # values (mirrored so the face average equals the target -
-                # same mechanic as the existing k=0 no-slip Dirichlet, just
-                # with the log-law model's near-wall value instead of 0 /
-                # plain zero-gradient extrapolation).
-                tang_dir, tang_mag = self._wall_tangential_velocity(rho, vel, boundary_states)
-                y_p = self.wall_distance[bo][wm]
-                _, k_wall, omega_wall = self._wall_function_targets(rho[bo][wm], tang_mag, y_p)
-                # Same mirror-then-clamp pattern as the rest of the ghost-
-                # state machinery: the mirror formula can dip below the
-                # physical floor when the interior value is already far
-                # from the target, so re-clamp after overwriting.
-                k_ghost[wm] = np.maximum(2.0 * k_wall - k[bo][wm], 0.0)
-                omega_ghost[wm] = np.maximum(2.0 * omega_wall - omega[bo][wm], 1e-6)
-
-            gk_face_b = self._boundary_face_grad(gk, k[bo], k_ghost)
-            gw_face_b = self._boundary_face_grad(gw, omega[bo], omega_ghost)
+            # k_ghost_b/omega_ghost_b: wall-function-aware boundary ghost,
+            # shared with (and computed once by) _turbulence_wall_ghost -
+            # see its own docstring for why this must be the same array
+            # _turbulence_gradient used, not a second independent copy.
+            gk_face_b = self._boundary_face_grad(gk, k[bo], k_ghost_b)
+            gw_face_b = self._boundary_face_grad(gw, omega[bo], omega_ghost_b)
             mut_b = mu_t[bo]
             diff_k_b = (self.mu_lam + SST_SIGMA_K1 * mut_b) * np.einsum('nd,nd->n', gk_face_b, n_b)
             diff_w_b = (self.mu_lam + SST_SIGMA_W1 * mut_b) * np.einsum('nd,nd->n', gw_face_b, n_b)

@@ -75,7 +75,6 @@ class MeshQualityValidator:
         self.thresholds = {
             'max_negative_volumes': 0,       # No negative volumes allowed
             'max_volume_ratio': 1e6,         # Global range - informational only, see MeshQualityReport docstring
-            'min_aspect_ratio': 0.1,
             'max_aspect_ratio': 100.0,       # fallback when no BL/core split is available
             'bl_max_aspect_ratio': 50.0,     # BL cells: expected to be stretched
             'core_max_aspect_ratio': 10.0,   # core-fill cells: should be close to isotropic

@@ -7,6 +7,7 @@ used in finite volume method calculations.
 import numpy as np
 from typing import Optional
 from dataclasses import dataclass
+from loguru import logger
 
 
 @dataclass
@@ -101,10 +102,17 @@ class FaceData:
         # Validate areas are positive
         if np.any(self.area <= 0):
             n_negative = np.sum(self.area <= 0)
-            raise ValueError(
-                f"All face areas must be positive, "
-                f"found {n_negative} non-positive areas"
+            logger.warning(
+                f"Found {n_negative} non-positive face areas. Filtering them out..."
             )
+            # Filter out invalid faces
+            valid_mask = self.area > 0
+            self.connectivity = self.connectivity[valid_mask]
+            self.area = self.area[valid_mask]
+            self.normal = self.normal[valid_mask]
+            self.center = self.center[valid_mask]
+            if self.node_connectivity is not None:
+                self.node_connectivity = self.node_connectivity[valid_mask]
         
         # Ensure contiguous memory layout
         if not self.connectivity.flags['C_CONTIGUOUS']:

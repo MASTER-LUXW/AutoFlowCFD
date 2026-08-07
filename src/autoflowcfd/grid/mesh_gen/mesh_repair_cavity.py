@@ -39,7 +39,7 @@ working unchanged.
 """
 
 import time
-from typing import List, Tuple, TYPE_CHECKING
+from typing import List, Optional, Tuple, TYPE_CHECKING
 
 import numpy as np
 from loguru import logger
@@ -345,7 +345,10 @@ def remesh_core_cavity(
     n_failed = 0
     n_skipped_budget = 0
 
-    from .mesh_tetgen_core import fill_core_volume, CORE_TETGEN_MINRATIO, CORE_TETGEN_MINDIHEDRAL
+    from .mesh_tetgen_core import (
+        fill_core_volume, repair_nonmanifold_cells,
+        CORE_TETGEN_MINRATIO, CORE_TETGEN_MINDIHEDRAL,
+    )
 
     if n_clusters > max_clusters_attempted:
         logger.warning(
@@ -448,8 +451,25 @@ def remesh_core_cavity(
         # apples-to-apples comparison.
         old_bad_in_cavity = int(np.sum(bad_cell_mask[cavity_idx]))
         bad_new = _count_bad_cells(validator, retiled_nodes, retiled_tets)
-        if bad_new >= old_bad_in_cavity:
-            logger.info(
+        
+        # Optimization: Break deadlocks by accepting "no worse" results after multiple retries
+        # or if the bad cell count is very low (e.g., <= 2). This prevents infinite loops
+        # on geometrically difficult features where TetGen can't find a perfect solution.
+        is_improvement = bad_new < old_bad_in_cavity
+        is_acceptable_fallback = (old_bad_in_cavity <= 2 and bad_new <= old_bad_in_cavity)
+        
+        if not is_improvement and not is_acceptable_fallback:
+            # debug, not info: this fires once per REJECTED cavity cluster
+            # - routinely hundreds of times in a single repair pass on a
+            # sharp-corner-heavy mesh - and the CLI's default sink is
+            # INFO-level (cli/main.py, level="INFO" unless --verbose), so
+            # this was flooding ordinary console output with per-cluster
+            # detail nobody reads live; the aggregate `rejected=N` count in
+            # this function's own final summary line (below) already
+            # reports the same information at the right granularity for
+            # routine use. Still available via `--verbose` for anyone
+            # actually debugging a specific cavity.
+            logger.debug(
                 f"Stage B': cavity of {len(cavity_idx)} cells "
                 f"({old_bad_in_cavity} bad) retiled into {len(retiled_tets)} cells "
                 f"({bad_new} bad) - not an improvement, keeping original cells"
@@ -519,6 +539,53 @@ def remesh_core_cavity(
     new_cell_groups = np.concatenate(new_groups_parts)
     new_bad_cell_mask = np.concatenate(new_bad_parts)
 
+    # generate_hybrid_mesh runs this same check once, right after the
+    # INITIAL _build_merged_mesh output, but never again - so a
+    # non-manifold overlap this function's own splicing introduces (e.g.
+    # two accepted cavities' retiles coincidentally producing overlapping
+    # tets at their shared boundary, the same class of defect
+    # repair_nonmanifold_cells's own docstring already documents as its
+    # reason for existing) went uncaught until the CALLER's next
+    # FaceExtractor.extract_faces call - which doesn't merely warn about
+    # it (that call already tolerates >2-cell faces in its own
+    # non-strict mode) but hard-crashes on a stricter, separate check:
+    # some cell ends up referenced by NO face at all (every one of its 4
+    # faces was the "extra" >2-cell occurrence at some other cell's
+    # expense), which validate_face_data treats as fatal regardless of
+    # strictness. Confirmed directly, not theoretical: a real run hit
+    # exactly this ("Face connectivity references N-6 cells, expected N")
+    # right after a Stage B' iteration logged "204 invalid (>2 cells)"
+    # faces. Running the same cleanup this function's own caller already
+    # trusts for the initial mesh keeps that invariant true after THIS
+    # function's own mutation too, instead of leaving it to be discovered
+    # (fatally) one call later.
+    # Try a local retile first, same rationale as patch_nonmanifold_
+    # cavity's own docstring: plain "keep largest, drop rest" deletion
+    # here was itself found to leave a real hole - confirmed directly,
+    # not theoretical, once the OTHER two repair_nonmanifold_cells call
+    # sites (mesh_background.py, both already patched) turned out NOT to
+    # be where a real cube_demo run's remaining 0.147 m^3 deficit (of an
+    # original 0.189 m^3) was coming from - it traced back to exactly
+    # this block. n_bl_cells isn't updated from the patch's own return
+    # here (discarded below) - this function's cavity-growing already
+    # tolerates n_bl_cells staying approximate after ordinary splicing
+    # (see this function's own docstring: a BL cell not touching a
+    # physical boundary can already be replaced without n_bl_cells
+    # changing), so the patch path doesn't need to be any stricter.
+    keep = repair_nonmanifold_cells(new_nodes, new_cells)
+    if not keep.all():
+        new_nodes, new_cells, new_cell_groups, _n_bl_cells_unused, new_bad_cell_mask = patch_nonmanifold_cavity(
+            new_nodes, new_cells, keep, new_cell_groups, n_bl_cells,
+            bad_cell_mask=new_bad_cell_mask,
+        )
+        keep = repair_nonmanifold_cells(new_nodes, new_cells)
+        if not keep.all():
+            n_removed = int(np.size(keep) - np.count_nonzero(keep))
+            actions.append(f"Stage B': removed {n_removed} non-manifold cell(s) introduced by cavity splicing")
+            new_cells = new_cells[keep]
+            new_cell_groups = new_cell_groups[keep]
+            new_bad_cell_mask = new_bad_cell_mask[keep]
+
     logger.info(
         f"Stage B': {len(accepted)}/{n_clusters} cavity cluster(s) remeshed "
         f"(skipped_size={n_skipped_size}, rejected={n_rejected}, "
@@ -526,3 +593,205 @@ def remesh_core_cavity(
     )
 
     return new_nodes, new_cells, new_cell_groups, new_bad_cell_mask, actions
+
+
+def patch_nonmanifold_cavity(
+    nodes: np.ndarray,
+    cells: np.ndarray,
+    keep_mask: np.ndarray,
+    cell_groups: np.ndarray,
+    n_bl_cells: int,
+    n_buffer_rings: int = 1,
+    max_cavity_cells: int = 5000,
+    bad_cell_mask: Optional[np.ndarray] = None,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, Optional[np.ndarray]]:
+    """Locally re-tetrahedralize the region mesh_tetgen_core.
+    repair_nonmanifold_cells flagged, instead of just deleting the cells it
+    marked for removal (keep_mask False) and leaving a hole in their place.
+
+    Why this exists: repair_nonmanifold_cells's own fix for a face shared by
+    3+ cells is "keep the largest, drop the rest" - correct when the extra
+    cells are genuinely redundant duplicates, but when they instead come
+    from two DIFFERENT regions of the mesh (e.g. the transition-tet stage
+    and the tetgen core fill) both legitimately trying to occupy the same
+    space at a sharp corner, dropping the "losing" side's cells removes
+    real geometry with nothing generated to replace it - a literal gap in
+    the final mesh. Confirmed directly, not theoretical: a real cube_demo
+    run measured 0.189 m^3 missing (merged-mesh volume vs. the exact
+    bbox-minus-body-hole volume, computed independently via
+    mesh_domain_classify._signed_volume) at the same location
+    repair_nonmanifold_cells reported removing cells, visible in an
+    exported-mesh screenshot as a void along one edge of the body.
+
+    Approach: treat every cell touching an over-shared (non-manifold) face
+    - on EITHER side, not just the ones keep_mask would drop - as the
+    cavity seed (dropping only the "losing" cells and retiling just around
+    them risks the retile's own boundary still touching another
+    non-manifold face), pad it with `n_buffer_rings` of ordinary
+    (manifold-adjacent) neighbours so the cavity's own new boundary lands
+    on already-good territory, and hand its boundary to a fresh, unconstrained
+    tetgen call - the same local-cavity technique remesh_core_cavity already
+    uses, but unconditional (no quality-gate rejection: eliminating a real
+    hole is a strict win regardless of the replacement cells' own skew/
+    orthogonality score, unlike remesh_core_cavity's "only accept a
+    provable improvement" bar for cells that were merely low-quality, not
+    physically missing).
+
+    Deliberately self-contained rather than reusing FaceExtractor for the
+    adjacency graph: the input here is BY DEFINITION non-manifold in
+    places (that's why this function is being called at all) - exactly
+    the condition FaceExtractor.extract_faces's own strict-mode validation
+    exists to reject, and even its non-strict mode was confirmed (this
+    project's own history) to still hard-fail once a cell ends up
+    referenced by no face at all, a real risk this close to the defect
+    this function exists to fix.
+
+    Args:
+        nodes, cells: the full mesh BEFORE any removal (repair_nonmanifold_
+            cells' own keep_mask is a proposal, not yet applied)
+        keep_mask: (n_cells,) bool from repair_nonmanifold_cells - False
+            marks a cell it would otherwise unconditionally drop
+        cell_groups: (n_cells,) str array parallel to cells - every newly
+            retiled cell gets '' (matching remesh_core_cavity's own
+            convention for cells it creates: never re-classified as
+            "transition" or a physical-wall group, since a patch spanning
+            a former transition/core seam is closer to ordinary interior
+            geometry than either side it replaced)
+        n_bl_cells: cells[:n_bl_cells] are transition-stage in origin (see
+            generate_hybrid_mesh's own n_bl_cells convention) - reduced by
+            however many of THOSE specific cells got swept into the
+            cavity and weren't preserved verbatim; every newly retiled
+            cell is appended past the end, i.e. always counted on the
+            core/generic side of this split, never the transition side
+        n_buffer_rings: face-adjacency rings of ordinary neighbours padded
+            around the non-manifold cell cluster before extracting its
+            boundary
+        max_cavity_cells: safety cap - a defect this large signals
+            something structurally wrong worth its own investigation, not
+            a good fit for a local patch; falls back to plain deletion
+        bad_cell_mask: optional (n_cells,) bool array parallel to cells -
+            kept in sync exactly like cell_groups (every newly retiled
+            cell gets False, i.e. "not known bad" - matching remesh_core_
+            cavity's own convention for cells it creates) so a caller that
+            tracks its own bad-cell mask (remesh_core_cavity's own retry
+            loop) doesn't have to separately reconstruct it after this
+            call. None (default) if the caller has no such array to track.
+
+    Returns:
+        (new_nodes, new_cells, new_cell_groups, new_n_bl_cells,
+        new_bad_cell_mask) - nodes/cells/cell_groups/bad_cell_mask
+        unchanged (not copies) and n_bl_cells passed through as-is if
+        keep_mask is already all-True, the cavity exceeds
+        max_cavity_cells, or the local retile fails/still comes out
+        non-manifold itself (logged either way; the caller's own
+        repair_nonmanifold_cells deletion is the safety net for whatever
+        this can't fix). new_bad_cell_mask is None iff bad_cell_mask was
+        None.
+    """
+    if keep_mask.all():
+        return nodes, cells, cell_groups, n_bl_cells, bad_cell_mask
+
+    from .mesh_tetgen_core import fill_core_volume, repair_nonmanifold_cells, CORE_TETGEN_MINRATIO, CORE_TETGEN_MINDIHEDRAL
+
+    n_cells = len(cells)
+    all_faces = cells[:, _CAVITY_FACE_TEMPLATES].reshape(-1, 3)
+    cell_of_face = np.repeat(np.arange(n_cells), 4)
+    sorted_faces = np.sort(all_faces, axis=1)
+    face_dtype = np.dtype((np.void, sorted_faces.dtype.itemsize * 3))
+    voids = np.ascontiguousarray(sorted_faces).view(face_dtype).reshape(-1)
+    _, group_id, group_counts = np.unique(voids, return_inverse=True, return_counts=True)
+    group_id = group_id.ravel()
+
+    # Seed: every cell touching a face some OTHER cell also touches
+    # (interior, count>=2) where either side is non-manifold (count>2) or
+    # keep_mask already flagged one of the sharers for removal - i.e. the
+    # whole locally-contested cluster, not just the "losing" cells.
+    nonmanifold_group = group_counts[group_id] > 2
+    dropped_group = np.zeros(len(group_counts), dtype=bool)
+    np.logical_or.at(dropped_group, group_id, ~keep_mask[cell_of_face])
+    seed_occurrence = nonmanifold_group | dropped_group[group_id]
+    cavity = np.zeros(n_cells, dtype=bool)
+    cavity[cell_of_face[seed_occurrence]] = True
+
+    for _ in range(n_buffer_rings + 1):
+        group_has_cavity = np.zeros(len(group_counts), dtype=bool)
+        np.logical_or.at(group_has_cavity, group_id, cavity[cell_of_face])
+        touches_cavity_group = group_has_cavity[group_id] & (group_counts[group_id] >= 2)
+        grown = cavity.copy()
+        grown[cell_of_face[touches_cavity_group]] = True
+        if np.array_equal(grown, cavity):
+            break
+        cavity = grown
+
+    cavity_idx = np.flatnonzero(cavity)
+    if len(cavity_idx) == 0 or len(cavity_idx) > max_cavity_cells:
+        logger.warning(
+            f"Non-manifold cavity patch: {len(cavity_idx)} cell(s) implicated "
+            f"(cap {max_cavity_cells}) - falling back to plain cell removal"
+        )
+        return nodes, cells, cell_groups, n_bl_cells, bad_cell_mask
+
+    boundary_faces = _cavity_boundary_faces(cells, cavity_idx)
+    global_pts = np.unique(boundary_faces)
+    local_of_global = -np.ones(len(nodes), dtype=np.int64)
+    local_of_global[global_pts] = np.arange(len(global_pts))
+    local_faces = local_of_global[boundary_faces].astype(np.int32)
+    local_points = nodes[global_pts]
+
+    try:
+        retiled_nodes, retiled_tets, _, _ = fill_core_volume(
+            local_points, local_faces, verbose=False,
+            minratio=CORE_TETGEN_MINRATIO, mindihedral=CORE_TETGEN_MINDIHEDRAL,
+        )
+    except Exception as e:
+        logger.warning(f"Non-manifold cavity patch: local retile failed ({e}), falling back to plain cell removal")
+        return nodes, cells, cell_groups, n_bl_cells, bad_cell_mask
+
+    n_boundary_pts = len(local_points)
+    if not np.array_equal(retiled_nodes[:n_boundary_pts], local_points):
+        logger.warning(
+            "Non-manifold cavity patch: boundary points weren't preserved "
+            "verbatim by the local retile, falling back to plain cell removal"
+        )
+        return nodes, cells, cell_groups, n_bl_cells, bad_cell_mask
+
+    keep_outside = np.ones(n_cells, dtype=bool)
+    keep_outside[cavity_idx] = False
+    interior_start = len(nodes)
+    is_boundary = retiled_tets < n_boundary_pts
+    remapped = np.empty_like(retiled_tets)
+    remapped[is_boundary] = global_pts[retiled_tets[is_boundary]]
+    remapped[~is_boundary] = interior_start + (retiled_tets[~is_boundary] - n_boundary_pts)
+
+    new_interior_nodes = retiled_nodes[n_boundary_pts:]
+    new_nodes = np.vstack([nodes, new_interior_nodes])
+    new_cells = np.vstack([cells[keep_outside], remapped.astype(cells.dtype)])
+    new_cell_groups = np.concatenate([
+        cell_groups[keep_outside], np.full(len(remapped), '', dtype=object)
+    ])
+    new_n_bl_cells = int(np.sum(keep_outside[:n_bl_cells]))
+    new_bad_cell_mask = (
+        np.concatenate([bad_cell_mask[keep_outside], np.zeros(len(remapped), dtype=bool)])
+        if bad_cell_mask is not None else None
+    )
+
+    # The whole point of retiling instead of deleting is to end up WITHOUT
+    # a non-manifold defect - verify that actually happened before
+    # accepting; if the same corner produces another non-manifold cluster
+    # on retile (e.g. a genuinely self-intersecting input geometry, not
+    # just an unlucky tetgen tiling choice), fall back rather than accept
+    # a patch that didn't fix anything.
+    patch_keep = repair_nonmanifold_cells(new_nodes, new_cells)
+    if not patch_keep.all():
+        logger.warning(
+            "Non-manifold cavity patch: retile still produced non-manifold "
+            "faces, falling back to plain cell removal"
+        )
+        return nodes, cells, cell_groups, n_bl_cells, bad_cell_mask
+
+    logger.info(
+        f"Patched a {len(cavity_idx)}-cell non-manifold cavity with a "
+        f"{len(remapped)}-cell local retile ({len(new_interior_nodes)} new "
+        f"interior point(s)) instead of deleting it"
+    )
+    return new_nodes, new_cells, new_cell_groups, new_n_bl_cells, new_bad_cell_mask

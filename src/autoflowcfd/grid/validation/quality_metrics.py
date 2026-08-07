@@ -60,22 +60,61 @@ def tetrahedron_edge_lengths(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray
 
 
 def compute_triangle_aspect_ratios(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
-    """AR = longest_edge / shortest_edge for every triangle (1.0 = equilateral)."""
+    """AR = longest_edge / shortest_edge for every triangle (1.0 = equilateral).
+
+    Denominator floored at a small FRACTION of the triangle's own longest
+    edge, not a fixed absolute epsilon - see compute_prism_aspect_ratios'
+    docstring for why: a mesh's edge lengths span mm to metres depending on
+    min_cell_size, so a constant like 1e-12 is orders of magnitude below any
+    legitimate edge and lets a near-degenerate (but not literally zero-area)
+    triangle report a physically meaningless ratio (e.g. ~1e10+) that swamps
+    every other cell's signal in max/mean quality statistics.
+    """
     edges = triangle_edge_lengths(nodes, cells)
-    return np.max(edges, axis=1) / (np.min(edges, axis=1) + 1e-12)
+    max_edge = np.max(edges, axis=1)
+    min_edge = np.min(edges, axis=1)
+    return max_edge / np.maximum(min_edge, max_edge * 1e-6)
 
 
 def compute_tetrahedron_aspect_ratios(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
-    """AR = longest_edge / shortest_edge across all 6 edges of every tet."""
+    """AR = longest_edge / shortest_edge across all 6 edges of every tet.
+
+    Denominator floored at a small FRACTION of the tet's own longest edge -
+    see compute_triangle_aspect_ratios/compute_prism_aspect_ratios' docstrings
+    for why a fixed absolute epsilon is wrong here.
+    """
     edges = tetrahedron_edge_lengths(nodes, cells)
-    return np.max(edges, axis=1) / (np.min(edges, axis=1) + 1e-12)
+    max_edge = np.max(edges, axis=1)
+    min_edge = np.min(edges, axis=1)
+    return max_edge / np.maximum(min_edge, max_edge * 1e-6)
 
 
 def compute_triangle_skewness_values(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
-    """Skewness for every triangle: max(|angle - 60 deg|) / 60 deg, in [0, 1].
+    """Skewness for every triangle via the standard equiangular-skew
+    measure (the same definition Fluent/ANSYS Meshing report), in [0, 1]:
 
-    Based on angle deviation from equilateral (60 deg each), via the law of
-    cosines on each triangle's 3 edge lengths.
+        skew = max[ (theta_max - 60) / (180 - 60), (60 - theta_min) / 60 ]
+
+    where theta_max/theta_min are the triangle's largest/smallest angles
+    (degrees) and 60 deg is the equilateral reference angle.
+
+    This REPLACES an earlier formula, `min(max(|angle-60|)/60, 1.0)`, that
+    saturated at exactly 1.0 for ANY angle >= 120 deg - a 120 deg angle
+    (a normal, valid, moderately-elongated triangle - e.g. a BL prism's
+    cap triangle where the extrusion fans out around a convex corner) and
+    a 179.99 deg angle (a genuinely degenerate near-zero-area sliver) both
+    reported the identical value 1.0, indistinguishable from each other or
+    from the `degenerate` (near-zero edge) case below. Confirmed as a real
+    false-positive on a real case (ProjectFiles Part... mesh quality
+    follow-up): a BL prism cap with angles (123, 29, 28) deg - area 38.5
+    mm^2, nowhere near degenerate, matching what ANSA's own quality check
+    agreed was a valid element - scored a saturated 1.0 under the old
+    formula. The equiangular-skew formula instead grows continuously
+    towards 1.0 as an angle approaches its 0/180 deg extreme (that same
+    123 deg angle now scores ~0.53, "moderately skewed" - the 0.95
+    threshold this project already uses matches Fluent's own "poor/
+    sliver" cutoff on this same scale, so thresholds need no changes,
+    only the formula computing the value they're compared against).
     """
     p0, p1, p2 = nodes[cells[:, 0]], nodes[cells[:, 1]], nodes[cells[:, 2]]
     a = np.linalg.norm(p1 - p2, axis=1)
@@ -96,8 +135,11 @@ def compute_triangle_skewness_values(nodes: np.ndarray, cells: np.ndarray) -> np
     angle_2 = np.pi - angle_0 - angle_1
 
     angles_deg = np.degrees(np.stack([angle_0, angle_1, angle_2], axis=1))
-    max_dev = np.max(np.abs(angles_deg - 60.0), axis=1)
-    skewness = np.minimum(max_dev / 60.0, 1.0)
+    theta_max = np.max(angles_deg, axis=1)
+    theta_min = np.min(angles_deg, axis=1)
+    skew_max = (theta_max - 60.0) / (180.0 - 60.0)
+    skew_min = (60.0 - theta_min) / 60.0
+    skewness = np.clip(np.maximum(skew_max, skew_min), 0.0, 1.0)
     skewness[degenerate] = 1.0
 
     return skewness
@@ -243,7 +285,7 @@ def compute_prism_aspect_ratios(nodes: np.ndarray, cells: np.ndarray) -> np.ndar
 
 def compute_prism_skewness_values(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
     """Skewness for every prism: max(bottom-cap, top-cap) triangle skewness
-    (equilateral-deviation, same formula as compute_triangle_skewness_values).
+    (equiangular skew, same formula as compute_triangle_skewness_values).
 
     Deliberately does NOT fold in "verticality" (how close the 3 vertical
     edges are to the cap normal, i.e. shear/twist) - that is a genuinely

@@ -264,15 +264,26 @@ class BoundaryConditionHandler:
         un = u * normal[0] + v * normal[1] + w * normal[2]
         if un < 0.0:
             rho_g, u_g, v_g, w_g = self.rho_inf, 0.0, 0.0, 0.0
+            # The "stagnant reservoir" assumption above only reset density/
+            # velocity/pressure - k/omega were left as the raw interior
+            # (wake-disturbed) values, silently re-injecting the wake's own
+            # turbulence signature through the one channel the density/
+            # velocity reset was specifically added to close off. A
+            # reservoir has freestream turbulence, not wake turbulence -
+            # same 1% intensity / 0.1 m length-scale formula _inlet_bc uses.
+            u_ref = max(self.base_inlet_velocity, 1.0)
+            k_g = 1.5 * (0.01 * u_ref) ** 2
+            omega_g = 5.0 * u_ref / 0.1
         else:
             rho_g, u_g, v_g, w_g = rho, u, v, w
+            k_g, omega_g = k, omega
 
         rhou = rho_g * u_g
         rhov = rho_g * v_g
         rhow = rho_g * w_g
         E = p_outlet / (gamma - 1.0) + 0.5 * rho_g * (u_g**2 + v_g**2 + w_g**2)
 
-        return np.array([rho_g, rhou, rhov, rhow, E, rho_g * k, rho_g * omega])
+        return np.array([rho_g, rhou, rhov, rhow, E, rho_g * k_g, rho_g * omega_g])
 
     def _symmetry_bc(self, rho: float, u: float, v: float, w: float,
                     E: float, k: float, omega: float, normal: np.ndarray) -> np.ndarray:
@@ -581,12 +592,20 @@ class BoundaryConditionHandler:
         v_g = np.where(backflow, 0.0, v)
         w_g = np.where(backflow, 0.0, w)
 
+        # See the scalar `_outlet_bc` for why backflow also resets k/omega
+        # to freestream turbulence, not just density/velocity/pressure.
+        u_ref = max(self.base_inlet_velocity, 1.0)
+        k_inf = 1.5 * (0.01 * u_ref) ** 2
+        omega_inf = 5.0 * u_ref / 0.1
+        k_g = np.where(backflow, k_inf, k)
+        omega_g = np.where(backflow, omega_inf, omega)
+
         rhou = rho_g * u_g
         rhov = rho_g * v_g
         rhow = rho_g * w_g
         E = p_outlet / (gamma - 1.0) + 0.5 * rho_g * (u_g**2 + v_g**2 + w_g**2)
 
-        return np.column_stack([rho_g, rhou, rhov, rhow, E, rho_g * k, rho_g * omega])
+        return np.column_stack([rho_g, rhou, rhov, rhow, E, rho_g * k_g, rho_g * omega_g])
     
     def _symmetry_bc_vectorized(self, rho: np.ndarray, u: np.ndarray, v: np.ndarray,
                                w: np.ndarray, E: np.ndarray, k: np.ndarray,

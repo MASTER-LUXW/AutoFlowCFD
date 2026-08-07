@@ -17,7 +17,7 @@ growth-rate combinations.
 
 Two complementary mechanisms close that gap, mirroring how advancing-
 front methods (e.g. Pointwise's T-Rex) handle it - both independent of
-growth_rate, bl_layers, max_layers or any other extrusion parameter:
+growth_rate, bl_layers, or any other extrusion parameter:
 
   clamp_budget_for_convergence - BEFORE each layer's step, measure the
       CURRENT distance between candidate non-adjacent face pairs and cap
@@ -63,6 +63,7 @@ node is literally lowering/zeroing that node's remaining_budget).
 """
 
 import numpy as np
+from loguru import logger
 
 from ..validation.overlap_geometry import triangle_triangle_intersect, triangle_triangle_min_distance
 
@@ -400,6 +401,7 @@ def clamp_budget_for_convergence(
         return
 
     tri, centroids, face_size, normal = _face_geometry(nodes, faces)
+    budget_before = remaining_budget.copy()
 
     for row_idx, col_idx in _iter_candidate_pairs(
         faces, centroids, face_size, search_multiplier, chunk_size
@@ -439,6 +441,27 @@ def clamp_budget_for_convergence(
         pair_nodes = np.concatenate([faces[row_idx], faces[col_idx]], axis=1)  # (M, 6)
         pair_budget = np.repeat(safe_budget, 6).reshape(-1, 6)
         np.minimum.at(remaining_budget, pair_nodes.ravel(), pair_budget.ravel())
+
+    # Was previously silent - no logging at all despite being the primary
+    # (proactive) defence the module docstring describes, which made it
+    # invisible in a real run's own console output: a mesh that converged
+    # entirely through this mechanism (remaining_budget tightened to ~0
+    # BEFORE any actual collision could occur) produced zero self-
+    # intersection warnings from freeze_self_colliding_nodes downstream,
+    # reading as if nothing had constrained growth there at all - confirmed
+    # directly on cube_demo, where this was the sole cause of ~25,000
+    # dropped (fully budget-exhausted) BL prisms with no other mechanism
+    # showing any evidence of why.
+    tightened = remaining_budget < budget_before
+    n_tightened = int(np.sum(tightened))
+    if n_tightened:
+        n_exhausted = int(np.sum(remaining_budget[tightened] <= 0.0))
+        logger.info(
+            f"Convergence budget clamp: {n_tightened} node(s) tightened this "
+            f"layer ({n_exhausted} fully exhausted, remaining_budget=0 - that "
+            f"column's front is done growing), min remaining "
+            f"{float(np.min(remaining_budget[tightened])):.4e} m"
+        )
 
 
 def freeze_self_colliding_nodes(
@@ -489,8 +512,9 @@ def freeze_self_colliding_nodes(
         none)
     """
     frozen = np.zeros(len(new_nodes), dtype=bool)
+    total_frozen_count = 0
 
-    for _ in range(max_iterations):
+    for i in range(max_iterations):
         colliding_faces = find_self_colliding_faces(new_nodes, faces)
         # Also check for a fast-advancing face sweeping through a
         # different, slower/frozen neighbour's territory this same step -
@@ -512,5 +536,15 @@ def freeze_self_colliding_nodes(
         new_nodes[guilty] = current_nodes[guilty]
         remaining_budget[guilty] = 0.0
         frozen[guilty] = True
+        total_frozen_count += len(guilty)
+        
+        if i == 0:
+            logger.warning(f"Detected {len(colliding_faces)} self-intersecting faces in BL layer. "
+                           f"Freezing {len(guilty)} nodes to prevent invalid geometry.")
+        elif len(guilty) > 0:
+            logger.debug(f"Cascade resolution: freezing {len(guilty)} additional nodes.")
+
+    if total_frozen_count > 0:
+        logger.info(f"Total nodes frozen in this BL layer: {total_frozen_count}")
 
     return np.flatnonzero(frozen)

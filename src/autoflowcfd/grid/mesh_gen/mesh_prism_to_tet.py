@@ -45,7 +45,18 @@ def convert_layers_to_tetrahedra(
 
     Args:
         all_nodes: All nodes from all layers, shape=(total_nodes, 3)
-        layer_connectivity: Face indices per layer
+        layer_connectivity: one entry per extrusion STEP (n_layers - 1
+            entries for n_layers node-layers), matching the convention
+            used everywhere else this project derives a node-layer count
+            from an extrude_layers-produced connectivity list (see
+            mesh_background_merge._build_merged_mesh's own
+            `n_layers = len(bl_layer_conn) + 1` and its docstring for why
+            - extrude_layers.all_layer_nodes starts with the layer-0
+            block then appends one block per step, so the node array
+            always has one MORE layer than there are steps). Only this
+            list's LENGTH is used (its actual per-layer face-index
+            contents are never read - every layer shares base_faces' own
+            local face topology, just offset by nodes_per_layer).
         base_faces: Original surface faces, shape=(n_faces, 3)
 
     Returns:
@@ -71,7 +82,25 @@ def convert_layers_to_tetrahedra(
         every interior face shared by exactly 2 cells - still passes after
         dropping).
     """
-    n_layers = len(layer_connectivity)
+    # +1: layer_connectivity holds one entry per extrusion STEP, not per
+    # node-layer - see this function's own `layer_connectivity` doc. Using
+    # len(layer_connectivity) directly here (as this function did until
+    # this fix) under-counts n_layers by exactly one, which in turn makes
+    # nodes_per_layer = n_total_nodes // n_layers compute a value LARGER
+    # than the true per-layer node count - every off_lo/off_hi below then
+    # lands on the wrong absolute node index, silently connecting a vertex
+    # from one layer to a same-local-index vertex several layers away
+    # (confirmed directly: on a real case this produced tetrahedra with
+    # vertices from the near-wall transition region AND the domain's own
+    # inlet/outlet/farfield walls in the same cell - a single ~14 m^3 tet
+    # spanning the full domain length, and this wasn't a rare outlier:
+    # roughly half of all transition-stage tets on that case exceeded a
+    # sane volume bound). The prism counterpart below
+    # (convert_layers_to_prisms) has the identical fix; its own caller in
+    # mesh_background_merge.py compensated with an ad-hoc slice-time +1
+    # that masked this exact bug there, but nothing analogous existed for
+    # this function's own caller.
+    n_layers = len(layer_connectivity) + 1
     n_base_faces = len(base_faces)
 
     if n_layers < 2:
@@ -206,10 +235,13 @@ def convert_layers_to_prisms(
 
     Args:
         all_nodes: All nodes from all layers, shape=(total_nodes, 3)
-        layer_connectivity: Face indices per layer (only its LENGTH is used
-            - see convert_layers_to_tetrahedra's identical treatment - every
-            layer shares base_faces' own local face topology, just offset
-            by nodes_per_layer)
+        layer_connectivity: one entry per extrusion STEP, not per
+            node-layer - see convert_layers_to_tetrahedra's own
+            `layer_connectivity` doc for the full explanation (this
+            function had the identical off-by-one bug until the same fix
+            was applied here). Only its LENGTH is used - every layer
+            shares base_faces' own local face topology, just offset by
+            nodes_per_layer.
         base_faces: Original surface faces, shape=(n_faces, 3)
 
     Returns:
@@ -222,7 +254,10 @@ def convert_layers_to_prisms(
         this leaves behind is cleaned up by the caller's coincident-point
         merge pass, same as it already was for the equivalent tet case).
     """
-    n_layers = len(layer_connectivity)
+    # +1: see convert_layers_to_tetrahedra's identical fix/comment above -
+    # layer_connectivity holds one entry per extrusion STEP, not per
+    # node-layer.
+    n_layers = len(layer_connectivity) + 1
     n_base_faces = len(base_faces)
 
     if n_layers < 2:

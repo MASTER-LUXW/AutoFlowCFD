@@ -58,7 +58,7 @@ class NASParser:
 
         Raises:
             FileNotFoundError: 文件不存在
-            ValueError: 文件扩展名不正确, or units is not 'mm'/'m'/'auto'
+            ValueError: 文件扩展名不正确,或 units is not 'mm'/'m'/'auto'
         """
         self.file_path = Path(file_path)
         self.encoding = encoding
@@ -190,6 +190,32 @@ class NASParser:
             logger.info(f"Parsed {surface_cells.count:,} surface cells")
 
             if surface_cells.count == 0:
+                # A common cause: the file is actually a VOLUME mesh
+                # (CTETRA/CPENTA, e.g. ANSA's own volume export) handed to
+                # a code path that only ever looks for CTRIA3 surface
+                # triangles - silently parsing 0 cells and failing here
+                # with no clue why, unless this is checked for and called
+                # out explicitly. `solve run`/`solve transient --surface-
+                # mesh` and `grid import-volume` are the paths built for a
+                # volume mesh instead - see nas_parser_volume.py.
+                looks_like_volume_mesh = False
+                try:
+                    with open(self.file_path, 'r', encoding=self.encoding, errors='replace') as f:
+                        for line in f:
+                            if line[:8].strip() in ("CTETRA", "CPENTA"):
+                                looks_like_volume_mesh = True
+                                break
+                except OSError:
+                    pass
+                if looks_like_volume_mesh:
+                    raise NASParseError(
+                        f"No CTRIA3 surface cells found in {self.file_path} - it contains "
+                        f"CTETRA/CPENTA volume elements instead (e.g. an already-generated "
+                        f"volume mesh, such as ANSA's own volume export). Use 'autoflowcfd "
+                        f"grid import-volume' or 'solve run/transient --surface-mesh "
+                        f"<original_surface.nas> {self.file_path}' instead of parsing this "
+                        f"file directly as a surface mesh."
+                    )
                 raise NASParseError("No cells found in NAS file")
 
             # Step 4: Parse boundaries (delegated)
@@ -284,34 +310,35 @@ class NASParser:
 
         params = volume_mesh_params or {}
 
-        # Optimized three-stage hybrid mesh strategy
-        # Stage 1: Boundary Layer (8 layers, fine resolution for y+ control)
-        # Stage 2: Transition Layer (4 layers, medium resolution)
-        # Stage 3: Far-field Background (coarse Cartesian grid)
+        # Hybrid mesh strategy:
+        # Stage 1: Boundary Layer (fixed layer count, fine resolution for y+ control)
+        # Stage 2: Core fill - tetgen fills the remaining volume directly from
+        #   the BL's own outer surface, using its own unstructured grading out
+        #   to max_cell_size (see mesh_background_merge._build_merged_mesh;
+        #   ProjectFiles Part13 P49 - no separate structured transition stage)
         optimized_params = {
             'growth_rate': params.get('growth_rate', 1.2),
-            'max_layers': params.get('max_layers', 12),  # 8 BL + 4 transition
             'min_cell_size': params.get('min_cell_size', 0.01),
             'target_cells': params.get('target_cells', 400000),  # Balanced target
             'max_cell_size': params.get('max_cell_size'),
             'bl_layers': params.get('bl_layers'),
+            'bl_only': params.get('bl_only', False),
+            'bl_only_output': params.get('output'),
+            'core_only': params.get('core_only', False),
         }
 
         # Reflect the actual resolved parameters, not fixed placeholder
         # numbers - this used to always print "8 layers, growth_rate=1.2 /
-        # 4 layers, growth_rate=1.5" even when --growth-rate/--max-layers/
-        # --bl-layers were overridden, misleading anyone (human or agent)
-        # trying to correlate this log with what was actually generated.
-        resolved_bl_layers = optimized_params['bl_layers'] or min(8, optimized_params['max_layers'])
-        resolved_transition_layers = max(optimized_params['max_layers'] - resolved_bl_layers, 0)
-        transition_growth_rate = optimized_params['growth_rate'] * 1.25
+        # 4 layers, growth_rate=1.5" even when --growth-rate/--bl-layers
+        # were overridden, misleading anyone (human or agent) trying to
+        # correlate this log with what was actually generated.
+        resolved_bl_layers = optimized_params['bl_layers'] or 8
         logger.info(
-            f"Using three-stage hybrid mesh strategy:\n"
+            f"Using hybrid mesh strategy:\n"
             f"  Stage 1 (BL): {resolved_bl_layers} layers, "
             f"growth_rate={optimized_params['growth_rate']}\n"
-            f"  Stage 2 (Transition): {resolved_transition_layers} layers, "
-            f"growth_rate={transition_growth_rate}\n"
-            f"  Stage 3 (Background): Coarse Cartesian grid\n"
+            f"  Stage 2 (Core fill): tetgen, graded out to "
+            f"max_cell_size={optimized_params['max_cell_size']}\n"
             f"  Target total cells: ~{optimized_params['target_cells']:,}"
         )
 
@@ -328,9 +355,7 @@ class NASParser:
                 'min': np.array([bounding_box[0], bounding_box[2], bounding_box[4]]),
                 'max': np.array([bounding_box[1], bounding_box[3], bounding_box[5]])
             },
-            method="extrusion",
             surface_boundaries=surface_grid.boundaries,
-            use_hybrid_mesh=True  # Enable hybrid mesh (BL + background)
         )
 
         # Save original surface mesh data

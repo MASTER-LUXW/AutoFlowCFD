@@ -270,17 +270,29 @@ class VolumeMeshData:
 
                 boundary_groups = self.boundaries.groups if self.boundaries else None
 
+                # strict=True: this is the genuine solve/export-time gate
+                # (called from solver_steady.py, transient_solver_loop.py,
+                # nas_export.py, quality_validator.py, postprocessing) - by
+                # this point mesh generation's own repair stages have all
+                # already run, so a face still shared by >2 cells here is a
+                # real, uncorrected topology defect (silent flux loss, see
+                # FaceExtractor._finalize_faces), not a transient repair-in-
+                # progress state. Intermediate extract_faces/extract_faces_
+                # mixed calls DURING generation/repair deliberately stay
+                # non-strict (default) instead.
                 if self.prism_cells is not None:
                     self.faces = FaceExtractor.extract_faces_mixed(
                         prism_connectivity=self.prism_cells.connectivity,
                         tet_connectivity=self.cells.connectivity,
                         nodes=self.nodes,
+                        strict=True,
                     )
                 else:
                     self.faces = FaceExtractor.extract_faces(
                         cell_connectivity=self.cells.connectivity,
                         nodes=self.nodes,
-                        boundary_groups=boundary_groups
+                        boundary_groups=boundary_groups,
+                        strict=True,
                     )
 
                 logger.info(

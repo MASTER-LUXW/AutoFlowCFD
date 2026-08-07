@@ -19,6 +19,21 @@ from .nas_parser_exceptions import NASParseError
 # condition assigned at all.
 _UNCLASSIFIED_GROUP = "UNCLASSIFIED"
 
+# Shell-like property card types recognized for boundary naming. PCOMP/
+# PCOMPG (composite/layered shells - common for painted or composite body
+# panels) previously fell straight through to _UNCLASSIFIED_GROUP/WALL with
+# no indication that it was a systematic property-type gap rather than a
+# genuinely unnamed property, since only PSHELL was ever checked.
+_SHELL_PROPERTY_TYPES = {'PSHELL', 'PCOMP', 'PCOMPG'}
+
+
+def _leading_card_name(line_stripped: str) -> str:
+    """Extract a Nastran card's leading keyword (e.g. "PSHELL" from both
+    "PSHELL,1,1001,0.001" and "PSHELL       1      1      1.") - the card
+    name is whatever comes before the first comma or whitespace, whichever
+    is first."""
+    return line_stripped.split(',', 1)[0].split()[0].upper() if line_stripped else ''
+
 
 def parse_boundary_properties(
     file_path: str,
@@ -138,9 +153,14 @@ def _parse_property_names(file_path: str, encoding: str) -> Dict[int, str]:
                         pid = int(parts[1])
                         prop_type = parts[2].strip().upper()
                         prop_name = parts[3].strip()
-                        
-                        # Only process PSHELL properties
-                        if prop_type == 'PSHELL' and prop_name:
+
+                        # PSHELL, and composite/layered shells (PCOMP/
+                        # PCOMPG) - common for painted or composite body
+                        # panels, otherwise silently degraded to WALL via
+                        # _UNCLASSIFIED_GROUP with no indication it was a
+                        # property-TYPE gap rather than a genuinely unnamed
+                        # property.
+                        if prop_type in _SHELL_PROPERTY_TYPES and prop_name:
                             pid_to_name[pid] = prop_name
                             logger.debug(f"Found Property: PID={pid}, Name='{prop_name}'")
                     except (ValueError, IndexError):
@@ -150,15 +170,14 @@ def _parse_property_names(file_path: str, encoding: str) -> Dict[int, str]:
 
 
 def _parse_pshell_names(file_path: str, encoding: str) -> Dict[int, str]:
-    """Parse PSHELL cards with comment-based naming.
+    """Parse PSHELL/PCOMP/PCOMPG cards with comment-based naming.
 
-    Handles both comma-separated free-field PSHELL cards
-    (``PSHELL,1,1001,0.001``) and fixed-width small-field cards
-    (``PSHELL       1      1      1.``, no commas - the format this
-    project's own nas_export.py writes when it isn't paired with an
-    $ANSA_NAME_COMMENT). A comma-only split previously matched neither the
-    fixed-width case nor a genuinely bare PID column, silently returning no
-    names for any such file.
+    Handles both comma-separated free-field cards (``PSHELL,1,1001,0.001``)
+    and fixed-width small-field cards (``PSHELL       1      1      1.``,
+    no commas - the format this project's own nas_export.py writes when it
+    isn't paired with an $ANSA_NAME_COMMENT). A comma-only split previously
+    matched neither the fixed-width case nor a genuinely bare PID column,
+    silently returning no names for any such file.
     """
     pid_to_name = {}
 
@@ -170,8 +189,9 @@ def _parse_pshell_names(file_path: str, encoding: str) -> Dict[int, str]:
             if not line_stripped or line_stripped.startswith('#'):
                 continue
 
-            # Check for PSHELL card
-            if line_stripped.upper().startswith('PSHELL'):
+            # Check for a shell-like property card (PSHELL, or composite/
+            # layered PCOMP/PCOMPG - same fallback naming convention).
+            if _leading_card_name(line_stripped) in _SHELL_PROPERTY_TYPES:
                 # Try to get name from previous comment line
                 # Format: $ PROPERTY NAME: XXXX
                 if prev_line.startswith('$'):

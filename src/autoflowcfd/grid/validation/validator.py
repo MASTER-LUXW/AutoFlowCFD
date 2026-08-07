@@ -27,6 +27,7 @@ from typing import Dict, Any, Tuple
 from loguru import logger
 
 from ..structures import GridData
+from .quality_metrics import compute_triangle_aspect_ratios, compute_triangle_skewness_values
 
 
 class GridValidator:
@@ -171,37 +172,18 @@ class GridValidator:
             Values > 10 indicate stretched cells that may cause numerical issues.
         """
         logger.debug("Computing aspect ratios...")
-        
+
         connectivity = self.grid_data.cells.connectivity
-        nodes = self.grid_data.nodes
-        
-        # Get node coordinates for all cells
-        # Shape: (N_cells, 3, 3) where last dim is (x, y, z)
-        cell_coords = np.stack([
-            nodes.get_coordinates(connectivity[:, i])
-            for i in range(3)
-        ], axis=1)
-        
-        # Compute edge lengths for each triangle
-        # Edge 0: node 0 to node 1
-        edge0 = np.linalg.norm(cell_coords[:, 1] - cell_coords[:, 0], axis=1)
-        # Edge 1: node 1 to node 2
-        edge1 = np.linalg.norm(cell_coords[:, 2] - cell_coords[:, 1], axis=1)
-        # Edge 2: node 2 to node 0
-        edge2 = np.linalg.norm(cell_coords[:, 0] - cell_coords[:, 2], axis=1)
-        
-        # Stack edges
-        edges = np.stack([edge0, edge1, edge2], axis=1)
-        
-        # Aspect ratio = max_edge / min_edge
-        max_edges = np.max(edges, axis=1)
-        min_edges = np.min(edges, axis=1)
-        
-        # Avoid division by zero
-        min_edges = np.maximum(min_edges, 1e-10)
-        
-        aspect_ratios = max_edges / min_edges
-        
+        node_coords = self.grid_data.nodes.get_coordinates()
+
+        # Reuses quality_metrics.compute_triangle_aspect_ratios (same
+        # relative-epsilon floor as every other cell-type's aspect ratio in
+        # this project) instead of a separate ad hoc implementation, so a
+        # future fix to that formula can't silently drift out of sync here
+        # the way this module's skewness check once did (see
+        # quality_metrics.compute_triangle_skewness_values' docstring).
+        aspect_ratios = compute_triangle_aspect_ratios(node_coords, connectivity)
+
         # Compute statistics
         stats = {
             'max': float(np.max(aspect_ratios)),
@@ -231,40 +213,23 @@ class GridValidator:
             Values > 0.9 indicate highly skewed cells.
         """
         logger.debug("Computing skewness...")
-        
+
         connectivity = self.grid_data.cells.connectivity
-        nodes = self.grid_data.nodes
-        
-        # Get node coordinates
-        cell_coords = np.stack([
-            nodes.get_coordinates(connectivity[:, i])
-            for i in range(3)
-        ], axis=1)
-        
-        # Compute edge lengths
-        edge0 = np.linalg.norm(cell_coords[:, 1] - cell_coords[:, 0], axis=1)
-        edge1 = np.linalg.norm(cell_coords[:, 2] - cell_coords[:, 1], axis=1)
-        edge2 = np.linalg.norm(cell_coords[:, 0] - cell_coords[:, 2], axis=1)
-        
-        # Compute area using cross product
-        v0 = cell_coords[:, 1] - cell_coords[:, 0]
-        v1 = cell_coords[:, 2] - cell_coords[:, 0]
-        cross = np.cross(v0, v1)
-        areas = 0.5 * np.linalg.norm(cross, axis=1)
-        
-        # Ideal area for equilateral triangle with same perimeter
-        perimeters = edge0 + edge1 + edge2
-        ideal_areas = (np.sqrt(3) / 36) * perimeters**2
-        
-        # Avoid division by zero
-        ideal_areas = np.maximum(ideal_areas, 1e-10)
-        
-        # Skewness = 1 - (actual_area / ideal_area)
-        skewness = 1.0 - (areas / ideal_areas)
-        
-        # Clamp to [0, 1] range
-        skewness = np.clip(skewness, 0.0, 1.0)
-        
+        node_coords = self.grid_data.nodes.get_coordinates()
+
+        # Reuses quality_metrics.compute_triangle_skewness_values (the
+        # standard Fluent-style equiangular-skew formula) instead of the
+        # area-deviation formula this check used to have. That older
+        # formula was a DIFFERENT, non-standard metric from the one this
+        # project deliberately adopted for triangle skewness elsewhere -
+        # see compute_triangle_skewness_values' own docstring for the real
+        # false-positive case (a valid 123/29/28 degree BL cap triangle)
+        # that motivated the switch. Left un-synced here, this surface
+        # mesh check - the FIRST quality gate a mesh goes through - would
+        # keep scoring the same triangle differently from every later
+        # check in the pipeline.
+        skewness = compute_triangle_skewness_values(node_coords, connectivity)
+
         # Compute statistics
         stats = {
             'max': float(np.max(skewness)),

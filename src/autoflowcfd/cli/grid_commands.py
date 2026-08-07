@@ -161,8 +161,11 @@ def parse(
 @click.argument("input_file", type=click.Path(exists=True))
 @click.option("--report", "-r", type=click.Path(), default="quality_report.json",
               help="Quality report output file")
-@click.option("--threshold-aspect-ratio", type=float, default=1000.0,
-              help="Aspect ratio threshold")
+@click.option("--threshold-aspect-ratio", type=float, default=100.0,
+              help="Aspect ratio threshold (matches GridValidator's own "
+              "default - see validator.py - so an unmodified `grid validate` "
+              "run agrees with `grid parse`/`generate-volume`'s quality gate "
+              "on the same mesh instead of being 10x more permissive)")
 @click.option("--threshold-area", type=float, default=1e-12,
               help="Minimum cell area threshold (m²)")
 @click.option("--fix-duplicates", is_flag=True, help="Auto-merge duplicate nodes")
@@ -272,38 +275,32 @@ def validate(
 
 @grid.command(name="generate-volume")
 @click.argument("input_file", type=click.Path(exists=True))
-@click.option("--output", "-o", type=click.Path(), required=True,
-              help="Output volume mesh .nas file path")
-@click.option("--growth-rate", type=float, default=1.2, help="Boundary layer growth rate")
-@click.option("--max-layers", type=int, default=12, help="Maximum extrusion layers")
-@click.option("--min-cell-size", type=float, default=0.01, help="Minimum cell size (m)")
-@click.option("--target-cells", type=int, default=400000, help="Target total volume cell count")
-@click.option("--max-cell-size", type=float, default=None,
-              help="Max core-region cell size (m), graded outward from the BL's near-wall "
-                   "size; unset means the core fill has no size cap beyond tetgen's own "
-                   "shape-quality bounds")
-@click.option("--bl-layers", type=int, default=None,
-              help="How many of --max-layers count as the fine boundary-layer stage "
-                   "before switching to the faster-growing transition stage; unset "
-                   "keeps the default min(8, max_layers) split. The transition stage "
-                   "always gets whatever remains (max_layers - bl_layers), so setting "
-                   "this equal to or above --max-layers leaves zero transition layers")
-@click.option("--skip-quality-report", is_flag=True,
-              help="Skip computing/printing the post-generation mesh quality "
-                   "report (the volume mesh is always exported either way - "
-                   "this only saves the validation pass itself)")
-@click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
+@click.option("-o", "--output", required=True, help="Output volume mesh .nas file path")
+@click.option("--growth-rate", default=1.2, show_default=True, help="Boundary layer growth rate")
+@click.option("--min-cell-size", default=0.001, show_default=True, help="Minimum cell size (m)")
+@click.option("--target-cells", default=500000, show_default=True, help="Target total volume cell count")
+@click.option("--max-cell-size", default=None, type=float, help="Maximum cell size (m)")
+@click.option("--bl-layers", default=None, type=int, help="Number of BL layers")
+@click.option("--skip-quality-report", is_flag=True, help="Skip quality report computation")
+@click.option("--json-output", is_flag=True, help="Output result as JSON")
+@click.option("--bl-only", is_flag=True, help="Generate and export only the BL prism layer mesh")
+@click.option(
+    "--core-only", is_flag=True,
+    help="Export the mesh right after core-region tetgen fill (core tets "
+    "alone, not spliced with BL) - skips all later steps",
+)
 def generate_volume(
     input_file: str,
     output: str,
     growth_rate: float,
-    max_layers: int,
     min_cell_size: float,
     target_cells: int,
     max_cell_size: Optional[float],
     bl_layers: Optional[int],
     skip_quality_report: bool,
-    json_output: bool
+    json_output: bool,
+    bl_only: bool,
+    core_only: bool,
 ) -> None:
     """Generate a volume mesh from a surface .nas file and export it.
 
@@ -321,26 +318,29 @@ def generate_volume(
         input_file: Path to surface .nas grid file
         output: Output volume mesh .nas file path
         growth_rate: Boundary layer growth rate
-        max_layers: Maximum extrusion layers
         min_cell_size: Minimum cell size (m)
         target_cells: Target total volume cell count
-        bl_layers: How many of max_layers count as the BL stage before
-            switching to the transition growth rate; None keeps the
-            default min(8, max_layers) split
+        bl_layers: How many layers the BL stage extrudes before the
+            remaining volume is filled directly from the BL's own outer
+            surface by tetgen (see mesh_background_merge._build_merged_mesh
+            - there is no separate structured "transition" stage anymore,
+            ProjectFiles Part13 P49); None defaults to 8
         skip_quality_report: Skip computing/printing the quality report
             (export always happens regardless)
         json_output: Output result as JSON
-
-    Examples:
-        # Basic volume mesh generation
-        $ autoflowcfd grid generate-volume sedan.nas -o sedan_volume.nas
-
-        # Coarser mesh for a quick check
-        $ autoflowcfd grid generate-volume sedan.nas -o sedan_volume.nas --target-cells 100000
+        bl_only: If set, only generate and export the BL prism layer mesh.
+        core_only: If set, export right after core-region tetgen fill (core
+            tets alone, not spliced with BL) and stop.
     """
     from autoflowcfd.grid import (
         NASParser, GridValidator, MeshQualityValidator, export_volume_mesh_to_nas
     )
+
+    if bl_only and core_only:
+        raise click.ClickException(
+            "--bl-only and --core-only are mutually exclusive - each stops "
+            "the pipeline at a different stage"
+        )
 
     logger.info(f"Generating volume mesh: {input_file}")
 
@@ -366,11 +366,13 @@ def generate_volume(
             surface_grid,
             volume_mesh_params={
                 'growth_rate': growth_rate,
-                'max_layers': max_layers,
                 'min_cell_size': min_cell_size,
                 'target_cells': target_cells,
                 'max_cell_size': max_cell_size,
                 'bl_layers': bl_layers,
+                'bl_only': bl_only,
+                'core_only': core_only,
+                'output': output,
             }
         )
 
@@ -397,16 +399,22 @@ def generate_volume(
                     "exporting anyway (see report above). This mesh would very "
                     "likely diverge if solved as-is; common causes: sharp convex "
                     "edges/corners on the body (BL extrusion degrades there; "
-                    "consider a small chamfer/fillet in the source geometry, or "
-                    "fewer/thicker --max-layers), or an overly aggressive "
-                    "--growth-rate/--min-cell-size for this geometry's feature "
-                    "sizes. 'autoflowcfd solve run' will still enforce this gate "
+                    "consider a small chamfer/fillet in the source geometry), or "
+                    "an overly aggressive --growth-rate/--min-cell-size for this "
+                    "geometry's feature sizes. 'autoflowcfd solve run' will still enforce this gate "
                     "before any iterations run, unless --skip-quality-check is "
                     "passed there too."
                 )
 
         logger.info("Step 4/4: Exporting volume mesh to NAS...")
-        output_path = export_volume_mesh_to_nas(volume_mesh, output)
+        # scale_factor=1000.0: internal mesh coordinates are always meters
+        # (NASParser converts mm->m on import), but this export writes a
+        # file with an ANSA-mimicking header ($ANSA_VERSION, "file created
+        # by A N S A") - re-importing it (into this project with
+        # NASParser's own default units='mm', or into ANSA itself) assumes
+        # millimeters, which would silently shrink the geometry 1000x if
+        # exported at the function's own meters default instead.
+        output_path = export_volume_mesh_to_nas(volume_mesh, output, scale_factor=1000.0)
 
         boundary_names = list(volume_mesh.boundaries.groups.keys())
         result = {
@@ -569,4 +577,119 @@ def convert(input_file: str, format: str, output: str, json_output: bool) -> Non
     else:
         click.echo(f"{result['status']}: {result['message']}")
     raise click.ClickException("Grid conversion is not yet implemented (planned for v1.0)")
+
+
+@grid.command(name="import-volume")
+@click.argument("volume_mesh_file", type=click.Path(exists=True))
+@click.option("--surface-mesh", "-s", type=click.Path(exists=True), required=True,
+              help="Original surface .nas file the volume mesh was generated from "
+                   "(supplies boundary-group geometry for inlet/outlet/wall/... "
+                   "attribution - the volume mesh file itself typically carries none)")
+@click.option("--output", "-o", type=click.Path(), required=True,
+              help="Output path for the validated/repaired mesh, as a pickled "
+                   "VolumeMeshData (.pkl) ready for 'autoflowcfd solve run'/"
+                   "'transient' - NOT a .nas file")
+@click.option("--skip-repair", is_flag=True,
+              help="Skip Stage A smoothing when the initial quality check fails - "
+                   "just report and export the mesh exactly as parsed")
+@click.option("--max-repair-passes", type=int, default=5,
+              help="Stage A smoothing's own max passes")
+@click.option("--skip-overlap-check", is_flag=True,
+              help="Skip the physical-overlap check (the most expensive single "
+                   "quality check on a large mesh) - use for a quick preliminary look")
+@click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
+def import_volume(
+    volume_mesh_file: str,
+    surface_mesh: str,
+    output: str,
+    skip_repair: bool,
+    max_repair_passes: int,
+    skip_overlap_check: bool,
+    json_output: bool,
+) -> None:
+    """Import an externally-generated volume mesh (e.g. ANSA's own volume
+    export) for quality-checking, best-effort repair, and solving.
+
+    Parses a volume-mesh .nas file (GRID + CTETRA + CPENTA cards) some
+    OTHER tool produced, attributes boundary groups (inlet/outlet/wall/...)
+    from the companion surface mesh it was generated from by geometric
+    (nearest-centroid) matching, runs the same MeshQualityValidator this
+    project's own generate-volume uses, and - if the check fails - applies
+    Stage A smoothing (quality-gated Laplacian smoothing of skewed/non-
+    orthogonal/volume-mismatched cells) as a best-effort repair. The
+    result is saved as a pickled VolumeMeshData, the same cache format
+    'autoflowcfd solve run'/'transient' already consume directly.
+
+    Args:
+        volume_mesh_file: Path to the volume-mesh .nas file
+        surface_mesh: Path to the original surface .nas file
+        output: Output .pkl path
+        skip_repair: Skip Stage A smoothing on a failing quality check
+        max_repair_passes: Stage A's own max passes
+        skip_overlap_check: Skip the (expensive) physical-overlap check
+        json_output: Output result as JSON
+
+    Examples:
+        # Import, repair if needed, and prepare for solving
+        $ autoflowcfd grid import-volume car_volume.nas -s car_surface.nas -o car_volume.pkl
+
+        # Then solve directly from the cache
+        $ autoflowcfd solve run car_volume.pkl
+    """
+    from autoflowcfd.grid.mesh_gen.mesh_external_import import import_external_volume_mesh
+
+    logger.info(f"Importing external volume mesh: {volume_mesh_file}")
+
+    try:
+        volume_mesh, report = import_external_volume_mesh(
+            volume_mesh_file, surface_mesh,
+            repair=not skip_repair,
+            max_repair_passes=max_repair_passes,
+            check_overlap=not skip_overlap_check,
+        )
+
+        output_path = Path(output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        import pickle
+        with open(output_path, 'wb') as f:
+            pickle.dump(volume_mesh, f)
+
+        result = {
+            "command": "grid.import-volume",
+            "status": "success",
+            "node_count": volume_mesh.node_count,
+            "cell_count": volume_mesh.cell_count,
+            "total_volume": volume_mesh.total_volume,
+            "boundary_groups": list(volume_mesh.boundaries.groups.keys()),
+            "quality_passed": report.passed,
+            "output": str(output_path),
+        }
+        if json_output:
+            click.echo(json.dumps(result, indent=2))
+        else:
+            click.echo(f"\nImported: {Path(volume_mesh_file).name}")
+            click.echo("=" * 50)
+            click.echo(f"Nodes: {volume_mesh.node_count:,}")
+            click.echo(f"Cells: {volume_mesh.cell_count:,}")
+            click.echo(f"Total volume: {volume_mesh.total_volume:.6e} m^3")
+            click.echo(f"Boundary groups: {', '.join(result['boundary_groups'])}")
+            click.echo(f"Quality gate: {'PASSED' if report.passed else 'FAILED'}")
+            click.echo(f"\n✓ Saved to: {output_path}")
+            if not report.passed:
+                click.echo(
+                    "✗ Quality gate failed (see report above) - "
+                    "'solve run'/'transient' will still enforce this before solving, "
+                    "unless --skip-quality-check is passed there too"
+                )
+
+    except Exception as e:
+        logger.error(f"External volume mesh import failed: {e}")
+        if json_output:
+            error_result = {
+                "command": "grid.import-volume",
+                "status": "error",
+                "error": str(e),
+            }
+            click.echo(json.dumps(error_result, indent=2))
+        raise click.ClickException(f"External volume mesh import failed: {e}")
     # TODO: Implement grid conversion in v1.0

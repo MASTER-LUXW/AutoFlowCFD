@@ -121,12 +121,12 @@ class SteadyConfig(SolverConfig):
         convergence_tol: Convergence tolerance (residual)
         monitor_coefficients: Monitor aerodynamic coefficients during iteration
         growth_rate: Boundary-layer geometric growth rate (surface -> volume mesh)
-        max_layers: Maximum boundary-layer + transition layer count
-        bl_layers: Optional override for how many of max_layers count as the
-            fine boundary-layer stage before switching to the faster-growing
+        bl_layers: Optional override for how many layers count as the fine
+            boundary-layer stage before switching to the (fixed-rate)
             transition stage (see mesh_extrusion.extrude_layers' own
-            bl_layers doc). None (default) keeps the hardcoded
-            min(8, max_layers) split.
+            bl_layers doc). None (default) uses 8. The transition stage
+            has no layer-count cap of its own - it grows at a fixed rate
+            until max_cell_size is reached.
         min_cell_size: First (near-wall) layer thickness, in meters
         target_cells: Target total cell count (currently only consulted by the
             pure-extrusion volume mesh path; the tetgen-based hybrid path
@@ -171,7 +171,6 @@ class SteadyConfig(SolverConfig):
     convergence_tol: float = 1e-3
     monitor_coefficients: bool = True
     growth_rate: float = 1.15
-    max_layers: int = 6
     bl_layers: Optional[int] = None
     min_cell_size: float = 0.003
     target_cells: int = 500000
@@ -204,8 +203,6 @@ class SteadyConfig(SolverConfig):
         # Validate volume mesh parameters
         if self.growth_rate <= 1.0:
             raise ValueError(f"growth_rate must be > 1.0, got {self.growth_rate}")
-        if self.max_layers < 1:
-            raise ValueError(f"max_layers must be positive, got {self.max_layers}")
         if self.min_cell_size <= 0:
             raise ValueError(f"min_cell_size must be positive, got {self.min_cell_size}")
         if self.target_cells < 1:
@@ -241,7 +238,7 @@ class TransientConfig(SolverConfig):
         sample_interval: Data sampling interval (steps)
         warmup_time: Warmup time to skip (seconds, for statistics)
         init_from_checkpoint: Initialize from steady-state checkpoint
-        growth_rate, max_layers, bl_layers, min_cell_size, target_cells,
+        growth_rate, bl_layers, min_cell_size, target_cells,
             max_cell_size: Volume mesh generation parameters, same meaning
             as SteadyConfig.
         rho_inf, vel_inf, p_inf: Freestream conditions, same meaning and
@@ -266,7 +263,6 @@ class TransientConfig(SolverConfig):
     warmup_time: float = 0.05
     init_from_checkpoint: Optional[str] = None
     growth_rate: float = 1.15
-    max_layers: int = 6
     bl_layers: Optional[int] = None
     min_cell_size: float = 0.003
     target_cells: int = 500000
@@ -300,8 +296,6 @@ class TransientConfig(SolverConfig):
         # Validate volume mesh parameters
         if self.growth_rate <= 1.0:
             raise ValueError(f"growth_rate must be > 1.0, got {self.growth_rate}")
-        if self.max_layers < 1:
-            raise ValueError(f"max_layers must be positive, got {self.max_layers}")
         if self.min_cell_size <= 0:
             raise ValueError(f"min_cell_size must be positive, got {self.min_cell_size}")
         if self.target_cells < 1:

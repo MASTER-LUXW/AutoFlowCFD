@@ -61,17 +61,23 @@ def solve() -> None:
               help="GPU device ID")
 @click.option("--growth-rate", type=float, default=None,
               help="Boundary-layer geometric growth rate (overrides config)")
-@click.option("--max-layers", type=int, default=None,
-              help="Maximum boundary layer layers (overrides config)")
 @click.option("--bl-layers", type=int, default=None,
-              help="How many of --max-layers count as the fine boundary-layer stage "
-                   "before switching to the faster-growing transition stage; unset "
-                   "keeps the default min(8, max_layers) split (overrides config)")
+              help="How many layers count as the fine boundary-layer stage before "
+                   "switching to the (fixed-rate) transition stage; unset defaults "
+                   "to 8 (overrides config)")
 @click.option("--min-cell-size", type=float, default=None,
               help="Minimum cell size in meters (overrides config)")
 @click.option("--max-cell-size", type=float, default=None,
               help="Max core-region cell size in meters, graded outward from the BL's "
                    "near-wall size (overrides config); unset means no cap")
+@click.option("--surface-mesh", "-s", type=click.Path(exists=True), default=None,
+              help="Original surface .nas file INPUT_FILE was generated from - passing "
+                   "this treats INPUT_FILE as an EXTERNALLY-generated volume mesh (e.g. "
+                   "ANSA's own volume export: GRID + CTETRA + CPENTA) instead of a "
+                   "surface mesh to regenerate from or a cached .pkl. Runs the same "
+                   "parse -> geometric boundary matching -> quality check -> best-effort "
+                   "Stage A repair flow as 'autoflowcfd grid import-volume', inline, "
+                   "without needing a separate .pkl round-trip first.")
 @click.option("--wall-functions", is_flag=True, default=False,
               help="Enable Menter scalable/automatic wall treatment (log-law based) "
                    "on WALL/GROUND faces, instead of resolving all the way to the "
@@ -101,10 +107,10 @@ def run(
     threads: int,
     gpu_device: int,
     growth_rate: Optional[float],
-    max_layers: Optional[int],
     bl_layers: Optional[int],
     min_cell_size: Optional[float],
     max_cell_size: Optional[float],
+    surface_mesh: Optional[str],
     wall_functions: bool,
     skip_quality_check: bool,
     json_output: bool
@@ -115,7 +121,15 @@ def run(
     using Flux Reconstruction method.
     
     Args:
-        input_file: Path to .nas grid file
+        input_file: Path to a surface .nas grid file (volume mesh is
+            generated fresh), a cached volume_mesh.pkl (from a prior
+            `solve run`/`transient`, or from `grid import-volume`'s own
+            external-mesh import - loaded as-is, not regenerated), or -
+            when --surface-mesh is also given - an externally-generated
+            volume-mesh .nas file
+        surface_mesh: Original surface .nas INPUT_FILE was generated from;
+            only meaningful (and required) when INPUT_FILE is an external
+            volume mesh, not a surface .nas or cached .pkl
         backend: Compute backend (cpu/gpu/auto)
         order: FR discretization order
         turbulence: Turbulence model
@@ -140,6 +154,9 @@ def run(
         
         # With config file
         $ autoflowcfd solve run sedan.nas -c simulation.yaml
+
+        # Directly from an externally-generated volume mesh (e.g. ANSA)
+        $ autoflowcfd solve run car_volume.nas -s car_surface.nas
     """
     from autoflowcfd.config import ConfigLoader, SteadyConfig, BackendType, TurbulenceModel
     from autoflowcfd.grid import NASParser
@@ -212,13 +229,11 @@ def run(
                 use_wall_functions=wall_functions,
             )
 
-        # --growth-rate/--max-layers/--bl-layers/--min-cell-size are CLI-only
+        # --growth-rate/--bl-layers/--min-cell-size are CLI-only
         # overrides: when passed, they win over whatever steady_config
         # carries (defaults, or values loaded from --config yaml).
         if growth_rate is not None:
             steady_config.growth_rate = growth_rate
-        if max_layers is not None:
-            steady_config.max_layers = max_layers
         if bl_layers is not None:
             steady_config.bl_layers = bl_layers
         if min_cell_size is not None:
@@ -229,67 +244,103 @@ def run(
         logger.info(f"Configuration: backend={steady_config.backend}, "
                    f"order={steady_config.order}, turbulence={steady_config.turbulence}")
 
-        # Parse grid and generate volume mesh
-        logger.info("Parsing grid file...")
-        parser = NASParser(input_file)
-
-        logger.info(
-            f"Using BL parameters: growth_rate={steady_config.growth_rate}, "
-            f"max_layers={steady_config.max_layers}, "
-            f"min_cell_size={steady_config.min_cell_size}m"
-        )
-
-        # Enable volume mesh generation by default for accurate CFD.
-        # Defaults are conservative BL parameters chosen to avoid
-        # self-intersection on sharp features (e.g. Ahmed Body's tight
-        # underbody gaps): few layers, small initial cell size, low growth
-        # rate -- see SteadyConfig field docs for the full rationale.
-        grid_data = parser.parse(
-            generate_volume_mesh=True,
-            volume_mesh_params={
-                'growth_rate': steady_config.growth_rate,
-                'max_layers': steady_config.max_layers,
-                'bl_layers': steady_config.bl_layers,
-                'min_cell_size': steady_config.min_cell_size,
-                'target_cells': steady_config.target_cells,
-                'max_cell_size': steady_config.max_cell_size,
-            }
-        )
-
-        logger.info(f"Grid loaded: {grid_data.node_count} nodes, "
-                   f"{grid_data.cell_count} cells")
-
-        # Pre-solve mesh quality gate. Degenerate (sliver) tetrahedra -
-        # near-zero volume relative to the mesh's typical cell size - are
-        # numerically ill-conditioned for gradient reconstruction and flux
-        # computation, and reliably seed a local blow-up that spreads
-        # through the domain over iterations (root-caused this way for a
-        # real case: BL extrusion at a body's sharp convex edges/corners
-        # produced sliver cells whose positions matched the eventual
-        # divergence's pressure/velocity hotspots almost exactly). Catching
-        # this before solve() burns any iterations is much cheaper than
-        # discovering it from a diverged run's checkpoint history.
-        if not skip_quality_check:
-            from autoflowcfd.grid import MeshQualityValidator
-            logger.info("Validating volume mesh quality before solving...")
-            quality_report = MeshQualityValidator().validate_volume_mesh(grid_data)
-            if quality_report.passed:
-                logger.info(f"\n{quality_report.summary()}")
-            else:
-                logger.error(f"\n{quality_report.summary()}")
-                raise click.ClickException(
-                    "Volume mesh quality check failed (see report above) - solving "
-                    "would very likely diverge. Common causes: sharp convex edges/"
-                    "corners on the body (BL extrusion degrades there; consider a "
-                    "small chamfer/fillet in the source geometry, or fewer/thicker "
-                    "--max-layers), or an overly aggressive --growth-rate/"
-                    "--min-cell-size for this geometry's feature sizes. Pass "
-                    "--skip-quality-check to solve anyway."
+        # Load grid: a saved volume_mesh.pkl (from a prior `solve run`/
+        # `transient`, OR from `grid import-volume`'s own external-mesh
+        # import) is loaded as-is, same convention `transient`/`resume`
+        # already use - no re-validation, since import-volume's own
+        # quality report (printed when that command ran) already told the
+        # user whether it passed; --surface-mesh means input_file is an
+        # externally-generated volume mesh, imported inline (same flow as
+        # `grid import-volume`, just without the separate .pkl round
+        # trip); otherwise input_file is a surface .nas, parsed and
+        # tetrahedralized fresh using this config's own BL parameters.
+        input_path = Path(input_file)
+        if input_path.suffix.lower() == '.pkl':
+            logger.info(f"Loading saved volume mesh: {input_file}")
+            import pickle
+            try:
+                with open(input_path, 'rb') as f:
+                    grid_data = pickle.load(f)
+                logger.success(
+                    f"Volume mesh loaded: {grid_data.node_count} nodes, "
+                    f"{grid_data.cell_count} cells"
                 )
+            except Exception as e:
+                raise ValueError(f"Failed to load volume mesh from {input_file}: {e}")
+            if skip_quality_check:
+                logger.debug("--skip-quality-check has no effect when input_file is a cached volume_mesh.pkl")
+        elif surface_mesh is not None:
+            from autoflowcfd.grid.mesh_gen.mesh_external_import import import_external_volume_mesh
+            logger.info(f"Importing external volume mesh: {input_file}")
+            grid_data, quality_report = import_external_volume_mesh(
+                input_file, surface_mesh, repair=True, check_overlap=True,
+            )
+            logger.info(f"External volume mesh loaded: {grid_data.node_count} nodes, "
+                       f"{grid_data.cell_count} cells")
+            if not quality_report.passed and not skip_quality_check:
+                raise click.ClickException(
+                    "External volume mesh quality check failed (see report above) - "
+                    "solving would very likely diverge. Pass --skip-quality-check to "
+                    "solve anyway, or address the implicated cells (e.g. re-mesh the "
+                    "sliver regions in the original tool) and re-import."
+                )
+        else:
+            logger.info("Parsing grid file...")
+            parser = NASParser(input_file)
+
+            logger.info(
+                f"Using BL parameters: growth_rate={steady_config.growth_rate}, "
+                f"min_cell_size={steady_config.min_cell_size}m"
+            )
+
+            # Enable volume mesh generation by default for accurate CFD.
+            # Defaults are conservative BL parameters chosen to avoid
+            # self-intersection on sharp features (e.g. Ahmed Body's tight
+            # underbody gaps): few layers, small initial cell size, low growth
+            # rate -- see SteadyConfig field docs for the full rationale.
+            grid_data = parser.parse(
+                generate_volume_mesh=True,
+                volume_mesh_params={
+                    'growth_rate': steady_config.growth_rate,
+                    'bl_layers': steady_config.bl_layers,
+                    'min_cell_size': steady_config.min_cell_size,
+                    'target_cells': steady_config.target_cells,
+                    'max_cell_size': steady_config.max_cell_size,
+                }
+            )
+
+            logger.info(f"Grid loaded: {grid_data.node_count} nodes, "
+                       f"{grid_data.cell_count} cells")
+
+            # Pre-solve mesh quality gate. Degenerate (sliver) tetrahedra -
+            # near-zero volume relative to the mesh's typical cell size - are
+            # numerically ill-conditioned for gradient reconstruction and flux
+            # computation, and reliably seed a local blow-up that spreads
+            # through the domain over iterations (root-caused this way for a
+            # real case: BL extrusion at a body's sharp convex edges/corners
+            # produced sliver cells whose positions matched the eventual
+            # divergence's pressure/velocity hotspots almost exactly). Catching
+            # this before solve() burns any iterations is much cheaper than
+            # discovering it from a diverged run's checkpoint history.
+            if not skip_quality_check:
+                from autoflowcfd.grid import MeshQualityValidator
+                logger.info("Validating volume mesh quality before solving...")
+                quality_report = MeshQualityValidator().validate_volume_mesh(grid_data)
+                if quality_report.passed:
+                    logger.info(f"\n{quality_report.summary()}")
+                else:
+                    logger.error(f"\n{quality_report.summary()}")
+                    raise click.ClickException(
+                        "Volume mesh quality check failed (see report above) - solving "
+                        "would very likely diverge. Common causes: sharp convex edges/"
+                        "corners on the body (BL extrusion degrades there; consider a "
+                        "small chamfer/fillet in the source geometry), or an overly "
+                        "aggressive --growth-rate/--min-cell-size for this geometry's "
+                        "feature sizes. Pass --skip-quality-check to solve anyway."
+                    )
 
         # Save volume mesh for future resume operations
         import pickle
-        from pathlib import Path
         output_dir = Path(steady_config.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         volume_mesh_path = output_dir / "volume_mesh.pkl"
@@ -383,14 +434,11 @@ def run(
 @click.option("--growth-rate", type=float, default=None,
               help="Boundary-layer geometric growth rate (overrides config; ignored "
                    "when input_file is a cached volume_mesh.pkl)")
-@click.option("--max-layers", type=int, default=None,
-              help="Maximum boundary layer layers (overrides config; ignored when "
-                   "input_file is a cached volume_mesh.pkl)")
 @click.option("--bl-layers", type=int, default=None,
-              help="How many of --max-layers count as the fine boundary-layer stage "
-                   "before switching to the faster-growing transition stage; unset "
-                   "keeps the default min(8, max_layers) split (overrides config; "
-                   "ignored when input_file is a cached volume_mesh.pkl)")
+              help="How many layers count as the fine boundary-layer stage before "
+                   "switching to the (fixed-rate) transition stage; unset defaults "
+                   "to 8 (overrides config; ignored when input_file is a cached "
+                   "volume_mesh.pkl)")
 @click.option("--min-cell-size", type=float, default=None,
               help="Minimum cell size in meters (overrides config; ignored when "
                    "input_file is a cached volume_mesh.pkl)")
@@ -398,6 +446,11 @@ def run(
               help="Max core-region cell size in meters, graded outward from the BL's "
                    "near-wall size (overrides config); unset means no cap. Ignored "
                    "when input_file is a cached volume_mesh.pkl")
+@click.option("--surface-mesh", "-s", type=click.Path(exists=True), default=None,
+              help="Original surface .nas file INPUT_FILE was generated from - passing "
+                   "this treats INPUT_FILE as an EXTERNALLY-generated volume mesh "
+                   "(see `solve run --help` for the same option's full rationale). "
+                   "Ignored when input_file is a cached volume_mesh.pkl.")
 @click.option("--wall-functions", is_flag=True, default=False,
               help="Enable Menter scalable/automatic wall treatment (log-law based) "
                    "on WALL/GROUND faces, instead of resolving all the way to the "
@@ -424,10 +477,10 @@ def transient(
     threads: Optional[int],
     gpu_device: Optional[int],
     growth_rate: Optional[float],
-    max_layers: Optional[int],
     bl_layers: Optional[int],
     min_cell_size: Optional[float],
     max_cell_size: Optional[float],
+    surface_mesh: Optional[str],
     wall_functions: bool,
     skip_quality_check: bool,
     json_output: bool
@@ -459,7 +512,7 @@ def transient(
         checkpoint_interval: Checkpoint save interval (steps)
         threads: CPU thread count
         gpu_device: GPU device ID
-        growth_rate, max_layers, bl_layers, min_cell_size, max_cell_size:
+        growth_rate, bl_layers, min_cell_size, max_cell_size:
             Volume mesh generation parameters (same meaning as `solve run`);
             ignored when input_file is a cached volume_mesh.pkl
         wall_functions: Enable Menter scalable/automatic wall treatment
@@ -554,7 +607,7 @@ def transient(
                 use_wall_functions=wall_functions,
             )
 
-        # --growth-rate/--max-layers/--bl-layers/--min-cell-size/--max-cell-size
+        # --growth-rate/--bl-layers/--min-cell-size/--max-cell-size
         # are CLI-only overrides (same convention as `run()` above): when
         # passed, they win over whatever transient_config carries (defaults,
         # or values loaded from --config yaml). No effect when input_file
@@ -562,8 +615,6 @@ def transient(
         # loaded as-is, not regenerated from these parameters.
         if growth_rate is not None:
             transient_config.growth_rate = growth_rate
-        if max_layers is not None:
-            transient_config.max_layers = max_layers
         if bl_layers is not None:
             transient_config.bl_layers = bl_layers
         if min_cell_size is not None:
@@ -608,6 +659,21 @@ def transient(
             # identical treatment of a cached volume_mesh.pkl.
             if skip_quality_check:
                 logger.debug("--skip-quality-check has no effect when input_file is a cached volume_mesh.pkl")
+        elif surface_mesh is not None:
+            from autoflowcfd.grid.mesh_gen.mesh_external_import import import_external_volume_mesh
+            logger.info(f"Importing external volume mesh: {input_file}")
+            grid_data, quality_report = import_external_volume_mesh(
+                input_file, surface_mesh, repair=True, check_overlap=True,
+            )
+            logger.info(f"External volume mesh loaded: {grid_data.node_count} nodes, "
+                       f"{grid_data.cell_count} cells")
+            if not quality_report.passed and not skip_quality_check:
+                raise click.ClickException(
+                    "External volume mesh quality check failed (see report above) - "
+                    "solving would very likely diverge. Pass --skip-quality-check to "
+                    "solve anyway, or address the implicated cells (e.g. re-mesh the "
+                    "sliver regions in the original tool) and re-import."
+                )
         else:
             logger.info("Parsing grid file...")
             parser = NASParser(input_file)
@@ -615,7 +681,6 @@ def transient(
                 generate_volume_mesh=True,
                 volume_mesh_params={
                     'growth_rate': transient_config.growth_rate,
-                    'max_layers': transient_config.max_layers,
                     'bl_layers': transient_config.bl_layers,
                     'min_cell_size': transient_config.min_cell_size,
                     'target_cells': transient_config.target_cells,
@@ -638,10 +703,9 @@ def transient(
                         "Volume mesh quality check failed (see report above) - solving "
                         "would very likely diverge. Common causes: sharp convex edges/"
                         "corners on the body (BL extrusion degrades there; consider a "
-                        "small chamfer/fillet in the source geometry, or fewer/thicker "
-                        "--max-layers), or an overly aggressive --growth-rate/"
-                        "--min-cell-size for this geometry's feature sizes. Pass "
-                        "--skip-quality-check to solve anyway."
+                        "small chamfer/fillet in the source geometry), or an overly "
+                        "aggressive --growth-rate/--min-cell-size for this geometry's "
+                        "feature sizes. Pass --skip-quality-check to solve anyway."
                     )
 
         # Create solver
