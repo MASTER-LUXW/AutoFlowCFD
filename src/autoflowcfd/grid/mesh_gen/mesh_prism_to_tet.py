@@ -8,8 +8,20 @@ on each other.
 """
 
 import numpy as np
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 from loguru import logger
+
+# Same relative-to-cell-size convention mesh_background.py's own
+# degenerate-tet cleanup already uses (`(min_cell_size ** 3) * 1e-6`) -
+# reused here so a fully-collapsed prism (an entire base face's own
+# taper_scale/budget stalled to ~0, not just floating-point-exact 0) is
+# recognised as degenerate too, not just the literal-zero case the old
+# fixed 1e-20 threshold caught. Deliberately still many orders of
+# magnitude below a genuine wedge prism's own volume (one vertical edge
+# near-zero, the other two normal) - see convert_layers_to_prisms' own
+# Returns doc for why that distinction matters (a wedge is real geometry,
+# dropping it tears a hole; a fully-collapsed prism contributes nothing).
+DEGENERATE_VOLUME_FRACTION = 1e-6
 
 
 def convert_layers_to_tetrahedra(
@@ -216,6 +228,7 @@ def convert_layers_to_prisms(
     all_nodes: np.ndarray,
     layer_connectivity: List[np.ndarray],
     base_faces: np.ndarray,
+    min_cell_size: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Convert layered prism mesh into genuine triangular-prism cells - the
     true-prism counterpart to convert_layers_to_tetrahedra, kept in this
@@ -243,16 +256,36 @@ def convert_layers_to_prisms(
             shares base_faces' own local face topology, just offset by
             nodes_per_layer.
         base_faces: Original surface faces, shape=(n_faces, 3)
+        min_cell_size: Optional target cell size (meters) used to scale the
+            degenerate-volume drop threshold below to
+            `(min_cell_size**3) * DEGENERATE_VOLUME_FRACTION` instead of a
+            fixed 1e-20 - see that constant's own comment for why a plain
+            float-noise epsilon under-catches a prism that has fully
+            collapsed (all 3 vertical edges ~0, an entire base face
+            stalled) but not to EXACTLY floating-point zero. None (the
+            default) keeps the old fixed 1e-20 threshold, for any caller
+            that doesn't have a size reference handy.
 
     Returns:
         (prisms, face_of_prism): prism connectivity, shape=(n_prisms, 6) as
         (v0,v1,v2,w0,w1,w2); face_of_prism, shape=(n_prisms,), maps each
         surviving prism back to its base_faces row index (n_prisms may be
-        less than n_base_faces*(n_layers-1) - exactly zero-volume prisms,
-        from a taper_scale of 0 collapsing a layer to zero thickness, are
-        dropped; the resulting coordinate-duplicate-but-index-distinct seam
-        this leaves behind is cleaned up by the caller's coincident-point
-        merge pass, same as it already was for the equivalent tet case).
+        less than n_base_faces*(n_layers-1) - prisms whose volume is
+        negligible relative to the degenerate-volume threshold above
+        (whether from a taper_scale of 0 collapsing a whole base face to
+        zero thickness, or - see that threshold's own comment - a whole-
+        face stall that lands close to but not exactly at zero) are
+        dropped. A prism with only ONE vertical edge near-zero and the
+        other two still growing normally (a genuine wedge, not a stall) is
+        NOT touched by this - its volume stays comparable to a normal
+        prism's, far above this threshold regardless of min_cell_size, by
+        construction (dropping it WOULD tear a real hole in the outer
+        boundary, unlike the fully-collapsed case: this project's own
+        Part12 history is full of exactly that class of defect from
+        deleting cells too aggressively). The resulting coordinate-
+        duplicate-but-index-distinct seam a fully-collapsed drop leaves
+        behind is cleaned up by the caller's coincident-point merge pass,
+        same as it already was for the equivalent tet case.
     """
     # +1: see convert_layers_to_tetrahedra's identical fix/comment above -
     # layer_connectivity holds one entry per extrusion STEP, not per
@@ -289,15 +322,26 @@ def convert_layers_to_prisms(
         face_of_prism[sl] = face_range
         prism_idx += n_base_faces
 
-    # Drop exactly-zero-volume prisms (same philosophy, same threshold, as
-    # convert_layers_to_tetrahedra's dropped-tets handling above).
+    # Drop fully-collapsed (whole-base-face) prisms - see
+    # DEGENERATE_VOLUME_FRACTION's own comment for why this threshold is
+    # scaled to min_cell_size rather than a fixed float-noise epsilon, and
+    # this function's own Returns doc for why a volume-based (not per-
+    # edge) check is what keeps a genuine wedge prism safe from being
+    # dropped.
     from ..validation.quality_metrics import compute_prism_volumes
     volumes = compute_prism_volumes(all_nodes, prisms)
-    drop = volumes < 1e-20
+    degenerate_threshold = (
+        (min_cell_size ** 3) * DEGENERATE_VOLUME_FRACTION if min_cell_size is not None
+        else 1e-20
+    )
+    drop = volumes < degenerate_threshold
 
     n_dropped = int(np.count_nonzero(drop))
     if n_dropped:
-        logger.info(f"Dropped {n_dropped} exactly-zero-volume prisms (collapsed layer)")
+        logger.info(
+            f"Dropped {n_dropped} fully-collapsed prisms (volume < "
+            f"{degenerate_threshold:.3e} m^3, an entire base face stalled)"
+        )
         keep = ~drop
         prisms = prisms[keep]
         face_of_prism = face_of_prism[keep]

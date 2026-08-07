@@ -104,13 +104,32 @@ def build_seam_taper_scale(
     hop_dist = dijkstra(graph, indices=seam_nodes, unweighted=True, min_only=True)
 
     t = np.clip(hop_dist / taper_rings, 0.0, 1.0)
-    smoothstep = t * t * (3.0 - 2.0 * t)
+    # Plain linear ramp, not the smoothstep (3t^2 - 2t^3) this used to be.
+    # Smoothstep has ZERO slope at t=0 (the seam itself) by construction -
+    # deliberately so at t=1 (blends smoothly into the untapered interior,
+    # scale held constant at exactly 1.0 there), but the same flatness at
+    # t=0 means the first several dozen rings out of taper_rings=100 stay
+    # under ~10% scale (solving 3t^2-2t^3=0.1 gives t~=0.196, i.e. ~20
+    # rings) - confirmed directly on cube_demo: ~12-14k BL prisms with a
+    # near-zero-height vertical edge, concentrated in this flat near-seam
+    # band, not a genuine defect but this taper's own by-design shape.
+    # Linear has a CONSTANT slope of 1/taper_rings everywhere, which is
+    # actually LOWER than smoothstep's own peak slope of 1.5/taper_rings
+    # (reached at t=0.5) - so this is not "more aggressive than smoothstep
+    # ever was" anywhere, it just removes the artificially flat start that
+    # concentrated so many rings in the near-zero band. The one thing it
+    # gives up is the zero-slope blend AT t=1 (linear meets the untapered
+    # scale=1.0 plateau with a slope discontinuity of 1/taper_rings,
+    # smoothstep met it with none) - a bounded, small (taper_rings=100)
+    # discontinuity right at the taper zone's own edge, not concentrated
+    # at the tight-feature seam this function's own docstring warns about.
+    linear = t
     # Nodes unreachable from any seam node (not connected through the
     # extrude-face graph, e.g. an unrelated embedded shell) keep scale=1.
     unreachable = ~np.isfinite(hop_dist)
-    smoothstep[unreachable] = 1.0
+    linear[unreachable] = 1.0
 
-    scale = smoothstep
+    scale = linear
     logger.info(
         f"BL taper applied over {taper_rings} connectivity rings from the seam "
         f"({int(np.sum(scale < 1.0))} nodes affected)"

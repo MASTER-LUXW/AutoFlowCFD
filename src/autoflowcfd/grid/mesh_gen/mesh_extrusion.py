@@ -30,6 +30,24 @@ from .mesh_bl_growth import _MAX_SAFETY_LAYERS, compute_layer_thickness
 # practice - kept as a safety backstop rather than removed.
 MAX_ADJACENT_VOLUME_RATIO = 5.0
 
+# Floor for _compute_edge_distance_field's own attenuation, applied at the
+# sharp-edge vertices themselves (distance == 0). That function previously
+# had no floor at all (plain `dists / (2*char_length)`, clipped to
+# [0, 1]), so any node actually ON a sharp edge attenuated to EXACTLY 0 -
+# combined with _compute_sharp_angle_attenuation via np.minimum, that
+# meant a whole seam of nodes tracing every sharp edge of the body barely
+# extruded at all, for every single BL layer, regardless of bl_layers or
+# growth_rate: not a gradual falloff but a near-total local collapse of
+# BL coverage exactly where automotive CFD needs good near-wall
+# resolution most (character lines, spoiler/mirror/underbody edges - all
+# separation-prone features). 0.2 matches _compute_sharp_angle_
+# attenuation's own value for a plain 90-degree edge (its 0.2-1.0 linear
+# ramp over the 90-150 degree dihedral range starts at exactly 0.2), so
+# the two mechanisms now agree at the edge itself instead of the distance
+# field silently overriding the angle field's own considered floor via
+# their np.minimum combination.
+MIN_EDGE_DISTANCE_ATTENUATION = 0.2
+
 
 def _compute_sharp_angle_attenuation(
     nodes: np.ndarray,
@@ -147,11 +165,13 @@ def _compute_edge_distance_field(
                       If None, assumes `normals` match `faces`.
         
     Returns:
-        attenuation: Attenuation factor in [0, 1] for each node. 
-                     1.0 means full thickness, < 1.0 means reduced thickness near edges.
+        attenuation: Attenuation factor in [MIN_EDGE_DISTANCE_ATTENUATION, 1]
+                     for each node. 1.0 means full thickness, down to the
+                     floor right at a sharp edge - see that constant's own
+                     comment.
     """
     n_nodes = len(nodes)
-    
+
     # Use normal_faces for edge detection if provided, otherwise use faces
     detect_faces = normal_faces if normal_faces is not None else faces
     
@@ -204,9 +224,12 @@ def _compute_edge_distance_field(
     for v1, v2 in list(sharp_edges)[:100]: # Sample for performance
         edge_lengths.append(np.linalg.norm(nodes[v1] - nodes[v2]))
     char_length = np.mean(edge_lengths) if edge_lengths else 0.01
-    
-    # Smooth attenuation: 0 at distance 0, 1 at distance > 2*char_length
-    attenuation = np.clip(dists / (2.0 * char_length), 0.0, 1.0)
+
+    # Smooth attenuation: MIN_EDGE_DISTANCE_ATTENUATION at distance 0
+    # (see that constant's own comment for why this floor exists), ramping
+    # to 1 at distance > 2*char_length.
+    ramp = np.clip(dists / (2.0 * char_length), 0.0, 1.0)
+    attenuation = MIN_EDGE_DISTANCE_ATTENUATION + (1.0 - MIN_EDGE_DISTANCE_ATTENUATION) * ramp
     
     return attenuation
 

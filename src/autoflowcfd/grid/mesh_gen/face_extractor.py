@@ -876,23 +876,46 @@ class FaceExtractor:
         # Get left and right cell centers
         center_left = all_cell_centers[left_cells]
         
-        # For interior faces, ensure normal points from left to right
+        # For interior faces, ensure the normal points outward from the
+        # OWNER (left) cell - i.e. away from left's own centroid, through
+        # the face itself - using the face's own center (face_centers)
+        # relative to left's centroid, same criterion the boundary branch
+        # just below already (correctly) uses.
+        #
+        # CRITICAL: flip the normal sign ONLY. A previous version of this
+        # code additionally swapped face_connectivity's two columns whenever
+        # it flipped the normal - which undoes its own fix: if the raw
+        # cross-product normal pointed inward to left, negating it makes it
+        # correctly point outward from left (exactly what "left/owner gets
+        # +normal" needs) - but then swapping the columns re-labels left as
+        # "neighbour" and right as "owner", so the solver's "+normal to
+        # owner, -normal to neighbour" accumulation ends up giving left
+        # -normal (i.e. right back to the original, still-wrong, inward
+        # value) and right +normal (outward from LEFT, not from right -
+        # wrong for right too). The two mistakes cancel for the pair's
+        # combined bookkeeping (which is why this was never caught by a
+        # sum-over-both-cells check) but not for either cell's OWN closure.
+        # Confirmed directly on this project's actual cube_demo core mesh:
+        # 89% of cells (100% of BL prisms) had a nonzero sum of their own
+        # outward area-weighted face normals - must be exactly zero for any
+        # closed cell by the divergence theorem - which silently broke both
+        # flux conservation and Green-Gauss gradient reconstruction almost
+        # everywhere, and was the actual root cause of the solver diverging
+        # on an otherwise mesh-quality-gate-passing mesh. A minimal 576-tet
+        # structured-box repro (no prisms, no skew) reproduced the same
+        # 73%-of-cells defect rate through extract_faces_mixed/extract_faces
+        # (which share this function) while the older, separate
+        # core/fvm_faces.py:FVMFaceExtractor.build_from_tetrahedra path -
+        # which doesn't have a connectivity swap at all - stayed exactly
+        # closed, pointing straight at this swap as the culprit.
         mask_interior = right_cells >= 0
-        
-        # CRITICAL FIX: Create copies of arrays before masking to avoid shape mismatch
-        center_right = all_cell_centers[right_cells[mask_interior]]
-        dx_interior = center_right - center_left[mask_interior]
+        dx_interior = face_centers[mask_interior] - center_left[mask_interior]
         dot_interior = np.sum(face_areas_vec[mask_interior] * dx_interior, axis=1)
-        
-        # Flip faces where normal points wrong direction
+
+        # Flip faces where normal points wrong direction (sign only - see above)
         flip_mask = dot_interior < 0
         indices_to_flip = np.where(mask_interior)[0][flip_mask]
         face_areas_vec[indices_to_flip] *= -1
-        
-        # Swap cell connectivity for flipped faces
-        temp = face_connectivity[indices_to_flip, 0].copy()
-        face_connectivity[indices_to_flip, 0] = face_connectivity[indices_to_flip, 1]
-        face_connectivity[indices_to_flip, 1] = temp
         
         # For boundary faces, ensure normal points outward
         mask_boundary = ~mask_interior

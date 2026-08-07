@@ -497,6 +497,7 @@ def _build_merged_mesh(
             bl_nodes[:bl_split_offset + nodes_per_layer],
             bl_layer_conn[:_effective_bl_layers],
             topology_faces,
+            min_cell_size=min_cell_size,
         )
         n_bl_cells = len(bl_prisms)
         logger.info(f"  BL mesh: {len(bl_nodes)} nodes, {len(bl_prisms)} prism cells")
