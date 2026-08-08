@@ -37,7 +37,8 @@ os.environ.setdefault('OMP_NUM_THREADS', str(_cpu_count))
 
 __version__ = "0.1.0"
 __author__ = "AutoFlowCFD Team"
-__email__ = "contact@autoflowcfd.org"
+__maintainer__ = "Mr Lu"
+__email__ = "luxw_chd@126.com"
 __license__ = "Apache-2.0"
 
 from typing import Any, Dict

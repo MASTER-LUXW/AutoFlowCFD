@@ -143,7 +143,6 @@ results/
 checkpoints/
 *.log
 cases/
-scripts/
 
 # AI
 .claude/

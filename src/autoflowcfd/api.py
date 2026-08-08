@@ -40,6 +40,7 @@ from autoflowcfd.config import (
     TimeIntegrationScheme,
 )
 from autoflowcfd.boundary import BoundaryManager
+from autoflowcfd.core import FRSolver, TransientSolver
 
 
 class AutoFlowCFDAPI:
@@ -209,8 +210,6 @@ class AutoFlowCFDAPI:
             ... )
             >>> print(f"Converged: {result.converged}")
         """
-        from ..core import FRSolver
-        
         logger.info("Starting steady-state simulation")
         
         # Create configuration
@@ -279,8 +278,6 @@ class AutoFlowCFDAPI:
             ...     dt=1e-4
             ... )
         """
-        from ..core import TransientSolver
-        
         logger.info(f"Starting transient simulation: t={physical_time}s")
         
         # Map mode to turbulence model
@@ -589,7 +586,7 @@ class AutoFlowCFDAPI:
         Returns:
             str: Version string
         """
-        from .. import __version__
+        from . import __version__
         return __version__
     
     def check_environment(self) -> Dict[str, Any]:

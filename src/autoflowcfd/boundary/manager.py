@@ -351,7 +351,7 @@ class BoundaryManager:
         
         # Try partial match (property name contains boundary name or vice versa)
         for boundary_name in self.boundary_map.boundary_names:
-            if prop_name_lower in boundary_name.lower() or boundary_name_lower in prop_name_lower:
+            if prop_name_lower in boundary_name.lower() or boundary_name.lower() in prop_name_lower:
                 return boundary_name
         
         return None

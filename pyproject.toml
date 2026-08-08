@@ -2,7 +2,8 @@
 name = "autoflowcfd"
 version = "0.1.0"
 description = "High-performance open-source CFD software for automotive external aerodynamics"
-authors = ["AutoFlowCFD Team <contact@autoflowcfd.org>"]
+authors = ["AutoFlowCFD Team", "Mr Lu <luxw_chd@126.com>"]
+maintainers = ["Mr Lu <luxw_chd@126.com>"]
 license = "Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/AutoFlowCFD/AutoFlowCFD"
