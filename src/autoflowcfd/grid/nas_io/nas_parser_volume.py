@@ -1,23 +1,18 @@
-"""Parser for externally-generated volume-mesh NAS files.
+"""外部生成的体网格 NAS 文件解析器。
 
-Unlike parser_core.NASParser (which reads a SURFACE mesh - CTRIA3 cards -
-and this project's own generate-volume pipeline builds the volume mesh
-from scratch), this module reads an ALREADY-COMPLETE volume mesh someone
-else's tool produced (e.g. ANSA's own volume export: GRID + CTETRA +
-CPENTA cards, fixed-width Nastran small-field format - the same format
-nas_export.py itself writes, confirmed directly against a real ANSA
-export this project was handed).
+和 parser_core.NASParser（读取 CTRIA3 面网格，体网格由本项目自己的
+generate-volume 流程从零生成）不同，本模块读取的是别的工具已经生成好的
+完整体网格（例如 ANSA 自身的体网格导出：GRID + CTETRA + CPENTA 卡片，
+fixed-width Nastran small-field 格式——和 nas_export.py 自己写出来的格式
+一致，已经拿真实的 ANSA 导出文件核实过）。
 
-The parsed VolumeMeshData has an EMPTY BoundaryMap - an externally-built
-volume mesh typically carries no boundary-condition information at all
-(ANSA's own volume export only tags PSOLID material regions, not surface
-BCs), unlike this project's own generation pipeline which tracks boundary
-provenance as it builds the mesh. Attributing boundary groups (inlet/
-outlet/wall/...) from a companion surface mesh file is a separate step -
-see mesh_gen.mesh_boundary.map_boundaries_by_geometry, which has to match
-by position (KD-tree nearest-centroid) rather than node index, since an
-externally-generated mesh's own node numbering has no relationship to any
-other file's.
+解析出来的 VolumeMeshData 的 BoundaryMap 是空的——外部生成的体网格通常
+完全不带边界条件信息（ANSA 自身的体网格导出只标注 PSOLID 材料分区，不带
+面边界条件），不像本项目自己的生成流程会在建网格的同时追踪边界来源。
+从配套的面网格文件里反推边界分组（inlet/outlet/wall/...）是单独一步，
+见 mesh_gen.mesh_boundary.map_boundaries_by_geometry——它必须按位置匹配
+（KD-tree 最近质心），而不能按节点编号匹配，因为外部生成的网格自己的节点
+编号和任何其他文件都没有对应关系。
 """
 
 import numpy as np

@@ -1,42 +1,47 @@
-"""Aerodynamic coefficient calculator for FVM solver.
+"""FVM 求解器的气动系数计算器。
 
-This module computes aerodynamic coefficients (Cd, Cl, etc.) by integrating
-pressure over body surfaces.
+本模块通过对车身表面积分压力来计算气动系数（Cd、Cl 等）。
 
 Key Components:
-    - AeroCoefficientCalculator: Computes drag and lift coefficients
+    - AeroCoefficientCalculator: 计算阻力和升力系数
 """
 
 import numpy as np
 from typing import Optional, Tuple
 from loguru import logger
 
+from .aero_reference_area import ReferenceAreaMixin
 
-class AeroCoefficientCalculator:
-    """Computes aerodynamic coefficients from solution field."""
-    
+
+class AeroCoefficientCalculator(ReferenceAreaMixin):
+    """从解场计算气动系数。
+
+    参考面积（`_compute_reference_area` 及其两种实现）的计算逻辑在
+    `aero_reference_area.ReferenceAreaMixin` 里，纯粹是为了控制单文件
+    行数拆出去的，不是独立的概念层——本类的公开接口不变。
+    """
+
     def __init__(self, grid_data, face_extractor, rho_inf: float = 1.225, vel_inf: float = 30.0):
-        """Initialize aerodynamic coefficient calculator.
+        """初始化气动系数计算器。
 
         Args:
-            grid_data: Volume mesh data (VolumeMeshData)
-            face_extractor: Face extractor for volume mesh
-            rho_inf: Freestream density (kg/m^3), shared with the solver's
-                initial condition and inlet/farfield BCs via SteadyConfig -
-                must match those for Cd/Cl to be normalized against the
-                actual freestream, not an independent guess.
-            vel_inf: Freestream velocity magnitude (m/s), same role as rho_inf.
+            grid_data: 体网格数据 (VolumeMeshData)
+            face_extractor: 体网格的面提取器
+            rho_inf: 自由来流密度 (kg/m^3)，与求解器的初始条件、
+                入口/远场边界条件共用同一份 SteadyConfig——必须一致，
+                Cd/Cl 才能相对实际自由来流归一化，而不是各算各的猜测值。
+            vel_inf: 自由来流速度大小 (m/s)，作用同 rho_inf。
         """
         self.grid_data = grid_data
         self.face_extractor = face_extractor
         self.rho_inf = rho_inf
         self.vel_inf = vel_inf
 
-        # Cache for reference area to avoid recomputation
+        # 参考面积缓存，避免重复计算
         self._cached_ref_area = None
         self._ref_area_computed = False
-        
-        # CRITICAL OPTIMIZATION: Cache body face indices (fixed after mesh generation)
+
+        # 关键优化：缓存车身面索引（网格生成后固定不变）
         self._cached_body_faces = None
         self._body_faces_cached = False
 
@@ -49,85 +54,83 @@ class AeroCoefficientCalculator:
         mu_t: Optional[np.ndarray] = None,
         boundary_states: Optional[np.ndarray] = None,
     ) -> Tuple[float, float, float, float]:
-        """Compute drag and lift coefficients.
+        """计算阻力和升力系数。
 
         Args:
-            solution: Solution array, shape=(n_cells, 7)
-            iteration: Current iteration number (for debugging)
-            viscous_residual: Optional ViscousRANSResidual instance, used to
-                compute skin-friction (viscous shear) drag/lift on body faces
-                via its wall_shear_stress() method - the exact same stress
-                the momentum residual balances against, so Cd/Cl stay
-                consistent with what the solver actually solved. If None
-                (or grad_vel/mu_t/boundary_states are None), only pressure
-                (form) drag is returned - skin friction is skipped.
-            grad_vel, mu_t, boundary_states: Per-iteration quantities the
-                solve loop already computes; reused here to avoid
-                recomputing the velocity gradient / eddy viscosity.
+            solution: 解数组，形状 (n_cells, 7)
+            iteration: 当前迭代数（用于调试）
+            viscous_residual: 可选的 ViscousRANSResidual 实例，用它的
+                wall_shear_stress() 方法计算车身表面的摩擦（粘性剪切）
+                阻力/升力——与动量残差实际平衡的是同一份应力，因此 Cd/Cl
+                和求解器实际求解的结果保持一致。若为 None（或
+                grad_vel/mu_t/boundary_states 为 None），则只返回压差
+                （形状）阻力——跳过摩擦阻力。
+            grad_vel, mu_t, boundary_states: 求解循环每次迭代已经算好的
+                量，这里复用以避免重复计算速度梯度/涡粘性。
 
         Returns:
-            Tuple of (Cd, Cl, Cd_pressure, Cd_friction)
+            (Cd, Cl, Cd_pressure, Cd_friction) 元组
         """
         try:
-            # Extract primitive variables
+            # 提取原始变量
             rho = solution[:, 0]
             rhou = solution[:, 1]
             rhov = solution[:, 2]
             rhow = solution[:, 3]
             E = solution[:, 4]
-            
+
             gamma = 1.4
             velocity_x = rhou / np.maximum(rho, 1e-10)
             velocity_y = rhov / np.maximum(rho, 1e-10)
             velocity_z = rhow / np.maximum(rho, 1e-10)
-            
+
             V_squared = velocity_x**2 + velocity_y**2 + velocity_z**2
             pressure = (gamma - 1.0) * (E - 0.5 * rho * V_squared)
-            
-            # Freestream conditions (from SteadyConfig, shared with the
-            # solver's initial condition and boundary conditions).
+
+            # 自由来流条件（来自 SteadyConfig，与求解器的初始条件、边界
+            # 条件共用）。
             rho_inf = self.rho_inf
             vel_inf = self.vel_inf
             q_inf = 0.5 * rho_inf * vel_inf**2
-            
+
             if q_inf < 1e-6:
                 logger.warning("Dynamic pressure too small")
                 return 0.0, 0.0, 0.0, 0.0
-            
-            # Identify body faces
+
+            # 识别车身面
             body_face_indices = self._identify_body_faces()
-            
+
             if len(body_face_indices) == 0:
                 logger.warning(f"[Iter {iteration}] No body faces found - returning Cd=0, Cl=0")
                 return 0.0, 0.0, 0.0, 0.0
-            
-            # Get face data
+
+            # 取面数据
             face_normals = self.face_extractor.face_normals[body_face_indices]
             face_areas = self.face_extractor.face_areas[body_face_indices]
-            
-            # Validate shapes
+
+            # 校验形状
             if len(body_face_indices) != len(face_normals):
                 logger.error(
                     f"[Iter {iteration}] CRITICAL: body_face_indices length ({len(body_face_indices)}) "
                     f"!= face_normals length ({len(face_normals)})"
                 )
                 return 0.0, 0.0, 0.0, 0.0
-            
+
             if len(body_face_indices) != len(face_areas):
                 logger.error(
                     f"[Iter {iteration}] CRITICAL: body_face_indices length ({len(body_face_indices)}) "
                     f"!= face_areas length ({len(face_areas)})"
                 )
                 return 0.0, 0.0, 0.0, 0.0
-            
-            # Get pressure on body surface
+
+            # 取车身表面压力
             body_cell_indices = self.face_extractor.face_connectivity[body_face_indices, 0]
             p_body = pressure[body_cell_indices]
             p_ref = 101325.0
-            
+
             dp = p_body - p_ref
-            
-            # Validate dp shape
+
+            # 校验 dp 形状
             if len(dp) != len(face_areas):
                 logger.error(
                     f"[Iter {iteration}] CRITICAL: dp length ({len(dp)}) "
@@ -135,81 +138,71 @@ class AeroCoefficientCalculator:
                 )
                 return 0.0, 0.0, 0.0, 0.0
 
-            # Pressure (form) drag/lift.
+            # 压差（形状）阻力/升力。
             Fx_p = -np.sum(dp * face_normals[:, 0] * face_areas)
             Fz_p = -np.sum(dp * face_normals[:, 2] * face_areas)
 
-            # Skin-friction (viscous shear) contribution, if the caller
-            # supplied what's needed to compute it. tau_n = tau.n (n
-            # outward from the fluid, i.e. from owner cell into the body)
-            # is the traction the WALL exerts ON THE FLUID (Cauchy
-            # convention); by Newton's third law the force the FLUID
-            # exerts ON THE BODY is -tau_n. Sign verified numerically
-            # against a trivial Couette-like case (fluid moving at U>0
-            # over a stationary wall must produce a positive, downstream
-            # skin-friction drag) before wiring this in - the naive '+='
-            # gives the force with the wrong sign.
+            # 摩擦（粘性剪切）贡献，前提是调用方提供了计算所需的量。
+            # tau_n = tau.n（n 从流体指向外，即从 owner 单元指向车身）
+            # 是壁面施加在流体上的牵引力（Cauchy 约定）；根据牛顿第三
+            # 定律，流体施加在车身上的力是 -tau_n。这个符号在接入之前
+            # 已经用一个简单的 Couette 流类比数值验证过（流体以 U>0 掠过
+            # 静止壁面，必须产生一个正的、顺流向的摩擦阻力）——朴素地
+            # 直接写 '+=' 会得到符号错误的力。
             Fx_f = 0.0
             Fz_f = 0.0
             if (viscous_residual is not None and grad_vel is not None
                     and mu_t is not None and boundary_states is not None):
                 vel = np.column_stack([velocity_x, velocity_y, velocity_z])
                 tau_n_all = viscous_residual.wall_shear_stress(rho, vel, mu_t, grad_vel, boundary_states)
-                
-                # tau_n_all shape: (n_boundary_faces, 3)
-                # Map body_face_indices to boundary face positions
-                
-                # Get all boundary face global indices
+
+                # tau_n_all 形状：(n_boundary_faces, 3)
+                # 把 body_face_indices 映射到边界面的位置
+
+                # 取所有边界面的全局索引
                 boundary_face_ids = np.where(self.face_extractor.boundary_flags)[0]
-                
-                # CRITICAL FIX: Ensure body_face_indices are actually boundary faces
-                # Use np.isin to find valid indices, then map to boundary face positions
+
+                # 关键修复：确保 body_face_indices 确实都是边界面
+                # 用 np.isin 找出有效索引，再映射到边界面的位置
                 mask_valid = np.isin(body_face_indices, boundary_face_ids)
-                
+
                 if np.any(mask_valid):
                     valid_body_faces = body_face_indices[mask_valid]
-                    
-                    # CRITICAL FIX: Map global face indices to boundary face array positions
-                    # Use dictionary-based mapping instead of searchsorted (which returns insertion positions, not actual positions)
-                    
-                    # Build position map: global_face_id -> boundary_array_position
-                    face_to_pos = {int(face_id): pos for pos, face_id in enumerate(boundary_face_ids)}
-                    
-                    # Map valid body faces to their positions in tau_n_all
-                    try:
-                        body_pos_in_boundary = np.array([face_to_pos[int(face_id)] for face_id in valid_body_faces], dtype=np.int64)
-                    except KeyError as e:
-                        logger.error(
-                            f"[Iter {iteration}] Face ID {e} not found in boundary face list. "
-                            f"This indicates a mismatch between body_face_indices and boundary_flags."
-                        )
-                        return 0.0, 0.0, 0.0, 0.0
-                    
-                    # Safety check: ensure indices are within bounds
+
+                    # 把全局面索引映射到它在 tau_n_all 里的位置（即在
+                    # boundary_face_ids 里的位置）。np.where 自身的输出
+                    # 已经按升序排列，而 mask_valid（对 boundary_face_ids
+                    # 做 np.isin）已经保证 valid_body_faces 里的每个值都
+                    # 在其中，因此 np.searchsorted 可以直接给出每个面的
+                    # 精确位置——这是每次求解器迭代都要跑的路径，不需要
+                    # 在 Python 层构建/查询字典。
+                    body_pos_in_boundary = np.searchsorted(boundary_face_ids, valid_body_faces)
+
+                    # 安全检查：确保索引在范围内
                     if len(body_pos_in_boundary) > 0 and np.max(body_pos_in_boundary) < len(tau_n_all):
                         tau_n_body = tau_n_all[body_pos_in_boundary]
-                        
-                        # CRITICAL FIX: Ensure shapes match for broadcasting
-                        # tau_n_body: (n_valid, 3), need to extract x and z components
-                        # face_areas should have same length as valid_body_faces
+
+                        # 关键修复：确保广播时形状匹配
+                        # tau_n_body: (n_valid, 3)，需要取 x、z 分量
+                        # face_areas 应与 valid_body_faces 长度相同
                         valid_face_areas = face_areas[mask_valid]
-                        
-                        # Verify shapes match before computation
+
+                        # 计算前先校验形状是否匹配
                         if tau_n_body.shape[0] != valid_face_areas.shape[0]:
                             logger.warning(
                                 f"[Iter {iteration}] Shape mismatch: tau_n_body has "
                                 f"{tau_n_body.shape[0]} faces but face_areas has "
                                 f"{valid_face_areas.shape[0]} faces"
                             )
-                            # Use minimum length to avoid error
+                            # 用较短的长度，避免报错
                             min_len = min(tau_n_body.shape[0], valid_face_areas.shape[0])
                             tau_n_body = tau_n_body[:min_len]
                             valid_face_areas = valid_face_areas[:min_len]
-                        
-                        # Compute friction forces with matching shapes
-                        # tau_n_body[:, 0]: x-component of wall shear stress (shape: n_valid,)
-                        # valid_face_areas: area of each face (shape: n_valid,)
-                        # Element-wise multiplication then sum
+
+                        # 用匹配好的形状计算摩擦力
+                        # tau_n_body[:, 0]：壁面剪切应力的 x 分量（形状 n_valid,）
+                        # valid_face_areas：每个面的面积（形状 n_valid,）
+                        # 逐元素相乘后求和
                         Fx_f = -np.sum(tau_n_body[:, 0] * valid_face_areas)
                         Fz_f = -np.sum(tau_n_body[:, 2] * valid_face_areas)
                     else:
@@ -219,22 +212,21 @@ class AeroCoefficientCalculator:
             Fx = Fx_p + Fx_f
             Fz = Fz_p + Fz_f
 
-            # Reference area
+            # 参考面积
             ref_area = self._compute_reference_area(body_face_indices)
 
-            # Coefficients
+            # 系数
             Cd = Fx / (q_inf * ref_area)
             Cl = Fz / (q_inf * ref_area)
 
-            # Diagnostic breakdown: skin friction should be a modest fraction
-            # of total drag for a bluff body (Ahmed Body is pressure-drag
-            # dominated). If friction dominates or is wildly out of scale,
-            # that points at the boundary viscous flux term rather than the
-            # (separately, longer-established) pressure integration.
+            # 诊断分解：对于钝体（Ahmed Body 以压差阻力为主），摩擦阻力
+            # 理应只占总阻力的一小部分。如果摩擦阻力占主导或量级明显
+            # 失常，问题更可能出在边界粘性通量项，而不是（已经独立、
+            # 更早验证过的）压力积分。
             Cd_p = Fx_p / (q_inf * ref_area)
             Cd_f = Fx_f / (q_inf * ref_area)
 
-            # Log force magnitudes for debugging
+            # 记录力的量级，便于调试
             if iteration <= 10 or iteration % 50 == 0:
                 logger.debug(
                     f"[Iter {iteration}] Force details:\n"
@@ -245,273 +237,87 @@ class AeroCoefficientCalculator:
                     f"  Reference area (A):    {ref_area:.4f} m^2\n"
                     f"  Friction/Pressure ratio: {abs(Fx_f/Fx_p)*100:.2f}%"
                 )
-            
+
             if abs(Fx_f) > abs(Fx_p) and abs(Fx_f) > 1e-9:
                 logger.warning(
                     f"[Iter {iteration}] Skin-friction drag ({Fx_f:.4e} N) exceeds "
                     f"pressure drag ({Fx_p:.4e} N) in magnitude - unexpected for a "
                     f"bluff body, check wall_shear_stress/near-wall mesh scaling."
                 )
-            
-            # Validate
+
+            # 校验
             if not np.isfinite(Cd):
                 logger.warning("Cd is not finite")
                 Cd = 0.0
             if not np.isfinite(Cl):
                 logger.warning("Cl is not finite")
                 Cl = 0.0
-            
+
             return float(Cd), float(Cl), float(Cd_p), float(Cd_f)
-            
-        except Exception as e:
-            logger.error(f"Failed to compute coefficients: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
-    
+
+        except Exception:
+            # 之前这里返回的是 6 元组，而正常路径返回 4 元组——调用方
+            # solver_steady.py 按 4 元组 unpack，一旦触发这个分支就会变成
+            # 一个更难排查的 ValueError（unpack 数量不对），把真正的异常
+            # 原因掩盖掉。用 logger.exception 记录完整 traceback 后按正常
+            # 路径同样的 4 元组形状返回兜底值。
+            logger.exception("Failed to compute coefficients")
+            return 0.0, 0.0, 0.0, 0.0
+
     def _identify_body_faces(self) -> np.ndarray:
-        """Identify body surface faces from boundary conditions.
-        
-        CRITICAL OPTIMIZATION: Cache result to avoid repeated expensive computation.
-        Body faces are fixed after mesh generation and never change during iteration.
-        
+        """从边界条件中识别车身表面面。
+
+        关键优化：缓存结果，避免重复的昂贵计算。车身面在网格生成后
+        固定不变，迭代过程中永远不会变化。
+
         Returns:
-            Array of face indices belonging to body boundaries
+            属于车身边界的面索引数组
         """
-        # Return cached result if available (99% of calls will hit cache)
+        # 若有缓存则直接返回（99% 的调用都会命中缓存）
         if self._body_faces_cached and self._cached_body_faces is not None:
             return self._cached_body_faces
-        
-        # Find all boundary names matching bc_handler.py's own WALL/vehicle-
-        # body classification (BoundaryConditionHandler._classify treats a
-        # name as the vehicle body if it contains "BODY" *or* "CAR" - this
-        # used to only check for "body", so a mesh naming its wall boundary
-        # "CAR" got correct no-slip BCs applied but zero body faces here,
-        # hitting the early-exit return every iteration).
+
+        # 找出所有匹配 bc_handler.py 自己 WALL/车身 分类规则的边界名
+        # （BoundaryConditionHandler._classify 只要名字包含 "BODY" *或*
+        # "CAR" 就认定为车身——以前只检查 "body"，导致一个把壁面边界
+        # 命名为 "CAR" 的网格虽然拿到了正确的无滑移边界条件，这里却识别
+        # 出零个车身面，每次迭代都命中提前退出的分支）。
         body_boundary_names = [
             name for name in self.grid_data.boundaries.boundary_names
             if 'BODY' in name.upper() or 'CAR' in name.upper()
         ]
-        
+
         if not body_boundary_names:
             logger.warning("No body boundary found")
             return np.array([], dtype=np.int64)
-        
-        # Collect all body cell indices using set union (vectorized)
+
+        # 用集合并集收集所有车身单元索引（向量化）
         body_cell_set = set()
         for boundary_name in body_boundary_names:
             cells = self.grid_data.boundaries.get_cell_indices(boundary_name)
             body_cell_set.update(cells)
-        
+
         if not body_cell_set:
             logger.warning(f"Body boundary found but no cells identified: {body_boundary_names}")
             return np.array([], dtype=np.int64)
-        
-        # Convert to numpy array for fast lookup
+
+        # 转成 numpy 数组以便快速查找
         body_cells_array = np.array(list(body_cell_set), dtype=np.int64)
-        
-        # Get all boundary faces
+
+        # 取所有边界面
         boundary_mask = self.face_extractor.boundary_flags
-        
-        # Get left cell indices for all faces
+
+        # 取所有面的左侧单元索引
         left_cells = self.face_extractor.face_connectivity[:, 0]
-        
-        # Use numpy isin for vectorized membership test (much faster than Python loop)
+
+        # 用 numpy isin 做向量化的成员测试（比 Python 循环快得多）
         is_body_face = np.isin(left_cells, body_cells_array) & boundary_mask
-        
-        # Get indices where condition is True
+
+        # 取条件为真的索引
         body_face_indices = np.where(is_body_face)[0]
-        
-        # CACHE the result for future calls
+
+        # 缓存结果供后续调用使用
         self._cached_body_faces = body_face_indices.astype(np.int64)
         self._body_faces_cached = True
-        
-        return self._cached_body_faces
 
-    def _compute_reference_area(self, body_face_indices: np.ndarray) -> float:
-        """Compute reference frontal area using bounding box estimation.
-        
-        Uses the body boundary's bounding box dimensions to estimate the
-        frontal projected area, avoiding issues with volume mesh extrusion layers.
-        
-        Args:
-            body_face_indices: Indices of body surface faces (not used in this implementation)
-            
-        Returns:
-            Reference area in m^2
-        """
-        # Use cached value if already computed
-        if self._ref_area_computed and self._cached_ref_area is not None:
-            return self._cached_ref_area
-        
-        try:
-            # Compute reference area from bounding box
-            ref_area = self._compute_ref_area_from_surface_mesh()
-            
-            if ref_area > 0 and np.isfinite(ref_area):
-                self._cached_ref_area = ref_area
-                self._ref_area_computed = True
-                return ref_area
-            
-            # Fallback to old method if bounding box estimation fails
-            logger.warning("Bounding box estimation failed, using volume mesh fallback")
-            ref_area = self._compute_ref_area_from_volume_mesh(body_face_indices)
-            
-            self._cached_ref_area = ref_area
-            self._ref_area_computed = True
-            
-            return ref_area
-            
-        except Exception as e:
-            logger.error(f"Failed to compute reference area: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return 1.0
-    
-    def _compute_ref_area_from_surface_mesh(self) -> float:
-        """Compute reference area from original surface mesh geometry.
-        
-        This method directly uses the surface triangles from the NAS file,
-        avoiding any issues with volume mesh extrusion layers or boundary pollution.
-        
-        Returns:
-            Reference area in m^2, or 0.0 if computation fails
-        """
-        try:
-            # Check if surface mesh is available
-            if not hasattr(self.grid_data, 'surface_mesh') or self.grid_data.surface_mesh is None:
-                logger.warning("Surface mesh not available in grid_data, using fallback method")
-                return 0.0
-            
-            surface_mesh = self.grid_data.surface_mesh
-            surface_nodes = surface_mesh.get('nodes')  # shape=(n_nodes, 3)
-            surface_faces = surface_mesh.get('faces')  # shape=(n_faces, 3)
-            surface_boundaries = surface_mesh.get('boundaries')  # BoundaryMap
-            
-            if surface_nodes is None or surface_faces is None:
-                logger.warning("Surface mesh nodes or faces not available")
-                return 0.0
-            
-            # Get body boundary face indices from surface mesh
-            if surface_boundaries is None:
-                logger.warning("Surface mesh boundaries not available")
-                return 0.0
-            
-            body_boundary_names = [
-                name for name in surface_boundaries.boundary_names
-                if 'BODY' in name.upper() or 'CAR' in name.upper()
-            ]
-            
-            if not body_boundary_names:
-                logger.warning("No body boundary found in surface mesh")
-                return 0.0
-            
-            # Collect all body face indices from surface mesh
-            body_face_indices = []
-            for boundary_name in body_boundary_names:
-                face_indices = surface_boundaries.get_cell_indices(boundary_name)
-                body_face_indices.extend(face_indices)
-            
-            if len(body_face_indices) == 0:
-                logger.warning("No body faces found in surface mesh")
-                return 0.0
-            
-            body_face_indices = np.array(body_face_indices, dtype=np.int64)
-            
-            logger.info(f"Surface mesh body analysis:")
-            logger.info(f"  Body faces: {len(body_face_indices)}")
-            
-            # Extract node coordinates for body faces
-            v0 = surface_nodes[surface_faces[body_face_indices, 0]]
-            v1 = surface_nodes[surface_faces[body_face_indices, 1]]
-            v2 = surface_nodes[surface_faces[body_face_indices, 2]]
-            
-            # Compute face normals and areas
-            e1 = v1 - v0
-            e2 = v2 - v0
-            normals = np.cross(e1, e2)
-            areas = 0.5 * np.linalg.norm(normals, axis=1)
-            
-            # Normalize normals to unit vectors
-            norms = np.linalg.norm(normals, axis=1, keepdims=True)
-            norms = np.maximum(norms, 1e-10)  # Avoid division by zero
-            unit_normals = normals / norms
-            
-            # Debug output
-            logger.info(f"  Total area: {areas.sum():.6f} m^2")
-            logger.info(f"  Mean face area: {areas.mean():.6e} m^2")
-            logger.info(f"  Min/Max face area: {areas.min():.6e} / {areas.max():.6e} m^2")
-            
-            # Compute projected area in X-direction (freestream direction)
-            x_component = unit_normals[:, 0]
-            
-            # Only count upstream-facing faces (normal pointing against flow, n_x < 0)
-            upstream_mask = x_component < 0
-            projected_areas = -x_component[upstream_mask] * areas[upstream_mask]
-            ref_area = np.sum(projected_areas)
-            
-            # Validate
-            if ref_area <= 0 or not np.isfinite(ref_area):
-                logger.warning(f"Invalid reference area from surface mesh: {ref_area:.6e}")
-                # Fallback: use absolute projection divided by 2 (for symmetric bodies)
-                projected_areas_all = np.abs(x_component) * areas
-                ref_area_fallback = np.sum(projected_areas_all) / 2.0
-                if ref_area_fallback > 0 and np.isfinite(ref_area_fallback):
-                    logger.info(f"Fallback reference area (|n_x|/2): {ref_area_fallback:.6f} m^2")
-                    return float(ref_area_fallback)
-                return 0.0
-            
-            # Sanity check for Ahmed Body
-            if ref_area < 0.01 or ref_area > 1.0:
-                logger.warning(f"Reference area {ref_area:.4f} m^2 outside expected range (0.1-0.3 m^2)")
-                logger.warning(f"  Upstream-facing faces: {np.sum(upstream_mask)} / {len(body_face_indices)}")
-                logger.warning(f"  Mean |n_x|: {np.mean(np.abs(x_component)):.4f}")
-            
-            logger.info(f"Reference area (from surface mesh): {ref_area:.6f} m^2")
-            logger.info(f"  Upstream-facing ratio: {np.sum(upstream_mask) / len(body_face_indices) * 100:.1f}%")
-            logger.info(f"  Mean projected area per upstream face: {ref_area / max(1, np.sum(upstream_mask)):.6e} m^2")
-            
-            return float(ref_area)
-            
-        except Exception as e:
-            logger.error(f"Failed to compute reference area from surface mesh: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return 0.0
-    
-    def _compute_ref_area_from_volume_mesh(self, body_face_indices: np.ndarray) -> float:
-        """Fallback: compute reference area from volume mesh boundary faces.
-        
-        This method is used when surface mesh is not available.
-        
-        Args:
-            body_face_indices: Indices of body surface faces in volume mesh
-            
-        Returns:
-            Reference area in m^2
-        """
-        if len(body_face_indices) == 0:
-            logger.warning("No body faces identified for reference area calculation")
-            return 1.0
-        
-        face_normals = self.face_extractor.face_normals[body_face_indices]
-        face_areas = self.face_extractor.face_areas[body_face_indices]
-        
-        # Projected area in X-direction (freestream direction)
-        x_component = face_normals[:, 0]
-        
-        # Only count upstream-facing faces (more accurate)
-        upstream_mask = x_component < 0
-        projected_areas = -x_component[upstream_mask] * face_areas[upstream_mask]
-        ref_area = np.sum(projected_areas)
-        
-        # Validate
-        if ref_area <= 0 or not np.isfinite(ref_area):
-            logger.warning(f"Invalid reference area: {ref_area:.6e}, using fallback")
-            projected_areas_all = np.abs(x_component) * face_areas
-            ref_area_fallback = np.sum(projected_areas_all) / 2.0
-            if ref_area_fallback > 0 and np.isfinite(ref_area_fallback):
-                return float(ref_area_fallback)
-            return 1.0
-        
-        return float(ref_area)
+        return self._cached_body_faces

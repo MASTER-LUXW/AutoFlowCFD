@@ -1,4 +1,4 @@
-"""Backend abstract base class for CPU/GPU computation."""
+"""CPU/GPU 计算的 backend 抽象基类。"""
 
 from abc import ABC, abstractmethod
 import numpy as np
@@ -8,68 +8,64 @@ from dataclasses import dataclass
 
 @dataclass
 class SolutionVector:
-    """Solution vector data structure.
+    """解向量数据结构。
 
-    Stores the flow field solution in CONSERVED form for all cells (this is
-    what the solver actually integrates and what checkpoints save under
-    `solution/conserved`):
-    - data[:, 0]: rho (density)
-    - data[:, 1:4]: rho*u, rho*v, rho*w (momentum)
-    - data[:, 4]: rho*E (total energy density)
-    - data[:, 5:7]: rho*k, rho*omega (turbulence, optional)
+    以**守恒**形式存储所有单元的流场解（求解器实际积分的就是这个，
+    checkpoint 也是存在 `solution/conserved` 下）：
+    - data[:, 0]: rho（密度）
+    - data[:, 1:4]: rho*u, rho*v, rho*w（动量）
+    - data[:, 4]: rho*E（总能密度）
+    - data[:, 5:7]: rho*k, rho*omega（湍流量，可选）
 
-    The get_velocity()/get_pressure()/get_turbulence() accessors below
-    convert these to the PRIMITIVE quantities their names promise (actual
-    velocity, static pressure, k and omega) - they used to return the raw
-    conserved columns unconverted (e.g. "velocity" was really momentum,
-    "pressure" was really total energy density), silently mislabeling
-    values by orders of magnitude for any caller. Kept for backward
-    compatibility, but note the solver's own residual/BC code does NOT use
-    these - it derives primitives inline with its own gamma/floor
-    conventions (see e.g. core/aero_coeffs.py).
+    下面的 get_velocity()/get_pressure()/get_turbulence() 访问器会把
+    这些量转换成方法名所承诺的**原始**量（真实速度、静压、k 和 omega）
+    ——以前这几个方法直接原样返回未转换的守恒量列（例如所谓的
+    "velocity" 其实是动量，"pressure" 其实是总能密度），会给任何调用方
+    悄悄地把数值标错好几个数量级。这里保留是为了向后兼容，但要注意
+    求解器自己的残差/边界条件代码**不**使用它们——那部分代码是按自己
+    的 gamma/下限约定就地推导原始量的（例如见 core/aero_coeffs.py）。
 
     Attributes:
-        data: Solution array, shape=(n_cells, n_variables)
-        n_cells: Number of cells
-        n_variables: Number of variables per cell
+        data: 解数组，形状=(n_cells, n_variables)
+        n_cells: 单元数
+        n_variables: 每个单元的变量数
     """
     data: Optional[np.ndarray] = None
     n_cells: int = 0
     n_variables: int = 5
 
-    # Ratio of specific heats, matching the equation of state used
-    # throughout the solver (e.g. core/aero_coeffs.py).
+    # 比热比，与求解器全局使用的状态方程一致（例如 core/aero_coeffs.py）。
     GAMMA = 1.4
     _RHO_FLOOR = 1e-10
 
     def __post_init__(self):
-        """Initialize data array if not provided"""
+        """若未提供 data，则初始化数组"""
         if self.data is None and self.n_cells > 0:
             self.data = np.zeros((self.n_cells, self.n_variables))
 
     @property
     def shape(self):
-        """Get shape of solution array"""
+        """获取解数组的形状"""
         if self.data is not None:
             return self.data.shape
         return (0, 0)
 
     def get_density(self) -> np.ndarray:
-        """Get density field"""
+        """获取密度场"""
         if self.data is not None and self.data.shape[1] > 0:
             return self.data[:, 0]
         return np.array([])
 
     def get_velocity(self) -> tuple:
-        """Get primitive velocity components (u, v, w), i.e. momentum/rho."""
+        """获取原始速度分量 (u, v, w)，即动量除以 rho。"""
         if self.data is not None and self.data.shape[1] >= 4:
             rho = np.maximum(self.data[:, 0], self._RHO_FLOOR)
             return (self.data[:, 1] / rho, self.data[:, 2] / rho, self.data[:, 3] / rho)
         return (np.array([]), np.array([]), np.array([]))
 
     def get_pressure(self) -> np.ndarray:
-        """Get static pressure via the ideal-gas equation of state,
-        p = (gamma-1) * (rho*E - 0.5*rho*|V|^2) - NOT the raw rho*E column."""
+        """通过理想气体状态方程获取静压，
+        p = (gamma-1) * (rho*E - 0.5*rho*|V|^2) —— 而不是直接返回原始的 rho*E 列。"""
         if self.data is not None and self.data.shape[1] >= 5:
             rho = np.maximum(self.data[:, 0], self._RHO_FLOOR)
             rhoE = self.data[:, 4]
@@ -78,9 +74,8 @@ class SolutionVector:
         return np.array([])
 
     def get_turbulence(self) -> tuple:
-        """Get primitive turbulence quantities (k, omega), i.e. their
-        conserved (rho*k, rho*omega) columns divided by density. Returns
-        two empty arrays if this solution has no turbulence columns."""
+        """获取原始湍流量 (k, omega)，即把守恒形式 (rho*k, rho*omega)
+        列除以密度。若该解没有湍流量列，返回两个空数组。"""
         if self.data is not None and self.data.shape[1] >= 7:
             rho = np.maximum(self.data[:, 0], self._RHO_FLOOR)
             return (self.data[:, 5] / rho, self.data[:, 6] / rho)
@@ -88,24 +83,23 @@ class SolutionVector:
 
 
 class BackendBase(ABC):
-    """Abstract base class for solver backends.
-    
-    This class defines the interface that all computational backends
-    (CPU/Numba, GPU/CUDA) must implement. It provides a unified API
-    for the FR solver to interact with different hardware accelerators.
-    
+    """求解器 backend 的抽象基类。
+
+    定义所有计算 backend（CPU/Numba、GPU/CUDA）必须实现的接口，为 FR
+    求解器提供统一的 API 来对接不同的硬件加速器。
+
     Attributes:
-        backend_type: Type identifier ('cpu' or 'gpu')
-        available: Whether the backend is available on current system
-        device_info: Hardware information dictionary
+        backend_type: 类型标识（'cpu' 或 'gpu'）
+        available: 当前系统上该 backend 是否可用
+        device_info: 硬件信息字典
     """
-    
+
     def __init__(self):
-        """Initialize backend base class."""
+        """初始化 backend 基类。"""
         self.backend_type = "base"
         self.available = False
         self.device_info: Dict[str, Any] = {}
-    
+
     @abstractmethod
     def initialize(
         self,
@@ -113,15 +107,15 @@ class BackendBase(ABC):
         n_nodes: int,
         n_variables: int = 5
     ) -> None:
-        """Allocate memory and initialize data structures.
-        
+        """分配内存并初始化数据结构。
+
         Args:
-            n_cells: Number of cells in mesh
-            n_nodes: Number of nodes in mesh
-            n_variables: Number of solution variables (default: 5 for compressible flow)
+            n_cells: 网格单元数
+            n_nodes: 网格节点数
+            n_variables: 解变量个数（默认 5，对应可压缩流）
         """
         pass
-    
+
     @abstractmethod
     def compute_flux(
         self,
@@ -130,19 +124,19 @@ class BackendBase(ABC):
         face_normals: np.ndarray,
         gamma: float = 1.4
     ) -> np.ndarray:
-        """Compute numerical flux at all cell interfaces.
-        
+        """计算所有单元界面上的数值通量。
+
         Args:
-            solution: Solution vector, shape=(n_cells, n_variables)
-            cell_connectivity: Cell connectivity array
-            face_normals: Face normal vectors
-            gamma: Specific heat ratio
-            
+            solution: 解向量，形状=(n_cells, n_variables)
+            cell_connectivity: 单元连接关系数组
+            face_normals: 面法向量
+            gamma: 比热比
+
         Returns:
-            Flux tensor at interfaces
+            界面上的通量张量
         """
         pass
-    
+
     @abstractmethod
     def compute_residuals(
         self,
@@ -151,19 +145,19 @@ class BackendBase(ABC):
         cell_volumes: np.ndarray,
         boundary_mask: np.ndarray
     ) -> np.ndarray:
-        """Compute residuals from flux divergence.
-        
+        """由通量散度计算残差。
+
         Args:
-            solution: Current solution state
-            flux: Computed fluxes at interfaces
-            cell_volumes: Cell volumes
-            boundary_mask: Boundary condition mask
-            
+            solution: 当前解状态
+            flux: 已算好的界面通量
+            cell_volumes: 单元体积
+            boundary_mask: 边界条件掩码
+
         Returns:
-            Residual vector, shape=(n_cells, n_variables)
+            残差向量，形状=(n_cells, n_variables)
         """
         pass
-    
+
     @abstractmethod
     def update_solution(
         self,
@@ -172,19 +166,19 @@ class BackendBase(ABC):
         dt: float,
         cfl: float
     ) -> np.ndarray:
-        """Update solution using time integration scheme.
-        
+        """用时间积分格式更新解。
+
         Args:
-            solution: Current solution
-            residuals: Computed residuals
-            dt: Time step size
-            cfl: CFL number
-            
+            solution: 当前解
+            residuals: 已算好的残差
+            dt: 时间步长
+            cfl: CFL 数
+
         Returns:
-            Updated solution
+            更新后的解
         """
         pass
-    
+
     @abstractmethod
     def apply_boundary_conditions(
         self,
@@ -192,32 +186,32 @@ class BackendBase(ABC):
         boundary_map: Dict[str, np.ndarray],
         bc_params: Dict[str, Any]
     ) -> np.ndarray:
-        """Apply boundary conditions to solution.
-        
+        """把边界条件应用到解上。
+
         Args:
-            solution: Solution vector
-            boundary_map: Mapping of boundary names to cell indices
-            bc_params: Boundary condition parameters
-            
+            solution: 解向量
+            boundary_map: 边界名到单元索引的映射
+            bc_params: 边界条件参数
+
         Returns:
-            Solution with boundary conditions applied
+            应用边界条件后的解
         """
         pass
-    
+
     @abstractmethod
     def synchronize(self) -> None:
-        """Synchronize data (important for GPU async operations)."""
+        """同步数据（对 GPU 异步操作很重要）。"""
         pass
-    
+
     @abstractmethod
     def get_device_info(self) -> Dict[str, Any]:
-        """Get hardware device information.
-        
+        """获取硬件设备信息。
+
         Returns:
-            Dictionary containing device specifications
+            包含设备规格的字典
         """
         pass
-    
+
     def cleanup(self) -> None:
-        """Release allocated resources."""
+        """释放已分配的资源。"""
         pass

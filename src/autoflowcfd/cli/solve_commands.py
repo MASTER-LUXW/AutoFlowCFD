@@ -799,16 +799,16 @@ def resume(
         json_output: Output as JSON
 
     Examples:
-        # Resume with grid file
+        # 使用网格文件恢复
         $ autoflowcfd solve resume checkpoint.h5 --grid mesh.nas
         
-        # With config file and more iterations
+        # 使用配置文件并增加迭代次数
         $ autoflowcfd solve resume checkpoint.h5 --config config.yaml --max-iter 2000
         
-        # Switch to GPU backend
+        # 切换到 GPU 后端
         $ autoflowcfd solve resume checkpoint.h5 --grid mesh.nas --backend gpu
     """
-    logger.info(f"Resuming from checkpoint: {checkpoint_file}")
+    logger.info(f"正在从检查点恢复: {checkpoint_file}")
     
     try:
         import h5py
@@ -818,107 +818,104 @@ def resume(
         from ..grid.nas_io.parser_core import NASParser
         from ..core.solver_steady import FRSolver
         
-        # Step 1: Load checkpoint metadata
-        logger.info("\n[1/5] Loading checkpoint metadata...")
+        # 步骤 1：加载检查点元数据
+        logger.info("\n[1/5] 正在加载检查点元数据...")
         with h5py.File(checkpoint_file, 'r') as f:
             iteration = int(f['metadata'].attrs['iteration'])
             original_backend = f['metadata'].attrs['backend']
             config_hash = f['metadata'].attrs['config_hash']
             
-            # Decode bytes to string if necessary
+            # 如果需要，将字节解码为字符串
             if isinstance(original_backend, bytes):
                 original_backend = original_backend.decode('utf-8')
         
-        logger.info(f"✓ Checkpoint loaded:")
-        logger.info(f"  - Last iteration: {iteration}")
-        logger.info(f"  - Original backend: {original_backend}")
-        logger.info(f"  - Config hash: {config_hash[:16]}...")
+        logger.info(f"✓ 检查点已加载:")
+        logger.info(f"  - 上次迭代: {iteration}")
+        logger.info(f"  - 原始后端: {original_backend}")
+        logger.info(f"  - 配置哈希: {config_hash[:16]}...")
         
-        # Step 2: Determine target backend
+        # 步骤 2：确定目标后端
         target_backend = backend if backend else original_backend
         if backend and backend != original_backend:
-            logger.warning(f"⚠ Backend override: {original_backend} → {target_backend}")
+            logger.warning(f"⚠ 后端覆盖: {original_backend} → {target_backend}")
         
-        # Step 3: Load grid data (required)
+        # 步骤 3：加载网格数据（必需）
         if not grid_file:
             raise ValueError(
-                "Grid file is required for resume operation. "
-                "Please specify with --grid option.\n"
-                "IMPORTANT: For volume mesh resume, you must provide the SAME "
-                "volume mesh file used in the original simulation, NOT the "
-                "surface NAS file."
+                "恢复操作需要网格文件。请使用 --grid 选项指定。\n"
+                "重要提示：对于体网格恢复，您必须提供与原始仿真中使用的相同"
+                "体网格文件，而不是表面 NAS 文件。"
             )
         
-        logger.info(f"\n[2/5] Loading grid data...")
+        logger.info(f"\n[2/5] 正在加载网格数据...")
         
-        # Check if grid_file is a saved volume mesh (pkl) or surface mesh (nas)
+        # 检查 grid_file 是保存的体网格 (pkl) 还是表面网格 (nas)
         from pathlib import Path
         grid_path = Path(grid_file)
         
         if grid_path.suffix.lower() == '.pkl':
-            # Load saved volume mesh
-            logger.info(f"Loading saved volume mesh: {grid_file}")
+            # 加载保存的体网格
+            logger.info(f"正在加载保存的体网格: {grid_file}")
             import pickle
             try:
                 with open(grid_file, 'rb') as f:
                     grid_data = pickle.load(f)
-                logger.success(f"✓ Volume mesh loaded: {grid_data.node_count} nodes, {grid_data.cell_count} cells")
+                logger.success(f"✓ 体网格已加载: {grid_data.node_count} 节点, {grid_data.cell_count} 单元")
             except Exception as e:
-                raise ValueError(f"Failed to load volume mesh from {grid_file}: {e}")
+                raise ValueError(f"从 {grid_file} 加载体网格失败: {e}")
         else:
-            # Parse surface mesh and generate volume mesh (NOT recommended for resume)
-            logger.warning(f"⚠ Parsing surface mesh file: {grid_file}")
-            logger.warning("  This will RE-GENERATE the volume mesh, which may differ from the original!")
-            logger.warning("  For accurate resume, use the saved volume_mesh.pkl file instead.")
+            # 解析表面网格并生成体网格（不推荐用于恢复）
+            logger.warning(f"⚠ 正在解析表面网格文件: {grid_file}")
+            logger.warning("  这将重新生成体网格，可能与原始网格不同！")
+            logger.warning("  为了准确恢复，请改用保存的 volume_mesh.pkl 文件。")
             
             parser = NASParser(grid_file)
             grid_data = parser.parse(generate_volume_mesh=True)
-            logger.info(f"✓ Grid generated: {grid_data.node_count} nodes, {grid_data.cell_count} cells")
+            logger.info(f"✓ 网格已生成: {grid_data.node_count} 节点, {grid_data.cell_count} 单元")
 
             if not skip_quality_check:
                 from ..grid import MeshQualityValidator
-                logger.info("Validating volume mesh quality before resuming...")
+                logger.info("在恢复前验证体网格质量...")
                 quality_report = MeshQualityValidator().validate_volume_mesh(grid_data)
                 if quality_report.passed:
                     logger.info(f"\n{quality_report.summary()}")
                 else:
                     logger.error(f"\n{quality_report.summary()}")
                     raise click.ClickException(
-                        "Volume mesh quality check failed (see report above) - this "
-                        "freshly re-generated mesh differs from the one the checkpoint "
-                        "was actually solved on (see the warning above about using "
-                        "volume_mesh.pkl instead) and is likely to diverge on resume. "
-                        "Pass --skip-quality-check to resume anyway."
+                        "体网格质量检查失败（见上方报告）- 这个"
+                        "新生成的网格与检查点实际求解的网格不同（见上方关于使用 "
+                        "volume_mesh.pkl 的警告），恢复时可能会发散。"
+                        "如果仍要恢复，请传递 --skip-quality-check。"
                     )
         
-        # Step 4: Load or create configuration
-        logger.info(f"\n[3/5] Loading configuration...")
+        # 步骤 4：加载或创建配置
+        logger.info(f"\n[3/5] 正在加载配置...")
         if config_file:
-            logger.info(f"  Loading from: {config_file}")
+            logger.info(f"  从以下位置加载: {config_file}")
             config = load_config(config_file)
         else:
             from ..config.solver_config import SteadyConfig
-            logger.warning("  No config file provided, using defaults")
+            logger.warning("  未提供配置文件，使用默认值")
             config = SteadyConfig()
         
-        # Override output directory if specified
+        # 如果指定了输出目录则覆盖
         if output:
             config.output_dir = output
-            logger.info(f"  Output directory: {output}")
+            logger.info(f"  输出目录: {output}")
         
-        # Override max_iter if specified
+        # 如果指定了 max_iter 则覆盖
         if max_iter:
             config.max_iter = max_iter
-            logger.info(f"  Max iterations: {max_iter}")
+            logger.info(f"  最大迭代次数: {max_iter}")
         
-        # Set backend
+        # 设置后端
         if target_backend:
             from ..config.solver_config import BackendType
             config.backend = BackendType(target_backend.lower())
-            logger.info(f"  Backend: {target_backend}")
+            logger.info(f"  后端: {target_backend}")
         
-        # Step 5: Create solver and load checkpoint
-        logger.info(f"\n[4/5] Creating solver and loading checkpoint...")
+        # 步骤 5：创建求解器并加载检查点
+        logger.info(f"\n[4/5] 正在创建求解器并加载检查点...")
         solver = FRSolver(grid_data, config)
         
         solution, history, loaded_iteration, metadata = solver.checkpoint_manager.load(
@@ -926,50 +923,49 @@ def resume(
             target_backend=target_backend
         )
         
-        # Validate grid size matches checkpoint solution shape
+        # 验证网格大小与检查点解的形状匹配
         expected_cells = solution.shape[0]
         if grid_data.cell_count != expected_cells:
             raise ValueError(
-                f"Grid cell count mismatch!\n"
-                f"  Checkpoint solution expects {expected_cells} cells\n"
-                f"  Current grid has {grid_data.cell_count} cells\n"
-                f"  Please provide the SAME volume mesh file used in the original simulation."
+                f"网格单元数不匹配！\n"
+                f"  检查点解期望 {expected_cells} 个单元\n"
+                f"  当前网格有 {grid_data.cell_count} 个单元\n"
+                f"  请提供与原始仿真中使用的相同体网格文件。"
             )
         
-        logger.info(f"✓ Checkpoint restored:")
-        logger.info(f"  - Iteration: {loaded_iteration}")
-        logger.info(f"  - Solution shape: {solution.shape}")
-        logger.info(f"  - History entries: {len(history.get('iterations', []))}")
-        logger.info(f"✓ Grid validated: {grid_data.cell_count} cells matches checkpoint")
+        logger.info(f"✓ 检查点已恢复:")
+        logger.info(f"  - 迭代: {loaded_iteration}")
+        logger.info(f"  - 解形状: {solution.shape}")
+        logger.info(f"  - 历史条目: {len(history.get('iterations', []))}")
+        logger.info(f"✓ 网格已验证: {grid_data.cell_count} 单元与检查点匹配")
         
-        # Set initial solution
+        # 设置初始解
         solver.solution = solution
         
-        # Restore convergence history
+        # 恢复收敛历史
         if history:
             solver.convergence_history = history
-            logger.info(f"  - Convergence history restored")
+            logger.info(f"  - 收敛历史已恢复")
         
-        # Step 6: Continue solving
+        # 步骤 6：继续求解
         logger.info(
-            f"\n[5/5] Resuming simulation from iteration {loaded_iteration} "
-            f"to iteration {config.max_iter}..."
+            f"\n[5/5] 正在从迭代 {loaded_iteration} 恢复到迭代 {config.max_iter}..."
         )
         logger.info("="*60)
 
         result = solver.solve(max_iter=config.max_iter, start_iteration=loaded_iteration)
 
-        # Output results (field names match SteadyResult - see solver_steady.py).
+        # 输出结果（字段名与 SteadyResult 匹配 - 参见 solver_steady.py）。
         final_cd = result.cd_history[-1] if result.cd_history else 0.0
         final_cl = result.cl_history[-1] if result.cl_history else 0.0
         logger.info("\n" + "="*60)
-        logger.info("✓ Simulation completed successfully!")
+        logger.info("✓ 仿真成功完成！")
         logger.info("="*60)
-        logger.info(f"Final iteration: {result.iterations}")
-        logger.info(f"Final residual: {result.final_residual:.6e}")
-        logger.info(f"Final Cd: {final_cd:.6f}")
-        logger.info(f"Final Cl: {final_cl:.6f}")
-        logger.info(f"Output directory: {config.output_dir}")
+        logger.info(f"最终迭代: {result.iterations}")
+        logger.info(f"最终残差: {result.final_residual:.6e}")
+        logger.info(f"最终 Cd: {final_cd:.6f}")
+        logger.info(f"最终 Cl: {final_cl:.6f}")
+        logger.info(f"输出目录: {config.output_dir}")
         logger.info("="*60)
 
         if json_output:
@@ -985,7 +981,7 @@ def resume(
             click.echo(json.dumps(result_dict, indent=2))
     
     except ValueError as e:
-        logger.error(f"Configuration error: {e}")
+        logger.error(f"配置错误: {e}")
         import traceback
         logger.error(traceback.format_exc())
         error_result = {
@@ -998,18 +994,18 @@ def resume(
         raise click.ClickException(str(e))
     
     except ImportError as e:
-        logger.error(f"Missing dependency: {e}")
+        logger.error(f"缺少依赖: {e}")
         error_result = {
             "command": "solve.resume",
             "status": "error",
-            "error": f"Missing dependency: {str(e)}"
+            "error": f"缺少依赖: {str(e)}"
         }
         if json_output:
             click.echo(json.dumps(error_result, indent=2))
-        raise click.ClickException(f"Resume failed: {e}")
+        raise click.ClickException(f"恢复失败: {e}")
     
     except Exception as e:
-        logger.error(f"Resume failed: {e}")
+        logger.error(f"恢复失败: {e}")
         import traceback
         logger.error(traceback.format_exc())
 
@@ -1020,44 +1016,44 @@ def resume(
                 "error": str(e)
             }
             click.echo(json.dumps(error_result, indent=2))
-        raise click.ClickException(f"Resume failed: {e}")
+        raise click.ClickException(f"恢复失败: {e}")
 
 
 @solve.command()
 @click.argument("case_dir", type=click.Path(exists=True))
-@click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
+@click.option("--json", "-j", "json_output", is_flag=True, help="以 JSON 格式输出")
 def status(case_dir: str, json_output: bool) -> None:
-    """Check solver status.
+    """检查求解器状态。
     
-    Display current status of a running or completed simulation.
+    显示正在运行或已完成的仿真的当前状态。
     
     Args:
-        case_dir: Case directory path
-        json_output: Output as JSON
+        case_dir: 案例目录路径
+        json_output: 以 JSON 格式输出
     
     Examples:
-        # Check status
+        # 检查状态
         $ autoflowcfd solve status results/
     """
-    logger.info(f"Checking status of case: {case_dir}")
+    logger.info(f"正在检查案例状态: {case_dir}")
     
     try:
-        # TODO: Implement status checking
-        logger.warning("Status check functionality is under development")
+        # TODO: 实现状态检查
+        logger.warning("状态检查功能正在开发中")
         
         result_dict = {
             "command": "solve.status",
             "status": "pending",
-            "message": "Status check not fully implemented",
+            "message": "状态检查尚未完全实现",
         }
         
         if json_output:
             click.echo(json.dumps(result_dict, indent=2))
         else:
-            click.echo("⚠ Status check feature coming in next update")
+            click.echo("⚠ 状态检查功能将在下次更新中提供")
     
     except Exception as e:
-        logger.error(f"Status check failed: {e}")
+        logger.error(f"状态检查失败: {e}")
         if json_output:
             error_result = {
                 "command": "solve.status",
@@ -1065,4 +1061,4 @@ def status(case_dir: str, json_output: bool) -> None:
                 "error": str(e)
             }
             click.echo(json.dumps(error_result, indent=2))
-        raise click.ClickException(f"Status check failed: {e}")
+        raise click.ClickException(f"状态检查失败: {e}")

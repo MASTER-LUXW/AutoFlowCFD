@@ -1,10 +1,9 @@
-"""Local cavity patch for non-manifold faces spanning the mixed
-prism(BL)+tet(transition/core) mesh - the mixed-mesh counterpart of
-mesh_repair_cavity.patch_nonmanifold_cavity.
+"""针对跨越棱柱(BL)+四面体(transition/core)混合网格的非流形面局部 cavity
+修补——是 mesh_repair_cavity.patch_nonmanifold_cavity 的混合网格版本。
 
-Split into its own module (rather than added to mesh_repair_cavity.py,
-already over this project's 450-line-per-file guideline) purely to keep
-file size down; the two modules share the same underlying technique.
+单独拆成一个模块（而不是加进已经超过本项目 450 行上限的
+mesh_repair_cavity.py），纯粹为了控制文件行数；两个模块用的是同一套
+底层技巧。
 """
 
 from typing import List, Tuple
@@ -370,7 +369,10 @@ def patch_nonmanifold_cavity_mixed(
                 local_points, local_faces, verbose=False,
                 minratio=CORE_TETGEN_MINRATIO, mindihedral=CORE_TETGEN_MINDIHEDRAL,
             )
-        except Exception:
+        except Exception as e:
+            # 只计数会让排查为什么某个 cavity retile 失败变得很困难，
+            # 这里把具体异常记下来（debug 级别，不打断批量修复流程）。
+            logger.debug(f"  Cavity retile failed for cluster with {len(global_pts)} boundary points: {e}")
             n_failed += 1
             continue
 

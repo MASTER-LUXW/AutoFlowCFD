@@ -1,7 +1,6 @@
-"""NAS parser boundary condition extraction.
+"""NAS 解析器：边界条件提取。
 
-Provides specialized functions for parsing boundary conditions from NAS files,
-including Property Name detection and boundary group mapping.
+提供从 NAS 文件解析边界条件的专用函数，包括 Property Name 识别与边界分组。
 """
 
 import re
@@ -37,9 +36,9 @@ def _leading_card_name(line_stripped: str) -> str:
 
 def parse_boundary_properties(
     file_path: str,
-    encoding: str = 'UTF-8',
-    cell_count: int = 0,
-    cells_data: list = None
+    encoding: str,
+    cell_count: int,
+    cells_data: list
 ) -> BoundaryMap:
     """解析边界条件（v2.0：支持Properties Name识别）
 
@@ -77,8 +76,8 @@ def parse_boundary_properties(
 
         logger.info(f"Found {len(pid_to_name)} Properties with names")
 
-        # Step 2: Parse CTRIA3 cards again to build cell_index to PID mapping
-        cell_to_pid = _parse_cell_to_pid_mapping(file_path, encoding, cells_data)
+        # Step 2: Build cell_index to PID mapping from the pre-parsed data
+        cell_to_pid = _parse_cell_to_pid_mapping(cells_data)
 
         # Step 3: Group cells by Property ID
         pid_to_cells = _group_cells_by_pid(cell_to_pid)
@@ -214,69 +213,14 @@ def _parse_pshell_names(file_path: str, encoding: str) -> Dict[int, str]:
     return pid_to_name
 
 
-def _parse_cell_to_pid_mapping(
-    file_path: str,
-    encoding: str,
-    cells_data: list = None
-) -> Dict[int, int]:
-    """Parse CTRIA3 cards to build cell_index to PID mapping."""
-    cell_to_pid = {}
-    
-    if cells_data is not None:
-        # Use pre-parsed data
-        for cell_idx, pid in cells_data:
-            cell_to_pid[cell_idx] = pid
-        return cell_to_pid
-    
-    # Re-parse CTRIA3 cards to extract PID information
-    cell_idx = 0
-    
-    # Support both comma-separated and fixed-format (space-separated)
-    ctria3_pattern_comma = re.compile(
-        r'^\s*CTRIA3\s*,\s*(\d+)\s*,\s*(\d+)\s*,',
-        re.IGNORECASE
-    )
-    ctria3_pattern_fixed = re.compile(
-        r'^\s*CTRIA3\s+(\d+)\s+(\d+)\s+',
-        re.IGNORECASE
-    )
-    
-    with open(file_path, 'r', encoding=encoding, errors='ignore') as f:
-        for line in f:
-            line_stripped = line.strip()
-            
-            if not line_stripped or line_stripped.startswith('$') or line_stripped.startswith('#'):
-                continue
-            
-            # Check if this is a CTRIA3 card
-            if not line_stripped.upper().startswith('CTRIA3'):
-                continue
-            
-            try:
-                # Try comma-separated format first
-                match = ctria3_pattern_comma.match(line_stripped)
-                
-                if match:
-                    eid = int(match.group(1))
-                    pid = int(match.group(2))
-                    cell_to_pid[cell_idx] = pid
-                    cell_idx += 1
-                    continue
-                
-                # Try fixed-format
-                match = ctria3_pattern_fixed.match(line_stripped)
-                
-                if match:
-                    eid = int(match.group(1))
-                    pid = int(match.group(2))
-                    cell_to_pid[cell_idx] = pid
-                    cell_idx += 1
-                    continue
-                    
-            except (ValueError, IndexError):
-                continue
-    
-    return cell_to_pid
+def _parse_cell_to_pid_mapping(cells_data: list) -> Dict[int, int]:
+    """把预先解析好的 [cell_index, pid] 列表转换成 cell_index -> pid 字典。
+
+    唯一调用方 parser_core.py 总是传入已经和 parse_cells_from_nas 结果对齐的
+    cells_data（见调用处注释：独立重新扫描 CTRIA3 卡片无法知道哪些 cell 被
+    跳过，索引会错位），因此这里不再保留"文件里独立重新扫描 CTRIA3"的分支。
+    """
+    return {cell_idx: pid for cell_idx, pid in cells_data}
 
 
 def _group_cells_by_pid(cell_to_pid: Dict[int, int]) -> Dict[int, List[int]]:

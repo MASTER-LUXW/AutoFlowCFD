@@ -1,7 +1,6 @@
-"""Grid parsing and processing module.
+"""网格解析与处理模块。
 
-This module handles ANSA .nas file parsing, grid data structures,
-quality validation, and boundary condition mapping.
+负责 ANSA .nas 文件解析、网格数据结构、质量校验与边界条件映射。
 
 Key Components:
     - GridData: Main grid data structure with SoA layout
@@ -44,8 +43,7 @@ from .mesh_gen.mesh_utils import (
     validate_surface_mesh,
     validate_bounding_box,
     compute_face_normals,
-    check_reached_boundary,
-    check_mesh_quality
+    check_reached_boundary
 )
 from .mesh_gen.mesh_extrusion import extrude_layers
 from .mesh_gen.mesh_layer_step import extrude_single_layer
@@ -94,7 +92,6 @@ __all__ = [
     "validate_bounding_box",
     "compute_face_normals",
     "check_reached_boundary",
-    "check_mesh_quality",
     # mesh_extrusion
     "extrude_layers",
     "extrude_single_layer",

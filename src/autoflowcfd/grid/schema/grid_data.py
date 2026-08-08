@@ -276,7 +276,7 @@ class VolumeMeshData:
                 # this point mesh generation's own repair stages have all
                 # already run, so a face still shared by >2 cells here is a
                 # real, uncorrected topology defect (silent flux loss, see
-                # FaceExtractor._finalize_faces), not a transient repair-in-
+                # face_geometry_finalize.finalize_face_data), not a transient repair-in-
                 # progress state. Intermediate extract_faces/extract_faces_
                 # mixed calls DURING generation/repair deliberately stay
                 # non-strict (default) instead.

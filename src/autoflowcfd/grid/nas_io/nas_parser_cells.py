@@ -1,13 +1,11 @@
-"""NAS parser cell extraction.
+"""NAS 解析器：面单元（cell）提取。
 
-Provides streaming cell parsing functionality for Nastran format files:
-CTRIA3 triangular surface elements natively, and CQUAD4 quadrilateral
-surface elements split into 2 triangles each (n1,n2,n3 + n1,n3,n4) - real
-ANSA automotive exports routinely mix both element types on doubly-curved
-body panels; a CQUAD4-blind parser silently produces a surface mesh with
-holes wherever quads were used, with no warning (a CQUAD4 line never
-matched any prior pattern here, so it was invisible even to the drop-
-fraction safety net below, unlike a genuinely malformed CTRIA3 line).
+流式解析 Nastran 格式文件里的面单元：原生支持 CTRIA3 三角形面单元，
+CQUAD4 四边形面单元会被拆成 2 个三角形（n1,n2,n3 + n1,n3,n4）——真实的
+ANSA 汽车导出文件里，双曲率车身钣金面经常混用这两种单元类型；如果解析器
+不认识 CQUAD4，会在用到四边形的地方静默产生一个带洞的面网格且没有任何
+警告（CQUAD4 这一行不会匹配下面任何已有的正则模式，所以连"丢弃比例"这个
+兜底安全网都发现不了它，这一点和真正格式错误的 CTRIA3 行不一样）。
 """
 
 import re

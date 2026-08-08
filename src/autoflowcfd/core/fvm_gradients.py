@@ -12,7 +12,20 @@ produced by :class:`autoflowcfd.core.fvm_faces.FVMFaceExtractor`.
 
 from __future__ import annotations
 
+from typing import Optional
+
 import numpy as np
+
+from .fvm_gradients_kernels import (
+    NUMBA_AVAILABLE,
+    _green_gauss_gradient_kernel,
+    _barth_jespersen_limiter_kernel,
+)
+from .fvm_gradients_kernels_gpu import (
+    CUDA_AVAILABLE,
+    green_gauss_gradient_gpu,
+    barth_jespersen_limiter_gpu,
+)
 
 
 class FaceGeometry:
@@ -54,7 +67,8 @@ class FaceGeometry:
 
 
 def green_gauss_gradient(cell_values: np.ndarray, geom: FaceGeometry,
-                         boundary_face_values: Optional[np.ndarray] = None) -> np.ndarray:
+                         boundary_face_values: Optional[np.ndarray] = None,
+                         use_gpu: bool = False) -> np.ndarray:
     """Compute cell-centred gradients via Green-Gauss theorem (vectorised).
 
     Args:
@@ -63,78 +77,100 @@ def green_gauss_gradient(cell_values: np.ndarray, geom: FaceGeometry,
         boundary_face_values: optional (n_boundary_faces, n_vars) values to use
             at boundary faces (e.g. ghost/BC states).  If ``None`` the owner
             cell value is used (zero-gradient extrapolation).
+        use_gpu: dispatch to the CUDA kernel (fvm_gradients_kernels_gpu.py)
+            when True and a GPU is actually available. **That GPU path has
+            never been run on real hardware** (see that module's docstring)
+            - unlike the CPU/Numba path below, it has no numerical
+            validation behind it yet.
 
     Returns:
         Gradients, shape (n_cells, n_vars, 3).
     """
     cell_values = np.ascontiguousarray(cell_values, dtype=np.float64)
     n_cells, n_vars = cell_values.shape
-    
+
     # === NUMERICAL STABILITY: Detect and clip NaN/Inf in input ===
     if not np.all(np.isfinite(cell_values)):
         import warnings
         warnings.warn("Non-finite values detected in cell_values, clipping to finite range")
         cell_values = np.nan_to_num(cell_values, nan=0.0, posinf=1e6, neginf=-1e6)
-    
-    grad = np.zeros((n_cells, n_vars, 3), dtype=np.float64)
 
-    # --- internal faces: face value = arithmetic mean of the two cells ---
-    io, ineigh = geom.int_owner, geom.int_neigh
-    phi_f = 0.5 * (cell_values[io] + cell_values[ineigh])          # (nif, nv)
-    
-    # Guard against NaN in face values
-    if not np.all(np.isfinite(phi_f)):
-        phi_f = np.nan_to_num(phi_f, nan=0.0, posinf=1e6, neginf=-1e6)
-    
-    aN = geom.areas[geom.internal_mask][:, None] * geom.normals[geom.internal_mask]  # (nif,3)
-
-    # contribution = phi_f (nv) outer aN (3)  -> (nif, nv, 3)
-    contrib = phi_f[:, :, None] * aN[:, None, :]
-    
-    # Guard against NaN in contributions
-    if not np.all(np.isfinite(contrib)):
-        contrib = np.nan_to_num(contrib, nan=0.0, posinf=1e6, neginf=-1e6)
-    
-    np.add.at(grad, io, contrib)
-    np.add.at(grad, ineigh, -contrib)
-
-    # --- boundary faces: outward normal, use BC value if provided ---
     bo = geom.bnd_owner
     if bo.size:
         if boundary_face_values is None:
             phi_b = cell_values[bo]
         else:
             phi_b = np.ascontiguousarray(boundary_face_values, dtype=np.float64)
-        
-        # Guard boundary values
         if not np.all(np.isfinite(phi_b)):
             phi_b = np.nan_to_num(phi_b, nan=0.0, posinf=1e6, neginf=-1e6)
-        
-        aB = geom.areas[geom.boundary_mask][:, None] * geom.normals[geom.boundary_mask]
-        bnd_contrib = phi_b[:, :, None] * aB[:, None, :]
-        
-        # Guard boundary contributions
-        if not np.all(np.isfinite(bnd_contrib)):
-            bnd_contrib = np.nan_to_num(bnd_contrib, nan=0.0, posinf=1e6, neginf=-1e6)
-        
-        np.add.at(grad, bo, bnd_contrib)
+    else:
+        phi_b = np.zeros((0, n_vars), dtype=np.float64)
 
-    # Divide by volume with protection against zero/negative volumes
-    vol_safe = np.maximum(geom.cell_volumes[:, None, None], 1e-30)
-    grad /= vol_safe
-    
+    if use_gpu and CUDA_AVAILABLE:
+        grad = green_gauss_gradient_gpu(
+            cell_values,
+            geom.int_owner, geom.int_neigh,
+            geom.areas[geom.internal_mask], geom.normals[geom.internal_mask],
+            bo, geom.areas[geom.boundary_mask], geom.normals[geom.boundary_mask],
+            phi_b, geom.cell_volumes,
+        )
+    elif NUMBA_AVAILABLE:
+        # Numba-accelerated path (same formula, translated to explicit
+        # per-face loops - see fvm_gradients_kernels.py's own module
+        # docstring for why np.add.at itself can't be JIT-compiled
+        # directly). Validated to agree with the numpy path below to
+        # ~1e-14 (float64 machine precision) on a real mesh.
+        grad = _green_gauss_gradient_kernel(
+            cell_values,
+            geom.int_owner, geom.int_neigh,
+            geom.areas[geom.internal_mask], geom.normals[geom.internal_mask],
+            bo, geom.areas[geom.boundary_mask], geom.normals[geom.boundary_mask],
+            phi_b, geom.cell_volumes,
+        )
+    else:
+        grad = np.zeros((n_cells, n_vars, 3), dtype=np.float64)
+
+        # --- internal faces: face value = arithmetic mean of the two cells ---
+        io, ineigh = geom.int_owner, geom.int_neigh
+        phi_f = 0.5 * (cell_values[io] + cell_values[ineigh])          # (nif, nv)
+        if not np.all(np.isfinite(phi_f)):
+            phi_f = np.nan_to_num(phi_f, nan=0.0, posinf=1e6, neginf=-1e6)
+
+        aN = geom.areas[geom.internal_mask][:, None] * geom.normals[geom.internal_mask]  # (nif,3)
+
+        # contribution = phi_f (nv) outer aN (3)  -> (nif, nv, 3)
+        contrib = phi_f[:, :, None] * aN[:, None, :]
+        if not np.all(np.isfinite(contrib)):
+            contrib = np.nan_to_num(contrib, nan=0.0, posinf=1e6, neginf=-1e6)
+
+        np.add.at(grad, io, contrib)
+        np.add.at(grad, ineigh, -contrib)
+
+        # --- boundary faces: outward normal, use BC value if provided ---
+        if bo.size:
+            aB = geom.areas[geom.boundary_mask][:, None] * geom.normals[geom.boundary_mask]
+            bnd_contrib = phi_b[:, :, None] * aB[:, None, :]
+            if not np.all(np.isfinite(bnd_contrib)):
+                bnd_contrib = np.nan_to_num(bnd_contrib, nan=0.0, posinf=1e6, neginf=-1e6)
+            np.add.at(grad, bo, bnd_contrib)
+
+        # Divide by volume with protection against zero/negative volumes
+        vol_safe = np.maximum(geom.cell_volumes[:, None, None], 1e-30)
+        grad /= vol_safe
+
     # Final NaN check on output
     if not np.all(np.isfinite(grad)):
         import warnings
         warnings.warn("Non-finite gradients detected, clipping to safe range")
         grad = np.nan_to_num(grad, nan=0.0, posinf=1e6, neginf=-1e6)
-    
+
     return grad
 
 
 def barth_jespersen_limiter(cell_values: np.ndarray,
                             grad: np.ndarray,
-                            geom: FaceGeometry) -> np.ndarray:
+                            geom: FaceGeometry,
+                            use_gpu: bool = False) -> np.ndarray:
     """Barth-Jespersen slope limiter phi_i in [0, 1] per cell and variable.
 
     Guarantees the reconstructed face values stay within the min/max of the
@@ -144,12 +180,34 @@ def barth_jespersen_limiter(cell_values: np.ndarray,
         cell_values: (n_cells, n_vars)
         grad: (n_cells, n_vars, 3) unlimited gradients
         geom: face geometry
+        use_gpu: dispatch to the CUDA kernel when True and a GPU is
+            actually available - unverified against real hardware, see
+            fvm_gradients_kernels_gpu.py's module docstring.
 
     Returns:
         Limiter phi, shape (n_cells, n_vars), in [0, 1].
     """
     cell_values = np.ascontiguousarray(cell_values, dtype=np.float64)
     n_cells, n_vars = cell_values.shape
+
+    if use_gpu and CUDA_AVAILABLE:
+        int_face_idx = np.where(geom.internal_mask)[0]
+        return barth_jespersen_limiter_gpu(
+            cell_values, grad, geom.owner, geom.centers, geom.cell_centroids,
+            geom.int_owner, geom.int_neigh, int_face_idx,
+        )
+
+    if NUMBA_AVAILABLE:
+        # Numba-accelerated path - same algorithm as the numpy fallback
+        # below (u_min/u_max stencil + per-face reconstruction-deviation
+        # ratio), translated to explicit loops - see
+        # fvm_gradients_kernels.py's own module docstring. Validated to
+        # agree with the numpy path to ~1e-14 on a real mesh.
+        int_face_idx = np.where(geom.internal_mask)[0]
+        return _barth_jespersen_limiter_kernel(
+            cell_values, grad, geom.owner, geom.centers, geom.cell_centroids,
+            geom.int_owner, geom.int_neigh, int_face_idx,
+        )
 
     # Neighbour min/max (self included) over internal-face stencil.
     u_max = cell_values.copy()
@@ -173,12 +231,12 @@ def barth_jespersen_limiter(cell_values: np.ndarray,
         phi_f = np.ones_like(delta)
         pos = delta > eps
         neg = delta < -eps
-        
+
         # CRITICAL FIX: Protect against division by zero in limiter calculation
         # When delta -> 0, the ratio becomes undefined and causes NaN propagation
         delta_safe_pos = np.maximum(delta[pos], eps)
         delta_safe_neg = np.minimum(delta[neg], -eps)
-        
+
         phi_f[pos] = np.minimum(1.0, umax[pos] / delta_safe_pos)
         phi_f[neg] = np.minimum(1.0, umin[neg] / delta_safe_neg)
         phi_f = np.clip(phi_f, 0.0, 1.0)

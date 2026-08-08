@@ -1,6 +1,5 @@
-"""Mesh quality validation.
+"""网格质量校验。
 
-Purely organizational grouping - re-exported at the `autoflowcfd.grid`
-package level, so import from there in external code rather than from
-these submodules directly.
+纯粹是组织性分组——统一在 `autoflowcfd.grid` 包一级重新导出，外部代码
+请从那里导入，不要直接导入这些子模块。
 """

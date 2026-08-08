@@ -1,4 +1,4 @@
-"""Backend factory and initialization."""
+"""Backend 工厂与初始化。"""
 
 from typing import Optional, Dict, Any
 from .base import BackendBase, SolutionVector
@@ -10,39 +10,36 @@ def create_backend(
     backend_type: str = "auto",
     **kwargs
 ) -> BackendBase:
-    """Factory function to create computational backend.
-    
-    This function creates the appropriate backend (CPU or GPU) based on
-    user preference and hardware availability.
-    
+    """按用户偏好和硬件可用性创建对应的计算 backend（CPU 或 GPU）的工厂函数。
+
     Args:
-        backend_type: Backend type selector
-            - "auto": Automatically choose best available backend
-            - "cpu": Force CPU backend (Numba)
-            - "gpu": Force GPU backend (CUDA)
-        **kwargs: Additional backend-specific parameters
-            - n_threads: Number of CPU threads (for CPU backend)
-            - device_id: CUDA device ID (for GPU backend)
-    
+        backend_type: backend 类型选择
+            - "auto": 自动选择最优的可用 backend
+            - "cpu": 强制使用 CPU backend (Numba)
+            - "gpu": 强制使用 GPU backend (CUDA)
+        **kwargs: 其它 backend 专属参数
+            - n_threads: CPU 线程数（CPU backend 用）
+            - device_id: CUDA 设备 ID（GPU backend 用）
+
     Returns:
-        Initialized backend instance
-    
+        已初始化的 backend 实例
+
     Raises:
-        ValueError: If backend_type is invalid
-        RuntimeError: If requested backend is not available
-    
+        ValueError: backend_type 无效时
+        RuntimeError: 请求的 backend 不可用时
+
     Examples:
-        >>> # Auto-select best backend
+        >>> # 自动选择最优 backend
         >>> backend = create_backend("auto")
-        
-        >>> # Force CPU with 8 threads
+
+        >>> # 强制 CPU，8 线程
         >>> backend = create_backend("cpu", n_threads=8)
-        
-        >>> # Force GPU on device 0
+
+        >>> # 强制 GPU，设备 0
         >>> backend = create_backend("gpu", device_id=0)
     """
     if backend_type == "auto":
-        # Try GPU first, fall back to CPU
+        # 先尝试 GPU，不行再退回 CPU
         try:
             gpu_backend = CUDABackend(**kwargs)
             if gpu_backend.available:
@@ -52,32 +49,32 @@ def create_backend(
                 print("[Backend] GPU not available, falling back to CPU")
         except Exception as e:
             print(f"[Backend] GPU initialization failed: {e}, using CPU")
-        
-        # Fall back to CPU
+
+        # 退回 CPU
         n_threads = kwargs.get('n_threads', 4)
         cpu_backend = NumbaBackend(n_threads=n_threads)
         print(f"[Backend] Using CPU (Numba) backend with {n_threads} threads")
         return cpu_backend
-    
+
     elif backend_type == "cpu":
         n_threads = kwargs.get('n_threads', 4)
         backend = NumbaBackend(n_threads=n_threads)
         print(f"[Backend] Using CPU (Numba) backend with {n_threads} threads")
         return backend
-    
+
     elif backend_type == "gpu":
         device_id = kwargs.get('device_id', 0)
         backend = CUDABackend(device_id=device_id)
-        
+
         if not backend.available:
             raise RuntimeError(
                 "GPU backend requested but CUDA is not available. "
                 "Please install CUDA Toolkit and ensure NVIDIA GPU is present."
             )
-        
+
         print(f"[Backend] Using GPU (CUDA) backend on device {device_id}")
         return backend
-    
+
     else:
         raise ValueError(
             f"Invalid backend_type: {backend_type}. "
@@ -86,25 +83,25 @@ def create_backend(
 
 
 def get_available_backends() -> Dict[str, bool]:
-    """Check which backends are available on current system.
-    
+    """检查当前系统上哪些 backend 可用。
+
     Returns:
-        Dictionary mapping backend names to availability status
-    
+        backend 名称到可用状态的映射字典
+
     Examples:
         >>> backends = get_available_backends()
         >>> print(backends)
         {'cpu': True, 'gpu': True}
     """
-    result = {"cpu": True}  # CPU backend always available
-    
-    # Check GPU backend
+    result = {"cpu": True}  # CPU backend 永远可用
+
+    # 检查 GPU backend
     try:
         gpu_test = CUDABackend()
         result["gpu"] = gpu_test.available
     except Exception:
         result["gpu"] = False
-    
+
     return result
 
 

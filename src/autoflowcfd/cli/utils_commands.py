@@ -1,11 +1,11 @@
-"""Utility subcommands.
+"""实用工具子命令。
 
-This module provides CLI utility commands for AutoFlowCFD.
+本模块提供 AutoFlowCFD 的 CLI 实用工具命令。
 
 Commands:
-    - version: Display version information
-    - doctor: Environment diagnostics
-    - benchmark: Performance benchmarking
+    - version: 显示版本信息
+    - doctor: 环境诊断
+    - benchmark: 性能基准测试
 
 Example:
     $ autoflowcfd utils version
@@ -22,38 +22,38 @@ from loguru import logger
 
 @click.group()
 def utils() -> None:
-    """Utility commands.
+    """实用工具命令。
     
-    System utilities and diagnostic tools.
+    系统实用工具和诊断工具。
     
     Examples:
-        # Check version
+        # 检查版本
         $ autoflowcfd utils version
         
-        # Run diagnostics
+        # 运行诊断
         $ autoflowcfd utils doctor
         
-        # Performance benchmark
+        # 性能基准测试
         $ autoflowcfd utils benchmark --grid model.nas
     """
     pass
 
 
 @utils.command()
-@click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
+@click.option("--json", "-j", "json_output", is_flag=True, help="以 JSON 格式输出")
 def version(json_output: bool) -> None:
-    """Display version information.
+    """显示版本信息。
     
-    Show AutoFlowCFD version and build information.
+    显示 AutoFlowCFD 版本和构建信息。
     
     Args:
-        json_output: Output as JSON
+        json_output: 以 JSON 格式输出
     
     Examples:
-        # Basic version
+        # 基本版本
         $ autoflowcfd utils version
         
-        # Detailed JSON output
+        # 详细 JSON 输出
         $ autoflowcfd utils version --json
     """
     from autoflowcfd import __version__
@@ -81,42 +81,43 @@ def version(json_output: bool) -> None:
             click.echo(f"{'='*40}")
     
     except Exception as e:
-        logger.error(f"Failed to get version info: {e}")
+        logger.error(f"获取版本信息失败: {e}")
         raise click.ClickException(str(e))
 
 
 @utils.command()
-@click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
+@click.option("--json", "-j", "json_output", is_flag=True, help="以 JSON 格式输出")
 def doctor(json_output: bool) -> None:
-    """Run environment diagnostics.
-    
-    Check system environment for potential issues and missing dependencies.
-    
+    """运行环境诊断。
+
+    检查系统环境中是否存在潜在问题和缺失的依赖项。
+
     Args:
-        json_output: Output as JSON
-    
+        json_output: 以 JSON 格式输出
+
     Examples:
-        # Run diagnostics
+        # 运行诊断
         $ autoflowcfd utils doctor
-        
-        # JSON output
+
+        # JSON 输出
         $ autoflowcfd utils doctor --json
     """
-    logger.info("Running environment diagnostics...")
+    if not json_output:
+        logger.info("正在运行环境诊断...")
     
     try:
         issues = []
         warnings = []
         info = {}
         
-        # Check Python version
+        # 检查 Python 版本
         python_version = sys.version_info
         info['python_version'] = f"{python_version.major}.{python_version.minor}.{python_version.micro}"
         
         if python_version < (3, 8):
-            issues.append(f"Python version {python_version} is too old. Requires Python 3.8+")
+            issues.append(f"Python 版本 {python_version} 太旧。需要 Python 3.8+")
         
-        # Check required packages
+        # 检查必需的包
         required_packages = {
             'numpy': 'NumPy',
             'click': 'Click',
@@ -134,15 +135,15 @@ def doctor(json_output: bool) -> None:
                     pkg = __import__(pkg_name)
                     installed_packages[pkg_display] = getattr(pkg, '__version__', 'unknown')
             except ImportError:
-                issues.append(f"Missing required package: {pkg_display}")
+                issues.append(f"缺少必需的包: {pkg_display}")
         
         info['installed_packages'] = installed_packages
         
-        # Check optional packages
+        # 检查可选包
         optional_packages = {
-            'cupy': 'CuPy (GPU support)',
-            'numba': 'Numba (CPU acceleration)',
-            'h5py': 'h5py (HDF5 support)',
+            'cupy': 'CuPy (GPU 支持)',
+            'numba': 'Numba (CPU 加速)',
+            'h5py': 'h5py (HDF5 支持)',
         }
         
         optional_installed = {}
@@ -151,28 +152,28 @@ def doctor(json_output: bool) -> None:
                 pkg = __import__(pkg_name)
                 optional_installed[pkg_display] = getattr(pkg, '__version__', 'available')
             except ImportError:
-                warnings.append(f"Optional package not installed: {pkg_display}")
+                warnings.append(f"未安装可选包: {pkg_display}")
         
         info['optional_packages'] = optional_installed
         
-        # Check GPU availability
+        # 检查 GPU 可用性
         gpu_available = False
         try:
             import cupy as cp
-            # Try to create a simple array on GPU
+            # 尝试在 GPU 上创建一个简单数组
             test_array = cp.array([1, 2, 3])
             gpu_available = True
             info['gpu_status'] = 'available'
         except Exception:
             info['gpu_status'] = 'not available'
-            warnings.append("GPU (CUDA) not available. Install CuPy and CUDA toolkit for GPU acceleration.")
+            warnings.append("GPU (CUDA) 不可用。安装 CuPy 和 CUDA 工具包以获得 GPU 加速。")
         
-        # Check CPU cores
+        # 检查 CPU 核心数
         import multiprocessing
         cpu_count = multiprocessing.cpu_count()
         info['cpu_cores'] = cpu_count
         
-        # Compile results
+        # 汇总结果
         status = "healthy" if not issues else "unhealthy"
         
         result = {
@@ -186,58 +187,58 @@ def doctor(json_output: bool) -> None:
         if json_output:
             click.echo(json.dumps(result, indent=2))
         else:
-            click.echo(f"\nEnvironment Diagnostics")
+            click.echo(f"\n环境诊断")
             click.echo(f"{'='*60}")
             
             if issues:
-                click.echo(f"Status: ❌ UNHEALTHY")
-                click.echo(f"\nIssues ({len(issues)}):")
+                click.echo(f"状态: ❌ 不健康")
+                click.echo(f"\n问题 ({len(issues)}):")
                 for issue in issues:
                     click.echo(f"  ❌ {issue}")
             else:
-                click.echo(f"Status: ✅ HEALTHY")
+                click.echo(f"状态: ✅ 健康")
             
             if warnings:
-                click.echo(f"\nWarnings ({len(warnings)}):")
+                click.echo(f"\n警告 ({len(warnings)}):")
                 for warning in warnings:
                     click.echo(f"  ⚠️  {warning}")
             
-            click.echo(f"\nSystem Information:")
+            click.echo(f"\n系统信息:")
             click.echo(f"  Python:      {info.get('python_version', 'unknown')}")
-            click.echo(f"  CPU Cores:   {info.get('cpu_cores', 'unknown')}")
-            click.echo(f"  GPU Status:  {info.get('gpu_status', 'unknown')}")
+            click.echo(f"  CPU 核心数:   {info.get('cpu_cores', 'unknown')}")
+            click.echo(f"  GPU 状态:  {info.get('gpu_status', 'unknown')}")
             
             if info.get('installed_packages'):
-                click.echo(f"\nInstalled Packages:")
+                click.echo(f"\n已安装的包:")
                 for pkg, ver in info['installed_packages'].items():
                     click.echo(f"  ✓ {pkg:<20} {ver}")
             
             if info.get('optional_packages'):
-                click.echo(f"\nOptional Packages:")
+                click.echo(f"\n可选包:")
                 for pkg, ver in info['optional_packages'].items():
                     click.echo(f"  {'✓' if ver != 'not installed' else '✗'} {pkg:<20} {ver}")
             
             click.echo(f"{'='*60}")
             
             if not issues and not warnings:
-                click.echo("\n✅ Everything looks good!")
+                click.echo("\n✅ 一切看起来都很好！")
             elif not issues:
-                click.echo(f"\n⚠️  {len(warnings)} warning(s) found. System is functional but could be improved.")
+                click.echo(f"\n⚠️  发现 {len(warnings)} 个警告。系统功能正常但可以改进。")
     
     except Exception as e:
-        logger.error(f"Diagnostics failed: {e}")
-        raise click.ClickException(f"Diagnostics failed: {e}")
+        logger.error(f"诊断失败: {e}")
+        raise click.ClickException(f"诊断失败: {e}")
 
 
 @utils.command()
 @click.argument("grid_file", type=click.Path(exists=True))
 @click.option("--backend", "-b", type=click.Choice(["cpu", "gpu"]),
-              default="cpu", help="Backend to benchmark")
+              default="cpu", help="要基准测试的后端")
 @click.option("--iterations", "-n", type=int, default=100,
-              help="Number of test iterations")
+              help="测试迭代次数")
 @click.option("--order", "-p", type=click.IntRange(1, 3), default=2,
-              help="FR order")
-@click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
+              help="FR 阶数")
+@click.option("--json", "-j", "json_output", is_flag=True, help="以 JSON 格式输出")
 def benchmark(
     grid_file: str,
     backend: str,
@@ -245,36 +246,36 @@ def benchmark(
     order: int,
     json_output: bool
 ) -> None:
-    """Run performance benchmark.
+    """运行性能基准测试。
     
-    Measure computation speed and memory usage for specified grid and backend.
+    测量指定网格和后端的计算速度和内存使用情况。
     
     Args:
-        grid_file: Path to .nas grid file
-        backend: Backend to benchmark (cpu/gpu)
-        iterations: Number of iterations
-        order: FR order
-        json_output: Output as JSON
+        grid_file: .nas 网格文件路径
+        backend: 要基准测试的后端 (cpu/gpu)
+        iterations: 迭代次数
+        order: FR 阶数
+        json_output: 以 JSON 格式输出
     
     Examples:
-        # CPU benchmark
+        # CPU 基准测试
         $ autoflowcfd utils benchmark sedan.nas --backend cpu
         
-        # GPU benchmark
+        # GPU 基准测试
         $ autoflowcfd utils benchmark sedan.nas --backend gpu -n 200
     """
-    logger.info(f"Running benchmark: grid={grid_file}, backend={backend}")
+    logger.info(f"运行基准测试: grid={grid_file}, backend={backend}")
     
     try:
-        # TODO: Implement actual benchmarking
-        # This requires loading grid, setting up solver, and running iterations
+        # TODO: 实现实际的基准测试
+        # 这需要加载网格、设置求解器并运行迭代
         
-        logger.warning("Benchmark functionality is under development")
+        logger.warning("基准测试功能正在开发中")
         
         result = {
             "command": "utils.benchmark",
             "status": "pending",
-            "message": "Benchmark feature coming soon",
+            "message": "基准测试功能即将推出",
             "grid_file": grid_file,
             "backend": backend,
             "iterations": iterations,
@@ -283,14 +284,14 @@ def benchmark(
         if json_output:
             click.echo(json.dumps(result, indent=2))
         else:
-            click.echo("\nPerformance Benchmark")
+            click.echo("\n性能基准测试")
             click.echo(f"{'='*60}")
-            click.echo(f"Grid File:  {grid_file}")
-            click.echo(f"Backend:    {backend.upper()}")
-            click.echo(f"Iterations: {iterations}")
-            click.echo(f"\n⚠️  Benchmark feature under development")
+            click.echo(f"网格文件:  {grid_file}")
+            click.echo(f"后端:    {backend.upper()}")
+            click.echo(f"迭代次数: {iterations}")
+            click.echo(f"\n⚠️  基准测试功能正在开发中")
             click.echo(f"{'='*60}")
     
     except Exception as e:
-        logger.error(f"Benchmark failed: {e}")
-        raise click.ClickException(f"Benchmark failed: {e}")
+        logger.error(f"基准测试失败: {e}")
+        raise click.ClickException(f"基准测试失败: {e}")

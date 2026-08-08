@@ -26,16 +26,11 @@ from loguru import logger
 if TYPE_CHECKING:
     from ..structures import BoundaryMap, VolumeMeshData
 
-from .mesh_extrusion import extrude_layers
 from .mesh_prism_to_tet import orient_tetrahedra
-from .mesh_domain_classify import classify_boundary_groups
-from .mesh_tetgen_core import (
-    fill_core_volume, compute_local_thickness_limit, repair_nonmanifold_cells,
-    _dedupe_coincident_points,
-)
-from .mesh_repair_cavity import patch_nonmanifold_cavity
+from .mesh_tetgen_core import _dedupe_coincident_points
 from .mesh_repair_nonmanifold_mixed import patch_nonmanifold_cavity_mixed, demote_invalid_prisms_to_tets
 from .mesh_background_merge import _build_merged_mesh
+from .mesh_background_repair import repair_nonmanifold_tets_with_escalation
 
 # Import refactored repair stages
 from .mesh_overlap_handler import compute_extra_bad_mask
@@ -109,50 +104,13 @@ def generate_hybrid_mesh(
             volumes = volumes[valid_mask]
             cell_groups = cell_groups[valid_mask]
 
-        # Repair non-manifold faces - try a local retile first (fills the
-        # gap a plain "keep largest, drop rest" repair would otherwise
-        # leave when the extra cells came from two different regions
-        # legitimately meeting at a sharp corner, not genuine duplicates -
-        # see patch_nonmanifold_cavity's own docstring for the real
-        # measured case, 0.189 m^3 of missing volume, that motivated this).
-        nonmanifold_keep = repair_nonmanifold_cells(merged_nodes, merged_cells)
-        if not nonmanifold_keep.all():
-            merged_nodes, merged_cells, cell_groups, n_bl_cells, _ = patch_nonmanifold_cavity(
-                merged_nodes, merged_cells, nonmanifold_keep, cell_groups, n_bl_cells,
-            )
-            # patch_nonmanifold_cavity falls back to returning its inputs
-            # UNCHANGED (still non-manifold) when it can't safely patch -
-            # re-run the plain keep-mask deletion in that case, same as
-            # before this fix existed, so a defect it can't fix still
-            # gets cleaned up rather than left in the mesh.
-            nonmanifold_keep = repair_nonmanifold_cells(merged_nodes, merged_cells)
-            # A cluster the default n_buffer_rings=1 attempt couldn't retile
-            # often just needed a bigger, better-defined local boundary, not
-            # because it's unfixable - escalate once before falling back to
-            # plain deletion, which leaves a REAL hole (confirmed directly:
-            # unconditional deletion at exactly this point, on a real
-            # cube_demo run, produced a disconnected tet-only "phantom"
-            # boundary shell enclosing genuinely empty space - see the mixed-
-            # mesh non-manifold check further below, which had the identical
-            # pattern and the same fix).
-            if not nonmanifold_keep.all():
-                merged_nodes, merged_cells, cell_groups, n_bl_cells, _ = patch_nonmanifold_cavity(
-                    merged_nodes, merged_cells, nonmanifold_keep, cell_groups, n_bl_cells,
-                    n_buffer_rings=4, max_cavity_cells=15_000,
-                )
-                nonmanifold_keep = repair_nonmanifold_cells(merged_nodes, merged_cells)
-            if not nonmanifold_keep.all():
-                n_deleted = int((~nonmanifold_keep).sum())
-                del_pts = merged_nodes[np.unique(merged_cells[~nonmanifold_keep])]
-                logger.warning(
-                    f"Non-manifold tet repair: {n_deleted} cell(s) still unpatched after "
-                    f"retry with a larger buffer ring - deleting as a last resort "
-                    f"(bbox min={del_pts.min(axis=0)}, max={del_pts.max(axis=0)}); this "
-                    f"leaves a real gap at that location, not just missing volume"
-                )
-                n_bl_cells = int(np.sum(nonmanifold_keep[:n_bl_cells]))
-                merged_cells = merged_cells[nonmanifold_keep]
-                cell_groups = cell_groups[nonmanifold_keep]
+        # Repair non-manifold faces (see repair_nonmanifold_tets_with_escalation's
+        # own docstring for the local-retile / escalate / last-resort-delete
+        # rationale).
+        merged_nodes, merged_cells, cell_groups, n_bl_cells, _nm_changed = (
+            repair_nonmanifold_tets_with_escalation(merged_nodes, merged_cells, cell_groups, n_bl_cells)
+        )
+        if _nm_changed:
             _tmp_nodes_obj_nm = NodeArray(
                 x=merged_nodes[:, 0].copy(), y=merged_nodes[:, 1].copy(), z=merged_nodes[:, 2].copy()
             )
@@ -176,31 +134,13 @@ def generate_hybrid_mesh(
                 merged_cells = merged_cells[valid_mask_seam]
                 volumes = volumes[valid_mask_seam]
                 cell_groups = cell_groups[valid_mask_seam]
-            nonmanifold_keep_seam = repair_nonmanifold_cells(merged_nodes, merged_cells)
-            if not nonmanifold_keep_seam.all():
-                merged_nodes, merged_cells, cell_groups, n_bl_cells, _ = patch_nonmanifold_cavity(
-                    merged_nodes, merged_cells, nonmanifold_keep_seam, cell_groups, n_bl_cells,
+            merged_nodes, merged_cells, cell_groups, n_bl_cells, _nm_changed_seam = (
+                repair_nonmanifold_tets_with_escalation(
+                    merged_nodes, merged_cells, cell_groups, n_bl_cells,
+                    context_suffix=" (post seam-merge)",
                 )
-                nonmanifold_keep_seam = repair_nonmanifold_cells(merged_nodes, merged_cells)
-                # Same escalate-before-delete fix as the pre-seam-merge check above.
-                if not nonmanifold_keep_seam.all():
-                    merged_nodes, merged_cells, cell_groups, n_bl_cells, _ = patch_nonmanifold_cavity(
-                        merged_nodes, merged_cells, nonmanifold_keep_seam, cell_groups, n_bl_cells,
-                        n_buffer_rings=4, max_cavity_cells=15_000,
-                    )
-                    nonmanifold_keep_seam = repair_nonmanifold_cells(merged_nodes, merged_cells)
-                if not nonmanifold_keep_seam.all():
-                    n_deleted = int((~nonmanifold_keep_seam).sum())
-                    del_pts = merged_nodes[np.unique(merged_cells[~nonmanifold_keep_seam])]
-                    logger.warning(
-                        f"Non-manifold tet repair (post seam-merge): {n_deleted} cell(s) still "
-                        f"unpatched after retry with a larger buffer ring - deleting as a last "
-                        f"resort (bbox min={del_pts.min(axis=0)}, max={del_pts.max(axis=0)}); "
-                        f"this leaves a real gap at that location, not just missing volume"
-                    )
-                    n_bl_cells = int(np.sum(nonmanifold_keep_seam[:n_bl_cells]))
-                    merged_cells = merged_cells[nonmanifold_keep_seam]
-                    cell_groups = cell_groups[nonmanifold_keep_seam]
+            )
+            if _nm_changed_seam:
                 _tmp_nodes_obj_nm2 = NodeArray(
                     x=merged_nodes[:, 0].copy(), y=merged_nodes[:, 1].copy(), z=merged_nodes[:, 2].copy()
                 )

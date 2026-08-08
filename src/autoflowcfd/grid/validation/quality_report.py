@@ -1,11 +1,10 @@
-"""Mesh quality report data structure.
+"""网格质量报告数据结构。
 
-MeshQualityReport is MeshQualityValidator's (quality_validator.py) output
-type - split into its own module so quality_validator.py (the check
-implementations) doesn't also have to carry this large a dataclass/summary
-formatter inline. GridValidator (validator.py) is a separate, simpler
-surface-mesh checker with its own plain-dict return shape, unrelated to
-this class.
+MeshQualityReport 是 MeshQualityValidator（quality_validator.py）的输出
+类型——拆成独立模块，避免 quality_validator.py（检查逻辑的实现）还要
+内联携带这么大的一个 dataclass/摘要格式化器。GridValidator
+（validator.py）是另一个更简单、返回值是普通 dict 的面网格检查器，与
+这个类无关。
 """
 
 import numpy as np

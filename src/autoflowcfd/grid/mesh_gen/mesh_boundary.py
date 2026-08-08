@@ -1,7 +1,6 @@
-"""Boundary identification and mapping module.
+"""边界识别与映射模块。
 
-Identifies boundary faces from volume mesh and maps surface boundaries
-to volume mesh cells.
+从体网格中识别边界面，并把面网格的边界分组映射到体网格单元上。
 """
 
 import numpy as np

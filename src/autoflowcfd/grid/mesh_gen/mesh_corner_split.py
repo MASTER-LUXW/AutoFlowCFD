@@ -1,4 +1,9 @@
-"""Sharp-corner vertex splitting for BL extrusion.
+"""BL 挤出前的尖锐拐角顶点拆分。
+
+概述：把接触到 3 个及以上曲面片的硬边/拐角顶点，按每个曲面片各复制一份、
+沿各自真实法向偏移，再用 bevel/cap 三角形把裂开的缝隙缝合——单一平均法向
+无法正确表达 valence-3+ 拐角，容易在挤出时自相交。下面详细说明原因与
+实现细节（cap 扇形必须按真实几何环绕顺序连接，否则会产生扭曲的连接面）。
 
 extrude_single_layer's per-node averaged normal (mesh_layer_step.py) and
 its miter-join compensation model a SINGLE two-patch sharp edge correctly

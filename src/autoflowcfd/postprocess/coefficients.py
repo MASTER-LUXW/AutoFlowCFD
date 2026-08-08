@@ -1,11 +1,10 @@
-"""Aerodynamic coefficient calculation module.
+"""气动系数计算模块。
 
-This module provides tools for calculating aerodynamic coefficients
-(Cd, Cl, Cm, etc.) from CFD simulation results using pressure integration.
+本模块通过压力积分从 CFD 仿真结果计算气动系数（Cd、Cl、Cm 等）。
 
 Key Components:
-    - CoefficientCalculator: Main calculator for aerodynamic coefficients
-    - ForceDecomposition: Force and moment decomposition utilities
+    - CoefficientCalculator: 气动系数主计算器
+    - ForceDecomposition: 力与力矩分解工具
 
 Example:
     >>> from autoflowcfd.postprocess import CoefficientCalculator
@@ -25,15 +24,15 @@ from ..core.backend.base import SolutionVector
 
 @dataclass
 class AerodynamicCoefficients:
-    """Aerodynamic coefficients data class
-    
+    """气动系数数据类。
+
     Attributes:
-        Cd: Drag coefficient
-        Cl: Lift coefficient
-        Cm: Pitching moment coefficient
-        Cs: Side force coefficient
-        Cy: Yawing moment coefficient
-        Cr: Rolling moment coefficient
+        Cd: 阻力系数
+        Cl: 升力系数
+        Cm: 俯仰力矩系数
+        Cs: 侧向力系数
+        Cy: 偏航力矩系数
+        Cr: 滚转力矩系数
     """
     Cd: float = 0.0
     Cl: float = 0.0
@@ -41,9 +40,9 @@ class AerodynamicCoefficients:
     Cs: float = 0.0
     Cy: float = 0.0
     Cr: float = 0.0
-    
+
     def to_dict(self) -> Dict[str, float]:
-        """Convert to dictionary"""
+        """转换成字典。"""
         return {
             'Cd': self.Cd,
             'Cl': self.Cl,
@@ -52,9 +51,9 @@ class AerodynamicCoefficients:
             'Cy': self.Cy,
             'Cr': self.Cr
         }
-    
+
     def __str__(self) -> str:
-        """String representation"""
+        """字符串表示。"""
         return (
             f"Aerodynamic Coefficients:\n"
             f"  Cd (Drag):              {self.Cd:.6f}\n"
@@ -68,15 +67,15 @@ class AerodynamicCoefficients:
 
 @dataclass
 class AerodynamicForces:
-    """Aerodynamic forces and moments (absolute values)
-    
+    """气动力与力矩（绝对值）。
+
     Attributes:
-        drag_force: Drag force (N)
-        lift_force: Lift force (N)
-        side_force: Side force (N)
-        pitch_moment: Pitching moment (N·m)
-        yaw_moment: Yawing moment (N·m)
-        roll_moment: Rolling moment (N·m)
+        drag_force: 阻力 (N)
+        lift_force: 升力 (N)
+        side_force: 侧向力 (N)
+        pitch_moment: 俯仰力矩 (N·m)
+        yaw_moment: 偏航力矩 (N·m)
+        roll_moment: 滚转力矩 (N·m)
     """
     drag_force: float = 0.0
     lift_force: float = 0.0
@@ -84,9 +83,9 @@ class AerodynamicForces:
     pitch_moment: float = 0.0
     yaw_moment: float = 0.0
     roll_moment: float = 0.0
-    
+
     def to_dict(self) -> Dict[str, float]:
-        """Convert to dictionary"""
+        """转换成字典。"""
         return {
             'drag_force': self.drag_force,
             'lift_force': self.lift_force,
@@ -95,9 +94,9 @@ class AerodynamicForces:
             'yaw_moment': self.yaw_moment,
             'roll_moment': self.roll_moment
         }
-    
+
     def __str__(self) -> str:
-        """String representation"""
+        """字符串表示。"""
         return (
             f"Aerodynamic Forces:\n"
             f"  Drag Force:             {self.drag_force:.2f} N\n"
@@ -110,26 +109,25 @@ class AerodynamicForces:
 
 
 class CoefficientCalculator:
-    """Aerodynamic coefficient calculator
-    
-    Calculates drag, lift, and moment coefficients by integrating
-    pressure and viscous forces over vehicle surfaces.
-    
+    """气动系数计算器。
+
+    通过对车身表面积分压力和粘性力来计算阻力、升力和力矩系数。
+
     Attributes:
-        grid_data: Grid data object
-        solution: Flow field solution vector
-        reference_area: Reference area (m²), default sedan frontal area
-        reference_length: Reference length (m), default car length
-        density: Air density (kg/m³), default 1.225
-        velocity: Freestream velocity (m/s), default 30.0
-        dynamic_pressure: Dynamic pressure q = 0.5 * rho * V²
-    
+        grid_data: 网格数据对象
+        solution: 流场解向量
+        reference_area: 参考面积 (m²)，默认取轿车迎风面积
+        reference_length: 参考长度 (m)，默认取车长
+        density: 空气密度 (kg/m³)，默认 1.225
+        velocity: 自由来流速度 (m/s)，默认 30.0
+        dynamic_pressure: 动压 q = 0.5 * rho * V²
+
     Example:
         >>> calc = CoefficientCalculator(grid_data, solution)
         >>> coeffs = calc.calculate()
         >>> print(f"Cd = {coeffs['Cd']:.4f}")
     """
-    
+
     def __init__(
         self,
         grid_data: GridData,
@@ -139,18 +137,18 @@ class CoefficientCalculator:
         density: float = 1.225,
         velocity: float = 30.0
     ):
-        """Initialize coefficient calculator
-        
+        """初始化系数计算器。
+
         Args:
-            grid_data: Grid data object
-            solution: Flow field solution vector
-            reference_area: Reference area (default sedan frontal area)
-            reference_length: Reference length (default car length)
-            density: Air density
-            velocity: Freestream velocity
-            
+            grid_data: 网格数据对象
+            solution: 流场解向量
+            reference_area: 参考面积（默认轿车迎风面积）
+            reference_length: 参考长度（默认车长）
+            density: 空气密度
+            velocity: 自由来流速度
+
         Raises:
-            ValueError: Invalid parameters (reference_area <= 0 or velocity <= 0)
+            ValueError: 参数无效（reference_area <= 0 或 velocity <= 0）
         """
         if reference_area <= 0:
             raise ValueError(f"Reference area must be positive, got {reference_area}")
@@ -158,7 +156,7 @@ class CoefficientCalculator:
             raise ValueError(f"Velocity must be positive, got {velocity}")
         if reference_length <= 0:
             raise ValueError(f"Reference length must be positive, got {reference_length}")
-        
+
         self.grid_data = grid_data
         self.solution = solution
         self.reference_area = reference_area
@@ -166,7 +164,7 @@ class CoefficientCalculator:
         self.density = density
         self.velocity = velocity
         self.dynamic_pressure = 0.5 * density * velocity ** 2
-        
+
         logger.info(
             f"CoefficientCalculator initialized:\n"
             f"  Reference area:     {reference_area:.2f} m²\n"
@@ -175,27 +173,26 @@ class CoefficientCalculator:
             f"  Velocity:           {velocity:.2f} m/s\n"
             f"  Dynamic pressure:   {self.dynamic_pressure:.2f} Pa"
         )
-    
+
     def calculate(self) -> AerodynamicCoefficients:
-        """Calculate aerodynamic coefficients
-        
-        Integrates pressure and viscous forces over all body surfaces
-        to compute dimensionless aerodynamic coefficients.
-        
+        """计算气动系数。
+
+        对全部车身表面积分压力和粘性力，算出无量纲气动系数。
+
         Returns:
-            AerodynamicCoefficients: Dimensionless coefficients
-            
+            AerodynamicCoefficients: 无量纲系数
+
         Example:
             >>> coeffs = calc.calculate()
             >>> print(f"Cd = {coeffs['Cd']:.4f}")
             >>> print(f"Cl = {coeffs['Cl']:.4f}")
         """
         logger.info("Calculating aerodynamic coefficients...")
-        
-        # Calculate forces and moments
+
+        # 计算力与力矩
         forces = self.calculate_forces()
-        
-        # Convert to dimensionless coefficients
+
+        # 转换成无量纲系数
         coeffs = AerodynamicCoefficients(
             Cd=forces.drag_force / (self.dynamic_pressure * self.reference_area),
             Cl=forces.lift_force / (self.dynamic_pressure * self.reference_area),
@@ -204,30 +201,28 @@ class CoefficientCalculator:
             Cy=forces.yaw_moment / (self.dynamic_pressure * self.reference_area * self.reference_length),
             Cr=forces.roll_moment / (self.dynamic_pressure * self.reference_area * self.reference_length)
         )
-        
+
         logger.success(f"Aerodynamic coefficients calculated:\n{coeffs}")
         return coeffs
-    
+
     def calculate_forces(self) -> AerodynamicForces:
-        """Calculate aerodynamic forces (absolute values)
+        """计算气动力（绝对值）。
 
-        Delegates the actual pressure + skin-friction surface integration
-        to core.aero_coeffs.AeroCoefficientCalculator - the same,
-        extensively-verified implementation the live solver uses to report
-        Cd/Cl during a solve, rather than fabricating a value. This used to
-        return hardcoded placeholder numbers ("assume typical values for
-        Ahmed body at 30 m/s") regardless of what solution/grid were passed
-        in - a real bug, not a stub: any user calling this got a
-        plausible-looking but entirely fake answer with no indication it
-        wasn't real.
+        把实际的压力 + 摩擦表面积分委托给
+        core.aero_coeffs.AeroCoefficientCalculator——与实际求解器在求解
+        过程中报告 Cd/Cl 用的是同一套、经过充分验证的实现，而不是自己
+        另外编一个值。这个方法以前无论传入什么 solution/grid，都直接
+        返回硬编码的占位数字（"假设 Ahmed body 在 30 m/s 下的典型值"）
+        ——这是一个真实的 bug，不是占位符：任何调用它的用户都会拿到一个
+        看起来合理、实则完全虚构的答案，且没有任何提示说明这不是真实
+        结果。
 
-        Side force and the three moments are NOT computed by
-        AeroCoefficientCalculator (it only integrates the drag/lift axes) -
-        they are honestly reported as 0.0 with a logged warning rather than
-        invented, unlike drag/lift which are now real.
+        侧向力和三个力矩 AeroCoefficientCalculator **不**计算（它只积分
+        阻力/升力轴向）——这些量如实报告为 0.0 并记录警告，而不是像以前
+        那样凭空编造；阻力/升力现在则是真实值。
 
         Returns:
-            AerodynamicForces: Forces (N) and moments (N·m)
+            AerodynamicForces: 力 (N) 与力矩 (N·m)
 
         Example:
             >>> forces = calc.calculate_forces()
@@ -278,25 +273,25 @@ class CoefficientCalculator:
 
         logger.info(f"Forces calculated:\n{forces}")
         return forces
-    
+
     def calculate_by_boundary(
         self,
         boundary_name: str
     ) -> AerodynamicCoefficients:
-        """Calculate aerodynamic coefficients for specified boundary
-        
-        Computes coefficients by integrating forces over a specific
-        boundary group (e.g., BODY, MIRROR, WHEEL).
-        
+        """计算指定边界的气动系数。
+
+        对某一个特定边界组（例如 BODY、MIRROR、WHEEL）积分力，算出该
+        边界自己的系数。
+
         Args:
-            boundary_name: Boundary group name (e.g., 'BODY', 'MIRROR')
-            
+            boundary_name: 边界组名称（例如 'BODY'、'MIRROR'）
+
         Returns:
-            AerodynamicCoefficients: Coefficients for specified boundary
-            
+            AerodynamicCoefficients: 该边界的系数
+
         Raises:
-            KeyError: Boundary name not found in grid
-            
+            KeyError: 网格中找不到该边界名
+
         Example:
             >>> body_coeffs = calc.calculate_by_boundary('BODY')
             >>> mirror_coeffs = calc.calculate_by_boundary('MIRROR')
@@ -306,16 +301,13 @@ class CoefficientCalculator:
                 f"Boundary '{boundary_name}' not found. "
                 f"Available boundaries: {list(self.grid_data.boundaries.groups.keys())}"
             )
-        
+
         logger.info(f"Calculating coefficients for boundary: {boundary_name}")
-        
-        # TODO: Implement boundary-specific integration
-        # This would filter faces by boundary group and integrate only those
-        
-        # Placeholder: return zero coefficients
-        # Actual implementation requires boundary face identification
+
+        # TODO: 实现按边界的积分——需要按边界组过滤面，只对那部分面积分
+        # 占位实现：返回全零系数
         coeffs = AerodynamicCoefficients()
-        
+
         logger.warning(
             f"Boundary-specific calculation not yet fully implemented. "
             f"Returning zero coefficients for '{boundary_name}'."

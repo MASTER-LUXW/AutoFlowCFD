@@ -1,10 +1,9 @@
-"""Boundary condition handler for FVM solver.
+"""FVM 求解器的边界条件处理器。
 
-This module handles boundary condition application for different boundary types
-in the finite volume method solver.
+本模块负责为有限体积法求解器的不同边界类型应用边界条件。
 
 Key Components:
-    - BoundaryConditionHandler: Applies BCs to ghost cells
+    - BoundaryConditionHandler: 把边界条件应用到 ghost 单元
 """
 
 import numpy as np
@@ -13,301 +12,84 @@ from loguru import logger
 
 
 class BoundaryConditionHandler:
-    """Handles boundary condition application for FVM solver."""
-    
+    """FVM 求解器的边界条件应用器。"""
+
     def __init__(self, grid_data, face_extractor, rho_inf: float = 1.225, p_inf: float = 101325.0):
         self.grid_data = grid_data
         self.face_extractor = face_extractor
 
-        # Thermodynamic constants
-        self.gamma = 1.4  # Ratio of specific heats for air
+        # 热力学常数
+        self.gamma = 1.4  # 空气比热比
 
-        # Freestream reference conditions (shared with FRSolver._initialize_solution
-        # and AeroCoefficientCalculator via SteadyConfig - single source of truth).
+        # 自由来流参考条件（与 FRSolver._initialize_solution 以及
+        # AeroCoefficientCalculator 共用，均来自 SteadyConfig——单一数据源）。
         self.rho_inf = rho_inf
         self.p_inf = p_inf
 
-        # Ramp mechanism for smooth velocity transition
-        self.ramp_factor = 0.0  # Start from 0, will increase to 1.0
-        self.base_inlet_velocity = 30.0  # Base inlet velocity (m/s); overwritten by FRSolver from config
-        self.base_farfield_velocity = 30.0  # Base farfield velocity (m/s); overwritten by FRSolver from config
-        self.ramp_iterations = 0  # Will be set during solve
-        # Cached boundary-face -> type map (built lazily).
+        # 平滑速度过渡的爬升（ramp）机制
+        self.ramp_factor = 0.0  # 从 0 开始，逐步增加到 1.0
+        self.base_inlet_velocity = 30.0  # 基准入口速度 (m/s)；会被 FRSolver 用 config 里的值覆盖
+        self.base_farfield_velocity = 30.0  # 基准远场速度 (m/s)；会被 FRSolver 用 config 里的值覆盖
+        self.ramp_iterations = 0  # 求解过程中设置
+        # 缓存的 边界面 -> 类型 映射（惰性构建），以及与之对应、按
+        # np.where(boundary_flags)[0] 顺序排列的 numpy 数组版本——见
+        # _precompute_face_types。
         self._face_types = None
-    
+        self._btypes_array = None
+
     def update_ramp_factor(self, iteration: int, max_iter: int):
-        """Update ramp factor for smooth velocity transition.
-        
-        Gradually increases the inlet/farfield velocity from 0 to full value over
-        the first 20% of iterations to avoid numerical instability.
-        
+        """更新爬升系数，用于平滑过渡速度。
+
+        在前 20% 的迭代内，把入口/远场速度从 0 线性增加到完整值，避免
+        数值不稳定。
+
         Args:
-            iteration: Current iteration number
-            max_iter: Maximum iterations
+            iteration: 当前迭代数
+            max_iter: 最大迭代数
         """
-        self.ramp_iterations = max(10, int(max_iter * 0.2))  # At least 10 iterations, or 20% of total
-        
+        self.ramp_iterations = max(10, int(max_iter * 0.2))  # 至少 10 次迭代，或总数的 20%
+
         if iteration <= self.ramp_iterations:
-            # Linear ramp from 0 to 1
+            # 从 0 到 1 线性爬升
             self.ramp_factor = iteration / self.ramp_iterations
         else:
             self.ramp_factor = 1.0
-        
+
         return self.ramp_factor
-    
+
     def get_current_inlet_velocity(self) -> float:
-        """Get current inlet velocity with ramp applied."""
+        """获取施加了爬升系数后的当前入口速度。"""
         return self.base_inlet_velocity * self.ramp_factor
-    
+
     def get_current_farfield_velocity(self) -> float:
-        """Get current farfield velocity with ramp applied."""
+        """获取施加了爬升系数后的当前远场速度。"""
         return self.base_farfield_velocity * self.ramp_factor
 
-    def apply_boundary_condition(self, solution: np.ndarray, 
-                                 cell_idx: int, face_idx: int) -> np.ndarray:
-        """Apply boundary condition for a boundary face.
-        
-        Args:
-            solution: Solution array
-            cell_idx: Interior cell index
-            face_idx: Boundary face index
-            
-        Returns:
-            Ghost cell conservative variables
-        """
-        U_interior = solution[cell_idx].copy()
-        rho, rhou, rhov, rhow, E, rhok, rhow_sst = U_interior
-
-        u = rhou / max(rho, 1e-10)
-        v = rhov / max(rho, 1e-10)
-        w = rhow / max(rho, 1e-10)
-        # Turbulence variables are carried in conservative form (rho*k, rho*omega).
-        k = rhok / max(rho, 1e-10)
-        omega = rhow_sst / max(rho, 1e-10)
-
-        gamma = 1.4
-        p = (gamma - 1.0) * (E - 0.5 * rho * (u**2 + v**2 + w**2))
-        p = max(p, 100.0)
-        
-        normal = self.face_extractor.face_normals[face_idx]
-        boundary_type = self._get_face_boundary_type(face_idx)
-        
-        if boundary_type in ["WALL", "GROUND"]:
-            return self._wall_bc(rho, u, v, w, p, k, omega, normal, boundary_type)
-        elif boundary_type == "INLET":
-            return self._inlet_bc()
-        elif boundary_type == "FARFIELD":
-            return self._farfield_bc(rho, u, v, w, p, k, omega, normal)
-        elif boundary_type == "OUTLET":
-            return self._outlet_bc(rho, u, v, w, p, k, omega, normal)
-        elif boundary_type == "SYMMETRY":
-            return self._symmetry_bc(rho, u, v, w, E, k, omega, normal)
-        else:
-            return U_interior.copy()
-    
-    def _wall_bc(self, rho: float, u: float, v: float, w: float,
-                p: float, k: float, omega: float,
-                normal: np.ndarray, wall_type: str) -> np.ndarray:
-        """Viscous no-slip wall boundary condition.
-
-        The ghost state mirrors the *full* interior velocity (not just its
-        normal component) so that the face-interpolated velocity 0.5*(u_i+u_g)
-        equals the prescribed wall velocity.  For a stationary wall that target
-        is zero; for a moving ground it is the belt speed in +x.  This is what
-        makes the viscous shear stress at the wall non-zero, which is the
-        physical origin of skin-friction drag.
-        """
-        # Target wall velocity.
-        u_wall, v_wall, w_wall = 0.0, 0.0, 0.0
-        if wall_type == "GROUND":
-            u_wall = self.get_current_farfield_velocity()
-
-        # Ghost = 2*wall - interior  => average = wall.
-        u_ghost = 2.0 * u_wall - u
-        v_ghost = 2.0 * v_wall - v
-        w_ghost = 2.0 * w_wall - w
-
-        gamma = 1.4
-        rho_ghost = rho
-        rhou_ghost = rho_ghost * u_ghost
-        rhov_ghost = rho_ghost * v_ghost
-        rhow_ghost = rho_ghost * w_ghost
-        # Zero-gradient pressure at the wall (dp/dn = 0).
-        E_ghost = p / (gamma - 1.0) + 0.5 * rho_ghost * (u_ghost**2 + v_ghost**2 + w_ghost**2)
-
-        # Turbulence (conservative): k -> 0 at the wall. NOTE: this used to be
-        # mirrored as -rho*k (intending a zero face-average), but every
-        # consumer decodes ghost states through to_primitive(), which clamps
-        # k = max(rho_k/rho, 0.0) - the negative mirror value was always
-        # floored back to 0 before use, so the actual boundary value is (and
-        # always effectively was) a direct k=0 Dirichlet ghost, not a mirror.
-        # omega is convected from interior (zero-gradient), not mirrored.
-        rhok_ghost = 0.0
-        rhow_ghost_sst = rho_ghost * omega
-        return np.array([rho_ghost, rhou_ghost, rhov_ghost, rhow_ghost,
-                        E_ghost, rhok_ghost, rhow_ghost_sst])
-    
     def _inlet_bc(self) -> np.ndarray:
-        """Prescribed-velocity inlet boundary condition with ramp factor.
+        """带爬升系数的定速入口边界条件。
 
-        Unlike FARFIELD, an INLET is an explicit prescribed-inflow face (the
-        user named it "inlet"), so a hard Dirichlet freestream state is the
-        physically intended condition here - there is no ambiguity about
-        flow direction to resolve.
+        与 FARFIELD 不同，INLET 是用户明确命名的强制入流面，因此这里
+        直接给定硬 Dirichlet 自由来流状态就是物理上正确的做法——不存在
+        需要判断流动方向的歧义。
 
-        Freestream turbulence (conservative form): a low k and a moderate omega
-        giving a small free-stream eddy viscosity.
+        自由来流湍流量（守恒形式）：一个较小的 k 和适中的 omega，给出
+        较小的自由来流涡粘性。
         """
         gamma = 1.4
         rho_inf = self.rho_inf
 
-        # Apply ramp factor to velocity
+        # 施加爬升系数到速度
         u_inf = self.get_current_inlet_velocity()
         p_inf = self.p_inf
 
         rhou_inf = rho_inf * u_inf
         E_inf = p_inf / (gamma - 1.0) + 0.5 * rho_inf * u_inf**2
 
-        # k_inf, omega_inf as primitive -> convert to conservative.
-        k_inf = 1.5 * (0.01 * max(u_inf, 1.0))**2   # 1% turbulence intensity
-        omega_inf = 5.0 * max(u_inf, 1.0) / 0.1     # length scale ~0.1 m
+        # k_inf、omega_inf 以原始变量形式给出 -> 转换为守恒形式。
+        k_inf = 1.5 * (0.01 * max(u_inf, 1.0))**2   # 1% 湍流强度
+        omega_inf = 5.0 * max(u_inf, 1.0) / 0.1     # 长度尺度 ~0.1 m
         return np.array([rho_inf, rhou_inf, 0.0, 0.0, E_inf,
                         rho_inf * k_inf, rho_inf * omega_inf])
-
-    def _farfield_bc(self, rho: float, u: float, v: float, w: float, p: float,
-                     k: float, omega: float, normal: np.ndarray) -> np.ndarray:
-        """Characteristic (Riemann-invariant) subsonic far-field boundary condition.
-
-        A box-shaped far-field/tunnel boundary is local inflow on the
-        front/sides but local outflow on the rear/top - imposing the full
-        freestream Dirichlet state everywhere (the previous behaviour) forces
-        mass through what are physically outflow faces and biases the
-        pressure field there, which feeds back into Cd/Cl and slows/
-        destabilizes convergence. This applies the standard 1-D
-        Riemann-invariant extrapolation along the face normal: the outgoing
-        invariant R+ is taken from the interior, the incoming invariant R-
-        is taken from the fixed freestream state, and whichever side the
-        resulting normal velocity implies (inflow vs. outflow) supplies the
-        tangential velocity and entropy (rho, p), matching the standard
-        subsonic far-field BC used in e.g. SU2/OpenFOAM's characteristic
-        far-field condition. Assumes the freestream direction is +x, matching
-        `_inlet_bc`/`_precompute_face_types`'s convention (v_inf = w_inf = 0).
-        """
-        gamma = self.gamma
-        rho_inf = self.rho_inf
-        p_inf = self.p_inf
-        u_inf = self.get_current_farfield_velocity()
-
-        rho_safe = max(rho, 1e-10)
-        c = np.sqrt(gamma * max(p, 100.0) / rho_safe)
-        c_inf = np.sqrt(gamma * p_inf / max(rho_inf, 1e-10))
-
-        vel = np.array([u, v, w])
-        vel_inf = np.array([u_inf, 0.0, 0.0])
-
-        un = float(np.dot(vel, normal))
-        un_inf = float(np.dot(vel_inf, normal))
-
-        R_plus = un + 2.0 * c / (gamma - 1.0)
-        R_minus = un_inf - 2.0 * c_inf / (gamma - 1.0)
-
-        un_b = 0.5 * (R_plus + R_minus)
-        c_b = max((gamma - 1.0) / 4.0 * (R_plus - R_minus), 1e-6)
-
-        if un_b < 0.0:
-            # Local inflow: tangential velocity & entropy come from freestream.
-            vel_tang = vel_inf - un_inf * normal
-            rho_side, p_side = rho_inf, p_inf
-            k_b = 1.5 * (0.01 * max(u_inf, 1.0))**2
-            omega_b = 5.0 * max(u_inf, 1.0) / 0.1
-        else:
-            # Local outflow: tangential velocity & entropy extrapolated from interior.
-            vel_tang = vel - un * normal
-            rho_side, p_side = rho_safe, max(p, 100.0)
-            k_b, omega_b = k, omega
-
-        s = p_side / (rho_side ** gamma)
-        rho_b = max(c_b**2 / (gamma * s), 1e-10) ** (1.0 / (gamma - 1.0))
-        p_b = rho_b * c_b**2 / gamma
-
-        vel_b = vel_tang + un_b * normal
-        u_b, v_b, w_b = vel_b
-
-        rhou_b = rho_b * u_b
-        rhov_b = rho_b * v_b
-        rhow_b = rho_b * w_b
-        E_b = p_b / (gamma - 1.0) + 0.5 * rho_b * (u_b**2 + v_b**2 + w_b**2)
-
-        return np.array([rho_b, rhou_b, rhov_b, rhow_b, E_b, rho_b * k_b, rho_b * omega_b])
-
-    def _outlet_bc(self, rho: float, u: float, v: float, w: float,
-                  p: float, k: float, omega: float, normal: np.ndarray) -> np.ndarray:
-        """Outlet boundary condition (static pressure specified, rest extrapolated).
-
-        Backflow-safe: if the local interior velocity actually points INTO
-        the domain through this outflow-only face (un < 0 - common
-        whenever a separated/vortex-shedding wake, e.g. a bluff body's,
-        hasn't settled into attached axial flow by the time it reaches the
-        outlet plane), a plain zero-gradient extrapolation of velocity and
-        density directly re-injects that reversed, wake-disturbed state
-        back into the domain with no bound - a self-reinforcing
-        instability (observed directly: density piling up to >10x
-        freestream exactly at the outlet plane on a cube case whose wake
-        reached the outlet only ~7 body-widths downstream). On backflow,
-        fall back to freestream density and zero velocity - a safe,
-        bounded "stagnant reservoir" assumption - instead of extrapolating
-        the disturbed interior state.
-        """
-        gamma = 1.4
-        p_outlet = self.p_inf
-
-        un = u * normal[0] + v * normal[1] + w * normal[2]
-        if un < 0.0:
-            rho_g, u_g, v_g, w_g = self.rho_inf, 0.0, 0.0, 0.0
-            # The "stagnant reservoir" assumption above only reset density/
-            # velocity/pressure - k/omega were left as the raw interior
-            # (wake-disturbed) values, silently re-injecting the wake's own
-            # turbulence signature through the one channel the density/
-            # velocity reset was specifically added to close off. A
-            # reservoir has freestream turbulence, not wake turbulence -
-            # same 1% intensity / 0.1 m length-scale formula _inlet_bc uses.
-            u_ref = max(self.base_inlet_velocity, 1.0)
-            k_g = 1.5 * (0.01 * u_ref) ** 2
-            omega_g = 5.0 * u_ref / 0.1
-        else:
-            rho_g, u_g, v_g, w_g = rho, u, v, w
-            k_g, omega_g = k, omega
-
-        rhou = rho_g * u_g
-        rhov = rho_g * v_g
-        rhow = rho_g * w_g
-        E = p_outlet / (gamma - 1.0) + 0.5 * rho_g * (u_g**2 + v_g**2 + w_g**2)
-
-        return np.array([rho_g, rhou, rhov, rhow, E, rho_g * k_g, rho_g * omega_g])
-
-    def _symmetry_bc(self, rho: float, u: float, v: float, w: float,
-                    E: float, k: float, omega: float, normal: np.ndarray) -> np.ndarray:
-        """Symmetry boundary condition (mirror normal velocity)."""
-        u_n = u * normal[0] + v * normal[1] + w * normal[2]
-
-        u_ghost = u - 2.0 * u_n * normal[0]
-        v_ghost = v - 2.0 * u_n * normal[1]
-        w_ghost = w - 2.0 * u_n * normal[2]
-
-        rhou_ghost = rho * u_ghost
-        rhov_ghost = rho * v_ghost
-        rhow_ghost = rho * w_ghost
-
-        return np.array([rho, rhou_ghost, rhov_ghost, rhow_ghost, E,
-                        rho * k, rho * omega])
-    
-    def _get_face_boundary_type(self, face_idx: int) -> str:
-        """Get boundary type for a face (cached O(1) lookup)."""
-        if not self.face_extractor.boundary_flags[face_idx]:
-            return "INTERIOR"
-        if self._face_types is None:
-            self._precompute_face_types()
-        return self._face_types.get(int(face_idx), "WALL")
 
     @staticmethod
     def _classify(name_upper: str) -> str:
@@ -322,26 +104,31 @@ class BoundaryConditionHandler:
         elif "SYMMETRY" in name_upper:
             return "SYMMETRY"
         elif "TUNNEL" in name_upper:
-            # A named "tunnel" boundary is a physical (if frictionless) duct
-            # wall - zero-penetration, free-slip - not an open domain
-            # boundary. Reuses the SYMMETRY ghost state (mirror the normal
-            # velocity component, no viscous shear enforced), which is
-            # mathematically identical to a slip wall for an inviscid-wall
-            # treatment. Previously grouped with FARFIELD (an open,
-            # characteristic boundary letting mass freely cross), which is
-            # the wrong physics for an actual tunnel wall and let flow
-            # leak through what should have been a solid boundary.
+            # 命名为 "tunnel" 的边界是一个物理（即便无摩擦）风洞壁面——
+            # 零穿透、自由滑移——而不是开放的域边界。这里复用 SYMMETRY 的
+            # ghost 状态（镜像法向速度分量，不施加粘性剪切），对无粘壁面
+            # 处理而言与滑移壁面在数学上是等价的。以前这个分类被归到
+            # FARFIELD（一个开放的、特征边界，允许质量自由穿越），这对
+            # 真实风洞壁面而言是错误的物理，会让流动从本该是固壁的地方
+            # 泄漏出去。
             return "SYMMETRY"
         elif "FARFIELD" in name_upper:
             return "FARFIELD"
         return "WALL"
 
     def _precompute_face_types(self) -> None:
-        """Build a face_idx -> boundary-type map once (was O(N^2) per call).
+        """一次性构建 face_idx -> 边界类型 的映射（以前是每次调用 O(N^2)）。
 
-        A cell -> type lookup is built from the boundary groups, then applied to
-        each boundary face via its owner cell.  This removes the per-face,
-        per-iteration linear scan over every boundary group.
+        先从边界组构建 单元 -> 类型 的查找表，再通过每个边界面的 owner
+        单元套用到该面上。这样就不用在每次迭代、每个面上都对所有边界组
+        做线性扫描。
+
+        同时缓存 `self._btypes_array`，这是 `build_boundary_states` 每次
+        调用都需要的同一份逐边界面类型数组，按固定的
+        `np.where(boundary_flags)[0]` 顺序排列——网格的 boundary_flags 在
+        求解过程中不会变，所以这个数组只需要算一次，而不必像以前那样
+        每次调用 build_boundary_states（每个外层迭代 2-3 次，每个 RK
+        阶段一次）都靠 Python `.get()` 循环重建。
         """
         cell_type: Dict[int, str] = {}
         for boundary_name in self.grid_data.boundaries.boundary_names:
@@ -351,38 +138,43 @@ class BoundaryConditionHandler:
 
         flags = self.face_extractor.boundary_flags
         conn = self.face_extractor.face_connectivity
+        bfaces = np.where(flags)[0]
         self._face_types = {}
-        for face_idx in np.where(flags)[0]:
+        btypes = np.empty(len(bfaces), dtype=object)
+        for i, face_idx in enumerate(bfaces):
             owner = int(conn[face_idx, 0])
-            self._face_types[int(face_idx)] = cell_type.get(owner, "WALL")
+            btype = cell_type.get(owner, "WALL")
+            self._face_types[int(face_idx)] = btype
+            btypes[i] = btype
+        self._btypes_array = btypes
 
     def build_boundary_states(self, solution: np.ndarray) -> np.ndarray:
-        """Return ghost conservative states for every face (n_faces, 7).
+        """返回每个面的 ghost 守恒状态（n_faces, 7）。
 
-        Interior-face rows are left as zeros (unused by the residual); boundary
-        rows hold the ghost state from :meth:`apply_boundary_condition`.
-        
-        OPTIMIZED: Vectorized implementation replacing Python loop over boundary faces.
-        Processes all boundary faces grouped by type for maximum performance.
+        内部面对应的行保持为零（残差不会用到）；边界面的行是
+        :meth:`apply_boundary_condition` 给出的 ghost 状态。
+
+        已优化：用向量化实现取代了原来遍历边界面的 Python 循环。按类型
+        对所有边界面分组处理，追求最高性能。
         """
         n_faces = len(self.face_extractor.boundary_flags)
         states = np.zeros((n_faces, 7), dtype=np.float64)
-        
-        # Get all boundary face indices at once
+
+        # 一次性取出所有边界面索引
         bface_mask = self.face_extractor.boundary_flags
         if not np.any(bface_mask):
             return states
-        
+
         bfaces = np.where(bface_mask)[0]
         n_bfaces = len(bfaces)
-        
-        # Batch extract owner cell indices for all boundary faces
+
+        # 批量提取所有边界面的 owner 单元索引
         owner_indices = self.face_extractor.face_connectivity[bfaces, 0].astype(np.int32)
-        
-        # Batch extract interior conservative states for owner cells
+
+        # 批量提取 owner 单元的内部守恒状态
         U_interior = solution[owner_indices]  # (n_bfaces, 7)
-        
-        # Decompose to primitive variables for all boundary faces at once
+
+        # 一次性把所有边界面分解为原始变量
         rho = np.maximum(U_interior[:, 0], 1e-9)
         vel = U_interior[:, 1:4] / rho[:, None]  # (n_bfaces, 3)
         u, v, w = vel[:, 0], vel[:, 1], vel[:, 2]
@@ -390,32 +182,31 @@ class BoundaryConditionHandler:
         p = np.maximum((self.gamma - 1.0) * (U_interior[:, 4] - ke), 100.0)
         k = np.maximum(U_interior[:, 5] / rho, 0.0)
         omega = np.maximum(U_interior[:, 6] / rho, 1e-6)
-        
-        # Get face normals for all boundary faces
+
+        # 取出所有边界面的法向量
         normals = self.face_extractor.face_normals[bfaces]  # (n_bfaces, 3)
-        
-        # Get boundary types for all faces (vectorized lookup)
+
+        # 每个面的边界类型，已在 _precompute_face_types 里预计算好（网格
+        # 的 boundary_flags/owner 在求解过程中不变，所以与上面其它量不同，
+        # 这个数组不需要每次调用都重建）。
         if self._face_types is None:
             self._precompute_face_types()
-        
-        # Create mapping from face index to array position
-        face_to_idx = {int(f): i for i, f in enumerate(bfaces)}
-        btypes = np.array([self._face_types.get(int(f), "WALL") for f in bfaces])
-        
-        # Process each boundary type separately (vectorized within each group)
+        btypes = self._btypes_array
+
+        # 逐个边界类型分组处理（每组内部是向量化的）
         unique_types = np.unique(btypes)
-        
+
         for btype in unique_types:
             type_mask = (btypes == btype)
             if not np.any(type_mask):
                 continue
-            
-            # Indices within bfaces array for this boundary type
+
+            # 该类型在 bfaces 数组内的索引
             type_indices_in_bfaces = np.where(type_mask)[0]
-            # Actual face indices
+            # 实际的面索引
             type_face_indices = bfaces[type_indices_in_bfaces]
-            
-            # Extract data for this boundary type
+
+            # 取出该边界类型的数据
             rho_t = rho[type_mask]
             u_t, v_t, w_t = u[type_mask], v[type_mask], w[type_mask]
             p_t = p[type_mask]
@@ -423,15 +214,15 @@ class BoundaryConditionHandler:
             omega_t = omega[type_mask]
             normals_t = normals[type_mask]
             U_int_t = U_interior[type_indices_in_bfaces]
-            
-            # Apply boundary condition based on type
+
+            # 按类型应用边界条件
             if btype in ["WALL", "GROUND"]:
                 ghost_states = self._wall_bc_vectorized(
-                    rho_t, u_t, v_t, w_t, p_t, k_t, omega_t, 
+                    rho_t, u_t, v_t, w_t, p_t, k_t, omega_t,
                     normals_t, btype
                 )
             elif btype == "INLET":
-                # Prescribed inflow: fixed freestream Dirichlet state.
+                # 强制入流：固定的自由来流 Dirichlet 状态。
                 n_type = np.sum(type_mask)
                 ghost_states = np.tile(self._inlet_bc(), (n_type, 1))
             elif btype == "FARFIELD":
@@ -443,84 +234,95 @@ class BoundaryConditionHandler:
                     rho_t, u_t, v_t, w_t, p_t, k_t, omega_t, normals_t
                 )
             elif btype == "SYMMETRY":
-                # Need total energy E for symmetry BC
+                # 对称边界条件需要总能量 E
                 E_t = U_int_t[:, 4]
                 ghost_states = self._symmetry_bc_vectorized(
                     rho_t, u_t, v_t, w_t, E_t, k_t, omega_t, normals_t
                 )
             else:
-                # Default: copy interior state
+                # 默认：直接复制内部状态
                 ghost_states = U_int_t.copy()
-            
-            # Assign ghost states to output array
+
+            # 把 ghost 状态写回输出数组
             states[type_face_indices] = ghost_states
-        
+
         return states
-    
+
     def _wall_bc_vectorized(self, rho: np.ndarray, u: np.ndarray, v: np.ndarray,
                            w: np.ndarray, p: np.ndarray, k: np.ndarray,
                            omega: np.ndarray, normals: np.ndarray,
                            wall_type: str = "WALL") -> np.ndarray:
-        """Vectorized wall boundary condition with numerical stability protection."""
+        """向量化的壁面边界条件，带数值稳定性保护。"""
         gamma = self.gamma
-        
-        # === NUMERICAL STABILITY: Clip velocity to prevent blow-up ===
-        MAX_VELOCITY = 1e4  # 10 km/s physical upper bound
+
+        # === 数值稳定性：限幅速度以防止爆炸 ===
+        MAX_VELOCITY = 1e4  # 10 km/s 物理上界
         vel_mag = np.sqrt(u**2 + v**2 + w**2)
         clip_factor = np.minimum(1.0, MAX_VELOCITY / np.maximum(vel_mag, 1e-12))
-        
+
         u = u * clip_factor
         v = v * clip_factor
         w = w * clip_factor
-        
-        # Recompute kinetic energy with clipped velocities
+
+        # 用限幅后的速度重新计算动能
         ke = 0.5 * rho * (u**2 + v**2 + w**2)
-        
-        # Ensure pressure positivity and reasonable bounds
+
+        # 保证压力为正且在合理范围内
         p = np.maximum(p, 100.0)
-        p = np.minimum(p, 1e8)  # Prevent extreme pressure
-        
-        # Target wall velocity
+        p = np.minimum(p, 1e8)  # 防止极端压力
+
+        # 目标壁面速度
         u_wall, v_wall, w_wall = 0.0, 0.0, 0.0
         if wall_type == "GROUND":
             u_wall = self.get_current_farfield_velocity()
-        
-        # Ghost = 2*wall - interior (mirror reflection)
+
+        # Ghost = 2*wall - interior（镜像反射）
         u_ghost = 2.0 * u_wall - u
         v_ghost = 2.0 * v_wall - v
         w_ghost = 2.0 * w_wall - w
-        
-        # Clip ghost velocities as well
+
+        # 同样限幅 ghost 速度
         vel_ghost_mag = np.sqrt(u_ghost**2 + v_ghost**2 + w_ghost**2)
         ghost_clip = np.minimum(1.0, MAX_VELOCITY / np.maximum(vel_ghost_mag, 1e-12))
         u_ghost *= ghost_clip
         v_ghost *= ghost_clip
         w_ghost *= ghost_clip
-        
+
         rho_ghost = rho
         rhou_ghost = rho_ghost * u_ghost
         rhov_ghost = rho_ghost * v_ghost
         rhow_ghost = rho_ghost * w_ghost
-        
-        # Compute ghost energy with clipped values
+
+        # 用限幅后的值计算 ghost 能量
         E_ghost = p / (gamma - 1.0) + 0.5 * rho_ghost * (u_ghost**2 + v_ghost**2 + w_ghost**2)
-        
-        # Turbulence: k -> 0 at wall (direct Dirichlet ghost - see the scalar
-        # _wall_bc for why mirroring doesn't survive the to_primitive clamp),
-        # omega extrapolated from interior.
+
+        # 湍流量：壁面处 k -> 0（直接给 Dirichlet ghost 值——若用
+        # -rho*k 做镜像，也活不过 to_primitive 里 k = max(rho_k/rho, 0)
+        # 的截断，所以干脆直接写），omega 从内部值外推。
         rhok_ghost = np.zeros_like(rho_ghost)
         rhow_ghost_sst = rho_ghost * omega
-        
+
         return np.column_stack([
             rho_ghost, rhou_ghost, rhov_ghost, rhow_ghost,
             E_ghost, rhok_ghost, rhow_ghost_sst
         ])
-    
+
     def _farfield_bc_vectorized(self, rho: np.ndarray, u: np.ndarray, v: np.ndarray,
                                w: np.ndarray, p: np.ndarray, k: np.ndarray,
                                omega: np.ndarray, normals: np.ndarray) -> np.ndarray:
-        """Vectorized characteristic far-field BC - see `_farfield_bc` for the
-        per-face derivation (Riemann-invariant inflow/outflow split)."""
+        """特征（Riemann 不变量）亚声速远场边界条件。
+
+        一个箱形远场/风洞边界，前面/侧面是局部入流，后面/顶面是局部
+        出流——在所有面上都强加完整的自由来流 Dirichlet 状态（以前的
+        做法）会把质量强行压过本该是出流的那些面，使那里的压力场产生
+        偏差，进而反馈进 Cd/Cl 并拖慢/削弱收敛。这里改用标准的一维
+        Riemann 不变量沿面法向外推：出行的不变量 R+ 取自内部，入行的
+        不变量 R- 取自固定的自由来流状态，算出的法向速度指示哪一侧
+        (入流还是出流) 决定切向速度和熵 (rho, p) 由谁提供，与 SU2/OpenFOAM
+        等常见的亚声速特征远场边界条件做法一致。假设自由来流方向为 +x，
+        与 `_inlet_bc`/`_precompute_face_types` 的约定一致
+        （v_inf = w_inf = 0）。
+        """
         gamma = self.gamma
         rho_inf = self.rho_inf
         p_inf = self.p_inf
@@ -533,7 +335,7 @@ class BoundaryConditionHandler:
 
         nx, ny, nz = normals[:, 0], normals[:, 1], normals[:, 2]
         un = u * nx + v * ny + w * nz
-        un_inf = u_inf * nx  # freestream direction is +x: v_inf = w_inf = 0
+        un_inf = u_inf * nx  # 自由来流方向为 +x：v_inf = w_inf = 0
 
         R_plus = un + 2.0 * c / (gamma - 1.0)
         R_minus = un_inf - 2.0 * c_inf / (gamma - 1.0)
@@ -579,8 +381,18 @@ class BoundaryConditionHandler:
     def _outlet_bc_vectorized(self, rho: np.ndarray, u: np.ndarray, v: np.ndarray,
                              w: np.ndarray, p: np.ndarray, k: np.ndarray,
                              omega: np.ndarray, normals: np.ndarray) -> np.ndarray:
-        """Vectorized outlet boundary condition - see the scalar `_outlet_bc`
-        for why the backflow clamp is needed."""
+        """出口边界条件（给定静压，其余外推）。
+
+        对回流安全：如果局部内部速度实际上指向域内、穿过这个"只应出流"
+        的面（un < 0——每当分离/涡脱落尾迹（例如钝体的尾迹）在到达出口
+        面之前还没稳定成附着轴向流动时，这种情况很常见），单纯的零梯度
+        外推密度和速度会把这个反向的、被尾迹扰动过的状态原样、无界地
+        重新注入域内——这是一种自我强化的不稳定性（曾直接观测到：一个
+        方块算例里，尾迹到出口平面只有约 7 个车身宽度远，密度就在出口
+        平面处堆积到自由来流的 10 倍以上）。遇到回流时，退回到自由来流
+        密度和零速度——一种安全、有界的"静止储槽"假设——而不是外推那个
+        被扰动的内部状态。
+        """
         gamma = self.gamma
         p_outlet = self.p_inf
 
@@ -592,8 +404,11 @@ class BoundaryConditionHandler:
         v_g = np.where(backflow, 0.0, v)
         w_g = np.where(backflow, 0.0, w)
 
-        # See the scalar `_outlet_bc` for why backflow also resets k/omega
-        # to freestream turbulence, not just density/velocity/pressure.
+        # 上面的"静止储槽"假设只重置了密度/速度/压力——k/omega 也必须
+        # 一起重置，否则回流会通过唯一没被这个重置机制堵住的通道，悄悄
+        # 把尾迹自己的湍流特征重新灌回域内。储槽应该带有自由来流湍流，
+        # 而不是尾迹湍流——用的是与 _inlet_bc 相同的 1% 强度 / 0.1 m
+        # 长度尺度公式。
         u_ref = max(self.base_inlet_velocity, 1.0)
         k_inf = 1.5 * (0.01 * u_ref) ** 2
         omega_inf = 5.0 * u_ref / 0.1
@@ -606,23 +421,23 @@ class BoundaryConditionHandler:
         E = p_outlet / (gamma - 1.0) + 0.5 * rho_g * (u_g**2 + v_g**2 + w_g**2)
 
         return np.column_stack([rho_g, rhou, rhov, rhow, E, rho_g * k_g, rho_g * omega_g])
-    
+
     def _symmetry_bc_vectorized(self, rho: np.ndarray, u: np.ndarray, v: np.ndarray,
                                w: np.ndarray, E: np.ndarray, k: np.ndarray,
                                omega: np.ndarray, normal: np.ndarray) -> np.ndarray:
-        """Vectorized symmetry boundary condition."""
-        # Normal velocity component
+        """向量化的对称边界条件。"""
+        # 法向速度分量
         u_n = u * normal[:, 0] + v * normal[:, 1] + w * normal[:, 2]
-        
-        # Mirror normal velocity: u_ghost = u - 2*u_n*n
+
+        # 镜像法向速度：u_ghost = u - 2*u_n*n
         u_ghost = u - 2.0 * u_n * normal[:, 0]
         v_ghost = v - 2.0 * u_n * normal[:, 1]
         w_ghost = w - 2.0 * u_n * normal[:, 2]
-        
+
         rhou_ghost = rho * u_ghost
         rhov_ghost = rho * v_ghost
         rhow_ghost = rho * w_ghost
-        
+
         return np.column_stack([
             rho, rhou_ghost, rhov_ghost, rhow_ghost, E,
             rho * k, rho * omega

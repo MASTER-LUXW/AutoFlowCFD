@@ -1,27 +1,21 @@
-"""Stage B (BL side): targeted BL-thickness-cap regeneration parameter.
+"""Stage B（BL 侧）：定向的 BL 厚度封顶再生成参数。
 
-compute_bl_thickness_limit_override is a pure function that turns a set of
-still-bad BL-region cells (after Stage A smoothing, mesh_repair.py) into a
-targeted regeneration parameter - a local BL thickness cap at specific
-surface vertices - for the caller (mesh_background.generate_hybrid_mesh)
-to feed into a second, targeted regeneration pass. Safe *because* it feeds
-back into the exact same, already-correct generation path rather than
-attempting a hand-rolled partial/local remesh.
+compute_bl_thickness_limit_override 是一个纯函数，把 Stage A 平滑之后仍然
+不达标的一批 BL 区域单元，转换成一个定向再生成参数——在特定表面顶点上的
+局部 BL 厚度上限——交给调用方（mesh_background.generate_hybrid_mesh）喂进
+第二次定向再生成。之所以安全，正是因为它反馈回的是同一条已经验证正确的
+生成路径，而不是自己手搓一个局部/部分重新铺网的实现。
 
-A previous core-side counterpart to this (region-based local refinement)
-was removed after being found net-harmful in practice: tetgen's per-region
-refinement does not confine itself to the small local footprint of an
-added region when a domain-wide grading region is also active in the same
-connected volume, so a handful of small local repair regions could balloon
-the whole core fill several-fold without actually improving quality there
-(see mesh_background.py's own history). Stage B' (mesh_repair_cavity.py)
-is the genuine local-remesh replacement for that core-side case; this
-BL-side thickness cap has no equivalent failure mode (it only shortens BL
-layers locally, never expands anything) and remains unchanged.
+之前 core 侧有一个对应方案（基于区域的局部细化），已经因为实际效果净负面
+而被移除：当同一个连通体积里还有一个域级别的分级区域在起作用时，tetgen
+按区域细化不会把自己限制在新增区域的小范围局部footprint内，于是几个小的
+局部修复区域就可能把整个 core 填充规模成倍吹大，而实际质量并没有改善
+（见 mesh_background.py 自己的历史记录）。Stage B'（mesh_repair_cavity.py）
+才是 core 侧那种情况真正的局部重铺网替代方案；这里的 BL 侧厚度封顶没有
+同类失效模式（它只会局部缩短 BL 层，从不扩张任何东西），所以保持不变。
 
-Split out of mesh_repair.py purely to keep file size down - re-exported
-from there (see the bottom of mesh_repair.py) so existing callers keep
-working unchanged.
+从 mesh_repair.py 拆出，纯粹为了控制文件行数——在 mesh_repair.py 底部
+重新转出（见该文件末尾），让现有调用方不受影响。
 """
 
 from typing import List, Optional, Tuple, TYPE_CHECKING

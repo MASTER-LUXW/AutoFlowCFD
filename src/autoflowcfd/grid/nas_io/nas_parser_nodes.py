@@ -1,6 +1,6 @@
-"""NAS parser node extraction.
+"""NAS 解析器：节点（node）提取。
 
-Provides streaming node parsing functionality for Nastran format files.
+流式解析 Nastran 格式文件里的 GRID 节点卡片。
 """
 
 import re

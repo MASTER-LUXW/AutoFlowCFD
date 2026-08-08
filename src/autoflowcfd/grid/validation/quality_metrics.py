@@ -1,11 +1,9 @@
-"""Pure per-cell geometric quality metric computations.
+"""纯粹的逐单元几何质量指标计算。
 
-Vectorized (no Python-level per-cell loop) functions for the raw arrays
-behind MeshQualityValidator's (quality_validator.py) aggregate statistics -
-split out of that module so the check/orchestration logic there isn't
-interleaved with these self-contained geometric formulas. Every function
-here is a pure function of (nodes, cells): no mesh-generation or repair
-concepts, no state.
+向量化（不含 Python 级逐单元循环）函数，是 MeshQualityValidator
+（quality_validator.py）汇总统计背后的原始数组来源——从该模块拆分出来，
+让检查/编排逻辑不与这些自包含的几何公式交织在一起。这里每个函数都是
+(nodes, cells) 的纯函数：不涉及网格生成或修复的概念，也没有状态。
 """
 
 import numpy as np

@@ -1,11 +1,10 @@
-"""Steady-state solver using Flux Reconstruction scheme.
+"""基于 Flux Reconstruction 格式的稳态求解器。
 
-This module implements the steady-state RANS solver coordinator,
-orchestrating FVM algorithms and solver loop.
+本模块实现稳态 RANS 求解器的协调器，编排 FVM 算法与求解循环。
 
 Key Components:
-    - SteadyResult: Container for steady simulation results
-    - FRSolver: Main steady-state solver class (coordinator)
+    - SteadyResult: 稳态仿真结果容器
+    - FRSolver: 稳态求解器主类（协调器）
 """
 
 import time
@@ -20,17 +19,17 @@ from .time_integration import TimeIntegrator, TimeIntegrationScheme
 from .backend import create_backend
 from ..boundary.manager import BoundaryManager
 from .fvm_core import FVMFaceExtractor
-from .fvm_gradients import FaceGeometry
-from .fvm_viscous_residual import ViscousRANSResidual, estimate_wall_distance
 from .bc_handler import BoundaryConditionHandler
 from .aero_coeffs import AeroCoefficientCalculator
 from .checkpoint import CheckpointManager
+from .solver_steady_setup import SteadySetupMixin
+from .solver_steady_cfl import CFLTrendAdjustMixin
 
 
 @dataclass
 class SteadyResult:
-    """Container for steady-state simulation results."""
-    
+    """稳态仿真结果容器。"""
+
     converged: bool
     iterations: int
     final_residual: float
@@ -39,52 +38,60 @@ class SteadyResult:
     residuals_history: List[float] = field(default_factory=list)
     solution_final: Optional[np.ndarray] = None
     checkpoint_path: Optional[str] = None
-    
+
     def get_mean_coefficients(self) -> Dict[str, float]:
-        """Compute mean aerodynamic coefficients."""
+        """计算平均气动系数。"""
         if len(self.cd_history) == 0:
             return {"Cd": 0.0, "Cl": 0.0}
-        
+
         n_samples = max(1, len(self.cd_history) // 10)
         cd_mean = float(np.mean(self.cd_history[-n_samples:]))
         cl_mean = float(np.mean(self.cl_history[-n_samples:]))
-        
+
         return {"Cd": cd_mean, "Cl": cl_mean}
-    
+
     def get_convergence_rate(self) -> float:
-        """Compute average convergence rate."""
+        """计算平均收敛速率。"""
         if len(self.residuals_history) < 2:
             return 0.0
-        
+
         initial_residual = self.residuals_history[0]
         final_residual = self.residuals_history[-1]
-        
+
         if initial_residual <= 0:
             return 0.0
-        
+
         total_reduction = np.log(initial_residual / max(final_residual, 1e-16))
         return total_reduction / self.iterations
 
 
-class FRSolver:
-    """Flux Reconstruction steady-state solver coordinator.
-    
-    Orchestrates FVM algorithms, boundary conditions, and solver loop.
+class FRSolver(SteadySetupMixin, CFLTrendAdjustMixin):
+    """Flux Reconstruction 稳态求解器协调器。
+
+    编排 FVM 算法、边界条件和求解循环。
+
+    `_prepare_geometry_and_residual`（solve() 迭代循环开始前的一次性
+    准备工作：面几何、壁面距离、ViscousRANSResidual 构造）在
+    `solver_steady_setup.SteadySetupMixin` 里；`_adjust_cfl_by_trend`
+    （循环内按残差趋势调整 CFL）在 `solver_steady_cfl.CFLTrendAdjustMixin`
+    里。两者都纯粹是为了控制单文件行数拆出去的，不是独立的概念层。
     """
-    
+
     def __init__(self, grid_data: Union[GridData, VolumeMeshData], config: SteadyConfig):
-        """Initialize steady-state solver."""
+        """初始化稳态求解器。"""
         self.grid_data = grid_data
         self.config = config
 
         logger.info(f"Initializing FRSolver")
         logger.info(f"  Grid: {grid_data.node_count} nodes, {grid_data.cell_count} cells")
 
-        # Backend selection. NOTE: the actual residual (ViscousRANSResidual)
-        # is a fixed pure-NumPy CPU implementation - it does not currently
-        # read from or dispatch through this backend object at all, so
-        # --backend gpu silently runs on CPU. Warn loudly rather than let
-        # a user believe they're getting GPU acceleration they aren't.
+        # Backend 选择。ViscousRANSResidual 的热点循环（AUSM+up 通量、
+        # 粘性通量、SST 涡粘性/源项、Green-Gauss 梯度）会自动分发到 Numba
+        # CPU kernel。--backend gpu 会让它额外尝试 CUDA kernel
+        # （fvm_*_kernels_gpu.py）——这些 kernel 在本项目里**从未在真实
+        # GPU 硬件上运行过**（开发时没有可用 GPU），若运行时实际没有
+        # CUDA 设备会带警告退回 CPU 路径。在真实硬件上跑过并做数值校验
+        # 之前，应把 --backend gpu 当作实验性/未验证功能对待。
         try:
             self.backend = create_backend(
                 backend_type=config.backend.value,
@@ -94,12 +101,14 @@ class FRSolver:
         except Exception as e:
             raise RuntimeError(f"Failed to initialize backend: {e}")
 
-        if config.backend == BackendType.GPU:
+        self._use_gpu_residual = config.backend == BackendType.GPU
+        if self._use_gpu_residual:
             logger.warning(
-                "--backend gpu was requested, but the steady RANS residual "
-                "(ViscousRANSResidual) is not yet wired to any GPU backend - "
-                "the solve will run on CPU (NumPy) regardless. This is a "
-                "known gap, not a silent failure: see backend/gpu_backend.py."
+                "--backend gpu was requested: the RANS residual will attempt "
+                "to dispatch to CUDA kernels (fvm_*_kernels_gpu.py). These "
+                "kernels have not been validated on real GPU hardware in "
+                "this project - if no CUDA device is available at runtime "
+                "the solve transparently falls back to the CPU (Numba) path."
             )
         if config.order != 2:
             logger.warning(
@@ -115,33 +124,32 @@ class FRSolver:
                 "model - only 'sst_kw' (on) or 'none' (off) currently apply."
             )
 
-        # Time integrator (explicit SSP-RK3 in pseudo-time).
+        # 时间积分器（伪时间上的显式 SSP-RK3）。
         self.time_integrator = TimeIntegrator(
             scheme=TimeIntegrationScheme.SSP_RK3,
             dt=1e-4,
             cfl_target=config.cfl_init,
         )
 
-        # Boundary manager
+        # 边界管理器
         self.boundary_manager = BoundaryManager(grid_data.boundaries)
 
-        # Solution vector
+        # 解向量
         self.solution = None
 
-        # Convergence history restored from a checkpoint on resume (set by
-        # the CLI before calling solve() - see resume path in
-        # cli/solve_commands.py). Used by solve() to restore the adaptive
-        # CFL state (cfl_history) instead of always resetting to
-        # config.cfl_init on resume.
+        # 恢复求解时从 checkpoint 恢复的收敛历史（由 CLI 在调用 solve()
+        # 之前设置——见 cli/solve_commands.py 的恢复路径）。solve() 用它
+        # 来恢复自适应 CFL 状态（cfl_history），而不是每次恢复求解都
+        # 重置回 config.cfl_init。
         self.convergence_history = None
 
-        # FVM face data holder (build_from_tetrahedra() is not used - see
-        # solve(): face data comes from grid_data.ensure_faces_exist(), the
-        # Numba-accelerated path; this instance is kept only as the shared
-        # data-holder that bc_handler/aero_calculator read face arrays from).
+        # FVM 面数据持有者（不使用 build_from_tetrahedra()——见 solve()：
+        # 面数据来自 grid_data.ensure_faces_exist()，即 Numba 加速路径；
+        # 这个实例只是作为共享数据容器，供 bc_handler/aero_calculator
+        # 从中读取面数组）。
         self.face_extractor = FVMFaceExtractor()
 
-        # Helper modules
+        # 辅助模块
         self.bc_handler = BoundaryConditionHandler(
             grid_data, self.face_extractor,
             rho_inf=config.rho_inf, p_inf=config.p_inf,
@@ -150,8 +158,8 @@ class FRSolver:
             grid_data, self.face_extractor,
             rho_inf=config.rho_inf, vel_inf=config.vel_inf,
         )
-        
-        # Checkpoint manager
+
+        # Checkpoint 管理器
         self.checkpoint_manager = CheckpointManager(
             config=config,
             output_dir=config.output_dir,
@@ -159,65 +167,64 @@ class FRSolver:
         )
 
         logger.info("FRSolver initialization complete")
-    
+
     def _get_cell_volumes(self) -> np.ndarray:
-        """Get cell volumes."""
+        """获取单元体积。"""
         if isinstance(self.grid_data, VolumeMeshData):
             return self.grid_data.get_cell_volumes()
         else:
             return self.cell_volumes
-    
+
     def _initialize_solution(self):
-        """Initialize solution field with freestream conditions.
-        
-        Uses freestream velocity as initial condition for numerical stability.
-        Starting from rest can cause instability in HLLC flux computation.
-        
-        Solution variables (conservative form):
+        """用自由来流条件初始化解场。
+
+        用自由来流速度作为初始条件，保证数值稳定性。从静止状态起步
+        可能导致 HLLC 通量计算不稳定。
+
+        解变量（守恒形式）：
             [rho, rhou, rhov, rhow, E, k, omega]
         """
         logger.info("Initializing solution field...")
-        
+
         n_cells = self.grid_data.cell_count
 
-        # Freestream conditions for stable initialization (single source of
-        # truth: self.config, shared with boundary conditions and Cd/Cl
-        # normalization so all three always agree).
+        # 稳定初始化用的自由来流条件（单一数据源：self.config，与边界
+        # 条件、Cd/Cl 归一化共用，保证三者始终一致）。
         rho_0 = self.config.rho_inf
-        u_0 = self.config.vel_inf     # use freestream velocity for stability
+        u_0 = self.config.vel_inf     # 用自由来流速度以保证稳定性
         v_0 = 0.0
         w_0 = 0.0
         p_0 = self.config.p_inf
         gamma = 1.4
-        
-        # Compute conservative variables
+
+        # 计算守恒变量
         rhou_0 = rho_0 * u_0
         rhov_0 = rho_0 * v_0
         rhow_0 = rho_0 * w_0
         E_0 = p_0 / (gamma - 1.0) + 0.5 * rho_0 * (u_0**2 + v_0**2 + w_0**2)
-        
-        # Turbulence field: conservative (rho*k, rho*omega).
-        # Freestream: 1% intensity, length scale ~0.1 m.
+
+        # 湍流场：守恒形式 (rho*k, rho*omega)。
+        # 自由来流：1% 湍流强度，长度尺度 ~0.1 m。
         u_ref = max(u_0, 1.0)
         k_0 = 1.5 * (0.01 * u_ref)**2
         omega_0 = 5.0 * u_ref / 0.1
 
-        # Allocate and initialize solution array
+        # 分配并初始化解数组
         self.solution = np.zeros((n_cells, 7), dtype=np.float64)
-        self.solution[:, 0] = rho_0   # density
-        self.solution[:, 1] = rhou_0  # x-momentum
-        self.solution[:, 2] = rhov_0  # y-momentum
-        self.solution[:, 3] = rhow_0  # z-momentum
-        self.solution[:, 4] = E_0     # total energy
-        self.solution[:, 5] = rho_0 * k_0      # conservative turbulent KE
-        self.solution[:, 6] = rho_0 * omega_0  # conservative specific dissipation
+        self.solution[:, 0] = rho_0   # 密度
+        self.solution[:, 1] = rhou_0  # x 方向动量
+        self.solution[:, 2] = rhov_0  # y 方向动量
+        self.solution[:, 3] = rhow_0  # z 方向动量
+        self.solution[:, 4] = E_0     # 总能
+        self.solution[:, 5] = rho_0 * k_0      # 守恒形式湍动能
+        self.solution[:, 6] = rho_0 * omega_0  # 守恒形式比耗散率
 
         logger.info(f"Solution initialized: {n_cells} cells")
         logger.info(f"  Initial conditions: rho={rho_0:.3f} kg/m^3, u={u_0:.1f} m/s, p={p_0:.0f} Pa")
         logger.info(f"  Turbulence: k={k_0:.4e} m^2/s^2, omega={omega_0:.2f} 1/s")
 
     def _setup_boundary_conditions(self):
-        """Setup boundary conditions."""
+        """配置边界条件。"""
         logger.info("Setting up boundary conditions...")
 
         boundary_names = self.grid_data.boundaries.boundary_names
@@ -228,7 +235,7 @@ class FRSolver:
             name_upper = boundary_name.upper()
 
             if "INLET" in name_upper or "INFLOW" in name_upper:
-                # Store base velocity for ramping (now handled by bc_handler)
+                # 存储基准速度供爬升机制使用（现在由 bc_handler 处理）
                 self.bc_handler.base_inlet_velocity = vel_inf
                 self.boundary_manager.add_bc(
                     boundary_name, bc_type="INLET",
@@ -242,10 +249,10 @@ class FRSolver:
                 self.bc_handler.base_farfield_velocity = vel_inf
                 self.boundary_manager.add_bc(boundary_name, bc_type="GROUND", moving_wall_velocity=vel_inf)
             elif "TUNNEL" in name_upper:
-                # A named "tunnel" boundary is a physical (frictionless)
-                # duct wall, not an open domain boundary - see
-                # bc_handler.py's _classify for the matching live-path
-                # reclassification (SYMMETRY = free-slip, zero-penetration).
+                # 命名为 "tunnel" 的边界是一个物理（无摩擦）风洞壁面，
+                # 不是开放的域边界——对应 bc_handler.py 的 _classify 里
+                # 实际求解路径采用的同一种重新分类（SYMMETRY = 自由滑移、
+                # 零穿透）。
                 self.boundary_manager.add_bc(boundary_name, bc_type="SYMMETRY")
             elif "FARFIELD" in name_upper:
                 self.bc_handler.base_farfield_velocity = vel_inf
@@ -255,162 +262,39 @@ class FRSolver:
             else:
                 self.bc_handler.base_farfield_velocity = vel_inf
                 self.boundary_manager.add_bc(boundary_name, bc_type="FARFIELD", velocity_x=vel_inf, pressure=p_inf)
-        
-        logger.info(f"Boundary conditions setup: {len(boundary_names)} boundaries")
-    
-    def solve(self, max_iter: Optional[int] = None, start_iteration: int = 0):
-        """Execute steady-state simulation.
 
-        Drives an explicit SSP-RK pseudo-time march of the second-order viscous
-        RANS residual, with local time stepping and a normalised multi-equation
-        convergence criterion.
+        logger.info(f"Boundary conditions setup: {len(boundary_names)} boundaries")
+
+    def solve(self, max_iter: Optional[int] = None, start_iteration: int = 0):
+        """执行稳态仿真。
+
+        对二阶粘性 RANS 残差做显式 SSP-RK 伪时间推进，配合局部时间步长
+        和归一化的多方程收敛判据。
 
         Args:
-            max_iter: Maximum TOTAL iteration count (overrides config if
-                provided). This is an absolute target, not a count of
-                additional steps - when resuming with start_iteration=50,
-                max_iter=2500 means "run up to iteration 2500 total"
-                (2450 more steps), matching the CLI's documented semantics.
-            start_iteration: Iteration count already completed (e.g. loaded
-                from a checkpoint). Iteration numbering, logging, and the
-                inlet/farfield velocity ramp (BoundaryConditionHandler.
-                update_ramp_factor) all continue from here instead of
-                restarting at 1 - otherwise resuming would snap the ramp
-                factor back down to ~0 and reintroduce a boundary-condition
-                discontinuity at the resume point.
+            max_iter: 总迭代数上限（若提供则覆盖 config 里的值）。这是
+                一个绝对目标，而不是"再跑多少步"——从
+                start_iteration=50 恢复求解、max_iter=2500 时，意思是
+                "总共跑到第 2500 次迭代"（还剩 2450 步），与 CLI 文档
+                里说明的语义一致。
+            start_iteration: 已完成的迭代数（例如从 checkpoint 加载）。
+                迭代计数、日志，以及入口/远场速度的爬升机制
+                （BoundaryConditionHandler.update_ramp_factor）都从这里
+                继续，而不是重新从 1 开始——否则恢复求解会把爬升系数
+                猛地拉回 ~0，在恢复点重新引入一次边界条件的不连续。
 
         Returns:
-            SteadyResult with solution and history
+            带解和历史记录的 SteadyResult
         """
 
-        # Initialize
+        # 初始化
         if self.solution is None:
             self._initialize_solution()
 
         self._setup_boundary_conditions()
 
-        # CRITICAL FIX: Use optimized face extraction from VolumeMeshData instead of slow FVMFaceExtractor
-        logger.info("Using pre-computed face data from VolumeMeshData (optimized radix-sort)...")
-        t_face_start = time.perf_counter()
-        
-        # Ensure faces exist (uses optimized FaceExtractor with argsort)
-        face_data_obj = self.grid_data.ensure_faces_exist()
-        
-        # Compute cell centroids FIRST (needed for gradient reconstruction)
-        nodes_array = np.column_stack([
-            self.grid_data.nodes.x,
-            self.grid_data.nodes.y,
-            self.grid_data.nodes.z,
-        ])
-        # Prism cells (if any - see VolumeMeshData.prism_cells) occupy the
-        # front of the global cell-index space, tets the rest (same
-        # convention grid_data.get_cell_volumes() below already follows) -
-        # centroids must be built the same way, or they'd misalign against
-        # cell_volumes/geom.cell_centroids for every BL cell once a prism
-        # mesh is in play (a plain tets-only average silently produced only
-        # n_tet rows, not n_prism+n_tet, for a mixed mesh here previously).
-        tet_connectivity_int64 = self.grid_data.cells.connectivity.astype(np.int64)
-        tet_centroids = nodes_array[tet_connectivity_int64].mean(axis=1)
-        prism_cells_obj = getattr(self.grid_data, 'prism_cells', None)
-        if prism_cells_obj is not None:
-            prism_connectivity_int64 = prism_cells_obj.connectivity.astype(np.int64)
-            prism_centroids = nodes_array[prism_connectivity_int64].mean(axis=1)
-            cell_centroids = np.vstack([prism_centroids, tet_centroids])
-        else:
-            cell_centroids = tet_centroids
-        
-        # Store in face_extractor for later use
-        self.face_extractor.cell_centroids = cell_centroids
-        
-        # Convert FaceData to the plain-dict format the rest of solve() uses
-        face_data = {
-            'connectivity': face_data_obj.connectivity,
-            'normals': face_data_obj.normal,
-            'areas': face_data_obj.area,
-            'centers': face_data_obj.center,
-            'boundary_flags': (face_data_obj.connectivity[:, 1] < 0).astype(np.int32),
-            'cell_centroids': cell_centroids,
-        }
-        
-        t_face_end = time.perf_counter()
-        logger.success(f"Face data prepared in {t_face_end - t_face_start:.2f}s (optimized)")
-
-        # Expose face data on face_extractor - bc_handler/aero_calculator
-        # both read face arrays from this shared holder.
-        self.face_extractor.face_connectivity = face_data['connectivity']
-        self.face_extractor.face_normals = face_data['normals']
-        self.face_extractor.face_areas = face_data['areas']
-        self.face_extractor.boundary_flags = face_data['boundary_flags']
-
-        # Assemble shared geometry bundle for the residual.
-        cell_volumes = self._get_cell_volumes()
-        geom = FaceGeometry(
-            connectivity=face_data['connectivity'],
-            normals=face_data['normals'],
-            areas=face_data['areas'],
-            centers=face_data['centers'],
-            boundary_flags=face_data['boundary_flags'],
-            cell_centroids=face_data['cell_centroids'],
-            cell_volumes=cell_volumes,
-        )
-
-        # Wall distance from viscous-wall boundary faces (WALL/GROUND).
-        try:
-            self.bc_handler._precompute_face_types()
-            wall_face_mask = np.zeros(geom.n_faces, dtype=bool)
-            for f, t in self.bc_handler._face_types.items():
-                if t in ("WALL", "GROUND"):
-                    wall_face_mask[f] = True
-            logger.info(f"Wall face mask computed: {np.sum(wall_face_mask)} wall faces")
-            wall_distance = estimate_wall_distance(geom, wall_face_mask)
-            logger.info(f"Wall distance estimated: min={wall_distance.min():.4e}, max={wall_distance.max():.4e}")
-        except Exception as e:
-            logger.error(f"Failed to compute wall distance: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            raise
-
-        # Molecular viscosity (Sutherland at 288 K ~ 1.79e-5 Pa s).
-        mu_lam = 1.7894e-5
-        turbulent = self.config.turbulence != TurbulenceModel.NONE
-
-        # Reference (freestream) Mach number, used two ways:
-        #  1. ViscousRANSResidual's inviscid flux: AUSM+up (see
-        #     fvm_viscous_residual.py's _ausm_up), which replaced HLLC as
-        #     the live flux specifically for its low-Mach robustness. It
-        #     has a built-in low-Mach scaling function f_a that this
-        #     reference Mach regularizes so f_a stays bounded away from
-        #     zero at genuine stagnation points, instead of a wave-speed-
-        #     bracket-based preconditioner (tried first, reverted - it
-        #     narrowed HLLC's SL/SR margin around the star-state wave
-        #     speed Sstar by ~10x at this case's M~0.09 everywhere in the
-        #     domain at once, causing a much faster, more widespread
-        #     numerical blow-up than the unpreconditioned scheme; see
-        #     fvm_viscous_residual.py's _hllc docstring for the history).
-        #  2. TimeIntegrator.local_time_step below: relaxes the pseudo-
-        #     time CFL restriction that a density-based scheme otherwise
-        #     inherits from the acoustic speed (~340 m/s) even though the
-        #     physical flow here is far slower - this part never touches
-        #     the flux itself, only how big a step is stable to take.
-        gamma_air = 1.4
-        a_inf = np.sqrt(gamma_air * self.config.p_inf / self.config.rho_inf)
-        mach_ref = self.config.vel_inf / max(a_inf, 1e-30)
-
-        residual = ViscousRANSResidual(
-            geom, mu_lam=mu_lam, wall_distance=wall_distance, turbulent=turbulent,
-            mach_ref=mach_ref,
-            wall_face_mask=wall_face_mask if self.config.use_wall_functions else None,
-        )
-        if self.config.use_wall_functions:
-            logger.info(
-                "Wall functions enabled (Menter scalable/automatic wall treatment) "
-                f"on {np.sum(wall_face_mask)} WALL/GROUND faces - near-wall mesh no "
-                "longer needs y+~1 to be accurate."
-            )
-
-        # Aerodynamic reference area.
-        body_face_indices = self.aero_calculator._identify_body_faces()
-        ref_area = self.aero_calculator._compute_reference_area(body_face_indices)
+        (geom, wall_distance, wall_face_mask, mu_lam, turbulent, mach_ref,
+         residual) = self._prepare_geometry_and_residual()
 
         actual_max_iter = max_iter if max_iter is not None else self.config.max_iter
         if start_iteration >= actual_max_iter:
@@ -423,12 +307,11 @@ class FRSolver:
             f"max_iter={actual_max_iter}, turbulent={turbulent})"
         )
 
-        # Restore adaptive CFL state on resume. Without this, the CFL always
-        # resets to config.cfl_init when resuming from a checkpoint,
-        # discarding whatever the adaptive mechanism had converged to (e.g.
-        # a CFL reduced far below cfl_init to survive a stiff region) - the
-        # first post-resume iterations would then re-attempt the original,
-        # already-known-risky cfl_init and could immediately diverge again.
+        # 恢复求解时恢复自适应 CFL 状态。没有这一步，每次从 checkpoint
+        # 恢复时 CFL 都会重置回 config.cfl_init，丢弃自适应机制原本已经
+        # 收敛到的值（例如为挺过一个刚性区域而降到远低于 cfl_init 的
+        # CFL）——恢复后最初几步就会重新尝试原始的、已知有风险的
+        # cfl_init，可能立刻再次发散。
         if self.convergence_history and self.convergence_history.get('cfl_history'):
             restored_cfl = float(self.convergence_history['cfl_history'][-1])
             if restored_cfl > 0:
@@ -442,18 +325,16 @@ class FRSolver:
         initial_res_vec = None
         converged = False
         start = time.time()
-        # Coordination state shared by the three CFL-adjustment mechanisms
-        # below (divergence auto-recovery, explosive-growth guard, and the
-        # residual-trend adaptive rule) so they can't fight each other -
-        # e.g. the trend rule increasing CFL right back up in the same or
-        # very next iteration after a safety mechanism just cut it, before
-        # the lower CFL has had any chance to actually take effect.
+        # 下面三种 CFL 调整机制（发散自动恢复、爆炸式增长防护、按残差
+        # 趋势的自适应规则）共用的协调状态，避免它们互相打架——例如
+        # 趋势规则在安全机制刚刚下调 CFL 之后的同一步或紧接着的下一步
+        # 就把它调回去，还没让较低的 CFL 有机会真正起作用。
         last_cfl_cut_iteration = -10**9
         cfl_cut_cooldown = 20
-        # If start_iteration >= actual_max_iter the loop body below never
-        # runs; keep `iteration` defined (as the last completed iteration)
-        # so the post-loop logging/checkpoint code doesn't reference an
-        # unbound local.
+        # 如果 start_iteration >= actual_max_iter，下面的循环体永远不会
+        # 执行；保持 `iteration` 有定义（作为最后完成的迭代数），这样
+        # 循环结束后的日志/checkpoint 代码就不会引用一个未绑定的局部
+        # 变量。
         iteration = start_iteration
 
         def residual_func(U):
@@ -462,23 +343,21 @@ class FRSolver:
 
         for step in range(1, actual_max_iter - start_iteration + 1):
             iteration = start_iteration + step
-            # Reset per-iteration flag: was CFL already cut by a safety
-            # mechanism (divergence recovery / explosive-growth guard) this
-            # iteration? If so, the trend-based rule below skips entirely
-            # rather than potentially reversing the cut in the same step.
+            # 重置本次迭代的标志：这一步 CFL 是否已经被某个安全机制
+            # （发散恢复 / 爆炸式增长防护）下调过？如果是，下面基于趋势
+            # 的规则会整个跳过，而不是有可能在同一步里把这次下调撤销。
             cfl_cut_this_iter = False
             if self.bc_handler is not None:
                 self.bc_handler.update_ramp_factor(iteration, actual_max_iter)
 
-            # Boundary ghost states for this solution - computed once and
-            # reused below (gradients, residual, aero coefficients) instead
-            # of being rebuilt from scratch for each consumer.
+            # 这次解对应的边界 ghost 状态——只算一次，下面（梯度、残差、
+            # 气动系数）复用，而不是每个消费者都从头重建一遍。
             bstates = self.bc_handler.build_boundary_states(self.solution)
 
-            # Effective viscosity for viscous time-step limit.
+            # 粘性时间步限制用的有效粘性。
             rho_c, vel_c, p_c, T_c, k_c, w_c = residual.to_primitive(self.solution)
-            
-            # Diagnostic: log shapes before gradient computation
+
+            # 诊断：梯度计算前记录形状
             if iteration <= 5 or iteration % 10 == 0:
                 logger.debug(
                     f"[Iter {iteration}] Primitive variables shapes:\n"
@@ -486,16 +365,16 @@ class FRSolver:
                     f"  k_c: {k_c.shape}, w_c (omega): {w_c.shape}\n"
                     f"  wall_distance: {residual.wall_distance.shape}"
                 )
-            
+
             try:
                 gvel = residual._velocity_gradient(vel_c, self.solution, bstates)
-                
+
                 if iteration <= 5 or iteration % 10 == 0:
                     logger.debug(f"[Iter {iteration}] Velocity gradient shape: {gvel.shape}")
-                
+
                 mu_t = residual._eddy_viscosity(rho_c, k_c, w_c, gvel) if turbulent \
                     else np.zeros(geom.n_cells)
-                    
+
                 if iteration <= 5 or iteration % 10 == 0:
                     logger.debug(f"[Iter {iteration}] Eddy viscosity shape: {mu_t.shape}")
             except Exception as e:
@@ -504,27 +383,25 @@ class FRSolver:
                 logger.error(traceback.format_exc())
                 raise
 
-            # Compute local time step with current CFL. omega=w_c adds the
-            # SST source-term stiffness limit (see local_time_step docstring)
-            # - without it, near-wall cells with large omega can be unstable
-            # for the k/omega equations even at a CFL that's comfortably
-            # safe for the convective/viscous mean-flow terms.
+            # 用当前 CFL 计算局部时间步长。omega=w_c 附加了 SST 源项
+            # 刚性限制（见 local_time_step 文档字符串）——没有它，近壁
+            # 单元的 omega 较大时，即便 CFL 对对流/粘性平均流场项来说
+            # 相当安全，k/omega 方程仍可能不稳定。
             dt_local = self.time_integrator.local_time_step(
                 self.solution, geom, mu_lam + mu_t, omega=(w_c if turbulent else None),
                 mach_ref=mach_ref,
             )
 
-            # One SSP-RK pseudo-time step. R is both the residual used for
-            # convergence monitoring below and the RK scheme's own stage-0
-            # residual (Ui=U0 at i=0) - computed once and reused via
-            # residual0= instead of letting step() recompute the same
-            # (expensive: MUSCL+HLLC+viscous+SST) evaluation a second time.
+            # 一次 SSP-RK 伪时间步。R 既是下面收敛监控要用的残差，也是
+            # RK 格式自己的第 0 阶段残差（i=0 时 Ui=U0）——只算一次，
+            # 通过 residual0= 复用，而不是让 step() 把这次（昂贵的：
+            # MUSCL+HLLC+粘性+SST 源项）计算再算一遍。
             R = residual.compute(self.solution, bstates)
             self.solution = self.time_integrator.step(
                 self.solution, residual_func, dt_local, residual0=R
             )
 
-            # Check for numerical divergence immediately after update
+            # 更新后立即检查数值发散
             if not np.all(np.isfinite(self.solution)):
                 logger.error(f"Solver diverged at iteration {iteration}: non-finite state detected")
                 logger.error("  Possible causes:")
@@ -532,143 +409,79 @@ class FRSolver:
                 logger.error("    2. Boundary condition inconsistency")
                 logger.error("    3. Turbulence model stiffness (try reducing CFL)")
                 logger.error(f"  Current CFL: {self.time_integrator.cfl_target:.4f}")
-                
-                # === AUTOMATIC RECOVERY ATTEMPT ===
+
+                # === 自动恢复尝试 ===
                 if self.time_integrator.cfl_target > 0.01:
                     old_cfl = self.time_integrator.cfl_target
                     self.time_integrator.cfl_target = max(old_cfl * 0.1, 0.005)
                     last_cfl_cut_iteration = iteration
                     logger.warning(f"[AUTO-RECOVERY] Attempting automatic recovery by reducing CFL to {self.time_integrator.cfl_target:.4f}")
 
-                    # Restore solution from previous step if available
+                    # 若有可用的上一步解，恢复它
                     if iteration > 1 and hasattr(self, '_last_stable_solution'):
                         self.solution = self._last_stable_solution.copy()
                         logger.info("[AUTO-RECOVERY] Restored solution from last stable state")
-                    
-                    continue  # Retry this iteration with lower CFL
+
+                    continue  # 用更低的 CFL 重试这次迭代
                 else:
                     raise RuntimeError(f"Solver diverged at iteration {iteration}: non-finite state")
-            
-            # Save stable solution for potential recovery
+
+            # 保存稳定解，供潜在的恢复使用
             if iteration % 5 == 0:
                 self._last_stable_solution = self.solution.copy()
 
-            # Normalised multi-equation residual (RMS over mass/momentum/energy).
+            # 归一化多方程残差（质量/动量/能量的 RMS）。
             #
-            # Volume-weighted, not a plain per-cell mean: R is already
-            # per-unit-volume (residual.compute() divides by cell_volumes),
-            # but an unweighted mean still counts every cell equally
-            # regardless of how much of the domain it represents - a
-            # boundary layer can hold thousands of tiny cells with locally
-            # noisy residuals that would otherwise swamp the signal from
-            # the much larger (but far fewer) far-field cells.
+            # 按体积加权，而不是简单的逐单元平均：R 已经是单位体积量
+            # （residual.compute() 已经除以 cell_volumes），但不加权的
+            # 平均仍然会让每个单元的权重相等，无论它代表多大的一部分
+            # 计算域——边界层可能有成千上万个局部残差本身就带噪声的
+            # 微小单元，若不加权，它们会淹没来自（数量少得多、但体积
+            # 大得多的）远场单元的信号。
             cell_volumes = geom.cell_volumes
             total_volume = float(np.sum(cell_volumes))
             res_vec = np.sqrt(np.sum(R[:, :5]**2 * cell_volumes[:, None], axis=0) / total_volume)
 
-            # Each of the 5 equations is normalised by ITS OWN initial-
-            # iteration RMS before being combined into one scalar. Without
-            # this, the energy equation's residual - intrinsically
-            # ~rho*vel_inf^3 in scale, orders of magnitude larger than the
-            # continuity/momentum residuals - dominates a plain combined
-            # L2 norm, so "convergence" would really only track the energy
-            # equation while mass/momentum are still moving.
+            # 5 个方程各自按自己首次迭代时的 RMS 归一化后，才合并成一个
+            # 标量。没有这一步，能量方程的残差——量级本来就是
+            # ~rho*vel_inf^3，比连续性/动量残差大好几个数量级——会主导
+            # 一个简单合并的 L2 范数，使得"收敛"实际上只反映能量方程，
+            # 而质量/动量可能还在变化。
             if initial_res_vec is None or iteration == 1:
                 initial_res_vec = np.maximum(res_vec, 1e-30)
             rel_res = float(np.linalg.norm(res_vec / initial_res_vec)) / np.sqrt(len(res_vec))
             res_history.append(rel_res)
-            
-            # === EARLY DIVERGENCE WARNING ===
+
+            # === 提前发散预警 ===
             if len(res_history) >= 3:
                 recent_growth = res_history[-1] / max(res_history[-3], 1e-30)
-                if recent_growth > 1e6:  # Explosive growth detected
+                if recent_growth > 1e6:  # 检测到爆炸式增长
                     logger.warning(
                         f"[DIVERGENCE WARNING] Residual grew by factor {recent_growth:.2e} in 3 steps! "
                         f"Current CFL={self.time_integrator.cfl_target:.4f}. "
                         f"Consider manual intervention."
                     )
-                    # Force aggressive CFL reduction
+                    # 强制大幅下调 CFL
                     self.time_integrator.cfl_target = max(self.time_integrator.cfl_target * 0.2, 0.005)
                     last_cfl_cut_iteration = iteration
                     cfl_cut_this_iter = True
                     logger.warning(f"[AUTO-FIX] Aggressively reduced CFL to {self.time_integrator.cfl_target:.4f}")
 
-            # Adaptive CFL adjustment based on residual trend (IMPROVED)
-            # Use longer window and log-scale for better stability. Skipped
-            # entirely if a safety mechanism already cut CFL this iteration
-            # (cfl_cut_this_iter) - otherwise this rule could immediately
-            # increase CFL right back up in the very same step, since the
-            # 8-iteration trend window doesn't yet reflect the cut's effect.
-            if not cfl_cut_this_iter and iteration > 10 and len(res_history) >= 8:
-                # Use last 8 iterations for trend analysis (smoother signal)
-                n_window = min(8, len(res_history))
-                recent = res_history[-n_window:]
-                
-                # Compute log-scale trend (better for exponential decay/growth)
-                # trend = ln(res_final/res_initial) / n_steps
-                # Negative = decreasing, Positive = increasing
-                if recent[0] > 1e-30 and recent[-1] > 1e-30:
-                    log_trend = np.log(recent[-1] / recent[0]) / (n_window - 1)
-                else:
-                    log_trend = 0.0
-                
-                # Add hysteresis to prevent oscillation
-                # Only adjust if trend is significant AND sustained
-                cfl_adjusted = False
-                
-                # Check for divergence or rapid increase
-                if log_trend > 0.15:  # ~16% increase per step (aggressive threshold)
-                    old_cfl = self.time_integrator.cfl_target
-                    # More conservative reduction: ×0.6 instead of ×0.5
-                    self.time_integrator.cfl_target = max(old_cfl * 0.6, 0.01)
-                    last_cfl_cut_iteration = iteration
-                    logger.warning(
-                        f"  [CFL ADJUST] Residuals increasing (log_trend={log_trend:.3f}/step), "
-                        f"reducing CFL: {old_cfl:.3f} -> {self.time_integrator.cfl_target:.3f}"
-                    )
-                    cfl_adjusted = True
+            # 按残差趋势自适应调整 CFL——见
+            # solver_steady_cfl.CFLTrendAdjustMixin._adjust_cfl_by_trend。
+            last_cfl_cut_iteration = self._adjust_cfl_by_trend(
+                res_history, iteration, cfl_cut_this_iter,
+                last_cfl_cut_iteration, cfl_cut_cooldown,
+            )
 
-                # Check for good convergence (can increase CFL) - only once
-                # the CFL has been stable (no safety cut) for a cooldown
-                # window, so an increase can't immediately undo a cut made
-                # before the lower CFL has had a chance to prove itself.
-                elif (log_trend < -0.25
-                      and self.time_integrator.cfl_target < self.config.cfl_max
-                      and iteration - last_cfl_cut_iteration >= cfl_cut_cooldown):
-                    # Require sustained decrease over the window
-                    # Check that most points are decreasing
-                    decreases = sum(1 for i in range(len(recent)-1) 
-                                   if recent[i+1] < recent[i])
-                    decrease_ratio = decreases / (len(recent) - 1)
-                    
-                    if decrease_ratio > 0.7:  # At least 70% of steps decreasing
-                        old_cfl = self.time_integrator.cfl_target
-                        # Moderate increase: ×1.15 instead of ×1.2
-                        self.time_integrator.cfl_target = min(old_cfl * 1.15, self.config.cfl_max)
-                        logger.info(
-                            f"  [CFL ADJUST] Residuals decreasing well (log_trend={log_trend:.3f}/step, "
-                            f"decrease_ratio={decrease_ratio:.0%}), "
-                            f"increasing CFL: {old_cfl:.3f} -> {self.time_integrator.cfl_target:.3f}"
-                        )
-                        cfl_adjusted = True
-                
-                if not cfl_adjusted and iteration % 50 == 0:
-                    # Log status every 50 iterations even when not adjusting
-                    logger.debug(
-                        f"  [CFL STATUS] log_trend={log_trend:.3f}/step, "
-                        f"CFL={self.time_integrator.cfl_target:.3f}, "
-                        f"no adjustment needed"
-                    )
-            
-            # Coefficients every iteration for accurate monitoring. Includes
-            # skin-friction drag/lift via wall_shear_stress(), reusing this
-            # iteration's gvel/mu_t/bstates (computed pre-step above) rather
-            # than recomputing them for the post-step solution - a one-
-            # iteration lag that's a good trade against doubling the
-            # gradient+eddy-viscosity cost every iteration just for
-            # monitoring output.
-            
-            # Diagnostic: log shapes before computing coefficients
+            # 每次迭代都算系数，保证监控的准确性。包含通过
+            # wall_shear_stress() 算出的摩擦阻力/升力，复用本次迭代
+            # 已经算好的 gvel/mu_t/bstates（在更新步之前算的），而不是
+            # 针对更新后的解重新计算——用一次迭代的滞后换取不必每次
+            # 迭代都为了监控输出而把梯度+涡粘性的开销翻倍，是划算的
+            # 权衡。
+
+            # 诊断：计算系数前记录形状
             if iteration <= 5 or iteration % 10 == 0:
                 logger.debug(
                     f"[Iter {iteration}] Pre-compute diagnostics:\n"
@@ -679,7 +492,7 @@ class FRSolver:
                     f"  Face normals shape: {self.face_extractor.face_normals.shape}\n"
                     f"  Face areas shape: {self.face_extractor.face_areas.shape}"
                 )
-            
+
             try:
                 Cd, Cl, Cd_p, Cd_f = self.aero_calculator.compute_coefficients(
                     self.solution, iteration,
@@ -691,29 +504,29 @@ class FRSolver:
                 import traceback
                 logger.error(traceback.format_exc())
                 raise
-            
+
             cd_history.append(Cd)
             cl_history.append(Cl)
 
-            # Output coefficients with improved formatting
-            # Main line: iteration info
+            # 输出系数，格式更清晰
+            # 主行：迭代信息
             logger.info(
                 f"Iter {iteration:5d}/{actual_max_iter}  |  "
                 f"Res(rel): {rel_res:.4e}  |  "
                 f"Cd: {Cd:.4f}  |  "
                 f"Cl: {Cl:.4f}"
             )
-            
-            # Second line: Cd breakdown (aligned with first |)
-            # Calculate indentation to align 'Cd' with the first '|'
-            # "Iter XXXX/XXXX  |  " = ~20 chars, so indent to position of first |
+
+            # 第二行：Cd 分解（与第一个 | 对齐）
+            # 计算缩进量，让 'Cd' 对齐到第一个 '|' 的位置
+            # "Iter XXXX/XXXX  |  " 约 20 个字符，所以缩进到第一个 | 的位置
             prefix_len = len(f"Iter {iteration:5d}/{actual_max_iter}")
             logger.info(
                 f"{'':>{prefix_len + 2}s}  "
                 f"Cd breakdown: pressure={Cd_p:.4f}, friction={Cd_f:.4f}"
             )
 
-            # Save checkpoint periodically
+            # 定期保存 checkpoint
             if self.checkpoint_manager.should_save(iteration):
                 history_dict = {
                     'iterations': list(range(1, iteration + 1)),
@@ -721,21 +534,21 @@ class FRSolver:
                     'coefficients': {'Cd': cd_history.copy(), 'Cl': cl_history.copy()},
                     'cfl_history': [self.time_integrator.cfl_target] * len(res_history),
                 }
-                
+
                 ckpt_path = self.checkpoint_manager.save(
                     solution=self.solution,
                     history=history_dict,
                     iteration=iteration,
                     extra_fields={'mu_t': mu_t},
                 )
-                
+
                 if ckpt_path:
                     logger.info(f"Checkpoint saved at iteration {iteration}")
-                    
-                    # Cleanup old checkpoints
+
+                    # 清理旧的 checkpoint
                     self.checkpoint_manager.cleanup_old_checkpoints(keep_last=3)
 
-            # Convergence: normalised residual below tolerance.
+            # 收敛判据：归一化残差低于容差。
             if rel_res < self.config.convergence_tol:
                 logger.success(f"Converged at iteration {iteration} (rel residual {rel_res:.3e})")
                 converged = True
@@ -744,7 +557,7 @@ class FRSolver:
         elapsed = time.time() - start
         logger.info(f"Solve finished: {len(res_history)} iters, {elapsed:.1f}s, converged={converged}")
 
-        # Save final checkpoint
+        # 保存最终 checkpoint
         try:
             logger.debug("Preparing final checkpoint data...")
             final_history = {
@@ -753,17 +566,17 @@ class FRSolver:
                 'coefficients': {'Cd': cd_history.copy(), 'Cl': cl_history.copy()},
                 'cfl_history': [self.time_integrator.cfl_target] * len(res_history),
             }
-            
+
             logger.debug(f"Final history keys: {final_history.keys()}")
             logger.debug(f"Cd history length: {len(cd_history)}, Cl history length: {len(cl_history)}")
-            
+
             final_ckpt = self.checkpoint_manager.save(
                 solution=self.solution,
                 history=final_history,
                 iteration=iteration,
                 extra_fields={'mu_t': mu_t},
             )
-            
+
             if final_ckpt:
                 logger.info(f"Final checkpoint saved: {final_ckpt}")
         except Exception as e:

@@ -1,7 +1,7 @@
-"""NAS parser core functionality.
+"""NAS 解析器核心功能。
 
-Provides the main NASParser class with streaming parsing for ANSA .nas files,
-supporting versions v22, v23, and v24.
+提供 NASParser 主类，用流式解析方式读取 ANSA 导出的 .nas 文件，支持
+v22、v23、v24 三个版本。
 """
 
 import re

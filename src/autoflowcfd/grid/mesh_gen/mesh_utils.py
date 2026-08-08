@@ -1,15 +1,11 @@
-"""Mesh utility functions for volume mesh generation.
+"""体网格生成用的网格工具函数。
 
-Provides validation, quality checking, and boundary detection utilities.
-All functions are stateless and can be used independently.
+提供网格校验、边界探测等无状态辅助函数，均可独立调用。
 """
 
 import numpy as np
-from typing import Dict, Optional, TYPE_CHECKING
+from typing import Dict
 from loguru import logger
-
-if TYPE_CHECKING:
-    from ..structures import VolumeMeshData
 
 
 def validate_surface_mesh(
@@ -135,38 +131,3 @@ def check_reached_boundary(
         return True
     
     return False
-
-
-def check_mesh_quality(volume_mesh: 'VolumeMeshData') -> None:
-    """Check mesh quality metrics.
-    
-    Args:
-        volume_mesh: Generated volume mesh
-        
-    Raises:
-        ValueError: If mesh quality is unacceptable
-    """
-    from ..structures import TetrahedralCells
-    
-    # Check for negative volumes (should not happen)
-    if np.any(volume_mesh.cells.volumes <= 0):
-        n_neg = np.sum(volume_mesh.cells.volumes <= 0)
-        raise ValueError(f"Found {n_neg} cells with non-positive volume")
-    
-    # Check aspect ratio (simplified - just check volume range)
-    vol_min = volume_mesh.cells.volumes.min()
-    vol_max = volume_mesh.cells.volumes.max()
-    vol_ratio = vol_max / vol_min if vol_min > 0 else float('inf')
-    
-    logger.info(
-        f"Mesh quality check: "
-        f"volume range [{vol_min:.6e}, {vol_max:.6e}], "
-        f"ratio={vol_ratio:.2f}"
-    )
-    
-    # Warn if ratio is too high
-    if vol_ratio > 1e6:
-        logger.warning(
-            f"High volume ratio detected ({vol_ratio:.2e}). "
-            f"Consider refining mesh or adjusting growth_rate."
-        )

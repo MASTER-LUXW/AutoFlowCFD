@@ -1,17 +1,15 @@
-"""Time integration schemes for the pseudo-time steady solver and transient runs.
+"""伪时间稳态求解器与瞬态计算的时间积分格式。
 
-The steady solver advances the solution in pseudo-time towards the residual =
-0 state.  For that we use explicit Strong-Stability-Preserving Runge-Kutta
-schemes (SSP-RK2 / SSP-RK3), which are the standard, provably correct explicit
-integrators for FV CFD, together with a **local (per-cell) time step** governed
-by the convective+acoustic+viscous CFL condition.
+稳态求解器在伪时间上推进解，直到残差趋于 0。为此我们采用显式的
+强稳定性保持 Runge-Kutta 格式（SSP-RK2 / SSP-RK3）——这是有限体积
+CFD 里标准、可证明正确的显式积分器，配合按对流+声速+粘性 CFL 条件
+确定的**局部（逐单元）时间步长**。
 
-This replaces the previous implementation, which (a) called itself
-"backward Euler" while doing an explicit forward-Euler step, (b) used
-placeholder residual history for RK2/AB3, and (c) hid divergence behind hard
-magnitude clips on density/velocity/flux.  Physical positivity is now enforced
-only where it is mathematically required (rho>0, p>0) via a *pressure floor*
-that preserves velocity, and divergence is reported rather than masked.
+这套实现取代了之前的版本，那个版本：(a) 自称"backward Euler"，实际
+做的却是显式前向欧拉步；(b) RK2/AB3 用的是占位的残差历史；(c) 通过对
+密度/速度/通量做硬幅值限幅来掩盖发散。现在物理正定性只在数学上确实
+需要的地方（rho>0，p>0）才强制施加，用一个保持速度不变的*压力下限*
+实现，发散会被报告出来，而不是被掩盖。
 """
 
 from __future__ import annotations
@@ -27,20 +25,20 @@ GAMMA = 1.4
 
 
 class TimeIntegrationScheme(Enum):
-    """Explicit pseudo-time integration schemes."""
+    """显式伪时间积分格式。"""
 
     FORWARD_EULER = "forward_euler"
     SSP_RK2 = "ssp_rk2"
     SSP_RK3 = "ssp_rk3"
-    # Legacy aliases kept so existing configs/tests keep importing.
+    # 保留旧别名，使已有的 config/测试仍能正常导入。
     BACKWARD_EULER = "forward_euler"
     RUNGE_KUTTA_2 = "ssp_rk2"
     ADAMS_BASHFORTH_3 = "ssp_rk3"
 
 
-# SSP-RK Shu-Osher coefficients: stages of the form
+# SSP-RK Shu-Osher 系数：各阶段形如
 #   u^(i) = sum_k alpha[i,k] u^(k) + beta[i] dt L(u^(i-1))
-# where L(u) = -R(u).  We store per-scheme stage lists.
+# 其中 L(u) = -R(u)。这里按格式分别存储各自的阶段系数表。
 _SSP_RK2 = {
     "stages": 2,
     # u1 = u0 + dt L0 ;  u2 = 1/2 u0 + 1/2 (u1 + dt L1)
@@ -64,32 +62,30 @@ _SCHEME_TABLE = {
 
 
 def enforce_positivity(U: np.ndarray, p_floor: float = 1.0) -> np.ndarray:
-    """Enforce physical bounds on conservative variables after a time step.
+    """在一次时间步更新后，对守恒变量施加物理上的边界约束。
 
-    Projects density and pressure to positive floors while preserving velocity.
-    Also clips velocity magnitude to prevent kinetic energy blow-up.
+    把密度和压力投影到正的下限，同时保持速度不变。另外还会限幅速度
+    大小，防止动能爆炸。
     """
-    MAX_VELOCITY = 1e4  # 10 km/s upper bound
-    
+    MAX_VELOCITY = 1e4  # 10 km/s 上界
+
     rho = np.maximum(U[:, 0], 1e-6)
     U[:, 0] = rho
 
     vel = U[:, 1:4] / rho[:, None]
-    
-    # === CRITICAL: Clip velocity magnitude ===
+
+    # 限幅速度大小，并把限幅后的动量写回 U——下面的 ke 必须从这个
+    # 最终写回 U 的同一份 vel 推导，否则压力下限会针对一个与实际写回
+    # 的动量不匹配的动能来计算（以前这里有一次重复的重新限幅——算出来
+    # 了却从未写回 U——可能引入的正是这种虽然通常很小、但确实存在的
+    # 物理不一致）。
     vel_mag = np.sqrt(np.sum(vel**2, axis=1))
     clip_mask = vel_mag > MAX_VELOCITY
     if np.any(clip_mask):
         clip_factor = MAX_VELOCITY / vel_mag[clip_mask]
         vel[clip_mask] *= clip_factor[:, None]
-        # Update momentum with clipped velocities
         U[clip_mask, 1:4] = (rho[clip_mask, None] * vel[clip_mask])
-    
-    max_vel = MAX_VELOCITY
-    vel_mag = np.sqrt(np.sum(vel**2, axis=1))
-    if np.any(vel_mag > max_vel):
-        vel = vel * np.minimum(max_vel / vel_mag, 1.0)[:, None]
-    
+
     ke = 0.5 * rho * np.sum(vel**2, axis=1)
     p = (GAMMA - 1.0) * (U[:, 4] - ke)
     low = p < p_floor
@@ -101,7 +97,7 @@ def enforce_positivity(U: np.ndarray, p_floor: float = 1.0) -> np.ndarray:
 
 
 class TimeIntegrator:
-    """Explicit SSP Runge-Kutta integrator with local time stepping."""
+    """带局部时间步长的显式 SSP Runge-Kutta 积分器。"""
 
     def __init__(
         self,
@@ -109,7 +105,7 @@ class TimeIntegrator:
         dt: float = 1e-5,
         cfl_target: float = 1.0,
     ):
-        # Map any legacy alias onto the canonical enum member.
+        # 把任何旧别名映射到规范的枚举成员。
         self.scheme = TimeIntegrationScheme(scheme.value) if isinstance(scheme, TimeIntegrationScheme) \
             else TimeIntegrationScheme(scheme)
         self.dt = dt
@@ -124,33 +120,27 @@ class TimeIntegrator:
         omega: Optional[np.ndarray] = None,
         mach_ref: Optional[float] = None,
     ) -> np.ndarray:
-        """Per-cell stable pseudo-time step dt_i = CFL * V_i / sum_f (|u.n|+a) A_f.
+        """逐单元的稳定伪时间步长 dt_i = CFL * V_i / sum_f (|u.n|+a) A_f。
 
-        Adds a viscous limit when ``mu_eff`` is provided, and an SST
-        turbulence-source stiffness limit when ``omega`` is provided.
+        提供 ``mu_eff`` 时额外施加粘性限制；提供 ``omega`` 时额外施加
+        SST 湍流源项刚性限制。
 
-        The k/omega destruction terms (Dk = beta_star*rho*k*omega,
-        Dw = beta*rho*omega^2) are ODEs of the form dy/dt ~ -c*omega*y,
-        whose explicit-Euler stability bound is dt < ~1/(c*omega) -
-        completely independent of the convective/viscous limits above. Near
-        walls (or wherever omega is large - e.g. thin boundary-layer cells,
-        or a solution that's already drifting), this can be far tighter
-        than either of them; without it, the timestep can silently be too
-        large for the turbulence equations even while comfortably CFL-safe
-        for the mean flow, which is a plausible mechanism for a residual
-        that looks merely "stuck" for many iterations before a stiff mode
-        it was never limiting suddenly runs away.
+        k/omega 的耗散项（Dk = beta_star*rho*k*omega，
+        Dw = beta*rho*omega^2）是形如 dy/dt ~ -c*omega*y 的常微分方程，
+        其显式欧拉稳定性上界是 dt < ~1/(c*omega)——与上面的对流/粘性限制
+        完全独立。在近壁区域（或任何 omega 较大的地方——例如很薄的边界
+        层单元，或者已经开始漂移的解），这个限制可能比前两者严格得多；
+        没有它，即便对平均流场而言 CFL 很安全，湍流方程用的时间步长仍
+        可能悄悄地过大——这是一种可信的失稳机制：残差表面上"卡住"很多
+        迭代，实际上是一个从未被限制过的刚性模态，某一步突然发散。
 
         Args:
-            mach_ref: reference (freestream) Mach number for low-Mach
-                preconditioning (see low_mach_preconditioning.py). None
-                (default) uses the raw physical acoustic speed `a`,
-                matching prior behaviour exactly. When given, replaces the
-                `|u.n|+a` acoustic contribution with its preconditioned
-                equivalent, relaxing the CFL restriction where the local
-                flow is far slower than the speed of sound - the same
-                acoustic-vs-convective stiffness that otherwise forces a
-                very small CFL for any genuinely low-speed (M << 1) case.
+            mach_ref: 低马赫数预处理用的参考（自由来流）马赫数（见
+                low_mach_preconditioning.py）。默认 None 表示直接用原始
+                的物理声速 `a`，与之前的行为完全一致。给定时，会把
+                `|u.n|+a` 这一声学贡献换成对应的预处理形式，在局部流速
+                远低于声速时放松 CFL 限制——否则对任何真正低速（M << 1）
+                的算例，声学与对流刚性的差异都会强制要求非常小的 CFL。
         """
         rho = np.maximum(U[:, 0], 1e-9)
         vel = U[:, 1:4] / rho[:, None]
@@ -169,7 +159,7 @@ class TimeIntegrator:
         imask = geom.internal_mask
 
         def _face_spectral(cell_idx, n_face):
-            """|lambda|_max contribution for one cell's own state at a face."""
+            """某个面上，某侧单元自身状态贡献的 |lambda|_max。"""
             un_signed = np.einsum('nd,nd->n', vel[cell_idx], n_face)
             if mach_ref is not None:
                 lam_plus, lam_minus, _ = preconditioned_acoustic_eigs(
@@ -178,7 +168,7 @@ class TimeIntegrator:
                 return np.maximum(np.abs(lam_plus), np.abs(lam_minus))
             return np.abs(un_signed) + a[cell_idx]
 
-        # internal faces contribute to both cells
+        # 内部面对两侧单元都有贡献
         io, ineigh = geom.int_owner, geom.int_neigh
         n_int = normals[imask]
         a_int = areas[imask]
@@ -187,7 +177,7 @@ class TimeIntegrator:
         np.add.at(spectral, io, un_o * a_int)
         np.add.at(spectral, ineigh, un_n * a_int)
 
-        # boundary faces contribute to owner
+        # 边界面只贡献给 owner
         bo = geom.bnd_owner
         if bo.size:
             n_b = normals[bmask]
@@ -199,17 +189,16 @@ class TimeIntegrator:
         dt = self.cfl_target * geom.cell_volumes / spectral
 
         if mu_eff is not None:
-            # viscous stability: dt_visc ~ CFL * rho V^{5/3} / mu
+            # 粘性稳定性：dt_visc ~ CFL * rho V^{5/3} / mu
             Lc2 = geom.cell_volumes ** (2.0 / 3.0)
             dt_visc = 0.25 * self.cfl_target * rho * Lc2 / np.maximum(mu_eff, 1e-30)
             dt = np.minimum(dt, dt_visc)
 
         if omega is not None:
-            # SST source-term stiffness limit (see docstring). beta_star
-            # (0.09) is used as a single conservative constant since it is
-            # the largest of the three SST destruction coefficients
-            # (beta_star=0.09 > beta2=0.0828 > beta1=0.075), giving the
-            # tightest (safest) bound of the three.
+            # SST 源项刚性限制（见上方文档字符串）。用 beta_star（0.09）
+            # 作为单一保守常数，因为它是 SST 三个耗散系数里最大的一个
+            # （beta_star=0.09 > beta2=0.0828 > beta1=0.075），给出三者中
+            # 最紧（最安全）的界限。
             SST_BETA_STAR = 0.09
             dt_turb = self.cfl_target / np.maximum(SST_BETA_STAR * omega, 1e-30)
             dt = np.minimum(dt, dt_turb)
@@ -225,23 +214,22 @@ class TimeIntegrator:
         p_floor: float = 1.0,
         residual0: Optional[np.ndarray] = None,
     ) -> np.ndarray:
-        """Advance one pseudo-time step with the configured SSP-RK scheme.
+        """用配置好的 SSP-RK 格式推进一个伪时间步。
 
         Args:
-            solution: current conservative state (n_cells, n_vars).
-            residual_func: callable U -> R(U) already divided by cell volume,
-                i.e. dU/dt = -R(U).
-            dt_local: per-cell pseudo-time step (n_cells,).
-            p_floor: minimum pressure for positivity projection.
-            residual0: optional precomputed R(solution) - every stage-0 of
-                every scheme here evaluates Ui=U0=solution, so if the caller
-                already has R(solution) (e.g. for convergence monitoring),
-                passing it in avoids re-running the residual (MUSCL + HLLC +
-                viscous + SST source terms - the most expensive part of an
-                iteration) a second time for no new information.
+            solution: 当前守恒状态 (n_cells, n_vars)。
+            residual_func: 可调用对象 U -> R(U)，已经除以单元体积，即
+                dU/dt = -R(U)。
+            dt_local: 逐单元伪时间步长 (n_cells,)。
+            p_floor: 正定性投影用的最小压力。
+            residual0: 可选的预先算好的 R(solution)——这里每个格式的
+                第 0 阶段都是 Ui=U0=solution，所以如果调用方已经有
+                R(solution)（例如用于收敛监控），传进来可以避免把残差
+                （MUSCL + HLLC + 粘性 + SST 源项——一次迭代里最贵的部分）
+                再多算一遍，却得不到任何新信息。
 
         Returns:
-            Updated conservative state.
+            更新后的守恒状态。
         """
         alpha = self._table["alpha"]
         beta = self._table["beta"]
@@ -252,7 +240,7 @@ class TimeIntegrator:
         for i in range(self._table["stages"]):
             Ui = stages[-1]
             if i == 0 and residual0 is not None:
-                L = -residual0                 # dU/dt, reuse caller's R(U0)
+                L = -residual0                 # dU/dt，复用调用方的 R(U0)
             else:
                 L = -residual_func(Ui)         # dU/dt
             combo = np.zeros_like(U0)

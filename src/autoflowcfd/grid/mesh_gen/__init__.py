@@ -1,6 +1,5 @@
-"""Volume mesh generation: boundary-layer extrusion, tetrahedralization, face extraction.
+"""体网格生成：边界层挤出、四面体化、面提取。
 
-Purely organizational grouping - re-exported at the `autoflowcfd.grid`
-package level, so import from there in external code rather than from
-these submodules directly.
+纯粹是组织性分组——统一在 `autoflowcfd.grid` 包一级重新导出，外部代码
+请从那里导入，不要直接导入这些子模块。
 """

@@ -1,35 +1,28 @@
-"""Mesh quality validation tools for CFD grids.
+"""面向 CFD 网格的质量校验工具。
 
-Provides comprehensive quality metrics for tetrahedral and triangular meshes,
-including volume checks, aspect ratio analysis, skewness evaluation, and
-orthogonality assessment.
+为四面体和三角形网格提供全面的质量指标，包括体积检查、长宽比分析、
+扭曲度评估和正交性评估。
 
-Key Metrics:
-    - Volume quality (negative volumes)
-    - Adjacent-cell volume ratio (Green-Gauss gradient conditioning)
-    - Aspect ratio (cell shape quality, BL-region vs core-region thresholds)
-    - Skewness (radius-ratio shape measure)
-    - Orthogonality (face normal vs. cell-centroid-connector angle)
+关键指标：
+    - 体积质量（负体积）
+    - 相邻单元体积比（关系到 Green-Gauss 梯度重构的条件数）
+    - 长宽比（单元形状质量，BL 区域和 core 区域用不同阈值）
+    - 扭曲度（基于半径比的形状度量）
+    - 正交性（面法向与单元质心连线的夹角）
 
-Metric choices are calibrated for this project's specific solver, not
-generic defaults - see the module-level comparison this was derived from:
-    - Gradient reconstruction is Green-Gauss (core/fvm_gradients.py),
-      grad ~ (face-value sum) / V_cell - a cell whose volume is orders of
-      magnitude below its neighbours gets its gradient amplified by that
-      same factor, regardless of local pseudo-time-step size (local
-      time-stepping protects *stability* at that cell, not the *accuracy*
-      of quantities it hands to neighbours). This is why adjacent-cell
-      volume ratio and non-orthogonality (both of which directly govern
-      Green-Gauss conditioning) are checked here, not just a global
-      min/max volume ratio - a BL mesh's global range from near-wall to
-      far-field legitimately spans many orders of magnitude and is not by
-      itself a defect.
-    - Mesh is tetrahedra-only (no hex/prism), generated as BL-extruded
-      prisms-split-to-tets near walls plus a tetgen core fill elsewhere -
-      aspect ratio is checked separately for each region since BL cells
-      are expected to be far more stretched than core cells.
+指标的选取是针对本项目具体求解器校准的，不是通用默认值——推导依据：
+    - 梯度重构用的是 Green-Gauss（core/fvm_gradients.py），
+      grad ~（面值之和）/ V_cell——体积比相邻单元小几个数量级的单元，
+      梯度会被同样倍数放大，与局部伪时间步长无关（局部时间步长保护的是
+      该单元自身的*稳定性*，不是它交给相邻单元的量的*精度*）。这就是为
+      什么这里检查相邻单元体积比和非正交性（两者都直接影响 Green-Gauss
+      条件数），而不只是一个全局最大/最小体积比——BL 网格从近壁到远场
+      的全局体积范围本来就会跨越好几个数量级，这本身不是缺陷。
+    - 网格只有四面体（没有六面体/棱柱），近壁是 BL 挤出棱柱拆分成的
+      四面体，其余是 tetgen 核心填充——长宽比对两个区域分别检查，因为
+      BL 单元预期比 core 单元拉伸得多。
 
-References:
+参考文献：
     - Knupp, P. "Advances in grid quality metrics", 2000
     - Field, D.A. "Qualitative measures for initial mesh generation", 1988
     - Verdict Geometric Quality Library (Sandia) - TetRadiusRatio metric
@@ -41,6 +34,7 @@ from loguru import logger
 
 from .quality_report import MeshQualityReport
 from . import quality_metrics as _qm
+from .quality_evaluation import evaluate_quality, generate_recommendations
 
 if TYPE_CHECKING:
     from ..structures import FaceData, VolumeMeshData
@@ -167,10 +161,10 @@ class MeshQualityValidator:
                 self._check_overlap_and_proximity(report, nodes, cells, faces)
 
         # Evaluate pass/fail criteria
-        self._evaluate_quality(report)
+        evaluate_quality(report, self.thresholds)
 
         # Generate recommendations
-        self._generate_recommendations(report)
+        generate_recommendations(report, self.thresholds)
 
         # Log summary
         if log_summary:
@@ -319,8 +313,8 @@ class MeshQualityValidator:
             # faces itself when the caller didn't already have them.
             self._check_overlap_and_proximity(report, nodes, tet_conn, faces)
 
-        self._evaluate_quality(report)
-        self._generate_recommendations(report)
+        evaluate_quality(report, self.thresholds)
+        generate_recommendations(report, self.thresholds)
 
         if log_summary:
             logger.info(f"\n{report.summary()}")
@@ -577,131 +571,3 @@ class MeshQualityValidator:
         report.overlap_min_gap = overlap_report.min_gap_found
         report.overlapping_cell_ids = overlap_report.overlapping_cell_ids
 
-    def _evaluate_quality(self, report: MeshQualityReport) -> None:
-        """Evaluate overall quality based on thresholds.
-
-        Args:
-            report: Quality report to evaluate
-        """
-        # Check critical failures
-        if report.negative_volumes > self.thresholds['max_negative_volumes']:
-            report.passed = False
-            report.warnings.append(
-                f"CRITICAL: {report.negative_volumes} cells with negative volume"
-            )
-
-        # Global volume ratio is informational only now - see
-        # MeshQualityReport docstring for why it doesn't gate.
-        if report.volume_ratio > self.thresholds['max_volume_ratio']:
-            report.warnings.append(
-                f"INFO: Global volume ratio {report.volume_ratio:.2e} exceeds "
-                f"{self.thresholds['max_volume_ratio']:.2e} - expected for a "
-                f"graded BL mesh, not itself a defect. See adjacent-cell "
-                f"volume ratio below for the metric that actually matters."
-            )
-
-        if report.adjacent_volume_ratio_max > self.thresholds['max_adjacent_volume_ratio']:
-            report.passed = False
-            report.warnings.append(
-                f"HIGH: Max adjacent-cell volume ratio {report.adjacent_volume_ratio_max:.2f} "
-                f"exceeds threshold {self.thresholds['max_adjacent_volume_ratio']:.2f} - "
-                f"Green-Gauss gradient reconstruction (grad ~ 1/V) will be severely "
-                f"ill-conditioned at these cells, and will pollute their neighbours' fluxes"
-            )
-
-        if report.orthogonality_max > self.thresholds['max_orthogonality_angle']:
-            report.passed = False
-            report.warnings.append(
-                f"HIGH: Max non-orthogonality {report.orthogonality_max:.1f} deg exceeds "
-                f"threshold {self.thresholds['max_orthogonality_angle']:.1f} deg"
-            )
-
-        if report.bl_max_aspect_ratio is not None and report.bl_max_aspect_ratio > self.thresholds['bl_max_aspect_ratio']:
-            report.warnings.append(
-                f"MEDIUM: BL-region max aspect ratio {report.bl_max_aspect_ratio:.2f} exceeds "
-                f"threshold {self.thresholds['bl_max_aspect_ratio']:.2f}"
-            )
-        if report.core_max_aspect_ratio is not None and report.core_max_aspect_ratio > self.thresholds['core_max_aspect_ratio']:
-            report.warnings.append(
-                f"MEDIUM: Core-region max aspect ratio {report.core_max_aspect_ratio:.2f} exceeds "
-                f"threshold {self.thresholds['core_max_aspect_ratio']:.2f}"
-            )
-        if report.bl_max_aspect_ratio is None and report.max_aspect_ratio > self.thresholds['max_aspect_ratio']:
-            report.warnings.append(
-                f"MEDIUM: Max aspect ratio {report.max_aspect_ratio:.2f} exceeds "
-                f"threshold {self.thresholds['max_aspect_ratio']:.2f}"
-            )
-
-        if report.max_skewness > self.thresholds['max_skewness']:
-            report.passed = False
-            report.warnings.append(
-                f"HIGH: Max skewness {report.max_skewness:.4f} exceeds threshold "
-                f"{self.thresholds['max_skewness']:.4f}"
-            )
-
-        if report.n_overlapping_cells > self.thresholds['max_overlapping_cells']:
-            report.passed = False
-            report.warnings.append(
-                f"CRITICAL: {report.n_overlapping_cells} cells physically overlap a "
-                f"different, non-adjacent cell's faces"
-            )
-        if report.n_close_cell_pairs > 0:
-            report.warnings.append(
-                f"INFO: {report.n_close_cell_pairs} cell pair(s) are close enough to "
-                f"overlap with a small further parameter change "
-                + (f"(min gap {report.overlap_min_gap:.3e} m)" if report.overlap_min_gap is not None else "")
-                + " - not a defect by itself, see summary for details"
-            )
-
-    def _generate_recommendations(self, report: MeshQualityReport) -> None:
-        """Generate improvement recommendations based on quality issues.
-
-        Args:
-            report: Quality report with identified issues
-        """
-        if report.negative_volumes > 0:
-            report.recommendations.append(
-                "Fix negative volumes: Check surface mesh orientation and repair "
-                "self-intersecting elements"
-            )
-
-        if report.n_overlapping_cells > 0:
-            report.recommendations.append(
-                "Fix overlapping cells: usually a BL extrusion front crossing a "
-                "facing surface (tight underbody-to-ground gaps) or a core-fill "
-                "artifact at a tight BL seam - see the mesh repair loop "
-                "(mesh_gen/mesh_repair.py) for automated local cavity re-tiling"
-            )
-
-        if report.adjacent_volume_ratio_max > self.thresholds['max_adjacent_volume_ratio']:
-            report.recommendations.append(
-                "Reduce adjacent-cell volume ratio: usually caused by degenerate "
-                "(sliver) tetrahedra at sharp convex edges/corners of the body, or "
-                "abrupt tetgen size-grading transitions in the core fill - see the "
-                "mesh repair loop (mesh_gen/mesh_repair.py) for automated fixes"
-            )
-
-        if report.orthogonality_max > self.thresholds['max_orthogonality_angle']:
-            report.recommendations.append(
-                "Reduce non-orthogonality: smooth or locally re-mesh the implicated "
-                "cells - Green-Gauss gradient accuracy degrades sharply beyond this"
-            )
-
-        if (report.bl_max_aspect_ratio or 0) > self.thresholds['bl_max_aspect_ratio']:
-            report.recommendations.append(
-                "Improve BL-region aspect ratio: reduce growth_rate or first-layer "
-                "min_cell_size"
-            )
-        if (report.core_max_aspect_ratio or report.max_aspect_ratio) > self.thresholds.get('core_max_aspect_ratio', self.thresholds['max_aspect_ratio']):
-            report.recommendations.append(
-                "Improve core-region aspect ratio: tighten max_cell_size grading"
-            )
-
-        if report.max_skewness > 0.9:
-            report.recommendations.append(
-                "Reduce skewness: improve mesh generation parameters, consider "
-                "using different algorithm or smoothing"
-            )
-
-        if not report.recommendations and report.passed:
-            report.recommendations.append("Mesh quality is good - no immediate action needed")

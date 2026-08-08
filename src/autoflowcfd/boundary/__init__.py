@@ -1,34 +1,35 @@
-"""Boundary condition management module.
+"""边界条件管理模块。
 
-This module handles boundary condition application, including built-in
-types (velocity_inlet, pressure_outlet, wall, symmetry, slip_wall) and custom BC plugins.
+本模块负责边界条件的元数据登记，包括内置类型（velocity_inlet、
+pressure_outlet、wall、symmetry、slip_wall）以及自定义 BC 插件。实际
+的边界值计算由 `core/bc_handler.py` 独立完成——见
+`conditions.py`/`manager.py` 模块文档字符串对这个分层的说明。
 
 Key Components:
-    - BoundaryManager: BC application manager with auto/manual/hybrid modes
-    - YAMLConfigLoader: YAML configuration file loader
-    - BoundaryTypeMapper: Automatic boundary type mapper
-    - Built-in BCs: VelocityInletBC, PressureOutletBC, WallBC, SymmetryBC, SlipWallBC
-    - Custom BC extension interface via register_boundary_condition decorator
+    - BoundaryManager: 支持 auto/manual/hybrid 模式的 BC 登记管理器
+    - YAMLConfigLoader: YAML 配置文件加载器
+    - BoundaryTypeMapper: 自动边界类型映射器
+    - 内置 BC: InletBC、OutletBC、WallBC、GroundBC、FarfieldBC、SymmetryBC、BodyBC
+    - 通过 register_boundary_condition 装饰器提供的自定义 BC 扩展接口
 
 Example:
     >>> from autoflowcfd.boundary import BoundaryManager
-    >>> from autoflowcfd.grid import BoundaryMap
-    >>> 
-    >>> # Create boundary map
-    >>> bmap = BoundaryMap()
-    >>> bmap.add_boundary("INLET", [0, 1, 2])
-    >>> bmap.add_boundary("BODY", list(range(3, 100)))
-    >>> 
-    >>> # Create manager and configure boundaries
+    >>> from autoflowcfd.grid.structures import BoundaryMap
+    >>> import numpy as np
+    >>>
+    >>> # 创建边界映射
+    >>> bmap = BoundaryMap(
+    ...     groups={"INLET": np.array([0, 1, 2], dtype=np.int32)},
+    ...     bc_types={"INLET": "WALL"},
+    ... )
+    >>>
+    >>> # 创建管理器并登记边界条件
     >>> bc_manager = BoundaryManager(bmap)
-    >>> bc_manager.auto_configure()  # Auto mode
-    >>> # or
-    >>> bc_manager.configure_from_yaml("config.yaml")  # Manual mode
-    >>> # or
-    >>> bc_manager.hybrid_configure("config.yaml")  # Hybrid mode
-    >>> 
-    >>> # Apply to solution
-    >>> bc_manager.apply_all(solution, time=0.0)
+    >>> bc_manager.auto_configure()  # Auto 模式
+    >>> # 或者
+    >>> bc_manager.configure_from_yaml("config.yaml")  # Manual 模式
+    >>> # 或者
+    >>> bc_manager.hybrid_configure("config.yaml")  # Hybrid 模式
 """
 
 from .conditions import (

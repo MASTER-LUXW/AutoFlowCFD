@@ -1,13 +1,13 @@
-"""Checkpoint management for AutoFlowCFD solver.
+"""AutoFlowCFD 求解器的 checkpoint 管理。
 
-This module provides comprehensive checkpoint save/load functionality using HDF5 format,
-supporting cross-backend (CPU↔GPU) restart and configuration validation.
+本模块基于 HDF5 格式提供完整的 checkpoint 保存/加载功能，支持跨
+backend（CPU↔GPU）恢复求解和配置校验。
 
 Key Components:
-    - CheckpointManager: Main checkpoint handler
-    - ConservedVariables serialization
-    - ConvergenceHistory serialization
-    
+    - CheckpointManager: 主 checkpoint 处理器
+    - ConservedVariables 序列化
+    - ConvergenceHistory 序列化
+
 Example:
     >>> from autoflowcfd.core.checkpoint import CheckpointManager
     >>> manager = CheckpointManager(config)
@@ -33,51 +33,51 @@ except ImportError:
 
 
 class CheckpointManager:
-    """Manages simulation checkpoints with HDF5 format.
-    
+    """用 HDF5 格式管理仿真 checkpoint。
+
     Attributes:
-        config: Solver configuration
-        output_dir: Output directory for checkpoints
-        checkpoint_interval: Save interval (steps)
-        
+        config: 求解器配置
+        output_dir: checkpoint 的输出目录
+        checkpoint_interval: 保存间隔（迭代步数）
+
     Example:
         >>> manager = CheckpointManager(config, output_dir="results/")
         >>> manager.save(solution, history, iteration=100)
         >>> sol, hist, it = manager.load("results/checkpoints/checkpoint_iter_000100.h5")
     """
-    
+
     def __init__(
         self,
         config,
         output_dir: str = "results/",
         checkpoint_interval: int = 100
     ):
-        """Initialize checkpoint manager.
-        
+        """初始化 checkpoint 管理器。
+
         Args:
-            config: Solver configuration object
-            output_dir: Base output directory
-            checkpoint_interval: Checkpoint save interval (iterations)
+            config: 求解器配置对象
+            output_dir: 基础输出目录
+            checkpoint_interval: checkpoint 保存间隔（迭代数）
         """
         if not H5PY_AVAILABLE:
             raise ImportError(
                 "h5py is required for checkpoint functionality. "
                 "Install with: pip install h5py"
             )
-        
+
         self.config = config
         self.output_dir = Path(output_dir)
         self.checkpoint_interval = checkpoint_interval
         self.checkpoint_dir = self.output_dir / "checkpoints"
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        
+
         logger.info(f"CheckpointManager initialized: {self.checkpoint_dir}")
-    
+
     def _compute_config_hash(self) -> str:
-        """Compute SHA256 hash of solver configuration.
-        
+        """计算求解器配置的 SHA256 哈希。
+
         Returns:
-            SHA256 hash string
+            SHA256 哈希字符串
         """
         config_dict = {
             "mode": getattr(self.config, "mode", "steady"),
@@ -87,10 +87,10 @@ class CheckpointManager:
             "cfl_initial": getattr(self.config, "cfl_init", 0.1),
             "cfl_max": getattr(self.config, "cfl_max", 5.0),
         }
-        
+
         config_str = json.dumps(config_dict, sort_keys=True)
         return hashlib.sha256(config_str.encode()).hexdigest()
-    
+
     def save(
         self,
         solution: np.ndarray,
@@ -99,57 +99,55 @@ class CheckpointManager:
         metadata: Optional[dict] = None,
         extra_fields: Optional[Dict[str, np.ndarray]] = None,
     ) -> Optional[str]:
-        """Save checkpoint to HDF5 file.
+        """把 checkpoint 保存为 HDF5 文件。
 
         Args:
-            solution: Solution array, shape=(n_cells, n_vars)
-            history: Convergence history dict with keys:
+            solution: 解数组，形状=(n_cells, n_vars)
+            history: 收敛历史字典，含以下键：
                 - iterations: List[int]
                 - residuals: Dict[str, List[float]]
                 - coefficients: Dict[str, List[float]]
                 - cfl_history: List[float]
-            iteration: Current iteration number
-            metadata: Additional metadata (optional)
-            extra_fields: Additional per-cell solver-derived fields to persist
-                alongside the conserved solution, e.g. {'mu_t': mu_t} - the
-                turbulent eddy viscosity the solver actually computed that
-                iteration. Without this, post-processing (VTKExporter) has
-                no way to recover the exact SST-blended value and has to
-                fall back to a cruder k/omega estimate. None-valued entries
-                are skipped (e.g. a caller passing mu_t=None because
-                turbulence is disabled that run).
+            iteration: 当前迭代数
+            metadata: 额外元数据（可选）
+            extra_fields: 随守恒解一起持久化的额外逐单元求解器派生场，
+                例如 {'mu_t': mu_t}——求解器那一步实际算出的湍流涡粘性。
+                没有这个，后处理（VTKExporter）就无法还原精确的
+                SST 混合值，只能退回到更粗糙的 k/omega 估计。值为 None
+                的条目会被跳过（例如调用方因为本次求解关闭了湍流而传
+                mu_t=None）。
 
         Returns:
-            Path to checkpoint file, or None if failed
+            checkpoint 文件路径；失败则返回 None
 
         Example:
             >>> path = manager.save(solution, history, iteration=500)
             >>> print(f"Checkpoint saved: {path}")
         """
         try:
-            # Generate checkpoint filename
+            # 生成 checkpoint 文件名
             ckpt_filename = f"checkpoint_iter_{iteration:06d}.h5"
             ckpt_path = self.checkpoint_dir / ckpt_filename
-            
+
             logger.debug(f"Saving checkpoint: {ckpt_path}")
-            
+
             with h5py.File(ckpt_path, 'w') as f:
-                # === Metadata ===
+                # === 元数据 ===
                 meta_group = f.create_group("metadata")
                 meta_group.attrs['iteration'] = iteration
                 meta_group.attrs['timestamp'] = np.string_(datetime.now().isoformat())
                 meta_group.attrs['backend'] = np.string_(getattr(self.config, "backend", "cpu"))
                 meta_group.attrs['config_hash'] = np.string_(self._compute_config_hash())
-                
+
                 if metadata:
                     for key, value in metadata.items():
-                        # Convert string values to bytes for HDF5 compatibility
+                        # 把字符串值转成 bytes 以兼容 HDF5
                         if isinstance(value, str):
                             meta_group.attrs[key] = np.string_(value)
                         else:
                             meta_group.attrs[key] = value
-                
-                # === Solution ===
+
+                # === 解 ===
                 sol_group = f.create_group("solution")
                 sol_group.create_dataset("conserved", data=solution)
                 sol_group.attrs['shape'] = solution.shape
@@ -159,18 +157,18 @@ class CheckpointManager:
                     for name, arr in extra_fields.items():
                         if arr is not None:
                             sol_group.create_dataset(name, data=np.asarray(arr, dtype=np.float64))
-                
-                # === Convergence History ===
+
+                # === 收敛历史 ===
                 conv_group = f.create_group("convergence/history")
-                
-                # Iterations
+
+                # 迭代数
                 if 'iterations' in history:
                     conv_group.create_dataset(
                         "iterations",
                         data=np.array(history['iterations'], dtype=np.int32)
                     )
-                
-                # Residuals
+
+                # 残差
                 if 'residuals' in history:
                     res_group = conv_group.create_group("residuals")
                     for eq_name, values in history['residuals'].items():
@@ -178,8 +176,8 @@ class CheckpointManager:
                             eq_name,
                             data=np.array(values, dtype=np.float64)
                         )
-                
-                # Coefficients
+
+                # 系数
                 if 'coefficients' in history:
                     coef_group = conv_group.create_group("coefficients")
                     for coef_name, values in history['coefficients'].items():
@@ -187,15 +185,15 @@ class CheckpointManager:
                             coef_name,
                             data=np.array(values, dtype=np.float64)
                         )
-                
-                # CFL history
+
+                # CFL 历史
                 if 'cfl_history' in history:
                     conv_group.create_dataset(
                         "cfl_history",
                         data=np.array(history['cfl_history'], dtype=np.float64)
                     )
-                
-                # === Statistics (for transient mode) ===
+
+                # === 统计量（瞬态模式）===
                 if 'statistics' in history:
                     stats_group = f.create_group("statistics")
                     for stat_name, stat_data in history['statistics'].items():
@@ -203,76 +201,76 @@ class CheckpointManager:
                             stats_group.create_dataset(stat_name, data=stat_data)
                         else:
                             stats_group.attrs[stat_name] = stat_data
-            
+
             logger.info(f"✓ Checkpoint saved: {ckpt_path} ({iteration} iterations)")
             return str(ckpt_path)
-            
+
         except Exception as e:
             logger.error(f"Failed to save checkpoint: {e}")
             import traceback
             logger.debug(traceback.format_exc())
             return None
-    
+
     def load(
         self,
         checkpoint_path: Union[str, Path],
         target_backend: Optional[str] = None
     ) -> Tuple[np.ndarray, dict, int, dict]:
-        """Load checkpoint from HDF5 file.
-        
+        """从 HDF5 文件加载 checkpoint。
+
         Args:
-            checkpoint_path: Path to checkpoint file
-            target_backend: Target backend ("cpu" or "gpu"). 
-                          If None, uses original backend.
-            
+            checkpoint_path: checkpoint 文件路径
+            target_backend: 目标 backend（"cpu" 或 "gpu"）。
+                          若为 None，使用原始 backend。
+
         Returns:
-            Tuple of (solution, history, iteration, metadata)
-            
+            (solution, history, iteration, metadata) 元组
+
         Raises:
-            FileNotFoundError: Checkpoint file not found
-            ValueError: Invalid checkpoint format
-            
+            FileNotFoundError: 找不到 checkpoint 文件
+            ValueError: checkpoint 格式无效
+
         Example:
             >>> solution, history, iteration, meta = manager.load("checkpoint.h5")
             >>> print(f"Resumed from iteration {iteration}")
         """
         checkpoint_path = Path(checkpoint_path)
-        
+
         if not checkpoint_path.exists():
             raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
-        
+
         try:
             logger.info(f"Loading checkpoint: {checkpoint_path}")
-            
+
             with h5py.File(checkpoint_path, 'r') as f:
-                # === Load Metadata ===
+                # === 加载元数据 ===
                 meta_group = f["metadata"]
                 iteration = int(meta_group.attrs['iteration'])
-                
-                # Decode byte strings to regular strings
+
+                # 把字节串解码成普通字符串
                 def decode_attr(value):
-                    """Decode HDF5 byte string attributes to Python strings."""
+                    """把 HDF5 字节串属性解码成 Python 字符串。"""
                     if isinstance(value, bytes):
                         return value.decode('utf-8')
                     return value
-                
+
                 timestamp = decode_attr(meta_group.attrs['timestamp'])
                 original_backend = decode_attr(meta_group.attrs['backend'])
                 config_hash = decode_attr(meta_group.attrs['config_hash'])
-                
+
                 metadata = {
                     'iteration': iteration,
                     'timestamp': timestamp,
                     'original_backend': original_backend,
                     'config_hash': config_hash,
                 }
-                
-                # Extract additional metadata
+
+                # 提取额外的元数据
                 for key in meta_group.attrs.keys():
                     if key not in ['iteration', 'timestamp', 'backend', 'config_hash']:
                         metadata[key] = decode_attr(meta_group.attrs[key])
-                
-                # === Validate Configuration ===
+
+                # === 校验配置 ===
                 current_hash = self._compute_config_hash()
                 if config_hash != current_hash:
                     logger.warning(
@@ -281,62 +279,62 @@ class CheckpointManager:
                         f"  Current config:    {current_hash[:16]}...\n"
                         f"  This may cause incorrect results."
                     )
-                
-                # === Load Solution ===
+
+                # === 加载解 ===
                 sol_group = f["solution"]
                 solution = sol_group["conserved"][:]
 
-                # Any extra per-cell fields saved alongside the conserved
-                # solution (see save()'s extra_fields, e.g. 'mu_t') - kept
-                # under metadata['fields'] rather than a 5th return value so
-                # existing (solution, history, iteration, metadata) callers
-                # are unaffected; absent for checkpoints written before this
-                # was added, or if extra_fields was never passed to save().
+                # 随守恒解一起保存的任何额外逐单元字段（见 save() 的
+                # extra_fields 参数，例如 'mu_t'）——放在
+                # metadata['fields'] 下而不是作为第 5 个返回值，这样现有
+                # 的 (solution, history, iteration, metadata) 调用方不受
+                # 影响；对于在加上这个功能之前写入的 checkpoint，或者
+                # save() 从未传过 extra_fields 的情况，这里就不存在。
                 extra_field_names = [k for k in sol_group.keys() if k != "conserved"]
                 if extra_field_names:
                     metadata['fields'] = {name: sol_group[name][:] for name in extra_field_names}
 
-                # Backend conversion if needed
+                # 如需要则做 backend 转换
                 if target_backend and target_backend != original_backend:
                     logger.info(
                         f"Converting solution from {original_backend} to {target_backend}"
                     )
-                    # TODO: Implement actual CPU↔GPU conversion
-                    # For now, just warn the user
+                    # TODO: 实现真正的 CPU↔GPU 转换
+                    # 目前只是提示用户
                     logger.warning(
                         "Cross-backend conversion not yet implemented. "
                         "Solution will remain on original backend."
                     )
-                
-                # === Load Convergence History ===
+
+                # === 加载收敛历史 ===
                 conv_group = f["convergence/history"]
                 history = {}
-                
-                # Iterations
+
+                # 迭代数
                 if 'iterations' in conv_group:
                     history['iterations'] = conv_group['iterations'][:].tolist()
-                
-                # Residuals
+
+                # 残差
                 if 'residuals' in conv_group:
                     history['residuals'] = {}
                     for eq_name in conv_group['residuals'].keys():
                         history['residuals'][eq_name] = (
                             conv_group['residuals'][eq_name][:].tolist()
                         )
-                
-                # Coefficients
+
+                # 系数
                 if 'coefficients' in conv_group:
                     history['coefficients'] = {}
                     for coef_name in conv_group['coefficients'].keys():
                         history['coefficients'][coef_name] = (
                             conv_group['coefficients'][coef_name][:].tolist()
                         )
-                
-                # CFL history
+
+                # CFL 历史
                 if 'cfl_history' in conv_group:
                     history['cfl_history'] = conv_group['cfl_history'][:].tolist()
-                
-                # === Load Statistics (transient mode) ===
+
+                # === 加载统计量（瞬态模式）===
                 if 'statistics' in f:
                     history['statistics'] = {}
                     stats_group = f['statistics']
@@ -344,71 +342,71 @@ class CheckpointManager:
                         history['statistics'][stat_name] = stats_group[stat_name][:]
                     for attr_name in stats_group.attrs.keys():
                         history['statistics'][attr_name] = stats_group.attrs[attr_name]
-            
+
             logger.success(
                 f"✓ Checkpoint loaded: {checkpoint_path}\n"
                 f"  Iteration: {iteration}\n"
                 f"  Solution shape: {solution.shape}\n"
                 f"  History entries: {len(history.get('iterations', []))}"
             )
-            
+
             return solution, history, iteration, metadata
-            
+
         except Exception as e:
             logger.error(f"Failed to load checkpoint: {e}")
             import traceback
             logger.debug(traceback.format_exc())
             raise RuntimeError(f"Checkpoint loading failed: {e}")
-    
+
     def should_save(self, iteration: int) -> bool:
-        """Check if checkpoint should be saved at this iteration.
-        
+        """检查这一迭代步是否应该保存 checkpoint。
+
         Args:
-            iteration: Current iteration number
-            
+            iteration: 当前迭代数
+
         Returns:
-            True if should save checkpoint
+            应保存则为 True
         """
         return iteration % self.checkpoint_interval == 0
-    
+
     def list_checkpoints(self) -> List[Path]:
-        """List all available checkpoints.
-        
+        """列出所有可用的 checkpoint。
+
         Returns:
-            List of checkpoint file paths, sorted by iteration
+            按迭代数排序的 checkpoint 文件路径列表
         """
         if not self.checkpoint_dir.exists():
             return []
-        
+
         checkpoints = list(self.checkpoint_dir.glob("checkpoint_iter_*.h5"))
         checkpoints.sort(key=lambda p: int(p.stem.split('_')[-1]))
-        
+
         return checkpoints
-    
+
     def get_latest_checkpoint(self) -> Optional[Path]:
-        """Get the most recent checkpoint.
-        
+        """获取最近的一个 checkpoint。
+
         Returns:
-            Path to latest checkpoint, or None if no checkpoints exist
+            最新 checkpoint 的路径；不存在则返回 None
         """
         checkpoints = self.list_checkpoints()
         return checkpoints[-1] if checkpoints else None
-    
+
     def cleanup_old_checkpoints(self, keep_last: int = 3) -> int:
-        """Remove old checkpoints, keeping only the most recent ones.
-        
+        """删除旧的 checkpoint，只保留最近的几个。
+
         Args:
-            keep_last: Number of recent checkpoints to keep
-            
+            keep_last: 保留的最近 checkpoint 数量
+
         Returns:
-            Number of deleted checkpoints
+            已删除的 checkpoint 数量
         """
         checkpoints = self.list_checkpoints()
-        
+
         if len(checkpoints) <= keep_last:
             return 0
-        
-        # Delete oldest checkpoints
+
+        # 删除最旧的 checkpoint
         to_delete = checkpoints[:-keep_last]
         for ckpt_path in to_delete:
             try:
@@ -416,7 +414,7 @@ class CheckpointManager:
                 logger.debug(f"Deleted old checkpoint: {ckpt_path}")
             except Exception as e:
                 logger.warning(f"Failed to delete {ckpt_path}: {e}")
-        
+
         deleted_count = len(to_delete)
         logger.info(f"Cleaned up {deleted_count} old checkpoints")
         return deleted_count
@@ -427,16 +425,16 @@ def resume_from_checkpoint(
     config,
     target_backend: Optional[str] = None
 ) -> Tuple[np.ndarray, dict, int, dict]:
-    """Convenience function to resume from checkpoint.
-    
+    """从 checkpoint 恢复求解的便捷函数。
+
     Args:
-        checkpoint_path: Path to checkpoint file
-        config: Solver configuration
-        target_backend: Target backend (optional)
-        
+        checkpoint_path: checkpoint 文件路径
+        config: 求解器配置
+        target_backend: 目标 backend（可选）
+
     Returns:
-        Tuple of (solution, history, iteration, metadata)
-        
+        (solution, history, iteration, metadata) 元组
+
     Example:
         >>> solution, history, iteration, meta = resume_from_checkpoint(
         ...     "results/checkpoints/checkpoint_iter_001000.h5",

@@ -1,6 +1,6 @@
-"""Stage B: Targeted regeneration with BL thickness cap and cavity remesh.
+"""Stage B：结合 BL 厚度封顶与 cavity 重新铺网的定向再生成。
 
-Split from mesh_background.py to adhere to line count limits.
+从 mesh_background.py 拆分出来以控制行数。
 """
 
 import numpy as np

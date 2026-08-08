@@ -1,259 +1,78 @@
-# FR Solver Core Module
+# core 求解器模块
 
-## Overview
+## 概述
 
-This module implements the core computational components for AutoFlowCFD's Flux Reconstruction (FR) solver, supporting both steady-state RANS and transient DES/LES simulations.
+本模块实现 AutoFlowCFD 的核心计算组件：基于有限体积法（FVM）的稳态 RANS
+求解器与瞬态 DES/LES 求解器。
 
-## Features
+> 本文档此前描述的是一套独立的、按类拆分的实现（FRScheme/SSTKOmegaModel/
+> WallFunctionModel/ConvergenceMonitor 等），但那套实现从未真正接入求解器
+> 主流程，已作为无用代码整体删除。下面描述的是实际在跑的live实现。
 
-### 1. FR Discretization Scheme (`fr_scheme.py`)
-- **High-order accuracy**: Supports 1st, 2nd, and 3rd order FR formats
-- **HLLC Riemann solver**: Robust numerical flux computation
-- **Solution reconstruction**: Polynomial-based high-order reconstruction
-- **Gradient computation**: Green-Gauss theorem based gradient calculation
+## 主要模块
 
-### 2. Computational Backends
+### 1. 稳态求解器（`solver_steady.py`：`FRSolver`）
+- SSP-RK3 时间推进
+- AUSM+up（低马赫数预条件）与 HLLC 两种无粘通量格式，二选一
+- 内嵌 SST k-ω 湍流模型、标准/增强壁面函数
+- 自适应 CFL、残差收敛监控
 
-#### CPU Backend (`backend/cpu_backend.py`)
-- **Numba JIT acceleration**: Automatic parallelization with `@njit(parallel=True)`
-- **Multi-threading**: Configurable thread count via `n_threads` parameter
-- **Performance**: ~50 iterations/min for million-cell grids (8-core i7)
+### 2. 瞬态求解器（`transient_solver_loop.py`：`TransientSolver`）
+- 支持 DES/DDES/LES 时间推进
+- 时均场、RMS 脉动统计
+- checkpoint 保存/续算
 
-#### GPU Backend (`backend/gpu_backend.py`)
-- **CUDA acceleration**: Maximum performance on NVIDIA GPUs
-- **CuPy integration**: Seamless GPU memory management
-- **Performance**: ~200 iterations/min for million-cell grids (RTX 3090)
+### 3. 数值核心
+- `fvm_viscous_residual.py`（`ViscousRANSResidual`）：无粘通量（AUSM+up/HLLC）
+  + 粘性通量 + SST 湍流源项 + 壁面函数，稳态/瞬态共用
+- `fvm_gradients.py`：Green-Gauss 梯度重构、Barth-Jespersen 限制器
+- `fvm_faces.py`（`FVMFaceExtractor`）：面几何数据的共享持有者，实际面提取
+  统一走 `grid.mesh_gen.face_extractor.FaceExtractor`
+- `bc_handler.py`（`BoundaryConditionHandler`）：向量化边界条件应用
+- `aero_coeffs.py`（`AeroCoefficientCalculator`）：Cd/Cl 等气动系数积分
+- `time_integration.py`（`TimeIntegrator`）：Backward Euler / RK2 / AB3 时间格式
 
-#### Backend Factory (`backend/__init__.py`)
-```python
-from autoflowcfd.core import create_backend
+### 4. 计算后端（`backend/`）
+- `backend/cpu_backend.py`（Numba）、`backend/gpu_backend.py`（CUDA/CuPy）
+- **尚未接入求解器主流程**：目前 `FRSolver`/`TransientSolver` 里的
+  `self.backend` 建好之后没有被调用——真正的数值计算在
+  `fvm_viscous_residual.py` 里用 numpy 直接实现。把完整 RANS-SST 物理移植
+  成 Numba/CUDA kernel 并接入主流程是一项独立的、工作量较大的后续任务。
 
-# Auto-select best available backend
-backend = create_backend("auto")
-
-# Force CPU with 8 threads
-backend = create_backend("cpu", n_threads=8)
-
-# Force GPU on device 0
-backend = create_backend("gpu", device_id=0)
-```
-
-### 3. Turbulence Models
-
-#### SST k-ω Model (`turbulence.py`)
-- **Steady RANS**: Shear Stress Transport k-omega model
-- **Blending function**: Smooth transition between k-ω (near-wall) and k-ε (far-field)
-- **Eddy viscosity**: Computation with positivity constraints
-
-#### Wall Functions (`wall_functions.py`)
-- **Standard log-law**: Valid for y+ = 30-100
-- **Enhanced treatment**: Spalding's unified wall law for full y+ range
-- **Industrial meshes**: Optimized for automotive RANS grids (y+ = 30-100)
-
-### 4. Time Integration (`time_integration.py`)
-
-Supports multiple time discretization schemes:
-
-| Scheme | Order | Stability | Use Case |
-|--------|-------|-----------|----------|
-| Backward Euler | 1st | Unconditionally stable | DES (default) |
-| Runge-Kutta 2 | 2nd | CFL ≤ 1.0 | LES (accurate) |
-| Adams-Bashforth 3 | 3rd | CFL ≤ 0.3 | Research LES |
+## 快速上手
 
 ```python
-from autoflowcfd.core import TimeIntegrator, TimeIntegrationScheme
+from autoflowcfd.core import FRSolver
+from autoflowcfd.config import SteadyConfig
 
-# Backward Euler for DES
-integrator = TimeIntegrator(
-    scheme=TimeIntegrationScheme.BACKWARD_EULER,
-    dt=1e-5,
-    cfl_target=1.0
-)
+config = SteadyConfig(order=2, max_iter=3000)
+solver = FRSolver(grid_data, config)
+result = solver.solve()
 
-# RK2 for LES
-integrator = TimeIntegrator(
-    scheme=TimeIntegrationScheme.RUNGE_KUTTA_2,
-    dt=5e-6,
-    cfl_target=0.5
-)
+print(f"Converged: {result.converged}, iterations: {result.iterations}")
 ```
 
-### 5. Convergence Monitoring (`convergence.py`)
-- **Residual tracking**: Real-time residual norm monitoring
-- **Adaptive CFL**: Automatic CFL adjustment based on convergence behavior
-- **Coefficient stability**: Drag/lift coefficient fluctuation analysis
-- **Export**: CSV convergence history for post-processing
-
-### 6. Transient Solver (`solver_transient.py`)
-- **Time marching**: Main loop for DES/LES simulations
-- **Statistics collection**: Time-averaged fields, RMS fluctuations
-- **Checkpoint management**: HDF5 format for restart capability
-- **Progress reporting**: ETA estimation and performance metrics
-
-### 7. Steady-Transient Coupling (`coupling.py`)
-
-#### Synthetic Turbulence Generation (STG)
-- **Vortex method**: Random vortex superposition scaled by turbulence intensity
-- **Synthetic Eddy Method (SEM)**: Eddy-based fluctuation generation
-- **RANS initialization**: Generate realistic fluctuations from k, ω fields
-
-#### Workflow
-```python
-from autoflowcfd.core import SteadyTransientCoupler
-
-# Load steady RANS solution
-coupler = SteadyTransientCoupler(stg_method="vortex")
-steady_data = coupler.load_steady_solution("steady_checkpoint.h5")
-
-# Initialize transient with synthetic turbulence
-solution_transient = coupler.initialize_transient(
-    steady_data, grid_data, add_fluctuations=True
-)
-
-# Estimate convergence time
-t_conv = coupler.estimate_convergence_time(
-    characteristic_length=4.5,  # vehicle length (m)
-    velocity=30.0  # freestream (m/s)
-)
-```
-
-## Usage Examples
-
-### Steady-State RANS Simulation
+瞬态：
 
 ```python
-from autoflowcfd.core import FRScheme, create_backend, SSTKOmegaModel
+from autoflowcfd.core import TransientSolver
+from autoflowcfd.config import TransientConfig
 
-# Create FR scheme (2nd order)
-fr = FRScheme(order=2)
-
-# Initialize CPU backend
-backend = create_backend("cpu", n_threads=8)
-backend.initialize(n_cells=1000000, n_nodes=500000)
-
-# Setup turbulence model
-turb = SSTKOmegaModel()
-k, omega = turb.initialize_turbulence_fields(1000000)
-
-# Main iteration loop
-for iteration in range(5000):
-    # Compute fluxes
-    flux = backend.compute_flux(solution, connectivity, normals)
-    
-    # Compute residuals
-    residuals = backend.compute_residuals(solution, flux, volumes, boundary_mask)
-    
-    # Update solution
-    solution = backend.update_solution(solution, residuals, dt, cfl)
-    
-    # Check convergence
-    if converged:
-        break
+config = TransientConfig(dt=1e-4, total_time=0.2)
+solver = TransientSolver(grid_data, config)
+result = solver.solve()
 ```
 
-### Transient DES Simulation
+## 测试
 
-```python
-from autoflowcfd.core import (
-    TransientSolver, TimeIntegrator, TimeIntegrationScheme,
-    ConvergenceMonitor
-)
-
-# Setup time integrator (backward Euler for DES)
-integrator = TimeIntegrator(
-    scheme=TimeIntegrationScheme.BACKWARD_EULER,
-    dt=1e-5,
-    cfl_target=1.0
-)
-
-# Setup convergence monitor
-monitor = ConvergenceMonitor(
-    convergence_threshold=1e-3,
-    max_iterations=10000
-)
-
-# Create transient solver
-solver = TransientSolver(
-    backend=backend,
-    fr_scheme=fr,
-    time_integrator=integrator,
-    convergence_monitor=monitor,
-    dt=1e-5,
-    total_time=0.2,  # 0.2 seconds physical time
-    sampling_interval=1e-4,
-    checkpoint_interval=0.01
-)
-
-# Run simulation
-result = solver.solve(solution, grid_data, boundary_map, bc_params)
-
-# Get statistics
-mean_coeffs = result.get_mean_coefficients()
-rms_coeffs = result.get_rms_coefficients()
-
-print(f"Mean Cd: {mean_coeffs['Cd']:.4f}")
-print(f"RMS Cd': {rms_coeffs['Cd_rms']:.4f}")
-```
-
-## Performance Benchmarks
-
-### CPU Mode (Numba, 8 threads)
-| Grid Size | Steady RANS | Transient DES | Memory |
-|-----------|-------------|---------------|--------|
-| 100K cells | ~100 iter/min | ~20 iter/min | ~2 GB |
-| 1M cells | ~50 iter/min | ~10 iter/min | ~8 GB |
-| 10M cells | ~5 iter/min | ~1 iter/min | ~40 GB |
-
-### GPU Mode (RTX 3090)
-| Grid Size | Steady RANS | Transient DES | Memory |
-|-----------|-------------|---------------|--------|
-| 100K cells | ~500 iter/min | ~100 iter/min | ~4 GB |
-| 1M cells | ~200 iter/min | ~50 iter/min | ~16 GB |
-| 10M cells | ~20 iter/min | ~5 iter/min | ~80 GB |
-
-## Testing
-
-Run unit tests:
 ```bash
-python -m pytest tests/unit/test_fr_scheme.py -v
+python -m pytest tests/unit/test_fvm_core_v2.py -v
 python -m pytest tests/unit/test_backends.py -v
-python -m pytest tests/unit/test_time_and_turbulence.py -v
+python -m pytest tests/integration/test_end_to_end_steady.py -v
 ```
 
-Run integration test:
-```bash
-python tests/integration/test_iteration3_solver.py
-```
+## 参考文献
 
-Run example:
-```bash
-python examples/steady_rans_example.py
-```
-
-## Implementation Status
-
-| Component | Status | Notes |
-|-----------|--------|-------|
-| FR Scheme (1st/2nd/3rd order) | ✅ Complete | HLLC Riemann solver |
-| CPU Backend (Numba) | ✅ Complete | Parallel acceleration |
-| GPU Backend (CUDA) | ⚠️ Partial | Python wrapper ready, CUDA kernels pending |
-| SST k-ω Model | ✅ Complete | Full implementation |
-| Wall Functions | ✅ Complete | Standard + Enhanced |
-| Time Integration | ✅ Complete | BE, RK2, AB3 |
-| Convergence Monitor | ✅ Complete | Adaptive CFL |
-| Transient Solver | ✅ Complete | Statistics + checkpoints |
-| STG Coupling | ✅ Complete | Vortex + SEM methods |
-
-## Next Steps (Iteration 3 Completion)
-
-1. **CUDA Kernel Implementation**: Compile `fr_flux.cu` to dynamic library
-2. **DES/DDES Model**: Implement hybrid RANS-LES turbulence model
-3. **Full Integration Test**: End-to-end simulation with real mesh
-4. **Performance Optimization**: Profile and optimize hot paths
-5. **Documentation**: Add docstrings and type hints to all public APIs
-
-## References
-
-- Huynh, H. T. (2009). "A Flux Reconstruction Scheme for Hyperbolic Conservation Laws"
 - Menter, F. R. (1994). "Two-Equation Eddy-Viscosity Turbulence Models"
-- Shurmer, G. et al. (2019). "Synthetic Turbulence Generation for LES Inflow"
+- Liou, M.-S. (2006). "A sequel to AUSM, Part II: AUSM+-up"
+- Toro, E. F. (2009). "Riemann Solvers and Numerical Methods for Fluid Dynamics"

@@ -1,9 +1,9 @@
-"""Shared field-interpolation helpers for post-processing modules.
+"""后处理模块共用的场插值辅助函数。
 
-Used by both vtk_export.py (writing POINT_DATA from cell-centered FVM
-solution data) and transient_stats.py (accumulating node-resolution
-time statistics from the same cell-centered data) - both need the exact
-same cell-to-node conversion, so it lives here once rather than twice.
+vtk_export.py（从单元中心的 FVM 解数据写出 POINT_DATA）和
+transient_stats.py（从同一份单元中心数据累积节点分辨率的时间统计量）
+都需要，两者要的是完全相同的单元->节点转换，所以放在这里共用一份，
+而不是各写一份。
 """
 
 import numpy as np
@@ -16,27 +16,23 @@ def cell_to_node(
     volumes: np.ndarray = None,
     fallback: float = 0.0,
 ) -> np.ndarray:
-    """Interpolate a per-cell scalar field to per-node values.
+    """把逐单元的标量场插值成逐节点的值。
 
-    Volume-weighted average over each node's connected cells (a vectorized
-    bincount scatter), not a plain unweighted mean - weighting by cell
-    volume keeps a node's value from being pulled toward whichever
-    neighboring cells happen to be largest/smallest, which matters near a
-    boundary layer where cell size can vary by orders of magnitude between
-    adjacent tets.
+    对每个节点相连的单元做体积加权平均（向量化的 bincount scatter），
+    而不是简单的不加权平均——按单元体积加权可以避免节点值被随便哪个
+    相邻单元（恰好体积特别大或特别小）拉偏，这在边界层附近尤其重要，
+    因为相邻四面体的体积可能相差好几个数量级。
 
     Args:
-        connectivity: (n_cells, nodes_per_cell) int cell-to-node array
-        cell_values: (n_cells,) per-cell field values
-        n_points: number of mesh nodes
-        volumes: (n_cells,) cell volumes for weighting; None = unweighted
-            (equal-weight) average
-        fallback: value assigned to any node with no connected cells
-            (shouldn't happen for a proper volume mesh, but avoids a
-            divide-by-zero if it does)
+        connectivity: (n_cells, nodes_per_cell) 整数单元-节点数组
+        cell_values: (n_cells,) 逐单元场值
+        n_points: 网格节点数
+        volumes: (n_cells,) 加权用的单元体积；None 表示不加权（等权重）平均
+        fallback: 赋给没有相连单元的节点的值（对正常的体网格不应该发生，
+            但万一发生了可以避免除零）
 
     Returns:
-        (n_points,) per-node interpolated values
+        (n_points,) 逐节点插值结果
     """
     conn = np.asarray(connectivity)
     n_cells, nodes_per_cell = conn.shape

@@ -1,23 +1,30 @@
-"""Second-order viscous RANS residual for the steady-state solver.
+"""稳态求解器用的二阶粘性 RANS 残差。
 
-This module replaces the first-order, inviscid-only residual path with a
-physically complete cell-centred finite-volume residual that includes:
+本模块取代了早期一阶、纯无粘的残差实现，提供物理上完整的单元中心有限
+体积残差，包含：
 
-* **MUSCL reconstruction** (item 3): Green-Gauss gradients + Barth-Jespersen
-  limiter give genuinely second-order left/right face states instead of the
-  cell-centre values used before.
-* **Inviscid flux** (HLLC Riemann solver) evaluated on the reconstructed states.
-* **Viscous flux** (item 2): molecular + turbulent (eddy) shear stress and
-  thermal/turbulent diffusion, using the compressible Newtonian stress tensor
-  with Stokes' hypothesis.
-* **SST k-omega source terms** (item 4): production, dissipation and
-  cross-diffusion actually coupled into the k and omega equations, with the
-  eddy viscosity feeding back into the momentum viscous flux.
+* **MUSCL 重构**：Green-Gauss 梯度 + Barth-Jespersen 限制器，给出真正
+  二阶精度的面左/右状态，而不是之前用的单元中心值。
+* **无粘通量**（HLLC Riemann 求解器）在重构状态上求值。
+* **粘性通量**：分子粘性 + 湍流（涡）剪切应力，以及热/湍流扩散，用
+  Stokes 假设下的可压缩牛顿应力张量。
+* **SST k-omega 源项**：production、dissipation 和 cross-diffusion
+  真正耦合进 k、omega 方程，涡粘性反馈进动量方程的粘性通量。
 
-The whole path is vectorised NumPy so it is deterministic and unit-testable.
-Conservative variable ordering is ``[rho, rho u, rho v, rho w, E, rho k, rho w_sst]``
-where the turbulence variables are carried in conservative (density-weighted)
-form to match the transport in the inviscid flux.
+整条路径都是向量化 NumPy 实现，因此结果确定、便于单元测试。守恒变量
+顺序为 ``[rho, rho u, rho v, rho w, E, rho k, rho w_sst]``，湍流量以
+守恒（密度加权）形式携带，与无粘通量里的输运形式一致。
+
+`ViscousRANSResidual` 本身只有构造函数、`to_primitive`/`compute`（编排整个
+残差计算的入口）和几个跨物理项共享的辅助方法（湍流量的壁面 ghost 值、
+k/omega 梯度、速度梯度）。三块具体物理各自的实现拆到了同目录下三个
+mixin 文件里（纯粹是控制单文件行数，不是独立的概念层）：
+
+* `fvm_residual_inviscid.InviscidFluxMixin` —— MUSCL 重构 + AUSM+up（HLLC
+  备用参考实现）。
+* `fvm_residual_viscous.ViscousFluxMixin` —— 应力/热传导/湍流扩散通量 +
+  Menter 壁面函数。
+* `fvm_residual_sst.SSTSourceMixin` —— 应变率、涡粘性、SST 源项。
 """
 
 from __future__ import annotations
@@ -26,131 +33,109 @@ import numpy as np
 from scipy.spatial import cKDTree
 from loguru import logger
 
-from .fvm_gradients import FaceGeometry, green_gauss_gradient, barth_jespersen_limiter
+from .fvm_gradients import FaceGeometry, green_gauss_gradient
+from .fvm_residual_inviscid import InviscidFluxMixin
+from .fvm_residual_viscous import ViscousFluxMixin
+from .fvm_residual_sst import SSTSourceMixin
+
+# GPU（CUDA）kernel 可用性标记：三个 mixin 文件各自从对应的 *_kernels_gpu.py
+# 导入自己需要的 dispatch 函数，这里只需要 CUDA_AVAILABLE 本身（__init__
+# 用它判断 use_gpu 请求是否可行）。见各 *_gpu.py 模块文档：**从未在真实
+# GPU 硬件上运行验证过**。
+from .fvm_inviscid_kernels_gpu import CUDA_AVAILABLE
 
 GAMMA = 1.4
-R_GAS = 287.058          # J/(kg K), dry air
-PRANDTL_LAMINAR = 0.72
-PRANDTL_TURBULENT = 0.90
-CP = GAMMA * R_GAS / (GAMMA - 1.0)
-
-# SST k-omega constants (Menter 2003).
-SST_A1 = 0.31
-SST_BETA_STAR = 0.09
-SST_KAPPA = 0.41
-SST_SIGMA_K1, SST_SIGMA_K2 = 0.85, 1.0
-SST_SIGMA_W1, SST_SIGMA_W2 = 0.5, 0.856
-SST_BETA1, SST_BETA2 = 0.075, 0.0828
-SST_GAMMA1 = SST_BETA1 / SST_BETA_STAR - SST_SIGMA_W1 * SST_KAPPA**2 / np.sqrt(SST_BETA_STAR)
-SST_GAMMA2 = SST_BETA2 / SST_BETA_STAR - SST_SIGMA_W2 * SST_KAPPA**2 / np.sqrt(SST_BETA_STAR)
-
-# AUSM+up constants (Liou 2006, JCP 214:137-170, "A sequel to AUSM, Part
-# II: AUSM+-up for all speeds").
-_AUSM_KP = 0.25      # velocity-pressure coupling coefficient
-_AUSM_KU = 0.75      # pressure-velocity coupling coefficient
-_AUSM_SIGMA = 1.0    # Mp cutoff coefficient
-_AUSM_BETA = 1.0 / 8.0  # Mach-splitting shape parameter
-
-# Menter scalable/automatic wall treatment constants (log-law of the
-# wall). E=9.8 is the smooth-wall log-law intercept for kappa=0.41;
-# WALL_YPLUS_SWITCH=11.06 is the (kappa,E)-consistent intersection of the
-# linear viscous-sublayer profile u+=y+ and the log law u+=(1/kappa)ln(E
-# y+) - below it the sublayer formula is used directly, at/above it the
-# log law is solved for iteratively. This is the standard two-branch
-# "scalable" wall function switch (Menter), not the single continuous
-# Spalding formula - simpler to implement/verify while still being
-# mesh-independent across the y+ range it's designed for.
-WALL_LOG_KAPPA = SST_KAPPA
-WALL_LOG_E = 9.8
-WALL_YPLUS_SWITCH = 11.06
+R_GAS = 287.058          # J/(kg K)，干空气气体常数
 
 
-def _blend(f1, a1_val, a2_val):
-    """SST blend: f1*phi1 + (1-f1)*phi2."""
-    return f1 * a1_val + (1.0 - f1) * a2_val
-
-
-class ViscousRANSResidual:
-    """Compute the full second-order viscous RANS residual.
+class ViscousRANSResidual(InviscidFluxMixin, ViscousFluxMixin, SSTSourceMixin):
+    """计算完整的二阶粘性 RANS 残差。
 
     Parameters
     ----------
     geom:
-        Oriented :class:`FaceGeometry`.
+        已定向的 :class:`FaceGeometry`。
     mu_lam:
-        Molecular dynamic viscosity (Pa s).
+        分子动力粘度（Pa s）。
     wall_distance:
-        Per-cell distance to the nearest viscous wall (m).  Required for the
-        SST blending functions; if ``None`` a large value is assumed
-        (free-stream behaviour everywhere).
+        每个单元到最近粘性壁面的距离（m）。SST 混合函数需要此量；若为
+        ``None``，则假设全场为一个很大的值（等效自由来流行为）。
     turbulent:
-        If False, k/omega source terms and eddy viscosity are disabled
-        (laminar Navier-Stokes).
+        若为 False，则关闭 k/omega 源项和涡粘性（层流 Navier-Stokes）。
     mach_ref:
-        Reference (freestream) Mach number, used only by the AUSM+up
-        inviscid flux's low-Mach scaling function f_a (see _ausm_up) to
-        regularize its stagnation-point behaviour - NOT a preconditioner
-        on the pseudo-time step or wave-speed structure (that approach
-        was tried and reverted; see solver_steady.py's comment). Default
-        0.1 is a generic, safe fallback for callers (e.g. the transient
-        solver) that don't compute a case-specific value; pass the
-        solve's actual freestream Mach for a physically-consistent
-        scaling.
+        参考（自由来流）马赫数，仅供 AUSM+up 无粘通量的低马赫数缩放函数
+        f_a（见 _ausm_up）用来规整其驻点行为——**不是**对伪时间步长或
+        波速结构做预处理（那种做法试过又撤销了，见 solver_steady.py 里
+        的说明）。默认值 0.1 是给不会算出具体算例马赫数的调用方（例如
+        瞬态求解器）用的通用安全兜底值；若能拿到本次求解实际的自由来流
+        马赫数，应传入以保证物理一致的缩放。
     wall_face_mask:
-        Boolean array, shape (n_faces,) aligned with `geom`'s full face
-        ordering (same convention as `wall_distance`'s wall_face_mask
-        argument to estimate_wall_distance) - True for boundary faces
-        classified WALL/GROUND (viscous no-slip walls), False everywhere
-        else (SYMMETRY/INLET/OUTLET/FARFIELD boundaries, and all interior
-        faces). None (default) disables wall-function treatment entirely,
-        falling back to resolving all the way to the wall (matching prior
-        behaviour exactly) - pass this to enable Menter's scalable/
-        automatic wall treatment (see _wall_function_targets) on those
-        faces, letting a coarser near-wall mesh (y+ up to ~100+, not just
-        y+~1) still give physically meaningful skin friction and k/omega.
+        布尔数组，形状 (n_faces,)，与 `geom` 的完整面排列对齐（约定同
+        `wall_distance` 的 wall_face_mask 参数传给 estimate_wall_distance
+        时一致）——分类为 WALL/GROUND（粘性无滑移壁面）的边界面为 True，
+        其余（SYMMETRY/INLET/OUTLET/FARFIELD 边界，以及所有内部面）为
+        False。默认 None 表示完全不启用壁面函数处理，退化为一直解到壁面
+        （与之前的行为完全一致）——传入此参数即可在这些面上启用 Menter
+        的 scalable/automatic 壁面处理（见 _wall_function_targets），使
+        较粗的近壁网格（y+ 可到 100+，不必是 y+~1）也能给出物理上合理的
+        壁面摩擦和 k/omega。
+    use_gpu:
+        为 True 且真的存在可用 CUDA 设备时，把热点循环（AUSM+up 通量、
+        粘性通量、SST 涡粘性/源项、Green-Gauss 梯度）分发到
+        `fvm_*_kernels_gpu.py` 里的 CUDA kernel；否则静默回退到 CPU
+        （Numba）路径并给出警告。这些 GPU kernel 在本项目里**从未在真实
+        GPU 硬件上运行过**——见各自模块的文档字符串。
     """
 
     def __init__(self, geom: FaceGeometry, mu_lam: float = 1.7894e-5,
                  wall_distance: np.ndarray | None = None,
                  turbulent: bool = True,
                  mach_ref: float = 0.1,
-                 wall_face_mask: np.ndarray | None = None):
+                 wall_face_mask: np.ndarray | None = None,
+                 use_gpu: bool = False):
         self.geom = geom
         self.mu_lam = float(mu_lam)
         self.turbulent = turbulent
         self.mach_ref = float(mach_ref)
+        # GPU dispatch 是可选项，若实际没有可用的 CUDA 设备会静默降级到
+        # CPU/Numba 路径——该路径未经真实硬件验证的原因见本模块顶部的
+        # GPU kernel 导入处注释（本开发环境没有 GPU 可供测试）。
+        if use_gpu and not CUDA_AVAILABLE:
+            logger.warning(
+                "use_gpu=True was requested but no CUDA device is available "
+                "in this environment - falling back to the CPU (Numba) "
+                "residual path."
+            )
+        self._use_gpu = bool(use_gpu) and CUDA_AVAILABLE
         n = geom.n_cells
         if wall_distance is None:
             self.wall_distance = np.full(n, 1.0e9, dtype=np.float64)
         else:
             self.wall_distance = np.maximum(np.asarray(wall_distance, np.float64), 1e-9)
 
-        # Subset wall_face_mask to just the boundary faces, in the same
-        # order as self._bo/geom.bnd_owner (set up right below) - this is
-        # the ordering wall_shear_stress()/_viscous_flux's boundary
-        # section actually iterate over.
+        # 把 wall_face_mask 收窄到只含边界面，顺序与下面马上建立的
+        # self._bo/geom.bnd_owner 一致——这正是 wall_shear_stress()/
+        # _viscous_flux 的边界部分实际遍历时用的顺序。
         if wall_face_mask is not None:
             self._wall_face_mask_b = np.asarray(wall_face_mask, dtype=bool)[geom.boundary_mask]
         else:
             self._wall_face_mask_b = None
 
-        # Precompute owner->neighbour geometric quantities for internal faces.
+        # 预计算内部面的 owner->neighbour 几何量。
         self._im = geom.internal_mask
         self._io = geom.int_owner
         self._in = geom.int_neigh
         d = geom.cell_centroids[self._in] - geom.cell_centroids[self._io]
         self._dist = np.maximum(np.linalg.norm(d, axis=1), 1e-12)
-        self._e_ON = d / self._dist[:, None]           # unit owner->neighbour
+        self._e_ON = d / self._dist[:, None]           # owner->neighbour 单位向量
 
-        # Precompute owner->ghost geometric quantities for boundary faces
-        # (same role as _dist/_e_ON above, but the "neighbour" is the mirror
-        # ghost state). Ghost states are constructed (see
-        # BoundaryConditionHandler) so that the *face* value is the midpoint
-        # average of owner and ghost - i.e. the ghost is assumed to sit at
-        # the mirror point across the face, twice the owner->face distance
-        # away, not at the face itself. Using the face distance directly
-        # here would halve the true owner->ghost separation and double the
-        # inferred near-wall gradient.
+        # 预计算边界面的 owner->ghost 几何量（作用与上面的
+        # _dist/_e_ON 相同，只是这里的"neighbour"是镜像 ghost 状态）。
+        # ghost 状态的构造方式（见 BoundaryConditionHandler）使得*面*上
+        # 的值正好是 owner 与 ghost 的中点平均——也就是说 ghost 被假定位于
+        # 跨面镜像点，距离是 owner 到面距离的两倍，而不是就在面上。如果
+        # 这里直接用面距离，会把真实的 owner->ghost 间距减半，从而把推算
+        # 出来的近壁梯度放大一倍。
         self._bo = geom.bnd_owner
         if self._bo.size:
             db = geom.centers[geom.boundary_mask] - geom.cell_centroids[self._bo]
@@ -161,11 +146,11 @@ class ViscousRANSResidual:
             self._e_OB = np.zeros((0, 3))
 
     # ------------------------------------------------------------------
-    # primitive <-> conservative
+    # 原始变量 <-> 守恒变量
     # ------------------------------------------------------------------
     @staticmethod
     def to_primitive(U: np.ndarray):
-        """Return (rho, vel(n,3), p, T, k, omega) from conservative U."""
+        """从守恒量 U 返回 (rho, vel(n,3), p, T, k, omega)。"""
         rho = np.maximum(U[:, 0], 1e-9)
         vel = U[:, 1:4] / rho[:, None]
         ke = 0.5 * rho * np.sum(vel**2, axis=1)
@@ -176,62 +161,57 @@ class ViscousRANSResidual:
         return rho, vel, p, T, k, omega
 
     # ------------------------------------------------------------------
-    # main entry
+    # 主入口
     # ------------------------------------------------------------------
     def compute(self, U: np.ndarray, boundary_states: np.ndarray) -> np.ndarray:
-        """Return dU/dt residual R such that V_i dU_i/dt = -R_i  (R already /V).
+        """返回残差 R，满足 dU/dt 使得 V_i dU_i/dt = -R_i（R 已经除以体积）。
 
         Args:
-            U: conservative solution, shape (n_cells, 7).
-            boundary_states: ghost conservative states at boundary faces,
-                shape (n_faces, 7); only rows for boundary faces are read.
+            U: 守恒解，形状 (n_cells, 7)。
+            boundary_states: 边界面的 ghost 守恒状态，形状 (n_faces, 7)；
+                只读取属于边界面的那些行。
 
         Returns:
-            Residual array shape (n_cells, 7), already divided by cell volume,
-            so the update is ``U -= dt * R``.
+            残差数组，形状 (n_cells, 7)，已经除以单元体积，因此更新式为
+            ``U -= dt * R``。
         """
         geom = self.geom
         n_cells = geom.n_cells
         rho, vel, p, T, k, omega = self.to_primitive(U)
 
-        # Eddy viscosity (needs strain rate -> gradients of velocity).
+        # 涡粘性（需要应变率 -> 速度梯度）。
         grad_vel = self._velocity_gradient(vel, U, boundary_states)
         mu_t = self._eddy_viscosity(rho, k, omega, grad_vel) if self.turbulent \
             else np.zeros(n_cells)
 
-        # Wall-function-aware k/omega boundary ghost, shared by
-        # _turbulence_gradient and _viscous_flux (see
-        # _turbulence_wall_ghost's own docstring for why this replaced two
-        # independent derivations of the boundary k/omega that disagreed
-        # with each other whenever wall functions were enabled).
+        # 支持壁面函数的 k/omega 边界 ghost 值，_turbulence_gradient 和
+        # _viscous_flux 共用（见 _turbulence_wall_ghost 自己的文档字符串，
+        # 说明这是为了替换掉之前两处各自独立推导、在启用壁面函数时会互相
+        # 不一致的边界 k/omega）。
         k_ghost_b, omega_ghost_b = self._turbulence_wall_ghost(rho, vel, k, omega, boundary_states)
 
-        # k/omega gradient, computed once here and shared by _viscous_flux
-        # (turbulent diffusion term, needed regardless of self.turbulent -
-        # see below) and _sst_sources (production/cross-diffusion, only
-        # when turbulent). Previously each of those computed its own
-        # independent copy of this same Green-Gauss gradient (with no
-        # boundary contribution), on top of the k/omega columns ALSO
-        # carried through _inviscid_flux's separate 7-variable MUSCL-
-        # reconstruction gradient - 3 evaluations of the same physical
-        # quantity per residual call. This shared version additionally
-        # includes the boundary (ghost-state) contribution, which the two
-        # duplicated computations were missing.
+        # k/omega 梯度，这里只算一次，供 _viscous_flux（湍流扩散项，无论
+        # self.turbulent 是否为真都需要——见下）和 _sst_sources
+        # （production/cross-diffusion，仅在湍流开启时用）共用。以前这两处
+        # 各自独立计算一份同样的 Green-Gauss 梯度（且都没有边界贡献），
+        # 而 _inviscid_flux 里单独的 7 变量 MUSCL 重构梯度也带着 k/omega
+        # 这两列——同一个物理量每次残差计算要算 3 遍。这里共用的版本额外
+        # 包含了边界（ghost 状态）贡献，是那两份重复计算都缺失的部分。
         grad_turb = self._turbulence_gradient(k, omega, k_ghost_b, omega_ghost_b)
 
         flux_accum = np.zeros((n_cells, 7), dtype=np.float64)
 
-        # --- inviscid flux via MUSCL + HLLC ---
+        # --- 无粘通量：MUSCL + HLLC ---
         self._inviscid_flux(U, boundary_states, flux_accum)
 
-        # --- viscous flux (molecular + turbulent) ---
+        # --- 粘性通量（分子 + 湍流）---
         self._viscous_flux(rho, vel, T, k, omega, mu_t, grad_vel, grad_turb,
                            boundary_states, flux_accum, k_ghost_b, omega_ghost_b)
 
-        # Convert surface-integral of fluxes into a residual (divide by V).
+        # 把通量的面积分转换成残差（除以体积 V）。
         residual = flux_accum / geom.cell_volumes[:, None]
 
-        # --- SST source terms (volumetric, added directly to residual) ---
+        # --- SST 源项（体积项，直接加进残差）---
         if self.turbulent:
             self._sst_sources(rho, k, omega, mu_t, grad_vel, grad_turb, residual)
 
@@ -240,35 +220,29 @@ class ViscousRANSResidual:
     def _turbulence_wall_ghost(self, rho: np.ndarray, vel: np.ndarray,
                                k: np.ndarray, omega: np.ndarray,
                                boundary_states: np.ndarray):
-        """Boundary k/omega ghost values, shape (n_bf,) each - wall-function
-        aware, and the single source of truth for both _turbulence_gradient
-        and _viscous_flux's turbulent diffusion term.
+        """边界 k/omega 的 ghost 值，各自形状 (n_bf,)——支持壁面函数，是
+        _turbulence_gradient 和 _viscous_flux 的湍流扩散项共同依赖的唯一
+        数据源。
 
-        For every boundary face this starts from the ghost already encoded
-        in `boundary_states` (k=0 Dirichlet / zero-gradient omega at solid
-        walls - see BoundaryConditionHandler._wall_bc - freestream at
-        INLET/FARFIELD/OUTLET). When a wall-function mask was supplied at
-        construction, WALL/GROUND faces additionally get overwritten with
-        the log-law model's near-wall target (mirrored the same way
-        boundary_states' own ghosts are, so the face-averaged value equals
-        the target exactly) - same mechanic _viscous_flux used to apply
-        entirely on its own, LOCALLY, with no effect outside that one
-        function.
+        对每个边界面，先取 `boundary_states` 里已经编码好的 ghost 值
+        （固壁上 k=0 的 Dirichlet / omega 零梯度——见
+        BoundaryConditionHandler._wall_bc；INLET/FARFIELD/OUTLET 上则是
+        自由来流值）。若构造时提供了壁面函数掩码，WALL/GROUND 面上的值
+        会被 log-law 模型给出的近壁目标值覆盖（用与 boundary_states 自身
+        ghost 相同的镜像方式构造，使面平均值恰好等于目标值）——这与
+        _viscous_flux 以前完全独立地自行应用的机制相同，但那时只在那一个
+        函数内部局部生效，不影响其他地方。
 
-        That was a real bug: _turbulence_gradient (called separately, once
-        per residual evaluation) kept computing its own k/omega ghost
-        straight from `boundary_states`, i.e. always the resolved-wall
-        (k=0, zero-gradient omega) values, even when wall functions were
-        enabled and the diffusion flux was already using the log-law
-        target. The k/omega GRADIENT that feeds SST's F1 blend,
-        cross-diffusion, and (indirectly) production at every near-wall
-        cell was therefore silently inconsistent with the wall treatment
-        actually being modelled - it kept assuming a resolved, y+~1 first
-        cell even on the coarser mesh wall functions are specifically for,
-        which forces an artificially steep k/omega gradient over
-        whatever (now larger) near-wall cell height is actually in play.
-        Computing both consumers from this one shared, correctly-adjusted
-        ghost keeps them consistent by construction.
+        这曾是一个真实的 bug：_turbulence_gradient（每次残差求值单独
+        调用一次）一直在自己从 `boundary_states` 计算 k/omega 的 ghost 值，
+        也就是说即使启用了壁面函数、扩散通量已经在用 log-law 目标值，它
+        用的却始终是解析到壁面（k=0，omega 零梯度）那一套值。而 SST 的
+        F1 混合、cross-diffusion，以及（间接地）production 在每个近壁
+        单元都依赖的 k/omega 梯度，因此和实际建模的壁面处理方式在暗中
+        不一致——它一直假设第一层网格解析到 y+~1，即便是在专门为壁面函数
+        设计的更粗网格上，这会在（现在更大的）近壁单元高度上强行造出一个
+        过陡的 k/omega 梯度。让两处消费者都从这一份共用、已正确调整的
+        ghost 值取数，从结构上保证了两者的一致性。
         """
         bo = self.geom.bnd_owner
         if not bo.size:
@@ -290,771 +264,68 @@ class ViscousRANSResidual:
 
     def _turbulence_gradient(self, k: np.ndarray, omega: np.ndarray,
                              k_ghost_b: np.ndarray, omega_ghost_b: np.ndarray) -> np.ndarray:
-        """Green-Gauss gradient of [k, omega], shape (n_cells, 2, 3).
+        """[k, omega] 的 Green-Gauss 梯度，形状 (n_cells, 2, 3)。
 
-        Computed once per residual evaluation and shared by _viscous_flux
-        and _sst_sources (see compute()'s docstring note on why this used
-        to be duplicated). Boundary ghost values come from
-        _turbulence_wall_ghost (wall-function aware - see its own
-        docstring), not recomputed here.
+        每次残差求值只算一次，_viscous_flux 和 _sst_sources 共用（为什么
+        以前是重复计算见 compute() 文档字符串里的说明）。边界 ghost 值
+        来自 _turbulence_wall_ghost（支持壁面函数，见其自身文档字符串），
+        这里不重新计算。
         """
         bo = self.geom.bnd_owner
         turb_b = None
         if bo.size:
             turb_b = np.column_stack([k_ghost_b, omega_ghost_b])
         turb_vars = np.column_stack([k, omega])
-        return green_gauss_gradient(turb_vars, self.geom, turb_b)
+        return green_gauss_gradient(turb_vars, self.geom, turb_b, use_gpu=self._use_gpu)
 
     # ------------------------------------------------------------------
-    # velocity gradient (for strain rate & viscous stress)
+    # 速度梯度（供应变率与粘性应力使用）
     # ------------------------------------------------------------------
     def _velocity_gradient(self, vel, U, boundary_states):
-        # boundary face velocities from ghost states
+        # 边界面速度取自 ghost 状态
         bo = self.geom.bnd_owner
         if bo.size:
             rho_b = np.maximum(boundary_states[self.geom.boundary_mask, 0], 1e-9)
             vel_b = boundary_states[self.geom.boundary_mask, 1:4] / rho_b[:, None]
         else:
             vel_b = None
-        # grad of each velocity component -> (n_cells, 3, 3): [cell, comp, dir]
-        return green_gauss_gradient(vel, self.geom, vel_b)
-
-    def _strain(self, grad_vel):
-        """Symmetric strain-rate tensor S and its magnitude |S|=sqrt(2 SijSij)."""
-        S = 0.5 * (grad_vel + np.transpose(grad_vel, (0, 2, 1)))
-        Smag = np.sqrt(2.0 * np.einsum('nij,nij->n', S, S) + 1e-30)
-        return S, Smag
-
-    # ------------------------------------------------------------------
-    # SST eddy viscosity  mu_t = rho a1 k / max(a1 omega, S F2)
-    # ------------------------------------------------------------------
-    def _eddy_viscosity(self, rho, k, omega, grad_vel):
-        """SST eddy viscosity calculation with diagnostic logging."""
-        try:
-            _, Smag = self._strain(grad_vel)
-            nu = self.mu_lam / rho
-            d = self.wall_distance
-            
-            # Diagnostic: log shapes for debugging
-            import logging
-            logger = logging.getLogger(__name__)
-            if hasattr(self, '_debug_iter') and self._debug_iter > 0:
-                logger.debug(
-                    f"  _eddy_viscosity shapes:\n"
-                    f"    rho: {rho.shape}, k: {k.shape}, omega: {omega.shape}\n"
-                    f"    grad_vel: {grad_vel.shape}, Smag: {Smag.shape}\n"
-                    f"    wall_distance: {d.shape}"
-                )
-            
-            # CRITICAL FIX: Protect against division by zero
-            omega_safe = np.maximum(omega, 1e-8)  # Minimum physical omega (1/s)
-            
-            arg2 = np.maximum(2.0 * np.sqrt(np.maximum(k, 0.0)) / (SST_BETA_STAR * omega_safe * d),
-                              500.0 * nu / (d**2 * omega_safe))
-            F2 = np.tanh(arg2**2)
-            denom = np.maximum(SST_A1 * omega_safe, Smag * F2)
-            mu_t = rho * SST_A1 * np.maximum(k, 0.0) / np.maximum(denom, 1e-12)
-            return np.clip(mu_t, 0.0, 1e5 * self.mu_lam)
-        except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"Error in _eddy_viscosity: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            raise
-
-    def _f1_blend(self, rho, k, omega, grad_k, grad_omega):
-        """SST F1 blending function."""
-        d = self.wall_distance
-        nu = self.mu_lam / rho
-        
-        # CRITICAL FIX: Protect against division by zero in CDkw calculation
-        omega_safe = np.maximum(omega, 1e-8)  # Minimum physical omega (1/s)
-        
-        CDkw = np.maximum(
-            2.0 * rho * SST_SIGMA_W2 / omega_safe *
-            np.einsum('nd,nd->n', grad_k, grad_omega),
-            1e-10,
-        )
-        arg1 = np.minimum(
-            np.maximum(np.sqrt(np.maximum(k, 0.0)) / (SST_BETA_STAR * omega_safe * d),
-                       500.0 * nu / (d**2 * omega_safe)),
-            4.0 * rho * SST_SIGMA_W2 * k / (CDkw * d**2),
-        )
-        return np.tanh(arg1**4), CDkw
-
-    # ------------------------------------------------------------------
-    # inviscid flux: MUSCL reconstruction + HLLC
-    # ------------------------------------------------------------------
-    def _inviscid_flux(self, U, boundary_states, flux_accum):
-        geom = self.geom
-
-        # --- second-order reconstruction on primitive variables ---
-        rho, vel, p, T, k, omega = self.to_primitive(U)
-        prim = np.column_stack([rho, vel[:, 0], vel[:, 1], vel[:, 2], p, k, omega])
-
-        # BC primitive values for gradient boundary contribution.
-        bo = geom.bnd_owner
-        prim_b = None
-        if bo.size:
-            rb, vb, pb, tb, kb, wb = self.to_primitive(boundary_states[geom.boundary_mask])
-            prim_b = np.column_stack([rb, vb[:, 0], vb[:, 1], vb[:, 2], pb, kb, wb])
-
-        grad = green_gauss_gradient(prim, geom, prim_b)
-        phi = barth_jespersen_limiter(prim, grad, geom)
-        grad_lim = grad * phi[:, :, None]
-
-        # Reconstruct to internal-face centroids.
-        io, ineigh = geom.int_owner, geom.int_neigh
-        fc = geom.centers[geom.internal_mask]
-        rL = fc - geom.cell_centroids[io]
-        rR = fc - geom.cell_centroids[ineigh]
-        pL = prim[io] + np.einsum('nvd,nd->nv', grad_lim[io], rL)
-        pR = prim[ineigh] + np.einsum('nvd,nd->nv', grad_lim[ineigh], rR)
-
-        # Enforce positivity of reconstructed rho, p, k, omega.
-        for col in (0, 4):
-            pL[:, col] = np.maximum(pL[:, col], 1e-6)
-            pR[:, col] = np.maximum(pR[:, col], 1e-6)
-        pL[:, 5:] = np.maximum(pL[:, 5:], 0.0)
-        pR[:, 5:] = np.maximum(pR[:, 5:], 0.0)
-
-        n_int = geom.normals[geom.internal_mask]
-        a_int = geom.areas[geom.internal_mask]
-        f_int = self._ausm_up(pL, pR, n_int) * a_int[:, None]
-
-        # R = (1/V) * sum_outward F.nA.  The face normal is outward for the
-        # owner and inward for the neighbour, hence the opposite signs.
-        np.add.at(flux_accum, io, f_int)
-        np.add.at(flux_accum, ineigh, -f_int)
-
-        # --- boundary faces: first order (owner state vs ghost state) ---
-        if bo.size:
-            pOwner = prim[bo]
-            # ghost primitives already computed as prim_b
-            n_b = geom.normals[geom.boundary_mask]
-            a_b = geom.areas[geom.boundary_mask]
-            f_b = self._ausm_up(pOwner, prim_b, n_b) * a_b[:, None]
-            np.add.at(flux_accum, bo, f_b)
-
-    def _ausm_up(self, primL: np.ndarray, primR: np.ndarray, normal: np.ndarray) -> np.ndarray:
-        """Vectorised AUSM+up all-speed flux (Liou 2006) for the 7-equation
-        system - the live inviscid flux, replacing HLLC (kept below,
-        unused, for reference/comparison).
-
-        Unlike HLLC's wave-speed-bracketed Riemann solver - whose middle
-        wave speed Sstar becomes ill-conditioned if its SL/SR bracket is
-        artificially narrowed by low-Mach preconditioning, see _hllc's own
-        comment for the failure this caused - AUSM+up is a flux-vector-
-        splitting scheme built from an explicit interface Mach number and
-        an explicit low-Mach scaling function f_a. It has proper O(M^2)
-        low-Mach pressure-velocity decoupling built into its own
-        formulation with no wave-speed bracket to destabilize, and reduces
-        smoothly to standard upwind behaviour as the local Mach number
-        approaches/exceeds 1 (so locally-accelerated regions, e.g. around
-        a body's sharp edges, are handled correctly too).
-
-        primL/primR columns: [rho, u, v, w, p, k, omega].
-        Returns flux array (n, 7).
-        """
-        rhoL, uL, vL, wL, pL, kL, wkL = primL.T
-        rhoR, uR, vR, wR, pR, kR, wkR = primR.T
-        nx, ny, nz = normal[:, 0], normal[:, 1], normal[:, 2]
-
-        # === NUMERICAL STABILITY: same clipping as _hllc. ===
-        MAX_VELOCITY = 1e4  # 10 km/s, physically reasonable upper bound
-        vel_mag_L = np.sqrt(uL**2 + vL**2 + wL**2)
-        vel_mag_R = np.sqrt(uR**2 + vR**2 + wR**2)
-        clip_factor_L = np.minimum(1.0, MAX_VELOCITY / np.maximum(vel_mag_L, 1e-12))
-        clip_factor_R = np.minimum(1.0, MAX_VELOCITY / np.maximum(vel_mag_R, 1e-12))
-        uL = uL * clip_factor_L; vL = vL * clip_factor_L; wL = wL * clip_factor_L
-        uR = uR * clip_factor_R; vR = vR * clip_factor_R; wR = wR * clip_factor_R
-
-        rhoL = np.maximum(rhoL, 1e-9)
-        rhoR = np.maximum(rhoR, 1e-9)
-        pL = np.maximum(pL, 1.0)
-        pR = np.maximum(pR, 1.0)
-
-        unL = uL * nx + vL * ny + wL * nz
-        unR = uR * nx + vR * ny + wR * nz
-
-        EL = pL / (GAMMA - 1.0) + 0.5 * rhoL * (uL**2 + vL**2 + wL**2)
-        ER = pR / (GAMMA - 1.0) + 0.5 * rhoR * (uR**2 + vR**2 + wR**2)
-        MAX_ENERGY = 1e12
-        EL = np.minimum(EL, MAX_ENERGY)
-        ER = np.minimum(ER, MAX_ENERGY)
-        HL = (EL + pL) / rhoL
-        HR = (ER + pR) / rhoR
-
-        # --- interface (critical) speed of sound, Liou 2006 eq. 30-33.
-        # Ensures a consistent, correctly-behaved interface sound speed
-        # for both compression and expansion, rather than a plain average.
-        a_crit_L = np.sqrt(np.maximum(2.0 * (GAMMA - 1.0) / (GAMMA + 1.0) * HL, 1e-12))
-        a_crit_R = np.sqrt(np.maximum(2.0 * (GAMMA - 1.0) / (GAMMA + 1.0) * HR, 1e-12))
-        a_hat_L = a_crit_L**2 / np.maximum(a_crit_L, unL)
-        a_hat_R = a_crit_R**2 / np.maximum(a_crit_R, -unR)
-        a_half = np.maximum(np.minimum(a_hat_L, a_hat_R), 1e-6)
-
-        ML = unL / a_half
-        MR = unR / a_half
-
-        # --- low-Mach reference scaling function f_a (the "up" in
-        # AUSM+up): regularized by self.mach_ref so f_a stays bounded away
-        # from zero at genuine stagnation points (where local Mbar -> 0),
-        # instead of letting the 1/f_a term in Mp below blow up there.
-        rho_half = 0.5 * (rhoL + rhoR)
-        Mbar2 = (unL**2 + unR**2) / (2.0 * a_half**2)
-        M0_2 = np.clip(np.maximum(Mbar2, self.mach_ref**2), 0.0, 1.0)
-        f_a = np.maximum(np.sqrt(M0_2) * (2.0 - np.sqrt(M0_2)), 1e-6)
-        alpha = 3.0 / 16.0 * (-4.0 + 5.0 * f_a**2)
-
-        # --- Mach-number splitting polynomials (Liou 2006 eq. 19, 21). ---
-        def M1_plus(M): return 0.5 * (M + np.abs(M))
-        def M1_minus(M): return 0.5 * (M - np.abs(M))
-        def M2_plus(M): return 0.25 * (M + 1.0) ** 2
-        def M2_minus(M): return -0.25 * (M - 1.0) ** 2
-
-        subL = np.abs(ML) < 1.0
-        subR = np.abs(MR) < 1.0
-
-        M4_plus = np.where(
-            subL,
-            M2_plus(ML) * (1.0 - 16.0 * _AUSM_BETA * M2_minus(ML)),
-            M1_plus(ML),
-        )
-        M4_minus = np.where(
-            subR,
-            M2_minus(MR) * (1.0 + 16.0 * _AUSM_BETA * M2_plus(MR)),
-            M1_minus(MR),
-        )
-
-        # --- pressure splitting polynomials (Liou 2006 eq. 24). The
-        # |M|>=1 branch (M1_plus/M) is only ever SELECTED where M!=0 (that
-        # region excludes M=0 by definition), but np.where evaluates both
-        # branches eagerly for every element - guard the division so
-        # M=0 elements (which always take the other, 5th-order branch)
-        # don't raise a spurious "invalid value in divide" warning from a
-        # 0/0 that gets computed and immediately discarded.
-        ML_safe = np.where(ML != 0.0, ML, 1.0)
-        MR_safe = np.where(MR != 0.0, MR, 1.0)
-        P5_plus = np.where(
-            subL,
-            M2_plus(ML) * ((2.0 - ML) - 16.0 * alpha * ML * M2_minus(ML)),
-            M1_plus(ML) / ML_safe,
-        )
-        P5_minus = np.where(
-            subR,
-            M2_minus(MR) * ((-2.0 - MR) + 16.0 * alpha * MR * M2_plus(MR)),
-            M1_minus(MR) / MR_safe,
-        )
-
-        # --- velocity-pressure coupling (Liou 2006 eq. 8, 15) - this is
-        # what gives AUSM+up its correct low-Mach asymptotic behaviour,
-        # unlike a plain upwind AUSM. ---
-        Mp = (-_AUSM_KP / f_a) * np.maximum(1.0 - _AUSM_SIGMA * Mbar2, 0.0) \
-            * (pR - pL) / (rho_half * a_half ** 2)
-        M_half = M4_plus + M4_minus + Mp
-
-        pu = -_AUSM_KU * P5_plus * P5_minus * (rhoL + rhoR) * f_a * a_half * (unR - unL)
-        p_half = P5_plus * pL + P5_minus * pR + pu
-
-        # --- mass flux and upwinded convected variables. ---
-        mdot = a_half * M_half * np.where(M_half > 0, rhoL, rhoR)
-
-        pos = mdot >= 0
-        u_up = np.where(pos, uL, uR)
-        v_up = np.where(pos, vL, vR)
-        w_up = np.where(pos, wL, wR)
-        H_up = np.where(pos, HL, HR)
-        k_up = np.where(pos, kL, kR)
-        wk_up = np.where(pos, wkL, wkR)
-
-        return np.column_stack([
-            mdot,
-            mdot * u_up + p_half * nx,
-            mdot * v_up + p_half * ny,
-            mdot * w_up + p_half * nz,
-            mdot * H_up,
-            mdot * k_up,
-            mdot * wk_up,
-        ])
-
-    def _hllc(self, primL: np.ndarray, primR: np.ndarray, normal: np.ndarray) -> np.ndarray:
-        """Vectorised HLLC flux for the 7-equation system.
-
-        NOT used by the live solve path (see _ausm_up, which replaced it
-        as _inviscid_flux's flux function) - kept for reference/comparison
-        and because it's a legitimate, independently-correct Riemann
-        solver in its own right (its flux consistency F(U,U)=F(U) still
-        holds). See _ausm_up's docstring and solver_steady.py's mach_ref
-        comment for why AUSM+up was adopted instead: HLLC's Sstar
-        computation is uniquely sensitive to any narrowing of the SL/SR
-        wave-speed bracket (as low-Mach preconditioning would do), which
-        AUSM+up's flux-vector-splitting formulation doesn't have at all.
-
-        primL/primR columns: [rho, u, v, w, p, k, omega].
-        Returns flux array (n, 7).
-        """
-        rhoL, uL, vL, wL, pL, kL, wkL = primL.T
-        rhoR, uR, vR, wR, pR, kR, wkR = primR.T
-        nx, ny, nz = normal[:, 0], normal[:, 1], normal[:, 2]
-
-        # === NUMERICAL STABILITY: Clip velocity to prevent kinetic energy blow-up ===
-        MAX_VELOCITY = 1e4  # 10 km/s, physically reasonable upper bound
-        vel_mag_L = np.sqrt(uL**2 + vL**2 + wL**2)
-        vel_mag_R = np.sqrt(uR**2 + vR**2 + wR**2)
-        
-        clip_factor_L = np.minimum(1.0, MAX_VELOCITY / np.maximum(vel_mag_L, 1e-12))
-        clip_factor_R = np.minimum(1.0, MAX_VELOCITY / np.maximum(vel_mag_R, 1e-12))
-        
-        uL *= clip_factor_L; vL *= clip_factor_L; wL *= clip_factor_L
-        uR *= clip_factor_R; vR *= clip_factor_R; wR *= clip_factor_R
-        
-        # Ensure positivity of density and pressure
-        rhoL = np.maximum(rhoL, 1e-9)
-        rhoR = np.maximum(rhoR, 1e-9)
-        pL = np.maximum(pL, 1.0)
-        pR = np.maximum(pR, 1.0)
-
-        unL = uL * nx + vL * ny + wL * nz
-        unR = uR * nx + vR * ny + wR * nz
-        
-        # Clamp sound speed to avoid division by zero or extreme values
-        aL = np.sqrt(np.maximum(GAMMA * pL / rhoL, 1.0))
-        aR = np.sqrt(np.maximum(GAMMA * pR / rhoR, 1.0))
-
-        EL = pL / (GAMMA - 1.0) + 0.5 * rhoL * (uL**2 + vL**2 + wL**2)
-        ER = pR / (GAMMA - 1.0) + 0.5 * rhoR * (uR**2 + vR**2 + wR**2)
-        
-        # Guard against energy overflow
-        MAX_ENERGY = 1e12
-        EL = np.minimum(EL, MAX_ENERGY)
-        ER = np.minimum(ER, MAX_ENERGY)
-
-        # Wave speed estimates (Davis / Einfeldt) - deliberately NOT low-Mach
-        # preconditioned, unlike the pseudo-time step (see
-        # TimeIntegrator.local_time_step). Preconditioning SL/SR here was
-        # tried and reverted: HLLC's middle wave speed Sstar is
-        #   Sstar = (pR-pL + rhoL*unL*(SL-unL) - rhoR*unR*(SR-unR)) / denom
-        #   denom = rhoL*(SL-unL) - rhoR*(SR-unR)
-        # With the raw acoustic SL/SR, (SL-unL) and (SR-unR) are O(a)
-        # (~340 m/s for air), giving `denom` a comfortable margin against
-        # cancellation. Preconditioning deliberately shrinks SL/SR toward
-        # un at low Mach (that's the whole point, for the CFL/dissipation
-        # benefit) - but that shrinks this same margin by the same factor
-        # (~beta, e.g. ~10x at M~0.09) at every face in the ENTIRE
-        # low-speed flow field, not just near-stagnation regions, making
-        # Sstar's denominator far more sensitive to noise everywhere at
-        # once. Observed directly: applying it here caused a much faster,
-        # more widespread numerical blow-up (velocity hitting the 1e4 m/s
-        # clip within 200 iterations) than the unpreconditioned scheme,
-        # consistent with this being a real conditioning regression, not
-        # an improvement - so only the timestep is preconditioned, never
-        # the flux's own wave-speed estimates.
-        SL = np.minimum(unL - aL, unR - aR)
-        SR = np.maximum(unL + aL, unR + aR)
-        denom = rhoL * (SL - unL) - rhoR * (SR - unR)
-        denom = np.where(np.abs(denom) < 1e-12, np.sign(denom) * 1e-12 + 1e-12, denom)
-        Sstar = (pR - pL + rhoL * unL * (SL - unL) - rhoR * unR * (SR - unR)) / denom
-
-        def phys_flux(rho, u, v, w, p, E, kk, wk, un):
-            return np.column_stack([
-                rho * un,
-                rho * u * un + p * nx,
-                rho * v * un + p * ny,
-                rho * w * un + p * nz,
-                (E + p) * un,
-                rho * kk * un,
-                rho * wk * un,
-            ])
-
-        FL = phys_flux(rhoL, uL, vL, wL, pL, EL, kL, wkL, unL)
-        FR = phys_flux(rhoR, uR, vR, wR, pR, ER, kR, wkR, unR)
-
-        UL = np.column_stack([rhoL, rhoL*uL, rhoL*vL, rhoL*wL, EL, rhoL*kL, rhoL*wkL])
-        UR = np.column_stack([rhoR, rhoR*uR, rhoR*vR, rhoR*wR, ER, rhoR*kR, rhoR*wkR])
-
-        def star_state(rho, u, v, w, p, E, kk, wk, un, S):
-            # Guard the (S - Sstar) denominator (S and Sstar can coincide).
-            dS = S - Sstar
-            dS = np.where(np.abs(dS) < 1e-12, np.sign(dS) * 1e-12 + 1e-12, dS)
-            factor = rho * (S - un) / dS
-            Ustar = np.empty((len(rho), 7))
-            Ustar[:, 0] = factor
-            Ustar[:, 1] = factor * (u + (Sstar - un) * nx)
-            Ustar[:, 2] = factor * (v + (Sstar - un) * ny)
-            Ustar[:, 3] = factor * (w + (Sstar - un) * nz)
-            # Energy in the algebraically-cancelled Toro form: the (S-un) in the
-            # p term cancels against factor, avoiding a 0/0 when S ~ un.
-            Ustar[:, 4] = factor * (E / rho + (Sstar - un) * Sstar) \
-                + (Sstar - un) * p / dS
-            Ustar[:, 5] = factor * kk
-            Ustar[:, 6] = factor * wk
-            return Ustar
-
-        F = np.empty_like(FL)
-        # Region selection.
-        left = SL >= 0
-        right = SR <= 0
-        starL = (~left) & (~right) & (Sstar >= 0)
-        starR = (~left) & (~right) & (Sstar < 0)
-
-        F[left] = FL[left]
-        F[right] = FR[right]
-        if np.any(starL):
-            UsL = star_state(rhoL, uL, vL, wL, pL, EL, kL, wkL, unL, SL)
-            F[starL] = FL[starL] + SL[starL, None] * (UsL[starL] - UL[starL])
-        if np.any(starR):
-            UsR = star_state(rhoR, uR, vR, wR, pR, ER, kR, wkR, unR, SR)
-            F[starR] = FR[starR] + SR[starR, None] * (UsR[starR] - UR[starR])
-        return F
-
-    # ------------------------------------------------------------------
-    # boundary-face helpers (owner -> face-centre, ghost state as target)
-    # ------------------------------------------------------------------
-    def _boundary_face_grad(self, cell_grad: np.ndarray, cell_val: np.ndarray,
-                            ghost_val: np.ndarray) -> np.ndarray:
-        """One-sided corrected gradient at boundary faces.
-
-        Same over-relaxed correction as the internal-face treatment (see
-        ``_viscous_flux``), except the "neighbour" is the ghost/wall value at
-        the face centre rather than a real neighbour cell.
-
-        Args:
-            cell_grad: per-cell gradient, shape (n_cells, 3) for a scalar
-                field or (n_cells, ncomp, 3) for a vector field.
-            cell_val, ghost_val: owner-cell and ghost values at every
-                boundary face, shape (n_bf,) / (n_bf,) or (n_bf, ncomp).
-
-        Returns:
-            Corrected face gradient, same trailing shape as ``cell_grad``.
-        """
-        bo = self._bo
-        g_owner = cell_grad[bo]
-        d_val = ghost_val - cell_val
-        if g_owner.ndim == 2:
-            proj = np.einsum('nd,nd->n', g_owner, self._e_OB)
-            corr = d_val / self._bdist - proj
-            return g_owner + corr[:, None] * self._e_OB
-        proj = np.einsum('nij,nj->ni', g_owner, self._e_OB)
-        corr = d_val / self._bdist[:, None] - proj
-        return g_owner + corr[:, :, None] * self._e_OB[:, None, :]
-
-    def _wall_tangential_velocity(self, rho: np.ndarray, vel: np.ndarray,
-                                  boundary_states: np.ndarray):
-        """Owner-cell velocity relative to the wall, decomposed into its
-        component tangential to the wall face, for WALL/GROUND boundary
-        faces only (shape (n_wall_faces, 3)), plus the wall-tangent unit
-        vectors and magnitude.
-
-        The wall's own velocity is recovered as the face-averaged
-        (owner+ghost)/2 value rather than needing separate access to
-        BoundaryConditionHandler's ramp/ground-speed state: `_wall_bc`
-        constructs the ghost specifically so this average equals the
-        prescribed wall velocity exactly (mirror construction) - reusing
-        that instead of threading wall-velocity state into this class.
-        """
-        geom = self.geom
-        bo = self._bo
-        wm = self._wall_face_mask_b
-        n_wb = geom.normals[geom.boundary_mask][wm]
-        rho_gw = np.maximum(boundary_states[geom.boundary_mask, 0][wm], 1e-9)
-        vel_ghost_w = boundary_states[geom.boundary_mask, 1:4][wm] / rho_gw[:, None]
-        vel_owner_w = vel[bo][wm]
-        vel_wall = 0.5 * (vel_owner_w + vel_ghost_w)
-        vel_rel = vel_owner_w - vel_wall
-        un_rel = np.einsum('nd,nd->n', vel_rel, n_wb)
-        vel_tang = vel_rel - un_rel[:, None] * n_wb
-        tang_mag = np.maximum(np.linalg.norm(vel_tang, axis=1), 1e-8)
-        tang_dir = vel_tang / tang_mag[:, None]
-        return tang_dir, tang_mag
-
-    def _wall_function_targets(self, rho_owner: np.ndarray, u_tang_mag: np.ndarray,
-                               y_p: np.ndarray):
-        """Menter scalable/automatic wall treatment: friction velocity
-        u_tau (via a laminar-sublayer/log-law switch at y+=WALL_YPLUS_SWITCH),
-        and the corresponding wall shear magnitude + near-wall k/omega
-        targets.
-
-        Args:
-            rho_owner: owner-cell density at each wall face
-            u_tang_mag: owner-cell velocity magnitude tangential to the
-                wall (relative to the wall's own motion), see
-                _wall_tangential_velocity
-            y_p: owner-cell centroid distance to the wall
-
-        Returns:
-            (tau_w, k_wall, omega_wall): each shape (n_wall_faces,).
-            tau_w is a magnitude (>=0); the caller applies it opposing
-            the tangential relative-velocity direction.
-        """
-        rho_s = np.maximum(rho_owner, 1e-9)
-        y_s = np.maximum(y_p, 1e-12)
-        u_p = np.maximum(u_tang_mag, 1e-8)
-
-        # Laminar-sublayer estimate: tau_w = mu*u_p/y_p = rho*u_tau^2.
-        u_tau_lam = np.sqrt(self.mu_lam * u_p / (rho_s * y_s))
-        yplus_lam = rho_s * u_tau_lam * y_s / self.mu_lam
-
-        # Log-law branch: Newton-iterate u_tau*[(1/kappa)ln(E*y+)] = u_p,
-        # y+ = rho*u_tau*y_p/mu (both factors depend on u_tau).
-        u_tau_log = np.maximum(u_tau_lam, 1e-8)
-        for _ in range(8):
-            yplus = np.maximum(rho_s * u_tau_log * y_s / self.mu_lam, 1e-3)
-            f = u_tau_log * (1.0 / WALL_LOG_KAPPA) * np.log(WALL_LOG_E * yplus) - u_p
-            dfdu = (1.0 / WALL_LOG_KAPPA) * (np.log(WALL_LOG_E * yplus) + 1.0)
-            dfdu = np.where(np.abs(dfdu) < 1e-8, 1e-8, dfdu)
-            u_tau_log = np.maximum(u_tau_log - f / dfdu, 1e-8)
-
-        u_tau = np.where(yplus_lam <= WALL_YPLUS_SWITCH, u_tau_lam, u_tau_log)
-        u_tau = np.maximum(u_tau, 1e-8)
-
-        tau_w = rho_s * u_tau ** 2
-
-        # Blended omega (Menter): sqrt(omega_viscous^2 + omega_log^2) -
-        # smoothly spans the near-wall asymptote (small y+) and the
-        # log-law value (large y+) without a hard switch.
-        omega_vis = 6.0 * self.mu_lam / (rho_s * SST_BETA1 * y_s ** 2)
-        omega_log = u_tau / (np.sqrt(SST_BETA_STAR) * SST_KAPPA * y_s)
-        omega_wall = np.sqrt(omega_vis ** 2 + omega_log ** 2)
-
-        k_wall = u_tau ** 2 / np.sqrt(SST_BETA_STAR)
-
-        return tau_w, k_wall, omega_wall
-
-    def wall_shear_stress(self, rho: np.ndarray, vel: np.ndarray, mu_t: np.ndarray,
-                          grad_vel: np.ndarray, boundary_states: np.ndarray) -> np.ndarray:
-        """Viscous stress tensor dotted with the outward normal, per boundary
-        face: ``tau . n``, shape (n_boundary_faces, 3).
-
-        Shared by :meth:`_viscous_flux` (the residual's own boundary viscous
-        term) and by aerodynamic force integration (skin-friction drag),
-        so both consistently use whatever force the momentum equation
-        actually balances against.
-
-        For WALL/GROUND faces where a wall-function mask was supplied at
-        construction (see wall_face_mask), the CFD-resolved gradient-based
-        stress is replaced with the log-law-model value (Menter scalable
-        wall treatment) - the resolved-gradient estimate is only accurate
-        when the first cell truly sits in the viscous sublayer (y+~1);
-        with a coarser near-wall mesh it silently underestimates skin
-        friction rather than erroring, which the wall-function value
-        corrects for regardless of actual y+.
-        """
-        geom = self.geom
-        bo = self._bo
-        if not bo.size:
-            return np.zeros((0, 3))
-        n_b = geom.normals[geom.boundary_mask]
-        mu_eff = self.mu_lam + mu_t
-        rho_b = np.maximum(boundary_states[geom.boundary_mask, 0], 1e-9)
-        vel_ghost = boundary_states[geom.boundary_mask, 1:4] / rho_b[:, None]
-        gv_face_b = self._boundary_face_grad(grad_vel, vel[bo], vel_ghost)
-        tau_resolved = self._stress_dot_normal(gv_face_b, n_b, mu_eff[bo])
-
-        wm = self._wall_face_mask_b
-        if wm is None or not np.any(wm):
-            return tau_resolved
-
-        tang_dir, tang_mag = self._wall_tangential_velocity(rho, vel, boundary_states)
-        y_p = self.wall_distance[bo][wm]
-        tau_w_mag, _, _ = self._wall_function_targets(rho[bo][wm], tang_mag, y_p)
-
-        tau_wf = tau_resolved.copy()
-        # Wall shear opposes the fluid's tangential motion relative to the
-        # wall (drag on the fluid), magnitude from the log-law model.
-        tau_wf[wm] = -tau_w_mag[:, None] * tang_dir
-        return tau_wf
-
-    # ------------------------------------------------------------------
-    # viscous flux
-    # ------------------------------------------------------------------
-    def _viscous_flux(self, rho, vel, T, k, omega, mu_t, grad_vel, grad_turb,
-                      boundary_states, flux_accum, k_ghost_b, omega_ghost_b):
-        geom = self.geom
-        io, ineigh = geom.int_owner, geom.int_neigh
-        n_int = geom.normals[geom.internal_mask]
-        a_int = geom.areas[geom.internal_mask]
-
-        mu_eff = self.mu_lam + mu_t                          # (n_cells,)
-
-        # Face-averaged gradients with an over-relaxed correction along the
-        # cell-connecting line for robustness on skewed meshes.
-        gvL, gvR = grad_vel[io], grad_vel[ineigh]
-        gv_face = 0.5 * (gvL + gvR)
-        # directional derivative correction
-        dvel = vel[ineigh] - vel[io]                         # (nif, 3)
-        proj = np.einsum('nij,nj->ni', gv_face, self._e_ON) # (nif, 3)
-        corr = (dvel / self._dist[:, None] - proj)
-        gv_face = gv_face + corr[:, :, None] * self._e_ON[:, None, :]
-
-        mu_f = 0.5 * (mu_eff[io] + mu_eff[ineigh])
-
-        tau_n = self._stress_dot_normal(gv_face, n_int, mu_f)   # (nif, 3)
-
-        # Temperature gradient for heat flux.
-        gT = green_gauss_gradient(T[:, None], geom)[:, 0, :]    # (n_cells, 3)
-        gT_face = 0.5 * (gT[io] + gT[ineigh])
-        dT = T[ineigh] - T[io]
-        gT_face = gT_face + (dT / self._dist - np.einsum('nd,nd->n', gT_face, self._e_ON))[:, None] * self._e_ON
-        cond = CP * (self.mu_lam / PRANDTL_LAMINAR + 0.5*(mu_t[io]+mu_t[ineigh]) / PRANDTL_TURBULENT)
-        qn = cond * np.einsum('nd,nd->n', gT_face, n_int)        # heat conduction
-
-        vel_face = 0.5 * (vel[io] + vel[ineigh])
-        work = np.einsum('nd,nd->n', tau_n, vel_face)
-
-        fvisc = np.zeros((len(io), 7))
-        fvisc[:, 1:4] = tau_n
-        fvisc[:, 4] = work + qn
-
-        # turbulent variable diffusion: (mu + sigma*mu_t) grad(k or omega).n
-        # gk/gw: shared gradient computed once in compute() (see _turbulence_gradient).
-        gk, gw = grad_turb[:, 0, :], grad_turb[:, 1, :]  # Each (n_cells, 3)
-
-        gk_face = 0.5*(gk[io]+gk[ineigh])
-        gw_face = 0.5*(gw[io]+gw[ineigh])
-        # blend sigma with F1 (approx face value)
-        mut_f = 0.5*(mu_t[io]+mu_t[ineigh])
-        diff_k = (self.mu_lam + SST_SIGMA_K1 * mut_f) * np.einsum('nd,nd->n', gk_face, n_int)
-        diff_w = (self.mu_lam + SST_SIGMA_W1 * mut_f) * np.einsum('nd,nd->n', gw_face, n_int)
-        fvisc[:, 5] = diff_k
-        fvisc[:, 6] = diff_w
-
-        fvisc *= a_int[:, None]
-        # Viscous flux enters the residual with the opposite sign to the
-        # inviscid one: R = (1/V)[sum F_inv.nA - sum F_visc.nA].
-        np.add.at(flux_accum, io, -fvisc)
-        np.add.at(flux_accum, ineigh, fvisc)
-
-        # --- boundary faces: molecular + turbulent viscous flux -----------
-        # Previously missing entirely: with no boundary contribution here,
-        # solid walls got zero shear stress, zero heat conduction, and zero
-        # turbulent diffusion from the momentum/energy/k-omega equations, so
-        # skin friction never actually entered the solved system despite the
-        # wall ghost-state velocity mirror being specifically built to make
-        # it possible (see BoundaryConditionHandler._wall_bc docstring).
-        bo = self._bo
-        if bo.size:
-            n_b = geom.normals[geom.boundary_mask]
-            a_b = geom.areas[geom.boundary_mask]
-
-            rho_b = np.maximum(boundary_states[geom.boundary_mask, 0], 1e-9)
-            vel_ghost = boundary_states[geom.boundary_mask, 1:4] / rho_b[:, None]
-            tau_n_b = self.wall_shear_stress(rho, vel, mu_t, grad_vel, boundary_states)
-
-            E_ghost = boundary_states[geom.boundary_mask, 4]
-            ke_ghost = 0.5 * rho_b * np.sum(vel_ghost**2, axis=1)
-            p_ghost = np.maximum((GAMMA - 1.0) * (E_ghost - ke_ghost), 1.0)
-            T_ghost = p_ghost / (rho_b * R_GAS)
-            gT_face_b = self._boundary_face_grad(gT, T[bo], T_ghost)
-            cond_b = CP * (self.mu_lam / PRANDTL_LAMINAR + mu_t[bo] / PRANDTL_TURBULENT)
-            qn_b = cond_b * np.einsum('nd,nd->n', gT_face_b, n_b)
-
-            vel_face_b = 0.5 * (vel[bo] + vel_ghost)
-            work_b = np.einsum('nd,nd->n', tau_n_b, vel_face_b)
-
-            fvisc_b = np.zeros((len(bo), 7))
-            fvisc_b[:, 1:4] = tau_n_b
-            fvisc_b[:, 4] = work_b + qn_b
-
-            # k_ghost_b/omega_ghost_b: wall-function-aware boundary ghost,
-            # shared with (and computed once by) _turbulence_wall_ghost -
-            # see its own docstring for why this must be the same array
-            # _turbulence_gradient used, not a second independent copy.
-            gk_face_b = self._boundary_face_grad(gk, k[bo], k_ghost_b)
-            gw_face_b = self._boundary_face_grad(gw, omega[bo], omega_ghost_b)
-            mut_b = mu_t[bo]
-            diff_k_b = (self.mu_lam + SST_SIGMA_K1 * mut_b) * np.einsum('nd,nd->n', gk_face_b, n_b)
-            diff_w_b = (self.mu_lam + SST_SIGMA_W1 * mut_b) * np.einsum('nd,nd->n', gw_face_b, n_b)
-            fvisc_b[:, 5] = diff_k_b
-            fvisc_b[:, 6] = diff_w_b
-
-            fvisc_b *= a_b[:, None]
-            np.add.at(flux_accum, bo, -fvisc_b)
-
-    @staticmethod
-    def _stress_dot_normal(grad_vel, normal, mu):
-        """tau . n  with tau = mu(grad u + grad u^T - 2/3 div(u) I)."""
-        divu = grad_vel[:, 0, 0] + grad_vel[:, 1, 1] + grad_vel[:, 2, 2]
-        tau = mu[:, None, None] * (grad_vel + np.transpose(grad_vel, (0, 2, 1)))
-        # subtract 2/3 mu divu on the diagonal
-        for i in range(3):
-            tau[:, i, i] -= (2.0/3.0) * mu * divu
-        return np.einsum('nij,nj->ni', tau, normal)
-
-    # ------------------------------------------------------------------
-    # SST source terms
-    # ------------------------------------------------------------------
-    def _sst_sources(self, rho, k, omega, mu_t, grad_vel, grad_turb, residual):
-        geom = self.geom
-        S, Smag = self._strain(grad_vel)
-
-        # gk/gw: shared gradient computed once in compute() (see _turbulence_gradient).
-        gk, gw = grad_turb[:, 0, :], grad_turb[:, 1, :]  # Each (n_cells, 3)
-
-        F1, CDkw = self._f1_blend(rho, k, omega, gk, gw)
-
-        beta = _blend(F1, SST_BETA1, SST_BETA2)
-        gamma = _blend(F1, SST_GAMMA1, SST_GAMMA2)
-        sigma_w = _blend(F1, SST_SIGMA_W1, SST_SIGMA_W2)
-
-        # Production of k, limited to 10*beta_star*rho*k*omega (Menter limiter).
-        Pk = mu_t * Smag**2
-        Pk = np.minimum(Pk, 10.0 * SST_BETA_STAR * rho * k * omega)
-        Dk = SST_BETA_STAR * rho * k * omega
-
-        Pw = gamma * rho * Smag**2  # = gamma/nu_t * Pk with mu_t=rho a1 k/...; use strain form
-        Dw = beta * rho * omega**2
-        
-        # CRITICAL FIX: Protect cross-diffusion term from division by zero
-        # When omega -> 0, the term blows up causing numerical divergence
-        omega_safe = np.maximum(omega, 1e-8)  # Minimum physical omega (1/s)
-        cross = 2.0 * (1.0 - F1) * rho * sigma_w / omega_safe * np.einsum('nd,nd->n', gk, gw)
-        
-        # Additional safety: clip cross-diffusion to prevent extreme values
-        max_cross = 10.0 * np.maximum(np.abs(Pw), np.abs(Dw))
-        cross = np.clip(cross, -max_cross, max_cross)
-
-        # residual is dU/dt = -R ; sources enter with opposite sign (added to U).
-        # For conservative rho*k, rho*omega equations:
-        residual[:, 5] -= (Pk - Dk)
-        residual[:, 6] -= (Pw - Dw + cross)
+        # 每个速度分量的梯度 -> (n_cells, 3, 3)：[单元, 分量, 方向]
+        return green_gauss_gradient(vel, self.geom, vel_b, use_gpu=self._use_gpu)
 
 
 def estimate_wall_distance(geom: FaceGeometry, wall_face_mask: np.ndarray) -> np.ndarray:
-    """Approximate nearest-wall distance for every cell centroid.
+    """估算每个单元中心到最近壁面的距离。
 
-    Uses KD-Tree spatial indexing for O(N log M) complexity instead of
-    brute-force O(N*M). For 2.8M cells and 130K wall faces, this reduces
-    computation time from hours to seconds.
-    
+    用 KD-Tree 空间索引把复杂度降到 O(N log M)，而不是暴力 O(N*M)。对
+    280 万单元、13 万壁面来说，计算时间从小时级降到秒级。
+
     Args:
-        geom: Face geometry with cell centroids and face centers
-        wall_face_mask: Boolean mask identifying wall boundary faces
-        
+        geom: 带单元中心和面中心的面几何
+        wall_face_mask: 标识壁面边界面的布尔掩码
+
     Returns:
-        Array of minimum distances from each cell to nearest wall face
+        每个单元到最近壁面的最小距离数组
     """
     n_cells = geom.n_cells
     wall_faces = np.where(wall_face_mask)[0]
-    
+
     if wall_faces.size == 0:
         logger.warning("No wall faces found, returning large default distance")
         return np.full(n_cells, 1.0e9)
-    
-    # Extract wall face center coordinates
+
+    # 取出壁面面心坐标
     wall_pts = geom.centers[wall_faces]
     cc = geom.cell_centroids
-    
+
     logger.info(f"Building KD-Tree for {len(wall_pts)} wall points...")
-    
-    # Build KD-Tree from wall points (O(M log M))
+
+    # 用壁面点构建 KD-Tree（O(M log M)）
     tree = cKDTree(wall_pts)
-    
-    # Query nearest neighbor for all cell centroids (O(N log M))
+
+    # 为所有单元中心查询最近邻（O(N log M)）
     logger.info(f"Querying nearest wall distance for {n_cells} cells...")
-    distances, _ = tree.query(cc, k=1, workers=-1)  # workers=-1 uses all CPUs
-    
+    distances, _ = tree.query(cc, k=1, workers=-1)  # workers=-1 使用全部 CPU 核心
+
     logger.success(f"Wall distance computed: min={distances.min():.4e}, max={distances.max():.4e}, mean={distances.mean():.4e}")
-    
+
     return np.maximum(distances, 1e-9)

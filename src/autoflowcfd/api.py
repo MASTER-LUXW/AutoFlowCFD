@@ -292,7 +292,7 @@ class AutoFlowCFDAPI:
             backend=BackendType(backend),
             order=order,
             turbulence=turbulence_map[mode],
-            time_integration=TimeIntegrationScheme(time_integration),
+            time_scheme=TimeIntegrationScheme(time_integration),
             dt=dt,
             total_time=physical_time,
             output_dir=output_dir,

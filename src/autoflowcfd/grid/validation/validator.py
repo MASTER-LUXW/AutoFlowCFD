@@ -450,51 +450,29 @@ class GridValidator:
         return counts, bin_edges
     
     def _check_aspect_ratio_values(self) -> np.ndarray:
-        """计算所有单元的长宽比值数组"""
+        """计算所有单元的长宽比值数组
+
+        与 _check_aspect_ratio 复用同一个 quality_metrics 实现（相对
+        epsilon 下限），不再维护一份固定 1e-10 epsilon 的独立实现——两者
+        曾经用不同公式，导致直方图和 pass/fail 判定对同一批单元给出不一致
+        的数值。
+        """
         connectivity = self.grid_data.cells.connectivity
-        nodes = self.grid_data.nodes
-        
-        cell_coords = np.stack([
-            nodes.get_coordinates(connectivity[:, i])
-            for i in range(3)
-        ], axis=1)
-        
-        edge0 = np.linalg.norm(cell_coords[:, 1] - cell_coords[:, 0], axis=1)
-        edge1 = np.linalg.norm(cell_coords[:, 2] - cell_coords[:, 1], axis=1)
-        edge2 = np.linalg.norm(cell_coords[:, 0] - cell_coords[:, 2], axis=1)
-        
-        edges = np.stack([edge0, edge1, edge2], axis=1)
-        max_edges = np.max(edges, axis=1)
-        min_edges = np.maximum(np.min(edges, axis=1), 1e-10)
-        
-        return max_edges / min_edges
-    
+        node_coords = self.grid_data.nodes.get_coordinates()
+        return compute_triangle_aspect_ratios(node_coords, connectivity)
+
     def _compute_skewness_values(self) -> np.ndarray:
-        """计算所有单元的扭曲度值数组"""
+        """计算所有单元的扭曲度值数组
+
+        与 _check_skewness 复用同一个 quality_metrics 等角偏斜公式，不再
+        维护一份旧的面积偏差公式——那套旧公式对形状正常的三角形（例如
+        123/29/28 度的 BL 顶部三角形）会产生假阳性，已在 _check_skewness
+        里换掉，这里之前一直没跟着换。
+        """
         connectivity = self.grid_data.cells.connectivity
-        nodes = self.grid_data.nodes
-        
-        cell_coords = np.stack([
-            nodes.get_coordinates(connectivity[:, i])
-            for i in range(3)
-        ], axis=1)
-        
-        edge0 = np.linalg.norm(cell_coords[:, 1] - cell_coords[:, 0], axis=1)
-        edge1 = np.linalg.norm(cell_coords[:, 2] - cell_coords[:, 1], axis=1)
-        edge2 = np.linalg.norm(cell_coords[:, 0] - cell_coords[:, 2], axis=1)
-        
-        v0 = cell_coords[:, 1] - cell_coords[:, 0]
-        v1 = cell_coords[:, 2] - cell_coords[:, 0]
-        cross = np.cross(v0, v1)
-        areas = 0.5 * np.linalg.norm(cross, axis=1)
-        
-        perimeters = edge0 + edge1 + edge2
-        ideal_areas = (np.sqrt(3) / 36) * perimeters**2
-        ideal_areas = np.maximum(ideal_areas, 1e-10)
-        
-        skewness = 1.0 - (areas / ideal_areas)
-        return np.clip(skewness, 0.0, 1.0)
-    
+        node_coords = self.grid_data.nodes.get_coordinates()
+        return compute_triangle_skewness_values(node_coords, connectivity)
+
     def _compute_jacobian_values(self) -> np.ndarray:
         """计算所有单元的雅可比行列式值数组"""
         connectivity = self.grid_data.cells.connectivity

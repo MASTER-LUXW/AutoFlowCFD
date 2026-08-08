@@ -1,13 +1,12 @@
-"""Post-processing module.
+"""后处理模块。
 
-This module provides tools for calculating aerodynamic coefficients,
-exporting visualization data, and analyzing convergence history.
+本模块提供计算气动系数、导出可视化数据、分析收敛历史的工具。
 
 Key Components:
-    - CoefficientCalculator: Cd, Cl, Cm calculation
-    - VTKExporter: Field data export for ParaView
-    - ConvergenceAnalyzer: Residual and coefficient history
-    - TransientStatistics: Time-averaged fields, RMS, PSD (v0.2+)
+    - CoefficientCalculator: Cd、Cl、Cm 计算
+    - VTKExporter: 供 ParaView 使用的场数据导出
+    - ConvergenceAnalyzer: 残差与系数历史
+    - TransientStatistics: 时间平均场、RMS、PSD
 
 Example:
     >>> from autoflowcfd.postprocess import CoefficientCalculator

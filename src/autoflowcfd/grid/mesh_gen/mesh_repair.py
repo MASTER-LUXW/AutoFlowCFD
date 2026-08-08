@@ -1,24 +1,19 @@
-"""Stage A post-generation volume mesh repair: quality-gated smoothing.
+"""生成后体网格修复 Stage A：质量门控平滑。
 
-Stage A (this module's main entry point, `smooth_bad_cells`): quality-gated
-Laplacian smoothing, restricted to nodes that don't lie on any physical
-boundary surface (body/tunnel/inlet/outlet) or on the BL/core interface -
-covers BL-interior layer nodes and core-region tetgen Steiner points, since
-neither carries physical geometry meaning and neither is load-bearing for
-already-generated neighbouring geometry the way the interface is (see
-compute_movable_node_mask's own docstring).
+Stage A（本模块主入口 `smooth_bad_cells`）：质量门控的拉普拉斯平滑，只
+作用于不在任何物理边界面（车身/隧道/进口/出口）上、也不在 BL/core 交界
+面上的节点——覆盖 BL 内部层节点和 core 区域 tetgen 的 Steiner 点，因为
+这两类节点既不承载物理几何含义，也不像交界面那样对已生成的相邻几何有
+支撑作用（见 compute_movable_node_mask 自己的文档字符串）。
 
-Stage B (BL-side thickness capping) and Stage B' (local cavity re-tiling)
-live in mesh_repair_cavity.py, split out purely to keep this file's size
-down - re-exported from here (see the bottom of this file) so existing
-callers (`from .mesh_repair import smooth_bad_cells,
-compute_bl_thickness_limit_override, remesh_core_cavity`) keep working
-unchanged. See mesh_repair_cavity.py's own module docstring for the full
-Stage B/B' picture, including why a previous core-side region-based
-counterpart to Stage B was removed (net-harmful in practice - tetgen's
-per-region refinement leaking outward, see mesh_background.py's own
-history), and why Stage B' now covers BL cells too, not just core-only
-ones.
+Stage B（BL 侧厚度封顶）和 Stage B'（局部 cavity 重新铺网）在
+mesh_repair_cavity.py 里，纯粹为了控制本文件行数才拆出去——在本文件底部
+重新转出，让现有调用方（`from .mesh_repair import smooth_bad_cells,
+compute_bl_thickness_limit_override, remesh_core_cavity`）不受影响。完整
+的 Stage B/B' 说明见 mesh_repair_cavity.py 自己的模块文档字符串，包括
+Stage B 之前一个基于 core 侧区域的对应方案为什么被移除（实际效果是净负面
+的——tetgen 按区域细化会向外泄漏，见 mesh_background.py 自己的历史记录），
+以及 Stage B' 为什么现在也覆盖 BL 单元，而不只是纯 core 单元。
 """
 
 from typing import List, Optional, Tuple, TYPE_CHECKING

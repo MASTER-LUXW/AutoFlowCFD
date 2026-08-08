@@ -1,7 +1,6 @@
-"""NAS parser utility functions.
+"""NAS 解析器工具函数。
 
-Provides helper functions for parsing Nastran format files, including
-floating point number parsing and format detection utilities.
+提供解析 Nastran 格式文件用的辅助函数，包括浮点数解析与格式探测。
 """
 
 import re

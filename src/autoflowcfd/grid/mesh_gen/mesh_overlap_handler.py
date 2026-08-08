@@ -1,6 +1,6 @@
-"""Physical overlap detection and bad cell mask computation.
+"""物理重叠检测与坏单元掩码计算。
 
-Split from mesh_background.py to adhere to line count limits.
+从 mesh_background.py 拆分出来以控制行数。
 """
 
 import numpy as np
@@ -17,7 +17,7 @@ def compute_prism_aware_overlap_bad_tet_mask(
 ) -> Optional[np.ndarray]:
     """Physical-overlap check over the FULL mixed (prism+tet) face set,
     returning a (len(merged_cells),) bool mask of which TET cells are
-    implicated - the only side Stage A/B'/D can act on (true prisms are
+    implicated - the only side Stage A/B' can act on (true prisms are
     entirely outside their scope).
 
     Why this is necessary and not redundant with the ordinary tet-only

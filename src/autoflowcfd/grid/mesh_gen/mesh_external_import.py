@@ -1,29 +1,22 @@
-"""Import + validate + best-effort repair for an externally-generated
-volume mesh (e.g. ANSA's own volume export), paired with its original
-surface mesh for boundary-condition attribution.
+"""导入 + 校验 + 尽力修复"外部生成"的体网格（例如 ANSA 自身的体网格导出），
+并配合其原始面网格用于边界条件归属。
 
-This is the "bring your own volume mesh" path: instead of this project's
-own generate-volume pipeline (BL extrusion + tetgen/gmsh core fill), a
-user hands over a volume mesh some OTHER tool already produced, plus the
-surface .nas it was meshed from (needed because the volume mesh itself
-typically carries no boundary-condition information - see nas_parser_
-volume's own docstring). import_external_volume_mesh does the three-step
-flow this enables: quality check, best-effort repair, and (via its return
-value, which every solve_commands.py entry point already knows how to
-consume as a VolumeMeshData) submission to the solver.
+这是"自带体网格"路径：用户不走本项目自己的 generate-volume 流程（BL
+挤出 + tetgen/gmsh 核心填充），而是直接提供别的工具已经生成好的体网格，
+外加它对应的原始面 .nas 文件（之所以需要面网格，是因为体网格本身通常
+不带任何边界条件信息——见 nas_parser_volume 自己的文档字符串）。
+import_external_volume_mesh 完成这三步：质量检测、尽力修复、以及（通过
+其返回值，每个 solve_commands.py 入口都已经知道如何把它当作
+VolumeMeshData 消费）提交给求解器。
 
-Repair scope is deliberately narrower here than this project's own
-generation pipeline's full Stage A/B'/D: only Stage A (quality-gated
-Laplacian smoothing, mesh_repair.smooth_bad_cells) is applied, and only
-to the tet portion. Stage B' (local cavity re-tiling) and Stage D (edge
-collapse) are NOT run - both are more tightly coupled to assumptions this
-project's own generation makes (e.g. Stage B' re-tiling a cavity against
-tetgen's own quality standard is only meaningful for a tetgen-filled
-region in the first place) that don't necessarily hold for a mesh some
-other, unknown tool produced. Stage A alone is the safest, most broadly
-applicable repair: it only ever relocates already-interior, non-boundary
-nodes, and only commits a move that introduces zero negative-volume
-cells - see smooth_bad_cells' own docstring.
+这里的修复范围比本项目自己生成流程的完整 Stage A/B' 窄得多：只应用
+Stage A（质量门控的拉普拉斯平滑，mesh_repair.smooth_bad_cells），而且
+只作用于四面体部分。Stage B'（局部 cavity 重新铺网）不会运行——它和本
+项目自己生成流程的假设绑得更紧（例如 Stage B' 按 tetgen 自己的质量标准
+重铺 cavity，前提是这片区域本来就是 tetgen 填出来的），这些假设对外部
+未知工具生成的网格不一定成立。只用 Stage A 是最安全、适用面最广的修复：
+它只会挪动本就是内部、非边界的节点，且只在不产生负体积单元时才提交这次
+移动——见 smooth_bad_cells 自己的文档字符串。
 """
 
 import numpy as np

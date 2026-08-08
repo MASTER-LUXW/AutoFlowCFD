@@ -1,17 +1,15 @@
-"""Time-accurate unsteady RANS/DES solver.
+"""时间精确的非定常 RANS/DES 求解器。
 
-Marches the same viscous RANS residual used by the steady solver
-(:class:`~autoflowcfd.core.fvm_viscous_residual.ViscousRANSResidual`) forward
-in *physical* time with a fixed, uniform time step - reusing the steady
-solver's face geometry, boundary-condition handling, and aerodynamic-force
-integration instead of maintaining a second, independent flux/BC/force
-pipeline.
+推进的是与稳态求解器相同的粘性 RANS 残差
+（:class:`~autoflowcfd.core.fvm_viscous_residual.ViscousRANSResidual`），
+但用固定、均匀的时间步长在**物理**时间上前进——复用稳态求解器的面
+几何、边界条件处理、气动力积分，而不是另外维护一套独立的
+通量/边界条件/力 计算流程。
 
-DES/DDES/LES modes only implement the Spalart DES97 grid-based length-scale
-limiter on the SST k-destruction term (see :meth:`TransientSolver._apply_des_correction`).
-DDES's boundary-layer shielding function and a genuine resolved-turbulence
-LES sub-grid model are not implemented; both currently fall back to DES97
-with a startup warning.
+DES/DDES/LES 模式目前只实现了 Spalart DES97 基于网格尺度的长度尺度
+限制器，作用在 SST k 耗散项上（见 :meth:`TransientSolver._apply_des_correction`）。
+DDES 的边界层屏蔽函数和真正的可解析湍流 LES 亚格子模型都未实现；两者
+目前都退化为 DES97，并在启动时给出警告。
 """
 
 from __future__ import annotations
@@ -32,10 +30,10 @@ from .checkpoint import CheckpointManager
 from .time_integration import TimeIntegrator, TimeIntegrationScheme
 from .transient_result import TransientResult
 
-# Scheme names in TransientConfig/CLI predate the steady solver's SSP-RK
-# rewrite (see time_integration.py's own module docstring on why
-# "backward_euler"/"ab3" are legacy aliases for explicit schemes) - map them
-# onto the real integrator this solver uses.
+# TransientConfig/CLI 里的格式名早于稳态求解器的 SSP-RK 重写（关于
+# "backward_euler"/"ab3" 为什么是显式格式的旧别名，见
+# time_integration.py 自己的模块文档字符串）——这里把它们映射到本求解器
+# 实际使用的真实积分器上。
 _SCHEME_MAP = {
     ConfigTimeScheme.BACKWARD_EULER: TimeIntegrationScheme.FORWARD_EULER,
     ConfigTimeScheme.RK2: TimeIntegrationScheme.SSP_RK2,
@@ -43,13 +41,13 @@ _SCHEME_MAP = {
     ConfigTimeScheme.AB3: TimeIntegrationScheme.SSP_RK3,
 }
 
-MU_LAM = 1.7894e-5  # Sutherland at 288 K, Pa s
+MU_LAM = 1.7894e-5  # 288 K 下的 Sutherland 粘度, Pa s
 SST_BETA_STAR = 0.09
-C_DES = 0.61  # Spalart DES97 constant (SST-calibrated)
+C_DES = 0.61  # Spalart DES97 常数（SST 标定）
 
 
 class TransientSolver:
-    """Time-accurate unsteady RANS/DES solver coordinator."""
+    """时间精确的非定常 RANS/DES 求解器协调器。"""
 
     def __init__(self, grid_data: VolumeMeshData, config: TransientConfig):
         self.grid_data = grid_data
@@ -91,8 +89,8 @@ class TransientSolver:
         if scheme is None:
             logger.warning(f"Unknown time_scheme {config.time_scheme}, defaulting to SSP-RK3")
             scheme = TimeIntegrationScheme.SSP_RK3
-        # cfl_target is unused here (dt is fixed/uniform, not CFL-adapted) but
-        # TimeIntegrator.local_time_step is never called in this solver.
+        # cfl_target 这里不会用到（dt 是固定/均匀的，不做 CFL 自适应），
+        # 但 TimeIntegrator.local_time_step 在本求解器里根本不会被调用。
         self.time_integrator = TimeIntegrator(scheme=scheme, dt=config.dt, cfl_target=1.0)
 
         self.current_time = 0.0
@@ -110,7 +108,7 @@ class TransientSolver:
 
     # ------------------------------------------------------------------
     def _initialize_solution(self) -> None:
-        """Uniform freestream initial condition (same form as FRSolver)."""
+        """均匀自由来流初始条件（形式与 FRSolver 相同）。"""
         n_cells = self.grid_data.cell_count
         rho_0, u_0, p_0 = self.config.rho_inf, self.config.vel_inf, self.config.p_inf
         gamma = 1.4
@@ -128,9 +126,9 @@ class TransientSolver:
         logger.info(f"Solution initialized: {n_cells} cells")
 
     def _setup_boundary_conditions(self) -> None:
-        """Wire freestream targets into bc_handler (no ramp: this is a real
-        time-accurate march, not a pseudo-time startup - ramping the BC here
-        would just be an unphysical time-dependent forcing)."""
+        """把自由来流目标值接进 bc_handler（不做爬升：这是真正的时间
+        精确推进，不是伪时间启动——在这里对边界条件做爬升只会引入一个
+        不符合物理的、随时间变化的强迫项）。"""
         vel_inf = self.config.vel_inf
         for name in self.grid_data.boundaries.boundary_names:
             u = name.upper()
@@ -139,10 +137,9 @@ class TransientSolver:
             elif "GROUND" in u or "FARFIELD" in u:
                 self.bc_handler.base_farfield_velocity = vel_inf
             elif "BODY" in u or "CAR" in u or "OUTLET" in u or "SYMMETRY" in u or "TUNNEL" in u:
-                # TUNNEL is classified as SYMMETRY (free-slip duct wall) by
-                # bc_handler.py's _classify - it doesn't use
-                # base_farfield_velocity at all, unlike a real open FARFIELD
-                # boundary.
+                # TUNNEL 被 bc_handler.py 的 _classify 分类为 SYMMETRY
+                # （自由滑移风洞壁面）——与真正开放的 FARFIELD 边界不同，
+                # 它完全不用 base_farfield_velocity。
                 pass
             else:
                 self.bc_handler.base_farfield_velocity = vel_inf
@@ -150,8 +147,8 @@ class TransientSolver:
         logger.info(f"Boundary conditions setup: {len(self.grid_data.boundaries.boundary_names)} boundaries")
 
     def _setup(self) -> None:
-        """Build face geometry / residual objects. Idempotent - safe to call
-        from both solve() and load_checkpoint()."""
+        """构建面几何/残差对象。幂等——可以安全地从 solve() 和
+        load_checkpoint() 两处调用。"""
         if self._geom is not None:
             return
 
@@ -165,12 +162,12 @@ class TransientSolver:
         nodes_array = np.column_stack([
             self.grid_data.nodes.x, self.grid_data.nodes.y, self.grid_data.nodes.z,
         ])
-        # See the matching comment in solver_steady.py's identical fix:
-        # prism cells (VolumeMeshData.prism_cells) occupy the front of the
-        # global cell-index space, tets the rest - centroids must follow
-        # the same order grid_data.get_cell_volumes() below already does,
-        # or they silently misalign against cell_volumes/face owner-
-        # neighbour indices for every BL cell once a prism mesh is in play.
+        # 见 solver_steady.py 里同样修复的对应注释：三棱柱单元
+        # （VolumeMeshData.prism_cells）占据全局单元索引空间的前段，
+        # 四面体在后——中心点的计算顺序必须和下面
+        # grid_data.get_cell_volumes() 已经采用的顺序一致，否则一旦用了
+        # 三棱柱网格，每个边界层单元的中心点都会悄悄地和
+        # cell_volumes/面的 owner-neighbour 索引对不上。
         tet_connectivity_int64 = self.grid_data.cells.connectivity.astype(np.int64)
         tet_centroids = nodes_array[tet_connectivity_int64].mean(axis=1)
         prism_cells_obj = getattr(self.grid_data, 'prism_cells', None)
@@ -206,9 +203,9 @@ class TransientSolver:
                 wall_face_mask[f] = True
         wall_distance = estimate_wall_distance(self._geom, wall_face_mask)
 
-        # Reference Mach number for AUSM+up's low-Mach scaling function
-        # f_a (see fvm_viscous_residual.py's _ausm_up / solver_steady.py's
-        # matching comment) - same role here as in the steady solver.
+        # AUSM+up 低马赫数缩放函数 f_a 用的参考马赫数（见
+        # fvm_viscous_residual.py 的 _ausm_up / solver_steady.py 里对应的
+        # 注释）——这里的作用和稳态求解器里一样。
         gamma_air = 1.4
         a_inf = np.sqrt(gamma_air * self.config.p_inf / self.config.rho_inf)
         mach_ref = self.config.vel_inf / max(a_inf, 1e-30)
@@ -217,6 +214,7 @@ class TransientSolver:
             self._geom, mu_lam=MU_LAM, wall_distance=wall_distance, turbulent=self.turbulent,
             mach_ref=mach_ref,
             wall_face_mask=wall_face_mask if self.config.use_wall_functions else None,
+            use_gpu=self.config.is_gpu,
         )
         if self.config.use_wall_functions:
             logger.info(
@@ -229,14 +227,12 @@ class TransientSolver:
         self._warn_if_dt_unstable()
 
     def _warn_if_dt_unstable(self) -> None:
-        """Estimate the explicit-scheme stability limit (CFL=1, inviscid +
-        SST source-term stiffness at the initial condition) and warn if the
-        configured fixed dt exceeds it. Unlike the steady solver, this
-        solver never adapts dt to CFL - an unstable choice here will just
-        diverge, so surfacing it up front is the only warning the user gets
-        before that happens. This is necessarily an initial-condition
-        estimate only: omega evolves, so a dt that looks safe at t=0 can
-        still become unstable later if omega grows near a wall."""
+        """估算显式格式的稳定性上限（CFL=1，初始条件下的无粘 + SST 源项
+        刚性），若配置的固定 dt 超过它则给出警告。与稳态求解器不同，
+        本求解器从不根据 CFL 自适应 dt——一个不稳定的选择只会直接发散，
+        所以提前给出这个警告是用户在那之前能得到的唯一提示。这只能是
+        一个基于初始条件的估计：omega 会随时间演化，所以在 t=0 看起来
+        安全的 dt，如果 omega 在壁面附近后续增大，仍可能变得不稳定。"""
         omega0 = None
         if self.turbulent:
             rho0 = np.maximum(self.solution[:, 0], 1e-9)
@@ -254,7 +250,7 @@ class TransientSolver:
 
     # ------------------------------------------------------------------
     def load_checkpoint(self, checkpoint_path: str) -> None:
-        """Resume from an HDF5 checkpoint (steady or transient)."""
+        """从 HDF5 checkpoint（稳态或瞬态）恢复。"""
         self._setup()
         solution, history, iteration, metadata = self.checkpoint_manager.load(checkpoint_path)
         if self.grid_data.cell_count != solution.shape[0]:
@@ -274,23 +270,22 @@ class TransientSolver:
         logger.info(f"Resumed transient state: t={self.current_time:.6f}s, step={self.n_steps}")
 
     def _apply_des_correction(self, U: np.ndarray, R: np.ndarray) -> None:
-        """Spalart DES97 length-scale limiter on the SST k-destruction term.
+        """Spalart DES97 长度尺度限制器，作用在 SST k 耗散项上。
 
-        Scales the standard destruction Dk = beta_star*rho*k*omega by
-        F_DES = max(l_RANS / (C_des*Delta), 1), where l_RANS is the modeled
-        turbulence length scale and Delta the local grid spacing. Once the
-        grid is fine enough to resolve the energy-containing scales directly
-        (l_RANS > C_des*Delta), this increases k destruction so the model
-        backs off and lets resolved turbulence take over - the one piece of
-        physics that actually distinguishes DES mode from plain RANS here.
+        用 F_DES = max(l_RANS / (C_des*Delta), 1) 缩放标准耗散项
+        Dk = beta_star*rho*k*omega，其中 l_RANS 是模化的湍流长度尺度，
+        Delta 是局部网格间距。一旦网格足够细、可以直接解析含能尺度
+        （l_RANS > C_des*Delta），这会增大 k 的耗散，让模型让位、由
+        可解析湍流接管——这是这里真正把 DES 模式和普通 RANS 区分开的
+        唯一物理机制。
         """
         rho, vel, p, T, k, omega = self._residual.to_primitive(U)
         l_rans = np.sqrt(np.maximum(k, 0.0)) / np.maximum(SST_BETA_STAR * omega, 1e-12)
         l_les = C_DES * self._des_delta
         F_DES = np.maximum(l_rans / np.maximum(l_les, 1e-12), 1.0)
         Dk_std = SST_BETA_STAR * rho * k * omega
-        # R already contains +Dk_std from _sst_sources; add the incremental
-        # (F_DES - 1) part so the total matches Dk_std * F_DES.
+        # R 里已经包含了 _sst_sources 加上的 +Dk_std；这里只加增量部分
+        # (F_DES - 1)，使总量等于 Dk_std * F_DES。
         R[:, 5] += Dk_std * (F_DES - 1.0)
 
     def _compute_residual(self, U: np.ndarray) -> np.ndarray:
@@ -302,7 +297,7 @@ class TransientSolver:
 
     # ------------------------------------------------------------------
     def solve(self) -> TransientResult:
-        """Advance the solution from ``current_time`` to ``config.total_time``."""
+        """把解从 ``current_time`` 推进到 ``config.total_time``。"""
         self._setup()
         geom = self._geom
         residual = self._residual
@@ -352,7 +347,7 @@ class TransientSolver:
                     f"Step {self.n_steps:6d} | t={self.current_time:.6f}s | "
                     f"Cd={Cd:.4f} | Cl={Cl:.4f}"
                 )
-                # Second line: Cd breakdown (aligned with first |)
+                # 第二行：Cd 分解（与第一个 | 对齐）
                 prefix_len = len(f"Step {self.n_steps:6d}")
                 logger.info(
                     f"{'':>{prefix_len + 2}s}  "

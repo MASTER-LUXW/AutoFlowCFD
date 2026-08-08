@@ -1,18 +1,18 @@
-"""AutoFlowCFD - High-performance CFD software for automotive aerodynamics.
+"""AutoFlowCFD - 面向汽车空气动力学的高性能计算流体力学（CFD）软件。
 
-AutoFlowCFD is an open-source Computational Fluid Dynamics (CFD) software
-specialized for automotive external aerodynamics simulation. It provides
-high-accuracy and high-speed CFD analysis with AI Agent integration capabilities.
+AutoFlowCFD 是一款开源计算流体力学（CFD）软件，
+专注于汽车外流场仿真分析。它提供
+高精度、高速度的 CFD 分析，并具备 AI Agent 集成能力。
 
-Key Features:
-    - Native NAS grid support (ANSA v22/v23/v24)
-    - Hybrid CPU/GPU computing (Numba/CUDA)
-    - High-order Flux Reconstruction solver
-    - Advanced turbulence models (SST k-ω, DES/DDES, LES)
-    - Dual interface (CLI + Python API)
-    - Modular and extensible architecture
+主要特性：
+    - 原生支持 NAS 网格格式（ANSA v22/v23/v24）
+    - 混合 CPU/GPU 计算（Numba/CUDA）
+    - 高阶通量重构（Flux Reconstruction）求解器
+    - 先进的湍流模型（SST k-ω, DES/DDES, LES）
+    - 双重接口（CLI + Python API）
+    - 模块化且可扩展的架构
 
-Example:
+示例：
     >>> from autoflowcfd import AutoFlowCFDAPI
     >>> api = AutoFlowCFDAPI()
     >>> grid = api.load_grid("car_model.nas")
@@ -22,8 +22,8 @@ Example:
 """
 
 # ============================================================================
-# CRITICAL: Set BLAS/linear algebra threading BEFORE importing NumPy
-# This ensures maximum multi-core utilization for vectorized operations
+# 关键：在导入 NumPy 之前设置 BLAS/线性代数线程数
+# 这确保了向量化操作能够最大限度地利用多核性能
 # ============================================================================
 import os
 import multiprocessing
@@ -43,10 +43,10 @@ __license__ = "Apache-2.0"
 
 from typing import Any, Dict
 
-# Import main API class
+# 导入主 API 类
 from .api import AutoFlowCFDAPI
 
-# Module metadata
+# 模块元数据
 __all__ = [
     "__version__",
     "__author__",
@@ -57,10 +57,10 @@ __all__ = [
 
 
 def get_version() -> str:
-    """Get the current version of AutoFlowCFD.
+    """获取 AutoFlowCFD 的当前版本。
     
     Returns:
-        str: Version string in semver format (e.g., "0.1.0")
+        str: 语义化版本字符串（例如 "0.1.0"）
         
     Example:
         >>> import autoflowcfd
@@ -71,15 +71,15 @@ def get_version() -> str:
 
 
 def create_api(verbose: bool = False) -> AutoFlowCFDAPI:
-    """Create AutoFlowCFD API instance.
+    """创建 AutoFlowCFD API 实例。
     
-    Convenience function to create API instance.
+    用于创建 API 实例的便捷函数。
     
     Args:
-        verbose: Enable verbose logging
+        verbose: 启用详细日志输出
         
     Returns:
-        AutoFlowCFDAPI: API instance
+        AutoFlowCFDAPI: API 实例
         
     Example:
         >>> api = autoflowcfd.create_api()

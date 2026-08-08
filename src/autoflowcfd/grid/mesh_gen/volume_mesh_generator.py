@@ -1,11 +1,11 @@
-"""Volume mesh generator for CFD simulations.
+"""CFD 用体网格生成器。
 
-Generates 3D tetrahedral volume meshes from surface triangulations, via
-BL extrusion + tetgen core-fill hybrid assembly.
+通过 BL 挤出 + tetgen 核心填充的混合装配方式，从面三角化网格生成三维
+四面体体网格。
 
-This module serves as a coordinator that delegates to specialized submodules:
-- mesh_background: Cartesian background grid and hybrid assembly
-- mesh_utils: Validation and utility functions
+本模块是一个协调者，把实际工作委托给专门的子模块：
+- mesh_background：混合装配编排
+- mesh_utils：校验与辅助函数
 """
 
 import numpy as np

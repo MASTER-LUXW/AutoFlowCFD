@@ -1,10 +1,8 @@
-"""Conversion of layered prism meshes (from mesh_extrusion.extrude_layers)
-into a conformal tetrahedral mesh.
+"""把分层棱柱网格（来自 mesh_extrusion.extrude_layers）转换成保形的四面体网格。
 
-Split out of mesh_extrusion.py (which retains the layer-generation loop,
-extrude_layers/extrude_single_layer) purely to keep both files under this
-project's 450-line-per-file guideline; the two modules have no dependency
-on each other.
+从 mesh_extrusion.py 拆出（该文件保留分层生成循环
+extrude_layers/extrude_single_layer），纯粹为了让两个文件都控制在 450
+行以内；两个模块彼此没有依赖关系。
 """
 
 import numpy as np

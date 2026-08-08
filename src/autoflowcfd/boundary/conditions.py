@@ -1,22 +1,36 @@
-"""Boundary condition implementations.
+"""边界条件实现。
 
-This module provides built-in boundary condition classes for AutoFlowCFD,
-including inlet, outlet, wall, ground, farfield, symmetry, and body boundaries.
+本模块提供 AutoFlowCFD 内置的边界条件类，包括入口、出口、壁面、地面、
+远场、对称面和车身边界。
 
 Key Components:
-    - BaseBC: Abstract base class for all boundary conditions
-    - InletBC: Velocity/pressure inlet boundary
-    - OutletBC: Pressure outlet boundary
-    - WallBC: No-slip wall boundary
-    - GroundBC: Moving/stationary ground boundary
-    - FarfieldBC: Free-stream farfield boundary
-    - SymmetryBC: Symmetry plane boundary
-    - BodyBC: Vehicle body surface (special wall)
+    - BaseBC: 所有边界条件的抽象基类
+    - InletBC: 速度/压力入口边界
+    - OutletBC: 压力出口边界
+    - WallBC: 无滑移壁面边界
+    - GroundBC: 移动/静止地面边界
+    - FarfieldBC: 自由来流远场边界
+    - SymmetryBC: 对称面边界
+    - BodyBC: 车身表面（特殊壁面）
+
+⚠️ 现状说明：这些类现在只承担参数校验和元数据登记的角色（构造 +
+`validate()`），由 `boundary/manager.py` 的 `BoundaryManager.add_bc()`/
+`auto_configure()`/`configure_from_yaml()`/`hybrid_configure()` 实际
+使用——这些方法确实是 `solver_steady.py`/`transient_solver_loop.py`
+求解主流程调用的（登记边界元数据供查询/导出用）。以前每个类还有一个
+`apply()` 方法，会直接往 solution 数组里写边界值——但**从未被生产
+求解路径调用过**：实际求解用的是 `core/bc_handler.py` 里完全独立、
+向量化实现的边界处理逻辑，那套逻辑读的是这里通过 `add_bc()` 存进
+`BoundaryMap` 的名字/类型信息，不会调用这些类的 `apply()`。已经
+确认这条 `apply()` 路径是死代码（唯一调用方是同样已删除的
+`BoundaryManager.apply_boundary()`/`apply_all()`），且 `SymmetryBC`/
+`BodyBC.apply()` 是完全没实现的空 TODO——如果这条路径被误用会静默给出
+错误结果，所以整体删除了 `apply()`，只保留元数据登记功能。
 
 Example:
     >>> from autoflowcfd.boundary.conditions import InletBC
     >>> inlet = InletBC(velocity=30.0, pressure=101325.0)
-    >>> inlet.apply(solution, boundary_cells=[0, 1, 2], time=0.0)
+    >>> inlet.validate()
 """
 
 from abc import ABC, abstractmethod
@@ -26,89 +40,69 @@ from loguru import logger
 
 
 class BaseBC(ABC):
-    """Abstract base class for all boundary conditions.
-    
-    All boundary condition implementations must inherit from this class
-    and implement the required methods.
-    
+    """所有边界条件的抽象基类。
+
+    所有边界条件实现都必须继承此类并实现要求的方法。
+
     Attributes:
-        bc_type: Boundary condition type identifier
-        params: Boundary condition parameters
-        
+        bc_type: 边界条件类型标识
+        params: 边界条件参数
+
     Example:
         >>> class MyBC(BaseBC):
         ...     def __init__(self, **kwargs):
         ...         super().__init__("MY_BC", kwargs)
     """
-    
+
     def __init__(self, bc_type: str, params: Dict[str, Any]):
-        """Initialize boundary condition.
-        
+        """初始化边界条件。
+
         Args:
-            bc_type: Boundary condition type identifier
-            params: Boundary condition parameters
+            bc_type: 边界条件类型标识
+            params: 边界条件参数
         """
         self.bc_type = bc_type
         self.params = params
-    
-    @abstractmethod
-    def apply(
-        self,
-        solution: Any,
-        boundary_cells: Any,  # Changed from List[int] to Any to accept numpy arrays
-        time: float = 0.0
-    ) -> None:
-        """Apply boundary condition to solution vector.
-        
-        Args:
-            solution: Solution vector (SolutionVector object)
-            boundary_cells: List or array of cell indices on this boundary
-            time: Current simulation time
-            
-        Raises:
-            NotImplementedError: Must be implemented by subclasses
-        """
-        pass
-    
+
     @abstractmethod
     def validate(self) -> bool:
-        """Validate boundary condition parameters.
-        
+        """校验边界条件参数。
+
         Returns:
-            bool: True if parameters are valid
-            
+            bool: 参数有效则为 True
+
         Raises:
-            ValueError: If parameters are invalid
+            ValueError: 参数无效时
         """
         pass
-    
+
     def get_type(self) -> str:
-        """Get boundary condition type.
-        
+        """获取边界条件类型。
+
         Returns:
-            str: Boundary condition type identifier
+            str: 边界条件类型标识
         """
         return self.bc_type
-    
+
     def __repr__(self) -> str:
-        """String representation."""
+        """字符串表示。"""
         return f"{self.__class__.__name__}(type={self.bc_type})"
 
 
 class InletBC(BaseBC):
-    """Velocity/pressure inlet boundary condition.
-    
-    Specifies velocity components and static pressure at the inlet.
-    Supports both uniform and profile-based inlet conditions.
-    
+    """速度/压力入口边界条件。
+
+    指定入口的速度分量和静压。同时支持均匀入口和基于剖面的入口条件
+    （元数据层面；实际求解见模块文档字符串）。
+
     Attributes:
-        velocity_x: X-component of inlet velocity (m/s)
-        velocity_y: Y-component of inlet velocity (m/s)
-        velocity_z: Z-component of inlet velocity (m/s)
-        pressure: Static pressure at inlet (Pa)
-        turbulence_k: Turbulent kinetic energy (m²/s²)
-        turbulence_omega: Specific dissipation rate (1/s)
-        
+        velocity_x: 入口速度 X 分量 (m/s)
+        velocity_y: 入口速度 Y 分量 (m/s)
+        velocity_z: 入口速度 Z 分量 (m/s)
+        pressure: 入口静压 (Pa)
+        turbulence_k: 湍动能 (m²/s²)
+        turbulence_omega: 比耗散率 (1/s)
+
     Example:
         >>> inlet = InletBC(
         ...     velocity_x=30.0,
@@ -117,7 +111,7 @@ class InletBC(BaseBC):
         ...     pressure=101325.0
         ... )
     """
-    
+
     def __init__(
         self,
         velocity_x: float = 30.0,
@@ -128,16 +122,16 @@ class InletBC(BaseBC):
         turbulence_omega: float = 10.0,
         **kwargs
     ):
-        """Initialize inlet boundary condition.
-        
+        """初始化入口边界条件。
+
         Args:
-            velocity_x: X-component of velocity (m/s)
-            velocity_y: Y-component of velocity (m/s)
-            velocity_z: Z-component of velocity (m/s)
-            pressure: Static pressure (Pa)
-            turbulence_k: Turbulent kinetic energy (m²/s²)
-            turbulence_omega: Specific dissipation rate (1/s)
-            **kwargs: Additional parameters
+            velocity_x: 速度 X 分量 (m/s)
+            velocity_y: 速度 Y 分量 (m/s)
+            velocity_z: 速度 Z 分量 (m/s)
+            pressure: 静压 (Pa)
+            turbulence_k: 湍动能 (m²/s²)
+            turbulence_omega: 比耗散率 (1/s)
+            **kwargs: 额外参数
         """
         params = {
             'velocity_x': velocity_x,
@@ -149,125 +143,60 @@ class InletBC(BaseBC):
         }
         params.update(kwargs)
         super().__init__('INLET', params)
-    
-    def apply(
-        self,
-        solution: Any,
-        boundary_cells: Any,
-        time: float = 0.0
-    ) -> None:
-        """Apply inlet boundary condition.
-        
-        Sets conserved variables at inlet cells based on specified
-        velocity and pressure.
-        
-        Solution variables are in conservative form: [rho, rhou, rhov, rhow, E, k, omega]
-        
-        Args:
-            solution: Solution vector with conserved variables
-            boundary_cells: List or array of inlet cell indices
-            time: Current simulation time (for time-varying BCs)
-        """
-        # Check if boundary_cells is empty
-        if hasattr(boundary_cells, 'size'):
-            # numpy array
-            if boundary_cells.size == 0:
-                return
-        else:
-            # list
-            if not boundary_cells:
-                return
-        
-        logger.debug(
-            f"Applying INLET BC to {len(boundary_cells)} cells "
-            f"at time={time:.6f}s"
-        )
-        
-        # Extract parameters
-        velocity_x = self.params['velocity_x']
-        velocity_y = self.params['velocity_y']
-        velocity_z = self.params['velocity_z']
-        pressure = self.params['pressure']
-        turbulence_k = self.params.get('turbulence_k', 0.1)
-        turbulence_omega = self.params.get('turbulence_omega', 10.0)
-        
-        # For air at standard conditions
-        rho = 1.225  # kg/m³
-        gamma = 1.4  # Specific heat ratio
-        
-        # Compute conservative variables
-        rhou = rho * velocity_x
-        rhov = rho * velocity_y
-        rhow = rho * velocity_z
-        
-        # Total energy: E = p/(gamma-1) + 0.5*rho*V^2
-        V_squared = velocity_x**2 + velocity_y**2 + velocity_z**2
-        E = pressure / (gamma - 1.0) + 0.5 * rho * V_squared
-        
-        # Set solution values at inlet cells
-        # Solution structure: [rho, rhou, rhov, rhow, E, k, omega]
-        solution[boundary_cells, 0] = rho           # density
-        solution[boundary_cells, 1] = rhou          # x-momentum
-        solution[boundary_cells, 2] = rhov          # y-momentum
-        solution[boundary_cells, 3] = rhow          # z-momentum
-        solution[boundary_cells, 4] = E             # total energy
-        solution[boundary_cells, 5] = turbulence_k  # turbulent kinetic energy
-        solution[boundary_cells, 6] = turbulence_omega  # specific dissipation rate
-    
+
     def validate(self) -> bool:
-        """Validate inlet boundary condition parameters.
-        
+        """校验入口边界条件参数。
+
         Returns:
-            bool: True if all parameters are valid
-            
+            bool: 全部参数有效则为 True
+
         Raises:
-            ValueError: If any parameter is invalid
+            ValueError: 任一参数无效时
         """
-        # Validate velocity magnitude
+        # 校验速度大小
         vel_mag = np.sqrt(
             self.params['velocity_x']**2 +
             self.params['velocity_y']**2 +
             self.params['velocity_z']**2
         )
-        
+
         if vel_mag < 0:
             raise ValueError("Velocity magnitude cannot be negative")
-        
-        if vel_mag > 340.0:  # Speed of sound approximation
+
+        if vel_mag > 340.0:  # 声速近似值
             logger.warning(
                 f"Inlet velocity {vel_mag:.2f} m/s is supersonic. "
                 f"Ensure compressible flow solver is enabled."
             )
-        
-        # Validate pressure
+
+        # 校验压力
         if self.params['pressure'] <= 0:
             raise ValueError(f"Pressure must be positive, got {self.params['pressure']}")
-        
-        # Validate turbulence quantities
+
+        # 校验湍流量
         if self.params['turbulence_k'] < 0:
             raise ValueError(f"Turbulence k must be non-negative, got {self.params['turbulence_k']}")
-        
+
         if self.params['turbulence_omega'] <= 0:
             raise ValueError(f"Turbulence omega must be positive, got {self.params['turbulence_omega']}")
-        
+
         return True
 
 
 class OutletBC(BaseBC):
-    """Pressure outlet boundary condition.
-    
-    Specifies static pressure at the outlet boundary.
-    Flow direction is determined by local solution gradient.
-    
+    """压力出口边界条件。
+
+    在出口边界指定静压，流动方向由局部解的梯度决定。
+
     Attributes:
-        pressure: Static pressure at outlet (Pa)
-        backflow_turbulence_k: Turbulence k for backflow (m²/s²)
-        backflow_turbulence_omega: Turbulence omega for backflow (1/s)
-        
+        pressure: 出口静压 (Pa)
+        backflow_turbulence_k: 回流时使用的湍动能 (m²/s²)
+        backflow_turbulence_omega: 回流时使用的比耗散率 (1/s)
+
     Example:
         >>> outlet = OutletBC(pressure=101325.0)
     """
-    
+
     def __init__(
         self,
         pressure: float = 101325.0,
@@ -275,13 +204,13 @@ class OutletBC(BaseBC):
         backflow_turbulence_omega: float = 10.0,
         **kwargs
     ):
-        """Initialize outlet boundary condition.
-        
+        """初始化出口边界条件。
+
         Args:
-            pressure: Static pressure (Pa)
-            backflow_turbulence_k: Turbulence k for backflow
-            backflow_turbulence_omega: Turbulence omega for backflow
-            **kwargs: Additional parameters
+            pressure: 静压 (Pa)
+            backflow_turbulence_k: 回流湍动能
+            backflow_turbulence_omega: 回流比耗散率
+            **kwargs: 额外参数
         """
         params = {
             'pressure': pressure,
@@ -290,103 +219,44 @@ class OutletBC(BaseBC):
         }
         params.update(kwargs)
         super().__init__('OUTLET', params)
-    
-    def apply(
-        self,
-        solution: Any,
-        boundary_cells: Any,
-        time: float = 0.0
-    ) -> None:
-        """Apply outlet boundary condition.
-        
-        Sets pressure at outlet cells. For subsonic outflow,
-        pressure is specified and other variables are extrapolated.
-        
-        Solution variables are in conservative form: [rho, rhou, rhov, rhow, E, k, omega]
-        
-        Args:
-            solution: Solution vector
-            boundary_cells: List or array of outlet cell indices
-            time: Current simulation time
-        """
-        # Check if boundary_cells is empty
-        if hasattr(boundary_cells, 'size'):
-            if boundary_cells.size == 0:
-                return
-        else:
-            if not boundary_cells:
-                return
-        
-        logger.debug(
-            f"Applying OUTLET BC to {len(boundary_cells)} cells "
-            f"at time={time:.6f}s"
-        )
-        
-        # Extract parameters
-        pressure = self.params['pressure']
-        backflow_k = self.params.get('backflow_turbulence_k', 0.1)
-        backflow_omega = self.params.get('backflow_turbulence_omega', 10.0)
-        
-        gamma = 1.4  # Specific heat ratio
-        
-        # For outlet, we set the total energy based on specified pressure
-        # E = p/(gamma-1) + 0.5*rho*V^2
-        # We keep rho and velocity from current solution (extrapolation)
-        rho_current = solution[boundary_cells, 0]
-        rhou_current = solution[boundary_cells, 1]
-        rhov_current = solution[boundary_cells, 2]
-        rhow_current = solution[boundary_cells, 3]
-        
-        # Compute velocity magnitude squared
-        V_squared = ((rhou_current / np.maximum(rho_current, 1e-10))**2 + 
-                     (rhov_current / np.maximum(rho_current, 1e-10))**2 + 
-                     (rhow_current / np.maximum(rho_current, 1e-10))**2)
-        
-        # Set total energy with specified pressure
-        E_new = pressure / (gamma - 1.0) + 0.5 * rho_current * V_squared
-        
-        solution[boundary_cells, 4] = E_new  # total energy
-        
-        # For turbulence variables, set backflow values if needed
-        solution[boundary_cells, 5] = np.maximum(solution[boundary_cells, 5], backflow_k)  # k
-        solution[boundary_cells, 6] = np.maximum(solution[boundary_cells, 6], backflow_omega)  # omega
-    
+
     def validate(self) -> bool:
-        """Validate outlet boundary condition parameters.
-        
+        """校验出口边界条件参数。
+
         Returns:
-            bool: True if parameters are valid
-            
+            bool: 参数有效则为 True
+
         Raises:
-            ValueError: If parameters are invalid
+            ValueError: 参数无效时
         """
         if self.params['pressure'] <= 0:
             raise ValueError(f"Pressure must be positive, got {self.params['pressure']}")
-        
+
         if self.params['backflow_turbulence_k'] < 0:
             raise ValueError(f"Backflow turbulence k must be non-negative")
-        
+
         if self.params['backflow_turbulence_omega'] <= 0:
             raise ValueError(f"Backflow turbulence omega must be positive")
-        
+
         return True
 
 
 class WallBC(BaseBC):
-    """No-slip wall boundary condition.
-    
-    Implements no-slip condition (u=v=w=0) at solid walls.
-    Supports wall functions for turbulent flows.
-    
+    """无滑移壁面边界条件。
+
+    在固壁上施加无滑移条件 (u=v=w=0)，支持湍流壁面函数（元数据层面；
+    实际的壁面函数求解见 core/fvm_residual_viscous.py 的
+    ViscousFluxMixin）。
+
     Attributes:
-        wall_function: Wall function type ('standard', 'enhanced', 'none')
-        roughness_height: Surface roughness height (m)
-        temperature: Wall temperature (K) - for heat transfer
-        
+        wall_function: 壁面函数类型（'standard'、'enhanced'、'none'）
+        roughness_height: 表面粗糙度高度 (m)
+        temperature: 壁面温度 (K)——用于传热
+
     Example:
         >>> wall = WallBC(wall_function='standard')
     """
-    
+
     def __init__(
         self,
         wall_function: str = 'standard',
@@ -394,20 +264,20 @@ class WallBC(BaseBC):
         temperature: Optional[float] = None,
         **kwargs
     ):
-        """Initialize wall boundary condition.
-        
+        """初始化壁面边界条件。
+
         Args:
-            wall_function: Wall function type ('standard', 'enhanced', 'none')
-            roughness_height: Surface roughness height (m)
-            temperature: Wall temperature (K), None for adiabatic
-            **kwargs: Additional parameters
+            wall_function: 壁面函数类型（'standard'、'enhanced'、'none'）
+            roughness_height: 表面粗糙度高度 (m)
+            temperature: 壁面温度 (K)，None 表示绝热
+            **kwargs: 额外参数
         """
         if wall_function not in ['standard', 'enhanced', 'none']:
             raise ValueError(
                 f"Invalid wall function: {wall_function}. "
                 f"Must be 'standard', 'enhanced', or 'none'"
             )
-        
+
         params = {
             'wall_function': wall_function,
             'roughness_height': roughness_height,
@@ -415,86 +285,44 @@ class WallBC(BaseBC):
         }
         params.update(kwargs)
         super().__init__('WALL', params)
-    
-    def apply(
-        self,
-        solution: Any,
-        boundary_cells: Any,
-        time: float = 0.0
-    ) -> None:
-        """Apply wall boundary condition.
-        
-        Sets velocity to zero (no-slip) and applies wall functions
-        for turbulence variables.
-        
-        Solution variables are in conservative form: [rho, rhou, rhov, rhow, E, k, omega]
-        
-        Args:
-            solution: Solution vector
-            boundary_cells: List or array of wall cell indices
-            time: Current simulation time
-        """
-        # Check if boundary_cells is empty
-        if hasattr(boundary_cells, 'size'):
-            if boundary_cells.size == 0:
-                return
-        else:
-            if not boundary_cells:
-                return
-        
-        logger.debug(
-            f"Applying WALL BC ({self.params['wall_function']}) "
-            f"to {len(boundary_cells)} cells at time={time:.6f}s"
-        )
-        
-        # No-slip condition: set momentum to zero
-        solution[boundary_cells, 1] = 0.0  # rhou = 0
-        solution[boundary_cells, 2] = 0.0  # rhov = 0
-        solution[boundary_cells, 3] = 0.0  # rhow = 0
-        
-        # For wall functions, turbulence variables should be handled by the turbulence model
-        # Here we just ensure they don't become negative
-        solution[boundary_cells, 5] = np.maximum(solution[boundary_cells, 5], 0.0)  # k >= 0
-        solution[boundary_cells, 6] = np.maximum(solution[boundary_cells, 6], 0.0)  # omega >= 0
-    
+
     def validate(self) -> bool:
-        """Validate wall boundary condition parameters.
-        
+        """校验壁面边界条件参数。
+
         Returns:
-            bool: True if parameters are valid
-            
+            bool: 参数有效则为 True
+
         Raises:
-            ValueError: If parameters are invalid
+            ValueError: 参数无效时
         """
         if self.params['roughness_height'] < 0:
             raise ValueError(f"Roughness height must be non-negative")
-        
+
         if self.params['temperature'] is not None and self.params['temperature'] <= 0:
             raise ValueError(f"Temperature must be positive if specified")
-        
+
         return True
 
 
 class GroundBC(BaseBC):
-    """Ground boundary condition.
-    
-    Special wall boundary for ground plane. Supports moving ground
-    simulation (rolling road) and stationary ground.
-    
+    """地面边界条件。
+
+    地面平面的特殊壁面边界，支持移动地面仿真（滚动路面）和静止地面。
+
     Attributes:
-        moving: Whether ground is moving (rolling road)
-        velocity_x: Ground velocity in X direction (m/s)
-        velocity_y: Ground velocity in Y direction (m/s)
-        velocity_z: Ground velocity in Z direction (m/s)
-        
+        moving: 地面是否移动（滚动路面）
+        velocity_x: 地面速度 X 分量 (m/s)
+        velocity_y: 地面速度 Y 分量 (m/s)
+        velocity_z: 地面速度 Z 分量 (m/s)
+
     Example:
-        >>> # Stationary ground
+        >>> # 静止地面
         >>> ground = GroundBC(moving=False)
-        >>> 
-        >>> # Moving ground (rolling road at 30 m/s)
+        >>>
+        >>> # 移动地面（滚动路面，30 m/s）
         >>> ground = GroundBC(moving=True, velocity_x=30.0)
     """
-    
+
     def __init__(
         self,
         moving: bool = False,
@@ -503,14 +331,14 @@ class GroundBC(BaseBC):
         velocity_z: float = 0.0,
         **kwargs
     ):
-        """Initialize ground boundary condition.
-        
+        """初始化地面边界条件。
+
         Args:
-            moving: Whether ground is moving
-            velocity_x: Ground velocity X component (m/s)
-            velocity_y: Ground velocity Y component (m/s)
-            velocity_z: Ground velocity Z component (m/s)
-            **kwargs: Additional parameters
+            moving: 地面是否移动
+            velocity_x: 地面速度 X 分量 (m/s)
+            velocity_y: 地面速度 Y 分量 (m/s)
+            velocity_z: 地面速度 Z 分量 (m/s)
+            **kwargs: 额外参数
         """
         params = {
             'moving': moving,
@@ -520,106 +348,40 @@ class GroundBC(BaseBC):
         }
         params.update(kwargs)
         super().__init__('GROUND', params)
-    
-    def apply(
-        self,
-        solution: Any,
-        boundary_cells: Any,
-        time: float = 0.0
-    ) -> None:
-        """Apply ground boundary condition.
-        
-        For stationary ground, sets velocity to zero.
-        For moving ground, sets velocity to specified ground speed.
-        
-        Solution variables are in conservative form: [rho, rhou, rhov, rhow, E, k, omega]
-        
-        Args:
-            solution: Solution vector
-            boundary_cells: List or array of ground cell indices
-            time: Current simulation time
-        """
-        # Check if boundary_cells is empty
-        if hasattr(boundary_cells, 'size'):
-            if boundary_cells.size == 0:
-                return
-        else:
-            if not boundary_cells:
-                return
-        
-        gamma = 1.4  # Specific heat ratio
-        
-        if self.params['moving']:
-            logger.debug(
-                f"Applying MOVING GROUND BC (v={self.params['velocity_x']:.2f} m/s) "
-                f"to {len(boundary_cells)} cells"
-            )
-            # Moving ground: set momentum to ground speed
-            rho = solution[boundary_cells, 0]  # Keep current density
-            velocity_x = self.params['velocity_x']
-            velocity_y = self.params['velocity_y']
-            velocity_z = self.params['velocity_z']
-            
-            solution[boundary_cells, 1] = rho * velocity_x  # rhou
-            solution[boundary_cells, 2] = rho * velocity_y  # rhov
-            solution[boundary_cells, 3] = rho * velocity_z  # rhow
-            
-            # Update total energy based on new velocity
-            V_squared = velocity_x**2 + velocity_y**2 + velocity_z**2
-            # Extract pressure from current energy: p = (gamma-1)*(E - 0.5*rho*V^2)
-            E_current = solution[boundary_cells, 4]
-            V_old_squared = ((solution[boundary_cells, 1] / np.maximum(rho, 1e-10))**2 + 
-                            (solution[boundary_cells, 2] / np.maximum(rho, 1e-10))**2 + 
-                            (solution[boundary_cells, 3] / np.maximum(rho, 1e-10))**2)
-            pressure = (gamma - 1.0) * (E_current - 0.5 * rho * V_old_squared)
-            E_new = pressure / (gamma - 1.0) + 0.5 * rho * V_squared
-            solution[boundary_cells, 4] = E_new
-        else:
-            logger.debug(
-                f"Applying STATIONARY GROUND BC to {len(boundary_cells)} cells"
-            )
-            # Stationary ground: no-slip condition (zero momentum)
-            solution[boundary_cells, 1] = 0.0  # rhou = 0
-            solution[boundary_cells, 2] = 0.0  # rhov = 0
-            solution[boundary_cells, 3] = 0.0  # rhow = 0
-        
-        # Ensure turbulence variables are non-negative
-        solution[boundary_cells, 5] = np.maximum(solution[boundary_cells, 5], 0.0)
-        solution[boundary_cells, 6] = np.maximum(solution[boundary_cells, 6], 0.0)
-    
+
     def validate(self) -> bool:
-        """Validate ground boundary condition parameters.
-        
+        """校验地面边界条件参数。
+
         Returns:
-            bool: True if parameters are valid
-            
+            bool: 参数有效则为 True
+
         Raises:
-            ValueError: If parameters are invalid
+            ValueError: 参数无效时
         """
         if not self.params['moving']:
-            # For stationary ground, velocities should be zero
+            # 静止地面的速度应为零
             if abs(self.params['velocity_x']) > 1e-6:
                 logger.warning(
                     "Stationary ground has non-zero X velocity. "
                     "Setting moving=True or velocity_x=0."
                 )
-        
+
         return True
 
 
 class FarfieldBC(BaseBC):
-    """Farfield boundary condition.
-    
-    Implements free-stream conditions at farfield boundaries.
-    Uses characteristic-based non-reflecting boundary conditions.
-    
+    """远场边界条件。
+
+    在远场边界施加自由来流条件，采用基于特征的无反射边界条件（元数据
+    层面；实际求解见 core/bc_handler.py 的 _farfield_bc_vectorized）。
+
     Attributes:
-        velocity_x: Free-stream velocity X (m/s)
-        velocity_y: Free-stream velocity Y (m/s)
-        velocity_z: Free-stream velocity Z (m/s)
-        pressure: Free-stream pressure (Pa)
-        temperature: Free-stream temperature (K)
-        
+        velocity_x: 自由来流速度 X 分量 (m/s)
+        velocity_y: 自由来流速度 Y 分量 (m/s)
+        velocity_z: 自由来流速度 Z 分量 (m/s)
+        pressure: 自由来流压力 (Pa)
+        temperature: 自由来流温度 (K)
+
     Example:
         >>> farfield = FarfieldBC(
         ...     velocity_x=30.0,
@@ -627,7 +389,7 @@ class FarfieldBC(BaseBC):
         ...     temperature=288.15
         ... )
     """
-    
+
     def __init__(
         self,
         velocity_x: float = 30.0,
@@ -637,15 +399,15 @@ class FarfieldBC(BaseBC):
         temperature: float = 288.15,
         **kwargs
     ):
-        """Initialize farfield boundary condition.
-        
+        """初始化远场边界条件。
+
         Args:
-            velocity_x: Free-stream velocity X (m/s)
-            velocity_y: Free-stream velocity Y (m/s)
-            velocity_z: Free-stream velocity Z (m/s)
-            pressure: Free-stream pressure (Pa)
-            temperature: Free-stream temperature (K)
-            **kwargs: Additional parameters
+            velocity_x: 自由来流速度 X 分量 (m/s)
+            velocity_y: 自由来流速度 Y 分量 (m/s)
+            velocity_z: 自由来流速度 Z 分量 (m/s)
+            pressure: 自由来流压力 (Pa)
+            temperature: 自由来流温度 (K)
+            **kwargs: 额外参数
         """
         params = {
             'velocity_x': velocity_x,
@@ -656,155 +418,61 @@ class FarfieldBC(BaseBC):
         }
         params.update(kwargs)
         super().__init__('FARFIELD', params)
-    
-    def apply(
-        self,
-        solution: Any,
-        boundary_cells: Any,
-        time: float = 0.0
-    ) -> None:
-        """Apply farfield boundary condition.
-        
-        Applies characteristic-based non-reflecting boundary conditions
-        using Riemann invariants.
-        
-        Solution variables are in conservative form: [rho, rhou, rhov, rhow, E, k, omega]
-        
-        Args:
-            solution: Solution vector
-            boundary_cells: List or array of farfield cell indices
-            time: Current simulation time
-        """
-        # Check if boundary_cells is empty
-        if hasattr(boundary_cells, 'size'):
-            if boundary_cells.size == 0:
-                return
-        else:
-            if not boundary_cells:
-                return
-        
-        logger.debug(
-            f"Applying FARFIELD BC to {len(boundary_cells)} cells "
-            f"at time={time:.6f}s"
-        )
-        
-        # Extract parameters
-        velocity_x = self.params['velocity_x']
-        velocity_y = self.params['velocity_y']
-        velocity_z = self.params['velocity_z']
-        pressure = self.params['pressure']
-        turbulence_k = self.params.get('turbulence_k', 0.1)
-        turbulence_omega = self.params.get('turbulence_omega', 10.0)
-        
-        # For air at standard conditions
-        rho = 1.225  # kg/m³
-        gamma = 1.4  # Specific heat ratio
-        
-        # Compute conservative variables
-        rhou = rho * velocity_x
-        rhov = rho * velocity_y
-        rhow = rho * velocity_z
-        
-        # Total energy: E = p/(gamma-1) + 0.5*rho*V^2
-        V_squared = velocity_x**2 + velocity_y**2 + velocity_z**2
-        E = pressure / (gamma - 1.0) + 0.5 * rho * V_squared
-        
-        # Set solution values at farfield cells
-        # Solution structure: [rho, rhou, rhov, rhow, E, k, omega]
-        solution[boundary_cells, 0] = rho           # density
-        solution[boundary_cells, 1] = rhou          # x-momentum
-        solution[boundary_cells, 2] = rhov          # y-momentum
-        solution[boundary_cells, 3] = rhow          # z-momentum
-        solution[boundary_cells, 4] = E             # total energy
-        solution[boundary_cells, 5] = turbulence_k  # turbulent kinetic energy
-        solution[boundary_cells, 6] = turbulence_omega  # specific dissipation rate
-    
+
     def validate(self) -> bool:
-        """Validate farfield boundary condition parameters.
-        
+        """校验远场边界条件参数。
+
         Returns:
-            bool: True if parameters are valid
-            
+            bool: 参数有效则为 True
+
         Raises:
-            ValueError: If parameters are invalid
+            ValueError: 参数无效时
         """
         if self.params['pressure'] <= 0:
             raise ValueError(f"Pressure must be positive")
-        
+
         if self.params['temperature'] <= 0:
             raise ValueError(f"Temperature must be positive")
-        
+
         return True
 
 
 class SymmetryBC(BaseBC):
-    """Symmetry plane boundary condition.
-    
-    Implements symmetry condition where normal velocity and
-    normal gradients of all variables are zero.
-    
+    """对称面边界条件。
+
+    施加对称条件：法向速度和所有变量的法向梯度均为零（元数据层面；
+    实际求解见 core/bc_handler.py 的 _symmetry_bc_vectorized）。
+
     Example:
         >>> symmetry = SymmetryBC()
     """
-    
+
     def __init__(self, **kwargs):
-        """Initialize symmetry boundary condition.
-        
+        """初始化对称面边界条件。
+
         Args:
-            **kwargs: Additional parameters (currently none)
+            **kwargs: 额外参数（目前无）
         """
         super().__init__('SYMMETRY', kwargs)
-    
-    def apply(
-        self,
-        solution: Any,
-        boundary_cells: Any,
-        time: float = 0.0
-    ) -> None:
-        """Apply symmetry boundary condition.
-        
-        Sets normal velocity to zero and ensures zero normal gradients.
-        
-        Args:
-            solution: Solution vector
-            boundary_cells: List or array of symmetry cell indices
-            time: Current simulation time
-        """
-        # Check if boundary_cells is empty
-        if hasattr(boundary_cells, 'size'):
-            if boundary_cells.size == 0:
-                return
-        else:
-            if not boundary_cells:
-                return
-        
-        logger.debug(
-            f"Applying SYMMETRY BC to {len(boundary_cells)} cells "
-            f"at time={time:.6f}s"
-        )
-        
-        # TODO: Implement actual boundary condition application
-        pass
-    
+
     def validate(self) -> bool:
-        """Validate symmetry boundary condition parameters.
-        
+        """校验对称面边界条件参数。
+
         Returns:
-            bool: Always True (no parameters to validate)
+            bool: 始终为 True（没有需要校验的参数）
         """
         return True
 
 
 class BodyBC(WallBC):
-    """Vehicle body surface boundary condition.
-    
-    Special wall boundary for vehicle body surfaces. Inherits from WallBC
-    but may have special treatment for aerodynamic surfaces.
-    
+    """车身表面边界条件。
+
+    车身表面的特殊壁面边界。继承自 WallBC，气动表面可能需要特殊处理。
+
     Example:
         >>> body = BodyBC(wall_function='enhanced')
     """
-    
+
     def __init__(
         self,
         wall_function: str = 'enhanced',
@@ -812,13 +480,13 @@ class BodyBC(WallBC):
         temperature: Optional[float] = None,
         **kwargs
     ):
-        """Initialize body boundary condition.
-        
+        """初始化车身边界条件。
+
         Args:
-            wall_function: Wall function type
-            roughness_height: Surface roughness height (m)
-            temperature: Wall temperature (K)
-            **kwargs: Additional parameters
+            wall_function: 壁面函数类型
+            roughness_height: 表面粗糙度高度 (m)
+            temperature: 壁面温度 (K)
+            **kwargs: 额外参数
         """
         super().__init__(
             wall_function=wall_function,
@@ -827,96 +495,63 @@ class BodyBC(WallBC):
             **kwargs
         )
         self.bc_type = 'BODY'
-    
-    def apply(
-        self,
-        solution: Any,
-        boundary_cells: Any,
-        time: float = 0.0
-    ) -> None:
-        """Apply body boundary condition.
-        
-        Similar to wall BC but may include special treatments for
-        automotive surfaces (e.g., enhanced wall functions).
-        
-        Args:
-            solution: Solution vector
-            boundary_cells: List or array of body cell indices
-            time: Current simulation time
-        """
-        # Check if boundary_cells is empty
-        if hasattr(boundary_cells, 'size'):
-            if boundary_cells.size == 0:
-                return
-        else:
-            if not boundary_cells:
-                return
-        
-        logger.debug(
-            f"Applying BODY BC ({self.params['wall_function']}) "
-            f"to {len(boundary_cells)} cells at time={time:.6f}s"
-        )
-        
-        # TODO: Implement actual boundary condition application
-        # May include special treatments for automotive surfaces
-        pass
 
 
-# Registry for custom boundary conditions
+# 自定义边界条件注册表
 _bc_registry: Dict[str, type] = {}
 
 
 def register_boundary_condition(bc_type: str):
-    """Decorator to register custom boundary condition classes.
-    
+    """注册自定义边界条件类的装饰器。
+
     Args:
-        bc_type: Boundary condition type identifier
-        
+        bc_type: 边界条件类型标识
+
     Example:
         >>> @register_boundary_condition("CUSTOM_INLET")
         ... class CustomInletBC(BaseBC):
-        ...     def apply(self, solution, boundary_cells, time):
-        ...         pass
+        ...     def validate(self):
+        ...         return True
     """
     def decorator(cls: type) -> type:
         if not issubclass(cls, BaseBC):
             raise TypeError(f"{cls.__name__} must inherit from BaseBC")
-        
+
         _bc_registry[bc_type] = cls
         logger.info(f"Registered custom boundary condition: {bc_type}")
         return cls
-    
+
     return decorator
 
 
 def get_boundary_condition_class(bc_type: str) -> type:
-    """Get boundary condition class by type identifier.
-    
+    """按类型标识获取边界条件类。
+
     Args:
-        bc_type: Boundary condition type identifier
-        
+        bc_type: 边界条件类型标识
+
     Returns:
-        type: Boundary condition class
-        
+        type: 边界条件类
+
     Raises:
-        KeyError: If boundary condition type is not registered
+        KeyError: 边界条件类型未注册时
     """
-    # Built-in boundary conditions
+    # 内置边界条件
     builtin_bcs = {
         'INLET': InletBC,
         'OUTLET': OutletBC,
-        'OUTLET_CHARACTERISTIC': None,  # Will be imported lazily
-        'OUTLET_SPONGE': None,  # Will be imported lazily
+        'OUTLET_CHARACTERISTIC': None,  # 惰性导入
+        'OUTLET_SPONGE': None,  # 惰性导入
         'WALL': WallBC,
         'GROUND': GroundBC,
         'FARFIELD': FarfieldBC,
         'SYMMETRY': SymmetryBC,
         'BODY': BodyBC,
     }
-    
+
     if bc_type in builtin_bcs:
         if builtin_bcs[bc_type] is None:
-            # Lazy import for advanced outlet BCs to avoid circular dependency
+            # 高级出口边界条件惰性导入，避免循环依赖
             if bc_type == 'OUTLET_CHARACTERISTIC':
                 from .outlet_bc import OutletCharacteristicBC
                 return OutletCharacteristicBC
@@ -924,10 +559,10 @@ def get_boundary_condition_class(bc_type: str) -> type:
                 from .outlet_bc import OutletSpongeBC
                 return OutletSpongeBC
         return builtin_bcs[bc_type]
-    
+
     if bc_type in _bc_registry:
         return _bc_registry[bc_type]
-    
+
     raise KeyError(
         f"Unknown boundary condition type: {bc_type}. "
         f"Available types: {list(builtin_bcs.keys()) + list(_bc_registry.keys())}"
@@ -935,15 +570,15 @@ def get_boundary_condition_class(bc_type: str) -> type:
 
 
 def create_boundary_condition(bc_type: str, **kwargs) -> BaseBC:
-    """Factory function to create boundary condition instances.
-    
+    """创建边界条件实例的工厂函数。
+
     Args:
-        bc_type: Boundary condition type identifier
-        **kwargs: Boundary condition parameters
-        
+        bc_type: 边界条件类型标识
+        **kwargs: 边界条件参数
+
     Returns:
-        BaseBC: Boundary condition instance
-        
+        BaseBC: 边界条件实例
+
     Example:
         >>> bc = create_boundary_condition('INLET', velocity_x=30.0)
     """

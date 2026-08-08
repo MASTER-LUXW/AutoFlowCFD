@@ -1,112 +1,59 @@
-"""AutoFlowCFD core solver module.
+"""AutoFlowCFD 核心求解器模块。
 
-This module provides the core computational components for AutoFlowCFD,
-including FR discretization, turbulence models, and solver backends.
+提供 AutoFlowCFD 的核心计算组件：FR 离散、湍流模型、求解器后端。
 
-LIVE vs. LEGACY: the actual production solve path (FRSolver.solve() /
-TransientSolver.solve()) is built from BoundaryConditionHandler,
-ViscousRANSResidual (fvm_viscous_residual.py), TimeIntegrator,
-FVMFaceExtractor (used purely as a data holder, populated via
-VolumeMeshData directly rather than its own build_from_tetrahedra), and
-AeroCoefficientCalculator. SST k-omega, MUSCL reconstruction/limiting, and
-residual assembly are re-implemented inline in fvm_viscous_residual.py /
-bc_handler.py rather than through the classes below - confirmed by
-`self.backend` (built via create_backend in FRSolver.__init__) never
-having any of its methods called anywhere in solver_steady.py or
-transient_solver_loop.py. The classes re-exported from the `legacy`
-subpackage below are a parallel, unused-in-production implementation
-stack that predates the current inline path; they still have their own
-standalone unit tests (tests/unit/test_fr_scheme.py,
-test_muscl_reconstruction.py, test_time_and_turbulence.py,
-tests/integration/test_iteration3_solver.py, test_convergence_integration.py,
-test_end_to_end_steady.py) so they are kept (see core/legacy/__init__.py)
-rather than deleted, but a fix made only there will NOT affect an actual
-solve - fix the live modules listed above instead.
+生产求解路径（FRSolver.solve() / TransientSolver.solve()）由
+BoundaryConditionHandler、ViscousRANSResidual（fvm_viscous_residual.py，
+拆成 fvm_residual_inviscid/viscous/sst.py 三个 mixin）、TimeIntegrator、
+FVMFaceExtractor（纯粹作为数据持有者，由 VolumeMeshData 直接填充）和
+AeroCoefficientCalculator 构成。RANS-SST 的完整物理（AUSM+up、粘性通量、
+SST 涡粘性/源项、Green-Gauss 梯度）已经移植成 Numba（CPU）kernel 并直接
+在 `ViscousRANSResidual` 内部 dispatch，CUDA（GPU）版本也已写好、通过
+`use_gpu=True`（由 `--backend gpu` 触发）dispatch，但**从未在真实 GPU
+硬件上验证过**（开发环境无 GPU）——见 `core/fvm_*_kernels_gpu.py` 各自
+的模块文档字符串。`core/backend/`（`create_backend`/`NumbaBackend`/
+`CUDABackend`）是一套独立的、更早期的无粘 Euler-only kernel 集合，只在
+`FRSolver.__init__`/`TransientSolver.__init__` 里被构造用于硬件可用性
+检查和日志提示，不参与实际残差计算——见 `core/backend/cpu_backend.py`
+模块文档字符串里对这个历史分层的说明。
 """
 
 from .time_integration import TimeIntegrator, TimeIntegrationScheme
 from .transient_result import TransientResult
 from .transient_solver_loop import TransientSolver
 from .solver_steady import FRSolver, SteadyResult
-from .coupling import SteadyTransientCoupler, SyntheticTurbulenceGenerator
 from .backend import create_backend, get_available_backends
 from .backend.base import BackendBase
-
-# Everything below this point lives under core/legacy/ - NOT on the live
-# solve path, see that subpackage's own __init__.py docstring for why it's
-# kept rather than deleted. Still re-exported here for backward
-# compatibility with existing `from autoflowcfd.core import X` style imports.
-from .legacy.fr_scheme import FROrder, FRScheme
-from .legacy.turbulence import SSTKOmegaModel
-from .legacy.wall_functions import WallFunctionModel
-from .legacy.convergence import ConvergenceMonitor, ConvergenceHistory
 from .backend.cpu_backend import NumbaBackend
 from .backend.gpu_backend import CUDABackend
-from .legacy.reconstruction_limiters import LimiterType, SlopeLimiters
-from .legacy.reconstruction_gradients import GradientComputer
-from .legacy.reconstruction_muscl import MUSCLReconstructor
-from .legacy.fvm_flux import FVMFluxCalculator
-from .legacy.fvm_residuals import FVMResidualComputer
-from .legacy.solver_loop import SteadySolverLoop
-from .legacy.solution_constraints import SolutionConstraintHandler
 
-# FVM Core modules (modularized). FVMFaceExtractor IS live (see module
-# docstring).
 from .fvm_faces import FVMFaceExtractor
-
-# Other core modules
-from .bc_handler import BoundaryConditionHandler  # live
-from .aero_coeffs import AeroCoefficientCalculator  # live
+from .bc_handler import BoundaryConditionHandler
+from .aero_coeffs import AeroCoefficientCalculator
 
 
 __all__ = [
-    # FR Scheme
-    "FRScheme",
-    "FROrder",
-    
-    # Turbulence Models
-    "SSTKOmegaModel",
-    "WallFunctionModel",
-    
-    # Time Integration
+    # 时间积分
     "TimeIntegrator",
     "TimeIntegrationScheme",
-    
-    # Convergence
-    "ConvergenceMonitor",
-    "ConvergenceHistory",
-    
-    # Steady Solver
+
+    # 稳态求解器
     "FRSolver",
     "SteadyResult",
-    
-    # Transient Solver
+
+    # 瞬态求解器
     "TransientSolver",
     "TransientResult",
-    
-    # Coupling
-    "SteadyTransientCoupler",
-    "SyntheticTurbulenceGenerator",
-    
-    # Backends
+
+    # Backend
     "create_backend",
     "get_available_backends",
     "BackendBase",
     "NumbaBackend",
     "CUDABackend",
-    
-    # Reconstruction and Limiters
-    "MUSCLReconstructor",
-    "SlopeLimiters",
-    "LimiterType",
-    "GradientComputer",
-    
-    # FVM Core modules
+
+    # FVM 核心模块
     "FVMFaceExtractor",
-    "FVMFluxCalculator",
-    "FVMResidualComputer",
-    "SteadySolverLoop",
     "BoundaryConditionHandler",
     "AeroCoefficientCalculator",
-    "SolutionConstraintHandler",
 ]

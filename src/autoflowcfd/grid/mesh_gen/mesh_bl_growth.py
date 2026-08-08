@@ -1,8 +1,7 @@
-"""Boundary layer growth logic.
+"""边界层生长逻辑。
 
-Handles the calculation of layer thicknesses and growth rates for boundary
-layer extrusion. Split from mesh_extrusion.py to adhere to line count
-limits.
+负责边界层挤出时每层厚度与增长率的计算。为控制行数从 mesh_extrusion.py
+拆分出来。
 """
 
 import numpy as np

@@ -1,6 +1,6 @@
-"""NAS parser exception classes.
+"""NAS 解析器异常类。
 
-Defines custom exceptions for NAS file parsing errors.
+定义 NAS 文件解析过程中用到的自定义异常。
 """
 
 

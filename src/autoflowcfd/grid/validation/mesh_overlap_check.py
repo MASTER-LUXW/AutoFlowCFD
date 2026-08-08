@@ -1,31 +1,24 @@
-"""Volume-mesh cell overlap / near-touching-face detection.
+"""体网格单元重叠 / 近似接触面检测。
 
-Detects the one class of mesh defect none of this project's existing
-checks target directly: two DIFFERENT, non-topologically-adjacent cells
-whose faces physically overlap in 3D space, or sit close enough together
-that they are one small parameter change away from overlapping (e.g. two
-BL extrusion fronts approaching each other across a tight gap - see
-mesh_tetgen_core.compute_local_thickness_limit, which only *prevents* this
-during generation and is explicitly documented there as a heuristic, not a
-guarantee).
+检测本项目现有检查都没有直接覆盖的一类网格缺陷：两个不同的、拓扑上不
+相邻的单元，其面在三维空间中物理重叠，或者靠得足够近，只要参数稍微一变
+就会重叠（例如两个 BL 挤出前沿隔着一道窄缝相向而行——见
+mesh_tetgen_core.compute_local_thickness_limit，它只是在生成阶段*尽量
+避免*这种情况，其自身文档也明确说明这只是启发式方法，不是保证）。
 
-What this complements, and does not replace:
-    - repair_nonmanifold_cells (mesh_tetgen_core.py) detects a *symptom*
-      of overlap (a face shared by >2 cells) after the fact - it can't see
-      an overlap that doesn't happen to produce that specific topological
-      signature (e.g. two cells that interpenetrate without any face being
-      literally coincident).
-    - fill_core_volume's tetgen self-intersection error only checks the BL
-      outer surface (a single 2D shell) for self-intersection before the
-      core is even filled - it says nothing about the final 3D volume mesh.
-    - This module checks the actual, final set of cells directly, via exact
-      triangle-triangle intersection/distance tests (overlap_geometry.py),
-      not a proxy signal.
+本模块是对以下检查的补充，而不是替代：
+    - repair_nonmanifold_cells（mesh_tetgen_core.py）事后检测的是重叠的
+      *症状*（一个面被超过 2 个单元共享）——如果重叠没有恰好产生这个特定
+      拓扑特征（例如两个单元相互穿插但没有任何面真正重合），它就看不见。
+    - fill_core_volume 里 tetgen 的自相交错误只在核心区域填充*之前*检查
+      BL 外表面（单张二维壳体）本身是否自相交——对最终的三维体网格什么
+      都不能说明。
+    - 本模块直接检查实际生成的最终单元集合，用精确的三角形-三角形相交/
+      距离检测（overlap_geometry.py），而不是间接信号。
 
-Two faces are only compared if they share ZERO nodes - faces sharing a
-node (an edge, a single vertex, or being the same face from opposite
-sides) are ordinary, correct mesh topology, not a defect, and are excluded
-before any geometric test runs.
+只有两个面完全不共享节点时才会被拿来比较——共享节点的面（一条边、一个
+顶点，或者同一个面从两侧看）是正常、正确的网格拓扑，不是缺陷，在任何
+几何检测开始之前就已被排除。
 """
 
 import time

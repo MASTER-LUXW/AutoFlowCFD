@@ -1,8 +1,7 @@
-"""Single-layer extrusion step: normal averaging and miter-join compensation.
+"""单层挤出步骤：法向平均与斜接（miter-join）补偿。
 
-Split out of mesh_extrusion.py (which retains the multi-layer orchestration
-loop, extrude_layers) purely to keep both files under this project's
-450-line-per-file guideline; extrude_layers is this module's only caller.
+从 mesh_extrusion.py 拆出（该文件保留多层编排循环 extrude_layers），纯粹
+为了让两个文件都控制在 450 行以内；extrude_layers 是本模块唯一调用方。
 """
 
 import numpy as np

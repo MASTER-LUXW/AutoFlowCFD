@@ -1,13 +1,12 @@
-"""Configuration loader for YAML files.
+"""YAML 配置文件加载器。
 
-This module provides functionality to load, validate, and merge solver
-configurations from YAML files.
+提供从 YAML 文件加载、验证和合并求解器配置的功能。
 
-Key Components:
-    - ConfigLoader: Main configuration loader class
-    - Default configs for steady and transient simulations
+核心组件:
+    - ConfigLoader: 主配置加载器类
+    - 定常和瞬态模拟的默认配置
 
-Example:
+示例:
     >>> from autoflowcfd.config import ConfigLoader
     >>> loader = ConfigLoader()
     >>> config = loader.load("simulation.yaml")
@@ -29,61 +28,60 @@ from .solver_config import (
 
 
 class ConfigLoader:
-    """YAML configuration file loader and validator.
-    
-    Supports loading steady-state and transient simulation configurations
-    from YAML files, with automatic validation and default value merging.
-    
-    Attributes:
-        default_steady: Default steady-state configuration
-        default_transient: Default transient configuration
-    
-    Example:
+    """YAML 配置文件加载器与验证器。
+
+    支持从 YAML 文件加载定常和瞬态模拟配置，自动验证并合并默认值。
+
+    属性:
+        default_steady: 默认定常配置
+        default_transient: 默认瞬态配置
+
+    示例:
         >>> loader = ConfigLoader()
         >>> config = loader.load("config.yaml")
         >>> print(config.backend)
     """
     
     def __init__(self):
-        """Initialize configuration loader with default configs."""
+        """初始化配置加载器，设置默认配置。"""
         self.default_steady = SteadyConfig()
         self.default_transient = TransientConfig()
     
     def load(self, config_path: Union[str, Path]) -> Union[SteadyConfig, TransientConfig]:
-        """Load configuration from YAML file.
-        
+        """从 YAML 文件加载配置。
+
         Args:
-            config_path: Path to YAML configuration file
-            
+            config_path: YAML 配置文件路径
+
         Returns:
-            SteadyConfig or TransientConfig: Loaded configuration object
-            
+            SteadyConfig or TransientConfig: 加载的配置对象
+
         Raises:
-            FileNotFoundError: Configuration file not found
-            ValueError: Invalid configuration format
-            yaml.YAMLError: YAML parsing error
-            
-        Example:
+            FileNotFoundError: 配置文件不存在
+            ValueError: 配置格式无效
+            yaml.YAMLError: YAML 解析错误
+
+        示例:
             >>> loader = ConfigLoader()
             >>> config = loader.load("simulation.yaml")
         """
         config_path = Path(config_path)
         
         if not config_path.exists():
-            raise FileNotFoundError(f"Configuration file not found: {config_path}")
+            raise FileNotFoundError(f"未找到配置文件: {config_path}")
         
-        logger.info(f"Loading configuration from {config_path}")
+        logger.info(f"正在从 {config_path} 加载配置")
         
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
                 config_dict = yaml.safe_load(f)
         except yaml.YAMLError as e:
-            raise ValueError(f"Invalid YAML format in {config_path}: {e}")
+            raise ValueError(f"{config_path} 中的 YAML 格式无效: {e}")
         
         if not isinstance(config_dict, dict):
-            raise ValueError(f"Configuration must be a YAML mapping, got {type(config_dict)}")
+            raise ValueError(f"配置必须是 YAML 映射，得到的是 {type(config_dict)}")
         
-        # Determine simulation mode
+        # 确定仿真模式
         mode = config_dict.get('mode', 'steady')
         
         if mode == 'steady':
@@ -91,101 +89,101 @@ class ConfigLoader:
         elif mode == 'transient':
             return self._load_transient_config(config_dict)
         else:
-            raise ValueError(f"Unknown simulation mode: {mode}. Must be 'steady' or 'transient'")
+            raise ValueError(f"未知的仿真模式: {mode}。必须是 'steady' 或 'transient'")
     
     def _load_steady_config(self, config_dict: Dict[str, Any]) -> SteadyConfig:
-        """Load and validate steady-state configuration.
-        
+        """加载并验证定常配置。
+
         Args:
-            config_dict: Configuration dictionary from YAML
-            
+            config_dict: YAML 配置字典
+
         Returns:
-            SteadyConfig: Validated steady-state configuration
+            SteadyConfig: 验证后的定常配置
         """
-        logger.debug("Loading steady-state configuration")
+        logger.debug("正在加载定常配置")
         
-        # Merge with defaults
+        # 与默认值合并
         merged = self._merge_defaults(config_dict, self.default_steady)
         
-        # Convert enum strings to enum values
+        # 将枚举字符串转换为枚举值
         merged = self._convert_enums(merged, SteadyConfig)
         
-        # Create config object
+        # 创建配置对象
         try:
             config = SteadyConfig(**merged)
-            logger.info(f"Steady config loaded: backend={config.backend}, order={config.order}")
+            logger.info(f"定常配置已加载: backend={config.backend}, order={config.order}")
             return config
         except Exception as e:
-            raise ValueError(f"Invalid steady configuration: {e}")
+            raise ValueError(f"无效的定常配置: {e}")
     
     def _load_transient_config(self, config_dict: Dict[str, Any]) -> TransientConfig:
-        """Load and validate transient configuration.
-        
+        """加载并验证瞬态配置。
+
         Args:
-            config_dict: Configuration dictionary from YAML
-            
+            config_dict: YAML 配置字典
+
         Returns:
-            TransientConfig: Validated transient configuration
+            TransientConfig: 验证后的瞬态配置
         """
-        logger.debug("Loading transient configuration")
+        logger.debug("正在加载瞬态配置")
         
-        # Merge with defaults
+        # 与默认值合并
         merged = self._merge_defaults(config_dict, self.default_transient)
         
-        # Convert enum strings to enum values
+        # 将枚举字符串转换为枚举值
         merged = self._convert_enums(merged, TransientConfig)
         
-        # Create config object
+        # 创建配置对象
         try:
             config = TransientConfig(**merged)
             logger.info(
-                f"Transient config loaded: backend={config.backend}, "
+                f"瞬态配置已加载: backend={config.backend}, "
                 f"dt={config.dt}, total_time={config.total_time}"
             )
             return config
         except Exception as e:
-            raise ValueError(f"Invalid transient configuration: {e}")
+            raise ValueError(f"无效的瞬态配置: {e}")
     
     def _merge_defaults(self, user_config: Dict[str, Any], default_config) -> Dict[str, Any]:
-        """Merge user configuration with default values.
-        
-        User-provided values override defaults. Missing values use defaults.
-        
+        """合并用户配置与默认值。
+
+        用户提供的值会覆盖默认值，缺失的值使用默认值。
+
         Args:
-            user_config: User-provided configuration dictionary
-            default_config: Default configuration object
-            
+            user_config: 用户提供的配置字典
+            default_config: 默认配置对象
+
         Returns:
-            Dict[str, Any]: Merged configuration dictionary
+            Dict[str, Any]: 合并后的配置字典
         """
-        # Start with defaults
+        # 从默认值开始
         merged = {}
         for key in default_config.__dataclass_fields__.keys():
             if hasattr(default_config, key):
                 merged[key] = getattr(default_config, key)
         
-        # Override with user values
+        # 用用户值覆盖
         for key, value in user_config.items():
             if key in merged:
                 merged[key] = value
             else:
-                logger.warning(f"Unknown configuration key: {key}")
+                logger.warning(f"未知的配置键: {key}")
         
         return merged
     
     def _convert_enums(self, config_dict: Dict[str, Any], config_class) -> Dict[str, Any]:
-        """Convert string values to enum types.
-        
+        """将字符串值转换为枚举类型。
+
         Args:
-            config_dict: Configuration dictionary
-            config_class: Target configuration class
-            
+            config_dict: 配置字典
+            config_class: 目标配置类
+
         Returns:
-            Dict[str, Any]: Dictionary with enum values converted
+            Dict[str, Any]: 枚举值已转换的字典
         """
         converted = config_dict.copy()
         
-        # Get field annotations
+        # 获取字段注解
         annotations = getattr(config_class, '__annotations__', {})
         
         for key, value in config_dict.items():
@@ -194,46 +192,46 @@ class ConfigLoader:
             
             field_type = annotations[key]
             
-            # Convert BackendType
+            # 转换 BackendType
             if field_type == BackendType and isinstance(value, str):
                 try:
                     converted[key] = BackendType(value.lower())
                 except ValueError:
                     raise ValueError(
-                        f"Invalid backend type: {value}. "
-                        f"Must be one of: {[b.value for b in BackendType]}"
+                        f"无效的后端类型: {value}。"
+                        f"必须是以下之一: {[b.value for b in BackendType]}"
                     )
             
-            # Convert TurbulenceModel
+            # 转换 TurbulenceModel
             elif field_type == TurbulenceModel and isinstance(value, str):
                 try:
                     converted[key] = TurbulenceModel(value.lower())
                 except ValueError:
                     raise ValueError(
-                        f"Invalid turbulence model: {value}. "
-                        f"Must be one of: {[t.value for t in TurbulenceModel]}"
+                        f"无效的湍流模型: {value}。"
+                        f"必须是以下之一: {[t.value for t in TurbulenceModel]}"
                     )
             
-            # Convert TimeIntegrationScheme
+            # 转换 TimeIntegrationScheme
             elif field_type == TimeIntegrationScheme and isinstance(value, str):
                 try:
                     converted[key] = TimeIntegrationScheme(value.lower())
                 except ValueError:
                     raise ValueError(
-                        f"Invalid time integration scheme: {value}. "
-                        f"Must be one of: {[s.value for s in TimeIntegrationScheme]}"
+                        f"无效的时间积分方案: {value}。"
+                        f"必须是以下之一: {[s.value for s in TimeIntegrationScheme]}"
                     )
         
         return converted
     
     def save_template(self, output_path: Union[str, Path], mode: str = 'steady'):
-        """Save configuration template to YAML file.
-        
+        """保存配置模板到 YAML 文件。
+
         Args:
-            output_path: Output file path
-            mode: Simulation mode ('steady' or 'transient')
-            
-        Example:
+            output_path: 输出文件路径
+            mode: 仿真模式（'steady' 或 'transient'）
+
+        示例:
             >>> loader = ConfigLoader()
             >>> loader.save_template("config_template.yaml", mode="steady")
         """
@@ -244,28 +242,28 @@ class ConfigLoader:
         elif mode == 'transient':
             config = self.default_transient
         else:
-            raise ValueError(f"Unknown mode: {mode}. Must be 'steady' or 'transient'")
+            raise ValueError(f"未知的模式: {mode}。必须是 'steady' 或 'transient'")
         
-        # Convert enums to strings for YAML serialization
+        # 将枚举转换为字符串以便 YAML 序列化
         config_dict = self._enum_to_string(config)
         config_dict['mode'] = mode
         
-        # Add comments as YAML structure
+        # 添加注释作为 YAML 结构
         yaml_content = self._add_yaml_comments(config_dict, mode)
         
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(yaml_content)
         
-        logger.info(f"Configuration template saved to {output_path}")
+        logger.info(f"配置模板已保存至 {output_path}")
     
     def _enum_to_string(self, config) -> Dict[str, Any]:
-        """Convert enum values to strings for YAML serialization.
-        
+        """将枚举值转换为字符串以便 YAML 序列化。
+
         Args:
-            config: Configuration object
-            
+            config: 配置对象
+
         Returns:
-            Dict[str, Any]: Dictionary with string values
+            Dict[str, Any]: 字符串值字典
         """
         result = {}
         for key, value in config.__dict__.items():
@@ -276,17 +274,17 @@ class ConfigLoader:
         return result
     
     def _add_yaml_comments(self, config_dict: Dict[str, Any], mode: str) -> str:
-        """Add helpful comments to YAML output.
-        
+        """向 YAML 输出添加说明注释。
+
         Args:
-            config_dict: Configuration dictionary
-            mode: Simulation mode
-            
+            config_dict: 配置字典
+            mode: 仿真模式
+
         Returns:
-            str: YAML content with comments
+            str: 带注释的 YAML 内容
         """
-        lines = [f"# AutoFlowCFD {mode.capitalize()} Simulation Configuration"]
-        lines.append(f"# Generated by ConfigLoader")
+        lines = [f"# AutoFlowCFD {mode.capitalize()} 仿真配置"]
+        lines.append(f"# 由 ConfigLoader 生成")
         lines.append("")
         lines.append(f"mode: {mode}")
         lines.append("")
@@ -295,24 +293,19 @@ class ConfigLoader:
             if key == 'mode':
                 continue
             
-            # Add comment for important parameters
+            # 为重要参数添加注释
             comment = self._get_parameter_comment(key, mode)
             if comment:
                 lines.append(f"# {comment}")
 
-            # Serialize the value through yaml.safe_dump itself instead of
-            # an f-string, or a None value (e.g. the default max_cell_size)
-            # renders as the literal text "None" - PyYAML does not
-            # recognize a bare "None" as null (only null/Null/NULL/~ /
-            # empty do), so safe_load reads it back as the STRING "None",
-            # not Python None, and it silently fails validation with a
-            # confusing type error instead of loading as the real default.
-            # Dumping as a single-key {key: value} flow mapping (then
-            # stripping the braces) - rather than dumping `value` alone -
-            # avoids PyYAML appending a "...\n" document-end marker after
-            # a bare top-level scalar, which would otherwise land in the
-            # middle of this hand-assembled multi-line file as a stray
-            # line and break every parse of the whole template.
+            # 通过 yaml.safe_dump 本身序列化值，而不是使用 f-string，
+            # 否则 None 值（例如默认的 max_cell_size）会呈现为字面文本 "None" - 
+            # PyYAML 不将裸写的 "None" 识别为 null（只有 null/Null/NULL/~ /空可以），
+            # 所以 safe_load 会将其读回为字符串 "None"，而不是 Python None，
+            # 并且它会静默地因类型错误而验证失败，而不是加载为真正的默认值。
+            # 转储为单键 {key: value} 流式映射（然后剥离大括号）- 而不是单独转储 `value` - 
+            # 避免 PyYAML 在裸顶层标量后附加 "...\n" 文档结束标记，
+            # 否则这会作为杂散行出现在这个手工组装的多行文件的中间，并破坏整个模板的每次解析。
             dumped = yaml.safe_dump({key: value}, default_flow_style=True).strip()
             assert dumped.startswith("{") and dumped.endswith("}")
             lines.append(dumped[1:-1])
@@ -321,50 +314,50 @@ class ConfigLoader:
         return "\n".join(lines)
     
     def _get_parameter_comment(self, param: str, mode: str) -> str:
-        """Get help comment for configuration parameter.
-        
+        """获取配置参数的帮助注释。
+
         Args:
-            param: Parameter name
-            mode: Simulation mode
-            
+            param: 参数名
+            mode: 仿真模式
+
         Returns:
-            str: Help comment text
+            str: 帮助注释文本
         """
         comments = {
-            'backend': 'Compute backend: cpu, gpu, or auto',
-            'order': 'FR discretization order: 1, 2, or 3',
-            'turbulence': 'Turbulence model: sst_kw, sa, des, ddes, les',
-            'max_iter': 'Maximum iteration steps (steady only)',
-            'cfl_init': 'Initial CFL number (steady only)',
-            'cfl_max': 'Maximum CFL number (steady only)',
-            'convergence_tol': 'Convergence tolerance for residuals (steady only)',
-            'dt': 'Time step size in seconds (transient only)',
-            'total_time': 'Total physical time in seconds (transient only)',
-            'time_scheme': 'Time integration scheme: backward_euler, rk2, rk3, ab3 (transient only)',
-            'output_dir': 'Output directory for results',
-            'checkpoint_interval': 'Checkpoint save interval in steps',
-            'growth_rate': 'Boundary-layer geometric growth rate (steady only)',
-            'bl_layers': 'How many layers count as the fine BL stage before the (fixed-rate) transition stage (unset = 8)',
-            'min_cell_size': 'First (near-wall) layer thickness in meters (steady only)',
-            'target_cells': 'Target total cell count (steady only; ignored by the tetgen hybrid mesh path)',
-            'max_cell_size': 'Max core-region cell size in meters, graded outward from the near-wall size (unset = no cap)',
-            'rho_inf': 'Freestream density in kg/m^3',
-            'vel_inf': 'Freestream velocity magnitude in m/s',
-            'p_inf': 'Freestream static pressure in Pa',
+            'backend': '计算后端: cpu, gpu, 或 auto',
+            'order': 'FR 离散阶数: 1, 2, 或 3',
+            'turbulence': '湍流模型: sst_kw, sa, des, ddes, les',
+            'max_iter': '最大迭代步数（仅定常）',
+            'cfl_init': '初始 CFL 数（仅定常）',
+            'cfl_max': '最大 CFL 数（仅定常）',
+            'convergence_tol': '残差收敛容差（仅定常）',
+            'dt': '时间步长，单位秒（仅瞬态）',
+            'total_time': '总物理时间，单位秒（仅瞬态）',
+            'time_scheme': '时间积分方案: backward_euler, rk2, rk3, ab3（仅瞬态）',
+            'output_dir': '结果输出目录',
+            'checkpoint_interval': '检查点保存间隔，单位步数',
+            'growth_rate': '边界层几何增长率（仅定常）',
+            'bl_layers': '在切换到（固定增长率）过渡阶段之前，计为精细 BL 阶段的层数（未设置 = 8）',
+            'min_cell_size': '第一层（近壁）厚度，单位米（仅定常）',
+            'target_cells': '目标总单元数（仅定常；被 tetgen 混合网格路径忽略）',
+            'max_cell_size': '核心区域最大单元尺寸，单位米，从近壁尺寸向外渐变（未设置 = 无上限）',
+            'rho_inf': '自由流密度，单位 kg/m^3',
+            'vel_inf': '自由流速度大小，单位 m/s',
+            'p_inf': '自由流静压，单位 Pa',
         }
         return comments.get(param, '')
 
 
 def load_config(config_path: Union[str, Path]) -> Union[SteadyConfig, TransientConfig]:
-    """Convenience function to load configuration from YAML file.
-    
+    """从 YAML 文件加载配置的便捷函数。
+
     Args:
-        config_path: Path to YAML configuration file
-        
+        config_path: YAML 配置文件路径
+
     Returns:
-        SteadyConfig or TransientConfig: Loaded configuration
-        
-    Example:
+        SteadyConfig or TransientConfig: 加载的配置
+
+    示例:
         >>> from autoflowcfd.config import load_config
         >>> config = load_config("simulation.yaml")
     """
@@ -373,13 +366,13 @@ def load_config(config_path: Union[str, Path]) -> Union[SteadyConfig, TransientC
 
 
 def save_config_template(output_path: Union[str, Path], mode: str = 'steady'):
-    """Convenience function to save configuration template.
-    
+    """保存配置模板的便捷函数。
+
     Args:
-        output_path: Output file path
-        mode: Simulation mode ('steady' or 'transient')
-        
-    Example:
+        output_path: 输出文件路径
+        mode: 仿真模式（'steady' 或 'transient'）
+
+    示例:
         >>> from autoflowcfd.config import save_config_template
         >>> save_config_template("config.yaml", mode="steady")
     """

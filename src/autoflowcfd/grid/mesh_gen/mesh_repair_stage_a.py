@@ -1,6 +1,6 @@
-"""Stage A: Quality-gated Laplacian smoothing.
+"""Stage A：质量门控的拉普拉斯平滑。
 
-Split from mesh_background.py to adhere to line count limits.
+从 mesh_background.py 拆分出来以控制行数。
 """
 
 import numpy as np

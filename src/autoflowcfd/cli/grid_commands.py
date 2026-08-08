@@ -407,13 +407,9 @@ def generate_volume(
                 )
 
         logger.info("Step 4/4: Exporting volume mesh to NAS...")
-        # scale_factor=1000.0: internal mesh coordinates are always meters
-        # (NASParser converts mm->m on import), but this export writes a
-        # file with an ANSA-mimicking header ($ANSA_VERSION, "file created
-        # by A N S A") - re-importing it (into this project with
-        # NASParser's own default units='mm', or into ANSA itself) assumes
-        # millimeters, which would silently shrink the geometry 1000x if
-        # exported at the function's own meters default instead.
+        # scale_factor=1000.0（默认值即为此，这里显式写出便于阅读）：内部网格坐标
+        # 始终是米（NASParser 导入时按 mm->m 换算），导出为 mm 与 NASParser
+        # 默认导入单位一致，避免往返导入导出时几何体缩小 1000 倍。
         output_path = export_volume_mesh_to_nas(volume_mesh, output, scale_factor=1000.0)
 
         boundary_names = list(volume_mesh.boundaries.groups.keys())
