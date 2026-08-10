@@ -40,6 +40,7 @@ __author__ = "AutoFlowCFD Team"
 __maintainer__ = "Mr Lu"
 __email__ = "luxw_chd@126.com"
 __license__ = "Apache-2.0"
+__name__ = "AutoFlowCFD"  # 添加包名称
 
 from typing import Any, Dict
 
@@ -49,6 +50,7 @@ from .api import AutoFlowCFDAPI
 # 模块元数据
 __all__ = [
     "__version__",
+    "__name__",
     "__author__",
     "__email__",
     "__license__",
@@ -68,6 +70,27 @@ def get_version() -> str:
         '0.1.0'
     """
     return __version__
+
+
+def get_info() -> Dict[str, str]:
+    """获取 AutoFlowCFD 的系统信息。
+    
+    Returns:
+        Dict: 包含版本、作者等信息的字典
+        
+    Example:
+        >>> import autoflowcfd
+        >>> info = autoflowcfd.get_info()
+        >>> print(info['version'])
+    """
+    return {
+        "name": __name__,
+        "version": __version__,
+        "author": __author__,
+        "maintainer": __maintainer__,
+        "email": __email__,
+        "license": __license__,
+    }
 
 
 def create_api(verbose: bool = False) -> AutoFlowCFDAPI:

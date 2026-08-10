@@ -20,6 +20,18 @@ Example:
 """
 
 import sys
+import os
+
+# 修复Windows控制台中文乱码问题
+if sys.platform == 'win32':
+    # 设置标准输出编码为UTF-8
+    if hasattr(sys.stdout, 'reconfigure'):
+        sys.stdout.reconfigure(encoding='utf-8')
+    if hasattr(sys.stderr, 'reconfigure'):
+        sys.stderr.reconfigure(encoding='utf-8')
+    # 设置环境变量
+    os.environ['PYTHONIOENCODING'] = 'utf-8'
+
 import click
 from loguru import logger
 

@@ -161,10 +161,7 @@ def finalize_face_data(
     # on an otherwise mesh-quality-gate-passing mesh. A minimal 576-tet
     # structured-box repro (no prisms, no skew) reproduced the same
     # 73%-of-cells defect rate through extract_faces_mixed/extract_faces
-    # (which share this function) while the older, separate
-    # core/fvm_faces.py:FVMFaceExtractor.build_from_tetrahedra path -
-    # which doesn't have a connectivity swap at all - stayed exactly
-    # closed, pointing straight at this swap as the culprit.
+    # (which share this function).
     mask_interior = right_cells >= 0
     dx_interior = face_centers[mask_interior] - center_left[mask_interior]
     dot_interior = np.sum(face_areas_vec[mask_interior] * dx_interior, axis=1)

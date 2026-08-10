@@ -275,7 +275,7 @@ def validate(
 
 @grid.command(name="generate-volume")
 @click.argument("input_file", type=click.Path(exists=True))
-@click.option("-o", "--output", required=True, help="Output volume mesh .nas file path")
+@click.option("--output", "-o", required=True, help="Output volume mesh .nas file path")
 @click.option("--growth-rate", default=1.2, show_default=True, help="Boundary layer growth rate")
 @click.option("--min-cell-size", default=0.001, show_default=True, help="Minimum cell size (m)")
 @click.option("--target-cells", default=500000, show_default=True, help="Target total volume cell count")
@@ -412,6 +412,13 @@ def generate_volume(
         # 默认导入单位一致，避免往返导入导出时几何体缩小 1000 倍。
         output_path = export_volume_mesh_to_nas(volume_mesh, output, scale_factor=1000.0)
 
+        # 同时保存pickle格式的体网格文件，供求解器直接使用
+        import pickle
+        pkl_output = Path(output).with_suffix('.pkl')
+        with open(pkl_output, 'wb') as f:
+            pickle.dump(volume_mesh, f)
+        logger.info(f"Volume mesh cache saved: {pkl_output}")
+
         boundary_names = list(volume_mesh.boundaries.groups.keys())
         result = {
             "command": "grid.generate-volume",
@@ -423,6 +430,7 @@ def generate_volume(
             "boundary_groups": boundary_names,
             "volume_quality_passed": quality_report.passed if quality_report else None,
             "output_file": output_path,
+            "cache_file": str(pkl_output),
         }
 
         if json_output:
@@ -435,6 +443,7 @@ def generate_volume(
             click.echo(f"Total volume: {volume_mesh.total_volume:.6e} m^3")
             click.echo(f"Boundary groups: {', '.join(boundary_names)}")
             click.echo(f"\n✓ Exported to: {output_path}")
+            click.echo(f"✓ Cache saved to: {pkl_output}")
 
     except Exception as e:
         logger.error(f"Volume mesh generation failed: {e}")

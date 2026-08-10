@@ -19,14 +19,11 @@ def verify_imports():
     print("=" * 70)
     
     modules_to_test = [
-        ("autoflowcfd.core.legacy.fr_scheme", ["FRScheme", "FROrder"]),
-        ("autoflowcfd.core.legacy.turbulence", ["SSTKOmegaModel"]),
-        ("autoflowcfd.core.legacy.wall_functions", ["WallFunctionModel"]),
+        ("autoflowcfd.fr", ["FROperators", "generate_fr_operators"]),
+        ("autoflowcfd.core.fr_state", ["FRState"]),
+        ("autoflowcfd.core.fr_kernels", ["compute_ausm_up_flux"]),
+        ("autoflowcfd.core.fr_solver", ["FRSolver"]),
         ("autoflowcfd.core.time_integration", ["TimeIntegrator", "TimeIntegrationScheme"]),
-        ("autoflowcfd.core.legacy.convergence", ["ConvergenceMonitor", "ConvergenceHistory"]),
-        ("autoflowcfd.core.transient_solver_loop", ["TransientSolver"]),
-        ("autoflowcfd.core.transient_result", ["TransientResult"]),
-        ("autoflowcfd.core.coupling", ["SteadyTransientCoupler", "SyntheticTurbulenceGenerator"]),
         ("autoflowcfd.core.backend", ["create_backend", "get_available_backends"]),
     ]
     
@@ -65,72 +62,79 @@ def verify_basic_functionality():
     
     import numpy as np
     
-    # Test FR Scheme
-    print("\n1. Testing FR Scheme...")
+    # Test FR Operators
+    print("\n1. Testing FR Operators...")
     try:
-        from autoflowcfd.core import FRScheme, FROrder
+        from autoflowcfd.fr import FROperators, generate_fr_operators
         
-        fr = FRScheme(FROrder.SECOND)
-        assert fr.order == FROrder.SECOND
-        assert fr.num_correction_points == 3
+        ops = generate_fr_operators(order=2)
+        assert isinstance(ops, FROperators)
+        assert ops.correction_matrix.shape[0] > 0
+        assert ops.interpolation_matrix.shape[0] > 0
         
-        sol_left = np.array([1.225, 36.75, 0.0, 0.0, 100000.0])
-        sol_right = np.array([1.225, 30.0, 0.0, 0.0, 98000.0])
+        print("   ✅ FR Operators: OK")
+    
+    except Exception as e:
+        print(f"   ❌ FR Operators: FAILED - {e}")
+        return False
+    
+    # Test FR State
+    print("\n2. Testing FR State...")
+    try:
+        from autoflowcfd.core.fr_state import FRState
+        
+        state = FRState(n_cells=100, n_solution_points=5)
+        assert state.density.shape == (100,)
+        assert state.velocity.shape == (100, 3)
+        assert state.pressure.shape == (100,)
+        assert np.all(state.density == 1.225)  # Default air density
+        
+        print("   ✅ FR State: OK")
+    
+    except Exception as e:
+        print(f"   ❌ FR State: FAILED - {e}")
+        return False
+    
+    # Test AUSM+ Up Flux
+    print("\n3. Testing AUSM+ Up Flux...")
+    try:
+        from autoflowcfd.core.fr_kernels import compute_ausm_up_flux
+        
+        left_state = np.array([1.225, 36.75, 0.0, 0.0, 100000.0])
+        right_state = np.array([1.225, 30.0, 0.0, 0.0, 98000.0])
         normal = np.array([1.0, 0.0, 0.0])
         
-        flux = fr.compute_flux(sol_left, sol_right, normal)
+        flux = compute_ausm_up_flux(left_state, right_state, normal)
         assert flux.shape == (5,)
         assert np.all(np.isfinite(flux))
         
-        print("   ✅ FR Scheme: OK")
+        print("   ✅ AUSM+ Up Flux: OK")
     
     except Exception as e:
-        print(f"   ❌ FR Scheme: FAILED - {e}")
+        print(f"   ❌ AUSM+ Up Flux: FAILED - {e}")
         return False
     
-    # Test Backend
-    print("\n2. Testing Backend...")
+    # Test FR Solver
+    print("\n4. Testing FR Solver...")
     try:
-        from autoflowcfd.core import create_backend
+        from autoflowcfd.core.fr_solver import FRSolver
+        from autoflowcfd.core.backend import create_backend
         
-        backend = create_backend("cpu", n_threads=2)
-        assert backend.backend_type == "cpu"
+        backend = create_backend("cpu")
+        solver = FRSolver(backend=backend, polynomial_order=2)
+        assert solver.polynomial_order == 2
+        assert solver.backend is not None
         
-        backend.initialize(n_cells=100, n_nodes=50)
-        assert backend.n_cells == 100
-        
-        info = backend.get_device_info()
-        assert "backend" in info
-        
-        print("   ✅ Backend: OK")
+        print("   ✅ FR Solver: OK")
     
     except Exception as e:
-        print(f"   ❌ Backend: FAILED - {e}")
-        return False
-    
-    # Test Turbulence Model
-    print("\n3. Testing SST k-ω Model...")
-    try:
-        from autoflowcfd.core import SSTKOmegaModel
-        
-        model = SSTKOmegaModel()
-        k, omega = model.initialize_turbulence_fields(100)
-        
-        assert k.shape == (100,)
-        assert omega.shape == (100,)
-        assert np.all(k > 0)
-        assert np.all(omega > 0)
-        
-        print("   ✅ SST k-ω Model: OK")
-    
-    except Exception as e:
-        print(f"   ❌ SST k-ω Model: FAILED - {e}")
+        print(f"   ❌ FR Solver: FAILED - {e}")
         return False
     
     # Test Time Integrator
-    print("\n4. Testing Time Integrator...")
+    print("\n5. Testing Time Integrator...")
     try:
-        from autoflowcfd.core import TimeIntegrator, TimeIntegrationScheme
+        from autoflowcfd.core.time_integration import TimeIntegrator, TimeIntegrationScheme
         
         integrator = TimeIntegrator(
             scheme=TimeIntegrationScheme.BACKWARD_EULER,
@@ -146,25 +150,24 @@ def verify_basic_functionality():
         print(f"   ❌ Time Integrator: FAILED - {e}")
         return False
     
-    # Test Wall Function
-    print("\n5. Testing Wall Function...")
+    # Test Backend
+    print("\n6. Testing Backend...")
     try:
-        from autoflowcfd.core import WallFunctionModel
+        from autoflowcfd.core.backend import create_backend
         
-        wf = WallFunctionModel()
-        y_plus = wf.compute_y_plus(
-            u_tau=np.array([1.0]),
-            y_distance=np.array([0.001]),
-            nu=1.5e-5
-        )
+        backend = create_backend("cpu", n_threads=2)
+        assert backend.backend_type == "cpu"
         
-        assert y_plus.shape == (1,)
-        assert y_plus[0] > 0
+        backend.initialize(n_cells=100, n_nodes=50)
+        assert backend.n_cells == 100
         
-        print("   ✅ Wall Function: OK")
+        info = backend.get_device_info()
+        assert "backend" in info
+        
+        print("   ✅ Backend: OK")
     
     except Exception as e:
-        print(f"   ❌ Wall Function: FAILED - {e}")
+        print(f"   ❌ Backend: FAILED - {e}")
         return False
     
     print("\n" + "=" * 70)

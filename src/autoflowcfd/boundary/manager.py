@@ -1,41 +1,15 @@
 """边界条件管理器。
 
-本模块提供 `BoundaryManager` 类，用于在 AutoFlowCFD 仿真中管理和登记
+本模块提供 `BoundaryManager` 类，用于在 AutoFlowCFD V2.0 仿真中管理和登记
 边界条件。
 
 Key Components:
     - BoundaryManager: 边界条件管理器主类
 
-⚠️ 现状说明：`apply_boundary()`/`apply_all()` 方法（把边界条件直接
-应用到 solution 数组上）已删除——这条路径从未被生产求解路径调用过，
-真正的边界处理由 `core/bc_handler.py` 的 `BoundaryConditionHandler`
-独立完成。本类现在只承担边界条件的元数据登记角色（`add_bc`/`get_bc`/
+注意：BoundaryManager 现在只承担边界条件的元数据登记角色（`add_bc`/`get_bc`/
 `auto_configure`/`configure_from_yaml`/`hybrid_configure`/
-`get_summary` 等），这部分**是**求解主流程实际使用的（见
-`solver_steady.py`/`transient_solver_loop.py` 的 `_setup_boundary_conditions`
-调用 `add_bc`），用于登记配置供查询/导出/校验，不用于计算边界值。详见
-`conditions.py` 模块文档字符串里对这个决定的完整说明。
-
-Example:
-    >>> from autoflowcfd.boundary import BoundaryManager
-    >>> from autoflowcfd.grid import BoundaryMap
-    >>>
-    >>> # 创建边界映射
-    >>> bmap = BoundaryMap()
-    >>> bmap.add_boundary("INLET", [0, 1, 2])
-    >>> bmap.add_boundary("OUTLET", [3, 4, 5])
-    >>> bmap.add_boundary("BODY", list(range(6, 100)))
-    >>>
-    >>> # 创建管理器
-    >>> bc_manager = BoundaryManager(bmap)
-    >>>
-    >>> # 登记边界条件
-    >>> bc_manager.add_bc("INLET", velocity_x=30.0)
-    >>> bc_manager.add_bc("OUTLET", pressure=101325.0)
-    >>> bc_manager.add_bc("BODY", wall_function='enhanced')
-    >>>
-    >>> # 查看登记摘要
-    >>> print(bc_manager.get_summary())
+`get_summary` 等），用于登记配置供查询/导出/校验，不用于计算边界值。
+实际的边界处理由 FR 求解器内部的弱边界条件处理器完成。
 """
 
 from typing import Dict, Any, List, Optional
@@ -463,19 +437,45 @@ class BoundaryManager:
         logger.info(f"Updated parameters for boundary '{boundary_name}': {kwargs}")
 
     def export_to_vtk(self, output_path: str) -> None:
-        """导出边界分组到 VTK 文件。
-
-        用于 ParaView 可视化验证边界划分正确性。
+        """Export boundary visualization to VTK format.
 
         Args:
-            output_path: VTK 输出文件路径
+            output_path: VTK output file path
 
         Example:
             >>> bc_manager.export_to_vtk("boundaries.vtk")
         """
-        # TODO: 实现 VTK 导出
+        from autoflowcfd.postprocess import VTKExporter
+        import numpy as np
+        
         logger.info(f"Exporting boundary visualization to VTK: {output_path}")
-        # 待后处理模块补充这部分功能时再实现
+        
+        # Create a dummy solution for VTK exporter (we only care about boundaries)
+        n_cells = self.grid_data.cell_count
+        dummy_solution = np.zeros((n_cells, 7), dtype=np.float64)
+        dummy_solution[:, 0] = 1.225  # density
+        dummy_solution[:, 1] = 30.0   # velocity x
+        dummy_solution[:, 4] = 101325.0 / (1.4 - 1.0)  # energy
+        
+        # Create VTK exporter
+        exporter = VTKExporter(
+            grid_data=self.grid_data,
+            solution=dummy_solution,
+        )
+        
+        # Export only boundary faces
+        output_path_obj = Path(output_path)
+        if not output_path_obj.suffix:
+            output_path_obj = output_path_obj.with_suffix('.vtk')
+        
+        vtk_path = exporter.export_boundaries(
+            output_path=str(output_path_obj),
+            fields=['velocity', 'pressure'],
+            format='legacy',
+            binary=True,
+        )
+        
+        logger.success(f"Boundary VTK exported: {vtk_path}")
 
     def export_to_json(self, output_path: str) -> dict:
         """导出边界统计信息到 JSON 文件。
@@ -653,17 +653,37 @@ class BoundaryManager:
         return self._bc_instances[boundary_name]
 
     def update_time_dependent_bcs(self, time: float) -> None:
-        """更新随时间变化的边界条件。
+        """Update time-dependent boundary conditions.
 
-        对于参数随时间变化的边界，根据当前仿真时间更新其参数。
+        For boundaries with time-varying parameters, update their values
+        based on the current simulation time.
 
         Args:
-            time: 当前仿真时间
+            time: Current simulation time (seconds)
+
+        Example:
+            >>> bc_manager.update_time_dependent_bcs(0.05)
+            >>> # Updates all BCs that have time-dependent functions
         """
-        # TODO: 实现随时间变化的边界条件更新
-        # 需要检查哪些 BC 有随时间变化的参数并相应更新
+        from autoflowcfd.boundary.conditions import TimeDependentBC
+        
         logger.debug(f"Updating time-dependent BCs at t={time:.6f}s")
-        pass
+        
+        updated_count = 0
+        for boundary_name, bc in self._bc_instances.items():
+            # Check if this BC supports time dependence
+            if hasattr(bc, 'update_time'):
+                try:
+                    bc.update_time(time)
+                    updated_count += 1
+                    logger.debug(f"Updated BC '{boundary_name}' to t={time:.6f}s")
+                except Exception as e:
+                    logger.warning(
+                        f"Failed to update time-dependent BC '{boundary_name}': {e}"
+                    )
+        
+        if updated_count > 0:
+            logger.info(f"Updated {updated_count} time-dependent boundary condition(s)")
 
     def validate_all(self) -> bool:
         """校验全部边界条件。

@@ -1,6 +1,6 @@
 """Backend 工厂与初始化。"""
 
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from .base import BackendBase, SolutionVector
 from .cpu_backend import NumbaBackend
 from .gpu_backend import CUDABackend
@@ -64,7 +64,14 @@ def create_backend(
 
     elif backend_type == "gpu":
         device_id = kwargs.get('device_id', 0)
-        backend = CUDABackend(device_id=device_id)
+        
+        try:
+            backend = CUDABackend(device_id=device_id)
+        except Exception as e:
+            raise RuntimeError(
+                f"GPU backend initialization failed: {e}. "
+                "Please install CUDA Toolkit and ensure NVIDIA GPU is present."
+            )
 
         if not backend.available:
             raise RuntimeError(
@@ -105,9 +112,20 @@ def get_available_backends() -> Dict[str, bool]:
     return result
 
 
+def list_available_backends() -> List[str]:
+    """列出所有可用的backend名称。
+    
+    Returns:
+        可用的backend名称列表
+    """
+    backends = get_available_backends()
+    return [name for name, available in backends.items() if available]
+
+
 __all__ = [
     "create_backend",
     "get_available_backends",
+    "list_available_backends",
     "BackendBase",
     "SolutionVector",
     "NumbaBackend",

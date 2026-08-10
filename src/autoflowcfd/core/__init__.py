@@ -1,59 +1,100 @@
-"""AutoFlowCFD 核心求解器模块。
+"""AutoFlowCFD V2.0 核心模块导出。
 
-提供 AutoFlowCFD 的核心计算组件：FR 离散、湍流模型、求解器后端。
-
-生产求解路径（FRSolver.solve() / TransientSolver.solve()）由
-BoundaryConditionHandler、ViscousRANSResidual（fvm_viscous_residual.py，
-拆成 fvm_residual_inviscid/viscous/sst.py 三个 mixin）、TimeIntegrator、
-FVMFaceExtractor（纯粹作为数据持有者，由 VolumeMeshData 直接填充）和
-AeroCoefficientCalculator 构成。RANS-SST 的完整物理（AUSM+up、粘性通量、
-SST 涡粘性/源项、Green-Gauss 梯度）已经移植成 Numba（CPU）kernel 并直接
-在 `ViscousRANSResidual` 内部 dispatch，CUDA（GPU）版本也已写好、通过
-`use_gpu=True`（由 `--backend gpu` 触发）dispatch，但**从未在真实 GPU
-硬件上验证过**（开发环境无 GPU）——见 `core/fvm_*_kernels_gpu.py` 各自
-的模块文档字符串。`core/backend/`（`create_backend`/`NumbaBackend`/
-`CUDABackend`）是一套独立的、更早期的无粘 Euler-only kernel 集合，只在
-`FRSolver.__init__`/`TransientSolver.__init__` 里被构造用于硬件可用性
-检查和日志提示，不参与实际残差计算——见 `core/backend/cpu_backend.py`
-模块文档字符串里对这个历史分层的说明。
+本模块统一导出 FR 求解器所需的核心类和函数。
 """
 
+from .fr_state import FRState, SolverResult
 from .time_integration import TimeIntegrator, TimeIntegrationScheme
-from .transient_result import TransientResult
-from .transient_solver_loop import TransientSolver
-from .solver_steady import FRSolver, SteadyResult
-from .backend import create_backend, get_available_backends
+from .fr_kernels import compute_ausm_up_flux
+from .wall_distance import compute_wall_distance
+from .turbulence_sst import SSTModelFR
+from .turbulence_des import DDESModel, IDDESModel
+from .turbulence_wmles import WMLESModel
+from .turbulence_sgs import WALEModel, SmagorinskyModel
 from .backend.base import BackendBase
 from .backend.cpu_backend import NumbaBackend
 from .backend.gpu_backend import CUDABackend
+from .fr_solver import FRSolver
 
-from .fvm_faces import FVMFaceExtractor
-from .bc_handler import BoundaryConditionHandler
-from .aero_coeffs import AeroCoefficientCalculator
+# TransientSolver 是 FRSolver 的别名，用于瞬态仿真
+TransientSolver = FRSolver
+
+
+def create_backend(backend_type: str = "cpu", **kwargs):
+    """创建计算后端实例。
+    
+    Args:
+        backend_type: 后端类型 ('cpu', 'gpu' 或 'auto')
+        **kwargs: 后端特定参数
+        
+    Returns:
+        BackendBase: 后端实例
+        
+    Raises:
+        RuntimeError: GPU后端不可用时
+        ValueError: 未知的后端类型
+    """
+    if backend_type.lower() == "cpu":
+        return NumbaBackend(**kwargs)
+    elif backend_type.lower() == "gpu":
+        backend = CUDABackend(**kwargs)
+        if not backend.available:
+            raise RuntimeError(
+                "GPU backend requested but CUDA is not available. "
+                "Please install CUDA Toolkit and ensure NVIDIA GPU is present."
+            )
+        return backend
+    elif backend_type.lower() == "auto":
+        # 先尝试GPU，失败则回退到CPU
+        try:
+            gpu_backend = CUDABackend(**kwargs)
+            if gpu_backend.available:
+                return gpu_backend
+        except Exception:
+            pass
+        
+        # 回退到CPU
+        return NumbaBackend(**kwargs)
+    else:
+        raise ValueError(f"Unknown backend type: {backend_type}")
+
+
+def get_available_backends():
+    """获取可用的后端列表。
+    
+    Returns:
+        dict: 后端名称到可用状态的映射字典
+    """
+    backends = {"cpu": True}
+    try:
+        import numba.cuda
+        if numba.cuda.is_available():
+            backends["gpu"] = True
+        else:
+            backends["gpu"] = False
+    except ImportError:
+        backends["gpu"] = False
+    return backends
 
 
 __all__ = [
-    # 时间积分
-    "TimeIntegrator",
-    "TimeIntegrationScheme",
-
-    # 稳态求解器
-    "FRSolver",
-    "SteadyResult",
-
-    # 瞬态求解器
-    "TransientSolver",
-    "TransientResult",
-
-    # Backend
-    "create_backend",
-    "get_available_backends",
-    "BackendBase",
-    "NumbaBackend",
-    "CUDABackend",
-
-    # FVM 核心模块
-    "FVMFaceExtractor",
-    "BoundaryConditionHandler",
-    "AeroCoefficientCalculator",
+    'FRState',
+    'SolverResult',
+    'TimeIntegrator',
+    'TimeIntegrationScheme',
+    'compute_ausm_up_flux',
+    'compute_wall_distance',
+    'SSTModelFR',
+    'DDESModel',
+    'IDDESModel',
+    'WMLESModel',
+    'WALEModel',
+    'SmagorinskyModel',
+    'BackendBase',
+    'NumbaBackend',
+    'CUDABackend',
+    'FRSolver',
+    'TransientSolver',
+    'create_backend',
+    'get_available_backends',
 ]

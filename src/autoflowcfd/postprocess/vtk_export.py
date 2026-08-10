@@ -23,7 +23,7 @@ Key Components:
       默认值）是当前主流 CFD 后处理工具（OpenFOAM 的 foamToVTK、
       ParaView 原生写入器）实际使用的现代标准格式。
     - `mu_t`（湍流动力粘度），如果提供了，是求解器自己算出的 SST 混合
-      值（见 fvm_viscous_residual.py 的 `_eddy_viscosity`），通过
+      值（见 core/turbulence_sst.py 的 `compute_eddy_viscosity`），通过
       CheckpointManager 的 extra_fields 持久化保存——而不是在它不可用时
       （例如加上这个功能之前保存的旧 checkpoint）退化用的简化
       nu_t = k/omega 估计值。
@@ -46,7 +46,6 @@ from loguru import logger
 
 from ..grid.structures import GridData
 from ..core.backend.base import SolutionVector
-from ..core.bc_handler import BoundaryConditionHandler
 from ._field_utils import cell_to_node
 
 # VTK legacy 单元类型代码（见 VTK 文件格式规范）。
@@ -275,12 +274,7 @@ class VTKExporter:
 
     def _boundary_zone_ids(self, owner_cells: np.ndarray):
         """把每个边界面的 owner 四面体映射到 BoundaryID（按边界组名）
-        和 BoundaryTypeID（按 BoundaryConditionHandler._classify 的
-        分类桶），用的是与 bc_handler.py 的 _precompute_face_types 在
-        实际求解时完全相同的 "owner 单元是否属于 BoundaryMap.groups"
-        查找方式——所以这个导出器标记为 'WALL' 的面，保证就是求解器
-        实际施加了无滑移壁面边界条件的那个面，而不是这里独立重新猜测
-        出来的名字模式匹配结果。
+        和 BoundaryTypeID（按名称模式匹配的分类桶）。
 
         Returns:
             (boundary_id, type_id, id_legend, type_legend)——前两个是
@@ -292,6 +286,24 @@ class VTKExporter:
         type_to_id = {t: i for i, t in enumerate(self._BC_TYPE_NAMES)}
         unclassified_id = len(boundary_names)
 
+        def _classify(name: str) -> str:
+            """基于名称模式匹配进行边界类型分类"""
+            name_upper = name.upper()
+            if any(prefix in name_upper for prefix in ['WALL', 'SOLID']):
+                return 'WALL'
+            elif 'GROUND' in name_upper:
+                return 'GROUND'
+            elif any(prefix in name_upper for prefix in ['INLET', 'INTAKE', 'ENTRY']):
+                return 'INLET'
+            elif any(prefix in name_upper for prefix in ['OUTLET', 'OUTFLOW', 'EXIT']):
+                return 'OUTLET'
+            elif 'SYM' in name_upper or 'MIRROR' in name_upper:
+                return 'SYMMETRY'
+            elif any(prefix in name_upper for prefix in ['FARFIELD', 'FAR_FIELD', 'BOUNDARY']):
+                return 'FARFIELD'
+            else:
+                return 'WALL'
+
         # 向量化的 单元 -> id 查找：构建一个按单元 id 索引的稠密数组
         # （哨兵值 = unclassified/WALL），而不是用 Python 字典 + 逐
         # owner 单元的列表推导 + .get() 调用——对真实网格 owner_cells
@@ -300,7 +312,7 @@ class VTKExporter:
         cell_to_name_id = np.full(n_cells, unclassified_id, dtype=np.int32)
         cell_to_type_id = np.full(n_cells, type_to_id['WALL'], dtype=np.int32)
         for name in boundary_names:
-            btype = BoundaryConditionHandler._classify(name.upper())
+            btype = _classify(name)
             nid = name_to_id[name]
             tid = type_to_id.get(btype, type_to_id['WALL'])
             cells = np.asarray(self.grid_data.boundaries.get_cell_indices(name), dtype=np.int64)

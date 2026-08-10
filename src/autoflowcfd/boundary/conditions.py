@@ -245,8 +245,7 @@ class WallBC(BaseBC):
     """无滑移壁面边界条件。
 
     在固壁上施加无滑移条件 (u=v=w=0)，支持湍流壁面函数（元数据层面；
-    实际的壁面函数求解见 core/fvm_residual_viscous.py 的
-    ViscousFluxMixin）。
+    实际的壁面函数求解见 core/turbulence_wmles.py 的 WMLESModel）。
 
     Attributes:
         wall_function: 壁面函数类型（'standard'、'enhanced'、'none'）

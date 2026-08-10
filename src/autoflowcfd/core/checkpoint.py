@@ -299,12 +299,53 @@ class CheckpointManager:
                     logger.info(
                         f"Converting solution from {original_backend} to {target_backend}"
                     )
-                    # TODO: 实现真正的 CPU↔GPU 转换
-                    # 目前只是提示用户
-                    logger.warning(
-                        "Cross-backend conversion not yet implemented. "
-                        "Solution will remain on original backend."
-                    )
+                    
+                    # 实现 CPU↔GPU 转换
+                    try:
+                        if target_backend.lower() == 'gpu':
+                            # CPU -> GPU: 将numpy数组转移到GPU
+                            try:
+                                import cupy as cp
+                                # 转换守恒变量
+                                if 'conserved' in sol_group:
+                                    U_cpu = sol_group['conserved'][:]
+                                    U_gpu = cp.asarray(U_cpu)
+                                    metadata['conserved'] = U_gpu
+                                    logger.info("Successfully converted solution from CPU to GPU")
+                                
+                                # 转换其他场变量
+                                for field_name in extra_field_names:
+                                    if field_name in sol_group:
+                                        field_cpu = sol_group[field_name][:]
+                                        field_gpu = cp.asarray(field_cpu)
+                                        metadata[field_name] = field_gpu
+                                        
+                            except ImportError:
+                                logger.warning("CuPy not available, keeping solution on CPU")
+                                
+                        elif target_backend.lower() == 'cpu':
+                            # GPU -> CPU: 将GPU数组转移回CPU
+                            try:
+                                import cupy as cp
+                                # 如果数据已经在GPU上（以cupy数组形式存储）
+                                if isinstance(metadata.get('conserved'), cp.ndarray):
+                                    metadata['conserved'] = cp.asnumpy(metadata['conserved'])
+                                    logger.info("Successfully converted solution from GPU to CPU")
+                                
+                                # 转换其他场变量
+                                for field_name in extra_field_names:
+                                    if field_name in metadata and isinstance(metadata[field_name], cp.ndarray):
+                                        metadata[field_name] = cp.asnumpy(metadata[field_name])
+                                        
+                            except ImportError:
+                                logger.warning("CuPy not available, assuming data is already on CPU")
+                                
+                        else:
+                            logger.warning(f"Unknown target backend: {target_backend}")
+                            
+                    except Exception as e:
+                        logger.error(f"Backend conversion failed: {e}")
+                        logger.warning("Solution will remain on original backend")
 
                 # === 加载收敛历史 ===
                 conv_group = f["convergence/history"]

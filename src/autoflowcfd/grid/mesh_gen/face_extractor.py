@@ -1,24 +1,22 @@
 """Face extraction module for tetrahedral meshes.
 
-This module provides efficient face extraction from tetrahedral volume meshes,
-generating the face connectivity and geometric data required for Finite Volume Method (FVM)
-flux calculations.
+本模块提供从四面体体积网格中高效提取面的功能，
+生成高阶 FR 求解器所需的面连接和几何数据。
 
-Key Features:
-    - Extract all triangular faces from tetrahedral cells
-    - Identify interior faces (shared by 2 cells) vs boundary faces (1 cell)
-    - Compute face area vectors with consistent orientation
-    - Map boundary conditions to extracted faces
+核心功能:
+    - 从四面体单元提取所有三角面
+    - 识别内部面（共享2个单元）和边界脸（1个单元）
+    - 计算具有一致方向的面面积矢量
+    - 将边界条件映射到提取的面
 
-Performance Optimization:
-    - Uses Numba JIT compilation for critical loops
-    - Vectorized numpy operations where possible
-    - Memory-efficient data structures
+性能优化:
+    - 使用 Numba JIT 编译关键循环
+    - 尽可能使用向量化 numpy 操作
+    - 内存高效的数据结构
 
-底层 Numba/numpy 面构建原语在 face_extraction_kernels.py；面积/法向/中心的
-收尾几何计算与校验在 face_geometry_finalize.py；本文件只保留 FaceExtractor
-的公开 API 编排与 repair_nonmanifold_mixed 这个基于同一套底层原语的修复
-函数。
+注意：底层 Numba/numpy 面构建原语在 face_extraction_kernels.py；
+面积/法向/中心的收尾几何计算与校验在 face_geometry_finalize.py；
+本文件只保留 FaceExtractor 的公开 API 编排。
 
 Example:
     >>> from autoflowcfd.grid.mesh_gen.face_extractor import FaceExtractor
