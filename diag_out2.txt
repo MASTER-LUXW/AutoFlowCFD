@@ -1,0 +1,4 @@
+face 210: owner=35 neighbor=69 is_boundary=False center=[0.13333333 0.08888889 0.06666667] bc_code=-99 cfg=internal
+face 211: owner=69 neighbor=70 is_boundary=False center=[0.17777778 0.08888889 0.06666667] bc_code=-99 cfg=internal
+face 213: owner=68 neighbor=69 is_boundary=False center=[0.17777778 0.09444444 0.06666667] bc_code=-99 cfg=internal
+face 267: owner=69 neighbor=-1 is_boundary=True center=[0.17777778 0.09444444 0.1       ] bc_code=5 cfg={'type': 'SYMMETRY'}

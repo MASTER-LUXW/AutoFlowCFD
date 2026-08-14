@@ -242,25 +242,31 @@ def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray) -> 
     else:
         a_half = 0.5 * (aL + aR)
     
-    # === 3. AUSM+ 质量通量分裂 ===
+    # === 3. AUSM+ 质量通量分裂 (van Leer 多项式分裂函数) ===
+    # 标准形式（Liou 1996, AUSM+）: M+(M)+M-(M) ≡ M（相容性要求：qL=qR时
+    # mass_flux 必须精确退化为 rho*u_n）。此前版本 M_minus 的亚声速分支
+    # 缺少整体负号（写成 +0.25*(M-1)^2 而不是 -0.25*(M-1)^2），导致
+    # M_plus(M)+M_minus(M) = 0.5*(M^2+1) 而不是 M —— 通量在 qL=qR
+    # 时不等于精确物理通量，已用数值一致性测试验证发现并在此修复
+    # （见 tests/unit/test_fr_residual_inviscid.py::test_ausm_up_consistency）。
     def M_plus(M):
         """M+ 函数"""
         if abs(M) >= 1:
             return 0.5 * (M + abs(M))
         else:
-            return 0.25 * ((M + 1)**2 + alpha * (M**2 - 1)**2)
-    
+            return 0.25 * (M + 1)**2 + alpha * (M**2 - 1)**2
+
     def M_minus(M):
         """M- 函数"""
         if abs(M) >= 1:
             return 0.5 * (M - abs(M))
         else:
-            return 0.25 * ((M - 1)**2 - alpha * (M**2 - 1)**2)
-    
+            return -0.25 * (M - 1)**2 - alpha * (M**2 - 1)**2
+
     # 计算质量通量
     M_half = M_plus(M_L) + M_minus(M_R)
     mass_flux = 0.5 * (rhoL * aL + rhoR * aR) * M_half
-    
+
     # === 4. 熵修正 (防止激波奇偶振荡) ===
     # 在跨音速点附近添加人工粘性
     entropy_fix_threshold = 0.1
@@ -268,7 +274,7 @@ def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray) -> 
         # 跨音速区域：添加熵修正项
         delta_M = abs(M_L - M_R)
         mass_flux += 0.5 * (rhoL + rhoR) * a_half * delta_M * 0.1
-    
+
     # === 5. AUSM+up 压力通量分裂 ===
     def P_plus(M):
         """P+ 函数"""
@@ -276,32 +282,36 @@ def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray) -> 
             return 0.5 * (1 + np.sign(M))
         else:
             return 0.25 * ((M + 1)**2 * (2 - M) + beta * M * (M**2 - 1)**2)
-    
+
     def P_minus(M):
         """P- 函数"""
         if abs(M) >= 1:
             return 0.5 * (1 - np.sign(M))
         else:
             return 0.25 * ((M - 1)**2 * (2 + M) - beta * M * (M**2 - 1)**2)
-    
+
     # 计算压力通量
     p_half = P_plus(M_L) * pL + P_minus(M_R) * pR
-    
+
     # === 6. 构造最终通量 ===
+    # 动量/能量的对流部分必须按 mass_flux 的符号做简单迎风选择（AUSM 族
+    # 方法的标准做法），而不是用压力分裂函数 P+/P- 做加权混合——P+/P-
+    # 是为压力项设计的相容分裂（P+(M)+P-(M)≡1），把它们套用到速度/焓的
+    # 迎风选择上没有理论依据，此前版本正是这样做的（已在此修复）：
+    # 当 qL=qR 时会得到与真实通量不一致的动量/能量分量。
+    upwind_L = mass_flux >= 0.0
     flux = np.zeros(5)
     flux[0] = mass_flux
-    # 动量通量 = 对流项(mass_flux * velocity) + 压力项(p_half * normal)
-    flux[1] = mass_flux * (P_plus(M_L) * uL + P_minus(M_R) * uR) + p_half * normal[0]
-    flux[2] = mass_flux * (P_plus(M_L) * vL + P_minus(M_R) * vR) + p_half * normal[1]
-    flux[3] = mass_flux * (P_plus(M_L) * wL + P_minus(M_R) * wR) + p_half * normal[2]
-    
-    # 能量通量
+    flux[1] = mass_flux * (uL if upwind_L else uR) + p_half * normal[0]
+    flux[2] = mass_flux * (vL if upwind_L else vR) + p_half * normal[1]
+    flux[3] = mass_flux * (wL if upwind_L else wR) + p_half * normal[2]
+
+    # 能量通量：用比总焓 h = H = e + p/rho + 0.5|u|^2 做迎风选择
     hL = gamma / (gamma - 1) * pL / rhoL + 0.5 * (uL**2 + vL**2 + wL**2)
     hR = gamma / (gamma - 1) * pR / rhoR + 0.5 * (uR**2 + vR**2 + wR**2)
-    
-    H_half = P_plus(M_L) * hL + P_minus(M_R) * hR
-    flux[4] = mass_flux * H_half
-    
+
+    flux[4] = mass_flux * (hL if upwind_L else hR)
+
     return flux
 
 

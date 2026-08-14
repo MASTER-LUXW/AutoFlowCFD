@@ -253,6 +253,12 @@ def _map_properties_to_boundaries(
         'VELOCITY_INLET': ['inlet', 'inflow', 'entrance', '入口'],
         'PRESSURE_OUTLET': ['outlet', 'outflow', 'exit', '出口'],
         'SYMMETRY': ['symmetry', 'sym', '对称'],
+        # 周期边界（见 grid/face_connectivity.py::pair_periodic_boundary_faces）
+        # 只能靠属性名关键字识别出"这是一对周期面"，无法从几何/NAS 文件本身
+        # 反推出配对的另一侧组名与平移向量——这两项必须通过 YAML 手动/混合
+        # 配置补齐（写入 BoundaryMap.parameters[name]['paired_with'/'translation']），
+        # 纯 NAS 自动模式无法单独完成周期边界的完整配置。
+        'PERIODIC': ['periodic', '周期'],
         # A "tunnel" boundary is a frictionless duct wall (see
         # bc_handler.py's _classify: TUNNEL -> SYMMETRY/free-slip), not a
         # viscous no-slip wall - it must never get BL extrusion (there is

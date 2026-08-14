@@ -55,9 +55,18 @@ class SSTModelFR:
         self.a1 = 0.31
         self.kappa = 0.41  # Von Karman 常数
         self.beta_star = 0.09
-        
+
         # Blending function 相关常数
         self.CD_epsilon = 1e-10
+
+        # DES/DDES 长度尺度替换 (T-04)：非 None 时，k 方程耗散项改用
+        # D_k = rho*k^1.5/l_eff 替代标准 RANS 的 D_k=rho*beta_star*k*omega，
+        # 由 turbulence_des.py::DDESModel.apply_to_sst_model 设置。
+        # 之前的版本用 "beta_star *= (1+0.5*f_d)" 这个启发式系数冒充 DES
+        # 修正，且该写法会在每次调用时把已经修改过的 self.beta_star 当成
+        # "original" 再乘一次，多步迭代下 beta_star 会无界增长——是原地
+        # 修改一个应保持不变的模型常数导致的复合 bug，不只是公式选择有误。
+        self.des_length_scale: Optional[np.ndarray] = None
 
     def compute_strain_rate_magnitude(self, grad_u: np.ndarray) -> np.ndarray:
         """
@@ -227,8 +236,13 @@ class SSTModelFR:
         # 产生项: P_k = μ_t * S^2
         P_k = self.nu_t * rho * S_mag**2
         
-        # 耗散项: D_k = ρ * β* * k * ω
-        D_k = rho * self.beta_star * self.k_field * self.omega_field
+        # 耗散项：标准 RANS 为 D_k = ρ*β**k*ω；DES/DDES 激活时（T-04）
+        # 替换为 D_k = ρ*k^1.5/l_eff，用 DDES 的混合长度尺度直接替代
+        # SST 隐含的 RANS 耗散长度尺度，而不是用启发式系数缩放 β*。
+        if self.des_length_scale is not None:
+            D_k = rho * self.k_field**1.5 / np.maximum(self.des_length_scale, 1e-10)
+        else:
+            D_k = rho * self.beta_star * self.k_field * self.omega_field
         
         # k 方程总源项
         Sk = P_k - D_k

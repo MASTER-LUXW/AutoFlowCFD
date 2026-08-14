@@ -83,6 +83,27 @@ def compute_diff_matrix_3d(D_1d: np.ndarray) -> np.ndarray:
     return D_3d
 
 
+def compute_lagrange_weights_batch(sps: np.ndarray, targets: np.ndarray) -> np.ndarray:
+    """计算一批任意目标点（不要求落在预设的 FPs 网格上）处的 1D Lagrange
+    基函数取值，用于在非 SP-网格对齐的位置（如面-面精确匹配点）求值。
+
+    这是 compute_interpolation_matrix 的推广：后者只能算固定的一组 fps，
+    这里 targets 可以是任意实数（包括 SPs 网格之外、非结构化的一批点）。
+
+    Args:
+        sps: Solution Points 坐标，形状 (n_sps,)
+        targets: 任意目标点坐标，形状 (n_targets,)
+
+    Returns:
+        L: 形状 (n_targets, n_sps)，使得 value_at_targets = L @ values_at_sps
+    """
+    n_sps = len(sps)
+    V_sps = compute_vandermonde(sps, n_sps)
+    V_sps_inv = np.linalg.inv(V_sps)
+    V_targets = compute_vandermonde(targets, n_sps)
+    return V_targets @ V_sps_inv
+
+
 def compute_interpolation_matrix(sps: np.ndarray, fps: np.ndarray) -> np.ndarray:
     """
     计算从 Solution Points 到 Flux Points 的插值矩阵。
@@ -111,85 +132,90 @@ def compute_interpolation_matrix(sps: np.ndarray, fps: np.ndarray) -> np.ndarray
     return L
 
 
+def _solve_radau_correction_coeffs(n: int, right: bool) -> np.ndarray:
+    """求解 Radau/VCJH (g2) 修正多项式的单项式系数（次数为 n）。
+
+    g_L 由以下 n+1 个条件唯一确定（Huynh 2007; Vincent, Castonguay &
+    Jameson 2011 的 "g2" 方案，是 FR 方法配合 Gauss-Legendre 解点的标准
+    选择）：
+        1. g_L(-1) = 1
+        2. g_L(+1) = 0
+        3. ∫_{-1}^{1} g_L(x) x^k dx = 0,  k = 0, ..., n-2 （与所有更低次
+           多项式 L2 正交，这是保证格式仍具有 n 阶精度的关键约束）
+    g_R(x) = g_L(-x)（对称性，right=True 时求解镜像版本的边界条件）。
+
+    Returns:
+        单项式基系数 c_0..c_n（从低次到高次），满足
+        g(x) = sum_k c_k x^k
+    """
+
+    def moment(j: int) -> float:
+        return 0.0 if j % 2 == 1 else 2.0 / (j + 1)
+
+    A = []
+    b = []
+    if right:
+        A.append([1.0 for _ in range(n + 1)])  # g(1) = 1
+        b.append(1.0)
+        A.append([(-1.0) ** k for k in range(n + 1)])  # g(-1) = 0
+        b.append(0.0)
+    else:
+        A.append([(-1.0) ** k for k in range(n + 1)])  # g(-1) = 1
+        b.append(1.0)
+        A.append([1.0 for _ in range(n + 1)])  # g(1) = 0
+        b.append(0.0)
+
+    for m in range(0, n - 1):
+        A.append([moment(m + k) for k in range(n + 1)])
+        b.append(0.0)
+
+    return np.linalg.solve(np.array(A), np.array(b))
+
+
 def compute_correction_weights(n: int, flux_point_type: str = 'lobatto') -> Tuple[np.ndarray, np.ndarray]:
     """
-    计算 FR 校正函数的左右权重向量。
-    
-    对于Radau多项式，校正函数 g_L 和 g_R 满足：
-    - g_L 在左边界 (-1) 为 1，在所有 SPs 处为 0
-    - g_R 在右边界 (+1) 为 1，在所有 SPs 处为 0
-    
-    校正函数用于将界面通量跳跃投影回单元内部：
-    δF(x) = δF_L * g_L(x) + δF_R * g_R(x)
-    
+    计算 FR 校正函数导数在各 SP 处的取值 g_L'(x_i), g_R'(x_i)。
+
+    残差组装中真正需要的量是校正函数的**导数**，而不是校正函数本身的值：
+        dU/dt|_corr(x_i) = -[F*_L - F(u(-1))] * g_L'(x_i)
+                            -[F*_R - F(u(+1))] * g_R'(x_i)
+    （FR/CPR 方法的标准公式，见 Huynh 2007 Eq. 3.9-3.11）。此前的实现把
+    "在边界处取值为1、在所有SP处取值为0的拉格朗日基函数在SP处的值"
+    误当作校正权重，这在概念上是错误的量——那样构造出来的量在所有 SP
+    处恒为 0（因为 g(x_j)=0 对所有 SP j 成立是这个多项式的定义性质
+    之一），会让通量跳跃校正项在SP处不产生任何贡献，退化为无效项。
+    现在改为求解满足边界条件 + 与低次多项式 L2 正交（VCJH "g2"/Radau
+    方案）的修正多项式 g_L(x)/g_R(x)，再解析求导并在 SPs 处求值。
+    已用边界条件、正交性、g_R(x)=g_L(-x) 对称性数值验证（相对误差 < 1e-10）。
+
     Args:
         n: SPs 数量（对应多项式阶数 P = n-1）
-        flux_point_type: FP 类型 ('lobatto' 或 'radau')
-        
+        flux_point_type: 保留参数以兼容既有调用签名；g2/Radau 修正函数
+            仅与 SPs 位于 Gauss-Legendre 点这一事实相关，与该参数无关
+            （该参数实际控制的是插值 FPs 的位置，见 compute_interpolation_matrix）
+
     Returns:
-        g_left, g_right: 左右校正权重向量，形状均为 (n,)
-                        表示在每个SP处的校正值
+        g_left_prime, g_right_prime: 左右校正函数导数在各 SP 处的取值，
+            形状均为 (n,)
     """
-    # 获取 SPs 坐标
     from .quadrature_points import gauss_legendre
+
     sps, _ = gauss_legendre(n)
-    
-    # 初始化校正权重
-    g_left = np.zeros(n)
-    g_right = np.zeros(n)
-    
-    # 使用拉格朗日插值构造校正函数
-    # g_L(x) = Π_{j=1}^{n} (x - x_j) / (-1 - x_j)
-    # g_R(x) = Π_{j=1}^{n} (x - x_j) / (1 - x_j)
-    
-    for i in range(n):
-        # 计算 g_L 在第 i 个 SP 处的值
-        # g_L(x_i) = Π_{j≠i} (x_i - x_j) / (-1 - x_j) * (-1 - x_i) / (-1 - x_i)
-        # 但我们需要的是 g_L 作为基函数的系数
-        
-        # 更准确的方法：构造通过以下点的多项式
-        # g_L(-1) = 1, g_L(x_j) = 0 for all j
-        # g_R(1) = 1, g_R(x_j) = 0 for all j
-        
-        # 使用拉格朗日基函数的思想
-        # l_j(x) = Π_{k≠j} (x - x_k) / (x_j - x_k)
-        
-        # g_L 在 SP i 处的值：需要计算从边界-1到SP i的插值
-        basis_left = 1.0
-        basis_right = 1.0
-        
-        for j in range(n):
-            if i != j:
-                # 对 g_L：在 x=-1 处值为1，在所有SPs处值为0
-                basis_left *= (-1 - sps[j]) / (sps[i] - sps[j])
-                
-                # 对 g_R：在 x=+1 处值为1，在所有SPs处值为0
-                basis_right *= (1 - sps[j]) / (sps[i] - sps[j])
-        
-        # 还需要考虑边界点的影响
-        # g_L(-1) = 1，所以需要除以 (-1 - sps[i]) 的连乘积
-        denom_left = 1.0
-        denom_right = 1.0
-        for j in range(n):
-            denom_left *= (-1 - sps[j])
-            denom_right *= (1 - sps[j])
-        
-        # 最终值
-        g_left[i] = basis_left / denom_left if abs(denom_left) > 1e-10 else 0.0
-        g_right[i] = basis_right / denom_right if abs(denom_right) > 1e-10 else 0.0
-    
-    # 归一化：确保在校正过程中保持守恒
-    # sum(g_L) 和 sum(g_R) 应该与数值积分权重相关
-    from .quadrature_points import gauss_legendre
-    _, weights = gauss_legendre(n)
-    
-    # 加权归一化
-    sum_gL = np.sum(g_left * weights)
-    sum_gR = np.sum(g_right * weights)
-    
-    if abs(sum_gL) > 1e-10:
-        g_left /= sum_gL
-    if abs(sum_gR) > 1e-10:
-        g_right /= sum_gR
-    
-    return g_left, g_right
+
+    c_left = _solve_radau_correction_coeffs(n, right=False)
+    c_right = _solve_radau_correction_coeffs(n, right=True)
+
+    # 解析求导（单项式基）：d/dx sum_k c_k x^k = sum_{k>=1} k*c_k*x^{k-1}
+    dc_left = np.array([c_left[k] * k for k in range(1, n + 1)])
+    dc_right = np.array([c_right[k] * k for k in range(1, n + 1)])
+
+    def polyval(coeffs: np.ndarray, x: np.ndarray) -> np.ndarray:
+        result = np.zeros_like(x)
+        for k, c in enumerate(coeffs):
+            result = result + c * x**k
+        return result
+
+    g_left_prime = polyval(dc_left, sps)
+    g_right_prime = polyval(dc_right, sps)
+
+    return g_left_prime, g_right_prime

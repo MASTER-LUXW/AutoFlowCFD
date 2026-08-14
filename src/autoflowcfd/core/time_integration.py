@@ -93,8 +93,10 @@ def enforce_positivity(U: np.ndarray, p_floor: float = 1.0) -> np.ndarray:
     low = p < p_floor
     if np.any(low):
         U[low, 4] = p_floor / (GAMMA - 1.0) + ke[low]
-    U[:, 5] = np.maximum(U[:, 5], 0.0)      # rho*k >= 0
-    U[:, 6] = np.maximum(U[:, 6], 1e-8)     # rho*omega > 0
+    if U.shape[1] > 5:
+        U[:, 5] = np.maximum(U[:, 5], 0.0)      # rho*k >= 0
+    if U.shape[1] > 6:
+        U[:, 6] = np.maximum(U[:, 6], 1e-8)     # rho*omega > 0
     return U
 
 
@@ -217,6 +219,7 @@ class TimeIntegrator:
         dt_local: np.ndarray,
         p_floor: float = 1.0,
         residual0: Optional[np.ndarray] = None,
+        filter_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
     ) -> np.ndarray:
         """根据配置的方案，推进一个时间步。
         
@@ -229,71 +232,118 @@ class TimeIntegrator:
             dt_local: 局部时间步长数组
             p_floor: 压力下限
             residual0: 预计算的初始残差（可选优化）
-            
+            filter_func: 可选的模态滤波回调（见 core/fr_solver_filter.py），
+                每个 RK stage 的正定性投影之后立即施加一次——不能只在最终
+                组合结果上滤波一次：真实复现，坍缩坐标节点配置法的混叠
+                噪声会在*中间* stage（Stage1/Stage2 各自重新求值残差时）
+                就已经放大到 NaN，等不到最终组合完成，见
+                _ssp_rk_stage_step 里各 stage 后的调用点
+
         Returns:
             U_new: 更新后的解 U^{n+1}
         """
         if self.scheme == TimeIntegrationScheme.IMEX_EULER:
             # 假设所有残差都通过同一个函数计算，实际使用时可能需要拆分
             return self.step_imex(solution, residual_func, residual_func, dt_local, p_floor)
-            
-        elif self.scheme == TimeIntegrationScheme.DUAL_TIME:
-            # 在 DTS 中，residual_func 被视为物理时间导数
-            return self.step_dual_time(solution, residual_func, dt_local, max_inner_iter=self.dual_time_steps)
-            
-        else:
-            # SSP-RK 显式格式的标准实现
-            alpha = self._table["alpha"]
-            beta = self._table["beta"]
-            n_stages = self._table["stages"]
-            dt = dt_local[:, None]
 
-            # Stage 0: 初始状态
-            U0 = solution.copy()
-            
-            # 如果提供了预计算的残差，直接使用；否则计算
-            if residual0 is not None:
-                L0 = -residual0  # dU/dt = -R(U)
-            else:
-                L0 = -residual_func(U0)
-            
-            # === Stage 1 ===
-            # U^(1) = U^0 + dt * L(U^0)
-            U_stage1 = U0 + dt * L0
-            enforce_positivity(U_stage1, p_floor)
-            
-            # 重新计算Stage 1的残差（关键：不能省略）
-            L1 = -residual_func(U_stage1)
-            
-            # === Stage 2 ===
-            # U^(2) = alpha[1,0]*U^0 + alpha[1,1]*U^(1) + beta[1]*dt*L(U^(1))
-            U_stage2 = (alpha[1][0] * U0 + 
-                       alpha[1][1] * U_stage1 + 
-                       beta[1] * dt * L1)
-            enforce_positivity(U_stage2, p_floor)
-            
-            # 重新计算Stage 2的残差（关键：不能省略）
-            L2 = -residual_func(U_stage2)
-            
-            # === Stage 3 (如果是RK3) ===
-            if n_stages >= 3:
-                # U^(3) = alpha[2,0]*U^0 + alpha[2,1]*U^(1) + alpha[2,2]*U^(2) + beta[2]*dt*L(U^(2))
-                U_stage3 = (alpha[2][0] * U0 + 
-                           alpha[2][1] * U_stage1 + 
-                           alpha[2][2] * U_stage2 + 
-                           beta[2] * dt * L2)
-                enforce_positivity(U_stage3, p_floor)
-                
-                # 对于RK3，最终解就是U^(3)
-                U_new = U_stage3
-            else:
-                # 对于RK2，最终解是U^(2)
-                U_new = U_stage2
-            
-            # 更新时间步计数
+        elif self.scheme == TimeIntegrationScheme.DUAL_TIME:
+            # DUAL_TIME 需要真正的物理时间步长 dt_physical 与上一物理时间层
+            # 的解 solution_prev（BDF2 时间导数项必需，见 step_dual_time
+            # 文档），这两个概念在这个通用 dt_local 数组接口里表达不了，
+            # 调用方（fr_solver.py::step）须直接调用 step_dual_time，不能
+            # 经过这个通用分发入口。
+            raise ValueError(
+                "DUAL_TIME scheme 需要 dt_physical/solution_prev，请直接调用 "
+                "step_dual_time(...)，不要通过通用的 step(...) 入口"
+            )
+
+        else:
+            U_new = self._ssp_rk_stage_step(
+                solution, residual_func, dt_local, p_floor, residual0, filter_func=filter_func
+            )
             self.n_steps += 1
-            
             return U_new
+
+    def _ssp_rk_stage_step(
+        self,
+        solution: np.ndarray,
+        residual_func: Callable[[np.ndarray], np.ndarray],
+        dt_local: np.ndarray,
+        p_floor: float = 1.0,
+        residual0: Optional[np.ndarray] = None,
+        table: Optional[dict] = None,
+        filter_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    ) -> np.ndarray:
+        """SSP-RK2/RK3 的 Shu-Osher stage 推进本体，不含 scheme 分发/计步——
+        从 step() 拆出来，供 step_dual_time 的内层伪时间迭代复用（见该方法
+        文档：内层迭代此前用的是纯前向欧拉，但 dt_local/pseudo_dt 是按这套
+        SSP-RK 格式的稳定性域标定的 CFL 步长，前向欧拉的稳定性域明显更小，
+        直接复用同一个 CFL 数会失稳——真实复现：Couette 层流验证算例第一次
+        内层迭代残差就从 5.5e6 暴涨到 2e27，两步内 NaN）。
+
+        Args:
+            table: 显式指定要用的 Shu-Osher 系数表；None 时用 self._table
+                （即 self.scheme 对应的表）。step_dual_time 调用时必须显式
+                传入 _SSP_RK3——self.scheme 此时是 DUAL_TIME 本身，
+                self._table 会回退成 1-stage 的 _EULER 表（_SCHEME_TABLE
+                里没有 DUAL_TIME 这个键），伪时间迭代想用的是 RK3，不是
+                self.scheme 这个外层枚举。
+        """
+        tbl = table if table is not None else self._table
+        alpha = tbl["alpha"]
+        beta = tbl["beta"]
+        n_stages = tbl["stages"]
+        dt = dt_local[:, None]
+
+        # Stage 0: 初始状态
+        U0 = solution.copy()
+
+        # 如果提供了预计算的残差，直接使用；否则计算
+        if residual0 is not None:
+            L0 = -residual0  # dU/dt = -R(U)
+        else:
+            L0 = -residual_func(U0)
+
+        # === Stage 1 ===
+        # U^(1) = U^0 + dt * L(U^0)
+        U_stage1 = U0 + dt * L0
+        enforce_positivity(U_stage1, p_floor)
+        if filter_func is not None:
+            U_stage1 = filter_func(U_stage1)
+
+        # 重新计算Stage 1的残差（关键：不能省略）
+        L1 = -residual_func(U_stage1)
+
+        # === Stage 2 ===
+        # U^(2) = alpha[1,0]*U^0 + alpha[1,1]*U^(1) + beta[1]*dt*L(U^(1))
+        U_stage2 = (alpha[1][0] * U0 +
+                   alpha[1][1] * U_stage1 +
+                   beta[1] * dt * L1)
+        enforce_positivity(U_stage2, p_floor)
+        if filter_func is not None:
+            U_stage2 = filter_func(U_stage2)
+
+        # 重新计算Stage 2的残差（关键：不能省略）
+        L2 = -residual_func(U_stage2)
+
+        # === Stage 3 (如果是RK3) ===
+        if n_stages >= 3:
+            # U^(3) = alpha[2,0]*U^0 + alpha[2,1]*U^(1) + alpha[2,2]*U^(2) + beta[2]*dt*L(U^(2))
+            U_stage3 = (alpha[2][0] * U0 +
+                       alpha[2][1] * U_stage1 +
+                       alpha[2][2] * U_stage2 +
+                       beta[2] * dt * L2)
+            enforce_positivity(U_stage3, p_floor)
+            if filter_func is not None:
+                U_stage3 = filter_func(U_stage3)
+
+            # 对于RK3，最终解就是U^(3)
+            U_new = U_stage3
+        else:
+            # 对于RK2，最终解是U^(2)
+            U_new = U_stage2
+
+        return U_new
     
     def step_imex(
         self,
@@ -367,44 +417,94 @@ class TimeIntegrator:
     def step_dual_time(
         self,
         solution: np.ndarray,
-        physical_residual: Callable[[np.ndarray], np.ndarray],
+        spatial_residual: Callable[[np.ndarray], np.ndarray],
         pseudo_dt: np.ndarray,
+        dt_physical: float,
+        solution_prev: Optional[np.ndarray] = None,
         max_inner_iter: int = 5,
-        tol: float = 1e-4
+        tol: float = 1e-4,
+        filter_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
     ) -> np.ndarray:
-        """执行一步 Dual-Time Stepping (S-05 Enhanced)。
-        
-        在每一个物理时间步内，通过伪时间迭代使伪残差趋于零。
-        
-        增强功能:
-        1. CFL 自适应：根据伪残差变化自动调整伪时间步长
-        2. 收敛监控：记录每次迭代的残差范数
-        3. 早期退出：当残差足够小时提前终止
+        """执行一步 Dual-Time Stepping (S-05)：真正时间精度的物理时间推进。
+
+        物理方程 dU/dt = -R_spatial(U) 在物理时间步内用 BDF 隐式离散，
+        再靠伪时间迭代把增广后的伪残差
+            R_dual(U) = R_spatial(U) + (BDF 时间导数项)
+        收敛到 0（等价于隐式求解 BDF 方程）——这是双时间步法的标准定义
+        （Jameson 1991），伪残差里必须包含物理时间导数项，否则伪时间内
+        迭代只是在反复收敛到同一个稳态，物理时间步之间不会有任何差异，
+        `dt_physical`/`solution_prev` 形同虚设。此前的实现里，调用方传入
+        的 `physical_residual` 只是纯空间残差、不含任何物理时间耦合项，
+        是这个 bug 的根源，已在此修复：改为在这里根据 `solution_prev`
+        是否提供，用 BDF1（仿真第一个物理步，只有一层历史可用）或 BDF2
+        （此后每一步，二阶精度）构造真正的增广伪残差。
+
+        Args:
+            solution: 物理时间层 n 的状态 U^n
+            spatial_residual: 纯空间残差 R_spatial(U)（不含任何时间导数项）
+            pseudo_dt: 伪时间迭代用的局部（逐单元）步长，只用来加速内层
+                收敛，与外层真正的物理时间步 dt_physical 是两个独立概念
+            dt_physical: 真正的物理时间步长（此前被忽略、用
+                self.dt 代替的 bug 已修复，见下方 current_time 更新）
+            solution_prev: 物理时间层 n-1 的状态 U^{n-1}；None 表示这是
+                仿真的第一个物理步，退化为一阶 BDF1（后向欧拉）
         """
-        U_n = solution # 物理时间步 n 的状态
-        U_tau = U_n.copy() # 伪时间初始猜测
-        
+        U_n = solution  # 物理时间步 n 的状态
+        U_tau = U_n.copy()  # 伪时间初始猜测
+
+        if solution_prev is None:
+            # BDF1（一阶后向欧拉）：dU/dt ≈ (U - U_n) / dt_physical
+            def dual_residual(U: np.ndarray) -> np.ndarray:
+                return spatial_residual(U) + (U - U_n) / dt_physical
+        else:
+            # BDF2（二阶后向差分）：dU/dt ≈ (3U - 4U_n + U_{n-1}) / (2 dt_physical)
+            def dual_residual(U: np.ndarray) -> np.ndarray:
+                return spatial_residual(U) + (3.0 * U - 4.0 * U_n + solution_prev) / (2.0 * dt_physical)
+
         # 初始伪残差
-        R_phys_initial = physical_residual(U_tau)
+        R_phys_initial = dual_residual(U_tau)
         initial_res_norm = np.linalg.norm(R_phys_initial)
-        
+
         logger.debug(f"Dual-Time Stepping: initial pseudo-residual norm = {initial_res_norm:.6e}")
-        
-        # CFL 自适应参数
-        cfl_current = 1.0
+
+        # CFL 自适应参数：起点用 cfl_min 而不是一个乐观值，是有意为之——
+        # 增大 CFL 只在连续观测到残差快速下降后才发生，反应天然滞后；
+        # 减小 CFL 只有等残差真的上升了才触发，那时解往往已经被推到
+        # 错误区域，需要后续很多步才能"还债"。从保守步长起步、按下降
+        # 情况谨慎放大，比从乐观步长起步、按上升情况被动收缩更不容易
+        # 过冲——真实复现：起点用 1.0 时，前 3 次内层迭代残差范数从
+        # 1e3 冲到 1.5e6（放大 1500 倍）才找到稳定区间，之后即使残差
+        # 单调下降也需要远超预算的迭代次数才能追平这个过冲。
+        cfl_current = 0.1
         cfl_min = 0.1
         cfl_max = 10.0
-        
+
         for k in range(max_inner_iter):
-            # 计算物理残差 (包含 dU/dt_physical)
-            R_phys = physical_residual(U_tau)
+            # 计算增广伪残差（含物理时间导数项）
+            R_phys = dual_residual(U_tau)
             current_res_norm = np.linalg.norm(R_phys)
-            
-            # 检查伪残差收敛
-            if current_res_norm < tol or current_res_norm < initial_res_norm * 1e-6:
-                logger.debug(f"Dual-Time converged at iteration {k+1}, res_norm={current_res_norm:.6e}")
+
+            # 检查伪残差收敛。绝对阈值 tol 的判据必须要求 k>=1（至少真正
+            # 做过一次伪时间迭代）才允许触发——这是一个真实复现过的 bug：
+            # tol 是一个跟具体问题尺度/网格 SP 总数无关的固定绝对值，
+            # 对一个 SP 数量大、边界强迫又局部集中的网格，初始状态的全域
+            # L2 范数很容易恰好已经低于这个绝对值（即使边界附近真实存在
+            # 需要演化的物理强迫），若在 k=0（还没做过任何一次真正更新）
+            # 就用这个绝对判据跳出循环，U_tau 会原地不动地"假收敛"，物理
+            # 时间步之间不会有任何演化——已用 Couette 合成算例复现：从
+            # 静止流场（与壁面速度不匹配、真实需要演化）出发，80 个物理
+            # 步后 dual-time-residual/max_err 与 k=0 时逐位精确相同。
+            # 相对判据（current_res_norm < initial_res_norm*1e-6）不受这个
+            # 问题影响——按定义 k=0 时 current_res_norm 恒等于
+            # initial_res_norm，比值恒为 1，不可能满足 <1e-6，不需要额外
+            # 加 k>=1 限制。
+            if current_res_norm < initial_res_norm * 1e-6:
+                logger.debug(f"Dual-Time converged (relative) at iteration {k+1}, res_norm={current_res_norm:.6e}")
                 break
-            
+            if k >= 1 and current_res_norm < tol:
+                logger.debug(f"Dual-Time converged (absolute) at iteration {k+1}, res_norm={current_res_norm:.6e}")
+                break
+
             # CFL 自适应：根据残差变化调整伪时间步长
             if k > 0:
                 res_ratio = current_res_norm / prev_res_norm
@@ -414,30 +514,37 @@ class TimeIntegrator:
                 elif res_ratio > 1.0:
                     # 残差上升，减小 CFL
                     cfl_current = max(cfl_current * 0.5, cfl_min)
-            
+
             prev_res_norm = current_res_norm
-            
+
             # 调整伪时间步长
             adjusted_pseudo_dt = pseudo_dt * cfl_current
-            
-            # 伪时间推进: dU/dtau = -R_phys
-            # 使用显式 RK 或 Euler 推进伪时间
-            U_next = U_tau - adjusted_pseudo_dt[:, None] * R_phys
+
+            # 伪时间推进: dU/dtau = -R_dual，用与 pseudo_dt 稳定性域匹配的
+            # 真正 SSP-RK stage 推进（见 _ssp_rk_stage_step 文档：此前这里
+            # 是纯前向欧拉，但 pseudo_dt 是按 SSP-RK 的稳定性域标定的 CFL
+            # 步长，前向欧拉稳定性域小得多，直接复用会失稳）。R_phys 已经
+            # 是 U_tau 处的 dual_residual，作为 residual0 传入避免重复计算。
+            U_next = self._ssp_rk_stage_step(
+                U_tau, dual_residual, adjusted_pseudo_dt, residual0=R_phys, table=_SSP_RK3, filter_func=filter_func
+            )
             U_next = enforce_positivity(U_next)
-            
+            if filter_func is not None:
+                U_next = filter_func(U_next)
+
             # 检查更新幅度
             update_norm = np.linalg.norm(U_next - U_tau)
             if update_norm < 1e-10:
                 logger.debug(f"Dual-Time update too small at iteration {k+1}")
                 break
-                
+
             U_tau = U_next
         else:
             logger.warning(f"Dual-Time did not converge after {max_inner_iter} iterations, "
                           f"final res_norm={current_res_norm:.6e}, initial={initial_res_norm:.6e}")
-            
+
         self.n_steps += 1
-        self.current_time += self.dt
+        self.current_time += dt_physical
         return U_tau
 
     def reset(self) -> None:

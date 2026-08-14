@@ -13,6 +13,7 @@ AutoFlowCFD V2.0 - DDES/IDDES 混合湍流模型 (T-04)
 
 import numpy as np
 from typing import Optional
+from loguru import logger
 
 
 class DDESModel:
@@ -196,25 +197,19 @@ class DDESModel:
         # 计算屏蔽函数
         f_d = self.compute_shielding_function(d_w, nu_t, omega, grad_u=grad_u)
         
-        # 计算有效长度尺度
+        # 计算有效长度尺度，直接替换 SST k 方程耗散项里的长度尺度
+        # （turbulence_sst.py::compute_source_terms 里 D_k=rho*k^1.5/l_eff），
+        # 而不是用启发式系数缩放 beta_star——那样做既不是标准 DES 公式，
+        # 也会因为原地修改 sst_model.beta_star 这个"常数"而在多步迭代下
+        # 产生复合误差（每次都把上一步已经改过的值当 original 再改一次）。
+        # beta_star 本身保持不变，供纯 RANS 场合复用。
         l_eff = self.compute_effective_length_scale(d_w, delta, f_d)
-        
-        # 修改 SST 模型的 beta_star 常数
-        # 在 LES 区域增加耗散以模拟亚格子效应
-        original_beta_star = sst_model.beta_star
-        
-        # DDES 修正：在分离区增大 β* 以增加耗散
-        if isinstance(original_beta_star, np.ndarray):
-            beta_star_modified = original_beta_star * (1.0 + 0.5 * f_d)
-        else:
-            # 如果是标量，直接相乘得到数组
-            beta_star_modified = original_beta_star * (1.0 + 0.5 * f_d)
-        
-        # 临时修改 SST 模型参数
-        sst_model.beta_star = beta_star_modified
-        
-        print(f"DDES applied: f_d range [{f_d.min():.4f}, {f_d.max():.4f}], "
-              f"modified β* range [{beta_star_modified.min():.4f}, {beta_star_modified.max():.4f}]")
+        sst_model.des_length_scale = l_eff
+
+        logger.debug(
+            f"DDES applied: f_d range [{f_d.min():.4f}, {f_d.max():.4f}], "
+            f"l_eff range [{l_eff.min():.4e}, {l_eff.max():.4e}]"
+        )
 
 
 class IDDESModel(DDESModel):

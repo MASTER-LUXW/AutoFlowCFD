@@ -163,7 +163,8 @@ class YAMLConfigLoader:
             'PRESSURE_OUTLET',
             'WALL',
             'SYMMETRY',
-            'SLIP_WALL'
+            'SLIP_WALL',
+            'PERIODIC',
         ]
         
         for prop_name, prop_config in mapping.items():
@@ -191,6 +192,18 @@ class YAMLConfigLoader:
                     bc_type,
                     prop_name
                 )
+
+            # PERIODIC 必须显式给出配对的另一侧组名和平移向量——这两项
+            # 无法从几何/NAS 文件自动反推（见 grid/nas_io/nas_parser_boundary.py
+            # 关键字表旁的说明），跟 'type' 一样是这个 bc_type 下的必填项。
+            if bc_type == 'PERIODIC':
+                params = prop_config.get('parameters', {})
+                if 'paired_with' not in params or 'translation' not in params:
+                    raise ConfigurationError(
+                        f"Property '{prop_name}' has type 'PERIODIC' but is missing "
+                        f"'paired_with' and/or 'translation' under 'parameters' - both "
+                        f"are required (cannot be auto-detected from geometry)."
+                    )
     
     def _validate_boundary_parameters(
         self,
@@ -264,6 +277,25 @@ class YAMLConfigLoader:
             except (TypeError, ValueError):
                 raise ConfigurationError(
                     f"Property '{prop_name}': 'roughness_height' must be numeric"
+                )
+
+        # Validate PERIODIC pairing parameters
+        if 'paired_with' in params:
+            if not isinstance(params['paired_with'], str) or not params['paired_with']:
+                raise ConfigurationError(
+                    f"Property '{prop_name}': 'paired_with' must be a non-empty boundary group name"
+                )
+        if 'translation' in params:
+            translation = params['translation']
+            if not isinstance(translation, (list, tuple)) or len(translation) != 3:
+                raise ConfigurationError(
+                    f"Property '{prop_name}': 'translation' must be a list of 3 floats"
+                )
+            try:
+                [float(v) for v in translation]
+            except (TypeError, ValueError):
+                raise ConfigurationError(
+                    f"Property '{prop_name}': 'translation' values must be numeric"
                 )
     
     def _validate_defaults(
@@ -409,6 +441,7 @@ class BoundaryTypeMapper:
             'PRESSURE_OUTLET': ['OUTLET', 'OUTFLOW', 'PRESSURE_OUTLET'],
             'SYMMETRY': ['SYMMETRY', 'SYMM'],
             'SLIP_WALL': ['TUNNEL', 'FARFIELD', 'FAR', 'BOUNDARY'],
+            'PERIODIC': ['PERIODIC'],
         }
     
     def map(self, property_name: str) -> str:

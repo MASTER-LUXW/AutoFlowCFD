@@ -46,8 +46,11 @@ if TYPE_CHECKING:
 # _classify) - previously missing here, so a tunnel wall (falling through
 # to the 'WALL' bc_type default before that keyword-table fix) could still
 # get BL-extruded, which collapses almost immediately for a domain-
-# spanning wall (hits the opposite wall/body within 1-2 layers).
-NEVER_EXTRUDE_BC_TYPES = {'VELOCITY_INLET', 'PRESSURE_OUTLET', 'SYMMETRY', 'SLIP_WALL'}
+# spanning wall (hits the opposite wall/body within 1-2 layers). PERIODIC
+# is the same story - a periodic plane is a mathematical pairing
+# construct (see grid/face_connectivity.py::pair_periodic_boundary_faces),
+# not a physical wall; there is no boundary layer to extrude there.
+NEVER_EXTRUDE_BC_TYPES = {'VELOCITY_INLET', 'PRESSURE_OUTLET', 'SYMMETRY', 'SLIP_WALL', 'PERIODIC'}
 
 # A sub-shell whose own open-edge fraction is below this is treated as a
 # closed (embedded) solid for orientation purposes, even with a small real
