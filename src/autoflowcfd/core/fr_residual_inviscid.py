@@ -28,6 +28,8 @@ import numpy as np
 
 from autoflowcfd.core.fr_kernels import compute_ausm_up_flux
 from autoflowcfd.core.fr_troubled_cell import suppress_residual_outliers
+from autoflowcfd.core.fr_flux_kernels_pointwise import euler_physical_flux_batch
+from autoflowcfd.core.fr_volume_contract import contract_shared_operator_1axis, contract_shared_operator_2axis
 
 GAMMA = 1.4
 
@@ -125,93 +127,12 @@ def _compute_inviscid_residual_fv_p0(
     mesh,
     boundary_ghost_provider: Optional[Callable[[int, np.ndarray, np.ndarray], np.ndarray]] = None,
 ) -> np.ndarray:
-    """P0（1 SP/cell，Order Continuation 最低阶）专用有限体积残差。
+    """P0 专用有限体积无粘残差。实现见
+    fr_residual_inviscid_p0.py::compute_inviscid_residual_fv_p0（从本
+    文件拆出，控制单文件行数），文档字符串也在那里。"""
+    from .fr_residual_inviscid_p0 import compute_inviscid_residual_fv_p0
 
-    背景：P>=1 的界面项用坍缩坐标体积度量张量 adj(J) 外插到面上再做一致性
-    校验（见 compute_inviscid_residual_fr 里的 alignment 校验），这在 P0
-    下必然报错——坍缩（Duffy）坐标的 Jacobian 在单元内部本就强烈非均匀
-    （fr/collapsed_basis.py 模块文档），单元内唯一那个解点（位于坍缩参考
-    立方体中心）处的度量方向，物理上没有理由与该单元 3~4 个不同面各自的
-    真实法向对齐——这不是数值 bug，是"用同一个点的坍缩度量代表所有面"
-    这一想法在数学上站不住脚。真实网格已复现：alignment cosine 可低至
-    0.20（约78°偏差），远超 0.5 的校验阈值。
-
-    P0 在数学上唯一自洽的定义就是经典分片常数有限体积：完全不依赖坍缩
-    度量张量，直接用 face_connectivity 给出的真实几何法向 (ffp.true_normal)
-    与真实面积权重 (ffp.true_area_weight) 做迎风通量积分。owner/neighbor
-    共用同一个法向量、同一次 Riemann 求解结果（对两侧符号相反地施加），
-    天然精确守恒——不像 P>=1 那样需要 owner/neighbor 各自独立取自己的
-    度量法向（那是坍缩坐标外插固有的不一致来源，P0 完全没有这个问题，
-    因为这里用的是同一个真实几何法向，不是两个独立外插出来的近似法向）。
-
-    体积项在 P0 下无需计算：D_3d_tet/D_3d_prism 在 order=0 时解析恒为
-    零矩阵（常数函数对任何参考方向的导数都是零），体积散度贡献必为零。
-
-    关于棱柱四边形侧面拆分（真实网格已复现、修复的一个关键点）：
-    `build_face_flux_points` 对 face_connectivity 里的*每一条*记录（包括
-    棱柱四边形侧面因三角化被拆出的 2 条子面记录）都无条件调用
-    `result.append(...)`，`true_normal`/`true_area_weight` 也在
-    primary/非primary 判断之前就已算好、对每条记录都有效——`owner_is_primary`
-    /`neighbor_is_primary` 只是控制"是否触发一次自身外插+跨单元投影"
-    （P>=1 的坍缩度量路径需要，用来避免同一个原生 FP 网格被重复计入两次），
-    与"这条记录的真实几何面积/法向是否有效"无关。本函数因此直接按
-    face_connectivity 的原始每条记录处理（不经过 owner_is_primary 过滤、
-    不经过 neighbor_sources/owner_sources 的多源合并——P0 下每条记录本来
-    就唯一对应一个真实相邻单元，不存在"一个原生 FP 网格分给两个不同
-    相邻单元"这个 P>=1 才有的问题）：曾经的第一版实现按
-    `if not ffp.owner_is_primary: continue` 跳过非 primary 记录，等价于
-    直接丢弃了棱柱被拆分的那一半四边形的真实面积——对闭合单元的面积/
-    法向积分 Σ(n̂·A)=0 这一几何恒等式造成真实的（非浮点噪声量级的）
-    破坏，在小体积单元（真实网格边界层单元体积低至 ~1e-11 m³）上除以
-    体积后被放大到 1e11 量级的"伪残差"（已复现：直接改用本函数现在的
-    写法后，均匀自由流场残差恢复到机器精度量级）。
-
-    Args:
-        U: 守恒变量，形状 (n_cells, 1, n_vars)
-        mesh: HighOrderMesh 实例（n_points_1d 必须为 1）
-        boundary_ghost_provider: 同 compute_inviscid_residual_fr
-
-    Returns:
-        residual: 形状 (n_cells, 1, 5)
-    """
-    n_cells = mesh.n_cells
-    if mesh.cell_volumes is None:
-        raise RuntimeError(
-            "mesh.cell_volumes not available - required for the P0 finite-volume residual path "
-            "(should have been computed once in load_from_volume_mesh at the mesh's target order)."
-        )
-    cell_volumes = mesh.cell_volumes
-
-    Q_all = conserved_to_primitive(U[..., :5])[:, 0, :]  # (n_cells,5)，P0 唯一解点即单元均值
-
-    fc = mesh.face_connectivity
-    ffp_list = mesh.face_flux_points
-    ghost_provider = boundary_ghost_provider if boundary_ghost_provider is not None else DefaultGhostProvider()
-
-    residual5 = np.zeros((n_cells, 5))
-
-    for f in range(fc.n_faces):
-        ffp = ffp_list[f]
-        owner_cell = int(fc.owner_cell[f])
-        true_normal = ffp.true_normal  # (1,3)，owner->neighbor / 边界面指向域外
-        area_w = ffp.true_area_weight  # (1,)
-
-        Q_owner_fp = Q_all[owner_cell : owner_cell + 1]  # (1,5)
-
-        if fc.is_boundary[f]:
-            Q_neighbor_fp = ghost_provider(f, Q_owner_fp, true_normal)
-        else:
-            neighbor_cell = int(fc.neighbor_cell[f])
-            Q_neighbor_fp = Q_all[neighbor_cell : neighbor_cell + 1]
-
-        F_common_n = ausm_up_flux_batch(Q_owner_fp, Q_neighbor_fp, true_normal)  # (1,5)
-        flux_integral = F_common_n[0] * area_w[0]  # (5,)
-
-        residual5[owner_cell] += -flux_integral / cell_volumes[owner_cell]
-        if not fc.is_boundary[f]:
-            residual5[neighbor_cell] += flux_integral / cell_volumes[neighbor_cell]
-
-    return residual5[:, None, :]
+    return compute_inviscid_residual_fv_p0(U, mesh, boundary_ghost_provider)
 
 
 def compute_inviscid_residual_fr(
@@ -255,191 +176,117 @@ def compute_inviscid_residual_fr(
     det_jacs = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
     inv_jacs = mesh.jacobians["inv_jacs"].reshape(n_cells, n_sps, 3, 3)
     adj_j = det_jacs[..., None, None] * inv_jacs  # (n_cells,n_sps,3,3), adj_j[...,m,i]
+    # adj_j（coarse）在下面界面/校正项里仍要用（side_contravariant_flux 等
+    # 闭包捕获），体积项散度改走 over-integration（去混叠）路径，两者不
+    # 是同一段计算，coarse adj_j 不能删。
 
-    F_phys = euler_physical_flux(Q)  # (n_cells,n_sps,3,5)
-    # 逆变通量 F_tilde_m = sum_i adj_j[m,i] * F_phys[i]
-    F_tilde = np.einsum("csmi,csiv->csmv", adj_j, F_phys)  # (n_cells,n_sps,3,5)
-
-    # 体积项（计算空间散度）：res_comp[c,s,v] = sum_{j,m} D_3d[s,j,m]*F_tilde[c,j,m,v]。
-    # 四面体/棱柱必须用坍缩坐标专用微分矩阵（fr/collapsed_basis.py），不能
-    # 用朴素张量积 D_3d——见 FROperators.D_3d_tet/D_3d_prism 文档：真实
-    # 网格上朴素张量积基在坍缩坐标退化边附近的混叠误差，被同一处真实
-    # 偏小的几何 Jacobian（det_jacs，下面一步会除以它）放大到灾难量级。
     n_prism = mesh.n_prism_cells
-    div_comp = np.zeros((n_cells, n_sps, 5))
-    if n_prism > 0:
-        div_comp[:n_prism] = np.einsum("sjm,cjmv->csv", ops.D_3d_prism, F_tilde[:n_prism])
-    if n_cells > n_prism:
-        div_comp[n_prism:] = np.einsum("sjm,cjmv->csv", ops.D_3d_tet, F_tilde[n_prism:])
+
+    if mesh.jacobians_fine is not None:
+        # 体积项去混叠（over-integration，V2.0 二次评审 Tier 0 #2）：直接
+        # 在 coarse SPs 上对 adj(J)*F_phys(Q) 做 D_3d_tet/prism 散度会
+        # 把这个非线性乘积（真实多项式次数远高于 order）混叠到
+        # degree-order 空间再求导——真实数值实验：对解析残差恒为 0 的
+        # 线性剪切场，P2 算出的残差是真值的 43~62 倍。改为：① 把 Q
+        # 精确插值到更细的 FINE 参考点集（Q 本身次数 <= order，插值不
+        # 引入误差）；② 用解析精确的 FINE 点度量（mesh.jacobians_fine，
+        # 与 coarse 版同源，见 HighOrderMesh._build_order_geometry）和
+        # 在 FINE 点上重新算的物理通量算出逆变通量；③ 用 FINE 网格自己
+        # 的微分矩阵求散度（差分的是更接近真实非线性次数的插值多项式）；
+        # ④ 把结果插值限制回 coarse SPs。见
+        # fr/collapsed_basis.py::build_overintegration_operators 文档。
+        n_fine = mesh.n_sps_per_cell_fine
+        det_jacs_fine = mesh.jacobians_fine["det_jacs"].reshape(n_cells, n_fine)
+        inv_jacs_fine = mesh.jacobians_fine["inv_jacs"].reshape(n_cells, n_fine, 3, 3)
+        adj_j_fine = det_jacs_fine[..., None, None] * inv_jacs_fine  # (n_cells,n_fine,3,3)
+
+        Q_fine = np.zeros((n_cells, n_fine, 5))
+        if n_prism > 0:
+            Q_fine[:n_prism] = contract_shared_operator_1axis(ops.overint_interp_c2f_prism, Q[:n_prism])
+        if n_cells > n_prism:
+            Q_fine[n_prism:] = contract_shared_operator_1axis(ops.overint_interp_c2f_tet, Q[n_prism:])
+
+        # 体积项性能优化：以下三步（物理通量构造、逆变通量、散度、限制回
+        # coarse）在生产网格（545K cell）上实测是界面项 numba 化之后新暴露
+        # 出来的主导耗时（py-spy 采样几乎全部落在这里），原因是
+        # `euler_physical_flux` 的向量化 numpy 实现逐次分配大临时数组，
+        # 以及 `np.einsum` 对"共享算子 vs 逐 cell 批量小矩阵乘"这类收缩
+        # 不会自动走 BLAS gemm 路径。改用已逐位验证过的
+        # `euler_physical_flux_batch`（复用 numba 逐点 kernel）+
+        # `np.matmul`（批量小矩阵乘，两个操作数都依赖 cell）+
+        # `contract_shared_operator_*axis`（`np.tensordot`，operand 之一
+        # 不依赖 cell）——三者都是与原 einsum 公式严格等价的同一个求和，
+        # 只是换一条计算路径，验证方法与量级见
+        # `fr_volume_contract.py`/`fr_flux_kernels_pointwise.py` 模块文档。
+        Q_fine_flat = np.ascontiguousarray(Q_fine.reshape(-1, 5))
+        F_phys_fine = euler_physical_flux_batch(Q_fine_flat).reshape(n_cells, n_fine, 3, 5)
+        F_tilde_fine = np.matmul(adj_j_fine, F_phys_fine)  # (n_cells,n_fine,3,5)
+
+        div_comp_fine = np.zeros((n_cells, n_fine, 5))
+        if n_prism > 0:
+            div_comp_fine[:n_prism] = contract_shared_operator_2axis(ops.overint_D_fine_prism, F_tilde_fine[:n_prism])
+        if n_cells > n_prism:
+            div_comp_fine[n_prism:] = contract_shared_operator_2axis(ops.overint_D_fine_tet, F_tilde_fine[n_prism:])
+
+        div_comp = np.zeros((n_cells, n_sps, 5))
+        if n_prism > 0:
+            div_comp[:n_prism] = contract_shared_operator_1axis(ops.overint_restrict_f2c_prism, div_comp_fine[:n_prism])
+        if n_cells > n_prism:
+            div_comp[n_prism:] = contract_shared_operator_1axis(ops.overint_restrict_f2c_tet, div_comp_fine[n_prism:])
+    else:
+        # 没有 fine 几何（理论上只有 order==0 会发生，但 P0 在函数入口就
+        # 已经短路到 _compute_inviscid_residual_fv_p0，不会走到这里；保留
+        # 这条分支只是为了在任何未预见的 jacobians_fine 缺失场景下不静默
+        # 得到错误答案，而是仍用未去混叠的朴素路径，不崩溃）。
+        Q_flat = np.ascontiguousarray(Q.reshape(-1, 5))
+        F_phys = euler_physical_flux_batch(Q_flat).reshape(n_cells, n_sps, 3, 5)
+        F_tilde = np.matmul(adj_j, F_phys)  # (n_cells,n_sps,3,5)
+        div_comp = np.zeros((n_cells, n_sps, 5))
+        if n_prism > 0:
+            div_comp[:n_prism] = contract_shared_operator_2axis(ops.D_3d_prism, F_tilde[:n_prism])
+        if n_cells > n_prism:
+            div_comp[n_prism:] = contract_shared_operator_2axis(ops.D_3d_tet, F_tilde[n_prism:])
+
     residual = -div_comp / det_jacs[..., None]  # 物理空间残差（体积项部分）
 
-    # --- 界面项 ---
+    # --- 界面项：numba 逐点标量 kernel（性能优化，替代原纯 Python
+    # `for f in range(fc.n_faces)` 逐面循环——生产规模网格上 130 万个面、
+    # 每次残差求值都要跑一遍，纯 Python 解释器 + 逐次小 numpy 调用的
+    # 开销是实测 1546s/次残差求值的主因。控制流/数学公式与原实现逐字
+    # 对应，只是执行方式换成编译后的原生代码，见
+    # fr_residual_inviscid_kernel.py 模块文档、
+    # tests/unit/test_fr_residual_inviscid_kernel_crosscheck.py 的新旧
+    # 实现逐位对比验证）。
     ghost_provider = boundary_ghost_provider if boundary_ghost_provider is not None else DefaultGhostProvider()
 
-    fc = mesh.face_connectivity
-    ffp_list = mesh.face_flux_points
+    from autoflowcfd.core.fr_face_kernels_flat import get_flat_face_geometry
+    from autoflowcfd.core.fr_residual_inviscid_kernel import (
+        compute_inviscid_interface_correction_kernel,
+        compute_boundary_ghost_states,
+    )
 
-    correction = np.zeros_like(residual)
+    flat = get_flat_face_geometry(mesh, ops)
+    Q_ghost = compute_boundary_ghost_states(flat, Q, adj_j, ghost_provider)
+    # n_threads 必须紧邻调用之前取值，不能缓存，理由见
+    # fr_residual_inviscid_kernel.py 模块文档"多核并行"一节。
+    import numba
+    n_threads = numba.get_num_threads()
+    correction = compute_inviscid_interface_correction_kernel(
+        Q, adj_j, det_jacs,
+        flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
+        flat.owner_axis, flat.owner_side, flat.neighbor_axis, flat.neighbor_side,
+        flat.owner_is_primary, flat.neighbor_is_primary,
+        flat.true_normal,
+        flat.neighbor_src0_cell, flat.neighbor_src0_mat,
+        flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
+        flat.owner_src0_cell, flat.owner_src0_mat,
+        flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
+        flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
+        flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
+        n_prism, n_threads,
+    )
+    residual = residual + correction
 
-    def extrap_to_face(cell: int, field: np.ndarray, axis: int, side: float) -> np.ndarray:
-        """把 cell 体积 SPs 上的场外插到其 (axis,side) 边界 Flux Points。
-
-        四面体/棱柱必须用坍缩坐标模态基外插矩阵（ops.boundary_extrap_tet/
-        boundary_extrap_prism），不能用朴素 1D 张量积 extrapolate_to_face
-        ——真实网格验证发现，朴素外插算出的等效界面法向方向在坍缩坐标
-        退化边附近与真实几何法向偏差可达近 30°（仍在下面 alignment 校验
-        的宽松阈值内、不会报错，但足以在残差公式除以该处真实偏小的
-        Jacobian 后放大到灾难量级），见 FROperators.boundary_extrap_tet
-        文档。FP 索引约定（other_axes 顺序展平）与 extrapolate_to_face
-        完全一致，_distribute_from_face 的逐点校正投影不受影响。
-        """
-        if cell < n_prism:
-            E = ops.boundary_extrap_prism[(axis, side)]
-        else:
-            E = ops.boundary_extrap_tet[(axis, side)]
-        trailing = field.shape[1:]
-        flat = E @ field.reshape(field.shape[0], -1)
-        return flat.reshape((E.shape[0],) + trailing)
-
-    def side_contravariant_flux(cell: int, axis: int, side: float, Q_fp: np.ndarray, face_idx: int, label: str):
-        """给定单元在其局部面 (axis, side) 处外插得到的 Q_fp，计算：
-        - 该单元自身的边界逆变通量 F_tilde_own = adj_row · F_phys(Q_fp)
-        - adj_row 的模长与"是否指向真实外法向"的方向标记 side（+1/-1）
-
-        计算立方体参考域 [-1,1] 上，"+ξ_axis 方向"在 side=-1 的面处指向域内、
-        在 side=+1 的面处指向域外（标准参考单元朝向的固有性质，与单元是
-        四面体还是棱柱无关）。因此 adj_row 必须再乘以 side 才能与「真实
-        物理外法向」这一约定的方向一致——这是残差组装里最容易出错、也
-        最容易被误认为"符号无所谓"的一步，已用均匀自由流场残差应严格
-        为零的测试验证（tests/unit/test_fr_residual_inviscid.py）。
-        """
-        adj_row_fp = extrap_to_face(cell, adj_j[cell][:, axis, :], axis, side)  # (n_fp,3)
-        adj_mag = np.linalg.norm(adj_row_fp, axis=-1)
-        adj_dir_outward = (adj_row_fp / np.maximum(adj_mag[:, None], 1e-300)) * side
-        return adj_row_fp, adj_mag, adj_dir_outward
-
-    for f in range(fc.n_faces):
-        ffp = ffp_list[f]
-        owner_cell = int(fc.owner_cell[f])
-        owner_axis = ffp.owner_axis
-        owner_side = ffp.owner_side
-
-        # 棱柱四边形侧面被网格生成器恒定拆分成 2 个三角形子面记录（见
-        # fr/face_flux_points.py 模块文档），owner/neighbor 各自的自身
-        # 外插+校正投影只能由分组内的一条 primary 记录触发一次，否则会
-        # 对同一批原生 Flux Points 的界面校正项重复计入。非 primary 的
-        # 记录只是把"这条记录对应四边形哪一半、该跟哪个真实相邻单元耦合"
-        # 的信息合并进了 primary 记录的 neighbor_sources/owner_sources
-        # 里（见 face_flux_points_merge.py），本身不需要再单独处理。
-        if ffp.owner_is_primary:
-            Q_owner_fp = extrap_to_face(owner_cell, Q[owner_cell], owner_axis, owner_side)  # (n_fp,5)
-            adj_owner_row_fp, adj_mag_owner, adj_dir_owner_outward = side_contravariant_flux(
-                owner_cell, owner_axis, owner_side, Q_owner_fp, f, "owner"
-            )
-
-            alignment = np.sum(adj_dir_owner_outward * ffp.true_normal, axis=-1)
-            riemann_normal_owner = adj_dir_owner_outward
-            if np.any(alignment < 0.5):
-                # 度量张量外插得到的等效法向与真实几何法向偏离过大——真实
-                # 网格已复现：Order Continuation 的低阶 warm-up 阶段（P0、
-                # P1，目标阶 P2 本身未见此问题）单元内 SPs 太少，坍缩坐标
-                # 固有的度量非均匀性（fr/collapsed_basis.py 文档）在这些
-                # 阶数下无法被外插矩阵充分捕捉，与真实几何法向偏差可达
-                # 60°+；这是低阶表示的固有局限，不是拓扑/朝向 bug。偏离
-                # 超阈值的那些 Flux Points 改用真实几何法向做 Riemann 求解
-                # 迎风判据——物理上更基础可靠（迎风方向理应看真实外法向），
-                # 而不是让整条残差计算中止；adj_mag_owner/owner_side 的
-                # 投影关系只依赖 owner 自己的度量张量本身，与法向方向的
-                # 选择无关，不受影响。
-                bad = alignment < 0.5
-                riemann_normal_owner = np.where(bad[:, None], ffp.true_normal, adj_dir_owner_outward)
-
-            if fc.is_boundary[f]:
-                Q_neighbor_fp = ghost_provider(f, Q_owner_fp, ffp.true_normal)
-            else:
-                # neighbor（1~2 个真实相邻单元，见模块文档）的解在 owner FP
-                # 精确物理位置处的取值：每个 sources 矩阵只在它真正覆盖的
-                # 那部分 FP 行上非零，求和即得到按物理位置精确来源组装出的
-                # 完整界面场（不是"两侧独立离散化恰好重合"的错误假设）。
-                Q_neighbor_fp = sum(mat @ Q[cell] for cell, mat in ffp.neighbor_sources)
-
-            # 公共物理法向通量密度（黎曼求解器）：必须用 owner 自己的度量
-            # 法向 adj_dir_owner_outward，不能用外部（FaceExtractor 给出的
-            # 平面三角形）true_normal——棱柱四边形侧面是双线性曲面，其
-            # 局部法向随位置变化，与相邻四面体平面三角形的法向本就不
-            # 严格相等（真实网格验证：偏差可达约 28°，且是真实几何事实，
-            # 不是数值误差，见开发过程记录），若用 true_normal 算出
-            # F_common_n 后直接乘以 adj_mag_owner（隐含假设两者方向一致），
-            # 在偏差较大处会引入真实的、非近似意义下的不一致——用
-            # adj_dir_owner_outward 本身做黎曼求解器的法向，用它算出的
-            # 通量投影到 owner 自己的逆变坐标就是精确自洽的（不是近似）。
-            #
-            # （本会话曾尝试用 owner/neighbor 两侧方向的平分方向代替，
-            # 目的是恢复黎曼求解器的反对称性/通量守恒——已用受控解析算例
-            # 证实两侧独立方向确实违反 F(A,B,n)=-F(B,A,-n)——但在真实
-            # cube_demo 网格上实测导致自由流场残差从 9e-5 恶化到 3.1e7，
-            # 说明该平分方向实现对棱柱侧的坍缩坐标轴处理有误，已完整
-            # 撤销，恢复本段代码；通量不守恒问题仍待正确定位与修复。）
-            F_common_n_owner = ausm_up_flux_batch(Q_owner_fp, Q_neighbor_fp, riemann_normal_owner)  # (n_fp,5)
-
-            # --- owner 侧：转换到 owner 自己的逆变（"+ξ_axis方向"）约定并做校正投影 ---
-            F_tilde_common_owner = F_common_n_owner * adj_mag_owner[:, None] * owner_side
-            F_phys_owner_fp = euler_physical_flux(Q_owner_fp)  # (n_fp,3,5)
-            F_tilde_own_boundary = np.einsum("fi,fiv->fv", adj_owner_row_fp, F_phys_owner_fp)
-
-            jump_owner = F_tilde_common_owner - F_tilde_own_boundary  # (n_fp,5)
-            g_prime_owner = ops.g_left if owner_side < 0 else ops.g_right
-            contrib_owner = -_distribute_from_face(jump_owner, n1d, owner_axis, g_prime_owner)
-            correction[owner_cell] += contrib_owner / det_jacs[owner_cell][:, None]
-
-        if not fc.is_boundary[f] and ffp.neighbor_is_primary:
-            # --- neighbor 侧：独立地用 neighbor 自己的度量项、自己的 side、
-            # 自己原生的 FP 网格重新计算一次公共通量（不复用 owner 侧算好的
-            # F_common_n——那是在 owner 的 FP 物理位置上算的，neighbor 原生
-            # FP 位置一般是同一张平面上的另一组点，必须用 owner 解在
-            # *neighbor 的* FP 物理位置处的精确取值重新做一次黎曼求解）。
-            # 面是平面直边三角形/四边形（P1 直边网格），真实法向量在整张
-            # 面上恒定，neighbor 视角的外法向直接是 -true_normal，无需
-            # 按位置重新计算或置换。
-            neighbor_cell = int(fc.neighbor_cell[f])
-            neighbor_axis = ffp.neighbor_axis
-            neighbor_side = ffp.neighbor_side
-            neighbor_true_normal = -ffp.true_normal
-
-            Q_neighbor_fp_native = extrap_to_face(neighbor_cell, Q[neighbor_cell], neighbor_axis, neighbor_side)
-            adj_neighbor_row_fp_native, adj_mag_neighbor_native, adj_dir_neighbor_outward_native = (
-                side_contravariant_flux(neighbor_cell, neighbor_axis, neighbor_side, Q_neighbor_fp_native, f, "neighbor")
-            )
-
-            alignment_n = np.sum(adj_dir_neighbor_outward_native * neighbor_true_normal, axis=-1)
-            riemann_normal_neighbor = adj_dir_neighbor_outward_native
-            if np.any(alignment_n < 0.5):
-                # 同 owner 侧的处理（见上面 riemann_normal_owner 处的注释）：
-                # 低阶 warm-up 阶段度量外插法向偏离过大的 Flux Points 改用
-                # 真实几何法向做 Riemann 求解，不中止残差计算。
-                bad_n = alignment_n < 0.5
-                riemann_normal_neighbor = np.where(bad_n[:, None], neighbor_true_normal, adj_dir_neighbor_outward_native)
-
-            # owner（1~2 个真实相邻单元）的解在 neighbor 原生 FP 精确物理
-            # 位置处的取值，同样按 sources 求和组装
-            Q_owner_at_neighbor_fp = sum(mat @ Q[cell] for cell, mat in ffp.owner_sources)
-            # 黎曼求解器用 neighbor 自己的度量法向，理由同 owner 侧
-            # （F_common_n_owner 处的注释）——避免用外部 true_normal 算出
-            # 通量后再乘以 neighbor 自己的 adj_mag 这一步隐含的方向一致假设。
-            F_common_n_native = ausm_up_flux_batch(
-                Q_neighbor_fp_native, Q_owner_at_neighbor_fp, riemann_normal_neighbor
-            )
-
-            F_tilde_common_neighbor = F_common_n_native * adj_mag_neighbor_native[:, None] * neighbor_side
-            F_phys_neighbor_fp = euler_physical_flux(Q_neighbor_fp_native)
-            F_tilde_own_boundary_neighbor = np.einsum("fi,fiv->fv", adj_neighbor_row_fp_native, F_phys_neighbor_fp)
-
-            jump_neighbor = F_tilde_common_neighbor - F_tilde_own_boundary_neighbor
-            g_prime_neighbor = ops.g_left if neighbor_side < 0 else ops.g_right
-            contrib_neighbor = -_distribute_from_face(jump_neighbor, n1d, neighbor_axis, g_prime_neighbor)
-            correction[neighbor_cell] += contrib_neighbor / det_jacs[neighbor_cell][:, None]
-
-    residual += correction
     # 机制3（症状检测，见 fr_troubled_cell.py 模块文档）：取代此前"先用
     # det(J)/法向失配几何量预判、按整个单元降阶"的机制1/2，直接对算出的
     # 最终残差本身做 (cell,SP,变量) 粒度的量级异常检测——只清零真正异常

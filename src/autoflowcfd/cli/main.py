@@ -13,9 +13,9 @@ Example:
     
     Parse ANSA .nas grid file.
     
-    $ autoflowcfd solve run --help
-    Usage: autoflowcfd solve run [OPTIONS] INPUT_FILE
-    
+    $ autoflowcfd solve steady --help
+    Usage: autoflowcfd solve steady [OPTIONS] INPUT_FILE
+
     Run steady-state RANS simulation.
 """
 
@@ -70,21 +70,24 @@ def cli(verbose: bool) -> None:
         - Comprehensive post-processing tools
     
     Command Groups:
-        grid     Grid processing (parse, validate, info, convert)
-        solve    Solver commands (run, transient, resume, status)
+        grid     Grid processing (parse, validate, info, convert, generate-volume, import-volume)
+        solve    Solver commands (steady, transient, resume, status)
         post     Post-processing (coefficients, export-vtk, report, etc.)
         config   Configuration management (init, show, validate)
         utils    Utilities (version, doctor, benchmark)
-    
+
     Examples:
         # Parse grid file
         $ autoflowcfd grid parse sedan.nas
-        
-        # Run steady-state simulation
-        $ autoflowcfd solve run sedan.nas --backend gpu --order 3
-        
+
+        # Generate a volume mesh from the surface mesh (required before solving)
+        $ autoflowcfd grid generate-volume sedan.nas -o sedan_volume.nas
+
+        # Run steady-state simulation (input must be a .pkl volume mesh)
+        $ autoflowcfd solve steady sedan_volume.pkl --backend gpu --order 3
+
         # Run transient DES simulation
-        $ autoflowcfd solve transient sedan.nas --physical-time 0.3
+        $ autoflowcfd solve transient sedan_volume.pkl --physical-time 0.3
         
         # Calculate aerodynamic coefficients
         $ autoflowcfd post coefficients --case results/

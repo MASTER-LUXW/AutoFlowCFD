@@ -36,11 +36,14 @@ from .mesh_tetgen_seeding import (
     estimate_steinerleft,
     generate_core_background_points,
 )
+from .mesh_tetgen_input_prep import prepare_plc_input
+from .mesh_tetgen_error_translation import translate_tetgen_failure
 
 __all__ = [
     'CORE_TETGEN_MINRATIO',
     'CORE_TETGEN_MINDIHEDRAL',
     'CORE_VOLUME_CAP_FRACTION',
+    'CORE_TETGEN_OPT_ITERATIONS',
     'build_seam_taper_scale',
     'compute_local_thickness_limit',
     'subdivide_oversized_tetrahedra',
@@ -48,6 +51,8 @@ __all__ = [
     'attribute_cells_from_trifaces',
     'estimate_steinerleft',
     'generate_core_background_points',
+    'prepare_plc_input',
+    'translate_tetgen_failure',
     'fill_core_volume',
 ]
 
@@ -69,6 +74,20 @@ __all__ = [
 CORE_TETGEN_MINRATIO = 1.15  # was 1.4; tetgen default ~2.0 (lower = stricter)
 CORE_TETGEN_MINDIHEDRAL = 15.0  # unchanged - dihedral wasn't the implicated metric
 CORE_VOLUME_CAP_FRACTION = 0.08  # was 0.15, of max_cell_size**3
+
+# tetgen 精化完成后、边/面翻转+光顺的局部优化遍数（对应 tetgen 手册的 -O
+# 开关；Python 绑定里的 opt_iterations，默认 3）。这个优化阶段完全在已有
+# 点集上做纯拓扑操作（不插入新点），因此和 nobisect（-Y，边界点集固定不
+# 变）正交、不会重新触发 nobisect 原本要规避的"tetgen 在复杂 BL 表面上挂起"
+# 问题 - 只是让它在同一批点上多尝试几轮翻转/光顺来消除退化单元。
+#
+# 曾经考虑过直接传 insertaddpoints=True（tetgen 手册 -i 开关）当作"消除
+# sliver 的插点开关"，核对 Python 绑定的 tetrahedralize 文档字符串后确认
+# 这个理解是错的：-i 的实际含义是"插入调用方另外提供的一批点"，需要额外传
+# 一份点列表，不传点列表时不是通用的内部质量插点机制 - 已放弃这个方向，
+# 改为只调这里的、含义可以从参数本身（就是"遍数"）直接确认、不依赖对
+# tetgen C++ 内部位掩码语义猜测的安全参数。
+CORE_TETGEN_OPT_ITERATIONS = 6  # tetgen 默认 3
 
 
 # Rough conversion from a target edge length to a tetgen maxvolume cap
@@ -220,17 +239,7 @@ def fill_core_volume(
     """
     import tetgen
 
-    points = np.ascontiguousarray(points, dtype=np.float64)
-    faces = np.ascontiguousarray(faces, dtype=np.int32)
-
-    # Appended AFTER every point `faces` can reference, so none of the
-    # bounds/degenerate-face checks just below (which only look at
-    # `faces`/the ORIGINAL `points`) need to change. See this function's
-    # own `background_points` doc for why these are safe/useful as free
-    # (non-facet) input points.
-    if background_points is not None and len(background_points) > 0:
-        points = np.vstack([points, np.ascontiguousarray(background_points, dtype=np.float64)])
-        logger.info(f"Adding {len(background_points)} background points to seed the initial tetrahedralization")
+    points, faces, face_markers = prepare_plc_input(points, faces, background_points, face_markers)
 
     # Relax quality constraints slightly to ensure convergence on a complex
     # BL surface.
@@ -279,30 +288,6 @@ def fill_core_volume(
         f"minratio={effective_minratio:.1f}, mindihedral={effective_mindihedral:.1f})..."
     )
 
-    # Defensive check: ensure all face indices are within bounds and unique
-    if np.any(faces < 0) or np.any(faces >= len(points)):
-        raise RuntimeError(
-            f"Invalid face indices detected in PLC boundary. "
-            f"Faces range [{faces.min()}, {faces.max()}], but points count is {len(points)}."
-        )
-
-    # Check for degenerate faces (faces with duplicate vertices)
-    sorted_faces = np.sort(faces, axis=1)
-    degenerate_mask = (
-        (sorted_faces[:, 0] == sorted_faces[:, 1]) |
-        (sorted_faces[:, 1] == sorted_faces[:, 2]) |
-        (sorted_faces[:, 0] == sorted_faces[:, 2])
-    )
-    n_degenerate = int(np.sum(degenerate_mask))
-    if n_degenerate > 0:
-        logger.warning(
-            f"Found {n_degenerate} degenerate faces in PLC boundary. "
-            f"Removing them before TetGen call to prevent hangs."
-        )
-        faces = faces[~degenerate_mask]
-        if face_markers is not None:
-            face_markers = face_markers[~degenerate_mask]
-
     if face_markers is not None:
         tgen = tetgen.TetGen(points, faces, np.ascontiguousarray(face_markers, dtype=np.int32))
     else:
@@ -339,6 +324,11 @@ def fill_core_volume(
             regionattrib=bool(regions),
             varvolume=bool(regions),
             steinerleft=steinerleft,
+            # 精化完成后的边/面翻转+光顺优化遍数 - 见 CORE_TETGEN_OPT_
+            # ITERATIONS 自己的注释：这是纯拓扑操作（不插入新点），跟
+            # nobisect 正交，多跑几轮只会让已经精化出的点集更彻底地消除
+            # 退化单元，不会重新触发 nobisect 原本要规避的挂起问题。
+            opt_iterations=CORE_TETGEN_OPT_ITERATIONS,
             # Was hardcoded True regardless of this function's own
             # `verbose` param - meant every caller got tetgen's own raw
             # C-level console output (memorypool sizing, per-phase
@@ -351,35 +341,9 @@ def fill_core_volume(
             verbose=verbose,
         )
     except RuntimeError as e:
-        if "self-intersection" in str(e).lower():
-            raise RuntimeError(
-                f"{e}. The BL outer surface self-intersects at a tight local "
-                f"feature (common at small welded contact patches with sharp "
-                f"edges). Try fewer/thinner BL layers (--bl-layers, "
-                f"--min-cell-size) - naive normal-offset extrusion has no "
-                f"per-feature thickness limiting yet, so cumulative BL "
-                f"thickness must stay well under the tightest local gap in "
-                f"the geometry."
-            ) from e
-        if "removevertexbyflips" in str(e).lower() or "internal tetgen error" in str(e).lower():
-            # Observed on a real case when Stage B's reactive BL thickness
-            # cap (mesh_repair.compute_bl_thickness_limit_override) needs to
-            # cap a very large fraction of surface vertices - itself already
-            # a symptom of Stage A leaving widespread, not localized, bad
-            # cells - producing a boundary facet with enough near-coincident
-            # points to exceed tetgen's own numerical robustness limits
-            # internally (a tetgen implementation limitation, not a
-            # meshing-strategy error on this codebase's side) rather than
-            # failing with a clearer diagnostic like the self-intersection
-            # case above.
-            raise RuntimeError(
-                f"{e}. tetgen hit an internal robustness limit - on a case "
-                f"seen directly, this followed a very widespread Stage B "
-                f"BL-thickness cap (a sign Stage A already found bad cells "
-                f"across much of the surface, not just a few corners). Try "
-                f"loosening --growth-rate/--min-cell-size/--bl-layers so "
-                f"Stage A has fewer bad cells to begin with."
-            ) from e
+        translated = translate_tetgen_failure(e)
+        if translated is not None:
+            raise translated from e
         raise
 
     trifaces = None

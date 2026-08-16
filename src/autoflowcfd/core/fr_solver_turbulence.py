@@ -47,17 +47,67 @@ def init_turbulence_models(solver, n_cells: int, n_sps: int) -> None:
         raise ValueError(f"Unknown turbulence model: {solver.turb_model_name}")
 
 
-def compute_wall_distance_field(solver, mesh_nodes: np.ndarray, wall_indices: np.ndarray) -> None:
-    """计算壁面距离场（用于 DDES/WMLES/SST），映射到 SPs。"""
+def compute_wall_distance_field(
+    solver,
+    mesh_nodes: np.ndarray,
+    wall_indices: np.ndarray,
+    connectivity: Optional[np.ndarray] = None,
+    use_eikonal: bool = False,
+) -> None:
+    """计算壁面距离场（用于 DDES/WMLES/SST），映射到 SPs。
+
+    Args:
+        solver: FRSolver 实例
+        mesh_nodes: 全部网格节点坐标，shape=(n_nodes, 3)
+        wall_indices: WALL 边界节点索引
+        connectivity: 节点邻接表（见 grid.node_connectivity.
+            build_node_adjacency），use_eikonal=True 时必须提供，否则
+            忽略——Eikonal（图最短路径近似）沿网格拓扑传播距离，需要这张图
+        use_eikonal: True 时用 Eikonal 方程近似求解壁面距离（更符合复杂/
+            凹形几何的真实"沿流场路径"距离，例如轮腔、地板下这类通道里，
+            几何最近的墙面点可能隔着一层薄壁——纯欧氏 KD-Tree 会算出一个
+            物理上不成立、偏小的距离，Eikonal 沿网格边传播就不会有这个
+            问题）。False（默认）用纯欧氏 KD-Tree，更快，对开阔区域足够
+    """
     if solver.turb_model_name not in ["SST", "DDES", "WMLES", "LES"]:
         logger.warning(f"Turbulence model {solver.turb_model_name} does not require wall distance")
         return
 
     logger.info("Computing wall distance field...")
-    node_distances = compute_wall_distance(mesh_nodes, wall_indices)
+    node_distances = compute_wall_distance(
+        mesh_nodes, wall_indices, connectivity=connectivity, use_eikonal=use_eikonal
+    )
     logger.info(f"Node-level wall distance computed: min={node_distances.min():.6f}, max={node_distances.max():.6f}")
 
     n_cells, n_sps = solver.state.U.shape[:2]
+
+    if use_eikonal:
+        # Eikonal 距离只在网格节点上定义（沿网格拓扑传播的结果），必须从
+        # 最近节点的 node_distances 取值映射到 SP/单元中心 - 不能像下面
+        # use_eikonal=False 分支那样直接对查询点坐标重新做一次"到 WALL
+        # 节点最近欧氏距离"的独立几何查询,那样等于完全无视了 Eikonal 沿
+        # 网格拓扑传播出来的结果,直接退化回它原本要避免的那种纯直线距离。
+        query_points = (
+            solver.mesh.sps_coords.reshape(-1, 3)
+            if hasattr(solver.mesh, "sps_coords") and solver.mesh.sps_coords is not None
+            else getattr(solver.mesh, "cell_centers", None)
+        )
+        if query_points is not None:
+            mapped = _map_node_distances_to_points(mesh_nodes, node_distances, query_points)
+            solver.wall_distance = (
+                mapped.reshape(n_cells, n_sps)
+                if mapped.shape[0] == n_cells * n_sps
+                else np.tile(mapped[:, np.newaxis], (1, n_sps))
+            )
+            logger.info(
+                f"Eikonal wall distance field mapped: shape={solver.wall_distance.shape}, "
+                f"min={solver.wall_distance.min():.6f}, max={solver.wall_distance.max():.6f}"
+            )
+            return
+        solver.wall_distance = np.ones((n_cells, n_sps)) * node_distances.mean()
+        logger.info(f"Eikonal wall distance field initialized (no SP/cell-center coords available, using mean): "
+                    f"{solver.wall_distance.mean():.6f}")
+        return
 
     if hasattr(solver.mesh, "sps_coords") and solver.mesh.sps_coords is not None:
         sps_coords = solver.mesh.sps_coords
@@ -78,6 +128,32 @@ def compute_wall_distance_field(solver, mesh_nodes: np.ndarray, wall_indices: np
             _map_wall_distance_fallback(solver, node_distances, mesh_nodes, wall_indices, n_cells, n_sps)
     else:
         _map_wall_distance_fallback(solver, node_distances, mesh_nodes, wall_indices, n_cells, n_sps)
+
+
+def _map_node_distances_to_points(
+    mesh_nodes: np.ndarray, node_distances: np.ndarray, query_points: np.ndarray
+) -> np.ndarray:
+    """把节点级标量场（这里是 Eikonal 壁面距离）映射到任意查询点：每个
+    查询点取其最近网格节点的场值。
+
+    这是"节点上有定义、别处没有的标量场"映射到任意坐标最标准的做法（在没有
+    另外接入 FR 基函数插值的前提下）——查询点到最近节点之间还有一段真实的
+    几何偏移误差，量级受限于局部网格尺寸，是这类映射固有的、可接受的近似
+    误差，不是本函数的缺陷。
+
+    Args:
+        mesh_nodes: 全部网格节点坐标，shape=(n_nodes, 3)
+        node_distances: 节点级壁面距离，shape=(n_nodes,)
+        query_points: 待映射的坐标点，shape=(n_query, 3)
+
+    Returns:
+        shape=(n_query,) 每个查询点对应的（最近节点的）壁面距离
+    """
+    from scipy.spatial import cKDTree
+
+    tree = cKDTree(mesh_nodes)
+    _, nearest_node = tree.query(query_points, k=1)
+    return node_distances[nearest_node]
 
 
 def _map_wall_distance_fallback(solver, node_distances, mesh_nodes, wall_indices, n_cells, n_sps) -> None:
@@ -185,16 +261,30 @@ def compute_turbulence_source(solver, dt: float) -> Optional[tuple]:
         cell_volumes = solver._get_cell_volumes()
         solver.ddes_model.apply_to_sst_model(solver.turb_model, d_wall, cell_volumes, grad_vel)
 
-    solver.turb_model.update_fields(dt, Sk, S_omega)
+    # Sk/S_omega 是 compute_source_terms 按标准 SST 公式算出的 rho*k、
+    # rho*omega 方程源项（P_k/D_k/P_omega/D_omega/CD_omega 都显式带 rho
+    # 因子），但 turb_model.k_field/omega_field 存的是 k、omega 本身
+    # （不是 rho*k/rho*omega，初值 1e-6/1.0 也是 k/omega 量级而非 rho*k/
+    # rho*omega 量级）——直接 self.k_field += dt*Sk 会缺一个 1/rho，
+    # 量纲不对。这里换算成 dk/dt ≈ Sk/rho（对缓变 rho 的标准近似：
+    # d(rho*k)/dt = rho*dk/dt + k*drho/dt ≈ rho*dk/dt）再传给
+    # update_fields。
+    rho = Q[:, :, 0]
+    dk_dt = Sk / np.maximum(rho, 1e-10)
+    domega_dt = S_omega / np.maximum(rho, 1e-10)
+    solver.turb_model.update_fields(dt, dk_dt, domega_dt)
 
     return (Sk, S_omega)
 
 
 def apply_turbulence_corrections(solver) -> None:
-    """应用湍流模型的修正（WMLES 壁面应力、SGS 涡粘系数）。"""
-    if solver.wmles_model is not None:
-        solver._apply_wmles_wall_stress()
+    """应用湍流模型的修正（SGS 涡粘系数）。
 
+    WMLES 壁面剪应力**不**在这里施加，见
+    FRSolver.compute_viscous_residual()/apply_turbulence_corrections()
+    文档（T-05 修复：必须在残差组装阶段生效，这里在 step() 中排在状态
+    更新之后，为时已晚）。
+    """
     if solver.sgs_model is not None:
         grad_U = solver._compute_gradients()
         grad_u = grad_U[:, :, 1:4, :]

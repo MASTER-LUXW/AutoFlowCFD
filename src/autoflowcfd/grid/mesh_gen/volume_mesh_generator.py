@@ -239,7 +239,7 @@ class VolumeMeshGenerator:
                 f"{max_backoff_attempts} backoff attempt(s) - returning the best "
                 f"attempt's mesh anyway (best-effort); see the quality report above "
                 f"for which cells/regions are still implicated. The solve-time "
-                f"quality gate (autoflowcfd solve run) will catch this before any "
+                f"quality gate (autoflowcfd solve steady) will catch this before any "
                 f"iterations run, unless --skip-quality-check is passed."
             )
 

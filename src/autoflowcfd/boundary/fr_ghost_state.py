@@ -65,11 +65,61 @@ def farfield_ghost_state(Q_int: np.ndarray, Q_free: np.ndarray) -> np.ndarray:
 
 
 def inlet_ghost_state(Q_int: np.ndarray, Q_inlet: np.ndarray, normal: np.ndarray) -> np.ndarray:
-    """速度入口幽灵态：法向流入时用指定入口状态，流出（回流）时用内部状态延拓。"""
+    """速度入口幽灵态：法向流入时用指定入口状态，流出（回流）时用内部状态延拓。
+
+    Args:
+        Q_inlet: 形状 (5,)（全入口面统一常量，原有行为）或 (n_fp,5)
+            （逐 Flux Point 不同——BD-02 合成湍流入口 SEM 用这个形式喂入
+            随时间演化、逐点不同的脉动速度，见 boundary/synthetic_inlet.py
+            与本文件 InletSEMGhostState）。
+    """
     vel_n = np.sum(Q_int[:, 1:4] * normal, axis=1)
     inflow = vel_n < 0.0  # 法向量指向域外，流入时法向速度为负
-    Q_ghost = np.where(inflow[:, np.newaxis], np.asarray(Q_inlet)[np.newaxis, :], Q_int)
+    Q_inlet_arr = np.asarray(Q_inlet)
+    Q_inlet_broadcast = Q_inlet_arr[np.newaxis, :] if Q_inlet_arr.ndim == 1 else Q_inlet_arr
+    Q_ghost = np.where(inflow[:, np.newaxis], Q_inlet_broadcast, Q_int)
     return Q_ghost
+
+
+class InletSEMGhostState:
+    """给一组 INLET 边界面提供随时间演化、满足目标雷诺应力的合成湍流
+    入口脉动幽灵态（BD-02）。
+
+    与旧版本"SEM 算法本身正确但从未被任何边界路径调用"（V2.0 二次评审
+    发现）不同，这个类是 SyntheticEddyMethod 与
+    core/fr_residual_inviscid.py 期望的 boundary_ghost_provider 接口
+    （(face_idx, Q_owner_fp, true_normal) -> Q_ghost）之间的真实粘合层，
+    由 core/fr_solver_boundary.py::build_boundary_ghost_provider 在
+    LES/DDES 模式下为 VELOCITY_INLET 组构造并接入。
+
+    涡核的时间演化（advance）由 FRSolver.step() 每个物理步调用一次
+    （不是每次残差求值都调用——RK 子迭代内多次调用 __call__ 复用同一批
+    涡核位置，只有 generate_fluctuations 按位置重新求值，物理上等价于
+    "本物理步内脉动场冻结、下一物理步涡核才对流"，是标准做法）。
+    """
+
+    def __init__(self, sem, face_positions: dict, Q_mean: np.ndarray, reynolds_stress: np.ndarray):
+        self.sem = sem
+        self.face_positions = face_positions  # face_idx -> (n_fp,3) 物理坐标
+        self.Q_mean = np.asarray(Q_mean, dtype=float)
+        self.reynolds_stress = reynolds_stress
+
+    def __call__(self, face_idx: int, Q_owner_fp: np.ndarray, true_normal: np.ndarray) -> np.ndarray:
+        positions = self.face_positions.get(face_idx)
+        if positions is None:
+            # 该面不在预先构造涡核影响区时枚举到的 INLET 面集合里（理论上
+            # 不应发生，因为 face_positions 是按同一批 INLET 面构造的），
+            # 兜底退回常量均值状态而不是崩溃。
+            return np.tile(self.Q_mean, (Q_owner_fp.shape[0], 1))
+
+        mean_u = self.Q_mean[1:4]
+        u_inst = self.sem.generate_fluctuations(positions, mean_u, self.reynolds_stress)  # (n_fp,3)
+
+        n_fp = positions.shape[0]
+        Q_inlet_fp = np.tile(self.Q_mean, (n_fp, 1))
+        Q_inlet_fp[:, 1:4] = u_inst
+
+        return inlet_ghost_state(Q_owner_fp, Q_inlet_fp, true_normal)
 
 
 def outlet_ghost_state(Q_int: np.ndarray, p_outlet: float, normal: np.ndarray) -> np.ndarray:
@@ -127,6 +177,9 @@ class BoundaryGhostStateProvider:
         elif bc_type == "FARFIELD":
             return farfield_ghost_state(Q_owner_fp, cfg["Q_free"])
         elif bc_type == "INLET":
+            sem_ghost = cfg.get("sem")
+            if sem_ghost is not None:
+                return sem_ghost(face_idx, Q_owner_fp, true_normal)
             return inlet_ghost_state(Q_owner_fp, cfg["Q_inlet"], true_normal)
         elif bc_type == "OUTLET":
             return outlet_ghost_state(Q_owner_fp, cfg["p_outlet"], true_normal)

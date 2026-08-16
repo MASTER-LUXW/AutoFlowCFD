@@ -217,7 +217,7 @@ class NumbaBackend(BackendBase):
         updated = solution - residuals * dt
         
         # 物理正性保护
-        from .time_integration import enforce_positivity
+        from ..time_integration import enforce_positivity
         enforce_positivity(updated, p_floor=10.0)
         
         return updated

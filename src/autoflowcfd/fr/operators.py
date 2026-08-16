@@ -20,7 +20,12 @@ from .matrix_operators import (
     compute_interpolation_matrix,
     compute_correction_weights
 )
-from .collapsed_basis import build_collapsed_diff_matrices, build_collapsed_boundary_extrap
+from .collapsed_basis import (
+    build_collapsed_diff_matrices,
+    build_collapsed_boundary_extrap,
+    build_overintegration_operators,
+    OVERINTEGRATION_MAX_ORDER,
+)
 from .modal_filter import build_prism_modal_filter, build_tet_modal_filter
 
 
@@ -76,6 +81,16 @@ class FROperators:
     boundary_extrap_prism: Dict[Tuple[int, float], np.ndarray] = None
     filter_tet: np.ndarray = None
     filter_prism: np.ndarray = None
+    # 体积项去混叠（over-integration，见 collapsed_basis.build_overintegration_operators
+    # 文档）：order==0 时全部为 None（P0 走独立的有限体积残差路径，不需要）。
+    overint_order: int = None
+    overint_ref_fine: np.ndarray = None
+    overint_interp_c2f_tet: np.ndarray = None
+    overint_interp_c2f_prism: np.ndarray = None
+    overint_D_fine_tet: np.ndarray = None
+    overint_D_fine_prism: np.ndarray = None
+    overint_restrict_f2c_tet: np.ndarray = None
+    overint_restrict_f2c_prism: np.ndarray = None
     
     def get_operators(self) -> Dict[str, np.ndarray]:
         """返回算子字典，兼容旧接口。"""
@@ -145,7 +160,29 @@ def generate_fr_operators(order: int, flux_point_type: str = 'lobatto') -> FROpe
     
     # 5. 计算校正权重
     g_left, g_right = compute_correction_weights(n, flux_point_type)
-    
+
+    # 6. 体积项去混叠算子（order==0 时 P0 走独立有限体积路径，不需要，
+    # 见 grid/high_order_mesh.py::_build_order_geometry 里 jacobians_fine
+    # 同样按 order>=1 跳过的说明——两处的 over_order=2*order 约定必须
+    # 一致）。
+    overint_order = None
+    overint_ref_fine = None
+    overint_interp_c2f_tet = overint_interp_c2f_prism = None
+    overint_D_fine_tet = overint_D_fine_prism = None
+    overint_restrict_f2c_tet = overint_restrict_f2c_prism = None
+    if order >= 1:
+        # 必须与 grid/high_order_mesh.py::_build_order_geometry 里
+        # jacobians_fine 的 over_order 计算逐字一致（同一个上限常量），
+        # 否则 fr_residual_inviscid.py 里插值/微分/限制三个算子的形状
+        # 会和 mesh.jacobians_fine 对不上。
+        overint_order = min(2 * order, OVERINTEGRATION_MAX_ORDER)
+        overint_ref_fine, overint_interp_c2f_tet, overint_D_fine_tet, overint_restrict_f2c_tet = (
+            build_overintegration_operators("tet", order, overint_order, ref_cube_sps)
+        )
+        _, overint_interp_c2f_prism, overint_D_fine_prism, overint_restrict_f2c_prism = (
+            build_overintegration_operators("prism", order, overint_order, ref_cube_sps)
+        )
+
     return FROperators(
         D_1d=D_1d,
         D_3d=D_3d,
@@ -158,6 +195,14 @@ def generate_fr_operators(order: int, flux_point_type: str = 'lobatto') -> FROpe
         boundary_extrap_prism=boundary_extrap_prism,
         filter_tet=filter_tet,
         filter_prism=filter_prism,
+        overint_order=overint_order,
+        overint_ref_fine=overint_ref_fine,
+        overint_interp_c2f_tet=overint_interp_c2f_tet,
+        overint_interp_c2f_prism=overint_interp_c2f_prism,
+        overint_D_fine_tet=overint_D_fine_tet,
+        overint_D_fine_prism=overint_D_fine_prism,
+        overint_restrict_f2c_tet=overint_restrict_f2c_tet,
+        overint_restrict_f2c_prism=overint_restrict_f2c_prism,
     )
 
 

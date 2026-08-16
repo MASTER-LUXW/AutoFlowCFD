@@ -76,14 +76,15 @@ if _CUDA_IMPORT_OK:
         M_L = unL / max(aL, 1e-10)
         M_R = unR / max(aR, 1e-10)
 
+        # 界面声速/低马赫标度函数 Mbar2, fa（与 core/fr_kernels.py 逐字一致）。
+        a_half = 0.5 * (aL + aR)
+        rho_half = 0.5 * (rhoL_s + rhoR_s)
+        Mbar2 = (unL * unL + unR * unR) / (2.0 * a_half * a_half)
         Ma_ref = 0.1
-        sigma = 0.5
-        M_ref = max(abs(M_L), abs(M_R))
-        if M_ref < Ma_ref:
-            f_low = M_ref / Ma_ref
-            a_half = 0.5 * (aL + aR) * (1.0 + sigma * (1.0 - f_low))
-        else:
-            a_half = 0.5 * (aL + aR)
+        M0_sq = min(1.0, max(Mbar2, Ma_ref * Ma_ref))
+        sqrt_M0_sq = math.sqrt(M0_sq)
+        fa = sqrt_M0_sq * (2.0 - sqrt_M0_sq)
+        fa = max(fa, 1e-6)
 
         if abs(M_L) >= 1.0:
             Mp_L = 0.5 * (M_L + abs(M_L))
@@ -96,12 +97,18 @@ if _CUDA_IMPORT_OK:
             Mm_R = -0.25 * (M_R - 1.0) ** 2 - alpha * (M_R**2 - 1.0) ** 2
 
         M_half = Mp_L + Mm_R
-        mass_flux = 0.5 * (rhoL_s * aL + rhoR_s * aR) * M_half
 
-        entropy_fix_threshold = 0.1
-        if abs(M_L) < entropy_fix_threshold and abs(M_R) < entropy_fix_threshold:
-            delta_M = abs(M_L - M_R)
-            mass_flux += 0.5 * (rhoL_s + rhoR_s) * a_half * delta_M * 0.1
+        # Mp 压力扩散项 (Liou 2006 AUSM+up 式17)，取代旧的、破坏反对称性的
+        # "熵修正"（|M_L-M_R| 在 (L,R,n)->(R,L,-n) 变换下不翻号，直接违反
+        # F(A,B,n)=-F(B,A,-n)；详见 core/fr_kernels.py::compute_ausm_up_flux
+        # 同一处的完整推导与数值验证）。
+        Kp = 0.25
+        sigma_p = 1.0
+        one_minus_sigma_mbar2 = 1.0 - sigma_p * Mbar2
+        if one_minus_sigma_mbar2 < 0.0:
+            one_minus_sigma_mbar2 = 0.0
+        Mp = -(Kp / fa) * one_minus_sigma_mbar2 * (pR_s - pL_s) / (rho_half * a_half * a_half)
+        mass_flux = 0.5 * (rhoL_s * aL + rhoR_s * aR) * (M_half + Mp)
 
         if abs(M_L) >= 1.0:
             sign_ML = 1.0 if M_L > 0.0 else (-1.0 if M_L < 0.0 else 0.0)
@@ -115,7 +122,10 @@ if _CUDA_IMPORT_OK:
         else:
             Pm_R = 0.25 * ((M_R - 1.0) ** 2 * (2.0 + M_R) - beta * M_R * (M_R**2 - 1.0) ** 2)
 
-        p_half = Pp_L * pL_s + Pm_R * pR_s
+        # pu 速度扩散项 (Liou 2006 AUSM+up 式18)，与 Mp 项配套。
+        Ku = 0.75
+        p_half = Pp_L * pL_s + Pm_R * pR_s \
+            - Ku * Pp_L * Pm_R * (rhoL_s + rhoR_s) * fa * a_half * (unR - unL)
 
         upwind_L = mass_flux >= 0.0
         flux[0] = mass_flux

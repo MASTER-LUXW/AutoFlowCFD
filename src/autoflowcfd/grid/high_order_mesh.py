@@ -70,6 +70,14 @@ class HighOrderMesh:
 
         self.sps_coords: Optional[np.ndarray] = None
         self.jacobians: Optional[Dict[str, np.ndarray]] = None
+        # 体积项去混叠（over-integration，V2.0 二次评审 Tier 0 #2）用的
+        # 细网格几何：过积分阶数固定为 2*order（二次非线性去混叠的标准
+        # 经验法则，见 fr/collapsed_basis.py::build_overintegration_operators
+        # 文档），"det_jacs"/"inv_jacs" 形状与 self.jacobians 同构但按
+        # n_sps_per_cell_fine 展开；order==0 时为 None（P0 走独立的有限
+        # 体积残差路径，不需要）。
+        self.jacobians_fine: Optional[Dict[str, np.ndarray]] = None
+        self.n_sps_per_cell_fine: int = 0
         self.n_cells = 0
         self.n_prism_cells = 0
         self.face_connectivity: Optional[FRFaceConnectivity] = None
@@ -154,6 +162,8 @@ class HighOrderMesh:
         self.sps_coords = geom["sps_coords"]
         self.jacobians = geom["jacobians"]
         self._ref_cube_sps = geom["ref_cube_sps"]
+        self.jacobians_fine = geom["jacobians_fine"]
+        self.n_sps_per_cell_fine = geom["n_sps_per_cell_fine"]
 
         # 用当前（目标）阶数的高阶 Gauss-Legendre 求积算一次真实体积并固定
         # 下来——见 __init__ 里 cell_volumes 属性的文档：P0 阶段 1 点求积
@@ -232,162 +242,41 @@ class HighOrderMesh:
             "operators": self.operators,
             "face_flux_points": self.face_flux_points,
             "cell_face_misalignment": self.cell_face_misalignment,
+            "jacobians_fine": self.jacobians_fine,
+            "n_sps_per_cell_fine": self.n_sps_per_cell_fine,
         }
         self._active_order = self.order
 
     def _generate_reference_cube_sps(self, order: Optional[int] = None) -> np.ndarray:
-        """生成计算立方体 [-1,1]^3 内的张量积 Gauss-Legendre SPs 坐标。
+        """生成计算立方体参考 SPs 坐标。实现见
+        high_order_mesh_order.py::generate_reference_cube_sps（从本文件
+        拆出，控制单文件行数），文档字符串也在那里。"""
+        from .high_order_mesh_order import generate_reference_cube_sps
 
-        四面体、棱柱共用同一套计算立方体坐标（Duffy 坍缩坐标的计算域）；
-        单元类型差异完全体现在 curved_mapping 的物理映射函数中，这里不再
-        像旧版本那样对四面体/棱柱分别生成不同的"参考点"。
+        return generate_reference_cube_sps(self, order)
 
-        Args:
-            order: 目标阶数；None 时使用 self.order（当前活动阶数）。
-                Order Continuation 需要在切换到某个阶数*之前*为该阶数生成
-                SPs，此时 self.order 还是旧阶数，必须显式传入。
-        """
-        from autoflowcfd.fr.operators import gauss_legendre
+    def _compute_jacobians_at_ref_points(
+        self, mapper: "CurvedMapping", ref_pts: np.ndarray, want_scaled_quality: bool
+    ) -> Optional[Dict[str, np.ndarray]]:
+        """在给定参考点集上批量计算精确 Jacobian。实现见
+        high_order_mesh_order.py::compute_jacobians_at_ref_points。"""
+        from .high_order_mesh_order import compute_jacobians_at_ref_points
 
-        n_points_1d = (order + 1) if order is not None else self.n_points_1d
-        sps_1d, _ = gauss_legendre(n_points_1d)
-        xx, yy, zz = np.meshgrid(sps_1d, sps_1d, sps_1d, indexing="ij")
-        return np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
+        return compute_jacobians_at_ref_points(self, mapper, ref_pts, want_scaled_quality)
 
     def _build_order_geometry(self, order: int) -> Dict[str, np.ndarray]:
-        """在给定阶数下，从已修正朝向的 connectivity/节点坐标重新推导
-        SPs 物理坐标与 Jacobian（不依赖 self.order/self.n_points_1d 的当前值，
-        可在切换阶数*之前*安全调用）。
+        """在给定阶数下重新推导 SPs 物理坐标与 Jacobian。实现见
+        high_order_mesh_order.py::build_order_geometry。"""
+        from .high_order_mesh_order import build_order_geometry
 
-        Order Continuation（CL-02）的核心前提：FR 方法的解自由度与几何量
-        必须共享同一组 SPs——只换 FR 微分算子（self.operators）而不重新
-        推导这里的量，P0/P1 阶段的梯度/残差计算会直接用错误维度的
-        Jacobian（真实网格已复现：reshape 到 27 SPs/cell 的 Jacobian 硬套
-        1 SP/cell 的状态场，直接崩溃）。
-
-        Returns:
-            {"sps_coords", "jacobians", "ref_cube_sps"}
-        """
-        from autoflowcfd.core.fr_troubled_cell import compute_scaled_jacobian_quality
-
-        n_points_1d = order + 1
-        n_sps_per_cell = n_points_1d**3
-        sps_coords = np.zeros((self.n_cells, n_sps_per_cell, 3))
-        mapper = CurvedMapping(order)
-        all_dets, all_inv_jacs, all_scaled_quality = [], [], []
-
-        ref_cube_sps = self._generate_reference_cube_sps(order)
-        n_prisms = self.n_prism_cells
-
-        if self._fixed_prism_conn is not None and n_prisms > 0:
-            for i in range(n_prisms):
-                cell_nodes = self._node_coords[self._fixed_prism_conn[i]]
-                phys_sps = map_prism_to_physical(ref_cube_sps, cell_nodes)
-                sps_coords[i] = phys_sps
-
-                jac_data = mapper.compute_jacobian(
-                    phys_sps, cell_id=i, cell_type="prism", cell_nodes=cell_nodes, ref_cube_sps=ref_cube_sps
-                )
-                all_dets.append(jac_data["det_jacs"])
-                all_inv_jacs.append(jac_data["inv_jacs"])
-                all_scaled_quality.append(
-                    compute_scaled_jacobian_quality(jac_data["jacobians"], jac_data["det_jacs"])
-                )
-
-        if self._fixed_tet_conn is not None and len(self._fixed_tet_conn) > 0:
-            n_tets = len(self._fixed_tet_conn)
-            for i in range(n_tets):
-                cell_idx = n_prisms + i
-                cell_nodes = self._node_coords[self._fixed_tet_conn[i]]
-                phys_sps = map_tet_to_physical(ref_cube_sps, cell_nodes)
-                sps_coords[cell_idx] = phys_sps
-
-                jac_data = mapper.compute_jacobian(
-                    phys_sps, cell_id=cell_idx, cell_type="tet", cell_nodes=cell_nodes, ref_cube_sps=ref_cube_sps
-                )
-                all_dets.append(jac_data["det_jacs"])
-                all_inv_jacs.append(jac_data["inv_jacs"])
-                all_scaled_quality.append(
-                    compute_scaled_jacobian_quality(jac_data["jacobians"], jac_data["det_jacs"])
-                )
-
-        jacobians = None
-        if all_dets:
-            jacobians = {
-                "det_jacs": np.concatenate(all_dets, axis=0),
-                "inv_jacs": np.concatenate(all_inv_jacs, axis=0),
-                "scaled_quality": np.concatenate(all_scaled_quality, axis=0),
-            }
-
-        return {"sps_coords": sps_coords, "jacobians": jacobians, "ref_cube_sps": ref_cube_sps}
+        return build_order_geometry(self, order)
 
     def set_order(self, order: int) -> None:
         """切换网格当前活动的多项式阶数（Order Continuation 专用）。
+        实现见 high_order_mesh_order.py::set_order。"""
+        from .high_order_mesh_order import set_order as _set_order
 
-        SPs 坐标、Jacobian、Flux Points 几何（含 Newton 面点位定位）全部
-        随阶数重新推导——这些量不是"复用同一套再插值"就够的，FR 方法要求
-        解自由度与几何在同一组 SPs/FPs 上重合。按阶数缓存：目标阶数（网格
-        加载时已经构建过）与之前访问过的阶数直接复用缓存，不重复触发昂贵
-        的逐面 Newton 点位定位重建。
-
-        Args:
-            order: 目标阶数
-        """
-        if order == self._active_order:
-            return
-
-        if order not in self._order_geometry_cache:
-            geom = self._build_order_geometry(order)
-
-            # 临时切到新阶数的基础几何量：build_face_flux_points /
-            # precompute_cell_face_misalignment 直接读取 self.n_points_1d /
-            # self.jacobians / self.operators，必须先落地才能调用。
-            self.order = order
-            self.n_points_1d = order + 1
-            self.n_sps_per_cell = self.n_points_1d**3
-            self.sps_coords = geom["sps_coords"]
-            self.jacobians = geom["jacobians"]
-            self._ref_cube_sps = geom["ref_cube_sps"]
-            self.operators = generate_fr_operators(order)
-
-            face_flux_points = None
-            cell_face_misalignment = None
-            if self.face_connectivity is not None:
-                from autoflowcfd.fr.face_flux_points_merge import build_face_flux_points
-
-                logger.info(f"Order continuation: building Flux Points geometry for P{order}...")
-                face_flux_points = build_face_flux_points(self.face_connectivity, self)
-                self.face_flux_points = face_flux_points
-                logger.info(f"Order continuation: Flux Points geometry built for P{order}")
-
-                if self.jacobians is not None:
-                    from autoflowcfd.core.fr_troubled_cell import precompute_cell_face_misalignment
-
-                    cell_face_misalignment = precompute_cell_face_misalignment(self)
-                    self.cell_face_misalignment = cell_face_misalignment
-
-            self._order_geometry_cache[order] = {
-                "n_points_1d": self.n_points_1d,
-                "n_sps_per_cell": self.n_sps_per_cell,
-                "sps_coords": self.sps_coords,
-                "jacobians": self.jacobians,
-                "ref_cube_sps": self._ref_cube_sps,
-                "operators": self.operators,
-                "face_flux_points": face_flux_points,
-                "cell_face_misalignment": cell_face_misalignment,
-            }
-
-        cached = self._order_geometry_cache[order]
-        self.order = order
-        self.n_points_1d = cached["n_points_1d"]
-        self.n_sps_per_cell = cached["n_sps_per_cell"]
-        self.sps_coords = cached["sps_coords"]
-        self.jacobians = cached["jacobians"]
-        self._ref_cube_sps = cached["ref_cube_sps"]
-        self.operators = cached["operators"]
-        self.face_flux_points = cached["face_flux_points"]
-        self.cell_face_misalignment = cached["cell_face_misalignment"]
-        self._active_order = order
+        _set_order(self, order)
 
     def verify_gcl(self, tolerance: float = 1e-8) -> bool:
         """验证几何守恒律 (GCL)：对每个单元做 Kopriva 度量恒等式检验。

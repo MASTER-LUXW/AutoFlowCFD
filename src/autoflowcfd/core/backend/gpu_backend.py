@@ -256,11 +256,164 @@ class CUDABackend(BackendBase):
         
         return residuals
     
+    def update_solution(self,
+                       solution: np.ndarray,
+                       residuals: np.ndarray,
+                       dt: float,
+                       cfl: float) -> np.ndarray:
+        """用时间积分格式更新解（GPU 版本）。
+
+        Args:
+            solution: 当前解向量
+            residuals: 残差向量
+            dt: 时间步长
+            cfl: CFL 数
+
+        Returns:
+            updated_solution: 更新后的解向量
+        """
+        if not self.available:
+            print("[CUDABackend] Warning: GPU not available, falling back to CPU")
+            return self._update_solution_cpu(solution, residuals, dt)
+
+        n_cells, n_vars = solution.shape
+        print(f"[CUDABackend] Updating solution on GPU for {n_cells} cells")
+
+        d_solution = self.cuda.to_device(solution, stream=self.stream)
+        d_residuals = self.cuda.to_device(residuals, stream=self.stream)
+        d_updated = self.cuda.device_array((n_cells, n_vars), dtype=np.float64, stream=self.stream)
+
+        threads_per_block = 256
+        blocks_per_grid = (n_cells + threads_per_block - 1) // threads_per_block
+        self._cuda_update_kernel[blocks_per_grid, threads_per_block, self.stream](
+            d_solution, d_residuals, d_updated, dt, n_cells, n_vars
+        )
+
+        self.stream.synchronize()
+        updated = d_updated.copy_to_host()
+
+        # 物理正性保护（与 NumbaBackend.update_solution 同一套约束，见该
+        # 方法文档：显式 Euler 更新后必须夹持密度/压力下限）。
+        from ..time_integration import enforce_positivity
+        enforce_positivity(updated, p_floor=10.0)
+
+        return updated
+
+    @staticmethod
+    def _cuda_update_kernel(d_solution, d_residuals, d_updated, dt, n_cells, n_vars):
+        """CUDA 显式 Euler 更新内核：U^{n+1} = U^n - dt * R，每个线程处理一个单元。"""
+        from numba import cuda
+
+        cell_idx = cuda.grid(1)
+        if cell_idx >= n_cells:
+            return
+
+        for v in range(n_vars):
+            d_updated[cell_idx, v] = d_solution[cell_idx, v] - dt * d_residuals[cell_idx, v]
+
+    def _update_solution_cpu(self, solution, residuals, dt):
+        """CPU 备用解更新（显式 Euler + 正性保护，与 NumbaBackend.update_solution 一致）。"""
+        updated = solution - residuals * dt
+        from ..time_integration import enforce_positivity
+        enforce_positivity(updated, p_floor=10.0)
+        return updated
+
+    def apply_boundary_conditions(self,
+                                 solution: np.ndarray,
+                                 boundary_map: Dict[str, np.ndarray],
+                                 bc_params: Dict[str, Any]) -> np.ndarray:
+        """把边界条件应用到解上（CPU 实现：边界索引列表的散列写入不是有意义
+        的 GPU 并行工作负载——每个边界组的单元数通常远小于总单元数，核启动
+        开销会超过收益——与本文件 `compute_flux`/`compute_residuals` GPU
+        不可用时的 CPU 回退是同一种权衡，公式与 NumbaBackend.
+        apply_boundary_conditions 完全一致，理由/边界类型说明见该方法文档）。
+
+        Args:
+            solution: 解向量，形状 (n_cells, n_vars)
+            boundary_map: 边界名到单元索引的映射
+            bc_params: 边界条件参数
+
+        Returns:
+            updated_solution: 应用边界条件后的解
+        """
+        updated = solution.copy()
+        gamma = bc_params.get('gamma', 1.4)
+
+        for bc_name, cell_indices in boundary_map.items():
+            bc_type = bc_name.upper()
+
+            if len(cell_indices) == 0:
+                continue
+
+            if bc_type == 'WALL' or 'WALL' in bc_type:
+                for idx in cell_indices:
+                    if idx < len(updated):
+                        updated[idx, 1:4] = 0.0
+
+            elif bc_type == 'INLET' or 'INLET' in bc_type:
+                inlet_vel = bc_params.get('inlet_velocity', [0.0, 0.0, 0.0])
+                inlet_rho = bc_params.get('inlet_density', 1.225)
+                inlet_p = bc_params.get('inlet_pressure', 101325.0)
+
+                for idx in cell_indices:
+                    if idx < len(updated):
+                        updated[idx, 0] = inlet_rho
+                        updated[idx, 1] = inlet_rho * inlet_vel[0]
+                        updated[idx, 2] = inlet_rho * inlet_vel[1]
+                        updated[idx, 3] = inlet_rho * inlet_vel[2]
+                        ke = 0.5 * inlet_rho * (inlet_vel[0]**2 + inlet_vel[1]**2 + inlet_vel[2]**2)
+                        e_internal = inlet_p / ((gamma - 1.0) * inlet_rho)
+                        updated[idx, 4] = e_internal + ke
+
+            elif bc_type == 'OUTLET' or 'OUTLET' in bc_type:
+                outlet_p = bc_params.get('outlet_pressure', 101325.0)
+
+                for idx in cell_indices:
+                    if idx < len(updated):
+                        rho = updated[idx, 0]
+                        vel = updated[idx, 1:4] / max(rho, 1e-10)
+                        ke = 0.5 * rho * np.sum(vel**2)
+                        e_internal = outlet_p / ((gamma - 1.0) * max(rho, 1e-10))
+                        updated[idx, 4] = e_internal + ke
+
+            elif bc_type == 'FARFIELD' or 'FARFIELD' in bc_type:
+                farfield_state = bc_params.get('farfield_state')
+                if farfield_state is not None and len(farfield_state) == 5:
+                    for idx in cell_indices:
+                        if idx < len(updated):
+                            updated[idx] = farfield_state
+
+            else:
+                pass
+
+        return updated
+
     def synchronize(self):
         """同步GPU操作。"""
         if self.available and self.stream:
             self.stream.synchronize()
-    
+
+    def get_device_info(self) -> Dict[str, Any]:
+        """获取硬件设备信息。
+
+        Returns:
+            包含设备规格的字典
+        """
+        info = {
+            'backend': 'CUDA GPU',
+            'device': 'GPU',
+            'available': self.available,
+            'device_id': self.device_id,
+            'n_cells': self.n_cells,
+            'n_nodes': self.n_nodes,
+            'n_variables': self.n_variables,
+        }
+        if self.available:
+            gpu = self.cuda.get_current_device()
+            info['name'] = gpu.name
+            info['compute_capability'] = gpu.compute_capability
+        return info
+
     def cleanup(self):
         """清理GPU资源。"""
         if self.available:

@@ -17,6 +17,8 @@ tests/unit/test_fr_gradients.py）。
 
 import numpy as np
 
+from autoflowcfd.core.fr_volume_contract import contract_shared_operator_1axis
+
 
 def compute_physical_gradient(field: np.ndarray, mesh, ops) -> np.ndarray:
     """计算场变量在物理空间中的梯度，正确处理曲边/坍缩坐标度量项。
@@ -34,15 +36,31 @@ def compute_physical_gradient(field: np.ndarray, mesh, ops) -> np.ndarray:
 
     # 四面体/棱柱专用坍缩坐标微分矩阵（不能用朴素张量积 D_3d，理由见
     # fr/operators.py::FROperators.D_3d_tet/D_3d_prism 文档）。
+    #
+    # 性能优化：D（形状 (s,j,m)）不依赖 cell，只有 field（c,j,v）依赖
+    # cell——把 D 的 (s,m) 两个输出轴摊平、j 挪到最后一维，转成
+    # `contract_shared_operator_1axis` 认识的 (S*M, J) 2D 形状，收缩后
+    # 再 reshape 回 (c,s,m,v)；数学上与 `np.einsum("sjm,cjv->csmv", D,
+    # field)` 严格等价（同一个求和，只是换一条 BLAS gemm 计算路径），
+    # 原因/验证方式见 fr_volume_contract.py 模块文档——生产网格上
+    # `compute_physical_gradient` 的 einsum 是体积项性能优化里的另一个
+    # 主要热点（py-spy 采样证实）。
     n_prism = mesh.n_prism_cells
     grad_comp = np.zeros((n_cells, n_sps, 3, n_field_vars))
     if n_prism > 0:
-        grad_comp[:n_prism] = np.einsum("sjm,cjv->csmv", ops.D_3d_prism, field[:n_prism])
+        D2 = np.ascontiguousarray(np.transpose(ops.D_3d_prism, (0, 2, 1))).reshape(n_sps * 3, n_sps)
+        grad_comp[:n_prism] = contract_shared_operator_1axis(D2, field[:n_prism]).reshape(n_prism, n_sps, 3, n_field_vars)
     if n_cells > n_prism:
-        grad_comp[n_prism:] = np.einsum("sjm,cjv->csmv", ops.D_3d_tet, field[n_prism:])
+        n_tet = n_cells - n_prism
+        D2 = np.ascontiguousarray(np.transpose(ops.D_3d_tet, (0, 2, 1))).reshape(n_sps * 3, n_sps)
+        grad_comp[n_prism:] = contract_shared_operator_1axis(D2, field[n_prism:]).reshape(n_tet, n_sps, 3, n_field_vars)
     # 链式法则转物理空间：grad_phys[c,s,v,n] = sum_m inv_jac[c,s,m,n] * grad_comp[c,s,m,v]
-    # 输出维度顺序 (n_cells,n_sps,n_field_vars,3)，与代码库既有 grad_U 约定一致
-    grad_phys = np.einsum("csmn,csmv->csvn", inv_jacs, grad_comp)
+    # 输出维度顺序 (n_cells,n_sps,n_field_vars,3)，与代码库既有 grad_U 约定一致。
+    # 两个操作数都依赖 (c,s)，是逐点批量小矩阵乘，用 np.matmul 替代
+    # einsum（把 grad_comp 的 (m,v) 两轴转置成 (v,m) 再与 inv_jacs 的
+    # (m,n) 相乘，结果正是 (v,n)），验证见 fr_volume_contract.py 同批
+    # 验证脚本，随机数据下与原 einsum 逐位一致（diff=0.0）。
+    grad_phys = np.matmul(np.swapaxes(grad_comp, -1, -2), inv_jacs)
     return grad_phys
 
 

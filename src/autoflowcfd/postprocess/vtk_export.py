@@ -7,6 +7,16 @@ Key Components:
     - VTKExporter: VTK 文件生成的主导出器
     - 支持速度、压力、湍流变量导出
 
+拆分说明（本文件原有 756 行，超过 400 行硬性拆分阈值）：
+    - 边界分区分类 + 场数据计算（_boundary_zone_ids/_cell_fields/
+      _cell_to_node/_point_fields）已搬到 vtk_export_fields.py
+    - legacy VTK (.vtk) ASCII/二进制写入细节已搬到 vtk_export_legacy.py
+    - XML VTK (.vtu) 写入细节已搬到 vtk_export_xml.py
+    这些方法在 `VTKExporter` 上仍然保留同名薄委托包装（方法体内部
+    lazy import 对应模块的同名函数并转发调用），外部调用方
+    （包括直接访问 `exporter._write_points(...)` 这类用法，例如
+    cli/post_helpers.py 里的 `_export_point_fields_vtk`）行为完全不变。
+
 保真度说明（为什么这不只是旧的简化版导出器）：
     - 每个场都**同时**写 CELL_DATA（求解器实际产生的、未插值的原始
       单元中心值）和 POINT_DATA（体积加权的节点插值，用于平滑等值面
@@ -46,7 +56,6 @@ from loguru import logger
 
 from ..grid.structures import GridData
 from ..core.backend.base import SolutionVector
-from ._field_utils import cell_to_node
 
 # VTK legacy 单元类型代码（见 VTK 文件格式规范）。
 _VTK_TRIANGLE = 5
@@ -272,161 +281,31 @@ class VTKExporter:
 
     _BC_TYPE_NAMES = ['WALL', 'GROUND', 'INLET', 'OUTLET', 'SYMMETRY', 'FARFIELD']
 
+    # ------------------------------------------------------------------
+    # 边界分区分类 + 场数据计算——已搬到 vtk_export_fields.py，这里只
+    # 保留薄委托包装，保证 `exporter._xxx(...)` 这种直接方法调用（类
+    # 内部互相调用，以及 cli/post_helpers.py 等外部调用方）行为不变。
+    # ------------------------------------------------------------------
+
     def _boundary_zone_ids(self, owner_cells: np.ndarray):
-        """把每个边界面的 owner 四面体映射到 BoundaryID（按边界组名）
-        和 BoundaryTypeID（按名称模式匹配的分类桶）。
-
-        Returns:
-            (boundary_id, type_id, id_legend, type_legend)——前两个是
-            (n_boundary_faces,) 的 int32 数组，对照表是 "<id>=<name>"
-            形式的 List[str]。
-        """
-        boundary_names = self.grid_data.boundaries.boundary_names
-        name_to_id = {name: i for i, name in enumerate(boundary_names)}
-        type_to_id = {t: i for i, t in enumerate(self._BC_TYPE_NAMES)}
-        unclassified_id = len(boundary_names)
-
-        def _classify(name: str) -> str:
-            """基于名称模式匹配进行边界类型分类"""
-            name_upper = name.upper()
-            if any(prefix in name_upper for prefix in ['WALL', 'SOLID']):
-                return 'WALL'
-            elif 'GROUND' in name_upper:
-                return 'GROUND'
-            elif any(prefix in name_upper for prefix in ['INLET', 'INTAKE', 'ENTRY']):
-                return 'INLET'
-            elif any(prefix in name_upper for prefix in ['OUTLET', 'OUTFLOW', 'EXIT']):
-                return 'OUTLET'
-            elif 'SYM' in name_upper or 'MIRROR' in name_upper:
-                return 'SYMMETRY'
-            elif any(prefix in name_upper for prefix in ['FARFIELD', 'FAR_FIELD', 'BOUNDARY']):
-                return 'FARFIELD'
-            else:
-                return 'WALL'
-
-        # 向量化的 单元 -> id 查找：构建一个按单元 id 索引的稠密数组
-        # （哨兵值 = unclassified/WALL），而不是用 Python 字典 + 逐
-        # owner 单元的列表推导 + .get() 调用——对真实网格 owner_cells
-        # 可能有 1e5-1e6 量级，这样改成了一次花式索引 gather。
-        n_cells = self.grid_data.cell_count
-        cell_to_name_id = np.full(n_cells, unclassified_id, dtype=np.int32)
-        cell_to_type_id = np.full(n_cells, type_to_id['WALL'], dtype=np.int32)
-        for name in boundary_names:
-            btype = _classify(name)
-            nid = name_to_id[name]
-            tid = type_to_id.get(btype, type_to_id['WALL'])
-            cells = np.asarray(self.grid_data.boundaries.get_cell_indices(name), dtype=np.int64)
-            cell_to_name_id[cells] = nid
-            cell_to_type_id[cells] = tid
-
-        boundary_id = cell_to_name_id[owner_cells]
-        type_id = cell_to_type_id[owner_cells]
-
-        id_legend = [f"{i}={name}" for name, i in sorted(name_to_id.items(), key=lambda kv: kv[1])]
-        if np.any(boundary_id == unclassified_id):
-            n_unclassified = int(np.sum(boundary_id == unclassified_id))
-            logger.warning(
-                f"{n_unclassified} boundary faces have no matching boundary "
-                f"group; tagged BoundaryID={unclassified_id} (<UNCLASSIFIED>)"
-            )
-            id_legend.append(f"{unclassified_id}=<UNCLASSIFIED>")
-        type_legend = [f"{i}={name}" for name, i in sorted(type_to_id.items(), key=lambda kv: kv[1])]
-
-        return boundary_id, type_id, id_legend, type_legend
-
-    # ------------------------------------------------------------------
-    # 共用的场计算——CELL_DATA 原始值和 POINT_DATA 节点插值值的唯一数据
-    # 源，保证这两种表示不会悄悄产生分歧。
-    # ------------------------------------------------------------------
+        from .vtk_export_fields import boundary_zone_ids  # 见 vtk_export_fields.boundary_zone_ids
+        return boundary_zone_ids(self, owner_cells)
 
     def _cell_fields(self, fields: List[str]) -> Dict[str, np.ndarray]:
-        """在单元中心分辨率上计算每个请求的场（标量 (n_cells,)，矢量
-        (n_cells, 3)），解数据不可用时（例如空的 SolutionVector）套用
-        与旧的纯节点写入器相同的兜底常数。
-
-        Returns:
-            场名（'velocity'、'pressure'、'k'、'omega'、'nut'）到其原始
-            逐单元数组的字典——正是 CELL_DATA 写入的内容，也是
-            POINT_DATA 插值的数据源。
-        """
-        n_cells = self.grid_data.cell_count
-        has_data = self.solution.data is not None and self.solution.n_cells > 0
-        out: Dict[str, np.ndarray] = {}
-
-        if 'velocity' in fields:
-            if has_data:
-                u, v, w = self.solution.get_velocity()
-                out['velocity'] = np.column_stack([u, v, w])
-            else:
-                logger.warning("Solution data not available. Using zero velocity.")
-                out['velocity'] = np.zeros((n_cells, 3))
-
-        if 'pressure' in fields:
-            if has_data:
-                out['pressure'] = self.solution.get_pressure()
-            else:
-                logger.warning("Solution data not available. Using uniform pressure.")
-                out['pressure'] = np.full(n_cells, 101325.0)
-
-        need_turb = 'k' in fields or 'omega' in fields or 'nut' in fields
-        if need_turb:
-            k = omega = np.array([])
-            if has_data:
-                k, omega = self.solution.get_turbulence()
-                if len(k) == 0:
-                    logger.warning(
-                        "Solution has no turbulence columns (need >=7 variables); "
-                        "writing zero for k/omega/nut"
-                    )
-            k_out = k if len(k) == n_cells else np.full(n_cells, 0.0)
-            omega_out = omega if len(omega) == n_cells else np.full(n_cells, 0.0)
-
-            if 'k' in fields:
-                out['k'] = k_out
-            if 'omega' in fields:
-                out['omega'] = omega_out
-            if 'nut' in fields:
-                if self.mu_t is not None and len(self.mu_t) == n_cells and has_data:
-                    rho = np.maximum(self.solution.get_density(), 1e-10)
-                    out['nut'] = self.mu_t / rho
-                elif len(k_out) > 0 and np.any(omega_out > 0):
-                    logger.warning(
-                        "Exact solver mu_t not available (checkpoint predates "
-                        "extra_fields support, or turbulence disabled); "
-                        "'nut' is the simplified nu_t = k/omega estimate, "
-                        "not the actual SST-blended, a1-limited eddy "
-                        "viscosity the solver used."
-                    )
-                    out['nut'] = k_out / np.maximum(omega_out, 1e-10)
-                else:
-                    out['nut'] = np.zeros(n_cells)
-
-        return out
+        from .vtk_export_fields import cell_fields  # 见 vtk_export_fields.cell_fields
+        return cell_fields(self, fields)
 
     def _cell_to_node(self, cell_values: np.ndarray, n_points: int, fallback: float = 0.0) -> np.ndarray:
-        """把逐单元标量场插值成逐节点值（对每个节点相连的单元做体积
-        加权平均——见 _field_utils.cell_to_node）。"""
-        conn = np.asarray(self.grid_data.cells.connectivity)
-        volumes = getattr(self.grid_data.cells, "volumes", None)
-        return cell_to_node(conn, cell_values, n_points, volumes=volumes, fallback=fallback)
+        from .vtk_export_fields import cell_to_node  # 见 vtk_export_fields.cell_to_node
+        return cell_to_node(self, cell_values, n_points, fallback=fallback)
 
     def _point_fields(self, cell_fields: Dict[str, np.ndarray], n_points: int) -> Dict[str, np.ndarray]:
-        """把 `cell_fields` 里每个单元中心场都插值到节点。"""
-        out: Dict[str, np.ndarray] = {}
-        for name, arr in cell_fields.items():
-            if arr.ndim == 2:
-                fallback = 0.0 if name == 'velocity' else 0.0
-                out[name] = np.column_stack([
-                    self._cell_to_node(arr[:, i], n_points, fallback=float(np.mean(arr[:, i])) if len(arr) else 0.0)
-                    for i in range(arr.shape[1])
-                ])
-            else:
-                fallback = 101325.0 if name == 'pressure' else 0.0
-                out[name] = self._cell_to_node(arr, n_points, fallback=fallback)
-        return out
+        from .vtk_export_fields import point_fields  # 见 vtk_export_fields.point_fields
+        return point_fields(self, cell_fields, n_points)
 
     # ------------------------------------------------------------------
-    # Legacy VTK (.vtk)——ASCII 或二进制
+    # Legacy VTK (.vtk)——ASCII 或二进制。已搬到 vtk_export_legacy.py，
+    # 这里只保留薄委托包装。
     # ------------------------------------------------------------------
 
     _FIELD_LABELS = {
@@ -438,319 +317,73 @@ class VTKExporter:
     }
 
     def _export_legacy(self, output_path: Path, fields: List[str], binary: bool) -> None:
-        """导出为 legacy VTK 格式（VTK Legacy 规范，DataFile Version
-        3.0——经典的 CELLS/CELL_TYPES 布局，不是 VTK 9 更新的
-        OFFSETS/CONNECTIVITY 变体，以便和旧版读取器保持最大兼容性）。"""
-        logger.info(f"Exporting to legacy VTK format ({'binary' if binary else 'ASCII'}): {output_path}")
-
-        n_points = self.grid_data.nodes.count
-        n_cells = self.grid_data.cell_count
-        cell_fields = self._cell_fields(fields)
-        point_fields = self._point_fields(cell_fields, n_points)
-
-        try:
-            mode = 'wb' if binary else 'w'
-            with open(output_path, mode) as f:
-                self._wl(f, "# vtk DataFile Version 3.0\n", binary)
-                self._wl(f, f"AutoFlowCFD Export - {output_path.name}\n", binary)
-                self._wl(f, ("BINARY\n" if binary else "ASCII\n"), binary)
-                self._wl(f, "\n", binary)
-                self._wl(f, "DATASET UNSTRUCTURED_GRID\n", binary)
-                self._wl(f, "\n", binary)
-
-                self._write_points(f, binary)
-                self._write_cells(f, binary)
-
-                # CELL_DATA：原始、未插值的求解器值。
-                self._wl(f, f"CELL_DATA {n_cells}\n", binary)
-                self._write_field_block(f, fields, cell_fields, binary)
-
-                # POINT_DATA：体积加权插值，用于平滑等值面渲染。
-                self._wl(f, f"POINT_DATA {n_points}\n", binary)
-                self._write_field_block(f, fields, point_fields, binary)
-
-            logger.info("Legacy VTK file written successfully")
-
-        except IOError as e:
-            logger.error(f"Failed to write VTK file: {e}")
-            raise
+        from .vtk_export_legacy import export_legacy  # 见 vtk_export_legacy.export_legacy
+        export_legacy(self, output_path, fields, binary)
 
     @staticmethod
     def _wl(f, text: str, binary: bool) -> None:
-        """写一行头部/关键字，二进制模式下编码为字节。"""
-        f.write(text.encode('ascii') if binary else text)
+        from .vtk_export_legacy import wl  # 见 vtk_export_legacy.wl
+        wl(f, text, binary)
 
     def _write_points(self, f, binary: bool) -> None:
-        nodes = self.grid_data.nodes
-        n_points = nodes.count
-        coords = np.column_stack([nodes.x, nodes.y, nodes.z]).astype(np.float64)
-
-        self._wl(f, f"POINTS {n_points} double\n", binary)
-        if binary:
-            f.write(coords.astype('>f8').tobytes())
-            f.write(b'\n')
-        else:
-            np.savetxt(f, coords, fmt="%.6e")
-        self._wl(f, "\n", binary)
+        from .vtk_export_legacy import write_points  # 见 vtk_export_legacy.write_points
+        write_points(self, f, binary)
 
     def _write_cells(self, f, binary: bool) -> None:
-        """把单元连接关系写入 VTK 文件。
-
-        从 connectivity 数组自身的形状检测每个单元实际的节点数
-        （3=三角形，4=四面体）——如果设置了 grid_data.prism_cells，则
-        先写三棱柱（6 节点 wedge，全局索引 [0, n_prism)），再写四面体
-        （[n_prism, n_prism+n_tet)），与本项目的全局单元索引约定一致
-        （见 PrismCells/face_extractor.extract_faces_mixed）。
-        """
-        prism_cells_obj = getattr(self.grid_data, 'prism_cells', None)
-        if prism_cells_obj is not None:
-            self._write_cells_mixed(f, prism_cells_obj.connectivity, self.grid_data.cells.connectivity, binary)
-        else:
-            self._write_cells_from(f, self.grid_data.cells.connectivity, binary)
+        from .vtk_export_legacy import write_cells  # 见 vtk_export_legacy.write_cells
+        write_cells(self, f, binary)
 
     def _write_cells_mixed(self, f, prism_conn: np.ndarray, tet_conn: np.ndarray, binary: bool) -> None:
-        """为三棱柱(wedge)+四面体混合网格写 CELLS/CELL_TYPES——legacy
-        VTK 的 CELLS 格式里每行可以有不同的顶点数（每行开头的整数就是
-        该行的顶点数），所以三棱柱和四面体可以直接拼接成一个块；
-        CELL_TYPES 携带每行的类型代码（_VTK_WEDGE 还是 _VTK_TETRA）。"""
-        prism_conn = np.asarray(prism_conn, dtype=np.int32)
-        tet_conn = np.asarray(tet_conn, dtype=np.int32)
-        n_prism = len(prism_conn)
-        n_tet = len(tet_conn)
-        n_cells = n_prism + n_tet
-        total_ints = n_prism * 7 + n_tet * 5  # (1 个计数 + 6 个顶点) 或 (1 个计数 + 4 个顶点)
-
-        self._wl(f, f"CELLS {n_cells} {total_ints}\n", binary)
-        if binary:
-            if n_prism:
-                prism_lines = np.hstack([np.full((n_prism, 1), 6, dtype=np.int32), prism_conn])
-                f.write(prism_lines.astype('>i4').tobytes())
-            if n_tet:
-                tet_lines = np.hstack([np.full((n_tet, 1), 4, dtype=np.int32), tet_conn])
-                f.write(tet_lines.astype('>i4').tobytes())
-            f.write(b'\n')
-        else:
-            if n_prism:
-                prism_lines = np.hstack([np.full((n_prism, 1), 6, dtype=np.int32), prism_conn])
-                np.savetxt(f, prism_lines, fmt="%d")
-            if n_tet:
-                tet_lines = np.hstack([np.full((n_tet, 1), 4, dtype=np.int32), tet_conn])
-                np.savetxt(f, tet_lines, fmt="%d")
-        self._wl(f, "\n", binary)
-
-        cell_types = np.concatenate([
-            np.full(n_prism, _VTK_WEDGE, dtype=np.int32),
-            np.full(n_tet, _VTK_TETRA, dtype=np.int32),
-        ])
-        self._wl(f, f"CELL_TYPES {n_cells}\n", binary)
-        if binary:
-            f.write(cell_types.astype('>i4').tobytes())
-            f.write(b'\n')
-        else:
-            np.savetxt(f, cell_types.reshape(-1, 1), fmt="%d")
-        self._wl(f, "\n", binary)
+        from .vtk_export_legacy import write_cells_mixed  # 见 vtk_export_legacy.write_cells_mixed
+        write_cells_mixed(self, f, prism_conn, tet_conn, binary)
 
     def _write_cells_from(self, f, conn: np.ndarray, binary: bool) -> None:
-        """从显式的 connectivity 数组写 CELLS/CELL_TYPES——同时供整体
-        体网格导出（_write_cells）和边界面导出（同一份节点数组上的
-        另一组更小的三角形）共用。"""
-        conn = np.asarray(conn, dtype=np.int32)
-        n_cells = conn.shape[0]
-        nodes_per_cell = conn.shape[1]
-
-        vtk_type = {3: _VTK_TRIANGLE, 4: _VTK_TETRA}.get(nodes_per_cell)
-        if vtk_type is None:
-            raise ValueError(
-                f"Unsupported cell connectivity width {nodes_per_cell} "
-                f"(expected 3 for triangles or 4 for tetrahedra)"
-            )
-
-        counts = np.full((n_cells, 1), nodes_per_cell, dtype=np.int32)
-        cell_lines = np.hstack([counts, conn])
-
-        self._wl(f, f"CELLS {n_cells} {n_cells * (nodes_per_cell + 1)}\n", binary)
-        if binary:
-            f.write(cell_lines.astype('>i4').tobytes())
-            f.write(b'\n')
-        else:
-            np.savetxt(f, cell_lines, fmt="%d")
-        self._wl(f, "\n", binary)
-
-        self._wl(f, f"CELL_TYPES {n_cells}\n", binary)
-        types_arr = np.full(n_cells, vtk_type, dtype=np.int32)
-        if binary:
-            f.write(types_arr.astype('>i4').tobytes())
-            f.write(b'\n')
-        else:
-            np.savetxt(f, types_arr, fmt="%d")
-        self._wl(f, "\n", binary)
+        from .vtk_export_legacy import write_cells_from  # 见 vtk_export_legacy.write_cells_from
+        write_cells_from(self, f, conn, binary)
 
     def _write_field_block(self, f, fields: List[str], values: Dict[str, np.ndarray], binary: bool) -> None:
-        if 'velocity' in fields and 'velocity' in values:
-            self._write_vector(f, "Velocity", values['velocity'], binary)
-        if 'pressure' in fields and 'pressure' in values:
-            self._write_scalar(f, "Pressure", values['pressure'], binary)
-        if 'k' in fields and 'k' in values:
-            self._write_scalar(f, "TurbulentKineticEnergy", values['k'], binary)
-        if 'omega' in fields and 'omega' in values:
-            self._write_scalar(f, "SpecificDissipationRate", values['omega'], binary)
-        if 'nut' in fields and 'nut' in values:
-            self._write_scalar(f, "TurbulentViscosity", values['nut'], binary)
+        from .vtk_export_legacy import write_field_block  # 见 vtk_export_legacy.write_field_block
+        write_field_block(self, f, fields, values, binary)
 
     def _write_scalar(self, f, name: str, values: np.ndarray, binary: bool, int_type: bool = False) -> None:
-        vtk_type_name = "int" if int_type else "double"
-        np_dtype = '>i4' if int_type else '>f8'
-        self._wl(f, f"SCALARS {name} {vtk_type_name} 1\n", binary)
-        self._wl(f, "LOOKUP_TABLE default\n", binary)
-        if binary:
-            f.write(np.ascontiguousarray(values).astype(np_dtype).tobytes())
-            f.write(b'\n')
-        else:
-            np.savetxt(f, values, fmt="%d" if int_type else "%.6e")
-        self._wl(f, "\n", binary)
+        from .vtk_export_legacy import write_scalar  # 见 vtk_export_legacy.write_scalar
+        write_scalar(self, f, name, values, binary, int_type=int_type)
 
     def _write_field_data_legacy(self, f, entries: Dict[str, List[str]], binary: bool) -> None:
-        """写一个 FIELD FieldData 块（全局元数据，例如
-        BoundaryID->名称对照表）。
-
-        只在 ASCII 模式下写出：实测发现，VTK 9.3 自己的
-        vtkUnstructuredGridReader 只要文件的数据模式是 BINARY，就无法
-        解析**任何**包含字符串类型 FIELD 块的 legacy 文件——用一个独立
-        于本写入器的最小手写复现确认过（不管 field 块在二进制载荷之前
-        还是之后，都是同样失败；同一个块放在 ASCII 模式文件里能正确
-        读回）。与其生成一个 VTK 自己的读取器都打不开的二进制 .vtk，
-        binary=True 时改为把对照表记录到日志——无论如何，数值型的
-        BoundaryID/BoundaryTypeID CELL_DATA 都不受影响。XML（.vtu）
-        没有这个问题（见 _export_boundaries_xml），是这类导出推荐使用
-        的格式。
-        """
-        if not entries:
-            return
-        if binary:
-            for name, values in entries.items():
-                logger.info(f"{name}: " + ", ".join(values))
-            return
-        self._wl(f, f"FIELD FieldData {len(entries)}\n", binary)
-        for name, values in entries.items():
-            self._wl(f, f"{name} 1 {len(values)} string\n", binary)
-            for v in values:
-                self._wl(f, f"{v}\n", binary)
-        self._wl(f, "\n", binary)
+        from .vtk_export_legacy import write_field_data_legacy  # 见 vtk_export_legacy.write_field_data_legacy
+        write_field_data_legacy(self, f, entries, binary)
 
     def _write_vector(self, f, name: str, values: np.ndarray, binary: bool) -> None:
-        self._wl(f, f"VECTORS {name} double\n", binary)
-        if binary:
-            f.write(np.ascontiguousarray(values, dtype=np.float64).astype('>f8').tobytes())
-            f.write(b'\n')
-        else:
-            np.savetxt(f, values, fmt="%.6e")
-        self._wl(f, "\n", binary)
+        from .vtk_export_legacy import write_vector  # 见 vtk_export_legacy.write_vector
+        write_vector(self, f, name, values, binary)
 
     def _export_boundaries_legacy(
         self, output_path: Path, fields: List[str], tri_conn: np.ndarray,
         boundary_fields: Dict[str, np.ndarray], boundary_id: np.ndarray, type_id: np.ndarray,
         id_legend: List[str], type_legend: List[str], binary: bool,
     ) -> None:
-        logger.info(f"Exporting boundary patches to legacy VTK format ({'binary' if binary else 'ASCII'}): {output_path}")
-        n_tri = tri_conn.shape[0]
-
-        try:
-            mode = 'wb' if binary else 'w'
-            with open(output_path, mode) as f:
-                self._wl(f, "# vtk DataFile Version 3.0\n", binary)
-                self._wl(f, f"AutoFlowCFD Boundary Export - {output_path.name}\n", binary)
-                self._wl(f, ("BINARY\n" if binary else "ASCII\n"), binary)
-                self._wl(f, "\n", binary)
-                self._wl(f, "DATASET UNSTRUCTURED_GRID\n", binary)
-                self._write_field_data_legacy(f, {
-                    'BoundaryID_to_Name': id_legend,
-                    'BoundaryTypeID_to_Name': type_legend,
-                }, binary)
-                self._wl(f, "\n", binary)
-
-                self._write_points(f, binary)
-                self._write_cells_from(f, tri_conn, binary)
-
-                self._wl(f, f"CELL_DATA {n_tri}\n", binary)
-                self._write_scalar(f, "BoundaryID", boundary_id, binary, int_type=True)
-                self._write_scalar(f, "BoundaryTypeID", type_id, binary, int_type=True)
-                self._write_field_block(f, fields, boundary_fields, binary)
-
-            logger.info("Legacy VTK boundary file written successfully")
-
-        except IOError as e:
-            logger.error(f"Failed to write VTK boundary file: {e}")
-            raise
+        from .vtk_export_legacy import export_boundaries_legacy  # 见 vtk_export_legacy.export_boundaries_legacy
+        export_boundaries_legacy(
+            self, output_path, fields, tri_conn, boundary_fields,
+            boundary_id, type_id, id_legend, type_legend, binary,
+        )
 
     # ------------------------------------------------------------------
-    # XML VTK (.vtu)——委托给 pyvista/VTK 自己的写入器
+    # XML VTK (.vtu)——委托给 pyvista/VTK 自己的写入器。已搬到
+    # vtk_export_xml.py，这里只保留薄委托包装。
     # ------------------------------------------------------------------
 
     def _export_xml(self, output_path: Path, fields: List[str], binary: bool) -> None:
-        """导出为基于 XML 的 VTK 格式（.vtu），当前主流 CFD 后处理工具
-        采用的现代标准格式。从与 legacy 写入器相同的单元/节点场数据
-        构建一个 pyvista.UnstructuredGrid，交给 VTK 自己的
-        vtkXMLUnstructuredGridWriter 序列化（binary=True 时带
-        binary+zlib 压缩）——这样不需要自己手写 XML appended-data 的
-        二进制编码，pyvista/VTK 已经正确实现了这一点，ParaView 自身
-        读写用的也是这一套。
-        """
-        import pyvista as pv
-
-        logger.info(f"Exporting to XML VTK format ({'binary' if binary else 'ASCII'}): {output_path}")
-
-        nodes = self.grid_data.nodes
-        n_points = nodes.count
-        points = np.column_stack([nodes.x, nodes.y, nodes.z]).astype(np.float64)
-
-        conn = np.asarray(self.grid_data.cells.connectivity, dtype=np.int64)
-        nodes_per_cell = conn.shape[1]
-        cell_type = {3: pv.CellType.TRIANGLE, 4: pv.CellType.TETRA}.get(nodes_per_cell)
-        if cell_type is None:
-            raise ValueError(
-                f"Unsupported cell connectivity width {nodes_per_cell} "
-                f"(expected 3 for triangles or 4 for tetrahedra)"
-            )
-
-        grid = pv.UnstructuredGrid({cell_type: conn}, points)
-
-        cell_fields = self._cell_fields(fields)
-        point_fields = self._point_fields(cell_fields, n_points)
-        for key, arr in cell_fields.items():
-            grid.cell_data[self._FIELD_LABELS[key]] = arr
-        for key, arr in point_fields.items():
-            grid.point_data[self._FIELD_LABELS[key]] = arr
-
-        grid.save(str(output_path), binary=binary)
-        logger.info("XML VTK file written successfully")
+        from .vtk_export_xml import export_xml  # 见 vtk_export_xml.export_xml
+        export_xml(self, output_path, fields, binary)
 
     def _export_boundaries_xml(
         self, output_path: Path, fields: List[str], tri_conn: np.ndarray,
         boundary_fields: Dict[str, np.ndarray], boundary_id: np.ndarray, type_id: np.ndarray,
         id_legend: List[str], type_legend: List[str], binary: bool,
     ) -> None:
-        """把边界面片导出为 .vtu——见 export_boundaries。
-        BoundaryID/BoundaryTypeID -> 名称对照表放在 field_data（全局
-        元数据，不是逐单元）里：已实测验证，逐单元的*字符串*类型
-        CELL_DATA 数组经过 VTK XML 写入器/读取器往返后不会保留（数组
-        列出来了，但读回时是空指针），而 field_data 字符串数组能作为
-        vtkStringArray 正确往返——无论是直接通过
-        vtkXMLUnstructuredGridReader 还是通过 pyvista.read()。
-        """
-        import pyvista as pv
-
-        logger.info(f"Exporting boundary patches to XML VTK format ({'binary' if binary else 'ASCII'}): {output_path}")
-
-        nodes = self.grid_data.nodes
-        points = np.column_stack([nodes.x, nodes.y, nodes.z]).astype(np.float64)
-
-        grid = pv.UnstructuredGrid({pv.CellType.TRIANGLE: np.asarray(tri_conn, dtype=np.int64)}, points)
-        grid.cell_data['BoundaryID'] = boundary_id
-        grid.cell_data['BoundaryTypeID'] = type_id
-        for key, arr in boundary_fields.items():
-            grid.cell_data[self._FIELD_LABELS[key]] = arr
-        grid.field_data['BoundaryID_to_Name'] = np.array(id_legend)
-        grid.field_data['BoundaryTypeID_to_Name'] = np.array(type_legend)
-
-        grid.save(str(output_path), binary=binary)
-        logger.info("XML VTK boundary file written successfully")
+        from .vtk_export_xml import export_boundaries_xml  # 见 vtk_export_xml.export_boundaries_xml
+        export_boundaries_xml(
+            self, output_path, fields, tri_conn, boundary_fields,
+            boundary_id, type_id, id_legend, type_legend, binary,
+        )

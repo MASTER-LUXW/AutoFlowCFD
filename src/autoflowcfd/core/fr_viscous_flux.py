@@ -42,6 +42,8 @@ import numpy as np
 
 from autoflowcfd.core.fr_gradients import compute_physical_gradient
 from autoflowcfd.core.fr_troubled_cell import suppress_residual_outliers
+from autoflowcfd.core.fr_flux_kernels_pointwise import viscous_physical_flux_batch
+from autoflowcfd.core.fr_volume_contract import contract_shared_operator_2axis
 
 GAMMA = 1.4
 R_AIR = 287.0  # 空气比气体常数 J/(kg*K)
@@ -107,14 +109,6 @@ def viscous_physical_flux(
     return G
 
 
-def _distribute_from_face(fp_data: np.ndarray, n1d: int, axis: int, g_prime: np.ndarray) -> np.ndarray:
-    trailing_shape = fp_data.shape[1:]
-    fp_grid = fp_data.reshape((n1d, n1d) + trailing_shape)
-    expanded = np.tensordot(g_prime, fp_grid, axes=0)
-    result = np.moveaxis(expanded, 0, axis)
-    return result.reshape((n1d**3,) + trailing_shape)
-
-
 def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
                                  mu_t_field=None, Pr_t: float = 0.9,
                                  boundary_ghost_provider=None) -> np.ndarray:
@@ -131,15 +125,31 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
             接入点——调用方（core/fr_solver.py）负责把 SST/DDES/WALE 算出
             的 nu_t 乘以密度后传入，见该模块修复说明。
         Pr_t: 湍流普朗特数
-        boundary_ghost_provider: 边界面统一取内部值外插（零梯度延拓），
-            边界层剪应力由 WMLES 壁面应力模型单独提供，见函数早期版本
-            文档说明（未删除以保持接口一致，当前实现不使用该参数，
-            保留位置供未来扩展绝热壁面镜像梯度时使用）。
+        boundary_ghost_provider: 边界面幽灵态提供者，与无粘残差
+            （fr_residual_inviscid.py）共用同一个实例/同一套 WALL/INLET/
+            OUTLET/FARFIELD/SYMMETRY 逻辑（见 boundary/fr_ghost_state.py），
+            签名 (face_idx, Q_owner_fp, true_normal) -> Q_ghost_fp。
+            None 时退化为 DefaultGhostProvider（零梯度外插，Q_ghost=Q_owner，
+            BR1 跳跃恒为零）。
+
+            此前这里完全不使用该参数、边界面统一取 Q_n=Q_o（内部值原样
+            镜像），导致 BR1 平均 Q_avg 恒等于 Q_o、跳跃项 jump_owner 恒为
+            零——即固壁上不存在任何由粘性方程施加的边界约束，无滑移
+            剪应力不存在（真实数值验证：真实网格上 WALL 面的粘性校正项
+            逐面精确为 0，与是否退化/网格质量无关，是恒等式）。现在真正
+            调用 boundary_ghost_provider 取得反映边界条件的幽灵原始变量
+            （例如 WALL 用速度镜像取反构造 Q_avg 速度=0，真正的无滑移），
+            只有梯度（gv_n/gT_n）仍取内部值镜像（标准 BR1/LDG 简化处理：
+            梯度本身没有独立的边界"真值"可用，用内部外插值是常见做法，
+            边界约束通过状态跳跃在通量里体现，不需要也没有单独的梯度
+            幽灵值）。
 
     Returns:
         residual: (n_cells, n_sps, 5)
     """
-    from autoflowcfd.core.fr_residual_inviscid import conserved_to_primitive
+    from autoflowcfd.core.fr_residual_inviscid import conserved_to_primitive, DefaultGhostProvider
+
+    ghost_provider = boundary_ghost_provider if boundary_ghost_provider is not None else DefaultGhostProvider()
 
     n_cells = mesh.n_cells
     n_sps = mesh.n_sps_per_cell
@@ -158,135 +168,63 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
     inv_jacs = mesh.jacobians["inv_jacs"].reshape(n_cells, n_sps, 3, 3)
     adj_j = det_jacs[..., None, None] * inv_jacs
 
-    G_phys = viscous_physical_flux(Q, grad_vel, grad_T, mu, Pr, mu_t=mu_t_field, Pr_t=Pr_t)  # (n_cells,n_sps,3,5)
+    # 体积项性能优化：与 fr_residual_inviscid.py 的同类改动理由/验证方式
+    # 完全一致（py-spy 对生产网格的采样证实 `viscous_physical_flux`/
+    # `einsum` 是界面项 numba 化之后新暴露出的主导耗时）——
+    # `viscous_physical_flux_batch` 复用已逐位验证过的 numba 逐点 kernel，
+    # `np.matmul`/`contract_shared_operator_2axis` 与原 einsum 公式严格
+    # 等价，只是换一条计算路径，见 fr_volume_contract.py 模块文档。
+    Q_flat = np.ascontiguousarray(Q.reshape(-1, 5))
+    grad_vel_flat = np.ascontiguousarray(grad_vel.reshape(-1, 3, 3))
+    grad_T_flat = np.ascontiguousarray(grad_T.reshape(-1, 3))
+    mu_t_flat = np.ascontiguousarray(mu_t_field.reshape(-1))
+    G_phys = viscous_physical_flux_batch(
+        Q_flat, grad_vel_flat, grad_T_flat, mu, Pr, mu_t_flat, Pr_t
+    ).reshape(n_cells, n_sps, 3, 5)
 
-    G_tilde = np.einsum("csmi,csiv->csmv", adj_j, G_phys)  # (n_cells,n_sps,3,5)
+    G_tilde = np.matmul(adj_j, G_phys)  # (n_cells,n_sps,3,5)
     # 四面体/棱柱专用坍缩坐标微分矩阵，理由同 fr_residual_inviscid.py 的
     # 同类改动——见 FROperators.D_3d_tet/D_3d_prism 文档。
     n_prism = mesh.n_prism_cells
     div_comp = np.zeros((n_cells, n_sps, 5))
     if n_prism > 0:
-        div_comp[:n_prism] = np.einsum("sjm,cjmv->csv", ops.D_3d_prism, G_tilde[:n_prism])
+        div_comp[:n_prism] = contract_shared_operator_2axis(ops.D_3d_prism, G_tilde[:n_prism])
     if n_cells > n_prism:
-        div_comp[n_prism:] = np.einsum("sjm,cjmv->csv", ops.D_3d_tet, G_tilde[n_prism:])
+        div_comp[n_prism:] = contract_shared_operator_2axis(ops.D_3d_tet, G_tilde[n_prism:])
     residual = div_comp / det_jacs[..., None]  # 注意：粘性项是 +div(G)（见模块文档的符号约定）
 
-    fc = mesh.face_connectivity
-    ffp_list = mesh.face_flux_points
-    correction = np.zeros_like(residual)
+    # --- 界面项：numba 逐点标量 kernel（性能优化，替代原纯 Python
+    # `for f in range(fc.n_faces)` 逐面循环，理由/验证方式与
+    # fr_residual_inviscid.py 的同类改动完全一致，见
+    # fr_viscous_flux_kernel.py 模块文档、
+    # tests/unit/test_fr_viscous_flux_kernel_crosscheck.py 的新旧实现
+    # 逐位对比验证）。
+    from autoflowcfd.core.fr_face_kernels_flat import get_flat_face_geometry
+    from autoflowcfd.core.fr_residual_inviscid_kernel import compute_boundary_ghost_states
+    from autoflowcfd.core.fr_viscous_flux_kernel import compute_viscous_interface_correction_kernel
 
-    def extrap_to_face(cell: int, field: np.ndarray, axis: int, side: float) -> np.ndarray:
-        """四面体/棱柱专用坍缩坐标模态基外插（不是朴素 1D 张量积
-        extrapolate_to_face），理由同 fr_residual_inviscid.py 的同名
-        改动——见 FROperators.boundary_extrap_tet/boundary_extrap_prism
-        文档：朴素外插在坍缩坐标退化边附近算出的等效法向方向与真实
-        几何法向偏差可达近 30°，被同处偏小的 Jacobian 放大到灾难量级。
-        """
-        E = ops.boundary_extrap_prism[(axis, side)] if cell < n_prism else ops.boundary_extrap_tet[(axis, side)]
-        trailing = field.shape[1:]
-        flat = E @ field.reshape(field.shape[0], -1)
-        return flat.reshape((E.shape[0],) + trailing)
+    flat = get_flat_face_geometry(mesh, ops)
+    Q_ghost = compute_boundary_ghost_states(flat, Q, adj_j, ghost_provider)
+    # n_threads 必须紧邻调用之前取值，不能缓存，理由见
+    # fr_viscous_flux_kernel.py 模块文档"多核并行"一节。
+    import numba
+    n_threads = numba.get_num_threads()
+    correction = compute_viscous_interface_correction_kernel(
+        Q, grad_vel, grad_T, mu_t_field,
+        adj_j, det_jacs, mu, Pr, Pr_t,
+        flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
+        flat.owner_axis, flat.owner_side, flat.neighbor_axis, flat.neighbor_side,
+        flat.owner_is_primary, flat.neighbor_is_primary,
+        flat.neighbor_src0_cell, flat.neighbor_src0_mat,
+        flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
+        flat.owner_src0_cell, flat.owner_src0_mat,
+        flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
+        flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
+        flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
+        n_prism, n_threads,
+    )
+    residual = residual + correction
 
-    def extrapolate_state_and_grad(cell, axis, side):
-        Q_fp = extrap_to_face(cell, Q[cell], axis, side)
-        gradvel_fp = extrap_to_face(cell, grad_vel[cell], axis, side)
-        gradT_fp = extrap_to_face(cell, grad_T[cell], axis, side)
-        adj_row_fp = extrap_to_face(cell, adj_j[cell][:, axis, :], axis, side)
-        mut_fp = extrap_to_face(cell, mu_t_field[cell][:, None], axis, side)[:, 0]
-        return Q_fp, gradvel_fp, gradT_fp, adj_row_fp, mut_fp
-
-    def _apply_interp(interp_matrix: np.ndarray, field: np.ndarray) -> np.ndarray:
-        """interp_matrix: (n_fp, n_sps); field: (n_sps, ...) -> (n_fp, ...)。"""
-        trailing = field.shape[1:]
-        flat = interp_matrix @ field.reshape(field.shape[0], -1)
-        return flat.reshape((interp_matrix.shape[0],) + trailing)
-
-    def _apply_sources(sources, field_of_cell) -> np.ndarray:
-        """sources: List[(cell_id, (n_fp,n_sps)矩阵)]；field_of_cell(cell_id)
-        返回该 cell 的 (n_sps, ...) 场。按物理位置精确来源求和组装
-        （见 fr/face_flux_points.py::FaceFluxPointGeometry 文档，1~2 个
-        真实相邻单元的情形统一处理）。"""
-        total = None
-        for cell_id, mat in sources:
-            contrib = _apply_interp(mat, field_of_cell(cell_id))
-            total = contrib if total is None else total + contrib
-        return total
-
-    for f in range(fc.n_faces):
-        ffp = ffp_list[f]
-        owner_cell = int(fc.owner_cell[f])
-        owner_axis, owner_side = ffp.owner_axis, ffp.owner_side
-
-        # 棱柱四边形侧面被拆分成 2 个三角形子面记录的情形（见
-        # fr/face_flux_points.py 文档）：owner/neighbor 各自的自身外插+
-        # 校正投影只能由分组内的一条 primary 记录触发一次。
-        if ffp.owner_is_primary:
-            Q_o, gv_o, gT_o, adjrow_o, mut_o = extrapolate_state_and_grad(owner_cell, owner_axis, owner_side)
-
-            if fc.is_boundary[f]:
-                Q_n, gv_n, gT_n, mut_n = Q_o, gv_o, gT_o, mut_o
-            else:
-                # neighbor（1~2 个真实相邻单元）的场在 owner FP 精确物理
-                # 位置处的取值（精确点位插值）
-                Q_n = _apply_sources(ffp.neighbor_sources, lambda c: Q[c])
-                gv_n = _apply_sources(ffp.neighbor_sources, lambda c: grad_vel[c])
-                gT_n = _apply_sources(ffp.neighbor_sources, lambda c: grad_T[c])
-                mut_n = _apply_sources(ffp.neighbor_sources, lambda c: mu_t_field[c][:, None])[:, 0]
-
-            # BR1: 界面态取相邻两侧（同一物理位置处）取值的算术平均
-            Q_avg = 0.5 * (Q_o + Q_n)
-            gv_avg = 0.5 * (gv_o + gv_n)
-            gT_avg = 0.5 * (gT_o + gT_n)
-            mut_avg = 0.5 * (mut_o + mut_n)
-
-            G_common = viscous_physical_flux(Q_avg, gv_avg, gT_avg, mu, Pr, mu_t=mut_avg, Pr_t=Pr_t)  # (n_fp,3,5)
-            G_tilde_common_owner = np.einsum("fi,fiv->fv", adjrow_o, G_common)
-
-            G_phys_owner_fp = viscous_physical_flux(Q_o, gv_o, gT_o, mu, Pr, mu_t=mut_o, Pr_t=Pr_t)
-            G_tilde_own_boundary = np.einsum("fi,fiv->fv", adjrow_o, G_phys_owner_fp)
-
-            jump_owner = G_tilde_common_owner - G_tilde_own_boundary
-            g_prime_owner = ops.g_left if owner_side < 0 else ops.g_right
-            contrib_owner = _distribute_from_face(jump_owner, n1d, owner_axis, g_prime_owner)
-            correction[owner_cell] += contrib_owner / det_jacs[owner_cell][:, None]
-
-        if not fc.is_boundary[f] and ffp.neighbor_is_primary:
-            # neighbor 侧：用 neighbor 自己原生 FP 网格 + owner 的场在这些
-            # 精确物理位置处的取值，独立重做一次 BR1 平均与校正投影
-            # （原生 FP 位置一般不同于 owner 的 FP 位置，不能直接复用上面
-            # 算好的 Q_avg 等量）。
-            neighbor_cell = int(fc.neighbor_cell[f])
-            n_axis, n_side = ffp.neighbor_axis, ffp.neighbor_side
-            Q_n_native, gv_n_native, gT_n_native, adjrow_n_native, mut_n_native = extrapolate_state_and_grad(
-                neighbor_cell, n_axis, n_side
-            )
-
-            Q_o_at_n = _apply_sources(ffp.owner_sources, lambda c: Q[c])
-            gv_o_at_n = _apply_sources(ffp.owner_sources, lambda c: grad_vel[c])
-            gT_o_at_n = _apply_sources(ffp.owner_sources, lambda c: grad_T[c])
-            mut_o_at_n = _apply_sources(ffp.owner_sources, lambda c: mu_t_field[c][:, None])[:, 0]
-
-            Q_avg_n = 0.5 * (Q_n_native + Q_o_at_n)
-            gv_avg_n = 0.5 * (gv_n_native + gv_o_at_n)
-            gT_avg_n = 0.5 * (gT_n_native + gT_o_at_n)
-            mut_avg_n = 0.5 * (mut_n_native + mut_o_at_n)
-
-            G_common_native = viscous_physical_flux(
-                Q_avg_n, gv_avg_n, gT_avg_n, mu, Pr, mu_t=mut_avg_n, Pr_t=Pr_t
-            )
-            G_tilde_common_neighbor = np.einsum("fi,fiv->fv", adjrow_n_native, G_common_native)
-
-            G_phys_neighbor_fp = viscous_physical_flux(
-                Q_n_native, gv_n_native, gT_n_native, mu, Pr, mu_t=mut_n_native, Pr_t=Pr_t
-            )
-            G_tilde_own_boundary_neighbor = np.einsum("fi,fiv->fv", adjrow_n_native, G_phys_neighbor_fp)
-
-            jump_neighbor = G_tilde_common_neighbor - G_tilde_own_boundary_neighbor
-            g_prime_neighbor = ops.g_left if n_side < 0 else ops.g_right
-            contrib_neighbor = _distribute_from_face(jump_neighbor, n1d, n_axis, g_prime_neighbor)
-            correction[neighbor_cell] += contrib_neighbor / det_jacs[neighbor_cell][:, None]
-
-    residual += correction
     # 机制3（症状检测，见 fr_troubled_cell.py 模块文档）：直接对算出的
     # 最终粘性残差做 (cell,SP,变量) 粒度的量级异常检测并清零，取代按
     # 整个单元降阶的旧机制1/2 门控，理由同 fr_residual_inviscid.py 的

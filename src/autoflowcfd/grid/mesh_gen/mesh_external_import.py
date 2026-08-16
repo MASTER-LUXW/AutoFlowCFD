@@ -174,7 +174,7 @@ def import_external_volume_mesh(
         logger.warning(
             "Quality check still failing after Stage A - returning the best-effort "
             "repaired mesh anyway (see report above). This mesh may diverge if solved "
-            "as-is; 'autoflowcfd solve run'/'transient' will still enforce this gate "
+            "as-is; 'autoflowcfd solve steady'/'transient' will still enforce this gate "
             "before any iterations run, unless --skip-quality-check is passed."
         )
     return volume_mesh, report

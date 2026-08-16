@@ -17,7 +17,8 @@ Example:
 from .coefficients import CoefficientCalculator, AerodynamicCoefficients, AerodynamicForces
 from .vtk_export import VTKExporter
 from .report import ConvergenceAnalyzer, SimulationReport
-from .transient_stats import TransientStatistics, PressurePSD, TransientResult
+from .transient_stats import TransientStatistics, TransientResult
+from .pressure_psd import PressurePSD
 
 __all__ = [
     "CoefficientCalculator",

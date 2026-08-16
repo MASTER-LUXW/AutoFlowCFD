@@ -49,10 +49,16 @@ coverage.xml
 .pytest_cache/
 cover/
 
-# Debug and temporary test files (root level only)
-test_*.py
-diagnose_*.py
-cleanup_*.py
+# Debug and temporary test files (root level only) - anchored with a
+# leading "/" so this only matches the repo root, not tests/unit/ and
+# tests/integration/ (an unanchored `test_*.py` matches at every depth in
+# gitignore syntax, which was silently excluding the ENTIRE real pytest
+# suite under tests/ from version control - confirmed directly: 34
+# tests/unit/test_*.py files exist on disk, 0 were tracked by git before
+# this fix).
+/test_*.py
+/diagnose_*.py
+/cleanup_*.py
 
 # Translations
 *.mo

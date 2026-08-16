@@ -11,7 +11,9 @@ AutoFlowCFD V2.0 - FR 求解器主类 (Final Integration)
 4. 残差监控和收敛判断
 """
 
+import os
 import numpy as np
+import numba
 import logging
 from typing import Dict, Any, Optional, Tuple
 from autoflowcfd.core.fr_state import FRState, SolverResult
@@ -20,13 +22,13 @@ from autoflowcfd.fr.operators import generate_fr_operators, FROperators
 from autoflowcfd.core.fr_residual_inviscid import compute_inviscid_residual_fr
 from autoflowcfd.core.time_integration import TimeIntegrator, TimeIntegrationScheme
 from autoflowcfd.core.fr_residual_viscous import compute_viscous_residual as compute_viscous_residual_ldg
-from autoflowcfd.core.fr_solver_filter import build_filter_func
 
 # 导入辅助模块
 from . import solver_helpers
 from . import order_continuation
 from . import fr_solver_turbulence
 from . import fr_solver_boundary
+from . import fr_solver_step
 
 # 配置日志
 logger = logging.getLogger(__name__)
@@ -50,7 +52,10 @@ class FRSolver:
                  initial_state: Optional[FRState] = None,
                  backend: str = "cpu",
                  rho_inf: float = 1.225, vel_inf: float = 30.0, p_inf: float = 101325.0,
-                 bc_overrides: Optional[Dict[str, Dict[str, Any]]] = None):
+                 bc_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
+                 mu_molecular: float = 1.8e-5,
+                 dual_time_inner_iter: int = 20,
+                 n_threads: int = -1):
         """
         初始化 FRSolver。
 
@@ -58,6 +63,13 @@ class FRSolver:
             mesh: HighOrderMesh 类型的高阶网格对象
             order: 多项式阶数
             turb_model_name: 湍流模型名称 ("SST"/"DDES"/"WMLES"/"LES"/"NONE")
+            mu_molecular: 分子动力粘度（默认 1.8e-5 Pa*s，标准状态下空气）。
+                此前粘性残差（fr_residual_viscous.py 默认参数）与粘性 CFL
+                步长（_compute_local_time_step）各自独立硬编码这个值，没有
+                任何受支持的方式一致地设置自定义粘度——两处必须同步改，
+                否则 CFL 步长会与真正参与残差组装的粘度脱节（同类问题见
+                记忆条目 hardcoded_molecular_viscosity_mismatch）。现在两处
+                都从这个构造参数读取。
             n_vars: 守恒变量数量（默认5：rho, rho_u, rho_v, rho_w, rho_e）
             time_scheme: 时间推进方案
             initial_state: 初始状态（用于 Order Continuation）
@@ -70,7 +82,73 @@ class FRSolver:
                 未提供的组按 mesh.boundary_bc_types 自动映射
                 （WALL/SLIP_WALL->WALL, VELOCITY_INLET->INLET,
                 PRESSURE_OUTLET->OUTLET, SYMMETRY->SYMMETRY, 其余->FARFIELD）
+            dual_time_inner_iter: DUAL_TIME 方案每个物理步的伪时间内迭代
+                次数（仅 time_scheme=DUAL_TIME 时有意义）。此前完全没有
+                途径设置，恒为硬编码 3；真实测得默认保守 CFL 起点下 3 次
+                内迭代通常远不足以让伪残差收敛到物理时间精度要求的水平
+                （见 TimeIntegrator.__init__ 与 step_dual_time 文档）。
+            n_threads: numba 并行 kernel（无粘/粘性残差界面项，见
+                core/fr_residual_inviscid_kernel.py、
+                core/fr_viscous_flux_kernel.py 模块文档"多核并行"一节）
+                使用的 CPU 线程数。默认 -1 **不是** `os.cpu_count()`——真实
+                545,597 单元生产网格上实测的线程数扩展曲线（P2，16 物理核
+                机器）：nt=1 87.63s、nt=2 61.25s、nt=4 57.35s（峰值）、
+                nt=8 61.46s、nt=16 67.19s，超过 4 线程后不是收益递减而是
+                净倒退（16 线程比 4 线程还慢），根因见下方与 kernel 模块
+                文档"多核并行的扩展性上限"一节。因此 -1 解析成 **4**（本机
+                实测的甜点，不是理论值），不是自动检测到的物理核数——这是
+                目前唯一有真实网格实测数据支撑的默认值；调用方仍可显式传
+                更大或更小的 n_threads 覆盖（CLI 见 `--threads`/`-j`），但
+                默认不应该让用户在毫无预警的情况下用一个实测更差的核数。
+                只在这里调用一次 `numba.set_num_threads`——两个界面
+                kernel 的 `n_threads` 参数要求调用方紧邻调用前取
+                `numba.get_num_threads()`，如果这个全局状态在其他地方
+                被并发修改，会破坏该约束（见两个 kernel 模块文档"多核
+                并行"一节的坑E）。
         """
+        # numba 全局线程数只在这里设置一次（求解器生命周期内不再修改），
+        # 理由见本方法 n_threads 参数文档。必须在任何残差 kernel 被调用
+        # 之前设置。-1 解析成 4（本机真实网格实测的扩展性甜点），不是
+        # os.cpu_count()——见 n_threads 参数文档，超过 4 线程实测是净
+        # 倒退，盲目用满全部核数在这个 kernel 的当前实现下是有害默认值。
+        _DEFAULT_N_THREADS = 4
+        resolved_n_threads = n_threads if n_threads > 0 else _DEFAULT_N_THREADS
+        numba.set_num_threads(resolved_n_threads)
+
+        # 防御性内存检查：两个界面 kernel 各自的私有累加缓冲区峰值约
+        # n_threads * n_cells * n_sps * 5 vars * 8 bytes（无粘/粘性两次
+        # 调用不会同时存活，见 fr_residual_inviscid_kernel.py 模块文档
+        # "多核并行"一节），超过系统总内存一半就提醒用户，不静默跑到
+        # OOM。取不到总内存（非 Windows 平台没有对应 ctypes 调用）时
+        # 直接跳过，不影响求解——这只是个提醒，不是硬性门禁。
+        n_cells_est = getattr(mesh, 'n_cells', 0)
+        n_sps_est = getattr(mesh, 'n_sps_per_cell', 8)
+        buf_bytes = resolved_n_threads * n_cells_est * n_sps_est * 5 * 8
+        try:
+            import ctypes
+
+            class _MEMORYSTATUSEX(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            stat = _MEMORYSTATUSEX()
+            stat.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
+            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+            total_mem = stat.ullTotalPhys
+            if total_mem > 0 and buf_bytes > 0.5 * total_mem:
+                print(
+                    f"⚠️  警告：n_threads={resolved_n_threads} 下界面 kernel 私有累加缓冲区峰值约 "
+                    f"{buf_bytes / 1e9:.1f}GB，超过系统总内存（{total_mem / 1e9:.1f}GB）的一半，"
+                    f"叠加其他计算环节的内存占用可能导致 OOM。建议用更小的 n_threads。"
+                )
+        except Exception:
+            pass
+
         self.mesh = mesh
         self.order = order
         self.backend_type = backend.lower()
@@ -85,8 +163,12 @@ class FRSolver:
             self.state = initial_state
             print(f"✅ Using provided initial state from lower order")
         else:
-            # 根据湍流模型确定变量数
-            default_n_vars = 7 if turb_model_name in ["SST", "DDES"] else 5
+            # 根据湍流模型确定变量数。必须先 upper()：self.turb_model_name
+            # 要到第 5 步才被规范化为大写，这里若直接用构造参数原始大小写
+            # 比较，会导致 `turbulence-model sst`（小写，steady CLI 路径）
+            # 与 `SST`（大写，transient CLI 路径）判出不同的 n_vars——已用
+            # 两条 CLI 路径实测复现（steady 得到 n_vars=5，transient 得到 7）。
+            default_n_vars = 7 if turb_model_name.upper() in ["SST", "DDES"] else 5
             self.state = FRState(n_cells, n_sps, default_n_vars)
             # 初场必须与自由来流边界条件一致（都用同一套 rho_inf/vel_inf/p_inf），
             # 否则显式伪时间推进第一步就要吸收一个几个数量级的压力跳跃
@@ -103,44 +185,23 @@ class FRSolver:
         # （不再持有未被使用的 FRWeakBC 罚项处理器实例——那是旧版本从未被
         # 求解主循环调用过的死代码路径，真正生效的是下面的
         # boundary_ghost_provider，见 boundary/fr_ghost_state.py）
+        #
+        # self.turb_model_name 必须先于 boundary_ghost_provider 构造
+        # （BD-02：LES/DDES 模式下要给 VELOCITY_INLET 组接入合成湍流
+        # 入口，需要在构造 ghost provider 时就知道湍流模型），其余湍流
+        # 模型对象（turb_model/wmles_model/sgs_model）留到下面第 5 步
+        # 再真正初始化——ghost provider 构造时只用 getattr(...,None) 安全
+        # 读取 wmles_model，不依赖它已经存在。
+        self.turb_model_name = turb_model_name.upper()
         self.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf}
         self.boundary_ghost_provider = self._build_boundary_ghost_provider(bc_overrides or {})
+        self.mu_molecular = mu_molecular
 
-        # 4. 初始化计算后端 (B-01)
-        #
-        # 此前这里构造一个 CUDABackend 实例、调用一次 .initialize()，
-        # 之后 self.backend 在全文件里再也不会被引用——backend="gpu"
-        # 对实际计算路径没有任何影响，只改变构造时打印哪几行日志（V2.0
-        # 专家评审报告 B-01 项指出的问题）。真正的 GPU 加速路径见
-        # core/backend/fr_gpu_p0.py：目前只对 P0（Order Continuation
-        # 最低阶/有限体积）无粘残差实现了真实 CUDA kernel（忠实移植
-        # 已验证正确的 CPU 版 _compute_inviscid_residual_fv_p0，见该模块
-        # 文档），P>=1（真正的高阶 FR，坍缩坐标度量张量外插 + 逐面记录
-        # 字典键控分发）尚未实现 GPU 版本，如实回退 CPU、如实记录日志，
-        # 不再静默构造一个从未被使用的对象。是否真正走 GPU 由
-        # compute_inviscid_residual() 在每次调用时按 self.backend_type
-        # 与当前网格阶数共同判断（阶数延续期间会在多个阶数之间切换）。
+        # 4. 初始化计算后端 (B-01)——见 solver_helpers.py::resolve_backend_type 文档。
         self.backend = None
-        if self.backend_type == "gpu":
-            from .backend.fr_gpu_p0 import gpu_p0_available
-            if gpu_p0_available():
-                logger.info(
-                    "GPU (CUDA) backend available - will accelerate the P0 finite-volume inviscid "
-                    "residual only (order continuation warm-up stage); P>=1 orders still run on CPU "
-                    "(see core/backend/fr_gpu_p0.py for scope)."
-                )
-            else:
-                logger.warning(
-                    "GPU backend requested but no CUDA device found (and NUMBA_ENABLE_CUDASIM not set) "
-                    "- falling back to CPU entirely"
-                )
-                self.backend_type = "cpu"
+        self.backend_type = solver_helpers.resolve_backend_type(self.backend_type)
 
-        if self.backend_type == "cpu":
-            logger.info(f"CPU Backend (Numba) initialized")
-        
-        # 5. 初始化湍流模型
-        self.turb_model_name = turb_model_name.upper()
+        # 5. 初始化湍流模型（self.turb_model_name 已在第 3 步设置）
         self.turb_model = None
         self.ddes_model = None
         self.wmles_model = None
@@ -149,7 +210,7 @@ class FRSolver:
         self._init_turbulence_models(n_cells, n_sps)
         
         # 6. 初始化时间积分器 (S-05)
-        self.time_integrator = TimeIntegrator(scheme=time_scheme)
+        self.time_integrator = TimeIntegrator(scheme=time_scheme, dual_time_steps=dual_time_inner_iter)
 
         # DUAL_TIME 专用：物理时间层 n-1 的解（BDF2 时间导数项需要），
         # None 表示还没有跑过物理步（下一步会退化为 BDF1），见 step()
@@ -160,11 +221,8 @@ class FRSolver:
         
         # 7. 壁面距离场（用于DDES/WMLES）
         self.wall_distance = None
-        
-        # 8. 壁面边界信息（用于WMLES）
-        self._wall_sp_info = None
-        
-        # 9. Order Continuation 状态
+
+        # 8. Order Continuation 状态
         self.current_order = order
         self.order_continuation_enabled = True
         
@@ -173,6 +231,7 @@ class FRSolver:
         print(f"   Turbulence: {turb_model_name}")
         print(f"   Backend: {self.backend_type.upper()}")
         print(f"   Time Scheme: {time_scheme.value}")
+        print(f"   Threads: {resolved_n_threads}")
 
     def _init_turbulence_models(self, n_cells: int, n_sps: int):
         """初始化湍流模型（委托给 fr_solver_turbulence）。"""
@@ -183,9 +242,21 @@ class FRSolver:
         return fr_solver_boundary.build_boundary_ghost_provider(self, bc_overrides)
 
     def compute_wall_distance_field(self, mesh_nodes: np.ndarray,
-                                   wall_indices: np.ndarray):
-        """计算壁面距离场（用于 DDES/WMLES/SST），委托给 fr_solver_turbulence。"""
-        fr_solver_turbulence.compute_wall_distance_field(self, mesh_nodes, wall_indices)
+                                   wall_indices: np.ndarray,
+                                   connectivity: Optional[np.ndarray] = None,
+                                   use_eikonal: bool = False):
+        """计算壁面距离场（用于 DDES/WMLES/SST），委托给 fr_solver_turbulence。
+
+        Args:
+            mesh_nodes: 全部网格节点坐标
+            wall_indices: WALL 边界节点索引
+            connectivity: 节点邻接表，use_eikonal=True 时必须提供 - 见
+                fr_solver_turbulence.compute_wall_distance_field 自己的文档
+            use_eikonal: 是否用 Eikonal 方程（而不是纯欧氏 KD-Tree）求解
+        """
+        fr_solver_turbulence.compute_wall_distance_field(
+            self, mesh_nodes, wall_indices, connectivity=connectivity, use_eikonal=use_eikonal
+        )
 
     def solve(self, max_iter: int = 1000, dt: float = 1e-4, tol: float = 1e-6) -> SolverResult:
         """
@@ -237,152 +308,25 @@ class FRSolver:
         """将解从当前阶数插值到新的阶数（委托给 order_continuation）。"""
         order_continuation.interpolate_to_new_order_checked(self, new_order)
 
-
     def step(self, dt: float) -> float:
-        """
-        执行一个时间步长 (S-05)。
+        """执行一个时间步长 (S-05)。见 fr_solver_step.py::step 文档。"""
+        return fr_solver_step.step(self, dt)
 
-        平均流（5个欧拉变量）真正通过 self.time_integrator 推进
-        （SSP-RK2/RK3/IMEX/Dual-Time，由构造时的 time_scheme 决定），
-        取代旧版本里恒定不变的单级前向欧拉——此前不管 CLI 传
-        --time-method rk3/imex/dual-time 哪一个，step() 内部都硬编码执行
-        `U = U + dt_local*residual`，`self.time_integrator` 被构造出来后
-        从未被调用过。
-
-        湍流量 (k,omega) 的输运方程仍用独立的单步显式更新（算子分裂：
-        平均流走高阶 RK 子迭代，湍流方程走更简单、专门做过刚性限制
-        的更新，是工业 RANS/DES 求解器常见做法，避免把湍流源项的强
-        非线性刚性直接卷入平均流的多级残差重新求值）。
-
-        dt 参数的语义按 time_scheme 分两种情况（此前不管哪种 scheme，
-        dt 参数都被完全忽略，实际步长恒由 self._compute_local_time_step()
-        的逐单元局部 CFL 步长决定——这对稳态 RANS 收敛加速是对的，但
-        意味着 CLI `solve transient`（DES/LES）传入的 `--dt`/`--physical-time`
-        从未真正生效，瞬态仿真没有时间精度，这是本次修复的问题）：
-        - SSP-RK2/RK3/IMEX（稳态收敛加速模式）：dt 参数确实被忽略，
-          步长仍由局部 CFL 决定——用于收敛到定常解，不要求时间精度，
-          局部时间步是标准且正确的加速手段。
-        - DUAL_TIME（DES/LES 等真正非稳态仿真应使用的模式）：dt 现在
-          是真正的物理时间步长，通过 BDF1/BDF2 时间导数项耦合进伪残差
-          （见 TimeIntegrator.step_dual_time），伪时间迭代收敛后得到的
-          解在物理时间上精确前进了 dt；局部 CFL 步长只用作内层伪时间
-          迭代的加速手段，不影响物理时间精度。
-
-        Args:
-            dt: 见上——SSP-RK/IMEX 模式下被忽略，DUAL_TIME 模式下是真正
-                生效的物理时间步长
-
-        Returns:
-            residual_norm: 残差范数
-        """
-        try:
-            self.state._update_primitives()
-
-            # 湍流源项在当前状态下求值一次（沿用旧有的单步显式-半隐式
-            # 阻尼更新，见 turbulence_sst.py::update_fields）
-            turb_source = self.compute_turbulence_source(dt)
-
-            n_cells, n_sps, n_vars = self.state.U.shape
-            dt_local = self._compute_local_time_step()  # (n_cells, n_sps)
-
-            U_flat = self.state.U.reshape(n_cells * n_sps, n_vars)
-            dt_local_flat = dt_local.reshape(n_cells * n_sps)
-
-            def mean_flow_residual(U_flat_trial: np.ndarray) -> np.ndarray:
-                """TimeIntegrator 约定：dU/dt = -residual_func(U)。"""
-                U_trial = U_flat_trial.reshape(n_cells, n_sps, n_vars)
-                saved_U = self.state.U
-                self.state.U = U_trial
-                try:
-                    inv_res = self.compute_inviscid_residual()
-                    visc_res = self.compute_viscous_residual()
-                finally:
-                    self.state.U = saved_U
-                total = inv_res + visc_res  # 已是 dU/dt，形状 (n_cells,n_sps,n_vars)
-                return -total.reshape(n_cells * n_sps, n_vars)
-
-            # residual0 是 TimeIntegrator 自身的 R(U) 约定（dU/dt=-R），
-            # 复用它既避免重复计算 Stage 0 残差，也用来更新
-            # self.state.dU_dt——收敛监控 (get_residual_norm) 依赖这个量，
-            # 重构 step() 时若遗漏这一步，会让残差历史恒为 0（表面上"已收敛"，
-            # 实际只是从未被更新过），已用非均匀扰动初场验证发现并修复。
-            residual0 = mean_flow_residual(U_flat)
-            self.state.dU_dt = (-residual0).reshape(n_cells, n_sps, n_vars)
-
-            # 模态滤波回调（S-05 补充修复）：见 fr_solver_filter.py 文档——
-            # 必须传给 TimeIntegrator，由它在*每个* RK stage 的正定性投影
-            # 之后立即施加，抑制坍缩坐标节点配置法固有的混叠噪声放大；
-            # 只在最终组合结果上滤波一次不够，真实复现噪声在中间 stage
-            # 就已放大到 NaN。
-            filter_func = build_filter_func(self)
-
-            if self.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME:
-                # 真正时间精度的物理时间推进：dt 是物理时间步长（不再被
-                # 忽略），dt_local 只用作内层伪时间迭代的局部加速步长，
-                # 两者不能混用——见 TimeIntegrator.step_dual_time 文档。
-                U_new_flat = self.time_integrator.step_dual_time(
-                    U_flat,
-                    mean_flow_residual,
-                    dt_local_flat,
-                    dt_physical=dt,
-                    solution_prev=self._dual_time_U_prev,
-                    max_inner_iter=self.time_integrator.dual_time_steps,
-                    filter_func=filter_func,
-                )
-                self._dual_time_U_prev = U_flat.copy()
-            else:
-                U_new_flat = self.time_integrator.step(
-                    U_flat, mean_flow_residual, dt_local_flat, p_floor=1.0, residual0=residual0,
-                    filter_func=filter_func,
-                )
-            self.state.U = U_new_flat.reshape(n_cells, n_sps, n_vars)
-
-            # 湍流量单步显式更新（与平均流的 RK 子迭代解耦）
-            if turb_source is not None and n_vars > 5:
-                self.state.U[:, :, 5] += dt_local * turb_source[0]
-                self.state.U[:, :, 6] += dt_local * turb_source[1]
-                self.state.U[:, :, 5] = np.maximum(self.state.U[:, :, 5], 0.0)
-                self.state.U[:, :, 6] = np.maximum(self.state.U[:, :, 6], 1e-8)
-
-            self.apply_turbulence_corrections()
-            self.state._update_primitives()
-
-            residual_norm = self.state.get_residual_norm()
-            return residual_norm
-
-        except Exception as e:
-            logger.error(f"Step failed with error: {e}")
-            import traceback
-            traceback.print_exc()
-            raise
-    
     def compute_turbulence_source(self, dt: float) -> Optional[tuple]:
         """计算湍流模型源项（委托给 fr_solver_turbulence）。"""
         return fr_solver_turbulence.compute_turbulence_source(self, dt)
 
-
     def apply_turbulence_corrections(self):
-        """应用湍流模型的修正（WMLES 壁面应力、SGS 涡粘系数），委托给 fr_solver_turbulence。"""
+        """应用湍流模型的修正（SGS 涡粘系数），委托给 fr_solver_turbulence。
+
+        WMLES 壁面剪应力**不**在这里施加——它是一个真正的残差贡献项，
+        必须在时间积分*之前*参与残差组装才能生效，见
+        compute_viscous_residual() 里的调用与该方法文档（T-05 修复：
+        此前在这里调用，而这里在 step() 中排在状态更新*之后*，对本步
+        毫无影响，架构上不可能生效）。
+        """
         fr_solver_turbulence.apply_turbulence_corrections(self)
 
-    def _apply_wmles_wall_stress(self):
-        """
-        应用WMLES壁面剪应力到动量方程残差（委托给 solver_helpers）。
-        """
-        solver_helpers.apply_wmles_wall_stress(self)
-
-    def _extract_wall_boundary_info(self):
-        """
-        从网格或边界管理器中提取壁面边界信息（委托给 solver_helpers）。
-        """
-        self._wall_sp_info = solver_helpers.extract_wall_boundary_info(self)
-    
-    def _auto_detect_wall_boundaries(self):
-        """
-        基于几何特征自动检测壁面边界（委托给 solver_helpers）。
-        """
-        self._wall_sp_info = solver_helpers.auto_detect_wall_boundaries(self)
-    
     def compute_inviscid_residual(self):
         """
         计算无粘残差 (S-02/S-04)。
@@ -439,13 +383,26 @@ class FRSolver:
         动量/能量方程的扩散项）。
 
         Returns:
-            viscous_res: 粘性残差
+            viscous_res: 粘性残差（WMLES 激活时已叠加壁面剪应力修正，
+                见 solver_helpers.compute_wmles_wall_stress_correction
+                文档 T-05 修复说明——必须在这里（残差组装、时间积分之前）
+                施加才能真正影响本步的解，而不是像此前那样在状态更新
+                之后才计算）
         """
         mu_t_field = self._get_turbulent_viscosity_field()
-        return compute_viscous_residual_ldg(
+        res = compute_viscous_residual_ldg(
             self.state.U, self.state.Q, self.ops, self.mesh,
+            mu=self.mu_molecular,
             mu_t_field=mu_t_field,
+            boundary_ghost_provider=self.boundary_ghost_provider,
         )
+
+        if self.wmles_model is not None:
+            wall_stress_correction = solver_helpers.compute_wmles_wall_stress_correction(self)
+            if wall_stress_correction is not None:
+                res = res + wall_stress_correction[..., : res.shape[-1]]
+
+        return res
 
     def _get_turbulent_viscosity_field(self) -> Optional[np.ndarray]:
         """汇总当前激活的湍流模型给出的动力涡粘度场 mu_t = rho * nu_t（委托给 fr_solver_turbulence）。"""
@@ -478,115 +435,12 @@ class FRSolver:
         return metric_flux_scale
 
     def _compute_local_time_step(self) -> np.ndarray:
-        """
-        计算局部时间步长（基于CFL条件）。
+        """计算局部时间步长（基于CFL条件）。实现见
+        fr_solver_cfl.py::compute_local_time_step（从本文件拆出，控制
+        单文件行数），文档字符串也在那里。"""
+        from .fr_solver_cfl import compute_local_time_step
 
-        真正的稳定性限制取三个独立机制中更严格的一个：
-        0. 【已撤销】低马赫数预处理——2026-08-14 Couette 合成算例定量验证
-           过程中真实复现并确认：这里曾经引入的 Weiss-Smith 预处理
-           （`preconditioned_acoustic_eigs`）只用来放松 CFL *步长估计*，
-           但实际参与残差计算的 AUSM+up 通量（core/fr_kernels.py::
-           compute_ausm_up_flux）自身完全没有做任何 Weiss-Smith 预处理——
-           它内部用的始终是*真实物理*声速 aL/aR（只有 Liou 2001 式的
-           界面声速插值修正，调整耗散强度，不改变特征波速本身）。这两者
-           不一致：CFL 步长按"预处理后、人为缩小的"波速估计出一个偏大
-           的 dt，但真正被显式积分的却是未预处理、用真实声速主导刚性的
-           AUSM+up 通量——真实复现（棱柱/四面体网格均可复现）：自由参考
-           马赫数 mach_ref 越小（越贴近 Couette/Poiseuille 这类低速层流
-           算例的真实工况），这个 dt 相对真实稳定性极限就越大，扫描
-           参考速度 1~30 m/s 精确复现了这个失稳阈值（<~15 m/s 对应
-           M<~0.044 必然在数步内 NaN，>=20 m/s 稳定）——不是"要更保守
-           CFL"就能绕开的问题，是步长估计与实际被积分的物理不一致这一
-           结构性缺陷。真正一致的做法需要连 AUSM+up 通量本身也做
-           Weiss-Smith 预处理（改动数值通量本身，属于更大的算法工作，
-           已记录待后续评估），在此之前 CFL 步长必须如实按*真实*声速
-           估计，不能假装用了一套实际并未生效的预处理来"合法"放宽步长。
-           wave_speed 现在恒为真实的 |u|+a（未预处理），与 AUSM+up 通量
-           实际使用的特征波速一致。
-        1. 对流 CFL（原有逻辑）：dt = CFL * h / wave_speed，h 用单元的
-           精确求积体积——这是标准有限体积式估计，按"单元平均"尺度衡量。
-        2. 粘性稳定性限制（新增，同样是修复真实存在的失稳）：显式格式
-           对粘性（分子+湍流）扩散项的稳定性时间步长是 dt<=C*rho*V^(2/3)
-           /mu_eff（抛物型稳定性条件），与上面的对流限制是完全独立的
-           机制——粘性主导流动（低速层流、边界层内部）下这个限制可能
-           严格得多，此前完全没有被施加过，真实复现：Couette 层流验证
-           算例里这正是导致发散的根本原因之一（另一个是上面 0 提到的
-           低马赫数刚性）。公式与 TimeIntegrator.local_time_step 一致。
-        3. 几何/度量 CFL（此前已修复的失稳）：坍缩坐标下同一个
-           四面体/棱柱单元内，不同 SP 的 det(J) 天然可以相差几百倍——
-           已用完美正四面体数值验证，这是 Duffy 坍缩变换在 P=2 时的
-           固有性质，与单元形状/网格质量无关，不是可以"修好"的缺陷。
-           无粘残差公式 residual = -div_comp/det(J) 对*非均匀*流场（自由
-           流场因离散GCL恒等式精确抵消是例外）在 det(J) 很小的 SP 处，
-           把一个本身有界的参考空间通量散度 div_comp（真实网格实测量级
-           ~0.01~0.3，不随 det(J) 一起等比例缩小——这是把 P 阶多项式
-           微分矩阵套在"度量项(有理)×非常数流场"这个不再是低阶多项式的
-           乘积上的固有混叠截断误差）放大到失稳量级——真实网格上单元
-           509974/525292 等（det(J) 低至 ~2e-14）在仅 1% 幅度的温和非
-           均匀扰动下，无粘残差被放大到 1e10~1e11 量级，用原有"单元
-           平均体积"CFL 算出的步长完全无法感知、更谈不上限制这种
-           SP 级别的刚性，几步之内必然发散为 NaN——已数值复现验证。
-           标准有限体积 CFL 公式 dt=CFL*V/Σ(A_f*(|u·n|+a)) 在这里的
-           直接类比：用该 SP 自己的 det(J) 当作局部"体积"，
-           sum_m ||adj(J)[SP,m,:]|| 当作局部"总通量面积"。
-
-        Returns:
-            dt_local: 局部时间步长，形状 (n_cells, n_sps)
-        """
-        n_cells, n_sps, n_vars = self.state.U.shape
-
-        # 提取速度和声速
-        rho = self.state.Q[:, :, 0]
-        u = self.state.Q[:, :, 1] / np.maximum(rho, 1e-10)
-        v = self.state.Q[:, :, 2] / np.maximum(rho, 1e-10)
-        w = self.state.Q[:, :, 3] / np.maximum(rho, 1e-10)
-        p = (1.4 - 1.0) * (self.state.Q[:, :, 4] - 0.5 * rho * (u**2 + v**2 + w**2))
-        a = np.sqrt(np.maximum(1.4 * p / np.maximum(rho, 1e-10), 1e-10))
-
-        vel_mag = np.sqrt(u**2 + v**2 + w**2)
-
-        # 真实（未预处理）声学波速（见上方文档 0）：必须与 AUSM+up 通量
-        # 实际使用的特征波速一致——那里从未做过 Weiss-Smith 预处理，CFL
-        # 步长估计也不能假装做了。
-        wave_speed = np.maximum(vel_mag + a, 1e-10)
-
-        # 网格尺度：用 HighOrderMesh 的精确求积体积（不是"det(J)均值*8"近似），
-        # Order Continuation 期间当前状态 n_sps 可能与网格 n_sps 不同，
-        # 体积是逐单元量不受此影响，直接广播到当前 n_sps 即可。
-        volumes = self.mesh.get_all_cell_volumes()
-        h = np.power(np.abs(volumes), 1.0 / 3.0)
-        h_expanded = np.tile(h[:, np.newaxis], (1, n_sps))
-
-        CFL = 0.1  # 保守的CFL数
-        dt_advective = CFL * h_expanded / wave_speed
-
-        # 粘性稳定性限制（见上方文档 2）：分子粘度 + 当前湍流模型给出的
-        # 涡粘（若有），与 TimeIntegrator.local_time_step 用同一公式
-        # dt_visc = 0.25*CFL*rho*V^(2/3)/mu_eff。
-        mu_t_field = self._get_turbulent_viscosity_field()  # None 或 (n_cells,n_sps)/(n_cells,mesh_n_sps)
-        mu_molecular = 1.8e-5
-        if mu_t_field is not None:
-            if mu_t_field.shape[1] != n_sps:
-                rep = int(np.ceil(n_sps / mu_t_field.shape[1]))
-                mu_t_field = np.tile(mu_t_field, (1, rep))[:, :n_sps]
-            mu_eff = mu_molecular + mu_t_field
-        else:
-            mu_eff = np.full_like(rho, mu_molecular)
-        Lc2 = h_expanded ** 2  # V^(1/3) 的平方 = V^(2/3)
-        dt_visc = 0.25 * CFL * rho * Lc2 / np.maximum(mu_eff, 1e-30)
-
-        metric_flux_scale = self._get_metric_flux_scale()  # (n_cells,n_sps)
-        det_jacs = self.mesh.jacobians["det_jacs"].reshape(n_cells, self.mesh.n_sps_per_cell)
-        # Order Continuation 期间当前状态 n_sps 可能与网格 n_sps 不同——
-        # 度量场是网格固有量，跟当前解阶数无关，按需重复/裁剪到当前
-        # n_sps（与上面 h_expanded 对体积的处理是同一原则）。
-        if det_jacs.shape[1] != n_sps:
-            rep = int(np.ceil(n_sps / det_jacs.shape[1]))
-            det_jacs = np.tile(det_jacs, (1, rep))[:, :n_sps]
-            metric_flux_scale = np.tile(metric_flux_scale, (1, rep))[:, :n_sps]
-        dt_geometric = CFL * np.abs(det_jacs) / np.maximum(metric_flux_scale * wave_speed, 1e-300)
-
-        return np.minimum(np.minimum(dt_advective, dt_visc), dt_geometric)
+        return compute_local_time_step(self)
 
     def _get_cell_volumes(self) -> np.ndarray:
         """

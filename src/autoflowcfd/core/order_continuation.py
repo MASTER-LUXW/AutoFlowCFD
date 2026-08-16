@@ -14,9 +14,16 @@ from loguru import logger
 def interpolate_to_new_order(solver: Any, new_order: int):
     """
     将解从当前阶数插值到新的阶数（Order Continuation核心逻辑）。
-    
-    使用L2投影方法，确保守恒变量在插值前后保持积分守恒。
-    
+
+    文档更正：这里做的是逐变量的张量积网格线性插值
+    （`scipy.interpolate.RegularGridInterpolator(method='linear')`，
+    在旧 SPs 构成的规则网格上对每个守恒变量独立插值到新 SPs 位置），
+    不是 L2 投影——真正的 L2 投影需要用求积权重把旧解在新的多项式空间上
+    做最佳逼近（保证单元积分量守恒），当前实现没有做任何这样的求积/
+    投影计算，也没有任何守恒性校验。此前文档字符串声称"L2投影...保持
+    积分守恒"与实际实现不符，先如实改正说明；真正实现守恒的 L2 投影是
+    独立的后续工作。
+
     Args:
         solver: FRSolver 实例
         new_order: 目标多项式阶数
@@ -265,8 +272,12 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float):
         solver.state = p0_state
 
         if getattr(solver, "turb_model", None) is not None and hasattr(solver.turb_model, "k_field"):
+            # omega 初值必须与 SSTModelFR.__init__ 的默认值（1.0，见
+            # turbulence_sst.py）一致——此前这里用 1e-2，相差 100 倍，
+            # 意味着从 P0 重新初始化和求解器首次构造走的是两套不同的
+            # 湍流初场惯例。
             solver.turb_model.k_field = np.ones((solver.state.n_cells, expected_p0_n_sps)) * 1e-6
-            solver.turb_model.omega_field = np.ones((solver.state.n_cells, expected_p0_n_sps)) * 1e-2
+            solver.turb_model.omega_field = np.ones((solver.state.n_cells, expected_p0_n_sps)) * 1.0
             print(f"[INFO] Turbulence fields reset to P0 dimensions")
 
         if getattr(solver, "turb_model", None) is not None and hasattr(solver.turb_model, "des_length_scale"):
@@ -290,7 +301,21 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float):
 
         print(f"[INFO] Reinitialized to P0 ({expected_p0_n_sps} SP/cell)")
 
-    orders = list(range(0, original_order + 1))
+    # P=1 阶数下坍缩坐标度量恒等式（GCL）残差高达 0.105（P>=2 是机器精度
+    # 量级），是 Duffy 坍缩变换本身在 P=1 时的固有性质，与网格质量无关
+    # （HighOrderMesh.verify_gcl 文档也明确写着"P0/P1 阶段...不适用本严格
+    # 判据"，所以这里不是加一道 verify_gcl 门禁能拦住的问题——P=1 本身
+    # 就不该被当作可用的中间阶段）。真实网格数值验证：均匀自由流场在
+    # P=1 下残差达到 1563 倍来流压力，而 Order Continuation 默认对
+    # order>=2 的目标一定会经过 P=1 这一阶段，把 1/3 的迭代预算花在一个
+    # 会把解完全破坏的阶段上，交接给 P2 的初场因此已被污染。跳过 P=1，
+    # 直接 P0->P2->...->目标阶数；若用户显式请求的目标阶数本身就是 1，
+    # 则没有更高阶可跳过去，只能仍然经过它（这是用户明确选择的阶数，
+    # 不是 continuation 中间的可回避台阶）。
+    if original_order >= 2:
+        orders = [0] + list(range(2, original_order + 1))
+    else:
+        orders = list(range(0, original_order + 1))
 
     total_iter = 0
     for target_p in orders:
@@ -343,4 +368,3 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float):
     solver.ops = original_ops
 
     return SolverResult(converged=False, iterations=total_iter, final_residual=final_residual)
-    print(f"     Old SPs per cell: {old_n_sps} -> New SPs per cell: {new_n_sps}")

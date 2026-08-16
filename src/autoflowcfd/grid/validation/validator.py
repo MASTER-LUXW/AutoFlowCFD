@@ -248,115 +248,18 @@ class GridValidator:
     def _check_jacobian(self) -> Dict[str, float]:
         """检查雅可比行列式
 
-        Computes Jacobian determinant for each cell. The Jacobian measures
-        the local scaling factor of the coordinate transformation.
+        Computes Jacobian determinant for each cell (and, via directed-edge
+        winding consistency, cells with inconsistent orientation relative
+        to a neighbor).
 
-        Returns:
-            Dict: Statistics with 'max', 'avg', 'min' keys
-
-        Note:
-            Positive Jacobian indicates valid cell orientation.
-            Negative or near-zero Jacobian indicates inverted or degenerate cells.
+        Implementation lives in validator_jacobian.py (extracted for the
+        project's >400-line file-split rule) - see that module's
+        check_jacobian for the full Args/Returns/Note documentation.
         """
-        logger.debug("Computing Jacobian determinants...")
+        from .validator_jacobian import check_jacobian
 
-        connectivity = self.grid_data.cells.connectivity
-        nodes = self.grid_data.nodes
+        return check_jacobian(self.grid_data)
 
-        # Get node coordinates
-        cell_coords = np.stack([
-            nodes.get_coordinates(connectivity[:, i])
-            for i in range(3)
-        ], axis=1)
-
-        # Compute vectors from node 0 to nodes 1 and 2
-        v0 = cell_coords[:, 1] - cell_coords[:, 0]
-        v1 = cell_coords[:, 2] - cell_coords[:, 0]
-
-        # Compute cross product (gives normal vector)
-        cross = np.cross(v0, v1)
-
-        # Jacobian determinant is magnitude of cross product
-        jacobians = np.linalg.norm(cross, axis=1)
-
-        # A single triangle's winding has no absolute sign without an
-        # external reference frame, so "jacobians < 0" here (np.linalg.norm
-        # is never negative) could never fire for any mesh - inverted
-        # triangles were silently invisible to this check regardless of
-        # input. What *is* well-defined without an external reference is
-        # whether neighboring triangles agree with each other: on a
-        # consistently-oriented manifold surface, two triangles sharing an
-        # edge must traverse that shared edge in opposite directions. If
-        # they traverse it in the same direction, one of the pair is
-        # flipped relative to its neighbor - detect that via directed-edge
-        # sign accumulation instead of the magnitude's sign.
-        negative_count = self._count_flipped_triangles(connectivity)
-
-        # Compute statistics
-        stats = {
-            'max': float(np.max(jacobians)),
-            'avg': float(np.mean(jacobians)),
-            'min': float(np.min(jacobians)),
-            'std': float(np.std(jacobians)),
-            'negative_count': negative_count
-        }
-
-        logger.debug(
-            f"Jacobian - Max: {stats['max']:.6f}, "
-            f"Avg: {stats['avg']:.6f}, Min: {stats['min']:.6f}, "
-            f"Negative: {stats['negative_count']}"
-        )
-
-        return stats
-
-    def _count_flipped_triangles(self, connectivity: np.ndarray) -> int:
-        """Count triangles whose winding is inconsistent with a neighbor.
-
-        For every shared (manifold-interior) edge - one that borders
-        exactly two triangles - a consistently-oriented surface must
-        traverse it in opposite directions from each side. Two triangles
-        that instead traverse their shared edge in the same direction
-        cannot both be correctly oriented; both are flagged. Edges shared
-        by a triangle count other than 2 (open boundary or non-manifold)
-        aren't orientation-checkable this way and are skipped here - that
-        is a distinct mesh-integrity issue, not this metric's concern.
-        """
-        n1, n2, n3 = connectivity[:, 0], connectivity[:, 1], connectivity[:, 2]
-        directed_edges = np.concatenate([
-            np.stack([n1, n2], axis=1),
-            np.stack([n2, n3], axis=1),
-            np.stack([n3, n1], axis=1),
-        ], axis=0)
-        owner_cells = np.tile(np.arange(len(connectivity)), 3)
-
-        n_nodes = self.grid_data.nodes.count
-        lo = np.minimum(directed_edges[:, 0], directed_edges[:, 1]).astype(np.int64)
-        hi = np.maximum(directed_edges[:, 0], directed_edges[:, 1]).astype(np.int64)
-        edge_key = lo * n_nodes + hi
-        sign = np.where(directed_edges[:, 0] < directed_edges[:, 1], 1, -1)
-
-        order = np.argsort(edge_key, kind='stable')
-        sorted_keys = edge_key[order]
-        sorted_signs = sign[order]
-        sorted_owners = owner_cells[order]
-
-        group_end = np.flatnonzero(
-            np.concatenate([sorted_keys[1:] != sorted_keys[:-1], [True]])
-        )
-        group_start = np.concatenate([[0], group_end[:-1] + 1])
-        group_size = group_end - group_start + 1
-
-        pair_mask = group_size == 2
-        pair_first = group_start[pair_mask]
-        same_direction = sorted_signs[pair_first] == sorted_signs[pair_first + 1]
-        bad_first = pair_first[same_direction]
-
-        flipped_cells = np.unique(np.concatenate([
-            sorted_owners[bad_first], sorted_owners[bad_first + 1]
-        ])) if bad_first.size else np.array([], dtype=owner_cells.dtype)
-
-        return int(flipped_cells.size)
-    
     def _generate_summary(self, results: Dict[str, Any], failures: list) -> str:
         """生成校验结果摘要
         
