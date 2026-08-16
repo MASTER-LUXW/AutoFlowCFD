@@ -301,21 +301,32 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float):
 
         print(f"[INFO] Reinitialized to P0 ({expected_p0_n_sps} SP/cell)")
 
-    # P=1 阶数下坍缩坐标度量恒等式（GCL）残差高达 0.105（P>=2 是机器精度
-    # 量级），是 Duffy 坍缩变换本身在 P=1 时的固有性质，与网格质量无关
-    # （HighOrderMesh.verify_gcl 文档也明确写着"P0/P1 阶段...不适用本严格
-    # 判据"，所以这里不是加一道 verify_gcl 门禁能拦住的问题——P=1 本身
-    # 就不该被当作可用的中间阶段）。真实网格数值验证：均匀自由流场在
-    # P=1 下残差达到 1563 倍来流压力，而 Order Continuation 默认对
-    # order>=2 的目标一定会经过 P=1 这一阶段，把 1/3 的迭代预算花在一个
-    # 会把解完全破坏的阶段上，交接给 P2 的初场因此已被污染。跳过 P=1，
-    # 直接 P0->P2->...->目标阶数；若用户显式请求的目标阶数本身就是 1，
-    # 则没有更高阶可跳过去，只能仍然经过它（这是用户明确选择的阶数，
-    # 不是 continuation 中间的可回避台阶）。
-    if original_order >= 2:
-        orders = [0] + list(range(2, original_order + 1))
-    else:
-        orders = list(range(0, original_order + 1))
+    # 曾经在这里跳过 P=1（直接 P0->P2->...），理由是"P=1 下均匀自由流场
+    # 残差达到 1563 倍来流压力"——这个说法已过时，被"解析精确雅可比"
+    # （grid/curved_mapping.py::tet_exact_jacobian/prism_exact_jacobian）
+    # 顺带修好，真实数值复核（_build_synthetic_mixed_mesh，与
+    # TestFreeStreamPreservation/TestVolumeTermDealiasing 同一参考网格）：
+    #   - 均匀自由流场残差（真实求解器路径，compute_inviscid_residual_fr）：
+    #     P1=1.25e-10（相对p_inf），P2=1.37e-5，P3=8.2e-4——P1 现在反而是
+    #     三者里最好的。
+    #   - 纯几何 GCL 诊断（HighOrderMesh.verify_gcl，不经过体积项
+    #     over-integration，只用 coarse 阶数自己的 D_3d_tet/prism 对
+    #     adj(J) 求散度）：P1=0.105，P2=1.6e-13，P3=1.2e-8——这个数字
+    #     依然真实存在，但是诊断函数自身的局限（adj(J) 是坍缩坐标下的
+    #     有理函数不是多项式，P1 差分矩阵次数不够精确微分它），不代表
+    #     真实求解器残差有问题（verify_gcl 文档已经写明"P0/P1 阶段
+    #     ...不适用本严格判据"，本来就不该拿它当 P1 可用性的门禁）。
+    #   - 非均匀（线性剪切）流场残差：P1 在退化四面体角点
+    #     （计算立方体 (a,b,c)=(1,1,1)，Duffy 坍缩变换的奇异汇聚点）
+    #     附近仍可能出现巨大局部残差（真实测得 2.85 vs P2 的 4.49e-6）
+    #     ——但这是本项目已经记录、已经决定不在数值算法层面修的"四面体
+    #     坍缩坐标各向异性"问题（见 tet_collapsed_coord_anisotropy 相关
+    #     记录：应对方式是剪切区用棱柱而非四面体，不是改数值算法/加阈值），
+    #     P2/P3 底层有同一个奇异性，只是点更多、数值上被摊薄——不是
+    #     P1 专属、也不是跳过 P1 就能规避的风险。
+    # 综上，均匀流场的顾虑已不成立，另外两点也不构成继续跳过 P1 的理由，
+    # 恢复朴素的 P0->P1->...->目标阶数。
+    orders = list(range(0, original_order + 1))
 
     total_iter = 0
     for target_p in orders:
