@@ -2,17 +2,30 @@
 
 ## 快速安装
 
-### 方法1: 使用pip直接安装（推荐）
+### 方法1: 使用Poetry安装（推荐）
 
 ```bash
-# 安装核心依赖（Iteration 2必需）
-pip install numpy>=1.24.0 click>=8.1.0 pyyaml>=6.0.0 h5py>=3.9.0 loguru>=0.7.0
+# 安装 Poetry（如果还没有）
+pip install poetry
+
+# 安装所有依赖
+poetry install
+
+# 安装包含可选依赖
+poetry install --extras "viz gpu"
+```
+
+### 方法2: 使用pip直接安装
+
+```bash
+# 安装核心依赖
+pip install numpy>=1.26.0 click>=8.1.0 pyyaml>=6.0.0 h5py>=3.9.0 loguru>=0.7.0 numba>=0.60.0
 
 # 安装开发依赖（测试和代码检查）
 pip install pytest>=7.4.0 pytest-cov>=4.1.0 black>=23.7.0 isort>=5.12.0 flake8>=6.1.0 mypy>=1.5.0
 ```
 
-### 方法2: 使用自动化脚本
+### 方法3: 使用自动化脚本
 
 **Windows:**
 ```bash
@@ -24,19 +37,6 @@ install_dependencies.bat
 python scripts/check_dependencies.py
 ```
 
-### 方法3: 使用Poetry（项目推荐）
-
-```bash
-# 安装Poetry（如果还没有）
-pip install poetry
-
-# 安装所有依赖
-poetry install
-
-# 安装包含可选依赖
-poetry install --extras "viz gpu"
-```
-
 ---
 
 ## 依赖清单
@@ -45,7 +45,7 @@ poetry install --extras "viz gpu"
 
 |包名|最低版本|用途|
 |---|---|---|
-|numpy|1.24.0|数值计算基础库|
+|numpy|1.26.0|数值计算基础库|
 |click|8.1.0|CLI命令行框架|
 |pyyaml|6.0.0|YAML配置文件解析|
 |h5py|3.9.0|HDF5数据序列化|
@@ -82,34 +82,18 @@ python -c "import numpy, click, yaml, h5py, loguru; print('✓ All core dependen
 ### 2. 运行完整验证脚本
 
 ```bash
-python scripts/verify_iteration2.py
+python scripts/check_dependencies.py
 ```
 
 预期输出：
 ```
-======================================================================
-AutoFlowCFD Iteration 2 Verification
-======================================================================
-Testing file structure...
-✅ All expected files present
-Testing imports...
-✅ All imports successful
-...
-✅ ALL TESTS PASSED - Iteration 2 is ready!
+✓ All core dependencies OK
 ```
 
 ### 3. 运行单元测试
 
 ```bash
-pytest tests/unit/test_grid_structures.py -v
-pytest tests/unit/test_nas_parser.py -v
-pytest tests/unit/test_grid_validator.py -v
-```
-
-### 4. 运行示例
-
-```bash
-python examples/grid_parsing_example.py
+poetry run pytest tests/unit/ -v
 ```
 
 ---
@@ -201,12 +185,12 @@ print(f"CUDA available: {cp.cuda.runtime.getDeviceCount() > 0}")
 
 依赖安装完成后，您可以：
 
-1. **运行测试**: `pytest tests/ -v`
-2. **查看示例**: `python examples/grid_parsing_example.py`
-3. **验证迭代2**: `python scripts/verify_iteration2.py`
-4. **开始开发**: 进入Iteration 3 - FR求解器开发
+1. **运行测试**: `poetry run pytest tests/ -v`
+2. **快速入门**: 参考 [QUICKSTART.md](QUICKSTART.md)
+3. **检查环境**: `poetry run autoflowcfd utils doctor`
+4. **开始开发**: 参考 [开发者指南](docs/DEVELOPER_GUIDE.md)
 
 ---
 
-**最后更新**: 2026-07-23  
+**最后更新**: 2026-08-17  
 **维护者**: AutoFlowCFD Team

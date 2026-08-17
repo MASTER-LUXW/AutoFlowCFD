@@ -132,7 +132,7 @@ AutoFlowCFD: ANSA → .nas → AutoFlowCFD  (1步，零误差)
 
 ```bash
 # CLI 命令行（适合脚本调用）
-autoflowcfd solve run car.nas --backend gpu --order 2
+autoflowcfd solve steady volume_mesh.pkl --backend cpu --order 2
 
 # Python API（适合程序化集成）
 from autoflowcfd import AutoFlowCFDAPI
@@ -439,13 +439,12 @@ ANSA (前处理) → AutoFlowCFD (求解器) → ParaView (后处理)
 - ✅ 完善 CLI 命令行接口
 - ✅ 增强 Python API 功能
 - ✅ 添加更多算例教程
-- ✅ 提升测试覆盖率至 90%
-- ✅ 发布 v0.2.0 Beta 版本
+- ✅ 发布 v0.2.0 (V2.0 系统改造版)
+- 🔲 提升测试覆盖率至 90%
 
 ### 中期目标（1 年内）
 
 - 🎯 实现多 GPU 分布式计算（MPI + NCCL）
-- 🎯 添加 LES 大涡模拟插件
 - 🎯 开发气动噪声模块（FW-H 声类比）
 - 🎯 推出 Docker 容器化部署
 - 🎯 发布 v1.0.0 Stable 版本
@@ -461,27 +460,26 @@ ANSA (前处理) → AutoFlowCFD (求解器) → ParaView (后处理)
 ### 技术路线图
 
 ```
-2024 Q3-Q4: 基础功能完善
-  ├─ CLI 完整实现
-  ├─ Python API 封装
-  └─ 文档体系建设
+2026 Q3: V2.0 系统改造版完成
+  ├─ AUSM+up 黎曼求解器 + BR1 粘性耦合
+  ├─ SST/DDES/WMLES/WALE 渥流模型体系
+  ├─ SSP-RK2/RK3 + IMEX + Dual-Time 时间积分
+  ├─ Q-Criterion 涡识别 + 力系数时间平均
+  └─ CPU 性能优化 + 检查点断点续算
 
-2025 Q1-Q2: 性能优化
+2026 Q4: 稳定性与测试强化
+  ├─ 测试覆盖率提升至 90%
+  ├─ 更多验证算例
+  └─ 文档完善
+
+2027 Q1-Q2: 性能优化
   ├─ 多 GPU 分布式
   ├─ 混合精度计算
   └─ 内存优化
 
-2025 Q3-Q4: 功能扩展
-  ├─ LES 大涡模拟
-  ├─ 气动噪声模块
-  └─ 网格变形工具
-
-2026 Q1-Q2: 生态建设
+2027 Q3-Q4: v1.0 发布
+  ├─ 工业精度验证（Cd 误差 ≤1.5%）
   ├─ Docker 容器化
-  ├─ Web 可视化界面
-  └─ AI Agent 集成示例
-
-2026 Q3+:  v1.0 发布
   └─ 稳定版发布，长期支持
 ```
 
@@ -508,5 +506,5 @@ ANSA (前处理) → AutoFlowCFD (求解器) → ParaView (后处理)
 
 ---
 
-**最后更新**: 2026-07-25  
-**版本**: AutoFlowCFD v0.1.0
+**最后更新**: 2026-08-17  
+**版本**: AutoFlowCFD v0.2.0 (V2.0 系统改造版)

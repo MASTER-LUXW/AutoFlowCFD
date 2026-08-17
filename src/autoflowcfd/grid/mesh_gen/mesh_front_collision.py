@@ -1,23 +1,16 @@
-"""Reactive per-layer self-collision prevention for BL front extrusion.
+"""边界层前沿挤出的逐层自碰撞防护。
 
-extrude_single_layer's miter-join compensation (mesh_layer_step.py's own
-MITER_LIMIT) and mesh_tetgen_core.compute_local_thickness_limit's
-a-priori cone-angle budget both reduce how often an extruded front folds
-over itself, but neither *guarantees* it: the miter join is a fixed
-per-node scale computed once from the UNDEFORMED surface, and the
-thickness-limit budget is a static, whole-run estimate from that same
-undeformed geometry - neither one looks at the actual, current geometry
-of the layer it is about to produce. A sharp CONCAVE curve (offset lines
-converging once thickness exceeds the local radius of curvature) or a
-valence-3+ corner (three or more patches meeting, not the simple
-two-patch edge the miter compensation models) can still fold over
-regardless of parameters - confirmed directly: cube_demo still showed
-hundreds of overlapping cells across several different layer-count/
-growth-rate combinations.
+extrude_single_layer 的斜接补偿（mesh_layer_step.py 的 MITER_LIMIT）和
+mesh_tetgen_core.compute_local_thickness_limit 的先验锥角预算都能减少挤出
+前沿自折叠的频率，但都不能*保证*避免：斜接是按未变形表面一次性计算的
+固定逐节点缩放，厚度限制预算是基于同一未变形几何的静态全程估计——
+两者都不会查看即将生成的层的实际当前几何。尖锐凹曲线（当厚度超过局部
+曲率半径时偏移线收敛）或价≥3的角点（三个或更多面片交汇，而非斜接补偿
+建模的简单两面片边）无论参数如何都可能折叠——已直接确认：cube_demo 在
+多种层数/增长率组合下仍显示数百个重叠单元。
 
-Two complementary mechanisms close that gap, mirroring how advancing-
-front methods (e.g. Pointwise's T-Rex) handle it - both independent of
-growth_rate, bl_layers, or any other extrusion parameter:
+两个互补机制弥补了这一缺陷，镜像了推进前沿方法（如 Pointwise 的 T-Rex）
+的处理方式——两者均独立于 growth_rate、bl_layers 或任何其它挤出参数：
 
   clamp_budget_for_convergence - BEFORE each layer's step, measure the
       CURRENT distance between candidate non-adjacent face pairs and cap

@@ -88,11 +88,11 @@ poetry install -E gpu
 ```bash
 # 查看版本信息
 poetry run autoflowcfd --version
-# 应输出: AutoFlowCFD, version 0.1.0
+# 应输出: AutoFlowCFD, version 0.1.0（发布版本将更新为 2.0.0）
 
 # 检查可用后端
-poetry run python -c "from autoflowcfd.core import get_available_backends; print(get_available_backends())"
-# 应输出: ['cpu'] 或 ['cpu', 'gpu']（如果已安装 GPU 支持）
+poetry run python -c "from autoflowcfd.core.backend import get_available_backends; print(get_available_backends())"
+# 应输出: {'cpu': True} 或 {'cpu': True, 'gpu': True}（如果已安装 GPU 支持）
 ```
 
 ---
@@ -105,64 +105,78 @@ poetry run python -c "from autoflowcfd.core import get_available_backends; print
 
 ```bash
 ls examples/ahmed_demo/
-# 应看到: car_model.nas（或其他 .nas 文件）
+# 应看到: ahmed_body_demo.nas（面网格文件）
 ```
 
 如果没有现成网格，可以使用我们提供的示例文件继续测试。
+
+> **注意**：V2.0 求解流程为：面网格(.nas) → 体网格(.pkl) → 求解。需先生成体网格。
 
 ### 方式一：CLI 命令行（推荐新手）
 
 #### 🎯 稳态 RANS 仿真（CPU）
 
-最简单的入门命令：
+V2.0 求解流程：先生成体网格，再进行求解。
 
 ```bash
-poetry run autoflowcfd solve run examples/ahmed_demo/car_model.nas \
-    --mode steady \
-    --turbulence sst_kw \
+# 步骤 1: 从面网格生成体网格
+poetry run autoflowcfd grid generate-volume examples/ahmed_demo/ahmed_body_demo.nas \
+    -o examples/ahmed_demo/ahmed_volume.pkl
+
+# 步骤 2: 运行稳态求解
+poetry run autoflowcfd solve steady examples/ahmed_demo/ahmed_volume.pkl \
     --backend cpu \
-    --order 2 \
-    --max-iter 1000
+    --order 1 \
+    --turbulence-model sst \
+    --max-iter 1000 \
+    -o ./results/steady \
+    --reference-area 1.0
 ```
 
 **参数说明**：
-- `--mode steady`：稳态求解模式
-- `--turbulence sst_kw`：SST k-ω 湍流模型
+- `solve steady`：稳态求解子命令
+- `--turbulence-model sst`：SST k-ω 湍流模型
 - `--backend cpu`：使用 CPU 计算
-- `--order 2`：FR 二阶精度
+- `--order 1`：FR 一阶精度（P1，工程推荐 P2）
 - `--max-iter 1000`：最大迭代次数
+- `--reference-area 1.0`：气动系数参考面积 (m²)
 
 #### ⚡ GPU 加速仿真
 
 如果您的系统支持 GPU：
 
 ```bash
-poetry run autoflowcfd solve run examples/ahmed_demo/car_model.nas \
-    --mode steady \
-    --turbulence sst_kw \
+poetry run autoflowcfd solve steady examples/ahmed_demo/ahmed_volume.pkl \
     --backend gpu \
     --order 2 \
-    --max-iter 1000
+    --turbulence-model sst \
+    --max-iter 1000 \
+    -o ./results/steady_gpu \
+    --reference-area 1.0
 ```
 
-#### 🌊 瞬态 DES 仿真
+#### 🌊 瞬态 DES/LES 仿真
 
 捕捉非定常流动特征：
 
 ```bash
-poetry run autoflowcfd solve run examples/ahmed_demo/car_model.nas \
-    --mode transient \
-    --turbulence des \
-    --backend gpu \
+poetry run autoflowcfd solve transient examples/ahmed_demo/ahmed_volume.pkl \
+    --backend cpu \
+    --order 1 \
+    --time-method dual-time \
+    --turbulence-model ddes \
     --dt 1e-4 \
-    --total-time 0.05
+    --physical-time 0.05 \
+    -o ./results/transient \
+    --reference-area 1.0
 ```
 
 **参数说明**：
-- `--mode transient`：瞬态求解模式
-- `--turbulence des`：DES 混合湍流模型
+- `solve transient`：瞬态求解子命令
+- `--time-method dual-time`：Dual-Time 时间推进（支持 rk3/imex/dual-time）
+- `--turbulence-model ddes`：DDES 混合湍流模型（支持 sst/ddes/wmles/les）
 - `--dt 1e-4`：时间步长（秒）
-- `--total-time 0.05`：总仿真时间（秒）
+- `--physical-time 0.05`：总物理时间（秒）
 
 #### 📝 使用配置文件（进阶）
 
@@ -203,7 +217,7 @@ boundary_conditions:
 运行仿真：
 
 ```bash
-poetry run autoflowcfd solve run car_model.nas -c config.yaml
+poetry run autoflowcfd solve steady volume_mesh.pkl -c config.yaml
 ```
 
 ### 方式二：Python API（推荐开发者）
@@ -218,7 +232,7 @@ api = AutoFlowCFDAPI(verbose=True)
 
 # 加载网格
 print("📂 加载网格文件...")
-grid = api.load_grid("examples/ahmed_demo/car_model.nas")
+grid = api.load_grid("examples/ahmed_demo/ahmed_body_demo.nas")
 print(f"✅ 网格加载成功: {grid.node_count} 节点, {grid.cell_count} 单元")
 
 # 配置并运行稳态仿真
@@ -294,7 +308,7 @@ results/
 3. **可视化建议**：
    - **压力云图**：显示 `pressure` 字段，调整颜色映射
    - **速度矢量**：显示 `velocity` 矢量箭头
-   - **涡量等值面**：显示 `vorticity` 识别涡系结构
+   - **Q-Criterion 等值面**：显示 `q_criterion` 识别涡系结构
    - **流线追踪**：从车头上游释放流线，观察流动分离
 
 ### 📈 收敛曲线分析
@@ -385,8 +399,8 @@ poetry run python -c "import cupy as cp; print(cp.cuda.runtime.getDeviceCount())
 # 应输出 > 0
 
 # 3. 检查 AutoFlowCFD 后端检测
-poetry run python -c "from autoflowcfd.core import get_available_backends; print(get_available_backends())"
-# 应输出 ['cpu', 'gpu']
+poetry run python -c "from autoflowcfd.core.backend import get_available_backends; print(get_available_backends())"
+# 应输出 {'cpu': True, 'gpu': True}
 
 # 4. 确认 NVIDIA 驱动和 CUDA 版本兼容
 nvidia-smi  # 查看驱动版本
@@ -399,13 +413,13 @@ nvcc --version  # 查看 CUDA 版本
 
 ```bash
 # 1. 确认文件路径正确（使用绝对路径更可靠）
-poetry run autoflowcfd solve run /absolute/path/to/car_model.nas
+poetry run autoflowcfd grid parse /absolute/path/to/model.nas
 
 # 2. 验证网格文件格式
-poetry run autoflowcfd grid validate car_model.nas
+poetry run autoflowcfd grid validate model.nas
 
 # 3. 查看网格详细信息
-poetry run autoflowcfd grid parse car_model.nas
+poetry run autoflowcfd grid info model.nas
 ```
 
 ### ❓ Q5: 如何查看详细的日志输出？
@@ -413,7 +427,7 @@ poetry run autoflowcfd grid parse car_model.nas
 **A**: 使用 `-v` 或 `--verbose` 标志：
 
 ```bash
-poetry run autoflowcfd solve run car_model.nas -v
+poetry run autoflowcfd solve steady volume_mesh.pkl -v
 ```
 
 ### ❓ Q6: 计算结果保存在哪里？
@@ -422,7 +436,7 @@ poetry run autoflowcfd solve run car_model.nas -v
 - 默认保存在 `./results` 目录
 - 可通过 `--output` 参数指定：
   ```bash
-  poetry run autoflowcfd solve run car_model.nas --output ./my_results
+  poetry run autoflowcfd solve steady volume_mesh.pkl --output ./my_results
   ```
 
 ### ❓ Q7: 内存不足怎么办？
@@ -431,13 +445,13 @@ poetry run autoflowcfd solve run car_model.nas -v
 
 ```bash
 # 方式一：限制 CPU 线程数
-poetry run autoflowcfd solve run large_grid.nas --threads 4
+poetry run autoflowcfd solve steady large_grid.pkl --threads 4
 
 # 方式二：使用 GPU（显存通常更大）
-poetry run autoflowcfd solve run large_grid.nas --backend gpu
+poetry run autoflowcfd solve steady large_grid.pkl --backend gpu
 
 # 方式三：降低 FR 阶数（减少内存占用）
-poetry run autoflowcfd solve run large_grid.nas --order 1
+poetry run autoflowcfd solve steady large_grid.pkl --order 1
 ```
 
 ### ❓ Q8: 仿真不收敛怎么办？
@@ -445,17 +459,16 @@ poetry run autoflowcfd solve run large_grid.nas --order 1
 **A**: 尝试以下调整：
 
 ```bash
-# 1. 降低初始 CFL 数
-poetry run autoflowcfd solve run car_model.nas --cfl-init 0.05
+# 1. 降低初始 CFL 数（通过配置文件设置 cfl_init）
+# 在 config.yaml 中设置:
+# solver:
+#   cfl_init: 0.05
 
 # 2. 增加最大迭代次数
-poetry run autoflowcfd solve run car_model.nas --max-iter 10000
+poetry run autoflowcfd solve steady volume_mesh.pkl --max-iter 10000
 
-# 3. 放宽收敛容差
-poetry run autoflowcfd solve run car_model.nas --convergence-tol 1.0e-5
-
-# 4. 检查网格质量
-poetry run autoflowcfd grid validate car_model.nas
+# 3. 检查网格质量
+poetry run autoflowcfd grid validate volume_mesh.pkl
 ```
 
 ---

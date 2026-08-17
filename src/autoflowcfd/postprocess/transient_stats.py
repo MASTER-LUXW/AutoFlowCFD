@@ -37,11 +37,15 @@ class TransientResult:
         rms_fields: RMS 脉动场
         sampling_time: 总采样时长（秒）
         num_samples: 已采集的样本数
+        mean_coefficients: 时间平均气动系数 (P-03)
+        std_coefficients: 气动系数标准差 (P-03)
     """
     mean_fields: Dict[str, np.ndarray] = field(default_factory=dict)
     rms_fields: Dict[str, np.ndarray] = field(default_factory=dict)
     sampling_time: float = 0.0
     num_samples: int = 0
+    mean_coefficients: Dict[str, float] = field(default_factory=dict)
+    std_coefficients: Dict[str, float] = field(default_factory=dict)
 
     def to_dict(self) -> Dict:
         """转换成字典（不含数组本身）。"""
@@ -49,7 +53,9 @@ class TransientResult:
             'sampling_time': self.sampling_time,
             'num_samples': self.num_samples,
             'mean_fields': list(self.mean_fields.keys()),
-            'rms_fields': list(self.rms_fields.keys())
+            'rms_fields': list(self.rms_fields.keys()),
+            'mean_coefficients': self.mean_coefficients,
+            'std_coefficients': self.std_coefficients,
         }
 
 
@@ -102,6 +108,11 @@ class TransientStatistics:
         self.n_samples = 0
         self.mean_accumulator: Optional[Dict[str, np.ndarray]] = None
         self.m2_accumulator: Optional[Dict[str, np.ndarray]] = None  # 用于方差
+
+        # P-03：气动系数时间平均统计（Cd/Cl/Cs）
+        self.n_coeff_samples = 0
+        self.coeff_mean: Optional[Dict[str, float]] = None
+        self.coeff_m2: Optional[Dict[str, float]] = None
 
         logger.info(
             f"TransientStatistics initialized:\n"
@@ -235,7 +246,9 @@ class TransientStatistics:
             mean_fields=mean_fields,
             rms_fields=rms_fields,
             sampling_time=sampling_time,
-            num_samples=self.n_samples
+            num_samples=self.n_samples,
+            mean_coefficients={k: v['mean'] for k, v in self.get_coefficient_statistics().items()} if self.n_coeff_samples > 0 else {},
+            std_coefficients={k: v['std'] for k, v in self.get_coefficient_statistics().items()} if self.n_coeff_samples > 0 else {},
         )
 
         logger.success(
@@ -245,6 +258,9 @@ class TransientStatistics:
             f"  Mean fields:    {list(result.mean_fields.keys())}\n"
             f"  RMS fields:     {list(result.rms_fields.keys())}"
         )
+        if result.mean_coefficients:
+            logger.info(f"  Mean coefficients: {result.mean_coefficients}")
+            logger.info(f"  Std coefficients:  {result.std_coefficients}")
 
         return result
 
@@ -259,5 +275,62 @@ class TransientStatistics:
             'window_size': self.window_size,
             'current_samples': len(self.samples),
             'time_range': [self.times[0], self.times[-1]] if self.times else [0.0, 0.0],
-            'sampling_duration': self.times[-1] - self.times[0] if len(self.times) >= 2 else 0.0
+            'sampling_duration': self.times[-1] - self.times[0] if len(self.times) >= 2 else 0.0,
         }
+
+    # ------------------------------------------------------------------
+    # P-03：气动系数时间平均统计
+    # ------------------------------------------------------------------
+
+    def accumulate_coefficients(self, Cd: float, Cl: float, Cs: float = 0.0) -> None:
+        """累积一组气动系数用于时间平均统计（P-03）。
+
+        使用 Welford 在线算法同时计算均值和方差，与流场统计的
+        `_update_online_stats` 同一套方法，不需要存储全部样本。
+
+        Args:
+            Cd: 当前时间步的阻力系数
+            Cl: 当前时间步的升力系数
+            Cs: 当前时间步的侧向力系数（默认 0）
+        """
+        coeffs = {'Cd': Cd, 'Cl': Cl, 'Cs': Cs}
+        self.n_coeff_samples += 1
+
+        if self.coeff_mean is None:
+            self.coeff_mean = {k: v for k, v in coeffs.items()}
+            self.coeff_m2 = {k: 0.0 for k in coeffs}
+        else:
+            for key, val in coeffs.items():
+                delta = val - self.coeff_mean[key]
+                self.coeff_mean[key] += delta / self.n_coeff_samples
+                delta2 = val - self.coeff_mean[key]
+                self.coeff_m2[key] += delta * delta2
+
+        if self.n_coeff_samples % 50 == 0:
+            logger.info(
+                f"Coefficient stats ({self.n_coeff_samples} samples): "
+                f"Cd_mean={self.coeff_mean['Cd']:.6f}, "
+                f"Cl_mean={self.coeff_mean['Cl']:.6f}"
+            )
+
+    def get_coefficient_statistics(self) -> Dict[str, Dict[str, float]]:
+        """获取气动系数的时间平均统计量（P-03）。
+
+        Returns:
+            每个系数名称到 {'mean', 'std', 'n_samples'} 的字典。
+            尚未累积样本时返回空字典。
+        """
+        if self.n_coeff_samples == 0 or self.coeff_mean is None:
+            return {}
+
+        result = {}
+        for key in self.coeff_mean:
+            mean_val = self.coeff_mean[key]
+            variance = self.coeff_m2[key] / max(self.n_coeff_samples - 1, 1)
+            std_val = float(np.sqrt(max(variance, 0.0)))
+            result[key] = {
+                'mean': mean_val,
+                'std': std_val,
+                'n_samples': self.n_coeff_samples,
+            }
+        return result

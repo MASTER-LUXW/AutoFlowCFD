@@ -1,7 +1,7 @@
-"""Grid node data structures for CFD mesh.
+"""CFD 网格节点数据结构。
 
-Provides CPU and GPU node coordinate storage in Structure of Arrays (SoA) layout
-for optimal cache performance during numerical computations.
+提供 SoA（Structure of Arrays）布局的 CPU 和 GPU 节点坐标存储，
+优化数值计算过程中的缓存性能。
 """
 
 import numpy as np

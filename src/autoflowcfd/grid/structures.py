@@ -1,7 +1,7 @@
-"""Grid data structures for CFD mesh.
+"""CFD 网格数据结构。
 
-This module provides backward compatibility by re-exporting from submodules.
-For new code, import directly from:
+本模块通过从子模块重新导出提供向后兼容。
+新代码请直接从以下模块导入:
     - autoflowcfd.grid.schema.grid_nodes
     - autoflowcfd.grid.schema.grid_cells
     - autoflowcfd.grid.schema.grid_boundaries

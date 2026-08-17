@@ -1,14 +1,14 @@
-"""Boundary condition configuration loader.
+"""边界条件配置加载器。
 
-This module provides YAML configuration loading for boundary conditions,
-supporting auto, manual, and hybrid modes.
+本模块提供边界条件的 YAML 配置加载功能，
+支持自动、手动和混合模式。
 
-Key Components:
-    - YAMLConfigLoader: Loads and validates YAML boundary configurations
-    - BoundaryTypeMapper: Maps property names to boundary types
-    - ParameterValidator: Validates boundary condition parameters
+核心组件:
+    - YAMLConfigLoader: 加载并验证 YAML 边界配置
+    - BoundaryTypeMapper: 属性名到边界类型的映射
+    - ParameterValidator: 边界条件参数验证
 
-Example:
+示例:
     >>> from autoflowcfd.boundary.config import YAMLConfigLoader
     >>> loader = YAMLConfigLoader()
     >>> config = loader.load("boundary_config.yaml")
@@ -22,7 +22,7 @@ from loguru import logger
 
 
 class ConfigurationError(Exception):
-    """Configuration loading or validation error."""
+    """配置加载或验证错误。"""
     pass
 
 

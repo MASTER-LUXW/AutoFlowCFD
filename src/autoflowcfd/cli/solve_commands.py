@@ -1,14 +1,14 @@
-"""Solver subcommands (V2.0 Pure FR).
+"""V2.0 FR 求解器子命令。
 
 本模块提供 V2.0 FR 求解器的 CLI 命令，支持高阶精度、多种时间推进方法和湍流模型。
 
-Commands:
+命令:
     - steady: 运行稳态 FR 仿真
     - transient: 运行瞬态 FR 仿真（专用命令）
     - resume: 从检查点恢复
     - status: 查看求解器状态
 
-Example:
+示例:
     $ autoflowcfd solve steady model_volume.pkl --backend cpu --order 2 --turbulence-model sst
 
 网格加载/壁面距离场/结果保存三个共享辅助函数在 solve_helpers.py，本文件只保留

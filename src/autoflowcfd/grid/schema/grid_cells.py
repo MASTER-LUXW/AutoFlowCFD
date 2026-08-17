@@ -1,7 +1,7 @@
-"""Grid cell data structures for CFD mesh.
+"""CFD 网格单元数据结构。
 
-Provides CPU and GPU cell connectivity storage in Structure of Arrays (SoA) layout,
-including triangular surface cells and tetrahedral volume cells.
+提供 SoA（Structure of Arrays）布局的 CPU 和 GPU 单元连接关系存储，
+包括三角形面单元和四面体/棱柱体单元。
 """
 
 import numpy as np

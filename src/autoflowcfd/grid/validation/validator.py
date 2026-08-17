@@ -1,25 +1,25 @@
-"""Grid quality validator.
+"""网格质量验证器。
 
-This module implements comprehensive mesh quality checking for CFD simulations.
-It validates geometric quality metrics including aspect ratio, skewness,
-and Jacobian determinant to ensure numerical stability and accuracy.
+本模块实现 CFD 仿真的全面网格质量检查，
+验证纵横比、偏斜度和雅可比行列式等几何质量指标，
+以确保数值稳定性和精度。
 
-Key Features:
-    - Aspect ratio calculation and validation
-    - Skewness measurement for triangular elements
-    - Jacobian determinant checking
-    - Detailed statistical reporting (max, avg, min)
-    - Configurable quality thresholds
-    - Performance-optimized for large meshes
+主要功能:
+    - 纵横比计算与验证
+    - 三角形单元偏斜度测量
+    - 雅可比行列式检查
+    - 详细统计报告（最大值、平均值、最小值）
+    - 可配置的质量阈值
+    - 针对大规模网格的性能优化
 
-Example:
+示例:
     >>> from autoflowcfd.grid.validation.validator import GridValidator
     >>> validator = GridValidator(grid_data)
     >>> results = validator.validate()
     >>> if results['passed']:
-    ...     print("Mesh quality is acceptable")
+    ...     print("网格质量合格")
     ... else:
-    ...     print(f"Max aspect ratio: {results['aspect_ratio']['max']}")
+    ...     print(f"最大纵横比: {results['aspect_ratio']['max']}")
 """
 
 import numpy as np

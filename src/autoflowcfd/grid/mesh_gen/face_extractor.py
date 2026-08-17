@@ -1,4 +1,4 @@
-"""Face extraction module for tetrahedral meshes.
+"""四面体网格的面提取模块。
 
 本模块提供从四面体体积网格中高效提取面的功能，
 生成高阶 FR 求解器所需的面连接和几何数据。

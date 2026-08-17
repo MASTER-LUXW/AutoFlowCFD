@@ -141,22 +141,19 @@ bc_manager.update_boundary_params(
 ## CLI命令
 
 ```bash
-# 自动模式
-autoflowcfd solve run model.nas --backend gpu
+# 稳态求解（自动模式）
+autoflowcfd solve steady volume_mesh.pkl --backend cpu
 
 # 指定配置文件
-autoflowcfd solve run model.nas \
-  --backend gpu \
-  --boundary-config config.yaml
+autoflowcfd solve steady volume_mesh.pkl \
+  --backend cpu \
+  -c config.yaml
 
-# 查看边界检测
-autoflowcfd grid boundaries model.nas --output boundaries.json
-
-# 生成模板
-autoflowcfd grid generate-bc-template model.nas --output template.yaml
+# 查看网格信息
+autoflowcfd grid info model.nas
 
 # 导出VTK验证
-autoflowcfd grid export-boundaries model.nas --output boundaries.vtk
+autoflowcfd grid convert model.nas --format vtk
 ```
 
 ## 性能指标

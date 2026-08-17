@@ -1,7 +1,7 @@
-"""Grid boundary condition mapping structures.
+"""网格边界条件映射结构。
 
-Provides BoundaryMap class for managing boundary conditions with support for
-automatic detection, manual configuration, and hybrid modes.
+提供 BoundaryMap 类，用于管理边界条件，支持自动检测、
+手动配置和混合模式。
 """
 
 import numpy as np

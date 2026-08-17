@@ -1,28 +1,22 @@
-"""Stage B': local cavity re-tiling for post-generation volume mesh repair.
+"""Stage B'：生成后体网格修复的局部空腔重铺。
 
-remesh_core_cavity locally re-tetrahedralizes just the still-bad cells
-(after Stage A smoothing and Stage B's BL-thickness cap, both in
-mesh_repair.py / mesh_repair_bl_thickness.py) plus a buffer of good
-neighbour cells, instead of nudging nodes (Stage A) or regenerating the
-whole mesh. Extract the cavity's own boundary (padded by
-`n_buffer_rings` of good cells so the cavity's new boundary sits in
-already-good territory, not through an already-degenerate cell), hand JUST
-that small closed shell to its own standalone tetgen call (nobisect=True,
-no competing region/volume constraint - the same default,
-already-proven-good tetgen usage this whole package's core fill uses
-everywhere else), and splice the result back in place of the removed
-cells. This structurally cannot leak refinement outward the way the old
-core-side region approach did (see mesh_repair_bl_thickness.py's own
-docstring for that history), because the cavity's own tetgen call never
-sees the rest of the domain at all - there's nothing for it to leak into.
-Gated on a strict quality improvement over the cells it replaces - if the
-local retile doesn't actually help, the original cells are kept and the
-case falls through to whatever repair stage runs next.
+remesh_core_cavity 仅对仍然不合格的单元（经过 Stage A 平滑和 Stage B 的
+BL 厚度上限，均在 mesh_repair.py / mesh_repair_bl_thickness.py 中）加上
+一圈良好邻居单元的缓冲区进行局部重新四面体化，而不是微调节点（Stage A）
+或重新生成整个网格。提取空腔自身的边界（用 `n_buffer_rings` 圈良好单元
+做缓冲，使空腔的新边界位于已经良好的区域中，而非穿过已退化的单元），
+仅将这个小的封闭壳体交给独立的 tetgen 调用（nobisect=True，无竞争区域/
+体积约束——与本包核心填充在所有其他地方使用的同一默认、已验证可靠的
+tetgen 用法相同），然后将结果拼回被移除单元的位置。这在结构上不可能像
+旧的核心侧区域方法那样向外泄漏细化（见 mesh_repair_bl_thickness.py 的
+历史说明），因为空腔自己的 tetgen 调用完全看不到域的其余部分——没有东西
+可以泄漏进去。对替换单元有严格的质量改进门控——如果局部重铺实际上没有
+帮助，则保留原始单元，算例继续进入下一个修复阶段。
 
-Scope (core-only cells vs. BL cells touching their own wall) is documented
-on remesh_core_cavity's own docstring below, not repeated here.
+作用域（核心单元 vs. 接触自身壁面的 BL 单元）记录在 remesh_core_cavity
+自己的文档字符串中，此处不重复。
 
-Split out of mesh_repair.py purely to keep file size down - re-exported
+从 mesh_repair.py 拆分纯粹为了控制文件大小——通过
 from there (see the bottom of mesh_repair.py) so existing callers keep
 working unchanged.
 

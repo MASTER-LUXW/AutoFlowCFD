@@ -3,7 +3,7 @@
 本模块提供把 CFD 仿真结果导出为 VTK 格式的工具，供 ParaView 及其它
 VTK 兼容查看器可视化使用。
 
-Key Components:
+核心组件:
     - VTKExporter: VTK 文件生成的主导出器
     - 支持速度、压力、湍流变量导出
 
@@ -64,7 +64,7 @@ _VTK_WEDGE = 13  # 三棱柱——VTK 自己的节点顺序正好与本项目的
                  # (v0,v1,v2,w0,w1,w2) 约定直接一致（两个三角形"底面"
                  # 依次列出），不需要重新排序
 
-_VALID_FIELDS = {'velocity', 'pressure', 'k', 'omega', 'nut', 'turbulence'}
+_VALID_FIELDS = {'velocity', 'pressure', 'k', 'omega', 'nut', 'turbulence', 'q_criterion'}
 
 
 class VTKExporter:
@@ -314,6 +314,7 @@ class VTKExporter:
         'k': 'TurbulentKineticEnergy',
         'omega': 'SpecificDissipationRate',
         'nut': 'TurbulentViscosity',
+        'q_criterion': 'QCriterion',
     }
 
     def _export_legacy(self, output_path: Path, fields: List[str], binary: bool) -> None:

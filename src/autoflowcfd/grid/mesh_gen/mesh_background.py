@@ -1,20 +1,16 @@
-"""Domain-conforming hybrid mesh assembly (BL extrusion + tetgen core fill).
+"""域适配混合网格装配（边界层挤出 + tetgen 核心填充）。
 
-Generates a volume mesh that fills exactly the closed cavity the input
-surface mesh encloses: boundary-layer (BL) prisms are extruded only from
-wall-type surfaces (mesh_domain_classify picks these out via topology, not
-boundary names), and the remaining interior volume is filled by a
-constrained tetrahedralization (tetgen) of the exact outer boundary - the BL
-outer surface plus the unmodified non-wall surfaces (inlet/outlet/tunnel/
-symmetry-like boundaries). Because the tetgen fill is bounded by the real
-closed surface rather than a padded bounding box, the result can never
-extend outside the domain the input surface actually describes.
+生成恰好填充输入面网格所围封闭腔体的体网格：边界层（BL）棱柱仅从
+壁面类型表面挤出（mesh_domain_classify 通过拓扑而非边界名称识别这些
+表面），剩余内部体积由精确外边界（BL 外表面加上未修改的非壁面表面——
+入口/出口/隧道/对称类边界）的约束四面体化（tetgen）填充。由于 tetgen
+填充受真实封闭表面而非填充边界盒约束，结果永远不会超出输入面网格
+实际描述的区域。
 
-The actual per-attempt assembly work (classify -> extrude -> tetgen-fill ->
-splice) lives in mesh_background_merge._build_merged_mesh; this module is
-the retry/repair orchestration around it (Stage A smoothing, Stage B/B'
-targeted repair, Stage C-adjacent backoff-retry recursion) - see
-generate_hybrid_mesh's own docstring.
+每次装配尝试的实际工作（分类 -> 挤出 -> tetgen 填充 -> 拼接）在
+mesh_background_merge._build_merged_mesh 中实现；本模块是其外层的
+重试/修复编排（Stage A 平滑、Stage B/B' 定向修复、Stage C-相邻回退重试
+递归）——见 generate_hybrid_mesh 的文档字符串。
 """
 
 import sys

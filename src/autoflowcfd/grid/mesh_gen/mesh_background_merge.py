@@ -1,14 +1,11 @@
-"""Merged BL + tetgen-core mesh assembly for one generation attempt.
+"""合并 BL + tetgen 核心网格装配（单次生成尝试）。
 
-_build_merged_mesh does the actual per-attempt work generate_hybrid_mesh
-(mesh_background.py) orchestrates: classify boundary groups, extrude BL
-layers, tetgen-fill the remaining core volume, and splice the two into one
-merged (nodes, cells) pair with per-cell source-group attribution. Split
-into its own module purely to keep mesh_background.py's own file size
-down - there is no independent reuse of this function outside
-generate_hybrid_mesh's own retry loop (Stage B), which is why it stays
-private (leading underscore) and lives right next to its only caller's
-module.
+_build_merged_mesh 完成 generate_hybrid_mesh（mesh_background.py）编排的
+每次实际装配工作：分类边界组、挤出 BL 层、tetgen 填充剩余核心体积，
+然后将两者拼接为一组带单元级源组标记的合并 (nodes, cells)。拆分到独立
+模块纯粹是为了控制 mesh_background.py 的文件大小——此函数在
+generate_hybrid_mesh 的重试循环（Stage B）之外没有独立复用，因此保持为
+私有函数（前导下划线）并位于其唯一调用者的模块旁边。
 
 两个和 _build_merged_mesh 自身逻辑无关、只是被它调用的独立工具函数
 （边界面按最大边长细分、`--*-only` 调试导出）拆到了同目录

@@ -47,9 +47,9 @@ def interpolate_to_new_order(solver: Any, new_order: int):
         print(f"    Same order, skipping interpolation")
         return
     
-    # 构造插值矩阵（基于L2投影）
-    # 对于FR方法，可以使用节点插值或L2投影
-    # 这里使用简化的节点插值：在相同物理位置的值保持不变
+    # 构造线性插值方案（基于参考单元 SPs 的 RegularGridInterpolator）
+    # 注意：这是逐变量线性插值，不是 L2 投影——L2 投影需要求积权重和守恒性
+    # 校验，当前实现未做（见函数文档说明）
     
     # 获取参考单元内的SPs坐标
     from autoflowcfd.fr.quadrature_points import gauss_legendre
@@ -353,6 +353,13 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float):
         phase_max_iter = max_iter // len(orders)
         phase_tol = tol * (10 ** (original_order - target_p))
 
+        # CL-02 修复：阶数提升触发条件改为残差下降判据
+        # 规范要求"残差降 2 个数量级后提升阶数"，而非固定迭代预算
+        # 记录本阶数初始残差，用于判断相对下降量
+        initial_residual_this_order = None
+        residual_drop_threshold = 1e2  # 残差下降 2 个数量级
+        min_iter_before_transition = 20  # 最少迭代次数，避免过早提升
+
         converged = False
         final_residual = 1e10
 
@@ -363,12 +370,27 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float):
             final_residual = res
             total_iter += 1
 
-            if i == 0 or (i + 1) % 10 == 0:
-                print(f"P{target_p} Iter {i+1}: Residual = {res:.6e} | Time: {t_end - t_start:.2f}s")
+            if initial_residual_this_order is None:
+                initial_residual_this_order = res
 
+            if i == 0 or (i + 1) % 10 == 0:
+                drop_ratio = initial_residual_this_order / max(res, 1e-30)
+                print(f"P{target_p} Iter {i+1}: Residual = {res:.6e} | Drop: {drop_ratio:.1f}x | Time: {t_end - t_start:.2f}s")
+
+            # 收敛判据：绝对容差
             if res < phase_tol:
                 converged = True
                 print(f"[OK] P{target_p} converged at iter {i+1}")
+                break
+
+            # 阶数提升判据（CL-02）：残差相对初始值下降足够多
+            # 非最高阶时，满足下降条件即可提前进入下一阶
+            if (target_p < original_order
+                    and i >= min_iter_before_transition
+                    and initial_residual_this_order > 0
+                    and initial_residual_this_order / max(res, 1e-30) >= residual_drop_threshold):
+                print(f"[OK] P{target_p} residual dropped {initial_residual_this_order/res:.1f}x "
+                      f"(>= {residual_drop_threshold:.0e}x), advancing to next order at iter {i+1}")
                 break
 
         if target_p == original_order and converged:

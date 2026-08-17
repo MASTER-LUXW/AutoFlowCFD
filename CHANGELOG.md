@@ -10,12 +10,68 @@
 
 ### 计划中
 
+- P≥1 阶 GPU 加速（当前仅 P0 有限体积有 GPU kernel）
+- 完整 SST 输运方程（对流+扩散，当前为逐点源项 ODE 近似）
 - 多 GPU 分布式计算支持（MPI + NCCL）
-- LES 大涡模拟插件
 - 气动噪声模块（FW-H 声类比）
-- Web 可视化界面（可选）
 - Docker 容器化部署
 - AI Agent 集成示例（参数优化流水线）
+
+---
+
+## [2.0.0] - 2026-08-17
+
+### ✨ 重大更新：V2.0 系统改造
+
+V2.0 是一次全面的系统改造，重点修复了 V1.0 专家评审发现的全部问题，并实现了完整的工业级计算功能。
+
+#### 数值算法核心
+- ✅ FR 高阶离散格式（P1/P2/P3），含 Duffy 坍缩坐标四面体/棱柱映射
+- ✅ AUSM+up 黎曼求解器（含低马赫数 Mp/pu 修正，保持反对称性）
+- ✅ BR1 粘性界面耦合（真实边界幽灵态，温度梯度完整计算）
+- ✅ 体积项去混叠（Over-integration：fine 几何 + 插值 + 限制回 coarse）
+- ✅ 问题单元检测机制（残差异常抑制）
+
+#### 时间积分
+- ✅ SSP-RK2/RK3（Shu-Osher 形式，每 stage 重新计算残差）
+- ✅ IMEX Euler（显式对流 + 隐式粘性，阻尼 Picard 子迭代）
+- ✅ Dual-Time Stepping（BDF1/BDF2 + SSP-RK3 伪时间 + CFL 自适应）
+
+#### 湍流模型体系
+- ✅ SST k-ω RANS（F1/F2 混合函数标准 Menter 1994 公式、正性限制器）
+- ✅ DDES 延迟分离涡模拟（屏蔽函数 + 有效长度尺度替换）
+- ✅ WMLES 壁面模型大涡模拟（Spalding 律 + Newton-Raphson 迭代）
+- ✅ WALE 亚格子应力模型
+
+#### 网格与边界
+- ✅ 原生 NAS 网格解析 + 自动体网格生成（BL extrusion + tetgen）
+- ✅ 高阶网格初始化（Duffy 映射、解析雅可比、面通量点定位/合并）
+- ✅ 幽灵态边界框架（WALL/FARFIELD/INLET/OUTLET/SYMMETRY）
+- ✅ SEM 合成湍流入口（Cholesky 分解雷诺应力、涡核对流+再生）
+- ✅ 壁面距离场（KD-Tree + Eikonal Dijkstra 近似）
+
+#### 工程工作流
+- ✅ CLI 完整命令体系（`grid`/`solve`/`post`/`config`/`utils`）
+- ✅ 检查点机制（HDF5 存储完整状态，支持 `solve resume` 断点续算）
+- ✅ 气动系数积分（直接在 FR 面通量点上积分压力+粘性力）
+- ✅ Q-Criterion 涡识别准则（Green-Gauss 速度梯度重建）
+- ✅ 力系数时间平均统计（Welford 在线算法）
+- ✅ Order Continuation（P0→P1→...→目标阶数，残差下降触发判据）
+- ✅ VTK 导出（legacy + XML VTU，含边界分区、Q-Criterion）
+- ✅ CPU 性能优化（界面项 numba 化、体积项 einsum→matmul/tensordot）
+
+### 🐛 重大修复
+
+- 修复 AUSM+up 熵修正破坏反对称性（替换为 Mp/pu 低马赫数修正）
+- 修复 SST F1/F2 混合函数公式倒置（改为标准 Menter 1994）
+- 修复 IMEX 时间积分符号写反
+- 修复壁面距离 Eikonal max_iter=500 导致 99%+ 节点为 inf
+- 修复 `solve resume` 死路径（重建 FRSolver 并恢复完整状态）
+- 修复气动力系数占位实现（改为直接在 FR 面通量点上积分）
+- 修复粘性残差不施加边界条件（改为 BR1 + 幽灵态）
+- 修复 SEM 合成湍流入口死代码（重写并接入 InletSEMGhostState）
+- 修复 WMLES 壁面应力修正缺少 return 语句（T-05 功能完全失效）
+- 修复 Order Continuation 触发条件（改为残差下降判据）
 
 ---
 
@@ -169,4 +225,4 @@ autoflowcfd = "==0.1.0"
 
 ---
 
-**最后更新**: 2026-07-25
+**最后更新**: 2026-08-17

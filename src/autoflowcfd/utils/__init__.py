@@ -1,27 +1,27 @@
-"""Utility functions and helpers module.
+"""工具函数与辅助模块。
 
-This module provides common utilities including logging configuration,
-custom exceptions, performance monitoring, I/O helpers, and array validation.
+本模块提供通用工具，包括日志配置、自定义异常、性能监控、
+I/O 辅助和数组验证。
 
-Key Components:
-    - Logger setup with loguru
-    - Custom exception hierarchy
-    - Performance timers and benchmarks
-    - File I/O helpers
-    - Array shape validation (NEW)
+核心组件:
+    - 基于 loguru 的日志配置
+    - 自定义异常层次
+    - 性能计时器与基准测试
+    - 文件 I/O 辅助
+    - 数组形状验证
 
-Example:
+示例:
     >>> from autoflowcfd.utils import setup_logger
     >>> logger = setup_logger(verbose=True)
-    >>> logger.info("Simulation started")
+    >>> logger.info("仿真启动")
     
     >>> from autoflowcfd.utils.array_validation import safe_elementwise_multiply
-    >>> result = safe_elementwise_multiply(a, b, context="force calculation")
+    >>> result = safe_elementwise_multiply(a, b, context="力计算")
 """
 
 from typing import Any
 
-# Array validation utilities (NEW - Iteration 2 enhancement)
+# 数组验证工具
 from .array_validation import (
     validate_broadcast_shapes,
     safe_elementwise_multiply,
@@ -34,7 +34,7 @@ __all__ = [
     # "setup_logger",
     # "AutoFlowCFDError",
     # "Timer",
-    # Array validation tools
+    # 数组验证工具
     "validate_broadcast_shapes",
     "safe_elementwise_multiply",
     "assert_matching_lengths",
@@ -44,8 +44,8 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
-    """Lazy import placeholder for unimplemented classes."""
+    """懒导入占位符，用于未实现的类。"""
     raise NotImplementedError(
-        f"{name} is not yet implemented (scheduled for Iteration 1). "
-        f"Please check the roadmap for implementation timeline."
+        f"{name} 尚未实现。"
+        f"请查看路线图了解实现计划。"
     )

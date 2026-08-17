@@ -3,12 +3,12 @@
 本模块基于 HDF5 格式提供完整的 checkpoint 保存/加载功能，支持跨
 backend（CPU↔GPU）恢复求解和配置校验。
 
-Key Components:
+核心组件:
     - CheckpointManager: 主 checkpoint 处理器
     - ConservedVariables 序列化
     - ConvergenceHistory 序列化
 
-Example:
+示例:
     >>> from autoflowcfd.core.checkpoint import CheckpointManager
     >>> manager = CheckpointManager(config)
     >>> manager.save(solution, history, iteration)

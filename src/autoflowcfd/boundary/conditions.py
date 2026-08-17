@@ -3,7 +3,7 @@
 本模块提供 AutoFlowCFD 内置的边界条件类，包括入口、出口、壁面、地面、
 远场、对称面和车身边界。
 
-Key Components:
+核心组件:
     - BaseBC: 所有边界条件的抽象基类
     - InletBC: 速度/压力入口边界
     - OutletBC: 压力出口边界

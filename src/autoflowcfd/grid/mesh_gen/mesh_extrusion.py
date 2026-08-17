@@ -1,13 +1,10 @@
-"""Mesh extrusion module for boundary layer generation.
+"""边界层生成的网格挤出模块。
 
-Implements surface extrusion along normals to create layered meshes
-suitable for boundary layer resolution in CFD simulations. The per-layer
-geometry step (normal averaging, sharp-corner miter compensation) lives in
-mesh_layer_step.extrude_single_layer; converting the resulting layered
-prism stack into tetrahedra lives in mesh_prism_to_tet; the two sharp-
-feature attenuation heuristics live in mesh_extrusion_attenuation.py -
-all split out of this file to stay under this project's 450-line-per-file
-guideline.
+实现沿法向的表面挤出以创建层状网格，适用于 CFD 仿真中的边界层
+分辨率。单层几何步骤（法向平均、尖角补偿）在 mesh_layer_step.extrude_single_layer
+中实现；将层状棱柱堆栈转换为四面体在 mesh_prism_to_tet 中实现；
+两个尖角特征衰减启发式方法在 mesh_extrusion_attenuation.py 中实现——
+均从本文件拆分以满足项目 450 行/文件的规范。
 """
 
 import numpy as np

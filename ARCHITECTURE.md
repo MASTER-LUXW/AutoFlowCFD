@@ -103,47 +103,51 @@ AutoFlowCFD是一款专注于汽车外流场仿真的开源CFD软件，采用模
 
 ### 3.2 求解器核心模块（core/）
 
-**职责**：实现FR离散格式、湍流模型和时间积分算法
+**职责**：实现 FR 离散格式、黎曼求解器、粘性格式、湍流模型和时间积分算法
 
 **核心组件**：
-- `discretization.py`：FR空间离散格式（1-3阶）
-- `turbulence/`：湍流模型插件
-  - `sst_kw.py`：SST k-ω模型
-  - `des.py`：DES/DDES混合模型
-  - `les_plugin.py`：LES插件接口（v2.0）
-- `time_integration.py`：时间离散格式
-  - Backward Euler（稳态）
-  - Runge-Kutta（瞬态，2-3阶）
+- `fr_solver.py`：FR 求解器主类（状态初始化、算子预计算、求解主循环）
+- `fr_residual_inviscid.py`：无粘残差（体积项 over-integration 去混叠 + 界面项 AUSM+up）
+- `fr_viscous_flux.py`：粘性残差（BR1 界面耦合 + 真实边界幽灵态）
+- `fr_kernels.py`：AUSM+up 黎曼求解器（含低马赫数 Mp/pu 修正）
+- `turbulence_sst.py`：SST k-ω 模型（F1/F2 混合函数、正性限制器、DES 长度尺度替换）
+- `turbulence_des.py`：DDES 延迟分离涡模拟（屏蔽函数 + 有效长度尺度）
+- `turbulence_wmles.py`：WMLES 壁面模型（Spalding 律 + Newton-Raphson 迭代）
+- `turbulence_sgs.py`：WALE 亚格子应力模型
+- `time_integration.py`：SSP-RK2/RK3（Shu-Osher 形式）
+- `time_integration_imex.py`：IMEX Euler（显式对流 + 隐式粘性）
+- `time_integration_dual.py`：Dual-Time Stepping（BDF1/BDF2 + SSP-RK3 + CFL 自适应）
+- `order_continuation.py`：Order Continuation 策略（P0→P1→...→目标阶数）
+- `wall_distance.py`：壁面距离场（KD-Tree + Eikonal Dijkstra）
 - `backend/`：计算后端抽象
-  - `cpu_backend.py`：Numba并行实现
-  - `gpu_backend.py`：CUDA kernel实现
+  - `fr_gpu_p0.py`：P0 有限体积 GPU kernel（P≥1 阶仍运行 CPU）
 
 **关键特性**：
-- 统一的Backend接口，支持CPU/GPU无缝切换
+- 统一的求解器框架，支持稳态/瞬态无缝切换
 - 插件化湍流模型，通过注册机制扩展
-- 预分配内存池，避免频繁malloc/free
+- Numba `prange` 多核并行，界面项/体积项全并行
+- 问题单元检测机制（残差异常抑制）
 
 **输入**：GridData + SolverConfig  
 **输出**：SolutionVector（流场变量）
 
 ### 3.3 边界条件模块（boundary/）
 
-**职责**：管理边界条件的应用和更新
+**职责**：实现幽灵态边界条件框架和合成湍流入口
 
 **核心组件**：
+- `fr_ghost_state.py`：幽灵态边界条件框架
+  - WALL：镜像构造（无滑移/滑移）
+  - FARFIELD/INLET/OUTLET：特征边界条件
+  - SYMMETRY：对称面镜像
+- `synthetic_inlet.py`：SEM 合成湍流入口（Cholesky 分解雷诺应力、涡核对流+再生）
 - `manager.py`：边界条件管理器
-- `conditions.py`：内置BC类型
-  - Inlet（速度入口）
-  - Outlet（压力出口）
-  - Wall（壁面，含壁面函数）
-  - Symmetry（对称面）
-  - Farfield（远场）
-- `custom_bc.py`：自定义BC扩展接口
+- `config.py`：边界配置解析
 
 **关键特性**：
-- 基于边界组名称自动匹配BC类型
-- 支持用户自定义边界条件插件
-- 壁面函数自动适配y+范围
+- 基于边界组名称自动匹配幽灵态构造方式
+- InletSEMGhostState：SEM 与幽灵态的粘合层
+- 壁面无滑移通过镜像构造实现，无需壁面函数
 
 **输入**：BoundaryMap + 边界参数  
 **输出**：边界通量修正
@@ -184,15 +188,17 @@ output:
 **职责**：计算气动系数、导出可视化数据、分析收敛性
 
 **核心组件**：
-- `aerodynamics.py`：气动系数计算（Cd、Cl、Cm）
-- `vtk_export.py`：VTK场数据导出
-- `convergence.py`：收敛曲线分析
-- `transient_stats.py`：瞬态统计（时均场、RMS、频谱）
+- `fr_coefficients.py`：FR 原生气动系数计算（直接在面通量点上积分压力+粘性力）
+- `vtk_export.py`：VTK 场数据导出（legacy + XML VTU，含边界分区）
+- `q_criterion.py`：Q-Criterion 涡识别准则（Green-Gauss 速度梯度重建）
+- `transient_stats.py`：瞬态统计（时均场、RMS、力系数时间平均）
+- `report.py`：收敛曲线分析
 
 **关键特性**：
-- 实时计算气动力系数
-- 支持ParaView兼容的VTK格式
-- 自动检测收敛并提供建议
+- 直接在 FR 求解器原生数据上积分，不经过单元中心近似
+- 支持 Q-Criterion 涡识别准则导出
+- 力系数时间平均统计（Welford 在线算法）
+- 同时输出 CELL_DATA（原始值）和 POINT_DATA（节点插值）
 
 **输入**：SolutionVector + 参考参数  
 **输出**：JSON/CSV/VTK文件
@@ -203,10 +209,19 @@ output:
 
 **核心命令**：
 ```bash
-autoflowcfd solve --grid <file> --mode <steady/transient> [options]
-autoflowcfd postprocess --case <case_id> --output <format>
-autoflowcfd validate-grid --grid <file>
-autoflowcfd benchmark --grid <file> --backend <cpu/gpu>
+# 网格处理
+autoflowcfd grid generate-volume <surface.nas> -o <volume.nas>
+autoflowcfd grid import-volume <volume.nas>
+
+# 求解
+autoflowcfd solve steady <volume.pkl> --order 2 --turbulence-model sst
+autoflowcfd solve transient <volume.pkl> --time-method dual-time --physical-time 0.1
+autoflowcfd solve resume <checkpoint.h5>
+
+# 后处理
+autoflowcfd post export-vtk --case <case_dir> --variables velocity pressure q_criterion
+autoflowcfd post coefficients --case <case_dir>
+autoflowcfd post report --case <case_dir>
 ```
 
 **关键特性**：
@@ -425,5 +440,5 @@ class ForceBreakdownAnalyzer:
 
 ---
 
-**文档版本**：v0.1  
-**最后更新**：2026-07-23
+**文档版本**：v2.0  
+**最后更新**：2026-08-17

@@ -1,22 +1,21 @@
-"""Command-line interface for AutoFlowCFD.
+"""AutoFlowCFD 命令行接口。
 
-This module provides the main CLI entry point using Click framework.
-It supports subcommands for grid processing, solving, postprocessing,
-configuration management, and utilities.
+本模块基于 Click 框架提供主 CLI 入口，支持网格处理、求解、后处理、
+配置管理和实用工具等子命令。
 
-Example:
+示例:
     $ autoflowcfd --version
-    AutoFlowCFD v0.1.0
+    AutoFlowCFD v0.2.0
     
     $ autoflowcfd grid parse --help
     Usage: autoflowcfd grid parse [OPTIONS] INPUT_FILE
     
-    Parse ANSA .nas grid file.
+    解析 ANSA .nas 网格文件。
     
     $ autoflowcfd solve steady --help
     Usage: autoflowcfd solve steady [OPTIONS] INPUT_FILE
 
-    Run steady-state RANS simulation.
+    运行稳态 RANS 仿真。
 """
 
 import sys
@@ -42,12 +41,11 @@ from .post_commands import post
 from .config_commands import config
 from .utils_commands import utils
 
-# Log messages and click.echo() calls throughout this CLI use Unicode symbols
-# (checkmarks, °, ³, ...). On Windows, stdout/stderr default to the active
-# console codepage (e.g. GBK/936 on Chinese locales) rather than UTF-8, so
-# those characters raise UnicodeEncodeError and abort the command. Force
-# UTF-8 with a safe fallback so output never crashes the CLI regardless of
-# the host console's codepage.
+# 本 CLI 的日志输出和 click.echo() 调用中使用 Unicode 符号
+#（勾选标记、°、³ 等）。Windows 下 stdout/stderr 默认使用活动控制台
+#代码页（如中文环境为 GBK/936），而非 UTF-8，这些字符会触发
+# UnicodeEncodeError 并中断命令执行。强制使用 UTF-8 并设置安全回退，
+# 确保输出不会因宿主控制台代码页不同而导致 CLI 崩溃。
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
@@ -55,50 +53,49 @@ for _stream in (sys.stdout, sys.stderr):
 
 @click.group()
 @click.version_option(version=__version__, prog_name="AutoFlowCFD")
-@click.option("--verbose", "-v", is_flag=True, help="Enable verbose output")
+@click.option("--verbose", "-v", is_flag=True, help="启用详细输出")
 def cli(verbose: bool) -> None:
-    """AutoFlowCFD - High-performance CFD for automotive aerodynamics.
+    """AutoFlowCFD - 高性能汽车外流场 CFD 求解器。
     
-    AutoFlowCFD is an open-source Computational Fluid Dynamics software
-    specialized for automotive external flow field simulation.
+    AutoFlowCFD 是专注于汽车外流场仿真的开源计算流体力学软件。
     
-    Features:
-        - FR (Flux Reconstruction) high-order discretization
-        - SST k-ω, DES, DDES turbulence models
-        - CPU (Numba) and GPU (CUDA) backends
-        - ANSA .nas grid file support
-        - Comprehensive post-processing tools
+    主要特性:
+        - FR（通量重构）高阶离散方法
+        - SST k-ω、DDES、WMLES、LES 漫流模型体系
+        - CPU (Numba) 和 GPU (CUDA) 计算后端
+        - ANSA .nas 网格文件支持
+        - 完善的后处理工具
     
-    Command Groups:
-        grid     Grid processing (parse, validate, info, convert, generate-volume, import-volume)
-        solve    Solver commands (steady, transient, resume, status)
-        post     Post-processing (coefficients, export-vtk, report, etc.)
-        config   Configuration management (init, show, validate)
-        utils    Utilities (version, doctor, benchmark)
+    命令组:
+        grid     网格处理（解析、验证、信息、转换、生成体网格、导入体网格）
+        solve    求解器命令（稳态、瞬态、恢复、状态）
+        post     后处理（气动系数、VTK导出、报告等）
+        config   配置管理（初始化、查看、验证）
+        utils    实用工具（版本、环境检查、性能测试）
 
-    Examples:
-        # Parse grid file
+    示例:
+        # 解析网格文件
         $ autoflowcfd grid parse sedan.nas
 
-        # Generate a volume mesh from the surface mesh (required before solving)
+        # 从面网格生成体网格（求解前必需步骤）
         $ autoflowcfd grid generate-volume sedan.nas -o sedan_volume.nas
 
-        # Run steady-state simulation (input must be a .pkl volume mesh)
+        # 运行稳态仿真（输入必须为 .pkl 体网格）
         $ autoflowcfd solve steady sedan_volume.pkl --backend gpu --order 3
 
-        # Run transient DES simulation
+        # 运行瞬态 DES 仿真
         $ autoflowcfd solve transient sedan_volume.pkl --physical-time 0.3
         
-        # Calculate aerodynamic coefficients
+        # 计算气动系数
         $ autoflowcfd post coefficients --case results/
         
-        # Generate config template
+        # 生成配置模板
         $ autoflowcfd config init --template steady
         
-        # Check environment
+        # 检查环境
         $ autoflowcfd utils doctor
     
-    For more information on a specific command, use:
+    使用以下命令查看特定命令的帮助信息:
         $ autoflowcfd <command> --help
         $ autoflowcfd <command> <subcommand> --help
     """

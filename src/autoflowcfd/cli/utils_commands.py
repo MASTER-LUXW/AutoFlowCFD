@@ -2,12 +2,12 @@
 
 本模块提供 AutoFlowCFD 的 CLI 实用工具命令。
 
-Commands:
+命令:
     - version: 显示版本信息
     - doctor: 环境诊断
     - benchmark: 性能基准测试
 
-Example:
+示例:
     $ autoflowcfd utils version
     $ autoflowcfd utils doctor
     $ autoflowcfd utils benchmark --grid model.nas --backend cpu

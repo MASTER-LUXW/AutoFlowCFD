@@ -248,21 +248,19 @@ bc_manager.export_to_vtk("boundaries.vtk")
 ### CLI命令行使用
 
 ```bash
-# 自动模式（默认）
-autoflowcfd solve run model.nas --backend gpu
+# 稳态求解（自动模式，默认）
+autoflowcfd solve steady volume_mesh.pkl --backend cpu
 
-# 指定YAML配置文件（混合模式）
-autoflowcfd solve run model.nas \
-  --backend gpu \
-  --boundary-config boundary_config.yaml
+# 指定YAML配置文件
+autoflowcfd solve steady volume_mesh.pkl \
+  --backend cpu \
+  -c boundary_config.yaml
 
 # 查看边界检测结果
-autoflowcfd grid boundaries model.nas --output boundaries.json
-
-# 生成边界配置模板
-autoflowcfd grid generate-bc-template model.nas --output template.yaml
+autoflowcfd grid info model.nas
 
 # 导出边界VTK用于可视化验证
+autoflowcfd grid convert model.nas --format vtk
 autoflowcfd grid export-boundaries model.nas --output boundaries.vtk
 ```
 

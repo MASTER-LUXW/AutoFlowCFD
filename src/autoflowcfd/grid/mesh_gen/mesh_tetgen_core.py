@@ -1,11 +1,9 @@
-"""Constrained tetrahedralization of the domain core using tetgen.
+"""基于 tetgen 的域核心约束四面体化。
 
-Fills the volume enclosed by a closed piecewise-linear complex (PLC) - the
-boundary-layer (BL) outer surface plus the unmodified outer-shell faces
-(inlet/outlet/tunnel/symmetry-like boundaries) - with tetgen, instead of the
-old arbitrary padded-bounding-box + Cartesian background grid. The PLC is by
-construction exactly the closed surface the input mesh already describes, so
-the result can never extend outside the real domain.
+用 tetgen 填充由分段线性复形（PLC）封闭的体积——边界层（BL）外表面
+加上未修改的外壳面（入口/出口/隧道/对称类边界）——取代旧版的任意填充
+边界盒 + 笛卡尔背景网格。PLC 在构造上恰好是输入网格已描述的封闭表面，
+因此结果永远不会超出真实域。
 
 本文件只保留 fill_core_volume 本体和相关常量。拆分出去的部分：
     - mesh_tetgen_seam.py：BL/core 交界（seam）过渡缩放、局部厚度限制

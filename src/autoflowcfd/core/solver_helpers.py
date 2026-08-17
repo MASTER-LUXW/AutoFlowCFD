@@ -131,6 +131,8 @@ def compute_wmles_wall_stress_correction(solver: Any) -> Optional[np.ndarray]:
                 f"y+ min={all_yplus.min():.1f}, max={all_yplus.max():.1f}, mean={all_yplus.mean():.1f}"
             )
 
+    return correction
+
 
 def resolve_backend_type(backend: str) -> str:
     """解析 FRSolver 构造参数 backend 的实际生效后端类型 (B-01)。
@@ -172,5 +174,3 @@ def resolve_backend_type(backend: str) -> str:
         logger.info("CPU Backend (Numba) initialized")
 
     return backend_type
-
-    return correction

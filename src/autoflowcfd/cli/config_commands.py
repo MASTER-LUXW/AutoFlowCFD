@@ -2,12 +2,12 @@
 
 本模块提供用于管理仿真配置的 CLI 命令。
 
-Commands:
+命令:
     - init: 生成配置模板
     - show: 显示当前配置
     - validate: 验证配置文件
 
-Example:
+示例:
     $ autoflowcfd config init --template steady
     $ autoflowcfd config validate simulation.yaml
 """

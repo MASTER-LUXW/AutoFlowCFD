@@ -1,7 +1,7 @@
-"""Grid face data structures for FVM flux computation.
+"""有限体积法通量计算的网格面数据结构。
 
-Provides FaceData class for storing face connectivity and geometric properties
-used in finite volume method calculations.
+提供 FaceData 类，存储面连接关系和几何属性，
+用于有限体积法计算。
 """
 
 import numpy as np

@@ -3,7 +3,7 @@
 本模块提供 `BoundaryManager` 类，用于在 AutoFlowCFD V2.0 仿真中管理和登记
 边界条件。
 
-Key Components:
+核心组件:
     - BoundaryManager: 边界条件管理器主类
 
 注意：BoundaryManager 现在只承担边界条件的元数据登记角色（`add_bc`/`get_bc`/

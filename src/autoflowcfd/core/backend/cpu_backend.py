@@ -1,4 +1,4 @@
-"""CPU backend implementation using Numba JIT compilation.
+"""基于 Numba JIT 编译的 CPU 后端实现。
 
 本模块提供基于 Numba 的 CPU 加速后端，用于 FR 求解器的通量和残差计算。
 

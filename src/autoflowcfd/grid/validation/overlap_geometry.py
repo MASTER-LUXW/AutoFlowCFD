@@ -1,18 +1,14 @@
-"""Exact geometric primitives for triangle-triangle overlap/proximity checks.
+"""三角形-三角形重叠/接近检查的精确几何原语。
 
-Vectorized (numpy, no Python loop over candidate pairs) implementations of
-the standard closed-form algorithms from Ericson, "Real-Time Collision
-Detection" (2005) and Moller, "A Fast Triangle-Triangle Intersection Test"
-(1997) - not heuristics or approximations. Every function here takes
-batched input (shape (N, 3) per point/vertex argument, one row per
-candidate pair) so a caller with M candidate pairs after its own broad-phase
-filtering runs all M tests in a handful of vectorized numpy calls, not a
-Python-level loop over M.
+基于 Ericson《Real-Time Collision Detection》(2005) 和 Moller《A Fast
+Triangle-Triangle Intersection Test》(1997) 的标准解析算法的向量化实现
+（numpy，无候选对 Python 循环）——非启发式或近似方法。本模块所有函数
+均接受批量输入（每个点/顶点参数形状为 (N, 3)，每行一个候选对），因此
+调用方在完成自粗相过滤后有 M 个候选对时，只需少量向量化 numpy 调用即可
+运行全部 M 个测试，而非 Python 级 M 次循环。
 
-Used by mesh_overlap_check.py, which handles broad-phase candidate
-generation and orchestration; this module is pure computational geometry
-with no mesh-specific concepts (no cells, no boundary groups, no faces
-beyond their three vertex positions).
+由 mesh_overlap_check.py 使用，后者负责粗相候选生成和编排；本模块是纯
+计算几何，不包含网格特定概念（无单元、无边界组、除三个顶点位置外无面信息）。
 
 点/线段到三角形的最近点/最近距离原语拆到了同目录
 overlap_geometry_primitives.py，本文件只保留三角形-三角形相交检测

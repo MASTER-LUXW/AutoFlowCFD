@@ -804,5 +804,5 @@ poetry run pytest tests/performance/ -v --benchmark-only
 
 ---
 
-**最后更新**: 2026-07-25  
-**版本**: AutoFlowCFD v0.1.0
+**最后更新**: 2026-08-17  
+**版本**: AutoFlowCFD v0.2.0 (V2.0 系统改造版)

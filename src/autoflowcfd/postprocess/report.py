@@ -3,11 +3,11 @@
 本模块提供分析收敛历史、把收敛曲线导出为 CSV、以及生成 JSON 格式仿真
 报告的工具。
 
-Key Components:
+核心组件:
     - ConvergenceAnalyzer: 残差与系数历史分析
     - SimulationReport: 完整仿真报告生成
 
-Example:
+示例:
     >>> from autoflowcfd.postprocess import ConvergenceAnalyzer
     >>> analyzer = ConvergenceAnalyzer()
     >>> analyzer.add_iteration(residuals={'continuity': 1e-3, 'momentum': 1e-4})

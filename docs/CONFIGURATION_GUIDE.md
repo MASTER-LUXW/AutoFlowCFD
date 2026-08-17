@@ -280,7 +280,11 @@ output:
 ### 基本用法
 
 ```bash
-poetry run autoflowcfd solve run <grid_file> [OPTIONS]
+# 稳态仿真
+poetry run autoflowcfd solve steady <volume_mesh.pkl> [OPTIONS]
+
+# 瞬态仿真
+poetry run autoflowcfd solve transient <volume_mesh.pkl> [OPTIONS]
 ```
 
 ### 常用参数
@@ -289,62 +293,47 @@ poetry run autoflowcfd solve run <grid_file> [OPTIONS]
 
 ```bash
 # 稳态仿真
-poetry run autoflowcfd solve run car_model.nas \
-    --mode steady \
-    --backend gpu \
-    --turbulence sst_kw \
+poetry run autoflowcfd solve steady volume_mesh.pkl \
+    --backend cpu \
+    --turbulence-model sst \
     --order 2 \
     --max-iter 5000 \
-    --cfl-init 0.1 \
-    --cfl-max 5.0
+    -o ./results
 
 # 瞬态仿真
-poetry run autoflowcfd solve run car_model.nas \
-    --mode transient \
-    --backend gpu \
-    --turbulence ddes \
+poetry run autoflowcfd solve transient volume_mesh.pkl \
+    --backend cpu \
+    --turbulence-model ddes \
     --order 2 \
+    --time-method dual-time \
     --dt 1e-4 \
-    --total-time 0.1
+    --physical-time 0.1 \
+    -o ./results
 ```
 
 #### 边界条件参数
 
 ```bash
-# 指定入口速度
-poetry run autoflowcfd solve run car_model.nas \
-    --inlet-velocity 30.0 \
-    --inlet-pressure 101325.0
+# 指定入口速度（通过配置文件）
+# 在 config.yaml 中设置边界条件
 
-# 指定出口压力
-poetry run autoflowcfd solve run car_model.nas \
-    --outlet-pressure 101325.0
-```
-
-#### 输出参数
-
-```bash
 # 指定输出目录
-poetry run autoflowcfd solve run car_model.nas \
-    --output ./my_results
+poetry run autoflowcfd solve steady volume_mesh.pkl \
+    -o ./my_results
 
 # 指定检查点间隔
-poetry run autoflowcfd solve run car_model.nas \
+poetry run autoflowcfd solve steady volume_mesh.pkl \
     --checkpoint-interval 200
-
-# 指定场输出间隔
-poetry run autoflowcfd solve run car_model.nas \
-    --field-output-interval 100
 ```
 
 #### 其他参数
 
 ```bash
 # 详细日志
-poetry run autoflowcfd solve run car_model.nas -v
+poetry run autoflowcfd solve steady volume_mesh.pkl -v
 
 # 使用配置文件
-poetry run autoflowcfd solve run car_model.nas -c config.yaml
+poetry run autoflowcfd solve steady volume_mesh.pkl -c config.yaml
 
 # 从检查点恢复
 poetry run autoflowcfd solve resume ./checkpoints/latest_checkpoint.h5 \
@@ -356,7 +345,8 @@ poetry run autoflowcfd solve resume ./checkpoints/latest_checkpoint.h5 \
 运行以下命令查看所有可用参数：
 
 ```bash
-poetry run autoflowcfd solve run --help
+poetry run autoflowcfd solve steady --help
+poetry run autoflowcfd solve transient --help
 ```
 
 ---
@@ -381,7 +371,7 @@ solver:
 
 ```bash
 # 命令行覆盖 YAML 配置
-poetry run autoflowcfd solve run car_model.nas \
+poetry run autoflowcfd solve steady volume_mesh.pkl \
     -c config.yaml \
     --max-iter 10000 \      # 覆盖 YAML 中的 5000
     --backend gpu           # 覆盖 YAML 中的 cpu
@@ -452,7 +442,7 @@ output:
 
 **运行命令**：
 ```bash
-poetry run autoflowcfd solve run car_model.nas -c configs/steady_rans.yaml
+poetry run autoflowcfd solve steady volume_mesh.pkl -c configs/steady_rans.yaml
 ```
 
 ---
@@ -525,7 +515,7 @@ output:
 
 **运行命令**：
 ```bash
-poetry run autoflowcfd solve run car_model.nas -c configs/transient_ddes.yaml
+poetry run autoflowcfd solve transient volume_mesh.pkl -c configs/transient_ddes.yaml
 ```
 
 ---
@@ -822,5 +812,5 @@ tail -f debug.log
 
 ---
 
-**最后更新**: 2026-07-25  
-**版本**: AutoFlowCFD v0.1.0
+**最后更新**: 2026-08-17  
+**版本**: AutoFlowCFD v0.2.0 (V2.0 系统改造版)

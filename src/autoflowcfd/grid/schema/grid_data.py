@@ -1,7 +1,7 @@
-"""Grid data container classes.
+"""网格数据容器类。
 
-Provides GridData, CupyGridData, and VolumeMeshData classes for managing
-complete grid structures with nodes, cells, boundaries, and metadata.
+提供 GridData、CupyGridData 和 VolumeMeshData 类，用于管理
+包含节点、单元、边界和元数据的完整网格结构。
 """
 
 import numpy as np

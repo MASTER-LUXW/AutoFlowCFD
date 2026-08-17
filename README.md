@@ -31,13 +31,15 @@ AutoFlowCFD 旨在填补工业级高精度 CFD 与低门槛二次开发之间的
 
 ### 🔬 高精度数值算法
 - **通量重构（Flux Reconstruction）高阶格式**：支持 1-3 阶精度，显著提升边界层、尾流场仿真精度
-- **先进湍流模型体系**：SST k-ω RANS、DES/DDES 混合、LES 大涡模拟（插件化扩展）
-- **自适应 CFL 策略**：智能收敛监控，稳态-瞬态无缝耦合
+- **先进湍流模型体系**：SST k-ω RANS、DDES 延迟分离涡模拟、WMLES 壁面模型大涡模拟、WALE 亚格子模型
+- **AUSM+up 黎曼求解器**：含低马赫数修正，保持反对称性，保证全速域精度
+- **Order Continuation**：P0→P1→...→目标阶数逐步提升策略，加速高阶格式收敛
+- **Q-Criterion 涡识别准则**：基于 Green-Gauss 速度梯度重建，供 VTK 导出使用
 
 ### ⚡ 高性能计算引擎
-- **CPU 并行加速**：Numba JIT 编译 + 多线程向量化，4-5x 加速比
-- **GPU CUDA 加速**：CuPy 封装 FR 核心算子，10-20x 加速比（相比单核 CPU）
-- **SoA 内存布局**：结构体数组优化，最大化缓存命中率
+- **CPU 并行加速**：Numba JIT 编译 + `prange` 多线程向量化，界面项/体积项全并行
+- **GPU CUDA 加速**：CuPy 封装 P0 有限体积核心算子（P≥1 阶仍运行 CPU）
+- **体积项去混叠（Over-integration）**：fine 几何积分 + 插值 + 限制回 coarse，消除高阶格式混叠误差
 
 ### 🔧 工业级工作流适配
 - **原生 NAS 网格解析**：直接读取 ANSA v22/v23/v24 生成的 `.nas` 文件，无需转换
@@ -45,14 +47,14 @@ AutoFlowCFD 旨在填补工业级高精度 CFD 与低门槛二次开发之间的
 - **网格质量校验**：长宽比、扭曲度、雅可比行列式全自动检测
 
 ### 🤖 AI Agent 友好设计
-- **双接口架构**：CLI 命令行 + Python API，无缝嵌入自动化流水线
+- **CLI 命令行接口**：Click 框架，`solve`/`post`/`grid`/`config`/`utils` 子命令体系，无缝嵌入自动化流水线
 - **结构化输出**：JSON/CSV/VTK 多格式结果，便于后处理与数据驱动优化
-- **算力分时复用**：与大模型训练共享 GPU 资源池，降低硬件成本
+- **检查点断点续算**：HDF5 存储完整求解器状态，支持 `solve resume` 精确恢复
 
 ### 🧩 模块化扩展架构
 - **插件化湍流模型**：新增模型仅需实现 Python 接口，无底层代码侵入
-- **清晰模块划分**：Grid/Core/Boundary/Postprocess 职责明确
-- **类型注解完备**：MyPy 严格检查，二次开发上手简单
+- **清晰模块划分**：FR/Core/Grid/Boundary/Postprocess/CLI/Config 职责明确
+- **幽灵态边界框架**：统一处理 WALL/FARFIELD/INLET/OUTLET/SYMMETRY 边界，含 SEM 合成湍流入口
 
 ---
 
@@ -104,20 +106,30 @@ poetry install -E gpu
 #### 方式一：CLI 命令行（推荐）
 
 ```bash
-# 稳态 RANS 仿真（CPU）
-poetry run autoflowcfd solve run examples/ahmed_demo/car_model.nas \
-    --mode steady \
-    --turbulence sst_kw \
-    --backend cpu \
-    --order 2
+# 1. 从面网格生成体网格
+poetry run autoflowcfd grid generate-volume car_model.nas -o car_volume.nas
 
-# 瞬态 DES 仿真（GPU 加速）
-poetry run autoflowcfd solve run car_model.nas \
-    --mode transient \
-    --turbulence des \
-    --backend gpu \
+# 2. 稳态 RANS 仿真（CPU）
+poetry run autoflowcfd solve steady car_volume.pkl \
+    --backend cpu \
+    --order 2 \
+    --turbulence-model sst \
+    --max-iter 5000 \
+    --reference-area 2.2
+
+# 3. 瞬态 DES 仿真（Dual-Time Stepping）
+poetry run autoflowcfd solve transient car_volume.pkl \
+    --time-method dual-time \
+    --turbulence-model ddes \
     --dt 1e-4 \
-    --total-time 0.1
+    --physical-time 0.1 \
+    --reference-area 2.2
+
+# 4. 后处理：导出 VTK 可视化（含 Q-Criterion 涡识别）
+poetry run autoflowcfd post export-vtk \
+    --case ./results/steady/ \
+    --variables velocity pressure q_criterion \
+    --output flow_field.vtu
 ```
 
 #### 方式二：Python API
@@ -183,31 +195,37 @@ poetry run autoflowcfd post convergence --case case_001
 ```
 AutoFlowCFD/
 ├── src/autoflowcfd/          # 核心源代码
-│   ├── cli/                  # CLI 命令行接口（Click 框架）
-│   ├── api.py                # Python API 统一入口
+│   ├── fr/                   # 通量重构高阶格式（算子、模态基、积分点）
 │   ├── core/                 # 求解器引擎
 │   │   ├── backend/          # CPU/GPU 后端实现
-│   │   ├── solver_steady.py  # 稳态求解器主循环
-│   │   ├── transient_solver_loop.py  # 瞬态求解器
-│   │   ├── aero_coeffs.py    # 气动系数计算
-│   │   └── checkpoint.py     # 检查点管理
+│   │   ├── fr_solver.py      # FR 求解器主类
+│   │   ├── fr_residual_inviscid.py  # 无粘残差（AUSM+up 黎曼求解器）
+│   │   ├── fr_viscous_flux.py       # 粘性残差（BR1 格式）
+│   │   ├── turbulence_sst.py        # SST k-ω 湍流模型
+│   │   ├── turbulence_des.py        # DDES 混合模型
+│   │   ├── turbulence_wmles.py      # WMLES 壁面模型
+│   │   ├── time_integration*.py     # 时间积分（SSP-RK/IMEX/Dual-Time）
+│   │   ├── order_continuation.py    # 阶数延续策略
+│   │   └── checkpoint.py            # 检查点管理
 │   ├── grid/                 # 网格解析与处理
-│   │   ├── parser.py         # NAS 文件解析器
-│   │   ├── structures.py     # SoA 数据结构
-│   │   └── validator.py      # 网格质量校验
-│   ├── boundary/             # 边界条件管理
+│   │   ├── high_order_mesh.py       # 高阶网格（Duffy 坍缩坐标映射）
+│   │   ├── face_connectivity.py     # FR 面连接关系
+│   │   └── mesh_gen/                # 体网格生成（BL  extrusion + tetgen）
+│   ├── boundary/             # 边界条件（幽灵态框架 + SEM 合成湍流入口）
+│   ├── cli/                  # CLI 命令行接口（Click 框架）
 │   ├── config/               # 配置管理（YAML）
-│   ├── postprocess/          # 后处理工具
+│   ├── postprocess/          # 后处理（气动系数、VTK 导出、Q-Criterion）
 │   └── utils/                # 工具函数
 ├── tests/                    # 测试套件（pytest）
 │   ├── unit/                 # 单元测试
-│   └── integration/          # 集成测试
+│   ├── integration/          # 集成测试
+│   └── validation/           # 验证算例
 ├── examples/                 # 示例算例
 │   ├── ahmed_demo/           # Ahmed Body 标准算例
 │   ├── cube_demo/            # 立方体绕流验证
 │   └── plate_demo/           # 平板边界层案例
 ├── docs/                     # 技术文档
-├── ProjectFiles/             # 项目规划文档
+├── ProjectFiles/             # 项目规划文档（V1.0/V2.0）
 └── pyproject.toml            # Poetry 依赖管理
 ```
 
@@ -222,9 +240,10 @@ AutoFlowCFD/
 
 ### 技术文档
 - [🏛️ 架构设计](ARCHITECTURE.md) - 系统架构与模块划分
-- [📐 数据结构](ProjectFiles/2-3_数据结构设计文档-Part1.md) - SoA 布局与内存优化
 - [🔌 API 参考](docs/API.md) - Python API 详细说明
-- [⚙️ 配置指南](docs/configuration.md) - YAML 配置文件模板
+- [⚙️ 配置指南](docs/CONFIGURATION_GUIDE.md) - YAML 配置文件说明
+- [📐 V2.0 实施路径](ProjectFiles/V2.0/0_项目实施路径.md) - V2.0 改造规划
+- [📋 V2.0 功能点清单](ProjectFiles/V2.0/1_系统改造功能点.md) - 25 项功能详细说明
 
 ### 进阶主题
 - [🚀 性能优化](docs/CFL_ADAPTIVE_OPTIMIZATION.md) - CFL 自适应与收敛加速
@@ -242,45 +261,50 @@ AutoFlowCFD/
 
 ## 🚧 当前开发状态
 
-### ✅ 已完成功能（Iteration 1-3）
+### ✅ V2.0 已完成功能
 
-**Iteration 1: 工程基础设施**
-- ✅ Poetry 依赖管理与虚拟环境
-- ✅ CI/CD 自动化流水线（GitHub Actions）
-- ✅ 代码质量工具链（Black/Isort/MyPy/Pylint）
-- ✅ pytest 单元测试框架（覆盖率 ≥80%）
+**数值算法核心**
+- ✅ FR 高阶离散格式（P1/P2/P3），含 Duffy 坍缩坐标四面体/棱柱映射
+- ✅ AUSM+up 黎曼求解器（含低马赫数 Mp/pu 修正，保持反对称性）
+- ✅ BR1 粘性界面耦合（真实边界幽灵态，温度梯度完整计算）
+- ✅ 体积项去混叠（Over-integration：fine 几何 + 插值 + 限制回 coarse）
+- ✅ 问题单元检测机制（`suppress_residual_outliers` 残差异常抑制）
 
-**Iteration 2: 网格解析模块**
-- ✅ NAS 文件解析器（v22/v23/v24 格式）
-- ✅ SoA 内存布局（NodeArray/CellArray/BoundaryMap）
-- ✅ 网格质量校验器（长宽比/扭曲度/雅可比）
-- ✅ 边界条件自动识别与映射
+**时间积分**
+- ✅ SSP-RK2/RK3（Shu-Osher 形式，每 stage 重新计算残差）
+- ✅ IMEX Euler（显式对流 + 隐式粘性，阻尼 Picard 子迭代）
+- ✅ Dual-Time Stepping（BDF1/BDF2 + SSP-RK3 伪时间 + CFL 自适应）
 
-**Iteration 3: FR 求解器核心**
-- ✅ FR 离散格式（1st/2nd/3rd order）
-- ✅ CPU 后端（Numba JIT + 多线程，4.2x 加速）
-- ✅ GPU 后端（CuPy 封装，10-20x 加速）
-- ✅ SST k-ω 湍流模型 + 壁面函数（y+=30-100）
-- ✅ 时间离散（Backward Euler/RK2/AB3）
-- ✅ 收敛监控与自适应 CFL 策略
-- ✅ 瞬态求解器主循环 + STG 合成湍流
-- ✅ 检查点机制（HDF5 存储，支持断点续算）
+**湍流模型体系**
+- ✅ SST k-ω RANS（F1/F2 混合函数标准 Menter 1994 公式、正性限制器）
+- ✅ DDES 延迟分离涡模拟（屏蔽函数 + 有效长度尺度替换）
+- ✅ WMLES 壁面模型大涡模拟（Spalding 律 + Newton-Raphson 迭代）
+- ✅ WALE 亚格子应力模型
 
-### 🚧 进行中（Iteration 4）
+**网格与边界**
+- ✅ 原生 NAS 网格解析（ANSA v22/v23/v24）+ 自动体网格生成（BL extrusion + tetgen）
+- ✅ 高阶网格初始化（Duffy 映射、解析雅可比、面通量点定位/合并）
+- ✅ 幽灵态边界框架（WALL/FARFIELD/INLET/OUTLET/SYMMETRY）
+- ✅ SEM 合成湍流入口（Cholesky 分解雷诺应力、涡核对流+再生）
+- ✅ 壁面距离场（KD-Tree + Eikonal Dijkstra 近似）
 
-- 🔄 CLI 命令行接口完整实现（solve/post/grid 子命令）
-- 🔄 Python API 高层封装（AutoFlowCFDAPI 类）
-- 🔄 配置管理系统（YAML 解析 + 验证）
-- 🔄 边界条件模块增强（速度入口/压力出口/滑移壁面）
+**工程工作流**
+- ✅ CLI 完整命令体系（`grid`/`solve`/`post`/`config`/`utils`）
+- ✅ 检查点机制（HDF5 存储完整 (n_cells,n_sps,n_vars) 状态，支持 `solve resume`）
+- ✅ 气动系数积分（直接在 FR 面通量点上积分压力+粘性力）
+- ✅ Q-Criterion 涡识别准则（Green-Gauss 速度梯度重建）
+- ✅ 力系数时间平均统计（Welford 在线算法）
+- ✅ Order Continuation（P0→P1→...→目标阶数，残差下降触发判据）
+- ✅ VTK 导出（legacy + XML VTU，含边界分区、Q-Criterion）
 
-### 📅 规划中（Iteration 5-6）
+### 🚧 规划中
 
+- 📋 P≥1 阶 GPU 加速（当前仅 P0 有限体积有 GPU kernel）
+- 📋 完整 SST 输运方程（对流+扩散，当前为逐点源项 ODE 近似）
 - 📋 多 GPU 分布式计算（MPI + NCCL）
-- 📋 气动噪声模块（FW-H声类比）
-- 📋 LES 大涡模拟插件
-- 📋 AI Agent 集成示例（参数优化流水线）
+- 📋 气动噪声模块（FW-H 声类比）
 - 📋 Docker 容器化部署
-- 📋 Web 可视化界面（可选）
+- 📋 AI Agent 集成示例（参数优化流水线）
 
 ---
 

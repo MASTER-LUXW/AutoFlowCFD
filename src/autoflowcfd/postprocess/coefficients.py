@@ -2,11 +2,11 @@
 
 本模块通过压力积分从 CFD 仿真结果计算气动系数（Cd、Cl、Cm 等）。
 
-Key Components:
+核心组件:
     - CoefficientCalculator: 气动系数主计算器
     - ForceDecomposition: 力与力矩分解工具
 
-Example:
+示例:
     >>> from autoflowcfd.postprocess import CoefficientCalculator
     >>> calc = CoefficientCalculator(grid_data, solution)
     >>> coeffs = calc.calculate()

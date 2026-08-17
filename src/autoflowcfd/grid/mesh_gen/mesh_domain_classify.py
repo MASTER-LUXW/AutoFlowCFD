@@ -1,18 +1,13 @@
-"""Boundary-group classification for volume mesh generation.
+"""体网格生成的边界组分类。
 
-Decides which boundary-group faces should get boundary-layer (BL) extrusion
-versus which should be used unmodified as part of the outer domain shell fed
-to the constrained tetrahedralizer, and fixes each eligible sub-shell's
-winding so BL extrusion grows into the fluid domain instead of trusting the
-input mesh's raw (unverified) face winding.
+决定哪些边界组面应进行边界层（BL）挤出，哪些应作为外部域壳的一部分
+原样送入约束四面体化器，并修正每个合格子壳的缠绕方向，使 BL 挤出
+向流体域内部生长，而非信任输入网格未经验证的原始面缠绕方向。
 
-Classification operates per *named boundary group*, not per raw globally
-connected component: real automotive surface meshes routinely weld a wall
-group (e.g. the car body's underbody) to an adjacent group (ground/tunnel)
-at a small contact patch, so a naive "connected components over all
-candidate faces" pass would fuse body+ground+tunnel into one blob and lose
-the ability to tell them apart. Scoping the analysis to each group's own
-face subset avoids that.
+分类按*命名边界组*进行，而非按原始全局连通分量：真实汽车表面网格
+通常会在小接触面处将壁面组（如车底）与相邻组（地面/隧道）焊接在一起，
+因此对所有候选面的简单"连通分量"遍历会将车身+地面+隧道融合为一个
+整体，失去区分能力。将分析范围限定在每个组自己的面子集上可避免此问题。
 
 底层几何原语（连通分量、射线-三角形相交、封闭壳体内部点、带符号体积、
 包围盒接触面判定）拆到了同目录 mesh_domain_classify_geometry.py，本文件

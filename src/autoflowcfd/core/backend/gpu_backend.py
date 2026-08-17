@@ -1,11 +1,11 @@
-"""GPU backend implementation using CUDA acceleration.
+"""基于 CUDA 加速的 GPU 后端实现。
 
 本模块提供基于 CUDA 的 GPU 加速后端，用于 FR 求解器的通量和残差计算。
 
 注意：
 - 这是 V2.0 Pure FR 架构的一部分
 - 使用 Numba CUDA 进行 GPU 加速
-- 支持多GPU并行（未来扩展）
+- 支持多 GPU 并行（未来扩展）
 """
 
 import numpy as np

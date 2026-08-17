@@ -140,6 +140,16 @@ def cell_fields(exporter, fields: List[str]) -> Dict[str, np.ndarray]:
             else:
                 out['nut'] = np.zeros(n_cells)
 
+    # Q-Criterion 涡识别准则 (P-02)
+    if 'q_criterion' in fields:
+        from .q_criterion import compute_q_criterion_from_grid_solution
+        q_val = compute_q_criterion_from_grid_solution(exporter.grid_data, exporter.solution)
+        if q_val is not None and len(q_val) == n_cells:
+            out['q_criterion'] = q_val
+        else:
+            logger.warning("Q-Criterion computation unavailable; writing zeros")
+            out['q_criterion'] = np.zeros(n_cells)
+
     return out
 
 

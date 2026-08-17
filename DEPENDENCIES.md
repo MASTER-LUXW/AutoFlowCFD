@@ -24,7 +24,7 @@ install_all_deps.bat
 
 | 包名 | 最低版本 | 用途 | 安装命令 |
 |------|---------|------|---------|
-| numpy | 1.24.0 | 数值计算基础库 | `pip install numpy>=1.24.0` |
+| numpy | 1.26.0 | 数值计算基础库 | `pip install numpy>=1.26.0` |
 | click | 8.1.0 | CLI命令行框架 | `pip install click>=8.1.0` |
 | pyyaml | 6.0.0 | YAML配置文件解析 | `pip install pyyaml>=6.0.0` |
 | h5py | 3.9.0 | HDF5数据序列化 | `pip install h5py>=3.9.0` |
@@ -32,7 +32,7 @@ install_all_deps.bat
 
 **一键安装命令：**
 ```bash
-pip install numpy>=1.24.0 click>=8.1.0 pyyaml>=6.0.0 h5py>=3.9.0 loguru>=0.7.0
+pip install numpy>=1.26.0 click>=8.1.0 pyyaml>=6.0.0 h5py>=3.9.0 loguru>=0.7.0
 ```
 
 ### 开发依赖（测试和代码质量）
@@ -106,10 +106,10 @@ AutoFlowCFD - Dependency Verification
 
 ```bash
 # 运行单元测试
-pytest tests/unit/test_grid_structures.py -v
+poetry run pytest tests/unit/ -v
 
 # 运行完整验证
-python scripts\verify_iteration2.py
+poetry run pytest tests/ -v
 ```
 
 ---
@@ -202,7 +202,7 @@ poetry shell
 ### 4. 运行项目
 ```bash
 # 在虚拟环境中
-python scripts\verify_iteration2.py
+poetry run autoflowcfd --version
 ```
 
 ---
@@ -211,25 +211,20 @@ python scripts\verify_iteration2.py
 
 依赖安装完成后，您可以：
 
-1. **验证迭代2完成情况**
+1. **运行测试套件**
    ```bash
-   python scripts\verify_iteration2.py
+   poetry run pytest tests/ -v
    ```
 
-2. **运行示例程序**
+2. **快速入门**
    ```bash
-   python examples\grid_parsing_example.py
+   poetry run autoflowcfd --help
    ```
 
-3. **运行测试套件**
+3. **查看文档**
    ```bash
-   pytest tests/ -v
-   ```
-
-4. **查看网格模块文档**
-   ```bash
-   # 查看README
-   type src\autoflowcfd\grid\README.md
+   # 查看快速入门指南
+   type QUICKSTART.md
    ```
 
 ---
@@ -245,5 +240,5 @@ python scripts\verify_iteration2.py
 
 ---
 
-**最后更新**: 2026-07-23  
+**最后更新**: 2026-08-17  
 **维护者**: AutoFlowCFD Team

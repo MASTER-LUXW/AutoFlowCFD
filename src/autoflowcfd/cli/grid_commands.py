@@ -1,17 +1,16 @@
-"""Grid processing subcommands.
+"""网格处理子命令。
 
-This module provides CLI commands for grid file parsing, validation,
-and information display.
+本模块提供网格文件解析、验证和信息显示的 CLI 命令。
 
-Commands:
-    - parse: Parse .nas grid files
-    - validate: Validate grid quality
-    - info: Display grid statistics
-    - convert: Convert grid formats (v1.0)
-    - generate-volume: Generate + export a volume mesh from a surface .nas
-      (moved to grid_volume_commands.py, see below)
-    - import-volume: Import an externally-generated volume mesh (moved to
-      grid_volume_commands.py, see below)
+命令:
+    - parse: 解析 .nas 网格文件
+    - validate: 验证网格质量
+    - info: 显示网格统计信息
+    - convert: 转换网格格式（v1.0）
+    - generate-volume: 从面网格 .nas 生成体网格
+      （已搬至 grid_volume_commands.py，见下）
+    - import-volume: 导入外部生成的体网格
+      （已搬至 grid_volume_commands.py，见下）
 
 拆分说明（本文件原有 700 行，超过 400 行硬性拆分阈值）：
 `generate-volume`/`import-volume` 这两个围绕"体网格"主题的重量级命令

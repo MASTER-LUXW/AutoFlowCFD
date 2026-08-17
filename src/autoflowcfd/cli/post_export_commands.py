@@ -111,7 +111,7 @@ def export_vtk(
             logger.info(f"Exporting variables: {var_list}")
 
         # Validate variable names
-        valid_vars = {'velocity', 'pressure', 'k', 'omega', 'nut'}
+        valid_vars = {'velocity', 'pressure', 'k', 'omega', 'nut', 'q_criterion'}
         invalid_vars = set(var_list) - valid_vars
         if invalid_vars:
             raise ValueError(

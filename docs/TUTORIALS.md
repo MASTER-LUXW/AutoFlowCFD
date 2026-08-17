@@ -59,13 +59,17 @@ ls examples/cube_demo/cube.nas
 #### 方式一: CLI
 
 ```bash
-poetry run autoflowcfd solve run examples/cube_demo/cube.nas \
-    --mode steady \
+# 步骤 1: 生成体网格
+poetry run autoflowcfd grid generate-volume examples/cube_demo/cube.nas \
+    -o examples/cube_demo/cube_volume.pkl
+
+# 步骤 2: 运行稳态求解
+poetry run autoflowcfd solve steady examples/cube_demo/cube_volume.pkl \
     --backend cpu \
-    --turbulence sst_kw \
+    --turbulence-model sst \
     --order 2 \
     --max-iter 2000 \
-    --output ./results/cube_steady
+    -o ./results/cube_steady
 ```
 
 #### 方式二: Python API
@@ -235,7 +239,7 @@ output:
 ### 运行仿真
 
 ```bash
-poetry run autoflowcfd solve run examples/ahmed_demo/car_model.nas \
+poetry run autoflowcfd solve steady examples/ahmed_demo/ahmed_volume.pkl \
     -c configs/ahmed_steady.yaml
 ```
 
@@ -453,7 +457,7 @@ output:
 
 ```bash
 # GPU 加速（推荐）
-poetry run autoflowcfd solve run grids/sedan_full.nas \
+poetry run autoflowcfd solve steady grids/sedan_full_volume.pkl \
     -c configs/sedan_full.yaml
 
 # 预计耗时: 2-4 小时（GPU A100）
@@ -622,7 +626,7 @@ output:
 ### 运行仿真
 
 ```bash
-poetry run autoflowcfd solve run examples/ahmed_demo/car_model.nas \
+poetry run autoflowcfd solve transient examples/ahmed_demo/ahmed_volume.pkl \
     -c configs/ahmed_transient_ddes.yaml
 
 # 预计耗时: 4-6 小时（GPU A100）
@@ -1062,5 +1066,5 @@ print(f"外推至无限网格: Cd = {Cd_extrapolated:.4f}")
 
 ---
 
-**最后更新**: 2026-07-25  
-**版本**: AutoFlowCFD v0.1.0
+**最后更新**: 2026-08-17  
+**版本**: AutoFlowCFD v0.2.0 (V2.0 系统改造版)

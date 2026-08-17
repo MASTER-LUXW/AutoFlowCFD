@@ -1,7 +1,7 @@
-"""Grid metadata structures.
+"""网格元数据结构。
 
-Provides GridMetadata class for storing grid information including counts,
-format version, and statistical data.
+提供 GridMetadata 类，存储网格信息，包括数量统计、
+格式版本和统计数据。
 """
 
 from typing import List, Optional, Tuple
