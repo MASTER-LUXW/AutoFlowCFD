@@ -239,7 +239,7 @@ def compute_inviscid_residual_p0_cupy(
             "mesh.cell_volumes not available - required for P0 finite-volume residual"
         )
 
-    from autoflowcfd.core.fr_residual_inviscid import (
+    from autoflowcfd.core.fr_residual.inviscid import (
         conserved_to_primitive, DefaultGhostProvider
     )
 

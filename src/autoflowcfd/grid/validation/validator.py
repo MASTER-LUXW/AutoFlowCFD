@@ -33,8 +33,8 @@ from .quality_metrics import compute_triangle_aspect_ratios, compute_triangle_sk
 class GridValidator:
     """网格质量校验器
     
-    Validates mesh quality by computing geometric metrics for each cell.
-    Ensures mesh meets quality requirements for stable CFD simulations.
+    通过计算每个单元的几何指标来验证网格质量。
+    确保网格满足稳定 CFD 仿真的质量要求。
     
     Attributes:
         grid_data: 网格数据
@@ -54,16 +54,16 @@ class GridValidator:
             grid_data: 网格数据
             
         Raises:
-            ValueError: If grid data is invalid
+            ValueError: 如果网格数据无效
         """
         self.grid_data = grid_data
         
-        # Default quality thresholds based on CFD best practices
-        # These values are conservative for automotive external aerodynamics
+        # 默认质量阈值基于 CFD 最佳实践
+        # 这些值对汽车外部空气动力学是保守的
         self.thresholds = {
-            'aspect_ratio_max': 100.0,    # Max acceptable aspect ratio
-            'skewness_max': 0.95,          # Max acceptable skewness (0-1 scale)
-            'jacobian_min': 1e-6,          # Min acceptable Jacobian determinant
+            'aspect_ratio_max': 100.0,    # 最大可接受长宽比
+            'skewness_max': 0.95,          # 最大可接受偏斜度 (0-1 范围)
+            'jacobian_min': 1e-6,          # 最小可接受雅可比行列式
         }
         
         logger.info(
@@ -74,7 +74,7 @@ class GridValidator:
     def validate(self) -> Dict[str, Any]:
         """执行完整校验
         
-        Performs all quality checks and returns comprehensive results.
+        执行所有质量检查并返回综合结果。
         
         Returns:
             Dict: 校验结果字典,包含以下键:
@@ -99,7 +99,7 @@ class GridValidator:
             'summary': ''
         }
         
-        # Check if mesh passes all quality criteria
+        # 检查网格是否通过所有质量标准
         failures = []
         
         if results['aspect_ratio']['max'] > self.thresholds['aspect_ratio_max']:
@@ -146,7 +146,7 @@ class GridValidator:
                 f"winding relative to a neighboring cell"
             )
 
-        # Generate summary
+        # 生成摘要
         results['summary'] = self._generate_summary(results, failures)
         
         if results['passed']:
@@ -161,30 +161,29 @@ class GridValidator:
     def _check_aspect_ratio(self) -> Dict[str, float]:
         """检查长宽比
         
-        Computes aspect ratio for each triangular cell. For triangles,
-        aspect ratio is defined as the ratio of longest edge to shortest edge.
+        计算每个三角形单元的长宽比。对于三角形，
+        长宽比定义为最长边与最短边的比值。
         
         Returns:
-            Dict: Statistics with 'max', 'avg', 'min' keys
+            Dict: 包含 'max'、'avg'、'min' 键的统计字典
             
-        Note:
-            Aspect ratio of 1.0 is perfect (equilateral triangle).
-            Values > 10 indicate stretched cells that may cause numerical issues.
+        注意:
+            长宽比 1.0 为完美（等边三角形）。
+            值 > 10 表示可能导致数值问题的拉伸单元。
         """
         logger.debug("Computing aspect ratios...")
 
         connectivity = self.grid_data.cells.connectivity
         node_coords = self.grid_data.nodes.get_coordinates()
 
-        # Reuses quality_metrics.compute_triangle_aspect_ratios (same
-        # relative-epsilon floor as every other cell-type's aspect ratio in
-        # this project) instead of a separate ad hoc implementation, so a
-        # future fix to that formula can't silently drift out of sync here
-        # the way this module's skewness check once did (see
-        # quality_metrics.compute_triangle_skewness_values' docstring).
+        # 复用 quality_metrics.compute_triangle_aspect_ratios（与其他
+        # 所有单元类型的长宽比使用相同的相对 epsilon 下限），而不是单独
+        # 的临时实现，这样对该公式的未来修复不会在此处静默不同步——
+        # 正如本模块的偏斜度检查曾经发生过的那样（见
+        # quality_metrics.compute_triangle_skewness_values 的文档字符串）。
         aspect_ratios = compute_triangle_aspect_ratios(node_coords, connectivity)
 
-        # Compute statistics
+        # 计算统计量
         stats = {
             'max': float(np.max(aspect_ratios)),
             'avg': float(np.mean(aspect_ratios)),
@@ -200,37 +199,34 @@ class GridValidator:
         return stats
     
     def _check_skewness(self) -> Dict[str, float]:
-        """检查扭曲度
+        """检查偏斜度
         
-        Computes skewness for triangular cells. Skewness measures how much
-        a triangle deviates from an equilateral triangle.
+        计算三角形单元的偏斜度。偏斜度衡量三角形
+        偏离等边三角形的程度。
         
         Returns:
-            Dict: Statistics with 'max', 'avg', 'min' keys
+            Dict: 包含 'max'、'avg'、'min' 键的统计字典
             
-        Note:
-            Skewness ranges from 0 (perfect equilateral) to 1 (degenerate).
-            Values > 0.9 indicate highly skewed cells.
+        注意:
+            偏斜度范围从 0（完美等边）到 1（退化）。
+            值 > 0.9 表示高度偏斜的单元。
         """
         logger.debug("Computing skewness...")
 
         connectivity = self.grid_data.cells.connectivity
         node_coords = self.grid_data.nodes.get_coordinates()
 
-        # Reuses quality_metrics.compute_triangle_skewness_values (the
-        # standard Fluent-style equiangular-skew formula) instead of the
-        # area-deviation formula this check used to have. That older
-        # formula was a DIFFERENT, non-standard metric from the one this
-        # project deliberately adopted for triangle skewness elsewhere -
-        # see compute_triangle_skewness_values' own docstring for the real
-        # false-positive case (a valid 123/29/28 degree BL cap triangle)
-        # that motivated the switch. Left un-synced here, this surface
-        # mesh check - the FIRST quality gate a mesh goes through - would
-        # keep scoring the same triangle differently from every later
-        # check in the pipeline.
+        # 复用 quality_metrics.compute_triangle_skewness_values（
+        # 标准 Fluent 风格等角偏斜公式），而不是此检查曾经使用的
+        # 面积偏差公式。旧公式是一个不同的、非标准的度量，与本项目
+        # 在其他地方刻意采用的三角形偏斜度度量不一致——见
+        # compute_triangle_skewness_values 自身的文档字符串了解
+        # 导致切换的真实假阳性案例（一个有效的 123/29/28 度 BL 顶部三角形）。
+        # 此处未同步，这个表面网格检查——网格经过的第一个质量关卡——
+        # 会对同一个三角形给出与后续所有检查不同的评分。
         skewness = compute_triangle_skewness_values(node_coords, connectivity)
 
-        # Compute statistics
+        # 计算统计量
         stats = {
             'max': float(np.max(skewness)),
             'avg': float(np.mean(skewness)),
@@ -248,13 +244,12 @@ class GridValidator:
     def _check_jacobian(self) -> Dict[str, float]:
         """检查雅可比行列式
 
-        Computes Jacobian determinant for each cell (and, via directed-edge
-        winding consistency, cells with inconsistent orientation relative
-        to a neighbor).
+        计算每个单元的雅可比行列式（以及通过有向边绕向一致性
+        检测相对于邻居方向不一致的单元）。
 
-        Implementation lives in validator_jacobian.py (extracted for the
-        project's >400-line file-split rule) - see that module's
-        check_jacobian for the full Args/Returns/Note documentation.
+        实现位于 validator_jacobian.py（按项目 >400 行文件拆分规则
+        提取）——见该模块的 check_jacobian 了解完整的 Args/Returns/Notes
+        文档。
         """
         from .validator_jacobian import check_jacobian
 
@@ -263,7 +258,7 @@ class GridValidator:
     def _generate_summary(self, results: Dict[str, Any], failures: list) -> str:
         """生成校验结果摘要
         
-        Creates a human-readable summary of validation results.
+        创建验证结果的可读摘要。
         
         Args:
             results: Validation results dictionary
@@ -281,7 +276,7 @@ class GridValidator:
             "-" * 60,
         ]
         
-        # Aspect ratio section
+        # 纵横比部分
         ar = results['aspect_ratio']
         lines.append("Aspect Ratio:")
         lines.append(f"  Max: {ar['max']:.2f} (threshold: {self.thresholds['aspect_ratio_max']:.2f})")
@@ -289,7 +284,7 @@ class GridValidator:
         lines.append(f"  Min: {ar['min']:.2f}")
         lines.append("")
         
-        # Skewness section
+        # 偏斜度部分
         sk = results['skewness']
         lines.append("Skewness:")
         lines.append(f"  Max: {sk['max']:.3f} (threshold: {self.thresholds['skewness_max']:.3f})")
@@ -297,7 +292,7 @@ class GridValidator:
         lines.append(f"  Min: {sk['min']:.3f}")
         lines.append("")
         
-        # Jacobian section
+        # 雅可比部分
         jac = results['jacobian']
         lines.append("Jacobian Determinant:")
         lines.append(f"  Max: {jac['max']:.6f}")
@@ -307,7 +302,7 @@ class GridValidator:
             lines.append(f"  WARNING: {jac['negative_count']} cells with negative Jacobian!")
         lines.append("")
         
-        # Overall result
+        # 总体结果
         lines.append("-" * 60)
         if results['passed']:
             lines.append("RESULT: ✓ PASSED - Mesh quality is acceptable")
@@ -325,7 +320,7 @@ class GridValidator:
     def get_quality_histogram(self, metric: str = 'aspect_ratio', bins: int = 50) -> Tuple[np.ndarray, np.ndarray]:
         """获取质量指标直方图
         
-        Generates histogram data for visualization of quality metric distribution.
+        生成质量指标分布的直方图数据，用于可视化。
         
         Args:
             metric: Quality metric name ('aspect_ratio', 'skewness', or 'jacobian')
@@ -357,7 +352,7 @@ class GridValidator:
 
         与 _check_aspect_ratio 复用同一个 quality_metrics 实现（相对
         epsilon 下限），不再维护一份固定 1e-10 epsilon 的独立实现——两者
-        曾经用不同公式，导致直方图和 pass/fail 判定对同一批单元给出不一致
+        曾经用不同公式，导致直方图和 传递/fail 判定对同一批单元给出不一致
         的数值。
         """
         connectivity = self.grid_data.cells.connectivity

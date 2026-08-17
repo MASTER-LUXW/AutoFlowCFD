@@ -9,14 +9,14 @@ never folds over itself, regardless of growth_rate/bl_layers/transition_growth_r
 import numpy as np
 import pytest
 
-from autoflowcfd.grid.mesh_gen.mesh_extrusion import extrude_layers
-from autoflowcfd.grid.mesh_gen.mesh_front_collision import (
+from autoflowcfd.grid.mesh_gen.extrusion.mesh_extrusion import extrude_layers
+from autoflowcfd.grid.mesh_gen.utils.mesh_front_collision import (
     CONVERGENCE_SAFETY_FRACTION,
     clamp_budget_for_convergence,
     find_self_colliding_faces,
     freeze_self_colliding_nodes,
 )
-from autoflowcfd.grid.mesh_gen.mesh_utils import compute_face_normals
+from autoflowcfd.grid.mesh_gen.utils.mesh_utils import compute_face_normals
 
 # Two triangles that genuinely cross in 3D, sharing no vertices - verified
 # directly against overlap_geometry.triangle_triangle_intersect. Triangle A

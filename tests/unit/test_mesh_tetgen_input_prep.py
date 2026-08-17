@@ -7,7 +7,7 @@ module never invokes."""
 import numpy as np
 import pytest
 
-from autoflowcfd.grid.mesh_gen.mesh_tetgen_input_prep import prepare_plc_input
+from autoflowcfd.grid.mesh_gen.tetgen.mesh_tetgen_input_prep import prepare_plc_input
 
 _CUBE_POINTS = np.array([
     [0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.],

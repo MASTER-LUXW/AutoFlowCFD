@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from autoflowcfd.grid.high_order_mesh import HighOrderMesh
+from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
 from autoflowcfd.boundary.fr_ghost_state import BoundaryGhostStateProvider
 
 

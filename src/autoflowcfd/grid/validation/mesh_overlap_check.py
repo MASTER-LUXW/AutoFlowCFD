@@ -33,25 +33,19 @@ from .mesh_overlap_report import OverlapProximityReport
 if TYPE_CHECKING:
     from ..schema.grid_faces import FaceData
 
-# A single outlier-huge boundary face (e.g. a coarse farfield/domain-shell
-# panel many times larger than the typical boundary face - see
-# check_face_overlap_and_proximity's own search_radius docstring for why
-# radius scales with each face's OWN size) gets a broad-phase search
-# radius scaled to that huge size, and its query_ball_point call can then
-# return a candidate list numbering in the hundreds of thousands - purely
-# because of its own size, not genuine proximity risk. Measured on a real
-# case (cube_demo's coarse domain-shell/farfield panels): a single such
-# face returned 142,944 candidates, blowing its containing 500-face chunk
-# out to 5.58M candidate pairs and making the whole check take 6+ minutes
-# and several GB of memory. A genuine near-miss or overlap always shows up
-# among the CLOSEST few candidates - the defect threshold
-# (proximity_fraction * min(size_i, size_j)) is far tighter than
-# search_radius (search_multiplier's own docstring explains the required
-# headroom between them) - so capping any one face's candidate set at its
-# CAP nearest neighbours (instead of every point within its oversized
-# radius) keeps every genuine candidate while dropping only the excess,
-# far-within-radius-but-nowhere-near-the-actual-threshold ones that were
-# never going to be flagged anyway.
+# 单个异常巨大的边界面（例如比典型边界面大很多倍的粗远场/域壳
+# 面板——见 check_face_overlap_and_proximity 的 search_radius 文档
+# 了解为何半径随每个面自身尺寸缩放）会得到一个按该巨大尺寸
+# 缩放的宽相位搜索半径，其 query_ball_point 调用可能返回多达
+# 数十万的候选列表——纯粹是因为其自身大小，而非真实的接近风险。
+# 在真实案例上测量（cube_demo 的粗域壳/远场面板）：单个这样的面
+# 返回了 142,944 个候选，将其所在的 500 面块扩展到 558 万候选对，
+# 使整个检查耗时 6+ 分钟和数 GB 内存。真实的接近或重叠总是出现在
+# 最近的几个候选中——缺陷阈值（proximity_fraction * min(size_i, size_j)）
+# 远紧于 search_radius（search_multiplier 的文档解释了两者之间所需
+# 的余量）——因此将任何单个面的候选集限制在其最近的 CAP 个邻居
+# （而非其超大半径内的每个点）保留了所有真实候选，仅丢弃那些
+# 远在半径内但远未达到实际阈值的、无论如何都不会被标记的多余项。
 CANDIDATE_CAP_PER_FACE = 2000
 
 
@@ -60,14 +54,10 @@ def _extract_faces(nodes: np.ndarray, cells: np.ndarray) -> 'FaceData':
     # elsewhere in this package (see quality_validator.py's identical
     # _extract_faces) - importing the other direction only at call time
     # avoids ever needing to reason about import order.
-    from ..mesh_gen.face_extractor import FaceExtractor
+    from ..mesh_gen.extraction.face_extractor import FaceExtractor
     from ..schema.grid_nodes import NodeArray
 
-    node_arr = NodeArray(
-        x=np.ascontiguousarray(nodes[:, 0]),
-        y=np.ascontiguousarray(nodes[:, 1]),
-        z=np.ascontiguousarray(nodes[:, 2]),
-    )
+    node_arr = NodeArray.from_array(nodes)
     return FaceExtractor.extract_faces(cells.astype(np.int32), node_arr)
 
 
@@ -81,97 +71,74 @@ def check_face_overlap_and_proximity(
     chunk_size: int = 500,
     boundary_faces_only: bool = True,
 ) -> OverlapProximityReport:
-    """Detect genuinely overlapping and near-touching faces between
-    different, non-adjacent cells.
+    """检测不同、非相邻单元之间真实重叠和接近接触的面。
 
-    Uses FaceData's already-deduplicated face list (one entry per distinct
-    triangular face, whether interior or boundary - see grid_faces.py) as
-    the candidate set, rather than re-deriving all 4*n_cells raw tet faces:
-    two cells that legitimately share a face already collapse to a single
-    FaceData entry with both an owner and a neighbour, so this never has to
-    separately special-case "the two faces are actually the same face".
+    使用 FaceData 已去重面列表（每个独立三角形面一个条目，无论内部
+    还是边界——见 grid_faces.py）作为候选集，而非重新推导所有
+    4*n_cells 个原始四面体面：合法共享面的两个单元已折叠为单个
+    FaceData 条目，同时拥有 owner 和 neighbour，因此无需单独处理
+    "两面实际上是同一面"的情况。
 
-    By default (`boundary_faces_only=True`) only the mesh's true boundary
-    faces (no neighbour cell) are candidates. This is a deliberate scope
-    restriction, not just a performance shortcut: the defects this check
-    exists for (see module docstring - two BL extrusion fronts crossing, a
-    core-fill splice artifact) both manifest at the OUTER surface of the
-    respective regions colliding, never buried inside an already-correctly-
-    formed BL layer stack's interior. Checking interior faces too was tried
-    first and found to be both wrong and impractically expensive on a real
-    automotive mesh: a BL stack's own consecutive layers are, BY DESIGN,
-    packed far closer together (first-layer thickness can be a few mm) than
-    a face's own lateral size, so `proximity_fraction`-scaled "closeness"
-    flagged nearly every ordinary layer-to-layer transition in the entire
-    BL volume as a false positive - millions of them on a 2.4M-cell case,
-    which is also what made the check itself slow/memory-heavy for no
-    diagnostic benefit. Boundary faces alone were ~36x fewer on that same
-    case (135,914 of 4,886,259 total) and are exactly where a genuine
-    cross-region collision would actually show up.
+    默认情况下（`boundary_faces_only=True`）只有网格的真正边界面
+    （无邻居单元）是候选。这是刻意的范围限制，不仅是性能捷径：
+    此检查存在的缺陷（见模块文档字符串——两个 BL 挤出前沿交叉、
+    核心填充拼接伪影）都表现在各自区域碰撞的外表面，从不埋在
+    已正确形成的 BL 层堆内部。也试过检查内部面，但在真实汽车
+    网格上发现既错误又不切实际地昂贵：BL 堆栈自身的连续层按
+    设计彼此堆积得远比面的自身横向尺寸近（第一层厚度可以只有
+    几毫米），因此 `proximity_fraction` 缩放的"接近度"将几乎每个
+    普通的层到层过渡都标记为假阳性——在 240 万单元案例上有数百万
+    个，这也是使检查本身慢/内存密集的原因，且无诊断收益。仅边界
+    面在相同案例上少约 36 倍（4,886,259 个中的 135,914 个），且正是
+    真实跨区域碰撞会出现的地方。
 
-    Broad phase: for each face, query a KD-tree of face centroids within
-    `search_multiplier * sqrt(own_area)` of that face's own centroid - a
-    LOCAL, per-face radius (not a single domain-scale constant). This
-    matters on a BL-extruded automotive mesh where near-wall cells can be
-    orders of magnitude smaller than far-field core cells (see
-    mesh_tetgen_core.compute_local_thickness_limit's own doc for the exact
-    same lesson, learned from a measured multi-minute regression when an
-    earlier version of that function used a domain-scale radius
-    unconditionally). Querying from every face (not just small ones) with
-    its OWN radius, then taking the union of all pairs found, naturally
-    also catches a small face near a much larger one even though the small
-    face's own radius alone wouldn't reach the large face's centroid - the
-    large face's own (larger) query catches it from the other direction.
-    A rare outlier-huge face's own candidate list is capped at
-    CANDIDATE_CAP_PER_FACE nearest neighbours rather than left unbounded -
-    see that constant's module-level docstring for why this doesn't lose
-    any genuine defect.
+    宽相位：对每个面，在该面质心 `search_multiplier * sqrt(自身面积)`
+    范围内查询面质心的 KD 树——局部的、每面半径（非单一域尺度常量）。
+    这在 BL 挤出的汽车网格上很重要，其中近壁单元可以比远场核心
+    单元小几个数量级（见 mesh_tetgen_core.compute_local_thickness_limit
+    的文档了解完全相同的教训，从测量的多分钟回归中学到，当该函数
+    的早期版本无条件使用域缩放半径时）。从每个面（不仅是小面）
+    用自身半径查询，然后取所有找到对的并集，自然地也能捕获靠近
+    更大面的小面，即使小面自身的半径不足以到达大面的质心——
+    大面自身的（更大的）查询从另一个方向捕获它。罕见异常巨大面
+    的候选列表被限制在 CANDIDATE_CAP_PER_FACE 个最近邻居而非无界——
+    见该常量的模块级文档了解为何这不会丢失任何真实缺陷。
 
-    Narrow phase, per surviving candidate pair (excludes any pair sharing a
-    node - see module docstring): exact triangle_triangle_intersect first;
-    if not intersecting, triangle_triangle_min_distance, flagged as "close"
-    if below `proximity_fraction * min(sqrt(area_i), sqrt(area_j))` (a
-    per-pair, locally-scaled threshold, not a single global distance).
+    窄相位，对每个幸存的候选对（排除共享节点的对——见模块文档
+    字符串）：先精确 triangle_triangle_intersect；若不相交，则
+    triangle_triangle_min_distance，低于 `proximity_fraction *
+    min(sqrt(area_i), sqrt(area_j))` 时标记为"接近"（每对局部
+    缩放的阈值，非单一全局距离）。
 
     Args:
-        nodes: (n_nodes, 3) float64 node coordinates
-        cells: (n_cells, 4) int32/int64 tetrahedral connectivity
-        faces: Optional precomputed FaceData - reused if the caller already
-            has it (this project's mesh generation/repair pipeline commonly
-            does), else derived internally
-        proximity_fraction: "close" threshold as a fraction of the smaller
-            of the two candidate faces' own characteristic size
-        search_multiplier: broad-phase KD-tree query radius as a multiple
-            of each face's own characteristic size - larger catches more
-            candidates (safer, slower); must exceed proximity_fraction for
-            the close-pair threshold to ever be reachable, and in practice
-            needs headroom beyond that since two faces can be centroid-
-            further-apart than their close-distance while their nearest
-            EDGES are still within range
-        max_examples: cap on how many concrete (cell, cell[, distance])
-            examples are kept for the human-readable report - counts are
-            never capped, only the example list
-        chunk_size: KD-tree queries AND candidate-pair deduplication are
-            batched this many faces at a time (same rationale as
-            mesh_tetgen_core.compute_local_thickness_limit's chunking -
-            materializing every face's full candidate list, or every
-            candidate pair ever seen, at once does not scale on a fine
-            mesh; a global cross-chunk `set()` of every pair seen so far
-            was tried first and grew into tens of GB on a real 4.9M-face
-            mesh). Deduplication is per-chunk only (vectorized via
-            np.unique, not a Python-level set) - a genuine defect pair can
-            therefore be found and geometrically tested twice if it's
-            reachable from two different chunks, a bounded 2x compute cost
-            accepted in exchange for bounded (not unbounded) memory; the
-            final overlap/close pair lists are deduplicated again at the
-            end regardless (cheap, bounded by the number of actual
-            findings, not by candidate-pair count)
-        boundary_faces_only: see above - False checks every face
-            (interior + boundary), which is both slower and noisier on a
-            BL-extruded mesh; only meaningful for a caller that has
-            verified its own mesh has no BL region at all (e.g. a bare
-            tetgen background fill), where "interior" carries none of the
-            BL-stacking density this default is scoped around.
+        nodes: (n_nodes, 3) float64 节点坐标
+        cells: (n_cells, 4) int32/int64 四面体连接关系
+        faces: 可选预计算的 FaceData——若调用方已拥有则复用
+            （本项目的网格生成/修复管线通常如此），否则内部推导
+        proximity_fraction: "接近"阈值，作为两个候选面中较小者
+            自身特征尺寸的比例
+        search_multiplier: 宽相位 KD 树查询半径，作为每个面自身
+            特征尺寸的倍数——越大捕获越多候选（更安全、更慢）；
+            必须超过 proximity_fraction 才能使接近对阈值可达，
+            且实际上需要更多余量，因为两个面在最近边仍在范围内
+            时质心距离可能远超其接近距离
+        max_examples: 保留多少具体 (cell, cell[, distance]) 示例
+            供人类可读报告——计数从无限制，仅示例列表
+        chunk_size: KD 树查询和候选对去重每次批处理这么多面
+            （与 mesh_tetgen_core.compute_local_thickness_limit 的
+            分块理由相同——在细网格上一次性物化每个面的完整候选
+            列表或所有见过的候选对不会缩放；之前试过全局跨块
+            `set()` 存储所有见过的对，在真实 490 万面网格上增长
+            到数十 GB）。去重仅在每个块内（通过 np.unique 向量化，
+            非 Python 级 set）——因此真实缺陷对若从两个不同块
+            可达可能被找到并进行几何测试两次，有界的 2x 计算成本
+            换取有界（非无界）内存；最终的重叠/接近对列表无论如何
+            在最后再次去重（廉价，受实际发现数而非候选对数限制）
+        boundary_faces_only: 见上方——False 检查每个面（内部 +
+            边界），在 BL 挤出网格上更慢且更嘈杂；仅对已确认
+            自身网格完全没有 BL 区域的调用方有意义（例如裸 tetgen
+            背景填充），其中"内部"不携带此默认值围绕的 BL 堆叠
+            密度问题。
 
     Returns:
         OverlapProximityReport
@@ -221,27 +188,23 @@ def check_face_overlap_and_proximity(
             centroids[idx_chunk], r=search_radius[idx_chunk], workers=-1
         )
 
-        # Fully vectorized candidate-pair construction - NOT a Python-level
-        # loop over every (face, candidate) combination, and NOT an
-        # ever-growing cross-chunk Python `set()` of every pair seen so
-        # far. Both were tried first and, on a real multi-million-face
-        # mesh (Ahmed Body, 4.9M faces), the set grew into tens of GB and
-        # the loop made no visible progress for 10+ minutes before being
-        # killed - the same class of unbounded-accumulation performance
-        # trap this project has hit before (see this doc's own Part4,
-        # P1/P2). Deduplication is instead done PER CHUNK only, via
-        # np.unique on a small (chunk-local) array; a pair can still be
-        # tested twice total if it's found from both directions across two
-        # DIFFERENT chunks (bounded 2x extra work, not unbounded memory) -
-        # a deliberate, cheap trade-off, not an oversight.
+        # 全向量化候选对构造——不是 Python 级循环遍历每个
+        # (面, 候选) 组合，也不是不断增长的跨块 Python `set()`
+        # 存储所有见过的对。两者都试过，在真实数百万面网格
+        # （Ahmed Body, 490 万面）上，set 增长到数十 GB，循环
+        # 10+ 分钟看不到任何进展就被杀掉——同类无界积累性能
+        # 陷阱本项目之前已遇到过（见本文档 Part4, P1/P2）。
+        # 去重改为仅在每个块内通过 np.unique 对小（块本地）数组
+        # 进行；一对若从两个不同块的两个方向都被找到仍可能被
+        # 测试两次（有界的 2x 额外工作，非无界内存）——刻意的、
+        # 廉价的权衡，不是疏忽。
         counts = np.fromiter(
             (len(lst) for lst in neighbor_lists), dtype=np.int64, count=len(neighbor_lists)
         )
 
-        # See CANDIDATE_CAP_PER_FACE's module-level docstring. This only
-        # ever fires for rare outlier-huge faces - normal-scale faces
-        # (the vast majority) have small counts and are completely
-        # unaffected.
+        # 见 CANDIDATE_CAP_PER_FACE 的模块级文档字符串。这仅对
+        # 罕见的异常巨大面触发——正常规模面（绝大多数）的计数
+        # 很小，完全不受影响。
         over_cap = np.flatnonzero(counts > CANDIDATE_CAP_PER_FACE)
         if len(over_cap):
             k = min(CANDIDATE_CAP_PER_FACE, n_faces)
@@ -334,11 +297,10 @@ def check_face_overlap_and_proximity(
                     for cj in cells_j:
                         close_pairs.append((int(ci), int(cj), d))
 
-    # A genuine defect pair can be found twice (once from each face's own
-    # chunk - see the per-chunk-only dedup note above); collapse to unique
-    # (cell_a, cell_b) entries here rather than double-reporting/double-
-    # counting it. Cheap: bounded by the number of actual findings, not by
-    # the (potentially huge) total candidate-pair count.
+    # 真实缺陷对可能被发现两次（从每个面所在的块各一次——
+    # 见上方仅块内去重的说明）；在此折叠为唯一的 (cell_a, cell_b)
+    # 条目，而非重复报告/重复计数。廉价：受实际发现数限制，
+    # 而非（可能巨大的）总候选对数限制。
     overlap_pairs = list(dict.fromkeys(overlap_pairs))
     close_pairs = list({(a, b): (a, b, d) for a, b, d in close_pairs}.values())
 

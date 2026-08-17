@@ -5,7 +5,7 @@ from tetgen itself which is never invoked to produce these exceptions
 
 import pytest
 
-from autoflowcfd.grid.mesh_gen.mesh_tetgen_error_translation import translate_tetgen_failure
+from autoflowcfd.grid.mesh_gen.tetgen.mesh_tetgen_error_translation import translate_tetgen_failure
 
 
 class TestTranslateTetgenFailure:

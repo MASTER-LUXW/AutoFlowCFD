@@ -12,9 +12,9 @@ from typing import Optional, Tuple
 
 import click
 
-from autoflowcfd.grid.high_order_mesh import HighOrderMesh
+from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
 from autoflowcfd.grid.schema.grid_data import VolumeMeshData
-from autoflowcfd.grid.curved_mapping import MeshDistortionError
+from autoflowcfd.grid.curved_mapping.curved_mapping import MeshDistortionError
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +105,7 @@ def load_mesh_for_solver(
                 f"原始面网格来反推 WALL/INLET/OUTLET 等边界分组，否则湍流模型"
                 f"和边界条件都无法正确设置。用法：--surface-mesh <原始面网格.nas>"
             )
-        from autoflowcfd.grid.mesh_gen.mesh_external_import import import_external_volume_mesh
+        from autoflowcfd.grid.mesh_gen.utils.mesh_external_import import import_external_volume_mesh
         print(f"Detected volume-mesh NAS format. Parsing and attributing boundaries...")
         try:
             volume_data, report = import_external_volume_mesh(input_file, surface_mesh)
@@ -237,7 +237,7 @@ def compute_wall_distance_for_solver(solver, volume_data, use_eikonal=False):
                     # 有实打实开销的图结构，KD-Tree 路径完全不需要它，没有
                     # 理由在默认路径上白白多算一遍。
                     print(f"   Building node adjacency graph for Eikonal solver...")
-                    from autoflowcfd.grid.node_connectivity import build_node_adjacency
+                    from autoflowcfd.grid.connectivity.node_connectivity import build_node_adjacency
 
                     tet_conn = volume_data.cells.connectivity if volume_data.cells else None
                     prism_conn = volume_data.prism_cells.connectivity if volume_data.prism_cells else None
@@ -411,7 +411,7 @@ def write_checkpoint(
         checkpoint 文件路径；h5py 不可用等失败情形返回 None（不中止求解）
     """
     from types import SimpleNamespace
-    from autoflowcfd.core.checkpoint import CheckpointManager, H5PY_AVAILABLE
+    from autoflowcfd.core.utils.checkpoint import CheckpointManager, H5PY_AVAILABLE
 
     if not H5PY_AVAILABLE:
         print("   ⚠️  h5py not available, skipping checkpoint write (final_state.pkl is still saved)")

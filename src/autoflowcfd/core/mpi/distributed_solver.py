@@ -100,7 +100,7 @@ class DistributedFRSolver:
         # 分布式模式下我们需要从 face_connectivity_data 重建
         if face_connectivity_data is not None:
             # 分布式模式：从数据构建局部面连接关系
-            from autoflowcfd.grid.face_connectivity import FRFaceConnectivity
+            from autoflowcfd.grid.connectivity.face_connectivity import FRFaceConnectivity
             from dataclasses import dataclass
 
             @dataclass
@@ -155,7 +155,7 @@ class DistributedFRSolver:
     def local_solver(self):
         """延迟初始化本地求解器（避免循环依赖）。"""
         if self._local_solver is None:
-            from autoflowcfd.core.fr_solver import FRSolver
+            from autoflowcfd.core.fr_solver.solver import FRSolver
             self._local_solver = FRSolver(
                 self.mesh, self.ops, **self.solver_kwargs
             )
@@ -219,7 +219,7 @@ class DistributedFRSolver:
             distributed_compute_physical_gradient,
             distributed_compute_viscous_residual,
         )
-        from autoflowcfd.core.fr_solver_step import ssp_rk3_step
+        from autoflowcfd.core.fr_solver.step import ssp_rk3_step
 
         # 获取当前 local cells 的守恒变量
         U_local = self.state.get_local_U()
@@ -270,7 +270,7 @@ class DistributedFRSolver:
         self.state.U[:self.partition.n_local_cells] += dt * total_residual
 
         # 6. 更新原变量
-        from autoflowcfd.core.fr_residual_inviscid import conserved_to_primitive
+        from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
         self.state.Q[:self.partition.n_local_cells] = conserved_to_primitive(
             self.state.U[:self.partition.n_local_cells]
         )

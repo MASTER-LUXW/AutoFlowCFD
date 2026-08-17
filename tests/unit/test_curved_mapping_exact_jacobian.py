@@ -12,7 +12,7 @@
 import numpy as np
 
 from autoflowcfd.fr.operators import gauss_legendre, generate_fr_operators
-from autoflowcfd.grid.curved_mapping import (
+from autoflowcfd.grid.curved_mapping.curved_mapping import (
     CurvedMapping,
     map_prism_to_physical,
     map_tet_to_physical,

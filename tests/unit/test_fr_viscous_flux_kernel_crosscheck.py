@@ -14,17 +14,17 @@ import numba
 import numpy as np
 import pytest
 
-from autoflowcfd.core.fr_residual_inviscid import (
+from autoflowcfd.core.fr_residual.inviscid import (
     conserved_to_primitive, primitive_to_conserved, DefaultGhostProvider,
 )
-from autoflowcfd.core.fr_viscous_flux import compute_viscous_residual_fr
-from autoflowcfd.core.fr_gradients import compute_physical_gradient
-from autoflowcfd.core.fr_face_kernels_flat import get_flat_face_geometry
-from autoflowcfd.core.fr_residual_inviscid_kernel import compute_boundary_ghost_states
-from autoflowcfd.core.fr_viscous_flux_kernel import compute_viscous_interface_correction_kernel
-from autoflowcfd.core.fr_flux_kernels_pointwise import viscous_physical_flux_batch
-from autoflowcfd.core.fr_volume_contract import contract_shared_operator_2axis
-from autoflowcfd.core.fr_troubled_cell import suppress_residual_outliers
+from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
+from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient
+from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+from autoflowcfd.core.fr_residual.inviscid_kernel import compute_boundary_ghost_states
+from autoflowcfd.core.fr_residual.viscous_flux_kernel import compute_viscous_interface_correction_kernel
+from autoflowcfd.core.fr_operators.flux_kernels import viscous_physical_flux_batch
+from autoflowcfd.core.fr_operators.volume_contract import contract_shared_operator_2axis
+from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
 
 from .test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 
@@ -193,7 +193,7 @@ def test_parallel_degenerate_cell_no_blowup():
     """退化/近共面单元场景，理由/构造方式同
     test_fr_residual_inviscid_kernel_crosscheck.py 同名测试。"""
     from types import SimpleNamespace
-    from autoflowcfd.grid.high_order_mesh import HighOrderMesh
+    from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
     from .test_fr_residual_inviscid import _MockNodes, _MockCells
 
     nodes = np.array(

@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 
 try:
-    from autoflowcfd.grid.mesh_gen.face_extractor import FaceExtractor
+    from autoflowcfd.grid.mesh_gen.extraction.face_extractor import FaceExtractor
     from autoflowcfd.grid.schema.grid_nodes import NodeArray
     from autoflowcfd.grid.schema.grid_cells import TetrahedralCells
     from autoflowcfd.core._legacy_fvm.fvm_gradients import (
@@ -240,7 +240,7 @@ class TestFaceOrientation:
         skew) is enough to reproduce it via extract_faces_mixed, which is
         why this needs its own test distinct from the tet-only one above.
         """
-        from autoflowcfd.grid.mesh_gen.face_extractor import FaceExtractor
+        from autoflowcfd.grid.mesh_gen.extraction.face_extractor import FaceExtractor
         from autoflowcfd.grid.schema.grid_nodes import NodeArray
 
         coords, tets = _box_mesh(nx=4, ny=3, nz=3, lx=2.0, ly=1.0, lz=1.0)

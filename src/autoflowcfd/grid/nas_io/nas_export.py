@@ -1,15 +1,15 @@
-"""NAS file export module.
+"""NAS 文件导出模块。
 
-Exports VolumeMeshData to Nastran (.nas) format for visualization and post-processing.
+将 VolumeMeshData 导出为 Nastran (.nas) 格式，用于可视化和后处理。
 边界组的 PSHELL/CTRIA3/PSOLID 元数据写入部分拆到了同目录下的
 nas_export_boundary.py，本文件只保留节点/体单元几何的写入与编排。
 
-Key Components:
-    - export_volume_mesh_to_nas: Main export function
-    - _write_header: Write NAS file header
-    - _write_nodes: Write GRID cards
-    - _write_tetrahedra: Write CTETRA cards
-    - _write_pentahedra: Write CPENTA cards
+主要组件：
+    - export_volume_mesh_to_nas：主导出函数
+    - _write_header：写入 NAS 文件头
+    - _write_nodes：写入 GRID 卡片
+    - _write_tetrahedra：写入 CTETRA 卡片
+    - _write_pentahedra：写入 CPENTA 卡片
 """
 
 import math
@@ -21,19 +21,17 @@ from .nas_export_boundary import write_boundaries as _write_boundaries
 
 
 def _format_nastran_compact_exponent(value: float, width: int = 8) -> str:
-    """Format a float in Nastran's compact exponent notation (no 'e'),
-    e.g. "-1.23+05" for -123000.0, guaranteed to fit within `width` chars.
+    """以 Nastran 紧凑指数格式格式化浮点数（无 'e'）。
 
-    This is what nas_parser_utils.parse_nastran_float already knows how to
-    read back, so a round-tripped file stays self-consistent. It exists as
-    the last-resort fallback in format_coord_8char below, for coordinates
-    where even 2-decimal fixed notation doesn't fit an 8-character Nastran
-    Small Field - which Python's "%e" (used previously) does not fit
-    either: "-5.0000e+04" is 11 characters, itself overflowing the field
-    it was supposed to protect. Automotive external-aero domains routinely
-    have +/-tens-of-meters extents, i.e. +/-tens-of-thousands of mm once
-    exported at scale_factor=1000, so this path is realistically reachable,
-    not just a theoretical edge case.
+    例如 -123000.0 格式化为 "-1.23+05"，保证在 `width` 字符内。
+    这也是 nas_parser_utils.parse_nastran_float 已经知道如何读回的格式，
+    所以舍入后的文件保持自洽。它作为下面 format_coord_8char 的
+    最后手段备选，用于即使 2 位小数定点格式也放不下 8 字符 Nastran
+    小字段的坐标——Python 的 "%e"（之前用过）也放不下：
+    "-5.0000e+04" 是 11 个字符，本身就溢出了它本应保护的字段。
+    汽车外气动域通常有 +/-数十米的范围，即以 scale_factor=1000
+    导出时为 +/-数万千米的 mm，所以这条路径实际上是可以达到的，
+    不仅仅是理论边界情况。
     """
     if value == 0.0:
         return "0.0"
@@ -42,7 +40,7 @@ def _format_nastran_compact_exponent(value: float, width: int = 8) -> str:
     abs_value = abs(value)
     exponent = int(math.floor(math.log10(abs_value)))
     mantissa = abs_value / (10.0 ** exponent)
-    # Guard against log10 rounding landing exactly on a power-of-ten boundary.
+    # 防止 log10 舍入恰好落在幂次边界上。
     if mantissa >= 10.0:
         mantissa /= 10.0
         exponent += 1
@@ -76,20 +74,20 @@ def _format_nastran_compact_exponent(value: float, width: int = 8) -> str:
 
 
 def _format_coord_8char(value: float) -> str:
-    """Format a coordinate to fit an 8-character Nastran Small Field.
+    """将坐标格式化以适应 8 字符 Nastran 小字段。
 
-    Module-level (not a per-node closure) since it captures nothing from
-    its caller - previously redefined on every node inside _write_nodes'
-    loop, needlessly constructing a new function object per node.
+    模块级函数（不是每个节点的闭包），因为它不从调用方捕获任何内容
+    ——之前在 _write_nodes 的循环中每个节点重新定义，无谓地每个节点
+    构造一个新函数对象。
     """
     for precision in [6, 5, 4, 3, 2]:
         formatted = f"{value:.{precision}f}"
         if len(formatted) <= 8:
             return formatted
 
-    # Fallback: Nastran compact exponent notation (no 'e', so it actually
-    # fits 8 chars - Python's "%e"/.4e is itself 10-11 characters and would
-    # silently overflow the field).
+    # 备选方案：Nastran 紧凑指数格式（无 'e'，所以确实
+    # 放得下 8 字符——Python 的 "%e"/.4e 本身是 10-11 字符，会
+    # 静默溢出字段）。
     return _format_nastran_compact_exponent(value, width=8)
 
 
@@ -99,38 +97,36 @@ def export_volume_mesh_to_nas(
     include_boundaries: bool = True,
     scale_factor: float = 1000.0
 ) -> str:
-    """Export VolumeMeshData to Nastran (.nas) format.
+    """将 VolumeMeshData 导出为 Nastran (.nas) 格式。
 
-    Converts tetrahedral volume mesh to Nastran format with:
-    - GRID cards for nodes (default: millimeters, matching the .nas import
-      convention used throughout this project - NASParser defaults to
-      units='mm', so a round trip through this function's default and back
-      through NASParser stays consistent)
-    - CTETRA cards for tetrahedral elements
-    - PSHELL/PSET cards for boundary groups (optional)
+    将四面体体网格转换为 Nastran 格式：
+    - 节点的 GRID 卡片（默认：毫米，匹配本项目的 .nas 导入约定
+      ——NASParser 默认 units='mm'，所以此函数默认值和 NASParser
+      的往返保持一致）
+    - 四面体元素的 CTETRA 卡片
+    - 边界组的 PSHELL/PSET 卡片（可选）
 
     Args:
-        volume_mesh: VolumeMeshData object with nodes, cells, boundaries
-            (internally stored in meters, SI units)
-        output_path: Output file path (.nas extension)
-        include_boundaries: Whether to include boundary group info
-        scale_factor: Coordinate scaling factor applied to the internal
-            meter-based coordinates (default 1000.0 to write millimeters,
-            matching NASParser's default import units). Pass 1.0 to write
-            meters instead.
-        
+        volume_mesh: VolumeMeshData 对象，包含 nodes、cells、boundaries
+            （内部存储为米，SI 单位）。
+        output_path: 输出文件路径（.nas 扩展名）。
+        include_boundaries: 是否包含边界组信息。
+        scale_factor: 坐标缩放因子，应用于内部基于米的坐标
+            （默认 1000.0 写入毫米，匹配 NASParser 的默认导入单位）。
+            传 1.0 写入米。
+
     Returns:
-        str: Path to exported file
-        
+        str: 导出文件的路径
+
     Example:
-        >>> from autoflowcfd.grid import NASParser
+        >>> 从 autoflowcfd.grid 导入 NASParser
         >>> parser = NASParser('surface.nas')
         >>> volume_mesh = parser.parse(generate_volume_mesh=True)
         >>> export_volume_mesh_to_nas(volume_mesh, 'volume_mesh.nas')
     """
     output_path = Path(output_path)
 
-    # Ensure .nas extension
+    # 确保 .nas extension
     if output_path.suffix.lower() != '.nas':
         output_path = output_path.with_suffix('.nas')
 
@@ -154,20 +150,19 @@ def export_volume_mesh_to_nas(
 
     try:
         with open(output_path, 'w') as f:
-            # Write header
+            # 写入 header
             _write_header(f, volume_mesh)
 
             # Write nodes (GRID cards)
             logger.info("Writing nodes...")
             _write_nodes(f, volume_mesh.nodes, scale_factor)
 
-            # Write volume elements. Prisms (BL region, CPENTA) first, then
-            # tetrahedra (core region, CTETRA) - element IDs follow the same
-            # global ordering convention as the mesh's own cell indices
-            # ([0, n_prism) prism, [n_prism, n_prism+n_tet) tet - see
-            # PrismCells/face_extractor.extract_faces_mixed), so a boundary
-            # group's cell indices (below) line up directly with element IDs
-            # without any extra remapping.
+            # 写入体单元。先写棱柱（BL 区域，CPENTA），再写
+            # 四面体（核心区域，CTETRA）——元素 ID 遵循与网格自身
+            # 单元索引相同的全局排序约定（[0, n_prism) 棱柱，
+            # [n_prism, n_prism+n_tet) 四面体——见
+            # PrismCells/face_extractor.extract_faces_mixed），所以
+            # 下面的边界组单元索引直接与元素 ID 对齐，无需额外重映射。
             n_prism = 0
             if has_prisms:
                 logger.info("Writing pentahedral (BL prism) elements...")
@@ -176,18 +171,17 @@ def export_volume_mesh_to_nas(
             logger.info("Writing tetrahedral elements...")
             n_tets = _write_tetrahedra(f, volume_mesh.cells.connectivity, solid_pid, start_eid=n_prism + 1)
 
-            # Write boundary information (optional): boundary faces as CTRIA3
-            # elements referencing per-group PSHELL properties, so the groups
-            # are actually selectable in ANSA/Nastran instead of being empty
-            # property definitions.
+            # 写入边界信息（可选）：边界面作为 CTRIA3 元素，
+            # 引用每组的 PSHELL 属性，使组在 ANSA/Nastran 中
+            # 实际可选，而不是空的属性定义。
             if write_boundaries:
                 logger.info("Writing boundary groups...")
                 _write_boundaries(
                     f, volume_mesh, solid_pid=solid_pid, start_eid=n_prism + n_tets + 1
                 )
 
-            # Every Bulk Data deck must end with ENDDATA regardless of whether
-            # boundary groups were written.
+            # 每个 Bulk Data deck 必须以 ENDDATA 结束，无论
+            # 是否写入了边界组。
             f.write("ENDDATA\n")
             f.write("$ End of file\n")
 
@@ -205,7 +199,7 @@ def export_volume_mesh_to_nas(
 
 
 def _write_header(f, volume_mesh) -> None:
-    """Write NAS file header with metadata.
+    """写入 NAS 文件 header 与 metadata.
     
     Args:
         f: File handle
@@ -233,29 +227,27 @@ def _write_header(f, volume_mesh) -> None:
 
 
 def _write_nodes(f, nodes, scale_factor: float) -> None:
-    """Write GRID cards for all nodes.
+    """写入所有节点的 GRID 卡片。
 
-    Nastran Small Field format (what this function actually writes below -
-    see the Field 1-6 comments inline for the authoritative column layout):
-    Columns 1-8:   "GRID" keyword
-    Columns 9-16:  Node ID (right-aligned, 8 chars)
-    Columns 17-24: Coordinate system ID (right-aligned, 8 chars)
-    Columns 25-32: X coordinate (right-aligned, 8 chars)
-    Columns 33-40: Y coordinate (right-aligned, 8 chars)
-    Columns 41-48: Z coordinate (right-aligned, 8 chars)
+    Nastran 小字段格式（下面实际写入的内容——
+    见 Field 1-6 的内联注释了解权威的列布局）：
+    列 1-8：   "GRID" 关键字
+    列 9-16：  节点 ID（右对齐，8 字符）
+    列 17-24： 坐标系 ID（右对齐，8 字符）
+    列 25-32： X 坐标（右对齐，8 字符）
+    列 33-40： Y 坐标（右对齐，8 字符）
+    列 41-48： Z 坐标（右对齐，8 字符）
 
     Args:
-        f: File handle
-        nodes: NodeArray with x, y, z coordinates
-        scale_factor: Scaling factor for coordinates
+        f: 文件句柄
+        nodes: NodeArray，包含 x, y, z 坐标
+        scale_factor: 坐标缩放因子
     """
     n_nodes = len(nodes.x)
 
-    # Batch write for performance (1000 nodes per batch): lines are
-    # accumulated in a list and flushed via a single writelines() call per
-    # batch, instead of one f.write() per node - an actual batched I/O
-    # pattern, not just batched progress-logging cadence around individual
-    # per-line writes.
+    # 批量写入以提高性能（每批 1000 个节点）：行累积在列表中，
+    # 每批通过单次 writelines() 调用刷新，而不是每个节点一次 f.write()
+    # ——这是实际的批量 I/O 模式，而不仅仅是批量进度日志节奏。
     batch_size = 1000
 
     for start_idx in range(0, n_nodes, batch_size):
@@ -263,7 +255,7 @@ def _write_nodes(f, nodes, scale_factor: float) -> None:
 
         lines = []
         for i in range(start_idx, end_idx):
-            node_id = i + 1  # Nastran IDs start from 1
+            node_id = i + 1  # Nastran ID 从 1 开始
             x = nodes.x[i] * scale_factor
             y = nodes.y[i] * scale_factor
             z = nodes.z[i] * scale_factor
@@ -292,35 +284,33 @@ def _write_nodes(f, nodes, scale_factor: float) -> None:
 
 
 def _write_tetrahedra(f, connectivity: np.ndarray, solid_pid: int, start_eid: int = 1) -> int:
-    """Write CTETRA cards for tetrahedral elements.
+    """写入四面体元素的 CTETRA 卡片。
 
-    ANSA Nastran CTETRA card format (fixed-width fields):
+    ANSA Nastran CTETRA 卡片格式（固定宽度字段）：
     CTETRA      EID       PID      G1       G2       G3       G4
 
-    Field widths: 8-8-8-8-8-8 characters
+    字段宽度：8-8-8-8-8-8 字符
 
     Args:
-        f: File handle
-        connectivity: Tetrahedral connectivity array, shape=(n_tets, 4)
-        solid_pid: PSOLID property ID for the volume elements. Must match the
-            PSOLID card written by _write_boundaries (or be free of any
-            PSHELL PID) to avoid a duplicate-PID Bulk Data entry.
-        start_eid: First element ID to use (default 1) - non-1 when prism
-            (CPENTA) elements were already written before this call and
-            occupy [1, start_eid) (see export_volume_mesh_to_nas: prisms
-            occupy the same [0, n_prism) global cell-index range here that
-            they do everywhere else in this codebase, so element IDs stay
-            consistent with boundary group cell indices).
+        f: 文件句柄
+        connectivity: 四面体连接数组，shape=(n_tets, 4)
+        solid_pid: 体单元的 PSOLID 属性 ID。必须与
+            _write_boundaries 写入的 PSOLID 卡片匹配（或不与任何
+            PSHELL PID 重复），以避免重复的 Bulk Data 条目。
+        start_eid: 使用的第一个元素 ID（默认 1）——当棱柱
+            (CPENTA) 元素已在此调用之前写入并占据 [1, start_eid)
+            时非 1（见 export_volume_mesh_to_nas：棱柱占据
+            与代码库其他地方相同的 [0, n_prism) 全局单元索引范围，
+            所以元素 ID 与边界组单元索引保持一致）。
 
     Returns:
-        int: Number of tetrahedra written (elem IDs used are
-        start_eid..start_eid+n_tets-1), so callers can continue element
-        numbering (e.g. boundary CTRIA3 cards) without colliding with these
-        element IDs.
+        int: 写入的四面体数量（使用的元素 ID 为
+        start_eid..start_eid+n_tets-1），调用方可继续编号
+        （例如边界 CTRIA3 卡片）而不与这些元素 ID 冲突。
     """
     n_tets = len(connectivity)
 
-    # Batch write for performance
+    # 批量写入以提高性能
     batch_size = 1000
 
     for start_idx in range(0, n_tets, batch_size):
@@ -328,7 +318,7 @@ def _write_tetrahedra(f, connectivity: np.ndarray, solid_pid: int, start_eid: in
 
         for i in range(start_idx, end_idx):
             elem_id = start_eid + i
-            g1 = int(connectivity[i, 0]) + 1  # Convert 0-indexed to 1-indexed
+            g1 = int(connectivity[i, 0]) + 1  # 从 0-indexed 转换为 1-indexed
             g2 = int(connectivity[i, 1]) + 1
             g3 = int(connectivity[i, 2]) + 1
             g4 = int(connectivity[i, 3]) + 1
@@ -345,30 +335,29 @@ def _write_tetrahedra(f, connectivity: np.ndarray, solid_pid: int, start_eid: in
 
 
 def _write_pentahedra(f, connectivity: np.ndarray, solid_pid: int, start_eid: int = 1) -> int:
-    """Write CPENTA cards for triangular-prism (BL region) elements.
+    """写入三角棱柱（BL 区域）元素的 CPENTA 卡片。
 
-    ANSA Nastran CPENTA card format (fixed-width fields):
+    ANSA Nastran CPENTA 卡片格式（固定宽度字段）：
     CPENTA      EID       PID      G1       G2       G3       G4       G5       G6
 
-    G1-G3 are one triangular cap, G4-G6 the other, with Gi+3 "above" Gi -
-    exactly PrismCells' own (v0,v1,v2,w0,w1,w2) convention (w_i is the
-    extrusion of v_i), so connectivity needs no reordering here.
+    G1-G3 是一个三角端盖，G4-G6 是另一个，Gi+3 在 Gi "上方"——
+    完全匹配 PrismCells 的 (v0,v1,v2,w0,w1,w2) 约定（w_i 是 v_i
+    的拉伸），所以此处的连接无需重排。
 
-    Card name + EID + PID + 6 grid IDs = 9 fields, fitting Nastran's 10
-    (8-char) fields-per-line Small Field layout with room to spare - no
-    continuation card needed (unlike PSHELL elsewhere in this file, which
-    has more data than fits on one line).
+    卡片名 + EID + PID + 6 个网格 ID = 9 个字段，适合 Nastran 每行
+    10 个（8 字符）字段的小字段布局，有余量——不需要续行卡片
+    （与本文件其他地方的 PSHELL 不同，PSHELL 的数据多于一行放不下）。
 
     Args:
-        f: File handle
-        connectivity: Prism connectivity array, shape=(n_prism, 6)
-        solid_pid: PSOLID property ID for the volume elements (shared with
-            _write_tetrahedra - both regions belong to the same solid part)
-        start_eid: First element ID to use (default 1)
+        f: 文件句柄
+        connectivity: 棱柱连接数组，shape=(n_prism, 6)
+        solid_pid: 体单元的 PSOLID 属性 ID（与 _write_tetrahedra 共享
+            ——两个区域属于同一个实体部件）
+        start_eid: 使用的第一个元素 ID（默认 1）
 
     Returns:
-        int: Number of prisms written (elem IDs used are
-        start_eid..start_eid+n_prism-1)
+        int: 写入的棱柱数量（使用的元素 ID 为
+        start_eid..start_eid+n_prism-1）
     """
     n_prism = len(connectivity)
     batch_size = 1000

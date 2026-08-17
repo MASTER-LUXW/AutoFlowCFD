@@ -1,4 +1,4 @@
-"""NAS 解析器：面单元（cell）提取。
+"""NAS 解析器：面单元（单元）提取。
 
 流式解析 Nastran 格式文件里的面单元：原生支持 CTRIA3 三角形面单元，
 CQUAD4 四边形面单元会被拆成 2 个三角形（n1,n2,n3 + n1,n3,n4）——真实的
@@ -16,16 +16,13 @@ from loguru import logger
 from ..structures import CellArray
 from .nas_parser_exceptions import NASParseError
 
-# Above this fraction of element (CTRIA3/CQUAD4) LINES dropped (parse
-# errors, unparseable lines, or dangling node references), treat it as a
-# systematic format/encoding mismatch - or GRID/element sections out of
-# sync - rather than incidental noise, and fail loudly instead of silently
-# returning a surface mesh missing a large chunk of its true geometry while
-# still reporting success. Only enforced once there's a meaningful sample
-# size (MIN_LINES_FOR_DROP_CHECK) - see the matching constant in
-# nas_parser_nodes.py for why. Measured in LINES, not cells: a dropped
-# CQUAD4 line loses one card, not the two triangles it would have produced,
-# so cell-count-based accounting would understate its weight.
+# 超过这个比例的元素 (CTRIA3/CQUAD4) 行被丢弃（解析错误、不可解析的行
+# 或悬空节点引用），就视为系统性的格式/编码不匹配——或 GRID/元素段不同步
+# ——而不是偶然噪声，大声报错而不是静默返回一个缺失大块真实几何但仍然
+# 报告成功的表面网格。仅在有意义的样本量 (MIN_LINES_FOR_DROP_CHECK) 时
+# 才强制执行——原因见 nas_parser_nodes.py 中的匹配常量。以行数为单位
+# 而不是单元数：丢弃一行 CQUAD4 损失一张卡片，而不是它会产生的两个三角形，
+# 所以基于单元数的统计会低估其权重。
 MAX_DROP_FRACTION = 0.05
 MIN_LINES_FOR_DROP_CHECK = 20
 
@@ -35,27 +32,26 @@ def parse_cells_from_nas(
     node_id_to_index: dict,
     encoding: str = 'UTF-8'
 ) -> Tuple[CellArray, np.ndarray]:
-    """解析单元数据(流式)
+    """解析单元数据（流式）。
 
-    Parses CTRIA3 and CQUAD4 cards from NAS file using streaming approach.
-    Supports comma-separated, fixed-format, and whitespace-flexible
-    Nastran cards. CQUAD4 quads are split into 2 triangles each (diagonal
-    n1-n3), since the rest of this project's surface/volume mesh pipeline
-    is triangle-only.
+    使用流式方式从 NAS 文件解析 CTRIA3 和 CQUAD4 卡片。
+    支持逗号分隔、固定格式和空白分隔的 Nastran 卡片。
+    CQUAD4 四边形每张拆成 2 个三角形（对角线 n1-n3），
+    因为本项目的其余表面/体网格管线纯三角形。
 
     Args:
-        file_path: Path to NAS file
-        node_id_to_index: Mapping from NAS node IDs to array indices
-        encoding: File encoding
+        file_path: NAS 文件路径
+        node_id_to_index: 从 NAS 节点 ID 到数组索引的映射
+        encoding: 文件编码
 
     Returns:
-        Tuple[CellArray, np.ndarray]: Parsed cell connectivity/types, and the
-        Property ID (PID) for each surviving cell, in the same order and
-        length as the CellArray. Cells skipped due to missing node references
-        are excluded from both, so index i always refers to the same cell.
+        Tuple[CellArray, np.ndarray]: 解析的单元连接/类型，以及每个
+        幸存单元的属性 ID (PID)，顺序和长度与 CellArray 一致。
+        因缺失节点引用而被跳过的单元两者都排除，所以索引 i
+        始终指向同一个单元。
 
     Raises:
-        NASParseError: If cell parsing fails
+        NASParseError: 单元解析失败
     """
     connectivity_list = []
     cell_types = []
@@ -70,19 +66,16 @@ def parse_cells_from_nas(
     duplicate_eids = 0
 
     def _record_triangle(key, pid: int, idx1: int, idx2: int, idx3: int) -> None:
-        """Store one parsed triangle (a CTRIA3 card, or one half of a split
-        CQUAD4) under `key`, applying Nastran's documented "last element ID
-        wins" convention on a repeated key instead of appending a second,
-        coincident triangle (which previously happened silently - the EID
-        was parsed but never tracked, so re-exported or duplicated element
-        cards inflated cell_count and could leave a non-manifold surface
-        for the volume mesher).
+        """存储一个解析的三角形（CTRIA3 卡片，或拆分的 CQUAD4 的一半），
+        以 `key` 为键，应用 Nastran 文档化的"最后一个元素 ID 获胜"约定：
+        重复键时覆盖而不是追加第二个重合的三角形（之前会静默发生——
+        EID 已解析但从未跟踪，所以重新导出或重复的元素卡片膨胀了
+        cell_count 并且可能给体网格器留下一个非流形表面）。
 
-        `key` is the bare int EID for a CTRIA3, or an (eid, 0|1) tuple for
-        a CQUAD4's two sub-triangles - Nastran EIDs are unique per element
-        (not per triangle), so a re-issued CQUAD4 with the same EID must
-        overwrite both of its own previous sub-triangles, not collide with
-        an unrelated CTRIA3 that happens to share the bare int value.
+        `key` 对 CTRIA3 是裸 int EID，对 CQUAD4 的两个子三角形是
+        (eid, 0|1) 元组——Nastran EID 每元素唯一（不是每三角形），
+        所以重新发出的同 EID CQUAD4 必须覆盖其自身的两个先前子三角形，
+        不能与碰巧共享裸 int 值的无关 CTRIA3 冲突。
         """
         nonlocal cell_count, duplicate_eids
         existing_idx = eid_to_cell_idx.get(key)
@@ -100,11 +93,10 @@ def parse_cells_from_nas(
             logger.debug(f"Parsed {cell_count:,} cells...")
 
     def _record_quad(eid: int, pid: int, n1: int, n2: int, n3: int, n4: int) -> bool:
-        """Split a CQUAD4's 4 nodes into 2 triangles (n1,n2,n3) and
-        (n1,n3,n4) and record both. Returns False (recording nothing) if
-        any of the 4 nodes is missing - the whole quad is skipped as one
-        unit, not partially recorded, to avoid a torn/self-overlapping
-        surface."""
+        """将 CQUAD4 的 4 个节点拆成 2 个三角形 (n1,n2,n3) 和
+        (n1,n3,n4) 并记录两者。如果 4 个节点中任何一个缺失则返回
+        False（不记录任何东西）——整个四边形作为一个单元被跳过，
+        不部分记录，以避免撕裂/自重叠的表面。"""
         if not (n1 in node_id_to_index and n2 in node_id_to_index
                 and n3 in node_id_to_index and n4 in node_id_to_index):
             return False
@@ -175,7 +167,7 @@ def parse_cells_from_nas(
                             skipped_lines += 1
                         continue
 
-                    # Try comma-separated format
+                    # 尝试 comma-separated 格式
                     match = ctria3_pattern_comma.match(line_stripped)
 
                     if match:
@@ -195,7 +187,7 @@ def parse_cells_from_nas(
                             skipped_cells += 1
                             continue
 
-                    # Try fixed-format
+                    # 尝试 fixed-格式
                     match = ctria3_pattern_fixed.match(line_stripped)
 
                     if match:

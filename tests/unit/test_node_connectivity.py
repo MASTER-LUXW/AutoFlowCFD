@@ -5,7 +5,7 @@ parameter), built from tetrahedron/prism cell connectivity."""
 
 import numpy as np
 
-from autoflowcfd.grid.node_connectivity import build_node_adjacency
+from autoflowcfd.grid.connectivity.node_connectivity import build_node_adjacency
 
 
 def _neighbors_of(adjacency: np.ndarray, node: int) -> set:

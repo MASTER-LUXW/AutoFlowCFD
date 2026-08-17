@@ -14,70 +14,65 @@ from dataclasses import dataclass, field
 
 @dataclass
 class MeshQualityReport:
-    """Comprehensive mesh quality report.
+    """全面的网格质量报告。
 
     Attributes:
-        n_cells: Total number of cells
-        n_nodes: Total number of nodes
-        passed: Overall quality check result
-        negative_volumes: Count of cells with negative volume
-        min_volume: Minimum cell volume
-        max_volume: Maximum cell volume
-        mean_volume: Mean cell volume
-        std_volume: Standard deviation of volumes
-        volume_ratio: Global max/min volume ratio - reference/informational
-            only (see module docstring - a BL mesh's legitimate near-wall-
-            to-far-field range dominates this and swamps any real local
-            defect signal); adjacent_volume_ratio_max is the metric that
-            actually gates.
-        min_aspect_ratio: Minimum aspect ratio
-        max_aspect_ratio: Maximum aspect ratio (whole mesh)
-        mean_aspect_ratio: Mean aspect ratio (whole mesh)
-        bl_max_aspect_ratio: Max aspect ratio within BL-region cells only
-            (None unless bl_cell_mask was supplied to validate())
-        core_max_aspect_ratio: Max aspect ratio within core-region cells
-        max_skewness: Maximum radius-ratio skewness (0=regular tet, 1=sliver)
-        mean_skewness: Mean skewness
-        orthogonality_max: Worst (largest) face-normal vs. centroid-
-            connector angle across all internal faces, degrees (0=ideal)
-        orthogonality_mean: Mean of the same
-        adjacent_volume_ratio_max: Worst face-neighbour volume ratio
-            (max(V)/min(V) across the two cells sharing a face) - the
-            metric that actually governs Green-Gauss conditioning
-        adjacent_volume_ratio_mean: Mean of the same
-        n_overlapping_cells: Cells with at least one face that physically
-            overlaps a DIFFERENT, non-adjacent cell's face (see
-            mesh_gen/../validation/mesh_overlap_check.py) - a distinct
-            defect class from a negative/degenerate cell: both cells
-            involved can individually have perfectly valid positive
-            volume and reasonable shape, the problem is that they occupy
-            overlapping physical space. None unless check_overlap=True was
-            passed to validate() (it is the one check here whose cost
-            scales with local mesh density, not purely cell count, so it
-            is opt-out rather than always-silently-skipped).
-        n_close_cell_pairs: Cells whose faces don't yet overlap but are
-            closer than a locally-scaled threshold - informational only,
-            not a defect by itself (this is deliberately how
-            mesh_tetgen_core.compute_local_thickness_limit already tries
-            to prevent BL fronts from crossing at generation time; this is
-            the post-hoc visibility check for whatever that heuristic
-            didn't fully prevent).
-        overlap_min_gap: Smallest non-overlapping face-to-face distance
-            found among close pairs, meters (None if none found/checked)
-        warnings: List of quality warnings
-        recommendations: List of improvement recommendations
-        repair_stages_applied: Human-readable log of repair actions taken
-            before this report was produced (see mesh_gen/mesh_repair.py) -
-            empty for a bare validate() call with no repair attempted.
-        initial_report: The report *before* any repair was attempted, for
-            a before/after comparison in summary() - None if this report
-            itself is the pre-repair baseline, or no repair was run.
+        n_cells: 单元总数
+        n_nodes: 节点总数
+        passed: 整体质量检查结果
+        negative_volumes: 负体积单元数
+        min_volume: 最小单元体积
+        max_volume: 最大单元体积
+        mean_volume: 平均单元体积
+        std_volume: 体积标准差
+        volume_ratio: 全局最大/最小体积比——仅供参考（见模块文档
+            字符串——BL 网格合法的近壁到远场范围会主导这个值并
+            淹没任何真实的局部缺陷信号）；adjacent_volume_ratio_max
+            才是真正的关卡指标
+        min_aspect_ratio: 最小长宽比
+        max_aspect_ratio: 最大长宽比（全网格）
+        mean_aspect_ratio: 平均长宽比（全网格）
+        bl_max_aspect_ratio: 仅 BL 区域单元的最大长宽比
+            （除非 validate() 提供了 bl_cell_mask，否则为 None）
+        core_max_aspect_ratio: 核心区域单元的最大长宽比
+        max_skewness: 最大半径比偏斜度（0=正四面体, 1=碎片）
+        mean_skewness: 平均偏斜度
+        orthogonality_max: 所有内部面上面法向与质心连线夹角
+            的最差值（度），0=理想
+        orthogonality_mean: 上述的均值
+        adjacent_volume_ratio_max: 最差的面邻居体积比
+            （共享面的两个单元间 max(V)/min(V)）——
+            真正控制 Green-Gauss 条件数的指标
+        adjacent_volume_ratio_mean: 上述的均值
+        n_overlapping_cells: 至少有一个面与不同的、不相邻单元的
+            面物理重叠的单元数（见 mesh_gen/../validation/
+            mesh_overlap_check.py）——与负/退化单元不同的缺陷类别：
+            涉及的每个单元自身都可以有完美的正体积和合理形状，
+            问题是它们占据了重叠的物理空间。除非 validate() 传入
+            check_overlap=True 否则为 0（这是此处唯一一个成本随
+            局部网格密度缩放而非纯粹按单元数的检查，因此是可选
+            而非始终静默跳过的）。
+        n_close_cell_pairs: 面尚未重叠但距离小于局部缩放阈值
+            的单元对——仅供参考，本身不是缺陷（这正是
+            mesh_tetgen_core.compute_local_thickness_limit 在生成时
+            试图防止 BL 前沿交叉的方式；这是对那个启发式方法
+            未能完全防止的事后可见性检查）。
+        overlap_min_gap: 接近对中最小的非重叠面到面距离，
+            米（若未找到/未检查则为 None）
+        warnings: 质量警告列表
+        recommendations: 改进建议列表
+        repair_stages_applied: 生成此报告前采取的修复操作
+            的人类可读日志（见 mesh_gen/mesh_repair.py）——
+            对不带修复的裸 validate() 调用为空。
+        initial_report: 任何修复前的报告，用于 summary() 中的
+            前后对比——若此报告本身就是修复前基线或未运行修复
+            则为 None。
     """
     n_cells: int = 0
     n_nodes: int = 0
     passed: bool = True
 
-    # Volume metrics
+    # 体积指标
     negative_volumes: int = 0
     min_volume: float = float('inf')
     max_volume: float = 0.0
@@ -85,7 +80,7 @@ class MeshQualityReport:
     std_volume: float = 0.0
     volume_ratio: float = 0.0
 
-    # Aspect ratio metrics
+    # 长宽比指标
     min_aspect_ratio: float = float('inf')
     max_aspect_ratio: float = 0.0
     mean_aspect_ratio: float = 0.0
@@ -94,55 +89,55 @@ class MeshQualityReport:
     core_max_aspect_ratio: Optional[float] = None
     core_mean_aspect_ratio: Optional[float] = None
 
-    # Skewness metrics (radius-ratio based)
+    # 偏斜度指标（基于半径比）
     max_skewness: float = 0.0
     mean_skewness: float = 0.0
 
-    # Orthogonality metrics
+    # 正交性指标
     orthogonality_max: float = 0.0
     orthogonality_mean: float = 0.0
 
-    # Adjacent-cell (face-neighbour) volume ratio
+    # 相邻单元（面邻居）体积比
     adjacent_volume_ratio_max: float = 0.0
     adjacent_volume_ratio_mean: float = 0.0
 
-    # Cell overlap / near-touching-face metrics (see mesh_overlap_check.py)
+    # 单元重叠/接近接触面指标（见 mesh_overlap_check.py）
     n_overlapping_cells: int = 0
     n_close_cell_pairs: int = 0
     overlap_min_gap: Optional[float] = None
-    # (n_overlapping_cells,) int64 - for a caller (e.g. the mesh repair
-    # loop) that needs to know WHICH cells, not just the count; avoids
-    # re-running the overlap check a second time just to recover this.
+    # (n_overlapping_cells,) int64——供需要知道具体是哪些单元
+    # （而非仅数量）的调用方（例如网格修复循环）使用；避免
+    # 为恢复此信息而重新运行重叠检查。
     overlapping_cell_ids: Optional[np.ndarray] = None
 
-    # Qualitative feedback
+    # 定性反馈
     warnings: List[str] = field(default_factory=list)
     recommendations: List[str] = field(default_factory=list)
 
-    # Repair-loop bookkeeping
+    # 修复循环簿记
     repair_stages_applied: List[str] = field(default_factory=list)
     initial_report: Optional['MeshQualityReport'] = None
 
     def summary(self) -> str:
-        """Generate human-readable quality summary."""
+        """生成人类可读的质量摘要。"""
         lines = [
             "=" * 70,
             "MESH QUALITY REPORT",
             "=" * 70,
             f"Overall Status: {'PASSED ✓' if self.passed else 'FAILED ✗'}",
             "",
-            f"Grid Size:",
+            "Grid Size:",
             f"  Cells: {self.n_cells:,}",
             f"  Nodes: {self.n_nodes:,}",
             "",
-            f"Volume Quality:",
+            "Volume Quality:",
             f"  Negative volumes: {self.negative_volumes}",
             f"  Volume range: [{self.min_volume:.6e}, {self.max_volume:.6e}]",
             f"  Mean ± Std: {self.mean_volume:.6e} ± {self.std_volume:.6e}",
             f"  Global max/min ratio: {self.volume_ratio:.2e} (informational - BL grading, not a defect by itself)",
             f"  Adjacent-cell (face-neighbour) ratio: max={self.adjacent_volume_ratio_max:.2f}, mean={self.adjacent_volume_ratio_mean:.2f}",
             "",
-            f"Aspect Ratio:",
+            "Aspect Ratio:",
             f"  Overall: [{self.min_aspect_ratio:.3f}, {self.max_aspect_ratio:.3f}], mean={self.mean_aspect_ratio:.3f}",
         ]
         if self.bl_max_aspect_ratio is not None:
@@ -151,11 +146,11 @@ class MeshQualityReport:
             lines.append(f"  Core region: max={self.core_max_aspect_ratio:.3f}, mean={self.core_mean_aspect_ratio:.3f}")
         lines += [
             "",
-            f"Skewness (radius-ratio, 0=regular tet .. 1=sliver):",
+            "Skewness (radius-ratio, 0=regular tet .. 1=sliver):",
             f"  Max: {self.max_skewness:.4f}",
             f"  Mean: {self.mean_skewness:.4f}",
             "",
-            f"Orthogonality (face-normal vs. centroid-connector angle, 0deg=ideal):",
+            "Orthogonality (face-normal vs. centroid-connector angle, 0deg=ideal):",
             f"  Max: {self.orthogonality_max:.2f} deg",
             f"  Mean: {self.orthogonality_mean:.2f} deg",
         ]
@@ -163,7 +158,7 @@ class MeshQualityReport:
         if self.n_overlapping_cells > 0 or self.n_close_cell_pairs > 0:
             lines += [
                 "",
-                f"Cell Overlap / Proximity:",
+                "Cell Overlap / Proximity:",
                 f"  Overlapping cells: {self.n_overlapping_cells}",
                 f"  Near-touching cell pairs: {self.n_close_cell_pairs}"
                 + (f" (min gap {self.overlap_min_gap:.3e} m)" if self.overlap_min_gap is not None else ""),

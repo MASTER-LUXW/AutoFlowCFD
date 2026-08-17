@@ -12,21 +12,21 @@ from loguru import logger
 
 @dataclass
 class FaceData:
-    """面数据结构（用于FVM通量计算）
+    """面数据结构（用于 FVM 通量计算）
     
-    Stores face connectivity and geometric properties for finite volume methods.
+    存储面的连接关系和几何属性，用于有限体积法计算。
     
-    Attributes:
+    属性:
         connectivity: 面连接关系, int32, shape=(N_faces, 2)
-                     Each row contains two node indices forming an edge/face
+                     每行包含构成边/面的 2 个节点索引
         area: 面面积数组, float64, shape=(N_faces,)
-             Pre-computed areas for each face (in m^2)
+             每个面的面积（m^2）
         normal: 面法向量数组, float64, shape=(N_faces, 3)
-                Unit normal vectors for each face
+                每个面的单位法向量
         center: 面中心坐标, float64, shape=(N_faces, 3)
-                Center coordinates of each face
+                每个面的中心坐标
     
-    Example:
+    示例:
         >>> faces = FaceData(
         ...     connectivity=np.array([[0, 1], [1, 2], [2, 0]], dtype=np.int32),
         ...     area=np.array([1.0, 1.0, 1.0]),
@@ -36,22 +36,22 @@ class FaceData:
         >>> print(f"Number of faces: {faces.count}")
         >>> print(f"Total area: {faces.area.sum():.6f} m^2")
     """
-    connectivity: np.ndarray  # int32, shape=(N_faces, 2) - left/right cells for interior faces, right=-1 for boundary
-    area: np.ndarray  # float64, shape=(N_faces,) - scalar face areas (m^2)
-    normal: np.ndarray  # float64, shape=(N_faces, 3) - unit normal vectors
-    center: np.ndarray  # float64, shape=(N_faces, 3) - face center coordinates
-    node_connectivity: Optional[np.ndarray] = None  # int32, shape=(N_faces, 3) - triangle corner node indices (see FaceExtractor.extract_faces); None for callers that never populate it
-    _area_vectors: Optional[np.ndarray] = None  # float64, shape=(N_faces, 3) - area vectors (normal * area), internal use
+    connectivity: np.ndarray  # int32, shape=(N_faces, 2) - 内部面的左右单元, 边界面右=-1
+    area: np.ndarray  # float64, shape=(N_faces,) - 标量面面积 (m^2)
+    normal: np.ndarray  # float64, shape=(N_faces, 3) - 单位法向量
+    center: np.ndarray  # float64, shape=(N_faces, 3) - 面中心坐标
+    node_connectivity: Optional[np.ndarray] = None  # int32, shape=(N_faces, 3) - 三角面角点节点索引（见 FaceExtractor.extract_faces）；未设置时为 None
+    _area_vectors: Optional[np.ndarray] = None  # float64, shape=(N_faces, 3) - 面积向量 (normal * area)，内部使用
     
     def __post_init__(self):
         """验证面数据一致性
         
-        Raises:
-            ValueError: If arrays have invalid shapes or dtypes
+        抛出异常:
+            ValueError: 如果数组形状或数据类型无效
         """
         n_faces = self.connectivity.shape[0]
         
-        # Check connectivity shape
+        # 检查连接关系形状
         if len(self.connectivity.shape) != 2:
             raise ValueError(
                 f"Connectivity must be 2D array, got shape {self.connectivity.shape}"
@@ -62,7 +62,7 @@ class FaceData:
                 f"got {self.connectivity.shape[1]}"
             )
         
-        # Check other arrays' shapes
+        # 检查其他数组的形状
         if self.area.shape != (n_faces,):
             raise ValueError(
                 f"Area shape {self.area.shape} doesn't match "
@@ -89,7 +89,7 @@ class FaceData:
                 f"connectivity count {n_faces}"
             )
         
-        # Check dtypes
+        # 检查数据类型
         if self.connectivity.dtype != np.int32:
             raise ValueError(f"Connectivity must be int32, got {self.connectivity.dtype}")
         if self.area.dtype != np.float64:
@@ -99,13 +99,13 @@ class FaceData:
         if self.center.dtype != np.float64:
             raise ValueError(f"Center must be float64, got {self.center.dtype}")
         
-        # Validate areas are positive
+        # 验证面积为正值
         if np.any(self.area <= 0):
             n_negative = np.sum(self.area <= 0)
             logger.warning(
                 f"Found {n_negative} non-positive face areas. Filtering them out..."
             )
-            # Filter out invalid faces
+            # 过滤输出无效面
             valid_mask = self.area > 0
             self.connectivity = self.connectivity[valid_mask]
             self.area = self.area[valid_mask]
@@ -114,7 +114,7 @@ class FaceData:
             if self.node_connectivity is not None:
                 self.node_connectivity = self.node_connectivity[valid_mask]
         
-        # Ensure contiguous memory layout
+        # 确保连续内存布局
         if not self.connectivity.flags['C_CONTIGUOUS']:
             self.connectivity = np.ascontiguousarray(self.connectivity)
         if not self.area.flags['C_CONTIGUOUS']:

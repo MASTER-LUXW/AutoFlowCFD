@@ -268,7 +268,7 @@ class MultiGPUDistributedSolver:
     def _init_distributed_face_geometry(self):
         """初始化分布式面几何（GPU 版）。"""
         try:
-            from autoflowcfd.core.fr_face_kernels_flat import get_flat_face_geometry
+            from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
             flat_face = get_flat_face_geometry(self.mesh, self.ops)
             # 构建分布式面几何
             dist_flat_face = build_distributed_flat_face(

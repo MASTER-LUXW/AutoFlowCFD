@@ -10,12 +10,12 @@
 import numpy as np
 import pytest
 
-from autoflowcfd.core.fr_flux_kernels_pointwise import (
+from autoflowcfd.core.fr_operators.flux_kernels import (
     euler_physical_flux_point,
     viscous_physical_flux_point,
 )
-from autoflowcfd.core.fr_residual_inviscid import euler_physical_flux
-from autoflowcfd.core.fr_viscous_flux import viscous_physical_flux
+from autoflowcfd.core.fr_residual.inviscid import euler_physical_flux
+from autoflowcfd.core.fr_residual.viscous_flux import viscous_physical_flux
 
 
 @pytest.mark.parametrize("seed", range(20))

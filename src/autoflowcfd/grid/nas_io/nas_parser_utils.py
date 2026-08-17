@@ -7,10 +7,10 @@ import re
 
 
 def parse_nastran_float(value_str: str) -> float:
-    """解析Nastran格式的浮点数
-    
-    Handles Nastran's compact scientific notation where the exponent
-    is directly attached without 'e' or 'E'.
+    """解析 Nastran 格式的浮点数。
+
+    处理 Nastran 的紧凑科学计数法，指数直接附着，
+    没有 'e' 或 'E'。
     
     Examples:
         "5.635257-127" -> 5.635257e-127
@@ -32,13 +32,13 @@ def parse_nastran_float(value_str: str) -> float:
     
     value_str = value_str.strip()
     
-    # Try standard float parsing first
+    # 先尝试标准浮点数解析
     try:
         return float(value_str)
     except ValueError:
         pass
     
-    # Handle Nastran compact scientific notation
+    # 处理 Nastran compact scientific notation
     # Pattern: [sign]mantissa[exponent_sign]exponent_digits, where mantissa
     # is either "digits[.digits]" or a leading-dot form ".digits" (both are
     # legal Nastran reals, e.g. Nastran commonly emits "-.5-3" for -0.0005;

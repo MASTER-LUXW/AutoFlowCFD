@@ -10,7 +10,7 @@
     - autoflowcfd.grid.schema.grid_data
 """
 
-# Re-export from submodules for backward compatibility
+# 从子模块重新导出以保持向后兼容
 from .schema.grid_nodes import NodeArray, CupyNodeArray
 from .schema.grid_cells import CellArray, CupyCellArray, TetrahedralCells, PrismCells
 from .schema.grid_boundaries import BoundaryMap

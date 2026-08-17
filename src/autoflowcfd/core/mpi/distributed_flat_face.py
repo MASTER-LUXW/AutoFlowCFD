@@ -20,7 +20,7 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Optional
 
-from autoflowcfd.core.fr_face_kernels_flat import FlatFaceGeometry, get_flat_face_geometry
+from autoflowcfd.core.fr_operators.face_kernels import FlatFaceGeometry, get_flat_face_geometry
 from autoflowcfd.core.mpi.partition import DistributedPartition
 
 

@@ -66,7 +66,7 @@ def transient_mean(case: str, grid: Optional[str], output: str) -> None:
         if not ckpt_files:
             raise click.ClickException(f"No checkpoints found under {case_path / 'checkpoints'}")
 
-        from autoflowcfd.core.checkpoint import CheckpointManager
+        from autoflowcfd.core.utils.checkpoint import CheckpointManager
         ckpt_manager = CheckpointManager(str(ckpt_files[0].parent))
         stats = TransientStatistics(grid_data, window_size=len(ckpt_files))
 
@@ -140,7 +140,7 @@ def transient_rms(case: str, grid: Optional[str], output: str) -> None:
         if not ckpt_files:
             raise click.ClickException(f"No checkpoints found under {case_path / 'checkpoints'}")
 
-        from autoflowcfd.core.checkpoint import CheckpointManager
+        from autoflowcfd.core.utils.checkpoint import CheckpointManager
         ckpt_manager = CheckpointManager(str(ckpt_files[0].parent))
         stats = TransientStatistics(grid_data, window_size=len(ckpt_files))
 
@@ -230,7 +230,7 @@ def transient_psd(case: str, grid: Optional[str], output: str, probe_location: t
         probes = np.asarray(probe_location, dtype=np.float64)
         probe_cell_idx = [int(np.argmin(np.linalg.norm(centroids - p, axis=1))) for p in probes]
 
-        from autoflowcfd.core.checkpoint import CheckpointManager
+        from autoflowcfd.core.utils.checkpoint import CheckpointManager
         ckpt_manager = CheckpointManager(str(ckpt_files[0].parent))
 
         times: List[float] = []

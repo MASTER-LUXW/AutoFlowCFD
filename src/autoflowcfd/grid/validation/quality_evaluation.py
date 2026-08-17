@@ -1,9 +1,9 @@
-"""质量报告的 pass/fail 判定与改进建议文本生成。
+"""质量报告的 传递/fail 判定与改进建议文本生成。
 
 从 quality_validator.py 拆分出来：evaluate_quality 只依据阈值字典判定
 MeshQualityReport 是否通过、写警告文本；generate_recommendations 只根据
-report 里已有的问题字段生成人类可读的改进建议。两者都只需要
-report + thresholds，不依赖 MeshQualityValidator 实例的其它状态，所以
+报告 里已有的问题字段生成人类可读的改进建议。两者都只需要
+报告 + thresholds，不依赖 MeshQualityValidator 实例的其它状态，所以
 拆成自由函数而不是留在类里。
 """
 
@@ -11,21 +11,21 @@ from .quality_report import MeshQualityReport
 
 
 def evaluate_quality(report: MeshQualityReport, thresholds: dict) -> None:
-    """Evaluate overall quality based on thresholds.
+    """基于 thresholds 评估整体质量。
 
     Args:
         report: Quality report to evaluate
         thresholds: MeshQualityValidator.thresholds
     """
-    # Check critical failures
+    # 检查关键失败项
     if report.negative_volumes > thresholds['max_negative_volumes']:
         report.passed = False
         report.warnings.append(
             f"CRITICAL: {report.negative_volumes} cells with negative volume"
         )
 
-    # Global volume ratio is informational only now - see
-    # MeshQualityReport docstring for why it doesn't gate.
+    # 全局体积比现在仅供参考——见
+    # MeshQualityReport 文档字符串了解为何不作为关卡。
     if report.volume_ratio > thresholds['max_volume_ratio']:
         report.warnings.append(
             f"INFO: Global volume ratio {report.volume_ratio:.2e} exceeds "
@@ -89,7 +89,7 @@ def evaluate_quality(report: MeshQualityReport, thresholds: dict) -> None:
 
 
 def generate_recommendations(report: MeshQualityReport, thresholds: dict) -> None:
-    """Generate improvement recommendations based on quality issues.
+    """基于质量问题生成改进建议。
 
     Args:
         report: Quality report with identified issues

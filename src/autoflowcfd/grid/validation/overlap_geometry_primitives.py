@@ -13,21 +13,19 @@ import numpy as np
 def closest_point_on_triangle(
     p: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray
 ) -> np.ndarray:
-    """Closest point to `p` on triangle (a, b, c), one row per candidate.
+    """三角形 (a, b, c) 上距离 `p` 最近的点，每行一个候选。
 
-    Ericson section 5.1.5's seven-region Voronoi test, vectorized: for each
-    row, determine which of the triangle's two vertex regions, three edge
-    regions, or interior face region contains the closest point, using
-    boolean masks instead of Ericson's original early-return branches (the
-    first matching region "wins", masks are applied in the same priority
-    order the branching version checks them in).
+    Ericson 5.1.5 节的七区域 Voronoi 测试，向量化：对每行确定
+    三角形的两个顶点区域、三条边区域或内部面区域中哪个包含
+    最近点，使用布尔掩码而非 Ericson 原始的提前返回分支
+    （第一个匹配的区域"获胜"，掩码按与分支版本相同的优先级顺序应用）。
 
     Args:
-        p: (N, 3) query points
-        a, b, c: (N, 3) triangle vertices, one triangle per row
+        p: (N, 3) 查询点
+        a, b, c: (N, 3) 三角形顶点，每行一个三角形
 
     Returns:
-        (N, 3) closest point on each row's triangle to that row's query point
+        (N, 3) 每行三角形上距离该行查询点最近的点
     """
     n = len(p)
     ab = b - a
@@ -58,24 +56,24 @@ def closest_point_on_triangle(
         out[use] = values[use]
         assigned |= use
 
-    # Vertex regions.
+    # 顶点 regions.
     _take((d1 <= 0) & (d2 <= 0), a)
     _take((d3 >= 0) & (d4 <= d3), b)
     _take((d6 >= 0) & (d5 <= d6), c)
 
-    # Edge AB region.
+    # 边 AB 区域.
     mask_ab = (vc <= 0) & (d1 >= 0) & (d3 <= 0) & ~assigned
     denom_ab = d1 - d3
     v_ab = np.divide(d1, denom_ab, out=np.zeros(n), where=np.abs(denom_ab) > 1e-300)
     _take(mask_ab, a + v_ab[:, None] * ab)
 
-    # Edge AC region.
+    # 边 AC 区域.
     mask_ac = (vb <= 0) & (d2 >= 0) & (d6 <= 0) & ~assigned
     denom_ac = d2 - d6
     w_ac = np.divide(d2, denom_ac, out=np.zeros(n), where=np.abs(denom_ac) > 1e-300)
     _take(mask_ac, a + w_ac[:, None] * ac)
 
-    # Edge BC region.
+    # 边 BC 区域.
     e_d4d3 = d4 - d3
     e_d5d6 = d5 - d6
     mask_bc = (va <= 0) & (e_d4d3 >= 0) & (e_d5d6 >= 0) & ~assigned
@@ -103,17 +101,15 @@ def point_to_triangle_distance(
 def closest_points_segment_segment(
     p1: np.ndarray, q1: np.ndarray, p2: np.ndarray, q2: np.ndarray, eps: float = 1e-300
 ) -> tuple:
-    """Closest points between segments (p1,q1) and (p2,q2), one pair per row.
+    """线段 (p1,q1) 与 (p2,q2) 之间的最近点，每行一对。
 
-    Ericson section 5.1.9's closed-form solution, vectorized: solves for the
-    clamped parametric positions s in [0,1] (along d1 = q1-p1) and t in
-    [0,1] (along d2 = q2-p2) that minimize |c1 - c2|, handling degenerate
-    (zero-length) segments and near-parallel segments as their own cases
-    rather than dividing by a near-zero denominator.
+    Ericson 5.1.9 节的封闭形式解，向量化：求解夹紧的参数位置
+    s ∈ [0,1]（沿 d1 = q1-p1）和 t ∈ [0,1]（沿 d2 = q2-p2），
+    使 |c1 - c2| 最小化，将零长度线段和近平行线段作为独立情况处理，
+    而不是除以接近零的分母。
 
     Returns:
-        (c1, c2): each (N, 3), the closest point on each row's first/second
-        segment respectively
+        (c1, c2): 各为 (N, 3)，每行第一/第二线段上的最近点
     """
     n = len(p1)
     d1 = q1 - p1

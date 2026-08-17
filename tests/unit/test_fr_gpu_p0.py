@@ -27,7 +27,7 @@ if os.environ.get("NUMBA_ENABLE_CUDASIM") != "1":
         )
 
 from autoflowcfd.core.backend.fr_gpu_p0 import compute_inviscid_residual_p0_gpu
-from autoflowcfd.core.fr_residual_inviscid import _compute_inviscid_residual_fv_p0, DefaultGhostProvider
+from autoflowcfd.core.fr_residual.inviscid import _compute_inviscid_residual_fv_p0, DefaultGhostProvider
 
 from tests.validation._channel_mesh import build_channel_mesh_prism
 

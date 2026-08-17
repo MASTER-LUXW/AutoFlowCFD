@@ -10,9 +10,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from autoflowcfd.core.fr_residual_inviscid import primitive_to_conserved
-from autoflowcfd.core.fr_viscous_flux import compute_viscous_residual_fr
-from autoflowcfd.grid.high_order_mesh import HighOrderMesh
+from autoflowcfd.core.fr_residual.inviscid import primitive_to_conserved
+from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
+from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
 
 
 class _MockNodes:

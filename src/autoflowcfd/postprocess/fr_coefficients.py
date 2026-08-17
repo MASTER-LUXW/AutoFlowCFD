@@ -65,7 +65,7 @@ def compute_aerodynamic_coefficients_fr(
             "aerodynamic forces. Call load_from_volume_mesh(build_faces=True) first."
         )
 
-    from autoflowcfd.grid.face_connectivity import tag_boundary_groups
+    from autoflowcfd.grid.connectivity.face_connectivity import tag_boundary_groups
 
     group_code, name_to_code = tag_boundary_groups(fc, mesh.boundary_groups or {})
     bc_types = mesh.boundary_bc_types or {}
@@ -96,8 +96,8 @@ def compute_aerodynamic_coefficients_fr(
     force_viscous = np.zeros(3)
 
     if include_viscous:
-        from autoflowcfd.core.fr_gradients import compute_physical_gradient
-        from autoflowcfd.core.fr_viscous_flux import compute_temperature
+        from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient
+        from autoflowcfd.core.fr_residual.viscous_flux import compute_temperature
 
         grad_Q = compute_physical_gradient(Q, mesh, ops)  # (n_cells,n_sps,5,3)
         grad_vel_full = grad_Q[:, :, 1:4, :]  # (n_cells,n_sps,3,3)

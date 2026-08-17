@@ -1,6 +1,5 @@
-"""NAS (Nastran) file I/O: parsing and export.
+"""NAS (Nastran) 文件 I/O：解析与导出。
 
-Purely organizational grouping - re-exported at the `autoflowcfd.grid`
-package level, so import from there in external code rather than from
-these submodules directly.
+纯组织分组——在 `autoflowcfd.grid` 包级别重新导出，
+外部代码请从那里导入，而不是直接从这些子模块导入。
 """

@@ -27,14 +27,14 @@ if TYPE_CHECKING:
 
 
 def _compute_tet_centroids(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
-    """Vertex-average centroid of every tetrahedron, shape=(n_cells, 3)."""
+    """每个四面体的顶点平均质心，shape=(n_cells, 3)。"""
     if len(cells) == 0:
         return np.zeros((0, 3), dtype=np.float64)
     return nodes[cells].mean(axis=1)
 
 
 def _compute_prism_centroids(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
-    """Vertex-average centroid of every triangular prism, shape=(n_cells, 3)."""
+    """每个三棱柱的顶点平均质心，shape=(n_cells, 3)。"""
     if len(cells) == 0:
         return np.zeros((0, 3), dtype=np.float64)
     return nodes[cells].mean(axis=1)
@@ -47,31 +47,25 @@ def validate_mixed_mesh(
     log_summary: bool = True,
     check_overlap: bool = True,
 ) -> 'MeshQualityReport':
-    """Validate a mixed prism(BL) + tetrahedron(core) VolumeMeshData.
+    """校验混合棱柱(BL) + 四面体(core) VolumeMeshData。
 
-    Mirrors validate()'s structure, but every per-cell metric is
-    computed separately per region (prism cells via quality_metrics'
-    prism functions, tet cells via the existing tetrahedron functions -
-    the two shapes need genuinely different formulas, see quality_
-    metrics.py) and then concatenated in the SAME global cell-index
-    order every other prism-aware piece of this codebase uses (prisms
-    [0, n_prism), tets [n_prism, n_prism+n_tet) - see PrismCells/
-    face_extractor.extract_faces_mixed). Orthogonality and adjacent-
-    volume-ratio (face-based, so they inherently span the BL/core
-    interface) use ONE combined pass over the global face graph, via
-    compute_face_diagnostics' cell_centroids/cell_volumes parameters
-    (added specifically so it doesn't have to re-derive a per-cell
-    centroid/volume from a single uniform connectivity array, which a
-    mixed mesh doesn't have).
+    结构与 validate() 相同，但每个 per-cell 指标按区域分别计算
+    （棱柱单元用 quality_metrics 的棱柱函数，四面体单元用已有的
+    四面体函数——两种形状需要完全不同的公式，见 quality_metrics.py），
+    然后按所有其他棱柱感知代码使用的全局单元索引顺序拼接
+    （棱柱 [0, n_prism)，四面体 [n_prism, n_prism+n_tet)——
+    见 PrismCells / face_extractor.extract_faces_mixed）。
+    正交性和相邻体积比（基于面，因此天然跨越 BL/core 界面）
+    使用全局面图的一次合并遍历，通过 compute_face_diagnostics 的
+    cell_centroids/cell_volumes 参数（专门为此添加，避免从混合网格
+    没有的单一均匀连接关系数组重新推导 per-cell 质心/体积）。
 
-    bl_cell_mask is not a parameter here (unlike validate()) - it's
-    exactly [True]*n_prism + [False]*n_tet by construction, not
-    something a caller could meaningfully override.
+    bl_cell_mask 不是这里的参数（与 validate() 不同）——按构造它
+    恰好是 [True]*n_prism + [False]*n_tet，调用者无法有意义地覆盖。
 
     Args:
-        validator: the owning MeshQualityValidator instance (this
-            function was originally MeshQualityValidator.validate_mixed;
-            it's called as a thin-wrapper delegate from that method now).
+        validator: 所属的 MeshQualityValidator 实例（此函数最初是
+            MeshQualityValidator.validate_mixed；现在作为薄包装委托从该方法调用）。
     """
     from .quality_report import MeshQualityReport
 
@@ -89,9 +83,9 @@ def validate_mixed_mesh(
     # --- Volumes ---
     prism_vol = _qm.compute_prism_volumes(nodes, prism_conn)
     tet_vol_signed = _qm.compute_tetrahedron_volumes(nodes, tet_conn)
-    negative_mask = tet_vol_signed < 0  # prism volumes are unsigned by construction - see
-                                        # compute_prism_volumes' docstring for why an
-                                        # inversion check isn't available for them yet
+    negative_mask = tet_vol_signed < 0  # 棱柱体积按构造为无符号——
+                                        # 见 compute_prism_volumes 的文档字符串，
+                                        # 了解为何它们尚无反转检查
     report.negative_volumes = int(np.sum(negative_mask))
     all_volumes = np.concatenate([prism_vol, np.abs(tet_vol_signed)])
     positive_volumes = all_volumes[all_volumes > 0]
@@ -138,10 +132,10 @@ def validate_mixed_mesh(
         report, nodes, tet_conn, faces, cell_centroids=cell_centroids, cell_volumes=cell_volumes
     )
     if check_overlap:
-        # `cells` is unused by check_face_overlap_and_proximity whenever
-        # faces is already supplied (which it always is here) - see
-        # mesh_overlap_check.py, it only ever reads `cells` to derive
-        # faces itself when the caller didn't already have them.
+        # `cells` 在 faces 已提供时（这里总是如此）不会被
+        # check_face_overlap_and_proximity 使用——见
+        # mesh_overlap_check.py，它仅在调用者尚未拥有面时
+        # 才读取 `cells` 来推导面。
         validator._check_overlap_and_proximity(report, nodes, tet_conn, faces)
 
     evaluate_quality(report, validator.thresholds)

@@ -11,7 +11,7 @@ from loguru import logger
 
 # V2.0 Core Import
 from autoflowcfd.grid.nas_io.parser import NASParser
-from autoflowcfd.grid.mesh_gen.volume_mesh_generator import VolumeMeshGenerator
+from autoflowcfd.grid.mesh_gen.tetgen.volume_mesh_generator import VolumeMeshGenerator
 from autoflowcfd.grid.structures import GridData, VolumeMeshData
 from autoflowcfd.grid.validation.validator import GridValidator
 from autoflowcfd.boundary import BoundaryManager
@@ -335,7 +335,7 @@ class AutoFlowCFDAPI:
             bc_manager = None
         
         # Create and run solver
-        from autoflowcfd.core.time_integration import TimeIntegrationScheme as CoreTimeScheme
+        from autoflowcfd.core.time_integration.base import TimeIntegrationScheme as CoreTimeScheme
         from autoflowcfd.config.solver_config import TimeIntegrationScheme
         
         # Steady默认使用RK3
@@ -433,7 +433,7 @@ class AutoFlowCFDAPI:
         )
         
         # 创建并运行求解器
-        from autoflowcfd.core.time_integration import TimeIntegrationScheme as CoreTimeScheme
+        from autoflowcfd.core.time_integration.base import TimeIntegrationScheme as CoreTimeScheme
         
         # 将solver_config的枚举转换为core的枚举
         scheme_map = {

@@ -1,9 +1,9 @@
 """外部生成的体网格 NAS 文件解析器。
 
 和 parser_core.NASParser（读取 CTRIA3 面网格，体网格由本项目自己的
-generate-volume 流程从零生成）不同，本模块读取的是别的工具已经生成好的
+生成-体积 流程从零生成）不同，本模块读取的是别的工具已经生成好的
 完整体网格（例如 ANSA 自身的体网格导出：GRID + CTETRA + CPENTA 卡片，
-fixed-width Nastran small-field 格式——和 nas_export.py 自己写出来的格式
+fixed-width Nastran 小-字段 格式——和 nas_export.py 自己写出来的格式
 一致，已经拿真实的 ANSA 导出文件核实过）。
 
 解析出来的 VolumeMeshData 的 BoundaryMap 是空的——外部生成的体网格通常
@@ -26,11 +26,11 @@ from .nas_parser_utils import parse_nastran_float
 
 
 def _parse_cards(path: str) -> Tuple[np.ndarray, np.ndarray, list, list]:
-    """Single streaming pass over the file: collect GRID node id/xyz,
-    CTETRA node-id rows, and CPENTA node-id rows. Fixed-width 8-char
-    Nastran small-field cards throughout (matches nas_export.py's own
-    CTETRA/CPENTA writers exactly, and ANSA's own volume export uses the
-    same convention)."""
+    """单次流式扫描文件：收集 GRID 节点 id/xyz、
+    CTETRA 节点-id 行和 CPENTA 节点-id 行。全程使用固定宽度
+    8 字符 Nastran 小字段卡片（与 nas_export.py 自己的
+    CTETRA/CPENTA 写入器完全匹配，ANSA 自身的体导出也使用
+    相同约定）。"""
     node_ids = []
     node_xyz = []
     tet_rows = []
@@ -64,45 +64,38 @@ def _parse_cards(path: str) -> Tuple[np.ndarray, np.ndarray, list, list]:
     return node_ids_arr, node_xyz_arr, tet_rows, prism_rows
 
 
-# Matches NASParser.AUTO_UNITS_MM_THRESHOLD exactly - see that class's own
-# comment for the reasoning (an automotive external-aero domain reads in
-# the thousands in mm, a few to a few tens in metres).
+# 与 NASParser.AUTO_UNITS_MM_THRESHOLD 完全匹配——见该类的注释
+# 了解推理（汽车外气动域以 mm 为单位读入数千，以米为单位读入几到几十）。
 _AUTO_UNITS_MM_THRESHOLD = 50.0
 
 
 def parse_volume_mesh_nas(path: str, units: str = 'mm') -> VolumeMeshData:
-    """Parse an externally-generated volume-mesh NAS file (GRID + CTETRA
-    + CPENTA) into VolumeMeshData.
+    """解析外部生成的体网格 NAS 文件 (GRID + CTETRA + CPENTA) 为
+    VolumeMeshData。
 
     Args:
-        path: Path to the volume-mesh .nas file.
-        units: Length unit of the coordinates in the file - 'mm' (default,
-            matches NASParser's own default and ANSA's typical export
-            convention), 'm' (no scaling), or 'auto' (detect from the raw
-            bounding-box extent, same threshold/logic as NASParser's own
-            units='auto'). Getting this wrong doesn't just distort the
-            mesh - it silently breaks mesh_boundary.map_boundaries_by_
-            geometry's nearest-centroid matching against the companion
-            surface mesh (which NASParser always scales to metres),
-            since every volume-mesh face would then sit ~1000x farther
-            from its true position than any surface boundary face,
-            comfortably outside even a generous tolerance. Confirmed
-            directly: omitting this scaling on a real case matched 0 of
-            39,352 exterior-face-owning cells to any surface boundary
-            group.
+        path: 体网格 .nas 文件路径。
+        units: 文件中坐标的长度单位——'mm'（默认，匹配 NASParser
+            自身的默认值和 ANSA 的典型导出约定）、'm'（不缩放）
+            或 'auto'（从原始包围盒范围检测，与 NASParser 自身的
+            units='auto' 使用相同阈值/逻辑）。搞错这个不仅会扭曲
+            网格——还会静默破坏 mesh_boundary.map_boundaries_by_
+            geometry 对配套表面网格（NASParser 总是缩放到米）的
+            最近质心匹配，因为每个体网格面然后坐在比任何表面
+            边界面远约 1000 倍的位置，即使宽松容差也轻松超出。
+            已直接确认：在真实案例上省略此缩放导致 0 of 39,352
+            个外表面所属单元匹配到任何表面边界组。
 
     Returns:
-        VolumeMeshData with an EMPTY BoundaryMap (groups={}, bc_types={})
-        - see this module's own docstring for why boundary attribution is
-        a separate step. Tets are re-oriented to positive volume the same
-        way this project's own generation pipeline does; any exactly-
-        degenerate (near-zero-volume) cell is dropped, matching the same
-        cleanup this project applies to its own generated meshes.
+        VolumeMeshData，BoundaryMap 为空 (groups={}, bc_types={})
+        ——见本模块的文档字符串了解为什么边界归因是单独一步。
+        四面体被重定向到正体积，与本项目自己的生成管线相同的
+        方式；任何精确退化（近零体积）的单元被丢弃，匹配本项目
+        对自己的生成网格应用的相同清理。
 
     Raises:
-        ValueError: no GRID cards, no CTETRA/CPENTA cards (e.g. a
-            surface-only file was passed by mistake), or an invalid
-            `units` value.
+        ValueError: 无 GRID 卡片、无 CTETRA/CPENTA 卡片（例如误传了
+            纯表面文件），或无效的 `units` 值。
     """
     from ..mesh_gen.mesh_prism_to_tet import orient_tetrahedra
     from ..validation.quality_metrics import compute_prism_volumes

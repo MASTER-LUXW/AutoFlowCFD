@@ -83,7 +83,7 @@ def compute_inviscid_residual_fr_gpu(
     # ── 2. 界面项 ──
     if flat_face_gpu is None:
         # 需要构建面几何
-        from autoflowcfd.core.fr_face_kernels_flat import get_flat_face_geometry
+        from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
         flat_face = get_flat_face_geometry(mesh, ops)
         from autoflowcfd.core.gpu.gpu_face_geometry import build_gpu_flat_face
         flat_face_gpu = build_gpu_flat_face(flat_face, device_id)
@@ -107,7 +107,7 @@ def compute_inviscid_residual_fr_gpu(
     residual = residual + correction
 
     # ── 3. 异常残差抑制 ──
-    from autoflowcfd.core.fr_troubled_cell import suppress_residual_outliers
+    from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
     if input_is_numpy:
         residual_np = cp.asnumpy(residual)
         U_np = cp.asnumpy(U)

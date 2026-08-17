@@ -17,13 +17,13 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from autoflowcfd.core.fr_kernels import compute_ausm_up_flux
-from autoflowcfd.core.fr_residual_inviscid import (
+from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
+from autoflowcfd.core.fr_residual.inviscid import (
     compute_inviscid_residual_fr,
     euler_physical_flux,
     primitive_to_conserved,
 )
-from autoflowcfd.grid.high_order_mesh import HighOrderMesh
+from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
 
 
 class _MockNodes:

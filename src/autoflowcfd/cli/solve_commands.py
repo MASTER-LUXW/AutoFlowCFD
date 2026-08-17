@@ -22,7 +22,7 @@ from typing import Optional
 import click
 
 from autoflowcfd.core import FRSolver
-from autoflowcfd.core.time_integration import TimeIntegrationScheme
+from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 from autoflowcfd.cli.solve_helpers import (
     compute_wall_distance_for_solver,
     load_mesh_for_solver,
@@ -364,7 +364,7 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
     # 4.5. 从 checkpoint 初始化（可选：以稳态结果为初场启动瞬态计算）
     if init_checkpoint:
         from types import SimpleNamespace
-        from autoflowcfd.core.checkpoint import CheckpointManager
+        from autoflowcfd.core.utils.checkpoint import CheckpointManager
 
         print(f"\n🔄 从 checkpoint 加载稳态结果作为瞬态初场...")
         solution, history, ckpt_iter, ckpt_meta = CheckpointManager(
@@ -430,7 +430,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
         reference_area: 气动系数参考面积
     """
     from types import SimpleNamespace
-    from autoflowcfd.core.checkpoint import CheckpointManager
+    from autoflowcfd.core.utils.checkpoint import CheckpointManager
 
     logger.info(f"Resuming simulation from checkpoint: {checkpoint_file}")
 

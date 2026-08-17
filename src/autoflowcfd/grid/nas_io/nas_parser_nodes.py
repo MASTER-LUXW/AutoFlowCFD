@@ -1,4 +1,4 @@
-"""NAS 解析器：节点（node）提取。
+"""NAS 解析器：节点（节点）提取。
 
 流式解析 Nastran 格式文件里的 GRID 节点卡片。
 """
@@ -11,14 +11,11 @@ from ..structures import NodeArray
 from .nas_parser_exceptions import NASParseError
 from .nas_parser_utils import parse_nastran_float
 
-# Above this fraction of GRID lines dropped (parse errors + unparseable
-# lines), treat it as a systematic format/encoding mismatch rather than
-# incidental noise and fail loudly instead of silently returning a mesh
-# missing a large chunk of its true geometry while still reporting success.
-# Only enforced once there's a meaningful sample size
-# (MIN_LINES_FOR_DROP_CHECK) - a handful of GRID lines in a small file
-# having one bad line is not evidence of systematic corruption the way the
-# same ratio would be across the tens of thousands of lines in a real mesh.
+# 超过这个比例的 GRID 行被丢弃（解析错误 + 不可解析的行），就视为
+# 系统性的格式/编码不匹配而不是偶然噪声，大声报错而不是静默返回一个
+# 缺失大块真实几何但仍然报告"成功"的网格。仅在有意义的样本量
+# (MIN_LINES_FOR_DROP_CHECK) 时才强制执行——小文件里几行 GRID 有一行
+# 坏的不是系统性损坏的证据，而真实网格成千上万行里同样比例就是。
 MAX_DROP_FRACTION = 0.05
 MIN_LINES_FOR_DROP_CHECK = 20
 
@@ -27,21 +24,20 @@ def parse_nodes_from_nas(
     file_path: str,
     encoding: str = 'UTF-8'
 ) -> tuple:
-    """解析节点数据(流式)
-    
-    Parses GRID cards from NAS file using streaming approach to handle
-    large files efficiently. Supports both comma-separated and fixed-format
-    Nastran GRID cards.
-    
+    """解析节点数据（流式）。
+
+    使用流式方式从 NAS 文件解析 GRID 卡片，高效处理大文件。
+    支持逗号分隔和固定格式的 Nastran GRID 卡片。
+
     Args:
-        file_path: Path to NAS file
-        encoding: File encoding
-        
+        file_path: NAS 文件路径
+        encoding: 文件编码
+
     Returns:
-        tuple: (NodeArray, dict) - Node array and node_id_to_index mapping
-        
+        tuple: (NodeArray, dict) - 节点数组和 node_id_to_index 映射
+
     Raises:
-        NASParseError: If node parsing fails
+        NASParseError: 节点解析失败
     """
     x_coords = []
     y_coords = []
@@ -59,14 +55,13 @@ def parse_nodes_from_nas(
     duplicate_node_ids = 0
 
     def _record_node(node_id: int, x: float, y: float, z: float) -> None:
-        """Store a parsed GRID card, updating in place on a duplicate ID.
+        """存储解析的 GRID 卡片，重复 ID 时原地更新。
 
-        A repeated node ID used to just append a second entry and repoint
-        node_id_to_index at it, leaving the first occurrence's coordinates
-        behind as a live, unreferenced node - inflating node_count with a
-        disconnected phantom point. Nastran's own convention (last card for
-        a given ID wins) is applied here instead: overwrite the existing
-        slot rather than growing the array.
+        重复的节点 ID 以前只会追加第二个条目并将 node_id_to_index
+        指向它，把第一次出现的坐标留下作为一个活跃的、未引用的
+        节点——使 node_count 膨胀一个断开的幻影点。这里改用 Nastran
+        自身的约定（给定 ID 的最后一张卡片获胜）：覆盖现有槽位
+        而不是增长数组。
         """
         nonlocal node_count, duplicate_node_ids
         existing_idx = node_id_to_index.get(node_id)
@@ -98,7 +93,7 @@ def parse_nodes_from_nas(
                 try:
                     parsed = False
                     
-                    # Try comma-separated format
+                    # 尝试 comma-separated 格式
                     match = grid_pattern_comma.match(line_stripped)
                     
                     if match:
@@ -118,7 +113,7 @@ def parse_nodes_from_nas(
                                 parse_errors += 1
 
                     if not parsed:
-                        # Fixed format parsing
+                        # Fixed 格式 parsing
                         if len(line) >= 48:
                             node_id_str = line[8:16].strip()
                             x_str = line[24:32].strip()

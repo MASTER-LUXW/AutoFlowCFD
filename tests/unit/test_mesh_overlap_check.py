@@ -18,7 +18,7 @@ import pytest
 from autoflowcfd.grid.validation import mesh_overlap_check
 from autoflowcfd.grid.validation.mesh_overlap_check import check_face_overlap_and_proximity
 from autoflowcfd.grid.schema.grid_nodes import NodeArray
-from autoflowcfd.grid.mesh_gen.face_extractor import FaceExtractor
+from autoflowcfd.grid.mesh_gen.extraction.face_extractor import FaceExtractor
 
 # Two triangles that genuinely cross in 3D, sharing no vertices (same
 # fixture used in test_overlap_geometry.py / test_mesh_front_collision.py).

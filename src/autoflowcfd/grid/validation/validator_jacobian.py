@@ -19,51 +19,48 @@ from ..structures import GridData
 def check_jacobian(grid_data: GridData) -> Dict[str, float]:
     """检查雅可比行列式
 
-    Computes Jacobian determinant for each cell. The Jacobian measures
-    the local scaling factor of the coordinate transformation.
+    计算每个单元的雅可比行列式。雅可比衡量
+    坐标变换的局部缩放因子。
 
     Returns:
-        Dict: Statistics with 'max', 'avg', 'min' keys
+        Dict: 包含 'max'、'avg'、'min' 键的统计字典
 
-    Note:
-        Positive Jacobian indicates valid cell orientation.
-        Negative or near-zero Jacobian indicates inverted or degenerate cells.
+    注意:
+        正雅可比表示有效的单元方向。
+        负或接近零的雅可比表示反转或退化的单元。
     """
     logger.debug("Computing Jacobian determinants...")
 
     connectivity = grid_data.cells.connectivity
     nodes = grid_data.nodes
 
-    # Get node coordinates
+    # 获取节点坐标
     cell_coords = np.stack([
         nodes.get_coordinates(connectivity[:, i])
         for i in range(3)
     ], axis=1)
 
-    # Compute vectors from node 0 to nodes 1 and 2
+    # 计算从节点 0 到节点 1 和 2 的向量
     v0 = cell_coords[:, 1] - cell_coords[:, 0]
     v1 = cell_coords[:, 2] - cell_coords[:, 0]
 
-    # Compute cross product (gives normal vector)
+    # 计算叉积（得到法向量）
     cross = np.cross(v0, v1)
 
-    # Jacobian determinant is magnitude of cross product
+    # 雅可比行列式是叉积的模
     jacobians = np.linalg.norm(cross, axis=1)
 
-    # A single triangle's winding has no absolute sign without an
-    # external reference frame, so "jacobians < 0" here (np.linalg.norm
-    # is never negative) could never fire for any mesh - inverted
-    # triangles were silently invisible to this check regardless of
-    # input. What *is* well-defined without an external reference is
-    # whether neighboring triangles agree with each other: on a
-    # consistently-oriented manifold surface, two triangles sharing an
-    # edge must traverse that shared edge in opposite directions. If
-    # they traverse it in the same direction, one of the pair is
-    # flipped relative to its neighbor - detect that via directed-edge
-    # sign accumulation instead of the magnitude's sign.
+    # 单个三角形的绕向在没有外部参考系的情况下没有绝对符号，
+    # 因此这里的 "jacobians < 0"（np.linalg.norm 永远不为负）
+    # 对任何网格都不会触发——无论输入如何，反转三角形对此检查
+    # 都是静默不可见的。在没有外部参考的情况下有明确定义的是
+    # 相邻三角形是否彼此一致：在方向一致的流形表面上，
+    # 共享一条边的两个三角形必须以相反方向遍历该共享边。
+    # 如果它们以相同方向遍历，则其中一个相对于邻居翻转——
+    # 通过有向边符号累加而非模的符号来检测。
     negative_count = _count_flipped_triangles(grid_data, connectivity)
 
-    # Compute statistics
+    # 计算统计量
     stats = {
         'max': float(np.max(jacobians)),
         'avg': float(np.mean(jacobians)),
@@ -82,16 +79,14 @@ def check_jacobian(grid_data: GridData) -> Dict[str, float]:
 
 
 def _count_flipped_triangles(grid_data: GridData, connectivity: np.ndarray) -> int:
-    """Count triangles whose winding is inconsistent with a neighbor.
+    """计数绕向与邻居不一致的三角形。
 
-    For every shared (manifold-interior) edge - one that borders
-    exactly two triangles - a consistently-oriented surface must
-    traverse it in opposite directions from each side. Two triangles
-    that instead traverse their shared edge in the same direction
-    cannot both be correctly oriented; both are flagged. Edges shared
-    by a triangle count other than 2 (open boundary or non-manifold)
-    aren't orientation-checkable this way and are skipped here - that
-    is a distinct mesh-integrity issue, not this metric's concern.
+    对于每条共享（流形内部）边——恰好与两个三角形相邻的边——
+    方向一致的表面必须从每条边以相反方向遍历它。
+    不以相同方向遍历其共享边的两个三角形不可能都方向正确；
+    两者都被标记。被非 2 个三角形共享的边（开放边界或非流形）
+    无法以此方式检查方向，此处跳过——这是一个不同的网格完整性
+    问题，不属于此度量的关注范围。
     """
     n1, n2, n3 = connectivity[:, 0], connectivity[:, 1], connectivity[:, 2]
     directed_edges = np.concatenate([

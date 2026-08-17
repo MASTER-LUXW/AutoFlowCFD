@@ -2,15 +2,15 @@
 
 import numpy as np
 
-from autoflowcfd.grid.mesh_gen.mesh_repair import (
+from autoflowcfd.grid.mesh_gen.repair.mesh_repair import (
     smooth_bad_cells,
     compute_movable_node_mask,
     compute_bl_thickness_limit_override,
 )
-from autoflowcfd.grid.mesh_gen.mesh_prism_to_tet import orient_tetrahedra
+from autoflowcfd.grid.mesh_gen.tetgen.mesh_prism_to_tet import orient_tetrahedra
 from autoflowcfd.grid.validation.quality_validator import MeshQualityValidator
 from autoflowcfd.grid.schema.grid_nodes import NodeArray
-from autoflowcfd.grid.mesh_gen.face_extractor import FaceExtractor
+from autoflowcfd.grid.mesh_gen.extraction.face_extractor import FaceExtractor
 
 
 def _bipyramid():

@@ -8,10 +8,10 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from autoflowcfd.core.fr_gradients import compute_physical_gradient, compute_physical_scalar_gradient
-from autoflowcfd.grid.curved_mapping import map_prism_to_physical, map_tet_to_physical
+from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient, compute_physical_scalar_gradient
+from autoflowcfd.grid.curved_mapping.curved_mapping import map_prism_to_physical, map_tet_to_physical
 from autoflowcfd.fr.operators import generate_fr_operators, gauss_legendre
-from autoflowcfd.grid.high_order_mesh import HighOrderMesh
+from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
 
 
 class _MockNodes:

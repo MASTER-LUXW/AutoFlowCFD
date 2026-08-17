@@ -13,7 +13,7 @@ These tests target the mesh-generation defects found in the grid audit:
 import numpy as np
 import pytest
 
-from autoflowcfd.grid.mesh_gen.mesh_prism_to_tet import (
+from autoflowcfd.grid.mesh_gen.tetgen.mesh_prism_to_tet import (
     convert_layers_to_tetrahedra, orient_tetrahedra,
 )
 

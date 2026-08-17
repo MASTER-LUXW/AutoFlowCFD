@@ -134,7 +134,7 @@ def _load_case(case: str, grid: Optional[str] = None, checkpoint: Optional[str] 
     Returns:
         (grid_data, solution, history, iteration, metadata)
     """
-    from autoflowcfd.core.checkpoint import CheckpointManager
+    from autoflowcfd.core.utils.checkpoint import CheckpointManager
 
     case_path = Path(case)
     grid_file = _locate_grid_file(case_path, grid)
@@ -160,7 +160,7 @@ def _load_case(case: str, grid: Optional[str] = None, checkpoint: Optional[str] 
 
 def _load_history_only(case: str, checkpoint: Optional[str] = None) -> Tuple[dict, int, dict]:
     """只加载一个 checkpoint 的收敛历史/元数据（report/convergence 用，不需要网格）。"""
-    from autoflowcfd.core.checkpoint import CheckpointManager
+    from autoflowcfd.core.utils.checkpoint import CheckpointManager
 
     case_path = Path(case)
     ckpt_file = _locate_checkpoint(case_path, checkpoint)

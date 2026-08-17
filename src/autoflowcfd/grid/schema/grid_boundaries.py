@@ -5,9 +5,8 @@
 """
 
 import numpy as np
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from dataclasses import dataclass, field
-from loguru import logger
 
 
 @dataclass
@@ -16,7 +15,7 @@ class BoundaryMap:
     
     将边界名称映射到单元索引列表，支持基于Properties Name的自动识别。
     
-    Attributes:
+    属性:
         groups: 边界组字典 {boundary_name: cell_indices_array}
                cell_indices_array: numpy int32数组，存储属于该边界的单元索引
         bc_types: 边界条件类型映射 {boundary_name: bc_type}
@@ -30,7 +29,7 @@ class BoundaryMap:
         parameters: 边界参数 {boundary_name: param_dict}
                    存储每个边界的详细参数配置
     
-    Example:
+    示例:
         >>> bmap = BoundaryMap(
         ...     groups={"inlet": np.array([0, 1, 2], dtype=np.int32)},
         ...     bc_types={"inlet": "VELOCITY_INLET"},
@@ -54,7 +53,7 @@ class BoundaryMap:
     def __post_init__(self):
         """验证数据结构一致性
         
-        Raises:
+        抛出异常:
             ValueError: 如果groups、bc_types、property_ids键不一致
         """
         group_keys = set(self.groups.keys())
@@ -99,7 +98,7 @@ class BoundaryMap:
         Returns:
             str: 边界条件类型（如VELOCITY_INLET）
             
-        Raises:
+        抛出异常:
             KeyError: 边界名称不存在
         """
         if boundary_name not in self.bc_types:
@@ -118,7 +117,7 @@ class BoundaryMap:
         return self.property_ids.get(boundary_name)
     
     def get_property_name(self, boundary_name: str) -> Optional[str]:
-        """获取边界对应的Property Name
+        """获取边界对应的Property 名称
         
         Args:
             boundary_name: 边界名称
@@ -149,7 +148,7 @@ class BoundaryMap:
             boundary_name: 边界名称
             **kwargs: 要更新的参数键值对
             
-        Raises:
+        抛出异常:
             KeyError: 边界名称不存在
         """
         if boundary_name not in self.groups:
@@ -190,7 +189,7 @@ class BoundaryMap:
         Returns:
             np.ndarray: 节点索引数组（int32）
             
-        Raises:
+        抛出异常:
             KeyError: 边界名称不存在
         """
         if boundary_name not in self.groups:
@@ -206,7 +205,7 @@ class BoundaryMap:
         Returns:
             np.ndarray: 单元索引数组（int32）
             
-        Raises:
+        抛出异常:
             KeyError: 边界名称不存在
         """
         if boundary_name not in self.groups:
@@ -244,7 +243,6 @@ class BoundaryMap:
             group: h5py Group对象
             prefix: HDF5数据集前缀
         """
-        import h5py
         import json
         
         # 保存基本信息
@@ -267,14 +265,14 @@ class BoundaryMap:
                 data=np.string_(self.bc_types[name])
             )
             
-            # Property ID
+            # 属性 ID
             pid = self.property_ids.get(name, -1)
             group.create_dataset(
                 f"{prefix}/boundary_{i}/property_id",
                 data=np.int32(pid)
             )
             
-            # Parameters（序列化为JSON）
+            # 参数（序列化为JSON）
             params = self.parameters.get(name, {})
             params_json = json.dumps(params)
             group.create_dataset(
@@ -293,7 +291,6 @@ class BoundaryMap:
         Returns:
             BoundaryMap: 加载的边界映射对象
         """
-        import h5py
         import json
         
         names = group[f"{prefix}/names"][:].astype(str)

@@ -12,7 +12,7 @@ from typing import Tuple
 
 import numpy as np
 
-from autoflowcfd.grid.curved_mapping import map_prism_to_physical, map_tet_to_physical
+from autoflowcfd.grid.curved_mapping.curved_mapping import map_prism_to_physical, map_tet_to_physical
 
 # 四面体 (fixed_axis, fixed_val) -> 该真实面 3 个顶点的局部索引（不在面上的
 # 第 4 个顶点重心坐标恒为 0），与 curved_mapping.TET_CUBE_FACES 完全一致，

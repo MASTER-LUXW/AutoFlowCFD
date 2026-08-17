@@ -142,7 +142,7 @@ def distributed_save_checkpoint(
     Returns:
         checkpoint 文件路径（仅 root rank 有值）
     """
-    from autoflowcfd.core.checkpoint import CheckpointManager, H5PY_AVAILABLE
+    from autoflowcfd.core.utils.checkpoint import CheckpointManager, H5PY_AVAILABLE
     from types import SimpleNamespace
 
     if not H5PY_AVAILABLE:
@@ -213,7 +213,7 @@ def distributed_load_checkpoint(
     Returns:
         (U_local, metadata, iteration): 本 rank 的 local cells 数据 + 元数据 + 迭代数
     """
-    from autoflowcfd.core.checkpoint import CheckpointManager
+    from autoflowcfd.core.utils.checkpoint import CheckpointManager
     from types import SimpleNamespace
 
     rank = get_rank()
@@ -308,7 +308,7 @@ def distributed_save_results(
     os.makedirs(output_dir, exist_ok=True)
 
     # 计算原变量
-    from autoflowcfd.core.fr_residual_inviscid import conserved_to_primitive
+    from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
     Q_global = conserved_to_primitive(U_global)
 
     state_path = os.path.join(output_dir, "final_state.pkl")

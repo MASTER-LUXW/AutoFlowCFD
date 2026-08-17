@@ -119,7 +119,7 @@ def distributed_compute_inviscid_residual(
     Returns:
         residual: (n_local_cells, n_sps, 5) local cells 的残差
     """
-    from autoflowcfd.core.fr_residual_inviscid import compute_inviscid_residual_fr
+    from autoflowcfd.core.fr_residual.inviscid import compute_inviscid_residual_fr
 
     # 1. Halo 交换：获取 local + halo 的扩展状态
     U_extended = halo_exchange.exchange(U_local)
@@ -166,7 +166,7 @@ def distributed_compute_viscous_residual(
     Returns:
         residual: (n_local_cells, n_sps, 5) local cells 的粘性残差
     """
-    from autoflowcfd.core.fr_viscous_flux import compute_viscous_residual_fr
+    from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
 
     # 1. Halo 交换（守恒变量和梯度）
     U_extended = halo_exchange.exchange(U_local)
@@ -249,7 +249,7 @@ def distributed_turbulence_transport(
     Returns:
         d_turb_dt: (n_local_cells, n_sps, 2) local cells 的湍流残差
     """
-    from autoflowcfd.core.turbulence_transport import turbulence_transport
+    from autoflowcfd.core.turbulence.transport import turbulence_transport
 
     # 1. Halo 交换（守恒变量、湍流变量、湍流梯度）
     U_extended = halo_exchange.exchange(U_local)

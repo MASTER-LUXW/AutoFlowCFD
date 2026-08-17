@@ -14,7 +14,7 @@ from autoflowcfd.fr import (
     compute_diff_matrix_1d,
     compute_interpolation_matrix,
 )
-from autoflowcfd.core.fr_state import FRState  # 导入 S-01 核心类
+from autoflowcfd.core.fr_solver.state import FRState  # 导入 S-01 核心类
 
 
 class TestQuadraturePoints:
@@ -241,7 +241,7 @@ class TestFRState:
 
     def test_fr_state_uniform_flow(self):
         """测试均匀流场初始化"""
-        from autoflowcfd.core.fr_state import FRState
+        from autoflowcfd.core.fr_solver.state import FRState
         
         n_cells = 5
         n_sps = 8

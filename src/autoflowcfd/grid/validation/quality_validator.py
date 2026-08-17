@@ -24,13 +24,13 @@
       BL 单元预期比 core 单元拉伸得多。
 
 参考文献：
-    - Knupp, P. "Advances in grid quality metrics", 2000
-    - Field, D.A. "Qualitative measures for initial mesh generation", 1988
+    - Knupp, P. "Advances in grid 质量度量", 2000
+    - Liao, D.A. "Qualitative measures for initial 网格生成", 1988
     - Verdict Geometric Quality Library (Sandia) - TetRadiusRatio metric
 """
 
 import numpy as np
-from typing import Dict, List, Tuple, Optional, TYPE_CHECKING
+from typing import Dict, Optional, TYPE_CHECKING
 from loguru import logger
 
 from .quality_report import MeshQualityReport
@@ -42,34 +42,32 @@ if TYPE_CHECKING:
 
 
 class MeshQualityValidator:
-    """Validate mesh quality for CFD simulations.
+    """验证 CFD 仿真的网格质量。
 
-    Computes various quality metrics to ensure the mesh is suitable for
-    accurate and stable CFD simulations.
+    计算各种质量指标以确保网格适合精确且稳定的 CFD 仿真。
 
     Attributes:
         thresholds: Quality metric thresholds for pass/fail criteria
     """
 
     def __init__(self):
-        """Initialize validator with default quality thresholds."""
+        """初始化 validator，使用默认质量阈值。"""
         self.thresholds = {
             'max_negative_volumes': 0,       # No negative volumes allowed
-            'max_volume_ratio': 1e6,         # Global range - informational only, see MeshQualityReport docstring
+            'max_volume_ratio': 1e6,         # 全局范围 - 仅供参考，见 MeshQualityReport 文档字符串
             'max_aspect_ratio': 100.0,       # fallback when no BL/core split is available
             'bl_max_aspect_ratio': 50.0,     # BL cells: expected to be stretched
             'core_max_aspect_ratio': 10.0,   # core-fill cells: should be close to isotropic
             'max_skewness': 0.95,            # radius-ratio based (Fluent-equivalent severity)
-            'max_orthogonality_angle': 70.0, # degrees; OpenFOAM-aligned (Green-Gauss is more
-                                              # sensitive to non-orthogonality than surface-normal-
-                                              # correction schemes, so this is deliberately tighter
-                                              # than Fluent's permissive orthogonal-quality floor)
-            'max_adjacent_volume_ratio': 5.0,  # STAR-CCM+-aligned "Volume Change" guidance;
-                                                # this is what actually governs Green-Gauss's 1/V
-                                                # gradient-amplification conditioning
-            'max_overlapping_cells': 0,        # any physically-overlapping cell pair fails -
-                                                # see mesh_overlap_check.py; "close but not yet
-                                                # overlapping" is informational only, doesn't gate
+            'max_orthogonality_angle': 70.0, # 角度；与 OpenFOAM 对齐（Green-Gauss 对非正交性
+                                              # 比表面法向修正格式更敏感，因此这里刻意比
+                                              # Fluent 宽松的 orthogonal-quality 下限更严格）
+            'max_adjacent_volume_ratio': 5.0,  # 与 STAR-CCM+ 的 "Volume Change" 指导对齐；
+                                                # 这个才是真正控制 Green-Gauss 的 1/V
+                                                # 梯度放大条件数的因素
+            'max_overlapping_cells': 0,        # 任何物理重叠的单元对都不合格——
+                                                # 见 mesh_overlap_check.py；“接近但未重叠”
+                                                # 仅供参考，不作为关卡
         }
 
         logger.info("MeshQualityValidator initialized with default thresholds")
@@ -84,40 +82,36 @@ class MeshQualityValidator:
         log_summary: bool = True,
         check_overlap: bool = True,
     ) -> MeshQualityReport:
-        """Perform comprehensive mesh quality validation.
+        """执行全面的网格质量验证。
 
         Args:
-            nodes: Node coordinates, shape=(n_nodes, 3)
-            cells: Cell connectivity, shape=(n_cells, n_vertices)
-            cell_type: Type of cells ('tetrahedron' or 'triangle')
-            faces: Optional precomputed FaceData (owner/neighbour
-                connectivity + normals). Orthogonality, adjacent-volume-
-                ratio, and overlap/proximity checks need face connectivity;
-                if not supplied it is derived internally via
-                FaceExtractor.extract_faces (a real but non-trivial cost
-                for large meshes - callers that already have this, e.g.
-                the mesh generation/repair pipeline, should pass it through
-                to avoid redundant work). Ignored for cell_type='triangle'.
-            bl_cell_mask: Optional bool array, shape=(n_cells,), True for
-                BL-region cells - enables the separate BL-region/core-
-                region aspect ratio breakdown. None falls back to a single
-                whole-mesh aspect ratio check (previous behaviour).
-            log_summary: Log the full formatted report via logger.info.
-                False for callers that will print a more complete version
-                of this same report themselves right after (e.g. one with
-                a before/after comparison attached) - avoids the same
-                report text appearing twice in a row.
-            check_overlap: Run the cell overlap/proximity check (see
-                mesh_overlap_check.py). Unlike every other check here, its
-                cost scales with local mesh density (broad-phase spatial
-                search + exact geometric tests on survivors), not purely
-                cell count - opt-out (not silently skipped) for a caller
-                that needs the fastest possible turnaround and is willing
-                to accept an overlap going undetected until the next full
-                validate() call.
+            nodes: 节点坐标, shape=(n_nodes, 3)
+            cells: 单元连接关系, shape=(n_cells, n_vertices)
+            cell_type: 单元类型 ('tetrahedron' 或 'triangle')
+            faces: 可选的预计算 FaceData（owner/neighbour
+                连接关系 + 法向量）。正交性、相邻体积比和
+                重叠/接近度检查需要面连接关系；如果未提供，
+                则通过 FaceExtractor.extract_faces 内部推导
+                （对大规模网格有实际但非平凡的成本——已经
+                拥有它的调用者，例如网格生成/修复管线，
+                应该传递它以避免冗余工作）。
+                对 cell_type='triangle' 忽略。
+            bl_cell_mask: 可选布尔数组, shape=(n_cells,), True
+                表示 BL 区域单元——启用分离的 BL 区域/核心区域
+                长宽比分析。未设置时回退到单一的全网格长宽比
+                检查（之前的行为）。
+            log_summary: 通过 logger.info 记录完整格式化报告。
+                对于将自行打印更完整版本（例如附带前后对比）
+                的调用者设为 False——避免同一报告文本连续出现两次。
+            check_overlap: 运行单元重叠/接近度检查（见
+                mesh_overlap_check.py）。与此处所有其他检查不同，
+                其成本随局部网格密度缩放（宽相位空间搜索 +
+                幸存者精确几何测试），而非纯粹按单元数——
+                对需要最快周转且愿意接受重叠在下一次完整
+                validate() 调用前不被检测到的调用者提供退出选项。
 
         Returns:
-            MeshQualityReport with all quality metrics
+            MeshQualityReport 包含所有质量指标
         """
         logger.info(f"Validating mesh quality: {len(cells)} {cell_type}s...")
 
@@ -126,34 +120,33 @@ class MeshQualityValidator:
             n_nodes=len(nodes)
         )
 
-        # Compute all quality metrics
+        # 计算所有质量指标
         self._check_volumes(report, nodes, cells, cell_type)
         self._check_aspect_ratios(report, nodes, cells, cell_type, bl_cell_mask)
         self._check_skewness(report, nodes, cells, cell_type)
         if cell_type == "tetrahedron":
-            # Extracted (at most) once and shared with both checks below -
-            # _check_orthogonality_and_adjacency and _check_overlap_and_proximity
-            # would otherwise each independently call self._extract_faces
-            # when the caller didn't pre-supply `faces`, paying for a full
-            # face extraction over the WHOLE mesh twice in a row for no
-            # reason (confirmed directly: "Extracting faces from N
-            # tetrahedral cells..." logged twice back-to-back in one
-            # validate() call on a real 1.5M-cell mesh, since neither
-            # sub-check's own internally-extracted FaceData was cached back
-            # here for the other to reuse).
+            # 最多提取一次并共享给下面两个检查——
+            # _check_orthogonality_and_adjacency 和
+            # _check_overlap_and_proximity 否则会各自独立调用
+            # self._extract_faces（当调用者未预提供 `faces` 时），
+            # 无意义地为整个网格连续做两次完整面提取
+            # （已确认：在真实 150 万单元的网格上，一次 validate()
+            # 调用中连续出现两次 "Extracting faces from N
+            # tetrahedral cells..." 日志，因为两个子检查各自
+            # 内部提取的 FaceData 没有缓存回此处供另一个复用）。
             if faces is None:
                 faces = self._extract_faces(nodes, cells)
             self._check_orthogonality_and_adjacency(report, nodes, cells, faces)
             if check_overlap:
                 self._check_overlap_and_proximity(report, nodes, cells, faces)
 
-        # Evaluate pass/fail criteria
+        # 评估通过/失败标准
         evaluate_quality(report, self.thresholds)
 
-        # Generate recommendations
+        # 生成建议
         generate_recommendations(report, self.thresholds)
 
-        # Log summary
+        # 日志摘要
         if log_summary:
             logger.info(f"\n{report.summary()}")
 
@@ -166,23 +159,22 @@ class MeshQualityValidator:
         bl_cell_mask: Optional[np.ndarray] = None,
         check_overlap: bool = True,
     ) -> MeshQualityReport:
-        """Validate VolumeMeshData object (convenience method).
+        """验证 VolumeMeshData 对象（便捷方法）。
 
         Args:
-            volume_mesh: VolumeMeshData with tetrahedral cells (and,
-                optionally, prism_cells - dispatches to validate_mixed()
-                when present, see that method)
-            faces: Optional precomputed FaceData - if not supplied and
-                volume_mesh.faces is already populated (ensure_faces_exist
-                was called), that gets reused instead of re-extracting.
-            bl_cell_mask: Optional BL/core region split, see validate().
-                Ignored when volume_mesh.prism_cells is set - validate_mixed
-                derives this itself (prisms ARE the BL region, tets are all
-                core, by this project's global cell-index convention).
-            check_overlap: see validate()
+            volume_mesh: 包含四面体单元的 VolumeMeshData（以及可选的
+                prism_cells——存在时转调到 validate_mixed()，见该方法）
+            faces: 可选的预计算 FaceData——如果未提供且
+                volume_mesh.faces 已填充（已调用 ensure_faces_exist），
+                则复用它而不是重新提取。
+            bl_cell_mask: 可选的 BL/核心区域拆分，见 validate()。
+                当 volume_mesh.prism_cells 已设置时忽略——
+                validate_mixed 自行推导（棱柱即 BL 区域，四面体即核心，
+                按本项目的全局单元索引约定）。
+            check_overlap: 见 validate()
 
         Returns:
-            MeshQualityReport with all quality metrics
+            MeshQualityReport 包含所有质量指标
         """
         if faces is None:
             faces = volume_mesh.faces
@@ -210,31 +202,25 @@ class MeshQualityValidator:
         log_summary: bool = True,
         check_overlap: bool = True,
     ) -> MeshQualityReport:
-        """Validate a mixed prism(BL) + tetrahedron(core) VolumeMeshData.
+        """校验混合棱柱(BL) + 四面体(core) VolumeMeshData。
 
-        Mirrors validate()'s structure, but every per-cell metric is
-        computed separately per region (prism cells via quality_metrics'
-        prism functions, tet cells via the existing tetrahedron functions -
-        the two shapes need genuinely different formulas, see quality_
-        metrics.py) and then concatenated in the SAME global cell-index
-        order every other prism-aware piece of this codebase uses (prisms
-        [0, n_prism), tets [n_prism, n_prism+n_tet) - see PrismCells/
-        face_extractor.extract_faces_mixed). Orthogonality and adjacent-
-        volume-ratio (face-based, so they inherently span the BL/core
-        interface) use ONE combined pass over the global face graph, via
-        compute_face_diagnostics' cell_centroids/cell_volumes parameters
-        (added specifically so it doesn't have to re-derive a per-cell
-        centroid/volume from a single uniform connectivity array, which a
-        mixed mesh doesn't have).
+        结构与 validate() 相同，但每个 per-cell 指标按区域分别计算
+        （棱柱单元用 quality_metrics 的棱柱函数，四面体单元用已有的
+        四面体函数——两种形状需要完全不同的公式，见 quality_metrics.py），
+        然后按所有其他棱柱感知代码使用的全局单元索引顺序拼接
+        （棱柱 [0, n_prism)，四面体 [n_prism, n_prism+n_tet)——
+        见 PrismCells / face_extractor.extract_faces_mixed）。
+        正交性和相邻体积比（基于面，因此天然跨越 BL/core 界面）
+        使用全局面图的一次合并遍历，通过 compute_face_diagnostics 的
+        cell_centroids/cell_volumes 参数（专门为此添加，避免从混合网格
+        没有的单一均匀连接关系数组重新推导 per-cell 质心/体积）。
 
-        bl_cell_mask is not a parameter here (unlike validate()) - it's
-        exactly [True]*n_prism + [False]*n_tet by construction, not
-        something a caller could meaningfully override.
+        bl_cell_mask 不是这里的参数（与 validate() 不同）——按构造它
+        恰好是 [True]*n_prism + [False]*n_tet，调用者无法有意义地覆盖。
 
-        Implementation lives in quality_validator_mixed.py (extracted for
-        the project's >400-line file-split rule) - lazy-imported here to
-        avoid a module-load-time circular import (that module's type hints
-        reference MeshQualityValidator from this file).
+        实现位于 quality_validator_mixed.py（按项目 >400 行文件拆分规则
+        提取）——此处延迟导入以避免模块加载时的循环导入（该模块的类型
+        提示引用了本文件的 MeshQualityValidator）。
         """
         from .quality_validator_mixed import validate_mixed_mesh
 
@@ -244,18 +230,13 @@ class MeshQualityValidator:
 
     @staticmethod
     def _extract_faces(nodes: np.ndarray, cells: np.ndarray) -> 'FaceData':
-        """Derive face connectivity when the caller didn't already have it.
-        Lazy-imported (mesh_gen -> validation is a one-way dependency
-        elsewhere in this package; importing the other direction here only
-        at call time avoids ever needing to reason about import order)."""
-        from ..mesh_gen.face_extractor import FaceExtractor
+        """当调用者尚未拥有面时推导面连接关系。
+        延迟导入（mesh_gen -> validation 在本包中是单向依赖；
+        此处仅在调用时反向导入，避免考虑导入顺序）。"""
+        from ..mesh_gen.extraction.face_extractor import FaceExtractor
         from ..schema.grid_nodes import NodeArray
 
-        node_arr = NodeArray(
-            x=np.ascontiguousarray(nodes[:, 0]),
-            y=np.ascontiguousarray(nodes[:, 1]),
-            z=np.ascontiguousarray(nodes[:, 2]),
-        )
+        node_arr = NodeArray.from_array(nodes)
         return FaceExtractor.extract_faces(cells.astype(np.int32), node_arr)
 
     def _check_volumes(
@@ -265,21 +246,19 @@ class MeshQualityValidator:
         cells: np.ndarray,
         cell_type: str
     ) -> None:
-        """Check cell volumes for validity (vectorized).
+        """检查单元体积的有效性（向量化）。
 
-        Implementation lives in quality_validator_metrics.py (extracted
-        for the project's >400-line file-split rule; the body never used
-        `self`, so it moved as a plain function).
+        实现位于 quality_validator_metrics.py（按项目 >400 行文件拆分规则
+        提取；函数体不使用 `self`，因此作为普通函数搬移）。
         """
         from .quality_validator_metrics import check_volumes
 
         check_volumes(report, nodes, cells, cell_type)
 
     def _compute_tetrahedron_volumes(self, nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
-        """Thin instance-method wrapper over quality_metrics.compute_tetrahedron_volumes
-        - kept for external callers (mesh_gen/mesh_repair.py's Stage A) that
-        reach into this validator instance directly rather than importing
-        the metric function themselves."""
+        """quality_metrics.compute_tetrahedron_volumes 的薄实例方法包装
+        ——保留给外部调用者（例如 mesh_gen/mesh_repair.py 的 Stage A），
+        它们直接访问此 validator 实例而不是自行导入度量函数。"""
         return _qm.compute_tetrahedron_volumes(nodes, cells)
 
     def _check_aspect_ratios(
@@ -290,13 +269,11 @@ class MeshQualityValidator:
         cell_type: str,
         bl_cell_mask: Optional[np.ndarray] = None,
     ) -> None:
-        """Check cell aspect ratios (vectorized), optionally split by
-        BL-region vs. core-region (see MeshQualityReport docstring for why
-        these need separate thresholds).
+        """检查单元长宽比（向量化），可选按 BL 区域与核心区域拆分
+        （见 MeshQualityReport 文档字符串了解为何需要分离阈值）。
 
-        Implementation lives in quality_validator_metrics.py (extracted
-        for the project's >400-line file-split rule; the body never used
-        `self`, so it moved as a plain function).
+        实现位于 quality_validator_metrics.py（按项目 >400 行文件拆分规则
+        提取；函数体不使用 `self`，因此作为普通函数搬移）。
         """
         from .quality_validator_metrics import check_aspect_ratios
 
@@ -309,21 +286,20 @@ class MeshQualityValidator:
         cells: np.ndarray,
         cell_type: str
     ) -> None:
-        """Check cell skewness (vectorized).
+        """检查单元偏斜度（向量化）。
 
-        Implementation lives in quality_validator_metrics.py (extracted
-        for the project's >400-line file-split rule; the body never used
-        `self`, so it moved as a plain function).
+        实现位于 quality_validator_metrics.py（按项目 >400 行文件拆分规则
+        提取；函数体不使用 `self`，因此作为普通函数搬移）。
         """
         from .quality_validator_metrics import check_skewness
 
         check_skewness(report, nodes, cells, cell_type)
 
     def compute_cell_skewness(self, nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
-        """Public per-cell radius-ratio skewness array, shape=(n_cells,) -
-        the raw values behind max_skewness/mean_skewness, for callers (e.g.
-        the mesh repair loop in mesh_gen/mesh_repair.py) that need to know
-        *which* cells are bad, not just aggregate statistics."""
+        """公共 per-cell 半径比偏斜度数组, shape=(n_cells,)——
+        max_skewness/mean_skewness 背后的原始值，供需要知道
+        *哪些*单元有问题（而非仅聚合统计）的调用者使用
+        （例如 mesh_gen/mesh_repair.py 中的网格修复循环）。"""
         from .quality_validator_metrics import compute_cell_skewness as _compute_cell_skewness
 
         return _compute_cell_skewness(nodes, cells)
@@ -336,13 +312,12 @@ class MeshQualityValidator:
         cell_centroids: Optional[np.ndarray] = None,
         cell_volumes: Optional[np.ndarray] = None,
     ) -> Dict[str, np.ndarray]:
-        """Public per-internal-face diagnostics - the raw arrays behind
-        orthogonality_max/adjacent_volume_ratio_max, for callers that need
-        to know which faces/cells are implicated, not just aggregates.
+        """公共 per-内部面诊断——orthogonality_max/adjacent_volume_ratio_max
+        背后的原始数组，供需要知道哪些面/单元涉及（而非仅聚合值）的调用者使用。
 
-        Implementation lives in quality_validator_metrics.py (extracted
-        for the project's >400-line file-split rule) - see that module's
-        compute_face_diagnostics for the full Args/Returns documentation.
+        实现位于 quality_validator_metrics.py（按项目 >400 行文件拆分规则
+        提取）——见该模块的 compute_face_diagnostics 了解完整的 Args/Returns
+        文档。
         """
         from .quality_validator_metrics import compute_face_diagnostics as _compute_face_diagnostics
 
@@ -359,15 +334,14 @@ class MeshQualityValidator:
         cell_centroids: Optional[np.ndarray] = None,
         cell_volumes: Optional[np.ndarray] = None,
     ) -> None:
-        """Check face non-orthogonality and adjacent-cell (face-neighbour)
-        volume ratio - the two metrics that directly govern Green-Gauss
-        gradient conditioning for this project's solver (see module
-        docstring). Both need face owner/neighbour connectivity, so they
-        share a single face-extraction pass (compute_face_diagnostics).
+        """检查面非正交性和相邻单元（面邻居）体积比——这两个指标
+        直接控制本项目求解器的 Green-Gauss 梯度条件数（见模块文档字符串）。
+        两者都需要面 owner/neighbour 连接关系，因此共享单次面提取
+        （compute_face_diagnostics）。
 
-        cell_centroids/cell_volumes: see compute_face_diagnostics - pass
-        through for a mixed prism+tet mesh, where `cells` alone can't
-        describe every cell's shape.
+        cell_centroids/cell_volumes：见 compute_face_diagnostics——
+        对混合棱柱+四面体网格传入，因为仅靠 `cells` 无法描述
+        每个单元的形状。
         """
         diag = self.compute_face_diagnostics(
             nodes, cells, faces, cell_centroids=cell_centroids, cell_volumes=cell_volumes
@@ -387,11 +361,11 @@ class MeshQualityValidator:
         cells: np.ndarray,
         faces: Optional['FaceData'],
     ) -> None:
-        """Detect cells whose faces physically overlap a different, non-
-        adjacent cell's faces, or sit close enough to be one parameter
-        change away from it - see mesh_overlap_check.py for the exact
-        geometric tests and why this is a distinct defect class from
-        negative/degenerate volume."""
+        """检测面物理重叠不同且不相邻单元的面，或距离足够近
+        以至于一个参数变化就可能与之重叠的单元——见
+        mesh_overlap_check.py 了解精确几何测试以及为何这是与
+        负/退化体积不同的缺陷类别。
+        """
         from .mesh_overlap_check import check_face_overlap_and_proximity
 
         overlap_report = check_face_overlap_and_proximity(nodes, cells, faces=faces)

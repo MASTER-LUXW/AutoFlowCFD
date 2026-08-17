@@ -29,7 +29,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from autoflowcfd.grid.high_order_mesh import HighOrderMesh
+from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
 from autoflowcfd.grid.schema.grid_boundaries import BoundaryMap
 
 from ._channel_mesh import _MockCells, _MockNodes

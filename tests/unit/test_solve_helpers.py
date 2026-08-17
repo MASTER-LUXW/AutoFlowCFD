@@ -81,7 +81,7 @@ class TestLoadMeshForSolverExtensionDispatch:
             load_mesh_for_solver(str(bad_pkl), order=2)
 
     @patch("autoflowcfd.cli.solve_helpers.HighOrderMesh")
-    @patch("autoflowcfd.grid.mesh_gen.mesh_external_import.import_external_volume_mesh")
+    @patch("autoflowcfd.grid.mesh_gen.utils.mesh_external_import.import_external_volume_mesh")
     def test_nas_with_surface_mesh_dispatches_to_external_import(
         self, mock_import, mock_high_order_mesh, tmp_path
     ):
@@ -133,7 +133,7 @@ class TestLoadMeshForSolverQualityGate:
         assert volume_data.nodes.count == vm.nodes.count
 
     @patch("autoflowcfd.cli.solve_helpers.HighOrderMesh")
-    @patch("autoflowcfd.grid.mesh_gen.mesh_external_import.import_external_volume_mesh")
+    @patch("autoflowcfd.grid.mesh_gen.utils.mesh_external_import.import_external_volume_mesh")
     def test_failing_quality_gate_blocks_nas_input_too(
         self, mock_import, mock_high_order_mesh, tmp_path
     ):

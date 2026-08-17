@@ -29,35 +29,29 @@ def triangle_triangle_intersect(
     b0: np.ndarray, b1: np.ndarray, b2: np.ndarray,
     eps: float = 1e-9,
 ) -> np.ndarray:
-    """Exact triangle-triangle intersection test, one bool per row.
+    """精确三角形-三角形交集测试，每行一个布尔值。
 
-    Moller (1997): reject a pair whose vertices all lie strictly on one
-    side of the other triangle's plane (fast rejection using the plane
-    each triangle already has); otherwise both triangles cross the line L
-    where the two planes meet, so intersect if and only if their two
-    intervals along L overlap. Two triangles that only share an edge or a
-    single vertex are NOT reported as intersecting by this construction
-    (their overlap interval touches at a single point / has zero measure,
-    which the caller treats as "adjacent", not "overlapping" - see
-    mesh_overlap_check.py's node-sharing pre-filter, which excludes such
-    pairs before they ever reach this function).
+    Moller (1997)：拒绝所有顶点严格位于另一个三角形平面同一侧
+    的面对（使用该三角形已有的平面进行快速拒绝）；否则两个三角形
+    都穿过两平面相交的直线 L，因此相交当且仅当它们在 L 上的两个
+    区间重叠。仅共享一条边或一个顶点的两个三角形不被报告为相交
+    （它们的重叠区间在一个点接触/测度为零，调用方将其视为"相邻"
+    而非"重叠"——见 mesh_overlap_check.py 的节点共享预过滤，它在
+    面对到达此函数之前就排除了这样的对）。
 
-    Coplanar triangles (the fast-rejection plane tests can't distinguish
-    "coplanar" from "no separation" using only signed distances) fall back
-    to a 2D separating-axis test in the shared plane.
+    共面三角形（快速拒绝平面测试无法仅用带符号距离区分"共面"
+    与"无分离"）回退到共享平面中的 2D 分离轴测试。
 
     Args:
-        a0, a1, a2: (N, 3) first triangle's vertices
-        b0, b1, b2: (N, 3) second triangle's vertices
-        eps: tolerance in the SAME units as the input coordinates (meters
-            here) - distances below are unit-normalized (see normal_a/
-            normal_b) so this is a true, scale-independent distance
-            tolerance. A previous version compared RAW (non-normalized,
-            area-scaled) distances against a fixed eps - too loose for a
-            large core triangle and too tight for a tiny BL sliver on the
-            same mesh, which on a real multi-million-cell mesh produced an
-            all-NaN interval (RuntimeWarning) whenever no edge of a
-            triangle cleanly registered as "touching" the other plane.
+        a0, a1, a2: (N, 3) 第一个三角形的顶点
+        b0, b1, b2: (N, 3) 第二个三角形的顶点
+        eps: 与输入坐标相同单位的容差（此处为米）——以下距离
+            经过归一化，因此这是真实的、与缩放无关的距离容差。
+            之前的版本将原始的（未归一化、面积缩放的）距离与
+            固定 eps 比较——对大核心三角形太松，对同一网格上
+            的微小 BL 碎片太紧，在真实数百万单元网格上产生了
+            全 NaN 区间（RuntimeWarning），只要三角形的边没有
+            干净地"接触"另一个平面。
 
     Returns:
         (N,) bool
@@ -67,14 +61,12 @@ def triangle_triangle_intersect(
 
     normal_a = np.cross(a1 - a0, a2 - a0)
     normal_b = np.cross(b1 - b0, b2 - b0)
-    # Unit-normalize so every downstream signed "distance" is a TRUE
-    # geometric distance (meters), not scaled by the triangle's own area -
-    # see the eps arg doc above for why that scale-dependence was a real
-    # bug on a mesh with a wide range of face sizes. Degenerate (zero-area)
-    # triangles keep their raw (zero) normal; any pair involving one is
-    # physically meaningless as an "intersection" and is left to fall
-    # through to a safe (non-intersecting) result rather than dividing by
-    # zero.
+    # 归一化——使下游每个带符号"距离"都是真实的几何距离（米），
+    # 而非按三角形自身面积缩放——见上方 eps 参数文档了解为何
+    # 那种缩放依赖性在面尺寸范围大的网格上是个真实的 bug。
+    # 退化（零面积）三角形保留其原始（零）法向量；任何涉及
+    # 退化三角形的对在物理上作为"交集"无意义，让其安全地
+    # 落到非相交结果，而非除以零。
     norm_a_mag = np.linalg.norm(normal_a, axis=1, keepdims=True)
     norm_b_mag = np.linalg.norm(normal_b, axis=1, keepdims=True)
     normal_a = np.divide(normal_a, norm_a_mag, out=np.zeros_like(normal_a), where=norm_a_mag > 1e-300)
@@ -110,45 +102,33 @@ def triangle_triangle_intersect(
             normal_a[generic], normal_b[generic], eps,
         )
 
-        # Thin-sliver-triangle correction. _intersect_on_line determines
-        # overlap by projecting each triangle's edges onto the line where
-        # the two planes meet (line_dir = cross(normal_a, normal_b)) and
-        # comparing 1D intervals along it - both that projection and the
-        # da/db signed-distance-to-plane values it starts from lose
-        # precision whenever a triangle is a thin sliver (a real,
-        # measured consequence of this project's own miter-join sharp-
-        # corner compensation - see mesh_layer_step.py), because a thin
-        # triangle's own normal/plane is, by construction, only weakly
-        # sensitive to a genuine offset along the triangle's long axis.
-        # This is not limited to near-parallel plane pairs, as first
-        # suspected: confirmed directly on cube_demo across a range of
-        # plane angles (cross(normal_a,normal_b) magnitudes from ~7e-6 up
-        # to ~0.14) that two thin slivers stacked a real, unambiguous
-        # distance apart (independently verified in every case via brute-
-        # force point sampling and via triangle_triangle_min_distance,
-        # 0.01m - about 3x this project's own min_cell_size) were still
-        # flagged as crossing.
+        # 薄碎片三角形修正。_intersect_on_line 通过将每个三角形的边
+        # 投影到两平面相交的直线上（line_dir = cross(normal_a, normal_b)）
+        # 并比较沿该直线的一维区间来确定重叠——该投影和它起始的
+        # da/db 带符号平面距离在三角形是薄碎片时都会丢失精度
+        # （本项目自身的斜接拐角补偿的真实、可测量的后果——
+        # 见 mesh_layer_step.py），因为薄三角形自身的法向量/平面
+        # 按构造对沿三角形长轴的真实偏移只有弱敏感性。
+        # 这不仅限于近平行平面对——最初怀疑是，但在 cube_demo 上
+        # 直接确认了在各种平面角度下（cross(normal_a,normal_b) 的
+        # 模长从 ~7e-6 到 ~0.14）两个真实、明确距离分开的薄碎片
+        # （每种情况都通过暴力点采样和 triangle_triangle_min_distance
+        # 独立验证，0.01m——约本项目 min_cell_size 的 3 倍）仍被标记
+        # 为相交。
         #
-        # Fix: get a SECOND opinion from triangle_triangle_min_distance -
-        # built from point-to-triangle/segment-to-segment closest-point
-        # primitives (Ericson 5.1.5/5.1.9) that never divide by either
-        # triangle's own normal or by the two planes' cross product, so
-        # they stay well-conditioned regardless of how thin either
-        # triangle is or how the two planes happen to be oriented.
-        # Checked for every generic-path row currently called
-        # intersecting (not just suspected-thin ones - cheap relative to
-        # the false-positive risk, and there is no reliable, cheaper way
-        # to predict in advance which rows need it): only ever used to
-        # turn a True into False, and only when that second opinion finds
-        # a distance clearly outside eps - i.e. this can only correct a
-        # false positive into a verified true negative, never introduce a
-        # new one, and never touches rows the generic path already called
-        # non-intersecting or the (differently-conditioned) coplanar
-        # branch handles. Confirmed directly against all of this
-        # project's own 15 hand-built edge cases and the 3000-case mixed-
-        # scale stress test (see Part5 P2) - none of them exercise this
-        # thin-sliver regime, so this correction is purely additive for a
-        # case nothing existing already covered.
+        # 修复：从 triangle_triangle_min_distance 获取第二意见——
+        # 它基于点到三角形/线段对线段最近点原语（Ericson 5.1.5/5.1.9），
+        # 从不除以三角形自身法向量或两平面的叉乘，因此无论三角形
+        # 多薄或两平面如何取向都保持良好条件。
+        # 对每个通用路径当前标记为相交的行都检查（不仅是疑似
+        # 薄的——相对于假阳性风险成本很低，且没有可靠的更廉价
+        # 方法提前预测哪些行需要）：仅用于将真翻转为假，且仅在
+        # 第二意见发现距离明确超出 eps 时——即这只能将假阳性
+        # 修正为经验证的真阴性，永不引入新的，也永不触碰通用
+        # 路径已标记为非相交的行或（不同条件的）共面分支处理的行。
+        # 已直接对本项目自有的 15 个手工构建边界情况和 3000 个
+        # 混合缩放压力测试案例确认——它们都没有覆盖这个薄碎片
+        # 情况，因此这个修正纯粹是附加的，针对已有代码未覆盖的情况。
         gi = np.flatnonzero(generic)
         suspect = result[gi]
         if np.any(suspect):
@@ -174,38 +154,30 @@ def _interval_on_line(
     line_pt: np.ndarray, line_dir: np.ndarray,
     eps: float,
 ) -> tuple:
-    """Project a triangle's intersection with a line onto that line,
-    returning the [lo, hi] interval. `line_dir` must be unit length (the
-    caller normalizes it) so `lo`/`hi` are true distances along the line,
-    directly comparable against `eps` (also a true distance) - both
-    triangles' intervals are computed with the SAME line_dir so their
-    projected values are directly comparable with each other too.
+    """将三角形的交集投影到直线上，返回 [lo, hi] 区间。
+    `line_dir` 必须是单位长度（调用方负责归一化），使 `lo`/`hi`
+    是沿直线的真实距离，可直接与 `eps`（也是真实距离）比较——
+    两个三角形的区间都用相同的 line_dir 计算，因此投影值
+    彼此直接可比。
 
-    For each of the triangle's 3 edges, the edge crosses (or touches) the
-    plane the interval is measured against whenever its two endpoints'
-    signed distances (d0, d1, d2) have opposite sign or either is within
-    `eps` of zero (`da * db <= eps^2`, an eps-widened version of the exact
-    `da * db <= 0` test - see triangle_triangle_intersect's own eps doc for
-    why an exact-zero test is fragile once real, not synthetic, mesh
-    coordinates are involved); its crossing point is then linearly
-    interpolated and projected onto the line. Checking all 3 edges
-    independently - rather than first picking a single "odd one out"
-    vertex and assuming the other two edges are the crossings - correctly
-    handles a vertex landing exactly ON the other plane (d == 0 for that
-    vertex): both edges touching it register a valid "crossing" at that
-    same vertex, and the third (genuinely same-sign) edge contributes no
-    crossing at all. A single-vertex-picking approach mishandles this
-    configuration, since none of "two vertices share a sign" cleanly holds
-    when one distance is exactly (or near-) zero.
+    对三角形的 3 条边，当边两端点的带符号距离 (d0, d1, d2) 异号
+    或任一个在 `eps` 内接近零时（`da * db <= eps^2`，精确
+    `da * db <= 0` 测试的 eps 放宽版本——见 triangle_triangle_intersect
+    的 eps 文档了解为何精确零测试在涉及真实网格坐标时很脆弱），
+    该边穿过（或接触）平面，交点然后线性插值并投影到直线上。
+    独立检查所有 3 条边——而非先选一个"奇数个输出"顶点并假设
+    另两边是穿越——正确处理了顶点恰好落在另一个平面上的情况
+    （该顶点 d == 0）：接触它的两条边都在该顶点注册有效的"穿越"，
+    第三条（真正同号的）边不贡献任何穿越。单顶点选取方法会错误
+    处理这种配置，因为当一个距离恰好（或接近）零时，"两顶点共享
+    一个符号"没有一条能干净成立。
 
-    In the extremely rare case none of the 3 edges register as touching
-    (numerically, all three are just barely on the same side despite the
-    pair having already passed the caller's own "not separated" test - a
-    floating-point boundary case, not a valid geometric configuration),
-    this returns an EMPTY interval (lo=+inf, hi=-inf) rather than
-    NaN/np.nanmin's all-NaN warning - an empty interval can never overlap
-    anything, which is the correct, safe conclusion for an ambiguous
-    touch this close to the tolerance boundary.
+    在极罕见情况下三条边都不注册为接触（数值上，三个都刚好在
+    同一侧，尽管该对已经通过了调用方自身的"未分离"测试——
+    浮点边界情况，不是有效的几何配置），这返回空区间
+    (lo=+inf, hi=-inf) 而非 NaN/np.nanmin 的全 NaN 警告——
+    空区间永远不会与任何东西重叠，这对接近容差边界的模糊
+    接触是正确、安全的结论。
     """
     n = len(v0)
 
@@ -228,11 +200,10 @@ def _interval_on_line(
 
     stacked = np.stack([c01, c12, c20], axis=0)
     is_nan = np.isnan(stacked)
-    # Plain np.min/np.max on NaN-free arrays, not np.nanmin/np.nanmax - if
-    # a row is all-NaN (no edge touched, see docstring above), replacing
-    # NaN with +inf before min (or -inf before max) makes that row
-    # naturally resolve to lo=+inf, hi=-inf (an empty interval) without
-    # nanmin/nanmax's all-NaN RuntimeWarning.
+    # 在无 NaN 数组上用普通 np.min/np.max，而非 np.nanmin/np.nanmax——
+    # 如果某行全为 NaN（无边接触，见上方文档字符串），在 min 前将
+    # NaN 替换为 +inf（或 max 前替换为 -inf）使该行自然解析为
+    # lo=+inf, hi=-inf（空区间），而不会触发 nanmin/nanmax 的全 NaN RuntimeWarning。
     lo = np.min(np.where(is_nan, np.inf, stacked), axis=0)
     hi = np.max(np.where(is_nan, -np.inf, stacked), axis=0)
     return lo, hi
@@ -244,23 +215,19 @@ def _intersect_on_line(
     normal_a, normal_b,
     eps: float = 1e-9,
 ) -> np.ndarray:
-    """Both triangles genuinely cross the other's plane (non-separated,
-    non-coplanar) - intersect iff their projected intervals along the two
-    planes' common line overlap with positive length. A closed `<=`
-    comparison here would also flag two triangles that only touch at a
-    single point on the line (e.g. sharing exactly one vertex) as
-    "intersecting" - excluded via a small eps margin instead, consistent
-    with this function's contract (shared-edge/shared-vertex adjacency is
-    not overlap)."""
+    """两个三角形都真实穿过对方的平面（非分离、非共面）——
+    当且仅当它们沿两平面公共线的投影区间以正长度重叠时相交。
+    此处用闭合 `<=` 比较也会将仅在直线上一个点接触的两个
+    三角形（例如恰好共享一个顶点）标记为"相交"——改用一个小
+    eps 余量排除，与此函数的约定一致（共享边/共享顶点相邻
+    不算重叠）。"""
     line_dir = np.cross(normal_a, normal_b)
     line_dir_mag = np.linalg.norm(line_dir, axis=1, keepdims=True)
-    # Normalized so _interval_on_line's projected lo/hi are true distances
-    # (meters), comparable against eps directly - see that function's own
-    # eps doc. Guard the near-coplanar-but-not-quite case (planes almost
-    # parallel, line_dir magnitude near zero): falls back to treating the
-    # pair as non-intersecting via an already-empty interval rather than
-    # dividing by ~zero and amplifying floating-point noise into a
-    # meaningless "line" direction.
+    # 归一化使 _interval_on_line 的投影 lo/hi 是真实距离（米），
+    # 可直接与 eps 比较——见该函数自身的 eps 文档。保护近平行
+    # 但不完全共面的情况（平面几乎平行，line_dir 模长接近零）：
+    # 回退为通过已空的区间将其视为非相交，而非除以约零并放大
+    # 浮点噪声到无意义的"直线"方向。
     line_dir = np.divide(line_dir, line_dir_mag, out=np.zeros_like(line_dir), where=line_dir_mag > 1e-9)
     line_pt = a0  # any point on plane A's own triangle works as a projection origin
 
@@ -335,18 +302,15 @@ def triangle_triangle_min_distance(
     a0: np.ndarray, a1: np.ndarray, a2: np.ndarray,
     b0: np.ndarray, b1: np.ndarray, b2: np.ndarray,
 ) -> np.ndarray:
-    """Minimum distance between two (assumed non-intersecting) triangles,
-    one value per row.
+    """两个（假定不相交）三角形之间的最小距离，每行一个值。
 
-    Exact for non-intersecting convex-polygon pairs: the closest pair of
-    points is always either a vertex of one triangle against the other
-    triangle's face/edge/vertex (covered by point_to_triangle_distance from
-    each of the 6 vertices), or a genuine edge-edge closest approach not
-    involving either triangle's vertices head-on (covered by the 9 edge-
-    edge combinations) - the overall minimum of all 15 is the true answer.
-    Callers should gate this on triangle_triangle_intersect being False
-    first; distance is not a meaningful ~0 signal for a genuine overlap
-    (this function does not attempt to compute penetration depth).
+    对不相交凸多边形对精确：最近点对总是要么一个三角形的顶点
+    对另一个三角形的面/边/顶点（由 6 个顶点各自的
+    point_to_triangle_distance 覆盖），要么是不涉及任一三角形
+    顶点的真正边-边最近接近（由 9 个边-边组合覆盖）——所有
+    15 个的全局最小值就是真实答案。调用方应先在此之上用
+    triangle_triangle_intersect 为假进行门控；距离对真实重叠
+    不是有意义的 ~0 信号（此函数不尝试计算穿透深度）。
     """
     dists = [
         point_to_triangle_distance(a0, b0, b1, b2),

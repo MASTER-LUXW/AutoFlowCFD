@@ -51,8 +51,8 @@ from autoflowcfd.fr.face_flux_points import (
     face_ref_grid,
     map_ref_points,
 )
-from autoflowcfd.grid.curved_mapping import PRISM_CUBE_FACES
-from autoflowcfd.grid.face_connectivity import CUBE_FACE_CODES, CUBE_FACE_NAMES, FRFaceConnectivity
+from autoflowcfd.grid.curved_mapping.curved_mapping import PRISM_CUBE_FACES
+from autoflowcfd.grid.connectivity.face_connectivity import CUBE_FACE_CODES, CUBE_FACE_NAMES, FRFaceConnectivity
 
 # 棱柱的 3 个四边形侧面（a=-1,a=+1,b=-1）在立方体面整数编码中的取值——
 # 只有这些面会被网格生成器拆分成 2 个三角形子面（c=-1/c=+1 封盖本身就是

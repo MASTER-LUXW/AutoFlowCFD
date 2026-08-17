@@ -5,24 +5,26 @@
 """
 
 import numpy as np
-from typing import Optional, Tuple
+from typing import Optional, Tuple, TYPE_CHECKING
 from dataclasses import dataclass
 from loguru import logger
+
+if TYPE_CHECKING:
+    import cupy as cp
 
 
 @dataclass
 class NodeArray:
     """节点坐标数组(SoA布局)
     
-    Stores node coordinates in Structure of Arrays layout for optimal
-    cache performance during numerical computations.
+    以 SoA（Structure of Arrays）布局存储节点坐标，优化数值计算过程中的缓存性能。
     
-    Attributes:
+    属性:
         x: X坐标数组, float64, shape=(N_nodes,)
         y: Y坐标数组, float64, shape=(N_nodes,)
         z: Z坐标数组, float64, shape=(N_nodes,)
     
-    Example:
+    示例:
         >>> nodes = NodeArray(
         ...     x=np.array([0.0, 1.0, 2.0]),
         ...     y=np.array([0.0, 0.0, 0.0]),
@@ -38,24 +40,24 @@ class NodeArray:
     def __post_init__(self):
         """验证数组形状一致性与数据类型
         
-        Raises:
-            ValueError: If arrays have inconsistent shapes or wrong dtype
+        抛出异常:
+            ValueError: 如果数组形状不一致或数据类型错误
         """
-        # Check shape consistency
+        # 检查形状一致性
         if not (self.x.shape == self.y.shape == self.z.shape):
             raise ValueError(
                 f"Node coordinates shape mismatch: "
                 f"x={self.x.shape}, y={self.y.shape}, z={self.z.shape}"
             )
         
-        # Check dtype (must be float64 for numerical stability)
+        # 检查 dtype（必须为 float64 以保证数值稳定性）
         if not (self.x.dtype == self.y.dtype == self.z.dtype == np.float64):
             raise ValueError(
                 f"Node coordinates must be float64, got: "
                 f"x={self.x.dtype}, y={self.y.dtype}, z={self.z.dtype}"
             )
         
-        # Ensure contiguous memory layout for performance
+        # 确保连续内存布局以提升性能
         if not self.x.flags['C_CONTIGUOUS']:
             self.x = np.ascontiguousarray(self.x)
             self.y = np.ascontiguousarray(self.y)
@@ -68,7 +70,7 @@ class NodeArray:
         """获取节点数量
         
         Returns:
-            int: Number of nodes
+            int: 节点数量
         """
         return len(self.x)
     
@@ -77,7 +79,7 @@ class NodeArray:
         """获取节点数组形状
         
         Returns:
-            Tuple[int]: Shape tuple (N_nodes,)
+            Tuple[int]: 形状元组 (N_nodes,)
         """
         return self.x.shape
     
@@ -87,7 +89,7 @@ class NodeArray:
         Returns:
             CupyNodeArray: CuPy版本的节点数组
             
-        Example:
+        示例:
             >>> gpu_nodes = nodes.to_gpu()
             >>> print(type(gpu_nodes.x))  # <class 'cupy.ndarray'>
         """
@@ -127,6 +129,27 @@ class NodeArray:
                 "Install it with: pip install cupy-cuda11x"
             )
     
+    @classmethod
+    def from_array(cls, nodes: np.ndarray) -> 'NodeArray':
+        """从 (N, 3) 形状的 ndarray 快速构造 NodeArray。
+
+        等价于 ``cls(x=nodes[:, 0].copy(), y=nodes[:, 1].copy(), z=nodes[:, 2].copy())``，
+        在代码库中多处重复使用此模式，统一为此工厂方法。内部使用
+        ``np.ascontiguousarray`` 确保列数据在内存中连续，同时覆盖原来
+        用 ``np.ascontiguousarray(nodes[:, col])`` 的调用点。
+
+        Args:
+            nodes: 节点坐标数组, shape=(N, 3)
+
+        Returns:
+            NodeArray: 新实例
+        """
+        return cls(
+            x=np.ascontiguousarray(nodes[:, 0]),
+            y=np.ascontiguousarray(nodes[:, 1]),
+            z=np.ascontiguousarray(nodes[:, 2]),
+        )
+
     def get_coordinates(self, indices: Optional[np.ndarray] = None) -> np.ndarray:
         """获取节点坐标数组
         
@@ -134,7 +157,7 @@ class NodeArray:
             indices: 节点索引数组,如果为None则返回所有节点
             
         Returns:
-            np.ndarray: 坐标数组, shape=(N, 3) where N is number of selected nodes
+            np.ndarray: 坐标数组, shape=(N, 3)，其中 N 为选中节点数量
         """
         if indices is None:
             return np.stack([self.x, self.y, self.z], axis=-1)
@@ -146,16 +169,16 @@ class NodeArray:
 class CupyNodeArray:
     """GPU节点坐标数组(CuPy版本)
     
-    GPU-accelerated version of NodeArray using CuPy arrays.
+    NodeArray 的 GPU 加速版本，使用 CuPy 数组。
     
-    Attributes:
+    属性:
         x: X坐标数组 (cupy.ndarray)
         y: Y坐标数组 (cupy.ndarray)
         z: Z坐标数组 (cupy.ndarray)
     """
-    x: 'cp.ndarray'  # Will be typed at runtime
-    y: 'cp.ndarray'
-    z: 'cp.ndarray'
+    x: 'cp.ndarray'  # noqa: F821  (CuPy 类型，运行时由 cupy.ndarray 实例填充)
+    y: 'cp.ndarray'  # noqa: F821
+    z: 'cp.ndarray'  # noqa: F821
     
     @property
     def count(self) -> int:

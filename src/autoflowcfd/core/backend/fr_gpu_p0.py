@@ -32,7 +32,7 @@ try:
 except Exception:  # pragma: no cover - numba 本身缺失的极端环境
     _CUDA_IMPORT_OK = False
 
-from autoflowcfd.core.fr_residual_inviscid import conserved_to_primitive, DefaultGhostProvider
+from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive, DefaultGhostProvider
 
 GAMMA = 1.4
 

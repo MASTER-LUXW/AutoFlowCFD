@@ -4,8 +4,8 @@
 这个 dataclass 只是 check_face_overlap_and_proximity 的返回值容器，本身
 不依赖该函数体的任何内部状态，是最自然的独立单元——原样搬移，字段、
 方法、文档字符串均未改动。mesh_overlap_check.py 里通过
-`from .mesh_overlap_report import OverlapProximityReport` 重新导出，
-任何 `from autoflowcfd.grid.validation.mesh_overlap_check import
+`从 .mesh_overlap_report 导入 OverlapProximityReport` 重新导出，
+任何 `从 autoflowcfd.grid.验证.mesh_overlap_check 导入
 OverlapProximityReport` 的既有导入路径不受影响。
 """
 
@@ -17,34 +17,26 @@ import numpy as np
 
 @dataclass
 class OverlapProximityReport:
-    """Result of check_face_overlap_and_proximity.
+    """check_face_overlap_and_proximity 的结果。
 
     Attributes:
-        n_faces_checked: Total distinct triangular faces considered
-        n_candidate_pairs: Face pairs that survived broad-phase + node-
-            sharing filtering and were actually given the exact geometric
-            test - informational, for judging how selective the broad
-            phase was
-        n_overlapping_pairs: Face pairs that genuinely intersect
-        n_close_pairs: Face pairs that don't intersect but are closer than
-            `proximity_threshold_used` (a per-pair, locally-scaled
-            distance, not a single global constant - see the check
-            function's own docstring)
-        overlapping_cell_ids: Unique cell indices that own at least one
-            face involved in a genuine overlap
-        close_cell_ids: Unique cell indices that own at least one face
-            involved in a near-touching (but not yet overlapping) pair
-        min_gap_found: Smallest non-overlapping face-to-face distance
-            found among all close pairs (None if none found)
-        overlap_examples: Up to `max_examples` (cell_a, cell_b) pairs, for
-            a human-readable report - not exhaustive on a mesh with many
-            overlaps
-        close_examples: Up to `max_examples` (cell_a, cell_b, distance)
-            tuples
-        elapsed_seconds: Wall-clock time this check took - included
-            because, unlike this project's other O(n) vectorized quality
-            checks, this one's cost scales with local mesh density, not
-            purely cell count (see module docstring)
+        n_faces_checked: 考虑的独立三角形面总数
+        n_candidate_pairs: 通过宽相位 + 节点共享过滤后实际接受
+            精确几何测试的面片对——仅供参考，用于判断宽相位的选择性
+        n_overlapping_pairs: 真实相交的面片对
+        n_close_pairs: 不相交但距离小于 `proximity_threshold_used`
+            的面片对（每对局部缩放的阈值，非单一全局常量——
+            见检查函数自身的文档字符串）
+        overlapping_cell_ids: 拥有真实重叠面的唯一单元索引
+        close_cell_ids: 拥有接近接触（但尚未重叠）面片的唯一单元索引
+        min_gap_found: 所有接近对中最小的非重叠面到面距离
+            （若无则为 None）
+        overlap_examples: 最多 `max_examples` 个 (cell_a, cell_b) 对，
+            供人类可读报告——在有许多重叠的网格上不是穷举
+        close_examples: 最多 `max_examples` 个 (cell_a, cell_b, distance) 元组
+        elapsed_seconds: 此检查的挂钟时间——包含它是因为与此项目
+            其他 O(n) 向量化质量检查不同，此检查的成本随局部网格
+            密度缩放，而非纯粹按单元数（见模块文档字符串）
     """
     n_faces_checked: int = 0
     n_candidate_pairs: int = 0
@@ -62,10 +54,10 @@ class OverlapProximityReport:
         return self.n_overlapping_pairs > 0
 
     def bad_cell_mask(self, n_cells: int) -> np.ndarray:
-        """Boolean mask, True for any cell implicated in a genuine overlap
-        (NOT close-but-not-overlapping - see mesh_repair.py's use of this:
-        only an actual overlap is bad enough to warrant repair action;
-        "close" is reported for visibility but is not itself a defect)."""
+        """布尔掩码，真实重叠涉及的单元为 True
+        （不包括接近但未重叠的——见 mesh_repair.py 对此的使用：
+        只有实际重叠才严重到需要修复；
+        "接近"仅报告可见性，本身不是缺陷）。"""
         mask = np.zeros(n_cells, dtype=bool)
         if len(self.overlapping_cell_ids):
             mask[self.overlapping_cell_ids] = True

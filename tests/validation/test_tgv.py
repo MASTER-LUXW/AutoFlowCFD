@@ -35,7 +35,7 @@
 import numpy as np
 
 from autoflowcfd.core.fr_solver import FRSolver
-from autoflowcfd.core.fr_residual_viscous import compute_viscous_residual as _compute_visc_res
+from autoflowcfd.core.fr_residual.viscous import compute_viscous_residual as _compute_visc_res
 from autoflowcfd.core.time_integration import TimeIntegrationScheme
 
 from ._tgv_mesh import build_triply_periodic_tet_mesh

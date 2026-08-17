@@ -19,7 +19,7 @@ mesh 对象、是否显式触发 GC，`get_flat_face_geometry` 返回的几何�
 
 import gc
 
-from autoflowcfd.core.fr_face_kernels_flat import get_flat_face_geometry
+from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 
 from .test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 

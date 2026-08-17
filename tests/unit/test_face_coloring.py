@@ -8,7 +8,7 @@
 
 import numpy as np
 import pytest
-from autoflowcfd.core.face_coloring import greedy_face_coloring, get_color_masks
+from autoflowcfd.core.utils.face_coloring import greedy_face_coloring, get_color_masks
 
 
 class TestGreedyFaceColoring:
@@ -73,7 +73,7 @@ class TestColoringKernelEquivalence:
         """无粘 kernel：nt=1 时图着色与 per-thread buffer 应 bit-exact 相等。"""
         # 这个测试在 test_fr_residual_inviscid_kernel_crosscheck.py 中已覆盖
         # 这里只验证接口存在
-        from autoflowcfd.core.fr_residual_inviscid_kernel import (
+        from autoflowcfd.core.fr_residual.inviscid_kernel import (
             compute_inviscid_interface_correction_kernel,
             compute_inviscid_interface_correction_kernel_colored,
         )
@@ -82,7 +82,7 @@ class TestColoringKernelEquivalence:
 
     def test_viscous_kernel_equivalence_nt1(self):
         """粘性 kernel：nt=1 时图着色与 per-thread buffer 应 bit-exact 相等。"""
-        from autoflowcfd.core.fr_viscous_flux_kernel import (
+        from autoflowcfd.core.fr_residual.viscous_flux_kernel import (
             compute_viscous_interface_correction_kernel,
             compute_viscous_interface_correction_kernel_colored,
         )
@@ -91,7 +91,7 @@ class TestColoringKernelEquivalence:
 
     def test_turbulence_transport_kernel_equivalence(self):
         """湍流输运 kernel：图着色版本存在。"""
-        from autoflowcfd.core.turbulence_transport_kernel import (
+        from autoflowcfd.core.turbulence.transport_kernel import (
             distribute_corrections_to_cells_kernel,
             distribute_corrections_to_cells_kernel_colored,
         )
@@ -104,7 +104,7 @@ class TestFlatFaceColoringCache:
 
     def test_flat_face_has_coloring(self):
         """FlatFaceGeometry 应包含图着色信息。"""
-        from autoflowcfd.core.fr_face_kernels_flat import FlatFaceGeometry
+        from autoflowcfd.core.fr_operators.face_kernels import FlatFaceGeometry
         # 检查 dataclass 字段
         fields = {f.name for f in FlatFaceGeometry.__dataclass_fields__.values()}
         assert "color_face_indices" in fields

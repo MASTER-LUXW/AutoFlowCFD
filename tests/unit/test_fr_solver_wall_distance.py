@@ -15,7 +15,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
-from autoflowcfd.core.fr_solver_turbulence import (
+from autoflowcfd.core.fr_solver.turbulence import (
     _map_node_distances_to_points,
     compute_wall_distance_field,
 )

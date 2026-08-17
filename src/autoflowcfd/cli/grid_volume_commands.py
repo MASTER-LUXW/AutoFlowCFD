@@ -262,7 +262,7 @@ def import_volume(
         # Then solve directly from the cache
         $ autoflowcfd solve steady car_volume.pkl
     """
-    from autoflowcfd.grid.mesh_gen.mesh_external_import import import_external_volume_mesh
+    from autoflowcfd.grid.mesh_gen.utils.mesh_external_import import import_external_volume_mesh
 
     logger.info(f"Importing external volume mesh: {volume_mesh_file}")
 

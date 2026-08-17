@@ -133,7 +133,7 @@ def build_local_mesh_from_data(local_data: dict):
     Returns:
         local_mesh: 部分初始化的 HighOrderMesh（只包含局部数据）
     """
-    from autoflowcfd.grid.high_order_mesh import HighOrderMesh
+    from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
 
     mesh = HighOrderMesh(order=local_data['order'])
     mesh.n_cells = local_data['n_cells']
@@ -237,7 +237,7 @@ def distributed_mesh_load(
             partition_info: 分区信息（cell_partition 等）
     """
     from autoflowcfd.cli.solve_helpers import load_mesh_for_solver
-    from autoflowcfd.grid.face_connectivity import FRFaceConnectivity
+    from autoflowcfd.grid.connectivity.face_connectivity import FRFaceConnectivity
     from autoflowcfd.core.mpi.partition import partition_mesh
     from autoflowcfd.core.mpi.comm import bcast_from_root
 

@@ -156,7 +156,7 @@ class GPUFRSolver:
     def _init_face_geometry(self):
         """初始化 GPU 面几何缓存。"""
         try:
-            from autoflowcfd.core.fr_face_kernels_flat import get_flat_face_geometry
+            from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
             flat_face = get_flat_face_geometry(self.mesh, self.ops)
             from autoflowcfd.core.gpu.gpu_face_geometry import build_gpu_flat_face
             self.flat_face_gpu = build_gpu_flat_face(flat_face, self.device_id)

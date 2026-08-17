@@ -13,19 +13,18 @@ from loguru import logger
 class GridMetadata:
     """网格元数据
     
-    Contains metadata about the grid including counts, format version,
-    and statistical information.
+    包含网格的元数据，包括数量统计、格式版本和统计信息。
     
-    Attributes:
+    属性:
         node_count: 节点数量
         cell_count: 单元数量
         boundary_groups: 边界组名称列表
         file_format: 文件格式版本 (e.g., "v22", "v23", "v24")
         bounding_box: 包围盒信息 (min_x, max_x, min_y, max_y, min_z, max_z), optional -
-            this matches parser_core.py's _compute_bounding_box() producer order
+            与 parser_core.py 的 _compute_bounding_box() 输出顺序一致
         creation_time: 网格创建时间戳, optional
     
-    Example:
+    示例:
         >>> metadata = GridMetadata(
         ...     node_count=1000000,
         ...     cell_count=2000000,
@@ -44,8 +43,8 @@ class GridMetadata:
     def __post_init__(self):
         """验证元数据合理性
         
-        Raises:
-            ValueError: If counts are negative
+        抛出异常:
+            ValueError: 如果数量为负数
         """
         if self.node_count < 0:
             raise ValueError(f"Node count cannot be negative: {self.node_count}")
@@ -61,10 +60,10 @@ class GridMetadata:
         """生成网格元数据摘要
         
         Returns:
-            str: Human-readable summary string
+            str: 可读的摘要字符串
         """
         lines = [
-            f"Grid Metadata Summary:",
+            "Grid Metadata Summary:",
             f"  Format: {self.file_format}",
             f"  Nodes: {self.node_count:,}",
             f"  Cells: {self.cell_count:,}",
@@ -72,10 +71,9 @@ class GridMetadata:
         ]
         
         if self.bounding_box:
-            # Order matches the producer (parser_core.py's
-            # _compute_bounding_box): (min_x, max_x, min_y, max_y, min_z,
-            # max_z), NOT the grouped-by-axis order this used to assume -
-            # that mismatch silently mislabeled every axis in this summary.
+            # 顺序与生成端（parser_core.py 的 _compute_bounding_box）一致：
+            # (min_x, max_x, min_y, max_y, min_z, max_z)，
+            # 而非按轴分组的顺序——那种不匹配会静默错标每个轴。
             min_x, max_x, min_y, max_y, min_z, max_z = self.bounding_box
             lines.append(
                 f"  Bounding Box: [{min_x:.3f}, {max_x:.3f}] x "

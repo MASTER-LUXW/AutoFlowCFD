@@ -5,7 +5,7 @@ these tests never invoke."""
 import numpy as np
 import pytest
 
-from autoflowcfd.grid.mesh_gen.mesh_tetgen_core import estimate_steinerleft
+from autoflowcfd.grid.mesh_gen.tetgen.mesh_tetgen_core import estimate_steinerleft
 
 
 def _box_points(dx, dy, dz):
