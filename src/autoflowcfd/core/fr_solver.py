@@ -345,18 +345,24 @@ class FRSolver:
         if not self.state.U.flags['C_CONTIGUOUS']:
             self.state.U = np.ascontiguousarray(self.state.U)
 
-        # GPU 分发 (B-01)：只有当前网格是 P0（阶数延续热身阶段，
-        # mesh.n_points_1d==1）且请求了 GPU 后端时才真正走 GPU kernel
-        # （core/backend/fr_gpu_p0.py）；P>=1 无论 backend_type 是什么都
-        # 走 CPU 的 compute_inviscid_residual_fr（其内部对 P0 也有一条
-        # CPU 参考实现分支，两者数值上已用 tests/unit/test_fr_gpu_p0.py
-        # 交叉验证一致，这里选哪一条纯粹是性能路径的选择，不影响物理）。
-        if self.backend_type == "gpu" and self.mesh.n_points_1d == 1:
-            from .backend.fr_gpu_p0 import compute_inviscid_residual_p0_gpu
-            res_euler = compute_inviscid_residual_p0_gpu(
-                self.state.U, self.mesh,
-                boundary_ghost_provider=self.boundary_ghost_provider,
-            )
+        # GPU 分发 (B-01)：请求 GPU 后端时走 CuPy 加速路径。
+        # P0（阶数延续热身阶段）使用 CuPy RawKernel（core/gpu/gpu_p0_inviscid.py）；
+        # P>=1 高阶 FR 使用 CuPy 向量化实现（core/gpu/gpu_inviscid.py）。
+        # GPU 不可用时自动回退 CPU。
+        if self.backend_type == "gpu":
+            if self.mesh.n_points_1d == 1:
+                from .gpu.gpu_p0_inviscid import compute_inviscid_residual_p0_cupy
+                res_euler = compute_inviscid_residual_p0_cupy(
+                    self.state.U, self.mesh,
+                    boundary_ghost_provider=self.boundary_ghost_provider,
+                )
+            else:
+                # P>=1 高阶 FR GPU 路径
+                from .gpu.gpu_inviscid import compute_inviscid_residual_fr_gpu
+                res_euler = compute_inviscid_residual_fr_gpu(
+                    self.state.U, self.mesh, self.ops,
+                    boundary_ghost_provider=self.boundary_ghost_provider,
+                )
         else:
             res_euler = compute_inviscid_residual_fr(
                 self.state.U, self.mesh, self.ops,

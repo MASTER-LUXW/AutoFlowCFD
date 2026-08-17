@@ -8,16 +8,10 @@ AutoFlowCFD V2.0 - SST k-omega 湍流模型 FR 离散 (T-01, T-02)
    此前 F1/F2 都误用 Von Karman 常数 kappa 顶替 beta_star，且各丢失了
    标准公式里的一项，已改正并用近壁/远场极限数值验证）
 
-已知局限（诚实记录，不是本次会话修复范围）：k/omega 目前只有**逐点源项
-ODE**（产生-耗散-交叉扩散，含 DES 长度尺度替换），没有独立的**对流+
-扩散输运**——即 k/omega 不会被平均流速度场对流、也不会跨单元/跨面
-扩散，只在原地随源项弛豫。规范 T-01 要求"离散 k 和 omega 输运方程"，
-严格意义上并未完全满足。这是比 F1/F2 公式错误更大的独立工作量（需要
-仿照 core/fr_residual_inviscid.py 给 k/omega 各自实现一套基于真实面
-连接关系的标量对流数值通量，以及仿照 core/fr_viscous_flux.py 实现
-BR1 标量扩散耦合），本次会话优先修复了标准公式错误、量纲/双重更新
-bug、非物理限制器这几项影响更直接的正确性问题，完整输运方程留待
-后续会话。
+已知局限（V2.0 已修复）：k/omega 输运方程现已包含完整的对流+扩散输运项
+（见 core/turbulence_transport.py），k/omega 随流场对流、跨单元扩散，
+不再仅是逐点源项 ODE 近似。F1/F2 混合函数、源项量纲、正性限制器等
+此前的问题也均已在 V2.0 评审中修复。
 """
 
 import numpy as np
@@ -324,25 +318,41 @@ class SSTModelFR:
         # 阈值 100 没有任何依据（见 V2.0 二次评审 T-02 发现）。
 
     def update_fields(self, dt: float, Sk: np.ndarray, S_omega: np.ndarray,
-                     diff_k: np.ndarray = None, diff_omega: np.ndarray = None):
+                     diff_k: np.ndarray = None, diff_omega: np.ndarray = None,
+                     transport_k: np.ndarray = None,
+                     transport_omega: np.ndarray = None):
         """
         执行一个时间步长的湍流场更新。
-        
+
         Args:
             dt: 时间步长
-            Sk: 湍动能源项
-            S_omega: 比耗散率源项
-            diff_k: k 的扩散项（可选）
-            diff_omega: omega 的扩散项（可选）
+            Sk: 湍动能源项（dk/dt 量纲，已除以 rho）
+            S_omega: 比耗散率源项（domega/dt 量纲，已除以 rho）
+            diff_k: k 的扩散项（可选，已弃用——现在由 transport_k 替代）
+            diff_omega: omega 的扩散项（可选，已弃用）
+            transport_k: k 的完整输运残差（对流+扩散，dk/dt 量纲），
+                由 core/turbulence_transport.py 计算。非 None 时替代
+                diff_k 并加入更新。
+            transport_omega: omega 的完整输运残差（对流+扩散），同上。
         """
-        # 如果提供了扩散项，则包含在更新中
-        if diff_k is not None and diff_omega is not None:
-            self.k_field += dt * (Sk + diff_k)
-            self.omega_field += dt * (S_omega + diff_omega)
-        else:
-            # 仅源项更新
-            self.k_field += dt * Sk
-            self.omega_field += dt * S_omega
+        # 源项 + 输运项联合更新
+        dk_total = Sk
+        domega_total = S_omega
+
+        # 向后兼容：旧的 diff_k/diff_omega 参数仍支持
+        if diff_k is not None and transport_k is None:
+            dk_total = dk_total + diff_k
+        if diff_omega is not None and transport_omega is None:
+            domega_total = domega_total + diff_omega
+
+        # 新的完整输运项（对流+扩散）
+        if transport_k is not None:
+            dk_total = dk_total + transport_k
+        if transport_omega is not None:
+            domega_total = domega_total + transport_omega
+
+        self.k_field += dt * dk_total
+        self.omega_field += dt * domega_total
         
         # 应用正性限制器
         self.apply_positivity_limiter()

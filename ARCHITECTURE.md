@@ -111,6 +111,8 @@ AutoFlowCFD是一款专注于汽车外流场仿真的开源CFD软件，采用模
 - `fr_viscous_flux.py`：粘性残差（BR1 界面耦合 + 真实边界幽灵态）
 - `fr_kernels.py`：AUSM+up 黎曼求解器（含低马赫数 Mp/pu 修正）
 - `turbulence_sst.py`：SST k-ω 模型（F1/F2 混合函数、正性限制器、DES 长度尺度替换）
+- `turbulence_transport_kernel.py`：湍流输运 Numba kernel（标量场外插 + 校正量分配）
+- `face_coloring.py`：面图着色（消除 scatter-add 写冲突，替代 per-thread buffer）
 - `turbulence_des.py`：DDES 延迟分离涡模拟（屏蔽函数 + 有效长度尺度）
 - `turbulence_wmles.py`：WMLES 壁面模型（Spalding 律 + Newton-Raphson 迭代）
 - `turbulence_sgs.py`：WALE 亚格子应力模型
@@ -119,6 +121,14 @@ AutoFlowCFD是一款专注于汽车外流场仿真的开源CFD软件，采用模
 - `time_integration_dual.py`：Dual-Time Stepping（BDF1/BDF2 + SSP-RK3 + CFL 自适应）
 - `order_continuation.py`：Order Continuation 策略（P0→P1→...→目标阶数）
 - `wall_distance.py`：壁面距离场（KD-Tree + Eikonal Dijkstra）
+- `mpi/`：MPI 域分解并行模块
+  - `__init__.py`：MPI 可选依赖检测（mpi4py 不可用时优雅降级）
+  - `comm.py`：通信封装（Allreduce/Allgather/Isend/Irecv + MPITimer）
+  - `partition.py`：METIS 网格分区 + DistributedPartition 数据结构
+  - `halo.py`：Halo 层管理与非阻塞数据交换
+  - `distributed_state.py`：分布式 FRState（local + halo 扩展数组）
+  - `distributed_flat_face.py`：分布式面几何（面分类 + 扩展索引）
+  - `distributed_solver.py`：分布式 FRSolver（组合模式）
 - `backend/`：计算后端抽象
   - `fr_gpu_p0.py`：P0 有限体积 GPU kernel（P≥1 阶仍运行 CPU）
 
@@ -126,6 +136,8 @@ AutoFlowCFD是一款专注于汽车外流场仿真的开源CFD软件，采用模
 - 统一的求解器框架，支持稳态/瞬态无缝切换
 - 插件化湍流模型，通过注册机制扩展
 - Numba `prange` 多核并行，界面项/体积项全并行
+- 面图着色消除 scatter-add 冲突，内存从 O(n_threads × N) 降至 O(N)
+- MPI 域分解支持跨节点 HPC 集群扩展（METIS 分区 + Halo 交换）
 - 问题单元检测机制（残差异常抑制）
 
 **输入**：GridData + SolverConfig  
@@ -370,14 +382,23 @@ class ForceBreakdownAnalyzer:
 - **SoA布局**：提升CPU缓存命中率
 - **预分配内存池**：避免运行时频繁分配
 - **零拷贝传输**：CPU-GPU数据传输优化
+- **面图着色**：消除 scatter-add 的 per-thread buffer，内存从 O(n_threads × N) 降至 O(N)
 
 ### 6.2 计算优化
 
-- **Numba JIT编译**：Python代码接近C性能
+- **Numba JIT编译**：Python代码接近C性能（界面项、体积项、湍流输运全 kernel 化）
 - **CUDA Kernel融合**：减少kernel launch开销
 - **向量化操作**：充分利用SIMD指令
+- **prange 多核并行**：界面 kernel 采用 per-thread buffer + sum 归约
 
-### 6.3 I/O优化
+### 6.3 MPI 并行计算
+
+- **METIS 网格分区**：最小化分区间切割边数（= 跨 rank halo 交换量）
+- **非阻塞通信**：Isend/Irecv 异步数据交换，可与体积项计算重叠
+- **预分配 buffer**：Halo 交换管理器预分配固定大小 send/recv buffer
+- **两级并行**：MPI 跨节点 + Numba 多线程，总并行度 = n_ranks × n_threads
+
+### 6.4 I/O优化
 
 - **异步写入**：不阻塞主计算线程
 - **压缩存储**：HDF5内置压缩
@@ -405,17 +426,27 @@ class ForceBreakdownAnalyzer:
 +---------------------+
 ```
 
-### 7.2 集群部署（v2.0规划）
+### 7.2 集群部署（MPI 域分解）
 
 ```
 +-------------------+     +-------------------+
 |  Head Node        |     |  Worker Node 1    |
-|  - Task Scheduler |---->|  - GPU Solver     |
-|  - Result Aggreg. |     +-------------------+
-+-------------------+     |  Worker Node 2    |
-                          |  - GPU Solver     |
+|  - mpirun 启动    |---->|  - MPI Rank 0-3   |
+|  - 结果收集       |     |  - 4 threads/rank |
++-------------------+     +-------------------+
+                          |  Worker Node 2    |
+                          |  - MPI Rank 4-7   |
+                          |  - 4 threads/rank |
                           +-------------------+
+
+使用方式:
+  mpirun -np 8 autoflowcfd solve steady <grid_file> --n-ranks 8
 ```
+
+**进程模型**：
+- 每个 MPI rank 是独立进程，内部用 Numba 多线程
+- 总并行度 = n_ranks × n_threads_per_rank
+- 典型配置：4 nodes × 16 ranks/node × 4 threads = 256 总并行度
 
 ---
 
@@ -441,4 +472,4 @@ class ForceBreakdownAnalyzer:
 ---
 
 **文档版本**：v2.0  
-**最后更新**：2026-08-17
+**最后更新**：2026-08-17（HPC 并行计算优化更新）

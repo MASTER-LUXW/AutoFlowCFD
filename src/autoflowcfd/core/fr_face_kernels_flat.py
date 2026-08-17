@@ -178,6 +178,14 @@ class FlatFaceGeometry:
     dist_fp_of_sp: np.ndarray        # int64 (3, n_sps)
     dist_axis_coord_of_sp: np.ndarray  # int64 (3, n_sps)
 
+    # --- 面图着色（消除 scatter-add 写冲突，替代 per-thread buffer）---
+    # 在 build 时一次性计算，后续残差求值直接复用，不再重复着色。
+    # color_face_indices[c] = 颜色 c 的面索引数组（int64），
+    # n_colors = 总颜色数。同色面之间无 owner_cell 冲突，可安全直接
+    # prange + 写入共享 buffer。
+    color_face_indices: list  # list of np.ndarray (int64), length = n_colors
+    n_colors: int
+
 
 def _build_source_arrays(sources_per_face, n_faces: int, n_fp: int, n_sps: int):
     """把每个面最多 2 个 `(cell_id, matrix)` 的变长列表，拆成稠密槽 0 +
@@ -272,6 +280,16 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
 
     dist_fp_of_sp, dist_axis_coord_of_sp = _derive_distribute_mapping(n1d)
 
+    # 面图着色：一次性计算，后续残差求值直接复用（不再重复着色）。
+    # 贪心着色按 owner_cell 分组处理，同色面之间无 owner_cell 冲突。
+    from autoflowcfd.core.face_coloring import greedy_face_coloring
+    n_cells_est = int(np.max(fc.owner_cell)) + 1
+    colors = greedy_face_coloring(fc.owner_cell.astype(np.int64), n_cells_est)
+    n_colors = int(np.max(colors)) + 1
+    color_face_indices = [
+        np.where(colors == c)[0].astype(np.int64) for c in range(n_colors)
+    ]
+
     return FlatFaceGeometry(
         n_faces=n_faces, n_fp=n_fp, n_sps=n_sps, n_prism=n_prism,
         owner_cell=fc.owner_cell.astype(np.int64),
@@ -293,6 +311,8 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
         n1d=n1d,
         dist_fp_of_sp=dist_fp_of_sp,
         dist_axis_coord_of_sp=dist_axis_coord_of_sp,
+        color_face_indices=color_face_indices,
+        n_colors=n_colors,
     )
 
 

@@ -66,12 +66,10 @@ def get_available_backends():
         dict: 后端名称到可用状态的映射字典
     """
     backends = {"cpu": True}
+    # GPU 检测统一为 CuPy（替代此前的 numba.cuda）
     try:
-        import numba.cuda
-        if numba.cuda.is_available():
-            backends["gpu"] = True
-        else:
-            backends["gpu"] = False
+        from autoflowcfd.core.gpu import gpu_available
+        backends["gpu"] = gpu_available
     except ImportError:
         backends["gpu"] = False
     return backends

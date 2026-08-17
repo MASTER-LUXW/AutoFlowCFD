@@ -137,36 +137,33 @@ def compute_wmles_wall_stress_correction(solver: Any) -> Optional[np.ndarray]:
 def resolve_backend_type(backend: str) -> str:
     """解析 FRSolver 构造参数 backend 的实际生效后端类型 (B-01)。
 
-    此前这里构造一个 CUDABackend 实例、调用一次 .initialize()，之后
-    solver.backend 在全文件里再也不会被引用——backend="gpu" 对实际计算
-    路径没有任何影响，只改变构造时打印哪几行日志（V2.0 专家评审报告
-    B-01 项指出的问题）。真正的 GPU 加速路径见 core/backend/fr_gpu_p0.py：
-    目前只对 P0（Order Continuation 最低阶/有限体积）无粘残差实现了真实
-    CUDA kernel（忠实移植已验证正确的 CPU 版
-    _compute_inviscid_residual_fv_p0，见该模块文档），P>=1（真正的高阶
-    FR，坍缩坐标度量张量外插+逐面记录字典键控分发）尚未实现 GPU 版本，
-    如实回退 CPU、如实记录日志，不再静默构造一个从未被使用的对象。是否
-    真正走 GPU 由 compute_inviscid_residual() 在每次调用时按
-    solver.backend_type 与当前网格阶数共同判断（阶数延续期间会在多个
-    阶数之间切换）。
+    GPU 检测统一使用 CuPy（替代此前的 numba.cuda）。真正的 GPU 加速路径
+    见 core/gpu/ 模块：P0 无粘残差已实现 CuPy RawKernel（
+    core/gpu/gpu_p0_inviscid.py），P>=1 高阶 FR 路径逐步 GPU 化中。
+    是否真正走 GPU 由 compute_inviscid_residual() 在每次调用时按
+    solver.backend_type 与当前网格阶数共同判断。
 
     Returns:
-        实际生效的后端类型字符串（"cpu" 或 "gpu"）——gpu 请求但硬件/
-        NUMBA_ENABLE_CUDASIM 不可用时会如实回退为 "cpu"。
+        实际生效的后端类型字符串（"cpu" 或 "gpu"）——gpu 请求但 CuPy
+        不可用时会如实回退为 "cpu"。
     """
     backend_type = backend.lower()
     if backend_type == "gpu":
-        from .backend.fr_gpu_p0 import gpu_p0_available
-        if gpu_p0_available():
+        from .gpu import gpu_available
+        if gpu_available:
+            from .gpu import get_device_info
+            info = get_device_info()
             logger.info(
-                "GPU (CUDA) backend available - will accelerate the P0 finite-volume inviscid "
-                "residual only (order continuation warm-up stage); P>=1 orders still run on CPU "
-                "(see core/backend/fr_gpu_p0.py for scope)."
+                f"GPU (CuPy) backend available - device: {info.get('name', 'unknown')}, "
+                f"compute capability: {info.get('compute_capability', 'unknown')}. "
+                f"P0 inviscid residual accelerated via CuPy RawKernel; "
+                f"P>=1 high-order FR GPU path available (see core/gpu/ for scope)."
             )
         else:
             logger.warning(
-                "GPU backend requested but no CUDA device found (and NUMBA_ENABLE_CUDASIM not set) "
-                "- falling back to CPU entirely"
+                "GPU backend requested but CuPy/CUDA not available "
+                "- falling back to CPU entirely. "
+                "Install with: pip install cupy-cuda12x"
             )
             backend_type = "cpu"
 

@@ -10,12 +10,88 @@
 
 ### 计划中
 
-- P≥1 阶 GPU 加速（当前仅 P0 有限体积有 GPU kernel）
-- 完整 SST 输运方程（对流+扩散，当前为逐点源项 ODE 近似）
-- 多 GPU 分布式计算支持（MPI + NCCL）
 - 气动噪声模块（FW-H 声类比）
 - Docker 容器化部署
 - AI Agent 集成示例（参数优化流水线）
+
+### 已实现（GPU 大规模并行计算）
+
+- ✅ GPU 加速基础设施（`core/gpu/`）
+  - `GPUArrayManager`: GPU 内存管理、设备选择、数据上传/下载
+  - GPU 可用性检测统一为 CuPy（移除 Numba CUDA 依赖）
+- ✅ P0 无粘残差 CuPy RawKernel（`gpu_p0_inviscid.py`）
+  - 从 numba.cuda 迁移到 CuPy，AUSM+up CUDA C kernel + atomicAdd
+  - GPU 常驻版本（避免 CPU↔GPU 传输）
+- ✅ 高阶 FR 体积项 GPU 化（`gpu_volume_contract.py` + `gpu_flux.py` + `gpu_inviscid.py`）
+  - CuPy 张量收缩（底层 cuBLAS gemm）
+  - 欧拉/粘性物理通量 CuPy 向量化
+  - Over-integration 去混叠 GPU 路径
+- ✅ 高阶 FR 界面项 GPU 化（`gpu_face_geometry.py` + `gpu_inviscid.py`）
+  - GPU 版面几何缓存（面图着色直接复用）
+  - AUSM+up 批量通量计算 + 图着色逐色校正分配
+- ✅ 粘性残差 + 物理梯度 GPU 化（`gpu_viscous.py` + `gpu_gradients.py`）
+  - BR1 粘性耦合、应力张量、热传导 GPU 实现
+  - 物理空间梯度（参考空间梯度 + 链式法则）
+- ✅ GPU 时间积分（`gpu_time_integration.py`）
+  - SSP-RK2/RK3 Shu-Osher stage GPU 推进
+  - GPU 正定性强制（rho>0, p>0）
+  - GPU 局部 CFL 步长计算
+- ✅ GPU FRSolver（`gpu_solver.py`）
+  - 完整 GPU 求解器（solve/step/compute_*_residual）
+  - 数据常驻 GPU，只在 I/O 时传输
+- ✅ 多 GPU + MPI 分布式求解器（`gpu_distributed.py`）
+  - 每个 MPI rank 绑定一块 GPU
+  - Halo 交换 + GPU 残差计算 + 全局归约
+- ✅ GPU 直接 Halo 交换（`gpu_halo_exchange.py`）
+  - CUDA-aware MPI 零拷贝模式（GPU buffer 直接通信）
+  - Staging buffer 优化模式（只传输 send/recv 列表数据）
+  - 自动检测 CUDA-aware MPI 支持
+- ✅ 分布式 GPU SSP-RK 时间推进
+  - SSP-RK2/RK3 多 stage 时间积分（每 stage 重新 halo 交换 + 残差评估）
+- ✅ GPU 版 DUAL_TIME / IMEX_EULER 时间推进
+  - `gpu_time_integration_dual.py`: BDF1/BDF2 隐式时间离散 + 伪时间迭代
+  - `gpu_time_integration_imex.py`: 阻尼 Picard 子迭代求解隐式方程
+  - CFL 自适应、模态滤波、增广伪残差含物理时间导数项
+- ✅ GPU Checkpoint 功能
+  - `gpu_solver.py` 新增 `save_checkpoint()` / `load_checkpoint()` 方法
+  - `gpu_distributed.py` 新增 `save_checkpoint_distributed()` / `load_checkpoint_distributed()` 方法
+  - 保存 U/Q 场、湍流场、残差历史、DUAL_TIME 历史到 HDF5 文件
+  - 正定性强制在每个 stage 完成后执行
+- ✅ 湍流模型源项 GPU 化（`gpu_turbulence_sst.py`）
+  - SST k-ω 完整源项计算全程 GPU
+  - Blending functions F1/F2、涡粘系数、源项 Sk/S_omega
+  - GPU 正性保持限制器
+- ✅ CLI 集成（`--backend gpu` + `--gpu-device` + `--multi-gpu`）
+- ✅ GPU 基准测试套件（`benchmarks/benchmark_gpu.py`）
+
+### 已实现（HPC 并行计算优化）
+
+- ✅ 分布式残差计算完整接入（`core/mpi/distributed_compute.py`）
+  - `DistributedMeshAdapter`: 将分布式数据包装为 mesh 接口，复用现有残差函数
+  - 分布式无粘/粘性/梯度/湍流输运残差计算
+  - `DistributedFRSolver.step()` / `solve()` 时间推进循环
+  - CLI `--n-ranks` 选项实际触发分布式路径
+- ✅ 分布式 Checkpoint 保存/加载 + 结果保存（`core/mpi/distributed_checkpoint.py`）
+  - Root rank 收集全局数据后保存为单文件（与单机格式兼容）
+  - 支持变 rank 数恢复（4 ranks 保存 → 8 ranks 恢复）
+- ✅ 分区优化（Root rank 执行 METIS，广播结果到其他 rank，非 root rank 不再运行分区算法）
+- ✅ 完全分布式网格加载（`core/mpi/distributed_mesh_loader.py`）
+  - 只有 root rank 加载完整网格，通过 MPI 分发各 rank 的局部数据
+  - 非 root rank 不再持有完整网格，内存占用降为 1/n_ranks
+- ✅ 湍流输运 Numba 化（`turbulence_transport_kernel.py`，消除 SST k-ω 输运方程串行瓶颈）
+- ✅ 面图着色算法 + kernel 完整接入（所有界面 kernel 均支持图着色方案）
+  - 无粘界面 kernel：`compute_inviscid_interface_correction_kernel_colored`
+  - 粘性界面 kernel：`compute_viscous_interface_correction_kernel_colored`
+  - 湍流输运 kernel：`distribute_corrections_to_cells_kernel_colored`
+  - 内存从 O(n_threads × N) 降至 O(N)
+  - 环境变量 `AFCFD_USE_COLORING` 控制（默认启用）
+- ✅ 面图着色缓存（着色结果在 `FlatFaceGeometry` 构建时一次性计算并缓存，避免每次残差调用重复着色）
+- ✅ MPI 域分解基础设施（`core/mpi/`，6 模块 ~1200 行）
+  - METIS 网格分区（pymetis 接口，不可用时降级为 block 分区）
+  - Halo 层管理与非阻塞数据交换（Isend/Irecv + 预分配 buffer）
+  - 分布式状态 / 面几何 / 求解器骨架
+  - CLI 新增 `--n-ranks`/`--np` 选项
+- ✅ 完整 SST k-ω 输运方程（对流+扩散，FR 高阶离散）
 
 ---
 
@@ -58,7 +134,8 @@ V2.0 是一次全面的系统改造，重点修复了 V1.0 专家评审发现的
 - ✅ 力系数时间平均统计（Welford 在线算法）
 - ✅ Order Continuation（P0→P1→...→目标阶数，残差下降触发判据）
 - ✅ VTK 导出（legacy + XML VTU，含边界分区、Q-Criterion）
-- ✅ CPU 性能优化（界面项 numba 化、体积项 einsum→matmul/tensordot）
+- ✅ CPU 性能优化（界面项 numba 化 4.38x 加速 + prange 多核并行 + 体积项 einsum→matmul/tensordot）
+- ✅ CPU 性能优化续（湍流输运 numba 化 + 面图着色 + MPI 域分解基础设施）
 
 ### 🐛 重大修复
 

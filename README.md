@@ -38,7 +38,11 @@ AutoFlowCFD 旨在填补工业级高精度 CFD 与低门槛二次开发之间的
 
 ### ⚡ 高性能计算引擎
 - **CPU 并行加速**：Numba JIT 编译 + `prange` 多线程向量化，界面项/体积项全并行
-- **GPU CUDA 加速**：CuPy 封装 P0 有限体积核心算子（P≥1 阶仍运行 CPU）
+- **MPI 域分解并行**：METIS 网格分区 + Halo 层交换 + 分布式求解器，支持跨节点 HPC 集群扩展
+- **面图着色优化**：消除 scatter-add 写冲突，内存从 O(n_threads × N) 降至 O(N)
+- **GPU CUDA 加速**：CuPy 统一框架，覆盖 P0/P≥1 无粘残差、粘性残差、物理梯度、时间积分全流程
+- **多 GPU + MPI 分布式**：每个 rank 绑定一块 GPU，Halo 交换（CUDA-aware / staging buffer）+ GPU 残差 + 全局归约
+- **高级时间推进方案**：SSP-RK2/RK3、IMEX_EULER（隐式-显式分裂）、DUAL_TIME（BDF1/BDF2 + 伪时间迭代）
 - **体积项去混叠（Over-integration）**：fine 几何积分 + 插值 + 限制回 coarse，消除高阶格式混叠误差
 
 ### 🔧 工业级工作流适配
@@ -49,7 +53,7 @@ AutoFlowCFD 旨在填补工业级高精度 CFD 与低门槛二次开发之间的
 ### 🤖 AI Agent 友好设计
 - **CLI 命令行接口**：Click 框架，`solve`/`post`/`grid`/`config`/`utils` 子命令体系，无缝嵌入自动化流水线
 - **结构化输出**：JSON/CSV/VTK 多格式结果，便于后处理与数据驱动优化
-- **检查点断点续算**：HDF5 存储完整求解器状态，支持 `solve resume` 精确恢复
+- **检查点断点续算**：单机/分布式 GPU Checkpoint（HDF5），支持容错恢复与变 rank 数加载
 
 ### 🧩 模块化扩展架构
 - **插件化湍流模型**：新增模型仅需实现 Python 接口，无底层代码侵入
@@ -109,7 +113,7 @@ poetry install -E gpu
 # 1. 从面网格生成体网格
 poetry run autoflowcfd grid generate-volume car_model.nas -o car_volume.nas
 
-# 2. 稳态 RANS 仿真（CPU）
+# 2. 稳态 RANS 仿真（CPU 单机）
 poetry run autoflowcfd solve steady car_volume.pkl \
     --backend cpu \
     --order 2 \
@@ -117,15 +121,40 @@ poetry run autoflowcfd solve steady car_volume.pkl \
     --max-iter 5000 \
     --reference-area 2.2
 
-# 3. 瞬态 DES 仿真（Dual-Time Stepping）
+# 3. 稳态 RANS 仿真（MPI 并行，域分解）
+mpirun -np 8 poetry run autoflowcfd solve steady car_volume.pkl \
+    --backend cpu \
+    --order 2 \
+    --turbulence-model sst \
+    --n-ranks 8 \
+    --reference-area 2.2
+
+# 4. 稳态 RANS 仿真（GPU 单机）
+poetry run autoflowcfd solve steady car_volume.pkl \
+    --backend gpu \
+    --gpu-device 0 \
+    --order 2 \
+    --turbulence-model sst \
+    --max-iter 5000 \
+    --reference-area 2.2
+
+# 5. 瞬态 DES 仿真（GPU + DUAL_TIME）
 poetry run autoflowcfd solve transient car_volume.pkl \
+    --backend gpu \
     --time-method dual-time \
     --turbulence-model ddes \
     --dt 1e-4 \
     --physical-time 0.1 \
     --reference-area 2.2
 
-# 4. 后处理：导出 VTK 可视化（含 Q-Criterion 涡识别）
+# 6. 多 GPU 分布式仿真（MPI + GPU）
+mpirun -np 4 poetry run autoflowcfd solve steady car_volume.pkl \
+    --backend gpu \
+    --multi-gpu \
+    --n-ranks 4 \
+    --save-checkpoint checkpoint.h5
+
+# 5. 后处理：导出 VTK 可视化（含 Q-Criterion 涡识别）
 poetry run autoflowcfd post export-vtk \
     --case ./results/steady/ \
     --variables velocity pressure q_criterion \
@@ -175,18 +204,18 @@ poetry run autoflowcfd post convergence --case case_001
 
 ## 📊 性能基准
 
-基于 Ahmed Body 标准算例（100 万六面体网格单元）的测试结果：
+基于 cube_demo 生产网格（545,597 单元，1,326,110 面）的 P2 阶数测试结果：
 
-| 后端配置 | FR 阶数 | 每步耗时 | 内存占用 | 相对加速比 |
-|:--------:|:-------:|:--------:|:--------:|:----------:|
-| CPU (4 线程) | 2nd | ~2.5s | 4 GB | 1.0x |
-| CPU (16 线程) | 2nd | ~0.8s | 4 GB | 3.1x |
-| GPU (NVIDIA A100) | 2nd | ~0.3s | 6 GB | 8.3x |
-| GPU (NVIDIA A100) | 3rd | ~0.5s | 8 GB | 5.0x |
+| 后端配置 | 单次迭代耗时 | 相对加速比 | 说明 |
+|:--------:|:----------:|:----------:|:-----|
+| CPU (1 线程) | 87.63s | 1.00x | 基准 |
+| **CPU (4 线程)** | **57.35s** | **1.53x** | **实测甜点** |
+| CPU (8 线程) | 61.46s | 1.43x | 开始倒退 |
+| CPU (16 线程) | 67.19s | 1.30x | per-thread buffer 内存压力 |
 
-*测试环境: Intel Xeon Gold 6248 (16C/32T) / NVIDIA A100 40GB / CUDA 12.2*
+*测试环境: 16 物理核 CPU / 64GB RAM*
 
-> **注**：实际性能受网格质量、边界层分辨率、湍流模型复杂度影响。GPU 加速在大规模网格（>500 万单元）下优势更显著。
+> **注**：超过 4 线程后性能倒退的根因是界面 kernel 的 scatter-add 需要私有缓冲区归约。已通过面图着色方案（`face_coloring.py`）提供替代方案，以及 MPI 域分解实现跨节点扩展。
 
 ---
 
@@ -198,10 +227,13 @@ AutoFlowCFD/
 │   ├── fr/                   # 通量重构高阶格式（算子、模态基、积分点）
 │   ├── core/                 # 求解器引擎
 │   │   ├── backend/          # CPU/GPU 后端实现
+│   │   ├── mpi/              # MPI 域分解并行（METIS 分区 + Halo 交换 + 分布式求解器）
 │   │   ├── fr_solver.py      # FR 求解器主类
 │   │   ├── fr_residual_inviscid.py  # 无粘残差（AUSM+up 黎曼求解器）
 │   │   ├── fr_viscous_flux.py       # 粘性残差（BR1 格式）
 │   │   ├── turbulence_sst.py        # SST k-ω 湍流模型
+│   │   ├── turbulence_transport_kernel.py  # 湍流输运 Numba kernel
+│   │   ├── face_coloring.py         # 面图着色（scatter-add 冲突消除）
 │   │   ├── turbulence_des.py        # DDES 混合模型
 │   │   ├── turbulence_wmles.py      # WMLES 壁面模型
 │   │   ├── time_integration*.py     # 时间积分（SSP-RK/IMEX/Dual-Time）
@@ -297,11 +329,29 @@ AutoFlowCFD/
 - ✅ Order Continuation（P0→P1→...→目标阶数，残差下降触发判据）
 - ✅ VTK 导出（legacy + XML VTU，含边界分区、Q-Criterion）
 
+**HPC 并行计算**
+- ✅ 面图着色算法 + kernel 完整接入（无粘/粘性/湍流输运，内存 O(N)）
+- ✅ 湍流输运 Numba 化（消除 SST k-ω 输运方程串行瓶颈）
+- ✅ MPI 域分解基础设施（METIS 分区 + Halo 交换 + 分布式状态/面几何）
+- ✅ 分布式残差计算完整接入（`DistributedMeshAdapter` + 分布式无粘/粘性/梯度/湍流残差）
+- ✅ 分布式 Checkpoint 保存/加载 + 结果保存（与单机格式兼容，支持变 rank 数恢复）
+- ✅ 分区优化（Root rank 执行 METIS，广播结果，非 root rank 不再运行分区算法）
+- ✅ 完全分布式网格加载（只有 root 加载完整网格，非 root rank 内存占用降为 1/n_ranks）
+- ✅ CLI `--n-ranks` 选项实际触发分布式路径（`mpirun -np N autoflowcfd solve steady ... --n-ranks N`）
+
+**GPU 大规模并行计算**
+- ✅ 统一 CuPy 框架（移除 Numba CUDA），覆盖张量运算 + 自定义 kernel
+- ✅ GPU 直接 Halo 交换（CUDA-aware MPI 零拷贝 / staging buffer 优化）
+- ✅ 分布式 GPU SSP-RK 时间推进（每 stage 重新 halo 交换 + 残差评估）
+- ✅ 湍流模型源项 GPU 化（SST k-ω 全程 GPU：F1/F2 blending、涡粘系数、Sk/S_omega）
+- ✅ GPU 版 DUAL_TIME（BDF1/BDF2 + SSP-RK3 伪时间迭代 + CFL 自适应）
+- ✅ GPU 版 IMEX_EULER（阻尼 Picard 子迭代 + 自适应阻尼因子）
+- ✅ 单机/分布式 GPU Checkpoint（HDF5 格式，支持 U/Q 场、湍流场、残差历史、DUAL_TIME 历史）
+
 ### 🚧 规划中
 
-- 📋 P≥1 阶 GPU 加速（当前仅 P0 有限体积有 GPU kernel）
-- 📋 完整 SST 输运方程（对流+扩散，当前为逐点源项 ODE 近似）
-- 📋 多 GPU 分布式计算（MPI + NCCL）
+- 📋 NCCL 直接 GPU↔GPU 通信（替代当前 halo 交换的 CPU 中转）
+- 📋 动态重分区（AMR 场景负载均衡）
 - 📋 气动噪声模块（FW-H 声类比）
 - 📋 Docker 容器化部署
 - 📋 AI Agent 集成示例（参数优化流水线）

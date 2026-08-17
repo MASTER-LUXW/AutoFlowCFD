@@ -272,7 +272,22 @@ def compute_turbulence_source(solver, dt: float) -> Optional[tuple]:
     rho = Q[:, :, 0]
     dk_dt = Sk / np.maximum(rho, 1e-10)
     domega_dt = S_omega / np.maximum(rho, 1e-10)
-    solver.turb_model.update_fields(dt, dk_dt, domega_dt)
+
+    # 完整输运项（对流+扩散）：对 SST/DDES 模型计算 k/omega 的 FR 空间输运
+    # 残差，使 k/omega 不再仅是逐点 ODE 源项弛豫，而是真正随流场对流、
+    # 跨单元扩散。见 core/turbulence_transport.py 模块文档。
+    transport_k = None
+    transport_omega = None
+    if solver.turb_model_name in ["SST", "DDES"]:
+        try:
+            from autoflowcfd.core.turbulence_transport import compute_turbulence_transport_residual
+            transport_k, transport_omega = compute_turbulence_transport_residual(solver)
+        except Exception as e:
+            logger.warning(f"湍流输运项计算失败，退化为仅源项更新: {e}")
+
+    solver.turb_model.update_fields(dt, dk_dt, domega_dt,
+                                     transport_k=transport_k,
+                                     transport_omega=transport_omega)
 
     return (Sk, S_omega)
 
