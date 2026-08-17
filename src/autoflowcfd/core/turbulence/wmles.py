@@ -232,6 +232,8 @@ class WMLESModel:
         应用滑移边界条件（考虑壁面剪应力）。
         
         在 WMLES 中，壁面不强制无滑移，而是通过剪应力耦合。
+        边界速度通过平衡律修正：
+            u_bc_tangent = u_tangent - τ_w / (ρ * u_tau) * relaxation
         
         Args:
             u_interior: 内部点的速度，形状 (n_points, 3)
@@ -250,12 +252,24 @@ class WMLESModel:
         # 法向速度为零（不可穿透）
         u_bc_normal = np.zeros_like(u_normal)
         
-        # 切向速度：考虑壁面剪应力的影响
-        # τ_w = μ * (∂u/∂y) ≈ μ * (u_bc_tangent - u_tangent) / y
-        # 简化：u_bc_tangent = u_tangent - τ_w * dt / (ρ * y)
+        # 切向速度：基于壁面剪应力修正
+        rho_safe = np.maximum(rho, 1e-6)[:, np.newaxis]
         
-        # 这里需要根据具体数值格式调整
-        u_bc_tangent = u_tangent.copy()  # 暂时保持内部值
+        if self.u_tau is not None:
+            u_tau_safe = np.maximum(self.u_tau, 1e-6)[:, np.newaxis]
+            # 松弛因子：限制单次修正幅度，防止发散
+            relaxation = 0.5
+            delta_u = tau_w / (rho_safe * u_tau_safe) * relaxation * dt
+            # 限制修正幅度不超过内部速度的 50%
+            u_tangent_mag = np.linalg.norm(u_tangent, axis=-1, keepdims=True)
+            delta_u_mag = np.linalg.norm(delta_u, axis=-1, keepdims=True)
+            max_delta = 0.5 * u_tangent_mag
+            scale = np.minimum(max_delta / (delta_u_mag + 1e-10), 1.0)
+            delta_u = delta_u * scale
+            u_bc_tangent = u_tangent - delta_u
+        else:
+            # 尚未计算摩擦速度，保持内部切向速度
+            u_bc_tangent = u_tangent.copy()
         
         # 组合
         u_bc = u_bc_normal * normal + u_bc_tangent

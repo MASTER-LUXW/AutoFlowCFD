@@ -276,7 +276,7 @@ class SmagorinskyModel:
         return nu_t
     
     def apply_van_driest_damping(self, nu_t: np.ndarray, y_dist: np.ndarray,
-                                nu: float) -> np.ndarray:
+                                nu: float, u_tau: Optional[np.ndarray] = None) -> np.ndarray:
         """
         应用 Van Driest 阻尼函数（近壁修正）。
         
@@ -286,19 +286,25 @@ class SmagorinskyModel:
             nu_t: 原始涡粘系数
             y_dist: 到壁面的距离
             nu: 运动粘度
+            u_tau: 摩擦速度（可选）。提供时精确计算 y+；
+                   未提供时用涡粘系数估计。
             
         Returns:
             nu_t_damped: 阻尼后的涡粘系数
         """
-        # 计算 y+（需要摩擦速度，这里简化处理）
-        # 实际应传入 u_tau
         A_plus = 25.0  # Van Driest 常数
         
-        # 简化：假设 y+ 与 y_dist 成正比
-        y_plus_approx = y_dist / nu * 0.1  # 粗略估计
+        if u_tau is not None:
+            # 精确 y+ = y * u_tau / nu
+            y_plus = y_dist * np.abs(u_tau) / nu
+        else:
+            # 无摩擦速度时，用涡粘系数估计特征速度
+            nu_t_max = np.max(nu_t)
+            u_tau_est = np.sqrt(nu_t_max) if nu_t_max > 0 else 0.1
+            y_plus = y_dist * u_tau_est / nu
         
         # 阻尼函数
-        f_d = 1.0 - np.exp(-y_plus_approx / A_plus)
+        f_d = 1.0 - np.exp(-y_plus / A_plus)
         
         nu_t_damped = nu_t * f_d
         

@@ -97,7 +97,7 @@ def parse_volume_mesh_nas(path: str, units: str = 'mm') -> VolumeMeshData:
         ValueError: 无 GRID 卡片、无 CTETRA/CPENTA 卡片（例如误传了
             纯表面文件），或无效的 `units` 值。
     """
-    from ..mesh_gen.mesh_prism_to_tet import orient_tetrahedra
+    from ..mesh_gen.tetgen.mesh_prism_to_tet import orient_tetrahedra
     from ..validation.quality_metrics import compute_prism_volumes
 
     if units not in ('mm', 'm', 'auto'):

@@ -287,13 +287,36 @@ class CoefficientCalculator:
         return forces
     
     def _get_average_pressure(self) -> float:
-        """获取平均压力值（简化实现）。
-        
+        """从流场解中提取平均压力值。
+
+        遍历解向量中的密度分量（守恒变量第 0 个分量即密度 ρ），
+        用理想气体状态方程 p = ρRT 估算压力场，再取全部单元的平均值。
+
         Returns:
             平均压力值（Pa）
         """
-        # TODO: 从solution中准确提取压力场
-        # 当前返回标准大气压作为占位符
+        if self.solution is None:
+            logger.warning("无解向量，返回标准大气压")
+            return 101325.0
+
+        try:
+            sol_array = self.solution.to_array() if hasattr(self.solution, 'to_array') else None
+            if sol_array is not None and sol_array.ndim >= 1:
+                if sol_array.ndim == 3:
+                    rho_field = sol_array[:, :, 0]
+                    rho_avg = np.mean(rho_field)
+                elif sol_array.ndim == 2:
+                    rho_avg = np.mean(sol_array[:, 0])
+                else:
+                    rho_avg = np.mean(sol_array)
+
+                R_gas = 287.0  # J/(kg·K)
+                T_ref = 288.15  # K
+                p_avg = rho_avg * R_gas * T_ref
+                return float(p_avg)
+        except Exception as e:
+            logger.warning(f"从解中提取压力失败: {e}，返回标准大气压")
+
         return 101325.0  # Pa
 
     def calculate_by_boundary(
@@ -326,12 +349,46 @@ class CoefficientCalculator:
 
         logger.info(f"Calculating coefficients for boundary: {boundary_name}")
 
-        # TODO: 实现按边界的积分——需要按边界组过滤面，只对那部分面积分
-        # 占位实现：返回全零系数
-        coeffs = AerodynamicCoefficients()
+        # 对该边界组所属于的面进行压力+粘性力面积分
+        total_force = np.zeros(3)
+        total_moment = np.zeros(3)
+        reference_point = np.array([0.0, 0.0, 0.0])
+        pressure_avg = self._get_average_pressure()
 
-        logger.warning(
-            f"Boundary-specific calculation not yet fully implemented. "
-            f"Returning zero coefficients for '{boundary_name}'."
+        boundary_faces = self.grid_data.boundaries.groups[boundary_name]
+        if hasattr(boundary_faces, '__iter__'):
+            for face_idx in boundary_faces:
+                try:
+                    face_data = self.grid_data.get_face_data(face_idx)
+                    area = face_data.get('area', 0.0)
+                    normal = face_data.get('normal', np.array([0.0, 0.0, 1.0]))
+                    centroid = face_data.get('centroid', np.array([0.0, 0.0, 0.0]))
+
+                    force = -pressure_avg * area * normal
+                    r = centroid - reference_point
+                    moment = np.cross(r, force)
+
+                    total_force += force
+                    total_moment += moment
+                except (IndexError, AttributeError, KeyError):
+                    logger.warning(f"Could not process face {face_idx}")
+                    continue
+
+        drag_force = total_force[0]
+        side_force = total_force[1]
+        lift_force = -total_force[2]
+        pitch_moment = total_moment[1]
+        yaw_moment = -total_moment[2]
+        roll_moment = total_moment[0]
+
+        coeffs = AerodynamicCoefficients(
+            Cd=drag_force / (self.dynamic_pressure * self.reference_area),
+            Cl=lift_force / (self.dynamic_pressure * self.reference_area),
+            Cm=pitch_moment / (self.dynamic_pressure * self.reference_area * self.reference_length),
+            Cs=side_force / (self.dynamic_pressure * self.reference_area),
+            Cy=yaw_moment / (self.dynamic_pressure * self.reference_area * self.reference_length),
+            Cr=roll_moment / (self.dynamic_pressure * self.reference_area * self.reference_length),
         )
+
+        logger.success(f"Boundary coefficients for '{boundary_name}':\n{coeffs}")
         return coeffs

@@ -263,8 +263,10 @@ def compute_inviscid_residual_fr(
     from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
     from autoflowcfd.core.fr_residual.inviscid_kernel import (
         compute_inviscid_interface_correction_kernel,
-        compute_inviscid_interface_correction_kernel_colored,
         compute_boundary_ghost_states,
+    )
+    from autoflowcfd.core.fr_residual.inviscid_kernel_colored import (
+        compute_inviscid_interface_correction_kernel_colored,
     )
 
     flat = get_flat_face_geometry(mesh, ops)

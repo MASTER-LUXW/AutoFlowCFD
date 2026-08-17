@@ -118,8 +118,8 @@ def import_external_volume_mesh(
         类型相同（例如通过 pickled 缓存文件——见
         cli/solve_commands.py 自身的 .pkl 处理）。
     """
-    from ..nas_io.nas_parser_volume import parse_volume_mesh_nas
-    from ..nas_io.parser_core import NASParser
+    from ...nas_io.nas_parser_volume import parse_volume_mesh_nas
+    from ...nas_io.parser_core import NASParser
     from .mesh_boundary import map_boundaries_by_geometry
     from ...validation.quality_validator import MeshQualityValidator
 

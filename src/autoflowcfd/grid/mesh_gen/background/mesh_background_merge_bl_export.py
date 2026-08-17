@@ -33,7 +33,7 @@ def _export_bl_only_and_exit(
     logger.success(f"Exporting BL-only mesh to: {export_bl_only_path}")
 
     try:
-        from ..nas_io.nas_export import export_volume_mesh_to_nas
+        from ...nas_io.nas_export import export_volume_mesh_to_nas
         from ...schema.grid_nodes import NodeArray, PrismCells, BoundaryMap, GridMetadata, VolumeMeshData, TetrahedralCells
 
         # bl_nodes 包含所有挤出层（BL + 过渡层），但 bl_prisms 只索引

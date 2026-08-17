@@ -29,9 +29,11 @@ from autoflowcfd.core.gpu.gpu_time_integration import (
     enforce_positivity_gpu,
     compute_local_cfl_step_gpu,
 )
+from autoflowcfd.core.gpu.gpu_solver_init import _GPUSolverInitMixin
+from autoflowcfd.core.gpu.gpu_solver_io import _GPUSolverIOMixin
 
 
-class GPUFRSolver:
+class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
     """GPU 版 FR 求解器。
 
     与 CPU 版 FRSolver 接口一致，内部全程使用 CuPy 数组。
@@ -153,94 +155,6 @@ class GPUFRSolver:
         print(f"   Device: {device_id} ({self.array_mgr._device_name})")
         print(f"   Time Scheme: {time_scheme}, CFL: {cfl}")
 
-    def _init_face_geometry(self):
-        """初始化 GPU 面几何缓存。"""
-        try:
-            from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
-            flat_face = get_flat_face_geometry(self.mesh, self.ops)
-            from autoflowcfd.core.gpu.gpu_face_geometry import build_gpu_flat_face
-            self.flat_face_gpu = build_gpu_flat_face(flat_face, self.device_id)
-        except Exception as e:
-            logger.warning(f"Face geometry init failed: {e}")
-            self.flat_face_gpu = None
-
-    def _init_modal_filter_gpu(self):
-        """初始化 GPU 模态滤波回调函数。"""
-        cp = get_cupy()
-        n_cells = self.mesh.n_cells
-        n_sps = self.mesh.n_sps_per_cell
-        n_prism = self.mesh.n_prism_cells
-
-        try:
-            # 获取滤波矩阵并上传到 GPU
-            filter_prism = self.ops.filter_prism
-            filter_tet = self.ops.filter_tet
-
-            if filter_prism is not None or filter_tet is not None:
-                from autoflowcfd.core.gpu.gpu_modal_filter import build_gpu_filter_func
-                self.filter_func_gpu = build_gpu_filter_func(
-                    n_cells, n_sps, n_prism,
-                    filter_prism, filter_tet,
-                    device_id=self.device_id,
-                )
-                logger.debug("GPU modal filter initialized")
-        except Exception as e:
-            logger.warning(f"Modal filter init failed: {e}, running without filter")
-            self.filter_func_gpu = None
-
-    def _init_wall_distance_gpu(self):
-        """预计算壁面距离场并上传到 GPU。
-
-        使用 KD-Tree 欧氏距离（与 CPU 版一致），在初始化时一次性计算。
-        """
-        cp = get_cupy()
-        n_cells = self.mesh.n_cells
-        n_sps = self.mesh.n_sps_per_cell
-
-        try:
-            # 尝试从 mesh 获取壁面节点和 SP 坐标
-            if hasattr(self.mesh, 'sps_coords') and self.mesh.sps_coords is not None:
-                sps_coords = self.mesh.sps_coords.reshape(-1, 3)
-            elif hasattr(self.mesh, 'cell_centers') and self.mesh.cell_centers is not None:
-                sps_coords = np.tile(self.mesh.cell_centers, (1, n_sps)).reshape(-1, 3)
-            else:
-                logger.warning("No SP/cell-center coordinates available for wall distance")
-                self.wall_distance_gpu = cp.ones((n_cells, n_sps), dtype=cp.float64) * 0.01
-                return
-
-            # 查找壁面节点
-            wall_indices = None
-            if hasattr(self.mesh, 'boundary_groups'):
-                for bg_name, bg in self.mesh.boundary_groups.items():
-                    if 'WALL' in bg_name.upper() or bg.get('type', '').upper() == 'WALL':
-                        wall_indices = bg.get('node_indices')
-                        break
-            if wall_indices is None and hasattr(self.mesh, 'nodes'):
-                # 回退：使用所有边界节点
-                wall_indices = np.array([], dtype=np.int64)
-
-            if wall_indices is not None and len(wall_indices) > 0:
-                from scipy.spatial import cKDTree
-                wall_coords = self.mesh.nodes[wall_indices]
-                tree = cKDTree(wall_coords)
-                dist_flat, _ = tree.query(sps_coords, k=1)
-                self.wall_distance_gpu = cp.asarray(
-                    dist_flat.reshape(n_cells, n_sps)
-                )
-                logger.info(f"Wall distance computed: min={dist_flat.min():.6e}, max={dist_flat.max():.6e}")
-            else:
-                # 无壁面信息，使用特征长度
-                volumes = self.mesh_data.get('cell_volumes')
-                if volumes is None:
-                    volumes = cp.asarray(self.mesh.get_all_cell_volumes())
-                h_char = volumes ** (1.0 / 3.0)
-                self.wall_distance_gpu = cp.broadcast_to(
-                    h_char[:, None], (n_cells, n_sps)
-                ).copy()
-                logger.warning("Wall distance: using characteristic length as estimate")
-        except Exception as e:
-            logger.warning(f"Wall distance computation failed: {e}, using fallback")
-            self.wall_distance_gpu = cp.ones((n_cells, n_sps), dtype=cp.float64) * 0.01
 
     def _update_primitives_gpu(self):
         """GPU 上更新原始变量。"""
@@ -328,78 +242,6 @@ class GPUFRSolver:
             ops_data=self.ops_data,
             device_id=self.device_id,
         )
-
-    def compute_turbulence_source_gpu(self):
-        """GPU 计算湍流模型源项。
-
-        完整流程：
-        1. 计算速度梯度（GPU）
-        2. 计算 k/ω 的真实物理梯度（GPU）
-        3. 使用预计算的壁面距离
-        4. 计算 SST 源项
-        5. 更新 k/ω 场（含正性限制器）
-
-        Returns:
-            mu_t: 动力涡粘度 rho*nu_t (n_cells, n_sps) CuPy 数组，无湍流模型时返回 None
-        """
-        if self.turb_model_gpu is None:
-            return None
-
-        cp = get_cupy()
-        n_cells = self.mesh.n_cells
-        n_sps = self.mesh.n_sps_per_cell
-
-        # 1. 计算速度梯度（GPU）
-        from autoflowcfd.core.gpu.gpu_gradients import (
-            compute_physical_gradient_gpu,
-            compute_physical_scalar_gradient_gpu,
-        )
-        grad_U = compute_physical_gradient_gpu(
-            self.U_gpu[..., :5], self.mesh_data, self.ops_data,
-        )
-
-        # 2. 壁面距离（预计算）
-        d_wall = self.wall_distance_gpu
-        if d_wall is None:
-            d_wall = cp.ones((n_cells, n_sps), dtype=cp.float64) * 0.01
-
-        # 3. 计算 k/ω 的真实物理梯度
-        grad_k = compute_physical_scalar_gradient_gpu(
-            self.turb_model_gpu.k_field, self.mesh_data, self.ops_data,
-        )
-        grad_omega = compute_physical_scalar_gradient_gpu(
-            self.turb_model_gpu.omega_field, self.mesh_data, self.ops_data,
-        )
-
-        # 梯度限幅（防止源项爆炸）
-        max_grad_mag = 1e6
-        grad_k_mag = cp.linalg.norm(grad_k, axis=-1)
-        grad_omega_mag = cp.linalg.norm(grad_omega, axis=-1)
-        if cp.any(grad_k_mag > max_grad_mag):
-            scale_k = max_grad_mag / cp.maximum(grad_k_mag, 1e-10)
-            grad_k *= cp.clip(scale_k, 0, 1)[..., None]
-        if cp.any(grad_omega_mag > max_grad_mag):
-            scale_omega = max_grad_mag / cp.maximum(grad_omega_mag, 1e-10)
-            grad_omega *= cp.clip(scale_omega, 0, 1)[..., None]
-
-        # 4. 计算 SST 源项
-        Sk, S_omega = self.turb_model_gpu.compute_source_terms_gpu(
-            self.Q_gpu, grad_U, d_wall, self.mu_molecular,
-            grad_k, grad_omega,
-        )
-
-        # 5. 换算为 dk/dt, domega/dt（除以 rho）并更新湍流场
-        rho = self.Q_gpu[:, :, 0]
-        dk_dt = Sk / cp.maximum(rho, 1e-10)
-        domega_dt = S_omega / cp.maximum(rho, 1e-10)
-
-        # 使用局部 CFL 步长更新湍流场（算子分裂：湍流走独立显式更新）
-        dt_local = self._compute_local_time_step_gpu()
-        dt_mean = cp.mean(dt_local)
-        self.turb_model_gpu.update_fields_gpu(float(dt_mean), dk_dt, domega_dt)
-
-        # 返回动力涡粘度 mu_t = rho * nu_t
-        return rho * self.turb_model_gpu.nu_t
 
     def _compute_local_time_step_gpu(self):
         """GPU 计算局部 CFL 时间步长（使用所有 SP 的谱半径）。"""
@@ -605,109 +447,3 @@ class GPUFRSolver:
             'residual_history': self.residual_history,
         }
 
-    def get_state_cpu(self) -> Dict[str, np.ndarray]:
-        """将 GPU 状态下载回 CPU。
-
-        Returns:
-            状态字典（numpy 数组）
-        """
-        return {
-            'U': self.array_mgr.to_cpu(self.U_gpu),
-            'Q': self.array_mgr.to_cpu(self.Q_gpu),
-        }
-
-    def set_state_from_cpu(self, U_np: np.ndarray):
-        """从 CPU 设置求解器状态。
-
-        Args:
-            U_np: numpy 数组 (n_cells, n_sps, n_vars)
-        """
-        self.U_gpu = self.array_mgr.to_gpu(U_np)
-        self._update_primitives_gpu()
-
-    def cleanup(self):
-        """释放 GPU 资源。"""
-        self.array_mgr.cleanup()
-
-    def save_checkpoint(self, path: str):
-        """保存 GPU 求解器状态到 checkpoint 文件。
-
-        Args:
-            path: checkpoint 文件路径（.h5 格式）
-        """
-        import h5py
-        cp = get_cupy()
-
-        # 下载 GPU 数据到 CPU
-        U_cpu = cp.asnumpy(self.U_gpu)
-        Q_cpu = cp.asnumpy(self.Q_gpu)
-
-        with h5py.File(path, 'w') as f:
-            # 保存守恒变量和原始变量
-            f.create_dataset('U', data=U_cpu)
-            f.create_dataset('Q', data=Q_cpu)
-
-            # 保存元数据
-            f.attrs['iteration'] = self.iteration
-            f.attrs['n_cells'] = self.mesh.n_cells
-            f.attrs['n_sps'] = self.mesh.n_sps_per_cell
-            f.attrs['order'] = self.order
-            f.attrs['time_scheme'] = self.time_integrator.scheme
-            f.attrs['cfl'] = self.time_integrator.cfl
-
-            # 保存残差历史
-            if self.residual_history:
-                f.create_dataset('residual_history', data=np.array(self.residual_history))
-
-            # 保存湍流场（如果有）
-            if self.turb_model_gpu is not None:
-                k_cpu = cp.asnumpy(self.turb_model_gpu.k_field)
-                omega_cpu = cp.asnumpy(self.turb_model_gpu.omega_field)
-                f.create_dataset('k', data=k_cpu)
-                f.create_dataset('omega', data=omega_cpu)
-
-            # 保存 DUAL_TIME 历史（如果有）
-            if self._dual_time_U_prev is not None:
-                U_prev_cpu = cp.asnumpy(self._dual_time_U_prev)
-                f.create_dataset('U_prev', data=U_prev_cpu)
-
-        logger.info(f"GPU checkpoint saved to {path}")
-
-    def load_checkpoint(self, path: str):
-        """从 checkpoint 文件加载 GPU 求解器状态。
-
-        Args:
-            path: checkpoint 文件路径（.h5 格式）
-        """
-        import h5py
-        cp = get_cupy()
-
-        with h5py.File(path, 'r') as f:
-            # 加载守恒变量和原始变量
-            U_cpu = f['U'][:]
-            Q_cpu = f['Q'][:]
-
-            # 上传到 GPU
-            self.U_gpu = cp.asarray(U_cpu)
-            self.Q_gpu = cp.asarray(Q_cpu)
-
-            # 加载元数据
-            self.iteration = int(f.attrs['iteration'])
-
-            # 加载残差历史
-            if 'residual_history' in f:
-                self.residual_history = f['residual_history'][:].tolist()
-
-            # 加载湍流场（如果有）
-            if 'k' in f and 'omega' in f and self.turb_model_gpu is not None:
-                k_cpu = f['k'][:]
-                omega_cpu = f['omega'][:]
-                self.turb_model_gpu.k_field = cp.asarray(k_cpu)
-                self.turb_model_gpu.omega_field = cp.asarray(omega_cpu)
-
-            # 加载 DUAL_TIME 历史（如果有）
-            if 'U_prev' in f:
-                U_prev_cpu = f['U_prev'][:]
-                self._dual_time_U_prev = cp.asarray(U_prev_cpu)
-
-        logger.info(f"GPU checkpoint loaded from {path}, iteration={self.iteration}")

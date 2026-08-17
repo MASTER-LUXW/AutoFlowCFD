@@ -62,7 +62,10 @@ class DDESModel:
         if method == 'cube_root':
             return cell_volumes ** (1.0 / 3.0)
         elif method == 'max_edge':
-            # 需要额外的网格边长信息，此处简化
+            logger.warning(
+                "compute_grid_scale: 'max_edge' 方法需要网格边长信息，"
+                "当前仅有单元体积，退化为 cube_root。"
+            )
             return cell_volumes ** (1.0 / 3.0)
         else:
             raise ValueError(f"Unknown method: {method}")
@@ -260,7 +263,7 @@ class IDDESModel(DDESModel):
 
 if __name__ == "__main__":
     # 测试代码
-    from turbulence_sst import SSTModelFR
+    from autoflowcfd.core.turbulence.sst import SSTModelFR
     
     # 创建测试数据
     n_cells = 100

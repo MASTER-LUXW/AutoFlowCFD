@@ -229,46 +229,74 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     """把 `mesh.face_flux_points` + `mesh.face_connectivity` 展平成
     `FlatFaceGeometry`。不缓存（缓存由 `get_flat_face_geometry` 负责），
     每次调用都重新构建——调用方必须通过 `get_flat_face_geometry` 走缓存。
+
+    快速路径：当 `mesh.face_flux_points` 是 `_KernelFaceData`（numba kernel
+    直接输出的 flat 数组容器）时，跳过 180 万次逐面 Python 对象访问，直接
+    使用已有的 flat 数组。
     """
     fc = mesh.face_connectivity
-    ffp_list = mesh.face_flux_points
+    ffp_data = mesh.face_flux_points
     n_faces = fc.n_faces
     n1d = mesh.n_points_1d
     n_fp = n1d * n1d
     n_sps = n1d ** 3
     n_prism = mesh.n_prism_cells
 
-    owner_axis = np.empty(n_faces, dtype=np.int64)
-    owner_side = np.empty(n_faces, dtype=np.float64)
-    neighbor_axis = np.empty(n_faces, dtype=np.int64)
-    neighbor_side = np.empty(n_faces, dtype=np.float64)
-    owner_is_primary = np.empty(n_faces, dtype=np.bool_)
-    neighbor_is_primary = np.empty(n_faces, dtype=np.bool_)
-    true_normal = np.empty((n_faces, n_fp, 3), dtype=np.float64)
+    # 检查是否为 _KernelFaceData 快速路径
+    from autoflowcfd.fr.face_flux_points_merge import _KernelFaceData
+    if isinstance(ffp_data, _KernelFaceData):
+        # 快速路径：直接使用 kernel 输出的 flat 数组
+        owner_axis = ffp_data.owner_axis
+        owner_side = ffp_data.owner_side
+        neighbor_axis = ffp_data.neighbor_axis
+        neighbor_side = ffp_data.neighbor_side
+        owner_is_primary = ffp_data.owner_is_primary
+        neighbor_is_primary = ffp_data.neighbor_is_primary
+        true_normal = ffp_data.true_normal
+        neighbor_src0_cell = ffp_data.nb_src0_cell
+        neighbor_src0_mat = ffp_data.nb_src0_mat
+        neighbor_src1_idx = ffp_data.nb_src1_idx
+        owner_src0_cell = ffp_data.ow_src0_cell
+        owner_src0_mat = ffp_data.ow_src0_mat
+        owner_src1_idx = ffp_data.ow_src1_idx
+        # extra sources → src1（紧凑数组，通过 src1_idx 索引）
+        neighbor_src1_cell = ffp_data.nb_extra_cell
+        neighbor_src1_mat = ffp_data.nb_extra_mat
+        owner_src1_cell = ffp_data.ow_extra_cell
+        owner_src1_mat = ffp_data.ow_extra_mat
+    else:
+        # 慢速路径：逐面访问 FaceFluxPointGeometry 对象
+        owner_axis = np.empty(n_faces, dtype=np.int64)
+        owner_side = np.empty(n_faces, dtype=np.float64)
+        neighbor_axis = np.empty(n_faces, dtype=np.int64)
+        neighbor_side = np.empty(n_faces, dtype=np.float64)
+        owner_is_primary = np.empty(n_faces, dtype=np.bool_)
+        neighbor_is_primary = np.empty(n_faces, dtype=np.bool_)
+        true_normal = np.empty((n_faces, n_fp, 3), dtype=np.float64)
 
-    neighbor_sources_per_face = [None] * n_faces
-    owner_sources_per_face = [None] * n_faces
+        neighbor_sources_per_face = [None] * n_faces
+        owner_sources_per_face = [None] * n_faces
 
-    for f in range(n_faces):
-        ffp = ffp_list[f]
-        owner_axis[f] = ffp.owner_axis
-        owner_side[f] = ffp.owner_side
-        neighbor_axis[f] = ffp.neighbor_axis
-        neighbor_side[f] = ffp.neighbor_side
-        owner_is_primary[f] = ffp.owner_is_primary
-        neighbor_is_primary[f] = ffp.neighbor_is_primary
-        true_normal[f] = ffp.true_normal
-        neighbor_sources_per_face[f] = ffp.neighbor_sources
-        owner_sources_per_face[f] = ffp.owner_sources
+        for f in range(n_faces):
+            ffp = ffp_data[f]
+            owner_axis[f] = ffp.owner_axis
+            owner_side[f] = ffp.owner_side
+            neighbor_axis[f] = ffp.neighbor_axis
+            neighbor_side[f] = ffp.neighbor_side
+            owner_is_primary[f] = ffp.owner_is_primary
+            neighbor_is_primary[f] = ffp.neighbor_is_primary
+            true_normal[f] = ffp.true_normal
+            neighbor_sources_per_face[f] = ffp.neighbor_sources
+            owner_sources_per_face[f] = ffp.owner_sources
 
-    (neighbor_src0_cell, neighbor_src0_mat, neighbor_src1_idx,
-     neighbor_src1_cell, neighbor_src1_mat) = _build_source_arrays(
-        neighbor_sources_per_face, n_faces, n_fp, n_sps
-    )
-    (owner_src0_cell, owner_src0_mat, owner_src1_idx,
-     owner_src1_cell, owner_src1_mat) = _build_source_arrays(
-        owner_sources_per_face, n_faces, n_fp, n_sps
-    )
+        (neighbor_src0_cell, neighbor_src0_mat, neighbor_src1_idx,
+         neighbor_src1_cell, neighbor_src1_mat) = _build_source_arrays(
+            neighbor_sources_per_face, n_faces, n_fp, n_sps
+        )
+        (owner_src0_cell, owner_src0_mat, owner_src1_idx,
+         owner_src1_cell, owner_src1_mat) = _build_source_arrays(
+            owner_sources_per_face, n_faces, n_fp, n_sps
+        )
 
     # boundary_extrap_tet/prism: Dict[(axis:int,side:float), (n_fp,n_sps)矩阵]
     # -> (2,3,2,n_fp,n_sps)，[celltype(0=prism,1=tet), axis, side_idx]

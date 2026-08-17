@@ -267,29 +267,87 @@ def benchmark(
     logger.info(f"运行基准测试: grid={grid_file}, backend={backend}")
     
     try:
-        # TODO: 实现实际的基准测试
-        # 这需要加载网格、设置求解器并运行迭代
-        
-        logger.warning("基准测试功能正在开发中")
-        
+        import time as _time
+        import numpy as np
+
+        # 加载网格
+        t_start = _time.perf_counter()
+        from autoflowcfd.grid.nas_io.parser import NASParser
+        parser = NASParser(grid_file)
+        grid_data = parser.parse()
+        t_load = _time.perf_counter() - t_start
+
+        # 构建高阶网格
+        from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
+        mesh = HighOrderMesh(grid_data, order=order)
+        t_mesh = _time.perf_counter() - t_start - t_load
+
+        # 初始化自由来流解向量
+        from autoflowcfd.core.fr_residual.inviscid import compute_inviscid_residual_fr
+        n_cells = mesh.n_cells
+        n_sps = mesh.n_sps_per_cell
+        n_vars = 5
+        rho_inf, u_inf, p_inf = 1.225, 30.0, 101325.0
+        E_inf = p_inf / 0.4 + 0.5 * rho_inf * u_inf**2
+        U_init = np.zeros((n_cells, n_sps, n_vars))
+        U_init[:, :, 0] = rho_inf
+        U_init[:, :, 1] = rho_inf * u_inf
+        U_init[:, :, 4] = E_inf
+
+        # 预热（触发 Numba JIT 编译）
+        try:
+            _ = compute_inviscid_residual_fr(mesh, U_init)
+        except Exception:
+            pass
+
+        # 正式基准测试
+        t_bench_start = _time.perf_counter()
+        for _ in range(iterations):
+            _ = compute_inviscid_residual_fr(mesh, U_init)
+        t_bench = _time.perf_counter() - t_bench_start
+
+        # 内存使用
+        try:
+            import psutil
+            mem_mb = psutil.Process().memory_info().rss / 1024 / 1024
+        except ImportError:
+            mem_mb = -1.0
+
+        rate_per_min = iterations / (t_bench / 60.0) if t_bench > 0 else 0.0
+
         result = {
             "command": "utils.benchmark",
-            "status": "pending",
-            "message": "基准测试功能即将推出",
+            "status": "success",
             "grid_file": grid_file,
             "backend": backend,
+            "order": order,
             "iterations": iterations,
+            "n_cells": int(n_cells),
+            "n_sps": int(n_sps),
+            "grid_load_time_s": round(t_load, 3),
+            "mesh_build_time_s": round(t_mesh, 3),
+            "benchmark_time_s": round(t_bench, 3),
+            "rate_iter_per_min": round(rate_per_min, 1),
+            "memory_mb": round(mem_mb, 1),
         }
-        
+
         if json_output:
             click.echo(json.dumps(result, indent=2))
         else:
-            click.echo("\n性能基准测试")
+            click.echo("\n性能基准测试结果")
             click.echo(f"{'='*60}")
-            click.echo(f"网格文件:  {grid_file}")
-            click.echo(f"后端:    {backend.upper()}")
-            click.echo(f"迭代次数: {iterations}")
-            click.echo(f"\n⚠️  基准测试功能正在开发中")
+            click.echo(f"网格文件:    {grid_file}")
+            click.echo(f"后端:        {backend.upper()}")
+            click.echo(f"多项式阶数:  P{order}")
+            click.echo(f"单元数:      {n_cells}")
+            click.echo(f"每单元SPs:   {n_sps}")
+            click.echo(f"迭代次数:    {iterations}")
+            click.echo(f"网格加载:    {t_load:.3f} s")
+            click.echo(f"网格构建:    {t_mesh:.3f} s")
+            click.echo(f"基准测试:    {t_bench:.3f} s")
+            click.echo(f"计算速率:    {rate_per_min:.1f} iter/min")
+            if mem_mb > 0:
+                click.echo(f"内存占用:    {mem_mb:.1f} MB")
             click.echo(f"{'='*60}")
     
     except Exception as e:

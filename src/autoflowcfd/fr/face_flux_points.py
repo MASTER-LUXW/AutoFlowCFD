@@ -103,11 +103,11 @@ class FaceFluxPointGeometry:
     *真正* 所属的那个相邻单元，而不是把整张四边形都指给其中一个。
 
     因此本结构不再直接存一个 (n_fp, n_sps) 插值矩阵 + 单一 neighbor_cell，
-    而是存 sources 列表：每个元素是 (real_cell_id, (n_fp, n_sps) 矩阵)，
+    而是存 sources 列表：每个元素是 (real_cell_id, (n_fp,n_sps) 矩阵)，
     矩阵在不属于该 real_cell 的 FP 行上恒为 0——调用方对列表求和即可得到
     正确的、按物理位置精确来源组装出的界面场，不管背后是 1 个还是 2 个
     真实相邻单元。*_is_primary 标记这条 face_connectivity 记录是否是其
-    (cell, 立方体面) 分组里"负责触发一次自身外插+校正投影"的那条——非
+    (cell, 立方体面) 分组里“负责触发一次自身外插+校正投影”的那条——非
     primary 的记录只贡献跨单元插值信息（已经被合并进 primary 记录的
     sources 里），本身不应再触发一次自身贡献，否则等价于重复计入。
 
@@ -126,6 +126,11 @@ class FaceFluxPointGeometry:
         neighbor_is_primary: 本记录是否负责 neighbor 侧的自身外插+校正投影
             （边界面恒为 True，但此时不产生 neighbor 侧计算）
     """
+    __slots__ = (
+        'owner_axis', 'owner_side', 'neighbor_axis', 'neighbor_side',
+        'neighbor_sources', 'owner_sources', 'true_normal',
+        'true_area_weight', 'owner_is_primary', 'neighbor_is_primary',
+    )
 
     owner_axis: int
     owner_side: float
@@ -135,8 +140,8 @@ class FaceFluxPointGeometry:
     owner_sources: List[tuple]
     true_normal: np.ndarray
     true_area_weight: np.ndarray
-    owner_is_primary: bool = True
-    neighbor_is_primary: bool = True
+    owner_is_primary: bool
+    neighbor_is_primary: bool
 
 
 def face_ref_grid(n1d: int, axis: int, side: float, sps_1d: np.ndarray) -> np.ndarray:
@@ -167,6 +172,8 @@ def build_cross_interp(
     source_phys: np.ndarray,
     char_length: float = 1.0,
     translation: np.ndarray = None,
+    precomputed_free_coords: np.ndarray = None,
+    precomputed_resid: float = None,
 ) -> tuple:
     """求 target_cell 的解在给定 source_phys 目标物理点集上的取值算子，
     形状 (n_source_pts, n_sps)。target_cell 的固定面由 (target_axis,target_side) 给定。
@@ -179,12 +186,22 @@ def build_cross_interp(
             周期像位置）里定位，必须先减去平移量，把目标点从"来源"侧
             的物理坐标系平移到"目标"侧的物理坐标系。非周期面（绝大多数
             调用）传 None，等价于零平移。
+        precomputed_free_coords: (n_pts, 2) 或 None。numba 并行 kernel
+            预计算的 Newton 自由坐标。提供时跳过 Newton 迭代，直接用于
+            构造插值矩阵（性能优化：避免对同一 cell-face 重复 Newton）。
+        precomputed_resid: float 或 None。与 precomputed_free_coords 配套
+            的预计算残差。
     """
     is_prism, cell_nodes = cell_info(mesh, target_cell)
-    search_phys = source_phys if translation is None else source_phys - translation[np.newaxis, :]
-    free_coords, final_resid = newton_locate_on_face(
-        is_prism, cell_nodes, target_axis, target_side, search_phys, char_length=char_length
-    )
+
+    if precomputed_free_coords is not None:
+        free_coords = precomputed_free_coords
+        final_resid = precomputed_resid if precomputed_resid is not None else 0.0
+    else:
+        search_phys = source_phys if translation is None else source_phys - translation[np.newaxis, :]
+        free_coords, final_resid = newton_locate_on_face(
+            is_prism, cell_nodes, target_axis, target_side, search_phys, char_length=char_length
+        )
 
     # 用与 fr/collapsed_basis.py::build_collapsed_boundary_extrap（owner
     # 侧自身外插用的同一套算子）一致的坍缩坐标模态基插值，而不是朴素 1D
