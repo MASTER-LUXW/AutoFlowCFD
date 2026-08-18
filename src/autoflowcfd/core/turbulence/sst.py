@@ -127,9 +127,15 @@ class SSTModelFR:
         sqrt_k = np.sqrt(k)
         term1 = sqrt_k / (self.beta_star * omega * d)
         term2 = 500.0 * nu / (d**2 * omega)
-        term3 = 4.0 * rho * self.sigma_w2 * k / (np.maximum(CD_kw, 1e-10) * d**2)
+        with np.errstate(over='ignore', invalid='ignore'):
+            term3 = 4.0 * rho * self.sigma_w2 * k / (np.maximum(CD_kw, 1e-10) * d**2)
 
         arg1 = np.minimum(np.maximum(term1, term2), term3)
+        # 防 overflow：arg1**4 在 arg1>~1.3e154 时超 float64 上限，
+        # tanh(大值)=1.0 物理正确（近壁 F1→1）。
+        # 退化网格上 term3 中间量可 overflow 到 inf，需先替换非有限值
+        arg1 = np.where(np.isfinite(arg1), arg1, 1e75)
+        arg1 = np.minimum(arg1, 1e75)
         F1 = np.tanh(arg1**4)
 
         return F1
@@ -165,7 +171,9 @@ class SSTModelFR:
         term1 = 2.0 * sqrt_k / (self.beta_star * omega * d)
         term2 = 500.0 * nu / (d**2 * omega)
         arg2 = np.maximum(term1, term2)
-
+        # 防 overflow：同 F1 策略
+        arg2 = np.where(np.isfinite(arg2), arg2, 1e150)
+        arg2 = np.minimum(arg2, 1e150)
         F2 = np.tanh(arg2**2)
 
         return F2
@@ -193,10 +201,13 @@ class SSTModelFR:
         S_mag = np.maximum(S_mag, 1e-10)
         
         # Boussinesq 假设下的涡粘系数
-        nu_t = self.a1 * k / np.maximum(self.a1 * omega, F2 * S_mag)
+        with np.errstate(over='ignore', invalid='ignore'):
+            nu_t = self.a1 * k / np.maximum(self.a1 * omega, F2 * S_mag)
         
         # 限制最大值以避免数值不稳定
         nu_t = np.minimum(nu_t, 1e6)
+        # NaN 安全网（k/omega 已被上游 limiter 保护，此处为防御性编程）
+        nu_t = np.where(np.isfinite(nu_t), nu_t, 0.0)
         
         return nu_t
 
@@ -229,23 +240,29 @@ class SSTModelFR:
         # 运动粘度
         nu = mu / np.maximum(rho, 1e-10)
 
+        # 钳制湍流变量防 overflow：k*omega 在 k,omega~1e155 时超 float64
+        # 上限。物理上 k<1e6, omega<1e8 已远超任何工程工况，保守取 1e40
+        # 确保 k*omega=1e80 后乘 rho*beta_star 仍安全
+        k_safe = np.minimum(self.k_field, 1e40)
+        omega_safe_raw = np.minimum(self.omega_field, 1e40)
+        omega_safe = np.maximum(omega_safe_raw, 1e-10)
+
         # 计算应变率模
         S_mag = self.compute_strain_rate_magnitude(grad_U)
 
         # 交叉扩散项 CD_kw（F1 与 S_omega 的 CD_omega 项共用同一个量，
         # 标准做法是先算这个再算两处，避免重复计算且保证一致）
         grad_dot_product = np.sum(grad_k * grad_omega, axis=2)  # (n_cells,n_sps)
-        omega_safe = np.maximum(self.omega_field, 1e-10)
         CD_kw = np.maximum(
             2.0 * rho * self.sigma_w2 / omega_safe * grad_dot_product, 1e-10
         )
 
-        # 计算 blending functions
+        # 计算 blending functions（传入钳制值，防止中间量 overflow）
         F1 = self.compute_blending_function_F1(
-            self.k_field, self.omega_field, d_wall, nu, S_mag, rho, CD_kw
+            k_safe, omega_safe, d_wall, nu, S_mag, rho, CD_kw
         )
         F2 = self.compute_blending_function_F2(
-            self.k_field, self.omega_field, d_wall, S_mag, nu
+            k_safe, omega_safe, d_wall, S_mag, nu
         )
 
         # Blending 常数
@@ -253,9 +270,9 @@ class SSTModelFR:
         sigma_w = F1 * self.sigma_w1 + (1.0 - F1) * self.sigma_w2
         beta = F1 * self.beta1 + (1.0 - F1) * self.beta2
 
-        # 计算涡粘系数
+        # 计算涡粘系数（传入钳制值）
         self.nu_t = self.compute_eddy_viscosity(
-            self.k_field, self.omega_field, rho, S_mag, F2
+            k_safe, omega_safe, rho, S_mag, F2
         )
 
         # === k 方程源项 ===
@@ -264,15 +281,15 @@ class SSTModelFR:
 
         # P_k 上限（标准 SST 要求，此前缺失）：P_k = min(P_k, 10*beta_star*rho*k*omega)，
         # 防止驻点/强剪切层附近产生项无界增长导致 k 失控。
-        P_k = np.minimum(P_k, 10.0 * self.beta_star * rho * self.k_field * omega_safe)
+        P_k = np.minimum(P_k, 10.0 * self.beta_star * rho * k_safe * omega_safe)
 
         # 耗散项：标准 RANS 为 D_k = ρ*β**k*ω；DES/DDES 激活时（T-04）
         # 替换为 D_k = ρ*k^1.5/l_eff，用 DDES 的混合长度尺度直接替代
         # SST 隐含的 RANS 耗散长度尺度，而不是用启发式系数缩放 β*。
         if self.des_length_scale is not None:
-            D_k = rho * self.k_field**1.5 / np.maximum(self.des_length_scale, 1e-10)
+            D_k = rho * k_safe**1.5 / np.maximum(self.des_length_scale, 1e-10)
         else:
-            D_k = rho * self.beta_star * self.k_field * self.omega_field
+            D_k = rho * self.beta_star * k_safe * omega_safe
 
         # k 方程总源项
         Sk = P_k - D_k
@@ -286,7 +303,8 @@ class SSTModelFR:
         P_omega = rho * gamma * S_mag**2
 
         # 耗散项: D_ω = ρ * β * ω^2
-        D_omega = rho * beta * self.omega_field**2
+        # omega_safe 已钳制到 [1e-10, 1e100]，平方后 1e200 仍在 float64 范围内
+        D_omega = rho * beta * omega_safe**2
 
         # 交叉扩散项: CD_ω = 2 * ρ * (1-F1) * σ_w2 / ω * ∇k · ∇ω（与上面
         # 算 CD_kw 用的是同一个 grad_dot_product，(1-F1) 权重是标准 SST
@@ -296,6 +314,11 @@ class SSTModelFR:
 
         # ω 方程总源项
         S_omega = P_omega - D_omega + CD_omega
+
+        # 源项 NaN/Inf 隔离：退化网格上 grad_k·grad_omega 等可能为 inf，
+        # 导致 inf-inf=NaN 传播。将非有限源项归零。
+        Sk = np.where(np.isfinite(Sk), Sk, 0.0)
+        S_omega = np.where(np.isfinite(S_omega), S_omega, 0.0)
 
         return Sk, S_omega
 
@@ -307,6 +330,14 @@ class SSTModelFR:
             min_k: k 的最小允许值
             min_omega: omega 的最小允许值
         """
+        # NaN/Inf 恢复：np.maximum(NaN, x) 仍返回 NaN，必须先替换
+        bad_k = ~np.isfinite(self.k_field)
+        bad_w = ~np.isfinite(self.omega_field)
+        if np.any(bad_k):
+            self.k_field[bad_k] = min_k
+        if np.any(bad_w):
+            self.omega_field[bad_w] = min_omega
+
         # 硬截断确保物理合理性（T-02 规范要求的正性约束：k,omega >= 0）
         self.k_field = np.maximum(self.k_field, min_k)
         self.omega_field = np.maximum(self.omega_field, min_omega)
@@ -351,10 +382,16 @@ class SSTModelFR:
         if transport_omega is not None:
             domega_total = domega_total + transport_omega
 
+        # NaN/Inf 隔离：退化网格上源项/输运项可能产生 NaN（inf-inf），
+        # 直接加到场量上会污染全场。将非有限增量归零，依赖后续的
+        # positivity limiter 钳制场量本身。
+        dk_total = np.where(np.isfinite(dk_total), dk_total, 0.0)
+        domega_total = np.where(np.isfinite(domega_total), domega_total, 0.0)
+
         self.k_field += dt * dk_total
         self.omega_field += dt * domega_total
         
-        # 应用正性限制器
+        # 应用正性限制器（含 NaN/Inf 恢复）
         self.apply_positivity_limiter()
         
     def get_turbulent_viscosity(self) -> np.ndarray:

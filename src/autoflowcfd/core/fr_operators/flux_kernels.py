@@ -68,7 +68,7 @@ def euler_physical_flux_point(Q: np.ndarray) -> np.ndarray:
     return F
 
 
-@njit(cache=True)
+@njit(cache=True, inline='always')
 def viscous_physical_flux_point(
     Q: np.ndarray, grad_vel: np.ndarray, grad_T: np.ndarray,
     mu: float, Pr: float, mu_t: float, Pr_t: float,

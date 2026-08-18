@@ -53,7 +53,7 @@ from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
 from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_point
 
 
-@njit(cache=True)
+@njit(cache=True, inline='always')
 def _extrap_matmul(field_cell: np.ndarray, E: np.ndarray) -> np.ndarray:
     """外插矩阵乘法：field_cell (n_sps, k), E (n_fp, n_sps) -> (n_fp, k)。
 
@@ -63,7 +63,7 @@ def _extrap_matmul(field_cell: np.ndarray, E: np.ndarray) -> np.ndarray:
     return E @ field_cell
 
 
-@njit(cache=True)
+@njit(cache=True, inline='always')
 def _distribute_point(fp_data: np.ndarray, fp_of_sp_axis: np.ndarray,
                        axis_coord_of_sp_axis: np.ndarray, g_prime: np.ndarray) -> np.ndarray:
     """`_distribute_from_face` 的逐点等价形式，见

@@ -4,11 +4,15 @@ AutoFlowCFD V2.0 - P0 阶专用有限体积无粘残差 (S-02)
 从 fr_residual_inviscid.py 拆出来（控制单文件行数，>400 行需拆分的
 项目规范）。`compute_inviscid_residual_fr` 在 `mesh.n_points_1d==1`
 时委托到这里，见该函数文档。
+
+性能优化：将原纯 Python 逐面循环替换为 numba 并行 kernel
+(inviscid_p0_kernel.py)，791K 单元 / 188 万面网格上从 ~25s 降至 ~1-2s。
 """
 
 from typing import Callable, Optional
 
 import numpy as np
+import numba
 
 
 def compute_inviscid_residual_fv_p0(
@@ -18,44 +22,15 @@ def compute_inviscid_residual_fv_p0(
 ) -> np.ndarray:
     """P0（1 SP/cell，Order Continuation 最低阶）专用有限体积残差。
 
-    背景：P>=1 的界面项用坍缩坐标体积度量张量 adj(J) 外插到面上再做一致性
-    校验（见 compute_inviscid_residual_fr 里的 alignment 校验），这在 P0
-    下必然报错——坍缩（Duffy）坐标的 Jacobian 在单元内部本就强烈非均匀
-    （fr/collapsed_basis.py 模块文档），单元内唯一那个解点（位于坍缩参考
-    立方体中心）处的度量方向，物理上没有理由与该单元 3~4 个不同面各自的
-    真实法向对齐——这不是数值 bug，是"用同一个点的坍缩度量代表所有面"
-    这一想法在数学上站不住脚。真实网格已复现：alignment cosine 可低至
-    0.20（约78°偏差），远超 0.5 的校验阈值。
+    算法与原 Python 版本完全一致（逐位等价，仅浮点重排顺序不同）：
+    1. 提取 flat 面几何数组（单位法向、面积权重、面连接关系）
+    2. 预计算边界幽灵态（Python 端，仅 ~40K 边界面）
+    3. numba 并行 kernel 执行 AUSM+up 黎曼求解 + scatter-add
+    4. per-thread buffer 归约得到最终残差
 
-    P0 在数学上唯一自洽的定义就是经典分片常数有限体积：完全不依赖坍缩
-    度量张量，直接用 face_connectivity 给出的真实几何法向 (ffp.true_normal)
-    与真实面积权重 (ffp.true_area_weight) 做迎风通量积分。owner/neighbor
-    共用同一个法向量、同一次 Riemann 求解结果（对两侧符号相反地施加），
-    天然精确守恒——不像 P>=1 那样需要 owner/neighbor 各自独立取自己的
-    度量法向（那是坍缩坐标外插固有的不一致来源，P0 完全没有这个问题，
-    因为这里用的是同一个真实几何法向，不是两个独立外插出来的近似法向）。
-
-    体积项在 P0 下无需计算：D_3d_tet/D_3d_prism 在 order=0 时解析恒为
-    零矩阵（常数函数对任何参考方向的导数都是零），体积散度贡献必为零。
-
-    关于棱柱四边形侧面拆分（真实网格已复现、修复的一个关键点）：
-    `build_face_flux_points` 对 face_connectivity 里的*每一条*记录（包括
-    棱柱四边形侧面因三角化被拆出的 2 条子面记录）都无条件调用
-    `result.append(...)`，`true_normal`/`true_area_weight` 也在
-    primary/非primary 判断之前就已算好、对每条记录都有效——`owner_is_primary`
-    /`neighbor_is_primary` 只是控制"是否触发一次自身外插+跨单元投影"
-    （P>=1 的坍缩度量路径需要，用来避免同一个原生 FP 网格被重复计入两次），
-    与"这条记录的真实几何面积/法向是否有效"无关。本函数因此直接按
-    face_connectivity 的原始每条记录处理（不经过 owner_is_primary 过滤、
-    不经过 neighbor_sources/owner_sources 的多源合并——P0 下每条记录本来
-    就唯一对应一个真实相邻单元，不存在"一个原生 FP 网格分给两个不同
-    相邻单元"这个 P>=1 才有的问题）：曾经的第一版实现按
-    `if not ffp.owner_is_primary: continue` 跳过非 primary 记录，等价于
-    直接丢弃了棱柱被拆分的那一半四边形的真实面积——对闭合单元的面积/
-    法向积分 Σ(n̂·A)=0 这一几何恒等式造成真实的（非浮点噪声量级的）
-    破坏，在小体积单元（真实网格边界层单元体积低至 ~1e-11 m³）上除以
-    体积后被放大到 1e11 量级的"伪残差"（已复现：直接改用本函数现在的
-    写法后，均匀自由流场残差恢复到机器精度量级）。
+    关于棱柱四边形侧面拆分的处理：与原 Python 版本一致，按
+    face_connectivity 的原始每条记录处理（不过滤 owner_is_primary），
+    保证闭合单元面积/法向积分 Σ(n̂·A)=0 的几何恒等式不被破坏。
 
     Args:
         U: 守恒变量，形状 (n_cells, 1, n_vars)
@@ -65,7 +40,8 @@ def compute_inviscid_residual_fv_p0(
     Returns:
         residual: 形状 (n_cells, 1, 5)
     """
-    from .fr_residual_inviscid import conserved_to_primitive, ausm_up_flux_batch, DefaultGhostProvider
+    from .inviscid import conserved_to_primitive, DefaultGhostProvider
+    from .inviscid_p0_kernel import _p0_inviscid_kernel
 
     n_cells = mesh.n_cells
     if mesh.cell_volumes is None:
@@ -75,33 +51,93 @@ def compute_inviscid_residual_fv_p0(
         )
     cell_volumes = mesh.cell_volumes
 
-    Q_all = conserved_to_primitive(U[..., :5])[:, 0, :]  # (n_cells,5)，P0 唯一解点即单元均值
+    Q_all = conserved_to_primitive(U[..., :5])[:, 0, :]  # (n_cells,5)
 
     fc = mesh.face_connectivity
     ffp_list = mesh.face_flux_points
+    n_faces = fc.n_faces
+
+    # --- 提取 flat 面几何数组 ---
+    unit_normals, area_weights = _extract_p0_face_geometry(ffp_list, n_faces)
+
+    # --- 预计算边界幽灵态 ---
     ghost_provider = boundary_ghost_provider if boundary_ghost_provider is not None else DefaultGhostProvider()
+    Q_ghost = _precompute_ghost_states(ffp_list, fc, ghost_provider, Q_all, n_faces)
 
-    residual5 = np.zeros((n_cells, 5))
+    # --- numba 并行 kernel ---
+    n_threads = numba.get_num_threads()
+    owner_cell = fc.owner_cell.astype(np.int64)
+    neighbor_cell = fc.neighbor_cell.astype(np.int64)
+    is_boundary = fc.is_boundary.astype(np.bool_)
 
-    for f in range(fc.n_faces):
-        ffp = ffp_list[f]
-        owner_cell = int(fc.owner_cell[f])
-        true_normal = ffp.true_normal  # (1,3)，owner->neighbor / 边界面指向域外
-        area_w = ffp.true_area_weight  # (1,)
+    residual_per_thread = _p0_inviscid_kernel(
+        owner_cell, neighbor_cell, is_boundary,
+        unit_normals, area_weights,
+        Q_all, Q_ghost, cell_volumes,
+        n_cells, n_threads,
+    )
 
-        Q_owner_fp = Q_all[owner_cell : owner_cell + 1]  # (1,5)
-
-        if fc.is_boundary[f]:
-            Q_neighbor_fp = ghost_provider(f, Q_owner_fp, true_normal)
-        else:
-            neighbor_cell = int(fc.neighbor_cell[f])
-            Q_neighbor_fp = Q_all[neighbor_cell : neighbor_cell + 1]
-
-        F_common_n = ausm_up_flux_batch(Q_owner_fp, Q_neighbor_fp, true_normal)  # (1,5)
-        flux_integral = F_common_n[0] * area_w[0]  # (5,)
-
-        residual5[owner_cell] += -flux_integral / cell_volumes[owner_cell]
-        if not fc.is_boundary[f]:
-            residual5[neighbor_cell] += flux_integral / cell_volumes[neighbor_cell]
+    # --- per-thread buffer 归约 ---
+    residual5 = residual_per_thread.sum(axis=0)
 
     return residual5[:, None, :]
+
+
+def _extract_p0_face_geometry(ffp_list, n_faces: int):
+    """从 face_flux_points 提取 P0 需要的 flat 数组。
+
+    支持两种数据源：
+    - _KernelFaceData（快速路径）：直接读取 flat 数组
+    - list of FaceFluxPointGeometry（慢速路径）：逐面提取
+
+    Returns:
+        unit_normals: (n_faces, 3) float64
+        area_weights: (n_faces,) float64
+    """
+    from autoflowcfd.fr.face_flux_points_data import _KernelFaceData
+
+    if isinstance(ffp_list, _KernelFaceData):
+        # 快速路径：直接使用 flat 数组（P0: n_fp=1）
+        unit_normals = np.ascontiguousarray(ffp_list.true_normal[:, 0, :])
+        area_weights = np.ascontiguousarray(ffp_list.true_area_weight[:, 0])
+    else:
+        # 慢速路径：逐面提取（仅在非 _KernelFaceData 时）
+        unit_normals = np.empty((n_faces, 3), dtype=np.float64)
+        area_weights = np.empty(n_faces, dtype=np.float64)
+        for f in range(n_faces):
+            ffp = ffp_list[f]
+            unit_normals[f] = ffp.true_normal[0]
+            area_weights[f] = ffp.true_area_weight[0]
+
+    return unit_normals, area_weights
+
+
+def _precompute_ghost_states(ffp_list, fc, ghost_provider, Q_all, n_faces: int):
+    """预计算边界面的幽灵态。
+
+    在 Python 端遍历边界面（~40K 个），调用 ghost_provider 获取幽灵态，
+    存储为 (n_cells, 5) 数组。numba kernel 内部通过 is_boundary 判断
+    读取 Q_ghost[owner_cell] 而非 Q_all[neighbor_cell]。
+
+    对于 DefaultGhostProvider（零梯度外插，ghost = owner），直接复制
+    Q_all 即可（O(n_cells) 向量化操作，无需逐面循环）。
+    """
+    from .inviscid import DefaultGhostProvider
+
+    if isinstance(ghost_provider, DefaultGhostProvider):
+        # 快速路径：ghost = owner，直接复制
+        return Q_all.copy()
+
+    # 通用路径：逐面调用 ghost_provider
+    Q_ghost = np.zeros_like(Q_all)
+    boundary_mask = fc.is_boundary
+    for f in range(n_faces):
+        if boundary_mask[f]:
+            oc = int(fc.owner_cell[f])
+            ffp = ffp_list[f]
+            Q_owner_fp = Q_all[oc:oc+1]  # (1,5)
+            true_normal = ffp.true_normal  # (1,3)
+            Q_ghost_fp = ghost_provider(f, Q_owner_fp, true_normal)  # (1,5)
+            Q_ghost[oc] = Q_ghost_fp[0]
+
+    return Q_ghost

@@ -58,7 +58,7 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         time_scheme: str = "ssp_rk3",
         cfl: float = 1.0,
         rho_inf: float = 1.225,
-        vel_inf: float = 30.0,
+        vel_inf: float = 33.33,
         p_inf: float = 101325.0,
         mu_molecular: float = 1.8e-5,
         boundary_ghost_provider=None,

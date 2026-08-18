@@ -40,9 +40,11 @@ def _smooth_external_tets(
     分离的 n_bl_cells 簿记。
     """
     from ...schema.grid_nodes import NodeArray
-    from ...schema.grid_cells import TetrahedralCells, VolumeMeshData, GridMetadata
+    from ...schema.grid_cells import TetrahedralCells
+    from ...schema.grid_data import VolumeMeshData
+    from ...schema.grid_metadata import GridMetadata
     from ...validation.quality_validator import MeshQualityValidator
-    from .mesh_repair import smooth_bad_cells
+    from ..repair.mesh_repair import smooth_bad_cells
 
     nodes = np.column_stack([volume_mesh.nodes.x, volume_mesh.nodes.y, volume_mesh.nodes.z])
     tet_conn = volume_mesh.cells.connectivity.astype(np.int64)
@@ -77,6 +79,7 @@ def _smooth_external_tets(
     return VolumeMeshData(
         nodes=new_nodes_obj, cells=new_cells_obj, boundaries=volume_mesh.boundaries,
         metadata=metadata, prism_cells=new_prism_obj,
+        surface_mesh=volume_mesh.surface_mesh,
     )
 
 
@@ -131,6 +134,14 @@ def import_external_volume_mesh(
     boundaries = map_boundaries_by_geometry(volume_mesh, surface_grid)
     volume_mesh.boundaries = boundaries
     volume_mesh.metadata.boundary_groups = list(boundaries.groups.keys())
+
+    # 保存原始面网格数据，供参考面积（投影面积）计算使用
+    surface_nodes = surface_grid.nodes.get_coordinates()  # shape=(n_nodes, 3)
+    volume_mesh.surface_mesh = {
+        'nodes': surface_nodes,
+        'faces': surface_grid.cells.connectivity,
+        'boundaries': surface_grid.boundaries
+    }
 
     validator = MeshQualityValidator()
     logger.info("Checking external volume mesh quality (pre-repair)...")

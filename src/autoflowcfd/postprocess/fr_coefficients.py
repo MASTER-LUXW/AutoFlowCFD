@@ -150,3 +150,64 @@ def compute_aerodynamic_coefficients_fr(
     )
 
     return AerodynamicCoefficients(Cd=Cd, Cl=Cl, Cm=0.0, Cs=Cs, Cy=0.0, Cr=0.0)
+
+
+def compute_forces_pressure_only(solver, reference_area: float) -> dict:
+    """轻量级压力积分——仅做压力面积分，不计算粘性力梯度。
+
+    设计用于每迭代步输出 Cd/Cl/Cs 监控，避免每步都算粘性力梯度（开销大）。
+    返回字典而非 AerodynamicCoefficients 对象，方便格式化输出。
+
+    Args:
+        solver: FRSolver 实例
+        reference_area: 参考面积 (m^2)
+
+    Returns:
+        dict: {'Cd': float, 'Cl': float, 'Cs': float}，若计算失败返回全零
+    """
+    mesh = solver.mesh
+    fc = mesh.face_connectivity
+    if fc is None or mesh.face_flux_points is None:
+        return {'Cd': 0.0, 'Cl': 0.0, 'Cs': 0.0}
+
+    try:
+        from autoflowcfd.grid.connectivity.face_connectivity import tag_boundary_groups
+
+        group_code, name_to_code = tag_boundary_groups(fc, mesh.boundary_groups or {})
+        bc_types = mesh.boundary_bc_types or {}
+        wall_codes = {code for name, code in name_to_code.items()
+                      if bc_types.get(name, "") in ("WALL",)}
+        if not wall_codes:
+            return {'Cd': 0.0, 'Cl': 0.0, 'Cs': 0.0}
+        is_wall_face = np.isin(group_code, list(wall_codes))
+
+        ops = solver.ops
+        Q = solver.state.Q
+        n_prism = mesh.n_prism_cells
+
+        force = np.zeros(3)
+        for f in np.nonzero(is_wall_face)[0]:
+            ffp = mesh.face_flux_points[f]
+            if not ffp.owner_is_primary:
+                continue
+            owner_cell = int(fc.owner_cell[f])
+            axis, side = ffp.owner_axis, ffp.owner_side
+
+            E = (ops.boundary_extrap_prism[(axis, side)] if owner_cell < n_prism
+                 else ops.boundary_extrap_tet[(axis, side)])
+            Q_fp = E @ Q[owner_cell, :, 4]  # pressure only, (n_fp,)
+            normal = ffp.true_normal
+            area_w = ffp.true_area_weight
+            force += np.sum(Q_fp[:, None] * normal * area_w[:, None], axis=0)
+
+        rho_inf = solver.freestream["rho_inf"]
+        vel_inf = solver.freestream["vel_inf"]
+        denom = max(0.5 * rho_inf * vel_inf**2 * reference_area, 1e-300)
+
+        return {
+            'Cd': float(force[0] / denom),
+            'Cl': float(force[2] / denom),
+            'Cs': float(force[1] / denom),
+        }
+    except Exception:
+        return {'Cd': 0.0, 'Cl': 0.0, 'Cs': 0.0}

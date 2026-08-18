@@ -41,7 +41,7 @@ from autoflowcfd.core.fr_operators.flux_kernels import viscous_physical_flux_poi
 from autoflowcfd.core.fr_residual.inviscid_kernel import _extrap_matmul, _distribute_point
 
 
-@njit(cache=True)
+@njit(cache=True, inline='always')
 def _extrap_matrix3x3(field_cell: np.ndarray, E: np.ndarray) -> np.ndarray:
     """(n_sps,3,3) 场外插到 (n_fp,3,3)。numba 不支持任意维 reshape，
     显式按 9 个分量分别做矩阵乘法。"""

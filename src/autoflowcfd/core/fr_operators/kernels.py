@@ -16,7 +16,7 @@ import numpy as np
 from numba import njit
 
 
-@njit(cache=True)
+@njit(cache=True, inline='always')
 def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray) -> np.ndarray:
     """
     计算 AUSM+up 数值通量（工业级稳定性增强版）。

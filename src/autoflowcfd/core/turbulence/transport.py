@@ -272,7 +272,8 @@ def compute_scalar_diffusion_residual(
     # 将标量跳跃转为等效扩散通量差（使用 gamma_face 缩放）
     # 在 FR 框架中，扩散校正的严格形式需要梯度跳跃，但简化 BR1 只使用
     # 状态跳跃乘以扩散系数作为代理——这在网格足够细时收敛到正确解。
-    correction_fp = gamma_face * delta_phi  # (n_faces, n_fp)
+    with np.errstate(over='ignore', invalid='ignore'):
+        correction_fp = gamma_face * delta_phi  # (n_faces, n_fp)
 
     # 分配回 SPs
     interface_correction = _distribute_correction_to_cells(correction_fp, flat, ops, mesh)
@@ -334,11 +335,18 @@ def compute_turbulence_transport_residual(solver) -> Tuple[np.ndarray, np.ndarra
     # 计算 k 的对流 + 扩散残差
     conv_k = compute_scalar_convection_residual(turb.k_field, rho, vel, solver.mesh, solver.ops)
     diff_k = compute_scalar_diffusion_residual(turb.k_field, gamma_k, solver.mesh, solver.ops)
-    dk_dt_transport = (conv_k + diff_k) / np.maximum(rho, 1e-10)
+    with np.errstate(over='ignore', invalid='ignore'):
+        dk_dt_transport = (conv_k + diff_k) / np.maximum(rho, 1e-10)
 
     # 计算 omega 的对流 + 扩散残差
     conv_w = compute_scalar_convection_residual(turb.omega_field, rho, vel, solver.mesh, solver.ops)
     diff_w = compute_scalar_diffusion_residual(turb.omega_field, gamma_w, solver.mesh, solver.ops)
-    domega_dt_transport = (conv_w + diff_w) / np.maximum(rho, 1e-10)
+    with np.errstate(over='ignore', invalid='ignore'):
+        domega_dt_transport = (conv_w + diff_w) / np.maximum(rho, 1e-10)
+
+    # NaN/Inf 隔离：退化网格上梯度/Jacobian 可能产生非有限值，
+    # 归零后由 SST.update_fields 的二次防护和 positivity limiter 接管
+    dk_dt_transport = np.where(np.isfinite(dk_dt_transport), dk_dt_transport, 0.0)
+    domega_dt_transport = np.where(np.isfinite(domega_dt_transport), domega_dt_transport, 0.0)
 
     return dk_dt_transport, domega_dt_transport

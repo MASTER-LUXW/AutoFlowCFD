@@ -8,6 +8,7 @@ import logging
 from typing import Optional
 
 import click
+import numpy as np
 
 from autoflowcfd.core import FRSolver
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
@@ -20,6 +21,96 @@ from autoflowcfd.cli.solve_helpers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _compute_reference_area_auto(volume_data) -> Optional[float]:
+    """从面网格自动计算参考面积（X 方向正投影面积）。
+
+    当用户未指定 --reference-area 时调用，从保存的原始面网格数据计算
+    车身迎风面的投影面积，作为气动力系数的参考面积。
+
+    Args:
+        volume_data: VolumeMeshData 对象，应包含 surface_mesh 属性
+
+    Returns:
+        参考面积 (m^2)，计算失败返回 None
+    """
+    surface_mesh = getattr(volume_data, 'surface_mesh', None)
+    if surface_mesh is None:
+        logger.debug("Auto reference area: surface_mesh is None")
+        return None
+
+    try:
+        surface_nodes = surface_mesh.get('nodes')
+        surface_faces = surface_mesh.get('faces')
+        surface_boundaries = surface_mesh.get('boundaries')
+
+        if surface_nodes is None or surface_faces is None or surface_boundaries is None:
+            logger.debug(f"Auto reference area: missing data - nodes={surface_nodes is not None}, faces={surface_faces is not None}, boundaries={surface_boundaries is not None}")
+            return None
+
+        # 获取面网格边界名称
+        all_boundary_names = list(surface_boundaries.boundary_names)
+        logger.debug(f"Auto reference area: surface mesh boundaries = {all_boundary_names}")
+
+        # 查找车身边界面（BODY/CAR/WALL，排除 INLET/OUTLET/SYMMETRY 等）
+        body_boundary_names = [
+            name for name in all_boundary_names
+            if ('BODY' in name.upper() or 'CAR' in name.upper() or 'WALL' in name.upper())
+            and 'INLET' not in name.upper() and 'OUTLET' not in name.upper() and 'SYMMETRY' not in name.upper()
+        ]
+
+        if not body_boundary_names:
+            logger.debug(f"Auto reference area: no body boundary found in {all_boundary_names}")
+            return None
+
+        # 收集车身面索引
+        body_face_indices = []
+        for boundary_name in body_boundary_names:
+            face_indices = surface_boundaries.get_cell_indices(boundary_name)
+            body_face_indices.extend(face_indices)
+
+        if len(body_face_indices) == 0:
+            return None
+
+        body_face_indices = np.array(body_face_indices, dtype=np.int64)
+
+        # 取车身面的节点坐标
+        v0 = surface_nodes[surface_faces[body_face_indices, 0]]
+        v1 = surface_nodes[surface_faces[body_face_indices, 1]]
+        v2 = surface_nodes[surface_faces[body_face_indices, 2]]
+
+        # 计算面法向量和面积
+        e1 = v1 - v0
+        e2 = v2 - v0
+        normals = np.cross(e1, e2)
+        areas = 0.5 * np.linalg.norm(normals, axis=1)
+
+        # 归一化法向量
+        norms = np.linalg.norm(normals, axis=1, keepdims=True)
+        norms = np.maximum(norms, 1e-10)
+        unit_normals = normals / norms
+
+        # 计算 X 方向投影面积（迎风面：法向 n_x < 0）
+        x_component = unit_normals[:, 0]
+        upstream_mask = x_component < 0
+        projected_areas = -x_component[upstream_mask] * areas[upstream_mask]
+        ref_area = np.sum(projected_areas)
+
+        if ref_area <= 0 or not np.isfinite(ref_area):
+            # 兆底：用绝对投影除以 2（适用于对称车身）
+            projected_areas_all = np.abs(x_component) * areas
+            ref_area = np.sum(projected_areas_all) / 2.0
+
+        if ref_area > 0 and np.isfinite(ref_area):
+            logger.info(f"Auto-computed reference area (frontal projected area): {ref_area:.6f} m^2")
+            return float(ref_area)
+
+        return None
+
+    except Exception as e:
+        logger.warning(f"Failed to auto-compute reference area: {e}")
+        return None
 
 
 def _report_aerodynamic_coefficients(solver, reference_area: Optional[float]) -> None:
@@ -249,9 +340,32 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, output_
         # 2.5. 计算壁面距离场（如果湍流模型需要）
         compute_wall_distance_for_solver(solver, volume_data, use_eikonal=use_eikonal)
 
+        # 传递参考面积到求解器，供迭代中输出气动力系数
+        # 如果未指定 --reference-area，尝试从面网格自动计算投影面积
+        if reference_area is None:
+            auto_ref_area = _compute_reference_area_auto(volume_data)
+            if auto_ref_area is not None:
+                reference_area = auto_ref_area
+        solver._reference_area = reference_area
+
+        # 构建中间 checkpoint 保存回调（每 checkpoint_interval 步保存一次）
+        def _checkpoint_cb(solver_ref, iteration):
+            if iteration % checkpoint_interval != 0:
+                return
+            try:
+                save_results(solver_ref, output_dir)
+                write_checkpoint(
+                    solver_ref, output_dir, iteration,
+                    input_file, order, turbulence_model, backend
+                )
+                print(f"   [Checkpoint] Saved at iteration {iteration} to {output_dir}")
+            except Exception as e:
+                print(f"   [Checkpoint] Warning: save failed at iter {iteration}: {e}")
+
         # 3. 执行求解
         try:
-            result = solver.solve(max_iter=max_iter, dt=1e-3, tol=1e-6)
+            result = solver.solve(max_iter=max_iter, dt=1e-3, tol=1e-6,
+                                  checkpoint_callback=_checkpoint_cb)
             print(f"\n✅ Simulation Finished: Iterations={result.iterations}, Residual={result.final_residual:.6e}")
 
             # 4. 保存结果（.pkl 全量状态 + HDF5 checkpoint，后者供 solve resume 使用）

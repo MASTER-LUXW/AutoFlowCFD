@@ -202,45 +202,21 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
     # 逐位对比验证）。
     from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
     from autoflowcfd.core.fr_residual.inviscid_kernel import compute_boundary_ghost_states
-    from autoflowcfd.core.fr_residual.viscous_flux_kernel import (
-        compute_viscous_interface_correction_kernel,
-        compute_viscous_interface_correction_kernel_colored,
-    )
     
     flat = get_flat_face_geometry(mesh, ops)
     Q_ghost = compute_boundary_ghost_states(flat, Q, adj_j, ghost_provider)
-    
-    # 图着色方案：同色面无 owner_cell 冲突，直接写入共享 buffer
-    # 内存从 O(n_threads * n_cells * n_sps * 5) 降至 O(n_cells * n_sps * 5)
-    # 着色结果已缓存在 flat 中（build 时一次性计算，不再重复着色）
-    # 通过环境变量或配置可切换回 per-thread buffer 方案
-    use_coloring = os.environ.get("AFCFD_USE_COLORING", "1") == "1"
-    
-    if use_coloring:
-        correction = np.zeros((n_cells, n_sps, 5))
-        for c in range(flat.n_colors):
-            face_indices = flat.color_face_indices[c]
-            if len(face_indices) == 0:
-                continue
-            compute_viscous_interface_correction_kernel_colored(
-                Q, grad_vel, grad_T, mu_t_field,
-                adj_j, det_jacs, mu, Pr, Pr_t,
-                flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
-                flat.owner_axis, flat.owner_side, flat.neighbor_axis, flat.neighbor_side,
-                flat.owner_is_primary, flat.neighbor_is_primary,
-                flat.neighbor_src0_cell, flat.neighbor_src0_mat,
-                flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
-                flat.owner_src0_cell, flat.owner_src0_mat,
-                flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
-                flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
-                flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
-                n_prism, face_indices, correction,
-            )
-    else:
-        # 回退到 per-thread buffer 方案（小网格 + 低线程数可能更快）
+
+    if n_sps == 1:
+        # P0 专用路径：使用简化 kernel（消除 SP 循环，外插简化为标量乘）
+        # 性能优化：Order Continuation P0 阶段 n_sps=1，通用 kernel 的
+        # for s in range(n_sps) 循环虽只有 1 次迭代但仍有分支/索引开销，
+        # P0 专用 kernel 在编译期消除所有 SP 循环。
+        from autoflowcfd.core.fr_residual.viscous_p0_kernel import (
+            compute_viscous_interface_correction_p0_kernel,
+        )
         import numba
         n_threads = numba.get_num_threads()
-        correction = compute_viscous_interface_correction_kernel(
+        correction = compute_viscous_interface_correction_p0_kernel(
             Q, grad_vel, grad_T, mu_t_field,
             adj_j, det_jacs, mu, Pr, Pr_t,
             flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
@@ -254,6 +230,56 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
             flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
             n_prism, n_threads,
         )
+    else:
+        # P≥1 通用路径：图着色或 per-thread buffer
+        from autoflowcfd.core.fr_residual.viscous_flux_kernel import (
+            compute_viscous_interface_correction_kernel,
+            compute_viscous_interface_correction_kernel_colored,
+        )
+        # 图着色方案：同色面无 owner_cell 冲突，直接写入共享 buffer
+        # 内存从 O(n_threads * n_cells * n_sps * 5) 降至 O(n_cells * n_sps * 5)
+        # 着色结果已缓存在 flat 中（build 时一次性计算，不再重复着色）
+        # 通过环境变量或配置可切换回 per-thread buffer 方案
+        use_coloring = os.environ.get("AFCFD_USE_COLORING", "1") == "1"
+        
+        if use_coloring:
+            correction = np.zeros((n_cells, n_sps, 5))
+            for c in range(flat.n_colors):
+                face_indices = flat.color_face_indices[c]
+                if len(face_indices) == 0:
+                    continue
+                compute_viscous_interface_correction_kernel_colored(
+                    Q, grad_vel, grad_T, mu_t_field,
+                    adj_j, det_jacs, mu, Pr, Pr_t,
+                    flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
+                    flat.owner_axis, flat.owner_side, flat.neighbor_axis, flat.neighbor_side,
+                    flat.owner_is_primary, flat.neighbor_is_primary,
+                    flat.neighbor_src0_cell, flat.neighbor_src0_mat,
+                    flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
+                    flat.owner_src0_cell, flat.owner_src0_mat,
+                    flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
+                    flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
+                    flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
+                    n_prism, face_indices, correction,
+                )
+        else:
+            # 回退到 per-thread buffer 方案（小网格 + 低线程数可能更快）
+            import numba
+            n_threads = numba.get_num_threads()
+            correction = compute_viscous_interface_correction_kernel(
+                Q, grad_vel, grad_T, mu_t_field,
+                adj_j, det_jacs, mu, Pr, Pr_t,
+                flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
+                flat.owner_axis, flat.owner_side, flat.neighbor_axis, flat.neighbor_side,
+                flat.owner_is_primary, flat.neighbor_is_primary,
+                flat.neighbor_src0_cell, flat.neighbor_src0_mat,
+                flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
+                flat.owner_src0_cell, flat.owner_src0_mat,
+                flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
+                flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
+                flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
+                n_prism, n_threads,
+            )
     residual = residual + correction
 
     # 机制3（症状检测，见 fr_troubled_cell.py 模块文档）：直接对算出的

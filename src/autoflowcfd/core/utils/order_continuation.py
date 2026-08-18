@@ -236,7 +236,8 @@ def interpolate_to_new_order_checked(solver: Any, new_order: int) -> None:
     logger.info(f"Order Continuation: Successfully interpolated to P{new_order} ({new_n_sps} SPs/cell)")
 
 
-def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float):
+def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
+                            checkpoint_callback=None):
     """实现 Order Continuation 策略：从 P0 逐步提升到目标阶数
     （从 fr_solver.py::FRSolver._solve_with_order_continuation 拆分）。
 
@@ -245,6 +246,8 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float):
         max_iter: 总迭代次数
         dt: 时间步长
         tol: 收敛容差
+        checkpoint_callback: 可选的中间 checkpoint 回调函数，
+            签名为 callback(solver, iteration_number)，每步迭代后调用。
 
     Returns:
         SolverResult: 求解结果
@@ -373,9 +376,20 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float):
             if initial_residual_this_order is None:
                 initial_residual_this_order = res
 
-            if i == 0 or (i + 1) % 10 == 0:
+            if True:  # 每步都输出残差与气动力系数
                 drop_ratio = initial_residual_this_order / max(res, 1e-30)
-                print(f"P{target_p} Iter {i+1}: Residual = {res:.6e} | Drop: {drop_ratio:.1f}x | Time: {t_end - t_start:.2f}s")
+                msg = f"P{target_p} Iter {i+1}: Residual = {res:.6e} | Drop: {drop_ratio:.1f}x | Time: {t_end - t_start:.2f}s"
+                # 每步输出气动力系数（轻量级压力积分，不含粘性力梯度）
+                ref_area = getattr(solver, '_reference_area', None)
+                if ref_area is not None and ref_area > 0:
+                    from autoflowcfd.postprocess.fr_coefficients import compute_forces_pressure_only
+                    aero = compute_forces_pressure_only(solver, ref_area)
+                    msg += f" | Cd={aero['Cd']:.4f} Cl={aero['Cl']:.4f} Cs={aero['Cs']:.4f}"
+                print(msg)
+
+            # 中间 checkpoint 保存（按 --checkpoint-interval 间隔）
+            if checkpoint_callback is not None:
+                checkpoint_callback(solver, total_iter)
 
             # 收敛判据：绝对容差
             if res < phase_tol:

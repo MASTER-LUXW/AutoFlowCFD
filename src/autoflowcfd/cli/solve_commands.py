@@ -113,7 +113,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
         order=order,
         turb_model_name=turbulence_model,
         rho_inf=metadata.get("rho_inf", 1.225),
-        vel_inf=metadata.get("vel_inf", 30.0),
+        vel_inf=metadata.get("vel_inf", 33.33),
         p_inf=metadata.get("p_inf", 101325.0),
         n_threads=threads,
     )

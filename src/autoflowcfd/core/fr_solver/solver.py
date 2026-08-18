@@ -52,7 +52,7 @@ class FRSolver(_SolverGeometryMixin):
                  time_scheme: TimeIntegrationScheme = TimeIntegrationScheme.SSP_RK3,
                  initial_state: Optional[FRState] = None,
                  backend: str = "cpu",
-                 rho_inf: float = 1.225, vel_inf: float = 30.0, p_inf: float = 101325.0,
+                 rho_inf: float = 1.225, vel_inf: float = 33.33, p_inf: float = 101325.0,
                  bc_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
                  mu_molecular: float = 1.8e-5,
                  dual_time_inner_iter: int = 20,
@@ -259,7 +259,8 @@ class FRSolver(_SolverGeometryMixin):
             self, mesh_nodes, wall_indices, connectivity=connectivity, use_eikonal=use_eikonal
         )
 
-    def solve(self, max_iter: int = 1000, dt: float = 1e-4, tol: float = 1e-6) -> SolverResult:
+    def solve(self, max_iter: int = 1000, dt: float = 1e-4, tol: float = 1e-6,
+              checkpoint_callback=None) -> SolverResult:
         """
         执行稳态/瞬态求解循环。
         
@@ -267,6 +268,9 @@ class FRSolver(_SolverGeometryMixin):
             max_iter: 最大迭代次数
             dt: 时间步长
             tol: 收敛容差
+            checkpoint_callback: 可选的中间 checkpoint 回调函数，
+                签名为 callback(solver, iteration_number)，每步迭代后调用。
+                用于在求解过程中定期保存状态到磁盘。
             
         Returns:
             SolverResult: 包含收敛状态、最终残差和迭代次数的结果对象
@@ -278,7 +282,7 @@ class FRSolver(_SolverGeometryMixin):
         
         # Order Continuation: 从低阶开始逐步提升精度
         if self.order_continuation_enabled and self.order >= 2:
-            return self._solve_with_order_continuation(max_iter, dt, tol)
+            return self._solve_with_order_continuation(max_iter, dt, tol, checkpoint_callback)
         
         import time
         converged = False
@@ -293,6 +297,10 @@ class FRSolver(_SolverGeometryMixin):
             # 每 10 步或第 1 步打印详细信息
             if i == 0 or (i + 1) % 10 == 0:
                 print(f"Iteration {i+1}: Residual = {res:.6e} | Time/step: {t_end - t_start:.2f}s")
+            
+            # 中间 checkpoint 保存
+            if checkpoint_callback is not None:
+                checkpoint_callback(self, i + 1)
                 
             if res < tol:
                 converged = True
@@ -301,9 +309,10 @@ class FRSolver(_SolverGeometryMixin):
         
         return SolverResult(converged=converged, iterations=i+1, final_residual=final_residual)
     
-    def _solve_with_order_continuation(self, max_iter: int, dt: float, tol: float) -> SolverResult:
+    def _solve_with_order_continuation(self, max_iter: int, dt: float, tol: float,
+                                        checkpoint_callback=None) -> SolverResult:
         """实现 Order Continuation 策略：从P0逐步提升到目标阶数（委托给 order_continuation）。"""
-        return order_continuation.run_order_continuation(self, max_iter, dt, tol)
+        return order_continuation.run_order_continuation(self, max_iter, dt, tol, checkpoint_callback)
 
     def _interpolate_to_new_order(self, new_order: int):
         """将解从当前阶数插值到新的阶数（委托给 order_continuation）。"""
