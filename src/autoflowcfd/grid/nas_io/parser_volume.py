@@ -36,7 +36,7 @@ def generate_volume_mesh_from_surface(
     Returns:
         VolumeMeshData
     """
-    from ..mesh_gen.volume_mesh_generator import VolumeMeshGenerator
+    from ..mesh_gen.tetgen.volume_mesh_generator import VolumeMeshGenerator
 
     logger.info("Generating volume mesh from surface geometry...")
 

@@ -8,7 +8,7 @@
 
 import numpy as np
 
-from .turbulence_sgs import SmagorinskyModel
+from .sgs import SmagorinskyModel
 
 
 class DynamicSmagorinskyModel(SmagorinskyModel):

@@ -126,7 +126,7 @@ def generate_core_background_points(
         没有任何网格单元能通过两个过滤器则 k 可能为 0
     """
     from scipy.spatial import cKDTree
-    from .mesh_domain_classify import _ray_triangle_intersect_count
+    from ..utils.mesh_domain_classify_geometry import _ray_triangle_intersect_count
 
     if target_edge_length <= 0.0 or len(plc_points) == 0:
         return np.empty((0, 3), dtype=np.float64)

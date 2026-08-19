@@ -361,14 +361,14 @@ class FRSolver(_SolverGeometryMixin):
         # GPU 不可用时自动回退 CPU。
         if self.backend_type == "gpu":
             if self.mesh.n_points_1d == 1:
-                from .gpu.gpu_p0_inviscid import compute_inviscid_residual_p0_cupy
+                from ..gpu.gpu_p0_inviscid import compute_inviscid_residual_p0_cupy
                 res_euler = compute_inviscid_residual_p0_cupy(
                     self.state.U, self.mesh,
                     boundary_ghost_provider=self.boundary_ghost_provider,
                 )
             else:
                 # P>=1 高阶 FR GPU 路径
-                from .gpu.gpu_inviscid import compute_inviscid_residual_fr_gpu
+                from ..gpu.gpu_inviscid import compute_inviscid_residual_fr_gpu
                 res_euler = compute_inviscid_residual_fr_gpu(
                     self.state.U, self.mesh, self.ops,
                     boundary_ghost_provider=self.boundary_ghost_provider,

@@ -294,7 +294,7 @@ class CUDABackend(BackendBase):
 
         # 物理正性保护（与 NumbaBackend.update_solution 同一套约束，见该
         # 方法文档：显式 Euler 更新后必须夹持密度/压力下限）。
-        from ..time_integration import enforce_positivity
+        from ..time_integration.positivity import enforce_positivity
         enforce_positivity(updated, p_floor=10.0)
 
         return updated
@@ -314,7 +314,7 @@ class CUDABackend(BackendBase):
     def _update_solution_cpu(self, solution, residuals, dt):
         """CPU 备用解更新（显式 Euler + 正性保护，与 NumbaBackend.update_solution 一致）。"""
         updated = solution - residuals * dt
-        from ..time_integration import enforce_positivity
+        from ..time_integration.positivity import enforce_positivity
         enforce_positivity(updated, p_floor=10.0)
         return updated
 

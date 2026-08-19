@@ -252,8 +252,8 @@ def distributed_mesh_load(
         )
 
         # 构建面连接关系
-        from autoflowcfd.core.operators import FROperators
-        ops = FROperators(order=order, n_points_1d=mesh.n_points_1d)
+        from autoflowcfd.fr.operators import generate_fr_operators
+        ops = generate_fr_operators(order)
         fc = FRFaceConnectivity(mesh, ops)
 
         # 分区

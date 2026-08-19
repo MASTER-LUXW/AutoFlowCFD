@@ -143,41 +143,62 @@ def distributed_compute_inviscid_residual(
 
 def distributed_compute_viscous_residual(
     U_local: np.ndarray,
-    grad_U_local: np.ndarray,
     partition: DistributedPartition,
     halo_exchange: HaloExchange,
     dist_fc: DistributedFlatFaceGeometry,
     local_mesh,
     ops,
-    config,
+    mu: float,
+    boundary_ghost_provider=None,
 ) -> np.ndarray:
     """分布式粘性残差计算。
 
+    此前这里错误地按 `compute_viscous_residual_fr(U, grad_U, adapter, ops,
+    config)` 的参数顺序调用，但该函数真实签名是
+    `compute_viscous_residual_fr(U, mesh, ops, mu, Pr, mu_t_field=None,
+    Pr_t=0.9, boundary_ghost_provider=None)`（见 fr_residual/viscous_flux.py）
+    ——等价于把 `grad_U`（一个数组）当 `mesh` 传、把 `adapter` 当 `ops`
+    传、把 `ops` 当 `mu`（标量）传、把 `config` 当 `Pr`（标量）传，只要
+    `config.physics.enable_viscous=True`（真实粘性算例的默认配置）就会
+    在第一次残差求值时立刻因属性访问失败而崩溃——分布式求解器实际上
+    从未跑通过任何粘性算例。改用单机路径同一个入口
+    `core.fr_residual.viscous.compute_viscous_residual`（该函数内部会
+    重新计算 primitive 变量与梯度，不需要调用方预先算好并传入，`grad_U`
+    参数因此整个不再需要）。
+
+    尚未支持湍流涡粘度耦合（`mu_t_field` 恒为 None，等价于纯层流粘性
+    应力）——`DistributedFRSolver.__init__` 已经在构造时拒绝
+    `turbulence_model != 'none'`，所以这里不会在有湍流模型的场景下
+    被静默调用。
+
     Args:
         U_local: (n_local_cells, n_sps, 5) 本 rank 的 local cell 守恒变量
-        grad_U_local: (n_local_cells, n_sps, 3, 5) 本 rank 的 local cell 梯度
         partition: 分区信息
         halo_exchange: halo 交换管理器
         dist_fc: 分布式面连接关系
         local_mesh: 本地网格对象
         ops: FR 算子
-        config: 求解器配置
+        mu: 分子动力粘度（标量）
+        boundary_ghost_provider: 边界幽灵态提供者
 
     Returns:
         residual: (n_local_cells, n_sps, 5) local cells 的粘性残差
     """
-    from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
+    from autoflowcfd.core.fr_residual.viscous import compute_viscous_residual as compute_viscous_residual_ldg
+    from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
 
-    # 1. Halo 交换（守恒变量和梯度）
+    # 1. Halo 交换
     U_extended = halo_exchange.exchange(U_local)
-    grad_U_extended = halo_exchange.exchange(grad_U_local)
 
     # 2. 创建网格适配器
     adapter = DistributedMeshAdapter(partition, dist_fc, local_mesh, ops)
 
-    # 3. 调用现有残差函数
-    residual_extended = compute_viscous_residual_fr(
-        U_extended, grad_U_extended, adapter, ops, config
+    # 3. 调用现有残差函数（state_Q 参数只为兼容旧签名保留，函数内部
+    # 从 state_U 自行重新计算 primitive 变量，见该函数文档）
+    Q_extended = conserved_to_primitive(U_extended[..., :5])
+    residual_extended = compute_viscous_residual_ldg(
+        U_extended, Q_extended, ops, adapter, mu=mu,
+        boundary_ghost_provider=boundary_ghost_provider,
     )
 
     # 4. 只返回 local cells 的残差
@@ -205,7 +226,7 @@ def distributed_compute_physical_gradient(
     Returns:
         grad_U: (n_local_cells, n_sps, 3, 5) local cells 的梯度
     """
-    from autoflowcfd.core.fr_gradient import compute_physical_gradient
+    from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient
 
     # 1. Halo 交换
     U_extended = halo_exchange.exchange(U_local)
@@ -233,39 +254,35 @@ def distributed_turbulence_transport(
     config,
     boundary_provider=None,
 ) -> np.ndarray:
-    """分布式湍流输运方程计算。
+    """分布式湍流输运方程计算——尚未实现，故意报错而不是静默跑错误物理。
 
-    Args:
-        U_local: (n_local_cells, n_sps, 5) 本 rank 的 local cell 守恒变量
-        turb_local: (n_local_cells, n_sps, 2) 本 rank 的 local cell 湍流变量 (k, omega)
-        grad_turb_local: (n_local_cells, n_sps, 3, 2) 本 rank 的 local cell 湍流梯度
-        partition: 分区信息
-        halo_exchange: halo 交换管理器
-        local_mesh: 本地网格对象
-        ops: FR 算子
-        config: 求解器配置
-        boundary_provider: 湍流边界条件提供者
+    此前这里调用一个不存在的 `turbulence_transport(U, turb, grad_turb,
+    mesh, ops, config, boundary_provider)` 函数（导入即失败）。真实的
+    单机实现是 `core/turbulence/transport.py::compute_turbulence_
+    transport_residual(solver)`——它的入参不是这几个松散数组，而是一个
+    完整的 `FRSolver` 实例：要从 `solver.turb_model`（`k_field`/
+    `omega_field`/`nu_t`/SST 各项系数）、`solver.state.Q`、
+    `solver.wall_distance`、`solver._compute_gradients()` 里读一整套
+    仍在自增长的湍流模型内部状态，不是几个可以从调用方直接拼出来的
+    独立数组。
 
-    Returns:
-        d_turb_dt: (n_local_cells, n_sps, 2) local cells 的湍流残差
+    要让这个函数真正可用，需要先把湍流模型实例接入
+    `DistributedFRSolver`（分布式状态扩展到 7 vars、`turb_model` 与分布
+    式 U 的 k/omega 分量同步、wall_distance 分发到 local cells、每个 RK
+    子步之间 k/omega 也要 halo 交换)——这是一次完整的分布式湍流耦合
+    实现，不是修一处调用签名能带出来的。`DistributedFRSolver.__init__`
+    已经在构造时直接拒绝 `turbulence_model != 'none'`，所以这个函数
+    在当前代码库里没有任何调用方；保留函数签名与文档是为了未来接入
+    时有明确的落脚点，调用它本身应该失败得清楚，而不是被绕过或悄悄
+    退化为忽略湍流输运。
+
+    Raises:
+        NotImplementedError: 恒为此——分布式湍流输运尚未实现。
     """
-    from autoflowcfd.core.turbulence.transport import turbulence_transport
-
-    # 1. Halo 交换（守恒变量、湍流变量、湍流梯度）
-    U_extended = halo_exchange.exchange(U_local)
-    turb_extended = halo_exchange.exchange_scalar(turb_local)
-    grad_turb_extended = halo_exchange.exchange(grad_turb_local)
-
-    # 2. 创建网格适配器
-    adapter = DistributedMeshAdapter(partition, None, local_mesh, ops)
-
-    # 3. 调用现有湍流输运函数
-    d_turb_dt_extended = turbulence_transport(
-        U_extended, turb_extended, grad_turb_extended,
-        adapter, ops, config, boundary_provider
+    raise NotImplementedError(
+        "分布式湍流输运（DDES/SST 的 k/omega 对流+扩散）尚未实现："
+        "需要先把 turb_model 实例接入 DistributedFRSolver 的分布式状态"
+        "（7-var 状态、wall_distance 分发、逐 RK 子步的 k/omega halo "
+        "交换），不是简单的函数签名修复。MPI 分布式求解目前只支持 "
+        "turbulence_model='none'；单机模式已完整支持 SST/DDES/WMLES/LES。"
     )
-
-    # 4. 只返回 local cells 的残差
-    d_turb_dt_local = d_turb_dt_extended[:partition.n_local_cells]
-
-    return d_turb_dt_local

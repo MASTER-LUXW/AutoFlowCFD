@@ -50,7 +50,8 @@ class CheckpointManager:
         self,
         config,
         output_dir: str = "results/",
-        checkpoint_interval: int = 100
+        checkpoint_interval: int = 100,
+        quiet: bool = False
     ):
         """初始化 checkpoint 管理器。
 
@@ -58,6 +59,7 @@ class CheckpointManager:
             config: 求解器配置对象
             output_dir: 基础输出目录
             checkpoint_interval: checkpoint 保存间隔（迭代数）
+            quiet: 静默模式，不打印初始化信息
         """
         if not H5PY_AVAILABLE:
             raise ImportError(
@@ -70,8 +72,10 @@ class CheckpointManager:
         self.checkpoint_interval = checkpoint_interval
         self.checkpoint_dir = self.output_dir / "checkpoints"
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        self.quiet = quiet
 
-        logger.info(f"CheckpointManager initialized: {self.checkpoint_dir}")
+        if not quiet:
+            logger.info(f"CheckpointManager initialized: {self.checkpoint_dir}")
 
     def _compute_config_hash(self) -> str:
         """计算求解器配置的 SHA256 哈希。
@@ -202,7 +206,8 @@ class CheckpointManager:
                         else:
                             stats_group.attrs[stat_name] = stat_data
 
-            logger.info(f"✓ Checkpoint saved: {ckpt_path} ({iteration} iterations)")
+            if not self.quiet:
+                logger.info(f"✓ Checkpoint saved: {ckpt_path} ({iteration} iterations)")
             return str(ckpt_path)
 
         except Exception as e:

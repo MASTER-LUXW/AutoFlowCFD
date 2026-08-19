@@ -95,7 +95,7 @@ def patch_nonmanifold_cavity(
     if keep_mask.all():
         return nodes, cells, cell_groups, n_bl_cells, bad_cell_mask
 
-    from .mesh_tetgen_core import fill_core_volume, repair_nonmanifold_cells, CORE_TETGEN_MINRATIO, CORE_TETGEN_MINDIHEDRAL
+    from ..tetgen.mesh_tetgen_core import fill_core_volume, repair_nonmanifold_cells, CORE_TETGEN_MINRATIO, CORE_TETGEN_MINDIHEDRAL
 
     n_cells = len(cells)
     all_faces = cells[:, _CAVITY_FACE_TEMPLATES].reshape(-1, 3)

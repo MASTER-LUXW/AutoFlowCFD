@@ -71,7 +71,7 @@ def _attempt_cavity_retile_clusters(
     n_failed = 0
     n_skipped_budget = 0
 
-    from .mesh_tetgen_core import (
+    from ..tetgen.mesh_tetgen_core import (
         fill_core_volume,
         CORE_TETGEN_MINRATIO, CORE_TETGEN_MINDIHEDRAL,
     )

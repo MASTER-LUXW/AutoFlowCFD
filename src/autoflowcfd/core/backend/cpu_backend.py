@@ -95,7 +95,7 @@ class NumbaBackend(BackendBase):
         Returns:
             flux: 数值通量向量，形状 (n_faces, n_vars)
         """
-        from ..fr_kernels import compute_ausm_up_flux
+        from ..fr_operators.kernels import compute_ausm_up_flux
         
         n_faces = cell_connectivity.shape[0]
         n_vars = solution.shape[1]
@@ -217,7 +217,7 @@ class NumbaBackend(BackendBase):
         updated = solution - residuals * dt
         
         # 物理正性保护
-        from ..time_integration import enforce_positivity
+        from ..time_integration.positivity import enforce_positivity
         enforce_positivity(updated, p_floor=10.0)
         
         return updated

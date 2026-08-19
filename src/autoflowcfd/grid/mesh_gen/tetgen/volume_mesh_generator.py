@@ -138,7 +138,7 @@ class VolumeMeshGenerator:
         允许多少次尝试都不会收敛，每个额外级别纯增壁钟时间而
         无质量收益）。
         """
-        from .mesh_background import generate_hybrid_mesh
+        from ..background.mesh_background import generate_hybrid_mesh
         from ...validation.quality_validator import MeshQualityValidator
 
         growth_rate = self.growth_rate

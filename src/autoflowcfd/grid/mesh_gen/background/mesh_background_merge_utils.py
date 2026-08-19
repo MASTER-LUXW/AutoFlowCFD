@@ -148,7 +148,7 @@ def _export_partial_mesh_and_exit(
         label: 当前阶段的易读名称，仅用于日志
     """
     from ...nas_io.nas_export import export_volume_mesh_to_nas
-    from ...schema.grid_nodes import NodeArray, PrismCells, TetrahedralCells, BoundaryMap, GridMetadata, VolumeMeshData
+    from ...structures import NodeArray, PrismCells, TetrahedralCells, BoundaryMap, GridMetadata, VolumeMeshData
 
     logger.success(f"Exporting {label} mesh to: {output_path}")
     try:

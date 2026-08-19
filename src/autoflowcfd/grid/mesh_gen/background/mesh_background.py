@@ -19,7 +19,7 @@ from typing import Dict, Optional, TYPE_CHECKING
 from loguru import logger
 
 if TYPE_CHECKING:
-    from ...schema.grid_boundaries import BoundaryMap, VolumeMeshData
+    from ...structures import BoundaryMap, VolumeMeshData
 
 from ..tetgen.mesh_prism_to_tet import orient_tetrahedra
 from ..tetgen.mesh_tetgen_core import _dedupe_coincident_points
@@ -83,7 +83,7 @@ def generate_hybrid_mesh(
             import sys
             sys.exit(0)
 
-        from ...schema.grid_nodes import NodeArray, TetrahedralCells, PrismCells, GridMetadata, VolumeMeshData
+        from ...structures import NodeArray, TetrahedralCells, PrismCells, GridMetadata, VolumeMeshData
 
         logger.info("Step 4/4: Re-orienting and computing tetrahedral volumes...")
         merged_cells = orient_tetrahedra(merged_nodes, merged_cells.astype(np.int64))

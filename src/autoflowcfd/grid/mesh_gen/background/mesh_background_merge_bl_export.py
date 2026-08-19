@@ -34,7 +34,7 @@ def _export_bl_only_and_exit(
 
     try:
         from ...nas_io.nas_export import export_volume_mesh_to_nas
-        from ...schema.grid_nodes import NodeArray, PrismCells, BoundaryMap, GridMetadata, VolumeMeshData, TetrahedralCells
+        from ...structures import NodeArray, PrismCells, BoundaryMap, GridMetadata, VolumeMeshData, TetrahedralCells
 
         # bl_nodes 包含所有挤出层（BL + 过渡层），但 bl_prisms 只索引
         # 其中的 BL 阶段前缀（参见上方的 convert_layers_to_prisms 调用，

@@ -301,8 +301,6 @@ class BoundaryManager(_BoundaryConfigMixin):
             >>> bc_manager.update_time_dependent_bcs(0.05)
             >>> # Updates all BCs that have time-dependent functions
         """
-        from autoflowcfd.boundary.conditions import TimeDependentBC
-        
         logger.debug(f"Updating time-dependent BCs at t={time:.6f}s")
         
         updated_count = 0

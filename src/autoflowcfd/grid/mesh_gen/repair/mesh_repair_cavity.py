@@ -196,7 +196,7 @@ def remesh_core_cavity(
         )
     )
 
-    from .mesh_tetgen_core import repair_nonmanifold_cells
+    from ..tetgen.mesh_tetgen_core import repair_nonmanifold_cells
 
     if not accepted:
         actions.append(

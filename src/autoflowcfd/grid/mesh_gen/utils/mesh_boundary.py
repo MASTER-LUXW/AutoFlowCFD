@@ -8,7 +8,7 @@ from typing import Dict, Optional, TYPE_CHECKING
 from loguru import logger
 
 if TYPE_CHECKING:
-    from ...schema.grid_boundaries import BoundaryMap, GridData, VolumeMeshData
+    from ...structures import BoundaryMap, GridData, VolumeMeshData
 
 
 def identify_boundaries_from_surface(

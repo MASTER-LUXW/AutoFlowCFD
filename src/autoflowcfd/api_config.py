@@ -141,7 +141,7 @@ def api_resume_simulation(self, checkpoint_file: str, **kwargs) -> Any:
         return result
     else:
         logger.warning("grid_data 未设置，无法重建求解器")
-        from autoflowcfd.core.backend.base import SolverResult
+        from autoflowcfd.core.fr_solver.state import SolverResult
         return SolverResult(
             iterations=iteration,
             converged=False,

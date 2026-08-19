@@ -11,7 +11,7 @@ from typing import List, Tuple
 import numpy as np
 from loguru import logger
 
-from .mesh_repair_cavity import _CAVITY_FACE_TEMPLATES, _cavity_boundary_faces
+from .mesh_repair_cavity_shared import _CAVITY_FACE_TEMPLATES, _cavity_boundary_faces
 from .mesh_repair_nonmanifold_mixed_demote import _split_prisms_to_tets, demote_invalid_prisms_to_tets  # noqa: F401  (demote_invalid_prisms_to_tets 是本模块的公开出口，保持原有导入路径可用)
 
 
@@ -84,7 +84,7 @@ def patch_nonmanifold_cavity_mixed(
     if prism_keep.all() and tet_keep.all():
         return nodes, prism_cells, tet_cells, bl_cell_groups, cell_groups
 
-    from .mesh_tetgen_core import fill_core_volume, CORE_TETGEN_MINRATIO, CORE_TETGEN_MINDIHEDRAL
+    from ..tetgen.mesh_tetgen_core import fill_core_volume, CORE_TETGEN_MINRATIO, CORE_TETGEN_MINDIHEDRAL
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components
 

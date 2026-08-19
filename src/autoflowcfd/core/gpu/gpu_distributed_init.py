@@ -187,7 +187,7 @@ class _GPUDistributedInitMixin:
         n_global_cell = self.mesh.n_cells * self.n_ranks
         _dist_save(U_local_cpu, local_cells, n_global_cell, path, self.rank, self.n_ranks)
 
-        from autoflowcfd.core.mpi.utils import is_root
+        from autoflowcfd.core.mpi import is_root
         if is_root():
             logger.info(f"Distributed GPU checkpoint saved to {path}")
 
@@ -201,6 +201,6 @@ class _GPUDistributedInitMixin:
         U_local_cpu = _dist_load(path, local_cells, self.rank, self.n_ranks)
         self.U_gpu = cp.asarray(U_local_cpu)
 
-        from autoflowcfd.core.mpi.utils import is_root
+        from autoflowcfd.core.mpi import is_root
         if is_root():
             logger.info(f"Distributed GPU checkpoint loaded from {path}")

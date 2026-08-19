@@ -149,9 +149,9 @@ def resolve_backend_type(backend: str) -> str:
     """
     backend_type = backend.lower()
     if backend_type == "gpu":
-        from .gpu import gpu_available
+        from ..gpu import gpu_available
         if gpu_available:
-            from .gpu import get_device_info
+            from ..gpu import get_device_info
             info = get_device_info()
             logger.info(
                 f"GPU (CuPy) backend available - device: {info.get('name', 'unknown')}, "
