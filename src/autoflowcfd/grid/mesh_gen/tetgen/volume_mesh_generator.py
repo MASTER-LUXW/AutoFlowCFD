@@ -110,122 +110,30 @@ class VolumeMeshGenerator:
             f"{len(surface_faces)} faces..."
         )
 
-        return self._generate_hybrid_with_backoff(
-            surface_nodes, surface_faces, bounding_box, surface_boundaries
-        )
-
-    def _generate_hybrid_with_backoff(
-        self,
-        surface_nodes: np.ndarray,
-        surface_faces: np.ndarray,
-        bounding_box: Dict[str, np.ndarray],
-        surface_boundaries: Optional['BoundaryMap'],
-        max_backoff_attempts: int = 1,
-    ) -> 'VolumeMeshData':
-        """网格质量修复循环的 Stage C：如果 generate_hybrid_mesh
-        （内部已经运行 Stage A 光顺和一次 Stage B 定向重试——见
-        mesh_gen/mesh_repair.py）仍然无法通过 MeshQualityValidator，
-        用回退的全局参数（更大的 min_cell_size、更少的层）重试
-        *整个* 生成——更粗糙的网格给尖锐特征按比例更多空间，
-        在遇到相同的退化四面体失败模式之前，代价是分辨率。
-        这是当 Stage A/B 的更有针对性的修复不够时的粗粒、无定向
-        回退；每次尝试是完整的（可能多分钟的）重新生成，所以尝试
-        次数有上限——与 generate_hybrid_mesh 内部可能每次尝试运行
-        的一次 Stage B 重试组合，理论最坏情况是
-        (max_backoff_attempts + 1) * 2 次完整生成过程（默认：2 个
-        Stage C 级别 * 2 = 4，从早期的 3 * 2 = 6 降低——直接在
-        困难的真实案例（90 度锐角物体）上测量，该案例实际上无论
-        允许多少次尝试都不会收敛，每个额外级别纯增壁钟时间而
-        无质量收益）。
-        """
+        # 曾经这里还有一个 Stage C（全局参数回退：质量门不过就把
+        # min_cell_size 放大 1.5 倍重跑整个生成），已经移除——用户
+        # 明确要求的理由是它的收益不稳定（V2.0 专项攻关记录：cube_demo
+        # 上三次独立对照实验里有两次 Stage C 的回退尝试反而比原始参数
+        # 更差，只有一次更好，且挑选标准只看 n_overlapping_cells 一项
+        # CRITICAL 指标，不是整体质量），而代价是确定的——导出的网格
+        # 用的 min_cell_size 会静默偏离用户在 CLI/API 里明确传入的值，
+        # 这本身就违反了"网格生成器应该忠实执行用户请求的参数，而不是
+        # 在背后换一份不同的网格"这个更基本的期望。现在只用一次
+        # generate_hybrid_mesh 调用（内部仍有 Stage A 光顺 + 一次
+        # Stage B 定向重试，两者都不改 min_cell_size，只是更精细地
+        # 利用同一份参数下已有的信息——见 mesh_background.py 自身的
+        # Stage B 重试文档），不再有隐藏的第二次全局重新生成。
         from ..background.mesh_background import generate_hybrid_mesh
-        from ...validation.quality_validator import MeshQualityValidator
-
-        growth_rate = self.growth_rate
-        min_cell_size = self.min_cell_size
-
-        validator = MeshQualityValidator()
-        # 跟踪目前为止产生的最佳网格，即使后续尝试抛出——
-        # 后续回退级别失败不应该丢弃先前尝试仍可用的（虽然质量
-        # 未通过的）网格。
-        best_mesh = None
-        best_report = None
-        last_error: Optional[Exception] = None
-
-        for attempt in range(max_backoff_attempts + 1):
-            if attempt > 0:
-                min_cell_size *= 1.5
-                logger.warning(
-                    f"Stage C: retrying generation (attempt "
-                    f"{attempt}/{max_backoff_attempts}) with backed-off "
-                    f"parameters: min_cell_size={min_cell_size:.6f}m - "
-                    + (
-                        f"previous attempt raised: {last_error}"
-                        if last_error is not None
-                        else "mesh quality gate still failing after Stage A/B"
-                    )
-                )
-
-            try:
-                volume_mesh = generate_hybrid_mesh(
-                    surface_nodes, surface_faces, bounding_box,
-                    growth_rate=growth_rate,
-                    min_cell_size=min_cell_size,
-                    target_cells=self.target_cells,
-                    surface_boundaries=surface_boundaries,
-                    max_cell_size=self.max_cell_size,
-                    bl_layers=self.bl_layers,
-                    export_bl_only=self.bl_only,
-                    export_bl_only_path=self.bl_only_output,
-                    export_core_only=self.core_only,
-                    export_core_only_path=self.bl_only_output,
-                )
-            except RuntimeError as e:
-                # fill_core_volume（mesh_tetgen_core.py）在 BL 表面
-                # 自交或 tetgen 鲁棒性失败时抛出 RuntimeError——
-                # 正是回退参数（更少/更薄的层）要修复的失败模式。
-                # 以前这里没有捕获这个异常，所以它直接穿透所有剩余
-                # 的回退尝试，完全中止生成，使 Stage C 在最严重的
-                # 失败类别上失效，同时对下面较温和的"已生成但未
-                # 通过质量门"情况仍然有效。
-                last_error = e
-                logger.warning(f"Stage C: attempt {attempt} raised during generation: {e}")
-                continue
-
-            report = validator.validate_volume_mesh(volume_mesh)
-            # 真正保留最佳尝试，不仅是最近一次——尽管变量名如此，
-            # 但以前每次迭代都无条件覆盖 best_mesh/best_report，
-            # 所以无论新尝试是否实际更好，最后运行的那次都静默胜出。
-            # 在真实案例上直接确认：尝试 0 产生 37 个重叠单元，
-            # 尝试 1（回退参数，因为尝试 0 在其他标准上仍失败质量门
-            # 而触发）产生 127 个——在本项目自身防重叠工作关注的那
-            # 个指标上更差——但返回的是尝试 1。n_overlapping_cells 用作
-            # 排名键（不是整体通过/失败，每次尝试按构造都已缺少它，
-            # 也不是多标准分数），因为它是质量报告自身的 CRITICAL
-            # 严重度字段——其他警告（偏斜度、非正交性、长宽比）是
-            # HIGH/MEDIUM。
-            if best_report is None or report.n_overlapping_cells < best_report.n_overlapping_cells:
-                best_mesh, best_report = volume_mesh, report
-            if report.passed:
-                if attempt > 0:
-                    logger.success(f"Stage C: attempt {attempt} passed the quality gate")
-                break
-        else:
-            if best_mesh is None:
-                # 每次尝试，包括最后一次，都抛出——没有网格可回退，
-                # 所以将最后一次失败浮现出来，而不是返回 None 给调用方。
-                raise RuntimeError(
-                    f"Stage C: mesh generation failed on all "
-                    f"{max_backoff_attempts + 1} attempt(s) (including backed-off "
-                    f"parameters); last error: {last_error}"
-                ) from last_error
-            logger.error(
-                f"Stage C: mesh quality gate still failing after "
-                f"{max_backoff_attempts} backoff attempt(s) - returning the best "
-                f"attempt's mesh anyway (best-effort); see the quality report above "
-                f"for which cells/regions are still implicated. The solve-time "
-                f"quality gate (autoflowcfd solve steady) will catch this before any "
-                f"iterations run, unless --skip-quality-check is passed."
-            )
-
-        return best_mesh
+        return generate_hybrid_mesh(
+            surface_nodes, surface_faces, bounding_box,
+            growth_rate=self.growth_rate,
+            min_cell_size=self.min_cell_size,
+            target_cells=self.target_cells,
+            surface_boundaries=surface_boundaries,
+            max_cell_size=self.max_cell_size,
+            bl_layers=self.bl_layers,
+            export_bl_only=self.bl_only,
+            export_bl_only_path=self.bl_only_output,
+            export_core_only=self.core_only,
+            export_core_only_path=self.bl_only_output,
+        )

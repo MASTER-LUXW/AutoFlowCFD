@@ -29,44 +29,20 @@ from loguru import logger
 MITER_LIMIT = 1.2
 
 # 当节点的 remaining_budget（mesh_front_collision.clamp_budget_for_
-# convergence 的运行累积上限——见 extrude_layers）已经小于本层名义厚度
-# 请求的量时，只消耗剩余量的这个比例，而不是一次性消耗全部。简单的
-# min(nominal, remaining_budget)（之前的行为）在下一次层的名义请求超过
-# 剩余量时精确命中 0——通常是立即，因为层厚度几何增长（每层约 1.2-1.5
-# 倍上一层），而 remaining_budget 按定义已经很小（否则不会触发这个路径）
-# ——为该节点后续的每层产生完全重合（零体积）棱柱。已在 cube_demo 上直接
-# 确认：这是约 25,000 个被丢弃 BL 棱柱的全部原因，而其他碰撞机制
-# （freeze_self_colliding_nodes、compute_local_thickness_limit）都没有
-# 参与的任何证据。几何衰减（消耗剩余量的固定比例，不是固定量）意味着
-# 受约束节点的高度在多层上渐近地接近其真实极限——它只会产生消失地薄，
-# 永远不会精确为零体积的层，所以下游不需要丢弃任何东西。0.5（每次绑定
-# 约束时减半剩余间隙）反映了本项目其他地方自己的 CONVERGENCE_SAFETY_
-# FRACTION 风格推理（mesh_front_collision.py），而不是一字不差地复用那个
-# 特定常量，因为它控制的是不同的量（那里是空间安全裕量，这里是时间衰减率）。
-BUDGET_TAPER_FRACTION = 0.5
-
-# 纯几何衰减（BUDGET_TAPER_FRACTION 单独）永远不会精确命中 0，但
-# "永不精确为 0"不等于"可用"——已在 cube_demo 上直接确认：用这种方式
-# 消除所有被丢弃的棱柱产生了一长串数值上消失的幸存者（最小 3.3e-8 m，
-# 即 33 纳米，约 6% 的 BL 棱柱低于 0.1mm），真实求解器没有现实用途
-# （相对于该单元几毫米的占地，长宽比达数百万），而且可以说比干净丢弃更糟——
-# 对任何下游质量门控或求解器都是垃圾输入，不仅是日志行中更小的数字。
-# 低于当前层自身名义厚度的这个比例时，tapered 花费被视为完全耗尽（捕捉
-# 到 0，与旧的硬停止行为相同），而不是继续缩小——是地板，不是猜测：它
-# 为仍在邻居自身单元尺寸合理范围内的每个节点保持平滑过渡，只有当继续
-# 会产生下游阶段无法做任何有用事情的单元时才恢复干净停止。
-#
-# 0.05（第一个尝试的值）仍然让幸存者小到 0.073mm 通过——复合效应：
-# 节点可以跨多个连续层过渡，直到单层的地板检查捕获它（每层自身的地板
-# 相对于该层自身更大的名义厚度，但幸存者继续按 BUDGET_TAPER_FRACTION
-# 缩小），留下 0.1mm 以下的小但真实的尾部（cube_demo 上约 0.47% 的 BL
-# 棱柱）。直接跨多个值测量：0.1 是完全清除 0.1mm 尾部的最小值（最小
-# 幸存者 0.130mm，0 个单元低于 0.1mm），以适度额外干净丢弃为代价
-# （20,828 vs 0.05 的 13,807，两者仍远低于过渡前的 24,691 基线）。
-# 0.3 清除更宽的裕量（最小幸存者 0.260mm）但将丢弃单元推到 32,213——
-# 比完全不过渡更糟——所以更高并不简单地更安全；0.1 被保留为测量更好的
-# 权衡，不是最保守可用的。
-MIN_TAPER_FRACTION_OF_NOMINAL = 0.1
+# convergence 的运行累积上限，或 freeze_self_colliding_nodes 的反应式
+# 冻结——见 extrude_layers）已经小于本层名义厚度请求的量时，本层及之后
+# 所有层此节点位移精确为 0，硬停止在当前（已完成的）层位置——不再有
+# 渐近摊薄的中间阶段（V2.0 专项攻关记录：cube_demo BL 质量campaign 第五轮，
+# 曾经在这里用 BUDGET_TAPER_FRACTION/MIN_TAPER_FRACTION_OF_NOMINAL 做
+# 渐近摊薄，换来的是一长串"消失地薄但非零"的层，是核心区 tetgen 填充在
+# BL/核心交界处生出极端 sliver 四面体的直接原因；改回硬停止后 cube_demo
+# 上相邻单元体积比从 1431.89 降到 421.11。参照 ANSA 官方文档描述的
+# Collapse 机制："从外层往内逐层减少层数，上层节点收缩回下层节点，棱柱
+# 退化为面"——即精确回退，不是渐进逼近）。产生的"完全坍缩"棱柱由
+# mesh_prism_to_tet.convert_layers_to_prisms 自身已有的
+# DEGENERATE_VOLUME_FRACTION 检查干净丢弃，该检查的文档字符串已经论证过
+# 这是安全的：丢弃的棱柱唯一非退化面只与自身内部四面体共享，从不留下
+# 真实几何空洞。
 
 
 def extrude_single_layer(
@@ -121,10 +97,9 @@ def extrude_single_layer(
         taper_scale: 可选 float 数组，[0, 1]，形状=(n_nodes,)，
             缩放每个节点的位移（见 extrude_layers）
         remaining_budget: 可选 float 数组，米，形状=(n_nodes,)，
-            原地修改——名义位移超过剩余预算的节点只花费
-            BUDGET_TAPER_FRACTION 的剩余量（渐近过渡，永远不会
-            一步精确耗尽——见该常量自己的注释），减去它实际花费的
-            相同量（见 extrude_layers 的 thickness_limit）
+            原地修改——名义位移超过剩余预算的节点本层位移硬停止为 0
+            （见下方实现自己的注释了解为什么不是渐近摊薄），减去它
+            实际花费的相同量（见 extrude_layers 的 thickness_limit）
         miter_decay: 将每节点偏移向量混合向简单（无权重、大小 1）
             平均法向——1.0（默认）保持完整计算偏移向量不变，0.0
             完全禁用本层的补偿。extrude_layers 在过渡阶段降低这个
@@ -191,21 +166,17 @@ def extrude_single_layer(
         node_thickness = thickness * miter_scale
 
     if remaining_budget is not None:
-        # 见 BUDGET_TAPER_FRACTION 自己的注释：剩余预算已经比本层名义
-        # 请求更紧的节点只花费剩余量的一部分，渐近过渡而不是在一步中
-        # 精确耗尽到 0。预算充裕的节点（常见情况）完全不受影响——
-        # node_thickness 在那里已经等于其自身的名义请求。
+        # 硬停止，不摊薄——见本文件顶部这段注释自己的完整说明。
         tight = remaining_budget < node_thickness
-        tapered = remaining_budget * BUDGET_TAPER_FRACTION
-        # 见 MIN_TAPER_FRACTION_OF_NOMINAL 自己的注释：干净停止而不是
-        # 继续过渡到数值上无意义的碎片，当即使过渡后的花费相对于本层
-        # 自身尺度也可以忽略时。
-        floor = thickness * MIN_TAPER_FRACTION_OF_NOMINAL
-        exhausted = tight & (tapered < floor)
-        node_thickness = np.where(tight & ~exhausted, tapered, node_thickness)
-        node_thickness = np.where(exhausted, 0.0, node_thickness)
+        node_thickness = np.where(tight, 0.0, node_thickness)
+        # 原地修改（`-=`，不是重新赋值给局部变量名）——本函数自己的
+        # Args 文档承诺 remaining_budget 是调用方数组的原地更新，重新
+        # 绑定局部名字到 np.where(...) 的新数组不会传播回调用方持有的
+        # 那个数组对象，会让冻结状态在下一层调用时静默丢失（已在这版
+        # 硬停止实现里直接踩到过：debug 输出显示 remaining_budget 在
+        # 调用前后完全不变，corner 节点因此从不真正冻结，一路长到
+        # 第 8 层）。
         remaining_budget -= node_thickness
-        remaining_budget = np.where(exhausted, 0.0, remaining_budget)
 
     displacement = node_thickness[:, np.newaxis] * avg_normals
 

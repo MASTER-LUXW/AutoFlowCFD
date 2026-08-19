@@ -128,22 +128,28 @@ def generate_volume(
         if not skip_quality_report:
             logger.info("Validating volume mesh quality...")
             quality_report = MeshQualityValidator().validate_volume_mesh(volume_mesh)
-            # Stage A/B/C (mesh_gen/mesh_repair.py, volume_mesh_generator.py's
-            # backoff loop) already ran to completion during generation above -
-            # this is purely informational on their outcome, not an export
-            # gate: the volume mesh file is always written below regardless
-            # of pass/fail, since a case that genuinely can't converge (e.g.
-            # a real sharp convex corner - see mesh_repair.py's own
-            # documented, measured limits here) would otherwise never
-            # produce any output at all to inspect or hand-fix. The
-            # solve-time quality gate (cli/solve_commands.py) is the actual
-            # enforcement point before any iterations run.
+            # Stage A/B (mesh_gen/mesh_repair.py) already ran to completion
+            # during generation above - this is purely informational on
+            # their outcome, not an export gate: the volume mesh file is
+            # always written below regardless of pass/fail, since a case
+            # that genuinely can't converge (e.g. a real sharp convex
+            # corner - see mesh_repair.py's own documented, measured
+            # limits here) would otherwise never produce any output at all
+            # to inspect or hand-fix. There used to also be a Stage C
+            # (global min_cell_size backoff + full regeneration) here -
+            # removed per user request: measured to be an unreliable net
+            # win (2 of 3 controlled cube_demo comparisons were worse, not
+            # better, than the original parameters) while guaranteeing the
+            # exported mesh silently deviates from the min_cell_size the
+            # user actually asked for. The solve-time quality gate
+            # (cli/solve_commands.py) is the actual enforcement point
+            # before any iterations run.
             if quality_report.passed:
                 logger.info(f"\n{quality_report.summary()}")
             else:
                 logger.error(
                     f"\n{quality_report.summary()}\n"
-                    "Volume mesh quality check failed after Stage A/B/C repair - "
+                    "Volume mesh quality check failed after Stage A/B repair - "
                     "exporting anyway (see report above). This mesh would very "
                     "likely diverge if solved as-is; common causes: sharp convex "
                     "edges/corners on the body (BL extrusion degrades there; "

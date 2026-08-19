@@ -106,100 +106,139 @@ def _attempt_cavity_retile_clusters(
         cluster_seed_mask = np.zeros(n_cells, dtype=bool)
         cluster_seed_mask[seed_idx[labels == cluster_id]] = True
 
-        cavity_mask = _grow_cavity_rings(cluster_seed_mask, owner, neighbor, ineligible | claimed, n_buffer_rings)
-        cavity_idx = np.flatnonzero(cavity_mask)
-        if len(cavity_idx) > max_cavity_cells:
-            n_skipped_size += 1
-            continue
+        # 扩环重试：第一次尝试用调用方传入的 n_buffer_rings（通常 1）；
+        # 如果 tetgen 在这个小空腔里找不到能通过质量门的重铺（既非改进
+        # 也非"死锁兜底"，见下方 is_improvement/is_acceptable_fallback），
+        # 在放弃前依次用 n_buffer_rings+1、+2 再试——给 tetgen 一个更大、
+        # 边界落在更远良好区域的空腔重新尝试，而不是立刻保留原始坏单元。
+        # 上限到 +2（不是无限扩环）：+1 这一档已经用真实数据验证过是净
+        # 改善且零副作用（cube_demo 上 Stage B' 最终坏单元数 1178→1069，
+        # 相邻单元体积比等其他全局指标不变——V2.0 专项攻关记录），这里
+        # 只是把同一条已验证安全的路径再延伸一档，不是新机制；是否值得
+        # 再扩到 +3 由这次 +2 的真实收益/时间开销数据决定，不预先假设。
+        # 复用与外层循环相同的 max_seconds 预算（下面提前 return 时用
+        # 同一个 n_skipped_budget 语义）。
+        result = None
+        for attempt_rings in (n_buffer_rings, n_buffer_rings + 1, n_buffer_rings + 2):
+            elapsed = time.perf_counter() - start_time
+            if elapsed > max_seconds:
+                n_skipped_budget = n_clusters - cluster_id
+                logger.warning(
+                    f"Stage B': stopping after {elapsed:.1f}s (max_seconds="
+                    f"{max_seconds:.0f}) with {cluster_id}/{n_clusters} clusters "
+                    f"attempted - remaining {n_skipped_budget} left for "
+                    f"whichever repair stage runs next"
+                )
+                return accepted, claimed, n_skipped_size, n_rejected, n_failed, n_skipped_budget
 
-        boundary_faces = _cavity_boundary_faces(cells, cavity_idx)
-        global_pts = np.unique(boundary_faces)
-        local_of_global = -np.ones(len(nodes), dtype=np.int64)
-        local_of_global[global_pts] = np.arange(len(global_pts))
-        local_faces = local_of_global[boundary_faces].astype(np.int32)
-        local_points = nodes[global_pts]
-
-        try:
-            # verbose=False: 每个空腔簇运行一次，可能每次修复
-            # 很多遍——每个单独调用自身的边界点数/Steiner 预算/
-            # 完成行单独来看没意义，只有本函数自身的逐空腔
-            # 和最终汇总行（分别在下方/末尾单独记录）才有意义。
-            # minratio/mindihedral: 与主核心填充使用的相同收紧标准
-            # （mesh_background_merge.py），而非 tetgen 自身更宽松的
-            # 默认值——使用比产生其自身（已经坏的）邻居更松的形状
-            # 质量边界的空腔重铺没有真正理由产出更好结果。已确认为
-            # 真实案例上的真实大效应：使用 tetgen 默认值时，约 72%
-            # 的尝试重铺被拒绝为"非改进"；参见 CORE_TETGEN_MINRATIO
-            # 自身文档字符串。
-            retiled_nodes, retiled_tets, _, _ = fill_core_volume(
-                local_points, local_faces, verbose=False,
-                minratio=CORE_TETGEN_MINRATIO, mindihedral=CORE_TETGEN_MINDIHEDRAL,
+            cavity_mask = _grow_cavity_rings(
+                cluster_seed_mask, owner, neighbor, ineligible | claimed, attempt_rings
             )
-        except Exception as e:
-            logger.warning(f"Stage B': cavity remesh failed ({e}), keeping original cells")
-            n_failed += 1
-            continue
+            cavity_idx = np.flatnonzero(cavity_mask)
+            if len(cavity_idx) > max_cavity_cells:
+                # 扩环只会让空腔更大——如果调用方自己的环数已经超限，
+                # 多试一环没有意义，直接按原有语义计数并放弃这个簇。
+                n_skipped_size += 1
+                result = 'skipped_size'
+                break
 
-        n_boundary_pts = len(local_points)
-        if not np.array_equal(retiled_nodes[:n_boundary_pts], local_points):
-            # fill_core_volume already logs+handles this internally (coincident-
-            # point stitching fallback), but the cavity's own boundary points
-            # are exactly the ones that must stay pinned for the splice below
-            # to be valid - if even the fallback couldn't preserve them
-            # verbatim, don't risk stitching a silently-shifted boundary into
-            # the still-good rest of the mesh.
-            logger.warning(
-                "Stage B': cavity boundary points weren't preserved "
-                "verbatim by the local retile, keeping original cells"
-            )
-            n_failed += 1
-            continue
+            boundary_faces = _cavity_boundary_faces(cells, cavity_idx)
+            global_pts = np.unique(boundary_faces)
+            local_of_global = -np.ones(len(nodes), dtype=np.int64)
+            local_of_global[global_pts] = np.arange(len(global_pts))
+            local_faces = local_of_global[boundary_faces].astype(np.int32)
+            local_points = nodes[global_pts]
 
-        # 质量门控：仅当重铺严格优于其替换时才接受——
-        # 阶段 A 自身的"永远不盲目信任移动"哲学（参见本模块
-        # 文档字符串），在此应用于整个空腔交换而非逐节点位置。
-        #
-        # old_bad_in_cavity 按 bad_cell_mask 的任何判据（偏斜、
-        # 非正交、相邻体积比，以及——因为 mesh_background.py 将其
-        # 折叠入——物理重叠）计算坏单元数。仅按偏斜度评分
-        # bad_new（此检查的早期版本）是苹果比橘子：主要因
-        # 非正交或相邻体积比而坏的空腔可能得到真正修复它们的
-        # 重铺，但仍在此被拒绝，因为其（无关的）偏斜度计数
-        # 碰巧没改善——已直接在真实锐角案例上确认，绝大多数
-        # 重铺以这种方式被拒绝。在重铺空腔上评估相同的三项
-        # 判据使这成为真正的苹果比苹果比较。
-        old_bad_in_cavity = int(np.sum(bad_cell_mask[cavity_idx]))
-        bad_new = _count_bad_cells(validator, retiled_nodes, retiled_tets)
+            try:
+                # verbose=False: 每个空腔簇运行一次，可能每次修复
+                # 很多遍——每个单独调用自身的边界点数/Steiner 预算/
+                # 完成行单独来看没意义，只有本函数自身的逐空腔
+                # 和最终汇总行（分别在下方/末尾单独记录）才有意义。
+                # minratio/mindihedral: 与主核心填充使用的相同收紧标准
+                # （mesh_background_merge.py），而非 tetgen 自身更宽松的
+                # 默认值——使用比产生其自身（已经坏的）邻居更松的形状
+                # 质量边界的空腔重铺没有真正理由产出更好结果。已确认为
+                # 真实案例上的真实大效应：使用 tetgen 默认值时，约 72%
+                # 的尝试重铺被拒绝为"非改进"；参见 CORE_TETGEN_MINRATIO
+                # 自身文档字符串。
+                retiled_nodes, retiled_tets, _, _ = fill_core_volume(
+                    local_points, local_faces, verbose=False,
+                    minratio=CORE_TETGEN_MINRATIO, mindihedral=CORE_TETGEN_MINDIHEDRAL,
+                )
+            except Exception as e:
+                logger.warning(f"Stage B': cavity remesh failed ({e}), keeping original cells")
+                result = 'failed'
+                continue
 
-        # 优化：在几何困难特征上 TetGen 找不到完美解时，通过
-        # 接受"不更差"的结果打破死锁（多次重试后或坏单元数
-        # 很少时，例如 <= 2）。防止无限循环。
-        is_improvement = bad_new < old_bad_in_cavity
-        is_acceptable_fallback = (old_bad_in_cavity <= 2 and bad_new <= old_bad_in_cavity)
+            n_boundary_pts = len(local_points)
+            if not np.array_equal(retiled_nodes[:n_boundary_pts], local_points):
+                # fill_core_volume already logs+handles this internally (coincident-
+                # point stitching fallback), but the cavity's own boundary points
+                # are exactly the ones that must stay pinned for the splice below
+                # to be valid - if even the fallback couldn't preserve them
+                # verbatim, don't risk stitching a silently-shifted boundary into
+                # the still-good rest of the mesh.
+                logger.warning(
+                    "Stage B': cavity boundary points weren't preserved "
+                    "verbatim by the local retile, keeping original cells"
+                )
+                result = 'failed'
+                continue
 
-        if not is_improvement and not is_acceptable_fallback:
-            # debug 而非 info：每个被拒绝的空腔簇触发一次——
-            # 在锐角密集网格上的单次修复中可能数百次——而 CLI
-            # 默认输出为 INFO 级别（cli/main.py，level="INFO"
-            # 除非 --verbose），因此这会用无人实时阅读的逐簇
-            # 细节淹没普通控制台输出；本函数自身最终汇总行
-            # （下方）中的 `rejected=N` 合计已在正确粒度报告
-            # 相同信息供日常使用。仍可通过 `--verbose` 供任何
-            # 实际调试特定空腔的人使用。
-            logger.debug(
-                f"Stage B': cavity of {len(cavity_idx)} cells "
-                f"({old_bad_in_cavity} bad) retiled into {len(retiled_tets)} cells "
-                f"({bad_new} bad) - not an improvement, keeping original cells"
-            )
+            # 质量门控：仅当重铺严格优于其替换时才接受——
+            # 阶段 A 自身的"永远不盲目信任移动"哲学（参见本模块
+            # 文档字符串），在此应用于整个空腔交换而非逐节点位置。
+            #
+            # old_bad_in_cavity 按 bad_cell_mask 的任何判据（偏斜、
+            # 非正交、相邻体积比，以及——因为 mesh_background.py 将其
+            # 折叠入——物理重叠）计算坏单元数。仅按偏斜度评分
+            # bad_new（此检查的早期版本）是苹果比橘子：主要因
+            # 非正交或相邻体积比而坏的空腔可能得到真正修复它们的
+            # 重铺，但仍在此被拒绝，因为其（无关的）偏斜度计数
+            # 碰巧没改善——已直接在真实锐角案例上确认，绝大多数
+            # 重铺以这种方式被拒绝。在重铺空腔上评估相同的三项
+            # 判据使这成为真正的苹果比苹果比较。
+            old_bad_in_cavity = int(np.sum(bad_cell_mask[cavity_idx]))
+            bad_new = _count_bad_cells(validator, retiled_nodes, retiled_tets)
+
+            # 优化：在几何困难特征上 TetGen 找不到完美解时，通过
+            # 接受"不更差"的结果打破死锁（多次重试后或坏单元数
+            # 很少时，例如 <= 2）。防止无限循环。
+            is_improvement = bad_new < old_bad_in_cavity
+            is_acceptable_fallback = (old_bad_in_cavity <= 2 and bad_new <= old_bad_in_cavity)
+
+            if not is_improvement and not is_acceptable_fallback:
+                # debug 而非 info：每个被拒绝的空腔簇触发一次——
+                # 在锐角密集网格上的单次修复中可能数百次——而 CLI
+                # 默认输出为 INFO 级别（cli/main.py，level="INFO"
+                # 除非 --verbose），因此这会用无人实时阅读的逐簇
+                # 细节淹没普通控制台输出；本函数自身最终汇总行
+                # （下方）中的 `rejected=N` 合计已在正确粒度报告
+                # 相同信息供日常使用。仍可通过 `--verbose` 供任何
+                # 实际调试特定空腔的人使用。
+                logger.debug(
+                    f"Stage B': cavity of {len(cavity_idx)} cells (n_buffer_rings="
+                    f"{attempt_rings}) ({old_bad_in_cavity} bad) retiled into "
+                    f"{len(retiled_tets)} cells ({bad_new} bad) - not an "
+                    f"improvement, keeping original cells"
+                )
+                result = 'rejected'
+                continue
+
+            claimed[cavity_idx] = True
+            accepted.append(dict(
+                cavity_idx=cavity_idx, global_pts=global_pts,
+                retiled_nodes=retiled_nodes, retiled_tets=retiled_tets,
+                n_boundary_pts=n_boundary_pts,
+                old_bad=old_bad_in_cavity, bad_new=bad_new,
+            ))
+            result = 'accepted'
+            break
+
+        if result == 'rejected':
             n_rejected += 1
-            continue
-
-        claimed[cavity_idx] = True
-        accepted.append(dict(
-            cavity_idx=cavity_idx, global_pts=global_pts,
-            retiled_nodes=retiled_nodes, retiled_tets=retiled_tets,
-            n_boundary_pts=n_boundary_pts,
-            old_bad=old_bad_in_cavity, bad_new=bad_new,
-        ))
+        elif result == 'failed':
+            n_failed += 1
+        # 'accepted' 和 'skipped_size' 已经在各自的分支里记账过了。
 
     return accepted, claimed, n_skipped_size, n_rejected, n_failed, n_skipped_budget

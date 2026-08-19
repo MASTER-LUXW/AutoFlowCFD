@@ -144,10 +144,26 @@ def extrude_layers(
 
     # 优化：计算边距离场以在尖角附近衰减 BL 厚度
     # 这防止边处的严重几何畸变和自交叉
+    #
+    # min_feature_radius=nominal_bl_thickness：V2.0 专项攻关记录（cube_demo
+    # BL 质量campaign 第八轮）：这个判据本来完全没有曲率半径过滤，纯角度
+    # 阈值（45°）把车身圆角（cube_demo 实测真实半径 7.6mm）密集三角化后的
+    # 普通面片边全部误判成尖锐折痕，导致衰减场沿整条棱边被压到地板值——
+    # 参见 _compute_edge_distance_field 自己的 min_feature_radius 文档了解
+    # 完整根因链条。这里传入的名义边界层累积厚度（几何级数和，与
+    # split_sharp_corners 在别处用 min_cell_size 作为半径判据不同——那里
+    # 判断的是"网格分辨率够不够细来正确描述这条边"，这里判断的是"边界层
+    # 会不会长得比这个圆角的曲率半径还厚"，是两个不同的问题，用同一个
+    # min_cell_size 量级的值在这里量纲上就不对）。
+    nominal_bl_thickness = (
+        base_thickness * (bl_growth_rate ** bl_layers - 1) / (bl_growth_rate - 1)
+        if bl_layers > 0 else 0.0
+    )
     logger.info("Computing sharp-edge distance field for BL attenuation...")
     distance_attenuation = _compute_edge_distance_field(
         surface_nodes, surface_faces, normals,
-        normal_faces=normal_faces
+        normal_faces=normal_faces,
+        min_feature_radius=nominal_bl_thickness,
     )
     n_attenuated = int(np.sum(distance_attenuation < 0.9))
     if n_attenuated > 0:

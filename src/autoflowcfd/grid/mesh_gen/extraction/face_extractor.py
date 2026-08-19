@@ -133,7 +133,15 @@ def repair_nonmanifold_mixed(
             if c < n_prism:
                 prism_keep[c] = False
             else:
-                tet_keep[c] = False
+                # 全局索引（tet 从 n_prism 开始，与上方 vols 循环里
+                # `t = c - n_prism` 的换算相同），不是本地 tet_keep 数组的
+                # 索引——`tet_keep[c] = False` 会在 c 超过 n_tet 时越界
+                # （已在真实 cube_demo 网格上直接确认：IndexError，c 高达
+                # 364726 对一个只有 202949 个 tet 的数组），且即便不越界，
+                # 用错索引也会静默标记错误的 tet 为丢弃。上方第 126-127 行
+                # 算体积时已经正确用了 `t = c - n_prism`，这里漏了同一个
+                # 换算。
+                tet_keep[c - n_prism] = False
             n_dropped += 1
 
     logger.warning(

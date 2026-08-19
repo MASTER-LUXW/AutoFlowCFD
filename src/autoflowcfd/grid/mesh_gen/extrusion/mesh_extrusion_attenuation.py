@@ -119,6 +119,7 @@ def _compute_edge_distance_field(
     normals: np.ndarray,
     angle_threshold: float = 45.0,
     normal_faces: Optional[np.ndarray] = None,
+    min_feature_radius: float = 0.0,
 ) -> np.ndarray:
     """计算从每个节点到最近尖锐边的距离场。
 
@@ -129,11 +130,24 @@ def _compute_edge_distance_field(
         angle_threshold: 认为边尖锐的二面角阈值（度）
         normal_faces: 可选 `faces` 子集，`normals` 对应它。如果 None，
                       假设 `normals` 匹配 `faces`。
+        min_feature_radius: 与 mesh_corner_split.split_sharp_corners 同名
+            参数相同的曲率半径过滤（米）——法向偏差超过 angle_threshold 的边，
+            如果其自身几何（弦长 + 偏差角）隐含的局部曲率半径达到或超过
+            此值，仍不视为尖锐特征。0.0（默认）保留原始纯角度判据，向后
+            兼容未显式传入这个新参数的调用方。
 
-    Returns:
-        attenuation: [MIN_EDGE_DISTANCE_ATTENUATION, 1] 中的衰减因子，
-                     每个节点。1.0 表示完整厚度，向下到尖锐边处的地板——
-                     见该常量自己的注释。
+            V2.0 专项攻关记录（cube_demo BL 质量campaign 第八轮）：这个
+            过滤器此前只存在于 split_sharp_corners（Multiple-Normals 拆分
+            判据），本函数完全没有——cube_demo 实测车身圆角（真实半径
+            7.6mm）密集三角化后单个面片间法向偏差普遍 45°~46°，恰好越过
+            默认 angle_threshold=45°，但这只是圆角的正常离散化，不是真正
+            的尖锐折痕（split_sharp_corners 用同一份判据 + 曲率半径过滤
+            正确识别出这一点，因此对 cube_demo 零拆分）。本函数在没有这层
+            过滤的情况下把这些"伪尖锐边"误判为真正的尖锐特征，实测导致
+            衰减场沿车身整条棱边被压到地板值 0.2（177 个节点，覆盖某条棱
+            边 x 方向 0.01~0.49 的几乎全长），直接造成硬停止机制在这些
+            节点上过早耗尽预算、边界层层数大幅收缩——这正是"圆角处处
+            平滑却没有生成完整层数"这个现象的根因。
     """
     n_nodes = len(nodes)
 
@@ -152,6 +166,9 @@ def _compute_edge_distance_field(
                 edge_map[key] = []
             edge_map[key].append(i)
 
+    if min_feature_radius > 0.0:
+        from ..utils.mesh_corner_split_geometry import _implied_edge_radius
+
     sharp_edges = set()
     for (v1, v2), face_indices in edge_map.items():
         if len(face_indices) >= 2:
@@ -159,11 +176,22 @@ def _compute_edge_distance_field(
             n1 = normals[face_indices[0]]
             n2 = normals[face_indices[1]]
             cos_angle = np.clip(np.dot(n1, n2), -1.0, 1.0)
-            angle = np.degrees(np.arccos(cos_angle))
+            angle_rad = np.arccos(cos_angle)
+            angle = np.degrees(angle_rad)
 
             # 如果角度与 180（平坦）显著不同则为尖锐
             # 对于立方体，我们期望 90 度角
-            if angle > angle_threshold and angle < (180 - angle_threshold):
+            is_sharp = angle > angle_threshold and angle < (180 - angle_threshold)
+            # 见 min_feature_radius 自己的文档：与 split_sharp_corners 相同的
+            # "这是真正的尖锐折痕，还是只是一段曲率半径够大的平滑曲面被
+            # 密集三角化后单个面片角度恰好越过阈值"区分——用弦长+偏差角
+            # 隐含的局部曲率半径判断，不是纯角度判据能区分的。
+            if is_sharp and min_feature_radius > 0.0:
+                edge_length = float(np.linalg.norm(nodes[v1] - nodes[v2]))
+                implied_radius = _implied_edge_radius(edge_length, angle_rad)
+                if implied_radius >= min_feature_radius:
+                    is_sharp = False
+            if is_sharp:
                 sharp_edges.add((v1, v2))
 
     if not sharp_edges:
