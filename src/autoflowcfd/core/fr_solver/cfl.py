@@ -93,8 +93,30 @@ def compute_local_time_step(solver) -> np.ndarray:
     h = np.power(np.abs(volumes), 1.0 / 3.0)
     h_expanded = np.tile(h[:, np.newaxis], (1, n_sps))
 
-    CFL = 0.1  # 保守的CFL数
-    dt_advective = CFL * h_expanded / wave_speed
+    CFL = 0.1  # 保守的CFL数（P0 基准值）
+
+    # 阶数相关的 CFL 收紧（此前完全缺失——全代码库搜索确认没有任何地方
+    # 按 solver.current_order 收紧过这个常量）：h 用的是整个宏单元体积
+    # V^(1/3)，与该单元内有多少个 solution point 无关，所以 P0（1 个 SP/
+    # 单元）和 P1（8 个）、P2（27 个）用的是完全相同的 dt 公式——但显式
+    # FR/DG 格式的稳定性极限本身随阶数增长（微分矩阵谱半径随 p 增大），
+    # 标准结果是对流项稳定 CFL ~ 1/(2p+1)，扩散/粘性项因算子等效于二阶
+    # 微分，谱半径按 p 的平方增长，稳定 CFL ~ 1/(2p+1)^2（Kopriva,
+    # "Implementing Spectral Methods for PDEs" 对 DGSEM 稳定性的标准
+    # 推导；FR 用同一套配置点，结论同样适用）。真实复现的失稳模式与此
+    # 精确吻合：P0 阶段用同一个 CFL=0.1 大致还在稳定域内（收敛很慢，
+    # 说明其实已经接近边界），Order Continuation 一旦插值到 P1，
+    # 残差立刻在第 1 步跳增且不再下降，湍流交叉扩散项（数值上最刚性
+    # 的子系统）最先溢出——这正是"同一个步长，稳定域已经收紧"的典型
+    # 特征，不是插值或湍流模型本身的 bug。
+    # 命名为 poly_order 而非 p——本函数前面已经用 p 表示压力
+    # （line 79，solver.state.Q[:,:,4]），同名会遮蔽它，虽然当前压力变量
+    # 用完即弃、不会产生真实 bug，但对以后维护是隐患。
+    poly_order = getattr(solver, "current_order", 0)
+    order_factor_advective = 1.0 / (2 * poly_order + 1)
+    order_factor_viscous = 1.0 / (2 * poly_order + 1) ** 2
+
+    dt_advective = CFL * order_factor_advective * h_expanded / wave_speed
 
     # 粘性稳定性限制（见上方文档 2）：分子粘度 + 当前湍流模型给出的
     # 涡粘（若有），与 TimeIntegrator.local_time_step 用同一公式
@@ -109,7 +131,7 @@ def compute_local_time_step(solver) -> np.ndarray:
     else:
         mu_eff = np.full_like(rho, mu_molecular)
     Lc2 = h_expanded ** 2  # V^(1/3) 的平方 = V^(2/3)
-    dt_visc = 0.25 * CFL * rho * Lc2 / np.maximum(mu_eff, 1e-30)
+    dt_visc = 0.25 * CFL * order_factor_viscous * rho * Lc2 / np.maximum(mu_eff, 1e-30)
 
     metric_flux_scale = solver._get_metric_flux_scale()  # (n_cells,n_sps)
     det_jacs = solver.mesh.jacobians["det_jacs"].reshape(n_cells, solver.mesh.n_sps_per_cell)

@@ -43,9 +43,20 @@ OVERSIZED_TET_FACTOR = 5.0
 # 刻意独立于 mesh_tetgen_core.CORE_VOLUME_CAP_FRACTION (0.08)——
 # 后者针对阶段 B 的小局部空腔重划，是不同负载和独立原理
 # （参见该常量的文档字符串），最初在此复用 0.08 使得过渡明显过慢/过细
-# （核心单元数过多）；0.2 仍偏慢/偏细，0.3 偏快/偏粗。0.25 是当前
-# 折中值——如果仍不合适可直接在此调整。
-CORE_FILL_VOLUME_CAP_FRACTION = 0.25
+# （核心单元数过多）；0.2 仍偏慢/偏细，0.3 偏快/偏粗。0.25 曾是折中值。
+#
+# 曾直接测过 TetGen 自身原生的"增长率"参数 elem_growth_ratio（对应
+# `-r#` 开关，语义正是相邻单元体积比上限，比这个单一 flat 上限更接近
+# 真正的连续分级）——但它只在 refine=True（重建并细化一个已有体网格）
+# 模式下生效，而当前安装的 python 绑定（pyvista/tetgen 0.8.4）只提供
+# 表面 PLC 加载（`load_mesh`），没有任何方法把已有体网格喂回去做
+# "重建"；已直接实测确认：对只加载了表面的 TetGen 实例调用
+# refine=True + elem_growth_ratio 立即 RuntimeError（"Failed to
+# tetrahedralize...may need to repair surface"），不是参数用法问题，是
+# 这版绑定缺失该机制依赖的接口。所以仍然只能靠这个单一 flat 上限本身
+# 间接控制过渡陡度：0.25 -> 0.20（cube_demo BL 质量campaign 第十一轮，
+# 直接应低回 0.2 曾评估过的取值，用于让过渡稍微变慢/变细）。
+CORE_FILL_VOLUME_CAP_FRACTION = 0.20
 
 
 def _build_merged_mesh(

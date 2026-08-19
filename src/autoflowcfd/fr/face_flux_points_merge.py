@@ -113,9 +113,20 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
     # ---- numba 并行 Newton + 插值矩阵预计算 ----
     logger.info("Running numba parallel Newton+interp kernel for FP geometry...")
     kernel = _get_numba_kernel()
-    # 准备 flat 连接数组（numba 需要连续内存）
-    prism_conn_flat = np.ascontiguousarray(mesh._fixed_prism_conn.ravel().astype(np.int32))
-    tet_conn_flat = np.ascontiguousarray(mesh._fixed_tet_conn.ravel().astype(np.int32))
+    # 准备 flat 连接数组（numba 需要连续内存）。单一单元类型的网格
+    # （纯棱柱 BL 通道、纯四面体 TGV 等验证算例）另一种 connectivity
+    # 在 HighOrderMesh.load_from_volume_mesh 里按设计留 None（不是空
+    # 数组，见该方法文档）——下面的 kernel 调用同时显式传了 n_prism
+    # （棱柱数）来界定循环范围，用空数组占位不会让 kernel 越界访问
+    # 不存在的那一类单元，只是避免在这里对 None 调用 .ravel() 崩溃。
+    prism_conn_flat = np.ascontiguousarray(
+        (mesh._fixed_prism_conn if mesh._fixed_prism_conn is not None
+         else np.empty((0, 6), dtype=np.int64)).ravel().astype(np.int32)
+    )
+    tet_conn_flat = np.ascontiguousarray(
+        (mesh._fixed_tet_conn if mesh._fixed_tet_conn is not None
+         else np.empty((0, 4), dtype=np.int64)).ravel().astype(np.int32)
+    )
     node_coords = np.ascontiguousarray(mesh._node_coords.astype(np.float64))
     # 预计算 V_sps 逆矩阵（用于 kernel 内插值矩阵构建）
     from autoflowcfd.fr.face_flux_points import _get_v_sps_lu

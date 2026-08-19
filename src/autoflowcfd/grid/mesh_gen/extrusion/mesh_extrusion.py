@@ -3,8 +3,11 @@
 实现沿法向的表面挤出以创建层状网格，适用于 CFD 仿真中的边界层
 分辨率。单层几何步骤（法向平均、尖角补偿）在 mesh_layer_step.extrude_single_layer
 中实现；将层状棱柱堆栈转换为四面体在 mesh_prism_to_tet 中实现；
-两个尖角特征衰减启发式方法在 mesh_extrusion_attenuation.py 中实现——
-均从本文件拆分以满足项目 450 行/文件的规范。
+真 3D 顶点节点的静态挤出厚度上限在 mesh_extrusion_vertex_limit.py
+中实现（V2.0 专项攻关记录 cube_demo BL 质量campaign 第十六轮：替换
+了之前住在 mesh_extrusion_attenuation.py 里的两个连续衰减启发式，
+见 extrude_layers 自身改动处的注释了解为什么）——均从本文件拆分以
+满足项目 450 行/文件的规范。
 """
 
 import numpy as np
@@ -15,10 +18,7 @@ from ..utils.mesh_utils import check_reached_boundary
 from .mesh_layer_step import extrude_single_layer
 from ..utils.mesh_front_collision import clamp_budget_for_convergence, freeze_self_colliding_nodes
 from .mesh_bl_growth import _MAX_SAFETY_LAYERS, compute_layer_thickness
-from .mesh_extrusion_attenuation import (
-    _compute_sharp_angle_attenuation,
-    _compute_edge_distance_field,
-)
+from .mesh_extrusion_vertex_limit import compute_vertex_corner_thickness_limit
 
 # 限制每层自身的厚度，使其单元体积永远不会比前一层的跳跃超过这个倍数——
 # 棱柱层的体积随其厚度缩放（底面积通过平移偏移几乎不变），所以限制连续层
@@ -123,53 +123,25 @@ def extrude_layers(
 
     bl_layers = 8 if bl_layers is None else max(0, int(bl_layers))
     bl_growth_rate = growth_rate
-    
-    # 两个独立的衰减启发式，通过最小值组合（两者中更保守的获胜）而不是
-    # 一个默默覆盖另一个（之前的行为：这个本地计算并记录，然后在下面的
-    # edge_attenuation 重新赋值时立即丢弃——真实的、浪费的工作，从不影响实际
-    # 挤出）。_compute_sharp_angle_attenuation 直接响应节点自身最尖锐的相邻
-    # 二面角（< 90 度时地板为 0.1）；_compute_edge_distance_field 响应到最近
-    # 识别的尖锐顶点的欧氏距离（在该顶点处精确为 0 地板，在 2 倍网格自身
-    # 尖锐边长度尺度上攀升）。单独任何一个都不足以在稀疏网格化的圆角处可靠地
-    # 衰减（物理上平滑的曲线只跨越 1-2 个元素，对两者都仍然读作尖锐边），
-    # 所以组合它们让任何一个先响应。
-    logger.info("Computing sharp-angle attenuation for BL...")
-    angle_attenuation = _compute_sharp_angle_attenuation(
-        surface_nodes, surface_faces, normals,
-        normal_faces=normal_faces
-    )
-    n_attenuated = int(np.sum(angle_attenuation < 0.9))
-    if n_attenuated > 0:
-        logger.info(f"Sharp-angle attenuation active for {n_attenuated} nodes")
 
-    # 优化：计算边距离场以在尖角附近衰减 BL 厚度
-    # 这防止边处的严重几何畸变和自交叉
-    #
-    # min_feature_radius=nominal_bl_thickness：V2.0 专项攻关记录（cube_demo
-    # BL 质量campaign 第八轮）：这个判据本来完全没有曲率半径过滤，纯角度
-    # 阈值（45°）把车身圆角（cube_demo 实测真实半径 7.6mm）密集三角化后的
-    # 普通面片边全部误判成尖锐折痕，导致衰减场沿整条棱边被压到地板值——
-    # 参见 _compute_edge_distance_field 自己的 min_feature_radius 文档了解
-    # 完整根因链条。这里传入的名义边界层累积厚度（几何级数和，与
-    # split_sharp_corners 在别处用 min_cell_size 作为半径判据不同——那里
-    # 判断的是"网格分辨率够不够细来正确描述这条边"，这里判断的是"边界层
-    # 会不会长得比这个圆角的曲率半径还厚"，是两个不同的问题，用同一个
-    # min_cell_size 量级的值在这里量纲上就不对）。
-    nominal_bl_thickness = (
-        base_thickness * (bl_growth_rate ** bl_layers - 1) / (bl_growth_rate - 1)
-        if bl_layers > 0 else 0.0
-    )
-    logger.info("Computing sharp-edge distance field for BL attenuation...")
-    distance_attenuation = _compute_edge_distance_field(
-        surface_nodes, surface_faces, normals,
-        normal_faces=normal_faces,
-        min_feature_radius=nominal_bl_thickness,
-    )
-    n_attenuated = int(np.sum(distance_attenuation < 0.9))
-    if n_attenuated > 0:
-        logger.info(f"Sharp-edge attenuation active for {n_attenuated} nodes")
-
-    edge_attenuation = np.minimum(angle_attenuation, distance_attenuation)
+    # V2.0 专项攻关记录（cube_demo BL 质量campaign 第十六轮，"协同循环"
+    # 重设计）：之前用两个连续衰减启发式（_compute_sharp_angle_attenuation
+    # 按节点自身最尖锐二面角、_compute_edge_distance_field 按到最近尖锐边
+    # 距离）逐层压薄尖角附近的厚度——这是本次专项攻关最先诊断出的问题
+    # 表现（"很多亚毫米级薄棱柱堆在角点，而不是干净地少几层"），但两次
+    # 独立尝试直接修复它（顶点专属静态厚度上限、棱柱降级对角线重选择）
+    # 都没能改善相邻单元体积比这个主指标——根因排查确认：真正的问题不是
+    # "衰减不够精确"，是"用连续衰减压薄再反应式冻结"这个停止方式本身，
+    # 与 ANSA 文档描述的 Collapse 机制（精确回退到上一层已完成位置，不是
+    # 渐进逼近）不符，会在任意衰减比例的中间状态停住，产生大量退化程度
+    # 不一的薄棱柱。这两个连续衰减启发式已完全移除；替换为两个机制协同：
+    # ①compute_vertex_corner_thickness_limit 在挤出前静态算出真顶点节点
+    # 的目标厚度上限，直接并入 remaining_budget——每一层都按完整名义
+    # 厚度挤出（不再逐层打折），remaining_budget 的既有硬停止逻辑
+    # （mesh_layer_step.py 自身注释）在某个干净的层边界精确停止，不再有
+    # 中间的压薄状态；②clamp_budget_for_convergence（已保留，逻辑不变）
+    # 作为反应式兜底，处理这个静态估计漏掉的真实几何会聚。
+    vertex_corner_limit = compute_vertex_corner_thickness_limit(surface_nodes, normal_faces)
 
     # 手动（结构化）挤出也在约 0.5 * max_cell_size 停止（ANSA 风格）
     # 作为安全底线——见上方 Args 文档中这个上限自己的说明了解为什么
@@ -199,11 +171,15 @@ def extrude_layers(
     # 在第一层提交之前为 None。
     previous_layer_thickness: Optional[float] = None
 
-    # 分配剩余预算用于厚度限制
+    # 分配剩余预算用于厚度限制——外部传入的 thickness_limit（地面间隙等）
+    # 与本函数自己算出的 vertex_corner_limit（真顶点组合半径）用
+    # np.minimum 组合，两者中更保守的获胜，与 mesh_background_merge_
+    # with_bl.py 组合 compute_local_thickness_limit 结果时的既有模式一致。
     remaining_budget = (
         thickness_limit.copy() if thickness_limit is not None
         else np.full(len(surface_nodes), np.inf, dtype=np.float64)
     )
+    remaining_budget = np.minimum(remaining_budget, vertex_corner_limit)
     n_limited = int(np.sum(np.isfinite(remaining_budget)))
     if n_limited:
         logger.info(f"Local BL thickness limiting active for {n_limited} nodes")
@@ -258,13 +234,16 @@ def extrude_layers(
         # Reactive convergence clamp
         clamp_budget_for_convergence(current_nodes, surface_faces, remaining_budget)
 
-        # 合并边衰减与 taper_scale 以在尖角附近获得更平滑的 BL
-        effective_taper = taper_scale * edge_attenuation if taper_scale is not None else edge_attenuation
+        # 只保留 seam taper_scale（seam 处平滑过渡到零，与尖角处的厚度
+        # 控制是两个不同的问题）——尖角处的厚度控制现在完全由上面并入
+        # remaining_budget 的 vertex_corner_limit（静态、按目标层数硬
+        # 停止）加 clamp_budget_for_convergence（反应式兜底）两个机制
+        # 负责，不再靠这里逐层打折。
 
         # 沿平均法向挤出节点
         new_nodes = extrude_single_layer(
             current_nodes, normal_faces, normals, layer_thickness,
-            taper_scale=effective_taper, remaining_budget=remaining_budget,
+            taper_scale=taper_scale, remaining_budget=remaining_budget,
         )
 
         # 反应式局部碰撞冻结
