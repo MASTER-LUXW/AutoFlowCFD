@@ -52,6 +52,65 @@ def _split_prisms_to_tets(prisms: np.ndarray) -> np.ndarray:
     ], axis=0)
 
 
+def _split_collapsed_corner_to_2_tets(prisms: np.ndarray, corner: int) -> np.ndarray:
+    """"折叠角"棱柱（恰好一个顶点 v_c == w_c，无其他重复）的精确 2-四面体
+    分解——取代通用 3-way 拆分再丢弃退化件的做法。
+
+    几何：棱柱的 3 个侧面里，与折叠角相邻的 2 个侧面本身也随之退化为
+    三角形（因为它们各自的 4 个角里有一对已重合），只有"对面"（不
+    触碰折叠角的那个侧面）仍是一个完好的四边形 quad = v_a,v_b,w_b,w_a
+    （沿用棱柱自身"v_i,v_{i+1},w_{i+1},w_i"侧面缠绕约定）。折叠角本身
+    的顶点 apex = v_c(=w_c) 与这个 quad 一起，精确构成一个四棱锥
+    （quad 底面 + apex 顶点）——这正是折叠棱柱退化后的真实立体形状，
+    5 个不同顶点，不是 6 个。
+
+    四棱锥沿 quad 的一条对角线（v_a—w_b）恰好精确、无残留地分解为 2 个
+    四面体。
+
+    **重要更正（诚实记录一次证伪，避免下一轮重复走这条已证明无效的
+    路）**：最初怀疑旧版"通用 3-way 拆分、丢弃恰好重复引用同一节点的
+    第 3 个候选"会产生病态的不均衡子四面体对（一个几乎占满、一个
+    近零体积），是本函数存在的动机。但已用符号推导+数值核对严格证明：
+    对单角折叠的全部 3 种情形，通用拆分丢弃退化候选后剩下的 2 个
+    候选，与本函数直接构造的 2 个四棱锥子四面体，是**逐节点集合完全
+    相同**的两个四面体（只是同一四面体的 4 个顶点写入顺序可能不同，
+    不影响形状/体积，只影响绕向符号，而绕向本来就会被调用方
+    `orient_tetrahedra` 统一处理）——即通用拆分对这个特定简并情形早已
+    是精确解，不存在实际的体积不均衡 bug。已在 cube_demo 上实测验证：
+    换用本函数前后，全部质量指标（含 adjacent_volume_ratio_max）
+    逐位不变。
+
+    因此本函数相对旧版通用拆分**不改变任何输出网格几何**，价值仅在于
+    ①省去构造并丢弃第 3 个候选的计算 ②用推导式的显式公式取代"凑巧
+    discard 对了"的隐式正确性，可读性更好、更不容易在未来被误改坏。
+    cube_demo 上实测确认的 336.57 相邻体积比根因**不是**折叠角棱柱
+    降级——已用逐面追踪定位到具体的最坏单元后确认它不触碰任何折叠角
+    棱柱产生的四面体，是另一个尚未定位的、独立的近退化 sliver 来源
+    （详见 mesh_repair_interface.py 模块文档"已知局限"一节的后续
+    分析）。
+
+    Args:
+        prisms: (n, 6) 棱柱连接关系，每行恰好满足 prisms[:,corner] ==
+            prisms[:,corner+3] 且无其他重复顶点对（调用方保证）。
+        corner: 0/1/2，折叠角在棱柱自身编号中的索引。
+
+    Returns:
+        (2*n, 4) 四面体连接关系，block 布局：前 n 行是每个输入棱柱的
+        第一个子四面体，后 n 行是第二个（与 _split_prisms_to_tets 的
+        block 布局约定一致，调用方可用同一种 np.tile(idx, 2) 方式
+        推导来源）。
+    """
+    a, b = [k for k in range(3) if k != corner]
+    v_a, v_b = prisms[:, a], prisms[:, b]
+    w_a, w_b = prisms[:, a + 3], prisms[:, b + 3]
+    apex = prisms[:, corner]  # == prisms[:, corner+3]，调用方已保证
+    # quad 顶点按 v_a -> v_b -> w_b -> w_a 的原侧面缠绕顺序，对角线取
+    # v_a—w_b：三角形 (v_a,v_b,w_b) 和 (v_a,w_b,w_a)，各自加 apex。
+    tet1 = np.stack([v_a, v_b, w_b, apex], axis=1)
+    tet2 = np.stack([v_a, w_b, w_a, apex], axis=1)
+    return np.concatenate([tet1, tet2], axis=0)
+
+
 def demote_invalid_prisms_to_tets(
     prism_cells: np.ndarray,
     bl_cell_groups: np.ndarray,
@@ -69,19 +128,26 @@ def demote_invalid_prisms_to_tets(
     而非本项目早期追踪的小四面体体积缺口（参见 ProjectFiles
     Part10 P39）。
 
-    patch_nonmanifold_cavity_mixed（mesh_background.py 中的
-    长细比修复遍，已通过 prism_ar <= 500.0 将每个这样的棱柱
-    路由通过它）是尽力 tetgen 重铺，静默留下没有簇被"接受"的
-    空腔不变——且 tetgen 在从近零体积几何构建的空腔上可靠
-    失败或被跳过，正好是折叠角棱柱边界的情况。已直接确认：
-    在同一真实导出上，100% 的约 21,000 个标记棱柱仍然呈现、
-    未修补、带有原始重复节点 id，尽管基于长细比的补丁已运行。
-    此函数是确定性兜底，无失败模式：折叠棱柱通过相同
-    对角线一致性规则拆分为正好 3 个四面体，本模块其他
-    地方都使用该规则（_split_prisms_to_tets），其中正好
-    重复引用该节点两次的那个是退化的并被丢弃；另外 2 个
-    是覆盖相同体积的普通、有效、非退化四面体——纯算术，
-    不会像 tetgen 调用那样失败。
+    折叠棱柱本身覆盖的是真实、非零的物理体积（BL 挤出过程里，该角
+    的增长提前冻结，不是几何缺陷或重复单元）——因此正确的处理方式
+    是把它转换成等体积的四面体表示，而不是直接删除（删除会在域内
+    留下一个没有任何单元覆盖的真实空洞，比退化单元更严重：面提取
+    会在那里产生虚假的内部边界，或者干脆让相邻单元的通量计算漏掉
+    这部分体积，是真实的守恒违反）。
+
+    分两种情况处理：
+    1. **精确的单角折叠**（v_c == w_c 恰好一对，无其他重复）：用
+       `_split_collapsed_corner_to_2_tets` 直接构造 2 个四面体（四棱锥
+       的标准分解，体积 100% 覆盖）。**注意**：已证明这与旧版通用
+       3-way 拆分 + 丢弃退化候选，对这个特定简并情形产生逐节点相同的
+       结果（见 `_split_collapsed_corner_to_2_tets` 文档字符串"重要
+       更正"一节）——本路径不改变任何输出几何，只是更清晰/省一次
+       无用计算。这是绝大多数真实折叠角棱柱的情况。
+    2. **更复杂/非预期的重复模式**（多对重复，或重复不在 v_i/w_i
+       竖直对上）：退回旧有的通用 3-way 拆分 + 丢弃恰好退化的那个
+       子四面体——通用公式对这类不常见形状仍然正确（纯算术，不会
+       像 tetgen 调用那样失败）；这类情况按本模块的历史实测记录
+       （ProjectFiles Part10 P39）远少于情况 1。
 
     Args:
         prism_cells: (n_prism, 6) 棱柱连接关系
@@ -101,37 +167,70 @@ def demote_invalid_prisms_to_tets(
     if len(prism_cells) == 0:
         return prism_cells, bl_cell_groups, empty_tets, empty_groups
 
-    has_dup = np.zeros(len(prism_cells), dtype=bool)
+    # 竖直对（折叠角的标志）与全部 15 对的重复计数分开统计，用于区分
+    # "干净的单角折叠"（情况 1）与其他重复模式（情况 2）。
+    vertical_match = np.stack(
+        [prism_cells[:, k] == prism_cells[:, k + 3] for k in range(3)], axis=1
+    )  # (n, 3)
+    total_dup_pairs = np.zeros(len(prism_cells), dtype=np.int32)
     for i in range(6):
         for j in range(i + 1, 6):
-            has_dup |= prism_cells[:, i] == prism_cells[:, j]
+            total_dup_pairs += (prism_cells[:, i] == prism_cells[:, j]).astype(np.int32)
 
+    has_dup = total_dup_pairs > 0
     if not has_dup.any():
         return prism_cells, bl_cell_groups, empty_tets, empty_groups
 
-    bad_idx = np.flatnonzero(has_dup)
-    split_tets = _split_prisms_to_tets(prism_cells[bad_idx])  # (3*n_bad, 4), block layout: all T1s, then T2s, then T3s
-    degenerate = (
-        (split_tets[:, 0] == split_tets[:, 1]) | (split_tets[:, 0] == split_tets[:, 2]) |
-        (split_tets[:, 0] == split_tets[:, 3]) | (split_tets[:, 1] == split_tets[:, 2]) |
-        (split_tets[:, 1] == split_tets[:, 3]) | (split_tets[:, 2] == split_tets[:, 3])
-    )
-    valid_tets = split_tets[~degenerate]
-    # np.tile (not np.repeat) matches _split_prisms_to_tets' block layout -
-    # row r of the (3*n_bad,4) output belongs to source prism bad_idx[r % n_bad].
-    source_idx = np.tile(bad_idx, 3)[~degenerate]
+    n_vertical = vertical_match.sum(axis=1)
+    clean_single_collapse = has_dup & (total_dup_pairs == 1) & (n_vertical == 1)
+    messy = has_dup & ~clean_single_collapse
 
-    logger.warning(
-        f"{len(bad_idx)} prism(s) with a duplicate node id among their own 6 "
-        f"vertices (collapsed-corner, invalid as a CPENTA record) - demoting "
-        f"to {len(valid_tets)} plain tet(s), the deterministic fallback for "
-        f"whatever the tetgen-based aspect-ratio patch above did not resolve"
-    )
+    tet_parts = []
+    group_parts = []
+
+    if clean_single_collapse.any():
+        collapsed_corner = np.argmax(vertical_match, axis=1)  # 仅在 clean 行上有意义
+        for c in range(3):
+            rows = np.flatnonzero(clean_single_collapse & (collapsed_corner == c))
+            if len(rows) == 0:
+                continue
+            two_tets = _split_collapsed_corner_to_2_tets(prism_cells[rows], c)
+            tet_parts.append(two_tets)
+            group_parts.append(np.tile(bl_cell_groups[rows], 2))
+        logger.warning(
+            f"{int(clean_single_collapse.sum())} prism(s) with a single collapsed "
+            f"corner (v_i == w_i, invalid as a CPENTA record) - demoting to "
+            f"{2 * int(clean_single_collapse.sum())} plain tet(s) via exact "
+            f"quad-pyramid decomposition (no discarded degenerate piece, "
+            f"volumes stay balanced - see _split_collapsed_corner_to_2_tets docstring)"
+        )
+
+    if messy.any():
+        bad_idx = np.flatnonzero(messy)
+        split_tets = _split_prisms_to_tets(prism_cells[bad_idx])  # (3*n_bad,4), block layout
+        degenerate = (
+            (split_tets[:, 0] == split_tets[:, 1]) | (split_tets[:, 0] == split_tets[:, 2]) |
+            (split_tets[:, 0] == split_tets[:, 3]) | (split_tets[:, 1] == split_tets[:, 2]) |
+            (split_tets[:, 1] == split_tets[:, 3]) | (split_tets[:, 2] == split_tets[:, 3])
+        )
+        valid_tets = split_tets[~degenerate]
+        source_idx = np.tile(bad_idx, 3)[~degenerate]
+        logger.warning(
+            f"{len(bad_idx)} prism(s) with an unexpected duplicate-vertex pattern "
+            f"(not a single clean corner collapse) - falling back to generic "
+            f"3-way split + discard-the-degenerate-one, demoting to "
+            f"{len(valid_tets)} plain tet(s)"
+        )
+        tet_parts.append(valid_tets)
+        group_parts.append(bl_cell_groups[source_idx])
+
+    extra_tets = np.concatenate(tet_parts, axis=0) if tet_parts else empty_tets
+    extra_groups = np.concatenate(group_parts, axis=0) if group_parts else empty_groups
 
     keep_mask = ~has_dup
     return (
         prism_cells[keep_mask],
         bl_cell_groups[keep_mask],
-        valid_tets.astype(prism_cells.dtype),
-        bl_cell_groups[source_idx],
+        extra_tets.astype(prism_cells.dtype),
+        extra_groups,
     )

@@ -21,11 +21,8 @@ from typing import Optional
 
 import click
 
-from autoflowcfd.core import FRSolver
 from autoflowcfd.cli.solve_helpers import (
-    compute_wall_distance_for_solver,
-    load_mesh_for_solver,
-    restore_state_from_checkpoint,
+    rebuild_solver_from_checkpoint,
     save_results,
     write_checkpoint,
 )
@@ -77,58 +74,18 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
             参数语义一致）
         reference_area: 气动系数参考面积
     """
-    from types import SimpleNamespace
-    from autoflowcfd.core.utils.checkpoint import CheckpointManager
-
     logger.info(f"Resuming simulation from checkpoint: {checkpoint_file}")
 
-    solution, history, iteration, metadata = CheckpointManager(
-        config=SimpleNamespace(), output_dir="."
-    ).load(checkpoint_file)
-
-    fields = metadata.get("fields", {})
-    if "U_sps" not in fields:
-        raise click.ClickException(
-            f"Checkpoint '{checkpoint_file}' 缺少 'U_sps' 字段（完整的 (n_cells,n_sps,n_vars) "
-            f"求解器状态）——这不是本版本 solve_helpers.write_checkpoint 写出的 checkpoint，"
-            f"无法精确恢复（只有拍扁过的单元中心近似不足以重建高阶解）。"
-        )
-
-    input_file = metadata.get("input_file")
-    order = int(metadata.get("order", 2))
-    turbulence_model = metadata.get("turbulence_model", "sst")
-    target_backend = backend or metadata.get("backend", "cpu")
-
-    if not input_file:
-        raise click.ClickException("Checkpoint metadata 缺少 'input_file'，无法重新加载网格。")
-
-    logger.info(f"Rebuilding solver from checkpoint: input={input_file}, order=P{order}, "
-                f"turbulence={turbulence_model}, backend={target_backend}, resuming at iter={iteration}")
-
-    mesh, volume_data = load_mesh_for_solver(input_file, order, surface_mesh=surface_mesh)
-
-    solver = FRSolver(
-        mesh=mesh,
-        backend=target_backend,
-        order=order,
-        turb_model_name=turbulence_model,
-        rho_inf=metadata.get("rho_inf", 1.225),
-        vel_inf=metadata.get("vel_inf", 33.33),
-        p_inf=metadata.get("p_inf", 101325.0),
-        n_threads=threads,
+    solver, iteration, metadata = rebuild_solver_from_checkpoint(
+        checkpoint_file, backend=backend, surface_mesh=surface_mesh, threads=threads,
     )
-    compute_wall_distance_for_solver(solver, volume_data)
+    input_file = metadata["input_file"]
+    order = metadata["order"]
+    turbulence_model = metadata["turbulence_model"]
+    target_backend = metadata["backend"]
 
-    U_restored = fields["U_sps"]
-    if U_restored.shape != solver.state.U.shape:
-        raise click.ClickException(
-            f"Checkpoint 状态形状 {U_restored.shape} 与重建求解器的状态形状 "
-            f"{solver.state.U.shape} 不匹配（网格或阶数可能已变化），拒绝恢复。"
-        )
-    solver.state.U = U_restored
-    solver.state._update_primitives()
-
-    logger.info(f"State restored from checkpoint, continuing for {max_iter} more iterations...")
+    logger.info(f"State restored from checkpoint (iter={iteration}), "
+                f"continuing for {max_iter} more iterations...")
     result = solver.solve(max_iter=max_iter, dt=1e-3, tol=1e-6)
     print(f"\n✅ Resumed simulation finished: total_iterations~={iteration + result.iterations}, "
           f"Residual={result.final_residual:.6e}")

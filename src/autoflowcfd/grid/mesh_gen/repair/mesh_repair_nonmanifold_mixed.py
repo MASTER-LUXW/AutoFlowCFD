@@ -11,8 +11,40 @@ from typing import List, Tuple
 import numpy as np
 from loguru import logger
 
-from .mesh_repair_cavity_shared import _CAVITY_FACE_TEMPLATES, _cavity_boundary_faces
+from .mesh_repair_cavity_shared import (
+    _CAVITY_FACE_TEMPLATES,
+    _cavity_boundary_faces,
+    _count_bad_cells,
+    _weld_near_coincident_boundary_points,
+)
 from .mesh_repair_nonmanifold_mixed_demote import _split_prisms_to_tets, demote_invalid_prisms_to_tets  # noqa: F401  (demote_invalid_prisms_to_tets 是本模块的公开出口，保持原有导入路径可用)
+
+# _weld_near_coincident_boundary_points 的容差——空腔边界面自身中位边长
+# 的比例，不是固定长度（见该函数自己的文档字符串了解为什么必须用局部
+# 尺度）。V2.0 专项攻关记录（cube_demo BL 质量campaign 第十九轮）：这个
+# 函数是 BL 挤出前沿被撕裂（见 mesh_front_collision.py 模块文档字符串）
+# 后唯一实际"缝合"出退化 sliver 的地方——之前对重铺结果完全没有事后
+# 质量校验，也没有对输入边界点集本身的近重合焊接，两者都在本轮补上。
+#
+# 0.10 是真实 cube_demo A/B 扫描出的安全上界，不是随意选的：
+# <=0.10（含本值）在整个真实生产管线上稳定安全——0.05 时焊接从未
+# 实际触发（tolerance 太紧，0 次焊接，相邻单元体积比的改善完全来自
+# 下面的事后质量门控），0.08/0.10 时焊接开始真正生效（5~13 次，
+# 每次合并几个到十几个点），对主指标（相邻单元体积比 336.57->33.20）
+# 零额外影响、对非正交度等其它指标零/可忽略的额外副作用；但
+# >=0.12 时同一真实网格上会崩溃——真实报错"3 faces are shared by
+# more than 2 cells"，即真正的非流形撕裂：更松的容差开始把同一空腔
+# 边界里*彼此独立、各自与外部保留单元有真实缝合关系*的不同点也当成
+# "近重合"合并掉（0.15 时单个空腔一次合并 192 个点、丢弃 520 个退化
+# 面——远超"一对撕裂角点"的规模），把其中一个的索引整个丢弃相当于
+# 撕开该点与外部网格的缝合缝。焊接函数自身的"只丢弃索引、不移动幸存
+# 点坐标"设计本来就是为了不去扰动外部共享的真实缝合点，但无法从
+# 距离本身分辨"确实是同一撕裂点"和"恰好彼此靠近的两个不同缝合点"——
+# 容差越松，后一类假阳性合并的概率越高，真实数据显示 0.10->0.12 之间
+# 就是这个假阳性开始产生真实拓扑损伤的转折点。选 0.10（安全区间的
+# 上沿，不是更保守的 0.05/0.08）是为了让焊接机制在真实撕裂案例上尽量
+# 有实际参与的机会，而不是退化成事实上从不触发的死代码。
+CAVITY_WELD_TOLERANCE_FRACTION = 0.10
 
 
 def patch_nonmanifold_cavity_mixed(
@@ -85,8 +117,11 @@ def patch_nonmanifold_cavity_mixed(
         return nodes, prism_cells, tet_cells, bl_cell_groups, cell_groups
 
     from ..tetgen.mesh_tetgen_core import fill_core_volume, CORE_TETGEN_MINRATIO, CORE_TETGEN_MINDIHEDRAL
+    from ...validation.quality_validator import MeshQualityValidator
     from scipy.sparse import coo_matrix
     from scipy.sparse.csgraph import connected_components
+
+    validator = MeshQualityValidator()
 
     n_prism = len(prism_cells)
     n_tet = len(tet_cells)
@@ -181,6 +216,7 @@ def patch_nonmanifold_cavity_mixed(
     accepted: List[dict] = []
     n_skipped_size = 0
     n_failed = 0
+    n_rejected = 0
 
     for cluster_id in range(min(n_clusters, max_clusters_attempted)):
         cluster_seed_mask = np.zeros(n_total, dtype=bool)
@@ -221,6 +257,16 @@ def patch_nonmanifold_cavity_mixed(
         local_faces = local_of_global[boundary_faces].astype(np.int32)
         local_points = nodes[global_pts]
 
+        # 焊接空腔自身边界点集里的近重合点对（撕裂的 BL 前沿留下的典型
+        # 产物），在把边界原样交给 tetgen 之前——见
+        # _weld_near_coincident_boundary_points 自己的文档字符串了解
+        # 为什么这必须在 tetgen 调用*之前*做，"重铺完再拒绝"本身不能
+        # 修复由退化输入边界导致的退化输出。
+        local_points, local_faces, global_pts = _weld_near_coincident_boundary_points(
+            local_points, local_faces, global_pts,
+            tolerance_fraction=CAVITY_WELD_TOLERANCE_FRACTION,
+        )
+
         try:
             retiled_nodes, retiled_tets, _, _ = fill_core_volume(
                 local_points, local_faces, verbose=False,
@@ -238,6 +284,27 @@ def patch_nonmanifold_cavity_mixed(
             n_failed += 1
             continue
 
+        # 事后体积/形状质量门控——这个混合网格版本此前完全没有（对照
+        # mesh_repair_cavity.remesh_core_cavity/_attempt_cavity_retile_
+        # clusters 已有的 is_improvement/is_acceptable_fallback 门控），
+        # 是本函数把撕裂"缝合"成 sliver 却从不拒绝的直接原因（见
+        # mesh_front_collision.py 模块文档字符串了解撕裂如何产生）。
+        # 与 Stage B' 相同的双重接受条件：严格改善，或者原始空腔本来就
+        # 只有很少（<=2）坏单元时至少不变差——用于在困难几何特征上
+        # tetgen 找不到完美解时打破死锁，而不是无限拒绝。
+        old_bad = _count_bad_cells(validator, nodes, cavity_as_tets)
+        bad_new = _count_bad_cells(validator, retiled_nodes, retiled_tets)
+        is_improvement = bad_new < old_bad
+        is_acceptable_fallback = (old_bad <= 2 and bad_new <= old_bad)
+        if not is_improvement and not is_acceptable_fallback:
+            logger.debug(
+                f"  Cavity retile of {len(cavity_idx)} cell(s) ({old_bad} bad) -> "
+                f"{len(retiled_tets)} cell(s) ({bad_new} bad) - not an improvement, "
+                f"keeping original cells"
+            )
+            n_rejected += 1
+            continue
+
         claimed[cavity_idx] = True
         accepted.append(dict(
             cavity_prism_idx=cavity_prism_idx, cavity_tet_idx=cavity_tet_idx,
@@ -248,8 +315,8 @@ def patch_nonmanifold_cavity_mixed(
     if not accepted:
         logger.warning(
             f"Non-manifold mixed-cavity patch: {n_clusters} cluster(s) found, none "
-            f"accepted (skipped_size={n_skipped_size}, failed={n_failed}) - "
-            f"falling back to plain cell removal"
+            f"accepted (skipped_size={n_skipped_size}, rejected={n_rejected}, "
+            f"failed={n_failed}) - falling back to plain cell removal"
         )
         return nodes, prism_cells, tet_cells, bl_cell_groups, cell_groups
 
@@ -292,6 +359,6 @@ def patch_nonmanifold_cavity_mixed(
     logger.info(
         f"Non-manifold mixed-cavity patch: {len(accepted)}/{n_clusters} cluster(s) patched "
         f"({n_cavity_cells_replaced} cell(s) -> {n_new_cells} local retile cell(s); "
-        f"skipped_size={n_skipped_size}, failed={n_failed})"
+        f"skipped_size={n_skipped_size}, rejected={n_rejected}, failed={n_failed})"
     )
     return new_nodes, new_prism_cells, new_tet_cells, new_bl_cell_groups, new_cell_groups

@@ -118,30 +118,63 @@ class DistributedFRSolver:
         else:
             raise ValueError("Either face_connectivity or partition_info must be provided")
 
-        # 构建本 rank 的分区数据结构
-        # 注意：build_distributed_partition 需要 face_connectivity 对象
-        # 分布式模式下我们需要从 face_connectivity_data 重建
+        # 构建本 rank 的分区数据结构。
+        #
+        # build_distributed_partition 的 halo 探测（哪些面跨越分区边界、
+        # 因此需要 halo 交换）必须在**全局、未裁剪**的面连接关系上做——
+        # 它要用 cell_partition[owner]/cell_partition[neighbor] 判断一条
+        # 面两侧是否属于不同 rank，cell_partition 本身是全局数组
+        # （下标是全局 cell id）。此前这里传入的是
+        # face_connectivity_data（distributed_mesh_load 提取的**局部**
+        # 数据，owner_cell/neighbor_cell 已经重映射成本 rank 的局部索引，
+        # 跨 rank 的 neighbor 被强制置为 -1，与真正的边界面用同一个
+        # 哨兵值、在本 rank 视角下已经无法区分），拿它当 face_connectivity
+        # 传给 build_distributed_partition 有两个独立问题：(1) 该
+        # 函数第一行就要读 face_connectivity.n_faces，一个用普通
+        # dataclass 拼出来的 LocalFaceConnectivity 对象没有这个属性，
+        # 必然 AttributeError；(2) 即便补上这个属性，用局部索引去查
+        # cell_partition（全局索引空间）也是错的，且跨 rank 邻居已经
+        # 提前坍缩成 -1，halo 探测的 `if nc < 0: continue` 会直接跳过
+        # 所有真正的分区边界面——halo_cells/send_lists/recv_lists 会
+        # 算成空的，粘性/无粘残差在分区边界上完全得不到邻居数据
+        # （V2.0 专家组评审逐行核实：这条路径此前从未被真正跑通过）。
+        #
+        # 修复：用 distributed_mesh_load 随 partition_info 一起广播的
+        # **全局**面连接关系（global_owner_cell/global_neighbor_cell/
+        # global_is_boundary）构建分区——这才是 build_distributed_
+        # partition 设计时假设的输入形态，cell_partition 也是同一个
+        # 全局索引空间，两者能正确对齐。
         if face_connectivity_data is not None:
-            # 分布式模式：从数据构建局部面连接关系
-            from autoflowcfd.grid.connectivity.face_connectivity import FRFaceConnectivity
+            if partition_info is None or 'global_owner_cell' not in partition_info:
+                raise ValueError(
+                    "DistributedFRSolver(face_connectivity_data=...) 需要 "
+                    "partition_info 里包含 global_owner_cell/global_neighbor_cell/"
+                    "global_is_boundary（distributed_mesh_load 的输出）才能正确"
+                    "构建分区——不能只用局部（已按 rank 裁剪）的面连接关系，"
+                    "见本方法上方注释。"
+                )
             from dataclasses import dataclass
 
             @dataclass
-            class LocalFaceConnectivity:
-                """局部面连接关系（用于分区构建）。"""
+            class GlobalFaceConnectivityView:
+                """构建分区专用的最小全局面连接关系视图（只读，不重新
+                实例化完整 FRFaceConnectivity，避免要求调用方提供它
+                不需要的其余几何字段）。"""
                 owner_cell: np.ndarray
                 neighbor_cell: np.ndarray
                 is_boundary: np.ndarray
 
-            local_fc = LocalFaceConnectivity(
-                owner_cell=np.array(face_connectivity_data['owner_cell']),
-                neighbor_cell=np.array(face_connectivity_data['neighbor_cell']),
-                is_boundary=np.array(face_connectivity_data['is_boundary']),
+                @property
+                def n_faces(self) -> int:
+                    return len(self.owner_cell)
+
+            global_fc = GlobalFaceConnectivityView(
+                owner_cell=np.asarray(partition_info['global_owner_cell']),
+                neighbor_cell=np.asarray(partition_info['global_neighbor_cell']),
+                is_boundary=np.asarray(partition_info['global_is_boundary']),
             )
-            # 使用局部面连接关系构建分区
-            # 注意：这里需要全局 cell 数来构建分区
             self.partition = build_distributed_partition(
-                local_fc, cell_partition, self.rank, n_ranks
+                global_fc, cell_partition, self.rank, n_ranks
             )
         else:
             # 兼容旧接口

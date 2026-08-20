@@ -18,5 +18,6 @@ from autoflowcfd.cli.solve_wall_distance import compute_wall_distance_for_solver
 from autoflowcfd.cli.solve_checkpoint_io import (  # noqa: F401
     save_results,
     restore_state_from_checkpoint,
+    rebuild_solver_from_checkpoint,
     write_checkpoint,
 )

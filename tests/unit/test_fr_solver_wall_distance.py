@@ -1,4 +1,4 @@
-"""Unit tests for core/fr_solver_turbulence.compute_wall_distance_field's
+"""Unit tests for core/fr_solver/turbulence.py's compute_wall_distance_field
 use_eikonal handling and _map_node_distances_to_points - the mapping step
 that used to silently discard the just-computed node-level distance field
 and re-query mesh_nodes/wall_coords directly via KD-Tree regardless of
@@ -49,7 +49,7 @@ class TestComputeWallDistanceFieldBranching:
         compute_wall_distance_field(solver, np.zeros((3, 3)), np.array([0]))
         assert solver.wall_distance is None
 
-    @patch("autoflowcfd.core.fr_solver_turbulence.compute_wall_distance")
+    @patch("autoflowcfd.core.fr_solver.turbulence.compute_wall_distance")
     def test_eikonal_with_sps_coords_maps_via_nearest_node(self, mock_compute):
         # 3 mesh nodes on a line; node_distances mocked as if Eikonal had
         # already solved them.
@@ -77,7 +77,7 @@ class TestComputeWallDistanceFieldBranching:
         assert solver.wall_distance.shape == (n_cells, n_sps)
         assert solver.wall_distance[0, 0] == pytest.approx(1.0)
 
-    @patch("autoflowcfd.core.fr_solver_turbulence.compute_wall_distance")
+    @patch("autoflowcfd.core.fr_solver.turbulence.compute_wall_distance")
     def test_eikonal_without_sps_coords_falls_back_to_cell_centers(self, mock_compute):
         mesh_nodes = np.array([[0., 0., 0.], [5., 0., 0.]])
         mock_compute.return_value = np.array([0.0, 5.0])
@@ -93,7 +93,7 @@ class TestComputeWallDistanceFieldBranching:
         assert solver.wall_distance.shape == (n_cells, n_sps)
         assert np.allclose(solver.wall_distance, 5.0)
 
-    @patch("autoflowcfd.core.fr_solver_turbulence.compute_wall_distance")
+    @patch("autoflowcfd.core.fr_solver.turbulence.compute_wall_distance")
     def test_eikonal_without_any_query_points_falls_back_to_mean(self, mock_compute):
         mesh_nodes = np.array([[0., 0., 0.], [1., 0., 0.], [2., 0., 0.]])
         mock_compute.return_value = np.array([0.0, 1.0, 2.0])
@@ -108,7 +108,7 @@ class TestComputeWallDistanceFieldBranching:
         assert solver.wall_distance.shape == (n_cells, n_sps)
         assert np.allclose(solver.wall_distance, 1.0)  # mean([0,1,2])
 
-    @patch("autoflowcfd.core.fr_solver_turbulence.compute_wall_distance")
+    @patch("autoflowcfd.core.fr_solver.turbulence.compute_wall_distance")
     def test_default_kdtree_path_is_unaffected_by_eikonal_changes(self, mock_compute):
         """Regression guard: use_eikonal=False (the default, pre-existing
         behaviour) must still do its own direct SP-to-wall KD-Tree query,

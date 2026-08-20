@@ -39,7 +39,8 @@ import click
 import numpy as np
 from loguru import logger
 
-from .post_helpers import _load_case, _load_history_only, _replay_history
+from .post_helpers import _load_case, _load_history_only, _locate_checkpoint, _replay_history
+from .solve_helpers import rebuild_solver_from_checkpoint
 
 
 @click.group()
@@ -60,70 +61,53 @@ def post() -> None:
 
 @post.command()
 @click.option("--case", "-c", required=True, type=click.Path(exists=True),
-              help="Case directory or result file")
-@click.option("--grid", "-g", type=click.Path(exists=True),
-              help="Grid file path (if not in case directory)")
+              help="Case directory containing a checkpoint written by 'solve steady/transient/resume'")
 @click.option("--checkpoint", type=click.Path(exists=True),
-              help="Checkpoint file path (defaults to latest)")
-@click.option("--reference-area", type=float, default=2.2,
-              help="Reference area (m²)")
-@click.option("--reference-length", type=float, default=4.5,
-              help="Reference length (m)")
-@click.option("--density", type=float, default=1.225,
-              help="Air density (kg/m³)")
-@click.option("--velocity", type=float, default=30.0,
-              help="Free-stream velocity (m/s)")
+              help="Checkpoint file path (defaults to latest under --case)")
+@click.option("--surface-mesh", "-s", type=click.Path(exists=True), default=None,
+              help="原始面网格路径——checkpoint 记录的 input_file 若是 .nas 体网格则必填"
+                   "（与 'solve resume --surface-mesh' 语义一致，用于反推边界分组）")
+@click.option("--reference-area", type=float, required=True,
+              help="Reference area A_ref (m^2), 通常是车辆正面投影面积——没有默认值，"
+                   "错的参考面积会给出误导性的 Cd/Cl，宁可强制用户显式指定")
+@click.option("--backend", "-b", type=click.Choice(["cpu", "gpu"]), default=None,
+              help="后端覆盖，默认沿用 checkpoint 记录的原始后端")
+@click.option("--threads", type=int, default=-1, help="CPU 后端 numba 并行线程数")
 @click.option("--output", "-o", type=click.Path(), default="coefficients.json",
               help="Output file")
 @click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
 def coefficients(
     case: str,
-    grid: Optional[str],
     checkpoint: Optional[str],
+    surface_mesh: Optional[str],
     reference_area: float,
-    reference_length: float,
-    density: float,
-    velocity: float,
+    backend: Optional[str],
+    threads: int,
     output: str,
     json_output: bool
 ) -> None:
-    """Calculate aerodynamic coefficients.
+    """Calculate aerodynamic coefficients from a checkpoint (post-hoc, no re-solve).
 
-    Compute drag coefficient (Cd), lift coefficient (Cl), and other
-    aerodynamic coefficients from simulation results.
-
-    Args:
-        case: Case directory or result file
-        grid: Grid file path (auto-detected from case dir if omitted)
-        checkpoint: Checkpoint file path (defaults to latest)
-        reference_area: Reference area
-        reference_length: Reference length
-        density: Air density
-        velocity: Free-stream velocity
-        output: Output file path
-        json_output: Output as JSON
+    在 checkpoint 保存的 FR 原生解（(n_cells,n_sps,n_vars) 多点存储）上重建一个
+    完整的 FRSolver（网格+面几何+状态），复用与 `solve steady` 收尾阶段完全相同的
+    `postprocess.fr_coefficients.compute_aerodynamic_coefficients_fr`（WALL 边界
+    压力+粘性力面积分），而不是 V1 时代假设单元中心 `GridData`/`SolutionVector`
+    的 `CoefficientCalculator`（该实现调用的 `grid_data.get_face_data()` 从未
+    存在过，Cd/Cl 恒为 0，见 ProjectFiles/V2.0/6_整体专家组二次评审.md 发现23）。
 
     Examples:
-        # Basic calculation
-        $ autoflowcfd post coefficients --case results/
-
-        # Custom reference values
-        $ autoflowcfd post coefficients --case results/ \
-          --reference-area 2.5 --velocity 35.0
+        $ autoflowcfd post coefficients --case results/ --reference-area 2.2
     """
     logger.info(f"Calculating aerodynamic coefficients for case: {case}")
 
     try:
-        from autoflowcfd.postprocess import CoefficientCalculator
+        from autoflowcfd.postprocess.fr_coefficients import compute_aerodynamic_coefficients_fr
 
-        grid_data, solution, history, iteration, metadata = _load_case(case, grid, checkpoint)
-
-        calc = CoefficientCalculator(
-            grid_data, solution,
-            reference_area=reference_area, reference_length=reference_length,
-            density=density, velocity=velocity,
+        ckpt_file = str(_locate_checkpoint(Path(case), checkpoint))
+        solver, iteration, _metadata = rebuild_solver_from_checkpoint(
+            ckpt_file, backend=backend, surface_mesh=surface_mesh, threads=threads,
         )
-        coeffs = calc.calculate()
+        coeffs = compute_aerodynamic_coefficients_fr(solver, reference_area=reference_area)
         result = coeffs.to_dict()
 
         output_path = Path(output)
@@ -138,7 +122,6 @@ def coefficients(
             click.echo(f"{'='*40}")
             click.echo(f"Cd (Drag):     {result['Cd']:.4f}")
             click.echo(f"Cl (Lift):     {result['Cl']:.4f}")
-            click.echo(f"Cm (Pitch):    {result['Cm']:.4f}")
             click.echo(f"Cs (Side):     {result['Cs']:.4f}")
 
     except Exception as e:

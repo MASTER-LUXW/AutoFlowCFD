@@ -263,10 +263,24 @@ def distributed_mesh_load(
         # 分发网格数据
         local_data = distribute_mesh_data(mesh, fc, cell_partition, n_ranks)
 
-        # 广播分区信息（非 root rank 需要知道 cell_partition 来构建 partition）
+        # 广播分区信息（非 root rank 需要知道 cell_partition 来构建 partition）。
+        # 同时广播**全局**面连接关系的 owner_cell/neighbor_cell/is_boundary——
+        # build_distributed_partition 的 halo 探测（哪些面跨越分区边界）
+        # 必须在全局、未裁剪的面连接关系上做：extract_local_mesh_data
+        # 产出的 local_fc_data 已经把跨 rank 的 neighbor 重映射成 -1
+        # （与真正的边界面用同一个哨兵值，二者在本 rank 视角下无法区分），
+        # 用它调用 build_distributed_partition 只会产出全空的 halo 列表——
+        # 残差在分区边界上完全得不到邻居数据（V2.0 专家组评审逐行核实，
+        # DistributedFRSolver 的 face_connectivity_data 路径此前从未被
+        # 真正跑通过）。这三个全局数组量级与 cell_partition 相同
+        # （均为 O(n_faces)/O(n_cells) 的整数/布尔数组），随 partition_info
+        # 一起广播的开销可忽略。
         partition_info = {
             'cell_partition': cell_partition,
             'n_global_cells': mesh.n_cells,
+            'global_owner_cell': fc.owner_cell,
+            'global_neighbor_cell': fc.neighbor_cell,
+            'global_is_boundary': fc.is_boundary,
         }
     else:
         # 非 root rank: 接收数据

@@ -80,7 +80,7 @@ class TestLoadMeshForSolverExtensionDispatch:
         with pytest.raises(click.ClickException, match="VolumeMeshData"):
             load_mesh_for_solver(str(bad_pkl), order=2)
 
-    @patch("autoflowcfd.cli.solve_helpers.HighOrderMesh")
+    @patch("autoflowcfd.cli.solve_mesh_loader.HighOrderMesh")
     @patch("autoflowcfd.grid.mesh_gen.utils.mesh_external_import.import_external_volume_mesh")
     def test_nas_with_surface_mesh_dispatches_to_external_import(
         self, mock_import, mock_high_order_mesh, tmp_path
@@ -98,7 +98,7 @@ class TestLoadMeshForSolverExtensionDispatch:
         mock_import.assert_called_once_with(str(volume_nas), str(surface_nas))
         assert volume_data is mock_import.return_value[0]
 
-    @patch("autoflowcfd.cli.solve_helpers.HighOrderMesh")
+    @patch("autoflowcfd.cli.solve_mesh_loader.HighOrderMesh")
     def test_pkl_path_loads_without_needing_surface_mesh(self, mock_high_order_mesh, fake_pkl):
         pkl_path, vm = fake_pkl
         with patch(
@@ -114,7 +114,7 @@ class TestLoadMeshForSolverExtensionDispatch:
 
 
 class TestLoadMeshForSolverQualityGate:
-    @patch("autoflowcfd.cli.solve_helpers.HighOrderMesh")
+    @patch("autoflowcfd.cli.solve_mesh_loader.HighOrderMesh")
     def test_failing_quality_gate_blocks_pkl_input(self, mock_high_order_mesh, fake_pkl):
         pkl_path, _vm = fake_pkl
         with patch(
@@ -124,7 +124,7 @@ class TestLoadMeshForSolverQualityGate:
             with pytest.raises(click.ClickException, match="质量门"):
                 load_mesh_for_solver(str(pkl_path), order=2)
 
-    @patch("autoflowcfd.cli.solve_helpers.HighOrderMesh")
+    @patch("autoflowcfd.cli.solve_mesh_loader.HighOrderMesh")
     def test_skip_quality_check_bypasses_a_failing_gate(self, mock_high_order_mesh, fake_pkl):
         pkl_path, vm = fake_pkl
         # No MeshQualityValidator patch needed here - skip_quality_check=True
@@ -132,7 +132,7 @@ class TestLoadMeshForSolverQualityGate:
         mesh, volume_data = load_mesh_for_solver(str(pkl_path), order=2, skip_quality_check=True)
         assert volume_data.nodes.count == vm.nodes.count
 
-    @patch("autoflowcfd.cli.solve_helpers.HighOrderMesh")
+    @patch("autoflowcfd.cli.solve_mesh_loader.HighOrderMesh")
     @patch("autoflowcfd.grid.mesh_gen.utils.mesh_external_import.import_external_volume_mesh")
     def test_failing_quality_gate_blocks_nas_input_too(
         self, mock_import, mock_high_order_mesh, tmp_path

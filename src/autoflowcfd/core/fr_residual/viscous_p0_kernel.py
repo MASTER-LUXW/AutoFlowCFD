@@ -17,7 +17,9 @@ AutoFlowCFD V2.0 - P0 专用粘性界面校正 numba kernel
 import numpy as np
 from numba import njit, prange, get_thread_id
 
-from autoflowcfd.core.fr_operators.flux_kernels import viscous_physical_flux_point
+from autoflowcfd.core.fr_operators.flux_kernels import viscous_physical_flux_point, viscous_boundary_penalty_tilde
+
+_VISCOUS_BOUNDARY_IP_C = 4.0
 
 
 @njit(cache=True, parallel=True)
@@ -160,6 +162,18 @@ def compute_viscous_interface_correction_p0_kernel(
 
                 for v in range(5):
                     jump_owner[i, v] = G_tilde_common[v] - G_tilde_own[v]
+
+                if is_boundary[f]:
+                    # 边界 IP 罚项，见 viscous_flux_kernel.py::
+                    # compute_viscous_interface_correction_kernel 同名分支
+                    # 文档（P0 特化：vol_o 直接是 det_jacs[oc,0]，无需对
+                    # n_sps 求平均）。
+                    adj_mag_o = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
+                    pen = viscous_boundary_penalty_tilde(
+                        Q_o_i, Q_n, mu + mut_o_i, det_jacs[oc, 0], adj_mag_o, oside, _VISCOUS_BOUNDARY_IP_C,
+                    )
+                    for v in range(1, 4):
+                        jump_owner[i, v] += pen[v]
 
             # P0 简化分布：n_sps=1，只有 s=0
             g_prime_owner = g_left if oside < 0 else g_right

@@ -309,10 +309,17 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     dist_fp_of_sp, dist_axis_coord_of_sp = _derive_distribute_mapping(n1d)
 
     # 面图着色：一次性计算，后续残差求值直接复用（不再重复着色）。
-    # 贪心着色按 owner_cell 分组处理，同色面之间无 owner_cell 冲突。
+    # 贪心着色覆盖 owner_cell 与非边界面 neighbor_cell 两侧的写冲突——
+    # 图着色 kernel 对内部面会分别向 owner_cell 与 neighbor_cell 做非原子
+    # scatter-add，只按 owner_cell 分组会漏掉跨面的 owner/neighbor 交叉
+    # 冲突（面 A 的 owner 是面 B 的 neighbor），必须一并传入才能保证同色
+    # 面之间真正无写冲突。
     from autoflowcfd.core.utils.face_coloring import greedy_face_coloring
     n_cells_est = int(np.max(fc.owner_cell)) + 1
-    colors = greedy_face_coloring(fc.owner_cell.astype(np.int64), n_cells_est)
+    colors = greedy_face_coloring(
+        fc.owner_cell.astype(np.int64), n_cells_est,
+        fc.neighbor_cell.astype(np.int64), fc.is_boundary.astype(np.bool_),
+    )
     n_colors = int(np.max(colors)) + 1
     color_face_indices = [
         np.where(colors == c)[0].astype(np.int64) for c in range(n_colors)

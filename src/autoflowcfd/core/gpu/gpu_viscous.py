@@ -92,14 +92,13 @@ def compute_viscous_residual_fr_gpu(
     grad_T = grad_T[..., 0, :]  # (n_cells, n_sps, 3)
 
     # 2. 体积项：粘性物理通量 + 散度
-    # mu_t_field 可以是标量或 (n_cells, n_sps) 数组
+    # mu_t_field 是调用方按 CPU 版约定（core/fr_residual/viscous_flux.py）
+    # 传入的动力涡粘度 mu_t = rho * nu_t，与分子粘度 mu 量纲一致，直接相加
+    # 即可得到有效动力粘度。此前这里误多做了一次"除以 rho"把 mu_t_field
+    # 转换成运动粘度 nu_t 再与动力粘度 mu 相加，量纲不一致，等效于把湍流
+    # 粘性应力贡献错误缩小了约 1/rho 倍。
     if mu_t_field is None:
         mu_eff = mu
-    elif hasattr(mu_t_field, 'shape') and mu_t_field.shape == (n_cells, n_sps):
-        # 动力涡粘度 mu_t = rho * nu_t，转换为运动粘度 nu_t = mu_t / rho
-        rho = Q[:, :, 0]
-        nu_t = mu_t_field / cp.maximum(rho, 1e-10)
-        mu_eff = mu + nu_t  # 有效粘度 = 分子粘度 + 湍流粘度
     else:
         mu_eff = mu + mu_t_field
 

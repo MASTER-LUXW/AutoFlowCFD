@@ -23,11 +23,18 @@ def _repair_mixed_mesh_post_stage_c(
     cell_groups: np.ndarray,
     nodes_obj,
     mesh_changed_by_repair: bool,
+    min_cell_size: float,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, object, bool]:
     """跨棱柱 + 四面体的非流形面修补、BL 棱柱长细比修补、collapsed-corner
     棱柱降级为四面体——见本模块文档字符串。逐字对应
     mesh_background.generate_hybrid_mesh 原来这一段代码，未改动任何数值
-    逻辑。
+    逻辑（新增的收尾去重步骤除外，见函数末尾）。
+
+    Args:
+        min_cell_size: 与 generate_hybrid_mesh 同名参数一致，仅用于
+            函数末尾新增的去重后退化体积过滤阈值
+            （(min_cell_size**3)*1e-6，与 generate_hybrid_mesh 自身
+            对 _build_merged_mesh 直接输出的同名过滤完全一致）。
 
     Returns:
         (merged_nodes, prism_cells, merged_cells, bl_cell_groups,
@@ -36,8 +43,10 @@ def _repair_mixed_mesh_post_stage_c(
     """
     # 延迟导入，避免循环导入（约定见本项目 core/fr_solver_cfl.py 等）。
     from ...schema.grid_nodes import NodeArray
+    from ...schema.grid_cells import TetrahedralCells
     from ..extraction.face_extractor import repair_nonmanifold_mixed
     from ..tetgen.mesh_prism_to_tet import orient_tetrahedra
+    from ..tetgen.mesh_tetgen_core import _dedupe_coincident_points
     from ..repair.mesh_repair_nonmanifold_mixed import patch_nonmanifold_cavity_mixed, demote_invalid_prisms_to_tets
 
     # 跨混合网格的非流形检查——先尝试局部重铺
@@ -131,6 +140,20 @@ def _repair_mixed_mesh_post_stage_c(
                 f"attempting local cavity patch"
             )
             tet_keep_allones = np.ones(len(merged_cells), dtype=bool)
+            # 保持默认 n_buffer_rings=1。V2.0 专家组评审在追查 cube_demo
+            # 336.57 相邻体积比根因时，怀疑默认 1 圈缓冲把这里的空腔固定
+            # 边界卡得太紧，试过把它调大：n_buffer_rings=4 和 =2 都是
+            # 真实崩溃（不是"指标没改善"，是硬性 ValueError——"Face
+            # connectivity references N cells, expected N+2"），且两次
+            # 崩溃的具体数字完全相同，与两个独立、真实、已验证的中间
+            # 修复（本函数末尾新增的收尾去重；mesh_repair_cavity_shared.
+            # _cavity_boundary_faces 补上了此前遗漏的退化面过滤）叠加
+            # 后依然逐位复现同样的崩溃——说明这两个修复虽然本身是正确
+            # 的独立改进（保留），但都不是这次崩溃的根因。诊断已经做到
+            # 能在具体坐标层面复现异常模式的程度（见本文件 git 历史/
+            # 会话记录），但触发这次崩溃的确切机制本轮未能定位。在
+            # 找到真正根因之前，调大 n_buffer_rings 对这个调用点是已
+            # 验证的不安全操作，不要在未确认修复的情况下重新尝试。
             merged_nodes, prism_cells, merged_cells, bl_cell_groups, cell_groups = patch_nonmanifold_cavity_mixed(
                 merged_nodes, prism_cells, merged_cells.astype(np.int64),
                 ar_keep, tet_keep_allones, bl_cell_groups, cell_groups,
@@ -165,5 +188,57 @@ def _repair_mixed_mesh_post_stage_c(
             merged_cells = np.vstack([merged_cells.astype(np.int64), extra_tets])
             cell_groups = np.concatenate([cell_groups, extra_tet_groups])
             mesh_changed_by_repair = True
+
+    # 收尾去重：子步骤 1/2 都通过 patch_nonmanifold_cavity_mixed 调用
+    # 本地 tetgen 生成新的内部（Steiner）点——已实测确认（V2.0 专家组
+    # 评审，把子步骤 2 的 n_buffer_rings 从默认 1 试调到 2/4 时复现）
+    # 这类局部 tetgen 调用可能产生与已有边界点/彼此在数值上重合但索引
+    # 不同的新点。这与 _dedupe_coincident_points 自身文档字符串"两个
+    # 调用场景"一节描述的 BL 挤出多顶点同层冻结产生重合点是完全同一类
+    # 失效模式（"静默的拓扑撕裂...不会立刻崩溃，上游没有任何地方能
+    # 捕获它"），只是触发源不同——这里是 tetgen 的 Steiner 点插入，
+    # 不是 BL 挤出。已用独立诊断脚本定位：n_buffer_rings=2 时产生了
+    # 2910 组"同一个排序后三角形被 2 个以上单元引用"的拓扑异常，逐一
+    # 追踪发现是同一个四面体自己的 4 个面（理论上互不相同）因为其
+    # 4 个顶点里有 2 个在数值上重合而坍缩成同一个面——即该四面体本身
+    # 已退化，只是退化方式（重合点用不同索引表示）绕开了此前只按
+    # "同一索引出现两次"判定退化的检查。不去重的后果是这类退化单元
+    # 混进最终网格，在下游 validate_face_data 触发硬性崩溃（"Face
+    # connectivity references N cells, expected N+2"）。
+    #
+    # 本函数从不修改本已进入本函数前就存在的节点坐标（只有子步骤 1/2
+    # 会追加新节点），因此这一步在整个函数体只需跑一次，放在末尾对
+    # 全部子步骤累积的新增点统一处理，而不必在每个子步骤后单独跑。
+    n_nodes_before_dedupe = len(merged_nodes)
+    merged_nodes, merged_cells, dedupe_remap = _dedupe_coincident_points(
+        merged_nodes, merged_cells.astype(np.int64)
+    )
+    if len(merged_nodes) != n_nodes_before_dedupe:
+        merged_cells = merged_cells.astype(np.int64)
+        prism_cells = dedupe_remap[prism_cells]
+        nodes_obj = NodeArray.from_array(merged_nodes)
+        mesh_changed_by_repair = True
+
+        # 去重可能让原本形状健康、只是顶点恰好数值重合的四面体，在
+        # 合并后真正退化为（近似）零体积——与 generate_hybrid_mesh 自身
+        # 对 _build_merged_mesh 直接输出、以及对它自己的两次
+        # _dedupe_coincident_points 调用之后完全相同的过滤（同一个
+        # 阈值公式），保持前后一致。
+        post_dedupe_volumes = TetrahedralCells.compute_volumes(
+            nodes_obj, merged_cells.astype(np.int32)
+        )
+        degenerate_threshold = (min_cell_size ** 3) * 1e-6
+        valid_mask = post_dedupe_volumes > degenerate_threshold
+        n_newly_degenerate = int(np.sum(~valid_mask))
+        if n_newly_degenerate > 0:
+            logger.warning(
+                f"Post-stage-c coincident-point merge: {n_newly_degenerate} "
+                f"tet(s) became degenerate after merging Steiner points "
+                f"introduced by the non-manifold/aspect-ratio cavity patches "
+                f"above - removing them (leaves a small local gap rather than "
+                f"a downstream hard crash)"
+            )
+            merged_cells = merged_cells[valid_mask]
+            cell_groups = cell_groups[valid_mask]
 
     return merged_nodes, prism_cells, merged_cells, bl_cell_groups, cell_groups, nodes_obj, mesh_changed_by_repair

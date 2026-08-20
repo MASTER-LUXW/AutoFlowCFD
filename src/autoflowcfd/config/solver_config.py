@@ -41,27 +41,66 @@ class TurbulenceModel(str, Enum):
 
 
 class TimeIntegrationScheme(str, Enum):
-    """时间积分方案枚举。"""
+    """时间积分方案枚举。
+
+    **已知架构缺口（C-01，V2.0 专家组评审记录，本轮未完全解决）**：
+    这个枚举与真正被求解器使用的
+    `core.time_integration.base.TimeIntegrationScheme` 是两个独立的
+    Python 类（这个是 `str, Enum`，取值 backward_euler/rk2/rk3/ab3；
+    那个是普通 `Enum`，取值 forward_euler/ssp_rk2/ssp_rk3/imex_euler/
+    dual_time），且 `AB3`（Adams-Bashforth 三阶，与 SSP-RK3 是完全不同
+    的数值格式）在核心层甚至没有真正实现——核心层的 `ADAMS_BASHFORTH_3`
+    只是 `"ssp_rk3"` 的一个别名，选它实际跑的是 SSP-RK3，不是 AB3。
+    本模块（`config/`）整体目前没有任何代码路径真正把这里的配置对象
+    喂给 `FRSolver`（CLI `solve steady/transient` 直接接受 `--order`/
+    `--time-method`/`--turbulence-model` 等命令行参数，不经过这层
+    dataclass；Python API `AutoFlowCFDAPI.run_steady/run_transient`
+    同样直接使用 `core.time_integration.base.TimeIntegrationScheme`，
+    完全绕开这个类，见 api.py 对应方法的文档字符串）——因此这个类目前
+    是纯粹的、内部自洽的配置数据结构，不会因为与核心层不一致而在实际
+    运行中产生错误结果，但也意味着通过这层写的配置值不会真正影响求解
+    行为。彻底修复需要设计 `--config <file.yaml>` 这条目前不存在的
+    CLI/API 接入路径，把这里的 SteadyConfig/TransientConfig 真正解析
+    出参数传给 FRSolver 构造——工作量与新增一个功能点相当，超出本轮
+    "修复崩溃 bug" 的范围，作为独立后续任务记录。
+    """
     BACKWARD_EULER = "backward_euler"
     RK2 = "rk2"
     RK3 = "rk3"
-    AB3 = "ab3"  # Adams-Bashforth 三阶
+    AB3 = "ab3"  # Adams-Bashforth 三阶——见上方文档，核心层目前无真正实现
 
 
 @dataclass
 class SolverConfig:
     """基础求解器配置。
-    
+
     属性:
         backend: 计算后端 (cpu/gpu/auto)
-        order: FR 离散阶数 (1/2/3)
+        order: FR 离散阶数 (1/2/3)，即 C-01 描述的 polynomial_order (P)
+            ——沿用 `order` 这个名字而不是另起一个 polynomial_order 字段，
+            是因为它已经和 CLI `--order`/API `run_steady(order=...)`/
+            `FRSolver(order=...)` 全程统一使用同一个名字；引入第二个
+            同义字段只会制造"两个名字哪个才是真的"的新歧义，不是真正
+            解决 C-01。
         turbulence: 湍流模型
         gpu_device: GPU 设备 ID（仅 GPU 模式）
         n_threads: CPU 线程数（仅 CPU 模式，auto=检测）
         output_dir: 输出目录路径
         checkpoint_interval: 检查点保存间隔（步数）
         verbose: 启用详细日志记录
-        
+
+    **关于 C-01 的 flux_type (Radau/Gauss) 参数**：本类刻意不提供这个
+    字段。V2.0 专家组评审核实：`fr/matrix_operators.py::
+    compute_correction_weights` 确实保留了一个 `flux_point_type` 形参，
+    但其文档字符串明确写着"保留参数以兼容既有调用签名；g2/Radau 修正
+    函数仅与 SPs 位于 Gauss-Legendre 点这一事实相关，与该参数无关"——
+    也就是说数值层从未真正实现除 Radau/VCJH-g2 以外的第二种修正函数
+    族，这个参数是彻底的空操作。在数值层没有真正的"Gauss"方案可选之前
+    往配置类里加一个 flux_type 字段，用户设成任何值都不会改变实际计算，
+    是本项目明确禁止的那种"看起来实现了、实际没有效果"的假实现——因此
+    暂不加，等 fr/matrix_operators.py 真正实现了第二种修正函数族之后
+    再补。
+
     示例:
         >>> config = SolverConfig(backend="gpu", order=3)
         >>> print(config.backend)

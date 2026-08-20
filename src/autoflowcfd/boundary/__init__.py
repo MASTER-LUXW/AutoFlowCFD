@@ -1,9 +1,20 @@
-"""边界条件管理模块。
+"""边界条件管理模块——V1（FVM）时代遗留，当前 V2 FR 求解路径不使用。
 
-本模块负责边界条件的元数据登记，包括内置类型（velocity_inlet、
-pressure_outlet、wall、symmetry、slip_wall）以及自定义 BC 插件。实际
-的边界值计算由 `core/bc_handler.py` 独立完成——见
-`conditions.py`/`manager.py` 模块文档字符串对这个分层的说明。
+**现状说明（V2.0 专家组评审核实）**：本模块（BoundaryManager/
+conditions.py/manager.py/config.py/outlet_bc.py/manager_configure.py/
+config_validators.py/conditions_advanced.py，合计约 2560 行）此前的
+文档字符串声称"实际的边界值计算由 core/bc_handler.py 独立完成"——
+`core/bc_handler.py` 在 V2 重构中已被删除，这个分层描述早已失实。
+本模块在真实的 FR 求解路径上**零调用点**：无粘/粘性残差的边界条件
+统一由 `boundary/fr_ghost_state.py`（弱形式幽灵态，BD-01）+
+`boundary/synthetic_inlet.py`（SEM 合成湍流入口，BD-02）提供，两者都
+真正接入 `core/fr_solver/boundary.py`——与本文件描述的
+InletBC/OutletBC/WallBC 等类完全无关。
+
+本模块目前只保留给测试（tests/unit/test_boundary*.py）覆盖，未在本轮
+删除——删除它需要同时处理这些测试，是比"标注状态"更大的独立改动，
+留给后续专门的死代码清理会话。二次开发/新代码不应该以本模块为起点，
+应参考 `boundary/fr_ghost_state.py`。
 
 Key Components:
     - BoundaryManager: 支持 auto/manual/hybrid 模式的 BC 登记管理器

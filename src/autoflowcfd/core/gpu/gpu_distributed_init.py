@@ -81,23 +81,31 @@ class _GPUDistributedInitMixin:
             logger.warning(f"Rank {self.rank}: Modal filter init failed: {e}")
 
     def _init_distributed_face_geometry(self):
-        """初始化分布式面几何（GPU 版）。"""
-        try:
-            from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
-            flat_face = get_flat_face_geometry(self.mesh, self.ops)
-            # 构建分布式面几何
-            from autoflowcfd.core.mpi.distributed_flat_face import (
-                build_distributed_flat_face,
-            )
-            dist_flat_face = build_distributed_flat_face(
-                flat_face, self.partition, self.rank, self.n_ranks
-            )
-            # 上传到 GPU
-            from autoflowcfd.core.gpu.gpu_face_geometry import build_gpu_flat_face
-            self.flat_face_gpu = build_gpu_flat_face(dist_flat_face, self.device_id)
-        except Exception as e:
-            logger.warning(f"Distributed face geometry init failed: {e}")
-            self.flat_face_gpu = None
+        """初始化分布式面几何（GPU 版）。
+
+        此前这里的调用方式与 build_distributed_flat_face 的真实签名
+        `(mesh, ops, partition)` 不匹配——旧代码传的是
+        `(flat_face, self.partition, self.rank, self.n_ranks)`（4 个
+        位置参数，且第一个是已经算好的全局 FlatFaceGeometry 而不是
+        mesh；该函数内部本就会自己调用 get_flat_face_geometry(mesh,
+        ops)，不需要调用方先算一遍）——必然 TypeError，且被外层宽
+        `except Exception` 吞掉，`self.flat_face_gpu` 静默设为 None。
+        下游 gpu_inviscid.py 在 flat_face_gpu 为 None 时会用**未分区的
+        全局网格**重新构建一份非分布式面几何，等于让多 GPU 求解器
+        悄悄退化成"每个 rank 各算各的全局残差、不做 halo 耦合"——
+        不是崩溃，是产出物理上错误的结果，比崩溃更隐蔽（V2.0 专家组
+        评审逐行核实）。修复：改用真实签名调用；同时去掉吞掉一切异常
+        的 try/except——分布式面几何构建失败时必须让求解器初始化
+        真正失败，而不是静默退化成错误的单机行为。
+        """
+        from autoflowcfd.core.mpi.distributed_flat_face import (
+            build_distributed_flat_face,
+        )
+        dist_flat_face = build_distributed_flat_face(
+            self.mesh, self.ops, self.partition
+        )
+        from autoflowcfd.core.gpu.gpu_face_geometry import build_gpu_flat_face
+        self.flat_face_gpu = build_gpu_flat_face(dist_flat_face, self.device_id)
 
     def _halo_exchange_gpu(self):
         """GPU 直接 halo 交换（优化版）。

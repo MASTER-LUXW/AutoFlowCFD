@@ -106,45 +106,71 @@ def api_load_config(self, config_file: str) -> Dict[str, Any]:
         return {}
 
 
-def api_resume_simulation(self, checkpoint_file: str, **kwargs) -> Any:
-    """从检查点恢复仿真（委托函数）。"""
-    from autoflowcfd.core.utils.checkpoint import CheckpointManager
-    from autoflowcfd.core import FRSolver
-    from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
+def api_resume_simulation(
+    self,
+    checkpoint_file: str,
+    max_iter: int = 0,
+    dt: float = 1e-3,
+    tol: float = 1e-6,
+    backend: str = None,
+    surface_mesh: str = None,
+    threads: int = -1,
+) -> Any:
+    """从检查点恢复仿真（委托函数）。
 
+    此前这里把 `self.grid_data`（表面网格，且往往在 resume 场景下根本
+    没设置过——恢复仿真通常是一个独立的新会话，不会先调用 load_grid）
+    直接传给 `FRSolver(mesh=self.grid_data, ...)`，随后调用
+    `solver.solve(initial_solution=solution, start_iteration=iteration,
+    **kwargs)`——但 FRSolver.solve() 真实签名是
+    `solve(max_iter, dt, tol, checkpoint_callback)`，根本不接受
+    initial_solution/start_iteration，必然 TypeError（V2.0 专家组评审
+    逐行核实）。且 `self.grid_data is None` 分支返回一个只含拍扁体积
+    平均解的占位 SolverResult，从不真正恢复求解器。
+
+    改为直接复用 CLI `solve resume`（cli/solve_commands.py）已验证
+    正确的重建逻辑（cli/solve_checkpoint_io.py::rebuild_solver_from_
+    checkpoint）——checkpoint 的 metadata 自带重建 HighOrderMesh +
+    FRSolver 所需的全部参数（input_file/order/turbulence_model/backend/
+    自由来流条件），不依赖调用方是否设置过 self.grid_data。
+
+    Args:
+        checkpoint_file: checkpoint 文件路径
+        max_iter: 恢复后继续迭代的次数；0（默认）表示只恢复状态、不
+            继续求解，直接返回恢复后的（未收敛）结果
+        dt, tol: 继续迭代时使用的时间步长/收敛容差
+        backend: 后端覆盖，None 时沿用 checkpoint 记录的原始后端
+        surface_mesh: checkpoint 记录的 input_file 若是 .nas 体网格，
+            需要提供原始面网格来反推边界分组
+        threads: CPU 后端 numba 并行线程数
+
+    Returns:
+        SolverResult
+    """
     if not Path(checkpoint_file).exists():
         raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_file}")
 
     logger.info(f"Resuming simulation from checkpoint: {checkpoint_file}")
 
-    config = SteadyConfig()
-    manager = CheckpointManager(config)
-    solution, history, iteration, metadata = manager.load(checkpoint_file)
+    from autoflowcfd.cli.solve_checkpoint_io import rebuild_solver_from_checkpoint
 
-    logger.info(
-        f"Checkpoint loaded: iteration={iteration}, "
-        f"solution shape={solution.shape}"
+    solver, iteration, metadata = rebuild_solver_from_checkpoint(
+        checkpoint_file, backend=backend, surface_mesh=surface_mesh, threads=threads,
     )
+    self.solver = solver
 
-    if self.grid_data is not None:
-        solver = FRSolver(
-            mesh=self.grid_data,
-            order=getattr(config, 'order', 2),
-            turb_model_name=getattr(config, 'turbulence', 'sst_kw'),
-            time_scheme=TimeIntegrationScheme.SSP_RK3,
-        )
-        result = solver.solve(
-            initial_solution=solution,
-            start_iteration=iteration,
-            **kwargs,
-        )
-        return result
-    else:
-        logger.warning("grid_data 未设置，无法重建求解器")
+    logger.info(f"State restored from checkpoint (iter={iteration})")
+
+    if max_iter <= 0:
+        # SolverResult 真实字段只有 converged/iterations/final_residual
+        # （core/fr_solver/state.py）——不带 solution/residuals，恢复后
+        # 的解场请从 self.solver.state.U 读取（已在上面设好 self.solver）。
         from autoflowcfd.core.fr_solver.state import SolverResult
         return SolverResult(
-            iterations=iteration,
             converged=False,
-            solution=solution,
-            residuals=history.get('residuals', {}),
+            iterations=iteration,
+            final_residual=float('nan'),
         )
+
+    result = solver.solve(max_iter=max_iter, dt=dt, tol=tol)
+    return result

@@ -37,8 +37,10 @@ scatter-add 处理方式（每线程私有累加缓冲区 `correction_per_thread
 import numpy as np
 from numba import njit, prange, get_thread_id
 
-from autoflowcfd.core.fr_operators.flux_kernels import viscous_physical_flux_point
+from autoflowcfd.core.fr_operators.flux_kernels import viscous_physical_flux_point, viscous_boundary_penalty_tilde
 from autoflowcfd.core.fr_residual.inviscid_kernel import _extrap_matmul, _distribute_point
+
+_VISCOUS_BOUNDARY_IP_C = 4.0
 
 
 @njit(cache=True, inline='always')
@@ -102,6 +104,11 @@ def compute_viscous_interface_correction_kernel(
             gT_o = _extrap_matmul(grad_T[oc], E_o)  # (n_fp,3)
             mut_o = E_o @ mu_t_field[oc]  # (n_fp,)
             adjrow_o = _extrap_matmul(np.ascontiguousarray(adj_j[oc, :, oax, :]), E_o)  # (n_fp,3)
+
+            vol_o = 0.0
+            for s in range(n_sps):
+                vol_o += det_jacs[oc, s]
+            vol_o /= n_sps
 
             jump_owner = np.zeros((n_fp, 5))
             for i in range(n_fp):
@@ -172,6 +179,17 @@ def compute_viscous_interface_correction_kernel(
 
                 for v in range(5):
                     jump_owner[i, v] = G_tilde_common[v] - G_tilde_own[v]
+
+                if is_boundary[f]:
+                    # 边界 IP 罚项：动量分量的 jump_owner 在梯度镜像下恒为 0
+                    # （见 viscous_boundary_penalty_tilde 文档），补上正比于
+                    # 状态跳跃的耗散罚项，否则固壁无滑移剪应力不存在。
+                    adj_mag_o = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
+                    pen = viscous_boundary_penalty_tilde(
+                        Q_o[i], Q_n, mu + mut_o[i], vol_o, adj_mag_o, oside, _VISCOUS_BOUNDARY_IP_C,
+                    )
+                    for v in range(1, 4):
+                        jump_owner[i, v] += pen[v]
 
             g_prime_owner = g_left if oside < 0 else g_right
             contrib_owner = _distribute_point(
@@ -323,6 +341,11 @@ def compute_viscous_interface_correction_kernel_colored(
             mut_o = E_o @ mu_t_field[oc]
             adjrow_o = _extrap_matmul(np.ascontiguousarray(adj_j[oc, :, oax, :]), E_o)
 
+            vol_o = 0.0
+            for s in range(n_sps):
+                vol_o += det_jacs[oc, s]
+            vol_o /= n_sps
+
             jump_owner = np.zeros((n_fp, 5))
             for i in range(n_fp):
                 if is_boundary[f]:
@@ -390,6 +413,16 @@ def compute_viscous_interface_correction_kernel_colored(
 
                 for v in range(5):
                     jump_owner[i, v] = G_tilde_common[v] - G_tilde_own[v]
+
+                if is_boundary[f]:
+                    # 边界 IP 罚项，见 compute_viscous_interface_correction_kernel
+                    # 同名分支的文档（图着色版本，逻辑必须逐字保持一致）。
+                    adj_mag_o = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
+                    pen = viscous_boundary_penalty_tilde(
+                        Q_o[i], Q_n, mu + mut_o[i], vol_o, adj_mag_o, oside, _VISCOUS_BOUNDARY_IP_C,
+                    )
+                    for v in range(1, 4):
+                        jump_owner[i, v] += pen[v]
 
             g_prime_owner = g_left if oside < 0 else g_right
             contrib_owner = _distribute_point(

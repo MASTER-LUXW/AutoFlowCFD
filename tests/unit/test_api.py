@@ -60,7 +60,7 @@ class TestAutoFlowCFDAPI:
         assert config.dt == 1e-4
         assert config.total_time == 0.3
 
-    @patch('autoflowcfd.api.NASParser')
+    @patch('autoflowcfd.api_grid_ops.NASParser')
     def test_load_grid(self, mock_parser_class: Mock) -> None:
         """Test grid loading."""
         # Mock parser and grid data
@@ -96,7 +96,7 @@ class TestAutoFlowCFDAPI:
         """Test grid validation."""
         mock_grid = MagicMock()
         
-        with patch('autoflowcfd.api.GridValidator') as mock_validator_class:
+        with patch('autoflowcfd.api_grid_ops.GridValidator') as mock_validator_class:
             mock_validator = MagicMock()
             mock_validator.validate.return_value = {
                 "error_count": 0,
@@ -108,50 +108,73 @@ class TestAutoFlowCFDAPI:
             
             assert report["error_count"] == 0
 
+    @patch('autoflowcfd.cli.solve_wall_distance.compute_wall_distance_for_solver')
+    @patch('autoflowcfd.grid.high_order.high_order_mesh.HighOrderMesh')
     @patch('autoflowcfd.api.FRSolver')
-    def test_run_steady(self, mock_solver_class: Mock) -> None:
-        """Test steady simulation."""
-        mock_grid = MagicMock()
+    def test_run_steady(
+        self, mock_solver_class: Mock, mock_mesh_class: Mock, mock_wall_distance: Mock
+    ) -> None:
+        """Test steady simulation.
+
+        run_steady 需要先把 volume_mesh 升格成 HighOrderMesh 再构造
+        FRSolver（见 api.py::run_steady 文档字符串——此前这里直接把
+        表面网格传给 FRSolver 是那个从未跑通过的 bug 本身），所以这里
+        同时 mock 掉 HighOrderMesh 构造/wall distance 计算这两步，
+        不依赖真实网格数据。
+        """
+        mock_volume_mesh = MagicMock()
+        mock_mesh_class.return_value.load_from_volume_mesh.return_value = None
+
         mock_result = MagicMock()
         mock_result.converged = True
         mock_result.iterations = 1000
-        
+
         mock_solver = MagicMock()
         mock_solver.solve.return_value = mock_result
         mock_solver_class.return_value = mock_solver
-        
+
         result = self.api.run_steady(
-            mock_grid,
+            mock_volume_mesh,
             backend="cpu",
             order=2,
             max_iter=500
         )
-        
+
         assert result.converged is True
         assert result.iterations == 1000
         mock_solver_class.assert_called_once()
+        assert self.api.solver is mock_solver
 
+    @patch('autoflowcfd.cli.solve_wall_distance.compute_wall_distance_for_solver')
+    @patch('autoflowcfd.grid.high_order.high_order_mesh.HighOrderMesh')
     @patch('autoflowcfd.api.TransientSolver')
-    def test_run_transient(self, mock_solver_class: Mock) -> None:
+    def test_run_transient(
+        self, mock_solver_class: Mock, mock_mesh_class: Mock, mock_wall_distance: Mock
+    ) -> None:
         """Test transient simulation."""
-        mock_grid = MagicMock()
+        mock_volume_mesh = MagicMock()
+        mock_mesh_class.return_value.load_from_volume_mesh.return_value = None
+
         mock_result = MagicMock()
-        mock_result.time_steps = 3000
-        mock_result.physical_time = 0.3
-        
+        mock_result.converged = True
+        mock_result.iterations = 3000
+
         mock_solver = MagicMock()
         mock_solver.solve.return_value = mock_result
         mock_solver_class.return_value = mock_solver
-        
+
         result = self.api.run_transient(
-            mock_grid,
-            mode="des",
+            mock_volume_mesh,
+            mode="ddes",
             physical_time=0.3,
             dt=1e-4
         )
-        
-        assert result.time_steps == 3000
-        assert result.physical_time == 0.3
+
+        assert result.iterations == 3000
+        mock_solver_class.assert_called_once()
+        # physical_time/dt 决定 max_iter，solve() 应该按算出来的迭代数调用
+        _, solve_kwargs = mock_solver.solve.call_args
+        assert solve_kwargs["max_iter"] == int(0.3 / 1e-4)
 
     def test_resume_simulation_missing_checkpoint(self) -> None:
         """Test resume raises FileNotFoundError for missing checkpoint."""
@@ -167,11 +190,16 @@ class TestAutoFlowCFDAPI:
         assert "Cl" in coeffs
         assert coeffs["Cd"] == 0.0  # Placeholder value
 
-    def test_export_vtk_not_implemented(self) -> None:
-        """Test VTK export raises NotImplementedError."""
-        mock_result = MagicMock()
-        with pytest.raises(NotImplementedError):
-            self.api.export_vtk(mock_result, "output.vtk")
+    def test_export_vtk_without_prior_solve_raises(self) -> None:
+        """export_vtk 需要先跑过 run_steady/run_transient（self.solver/
+        self.volume_mesh 均已设置）——没有的话应该给出清楚的 ValueError，
+        不是此前那种"传了错的 result.solution/grid_data 最终在别处
+        抛不相关异常"（V2.0 专家组评审逐行核实此前实现从未跑通过）。
+        """
+        assert self.api.solver is None
+        assert self.api.volume_mesh is None
+        with pytest.raises(ValueError, match="run_steady/run_transient"):
+            self.api.export_vtk(result=None, filename="output.vtk")
 
     def test_get_convergence_history_placeholder(self) -> None:
         """Test convergence history placeholder."""

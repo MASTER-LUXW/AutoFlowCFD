@@ -36,7 +36,7 @@ class TestComputeWallDistanceForSolverEikonalWiring:
         be built when actually needed."""
         solver = MagicMock()
         solver.turb_model_name = 'SST'
-        with patch("autoflowcfd.grid.node_connectivity.build_node_adjacency") as mock_build:
+        with patch("autoflowcfd.grid.connectivity.node_connectivity.build_node_adjacency") as mock_build:
             compute_wall_distance_for_solver(solver, _volume_mesh_with_wall(), use_eikonal=False)
         mock_build.assert_not_called()
         solver.compute_wall_distance_field.assert_called_once()

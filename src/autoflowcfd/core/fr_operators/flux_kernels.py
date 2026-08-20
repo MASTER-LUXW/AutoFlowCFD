@@ -137,6 +137,69 @@ def viscous_physical_flux_point(
     return G
 
 
+@njit(cache=True, inline='always')
+def viscous_boundary_penalty_tilde(
+    Q_o: np.ndarray, Q_ghost: np.ndarray, mu_total: float,
+    vol: float, adj_mag: float, oside: float, c_ip: float,
+) -> np.ndarray:
+    """边界面粘性 Interior Penalty (IP) 罚项，动量分量，已转成 tilde（逆变）单位。
+
+    根因：`viscous_physical_flux_point` 算出的应力张量 tau 只依赖速度梯度
+    `grad_vel`，不依赖状态 `Q` 本身；而边界面的梯度按本代码库既定策略镜像
+    内部值（`gv_ghost=gv_owner`，见 viscous_flux_kernel.py 模块文档"边界面
+    梯度处理"一节），于是 `G_common` 与 `G_own` 的动量分量在任意边界条件
+    下逐位相等——`jump_owner` 恒为零，等价于固壁上无滑移剪应力不存在
+    （数值验证：WALL/SLIP_WALL/FARFIELD 给出逐位相同的动量残差，V2.0
+    专家组评审新发现的阻塞级问题）。
+
+    标准 DG/FR 文献（S-03 允许的 "IP" 方案，与 LDG 并列）对此的解法是在
+    共同数值粘性通量里补一个正比于状态跳跃 [[u]]=u_owner-u_ghost 的耗散
+    罚项（Interior Penalty / SIPG，Arnold et al. 2002 统一分析框架；系数
+    形式取自 Shahbazi (2005) 的标准 penalty parameter η=C·μ/h）：
+
+        G_num·n = {G(∇u)}·n - η·[[u]]，η = c_ip·μ_eff/h
+
+    h 用本项目自己在粘性 CFL（core/fr_solver/cfl.py::_compute_local_time_step
+    的 `dt_visc ∝ V^(2/3)/mu_eff` 隐含的长度尺度约定）里已经采用的
+    "cell volume^(1/3)" 做局部特征长度，不引入新的长度尺度定义，量纲上
+    `mu_total*(Δu)/h` 与 tau 同为 Pa；再乘以 `adj_mag*oside`
+    （与本文件其余通量把物理量转成 tilde/逆变量的方式完全一致，
+    见 fr_residual_inviscid_kernel.py 里 `F_tilde_common = F_common_n *
+    adj_mag * oside` 的同一套惯例）得到可以直接叠加进 `G_tilde_common`
+    的量。
+
+    只在边界面调用（`is_boundary[f]==True` 分支）：内部面两侧的梯度本就
+    是各自独立算出的真实局部梯度（不是镜像），已有非零、物理有意义的
+    耦合，不属于本次修复范围，不额外加罚项，避免改动已通过验证的内部
+    粘性通量路径。
+
+    Args:
+        Q_o: (5,) 面上 owner 侧原始变量外插值 (rho,u,v,w,p)
+        Q_ghost: (5,) 边界幽灵态原始变量（含真实 BC，如 WALL 无滑移镜像）
+        mu_total: 分子+湍流动力粘度之和（该 FP 处）
+        vol: owner 单元的体积尺度（det_jacs 均值或 P0 的 det_jacs 本身）
+        adj_mag: 该 FP 处 owner 侧逆变行范数（与本文件其余处一致的度量量）
+        oside: owner 侧参考坐标方向（±1）
+        c_ip: 罚项常数（标准 DG 惯例取 O(1)~O(10)，本实现固定用 4.0，
+            未做多项式阶数相关的最优 trace-inequality 常数标定——这是
+            稳定性调优参数，不影响"罚项存在与否/符号是否耗散"这一
+            正确性核心，若未来观测到边界层数值振荡可调大）
+
+    Returns:
+        pen: (5,)，仅 [1:4] 非零（动量分量的罚项贡献），可直接
+        `G_tilde_common[v] += pen[v]` for v in range(5)
+    """
+    pen = np.zeros(5)
+    h = vol ** (1.0 / 3.0)
+    if h < 1e-300:
+        h = 1e-300
+    eta = c_ip * mu_total / h
+    scale = eta * adj_mag * oside
+    for v in range(1, 4):
+        pen[v] = -scale * (Q_o[v] - Q_ghost[v])
+    return pen
+
+
 @njit(cache=True, parallel=True)
 def euler_physical_flux_batch(Q: np.ndarray) -> np.ndarray:
     """`euler_physical_flux_point` 的批量版：Q (N,5) -> F (N,3,5)。

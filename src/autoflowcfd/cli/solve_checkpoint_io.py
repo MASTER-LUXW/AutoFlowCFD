@@ -110,6 +110,100 @@ def restore_state_from_checkpoint(
     return ckpt_iter
 
 
+def rebuild_solver_from_checkpoint(
+    checkpoint_path: str,
+    backend: Optional[str] = None,
+    surface_mesh: Optional[str] = None,
+    threads: int = -1,
+):
+    """从 checkpoint 完整重建一个带解场的 FRSolver（不继续迭代）。
+
+    从 `solve resume` 里提炼出的公共重建逻辑：checkpoint 的 metadata 记录了
+    重建 FRSolver 所需的全部构造参数（input_file/order/turbulence_model/
+    backend/自由来流条件），据此重新走一遍 load_mesh_for_solver + FRSolver(...)
+    构造出求解器，再用 checkpoint 里完整保存的 (n_cells,n_sps,n_vars) 状态
+    （metadata['fields']['U_sps']）整体替换初始化生成的均匀流场。
+
+    `solve resume` 用它接着跑更多迭代；`post coefficients` 用它在不继续
+    迭代的情况下拿到一个状态完整、几何完整（mesh.face_connectivity/
+    face_flux_points）的求解器，喂给
+    `postprocess.fr_coefficients.compute_aerodynamic_coefficients_fr`
+    —— 这是气动系数计算真正需要的输入（FR 原生多点解 + 面几何），不是
+    `postprocess.coefficients.CoefficientCalculator` 假设的 V1 单元中心
+    `GridData`/`SolutionVector`（该实现的 `get_face_data()` 从未存在过，
+    气动系数恒为 0，见 6_整体专家组二次评审.md 发现 23）。
+
+    Args:
+        checkpoint_path: checkpoint 文件路径（solve steady/transient 产出）
+        backend: 后端覆盖，None 时沿用 checkpoint 记录的原始后端
+        surface_mesh: checkpoint 记录的 input_file 若是 .nas 体网格，
+            需要提供原始面网格来反推边界分组
+        threads: CPU 后端 numba 并行 kernel 使用的线程数
+
+    Returns:
+        (solver, iteration, metadata): 重建好的 FRSolver 实例（状态已从
+        checkpoint 恢复）、checkpoint 记录的迭代数、以及重建所用的完整
+        metadata 字典（含 input_file/order/turbulence_model/backend，
+        调用方续写 checkpoint 时需要，不必重新加载一遍 checkpoint 文件）
+
+    Raises:
+        click.ClickException: checkpoint 缺少 U_sps 字段、缺少 input_file，
+            或状态形状与重建求解器不匹配
+    """
+    from types import SimpleNamespace
+    from autoflowcfd.core import FRSolver
+    from autoflowcfd.core.utils.checkpoint import CheckpointManager
+    from autoflowcfd.cli.solve_mesh_loader import load_mesh_for_solver
+    from autoflowcfd.cli.solve_wall_distance import compute_wall_distance_for_solver
+
+    _solution, _history, iteration, metadata = CheckpointManager(
+        config=SimpleNamespace(), output_dir="."
+    ).load(checkpoint_path)
+
+    fields = metadata.get("fields", {})
+    if "U_sps" not in fields:
+        raise click.ClickException(
+            f"Checkpoint '{checkpoint_path}' 缺少 'U_sps' 字段（完整的 (n_cells,n_sps,n_vars) "
+            f"求解器状态）——不是本版本 write_checkpoint 写出的 checkpoint，无法精确重建。"
+        )
+
+    input_file = metadata.get("input_file")
+    if not input_file:
+        raise click.ClickException("Checkpoint metadata 缺少 'input_file'，无法重新加载网格。")
+
+    order = int(metadata.get("order", 2))
+    turbulence_model = metadata.get("turbulence_model", "sst")
+    target_backend = backend or metadata.get("backend", "cpu")
+
+    mesh, volume_data = load_mesh_for_solver(input_file, order, surface_mesh=surface_mesh)
+
+    solver = FRSolver(
+        mesh=mesh,
+        backend=target_backend,
+        order=order,
+        turb_model_name=turbulence_model,
+        rho_inf=metadata.get("rho_inf", 1.225),
+        vel_inf=metadata.get("vel_inf", 33.33),
+        p_inf=metadata.get("p_inf", 101325.0),
+        n_threads=threads,
+    )
+    compute_wall_distance_for_solver(solver, volume_data)
+
+    U_restored = fields["U_sps"]
+    if U_restored.shape != solver.state.U.shape:
+        raise click.ClickException(
+            f"Checkpoint 状态形状 {U_restored.shape} 与重建求解器的状态形状 "
+            f"{solver.state.U.shape} 不匹配（网格或阶数可能已变化），拒绝恢复。"
+        )
+    solver.state.U = U_restored
+    solver.state._update_primitives()
+
+    metadata["order"] = order
+    metadata["turbulence_model"] = turbulence_model
+    metadata["backend"] = target_backend
+    return solver, iteration, metadata
+
+
 def write_checkpoint(
     solver,
     output_dir: str,

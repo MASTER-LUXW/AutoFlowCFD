@@ -36,6 +36,11 @@ from ..repair.mesh_repair_stage_b import run_stage_b_repair
 # 文档字符串）。
 from .mesh_background_mixed_repair import _repair_mixed_mesh_post_stage_c
 
+# 阶段 D：BL/core 界面相邻体积比定向修复（V2.0 专家组三次评审新发现的
+# 根因修复，见 mesh_repair_interface.py 模块文档——阶段 A/B/B' 的坏单元
+# 判据从不覆盖棱柱一侧，看不到 BL/core 界面）。
+from ..repair.mesh_repair_interface import run_stage_d_interface_repair
+
 
 def generate_hybrid_mesh(
     surface_nodes: np.ndarray,
@@ -221,8 +226,20 @@ def generate_hybrid_mesh(
         (merged_nodes, prism_cells, merged_cells, bl_cell_groups, cell_groups,
          nodes_obj, mesh_changed_by_repair) = _repair_mixed_mesh_post_stage_c(
             merged_nodes, prism_cells, merged_cells, bl_cell_groups, cell_groups,
-            nodes_obj, mesh_changed_by_repair,
+            nodes_obj, mesh_changed_by_repair, min_cell_size,
         )
+
+        # 阶段 D：见 run_stage_d_interface_repair 模块文档——在完整混合
+        # 面图（棱柱+四面体）上定向修复 BL/core 界面相邻体积比违规，只
+        # 局部重铺四面体一侧，不改动任何棱柱/BL 几何。
+        (merged_nodes, merged_cells, cell_groups, nodes_obj,
+         _stage_d_changed, stage_d_actions) = run_stage_d_interface_repair(
+            merged_nodes, prism_cells, merged_cells, cell_groups, nodes_obj, validator,
+        )
+        if stage_d_actions:
+            for _action in stage_d_actions:
+                logger.info(_action)
+        mesh_changed_by_repair = mesh_changed_by_repair or _stage_d_changed
 
         # TetrahedralCells 严格执行 int32 连接关系；上方的 patch
         # 路径全程使用 int64（匹配送入的 .astype(np.int64) 转换，

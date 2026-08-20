@@ -138,15 +138,20 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
             )
             self._using_distributed_mesh = False
 
+        # 分布式状态（n_sps 必须先于下面的 GPUHaloExchange 构造赋值——
+        # 此前这里是反的：GPUHaloExchange(..., n_sps=n_sps, ...) 在
+        # `n_sps = mesh.n_sps_per_cell` 赋值语句之前引用 n_sps，
+        # Python 函数作用域规则下是必然的 UnboundLocalError，
+        # MultiGPUDistributedSolver.__init__ 100% 崩溃且零测试覆盖
+        # （V2.0 专家组评审逐行核实）。
+        n_cells = mesh.n_cells
+        n_sps = mesh.n_sps_per_cell
+        n_local = self.partition.n_local_cells
+
         # GPU 直接 Halo 交换（支持 CUDA-aware MPI 和 staging buffer 两种模式）
         self.gpu_halo = GPUHaloExchange(
             self.partition, n_sps=n_sps, n_vars=5, device_id=device_id
         )
-
-        # 分布式状态
-        n_cells = mesh.n_cells
-        n_sps = mesh.n_sps_per_cell
-        n_local = self.partition.n_local_cells
         self.state = DistributedFRState(n_cells, n_sps, 5, self.partition)
 
         # 上传局部网格数据到 GPU
@@ -217,12 +222,18 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
             device_id=self.device_id,
         )
 
-    def compute_viscous_residual_gpu(self):
-        """GPU 计算分布式粘性残差。"""
+    def compute_viscous_residual_gpu(self, mu_t_field=None):
+        """GPU 计算分布式粘性残差。
+
+        mu_t_field: 湍流涡粘度场（可选）——此前本方法签名只有 self，
+        但调用方 step() 以 mu_t_field=mu_t_field 关键字调用它，签名/
+        调用不匹配，必然 TypeError（V2.0 专家组评审逐行核实）。
+        """
         from autoflowcfd.core.gpu.gpu_viscous import compute_viscous_residual_fr_gpu
         return compute_viscous_residual_fr_gpu(
             self.U_gpu, self.mesh, self.ops,
             mu=self.mu_molecular,
+            mu_t_field=mu_t_field,
             mesh_data=self.mesh_data,
             ops_data=self.mesh_data,
             device_id=self.device_id,
