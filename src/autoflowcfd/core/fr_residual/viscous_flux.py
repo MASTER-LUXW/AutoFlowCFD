@@ -44,7 +44,7 @@ import numpy as np
 from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient
 from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
 from autoflowcfd.core.fr_operators.flux_kernels import viscous_physical_flux_batch
-from autoflowcfd.core.fr_operators.volume_contract import contract_shared_operator_2axis
+from autoflowcfd.core.fr_operators.volume_contract import contract_shared_operator_2axis, compute_adj_j
 
 GAMMA = 1.4
 R_AIR = 287.0  # 空气比气体常数 J/(kg*K)
@@ -167,7 +167,7 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
 
     det_jacs = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
     inv_jacs = mesh.jacobians["inv_jacs"].reshape(n_cells, n_sps, 3, 3)
-    adj_j = det_jacs[..., None, None] * inv_jacs
+    adj_j = compute_adj_j(det_jacs, inv_jacs)
 
     # 体积项性能优化：与 fr_residual_inviscid.py 的同类改动理由/验证方式
     # 完全一致（py-spy 对生产网格的采样证实 `viscous_physical_flux`/
@@ -182,8 +182,19 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
     G_phys = viscous_physical_flux_batch(
         Q_flat, grad_vel_flat, grad_T_flat, mu, Pr, mu_t_flat, Pr_t
     ).reshape(n_cells, n_sps, 3, 5)
+    # 内存优化（理由与验证方式同 fr_residual/inviscid.py 的同类改动）：
+    # grad_vel_flat 是 grad_vel（grad_Q 的非连续切片）经 ascontiguousarray
+    # 强制拷贝出的独立数组（~1.4GiB，真实新分配，不是 grad_Q 的 view），
+    # 用完即弃，之后不再被引用；Q_flat/grad_T_flat/mu_t_flat 是各自
+    # 已连续源数组的 view（reshape+ascontiguousarray 在已连续输入上是
+    # no-op），不持有独立内存，del 与否不影响峰值，为避免误导不在此
+    # 一并 del（它们的生命周期由 Q/grad_T/mu_t_field 这些仍在用的名字
+    # 决定）。grad_Q/grad_vel/grad_T/Q/adj_j/det_jacs 在下面界面项 numba
+    # kernel 调用里还要用，不能删。
+    del grad_vel_flat
 
     G_tilde = np.matmul(adj_j, G_phys)  # (n_cells,n_sps,3,5)
+    del G_phys  # ~2.4GiB，用完即弃
     # 四面体/棱柱专用坍缩坐标微分矩阵，理由同 fr_residual_inviscid.py 的
     # 同类改动——见 FROperators.D_3d_tet/D_3d_prism 文档。
     n_prism = mesh.n_prism_cells
@@ -192,7 +203,9 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
         div_comp[:n_prism] = contract_shared_operator_2axis(ops.D_3d_prism, G_tilde[:n_prism])
     if n_cells > n_prism:
         div_comp[n_prism:] = contract_shared_operator_2axis(ops.D_3d_tet, G_tilde[n_prism:])
+    del G_tilde  # ~2.4GiB，用完即弃
     residual = div_comp / det_jacs[..., None]  # 注意：粘性项是 +div(G)（见模块文档的符号约定）
+    del div_comp  # ~854MiB，用完即弃
 
     # --- 界面项：numba 逐点标量 kernel（性能优化，替代原纯 Python
     # `for f in range(fc.n_faces)` 逐面循环，理由/验证方式与

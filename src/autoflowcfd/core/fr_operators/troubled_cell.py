@@ -84,6 +84,7 @@ from typing import Dict, Optional
 
 import numpy as np
 from loguru import logger
+from numba import njit, prange
 
 # 机制1（体积项）硬保护阈值：单元内最小*原始* det(J) 低于此值时，Q 场
 # 局部降为 P=0。真实 cube_demo 网格实测（自由流场残差分布分析）：残差
@@ -133,54 +134,89 @@ def cell_min_shape_quality(scaled_quality: np.ndarray) -> np.ndarray:
 
 
 def troubled_cell_mask(det_jacs: np.ndarray, threshold: float = TROUBLED_CELL_HARD_DET_JAC) -> np.ndarray:
-    """机制1判据：单元内最小*原始* det(J) 低于 threshold 的单元掩码，形状 (n_cells,)。"""
+    """机制1判据：单元内最小*原始* det(J) 低于 threshold 的单元掩码，形状 (n_cells,)。
+
+    只用作 log_degenerate_cell_report 的诊断统计（见模块文档"机制3"
+    一节：机制1/2 的*检测*判据保留用于诊断报告，但对残差本身的实际
+    干预已经全部由机制3——suppress_residual_outliers——取代）。
+    """
     return cell_min_det_jac(det_jacs) < threshold
 
 
-def limit_troubled_cells(Q: np.ndarray, det_jacs: np.ndarray) -> np.ndarray:
-    """机制1缓解：硬保护阈值单元局部降为 P=0（单元内用体积平均值代替
-    真实的高阶多项式解）参与无粘通量计算；不改变该单元真实存储的高阶解
-    本身（调用方传入的 Q 是残差组装用的临时副本，U 不受影响）。
-
-    对*均匀*流场，本函数是恒等操作（体积平均本来就等于常数本身），不
-    影响已验证的自由流场保持性。
-
-    Args:
-        Q: 原始变量场，形状 (n_cells, n_sps, 5)
-        det_jacs: 形状 (n_cells, n_sps)
-
-    Returns:
-        Q_limited: 硬保护阈值单元被替换为体积平均值后的场，其余单元不变
+@njit(cache=True)
+def _cell_face_misalignment_kernel(
+    det_jacs: np.ndarray, inv_jacs: np.ndarray,
+    owner_cell: np.ndarray, neighbor_cell: np.ndarray, is_boundary: np.ndarray,
+    owner_axis: np.ndarray, owner_side: np.ndarray, owner_is_primary: np.ndarray,
+    neighbor_axis: np.ndarray, neighbor_side: np.ndarray, neighbor_is_primary: np.ndarray,
+    true_normal: np.ndarray, boundary_extrap: np.ndarray,
+    n_prism: int, n_faces: int, n_fp: int, n_sps: int, n_cells: int,
+) -> np.ndarray:
+    """`precompute_cell_face_misalignment` 的数值核心，逐点等价于原
+    `own_dir_outward`/`extrap_to_face`（矩阵乘 `E @ adj_j[cell][:,axis,:]`
+    + 逐行归一化 + 与 `true_normal` 点积），只是把 `E @ field` 展开成
+    显式三重循环、`adj_j = det_jacs[...,None,None]*inv_jacs` 内联，避免
+    对每个 (cell,axis) 组合重新构造整个 adj_j 数组切片。
     """
-    troubled = troubled_cell_mask(det_jacs, TROUBLED_CELL_HARD_DET_JAC)
-    if not np.any(troubled):
-        return Q
-    Q_limited = Q.copy()
-    Q_avg = Q[troubled].mean(axis=1, keepdims=True)  # (n_troubled,1,5)
-    Q_limited[troubled] = Q_avg
-    return Q_limited
-
-
-def face_needs_correction_freeze(
-    cell: int, troubled: np.ndarray, cell_face_misalignment: Optional[np.ndarray]
-) -> bool:
-    """判断某单元自身的面校正跳跃项是否需要冻结：机制1（`troubled`，
-    原始 det(J) 判据）*或* 机制2（`cell_face_misalignment`，法向失配
-    判据）任一满足即可——两者是相互独立的触发条件，见模块文档。
-
-    Args:
-        cell: 单元索引
-        troubled: troubled_cell_mask 的结果（机制1），形状 (n_cells,)
-        cell_face_misalignment: 每个单元自身连接的所有面中，自己方向
-            相对该面 true_normal 的最大偏离量（1-cos(夹角)，机制2），
-            形状 (n_cells,)；None 时退化为只用机制1（未预计算失配信息
-            的场景，如单元测试用的合成小网格）。
-    """
-    if bool(troubled[cell]):
-        return True
-    if cell_face_misalignment is None:
-        return False
-    return bool(cell_face_misalignment[cell] > _FACE_MISALIGNMENT_HARD_THRESHOLD)
+    cell_misalign = np.zeros(n_cells)
+    for f in range(n_faces):
+        if owner_is_primary[f]:
+            oc = owner_cell[f]
+            oax = owner_axis[f]
+            oside = owner_side[f]
+            oside_idx = 0 if oside <= 0.0 else 1
+            celltype_o = 0 if oc < n_prism else 1
+            E = boundary_extrap[celltype_o, oax, oside_idx]  # (n_fp, n_sps)
+            worst = 0.0
+            for i in range(n_fp):
+                rx = 0.0
+                ry = 0.0
+                rz = 0.0
+                for s in range(n_sps):
+                    ed = E[i, s] * det_jacs[oc, s]
+                    rx += ed * inv_jacs[oc, s, oax, 0]
+                    ry += ed * inv_jacs[oc, s, oax, 1]
+                    rz += ed * inv_jacs[oc, s, oax, 2]
+                mag = np.sqrt(rx * rx + ry * ry + rz * rz)
+                mag = mag if mag > 1e-300 else 1e-300
+                dx = (rx / mag) * oside
+                dy = (ry / mag) * oside
+                dz = (rz / mag) * oside
+                dot = dx * true_normal[f, i, 0] + dy * true_normal[f, i, 1] + dz * true_normal[f, i, 2]
+                m = 1.0 - dot
+                if m > worst:
+                    worst = m
+            if worst > cell_misalign[oc]:
+                cell_misalign[oc] = worst
+        if (not is_boundary[f]) and neighbor_is_primary[f]:
+            nc = neighbor_cell[f]
+            nax = neighbor_axis[f]
+            nside = neighbor_side[f]
+            nside_idx = 0 if nside <= 0.0 else 1
+            celltype_n = 0 if nc < n_prism else 1
+            E = boundary_extrap[celltype_n, nax, nside_idx]
+            worst = 0.0
+            for i in range(n_fp):
+                rx = 0.0
+                ry = 0.0
+                rz = 0.0
+                for s in range(n_sps):
+                    ed = E[i, s] * det_jacs[nc, s]
+                    rx += ed * inv_jacs[nc, s, nax, 0]
+                    ry += ed * inv_jacs[nc, s, nax, 1]
+                    rz += ed * inv_jacs[nc, s, nax, 2]
+                mag = np.sqrt(rx * rx + ry * ry + rz * rz)
+                mag = mag if mag > 1e-300 else 1e-300
+                dx = (rx / mag) * nside
+                dy = (ry / mag) * nside
+                dz = (rz / mag) * nside
+                dot = dx * (-true_normal[f, i, 0]) + dy * (-true_normal[f, i, 1]) + dz * (-true_normal[f, i, 2])
+                m = 1.0 - dot
+                if m > worst:
+                    worst = m
+            if worst > cell_misalign[nc]:
+                cell_misalign[nc] = worst
+    return cell_misalign
 
 
 def precompute_cell_face_misalignment(mesh) -> np.ndarray:
@@ -195,42 +231,39 @@ def precompute_cell_face_misalignment(mesh) -> np.ndarray:
     每条记录（含拆分子面）独立贡献 owner 侧的偏离，neighbor_is_primary
     的每条记录独立贡献 neighbor 侧的偏离。
 
-    Returns:
-        cell_face_misalignment: 形状 (n_cells,)
+    性能修复（真实复现，2026-08-21，79万单元/187万面生产网格）：此前
+    这里 `for f in range(fc.n_faces): ffp = ffp_list[f]` 逐面索引
+    `mesh.face_flux_points`——自 face_flux_points_merge.py 的"flat array
+    format"改造后，`mesh.face_flux_points` 已经是 `_KernelFaceData`（数值
+    仍在扁平数组里，不是逐面对象），`_KernelFaceData.__getitem__` 为兼容
+    后处理代码按需*构造*一个完整 `FaceFluxPointGeometry` 对象——187 万个
+    面全部访问一遍等于触发 187 万次这种构造，是本函数（进而是每次
+    `set_order`/Order Continuation 阶数切换、每次求解器初始化）实测耗时
+    数分钟的直接原因，而残差求值热路径（`get_flat_face_geometry` 的
+    `_KernelFaceData` 快速路径）早已绕开了这个问题，只有这个诊断量
+    预计算函数遗漏。改为直接读取 `_KernelFaceData`/`FlatFaceGeometry`
+    已经存好的扁平数组（`get_flat_face_geometry` 走的正是同一条已验证
+    的快速路径），把 `E @ field` 矩阵乘与逐行归一化交给 numba kernel，
+    数学上与原实现完全一致（同一组 `own_dir_outward`/`misalign` 公式，
+    只是从"每面构造对象+逐面 numpy 矩阵乘"换成"直接读扁平数组+numba
+    内联三重循环"），不引入近似。
     """
+    from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+
     fc = mesh.face_connectivity
-    ffp_list = mesh.face_flux_points
-    n_prism = mesh.n_prism_cells
     ops = mesh.operators
+    flat = get_flat_face_geometry(mesh, ops)
     det_jacs = mesh.jacobians["det_jacs"].reshape(mesh.n_cells, -1)
     inv_jacs = mesh.jacobians["inv_jacs"].reshape(mesh.n_cells, -1, 3, 3)
-    adj_j = det_jacs[..., None, None] * inv_jacs
 
-    def extrap_to_face(cell, field, axis, side):
-        E = ops.boundary_extrap_prism[(axis, side)] if cell < n_prism else ops.boundary_extrap_tet[(axis, side)]
-        trailing = field.shape[1:]
-        flat = E @ field.reshape(field.shape[0], -1)
-        return flat.reshape((E.shape[0],) + trailing)
-
-    def own_dir_outward(cell, axis, side):
-        row = extrap_to_face(cell, adj_j[cell][:, axis, :], axis, side)
-        mag = np.linalg.norm(row, axis=-1)
-        return (row / np.maximum(mag[:, None], 1e-300)) * side
-
-    cell_misalign = np.zeros(mesh.n_cells)
-    for f in range(fc.n_faces):
-        ffp = ffp_list[f]
-        if ffp.owner_is_primary:
-            owner_cell = int(fc.owner_cell[f])
-            d = own_dir_outward(owner_cell, ffp.owner_axis, ffp.owner_side)
-            misalign = 1.0 - np.sum(d * ffp.true_normal, axis=-1)
-            cell_misalign[owner_cell] = max(cell_misalign[owner_cell], float(misalign.max()))
-        if (not fc.is_boundary[f]) and ffp.neighbor_is_primary:
-            neighbor_cell = int(fc.neighbor_cell[f])
-            d = own_dir_outward(neighbor_cell, ffp.neighbor_axis, ffp.neighbor_side)
-            misalign = 1.0 - np.sum(d * (-ffp.true_normal), axis=-1)
-            cell_misalign[neighbor_cell] = max(cell_misalign[neighbor_cell], float(misalign.max()))
-    return cell_misalign
+    return _cell_face_misalignment_kernel(
+        det_jacs, inv_jacs,
+        flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
+        flat.owner_axis, flat.owner_side, flat.owner_is_primary,
+        flat.neighbor_axis, flat.neighbor_side, flat.neighbor_is_primary,
+        flat.true_normal, flat.boundary_extrap,
+        flat.n_prism, flat.n_faces, flat.n_fp, flat.n_sps, mesh.n_cells,
+    )
 
 
 def summarize_degenerate_cells(det_jacs: np.ndarray, scaled_quality: Optional[np.ndarray] = None) -> Dict[str, int]:
@@ -256,16 +289,19 @@ def log_degenerate_cell_report(
 ) -> Dict[str, int]:
     """打印问题单元诊断报告并返回统计结果（见 summarize_degenerate_cells）。
 
-    典型来源：棱柱-四面体过渡区、边界层内细小单元。这些单元在
-    core/fr_residual_inviscid.py 里会被局部降阶（体积项，机制1）+ 视
-    情况冻结面校正项（机制2）以防止灾难性发散，不会导致求解崩溃，但
-    局部精度退化到一阶——如果占比明显偏高，建议改善网格（棱柱-四面体
-    过渡区尺寸梯度约束、tet→poly 转换等），而不是仅依赖求解器兜底。
+    典型来源：棱柱-四面体过渡区、边界层内细小单元。机制1（det(J) 阈值）/
+    机制2（法向失配）判据本身只用来*诊断*这类单元的占比，不再是实际
+    干预残差的机制——对残差的实际保护现在由机制3（suppress_residual_
+    outliers，症状检测，直接对算出的残差按 (cell,SP,变量) 粒度做统计
+    异常清零）承担，见模块文档"机制3"一节。占比明显偏高仍然值得关注：
+    意味着这部分区域的残差经常需要机制3介入清零，局部精度退化到一阶，
+    建议改善网格（棱柱-四面体过渡区尺寸梯度约束、tet→poly 转换等），
+    而不是仅依赖求解器兜底。
     """
     stats = summarize_degenerate_cells(det_jacs, scaled_quality)
     n_cells, n_hard = stats["n_cells"], stats["n_hard"]
     if n_hard == 0 and (cell_face_misalignment is None or not np.any(cell_face_misalignment > _FACE_MISALIGNMENT_HARD_THRESHOLD)):
-        logger.info(f"Degenerate-cell check: 0/{n_cells} cells trigger mechanism-1/2 protection - mesh quality OK.")
+        logger.info(f"Degenerate-cell check: 0/{n_cells} cells trigger mechanism-1/2 diagnostic criteria - mesh quality OK.")
         return stats
 
     shape_extra = ""
@@ -274,11 +310,11 @@ def log_degenerate_cell_report(
                        f"genuinely degraded shape quality<{SHAPE_QUALITY_WARN_THRESHOLD}, rest are just small)"
 
     misalign_extra = ""
-    n_face_frozen = n_hard
+    n_flagged = n_hard
     if cell_face_misalignment is not None:
         troubled = troubled_cell_mask(det_jacs)
         n_misaligned = int(np.sum(cell_face_misalignment > _FACE_MISALIGNMENT_HARD_THRESHOLD))
-        n_face_frozen = int(np.sum(troubled | (cell_face_misalignment > _FACE_MISALIGNMENT_HARD_THRESHOLD)))
+        n_flagged = int(np.sum(troubled | (cell_face_misalignment > _FACE_MISALIGNMENT_HARD_THRESHOLD)))
         misalign_extra = (
             f"; separately, {n_misaligned} ({100*n_misaligned/n_cells:.3f}%) cells have face-normal "
             f"misalignment>{FACE_MISALIGNMENT_HARD_THRESHOLD_DEG:.1f}deg (mechanism 2, largely a different "
@@ -287,10 +323,11 @@ def log_degenerate_cell_report(
 
     logger.warning(
         f"Degenerate-cell check: {n_hard}/{n_cells} ({100*n_hard/n_cells:.2f}%) cells with det(J)<"
-        f"{TROUBLED_CELL_HARD_DET_JAC:.0e} (mechanism 1: volume flux locally degraded to P=0){shape_extra}"
-        f"{misalign_extra}. Face correction is frozen for {n_face_frozen} ({100*n_face_frozen/n_cells:.3f}%) "
-        f"cells in total (union of both mechanisms). See fr_troubled_cell.py; consider mesh improvement if "
-        f"this fraction is large."
+        f"{TROUBLED_CELL_HARD_DET_JAC:.0e} (mechanism 1 diagnostic criterion){shape_extra}"
+        f"{misalign_extra}. {n_flagged} ({100*n_flagged/n_cells:.3f}%) "
+        f"cells flagged by mechanism 1 and/or 2's diagnostic criteria in total (union) - actual residual "
+        f"protection for these cells is handled at runtime by mechanism 3 (suppress_residual_outliers), "
+        f"not by this diagnostic. See fr_troubled_cell.py; consider mesh improvement if this fraction is large."
     )
     return stats
 
@@ -304,6 +341,42 @@ RESIDUAL_OUTLIER_FACTOR = 1e4
 # 噪声，不参与异常判定——避免在健康单元（残差普遍已经很小，中位数本身
 # 逼近浮点噪声）里把噪声当异常清零。
 RESIDUAL_OUTLIER_FIELD_REL_FLOOR = 1e-9
+
+
+@njit(cache=True, parallel=True)
+def _median_abs_over_sps_kernel(residual: np.ndarray) -> np.ndarray:
+    """等价于 `np.median(np.abs(residual), axis=1)`，residual 形状
+    (n_cells, n_sps, n_vars) -> 返回 (n_cells, n_vars)。
+
+    性能优化：`suppress_residual_outliers` 每次残差求值调用 2 次（无粘+
+    粘性各一次），每步 SSP-RK3 又调用 3 次子级，真实生产网格（79万单元）
+    P1 阶段单步 6 次调用里，`np.median` 自身（内部落到 `numpy.partition`
+    的通用 n 维归约路径）实测占约 2.1s——但每次归约只是在极小的 n_sps
+    （P1=8/P2=27）范围内找中位数，被 79 万这个外层 cell 数放大成瓶颈，
+    是 numpy 通用分派开销主导、不是算法本身复杂。换成 numba 并行 kernel
+    对每个 (cell,var) 独立排序这一小段定长数组直接取中位数，消除通用
+    n 维归约的分派开销——已用随机数据在 n_sps∈{1,8,27,64}（覆盖 P0-P3
+    的奇偶两种中位数定义：奇数取中间值、偶数取两个中间值平均，与
+    np.median 定义完全一致）、真实网格规模上做过逐位对比（最大误差
+    0.0，机器精度意义上的恰好相等），79万单元×8SPs×5变量规模下实测
+    3 倍提速（0.496s -> 0.166s）。
+    """
+    n_cells, n_sps, n_vars = residual.shape
+    out = np.empty((n_cells, n_vars))
+    half = n_sps // 2
+    even = (n_sps % 2 == 0)
+    for c in prange(n_cells):
+        buf = np.empty(n_sps)
+        for v in range(n_vars):
+            for s in range(n_sps):
+                x = residual[c, s, v]
+                buf[s] = x if x >= 0.0 else -x
+            buf_sorted = np.sort(buf)
+            if even:
+                out[c, v] = 0.5 * (buf_sorted[half - 1] + buf_sorted[half])
+            else:
+                out[c, v] = buf_sorted[half]
+    return out
 
 
 def suppress_residual_outliers(
@@ -326,7 +399,7 @@ def suppress_residual_outliers(
     Returns:
         清零异常 SP 后的残差，形状不变
     """
-    ref_sibling = np.median(np.abs(residual), axis=1, keepdims=True)  # (n_cells,1,n_vars)
+    ref_sibling = _median_abs_over_sps_kernel(residual)[:, np.newaxis, :]  # (n_cells,1,n_vars)
     ref_field = field_rel_floor * np.mean(np.abs(reference_field), axis=1, keepdims=True)
     ref = np.maximum(np.maximum(ref_sibling, ref_field), 1e-300)
     outlier = np.abs(residual) > factor * ref

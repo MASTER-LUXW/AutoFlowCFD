@@ -98,7 +98,7 @@ order: 3       # FR 阶数 (1, 2, 或 3)
 turbulence: des  # des, ddes, les
 
 # 时间积分
-time_integration: backward_euler  # backward_euler, rk2, rk3, ab3
+time_scheme: backward_euler  # backward_euler, rk2, rk3, ab3
 dt: 1.0e-4     # 时间步长 (s)
 total_time: 0.3  # 总物理时间 (s)
 
@@ -201,25 +201,33 @@ def validate(config_file: str, json_output: bool) -> None:
         # JSON 输出
         $ autoflowcfd config validate simulation.yaml --json
     """
-    from autoflowcfd.config import ConfigLoader
-    
+    from autoflowcfd.config import ConfigLoader, TransientConfig
+
     logger.info(f"正在验证配置: {config_file}")
-    
+
     try:
         loader = ConfigLoader()
         config_obj = loader.load(config_file)
-        
+
+        # `mode` 不是 SteadyConfig/TransientConfig 的字段（只是 YAML 里
+        # 用来在 loader.load() 内部选择走哪个 _load_*_config 分支的顶层
+        # 路由键，见 config/loader.py::load 文档），config_obj 上从来
+        # 没有过 `mode` 属性——`hasattr(config_obj, 'mode')` 恒为
+        # False，这里此前无论传入什么配置文件都会显示"模式: unknown"。
+        # 改成用返回对象的实际类型判断，这是 loader.load() 真正做出的
+        # 那个路由决策的唯一外部可观察结果。
+        mode = "transient" if isinstance(config_obj, TransientConfig) else "steady"
+
         result = {
             "command": "config.validate",
             "status": "valid",
             "file": config_file,
-            "mode": config_obj.mode if hasattr(config_obj, 'mode') else "unknown",
+            "mode": mode,
         }
-        
+
         if json_output:
             click.echo(json.dumps(result, indent=2))
         else:
-            mode = config_obj.mode if hasattr(config_obj, 'mode') else "unknown"
             click.echo(f"✓ 配置有效")
             click.echo(f"  文件: {config_file}")
             click.echo(f"  模式: {mode}")

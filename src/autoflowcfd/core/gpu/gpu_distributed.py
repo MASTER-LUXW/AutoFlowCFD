@@ -243,7 +243,6 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         """GPU 计算局部 CFL 步长。"""
         cp = get_cupy()
         fc = self.mesh.face_connectivity
-        ffp_list = self.mesh.face_flux_points
         n_faces = fc.n_faces
 
         owner_cell = cp.asarray(fc.owner_cell)
@@ -252,11 +251,11 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         )
         is_boundary = cp.asarray(fc.is_boundary)
 
-        normal = np.empty((n_faces, 3), dtype=np.float64)
-        area_w = np.empty((n_faces,), dtype=np.float64)
-        for f in range(n_faces):
-            normal[f] = ffp_list[f].true_normal[0]
-            area_w[f] = ffp_list[f].true_area_weight[0]
+        # 面法向和面积：每步热路径性能修复，理由/验证方式同
+        # gpu_solver.py::_compute_local_time_step_gpu（同一个真实复现、
+        # 同一处遗漏，见该方法文档）。
+        from autoflowcfd.core.fr_residual.inviscid_p0 import _extract_p0_face_geometry
+        normal, area_w = _extract_p0_face_geometry(self.mesh.face_flux_points, n_faces)
         normals_gpu = cp.asarray(normal)
         areas_gpu = cp.asarray(area_w)
 

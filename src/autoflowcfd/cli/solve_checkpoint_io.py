@@ -3,14 +3,11 @@
 见 solve_helpers.py 文档说明整体拆分结构。
 """
 
-import logging
 import os
 import pickle
 from typing import Optional
 
 import click
-
-logger = logging.getLogger(__name__)
 
 
 def save_results(solver, output_dir: str, quiet: bool = False):

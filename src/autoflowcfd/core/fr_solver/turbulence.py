@@ -175,8 +175,21 @@ def _map_wall_distance_fallback(solver, node_distances, mesh_nodes, wall_indices
     logger.info(f"Wall distance field initialized (fallback): mean={solver.wall_distance.mean():.6f}")
 
 
-def compute_turbulence_source(solver, dt: float) -> Optional[tuple]:
-    """计算湍流模型源项（对应 FRSolver.compute_turbulence_source）。"""
+def compute_turbulence_source(solver, dt) -> Optional[tuple]:
+    """计算湍流模型源项（对应 FRSolver.compute_turbulence_source）。
+
+    Args:
+        dt: k/omega 场显式更新使用的时间步长，直接转发给
+            `turb_model.update_fields`。调用方（fr_solver/step.py）
+            按 scheme 传入不同的量：稳态加速模式（SSP-RK/IMEX）传
+            逐 SP 的局部 CFL 步长数组 dt_local（形状 (n_cells, n_sps)，
+            与 dk_total/domega_total 广播兼容），DUAL_TIME 模式传标量
+            物理 dt。之前这里统一收到的是原始物理 dt 标量，未经
+            cfl.py 的阶数/粘性/几何刚性收紧，真实复现过在合成 Couette
+            +SST 算例与 cube_demo 生产网格上都会让 omega 场显式积分
+            失稳（一步内放大几十倍，Order Continuation 升阶后几步内
+            发散至 inf/NaN）——修复见 step.py::step 文档。
+    """
     if solver.turb_model is None:
         return None
 
@@ -279,11 +292,36 @@ def compute_turbulence_source(solver, dt: float) -> Optional[tuple]:
     transport_k = None
     transport_omega = None
     if solver.turb_model_name in ["SST", "DDES"]:
-        try:
-            from autoflowcfd.core.turbulence.transport import compute_turbulence_transport_residual
-            transport_k, transport_omega = compute_turbulence_transport_residual(solver)
-        except Exception as e:
-            logger.warning(f"湍流输运项计算失败，退化为仅源项更新: {e}")
+        from autoflowcfd.core.turbulence.transport import compute_turbulence_transport_residual
+        # grad_vel 复用上面已经为 compute_source_terms 算过的同一份值
+        # （同一个 solver.state.U，两处之间没有任何修改），避免
+        # compute_physical_gradient 这个已知热点被重复调用——见
+        # compute_turbulence_transport_residual 参数文档的性能说明。
+        #
+        # grad_k/grad_omega 刻意不复用、仍让本函数内部重新计算：上面
+        # 那两份在传给 compute_source_terms 之前经过了一次条件触发的
+        # 梯度幅值裁剪（grad_k_mag/grad_omega_mag > 1e6 时 *= 缩放，
+        # 见上方"正性保持检查"），而 transport 内部的 CD_kw/F1
+        # 计算历来用的是未裁剪的原始梯度——两者在裁剪实际触发的
+        # （罕见）情形下不是同一个数值，复用会在那个边界情形下悄悄
+        # 改变 transport 的 F1/CD_kw 取值，不是纯粹的性能优化。这里
+        # 没有把握判断"两处都用裁剪后的值"在物理上是否更对，宁可
+        # 保持这部分原有行为不变，只拿 grad_vel 这个确定安全（两处
+        # 之间毫无改动、任何情形下都是同一个数值）的部分。
+        #
+        # 之前这里 `try/except Exception` 把任何失败（包括真正的编程
+        # 错误——形状不匹配、numba 编译失败等）都静默降级为"仅源项
+        # 更新"，只打一条 warning，不中断求解——与本项目在别处反复强调
+        # 的"不允许静默地什么都不做"（见 boundary/fr_ghost_state.py::
+        # BoundaryGhostStateProvider 文档）、"必须先查清原因，不能静默
+        # 截断/忽略"（见 face_flux_points_merge.py 文档）等原则相悖：
+        # 真实 bug 会被这个 except 吞掉，求解器带着一个悄悄退化、外部
+        # 毫无察觉的湍流模型继续跑完整个仿真。真实复现过的输运计算失败
+        # 目前没有已知的"预期内、可安全忽略"的情形，故不再兜底捕获，
+        # 让真正的错误照常抛出、中断求解。
+        transport_k, transport_omega = compute_turbulence_transport_residual(
+            solver, grad_vel=grad_vel
+        )
 
     solver.turb_model.update_fields(dt, dk_dt, domega_dt,
                                      transport_k=transport_k,

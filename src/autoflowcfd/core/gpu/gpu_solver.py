@@ -186,14 +186,19 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
                 np.where(fc.is_boundary, 0, fc.neighbor_cell)
             )
             is_bnd = cp.asarray(fc.is_boundary)
-            # 面法向和面积
-            ffp_list = self.mesh.face_flux_points
+            # 面法向和面积（性能修复，真实复现：本函数是 GPU P0 无粘残差
+            # 每步都要调用的热路径，此前这里逐面 `ffp_list[f]` 索引——自
+            # face_flux_points_merge.py 的 flat array 重构后
+            # `mesh.face_flux_points` 是 `_KernelFaceData`，`[f]` 会按需
+            # *构造*一个完整 FaceFluxPointGeometry 对象，187 万面级别的
+            # 网格上每步都这样做是灾难级开销，与
+            # core/fr_operators/troubled_cell.py::precompute_cell_face_
+            # misalignment 是同一类遗漏、同一次真实复现中一并发现。改用
+            # inviscid_p0.py 里已经过测试、CPU P0 热路径同样在用的快速
+            # 路径提取函数，数学上是同一批数据，只是不再逐面构造对象。
             n_faces = fc.n_faces
-            normal = np.empty((n_faces, 3), dtype=np.float64)
-            area_w = np.empty((n_faces,), dtype=np.float64)
-            for f in range(n_faces):
-                normal[f] = ffp_list[f].true_normal[0]
-                area_w[f] = ffp_list[f].true_area_weight[0]
+            from autoflowcfd.core.fr_residual.inviscid_p0 import _extract_p0_face_geometry
+            normal, area_w = _extract_p0_face_geometry(self.mesh.face_flux_points, n_faces)
             normal_gpu = cp.asarray(normal)
             area_w_gpu = cp.asarray(area_w)
             volumes_gpu = self.mesh_data.get('cell_volumes')
@@ -250,7 +255,6 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         n_sps = self.mesh.n_sps_per_cell
 
         fc = self.mesh.face_connectivity
-        ffp_list = self.mesh.face_flux_points
         n_faces = fc.n_faces
 
         owner_cell = cp.asarray(fc.owner_cell)
@@ -259,11 +263,12 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         )
         is_boundary = cp.asarray(fc.is_boundary)
 
-        normal = np.empty((n_faces, 3), dtype=np.float64)
-        area_w = np.empty((n_faces,), dtype=np.float64)
-        for f in range(n_faces):
-            normal[f] = ffp_list[f].true_normal[0]
-            area_w[f] = ffp_list[f].true_area_weight[0]
+        # 面法向和面积：与 compute_inviscid_residual_gpu 同一类每步热路径
+        # 性能修复，理由/验证方式相同（见该方法文档）——本方法是每步都要
+        # 调用的局部 CFL 步长计算，逐面对象构造的开销在这里同样是每步
+        # 复现，不是一次性成本。
+        from autoflowcfd.core.fr_residual.inviscid_p0 import _extract_p0_face_geometry
+        normal, area_w = _extract_p0_face_geometry(self.mesh.face_flux_points, n_faces)
         normals_gpu = cp.asarray(normal)
         areas_gpu = cp.asarray(area_w)
 

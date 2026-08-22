@@ -3,11 +3,7 @@
 见 solve_helpers.py 文档说明整体拆分结构。
 """
 
-import logging
-
 import click
-
-logger = logging.getLogger(__name__)
 
 
 def compute_wall_distance_for_solver(solver, volume_data, use_eikonal=False):

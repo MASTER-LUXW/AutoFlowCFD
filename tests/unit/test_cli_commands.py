@@ -214,6 +214,43 @@ class TestCLIConfigCommands:
         result = self.runner.invoke(cli, ["config", "validate", "--help"])
         assert result.exit_code == 0
 
+    @pytest.mark.parametrize("template", ["steady", "transient"])
+    def test_config_init_then_validate_round_trip_reports_correct_mode(
+        self, tmp_path, template
+    ) -> None:
+        """`config init --template X` followed by `config validate` on the
+        generated file must round-trip cleanly: exit 0 and report the same
+        mode that was requested.
+
+        Real bug caught by this test (fixed 2026-08-21): `validate` derived
+        `mode` via `config_obj.mode if hasattr(config_obj, 'mode') else
+        "unknown"`, but `mode` is a top-level YAML routing key consumed by
+        `ConfigLoader.load()` before the config dataclass is even
+        constructed - it was never an attribute on SteadyConfig/
+        TransientConfig, so `hasattr` was always False and every config
+        file, regardless of its actual mode, reported "unknown".
+        """
+        out_file = tmp_path / f"{template}.yaml"
+        init_result = self.runner.invoke(
+            cli, ["config", "init", "--template", template, "-o", str(out_file)]
+        )
+        assert init_result.exit_code == 0, init_result.output
+
+        validate_result = self.runner.invoke(
+            cli, ["config", "validate", str(out_file), "--json"]
+        )
+        assert validate_result.exit_code == 0, validate_result.output
+
+        # `--json` must be pipeable/parseable on stdout alone (the real-world
+        # contract: `autoflowcfd ... --json > out.json` only redirects
+        # stdout) - INFO-level log lines belong on stderr and must not leak
+        # into stdout and corrupt the JSON payload (see cli/main.py's
+        # `logger.add(..., err=True)` fix).
+        import json
+        payload = json.loads(validate_result.stdout)
+        assert payload["status"] == "valid"
+        assert payload["mode"] == template
+
 
 class TestCLIUtilsCommands:
     """Test suite for utils subcommands."""

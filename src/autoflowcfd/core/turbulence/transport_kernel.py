@@ -106,10 +106,50 @@ def extrapolate_scalar_to_faces_kernel(
     neighbor_src1_idx, neighbor_src1_cell, neighbor_src1_mat,
     owner_cell, owner_axis, owner_side,
     n_prism, n_faces, n_fp, n_sps,
+    wall_dirichlet_zero_face,
 ):
     """将 SPs 标量场外插到所有面的通量点（owner + neighbor 两侧）。
 
     组合 _extrap_owner_scalar_to_faces 和 _extrap_neighbor_scalar_to_faces。
+
+    边界面 ghost 值修复（真实 bug，已修复，真实复现：合成 Couette+SST
+    小算例，P0 单个显式步内 omega 场的输运残差就已经达到 ~2e4 量级，
+    而当时整个 omega 场仍是完全均匀的初值 1.0——均匀场理论上不该产生
+    任何非零输运残差）：`_extrap_neighbor_scalar_to_faces` 对没有真实
+    neighbor 单元的边界面（`neighbor_src0_cell[f]==-1` 且没有
+    `neighbor_src1`），循环体直接跳过，把 `phi_neighbor_fp` 留在数组
+    初始化时的 0——对 WALL/OUTLET/SYMMETRY 任何边界类型都一样，等于
+    悄悄把边界处的 k、omega ghost 值当成 0 处理，与这两个物理量的真实
+    边界条件毫无关系（尤其 omega 在近壁应该很大，不是 0）。与平均流
+    残差组装不同，这里从未接入 `solver.boundary_ghost_provider`——这个
+    人工的"ghost=0"在扩散残差里表现为一个恒定虚假跳跃
+    delta_phi=0.5*(0-phi_owner)，不随场是否已经物理收敛而消失，从第一
+    步开始就往湍流标量方程里注入等效于虚假源项的边界通量，是本文档
+    开头描述的 P0->P1->P2 残差链式失控的最初触发点（后续被 CFL/湍流
+    粘性比等其它环节放大，但源头在这里）。
+    真正实现每种边界类型各自正确的 k/omega ghost 值（WALL 上 k=0、
+    omega 按 Wilcox 解析式随近壁距离变化，OUTLET/FARFIELD 用来流值，
+    SYMMETRY 零法向梯度等）需要把 boundary_ghost_provider 的分组信息
+    接入这个纯标量输运模块，是一项更大的独立工作。这里先修正最基本、
+    对所有边界类型都成立的最小合理默认——零梯度（Neumann）ghost：
+    ghost 值取 owner 侧外插值本身，边界处 delta_phi=0，不再凭空引入
+    虚假跳跃/虚假源项。这不是"引入新阈值掩盖问题"，是把一个连"当前
+    场是否收敛"都不敏感、对任何输入都会触发的错误 ghost 值改成没有
+    额外假设的中性默认（对 SYMMETRY 严格物理正确；对 OUTLET/WALL 是
+    比"隐式当作0"更保守、更不容易引入数值毛刺的近似，真正的解析壁面
+    condition 留待后续工作补齐)。
+
+    WALL 上 k=0 的 Dirichlet 处理（真实修复，2026-08-21）：k 在无滑移
+    壁面上严格为零，这是标准 k-omega/SST 边界条件（Wilcox《Turbulence
+    Modeling for CFD》），不是近似——不像 omega 解析壁面值需要额外的
+    壁面距离数据，k=0 不需要任何额外输入，可以用与均流场无滑移壁面
+    幽灵态完全相同的镜像手法独立实现：ghost = 2*k_wall - k_owner =
+    -k_owner（k_wall=0）。`wall_dirichlet_zero_face[f]` 由调用方
+    （`compute_turbulence_transport_residual`，据 solver.boundary_
+    ghost_provider 的边界分组信息算出）标记这个面是否要用这种
+    Dirichlet-zero 处理而不是上面的 Neumann 默认——只在对 k 场调用本
+    kernel 时为 True，omega/rho/velocity/gamma_field 等其它场的调用
+    仍传全 False 数组，行为不变。
     """
     phi_owner = _extrap_owner_scalar_to_faces(
         scalar_sps, boundary_extrap,
@@ -122,6 +162,14 @@ def extrapolate_scalar_to_faces_kernel(
         neighbor_src1_idx, neighbor_src1_cell, neighbor_src1_mat,
         n_faces, n_fp, n_sps,
     )
+    for f in range(n_faces):
+        if neighbor_src0_cell[f] < 0 and neighbor_src1_idx[f] < 0:
+            if wall_dirichlet_zero_face[f]:
+                for i in range(n_fp):
+                    phi_neighbor[f, i] = -phi_owner[f, i]
+            else:
+                for i in range(n_fp):
+                    phi_neighbor[f, i] = phi_owner[f, i]
     return phi_owner, phi_neighbor
 
 

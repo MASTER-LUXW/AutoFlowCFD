@@ -139,13 +139,27 @@ class GPUTurbulenceSST:
         F2 = cp.tanh(arg2**2)
         return F2
 
+    # 湍流粘性比上限（与 CPU 版 SSTModelFR.TURBULENT_VISCOSITY_RATIO_MAX
+    # 保持一致，见该类属性文档：主流 RANS 求解器标准安全阀，切断
+    # k/omega 比值局部失控增长的反馈环）。
+    TURBULENT_VISCOSITY_RATIO_MAX = 1.0e5
+
     def compute_eddy_viscosity_gpu(
         self, k: 'cp.ndarray', omega: 'cp.ndarray',
-        rho: 'cp.ndarray', S_mag: 'cp.ndarray', F2: 'cp.ndarray'
+        rho: 'cp.ndarray', S_mag: 'cp.ndarray', F2: 'cp.ndarray', mu: float
     ) -> 'cp.ndarray':
-        """GPU 计算涡粘系数 ν_t。
+        """GPU 计算涡粘系数 ν_t，并施加湍流粘性比上限。
 
-        ν_t = a1 * k / max(a1*ω, F2*S)
+        ν_t = a1 * k / max(a1*ω, F2*S)，再钳制到
+        nu_t_max = TURBULENT_VISCOSITY_RATIO_MAX * mu / rho——与 CPU 版
+        SSTModelFR.compute_eddy_viscosity 完全一致（见该方法文档：此前
+        这里与 CPU 版一样只有一个与物理粘度脱钩的绝对值上限 nu_t<=1e6，
+        对应粘性比高达 ~6.8e10，形同虚设，是 P2 SST 发散链条的一环，
+        CPU 版已修复但此 GPU 版此前遗漏，GPU 上的 DES/LES 会重新触发
+        同一个已被证实、已被修复的发散问题）。
+
+        Args:
+            mu: 分子动力粘度（用于换算粘性比上限对应的 nu_t 上限）
         """
         cp = get_cupy()
         k = cp.maximum(k, 1e-10)
@@ -153,7 +167,9 @@ class GPUTurbulenceSST:
         S_mag = cp.maximum(S_mag, 1e-10)
 
         nu_t = self.a1 * k / cp.maximum(self.a1 * omega, F2 * S_mag)
-        nu_t = cp.minimum(nu_t, 1e6)
+        nu_t_max = self.TURBULENT_VISCOSITY_RATIO_MAX * mu / cp.maximum(rho, 1e-10)
+        nu_t = cp.minimum(nu_t, nu_t_max)
+        nu_t = cp.where(cp.isfinite(nu_t), nu_t, 0.0)
         return nu_t
 
     def compute_source_terms_gpu(
@@ -207,9 +223,15 @@ class GPUTurbulenceSST:
         sigma_w = F1 * self.sigma_w1 + (1.0 - F1) * self.sigma_w2
         beta = F1 * self.beta1 + (1.0 - F1) * self.beta2
 
-        # 涡粘系数
+        # 暂存本次求值用的混合 beta（供 update_fields_gpu 的半隐式阻尼
+        # 使用，见该方法文档，与 CPU 版 SSTModelFR.compute_source_terms
+        # 完全一致）。
+        self._last_beta_blend = beta
+
+        # 涡粘系数（传入 mu 以施加物理粘性比上限，见 compute_eddy_
+        # viscosity_gpu 文档）
         self.nu_t = self.compute_eddy_viscosity_gpu(
-            self.k_field, self.omega_field, rho, S_mag, F2
+            self.k_field, self.omega_field, rho, S_mag, F2, mu
         )
 
         # === k 方程源项 ===
@@ -252,7 +274,12 @@ class GPUTurbulenceSST:
         transport_k: Optional['cp.ndarray'] = None,
         transport_omega: Optional['cp.ndarray'] = None,
     ):
-        """GPU 湍流场时间更新。
+        """GPU 湍流场时间更新，含源项半隐式阻尼（point-implicit
+        destruction）——与 CPU 版 SSTModelFR.update_fields 完全一致
+        （见该方法文档的推导）：纯显式更新 destruction 项
+        D_omega=rho*beta*omega^2 这类逐点二次反应项在真实网格上会失稳，
+        这是 CPU 版已确认、已修复的 P2 SST 发散根因之一，此 GPU 版此前
+        遗漏同一处修复。
 
         Args:
             dt: 时间步长
@@ -262,13 +289,29 @@ class GPUTurbulenceSST:
             transport_omega: omega 输运残差（可选）
         """
         cp = get_cupy()
-        dk_total = Sk.copy()
-        domega_total = S_omega.copy()
+
+        beta_blend = getattr(self, "_last_beta_blend", None)
+        if beta_blend is None:
+            # 防御性回退，理由同 CPU 版：正常路径下 compute_source_terms_gpu
+            # 总在 update_fields_gpu 之前被调用。
+            beta_blend = self.beta2
+
+        omega_old_safe = cp.maximum(self.omega_field, 1e-10)
+        c_k = self.beta_star * omega_old_safe
+        c_omega = beta_blend * omega_old_safe
+
+        Sk_damped = Sk / (1.0 + dt * c_k)
+        S_omega_damped = S_omega / (1.0 + dt * c_omega)
+        Sk_damped = cp.where(cp.isfinite(Sk_damped), Sk_damped, 0.0)
+        S_omega_damped = cp.where(cp.isfinite(S_omega_damped), S_omega_damped, 0.0)
+
+        dk_total = Sk_damped
+        domega_total = S_omega_damped
 
         if transport_k is not None:
-            dk_total += transport_k
+            dk_total = dk_total + transport_k
         if transport_omega is not None:
-            domega_total += transport_omega
+            domega_total = domega_total + transport_omega
 
         self.k_field += dt * dk_total
         self.omega_field += dt * domega_total

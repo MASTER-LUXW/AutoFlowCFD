@@ -15,11 +15,11 @@ steady/transient 命令本体已拆分到 solve_steady_commands.py，本文件�
 命令组定义 + resume/status。
 """
 
-import logging
 from pathlib import Path
 from typing import Optional
 
 import click
+from loguru import logger
 
 from autoflowcfd.cli.solve_helpers import (
     rebuild_solver_from_checkpoint,
@@ -27,7 +27,19 @@ from autoflowcfd.cli.solve_helpers import (
     write_checkpoint,
 )
 
-logger = logging.getLogger(__name__)
+# 真实 bug（已修复，2026-08-21）：此前这里 `import logging` +
+# `logging.getLogger(__name__)` 用的是标准库 logging，不是本项目全局
+# 统一用的 loguru（见 cli/main.py 顶层 `cli()` group 回调对 loguru 的
+# sink 配置——标准库 logging 完全不受它影响）。项目从未对标准库
+# logging 做过 basicConfig/加 handler，root logger 默认没有任何
+# handler、默认级别 WARNING，`logger.info(...)` 因此被静默吞掉，不会
+# 出现在 stdout 也不会出现在 stderr——真实复现：`solve status`（不带
+# --backend）唯一的输出就是 5 行 logger.info，此前这条命令跑完退出码
+# 0、终端上什么都不打印，是一个看起来"能跑但什么也不做"的伪装可用
+# 命令；`solve resume` 同样两行进度日志被吞掉（其余关键结果走的是
+# print()，未受影响，问题比 status 轻但同样是真实 bug）。改成和本
+# 代码库其余所有文件一致的 `from loguru import logger`，走同一个已在
+# cli/main.py 里配置好、路由到 stderr 的 sink。
 
 
 @click.group()

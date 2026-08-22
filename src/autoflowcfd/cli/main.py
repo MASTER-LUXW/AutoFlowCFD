@@ -99,17 +99,28 @@ def cli(verbose: bool) -> None:
         $ autoflowcfd <command> --help
         $ autoflowcfd <command> <subcommand> --help
     """
+    # 日志一律走 stderr（err=True），不写 stdout：本 CLI 的多个子命令支持
+    # `--json`/`-j` 输出机器可解析的 JSON 到 stdout，供下游 Agent 工具化
+    # 调用（见项目功能点 CL-01）——真实 bug（已修复，2026-08-21）：此前
+    # 这里用 `click.echo(msg)`（默认写 stdout），INFO 级日志（"正在验证
+    # 配置: ..." 等，默认级别就会打印）与 --json 的 JSON payload 混在
+    # 同一个 stdout 流里，`autoflowcfd config validate x.yaml --json`
+    # 这类调用的输出根本不是合法 JSON，管道给 `jq`/`json.loads` 直接解析
+    # 失败——不是某个子命令的孤立问题，是这里的全局 logger sink 配置
+    # 影响所有子命令。终端交互式使用不受影响（stdout/stderr 都会显示在
+    # 同一个终端里），只有把 stdout 单独重定向/管道消费（脚本化调用的
+    # 标准做法）时才看得出区别，这正是这个 bug 会被忽略的原因。
     if verbose:
         logger.remove()
         logger.add(
-            lambda msg: click.echo(msg),
+            lambda msg: click.echo(msg, err=True),
             level="DEBUG",
             format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
         )
     else:
         logger.remove()
         logger.add(
-            lambda msg: click.echo(msg),
+            lambda msg: click.echo(msg, err=True),
             level="INFO",
             format="<level>{message}</level>",
         )

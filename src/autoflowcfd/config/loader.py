@@ -166,6 +166,15 @@ class ConfigLoader:
         for key, value in user_config.items():
             if key in merged:
                 merged[key] = value
+            elif key == "mode":
+                # `mode` 是顶层路由键，本来就不属于 SteadyConfig/
+                # TransientConfig 任何一个的字段——load() 在调用本方法
+                # 之前已经用它选好了 _load_steady_config/_load_transient_
+                # config 分支（见该方法文档），走到这里时它的使命已经
+                # 完成。之前没有这个分支，导致 save_template() 生成的
+                # 每一份配置模板自己都会触发"未知的配置键: mode"这个
+                # 误报——不是真的未知，是本来就不该按 dataclass 字段处理。
+                continue
             else:
                 logger.warning(f"未知的配置键: {key}")
         

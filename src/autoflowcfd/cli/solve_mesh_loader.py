@@ -3,7 +3,6 @@
 见 solve_helpers.py 文档说明整体拆分结构。
 """
 
-import logging
 import os
 import pickle
 from typing import Optional, Tuple
@@ -13,8 +12,6 @@ import click
 from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
 from autoflowcfd.grid.schema.grid_data import VolumeMeshData
 from autoflowcfd.grid.curved_mapping.curved_mapping import MeshDistortionError
-
-logger = logging.getLogger(__name__)
 
 
 def load_mesh_for_solver(

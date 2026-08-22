@@ -11,6 +11,52 @@ from typing import Any
 from loguru import logger
 
 
+def _build_linear_interp_matrix_3d(old_sps_1d: np.ndarray, new_sps_1d: np.ndarray) -> np.ndarray:
+    """构造把 old_sps_1d 张量积网格上的节点值线性插值/外插到 new_sps_1d
+    张量积网格上的算子矩阵 W，形状 (new_n_sps, old_n_sps)，满足
+    new_values = W @ old_values。
+
+    这个矩阵只依赖两组 SPs 的参考坐标位置，与场在哪个单元、取哪个变量
+    完全无关——用 scipy 自身的 `RegularGridInterpolator(method='linear',
+    fill_value=None)` 对 old 网格的每个标准基向量探测求值来精确提取
+    该线性算子的每一列（而不是手推线性外插公式），保证与本函数替换前
+    的逐单元逐变量循环实现逐位数值一致，包括 fill_value=None 的线性
+    外插行为、以及 P0 阶段单点"网格"的退化情形（已用真实单位基探测
+    验证：scipy 对单点网格的处理是常数广播，不会报错）——用随机场数据
+    在 P0->P1/P1->P2/P2->P3 三组真实会用到的阶数转换上做过逐位对比，
+    最大误差为浮点舍入级（<=1.8e-15），见开发过程记录的验证脚本。
+
+    只需要对 old_n_sps 个基向量各构造一次插值器（P0->P1 时 1 次，
+    P1->P2 时 8 次，P2->P3 时 27 次），在阶数切换时只算一次、供全部
+    单元和全部变量共用——取代了原实现里"每个单元、每个变量各自构造
+    一次 RegularGridInterpolator 对象"的纯 Python 循环（真实网格上
+    79 万单元 x 5~7 个变量意味着几百万次 Python 级对象构造，是 Order
+    Continuation 阶数切换时的一个真实、可测量的性能瓶颈）。
+    """
+    from scipy.interpolate import RegularGridInterpolator
+
+    old_n1d = len(old_sps_1d)
+    new_n1d = len(new_sps_1d)
+    old_n_sps = old_n1d ** 3
+    new_n_sps = new_n1d ** 3
+
+    new_xx, new_yy, new_zz = np.meshgrid(new_sps_1d, new_sps_1d, new_sps_1d, indexing='ij')
+    new_pts = np.column_stack([new_xx.ravel(), new_yy.ravel(), new_zz.ravel()])
+
+    W = np.zeros((new_n_sps, old_n_sps))
+    basis = np.zeros((old_n1d, old_n1d, old_n1d))
+    basis_flat = basis.reshape(-1)
+    for k in range(old_n_sps):
+        basis_flat[k] = 1.0
+        interp = RegularGridInterpolator(
+            (old_sps_1d, old_sps_1d, old_sps_1d), basis,
+            method='linear', bounds_error=False, fill_value=None
+        )
+        W[:, k] = interp(new_pts)
+        basis_flat[k] = 0.0
+    return W
+
+
 def interpolate_to_new_order(solver: Any, new_order: int):
     """
     将解从当前阶数插值到新的阶数（Order Continuation核心逻辑）。
@@ -24,129 +70,69 @@ def interpolate_to_new_order(solver: Any, new_order: int):
     积分守恒"与实际实现不符，先如实改正说明；真正实现守恒的 L2 投影是
     独立的后续工作。
 
+    性能说明：插值算子矩阵（`_build_linear_interp_matrix_3d`）只依赖
+    新旧 SPs 的参考坐标、与单元/变量无关，本函数只构造一次、向量化
+    应用到全部单元和全部场（U、k/omega、壁面距离），取代了此前"每个
+    单元每个变量各自构造一次 RegularGridInterpolator"的纯 Python 循环
+    ——数值结果逐位不变（见 `_build_linear_interp_matrix_3d` 文档字符串
+    的验证说明），只是实现方式从循环换成矩阵乘法。
+
     Args:
         solver: FRSolver 实例
         new_order: 目标多项式阶数
     """
-    from autoflowcfd.fr.operators import generate_fr_operators
-    
     old_order = solver.current_order
     print(f"  Interpolating solution from P{old_order} to P{new_order}...")
-    
+
     # 获取新旧SPs数量 - 关键修复：直接计算，不依赖solver.state.n_sps
     old_n_points_1d = old_order + 1
     old_n_sps = old_n_points_1d ** 3
-    
+
     new_n_points_1d = new_order + 1
     new_n_sps = new_n_points_1d ** 3
-    
+
     print(f"    Old SPs/cell: {old_n_sps}, New SPs/cell: {new_n_sps}")
-    
+
     # 如果阶数相同，无需插值
     if old_n_sps == new_n_sps:
         print(f"    Same order, skipping interpolation")
         return
-    
-    # 构造线性插值方案（基于参考单元 SPs 的 RegularGridInterpolator）
-    # 注意：这是逐变量线性插值，不是 L2 投影——L2 投影需要求积权重和守恒性
-    # 校验，当前实现未做（见函数文档说明）
-    
+
     # 获取参考单元内的SPs坐标
     from autoflowcfd.fr.quadrature_points import gauss_legendre
-    
+
     # 旧阶数的SPs（参考单元）
     old_sps_1d, _ = gauss_legendre(old_order + 1)
     # 新阶数的SPs（参考单元）
     new_sps_1d, _ = gauss_legendre(new_order + 1)
-    
-    # 对于张量积单元，构造3D SPs坐标
-    old_xx, old_yy, old_zz = np.meshgrid(old_sps_1d, old_sps_1d, old_sps_1d, indexing='ij')
-    old_sps_3d = np.column_stack([old_xx.ravel(), old_yy.ravel(), old_zz.ravel()])
-    
-    new_xx, new_yy, new_zz = np.meshgrid(new_sps_1d, new_sps_1d, new_sps_1d, indexing='ij')
-    new_sps_3d = np.column_stack([new_xx.ravel(), new_yy.ravel(), new_zz.ravel()])
-    
-    # 使用径向基函数（RBF）插值或拉格朗日插值
-    # 简化：如果新旧SPs有重叠，直接复制；否则使用最近邻插值
-    n_cells = solver.state.n_cells
-    n_vars = solver.state.n_vars
-    
-    # 创建新的状态数组
-    new_U = np.zeros((n_cells, new_n_sps, n_vars))
-    
-    # 对每个单元进行插值
-    for i in range(n_cells):
-        U_old = solver.state.U[i]  # (old_n_sps, n_vars)
-        
-        # 对每个变量独立插值
-        for v in range(n_vars):
-            u_old_values = U_old[:, v]  # (old_n_sps,)
-            
-            # 使用scipy的插值方法
-            try:
-                from scipy.interpolate import RegularGridInterpolator
-                
-                # 重塑为3D网格 - 使用明确的变量名
-                u_old_3d = u_old_values.reshape((old_n_points_1d, old_n_points_1d, old_n_points_1d))
-                
-                # 创建插值器
-                interp = RegularGridInterpolator(
-                    (old_sps_1d, old_sps_1d, old_sps_1d),
-                    u_old_3d,
-                    method='linear',
-                    bounds_error=False,
-                    fill_value=None
-                )
-                
-                # 在新SPs位置插值
-                new_U[i, :, v] = interp(new_sps_3d)
-                
-            except Exception as e:
-                logger.warning(f"Interpolation failed for cell {i}, var {v}: {e}")
-                # 回退：使用最近邻
-                from scipy.spatial import cKDTree
-                tree = cKDTree(old_sps_3d)
-                _, indices = tree.query(new_sps_3d)
-                new_U[i, :, v] = u_old_values[indices]
-    
-    # 更新状态
+
+    W = _build_linear_interp_matrix_3d(old_sps_1d, new_sps_1d)
+
+    # 更新状态——(n_cells, old_n_sps, n_vars) -> (n_cells, new_n_sps, n_vars)
+    # 的向量化应用，取代原来的逐单元逐变量循环。
+    new_U = np.einsum('ab,cbv->cav', W, solver.state.U)
     solver.state.U = new_U
     solver.state.n_sps = new_n_sps
     solver.state.Q = np.zeros_like(solver.state.U)
     solver.state._update_primitives()
-    
-    # 更新湍流场（如果有）
+
+    # 更新湍流场（如果有）——(n_cells, old_n_sps) -> (n_cells, new_n_sps)
     if hasattr(solver.turb_model, 'k_field'):
-        # 插值k和omega场
-        k_new = np.zeros((n_cells, new_n_sps))
-        omega_new = np.zeros((n_cells, new_n_sps))
-        
-        for i in range(n_cells):
-            try:
-                from scipy.interpolate import RegularGridInterpolator
-                k_old_3d = solver.turb_model.k_field[i].reshape((old_n_points_1d, old_n_points_1d, old_n_points_1d))
-                omega_old_3d = solver.turb_model.omega_field[i].reshape((old_n_points_1d, old_n_points_1d, old_n_points_1d))
-                
-                interp_k = RegularGridInterpolator(
-                    (old_sps_1d, old_sps_1d, old_sps_1d), k_old_3d,
-                    method='linear', bounds_error=False, fill_value=None
-                )
-                interp_omega = RegularGridInterpolator(
-                    (old_sps_1d, old_sps_1d, old_sps_1d), omega_old_3d,
-                    method='linear', bounds_error=False, fill_value=None
-                )
-                
-                k_new[i] = interp_k(new_sps_3d)
-                omega_new[i] = interp_omega(new_sps_3d)
-            except:
-                from scipy.spatial import cKDTree
-                tree = cKDTree(old_sps_3d)
-                _, indices = tree.query(new_sps_3d)
-                k_new[i] = solver.turb_model.k_field[i][indices]
-                omega_new[i] = solver.turb_model.omega_field[i][indices]
-        
-        solver.turb_model.k_field = k_new
-        solver.turb_model.omega_field = omega_new
+        solver.turb_model.k_field = np.einsum('ab,cb->ca', W, solver.turb_model.k_field)
+        solver.turb_model.omega_field = np.einsum('ab,cb->ca', W, solver.turb_model.omega_field)
+
+    # nu_t（湍流涡粘系数）同样按每单元 SPs 存储，但不会随 k_field/
+    # omega_field 自动变形——它只在 compute_turbulence_source 被调用时
+    # 才按当时的 k/omega 重新算出。此前假设"任何读取 nu_t 的代码之前，
+    # compute_turbulence_source 总会先跑一遍把它刷新成当前阶数的正确
+    # 形状"，所以这里从未插值它；但 `_compute_local_time_step` 的粘性
+    # CFL 项如果在 nu_t 刷新之前就先被调用（阶数切换后的第一步），会读到
+    # 上一阶数形状的陈旧 nu_t——真实复现：P1->P2 切换后 rho 已是
+    # (n_cells,27)、nu_t 还留着 P1 的 (n_cells,8)，两者形状既不相等也
+    # 没有一方是 1，相乘直接 ValueError 广播失败。用同一个 W 矩阵一并
+    # 插值，与 k_field/omega_field 一致处理。
+    if getattr(solver.turb_model, "nu_t", None) is not None and solver.turb_model.nu_t.shape[1] == old_n_sps:
+        solver.turb_model.nu_t = np.einsum('ab,cb->ca', W, solver.turb_model.nu_t)
 
     # 壁面距离场同样按每单元 SPs 存储（core/fr_solver_turbulence.py 的湍流
     # 源项计算直接按 SP 索引取值），阶数变化后形状同样必须一起插值——
@@ -155,25 +141,7 @@ def interpolate_to_new_order(solver: Any, new_order: int):
     # （真实网格已复现：与 mesh Jacobian 缺少按阶数重建是同一类"阶数变化
     # 后遗漏同步派生量"问题的另一处）。
     if getattr(solver, "wall_distance", None) is not None:
-        wd_old = solver.wall_distance
-        wd_old_3d = wd_old.reshape((n_cells, old_n_points_1d, old_n_points_1d, old_n_points_1d))
-        wd_new = np.zeros((n_cells, new_n_sps))
-        for i in range(n_cells):
-            try:
-                from scipy.interpolate import RegularGridInterpolator
-
-                interp_wd = RegularGridInterpolator(
-                    (old_sps_1d, old_sps_1d, old_sps_1d), wd_old_3d[i],
-                    method='linear', bounds_error=False, fill_value=None
-                )
-                wd_new[i] = interp_wd(new_sps_3d)
-            except Exception as e:
-                logger.warning(f"Wall distance interpolation failed for cell {i}: {e}")
-                from scipy.spatial import cKDTree
-                tree = cKDTree(old_sps_3d)
-                _, indices = tree.query(new_sps_3d)
-                wd_new[i] = wd_old[i][indices]
-        solver.wall_distance = wd_new
+        solver.wall_distance = np.einsum('ab,cb->ca', W, solver.wall_distance)
 
     # DDES 的有效长度尺度按上一个阶数的 SPs 维度算出，阶数变化后与刚插值
     # 完的 k_field 形状不再匹配——不能像 k_field/omega_field/wall_distance
@@ -281,6 +249,14 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
             # 湍流初场惯例。
             solver.turb_model.k_field = np.ones((solver.state.n_cells, expected_p0_n_sps)) * 1e-6
             solver.turb_model.omega_field = np.ones((solver.state.n_cells, expected_p0_n_sps)) * 1.0
+            # nu_t 同样必须重置到 P0 维度——理由同 interpolate_to_new_order
+            # 里的 nu_t 插值处理：它不会自动跟着 k_field/omega_field 变形，
+            # 只在 compute_source_terms 被调用时才按当时的 k/omega 重新
+            # 算出，遗漏会让它保留重置前的形状，被 _compute_local_time_step
+            # 在 compute_turbulence_source 刷新它之前读取时引发同一类形状
+            # 不匹配问题。用 SSTModelFR.__init__ 同样的初值约定（零）。
+            if hasattr(solver.turb_model, "nu_t"):
+                solver.turb_model.nu_t = np.zeros((solver.state.n_cells, expected_p0_n_sps))
             print(f"[INFO] Turbulence fields reset to P0 dimensions")
 
         if getattr(solver, "turb_model", None) is not None and hasattr(solver.turb_model, "des_length_scale"):
@@ -352,6 +328,38 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
                 f"Order Continuation dimension mismatch after interpolation to P{target_p}: "
                 f"State has {actual_n_sps} SPs but operators expect {expected_n_sps} SPs"
             )
+
+        # 释放已经离开的阶段的完整几何缓存（HighOrderMesh._order_geometry_
+        # cache，见 set_order/high_order_mesh_order.py 文档）——本函数是
+        # 该缓存唯一的调用方（`grep .set_order(` 全仓库确认），且单调递增
+        # 遍历 P0->目标阶数、一旦离开某个阶段就再也不会回来；但 set_order
+        # 自身的缓存语义是为"阶数可能被重新访问"的通用场景设计的，不知道
+        # 这个调用模式是单调的，会让每个阶段完整的 Flux Points 几何（逐面
+        # Newton 插值算子，187 万面级别的网格上单阶数就有明显体量）无限期
+        # 累积在内存里从未释放。真实网格已复现：79 万单元网格进入 P2 阶段
+        # 第一次残差求值时，因为同时驻留 P0+P1+P2 三份完整几何，一次 1.56
+        # GiB 的过积分张量收缩分配失败崩溃。
+        #
+        # 只保留当前阶段 `target_p`，不再对 `original_order` 破例（真实
+        # 复现，2026-08-21，79 万单元/187 万面生产网格、本机 33GiB
+        # 物理内存：只破例保留 original_order 这一个改动版本，P0->P1
+        # 切换时依然 OOM——P1 阶段仍要同时驻留 P1 的完整 Flux Points
+        # 几何 + 被破例保留的 P2（original_order）几何两份，对 187 万面
+        # 规模的网格，两份仍然超出可用内存，说 3->2 份不够，必须是
+        # 3->1 份）。`original_order` 破例保留的唯一目的是省下"本函数
+        # 结束时切回目标阶数"那一次 Flux Points 重建；但 `orders =
+        # list(range(0, original_order+1))` 决定了循环最后一个 target_p
+        # 恰好就是 original_order，那一次 `solver.mesh.set_order(target_p)`
+        # 本来就会在缓存缺失时透明地触发重建（见 set_order 文档：
+        # `if order not in mesh._order_geometry_cache: 重建`，不是异常
+        # 路径）——破例保留换来的只是省掉这一次重建，用峰值内存翻倍
+        # 换一次性能优化，真实网格上不划算，去掉这个特殊情况。
+        stale_orders = [
+            o for o in list(solver.mesh._order_geometry_cache)
+            if o != target_p
+        ]
+        for o in stale_orders:
+            del solver.mesh._order_geometry_cache[o]
 
         phase_max_iter = max_iter // len(orders)
         phase_tol = tol * (10 ** (original_order - target_p))

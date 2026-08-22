@@ -21,11 +21,11 @@ from typing import Tuple, Optional
 class SSTModelFR:
     """
     FR 框架下的 SST k-omega 模型处理器。
-    
+
     实现 Menter 的 SST (Shear Stress Transport) 模型，包括:
     - k 输运方程: ∂(ρk)/∂t + ∇·(ρUk) = P_k - D_k + ∇·[(μ+σ_k μ_t)∇k]
     - ω 输运方程: ∂(ρω)/∂t + ∇·(ρUω) = P_ω - D_ω + ∇·[(μ+σ_ω μ_t)∇ω] + CD_ω
-    
+
     Attributes:
         k_field: 湍动能场，存储在 SPs 上，形状 (n_cells, n_sps)
         omega_field: 比耗散率场，存储在 SPs 上，形状 (n_cells, n_sps)
@@ -35,19 +35,19 @@ class SSTModelFR:
     def __init__(self, n_cells: int, n_sps: int):
         """
         初始化 SST 模型。
-        
+
         Args:
             n_cells: 单元数量
             n_sps: 每单元解点数量
         """
         self.n_cells = n_cells
         self.n_sps = n_sps
-        
+
         # 初始化湍流场（使用小正值避免除零）
         self.k_field = np.ones((n_cells, n_sps)) * 1e-6
         self.omega_field = np.ones((n_cells, n_sps)) * 1.0
         self.nu_t = np.zeros((n_cells, n_sps))
-        
+
         # SST 模型常数
         self.sigma_k1 = 0.85
         self.sigma_k2 = 1.0
@@ -74,19 +74,19 @@ class SSTModelFR:
     def compute_strain_rate_magnitude(self, grad_u: np.ndarray) -> np.ndarray:
         """
         计算应变率张量的模 |S|。
-        
+
         Args:
             grad_u: 速度梯度张量，形状 (n_cells, n_sps, 3, 3)
-            
+
         Returns:
             S_mag: 应变率模，形状 (n_cells, n_sps)
         """
         # S_ij = 0.5 * (∂u_i/∂x_j + ∂u_j/∂x_i)
         S_ij = 0.5 * (grad_u + np.transpose(grad_u, (0, 1, 3, 2)))
-        
+
         # |S| = sqrt(2 * S_ij * S_ij)
         S_mag = np.sqrt(2.0 * np.einsum('nijm,nijm->ni', S_ij, S_ij))
-        
+
         return S_mag
 
     def compute_blending_function_F1(self, k: np.ndarray, omega: np.ndarray,
@@ -178,37 +178,64 @@ class SSTModelFR:
 
         return F2
 
-    def compute_eddy_viscosity(self, k: np.ndarray, omega: np.ndarray, 
-                              rho: np.ndarray, S_mag: np.ndarray, 
-                              F2: np.ndarray) -> np.ndarray:
+    # 湍流粘性比上限 (Turbulent Viscosity Ratio, mu_t/mu)：主流 RANS
+    # 求解器的标准安全阀（ANSYS Fluent/CFX 默认值即 1e5；OpenFOAM 等
+    # 同样内置类似限制），用于切断"k/omega 比值局部失控增长"这个
+    # SST 涡粘公式本身没有自带上限保护的反馈环——见 compute_eddy_
+    # viscosity 文档。不是为这次调试新发明的阈值，是补齐标准 SST/
+    # RANS 实现里本来就该有、这里此前没有的一道物理限制。
+    TURBULENT_VISCOSITY_RATIO_MAX = 1.0e5
+
+    def compute_eddy_viscosity(self, k: np.ndarray, omega: np.ndarray,
+                              rho: np.ndarray, S_mag: np.ndarray,
+                              F2: np.ndarray, mu: float) -> np.ndarray:
         """
         计算湍流涡粘系数 ν_t。
-        
-        ν_t = a1 * k / max(a1*ω, F2*S)
-        
+
+        ν_t = a1 * k / max(a1*ω, F2*S)，再施加湍流粘性比上限
+        （见 TURBULENT_VISCOSITY_RATIO_MAX 类属性文档）。
+
         Args:
             k: 湍动能
             omega: 比耗散率
             rho: 密度
             S_mag: 应变率模
             F2: blending function
-            
+            mu: 分子动力粘度（用于换算粘性比上限对应的 nu_t 上限，
+                真实复现：Order Continuation 跨阶数切换（尤其是 P1->P2，
+                真正的 FR 梯度重构首次启用）后的"冷启动"瞬态里，个别
+                SP 的湍流标量输运方程（transport.py）显式积分短暂失衡，
+                把 omega 压到接近正性下限、同时 k 未同步跌落，产生一个
+                物理上不合理的巨大 k/omega 比值——此前这里只有一个与
+                物理粘度完全脱钩的绝对值上限 nu_t<=1e6（对应粘性比高达
+                ~6.8e10，形同虚设），nu_t 由此被放大到足以让下一步的
+                湍流扩散系数 Gamma=mu+sigma*rho*nu_t 本身变得极度刚性，
+                反过来让输运残差进一步失控——几步内呈指数级放大（真实
+                测得 P2 阶段 domega/dt 输运残差 3.8e5->1.5e6->7.6e8->
+                2.6e12，每步放大约 3-4 个数量级）。合成 Couette+SST
+                算例上实测验证：把上限换成物理粘性比上限（1e5×mu/rho）
+                后这个链条被切断，P2 不再发散。
+
         Returns:
             nu_t: 湍流涡粘系数
         """
         k = np.maximum(k, 1e-10)
         omega = np.maximum(omega, 1e-10)
         S_mag = np.maximum(S_mag, 1e-10)
-        
+
         # Boussinesq 假设下的涡粘系数
         with np.errstate(over='ignore', invalid='ignore'):
             nu_t = self.a1 * k / np.maximum(self.a1 * omega, F2 * S_mag)
-        
-        # 限制最大值以避免数值不稳定
-        nu_t = np.minimum(nu_t, 1e6)
+
+        # 湍流粘性比上限（见本方法/类属性文档）：nu_t_max = TVR_max*mu/rho
+        # （mu_t/mu = nu_t/nu 是同一个比值，rho 逐 SP 变化，除法在此处
+        # 完成而不是换算成一个固定 nu_t 常数，避免密度变化大的场合下
+        # 限制器本身引入新的不一致）。
+        nu_t_max = self.TURBULENT_VISCOSITY_RATIO_MAX * mu / np.maximum(rho, 1e-10)
+        nu_t = np.minimum(nu_t, nu_t_max)
         # NaN 安全网（k/omega 已被上游 limiter 保护，此处为防御性编程）
         nu_t = np.where(np.isfinite(nu_t), nu_t, 0.0)
-        
+
         return nu_t
 
     def compute_source_terms(self, Q: np.ndarray, grad_U: np.ndarray,
@@ -270,9 +297,13 @@ class SSTModelFR:
         sigma_w = F1 * self.sigma_w1 + (1.0 - F1) * self.sigma_w2
         beta = F1 * self.beta1 + (1.0 - F1) * self.beta2
 
+        # 暂存本次求值用的混合 beta（用于 update_fields 的半隐式阻尼——
+        # 见该方法文档），避免在那里重新跑一遍 F1/blending 计算。
+        self._last_beta_blend = beta
+
         # 计算涡粘系数（传入钳制值）
         self.nu_t = self.compute_eddy_viscosity(
-            k_safe, omega_safe, rho, S_mag, F2
+            k_safe, omega_safe, rho, S_mag, F2, mu
         )
 
         # === k 方程源项 ===
@@ -325,7 +356,7 @@ class SSTModelFR:
     def apply_positivity_limiter(self, min_k: float = 1e-12, min_omega: float = 1e-12):
         """
         正性保持限制器 (T-02)：强制 k 和 omega 非负，并在重构过程中嵌入硬约束。
-        
+
         Args:
             min_k: k 的最小允许值
             min_omega: omega 的最小允许值
@@ -356,9 +387,12 @@ class SSTModelFR:
         执行一个时间步长的湍流场更新。
 
         Args:
-            dt: 时间步长
-            Sk: 湍动能源项（dk/dt 量纲，已除以 rho）
-            S_omega: 比耗散率源项（domega/dt 量纲，已除以 rho）
+            dt: 时间步长（标量或逐 SP 数组，与 Sk/S_omega 广播兼容——见
+                fr_solver/step.py 文档：稳态加速模式传逐 SP 的局部 CFL
+                步长 dt_local，DUAL_TIME 模式传标量物理 dt）
+            Sk: 湍动能源项（dk/dt 量纲，已除以 rho，P_k-D_k 合并后的净值）
+            S_omega: 比耗散率源项（domega/dt 量纲，已除以 rho，
+                P_omega-D_omega+CD_omega 合并后的净值）
             diff_k: k 的扩散项（可选，已弃用——现在由 transport_k 替代）
             diff_omega: omega 的扩散项（可选，已弃用）
             transport_k: k 的完整输运残差（对流+扩散，dk/dt 量纲），
@@ -366,9 +400,59 @@ class SSTModelFR:
                 diff_k 并加入更新。
             transport_omega: omega 的完整输运残差（对流+扩散），同上。
         """
+        # 源项半隐式阻尼（point-implicit destruction）：真实复现
+        # （合成 Couette+SST 小算例、order continuation 到 P2）：即使
+        # dt 已经是 cfl.py 正确按阶数/粘性/几何刚性收紧过的局部步长，
+        # 纯显式积分 D_omega=rho*beta*omega^2 这类关于场量自身的二次
+        # destruction 项仍会失稳——这是逐点 ODE 反应项刚性，
+        # cfl.py::compute_local_time_step 的对流/粘性 CFL 估计的是
+        # *空间*算子（对流通量/扩散通量）的谱半径，从未覆盖、也不该
+        # 覆盖这种*逐点*反应项刚性（两者是独立的稳定性机制）。本方法
+        # 及调用方 fr_solver/turbulence.py 的注释此前一直声称这里是
+        # "半隐式阻尼更新"，但实际代码是纯前向欧拉
+        # `k_field += dt*dk_total`，没有任何阻尼——文档与实现不符，
+        # 现在改正为文档一直声称的做法。
+        #
+        # 标准 point-implicit 处理（Blazek《CFD Principles and
+        # Applications》、Wilcox《Turbulence Modeling for CFD》等对
+        # k-omega 类模型刚性 destruction 项的标准做法）：把 destruction
+        # 项在 phi_new 上线性化、用 phi_old 处的系数隐式求解：
+        #   D_k/rho   = beta_star*omega*k   （对 k 线性，系数 beta_star*omega）
+        #   D_omega/rho = beta*omega^2      （对 omega 自身非线性，冻结一个
+        #                                     omega 因子做隐式，另一个仍用旧值）
+        # 设 S = P/rho - D/rho（Sk/S_omega 已经是这个合并后的净值，用
+        # phi_old 求出），隐式方程：
+        #   phi_new = phi_old + dt*(S + c*phi_old - c*phi_new)
+        # （即把 S 里已经用 phi_old 算出的 destruction 部分换成对 phi_new
+        # 隐式求解，c 是上面两个线性化系数）整理得：
+        #   phi_new = phi_old + dt*S / (1 + dt*c)
+        # 这就是"阻尼系数 1/(1+dt*c)"——c 越大（omega 越高、destruction
+        # 越刚性）阻尼越强，无条件稳定，不依赖 dt 取多小；c 很小时
+        # （omega 接近 0）阻尼趋于 1，退化回普通显式欧拉，物理正确。
+        # 只阻尼 Sk/S_omega（逐点反应项刚性），不阻尼 transport_k/
+        # transport_omega（对流+扩散的空间算子刚性已经由 dt_local 本身
+        # 的粘性 CFL 项覆盖，是不同机制，重复阻尼没有理论依据）。
+        beta_star = self.beta_star
+        beta_blend = getattr(self, "_last_beta_blend", None)
+        if beta_blend is None:
+            # 防御性回退（正常路径下 compute_source_terms 总在
+            # update_fields 之前被调用，_last_beta_blend 应已存在）：
+            # 用 beta2（> beta1，阻尼更强而非更弱，不会引入新的失稳）。
+            beta_blend = self.beta2
+
+        omega_old_safe = np.maximum(self.omega_field, 1e-10)
+        c_k = beta_star * omega_old_safe
+        c_omega = beta_blend * omega_old_safe
+
+        with np.errstate(over='ignore', invalid='ignore'):
+            Sk_damped = Sk / (1.0 + dt * c_k)
+            S_omega_damped = S_omega / (1.0 + dt * c_omega)
+        Sk_damped = np.where(np.isfinite(Sk_damped), Sk_damped, 0.0)
+        S_omega_damped = np.where(np.isfinite(S_omega_damped), S_omega_damped, 0.0)
+
         # 源项 + 输运项联合更新
-        dk_total = Sk
-        domega_total = S_omega
+        dk_total = Sk_damped
+        domega_total = S_omega_damped
 
         # 向后兼容：旧的 diff_k/diff_omega 参数仍支持
         if diff_k is not None and transport_k is None:
@@ -390,14 +474,14 @@ class SSTModelFR:
 
         self.k_field += dt * dk_total
         self.omega_field += dt * domega_total
-        
+
         # 应用正性限制器（含 NaN/Inf 恢复）
         self.apply_positivity_limiter()
-        
+
     def get_turbulent_viscosity(self) -> np.ndarray:
         """
         获取当前的湍流涡粘系数。
-        
+
         Returns:
             nu_t: 涡粘系数场
         """

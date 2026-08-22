@@ -240,7 +240,7 @@ class TestGPUTurbulenceSST:
         S_mag = cupy.ones((5, 4)) * 10.0
         F2 = cupy.ones((5, 4)) * 0.5
 
-        nu_t = sst.compute_eddy_viscosity_gpu(k, omega, rho, S_mag, F2)
+        nu_t = sst.compute_eddy_viscosity_gpu(k, omega, rho, S_mag, F2, mu=1.8e-5)
         nu_t_np = cupy.asnumpy(nu_t)
         assert np.all(nu_t_np > 0)
         sst.cleanup()

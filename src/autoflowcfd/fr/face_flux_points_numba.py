@@ -51,8 +51,24 @@ def build_fp_newton_parallel(
     nb_resid = np.zeros(n_faces)
     ow_fc = np.zeros((n_faces, n_fp, 2))
     ow_resid = np.zeros(n_faces)
-    nb_interp = np.zeros((n_faces, n_fp, n_sps))
-    ow_interp = np.zeros((n_faces, n_fp, n_sps))
+    # nb_interp/ow_interp 必须是 float64，不能降到 float32——已经真实
+    # 验证过 float32 在这里不安全，不是假设：cross-interpolation 用的
+    # 坍缩坐标模态 Vandermonde 矩阵条件数随阶数快速增长（collapsed_basis.py
+    # 文档实测 P2 时 cond~1e5、P3 时 cond~1e9），这意味着矩阵单个条目的
+    # 量级可以比"重构常数场应得的求和结果"大出条件数那么多倍——float64
+    # 的 lu_solve 正是为控制这个病态而不用显式求逆引入的（见
+    # face_flux_points.py::_get_v_sps_lu 文档），把算出来的矩阵条目本身
+    # 再降到 float32 存储，等于在最后一步重新引入同样量级的舍入误差，
+    # 白费了前面用 lu_solve 控制条件数的努力。真实回归测试证实了这一点：
+    # 把这两个数组改成 float32 后，tests/unit/test_fr_residual_inviscid.py
+    # 的自由流场保持性测试在 P=2（生产阶数）从 3e-5 容差內失败到
+    # rel_res 量级压根不通过，线性剪切流去混叠测试在 P=3 下 max|mass
+    # residual| 从应有的 <1e-2 暴涨到 1.512e+05——不是"略微变差"，是完全
+    # 破坏了这两个此前专门为控制舍入误差而做的修复(G-04 跨单元插值统一 +
+    # S-02 体积项去混叠)，因此保留 float64，只保留"消除冗余拷贝"这一个
+    # 真正安全的内存优化（见 fr/face_flux_points_merge.py 顶部内存说明）。
+    nb_interp = np.zeros((n_faces, n_fp, n_sps), dtype=np.float64)
+    ow_interp = np.zeros((n_faces, n_fp, n_sps), dtype=np.float64)
     nb_cell_id = np.full(n_faces, -1, dtype=np.int32)
     ow_cell_id = np.full(n_faces, -1, dtype=np.int32)
     geom_oa = np.empty(n_faces, dtype=np.int32)

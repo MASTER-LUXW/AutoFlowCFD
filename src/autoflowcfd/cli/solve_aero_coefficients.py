@@ -6,12 +6,17 @@
 文档）。
 """
 
-import logging
 from typing import Optional
 
 import numpy as np
+from loguru import logger
 
-logger = logging.getLogger(__name__)
+# 真实 bug（已修复，2026-08-21，见 cli/solve_commands.py 同一处修复的
+# 文档）：此前这里用标准库 logging（从未被本项目 basicConfig 过，
+# root logger 默认无 handler），本文件的 6 处 logger 调用（含
+# "Auto-computed reference area" 这条 INFO 和"Failed to auto-compute
+# reference area"这条 WARNING）全部被静默吞掉，用户在参考面积自动
+# 估算失败时看不到任何提示。改成本代码库统一使用的 loguru。
 
 
 def _compute_reference_area_auto(volume_data) -> Optional[float]:

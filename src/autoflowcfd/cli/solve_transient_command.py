@@ -3,7 +3,6 @@
 见 solve_steady_commands.py 文档说明整体拆分结构。
 """
 
-import logging
 from typing import Optional
 
 import click
@@ -19,8 +18,6 @@ from autoflowcfd.cli.solve_helpers import (
 )
 from autoflowcfd.cli.solve_aero_coefficients import _report_aerodynamic_coefficients
 from autoflowcfd.cli.solve_commands import solve
-
-logger = logging.getLogger(__name__)
 
 
 @solve.command(name='transient')

@@ -259,17 +259,20 @@ def compute_inviscid_residual_p0_cupy(
     owner_cell = fc.owner_cell.astype(np.int32)
     neighbor_cell = np.where(fc.is_boundary, 0, fc.neighbor_cell).astype(np.int32)
     is_boundary = fc.is_boundary.astype(np.bool_)
-    normal = np.empty((n_faces, 3), dtype=np.float64)
-    area_w = np.empty((n_faces,), dtype=np.float64)
     Q_ghost = np.zeros((n_faces, 5), dtype=np.float64)
 
-    for f in range(n_faces):
-        ffp = ffp_list[f]
-        normal[f, :] = ffp.true_normal[0]
-        area_w[f] = ffp.true_area_weight[0]
-        if is_boundary[f]:
-            Q_owner_fp = Q_all[owner_cell[f]: owner_cell[f] + 1]
-            Q_ghost[f, :] = ghost_provider(f, Q_owner_fp, ffp.true_normal)[0]
+    # 面法向/面积：性能修复，理由同 gpu_solver.py::compute_inviscid_
+    # residual_gpu（同一次真实复现、同一处遗漏，见该方法文档）——原来
+    # 这里连同下面的边界 ghost 态一起塞进同一个 `for f in range(n_faces)`
+    # 逐面对象构造循环；改用已测试的快速路径提取 normal/area_w，边界
+    # ghost 态单独只在边界面（~4万个，远小于总面数）上循环，不再对全部
+    # 187 万面重复付出对象构造代价。
+    from autoflowcfd.core.fr_residual.inviscid_p0 import _extract_p0_face_geometry
+    normal, area_w = _extract_p0_face_geometry(ffp_list, n_faces)
+
+    for f in np.nonzero(is_boundary)[0]:
+        Q_owner_fp = Q_all[owner_cell[f]: owner_cell[f] + 1]
+        Q_ghost[f, :] = ghost_provider(f, Q_owner_fp, normal[f:f + 1])[0]
 
     cell_volumes = mesh.cell_volumes.astype(np.float64)
 

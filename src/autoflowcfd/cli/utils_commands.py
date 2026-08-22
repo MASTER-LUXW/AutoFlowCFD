@@ -265,25 +265,53 @@ def benchmark(
         $ autoflowcfd utils benchmark sedan.nas --backend gpu -n 200
     """
     logger.info(f"运行基准测试: grid={grid_file}, backend={backend}")
-    
+
     try:
         import time as _time
         import numpy as np
 
-        # 加载网格
+        # 加载网格：真实 bug（已修复，2026-08-21）——此前这里直接
+        # `HighOrderMesh(grid_data, order=order)`，grid_data 是
+        # NASParser.parse() 返回的*面*网格 GridData（三角面片），既不是
+        # HighOrderMesh.__init__ 接受的参数（它只有 order 一个参数，
+        # grid_data 位置传参会顶替掉 order，"got multiple values for
+        # argument 'order'" 就是这么来的——真实复现），也不是
+        # load_from_volume_mesh 需要的 VolumeMeshData（体网格，四面体/
+        # 棱柱），这条命令此前对任何输入都会立即报错崩溃，从未真正跑通
+        # 过一次基准测试。改成与 `grid generate-volume` 完全相同的管线
+        # （parser.generate_volume_mesh_from_surface，见
+        # cli/grid_volume_commands.py::generate_volume 文档）先从面网格
+        # 生成体网格，再用 HighOrderMesh(order=order).load_from_volume_mesh
+        # 加载——这是本项目里唯一真正构造出可用 HighOrderMesh 的路径。
         t_start = _time.perf_counter()
         from autoflowcfd.grid.nas_io.parser import NASParser
         parser = NASParser(grid_file)
-        grid_data = parser.parse()
+        surface_grid = parser.parse()
+        volume_mesh = parser.generate_volume_mesh_from_surface(
+            surface_grid,
+            volume_mesh_params={
+                'growth_rate': 1.2,
+                'min_cell_size': 0.001,
+                'target_cells': 500000,
+                'max_cell_size': None,
+                'bl_layers': None,
+                'bl_only': False,
+                'core_only': False,
+                'output': None,
+            },
+        )
         t_load = _time.perf_counter() - t_start
 
         # 构建高阶网格
         from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
-        mesh = HighOrderMesh(grid_data, order=order)
+        mesh = HighOrderMesh(order=order)
+        mesh.load_from_volume_mesh(volume_mesh)
         t_mesh = _time.perf_counter() - t_start - t_load
 
         # 初始化自由来流解向量
         from autoflowcfd.core.fr_residual.inviscid import compute_inviscid_residual_fr
+        from autoflowcfd.fr.operators import generate_fr_operators
+        ops = generate_fr_operators(order)
         n_cells = mesh.n_cells
         n_sps = mesh.n_sps_per_cell
         n_vars = 5
@@ -294,16 +322,14 @@ def benchmark(
         U_init[:, :, 1] = rho_inf * u_inf
         U_init[:, :, 4] = E_inf
 
-        # 预热（触发 Numba JIT 编译）
-        try:
-            _ = compute_inviscid_residual_fr(mesh, U_init)
-        except Exception:
-            pass
+        # 预热（触发 Numba JIT 编译）——第一次真实求值失败说明基准测试
+        # 本身就跑不通，不能吞掉继续假装成功，让它正常抛出。
+        _ = compute_inviscid_residual_fr(U_init, mesh, ops)
 
         # 正式基准测试
         t_bench_start = _time.perf_counter()
         for _ in range(iterations):
-            _ = compute_inviscid_residual_fr(mesh, U_init)
+            _ = compute_inviscid_residual_fr(U_init, mesh, ops)
         t_bench = _time.perf_counter() - t_bench_start
 
         # 内存使用

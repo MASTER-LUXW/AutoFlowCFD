@@ -30,7 +30,7 @@ import numpy as np
 from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
 from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
 from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_batch
-from autoflowcfd.core.fr_operators.volume_contract import contract_shared_operator_1axis, contract_shared_operator_2axis
+from autoflowcfd.core.fr_operators.volume_contract import contract_shared_operator_1axis, contract_shared_operator_2axis, compute_adj_j
 
 GAMMA = 1.4
 
@@ -176,7 +176,7 @@ def compute_inviscid_residual_fr(
 
     det_jacs = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
     inv_jacs = mesh.jacobians["inv_jacs"].reshape(n_cells, n_sps, 3, 3)
-    adj_j = det_jacs[..., None, None] * inv_jacs  # (n_cells,n_sps,3,3), adj_j[...,m,i]
+    adj_j = compute_adj_j(det_jacs, inv_jacs)  # (n_cells,n_sps,3,3), adj_j[...,m,i]
     # adj_j（coarse）在下面界面/校正项里仍要用（side_contravariant_flux 等
     # 闭包捕获），体积项散度改走 over-integration（去混叠）路径，两者不
     # 是同一段计算，coarse adj_j 不能删。
@@ -199,7 +199,7 @@ def compute_inviscid_residual_fr(
         n_fine = mesh.n_sps_per_cell_fine
         det_jacs_fine = mesh.jacobians_fine["det_jacs"].reshape(n_cells, n_fine)
         inv_jacs_fine = mesh.jacobians_fine["inv_jacs"].reshape(n_cells, n_fine, 3, 3)
-        adj_j_fine = det_jacs_fine[..., None, None] * inv_jacs_fine  # (n_cells,n_fine,3,3)
+        adj_j_fine = compute_adj_j(det_jacs_fine, inv_jacs_fine)  # (n_cells,n_fine,3,3)
 
         Q_fine = np.zeros((n_cells, n_fine, 5))
         if n_prism > 0:
@@ -221,19 +221,34 @@ def compute_inviscid_residual_fr(
         # `fr_volume_contract.py`/`fr_flux_kernels_pointwise.py` 模块文档。
         Q_fine_flat = np.ascontiguousarray(Q_fine.reshape(-1, 5))
         F_phys_fine = euler_physical_flux_batch(Q_fine_flat).reshape(n_cells, n_fine, 3, 5)
+        # 内存优化：Q_fine/Q_fine_flat 用完即弃（F_phys_fine 已经算出，后面
+        # 不会再用到它们），但作为普通局部变量，Python 只在函数返回时才
+        # 会因为引用计数归零而释放它们——这个函数接下来还有一大段界面项/
+        # troubled-cell 代码要执行，期间会继续分配更多同量级的大数组，
+        # 不主动 del 就会让这两个已经用完的 (n_cells,n_fine,5) 数组
+        # （~1.9GiB）白白多存活一段时间，是 P2+SST+过积分在生产网格上
+        # 峰值内存吃紧、下游 suppress_residual_outliers 里一次几百 MiB
+        # 的分配都会失败的直接原因之一（真实 cube_demo 复现：79万单元
+        # P2 阶段第一次残差求值 OOM，见 order_continuation.py 相关记录）。
+        # del 不改变任何计算，只影响这些数组何时被回收，数值结果逐位
+        # 不变——本文件其余同类 del 的理由/验证方式均与此相同，不重复。
+        del Q_fine, Q_fine_flat
         F_tilde_fine = np.matmul(adj_j_fine, F_phys_fine)  # (n_cells,n_fine,3,5)
+        del adj_j_fine, F_phys_fine  # 各自 ~3.4GiB/~5.7GiB，用完即弃
 
         div_comp_fine = np.zeros((n_cells, n_fine, 5))
         if n_prism > 0:
             div_comp_fine[:n_prism] = contract_shared_operator_2axis(ops.overint_D_fine_prism, F_tilde_fine[:n_prism])
         if n_cells > n_prism:
             div_comp_fine[n_prism:] = contract_shared_operator_2axis(ops.overint_D_fine_tet, F_tilde_fine[n_prism:])
+        del F_tilde_fine  # ~5.7GiB，用完即弃
 
         div_comp = np.zeros((n_cells, n_sps, 5))
         if n_prism > 0:
             div_comp[:n_prism] = contract_shared_operator_1axis(ops.overint_restrict_f2c_prism, div_comp_fine[:n_prism])
         if n_cells > n_prism:
             div_comp[n_prism:] = contract_shared_operator_1axis(ops.overint_restrict_f2c_tet, div_comp_fine[n_prism:])
+        del div_comp_fine  # ~1.9GiB，用完即弃
     else:
         # 没有 fine 几何（理论上只有 order==0 会发生，但 P0 在函数入口就
         # 已经短路到 _compute_inviscid_residual_fv_p0，不会走到这里；保留
@@ -249,6 +264,9 @@ def compute_inviscid_residual_fr(
             div_comp[n_prism:] = contract_shared_operator_2axis(ops.D_3d_tet, F_tilde[n_prism:])
 
     residual = -div_comp / det_jacs[..., None]  # 物理空间残差（体积项部分）
+    # div_comp（~854MiB）用完即弃，理由同上（over-integration 分支/朴素
+    # 分支的 div_comp 是同一个局部变量名，del 同样安全，之后不再被引用）。
+    del div_comp
 
     # --- 界面项：numba 逐点标量 kernel（性能优化，替代原纯 Python
     # `for f in range(fc.n_faces)` 逐面循环——生产规模网格上 130 万个面、

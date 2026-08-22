@@ -32,16 +32,41 @@ def export_xml(exporter, output_path: Path, fields: List[str], binary: bool) -> 
     n_points = nodes.count
     points = np.column_stack([nodes.x, nodes.y, nodes.z]).astype(np.float64)
 
-    conn = np.asarray(exporter.grid_data.cells.connectivity, dtype=np.int64)
-    nodes_per_cell = conn.shape[1]
-    cell_type = {3: pv.CellType.TRIANGLE, 4: pv.CellType.TETRA}.get(nodes_per_cell)
-    if cell_type is None:
-        raise ValueError(
-            f"Unsupported cell connectivity width {nodes_per_cell} "
-            f"(expected 3 for triangles or 4 for tetrahedra)"
-        )
+    # 真实 bug（已修复，2026-08-21）：此前这里只读 `exporter.grid_data.
+    # cells.connectivity`（四面体），完全没有处理棱柱——本项目每一份体
+    # 网格的边界层都是棱柱挤出（BL prism extrusion 是核心、始终启用的
+    # 功能，见 grid/mesh_gen 文档），意味着这条路径此前对*任何*真实
+    # 网格都会静默丢弃全部棱柱单元，只导出四面体核心区（真实复现：
+    # cube_demo 79万单元网格，136980 个棱柱单元 100% 丢失，只留下
+    # 654512 个四面体——不多不少恰好是四面体总数，与逐单元场数组
+    # （791492 个值，两种单元都算在内）大小对不上，之前唯一表现是
+    # pyvista/VTK 自己的内部校验直接报错拒绝写入，不是"导出了一份看起
+    # 来正常、实际缺了近壁边界层的错误文件"，但 legacy 格式写入器
+    # （vtk_export_legacy.py::write_cells_mixed）本来就已经正确实现了
+    # 棱柱+四面体混合网格的写入，只是 XML（.vtu，这个项目自己文档里
+    # 说的"当前主流格式"、`--binary`默认走的格式）这条路径没有对齐。
+    # 用同一个 pv.UnstructuredGrid 多单元类型字典构造（WEDGE 在前、
+    # TETRA 在后，与本项目全局单元索引约定——棱柱在前、四面体在后，
+    # 见 vtk_export.py::_VTK_WEDGE 文档——完全一致，已用 pyvista 0.44.2
+    # 验证过重建后的单元顺序确实遵从字典插入顺序），修复为同时处理
+    # 两种单元类型，不再假设网格只有四面体。
+    prism_cells_obj = getattr(exporter.grid_data, 'prism_cells', None)
+    tet_conn = np.asarray(exporter.grid_data.cells.connectivity, dtype=np.int64)
 
-    grid = pv.UnstructuredGrid({cell_type: conn}, points)
+    if prism_cells_obj is not None and len(prism_cells_obj.connectivity) > 0:
+        prism_conn = np.asarray(prism_cells_obj.connectivity, dtype=np.int64)
+        grid = pv.UnstructuredGrid(
+            {pv.CellType.WEDGE: prism_conn, pv.CellType.TETRA: tet_conn}, points
+        )
+    else:
+        nodes_per_cell = tet_conn.shape[1]
+        cell_type = {3: pv.CellType.TRIANGLE, 4: pv.CellType.TETRA}.get(nodes_per_cell)
+        if cell_type is None:
+            raise ValueError(
+                f"Unsupported cell connectivity width {nodes_per_cell} "
+                f"(expected 3 for triangles or 4 for tetrahedra)"
+            )
+        grid = pv.UnstructuredGrid({cell_type: tet_conn}, points)
 
     cell_fields = exporter._cell_fields(fields)
     point_fields = exporter._point_fields(cell_fields, n_points)

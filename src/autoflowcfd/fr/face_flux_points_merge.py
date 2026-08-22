@@ -184,12 +184,28 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
     _all_area_w = np.outer(_areas, rel_weight)  # (n_faces, n_fp)
 
     # ---- 直接构建 flat 源数组（跳过 180 万 FaceFluxPointGeometry 对象创建）----
+    # 内存说明（P3 阶数 OOM 排查，2026-08-21）：nb_src0_mat/ow_src0_mat 曾经
+    # 各自独立 np.zeros((n_faces,n_fp,n_sps)) 分配、再从 kernel 输出的
+    # _nb_interp/_ow_interp（同形状、同 dtype）逐元素拷贝进去——但真实数据
+    # 追踪证实 _nb_interp/_ow_interp 在 kernel（含下面的 multi-source
+    # kernel 原地写入）跑完之后，其内容与最终应存入 nb_src0_mat/ow_src0_mat
+    # 的值逐位相等（对每个面 f：kernel 只在 owner_primary[f] 为真、且非
+    # 多源棱柱四边形面时写入 _nb_interp[f]，其余情形 _nb_interp[f] 保持
+    # 初始化的全零；nb_src0_mat 的赋值范围恰好覆盖同一个集合，非该集合的
+    # 面在原实现里也是保持全零——两者对全部 n_faces 逐位恒等，不是巧合，
+    # 是因为本来就是同一份计算结果的两次冗余存储）。这个逐元素拷贝纯粹是
+    # 浪费——在 P3（n_fp=16,n_sps=64）下每个矩阵约 14.3GiB，"kernel 输出
+    # 缓冲区"+"这里的拷贝目标"同时存活会让这两个数组的峰值内存翻倍到约
+    # 57GiB，是真实 OOM 崩溃的直接原因之一（而不仅是矩阵本身"必须稠密"）。
+    # 修复：不再单独分配 nb_src0_mat/ow_src0_mat 并拷贝，kernel 输出的
+    # _nb_interp/_ow_interp（已被下面的向量化赋值和 multi-source kernel
+    # 原地写满）在处理完 multi-source 面之后直接作为 nb_src0_mat/
+    # ow_src0_mat 本身使用（零拷贝别名，不是近似）——数值上与旧实现逐位
+    # 相同,只是消除了一次完全冗余的 14.3GiB x2 拷贝。
     logger.info("Building flat source arrays from kernel output...")
     nb_src0_cell = np.full(n_faces, -1, dtype=np.int64)
-    nb_src0_mat = np.zeros((n_faces, n_fp, n_sps), dtype=np.float64)
     nb_src1_idx = np.full(n_faces, -1, dtype=np.int64)
     ow_src0_cell = np.full(n_faces, -1, dtype=np.int64)
-    ow_src0_mat = np.zeros((n_faces, n_fp, n_sps), dtype=np.float64)
     ow_src1_idx = np.full(n_faces, -1, dtype=np.int64)
     _tolerated: List[dict] = []
     _diagnostic_failures: List[dict] = []
@@ -198,9 +214,10 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
     _nb_single = _nb_cell_id >= 0  # 单源 neighbor 掩码
     _ow_single = _ow_cell_id >= 0  # 单源 owner 掩码
     nb_src0_cell[_nb_single] = _nb_cell_id[_nb_single]
-    nb_src0_mat[_nb_single] = _nb_interp[_nb_single]
     ow_src0_cell[_ow_single] = _ow_cell_id[_ow_single]
-    ow_src0_mat[_ow_single] = _ow_interp[_ow_single]
+    # 矩阵本身不再拷贝：_nb_interp[_nb_single]/_ow_interp[_ow_single] 已经是
+    # kernel 直接写入的最终值，见上面"内存说明"——nb_src0_mat/ow_src0_mat
+    # 在函数末尾直接别名到 _nb_interp/_ow_interp。
     logger.info(f"  Single-source vectorized: nb={np.sum(_nb_single)}, ow={np.sum(_ow_single)}")
 
     # ---- 仅遍历 multi-source 面（~5% 棱柱四边形面）+ 边界面跳过 ----
@@ -258,7 +275,10 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
             is_lower = is_lower_fp_standard if is_std else is_lower_fp_flipped
             ow_mask[f] = is_lower if half == "lower" else ~is_lower
 
-        # 分配 extra 数组
+        # 分配 extra 数组（float64——同一套跨单元插值矩阵，与 nb_interp/
+        # ow_interp 一样存在坍缩坐标模态 Vandermonde 条件数病态问题，
+        # 见 face_flux_points_numba.py::build_fp_newton_parallel 文档，
+        # 不能降精度）
         n_extra_nb = len(_multi_nb_faces)
         n_extra_ow = len(_multi_ow_faces)
         _nb_extra_mats_arr = np.zeros((max(n_extra_nb, 1), n_fp, n_sps), dtype=np.float64)
@@ -317,16 +337,24 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
             nb_src1_idx[f] = i
         for i, f in enumerate(_multi_ow_faces):
             ow_src1_idx[f] = i
-        # src0 cell/mat
+        # src0 cell（矩阵已由 ms_kernel 原地写进 _nb_interp/_ow_interp 的
+        # multi-source 面对应位置，见上面"内存说明"，不再单独拷贝）
         nb_src0_cell[_multi_nb_faces] = _ms_nb_pn_cell.astype(np.int64)
-        nb_src0_mat[_multi_nb_faces] = _nb_interp[_multi_nb_faces]
         ow_src0_cell[_multi_ow_faces] = _ms_ow_pn_cell.astype(np.int64)
-        ow_src0_mat[_multi_ow_faces] = _ow_interp[_multi_ow_faces]
     else:
         _nb_extra_mats_arr = np.empty((0, n_fp, n_sps), dtype=np.float64)
         _ow_extra_mats_arr = np.empty((0, n_fp, n_sps), dtype=np.float64)
         _nb_extra_cells = np.empty(0, dtype=np.int64)
         _ow_extra_cells = np.empty(0, dtype=np.int64)
+
+    # nb_src0_mat/ow_src0_mat：零拷贝别名到 kernel 输出的 _nb_interp/
+    # _ow_interp——此时两者已经历完主 kernel 的向量化赋值范围与
+    # multi-source kernel 的原地写入，逐位等于旧实现里 nb_src0_mat/
+    # ow_src0_mat 该有的值（详见本函数开头"内存说明"），不再重新分配、
+    # 不再逐元素拷贝，避免 P3 阶数下这两个 ~14.3GiB 矩阵各自双份同时
+    # 存活导致的 OOM。
+    nb_src0_mat = _nb_interp
+    ow_src0_mat = _ow_interp
 
     nb_extra_cell = _nb_extra_cells
     nb_extra_mat = _nb_extra_mats_arr

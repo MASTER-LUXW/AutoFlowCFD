@@ -14,8 +14,8 @@ AutoFlowCFD V2.0 - FR 求解器主类 (Final Integration)
 import os
 import numpy as np
 import numba
-import logging
 from typing import Dict, Any, Optional, Tuple
+from loguru import logger
 from autoflowcfd.core.fr_solver.state import FRState, SolverResult
 from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
 from autoflowcfd.fr.operators import generate_fr_operators, FROperators
@@ -31,8 +31,16 @@ from . import boundary as fr_solver_boundary
 from . import step as fr_solver_step
 from .solver_geometry import _SolverGeometryMixin
 
-# 配置日志
-logger = logging.getLogger(__name__)
+# `logger` 本文件自己不直接调用（真实排查过：0 处 `logger.xxx(...)`），
+# 但 `step.py::mean_flow_residual` 用 `from autoflowcfd.core.fr_solver.
+# solver import logger` 延迟导入它（避免循环依赖，见该行注释）——删掉
+# 会导致那个 ImportError（真实复现，2026-08-21，被 tests/validation/
+# test_couette.py 抓到）。之前这里是标准库 `logging.getLogger(__name__)`
+# （从未 basicConfig 过，root logger 默认无 handler），`step.py` 里唯一
+# 用到它的 `logger.error(f"Step failed with error: {e}")` 因此也一直
+# 被静默吞掉（该异常处理分支里唯一可见的输出其实是同一段代码紧接着的
+# `traceback.print_exc()`，两者容易混淆成"看起来在正常报错"）。改成
+# 本代码库统一用的 loguru，两处修复是同一个根因。
 
 
 class FRSolver(_SolverGeometryMixin):
@@ -322,8 +330,11 @@ class FRSolver(_SolverGeometryMixin):
         """执行一个时间步长 (S-05)。见 fr_solver_step.py::step 文档。"""
         return fr_solver_step.step(self, dt)
 
-    def compute_turbulence_source(self, dt: float) -> Optional[tuple]:
-        """计算湍流模型源项（委托给 fr_solver_turbulence）。"""
+    def compute_turbulence_source(self, dt) -> Optional[tuple]:
+        """计算湍流模型源项（委托给 fr_solver_turbulence）。dt 可以是标量
+        （DUAL_TIME 物理步长）或逐 SP 数组（稳态加速模式的局部 CFL
+        步长 dt_local）——见 fr_solver_turbulence.compute_turbulence_source
+        文档。"""
         return fr_solver_turbulence.compute_turbulence_source(self, dt)
 
     def apply_turbulence_corrections(self):
