@@ -11,7 +11,7 @@ import numpy as np
 from loguru import logger
 
 from autoflowcfd.boundary.fr_ghost_state import BoundaryGhostStateProvider, InletSEMGhostState
-from autoflowcfd.grid.connectivity.face_connectivity import tag_boundary_groups
+from autoflowcfd.grid.connectivity.face_connectivity import tag_boundary_groups_for_mesh
 
 # LES/DDES 入口合成湍流默认湍流度（BD-02）：本代码库目前没有暴露专门的
 # CLI/配置参数来指定目标雷诺应力张量，用来流速度的 5% 作为各向同性
@@ -71,7 +71,7 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
     bc_types = solver.mesh.boundary_bc_types or {}
 
     face_conn = solver.mesh.face_connectivity
-    group_code, name_to_code = tag_boundary_groups(face_conn, boundary_groups)
+    group_code, name_to_code = tag_boundary_groups_for_mesh(solver.mesh, face_conn)
 
     type_map = {
         "WALL": ("WALL", {"is_no_slip": True}),

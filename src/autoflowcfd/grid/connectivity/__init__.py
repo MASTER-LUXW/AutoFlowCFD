@@ -8,6 +8,8 @@ from autoflowcfd.grid.connectivity.face_connectivity import (
     FRFaceConnectivity,
     build_face_connectivity,
     tag_boundary_groups,
+    tag_boundary_groups_by_geometry,
+    tag_boundary_groups_for_mesh,
     CUBE_FACE_CODES,
     CUBE_FACE_NAMES,
 )
@@ -17,6 +19,8 @@ __all__ = [
     'FRFaceConnectivity',
     'build_face_connectivity',
     'tag_boundary_groups',
+    'tag_boundary_groups_by_geometry',
+    'tag_boundary_groups_for_mesh',
     'CUBE_FACE_CODES',
     'CUBE_FACE_NAMES',
     'build_node_adjacency',

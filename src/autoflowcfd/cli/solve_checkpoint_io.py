@@ -112,6 +112,7 @@ def rebuild_solver_from_checkpoint(
     backend: Optional[str] = None,
     surface_mesh: Optional[str] = None,
     threads: int = -1,
+    reference_area: Optional[float] = None,
 ):
     """从 checkpoint 完整重建一个带解场的 FRSolver（不继续迭代）。
 
@@ -133,9 +134,22 @@ def rebuild_solver_from_checkpoint(
     Args:
         checkpoint_path: checkpoint 文件路径（solve steady/transient 产出）
         backend: 后端覆盖，None 时沿用 checkpoint 记录的原始后端
-        surface_mesh: checkpoint 记录的 input_file 若是 .nas 体网格，
-            需要提供原始面网格来反推边界分组
+        surface_mesh: 面网格路径覆盖。None 时回退到 checkpoint metadata
+            里存的 surface_mesh（write_checkpoint 若拿到了就会存下，见
+            该函数文档）；两者都没有、且 input_file 是 .nas 体网格时，
+            下面 load_mesh_for_solver 会因缺边界信息直接报错，不会
+            静默用错误网格求解
         threads: CPU 后端 numba 并行 kernel 使用的线程数
+        reference_area: 气动系数参考面积 (m^2) 覆盖。None 时尝试从
+            volume_data.surface_mesh 自动估算（X 方向正投影面积，见
+            solve_aero_coefficients._compute_reference_area_auto），
+            与 `solve steady` 的同名逻辑一致——真实 bug（2026-08-22）：
+            此前只有 solve_steady_command.py 会设置 solver._reference_area
+            （run_order_continuation 的每步日志靠这个属性判断要不要打印
+            Cd/Cl/Cs），resume 出来的求解器上这个属性完全没设置过，哪怕
+            --reference-area 传了，resume 期间的每步日志也永远不会带
+            气动力系数，直到 solve() 整个跑完才会通过 resume() 自己那次
+            额外的 _report_aerodynamic_coefficients 调用打印一次
 
     Returns:
         (solver, iteration, metadata): 重建好的 FRSolver 实例（状态已从
@@ -169,10 +183,20 @@ def rebuild_solver_from_checkpoint(
         raise click.ClickException("Checkpoint metadata 缺少 'input_file'，无法重新加载网格。")
 
     order = int(metadata.get("order", 2))
+    # target_order（Order Continuation 的最终目标阶数，solver.order）与
+    # order（checkpoint 保存那一刻的 solver.current_order，决定重建
+    # mesh/FRSolver 初始状态要用哪个 n_sps 才能跟保存的 U_sps 形状对上）
+    # 是两个独立的量，checkpoint 若是 Order Continuation 爬升到目标阶数
+    # 之前存的（例如 P0 阶段中途），二者不相等——见 write_checkpoint 的
+    # target_order 参数文档。缺省回退到 order 本身，兼容旧 checkpoint
+    # （没有 target_order 字段，那种情况下当时 order 记的就是静态目标
+    # 阶数，二者天然相等，回退安全）。
+    target_order = int(metadata.get("target_order", order))
     turbulence_model = metadata.get("turbulence_model", "sst")
     target_backend = backend or metadata.get("backend", "cpu")
+    resolved_surface_mesh = surface_mesh or metadata.get("surface_mesh")
 
-    mesh, volume_data = load_mesh_for_solver(input_file, order, surface_mesh=surface_mesh)
+    mesh, volume_data = load_mesh_for_solver(input_file, order, surface_mesh=resolved_surface_mesh)
 
     solver = FRSolver(
         mesh=mesh,
@@ -184,7 +208,25 @@ def rebuild_solver_from_checkpoint(
         p_inf=metadata.get("p_inf", 101325.0),
         n_threads=threads,
     )
+    # FRSolver.__init__ 用同一个 order 参数同时设置 self.current_order
+    # 和 self.order（ramp 目标）——上面为了让 mesh/初始状态形状匹配
+    # checkpoint，传的是 checkpoint 时的 current_order，这里把
+    # self.order 单独纠正回真正的目标阶数，否则 solve() 里
+    # `self.order_continuation_enabled and self.order >= 2` 这个门槛
+    # 会被错误地拿 current_order 去判断，P0 checkpoint resume 出来的
+    # 求解器会误判目标阶数已经是 0、直接跳过 Order Continuation 的
+    # 继续爬升。
+    solver.order = target_order
     compute_wall_distance_for_solver(solver, volume_data)
+
+    # 与 solve_steady_command.py 同一段逻辑保持一致（见上面 reference_area
+    # 参数文档）：未显式传参数时尝试自动估算，让 resume 期间的每步日志
+    # 也能带 Cd/Cl/Cs，不必等到 solve() 整个跑完才看到一次。
+    resolved_reference_area = reference_area
+    if resolved_reference_area is None:
+        from autoflowcfd.cli.solve_aero_coefficients import _compute_reference_area_auto
+        resolved_reference_area = _compute_reference_area_auto(volume_data)
+    solver._reference_area = resolved_reference_area
 
     U_restored = fields["U_sps"]
     if U_restored.shape != solver.state.U.shape:
@@ -195,9 +237,21 @@ def rebuild_solver_from_checkpoint(
     solver.state.U = U_restored
     solver.state._update_primitives()
 
+    # 标记这个 solver 的状态是从 checkpoint 恢复的真实解、不是构造函数
+    # 生成的均匀自由流场占位值——order_continuation.run_order_continuation
+    # 用这个标记决定要不要把状态重置回 P0 重新爬升，见该函数文档：真实
+    # 复现的 bug（2026-08-22），checkpoint 若是在 P1/P2 阶段中途存的，
+    # 不加这个标记会被 run_order_continuation 误判成"刚构造、还没跑过
+    # Order Continuation"，把刚恢复的真实解丢弃、替换成均匀自由流场从
+    # P0 重新开始整个爬升——恢复等于白恢复，且悄悄发生、resume 不会报
+    # 任何错误或警告。
+    solver._resumed_from_checkpoint = True
+
     metadata["order"] = order
+    metadata["target_order"] = target_order
     metadata["turbulence_model"] = turbulence_model
     metadata["backend"] = target_backend
+    metadata["surface_mesh"] = resolved_surface_mesh
     return solver, iteration, metadata
 
 
@@ -211,6 +265,8 @@ def write_checkpoint(
     backend: str,
     history: Optional[dict] = None,
     quiet: bool = False,
+    surface_mesh: Optional[str] = None,
+    target_order: Optional[int] = None,
 ) -> Optional[str]:
     """把求解器状态写成 HDF5 checkpoint，供 `solve resume` 真正恢复求解
     （V2.0 二次评审 Tier 1 #13/#14：此前 `solve steady/transient` 从不
@@ -230,6 +286,35 @@ def write_checkpoint(
     重新加载网格——mesh/face_connectivity 这类对象本身没有放进
     checkpoint，序列化+反序列化整个网格对象比重新跑一遍
     `load_mesh_for_solver` 更脆弱、更没必要）。
+
+    surface_mesh 同样在此存下（当 input_file 是 .nas 体网格、需要靠
+    原始面网格反推边界分组时）——此前只存了 input_file，resume 时
+    体网格路径能自动带回，但面网格路径每次都得用户手动重新传
+    --surface-mesh，两者本该对称：都是"重建这个 checkpoint 需要的
+    构造参数"，只有一半被持久化没有道理。传 None（原始求解本就没有
+    面网格，例如 input_file 是已经内嵌边界信息的 .pkl）时跳过，不写
+    入 metadata——h5py attrs 不接受 None，且 rebuild_solver_from_
+    checkpoint 的回退逻辑用 metadata.get() 缺省 None 处理即可，不需要
+    显式哨兵值。
+
+    target_order 单独存（默认等于 order，向后兼容不区分两者的旧调用
+    方）——真实复现的 bug（2026-08-22）：`order` 参数记录的是这次
+    checkpoint 保存时 solver.current_order（用于让 resume 时重建的
+    mesh/FRSolver 初始状态形状与保存的 U_sps 对得上，见上面 order 参数
+    文档），但 FRSolver 的 order 构造参数同时也决定了 self.order——
+    Order Continuation 是否继续爬升的目标阶数判据（solver.py 里
+    `self.order >= 2` 的门槛）。Order Continuation 跑到一半（例如 P0
+    阶段中途）存的 checkpoint，current_order（0）和真正的目标阶数
+    （CLI --order，例如 2）从这一刻起就不再相等——只存一个字段、
+    resume 时用它同时驱动"重建形状"和"续跑目标"，两者只要不相等就必然
+    有一个是错的：要么形状对不上直接报错拒绝恢复，要么（更隐蔽）形状
+    凑巧对上但目标阶数被错当成 current_order，Order Continuation 的
+    再触发条件 self.order>=2 悄悄变 False，resume 出来的求解器整个
+    跳过阶数爬升逻辑，退化成没有 Drop/P{n} 分阶段日志、也永远不会真正
+    提升到目标阶数的普通定阶迭代——真实网格已复现（cube_demo 791k
+    单元，P0 checkpoint resume 后日志格式从 "P0 Iter N: ... Drop: ...x"
+    变成了普通的 "Iteration N: Residual = ... | Time/step: ...s"，且
+    残差在 8.8e6 附近原地打转，不会向 P1 转变）。
 
     Returns:
         checkpoint 文件路径；h5py 不可用等失败情形返回 None（不中止求解）
@@ -256,6 +341,7 @@ def write_checkpoint(
     metadata = {
         "input_file": input_file,
         "order": order,
+        "target_order": target_order if target_order is not None else order,
         "turbulence_model": turbulence_model,
         "backend": backend,
         "n_sps_per_cell": solver.state.n_sps,
@@ -264,6 +350,8 @@ def write_checkpoint(
         "vel_inf": solver.freestream["vel_inf"],
         "p_inf": solver.freestream["p_inf"],
     }
+    if surface_mesh:
+        metadata["surface_mesh"] = surface_mesh
 
     path = manager.save(
         solution_cell_avg,

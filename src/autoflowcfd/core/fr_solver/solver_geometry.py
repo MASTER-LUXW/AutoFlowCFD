@@ -20,8 +20,27 @@ class _SolverGeometryMixin:
         几何（与流场状态无关），缓存后避免每个时间步重复计算——供
         _compute_local_time_step 的几何/度量 CFL 限制使用，见该方法文档。
         """
+        # 真实 bug（已修复，2026-08-23，用户追问 P1 发散根因促成排查，
+        # CFL 假说被三次证伪后倒查出的真正问题）：这里此前只比较
+        # `cached.shape[0]`（单元数 n_cells）——Order Continuation 跨
+        # 阶数转换时 n_cells 恒定不变，只有 `shape[1]`（每单元 SPs 数
+        # n_sps）会变，这个判据因此在任何一次阶数切换后都会误判缓存
+        # 仍然有效，继续返回 P0 时代形状为 (n_cells,1) 的陈旧值。真正
+        # 消费它的地方（cfl.py::compute_local_time_step 的 dt_geometric
+        # 项）自己有一段"det_jacs.shape[1] != n_sps 时把两者一起 tile
+        # 广播到当前 n_sps"的兼容逻辑——但那段逻辑判断的是*重新读取的*
+        # det_jacs 是否需要广播（阶数切换后 mesh.jacobians 已经是新阶数
+        # 形状，恒为 False），不会触发，metric_flux_scale 因此以
+        # (n_cells,1) 的原始形状直接参与 `metric_flux_scale * wave_speed`
+        # ——numpy 广播规则允许 size=1 维度对齐任意长度，不报错、不崩溃，
+        # 静默用同一个 P0 阶段"整单元平均"的度量标度覆盖 P1 每个 SP
+        # 本该独立的真实值。这正好是几何 CFL 项本来专门用来防的那类
+        # 退化 SP 局部刚性失稳的探测机制被静默削弱——从阶数切换后的第一
+        # 步起，直到进程结束（缓存永不失效）。改成同时比较 shape[1]（
+        # 与 self.state.U.shape[1]，即当前真正的 n_sps，一致），跨阶数
+        # 切换后缓存正确失效、重新计算。
         cached = getattr(self, "_metric_flux_scale_cache", None)
-        if cached is not None and cached.shape[0] == self.state.U.shape[0]:
+        if cached is not None and cached.shape == self.state.U.shape[:2]:
             return cached
         det_jacs = self.mesh.jacobians["det_jacs"].reshape(self.mesh.n_cells, self.mesh.n_sps_per_cell)
         inv_jacs = self.mesh.jacobians["inv_jacs"].reshape(self.mesh.n_cells, self.mesh.n_sps_per_cell, 3, 3)

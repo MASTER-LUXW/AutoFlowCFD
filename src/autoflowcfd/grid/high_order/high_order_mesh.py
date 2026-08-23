@@ -85,6 +85,7 @@ class HighOrderMesh:
         self.cell_face_misalignment: Optional[np.ndarray] = None
         self.boundary_groups: Optional[Dict[str, np.ndarray]] = None
         self.boundary_bc_types: Optional[Dict[str, str]] = None
+        self.boundary_surface_mesh: Optional[Dict[str, object]] = None
 
         # 供 fr/face_flux_points.py 按需重新映射任意计算立方体坐标点到
         # 物理坐标（Flux 点 与 SPs 是不同的点集，需要能对单元重新映射）
@@ -173,6 +174,16 @@ class HighOrderMesh:
         if getattr(volume_mesh_data, "boundaries", None) is not None:
             self.boundary_groups = boundary_groups
             self.boundary_bc_types = volume_mesh_data.boundaries.bc_types
+
+        # 供 tag_boundary_groups_for_mesh 做逐面几何匹配用（见该函数文档：
+        # 修复 tag_boundary_groups 的单元级别聚合缺陷需要原始表面网格的
+        # 边界组三角面片数据，不是 self.boundary_groups 这份已经聚合到
+        # 单元粒度的派生结果）——只有 input_file 是 .nas 体网格 +
+        # --surface-mesh 反推边界这条路径才有（import_external_volume_mesh
+        # 写入 volume_mesh.surface_mesh），.pkl 路径没有，属性缺失时
+        # tag_boundary_groups_for_mesh 自动回退到单元级别匹配。
+        if getattr(volume_mesh_data, "surface_mesh", None) is not None:
+            self.boundary_surface_mesh = volume_mesh_data.surface_mesh
 
         if build_faces:
             self.face_connectivity = build_face_connectivity(

@@ -132,9 +132,17 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
 
         # 6. 保存结果（.pkl 全量状态 + HDF5 checkpoint，后者供 solve resume 使用）
         save_results(solver, output_dir)
+        # solver.current_order 而非 order：瞬态求解本身不做 Order
+        # Continuation 爬升，但 input_file 若是从 steady 阶段的 checkpoint
+        # resume 而来，order 这个闭包变量可能仍是 steady 侧的目标阶数，
+        # 与 resume 时实际重建出的 solver.current_order 不一定相等——见
+        # solve_steady_command.py 里同名参数的说明，避免同一类 checkpoint
+        # 形状不匹配 bug。
         write_checkpoint(
-            solver, output_dir, result.iterations, input_file, order, turbulence_model, backend,
-            history={"iterations": [result.iterations]},
+            solver, output_dir, result.iterations, input_file, solver.current_order,
+            turbulence_model, backend,
+            history={"iterations": [result.iterations]}, surface_mesh=surface_mesh,
+            target_order=solver.order,
         )
 
         # 7. 气动系数（提供 --reference-area 时）

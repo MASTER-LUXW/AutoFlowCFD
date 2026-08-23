@@ -65,9 +65,9 @@ def compute_aerodynamic_coefficients_fr(
             "aerodynamic forces. Call load_from_volume_mesh(build_faces=True) first."
         )
 
-    from autoflowcfd.grid.connectivity.face_connectivity import tag_boundary_groups
+    from autoflowcfd.grid.connectivity.face_connectivity import tag_boundary_groups_for_mesh
 
-    group_code, name_to_code = tag_boundary_groups(fc, mesh.boundary_groups or {})
+    group_code, name_to_code = tag_boundary_groups_for_mesh(mesh, fc)
     bc_types = mesh.boundary_bc_types or {}
     wall_codes = {code for name, code in name_to_code.items() if bc_types.get(name, "") in ("WALL",)}
     if not wall_codes:
@@ -171,9 +171,9 @@ def compute_forces_pressure_only(solver, reference_area: float) -> dict:
         return {'Cd': 0.0, 'Cl': 0.0, 'Cs': 0.0}
 
     try:
-        from autoflowcfd.grid.connectivity.face_connectivity import tag_boundary_groups
+        from autoflowcfd.grid.connectivity.face_connectivity import tag_boundary_groups_for_mesh
 
-        group_code, name_to_code = tag_boundary_groups(fc, mesh.boundary_groups or {})
+        group_code, name_to_code = tag_boundary_groups_for_mesh(mesh, fc)
         bc_types = mesh.boundary_bc_types or {}
         wall_codes = {code for name, code in name_to_code.items()
                       if bc_types.get(name, "") in ("WALL",)}

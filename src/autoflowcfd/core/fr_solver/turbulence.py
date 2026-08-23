@@ -242,17 +242,31 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
         grad_omega = compute_scalar_gradient(omega_expanded, solver.ops, solver.mesh)
 
         # 正性保持检查：防止梯度过大导致负值（工业计算的梯度限幅处理）
-        max_grad_mag = 1e6
-        grad_k_mag = np.linalg.norm(grad_k, axis=-1)
-        grad_omega_mag = np.linalg.norm(grad_omega, axis=-1)
+        #
+        # errstate 包裹（真实 bug，2026-08-22，用户直接在真实网格 P0->P1
+        # 转阶后的输出里看到这条警告发现）：跟 turbulence/transport.py
+        # 同一处（见该文件对应注释的完整原理）完全同一个失效模式——退化
+        # 单元上理论为常数的 k/omega 场求梯度，度量比值 adj(J)/det(J) 把
+        # 浮点噪声放大到 >1e150，np.linalg.norm 内部 x*x 先于下面的裁剪
+        # 逻辑溢出到 inf。2026-08-21 修 transport.py 那份独立副本时，这里
+        # （同一份裁剪逻辑最早的位置，transport.py 的注释原文引用的正是
+        # 本函数）被遗漏了——两处形状不同（这里是 (n_cells,n_sps)，
+        # transport.py 是 (n_cells,n_sps,3)->(...,)但语义一致）但都是同一
+        # 组 np.linalg.norm+裁剪代码，只补了一处。inf 输入不影响下面裁剪
+        # 结果的正确性（inf>max_grad_mag 恒真，scale=max_grad_mag/inf=0，
+        # 裁剪趋于 0 不是 nan），errstate 只是抑制警告噪音。
+        with np.errstate(over='ignore', invalid='ignore'):
+            max_grad_mag = 1e6
+            grad_k_mag = np.linalg.norm(grad_k, axis=-1)
+            grad_omega_mag = np.linalg.norm(grad_omega, axis=-1)
 
-        if np.any(grad_k_mag > max_grad_mag):
-            scale_k = max_grad_mag / np.maximum(grad_k_mag, 1e-10)
-            grad_k *= np.clip(scale_k[:, :, np.newaxis], 0, 1)
+            if np.any(grad_k_mag > max_grad_mag):
+                scale_k = max_grad_mag / np.maximum(grad_k_mag, 1e-10)
+                grad_k *= np.clip(scale_k[:, :, np.newaxis], 0, 1)
 
-        if np.any(grad_omega_mag > max_grad_mag):
-            scale_omega = max_grad_mag / np.maximum(grad_omega_mag, 1e-10)
-            grad_omega *= np.clip(scale_omega[:, :, np.newaxis], 0, 1)
+            if np.any(grad_omega_mag > max_grad_mag):
+                scale_omega = max_grad_mag / np.maximum(grad_omega_mag, 1e-10)
+                grad_omega *= np.clip(scale_omega[:, :, np.newaxis], 0, 1)
 
     # DDES 的有效长度尺度 (sst_model.des_length_scale) 依赖涡粘 nu_t，而
     # nu_t 只在 compute_source_terms 内部才会被重新计算（sst_model.nu_t 是

@@ -220,10 +220,16 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, output_
                 return
             try:
                 save_results(solver_ref, output_dir, quiet=True)
+                # 必须用 solver_ref.current_order（这一步实际求解用的阶数），
+                # 不能用外层闭包捕获的 order（CLI --order，Order Continuation
+                # 的最终目标阶数）——真实复现：Order Continuation 还没爬升到
+                # 目标阶数时（例如 P0 阶段的中间 checkpoint）两者不相等，用
+                # 目标阶数重建 mesh/FRSolver 会得到与 checkpoint 里存的
+                # U_sps 形状不匹配的 n_sps，resume 直接报错拒绝恢复。
                 write_checkpoint(
                     solver_ref, output_dir, iteration,
-                    input_file, order, turbulence_model, backend,
-                    quiet=True
+                    input_file, solver_ref.current_order, turbulence_model, backend,
+                    quiet=True, surface_mesh=surface_mesh, target_order=solver_ref.order,
                 )
                 print(f"   [Checkpoint] iter {iteration} saved")
             except Exception as e:
@@ -237,8 +243,12 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, output_
 
             # 4. 保存结果（.pkl 全量状态 + HDF5 checkpoint，后者供 solve resume 使用）
             save_results(solver, output_dir)
+            # solver.current_order 而非 order：理由同上方 _checkpoint_cb 里的
+            # 说明。正常跑完的情况下 Order Continuation 应该已经爬升到目标
+            # 阶数、二者相等，但读活的值而不是假设闭包变量仍然成立更稳妥。
             write_checkpoint(
-                solver, output_dir, result.iterations, input_file, order, turbulence_model, backend
+                solver, output_dir, result.iterations, input_file, solver.current_order,
+                turbulence_model, backend, surface_mesh=surface_mesh, target_order=solver.order,
             )
 
             # 5. 气动系数（提供 --reference-area 时）

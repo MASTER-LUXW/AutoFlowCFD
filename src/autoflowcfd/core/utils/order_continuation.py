@@ -229,10 +229,21 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
     original_order = solver.order
     original_ops = solver.ops
 
+    # resume 恢复出的 solver 状态是 checkpoint 里的真实解（可能已经在
+    # P1/P2 阶段，见 solve_checkpoint_io.py::rebuild_solver_from_
+    # checkpoint 打的 _resumed_from_checkpoint 标记），不是构造函数生成
+    # 的占位均匀自由流场——下面"状态不在 P0 就重置回 P0 均匀流场"这条
+    # 逻辑只对后者成立，对前者会把刚从 checkpoint 恢复的真实解直接
+    # 丢弃，且不报错、不警告，静默从 P0 重新开始整个爬升（真实复现，
+    # 2026-08-22：P1 checkpoint resume 后没有任何异常提示，但物理上
+    # 完全从零开始）。resumed 时爬升范围也要从 solver.current_order
+    # （checkpoint 实际所在阶数）开始，不是永远从 P0。
+    resumed = getattr(solver, "_resumed_from_checkpoint", False)
+
     current_state_n_sps = solver.state.U.shape[1]
     expected_p0_n_sps = 1
 
-    if current_state_n_sps != expected_p0_n_sps:
+    if not resumed and current_state_n_sps != expected_p0_n_sps:
         print(f"[INFO] Current state has {current_state_n_sps} SPs/cell, reinitializing from P0...")
 
         p0_state = FRState(solver.state.n_cells, expected_p0_n_sps, solver.state.n_vars)
@@ -305,13 +316,21 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
     #     P1 专属、也不是跳过 P1 就能规避的风险。
     # 综上，均匀流场的顾虑已不成立，另外两点也不构成继续跳过 P1 的理由，
     # 恢复朴素的 P0->P1->...->目标阶数。
-    orders = list(range(0, original_order + 1))
+    #
+    # resumed 时从 solver.current_order（checkpoint 实际所在阶数）开始，
+    # 不是永远从 P0——理由见上面 resumed 变量的说明。非 resumed（正常
+    # 新建求解器）时 solver.current_order 在上面未进入 if 分支的情况下
+    # 仍等于构造时传入的 order，但那种情况下 current_state_n_sps 必然
+    # 已经等于 expected_p0_n_sps（因为上面的重置分支已经处理过），所以
+    # 这里统一用 solver.current_order 作为起点对两种场景都成立。
+    starting_order = solver.current_order if resumed else 0
+    orders = list(range(starting_order, original_order + 1))
 
     total_iter = 0
     for target_p in orders:
         print(f"\n--- Phase: P{target_p} ---")
 
-        if target_p > 0:
+        if target_p > 0 and target_p != solver.current_order:
             solver._interpolate_to_new_order(target_p)
 
         solver.current_order = target_p

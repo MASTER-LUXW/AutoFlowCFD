@@ -58,10 +58,10 @@ def compute_wmles_wall_stress_correction(solver: Any) -> Optional[np.ndarray]:
         logger.warning("WMLES requires wall distance field but none is available; skipping wall stress")
         return None
 
-    from autoflowcfd.grid.connectivity.face_connectivity import tag_boundary_groups
+    from autoflowcfd.grid.connectivity.face_connectivity import tag_boundary_groups_for_mesh
     from autoflowcfd.core.fr_residual.inviscid import _distribute_from_face
 
-    group_code, name_to_code = tag_boundary_groups(fc, mesh.boundary_groups or {})
+    group_code, name_to_code = tag_boundary_groups_for_mesh(mesh, fc)
     bc_types = mesh.boundary_bc_types or {}
     wall_codes = {code for name, code in name_to_code.items() if bc_types.get(name, "") == "WALL"}
     if not wall_codes:
