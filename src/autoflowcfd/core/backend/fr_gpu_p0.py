@@ -18,6 +18,18 @@ P>=1（坍缩坐标度量张量外插 + 逐面记录字典键控分发）复杂�
 无本地 GPU 硬件：正确性通过 `NUMBA_ENABLE_CUDASIM=1`（numba 自带的纯
 Python CUDA 语义模拟器，不需要真实显卡，逐线程真实执行核函数逻辑）
 对照已验证的 CPU 版本数值核验，见 tests/unit/test_fr_gpu_p0.py。
+
+已被取代、不在生产调用路径上（2026-08-23 核实）：`FRSolver`/
+`GPUFRSolver` 的 GPU P0 无粘残差分发（solver.py/gpu_solver.py）现在
+统一走 `core/gpu/gpu_p0_inviscid.py`（CuPy `RawKernel` 版本）；全仓库
+搜索确认 `core.backend.fr_gpu_p0` 只被本模块自己的 docstring 和
+`tests/unit/test_fr_gpu_p0.py` 引用，从未被 `solver.py`/`gpu_solver.py`
+import。棱柱四边形侧面重复计数缺陷已同步修复（2026-08-23）：面法向/
+面积改为直接复用 `fr_residual/inviscid_p0.py::_extract_p0_face_geometry`
+（CPU P0 路径已验证过的去重/multi-source 回退逻辑），不再逐面独立
+读取未去重的 `true_normal`/`true_area_weight`。仍然是死代码这一点
+不变——本机没有真实 GPU/CUDA，只能靠 `NUMBA_ENABLE_CUDASIM=1` 模拟器
+跑 `tests/unit/test_fr_gpu_p0.py` 核验，无法在真实硬件上验证。
 """
 import math
 from typing import Callable, Optional
@@ -50,11 +62,12 @@ def gpu_p0_available() -> bool:
 if _CUDA_IMPORT_OK:
 
     @cuda.jit(device=True, inline=True)
-    def _ausm_up_flux_device(rhoL, uL, vL, wL, pL, rhoR, uR, vR, wR, pR, nx, ny, nz, flux):
-        """AUSM+up 数值通量，逐字对照 core/fr_kernels.py::compute_ausm_up_flux
-        移植（同一套物理/参数，只是把嵌套函数 M_plus/M_minus/P_plus/P_minus
-        展开成内联分支——numba CUDA target 对函数内定义闭包函数的支持不如
-        CPU target 稳定，展开是为了可移植性，不改变任何数值结果）。
+    def _ausm_up_flux_device(rhoL, uL, vL, wL, pL, rhoR, uR, vR, wR, pR, nx, ny, nz, mach_ref, flux):
+        """AUSM+up 数值通量（含 Weiss-Smith 低马赫数预处理），逐字对照
+        core/fr_kernels.py::compute_ausm_up_flux 移植（同一套物理/参数，
+        只是把嵌套函数 M_plus/M_minus/P_plus/P_minus 展开成内联分支——
+        numba CUDA target 对函数内定义闭包函数的支持不如 CPU target 稳定，
+        展开是为了可移植性，不改变任何数值结果）。
         把结果写入长度为 5 的 `flux` 数组（CUDA device 函数里避免返回新分配
         数组，与 CPU 版返回值一致，只是调用约定不同）。
         """
@@ -73,18 +86,25 @@ if _CUDA_IMPORT_OK:
         aL = math.sqrt(max(gamma * pL_s / rhoL_s, 1e-10))
         aR = math.sqrt(max(gamma * pR_s / rhoR_s, 1e-10))
 
-        M_L = unL / max(aL, 1e-10)
-        M_R = unR / max(aR, 1e-10)
-
         # 界面声速/低马赫标度函数 Mbar2, fa（与 core/fr_kernels.py 逐字一致）。
         a_half = 0.5 * (aL + aR)
         rho_half = 0.5 * (rhoL_s + rhoR_s)
         Mbar2 = (unL * unL + unR * unR) / (2.0 * a_half * a_half)
-        Ma_ref = 0.1
-        M0_sq = min(1.0, max(Mbar2, Ma_ref * Ma_ref))
+        M0_sq = min(1.0, max(Mbar2, mach_ref * mach_ref))
         sqrt_M0_sq = math.sqrt(M0_sq)
         fa = sqrt_M0_sq * (2.0 - sqrt_M0_sq)
         fa = max(fa, 1e-6)
+
+        # Weiss-Smith 预处理声速（与 kernels.py::compute_ausm_up_flux 的
+        # _WEISS_SMITH_K=1.1 同一个安全裕度常数、同一套 beta2 公式）。
+        beta2 = min(1.0, max(max(Mbar2, 1.1 * mach_ref * mach_ref), 1e-10))
+        sqrt_beta2 = math.sqrt(beta2)
+        aL_p = sqrt_beta2 * aL
+        aR_p = sqrt_beta2 * aR
+        a_half_p = sqrt_beta2 * a_half
+
+        M_L = unL / max(aL_p, 1e-10)
+        M_R = unR / max(aR_p, 1e-10)
 
         if abs(M_L) >= 1.0:
             Mp_L = 0.5 * (M_L + abs(M_L))
@@ -107,8 +127,8 @@ if _CUDA_IMPORT_OK:
         one_minus_sigma_mbar2 = 1.0 - sigma_p * Mbar2
         if one_minus_sigma_mbar2 < 0.0:
             one_minus_sigma_mbar2 = 0.0
-        Mp = -(Kp / fa) * one_minus_sigma_mbar2 * (pR_s - pL_s) / (rho_half * a_half * a_half)
-        mass_flux = 0.5 * (rhoL_s * aL + rhoR_s * aR) * (M_half + Mp)
+        Mp = -(Kp / fa) * one_minus_sigma_mbar2 * (pR_s - pL_s) / (rho_half * a_half_p * a_half_p)
+        mass_flux = 0.5 * (rhoL_s * aL_p + rhoR_s * aR_p) * (M_half + Mp)
 
         if abs(M_L) >= 1.0:
             sign_ML = 1.0 if M_L > 0.0 else (-1.0 if M_L < 0.0 else 0.0)
@@ -125,7 +145,7 @@ if _CUDA_IMPORT_OK:
         # pu 速度扩散项 (Liou 2006 AUSM+up 式18)，与 Mp 项配套。
         Ku = 0.75
         p_half = Pp_L * pL_s + Pm_R * pR_s \
-            - Ku * Pp_L * Pm_R * (rhoL_s + rhoR_s) * fa * a_half * (unR - unL)
+            - Ku * Pp_L * Pm_R * (rhoL_s + rhoR_s) * fa * a_half_p * (unR - unL)
 
         upwind_L = mass_flux >= 0.0
         flux[0] = mass_flux
@@ -142,7 +162,7 @@ if _CUDA_IMPORT_OK:
     @cuda.jit
     def _p0_inviscid_residual_kernel(
         owner_cell, neighbor_cell, is_boundary, normal, area_w,
-        Q_all, Q_ghost, cell_volumes, residual_out,
+        Q_all, Q_ghost, cell_volumes, residual_out, mach_ref,
     ):
         """一个 CUDA 线程处理一条面记录：计算该面的 AUSM+up 公共通量，
         原子累加到 owner（总是）与 neighbor（仅内部面）两侧的残差——
@@ -181,7 +201,7 @@ if _CUDA_IMPORT_OK:
             pR = Q_all[nc, 4]
 
         flux = cuda.local.array(5, dtype=_CUDA_FLUX_DTYPE)
-        _ausm_up_flux_device(rhoL, uL, vL, wL, pL, rhoR, uR, vR, wR, pR, nx, ny, nz, flux)
+        _ausm_up_flux_device(rhoL, uL, vL, wL, pL, rhoR, uR, vR, wR, pR, nx, ny, nz, mach_ref, flux)
 
         vol_o = cell_volumes[oc]
         for v in range(5):
@@ -198,6 +218,7 @@ def compute_inviscid_residual_p0_gpu(
     U: np.ndarray,
     mesh,
     boundary_ghost_provider: Optional[Callable[[int, np.ndarray, np.ndarray], np.ndarray]] = None,
+    mach_ref: float = 0.1,
 ) -> np.ndarray:
     """P0 无粘残差的 GPU（CUDA）实现，函数签名/返回值契约与
     `core/fr_residual_inviscid.py::_compute_inviscid_residual_fv_p0` 完全一致
@@ -238,17 +259,21 @@ def compute_inviscid_residual_p0_gpu(
     owner_cell = fc.owner_cell.astype(np.int32)
     neighbor_cell = np.where(fc.is_boundary, 0, fc.neighbor_cell).astype(np.int32)  # 边界面此列不会被读取
     is_boundary = fc.is_boundary.astype(np.bool_)
-    normal = np.empty((n_faces, 3), dtype=np.float64)
-    area_w = np.empty((n_faces,), dtype=np.float64)
     Q_ghost = np.zeros((n_faces, 5), dtype=np.float64)
 
-    for f in range(n_faces):
-        ffp = ffp_list[f]
-        normal[f, :] = ffp.true_normal[0]
-        area_w[f] = ffp.true_area_weight[0]
-        if is_boundary[f]:
-            Q_owner_fp = Q_all[owner_cell[f]: owner_cell[f] + 1]
-            Q_ghost[f, :] = ghost_provider(f, Q_owner_fp, ffp.true_normal)[0]
+    # 面法向/面积：复用 CPU P0 路径已经修好的去重/multi-source 回退逻辑
+    # （2026-08-23，见 inviscid_p0.py::_extract_p0_face_geometry 文档）
+    # ——本文件此前逐面 `ffp_list[f]` 直接读 true_normal/true_area_weight，
+    # 不做 owner_is_primary 过滤，对棱柱四边形侧面的重复三角化子面记录
+    # 会重复 scatter-add 两次，与 CPU P0 kernel 修复前的同一个 bug（本
+    # 模块是死代码、不在生产调用路径上，但既然要保持数值正确性就应该
+    # 复用同一份已验证逻辑，而不是留着一份已知有 bug 的独立实现）。
+    from autoflowcfd.core.fr_residual.inviscid_p0 import _extract_p0_face_geometry
+    normal, area_w = _extract_p0_face_geometry(ffp_list, fc, n_faces)
+
+    for f in np.nonzero(is_boundary)[0]:
+        Q_owner_fp = Q_all[owner_cell[f]: owner_cell[f] + 1]
+        Q_ghost[f, :] = ghost_provider(f, Q_owner_fp, normal[f:f + 1])[0]
 
     cell_volumes = mesh.cell_volumes.astype(np.float64)
 
@@ -266,7 +291,7 @@ def compute_inviscid_residual_p0_gpu(
     blocks_per_grid = (n_faces + threads_per_block - 1) // threads_per_block
     _p0_inviscid_residual_kernel[blocks_per_grid, threads_per_block](
         d_owner, d_neighbor, d_is_boundary, d_normal, d_area_w,
-        d_Q, d_Q_ghost, d_volumes, d_residual,
+        d_Q, d_Q_ghost, d_volumes, d_residual, np.float64(mach_ref),
     )
     cuda.synchronize()
 

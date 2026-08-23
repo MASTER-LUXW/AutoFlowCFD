@@ -390,6 +390,42 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
         residual_drop_threshold = 1e2  # 残差下降 2 个数量级
         min_iter_before_transition = 20  # 最少迭代次数，避免过早提升
 
+        # resume 状态持久化修复（2026-08-23，真实 bug）：
+        # `initial_residual_this_order` 是纯局部变量，每次调用
+        # `run_order_continuation` 都从 None 重新记录——`solve steady`
+        # 单次连续运行里 `run_order_continuation` 只调用一次，这个变量
+        # 天然在每个阶数真正开始时被正确捕获一次；但 `solve resume`
+        # 是全新进程、全新一次 `run_order_continuation` 调用，checkpoint
+        # 恢复出来的状态通常已经在当前阶数收敛了一部分甚至大部分，
+        # resume 后这里第一步测出来的残差会被错当成"这个阶数刚开始时
+        # 的残差"，导致下面的残差下降判据（要求下降
+        # residual_drop_threshold 倍）在还没有真实下降那么多的情况下
+        # 被满足，过早升阶——真实复现：cube_demo 791k 网格从 P0
+        # checkpoint resume，本该继续在 P0 收敛却在 resume 后几步内就
+        # 满足了"下降 100 倍"判据升到 P1，插值到更高阶引入的截断误差
+        # 精确对应之前长期排查的"P0->P1 残差暴涨"现象的一个独立成因
+        # （与同一次调查里定位到的棱柱四边形侧面重复计数几何 bug是两个
+        # 不同的问题，此前那次的具体案例最终由几何 bug 完全解释，但这个
+        # resume 状态丢失的逻辑漏洞本身依然存在、换一个 checkpoint 就可能
+        # 复现）。resume 恢复出来的第一个阶段（target_p == starting_order）
+        # 如果 checkpoint 里带了上次持久化的阶段起始残差
+        # （solver._phase_initial_residual，见 solve_checkpoint_io.py
+        # write_checkpoint/rebuild_solver_from_checkpoint），直接用它做
+        # 种子而不是等第一步重新捕获——这样"下降了多少倍"就是相对
+        # *真正*的阶段起点算的，不是相对"这次 resume 调用第一步"算的。
+        # 旧版本 checkpoint 没有这个字段时保留原有行为（第一步捕获），
+        # 但打印警告，让用户知道这次 resume 的升阶判据可能提前触发
+        # （与 k_field/omega_field 缺失时的向后兼容处理方式一致）。
+        if resumed and target_p == starting_order:
+            _persisted = getattr(solver, "_phase_initial_residual", None)
+            if _persisted is not None:
+                initial_residual_this_order = _persisted
+                print(f"[INFO] P{target_p} resume：用 checkpoint 里保存的阶段起始残差 "
+                      f"({_persisted:.6e}) 做种子，升阶判据按真实阶段起点计算")
+            else:
+                print(f"[WARN] P{target_p} 从旧版本 checkpoint resume（缺少阶段起始残差记录）："
+                      f"残差下降升阶判据将从这次 resume 的第一步重新开始计算，可能提前触发。")
+
         converged = False
         final_residual = 1e10
 
@@ -402,6 +438,7 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
 
             if initial_residual_this_order is None:
                 initial_residual_this_order = res
+            solver._phase_initial_residual = initial_residual_this_order
 
             if True:  # 每步都输出残差与气动力系数
                 drop_ratio = initial_residual_this_order / max(res, 1e-30)

@@ -145,38 +145,37 @@ def troubled_cell_mask(det_jacs: np.ndarray, threshold: float = TROUBLED_CELL_HA
 
 @njit(cache=True)
 def _cell_face_misalignment_kernel(
-    det_jacs: np.ndarray, inv_jacs: np.ndarray,
     owner_cell: np.ndarray, neighbor_cell: np.ndarray, is_boundary: np.ndarray,
-    owner_axis: np.ndarray, owner_side: np.ndarray, owner_is_primary: np.ndarray,
-    neighbor_axis: np.ndarray, neighbor_side: np.ndarray, neighbor_is_primary: np.ndarray,
-    true_normal: np.ndarray, boundary_extrap: np.ndarray,
-    n_prism: int, n_faces: int, n_fp: int, n_sps: int, n_cells: int,
+    owner_side: np.ndarray, owner_is_primary: np.ndarray,
+    neighbor_side: np.ndarray, neighbor_is_primary: np.ndarray,
+    true_normal: np.ndarray,
+    owner_adj_row_exact: np.ndarray, neighbor_adj_row_exact: np.ndarray,
+    n_faces: int, n_fp: int, n_cells: int,
 ) -> np.ndarray:
-    """`precompute_cell_face_misalignment` 的数值核心，逐点等价于原
-    `own_dir_outward`/`extrap_to_face`（矩阵乘 `E @ adj_j[cell][:,axis,:]`
-    + 逐行归一化 + 与 `true_normal` 点积），只是把 `E @ field` 展开成
-    显式三重循环、`adj_j = det_jacs[...,None,None]*inv_jacs` 内联，避免
-    对每个 (cell,axis) 组合重新构造整个 adj_j 数组切片。
+    """`precompute_cell_face_misalignment` 的数值核心：`own_dir_outward`
+    与 `true_normal` 逐行归一化后点积，取 `1-dot` 的单元内最大值。
+
+    真实 bug 修复（2026-08-23，见 fr/face_flux_points_exact_normal.py
+    模块文档）：`owner_adj_row_exact`/`neighbor_adj_row_exact` 取代了
+    此前这里对 `det_jacs`/`inv_jacs` 用 `boundary_extrap` 做 Lagrange
+    外插到 FP 得到 `own_dir_outward` 的做法（`rx,ry,rz` 曾经是
+    `E @ (det_jacs[cell]*inv_jacs[cell,:,axis,:])` 的展开三重循环）——
+    外插本身的截断误差是"机制2失配率此前只能部分改善、不能收敛到
+    接近零"的直接原因；直接读取已经在 mesh 加载阶段一次性算好的逐 FP
+    精确值，不再需要这个内核自己重新做外插，函数也因此不再需要
+    `det_jacs`/`inv_jacs`/`boundary_extrap`/`owner_axis`/`neighbor_axis`/
+    `n_sps`/`n_prism` 这些只是为了做外插才需要的参数。
     """
     cell_misalign = np.zeros(n_cells)
     for f in range(n_faces):
         if owner_is_primary[f]:
             oc = owner_cell[f]
-            oax = owner_axis[f]
             oside = owner_side[f]
-            oside_idx = 0 if oside <= 0.0 else 1
-            celltype_o = 0 if oc < n_prism else 1
-            E = boundary_extrap[celltype_o, oax, oside_idx]  # (n_fp, n_sps)
             worst = 0.0
             for i in range(n_fp):
-                rx = 0.0
-                ry = 0.0
-                rz = 0.0
-                for s in range(n_sps):
-                    ed = E[i, s] * det_jacs[oc, s]
-                    rx += ed * inv_jacs[oc, s, oax, 0]
-                    ry += ed * inv_jacs[oc, s, oax, 1]
-                    rz += ed * inv_jacs[oc, s, oax, 2]
+                rx = owner_adj_row_exact[f, i, 0]
+                ry = owner_adj_row_exact[f, i, 1]
+                rz = owner_adj_row_exact[f, i, 2]
                 mag = np.sqrt(rx * rx + ry * ry + rz * rz)
                 mag = mag if mag > 1e-300 else 1e-300
                 dx = (rx / mag) * oside
@@ -190,21 +189,12 @@ def _cell_face_misalignment_kernel(
                 cell_misalign[oc] = worst
         if (not is_boundary[f]) and neighbor_is_primary[f]:
             nc = neighbor_cell[f]
-            nax = neighbor_axis[f]
             nside = neighbor_side[f]
-            nside_idx = 0 if nside <= 0.0 else 1
-            celltype_n = 0 if nc < n_prism else 1
-            E = boundary_extrap[celltype_n, nax, nside_idx]
             worst = 0.0
             for i in range(n_fp):
-                rx = 0.0
-                ry = 0.0
-                rz = 0.0
-                for s in range(n_sps):
-                    ed = E[i, s] * det_jacs[nc, s]
-                    rx += ed * inv_jacs[nc, s, nax, 0]
-                    ry += ed * inv_jacs[nc, s, nax, 1]
-                    rz += ed * inv_jacs[nc, s, nax, 2]
+                rx = neighbor_adj_row_exact[f, i, 0]
+                ry = neighbor_adj_row_exact[f, i, 1]
+                rz = neighbor_adj_row_exact[f, i, 2]
                 mag = np.sqrt(rx * rx + ry * ry + rz * rz)
                 mag = mag if mag > 1e-300 else 1e-300
                 dx = (rx / mag) * nside
@@ -242,27 +232,31 @@ def precompute_cell_face_misalignment(mesh) -> np.ndarray:
     数分钟的直接原因，而残差求值热路径（`get_flat_face_geometry` 的
     `_KernelFaceData` 快速路径）早已绕开了这个问题，只有这个诊断量
     预计算函数遗漏。改为直接读取 `_KernelFaceData`/`FlatFaceGeometry`
-    已经存好的扁平数组（`get_flat_face_geometry` 走的正是同一条已验证
-    的快速路径），把 `E @ field` 矩阵乘与逐行归一化交给 numba kernel，
-    数学上与原实现完全一致（同一组 `own_dir_outward`/`misalign` 公式，
-    只是从"每面构造对象+逐面 numpy 矩阵乘"换成"直接读扁平数组+numba
-    内联三重循环"），不引入近似。
+    已经存好的扁平数组，交给 numba kernel。
+
+    精度修复（2026-08-23，见 fr/face_flux_points_exact_normal.py 模块
+    文档）：`own_dir_outward` 现在直接读取 `flat.owner_adj_row_exact`/
+    `flat.neighbor_adj_row_exact`（mesh 加载阶段一次性算好的逐 FP 精确
+    adj(J) 行），不再对 `det_jacs`/`inv_jacs` 做 Lagrange 外插——这也
+    意味着 owner 侧比较（`owner_adj_row_exact` 归一化后 vs 同样来自
+    owner 侧精确值的 `true_normal`）现在恒等（数值上 `1-dot≈0`，浮点
+    舍入级），真正非零的失配只会来自 neighbor 侧比较——这才是这个诊断
+    真正应该测量的量：owner/neighbor 两侧*各自独立*的局部度量方向是否
+    一致，即 `5_重大问题修复-黎曼求解器法向.md` 记载的、仍然"未根治"
+    的内部面通量守恒性问题的直接几何体现，不再混杂外插截断误差。
     """
     from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 
-    fc = mesh.face_connectivity
     ops = mesh.operators
     flat = get_flat_face_geometry(mesh, ops)
-    det_jacs = mesh.jacobians["det_jacs"].reshape(mesh.n_cells, -1)
-    inv_jacs = mesh.jacobians["inv_jacs"].reshape(mesh.n_cells, -1, 3, 3)
 
     return _cell_face_misalignment_kernel(
-        det_jacs, inv_jacs,
         flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
-        flat.owner_axis, flat.owner_side, flat.owner_is_primary,
-        flat.neighbor_axis, flat.neighbor_side, flat.neighbor_is_primary,
-        flat.true_normal, flat.boundary_extrap,
-        flat.n_prism, flat.n_faces, flat.n_fp, flat.n_sps, mesh.n_cells,
+        flat.owner_side, flat.owner_is_primary,
+        flat.neighbor_side, flat.neighbor_is_primary,
+        flat.true_normal,
+        flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
+        flat.n_faces, flat.n_fp, mesh.n_cells,
     )
 
 

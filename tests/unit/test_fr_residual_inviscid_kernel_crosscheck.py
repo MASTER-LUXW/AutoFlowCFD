@@ -35,7 +35,7 @@ from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outlie
 from .test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 
 
-def _compute_residual_via_new_kernel(U, mesh, ops, boundary_ghost_provider=None):
+def _compute_residual_via_new_kernel(U, mesh, ops, boundary_ghost_provider=None, mach_ref=0.1):
     """与 fr_residual_inviscid.py::compute_inviscid_residual_fr 完全对应
     的"新版"：体积项逐字复制（未改动），界面项换成新 kernel。"""
     ghost_provider = boundary_ghost_provider if boundary_ghost_provider is not None else DefaultGhostProvider()
@@ -98,18 +98,19 @@ def _compute_residual_via_new_kernel(U, mesh, ops, boundary_ghost_provider=None)
     Q_ghost = compute_boundary_ghost_states(flat, Q, adj_j, ghost_provider)
     n_threads = numba.get_num_threads()
     correction = compute_inviscid_interface_correction_kernel(
-        Q, adj_j, det_jacs,
+        Q, det_jacs,
         flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
         flat.owner_axis, flat.owner_side, flat.neighbor_axis, flat.neighbor_side,
         flat.owner_is_primary, flat.neighbor_is_primary,
         flat.true_normal,
+        flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
         flat.neighbor_src0_cell, flat.neighbor_src0_mat,
         flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
         flat.owner_src0_cell, flat.owner_src0_mat,
         flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
         flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
         flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
-        n_prism, n_threads,
+        n_prism, n_threads, mach_ref,
     )
     residual = residual + correction
     return suppress_residual_outliers(residual, U[..., :5])

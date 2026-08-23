@@ -34,6 +34,7 @@ class _KernelFaceData:
         'owner_axis', 'owner_side', 'neighbor_axis', 'neighbor_side',
         'owner_is_primary', 'neighbor_is_primary',
         'true_normal', 'true_area_weight',
+        'owner_adj_row_exact', 'neighbor_adj_row_exact',
         'nb_src0_cell', 'nb_src0_mat', 'nb_src1_idx',
         'ow_src0_cell', 'ow_src0_mat', 'ow_src1_idx',
         'nb_extra_cell', 'nb_extra_mat', 'ow_extra_cell', 'ow_extra_mat',

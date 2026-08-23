@@ -310,6 +310,7 @@ class DistributedFRSolver:
         enable_viscous = config.physics.enable_viscous
         mu = self.local_solver.mu_molecular
         boundary_ghost_provider = self.local_solver.boundary_ghost_provider
+        mach_ref = self.local_solver.freestream["mach_ref"]
         n_local = self.partition.n_local_cells
         n_sps = self.state.n_sps
         n_vars = self.state.n_vars
@@ -323,7 +324,7 @@ class DistributedFRSolver:
             inviscid_residual = distributed_compute_inviscid_residual(
                 U_stage_local, self.partition, self.halo_exchange,
                 self.dist_flat_face.connectivity, self.mesh, self.ops,
-                boundary_ghost_provider,
+                boundary_ghost_provider, mach_ref=mach_ref,
             )
             if enable_viscous:
                 viscous_residual = distributed_compute_viscous_residual(

@@ -77,7 +77,7 @@ def step_dual_time(
 
     logger.debug(f"Dual-Time Stepping: initial pseudo-residual norm = {initial_res_norm:.6e}")
 
-    # CFL 自适应参数：起点用 cfl_min 而不是一个乐观值，是有意为之——
+    # CFL 自适应参数：起点用一个保守值而不是乐观值，是有意为之——
     # 增大 CFL 只在连续观测到残差快速下降后才发生，反应天然滞后；
     # 减小 CFL 只有等残差真的上升了才触发，那时解往往已经被推到
     # 错误区域，需要后续很多步才能"还债"。从保守步长起步、按下降
@@ -85,11 +85,42 @@ def step_dual_time(
     # 过冲——真实复现：起点用 1.0 时，前 3 次内层迭代残差范数从
     # 1e3 冲到 1.5e6（放大 1500 倍）才找到稳定区间，之后即使残差
     # 单调下降也需要远超预算的迭代次数才能追平这个过冲。
+    #
+    # 真实 bug 修复（2026-08-23，等熵涡合成算例——涡核峰值切向速度
+    # ~270 m/s，接近来流声速量级——逐迭代追踪 CFL/残差轨迹诊断出，
+    # 前后共修复三处相互掩盖的问题，不是从代码走查一次看出来的）：
+    #
+    # 1. 此前 cfl_min=0.1 是一个硬下限——残差上升时把 cfl_current
+    #    减半直到碰到 0.1 就不再继续减小，但*接受*的仍然是用"减小前"
+    #    那个过大 CFL 算出的 U_next（CFL 调整只影响下一次迭代，不回滚
+    #    这一步），对真正需要 CFL<0.1 才稳定的区域，残差会在 0.1 附近
+    #    持续增长、max_inner_iter 耗尽也不收敛。改为标准的"步骤拒绝+
+    #    重试"（pseudo-transient continuation 文献做法，如 Kelley &
+    #    Keyes 1998）：算出 U_next 后先检验残差有没有恶化超过容忍幅度，
+    #    真正恶化就*拒绝*这一步、把 CFL 砍半后用同一个 U_tau 重算。
+    # 2. 第一次修复后发现：外层"残差上升"分支的 `max(cfl_current*0.5,
+    #    cfl_min)` 用的还是旧的 cfl_min=0.1，每次迭代开始时都会把 retry
+    #    循环刚辛苦砍下去的 cfl_current 强行拉回 0.1，等于每次都从头
+    #    重新踩一遍"0.1 太大→retry 砍到底"的坑。删除独立的 cfl_min，
+    #    外层分支和 retry 循环共用同一个 `_CFL_HARD_FLOOR`——cfl_current
+    #    是跨迭代持续的单一状态，只有"残差快速下降"能把它调高。
+    # 3. 修复 1/2 后用零容忍（trial_res_norm<=current_res_norm 才接受）
+    #    发现新问题：等熵涡这类强非线性算例的伪时间轨迹在早期迭代本来
+    #    就有一段正常的"残差先涨后落"暂态（pseudo-transient continuation
+    #    文献里的标准现象，不代表不稳定），零容忍会让 retry 循环把步长
+    #    一路砍到浮点噪声量级（U_next 与 U_tau 数值上不再可分辨）也不肯
+    #    接受，实质上卡死在原地。改用有界容忍（`_GROWTH_TOLERANCE`）：
+    #    允许残差有限度地暂时变差（暂态期间的正常现象），只有真正失控
+    #    的恶化才触发拒绝重试，接受阈值和重试下限都取比原来更宽松、但
+    #    仍远比"完全不设限"保守的数量级。
     cfl_current = 0.1
-    cfl_min = 0.1
     cfl_max = 10.0
+    _CFL_HARD_FLOOR = 1e-6
+    _MAX_REJECT_RETRIES = 20  # 0.1 砍 20 次到约 1e-7，覆盖到硬下限有富余
+    _GROWTH_TOLERANCE = 1.5  # 允许单次迭代残差最多恶化到 1.5 倍再拒绝
 
-    for k in range(max_inner_iter):
+    k = 0
+    while k < max_inner_iter:
         # 计算增广伪残差（含物理时间导数项）
         R_phys = dual_residual(U_tau)
         current_res_norm = np.linalg.norm(R_phys)
@@ -115,40 +146,82 @@ def step_dual_time(
             logger.debug(f"Dual-Time converged (absolute) at iteration {k+1}, res_norm={current_res_norm:.6e}")
             break
 
-        # CFL 自适应：根据残差变化调整伪时间步长
+        # CFL 自适应：根据上一次接受的迭代残差变化调整起始步长。
+        #
+        # 第四个真实 bug（修复 1-3 后仍复现）：这里原来用 `res_ratio>1.0`
+        # 判断"要不要缩小 CFL"，跟 retry 循环的接受阈值
+        # （`<=current_res_norm*_GROWTH_TOLERANCE`）不是同一个标准——
+        # 任何哪怕 0.1%~1% 的轻微残差波动（暂态期间完全正常、且已经在
+        # retry 循环里被判定为"可接受"）都会被这里判成"要缩小"，导致
+        # CFL 每次迭代都被砍一半，哪怕每一步单独看都被接受、残差整体
+        # 也没有真正失控——最终照样一路砍到硬下限附近停滞（等熵涡合成
+        # 算例复现：cfl 在 18 次迭代内从 0.1 单调砍到 1e-6，之后残差
+        # 变化量落入浮点噪声，40 次迭代几乎原地不动）。改为跟 retry 循环
+        # 共用同一个 `_GROWTH_TOLERANCE` 判据：只有真正超出容忍幅度的
+        # 恶化才缩小 CFL；轻微波动（无论涨跌）保持 CFL 不变，不再对
+        # 噪声级波动过度反应。
         if k > 0:
             res_ratio = current_res_norm / prev_res_norm
             if res_ratio < 0.5:
                 # 残差快速下降，增加 CFL
                 cfl_current = min(cfl_current * 1.5, cfl_max)
-            elif res_ratio > 1.0:
-                # 残差上升，减小 CFL
-                cfl_current = max(cfl_current * 0.5, cfl_min)
+            elif res_ratio > _GROWTH_TOLERANCE:
+                # 残差恶化超出容忍幅度，减小 CFL——与下面拒绝重试用同一个
+                # _CFL_HARD_FLOOR，不会把 retry 已经砍下去的值拉回去。
+                cfl_current = max(cfl_current * 0.5, _CFL_HARD_FLOOR)
+            # else: 轻微波动（涨跌都在容忍幅度内），CFL 保持不变。
 
-        prev_res_norm = current_res_norm
+        # 步骤拒绝 + 重试：只有真正降低残差的步才被接受。
+        accepted = False
+        U_next = U_tau
+        for _retry in range(_MAX_REJECT_RETRIES):
+            adjusted_pseudo_dt = pseudo_dt * cfl_current
 
-        # 调整伪时间步长
-        adjusted_pseudo_dt = pseudo_dt * cfl_current
+            # 伪时间推进: dU/dtau = -R_dual，用与 pseudo_dt 稳定性域匹配
+            # 的真正 SSP-RK stage 推进（见 _ssp_rk_stage_step 文档：此前
+            # 这里是纯前向欧拉，但 pseudo_dt 是按 SSP-RK 的稳定性域标定
+            # 的 CFL 步长，前向欧拉稳定性域小得多，直接复用会失稳）。
+            # R_phys 已经是 U_tau 处的 dual_residual，作为 residual0
+            # 传入避免重复计算。
+            U_trial = integrator._ssp_rk_stage_step(
+                U_tau, dual_residual, adjusted_pseudo_dt, residual0=R_phys, table=_SSP_RK3, filter_func=filter_func
+            )
+            U_trial = enforce_positivity(U_trial)
+            if filter_func is not None:
+                U_trial = filter_func(U_trial)
 
-        # 伪时间推进: dU/dtau = -R_dual，用与 pseudo_dt 稳定性域匹配的
-        # 真正 SSP-RK stage 推进（见 _ssp_rk_stage_step 文档：此前这里
-        # 是纯前向欧拉，但 pseudo_dt 是按 SSP-RK 的稳定性域标定的 CFL
-        # 步长，前向欧拉稳定性域小得多，直接复用会失稳）。R_phys 已经
-        # 是 U_tau 处的 dual_residual，作为 residual0 传入避免重复计算。
-        U_next = integrator._ssp_rk_stage_step(
-            U_tau, dual_residual, adjusted_pseudo_dt, residual0=R_phys, table=_SSP_RK3, filter_func=filter_func
-        )
-        U_next = enforce_positivity(U_next)
-        if filter_func is not None:
-            U_next = filter_func(U_next)
+            trial_res_norm = np.linalg.norm(dual_residual(U_trial))
+            if trial_res_norm <= current_res_norm * _GROWTH_TOLERANCE or cfl_current <= _CFL_HARD_FLOOR:
+                # 接受：残差没有恶化超过容忍幅度（暂态期间的有限恶化是
+                # 正常现象，不是失稳），或者已经砍到硬下限——再砍下去
+                # 步长会小到失去数值意义，接受当前结果，让外层的 k 迭代/
+                # max_inner_iter 预算和最终的"未收敛"告警去反映这个
+                # 真实的收敛难度，而不是在这里无限重试掩盖它。
+                U_next = U_trial
+                accepted = True
+                break
+            cfl_current = max(cfl_current * 0.5, _CFL_HARD_FLOOR)
+
+        if not accepted:
+            # 循环耗尽 _MAX_REJECT_RETRIES 次仍未找到不增大残差的步长——
+            # 用最后一次（已经砍到硬下限附近）的结果继续，如实记录，
+            # 不静默循环到 max_inner_iter 预算耗尽却看起来像"正常收敛慢"。
+            logger.warning(
+                f"Dual-Time inner iteration {k+1}: step rejected {_MAX_REJECT_RETRIES} times "
+                f"down to cfl={cfl_current:.3e}, still could not reduce residual "
+                f"({current_res_norm:.6e} -> {np.linalg.norm(dual_residual(U_next)):.6e})"
+            )
 
         # 检查更新幅度
         update_norm = np.linalg.norm(U_next - U_tau)
         if update_norm < 1e-10:
             logger.debug(f"Dual-Time update too small at iteration {k+1}")
+            U_tau = U_next
             break
 
         U_tau = U_next
+        prev_res_norm = current_res_norm
+        k += 1
     else:
         logger.warning(f"Dual-Time did not converge after {max_inner_iter} iterations, "
                       f"final res_norm={current_res_norm:.6e}, initial={initial_res_norm:.6e}")

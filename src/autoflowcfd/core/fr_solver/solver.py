@@ -202,7 +202,13 @@ class FRSolver(_SolverGeometryMixin):
         # 再真正初始化——ghost provider 构造时只用 getattr(...,None) 安全
         # 读取 wmles_model，不依赖它已经存在。
         self.turb_model_name = turb_model_name.upper()
-        self.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf}
+        # mach_ref：AUSM+up Weiss-Smith 低马赫数预处理（kernels.py::
+        # compute_ausm_up_flux）和 CFL 步长估计（cfl.py）共用的同一个
+        # 参考马赫数，从真实自由来流条件算一次，不再各处各用一套（2026-
+        # 08-14 那次失稳正是因为 CFL 和通量各自假设了不一致的参考值，
+        # 见 cfl.py 模块文档"已撤销"一节）。
+        mach_ref = vel_inf / np.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10))
+        self.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf, "mach_ref": mach_ref}
         self.boundary_ghost_provider = self._build_boundary_ghost_provider(bc_overrides or {})
         self.mu_molecular = mu_molecular
 
@@ -376,6 +382,7 @@ class FRSolver(_SolverGeometryMixin):
                 res_euler = compute_inviscid_residual_p0_cupy(
                     self.state.U, self.mesh,
                     boundary_ghost_provider=self.boundary_ghost_provider,
+                    mach_ref=self.freestream["mach_ref"],
                 )
             else:
                 # P>=1 高阶 FR GPU 路径
@@ -383,11 +390,13 @@ class FRSolver(_SolverGeometryMixin):
                 res_euler = compute_inviscid_residual_fr_gpu(
                     self.state.U, self.mesh, self.ops,
                     boundary_ghost_provider=self.boundary_ghost_provider,
+                    mach_ref=self.freestream["mach_ref"],
                 )
         else:
             res_euler = compute_inviscid_residual_fr(
                 self.state.U, self.mesh, self.ops,
                 boundary_ghost_provider=self.boundary_ghost_provider,
+                mach_ref=self.freestream["mach_ref"],
             )
 
         if self.state.n_vars > 5:

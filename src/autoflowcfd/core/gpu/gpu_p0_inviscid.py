@@ -40,7 +40,9 @@ void p0_inviscid_residual(
     const double* Q_ghost,     // (n_faces, 5) 边界幽灵态
     const double* cell_volumes,// (n_cells,)
     double* residual,          // (n_cells, 5) 输出残差
-    const int n_faces
+    const int n_faces,
+    const double mach_ref      // AUSM+up Weiss-Smith 预处理参考马赫数，
+                                // 见 kernels.py::compute_ausm_up_flux 文档
 ) {
     int f = blockIdx.x * blockDim.x + threadIdx.x;
     if (f >= n_faces) return;
@@ -93,17 +95,24 @@ void p0_inviscid_residual(
     double aL = sqrt(fmax(gamma * pL_s / rhoL_s, 1e-10));
     double aR = sqrt(fmax(gamma * pR_s / rhoR_s, 1e-10));
 
-    double M_L = unL / fmax(aL, 1e-10);
-    double M_R = unR / fmax(aR, 1e-10);
-
     double a_half = 0.5 * (aL + aR);
     double rho_half = 0.5 * (rhoL_s + rhoR_s);
     double Mbar2 = (unL * unL + unR * unR) / (2.0 * a_half * a_half);
-    double Ma_ref = 0.1;
-    double M0_sq = fmin(1.0, fmax(Mbar2, Ma_ref * Ma_ref));
+    double M0_sq = fmin(1.0, fmax(Mbar2, mach_ref * mach_ref));
     double sqrt_M0_sq = sqrt(M0_sq);
     double fa = sqrt_M0_sq * (2.0 - sqrt_M0_sq);
     fa = fmax(fa, 1e-6);
+
+    // Weiss-Smith 预处理声速（与 kernels.py::compute_ausm_up_flux 的
+    // _WEISS_SMITH_K=1.1 同一个安全裕度常数、同一套 beta2 公式）。
+    double beta2 = fmin(1.0, fmax(fmax(Mbar2, 1.1 * mach_ref * mach_ref), 1e-10));
+    double sqrt_beta2 = sqrt(beta2);
+    double aL_p = sqrt_beta2 * aL;
+    double aR_p = sqrt_beta2 * aR;
+    double a_half_p = sqrt_beta2 * a_half;
+
+    double M_L = unL / fmax(aL_p, 1e-10);
+    double M_R = unR / fmax(aR_p, 1e-10);
 
     // 质量通量分裂 M+ / M-
     double Mp_L, Mm_R;
@@ -124,8 +133,8 @@ void p0_inviscid_residual(
     double sigma_p = 1.0;
     double one_minus_sigma = 1.0 - sigma_p * Mbar2;
     if (one_minus_sigma < 0.0) one_minus_sigma = 0.0;
-    double Mp = -(Kp / fa) * one_minus_sigma * (pR_s - pL_s) / (rho_half * a_half * a_half);
-    double mass_flux = 0.5 * (rhoL_s * aL + rhoR_s * aR) * (M_half + Mp);
+    double Mp = -(Kp / fa) * one_minus_sigma * (pR_s - pL_s) / (rho_half * a_half_p * a_half_p);
+    double mass_flux = 0.5 * (rhoL_s * aL_p + rhoR_s * aR_p) * (M_half + Mp);
 
     // 压力分裂 P+ / P-
     double Pp_L, Pm_R;
@@ -147,7 +156,7 @@ void p0_inviscid_residual(
     // pu 速度扩散项
     double Ku = 0.75;
     double p_half = Pp_L * pL_s + Pm_R * pR_s
-        - Ku * Pp_L * Pm_R * (rhoL_s + rhoR_s) * fa * a_half * (unR - unL);
+        - Ku * Pp_L * Pm_R * (rhoL_s + rhoR_s) * fa * a_half_p * (unR - unL);
 
     // 上风通量
     double flux[5];
@@ -207,6 +216,7 @@ def compute_inviscid_residual_p0_cupy(
     mesh,
     boundary_ghost_provider: Optional[Callable] = None,
     device_id: int = 0,
+    mach_ref: float = 0.1,
 ) -> np.ndarray:
     """P0 无粘残差的 CuPy CUDA 实现。
 
@@ -218,6 +228,10 @@ def compute_inviscid_residual_p0_cupy(
         mesh: HighOrderMesh（n_points_1d == 1）
         boundary_ghost_provider: 边界幽灵态提供者
         device_id: GPU 设备 ID
+        mach_ref: AUSM+up Weiss-Smith 预处理参考马赫数（见
+            kernels.py::compute_ausm_up_flux 文档）。默认值 0.1 只是
+            保留旧硬编码值，真正的求解器路径必须显式传入
+            `solver.freestream["mach_ref"]`。
 
     Returns:
         residual: (n_cells, 1, 5) 残差数组
@@ -268,7 +282,7 @@ def compute_inviscid_residual_p0_cupy(
     # ghost 态单独只在边界面（~4万个，远小于总面数）上循环，不再对全部
     # 187 万面重复付出对象构造代价。
     from autoflowcfd.core.fr_residual.inviscid_p0 import _extract_p0_face_geometry
-    normal, area_w = _extract_p0_face_geometry(ffp_list, n_faces)
+    normal, area_w = _extract_p0_face_geometry(ffp_list, fc, n_faces)
 
     for f in np.nonzero(is_boundary)[0]:
         Q_owner_fp = Q_all[owner_cell[f]: owner_cell[f] + 1]
@@ -296,7 +310,8 @@ def compute_inviscid_residual_p0_cupy(
         kernel(
             (blocks_per_grid,), (threads_per_block,),
             (d_owner, d_neighbor, d_is_boundary, d_normal, d_area_w,
-             d_Q, d_Q_ghost, d_volumes, d_residual, np.int32(n_faces))
+             d_Q, d_Q_ghost, d_volumes, d_residual, np.int32(n_faces),
+             np.float64(mach_ref))
         )
         cp.cuda.Stream.null.synchronize()
 
@@ -311,6 +326,7 @@ def compute_inviscid_residual_p0_cupy_gpu_resident(
     owner_cell_gpu, neighbor_cell_gpu, is_boundary_gpu,
     normal_gpu, area_w_gpu, cell_volumes_gpu,
     Q_ghost_gpu, n_cells: int, n_faces: int,
+    mach_ref: float = 0.1,
 ):
     """P0 无粘残差的 GPU 常驻版本（数据已在 GPU 上，无需传输）。
 
@@ -324,6 +340,8 @@ def compute_inviscid_residual_p0_cupy_gpu_resident(
         Q_ghost_gpu: 边界幽灵态
         n_cells: 单元数
         n_faces: 面数
+        mach_ref: AUSM+up Weiss-Smith 预处理参考马赫数，调用方
+            （gpu_solver.py）必须显式传入 `solver.freestream["mach_ref"]`。
 
     Returns:
         residual_gpu: (n_cells, 1, 5) CuPy 残差数组
@@ -342,7 +360,7 @@ def compute_inviscid_residual_p0_cupy_gpu_resident(
         (blocks_per_grid,), (threads_per_block,),
         (owner_cell_gpu, neighbor_cell_gpu, is_boundary_gpu,
          normal_gpu, area_w_gpu, Q_gpu, Q_ghost_gpu,
-         cell_volumes_gpu, d_residual, np.int32(n_faces))
+         cell_volumes_gpu, d_residual, np.int32(n_faces), np.float64(mach_ref))
     )
     cp.cuda.Stream.null.synchronize()
 

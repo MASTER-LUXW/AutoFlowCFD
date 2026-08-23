@@ -15,20 +15,31 @@ core/fr_viscous_flux.py），已删除而不是继续留作"看起来完整、�
 import numpy as np
 from numba import njit
 
+# Weiss-Smith 预处理安全裕度倍数，与 core/utils/preconditioning.py::
+# preconditioned_acoustic_eigs 的同名默认值保持一致（同一套 beta2 下限
+# 构造，理由见该文件模块文档）。
+_WEISS_SMITH_K = 1.1
+
 
 @njit(cache=True, inline='always')
-def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray) -> np.ndarray:
+def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray, mach_ref: float) -> np.ndarray:
     """
-    计算 AUSM+up 数值通量（工业级稳定性增强版）。
+    计算 AUSM+up 数值通量（工业级稳定性增强版，含 Weiss-Smith 低马赫数预处理）。
 
     增强功能:
     1. 压力/密度正性保护 (Pressure/Density Positivity Preservation)
     2. 低马赫数修正 Mp/pu 项 (Liou 2006, AUSM+up 压力/速度扩散项)
+    3. Weiss-Smith 特征值预处理（2026-08-23 新增，见下方"预处理声速"一节）
 
     Args:
         qL: 左侧状态 (rho, u, v, w, p)，形状 (5,)
         qR: 右侧状态 (rho, u, v, w, p)，形状 (5,)
         normal: 单位法向量，形状 (3,)
+        mach_ref: 参考（自由来流）马赫数，必须显式传入（无默认值——上一次
+            "只改 CFL 不改通量"的预处理尝试（2026-08-14，见 cfl.py 模块
+            文档"已撤销"一节）就是因为参考马赫数在两处不同步才导致失稳，
+            这次要求调用方在每次调用都显式给出同一个值，任何遗漏都会在
+            调用点直接报 TypeError 而不是静默用错的默认值）。
 
     Returns:
         flux: 守恒变量通量，形状 (5,)
@@ -54,24 +65,51 @@ def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray) -> 
     aL = np.sqrt(max(gamma * pL / rhoL, 1e-10))
     aR = np.sqrt(max(gamma * pR / rhoR, 1e-10))
 
-    # 马赫数
-    M_L = unL / max(aL, 1e-10)
-    M_R = unR / max(aR, 1e-10)
-
-    # === 2. 界面声速与低马赫数标度函数 (Liou 2006, AUSM+up) ===
+    # === 2. 界面声速、Weiss-Smith 预处理声速、低马赫数标度函数 ===
     # a_half 用简单算术平均（工程上常见的近似，非 Liou 原文的临界声速构造，
     # 但对当前亚声速外流场景足够，且不影响下面 Mp/pu 项的反对称性证明）。
     a_half = 0.5 * (aL + aR)
     rho_half = 0.5 * (rhoL + rhoR)
 
-    # Mbar^2 = (unL^2+unR^2)/(2*a_half^2) 在 (L,R,n)->(R,L,-n) 变换下不变
-    # （法向翻转使 unL/unR 同时变号但平方不变），fa 因此也不变——这是下面
-    # Mp/pu 项能保持通量反对称性 F(A,B,n)=-F(B,A,-n) 的前提。
+    # Mbar^2 = (unL^2+unR^2)/(2*a_half^2)（用*物理*声速算，不能用下面的
+    # 预处理声速，否则 beta2 的定义会自我循环）在 (L,R,n)->(R,L,-n) 变换
+    # 下不变（法向翻转使 unL/unR 同时变号但平方不变）——这是 fa 和下面
+    # beta2 都能保持通量反对称性 F(A,B,n)=-F(B,A,-n) 的共同前提。
     Mbar2 = (unL**2 + unR**2) / (2.0 * a_half**2)
-    Ma_ref = 0.1  # 截断参考马赫数（未接入自由来流马赫数时的局部近似）
-    M0_sq = min(1.0, max(Mbar2, Ma_ref**2))
+
+    # fa：Liou (2006) AUSM+up 自带的低马赫数标度函数，只缩放 Mp/pu 修正项
+    # 的幅度。此前这里的 Ma_ref 硬编码成 0.1，不接真实自由来流马赫数，
+    # 现在直接用调用方传入的 mach_ref（与下面 beta2 用的是同一个真实值，
+    # 不再是两个互相不知道对方存在的"低马赫数修正"）。
+    M0_sq = min(1.0, max(Mbar2, mach_ref**2))
     fa = np.sqrt(M0_sq) * (2.0 - np.sqrt(M0_sq))
     fa = max(fa, 1e-6)
+
+    # Weiss-Smith 特征值预处理（core/utils/preconditioning.py::
+    # preconditioned_acoustic_eigs 的公式，逐字对应，理由/推导见该文件
+    # 模块文档；这里内联而不是直接调用该函数，是因为那个函数按"单个
+    # 特征速度 un/a"设计（HLLC 的 SL/SR 场景），AUSM+up 要求 beta2 是
+    # 界面共享的单一值（用上面已经证明在 L/R 互换下不变的 Mbar2 算），
+    # 不是分别给 L、R 各算一个——直接调用会破坏这个共享不变量、进而破坏
+    # 反对称性证明）。beta2 只在局部马赫数趋于 1（跨/超声速）时精确等于
+    # 1（此时预处理声速退化为物理声速，通量退化为未预处理形式）；本项目
+    # 典型亚声速外流工况（M~0.09）下 beta2 会被压到 _WEISS_SMITH_K*
+    # mach_ref^2 这个下限附近，预处理声速比物理声速小一个数量级，这是
+    # Weiss-Smith 预处理设计上就要做的事（减少低马赫数下的过量声学耗散），
+    # 不是数值不稳定的迹象。qL=qR 时 Mp=0（(pR-pL)=0）、pu 项的 (unR-unL)=0
+    # ——mass_flux 和 p_half 的相容性 F(U,U)=F(U) 与 beta2 取值无关（已用
+    # M+(M)+M-(M)≡M、P+(M)+P-(M)≡1 两个恒等式在任意 beta2 下验证过）。
+    beta2 = min(1.0, max(max(Mbar2, _WEISS_SMITH_K * mach_ref**2), 1e-10))
+    sqrt_beta2 = np.sqrt(beta2)
+    aL_p = sqrt_beta2 * aL
+    aR_p = sqrt_beta2 * aR
+    a_half_p = sqrt_beta2 * a_half
+
+    # 马赫数：用预处理声速算（这是预处理真正改变通量数值的地方——
+    # 预处理声速变小 ⇒ 局部马赫数被放大 ⇒ M±/P± 分裂函数对这个面的
+    # 响应更接近"高马赫"区域的行为，从而降低人为声学耗散）。
+    M_L = unL / max(aL_p, 1e-10)
+    M_R = unR / max(aR_p, 1e-10)
 
     # === 3. AUSM+ 质量通量分裂 (van Leer 多项式分裂函数) ===
     # 标准形式（Liou 1996, AUSM+）: M+(M)+M-(M) ≡ M（相容性要求：qL=qR时
@@ -103,11 +141,18 @@ def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray) -> 
     # Mp 项是 Liou 原始 AUSM+up 方案自带的低马赫数稳定化机制，(pR-pL) 在同一
     # 变换下翻号、其余因子（Mbar2/rho_half/a_half/fa）不变，故 Mp 本身翻号，
     # 叠加到已验证满足反对称性的 M_half 上不会破坏该性质。
+    # Mp 的声速项、mass_flux 前面的声阻抗项都改用预处理声速 aL_p/aR_p/
+    # a_half_p（原来是 aL/aR/a_half）——这是 Weiss-Smith 预处理在
+    # mass_flux 上生效的地方；qL=qR 时 (pR-pL)=0 ⇒ Mp=0，
+    # M_plus(M)+M_minus(M)≡M 恒等式与 M 具体等于多少（物理还是预处理
+    # Mach）无关，mass_flux = rho*aL_p*(M_half+0) = rho*aL_p*(un/aL_p)
+    # = rho*un——相容性不因预处理声速的引入而破坏，见函数文档"Weiss-
+    # Smith 特征值预处理"一节。
     Kp = 0.25
     sigma_p = 1.0
     M_half = M_plus(M_L) + M_minus(M_R)
-    Mp = -(Kp / fa) * max(1.0 - sigma_p * Mbar2, 0.0) * (pR - pL) / (rho_half * a_half**2)
-    mass_flux = 0.5 * (rhoL * aL + rhoR * aR) * (M_half + Mp)
+    Mp = -(Kp / fa) * max(1.0 - sigma_p * Mbar2, 0.0) * (pR - pL) / (rho_half * a_half_p**2)
+    mass_flux = 0.5 * (rhoL * aL_p + rhoR * aR_p) * (M_half + Mp)
 
     # === 5. AUSM+up 压力通量分裂 ===
     def P_plus(M):
@@ -131,7 +176,7 @@ def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray) -> 
     # 通量的反对称性，pu 项不破坏这一点。
     Ku = 0.75
     p_half = P_plus(M_L) * pL + P_minus(M_R) * pR \
-        - Ku * P_plus(M_L) * P_minus(M_R) * (rhoL + rhoR) * fa * a_half * (unR - unL)
+        - Ku * P_plus(M_L) * P_minus(M_R) * (rhoL + rhoR) * fa * a_half_p * (unR - unL)
 
     # === 6. 构造最终通量 ===
     # 动量/能量的对流部分必须按 mass_flux 的符号做简单迎风选择（AUSM 族

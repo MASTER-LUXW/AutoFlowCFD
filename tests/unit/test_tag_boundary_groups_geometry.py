@@ -91,6 +91,53 @@ class TestCellBasedTaggingMisattributesCornerCellFaces:
         assert group_code[0] == group_code[1]
         assert group_code[0] == name_to_code["FARFIELD"]  # last-iterated wins
 
+    def test_warns_loudly_about_the_specific_ambiguous_cell(self):
+        """2026-08-23 fix: a true per-face fix is impossible from
+        cell-granular input alone (the group->cell_ids mapping has
+        already lost which face belongs to which group) - so the fallback
+        must at least turn this from a silent mis-tag into a loud,
+        diagnosable warning naming the specific cell and the conflicting
+        group names, instead of the previous complete silence."""
+        from loguru import logger
+
+        fc = _corner_cell_face_conn()
+        boundary_groups = {
+            "WALL": np.array([0], dtype=np.int32),
+            "FARFIELD": np.array([0], dtype=np.int32),
+        }
+        messages = []
+        handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING")
+        try:
+            tag_boundary_groups(fc, boundary_groups)
+        finally:
+            logger.remove(handler_id)
+
+        ambiguity_warnings = [m for m in messages if "claimed by more than one" in m]
+        assert len(ambiguity_warnings) == 1, f"expected exactly one ambiguity warning, got: {messages}"
+        assert "cell 0" in ambiguity_warnings[0]
+        assert "WALL" in ambiguity_warnings[0] and "FARFIELD" in ambiguity_warnings[0]
+
+    def test_no_ambiguity_warning_when_groups_do_not_overlap(self):
+        """Non-overlapping groups (the common case, e.g. cube_demo's four
+        boundary groups) must not trigger the new warning - it should
+        only fire for genuinely ambiguous cells."""
+        from loguru import logger
+
+        fc = _corner_cell_face_conn()
+        boundary_groups = {
+            "WALL": np.array([0], dtype=np.int32),
+            "FARFIELD": np.array([1], dtype=np.int32),
+        }
+        messages = []
+        handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING")
+        try:
+            tag_boundary_groups(fc, boundary_groups)
+        finally:
+            logger.remove(handler_id)
+
+        ambiguity_warnings = [m for m in messages if "claimed by more than one" in m]
+        assert ambiguity_warnings == []
+
 
 class TestGeometricTaggingResolvesCornerCellCorrectly:
     def test_each_face_gets_its_own_true_group(self):

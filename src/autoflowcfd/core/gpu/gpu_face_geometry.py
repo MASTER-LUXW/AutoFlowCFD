@@ -62,6 +62,19 @@ class GPUFlatFaceGeometry:
             # ── 面法向 ──
             self.true_normal = cp.asarray(flat_face.true_normal)
 
+            # ── 自洽方向 adj(J) 行（未归一化、未按 side 定向的原始值，
+            # 语义与 CPU 端 owner_adj_row_exact/neighbor_adj_row_exact 一致，
+            # 见 fr/face_flux_points_exact_normal.py 模块文档）——2026-08-23
+            # 新增，供 GPU 粘性界面校正使用：CPU 端粘性 kernel
+            # （viscous_flux_kernel.py）用这两行的原始 (a0,a1,a2) 分量直接
+            # 把物理通量投影成逆变（tilde）形式，不是先归一化成单位法向
+            # 再单独乘面积——GPU 无粘界面校正（_compute_interface_correction_
+            # gpu）目前只用 true_normal（单位法向），这里为粘性项额外上传
+            # 这两个字段，不改动无粘路径的既有行为。
+
+            self.owner_adj_row_exact = cp.asarray(flat_face.owner_adj_row_exact)
+            self.neighbor_adj_row_exact = cp.asarray(flat_face.neighbor_adj_row_exact)
+
             # ── 邻居源数据（src0 = 主要来源矩阵，src1 = 稀疏第二来源）──
             self.neighbor_src0_cell = cp.asarray(flat_face.neighbor_src0_cell)
             self.neighbor_src0_mat = cp.asarray(flat_face.neighbor_src0_mat)

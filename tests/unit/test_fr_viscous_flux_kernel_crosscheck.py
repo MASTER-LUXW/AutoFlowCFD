@@ -84,10 +84,11 @@ def _compute_residual_via_new_kernel(U, mesh, ops, mu_t_field=None, boundary_gho
     n_threads = numba.get_num_threads()
     correction = compute_viscous_interface_correction_kernel(
         Q, grad_vel, grad_T, mu_t_field,
-        adj_j, det_jacs, MU, PR, PR_T,
+        det_jacs, MU, PR, PR_T,
         flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
         flat.owner_axis, flat.owner_side, flat.neighbor_axis, flat.neighbor_side,
         flat.owner_is_primary, flat.neighbor_is_primary,
+        flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
         flat.neighbor_src0_cell, flat.neighbor_src0_mat,
         flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
         flat.owner_src0_cell, flat.owner_src0_mat,

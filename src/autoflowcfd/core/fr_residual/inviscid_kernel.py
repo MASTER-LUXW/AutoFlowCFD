@@ -85,12 +85,13 @@ def _distribute_point(fp_data: np.ndarray, fp_of_sp_axis: np.ndarray,
 
 @njit(cache=True, parallel=True)
 def compute_inviscid_interface_correction_kernel(
-    Q: np.ndarray, adj_j: np.ndarray, det_jacs: np.ndarray,
+    Q: np.ndarray, det_jacs: np.ndarray,
     owner_cell: np.ndarray, neighbor_cell: np.ndarray, is_boundary: np.ndarray,
     owner_axis: np.ndarray, owner_side: np.ndarray,
     neighbor_axis: np.ndarray, neighbor_side: np.ndarray,
     owner_is_primary: np.ndarray, neighbor_is_primary: np.ndarray,
     true_normal: np.ndarray,
+    owner_adj_row_exact: np.ndarray, neighbor_adj_row_exact: np.ndarray,
     neighbor_src0_cell: np.ndarray, neighbor_src0_mat: np.ndarray,
     neighbor_src1_idx: np.ndarray, neighbor_src1_cell: np.ndarray, neighbor_src1_mat: np.ndarray,
     owner_src0_cell: np.ndarray, owner_src0_mat: np.ndarray,
@@ -101,6 +102,7 @@ def compute_inviscid_interface_correction_kernel(
     dist_fp_of_sp: np.ndarray, dist_axis_coord_of_sp: np.ndarray,
     n_prism: int,
     n_threads: int,
+    mach_ref: float,
 ) -> np.ndarray:
     """返回 correction，形状 (n_cells, n_sps, 5)，与
     fr_residual_inviscid.py::compute_inviscid_residual_fr 里"--- 界面项
@@ -110,6 +112,17 @@ def compute_inviscid_interface_correction_kernel(
     get_num_threads()`，理由见模块文档"多核并行"一节——不能在这个函数
     内部自己查询（会破坏磁盘缓存）。多线程下累加顺序不再是严格的
     `range(n_faces)` 顺序，验证判据也相应分层，见模块文档。
+
+    真实 bug 修复（2026-08-23，见 fr/face_flux_points_exact_normal.py
+    模块文档完整原理）：`owner_adj_row_exact`/`neighbor_adj_row_exact`
+    取代了此前这里对 `adj_j`（SP 网格上的度量）用 `E_o`/`E_n` 做
+    Lagrange 外插到 FP 得到"自洽方向"的做法——外插对坍缩坐标下本质是
+    有理函数的 adj(J) 有不可忽略的截断误差（P1 尤其明显）。改为在
+    mesh 加载阶段一次性预计算好的、每个 FP 自己精确参考坐标处的解析
+    Jacobian 值，直接查表读取，消除这部分截断误差——原来的 `adj_j`
+    参数（SP 网格度量）因此不再被本函数需要，已从签名中移除（同文件
+    的 `compute_boundary_ghost_states` 是另一个独立函数，自己的
+    `adj_j` 参数不受影响）。
     """
     n_cells = Q.shape[0]
     n_sps = Q.shape[1]
@@ -130,8 +143,7 @@ def compute_inviscid_interface_correction_kernel(
             E_o = boundary_extrap[celltype_o, oax, oside_idx]  # (n_fp, n_sps)
 
             Q_o = _extrap_matmul(Q[oc], E_o)  # (n_fp, 5)
-            # adj_j[oc][:, oax, :] -> (n_sps, 3)
-            adjrow_o = _extrap_matmul(np.ascontiguousarray(adj_j[oc, :, oax, :]), E_o)  # (n_fp, 3)
+            adjrow_o = owner_adj_row_exact[f]  # (n_fp, 3)，逐 FP 精确值，见函数文档
 
             jump_owner = np.zeros((n_fp, 5))
             for i in range(n_fp):
@@ -178,7 +190,7 @@ def compute_inviscid_interface_correction_kernel(
                 normal[0] = dirx
                 normal[1] = diry
                 normal[2] = dirz
-                F_common_n = compute_ausm_up_flux(Q_o[i], Q_n, normal)  # (5,)
+                F_common_n = compute_ausm_up_flux(Q_o[i], Q_n, normal, mach_ref)  # (5,)
 
                 F_tilde_common = np.empty(5)
                 for v in range(5):
@@ -211,7 +223,7 @@ def compute_inviscid_interface_correction_kernel(
             E_n = boundary_extrap[celltype_n, nax, nside_idx]
 
             Q_n_native = _extrap_matmul(Q[nc], E_n)  # (n_fp,5)
-            adjrow_n_native = _extrap_matmul(np.ascontiguousarray(adj_j[nc, :, nax, :]), E_n)  # (n_fp,3)
+            adjrow_n_native = neighbor_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
 
             jump_neighbor = np.zeros((n_fp, 5))
             for i in range(n_fp):
@@ -258,7 +270,7 @@ def compute_inviscid_interface_correction_kernel(
                 normal[0] = dirx
                 normal[1] = diry
                 normal[2] = dirz
-                F_common_n_native = compute_ausm_up_flux(Q_n_native[i], Q_o_at_n, normal)
+                F_common_n_native = compute_ausm_up_flux(Q_n_native[i], Q_o_at_n, normal, mach_ref)
 
                 F_tilde_common_n = np.empty(5)
                 for v in range(5):

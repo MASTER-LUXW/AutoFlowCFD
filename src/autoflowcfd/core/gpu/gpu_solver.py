@@ -89,7 +89,10 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         self.n_vars = n_vars
         self.device_id = device_id
         self.mu_molecular = mu_molecular
-        self.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf}
+        # mach_ref：与 CPU 版 FRSolver.__init__（fr_solver/solver.py）
+        # 同一套计算方式/同一个用途，见该文件对应注释。
+        mach_ref = vel_inf / np.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10))
+        self.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf, "mach_ref": mach_ref}
         self.boundary_ghost_provider = boundary_ghost_provider
         self.turb_model_name = turb_model
         self.turb_model_gpu = None  # GPU 湍流模型（可选）
@@ -198,7 +201,7 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
             # 路径提取函数，数学上是同一批数据，只是不再逐面构造对象。
             n_faces = fc.n_faces
             from autoflowcfd.core.fr_residual.inviscid_p0 import _extract_p0_face_geometry
-            normal, area_w = _extract_p0_face_geometry(self.mesh.face_flux_points, n_faces)
+            normal, area_w = _extract_p0_face_geometry(self.mesh.face_flux_points, fc, n_faces)
             normal_gpu = cp.asarray(normal)
             area_w_gpu = cp.asarray(area_w)
             volumes_gpu = self.mesh_data.get('cell_volumes')
@@ -212,6 +215,7 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
                 Q_flat, owner, neighbor, is_bnd,
                 normal_gpu, area_w_gpu, volumes_gpu,
                 Q_ghost, self.mesh.n_cells, n_faces,
+                mach_ref=self.freestream["mach_ref"],
             )
             # 扩展到 (n_cells, n_sps, 5)
             return cp.broadcast_to(res, (self.mesh.n_cells, self.mesh.n_sps_per_cell, 5)).copy()
@@ -225,6 +229,7 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
                 ops_data=self.ops_data,
                 flat_face_gpu=self.flat_face_gpu,
                 device_id=self.device_id,
+                mach_ref=self.freestream["mach_ref"],
             )
 
     def compute_viscous_residual_gpu(self, U_trial=None, mu_t_field=None):
@@ -243,8 +248,10 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
             U, self.mesh, self.ops,
             mu=self.mu_molecular,
             mu_t_field=mu_t_field,
+            boundary_ghost_provider=self.boundary_ghost_provider,
             mesh_data=self.mesh_data,
             ops_data=self.ops_data,
+            flat_face_gpu=self.flat_face_gpu,
             device_id=self.device_id,
         )
 
@@ -268,7 +275,7 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         # 调用的局部 CFL 步长计算，逐面对象构造的开销在这里同样是每步
         # 复现，不是一次性成本。
         from autoflowcfd.core.fr_residual.inviscid_p0 import _extract_p0_face_geometry
-        normal, area_w = _extract_p0_face_geometry(self.mesh.face_flux_points, n_faces)
+        normal, area_w = _extract_p0_face_geometry(self.mesh.face_flux_points, fc, n_faces)
         normals_gpu = cp.asarray(normal)
         areas_gpu = cp.asarray(area_w)
 
@@ -287,6 +294,7 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
                 normals_gpu, areas_gpu,
                 None, None,
                 cfl=self.time_integrator.cfl,
+                mach_ref=self.freestream["mach_ref"],
             )
             dt_all_sps[:, sp] = dt_sp
 

@@ -268,7 +268,51 @@ def tag_boundary_groups(
     boundary_idx = face_conn.get_boundary_face_indices()
     boundary_owners = face_conn.owner_cell[boundary_idx]
 
-    n_unmatched = 0
+    # 真实 bug 修复（2026-08-23，用户明确要求处理这个此前已确认、未修复
+    # 的缺陷）：这个函数按 owner *单元* 匹配，对角单元（同一个单元的两个
+    # 不同边界面分属两个不同组）本质上没有足够信息真正修复——单元级别的
+    # `boundary_groups: name->cell_ids` 输入本身就丢失了"这个单元具体
+    # 哪个面属于哪个组"这个信息，唯一真正修复过的路径是
+    # `tag_boundary_groups_by_geometry`（有原始面网格几何数据时优先走
+    # 这条，见 `tag_boundary_groups_for_mesh`），本函数只在没有原始面
+    # 网格数据时作为后备。既然真正修复不可行，这里做能做到的最好事情：
+    # 在赋值*之前*先检测哪些单元被多个组同时声称拥有，把这个此前完全
+    # 静默的数据缺陷变成一个明确、可诊断的告警（列出具体单元和冲突的
+    # 组名），而不是像之前那样"最后一个循环到的组覆盖前面的"、不留任何
+    # 痕迹地错标角单元的某个边界面。
+    group_items = list(boundary_groups.items())
+    boundary_owner_set = set(np.unique(boundary_owners).tolist())
+    ambiguous: Dict[int, list] = {}
+    for i in range(len(group_items)):
+        name_i, cell_ids_i = group_items[i]
+        set_i = set(np.asarray(cell_ids_i).tolist()) & boundary_owner_set
+        for j in range(i + 1, len(group_items)):
+            name_j, cell_ids_j = group_items[j]
+            set_j = set(np.asarray(cell_ids_j).tolist())
+            for cid in (set_i & set_j):
+                names = ambiguous.setdefault(cid, [])
+                if name_i not in names:
+                    names.append(name_i)
+                if name_j not in names:
+                    names.append(name_j)
+
+    if ambiguous:
+        sample = list(ambiguous.items())[:10]
+        sample_str = "; ".join(f"cell {cid} in groups {names}" for cid, names in sample)
+        logger.warning(
+            f"tag_boundary_groups: {len(ambiguous)} boundary owner cell(s) are claimed "
+            f"by more than one boundary_groups entry (corner/edge cells touching two "
+            f"different boundary patches) — this cell-granular fallback cannot "
+            f"correctly disambiguate which of that cell's boundary faces belongs to "
+            f"which group (only tag_boundary_groups_by_geometry, which needs the "
+            f"original surface mesh, can); for these cells, group assignment falls "
+            f"back to whichever group is iterated last, so some faces WILL be "
+            f"mistagged. Provide the original surface mesh (e.g. via --surface-mesh "
+            f"or a .pkl that carries VolumeMeshData.surface_mesh) to use the correct "
+            f"geometric path instead. Examples: {sample_str}"
+            + (f" (+{len(ambiguous) - 10} more)" if len(ambiguous) > 10 else "")
+        )
+
     for code, (name, cell_ids) in enumerate(boundary_groups.items()):
         name_to_code[name] = code
         cell_id_set = np.asarray(cell_ids)

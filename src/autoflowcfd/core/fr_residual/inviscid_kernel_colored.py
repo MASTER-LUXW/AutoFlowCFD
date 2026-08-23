@@ -42,12 +42,13 @@ def _distribute_point(fp_data: np.ndarray, fp_of_sp_axis: np.ndarray,
 
 @njit(cache=True, parallel=True)
 def compute_inviscid_interface_correction_kernel_colored(
-    Q: np.ndarray, adj_j: np.ndarray, det_jacs: np.ndarray,
+    Q: np.ndarray, det_jacs: np.ndarray,
     owner_cell: np.ndarray, neighbor_cell: np.ndarray, is_boundary: np.ndarray,
     owner_axis: np.ndarray, owner_side: np.ndarray,
     neighbor_axis: np.ndarray, neighbor_side: np.ndarray,
     owner_is_primary: np.ndarray, neighbor_is_primary: np.ndarray,
     true_normal: np.ndarray,
+    owner_adj_row_exact: np.ndarray, neighbor_adj_row_exact: np.ndarray,
     neighbor_src0_cell: np.ndarray, neighbor_src0_mat: np.ndarray,
     neighbor_src1_idx: np.ndarray, neighbor_src1_cell: np.ndarray, neighbor_src1_mat: np.ndarray,
     owner_src0_cell: np.ndarray, owner_src0_mat: np.ndarray,
@@ -59,6 +60,7 @@ def compute_inviscid_interface_correction_kernel_colored(
     n_prism: int,
     face_indices: np.ndarray,  # 当前颜色组的面索引
     correction: np.ndarray,    # 共享输出 buffer（同色面无冲突，直接写入）
+    mach_ref: float,
 ) -> None:
     """图着色版本的无粘界面 kernel。
 
@@ -69,6 +71,12 @@ def compute_inviscid_interface_correction_kernel_colored(
 
     调用方按颜色循环调用此函数，每种颜色处理约 n_faces/n_colors 个面。
     内存从 O(n_threads * n_cells * n_sps * 5) 降至 O(n_cells * n_sps * 5)。
+
+    真实 bug 修复（2026-08-23，见 fr/face_flux_points_exact_normal.py
+    模块文档）：`owner_adj_row_exact`/`neighbor_adj_row_exact` 取代了
+    此前这里对 `adj_j` 做 Lagrange 外插得到"自洽方向"的做法，理由与
+    compute_inviscid_interface_correction_kernel（非 colored 版本）
+    完全相同，两处必须同步修改。`adj_j` 参数因此从签名中移除。
     """
     n_cells = Q.shape[0]
     n_sps = Q.shape[1]
@@ -87,7 +95,7 @@ def compute_inviscid_interface_correction_kernel_colored(
             E_o = boundary_extrap[celltype_o, oax, oside_idx]
 
             Q_o = _extrap_matmul(Q[oc], E_o)
-            adjrow_o = _extrap_matmul(np.ascontiguousarray(adj_j[oc, :, oax, :]), E_o)
+            adjrow_o = owner_adj_row_exact[f]  # (n_fp, 3)，逐 FP 精确值，见函数文档
 
             jump_owner = np.zeros((n_fp, 5))
             for i in range(n_fp):
@@ -133,7 +141,7 @@ def compute_inviscid_interface_correction_kernel_colored(
                 normal[0] = dirx
                 normal[1] = diry
                 normal[2] = dirz
-                F_common_n = compute_ausm_up_flux(Q_o[i], Q_n, normal)
+                F_common_n = compute_ausm_up_flux(Q_o[i], Q_n, normal, mach_ref)
 
                 F_tilde_common = np.empty(5)
                 for v in range(5):
@@ -166,7 +174,7 @@ def compute_inviscid_interface_correction_kernel_colored(
             E_n = boundary_extrap[celltype_n, nax, nside_idx]
 
             Q_n_native = _extrap_matmul(Q[nc], E_n)
-            adjrow_n_native = _extrap_matmul(np.ascontiguousarray(adj_j[nc, :, nax, :]), E_n)
+            adjrow_n_native = neighbor_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
 
             jump_neighbor = np.zeros((n_fp, 5))
             for i in range(n_fp):
@@ -212,7 +220,7 @@ def compute_inviscid_interface_correction_kernel_colored(
                 normal[0] = dirx
                 normal[1] = diry
                 normal[2] = dirz
-                F_common_n_native = compute_ausm_up_flux(Q_n_native[i], Q_o_at_n, normal)
+                F_common_n_native = compute_ausm_up_flux(Q_n_native[i], Q_o_at_n, normal, mach_ref)
 
                 F_tilde_common_n = np.empty(5)
                 for v in range(5):

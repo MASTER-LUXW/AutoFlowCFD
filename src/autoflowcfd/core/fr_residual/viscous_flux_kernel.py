@@ -58,11 +58,12 @@ def _extrap_matrix3x3(field_cell: np.ndarray, E: np.ndarray) -> np.ndarray:
 @njit(cache=True, parallel=True)
 def compute_viscous_interface_correction_kernel(
     Q: np.ndarray, grad_vel: np.ndarray, grad_T: np.ndarray, mu_t_field: np.ndarray,
-    adj_j: np.ndarray, det_jacs: np.ndarray, mu: float, Pr: float, Pr_t: float,
+    det_jacs: np.ndarray, mu: float, Pr: float, Pr_t: float,
     owner_cell: np.ndarray, neighbor_cell: np.ndarray, is_boundary: np.ndarray,
     owner_axis: np.ndarray, owner_side: np.ndarray,
     neighbor_axis: np.ndarray, neighbor_side: np.ndarray,
     owner_is_primary: np.ndarray, neighbor_is_primary: np.ndarray,
+    owner_adj_row_exact: np.ndarray, neighbor_adj_row_exact: np.ndarray,
     neighbor_src0_cell: np.ndarray, neighbor_src0_mat: np.ndarray,
     neighbor_src1_idx: np.ndarray, neighbor_src1_cell: np.ndarray, neighbor_src1_mat: np.ndarray,
     owner_src0_cell: np.ndarray, owner_src0_mat: np.ndarray,
@@ -80,6 +81,14 @@ def compute_viscous_interface_correction_kernel(
     `numba.get_num_threads()`，理由见模块文档"多核并行"一节。多线程下
     累加顺序不再是严格的 `range(n_faces)` 顺序，验证判据分层，同
     fr_residual_inviscid_kernel.py。
+
+    真实 bug 修复（2026-08-23，见 fr/face_flux_points_exact_normal.py
+    模块文档）：`owner_adj_row_exact`/`neighbor_adj_row_exact` 取代了
+    此前这里对 `adj_j` 做 Lagrange 外插得到自洽方向的做法，理由与
+    inviscid_kernel.py 完全相同——本函数没有 inviscid_kernel.py 那样的
+    `true_normal` 对齐安全阀，自洽方向是粘性通量法向*唯一*的输入，
+    外插截断误差此前没有任何兜底，本次修复对粘性残差的精度改善因此
+    更直接。`adj_j` 参数已从签名中移除。
     """
     n_cells = Q.shape[0]
     n_sps = Q.shape[1]
@@ -103,7 +112,7 @@ def compute_viscous_interface_correction_kernel(
             gv_o = _extrap_matrix3x3(grad_vel[oc], E_o)  # (n_fp,3,3)
             gT_o = _extrap_matmul(grad_T[oc], E_o)  # (n_fp,3)
             mut_o = E_o @ mu_t_field[oc]  # (n_fp,)
-            adjrow_o = _extrap_matmul(np.ascontiguousarray(adj_j[oc, :, oax, :]), E_o)  # (n_fp,3)
+            adjrow_o = owner_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
 
             vol_o = 0.0
             for s in range(n_sps):
@@ -213,7 +222,7 @@ def compute_viscous_interface_correction_kernel(
             gv_n_native = _extrap_matrix3x3(grad_vel[nc], E_n)  # (n_fp,3,3)
             gT_n_native = _extrap_matmul(grad_T[nc], E_n)  # (n_fp,3)
             mut_n_native = E_n @ mu_t_field[nc]  # (n_fp,)
-            adjrow_n_native = _extrap_matmul(np.ascontiguousarray(adj_j[nc, :, nax, :]), E_n)  # (n_fp,3)
+            adjrow_n_native = neighbor_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
 
             jump_neighbor = np.zeros((n_fp, 5))
             for i in range(n_fp):
@@ -292,11 +301,12 @@ def compute_viscous_interface_correction_kernel(
 @njit(cache=True, parallel=True)
 def compute_viscous_interface_correction_kernel_colored(
     Q: np.ndarray, grad_vel: np.ndarray, grad_T: np.ndarray, mu_t_field: np.ndarray,
-    adj_j: np.ndarray, det_jacs: np.ndarray, mu: float, Pr: float, Pr_t: float,
+    det_jacs: np.ndarray, mu: float, Pr: float, Pr_t: float,
     owner_cell: np.ndarray, neighbor_cell: np.ndarray, is_boundary: np.ndarray,
     owner_axis: np.ndarray, owner_side: np.ndarray,
     neighbor_axis: np.ndarray, neighbor_side: np.ndarray,
     owner_is_primary: np.ndarray, neighbor_is_primary: np.ndarray,
+    owner_adj_row_exact: np.ndarray, neighbor_adj_row_exact: np.ndarray,
     neighbor_src0_cell: np.ndarray, neighbor_src0_mat: np.ndarray,
     neighbor_src1_idx: np.ndarray, neighbor_src1_cell: np.ndarray, neighbor_src1_mat: np.ndarray,
     owner_src0_cell: np.ndarray, owner_src0_mat: np.ndarray,
@@ -318,6 +328,11 @@ def compute_viscous_interface_correction_kernel_colored(
 
     调用方按颜色循环调用此函数，每种颜色处理约 n_faces/n_colors 个面。
     内存从 O(n_threads * n_cells * n_sps * 5) 降至 O(n_cells * n_sps * 5)。
+
+    真实 bug 修复（2026-08-23）：`owner_adj_row_exact`/
+    `neighbor_adj_row_exact` 取代 `adj_j` 外插，理由与
+    compute_viscous_interface_correction_kernel（非 colored 版本）
+    完全相同，两处必须同步修改。`adj_j` 参数已从签名中移除。
     """
     n_cells = Q.shape[0]
     n_sps = Q.shape[1]
@@ -339,7 +354,7 @@ def compute_viscous_interface_correction_kernel_colored(
             gv_o = _extrap_matrix3x3(grad_vel[oc], E_o)
             gT_o = _extrap_matmul(grad_T[oc], E_o)
             mut_o = E_o @ mu_t_field[oc]
-            adjrow_o = _extrap_matmul(np.ascontiguousarray(adj_j[oc, :, oax, :]), E_o)
+            adjrow_o = owner_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
 
             vol_o = 0.0
             for s in range(n_sps):
@@ -446,7 +461,7 @@ def compute_viscous_interface_correction_kernel_colored(
             gv_n_native = _extrap_matrix3x3(grad_vel[nc], E_n)
             gT_n_native = _extrap_matmul(grad_T[nc], E_n)
             mut_n_native = E_n @ mu_t_field[nc]
-            adjrow_n_native = _extrap_matmul(np.ascontiguousarray(adj_j[nc, :, nax, :]), E_n)
+            adjrow_n_native = neighbor_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
 
             jump_neighbor = np.zeros((n_fp, 5))
             for i in range(n_fp):

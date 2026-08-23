@@ -69,28 +69,55 @@ class TestSuppressResidualOutliers:
 
 
 def _reference_cell_face_misalignment(mesh):
-    """Original per-face Python-loop implementation, kept only as an
-    independent oracle for the numba-based replacement (real perf bug: this
-    version indexes `mesh.face_flux_points[f]` for every face, which since
-    the flat-array refactor lazily *constructs* a full FaceFluxPointGeometry
-    object per access - 1.88M such constructions measured to cost minutes on
-    a production mesh)."""
+    """Independent per-face Python-loop oracle for
+    `precompute_cell_face_misalignment`'s numba kernel (real perf bug this
+    guards against: indexing `mesh.face_flux_points[f]` for every face
+    lazily *constructs* a full FaceFluxPointGeometry object per access -
+    1.88M such constructions measured to cost minutes on a production mesh,
+    see `_cell_face_misalignment_kernel`'s docstring for the fix).
+
+    Updated 2026-08-23 (see fr/face_flux_points_exact_normal.py module
+    docstring): `own_dir_outward` used to be computed here via its own
+    independent SP-grid Lagrange extrapolation of `adj_j` - an
+    *approximation* of the true local metric direction, with real
+    truncation error (worse at low order). The production kernel now reads
+    the exact per-FP adj(J) row precomputed at mesh-load time instead of
+    extrapolating - this reference must use the same exact values (still
+    computed independently here, via `compute_exact_adj_rows` rather than
+    the kernel's own precomputed arrays, so this remains a real oracle for
+    the *reduction loop* logic, not a tautology) or it would be comparing
+    the new kernel against a stale, less-accurate approximation of a
+    different quantity.
+    """
+    from autoflowcfd.fr.face_flux_points_exact_normal import compute_exact_adj_rows
+
     fc = mesh.face_connectivity
     ffp_list = mesh.face_flux_points
     n_prism = mesh.n_prism_cells
-    ops = mesh.operators
-    det_jacs = mesh.jacobians["det_jacs"].reshape(mesh.n_cells, -1)
-    inv_jacs = mesh.jacobians["inv_jacs"].reshape(mesh.n_cells, -1, 3, 3)
-    adj_j = det_jacs[..., None, None] * inv_jacs
+    n1d = mesh.n_points_1d
+    sps_1d = ffp_list._sps_1d
 
-    def extrap_to_face(cell, field, axis, side):
-        E = ops.boundary_extrap_prism[(axis, side)] if cell < n_prism else ops.boundary_extrap_tet[(axis, side)]
-        trailing = field.shape[1:]
-        flat = E @ field.reshape(field.shape[0], -1)
-        return flat.reshape((E.shape[0],) + trailing)
+    owner_adj_row = compute_exact_adj_rows(
+        fc.n_faces, n1d, sps_1d, n_prism,
+        cell_arr=fc.owner_cell.astype(np.int64),
+        axis_arr=ffp_list.owner_axis.astype(np.int64),
+        side_arr=ffp_list.owner_side.astype(np.float64),
+        prism_conn=mesh._fixed_prism_conn if mesh._fixed_prism_conn is not None else np.empty((0, 6), dtype=np.int64),
+        tet_conn=mesh._fixed_tet_conn if mesh._fixed_tet_conn is not None else np.empty((0, 4), dtype=np.int64),
+        node_coords=mesh._node_coords,
+    )
+    neighbor_adj_row = compute_exact_adj_rows(
+        fc.n_faces, n1d, sps_1d, n_prism,
+        cell_arr=fc.neighbor_cell.astype(np.int64),
+        axis_arr=ffp_list.neighbor_axis.astype(np.int64),
+        side_arr=ffp_list.neighbor_side.astype(np.float64),
+        prism_conn=mesh._fixed_prism_conn if mesh._fixed_prism_conn is not None else np.empty((0, 6), dtype=np.int64),
+        tet_conn=mesh._fixed_tet_conn if mesh._fixed_tet_conn is not None else np.empty((0, 4), dtype=np.int64),
+        node_coords=mesh._node_coords,
+        valid_mask=~fc.is_boundary,
+    )
 
-    def own_dir_outward(cell, axis, side):
-        row = extrap_to_face(cell, adj_j[cell][:, axis, :], axis, side)
+    def own_dir(row, side):
         mag = np.linalg.norm(row, axis=-1)
         return (row / np.maximum(mag[:, None], 1e-300)) * side
 
@@ -99,12 +126,12 @@ def _reference_cell_face_misalignment(mesh):
         ffp = ffp_list[f]
         if ffp.owner_is_primary:
             owner_cell = int(fc.owner_cell[f])
-            d = own_dir_outward(owner_cell, ffp.owner_axis, ffp.owner_side)
+            d = own_dir(owner_adj_row[f], ffp.owner_side)
             misalign = 1.0 - np.sum(d * ffp.true_normal, axis=-1)
             cell_misalign[owner_cell] = max(cell_misalign[owner_cell], float(misalign.max()))
         if (not fc.is_boundary[f]) and ffp.neighbor_is_primary:
             neighbor_cell = int(fc.neighbor_cell[f])
-            d = own_dir_outward(neighbor_cell, ffp.neighbor_axis, ffp.neighbor_side)
+            d = own_dir(neighbor_adj_row[f], ffp.neighbor_side)
             misalign = 1.0 - np.sum(d * (-ffp.true_normal), axis=-1)
             cell_misalign[neighbor_cell] = max(cell_misalign[neighbor_cell], float(misalign.max()))
     return cell_misalign

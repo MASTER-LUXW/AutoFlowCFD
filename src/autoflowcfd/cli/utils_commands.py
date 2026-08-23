@@ -321,15 +321,16 @@ def benchmark(
         U_init[:, :, 0] = rho_inf
         U_init[:, :, 1] = rho_inf * u_inf
         U_init[:, :, 4] = E_inf
+        mach_ref = u_inf / np.sqrt(1.4 * p_inf / rho_inf)
 
         # 预热（触发 Numba JIT 编译）——第一次真实求值失败说明基准测试
         # 本身就跑不通，不能吞掉继续假装成功，让它正常抛出。
-        _ = compute_inviscid_residual_fr(U_init, mesh, ops)
+        _ = compute_inviscid_residual_fr(U_init, mesh, ops, mach_ref=mach_ref)
 
         # 正式基准测试
         t_bench_start = _time.perf_counter()
         for _ in range(iterations):
-            _ = compute_inviscid_residual_fr(U_init, mesh, ops)
+            _ = compute_inviscid_residual_fr(U_init, mesh, ops, mach_ref=mach_ref)
         t_bench = _time.perf_counter() - t_bench_start
 
         # 内存使用

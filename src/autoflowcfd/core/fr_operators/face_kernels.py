@@ -147,6 +147,15 @@ class FlatFaceGeometry:
     owner_is_primary: np.ndarray     # bool (n_faces,)
     neighbor_is_primary: np.ndarray  # bool (n_faces,)
     true_normal: np.ndarray      # float64 (n_faces, n_fp, 3)
+    # 真实 bug 修复（2026-08-23，见 fr/face_flux_points_exact_normal.py
+    # 模块文档）：owner/neighbor 各自的精确 adj(J) 行（未归一化、未按
+    # side 定向），取代此前 inviscid_kernel.py 内部对 SP 网格 adj_j 做
+    # Lagrange 外插得到"自洽方向"的做法——外插对坍缩坐标下本质是有理
+    # 函数的 adj(J) 有截断误差，直接在 FP 精确坐标求值消除这部分误差。
+    # neighbor 侧对边界面为全零占位（无意义，kernel 内 is_boundary 分支
+    # 不会读取）。
+    owner_adj_row_exact: np.ndarray     # float64 (n_faces, n_fp, 3)
+    neighbor_adj_row_exact: np.ndarray  # float64 (n_faces, n_fp, 3)
 
     # --- neighbor_sources（owner 侧用来组装 Q_neighbor 的来源）---
     neighbor_src0_cell: np.ndarray   # int64 (n_faces,)，-1 表示无来源
@@ -264,6 +273,8 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
         neighbor_src1_mat = ffp_data.nb_extra_mat
         owner_src1_cell = ffp_data.ow_extra_cell
         owner_src1_mat = ffp_data.ow_extra_mat
+        owner_adj_row_exact = ffp_data.owner_adj_row_exact
+        neighbor_adj_row_exact = ffp_data.neighbor_adj_row_exact
     else:
         # 慢速路径：逐面访问 FaceFluxPointGeometry 对象
         owner_axis = np.empty(n_faces, dtype=np.int64)
@@ -296,6 +307,19 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
         (owner_src0_cell, owner_src0_mat, owner_src1_idx,
          owner_src1_cell, owner_src1_mat) = _build_source_arrays(
             owner_sources_per_face, n_faces, n_fp, n_sps
+        )
+        # 慢速路径（逐面 FaceFluxPointGeometry 对象）目前没有任何生产
+        # 或测试代码路径会触发（全仓库搜索确认 `face_flux_points` 只会
+        # 被赋值为 _KernelFaceData，见 face_flux_points_exact_normal.py
+        # 相关改动的验证记录）——精确 adj(J) 行的计算需要单元节点坐标，
+        # 这条路径没有随身带这份数据，宁可在真被触发时报错，也不要
+        # 静默填零产出错误物理量。
+        raise NotImplementedError(
+            "build_flat_face_geometry 的慢速路径（非 _KernelFaceData）不支持"
+            "owner_adj_row_exact/neighbor_adj_row_exact 的精确计算——该路径"
+            "目前没有任何已知调用方，如果这里被触发，说明出现了一个新的、"
+            "尚未适配本次 adj(J) 精确化修复的 mesh.face_flux_points 构造方式，"
+            "需要先补上这部分逻辑，不能假装可以正确产出结果。"
         )
 
     # boundary_extrap_tet/prism: Dict[(axis:int,side:float), (n_fp,n_sps)矩阵]
@@ -334,6 +358,7 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
         neighbor_axis=neighbor_axis, neighbor_side=neighbor_side,
         owner_is_primary=owner_is_primary, neighbor_is_primary=neighbor_is_primary,
         true_normal=true_normal,
+        owner_adj_row_exact=owner_adj_row_exact, neighbor_adj_row_exact=neighbor_adj_row_exact,
         neighbor_src0_cell=neighbor_src0_cell, neighbor_src0_mat=neighbor_src0_mat,
         neighbor_src1_idx=neighbor_src1_idx, neighbor_src1_cell=neighbor_src1_cell,
         neighbor_src1_mat=neighbor_src1_mat,

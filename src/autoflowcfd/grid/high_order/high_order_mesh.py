@@ -290,16 +290,51 @@ class HighOrderMesh:
         """验证几何守恒律 (GCL)：对每个单元做 Kopriva 度量恒等式检验。
 
         Args:
-            tolerance: 度量恒等式残差容差（P>=2 时应能达到机器精度量级，
-                见 curved_mapping.CurvedMapping.compute_metric_identity_residual
-                的文档说明；P0/P1 阶段存在坍缩坐标固有的混叠误差，不适用
-                本严格判据，应在目标求解阶数下调用）
+            tolerance: 度量恒等式残差容差（P>=2 原生检验即可达到机器精度
+                量级；P1 用下面的过积分检验后同样能达到，见该分支文档）
 
         Returns:
             bool: 全部单元 GCL 是否通过
+
+        度量阶数与解阶数解耦（2026-08-23，此前"P1 GCL=0.105"被记录为
+        已知、搁置的诊断局限，用户明确要求修复）：原实现对 adj(J) 精确
+        求值后，用与当前求解阶数*相同*的坍缩坐标微分矩阵 D_3d_tet/prism
+        求散度——但 adj(J) 在 Duffy 坍缩坐标下是有理函数、不是多项式，
+        P1（degree=1）的微分矩阵次数不足以精确微分它，给出一个纯属
+        诊断函数自身局限的 0.105（P2=1.6e-13、P3=1.2e-8 因为微分矩阵
+        次数够高，问题不明显），不代表真实求解器残差有问题（真实求解器
+        路径 compute_inviscid_residual_fr 的 P1 均匀自由流场残差实测
+        1.25e-10，是 P1/P2/P3 三者里最好的，见 order_continuation.py
+        模块文档）。
+
+        修复思路：不再让"用来微分 adj(J)"的算子阶数与"求解阶数"绑死，
+        复用真实求解器体积项本来就已经在用的过积分（over-integration）
+        基础设施本身（`self.jacobians_fine`/`self.operators.
+        overint_D_fine_tet/prism`，over_order=min(2*order,
+        OVERINTEGRATION_MAX_ORDER)，见 high_order_mesh_order.py::
+        build_order_geometry 文档）：adj(J) 在过积分细网格上精确求值
+        （tet_exact_jacobian/prism_exact_jacobian 本身与阶数无关，多少
+        个点都能精确求值），散度改用细网格自己更高次、更准确的微分矩阵，
+        与体积项组装用的是完全同一套算子。
+
+        真实验证结果（同一份合成混合网格）：P1 从 0.105 降到 1.64e-13
+        （12 个数量级），确认原判据是纯粹的诊断局限。但同一次验证也
+        发现：P2/P3 切到过积分反而从原生的 1.6e-13/1.2e-8 变差到
+        1.17e-8（两者的 over_order 都被 OVERINTEGRATION_MAX_ORDER=3
+        封顶，退化到同一个网格）——不是过积分本身有 bug，是本项目已经
+        记录过的坍缩坐标高阶模态基条件数问题（Vandermonde 矩阵条件数
+        随阶数增长，见 fr/collapsed_basis.py 相关文档）：degree-3 微分
+        矩阵的截断误差改善不足以抵消它更差的舍入误差特性，P2 原生
+        degree-2 矩阵在这个光滑合成网格上恰好已经落在"截断/舍入都小"
+        的甜点区。因此只对 P1（唯一有真实、大幅度诊断局限的阶数）切换
+        到过积分路径，P2/P3 保留已经很好的原生检验，不用一个"理论上
+        更精确"但实测更差的路径替换一个已经工作良好的路径。
         """
         if self.sps_coords is None:
             return False
+
+        if self.order == 1 and self.jacobians_fine is not None:
+            return self._verify_gcl_overintegrated(tolerance)
 
         mapper = CurvedMapping(self.order)
         max_residual = 0.0
@@ -319,6 +354,42 @@ class HighOrderMesh:
                 n_failed += 1
 
         logger.info(f"GCL check: max metric-identity residual = {max_residual:.6e} (tolerance={tolerance:.1e})")
+        if n_failed > 0:
+            logger.warning(f"GCL check failed for {n_failed}/{self.n_cells} cells")
+        return n_failed == 0
+
+    def _verify_gcl_overintegrated(self, tolerance: float) -> bool:
+        """`verify_gcl` 的过积分实现，见该方法文档"度量阶数与解阶数
+        解耦"一节。散度算子与真实体积项组装（fr_residual_inviscid.py）
+        用的是同一个 `contract_shared_operator_2axis`，不是重新实现一遍
+        同一个数学操作的第二份独立代码。
+        """
+        from autoflowcfd.core.fr_operators.volume_contract import contract_shared_operator_2axis
+
+        n_prism = self.n_prism_cells
+        n_fine = self.n_sps_per_cell_fine
+        det_jacs_fine = self.jacobians_fine["det_jacs"].reshape(self.n_cells, n_fine)
+        inv_jacs_fine = self.jacobians_fine["inv_jacs"].reshape(self.n_cells, n_fine, 3, 3)
+        adj_fine = det_jacs_fine[..., None, None] * inv_jacs_fine  # adj[c,j,m,i] = adj(J)_{m,i}
+
+        residual = np.zeros((self.n_cells, n_fine, 3))
+        if n_prism > 0:
+            residual[:n_prism] = contract_shared_operator_2axis(
+                self.operators.overint_D_fine_prism, adj_fine[:n_prism]
+            )
+        if self.n_cells > n_prism:
+            residual[n_prism:] = contract_shared_operator_2axis(
+                self.operators.overint_D_fine_tet, adj_fine[n_prism:]
+            )
+
+        cell_max = np.max(np.abs(residual), axis=(1, 2))
+        max_residual = float(np.max(cell_max))
+        n_failed = int(np.sum(cell_max >= tolerance))
+
+        logger.info(
+            f"GCL check (over-integrated, order={self.order}): max metric-identity "
+            f"residual = {max_residual:.6e} (tolerance={tolerance:.1e})"
+        )
         if n_failed > 0:
             logger.warning(f"GCL check failed for {n_failed}/{self.n_cells} cells")
         return n_failed == 0

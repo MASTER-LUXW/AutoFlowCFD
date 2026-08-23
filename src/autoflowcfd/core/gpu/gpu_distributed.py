@@ -102,7 +102,10 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         self.mesh = mesh
         self.ops = ops
         self.mu_molecular = mu_molecular
-        self.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf}
+        # mach_ref：与 CPU 版 FRSolver.__init__（fr_solver/solver.py）
+        # 同一套计算方式/同一个用途，见该文件对应注释。
+        mach_ref = vel_inf / np.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10))
+        self.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf, "mach_ref": mach_ref}
         self.turb_model_name = turb_model
 
         # GPU 设备选择：默认 round-robin 分配
@@ -220,6 +223,7 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
             ops_data=self.mesh_data,
             flat_face_gpu=self.flat_face_gpu,
             device_id=self.device_id,
+            mach_ref=self.freestream["mach_ref"],
         )
 
     def compute_viscous_residual_gpu(self, mu_t_field=None):
@@ -255,7 +259,7 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         # gpu_solver.py::_compute_local_time_step_gpu（同一个真实复现、
         # 同一处遗漏，见该方法文档）。
         from autoflowcfd.core.fr_residual.inviscid_p0 import _extract_p0_face_geometry
-        normal, area_w = _extract_p0_face_geometry(self.mesh.face_flux_points, n_faces)
+        normal, area_w = _extract_p0_face_geometry(self.mesh.face_flux_points, fc, n_faces)
         normals_gpu = cp.asarray(normal)
         areas_gpu = cp.asarray(area_w)
 
@@ -269,6 +273,7 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
             normals_gpu, areas_gpu,
             None, None,
             cfl=self.time_integrator.cfl,
+            mach_ref=self.freestream["mach_ref"],
         )
 
     def _compute_total_residual_gpu(self, mu_t_field=None):

@@ -12,6 +12,18 @@ AutoFlowCFD V2.0 - P0 专用粘性界面校正 numba kernel
 
 算法与通用 viscous_flux_kernel.py 完全一致（n_sps=1 的特化），
 数学等价，仅浮点重排顺序不同。
+
+确认不受棱柱四边形侧面重复计数问题影响（2026-08-23 核实，交叉引用
+fr_residual/inviscid_p0.py::_extract_p0_face_geometry 文档记录的那次
+回归/修复）：本 kernel 的两处 scatter-add 累加块本来就用
+`owner_is_primary[f]`/`neighbor_is_primary[f]` 门控（见下方
+`compute_viscous_interface_correction_p0_kernel` 的 owner/neighbor
+两段累加代码），对棱柱四边形侧面被三角化拆分出的非 primary 重复记录
+天然贡献为零；multi-source（~5% 拆分面两条记录指向 2 个不同真实
+相邻单元）情形也已经通过 `owner_src0_cell`/`owner_src1_idx` 等插值
+权重机制在 primary 记录内部正确混合，不需要像 inviscid_p0.py 那样
+额外回退到三角化半面几何。P0 无粘 kernel 修复前唯一遗漏的正是这个
+primary 门控，本 kernel 从一开始就没有这个问题，不需要改动。
 """
 
 import numpy as np

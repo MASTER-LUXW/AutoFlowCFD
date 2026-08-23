@@ -79,19 +79,25 @@ class NumbaBackend(BackendBase):
             'n_variables': self.n_variables
         }
     
-    def compute_flux(self, 
+    def compute_flux(self,
                     solution: np.ndarray,
                     cell_connectivity: np.ndarray,
                     face_normals: np.ndarray,
-                    gamma: float = 1.4) -> np.ndarray:
+                    gamma: float = 1.4,
+                    mach_ref: float = 0.1) -> np.ndarray:
         """计算界面数值通量。
-        
+
         Args:
             solution: 解向量，形状 (n_cells, n_vars)
             cell_connectivity: 单元连接关系，形状 (n_faces, 2)
             face_normals: 界面法向量，形状 (n_faces, 3)
             gamma: 比热比
-            
+            mach_ref: AUSM+up Weiss-Smith 预处理参考马赫数（见
+                kernels.py::compute_ausm_up_flux 文档）。本类全仓库零
+                调用点（NumbaBackend 未被 resolve_backend_type 或任何
+                求解主循环引用），默认值只是让这段死代码保持可运行，
+                不代表任何真实求解器工况。
+
         Returns:
             flux: 数值通量向量，形状 (n_faces, n_vars)
         """
@@ -130,7 +136,7 @@ class NumbaBackend(BackendBase):
                 if norm > 1e-10:
                     normal = normal / norm
                 
-                flux[f] = compute_ausm_up_flux(qL, qR, normal)
+                flux[f] = compute_ausm_up_flux(qL, qR, normal, mach_ref)
             else:
                 # 边界面：简化处理
                 flux[f] = np.zeros(n_vars)

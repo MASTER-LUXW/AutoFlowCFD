@@ -23,6 +23,9 @@ from autoflowcfd.fr.face_flux_points import (
 from autoflowcfd.fr.face_flux_points_data import (
     _KernelFaceData, _PRISM_QUAD_CODES, _classify_half,
 )
+from autoflowcfd.fr.face_flux_points_exact_normal import (
+    compute_exact_face_normals_and_weights, compute_exact_adj_rows,
+)
 from autoflowcfd.grid.curved_mapping.curved_mapping import PRISM_CUBE_FACES
 from autoflowcfd.grid.connectivity.face_connectivity import CUBE_FACE_NAMES, FRFaceConnectivity
 
@@ -58,10 +61,6 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
     n_fp = n1d * n1d
     n_faces = face_conn.n_faces
     n_prism = mesh.n_prism_cells
-
-    wx, wy = np.meshgrid(weights_1d, weights_1d, indexing="ij")
-    rel_weight = (wx * wy).ravel()
-    rel_weight = rel_weight / np.sum(rel_weight)
 
     # 原生 FP 网格 (u,v) 参考坐标（u=其中一个自由轴，v=另一个，升序，
     # 与 face_ref_grid 的构造顺序一致）：解析判断每个 FP 落在四边形对角线
@@ -175,13 +174,61 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
     _n_side_arr = _geom_ns
     # 缓存常用数组引用
     _is_bnd = face_conn.is_boundary
-    _areas = face_conn.area
-    _normals = face_conn.normal
     _op = owner_primary
     _np_ = neighbor_primary
-    # 预计算 true_normal / true_area_weight 全数组（消除逐面 np.tile 调用）
-    _all_normals = np.repeat(_normals, n_fp, axis=0).reshape(n_faces, n_fp, 3)
-    _all_area_w = np.outer(_areas, rel_weight)  # (n_faces, n_fp)
+    # 真实 bug 修复（2026-08-23，见 face_flux_points_exact_normal.py 模块
+    # 文档完整原理）：此前这里对每个面只取*一个*常数法向/面积（`_normals`/
+    # `_areas`，来自三角化的平面近似），在该面全部 n_fp 个 Flux Points 上
+    # 重复使用（`np.repeat`）——核心通量 kernel（inviscid_kernel.py 等）
+    # 因此对棱柱四边形侧面这类物理上一般非平面的面，用同一个错误的局部
+    # 切平面方向做黎曼求解，与 troubled_cell.py 机制2诊断的"面法向失配"
+    # 是同一个问题，只是此前只用于事后诊断、从未修正过通量本身实际使用
+    # 的法向。改为逐 Flux Point 精确求值（`compute_exact_face_normals_
+    # and_weights`，用已经验证过的解析精确 Jacobian，不是新的近似）——
+    # 对平面面（绝大多数四面体面、未翘曲的棱柱四边形面）结果与旧的常数
+    # 值逐位一致（见对应单元测试），只有真正非平面的棱柱四边形侧面才会
+    # 表现出per-FP的真实差异。
+    _all_normals, _all_area_w = compute_exact_face_normals_and_weights(
+        n_faces=n_faces, n1d=n1d, sps_1d=sps_1d, weights_1d=weights_1d, n_prism=n_prism,
+        owner_cell=np.asarray(face_conn.owner_cell, dtype=np.int64),
+        owner_axis=_o_axis_arr.astype(np.int64), owner_side=_o_side_arr.astype(np.float64),
+        prism_conn=(mesh._fixed_prism_conn if mesh._fixed_prism_conn is not None
+                    else np.empty((0, 6), dtype=np.int64)),
+        tet_conn=(mesh._fixed_tet_conn if mesh._fixed_tet_conn is not None
+                  else np.empty((0, 4), dtype=np.int64)),
+        node_coords=mesh._node_coords,
+    )
+
+    # 真实 bug 修复的第二部分（2026-08-23）：P1+ 内部面主通量（
+    # inviscid_kernel.py/inviscid_kernel_colored.py）与 troubled_cell.py
+    # 机制2诊断此前用的"自洽方向"（`own_dir_outward`/`a0,a1,a2`）是对
+    # SP 网格上的 adj(J) 做 Lagrange 外插到 FP，不是本次同款的逐点精确
+    # 求值——这里预计算 owner/neighbor 两侧各自的精确 adj(J) 行（未归一化、
+    # 未按 side 定向的原始值，与下游消费点 `a0,a1,a2` 变量的语义一致），
+    # 供这些 kernel 直接查表读取，取代它们内部的 `_extrap_matmul(adj_j
+    # [cell,:,axis,:], E)` 外插调用。neighbor 侧对边界面无意义（
+    # neighbor_axis/side 是 -1/0.0 哨兵值），用 `~_is_bnd` 排除。
+    _owner_adj_row_exact = compute_exact_adj_rows(
+        n_faces, n1d, sps_1d, n_prism,
+        cell_arr=np.asarray(face_conn.owner_cell, dtype=np.int64),
+        axis_arr=_o_axis_arr.astype(np.int64), side_arr=_o_side_arr.astype(np.float64),
+        prism_conn=(mesh._fixed_prism_conn if mesh._fixed_prism_conn is not None
+                    else np.empty((0, 6), dtype=np.int64)),
+        tet_conn=(mesh._fixed_tet_conn if mesh._fixed_tet_conn is not None
+                  else np.empty((0, 4), dtype=np.int64)),
+        node_coords=mesh._node_coords,
+    )
+    _neighbor_adj_row_exact = compute_exact_adj_rows(
+        n_faces, n1d, sps_1d, n_prism,
+        cell_arr=np.asarray(face_conn.neighbor_cell, dtype=np.int64),
+        axis_arr=_n_axis_arr.astype(np.int64), side_arr=_n_side_arr.astype(np.float64),
+        prism_conn=(mesh._fixed_prism_conn if mesh._fixed_prism_conn is not None
+                    else np.empty((0, 6), dtype=np.int64)),
+        tet_conn=(mesh._fixed_tet_conn if mesh._fixed_tet_conn is not None
+                  else np.empty((0, 4), dtype=np.int64)),
+        node_coords=mesh._node_coords,
+        valid_mask=~_is_bnd,
+    )
 
     # ---- 直接构建 flat 源数组（跳过 180 万 FaceFluxPointGeometry 对象创建）----
     # 内存说明（P3 阶数 OOM 排查，2026-08-21）：nb_src0_mat/ow_src0_mat 曾经
@@ -410,6 +457,8 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         owner_is_primary=_op,
         neighbor_is_primary=_np_,
         true_normal=_all_normals,
+        owner_adj_row_exact=_owner_adj_row_exact,
+        neighbor_adj_row_exact=_neighbor_adj_row_exact,
         true_area_weight=_all_area_w,
         nb_src0_cell=nb_src0_cell,
         nb_src0_mat=nb_src0_mat,

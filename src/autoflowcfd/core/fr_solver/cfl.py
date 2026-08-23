@@ -14,27 +14,17 @@ def compute_local_time_step(solver) -> np.ndarray:
     计算局部时间步长（基于CFL条件）。
 
     真正的稳定性限制取三个独立机制中更严格的一个：
-    0. 【已撤销】低马赫数预处理——2026-08-14 Couette 合成算例定量验证
-       过程中真实复现并确认：这里曾经引入的 Weiss-Smith 预处理
-       （`preconditioned_acoustic_eigs`）只用来放松 CFL *步长估计*，
-       但实际参与残差计算的 AUSM+up 通量（core/fr_kernels.py::
-       compute_ausm_up_flux）自身完全没有做任何 Weiss-Smith 预处理——
-       它内部用的始终是*真实物理*声速 aL/aR（只有 Liou 2001 式的
-       界面声速插值修正，调整耗散强度，不改变特征波速本身）。这两者
-       不一致：CFL 步长按"预处理后、人为缩小的"波速估计出一个偏大
-       的 dt，但真正被显式积分的却是未预处理、用真实声速主导刚性的
-       AUSM+up 通量——真实复现（棱柱/四面体网格均可复现）：自由参考
-       马赫数 mach_ref 越小（越贴近 Couette/Poiseuille 这类低速层流
-       算例的真实工况），这个 dt 相对真实稳定性极限就越大，扫描
-       参考速度 1~30 m/s 精确复现了这个失稳阈值（<~15 m/s 对应
-       M<~0.044 必然在数步内 NaN，>=20 m/s 稳定）——不是"要更保守
-       CFL"就能绕开的问题，是步长估计与实际被积分的物理不一致这一
-       结构性缺陷。真正一致的做法需要连 AUSM+up 通量本身也做
-       Weiss-Smith 预处理（改动数值通量本身，属于更大的算法工作，
-       已记录待后续评估），在此之前 CFL 步长必须如实按*真实*声速
-       估计，不能假装用了一套实际并未生效的预处理来"合法"放宽步长。
-       wave_speed 现在恒为真实的 |u|+a（未预处理），与 AUSM+up 通量
-       实际使用的特征波速一致。
+    0. Weiss-Smith 低马赫数预处理（2026-08-23 重新接入，与 AUSM+up 通量
+       同步）——2026-08-14 那次曾经引入又撤销的尝试（当时只把
+       `preconditioned_acoustic_eigs` 接进 CFL 步长估计，AUSM+up 通量
+       本身完全没有预处理，两边用的特征波速不一致：CFL 按"预处理后、
+       人为缩小的"波速估计出偏大的 dt，但真正被显式积分的却是未预处理、
+       用真实声速主导刚性的通量，真实复现过扫描参考速度 1~30 m/s 精确
+       复现失稳阈值）已经不再适用——这次 `kernels.py::
+       compute_ausm_up_flux` 本身也做了同一套 Weiss-Smith beta2 预处理
+       （用同一个 `solver.freestream["mach_ref"]`），CFL 这里用同一个
+       `preconditioned_acoustic_eigs` 算出的 `c_precond` 替代原始声速 a，
+       两边终于共享同一套有效声速，不会重蹈那次不一致的覆辙。
     1. 对流 CFL（原有逻辑）：dt = CFL * h / wave_speed，h 用单元的
        精确求积体积——这是标准有限体积式估计，按"单元平均"尺度衡量。
     2. 粘性稳定性限制（新增，同样是修复真实存在的失稳）：显式格式
@@ -81,10 +71,13 @@ def compute_local_time_step(solver) -> np.ndarray:
 
     vel_mag = np.sqrt(u**2 + v**2 + w**2)
 
-    # 真实（未预处理）声学波速（见上方文档 0）：必须与 AUSM+up 通量
-    # 实际使用的特征波速一致——那里从未做过 Weiss-Smith 预处理，CFL
-    # 步长估计也不能假装做了。
-    wave_speed = np.maximum(vel_mag + a, 1e-10)
+    # Weiss-Smith 预处理声速（见上方文档 0）：与 AUSM+up 通量
+    # （kernels.py::compute_ausm_up_flux）用同一个 mach_ref、同一套
+    # preconditioned_acoustic_eigs 公式，两边不再各用各的假设。
+    from autoflowcfd.core.utils.preconditioning import preconditioned_acoustic_eigs
+    mach_ref = solver.freestream["mach_ref"]
+    _, _, c_precond = preconditioned_acoustic_eigs(vel_mag, a, mach_ref)
+    wave_speed = np.maximum(vel_mag + c_precond, 1e-10)
 
     # 网格尺度：用 HighOrderMesh 的精确求积体积（不是"det(J)均值*8"近似），
     # Order Continuation 期间当前状态 n_sps 可能与网格 n_sps 不同，

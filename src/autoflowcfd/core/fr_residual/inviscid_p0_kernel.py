@@ -33,6 +33,7 @@ def _p0_inviscid_kernel(
     cell_volumes,     # float64 (n_cells,)
     n_cells,
     n_threads,
+    mach_ref,         # float，见 kernels.py::compute_ausm_up_flux 文档
 ):
     """P0 有限体积无粘残差并行 kernel。
 
@@ -75,7 +76,7 @@ def _p0_inviscid_kernel(
         normal[2] = unit_normals[f, 2]
 
         # AUSM+up 黎曼求解（返回单位面积通量）
-        F_common_n = compute_ausm_up_flux(Q_o, Q_n, normal)
+        F_common_n = compute_ausm_up_flux(Q_o, Q_n, normal, mach_ref)
 
         # 面积加权通量
         aw = area_weights[f]

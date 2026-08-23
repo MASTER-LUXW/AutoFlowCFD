@@ -237,6 +237,41 @@ def rebuild_solver_from_checkpoint(
     solver.state.U = U_restored
     solver.state._update_primitives()
 
+    # 湍流场恢复（配套 write_checkpoint 的 k_field/omega_field 持久化，
+    # 见该函数文档）：checkpoint 里有就精确恢复，形状必须与刚重建的
+    # turb_model 字段一致（否则说明网格/阶数不匹配，同 U_sps 的处理，
+    # 拒绝恢复而不是静默截断/广播）；checkpoint 是旧版本写的、没有这两个
+    # 字段时，保留 FRSolver 构造时已经生成的均匀初始猜测值，打印警告——
+    # 这是此前一直存在的行为，向后兼容，不因为新加了持久化就让旧
+    # checkpoint 无法 resume。
+    turb_model = getattr(solver, "turb_model", None)
+    if turb_model is not None and (hasattr(turb_model, "k_field") or hasattr(turb_model, "omega_field")):
+        if "k_field" in fields and "omega_field" in fields:
+            k_restored = fields["k_field"]
+            omega_restored = fields["omega_field"]
+            if k_restored.shape != turb_model.k_field.shape or omega_restored.shape != turb_model.omega_field.shape:
+                raise click.ClickException(
+                    f"Checkpoint 湍流场形状 k={k_restored.shape}/omega={omega_restored.shape} 与重建求解器的 "
+                    f"turb_model 形状 k={turb_model.k_field.shape}/omega={turb_model.omega_field.shape} "
+                    f"不匹配（网格或阶数可能已变化），拒绝恢复。"
+                )
+            turb_model.k_field = k_restored
+            turb_model.omega_field = omega_restored
+        else:
+            print("   ⚠️  Checkpoint 缺少 k_field/omega_field（旧版本 checkpoint）："
+                  "湍流场从均匀初始猜测值重新开始，与已恢复的平均流场不连续，"
+                  "SST 收敛可能需要重新爬升。")
+
+    # Order Continuation 阶段起始残差恢复（配套 write_checkpoint 的
+    # phase_initial_residual 持久化，见该函数文档）：checkpoint 里有就
+    # 恢复到 solver 属性上，供 run_order_continuation 在 resume 恢复出的
+    # 第一个阶段用作残差下降判据的种子；旧版本 checkpoint 没有这个字段
+    # 时不设置，run_order_continuation 会走向后兼容分支（打印警告，
+    # 从这次 resume 的第一步重新捕获，不崩溃）。
+    _phase_initial_residual = metadata.get("phase_initial_residual")
+    if _phase_initial_residual is not None:
+        solver._phase_initial_residual = float(_phase_initial_residual)
+
     # 标记这个 solver 的状态是从 checkpoint 恢复的真实解、不是构造函数
     # 生成的均匀自由流场占位值——order_continuation.run_order_continuation
     # 用这个标记决定要不要把状态重置回 P0 重新爬升，见该函数文档：真实
@@ -338,6 +373,23 @@ def write_checkpoint(
     solution_cell_avg = solver.state.U.mean(axis=1)  # (n_cells, n_vars)，供粗粒度消费方使用
     extra_fields = {"U_sps": solver.state.U, "Q_sps": solver.state.Q}
 
+    # 湍流场 (k_field/omega_field) 持久化（真实 bug，2026-08-23，用户直接
+    # 问"k和omega场在ckpt中没有存储的问题存在吗"发现）：此前只存平均流场
+    # U_sps/Q_sps，SSTModelFR.k_field/omega_field 从未写入 checkpoint。
+    # resume 时 rebuild_solver_from_checkpoint 走 FRSolver(...) 全新构造，
+    # 内部全新 SSTModelFR.__init__ 无条件把湍流场初始化成 k=1e-6/omega=1.0
+    # 这个"刚开始求解"的均匀猜测值——resume 出来的求解器因此是"平均流场
+    # 精确恢复到收敛态、湍流场却被悄悄打回起点"的不一致状态，物理上不
+    # 连续。用 hasattr 而非硬编码 SST，同样覆盖内部复用 SSTModelFR 字段
+    # 的 DES 包装；turb_model 为 None（--turbulence none）或不含这两个
+    # 属性的湍流模型（如纯 SGS 的 LES/WMLES）时自然跳过，不强行造字段。
+    turb_model = getattr(solver, "turb_model", None)
+    if turb_model is not None:
+        if hasattr(turb_model, "k_field"):
+            extra_fields["k_field"] = turb_model.k_field
+        if hasattr(turb_model, "omega_field"):
+            extra_fields["omega_field"] = turb_model.omega_field
+
     metadata = {
         "input_file": input_file,
         "order": order,
@@ -352,6 +404,16 @@ def write_checkpoint(
     }
     if surface_mesh:
         metadata["surface_mesh"] = surface_mesh
+
+    # Order Continuation 阶段起始残差持久化（2026-08-23，配套
+    # order_continuation.py::run_order_continuation 的 resume 状态丢失
+    # 修复，见该函数文档）：h5py attrs 不接受 None，未设置时（例如
+    # checkpoint_callback 在 run_order_continuation 第一次 solver.step()
+    # 之前就被调用——实际不会发生，但防御性地允许缺失）跳过，同
+    # surface_mesh 的处理方式一致。
+    phase_initial_residual = getattr(solver, "_phase_initial_residual", None)
+    if phase_initial_residual is not None:
+        metadata["phase_initial_residual"] = float(phase_initial_residual)
 
     path = manager.save(
         solution_cell_avg,

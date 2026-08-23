@@ -12,6 +12,19 @@ AutoFlowCFD V2.0 - GPU 模块单元测试
 5. GPU 版守恒/原始变量转换一致性
 6. GPU 版粘性通量与 CPU 一致性
 7. GPU 版梯度计算与 CPU 一致性
+
+验证限制说明（2026-08-23）：本机没有 CuPy/真实 CUDA 设备（`pytest.
+importorskip("cupy")` 会让本文件在这台机器上整体跳过），2026-08-23
+这一轮对 `gpu_p0_inviscid.py`/`gpu_solver.py`/`gpu_distributed.py` 的
+调用签名崩溃修复、以及后续对 `gpu_viscous.py` 缺失界面项的修复，都
+只能靠代码走查确认正确，无法在本机实际执行验证——这与
+`core/backend/fr_gpu_p0.py`（numba.cuda 版本）不同，那个可以用
+`NUMBA_ENABLE_CUDASIM=1` 纯 Python 模拟器在没有真实显卡的机器上真实
+跑通（见 test_fr_gpu_p0.py），但本文件测试的 CuPy `RawKernel`/
+向量化路径没有等价的纯 CPU 模拟方式，依赖真实 CUDA 编译器/驱动。
+如果以后在有 GPU 的环境里跑，应该优先跑一次
+`autoflowcfd solve steady --backend gpu` 在小网格上做冒烟测试，
+再跑这个文件的完整测试套件。
 """
 
 import numpy as np

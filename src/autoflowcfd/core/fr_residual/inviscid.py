@@ -84,12 +84,13 @@ def euler_physical_flux(Q: np.ndarray) -> np.ndarray:
     return F
 
 
-def ausm_up_flux_batch(Q_L: np.ndarray, Q_R: np.ndarray, normal: np.ndarray) -> np.ndarray:
+def ausm_up_flux_batch(Q_L: np.ndarray, Q_R: np.ndarray, normal: np.ndarray, mach_ref: float = 0.1) -> np.ndarray:
     """对一批 Flux Points 逐点调用 Numba 版 AUSM+up (标量法向通量密度)。
 
     Args:
         Q_L, Q_R: (n_fp, 5)
         normal: (n_fp, 3) 单位法向量（由 L 指向 R）
+        mach_ref: 见 kernels.py::compute_ausm_up_flux 文档
 
     Returns:
         flux: (n_fp, 5)，F*·n （每单位面积的物理通量密度）
@@ -97,7 +98,7 @@ def ausm_up_flux_batch(Q_L: np.ndarray, Q_R: np.ndarray, normal: np.ndarray) -> 
     n_fp = Q_L.shape[0]
     flux = np.zeros((n_fp, 5))
     for i in range(n_fp):
-        flux[i] = compute_ausm_up_flux(Q_L[i], Q_R[i], normal[i])
+        flux[i] = compute_ausm_up_flux(Q_L[i], Q_R[i], normal[i], mach_ref)
     return flux
 
 
@@ -127,13 +128,14 @@ def _compute_inviscid_residual_fv_p0(
     U: np.ndarray,
     mesh,
     boundary_ghost_provider: Optional[Callable[[int, np.ndarray, np.ndarray], np.ndarray]] = None,
+    mach_ref: float = 0.1,
 ) -> np.ndarray:
     """P0 专用有限体积无粘残差。实现见
     inviscid_p0.py::compute_inviscid_residual_fv_p0（从本
     文件拆出，控制单文件行数），文档字符串也在那里。"""
     from .inviscid_p0 import compute_inviscid_residual_fv_p0
 
-    return compute_inviscid_residual_fv_p0(U, mesh, boundary_ghost_provider)
+    return compute_inviscid_residual_fv_p0(U, mesh, boundary_ghost_provider, mach_ref)
 
 
 def compute_inviscid_residual_fr(
@@ -141,6 +143,7 @@ def compute_inviscid_residual_fr(
     mesh,
     ops,
     boundary_ghost_provider: Optional[Callable[[int, np.ndarray, np.ndarray], np.ndarray]] = None,
+    mach_ref: float = 0.1,
 ) -> np.ndarray:
     """计算真实面耦合的 FR 无粘残差 dU/dt（物理空间，已除以 det(J)）。
 
@@ -151,6 +154,15 @@ def compute_inviscid_residual_fr(
         ops: FROperators（D_3d, g_left, g_right）
         boundary_ghost_provider: 可调用对象 (face_idx, Q_owner_fp, true_normal) -> Q_ghost_fp，
             用于给出边界面的幽灵态；None 时使用 DefaultGhostProvider（零梯度外插）
+        mach_ref: AUSM+up Weiss-Smith 预处理用的参考（自由来流）马赫数
+            （见 kernels.py::compute_ausm_up_flux 文档）。默认值 0.1 只是
+            保留旧硬编码值以免所有非求解器主循环调用点（CLI 工具/MPI
+            冒烟测试/测试文件）都被迫改动；求解器真正的残差求值路径
+            （fr_solver/solver.py、mpi/distributed_compute.py）必须显式
+            传入 `solver.freestream["mach_ref"]`（真实自由来流马赫数），
+            不能依赖这个默认值——CFL 步长估计（cfl.py）用的就是这同一个
+            真实值，两者不同步正是 2026-08-14 那次失稳的根因，见 cfl.py
+            模块文档"已撤销"一节。
 
     Returns:
         residual: 形状 (n_cells, n_sps, 5)
@@ -166,7 +178,7 @@ def compute_inviscid_residual_fr(
         # 无法代表单元各面各自的真实法向，完全绕开度量张量外插机制，走
         # 独立的真实几何有限体积路径，见 _compute_inviscid_residual_fv_p0
         # 文档。
-        return _compute_inviscid_residual_fv_p0(U, mesh, boundary_ghost_provider)
+        return _compute_inviscid_residual_fv_p0(U, mesh, boundary_ghost_provider, mach_ref)
 
     n_cells = mesh.n_cells
     n_sps = mesh.n_sps_per_cell
@@ -305,36 +317,38 @@ def compute_inviscid_residual_fr(
             if len(face_indices) == 0:
                 continue
             compute_inviscid_interface_correction_kernel_colored(
-                Q, adj_j, det_jacs,
+                Q, det_jacs,
                 flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
                 flat.owner_axis, flat.owner_side, flat.neighbor_axis, flat.neighbor_side,
                 flat.owner_is_primary, flat.neighbor_is_primary,
                 flat.true_normal,
+                flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
                 flat.neighbor_src0_cell, flat.neighbor_src0_mat,
                 flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
                 flat.owner_src0_cell, flat.owner_src0_mat,
                 flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
                 flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
                 flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
-                n_prism, face_indices, correction,
+                n_prism, face_indices, correction, mach_ref,
             )
     else:
         # 回退到 per-thread buffer 方案（小网格 + 低线程数可能更快）
         import numba
         n_threads = numba.get_num_threads()
         correction = compute_inviscid_interface_correction_kernel(
-            Q, adj_j, det_jacs,
+            Q, det_jacs,
             flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
             flat.owner_axis, flat.owner_side, flat.neighbor_axis, flat.neighbor_side,
             flat.owner_is_primary, flat.neighbor_is_primary,
             flat.true_normal,
+            flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
             flat.neighbor_src0_cell, flat.neighbor_src0_mat,
             flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
             flat.owner_src0_cell, flat.owner_src0_mat,
             flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
             flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
             flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
-            n_prism, n_threads,
+            n_prism, n_threads, mach_ref,
         )
     residual = residual + correction
 

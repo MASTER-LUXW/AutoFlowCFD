@@ -99,6 +99,7 @@ def distributed_compute_inviscid_residual(
     local_mesh,
     ops,
     boundary_ghost_provider: Optional[Callable] = None,
+    mach_ref: float = 0.1,
 ) -> np.ndarray:
     """分布式无粘残差计算。
 
@@ -115,6 +116,11 @@ def distributed_compute_inviscid_residual(
         local_mesh: 本地网格对象
         ops: FR 算子
         boundary_ghost_provider: 边界幽灵态提供者
+        mach_ref: AUSM+up Weiss-Smith 预处理参考马赫数，调用方必须传入
+            与单进程路径同一个 `solver.freestream["mach_ref"]`（各 rank
+            必须用同一个值，否则分区边界两侧算出的 beta2 不一致，通量
+            反对称性会被破坏——理由与本函数入参必须显式传递而非隐式
+            读取全局状态的一般原则相同）。
 
     Returns:
         residual: (n_local_cells, n_sps, 5) local cells 的残差
@@ -132,7 +138,7 @@ def distributed_compute_inviscid_residual(
     # dist_fc 的 neighbor_cell 对于 partition boundary 面指向 halo cells
     # 残差函数会自动从 U_extended 中读取 halo cells 的数据
     residual_extended = compute_inviscid_residual_fr(
-        U_extended, adapter, ops, boundary_ghost_provider
+        U_extended, adapter, ops, boundary_ghost_provider, mach_ref=mach_ref,
     )
 
     # 4. 只返回 local cells 的残差
