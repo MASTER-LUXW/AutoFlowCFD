@@ -11,7 +11,7 @@ def api_calculate_coefficients(self, result: Any = None,
                                 reference_area: float = 1.0,
                                 reference_length: float = 1.0,
                                 density: float = 1.225,
-                                velocity: float = 30.0) -> Dict[str, float]:
+                                velocity: float = 33.33) -> Dict[str, float]:
     """计算气动力系数（委托函数）。
 
     优先使用 FR 原生积分路径，回退到 V1 CoefficientCalculator。

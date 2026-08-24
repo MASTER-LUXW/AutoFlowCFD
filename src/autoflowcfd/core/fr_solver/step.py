@@ -109,7 +109,7 @@ def step(solver, dt: float) -> float:
         # BDF2 时间精度要求，见本函数顶部文档与下方 U 的推进分支），
         # 湍流场必须与平均流用同一个物理时间基准前进，不能像稳态加速
         # 模式那样换成逐 SP 伪时间步长——否则湍流场与平均流各自站在
-        # 不同的"时间"上，物理时间精度失去意义。稳态收敛加速模式
+        # 不同的“时间”上，物理时间精度失去意义。稳态收敛加速模式
         # （SSP-RK/IMEX）下 dt 参数定义上就应被忽略（见文档），
         # 用 dt_local 才是这里的一致行为。
         turb_dt = dt if solver.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME else dt_local
@@ -212,6 +212,14 @@ def step(solver, dt: float) -> float:
         solver.state._update_primitives()
 
         residual_norm = solver.state.get_residual_norm()
+
+        # 自适应 CFL 更新（2026-08-24）：根据本步残差调节下一步的 CFL 数。
+        # 放在 step() 末尾（不是 solve() 循环里），这样 solve() 和
+        # order_continuation 两条路径都自动受益。
+        _cfl_ctrl = getattr(solver, '_cfl_controller', None)
+        if _cfl_ctrl is not None:
+            _cfl_ctrl.update(residual_norm)
+
         return residual_norm
 
     except Exception as e:

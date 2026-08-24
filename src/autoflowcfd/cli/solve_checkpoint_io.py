@@ -262,6 +262,23 @@ def rebuild_solver_from_checkpoint(
                   "湍流场从均匀初始猜测值重新开始，与已恢复的平均流场不连续，"
                   "SST 收敛可能需要重新爬升。")
 
+        # nu_t 恢复（配套 write_checkpoint 的 nu_t 持久化）：
+        # checkpoint 里有就精确恢复，没有时保留 FRSolver 构造时的零值。
+        # nu_t 直接影响粘性残差（mu_eff = mu + nu_t），缺失会导致
+        # resume 后第一步粘性应力突变、残差跳升。
+        if hasattr(turb_model, "nu_t"):
+            if "nu_t" in fields:
+                nu_t_restored = fields["nu_t"]
+                if turb_model.nu_t is not None and nu_t_restored.shape != turb_model.nu_t.shape:
+                    raise click.ClickException(
+                        f"Checkpoint nu_t 形状 {nu_t_restored.shape} 与重建求解器的 "
+                        f"nu_t 形状 {turb_model.nu_t.shape} 不匹配，拒绝恢复。"
+                    )
+                turb_model.nu_t = nu_t_restored
+            elif turb_model.nu_t is not None:
+                print("   ⚠️  Checkpoint 缺少 nu_t（旧版本 checkpoint）："
+                      "涡粘度从零重新开始，粘性残差可能短暂跳升。")
+
     # Order Continuation 阶段起始残差恢复（配套 write_checkpoint 的
     # phase_initial_residual 持久化，见该函数文档）：checkpoint 里有就
     # 恢复到 solver 属性上，供 run_order_continuation 在 resume 恢复出的
@@ -389,6 +406,12 @@ def write_checkpoint(
             extra_fields["k_field"] = turb_model.k_field
         if hasattr(turb_model, "omega_field"):
             extra_fields["omega_field"] = turb_model.omega_field
+        # nu_t（湍流涡粘度）持久化：此前只存 k/omega，nu_t 在 resume 后
+        # 从 FRSolver 构造时的零值重新开始，而粘性残差计算依赖 nu_t
+        # （mu_eff = mu_molecular + nu_t）。Checkpoint 时刻 nu_t 已有充分
+        # 发展的湍流结构，resume 后 nu_t=0 导致粘性应力突变、残差跳升。
+        if hasattr(turb_model, "nu_t") and turb_model.nu_t is not None:
+            extra_fields["nu_t"] = turb_model.nu_t
 
     metadata = {
         "input_file": input_file,

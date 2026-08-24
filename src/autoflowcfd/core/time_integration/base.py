@@ -139,13 +139,14 @@ class TimeIntegrator:
         imask = geom.internal_mask
 
         def _face_spectral(cell_idx, n_face):
-            """某个面上，某侧单元自身状态贡献的 |lambda|_max。"""
+            """某个面上，某侧单元自身状态贡献的 |lambda|_max。
+            
+            始终使用物理声速 a（2026-08-24 修复）：此前 mach_ref 非 None
+            时用 Weiss-Smith 预处理特征值，导致谱半径被低估 ~10 倍
+            （Mach 0.1 下 c_precond≈36 vs a≈340），dt 被高估同等倍数，
+            有效 CFL 远超 SSP-RK3 稳定极限。显式积分的稳定性由物理
+            通量的谱半径决定，预处理不改变这一限制。"""
             un_signed = np.einsum('nd,nd->n', vel[cell_idx], n_face)
-            if mach_ref is not None:
-                lam_plus, lam_minus, _ = preconditioned_acoustic_eigs(
-                    un_signed, a[cell_idx], mach_ref
-                )
-                return np.maximum(np.abs(lam_plus), np.abs(lam_minus))
             return np.abs(un_signed) + a[cell_idx]
 
         # 内部面对两侧单元都有贡献

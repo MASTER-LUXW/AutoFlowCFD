@@ -204,7 +204,7 @@ class SteadyConfig(SolverConfig):
     target_cells: int = 500000
     max_cell_size: Optional[float] = None
     rho_inf: float = 1.225
-    vel_inf: float = 30.0
+    vel_inf: float = 33.33
     p_inf: float = 101325.0
     use_wall_functions: bool = False
 
@@ -294,7 +294,7 @@ class TransientConfig(SolverConfig):
     target_cells: int = 500000
     max_cell_size: Optional[float] = None
     rho_inf: float = 1.225
-    vel_inf: float = 30.0
+    vel_inf: float = 33.33
     p_inf: float = 101325.0
     use_wall_functions: bool = False
 

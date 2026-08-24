@@ -380,6 +380,12 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
         for o in stale_orders:
             del solver.mesh._order_geometry_cache[o]
 
+        # 自适应 CFL 重置（2026-08-24）：阶数切换导致残差跳变（插值误差），
+        # 不应触发 CFL 缩小。重置后重新开始爬升阶段。
+        _cfl_ctrl = getattr(solver, '_cfl_controller', None)
+        if _cfl_ctrl is not None:
+            _cfl_ctrl.reset()
+
         phase_max_iter = max_iter // len(orders)
         phase_tol = tol * (10 ** (original_order - target_p))
 
@@ -443,6 +449,10 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
             if True:  # 每步都输出残差与气动力系数
                 drop_ratio = initial_residual_this_order / max(res, 1e-30)
                 msg = f"P{target_p} Iter {i+1}: Residual = {res:.6e} | Drop: {drop_ratio:.1f}x | Time: {t_end - t_start:.2f}s"
+                # 自适应 CFL 状态
+                _cfl_ctrl = getattr(solver, '_cfl_controller', None)
+                if _cfl_ctrl is not None:
+                    msg += f" | CFL={_cfl_ctrl.cfl_number:.3f}"
                 # 每步输出气动力系数（轻量级压力积分，不含粘性力梯度）
                 ref_area = getattr(solver, '_reference_area', None)
                 if ref_area is not None and ref_area > 0:
@@ -455,10 +465,19 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
             if checkpoint_callback is not None:
                 checkpoint_callback(solver, total_iter)
 
-            # 收敛判据：绝对容差
-            if res < phase_tol:
+            # 收敛判据：相对容差（残差相对本阶段初始值下降 1/tol 倍）
+            # tol=1e-6 配合 phase_tol 的阶数缩放，实际含义：
+            #   P0: 下降 4 个量级 (1/(tol*100) = 1e4)
+            #   P1: 下降 5 个量级 (1/(tol*10)  = 1e5)
+            #   P2: 下降 6 个量级 (1/(tol*1)   = 1e6)
+            # 替代此前的绝对判据 res < phase_tol（要求 RMS 残差低于 1e-4~1e-6，
+            # 对 Mach 0.1~0.3 流动初始残差 ~1e8 需下降 12~14 个量级，永远不可达）。
+            drop_for_convergence = initial_residual_this_order / max(res, 1e-30)
+            required_drop = 1.0 / max(phase_tol, 1e-30)
+            if i >= 1 and drop_for_convergence >= required_drop:
                 converged = True
-                print(f"[OK] P{target_p} converged at iter {i+1}")
+                print(f"[OK] P{target_p} converged at iter {i+1} "
+                      f"(residual dropped {drop_for_convergence:.1e}x >= {required_drop:.1e}x)")
                 break
 
             # 阶数提升判据（CL-02）：残差相对初始值下降足够多

@@ -64,7 +64,8 @@ class FRSolver(_SolverGeometryMixin):
                  bc_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
                  mu_molecular: float = 1.8e-5,
                  dual_time_inner_iter: int = 20,
-                 n_threads: int = -1):
+                 n_threads: int = -1,
+                 adaptive_cfl: bool = True):
         """
         初始化 FRSolver。
 
@@ -227,6 +228,18 @@ class FRSolver(_SolverGeometryMixin):
         # 6. 初始化时间积分器 (S-05)
         self.time_integrator = TimeIntegrator(scheme=time_scheme, dual_time_steps=dual_time_inner_iter)
 
+        # 6b. 自适应 CFL 控制器（2026-08-24）：
+        # 稳态伪时间迭代中根据残差历史自动调节 CFL 数，替代此前硬编码 0.1。
+        # 仅对稳态路径（SSP-RK2/RK3）生效；DUAL_TIME 有自己的内层自适应逻辑。
+        self._cfl_controller = None
+        if adaptive_cfl and time_scheme != TimeIntegrationScheme.DUAL_TIME:
+            from autoflowcfd.core.time_integration.adaptive_cfl import AdaptiveCFLController
+            self._cfl_controller = AdaptiveCFLController()
+            print(f"   Adaptive CFL: enabled (start={self._cfl_controller.cfl_start}, "
+                  f"max={self._cfl_controller.cfl_max})")
+        else:
+            print(f"   Adaptive CFL: disabled")
+
         # DUAL_TIME 专用：物理时间层 n-1 的解（BDF2 时间导数项需要），
         # None 表示还没有跑过物理步（下一步会退化为 BDF1），见 step()
         # 与 order_continuation.interpolate_to_new_order_checked（阶数
@@ -281,7 +294,10 @@ class FRSolver(_SolverGeometryMixin):
         Args:
             max_iter: 最大迭代次数
             dt: 时间步长
-            tol: 收敛容差
+            tol: 相对收敛容差——残差需相对初始值下降 1/tol 倍才算收敛。
+                默认 1e-6 表示下降 6 个量级（与 Order Continuation 各阶段
+                的 phase_tol 阶数缩放配合：P0 下降 4 级、P1 下降 5 级、P2 下降 6 级）。
+                此前为绝对判据 res < tol，对 RMS ~1e8 的流动永远不可达。
             checkpoint_callback: 可选的中间 checkpoint 回调函数，
                 签名为 callback(solver, iteration_number)，每步迭代后调用。
                 用于在求解过程中定期保存状态到磁盘。
@@ -301,6 +317,7 @@ class FRSolver(_SolverGeometryMixin):
         import time
         converged = False
         final_residual = 1e10
+        initial_res = None
         
         for i in range(max_iter):
             t_start = time.time()
@@ -308,17 +325,27 @@ class FRSolver(_SolverGeometryMixin):
             t_end = time.time()
             final_residual = res
             
+            if initial_res is None:
+                initial_res = res
+            
             # 每 10 步或第 1 步打印详细信息
             if i == 0 or (i + 1) % 10 == 0:
-                print(f"Iteration {i+1}: Residual = {res:.6e} | Time/step: {t_end - t_start:.2f}s")
+                drop = initial_res / max(res, 1e-30)
+                cfl_msg = ""
+                if self._cfl_controller is not None:
+                    cfl_msg = f" | CFL={self._cfl_controller.cfl_number:.3f}"
+                print(f"Iteration {i+1}: Residual = {res:.6e} | Drop: {drop:.1f}x{cfl_msg} | Time/step: {t_end - t_start:.2f}s")
             
             # 中间 checkpoint 保存
             if checkpoint_callback is not None:
                 checkpoint_callback(self, i + 1)
                 
-            if res < tol:
+            # 相对收敛判据：残差相对初始值下降 1/tol 倍
+            # tol=1e-6 表示需要下降 6 个量级
+            if i >= 1 and initial_res / max(res, 1e-30) >= 1.0 / tol:
                 converged = True
-                print(f"✅ Converged at iteration {i+1} with residual {res:.6e}")
+                print(f"✅ Converged at iteration {i+1} with residual {res:.6e} "
+                      f"(dropped {initial_res/res:.1e}x)")
                 break
         
         return SolverResult(converged=converged, iterations=i+1, final_residual=final_residual)

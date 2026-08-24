@@ -84,7 +84,7 @@ class ParameterValidator:
 
     Example:
         >>> validator = ParameterValidator()
-        >>> validator.validate_velocity([30.0, 0.0, 0.0])  # OK
+        >>> validator.validate_velocity([33.33, 0.0, 0.0])  # OK
     """
 
     @staticmethod

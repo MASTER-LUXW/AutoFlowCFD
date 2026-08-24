@@ -31,7 +31,7 @@ class GroundBC(BaseBC):
         >>> ground = GroundBC(moving=False)
         >>>
         >>> # 移动地面（滚动路面，30 m/s）
-        >>> ground = GroundBC(moving=True, velocity_x=30.0)
+        >>> ground = GroundBC(moving=True, velocity_x=33.33)
     """
 
     def __init__(
@@ -95,7 +95,7 @@ class FarfieldBC(BaseBC):
 
     Example:
         >>> farfield = FarfieldBC(
-        ...     velocity_x=30.0,
+        ...     velocity_x=33.33,
         ...     pressure=101325.0,
         ...     temperature=288.15
         ... )
@@ -103,7 +103,7 @@ class FarfieldBC(BaseBC):
 
     def __init__(
         self,
-        velocity_x: float = 30.0,
+        velocity_x: float = 33.33,
         velocity_y: float = 0.0,
         velocity_z: float = 0.0,
         pressure: float = 101325.0,

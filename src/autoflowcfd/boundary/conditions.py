@@ -29,7 +29,7 @@
 
 Example:
     >>> from autoflowcfd.boundary.conditions import InletBC
-    >>> inlet = InletBC(velocity=30.0, pressure=101325.0)
+    >>> inlet = InletBC(velocity=33.33, pressure=101325.0)
     >>> inlet.validate()
 """
 
@@ -105,7 +105,7 @@ class InletBC(BaseBC):
 
     Example:
         >>> inlet = InletBC(
-        ...     velocity_x=30.0,
+        ...     velocity_x=33.33,
         ...     velocity_y=0.0,
         ...     velocity_z=0.0,
         ...     pressure=101325.0
@@ -114,7 +114,7 @@ class InletBC(BaseBC):
 
     def __init__(
         self,
-        velocity_x: float = 30.0,
+        velocity_x: float = 33.33,
         velocity_y: float = 0.0,
         velocity_z: float = 0.0,
         pressure: float = 101325.0,
@@ -391,7 +391,7 @@ def create_boundary_condition(bc_type: str, **kwargs) -> BaseBC:
         BaseBC: 边界条件实例
 
     Example:
-        >>> bc = create_boundary_condition('INLET', velocity_x=30.0)
+        >>> bc = create_boundary_condition('INLET', velocity_x=33.33)
     """
     bc_class = get_boundary_condition_class(bc_type)
     return bc_class(**kwargs)

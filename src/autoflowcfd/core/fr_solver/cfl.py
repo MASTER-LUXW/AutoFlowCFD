@@ -25,8 +25,11 @@ def compute_local_time_step(solver) -> np.ndarray:
        （用同一个 `solver.freestream["mach_ref"]`），CFL 这里用同一个
        `preconditioned_acoustic_eigs` 算出的 `c_precond` 替代原始声速 a，
        两边终于共享同一套有效声速，不会重蹈那次不一致的覆辙。
-    1. 对流 CFL（原有逻辑）：dt = CFL * h / wave_speed，h 用单元的
-       精确求积体积——这是标准有限体积式估计，按"单元平均"尺度衡量。
+    1. 对流 CFL（已升级为基于面的谱半径）：dt = CFL * V / sum_f(wave_speed_f * A_f)，
+       替代此前的 dt = CFL * V^(1/3) / wave_speed。旧公式假设各向同性单元，
+       对边界层薄棱柱单元高估稳定步长 ~100 倍（V^(1/3) ~ 1e-3 m vs 实际
+       最小维度 ~1e-5 m），导致有效 CFL ~10 远超 SSP-RK3 稳定极限 ~1。
+       新公式自然捕捉各向异性：薄面面积小 → 谱半径小 → dt 小。
     2. 粘性稳定性限制（新增，同样是修复真实存在的失稳）：显式格式
        对粘性（分子+湍流）扩散项的稳定性时间步长是 dt<=C*rho*V^(2/3)
        /mu_eff（抛物型稳定性条件），与上面的对流限制是完全独立的
@@ -71,45 +74,92 @@ def compute_local_time_step(solver) -> np.ndarray:
 
     vel_mag = np.sqrt(u**2 + v**2 + w**2)
 
-    # Weiss-Smith 预处理声速（见上方文档 0）：与 AUSM+up 通量
-    # （kernels.py::compute_ausm_up_flux）用同一个 mach_ref、同一套
-    # preconditioned_acoustic_eigs 公式，两边不再各用各的假设。
-    from autoflowcfd.core.utils.preconditioning import preconditioned_acoustic_eigs
-    mach_ref = solver.freestream["mach_ref"]
-    _, _, c_precond = preconditioned_acoustic_eigs(vel_mag, a, mach_ref)
-    wave_speed = np.maximum(vel_mag + c_precond, 1e-10)
+    # 物理声速用于 CFL 估计（2026-08-24 修复）：
+    # 此前用 Weiss-Smith 预处理后的 c_precond 替代物理声速 a 计算 CFL，
+    # 导致 dt 被高估 ~10 倍（Mach 0.1 下 c_precond≈36 m/s vs a≈340 m/s），
+    # 有效 CFL 从目标的 0.1 飙到 ~0.54，远超 SSP-RK3 稳定极限。
+    # 诊断复现：CFL=0.1 在 Step 2 发散，CFL=0.05 在 Step 3 发散，
+    # CFL=0.01（有效 CFL≈0.054）才稳定——与"有效 CFL ~0.5 触发失稳"
+    # 精确吻合。
+    #
+    # 原理：显式 SSP-RK3 积分的是物理通量（AUSM+up 用真实声速 a 计算
+    # 数值通量），其稳定性由物理通量的谱半径决定（|u_n|+a），不由
+    # 预处理后的谱半径（|u_n|+c_precond）决定。预处理改善的是伪时间
+    # 系统的条件数（加速收敛），不改变显式积分的稳定性限制。
+    #
+    # Weiss-Smith 预处理仍用于 AUSM+up 通量本身（改善低 Mach 数值
+    # 耗散特性），但 CFL 估计必须用物理波速。
+    wave_speed = np.maximum(vel_mag + a, 1e-10)
 
-    # 网格尺度：用 HighOrderMesh 的精确求积体积（不是"det(J)均值*8"近似），
-    # Order Continuation 期间当前状态 n_sps 可能与网格 n_sps 不同，
-    # 体积是逐单元量不受此影响，直接广播到当前 n_sps 即可。
-    volumes = solver.mesh.get_all_cell_volumes()
-    h = np.power(np.abs(volumes), 1.0 / 3.0)
-    h_expanded = np.tile(h[:, np.newaxis], (1, n_sps))
+    # 基于面的谱半径（face-based spectral radius），
+    # 替代此前的 V^(1/3) 各向同性假设。对于边界层薄棱柱单元，V^(1/3)
+    # 比实际最小维度大约 100 倍，导致有效 CFL 远超 SSP-RK3 稳定极限。
+    # 基于面的公式 dt = CFL * V / sum_f(wave_speed_f * A_f) 自然捕捉
+    # 各向异性：薄面的面积小 → 谱半径小 → dt 小，物理正确。
+    # 与 TimeIntegrator.local_time_step (base.py) 用同一公式。
+    # 自适应 CFL（2026-08-24）：从 solver 上的 AdaptiveCFLController 读取
+    # 当前 CFL 数，替代此前硬编码 0.1。控制器根据残差历史自动调节 CFL，
+    # 收敛好时逐步放大（加速收敛），恶化时缩小（保证稳定）。无控制器时
+    # 回退到固定 0.1（向后兼容，也用于诊断脚本的 monkey-patch 场景）。
+    _cfl_controller = getattr(solver, '_cfl_controller', None)
+    CFL = _cfl_controller.cfl_number if _cfl_controller is not None else 0.1
 
-    CFL = 0.1  # 保守的CFL数（P0 基准值）
-
-    # 阶数相关的 CFL 收紧（此前完全缺失——全代码库搜索确认没有任何地方
-    # 按 solver.current_order 收紧过这个常量）：h 用的是整个宏单元体积
-    # V^(1/3)，与该单元内有多少个 solution point 无关，所以 P0（1 个 SP/
-    # 单元）和 P1（8 个）、P2（27 个）用的是完全相同的 dt 公式——但显式
-    # FR/DG 格式的稳定性极限本身随阶数增长（微分矩阵谱半径随 p 增大），
-    # 标准结果是对流项稳定 CFL ~ 1/(2p+1)，扩散/粘性项因算子等效于二阶
-    # 微分，谱半径按 p 的平方增长，稳定 CFL ~ 1/(2p+1)^2（Kopriva,
-    # "Implementing Spectral Methods for PDEs" 对 DGSEM 稳定性的标准
-    # 推导；FR 用同一套配置点，结论同样适用）。真实复现的失稳模式与此
-    # 精确吻合：P0 阶段用同一个 CFL=0.1 大致还在稳定域内（收敛很慢，
-    # 说明其实已经接近边界），Order Continuation 一旦插值到 P1，
-    # 残差立刻在第 1 步跳增且不再下降，湍流交叉扩散项（数值上最刚性
-    # 的子系统）最先溢出——这正是"同一个步长，稳定域已经收紧"的典型
-    # 特征，不是插值或湍流模型本身的 bug。
-    # 命名为 poly_order 而非 p——本函数前面已经用 p 表示压力
-    # （line 79，solver.state.Q[:,:,4]），同名会遮蔽它，虽然当前压力变量
-    # 用完即弃、不会产生真实 bug，但对以后维护是隐患。
+    # 阶数相关的 CFL 收紧：基于面的谱半径已经考虑了单元几何，
+    # 但显式 FR/DG 格式的稳定性极限仍随阶数增长（微分矩阵谱半径随 p 增大），
+    # 标准结果：对流项 CFL ~ 1/(2p+1)，粘性项 CFL ~ 1/(2p+1)^2。
     poly_order = getattr(solver, "current_order", 0)
     order_factor_advective = 1.0 / (2 * poly_order + 1)
     order_factor_viscous = 1.0 / (2 * poly_order + 1) ** 2
 
-    dt_advective = CFL * order_factor_advective * h_expanded / wave_speed
+    volumes = solver.mesh.get_all_cell_volumes()
+
+    fc = solver.mesh.face_connectivity
+    face_areas = fc.area  # (n_faces,) 物理面面积
+    face_normals = fc.normal  # (n_faces, 3) 面法向量（模=面积，单位化后得法向）
+    # 归一化得到单位法向
+    face_norms = np.linalg.norm(face_normals, axis=1, keepdims=True)
+    face_unit_normals = face_normals / np.maximum(face_norms, 1e-30)
+
+    # 每个面的波速（owner 侧）
+    owner_cells = fc.owner_cell  # (n_faces,)
+    is_bnd = fc.is_boundary  # (n_faces,)
+
+    # wave_speed shape: (n_cells, n_sps) → 取 SP0 用于面级 CFL（P0 只有一个 SP）
+    # 面谱半径 = (|u·n| + a) * A_f —— 标准有限体积 CFL 公式，
+    # 使用物理声速（不用预处理声速，见上方文档）。
+    a_o = a[owner_cells, 0]  # (n_faces,)
+    vel_owner_x = u[owner_cells, 0]
+    vel_owner_y = v[owner_cells, 0]
+    vel_owner_z = w[owner_cells, 0]
+    un_owner = (vel_owner_x * face_unit_normals[:, 0] +
+                vel_owner_y * face_unit_normals[:, 1] +
+                vel_owner_z * face_unit_normals[:, 2])
+    # 谱半径贡献 = (|un| + a) * A_f
+    spectral_per_face = (np.abs(un_owner) + a_o) * face_areas
+
+    # 每个单元的谱半径 = sum of face contributions
+    spectral = np.zeros(n_cells, dtype=np.float64)
+    np.add.at(spectral, owner_cells, spectral_per_face)
+    # 内部面：neighbor 侧也贡献
+    neighbor_cells = fc.neighbor_cell  # (n_faces,) 边界面为 -1
+    internal = ~is_bnd
+    if np.any(internal):
+        nc = neighbor_cells[internal]
+        a_n = a[nc, 0]
+        vel_neigh_x = u[nc, 0]
+        vel_neigh_y = v[nc, 0]
+        vel_neigh_z = w[nc, 0]
+        un_neigh = (vel_neigh_x * face_unit_normals[internal, 0] +
+                    vel_neigh_y * face_unit_normals[internal, 1] +
+                    vel_neigh_z * face_unit_normals[internal, 2])
+        spectral_per_face_neigh = (np.abs(un_neigh) + a_n) * face_areas[internal]
+        np.add.at(spectral, nc, spectral_per_face_neigh)
+
+    spectral = np.maximum(spectral, 1e-30)
+    # 基于面的 CFL: dt = CFL * V / spectral
+    dt_face = CFL * order_factor_advective * volumes / spectral
+    # 广播到 (n_cells, n_sps)
+    dt_advective = np.tile(dt_face[:, np.newaxis], (1, n_sps))
 
     # 粘性稳定性限制（见上方文档 2）：分子粘度 + 当前湍流模型给出的
     # 涡粘（若有），与 TimeIntegrator.local_time_step 用同一公式
@@ -123,8 +173,9 @@ def compute_local_time_step(solver) -> np.ndarray:
         mu_eff = mu_molecular + mu_t_field
     else:
         mu_eff = np.full_like(rho, mu_molecular)
-    Lc2 = h_expanded ** 2  # V^(1/3) 的平方 = V^(2/3)
-    dt_visc = 0.25 * CFL * order_factor_viscous * rho * Lc2 / np.maximum(mu_eff, 1e-30)
+    Lc2 = np.power(np.abs(volumes), 2.0 / 3.0)  # V^(2/3)
+    Lc2_expanded = np.tile(Lc2[:, np.newaxis], (1, n_sps))
+    dt_visc = 0.25 * CFL * order_factor_viscous * rho * Lc2_expanded / np.maximum(mu_eff, 1e-30)
 
     metric_flux_scale = solver._get_metric_flux_scale()  # (n_cells,n_sps)
     det_jacs = solver.mesh.jacobians["det_jacs"].reshape(n_cells, solver.mesh.n_sps_per_cell)

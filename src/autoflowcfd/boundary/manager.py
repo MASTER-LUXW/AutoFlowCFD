@@ -222,7 +222,7 @@ class BoundaryManager(_BoundaryConfigMixin):
             ValueError: bc_type 无效时
 
         Example:
-            >>> manager.add_bc("INLET", velocity_x=30.0, pressure=101325.0)
+            >>> manager.add_bc("INLET", velocity_x=33.33, pressure=101325.0)
             >>> manager.add_bc("BODY", bc_type="WALL", wall_function='enhanced')
         """
         # 检查边界是否存在

@@ -47,6 +47,19 @@ def _fake_solver(current_order, target_order, resumed):
     )
     mesh.set_order_calls = []
 
+    # 相对收敛判据需要残差真正下降：每个阶段的第一步返回 1e10（被捕获为
+    # 初始残差），第二步起返回 1e-10（下降 1e20 倍，远超任何阶段的阈值）。
+    # 旧代码用 step=lambda dt: 1e-9 配合绝对判据 res < 1e-4 立即收敛，
+    # 相对判据下恒定残差不会产生任何下降比。
+    # 用周期性模式确保跨阶段重置：每个阶段的第一步恰好落在高值上。
+    _call_count = {"n": 0}
+
+    def _decreasing_step(dt):
+        n = _call_count["n"]
+        _call_count["n"] += 1
+        # 每个阶段 2 步收敛：奇数步高值，偶数步低值
+        return 1e10 if n % 2 == 0 else 1e-10
+
     solver = SimpleNamespace(
         order=target_order,
         current_order=current_order,
@@ -58,7 +71,7 @@ def _fake_solver(current_order, target_order, resumed):
         wall_distance=None,
         sgs_model=None,
         _resumed_from_checkpoint=resumed,
-        step=lambda dt: 1e-9,  # always "converged" -> each phase finishes in 1 iteration
+        step=_decreasing_step,
     )
 
     def _fake_interpolate(new_order):

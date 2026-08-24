@@ -119,7 +119,7 @@ class CoefficientCalculator:
         reference_area: 参考面积 (m²)，默认取轿车迎风面积
         reference_length: 参考长度 (m)，默认取车长
         density: 空气密度 (kg/m³)，默认 1.225
-        velocity: 自由来流速度 (m/s)，默认 30.0
+        velocity: 自由来流速度 (m/s)，默认 33.33
         dynamic_pressure: 动压 q = 0.5 * rho * V²
 
     Example:
@@ -135,7 +135,7 @@ class CoefficientCalculator:
         reference_area: float = 2.2,
         reference_length: float = 4.5,
         density: float = 1.225,
-        velocity: float = 30.0
+        velocity: float = 33.33
     ):
         """初始化系数计算器。
 

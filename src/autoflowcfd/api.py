@@ -326,7 +326,7 @@ class AutoFlowCFDAPI:
         reference_area: float = 1.0,
         reference_length: float = 1.0,
         density: float = 1.225,
-        velocity: float = 30.0
+        velocity: float = 33.33
     ) -> Dict[str, float]:
         """计算气动力系数。
         

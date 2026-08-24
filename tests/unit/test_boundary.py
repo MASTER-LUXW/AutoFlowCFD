@@ -51,7 +51,7 @@ class TestInletBC:
         """Test creating InletBC with default parameters."""
         inlet = InletBC()
         assert inlet.bc_type == "INLET"
-        assert inlet.params['velocity_x'] == 30.0
+        assert inlet.params['velocity_x'] == 33.33
         assert inlet.params['pressure'] == 101325.0
 
     def test_creation_with_custom_params(self):

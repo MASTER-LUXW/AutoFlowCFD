@@ -1,7 +1,7 @@
 """
 AutoFlowCFD V2.0 - P0 有限体积无粘残差 numba 并行 kernel
 
-从 inviscid_p0.py 拆出。将原纯 Python 逐面循环（188 万个面，每步迭代
+从 inviscid_p0.py 拆出。将原纯 Python 逐面循环（188 万个面，每次残差求值
 ~25s）替换为 numba `@njit(parallel=True)` + `prange` 并行 kernel，
 与 P≥1 界面项 kernel (inviscid_kernel.py) 一致的加速策略。
 
