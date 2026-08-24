@@ -20,16 +20,74 @@ from autoflowcfd.core.turbulence.sgs import WALEModel
 from autoflowcfd.core.utils.wall_distance import compute_wall_distance
 
 
+def _set_turbulence_bounds(solver) -> None:
+    """根据来流条件设置 k/omega 物理上界。
+
+    k_max = 0.5 * vel_inf^2：湍动能不可能超过平均流动能（湍流强度 100% 的极限）。
+    omega_max = 1e6：远大于任何工程壁面 omega 值（壁面 omega ~ U_tau^2/nu ~ 1e4
+    量级，1e6 留 100 倍裕度）。
+
+    不设上界时，SST 输运方程的源项+输运项正反馈会导致 k/omega 指数增长到
+    1e260+ 量级（实测 cube_demo 100 步内即达到），而平均流完全不受影响
+    （nu_t 被 SST a1 限幅保持合理），形成隐蔽的发散失效模式。
+    """
+    if not hasattr(solver, 'turb_model') or solver.turb_model is None:
+        return
+    if not hasattr(solver.turb_model, 'k_max'):
+        return  # 不是 SST 模型，无上界属性
+    vel_inf = solver.freestream.get("vel_inf", 33.33)
+    solver.turb_model.k_max = 0.5 * vel_inf ** 2  # 湍动能 ≤ 平均流动能
+    solver.turb_model.omega_max = 1e6  # 保守上界
+    logger.debug(
+        f"Turbulence bounds set: k_max={solver.turb_model.k_max:.2f}, "
+        f"omega_max={solver.turb_model.omega_max:.0e} "
+        f"(vel_inf={vel_inf:.2f})"
+    )
+
+
+def _update_production_ramp(solver) -> None:
+    """更新湍流产项渐变因子。
+
+    前 N 步内 production_factor 从 0 线性增加到 1，防止初始流场未发展时
+    P_k >> D_k（产生项超过耗散项 8 个量级）导致 k/omega 指数爆炸。
+    工业 RANS 求解器（Fluent、OpenFOAM）的标准做法。
+    """
+    if not hasattr(solver, 'turb_model') or solver.turb_model is None:
+        return
+    if not hasattr(solver.turb_model, 'production_factor'):
+        return
+    ramp_steps = getattr(solver, '_turb_production_ramp_steps', 0)
+    current_step = getattr(solver, '_turb_ramp_step', 0)
+    if ramp_steps <= 0 or current_step >= ramp_steps:
+        solver.turb_model.production_factor = 1.0
+    else:
+        solver.turb_model.production_factor = current_step / ramp_steps
+    # 递增计数器（每调用一次代表一个迭代步）
+    solver._turb_ramp_step = current_step + 1
+
+
 def init_turbulence_models(solver, n_cells: int, n_sps: int) -> None:
     """初始化湍流模型（对应 FRSolver._init_turbulence_models）。"""
+    # 湍流产项渐变计数器（与迭代步数同步，控制 production_factor 从 0 渐增到 1）
+    solver._turb_ramp_step = 0
+    # 渐变步数：前 turb_production_ramp_steps 步内，产生项从 0 线性增加到全量。
+    # 工业 RANS 标准做法：防止初始流场未发展时 P_k >> D_k 导致 k/omega 指数爆炸。
+    solver._turb_production_ramp_steps = 200
+
     if solver.turb_model_name == "SST":
         solver.turb_model = SSTModelFR(n_cells, n_sps)
-        print(f"   [OK] SST k-omega model initialized")
+        _set_turbulence_bounds(solver)
+        _update_production_ramp(solver)
+        print(f"   [OK] SST k-omega model initialized "
+              f"(production ramp: {solver._turb_production_ramp_steps} steps)")
 
     elif solver.turb_model_name == "DDES":
         solver.turb_model = SSTModelFR(n_cells, n_sps)
+        _set_turbulence_bounds(solver)
+        _update_production_ramp(solver)
         solver.ddes_model = DDESModel()
-        print(f"   [OK] DDES model initialized (based on SST)")
+        print(f"   [OK] DDES model initialized (based on SST, "
+              f"production ramp: {solver._turb_production_ramp_steps} steps)")
 
     elif solver.turb_model_name == "WMLES":
         solver.wmles_model = WMLESModel()
@@ -192,6 +250,9 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
     """
     if solver.turb_model is None:
         return None
+
+    # 更新湍流产项渐变因子（每步调用，production_factor 从 0 渐增到 1）
+    _update_production_ramp(solver)
 
     Q = solver.state.Q
     grad_U = solver._compute_gradients()

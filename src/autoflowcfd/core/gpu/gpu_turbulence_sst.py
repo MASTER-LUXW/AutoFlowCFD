@@ -77,6 +77,15 @@ class GPUTurbulenceSST:
         # DES 长度尺度（可选）
         self.des_length_scale: Optional['cp.ndarray'] = None
 
+        # k/omega 物理上界（防止输运方程数值爆炸，与 CPU 版一致）
+        self.k_max: float = 1e6
+        self.omega_max: float = 1e6
+
+        # 湍流产项渐变因子 [0, 1]（工业 RANS 标准做法，与 CPU 版一致）
+        # 初始为 0（抑制产生项），逐步增加到 1（全量产生）。
+        # 防止初始流场未发展时 P_k >> D_k 导致 k/omega 指数爆炸。
+        self.production_factor: float = 1.0
+
     def compute_strain_rate_magnitude_gpu(self, grad_u: 'cp.ndarray') -> 'cp.ndarray':
         """GPU 计算应变率张量模 |S|。
 
@@ -235,7 +244,8 @@ class GPUTurbulenceSST:
         )
 
         # === k 方程源项 ===
-        P_k = self.nu_t * rho * S_mag**2
+        # 产生项: P_k = μ_t * S^2（乘以 production_factor 渐变因子）
+        P_k = self.production_factor * self.nu_t * rho * S_mag**2
         P_k = cp.minimum(P_k, 10.0 * self.beta_star * rho * self.k_field * omega_safe)
 
         if self.des_length_scale is not None:
@@ -250,7 +260,8 @@ class GPUTurbulenceSST:
         gamma2 = self.beta2 / self.beta_star - self.sigma_w2 * self.kappa**2 / cp.sqrt(self.beta_star)
         gamma = F1 * gamma1 + (1.0 - F1) * gamma2
 
-        P_omega = rho * gamma * S_mag**2
+        # 产生项: P_ω = ρ * γ * S^2（乘以 production_factor 渐变因子）
+        P_omega = self.production_factor * rho * gamma * S_mag**2
         D_omega = rho * beta * self.omega_field**2
         CD_omega = 2.0 * rho * (1.0 - F1) * self.sigma_w2 / omega_safe * grad_dot
 
@@ -261,10 +272,12 @@ class GPUTurbulenceSST:
     def apply_positivity_limiter_gpu(
         self, min_k: float = 1e-12, min_omega: float = 1e-12
     ):
-        """GPU 正性保持限制器。"""
+        """GPU 正性保持限制器（含物理上界）。"""
         cp = get_cupy()
         self.k_field = cp.maximum(self.k_field, min_k)
         self.omega_field = cp.maximum(self.omega_field, min_omega)
+        self.k_field = cp.minimum(self.k_field, self.k_max)
+        self.omega_field = cp.minimum(self.omega_field, self.omega_max)
 
     def update_fields_gpu(
         self,

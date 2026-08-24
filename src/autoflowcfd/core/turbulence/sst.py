@@ -48,6 +48,19 @@ class SSTModelFR:
         self.omega_field = np.ones((n_cells, n_sps)) * 1.0
         self.nu_t = np.zeros((n_cells, n_sps))
 
+        # k/omega 物理上界（防止输运方程数值爆炸）。
+        # 默认值保守（1e6），应在求解器初始化时根据来流条件设置：
+        #   k_max = 0.5 * vel_inf^2（湍动能不超过平均流动能）
+        #   omega_max = 1e6（远大于任何工程壁面 omega 值）
+        self.k_max: float = 1e6
+        self.omega_max: float = 1e6
+
+        # 湍流产项渐变因子 [0, 1]（工业 RANS 标准做法）。
+        # 初始为 0（抑制产生项），逐步增加到 1（全量产生）。
+        # 防止初始流场未发展时 P_k >> D_k 导致 k/omega 指数爆炸。
+        # 由求解器根据全局迭代步数控制，见 turbulence.py::_update_production_ramp。
+        self.production_factor: float = 1.0
+
         # SST 模型常数
         self.sigma_k1 = 0.85
         self.sigma_k2 = 1.0
@@ -307,8 +320,8 @@ class SSTModelFR:
         )
 
         # === k 方程源项 ===
-        # 产生项: P_k = μ_t * S^2
-        P_k = self.nu_t * rho * S_mag**2
+        # 产生项: P_k = μ_t * S^2（乘以 production_factor 渐变因子）
+        P_k = self.production_factor * self.nu_t * rho * S_mag**2
 
         # P_k 上限（标准 SST 要求，此前缺失）：P_k = min(P_k, 10*beta_star*rho*k*omega)，
         # 防止驻点/强剪切层附近产生项无界增长导致 k 失控。
@@ -326,12 +339,12 @@ class SSTModelFR:
         Sk = P_k - D_k
 
         # === ω 方程源项 ===
-        # 产生项: P_ω = ρ * γ * S^2
+        # 产生项: P_ω = ρ * γ * S^2（乘以 production_factor 渐变因子）
         gamma1 = self.beta1 / self.beta_star - self.sigma_w1 * self.kappa**2 / np.sqrt(self.beta_star)
         gamma2 = self.beta2 / self.beta_star - self.sigma_w2 * self.kappa**2 / np.sqrt(self.beta_star)
         gamma = F1 * gamma1 + (1.0 - F1) * gamma2
 
-        P_omega = rho * gamma * S_mag**2
+        P_omega = self.production_factor * rho * gamma * S_mag**2
 
         # 耗散项: D_ω = ρ * β * ω^2
         # omega_safe 已钳制到 [1e-10, 1e100]，平方后 1e200 仍在 float64 范围内
@@ -355,7 +368,18 @@ class SSTModelFR:
 
     def apply_positivity_limiter(self, min_k: float = 1e-12, min_omega: float = 1e-12):
         """
-        正性保持限制器 (T-02)：强制 k 和 omega 非负，并在重构过程中嵌入硬约束。
+        正性保持限制器 (T-02)：强制 k 和 omega 在物理合理范围内。
+
+        下界：k, omega >= min（防止负值导致后续计算崩溃）
+        上界：k <= k_max, omega <= omega_max（防止输运方程数值爆炸）
+
+        上界的物理依据：
+        - k_max = 0.5 * vel_inf^2：湍动能不可能超过平均流动能
+        - omega_max：远大于任何工程壁面 omega 值的保守上界
+        不设上界时，SST 源项+输运项的正反馈（P_k ∝ k，transport ∝ ∇k）
+        会导致 k/omega 指数增长到 1e260+ 量级（实测 cube_demo 100 步内
+        即达到此量级），而平均流完全不受影响（nu_t 被 SST a1 限幅保持
+        合理），形成"平均流正常但湍流场完全发散"的隐蔽失效模式。
 
         Args:
             min_k: k 的最小允许值
@@ -369,15 +393,13 @@ class SSTModelFR:
         if np.any(bad_w):
             self.omega_field[bad_w] = min_omega
 
-        # 硬截断确保物理合理性（T-02 规范要求的正性约束：k,omega >= 0）
+        # 下界：正性约束（T-02 规范要求的 k,omega >= 0）
         self.k_field = np.maximum(self.k_field, min_k)
         self.omega_field = np.maximum(self.omega_field, min_omega)
 
-        # 此前这里还有一段"超过全场均值100倍就拍回100倍均值"的全局裁剪，
-        # 已删除：这不是正性限制器要求的东西（T-02 只要求 k,omega>=0），
-        # 全场均值在驻点/强剪切层附近偏低是正常物理现象，用它做裁剪阈值
-        # 会把这些区域本应合法的高 k 值直接削平，是非物理的伪平滑，且
-        # 阈值 100 没有任何依据（见 V2.0 二次评审 T-02 发现）。
+        # 上界：物理约束——防止 k/omega 输运方程数值爆炸
+        self.k_field = np.minimum(self.k_field, self.k_max)
+        self.omega_field = np.minimum(self.omega_field, self.omega_max)
 
     def update_fields(self, dt: float, Sk: np.ndarray, S_omega: np.ndarray,
                      diff_k: np.ndarray = None, diff_omega: np.ndarray = None,

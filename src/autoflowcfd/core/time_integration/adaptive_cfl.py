@@ -8,10 +8,13 @@ AutoFlowCFD V2.0 - 稳态求解器自适应 CFL 控制器
 设计原则（2026-08-24）：
     1. 保证不发散：CFL 上限保守（0.3，远低于 SSP-RK3 稳定极限 ~1.0），
        残差恶化时立即缩小 CFL，爬升阶段固定 CFL 不动。
-    2. CFL 变动不要太频繁：设置“死区”（残差比 0.95~1.5 之间 CFL 不变）
-       和“连续确认”（需要连续 2 步残差下降才放大 CFL），避免对单步
-       波动过度反应。冷却期（至少间隔 2 步才允许再次调节）进一步抑制
-       CFL 振荡。
+    2. 五级调节策略：
+       - grow：ratio < 0.9（残差快速下降），连续 5 步确认后 ×1.1
+       - crawl：0.9 ≤ ratio < 0.95（缓慢收敛），连续 5 步确认后 ×1.05
+       - 死区：0.95 ≤ ratio ≤ 1.0，CFL 不变
+       - shrink(轻)：1.0 < ratio ≤ 1.1（轻微恶化），立即 ×0.9
+       - shrink(重)：ratio > 1.1（明显恶化），立即 ×0.8
+       所有调节均有 5 步冷却期，避免 CFL 振荡。
     3. 与 dual.py 的双时间步自适应逻辑独立——两者面向不同的迭代结构
        （稳态每步一次 RK3 vs 双时间每步多次内迭代），参数和策略不同。
 
@@ -39,11 +42,13 @@ class AdaptiveCFLController:
         1. 爬升阶段（前 ramp_steps 步）：CFL 固定为 cfl_start，不调节。
            建立稳定的残差基线，避免初始暂态触发误调节。
         2. 爬升结束后，根据残差比 ratio = res_current / res_previous：
-           - ratio < growth_threshold（残差持续下降，至少下降 10%）：
-             需要连续 growth_confirm_steps 步都满足条件才放大 CFL
-           - ratio > shrink_threshold（残差恶化，增长超过 3 倍）：
-             立即缩小 CFL（安全优先，不等确认）
-           - 其余（死区 [0.9, 3.0]）：CFL 保持不变
+           - ratio < 0.9（残差快速下降 >10%）：
+             连续 5 步确认后 CFL ×1.1（grow）
+           - 0.9 ≤ ratio < 0.95（缓慢收敛）：
+             连续 5 步确认后 CFL ×1.05（crawl）
+           - 0.95 ≤ ratio ≤ 1.0（死区）：CFL 不变
+           - 1.0 < ratio ≤ 1.1（轻微恶化）：立即 CFL ×0.9（shrink）
+           - ratio > 1.1（明显恶化）：立即 CFL ×0.8（shrink）
         3. 冷却期：两次 CFL 调节之间至少间隔 cooldown_steps 步，
            避免 CFL 在相邻两步间来回振荡。
 
@@ -56,36 +61,36 @@ class AdaptiveCFLController:
         cfl_start: float = 0.1,
         cfl_max: float = 0.3,
         cfl_min: float = 0.05,
-        growth_factor: float = 1.15,
-        shrink_factor: float = 0.5,
-        growth_threshold: float = 0.95,
-        shrink_threshold: float = 1.5,
-        growth_confirm_steps: int = 2,
-        cooldown_steps: int = 2,
+        growth_factor: float = 1.1,
+        shrink_factor: float = 0.8,
+        growth_threshold: float = 0.9,
+        shrink_threshold: float = 1.1,
+        growth_confirm_steps: int = 5,
+        cooldown_steps: int = 5,
         ramp_steps: int = 3,
+        crawl_threshold: float = 0.95,
+        crawl_factor: float = 1.05,
+        crawl_confirm_steps: int = 5,
+        mild_shrink_factor: float = 0.9,
     ):
         """初始化自适应 CFL 控制器。
-    
+
         Args:
             cfl_start: 初始 CFL 数（已验证稳定的保守值）。
-            cfl_max: CFL 上限。实测 cube_demo 791k 网格 CFL=0.144 时残差开始
-                振荡（step 9 ratio=1.01, step 10 ratio=1.27），取 0.3 留
-                一倍裕度。SSP-RK3 稳定极限 ~1.0，但实际可用上限取决于网格
-                /物理问题，0.3 是安全保守值。
+            cfl_max: CFL 上限。SSP-RK3 稳定极限 ~1.0，实际可用上限取决于
+                网格/物理问题，0.3 是安全保守值。
             cfl_min: CFL 下限。低于此值说明问题本身很难，继续缩小意义不大。
-            growth_factor: 残差持续下降时的 CFL 放大因子（1.15 = 每次放大 15%）。
-                比此前的 1.2 更保守，因为实测 CFL>0.12 后残差对步长敏感。
-            shrink_factor: 残差恶化时的 CFL 缩小因子（0.5 = 每次减半）。
-            growth_threshold: 残差比低于此值视为“持续下降”（ratio < 0.95 即
-                残差至少下降 5%）。
-            shrink_threshold: 残差比高于此值视为“恶化”（ratio > 1.5 即
-                残差增长超过 50%）。实测 CFL=0.144 时残差比 1.27 已是不稳定
-                信号，阈值从 3.0 降到 1.5 可以更早察觉并回退。
-            growth_confirm_steps: 放大 CFL 前需要连续多少步满足“持续下降”条件。
-                防止单步残差骤降（可能是初始暂态而非真正收敛）触发过度放大。
-            cooldown_steps: 两次 CFL 调节之间的最小间隔步数。防止 CFL 在
-                相邻步之间来回振荡（放大→恶化→缩小→恢复→放大→...）。
+            growth_factor: 快速放大因子（1.1 = 每次放大 10%）。
+            shrink_factor: 重度缩小因子（0.8 = 每次缩小 20%，ratio > 1.1）。
+            growth_threshold: 快速下降阈值（ratio < 0.9 即残差下降 >10%）。
+            shrink_threshold: 重度恶化阈值（ratio > 1.1 即残差增长 >10%）。
+            growth_confirm_steps: 快速放大前需连续满足条件的步数。
+            cooldown_steps: 两次 CFL 调节之间的最小间隔步数。
             ramp_steps: 初始爬升步数。此期间 CFL 固定为 cfl_start，不调节。
+            crawl_threshold: 慢速爬升阈值上界（ratio < 0.95 视为缓慢收敛）。
+            crawl_factor: 慢速放大因子（1.05 = 每次放大 5%）。
+            crawl_confirm_steps: 慢速放大前需连续满足条件的步数。
+            mild_shrink_factor: 轻度缩小因子（0.9 = 每次缩小 10%，1.0 < ratio ≤ 1.1）。
         """
         # 参数
         self.cfl_start = cfl_start
@@ -98,12 +103,17 @@ class AdaptiveCFLController:
         self.growth_confirm_steps = growth_confirm_steps
         self.cooldown_steps = cooldown_steps
         self.ramp_steps = ramp_steps
-
+        self.crawl_threshold = crawl_threshold
+        self.crawl_factor = crawl_factor
+        self.crawl_confirm_steps = crawl_confirm_steps
+        self.mild_shrink_factor = mild_shrink_factor
+    
         # 状态
         self.cfl_number: float = cfl_start
         self._prev_residual: float = 0.0
         self._step_count: int = 0
-        self._consecutive_good: int = 0  # 连续"快速下降"步数计数
+        self._consecutive_good: int = 0      # 连续"快速下降"步数计数
+        self._consecutive_crawl: int = 0     # 连续"缓慢收敛"步数计数
         self._steps_since_last_change: int = 0  # 距上次 CFL 调节的步数
         self._history: List[Tuple[int, float, float]] = []  # (step, cfl, residual)
 
@@ -144,44 +154,63 @@ class AdaptiveCFLController:
         # --- 调节判断 ---
 
         if ratio < self.growth_threshold:
-            # 残差持续下降（ratio < growth_threshold）
+            # 快速下降（ratio < 0.9）→ grow
             self._consecutive_good += 1
-        elif ratio > self.shrink_threshold:
-            # 残差恶化（ratio > shrink_threshold）
-            # 安全优先：立即缩小 CFL，不等连续确认
+            self._consecutive_crawl = 0
+        elif ratio < self.crawl_threshold:
+            # 缓慢收敛（0.9 ≤ ratio < 0.95）→ crawl
+            self._consecutive_crawl += 1
             self._consecutive_good = 0
+            if (self._consecutive_crawl >= self.crawl_confirm_steps
+                    and self._steps_since_last_change >= self.cooldown_steps):
+                old_cfl = self.cfl_number
+                self.cfl_number = min(
+                    self.cfl_number * self.crawl_factor, self.cfl_max
+                )
+                self._consecutive_crawl = 0
+                self._steps_since_last_change = 0
+                if abs(self.cfl_number - old_cfl) > 1e-10:
+                    logger.info(
+                        f"[AdaptiveCFL] Step {self._step_count}: "
+                        f"CFL {old_cfl:.3f} → {self.cfl_number:.3f} "
+                        f"(crawl, ratio={ratio:.3f})"
+                    )
+            self._prev_residual = current_residual
+            return self.cfl_number
+        elif ratio > 1.0:
+            # 恶化：分轻度 (1.0 < ratio ≤ 1.1) 和重度 (ratio > 1.1)
+            self._consecutive_good = 0
+            self._consecutive_crawl = 0
+            factor = (self.shrink_factor if ratio > self.shrink_threshold
+                      else self.mild_shrink_factor)
+            label = "shrink" if ratio > self.shrink_threshold else "shrink_mild"
             if self._steps_since_last_change >= self.cooldown_steps:
                 old_cfl = self.cfl_number
-                self.cfl_number = max(self.cfl_number * self.shrink_factor, self.cfl_min)
+                self.cfl_number = max(self.cfl_number * factor, self.cfl_min)
                 self._steps_since_last_change = 0
                 logger.info(
                     f"[AdaptiveCFL] Step {self._step_count}: CFL {old_cfl:.3f} → "
-                    f"{self.cfl_number:.3f} (shrink, ratio={ratio:.2f})"
+                    f"{self.cfl_number:.3f} ({label}, ratio={ratio:.3f})"
                 )
             self._prev_residual = current_residual
             return self.cfl_number
         else:
-            # 死区：残差变化在可接受范围内，CFL 不变
-            # 但连续"好"计数不重置（轻微波动不应抹杀之前的积累）
-            # 仅当残差真正恶化（ratio > 1.0）时才重置
-            if ratio > 1.0:
-                self._consecutive_good = 0
+            # 死区（0.95 ≤ ratio ≤ 1.0）：CFL 不变
             self._prev_residual = current_residual
             return self.cfl_number
 
-        # --- 放大 CFL（需要连续确认 + 冷却期）---
+        # --- 快速放大 CFL（需要连续确认 + 冷却期）---
 
         if (self._consecutive_good >= self.growth_confirm_steps
                 and self._steps_since_last_change >= self.cooldown_steps):
             old_cfl = self.cfl_number
             self.cfl_number = min(self.cfl_number * self.growth_factor, self.cfl_max)
-            self._consecutive_good = 0  # 重置计数器，需要再积累
+            self._consecutive_good = 0
             self._steps_since_last_change = 0
             if abs(self.cfl_number - old_cfl) > 1e-10:
                 logger.info(
                     f"[AdaptiveCFL] Step {self._step_count}: CFL {old_cfl:.3f} → "
-                    f"{self.cfl_number:.3f} (grow, ratio={ratio:.2f}, "
-                    f"consecutive_good={self._consecutive_good})"
+                    f"{self.cfl_number:.3f} (grow, ratio={ratio:.3f})"
                 )
 
         self._prev_residual = current_residual
@@ -201,6 +230,7 @@ class AdaptiveCFLController:
         self._prev_residual = 0.0
         self._step_count = 0
         self._consecutive_good = 0
+        self._consecutive_crawl = 0
         self._steps_since_last_change = 0
         # 不清空 _history（保留诊断信息）
 
@@ -219,5 +249,6 @@ class AdaptiveCFLController:
         return (
             f"CFL={self.cfl_number:.3f} "
             f"(steps={self._step_count}, good_streak={self._consecutive_good}, "
+            f"crawl_streak={self._consecutive_crawl}, "
             f"since_change={self._steps_since_last_change})"
         )

@@ -396,7 +396,8 @@ def suppress_residual_outliers(
     ref_sibling = _median_abs_over_sps_kernel(residual)[:, np.newaxis, :]  # (n_cells,1,n_vars)
     ref_field = field_rel_floor * np.mean(np.abs(reference_field), axis=1, keepdims=True)
     ref = np.maximum(np.maximum(ref_sibling, ref_field), 1e-300)
-    outlier = np.abs(residual) > factor * ref
+    with np.errstate(over='ignore', invalid='ignore'):
+        outlier = np.abs(residual) > factor * ref
     if not np.any(outlier):
         return residual
     return np.where(outlier, 0.0, residual)
