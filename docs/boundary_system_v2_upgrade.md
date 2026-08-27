@@ -85,8 +85,8 @@
 - `configure_from_yaml()`: 手动模式配置
 - `hybrid_configure()`: 混合模式配置
 - `update_boundary_params()`: 动态更新参数
-- `export_to_vtk()`: 导出VTK可视化文件
-- `export_to_json()`: 导出JSON统计信息
+- `export_to_json()`: 导出JSON统计信息（VTK 导出后来确认不属于管理器职责，
+  已移除断链的 `export_to_vtk()`，边界面片可视化走 CLI `post export-vtk`）
 - `generate_template()`: 生成YAML模板
 
 改进方法：
@@ -251,7 +251,8 @@ CTRIA3, 100001, 10, 50001, 50002, 50003
 
 ## 下一步计划
 
-1. **VTK导出实现**：完成`export_to_vtk()`方法的完整实现
+1. **VTK导出实现**：已完成替代方案——边界面片导出由 `post export-vtk`（VTKExporter.export_boundaries）
+   承担；BoundaryManager 的 `export_to_vtk()` 因依赖从未赋值的 grid_data 属断链死代码，已移除
 2. **CLI命令集成**：在CLI中添加边界管理相关子命令
 3. **文档完善**：补充更多实际算例和最佳实践
 4. **性能优化**：进一步优化大规模网格的解析速度

@@ -93,11 +93,20 @@ def enforce_positivity_gpu(U, p_floor: float = 1.0):
 def compute_local_cfl_step_gpu(
     U, cell_volumes, owner_cell, neighbor_cell, is_boundary,
     normals, areas, cell_owner, cell_areas,
-    cfl: float = 1.0, mu_eff=None, mach_ref: float = 0.1,
+    cfl: float = 1.0, mu_eff=None, poly_order: int = 0,
 ):
     """GPU 版局部 CFL 时间步长计算。
 
-    dt_i = CFL * V_i / sum_f (|u.n|+c_precond) A_f
+    dt_i = CFL * order_factor * V_i / sum_f (|u.n|+a) A_f
+
+    谱半径用物理声速 a（2026-08-25 代码审查修复）：此前这里用
+    Weiss-Smith 预处理声速 c_precond 替代物理声速，低马赫数下（Mach 0.1
+    时 c_precond≈36 m/s vs a≈340 m/s）dt 被高估 ~10 倍，有效 CFL 远超
+    SSP-RK3 稳定极限——与 CPU 侧 cfl.py::compute_local_time_step 的
+    2026-08-24 修复完全同因（该次修复只改了 CPU 路径，GPU 路径被遗漏，
+    此处把 GPU 拉回与 CPU 一致的物理声速）。原理：显式积分的是物理通量，
+    稳定性由物理通量谱半径（|u_n|+a）决定；预处理只改善条件数，不改变
+    稳定极限。order_factor 与 CPU 侧同一公式 1/(2p+1)。
 
     Args:
         U: CuPy 数组 (n_cells, n_sps, n_vars)
@@ -109,11 +118,9 @@ def compute_local_cfl_step_gpu(
         cell_areas: 边界面面积
         cfl: CFL 数
         mu_eff: 有效粘度（可选）
-        mach_ref: Weiss-Smith 预处理参考马赫数，必须与
-            kernels.py::compute_ausm_up_flux/gpu_inviscid.py::
-            _ausm_up_flux_batch_gpu 用同一个真实自由来流值（见
-            cfl.py 模块文档"0"一节，两边用不同参考值正是 2026-08-14
-            那次失稳的根因）。
+        poly_order: 当前多项式阶数，用于 1/(2p+1) 的阶数相关收紧，
+            与 CPU 侧 cfl.py::compute_local_time_step 的
+            order_factor_advective/order_factor_viscous 同一公式。
 
     Returns:
         dt_local: CuPy 数组 (n_cells,)
@@ -128,14 +135,10 @@ def compute_local_cfl_step_gpu(
     p = cp.maximum((GAMMA - 1.0) * (U[:, 0, 4] - ke), 1.0)
     a = cp.sqrt(GAMMA * p / rho)
 
-    # Weiss-Smith 预处理声速（逐 cell，用该 cell 自己的速度大小/物理声速
-    # 算局部马赫数——与 cfl.py::compute_local_time_step 的 CPU 版本
-    # 同一套公式/同一个 mach_ref，替代下面谱半径求和里的原始声速 a，
-    # 与 AUSM+up 通量本身的预处理保持一致）。
-    vel_mag_cell = cp.sqrt(cp.sum(vel**2, axis=1))
-    Mbar2_cell = (vel_mag_cell / cp.maximum(a, 1e-10)) ** 2
-    beta2_cell = cp.minimum(1.0, cp.maximum(cp.maximum(Mbar2_cell, 1.1 * mach_ref**2), 1e-10))
-    c_precond = cp.sqrt(beta2_cell) * a
+    # 阶数相关收紧（与 CPU 侧 cfl.py 同一公式）：显式 FR 格式的对流/
+    # 粘性稳定极限随阶数衰减，对流 ~1/(2p+1)、粘性 ~1/(2p+1)^2。
+    order_factor_advective = 1.0 / (2 * poly_order + 1)
+    order_factor_viscous = order_factor_advective ** 2
 
     # 谱半径累加
     spectral = cp.zeros(n_cells, dtype=cp.float64)
@@ -147,8 +150,8 @@ def compute_local_cfl_step_gpu(
     n_int = normals[int_mask]
     a_int = areas[int_mask]
 
-    un_o = cp.abs(cp.einsum('nd,nd->n', vel[io], n_int)) + c_precond[io]
-    un_n = cp.abs(cp.einsum('nd,nd->n', vel[ineigh], n_int)) + c_precond[ineigh]
+    un_o = cp.abs(cp.einsum('nd,nd->n', vel[io], n_int)) + a[io]
+    un_n = cp.abs(cp.einsum('nd,nd->n', vel[ineigh], n_int)) + a[ineigh]
 
     cp.scatter_add(spectral, io, un_o * a_int)
     cp.scatter_add(spectral, ineigh, un_n * a_int)
@@ -159,16 +162,16 @@ def compute_local_cfl_step_gpu(
     if bo.size > 0:
         n_b = normals[bnd_mask]
         a_b = areas[bnd_mask]
-        un_b = cp.abs(cp.einsum('nd,nd->n', vel[bo], n_b)) + c_precond[bo]
+        un_b = cp.abs(cp.einsum('nd,nd->n', vel[bo], n_b)) + a[bo]
         cp.scatter_add(spectral, bo, un_b * a_b)
 
     spectral = cp.maximum(spectral, 1e-30)
-    dt = cfl * cell_volumes / spectral
+    dt = cfl * order_factor_advective * cell_volumes / spectral
 
-    # 粘性限制
+    # 粘性限制（阶数收紧与 CPU 侧 cfl.py 同一公式）
     if mu_eff is not None:
         Lc2 = cell_volumes ** (2.0 / 3.0)
-        dt_visc = 0.25 * cfl * rho * Lc2 / cp.maximum(mu_eff, 1e-30)
+        dt_visc = 0.25 * cfl * order_factor_viscous * rho * Lc2 / cp.maximum(mu_eff, 1e-30)
         dt = cp.minimum(dt, dt_visc)
 
     return dt

@@ -40,13 +40,16 @@ class GPUTurbulenceSST:
         nu_t: 涡粘系数场 (GPU)
     """
 
-    def __init__(self, n_cells: int, n_sps: int, device_id: int = 0):
+    def __init__(self, n_cells: int, n_sps: int, device_id: int = 0,
+                 k_inf: float = 1e-6, omega_inf: float = 1.0):
         """初始化 GPU SST 模型。
 
         Args:
             n_cells: 单元数量
             n_sps: 每单元解点数
             device_id: GPU 设备 ID
+            k_inf: 来流湍动能初值（默认 1e-6，工业标准由 Tu/VR 推导）
+            omega_inf: 来流比耗散率初值（默认 1.0，工业标准由 Tu/VR 推导）
         """
         if not gpu_available:
             raise RuntimeError("CuPy required for GPU turbulence model")
@@ -57,9 +60,9 @@ class GPUTurbulenceSST:
         self.device_id = device_id
 
         with cp.cuda.Device(device_id):
-            # 初始化湍流场（小正值避免除零）
-            self.k_field = cp.ones((n_cells, n_sps), dtype=cp.float64) * 1e-6
-            self.omega_field = cp.ones((n_cells, n_sps), dtype=cp.float64) * 1.0
+            # 初始化湍流场（工业标准：从 Tu/VR 推导物理自洽的 k/omega）
+            self.k_field = cp.ones((n_cells, n_sps), dtype=cp.float64) * k_inf
+            self.omega_field = cp.ones((n_cells, n_sps), dtype=cp.float64) * omega_inf
             self.nu_t = cp.zeros((n_cells, n_sps), dtype=cp.float64)
 
         # SST 模型常数（与 CPU 版一致）
@@ -77,13 +80,19 @@ class GPUTurbulenceSST:
         # DES 长度尺度（可选）
         self.des_length_scale: Optional['cp.ndarray'] = None
 
-        # k/omega 物理上界（防止输运方程数值爆炸，与 CPU 版一致）
+        # k/omega 物理上界（防止输运方程数值爆炸）。k_max 这里是占位保守值，
+        # GPUFRSolver 初始化湍流模型后会按 CPU 同一公式覆盖为 0.5·vel_inf²
+        # （见 gpu_solver.py，与 CPU 版 fr_solver/turbulence.py::
+        # _set_turbulence_bounds 一致；2026-08-25 代码审查前此处恒为 1e6，
+        # 与 CPU 惯例不一致且注释误称"与 CPU 版一致"）。
         self.k_max: float = 1e6
         self.omega_max: float = 1e6
 
-        # 湍流产项渐变因子 [0, 1]（工业 RANS 标准做法，与 CPU 版一致）
-        # 初始为 0（抑制产生项），逐步增加到 1（全量产生）。
-        # 防止初始流场未发展时 P_k >> D_k 导致 k/omega 指数爆炸。
+        # 湍流产项渐变因子 [0, 1]。注意：GPU 路径当前未接入渐变逻辑，
+        # 恒为 1.0（与 CPU 版 fr_solver/turbulence.py::_update_production_ramp
+        # 的"从 0 线性爬升 50 步"行为不一致，2026-08-25 代码审查前此处注释
+        # 误称"与 CPU 版一致"）。GPU 侧初始 k/omega 爆炸靠 k_max/omega_max
+        # 物理上界抑制；若后续要接入 ramp，需在 GPU 求解循环里同步更新本值。
         self.production_factor: float = 1.0
 
     def compute_strain_rate_magnitude_gpu(self, grad_u: 'cp.ndarray') -> 'cp.ndarray':
@@ -101,6 +110,17 @@ class GPUTurbulenceSST:
         # |S| = sqrt(2 * S_ij * S_ij)
         S_mag = cp.sqrt(2.0 * cp.sum(S_ij * S_ij, axis=(2, 3)))
         return S_mag
+
+    def compute_vorticity_magnitude_gpu(self, grad_u: 'cp.ndarray') -> 'cp.ndarray':
+        """GPU 计算涡量张量模 |Ω|（用于 Kato-Launder 驻点修正）。
+
+        Ω_ij = 0.5 * (∂u_i/∂x_j - ∂u_j/∂x_i)
+        |Ω| = sqrt(2 * Ω_ij * Ω_ij)
+        """
+        cp = get_cupy()
+        W_ij = 0.5 * (grad_u - cp.transpose(grad_u, (0, 1, 3, 2)))
+        Omega_mag = cp.sqrt(2.0 * cp.sum(W_ij * W_ij, axis=(2, 3)))
+        return Omega_mag
 
     def compute_blending_F1_gpu(
         self, k: 'cp.ndarray', omega: 'cp.ndarray',
@@ -212,6 +232,14 @@ class GPUTurbulenceSST:
         # 应变率模
         S_mag = self.compute_strain_rate_magnitude_gpu(grad_U)
 
+        # Kato-Launder 驻点修正（与 CPU 版一致）：
+        # 产生项用 S*Ω 替代 S²，防止驻点区 k 非物理增长
+        Omega_mag = self.compute_vorticity_magnitude_gpu(grad_U)
+        S_omega_prod = S_mag * Omega_mag
+
+        # 时间尺度 realization：动态 ω 下限
+        self._omega_realizability_min = 0.1 * float(cp.max(S_mag))
+
         # 交叉扩散项
         grad_dot = cp.sum(grad_k * grad_omega, axis=2)
         omega_safe = cp.maximum(self.omega_field, 1e-10)
@@ -244,8 +272,8 @@ class GPUTurbulenceSST:
         )
 
         # === k 方程源项 ===
-        # 产生项: P_k = μ_t * S^2（乘以 production_factor 渐变因子）
-        P_k = self.production_factor * self.nu_t * rho * S_mag**2
+        # 产生项: P_k = μ_t * S * Ω（Kato-Launder 修正）
+        P_k = self.production_factor * self.nu_t * rho * S_omega_prod
         P_k = cp.minimum(P_k, 10.0 * self.beta_star * rho * self.k_field * omega_safe)
 
         if self.des_length_scale is not None:
@@ -260,8 +288,8 @@ class GPUTurbulenceSST:
         gamma2 = self.beta2 / self.beta_star - self.sigma_w2 * self.kappa**2 / cp.sqrt(self.beta_star)
         gamma = F1 * gamma1 + (1.0 - F1) * gamma2
 
-        # 产生项: P_ω = ρ * γ * S^2（乘以 production_factor 渐变因子）
-        P_omega = self.production_factor * rho * gamma * S_mag**2
+        # 产生项: P_ω = ρ * γ * S * Ω（Kato-Launder 修正）
+        P_omega = self.production_factor * rho * gamma * S_omega_prod
         D_omega = rho * beta * self.omega_field**2
         CD_omega = 2.0 * rho * (1.0 - F1) * self.sigma_w2 / omega_safe * grad_dot
 
@@ -278,6 +306,10 @@ class GPUTurbulenceSST:
         self.omega_field = cp.maximum(self.omega_field, min_omega)
         self.k_field = cp.minimum(self.k_field, self.k_max)
         self.omega_field = cp.minimum(self.omega_field, self.omega_max)
+
+        # 时间尺度 realization（与 CPU 版一致）
+        if hasattr(self, '_omega_realizability_min'):
+            self.omega_field = cp.maximum(self.omega_field, self._omega_realizability_min)
 
     def update_fields_gpu(
         self,

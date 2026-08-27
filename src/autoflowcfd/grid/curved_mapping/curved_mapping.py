@@ -36,8 +36,11 @@ from .curved_mapping_exact_jacobian import tet_exact_jacobian, prism_exact_jacob
 
 
 @njit(cache=True)
-def batched_det_inv_3x3(J: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """批量计算 (N,3,3) 矩阵的行列式与逆矩阵，闭式伴随矩阵公式
+def _batched_det_adj_3x3(J: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """批量计算 (N,3,3) 矩阵的行列式与伴随矩阵（余子式转置），闭式公式。
+    返回的第二个数组存的是 adj(J)，除以 det 得到逆矩阵的这一步由纯 Python 包装
+    函数 `batched_det_inv_3x3` 在 numba 外完成（numba nopython 不支持
+    np.errstate，而 det==0 的除法需要在不抛异常的前提下产出 inf）。
     （inv=adj(J)/det(J)，adj 是余子式矩阵的转置），数学上与
     `np.linalg.det`/`np.linalg.inv` 精确等价，不是近似替代。
 
@@ -79,17 +82,36 @@ def batched_det_inv_3x3(J: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
 
         d = m00 * c00 + m01 * c01 + m02 * c02
         det[idx] = d
-        inv_d = 1.0 / d
-        inv[idx, 0, 0] = c00 * inv_d
-        inv[idx, 0, 1] = c10 * inv_d
-        inv[idx, 0, 2] = c20 * inv_d
-        inv[idx, 1, 0] = c01 * inv_d
-        inv[idx, 1, 1] = c11 * inv_d
-        inv[idx, 1, 2] = c21 * inv_d
-        inv[idx, 2, 0] = c02 * inv_d
-        inv[idx, 2, 1] = c12 * inv_d
-        inv[idx, 2, 2] = c22 * inv_d
+        # 这里只存伴随矩阵（余子式转置）；除以 det 的向量化步骤在
+        # numba 外完成——标量 1.0/d 在完全退化单元（det==0 精确成立）上会抛异常，
+        # 抢在 compute_jacobian 设计好的 MeshDistortionError 之前，用户拿到的就
+        inv[idx, 0, 0] = c00
+        inv[idx, 0, 1] = c10
+        inv[idx, 0, 2] = c20
+        inv[idx, 1, 0] = c01
+        inv[idx, 1, 1] = c11
+        inv[idx, 1, 2] = c21
+        inv[idx, 2, 0] = c02
+        inv[idx, 2, 1] = c12
+        inv[idx, 2, 2] = c22
     return det, inv
+
+
+def batched_det_inv_3x3(J: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """批量计算 (N,3,3) 矩阵的行列式与逆矩阵：numba 闭式伴随矩阵 + 纯 Python 向量化除法。
+
+    数值等价性已验证：随机良态矩阵（条件数 1~3，代表真实网格 Jacobian 的典型
+    量级）与 `np.linalg.det`/`np.linalg.inv` 逐位一致（最大误差 6.7e-16）；
+    退化单元场景（某一方向 det 低至 ~2e-14）精确一致（相对误差 0.0）。
+    闭式公式相对 LAPACK 通用求逆实测提速约 300~370 倍（见 _batched_det_adj_3x3 文档）。
+
+    det==0 时向量化倒数在 errstate 下得到 inf（不抛异常）；inv 的 inf 项不会被任何调用方读到——
+    compute_jacobian 在读 inv_jacs 之前就检查 det<=0 并抛带单元诊断的 MeshDistortionError。
+    """
+    det, adj = _batched_det_adj_3x3(J)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        adj *= (1.0 / det)[:, None, None]
+    return det, adj
 
 
 class MeshDistortionError(ValueError):

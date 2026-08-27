@@ -424,6 +424,17 @@ def _compute_interface_correction_gpu(
                 Q_n,
             )
 
+            # 混合拆分面（B-8，镜像 CPU inviscid_kernel.py 同名分支）：混合配对的内部面在边界半区
+            # 逐 FP 取配对边界面的幽灵态（GPU 幽灵态为逐面 (n_faces,5)，对所有 FP 同值广播）。
+            mp_o = ff.mixed_nb_partner[idx_o]
+            mixed_sel_o = (mp_o[:, None] >= 0) & ff.mixed_nb_mask[idx_o]  # (nO, n_fp)
+            Q_ghost_partner_o = Q_ghost_gpu[cp.maximum(mp_o, 0)]  # (nO, 5)
+            Q_n = cp.where(
+                mixed_sel_o[..., None],
+                cp.broadcast_to(Q_ghost_partner_o[:, None, :], Q_n.shape),
+                Q_n,
+            )
+
             adjrow_o = ff.owner_adj_row_exact[idx_o]
             direction_o, adj_mag_o = _ausm_direction_with_fallback(
                 cp, adjrow_o, oside, ff.true_normal[idx_o],
@@ -470,6 +481,16 @@ def _compute_interface_correction_gpu(
             Q_o_at_n = _extrap_q_to_fp(cp, ff.owner_src0_mat[idx_n], ff.owner_src0_cell[idx_n], Q_gpu)
             Q_o_at_n = _add_q_src1_to_fp(
                 cp, Q_o_at_n, ff.owner_src1_idx[idx_n], ff.owner_src1_cell, ff.owner_src1_mat, Q_gpu,
+            )
+
+            # 混合拆分面（B-8）：neighbor 侧对称处理——边界半区对侧状态取配对面幽灵态。
+            mp_n = ff.mixed_ow_partner[idx_n]
+            mixed_sel_n = (mp_n[:, None] >= 0) & ff.mixed_ow_mask[idx_n]
+            Q_ghost_partner_n = Q_ghost_gpu[cp.maximum(mp_n, 0)]
+            Q_o_at_n = cp.where(
+                mixed_sel_n[..., None],
+                cp.broadcast_to(Q_ghost_partner_n[:, None, :], Q_o_at_n.shape),
+                Q_o_at_n,
             )
 
             n_fp = Q_n_native.shape[1]

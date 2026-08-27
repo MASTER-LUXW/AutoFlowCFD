@@ -20,6 +20,42 @@ from autoflowcfd.core.turbulence.sgs import WALEModel
 from autoflowcfd.core.utils.wall_distance import compute_wall_distance
 
 
+def _set_freestream_turbulence(solver) -> tuple:
+    """根据来流条件从 Tu/VR 推导物理自洽的 k/omega 初值。
+
+    工业 RANS 标准做法（Fluent 用户手册 Section 7.3.2、OpenFOAM 通用实践）：
+    不直接指定 k 和 omega，而是从湍流强度 Tu 和粘性比 VR 推导，
+    确保 k 和 omega 通过 nu_t 物理耦合，避免拍脑袋组合导致源项失衡。
+
+    公式：
+        k_inf   = 1.5 * (U_inf * Tu)^2
+        nu_t    = VR * nu（nu = mu/rho 运动粘度）
+        omega_inf = k_inf / nu_t
+
+    Returns:
+        (k_inf, omega_inf): 来流湍动能和比耗散率
+    """
+    vel_inf = solver.freestream.get("vel_inf", 33.33)
+    rho_inf = solver.freestream.get("rho_inf", 1.225)
+    mu = getattr(solver, 'mu_molecular', 1.8e-5)
+    nu = mu / max(rho_inf, 1e-10)
+
+    # 外部气动默认值（参考 Fluent 手册：Tu ≤ 1%, VR = 2-10）
+    Tu = getattr(solver, '_turbulence_intensity', 0.01)
+    VR = getattr(solver, '_viscosity_ratio', 5.0)
+
+    k_inf = 1.5 * (vel_inf * Tu) ** 2
+    nu_t_inf = VR * nu
+    omega_inf = k_inf / max(nu_t_inf, 1e-30)
+
+    logger.debug(
+        f"Freestream turbulence: Tu={Tu}, VR={VR}, "
+        f"k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e}, "
+        f"tau={1.0/(0.09*omega_inf):.6e}s"
+    )
+    return k_inf, omega_inf
+
+
 def _set_turbulence_bounds(solver) -> None:
     """根据来流条件设置 k/omega 物理上界。
 
@@ -51,6 +87,9 @@ def _update_production_ramp(solver) -> None:
     前 N 步内 production_factor 从 0 线性增加到 1，防止初始流场未发展时
     P_k >> D_k（产生项超过耗散项 8 个量级）导致 k/omega 指数爆炸。
     工业 RANS 求解器（Fluent、OpenFOAM）的标准做法。
+
+    渐变完成时设置 _turb_production_ramp_complete = True（一次性标记），
+    供 Order Continuation 等上层逻辑检测并重置残差基准值。
     """
     if not hasattr(solver, 'turb_model') or solver.turb_model is None:
         return
@@ -60,6 +99,13 @@ def _update_production_ramp(solver) -> None:
     current_step = getattr(solver, '_turb_ramp_step', 0)
     if ramp_steps <= 0 or current_step >= ramp_steps:
         solver.turb_model.production_factor = 1.0
+        # 渐变完成：一次性标记（之前未完成且现在已完成）
+        if not getattr(solver, '_turb_production_ramp_complete', False):
+            solver._turb_production_ramp_complete = True
+            logger.info(
+                f"[ProductionRamp] Ramp complete after {ramp_steps} steps, "
+                f"production_factor = 1.0"
+            )
     else:
         solver.turb_model.production_factor = current_step / ramp_steps
     # 递增计数器（每调用一次代表一个迭代步）
@@ -70,23 +116,32 @@ def init_turbulence_models(solver, n_cells: int, n_sps: int) -> None:
     """初始化湍流模型（对应 FRSolver._init_turbulence_models）。"""
     # 湍流产项渐变计数器（与迭代步数同步，控制 production_factor 从 0 渐增到 1）
     solver._turb_ramp_step = 0
+    # 渐变完成标记（_update_production_ramp 在渐变完成时设为 True）
+    solver._turb_production_ramp_complete = False
     # 渐变步数：前 turb_production_ramp_steps 步内，产生项从 0 线性增加到全量。
     # 工业 RANS 标准做法：防止初始流场未发展时 P_k >> D_k 导致 k/omega 指数爆炸。
-    solver._turb_production_ramp_steps = 200
+    # 50 步足够：配合物理上界限制（k_max, omega_max），k/omega 在此步数内达到准平衡。
+    # Fluent 默认 ~50 步，OpenFOAM ~100 步；过长的 ramp 浪费收敛机会。
+    solver._turb_production_ramp_steps = 50
+
+    # 从 Tu/VR 推导物理自洽的 k/omega 初值（工业标准）
+    k_inf, omega_inf = _set_freestream_turbulence(solver)
 
     if solver.turb_model_name == "SST":
-        solver.turb_model = SSTModelFR(n_cells, n_sps)
+        solver.turb_model = SSTModelFR(n_cells, n_sps, k_inf=k_inf, omega_inf=omega_inf)
         _set_turbulence_bounds(solver)
         _update_production_ramp(solver)
         print(f"   [OK] SST k-omega model initialized "
-              f"(production ramp: {solver._turb_production_ramp_steps} steps)")
+              f"(k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e}, "
+              f"production ramp: {solver._turb_production_ramp_steps} steps)")
 
     elif solver.turb_model_name == "DDES":
-        solver.turb_model = SSTModelFR(n_cells, n_sps)
+        solver.turb_model = SSTModelFR(n_cells, n_sps, k_inf=k_inf, omega_inf=omega_inf)
         _set_turbulence_bounds(solver)
         _update_production_ramp(solver)
         solver.ddes_model = DDESModel()
         print(f"   [OK] DDES model initialized (based on SST, "
+              f"k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e}, "
               f"production ramp: {solver._turb_production_ramp_steps} steps)")
 
     elif solver.turb_model_name == "WMLES":

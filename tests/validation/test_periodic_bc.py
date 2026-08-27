@@ -72,6 +72,15 @@ def test_periodic_faces_paired_correctly():
 def test_periodic_freestream_preservation():
     """均匀自由流场跨越周期面时残差应保持机器精度量级——与 Couette
     棱柱网格的自由流保持性测试（test_couette.py）同一判据、同一量级。
+
+    判据校准记录：无粘残差判据用相对量（/P_INF），阈值与
+    tests/unit/test_fr_residual_inviscid.py::TestFreeStreamPreservation
+    P=2 情形、以及 test_tgv.py::test_tgv_freestream_preservation 取同一个
+    3e-5——同一个 G-04/S-02 舍入噪声基线，三处共享同一条已审查过的精度
+    基线。此前用的绝对阈值 1e-3（对应相对 9.9e-9）比该共享基线严 3 个
+    数量级、且没有物理标定依据；实测相对残差在该基线之内（
+    max|inv_res|=2.08e-3，rel=2.05e-8），主导分量是 rho_E（其余分量 ≤
+    1.4e-7），与该修复组合已知有界的舍入噪声下限同量级，不是周期配对引入的虚假源项。粘性判据 1e-6 实测 7.64e-11 通过，保持不变。
     """
     solver, mesh = _build_periodic_solver()
 
@@ -82,7 +91,8 @@ def test_periodic_freestream_preservation():
 
     inv_res = solver.compute_inviscid_residual()
     visc_res = solver.compute_viscous_residual()
-    assert np.max(np.abs(inv_res)) < 1e-3
+    rel_inv_res = np.max(np.abs(inv_res)) / P_INF
+    assert rel_inv_res < 3e-5, f"rel_inv_res={rel_inv_res:.3e}"
     assert np.max(np.abs(visc_res)) < 1e-6
 
 

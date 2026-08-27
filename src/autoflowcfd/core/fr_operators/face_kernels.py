@@ -171,6 +171,23 @@ class FlatFaceGeometry:
     owner_src1_cell: np.ndarray
     owner_src1_mat: np.ndarray
 
+    # --- 混合分组面（B-8：棱柱四边形侧面三角化拆分后一条子面落在域边界、
+    #     另一条为内部界面；见 fr/face_flux_points_merge.py 混合分组检测块文档）---
+    # 内部界面侧：mixed_nb_partner[f_int] = 配对的边界面索引（-1 表示非混合面）；
+    # mixed_nb_mask[f_int] 逐 FP 标记边界半区（True 处 Q_neighbor 应取配对面幽灵态）。
+    mixed_nb_partner: np.ndarray   # int64 (n_faces,)
+    mixed_nb_mask: np.ndarray      # bool (n_faces, n_fp)
+    # neighbor 侧对称：mixed_ow_partner[f_int] = 配对的边界面索引，供
+    # neighbor-primary 分支组装 Q_owner_at_n 时覆盖边界半区。
+    mixed_ow_partner: np.ndarray   # int64 (n_faces,)
+    mixed_ow_mask: np.ndarray      # bool (n_faces, n_fp)
+    # 边界面侧：mixed_bnd_face[bf] = True 表示该边界面是混合配对的边界半区。
+    # 这类面 owner_primary 已被置 False（不参与残差累加，整张面由配对的内部面记录），
+    # 但幽灵态仍需计算（compute_boundary_ghost_states 据此保留）。
+    mixed_bnd_face: np.ndarray     # bool (n_faces,)
+    # P0 专用：混合面中边界子面的面积占比（面积加权混合通量用），非混合面为 0。
+    mixed_p0_bnd_frac: np.ndarray  # float64 (n_faces,)
+
     # --- 外插算子（重堆叠自 ops.boundary_extrap_tet/prism 这两个
     #     Dict[(axis:int,side:float), ndarray]，numba nopython 模式不支持
     #     这种 float 键的 dict）---
@@ -275,6 +292,13 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
         owner_src1_mat = ffp_data.ow_extra_mat
         owner_adj_row_exact = ffp_data.owner_adj_row_exact
         neighbor_adj_row_exact = ffp_data.neighbor_adj_row_exact
+        # 混合分组面（B-8）：merge 层检测后填入，_KernelFaceData 恒定提供这 6 个数组。
+        mixed_nb_partner = ffp_data.mixed_nb_partner
+        mixed_nb_mask = ffp_data.mixed_nb_mask
+        mixed_ow_partner = ffp_data.mixed_ow_partner
+        mixed_ow_mask = ffp_data.mixed_ow_mask
+        mixed_bnd_face = ffp_data.mixed_bnd_face
+        mixed_p0_bnd_frac = ffp_data.mixed_p0_bnd_frac
     else:
         # 慢速路径：逐面访问 FaceFluxPointGeometry 对象
         owner_axis = np.empty(n_faces, dtype=np.int64)
@@ -365,6 +389,9 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
         owner_src0_cell=owner_src0_cell, owner_src0_mat=owner_src0_mat,
         owner_src1_idx=owner_src1_idx, owner_src1_cell=owner_src1_cell,
         owner_src1_mat=owner_src1_mat,
+        mixed_nb_partner=mixed_nb_partner, mixed_nb_mask=mixed_nb_mask,
+        mixed_ow_partner=mixed_ow_partner, mixed_ow_mask=mixed_ow_mask,
+        mixed_bnd_face=mixed_bnd_face, mixed_p0_bnd_frac=mixed_p0_bnd_frac,
         boundary_extrap=boundary_extrap,
         g_left=np.asarray(ops.g_left, dtype=np.float64),
         g_right=np.asarray(ops.g_right, dtype=np.float64),

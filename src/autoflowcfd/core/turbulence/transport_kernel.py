@@ -107,6 +107,7 @@ def extrapolate_scalar_to_faces_kernel(
     owner_cell, owner_axis, owner_side,
     n_prism, n_faces, n_fp, n_sps,
     wall_dirichlet_zero_face,
+    mixed_nb_partner, mixed_nb_mask,
 ):
     """将 SPs 标量场外插到所有面的通量点（owner + neighbor 两侧）。
 
@@ -170,6 +171,20 @@ def extrapolate_scalar_to_faces_kernel(
             else:
                 for i in range(n_fp):
                     phi_neighbor[f, i] = phi_owner[f, i]
+    # 混合拆分面（B-8，见 fr/face_flux_points_merge.py）：混合配对的内部面在边界半区
+    # 没有真实邻居单元，neighbor 侧值按配对边界面自身获得的同一规则逐 FP 覆盖——
+    # Dirichlet-zero 壁面用镜像（-phi_owner），其余用零梯度（phi_owner）；
+    # 内部半区保持上方多源插值结果不动。
+    for f in range(n_faces):
+        mp = mixed_nb_partner[f]
+        if mp >= 0:
+            dirichlet = wall_dirichlet_zero_face[mp]
+            for i in range(n_fp):
+                if mixed_nb_mask[f, i]:
+                    if dirichlet:
+                        phi_neighbor[f, i] = -phi_owner[f, i]
+                    else:
+                        phi_neighbor[f, i] = phi_owner[f, i]
     return phi_owner, phi_neighbor
 
 

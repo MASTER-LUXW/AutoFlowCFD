@@ -31,6 +31,7 @@ def _p0_inviscid_kernel(
     Q_all,            # float64 (n_cells, 5)，原始变量
     Q_ghost,          # float64 (n_cells, 5)，预计算的边界幽灵态
     cell_volumes,     # float64 (n_cells,)
+    mixed_p0_bnd_frac,  # float64 (n_faces,)，混合面边界子面面积占比（B-8，非混合面为 0）
     n_cells,
     n_threads,
     mach_ref,         # float，见 kernels.py::compute_ausm_up_flux 文档
@@ -78,6 +79,19 @@ def _p0_inviscid_kernel(
         # AUSM+up 黎曼求解（返回单位面积通量）
         F_common_n = compute_ausm_up_flux(Q_o, Q_n, normal, mach_ref)
 
+        # 混合拆分面（B-8，见 fr/face_flux_points_merge.py）：整张四边形面的通量按子面面积占比混合——
+        # 内部半区用上方内部通量，边界半区用同一 owner 单元的幽灵态另解一次黎曼问题。
+        # P0 每面仅 1 个 FP，无法像 P≥1 kernel 那样逐 FP 掩码分支，只能面积加权。
+        bfrac = mixed_p0_bnd_frac[f]
+        if bfrac > 0.0 and (not is_boundary[f]):
+            Q_nb = np.empty(5, dtype=np.float64)
+            for v in range(5):
+                Q_nb[v] = Q_ghost[oc, v]
+            F_bnd = compute_ausm_up_flux(Q_o, Q_nb, normal, mach_ref)
+            one_minus = 1.0 - bfrac
+            for v in range(5):
+                F_common_n[v] = one_minus * F_common_n[v] + bfrac * F_bnd[v]
+
         # 面积加权通量
         aw = area_weights[f]
         flux0 = F_common_n[0] * aw
@@ -94,14 +108,16 @@ def _p0_inviscid_kernel(
         residual_per_thread[tid, oc, 3] -= flux3 * inv_vol_o
         residual_per_thread[tid, oc, 4] -= flux4 * inv_vol_o
 
-        # Neighbor：通量流入（符号相反）
+        # Neighbor：通量流入（符号相反）；混合面（B-8）只把内部半区份额计入 neighbor，
+        # 边界半区的份额属于边界条件，不应累加给邻居单元。
         if not is_boundary[f]:
             nc = neighbor_cell[f]
+            nshare = 1.0 - mixed_p0_bnd_frac[f]
             inv_vol_n = 1.0 / cell_volumes[nc]
-            residual_per_thread[tid, nc, 0] += flux0 * inv_vol_n
-            residual_per_thread[tid, nc, 1] += flux1 * inv_vol_n
-            residual_per_thread[tid, nc, 2] += flux2 * inv_vol_n
-            residual_per_thread[tid, nc, 3] += flux3 * inv_vol_n
-            residual_per_thread[tid, nc, 4] += flux4 * inv_vol_n
+            residual_per_thread[tid, nc, 0] += flux0 * inv_vol_n * nshare
+            residual_per_thread[tid, nc, 1] += flux1 * inv_vol_n * nshare
+            residual_per_thread[tid, nc, 2] += flux2 * inv_vol_n * nshare
+            residual_per_thread[tid, nc, 3] += flux3 * inv_vol_n * nshare
+            residual_per_thread[tid, nc, 4] += flux4 * inv_vol_n * nshare
 
     return residual_per_thread

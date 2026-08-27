@@ -46,16 +46,17 @@ def compute_aerodynamic_coefficients_fr(
     Args:
         solver: 已完成求解的 FRSolver 实例
         reference_area: 参考面积 A_ref（m^2），通常是车辆正面投影面积
-        reference_length: 参考长度（力矩系数用，本函数当前不计算力矩）
-        moment_center: 力矩参考点（当前未使用，保留参数位供后续扩展）
+        reference_length: 力矩系数参考长度 L_ref（m），通常是车身长度/轴距，
+            力矩系数分母为 q_inf * A_ref * L_ref
+        moment_center: 力矩参考点 (3,)，None 时取坐标原点；力矩按
+            M = Σ (r × dF) 积分，r 为各 Flux Point 物理坐标与该参考点之差
         include_viscous: 是否包含粘性摩擦力贡献（默认 True；WALL 边界的
             粘性梯度在低速无 WMLES 时的物理保真度见
             core/fr_viscous_flux.py 模块文档"已知局限"一节——粘性力可能
             低估，但绝不是无中生有，仍然是用实际解场算出的真实积分量）
 
     Returns:
-        AerodynamicCoefficients（Cd/Cl 已填，Cm/Cs/Cy/Cr 当前为 0，
-        本函数未实现力矩积分）
+        AerodynamicCoefficients（Cd/Cl/Cs 与力矩系数 Cm/Cy/Cr 均已由真实面积分填入）
     """
     mesh = solver.mesh
     fc = mesh.face_connectivity
@@ -94,6 +95,14 @@ def compute_aerodynamic_coefficients_fr(
 
     force_pressure = np.zeros(3)
     force_viscous = np.zeros(3)
+    # 力矩与力同循环累加：M = Σ (r × dF)，r = FP 物理坐标 - 力矩参考点。
+    # FP 几何本身不存物理坐标，用与流场完全相同的边界外插矩阵作用在
+    # mesh.sps_coords（SPs 物理坐标场）上得到，机制与
+    # core/fr_solver/boundary.py::_compute_inlet_fp_positions 一致：
+    # 外插算子是线性的，对坐标分量和对流场分量是同一个矩阵运算。
+    mc = np.zeros(3) if moment_center is None else np.asarray(moment_center, dtype=float).reshape(3)
+    moment_pressure = np.zeros(3)
+    moment_viscous = np.zeros(3)
 
     if include_viscous:
         from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient
@@ -113,8 +122,12 @@ def compute_aerodynamic_coefficients_fr(
         p_fp = Q_fp[:, 4]
         normal = ffp.true_normal  # (n_fp,3)
         area_w = ffp.true_area_weight  # (n_fp,)
+        # 本面各 Flux Point 的物理坐标（外插 SPs 坐标场），减去力矩参考点得臂向量
+        r_arm = extrap_to_face(owner_cell, mesh.sps_coords[owner_cell], axis, side) - mc  # (n_fp,3)
 
-        force_pressure += np.sum(p_fp[:, None] * normal * area_w[:, None], axis=0)
+        d_force_p = p_fp[:, None] * normal * area_w[:, None]
+        force_pressure += np.sum(d_force_p, axis=0)
+        moment_pressure += np.sum(np.cross(r_arm, d_force_p), axis=0)
 
         if include_viscous:
             gv_fp = extrap_to_face(owner_cell, grad_vel_full[owner_cell], axis, side)  # (n_fp,3,3)
@@ -130,26 +143,36 @@ def compute_aerodynamic_coefficients_fr(
             eye3 = np.eye(3)
             tau = 2.0 * mu_total[:, None, None] * S + lam[:, None, None] * div_u[:, None, None] * eye3  # (n_fp,3,3)
             traction = np.einsum("fij,fj->fi", tau, normal)  # (n_fp,3): tau·true_normal
-            force_viscous += -np.sum(traction * area_w[:, None], axis=0)
+            d_force_v = -traction * area_w[:, None]
+            force_viscous += np.sum(d_force_v, axis=0)
+            moment_viscous += np.sum(np.cross(r_arm, d_force_v), axis=0)
 
     force_total = force_pressure + force_viscous
+    moment_total = moment_pressure + moment_viscous
 
     rho_inf = solver.freestream["rho_inf"]
     vel_inf = solver.freestream["vel_inf"]
     q_inf = 0.5 * rho_inf * vel_inf**2
     denom = max(q_inf * reference_area, 1e-300)
+    denom_moment = max(q_inf * reference_area * reference_length, 1e-300)
 
-    # 来流沿 +x（见 FRSolver.freestream 文档），阻力=流向分量，升力=z向分量
+    # 来流沿 +x（见 FRSolver.freestream 文档），阻力=流向分量，升力=z向分量，
+    # 侧向力=y向分量。力矩按标准轴系映射：俯仰 Cm=绕 y 轴分量、
+    # 偏航 Cy=绕 z 轴分量、滚转 Cr=绕 x 轴分量（x=流向/y=侧向/z=法向右手系）。
     Cd = float(force_total[0] / denom)
     Cl = float(force_total[2] / denom)
     Cs = float(force_total[1] / denom)
+    Cm = float(moment_total[1] / denom_moment)
+    Cy = float(moment_total[2] / denom_moment)
+    Cr = float(moment_total[0] / denom_moment)
 
     logger.info(
         f"Aerodynamic force integration: {n_wall_faces} wall faces, "
-        f"F_pressure={force_pressure}, F_viscous={force_viscous}, F_total={force_total}"
+        f"F_pressure={force_pressure}, F_viscous={force_viscous}, F_total={force_total}, "
+        f"M_total={moment_total} (center={mc}, L_ref={reference_length})"
     )
 
-    return AerodynamicCoefficients(Cd=Cd, Cl=Cl, Cm=0.0, Cs=Cs, Cy=0.0, Cr=0.0)
+    return AerodynamicCoefficients(Cd=Cd, Cl=Cl, Cm=Cm, Cs=Cs, Cy=Cy, Cr=Cr)
 
 
 def compute_forces_pressure_only(solver, reference_area: float) -> dict:

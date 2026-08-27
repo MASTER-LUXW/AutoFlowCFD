@@ -32,20 +32,27 @@ class SSTModelFR:
         nu_t: 湍流涡粘系数场，形状 (n_cells, n_sps)
     """
 
-    def __init__(self, n_cells: int, n_sps: int):
+    def __init__(self, n_cells: int, n_sps: int,
+                 k_inf: float = 1e-6, omega_inf: float = 1.0):
         """
         初始化 SST 模型。
 
         Args:
             n_cells: 单元数量
             n_sps: 每单元解点数量
+            k_inf: 来流湍动能初值（默认 1e-6，工业标准由 Tu/VR 推导，
+                见 turbulence.py::_set_freestream_turbulence）
+            omega_inf: 来流比耗散率初值（默认 1.0，工业标准由 Tu/VR 推导）
         """
         self.n_cells = n_cells
         self.n_sps = n_sps
 
-        # 初始化湍流场（使用小正值避免除零）
-        self.k_field = np.ones((n_cells, n_sps)) * 1e-6
-        self.omega_field = np.ones((n_cells, n_sps)) * 1.0
+        # 初始化湍流场（工业标准：从 Tu/VR 推导物理自洽的 k/omega，
+        # 而非拍脑袋的 k=1e-6, omega=1.0）。
+        # 参考：Fluent 用户手册 Section 7.3.2，
+        # k = 1.5*(U*Tu)^2, omega = k/(VR*nu)。
+        self.k_field = np.ones((n_cells, n_sps)) * k_inf
+        self.omega_field = np.ones((n_cells, n_sps)) * omega_inf
         self.nu_t = np.zeros((n_cells, n_sps))
 
         # k/omega 物理上界（防止输运方程数值爆炸）。
@@ -101,6 +108,26 @@ class SSTModelFR:
         S_mag = np.sqrt(2.0 * np.einsum('nijm,nijm->ni', S_ij, S_ij))
 
         return S_mag
+
+    def compute_vorticity_magnitude(self, grad_u: np.ndarray) -> np.ndarray:
+        """计算涡量张量的模 |Ω|（用于 Kato-Launder 驻点修正）。
+
+        Ω_ij = 0.5 * (∂u_i/∂x_j - ∂u_j/∂x_i)
+        |Ω| = sqrt(2 * Ω_ij * Ω_ij)
+
+        Args:
+            grad_u: 速度梯度张量，形状 (n_cells, n_sps, 3, 3)
+
+        Returns:
+            Omega_mag: 涡量模，形状 (n_cells, n_sps)
+        """
+        # Ω_ij = 0.5 * (∂u_i/∂x_j - ∂u_j/∂x_i)
+        W_ij = 0.5 * (grad_u - np.transpose(grad_u, (0, 1, 3, 2)))
+
+        # |Ω| = sqrt(2 * Ω_ij * Ω_ij)
+        Omega_mag = np.sqrt(2.0 * np.einsum('nijm,nijm->ni', W_ij, W_ij))
+
+        return Omega_mag
 
     def compute_blending_function_F1(self, k: np.ndarray, omega: np.ndarray,
                                      d: np.ndarray, nu: np.ndarray,
@@ -290,6 +317,17 @@ class SSTModelFR:
         # 计算应变率模
         S_mag = self.compute_strain_rate_magnitude(grad_U)
 
+        # Kato-Launder 驻点修正（工业 RANS 标配：Fluent/OpenFOAM/STAR-CCM+）：
+        # 产生项用 S*Ω 替代 S²，防止驻点/滞止区（车头、机头）k 非物理增长。
+        # 驻点处 S 大但 Ω≈0 → P_k≈0；剪切层中 S≈Ω → P_k≈S²（退化为标准式）。
+        Omega_mag = self.compute_vorticity_magnitude(grad_U)
+        S_omega_prod = S_mag * Omega_mag  # Kato-Launder 有效应变率
+
+        # 时间尺度 realization：动态计算 ω 下限（供 apply_positivity_limiter 使用）。
+        # 约束 ω ≥ C * S，防止远场 ω 衰减到过小值导致 τ = 1/(β*ω) 过大。
+        # C=0.1 是保守值（Fluent 默认时间尺度限制等价于 C≈0.1-0.3）。
+        self._omega_realizability_min = 0.1 * np.max(S_mag)
+
         # 交叉扩散项 CD_kw（F1 与 S_omega 的 CD_omega 项共用同一个量，
         # 标准做法是先算这个再算两处，避免重复计算且保证一致）
         grad_dot_product = np.sum(grad_k * grad_omega, axis=2)  # (n_cells,n_sps)
@@ -320,8 +358,8 @@ class SSTModelFR:
         )
 
         # === k 方程源项 ===
-        # 产生项: P_k = μ_t * S^2（乘以 production_factor 渐变因子）
-        P_k = self.production_factor * self.nu_t * rho * S_mag**2
+        # 产生项: P_k = μ_t * S * Ω（Kato-Launder 修正，替代标准 S²）
+        P_k = self.production_factor * self.nu_t * rho * S_omega_prod
 
         # P_k 上限（标准 SST 要求，此前缺失）：P_k = min(P_k, 10*beta_star*rho*k*omega)，
         # 防止驻点/强剪切层附近产生项无界增长导致 k 失控。
@@ -339,12 +377,12 @@ class SSTModelFR:
         Sk = P_k - D_k
 
         # === ω 方程源项 ===
-        # 产生项: P_ω = ρ * γ * S^2（乘以 production_factor 渐变因子）
+        # 产生项: P_ω = ρ * γ * S * Ω（Kato-Launder 修正，替代标准 S²）
         gamma1 = self.beta1 / self.beta_star - self.sigma_w1 * self.kappa**2 / np.sqrt(self.beta_star)
         gamma2 = self.beta2 / self.beta_star - self.sigma_w2 * self.kappa**2 / np.sqrt(self.beta_star)
         gamma = F1 * gamma1 + (1.0 - F1) * gamma2
 
-        P_omega = self.production_factor * rho * gamma * S_mag**2
+        P_omega = self.production_factor * rho * gamma * S_omega_prod
 
         # 耗散项: D_ω = ρ * β * ω^2
         # omega_safe 已钳制到 [1e-10, 1e100]，平方后 1e200 仍在 float64 范围内
@@ -400,6 +438,14 @@ class SSTModelFR:
         # 上界：物理约束——防止 k/omega 输运方程数值爆炸
         self.k_field = np.minimum(self.k_field, self.k_max)
         self.omega_field = np.minimum(self.omega_field, self.omega_max)
+
+        # 时间尺度 realization（工业 RANS 标配）：限制湍流时间尺度
+        # τ = 1/(β*ω) 不超过基于应变率的最小时间尺度的倒数。
+        # 防止远场 ω 衰减到过小值导致 τ 过大、k 有时间大幅增长。
+        # 动态下限由 compute_source_terms 计算：ω_min = 0.1 * max(S_mag)
+        # （与 Fluent 的 turbulence time scale limit 等价）。
+        if hasattr(self, '_omega_realizability_min'):
+            self.omega_field = np.maximum(self.omega_field, self._omega_realizability_min)
 
     def update_fields(self, dt: float, Sk: np.ndarray, S_omega: np.ndarray,
                      diff_k: np.ndarray = None, diff_omega: np.ndarray = None,

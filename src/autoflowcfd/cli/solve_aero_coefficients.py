@@ -126,8 +126,12 @@ def _report_aerodynamic_coefficients(solver, reference_area: Optional[float]) ->
 
         coeffs = compute_aerodynamic_coefficients_fr(solver, reference_area=reference_area)
         print(f"\n=== Aerodynamic Coefficients (reference_area={reference_area} m^2) ===")
-        print(f"   Cd (drag) = {coeffs.Cd:.6f}")
-        print(f"   Cl (lift) = {coeffs.Cl:.6f}")
-        print(f"   Cs (side) = {coeffs.Cs:.6f}")
+        print(f"   Cd (drag)  = {coeffs.Cd:.6f}")
+        print(f"   Cl (lift)  = {coeffs.Cl:.6f}")
+        print(f"   Cs (side)  = {coeffs.Cs:.6f}")
+        # 力矩系数基于默认参考长度 1.0 m 与原点的力矩参考点（函数默认值）
+        print(f"   Cm (pitch) = {coeffs.Cm:.6f}")
+        print(f"   Cy (yaw)   = {coeffs.Cy:.6f}")
+        print(f"   Cr (roll)  = {coeffs.Cr:.6f}")
     except Exception as e:
         print(f"\n⚠️  Aerodynamic coefficient calculation failed: {e}")

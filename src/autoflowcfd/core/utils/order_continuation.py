@@ -10,6 +10,8 @@ import numpy as np
 from typing import Any
 from loguru import logger
 
+from autoflowcfd.core.fr_solver.turbulence import _set_freestream_turbulence
+
 
 def _build_linear_interp_matrix_3d(old_sps_1d: np.ndarray, new_sps_1d: np.ndarray) -> np.ndarray:
     """构造把 old_sps_1d 张量积网格上的节点值线性插值/外插到 new_sps_1d
@@ -240,6 +242,60 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
     # （checkpoint 实际所在阶数）开始，不是永远从 P0。
     resumed = getattr(solver, "_resumed_from_checkpoint", False)
 
+    # Production ramp 基准重置标记（渐变完成后重置一次残差基准）
+    # 必须在 resume 跳过代码之前初始化，否则 resume 跳过设的 True 会被覆盖
+    solver._ramp_baseline_reset_done = False
+
+    # Resume 时跳过 production ramp：checkpoint 里的流场已经充分发展，
+    # k/omega 处于物理平衡态，重新跑 ramp 会人为抑制已有的湍流场。
+    # 基准值处理：不清除 _phase_initial_residual——新代码存的 step 50 值
+    # 正是我们想要的基准；旧代码存的 step 0 值由下面迭代循环里的
+    # resume 检查分支处理（打印警告，第一步重新捕获）。
+    if resumed:
+        if hasattr(solver, 'turb_model') and solver.turb_model is not None:
+            if hasattr(solver.turb_model, 'production_factor'):
+                solver.turb_model.production_factor = 1.0
+                solver._turb_production_ramp_complete = True
+                solver._ramp_baseline_reset_done = True
+                # 同步把渐变计数器推到完成值（真实修复，2026-08-25 代码审查）：
+                # 重建的 solver 经 init_turbulence_models 后 _turb_ramp_step≈1，
+                # 每步调用的 _update_production_ramp 在 current_step < ramp_steps
+                # 时会用 current_step/ramp_steps 覆盖上面设的 1.0——不设这行，
+                # "resume 跳过 ramp"会被架空，产生项仍从 ~2% 爬升 50 步。
+                solver._turb_ramp_step = getattr(solver, '_turb_production_ramp_steps', 50)
+                print(f"[INFO] Resume: skipping production ramp")
+
+                # 检测湍流场是否被上界大面积钳制（旧 checkpoint k/omega 爆炸后
+                # resume 被上界截断）。如果超过 10% 的单元 k 接近上界，说明湍流场
+                # 从未真正恢复，必须重置到来流初值让 SST 源项重新建立平衡。
+                if hasattr(solver.turb_model, 'k_max') and hasattr(solver.turb_model, 'k_field'):
+                    k = solver.turb_model.k_field
+                    k_max_limit = solver.turb_model.k_max
+                    # 检查是否大面积触及上界（取平均值判断，避免单点噪声）
+                    k_mean = float(np.mean(k))
+                    # 阈值锚定到本算例的物理期望值（真实修复，2026-08-25 代码审查）：
+                    # 仅用 0.01·k_max 时，高 Tu 配置（k_inf = 1.5·(U·Tu)²，
+                    # Tu ≳ 5.8% 即超过该阈值）会把完全健康的场误重置；取与 10·k_inf
+                    # 的较大值——爆炸后的场被钳在 k_max 附近（≫ 两者），健康场即使有
+                    # 充分发展边界层抬升也远低于 10 倍来流值。
+                    k_inf, omega_inf = _set_freestream_turbulence(solver)
+                    reset_threshold = max(0.01 * k_max_limit, 10.0 * k_inf)
+                    if k_mean > reset_threshold:
+                        print(f"[WARN] Resume: k_field mean={k_mean:.2f} exceeds "
+                              f"reset threshold={reset_threshold:.2f} "
+                              f"(max(1% of k_max={k_max_limit:.2f}, 10x k_inf={k_inf:.2e})) "
+                              f"— turbulence field not recovered "
+                              f"from previous explosion. Resetting to freestream values.")
+                        # 用 Tu/VR 推导的物理自洽值重置（与初始化一致）
+                        solver.turb_model.k_field[:] = k_inf
+                        solver.turb_model.omega_field[:] = omega_inf
+                        if hasattr(solver.turb_model, 'nu_t'):
+                            solver.turb_model.nu_t[:] = 0.0
+                        # Resume 算例不重新跑 ramp：平均流场已充分发展，
+                        # Tu/VR 推导的 k/ω 物理自洽（P_k/D_k ≈ 1），
+                        # 不需要 ramp 抑制初始瞬态。保持 production_factor=1.0。
+                        # 残差基线保持 checkpoint 保存的值，不重置。
+
     current_state_n_sps = solver.state.U.shape[1]
     expected_p0_n_sps = 1
 
@@ -254,12 +310,10 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
         solver.state = p0_state
 
         if getattr(solver, "turb_model", None) is not None and hasattr(solver.turb_model, "k_field"):
-            # omega 初值必须与 SSTModelFR.__init__ 的默认值（1.0，见
-            # turbulence_sst.py）一致——此前这里用 1e-2，相差 100 倍，
-            # 意味着从 P0 重新初始化和求解器首次构造走的是两套不同的
-            # 湍流初场惯例。
-            solver.turb_model.k_field = np.ones((solver.state.n_cells, expected_p0_n_sps)) * 1e-6
-            solver.turb_model.omega_field = np.ones((solver.state.n_cells, expected_p0_n_sps)) * 1.0
+            # 用 Tu/VR 推导的物理自洽值重置（与 init_turbulence_models 一致）
+            k_inf, omega_inf = _set_freestream_turbulence(solver)
+            solver.turb_model.k_field = np.ones((solver.state.n_cells, expected_p0_n_sps)) * k_inf
+            solver.turb_model.omega_field = np.ones((solver.state.n_cells, expected_p0_n_sps)) * omega_inf
             # nu_t 同样必须重置到 P0 维度——理由同 interpolate_to_new_order
             # 里的 nu_t 插值处理：它不会自动跟着 k_field/omega_field 变形，
             # 只在 compute_source_terms 被调用时才按当时的 k/omega 重新
@@ -335,10 +389,53 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
 
         solver.current_order = target_p
         solver.ops = generate_fr_operators(target_p)
+
+        # 在构建新阶数几何*之前*先释放已经离开的阶段的完整几何缓存——
+        # 原先这段清理放在下面 set_order 之后，导致新阶数几何构建期间旧阶数
+        # 缓存仍完整驻留：79 万单元生产网格 P1→P2 切换时，P2 过积分几何构建峰值（预分配优化后仍有 ~4GB）
+        # 叠加 P1 缓存 ~2.5GB 超出可用内存，分配失败崩溃（两次独立复现，
+        # 2026-08-26）。set_order 构建新阶数几何时不读任何旧阶数缓存条目，
+        # 提前清理语义不变。
+        #
+        # 背景（保留自首次修复，2026-08-21）：HighOrderMesh._order_geometry_
+        # cache 的缓存语义是为“阶数可能被重新访问”的通用场景设计的，不知道
+        # 本函数的调用模式是单调递增的，会让每个阶段完整的 Flux Points 几何
+        # （逐面 Newton 插值算子，187 万面级别的网格上单阶数就有明显体量）
+        # 无限期累积。首次修复时实测：79 万单元网格进入 P2 阶段第一次残差
+        # 求值时，因同时驻留 P0+P1+P2 三份完整几何，一次 1.56 GiB 的过积分
+        # 张量收缩分配失败崩溃。
+        #
+        # 只保留当前阶段 `target_p`，不对 `original_order` 破例（真实复现，
+        # 2026-08-21，79 万单元/187 万面生产网格、本机 33GiB 物理内存：只破例保留
+        # original_order 这一个改动版本，P0->P1 切换时依然 OOM——P1 阶段仍要同时驻留
+        # P1 的完整 Flux Points 几何 + 被破例保留的 P2（original_order）几何两份，
+        # 对 187 万面规模的网格，两份仍然超出可用内存，说 3->2 份不够，必须是
+        # 3->1 份）。`orders = list(range(0, original_order+1))` 决定了循环最后一个
+        # target_p 恰好就是 original_order，那次 `solver.mesh.set_order(target_p)`
+        # 本来就会在缓存缺失时透明地触发重建（见 set_order 文档：
+        # `if order not in mesh._order_geometry_cache: 重建`，不是异常路径）。
+        stale_orders = [
+            o for o in list(solver.mesh._order_geometry_cache)
+            if o != target_p
+        ]
+        for o in stale_orders:
+            del solver.mesh._order_geometry_cache[o]
+
         # mesh 的 SPs/Jacobian/Flux Points 几何是阶数相关的（见
         # HighOrderMesh.set_order 文档）——必须随 solver.ops 一起切换，
         # 否则梯度/残差计算会用错误维度的几何量崩溃。
         solver.mesh.set_order(target_p)
+
+        # B-9 修复（2026-08-25，真实复现：solve transient ddes P0 阶段第一步
+        # 幽灵态形状 (9,5) 无法广播进 (1,5)）：BD-02 的 SEM 入口幽灵态在
+        # 构造时按当时阶数的 FP 几何预存了每面 FP 物理坐标（n_fp 阶数相关），
+        # 切阶后与新阶幽灵数组形状失配；provider 其余部分（分组映射/
+        # 幽灵态公式）无阶数相关状态。每次切阶后按当前阶数重建（开销仅
+        # 边界面级循环，每个阶段切换只发生一次，可忽略）。
+        if hasattr(solver, "_build_boundary_ghost_provider"):
+            solver.boundary_ghost_provider = solver._build_boundary_ghost_provider(
+                getattr(solver, "bc_overrides", {})
+            )
 
         expected_n_sps = solver.ops.D_3d.shape[0]
         actual_n_sps = solver.state.U.shape[1]
@@ -347,38 +444,6 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
                 f"Order Continuation dimension mismatch after interpolation to P{target_p}: "
                 f"State has {actual_n_sps} SPs but operators expect {expected_n_sps} SPs"
             )
-
-        # 释放已经离开的阶段的完整几何缓存（HighOrderMesh._order_geometry_
-        # cache，见 set_order/high_order_mesh_order.py 文档）——本函数是
-        # 该缓存唯一的调用方（`grep .set_order(` 全仓库确认），且单调递增
-        # 遍历 P0->目标阶数、一旦离开某个阶段就再也不会回来；但 set_order
-        # 自身的缓存语义是为"阶数可能被重新访问"的通用场景设计的，不知道
-        # 这个调用模式是单调的，会让每个阶段完整的 Flux Points 几何（逐面
-        # Newton 插值算子，187 万面级别的网格上单阶数就有明显体量）无限期
-        # 累积在内存里从未释放。真实网格已复现：79 万单元网格进入 P2 阶段
-        # 第一次残差求值时，因为同时驻留 P0+P1+P2 三份完整几何，一次 1.56
-        # GiB 的过积分张量收缩分配失败崩溃。
-        #
-        # 只保留当前阶段 `target_p`，不再对 `original_order` 破例（真实
-        # 复现，2026-08-21，79 万单元/187 万面生产网格、本机 33GiB
-        # 物理内存：只破例保留 original_order 这一个改动版本，P0->P1
-        # 切换时依然 OOM——P1 阶段仍要同时驻留 P1 的完整 Flux Points
-        # 几何 + 被破例保留的 P2（original_order）几何两份，对 187 万面
-        # 规模的网格，两份仍然超出可用内存，说 3->2 份不够，必须是
-        # 3->1 份）。`original_order` 破例保留的唯一目的是省下"本函数
-        # 结束时切回目标阶数"那一次 Flux Points 重建；但 `orders =
-        # list(range(0, original_order+1))` 决定了循环最后一个 target_p
-        # 恰好就是 original_order，那一次 `solver.mesh.set_order(target_p)`
-        # 本来就会在缓存缺失时透明地触发重建（见 set_order 文档：
-        # `if order not in mesh._order_geometry_cache: 重建`，不是异常
-        # 路径）——破例保留换来的只是省掉这一次重建，用峰值内存翻倍
-        # 换一次性能优化，真实网格上不划算，去掉这个特殊情况。
-        stale_orders = [
-            o for o in list(solver.mesh._order_geometry_cache)
-            if o != target_p
-        ]
-        for o in stale_orders:
-            del solver.mesh._order_geometry_cache[o]
 
         # 自适应 CFL 重置（2026-08-24）：阶数切换导致残差跳变（插值误差），
         # 不应触发 CFL 缩小。重置后重新开始爬升阶段。
@@ -445,6 +510,22 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
             if initial_residual_this_order is None:
                 initial_residual_this_order = res
             solver._phase_initial_residual = initial_residual_this_order
+
+            # Production ramp 完成检测（2026-08-25）：
+            # 渐变期间（前 50 步）湍流产生项被抑制，残差反映的是无湍流状态。
+            # 渐变完成后湍流突然开启，残差可能跳升，导致相对 step 0 的“下降
+            # 100x”判据永远无法满足（分母是 step 0 无湍流时的残差，分子是
+            # 湍流开启后的残差，两者不在同一物理基准上）。
+            # 修复：检测到渐变完成标记后，立即将基准残差重置为当前值，
+            # 让 100x 判据从湍流完全开启后的第一个真实残差开始计算。
+            if getattr(solver, '_turb_production_ramp_complete', False):
+                if not getattr(solver, '_ramp_baseline_reset_done', False):
+                    old_baseline = initial_residual_this_order
+                    initial_residual_this_order = res
+                    solver._phase_initial_residual = res
+                    solver._ramp_baseline_reset_done = True
+                    print(f"[INFO] P{target_p} Iter {i+1}: Production ramp complete, "
+                          f"resetting residual baseline: {old_baseline:.6e} → {res:.6e}")
 
             if True:  # 每步都输出残差与气动力系数
                 drop_ratio = initial_residual_this_order / max(res, 1e-30)

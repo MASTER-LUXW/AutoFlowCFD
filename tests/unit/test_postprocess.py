@@ -9,11 +9,9 @@ import csv
 
 from autoflowcfd.grid.structures import (
     GridData, NodeArray, CellArray, BoundaryMap, GridMetadata,
-    TetrahedralCells, VolumeMeshData,
 )
 from autoflowcfd.core.backend.base import SolutionVector
 from autoflowcfd.postprocess import (
-    CoefficientCalculator,
     AerodynamicCoefficients,
     AerodynamicForces,
     VTKExporter,
@@ -67,102 +65,19 @@ class TestAerodynamicForces(unittest.TestCase):
         self.assertAlmostEqual(d['lift_force'], -20.0)
 
 
-class TestCoefficientCalculator(unittest.TestCase):
-    """Test coefficient calculator"""
-    
-    def setUp(self):
-        """Set up test fixtures.
+class TestCoefficientCalculatorRemoved(unittest.TestCase):
+    """第三轮评审整改：V1 CoefficientCalculator 已移除（依赖从未存在的
+    get_face_data()、全场 ρRT 均值压力伪积分，系数恒为 0）。生产路径是
+    postprocess/fr_coefficients.py 的 FR 原生积分（其单元测试见
+    tests/unit/test_fr_coefficients.py 等）。这里只验证失效入口确实不存在。"""
 
-        calculate_forces() delegates to core.aero_coeffs.AeroCoefficientCalculator
-        for a real pressure/skin-friction surface integration (see
-        coefficients.py), which needs actual volume-mesh face connectivity -
-        a bare surface GridData has no such thing. Two tets sharing a face
-        (rather than a single closed cell) so a non-uniform per-cell
-        pressure gives a genuinely non-trivial net force, matching the
-        fixture used to verify the real-integration fix itself.
-        """
-        nodes = NodeArray(
-            x=np.array([0.0, 1.0, 0.0, 0.0, 1.0]),
-            y=np.array([0.0, 0.0, 1.0, 0.0, 1.0]),
-            z=np.array([0.0, 0.0, 0.0, 1.0, 1.0]),
-        )
-        cells = TetrahedralCells(
-            connectivity=np.array([[0, 1, 2, 3], [1, 2, 3, 4]], dtype=np.int32),
-            volumes=np.array([1.0 / 6.0, 1.0 / 6.0]),
-        )
-        boundaries = BoundaryMap(
-            groups={"body": np.array([0, 1], dtype=np.int32)},
-            bc_types={"body": "WALL"}
-        )
-        metadata = GridMetadata(
-            node_count=5,
-            cell_count=2,
-            boundary_groups=["body"],
-            file_format="volume"
-        )
-        self.grid_data = VolumeMeshData(
-            nodes=nodes,
-            cells=cells,
-            boundaries=boundaries,
-            metadata=metadata
-        )
+    def test_removed_from_module(self):
+        import autoflowcfd.postprocess.coefficients as coef_mod
+        self.assertFalse(hasattr(coef_mod, "CoefficientCalculator"))
 
-        # Solution with a non-uniform per-cell pressure (zero velocity) so
-        # the surface integration has a genuine, non-zero force to find.
-        gamma = 1.4
-        data = np.zeros((2, 7))
-        data[:, 0] = 1.225  # rho
-        data[0, 4] = (101325.0 + 2000.0) / (gamma - 1.0)
-        data[1, 4] = (101325.0 - 2000.0) / (gamma - 1.0)
-        self.solution = SolutionVector(data=data, n_cells=2, n_variables=7)
-    
-    def test_initialization(self):
-        """Test calculator initialization"""
-        calc = CoefficientCalculator(
-            self.grid_data,
-            self.solution,
-            reference_area=2.2,
-            velocity=30.0
-        )
-        self.assertEqual(calc.reference_area, 2.2)
-        self.assertEqual(calc.velocity, 30.0)
-        self.assertAlmostEqual(calc.dynamic_pressure, 0.5 * 1.225 * 30.0**2)
-    
-    def test_invalid_reference_area(self):
-        """Test rejection of invalid reference area"""
-        with self.assertRaises(ValueError):
-            CoefficientCalculator(
-                self.grid_data,
-                self.solution,
-                reference_area=-1.0
-            )
-    
-    def test_invalid_velocity(self):
-        """Test rejection of invalid velocity"""
-        with self.assertRaises(ValueError):
-            CoefficientCalculator(
-                self.grid_data,
-                self.solution,
-                velocity=0.0
-            )
-    
-    def test_calculate_returns_coefficients(self):
-        """Test calculate method returns AerodynamicCoefficients"""
-        calc = CoefficientCalculator(self.grid_data, self.solution)
-        coeffs = calc.calculate()
-        self.assertIsInstance(coeffs, AerodynamicCoefficients)
-    
-    def test_calculate_forces_returns_forces(self):
-        """Test calculate_forces method returns AerodynamicForces"""
-        calc = CoefficientCalculator(self.grid_data, self.solution)
-        forces = calc.calculate_forces()
-        self.assertIsInstance(forces, AerodynamicForces)
-    
-    def test_calculate_by_boundary_invalid_name(self):
-        """Test rejection of invalid boundary name"""
-        calc = CoefficientCalculator(self.grid_data, self.solution)
-        with self.assertRaises(KeyError):
-            calc.calculate_by_boundary("INVALID")
+    def test_removed_from_package_exports(self):
+        import autoflowcfd.postprocess as postprocess_pkg
+        self.assertNotIn("CoefficientCalculator", postprocess_pkg.__all__)
 
 
 class TestVTKExporter(unittest.TestCase):

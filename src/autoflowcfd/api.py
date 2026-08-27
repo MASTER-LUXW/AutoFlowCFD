@@ -340,43 +340,28 @@ class AutoFlowCFDAPI:
         Returns:
             气动力系数字典（使用大写键名Cd, Cl等）
         """
-        # 优先使用 FR 原生积分路径
+        # FR 原生积分路径（唯一真实积分实现，见 api_postprocess.py 同名委托函数文档）
         if self.solver is not None and hasattr(self.solver, 'mesh'):
-            try:
-                from autoflowcfd.postprocess.fr_coefficients import (
-                    compute_aerodynamic_coefficients_fr,
-                )
-                coeffs = compute_aerodynamic_coefficients_fr(
-                    self.solver,
-                    reference_area=reference_area,
-                    reference_length=reference_length,
-                )
-                return coeffs.to_dict()
-            except Exception as e:
-                logger.warning(f"FR 原生系数计算失败: {e}，回退到 V1 路径")
+            from autoflowcfd.postprocess.fr_coefficients import (
+                compute_aerodynamic_coefficients_fr,
+            )
+            coeffs = compute_aerodynamic_coefficients_fr(
+                self.solver,
+                reference_area=reference_area,
+                reference_length=reference_length,
+            )
+            return coeffs.to_dict()
 
-        # 回退路径：使用 V1 CoefficientCalculator
-        from autoflowcfd.postprocess.coefficients import CoefficientCalculator
-
-        if not hasattr(self, 'grid_data') or self.grid_data is None:
-            logger.warning("grid_data 不可用，返回零系数")
-            return {
-                'Cd': 0.0, 'Cl': 0.0, 'Cm': 0.0,
-                'Cs': 0.0, 'Cy': 0.0, 'Cr': 0.0,
-            }
-
-        solution = result.solution if hasattr(result, 'solution') else None
-        calc = CoefficientCalculator(
-            self.grid_data,
-            solution,
-            reference_area=reference_area,
-            reference_length=reference_length,
-            density=density,
-            velocity=velocity
+        # 无求解器：返回诚实零值并警告，不回退到伪积分实现（旧版 V1
+        # CoefficientCalculator 依赖不存在的 get_face_data()，已移除）
+        logger.warning(
+            "calculate_coefficients: 没有可用的 FR 求解器（需先调用 run_steady/"
+            "run_transient 或 resume_simulation），返回零系数。"
         )
-
-        coeffs = calc.calculate()
-        return coeffs.to_dict()
+        return {
+            'Cd': 0.0, 'Cl': 0.0, 'Cm': 0.0,
+            'Cs': 0.0, 'Cy': 0.0, 'Cr': 0.0,
+        }
     
     def export_vtk(self, result: Any = None, filename: str = None) -> None:
         """导出 VTK 可视化文件。

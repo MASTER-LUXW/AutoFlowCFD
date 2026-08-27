@@ -28,6 +28,13 @@ class _KernelFaceData:
     残差计算路径（build_flat_face_geometry）直接读取 flat 数组，跳过逐面
     对象创建。后处理代码（fr_coefficients、boundary 等）通过 __getitem__
     按需创建 FaceFluxPointGeometry（仅边界面 ~39K 个，可忽略）。
+
+    混合分组字段（B-8，2026-08-25，见 face_flux_points_merge.py 同名段注释）：
+    mixed_nb_partner/mixed_ow_partner：(n_faces,) int64，混合面内部记录 ->
+    边界子面记录索引（-1 表示普通面）；mixed_nb_mask/mixed_ow_mask：
+    (n_faces, n_fp) bool，True 的 FP 落在边界半区（残差 kernel 逐 FP 取幽灵态）；
+    mixed_bnd_face：(n_faces,) bool，边界子面记录标志（不参与累加但需算幽灵态）；
+    mixed_p0_bnd_frac：(n_faces,) float64，P0 面积占比混合用。
     """
     __slots__ = (
         'n_faces', 'n_fp', 'n_sps', 'n1d',
@@ -38,6 +45,8 @@ class _KernelFaceData:
         'nb_src0_cell', 'nb_src0_mat', 'nb_src1_idx',
         'ow_src0_cell', 'ow_src0_mat', 'ow_src1_idx',
         'nb_extra_cell', 'nb_extra_mat', 'ow_extra_cell', 'ow_extra_mat',
+        'mixed_nb_partner', 'mixed_nb_mask', 'mixed_ow_partner', 'mixed_ow_mask',
+        'mixed_bnd_face', 'mixed_p0_bnd_frac',
         '_mesh', '_face_conn', '_sps_1d',
         '_nb_fc', '_nb_resid', '_ow_fc', '_ow_resid',
         '_nb_cell_id', '_ow_cell_id',

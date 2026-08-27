@@ -19,8 +19,6 @@ I/O 辅助和数组验证。
     >>> result = safe_elementwise_multiply(a, b, context="力计算")
 """
 
-from typing import Any
-
 # 数组验证工具
 from .array_validation import (
     validate_broadcast_shapes,
@@ -41,11 +39,3 @@ __all__ = [
     "validate_face_indices",
     "get_shape_summary",
 ]
-
-
-def __getattr__(name: str) -> Any:
-    """懒导入占位符，用于未实现的类。"""
-    raise NotImplementedError(
-        f"{name} 尚未实现。"
-        f"请查看路线图了解实现计划。"
-    )

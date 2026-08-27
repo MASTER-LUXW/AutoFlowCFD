@@ -291,6 +291,12 @@ class TimeIntegrator:
         # === Stage 1 ===
         # U^(1) = U^0 + dt * L(U^0)
         U_stage1 = U0 + dt * L0
+        del L0  # B-12 P2 OOM 修复第⑤级（2026-08-26）：L0 已完成使命（只参与
+        # Stage 1 组合），但其引用会让 1.2GB 数组（79万单元×27SP×7变量）在后续
+        # stage 残差求值期间白白驻留——retest7 实测（见下方 Stage 2 处同类注释）：
+        # 体积项分块后峰值已大降，但 Stage 2 粘性残差求值时 U0/L0/U_stage1/L1/
+        # U_stage2 五份共存（~6GB）仍把剩余 commit 压到临界，连 815MiB 的
+        # correction 缓冲都分配失败。纯引用管理，不改变任何数值。
         enforce_positivity(U_stage1, p_floor)
         if filter_func is not None:
             U_stage1 = filter_func(U_stage1)
@@ -309,6 +315,8 @@ class TimeIntegrator:
         U_stage2 = (alpha[1][0] * U0 +
                    alpha[1][1] * U_stage1 +
                    beta[1] * dt * L1)
+        del L1  # 同 Stage 1 处 del L0 的 B-12 注释：L1 只参与 Stage 2 组合，
+        # 组合完成立即释放，避免与 Stage 2 残差求值的瞬态数组共存。
         enforce_positivity(U_stage2, p_floor)
         if filter_func is not None:
             U_stage2 = filter_func(U_stage2)

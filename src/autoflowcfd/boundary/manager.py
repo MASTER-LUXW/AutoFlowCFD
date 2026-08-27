@@ -72,47 +72,6 @@ class BoundaryManager(_BoundaryConfigMixin):
     # _find_matching_boundary / _validate_parameters / _get_default_parameters /
     # update_boundary_params）已拆分到 manager_configure.py 的混入类中。
 
-    def export_to_vtk(self, output_path: str) -> None:
-        """Export boundary visualization to VTK format.
-
-        Args:
-            output_path: VTK output file path
-
-        Example:
-            >>> bc_manager.export_to_vtk("boundaries.vtk")
-        """
-        from autoflowcfd.postprocess import VTKExporter
-        import numpy as np
-        
-        logger.info(f"Exporting boundary visualization to VTK: {output_path}")
-        
-        # Create a dummy solution for VTK exporter (we only care about boundaries)
-        n_cells = self.grid_data.cell_count
-        dummy_solution = np.zeros((n_cells, 7), dtype=np.float64)
-        dummy_solution[:, 0] = 1.225  # density
-        dummy_solution[:, 1] = 30.0   # velocity x
-        dummy_solution[:, 4] = 101325.0 / (1.4 - 1.0)  # energy
-        
-        # Create VTK exporter
-        exporter = VTKExporter(
-            grid_data=self.grid_data,
-            solution=dummy_solution,
-        )
-        
-        # Export only boundary faces
-        output_path_obj = Path(output_path)
-        if not output_path_obj.suffix:
-            output_path_obj = output_path_obj.with_suffix('.vtk')
-        
-        vtk_path = exporter.export_boundaries(
-            output_path=str(output_path_obj),
-            fields=['velocity', 'pressure'],
-            format='legacy',
-            binary=True,
-        )
-        
-        logger.success(f"Boundary VTK exported: {vtk_path}")
-
     def export_to_json(self, output_path: str) -> dict:
         """导出边界统计信息到 JSON 文件。
 

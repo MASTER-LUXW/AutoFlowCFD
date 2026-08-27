@@ -48,11 +48,14 @@ from autoflowcfd.cli.solve_commands import solve
 @click.option('--init-from', 'init_checkpoint', type=click.Path(exists=True), default=None,
               help='从稳态 checkpoint 文件初始化瞬态求解器（典型工作流：先稳态 SST 收敛，'
                    '再从该流场启动 DES/LES 瞬态计算，避免从均匀流场直接启动需要极长的瞬态发展时间）')
+@click.option('--turbulence-intensity', type=float, default=0.01, help='来流湍流强度 Tu（默认 0.01=1%%）')
+@click.option('--viscosity-ratio', type=float, default=5.0, help='来流粘性比 VR=nu_t/nu（默认 5.0）')
 def transient(input_file: str, backend: str, order: int, time_method: str,
               turbulence_model: str, max_iter: int, dt: float, physical_time: float,
               output_dir: str, use_eikonal: bool, surface_mesh: Optional[str],
               skip_quality_check: bool, reference_area: Optional[float],
-              dual_time_inner_iter: int, threads: int, init_checkpoint: Optional[str]) -> None:
+              dual_time_inner_iter: int, threads: int, init_checkpoint: Optional[str],
+              turbulence_intensity: float, viscosity_ratio: float) -> None:
     """运行瞬态 FR 仿真 (DES/LES)。
 
     Args:
@@ -73,6 +76,12 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
         init_checkpoint: 从稳态 checkpoint 初始化（可选）
     """
     print(f"=== Starting Transient FR Simulation (DES/LES) ===")
+    # Tu/VR 范围校验：与 solve_steady_command.py 入口同一规则（CLI 路径不经过
+    # SolverConfig.__post_init__ 的校验，2026-08-25 代码审查）。
+    if not (0.0 < turbulence_intensity <= 1.0):
+        raise click.BadParameter("湍流强度 Tu 必须在 (0, 1] 区间", param_hint="--turbulence-intensity")
+    if viscosity_ratio <= 0.0:
+        raise click.BadParameter("粘性比 VR 必须 > 0", param_hint="--viscosity-ratio")
     print(f"\nInput Grid : {input_file}")
     print(f"Backend    : {backend} | Order: P{order} | Method: {time_method}")
     print(f"Turbulence : {turbulence_model} | dt: {dt:.2e}")
@@ -106,6 +115,8 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
         time_scheme=time_scheme,
         dual_time_inner_iter=dual_time_inner_iter,
         n_threads=threads,
+        turbulence_intensity=turbulence_intensity,
+        viscosity_ratio=viscosity_ratio,
     )
 
     # 4. 计算壁面距离场（DES/LES/WMLES 必须）

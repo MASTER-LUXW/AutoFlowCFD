@@ -211,49 +211,39 @@ def compute_inviscid_residual_fr(
         n_fine = mesh.n_sps_per_cell_fine
         det_jacs_fine = mesh.jacobians_fine["det_jacs"].reshape(n_cells, n_fine)
         inv_jacs_fine = mesh.jacobians_fine["inv_jacs"].reshape(n_cells, n_fine, 3, 3)
-        adj_j_fine = compute_adj_j(det_jacs_fine, inv_jacs_fine)  # (n_cells,n_fine,3,3)
 
-        Q_fine = np.zeros((n_cells, n_fine, 5))
-        if n_prism > 0:
-            Q_fine[:n_prism] = contract_shared_operator_1axis(ops.overint_interp_c2f_prism, Q[:n_prism])
-        if n_cells > n_prism:
-            Q_fine[n_prism:] = contract_shared_operator_1axis(ops.overint_interp_c2f_tet, Q[n_prism:])
-
-        # 体积项性能优化：以下三步（物理通量构造、逆变通量、散度、限制回
-        # coarse）在生产网格（545K cell）上实测是界面项 numba 化之后新暴露
-        # 出来的主导耗时（py-spy 采样几乎全部落在这里），原因是
-        # `euler_physical_flux` 的向量化 numpy 实现逐次分配大临时数组，
-        # 以及 `np.einsum` 对"共享算子 vs 逐 cell 批量小矩阵乘"这类收缩
-        # 不会自动走 BLAS gemm 路径。改用已逐位验证过的
-        # `euler_physical_flux_batch`（复用 numba 逐点 kernel）+
-        # `np.matmul`（批量小矩阵乘，两个操作数都依赖 cell）+
-        # `contract_shared_operator_*axis`（`np.tensordot`，operand 之一
-        # 不依赖 cell）——三者都是与原 einsum 公式严格等价的同一个求和，
-        # 只是换一条计算路径，验证方法与量级见
-        # `fr_volume_contract.py`/`fr_flux_kernels_pointwise.py` 模块文档。
-        Q_fine_flat = np.ascontiguousarray(Q_fine.reshape(-1, 5))
-        F_phys_fine = euler_physical_flux_batch(Q_fine_flat).reshape(n_cells, n_fine, 3, 5)
-        # 内存优化：Q_fine/Q_fine_flat 用完即弃（F_phys_fine 已经算出，后面
-        # 不会再用到它们），但作为普通局部变量，Python 只在函数返回时才
-        # 会因为引用计数归零而释放它们——这个函数接下来还有一大段界面项/
-        # troubled-cell 代码要执行，期间会继续分配更多同量级的大数组，
-        # 不主动 del 就会让这两个已经用完的 (n_cells,n_fine,5) 数组
-        # （~1.9GiB）白白多存活一段时间，是 P2+SST+过积分在生产网格上
-        # 峰值内存吃紧、下游 suppress_residual_outliers 里一次几百 MiB
-        # 的分配都会失败的直接原因之一（真实 cube_demo 复现：79万单元
-        # P2 阶段第一次残差求值 OOM，见 order_continuation.py 相关记录）。
-        # del 不改变任何计算，只影响这些数组何时被回收，数值结果逐位
-        # 不变——本文件其余同类 del 的理由/验证方式均与此相同，不重复。
-        del Q_fine, Q_fine_flat
-        F_tilde_fine = np.matmul(adj_j_fine, F_phys_fine)  # (n_cells,n_fine,3,5)
-        del adj_j_fine, F_phys_fine  # 各自 ~3.4GiB/~5.7GiB，用完即弃
-
+        # 按单元分块执行整条 插值→物理通量→逆变通量→散度 链（B-12 P2
+        # OOM 修复，2026-08-26）：原实现把四个全场临时数组（adj_j_fine
+        # ~3.4GiB、Q_fine ~1.9GiB、F_phys_fine ~5.7GiB、F_tilde_fine ~5.7GiB，
+        # 79万单元×64过积分点）先后全量分配，峰值时刻三者共存——仪表化
+        # 实测（_tmp_review/diag_p2_13.py，31万单元网格）体积项链路自身峰值
+        # RSS≈16.6GB，按单元数比例外推 79万单元生产网格峰值≈38GB，超过本机
+        # commit limit 43GB 减去系统其余进程占用后的剩余额度，P1→P2 切换后
+        # 首次残差求值在 F_phys_fine 处分配失败崩溃（三次独立复现）。这条链上
+        # 每一步都是 cell 局部的（批量矩阵乘按 cell 广播、numba kernel 按点纯
+        # gather，cell 之间零数据依赖），把 cell 轴切成块、块内走完五步再进下一
+        # 块，同一块内的每步计算形状/求和顺序与全场版逐位一致，数值结果不变；
+        # 峰值降为常驻的 div_comp_fine（~1.9GiB）+ 块内瞬态（32768 单元块约
+        # 0.7GiB）。prism/tet 两段分开切块是因为两者用不同的算子，且单元存储
+        # 本来就是 prism 在前 tet 在后，块不会跨类型。
         div_comp_fine = np.zeros((n_cells, n_fine, 5))
-        if n_prism > 0:
-            div_comp_fine[:n_prism] = contract_shared_operator_2axis(ops.overint_D_fine_prism, F_tilde_fine[:n_prism])
-        if n_cells > n_prism:
-            div_comp_fine[n_prism:] = contract_shared_operator_2axis(ops.overint_D_fine_tet, F_tilde_fine[n_prism:])
-        del F_tilde_fine  # ~5.7GiB，用完即弃
+        _OVERINT_CHUNK_CELLS = 32768
+        for seg_lo, seg_hi, op_c2f, op_D_fine in (
+            (0, n_prism, ops.overint_interp_c2f_prism, ops.overint_D_fine_prism),
+            (n_prism, n_cells, ops.overint_interp_c2f_tet, ops.overint_D_fine_tet),
+        ):
+            for c0 in range(seg_lo, seg_hi, _OVERINT_CHUNK_CELLS):
+                c1 = min(c0 + _OVERINT_CHUNK_CELLS, seg_hi)
+                Q_fine = contract_shared_operator_1axis(op_c2f, Q[c0:c1])
+                F_phys_fine = euler_physical_flux_batch(
+                    Q_fine.reshape(-1, 5)
+                ).reshape(c1 - c0, n_fine, 3, 5)
+                del Q_fine  # 块内用完即弃，下一轮迭代变量重新绑定
+                adj_j_fine = compute_adj_j(det_jacs_fine[c0:c1], inv_jacs_fine[c0:c1])
+                F_tilde_fine = np.matmul(adj_j_fine, F_phys_fine)  # (块长,n_fine,3,5)
+                del adj_j_fine, F_phys_fine
+                div_comp_fine[c0:c1] = contract_shared_operator_2axis(op_D_fine, F_tilde_fine)
+                del F_tilde_fine
 
         div_comp = np.zeros((n_cells, n_sps, 5))
         if n_prism > 0:
@@ -327,6 +317,8 @@ def compute_inviscid_residual_fr(
                 flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
                 flat.owner_src0_cell, flat.owner_src0_mat,
                 flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
+                flat.mixed_nb_partner, flat.mixed_nb_mask,
+                flat.mixed_ow_partner, flat.mixed_ow_mask,
                 flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
                 flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
                 n_prism, face_indices, correction, mach_ref,
@@ -346,6 +338,8 @@ def compute_inviscid_residual_fr(
             flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
             flat.owner_src0_cell, flat.owner_src0_mat,
             flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
+            flat.mixed_nb_partner, flat.mixed_nb_mask,
+            flat.mixed_ow_partner, flat.mixed_ow_mask,
             flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
             flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
             n_prism, n_threads, mach_ref,

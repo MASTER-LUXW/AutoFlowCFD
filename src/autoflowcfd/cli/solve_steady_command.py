@@ -37,7 +37,9 @@ from autoflowcfd.cli.solve_commands import solve
 @click.option('--n-ranks', '--np', type=int, default=1, help='MPI 并行 rank 数（域分解并行，需配合 mpirun 使用。默认 1 = 单机模式）')
 @click.option('--gpu-device', type=int, default=0, help='GPU 设备 ID（默认 0，多 GPU 时每个 rank 自动分配）')
 @click.option('--multi-gpu', is_flag=True, help='启用多 GPU + MPI 分布式求解（每个 rank 使用一块 GPU）')
-def solve_steady(input_file, backend, order, turbulence_model, max_iter, output_dir, checkpoint_interval, use_eikonal, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, gpu_device, multi_gpu):
+@click.option('--turbulence-intensity', type=float, default=0.01, help='来流湍流强度 Tu（默认 0.01=1%%），外部气动 ≤1%%，城市道路 3-5%%')
+@click.option('--viscosity-ratio', type=float, default=5.0, help='来流粘性比 VR=nu_t/nu（默认 5.0），外部气动推荐 2-10')
+def solve_steady(input_file, backend, order, turbulence_model, max_iter, output_dir, checkpoint_interval, use_eikonal, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio):
     """执行稳态 FR 求解。
 
     支持高阶精度 (P1-P4) 和多种湍流模型 (SST, DDES, WMLES)。
@@ -46,6 +48,12 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, output_
     分组）。求解前会强制检查网格质量门，除非传了 --skip-quality-check。
     """
     print(f"=== Starting Steady FR Simulation ===")
+    # Tu/VR 范围校验：CLI 路径不构造 SolverConfig，其 __post_init__ 的校验
+    # （Tu ∈ (0,1]、VR > 0）到不了这里，必须在入口拦截（2026-08-25 代码审查）。
+    if not (0.0 < turbulence_intensity <= 1.0):
+        raise click.BadParameter("湍流强度 Tu 必须在 (0, 1] 区间", param_hint="--turbulence-intensity")
+    if viscosity_ratio <= 0.0:
+        raise click.BadParameter("粘性比 VR 必须 > 0", param_hint="--viscosity-ratio")
     print(f"\nInput Grid : {input_file}")
     print(f"Backend    : {backend} | Order: P{order} | Method: rk3")
     print(f"Turbulence : {turbulence_model} | Max Iter: {max_iter}")
@@ -109,6 +117,8 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, output_
         solver = GPUFRSolver(
             mesh=mesh, ops=ops, order=order,
             device_id=gpu_device,
+            turbulence_intensity=turbulence_intensity,
+            viscosity_ratio=viscosity_ratio,
         )
 
         try:
@@ -160,6 +170,8 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, output_
             turb_model_name=turbulence_model,
             time_scheme=TimeIntegrationScheme.SSP_RK3,
             n_threads=threads,
+            turbulence_intensity=turbulence_intensity,
+            viscosity_ratio=viscosity_ratio,
         )
 
         # 初始化状态
@@ -201,6 +213,8 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, output_
             turb_model_name=turbulence_model,
             time_scheme=TimeIntegrationScheme.SSP_RK3,
             n_threads=threads,
+            turbulence_intensity=turbulence_intensity,
+            viscosity_ratio=viscosity_ratio,
         )
 
         # 2.5. 计算壁面距离场（如果湍流模型需要）

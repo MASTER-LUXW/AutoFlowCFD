@@ -51,6 +51,8 @@ def compute_viscous_interface_correction_p0_kernel(
     neighbor_src1_idx: np.ndarray, neighbor_src1_cell: np.ndarray, neighbor_src1_mat: np.ndarray,
     owner_src0_cell: np.ndarray, owner_src0_mat: np.ndarray,
     owner_src1_idx: np.ndarray, owner_src1_cell: np.ndarray, owner_src1_mat: np.ndarray,
+    mixed_nb_partner: np.ndarray, mixed_nb_mask: np.ndarray,
+    mixed_ow_partner: np.ndarray, mixed_ow_mask: np.ndarray,
     boundary_extrap: np.ndarray,  # (2, 3, 2, n_fp, 1)
     g_left: np.ndarray, g_right: np.ndarray,
     Q_ghost: np.ndarray,          # (n_boundary_faces, n_fp, 5)
@@ -93,6 +95,9 @@ def compute_viscous_interface_correction_p0_kernel(
 
             jump_owner = np.zeros((n_fp, 5))
             for i in range(n_fp):
+                # 混合拆分面（B-8，与通用 kernel 同步，见 viscous_flux_kernel.py 同名注释）。
+                mp = mixed_nb_partner[f]
+                is_bnd_i = is_boundary[f] or (mp >= 0 and mixed_nb_mask[f, i])
                 e_i = E_o[i, 0]  # 标量
 
                 # 外插到 FP i（P0 简化：标量乘）
@@ -144,6 +149,15 @@ def compute_viscous_interface_correction_p0_kernel(
                                     gv_n[a, b] += w * grad_vel[c1, 0, a, b]
                                 gT_n[a] += w * grad_T[c1, 0, a]
                             mut_n += w * mu_t_field[c1, 0]
+                    # 混合拆分面边界半区（B-8）：状态取配对面幽灵态，梯度镜像内部值。
+                    if mp >= 0 and mixed_nb_mask[f, i]:
+                        for v in range(5):
+                            Q_n[v] = Q_ghost[mp, i, v]
+                        for a in range(3):
+                            for b in range(3):
+                                gv_n[a, b] = gv_o_i[a, b]
+                            gT_n[a] = gT_o_i[a]
+                        mut_n = mut_o_i
 
                 # 算术平均
                 Q_avg = np.empty(5)
@@ -175,7 +189,7 @@ def compute_viscous_interface_correction_p0_kernel(
                 for v in range(5):
                     jump_owner[i, v] = G_tilde_common[v] - G_tilde_own[v]
 
-                if is_boundary[f]:
+                if is_bnd_i:
                     # 边界 IP 罚项，见 viscous_flux_kernel.py::
                     # compute_viscous_interface_correction_kernel 同名分支
                     # 文档（P0 特化：vol_o 直接是 det_jacs[oc,0]，无需对
@@ -257,6 +271,16 @@ def compute_viscous_interface_correction_p0_kernel(
                                 gv_o_at_n[a, b] += w * grad_vel[c1, 0, a, b]
                             gT_o_at_n[a] += w * grad_T[c1, 0, a]
                         mut_o_at_n += w * mu_t_field[c1, 0]
+                # 混合拆分面边界半区（B-8）：neighbor 侧对称处理，规则同通用 kernel。
+                mp_o = mixed_ow_partner[f]
+                if mp_o >= 0 and mixed_ow_mask[f, i]:
+                    for v in range(5):
+                        Q_o_at_n[v] = Q_ghost[mp_o, i, v]
+                    for a in range(3):
+                        for b in range(3):
+                            gv_o_at_n[a, b] = gv_n_i[a, b]
+                        gT_o_at_n[a] = gT_n_i[a]
+                    mut_o_at_n = mut_n_i
 
                 Q_avg_n = np.empty(5)
                 for v in range(5):
@@ -285,6 +309,15 @@ def compute_viscous_interface_correction_p0_kernel(
 
                 for v in range(5):
                     jump_neighbor[i, v] = G_tilde_common_n[v] - G_tilde_own_n[v]
+
+                # 混合拆分面边界半区（B-8）：neighbor 侧边界 IP 罚项，规则同通用 kernel。
+                if mp_o >= 0 and mixed_ow_mask[f, i]:
+                    adj_mag_n = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
+                    pen_n = viscous_boundary_penalty_tilde(
+                        Q_n_i, Q_o_at_n, mu + mut_n_i, det_jacs[nc, 0], adj_mag_n, nside, _VISCOUS_BOUNDARY_IP_C,
+                    )
+                    for v in range(1, 4):
+                        jump_neighbor[i, v] += pen_n[v]
 
             # P0 简化分布
             g_prime_neighbor = g_left if nside < 0 else g_right

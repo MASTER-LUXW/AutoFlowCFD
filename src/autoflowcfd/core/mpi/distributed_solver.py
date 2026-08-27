@@ -77,9 +77,8 @@ class DistributedFRSolver:
             NotImplementedError: 请求了 'none' 以外的湍流模型时。分布式
                 残差/状态目前只接了纯层流（5-var，无 mu_t 耦合）路径——
                 湍流模型的 k/omega 输运方程需要 turb_model 实例接入分布式
-                状态与逐 RK 子步的 halo 交换，尚未实现（见
-                distributed_compute.py::distributed_turbulence_transport
-                文档）。静默忽略请求的湍流模型、跑出一个看似正常实际上
+                状态与逐 RK 子步的 halo 交换，尚未实现（见本构造器下方的运行期报错与
+                distributed_compute.py 末尾说明）。静默忽略请求的湍流模型、跑出一个看似正常实际上
                 物理不完整的结果，比直接报错更糟——所以这里在构造时就
                 拒绝，而不是等到求解中途才发现。单机模式
                 （不带 --n-ranks/--np）已完整支持 SST/DDES/WMLES/LES。
@@ -90,9 +89,8 @@ class DistributedFRSolver:
                 f"MPI 分布式求解器（--n-ranks/--np > 1，或 --multi-gpu）目前只支持 "
                 f"turbulence_model='none'，收到的是 '{turb_model_name}'。分布式湍流"
                 f"输运（k/omega 对流+扩散、wall_distance 分发、SGS/壁面应力模型）"
-                f"尚未接入分布式状态与残差计算，详见 "
-                f"core/mpi/distributed_compute.py::distributed_turbulence_transport "
-                f"文档。请去掉 --turbulence-model（默认 none）或改用单机模式。"
+                f"尚未接入分布式状态与残差计算（见 core/mpi/distributed_compute.py "
+                f"末尾说明）。请去掉 --turbulence-model（默认 none）或改用单机模式。"
             )
 
         self.rank = rank if rank is not None else get_rank()

@@ -18,10 +18,15 @@ class TestDistributedComputeImport:
             distributed_compute_inviscid_residual,
             distributed_compute_viscous_residual,
             distributed_compute_physical_gradient,
-            distributed_turbulence_transport,
         )
         assert DistributedMeshAdapter is not None
         assert distributed_compute_inviscid_residual is not None
+
+    def test_no_turbulence_transport_entry(self):
+        """分布式湍流输运占位函数已移除（第三轮评审整改）：构造期 fail-fast
+        拒绝非 none 湍流后，该入口零调用方且不可达，不应再存在。"""
+        import autoflowcfd.core.mpi.distributed_compute as dc
+        assert not hasattr(dc, "distributed_turbulence_transport")
 
     def test_import_distributed_solver(self):
         """验证分布式求解器可以正常导入。"""

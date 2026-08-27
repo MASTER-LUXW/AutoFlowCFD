@@ -93,6 +93,8 @@ def _compute_residual_via_new_kernel(U, mesh, ops, mu_t_field=None, boundary_gho
         flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
         flat.owner_src0_cell, flat.owner_src0_mat,
         flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
+        flat.mixed_nb_partner, flat.mixed_nb_mask,
+        flat.mixed_ow_partner, flat.mixed_ow_mask,
         flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
         flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
         n_prism, n_threads,

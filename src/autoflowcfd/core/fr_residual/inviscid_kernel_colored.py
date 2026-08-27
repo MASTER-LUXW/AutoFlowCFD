@@ -53,6 +53,8 @@ def compute_inviscid_interface_correction_kernel_colored(
     neighbor_src1_idx: np.ndarray, neighbor_src1_cell: np.ndarray, neighbor_src1_mat: np.ndarray,
     owner_src0_cell: np.ndarray, owner_src0_mat: np.ndarray,
     owner_src1_idx: np.ndarray, owner_src1_cell: np.ndarray, owner_src1_mat: np.ndarray,
+    mixed_nb_partner: np.ndarray, mixed_nb_mask: np.ndarray,
+    mixed_ow_partner: np.ndarray, mixed_ow_mask: np.ndarray,
     boundary_extrap: np.ndarray,
     g_left: np.ndarray, g_right: np.ndarray,
     Q_ghost: np.ndarray,
@@ -136,6 +138,10 @@ def compute_inviscid_interface_correction_kernel_colored(
                             if w != 0.0:
                                 for v in range(5):
                                     Q_n[v] += w * Q[c1, s, v]
+                    # 混合拆分面（B-8，与主 kernel 同步修改，见 inviscid_kernel.py 同名注释）
+                    mp = mixed_nb_partner[f]
+                    if mp >= 0 and mixed_nb_mask[f, i]:
+                        Q_n = Q_ghost[mp, i]
 
                 normal = np.empty(3)
                 normal[0] = dirx
@@ -215,6 +221,11 @@ def compute_inviscid_interface_correction_kernel_colored(
                         if w != 0.0:
                             for v in range(5):
                                 Q_o_at_n[v] += w * Q[c1, s, v]
+                # 混合拆分面（B-8，与主 kernel 同步；逐元素拷贝避免 numba C/A 布局赋值冲突）
+                mp_o = mixed_ow_partner[f]
+                if mp_o >= 0 and mixed_ow_mask[f, i]:
+                    for v in range(5):
+                        Q_o_at_n[v] = Q_ghost[mp_o, i, v]
 
                 normal = np.empty(3)
                 normal[0] = dirx

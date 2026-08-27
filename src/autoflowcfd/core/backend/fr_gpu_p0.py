@@ -162,7 +162,7 @@ if _CUDA_IMPORT_OK:
     @cuda.jit
     def _p0_inviscid_residual_kernel(
         owner_cell, neighbor_cell, is_boundary, normal, area_w,
-        Q_all, Q_ghost, cell_volumes, residual_out, mach_ref,
+        Q_all, Q_ghost, cell_volumes, mixed_bnd_frac, residual_out, mach_ref,
     ):
         """一个 CUDA 线程处理一条面记录：计算该面的 AUSM+up 公共通量，
         原子累加到 owner（总是）与 neighbor（仅内部面）两侧的残差——
@@ -203,6 +203,20 @@ if _CUDA_IMPORT_OK:
         flux = cuda.local.array(5, dtype=_CUDA_FLUX_DTYPE)
         _ausm_up_flux_device(rhoL, uL, vL, wL, pL, rhoR, uR, vR, wR, pR, nx, ny, nz, mach_ref, flux)
 
+        # 混合拆分面（B-8，镜像 CPU inviscid_p0_kernel.py / gpu_p0_inviscid.py
+        # 同名分支）：整张四边形面的通量按子面面积占比混合，边界半区用同一
+        # owner 单元的幽灵态另解一次黎曼问题。
+        bfrac = mixed_bnd_frac[f]
+        if bfrac > 0.0 and not is_boundary[f]:
+            flux_b = cuda.local.array(5, dtype=_CUDA_FLUX_DTYPE)
+            _ausm_up_flux_device(
+                rhoL, uL, vL, wL, pL,
+                Q_ghost[f, 0], Q_ghost[f, 1], Q_ghost[f, 2], Q_ghost[f, 3], Q_ghost[f, 4],
+                nx, ny, nz, mach_ref, flux_b,
+            )
+            for v in range(5):
+                flux[v] = (1.0 - bfrac) * flux[v] + bfrac * flux_b[v]
+
         vol_o = cell_volumes[oc]
         for v in range(5):
             cuda.atomic.add(residual_out, (oc, v), -flux[v] * aw / vol_o)
@@ -210,8 +224,10 @@ if _CUDA_IMPORT_OK:
         if not is_boundary[f]:
             nc = neighbor_cell[f]
             vol_n = cell_volumes[nc]
+            # 混合面（B-8）：只把内部半区份额计入 neighbor，边界半区份额属于边界条件。
+            nshare = 1.0 - bfrac
             for v in range(5):
-                cuda.atomic.add(residual_out, (nc, v), flux[v] * aw / vol_n)
+                cuda.atomic.add(residual_out, (nc, v), flux[v] * aw / vol_n * nshare)
 
 
 def compute_inviscid_residual_p0_gpu(
@@ -271,7 +287,16 @@ def compute_inviscid_residual_p0_gpu(
     from autoflowcfd.core.fr_residual.inviscid_p0 import _extract_p0_face_geometry
     normal, area_w = _extract_p0_face_geometry(ffp_list, fc, n_faces)
 
-    for f in np.nonzero(is_boundary)[0]:
+    # 幽灵态预计算范围（B-8）：真边界面之外，混合拆分面的边界子面记录也读
+    # Q_ghost[f]（kernel 混合分支），与 gpu_p0_inviscid.py 的 CPU 侧入口一致。
+    mixed_bnd_face = getattr(ffp_list, "mixed_bnd_face", None)
+    if mixed_bnd_face is None:
+        mixed_bnd_face = np.zeros(n_faces, dtype=np.bool_)
+    mixed_bnd_frac = getattr(ffp_list, "mixed_p0_bnd_frac", None)
+    if mixed_bnd_frac is None:
+        mixed_bnd_frac = np.zeros(n_faces, dtype=np.float64)
+
+    for f in np.nonzero(is_boundary | mixed_bnd_face)[0]:
         Q_owner_fp = Q_all[owner_cell[f]: owner_cell[f] + 1]
         Q_ghost[f, :] = ghost_provider(f, Q_owner_fp, normal[f:f + 1])[0]
 
@@ -285,13 +310,14 @@ def compute_inviscid_residual_p0_gpu(
     d_Q = cuda.to_device(Q_all)
     d_Q_ghost = cuda.to_device(Q_ghost)
     d_volumes = cuda.to_device(cell_volumes)
+    d_mixed_frac = cuda.to_device(mixed_bnd_frac)
     d_residual = cuda.to_device(np.zeros((n_cells, 5), dtype=np.float64))
 
     threads_per_block = 128
     blocks_per_grid = (n_faces + threads_per_block - 1) // threads_per_block
     _p0_inviscid_residual_kernel[blocks_per_grid, threads_per_block](
         d_owner, d_neighbor, d_is_boundary, d_normal, d_area_w,
-        d_Q, d_Q_ghost, d_volumes, d_residual, np.float64(mach_ref),
+        d_Q, d_Q_ghost, d_volumes, d_mixed_frac, d_residual, np.float64(mach_ref),
     )
     cuda.synchronize()
 

@@ -89,6 +89,14 @@ class GPUFlatFaceGeometry:
             self.owner_src1_cell = cp.asarray(flat_face.owner_src1_cell)
             self.owner_src1_mat = cp.asarray(flat_face.owner_src1_mat)
 
+            # ── 混合拆分面（B-8，语义见 face_kernels.py::FlatFaceGeometry 同名字段文档）──
+            self.mixed_nb_partner = cp.asarray(flat_face.mixed_nb_partner)
+            self.mixed_nb_mask = cp.asarray(flat_face.mixed_nb_mask)
+            self.mixed_ow_partner = cp.asarray(flat_face.mixed_ow_partner)
+            self.mixed_ow_mask = cp.asarray(flat_face.mixed_ow_mask)
+            self.mixed_bnd_face = cp.asarray(flat_face.mixed_bnd_face)
+            self.mixed_p0_bnd_frac = cp.asarray(flat_face.mixed_p0_bnd_frac)
+
             # ── 边界外插矩阵 ──
             self.boundary_extrap = cp.asarray(flat_face.boundary_extrap)
 

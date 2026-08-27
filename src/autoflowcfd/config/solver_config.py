@@ -114,6 +114,8 @@ class SolverConfig:
     output_dir: str = "./results"
     checkpoint_interval: int = 100
     verbose: bool = False
+    turbulence_intensity: float = 0.01  # 来流湍流强度 Tu（默认 1%）
+    viscosity_ratio: float = 5.0  # 来流粘性比 VR = nu_t/nu
     
     def __post_init__(self):
         """初始化后验证配置。"""
@@ -132,6 +134,12 @@ class SolverConfig:
             self.n_threads = multiprocessing.cpu_count()
         elif self.n_threads < 1:
             raise ValueError(f"线程数必须为正数，得到 {self.n_threads}")
+        
+        # 验证湍流参数
+        if not (0 < self.turbulence_intensity <= 1.0):
+            raise ValueError(f"湍流强度 Tu 必须在 (0, 1] 范围内，得到 {self.turbulence_intensity}")
+        if self.viscosity_ratio <= 0:
+            raise ValueError(f"粘性比 VR 必须为正数，得到 {self.viscosity_ratio}")
         
         # 如果输出目录不存在则创建
         os.makedirs(self.output_dir, exist_ok=True)

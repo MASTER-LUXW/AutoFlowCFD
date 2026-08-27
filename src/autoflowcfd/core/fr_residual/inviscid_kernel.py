@@ -96,6 +96,8 @@ def compute_inviscid_interface_correction_kernel(
     neighbor_src1_idx: np.ndarray, neighbor_src1_cell: np.ndarray, neighbor_src1_mat: np.ndarray,
     owner_src0_cell: np.ndarray, owner_src0_mat: np.ndarray,
     owner_src1_idx: np.ndarray, owner_src1_cell: np.ndarray, owner_src1_mat: np.ndarray,
+    mixed_nb_partner: np.ndarray, mixed_nb_mask: np.ndarray,
+    mixed_ow_partner: np.ndarray, mixed_ow_mask: np.ndarray,
     boundary_extrap: np.ndarray,
     g_left: np.ndarray, g_right: np.ndarray,
     Q_ghost: np.ndarray,
@@ -185,6 +187,12 @@ def compute_inviscid_interface_correction_kernel(
                             if w != 0.0:
                                 for v in range(5):
                                     Q_n[v] += w * Q[c1, s, v]
+                    # 混合拆分面（B-8，见 fr/face_flux_points_merge.py）：内部半区由上方多源插值覆盖，
+                    # 边界半区逐 FP 取配对边界面的幽灵态（两条记录共享同一 owner 棱柱与立方体面，
+                    # FP 网格逐点重合）。掩码行内多源插值矩阵权重为 0，先算再覆盖不冲突。
+                    mp = mixed_nb_partner[f]
+                    if mp >= 0 and mixed_nb_mask[f, i]:
+                        Q_n = Q_ghost[mp, i]
 
                 normal = np.empty(3)
                 normal[0] = dirx
@@ -265,6 +273,14 @@ def compute_inviscid_interface_correction_kernel(
                         if w != 0.0:
                             for v in range(5):
                                 Q_o_at_n[v] += w * Q[c1, s, v]
+                # 混合拆分面（B-8）：neighbor-primary 分支对称处理——若本面是 neighbor 侧的
+                # 混合配对内部面，边界半区处的对侧状态同样取配对边界面的幽灵态。
+                # 逐元素拷贝而非整体赋值：Q_o_at_n 首次赋值为 np.zeros(5)（C 布局），
+                # numba 不允许再把 A 布局视图赋给 C 布局变量。
+                mp_o = mixed_ow_partner[f]
+                if mp_o >= 0 and mixed_ow_mask[f, i]:
+                    for v in range(5):
+                        Q_o_at_n[v] = Q_ghost[mp_o, i, v]
 
                 normal = np.empty(3)
                 normal[0] = dirx
@@ -309,7 +325,9 @@ def compute_boundary_ghost_states(flat, Q: np.ndarray, adj_j: np.ndarray, ghost_
     for f in range(flat.n_faces):
         if not flat.is_boundary[f]:
             continue
-        if not flat.owner_is_primary[f]:
+        # 混合拆分面（B-8）：混合配对的边界子面 owner_primary 已被置 False（不参与残差累加），
+        # 但它的幽灵态仍被配对的内部面逐 FP 读取，不能跳过计算。
+        if not flat.owner_is_primary[f] and not flat.mixed_bnd_face[f]:
             continue
         oc = flat.owner_cell[f]
         oax = flat.owner_axis[f]

@@ -14,38 +14,30 @@ def api_calculate_coefficients(self, result: Any = None,
                                 velocity: float = 33.33) -> Dict[str, float]:
     """计算气动力系数（委托函数）。
 
-    优先使用 FR 原生积分路径，回退到 V1 CoefficientCalculator。
+    唯一生产路径是 FR 原生积分（fr_coefficients.py：面通量点压力积分，含力矩），
+    需要先跑过 run_steady/run_transient（self.solver 已就绪）。没有可用的求解器时返回诚实的零系数并警告——
+    旧版的 V1 CoefficientCalculator 回退已移除（依赖不存在的
+    get_face_data()，系数恒为 0，属失效实现）。
     """
-    # 优先使用 FR 原生积分路径
+    # FR 原生积分路径（唯一真实积分实现）
     if self.solver is not None and hasattr(self.solver, 'mesh'):
-        try:
-            from autoflowcfd.postprocess.fr_coefficients import (
-                compute_aerodynamic_coefficients_fr,
-            )
-            coeffs = compute_aerodynamic_coefficients_fr(
-                self.solver,
-                reference_area=reference_area,
-                reference_length=reference_length,
-            )
-            return coeffs.to_dict()
-        except Exception as e:
-            logger.warning(f"FR 原生系数计算失败: {e}，回退到 V1 路径")
+        from autoflowcfd.postprocess.fr_coefficients import (
+            compute_aerodynamic_coefficients_fr,
+        )
+        coeffs = compute_aerodynamic_coefficients_fr(
+            self.solver,
+            reference_area=reference_area,
+            reference_length=reference_length,
+        )
+        return coeffs.to_dict()
 
-    # 回退路径：使用 V1 CoefficientCalculator
-    from autoflowcfd.postprocess.coefficients import CoefficientCalculator
-
-    if not hasattr(self, 'grid_data') or self.grid_data is None:
-        logger.warning("grid_data 不可用，返回零系数")
-        return {'Cd': 0.0, 'Cl': 0.0, 'Cm': 0.0, 'Cs': 0.0, 'Cy': 0.0, 'Cr': 0.0}
-
-    solution = result.solution if hasattr(result, 'solution') else None
-    calc = CoefficientCalculator(
-        self.grid_data, solution,
-        reference_area=reference_area, reference_length=reference_length,
-        density=density, velocity=velocity,
+    # 无求解器：不再回退到伪积分实现，返回诚实零值并警告（第三轮评审整改）
+    logger.warning(
+        "calculate_coefficients: 没有可用的 FR 求解器（需先调用 run_steady/"
+        "run_transient 或 resume_simulation），返回零系数。CLI 场景请用 "
+        "`autoflowcfd post coefficients <checkpoint>`。"
     )
-    coeffs = calc.calculate()
-    return coeffs.to_dict()
+    return {'Cd': 0.0, 'Cl': 0.0, 'Cm': 0.0, 'Cs': 0.0, 'Cy': 0.0, 'Cr': 0.0}
 
 
 def api_export_vtk(self, result: Any, filename: str) -> None:

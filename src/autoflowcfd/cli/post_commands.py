@@ -73,6 +73,9 @@ def post() -> None:
 @click.option("--backend", "-b", type=click.Choice(["cpu", "gpu"]), default=None,
               help="后端覆盖，默认沿用 checkpoint 记录的原始后端")
 @click.option("--threads", type=int, default=-1, help="CPU 后端 numba 并行线程数")
+@click.option("--skip-quality-check", is_flag=True,
+              help="跳过重建时的网格质量门检查（B-11：原求解靠该选项才跑得起来的"
+                   "网格，后处理同样需要跳过；不建议，仅用于临时诊断）")
 @click.option("--output", "-o", type=click.Path(), default="coefficients.json",
               help="Output file")
 @click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
@@ -83,6 +86,7 @@ def coefficients(
     reference_area: float,
     backend: Optional[str],
     threads: int,
+    skip_quality_check: bool,
     output: str,
     json_output: bool
 ) -> None:
@@ -106,6 +110,7 @@ def coefficients(
         ckpt_file = str(_locate_checkpoint(Path(case), checkpoint))
         solver, iteration, _metadata = rebuild_solver_from_checkpoint(
             ckpt_file, backend=backend, surface_mesh=surface_mesh, threads=threads,
+            skip_quality_check=skip_quality_check,
         )
         coeffs = compute_aerodynamic_coefficients_fr(solver, reference_area=reference_area)
         result = coeffs.to_dict()
@@ -123,6 +128,9 @@ def coefficients(
             click.echo(f"Cd (Drag):     {result['Cd']:.4f}")
             click.echo(f"Cl (Lift):     {result['Cl']:.4f}")
             click.echo(f"Cs (Side):     {result['Cs']:.4f}")
+            click.echo(f"Cm (Pitch):    {result['Cm']:.4f}")
+            click.echo(f"Cy (Yaw):      {result['Cy']:.4f}")
+            click.echo(f"Cr (Roll):     {result['Cr']:.4f}")
 
     except Exception as e:
         logger.error(f"Coefficient calculation failed: {e}")

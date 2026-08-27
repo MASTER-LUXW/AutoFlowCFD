@@ -113,6 +113,7 @@ def rebuild_solver_from_checkpoint(
     surface_mesh: Optional[str] = None,
     threads: int = -1,
     reference_area: Optional[float] = None,
+    skip_quality_check: bool = False,
 ):
     """从 checkpoint 完整重建一个带解场的 FRSolver（不继续迭代）。
 
@@ -126,10 +127,10 @@ def rebuild_solver_from_checkpoint(
     迭代的情况下拿到一个状态完整、几何完整（mesh.face_connectivity/
     face_flux_points）的求解器，喂给
     `postprocess.fr_coefficients.compute_aerodynamic_coefficients_fr`
-    —— 这是气动系数计算真正需要的输入（FR 原生多点解 + 面几何），不是
-    `postprocess.coefficients.CoefficientCalculator` 假设的 V1 单元中心
-    `GridData`/`SolutionVector`（该实现的 `get_face_data()` 从未存在过，
-    气动系数恒为 0，见 6_整体专家组二次评审.md 发现 23）。
+    —— 这是气动系数计算真正需要的输入（FR 原生多点解 + 面几何）。旧版
+    V1 `CoefficientCalculator`（假设单元中心 `GridData`/`SolutionVector`、
+    依赖从未存在的 `get_face_data()`、系数恒为 0，见 6_整体专家组二次评审.md
+    发现 23）已在第三轮评审整改中移除。
 
     Args:
         checkpoint_path: checkpoint 文件路径（solve steady/transient 产出）
@@ -140,6 +141,8 @@ def rebuild_solver_from_checkpoint(
             下面 load_mesh_for_solver 会因缺边界信息直接报错，不会
             静默用错误网格求解
         threads: CPU 后端 numba 并行 kernel 使用的线程数
+        skip_quality_check: 跳过重建时的网格质量门检查（B-11）——原求解靠该选项
+            才跑得起来时，resume/后处理重建也必须同样跳过；默认 False 仍强制
         reference_area: 气动系数参考面积 (m^2) 覆盖。None 时尝试从
             volume_data.surface_mesh 自动估算（X 方向正投影面积，见
             solve_aero_coefficients._compute_reference_area_auto），
@@ -196,7 +199,13 @@ def rebuild_solver_from_checkpoint(
     target_backend = backend or metadata.get("backend", "cpu")
     resolved_surface_mesh = surface_mesh or metadata.get("surface_mesh")
 
-    mesh, volume_data = load_mesh_for_solver(input_file, order, surface_mesh=resolved_surface_mesh)
+    mesh, volume_data = load_mesh_for_solver(
+        input_file, order, surface_mesh=resolved_surface_mesh,
+        # B-11（2026-08-26）：原求解若靠 --skip-quality-check 才跑得起来，
+        # resume/post 重建时这里却无条件重新强制质量门，导致同一个网格上产出的
+        # checkpoint 永远无法被 resume/后处理，与 solve 侧语义不一致。默认仍然强制。
+        skip_quality_check=skip_quality_check,
+    )
 
     solver = FRSolver(
         mesh=mesh,
@@ -207,6 +216,11 @@ def rebuild_solver_from_checkpoint(
         vel_inf=metadata.get("vel_inf", 33.33),
         p_inf=metadata.get("p_inf", 101325.0),
         n_threads=threads,
+        # Tu/VR 从 checkpoint metadata 恢复（2026-08-25 添加）：
+        # 保证 Resume 时湍流场重置用的参数与原始计算一致。
+        # 旧 checkpoint 没有这两个字段，回退到默认值（Tu=0.01, VR=5.0）。
+        turbulence_intensity=metadata.get("turbulence_intensity", 0.01),
+        viscosity_ratio=metadata.get("viscosity_ratio", 5.0),
     )
     # FRSolver.__init__ 用同一个 order 参数同时设置 self.current_order
     # 和 self.order（ramp 目标）——上面为了让 mesh/初始状态形状匹配
@@ -257,6 +271,21 @@ def rebuild_solver_from_checkpoint(
                 )
             turb_model.k_field = k_restored
             turb_model.omega_field = omega_restored
+            # 跳过 production ramp（2026-08-25 代码审查）：k/omega 场已精确恢复，
+            # 说明湍流已充分发展，再重新压制产生项 50 步会把已收敛的湍流场
+            # 往回压。order_continuation.py 的 resume 分支已有同样的跳过逻辑，
+            # 但 order_continuation_enabled=False 或 order < 2 时 solver.solve()
+            # 走普通循环不经过那里，而 init_turbulence_models 已把重建求解器的
+            # _turb_ramp_step 推到 ≈1（production_factor≈0.02）——在这里统一补上。
+            if hasattr(turb_model, "production_factor"):
+                turb_model.production_factor = 1.0
+                solver._turb_ramp_step = getattr(solver, "_turb_production_ramp_steps", 50)
+                solver._turb_production_ramp_complete = True
+                # 同步置位基准重置完成标记（与 order_continuation.py 的 resume
+                # 分支一致）：否则 run_order_continuation 循环里的"ramp 完成 →
+                # 重置残差基准"检测会在 resume 后第一步把上面刚恢复的
+                # _phase_initial_residual 丢掉。
+                solver._ramp_baseline_reset_done = True
         else:
             print("   ⚠️  Checkpoint 缺少 k_field/omega_field（旧版本 checkpoint）："
                   "湍流场从均匀初始猜测值重新开始，与已恢复的平均流场不连续，"
@@ -424,6 +453,11 @@ def write_checkpoint(
         "rho_inf": solver.freestream["rho_inf"],
         "vel_inf": solver.freestream["vel_inf"],
         "p_inf": solver.freestream["p_inf"],
+        # Tu/VR 持久化（2026-08-25 添加）：Resume 时必须用原始 Tu/VR 值，
+        # 否则会用默认值（Tu=0.01, VR=5.0）覆盖用户设置的值，导致湍流场
+        # 重置时用的参数与原始计算不一致。
+        "turbulence_intensity": getattr(solver, '_turbulence_intensity', 0.01),
+        "viscosity_ratio": getattr(solver, '_viscosity_ratio', 5.0),
     }
     if surface_mesh:
         metadata["surface_mesh"] = surface_mesh

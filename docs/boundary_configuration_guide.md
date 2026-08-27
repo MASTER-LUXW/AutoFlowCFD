@@ -235,10 +235,10 @@ bc_manager.hybrid_configure("template.yaml")
 ```python
 # 导出边界统计信息到JSON
 stats = bc_manager.export_to_json("boundary_stats.json")
-
-# 导出VTK文件用于ParaView可视化验证
-bc_manager.export_to_vtk("boundaries.vtk")
 ```
+
+边界面片的 VTK 可视化用 CLI 的 `post export-vtk`（内部调用 `VTKExporter.export_boundaries`）——
+`BoundaryManager` 只承担元数据登记，不直接做 VTK 导出。
 
 在ParaView中：
 1. 打开`boundaries.vtk`
@@ -365,8 +365,7 @@ print(summary)
 # 方法2：导出JSON
 bc_manager.export_to_json("check.json")
 
-# 方法3：导出VTK并在ParaView中可视化
-bc_manager.export_to_vtk("boundaries.vtk")
+# 方法3：用 CLI `post export-vtk` 导出边界面片并在 ParaView 中可视化
 ```
 
 ### Q2: 自动识别的边界类型不正确怎么办？

@@ -87,6 +87,11 @@ def compute_viscous_residual_fr_gpu(
     if input_is_numpy:
         with cp.cuda.Device(device_id):
             U = cp.asarray(U)
+            # mu_t_field 一并转换（2026-08-25 代码审查）：湍流场景下调用方可能
+            # 同时传 numpy 的 U 和 mu_t_field，只转 U 会让 numpy 数组直接进入
+            # 下面的 cupy 运算（物理通量/界面校正）触发混合运算错误。
+            if mu_t_field is not None and isinstance(mu_t_field, np.ndarray):
+                mu_t_field = cp.asarray(mu_t_field)
 
     n_cells = mesh.n_cells
     n_sps = mesh.n_sps_per_cell
@@ -351,6 +356,20 @@ def _compute_viscous_interface_correction_gpu(
             gT_n = cp.where(bmask3, gT_o, gT_n)
             mut_n = cp.where(is_bnd_o[:, None], mut_o, mut_n)
 
+            # 混合拆分面（B-8，镜像 CPU viscous_flux_kernel.py 同名分支）：边界半区用配对面幽灵态，
+            # 梯度镜像内部值——与真边界面同规则，逐 FP 生效。
+            mp_o = ff.mixed_nb_partner[idx_o]
+            mixed_sel_o = (mp_o[:, None] >= 0) & ff.mixed_nb_mask[idx_o]  # (nO, n_fp)
+            mixed3_o = mixed_sel_o[..., None]
+            # Q_ghost_gpu 形状 (n_faces, n_fp, 5)，与 Q_n 形状一致，逐 FP 直接替换。
+            Q_ghost_partner_o = Q_ghost_gpu[cp.maximum(mp_o, 0)]  # (nO, n_fp, 5)
+            Q_n = cp.where(mixed3_o, Q_ghost_partner_o, Q_n)
+            gv_n = cp.where(mixed_sel_o[:, :, None, None], gv_o, gv_n)
+            gT_n = cp.where(mixed3_o, gT_o, gT_n)
+            mut_n = cp.where(mixed_sel_o, mut_o, mut_n)
+            # 逐 FP 的"边界半区"标记（真边界面全 FP 生效 + 混合面仅掩码 FP 生效），下方 IP 罚项共用。
+            is_bnd_i_o = is_bnd_o[:, None] | mixed_sel_o
+
             Q_avg = 0.5 * (Q_o + Q_n)
             gv_avg = 0.5 * (gv_o + gv_n)
             gT_avg = 0.5 * (gT_o + gT_n)
@@ -362,7 +381,7 @@ def _compute_viscous_interface_correction_gpu(
             )
             jump_owner = G_tilde_common - G_tilde_own
 
-            if bool(cp.any(is_bnd_o)):
+            if bool(cp.any(is_bnd_i_o)):
                 a0 = adjrow_o[..., 0]
                 a1 = adjrow_o[..., 1]
                 a2 = adjrow_o[..., 2]
@@ -374,7 +393,7 @@ def _compute_viscous_interface_correction_gpu(
                 pen = -scale[..., None] * (Q_o[..., 1:4] - Q_n[..., 1:4])
                 pen_full = cp.zeros_like(jump_owner)
                 pen_full[..., 1:4] = pen
-                jump_owner = cp.where(bmask3, jump_owner + pen_full, jump_owner)
+                jump_owner = cp.where(is_bnd_i_o[..., None], jump_owner + pen_full, jump_owner)
 
             g_left_o = ff.g_left[idx_o]
             g_right_o = ff.g_right[idx_o]
@@ -402,6 +421,16 @@ def _compute_viscous_interface_correction_gpu(
             )
             adjrow_n = ff.neighbor_adj_row_exact[idx_n]
 
+            # 混合拆分面（B-8）：neighbor 侧对称处理——边界半区对侧状态取配对面幽灵态，梯度镜像。
+            mp_n = ff.mixed_ow_partner[idx_n]
+            mixed_sel_n = (mp_n[:, None] >= 0) & ff.mixed_ow_mask[idx_n]  # (nN, n_fp)
+            mixed3_n = mixed_sel_n[..., None]
+            Q_ghost_partner_n = Q_ghost_gpu[cp.maximum(mp_n, 0)]  # (nN, n_fp, 5)
+            Q_o_at_n = cp.where(mixed3_n, Q_ghost_partner_n, Q_o_at_n)
+            gv_o_at_n = cp.where(mixed_sel_n[:, :, None, None], gv_n_native, gv_o_at_n)
+            gT_o_at_n = cp.where(mixed3_n, gT_n_native, gT_o_at_n)
+            mut_o_at_n = cp.where(mixed_sel_n, mut_n_native, mut_o_at_n)
+
             Q_avg_n = 0.5 * (Q_n_native + Q_o_at_n)
             gv_avg_n = 0.5 * (gv_n_native + gv_o_at_n)
             gT_avg_n = 0.5 * (gT_n_native + gT_o_at_n)
@@ -413,6 +442,22 @@ def _compute_viscous_interface_correction_gpu(
                 adjrow_n, mu, Pr, Pr_t,
             )
             jump_neighbor = G_tilde_common_n - G_tilde_own_n
+
+            # 混合拆分面（B-8）：neighbor 侧边界 IP 罚项，镜像 CPU kernel 同名分支（罚项的“内部态”
+            # 是本单元外插值、“对侧”是幽灵态）。
+            if bool(cp.any(mixed_sel_n)):
+                a0n = adjrow_n[..., 0]
+                a1n = adjrow_n[..., 1]
+                a2n = adjrow_n[..., 2]
+                adj_mag_n = cp.sqrt(a0n * a0n + a1n * a1n + a2n * a2n)
+                vol_n = cp.mean(det_jacs[nc], axis=-1)
+                h_n = cp.maximum(vol_n ** (1.0 / 3.0), 1e-300)
+                eta_n = _VISCOUS_BOUNDARY_IP_C * (mu + mut_n_native) / h_n[:, None]
+                scale_n = eta_n * adj_mag_n * nside[:, None]
+                pen_n = -scale_n[..., None] * (Q_n_native[..., 1:4] - Q_o_at_n[..., 1:4])
+                pen_full_n = cp.zeros_like(jump_neighbor)
+                pen_full_n[..., 1:4] = pen_n
+                jump_neighbor = cp.where(mixed_sel_n[..., None], jump_neighbor + pen_full_n, jump_neighbor)
 
             g_left_n = ff.g_left[idx_n]
             g_right_n = ff.g_right[idx_n]

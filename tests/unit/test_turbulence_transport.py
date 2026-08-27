@@ -50,6 +50,9 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
         neighbor_src1_mat = np.empty((0, n_fp, n_sps))
 
         wall_dirichlet_zero_face = np.array([True, False])
+        # 无混合拆分面（B-8）：partner 全 -1、掩码全 False，混合覆盖循环不生效。
+        mixed_nb_partner = np.full(n_faces, -1, dtype=np.int64)
+        mixed_nb_mask = np.zeros((n_faces, n_fp), dtype=np.bool_)
 
         phi_owner, phi_neighbor = extrapolate_scalar_to_faces_kernel(
             scalar_sps, boundary_extrap,
@@ -58,6 +61,7 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
             owner_cell, owner_axis, owner_side,
             n_prism, n_faces, n_fp, n_sps,
             wall_dirichlet_zero_face,
+            mixed_nb_partner, mixed_nb_mask,
         )
 
         np.testing.assert_allclose(phi_owner, [[5.0], [5.0]])
@@ -81,6 +85,8 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
         neighbor_src1_cell = np.empty((0,), dtype=np.int64)
         neighbor_src1_mat = np.empty((0, n_fp, n_sps))
         wall_dirichlet_zero_face = np.array([False])
+        mixed_nb_partner = np.full(n_faces, -1, dtype=np.int64)
+        mixed_nb_mask = np.zeros((n_faces, n_fp), dtype=np.bool_)
 
         _, phi_neighbor = extrapolate_scalar_to_faces_kernel(
             scalar_sps, boundary_extrap,
@@ -89,6 +95,7 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
             owner_cell, owner_axis, owner_side,
             n_prism, n_faces, n_fp, n_sps,
             wall_dirichlet_zero_face,
+            mixed_nb_partner, mixed_nb_mask,
         )
         np.testing.assert_allclose(phi_neighbor, [[3.0]])
 

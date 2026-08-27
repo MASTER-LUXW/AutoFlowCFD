@@ -63,6 +63,8 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         mu_molecular: float = 1.8e-5,
         boundary_ghost_provider=None,
         turb_model: str = "NONE",
+        turbulence_intensity: float = 0.01,
+        viscosity_ratio: float = 5.0,
     ):
         """初始化 GPU FRSolver。
 
@@ -90,8 +92,12 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         self.device_id = device_id
         self.mu_molecular = mu_molecular
         # mach_ref：与 CPU 版 FRSolver.__init__（fr_solver/solver.py）
-        # 同一套计算方式/同一个用途，见该文件对应注释。
+        # 同一套计算方式/同一个用途，见该文件对应注释。物理下限钳制同样与
+        # CPU 版镜像同步（2026-08-26，P2 发散专项）：低于 0.1 的参考马赫数会让
+        # AUSM+up Mp 压差扩散项的 1/mach_ref² 放大压倒显式推进稳定性，
+        # 完整推导/实证标定记录见 fr_solver/solver.py::_MACH_REF_FLOOR。
         mach_ref = vel_inf / np.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10))
+        mach_ref = max(mach_ref, 0.1)
         self.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf, "mach_ref": mach_ref}
         self.boundary_ghost_provider = boundary_ghost_provider
         self.turb_model_name = turb_model
@@ -129,9 +135,23 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         # 初始化 GPU 湍流模型
         if turb_model == "SST":
             from autoflowcfd.core.gpu.gpu_turbulence_sst import GPUTurbulenceSST
-            self.turb_model_gpu = GPUTurbulenceSST(n_cells, n_sps, device_id)
-            logger.info(f"GPU SST k-omega model initialized on device {device_id}")
-            print(f"   [OK] GPU SST k-omega model initialized")
+            # 从 Tu/VR 推导物理自洽的 k/omega 初值（与 CPU 版一致）
+            nu = mu_molecular / max(rho_inf, 1e-10)
+            k_inf = 1.5 * (vel_inf * turbulence_intensity) ** 2
+            nu_t_inf = viscosity_ratio * nu
+            omega_inf = k_inf / max(nu_t_inf, 1e-30)
+            self.turb_model_gpu = GPUTurbulenceSST(
+                n_cells, n_sps, device_id, k_inf=k_inf, omega_inf=omega_inf
+            )
+            # 物理上界与 CPU 同一公式（fr_solver/turbulence.py::_set_turbulence_bounds）：
+            # k_max = 0.5·vel_inf²（湍动能 ≤ 平均流动能）、omega_max = 1e6。
+            # 2026-08-25 代码审查前 GPU 侧恒为 1e6，与 CPU 不一致。
+            self.turb_model_gpu.k_max = 0.5 * vel_inf ** 2
+            self.turb_model_gpu.omega_max = 1e6
+            logger.info(f"GPU SST k-omega model initialized on device {device_id} "
+                       f"(k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
+            print(f"   [OK] GPU SST k-omega model initialized "
+                  f"(k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
 
         # 预计算壁面距离（用于湍流模型）
         self.wall_distance_gpu = None
@@ -208,13 +228,38 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
             if volumes_gpu is None:
                 volumes_gpu = cp.asarray(self.mesh.get_all_cell_volumes())
 
-            # 边界幽灵态
-            Q_ghost = cp.zeros((n_faces, 5), dtype=cp.float64)
+            # 边界幽灵态（正确性修复，B-8 一并暴露）：此前这里恒传全零，
+            # kernel 会把边界面外部状态当成零态解 AUSM 黎曼问题。改为与
+            # gpu_p0_inviscid.py::compute_inviscid_residual_p0_cupy 同款的
+            # 逐面 ghost_provider 预计算；范围含混合拆分面的边界子面记录（B-8）。
+            from autoflowcfd.core.fr_residual.inviscid import DefaultGhostProvider
+            ghost_provider = (
+                self.boundary_ghost_provider
+                if self.boundary_ghost_provider is not None
+                else DefaultGhostProvider()
+            )
+            ffp_list = self.mesh.face_flux_points
+            mixed_bnd_face = getattr(ffp_list, "mixed_bnd_face", None)
+            if mixed_bnd_face is None:
+                mixed_bnd_face = np.zeros(n_faces, dtype=np.bool_)
+            mixed_bnd_frac = getattr(ffp_list, "mixed_p0_bnd_frac", None)
+            if mixed_bnd_frac is None:
+                mixed_bnd_frac = np.zeros(n_faces, dtype=np.float64)
+            ghost_faces = np.nonzero(fc.is_boundary | mixed_bnd_face)[0]
+            Q_flat_np = cp.asnumpy(Q_flat)
+            Q_ghost_np = np.zeros((n_faces, 5), dtype=np.float64)
+            for f in ghost_faces:
+                oc = int(fc.owner_cell[f])
+                Q_ghost_np[f, :] = ghost_provider(
+                    f, Q_flat_np[oc: oc + 1], normal[f: f + 1]
+                )[0]
+            Q_ghost = cp.asarray(Q_ghost_np)
+            mixed_bnd_frac_gpu = cp.asarray(mixed_bnd_frac)
 
             res = compute_inviscid_residual_p0_cupy_gpu_resident(
                 Q_flat, owner, neighbor, is_bnd,
                 normal_gpu, area_w_gpu, volumes_gpu,
-                Q_ghost, self.mesh.n_cells, n_faces,
+                Q_ghost, mixed_bnd_frac_gpu, self.mesh.n_cells, n_faces,
                 mach_ref=self.freestream["mach_ref"],
             )
             # 扩展到 (n_cells, n_sps, 5)
@@ -294,7 +339,7 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
                 normals_gpu, areas_gpu,
                 None, None,
                 cfl=self.time_integrator.cfl,
-                mach_ref=self.freestream["mach_ref"],
+                poly_order=getattr(self, "order", 0),
             )
             dt_all_sps[:, sp] = dt_sp
 

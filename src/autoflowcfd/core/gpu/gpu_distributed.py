@@ -103,8 +103,12 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         self.ops = ops
         self.mu_molecular = mu_molecular
         # mach_ref：与 CPU 版 FRSolver.__init__（fr_solver/solver.py）
-        # 同一套计算方式/同一个用途，见该文件对应注释。
+        # 同一套计算方式/同一个用途，见该文件对应注释。物理下限钳制同样与
+        # CPU 版镜像同步（2026-08-26，P2 发散专项）：低于 0.1 的参考马赫数会让
+        # AUSM+up Mp 压差扩散项的 1/mach_ref² 放大压倒显式推进稳定性，
+        # 完整推导/实证标定记录见 fr_solver/solver.py::_MACH_REF_FLOOR。
         mach_ref = vel_inf / np.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10))
+        mach_ref = max(mach_ref, 0.1)
         self.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf, "mach_ref": mach_ref}
         self.turb_model_name = turb_model
 
@@ -273,7 +277,7 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
             normals_gpu, areas_gpu,
             None, None,
             cfl=self.time_integrator.cfl,
-            mach_ref=self.freestream["mach_ref"],
+            poly_order=getattr(self, "order", 0),
         )
 
     def _compute_total_residual_gpu(self, mu_t_field=None):

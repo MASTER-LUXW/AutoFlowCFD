@@ -249,46 +249,8 @@ def distributed_compute_physical_gradient(
     return grad_U_local
 
 
-def distributed_turbulence_transport(
-    U_local: np.ndarray,
-    turb_local: np.ndarray,
-    grad_turb_local: np.ndarray,
-    partition: DistributedPartition,
-    halo_exchange: HaloExchange,
-    local_mesh,
-    ops,
-    config,
-    boundary_provider=None,
-) -> np.ndarray:
-    """分布式湍流输运方程计算——尚未实现，故意报错而不是静默跑错误物理。
-
-    此前这里调用一个不存在的 `turbulence_transport(U, turb, grad_turb,
-    mesh, ops, config, boundary_provider)` 函数（导入即失败）。真实的
-    单机实现是 `core/turbulence/transport.py::compute_turbulence_
-    transport_residual(solver)`——它的入参不是这几个松散数组，而是一个
-    完整的 `FRSolver` 实例：要从 `solver.turb_model`（`k_field`/
-    `omega_field`/`nu_t`/SST 各项系数）、`solver.state.Q`、
-    `solver.wall_distance`、`solver._compute_gradients()` 里读一整套
-    仍在自增长的湍流模型内部状态，不是几个可以从调用方直接拼出来的
-    独立数组。
-
-    要让这个函数真正可用，需要先把湍流模型实例接入
-    `DistributedFRSolver`（分布式状态扩展到 7 vars、`turb_model` 与分布
-    式 U 的 k/omega 分量同步、wall_distance 分发到 local cells、每个 RK
-    子步之间 k/omega 也要 halo 交换)——这是一次完整的分布式湍流耦合
-    实现，不是修一处调用签名能带出来的。`DistributedFRSolver.__init__`
-    已经在构造时直接拒绝 `turbulence_model != 'none'`，所以这个函数
-    在当前代码库里没有任何调用方；保留函数签名与文档是为了未来接入
-    时有明确的落脚点，调用它本身应该失败得清楚，而不是被绕过或悄悄
-    退化为忽略湍流输运。
-
-    Raises:
-        NotImplementedError: 恒为此——分布式湍流输运尚未实现。
-    """
-    raise NotImplementedError(
-        "分布式湍流输运（DDES/SST 的 k/omega 对流+扩散）尚未实现："
-        "需要先把 turb_model 实例接入 DistributedFRSolver 的分布式状态"
-        "（7-var 状态、wall_distance 分发、逐 RK 子步的 k/omega halo "
-        "交换），不是简单的函数签名修复。MPI 分布式求解目前只支持 "
-        "turbulence_model='none'；单机模式已完整支持 SST/DDES/WMLES/LES。"
-    )
+# 分布式湍流输运（k/omega 对流+扩散）尚未接入分布式状态：DistributedFRSolver
+# 构造期已 fail-fast 拒绝非 none 湍流模型（见 distributed_solver.py 构造器文档），
+# 因此本模块不提供任何湍流输运入口——不留恒报错的占位函数，避免占位死代码；
+# 未来接入时以 core/turbulence/transport.py::compute_turbulence_transport_residual
+# 为蓝本实现（需 7-var 分布式状态、wall_distance 分发、逐 RK 子步 k/omega halo 交换）。

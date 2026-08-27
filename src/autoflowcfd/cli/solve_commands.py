@@ -65,12 +65,15 @@ from autoflowcfd.cli.solve_steady_commands import _report_aerodynamic_coefficien
                    "input_file 是 .nas 体网格时才会报错")
 @click.option('--reference-area', type=float, default=None, help='气动系数参考面积 (m^2)')
 @click.option('--threads', '-j', type=int, default=-1, help='CPU 后端 numba 并行 kernel 使用的线程数，默认 -1 = 4（本机真实网格实测扩展性甜点，不是核数）')
+@click.option('--skip-quality-check', is_flag=True,
+              help='跳过重建时的网格质量门检查（B-11：原求解靠该选项才跑得起来的'
+                   '网格，resume 同样需要跳过；不建议，仅用于临时诊断）')
 @click.option('--checkpoint-interval', type=int, default=100,
               help='中间 checkpoint 保存间隔（本次 resume 自己新跑的额外迭代数，'
                    '非绝对迭代数）——与 solve steady 同名参数含义一致')
 def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
            surface_mesh: Optional[str], reference_area: Optional[float], threads: int,
-           checkpoint_interval: int) -> None:
+           skip_quality_check: bool, checkpoint_interval: int) -> None:
     """从检查点真正恢复并继续求解（不是只打印元信息）。
 
     重建流程：checkpoint 的 metadata 记录了重建 FRSolver 所需的全部
@@ -98,6 +101,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
     solver, iteration, metadata = rebuild_solver_from_checkpoint(
         checkpoint_file, backend=backend, surface_mesh=surface_mesh, threads=threads,
         reference_area=reference_area,
+        skip_quality_check=skip_quality_check,
     )
     input_file = metadata["input_file"]
     order = metadata["order"]

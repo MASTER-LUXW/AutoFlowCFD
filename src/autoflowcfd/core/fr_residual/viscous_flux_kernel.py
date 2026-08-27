@@ -68,6 +68,8 @@ def compute_viscous_interface_correction_kernel(
     neighbor_src1_idx: np.ndarray, neighbor_src1_cell: np.ndarray, neighbor_src1_mat: np.ndarray,
     owner_src0_cell: np.ndarray, owner_src0_mat: np.ndarray,
     owner_src1_idx: np.ndarray, owner_src1_cell: np.ndarray, owner_src1_mat: np.ndarray,
+    mixed_nb_partner: np.ndarray, mixed_nb_mask: np.ndarray,
+    mixed_ow_partner: np.ndarray, mixed_ow_mask: np.ndarray,
     boundary_extrap: np.ndarray,
     g_left: np.ndarray, g_right: np.ndarray,
     Q_ghost: np.ndarray,
@@ -121,6 +123,9 @@ def compute_viscous_interface_correction_kernel(
 
             jump_owner = np.zeros((n_fp, 5))
             for i in range(n_fp):
+                # 混合拆分面（B-8，见 fr/face_flux_points_merge.py）：边界半区与真边界面同等处理。
+                mp = mixed_nb_partner[f]
+                is_bnd_i = is_boundary[f] or (mp >= 0 and mixed_nb_mask[f, i])
                 if is_boundary[f]:
                     # 边界面：状态反映真实边界条件，梯度镜像内部值本身
                     # （见模块文档"边界面梯度处理"一节，不能改成 sources/幽灵态）。
@@ -160,6 +165,16 @@ def compute_viscous_interface_correction_kernel(
                                         gv_n[a, b] += w * grad_vel[c1, s, a, b]
                                     gT_n[a] += w * grad_T[c1, s, a]
                                 mut_n += w * mu_t_field[c1, s]
+                    # 混合拆分面边界半区（B-8）：状态取配对面幽灵态（逐元素拷贝，
+                    # 避免 numba C/A 布局赋值冲突），梯度镜像内部值——与真边界面同规则。
+                    if mp >= 0 and mixed_nb_mask[f, i]:
+                        for v in range(5):
+                            Q_n[v] = Q_ghost[mp, i, v]
+                        for a in range(3):
+                            for b in range(3):
+                                gv_n[a, b] = gv_o[i, a, b]
+                            gT_n[a] = gT_o[i, a]
+                        mut_n = mut_o[i]
 
                 Q_avg = np.empty(5)
                 for v in range(5):
@@ -189,10 +204,10 @@ def compute_viscous_interface_correction_kernel(
                 for v in range(5):
                     jump_owner[i, v] = G_tilde_common[v] - G_tilde_own[v]
 
-                if is_boundary[f]:
-                    # 边界 IP 罚项：动量分量的 jump_owner 在梯度镜像下恒为 0
-                    # （见 viscous_boundary_penalty_tilde 文档），补上正比于
-                    # 状态跳跃的耗散罚项，否则固壁无滑移剪应力不存在。
+                if is_bnd_i:
+                    # 边界 IP 罚项：动量分量的 jump_owner 在梯度镜像下恒为 0（见
+                    # viscous_boundary_penalty_tilde 文档），补上正比于状态跳跃的耗散罚项，
+                    # 否则固壁无滑移剪应力不存在。混合面边界半区（B-8）同样需要。
                     adj_mag_o = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
                     pen = viscous_boundary_penalty_tilde(
                         Q_o[i], Q_n, mu + mut_o[i], vol_o, adj_mag_o, oside, _VISCOUS_BOUNDARY_IP_C,
@@ -223,6 +238,12 @@ def compute_viscous_interface_correction_kernel(
             gT_n_native = _extrap_matmul(grad_T[nc], E_n)  # (n_fp,3)
             mut_n_native = E_n @ mu_t_field[nc]  # (n_fp,)
             adjrow_n_native = neighbor_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
+
+            # neighbor 侧单元体积代理（混合面边界半区 IP 罚项用，B-8），算法同 vol_o。
+            vol_n = 0.0
+            for s in range(n_sps):
+                vol_n += det_jacs[nc, s]
+            vol_n /= n_sps
 
             jump_neighbor = np.zeros((n_fp, 5))
             for i in range(n_fp):
@@ -257,6 +278,17 @@ def compute_viscous_interface_correction_kernel(
                                     gv_o_at_n[a, b] += w * grad_vel[c1, s, a, b]
                                 gT_o_at_n[a] += w * grad_T[c1, s, a]
                             mut_o_at_n += w * mu_t_field[c1, s]
+                # 混合拆分面边界半区（B-8）：neighbor 侧对称处理——对侧状态取配对面幽灵态（逐元素拷贝），
+                # 梯度镜像本单元内部值，与边界面同规则。
+                mp_o = mixed_ow_partner[f]
+                if mp_o >= 0 and mixed_ow_mask[f, i]:
+                    for v in range(5):
+                        Q_o_at_n[v] = Q_ghost[mp_o, i, v]
+                    for a in range(3):
+                        for b in range(3):
+                            gv_o_at_n[a, b] = gv_n_native[i, a, b]
+                        gT_o_at_n[a] = gT_n_native[i, a]
+                    mut_o_at_n = mut_n_native[i]
 
                 Q_avg_n = np.empty(5)
                 for v in range(5):
@@ -286,6 +318,16 @@ def compute_viscous_interface_correction_kernel(
                 for v in range(5):
                     jump_neighbor[i, v] = G_tilde_common_n[v] - G_tilde_own_n[v]
 
+                # 混合拆分面边界半区（B-8）：neighbor 侧同样需要边界 IP 罚项（罚项的“内部态”
+                # 是本单元外插值 Q_n_native、“对侧”是幽灵态），与 owner 侧一致。
+                if mp_o >= 0 and mixed_ow_mask[f, i]:
+                    adj_mag_n = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
+                    pen_n = viscous_boundary_penalty_tilde(
+                        Q_n_native[i], Q_o_at_n, mu + mut_n_native[i], vol_n, adj_mag_n, nside, _VISCOUS_BOUNDARY_IP_C,
+                    )
+                    for v in range(1, 4):
+                        jump_neighbor[i, v] += pen_n[v]
+
             g_prime_neighbor = g_left if nside < 0 else g_right
             contrib_neighbor = _distribute_point(
                 jump_neighbor, dist_fp_of_sp[nax], dist_axis_coord_of_sp[nax], g_prime_neighbor
@@ -311,6 +353,8 @@ def compute_viscous_interface_correction_kernel_colored(
     neighbor_src1_idx: np.ndarray, neighbor_src1_cell: np.ndarray, neighbor_src1_mat: np.ndarray,
     owner_src0_cell: np.ndarray, owner_src0_mat: np.ndarray,
     owner_src1_idx: np.ndarray, owner_src1_cell: np.ndarray, owner_src1_mat: np.ndarray,
+    mixed_nb_partner: np.ndarray, mixed_nb_mask: np.ndarray,
+    mixed_ow_partner: np.ndarray, mixed_ow_mask: np.ndarray,
     boundary_extrap: np.ndarray,
     g_left: np.ndarray, g_right: np.ndarray,
     Q_ghost: np.ndarray,
@@ -363,6 +407,9 @@ def compute_viscous_interface_correction_kernel_colored(
 
             jump_owner = np.zeros((n_fp, 5))
             for i in range(n_fp):
+                # 混合拆分面（B-8，与非着色版同步，见 compute_viscous_interface_correction_kernel 同名注释）。
+                mp = mixed_nb_partner[f]
+                is_bnd_i = is_boundary[f] or (mp >= 0 and mixed_nb_mask[f, i])
                 if is_boundary[f]:
                     Q_n = Q_ghost[f, i]
                     gv_n = gv_o[i]
@@ -400,6 +447,16 @@ def compute_viscous_interface_correction_kernel_colored(
                                         gv_n[a, b] += w * grad_vel[c1, s, a, b]
                                     gT_n[a] += w * grad_T[c1, s, a]
                                 mut_n += w * mu_t_field[c1, s]
+                    # 混合拆分面边界半区（B-8）：状态取配对面幽灵态（逐元素拷贝，
+                    # 避免 numba C/A 布局赋值冲突），梯度镜像内部值——与真边界面同规则。
+                    if mp >= 0 and mixed_nb_mask[f, i]:
+                        for v in range(5):
+                            Q_n[v] = Q_ghost[mp, i, v]
+                        for a in range(3):
+                            for b in range(3):
+                                gv_n[a, b] = gv_o[i, a, b]
+                            gT_n[a] = gT_o[i, a]
+                        mut_n = mut_o[i]
 
                 Q_avg = np.empty(5)
                 for v in range(5):
@@ -429,9 +486,9 @@ def compute_viscous_interface_correction_kernel_colored(
                 for v in range(5):
                     jump_owner[i, v] = G_tilde_common[v] - G_tilde_own[v]
 
-                if is_boundary[f]:
+                if is_bnd_i:
                     # 边界 IP 罚项，见 compute_viscous_interface_correction_kernel
-                    # 同名分支的文档（图着色版本，逻辑必须逐字保持一致）。
+                    # 同名分支的文档（图着色版本，逻辑必须逐字保持一致；含混合面边界半区）。
                     adj_mag_o = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
                     pen = viscous_boundary_penalty_tilde(
                         Q_o[i], Q_n, mu + mut_o[i], vol_o, adj_mag_o, oside, _VISCOUS_BOUNDARY_IP_C,
@@ -462,6 +519,12 @@ def compute_viscous_interface_correction_kernel_colored(
             gT_n_native = _extrap_matmul(grad_T[nc], E_n)
             mut_n_native = E_n @ mu_t_field[nc]
             adjrow_n_native = neighbor_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
+
+            # neighbor 侧单元体积代理（混合面边界半区 IP 罚项用，B-8），算法同 vol_o。
+            vol_n = 0.0
+            for s in range(n_sps):
+                vol_n += det_jacs[nc, s]
+            vol_n /= n_sps
 
             jump_neighbor = np.zeros((n_fp, 5))
             for i in range(n_fp):
@@ -496,6 +559,17 @@ def compute_viscous_interface_correction_kernel_colored(
                                     gv_o_at_n[a, b] += w * grad_vel[c1, s, a, b]
                                 gT_o_at_n[a] += w * grad_T[c1, s, a]
                             mut_o_at_n += w * mu_t_field[c1, s]
+                # 混合拆分面边界半区（B-8）：neighbor 侧对称处理——对侧状态取配对面幽灵态（逐元素拷贝），
+                # 梯度镜像本单元内部值，与边界面同规则。
+                mp_o = mixed_ow_partner[f]
+                if mp_o >= 0 and mixed_ow_mask[f, i]:
+                    for v in range(5):
+                        Q_o_at_n[v] = Q_ghost[mp_o, i, v]
+                    for a in range(3):
+                        for b in range(3):
+                            gv_o_at_n[a, b] = gv_n_native[i, a, b]
+                        gT_o_at_n[a] = gT_n_native[i, a]
+                    mut_o_at_n = mut_n_native[i]
 
                 Q_avg_n = np.empty(5)
                 for v in range(5):
@@ -524,6 +598,16 @@ def compute_viscous_interface_correction_kernel_colored(
 
                 for v in range(5):
                     jump_neighbor[i, v] = G_tilde_common_n[v] - G_tilde_own_n[v]
+
+                # 混合拆分面边界半区（B-8）：neighbor 侧同样需要边界 IP 罚项（罚项的“内部态”
+                # 是本单元外插值 Q_n_native、“对侧”是幽灵态），与 owner 侧一致。
+                if mp_o >= 0 and mixed_ow_mask[f, i]:
+                    adj_mag_n = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
+                    pen_n = viscous_boundary_penalty_tilde(
+                        Q_n_native[i], Q_o_at_n, mu + mut_n_native[i], vol_n, adj_mag_n, nside, _VISCOUS_BOUNDARY_IP_C,
+                    )
+                    for v in range(1, 4):
+                        jump_neighbor[i, v] += pen_n[v]
 
             g_prime_neighbor = g_left if nside < 0 else g_right
             contrib_neighbor = _distribute_point(

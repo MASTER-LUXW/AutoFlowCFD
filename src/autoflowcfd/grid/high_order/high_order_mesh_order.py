@@ -57,45 +57,49 @@ def compute_jacobians_at_ref_points(
     from autoflowcfd.core.fr_operators.troubled_cell import compute_scaled_jacobian_quality
 
     n_prisms = mesh.n_prism_cells
-    all_dets, all_inv_jacs, all_scaled_quality = [], [], []
+    n_tets = len(mesh._fixed_tet_conn) if mesh._fixed_tet_conn is not None else 0
+    n_total = n_prisms + n_tets
+    if n_total == 0:
+        return None
+
+    # 预分配直写（2026-08-26，P2 专项 OOM 修复）：原实现先把逐单元的
+    # (n_ref,)/(n_ref,3,3) 小数组累积进三个 Python 列表（79 万单元→79 万个
+    # 独立小数组，仅对象开销就上百 MB），再 np.concatenate——拼接期间小数组
+    # 列表与完整拼接副本同时驻留，峰值直接翻倍；P2 过积分点集（64 pts/单元）
+    # 下仅 inv_jacs 就 3.6GB/份→峰值 ~7.3GB，叠加尚未清理的旧阶数几何缓存与
+    # 求解器状态，79 万单元生产网格 P1→P2 切换时分配失败崩溃（两次独立复现）。
+    # 改为预分配单块大数组逐单元就地写入：峰值降为结果单份 + 单元级瞬态，
+    # 数值与原实现逐位一致（写入顺序/拼接顺序都是 prism 在前、tet 在后）。
+    n_ref = ref_pts.shape[0]
+    all_dets = np.empty(n_total * n_ref)
+    all_inv_jacs = np.empty((n_total * n_ref, 3, 3))
+    all_scaled_quality = np.empty(n_total * n_ref) if want_scaled_quality else None
+
+    def _fill_cell(i, cell_nodes, cell_type):
+        phys_pts = (map_prism_to_physical if cell_type == "prism"
+                    else map_tet_to_physical)(ref_pts, cell_nodes)
+        jac_data = mapper.compute_jacobian(
+            phys_pts, cell_id=i, cell_type=cell_type, cell_nodes=cell_nodes, ref_cube_sps=ref_pts
+        )
+        lo, hi = i * n_ref, (i + 1) * n_ref
+        all_dets[lo:hi] = jac_data["det_jacs"].ravel()
+        all_inv_jacs[lo:hi] = jac_data["inv_jacs"].reshape(-1, 3, 3)
+        if want_scaled_quality:
+            all_scaled_quality[lo:hi] = compute_scaled_jacobian_quality(
+                jac_data["jacobians"], jac_data["det_jacs"]
+            ).ravel()
 
     if mesh._fixed_prism_conn is not None and n_prisms > 0:
         for i in range(n_prisms):
-            cell_nodes = mesh._node_coords[mesh._fixed_prism_conn[i]]
-            phys_pts = map_prism_to_physical(ref_pts, cell_nodes)
-            jac_data = mapper.compute_jacobian(
-                phys_pts, cell_id=i, cell_type="prism", cell_nodes=cell_nodes, ref_cube_sps=ref_pts
-            )
-            all_dets.append(jac_data["det_jacs"])
-            all_inv_jacs.append(jac_data["inv_jacs"])
-            if want_scaled_quality:
-                all_scaled_quality.append(
-                    compute_scaled_jacobian_quality(jac_data["jacobians"], jac_data["det_jacs"])
-                )
+            _fill_cell(i, mesh._node_coords[mesh._fixed_prism_conn[i]], "prism")
 
-    if mesh._fixed_tet_conn is not None and len(mesh._fixed_tet_conn) > 0:
-        n_tets = len(mesh._fixed_tet_conn)
+    if mesh._fixed_tet_conn is not None and n_tets > 0:
         for i in range(n_tets):
-            cell_nodes = mesh._node_coords[mesh._fixed_tet_conn[i]]
-            phys_pts = map_tet_to_physical(ref_pts, cell_nodes)
-            jac_data = mapper.compute_jacobian(
-                phys_pts, cell_id=n_prisms + i, cell_type="tet", cell_nodes=cell_nodes, ref_cube_sps=ref_pts
-            )
-            all_dets.append(jac_data["det_jacs"])
-            all_inv_jacs.append(jac_data["inv_jacs"])
-            if want_scaled_quality:
-                all_scaled_quality.append(
-                    compute_scaled_jacobian_quality(jac_data["jacobians"], jac_data["det_jacs"])
-                )
+            _fill_cell(n_prisms + i, mesh._node_coords[mesh._fixed_tet_conn[i]], "tet")
 
-    if not all_dets:
-        return None
-    result = {
-        "det_jacs": np.concatenate(all_dets, axis=0),
-        "inv_jacs": np.concatenate(all_inv_jacs, axis=0),
-    }
+    result = {"det_jacs": all_dets, "inv_jacs": all_inv_jacs}
     if want_scaled_quality:
-        result["scaled_quality"] = np.concatenate(all_scaled_quality, axis=0)
+        result["scaled_quality"] = all_scaled_quality
     return result
 
 

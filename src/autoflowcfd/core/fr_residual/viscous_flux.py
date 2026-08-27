@@ -169,41 +169,54 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
     inv_jacs = mesh.jacobians["inv_jacs"].reshape(n_cells, n_sps, 3, 3)
     adj_j = compute_adj_j(det_jacs, inv_jacs)
 
-    # 体积项性能优化：与 fr_residual_inviscid.py 的同类改动理由/验证方式
-    # 完全一致（py-spy 对生产网格的采样证实 `viscous_physical_flux`/
-    # `einsum` 是界面项 numba 化之后新暴露出的主导耗时）——
-    # `viscous_physical_flux_batch` 复用已逐位验证过的 numba 逐点 kernel，
-    # `np.matmul`/`contract_shared_operator_2axis` 与原 einsum 公式严格
-    # 等价，只是换一条计算路径，见 fr_volume_contract.py 模块文档。
-    Q_flat = np.ascontiguousarray(Q.reshape(-1, 5))
-    grad_vel_flat = np.ascontiguousarray(grad_vel.reshape(-1, 3, 3))
-    grad_T_flat = np.ascontiguousarray(grad_T.reshape(-1, 3))
-    mu_t_flat = np.ascontiguousarray(mu_t_field.reshape(-1))
-    G_phys = viscous_physical_flux_batch(
-        Q_flat, grad_vel_flat, grad_T_flat, mu, Pr, mu_t_flat, Pr_t
-    ).reshape(n_cells, n_sps, 3, 5)
-    # 内存优化（理由与验证方式同 fr_residual/inviscid.py 的同类改动）：
-    # grad_vel_flat 是 grad_vel（grad_Q 的非连续切片）经 ascontiguousarray
-    # 强制拷贝出的独立数组（~1.4GiB，真实新分配，不是 grad_Q 的 view），
-    # 用完即弃，之后不再被引用；Q_flat/grad_T_flat/mu_t_flat 是各自
-    # 已连续源数组的 view（reshape+ascontiguousarray 在已连续输入上是
-    # no-op），不持有独立内存，del 与否不影响峰值，为避免误导不在此
-    # 一并 del（它们的生命周期由 Q/grad_T/mu_t_field 这些仍在用的名字
-    # 决定）。grad_Q/grad_vel/grad_T/Q/adj_j/det_jacs 在下面界面项 numba
-    # kernel 调用里还要用，不能删。
-    del grad_vel_flat
-
-    G_tilde = np.matmul(adj_j, G_phys)  # (n_cells,n_sps,3,5)
-    del G_phys  # ~2.4GiB，用完即弃
-    # 四面体/棱柱专用坍缩坐标微分矩阵，理由同 fr_residual_inviscid.py 的
-    # 同类改动——见 FROperators.D_3d_tet/D_3d_prism 文档。
+    # 体积项：整条 物理通量→逆变通量→散度 链按单元分块执行（B-12 P2 OOM
+    # 修复第④级，2026-08-26）。历史背景：本函数体积项最初是纯 einsum 实现，
+    # 后按与 fr_residual_inviscid.py 相同的性能优化路径改为 `viscous_physical_
+    # flux_batch`（复用已逐位验证过的 numba 逐点 kernel）+ `np.matmul`/
+    # `contract_shared_operator_2axis`（与原 einsum 公式严格等价，见
+    # fr_volume_contract.py 模块文档）。retest5（cube 79万单元生产网格，
+    # P0+P1 全部走完、P2 首次无粘残差求值也已通过——证明过积分链分块修复③
+    # 生效）显示失败点前移到这里：SSP-RK3 第二阶段（L2）粘性残差求值时全场
+    # 分配 G_phys（~2.6GiB = 791492 单元×27 SP×15 分量）MemoryError 崩溃。
+    # 根因与内存账同 fr_residual/inviscid.py 过积分链分块注释（仪表化实测见
+    # _tmp_review/diag_p2_13_prod.log：峰值 freeCommit 仅 0.52GB）：本段的两个
+    # 全场数组 G_phys/G_tilde 各 ~2.6GiB，加上 grad_vel_flat 全场强制拷贝
+    # ~1.4GiB，与第一阶段驻留量共存时超出剩余 commit 额度。这条链每一步都是
+    # cell 局部的（`viscous_physical_flux_batch` 是 numba 逐点纯 gather、
+    # `np.matmul`/`contract_shared_operator_2axis` 按 cell 批量，cell 之间零数据
+    # 依赖），把 cell 轴切块、块内走完整条链，每步计算形状/求和顺序与全场版
+    # 逐位一致，数值结果不变（等价性判据见
+    # tests/unit/test_fr_viscous_flux_kernel_crosscheck.py）。块大小同样取 32768：
+    # 块内瞬态 ≈0.3GiB（G_phys+G_tilde ~0.2GiB + grad_vel 块拷贝 ~0.07GiB），
+    # 对比全场版同时驻留 ~6.6GiB。prism/tet 两段分开切块是因为两者用不同的
+    # 坍缩坐标微分矩阵（见 FROperators.D_3d_tet/D_3d_prism 文档），且单元存储
+    # 本来就是 prism 在前 tet 在后，块不会跨类型。附带收益：原全场 `np.
+    # ascontiguousarray(grad_vel.reshape(-1,3,3))` 强制拷贝（~1.4GiB 真实新分配，
+    # grad_vel 是 grad_Q 的非连续切片）降为每块一次小块拷贝；grad_T 同为梯度
+    # 输出的非连续切片，按块拷贝量级相同（~21MiB/块）。Q/mu_t_field 是连续数组，
+    # 块切片的 ascontiguousarray 是 no-op view。Q/grad_vel/grad_T/adj_j/det_jacs
+    # 在下方界面项 kernel 里还要用，不删。
     n_prism = mesh.n_prism_cells
+    _VISC_CHUNK_CELLS = 32768
     div_comp = np.zeros((n_cells, n_sps, 5))
-    if n_prism > 0:
-        div_comp[:n_prism] = contract_shared_operator_2axis(ops.D_3d_prism, G_tilde[:n_prism])
-    if n_cells > n_prism:
-        div_comp[n_prism:] = contract_shared_operator_2axis(ops.D_3d_tet, G_tilde[n_prism:])
-    del G_tilde  # ~2.4GiB，用完即弃
+    for seg_lo, seg_hi, op_D in (
+        (0, n_prism, ops.D_3d_prism),
+        (n_prism, n_cells, ops.D_3d_tet),
+    ):
+        for c0 in range(seg_lo, seg_hi, _VISC_CHUNK_CELLS):
+            c1 = min(c0 + _VISC_CHUNK_CELLS, seg_hi)
+            G_phys = viscous_physical_flux_batch(
+                np.ascontiguousarray(Q[c0:c1].reshape(-1, 5)),
+                np.ascontiguousarray(grad_vel[c0:c1].reshape(-1, 3, 3)),
+                np.ascontiguousarray(grad_T[c0:c1].reshape(-1, 3)),
+                mu, Pr,
+                np.ascontiguousarray(mu_t_field[c0:c1].reshape(-1)),
+                Pr_t,
+            ).reshape(c1 - c0, n_sps, 3, 5)
+            G_tilde = np.matmul(adj_j[c0:c1], G_phys)  # (块长,n_sps,3,5)
+            del G_phys  # 块内用完即弃，下一轮迭代变量重新绑定
+            div_comp[c0:c1] = contract_shared_operator_2axis(op_D, G_tilde)
+            del G_tilde
     residual = div_comp / det_jacs[..., None]  # 注意：粘性项是 +div(G)（见模块文档的符号约定）
     del div_comp  # ~854MiB，用完即弃
 
@@ -239,6 +252,8 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
             flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
             flat.owner_src0_cell, flat.owner_src0_mat,
             flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
+            flat.mixed_nb_partner, flat.mixed_nb_mask,
+            flat.mixed_ow_partner, flat.mixed_ow_mask,
             flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
             flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
             n_prism, n_threads,
@@ -272,6 +287,8 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
                     flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
                     flat.owner_src0_cell, flat.owner_src0_mat,
                     flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
+                    flat.mixed_nb_partner, flat.mixed_nb_mask,
+                    flat.mixed_ow_partner, flat.mixed_ow_mask,
                     flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
                     flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
                     n_prism, face_indices, correction,
@@ -291,6 +308,8 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
                 flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
                 flat.owner_src0_cell, flat.owner_src0_mat,
                 flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
+                flat.mixed_nb_partner, flat.mixed_nb_mask,
+                flat.mixed_ow_partner, flat.mixed_ow_mask,
                 flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
                 flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
                 n_prism, n_threads,

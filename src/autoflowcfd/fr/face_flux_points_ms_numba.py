@@ -34,6 +34,7 @@ def build_ms_interp_parallel(
     ms_nb_sec_cell, ms_nb_sec_cube_face, ms_nb_extra_idx,
     ms_ow_sec_cell, ms_ow_sec_cube_face, ms_ow_extra_idx,
     nb_mask, ow_mask,
+    ms_nb_mixed, ms_ow_mixed,
     n_prism, n1d, n_fp, sps_1d,
     owner_cell_arr, owner_cube_face_arr,
     neighbor_cell_arr, neighbor_cube_face_arr,
@@ -56,6 +57,13 @@ def build_ms_interp_parallel(
     （分组内第一条子面的跨单元邻居），而非 face f 自身的 neighbor/owner。
     Newton 自由坐标是相对 primary 邻居的参考空间计算的，primary interp
     必须使用同一邻居的节点。
+
+    ms_{nb,ow}_mixed：混合分组标志（B-8，2026-08-25）。棱柱四边形侧面
+    的两条子面一条在域边界、一条为内部界面时，内部子面记录作为整张面
+    的 primary：primary half（对角线掩码内）照常构建跨单元插值；另半区
+    没有真实相邻单元，由残差 kernel 逐 FP 取边界子面记录的幽灵态（见
+    inviscid_kernel.py 的 mixed_{nb,ow}_partner/mask 分支），因此这里跳过
+    Secondary Newton + interp，只写入 nb_cell_id/ow_cell_id 后结束。
     """
     n_sps = n1d * n1d * n1d
 
@@ -127,6 +135,12 @@ def build_ms_interp_parallel(
                     for m in range(n_sps):
                         val += V_t[p, m] * V_inv[m, s]
                     nb_interp[f, p, s] = val
+
+        if ms_nb_mixed[idx]:
+            # 混合分组：另半区是域边界，无真实邻居，残差 kernel 逐 FP 取
+            # 边界子面幽灵态，这里不做 Secondary Newton/插值。
+            nb_cell_id[f] = pn_c
+            continue
 
         # ---- Secondary Newton + interp ----
         sec_cell = ms_nb_sec_cell[idx]
@@ -254,6 +268,11 @@ def build_ms_interp_parallel(
                     for m in range(n_sps):
                         val += V_to[p, m] * V_inv_o[m, s]
                     ow_interp[f, p, s] = val
+
+        if ms_ow_mixed[idx]:
+            # 混合分组（neighbor 角色）：另半区是域边界，处理同 nb 分支。
+            ow_cell_id[f] = pn_c
+            continue
 
         # ---- Secondary Newton + interp ----
         sec_cell = ms_ow_sec_cell[idx]

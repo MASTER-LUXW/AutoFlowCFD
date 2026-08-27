@@ -109,6 +109,71 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         for f in sorted(flist)[1:]:
             owner_primary[f] = False
 
+    # ---- 混合分组检测（B-8 修复，2026-08-25）----
+    # BL 挤出在几何尖角棱处产生拓扑缝隙的固有产物：某个棱柱四边形侧面
+    # 的 2 条三角化子面记录中，一条在域边界分组（单侧暴露、无真实邻居）、
+    # 另一条是内部界面（与真实邻居配对）——内部分组只有 1 条记录，旧版
+    # multi-source 代码按组内 2 条记录取 group[1] 直接越界崩溃（真实复现：
+    # cube_demo 尖角网格，solve steady 在 FP 几何构建阶段 IndexError）。
+    # 语义：内部子面记录担任整张四边形面的 primary——子面覆盖的对角线半区
+    # 内照常构建跨单元插值，另半区逐 FP 取边界子面记录的幽灵态（两条
+    # 记录共享同一 owner 棱柱与立方体面，FP 网格逐点重合）。边界子面记录
+    # 不再参与残差累加（否则与内部记录在整张面上重复计数），但幽灵态仍需
+    # 计算（见 mixed_bnd_face 与 inviscid_kernel.py 幽灵态预计算的分支）。
+    mixed_nb_keys = sorted(set(owner_groups) & set(boundary_owner_groups))
+    mixed_ow_keys = sorted(set(neighbor_groups) & set(boundary_owner_groups))
+    mixed_nb_partner = np.full(n_faces, -1, dtype=np.int64)
+    mixed_ow_partner = np.full(n_faces, -1, dtype=np.int64)
+    mixed_nb_mask = np.zeros((n_faces, n_fp), dtype=np.bool_)
+    mixed_ow_mask = np.zeros((n_faces, n_fp), dtype=np.bool_)
+    mixed_bnd_face = np.zeros(n_faces, dtype=np.bool_)
+    mixed_p0_bnd_frac = np.zeros(n_faces, dtype=np.float64)
+
+    def _register_mixed(key, int_faces, bnd_faces, partner_arr, mask_arr):
+        """登记一个混合分组：f_int 为整张面 primary，bf 供幽灵态取用。"""
+        f_int, bf = int_faces[0], bnd_faces[0]
+        owner_primary[bf] = False
+        mixed_bnd_face[bf] = True
+        partner_arr[f_int] = bf
+        cell_node_ids = mesh._fixed_prism_conn[key[0]]
+        quad_local_idx = PRISM_CUBE_FACES[CUBE_FACE_NAMES[key[1]]]
+        half, is_std = _classify_half(
+            cell_node_ids, quad_local_idx, face_conn.face_node_ids[f_int]
+        )
+        is_lower = is_lower_fp_standard if is_std else is_lower_fp_flipped
+        interior_mask = is_lower if half == "lower" else ~is_lower
+        mask_arr[f_int] = ~interior_mask  # True = 边界半区（取幽灵态）
+        # P0 单态/面粒度：边界半区通量单独用幽灵态算，按面积占比混合，
+        # 见 inviscid_p0_kernel.py 的 mixed_p0_bnd_frac 分支。
+        total_area = float(face_conn.area[f_int]) + float(face_conn.area[bf])
+        mixed_p0_bnd_frac[f_int] = float(face_conn.area[bf]) / max(total_area, 1e-300)
+
+    for key in mixed_nb_keys:
+        int_faces = sorted(owner_groups[key])
+        bnd_faces = sorted(boundary_owner_groups[key])
+        if len(int_faces) != 1 or len(bnd_faces) != 1:
+            raise RuntimeError(
+                f"混合边界/内部棱柱四边形分组 (cell={key[0]}, face={key[1]}) 含 "
+                f"{len(int_faces)} 条内部子面 + {len(bnd_faces)} 条边界子面记录，"
+                f"仅支持 1+1（非协调网格拓扑，需检查网格生成）。"
+            )
+        _register_mixed(key, int_faces, bnd_faces, mixed_nb_partner, mixed_nb_mask)
+    for key in mixed_ow_keys:
+        int_faces = sorted(neighbor_groups[key])
+        bnd_faces = sorted(boundary_owner_groups[key])
+        if len(int_faces) != 1 or len(bnd_faces) != 1:
+            raise RuntimeError(
+                f"混合边界/内部棱柱四边形分组（neighbor 角色）(cell={key[0]}, "
+                f"face={key[1]}) 含 {len(int_faces)} 条内部子面 + {len(bnd_faces)} 条边界"
+                f"子面记录，仅支持 1+1（非协调网格拓扑，需检查网格生成）。"
+            )
+        _register_mixed(key, int_faces, bnd_faces, mixed_ow_partner, mixed_ow_mask)
+    if mixed_nb_keys or mixed_ow_keys:
+        logger.info(
+            f"检测到混合边界/内部四边形分组（尖角缝隙面）：nb={len(mixed_nb_keys)}, "
+            f"ow={len(mixed_ow_keys)}，内部子面记录担任整张面 primary"
+        )
+
     # ---- numba 并行 Newton + 插值矩阵预计算 ----
     logger.info("Running numba parallel Newton+interp kernel for FP geometry...")
     kernel = _get_numba_kernel()
@@ -279,7 +344,15 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         # 预计算 secondary cell 信息（每组第二条子面的跨单元邻居）
         _ms_nb_sec_cell = np.empty(len(_multi_nb_faces), dtype=np.int32)
         _ms_nb_sec_cf = np.empty(len(_multi_nb_faces), dtype=np.int32)
+        _ms_nb_mixed = np.zeros(len(_multi_nb_faces), dtype=np.bool_)
         for i, f in enumerate(_multi_nb_faces):
+            if mixed_nb_partner[f] >= 0:
+                # 混合分组：无真实次源（另半区是域边界），ms kernel 按标志跳过；
+                # 占位值不会被读取（src1_idx 保持 -1）。
+                _ms_nb_mixed[i] = True
+                _ms_nb_sec_cell[i] = 0
+                _ms_nb_sec_cf[i] = 0
+                continue
             key = (int(face_conn.owner_cell[f]), int(face_conn.owner_cube_face[f]))
             group = sorted(owner_groups[key])
             other = group[1] if group[0] == f else group[0]
@@ -288,7 +361,14 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
 
         _ms_ow_sec_cell = np.empty(len(_multi_ow_faces), dtype=np.int32)
         _ms_ow_sec_cf = np.empty(len(_multi_ow_faces), dtype=np.int32)
+        _ms_ow_mixed = np.zeros(len(_multi_ow_faces), dtype=np.bool_)
         for i, f in enumerate(_multi_ow_faces):
+            if mixed_ow_partner[f] >= 0:
+                # 混合分组（neighbor 角色）：处理同 nb 分支。
+                _ms_ow_mixed[i] = True
+                _ms_ow_sec_cell[i] = 0
+                _ms_ow_sec_cf[i] = 0
+                continue
             key = (int(face_conn.neighbor_cell[f]), int(face_conn.neighbor_cube_face[f]))
             group = sorted(neighbor_groups[key])
             other = group[1] if group[0] == f else group[0]
@@ -358,6 +438,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
             _ms_nb_sec_cell, _ms_nb_sec_cf, _ms_nb_extra_idx,
             _ms_ow_sec_cell, _ms_ow_sec_cf, _ms_ow_extra_idx,
             nb_mask, ow_mask,
+            _ms_nb_mixed, _ms_ow_mixed,
             n_prism, n1d, n_fp, np.ascontiguousarray(sps_1d.astype(np.float64)),
             np.ascontiguousarray(face_conn.owner_cell.astype(np.int32)),
             np.ascontiguousarray(face_conn.owner_cube_face.astype(np.int32)),
@@ -379,11 +460,14 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         # 将 kernel 输出拷贝到紧凑 extra 列表
         _nb_extra_cells = face_conn.neighbor_cell[_multi_nb_faces].astype(np.int64) if len(_multi_nb_faces) > 0 else np.empty(0, dtype=np.int64)
         _ow_extra_cells = face_conn.owner_cell[_multi_ow_faces].astype(np.int64) if len(_multi_ow_faces) > 0 else np.empty(0, dtype=np.int64)
-        # 更新 src1_idx
+        # 更新 src1_idx（混合分组无次源，保持 -1；另半区由残差 kernel 的
+        # mixed_{nb,ow}_partner/mask 分支逐 FP 取边界幽灵态）
         for i, f in enumerate(_multi_nb_faces):
-            nb_src1_idx[f] = i
+            if mixed_nb_partner[f] < 0:
+                nb_src1_idx[f] = i
         for i, f in enumerate(_multi_ow_faces):
-            ow_src1_idx[f] = i
+            if mixed_ow_partner[f] < 0:
+                ow_src1_idx[f] = i
         # src0 cell（矩阵已由 ms_kernel 原地写进 _nb_interp/_ow_interp 的
         # multi-source 面对应位置，见上面"内存说明"，不再单独拷贝）
         nb_src0_cell[_multi_nb_faces] = _ms_nb_pn_cell.astype(np.int64)
@@ -470,6 +554,12 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         nb_extra_mat=nb_extra_mat,
         ow_extra_cell=ow_extra_cell,
         ow_extra_mat=ow_extra_mat,
+        mixed_nb_partner=mixed_nb_partner,
+        mixed_nb_mask=mixed_nb_mask,
+        mixed_ow_partner=mixed_ow_partner,
+        mixed_ow_mask=mixed_ow_mask,
+        mixed_bnd_face=mixed_bnd_face,
+        mixed_p0_bnd_frac=mixed_p0_bnd_frac,
         _mesh=mesh,
         _face_conn=face_conn,
         _sps_1d=sps_1d,

@@ -31,6 +31,11 @@ from . import boundary as fr_solver_boundary
 from . import step as fr_solver_step
 from .solver_geometry import _SolverGeometryMixin
 
+# AUSM+up Weiss-Smith 预处理参考马赫数的物理下限（见 __init__ 内 mach_ref
+# 钳制处的完整推导/实证标定记录）。低于此值时预处理通量的压差放大系数
+# ~1/mach_ref² 会让显式时间推进在任何声学 CFL 步长下失稳。
+_MACH_REF_FLOOR = 0.1
+
 # `logger` 本文件自己不直接调用（真实排查过：0 处 `logger.xxx(...)`），
 # 但 `step.py::mean_flow_residual` 用 `from autoflowcfd.core.fr_solver.
 # solver import logger` 延迟导入它（避免循环依赖，见该行注释）——删掉
@@ -65,7 +70,9 @@ class FRSolver(_SolverGeometryMixin):
                  mu_molecular: float = 1.8e-5,
                  dual_time_inner_iter: int = 20,
                  n_threads: int = -1,
-                 adaptive_cfl: bool = True):
+                 adaptive_cfl: bool = True,
+                 turbulence_intensity: float = 0.01,
+                 viscosity_ratio: float = 5.0):
         """
         初始化 FRSolver。
 
@@ -115,6 +122,11 @@ class FRSolver(_SolverGeometryMixin):
                 `numba.get_num_threads()`，如果这个全局状态在其他地方
                 被并发修改，会破坏该约束（见两个 kernel 模块文档"多核
                 并行"一节的坑E）。
+            turbulence_intensity: 来流湍流强度 Tu（默认 0.01 = 1%），用于从
+                物理自洽的公式推导 k/omega 初值（工业 RANS 标准做法）。
+                外部气动默认 ≤1%，城市道路 3-5%，风洞对标 0.5-2%。
+            viscosity_ratio: 来流粘性比 VR = nu_t/nu（默认 5.0），与 Tu 共同
+                决定 omega 初值。外部气动推荐 2-10。
         """
         # numba 全局线程数只在这里设置一次（求解器生命周期内不再修改），
         # 理由见本方法 n_threads 参数文档。必须在任何残差 kernel 被调用
@@ -208,9 +220,33 @@ class FRSolver(_SolverGeometryMixin):
         # 参考马赫数，从真实自由来流条件算一次，不再各处各用一套（2026-
         # 08-14 那次失稳正是因为 CFL 和通量各自假设了不一致的参考值，
         # 见 cfl.py 模块文档"已撤销"一节）。
+        #
+        # 物理下限钳制（2026-08-26，P2 发散专项修复）：真实来流马赫数低于
+        # _MACH_REF_FLOOR 时钳制到下限。AUSM+up 的 Mp 压力扩散项正比于
+        # (pR-pL)/(fa*a_half_p²)，其中 fa≈2*mach_ref（滞止面）、
+        # a_half_p²=beta2*a²、beta2 下限=1.1*mach_ref²——两者同时随
+        # mach_ref 塌缩，压差的有效放大系数 ~1/mach_ref²：Couette 验证
+        # 算例（vel_inf=U_wall=0.01 m/s，mach_ref≈2.9e-5）实测残差泛函
+        # 对能量扰动的增益高达 ~3.4e13/Pa（mach_ref 扫描证实增益严格正比于
+        # 1/mach_ref²），显式 SSP-RK3 在任何声学 CFL 步长下都必然发散。
+        # 物理上这个下限对应低马赫数渐近展开的适用边界：真实压力扰动按
+        # ρ·U² ~ mach_ref² 缩小才与预处理通量的 1/mach_ref² 放大相互抵消，
+        # 低于下限后离散舍入/边界瞬态扰动不再随 M² 缩小，方案转为舍入驱动失稳。
+        # 下限值经真实算例实证扫描标定（分两档）：
+        # （1）Couette 棱柱算例：0.02 仍发散（iter 6）、0.05 稳定；
+        # （2）TGV 三向周期坍缩坐标四面体算例（真实 mach_ref≈0.0874，
+        #     网格条件数更差）：0.0874 仍发散（step 5 KE 暴涨至 1e93、
+        #     step 6 溢出）、0.1 稳定且动能衰减曲线与历史实测一致。
+        # 因此下限取 0.1——恰好等于 kernels.py 历史注释记载的遗留硬编码值，
+        # 那次把硬编码改成传入真实值的重构正是这两个算例的共同回归点；
+        # 0.1 以上真实马赫数的算例不受影响。
         mach_ref = vel_inf / np.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10))
+        mach_ref = max(mach_ref, _MACH_REF_FLOOR)
         self.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf, "mach_ref": mach_ref}
-        self.boundary_ghost_provider = self._build_boundary_ghost_provider(bc_overrides or {})
+        # B-9：保存 bc_overrides 供 Order Continuation 切阶后重建边界幽灵态
+        # provider（SEM 入口幽灵态持有构造阶数的 FP 坐标，见 order_continuation.py）。
+        self.bc_overrides = bc_overrides or {}
+        self.boundary_ghost_provider = self._build_boundary_ghost_provider(self.bc_overrides)
         self.mu_molecular = mu_molecular
 
         # 4. 初始化计算后端 (B-01)——见 solver_helpers.py::resolve_backend_type 文档。
@@ -222,6 +258,10 @@ class FRSolver(_SolverGeometryMixin):
         self.ddes_model = None
         self.wmles_model = None
         self.sgs_model = None
+        
+        # Tu/VR 设置（供 _set_freestream_turbulence 读取，推导物理自洽的 k/omega）
+        self._turbulence_intensity = turbulence_intensity
+        self._viscosity_ratio = viscosity_ratio
         
         self._init_turbulence_models(n_cells, n_sps)
         
@@ -341,8 +381,10 @@ class FRSolver(_SolverGeometryMixin):
                 checkpoint_callback(self, i + 1)
                 
             # 相对收敛判据：残差相对初始值下降 1/tol 倍
-            # tol=1e-6 表示需要下降 6 个量级
-            if i >= 1 and initial_res / max(res, 1e-30) >= 1.0 / tol:
+            # tol=1e-6 表示需要下降 6 个量级；tol<=0 表示纯定步数迭代（
+            # B-10：transient 命令固定传 tol=0.0，此前 1.0 / tol 在第 2 步
+            # 直接 ZeroDivisionError 崩溃），此时不启用收敛判据。
+            if i >= 1 and tol > 0.0 and initial_res / max(res, 1e-30) >= 1.0 / tol:
                 converged = True
                 print(f"✅ Converged at iteration {i+1} with residual {res:.6e} "
                       f"(dropped {initial_res/res:.1e}x)")

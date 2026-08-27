@@ -128,8 +128,13 @@ def step(solver, dt: float) -> float:
                 visc_res = solver.compute_viscous_residual()
             finally:
                 solver.state.U = saved_U
-            total = inv_res + visc_res  # 已是 dU/dt，形状 (n_cells,n_sps,n_vars)
-            return -total.reshape(n_cells * n_sps, n_vars)
+            # B-12 P2 OOM 修复第⑤级（2026-08-26）：原 `total = inv_res + visc_res`
+            # 再 `-total` 会先后多分配两个 (n_cells,n_sps,n_vars)≈1.2GB 的全场数组，
+            # 且峰值时三者共存；visc_res 是刚算出的新数组，对它原地加与原地取负严格等价，
+            # 峰值降 2.4GB。见 time_integration/base.py 的 del L0/L1 同类注释。
+            visc_res += inv_res
+            visc_res *= -1  # dU/dt → R(U)（TimeIntegrator 约定 dU/dt=-R）
+            return visc_res.reshape(n_cells * n_sps, n_vars)
 
         def convective_residual_only(U_flat_trial: np.ndarray) -> np.ndarray:
             """IMEX 显式项：只含无粘对流残差，供 step_imex 使用。"""
@@ -140,7 +145,8 @@ def step(solver, dt: float) -> float:
                 inv_res = solver.compute_inviscid_residual()
             finally:
                 solver.state.U = saved_U
-            return -inv_res.reshape(n_cells * n_sps, n_vars)
+            inv_res *= -1  # 原地取负，理由同 mean_flow_residual 的 B-12 注释
+            return inv_res.reshape(n_cells * n_sps, n_vars)
 
         def diffusive_residual_only(U_flat_trial: np.ndarray) -> np.ndarray:
             """IMEX 隐式项：只含粘性残差（含湍流涡粘耦合的扩散项），
@@ -152,7 +158,8 @@ def step(solver, dt: float) -> float:
                 visc_res = solver.compute_viscous_residual()
             finally:
                 solver.state.U = saved_U
-            return -visc_res.reshape(n_cells * n_sps, n_vars)
+            visc_res *= -1  # 原地取负，理由同 mean_flow_residual 的 B-12 注释
+            return visc_res.reshape(n_cells * n_sps, n_vars)
 
         # residual0 是 TimeIntegrator 自身的 R(U) 约定（dU/dt=-R），
         # 复用它既避免重复计算 Stage 0 残差，也用来更新

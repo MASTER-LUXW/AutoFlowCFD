@@ -23,11 +23,12 @@ AutoFlowCFD V2.0 - 稳态求解器自适应 CFL 控制器
       （稳态一步代价高 ~8s，保存/恢复状态 + 重算残差不划算）
     - dual.py 对单步残差变化立即反应（内迭代中），本控制器要求连续
       多步确认后才调节（跨步反馈，天然滞后但更平滑）
-    - dual.py 的 CFL 范围 [1e-6, 10.0]，本控制器 [0.1, 0.5]（保守）
+    - dual.py 的 CFL 范围 [1e-6, 10.0]，本控制器 [0.05, 0.3]（保守）
 """
 
 from __future__ import annotations
 
+import math
 from typing import List, Tuple
 
 from loguru import logger
@@ -150,6 +151,13 @@ class AdaptiveCFLController:
             return self.cfl_number
 
         ratio = current_residual / max(self._prev_residual, 1e-30)
+        # NaN/inf 防护（2026-08-25 代码审查）：残差发散成 NaN/inf 时，
+        # 五区间判据的所有比较对 NaN 都为 False，会永久落入死区分支、
+        # 控制器对发散完全无反应。基线或当前值非有限时一律视为最严重
+        # 恶化（ratio=+inf → 立即重度缩小，CFL 快速降至下限）。
+        prev_ok = math.isfinite(self._prev_residual) and self._prev_residual > 0
+        if not math.isfinite(current_residual) or not prev_ok:
+            ratio = float("inf")
 
         # --- 调节判断 ---
 
@@ -195,7 +203,11 @@ class AdaptiveCFLController:
             self._prev_residual = current_residual
             return self.cfl_number
         else:
-            # 死区（0.95 ≤ ratio ≤ 1.0）：CFL 不变
+            # 死区（0.95 ≤ ratio ≤ 1.0）：CFL 不变。同时复位连续计数，
+            # 否则 good/crawl 步隔着死区步交替也能凑满确认步数，与文档的
+            # "连续 N 步确认"语义不符。
+            self._consecutive_good = 0
+            self._consecutive_crawl = 0
             self._prev_residual = current_residual
             return self.cfl_number
 

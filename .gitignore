@@ -146,7 +146,9 @@ ProjectFiles/
 *.h5
 *.hdf5
 results/
+results_*/
 checkpoints/
+*.pkl
 *.log
 cases/
 

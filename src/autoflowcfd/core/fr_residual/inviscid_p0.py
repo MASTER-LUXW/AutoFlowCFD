@@ -86,11 +86,16 @@ def compute_inviscid_residual_fv_p0(
     owner_cell = fc.owner_cell.astype(np.int64)
     neighbor_cell = fc.neighbor_cell.astype(np.int64)
     is_boundary = fc.is_boundary.astype(np.bool_)
+    # 混合拆分面（B-8）面积占比权重，非混合面恒 0；慢速路径无混合面概念，补零占位。
+    mixed_p0_bnd_frac = getattr(ffp_list, "mixed_p0_bnd_frac", None)
+    if mixed_p0_bnd_frac is None:
+        mixed_p0_bnd_frac = np.zeros(n_faces, dtype=np.float64)
 
     residual_per_thread = _p0_inviscid_kernel(
         owner_cell, neighbor_cell, is_boundary,
         unit_normals, area_weights,
         Q_all, Q_ghost, cell_volumes,
+        mixed_p0_bnd_frac,
         n_cells, n_threads, mach_ref,
     )
 
