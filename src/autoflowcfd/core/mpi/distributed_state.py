@@ -55,18 +55,6 @@ class DistributedFRState:
         """local + halo 总数。"""
         return self.n_local_cells + self.n_halo_cells
 
-    def set_local_data(self, U_global: np.ndarray, global_to_local: np.ndarray):
-        """从全局数组中提取本 rank 的 local cell 数据。
-
-        Args:
-            U_global: (n_global_cells, n_sps, n_vars) 全局守恒变量
-            global_to_local: (n_global_cells,) 全局→局部映射
-        """
-        for g in range(U_global.shape[0]):
-            l = global_to_local[g]
-            if l >= 0:
-                self.U[l] = U_global[g]
-
     def get_local_U(self) -> np.ndarray:
         """返回 local cells 的守恒变量。"""
         return self.U[:self.n_local_cells].copy()
@@ -85,11 +73,3 @@ class DistributedFRState:
         local_sq_sum = np.sum(self.dU_dt[:self.n_local_cells] ** 2)
         global_sq_sum = allreduce_sum(local_sq_sum)
         return float(np.sqrt(global_sq_sum))
-
-    def update_local_from_extended(self, U_extended: np.ndarray):
-        """从扩展数组更新 local cells 的数据。
-
-        Args:
-            U_extended: (n_total_cells, n_sps, n_vars) 包含 halo 的扩展数组
-        """
-        self.U[:self.n_local_cells] = U_extended[:self.n_local_cells]

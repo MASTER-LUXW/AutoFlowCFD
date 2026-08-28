@@ -42,10 +42,14 @@ from autoflowcfd.core.turbulence.transport_kernel import (
     extrapolate_scalar_to_faces_kernel,
     distribute_corrections_to_cells_kernel,
     distribute_corrections_to_cells_kernel_colored,
+    _extrap_owner_scalar_to_faces,
 )
 
 
-def _extrapolate_scalar_to_faces(scalar_sps, flat, ops, mesh, wall_dirichlet_zero_face=None):
+def _extrapolate_scalar_to_faces(
+    scalar_sps, flat, ops, mesh, wall_dirichlet_zero_face=None,
+    wall_dirichlet_value_face=None, has_wall_dirichlet_value=None,
+):
     """将 SPs 上的标量场外插到所有面的通量点（numba kernel 版本）。
 
     使用 turbulence_transport_kernel.py 的 numba 编译函数替代纯 Python 循环。
@@ -58,6 +62,13 @@ def _extrapolate_scalar_to_faces(scalar_sps, flat, ops, mesh, wall_dirichlet_zer
             调用方传入，其余场（omega/rho/velocity/gamma_field 等）不传，
             退回原有 Neumann 默认，见 extrapolate_scalar_to_faces_kernel
             文档。
+        wall_dirichlet_value_face: (n_faces, n_fp) float，可选。非零
+            Dirichlet 目标值（例如 omega 壁面解析式），与
+            `has_wall_dirichlet_value` 配对使用，见 kernel 文档。只在
+            外插 omega 场时由调用方传入。
+        has_wall_dirichlet_value: (n_faces,) bool，可选，标记哪些面要
+            使用 `wall_dirichlet_value_face` 而不是 Neumann 默认——与
+            `wall_dirichlet_zero_face` 互斥。
 
     Returns:
         phi_owner_fp: (n_faces, n_fp)
@@ -65,6 +76,10 @@ def _extrapolate_scalar_to_faces(scalar_sps, flat, ops, mesh, wall_dirichlet_zer
     """
     if wall_dirichlet_zero_face is None:
         wall_dirichlet_zero_face = np.zeros(flat.n_faces, dtype=np.bool_)
+    if has_wall_dirichlet_value is None:
+        has_wall_dirichlet_value = np.zeros(flat.n_faces, dtype=np.bool_)
+    if wall_dirichlet_value_face is None:
+        wall_dirichlet_value_face = np.zeros((flat.n_faces, flat.n_fp), dtype=np.float64)
     return extrapolate_scalar_to_faces_kernel(
         scalar_sps, flat.boundary_extrap,
         flat.neighbor_src0_cell, flat.neighbor_src0_mat,
@@ -73,6 +88,37 @@ def _extrapolate_scalar_to_faces(scalar_sps, flat, ops, mesh, wall_dirichlet_zer
         flat.n_prism, flat.n_faces, flat.n_fp, flat.n_sps,
         wall_dirichlet_zero_face,
         flat.mixed_nb_partner, flat.mixed_nb_mask,
+        has_wall_dirichlet_value,
+        wall_dirichlet_value_face,
+    )
+
+
+def _extrapolate_owner_only_to_faces(scalar_sps, flat):
+    """将 SPs 标量场只外插到面的 owner 侧（不算 neighbor 侧）。
+
+    真实内存修复（V2.0 专家组盲审第四次评审，2026-08-28，cube_demo
+    79万单元/187万面生产网格 P2+DDES 首次真实 CLI 冒烟测试触发 OOM
+    崩溃）：`compute_scalar_convection_residual` 此前对 rho/velocity 都调用
+    `_extrapolate_scalar_to_faces`（同时算 owner+neighbor 两侧），但下面
+    `mass_flux`/`rho_u_owner` 的计算只用了 owner 侧的 rho/velocity——
+    neighbor 侧的 rho_neighbor_fp、以及每个速度分量的 vel_neighbor_fp
+    （(n_faces,n_fp,3)，本项目 cube_demo 规模下单个约 400MB）算出来后
+    从未被读取，纯粹的死计算+死内存占用。真正需要两侧的只有标量场
+    本身（phi_owner_fp/phi_neighbor_fp，用于上风选择）。
+
+    直接调用 `_extrap_owner_scalar_to_faces`（transport_kernel.py 已有的
+    独立 owner-only kernel，`extrapolate_scalar_to_faces_kernel` 内部
+    本来就是分别调用 owner/neighbor 两个子 kernel 再打包返回，这里只
+    调用其中一半），physically 精确等价于 `_extrapolate_scalar_to_faces`
+    返回值的第一个分量，不是近似。
+
+    Returns:
+        phi_owner_fp: (n_faces, n_fp)
+    """
+    return _extrap_owner_scalar_to_faces(
+        scalar_sps, flat.boundary_extrap,
+        flat.owner_cell, flat.owner_axis, flat.owner_side,
+        flat.n_prism, flat.n_faces, flat.n_fp, flat.n_sps,
     )
 
 
@@ -133,6 +179,8 @@ def compute_scalar_convection_residual(
     mesh,
     ops,
     wall_dirichlet_zero_face: np.ndarray = None,
+    wall_dirichlet_value_face: np.ndarray = None,
+    has_wall_dirichlet_value: np.ndarray = None,
 ) -> np.ndarray:
     """计算标量对流 FR 残差（体积项 + 界面上风校正）。
 
@@ -150,6 +198,9 @@ def compute_scalar_convection_residual(
             自身外插到面的 ghost 值（决定上风通量的物理量），不影响
             rho/velocity 的外插（无滑移壁面上 u=0 已经由平均流的
             WALL 幽灵态保证，这里不需要重复处理）。
+        wall_dirichlet_value_face, has_wall_dirichlet_value: 见
+            `_extrapolate_scalar_to_faces` 文档，omega 壁面解析式用，
+            与 wall_dirichlet_zero_face 互斥。
 
     Returns:
         residual: (n_cells, n_sps) 对流残差（dphi/dt 量纲，已除以 rho 前的
@@ -197,16 +248,17 @@ def compute_scalar_convection_residual(
     flat = get_flat_face_geometry(mesh, ops)
     n_fp = flat.n_fp
 
-    # 外插 rho, velocity, scalar 到面通量点
-    rho_owner_fp, rho_neighbor_fp = _extrapolate_scalar_to_faces(rho, flat, ops, mesh)
+    # 外插 rho, velocity, scalar 到面通量点——rho/velocity 只需要 owner 侧
+    # （下面 mass_flux 只用 owner 侧状态，见 _extrapolate_owner_only_to_faces
+    # 文档"真实内存修复"一节：neighbor 侧此前算出来从未被读取，纯浪费）；
+    # 只有标量场本身需要两侧（上风选择要比较 owner/neighbor）。
+    rho_owner_fp = _extrapolate_owner_only_to_faces(rho, flat)
     vel_owner_fp = np.zeros((flat.n_faces, n_fp, 3))
-    vel_neighbor_fp = np.zeros((flat.n_faces, n_fp, 3))
     for d in range(3):
-        vo, vn = _extrapolate_scalar_to_faces(velocity[:, :, d], flat, ops, mesh)
-        vel_owner_fp[:, :, d] = vo
-        vel_neighbor_fp[:, :, d] = vn
+        vel_owner_fp[:, :, d] = _extrapolate_owner_only_to_faces(velocity[:, :, d], flat)
     phi_owner_fp, phi_neighbor_fp = _extrapolate_scalar_to_faces(
-        scalar_field, flat, ops, mesh, wall_dirichlet_zero_face
+        scalar_field, flat, ops, mesh, wall_dirichlet_zero_face,
+        wall_dirichlet_value_face, has_wall_dirichlet_value,
     )
 
     # 计算每个面通量点的物理质量通量（使用 true_normal）
@@ -243,6 +295,8 @@ def compute_scalar_diffusion_residual(
     mesh,
     ops,
     wall_dirichlet_zero_face: np.ndarray = None,
+    wall_dirichlet_value_face: np.ndarray = None,
+    has_wall_dirichlet_value: np.ndarray = None,
 ) -> np.ndarray:
     """计算标量扩散 FR 残差（体积项 + BR1 界面校正），返回值为 dphi/dt。
 
@@ -271,6 +325,13 @@ def compute_scalar_diffusion_residual(
             对梯度场是对称的（奇函数的导数是偶函数），边界面上梯度跳跃自然为
             零，不需要单独处理；此前用状态跳跃校正时这个掩码决定 phi 的 ghost
             取值，校正改梯度差后不再有数值作用，留作后续补壁面扩散通量的接口。
+        wall_dirichlet_value_face, has_wall_dirichlet_value: 同理保留以兼容
+            调用方（omega 壁面解析式），出于与上面 wall_dirichlet_zero_face
+            完全相同的理由（本函数不再外插 scalar_field 自身，只外插
+            gamma_field/grad_phi），当前同样对本函数的数值结果没有影响——
+            壁面 Dirichlet 值目前只通过 `compute_scalar_convection_residual`
+            的上风 ghost 生效，diffusion 侧的解析壁面通量是更大的独立工作
+            （与 k=0 情形是同一个已有的架构限制，不是本次新引入的差异）。
 
     Returns:
         residual: (n_cells, n_sps) 扩散残差
@@ -395,6 +456,62 @@ def _compute_wall_dirichlet_face_mask(solver) -> np.ndarray:
     return np.isin(group_code, wall_codes)
 
 
+def _compute_omega_wall_target(solver, wall_mask: np.ndarray, mu: float, rho: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """按 Wilcox 解析式计算 WALL 面各自的 omega 目标值（真实修复，
+    V2.0 专家组盲审发现，2026-08-28）：
+
+        omega_wall = 60*nu / (beta1 * d1^2)
+
+    （Wilcox《Turbulence Modeling for CFD》标准公式，beta1=0.075 是
+    SST 内层 beta 系数，omega/sst.py::SSTModelFR.beta1）。
+
+    `d1` 的取法（与直接对 `solver.wall_distance` 做面外插的方案不同，
+    是本次实现有意的选择，不是疏漏）：不能用
+    `_extrapolate_scalar_to_faces(solver.wall_distance, ...)` 把
+    wall_distance 外插到 WALL 面本身——wall_distance 是"到最近壁面的
+    距离"，在几何上就位于壁面的这个面自身，外插值会趋于 0，代入公式
+    会让 omega_wall 发散到无穷大，不是"精度稍差"而是量纲上完全错误。
+    Wilcox 公式里的 d1 本来就是"近壁第一层网格点到壁面的距离"，不是
+    "壁面到自身的距离"——这里直接取该面 owner 单元自身 SPs 上
+    wall_distance 场的最小值，作为该单元的近壁特征距离（该单元里离墙
+    最近的 SP 到墙的真实距离），比在面上外插整个场更贴近公式原意，
+    也从根本上避免了除以零。
+
+    Args:
+        solver: FRSolver 实例（需要 solver.wall_distance 已计算）
+        wall_mask: (n_faces,) bool，WALL 边界面掩码（
+            _compute_wall_dirichlet_face_mask 的返回值）
+        mu: 分子动力粘度
+        rho: (n_cells, n_sps) 密度场，用于取 owner 单元的代表密度算 nu
+
+    Returns:
+        (omega_wall_value_face, has_value_face)：
+        - omega_wall_value_face: (n_faces, n_fp) float，WALL 面上恒为
+          该面 owner 单元算出的标量（对该面所有 FP 广播同一个值，不是
+          外插得到的逐 FP 不同值——d1 本身就是单元级别的代表量，不需要
+          逐 FP 精细区分），非 WALL 面为 0（不会被使用，has_value_face
+          对应位置为 False）
+        - has_value_face: (n_faces,) bool，与 wall_mask 相同
+    """
+    flat = get_flat_face_geometry(solver.mesh, solver.ops)
+    n_faces = flat.n_faces
+    n_fp = flat.n_fp
+    beta1 = getattr(solver.turb_model, "beta1", 0.075)
+
+    omega_wall_value_face = np.zeros((n_faces, n_fp), dtype=np.float64)
+    wall_face_idx = np.nonzero(wall_mask)[0]
+    if len(wall_face_idx) > 0:
+        owner_cells = flat.owner_cell[wall_face_idx]
+        d1 = np.min(solver.wall_distance[owner_cells], axis=1)
+        d1 = np.maximum(d1, 1e-8)
+        rho_owner = np.mean(rho[owner_cells], axis=1)
+        nu_owner = mu / np.maximum(rho_owner, 1e-10)
+        omega_wall = 60.0 * nu_owner / (beta1 * d1**2)
+        omega_wall_value_face[wall_face_idx, :] = omega_wall[:, None]
+
+    return omega_wall_value_face, wall_mask
+
+
 def compute_turbulence_transport_residual(
     solver,
     grad_vel: np.ndarray = None,
@@ -502,12 +619,11 @@ def compute_turbulence_transport_residual(
     gamma_w = mu + sigma_w * rho_nu_t    # (n_cells, n_sps)
 
     # WALL 上 k=0 的 Dirichlet 掩码（真实修复，2026-08-21，见
-    # transport_kernel.py::extrapolate_scalar_to_faces_kernel 文档）：
-    # 只对 k 场生效，omega 仍用 Neumann 默认（omega 解析壁面值需要额外
-    # 的壁面距离数据，留作后续独立工作，见该文档）。数值作用点：对流项的
-    # 上风 phi ghost（镜像成 -owner 强制壁面 k=0）；扩散项自 2026-08-25 校正
-    # 改梯度差形式后该掩码不再有数值影响（奇镜像对梯度对称，见
-    # compute_scalar_diffusion_residual 参数文档），仍传入以保持接口一致。
+    # transport_kernel.py::extrapolate_scalar_to_faces_kernel 文档）。
+    # 数值作用点：对流项的上风 phi ghost（镜像成 -owner 强制壁面 k=0）；
+    # 扩散项自 2026-08-25 校正改梯度差形式后该掩码不再有数值影响（奇镜像
+    # 对梯度对称，见 compute_scalar_diffusion_residual 参数文档），仍传入
+    # 以保持接口一致。
     wall_mask_k = _compute_wall_dirichlet_face_mask(solver)
 
     # 计算 k 的对流 + 扩散残差
@@ -520,9 +636,25 @@ def compute_turbulence_transport_residual(
     with np.errstate(over='ignore', invalid='ignore'):
         dk_dt_transport = (conv_k + diff_k) / np.maximum(rho, 1e-10)
 
+    # WALL 上 omega 解析壁面值的 Dirichlet 目标（真实修复，V2.0 专家组
+    # 盲审发现，2026-08-28，见 _compute_omega_wall_target 文档）：此前
+    # omega 恒用 Neumann（零梯度）默认，是明确记录过的已知限制——现在
+    # 用 Wilcox 解析式 60*nu/(beta1*d1^2) 代替。d1 需要 solver.wall_
+    # distance 已经计算好（SST/DDES/WMLES 初始化时必然如此，见
+    # fr_solver/turbulence.py），否则 _compute_omega_wall_target 里的
+    # np.min(solver.wall_distance[...]) 会直接因 wall_distance 为 None
+    # 报错——这是有意的（没有壁面距离场，压根不该假装能算出解析壁面值）。
+    omega_wall_value_face, has_omega_wall = _compute_omega_wall_target(solver, wall_mask_k, mu, rho)
+
     # 计算 omega 的对流 + 扩散残差
-    conv_w = compute_scalar_convection_residual(turb.omega_field, rho, vel, solver.mesh, solver.ops)
-    diff_w = compute_scalar_diffusion_residual(turb.omega_field, gamma_w, solver.mesh, solver.ops)
+    conv_w = compute_scalar_convection_residual(
+        turb.omega_field, rho, vel, solver.mesh, solver.ops,
+        wall_dirichlet_value_face=omega_wall_value_face, has_wall_dirichlet_value=has_omega_wall,
+    )
+    diff_w = compute_scalar_diffusion_residual(
+        turb.omega_field, gamma_w, solver.mesh, solver.ops,
+        wall_dirichlet_value_face=omega_wall_value_face, has_wall_dirichlet_value=has_omega_wall,
+    )
     with np.errstate(over='ignore', invalid='ignore'):
         domega_dt_transport = (conv_w + diff_w) / np.maximum(rho, 1e-10)
 

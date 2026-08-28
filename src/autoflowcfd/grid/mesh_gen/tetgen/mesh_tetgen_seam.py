@@ -120,7 +120,7 @@ def compute_local_thickness_limit(
 
     间隙在未变形的（layer-0）表面上测量：对每个节点，搜索在
     `domain_size * search_radius_fraction` 内的附近表面节点，只保留
-    那些大致在节点自身 outward 法向"前方"的（在 `angle_threshold_deg`
+    那些大致在节点自身外法向"前方"的（在 `angle_threshold_deg`
     内）——这区分了真正的相对间隙和节点自身的紧邻网格（它们总是
     空间上很近，只是因为局部网格分辨率，不是真实间隙，而且大致在
     面内而不是在法向前方）。最近合格点的距离就是局部间隙；
@@ -136,7 +136,7 @@ def compute_local_thickness_limit(
             可挤出子集——限制某个壁 BL 增长的最近特征可能是另一个
             壁）
         extrude_faces: (m, 3) 可 BL 挤出的面，仅用于计算每个节点的
-            outward（挤出）法向
+            外（挤出）法向
         extrude_node_idx: 实际将被挤出的节点索引
         domain_size: 域整体特征长度（包围盒对角线），同时约束搜索
             半径和回退上限

@@ -15,7 +15,7 @@ AutoFlowCFD V2.0 - SST k-ω 湍流模型源项 GPU 化
 - 支持 DES 长度尺度替换（与 CPU 版一致）
 
 使用:
-    from autoflowcfd.core.gpu.gpu_turbulence_sst import GPUTurbulenceSST
+    from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
     gpu_sst = GPUTurbulenceSST(n_cells, n_sps, device_id=0)
     Sk, S_omega = gpu_sst.compute_source_terms(Q_gpu, grad_U_gpu, d_wall_gpu, mu, grad_k_gpu, grad_omega_gpu)
 """
@@ -88,11 +88,11 @@ class GPUTurbulenceSST:
         self.k_max: float = 1e6
         self.omega_max: float = 1e6
 
-        # 湍流产项渐变因子 [0, 1]。注意：GPU 路径当前未接入渐变逻辑，
-        # 恒为 1.0（与 CPU 版 fr_solver/turbulence.py::_update_production_ramp
-        # 的"从 0 线性爬升 50 步"行为不一致，2026-08-25 代码审查前此处注释
-        # 误称"与 CPU 版一致"）。GPU 侧初始 k/omega 爆炸靠 k_max/omega_max
-        # 物理上界抑制；若后续要接入 ramp，需在 GPU 求解循环里同步更新本值。
+        # 湍流产项渐变因子 [0, 1]，初值 1.0，每步由
+        # gpu_solver_io.py::_update_production_ramp_gpu 更新（第四次评审
+        # 修复：此前 GPU 路径没有任何代码更新这个值，恒为初始的 1.0，
+        # 与 CPU 版 fr_solver/turbulence.py::_update_production_ramp 的
+        # "从 0 线性爬升 50 步"行为不一致）。
         self.production_factor: float = 1.0
 
     def compute_strain_rate_magnitude_gpu(self, grad_u: 'cp.ndarray') -> 'cp.ndarray':
@@ -143,6 +143,13 @@ class GPUTurbulenceSST:
         term3 = 4.0 * rho * self.sigma_w2 * k / (cp.maximum(CD_kw, 1e-10) * d**2)
 
         arg1 = cp.minimum(cp.maximum(term1, term2), term3)
+        # 防 overflow（与 CPU 版 sst.py::compute_blending_F1 逐字对应，
+        # V2.0 专家组盲审发现 GPU 版此前缺这一步）：arg1**4 在
+        # arg1>~1.3e154 时超 float64 上限；退化网格上 term3 中间量可
+        # overflow 到 inf，先替换非有限值再 clip，tanh(大值)=1.0 物理
+        # 正确（近壁 F1→1）。
+        arg1 = cp.where(cp.isfinite(arg1), arg1, 1e75)
+        arg1 = cp.minimum(arg1, 1e75)
         F1 = cp.tanh(arg1**4)
         return F1
 
@@ -164,7 +171,9 @@ class GPUTurbulenceSST:
         term1 = 2.0 * sqrt_k / (self.beta_star * omega * d)
         term2 = 500.0 * nu / (d**2 * omega)
         arg2 = cp.maximum(term1, term2)
-
+        # 防 overflow：同 F1 策略（与 CPU 版逐字对应）。
+        arg2 = cp.where(cp.isfinite(arg2), arg2, 1e150)
+        arg2 = cp.minimum(arg2, 1e150)
         F2 = cp.tanh(arg2**2)
         return F2
 
@@ -295,13 +304,36 @@ class GPUTurbulenceSST:
 
         S_omega = P_omega - D_omega + CD_omega
 
+        # 最终 isfinite 归零（与 CPU 版 sst.py:402-403 逐字对应，V2.0
+        # 专家组盲审发现 GPU 版此前缺这一步）：F1/F2 的 overflow 保护
+        # 只清理了这两个混合函数本身，P_k/D_k/P_omega/D_omega 各自的
+        # 中间量（如 CD_omega 里的 1/omega_safe）在极端退化网格上仍可能
+        # 产生局部 NaN/Inf，若不在这里兜底，会被 update_fields_gpu 的
+        # 半隐式阻尼放大后写入 k_field/omega_field。
+        Sk = cp.where(cp.isfinite(Sk), Sk, 0.0)
+        S_omega = cp.where(cp.isfinite(S_omega), S_omega, 0.0)
+
         return Sk, S_omega
 
     def apply_positivity_limiter_gpu(
         self, min_k: float = 1e-12, min_omega: float = 1e-12
     ):
-        """GPU 正性保持限制器（含物理上界）。"""
+        """GPU 正性保持限制器（含物理上界）。
+
+        真实 bug 修复（V2.0 专家组盲审发现，2026-08-27）：此前这里没有
+        NaN/Inf 恢复步骤——`cp.maximum(NaN, x)` 按 IEEE754 语义仍返回
+        NaN（与 `np.maximum` 完全一样），一旦退化网格（棱柱侧面法向
+        失配等，见 cube_demo 相关记录）在 GPU SST 源项计算里产生 NaN，
+        会直接穿透这个限制器永久污染 k_field/omega_field，且限制器
+        本身给不出任何提示——与 CPU 版 `sst.py::apply_positivity_limiter`
+        的 NaN/Inf 恢复逻辑逐字对应，消除这个此前更彻底的失效模式。
+        """
         cp = get_cupy()
+        bad_k = ~cp.isfinite(self.k_field)
+        bad_w = ~cp.isfinite(self.omega_field)
+        self.k_field = cp.where(bad_k, min_k, self.k_field)
+        self.omega_field = cp.where(bad_w, min_omega, self.omega_field)
+
         self.k_field = cp.maximum(self.k_field, min_k)
         self.omega_field = cp.maximum(self.omega_field, min_omega)
         self.k_field = cp.minimum(self.k_field, self.k_max)

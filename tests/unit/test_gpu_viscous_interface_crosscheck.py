@@ -23,7 +23,7 @@ from autoflowcfd.core.fr_residual.inviscid import (
     conserved_to_primitive, primitive_to_conserved, DefaultGhostProvider,
 )
 from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
-from autoflowcfd.core.gpu.gpu_viscous import compute_viscous_residual_fr_gpu
+from autoflowcfd.core.gpu.residual.gpu_viscous import compute_viscous_residual_fr_gpu
 
 from .test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 

@@ -31,43 +31,58 @@ class BackendType(str, Enum):
 
 
 class TurbulenceModel(str, Enum):
-    """湍流模型枚举。"""
+    """湍流模型枚举。
+
+    真实修复（V2.0 专家组盲审发现，2026-08-28，配套 #6 配置层接入）：
+    此前完全没有 `WMLES` 取值——FRSolver/CLI 真正支持的湍流模型是
+    NONE/SST/DDES/WMLES/LES（见 fr_solver/turbulence.py::
+    init_turbulence_models），这里却漏了 WMLES，导致 YAML/`create_steady_
+    config` 路径根本无法选择 WMLES。`SA`/`DES`（纯 Spalart-Allmaras、
+    非延迟 DES）保留只是为了不破坏已引用它们的既有代码/测试，但求解器
+    从未真正实现这两种模型——一旦真正接入求解器构造（见 api.py::
+    run_steady/run_transient 的 config 解析逻辑），选择这两个值会显式
+    报错而不是静默退化成其他模型或崩溃在无关的地方。
+    """
     NONE = "none"       # 层流 Navier-Stokes（无湍流模型）
     SST_KW = "sst_kw"
-    SA = "sa"
-    DES = "des"
+    SA = "sa"            # 未实现，见上方类文档
+    DES = "des"          # 未实现（非延迟 DES），见上方类文档
     DDES = "ddes"
+    IDDES = "iddes"
+    WMLES = "wmles"
     LES = "les"
 
 
 class TimeIntegrationScheme(str, Enum):
     """时间积分方案枚举。
 
-    **已知架构缺口（C-01，V2.0 专家组评审记录，本轮未完全解决）**：
-    这个枚举与真正被求解器使用的
-    `core.time_integration.base.TimeIntegrationScheme` 是两个独立的
-    Python 类（这个是 `str, Enum`，取值 backward_euler/rk2/rk3/ab3；
-    那个是普通 `Enum`，取值 forward_euler/ssp_rk2/ssp_rk3/imex_euler/
-    dual_time），且 `AB3`（Adams-Bashforth 三阶，与 SSP-RK3 是完全不同
-    的数值格式）在核心层甚至没有真正实现——核心层的 `ADAMS_BASHFORTH_3`
-    只是 `"ssp_rk3"` 的一个别名，选它实际跑的是 SSP-RK3，不是 AB3。
-    本模块（`config/`）整体目前没有任何代码路径真正把这里的配置对象
-    喂给 `FRSolver`（CLI `solve steady/transient` 直接接受 `--order`/
-    `--time-method`/`--turbulence-model` 等命令行参数，不经过这层
-    dataclass；Python API `AutoFlowCFDAPI.run_steady/run_transient`
-    同样直接使用 `core.time_integration.base.TimeIntegrationScheme`，
-    完全绕开这个类，见 api.py 对应方法的文档字符串）——因此这个类目前
-    是纯粹的、内部自洽的配置数据结构，不会因为与核心层不一致而在实际
-    运行中产生错误结果，但也意味着通过这层写的配置值不会真正影响求解
-    行为。彻底修复需要设计 `--config <file.yaml>` 这条目前不存在的
-    CLI/API 接入路径，把这里的 SteadyConfig/TransientConfig 真正解析
-    出参数传给 FRSolver 构造——工作量与新增一个功能点相当，超出本轮
-    "修复崩溃 bug" 的范围，作为独立后续任务记录。
+    **部分修复（C-01，V2.0 专家组盲审发现，2026-08-28）**：这个枚举与
+    真正被求解器使用的 `core.time_integration.base.TimeIntegrationScheme`
+    仍是两个独立的 Python 类（这个是 `str, Enum`，取值
+    backward_euler/rk2/rk3/ab3；那个是普通 `Enum`，取值
+    forward_euler/ssp_rk2/ssp_rk3/imex_euler/dual_time），且 `AB3`
+    （Adams-Bashforth 三阶）在核心层依然没有真正实现——核心层没有
+    对应取值，选它会在 `run_transient` 里因 `time_method not in
+    time_scheme_map` 直接报错，而不是静默退化成 SSP-RK3（这一点已
+    诚实化：宁可报错也不要偷偷跑错格式）。
+
+    `SteadyConfig`/`TransientConfig` 对象本身现在**确实**能真正驱动
+    求解行为：`AutoFlowCFDAPI.run_steady(config=...)`/
+    `run_transient(config=...)`（以及对应的 CLI `--config <file.yaml>`
+    选项，经由 `config/loader.py::ConfigLoader` 加载）会把
+    `order`/`turbulence`/`max_iter`/`dt`/`total_time`/`rho_inf`/
+    `vel_inf`/`p_inf`/`mu_molecular`/`turbulence_intensity`/
+    `viscosity_ratio` 这些字段真正解析进 FRSolver 构造参数——但
+    `time_scheme`（这个枚举本身管的字段）**仍未接入**：`run_transient`
+    的 `time_method` 目前始终是一个独立传入的字符串参数，不从
+    `config.time_scheme` 读取，因为两套枚举取值范围/命名都不兼容，
+    贸然做一层"尽量映射"的转换风险比价值大。选择时间积分方案请继续
+    显式传 `time_method`/CLI `--time-method`，不要依赖这个字段生效。
     """
     BACKWARD_EULER = "backward_euler"
     RK2 = "rk2"
     RK3 = "rk3"
-    AB3 = "ab3"  # Adams-Bashforth 三阶——见上方文档，核心层目前无真正实现
+    AB3 = "ab3"  # Adams-Bashforth 三阶——核心层无对应实现，选中会显式报错
 
 
 @dataclass
@@ -88,6 +103,12 @@ class SolverConfig:
         output_dir: 输出目录路径
         checkpoint_interval: 检查点保存间隔（步数）
         verbose: 启用详细日志记录
+        mu_molecular: 分子动力粘度 (Pa*s)，默认 1.8e-5（标准状态下空气）。
+            与 core/fr_solver/solver.py::FRSolver 构造参数同名同义——
+            粘性残差组装和粘性 CFL 步长必须用同一个值，不能各自硬编码
+            （历史教训见该参数在 FRSolver 里的文档）。CLI `solve steady`/
+            `solve transient` 的 `--mu-molecular` 选项、或本 YAML 配置的
+            `mu_molecular` 键，都改这一个字段。
 
     **关于 C-01 的 flux_type (Radau/Gauss) 参数**：本类刻意不提供这个
     字段。V2.0 专家组评审核实：`fr/matrix_operators.py::
@@ -116,17 +137,18 @@ class SolverConfig:
     verbose: bool = False
     turbulence_intensity: float = 0.01  # 来流湍流强度 Tu（默认 1%）
     viscosity_ratio: float = 5.0  # 来流粘性比 VR = nu_t/nu
-    
+    mu_molecular: float = 1.8e-5  # 分子动力粘度 (Pa*s)，默认标准状态下空气
+
     def __post_init__(self):
         """初始化后验证配置。"""
         # 验证阶数
         if self.order not in [1, 2, 3]:
             raise ValueError(f"FR 阶数必须是 1, 2, 或 3，得到 {self.order}")
-        
+
         # 验证 gpu_device
         if self.gpu_device < 0:
             raise ValueError(f"GPU 设备 ID 必须为非负数，得到 {self.gpu_device}")
-        
+
         # 验证 n_threads
         if self.n_threads == -1:
             # 自动检测 CPU 核心数
@@ -134,13 +156,15 @@ class SolverConfig:
             self.n_threads = multiprocessing.cpu_count()
         elif self.n_threads < 1:
             raise ValueError(f"线程数必须为正数，得到 {self.n_threads}")
-        
+
         # 验证湍流参数
         if not (0 < self.turbulence_intensity <= 1.0):
             raise ValueError(f"湍流强度 Tu 必须在 (0, 1] 范围内，得到 {self.turbulence_intensity}")
         if self.viscosity_ratio <= 0:
             raise ValueError(f"粘性比 VR 必须为正数，得到 {self.viscosity_ratio}")
-        
+        if self.mu_molecular <= 0:
+            raise ValueError(f"分子动力粘度 mu_molecular 必须为正数，得到 {self.mu_molecular}")
+
         # 如果输出目录不存在则创建
         os.makedirs(self.output_dir, exist_ok=True)
     

@@ -108,6 +108,8 @@ def extrapolate_scalar_to_faces_kernel(
     n_prism, n_faces, n_fp, n_sps,
     wall_dirichlet_zero_face,
     mixed_nb_partner, mixed_nb_mask,
+    has_wall_dirichlet_value,
+    wall_dirichlet_value_face,
 ):
     """将 SPs 标量场外插到所有面的通量点（owner + neighbor 两侧）。
 
@@ -142,15 +144,27 @@ def extrapolate_scalar_to_faces_kernel(
 
     WALL 上 k=0 的 Dirichlet 处理（真实修复，2026-08-21）：k 在无滑移
     壁面上严格为零，这是标准 k-omega/SST 边界条件（Wilcox《Turbulence
-    Modeling for CFD》），不是近似——不像 omega 解析壁面值需要额外的
-    壁面距离数据，k=0 不需要任何额外输入，可以用与均流场无滑移壁面
-    幽灵态完全相同的镜像手法独立实现：ghost = 2*k_wall - k_owner =
-    -k_owner（k_wall=0）。`wall_dirichlet_zero_face[f]` 由调用方
-    （`compute_turbulence_transport_residual`，据 solver.boundary_
+    Modeling for CFD》），不是近似——不需要任何额外输入，可以用与均流场
+    无滑移壁面幽灵态完全相同的镜像手法独立实现：ghost = 2*k_wall -
+    k_owner = -k_owner（k_wall=0）。`wall_dirichlet_zero_face[f]` 由
+    调用方（`compute_turbulence_transport_residual`，据 solver.boundary_
     ghost_provider 的边界分组信息算出）标记这个面是否要用这种
     Dirichlet-zero 处理而不是上面的 Neumann 默认——只在对 k 场调用本
     kernel 时为 True，omega/rho/velocity/gamma_field 等其它场的调用
     仍传全 False 数组，行为不变。
+
+    WALL 上 omega 解析壁面值的 Dirichlet 处理（真实修复，V2.0 专家组
+    盲审发现，2026-08-28）：omega 在壁面的正确边界条件不是零梯度，而是
+    Wilcox 解析式 `omega_wall = 60*nu/(beta1*d1^2)`（d1=壁面到第一层
+    SP 的距离）——此前因为"需要额外的壁面距离数据"被搁置，现在
+    `has_wall_dirichlet_value[f]`/`wall_dirichlet_value_face[f,:]` 由
+    调用方按同一套 wall_mask 逻辑、外插 solver.wall_distance 到壁面算出
+    （见 compute_turbulence_transport_residual 里 `_compute_omega_wall_
+    target` 的说明）提供：`ghost = 2*target - owner`，与 k=0 分支同一个
+    通式（target=0 时就是 k 的情形），只是这里 target 逐 FP 给定而非
+    恒为 0。与 `wall_dirichlet_zero_face` 互斥（一个面只会被两者之一
+    标记）；omega/velocity/gamma_field 等不适用的场调用本 kernel 时，
+    `has_wall_dirichlet_value` 传全 False 数组，行为与此前完全一致。
     """
     phi_owner = _extrap_owner_scalar_to_faces(
         scalar_sps, boundary_extrap,
@@ -168,21 +182,33 @@ def extrapolate_scalar_to_faces_kernel(
             if wall_dirichlet_zero_face[f]:
                 for i in range(n_fp):
                     phi_neighbor[f, i] = -phi_owner[f, i]
+            elif has_wall_dirichlet_value[f]:
+                # 非零 Dirichlet 目标值（例如 omega 壁面解析式，见
+                # compute_turbulence_transport_residual 调用处文档）：
+                # ghost = 2*target - owner，使 (ghost+owner)/2 = target
+                # 恰好等于目标值——k=0 的 Dirichlet-zero 分支是这个通式
+                # target=0 的特例，两者用同一套镜像原理，只是这里 target
+                # 逐 FP 给定而不是恒为 0。
+                for i in range(n_fp):
+                    phi_neighbor[f, i] = 2.0 * wall_dirichlet_value_face[f, i] - phi_owner[f, i]
             else:
                 for i in range(n_fp):
                     phi_neighbor[f, i] = phi_owner[f, i]
     # 混合拆分面（B-8，见 fr/face_flux_points_merge.py）：混合配对的内部面在边界半区
     # 没有真实邻居单元，neighbor 侧值按配对边界面自身获得的同一规则逐 FP 覆盖——
-    # Dirichlet-zero 壁面用镜像（-phi_owner），其余用零梯度（phi_owner）；
-    # 内部半区保持上方多源插值结果不动。
+    # Dirichlet-zero 壁面用镜像（-phi_owner），非零 Dirichlet 用配对面自己的
+    # target 值镜像，其余用零梯度（phi_owner）；内部半区保持上方多源插值结果不动。
     for f in range(n_faces):
         mp = mixed_nb_partner[f]
         if mp >= 0:
             dirichlet = wall_dirichlet_zero_face[mp]
+            has_value = has_wall_dirichlet_value[mp]
             for i in range(n_fp):
                 if mixed_nb_mask[f, i]:
                     if dirichlet:
                         phi_neighbor[f, i] = -phi_owner[f, i]
+                    elif has_value:
+                        phi_neighbor[f, i] = 2.0 * wall_dirichlet_value_face[mp, i] - phi_owner[f, i]
                     else:
                         phi_neighbor[f, i] = phi_owner[f, i]
     return phi_owner, phi_neighbor

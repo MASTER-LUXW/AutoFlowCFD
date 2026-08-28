@@ -29,7 +29,9 @@ def _p0_inviscid_kernel(
     unit_normals,     # float64 (n_faces, 3)，单位法向量
     area_weights,     # float64 (n_faces,)，面积权重
     Q_all,            # float64 (n_cells, 5)，原始变量
-    Q_ghost,          # float64 (n_cells, 5)，预计算的边界幽灵态
+    Q_ghost,          # float64 (n_faces, 5)，预计算的幽灵态（按面索引，
+                      # 不是按 owner 单元索引——见 inviscid_p0.py::
+                      # _precompute_ghost_states 文档"真实 bug 修复"一节）
     cell_volumes,     # float64 (n_cells,)
     mixed_p0_bnd_frac,  # float64 (n_faces,)，混合面边界子面面积占比（B-8，非混合面为 0）
     n_cells,
@@ -63,7 +65,7 @@ def _p0_inviscid_kernel(
         if is_boundary[f]:
             Q_n = np.empty(5, dtype=np.float64)
             for v in range(5):
-                Q_n[v] = Q_ghost[oc, v]
+                Q_n[v] = Q_ghost[f, v]
         else:
             nc = neighbor_cell[f]
             Q_n = np.empty(5, dtype=np.float64)
@@ -86,7 +88,7 @@ def _p0_inviscid_kernel(
         if bfrac > 0.0 and (not is_boundary[f]):
             Q_nb = np.empty(5, dtype=np.float64)
             for v in range(5):
-                Q_nb[v] = Q_ghost[oc, v]
+                Q_nb[v] = Q_ghost[f, v]
             F_bnd = compute_ausm_up_flux(Q_o, Q_nb, normal, mach_ref)
             one_minus = 1.0 - bfrac
             for v in range(5):

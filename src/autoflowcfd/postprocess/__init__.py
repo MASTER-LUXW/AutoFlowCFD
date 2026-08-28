@@ -5,7 +5,9 @@
 Key Components:
     - fr_coefficients: FR 原生面通量点压力积分气动系数（Cd/Cl/Cm 等，唯一生产路径）
     - coefficients: 气动系数/气动力数据类（AerodynamicCoefficients/AerodynamicForces）
-    - VTKExporter: 供 ParaView 使用的场数据导出
+    - VTKExporter: 供 ParaView 使用的场数据导出（单元中心平均值）
+    - export_highorder_vtk: VTK 高阶 Lagrange 单元导出（#5，真实分段
+      多项式，非单元中心平均值，见 vtk_export_highorder.py 模块文档）
     - ConvergenceAnalyzer: 残差与系数历史
     - TransientStatistics: 时间平均场、RMS、PSD
 
@@ -17,6 +19,7 @@ Example:
 
 from .coefficients import AerodynamicCoefficients, AerodynamicForces
 from .vtk_export import VTKExporter
+from .vtk_export_highorder import export_highorder_vtk
 from .report import ConvergenceAnalyzer, SimulationReport
 from .transient_stats import TransientStatistics, TransientResult
 from .pressure_psd import PressurePSD
@@ -25,6 +28,7 @@ __all__ = [
     "AerodynamicCoefficients",
     "AerodynamicForces",
     "VTKExporter",
+    "export_highorder_vtk",
     "ConvergenceAnalyzer",
     "SimulationReport",
     "TransientStatistics",

@@ -16,7 +16,6 @@ import numpy as np
 from loguru import logger
 
 from autoflowcfd.fr.face_flux_points import (
-    ACCEPT_STRICT_REL,
     CUBE_FACE_AXIS_SIDE,
     FaceFluxPointGeometry,
 )
@@ -24,8 +23,9 @@ from autoflowcfd.fr.face_flux_points_data import (
     _KernelFaceData, _PRISM_QUAD_CODES, _classify_half,
 )
 from autoflowcfd.fr.face_flux_points_exact_normal import (
-    compute_exact_face_normals_and_weights, compute_exact_adj_rows,
+    compute_exact_face_normals_and_weights,
 )
+from autoflowcfd.fr.face_flux_points_validation import validate_face_flux_point_residuals
 from autoflowcfd.grid.curved_mapping.curved_mapping import PRISM_CUBE_FACES
 from autoflowcfd.grid.connectivity.face_connectivity import CUBE_FACE_NAMES, FRFaceConnectivity
 
@@ -273,7 +273,16 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
     # 供这些 kernel 直接查表读取，取代它们内部的 `_extrap_matmul(adj_j
     # [cell,:,axis,:], E)` 外插调用。neighbor 侧对边界面无意义（
     # neighbor_axis/side 是 -1/0.0 哨兵值），用 `~_is_bnd` 排除。
-    _owner_adj_row_exact = compute_exact_adj_rows(
+    # 用 numba 并行加速版替代纯 NumPy 桶循环版（第四次评审接入）：
+    # compute_exact_adj_rows 在 P2+ 大网格上是真实存在的性能瓶颈（逐面
+    # 类型分桶 + 批量 NumPy 临时数组，峰值内存 ~5GB，P2 网格初始化卡住
+    # 10+ 分钟——见 face_flux_points_exact_normal_kernel.py 模块文档）。
+    # `compute_exact_adj_rows_fast` 此前虽已实现且接口完全一致，但从未
+    # 被接入生产路径；本轮评审用 order 1/2/3 × tet/prism 合成算例逐位
+    # 交叉验证（最大绝对误差 ~3e-16，机器精度量级），确认可以安全替换。
+    from autoflowcfd.fr.face_flux_points_exact_normal_kernel import compute_exact_adj_rows_fast
+
+    _owner_adj_row_exact = compute_exact_adj_rows_fast(
         n_faces, n1d, sps_1d, n_prism,
         cell_arr=np.asarray(face_conn.owner_cell, dtype=np.int64),
         axis_arr=_o_axis_arr.astype(np.int64), side_arr=_o_side_arr.astype(np.float64),
@@ -283,7 +292,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
                   else np.empty((0, 4), dtype=np.int64)),
         node_coords=mesh._node_coords,
     )
-    _neighbor_adj_row_exact = compute_exact_adj_rows(
+    _neighbor_adj_row_exact = compute_exact_adj_rows_fast(
         n_faces, n1d, sps_1d, n_prism,
         cell_arr=np.asarray(face_conn.neighbor_cell, dtype=np.int64),
         axis_arr=_n_axis_arr.astype(np.int64), side_arr=_n_side_arr.astype(np.float64),
@@ -319,8 +328,6 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
     nb_src1_idx = np.full(n_faces, -1, dtype=np.int64)
     ow_src0_cell = np.full(n_faces, -1, dtype=np.int64)
     ow_src1_idx = np.full(n_faces, -1, dtype=np.int64)
-    _tolerated: List[dict] = []
-    _diagnostic_failures: List[dict] = []
 
     # ---- 向量化：单源面直接批量拷贝（~95% 的面） ----
     _nb_single = _nb_cell_id >= 0  # 单源 neighbor 掩码
@@ -345,6 +352,11 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         _ms_nb_sec_cell = np.empty(len(_multi_nb_faces), dtype=np.int32)
         _ms_nb_sec_cf = np.empty(len(_multi_nb_faces), dtype=np.int32)
         _ms_nb_mixed = np.zeros(len(_multi_nb_faces), dtype=np.bool_)
+        # secondary 子面自身的 face_conn 索引（不是 cell/code，是面记录本身）——
+        # 供残差校验按 secondary 子面*自己的*面积算特征尺度，与旧慢速路径
+        # `_resolve_multi_source` 逐半区各自用 `face_conn.area[gf]` 完全一致
+        # （不能借用 primary 子面 f 的面积，两个三角子面面积一般不相等）。
+        _ms_nb_other_face = np.full(len(_multi_nb_faces), -1, dtype=np.int64)
         for i, f in enumerate(_multi_nb_faces):
             if mixed_nb_partner[f] >= 0:
                 # 混合分组：无真实次源（另半区是域边界），ms kernel 按标志跳过；
@@ -358,10 +370,12 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
             other = group[1] if group[0] == f else group[0]
             _ms_nb_sec_cell[i] = face_conn.neighbor_cell[other]
             _ms_nb_sec_cf[i] = face_conn.neighbor_cube_face[other]
+            _ms_nb_other_face[i] = other
 
         _ms_ow_sec_cell = np.empty(len(_multi_ow_faces), dtype=np.int32)
         _ms_ow_sec_cf = np.empty(len(_multi_ow_faces), dtype=np.int32)
         _ms_ow_mixed = np.zeros(len(_multi_ow_faces), dtype=np.bool_)
+        _ms_ow_other_face = np.full(len(_multi_ow_faces), -1, dtype=np.int64)
         for i, f in enumerate(_multi_ow_faces):
             if mixed_ow_partner[f] >= 0:
                 # 混合分组（neighbor 角色）：处理同 nb 分支。
@@ -374,6 +388,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
             other = group[1] if group[0] == f else group[0]
             _ms_ow_sec_cell[i] = face_conn.owner_cell[other]
             _ms_ow_sec_cf[i] = face_conn.owner_cube_face[other]
+            _ms_ow_other_face[i] = other
 
         # 计算对角线掩码（primary half = 分组首条子面覆盖的半侧）
         nb_mask = np.zeros((n_faces, n_fp), dtype=bool)
@@ -412,6 +427,12 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         _ow_extra_mats_arr = np.zeros((max(n_extra_ow, 1), n_fp, n_sps), dtype=np.float64)
         _ms_nb_extra_idx = np.arange(n_extra_nb, dtype=np.int64)
         _ms_ow_extra_idx = np.arange(n_extra_ow, dtype=np.int64)
+        # secondary Newton 逐 FP 残差输出（此前算出即丢弃，见
+        # face_flux_points_ms_numba.py::build_ms_interp_parallel 文档）；
+        # mixed 分组（无 secondary Newton）对应行保持全零，下面校验时按
+        # ~_ms_{nb,ow}_mixed 排除。
+        _nb_sec_resid_arr = np.zeros((max(n_extra_nb, 1), n_fp), dtype=np.float64)
+        _ow_sec_resid_arr = np.zeros((max(n_extra_ow, 1), n_fp), dtype=np.float64)
 
         # Primary neighbor/owner cell & code（分组首条子面的跨单元邻居）
         _ms_nb_pn_cell = np.empty(len(_multi_nb_faces), dtype=np.int32)
@@ -454,6 +475,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
             _nb_extra_mats_arr, _ow_extra_mats_arr,
             _ms_nb_pn_cell, _ms_nb_pn_code,
             _ms_ow_pn_cell, _ms_ow_pn_code,
+            _nb_sec_resid_arr, _ow_sec_resid_arr,
         )
         logger.info("Multi-source numba kernel completed.")
 
@@ -477,6 +499,14 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         _ow_extra_mats_arr = np.empty((0, n_fp, n_sps), dtype=np.float64)
         _nb_extra_cells = np.empty(0, dtype=np.int64)
         _ow_extra_cells = np.empty(0, dtype=np.int64)
+        nb_mask = np.zeros((n_faces, n_fp), dtype=bool)
+        ow_mask = np.zeros((n_faces, n_fp), dtype=bool)
+        _ms_nb_mixed = np.zeros(0, dtype=np.bool_)
+        _ms_ow_mixed = np.zeros(0, dtype=np.bool_)
+        _ms_nb_other_face = np.full(0, -1, dtype=np.int64)
+        _ms_ow_other_face = np.full(0, -1, dtype=np.int64)
+        _nb_sec_resid_arr = np.zeros((1, n_fp), dtype=np.float64)
+        _ow_sec_resid_arr = np.zeros((1, n_fp), dtype=np.float64)
 
     # nb_src0_mat/ow_src0_mat：零拷贝别名到 kernel 输出的 _nb_interp/
     # _ow_interp——此时两者已经历完主 kernel 的向量化赋值范围与
@@ -492,44 +522,21 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
     ow_extra_cell = _ow_extra_cells
     ow_extra_mat = _ow_extra_mats_arr
 
-    if _tolerated:
-        import json
-        import os
-        import tempfile
-
-        worst = max(_tolerated, key=lambda d: d["relative_pct"])
-        tol_dump_path = os.path.join(tempfile.gettempdir(), "face_flux_points_tolerated.json")
-        with open(tol_dump_path, "w") as fh:
-            json.dump(_tolerated, fh, indent=2)
-        logger.warning(
-            f"{len(_tolerated)}/{n_faces} face-side Newton point-locations accepted with a "
-            f"non-machine-precision residual (worst: face {worst['face']}, cell {worst['cell']}, "
-            f"{worst['relative_pct']:.2f}% of local face scale {worst['char_length']:.3e}). 这些均为"
-            f"棱柱四边形侧面（双线性曲面）与相邻单元共享界面处的真实、有界几何翘曲（已用最小二乘 "
-            f"Newton 解取该曲面上的最优逼近点），量级与直接对全网格棱柱四边形侧面翘曲度的独立几何"
-            f"测量一致（全网格最大 11.13%，见开发过程记录），非算法缺陷。完整清单见 {tol_dump_path}。"
-        )
-
-    if _diagnostic_failures:
-        import json
-        import os
-        import tempfile
-
-        dump_path = os.path.join(tempfile.gettempdir(), "face_flux_points_failures.json")
-        with open(dump_path, "w") as fh:
-            json.dump(_diagnostic_failures, fh, indent=2)
-        logger.error(
-            f"{len(_diagnostic_failures)}/{n_faces} interior faces failed exact Flux-Point "
-            f"location. Full diagnostics written to {dump_path}."
-        )
-        raise RuntimeError(
-            f"{len(_diagnostic_failures)}/{n_faces} interior faces failed exact Flux-Point "
-            f"location (see {dump_path} for full per-face diagnostics). This indicates either "
-            f"genuinely non-conforming mesh topology (a 'shared' 3-node face that is not "
-            f"actually a full face of both cells, e.g. a T-junction between differently-"
-            f"resolved mesh regions) or a remaining bug in the point-location algorithm - "
-            f"must be diagnosed and fixed, not silently tolerated."
-        )
+    # 校验 Newton/精确点位定位残差（拆到 face_flux_points_validation.py，
+    # 见该模块文档——本文件此前超过 600 行硬性拆分阈值，这段"接回此前
+    # 被丢弃的 kernel 残差输出、按阈值分级、超差即 raise"的收尾校验只读
+    # 上面已经算好的残差数组和分组掩码，不产生 build_face_flux_points
+    # 后续需要的返回值，是清晰的拆分边界）。
+    validate_face_flux_point_residuals(
+        face_conn, n_prism, n_faces,
+        _nb_resid, _ow_resid,
+        _nb_single, _ow_single,
+        _multi_nb_faces, _multi_ow_faces,
+        nb_mask, ow_mask,
+        _ms_nb_mixed, _ms_ow_mixed,
+        _nb_sec_resid_arr, _ow_sec_resid_arr,
+        _ms_nb_other_face, _ms_ow_other_face,
+    )
 
     logger.info("Flux Points geometry built (flat array format).")
     return _KernelFaceData(

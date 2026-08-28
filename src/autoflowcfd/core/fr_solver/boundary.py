@@ -13,13 +13,18 @@ from loguru import logger
 from autoflowcfd.boundary.fr_ghost_state import BoundaryGhostStateProvider, InletSEMGhostState
 from autoflowcfd.grid.connectivity.face_connectivity import tag_boundary_groups_for_mesh
 
-# LES/DDES 入口合成湍流默认湍流度（BD-02）：本代码库目前没有暴露专门的
-# CLI/配置参数来指定目标雷诺应力张量，用来流速度的 5% 作为各向同性
-# 脉动强度——是汽车风洞/道路工况常见的自由来流湍流度量级（典型范围
-# 0.1%~1% 风洞、可达 5%+ 的道路自然风），偏保守但物理上合理的默认值，
-# 不是任意拍的数字；有真实需求时应改为可配置参数，而不是在这里继续加
-# 硬编码分支。
-_SEM_DEFAULT_TURBULENCE_INTENSITY = 0.05
+# LES/DDES 入口合成湍流默认参数（BD-02）。真实修复（V2.0 专家组盲审
+# 发现，2026-08-28）：此前这两个量恒为硬编码常量，没有任何 CLI/配置
+# 途径覆盖，跑真实工程案例（不同来流湍流度/涡核密度）只能改源码。现在：
+# - 目标雷诺应力改为复用已有的 `--turbulence-intensity`（solver._turbulence_
+#   intensity，同一个量本来就用于 RANS 自由来流 k/omega 初值），不再单独
+#   维护一个 SEM 专用湍流度——一个旋钮统一表达"来流湍流强度"，
+#   见 build_boundary_ghost_provider 内 u_fluct 的计算。这个下面的常量
+#   现在只是 solver 没有设置 _turbulence_intensity 属性时（理论上不会
+#   发生，FRSolver/GPUFRSolver 构造时恒会设置）的兜底默认值。
+# - 涡核数量新增 `--sem-num-eddies` CLI 选项（solver._sem_num_eddies），
+#   默认值沿用原来的 200（未指定时保持向后兼容的行为）。
+_SEM_DEFAULT_TURBULENCE_INTENSITY = 0.01
 _SEM_DEFAULT_NUM_EDDIES = 200
 
 
@@ -73,8 +78,34 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
     face_conn = solver.mesh.face_connectivity
     group_code, name_to_code = tag_boundary_groups_for_mesh(solver.mesh, face_conn)
 
+    # 真实 bug 修复（#9，V2.0 专家组盲审第4轮，2026-08-28，WMLES 假滑移
+    # 边界）：WMLES 激活时，WALL 组此前恒用 is_no_slip=True 构造 ghost
+    # state——`wall_ghost_state` 把 ghost 切向速度镜像为与内部值相反
+    # （Q_ghost=2*v_wall-Q_int），逼出一个基于（本项目近壁网格通常无法
+    # 真正分辨粘性底层的）解析速度梯度的虚假壁面剪应力，然后
+    # `solver_helpers.compute_wmles_wall_stress_correction` 又把壁面模型
+    # 算出的 tau_w 作为**额外**动量源项叠加在这个虚假剪应力之上——两者
+    # 同时存在，造成双重计权。
+    #
+    # 按 WMLES 壁面模型文献的标准做法修正（Kawai & Larsson 团队官方页面
+    # https://wmles.umd.edu/wall-stress-models/coupling-les-to-a-wall-stress-model/
+    # 明确用词"replace"；Kang et al. 2024, arXiv:2405.15899，与本项目同为
+    # DG/FR 类弱式框架，给出具体公式并证明这样构造"不会双重计权"）：
+    # wall model 给出的 tau_w 应该**取代**、而不是叠加在解析梯度算出的
+    # 切向剪应力上。做法是让 WMLES 激活时的 WALL ghost state 退化成
+    # is_no_slip=False（与下面 SLIP_WALL 用的完全同一套构造：法向速度
+    # 镜像翻转以保证不可穿透 u_n=0，切向速度与内部值完全相同、无跳跃）——
+    # 这让该面在 BR1/LDG 粘性通量组装里对切向方向的梯度贡献退化为零
+    # （没有虚假的解析剪应力），tau_w 因此成为该面切向应力的唯一来源，
+    # 不再与之共存。法向速度仍然是不可穿透边界，物理上不受影响。
+    #
+    # 这把"粘性 WALL + WMLES"与"SLIP_WALL"底层复用同一个 ghost state
+    # 构造，但两者物理动机不同（前者是壁面模型的应力条件，后者是真正的
+    # 无粘/对称滑移边界）——共享同一个数值机制是刻意的工程简化，不是
+    # 混淆，见 wall_ghost_state 文档字符串的对应说明。
+    wall_is_no_slip = getattr(solver, "wmles_model", None) is None
     type_map = {
-        "WALL": ("WALL", {"is_no_slip": True}),
+        "WALL": ("WALL", {"is_no_slip": wall_is_no_slip}),
         "SLIP_WALL": ("WALL", {"is_no_slip": False}),
         "VELOCITY_INLET": ("INLET", {"Q_inlet": Q_free}),
         "PRESSURE_OUTLET": ("OUTLET", {"p_outlet": p_inf}),
@@ -87,7 +118,18 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
     # 涡核时间演化），但此前从未被任何边界路径调用。solver._sem_instances
     # 供 FRSolver.step() 每个物理步调用一次 advance()（见该列表的
     # 消费点），不在这里（构造阶段）就调用，因为这里只跑一次。
-    use_sem = solver.turb_model_name in ("LES", "DDES") and getattr(solver, "wmles_model", None) is None
+    #
+    # WMLES 显式排除（V2.0 专家组盲审复核，2026-08-28，行为本身不变，
+    # 仅补充说明）：WMLES 依赖壁面模型（对数律/Spalding 律）而非入口湍流
+    # 结构本身来正确预测近壁应力——`wmles_model` 非 None 时即使
+    # `turb_model_name` 恰好也是 "LES"/"DDES"（WMLES 是叠加在其上的近壁
+    # 处理，不是独立的第三种 turb_model_name 取值），也不注入 SEM 入口
+    # 脉动，理由是 WMLES 本身的壁面应力建模已经承担了近壁湍流校正的角色，
+    # 额外叠加 SEM 入口脉动不是这个方案设计要解决的问题。CLI
+    # `--turbulence-model` 帮助文本（见 solve_transient_command.py）已
+    # 补充说明这条排除规则，避免用户误以为 wmles 模式也会获得 SEM 入口
+    # 湍流。
+    use_sem = solver.turb_model_name in ("LES", "DDES", "IDDES") and getattr(solver, "wmles_model", None) is None
     solver._sem_instances = []
 
     code_to_config: Dict[int, Dict[str, Any]] = {}
@@ -114,12 +156,16 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
                 span = np.max(all_positions, axis=0) - np.min(all_positions, axis=0)
                 length_scale = max(float(np.max(span)) / 10.0, 1e-3)
 
+                num_eddies = getattr(solver, "_sem_num_eddies", _SEM_DEFAULT_NUM_EDDIES)
                 sem = SyntheticEddyMethod(
-                    num_eddies=_SEM_DEFAULT_NUM_EDDIES, length_scale=length_scale
+                    num_eddies=num_eddies, length_scale=length_scale
                 )
                 sem.configure_inlet_box(all_positions, flow_direction=flow_direction)
 
-                u_fluct = _SEM_DEFAULT_TURBULENCE_INTENSITY * vel_inf
+                turbulence_intensity = getattr(
+                    solver, "_turbulence_intensity", _SEM_DEFAULT_TURBULENCE_INTENSITY
+                )
+                u_fluct = turbulence_intensity * vel_inf
                 reynolds_stress = np.diag([u_fluct**2, u_fluct**2, u_fluct**2])
 
                 sem_ghost = InletSEMGhostState(
@@ -129,8 +175,9 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
                 solver._sem_instances.append(sem)
                 logger.info(
                     f"BD-02: Synthetic Eddy Method inlet turbulence enabled for group '{name}' "
-                    f"({len(positions_by_face)} faces, {_SEM_DEFAULT_NUM_EDDIES} eddies, "
-                    f"length_scale={length_scale:.4g}, u'={u_fluct:.3g} m/s)"
+                    f"({len(positions_by_face)} faces, {num_eddies} eddies, "
+                    f"length_scale={length_scale:.4g}, u'={u_fluct:.3g} m/s, "
+                    f"Tu={turbulence_intensity:.1%})"
                 )
 
         code_to_config[code] = config

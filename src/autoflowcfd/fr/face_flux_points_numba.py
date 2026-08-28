@@ -45,12 +45,21 @@ def build_fp_newton_parallel(
     Returns: (nb_fc, nb_resid, ow_fc, ow_resid,
               nb_interp, ow_interp, nb_cell_id, ow_cell_id,
               geom_oa, geom_os, geom_na, geom_ns, geom_aw, geom_n)
+    nb_resid/ow_resid 形状 (n_faces, n_fp)：逐 Flux Point 的 Newton 精确
+    点位定位残差（绝对长度单位，未按面特征尺度归一化，未按容差分级）——
+    调用方 face_flux_points_merge.py 负责归一化、按 ACCEPT_STRICT_REL/
+    _ACCEPT_WARN_REL 分级、以及对多源棱柱四边形侧面按半区掩码取值。
     """
     n_sps = n1d * n1d * n1d
     nb_fc = np.zeros((n_faces, n_fp, 2))
-    nb_resid = np.zeros(n_faces)
+    # nb_resid/ow_resid：逐 Flux Point 残差（不在这里归约成单一标量），
+    # 供 face_flux_points_merge.py 对多源棱柱四边形侧面按对角线半区
+    # 分别掩码取 max——见 _newton_locate_nb 文档，同一批点里混有真正
+    # 属于该 cell 和根本不属于该 cell（对角线另一半）的目标点，提前
+    # 归约成全批次单一 max 会把两者混在一起，对多源面产生系统性误报。
+    nb_resid = np.zeros((n_faces, n_fp))
     ow_fc = np.zeros((n_faces, n_fp, 2))
-    ow_resid = np.zeros(n_faces)
+    ow_resid = np.zeros((n_faces, n_fp))
     # nb_interp/ow_interp 必须是 float64，不能降到 float32——已经真实
     # 验证过 float32 在这里不安全，不是假设：cross-interpolation 用的
     # 坍缩坐标模态 Vandermonde 矩阵条件数随阶数快速增长（collapsed_basis.py
@@ -150,11 +159,26 @@ def build_fp_newton_parallel(
             t = face_translation[f]
             ht = abs(t[0]) > 1e-300 or abs(t[1]) > 1e-300 or abs(t[2]) > 1e-300
             if ht:
+                # 真实 bug 修复（V2.0 专家组盲审发现，2026-08-28）：周期边界
+                # 配对约定 owner.center + translation ≈ neighbor.center
+                # （见 face_connectivity_periodic.py::pair_periodic_boundary_faces
+                # "centers_a_shifted = center[idx_a] + translation 匹配
+                # center[idx_b]"，配对后 idx_a 侧留作 owner、idx_b 的
+                # owner 变成 neighbor_cell）。要把 owner 侧物理 FP 平移到
+                # neighbor 单元所在的区域去定位，必须 **加** translation，
+                # 此前这里写成减——这个安全网此前从未真正被激活过（见
+                # face_flux_points_validation.py 模块文档"safety net
+                # 架空"一节），直到本次评审把 _classify_and_record 真正
+                # 接上，才第一次在真实周期网格上暴露：残差恰好等于
+                # 2*|translation|（符号取反导致的偏差是 -t 相对正确值 +t
+                # 偏了 2t，不是巧合），此前完全静默——任何用到周期边界的
+                # 算例（TGV/Couette/periodic_bc 等验证用例）在周期面上的
+                # Flux Point 插值矩阵实际上一直是错的，只是从未被检查过。
                 search = np.empty((n_fp, 3))
                 for p in range(n_fp):
-                    search[p, 0] = phys_o[p, 0] - t[0]
-                    search[p, 1] = phys_o[p, 1] - t[1]
-                    search[p, 2] = phys_o[p, 2] - t[2]
+                    search[p, 0] = phys_o[p, 0] + t[0]
+                    search[p, 1] = phys_o[p, 1] + t[1]
+                    search[p, 2] = phys_o[p, 2] + t[2]
             else:
                 search = phys_o
             fc, rs = _newton_locate_nb(n_is_prism, n_nd, n_axis, n_side, search, cl)
@@ -203,11 +227,14 @@ def build_fp_newton_parallel(
             t = face_translation[f]
             ht = abs(t[0]) > 1e-300 or abs(t[1]) > 1e-300 or abs(t[2]) > 1e-300
             if ht:
+                # 对称的符号修复（见上方 owner_primary 分支的详细说明）：
+                # 把 neighbor 侧物理 FP 平移回 owner 单元所在区域，必须
+                # **减** translation。
                 search_o = np.empty((n_fp, 3))
                 for p in range(n_fp):
-                    search_o[p, 0] = phys_n[p, 0] + t[0]
-                    search_o[p, 1] = phys_n[p, 1] + t[1]
-                    search_o[p, 2] = phys_n[p, 2] + t[2]
+                    search_o[p, 0] = phys_n[p, 0] - t[0]
+                    search_o[p, 1] = phys_n[p, 1] - t[1]
+                    search_o[p, 2] = phys_n[p, 2] - t[2]
             else:
                 search_o = phys_n
             fc_o, rs_o = _newton_locate_nb(o_is_prism, o_nd, o_axis, o_side, search_o, cl_o)

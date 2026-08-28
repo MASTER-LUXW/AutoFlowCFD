@@ -160,6 +160,110 @@ class TestAusmUpWeissSmithPreconditioning:
             )
 
 
+class TestAusmUpM4P5CoefficientsMatchLiterature:
+    """真实 bug 修复回归测试（V2.0 专家组盲审第四次评审，2026-08-28，#12）：
+    此前 M4±（质量分裂）用了 0.1875、P5±（压力分裂）用了 0.5——两个标准
+    记号的系数被交换错配，且 0.5 本身超出 P5± 的有效区间 [-3/4,3/16]。
+
+    已用 Liou (2006) AUSM+up 原始文献的独立生产实现交叉核实（SU2
+    `CUpwAUSMPLUSUP_Flow::ComputeMassAndPressureFluxes`，su2code/SU2
+    GitHub 仓库 ausm_slau.cpp）确认正确值：
+        beta_mass = 1/8 = 0.125（固定常数，质量分裂）
+        alpha_pressure = 3/16*(-4+5*fa^2)（随 fa 变化，压力分裂；
+            fa=1 时退化为标准值 3/16=0.1875，fa->0 时趋于 -3/4）
+
+    这里独立重新转录一份只含 M4±/P5± 分裂函数的最小参照实现（不是从
+    kernels.py 复制过来的同一份代码，避免"验证代码抄了被验证代码的
+    同一个 bug"），与 `compute_ausm_up_flux` 在受控状态下逐位比对。
+    """
+
+    @staticmethod
+    def _reference_split_functions(M, alpha_pressure_val, beta_mass_val=1.0 / 8.0):
+        """独立转录的 M4±/P5± 分裂函数（Liou 2006 / SU2 ausm_slau.cpp），
+        与 kernels.py 内部同名闭包分开维护，供交叉核对。"""
+        if abs(M) >= 1.0:
+            Mp = 0.5 * (M + abs(M))
+            Mm = 0.5 * (M - abs(M))
+            Pp = 0.5 * (1.0 + np.sign(M))
+            Pm = 0.5 * (1.0 - np.sign(M))
+        else:
+            Mp = 0.25 * (M + 1.0) ** 2 + beta_mass_val * (M ** 2 - 1.0) ** 2
+            Mm = -0.25 * (M - 1.0) ** 2 - beta_mass_val * (M ** 2 - 1.0) ** 2
+            Pp = 0.25 * (M + 1.0) ** 2 * (2.0 - M) + alpha_pressure_val * M * (M ** 2 - 1.0) ** 2
+            Pm = 0.25 * (M - 1.0) ** 2 * (2.0 + M) - alpha_pressure_val * M * (M ** 2 - 1.0) ** 2
+        return Mp, Mm, Pp, Pm
+
+    def test_beta_mass_is_one_eighth(self):
+        """质量分裂系数必须是固定常数 1/8——用两个不同的（非对称、非
+        ±互为相反数——那种选择会让 M-(-M)=-M+(M) 恒成立，M_half 恒为
+        零，与 beta_mass 取值无关，是一个退化的反例）亚声速马赫数
+        M_L=0.5、M_R=0.2，验证 mass_flux 与独立参照实现一致。"""
+        n = np.array([1.0, 0.0, 0.0])
+        rho, a_target = 1.0, 340.0
+        p = a_target ** 2 * rho / 1.4
+        M_L_target, M_R_target = 0.5, 0.2
+        qL = np.array([rho, M_L_target * a_target, 0.0, 0.0, p])
+        qR = np.array([rho, M_R_target * a_target, 0.0, 0.0, p])
+
+        # mach_ref=1.0：M0_sq 恒为 1（fa=1），beta2 恒被 clip 到 1.0（见
+        # 既有测试类 test_preconditioning_reduces_to_unpreconditioned_at_sonic
+        # 文档），aL_p=aR_p=a_target；pL=pR 时 Mp 修正项恒为零。
+        flux_correct = compute_ausm_up_flux(qL, qR, n, 1.0)
+
+        Mp_expected, _, _, _ = self._reference_split_functions(M_L_target, alpha_pressure_val=0.1875)
+        _, Mm_expected, _, _ = self._reference_split_functions(M_R_target, alpha_pressure_val=0.1875)
+        mass_flux_expected = rho * a_target * (Mp_expected + Mm_expected)
+
+        assert abs(flux_correct[0] - mass_flux_expected) < 1e-6 * abs(mass_flux_expected), (
+            f"mass_flux={flux_correct[0]:.6f} 与 beta_mass=1/8 独立参照值 "
+            f"{mass_flux_expected:.6f} 不符"
+        )
+
+    def test_negative_control_old_swapped_coefficients_would_differ(self):
+        """反向对照：如果仍用修复前那套被交换错配的系数（0.1875 用在质量
+        分裂、0.5 用在压力分裂），压力通量 p_half 会明显偏离修复后的值
+        ——证明这处修复真的改变了数值行为，不是无意义的重命名。"""
+        n = np.array([1.0, 0.0, 0.0])
+        qL = np.array([1.2, 100.0, 0.0, 0.0, 101300.0])
+        qR = np.array([1.2, -80.0, 0.0, 0.0, 101500.0])
+
+        flux_fixed = compute_ausm_up_flux(qL, qR, n, 1.0)
+
+        # 用修复前的（交换错配）系数独立重算一遍 p_half，只替换 P+/P-
+        # 系数、其余（a_half/beta2/fa/Kp/Ku 等）沿用与生产代码相同的
+        # 构造方式，隔离出 alpha_pressure 取值本身造成的差异。
+        gamma = 1.4
+        rhoL, rhoR = qL[0], qR[0]
+        pL, pR = qL[4], qR[4]
+        unL, unR = qL[1], qR[1]
+        aL = np.sqrt(gamma * pL / rhoL)
+        aR = np.sqrt(gamma * pR / rhoR)
+        a_half = 0.5 * (aL + aR)
+        M0_sq = 1.0  # mach_ref=1.0
+        fa = np.sqrt(M0_sq) * (2.0 - np.sqrt(M0_sq))
+        beta2 = 1.0  # mach_ref=1.0 时恒被 clip 到 1.0
+        aL_p, aR_p, a_half_p = np.sqrt(beta2) * aL, np.sqrt(beta2) * aR, np.sqrt(beta2) * a_half
+        M_L, M_R = unL / aL_p, unR / aR_p
+
+        _, _, Pp_L_old, _ = self._reference_split_functions(M_L, alpha_pressure_val=0.5)
+        _, _, _, Pm_R_old = self._reference_split_functions(M_R, alpha_pressure_val=0.5)
+        Ku = 0.75
+        p_half_old_buggy = (
+            Pp_L_old * pL + Pm_R_old * pR
+            - Ku * Pp_L_old * Pm_R_old * (rhoL + rhoR) * fa * a_half_p * (unR - unL)
+        )
+
+        # flux[1] = mass_flux*u_upwind + p_half*nx，nx=1 → p_half 是唯一
+        # 依赖 alpha_pressure 的分量（mass_flux 只依赖 beta_mass，已在
+        # 上一个测试单独验证）。
+        p_half_fixed = flux_fixed[1] - flux_fixed[0] * (qL[1] if flux_fixed[0] >= 0 else qR[1])
+
+        assert abs(p_half_fixed - p_half_old_buggy) > 1.0, (
+            f"修复后 p_half={p_half_fixed:.6f} 与修复前（交换错配系数）"
+            f"p_half={p_half_old_buggy:.6f} 差异过小，#12 修复疑似未生效"
+        )
+
+
 class TestFreeStreamPreservation:
     """曲边/坍缩坐标 FR 残差的黄金标准判据：均匀流场残差必须为零。"""
 

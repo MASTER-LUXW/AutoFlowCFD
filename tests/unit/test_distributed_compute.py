@@ -38,30 +38,57 @@ class TestDistributedMeshAdapter:
     """测试 DistributedMeshAdapter 接口。"""
 
     def test_adapter_interface(self):
-        """验证适配器提供与 HighOrderMesh 相同的接口。"""
+        """验证适配器提供与 HighOrderMesh 相同的接口。
+
+        真实 bug 修复（#2，V2.0 专家组盲审第4轮，2026-08-28）：这个测试
+        此前的 mock（`MockDistFC` 空对象、断言 `adapter.n_cells==10`
+        即 n_local_cells、`adapter.jacobians is mesh.jacobians` 即原样
+        转发）反映的是已确认错误的旧行为——`dist_fc`（真实的
+        `DistributedFlatFaceGeometry`）的 owner_cell/neighbor_cell 用的
+        是 local+halo 压缩索引空间（且是"棱柱在前"排列，见
+        distributed_flat_face.py 模块文档），不是 n_local_cells，也不能
+        直接复用 mesh 原始（全局单元编号）jacobians——两者是不同的索引
+        空间。现在 mock 出一个具备 `compact_global_ids`/`base_flat.
+        n_prism` 的 `MockDistFC`（10 local + 2 halo = 12 个位置，
+        这里让 compact_global_ids 恰好是恒等排列 arange(12)，即测试
+        场景本身不含棱柱/四面体混合重排——重排逻辑本身已由
+        test_distributed_flat_face_prism_grouping.py 用真实网格单独
+        验证过，这里只验证 DistributedMeshAdapter 按 compact_global_ids
+        正确抽取+重排 jacobians 这一层逻辑），验证适配器按新的、正确的
+        压缩索引空间语义工作。
+        """
         from autoflowcfd.core.mpi.distributed_compute import DistributedMeshAdapter
-        from autoflowcfd.core.mpi.partition import DistributedPartition
-        from autoflowcfd.core.mpi.distributed_flat_face import DistributedFlatFaceGeometry
+
+        _n_local, _n_halo, n_compact = 10, 2, 12
 
         # 创建模拟数据
         class MockPartition:
-            n_local_cells = 10
-            n_halo = 2
+            n_local_cells = _n_local
+            n_halo = _n_halo
             n_global_cells = 12
 
         class MockMesh:
+            n_cells = 12  # 完整全局网格单元数（compact_global_ids 索引进这个范围）
             n_points_1d = 2
             n_sps_per_cell = 8
-            cell_types = np.array([0] * 10)  # 10 tet cells
-            jacobians = {"det_jacs": np.ones((10, 8)), "inv_jacs": np.eye(3).reshape(1, 1, 3, 3).repeat(10, 0).repeat(8, 1)}
+            cell_types = np.array([0] * 10 + [1] * 2)
+            jacobians = {
+                "det_jacs": np.arange(12 * 8, dtype=float).reshape(12, 8),
+                "inv_jacs": np.eye(3).reshape(1, 1, 3, 3).repeat(12, 0).repeat(8, 1),
+            }
             jacobians_fine = None
+            cell_volumes = np.arange(12, dtype=float)
             face_flux_points = None
 
         class MockOps:
             pass
 
+        class _MockBaseFlat:
+            n_prism = 0  # 这批 compact_global_ids 里没有棱柱
+
         class MockDistFC:
-            pass
+            compact_global_ids = np.arange(n_compact)  # 恒等排列（测试重点不在重排本身）
+            base_flat = _MockBaseFlat()
 
         partition = MockPartition()
         dist_fc = MockDistFC()
@@ -70,14 +97,17 @@ class TestDistributedMeshAdapter:
 
         adapter = DistributedMeshAdapter(partition, dist_fc, mesh, ops)
 
-        # 验证接口
-        assert adapter.n_cells == 10
+        # 验证接口：n_cells 现在是压缩索引空间大小（n_local+n_halo），
+        # 不是 n_local_cells。
+        assert adapter.n_cells == n_compact
         assert adapter.n_halo_cells == 2
         assert adapter.n_points_1d == 2
         assert adapter.n_sps_per_cell == 8
         assert adapter.n_prism_cells == 0
         assert adapter.face_connectivity is dist_fc
-        assert adapter.jacobians is mesh.jacobians
+        # 恒等排列下重排结果在数值上应与原始 mesh.jacobians 一致（但不
+        # 再是同一个对象引用——现在总是重新抽取+拷贝）。
+        np.testing.assert_array_equal(adapter.jacobians["det_jacs"], mesh.jacobians["det_jacs"])
 
 
 class TestDistributedSolverInterface:

@@ -42,8 +42,6 @@ void ausm_up_flux(
     // ── AUSM+up 数值通量 ──
     // 与 core/fr_kernels.py::compute_ausm_up_flux 逐字对应
     double gamma = 1.4;
-    double alpha = 0.1875;
-    double beta_param = 0.5;
 
     double rhoL_s = fmax(rhoL, 1e-6);
     double rhoR_s = fmax(rhoR, 1e-6);
@@ -64,6 +62,12 @@ void ausm_up_flux(
     double fa = sqrt_M0_sq * (2.0 - sqrt_M0_sq);
     fa = fmax(fa, 1e-6);
 
+    // M4±/P5± 耗散系数——真实 bug 修复（V2.0 专家组盲审第四次评审，
+    // 2026-08-28，#12），与 core/fr_kernels.py::compute_ausm_up_flux
+    // 逐字对应，完整推导/文献交叉核实见该文件同名注释。
+    double beta_mass = 1.0 / 8.0;
+    double alpha_pressure = 3.0 / 16.0 * (-4.0 + 5.0 * fa * fa);
+
     // Weiss-Smith 预处理声速（与 kernels.py::compute_ausm_up_flux 的
     // _WEISS_SMITH_K=1.1 同一个安全裕度常数、同一套 beta2 公式）。
     double beta2 = fmin(1.0, fmax(fmax(Mbar2, 1.1 * mach_ref * mach_ref), 1e-10));
@@ -80,12 +84,12 @@ void ausm_up_flux(
     if (fabs(M_L) >= 1.0) {
         Mp_L = 0.5 * (M_L + fabs(M_L));
     } else {
-        Mp_L = 0.25 * (M_L + 1.0) * (M_L + 1.0) + alpha * (M_L * M_L - 1.0) * (M_L * M_L - 1.0);
+        Mp_L = 0.25 * (M_L + 1.0) * (M_L + 1.0) + beta_mass * (M_L * M_L - 1.0) * (M_L * M_L - 1.0);
     }
     if (fabs(M_R) >= 1.0) {
         Mm_R = 0.5 * (M_R - fabs(M_R));
     } else {
-        Mm_R = -0.25 * (M_R - 1.0) * (M_R - 1.0) - alpha * (M_R * M_R - 1.0) * (M_R * M_R - 1.0);
+        Mm_R = -0.25 * (M_R - 1.0) * (M_R - 1.0) - beta_mass * (M_R * M_R - 1.0) * (M_R * M_R - 1.0);
     }
     double M_half = Mp_L + Mm_R;
 
@@ -104,14 +108,14 @@ void ausm_up_flux(
         Pp_L = 0.5 * (1.0 + sign_ML);
     } else {
         Pp_L = 0.25 * ((M_L + 1.0) * (M_L + 1.0) * (2.0 - M_L)
-               + beta_param * M_L * (M_L * M_L - 1.0) * (M_L * M_L - 1.0));
+               + alpha_pressure * M_L * (M_L * M_L - 1.0) * (M_L * M_L - 1.0));
     }
     if (fabs(M_R) >= 1.0) {
         double sign_MR = (M_R > 0.0) ? 1.0 : ((M_R < 0.0) ? -1.0 : 0.0);
         Pm_R = 0.5 * (1.0 - sign_MR);
     } else {
         Pm_R = 0.25 * ((M_R - 1.0) * (M_R - 1.0) * (2.0 + M_R)
-               - beta_param * M_R * (M_R * M_R - 1.0) * (M_R * M_R - 1.0));
+               - alpha_pressure * M_R * (M_R * M_R - 1.0) * (M_R * M_R - 1.0));
     }
 
     // pu 速度扩散项

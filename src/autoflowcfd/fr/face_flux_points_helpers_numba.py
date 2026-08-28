@@ -198,7 +198,20 @@ def _tet_exact_locate_nb(cell_nodes, fixed_axis, fixed_val, targets_phys):
 
 @njit(cache=True)
 def _newton_locate_nb(is_prism, cell_nodes, fixed_axis, fixed_val, targets_phys, char_length):
-    """在单元面上 Newton 迭代定位目标物理点。四面体走闭式解，棱柱走迭代。"""
+    """在单元面上 Newton 迭代定位目标物理点。四面体走闭式解，棱柱走迭代。
+
+    Returns:
+        (free_coords, resid_per_point)：resid_per_point 形状 (n_pts,)，
+        每个目标点各自的最终物理残差（绝对长度单位），不在这里归约成
+        单一标量——调用方（face_flux_points_merge.py）对多源棱柱四边形
+        侧面（同一批 targets_phys 里混有真正属于该 cell、和落在对角线
+        另一半、根本不在该 cell 面上的点）需要按半区各自的掩码分别取
+        max，若在这里就归约成全批次的单一 max，两个半区的残差会被
+        混在一起——落在"错误"那一半的目标点在这个 cell 的面上无论
+        Newton 怎么迭代都不可能收敛（它们物理上属于对角线另一侧、
+        映射到另一个真实相邻单元的面），残差会远超真实的双线性曲面
+        翘曲量级，误把这当作整张面的残差会对多源面产生系统性误报。
+    """
     o0, o1 = 0, 0
     ix = 0
     for ax in range(3):
@@ -220,15 +233,13 @@ def _newton_locate_nb(is_prism, cell_nodes, fixed_axis, fixed_val, targets_phys,
             full[p, o0] = x[p, 0]
             full[p, o1] = x[p, 1]
         phys = _map_ref_nb(False, full, cell_nodes)
-        mr = 0.0
+        resid_arr = np.empty(n_pts)
         for p in range(n_pts):
             dx = phys[p, 0] - targets_phys[p, 0]
             dy = phys[p, 1] - targets_phys[p, 1]
             dz = phys[p, 2] - targets_phys[p, 2]
-            r = np.sqrt(dx * dx + dy * dy + dz * dz)
-            if r > mr:
-                mr = r
-        return x, mr
+            resid_arr[p] = np.sqrt(dx * dx + dy * dy + dz * dz)
+        return x, resid_arr
 
     # 棱柱 Newton
     x = np.zeros((n_pts, 2))
@@ -311,7 +322,16 @@ def _newton_locate_nb(is_prism, cell_nodes, fixed_axis, fixed_val, targets_phys,
             dx[p, 0] = (b1 * a22 - b2 * a12) / ds / J0n[p]
             dx[p, 1] = (a11 * b2 - a12 * b1) / ds / J1n[p]
 
-        # 回溯线搜索
+        # 回溯线搜索。真实 bug 修复（V2.0 专家组盲审发现，2026-08-27）：
+        # 此前分两段循环——第一段算试探点更新 xb/rb，第二段对全部点
+        # 重新算一遍**相同的**试探点，用 rt<rb[p] 判断是否要减半步长；
+        # 但对刚在第一段改进过的点，rb[p] 此时已经等于这次算出的 rt，
+        # rt<rb[p] 恒为 False，导致刚成功改进的点在本轮也被错误地减半
+        # 步长。与 Python 参考实现（face_flux_points_locate.py::
+        # newton_locate_on_face）不一致——那里每次迭代只算一次试探残差，
+        # 用同一次结果同时驱动 xb/rb 更新与 step 调整决策。这里改成同一
+        # 结构：不影响最终收敛结果（历史最优 xb/rb 不会被撤销），但消除
+        # 了对已改进点的多余步长收缩，在偏斜/退化单元上收敛更稳健。
         step = np.ones(n_pts)
         xb = x.copy()
         rb = rn.copy()
@@ -328,34 +348,20 @@ def _newton_locate_nb(is_prism, cell_nodes, fixed_axis, fixed_val, targets_phys,
                 ddy = pt[0, 1] - targets_phys[p, 1]
                 ddz = pt[0, 2] - targets_phys[p, 2]
                 rt = np.sqrt(ddx * ddx + ddy * ddy + ddz * ddz)
-                if rt < rb[p]:
+                improved = rt < rb[p]
+                if improved:
                     xb[p, 0] = xt0; xb[p, 1] = xt1; rb[p] = rt
                 else:
                     all_imp = False
+                    step[p] *= 0.5
                 if step[p] >= 1e-8:
                     all_sml = False
             if all_imp or all_sml:
                 break
-            for p in range(n_pts):
-                xt0 = x[p, 0] + step[p] * dx[p, 0]
-                xt1 = x[p, 1] + step[p] * dx[p, 1]
-                fp = np.empty((1, 3))
-                fp[0, fixed_axis] = fixed_val; fp[0, o0] = xt0; fp[0, o1] = xt1
-                pt = _map_ref_nb(True, fp, cell_nodes)
-                ddx = pt[0, 0] - targets_phys[p, 0]
-                ddy = pt[0, 1] - targets_phys[p, 1]
-                ddz = pt[0, 2] - targets_phys[p, 2]
-                rt = np.sqrt(ddx * ddx + ddy * ddy + ddz * ddz)
-                if not (rt < rb[p]):
-                    step[p] *= 0.5
         x = xb
         rn = rb
 
-    fr = 0.0
-    for p in range(n_pts):
-        if rn[p] > fr:
-            fr = rn[p]
-    return x, fr
+    return x, rn
 
 
 # ============================================================================

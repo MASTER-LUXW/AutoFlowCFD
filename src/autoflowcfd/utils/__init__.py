@@ -1,41 +1,16 @@
 """工具函数与辅助模块。
 
-本模块提供通用工具，包括日志配置、自定义异常、性能监控、
-I/O 辅助和数组验证。
+真实状态更新（V2.0 专家组盲审发现，2026-08-27）：此前本模块文档字符串
+描述了 setup_logger/AutoFlowCFDError/Timer/math_helpers 等一整套工具，
+但全仓库检索确认这些从未被实现过（可能是设计意图，从未落地）；日志/
+计时目前在各模块里各自直接调用 loguru/time.time()，没有统一封装。
 
-核心组件:
-    - 基于 loguru 的日志配置
-    - 自定义异常层次
-    - 性能计时器与基准测试
-    - 文件 I/O 辅助
-    - 数组形状验证
+原先本模块唯一的真实实现 `array_validation.py`（形状校验工具）已删除：
+全仓库检索确认零调用点，且其中 `safe_elementwise_multiply` 的形状不
+匹配 fallback 分支（返回 0.0 而非报错）是一个"假通过"反面模式——一旦
+被误接入真实的力/系数计算路径，会让形状错误静默退化成分量为 0，而非
+暴露 bug。删除优于保留一个未使用、且容易被误用的工具函数。
 
-示例:
-    >>> from autoflowcfd.utils import setup_logger
-    >>> logger = setup_logger(verbose=True)
-    >>> logger.info("仿真启动")
-    
-    >>> from autoflowcfd.utils.array_validation import safe_elementwise_multiply
-    >>> result = safe_elementwise_multiply(a, b, context="力计算")
+本模块当前不提供任何公开 API；如需日志/异常/计时封装，应在实际需要时
+新增并接入真正的调用点，而不是预先搭建无人使用的脚手架。
 """
-
-# 数组验证工具
-from .array_validation import (
-    validate_broadcast_shapes,
-    safe_elementwise_multiply,
-    assert_matching_lengths,
-    validate_face_indices,
-    get_shape_summary,
-)
-
-__all__ = [
-    # "setup_logger",
-    # "AutoFlowCFDError",
-    # "Timer",
-    # 数组验证工具
-    "validate_broadcast_shapes",
-    "safe_elementwise_multiply",
-    "assert_matching_lengths",
-    "validate_face_indices",
-    "get_shape_summary",
-]

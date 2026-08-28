@@ -25,6 +25,20 @@ ProjectFiles/V2.0/6_整体专家组二次评审.md）：
    对本步毫无影响，架构上不可能生效。改为在 `compute_viscous_residual()`
    内部计算并叠加到返回的粘性残差数组上，随其余残差一起参与时间积分
    （见 fr_solver.py::compute_viscous_residual 调用处）。
+
+真实 bug 修复（#9，V2.0 专家组盲审第4轮，2026-08-28，"WMLES 假滑移边界"）：
+此前 WALL 边界的 ghost state 恒用严格无滑移镜像构造（is_no_slip=True），
+BR1/LDG 粘性通量因此已经从（本项目近壁网格通常无法真正分辨粘性底层的）
+解析速度梯度算出一个虚假壁面剪应力，本函数算出的 tau_w 又作为额外动量
+源项叠加在其上——两者同时生效，是真正的双重计权，不是设计如此。按
+WMLES 文献标准做法（wall model 的 tau_w 应"取代"而非"叠加"解析梯度剪
+应力，见 Kawai & Larsson 团队 wmles.umd.edu 页面明确用词"replace"，以及
+Kang et al. 2024 arXiv:2405.15899 在 DG 类弱式框架下的对应公式与"不会
+双重计权"论证）修复：`fr_solver/boundary.py::build_boundary_ghost_provider`
+现在在 WMLES 激活时把 WALL 组的 ghost state 构造改为 is_no_slip=False
+（与 SLIP_WALL 同一套构造：切向速度与内部值无跳跃），让该面对 BR1/LDG
+粘性通量的切向梯度贡献退化为零——本函数算出的 tau_w 现在是该面切向应力
+的唯一来源，不再与一个虚假的解析梯度剪应力共存。
 """
 
 from typing import Any, Optional

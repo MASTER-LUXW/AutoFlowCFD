@@ -112,7 +112,8 @@ def viscous_physical_flux(
 
 def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
                                  mu_t_field=None, Pr_t: float = 0.9,
-                                 boundary_ghost_provider=None) -> np.ndarray:
+                                 boundary_ghost_provider=None,
+                                 flat_face_override=None) -> np.ndarray:
     """计算真实面耦合的 FR 粘性残差 dU/dt（物理空间，已除以 det(J)）。
 
     Args:
@@ -228,8 +229,12 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
     # 逐位对比验证）。
     from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
     from autoflowcfd.core.fr_residual.inviscid_kernel import compute_boundary_ghost_states
-    
-    flat = get_flat_face_geometry(mesh, ops)
+
+    # #2（2026-08-28）：见 core/fr_residual/inviscid.py::
+    # compute_inviscid_residual_fr 同名参数文档——CPU 分布式路径必须传入
+    # 预先按 local+halo 压缩索引空间构造好的 flat_face_override，不能让
+    # 这里对 DistributedMeshAdapter 重新调用 get_flat_face_geometry。
+    flat = flat_face_override if flat_face_override is not None else get_flat_face_geometry(mesh, ops)
     Q_ghost = compute_boundary_ghost_states(flat, Q, adj_j, ghost_provider)
 
     if n_sps == 1:
@@ -262,6 +267,8 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
         # P≥1 通用路径：图着色或 per-thread buffer
         from autoflowcfd.core.fr_residual.viscous_flux_kernel import (
             compute_viscous_interface_correction_kernel,
+        )
+        from autoflowcfd.core.fr_residual.viscous_flux_kernel_colored import (
             compute_viscous_interface_correction_kernel_colored,
         )
         # 图着色方案：同色面无 owner_cell 冲突，直接写入共享 buffer

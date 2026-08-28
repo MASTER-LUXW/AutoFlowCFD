@@ -5,7 +5,7 @@ AutoFlowCFD V2.0 - FR 求解器主类 (Final Integration)
 它是 V2.0 求解器的总控中心，负责协调各模块完成 N-S 方程的高阶离散与求解。
 
 核心功能:
-1. 支持多种湍流模型（SST/DDES/WMLES/LES）
+1. 支持多种湍流模型（SST/DDES/IDDES/WMLES/LES）
 2. 自动切换RANS/LES模式
 3. 完整的时间推进循环
 4. 残差监控和收敛判断
@@ -72,14 +72,16 @@ class FRSolver(_SolverGeometryMixin):
                  n_threads: int = -1,
                  adaptive_cfl: bool = True,
                  turbulence_intensity: float = 0.01,
-                 viscosity_ratio: float = 5.0):
+                 viscosity_ratio: float = 5.0,
+                 sem_num_eddies: int = 200,
+                 flux_type: str = 'radau'):
         """
         初始化 FRSolver。
 
         Args:
             mesh: HighOrderMesh 类型的高阶网格对象
             order: 多项式阶数
-            turb_model_name: 湍流模型名称 ("SST"/"DDES"/"WMLES"/"LES"/"NONE")
+            turb_model_name: 湍流模型名称 ("SST"/"DDES"/"IDDES"/"WMLES"/"LES"/"NONE")
             mu_molecular: 分子动力粘度（默认 1.8e-5 Pa*s，标准状态下空气）。
                 此前粘性残差（fr_residual_viscous.py 默认参数）与粘性 CFL
                 步长（_compute_local_time_step）各自独立硬编码这个值，没有
@@ -127,6 +129,17 @@ class FRSolver(_SolverGeometryMixin):
                 外部气动默认 ≤1%，城市道路 3-5%，风洞对标 0.5-2%。
             viscosity_ratio: 来流粘性比 VR = nu_t/nu（默认 5.0），与 Tu 共同
                 决定 omega 初值。外部气动推荐 2-10。
+            sem_num_eddies: LES/DDES/IDDES 模式下 BD-02 合成湍流入口 (SEM) 的
+                涡核数量（默认 200，此前恒为硬编码常量，见
+                fr_solver/boundary.py 模块文档 2026-08-28 的修复说明）。
+                只在 turb_model_name 为 LES/DDES/IDDES 且未激活 WMLES 时生效。
+            flux_type: FR 修正函数族选择，透传给 `fr/operators.py::
+                generate_fr_operators` 的 `flux_point_type` 参数（#14 新增，
+                见该函数文档）。默认 'radau'（此前唯一被使用过的方案，
+                数值行为不变），'gauss' 启用与 Spectral Difference 等价的
+                新方案。Order Continuation 跨阶数重建算子时
+                （order_continuation.py）会读取 `self.flux_type` 保持
+                同一个选择贯穿整个求解过程，不会在阶数切换时静默退回默认值。
         """
         # numba 全局线程数只在这里设置一次（求解器生命周期内不再修改），
         # 理由见本方法 n_threads 参数文档。必须在任何残差 kernel 被调用
@@ -173,6 +186,7 @@ class FRSolver(_SolverGeometryMixin):
 
         self.mesh = mesh
         self.order = order
+        self.flux_type = flux_type
         self.backend_type = backend.lower()
         
         # 安全地获取网格信息
@@ -183,14 +197,14 @@ class FRSolver(_SolverGeometryMixin):
         if initial_state is not None:
             # 使用提供的初始状态（Order Continuation）
             self.state = initial_state
-            print(f"✅ Using provided initial state from lower order")
+            print(f"   [OK] Using provided initial state from lower order")
         else:
             # 根据湍流模型确定变量数。必须先 upper()：self.turb_model_name
             # 要到第 5 步才被规范化为大写，这里若直接用构造参数原始大小写
             # 比较，会导致 `turbulence-model sst`（小写，steady CLI 路径）
             # 与 `SST`（大写，transient CLI 路径）判出不同的 n_vars——已用
             # 两条 CLI 路径实测复现（steady 得到 n_vars=5，transient 得到 7）。
-            default_n_vars = 7 if turb_model_name.upper() in ["SST", "DDES"] else 5
+            default_n_vars = 7 if turb_model_name.upper() in ["SST", "DDES", "IDDES"] else 5
             self.state = FRState(n_cells, n_sps, default_n_vars)
             # 初场必须与自由来流边界条件一致（都用同一套 rho_inf/vel_inf/p_inf），
             # 否则显式伪时间推进第一步就要吸收一个几个数量级的压力跳跃
@@ -201,7 +215,7 @@ class FRSolver(_SolverGeometryMixin):
             self.state.initialize_uniform(rho=rho_inf, u=vel_inf, v=0.0, w=0.0, p=p_inf)
         
         # 2. 预计算算子 (G-04)
-        self.ops = generate_fr_operators(order)
+        self.ops = generate_fr_operators(order, flux_point_type=flux_type)
         
         # 3. 初始化边界条件 (BD-01) —— 真正参与残差组装的幽灵态边界条件
         # （不再持有未被使用的 FRWeakBC 罚项处理器实例——那是旧版本从未被
@@ -243,6 +257,17 @@ class FRSolver(_SolverGeometryMixin):
         mach_ref = vel_inf / np.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10))
         mach_ref = max(mach_ref, _MACH_REF_FLOOR)
         self.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf, "mach_ref": mach_ref}
+        # Tu/VR/SEM 涡核数设置必须先于 boundary_ghost_provider 构造（与上面
+        # turb_model_name 的顺序要求同理，2026-08-28 补充）：
+        # build_boundary_ghost_provider 现在会读 solver._turbulence_intensity/
+        # _sem_num_eddies 来驱动 BD-02 SEM 入口的目标雷诺应力/涡核数量
+        # （见 fr_solver/boundary.py 模块文档），若这几个属性此时还没设置，
+        # getattr 的兜底默认值会悄悄生效、用户传入的 --turbulence-intensity/
+        # --sem-num-eddies 就会被忽略——必须在 _build_boundary_ghost_provider
+        # 调用之前赋值。
+        self._turbulence_intensity = turbulence_intensity
+        self._viscosity_ratio = viscosity_ratio
+        self._sem_num_eddies = sem_num_eddies
         # B-9：保存 bc_overrides 供 Order Continuation 切阶后重建边界幽灵态
         # provider（SEM 入口幽灵态持有构造阶数的 FP 坐标，见 order_continuation.py）。
         self.bc_overrides = bc_overrides or {}
@@ -258,11 +283,7 @@ class FRSolver(_SolverGeometryMixin):
         self.ddes_model = None
         self.wmles_model = None
         self.sgs_model = None
-        
-        # Tu/VR 设置（供 _set_freestream_turbulence 读取，推导物理自洽的 k/omega）
-        self._turbulence_intensity = turbulence_intensity
-        self._viscosity_ratio = viscosity_ratio
-        
+
         self._init_turbulence_models(n_cells, n_sps)
         
         # 6. 初始化时间积分器 (S-05)
@@ -293,8 +314,15 @@ class FRSolver(_SolverGeometryMixin):
         # 8. Order Continuation 状态
         self.current_order = order
         self.order_continuation_enabled = True
-        
-        print(f"✅ FRSolver Ready:")
+
+        # 9. 收敛历史（真实 bug 修复，V2.0 专家组盲审发现，2026-08-27）：
+        # 此前 CPU FRSolver 从不记录逐迭代残差，api.py::get_convergence_history
+        # 恒返回硬编码占位符 {"iterations": [], "residuals": []}——GPUFRSolver
+        # 一直有这个属性且真正被 solve 循环填充，CPU 版本此前遗漏。solve()/
+        # run_order_continuation() 每步迭代后 append，与 GPU 版同一约定。
+        self.residual_history: list = []
+
+        print(f"[OK] FRSolver Ready:")
         print(f"   Cells: {n_cells}, Order: P{order}")
         print(f"   Turbulence: {turb_model_name}")
         print(f"   Backend: {self.backend_type.upper()}")
@@ -364,7 +392,8 @@ class FRSolver(_SolverGeometryMixin):
             res = self.step(dt)
             t_end = time.time()
             final_residual = res
-            
+            self.residual_history.append(res)
+
             if initial_res is None:
                 initial_res = res
             
@@ -386,7 +415,7 @@ class FRSolver(_SolverGeometryMixin):
             # 直接 ZeroDivisionError 崩溃），此时不启用收敛判据。
             if i >= 1 and tol > 0.0 and initial_res / max(res, 1e-30) >= 1.0 / tol:
                 converged = True
-                print(f"✅ Converged at iteration {i+1} with residual {res:.6e} "
+                print(f"[OK] Converged at iteration {i+1} with residual {res:.6e} "
                       f"(dropped {initial_res/res:.1e}x)")
                 break
         
@@ -442,12 +471,12 @@ class FRSolver(_SolverGeometryMixin):
             self.state.U = np.ascontiguousarray(self.state.U)
 
         # GPU 分发 (B-01)：请求 GPU 后端时走 CuPy 加速路径。
-        # P0（阶数延续热身阶段）使用 CuPy RawKernel（core/gpu/gpu_p0_inviscid.py）；
-        # P>=1 高阶 FR 使用 CuPy 向量化实现（core/gpu/gpu_inviscid.py）。
+        # P0（阶数延续热身阶段）使用 CuPy RawKernel（core/gpu/residual/gpu_p0_inviscid.py）；
+        # P>=1 高阶 FR 使用 CuPy 向量化实现（core/gpu/residual/gpu_inviscid.py）。
         # GPU 不可用时自动回退 CPU。
         if self.backend_type == "gpu":
             if self.mesh.n_points_1d == 1:
-                from ..gpu.gpu_p0_inviscid import compute_inviscid_residual_p0_cupy
+                from ..gpu.residual.gpu_p0_inviscid import compute_inviscid_residual_p0_cupy
                 res_euler = compute_inviscid_residual_p0_cupy(
                     self.state.U, self.mesh,
                     boundary_ghost_provider=self.boundary_ghost_provider,
@@ -455,7 +484,7 @@ class FRSolver(_SolverGeometryMixin):
                 )
             else:
                 # P>=1 高阶 FR GPU 路径
-                from ..gpu.gpu_inviscid import compute_inviscid_residual_fr_gpu
+                from ..gpu.residual.gpu_inviscid import compute_inviscid_residual_fr_gpu
                 res_euler = compute_inviscid_residual_fr_gpu(
                     self.state.U, self.mesh, self.ops,
                     boundary_ghost_provider=self.boundary_ghost_provider,

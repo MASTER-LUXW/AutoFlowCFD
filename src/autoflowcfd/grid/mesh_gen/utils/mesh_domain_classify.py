@@ -30,35 +30,30 @@ from .mesh_domain_classify_geometry import (
 if TYPE_CHECKING:
     from ...schema.grid_boundaries import BoundaryMap
 
-# Boundary types 那个 are always 打开-flow boundaries 或 frictionless
-# (slip) walls, so their faces are never BL-extruded regardless of
-# geometry: there is no near-wall velocity gradient to resolve at a
-# free-slip/symmetry surface, and no wall at all at a genuine open
-# boundary. SLIP_WALL covers e.g. "tunnel"/"farfield"-named boundaries
-# (see nas_parser_boundary.py's keyword table and bc_handler.py's
-# _classify) - previously missing here, so a tunnel wall (falling through
-# to the 'WALL' bc_type default before that keyword-table fix) could still
-# get BL-extruded, which collapses almost immediately for a domain-
-# spanning wall (hits the opposite wall/body within 1-2 layers). PERIODIC
-# is the same story - a periodic plane is a mathematical pairing
-# construct (see grid/face_connectivity.py::pair_periodic_boundary_faces),
-# not a physical wall; there is no boundary layer to extrude there.
+# 这些边界类型永远是开放流动边界或无摩擦（滑移）壁面，因此无论几何形状
+# 如何，它们的面都不会被挤出边界层：自由滑移/对称面上不存在需要解析的
+# 近壁速度梯度，真正的开放边界上更是完全没有壁面。SLIP_WALL 覆盖例如
+# "tunnel"/"farfield" 命名的边界（见 nas_parser_boundary.py 的关键词表和
+# bc_handler.py 的 _classify）——此前这里遗漏了它，导致隧道壁（在关键词表
+# 修复之前会落到默认的 'WALL' bc_type）仍可能被挤出边界层，而对于横跨
+# 整个计算域的壁面，这几乎立刻就会坍缩（1-2 层内就撞到对面的壁面/车身）。
+# PERIODIC 同理——周期面是一个数学配对构造（见
+# grid/face_connectivity.py::pair_periodic_boundary_faces），不是物理壁面，
+# 那里没有边界层可挤出。
 NEVER_EXTRUDE_BC_TYPES = {'VELOCITY_INLET', 'PRESSURE_OUTLET', 'SYMMETRY', 'SLIP_WALL', 'PERIODIC'}
 
-# A sub-shell whose own open-edge fraction is below this is treated as a
-# closed (embedded) solid for orientation purposes, even with a small real
-# opening (e.g. a body welded to the ground at a small contact patch).
+# 自身开放边比例低于此值的子壳体，在判定朝向时按闭合（嵌入）实体处理，
+# 即使存在一个很小的真实开口（例如车身在与地面小接触面处焊接）。
 _CLOSED_OPEN_EDGE_FRACTION = 0.01
 
-# Relative tolerance (of the domain's characteristic length) for deciding a
-# node lies "on" a bounding-box face, matching mesh_utils.check_reached_boundary's
-# existing 1e-6 convention.
+# 判定一个节点是否"贴合"某个包围盒面所用的相对容差（相对于计算域特征长度），
+# 与 mesh_utils.check_reached_boundary 已有的 1e-6 约定保持一致。
 _BBOX_TOUCH_RTOL = 1e-6
 
 
 class SubShell(NamedTuple):
-    """One classified, winding-corrected 片段 的 a boundary 分组."""
-    faces: np.ndarray          # (n, 3) int, indices into the shared node array
+    """一个已分类、绕向已修正的边界分组子片段。"""
+    faces: np.ndarray          # (n, 3) int，共享节点数组中的索引
     extrude: bool
     group_name: str
 
@@ -70,58 +65,53 @@ def classify_boundary_groups(
     bbox_min: np.ndarray,
     bbox_max: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray, List[str], np.ndarray, List[np.ndarray], np.ndarray, np.ndarray]:
-    """分割 every boundary 分组's 面 到 extrude-eligible vs. core-仅,
-    与 extrude-eligible 面 winding-corrected for 修正 BL growth
-    方向.
+    """把每个边界分组的面分割为可挤出边界层 vs. 仅用于核心区域两类，
+    可挤出的面已做绕向修正以保证边界层生长方向正确。
 
     Args:
-        nodes: (n_nodes, 3) surface node coordinates
-        surface_faces: (n_faces, 3) surface connectivity
-        boundaries: BoundaryMap with groups (cell/face indices) and bc_types
-        bbox_min, bbox_max: overall (unpadded) domain extent, shape (3,)
+        nodes: (n_nodes, 3) 表面节点坐标
+        surface_faces: (n_faces, 3) 表面连接关系
+        boundaries: 含分组（单元/面索引）与 bc_types 的 BoundaryMap
+        bbox_min, bbox_max: 整体（未加padding）计算域范围，形状 (3,)
 
     Returns:
-        extrude_faces: (m, 3) winding-corrected faces eligible for BL extrusion
-        core_faces: (k, 3) faces to use unmodified as outer-shell PLC input
-            (m + k == n_faces; every input face appears in exactly one)
-        extruded_group_names: names of boundary groups that got at least
-            some faces extruded (for logging/diagnostics)
-        extrude_face_groups: (m,) str array, the original boundary-group name
-            for each row of extrude_faces (same order/length) - lets the
-            caller attribute BL-extruded tets back 到 它们的 源 分组
-            directly 通过 面 位置, 代替 的 matching 节点 indices
-            against the pre-extrusion surface (which cannot work for
-            genuinely-displaced BL nodes; see mesh_boundary.py).
-        hole_points: one point per closed embedded-solid sub-component found
-            (e.g. a car body, isolated from the domain's outer shell) - must
-            be passed 到 mesh_tetgen_core.fill_core_volume as tetgen hole
-            seeds, or tetgen fills that solid's own interior (and its BL
-            block's enclosed cavity) with spurious tetrahedra that overlap
-             BL prisms 已经 occupying 那个 空间, 代替 的
-            correctly excluding it. A bbox-touching wall (ground/tunnel) is
-            never a hole - it's an 打开 sheet terminating at  域's
-            自身 outer boundary, 与 no enclosed interior 到 排除.
-        core_face_groups: (k,) str array, the original boundary-group name
-            for each row of core_faces (same order/length) - lets the
-            caller attribute core (tetgen-filled) boundary tets back to
-            它们的 源 分组 通过 tetgen facet markers, 哪个 存活
-            boundary subdivision unlike node-index matching (see
-            mesh_tetgen_core.fill_core_volume's `face_markers`/nobisect=False
-            路径, needed for graded 最大-单元-大小 regions 到 actually
-            refine cells near a coarse far-field wall).
-        is_closed_solid_face: (m,) bool array, parallel to extrude_faces -
-            True for rows from a closed embedded solid (the `hole_points`
-            branch, e.g. a car body), False for a bbox-touching wall sheet
-            (ground/tunnel-like). Currently unused by mesh_background.py
-            (received as `_is_closed_solid_face`) - it was meant to let the
-            caller 构建 最大-单元-大小 grading spheres centered 在...上 仅 
-            isolated solid's 自身 geometry, distinct 从 a bbox-touching
-            wall sheet 那个 can 跨越 nearly  整体 域 footprint, but
-            that per-solid grading-sphere approach was abandoned (see
-            mesh_tetgen_core.py's note where those functions used to live)
-            in favor 的 one flat core-填充 区域. Kept 此处 自从 it's a
-            cheap, 已经-computed byproduct 那个 a future per-solid
-            grading scheme could reuse.
+        extrude_faces: (m, 3) 绕向已修正、可挤出边界层的面
+        core_faces: (k, 3) 原样用作外壳 PLC 输入的面
+            （m + k == n_faces；每个输入面恰好出现在其中一类）
+        extruded_group_names: 至少有部分面被挤出边界层的边界分组名称
+            （供日志/诊断用）
+        extrude_face_groups: (m,) str 数组，extrude_faces 每一行对应的
+            原始边界分组名（顺序/长度一致）——让调用方直接按面的位置把
+            挤出边界层生成的四面体归属回其源分组，而不是靠匹配挤出前
+            表面的节点索引（对真正发生了位移的边界层节点这种匹配方式
+            行不通，见 mesh_boundary.py）。
+        hole_points: 每个发现的封闭嵌入实体子部件（例如与计算域外壳
+            隔离的车身）各取一个点——必须传给
+            mesh_tetgen_core.fill_core_volume 作为 tetgen 的 hole 种子点，
+            否则 tetgen 会用虚假的四面体去填充该实体自身内部（以及其
+            边界层区块围成的空腔），这些四面体会与已经占据该空间的
+            边界层棱柱重叠，而不是正确地把这部分区域排除在外。贴着
+            计算域边界包围盒的壁面（地面/隧道）永远不是 hole——它是
+            终止于计算域自身外边界的一张开放曲面，没有需要排除的
+            封闭内部空间。
+        core_face_groups: (k,) str 数组，core_faces 每一行对应的原始
+            边界分组名（顺序/长度一致）——让调用方通过 tetgen facet
+            markers 把核心区域（tetgen 填充生成）的边界四面体归属回
+            源分组，这种方式在边界被细分之后依然有效，不像节点索引
+            匹配那样会失效（见 mesh_tetgen_core.fill_core_volume 的
+            `face_markers`/nobisect=False 路径，这是让远场粗网格附近
+            的分级 max-cell-size 区域真正细化单元所需要的）。
+        is_closed_solid_face: (m,) bool 数组，与 extrude_faces 一一对应——
+            来自封闭嵌入实体（`hole_points` 分支，例如车身）的行为
+            True，来自贴着包围盒的壁面曲面（地面/隧道类）的行为 False。
+            目前 mesh_background.py（接收为 `_is_closed_solid_face`）未
+            使用这个返回值——本意是让调用方只围绕孤立实体自身的几何
+            构建 max-cell-size 分级球（区别于可能横跨几乎整个计算域
+            footprint 的贴边界壁面曲面），但这种按实体分别构建分级球
+            的方案已被放弃（见 mesh_tetgen_core.py 中这些函数原来所在
+            位置的说明），改用统一的单一扁平核心填充区域。这里保留
+            该返回值是因为它是一个廉价的、已经算出来的副产品，未来若
+            重新采用按实体分级的方案可以直接复用。
     """
     L_char = float(np.max(bbox_max - bbox_min))
     tol = L_char * _BBOX_TOUCH_RTOL
@@ -152,54 +142,48 @@ def classify_boundary_groups(
             comp_face_mask = labels == comp_id
             comp_faces = group_faces[comp_face_mask]
 
-            # 检查 bounding-box 接触 第一, 之前  打开-边-fraction
-            # test below. That fraction is not a topological invariant: a
-            # large flat sheet (ground/tunnel wall) has far more internal
-            # edges than perimeter edges once meshed finely enough, so it
-            # can fall under the "closed" threshold by mesh density alone -
-            # empirically confirmed to misclassify a >=150x150-division
-            # flat plane as a "closed embedded solid", which then gets its
-            # orientation decided by a near-zero (numerically-noisy) signed
-            # volume instead of the bbox-direction check meant for exactly
-            # this shape, and gets BL-extruded when it should stay core-only.
-            # A real embedded solid (car body) never predominantly touches a
-            # single bbox face even when welded to the ground at a small
-            # contact patch (_BBOX_TOUCH_MAJORITY=0.9 of its own nodes), so
-            # checking this first doesn't change that case's outcome.
+            # 先检查是否贴合包围盒（bounding-box）某一面，再看下面的开放边
+            # 比例判据。这个开放边比例不是拓扑不变量：一个大而平的薄片
+            # （地面/隧道壁）网格划分足够细后，内部边数会远超过周边边数，
+            # 仅凭网格密度就可能落入"闭合"阈值以内——已实测确认：一个
+            # >=150x150 划分的平面会被误判成"闭合的嵌入实体"，进而其法向
+            # 朝向由一个接近零（数值噪声级别）的带号体积决定，而不是专门
+            # 为这种形状设计的 bbox 方向判据，导致本该只参与核心区域填充的
+            # 平面被错误地做了边界层挤出。真正的嵌入实体（车身）即使在与
+            # 地面小接触面处焊接，也不会主要贴合单一 bbox 面
+            # （_BBOX_TOUCH_MAJORITY=0.9 是它自身节点的占比阈值），所以先做
+            # 这项检查不会改变这种情形的判定结果。
             comp_node_idx = np.unique(comp_faces)
             direction = _bbox_touch_fraction(nodes, comp_node_idx, bbox_min, bbox_max, tol)
 
             if direction is not None:
-                # Predominantly sits on one bbox face: a floor/wall-like
-                # sheet 那个's 部分 的  域's outer shell. Orientation
-                # comes from that bbox direction, not face winding (which is
-                # unreliable for a sheet with a real free boundary).
+                # 主要贴合某一个 bbox 面：说明这是地面/侧壁一类的薄片，属于
+                # 计算域外壳的一部分。法向朝向由该 bbox 方向决定，而不是面
+                # 绕序（面绕序对带有真实自由边界的薄片并不可靠）。
                 from .mesh_utils import compute_face_normals
                 comp_normals = compute_face_normals(nodes, comp_faces)
                 mean_normal = comp_normals.mean(axis=0)
                 if np.dot(mean_normal, direction) < 0:
-                    comp_faces = comp_faces[:, [1, 0, 2]]  # flip winding
+                    comp_faces = comp_faces[:, [1, 0, 2]]  # 翻转绕序
                 extrude_face_rows.append(comp_faces)
                 extrude_face_group_rows.append(np.full(len(comp_faces), name))
                 is_closed_solid_rows.append(np.zeros(len(comp_faces), dtype=bool))
                 any_extruded_in_group = True
                 continue
 
-            # Doesn't predominantly sit 在...上 a 单个 bbox 面. Recompute 边
-            # stats scoped to this sub-component alone so the open-edge
-            # fraction reflects only its own boundary, not the whole group's.
+            # 不主要贴合单一 bbox 面。重新在该子分量范围内单独统计边信息，
+            # 让开放边比例只反映它自身的边界，而不是整个分组的边界。
             _, sub_counts, _ = _face_edges(comp_faces)
             n_unique_edges = len(sub_counts)
             n_open_edges = int(np.count_nonzero(sub_counts == 1))
             open_fraction = n_open_edges / max(n_unique_edges, 1)
 
             if open_fraction < _CLOSED_OPEN_EDGE_FRACTION:
-                # Closed-like (embedded solid, e.g. car body): orient by the
-                # sign of its own enclosed volume, not by trusting input
-                # winding directly.
+                # 近似闭合（嵌入实体，例如车身）：按自身包围体积的正负号
+                # 定朝向，不直接信任输入的面绕序。
                 volume = _signed_volume(nodes, comp_faces)
                 if volume < 0:
-                    comp_faces = comp_faces[:, [1, 0, 2]]  # flip winding
+                    comp_faces = comp_faces[:, [1, 0, 2]]  # 翻转绕序
                 extrude_face_rows.append(comp_faces)
                 extrude_face_group_rows.append(np.full(len(comp_faces), name))
                 is_closed_solid_rows.append(np.ones(len(comp_faces), dtype=bool))
@@ -217,9 +201,9 @@ def classify_boundary_groups(
                         f"solid's own BL block."
                     )
             else:
-                # Open and not bbox-touching: an outer-shell wall
-                # (inlet/outlet/tunnel-like) with a genuine free boundary
-                # elsewhere. 使用 unmodified as 部分 的  core PLC.
+                # 开放且不贴合 bbox：属于外壳壁面（入口/出口/隧道一类），
+                # 在别处有真正的自由边界。原样保留、作为核心 PLC 的一部分
+                # 使用。
                 core_face_rows.append(comp_faces)
                 core_face_group_rows.append(np.full(len(comp_faces), name))
 

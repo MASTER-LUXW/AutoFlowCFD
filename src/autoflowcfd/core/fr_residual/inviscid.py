@@ -144,6 +144,7 @@ def compute_inviscid_residual_fr(
     ops,
     boundary_ghost_provider: Optional[Callable[[int, np.ndarray, np.ndarray], np.ndarray]] = None,
     mach_ref: float = 0.1,
+    flat_face_override=None,
 ) -> np.ndarray:
     """计算真实面耦合的 FR 无粘残差 dU/dt（物理空间，已除以 det(J)）。
 
@@ -289,9 +290,21 @@ def compute_inviscid_residual_fr(
         compute_inviscid_interface_correction_kernel_colored,
     )
 
-    flat = get_flat_face_geometry(mesh, ops)
+    # #2（V2.0 专家组盲审第4轮，2026-08-28）：flat_face_override 显式传入
+    # 时优先使用，不再无条件调用 get_flat_face_geometry(mesh, ops)——CPU
+    # 分布式路径（core/mpi/distributed_compute.py）下 `mesh` 是
+    # `DistributedMeshAdapter`，其 `face_connectivity`/`face_flux_points`
+    # 是 local+halo 压缩索引空间下的分布式几何数据（`DistributedFlatFaceGeometry`
+    # /局部 HighOrderMesh 片段），不是 `get_flat_face_geometry` 内部
+    # `build_flat_face_geometry` 期望的完整全局 FRFaceConnectivity——用它
+    # 重新构建一遍等于试图从不完整/类型不匹配的数据重新推导面几何，
+    # 必然出错或产出错误结果。调用方需要直接传入已经按同一套 local+halo
+    # 压缩索引空间构造好的 `DistributedFlatFaceGeometry.base_flat`（与
+    # gpu_inviscid.py::compute_inviscid_residual_fr_gpu 的 flat_face_cpu
+    # 参数同一个道理）。单机路径不传，行为完全不变。
+    flat = flat_face_override if flat_face_override is not None else get_flat_face_geometry(mesh, ops)
     Q_ghost = compute_boundary_ghost_states(flat, Q, adj_j, ghost_provider)
-    
+
     # 图着色方案：同色面无 owner_cell 冲突，直接写入共享 buffer
     # 内存从 O(n_threads * n_cells * n_sps * 5) 降至 O(n_cells * n_sps * 5)
     # 着色结果已缓存在 flat 中（build 时一次性计算，不再重复着色）

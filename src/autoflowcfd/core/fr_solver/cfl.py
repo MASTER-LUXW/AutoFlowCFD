@@ -14,17 +14,18 @@ def compute_local_time_step(solver) -> np.ndarray:
     计算局部时间步长（基于CFL条件）。
 
     真正的稳定性限制取三个独立机制中更严格的一个：
-    0. Weiss-Smith 低马赫数预处理（2026-08-23 重新接入，与 AUSM+up 通量
-       同步）——2026-08-14 那次曾经引入又撤销的尝试（当时只把
-       `preconditioned_acoustic_eigs` 接进 CFL 步长估计，AUSM+up 通量
-       本身完全没有预处理，两边用的特征波速不一致：CFL 按"预处理后、
-       人为缩小的"波速估计出偏大的 dt，但真正被显式积分的却是未预处理、
-       用真实声速主导刚性的通量，真实复现过扫描参考速度 1~30 m/s 精确
-       复现失稳阈值）已经不再适用——这次 `kernels.py::
-       compute_ausm_up_flux` 本身也做了同一套 Weiss-Smith beta2 预处理
-       （用同一个 `solver.freestream["mach_ref"]`），CFL 这里用同一个
-       `preconditioned_acoustic_eigs` 算出的 `c_precond` 替代原始声速 a，
-       两边终于共享同一套有效声速，不会重蹈那次不一致的覆辙。
+
+    （历史记录，第四次评审核实并更正：本节曾经短暂记录过一次
+    "CFL 改用 Weiss-Smith 预处理声速 c_precond 替代物理声速 a" 的尝试，
+    但这个改动在 2026-08-24 就已撤销——见下方 `wave_speed` 计算处
+    "物理声速用于 CFL 估计（2026-08-24 修复）" 的完整说明：显式 SSP-RK3
+    积分的是物理通量，稳定性由物理通量谱半径 |u_n|+a 决定，用预处理声速
+    反而会把 dt 高估约 10 倍、导致失稳。此前这里的文档没有同步更新，
+    仍描述着已经被撤销的设计，容易误导后来者"重新接入" c_precond 而
+    复现同一个真实发生过的失稳——`low_mach_cfl_ausm_inconsistency` 项目
+    记忆记录的正是这次事故。Weiss-Smith 预处理本身仍然在用，但只用于
+    AUSM+up 通量本身的低马赫数耗散修正，不影响这里的 CFL 步长估计。）
+
     1. 对流 CFL（已升级为基于面的谱半径）：dt = CFL * V / sum_f(wave_speed_f * A_f)，
        替代此前的 dt = CFL * V^(1/3) / wave_speed。旧公式假设各向同性单元，
        对边界层薄棱柱单元高估稳定步长 ~100 倍（V^(1/3) ~ 1e-3 m vs 实际

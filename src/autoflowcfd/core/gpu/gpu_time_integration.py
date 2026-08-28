@@ -94,6 +94,7 @@ def compute_local_cfl_step_gpu(
     U, cell_volumes, owner_cell, neighbor_cell, is_boundary,
     normals, areas, cell_owner, cell_areas,
     cfl: float = 1.0, mu_eff=None, poly_order: int = 0,
+    det_jacs_sp=None, metric_flux_scale_sp=None,
 ):
     """GPU 版局部 CFL 时间步长计算。
 
@@ -121,6 +122,17 @@ def compute_local_cfl_step_gpu(
         poly_order: 当前多项式阶数，用于 1/(2p+1) 的阶数相关收紧，
             与 CPU 侧 cfl.py::compute_local_time_step 的
             order_factor_advective/order_factor_viscous 同一公式。
+        det_jacs_sp: 本次调用对应 SP 的 |det(J)|，CuPy 数组 (n_cells,)
+            （可选）。与 metric_flux_scale_sp 一起提供时，额外施加第三个
+            几何/度量 CFL 限制——与 CPU 侧 cfl.py::compute_local_time_step
+            的 dt_geometric 同一机制：坍缩坐标下同一单元内不同 SP 的
+            det(J) 天然可以相差几百倍（Duffy 坍缩变换在 P>=2 时的固有
+            性质），此前 GPU 路径完全没有这一限制，可能重新触发 CPU 侧
+            已经修复过的同一类发散（项目记忆 "Tet collapsed-coord
+            anisotropy"）。
+        metric_flux_scale_sp: 本次调用对应 SP 的度量"通量面积"标度
+            sum_m||adj(J)[:,m,:]||，CuPy 数组 (n_cells,)（可选，与
+            det_jacs_sp 一起提供时才生效）。
 
     Returns:
         dt_local: CuPy 数组 (n_cells,)
@@ -173,6 +185,16 @@ def compute_local_cfl_step_gpu(
         Lc2 = cell_volumes ** (2.0 / 3.0)
         dt_visc = 0.25 * cfl * order_factor_viscous * rho * Lc2 / cp.maximum(mu_eff, 1e-30)
         dt = cp.minimum(dt, dt_visc)
+
+    # 几何/度量 CFL 限制（与 CPU 侧 cfl.py::compute_local_time_step 的
+    # dt_geometric 同一公式，见上方参数文档）：用该 SP 自己的 det(J) 当作
+    # 局部"体积"，metric_flux_scale 当作局部"总通量面积"。
+    if det_jacs_sp is not None and metric_flux_scale_sp is not None:
+        wave_speed = cp.maximum(cp.sqrt(cp.sum(vel**2, axis=1)) + a, 1e-10)
+        dt_geometric = cfl * cp.abs(det_jacs_sp) / cp.maximum(
+            metric_flux_scale_sp * wave_speed, 1e-300
+        )
+        dt = cp.minimum(dt, dt_geometric)
 
     return dt
 

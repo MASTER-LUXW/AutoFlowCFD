@@ -139,13 +139,9 @@ def viscous_physical_flux_gpu(Q, grad_vel, grad_T, mu, Pr, mu_t=None, Pr_t=0.9):
     v = Q[..., 2]
     w = Q[..., 3]
 
-    # 有效粘度
-    if mu_t is None:
-        mu_total = mu
-    elif np.isscalar(mu_t):
-        mu_total = mu + mu_t
-    else:
-        mu_total = mu + mu_t
+    # 有效粘度（mu_t 标量/数组两种情况下 mu + mu_t 的计算完全相同，
+    # 此前拆成三个分支但后两个分支代码逐字相同，合并为一个）
+    mu_total = mu if mu_t is None else mu + mu_t
 
     # 热导率：k = mu * Cp / Pr（分子）+ mu_t * Cp / Pr_t（湍流）
     Cp = GAMMA * R_AIR / (GAMMA - 1.0)

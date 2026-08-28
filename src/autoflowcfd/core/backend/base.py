@@ -1,8 +1,23 @@
-"""CPU/GPU 计算的 backend 抽象基类。"""
+"""SolutionVector 数据结构。
 
-from abc import ABC, abstractmethod
+此前本文件还定义了 `BackendBase` 抽象基类，供 `cpu_backend.py`
+(`NumbaBackend`) / `gpu_backend.py` (`CUDABackend`) 实现——这两个类是
+V1 时代 Numba CUDA 方案的遗留骨架，与真正的生产求解路径
+（`core/fr_solver/solver.py::FRSolver` / `core/gpu/gpu_solver.py::
+GPUFRSolver`，全程 CuPy）完全脱节：`_cuda_flux_kernel` 用"中心平均"
+冒充 AUSM+up、`_cuda_residual_kernel` 恒返回 0、GPU 可用性检测用的是
+已被项目明确弃用的 `numba.cuda.is_available()`（见
+`ProjectFiles/V2.0/7_重大问题修复-GPU大规模并行计算.md` "统一采用
+CuPy……移除 Numba CUDA" 的既定决策，此前从未真正执行），且被自己的
+单元测试（已删除的 `test_backends.py`）当作真实可用的 GPU 后端做回归
+测试，制造"这是一套可用 GPU 后端"的假象（第四次评审发现7）。已确认
+`BackendBase`/`NumbaBackend`/`CUDABackend`/`create_backend` 全仓库
+零真实调用点（只有已删除的测试用到），第四次评审时一并删除，只保留
+真正被生产代码使用的 `SolutionVector`。
+"""
+
 import numpy as np
-from typing import Dict, Any, Optional
+from typing import Optional
 from dataclasses import dataclass
 
 
@@ -80,138 +95,3 @@ class SolutionVector:
             rho = np.maximum(self.data[:, 0], self._RHO_FLOOR)
             return (self.data[:, 5] / rho, self.data[:, 6] / rho)
         return (np.array([]), np.array([]))
-
-
-class BackendBase(ABC):
-    """求解器 backend 的抽象基类。
-
-    定义所有计算 backend（CPU/Numba、GPU/CUDA）必须实现的接口，为 FR
-    求解器提供统一的 API 来对接不同的硬件加速器。
-
-    Attributes:
-        backend_type: 类型标识（'cpu' 或 'gpu'）
-        available: 当前系统上该 backend 是否可用
-        device_info: 硬件信息字典
-    """
-
-    def __init__(self):
-        """初始化 backend 基类。"""
-        self.backend_type = "base"
-        self.available = False
-        self.device_info: Dict[str, Any] = {}
-
-    @abstractmethod
-    def initialize(
-        self,
-        n_cells: int,
-        n_nodes: int,
-        n_variables: int = 5
-    ) -> None:
-        """分配内存并初始化数据结构。
-
-        Args:
-            n_cells: 网格单元数
-            n_nodes: 网格节点数
-            n_variables: 解变量个数（默认 5，对应可压缩流）
-        """
-        pass
-
-    @abstractmethod
-    def compute_flux(
-        self,
-        solution: np.ndarray,
-        cell_connectivity: np.ndarray,
-        face_normals: np.ndarray,
-        gamma: float = 1.4
-    ) -> np.ndarray:
-        """计算所有单元界面上的数值通量。
-
-        Args:
-            solution: 解向量，形状=(n_cells, n_variables)
-            cell_connectivity: 单元连接关系数组
-            face_normals: 面法向量
-            gamma: 比热比
-
-        Returns:
-            界面上的通量张量
-        """
-        pass
-
-    @abstractmethod
-    def compute_residuals(
-        self,
-        solution: np.ndarray,
-        flux: np.ndarray,
-        cell_volumes: np.ndarray,
-        boundary_mask: np.ndarray
-    ) -> np.ndarray:
-        """由通量散度计算残差。
-
-        Args:
-            solution: 当前解状态
-            flux: 已算好的界面通量
-            cell_volumes: 单元体积
-            boundary_mask: 边界条件掩码
-
-        Returns:
-            残差向量，形状=(n_cells, n_variables)
-        """
-        pass
-
-    @abstractmethod
-    def update_solution(
-        self,
-        solution: np.ndarray,
-        residuals: np.ndarray,
-        dt: float,
-        cfl: float
-    ) -> np.ndarray:
-        """用时间积分格式更新解。
-
-        Args:
-            solution: 当前解
-            residuals: 已算好的残差
-            dt: 时间步长
-            cfl: CFL 数
-
-        Returns:
-            更新后的解
-        """
-        pass
-
-    @abstractmethod
-    def apply_boundary_conditions(
-        self,
-        solution: np.ndarray,
-        boundary_map: Dict[str, np.ndarray],
-        bc_params: Dict[str, Any]
-    ) -> np.ndarray:
-        """把边界条件应用到解上。
-
-        Args:
-            solution: 解向量
-            boundary_map: 边界名到单元索引的映射
-            bc_params: 边界条件参数
-
-        Returns:
-            应用边界条件后的解
-        """
-        pass
-
-    @abstractmethod
-    def synchronize(self) -> None:
-        """同步数据（对 GPU 异步操作很重要）。"""
-        pass
-
-    @abstractmethod
-    def get_device_info(self) -> Dict[str, Any]:
-        """获取硬件设备信息。
-
-        Returns:
-            包含设备规格的字典
-        """
-        pass
-
-    def cleanup(self) -> None:
-        """释放已分配的资源。"""
-        pass

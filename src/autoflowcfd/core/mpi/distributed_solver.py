@@ -106,7 +106,7 @@ class DistributedFRSolver:
             # 兼容旧接口：所有 rank 独立执行分区
             if self.rank == 0:
                 logger.info(f"Partitioning mesh into {n_ranks} parts (METIS on root)...")
-                cell_partition = partition_mesh(face_connectivity, n_ranks)
+                cell_partition = partition_mesh(face_connectivity, n_ranks, n_cells=mesh.n_cells)
             else:
                 cell_partition = None
             if n_ranks > 1:
@@ -187,16 +187,35 @@ class DistributedFRSolver:
                 f"{len(self.partition.neighbor_ranks)} neighbors"
             )
 
-        # 3. 初始化分布式状态
+        # 3. 构建分布式面几何——必须排在下面 HaloExchange/DistributedFRState
+        # 构造**之前**：当 cell_partition 非空时，这一步内部会调用
+        # extend_halo_for_flux_point_cross_references 原地扩展
+        # self.partition 的 halo_cells/send_lists/recv_lists（覆盖 FR
+        # Flux Point 多源交叉插值依赖，真实 cube_demo 网格上 16%~19% 的
+        # 单元需要这种扩展，不是边缘情况）。HaloExchange 会按*构造时刻*
+        # 的 send_lists/recv_lists 大小预分配定长 buffer——如果它先构造、
+        # 面几何扩展后发生，buffer 要么大小对不上（形状不匹配崩溃），
+        # 要么根本没有新增邻居 rank 的 key（KeyError，或更隐蔽地静默
+        # 跳过、留下未初始化的 halo 数据）。第四次评审第二轮复核发现
+        # 此前的构造顺序正是反的，这里改为先做面几何（含 halo 扩展），
+        # 再构造依赖最终 halo 布局的对象。
+        #
+        # 传入 cell_partition 以便扩展 halo 层；"完全分布式加载"模式下
+        # mesh 是局部网格而非全局网格，这个扩展步骤依赖的
+        # get_flat_face_geometry(mesh, ops) 全局面几何假设在那条路径下
+        # 可能不成立——这是一个更深层、超出本次修复范围的架构问题，此处
+        # 不展开，只保证"传统模式：所有 rank 有完整网格"这条路径
+        # （cell_partition 在此处始终是全局数组）正确。
+        self.dist_flat_face = build_distributed_flat_face(mesh, ops, self.partition, cell_partition=cell_partition)
+
+        # 4. 初始化分布式状态（在面几何/halo 扩展之后构造）
         n_sps = mesh.n_sps_per_cell
         n_vars = solver_kwargs.get('n_vars', 5)
         self.state = DistributedFRState(self.partition, n_sps, n_vars)
 
-        # 4. 初始化 halo 交换器
+        # 5. 初始化 halo 交换器（同样必须在面几何/halo 扩展之后构造，
+        # 理由见上）
         self.halo_exchange = HaloExchange(self.partition, n_sps, n_vars)
-
-        # 5. 构建分布式面几何
-        self.dist_flat_face = build_distributed_flat_face(mesh, ops, self.partition)
 
         # 6. 保存 solver kwargs 用于创建本地求解器
         self.solver_kwargs = solver_kwargs
@@ -214,12 +233,27 @@ class DistributedFRSolver:
 
     @property
     def local_solver(self):
-        """延迟初始化本地求解器（避免循环依赖）。"""
+        """延迟初始化本地求解器（避免循环依赖）。
+
+        FRSolver.__init__ 的第二个位置参数是 order: int（内部会自己调用
+        generate_fr_operators(order) 重新构建算子，不接受外部预构建的
+        FROperators 对象作为构造参数）——此前这里错误地把 self.ops
+        （DistributedFRSolver 构造时外部传入的 FROperators 实例）当成
+        order 位置传参，导致 `order + 1` 处 TypeError（真实复现，
+        DistributedFRSolver(..., n_ranks=1, turb_model_name='none') 后
+        调用 step() 必现）；生产 CLI 路径（solve_steady_command.py）还
+        会同时把 order=order 塞进 solver_kwargs，两者相加变成
+        "got multiple values for argument 'order'"，同一个根因。
+        用 mesh.order（构建 local_mesh 时用的同一个阶数）作为默认值，
+        solver_kwargs 里若显式提供了 order（生产路径就是如此，且与
+        mesh.order 恒一致，见 solve_steady_command.py）则优先使用它，
+        避免与下面的显式关键字参数重复传参报错。
+        """
         if self._local_solver is None:
             from autoflowcfd.core.fr_solver.solver import FRSolver
-            self._local_solver = FRSolver(
-                self.mesh, self.ops, **self.solver_kwargs
-            )
+            kwargs = dict(self.solver_kwargs)
+            kwargs.setdefault('order', self.mesh.order)
+            self._local_solver = FRSolver(self.mesh, **kwargs)
         return self._local_solver
 
     def exchange_halo(self, U_local: np.ndarray) -> np.ndarray:
@@ -321,13 +355,13 @@ class DistributedFRSolver:
             U_stage_local = U_flat_trial.reshape(n_local, n_sps, n_vars)
             inviscid_residual = distributed_compute_inviscid_residual(
                 U_stage_local, self.partition, self.halo_exchange,
-                self.dist_flat_face.connectivity, self.mesh, self.ops,
+                self.dist_flat_face, self.mesh, self.ops,
                 boundary_ghost_provider, mach_ref=mach_ref,
             )
             if enable_viscous:
                 viscous_residual = distributed_compute_viscous_residual(
                     U_stage_local, self.partition, self.halo_exchange,
-                    self.dist_flat_face.connectivity, self.mesh, self.ops,
+                    self.dist_flat_face, self.mesh, self.ops,
                     mu, boundary_ghost_provider,
                 )
                 total_dudt = inviscid_residual + viscous_residual

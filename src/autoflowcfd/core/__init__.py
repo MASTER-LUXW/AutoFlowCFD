@@ -31,68 +31,16 @@ from .turbulence.des import DDESModel, IDDESModel
 from .turbulence.wmles import WMLESModel
 from .turbulence.sgs import WALEModel, SmagorinskyModel
 
-# Backend 模块
-from .backend.base import BackendBase
-from .backend.cpu_backend import NumbaBackend
-from .backend.gpu_backend import CUDABackend
+# Backend 模块（第四次评审：删除了 V1 时代与生产路径完全脱节、且用
+# 已被弃用的 numba.cuda 判据的 create_backend/NumbaBackend/CUDABackend/
+# BackendBase，见 backend/base.py、backend/__init__.py 模块文档。
+# get_available_backends/list_available_backends 现在只有一份实现
+# （backend/__init__.py），这里直接复用，不再各自维护一份可能给出不同
+# 结论的判据。）
+from .backend import get_available_backends, list_available_backends, SolutionVector
 
 # TransientSolver 是 FRSolver 的别名，用于瞬态仿真
 TransientSolver = FRSolver
-
-
-def create_backend(backend_type: str = "cpu", **kwargs):
-    """创建计算后端实例。
-    
-    Args:
-        backend_type: 后端类型 ('cpu', 'gpu' 或 'auto')
-        **kwargs: 后端特定参数
-        
-    Returns:
-        BackendBase: 后端实例
-        
-    Raises:
-        RuntimeError: GPU后端不可用时
-        ValueError: 未知的后端类型
-    """
-    if backend_type.lower() == "cpu":
-        return NumbaBackend(**kwargs)
-    elif backend_type.lower() == "gpu":
-        backend = CUDABackend(**kwargs)
-        if not backend.available:
-            raise RuntimeError(
-                "GPU backend requested but CUDA is not available. "
-                "Please install CUDA Toolkit and ensure NVIDIA GPU is present."
-            )
-        return backend
-    elif backend_type.lower() == "auto":
-        # 先尝试GPU，失败则回退到CPU
-        try:
-            gpu_backend = CUDABackend(**kwargs)
-            if gpu_backend.available:
-                return gpu_backend
-        except Exception:
-            pass
-        
-        # 回退到CPU
-        return NumbaBackend(**kwargs)
-    else:
-        raise ValueError(f"Unknown backend type: {backend_type}")
-
-
-def get_available_backends():
-    """获取可用的后端列表。
-    
-    Returns:
-        dict: 后端名称到可用状态的映射字典
-    """
-    backends = {"cpu": True}
-    # GPU 检测统一为 CuPy（替代此前的 numba.cuda）
-    try:
-        from autoflowcfd.core.gpu import gpu_available
-        backends["gpu"] = gpu_available
-    except ImportError:
-        backends["gpu"] = False
-    return backends
 
 
 __all__ = [
@@ -108,11 +56,9 @@ __all__ = [
     'WMLESModel',
     'WALEModel',
     'SmagorinskyModel',
-    'BackendBase',
-    'NumbaBackend',
-    'CUDABackend',
+    'SolutionVector',
     'FRSolver',
     'TransientSolver',
-    'create_backend',
     'get_available_backends',
+    'list_available_backends',
 ]

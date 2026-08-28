@@ -32,7 +32,7 @@ from ..utils.mesh_domain_classify import classify_boundary_groups
 # （参见 subdivide_oversized_tetrahedra 的文档字符串了解原因以及
 # 为何使用重心细分）。乘以各调用点自身的区域目标 maxvol（并非精确
 # 按该目标施加），因此正常的粗而合理的梯度过渡不会被误触发——只有
-# 真正的离群值（实测达目标的 100x-16000x）才会被Splitting。
+# 真正的离群值（实测达目标的 100x-16000x）才会被拆分。
 OVERSIZED_TET_FACTOR = 5.0
 
 # 核心四面体允许增长到的最大尺寸（以 max_cell_size**3 的分数表示），
@@ -96,6 +96,20 @@ def _build_merged_mesh(
     marker_to_name = {v: k for k, v in group_name_to_marker.items()}
 
     if len(extrude_faces) == 0:
+        if export_bl_only:
+            # 此前这里会静默走进 no_bl 分支（该分支签名根本不接受
+            # export_bl_only/export_bl_only_path），--bl-only 请求被完全
+            # 丢弃，调用方（generate_hybrid_mesh）却仍打印"导出完成"并以
+            # 0 退出——从未写出用户请求的 BL-only 文件（第四次评审发现2）。
+            # 该几何没有任何边界组被判定为可挤出边界层，--bl-only 在这种
+            # 输入上没有意义，必须显式报错，不能静默忽略。
+            raise ValueError(
+                "--bl-only was requested, but no boundary group in this surface mesh "
+                "was classified as extrudable (all groups fell into "
+                "NEVER_EXTRUDE_BC_TYPES or similar) - there is no BL prism layer to "
+                "export. Check the surface mesh's boundary group classification "
+                "(see mesh_domain_classify.py) before retrying."
+            )
         from .mesh_background_merge_no_bl import _build_merged_mesh_no_bl
         return _build_merged_mesh_no_bl(
             surface_nodes, surface_faces, surface_boundaries, extrude_faces,

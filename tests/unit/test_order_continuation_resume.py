@@ -82,7 +82,7 @@ def _fake_solver(current_order, target_order, resumed):
     return solver
 
 
-def _fake_generate_ops(p):
+def _fake_generate_ops(p, flux_point_type='radau'):
     n = _n_sps(p)
     return SimpleNamespace(D_3d=np.zeros((n, n)))
 

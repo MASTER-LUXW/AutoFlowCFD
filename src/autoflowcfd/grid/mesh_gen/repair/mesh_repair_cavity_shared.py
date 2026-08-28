@@ -235,11 +235,17 @@ def _count_bad_cells(validator: 'MeshQualityValidator', nodes: np.ndarray, cells
     # 单次 Stage B' 传递产生了 70K+ 行日志）。只有这个模块自己的
     # 每 cavity/摘要行（由 remesh_core_cavity 自己单独记录）在这个
     # 粒度上实际上有用。
-    logger.disable("autoflowcfd.grid.mesh_gen.face_extractor")
+    # 真实 bug（V2.0 专家组盲审发现）：FaceExtractor 实际所在模块是
+    # autoflowcfd.grid.mesh_gen.extraction.face_extractor（见上面
+    # import 语句），少了 ".extraction." 这一级；loguru 的
+    # disable/enable 按模块名精确/前缀匹配，路径不对时静默不生效——
+    # 这条日志抑制此前从未真正生效过，本函数文档里"70K+ 行日志"的
+    # 噪音问题实际仍然存在，只是错误地看起来已经被抑制。
+    logger.disable("autoflowcfd.grid.mesh_gen.extraction.face_extractor")
     try:
         faces = FaceExtractor.extract_faces(cells.astype(np.int32), node_arr)
     finally:
-        logger.enable("autoflowcfd.grid.mesh_gen.face_extractor")
+        logger.enable("autoflowcfd.grid.mesh_gen.extraction.face_extractor")
     diag = validator.compute_face_diagnostics(nodes, cells, faces)
     if len(diag['angle_deg']) > 0:
         face_bad = (

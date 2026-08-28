@@ -17,15 +17,25 @@ class _GPUSolverInitMixin:
     """
 
     def _init_face_geometry(self):
-        """初始化 GPU 面几何缓存。"""
-        try:
-            from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
-            flat_face = get_flat_face_geometry(self.mesh, self.ops)
-            from autoflowcfd.core.gpu.gpu_face_geometry import build_gpu_flat_face
-            self.flat_face_gpu = build_gpu_flat_face(flat_face, self.device_id)
-        except Exception as e:
-            logger.warning(f"Face geometry init failed: {e}")
-            self.flat_face_gpu = None
+        """初始化 GPU 面几何缓存。
+
+        此前这里用宽 `except Exception` 吞掉一切异常、把
+        `self.flat_face_gpu` 静默设为 None——这正是分布式版本
+        `gpu_distributed_init.py::_init_distributed_face_geometry` 在上
+        一轮评审中被认定为"必须移除的假通过错误处理"的同一类问题（该
+        文件文档明确记录了这个反面教材），第四次评审发现单 GPU 版本没
+        有同步修复（发现9）：`flat_face_gpu=None` 时，`gpu_inviscid.py`/
+        `gpu_viscous.py` 会在**每次**残差求值时重新构建+重新上传整套
+        GPU 面几何（约15个数组的 cp.asarray 上传），既隐藏了初始化失败
+        的真实原因，又严重拖慢求解、违背"GPU 数据常驻，只在 I/O 时传输"
+        的既定设计原则。修复：去掉吞掉一切异常的 try/except——面几何
+        构建失败时必须让求解器初始化真正失败，而不是静默退化成"每步
+        重建"这种隐蔽的性能/正确性陷阱。
+        """
+        from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+        flat_face = get_flat_face_geometry(self.mesh, self.ops)
+        from autoflowcfd.core.gpu.gpu_face_geometry import build_gpu_flat_face
+        self.flat_face_gpu = build_gpu_flat_face(flat_face, self.device_id)
 
     def _init_modal_filter_gpu(self):
         """初始化 GPU 模态滤波回调函数。"""
@@ -59,43 +69,56 @@ class _GPUSolverInitMixin:
         n_cells = self.mesh.n_cells
         n_sps = self.mesh.n_sps_per_cell
 
-        try:
-            if hasattr(self.mesh, 'sps_coords') and self.mesh.sps_coords is not None:
-                sps_coords = self.mesh.sps_coords.reshape(-1, 3)
-            elif hasattr(self.mesh, 'cell_centers') and self.mesh.cell_centers is not None:
-                sps_coords = np.tile(self.mesh.cell_centers, (1, n_sps)).reshape(-1, 3)
-            else:
-                logger.warning("No SP/cell-center coordinates available for wall distance")
-                self.wall_distance_gpu = cp.ones((n_cells, n_sps), dtype=cp.float64) * 0.01
-                return
+        # 真实 bug 修复（V2.0 专家组盲审发现，2026-08-27）：此前坐标缺失
+        # /计算异常时都静默回退到硬编码常量 0.01m——与 CPU 版
+        # fr_solver/turbulence.py 的既定原则矛盾（该文件对同样情形显式
+        # raise，理由"Industrial-grade calculation requires accurate
+        # wall distance, not simplified estimates"）。本方法只在
+        # `self.turb_model_gpu is not None`（真的需要壁面距离的湍流
+        # 模型，#7 起还包括 sgs_model_gpu 即 WMLES/LES）时才被调用（见
+        # gpu_solver.py 调用点），任何几何尺度不是
+        # 恰好在 0.01m 量级的真实网格上，这个假常量会系统性带偏 F1/F2
+        # 混合函数与 DDES 长度尺度——直接失败，不静默凑一个和网格无关
+        # 的常数。
+        if hasattr(self.mesh, 'sps_coords') and self.mesh.sps_coords is not None:
+            sps_coords = self.mesh.sps_coords.reshape(-1, 3)
+        elif hasattr(self.mesh, 'cell_centers') and self.mesh.cell_centers is not None:
+            sps_coords = np.tile(self.mesh.cell_centers, (1, n_sps)).reshape(-1, 3)
+        else:
+            raise RuntimeError(
+                f"Wall distance field not computed for turbulence model "
+                f"'{self.turb_model_name}': mesh has neither sps_coords nor "
+                f"cell_centers. Industrial-grade calculation requires accurate "
+                f"wall distance, not simplified estimates."
+            )
 
-            wall_indices = None
-            if hasattr(self.mesh, 'boundary_groups'):
-                for bg_name, bg in self.mesh.boundary_groups.items():
-                    if 'WALL' in bg_name.upper() or bg.get('type', '').upper() == 'WALL':
-                        wall_indices = bg.get('node_indices')
-                        break
-            if wall_indices is None and hasattr(self.mesh, 'nodes'):
-                wall_indices = np.array([], dtype=np.int64)
+        wall_indices = None
+        if hasattr(self.mesh, 'boundary_groups'):
+            for bg_name, bg in self.mesh.boundary_groups.items():
+                if 'WALL' in bg_name.upper() or bg.get('type', '').upper() == 'WALL':
+                    wall_indices = bg.get('node_indices')
+                    break
+        if wall_indices is None and hasattr(self.mesh, 'nodes'):
+            wall_indices = np.array([], dtype=np.int64)
 
-            if wall_indices is not None and len(wall_indices) > 0:
-                from scipy.spatial import cKDTree
-                wall_coords = self.mesh.nodes[wall_indices]
-                tree = cKDTree(wall_coords)
-                dist_flat, _ = tree.query(sps_coords, k=1)
-                self.wall_distance_gpu = cp.asarray(
-                    dist_flat.reshape(n_cells, n_sps)
-                )
-                logger.info(f"Wall distance computed: min={dist_flat.min():.6e}, max={dist_flat.max():.6e}")
-            else:
-                volumes = self.mesh_data.get('cell_volumes')
-                if volumes is None:
-                    volumes = cp.asarray(self.mesh.get_all_cell_volumes())
-                h_char = volumes ** (1.0 / 3.0)
-                self.wall_distance_gpu = cp.broadcast_to(
-                    h_char[:, None], (n_cells, n_sps)
-                ).copy()
-                logger.warning("Wall distance: using characteristic length as estimate")
-        except Exception as e:
-            logger.warning(f"Wall distance computation failed: {e}, using fallback")
-            self.wall_distance_gpu = cp.ones((n_cells, n_sps), dtype=cp.float64) * 0.01
+        if wall_indices is not None and len(wall_indices) > 0:
+            from scipy.spatial import cKDTree
+            wall_coords = self.mesh.nodes[wall_indices]
+            tree = cKDTree(wall_coords)
+            dist_flat, _ = tree.query(sps_coords, k=1)
+            self.wall_distance_gpu = cp.asarray(
+                dist_flat.reshape(n_cells, n_sps)
+            )
+            logger.info(f"Wall distance computed: min={dist_flat.min():.6e}, max={dist_flat.max():.6e}")
+        else:
+            # 找不到 WALL 边界组时退回特征长度估计——这是物理上合理的
+            # 近似（不是任意常数），仍打印 WARNING 提示精度下降，不属于
+            # 本次修复目标（"假常量" 0.01m）范畴，保留原行为。
+            volumes = self.mesh_data.get('cell_volumes')
+            if volumes is None:
+                volumes = cp.asarray(self.mesh.get_all_cell_volumes())
+            h_char = volumes ** (1.0 / 3.0)
+            self.wall_distance_gpu = cp.broadcast_to(
+                h_char[:, None], (n_cells, n_sps)
+            ).copy()
+            logger.warning("Wall distance: using characteristic length as estimate")

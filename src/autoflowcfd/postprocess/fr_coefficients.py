@@ -232,5 +232,6 @@ def compute_forces_pressure_only(solver, reference_area: float) -> dict:
             'Cl': float(force[2] / denom),
             'Cs': float(force[1] / denom),
         }
-    except Exception:
+    except Exception as e:
+        logger.warning(f"compute_forces_pressure_only 计算失败，返回零系数（根因需要排查，不应被忽略）: {e}")
         return {'Cd': 0.0, 'Cl': 0.0, 'Cs': 0.0}

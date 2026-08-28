@@ -10,7 +10,7 @@ AutoFlowCFD V2.0 - GPU 版物理空间梯度计算
 """
 
 from autoflowcfd.core.gpu import get_cupy
-from autoflowcfd.core.gpu.gpu_volume_contract import gpu_contract_shared_operator_1axis
+from autoflowcfd.core.gpu.residual.gpu_volume_contract import gpu_contract_shared_operator_1axis
 
 
 def compute_physical_gradient_gpu(field, mesh_data, ops_data):
@@ -71,4 +71,13 @@ def compute_physical_scalar_gradient_gpu(scalar_field, mesh_data, ops_data):
         scalar_field = scalar_field[..., None]  # (n_cells, n_sps, 1)
 
     grad = compute_physical_gradient_gpu(scalar_field, mesh_data, ops_data)
-    return grad[..., 0]  # (n_cells, n_sps, 3)
+    # 真实 bug 修复（V2.0 专家组盲审第四轮，2026-08-28）：`grad` 形状是
+    # (n_cells, n_sps, n_field_vars=1, 3)——`grad[..., 0]` 对末轴（3 个
+    # 空间分量那一维）取索引 0，等价于"只留 x 分量、丢掉 y/z"，还留了一个
+    # 多余的 n_field_vars=1 轴，输出形状 (n_cells, n_sps, 1) 而不是文档
+    # 承诺的 (n_cells, n_sps, 3)——本机没有 CuPy，这个函数此前从未被
+    # 实际执行验证过；`compute_turbulence_source_gpu`（SST 源项唯一调用
+    # 处，用于 grad_k/grad_omega）会因此拿到被截断成标量的假梯度。正确
+    # 做法是去掉 n_field_vars 这个多余轴（大小恒为 1），保留完整的 3
+    # 空间分量：`grad[:, :, 0, :]`。
+    return grad[:, :, 0, :]  # (n_cells, n_sps, 3)

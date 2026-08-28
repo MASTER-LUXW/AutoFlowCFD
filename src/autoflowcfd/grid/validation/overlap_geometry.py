@@ -271,19 +271,16 @@ def _coplanar_triangle_overlap(
 
     axes = np.concatenate([_edge_normals_2d(tri_a), _edge_normals_2d(tri_b)], axis=1)  # (N,6,2)
 
-    # A `<` (strict) separation test would call two coplanar triangles that
-    # only touch along a shared edge "not separated" (their projections on
-    # that edge's own normal axis meet exactly, but nowhere do they cross
-    # it) - i.e. it would misreport ordinary shared-edge adjacency as
-    # overlap. `<=` with a small eps margin treats an exact touch as
-    # separated (no overlap), consistent with triangle_triangle_intersect's
-    # documented contract. `ax` is unit-normalized before projecting so
-    # `proj_a`/`proj_b` are true distances (meters) and `eps` is directly
-    # comparable regardless of that edge's own length - an un-normalized
-    # axis would scale the projected values by the edge length, making the
-    # same eps effectively too loose for a long edge and too tight for a
-    # short one (the same class of bug as triangle_triangle_intersect's own
-    # normal-normalization - see its eps doc).
+    # 用 `<`（严格）分离判据会把两个仅沿共享边接触的共面三角形误判为
+    # "未分离"（它们在该边自身法向轴上的投影恰好相接、但并未真正穿越
+    # 对方）——也就是会把普通的共享边相邻关系误报成重叠。用 `<=` 配合
+    # 一个小的 eps 容差，把恰好接触视为"已分离"（不算重叠），与
+    # triangle_triangle_intersect 文档承诺的约定一致。`ax` 在投影前先做
+    # 单位归一化，这样 `proj_a`/`proj_b` 才是真实的距离（米），`eps` 才能
+    # 在不同长度的边之间直接比较——若不归一化，投影值会被该边自身的长度
+    # 放大/缩小，导致同一个 eps 对长边实际上偏松、对短边偏紧（与
+    # triangle_triangle_intersect 自身法向归一化那一类问题同源，见其
+    # eps 相关文档）。
     separated = np.zeros(n, dtype=bool)
     for k in range(6):
         ax = axes[:, k, :]  # (N,2)

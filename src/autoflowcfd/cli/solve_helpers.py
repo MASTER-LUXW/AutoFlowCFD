@@ -21,3 +21,8 @@ from autoflowcfd.cli.solve_checkpoint_io import (  # noqa: F401
     rebuild_solver_from_checkpoint,
     write_checkpoint,
 )
+from autoflowcfd.cli.solve_physical_constants import (  # noqa: F401
+    load_physical_config_if_given,
+    resolve_physical_constants,
+    resolve_turbulence_model,
+)

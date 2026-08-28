@@ -179,12 +179,11 @@ def patch_nonmanifold_cavity(
         if bad_cell_mask is not None else None
     )
 
-    #  整体 点 的 retiling 代替 的 deleting is 到 结束 向上 没有
-    # a non-manifold defect - verify that actually happened before
-    # accepting; if the same corner produces another non-manifold cluster
-    # on retile (e.g. a genuinely self-intersecting input geometry, not
-    # just an unlucky tetgen tiling choice), fall back rather than accept
-    # a patch that didn't fix anything.
+    # 用重新铺分（retiling）代替直接删除单元的整个意义，就在于让结果
+    # 最终不再有非流形缺陷——接受这次修补前必须验证这一点确实发生了；
+    # 如果同一个角点在重新铺分后又产生了另一簇非流形单元（例如输入
+    # 几何本身真的自相交，而不只是 tetgen 铺分方式不走运），就应该
+    # 回退到直接删除，而不是接受一次什么都没修好的"修补"。
     patch_keep = repair_nonmanifold_cells(new_nodes, new_cells)
     if not patch_keep.all():
         logger.warning(

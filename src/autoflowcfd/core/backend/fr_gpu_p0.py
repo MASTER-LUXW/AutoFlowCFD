@@ -72,8 +72,6 @@ if _CUDA_IMPORT_OK:
         数组，与 CPU 版返回值一致，只是调用约定不同）。
         """
         gamma = 1.4
-        alpha = 0.1875
-        beta = 0.5
 
         rhoL_s = max(rhoL, 1e-6)
         rhoR_s = max(rhoR, 1e-6)
@@ -95,6 +93,12 @@ if _CUDA_IMPORT_OK:
         fa = sqrt_M0_sq * (2.0 - sqrt_M0_sq)
         fa = max(fa, 1e-6)
 
+        # M4±/P5± 耗散系数——真实 bug 修复（V2.0 专家组盲审第四次评审，
+        # 2026-08-28，#12），与 core/fr_kernels.py::compute_ausm_up_flux
+        # 逐字对应，完整推导/文献交叉核实见该文件同名注释。
+        beta_mass = 1.0 / 8.0
+        alpha_pressure = 3.0 / 16.0 * (-4.0 + 5.0 * fa * fa)
+
         # Weiss-Smith 预处理声速（与 kernels.py::compute_ausm_up_flux 的
         # _WEISS_SMITH_K=1.1 同一个安全裕度常数、同一套 beta2 公式）。
         beta2 = min(1.0, max(max(Mbar2, 1.1 * mach_ref * mach_ref), 1e-10))
@@ -109,12 +113,12 @@ if _CUDA_IMPORT_OK:
         if abs(M_L) >= 1.0:
             Mp_L = 0.5 * (M_L + abs(M_L))
         else:
-            Mp_L = 0.25 * (M_L + 1.0) ** 2 + alpha * (M_L**2 - 1.0) ** 2
+            Mp_L = 0.25 * (M_L + 1.0) ** 2 + beta_mass * (M_L**2 - 1.0) ** 2
 
         if abs(M_R) >= 1.0:
             Mm_R = 0.5 * (M_R - abs(M_R))
         else:
-            Mm_R = -0.25 * (M_R - 1.0) ** 2 - alpha * (M_R**2 - 1.0) ** 2
+            Mm_R = -0.25 * (M_R - 1.0) ** 2 - beta_mass * (M_R**2 - 1.0) ** 2
 
         M_half = Mp_L + Mm_R
 
@@ -134,13 +138,13 @@ if _CUDA_IMPORT_OK:
             sign_ML = 1.0 if M_L > 0.0 else (-1.0 if M_L < 0.0 else 0.0)
             Pp_L = 0.5 * (1.0 + sign_ML)
         else:
-            Pp_L = 0.25 * ((M_L + 1.0) ** 2 * (2.0 - M_L) + beta * M_L * (M_L**2 - 1.0) ** 2)
+            Pp_L = 0.25 * ((M_L + 1.0) ** 2 * (2.0 - M_L) + alpha_pressure * M_L * (M_L**2 - 1.0) ** 2)
 
         if abs(M_R) >= 1.0:
             sign_MR = 1.0 if M_R > 0.0 else (-1.0 if M_R < 0.0 else 0.0)
             Pm_R = 0.5 * (1.0 - sign_MR)
         else:
-            Pm_R = 0.25 * ((M_R - 1.0) ** 2 * (2.0 + M_R) - beta * M_R * (M_R**2 - 1.0) ** 2)
+            Pm_R = 0.25 * ((M_R - 1.0) ** 2 * (2.0 + M_R) - alpha_pressure * M_R * (M_R**2 - 1.0) ** 2)
 
         # pu 速度扩散项 (Liou 2006 AUSM+up 式18)，与 Mp 项配套。
         Ku = 0.75

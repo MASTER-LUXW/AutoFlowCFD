@@ -309,7 +309,6 @@ def benchmark(
         t_mesh = _time.perf_counter() - t_start - t_load
 
         # 初始化自由来流解向量
-        from autoflowcfd.core.fr_residual.inviscid import compute_inviscid_residual_fr
         from autoflowcfd.fr.operators import generate_fr_operators
         ops = generate_fr_operators(order)
         n_cells = mesh.n_cells
@@ -323,14 +322,38 @@ def benchmark(
         U_init[:, :, 4] = E_inf
         mach_ref = u_inf / np.sqrt(1.4 * p_inf / rho_inf)
 
-        # 预热（触发 Numba JIT 编译）——第一次真实求值失败说明基准测试
-        # 本身就跑不通，不能吞掉继续假装成功，让它正常抛出。
-        _ = compute_inviscid_residual_fr(U_init, mesh, ops, mach_ref=mach_ref)
+        # 按 --backend 真正分派到对应实现——此前这里无论 backend 传什么
+        # 都恒定调用 CPU 专用的 compute_inviscid_residual_fr，`--backend
+        # gpu` 被静默忽略，结果 JSON/终端却仍打印 "backend": "gpu"，误导
+        # 性能对比决策（第四次评审发现3）。GPU 不可用时应与
+        # solve_steady_command.py 一致地显式 click.Abort()，不能悄悄
+        # 退化成 CPU 结果却还打着 GPU 的标签。
+        if backend == 'gpu':
+            from autoflowcfd.core.gpu import gpu_available
+            if not gpu_available:
+                raise click.ClickException(
+                    "CuPy not available - cannot run --backend gpu benchmark. "
+                    "Install with: pip install cupy-cuda12x"
+                )
+            from autoflowcfd.core.gpu.residual.gpu_inviscid import compute_inviscid_residual_fr_gpu
+
+            def _run_residual():
+                return compute_inviscid_residual_fr_gpu(U_init, mesh, ops, mach_ref=mach_ref)
+        else:
+            from autoflowcfd.core.fr_residual.inviscid import compute_inviscid_residual_fr
+
+            def _run_residual():
+                return compute_inviscid_residual_fr(U_init, mesh, ops, mach_ref=mach_ref)
+
+        # 预热（触发 Numba JIT 编译 / 首次 GPU kernel 编译）——第一次真实
+        # 求值失败说明基准测试本身就跑不通，不能吞掉继续假装成功，让它
+        # 正常抛出。
+        _ = _run_residual()
 
         # 正式基准测试
         t_bench_start = _time.perf_counter()
         for _ in range(iterations):
-            _ = compute_inviscid_residual_fr(U_init, mesh, ops, mach_ref=mach_ref)
+            _ = _run_residual()
         t_bench = _time.perf_counter() - t_bench_start
 
         # 内存使用

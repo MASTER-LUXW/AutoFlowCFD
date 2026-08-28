@@ -59,7 +59,7 @@ def _build_merged_mesh_no_bl(
     )
     n_bl_cells = 0
     source_vertex = np.arange(len(surface_nodes))
-    topology_faces = extrude_faces  # 空数组——无 BL 区域无需角点Splitting
+    topology_faces = extrude_faces  # 空数组——无 BL 区域无需角点拆分
     face_markers = None
     regions = None
 

@@ -23,7 +23,7 @@ def compute_wall_distance_for_solver(solver, volume_data, use_eikonal=False):
     import numpy as np
 
     turb_model = getattr(solver, 'turb_model_name', '').lower()
-    if turb_model not in ['sst', 'ddes', 'wmles', 'les']:
+    if turb_model not in ['sst', 'ddes', 'iddes', 'wmles', 'les']:
         print(f"   ℹ️  Turbulence model '{turb_model}' does not require wall distance")
         return
 

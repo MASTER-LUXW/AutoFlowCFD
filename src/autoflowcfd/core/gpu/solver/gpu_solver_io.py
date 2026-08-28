@@ -83,6 +83,36 @@ class _GPUSolverIOMixin:
 
         logger.info(f"GPU checkpoint loaded from {path}, iteration={self.iteration}")
 
+    def _update_production_ramp_gpu(self) -> None:
+        """更新湍流产项渐变因子（GPU 版，与 CPU 侧
+        fr_solver/turbulence.py::_update_production_ramp 同一机制）。
+
+        第四次评审发现：GPU 路径的 `turb_model_gpu.production_factor`
+        自身文档已承认"未接入渐变逻辑，恒为 1.0"——只靠 k_max/omega_max
+        硬上限兜底，初始瞬态存在重新触发 CPU 侧已修复过的数值爆炸风险
+        （CPU 侧修复正是本轮上一次提交"湍流强度产生项加渐变因子"）。
+        前 N 步内 production_factor 从 0 线性增加到 1，防止初始流场
+        未发展时 P_k >> D_k 导致 k/omega 指数爆炸。
+        """
+        if self.turb_model_gpu is None or not hasattr(self.turb_model_gpu, 'production_factor'):
+            return
+        ramp_steps = getattr(self, '_turb_production_ramp_steps', None)
+        if ramp_steps is None:
+            ramp_steps = 50  # 与 CPU 侧 init_turbulence_models 同一默认值
+            self._turb_production_ramp_steps = ramp_steps
+        current_step = getattr(self, '_turb_ramp_step', 0)
+        if ramp_steps <= 0 or current_step >= ramp_steps:
+            self.turb_model_gpu.production_factor = 1.0
+            if not getattr(self, '_turb_production_ramp_complete', False):
+                self._turb_production_ramp_complete = True
+                logger.info(
+                    f"[ProductionRamp][GPU] Ramp complete after {ramp_steps} steps, "
+                    f"production_factor = 1.0"
+                )
+        else:
+            self.turb_model_gpu.production_factor = current_step / ramp_steps
+        self._turb_ramp_step = current_step + 1
+
     def compute_turbulence_source_gpu(self):
         """GPU 计算湍流模型源项。
 
@@ -90,30 +120,61 @@ class _GPUSolverIOMixin:
         1. 计算速度梯度（GPU）
         2. 计算 k/ω 的真实物理梯度（GPU）
         3. 使用预计算的壁面距离
-        4. 计算 SST 源项
-        5. 更新 k/ω 场（含正性限制器）
+        4. DDES/IDDES 长度尺度（可选，写入 turb_model_gpu.des_length_scale）
+        5. 计算 SST 源项
+        6. k/ω 完整输运（对流+扩散，#7 新增，见 gpu_scalar_transport.py）
+        7. 更新 k/ω 场（含正性限制器）
+
+        纯 WMLES/LES（无 SST 输运，`turb_model_gpu is None`）：mu_t 只
+        来自 SGS 模型，读取上一步 `_apply_turbulence_corrections_gpu()`
+        算出的 `sgs_model_gpu.nu_t`（一步滞后，与 CPU 版
+        `apply_turbulence_corrections` 在 step() 末尾才更新 sgs_model.nu_t、
+        供下一步粘性残差使用的操作分裂时序完全一致，见该方法调用点
+        gpu_solver.py::step() 文档）。
 
         Returns:
-            mu_t: 动力涡粘度 rho*nu_t (n_cells, n_sps) CuPy 数组，无湍流模型时返回 None
+            mu_t: 动力涡粘度 rho*nu_t (n_cells, n_sps) CuPy 数组，湍流模型
+                与 SGS 模型都未激活时返回 None
         """
-        if self.turb_model_gpu is None:
-            return None
-
         cp = get_cupy()
+        rho = self.Q_gpu[:, :, 0]
+
+        if self.turb_model_gpu is None:
+            if self.sgs_model_gpu is None or self.sgs_model_gpu.nu_t is None:
+                return None
+            return rho * self.sgs_model_gpu.nu_t
+
         n_cells = self.mesh.n_cells
         n_sps = self.mesh.n_sps_per_cell
 
-        from autoflowcfd.core.gpu.gpu_gradients import (
+        self._update_production_ramp_gpu()
+
+        from autoflowcfd.core.gpu.residual.gpu_gradients import (
             compute_physical_gradient_gpu,
             compute_physical_scalar_gradient_gpu,
         )
         grad_U = compute_physical_gradient_gpu(
             self.U_gpu[..., :5], self.mesh_data, self.ops_data,
         )
+        grad_vel = grad_U[..., 1:4, :]
 
         d_wall = self.wall_distance_gpu
         if d_wall is None:
-            d_wall = cp.ones((n_cells, n_sps), dtype=cp.float64) * 0.01
+            # 真实 bug 修复（V2.0 专家组盲审发现，2026-08-27）：此前静默
+            # 回退到硬编码常量 0.01m，与 CPU 版 fr_solver/turbulence.py
+            # 的既定原则矛盾（"Industrial-grade calculation requires
+            # accurate wall distance, not simplified estimates"）。这个
+            # 分支只在 SST 已激活（本方法只被 SST 生产路径调用）却没有
+            # 壁面距离场时触发——正常初始化流程下 _init_wall_distance_gpu
+            # 已在构造期设置好 wall_distance_gpu（见 gpu_solver.py 调用
+            # 点），走到这里说明初始化被跳过或状态被破坏，直接失败而
+            # 不是悄悄用一个和网格尺度无关的假常量继续算。
+            raise RuntimeError(
+                f"Wall distance field not computed for turbulence model "
+                f"'{self.turb_model_name}'. Please ensure _init_wall_distance_gpu() "
+                f"ran during solver initialization. Industrial-grade calculation "
+                f"requires accurate wall distance, not simplified estimates."
+            )
 
         grad_k = compute_physical_scalar_gradient_gpu(
             self.turb_model_gpu.k_field, self.mesh_data, self.ops_data,
@@ -132,17 +193,84 @@ class _GPUSolverIOMixin:
             scale_omega = max_grad_mag / cp.maximum(grad_omega_mag, 1e-10)
             grad_omega *= cp.clip(scale_omega, 0, 1)[..., None]
 
+        # DDES/IDDES 长度尺度（#7）：必须在 compute_source_terms_gpu 之前
+        # 写入 self.turb_model_gpu.des_length_scale——该方法内部的 k 方程
+        # 耗散项 D_k 读取的正是这个字段，与 CPU 版
+        # fr_solver_turbulence.py::compute_turbulence_source 里
+        # ddes_model.apply_to_sst_model[_iddes] 的调用顺序完全一致。
+        if self.ddes_model_gpu is not None:
+            nu_field = self.mu_molecular / cp.maximum(rho, 1e-10)
+            from autoflowcfd.core.gpu.turbulence.gpu_turbulence_des import GPUIDDESModel
+            if isinstance(self.ddes_model_gpu, GPUIDDESModel):
+                self.ddes_model_gpu.apply_to_sst_model_iddes_gpu(
+                    self.turb_model_gpu, d_wall, self._iddes_h_max_gpu, self._iddes_h_wn_gpu,
+                    nu_field, grad_vel,
+                )
+            else:
+                cell_volumes = self.mesh_data.get('cell_volumes')
+                if cell_volumes is None:
+                    cell_volumes = cp.asarray(self.mesh.get_all_cell_volumes())
+                self.ddes_model_gpu.apply_to_sst_model_gpu(
+                    self.turb_model_gpu, d_wall, cell_volumes, nu_field, grad_vel,
+                )
+
         Sk, S_omega = self.turb_model_gpu.compute_source_terms_gpu(
             self.Q_gpu, grad_U, d_wall, self.mu_molecular,
             grad_k, grad_omega,
         )
 
-        rho = self.Q_gpu[:, :, 0]
         dk_dt = Sk / cp.maximum(rho, 1e-10)
         domega_dt = S_omega / cp.maximum(rho, 1e-10)
 
+        # k/omega 完整输运（对流+扩散，#7 新增）：真正补齐 GPU SST 长期
+        # 缺失的输运项——此前 update_fields_gpu 的 transport_k/
+        # transport_omega 参数从未被调用方传入（见 gpu_turbulence_sst.py
+        # 模块文档），k/omega 场只靠逐点源项 ODE 弛豫，没有跨单元对流/
+        # 扩散。与 CPU 版 fr_solver_turbulence.py::compute_turbulence_source
+        # 同一个触发条件（SST/DDES/IDDES 都需要）。
+        transport_k = None
+        transport_omega = None
+        if self.turb_model_name.upper() in ("SST", "DDES", "IDDES"):
+            from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import (
+                compute_turbulence_transport_residual_gpu,
+            )
+            transport_k, transport_omega = compute_turbulence_transport_residual_gpu(
+                self, grad_vel=grad_vel,
+            )
+
         dt_local = self._compute_local_time_step_gpu()
         dt_mean = cp.mean(dt_local)
-        self.turb_model_gpu.update_fields_gpu(float(dt_mean), dk_dt, domega_dt)
+        self.turb_model_gpu.update_fields_gpu(
+            float(dt_mean), dk_dt, domega_dt,
+            transport_k=transport_k, transport_omega=transport_omega,
+        )
 
-        return rho * self.turb_model_gpu.nu_t
+        mu_t = rho * self.turb_model_gpu.nu_t
+        if self.sgs_model_gpu is not None and self.sgs_model_gpu.nu_t is not None:
+            mu_t = mu_t + rho * self.sgs_model_gpu.nu_t
+        return mu_t
+
+    def _apply_turbulence_corrections_gpu(self):
+        """GPU 版 SGS（WALE）涡粘系数更新，与 CPU 版
+        `fr_solver_turbulence.py::apply_turbulence_corrections` 完全同一个
+        操作分裂时序：必须在 step() 里状态更新（`self.U_gpu = U_new_flat`+
+        `_update_primitives_gpu()`）**之后**调用（见 gpu_solver.py::step()
+        调用点），算出的 nu_t 供下一步 `compute_turbulence_source_gpu()`
+        读取——不能提前到状态更新之前，那样用的是上上一步的状态，语义上
+        更旧一步，且与 CPU 版行为不一致。
+
+        无 sgs_model_gpu（NONE/SST/DDES/IDDES 场景）时是 no-op。
+        """
+        if self.sgs_model_gpu is None:
+            return
+        cp = get_cupy()
+        from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_gradient_gpu
+
+        grad_U = compute_physical_gradient_gpu(
+            self.U_gpu[..., :5], self.mesh_data, self.ops_data,
+        )
+        grad_vel = grad_U[..., 1:4, :]
+        nu_t = self.sgs_model_gpu.compute_eddy_viscosity_gpu(grad_vel, self._grid_scale_gpu)
+
+        if self.turb_model_gpu is not None and hasattr(self.turb_model_gpu, "nu_t"):
+            self.turb_model_gpu.nu_t = self.turb_model_gpu.nu_t + nu_t

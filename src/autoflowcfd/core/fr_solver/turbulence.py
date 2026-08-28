@@ -14,7 +14,7 @@ import numpy as np
 from loguru import logger
 
 from autoflowcfd.core.turbulence.sst import SSTModelFR
-from autoflowcfd.core.turbulence.des import DDESModel
+from autoflowcfd.core.turbulence.des import DDESModel, IDDESModel, compute_h_max_and_h_wn
 from autoflowcfd.core.turbulence.wmles import WMLESModel
 from autoflowcfd.core.turbulence.sgs import WALEModel
 from autoflowcfd.core.utils.wall_distance import compute_wall_distance
@@ -144,6 +144,21 @@ def init_turbulence_models(solver, n_cells: int, n_sps: int) -> None:
               f"k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e}, "
               f"production ramp: {solver._turb_production_ramp_steps} steps)")
 
+    elif solver.turb_model_name == "IDDES":
+        solver.turb_model = SSTModelFR(n_cells, n_sps, k_inf=k_inf, omega_inf=omega_inf)
+        _set_turbulence_bounds(solver)
+        _update_production_ramp(solver)
+        solver.ddes_model = IDDESModel()
+        # h_max/h_wn 只依赖网格几何（边长），与流场状态无关——mesh 在
+        # 整个求解过程中不变，初始化时算一次并缓存在 solver 上，避免
+        # 每步都重新调用 quality_metrics 的边长几何计算（见
+        # compute_turbulence_source 里 solver._iddes_h_max/_iddes_h_wn
+        # 的消费点）。
+        solver._iddes_h_max, solver._iddes_h_wn = compute_h_max_and_h_wn(solver.mesh)
+        print(f"   [OK] IDDES model initialized (based on SST, "
+              f"k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e}, "
+              f"production ramp: {solver._turb_production_ramp_steps} steps)")
+
     elif solver.turb_model_name == "WMLES":
         solver.wmles_model = WMLESModel()
         solver.sgs_model = WALEModel()
@@ -182,7 +197,7 @@ def compute_wall_distance_field(
             物理上不成立、偏小的距离，Eikonal 沿网格边传播就不会有这个
             问题）。False（默认）用纯欧氏 KD-Tree，更快，对开阔区域足够
     """
-    if solver.turb_model_name not in ["SST", "DDES", "WMLES", "LES"]:
+    if solver.turb_model_name not in ["SST", "DDES", "IDDES", "WMLES", "LES"]:
         logger.warning(f"Turbulence model {solver.turb_model_name} does not require wall distance")
         return
 
@@ -281,8 +296,17 @@ def _map_wall_distance_fallback(solver, node_distances, mesh_nodes, wall_indices
             dist_centers, _ = tree.query(centers, k=1)
             solver.wall_distance = np.tile(dist_centers[:, np.newaxis], (1, n_sps))
             return
-        except Exception:
-            pass
+        except Exception as e:
+            # 第四次评审修复：此前静默吞掉异常且不记录原因（对比姊妹分支
+            # 会 logger.warning(f"...failed ({e})...")）——壁面距离对
+            # SST/DDES/WMLES 的近壁阻尼函数、F1/F2 混合函数、DDES 长度
+            # 尺度都是关键输入，下面"全域单一平均值"的兜底会显著且静默地
+            # 破坏这些模型的近壁行为，至少要把被吞掉的异常原因记下来。
+            logger.warning(
+                f"Cell-center wall distance KD-tree query failed ({e}), "
+                f"falling back to a single mean value for the whole domain "
+                f"- this will noticeably degrade near-wall turbulence model behavior."
+            )
 
     solver.wall_distance = np.ones((n_cells, n_sps)) * node_distances.mean()
     logger.info(f"Wall distance field initialized (fallback): mean={solver.wall_distance.mean():.6f}")
@@ -329,7 +353,7 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
                 raise RuntimeError(f"Cannot rescale wall distance from shape {d_wall.shape}")
 
     if d_wall is None:
-        if solver.turb_model_name in ["SST", "DDES", "WMLES", "LES"]:
+        if solver.turb_model_name in ["SST", "DDES", "IDDES", "WMLES", "LES"]:
             raise RuntimeError(
                 f"Wall distance field not computed for turbulence model '{solver.turb_model_name}'. "
                 f"Please call compute_wall_distance_field() before solving, or ensure wall distance "
@@ -343,12 +367,12 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
             d_wall = np.tile(h_char[:, np.newaxis], (1, n_sps))
             logger.warning(f"Using characteristic length scale as wall distance estimate")
 
-    mu = 1.8e-5  # 空气动力粘度（k/omega方程自身扩散系数用分子粘度，与平均流粘性应力
+    mu = getattr(solver, 'mu_molecular', 1.8e-5)  # 分子粘度（k/omega方程自身扩散系数用分子粘度，与平均流粘性应力
     # 张量所用的有效粘度[core/fr_solver.py::_get_turbulent_viscosity_field]是两个不同量）
 
     grad_k = None
     grad_omega = None
-    if solver.turb_model_name in ["SST", "DDES"]:
+    if solver.turb_model_name in ["SST", "DDES", "IDDES"]:
         k_expanded = solver.turb_model.k_field[:, :, np.newaxis]
         omega_expanded = solver.turb_model.omega_field[:, :, np.newaxis]
 
@@ -401,8 +425,20 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
     Sk, S_omega = solver.turb_model.compute_source_terms(Q, grad_vel, d_wall, mu, grad_k=grad_k, grad_omega=grad_omega)
 
     if solver.ddes_model is not None:
-        cell_volumes = solver._get_cell_volumes()
-        solver.ddes_model.apply_to_sst_model(solver.turb_model, d_wall, cell_volumes, grad_vel)
+        rho = Q[:, :, 0]
+        nu_field = mu / np.maximum(rho, 1e-10)
+        if isinstance(solver.ddes_model, IDDESModel):
+            # IDDES 的 Δ/f_B/f_e 公式需要逐单元 h_max/h_wn（见
+            # init_turbulence_models 里 IDDES 分支的一次性缓存），与
+            # DDESModel 基类只需要 cell_volumes 的 cube_root(V) 网格
+            # 尺度公式结构不同，走独立的 apply_to_sst_model_iddes。
+            solver.ddes_model.apply_to_sst_model_iddes(
+                solver.turb_model, d_wall, solver._iddes_h_max, solver._iddes_h_wn,
+                nu_field, grad_vel,
+            )
+        else:
+            cell_volumes = solver._get_cell_volumes()
+            solver.ddes_model.apply_to_sst_model(solver.turb_model, d_wall, cell_volumes, nu_field, grad_vel)
 
     # Sk/S_omega 是 compute_source_terms 按标准 SST 公式算出的 rho*k、
     # rho*omega 方程源项（P_k/D_k/P_omega/D_omega/CD_omega 都显式带 rho
@@ -421,7 +457,7 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
     # 跨单元扩散。见 core/turbulence_transport.py 模块文档。
     transport_k = None
     transport_omega = None
-    if solver.turb_model_name in ["SST", "DDES"]:
+    if solver.turb_model_name in ["SST", "DDES", "IDDES"]:
         from autoflowcfd.core.turbulence.transport import compute_turbulence_transport_residual
         # grad_vel 复用上面已经为 compute_source_terms 算过的同一份值
         # （同一个 solver.state.U，两处之间没有任何修改），避免
@@ -449,8 +485,19 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
         # 毫无察觉的湍流模型继续跑完整个仿真。真实复现过的输运计算失败
         # 目前没有已知的"预期内、可安全忽略"的情形，故不再兜底捕获，
         # 让真正的错误照常抛出、中断求解。
+        # grad_k/grad_omega 同样复用（#7 内存修复，2026-08-28，
+        # cube_demo 79万单元 P2+DDES 首次真实 CLI 冒烟测试触发 OOM
+        # 崩溃后追查发现）：本函数上面几行刚为 compute_source_terms
+        # 算好、裁剪过的同一份 grad_k/grad_omega，此前这里只传了
+        # grad_vel、没有一并传 grad_k/grad_omega——
+        # compute_turbulence_transport_residual 本身早就支持接收这两者
+        # （见该函数文档），调用方一直没有真正利用，导致内部又重新算
+        # 一遍完全相同的梯度（~1GB 冗余数组，79万单元 P2 阶段）。数学上
+        # 严格等价：本函数上面的裁剪是原地 `grad_k *= clip(...)`，
+        # compute_turbulence_transport_residual 内部对已经满足裁剪阈值
+        # 的输入重新检查同一个阈值必然是 no-op，不会改变数值结果。
         transport_k, transport_omega = compute_turbulence_transport_residual(
-            solver, grad_vel=grad_vel
+            solver, grad_vel=grad_vel, grad_k=grad_k, grad_omega=grad_omega,
         )
 
     solver.turb_model.update_fields(dt, dk_dt, domega_dt,

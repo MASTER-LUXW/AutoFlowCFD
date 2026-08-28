@@ -120,36 +120,38 @@ class WALEModel:
     def compute_wale_invariant(self, S_ij: np.ndarray, Omega_ij: np.ndarray) -> np.ndarray:
         """
         计算 WALE 模型的核心不变量。
-        
-        Q_wale = (S_ik * S_kj + Ω_ik * Ω_kj) 的二阶项
-        
-        更精确的形式：
+
         L_ij = S_ik * S_kj + Ω_ik * Ω_kj
-        L_ij^2 = L_ij * L_ij
-        
+        S_ij^d = L_ij - (1/3)*δ_ij*trace(L)  （迹的各向同性部分必须减去，
+            Nicoud & Ducros 1999 原始定义）
+        L_sq = S_ij^d * S_ij^d
+
+        此前实现漏掉了减迹这一步，直接用未去迹的 L_ij 平方求和。用轴对称
+        纯应变反例验证过：diag(a,-a/2,-a/2) 下正确值 L_sq=0.375*a^4，漏迹
+        版本算出 1.125*a^4（3倍误差）。纯剪切流特例下两者恰好相等（trace
+        本身为零），容易在简单验证用例下"看起来正确"，但一般三维应变场景
+        （驻点/加速区）会系统性高估涡粘，破坏 WALE"近壁自动衰减为零"这一
+        核心性质（该性质依赖去迹后 S_ij^d 在纯剪切下才自动满足，一般三维
+        应变必须显式去迹）。
+
         Args:
             S_ij: 应变率张量，形状 (n_cells, n_sps, 3, 3)
             Omega_ij: 旋转率张量，形状 (n_cells, n_sps, 3, 3)
-            
+
         Returns:
-            L_sq: WALE 不变量，形状 (n_cells, n_sps)
+            L_sq: WALE 不变量（已去迹），形状 (n_cells, n_sps)
         """
-        n_cells, n_sps = S_ij.shape[:2]
-        
-        # 计算 L_ij = S_ik * S_kj + Ω_ik * Ω_kj
-        L_ij = np.zeros_like(S_ij)
-        
-        for cell in range(n_cells):
-            for sp in range(n_sps):
-                S_local = S_ij[cell, sp, :, :]
-                O_local = Omega_ij[cell, sp, :, :]
-                
-                # 矩阵乘法
-                L_ij[cell, sp, :, :] = np.dot(S_local, S_local) + np.dot(O_local, O_local)
-        
-        # L^2 = L_ij * L_ij
-        L_sq = np.einsum('nijm,nijm->ni', L_ij, L_ij)
-        
+        # L_ij = S_ik*S_kj + Ω_ik*Ω_kj，对最后一维（k）求和，向量化
+        L_ij = (np.einsum('nsik,nskj->nsij', S_ij, S_ij)
+                + np.einsum('nsik,nskj->nsij', Omega_ij, Omega_ij))
+
+        # 减去迹的各向同性部分：S_ij^d = L_ij - (1/3)*δ_ij*trace(L)
+        trace_L = np.einsum('nsii->ns', L_ij)
+        eye3 = np.eye(3)
+        L_ij_traceless = L_ij - (trace_L / 3.0)[:, :, np.newaxis, np.newaxis] * eye3
+
+        L_sq = np.einsum('nsij,nsij->ns', L_ij_traceless, L_ij_traceless)
+
         return L_sq
     
     def compute_eddy_viscosity(self, grad_u: np.ndarray, delta: np.ndarray) -> np.ndarray:

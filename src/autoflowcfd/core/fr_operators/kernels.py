@@ -45,8 +45,6 @@ def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray, mac
         flux: 守恒变量通量，形状 (5,)
     """
     gamma = 1.4
-    alpha = 0.1875  # AUSM+up 参数
-    beta = 0.5      # 压力分裂参数
 
     # === 1. 正性保护与状态限制 ===
     rhoL = max(qL[0], 1e-6)
@@ -84,6 +82,26 @@ def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray, mac
     M0_sq = min(1.0, max(Mbar2, mach_ref**2))
     fa = np.sqrt(M0_sq) * (2.0 - np.sqrt(M0_sq))
     fa = max(fa, 1e-6)
+
+    # M4±（质量分裂，下方 M_plus/M_minus）与 P5±（压力分裂，下方
+    # P_plus/P_minus）各自的耗散系数——真实 bug 修复（V2.0 专家组盲审
+    # 第四次评审，2026-08-28，#12）：此前把两者用反了（0.1875 用在质量
+    # 分裂里、0.5 用在压力分裂里），已用 Liou (2006) AUSM+up 原始文献的
+    # 独立生产实现（SU2 `CUpwAUSMPLUSUP_Flow::ComputeMassAndPressureFluxes`，
+    # su2code/SU2 GitHub 仓库 ausm_slau.cpp）逐项核对确认：
+    #   - 质量分裂系数（beta_mass）是固定常数 1/8=0.125（SU2 源码
+    #     `beta = 1.0/8.0`，与该文档"质量分裂通常记作 β"的记号一致）；
+    #   - 压力分裂系数（alpha_pressure）不是固定常数，而是随 fa 变化：
+    #     3/16*(-4+5*fa²)（SU2 源码 `alpha = 3.0/16.0*(-4.0+5.0*fa*fa)`）
+    #     ——fa=1（跨/超声速）时退化为标准值 3/16=0.1875，fa→0（低马赫
+    #     极限）时趋于 -3/4，恰好落在此前代码注释记录的"α 常见有效区间
+    #     [-3/4,3/16]"两端，证实此前把 beta=0.5（超出这个区间）错配给
+    #     压力分裂就是这处 bug 的直接后果，不只是"偏离推荐默认值"。
+    # 与 M+(M)+M-(M)≡M、P+(M)+P-(M)≡1 两个相容性恒等式（对任意系数值
+    # 代数成立，不依赖具体系数）互不冲突，只改变通量的耗散幅度/低马赫
+    # 数区域的数值行为。
+    beta_mass = 1.0 / 8.0
+    alpha_pressure = 3.0 / 16.0 * (-4.0 + 5.0 * fa * fa)
 
     # Weiss-Smith 特征值预处理（core/utils/preconditioning.py::
     # preconditioned_acoustic_eigs 的公式，逐字对应，理由/推导见该文件
@@ -123,14 +141,14 @@ def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray, mac
         if abs(M) >= 1:
             return 0.5 * (M + abs(M))
         else:
-            return 0.25 * (M + 1)**2 + alpha * (M**2 - 1)**2
+            return 0.25 * (M + 1)**2 + beta_mass * (M**2 - 1)**2
 
     def M_minus(M):
         """M- 函数"""
         if abs(M) >= 1:
             return 0.5 * (M - abs(M))
         else:
-            return -0.25 * (M - 1)**2 - alpha * (M**2 - 1)**2
+            return -0.25 * (M - 1)**2 - beta_mass * (M**2 - 1)**2
 
     # === 4. 压力扩散项 Mp (Liou 2006, AUSM+up 式17) ===
     # 取代此前版本的"熵修正"：旧实现在 mass_flux 上叠加 0.5*(rhoL+rhoR)*a_half
@@ -160,14 +178,14 @@ def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray, mac
         if abs(M) >= 1:
             return 0.5 * (1 + np.sign(M))
         else:
-            return 0.25 * ((M + 1)**2 * (2 - M) + beta * M * (M**2 - 1)**2)
+            return 0.25 * ((M + 1)**2 * (2 - M) + alpha_pressure * M * (M**2 - 1)**2)
 
     def P_minus(M):
         """P- 函数"""
         if abs(M) >= 1:
             return 0.5 * (1 - np.sign(M))
         else:
-            return 0.25 * ((M - 1)**2 * (2 + M) - beta * M * (M**2 - 1)**2)
+            return 0.25 * ((M - 1)**2 * (2 + M) - alpha_pressure * M * (M**2 - 1)**2)
 
     # 速度扩散项 pu (Liou 2006, AUSM+up 式18)：与 Mp 项配套的压力项低马赫
     # 稳定化。(unR-unL) 在 (L,R,n)->(R,L,-n) 变换下不变（法向翻转与 L/R 互换

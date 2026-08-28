@@ -221,6 +221,11 @@ def rebuild_solver_from_checkpoint(
         # 旧 checkpoint 没有这两个字段，回退到默认值（Tu=0.01, VR=5.0）。
         turbulence_intensity=metadata.get("turbulence_intensity", 0.01),
         viscosity_ratio=metadata.get("viscosity_ratio", 5.0),
+        # mu_molecular 从 checkpoint metadata 恢复（2026-08-27 补齐）：与
+        # 上面 Tu/VR 同一批需要持久化的物理量，此前遗漏——非标准空气工况
+        # （--mu-molecular 显式设置过的算例）resume 后会悄悄换回标准海平面
+        # 空气粘度 1.8e-5，粘性残差/壁面剪切力全部用错误粘度重新计算。
+        mu_molecular=metadata.get("mu_molecular", 1.8e-5),
     )
     # FRSolver.__init__ 用同一个 order 参数同时设置 self.current_order
     # 和 self.order（ramp 目标）——上面为了让 mesh/初始状态形状匹配
@@ -242,6 +247,40 @@ def rebuild_solver_from_checkpoint(
         resolved_reference_area = _compute_reference_area_auto(volume_data)
     solver._reference_area = resolved_reference_area
 
+    restore_solver_state_from_fields(solver, fields, metadata)
+
+    metadata["order"] = order
+    metadata["target_order"] = target_order
+    metadata["turbulence_model"] = turbulence_model
+    metadata["backend"] = target_backend
+    metadata["surface_mesh"] = resolved_surface_mesh
+    return solver, iteration, metadata
+
+
+def restore_solver_state_from_fields(solver, fields: dict, metadata: dict) -> None:
+    """把 checkpoint 的 (U_sps/k_field/omega_field/nu_t/...) 字段原地灌入一个
+
+    **几何已经就绪**的 FRSolver（mesh/ops/turb_model 已构造好），只替换
+    状态数组，不重新加载网格/重建面几何。
+
+    从 `rebuild_solver_from_checkpoint` 里提炼出来（原先内联在那里，
+    是它跟"重新加载网格+构造 FRSolver"绑在一起的唯一原因是历史实现
+    没有拆分）：`post transient-mean/transient-rms` 要在同一个 case 的
+    全部 checkpoint 上依次计算气动系数时间平均（P-03），如果每个
+    checkpoint 都重新走一遍 `rebuild_solver_from_checkpoint`（重新加载
+    网格、重建 Flux Points 几何），在真实网格上单次就要 1~2 分钟——
+    多个 checkpoint 线性相乘会让这条命令实际不可用。真正需要按
+    checkpoint 变化的只有这里灌入的状态数组，网格/算子/gh ost provider
+    在同一个 case 内完全不变，构造一次、状态原地替换即可。
+
+    Args:
+        solver: 已经完整构造好的 FRSolver（geometry/turb_model 就绪）
+        fields: checkpoint metadata['fields'] 字典
+        metadata: checkpoint 的完整 metadata 字典（读 phase_initial_residual）
+
+    Raises:
+        click.ClickException: 状态形状与 solver 当前几何不匹配
+    """
     U_restored = fields["U_sps"]
     if U_restored.shape != solver.state.U.shape:
         raise click.ClickException(
@@ -327,13 +366,6 @@ def rebuild_solver_from_checkpoint(
     # P0 重新开始整个爬升——恢复等于白恢复，且悄悄发生、resume 不会报
     # 任何错误或警告。
     solver._resumed_from_checkpoint = True
-
-    metadata["order"] = order
-    metadata["target_order"] = target_order
-    metadata["turbulence_model"] = turbulence_model
-    metadata["backend"] = target_backend
-    metadata["surface_mesh"] = resolved_surface_mesh
-    return solver, iteration, metadata
 
 
 def write_checkpoint(
@@ -458,6 +490,11 @@ def write_checkpoint(
         # 重置时用的参数与原始计算不一致。
         "turbulence_intensity": getattr(solver, '_turbulence_intensity', 0.01),
         "viscosity_ratio": getattr(solver, '_viscosity_ratio', 5.0),
+        # mu_molecular 持久化（2026-08-27 补齐，与上面 Tu/VR 同一类遗漏）：
+        # 见 rebuild_solver_from_checkpoint 里对应恢复处的说明。getattr
+        # 兜底与 Tu/VR 同一个理由：轻量 fake/mock solver（单元测试）不一定
+        # 设置这个属性，真实 FRSolver/GPUFRSolver 恒会设置。
+        "mu_molecular": getattr(solver, 'mu_molecular', 1.8e-5),
     }
     if surface_mesh:
         metadata["surface_mesh"] = surface_mesh

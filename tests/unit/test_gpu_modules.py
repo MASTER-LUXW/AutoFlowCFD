@@ -69,7 +69,7 @@ class TestGPUFlux:
     """GPU 通量计算与 CPU 一致性。"""
 
     def test_conserved_to_primitive(self):
-        from autoflowcfd.core.gpu.gpu_flux import conserved_to_primitive_gpu
+        from autoflowcfd.core.gpu.residual.gpu_flux import conserved_to_primitive_gpu
         # 构造守恒变量
         rho = 1.225
         u, v, w = 30.0, 0.0, 0.0
@@ -85,7 +85,7 @@ class TestGPUFlux:
         np.testing.assert_allclose(Q[0, 0, 4], p, rtol=1e-6)
 
     def test_euler_flux_symmetry(self):
-        from autoflowcfd.core.gpu.gpu_flux import euler_physical_flux_gpu
+        from autoflowcfd.core.gpu.residual.gpu_flux import euler_physical_flux_gpu
         # 静止流体：通量应只有压力项
         Q = cupy.asarray([[1.225, 0.0, 0.0, 0.0, 101325.0]])
         F = euler_physical_flux_gpu(Q)
@@ -98,7 +98,7 @@ class TestGPUFlux:
         np.testing.assert_allclose(F_np[0, 2, 3], 101325.0, rtol=1e-6)
 
     def test_primitive_to_conserved_roundtrip(self):
-        from autoflowcfd.core.gpu.gpu_flux import (
+        from autoflowcfd.core.gpu.residual.gpu_flux import (
             conserved_to_primitive_gpu, primitive_to_conserved_gpu
         )
         Q_orig = cupy.asarray([[1.225, 30.0, 5.0, 0.0, 101325.0]])
@@ -111,7 +111,7 @@ class TestGPUVolumeContract:
     """GPU 张量收缩与 CPU 一致性。"""
 
     def test_contract_1axis(self):
-        from autoflowcfd.core.gpu.gpu_volume_contract import gpu_contract_shared_operator_1axis
+        from autoflowcfd.core.gpu.residual.gpu_volume_contract import gpu_contract_shared_operator_1axis
         D = np.random.rand(4, 6)
         X = np.random.rand(10, 6, 5)
         # CPU 参考
@@ -124,7 +124,7 @@ class TestGPUVolumeContract:
         np.testing.assert_allclose(result, ref, rtol=1e-10)
 
     def test_contract_2axis(self):
-        from autoflowcfd.core.gpu.gpu_volume_contract import gpu_contract_shared_operator_2axis
+        from autoflowcfd.core.gpu.residual.gpu_volume_contract import gpu_contract_shared_operator_2axis
         D = np.random.rand(4, 3, 2)
         X = np.random.rand(10, 3, 2, 5)
         ref = np.einsum("fjm,cjmv->cfv", D, X)
@@ -173,7 +173,7 @@ class TestGPUGradients:
 
     def test_constant_field_zero_gradient(self):
         """常数场的梯度应为零。"""
-        from autoflowcfd.core.gpu.gpu_gradients import compute_physical_gradient_gpu
+        from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_gradient_gpu
         n_cells = 5
         n_sps = 4
         n_vars = 3
@@ -197,7 +197,7 @@ class TestGPUViscousFlux:
 
     def test_zero_gradient_zero_viscous_flux(self):
         """零梯度时粘性通量应为零（除了能量方程中的热传导项）。"""
-        from autoflowcfd.core.gpu.gpu_flux import viscous_physical_flux_gpu
+        from autoflowcfd.core.gpu.residual.gpu_flux import viscous_physical_flux_gpu
         Q = cupy.asarray([[1.225, 30.0, 0.0, 0.0, 101325.0]])
         grad_vel = cupy.zeros((1, 3, 3))
         grad_T = cupy.zeros((1, 3))
@@ -212,7 +212,7 @@ class TestGPUTurbulenceSST:
 
     def test_strain_rate_magnitude(self):
         """应变率模计算正确性。"""
-        from autoflowcfd.core.gpu.gpu_turbulence_sst import GPUTurbulenceSST
+        from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
         sst = GPUTurbulenceSST(n_cells=2, n_sps=4, device_id=0)
         # 纯剪切流：du/dy = 1, 其他梯度为零
         grad_u = cupy.zeros((2, 4, 3, 3))
@@ -225,7 +225,7 @@ class TestGPUTurbulenceSST:
 
     def test_blending_functions_range(self):
         """Blending functions F1, F2 应在 [0, 1] 范围内。"""
-        from autoflowcfd.core.gpu.gpu_turbulence_sst import GPUTurbulenceSST
+        from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
         sst = GPUTurbulenceSST(n_cells=10, n_sps=4, device_id=0)
         k = cupy.ones((10, 4)) * 1e-3
         omega = cupy.ones((10, 4)) * 100.0
@@ -245,7 +245,7 @@ class TestGPUTurbulenceSST:
 
     def test_eddy_viscosity_positive(self):
         """涡粘系数应为正值。"""
-        from autoflowcfd.core.gpu.gpu_turbulence_sst import GPUTurbulenceSST
+        from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
         sst = GPUTurbulenceSST(n_cells=5, n_sps=4, device_id=0)
         k = cupy.ones((5, 4)) * 1e-3
         omega = cupy.ones((5, 4)) * 100.0
@@ -260,7 +260,7 @@ class TestGPUTurbulenceSST:
 
     def test_source_terms_shape(self):
         """源项输出形状应与输入一致。"""
-        from autoflowcfd.core.gpu.gpu_turbulence_sst import GPUTurbulenceSST
+        from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
         n_cells, n_sps = 8, 4
         sst = GPUTurbulenceSST(n_cells, n_sps, device_id=0)
 
@@ -285,6 +285,6 @@ class TestGPUHaloExchange:
 
     def test_cuda_aware_mpi_detection(self):
         """CUDA-aware MPI 检测应返回布尔值。"""
-        from autoflowcfd.core.gpu.gpu_halo_exchange import is_cuda_aware_mpi
+        from autoflowcfd.core.gpu.distributed.gpu_halo_exchange import is_cuda_aware_mpi
         result = is_cuda_aware_mpi()
         assert isinstance(result, bool)

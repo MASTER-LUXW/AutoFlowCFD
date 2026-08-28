@@ -1,7 +1,7 @@
 """mesh_background_merge._build_merged_mesh 用到的两个独立小工具。
 
 从 mesh_background_merge.py 拆分出来：`_refine_large_boundary_faces`
-（tetgen 之前按最大边长迭代二Splitting 边界面的过大三角形，避免生成过大的边界四面体）和
+（tetgen 之前按最大边长迭代二分边界面的过大三角形，避免生成过大的边界四面体）和
 `_export_partial_mesh_and_exit`（`--bl-only`/`--core-only` 等调试导出
 路径共用的导出后直接退出进程的辅助函数）。两者都只被 _build_merged_mesh
 自己调用，没有独立复用需求，纯粹为了控制文件行数而拆开。
@@ -20,7 +20,7 @@ def _refine_large_boundary_faces(
     markers: Optional[np.ndarray],
     max_edge_length: float,
 ) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
-    """在边界表面上迭代二Splitting 超过 max_edge_length 的边。
+    """在边界表面上迭代二分超过 max_edge_length 的边。
 
     这可以防止 TetGen 生成违反目标单元尺寸约束的巨大边界四面体。
     同时有助于将 BL 外表面的分辨率与核心填充匹配，并通过更精确的
@@ -68,21 +68,21 @@ def _refine_large_boundary_faces(
         new_markers_list = []
         new_vertices_list = []
 
-        # 分批处理Splitting以避免索引偏移问题
+        # 分批处理拆分以避免索引偏移问题
         # 需要将旧顶点索引映射到新顶点索引
         vertex_offset = len(current_verts)
 
         for i, (face, split_idx) in enumerate(zip(faces_to_split, split_indices)):
             v0, v1, v2 = face
-            if split_idx == 0:  # Splitting 0-1 边
+            if split_idx == 0:  # 拆分 0-1 边
                 mid_coord = (current_verts[v0] + current_verts[v1]) / 2.0
                 mid_idx = vertex_offset + i
                 f1, f2 = [mid_idx, v1, v2], [v0, mid_idx, v2]
-            elif split_idx == 1:  # Splitting 1-2 边
+            elif split_idx == 1:  # 拆分 1-2 边
                 mid_coord = (current_verts[v1] + current_verts[v2]) / 2.0
                 mid_idx = vertex_offset + i
                 f1, f2 = [v0, mid_idx, v2], [v0, v1, mid_idx]
-            else:  # Splitting 2-0 边
+            else:  # 拆分 2-0 边
                 mid_coord = (current_verts[v2] + current_verts[v0]) / 2.0
                 mid_idx = vertex_offset + i
                 f1, f2 = [v0, v1, mid_idx], [mid_idx, v1, v2]
@@ -96,7 +96,7 @@ def _refine_large_boundary_faces(
         if new_vertices_list:
             current_verts = np.vstack([current_verts, np.array(new_vertices_list)])
 
-        # 用新面替换已Splitting的旧面
+        # 用新面替换已拆分的旧面
         remaining_faces = current_faces[~needs_refinement_mask]
         remaining_markers = current_markers[~needs_refinement_mask] if current_markers is not None else None
 
@@ -209,5 +209,8 @@ def _export_partial_mesh_and_exit(
         logger.error(f"Failed to export {label} mesh: {e}")
         import traceback
         traceback.print_exc()
+        # 导出失败必须以非零退出码报告——此前这里无条件 sys.exit(0)，
+        # 靠退出码判断成败的调用方会把失败误判为成功（第四次评审发现1）。
+        sys.exit(1)
 
     sys.exit(0)

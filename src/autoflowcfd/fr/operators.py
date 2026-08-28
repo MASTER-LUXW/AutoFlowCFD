@@ -102,14 +102,28 @@ class FROperators:
         }
 
 
-def generate_fr_operators(order: int, flux_point_type: str = 'lobatto') -> FROperators:
+def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROperators:
     """
     生成完整的 FR 算子集合。
-    
+
     Args:
         order: 多项式阶数 P
-        flux_point_type: FP 类型 ('lobatto' 或 'radau')
-        
+        flux_point_type: 修正函数族 + FP 位置选择：
+            - 'radau'（默认，此前默认值 'lobatto' 与其行为完全等价，见下）：
+              校正函数用 VCJH η_p=0 方案（Huynh 记法 "g_DG"，此前代码误
+              标为 "g2"，见 matrix_operators.py 2026-08-28 的命名修正
+              说明），FPs 用 Gauss-Lobatto 求积点——这是此前唯一被生产
+              路径实际使用过的组合（所有既有调用点都不显式传参，见
+              compute_correction_weights 调用处历史行为）。'lobatto' 仍
+              作为同义值保留，不破坏任何硬编码传了这个字符串的旧代码。
+            - 'gauss'（#14 新增）：校正函数用 VCJH η_p=p/(p+1) 方案，与
+              Spectral Difference (SD) 方法等价（matrix_operators.py::
+              _compute_gauss_correction_derivative 文档的完整推导/引用），
+              配套地把 FPs 改为 SPs 本身 + 两个边界点（标准 SD 做法：
+              通量在 SPs 处直接重构，不是在额外的 Lobatto 求积点插值）——
+              这个 FP 位置选择与校正函数选择是同一个物理方案的两个方面，
+              绑定在同一个 flux_point_type 参数下，不单独暴露。
+
     Returns:
         operators: 包含所有预计算算子的 FROperators 对象
     """
@@ -150,11 +164,14 @@ def generate_fr_operators(order: int, flux_point_type: str = 'lobatto') -> FROpe
     filter_tet = build_tet_modal_filter(order, ref_cube_sps)
     filter_prism = build_prism_modal_filter(order, ref_cube_sps)
 
-    # 4. 计算插值矩阵
-    if flux_point_type == 'lobatto':
-        fps, _ = gauss_lobatto(n + 1)
-    else:
+    # 4. 计算插值矩阵。判据键在 'gauss' 上（而不是此前的 'lobatto'）：
+    # 任何非 'gauss' 的取值（'radau'/'lobatto'/历史调用点省略此参数）都
+    # 路由到同一个 Gauss-Lobatto FP 分支，保证除新增的 'gauss' 外行为
+    # 完全不变——见本函数 flux_point_type 参数文档。
+    if flux_point_type == 'gauss':
         fps = np.concatenate([[-1.0], sps, [1.0]])
+    else:
+        fps, _ = gauss_lobatto(n + 1)
     
     L_interp = compute_interpolation_matrix(sps, fps)
     

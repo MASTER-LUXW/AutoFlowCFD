@@ -5,7 +5,7 @@ with reliable output capture, avoiding terminal output issues.
 
 Example:
     >>> from tests.test_utils import run_pytest, run_command
-    >>> output = run_pytest("tests/unit/test_boundary.py")
+    >>> output = run_pytest("tests/unit/test_fr_residual_inviscid.py")
     >>> print(output)
 """
 
@@ -26,7 +26,7 @@ def run_pytest(test_path: str, verbose: bool = True) -> str:
         str: Test output
         
     Example:
-        >>> output = run_pytest("tests/unit/test_boundary.py")
+        >>> output = run_pytest("tests/unit/test_fr_residual_inviscid.py")
         >>> if "passed" in output:
         ...     print("Tests passed!")
     """
@@ -206,7 +206,7 @@ if __name__ == "__main__":
     print(f"✓ Module import: {'PASS' if result['success'] else 'FAIL'}")
     
     # Test 2: Run a simple test
-    output = run_pytest("tests/unit/test_boundary.py::TestInletBC::test_creation_with_defaults")
+    output = run_pytest("tests/unit/test_fr_residual_inviscid.py::TestAusmUpConsistency::test_flux_consistency_random_states")
     if "passed" in output.lower() or "PASSED" in output:
         print("✓ Test execution: PASS")
     else:

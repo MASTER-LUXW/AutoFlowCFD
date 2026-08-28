@@ -62,23 +62,23 @@ def parse_boundary_properties(
     logger.info("Parsing boundary conditions from Properties...")
 
     try:
-        # Step 1: Parse $ANSA_NAME_COMMENT cards to extract PID to Name mapping
+        # 第 1 步：解析 $ANSA_NAME_COMMENT 卡片，提取 PID 到名称的映射
         pid_to_name = _parse_property_names(file_path, encoding)
 
-        # If no ANSA_NAME_COMMENT found, try parsing PSHELL cards directly
+        # 若没有找到 ANSA_NAME_COMMENT，尝试直接解析 PSHELL 卡片
         if not pid_to_name:
             logger.warning("No $ANSA_NAME_COMMENT cards found. Trying alternative parsing...")
             pid_to_name = _parse_pshell_names(file_path, encoding)
 
         logger.info(f"Found {len(pid_to_name)} Properties with names")
 
-        # Step 2: Build cell_index to PID mapping from the pre-parsed data
+        # 第 2 步：从已解析数据构建 cell_index 到 PID 的映射
         cell_to_pid = _parse_cell_to_pid_mapping(cells_data)
 
-        # Step 3: Group cells by Property ID
+        # 第 3 步：按 Property ID 对单元分组
         pid_to_cells = _group_cells_by_pid(cell_to_pid)
 
-        # Step 4: Map Property Names to boundary groups
+        # 第 4 步：把属性名称映射到边界分组
         groups, bc_types, property_ids = _map_properties_to_boundaries(
             pid_to_name, pid_to_cells
         )
@@ -138,8 +138,8 @@ def _parse_property_names(file_path: str, encoding: str) -> Dict[int, str]:
             if not line_stripped or not line_stripped.startswith('$'):
                 continue
             
-            # 检查 for ANSA_NAME_COMMENT card
-            # Format: $ANSA_NAME_COMMENT;PID;PSHELL;name;;NO;NO;NO;NO;
+            # 检查是否为 ANSA_NAME_COMMENT 卡片
+            # 格式：$ANSA_NAME_COMMENT;PID;PSHELL;name;;NO;NO;NO;NO;
             if line_stripped.upper().startswith('$ANSA_NAME_COMMENT'):
                 parts = line_stripped.split(';')
                 if len(parts) >= 5:
@@ -148,12 +148,10 @@ def _parse_property_names(file_path: str, encoding: str) -> Dict[int, str]:
                         prop_type = parts[2].strip().upper()
                         prop_name = parts[3].strip()
 
-                        # PSHELL, and composite/layered shells (PCOMP/
-                        # PCOMPG) - common for painted or composite body
-                        # panels, otherwise silently degraded to WALL via
-                        # _UNCLASSIFIED_GROUP with no indication it was a
-                        # property-TYPE gap rather than a genuinely unnamed
-                        # property.
+                        # PSHELL 及复合/分层壳（PCOMP/PCOMPG，常见于涂漆或
+                        # 复合材料车身板）——否则会静默降级为 WALL、归入
+                        # _UNCLASSIFIED_GROUP，且没有任何指示表明这是属性
+                        # 类型缺口，而不是真正的未命名属性。
                         if prop_type in _SHELL_PROPERTY_TYPES and prop_name:
                             pid_to_name[pid] = prop_name
                             logger.debug(f"Found Property: PID={pid}, Name='{prop_name}'")
@@ -182,18 +180,18 @@ def _parse_pshell_names(file_path: str, encoding: str) -> Dict[int, str]:
             if not line_stripped or line_stripped.startswith('#'):
                 continue
 
-            # Check for a shell-like property card (PSHELL, or composite/
-            # layered PCOMP/PCOMPG - same fallback naming convention).
+            # 检查是否为壳类属性卡片（PSHELL，或复合/分层的
+            # PCOMP/PCOMPG——同一套回退命名约定）。
             if _leading_card_name(line_stripped) in _SHELL_PROPERTY_TYPES:
                 # 尝试从上一行注释获取名称
-                # Format: $ PROPERTY NAME: XXXX
+                # 格式：$ PROPERTY NAME: XXXX
                 if prev_line.startswith('$'):
                     match = re.search(r'PROPERTY\s+NAME:\s*(\S+)', prev_line, re.IGNORECASE)
                     if match:
                         # 逗号分隔自由字段格式优先...
                         parts = [p.strip() for p in line_stripped.split(',') if p.strip()]
                         if len(parts) < 2:
-                            # ...fall back to whitespace-split fixed-width form.
+                            # ...否则回退到按空白分割的固定宽度格式。
                             parts = line_stripped.split()
                         if len(parts) >= 2:
                             try:
@@ -238,11 +236,10 @@ def _map_properties_to_boundaries(
     bc_types = {}
     property_ids = {}
     
-    # Boundary keyword mapping for automatic detection. Order matters:
-    # _detect_boundary_type returns the FIRST matching bc_type, so more
-    # specific keyword sets are listed before the generic 'WALL' bucket -
-    # otherwise a compound name like "TUNNEL_WALL" would match the plain
-    # 'wall' substring before ever reaching the 'tunnel' keyword below.
+    # 边界关键字映射表，用于自动识别边界类型。顺序很重要：
+    # _detect_boundary_type 返回第一个匹配到的 bc_type，所以更具体的关键字
+    # 集合要排在通用的 'WALL' 分类之前——否则像 "TUNNEL_WALL" 这样的复合
+    # 名称会先匹配到 'wall' 这个子串，根本轮不到下面的 'tunnel' 关键字。
     boundary_keywords = {
         'VELOCITY_INLET': ['inlet', 'inflow', 'entrance', '入口'],
         'PRESSURE_OUTLET': ['outlet', 'outflow', 'exit', '出口'],
@@ -253,16 +250,13 @@ def _map_properties_to_boundaries(
         # 配置补齐（写入 BoundaryMap.parameters[name]['paired_with'/'translation']），
         # 纯 NAS 自动模式无法单独完成周期边界的完整配置。
         'PERIODIC': ['periodic', '周期'],
-        # A "tunnel" boundary is a frictionless duct wall (see
-        # bc_handler.py's _classify: TUNNEL -> SYMMETRY/free-slip), not a
-        # viscous no-slip wall - it must never get BL extrusion (there is
-        # no velocity gradient at a slip wall to resolve). Previously
-        # "tunnel" matched none of these keywords and silently fell
-        # through to the 'WALL' default below, making it BL-extrude-
-        # eligible - extruding a boundary layer on a domain-spanning
-        # tunnel wall collapses almost immediately (hits the opposite
-        # wall/body within 1-2 layers), producing hundreds of degenerate
-        # tetrahedra and a non-manifold surface that crashes tetgen.
+        # "tunnel"（风洞/隧道壁）是无摩擦的管道壁面（见 bc_handler.py 的
+        # _classify：TUNNEL -> SYMMETRY/自由滑移），不是粘性无滑移壁面——
+        # 绝不能做边界层挤出（滑移壁面处没有需要解析的速度梯度）。此前
+        # "tunnel" 不匹配这里任何一个关键字，会静默落入下面的 'WALL' 默认
+        # 分类，从而变得"可挤出边界层"——在横跨整个计算域的隧道壁上挤出
+        # 边界层几乎立刻塌缩（1-2 层内就撞上对面的壁/车身），产生数百个
+        # 退化四面体和一个让 tetgen 崩溃的非流形曲面。
         'SLIP_WALL': ['slip', 'farfield', 'freestream', 'tunnel', '风洞', '洞壁'],
         'WALL': ['wall', 'body', 'surface', '车体', '车身', '壁面'],
     }
@@ -271,7 +265,7 @@ def _map_properties_to_boundaries(
         if pid not in pid_to_cells:
             continue
 
-        # 确定 boundary 类型 基于 名称
+        # 根据属性名称确定边界类型
         bc_type = _detect_boundary_type(name, boundary_keywords)
 
         # ANSA 导出经常将一个逻辑边界（例如 "WALL"）拆分到

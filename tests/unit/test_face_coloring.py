@@ -126,6 +126,8 @@ class TestColoringKernelEquivalence:
         """粘性 kernel：nt=1 时图着色与 per-thread buffer 应 bit-exact 相等。"""
         from autoflowcfd.core.fr_residual.viscous_flux_kernel import (
             compute_viscous_interface_correction_kernel,
+        )
+        from autoflowcfd.core.fr_residual.viscous_flux_kernel_colored import (
             compute_viscous_interface_correction_kernel_colored,
         )
         assert callable(compute_viscous_interface_correction_kernel)

@@ -29,8 +29,8 @@ from autoflowcfd.core.gpu.gpu_time_integration import (
     enforce_positivity_gpu,
     compute_local_cfl_step_gpu,
 )
-from autoflowcfd.core.gpu.gpu_solver_init import _GPUSolverInitMixin
-from autoflowcfd.core.gpu.gpu_solver_io import _GPUSolverIOMixin
+from autoflowcfd.core.gpu.solver.gpu_solver_init import _GPUSolverInitMixin
+from autoflowcfd.core.gpu.solver.gpu_solver_io import _GPUSolverIOMixin
 
 
 class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
@@ -62,6 +62,7 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         p_inf: float = 101325.0,
         mu_molecular: float = 1.8e-5,
         boundary_ghost_provider=None,
+        bc_overrides=None,
         turb_model: str = "NONE",
         turbulence_intensity: float = 0.01,
         viscosity_ratio: float = 5.0,
@@ -78,12 +79,48 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
             cfl: CFL 数
             rho_inf, vel_inf, p_inf: 自由来流条件
             mu_molecular: 分子动力粘度
-            boundary_ghost_provider: 边界幽灵态提供者
+            boundary_ghost_provider: 边界幽灵态提供者。None 时按
+                CPU 版 FRSolver 同一套逻辑（fr_solver/boundary.py::
+                build_boundary_ghost_provider）自行构建——真实 bug
+                修复（V2.0 专家组盲审发现，2026-08-27）：此前这里
+                恒为调用方传入的 None（CLI 从未构建过真实的），
+                `compute_inviscid_residual_fr_gpu`/`compute_viscous_
+                residual_fr_gpu` 拿到 None 后用 DefaultGhostProvider
+                （镜像内部值）代替，等价于全部边界对残差不可见。
+            bc_overrides: 按边界组名称覆盖 BC 类型/参数，透传给
+                build_boundary_ghost_provider（与 CPU 版 FRSolver
+                同名参数语义一致，见 fr_solver/solver.py 文档）
+            turb_model: 湍流模型名称，支持 NONE/SST/DDES/IDDES/WMLES/LES
+                （#7，V2.0 专家组盲审第四轮，2026-08-28，见本方法顶部
+                文档"GPU 湍流模型支持范围"一节）。请求集合之外的值时
+                显式拒绝，不会像此前那样静默退化成层流。
+
+        Raises:
+            NotImplementedError: turb_model 是本方法支持集合之外的值
+
+        GPU 湍流模型支持范围（#7，V2.0 专家组盲审第四轮，2026-08-28）：
+        NONE/SST/DDES/IDDES/WMLES/LES 均已实现（core/gpu/turbulence/
+        gpu_turbulence_sst.py、gpu_turbulence_des.py、gpu_sgs.py、
+        gpu_turbulence_wmles.py）。明确的、真实的既有限制（不是本次
+        遗漏，是本次移植范围之外的独立大工作）：GPU 版 k/omega 输运
+        （gpu_scalar_transport.py）虽已实现并接入，但没有
+        `troubled_cell.py::suppress_residual_outliers` 那样的离群值抑制
+        （只有 isfinite 归零这一道最后防线，见 gpu_scalar_transport.py
+        模块文档）；GPU 侧整体仍未在真实 CUDA 硬件上执行验证过（本机
+        无 CuPy），已用 numpy 替身对照 CPU 版逐位数值核对过所有新增
+        公式，但真正的端到端 GPU 冒烟测试需要用户在有 GPU 的环境上补做。
         """
         if not gpu_available:
             raise RuntimeError(
                 "CuPy is not available. Install with: pip install cupy-cuda12x"
             )
+        _SUPPORTED_TURB_MODELS = ("NONE", "SST", "DDES", "IDDES", "WMLES", "LES")
+        if turb_model is not None and str(turb_model).upper() not in _SUPPORTED_TURB_MODELS:
+            raise NotImplementedError(
+                f"GPUFRSolver（--backend gpu）目前支持 turbulence_model="
+                f"{[m.lower() for m in _SUPPORTED_TURB_MODELS]}，收到的是 '{turb_model}'。"
+            )
+        turb_model_upper = str(turb_model).upper() if turb_model is not None else "NONE"
 
         self.mesh = mesh
         self.ops = ops
@@ -99,9 +136,27 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         mach_ref = vel_inf / np.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10))
         mach_ref = max(mach_ref, 0.1)
         self.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf, "mach_ref": mach_ref}
-        self.boundary_ghost_provider = boundary_ghost_provider
         self.turb_model_name = turb_model
-        self.turb_model_gpu = None  # GPU 湍流模型（可选）
+        self.turb_model_gpu = None  # GPU SST 模型（SST/DDES/IDDES 共用，可选）
+        self.ddes_model_gpu = None  # GPU DDES/IDDES 长度尺度计算器（可选）
+        self.sgs_model_gpu = None  # GPU WALE 亚格子模型（WMLES/LES 共用，可选）
+        # WMLES 激活时构造真实的 CPU 版 WMLESModel 实例（与 CPU 版
+        # fr_solver_turbulence.py::init_turbulence_models 完全同一个类，
+        # 摩擦速度迭代求解本身就是纯 numpy、不需要也不该有 GPU 版——见
+        # gpu_turbulence_wmles.py 模块文档"为什么不重新实现"一节）。
+        # 必须在下面 _build_boundary_ghost_provider 之前构造：
+        # build_boundary_ghost_provider 用 getattr(solver,"wmles_model",
+        # None) 判断 WALL 边界是否要切换成真滑移 ghost 态（is_no_slip=
+        # False），见 fr_solver/boundary.py 文档。
+        self.wmles_model = None
+        if turb_model_upper == "WMLES":
+            from autoflowcfd.core.turbulence.wmles import WMLESModel
+            self.wmles_model = WMLESModel(nu=mu_molecular / max(rho_inf, 1e-10))
+        self.bc_overrides = bc_overrides or {}
+        self.boundary_ghost_provider = (
+            boundary_ghost_provider if boundary_ghost_provider is not None
+            else self._build_boundary_ghost_provider(self.bc_overrides)
+        )
 
         # GPU 数组管理器
         self.array_mgr = GPUArrayManager(device_id=device_id)
@@ -132,9 +187,13 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
             self.Q_gpu = cp.zeros((n_cells, n_sps, 5), dtype=cp.float64)
             self._update_primitives_gpu()
 
-        # 初始化 GPU 湍流模型
-        if turb_model == "SST":
-            from autoflowcfd.core.gpu.gpu_turbulence_sst import GPUTurbulenceSST
+        # 初始化 GPU 湍流模型（#7：SST/DDES/IDDES 共用同一个 GPUTurbulenceSST
+        # 源项 ODE，DDES/IDDES 只是额外提供一个 des_length_scale 替换掉
+        # SST 内部的 RANS 耗散长度尺度，见 gpu_turbulence_des.py 模块文档；
+        # WMLES/LES 不构造 SST，只构造 GPUWALEModel，与 CPU 版
+        # fr_solver_turbulence.py::init_turbulence_models 分支结构一致）。
+        if turb_model_upper in ("SST", "DDES", "IDDES"):
+            from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
             # 从 Tu/VR 推导物理自洽的 k/omega 初值（与 CPU 版一致）
             nu = mu_molecular / max(rho_inf, 1e-10)
             k_inf = 1.5 * (vel_inf * turbulence_intensity) ** 2
@@ -153,10 +212,64 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
             print(f"   [OK] GPU SST k-omega model initialized "
                   f"(k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
 
-        # 预计算壁面距离（用于湍流模型）
+            if turb_model_upper == "DDES":
+                from autoflowcfd.core.gpu.turbulence.gpu_turbulence_des import GPUDDESModel
+                self.ddes_model_gpu = GPUDDESModel()
+                print(f"   [OK] GPU DDES model initialized (based on SST)")
+            elif turb_model_upper == "IDDES":
+                from autoflowcfd.core.gpu.turbulence.gpu_turbulence_des import GPUIDDESModel
+                from autoflowcfd.core.turbulence.des import compute_h_max_and_h_wn
+                self.ddes_model_gpu = GPUIDDESModel()
+                # h_max/h_wn 只依赖网格几何，与 CPU 版
+                # fr_solver_turbulence.py 同一个一次性缓存策略：CPU 算一次
+                # （复用已验证的 quality_metrics 边长几何函数），结果上传
+                # 常驻显存，不是每步都重算。
+                h_max_cpu, h_wn_cpu = compute_h_max_and_h_wn(mesh)
+                with cp.cuda.Device(device_id):
+                    self._iddes_h_max_gpu = cp.asarray(h_max_cpu)
+                    self._iddes_h_wn_gpu = cp.asarray(h_wn_cpu)
+                print(f"   [OK] GPU IDDES model initialized (based on SST)")
+
+        elif turb_model_upper == "WMLES":
+            from autoflowcfd.core.gpu.turbulence.gpu_sgs import GPUWALEModel
+            self.sgs_model_gpu = GPUWALEModel()
+            print(f"   [OK] GPU WMLES model initialized (wall stress correction + WALE SGS)")
+
+        elif turb_model_upper == "LES":
+            from autoflowcfd.core.gpu.turbulence.gpu_sgs import GPUWALEModel
+            self.sgs_model_gpu = GPUWALEModel()
+            print(f"   [OK] GPU LES with WALE SGS model initialized")
+
+        # 网格尺度 Delta = V^(1/3)（WALE/Smagorinsky 用，与 CPU 版
+        # fr_solver/solver_geometry.py::_get_grid_scale 同一个公式）：
+        # 只依赖单元体积几何，与流场无关，一次性算好缓存。
+        self._grid_scale_gpu = None
+        if self.sgs_model_gpu is not None:
+            volumes_cpu = mesh.get_all_cell_volumes()
+            delta_cpu = np.power(np.abs(volumes_cpu), 1.0 / 3.0)
+            delta_cpu = np.tile(delta_cpu[:, np.newaxis], (1, n_sps))
+            with cp.cuda.Device(device_id):
+                self._grid_scale_gpu = cp.asarray(delta_cpu)
+
+        # 预计算壁面距离（用于湍流模型）——与 CPU 版
+        # fr_solver_turbulence.py 的 ["SST","DDES","IDDES","WMLES","LES"]
+        # 同一个判据集合（WMLES 壁面剪应力修正/LES 近壁行为都需要它，
+        # 即便 WALE 本身的公式不直接读 d_wall）。
         self.wall_distance_gpu = None
-        if self.turb_model_gpu is not None:
+        if self.turb_model_gpu is not None or self.sgs_model_gpu is not None:
             self._init_wall_distance_gpu()
+
+        # WALL 边界面拓扑掩码（#7，k/omega 输运 Dirichlet BC 用）：纯几何/
+        # 边界分组查询，只依赖 mesh + boundary_ghost_provider，与流场状态
+        # 无关，一次性算好缓存，不是每步重算（见 gpu_scalar_transport.py::
+        # compute_wall_dirichlet_mask_gpu 文档）。只有 SST/DDES/IDDES 才
+        # 会真正用到（k/omega 输运的 Dirichlet 面）。
+        self._wall_mask_k_gpu = None
+        if self.turb_model_gpu is not None:
+            from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_wall_dirichlet_mask_gpu
+            wall_mask_np = compute_wall_dirichlet_mask_gpu(mesh, self.boundary_ghost_provider)
+            with cp.cuda.Device(device_id):
+                self._wall_mask_k_gpu = cp.asarray(wall_mask_np)
 
         # 初始化 GPU 模态滤波（抑制混叠噪声）
         self.filter_func_gpu = None
@@ -179,9 +292,17 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         print(f"   Time Scheme: {time_scheme}, CFL: {cfl}")
 
 
+    def _build_boundary_ghost_provider(self, bc_overrides):
+        """构建边界幽灵态提供者 (BD-01)，与 CPU 版 FRSolver 复用同一套
+        构建逻辑（fr_solver/boundary.py::build_boundary_ghost_provider
+        只依赖 self.mesh/self.freestream/self.turb_model_name/
+        self.wmles_model，在这个调用点之前均已设置好）。"""
+        from autoflowcfd.core.fr_solver import boundary as fr_solver_boundary
+        return fr_solver_boundary.build_boundary_ghost_provider(self, bc_overrides)
+
     def _update_primitives_gpu(self):
         """GPU 上更新原始变量。"""
-        from autoflowcfd.core.gpu.gpu_flux import conserved_to_primitive_gpu
+        from autoflowcfd.core.gpu.residual.gpu_flux import conserved_to_primitive_gpu
         self.Q_gpu = conserved_to_primitive_gpu(self.U_gpu[..., :5])
 
     def compute_inviscid_residual_gpu(self, U_trial=None):
@@ -198,7 +319,7 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
 
         if self.mesh.n_points_1d == 1:
             # P0 路径：使用 CuPy RawKernel
-            from autoflowcfd.core.gpu.gpu_p0_inviscid import (
+            from autoflowcfd.core.gpu.residual.gpu_p0_inviscid import (
                 compute_inviscid_residual_p0_cupy_gpu_resident,
             )
             Q_flat = self.Q_gpu[:, 0, :5].copy()
@@ -266,7 +387,7 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
             return cp.broadcast_to(res, (self.mesh.n_cells, self.mesh.n_sps_per_cell, 5)).copy()
         else:
             # P>=1 高阶 FR GPU 路径
-            from autoflowcfd.core.gpu.gpu_inviscid import compute_inviscid_residual_fr_gpu
+            from autoflowcfd.core.gpu.residual.gpu_inviscid import compute_inviscid_residual_fr_gpu
             return compute_inviscid_residual_fr_gpu(
                 U, self.mesh, self.ops,
                 boundary_ghost_provider=self.boundary_ghost_provider,
@@ -287,9 +408,9 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         Returns:
             viscous_residual: CuPy 数组 (n_cells, n_sps, 5)
         """
-        from autoflowcfd.core.gpu.gpu_viscous import compute_viscous_residual_fr_gpu
+        from autoflowcfd.core.gpu.residual.gpu_viscous import compute_viscous_residual_fr_gpu
         U = U_trial if U_trial is not None else self.U_gpu
-        return compute_viscous_residual_fr_gpu(
+        res = compute_viscous_residual_fr_gpu(
             U, self.mesh, self.ops,
             mu=self.mu_molecular,
             mu_t_field=mu_t_field,
@@ -299,6 +420,20 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
             flat_face_gpu=self.flat_face_gpu,
             device_id=self.device_id,
         )
+
+        # WMLES 壁面剪应力修正（#7）：与 CPU 版
+        # `FRSolver.compute_viscous_residual` 同一个调用点——必须叠加在
+        # 这里（残差组装阶段），不能等 step() 状态更新之后才生效，见
+        # gpu_turbulence_wmles.py 模块文档。
+        if self.wmles_model is not None:
+            from autoflowcfd.core.gpu.turbulence.gpu_turbulence_wmles import (
+                compute_wmles_wall_stress_correction_gpu,
+            )
+            wall_stress_correction = compute_wmles_wall_stress_correction_gpu(self, U=U)
+            if wall_stress_correction is not None:
+                res = res + wall_stress_correction[..., : res.shape[-1]]
+
+        return res
 
     def _compute_local_time_step_gpu(self):
         """GPU 计算局部 CFL 时间步长（使用所有 SP 的谱半径）。"""
@@ -328,11 +463,38 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         if cell_volumes is None:
             cell_volumes = cp.asarray(self.mesh.get_all_cell_volumes())
 
+        # 几何/度量 CFL 限制所需数据（与 CPU 侧 cfl.py 的 dt_geometric
+        # 同一机制，见 compute_local_cfl_step_gpu 参数文档）：det_jacs 已
+        # 在 upload_mesh_data 里常驻显存，metric_flux_scale 只依赖网格
+        # 几何（与流场状态无关），缓存后避免每步重复计算——与 CPU 侧
+        # solver_geometry.py::_get_metric_flux_scale 同一缓存策略。
+        det_jacs_gpu = self.mesh_data.get('det_jacs')
+        adj_j_gpu = self.mesh_data.get('adj_j')
+        metric_flux_scale_gpu = getattr(self, '_metric_flux_scale_gpu_cache', None)
+        # 第四次评审第二轮复核发现：只用 `is None` 判断缓存是否有效，
+        # 完全没有形状比较——CPU 侧 solver_geometry.py::_get_metric_flux_scale
+        # 曾因"只比较 shape[0]、漏比 n_sps 维度"复现过跨阶数切换后返回
+        # 陈旧形状缓存值的真实 bug（Order Continuation 切换阶数后 n_sps
+        # 改变），这里连 shape[0] 都没比，是同一类问题的更宽松版本。
+        # 当前 GPU 路径还没有接入 Order Continuation（CLI 直接以目标阶数
+        # 一次性构造 GPUFRSolver），这个缺陷现在不会被触发，但保持与
+        # CPU 侧同等的防御水位，不留一个"看起来复制了修复、实际没复制
+        # 关键部分"的陷阱。
+        if (metric_flux_scale_gpu is None or metric_flux_scale_gpu.shape != (n_cells, n_sps)) \
+                and adj_j_gpu is not None:
+            adj_row_norms = cp.linalg.norm(adj_j_gpu, axis=-1)  # (n_cells,n_sps,3)
+            metric_flux_scale_gpu = cp.sum(adj_row_norms, axis=-1)  # (n_cells,n_sps)
+            self._metric_flux_scale_gpu_cache = metric_flux_scale_gpu
+
         # 使用所有 SP 计算谱半径（取最大值），而非仅 SP0
         # 对每个 SP 独立计算 CFL 步长，然后取 cell 内最小值
         dt_all_sps = cp.zeros((n_cells, n_sps), dtype=cp.float64)
         for sp in range(n_sps):
             U_sp = self.U_gpu[:, sp:sp+1, :]  # (n_cells, 1, n_vars)
+            det_jacs_sp = det_jacs_gpu[:, sp] if det_jacs_gpu is not None else None
+            metric_flux_scale_sp = (
+                metric_flux_scale_gpu[:, sp] if metric_flux_scale_gpu is not None else None
+            )
             dt_sp = compute_local_cfl_step_gpu(
                 U_sp, cell_volumes,
                 owner_cell, neighbor_cell, is_boundary,
@@ -340,6 +502,8 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
                 None, None,
                 cfl=self.time_integrator.cfl,
                 poly_order=getattr(self, "order", 0),
+                det_jacs_sp=det_jacs_sp,
+                metric_flux_scale_sp=metric_flux_scale_sp,
             )
             dt_all_sps[:, sp] = dt_sp
 
@@ -445,6 +609,12 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
 
         self.U_gpu = U_new_flat.reshape(n_cells, n_sps, self.n_vars)
         self._update_primitives_gpu()
+
+        # SGS（WALE）涡粘系数更新（#7）：必须在状态更新之后调用，供
+        # 下一步的粘性残差消费，与 CPU 版 apply_turbulence_corrections
+        # 同一个操作分裂时序，见 gpu_solver_io.py::
+        # _apply_turbulence_corrections_gpu 文档。
+        self._apply_turbulence_corrections_gpu()
 
         # 残差范数
         residual_norm = float(cp.linalg.norm(residual0) / max(1, np.sqrt(residual0.size)))

@@ -18,7 +18,7 @@ AutoFlowCFD V2.0 - GPU 直接 Halo 交换
 - 新方案：只传输 send/recv 列表中的数据，使用异步流重叠计算与通信
 
 使用:
-    from autoflowcfd.core.gpu.gpu_halo_exchange import GPUHaloExchange
+    from autoflowcfd.core.gpu.distributed.gpu_halo_exchange import GPUHaloExchange
     gpu_halo = GPUHaloExchange(partition, n_sps, n_vars, device_id=0)
     U_extended_gpu = gpu_halo.exchange(U_gpu)
 """
@@ -36,38 +36,53 @@ def _check_cuda_aware_mpi() -> bool:
     """检测 MPI 实现是否支持 CUDA-aware 通信。
 
     CUDA-aware MPI 可以直接发送/接收 GPU buffer，无需经过 CPU 中转。
-    检测方法：尝试使用 CUDA buffer 进行一次小规模 MPI 通信。
+    检测方法：只让 rank 0/1 之间做一次真实的小规模 GPU buffer 通信测试，
+    再把结果广播给所有 rank，保证全体 rank 得到同一个结论。
+
+    第四次评审修复：此前 rank>=2 直接 `return True`，完全不参与检测、
+    也不知道 rank 0/1 真实测出的结果——如果真实环境不支持 CUDA-aware
+    MPI（rank 0/1 测出 False），rank>=2 仍会走 `_exchange_cuda_aware`
+    （GPU 指针 Isend/Irecv），而 rank 0/1 走 `_exchange_staging`（CPU
+    numpy buffer）——同一个通信域里两种消息格式不匹配，会挂起或产生
+    垃圾数据。改为只由 rank 0（与 rank 1 配对测试，size==1 时跳过测试
+    直接判 True）得出真实结论，再用 Allreduce（逻辑与）确保所有 rank
+    看到完全一致的结果，不允许任何 rank 各自猜测。
     """
     if not mpi_available or not gpu_available:
         return False
 
     cp = get_cupy()
-    try:
-        comm = get_comm()
-        rank = comm.Get_rank()
-        size = comm.Get_size()
+    comm = get_comm()
+    rank = comm.Get_rank()
+    size = comm.Get_size()
 
-        # 小规模测试：在 GPU 上分配一个数组，尝试直接发送
-        test_gpu = cp.ones(10, dtype=cp.float64) * (rank + 1)
+    if size == 1:
+        return True  # 单 rank 不需要实际通信
 
-        if size == 1:
-            return True  # 单 rank 不需要实际通信
-
-        # 尝试非阻塞发送/接收 GPU buffer
-        if rank == 0:
+    # 只有 rank 0/1 参与真实测试，结果只在 rank 0 上确定
+    local_result = False
+    if rank == 0:
+        try:
+            test_gpu = cp.ones(10, dtype=cp.float64)
             req = comm.Isend(test_gpu, dest=1, tag=99)
             req.Wait()
-        elif rank == 1:
+            local_result = True
+        except Exception:
+            local_result = False
+    elif rank == 1:
+        try:
             recv_buf = cp.zeros(10, dtype=cp.float64)
             req = comm.Irecv(recv_buf, source=0, tag=99)
             req.Wait()
-            # 如果成功执行到这里没有异常，说明支持 CUDA-aware MPI
-            return True
-        else:
-            return True
-
-    except Exception:
-        return False
+            local_result = True
+        except Exception:
+            local_result = False
+    # rank>=2 不参与测试，local_result 保持 False——下面用 MAX（逻辑或）
+    # 而不是 AND：真正的检测结果只由 rank 0/1 产生，rank>=2 的 False
+    # 不应该拖累这个结果，只需要把 rank 0/1 的结论传播给它们。
+    from mpi4py import MPI as _MPI
+    global_result = comm.allreduce(local_result, op=_MPI.MAX)
+    return bool(global_result)
 
 
 # 全局缓存检测结果

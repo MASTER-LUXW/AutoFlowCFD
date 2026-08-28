@@ -108,6 +108,17 @@ class GPUFlatFaceGeometry:
             self.dist_fp_of_sp = cp.asarray(flat_face.dist_fp_of_sp)
             self.dist_axis_coord_of_sp = cp.asarray(flat_face.dist_axis_coord_of_sp)
 
+            # ── 分布式 local+halo 扩展索引空间逐位置棱柱/四面体类型
+            # （#1，2026-08-28 新增）：只有 DistributedFlatFaceGeometry
+            # （多 GPU 分布式路径）才有这个字段，单机 FlatFaceGeometry
+            # 没有——getattr 默认 None，单机路径完全不受影响。见
+            # distributed_flat_face.py::DistributedFlatFaceGeometry
+            # 字段文档"棱柱/四面体判据"一节。
+            compact_cell_type = getattr(flat_face, 'compact_cell_type', None)
+            self.compact_cell_type = (
+                cp.asarray(compact_cell_type) if compact_cell_type is not None else None
+            )
+
             # ── 面图着色索引 ──
             self.color_face_indices = []
             for c in range(self.n_colors):

@@ -36,6 +36,20 @@ def wall_ghost_state(
 
     Returns:
         Q_ghost: (n_fp, 5)
+
+    Note（#9 修复，2026-08-28）：is_no_slip=False 这条分支被两种不同物理
+    场景复用——真正的无粘/对称 SLIP_WALL 边界，以及 WMLES 激活时的粘性
+    WALL 边界（见 fr_solver/boundary.py::build_boundary_ghost_provider）。
+    后一种场景下，"切向速度保持不变"不是在建模真实滑移，而是刻意让这个
+    面对 BR1/LDG 粘性通量的切向梯度贡献退化为零（ghost 切向速度与内部值
+    无跳跃），使壁面模型另外算出的 tau_w
+    （core/utils/solver_helpers.py::compute_wmles_wall_stress_correction）
+    成为该面切向应力的唯一来源，而不是叠加在一个由无滑移镜像逼出的虚假
+    解析梯度剪应力之上——按 WMLES 壁面模型文献的标准做法（wall model 的
+    tau_w 应该"取代"而非"叠加"解析梯度算出的剪应力，见
+    build_boundary_ghost_provider 文档引用的 Kawai & Larsson 团队页面与
+    Kang et al. 2024 arXiv:2405.15899）。两种场景共享同一个数值构造是
+    刻意的工程复用，不是把二者混为一谈。
     """
     Q_ghost = Q_int.copy()
     if is_no_slip:

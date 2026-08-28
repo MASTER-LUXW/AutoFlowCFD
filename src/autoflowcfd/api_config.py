@@ -24,10 +24,13 @@ def api_create_steady_config(
     """创建稳态仿真配置（委托函数）。"""
     turb_model_map = {
         'none': TurbulenceModel.NONE,
+        'sst': TurbulenceModel.SST_KW,
         'sst_kw': TurbulenceModel.SST_KW,
         'sa': TurbulenceModel.SA,
         'des': TurbulenceModel.DES,
         'ddes': TurbulenceModel.DDES,
+        'iddes': TurbulenceModel.IDDES,
+        'wmles': TurbulenceModel.WMLES,
         'les': TurbulenceModel.LES,
     }
     turb_model = turb_model_map.get(turbulence.lower(), TurbulenceModel.SST_KW)
@@ -71,10 +74,34 @@ def api_create_transient_config(
     if turbulence_model is None:
         turbulence_model = "sst"
 
+    # 真实 bug 修复（V2.0 专家组盲审发现，2026-08-28）：此前直接
+    # `TurbulenceModel(turbulence_model)` 构造，而 `turbulence_model`
+    # 默认值/常见取值 "sst" 从来都不是这个枚举的合法值（枚举值是
+    # "sst_kw"，见 solver_config.py）——`api.create_transient_config()`
+    # 不传 turbulence_model 参数（最常见的调用方式）恒定 ValueError 崩溃。
+    # 改用与 api_create_steady_config 同一套 CLI 词汇->枚举映射表。
+    turb_model_map = {
+        'none': TurbulenceModel.NONE,
+        'sst': TurbulenceModel.SST_KW,
+        'sst_kw': TurbulenceModel.SST_KW,
+        'sa': TurbulenceModel.SA,
+        'des': TurbulenceModel.DES,
+        'ddes': TurbulenceModel.DDES,
+        'iddes': TurbulenceModel.IDDES,
+        'wmles': TurbulenceModel.WMLES,
+        'les': TurbulenceModel.LES,
+    }
+    if turbulence_model.lower() not in turb_model_map:
+        raise ValueError(
+            f"Unknown turbulence_model '{turbulence_model}', expected one of "
+            f"{sorted(turb_model_map)}"
+        )
+    turb_model = turb_model_map[turbulence_model.lower()]
+
     return TransientConfig(
         backend=BackendType(backend),
         order=order,
-        turbulence=TurbulenceModel(turbulence_model),
+        turbulence=turb_model,
         time_scheme=time_scheme,
         dt=dt,
         total_time=total_time if total_time is not None else dt * max_iter,

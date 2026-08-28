@@ -59,15 +59,23 @@ class HaloExchange:
         # 预分配 send/recv buffer
         self.send_buffers: Dict[int, np.ndarray] = {}
         self.recv_buffers: Dict[int, np.ndarray] = {}
+        # 标量场（k/omega 等，形状 (n_sps,) 无 n_vars 维）专用的预分配
+        # buffer——此前 exchange_scalar() 每次调用都用 fancy-indexing/
+        # np.empty 现分配新数组，与本类"预分配固定 buffer"的既定设计
+        # 矛盾（exchange() 本体做到了，标量版本没有同步）。
+        self.send_buffers_scalar: Dict[int, np.ndarray] = {}
+        self.recv_buffers_scalar: Dict[int, np.ndarray] = {}
 
         for r, cells in partition.send_lists.items():
             self.send_buffers[r] = np.empty(
                 (len(cells), n_sps, n_vars), dtype=np.float64
             )
+            self.send_buffers_scalar[r] = np.empty((len(cells), n_sps), dtype=np.float64)
         for r, cells in partition.recv_lists.items():
             self.recv_buffers[r] = np.empty(
                 (len(cells), n_sps, n_vars), dtype=np.float64
             )
+            self.recv_buffers_scalar[r] = np.empty((len(cells), n_sps), dtype=np.float64)
 
         logger.debug(
             f"Rank {partition.rank}: Halo exchange initialized - "
@@ -163,13 +171,14 @@ class HaloExchange:
         comm = get_comm()
         MPI = get_mpi()
 
-        # 打包/解包标量数据（复用 float64 buffer，按 n_sps 大小切片）
-        send_bufs = {}
-        recv_bufs = {}
+        # 打包/解包标量数据：复用 __init__ 里预分配的固定 buffer（此前
+        # 这里每次调用都用 fancy-indexing/np.empty 现分配新数组，与本类
+        # exchange() 本体"预分配固定 buffer"的既定设计不一致，第四次
+        # 评审修复）。
+        send_bufs = self.send_buffers_scalar
+        recv_bufs = self.recv_buffers_scalar
         for r, indices in part.send_lists.items():
-            send_bufs[r] = local_scalar[indices]  # (n_send, n_sps)
-        for r, cells in part.recv_lists.items():
-            recv_bufs[r] = np.empty((len(cells), self.n_sps), dtype=np.float64)
+            send_bufs[r][:] = local_scalar[indices]  # (n_send, n_sps)
 
         # 非阻塞通信
         recv_requests = []

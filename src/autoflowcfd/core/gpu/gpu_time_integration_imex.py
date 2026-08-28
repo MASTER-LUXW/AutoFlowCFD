@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from typing import Callable
 
+from loguru import logger
+
 from autoflowcfd.core.gpu import get_cupy
 
 
@@ -88,7 +90,15 @@ def step_imex_gpu(
 
         U_new = U_next
     else:
-        pass  # 未收敛警告由调用方记录
+        # 第四次评审修复：此前这里的注释声称"未收敛警告由调用方记录"，
+        # 但检查 gpu_solver.py 的 IMEX 调用路径确认调用方从未检查或记录
+        # 未收敛状态——这条注释描述的行为并不存在。与 CPU 侧
+        # core/time_integration/imex.py 同一位置一致，直接在这里记录，
+        # 不依赖一个不存在的"调用方"。
+        logger.warning(
+            f"IMEX (GPU) did not converge after {max_iter} iterations, "
+            f"final res_norm={current_res_norm:.6e}"
+        )
 
     integrator.n_steps += 1
     return U_new

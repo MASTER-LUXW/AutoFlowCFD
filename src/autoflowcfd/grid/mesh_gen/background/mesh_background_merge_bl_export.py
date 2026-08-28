@@ -2,9 +2,9 @@
 
 从 mesh_background_merge.py 的 _build_merged_mesh_with_bl 分支里拆出来
 （原文件超过 400 行上限）——这段逻辑只在 export_bl_only=True 时触发，是
-一个自包含的"构造导出对象 -> 写文件 -> sys.exit(0)"流程，和周围的核心
+一个自包含的"构造导出对象 -> 写文件 -> 退出进程"流程，和周围的核心
 网格合并逻辑没有共享状态，适合单独成一个函数。逐字节保留原逻辑，未做任
-何改动。
+何改动（第四次评审后：成功退出码 0，失败退出码 1，不再是恒为 0）。
 """
 
 import numpy as np
@@ -21,12 +21,12 @@ def _export_bl_only_and_exit(
     nodes_per_layer: int,
     _effective_bl_layers: int,
 ) -> None:
-    """导出仅含边界层棱柱的网格并终止进程（sys.exit(0)），供调试使用。
+    """导出仅含边界层棱柱的网格并终止进程，供调试使用。
 
     对应 mesh_background_merge._build_merged_mesh 原来含 BL 分支里的
     `if export_bl_only:` 代码块，逐字搬运。调用方只需在 export_bl_only
-    为真时调用本函数——本函数自身会在成功或失败后都以 sys.exit(0) 结束
-    进程，调用方之后的代码不会再执行到。
+    为真时调用本函数——本函数自身会终止进程（成功 sys.exit(0)，失败
+    sys.exit(1)），调用方之后的代码不会再执行到。
     """
     if not export_bl_only_path:
         raise ValueError("export_bl_only=True requires export_bl_only_path to be set")
@@ -56,7 +56,7 @@ def _export_bl_only_and_exit(
         # 和 BL/核心界面（此处生成的最后一层）都是这个棱柱块的" exterior"面
         # ——把所有棱柱归入一个组会使 _extract_boundary_faces_by_group 在
         # 同一个 WALL 标签下导出两个重叠壳面。
-        # 按与非 bl-only 路径区分 layer 0 的相同方式Splitting它们（参见
+        # 按与非 bl-only 路径区分 layer 0 的相同方式拆分它们（参见
         # 此代码块下方几行的 is_layer0_prism）：棱柱的 v0 始终是其自身底层
         # 的节点，而第 L 层的节点始终占据
         # bl_nodes[L*nodes_per_layer : (L+1)*nodes_per_layer]。
@@ -93,6 +93,11 @@ def _export_bl_only_and_exit(
         logger.error(f"Failed to export BL mesh: {e}")
         import traceback
         traceback.print_exc()
+        # 导出失败必须以非零退出码报告——此前这里无条件 sys.exit(0)，
+        # 任何靠退出码判断成败的调用方（CI/脚本）会把失败误判为成功，
+        # 这正是项目明确禁止的"假通过"式错误处理（第四次评审发现1）。
+        import sys
+        sys.exit(1)
 
     import sys
     sys.exit(0)

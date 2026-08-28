@@ -340,7 +340,10 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
                 print(f"[INFO] Wall distance field reset to P0 dimensions")
 
         solver.current_order = 0
-        solver.ops = generate_fr_operators(0)
+        # flux_point_type 显式透传 solver.flux_type（#14，2026-08-28）：
+        # 此前恒用默认值重建算子，跨阶数切换后会静默丢失用户显式选择的
+        # 'gauss' 修正函数方案，退回默认的 'radau'。
+        solver.ops = generate_fr_operators(0, flux_point_type=getattr(solver, 'flux_type', 'radau'))
         solver.mesh.set_order(0)
 
         print(f"[INFO] Reinitialized to P0 ({expected_p0_n_sps} SP/cell)")
@@ -388,7 +391,8 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
             solver._interpolate_to_new_order(target_p)
 
         solver.current_order = target_p
-        solver.ops = generate_fr_operators(target_p)
+        # flux_point_type 显式透传，见上面 P0 重置分支同一处修复的说明。
+        solver.ops = generate_fr_operators(target_p, flux_point_type=getattr(solver, 'flux_type', 'radau'))
 
         # 在构建新阶数几何*之前*先释放已经离开的阶段的完整几何缓存——
         # 原先这段清理放在下面 set_order 之后，导致新阶数几何构建期间旧阶数
@@ -506,6 +510,11 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
             t_end = _time.time()
             final_residual = res
             total_iter += 1
+            # 收敛历史记录（V2.0 专家组盲审发现，2026-08-27，与
+            # solver.py::solve() 的普通循环同一约定）：api.py::
+            # get_convergence_history 读这个列表。
+            if hasattr(solver, 'residual_history'):
+                solver.residual_history.append(res)
 
             if initial_residual_this_order is None:
                 initial_residual_this_order = res

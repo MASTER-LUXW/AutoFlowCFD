@@ -26,6 +26,7 @@ def compute_viscous_residual(
     mu_t_field: np.ndarray = None,
     Pr_t: float = 0.9,
     boundary_ghost_provider=None,
+    flat_face_override=None,
 ) -> np.ndarray:
     """计算粘性残差。真正的实现见 fr_viscous_flux.compute_viscous_residual_fr。
 
@@ -48,6 +49,7 @@ def compute_viscous_residual(
     res_euler = compute_viscous_residual_fr(
         state_U, mesh, ops, mu=mu, Pr=Pr, mu_t_field=mu_t_field, Pr_t=Pr_t,
         boundary_ghost_provider=boundary_ghost_provider,
+        flat_face_override=flat_face_override,
     )
     if n_vars > 5:
         res_full = np.zeros(state_U.shape)

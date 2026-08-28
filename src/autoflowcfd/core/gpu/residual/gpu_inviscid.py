@@ -18,14 +18,21 @@ from typing import Callable, Optional
 from loguru import logger
 
 from autoflowcfd.core.gpu import get_cupy
-from autoflowcfd.core.gpu.gpu_volume_contract import (
-    gpu_contract_shared_operator_1axis,
-    gpu_contract_shared_operator_2axis,
-)
-from autoflowcfd.core.gpu.gpu_flux import (
+from autoflowcfd.core.gpu.residual.gpu_flux import (
     euler_physical_flux_gpu,
     conserved_to_primitive_gpu,
 )
+from autoflowcfd.core.gpu.residual.gpu_inviscid_volume import (
+    prepare_mesh_data as _prepare_mesh_data,
+    prepare_ops_data as _prepare_ops_data,
+    compute_volume_term_gpu as _compute_volume_term_gpu_impl,
+    distribute_face_correction_to_sps,
+)
+
+
+def _compute_volume_term_gpu(U, mesh_data, ops_data, n_cells, n_sps, n_prism):
+    """体积项计算，实现已拆分到 gpu_inviscid_volume.py（控制单文件行数）。"""
+    return _compute_volume_term_gpu_impl(get_cupy(), U, mesh_data, ops_data, n_cells, n_sps, n_prism)
 
 
 def compute_inviscid_residual_fr_gpu(
@@ -36,6 +43,7 @@ def compute_inviscid_residual_fr_gpu(
     mesh_data=None,
     ops_data=None,
     flat_face_gpu=None,
+    flat_face_cpu=None,
     device_id=0,
     mach_ref=0.1,
 ):
@@ -69,10 +77,28 @@ def compute_inviscid_residual_fr_gpu(
         with cp.cuda.Device(device_id):
             U = cp.asarray(U)
 
-    n_cells = mesh.n_cells
+    # #1（V2.0 专家组盲审第4轮，2026-08-28）：n_cells/n_prism 此前恒从
+    # `mesh` 读取——分布式多 GPU 路径下，`mesh` 传入的是完整全局网格
+    # （`get_flat_face_geometry(mesh, ops)` 下面几行需要它提供真实
+    # face_connectivity 来算边界幽灵态，不能替换成压缩后的 local+halo
+    # 子集），但残差/体积项数组的真实尺寸是 local+halo 压缩索引空间
+    # 大小（`mesh_data`/`flat_face_gpu` 已经是按这个压缩空间预先构造
+    # 好、显式传入的），与 `mesh.n_cells`/`mesh.n_prism_cells`（全局
+    # 尺寸）不一致——用全局尺寸给残差数组分配形状、给体积项当切片
+    # 阈值，会得到形状不匹配（IndexError/崩溃）或更隐蔽地用错误阈值
+    # 切分棱柱/四面体。`mesh_data`/`ops_data` 由调用方显式传入时，
+    # 优先从其中读取（array_manager.py::upload_mesh_data 自己就会写
+    # `mesh_data['n_cells']`/`['n_prism']`，分布式调用方构造压缩版
+    # mesh_data 时同样要写这两个 key，见 gpu_distributed.py 的构造处）；
+    # 未显式传入时（单机 GPUFRSolver 路径）保持原有行为，直接读 mesh。
+    if mesh_data is not None and 'n_cells' in mesh_data:
+        n_cells = mesh_data['n_cells']
+        n_prism = mesh_data.get('n_prism', mesh.n_prism_cells)
+    else:
+        n_cells = mesh.n_cells
+        n_prism = mesh.n_prism_cells
     n_sps = mesh.n_sps_per_cell
     n1d = mesh.n_points_1d
-    n_prism = mesh.n_prism_cells
 
     # ── 准备网格数据（如果未预上传）──
     if mesh_data is None:
@@ -86,10 +112,30 @@ def compute_inviscid_residual_fr_gpu(
     )
 
     # ── 2. 界面项 ──
-    if flat_face_gpu is None:
-        # 需要构建面几何
+    # flat_face（CPU 侧）恒需要获取——即便调用方已经预构建好
+    # flat_face_gpu，边界幽灵态计算仍要用 CPU 侧 flat_face（见下方
+    # _compute_boundary_ghost_states_gpu 文档）；get_flat_face_geometry
+    # 有单进程单槽缓存（face_kernels.py），同一 mesh/ops 再次调用是
+    # 缓存命中，不会重复构建。
+    #
+    # #1（2026-08-28）：`flat_face_cpu` 显式传入时优先使用，不再无条件
+    # 调用 get_flat_face_geometry(mesh, ops)——分布式多 GPU 路径下这里
+    # 的 `mesh` 是完整全局网格，get_flat_face_geometry 会返回全局尺寸的
+    # face 几何（owner_cell 等是全局单元编号），但 Q_gpu 现在是
+    # local+halo 压缩索引空间大小；用全局 flat_face 去算边界幽灵态会
+    # 用全局单元编号误当压缩索引去读 Q_gpu（要么越界崩溃，要么读到
+    # 毫不相关单元的数据），且会为不属于本 rank 的边界面白白计算一遍。
+    # 调用方（MultiGPUDistributedSolver）需要传入 dist_flat_face.base_flat
+    # ——那是已经按同一套 local+halo 压缩索引重映射过、且只包含本 rank
+    # 负责的面的 FlatFaceGeometry，与 flat_face_gpu 出自同一次
+    # build_distributed_flat_face 调用，两者索引空间天然一致。单机路径
+    # 不传这个参数，行为完全不变。
+    if flat_face_cpu is not None:
+        flat_face = flat_face_cpu
+    else:
         from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
         flat_face = get_flat_face_geometry(mesh, ops)
+    if flat_face_gpu is None:
         from autoflowcfd.core.gpu.gpu_face_geometry import build_gpu_flat_face
         flat_face_gpu = build_gpu_flat_face(flat_face, device_id)
 
@@ -97,10 +143,11 @@ def compute_inviscid_residual_fr_gpu(
     adj_j = mesh_data['adj_j']
     det_jacs = mesh_data['det_jacs']
 
-    # 边界幽灵态（CPU 上计算，然后上传到 GPU）
+    # 边界幽灵态：必须调用真实 ghost_provider 才能正确处理 WALL 无滑移/
+    # INLET/FARFIELD/SYMMETRY 边界（CPU 上计算，然后上传到 GPU——见
+    # _compute_boundary_ghost_states_gpu 文档）。
     Q_ghost_gpu = _compute_boundary_ghost_states_gpu(
-        Q_gpu, flat_face_gpu, adj_j, boundary_ghost_provider,
-        n_cells, n_sps, device_id,
+        Q_gpu, flat_face, boundary_ghost_provider, device_id,
     )
 
     # 界面校正（按图着色逐色处理）
@@ -112,181 +159,58 @@ def compute_inviscid_residual_fr_gpu(
     residual = residual + correction
 
     # ── 3. 异常残差抑制 ──
+    # 第四次评审修复：此前 if/else 两分支代码逐字相同，都以 cp.asarray(result)
+    # 结尾——不管 input_is_numpy 是 True 还是 False 都返回 CuPy 数组，
+    # 与函数文档承诺的"与输入同类型（numpy 输入返回 numpy）"矛盾，是一处
+    # 补丁堆叠后未清理的重复分支。
     from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
-    if input_is_numpy:
-        residual_np = cp.asnumpy(residual)
-        U_np = cp.asnumpy(U)
-        result = suppress_residual_outliers(residual_np, U_np[..., :5])
-        return cp.asarray(result)
-    else:
-        residual_np = cp.asnumpy(residual)
-        U_np = cp.asnumpy(U)
-        result = suppress_residual_outliers(residual_np, U_np[..., :5])
-        return cp.asarray(result)
-
-
-def _prepare_mesh_data(cp, mesh, device_id):
-    """准备网格度量数据到 GPU。"""
-    with cp.cuda.Device(device_id):
-        n_cells = mesh.n_cells
-        n_sps = mesh.n_sps_per_cell
-
-        det_jacs = cp.asarray(
-            np.ascontiguousarray(
-                mesh.jacobians['det_jacs'].reshape(n_cells, n_sps), dtype=np.float64
-            )
-        )
-        inv_jacs = cp.asarray(
-            np.ascontiguousarray(
-                mesh.jacobians['inv_jacs'].reshape(n_cells, n_sps, 3, 3), dtype=np.float64
-            )
-        )
-        adj_j = det_jacs[..., None, None] * inv_jacs
-
-        data = {
-            'det_jacs': det_jacs,
-            'inv_jacs': inv_jacs,
-            'adj_j': adj_j,
-            'n_prism': mesh.n_prism_cells,
-        }
-
-        # Fine Jacobian（over-integration）
-        if mesh.jacobians_fine is not None:
-            n_fine = mesh.n_sps_per_cell_fine
-            det_jacs_fine = cp.asarray(
-                np.ascontiguousarray(
-                    mesh.jacobians_fine['det_jacs'].reshape(n_cells, n_fine), dtype=np.float64
-                )
-            )
-            inv_jacs_fine = cp.asarray(
-                np.ascontiguousarray(
-                    mesh.jacobians_fine['inv_jacs'].reshape(n_cells, n_fine, 3, 3), dtype=np.float64
-                )
-            )
-            adj_j_fine = det_jacs_fine[..., None, None] * inv_jacs_fine
-            data['det_jacs_fine'] = det_jacs_fine
-            data['inv_jacs_fine'] = inv_jacs_fine
-            data['adj_j_fine'] = adj_j_fine
-            data['n_fine'] = n_fine
-
-        return data
-
-
-def _prepare_ops_data(cp, ops, device_id):
-    """准备 FR 算子数据到 GPU。"""
-    with cp.cuda.Device(device_id):
-        data = {}
-        for attr_name in ['D_3d_tet', 'D_3d_prism']:
-            D = getattr(ops, attr_name, None)
-            if D is not None:
-                data[attr_name] = cp.asarray(np.ascontiguousarray(D, dtype=np.float64))
-
-        for attr_name in [
-            'overint_interp_c2f_tet', 'overint_interp_c2f_prism',
-            'overint_D_fine_tet', 'overint_D_fine_prism',
-            'overint_restrict_f2c_tet', 'overint_restrict_f2c_prism',
-        ]:
-            op = getattr(ops, attr_name, None)
-            if op is not None:
-                data[attr_name] = cp.asarray(np.ascontiguousarray(op, dtype=np.float64))
-        return data
-
-
-def _compute_volume_term_gpu(U, mesh_data, ops_data, n_cells, n_sps, n_prism):
-    """计算体积项（CuPy 向量化）。"""
-    cp = get_cupy()
-
-    Q = conserved_to_primitive_gpu(U[..., :5])  # (n_cells, n_sps, 5)
-    det_jacs = mesh_data['det_jacs']
-
-    if 'adj_j_fine' in mesh_data:
-        # Over-integration 去混叠路径
-        n_fine = mesh_data['n_fine']
-        adj_j_fine = mesh_data['adj_j_fine']
-
-        # 插值到 fine 点
-        Q_fine = cp.zeros((n_cells, n_fine, 5), dtype=cp.float64)
-        if n_prism > 0:
-            Q_fine[:n_prism] = gpu_contract_shared_operator_1axis(
-                ops_data['overint_interp_c2f_prism'], Q[:n_prism]
-            )
-        if n_cells > n_prism:
-            Q_fine[n_prism:] = gpu_contract_shared_operator_1axis(
-                ops_data['overint_interp_c2f_tet'], Q[n_prism:]
-            )
-
-        # 物理通量（fine 点）
-        Q_fine_flat = cp.ascontiguousarray(Q_fine.reshape(-1, 5))
-        F_phys_fine = euler_physical_flux_gpu(Q_fine_flat).reshape(n_cells, n_fine, 3, 5)
-
-        # 逆变通量
-        F_tilde_fine = cp.matmul(adj_j_fine, F_phys_fine)
-
-        # 散度（fine 点）
-        div_comp_fine = cp.zeros((n_cells, n_fine, 5), dtype=cp.float64)
-        if n_prism > 0:
-            div_comp_fine[:n_prism] = gpu_contract_shared_operator_2axis(
-                ops_data['overint_D_fine_prism'], F_tilde_fine[:n_prism]
-            )
-        if n_cells > n_prism:
-            div_comp_fine[n_prism:] = gpu_contract_shared_operator_2axis(
-                ops_data['overint_D_fine_tet'], F_tilde_fine[n_prism:]
-            )
-
-        # 限制回 coarse
-        div_comp = cp.zeros((n_cells, n_sps, 5), dtype=cp.float64)
-        if n_prism > 0:
-            div_comp[:n_prism] = gpu_contract_shared_operator_1axis(
-                ops_data['overint_restrict_f2c_prism'], div_comp_fine[:n_prism]
-            )
-        if n_cells > n_prism:
-            div_comp[n_prism:] = gpu_contract_shared_operator_1axis(
-                ops_data['overint_restrict_f2c_tet'], div_comp_fine[n_prism:]
-            )
-    else:
-        # 无 fine 几何：朴素路径
-        adj_j = mesh_data['adj_j']
-        Q_flat = cp.ascontiguousarray(Q.reshape(-1, 5))
-        F_phys = euler_physical_flux_gpu(Q_flat).reshape(n_cells, n_sps, 3, 5)
-        F_tilde = cp.matmul(adj_j, F_phys)
-        div_comp = cp.zeros((n_cells, n_sps, 5), dtype=cp.float64)
-        if n_prism > 0:
-            div_comp[:n_prism] = gpu_contract_shared_operator_2axis(
-                ops_data['D_3d_prism'], F_tilde[:n_prism]
-            )
-        if n_cells > n_prism:
-            div_comp[n_prism:] = gpu_contract_shared_operator_2axis(
-                ops_data['D_3d_tet'], F_tilde[n_prism:]
-            )
-
-    residual = -div_comp / det_jacs[..., None]
-    return residual
+    residual_np = cp.asnumpy(residual)
+    U_np = cp.asnumpy(U)
+    result = suppress_residual_outliers(residual_np, U_np[..., :5])
+    return result if input_is_numpy else cp.asarray(result)
 
 
 def _compute_boundary_ghost_states_gpu(
-    Q_gpu, flat_face_gpu, adj_j, ghost_provider,
-    n_cells, n_sps, device_id,
+    Q_gpu, flat_face, ghost_provider, device_id,
 ):
-    """计算边界面的幽灵态（向量化实现，全程 GPU）。
+    """计算边界面每个 FP 各自的真实边界条件幽灵态。
 
-    零梯度外插：Q_ghost[face] = Q[owner_cell, SP0]
-    向量化替代逐面 Python 循环。
+    真实 bug 修复（V2.0 专家组盲审发现，2026-08-27）：此前这里完全
+    没有调用 `ghost_provider`——无论调用方传入 `None` 还是真实的
+    `BoundaryGhostStateProvider`，都恒定用"owner cell SP0 值零梯度
+    外插、对该面全部 FP 广播同一个值"代替（参数被静默丢弃）。等价于
+    让 WALL/INLET/OUTLET/FARFIELD/SYMMETRY 全部边界面在无粘通量计算
+    里"对该边界不可见"（镜像内部值），P>=1 阶数的 GPU 无粘残差路径上
+    车身壁面、来流边界、出口条件形同虚设——CLI `solve steady/transient
+    --backend gpu` 默认 order=2，恒定触发这条路径。
+
+    `ghost_provider` 是任意 Python 可调用对象，numba/CuPy 都调不了，
+    只能在 CPU 上跑（复用已验证的 P1+ CPU 实现
+    `inviscid_kernel.py::compute_boundary_ghost_states`，只循环边界面，
+    约占全部面的 3%，性能可接受）——与 `gpu_viscous.py` 里粘性残差
+    的同类边界幽灵态计算用的是同一个 CPU round-trip 模式。
+
+    Args:
+        Q_gpu: (n_cells, n_sps, 5) 当前原变量（GPU）
+        flat_face: CPU 侧 FlatFaceGeometry（get_flat_face_geometry 返回）
+        ghost_provider: 边界幽灵态提供者，None 时退化为
+            DefaultGhostProvider（镜像 CPU 路径的默认行为）
+        device_id: GPU 设备 ID
+
+    Returns:
+        Q_ghost_gpu: (n_faces, n_fp, 5)，每个边界面每个 FP 各自的
+            幽灵态（只有边界面对应的行有意义），与 CPU 版
+            `compute_boundary_ghost_states` 返回形状一致
     """
     cp = get_cupy()
-    n_faces = flat_face_gpu.n_faces
-    n_vars = Q_gpu.shape[-1]
+    from autoflowcfd.core.fr_residual.inviscid import DefaultGhostProvider
+    from autoflowcfd.core.fr_residual.inviscid_kernel import compute_boundary_ghost_states
 
-    Q_ghost_gpu = cp.zeros((n_faces, n_vars), dtype=cp.float64)
-
-    # 向量化：一次性处理所有边界面
-    bnd_mask = flat_face_gpu.is_boundary  # (n_faces,)
-    bnd_owners = flat_face_gpu.owner_cell[bnd_mask]  # (n_bnd,)
-
-    if bnd_owners.shape[0] > 0:
-        # 零梯度外插：取 owner cell 的 SP0 值
-        Q_ghost_gpu[bnd_mask] = Q_gpu[bnd_owners, 0, :]
-
-    return Q_ghost_gpu
+    provider = ghost_provider if ghost_provider is not None else DefaultGhostProvider()
+    Q_cpu = cp.asnumpy(Q_gpu)
+    Q_ghost_np = compute_boundary_ghost_states(flat_face, Q_cpu, None, provider)
+    with cp.cuda.Device(device_id):
+        return cp.asarray(Q_ghost_np)
 
 
 def _extrap_q_to_fp(cp, mat, src_cell, Q_gpu):
@@ -298,7 +222,8 @@ def _add_q_src1_to_fp(cp, out, src1_idx, src1_cell, src1_mat, Q_gpu):
     """叠加稀疏第二来源（分裂面场景），Q 专用版本，见
     gpu_viscous.py::_add_src1_to_fp 同名通用版本的文档（这里内联一份
     Q-only 版本，避免 gpu_inviscid.py<->gpu_viscous.py 产生循环 import：
-    gpu_viscous.py 已经反过来 import 本文件的 _prepare_mesh_data 等）。"""
+    两者都从 gpu_inviscid_volume.py 导入 prepare_mesh_data/prepare_ops_data，
+    不再互相 import）。"""
     has1 = src1_idx >= 0
     if not bool(cp.any(has1)):
         return out
@@ -406,7 +331,17 @@ def _compute_interface_correction_gpu(
             oside = ff.owner_side[idx_o]
             is_bnd_o = ff.is_boundary[idx_o]
 
-            celltype_o = cp.where(oc < n_prism, 0, 1)
+            # #1（2026-08-28）：分布式 local+halo 扩展索引空间下，
+            # `oc < n_prism` 这个单一阈值判据不成立（见
+            # distributed_flat_face.py::DistributedFlatFaceGeometry.
+            # compact_cell_type 文档）——ff.compact_cell_type 存在时
+            # （分布式路径）改用逐位置查表；单机路径 ff 没有这个属性，
+            # getattr 回退到原有阈值判据，行为完全不变。
+            compact_cell_type = getattr(ff, 'compact_cell_type', None)
+            if compact_cell_type is not None:
+                celltype_o = compact_cell_type[oc]
+            else:
+                celltype_o = cp.where(oc < n_prism, 0, 1)
             oside_idx = cp.where(oside < 0, 0, 1)
             E_o = ff.boundary_extrap[celltype_o, oax, oside_idx]  # (nO,n_fp,n_sps)
             Q_o = cp.matmul(E_o, Q_gpu[oc])  # (nO,n_fp,5)
@@ -417,21 +352,24 @@ def _compute_interface_correction_gpu(
             )
 
             n_fp = Q_o.shape[1]
-            Q_ghost_face = Q_ghost_gpu[idx_o]  # (nO,5)
+            # Q_ghost_gpu 现在是逐 FP 幽灵态 (n_faces,n_fp,5)（见
+            # _compute_boundary_ghost_states_gpu 文档），直接按 FP 对齐
+            # 使用，不再对该面全部 FP 广播同一个值。
+            Q_ghost_face = Q_ghost_gpu[idx_o]  # (nO, n_fp, 5)
             Q_n = cp.where(
                 is_bnd_o[:, None, None],
-                cp.broadcast_to(Q_ghost_face[:, None, :], (Q_ghost_face.shape[0], n_fp, 5)),
+                Q_ghost_face,
                 Q_n,
             )
 
             # 混合拆分面（B-8，镜像 CPU inviscid_kernel.py 同名分支）：混合配对的内部面在边界半区
-            # 逐 FP 取配对边界面的幽灵态（GPU 幽灵态为逐面 (n_faces,5)，对所有 FP 同值广播）。
+            # 逐 FP 取配对边界面的幽灵态。
             mp_o = ff.mixed_nb_partner[idx_o]
             mixed_sel_o = (mp_o[:, None] >= 0) & ff.mixed_nb_mask[idx_o]  # (nO, n_fp)
-            Q_ghost_partner_o = Q_ghost_gpu[cp.maximum(mp_o, 0)]  # (nO, 5)
+            Q_ghost_partner_o = Q_ghost_gpu[cp.maximum(mp_o, 0)]  # (nO, n_fp, 5)
             Q_n = cp.where(
                 mixed_sel_o[..., None],
-                cp.broadcast_to(Q_ghost_partner_o[:, None, :], Q_n.shape),
+                Q_ghost_partner_o,
                 Q_n,
             )
 
@@ -458,10 +396,16 @@ def _compute_interface_correction_gpu(
 
             jump_owner = F_tilde_common_o - F_tilde_own_o
 
-            g_left_o = ff.g_left[idx_o]
-            g_right_o = ff.g_right[idx_o]
-            g_prime_owner = cp.where(oside[:, None, None] < 0, g_left_o, g_right_o)
-            contrib_o = cp.matmul(cp.swapaxes(g_prime_owner, -1, -2), jump_owner)
+            # 真实 bug 修复（V2.0 专家组盲审第四轮，2026-08-28）：分配
+            # 改用 dist_fp_of_sp/dist_axis_coord_of_sp gather，不再用
+            # `ff.g_left[idx_o]` 按面索引去索引这个长度仅 n1d 的数组
+            # （会在真实 GPU 上 IndexError），见
+            # gpu_inviscid_volume.py::distribute_face_correction_to_sps
+            # 文档的完整推导。
+            contrib_o = distribute_face_correction_to_sps(
+                cp, jump_owner, oax, oside, ff.dist_fp_of_sp, ff.dist_axis_coord_of_sp,
+                ff.g_left, ff.g_right,
+            )
             contrib_o = contrib_o / det_jacs[oc][..., None]
             _scatter_add_to_correction(correction, -contrib_o, oc, n_cells, n_sps)
 
@@ -473,7 +417,12 @@ def _compute_interface_correction_gpu(
             nax = ff.neighbor_axis[idx_n]
             nside = ff.neighbor_side[idx_n]
 
-            celltype_n = cp.where(nc < n_prism, 0, 1)
+            # #1（2026-08-28）：见上方 owner-primary 块同名注释，同一处修复。
+            compact_cell_type = getattr(ff, 'compact_cell_type', None)
+            if compact_cell_type is not None:
+                celltype_n = compact_cell_type[nc]
+            else:
+                celltype_n = cp.where(nc < n_prism, 0, 1)
             nside_idx = cp.where(nside < 0, 0, 1)
             E_n = ff.boundary_extrap[celltype_n, nax, nside_idx]
             Q_n_native = cp.matmul(E_n, Q_gpu[nc])  # (nN,n_fp,5)
@@ -483,13 +432,14 @@ def _compute_interface_correction_gpu(
                 cp, Q_o_at_n, ff.owner_src1_idx[idx_n], ff.owner_src1_cell, ff.owner_src1_mat, Q_gpu,
             )
 
-            # 混合拆分面（B-8）：neighbor 侧对称处理——边界半区对侧状态取配对面幽灵态。
+            # 混合拆分面（B-8）：neighbor 侧对称处理——边界半区对侧状态
+            # 逐 FP 取配对面幽灵态（Q_ghost_gpu 为逐 FP (n_faces,n_fp,5)）。
             mp_n = ff.mixed_ow_partner[idx_n]
             mixed_sel_n = (mp_n[:, None] >= 0) & ff.mixed_ow_mask[idx_n]
-            Q_ghost_partner_n = Q_ghost_gpu[cp.maximum(mp_n, 0)]
+            Q_ghost_partner_n = Q_ghost_gpu[cp.maximum(mp_n, 0)]  # (nN, n_fp, 5)
             Q_o_at_n = cp.where(
                 mixed_sel_n[..., None],
-                cp.broadcast_to(Q_ghost_partner_n[:, None, :], Q_o_at_n.shape),
+                Q_ghost_partner_n,
                 Q_o_at_n,
             )
 
@@ -520,10 +470,11 @@ def _compute_interface_correction_gpu(
 
             jump_neighbor = F_tilde_common_n - F_tilde_own_n
 
-            g_left_n = ff.g_left[idx_n]
-            g_right_n = ff.g_right[idx_n]
-            g_prime_neighbor = cp.where(nside[:, None, None] < 0, g_left_n, g_right_n)
-            contrib_n = cp.matmul(cp.swapaxes(g_prime_neighbor, -1, -2), jump_neighbor)
+            # 见上方 owner-primary 块同名注释，同一处修复。
+            contrib_n = distribute_face_correction_to_sps(
+                cp, jump_neighbor, nax, nside, ff.dist_fp_of_sp, ff.dist_axis_coord_of_sp,
+                ff.g_left, ff.g_right,
+            )
             contrib_n = contrib_n / det_jacs[nc][..., None]
             _scatter_add_to_correction(correction, -contrib_n, nc, n_cells, n_sps)
 
@@ -547,8 +498,6 @@ def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref):
     """
     cp = get_cupy()
     gamma = 1.4
-    alpha = 0.1875
-    beta_param = 0.5
 
     rhoL = cp.maximum(Q_L[..., 0], 1e-6)
     uL, vL, wL = Q_L[..., 1], Q_L[..., 2], Q_L[..., 3]
@@ -577,6 +526,12 @@ def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref):
     fa = sqrt_M0_sq * (2.0 - sqrt_M0_sq)
     fa = cp.maximum(fa, 1e-6)
 
+    # M4±/P5± 耗散系数——真实 bug 修复（V2.0 专家组盲审第四次评审，
+    # 2026-08-28，#12），与 kernels.py::compute_ausm_up_flux 逐字对应，
+    # 完整推导/文献交叉核实见该文件同名注释，这里不重复。
+    beta_mass = 1.0 / 8.0
+    alpha_pressure = 3.0 / 16.0 * (-4.0 + 5.0 * fa * fa)
+
     # Weiss-Smith 预处理声速（与 kernels.py::compute_ausm_up_flux 的
     # _WEISS_SMITH_K=1.1 同一个安全裕度常数、同一套 beta2 公式）。
     beta2 = cp.minimum(1.0, cp.maximum(cp.maximum(Mbar2, 1.1 * mach_ref**2), 1e-10))
@@ -594,12 +549,12 @@ def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref):
     Mp_L = cp.where(
         abs_ML >= 1.0,
         0.5 * (M_L + abs_ML),
-        0.25 * (M_L + 1.0)**2 + alpha * (M_L**2 - 1.0)**2,
+        0.25 * (M_L + 1.0)**2 + beta_mass * (M_L**2 - 1.0)**2,
     )
     Mm_R = cp.where(
         abs_MR >= 1.0,
         0.5 * (M_R - abs_MR),
-        -0.25 * (M_R - 1.0)**2 - alpha * (M_R**2 - 1.0)**2,
+        -0.25 * (M_R - 1.0)**2 - beta_mass * (M_R**2 - 1.0)**2,
     )
     M_half = Mp_L + Mm_R
 
@@ -614,12 +569,12 @@ def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref):
     Pp_L = cp.where(
         abs_ML >= 1.0,
         0.5 * (1.0 + cp.sign(M_L)),
-        0.25 * ((M_L + 1.0)**2 * (2.0 - M_L) + beta_param * M_L * (M_L**2 - 1.0)**2),
+        0.25 * ((M_L + 1.0)**2 * (2.0 - M_L) + alpha_pressure * M_L * (M_L**2 - 1.0)**2),
     )
     Pm_R = cp.where(
         abs_MR >= 1.0,
         0.5 * (1.0 - cp.sign(M_R)),
-        0.25 * ((M_R - 1.0)**2 * (2.0 + M_R) - beta_param * M_R * (M_R**2 - 1.0)**2),
+        0.25 * ((M_R - 1.0)**2 * (2.0 + M_R) - alpha_pressure * M_R * (M_R**2 - 1.0)**2),
     )
 
     # pu 速度扩散

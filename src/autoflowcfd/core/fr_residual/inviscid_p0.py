@@ -79,7 +79,7 @@ def compute_inviscid_residual_fv_p0(
 
     # --- 预计算边界幽灵态 ---
     ghost_provider = boundary_ghost_provider if boundary_ghost_provider is not None else DefaultGhostProvider()
-    Q_ghost = _precompute_ghost_states(ffp_list, fc, ghost_provider, Q_all, n_faces)
+    Q_ghost = _precompute_ghost_states(ffp_list, fc, ghost_provider, Q_all, n_faces, unit_normals)
 
     # --- numba 并行 kernel ---
     n_threads = numba.get_num_threads()
@@ -198,32 +198,56 @@ def _extract_p0_face_geometry(ffp_list, fc, n_faces: int):
     return unit_normals, area_weights
 
 
-def _precompute_ghost_states(ffp_list, fc, ghost_provider, Q_all, n_faces: int):
-    """预计算边界面的幽灵态。
+def _precompute_ghost_states(ffp_list, fc, ghost_provider, Q_all, n_faces: int, unit_normals):
+    """预计算需要幽灵态的面（真边界面 + 混合拆分面的内部记录，B-8）的
+    幽灵态，按**面**索引（不是按 owner 单元索引）。
 
-    在 Python 端遍历边界面（~40K 个），调用 ghost_provider 获取幽灵态，
-    存储为 (n_cells, 5) 数组。numba kernel 内部通过 is_boundary 判断
-    读取 Q_ghost[owner_cell] 而非 Q_all[neighbor_cell]。
+    真实 bug 修复（V2.0 专家组盲审第四次评审，2026-08-28）：此前这里
+    按 owner 单元索引成 (n_cells,5) 数组、numba kernel 也按
+    `Q_ghost[owner_cell]` 读取——如果同一个 P0 单元同时挨着 2 个以上
+    边界面（角点单元很常见，真实复现：本文件下方交叉验证用的
+    `build_channel_mesh_prism` 测试网格上，单元 3 就同时挨着 3 个边界
+    面），后处理的边界面会把先处理的边界面的幽灵态覆盖掉，导致有些
+    边界面在通量计算时用了另一个边界面（可能是不同 BC 类型/不同法向）
+    算出的幽灵态。用 `DefaultGhostProvider`（ghost=owner 状态，覆盖谁
+    都一样）时这个问题被完全掩盖，只有真实的 WALL/INLET/OUTLET 等
+    幽灵态（不同面算出不同值）才会暴露。改为按面索引的 (n_faces,5)
+    数组，与 GPU 版
+    `core/gpu/residual/gpu_p0_inviscid.py::compute_inviscid_residual_p0_gpu`
+    的既有正确做法保持一致；numba kernel（`inviscid_p0_kernel.py::
+    _p0_inviscid_kernel`）同步改为按面索引读取。
 
-    对于 DefaultGhostProvider（零梯度外插，ghost = owner），直接复制
-    Q_all 即可（O(n_cells) 向量化操作，无需逐面循环）。
+    Args:
+        unit_normals: (n_faces,3)，`_extract_p0_face_geometry` 已去重
+            过的面法向——真边界面的法向不受多源去重逻辑影响（那只处理
+            内部面的歧义），与原来读 `ffp.true_normal` 数值相同，直接
+            复用避免重复访问 `ffp_list[f]`。
+
+    Returns:
+        Q_ghost: (n_faces, 5)，只有 is_boundary 或混合拆分面对应的行
+            有意义，其余行为零占位（kernel 不会读取）。
     """
     from .inviscid import DefaultGhostProvider
 
-    if isinstance(ghost_provider, DefaultGhostProvider):
-        # 快速路径：ghost = owner，直接复制
-        return Q_all.copy()
+    Q_ghost = np.zeros((n_faces, 5), dtype=Q_all.dtype)
+    is_bnd = fc.is_boundary
+    mixed_bnd_face = getattr(ffp_list, "mixed_bnd_face", None)
+    if mixed_bnd_face is None:
+        mixed_bnd_face = np.zeros(n_faces, dtype=np.bool_)
+    need_ghost = is_bnd | mixed_bnd_face
 
-    # 通用路径：逐面调用 ghost_provider
-    Q_ghost = np.zeros_like(Q_all)
-    boundary_mask = fc.is_boundary
-    for f in range(n_faces):
-        if boundary_mask[f]:
-            oc = int(fc.owner_cell[f])
-            ffp = ffp_list[f]
-            Q_owner_fp = Q_all[oc:oc+1]  # (1,5)
-            true_normal = ffp.true_normal  # (1,3)
-            Q_ghost_fp = ghost_provider(f, Q_owner_fp, true_normal)  # (1,5)
-            Q_ghost[oc] = Q_ghost_fp[0]
+    if isinstance(ghost_provider, DefaultGhostProvider):
+        # 快速路径：ghost = owner 状态，向量化赋值，无需逐面调用。
+        owner_of_needed = fc.owner_cell[need_ghost]
+        Q_ghost[need_ghost] = Q_all[owner_of_needed]
+        return Q_ghost
+
+    # 通用路径：逐面调用 ghost_provider（真实边界条件依赖各面自己的
+    # 法向/位置，不能向量化）。
+    for f in np.nonzero(need_ghost)[0]:
+        oc = int(fc.owner_cell[f])
+        Q_owner_fp = Q_all[oc:oc + 1]  # (1,5)
+        true_normal = unit_normals[f:f + 1]  # (1,3)
+        Q_ghost[f, :] = ghost_provider(f, Q_owner_fp, true_normal)[0]
 
     return Q_ghost

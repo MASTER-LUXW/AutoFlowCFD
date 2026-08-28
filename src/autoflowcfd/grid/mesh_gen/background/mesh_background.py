@@ -81,8 +81,12 @@ def generate_hybrid_mesh(
             export_core_only_path=export_core_only_path,
         )
 
-        # 如果处于 *-only 导出模式，_build_merged_mesh 已保存并退出
-        # 或返回特殊信号。目前假设它正常返回但我们跳过 TetGen 逻辑。
+        # 已核实（第四次评审）：export_bl_only/export_core_only=True 时，
+        # _build_merged_mesh 内部路径（_export_bl_only_and_exit /
+        # _export_partial_mesh_and_exit）本身总会以 sys.exit(0)/exit(1)
+        # 终止进程，正常情况下永远不会执行到这一行——这里是防御性兜底
+        # （防止未来有人给 _build_merged_mesh_no_bl 加了新分支、忘记
+        # 同步调用导出函数），不是当前实际会走到的路径。
         if export_bl_only or export_core_only:
             logger.success("Partial-pipeline export completed. Exiting.")
             import sys

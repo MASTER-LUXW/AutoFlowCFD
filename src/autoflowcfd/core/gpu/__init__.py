@@ -1,20 +1,30 @@
 """
 AutoFlowCFD V2.0 - GPU 加速计算模块（CuPy 统一框架）
 
-基于 CuPy 实现完整的 GPU 加速管线，覆盖 FR 求解器的所有核心计算：
+基于 CuPy 实现完整的 GPU 加速管线，覆盖 FR 求解器的所有核心计算。
+
+子目录布局（V2.0 第四次评审第四轮重构，2026-08-28：原先 20 个文件全部
+平铺在 core/gpu/ 下，与 CPU 侧按关注点分文件夹——fr_solver/、
+fr_residual/、turbulence/、mpi/——不对称，随文件数增长愈发难以导航，
+现按同一分类方式重新组织，一一对应）：
+- solver/: 对应 CPU fr_solver/ —— gpu_solver.py（GPUFRSolver 主体）、
+  gpu_solver_init.py、gpu_solver_io.py
+- residual/: 对应 CPU fr_residual/ + fr_operators/ 数值核 —— gpu_inviscid.py、
+  gpu_viscous.py、gpu_inviscid_volume.py、gpu_p0_inviscid.py（CUDA
+  RawKernel）、gpu_volume_contract.py（张量收缩）、gpu_flux.py（欧拉/
+  粘性物理通量）、gpu_gradients.py（物理梯度）
+- turbulence/: 对应 CPU turbulence/ —— gpu_turbulence_sst.py（SST k-ω
+  源项）及后续新增的 GPU 湍流模型
+- distributed/: 对应 CPU mpi/ 的 GPU 端 —— gpu_distributed.py（多 GPU +
+  MPI 分布式求解器）、gpu_distributed_init.py、gpu_halo_exchange.py
+  （CUDA-aware MPI / staging buffer 直接 Halo 交换）
+
+顶层保留（CPU 侧无直接对应的基础设施）：
 - array_manager.py: GPU 数组管理与设备管理
-- gpu_p0_inviscid.py: P0 无粘残差 CUDA kernel（CuPy RawKernel）
-- gpu_volume_contract.py: GPU 张量收缩（体积项）
-- gpu_flux.py: GPU 欧拉/粘性物理通量
 - gpu_face_geometry.py: GPU 版面几何缓存
-- gpu_kernels.py: GPU AUSM+up + 界面校正 kernel
-- gpu_gradients.py: GPU 物理梯度
-- gpu_viscous.py: GPU 粘性残差
-- gpu_time_integration.py: GPU 时间积分
-- gpu_solver.py: GPU FRSolver
-- gpu_distributed.py: 多 GPU + MPI 分布式求解器
-- gpu_halo_exchange.py: GPU 直接 Halo 交换（CUDA-aware MPI / staging buffer）
-- gpu_turbulence_sst.py: GPU SST k-ω 湍流模型源项
+- gpu_modal_filter.py: GPU 模态滤波
+- gpu_time_integration.py / gpu_time_integration_imex.py /
+  gpu_time_integration_dual.py: GPU 时间积分（含 IMEX/双时间步）
 
 设计原则:
 1. 统一 CuPy 框架：所有 GPU 计算走 CuPy（RawKernel/ElementwiseKernel + 向量化 API）

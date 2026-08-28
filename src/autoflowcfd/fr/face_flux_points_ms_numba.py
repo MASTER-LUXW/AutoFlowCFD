@@ -47,6 +47,7 @@ def build_ms_interp_parallel(
     nb_extra_mat, ow_extra_mat,
     ms_nb_pn_cell, ms_nb_pn_code,
     ms_ow_pn_cell, ms_ow_pn_code,
+    nb_sec_resid, ow_sec_resid,
 ):
     """为 multi-source 面构建主/次插值矩阵（含 Newton + 对角线掩码）。
 
@@ -64,6 +65,13 @@ def build_ms_interp_parallel(
     没有真实相邻单元，由残差 kernel 逐 FP 取边界子面记录的幽灵态（见
     inviscid_kernel.py 的 mixed_{nb,ow}_partner/mask 分支），因此这里跳过
     Secondary Newton + interp，只写入 nb_cell_id/ow_cell_id 后结束。
+
+    nb_sec_resid/ow_sec_resid：(max(n_ms_{nb,ow},1), n_fp) 输出数组，
+    Secondary Newton 的逐 Flux Point 残差（sec_rs，绝对长度单位，未归约、
+    未归一化）——之前算出来直接丢弃，现在写回供 face_flux_points_merge.py
+    按 ~{nb,ow}_mask（secondary 半区掩码）取值校验。混合分组（Secondary
+    Newton 被跳过）对应行保持初始化的全零，调用方必须只在非 mixed 索引上
+    读取。
     """
     n_sps = n1d * n1d * n1d
 
@@ -164,11 +172,15 @@ def build_ms_interp_parallel(
         t = face_translation_arr[f]
         ht = abs(t[0]) > 1e-300 or abs(t[1]) > 1e-300 or abs(t[2]) > 1e-300
         if ht:
+            # 真实 bug 修复（同 face_flux_points_numba.py::build_fp_newton_parallel
+            # 的 owner_primary 分支，见该处详细说明）：把 owner 侧物理 FP
+            # 平移到 secondary（neighbor 一侧）单元所在区域，必须加
+            # translation，此前写成减，残差恰好偏了 2*|translation|。
             search_sec = np.empty((n_fp, 3))
             for p in range(n_fp):
-                search_sec[p, 0] = phys_o[p, 0] - t[0]
-                search_sec[p, 1] = phys_o[p, 1] - t[1]
-                search_sec[p, 2] = phys_o[p, 2] - t[2]
+                search_sec[p, 0] = phys_o[p, 0] + t[0]
+                search_sec[p, 1] = phys_o[p, 1] + t[1]
+                search_sec[p, 2] = phys_o[p, 2] + t[2]
         else:
             search_sec = phys_o
         sec_fc, sec_rs = _newton_locate_nb(
@@ -195,6 +207,7 @@ def build_ms_interp_parallel(
             V_inv_sec = v_sps_inv_tet
         ei = ms_nb_extra_idx[idx]
         for p in range(n_fp):
+            nb_sec_resid[ei, p] = sec_rs[p]
             if not nb_mask[f, p]:
                 for s in range(n_sps):
                     val = 0.0
@@ -296,11 +309,14 @@ def build_ms_interp_parallel(
         t = face_translation_arr[f]
         ht = abs(t[0]) > 1e-300 or abs(t[1]) > 1e-300 or abs(t[2]) > 1e-300
         if ht:
+            # 对称的符号修复（见 build_fp_newton_parallel 的
+            # neighbor_primary 分支说明）：把 neighbor 侧物理 FP 平移回
+            # secondary（owner 一侧）单元所在区域，必须减 translation。
             search_sec = np.empty((n_fp, 3))
             for p in range(n_fp):
-                search_sec[p, 0] = phys_n[p, 0] + t[0]
-                search_sec[p, 1] = phys_n[p, 1] + t[1]
-                search_sec[p, 2] = phys_n[p, 2] + t[2]
+                search_sec[p, 0] = phys_n[p, 0] - t[0]
+                search_sec[p, 1] = phys_n[p, 1] - t[1]
+                search_sec[p, 2] = phys_n[p, 2] - t[2]
         else:
             search_sec = phys_n
         sec_fc, sec_rs = _newton_locate_nb(
@@ -327,6 +343,7 @@ def build_ms_interp_parallel(
             V_inv_sec = v_sps_inv_tet
         ei = ms_ow_extra_idx[idx]
         for p in range(n_fp):
+            ow_sec_resid[ei, p] = sec_rs[p]
             if not ow_mask[f, p]:
                 for s in range(n_sps):
                     val = 0.0

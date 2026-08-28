@@ -56,7 +56,7 @@ def closest_point_on_triangle(
         out[use] = values[use]
         assigned |= use
 
-    # 顶点 regions.
+    # 顶点区域。
     _take((d1 <= 0) & (d2 <= 0), a)
     _take((d3 >= 0) & (d4 <= d3), b)
     _take((d6 >= 0) & (d5 <= d6), c)
@@ -81,7 +81,7 @@ def closest_point_on_triangle(
     w_bc = np.divide(e_d4d3, denom_bc, out=np.zeros(n), where=np.abs(denom_bc) > 1e-300)
     _take(mask_bc, b + w_bc[:, None] * (c - b))
 
-    # Interior face region: whatever's left.
+    # 面内部区域：剩下未分配的都归入此类。
     denom_face = va + vb + vc
     v_face = np.divide(vb, denom_face, out=np.zeros(n), where=np.abs(denom_face) > 1e-300)
     w_face = np.divide(vc, denom_face, out=np.zeros(n), where=np.abs(denom_face) > 1e-300)
@@ -93,7 +93,7 @@ def closest_point_on_triangle(
 def point_to_triangle_distance(
     p: np.ndarray, a: np.ndarray, b: np.ndarray, c: np.ndarray
 ) -> np.ndarray:
-    """Distance from `p` to the closest point on triangle (a, b, c), (N,)."""
+    """`p` 到三角形 (a, b, c) 上最近点的距离，形状 (N,)。"""
     closest = closest_point_on_triangle(p, a, b, c)
     return np.linalg.norm(p - closest, axis=1)
 
@@ -128,17 +128,17 @@ def closest_points_segment_segment(
     s = np.zeros(n)
     t = np.zeros(n)
 
-    # Both segments degenerate to points: s=t=0 (already initialized).
+    # 两条线段都退化成点：s=t=0（已初始化好，无需处理）。
 
-    # Only segment 1 degenerate: closest point on segment 2 to p1.
+    # 只有线段 1 退化：取线段 2 上离 p1 最近的点。
     only2 = deg1 & ~deg2
     t[only2] = np.clip(np.divide(f, e, out=np.zeros(n), where=~deg2)[only2], 0.0, 1.0)
 
-    # Only segment 2 degenerate: closest point on segment 1 to p2.
+    # 只有线段 2 退化：取线段 1 上离 p2 最近的点。
     only1 = ~deg1 & deg2
     s[only1] = np.clip(np.divide(-c, a, out=np.zeros(n), where=~deg1)[only1], 0.0, 1.0)
 
-    # General case: neither degenerate.
+    # 一般情况：两条线段都不退化。
     general = ~deg1 & ~deg2
     denom = a * e - b * b
     nonparallel = general & (np.abs(denom) > eps)
@@ -149,16 +149,16 @@ def closest_points_segment_segment(
         / denom[nonparallel],
         0.0, 1.0,
     )
-    # Parallel (or near-parallel) segments: any s works for the infinite-line
-    # solution, pin s=0 and solve for t below - a fixed, deterministic choice
-    # rather than an ill-conditioned division.
+    # 平行（或近似平行）的线段：对无限长直线的解而言，s 取任意值都成立，
+    # 这里固定取 s=0、下面再求解 t——是一个确定性的选择，而不是去做一个
+    # 病态的除法。
     parallel = general & ~nonparallel
     s_gen[parallel] = 0.0
 
     t_raw = np.divide(b * s_gen + f, e, out=np.zeros(n), where=~deg2)
-    # Re-clamp t into [0,1] and, if that moved t, re-solve s for the new t
-    # (Ericson's own two-step clamp - clamping t first can otherwise leave s
-    # outside [0,1] too).
+    # 把 t 重新夹紧到 [0,1]，若 t 因此被改动，则用新的 t 重新求解 s
+    # （Ericson 原书的两步夹紧法——只夹紧 t 而不回头修正 s，s 仍可能
+    # 落在 [0,1] 之外）。
     t_clamped = np.clip(t_raw, 0.0, 1.0)
     below = general & (t_raw < 0.0)
     above = general & (t_raw > 1.0)
@@ -176,6 +176,6 @@ def closest_points_segment_segment(
 def segment_to_segment_distance(
     p1: np.ndarray, q1: np.ndarray, p2: np.ndarray, q2: np.ndarray
 ) -> np.ndarray:
-    """Distance between segments (p1,q1) and (p2,q2), one value per row."""
+    """线段 (p1,q1) 与 (p2,q2) 之间的距离，每行一个值。"""
     c1, c2 = closest_points_segment_segment(p1, q1, p2, q2)
     return np.linalg.norm(c1 - c2, axis=1)

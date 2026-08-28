@@ -97,14 +97,21 @@ def allgather_array(local_array: np.ndarray) -> np.ndarray:
     # 使用 Allgatherv 处理变长
     displs = np.zeros(comm.Get_size(), dtype=np.int64)
     displs[1:] = np.cumsum(all_sizes[:-1])
-    comm.Allgatherv(
-        local_array,
-        [global_array, all_sizes, displs, get_mpi().DOUBLE]
-        if local_array.dtype == np.float64 else
-        [global_array, all_sizes, displs, get_mpi().INT64]
-        if local_array.dtype == np.int64 else
-        [global_array, all_sizes, displs, get_mpi().FLOAT]
-    )
+    # 第四次评审修复：此前对非 float64/int64 的 dtype（例如 bool/int32/
+    # uint8）会静默落到 FLOAT（float32）分支——MPI 类型描述与数组真实
+    # 字节布局不匹配，会用错误的类型解释字节、产生错误但不报错的数据，
+    # 而不是抛异常。只支持这两种已验证的 dtype，其它类型必须显式报错，
+    # 调用方应先转换到受支持的 dtype 再调用。
+    if local_array.dtype == np.float64:
+        mpi_type = get_mpi().DOUBLE
+    elif local_array.dtype == np.int64:
+        mpi_type = get_mpi().INT64
+    else:
+        raise TypeError(
+            f"allgather_array: 不支持的 dtype {local_array.dtype}，只支持 "
+            f"float64/int64——传入前请先显式转换，不要依赖静默的类型兜底。"
+        )
+    comm.Allgatherv(local_array, [global_array, all_sizes, displs, mpi_type])
     return global_array
 
 

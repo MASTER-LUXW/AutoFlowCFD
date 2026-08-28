@@ -353,6 +353,9 @@ class ConfigLoader:
             'rho_inf': '自由流密度，单位 kg/m^3',
             'vel_inf': '自由流速度大小，单位 m/s',
             'p_inf': '自由流静压，单位 Pa',
+            'mu_molecular': '分子动力粘度，单位 Pa*s（默认标准状态下空气 1.8e-5）',
+            'turbulence_intensity': '来流湍流强度 Tu（默认 0.01=1%）',
+            'viscosity_ratio': '来流粘性比 VR=nu_t/nu（默认 5.0）',
         }
         return comments.get(param, '')
 

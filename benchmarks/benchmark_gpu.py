@@ -95,7 +95,7 @@ def benchmark_tensor_contraction(n_cells=100000, n_sps=27, n_runs=10):
 def benchmark_physical_flux(n_points=500000, n_runs=20):
     """基准测试：GPU 欧拉物理通量。"""
     import cupy as cp
-    from autoflowcfd.core.gpu.gpu_flux import euler_physical_flux_gpu
+    from autoflowcfd.core.gpu.residual.gpu_flux import euler_physical_flux_gpu
 
     logger.info("=" * 60)
     logger.info(f"GPU Benchmark: Euler Physical Flux ({n_points} points)")
@@ -125,7 +125,7 @@ def benchmark_physical_flux(n_points=500000, n_runs=20):
 def benchmark_ausm_up(n_faces=200000, n_runs=20):
     """基准测试：GPU AUSM+up 通量计算。"""
     import cupy as cp
-    from autoflowcfd.core.gpu.gpu_inviscid import _ausm_up_flux_batch_gpu
+    from autoflowcfd.core.gpu.residual.gpu_inviscid import _ausm_up_flux_batch_gpu
 
     logger.info("=" * 60)
     logger.info(f"GPU Benchmark: AUSM+up Flux ({n_faces} faces)")

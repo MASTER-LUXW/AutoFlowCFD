@@ -15,6 +15,9 @@ from autoflowcfd.cli.solve_helpers import (
     restore_state_from_checkpoint,
     save_results,
     write_checkpoint,
+    load_physical_config_if_given,
+    resolve_physical_constants,
+    resolve_turbulence_model,
 )
 from autoflowcfd.cli.solve_aero_coefficients import _report_aerodynamic_coefficients
 from autoflowcfd.cli.solve_commands import solve
@@ -26,12 +29,23 @@ from autoflowcfd.cli.solve_commands import solve
               default="cpu", help="计算后端")
 @click.option("--order", "-p", type=click.IntRange(1, 3), default=2,
               help="FR 离散阶数")
+@click.option("--flux-type", type=click.Choice(["radau", "gauss"]), default="radau",
+              help="FR 修正函数族（#14）：'radau'（默认，此前唯一使用过的方案，"
+                   "Huynh 记法 g_DG）；'gauss' 是与 Spectral Difference 等价的新方案"
+                   "（见 fr/matrix_operators.py 文档）")
 @click.option("--time-method", "-t",
               type=click.Choice(["rk3", "imex", "dual-time"]),
               default="rk3", help="时间推进方法")
 @click.option("--turbulence-model", "-m",
-              type=click.Choice(["sst", "ddes", "wmles", "les"]),
-              default="ddes", help="湍流模型")
+              type=click.Choice(["sst", "ddes", "iddes", "wmles", "les"]),
+              default="ddes",
+              help="湍流模型。iddes 按 Shur et al. (2008)/Gritskevich et al. (2012) "
+                   "SST-IDDES 重新实现（取代此前的死代码版本），部分常数（f_e2 的 "
+                   "c_t/c_l）本会话未能独立复核原始文献数值，见 core/turbulence/des.py "
+                   "::IDDESModel 文档。注意：ddes/iddes/les 会在 VELOCITY_INLET 边界"
+                   "自动启用 BD-02 合成湍流入口 (SEM)；wmles 不会（WMLES 依赖壁面模型本身 "
+                   "正确预测近壁应力，不需要额外的入口湍流结构，见 "
+                   "core/fr_solver/boundary.py 文档）")
 @click.option("--max-iter", "-n", default=100, help="最大迭代次数")
 @click.option("--dt", default=1e-5, help="时间步长 (秒)")
 @click.option("--physical-time", default=None, help="总物理时间（秒）")
@@ -48,14 +62,28 @@ from autoflowcfd.cli.solve_commands import solve
 @click.option('--init-from', 'init_checkpoint', type=click.Path(exists=True), default=None,
               help='从稳态 checkpoint 文件初始化瞬态求解器（典型工作流：先稳态 SST 收敛，'
                    '再从该流场启动 DES/LES 瞬态计算，避免从均匀流场直接启动需要极长的瞬态发展时间）')
-@click.option('--turbulence-intensity', type=float, default=0.01, help='来流湍流强度 Tu（默认 0.01=1%%）')
+@click.option('--turbulence-intensity', type=float, default=0.01,
+              help='来流湍流强度 Tu（默认 0.01=1%%）。也驱动 ddes/iddes/les 模式下 '
+                   'BD-02 SEM 入口的目标雷诺应力（2026-08-28 起复用同一个值，'
+                   '此前 SEM 用独立硬编码 5%%，见 core/fr_solver/boundary.py 文档）')
+@click.option('--sem-num-eddies', type=int, default=200,
+              help='ddes/iddes/les 模式下 BD-02 合成湍流入口 (SEM) 的涡核数量（默认 200）')
 @click.option('--viscosity-ratio', type=float, default=5.0, help='来流粘性比 VR=nu_t/nu（默认 5.0）')
-def transient(input_file: str, backend: str, order: int, time_method: str,
+@click.option('--mu-molecular', type=float, default=1.8e-5, help='分子动力粘度 (Pa*s)，默认 1.8e-5（标准状态下空气），非标准工况请覆盖')
+@click.option('--rho-inf', type=float, default=1.225, help='自由流密度 (kg/m^3)，默认 1.225（标准海平面空气）')
+@click.option('--vel-inf', type=float, default=33.33, help='自由流速度大小 (m/s)，默认 33.33')
+@click.option('--p-inf', type=float, default=101325.0, help='自由流静压 (Pa)，默认 101325.0（标准大气压）')
+@click.option('--config', 'config_path', type=click.Path(exists=True), default=None,
+              help='从 YAML 文件读取物理常量默认值（mu_molecular/rho_inf/vel_inf/p_inf/'
+                   'turbulence_intensity/viscosity_ratio）；显式传入的同名 --xxx 选项优先于此文件')
+def transient(input_file: str, backend: str, order: int, flux_type: str, time_method: str,
               turbulence_model: str, max_iter: int, dt: float, physical_time: float,
               output_dir: str, use_eikonal: bool, surface_mesh: Optional[str],
               skip_quality_check: bool, reference_area: Optional[float],
               dual_time_inner_iter: int, threads: int, init_checkpoint: Optional[str],
-              turbulence_intensity: float, viscosity_ratio: float) -> None:
+              turbulence_intensity: float, viscosity_ratio: float, sem_num_eddies: int,
+              mu_molecular: float, rho_inf: float, vel_inf: float, p_inf: float,
+              config_path: Optional[str]) -> None:
     """运行瞬态 FR 仿真 (DES/LES)。
 
     Args:
@@ -76,12 +104,51 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
         init_checkpoint: 从稳态 checkpoint 初始化（可选）
     """
     print(f"=== Starting Transient FR Simulation (DES/LES) ===")
-    # Tu/VR 范围校验：与 solve_steady_command.py 入口同一规则（CLI 路径不经过
+
+    # 物理常量解析：显式 CLI 选项 > --config YAML > 上面 click 声明的内建默认值。
+    # 不能硬编码——见 solve_physical_constants.py 文档。
+    _phys_cfg = load_physical_config_if_given(config_path)
+    _resolved = resolve_physical_constants(
+        click.get_current_context(),
+        {
+            'turbulence_intensity': turbulence_intensity, 'viscosity_ratio': viscosity_ratio,
+            'mu_molecular': mu_molecular, 'rho_inf': rho_inf, 'vel_inf': vel_inf, 'p_inf': p_inf,
+            'order': order, 'dt': dt,
+        },
+        _phys_cfg,
+    )
+    turbulence_intensity = _resolved['turbulence_intensity']
+    viscosity_ratio = _resolved['viscosity_ratio']
+    mu_molecular = _resolved['mu_molecular']
+    rho_inf = _resolved['rho_inf']
+    vel_inf = _resolved['vel_inf']
+    p_inf = _resolved['p_inf']
+    order = _resolved['order']
+    dt = _resolved['dt']
+    # turbulence_model：见 solve_steady_command.py 同一处的说明。
+    turbulence_model = resolve_turbulence_model(click.get_current_context(), turbulence_model, _phys_cfg)
+    # physical_time ← config.total_time：字段名不同（CLI 用 physical_time，
+    # TransientConfig 用 total_time），resolve_physical_constants 的同名
+    # getattr 不适用；physical_time 的 click 默认值就是 None，不需要
+    # get_parameter_source 也能安全判断"用户是否显式传过"。
+    if physical_time is None and _phys_cfg is not None and hasattr(_phys_cfg, 'total_time'):
+        physical_time = _phys_cfg.total_time
+
+    # Tu/VR/mu_molecular/rho_inf/vel_inf/p_inf 范围校验：与
+    # solve_steady_command.py 入口同一规则（CLI 路径不经过
     # SolverConfig.__post_init__ 的校验，2026-08-25 代码审查）。
     if not (0.0 < turbulence_intensity <= 1.0):
         raise click.BadParameter("湍流强度 Tu 必须在 (0, 1] 区间", param_hint="--turbulence-intensity")
     if viscosity_ratio <= 0.0:
         raise click.BadParameter("粘性比 VR 必须 > 0", param_hint="--viscosity-ratio")
+    if mu_molecular <= 0.0:
+        raise click.BadParameter("分子动力粘度必须 > 0", param_hint="--mu-molecular")
+    if rho_inf <= 0.0:
+        raise click.BadParameter("自由流密度必须 > 0", param_hint="--rho-inf")
+    if vel_inf <= 0.0:
+        raise click.BadParameter("自由流速度必须 > 0", param_hint="--vel-inf")
+    if p_inf <= 0.0:
+        raise click.BadParameter("自由流静压必须 > 0", param_hint="--p-inf")
     print(f"\nInput Grid : {input_file}")
     print(f"Backend    : {backend} | Order: P{order} | Method: {time_method}")
     print(f"Turbulence : {turbulence_model} | dt: {dt:.2e}")
@@ -117,6 +184,10 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
         n_threads=threads,
         turbulence_intensity=turbulence_intensity,
         viscosity_ratio=viscosity_ratio,
+        sem_num_eddies=sem_num_eddies,
+        flux_type=flux_type,
+        mu_molecular=mu_molecular,
+        rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
     )
 
     # 4. 计算壁面距离场（DES/LES/WMLES 必须）

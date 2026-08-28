@@ -254,17 +254,11 @@ def distributed_load_checkpoint(
         local_cells = solver.partition.local_cells
 
         if rank == 0:
-            # Root: 提取自己的数据
-            U_local = scatter_local_state(U_global, local_cells)
-            # 分发给其他 rank
-            for r in range(1, n_ranks):
-                # 需要知道 rank r 的 local_cells
-                # 由于所有 rank 执行相同分区算法，可以重建
-                # 但更简单的方式是让每个 rank 发送自己的 local_cells 给 root
-                pass  # 下面用另一种方式
-
-            # 替代方案：root 广播 U_global，每个 rank 自己提取
-            # 这对大网格内存开销较高，但实现简单且正确
+            # root 广播 U_global，每个 rank（包括 root 自己）各自提取
+            # 自己的 local_cells——这对大网格内存开销较高，但实现简单
+            # 且正确（root 也需要重新走一遍广播+提取，保证与非 root 分支
+            # 走同一条代码路径，不需要额外维护一份"root 已经有数据"的
+            # 特殊情况）。
             U_global = get_comm().bcast(U_global, root=0)
             U_local = scatter_local_state(U_global, local_cells)
         else:

@@ -3,7 +3,7 @@ AutoFlowCFD V2.0 - HighOrderMesh 的阶数相关几何构建 (G-01/G-03, CL-02)
 
 从 high_order_mesh.py 拆出来（控制单文件行数，>400 行需拆分的项目
 规范）：参考点集生成、（含体积项去混叠用的 fine 网格）Jacobian
-批量计算、顺序 Continuation 的按阶数几何缓存/切换。签名以
+批量计算、Order Continuation 的按阶数几何缓存/切换。签名以
 `mesh: HighOrderMesh` 为第一参数，HighOrderMesh 上保留同名薄委托
 方法，调用方式不变。
 """
@@ -33,8 +33,8 @@ def generate_reference_cube_sps(mesh: "HighOrderMesh", order: Optional[int] = No
 
     Args:
         order: 目标阶数；None 时使用 mesh.order（当前活动阶数）。
-            顺序 Continuation 需要在切换到某个阶数*之前*为该阶数生成
-            SPs，此时 网格.顺序 还是旧阶数，必须显式传入。
+            Order Continuation 需要在切换到某个阶数*之前*为该阶数生成
+            SPs，此时 mesh.order 还是旧阶数，必须显式传入。
     """
     from autoflowcfd.fr.operators import gauss_legendre
 
@@ -105,11 +105,11 @@ def compute_jacobians_at_ref_points(
 
 def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndarray]:
     """在给定阶数下，从已修正朝向的 connectivity/节点坐标重新推导
-    SPs 物理坐标与 Jacobian（不依赖 网格.顺序/网格.n_points_1d 的当前值，
+    SPs 物理坐标与 Jacobian（不依赖 mesh.order/mesh.n_points_1d 的当前值，
     可在切换阶数*之前*安全调用）。
 
-    顺序 Continuation（CL-02）的核心前提：FR 方法的解自由度与几何量
-    必须共享同一组 SPs——只换 FR 微分算子（网格.operators）而不重新
+    Order Continuation（CL-02）的核心前提：FR 方法的解自由度与几何量
+    必须共享同一组 SPs——只换 FR 微分算子（mesh.operators）而不重新
     推导这里的量，P0/P1 阶段的梯度/残差计算会直接用错误维度的
     Jacobian（真实网格已复现：reshape 到 27 SPs/单元 的 Jacobian 硬套
     1 SP/单元 的状态场，直接崩溃）。
@@ -173,7 +173,7 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
 
 
 def set_order(mesh: "HighOrderMesh", order: int) -> None:
-    """切换网格当前活动的多项式阶数（顺序 Continuation 专用）。
+    """切换网格当前活动的多项式阶数（Order Continuation 专用）。
 
     SPs 坐标、Jacobian、Flux 点 几何（含 Newton 面点位定位）全部
     随阶数重新推导——这些量不是"复用同一套再插值"就够的，FR 方法要求

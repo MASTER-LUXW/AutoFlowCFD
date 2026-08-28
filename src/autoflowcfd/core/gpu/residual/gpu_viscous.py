@@ -27,12 +27,12 @@ from typing import Optional
 from loguru import logger
 
 from autoflowcfd.core.gpu import get_cupy
-from autoflowcfd.core.gpu.gpu_volume_contract import (
+from autoflowcfd.core.gpu.residual.gpu_volume_contract import (
     gpu_contract_shared_operator_1axis,
     gpu_contract_shared_operator_2axis,
 )
-from autoflowcfd.core.gpu.gpu_flux import viscous_physical_flux_gpu, conserved_to_primitive_gpu
-from autoflowcfd.core.gpu.gpu_gradients import compute_physical_gradient_gpu
+from autoflowcfd.core.gpu.residual.gpu_flux import viscous_physical_flux_gpu, conserved_to_primitive_gpu
+from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_gradient_gpu
 
 GAMMA = 1.4
 R_AIR = 287.0
@@ -58,6 +58,7 @@ def compute_viscous_residual_fr_gpu(
     mesh_data=None,
     ops_data=None,
     flat_face_gpu=None,
+    flat_face_cpu=None,
     device_id=0,
 ):
     """GPU 版粘性残差计算。
@@ -93,15 +94,24 @@ def compute_viscous_residual_fr_gpu(
             if mu_t_field is not None and isinstance(mu_t_field, np.ndarray):
                 mu_t_field = cp.asarray(mu_t_field)
 
-    n_cells = mesh.n_cells
+    # #1（2026-08-28）：见 gpu_inviscid.py::compute_inviscid_residual_fr_gpu
+    # 同名注释——分布式多 GPU 路径下 n_cells/n_prism 必须从显式传入的
+    # （已按 local+halo 压缩索引空间构造好的）mesh_data 读取，不能用
+    # `mesh`（完整全局网格，供下面 get_flat_face_geometry 取真实
+    # face_connectivity 用）的全局尺寸。
+    if mesh_data is not None and 'n_cells' in mesh_data:
+        n_cells = mesh_data['n_cells']
+        n_prism = mesh_data.get('n_prism', mesh.n_prism_cells)
+    else:
+        n_cells = mesh.n_cells
+        n_prism = mesh.n_prism_cells
     n_sps = mesh.n_sps_per_cell
-    n_prism = mesh.n_prism_cells
 
     # 准备网格数据
     if mesh_data is None:
-        from autoflowcfd.core.gpu.gpu_inviscid import _prepare_mesh_data, _prepare_ops_data
-        mesh_data = _prepare_mesh_data(cp, mesh, device_id)
-        ops_data = _prepare_ops_data(cp, ops, device_id)
+        from autoflowcfd.core.gpu.residual.gpu_inviscid_volume import prepare_mesh_data, prepare_ops_data
+        mesh_data = prepare_mesh_data(cp, mesh, device_id)
+        ops_data = prepare_ops_data(cp, ops, device_id)
 
     det_jacs = mesh_data['det_jacs']
 
@@ -155,8 +165,15 @@ def compute_viscous_residual_fr_gpu(
     viscous_residual = div_G / det_jacs[..., None]
 
     # 3. 界面项（BR1 平均 + 边界 Interior Penalty 罚项）
-    from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
-    flat_face = get_flat_face_geometry(mesh, ops)
+    # #1（2026-08-28）：见 gpu_inviscid.py::compute_inviscid_residual_fr_gpu
+    # 同名注释——分布式路径必须用 dist_flat_face.base_flat（已按
+    # local+halo 压缩索引重映射、只含本 rank 面）而不是全局 flat_face，
+    # 否则边界幽灵态计算会用全局单元编号误当压缩索引读 Q。
+    if flat_face_cpu is not None:
+        flat_face = flat_face_cpu
+    else:
+        from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+        flat_face = get_flat_face_geometry(mesh, ops)
     if flat_face_gpu is None:
         from autoflowcfd.core.gpu.gpu_face_geometry import build_gpu_flat_face
         flat_face_gpu = build_gpu_flat_face(flat_face, device_id)
@@ -164,11 +181,9 @@ def compute_viscous_residual_fr_gpu(
     # 边界幽灵态：ghost_provider 是任意 Python 可调用对象，numba/CuPy 都
     # 调不了，只能在 CPU 上跑（复用已验证的 P1+ CPU 实现，只循环边界面，
     # 约占全部面的 3%，不是新逻辑）——与 gpu_inviscid.py::
-    # _compute_boundary_ghost_states_gpu 的"零梯度外插"简化不同，那里
-    # 完全没调用 ghost_provider，本函数必须调用真实 ghost_provider 才能
-    # 正确处理 WALL 无滑移等边界条件（CPU 端文档明确要求，见
-    # inviscid_kernel.py::compute_boundary_ghost_states 调用方 fr_viscous_
-    # flux.py 的用法）。
+    # _compute_boundary_ghost_states_gpu 现在用的是同一个 CPU round-trip
+    # 模式（此前那边有个真实 bug：完全没调用 ghost_provider，用"owner
+    # cell 零梯度外插"代替，V2.0 专家组盲审发现并已修复，两处现已一致）。
     from autoflowcfd.core.fr_residual.inviscid import DefaultGhostProvider
     from autoflowcfd.core.fr_residual.inviscid_kernel import compute_boundary_ghost_states
     ghost_provider = (
@@ -313,7 +328,8 @@ def _compute_viscous_interface_correction_gpu(
     cp = get_cupy()
     correction = cp.zeros((n_cells, n_sps, 5), dtype=cp.float64)
 
-    from autoflowcfd.core.gpu.gpu_inviscid import _scatter_add_to_correction
+    from autoflowcfd.core.gpu.residual.gpu_inviscid import _scatter_add_to_correction
+    from autoflowcfd.core.gpu.residual.gpu_inviscid_volume import distribute_face_correction_to_sps
 
     ff = flat_face_gpu
 
@@ -331,6 +347,7 @@ def _compute_viscous_interface_correction_gpu(
         if bool(cp.any(mask_o)):
             idx_o = face_idx[mask_o]
             oc = ff.owner_cell[idx_o]
+            oax = ff.owner_axis[idx_o]
             oside = ff.owner_side[idx_o]
             is_bnd_o = ff.is_boundary[idx_o]
 
@@ -395,10 +412,16 @@ def _compute_viscous_interface_correction_gpu(
                 pen_full[..., 1:4] = pen
                 jump_owner = cp.where(is_bnd_i_o[..., None], jump_owner + pen_full, jump_owner)
 
-            g_left_o = ff.g_left[idx_o]
-            g_right_o = ff.g_right[idx_o]
-            g_prime_owner = cp.where(oside[:, None, None] < 0, g_left_o, g_right_o)
-            contrib_o = cp.matmul(cp.swapaxes(g_prime_owner, -1, -2), jump_owner)
+            # 真实 bug 修复（V2.0 专家组盲审第四轮，2026-08-28）：分配
+            # 改用 dist_fp_of_sp/dist_axis_coord_of_sp gather，不再用
+            # `ff.g_left[idx_o]` 按面索引去索引这个长度仅 n1d 的数组
+            # （会在真实 GPU 上 IndexError），见
+            # gpu_inviscid_volume.py::distribute_face_correction_to_sps
+            # 文档的完整推导（gpu_inviscid.py 同一处修复）。
+            contrib_o = distribute_face_correction_to_sps(
+                cp, jump_owner, oax, oside, ff.dist_fp_of_sp, ff.dist_axis_coord_of_sp,
+                ff.g_left, ff.g_right,
+            )
             contrib_o = contrib_o / det_jacs[oc][..., None]
             _scatter_add_to_correction(correction, contrib_o, oc, n_cells, n_sps)
 
@@ -407,6 +430,7 @@ def _compute_viscous_interface_correction_gpu(
         if bool(cp.any(mask_n)):
             idx_n = face_idx[mask_n]
             nc = ff.neighbor_cell[idx_n]
+            nax = ff.neighbor_axis[idx_n]
             nside = ff.neighbor_side[idx_n]
 
             Q_n_native, gv_n_native, gT_n_native, mut_n_native = _extrap_side(
@@ -459,10 +483,11 @@ def _compute_viscous_interface_correction_gpu(
                 pen_full_n[..., 1:4] = pen_n
                 jump_neighbor = cp.where(mixed_sel_n[..., None], jump_neighbor + pen_full_n, jump_neighbor)
 
-            g_left_n = ff.g_left[idx_n]
-            g_right_n = ff.g_right[idx_n]
-            g_prime_neighbor = cp.where(nside[:, None, None] < 0, g_left_n, g_right_n)
-            contrib_n = cp.matmul(cp.swapaxes(g_prime_neighbor, -1, -2), jump_neighbor)
+            # 见上方 owner-primary 块同名注释，同一处修复。
+            contrib_n = distribute_face_correction_to_sps(
+                cp, jump_neighbor, nax, nside, ff.dist_fp_of_sp, ff.dist_axis_coord_of_sp,
+                ff.g_left, ff.g_right,
+            )
             contrib_n = contrib_n / det_jacs[nc][..., None]
             _scatter_add_to_correction(correction, contrib_n, nc, n_cells, n_sps)
 

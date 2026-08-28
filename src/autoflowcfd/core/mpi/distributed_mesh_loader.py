@@ -237,7 +237,6 @@ def distributed_mesh_load(
             partition_info: 分区信息（cell_partition 等）
     """
     from autoflowcfd.cli.solve_helpers import load_mesh_for_solver
-    from autoflowcfd.grid.connectivity.face_connectivity import FRFaceConnectivity
     from autoflowcfd.core.mpi.partition import partition_mesh
     from autoflowcfd.core.mpi.comm import bcast_from_root
 
@@ -251,14 +250,19 @@ def distributed_mesh_load(
             skip_quality_check=skip_quality_check,
         )
 
-        # 构建面连接关系
+        # 面连接关系已由 load_mesh_for_solver -> HighOrderMesh.load_from_volume_mesh
+        # 构建好挂在 mesh 上——此前这里写的是 `FRFaceConnectivity(mesh, ops)`，
+        # 但 FRFaceConnectivity 是一个 dataclass，字段是 owner_cell/
+        # neighbor_cell/... 等 numpy 数组，不是 (mesh, ops)，会把 mesh 对象
+        # 本身错误地绑定到 owner_cell 字段——第四次评审发现的又一个
+        # 独立崩溃 bug，MPI 分布式网格加载路径此前从未真正跑通过。
         from autoflowcfd.fr.operators import generate_fr_operators
         ops = generate_fr_operators(order)
-        fc = FRFaceConnectivity(mesh, ops)
+        fc = mesh.face_connectivity
 
         # 分区
         logger.info(f"Root rank partitioning mesh into {n_ranks} parts...")
-        cell_partition = partition_mesh(fc, n_ranks)
+        cell_partition = partition_mesh(fc, n_ranks, n_cells=mesh.n_cells)
 
         # 分发网格数据
         local_data = distribute_mesh_data(mesh, fc, cell_partition, n_ranks)

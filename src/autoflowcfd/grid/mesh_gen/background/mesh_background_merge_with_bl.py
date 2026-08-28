@@ -7,7 +7,8 @@
 立的模块级函数，由 mesh_background_merge._build_merged_mesh 在该分支下
 直接调用并原样返回其结果。`--bl-only` 调试导出那一小段进一步拆到了
 mesh_background_merge_bl_export.py（自包含的"构造导出对象 -> 写文件 ->
-sys.exit(0)"流程，与本文件其余逻辑没有共享状态）。
+退出进程（成功 exit(0)，失败 exit(1)）"流程，与本文件其余逻辑没有共享
+状态）。
 """
 
 import numpy as np
@@ -90,7 +91,7 @@ def _build_merged_mesh_with_bl(
     if extra_thickness_limit is not None:
         thickness_limit = np.minimum(thickness_limit, extra_thickness_limit)
 
-    # 在挤出之前，将每个锐角/硬边顶点的挤出合格子网格Splitting为每个
+    # 在挤出之前，将每个锐角/硬边顶点的挤出合格子网格拆分为每个
     # 光滑面片一份副本——参见 mesh_corner_split 的模块文档字符串了解
     # 为何单个平均法向/节点偏移无法表示真正的价-3+角点而不产生自交
     # （已在 cube_demo 上直接确认：级联碰撞冻结
@@ -102,7 +103,7 @@ def _build_merged_mesh_with_bl(
     # extrude_layers/下游单元归属。
     # min_feature_radius=min_cell_size: 自身几何暗示的曲率半径达到或超过
     # BL 目标近壁单元尺寸的边被视为普通曲面（无论网格多粗）而非锐折痕
-    # 来Splitting——参见 split_sharp_corners 的自身文档字符串。低于该
+    # 来拆分——参见 split_sharp_corners 的自身文档字符串。低于该
     # 尺度时，更密的网格分辨率也不会显著改变 BL 如何看待该特征，因此它
     # 仍被归类为硬边。
     split_nodes, topology_faces, real_face_mask, orig_of_node, bevel_source_face = (
@@ -116,13 +117,13 @@ def _build_merged_mesh_with_bl(
         [extrude_face_groups, extrude_face_groups[bevel_source_face]]
     )
 
-    # source_vertex 将Splitting后的局部（取模后）节点索引映射回其代表的
-    # 原始表面顶点——在 n_surface_nodes 以下时是恒等映射（未被Splitting
+    # source_vertex 将拆分后的局部（取模后）节点索引映射回其代表的
+    # 原始表面顶点——在 n_surface_nodes 以下时是恒等映射（未被拆分
     # 触及），在以上时映射到该副本所复制自的顶点。阶段 B 自身的
     # 节点到顶点簿记（mesh_repair_bl_thickness.
     # compute_bl_thickness_limit_override）已通过其
     # node_original_vertex/local_surface_faces 参数支持非恒等映射——
-    # 甚至在Splitting存在之前就已为此可能性而构建。
+    # 甚至在拆分存在之前就已为此可能性而构建。
     source_vertex = orig_of_node
 
     normal_faces = topology_faces[real_face_mask]
@@ -206,7 +207,7 @@ def _build_merged_mesh_with_bl(
     # 应该是开放内部空间的地方施加无滑移条件。已在真实案例上确认为
     # 真实（非理论）效应（ProjectFiles Part6/7 P21）：33,448 个这样的
     # 面，集中在立方体锐边处，分布在层 1-3——不在 BL/过渡接缝处（如
-    # 最初怀疑），证实这是预先存在的 BL 挤出特性，与棱柱/四面体Splitting
+    # 最初怀疑），证实这是预先存在的 BL 挤出特性，与棱柱/四面体拆分
     # 无关，只是之前从未从它静默合并进的壁面组中分离出来。
     #
     # Layer-0 检测是简单的节点索引范围检查，不是 convert_layers_to_prisms
