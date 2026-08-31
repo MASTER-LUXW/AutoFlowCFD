@@ -74,7 +74,10 @@ class FRSolver(_SolverGeometryMixin):
                  turbulence_intensity: float = 0.01,
                  viscosity_ratio: float = 5.0,
                  sem_num_eddies: int = 200,
-                 flux_type: str = 'radau'):
+                 flux_type: str = 'radau',
+                 artificial_viscosity_enabled: bool = False,
+                 artificial_viscosity_alpha: float = 1.0,
+                 entropy_stable_volume_enabled: bool = False):
         """
         初始化 FRSolver。
 
@@ -124,6 +127,32 @@ class FRSolver(_SolverGeometryMixin):
                 `numba.get_num_threads()`，如果这个全局状态在其他地方
                 被并发修改，会破坏该约束（见两个 kernel 模块文档"多核
                 并行"一节的坑E）。
+            artificial_viscosity_enabled: 是否启用 Persson-Peraire 模态
+                传感器 + 局部人工粘性（见 core/fr_operators/
+                artificial_viscosity.py 模块文档，ProjectFiles/V2.0/
+                7_重大问题修复-求解稳定性.md 五、六节）。默认 False——
+                这是 2026-08-29 调查引入的全新、独立的可选能力，不改变
+                任何未显式启用它的现有求解路径/测试的行为。启用后在
+                `compute_viscous_residual` 里，对模态谱衰减速率超出
+                光滑函数理论预期（`1/N^4`）的单元，叠加一个局部人工
+                粘性到既有的 `mu_t_field` 通道（复用已验证的 BR1 面
+                耦合粘性通量组装，不新建独立扩散残差路径）。
+            artificial_viscosity_alpha: 人工粘性强度标定常数（无量纲，
+                默认 1.0），只在 artificial_viscosity_enabled=True 时
+                有意义，见 compute_persson_peraire_artificial_viscosity
+                文档。
+            entropy_stable_volume_enabled: 是否在体积项过积分（over-
+                integration）分支启用 Chandrashekar (2013) 熵守恒两点
+                通量替代逐点通量代入（见 core/fr_residual/inviscid.py::
+                compute_inviscid_residual_fr 的 entropy_stable_volume
+                参数文档、`8_算法重构-Entropy-Stable_Split-Form通量
+                重构-Part1/2.md`）。默认 False——这是 2026-08-30 调查
+                引入的全新可选能力，不改变任何未显式启用它的现有求解
+                路径/测试的行为。真实决定性测试确认方向一致的真实改善
+                （在已经用了过积分的基础上再改善约 2~4 倍），代价是
+                体积项计算量从 O(n_fine) 升到 O(n_fine^2)（两点通量
+                遍历 SP 对的固有代价），默认关闭以避免无条件拖慢现有
+                全部生产用例。
             turbulence_intensity: 来流湍流强度 Tu（默认 0.01 = 1%），用于从
                 物理自洽的公式推导 k/omega 初值（工业 RANS 标准做法）。
                 外部气动默认 ≤1%，城市道路 3-5%，风洞对标 0.5-2%。
@@ -187,6 +216,20 @@ class FRSolver(_SolverGeometryMixin):
         self.mesh = mesh
         self.order = order
         self.flux_type = flux_type
+        self.artificial_viscosity_enabled = artificial_viscosity_enabled
+        self.artificial_viscosity_alpha = artificial_viscosity_alpha
+        self.entropy_stable_volume_enabled = entropy_stable_volume_enabled
+        if entropy_stable_volume_enabled and backend.lower() == "gpu":
+            import warnings
+            warnings.warn(
+                "entropy_stable_volume_enabled=True 目前只在 CPU 路径实现"
+                "（core/fr_residual/inviscid.py::compute_inviscid_residual_fr），"
+                "GPU 路径（core/gpu/residual/gpu_inviscid.py）尚未移植，"
+                "backend='gpu' 时这个开关不生效，体积项仍走 GPU 原有的"
+                "逐点通量代入实现——不是被静默忽略导致错误结果，只是"
+                "拿不到这个优化。",
+                stacklevel=2,
+            )
         self.backend_type = backend.lower()
         
         # 安全地获取网格信息
@@ -215,7 +258,21 @@ class FRSolver(_SolverGeometryMixin):
             self.state.initialize_uniform(rho=rho_inf, u=vel_inf, v=0.0, w=0.0, p=p_inf)
         
         # 2. 预计算算子 (G-04)
-        self.ops = generate_fr_operators(order, flux_point_type=flux_type)
+        # 真实 bug 修复（native 四面体路径C接入 CLI/solver 时发现）：这里
+        # 此前无条件按 tet_basis_mode="collapsed"（generate_fr_operators
+        # 默认值）重新构造 self.ops，完全无视 mesh 自己在 load_from_
+        # volume_mesh 时已经用哪个 tet_basis_mode 构造（含 face_
+        # connectivity 是否已经翻译成 native 编码）——如果两者不一致
+        # （mesh 是 native 但这里构造出 collapsed 的 ops，或反之），
+        # inviscid_kernel.py 会拿到"face 编码显示是 native 但 ops 里
+        # boundary_extrap_native/lift_native 是零长度占位数组"这种自相
+        # 矛盾的组合，触发 IndexError 或更隐蔽的错误。改为直接读
+        # `mesh.tet_basis_mode`（`HighOrderMesh` 已有该属性，见
+        # grid/high_order/high_order_mesh.py），不要求调用方另外维护
+        # 一份必须保持同步的 FRSolver 级别参数——从根上消除不一致的
+        # 可能性，而不是指望"调用方自己记得传一致的值"。
+        tet_basis_mode = getattr(mesh, "tet_basis_mode", "collapsed")
+        self.ops = generate_fr_operators(order, flux_point_type=flux_type, tet_basis_mode=tet_basis_mode)
         
         # 3. 初始化边界条件 (BD-01) —— 真正参与残差组装的幽灵态边界条件
         # （不再持有未被使用的 FRWeakBC 罚项处理器实例——那是旧版本从未被
@@ -397,13 +454,27 @@ class FRSolver(_SolverGeometryMixin):
             if initial_res is None:
                 initial_res = res
             
-            # 每 10 步或第 1 步打印详细信息
-            if i == 0 or (i + 1) % 10 == 0:
-                drop = initial_res / max(res, 1e-30)
-                cfl_msg = ""
-                if self._cfl_controller is not None:
-                    cfl_msg = f" | CFL={self._cfl_controller.cfl_number:.3f}"
-                print(f"Iteration {i+1}: Residual = {res:.6e} | Drop: {drop:.1f}x{cfl_msg} | Time/step: {t_end - t_start:.2f}s")
+            # 每步打印详细信息（真实功能缺口修复，2026-08-31，用户直接
+            # 指出"P0/P1直接运算和P2 order continuation打印的信息应该
+            # 一样"）：这条"非 order continuation"常规循环（目标阶数<2，
+            # 例如单独求解 P0/P1）此前打印频率（每10步一次）、字段顺序
+            # （CFL 在 Time 之前）、前缀（"Iteration N"而非"P{order} Iter
+            # N"）、Time 标签（"Time/step"而非"Time"）都与
+            # order_continuation.py::run_order_continuation（目标阶数>=2
+            # 时走的分阶段路径）不一致——两条路径各自独立发展、从未同步
+            # 过格式。这里改成逐字段对齐 order_continuation.py 的格式
+            # （以其为准），包括每步都打印、同样的字段顺序与 Cd/Cl/Cs
+            # 气动力系数打印。
+            drop = initial_res / max(res, 1e-30)
+            msg = f"P{self.order} Iter {i+1}: Residual = {res:.6e} | Drop: {drop:.1f}x | Time: {t_end - t_start:.2f}s"
+            if self._cfl_controller is not None:
+                msg += f" | CFL={self._cfl_controller.cfl_number:.3f}"
+            ref_area = getattr(self, '_reference_area', None)
+            if ref_area is not None and ref_area > 0:
+                from autoflowcfd.postprocess.fr_coefficients import compute_forces_pressure_only
+                aero = compute_forces_pressure_only(self, ref_area)
+                msg += f" | Cd={aero['Cd']:.4f} Cl={aero['Cl']:.4f} Cs={aero['Cs']:.4f}"
+            print(msg)
             
             # 中间 checkpoint 保存
             if checkpoint_callback is not None:
@@ -495,6 +566,7 @@ class FRSolver(_SolverGeometryMixin):
                 self.state.U, self.mesh, self.ops,
                 boundary_ghost_provider=self.boundary_ghost_provider,
                 mach_ref=self.freestream["mach_ref"],
+                entropy_stable_volume=self.entropy_stable_volume_enabled,
             )
 
         if self.state.n_vars > 5:
@@ -539,8 +611,34 @@ class FRSolver(_SolverGeometryMixin):
         return res
 
     def _get_turbulent_viscosity_field(self) -> Optional[np.ndarray]:
-        """汇总当前激活的湍流模型给出的动力涡粘度场 mu_t = rho * nu_t（委托给 fr_solver_turbulence）。"""
-        return fr_solver_turbulence.get_turbulent_viscosity_field(self)
+        """汇总当前激活的湍流模型给出的动力涡粘度场 mu_t = rho * nu_t（委托给 fr_solver_turbulence），
+        再叠加 Persson-Peraire 人工粘性（若启用）。
+
+        真实 bug 修复（2026-08-29，TGV 真实复现）：人工粘性最初被直接
+        加进 `compute_viscous_residual` 里临时拼出的 `mu_t_field`，
+        `_compute_local_time_step`（cfl.py）单独调用这个方法算粘性
+        CFL 步长时完全看不到这份额外粘度——时间步长仍按"只有分子
+        粘度+湍流涡粘"来估算，而实际粘性残差里已经叠加了一份可能
+        大出物理粘度一个数量级的人工扩散，显式格式的粘性稳定性条件
+        `dt<=C*h^2/mu_eff` 被违反，真实复现：TGV（P2，Re=20 低雷诺数
+        算例，物理 mu 已经刻意调得比空气分子粘度大三个数量级）3 步内
+        发散。必须让 CFL 计算与粘性残差看到*同一个* `mu_t_field`——
+        统一在这个唯一的读取入口叠加，而不是分别在两个消费点各自
+        处理（同一类问题见项目记忆 hardcoded_molecular_viscosity_
+        mismatch/low_mach_cfl_ausm_inconsistency：任何"物理量在多个
+        消费点独立计算/获取"的模式都有两处失去同步的风险）。
+        """
+        mu_t_field = fr_solver_turbulence.get_turbulent_viscosity_field(self)
+        if getattr(self, "artificial_viscosity_enabled", False):
+            from autoflowcfd.core.fr_operators.artificial_viscosity import (
+                compute_persson_peraire_artificial_viscosity,
+            )
+
+            epsilon_av = compute_persson_peraire_artificial_viscosity(
+                self, alpha_av=self.artificial_viscosity_alpha
+            )
+            mu_t_field = epsilon_av if mu_t_field is None else mu_t_field + epsilon_av
+        return mu_t_field
 
     def _compute_gradients(self) -> np.ndarray:
         """

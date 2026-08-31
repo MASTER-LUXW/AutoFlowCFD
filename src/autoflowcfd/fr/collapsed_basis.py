@@ -274,19 +274,52 @@ def build_collapsed_diff_matrices(cell_type: str, order: int, ref_cube_sps: np.n
 # 2*order（二次非线性经验法则），但本模块的模态 Vandermonde 矩阵条件数
 # 随阶数爆炸式增长（本文件 jacobi_polynomial 文档实测：N=2 时 cond~1e5，
 # N=3 时 ~1e9，N=4 时 ~1e14——接近 float64 ~1e16 动态范围的可用边界）。
-# 真实数值实验证实了这个上限的必要性：即使把 build_collapsed_diff_matrices/
-# build_collapsed_boundary_extrap 的显式求逆换成 lu_solve（同一轮修复，
-# 见上面 D=Va@V^{-1} 处的说明）大幅改善了条件数敏感度，over_order=4
-# （cond~1e14）在生产阶数 P=2 上仍不稳定：均匀自由流场残差 1.7（应为
-# ~0），线性剪切流残差 0.56（应为 0）——量级上比不做过积分更差，是真正
-# 的数值噪声而非改善。上限设为 3（cond~1e9）后同一组测试稳定给出自由
-# 流场残差 1.06e-5、剪切流残差 3.49e-6（后者比不做过积分时的 43~62 倍
-# 误差改善约 5~6 个数量级）；P=3 下 over_order=min(2*3,3)=3=order，
-# 退化为 fine 点集与 coarse 完全重合（interp_c2f/restrict_f2c 退化为
-# 恒等矩阵，D_fine=D_3d_tet/prism 本身）——等价于不做过积分，不提供
-# 额外去混叠效果，但也不会引入新的不稳定；P=3 本来就不是生产阶数，
-# 测试容差也早已为此放宽，见
-# tests/unit/test_fr_residual_inviscid.py::TestFreeStreamPreservation）。
+# 真实数值实验证实了这个上限过去（V2.0 二次评审 Tier 0 #2）之所以卡在
+# 3 的必要性：即使把 build_collapsed_diff_matrices/build_collapsed_
+# boundary_extrap 的显式求逆换成 lu_solve 大幅改善了条件数敏感度，
+# over_order=4（cond~1e14）用**双精度** LU 在生产阶数 P=2 上仍不稳定：
+# 均匀自由流场残差 1.7（应为 ~0），线性剪切流残差 0.56（应为 0）——量级
+# 上比不做过积分更差，是真正的数值噪声而非改善。上限设为 3（cond~1e9）
+# 后同一组测试稳定给出自由流场残差 1.06e-5、剪切流残差 3.49e-6（后者
+# 比不做过积分时的 43~62 倍误差改善约 5~6 个数量级）；但 P=3 下
+# over_order=min(2*3,3)=3=order，退化为 fine 点集与 coarse 完全重合
+# （interp_c2f/restrict_f2c 退化为恒等矩阵，D_fine=D_3d_tet/prism 本身）
+# ——等价于不做过积分，P3 完全拿不到任何去混叠收益。
+#
+# 2026-08-30（`8_算法重构-微分算子对坍缩坐标退化参考轴的病态条件数-
+# Part1~5.md`）：上面"over_order=4 不稳定"的病根一度被定位为"双精度 LU
+# 分解在 cond(V)~1e14 时把条件数直接喂进舍入误差"这一个纯数值线性代数
+# 问题——`collapsed_basis_high_precision.py` 用 mpmath 50 位十进制精度
+# 重新构造同一套算子验证了这个诊断的一半：Couette 剪切流残差确实真实
+# 改善（约 2~3 倍，见 Part4/Part5），且 `D_fine@常数场=0` 这类相对误差
+# 判据在 over_order=4 下依然保持在 float64 能达到的最好水平
+# （~1e-16 相对误差）。
+#
+# 但把 OVERINTEGRATION_MAX_ORDER 直接放宽到 4 作为**默认值**上线后，
+# 被本代码库已有的"黄金标准判据"—— 均匀自由流场残差必须近似为零
+# （tests/unit/test_fr_residual_inviscid.py::TestFreeStreamPreservation）
+# ——当场测出真实回归：P=2 均匀流场残差从 over_order=3 时的 1.06e-5
+# 恶化到 over_order=4 时的 5.6e-3（约 500 倍变差，远超原有 3e-5 容差）。
+# 根因：D_fine 的绝对量级本身随 over_order 从 3 到 4 暴涨约 6.3 万倍
+# （6.0e7 -> 3.8e12，与 cond(V) 1e9->1e14 的增长量级一致），即使
+# mpmath 构造把**相对**误差稳稳压在 float64 能表示的极限（~1e-16），
+# 这个相对误差乘上暴涨后的绝对量级，再经过真实（非常数、非零）的
+# 几何度量项收缩求和，会被放大成不可忽略的绝对噪声——这在"残差本该
+# 恒为零、任何非零都是纯噪声"的均匀流场检验里被完整暴露；而 Couette
+# 剪切流本身有真实的、量级更大的混叠误差需要被"去混叠"，这部分
+# 噪声被淹没在更大的（且被过积分实际改善的）信号里，才让 Part4 的
+# 决定性测试看起来是纯粹的净改善。**这是一个真实的、此前测试范围
+# （只测了 Couette，没有连带重新跑现有黄金标准判据）没有覆盖到的
+# 权衡取舍，不是可以无条件默认开启的纯粹提升**——已如实记录在
+# `8_算法重构-微分算子对坍缩坐标退化参考轴的病态条件数-Part5.md`，
+# 上限维持 3 不变。曾经为验证这个诊断写过一版 mpmath 高精度构造
+# （collapsed_basis_high_precision.py），构造方法本身确认正确，但
+# 上限维持 3 之后它在生产路径里已经完全不可达（`over_order>3` 这个
+# 分支永远不会被触发，只有它自己的单元测试在调用）——不留"以后可能
+# 用得上"的死代码，已删除；Part5 文档完整保留了这套方法的公式、数据
+# 与结论，未来若要重新做"用户显式选择更高 over_order"这个可选项，
+# 从那份文档和这段注释就能重新实现，不需要现在占着一份不会被执行
+# 的代码。
 OVERINTEGRATION_MAX_ORDER = 3
 
 

@@ -36,9 +36,41 @@ from ..mesh_gen.extraction.face_extractor import FaceExtractor
 from ..structures import NodeArray
 from ..curved_mapping.curved_mapping import TET_CUBE_FACES, PRISM_CUBE_FACES
 
-# 立方体面标识 -> 整数编码，供 numpy 数组存储（避免存字符串）
-CUBE_FACE_CODES: Dict[str, int] = {"a=-1": 0, "a=+1": 1, "b=-1": 2, "b=+1": 3, "c=-1": 4, "c=+1": 5}
-CUBE_FACE_NAMES: List[str] = ["a=-1", "a=+1", "b=-1", "b=+1", "c=-1", "c=+1"]
+# 立方体面标识 -> 整数编码，供 numpy 数组存储（避免存字符串）。
+# tet_native_v0~v3（编码 6~9）是四面体路径C（native basis，不经过坍缩
+# 坐标，见 fr/native_simplex_basis.py 与
+# `8_算法重构-微分算子对坍缩坐标退化参考轴的病态条件数-Part6/7.md`）
+# 专用的面标识——不是新建一套并行枚举，是在现有 0~5（坍缩坐标 6 个
+# 立方体面）基础上追加 4 个新编码（四面体只有 4 个真实面，用"被排除
+# 的局部顶点下标 0~3"标识，与 fr/native_simplex_basis.py::
+# face_node_indices 的约定一致）。这个推广让绝大部分消费这套编码的
+# 下游代码（法向量/面积、周期边界配对、multi-source 分类、numba flat
+# 数组、界面残差核函数）不需要感知"这个面是坍缩坐标面还是 native 面"
+# 这个区别，只有真正需要区别对待的两处（点位定位、体积->面插值，见
+# fr/face_flux_points_locate.py、fr/face_flux_points.py::build_cross_interp）
+# 才分派，见 Part7 文档第一节完整设计说明。
+CUBE_FACE_CODES: Dict[str, int] = {
+    "a=-1": 0, "a=+1": 1, "b=-1": 2, "b=+1": 3, "c=-1": 4, "c=+1": 5,
+    "tet_native_v0": 6, "tet_native_v1": 7, "tet_native_v2": 8, "tet_native_v3": 9,
+}
+CUBE_FACE_NAMES: List[str] = [
+    "a=-1", "a=+1", "b=-1", "b=+1", "c=-1", "c=+1",
+    "tet_native_v0", "tet_native_v1", "tet_native_v2", "tet_native_v3",
+]
+
+# 现有坍缩坐标四面体编码 -> native 编码的翻译表——网格拓扑本身（这个面
+# 是四面体的哪个真实几何面）不依赖 tet_basis_mode，`build_face_
+# connectivity` 按现有方式识别出的 4 种坍缩坐标 (axis,side) 组合与
+# 四面体 4 个真实面是固定的一一映射（见 fr/face_flux_points_locate.py::
+# _TET_FIXED_TO_FACE_VERTICES：(0,-1.0)排除顶点1、(0,1.0)排除顶点0、
+# (1,-1.0)排除顶点2、(2,-1.0)排除顶点3），因此只需要一次静态查找表
+# 翻译，不需要重新做任何几何识别——见本文件 `translate_tet_faces_to_native`。
+_COLLAPSED_TO_NATIVE_TET_CODE: Dict[int, int] = {
+    CUBE_FACE_CODES["a=-1"]: CUBE_FACE_CODES["tet_native_v1"],
+    CUBE_FACE_CODES["a=+1"]: CUBE_FACE_CODES["tet_native_v0"],
+    CUBE_FACE_CODES["b=-1"]: CUBE_FACE_CODES["tet_native_v2"],
+    CUBE_FACE_CODES["c=-1"]: CUBE_FACE_CODES["tet_native_v3"],
+}
 
 
 class FaceTopologyError(RuntimeError):
@@ -122,6 +154,42 @@ class FRFaceConnectivity:
 
     def get_interior_face_indices(self) -> np.ndarray:
         return np.flatnonzero(~self.is_boundary)
+
+    def with_native_tet_faces(self, n_prism_cells: int) -> "FRFaceConnectivity":
+        """返回一份翻译过面编码的浅拷贝：四面体侧（`owner_cell`/`neighbor_cell
+        >= n_prism_cells`）的坍缩坐标编码（0/1/2/4）替换成对应的
+        `tet_native_v*` 编码（6~9），棱柱侧、边界面（编码 -1）不变。
+
+        网格拓扑本身（这个面是四面体的哪个真实几何面）不依赖求解阶段的
+        `tet_basis_mode` 选择，`build_face_connectivity` 因此保持完全
+        不变、只产出坍缩坐标编码；这个方法是求解器按 `tet_basis_mode=
+        "native"` 请求时的一次性静态翻译，不重新做任何几何识别（翻译表
+        见 `_COLLAPSED_TO_NATIVE_TET_CODE` 文档）。其余字段（法向量、
+        面积、周期平移量等纯几何量）原样复用，不受影响。
+        """
+        owner_cube_face = self.owner_cube_face.copy()
+        neighbor_cube_face = self.neighbor_cube_face.copy()
+
+        def _translate(codes: np.ndarray, is_tet_side: np.ndarray) -> None:
+            for old_code, new_code in _COLLAPSED_TO_NATIVE_TET_CODE.items():
+                mask = is_tet_side & (codes == old_code)
+                codes[mask] = new_code
+
+        _translate(owner_cube_face, self.owner_cell >= n_prism_cells)
+        _translate(neighbor_cube_face, (self.neighbor_cell >= n_prism_cells) & (self.neighbor_cell >= 0))
+
+        return FRFaceConnectivity(
+            owner_cell=self.owner_cell,
+            neighbor_cell=self.neighbor_cell,
+            owner_cube_face=owner_cube_face,
+            neighbor_cube_face=neighbor_cube_face,
+            normal=self.normal,
+            area=self.area,
+            center=self.center,
+            face_node_ids=self.face_node_ids,
+            is_boundary=self.is_boundary,
+            face_translation=self.face_translation,
+        )
 
 
 def build_face_connectivity(

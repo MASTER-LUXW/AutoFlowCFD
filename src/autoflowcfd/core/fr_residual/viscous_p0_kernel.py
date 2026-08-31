@@ -60,6 +60,9 @@ def compute_viscous_interface_correction_p0_kernel(
     dist_axis_coord_of_sp: np.ndarray,  # (3, 1)
     n_prism: int,
     n_threads: int,
+    owner_cube_face: np.ndarray, neighbor_cube_face: np.ndarray,
+    true_area_weight: np.ndarray,
+    boundary_extrap_native: np.ndarray, lift_native: np.ndarray,
 ) -> np.ndarray:
     """P0 专用粘性界面校正 kernel。
 
@@ -68,6 +71,23 @@ def compute_viscous_interface_correction_p0_kernel(
     - 外插简化为标量乘：E[i,0]*field[0,...]
     - 分布简化为单 SP：out[0,v] = g * fp_data[fp_i, v]
     - correction 形状 (n_cells, 1, 5)
+
+    native 四面体（路径C）支持：与通用 kernel（viscous_flux_kernel.py）
+    同一套 native 分支原则——`owner_cube_face`/`neighbor_cube_face`>=6
+    判定 native 面，自身面外插改用 `boundary_extrap_native[excluded_
+    vertex]`，面修正项改用 `lift_native[excluded_vertex] @ (true_area_
+    weight⊙jump)`。native 阶数0 时 `n_native_sps` 恰好也是1（受限 PKD
+    模态数 `(0+1)(0+2)(0+3)/6=1`），`lift_native[excluded_vertex]`
+    形状 `(1, n_fp)`，矩阵乘法本身已经是这里"P0 简化"要的标量化形式
+    （单行矩阵乘向量），不需要像坍缩坐标分支那样额外手写标量循环。此前
+    这里完全没有 native 分支——是本次 order continuation P0 阶段验证
+    （真实 CLI smoke test，native+order continuation 组合此前从未被
+    实际跑到过）新发现的缺口：不加判断直接对 native 面读取 `boundary_
+    extrap[celltype,oax,...]`/`g_left/g_right[dist_axis_coord_of_sp[
+    oax,...]]`，其中 `oax`（`owner_axis`）对 native 面是复用槽位哑值
+    （见 face_flux_points_merge.py"轴槽位复用"说明），会造成越界内存
+    访问——真实复现：Windows access violation 段错误（不是 Python
+    异常），见 Part8 文档"四、明确未做的后续工作"补记。
     """
     n_cells = Q.shape[0]
     n_faces = owner_cell.shape[0]
@@ -78,13 +98,18 @@ def compute_viscous_interface_correction_p0_kernel(
     for f in prange(n_faces):
         tid = get_thread_id()
         oc = owner_cell[f]
+        oc_code = owner_cube_face[f]
+        o_is_native = oc_code >= 6
         oax = owner_axis[f]
         oside = owner_side[f]
         oside_idx = 0 if oside < 0 else 1
         celltype_o = 0 if oc < n_prism else 1
 
         if owner_is_primary[f]:
-            E_o = boundary_extrap[celltype_o, oax, oside_idx]  # (n_fp, 1)
+            if o_is_native:
+                E_o = boundary_extrap_native[oc_code - 6]  # (n_fp, 1)
+            else:
+                E_o = boundary_extrap[celltype_o, oax, oside_idx]  # (n_fp, 1)
 
             # P0 简化外插：E (n_fp,1) @ field (1,k) -> E[i,0]*field[0,...]
             Q_o_s0 = Q[oc, 0]  # (5,)
@@ -201,23 +226,40 @@ def compute_viscous_interface_correction_p0_kernel(
                     for v in range(1, 4):
                         jump_owner[i, v] += pen[v]
 
-            # P0 简化分布：n_sps=1，只有 s=0
-            g_prime_owner = g_left if oside < 0 else g_right
-            fp_i = dist_fp_of_sp[oax, 0]
-            g_val = g_prime_owner[dist_axis_coord_of_sp[oax, 0]]
             dj = det_jacs[oc, 0]
-            for v in range(5):
-                correction_per_thread[tid, oc, 0, v] += g_val * jump_owner[fp_i, v] / dj
+            if o_is_native:
+                # native 提升算子：lift_native[excluded_vertex] 形状 (1,n_fp)，
+                # @ 之后直接得到 (1,5)——本身已经是 P0 需要的标量化形式。
+                weighted_jump_o = np.empty((n_fp, 5))
+                for i in range(n_fp):
+                    w_area = true_area_weight[f, i]
+                    for v in range(5):
+                        weighted_jump_o[i, v] = w_area * jump_owner[i, v]
+                contrib_owner = lift_native[oc_code - 6] @ weighted_jump_o  # (1,5)
+                for v in range(5):
+                    correction_per_thread[tid, oc, 0, v] += contrib_owner[0, v] / dj
+            else:
+                # P0 简化分布：n_sps=1，只有 s=0
+                g_prime_owner = g_left if oside < 0 else g_right
+                fp_i = dist_fp_of_sp[oax, 0]
+                g_val = g_prime_owner[dist_axis_coord_of_sp[oax, 0]]
+                for v in range(5):
+                    correction_per_thread[tid, oc, 0, v] += g_val * jump_owner[fp_i, v] / dj
 
         # Neighbor 侧（与通用 kernel 相同逻辑，n_sps=1 简化）
         if (not is_boundary[f]) and neighbor_is_primary[f]:
             nc = neighbor_cell[f]
+            nc_code = neighbor_cube_face[f]
+            n_is_native = nc_code >= 6
             nax = neighbor_axis[f]
             nside = neighbor_side[f]
             nside_idx = 0 if nside < 0 else 1
             celltype_n = 0 if nc < n_prism else 1
 
-            E_n = boundary_extrap[celltype_n, nax, nside_idx]
+            if n_is_native:
+                E_n = boundary_extrap_native[nc_code - 6]
+            else:
+                E_n = boundary_extrap[celltype_n, nax, nside_idx]
 
             Q_n_s0 = Q[nc, 0]
             gv_n_s0 = grad_vel[nc, 0]
@@ -319,12 +361,22 @@ def compute_viscous_interface_correction_p0_kernel(
                     for v in range(1, 4):
                         jump_neighbor[i, v] += pen_n[v]
 
-            # P0 简化分布
-            g_prime_neighbor = g_left if nside < 0 else g_right
-            fp_i = dist_fp_of_sp[nax, 0]
-            g_val = g_prime_neighbor[dist_axis_coord_of_sp[nax, 0]]
             dj = det_jacs[nc, 0]
-            for v in range(5):
-                correction_per_thread[tid, nc, 0, v] += g_val * jump_neighbor[fp_i, v] / dj
+            if n_is_native:
+                weighted_jump_n = np.empty((n_fp, 5))
+                for i in range(n_fp):
+                    w_area = true_area_weight[f, i]
+                    for v in range(5):
+                        weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
+                contrib_neighbor = lift_native[nc_code - 6] @ weighted_jump_n  # (1,5)
+                for v in range(5):
+                    correction_per_thread[tid, nc, 0, v] += contrib_neighbor[0, v] / dj
+            else:
+                # P0 简化分布
+                g_prime_neighbor = g_left if nside < 0 else g_right
+                fp_i = dist_fp_of_sp[nax, 0]
+                g_val = g_prime_neighbor[dist_axis_coord_of_sp[nax, 0]]
+                for v in range(5):
+                    correction_per_thread[tid, nc, 0, v] += g_val * jump_neighbor[fp_i, v] / dj
 
     return correction_per_thread.sum(axis=0)

@@ -38,6 +38,9 @@ def compute_viscous_interface_correction_kernel_colored(
     n_prism: int,
     face_indices: np.ndarray,  # 当前颜色组的面索引
     correction: np.ndarray,    # 共享输出 buffer（同色面无冲突，直接写入）
+    owner_cube_face: np.ndarray, neighbor_cube_face: np.ndarray,
+    true_area_weight: np.ndarray,
+    boundary_extrap_native: np.ndarray, lift_native: np.ndarray,
 ) -> None:
     """图着色版本的粘性界面 kernel。
 
@@ -53,6 +56,10 @@ def compute_viscous_interface_correction_kernel_colored(
     `neighbor_adj_row_exact` 取代 `adj_j` 外插，理由与
     compute_viscous_interface_correction_kernel（非 colored 版本）
     完全相同，两处必须同步修改。`adj_j` 参数已从签名中移除。
+
+    native 四面体（路径C）支持：与非 colored 版本
+    （viscous_flux_kernel.py）同一套 native 分支，两处必须同步修改，
+    见该文件模块文档。
     """
     n_cells = Q.shape[0]
     n_sps = Q.shape[1]
@@ -62,13 +69,18 @@ def compute_viscous_interface_correction_kernel_colored(
     for fi in prange(n_faces_in_color):
         f = face_indices[fi]
         oc = owner_cell[f]
+        oc_code = owner_cube_face[f]
+        o_is_native = oc_code >= 6
         oax = owner_axis[f]
         oside = owner_side[f]
         oside_idx = 0 if oside < 0 else 1
         celltype_o = 0 if oc < n_prism else 1
 
         if owner_is_primary[f]:
-            E_o = boundary_extrap[celltype_o, oax, oside_idx]
+            if o_is_native:
+                E_o = boundary_extrap_native[oc_code - 6]
+            else:
+                E_o = boundary_extrap[celltype_o, oax, oside_idx]
 
             Q_o = _extrap_matmul(Q[oc], E_o)
             gv_o = _extrap_matrix3x3(grad_vel[oc], E_o)
@@ -172,10 +184,18 @@ def compute_viscous_interface_correction_kernel_colored(
                     for v in range(1, 4):
                         jump_owner[i, v] += pen[v]
 
-            g_prime_owner = g_left if oside < 0 else g_right
-            contrib_owner = _distribute_point(
-                jump_owner, dist_fp_of_sp[oax], dist_axis_coord_of_sp[oax], g_prime_owner
-            )
+            if o_is_native:
+                weighted_jump_o = np.empty((n_fp, 5))
+                for i in range(n_fp):
+                    w_area = true_area_weight[f, i]
+                    for v in range(5):
+                        weighted_jump_o[i, v] = w_area * jump_owner[i, v]
+                contrib_owner = lift_native[oc_code - 6] @ weighted_jump_o
+            else:
+                g_prime_owner = g_left if oside < 0 else g_right
+                contrib_owner = _distribute_point(
+                    jump_owner, dist_fp_of_sp[oax], dist_axis_coord_of_sp[oax], g_prime_owner
+                )
             for s in range(n_sps):
                 dj = det_jacs[oc, s]
                 for v in range(5):
@@ -183,12 +203,17 @@ def compute_viscous_interface_correction_kernel_colored(
 
         if (not is_boundary[f]) and neighbor_is_primary[f]:
             nc = neighbor_cell[f]
+            nc_code = neighbor_cube_face[f]
+            n_is_native = nc_code >= 6
             nax = neighbor_axis[f]
             nside = neighbor_side[f]
             nside_idx = 0 if nside < 0 else 1
             celltype_n = 0 if nc < n_prism else 1
 
-            E_n = boundary_extrap[celltype_n, nax, nside_idx]
+            if n_is_native:
+                E_n = boundary_extrap_native[nc_code - 6]
+            else:
+                E_n = boundary_extrap[celltype_n, nax, nside_idx]
 
             Q_n_native = _extrap_matmul(Q[nc], E_n)
             gv_n_native = _extrap_matrix3x3(grad_vel[nc], E_n)
@@ -285,10 +310,18 @@ def compute_viscous_interface_correction_kernel_colored(
                     for v in range(1, 4):
                         jump_neighbor[i, v] += pen_n[v]
 
-            g_prime_neighbor = g_left if nside < 0 else g_right
-            contrib_neighbor = _distribute_point(
-                jump_neighbor, dist_fp_of_sp[nax], dist_axis_coord_of_sp[nax], g_prime_neighbor
-            )
+            if n_is_native:
+                weighted_jump_n = np.empty((n_fp, 5))
+                for i in range(n_fp):
+                    w_area = true_area_weight[f, i]
+                    for v in range(5):
+                        weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
+                contrib_neighbor = lift_native[nc_code - 6] @ weighted_jump_n
+            else:
+                g_prime_neighbor = g_left if nside < 0 else g_right
+                contrib_neighbor = _distribute_point(
+                    jump_neighbor, dist_fp_of_sp[nax], dist_axis_coord_of_sp[nax], g_prime_neighbor
+                )
             for s in range(n_sps):
                 dj = det_jacs[nc, s]
                 for v in range(5):

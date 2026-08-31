@@ -462,6 +462,17 @@ def build_distributed_flat_face(
         true_normal=global_flat.true_normal[local_face_indices],
         owner_adj_row_exact=global_flat.owner_adj_row_exact[local_face_indices],
         neighbor_adj_row_exact=global_flat.neighbor_adj_row_exact[local_face_indices],
+        # native 四面体（路径C）字段：分布式/MPI 路径明确不支持 native
+        # 模式（Part6 阶段5/Part8 文档"五、诚实的范围声明"一致的既有
+        # 决定），这里只是把全局 flat 已有的（对纯坍缩坐标网格恒为
+        # 占位/空数组）同名字段原样按面切片/原样透传，不引入任何 native
+        # 分派逻辑——保持 FlatFaceGeometry 构造完整，不改变分布式路径
+        # 现有行为。
+        owner_cube_face=global_flat.owner_cube_face[local_face_indices],
+        neighbor_cube_face=global_flat.neighbor_cube_face[local_face_indices],
+        true_area_weight=global_flat.true_area_weight[local_face_indices],
+        boundary_extrap_native=global_flat.boundary_extrap_native,
+        lift_native=global_flat.lift_native,
         # src0/src1 cell 字段存的是*单元*索引（不是面索引），必须重映射到
         # local+halo 扩展索引空间——此前只对 src0 做了面轴切片、完全没做
         # cell 值重映射，src1 的紧凑数组更是原样透传，是发现3描述的

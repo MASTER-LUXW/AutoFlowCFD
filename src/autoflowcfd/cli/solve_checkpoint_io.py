@@ -198,6 +198,12 @@ def rebuild_solver_from_checkpoint(
     turbulence_model = metadata.get("turbulence_model", "sst")
     target_backend = backend or metadata.get("backend", "cpu")
     resolved_surface_mesh = surface_mesh or metadata.get("surface_mesh")
+    # tet_basis_mode 从 checkpoint metadata 恢复（2026-08-30，与
+    # write_checkpoint 同名字段配套修复）：不恢复的话，用 native 模式
+    # 求解、存下 checkpoint 后 resume，会悄悄用默认的 "collapsed" 重建
+    # 网格/算子，与保存时的 U_sps 形状/含义不一致，见 write_checkpoint
+    # 该字段的文档。
+    tet_basis_mode = metadata.get("tet_basis_mode", "collapsed")
 
     mesh, volume_data = load_mesh_for_solver(
         input_file, order, surface_mesh=resolved_surface_mesh,
@@ -205,6 +211,7 @@ def rebuild_solver_from_checkpoint(
         # resume/post 重建时这里却无条件重新强制质量门，导致同一个网格上产出的
         # checkpoint 永远无法被 resume/后处理，与 solve 侧语义不一致。默认仍然强制。
         skip_quality_check=skip_quality_check,
+        tet_basis_mode=tet_basis_mode,
     )
 
     solver = FRSolver(
@@ -254,6 +261,7 @@ def rebuild_solver_from_checkpoint(
     metadata["turbulence_model"] = turbulence_model
     metadata["backend"] = target_backend
     metadata["surface_mesh"] = resolved_surface_mesh
+    metadata["tet_basis_mode"] = tet_basis_mode
     return solver, iteration, metadata
 
 
@@ -495,6 +503,17 @@ def write_checkpoint(
         # 兜底与 Tu/VR 同一个理由：轻量 fake/mock solver（单元测试）不一定
         # 设置这个属性，真实 FRSolver/GPUFRSolver 恒会设置。
         "mu_molecular": getattr(solver, 'mu_molecular', 1.8e-5),
+        # tet_basis_mode 持久化（2026-08-30 补齐，与上面 mu_molecular 同一类
+        # 遗漏）：此前 resume 时 rebuild_solver_from_checkpoint 无条件用
+        # `load_mesh_for_solver` 默认值 "collapsed" 重建网格，如果原始求解
+        # 是 --tet-basis-mode native 跑的，resume 出来的网格/算子会悄悄换回
+        # 坍缩坐标基——不只是"结果不一致"，checkpoint 里存的 U_sps 是按
+        # native 网格的 SPs 排列/数量存的，用 collapsed 网格重建后大概率
+        # 连形状都对不上（同阶数下 native 的 n_native_sps 通常小于坍缩坐标
+        # 的 n1d^3），会在加载 U_sps 时直接报错或更隐蔽地错位赋值。getattr
+        # 兜底同样是为了兼容轻量 fake/mock solver（单元测试）不设置这个
+        # 属性的场景，真实 HighOrderMesh 恒会设置（默认 "collapsed"）。
+        "tet_basis_mode": getattr(getattr(solver, "mesh", None), "tet_basis_mode", "collapsed"),
     }
     if surface_mesh:
         metadata["surface_mesh"] = surface_mesh

@@ -56,6 +56,10 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
         # 无非零 Dirichlet 目标值（本测试只覆盖 k 的 Dirichlet-zero 分支）。
         has_wall_dirichlet_value = np.zeros(n_faces, dtype=np.bool_)
         wall_dirichlet_value_face = np.zeros((n_faces, n_fp), dtype=np.float64)
+        # 纯 collapsed 场景（无 native 四面体）：owner_cube_face 全 <6，
+        # boundary_extrap_native 空占位，见 kernel 文档 native 分支。
+        owner_cube_face = np.zeros(n_faces, dtype=np.int64)
+        boundary_extrap_native = np.zeros((0, n_fp, n_sps))
 
         phi_owner, phi_neighbor = extrapolate_scalar_to_faces_kernel(
             scalar_sps, boundary_extrap,
@@ -66,6 +70,7 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
             wall_dirichlet_zero_face,
             mixed_nb_partner, mixed_nb_mask,
             has_wall_dirichlet_value, wall_dirichlet_value_face,
+            owner_cube_face, boundary_extrap_native,
         )
 
         np.testing.assert_allclose(phi_owner, [[5.0], [5.0]])
@@ -93,6 +98,8 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
         mixed_nb_mask = np.zeros((n_faces, n_fp), dtype=np.bool_)
         has_wall_dirichlet_value = np.zeros(n_faces, dtype=np.bool_)
         wall_dirichlet_value_face = np.zeros((n_faces, n_fp), dtype=np.float64)
+        owner_cube_face = np.zeros(n_faces, dtype=np.int64)
+        boundary_extrap_native = np.zeros((0, n_fp, n_sps))
 
         _, phi_neighbor = extrapolate_scalar_to_faces_kernel(
             scalar_sps, boundary_extrap,
@@ -103,6 +110,7 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
             wall_dirichlet_zero_face,
             mixed_nb_partner, mixed_nb_mask,
             has_wall_dirichlet_value, wall_dirichlet_value_face,
+            owner_cube_face, boundary_extrap_native,
         )
         np.testing.assert_allclose(phi_neighbor, [[3.0]])
 
@@ -127,6 +135,8 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
         mixed_nb_mask = np.zeros((n_faces, n_fp), dtype=np.bool_)
         has_wall_dirichlet_value = np.array([True])
         wall_dirichlet_value_face = np.array([[12.0]])
+        owner_cube_face = np.zeros(n_faces, dtype=np.int64)
+        boundary_extrap_native = np.zeros((0, n_fp, n_sps))
 
         phi_owner, phi_neighbor = extrapolate_scalar_to_faces_kernel(
             scalar_sps, boundary_extrap,
@@ -137,6 +147,7 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
             wall_dirichlet_zero_face,
             mixed_nb_partner, mixed_nb_mask,
             has_wall_dirichlet_value, wall_dirichlet_value_face,
+            owner_cube_face, boundary_extrap_native,
         )
 
         np.testing.assert_allclose(phi_owner, [[5.0]])

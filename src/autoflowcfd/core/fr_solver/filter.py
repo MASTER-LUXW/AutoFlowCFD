@@ -54,7 +54,13 @@ def build_filter_func(solver) -> Callable[[np.ndarray], np.ndarray]:
     n_sps = mesh.n_sps_per_cell
     n_prism = mesh.n_prism_cells
     filter_prism = ops.filter_prism
-    filter_tet = ops.filter_tet
+    # native 四面体（路径C，Part8 文档）：`filter_native_tet_padded` 只
+    # 在 tet_basis_mode="native" 时非 None，此时四面体侧改用它（零填充
+    # 行改用单位矩阵，见 native_tet_padding.py::pad_native_tet_filter_
+    # matrix_to_global 文档——滤波器直接作用在 U 本身，不是残差贡献，
+    # 填充行必须原样通过而不是被重置为 0）；默认（collapsed）路径
+    # 完全不变。
+    filter_tet = ops.filter_native_tet_padded if ops.filter_native_tet_padded is not None else ops.filter_tet
 
     def filter_func(U_flat: np.ndarray) -> np.ndarray:
         return _filter_flat_U(U_flat, n_cells, n_sps, n_prism, filter_prism, filter_tet)

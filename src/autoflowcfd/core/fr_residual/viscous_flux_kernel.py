@@ -76,6 +76,9 @@ def compute_viscous_interface_correction_kernel(
     dist_fp_of_sp: np.ndarray, dist_axis_coord_of_sp: np.ndarray,
     n_prism: int,
     n_threads: int,
+    owner_cube_face: np.ndarray, neighbor_cube_face: np.ndarray,
+    true_area_weight: np.ndarray,
+    boundary_extrap_native: np.ndarray, lift_native: np.ndarray,
 ) -> np.ndarray:
     """返回 correction，形状 (n_cells, n_sps, 5)，与
     fr_viscous_flux.py::compute_viscous_residual_fr 里逐面循环算出的
@@ -91,6 +94,21 @@ def compute_viscous_interface_correction_kernel(
     `true_normal` 对齐安全阀，自洽方向是粘性通量法向*唯一*的输入，
     外插截断误差此前没有任何兜底，本次修复对粘性残差的精度改善因此
     更直接。`adj_j` 参数已从签名中移除。
+
+    native 四面体（路径C）支持（补齐 Part8 文档"四、明确未做的后续
+    工作"遗漏项——粘性残差此前完全没有 native 分支，见
+    inviscid_kernel.py 模块文档同一原则）：`owner_cube_face`/
+    `neighbor_cube_face`>=6 判定 native 面（excluded_vertex=code-6）。
+    与无粘 kernel 不同，这里**不需要** side_factor/`true_normal` 对齐
+    安全阀（本函数本来就没有这一层——见上方"真实 bug 修复"一节，
+    `owner_adj_row_exact`/`neighbor_adj_row_exact` 是唯一输入，只要
+    owner/neighbor 两侧独立调用各自读取同一份精确 adj row 就自洽，
+    不需要额外定向）。native 分支只涉及两处：(a) 自身面外插矩阵改用
+    `boundary_extrap_native[excluded_vertex]`；(b) 面修正项改用 DG
+    提升算子 `lift_native[excluded_vertex] @ (true_area_weight⊙jump)`
+    代替 `_distribute_point`（1D 坍缩坐标修正函数分布机制对 native
+    单纯形基不适用，理由同 inviscid_kernel.py/native_simplex_basis.py
+    ::build_native_tet_lift 文档）。
     """
     n_cells = Q.shape[0]
     n_sps = Q.shape[1]
@@ -102,13 +120,18 @@ def compute_viscous_interface_correction_kernel(
     for f in prange(n_faces):
         tid = get_thread_id()
         oc = owner_cell[f]
+        oc_code = owner_cube_face[f]
+        o_is_native = oc_code >= 6
         oax = owner_axis[f]
         oside = owner_side[f]
         oside_idx = 0 if oside < 0 else 1
         celltype_o = 0 if oc < n_prism else 1
 
         if owner_is_primary[f]:
-            E_o = boundary_extrap[celltype_o, oax, oside_idx]  # (n_fp,n_sps)
+            if o_is_native:
+                E_o = boundary_extrap_native[oc_code - 6]  # (n_fp,n_sps)
+            else:
+                E_o = boundary_extrap[celltype_o, oax, oside_idx]  # (n_fp,n_sps)
 
             Q_o = _extrap_matmul(Q[oc], E_o)  # (n_fp,5)
             gv_o = _extrap_matrix3x3(grad_vel[oc], E_o)  # (n_fp,3,3)
@@ -215,10 +238,18 @@ def compute_viscous_interface_correction_kernel(
                     for v in range(1, 4):
                         jump_owner[i, v] += pen[v]
 
-            g_prime_owner = g_left if oside < 0 else g_right
-            contrib_owner = _distribute_point(
-                jump_owner, dist_fp_of_sp[oax], dist_axis_coord_of_sp[oax], g_prime_owner
-            )  # (n_sps,5)，注意：粘性项没有负号（见模块文档符号约定）
+            if o_is_native:
+                weighted_jump_o = np.empty((n_fp, 5))
+                for i in range(n_fp):
+                    w_area = true_area_weight[f, i]
+                    for v in range(5):
+                        weighted_jump_o[i, v] = w_area * jump_owner[i, v]
+                contrib_owner = lift_native[oc_code - 6] @ weighted_jump_o  # (n_sps,5)
+            else:
+                g_prime_owner = g_left if oside < 0 else g_right
+                contrib_owner = _distribute_point(
+                    jump_owner, dist_fp_of_sp[oax], dist_axis_coord_of_sp[oax], g_prime_owner
+                )  # (n_sps,5)，注意：粘性项没有负号（见模块文档符号约定）
             for s in range(n_sps):
                 dj = det_jacs[oc, s]
                 for v in range(5):
@@ -226,12 +257,17 @@ def compute_viscous_interface_correction_kernel(
 
         if (not is_boundary[f]) and neighbor_is_primary[f]:
             nc = neighbor_cell[f]
+            nc_code = neighbor_cube_face[f]
+            n_is_native = nc_code >= 6
             nax = neighbor_axis[f]
             nside = neighbor_side[f]
             nside_idx = 0 if nside < 0 else 1
             celltype_n = 0 if nc < n_prism else 1
 
-            E_n = boundary_extrap[celltype_n, nax, nside_idx]
+            if n_is_native:
+                E_n = boundary_extrap_native[nc_code - 6]
+            else:
+                E_n = boundary_extrap[celltype_n, nax, nside_idx]
 
             Q_n_native = _extrap_matmul(Q[nc], E_n)  # (n_fp,5)
             gv_n_native = _extrap_matrix3x3(grad_vel[nc], E_n)  # (n_fp,3,3)
@@ -328,10 +364,18 @@ def compute_viscous_interface_correction_kernel(
                     for v in range(1, 4):
                         jump_neighbor[i, v] += pen_n[v]
 
-            g_prime_neighbor = g_left if nside < 0 else g_right
-            contrib_neighbor = _distribute_point(
-                jump_neighbor, dist_fp_of_sp[nax], dist_axis_coord_of_sp[nax], g_prime_neighbor
-            )
+            if n_is_native:
+                weighted_jump_n = np.empty((n_fp, 5))
+                for i in range(n_fp):
+                    w_area = true_area_weight[f, i]
+                    for v in range(5):
+                        weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
+                contrib_neighbor = lift_native[nc_code - 6] @ weighted_jump_n
+            else:
+                g_prime_neighbor = g_left if nside < 0 else g_right
+                contrib_neighbor = _distribute_point(
+                    jump_neighbor, dist_fp_of_sp[nax], dist_axis_coord_of_sp[nax], g_prime_neighbor
+                )
             for s in range(n_sps):
                 dj = det_jacs[nc, s]
                 for v in range(5):

@@ -203,6 +203,33 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
     # 棱柱 V_sps_inv
     lu_prism = _get_v_sps_lu("prism", n1d, sps_1d)
     v_sps_inv_prism = np.ascontiguousarray(lu_solve(lu_prism, I_n).T)
+    # native 四面体（路径C）V_sps_inv + 模态索引——只在 face_conn 里真的
+    # 出现过 native 四面体面（cube face code>=6，见
+    # grid/connectivity/face_connectivity.py::with_native_tet_faces）时
+    # 才计算；不含 native 四面体的既有网格（默认坍缩坐标路径）传零长度
+    # 占位数组，kernel 内对应分支（判据同样是 code>=6）永远不会被执行，
+    # 不改变任何现有行为——这是本函数自动探测是否启用 native 分支的唯一
+    # 入口，不需要单独的 tet_basis_mode 参数贯穿调用链（Part7 文档"实现
+    # 顺序建议"里"求解器/网格加载路径接入 tet_basis_mode"仍是独立的、
+    # 尚未做的后续工作，见该文档；这里只保证一旦上游把 face_conn 换成
+    # `.with_native_tet_faces()` 翻译后的版本，这条 numba 路径立即可用）。
+    has_native_tet = bool(np.any(np.asarray(face_conn.owner_cube_face) >= 6)) or bool(
+        np.any(np.asarray(face_conn.neighbor_cube_face) >= 6)
+    )
+    if has_native_tet:
+        from autoflowcfd.fr.face_flux_points import _get_v_sps_lu_native
+        order_native = n1d - 1
+        lu_native, modes_native = _get_v_sps_lu_native(order_native)
+        n_native = len(modes_native)
+        v_sps_inv_native = np.ascontiguousarray(lu_solve(lu_native, np.eye(n_native)).T)
+        native_mode_i = np.array([m[0] for m in modes_native], dtype=np.int32)
+        native_mode_j = np.array([m[1] for m in modes_native], dtype=np.int32)
+        native_mode_k = np.array([m[2] for m in modes_native], dtype=np.int32)
+    else:
+        v_sps_inv_native = np.zeros((0, 0))
+        native_mode_i = np.zeros(0, dtype=np.int32)
+        native_mode_j = np.zeros(0, dtype=np.int32)
+        native_mode_k = np.zeros(0, dtype=np.int32)
     (
         _nb_fc, _nb_resid, _ow_fc, _ow_resid,
         _nb_interp, _ow_interp, _nb_cell_id, _ow_cell_id,
@@ -226,6 +253,8 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         np.ascontiguousarray(neighbor_primary),
         v_sps_inv_tet,
         v_sps_inv_prism,
+        v_sps_inv_native,
+        native_mode_i, native_mode_j, native_mode_k,
     )
     logger.info("Numba parallel kernel completed.")
 
@@ -253,10 +282,16 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
     # 对平面面（绝大多数四面体面、未翘曲的棱柱四边形面）结果与旧的常数
     # 值逐位一致（见对应单元测试），只有真正非平面的棱柱四边形侧面才会
     # 表现出per-FP的真实差异。
+    # owner_code 透传（native 四面体 owner_code>=6 分派，见
+    # compute_exact_face_normals_and_weights/compute_exact_adj_rows 文档
+    # "真实 bug 修复"说明——_o_axis_arr 对 native 面存的是复用的
+    # excluded_vertex，与坍缩坐标 (axis,side) 语义会数值碰撞，必须靠
+    # 原始 cube face code 消除歧义）。
     _all_normals, _all_area_w = compute_exact_face_normals_and_weights(
         n_faces=n_faces, n1d=n1d, sps_1d=sps_1d, weights_1d=weights_1d, n_prism=n_prism,
         owner_cell=np.asarray(face_conn.owner_cell, dtype=np.int64),
         owner_axis=_o_axis_arr.astype(np.int64), owner_side=_o_side_arr.astype(np.float64),
+        owner_code=np.asarray(face_conn.owner_cube_face, dtype=np.int64),
         prism_conn=(mesh._fixed_prism_conn if mesh._fixed_prism_conn is not None
                     else np.empty((0, 6), dtype=np.int64)),
         tet_conn=(mesh._fixed_tet_conn if mesh._fixed_tet_conn is not None
@@ -282,6 +317,10 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
     # 交叉验证（最大绝对误差 ~3e-16，机器精度量级），确认可以安全替换。
     from autoflowcfd.fr.face_flux_points_exact_normal_kernel import compute_exact_adj_rows_fast
 
+    # code_arr 透传（native 四面体分派，见 compute_exact_adj_rows_kernel/
+    # _native_tet_adj_row_at 文档"真实 bug 修复"说明——owner_axis/
+    # owner_side 对 native 面存的是复用的 excluded_vertex/哑值，此前
+    # 这个"fast" kernel 完全不知道这一点，见该函数文档完整原理）。
     _owner_adj_row_exact = compute_exact_adj_rows_fast(
         n_faces, n1d, sps_1d, n_prism,
         cell_arr=np.asarray(face_conn.owner_cell, dtype=np.int64),
@@ -291,6 +330,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         tet_conn=(mesh._fixed_tet_conn if mesh._fixed_tet_conn is not None
                   else np.empty((0, 4), dtype=np.int64)),
         node_coords=mesh._node_coords,
+        code_arr=np.asarray(face_conn.owner_cube_face, dtype=np.int64),
     )
     _neighbor_adj_row_exact = compute_exact_adj_rows_fast(
         n_faces, n1d, sps_1d, n_prism,
@@ -302,6 +342,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
                   else np.empty((0, 4), dtype=np.int64)),
         node_coords=mesh._node_coords,
         valid_mask=~_is_bnd,
+        code_arr=np.asarray(face_conn.neighbor_cube_face, dtype=np.int64),
     )
 
     # ---- 直接构建 flat 源数组（跳过 180 万 FaceFluxPointGeometry 对象创建）----
@@ -470,6 +511,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
             prism_conn_flat, tet_conn_flat, node_coords,
             _nb_fc, _ow_fc,
             v_sps_inv_tet, v_sps_inv_prism,
+            v_sps_inv_native, native_mode_i, native_mode_j, native_mode_k,
             _nb_interp, _ow_interp,
             _nb_cell_id, _ow_cell_id,
             _nb_extra_mats_arr, _ow_extra_mats_arr,

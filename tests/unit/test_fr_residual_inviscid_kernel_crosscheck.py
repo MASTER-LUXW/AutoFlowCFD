@@ -113,6 +113,9 @@ def _compute_residual_via_new_kernel(U, mesh, ops, boundary_ghost_provider=None,
         flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
         flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
         n_prism, n_threads, mach_ref,
+        flat.owner_cube_face, flat.neighbor_cube_face,
+        flat.true_area_weight,
+        flat.boundary_extrap_native, flat.lift_native,
     )
     residual = residual + correction
     return suppress_residual_outliers(residual, U[..., :5])

@@ -147,6 +147,57 @@ _FACE_DEFS = [
     if name in valid_names
 ]
 
+def _native_tet_adj_row_batched(
+    excluded_vertex: int, cell_nodes: np.ndarray, n1d: int, sps_1d: np.ndarray
+) -> np.ndarray:
+    """native 四面体版本的"adj(J) 行"——与坍缩坐标版本
+    `compute_exact_adj_rows` 返回值同一约定：方向是 outward 法向，模长是
+    该 Flux Point 参考采样坐标 (a,b) 下的局部面积 Jacobian（`true_area_
+    weight=mag*w_fp` 直接积分给出真实物理面积）。
+
+    真实 bug 修复过程中的一个教训（如实记录）：**不能**简单套用"直边
+    四面体 Jacobian 是常数矩阵，所以这一行对该面所有 FP 都相同"这个
+    直觉——法向量*方向*确实处处相同（平面三角形），但 native 四面体
+    自己的面 Flux Points 是用 `native_tet_face_points_physical`/
+    `_native_tet_face_points_nb` 同一套**坍缩三角形**采样
+    （`cube_to_tri_rs`/`tri_barycentric`，与棱柱三角形封盖完全相同）
+    生成的物理点位置，(a,b) 立方体坐标到物理面坐标之间本身就含有
+    `(1-b)/4` 型非线性因子（与 `_prism_exact_jacobian_batched` 对
+    c=-1/c=+1 面的处理是同一个道理，那里全程没有走过"常数捷径"），
+    面积微元必须逐 FP 按这套采样自身的切向量叉积算，不能用常数行
+    广播——最初实现漏了这一步，被本模块单元测试（真实叉积面积交叉
+    验证）当场测出（面积微元求和与参考值相差整整 4 倍），已按下面的
+    正确公式重新实现。
+
+    Returns:
+        (k, n_fp, 3)
+    """
+    face_vertex_idx = [v for v in range(4) if v != excluded_vertex]
+    p_i = cell_nodes[:, face_vertex_idx[0]]  # (k,3)
+    p_j = cell_nodes[:, face_vertex_idx[1]]
+    p_k = cell_nodes[:, face_vertex_idx[2]]
+    p_excluded = cell_nodes[:, excluded_vertex]
+    e1 = p_j - p_i  # (k,3)，常数（平面三角形仿射映射）
+    e2 = p_k - p_i
+
+    aa, bb = np.meshgrid(sps_1d, sps_1d, indexing="ij")
+    a, b = aa.ravel(), bb.ravel()  # (n_fp,)
+
+    # phys(a,b) = l1(r_tri,s_tri)*p_i + l2*p_j + l3*p_k，其中
+    # (r_tri,s_tri)=cube_to_tri_rs(a,b)：见 curved_mapping.py/
+    # face_flux_points_helpers_numba.py::_cube_to_tri_rs_nb 同一约定
+    # （r=(1+a)(1-b)/2-1, s=b）与 _tri_barycentric_nb（l1=-(r+s)/2,
+    # l2=(1+r)/2, l3=(1+s)/2）——链式法则直接展开：
+    # d phys/da = (1-b)/4 * e1；d phys/db = -(1+a)/4*e1 + 0.5*e2。
+    dphys_da = ((1.0 - b) / 4.0)[None, :, None] * e1[:, None, :]
+    dphys_db = (-(1.0 + a) / 4.0)[None, :, None] * e1[:, None, :] + 0.5 * e2[:, None, :]
+    raw = np.cross(dphys_da, dphys_db)  # (k,n_fp,3)
+
+    # 定向：outward = 远离被排除顶点的方向
+    to_excluded = p_excluded[:, None, :] - p_i[:, None, :]  # (k,1,3)，对 n_fp 广播
+    sign = np.where(np.einsum('kpd,kpd->kp', raw, np.broadcast_to(to_excluded, raw.shape)) > 0, -1.0, 1.0)
+    return raw * sign[:, :, None]
+
 
 def compute_exact_adj_rows(
     n_faces: int,
@@ -160,6 +211,7 @@ def compute_exact_adj_rows(
     tet_conn: np.ndarray,
     node_coords: np.ndarray,
     valid_mask: Optional[np.ndarray] = None,
+    code_arr: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """对每个面，在其（可以是 owner 侧也可以是 neighbor 侧的）
     `(cell_arr[f], axis_arr[f], side_arr[f])` 赋值下，逐 Flux Point 精确
@@ -175,18 +227,31 @@ def compute_exact_adj_rows(
             对任意面都有效）；neighbor 侧调用时传
             `~face_conn.is_boundary`，跳过边界面（其 neighbor_axis 是
             -1 的哨兵值，不是一个真实的坍缩方向）
-
-    Returns:
-        (n_faces, n_fp, 3)，`valid_mask` 为 False 的条目保持全零
+        code_arr: (n_faces,) 或 None——原始 cube face 编码（`CUBE_FACE_CODES`
+            约定，0~5 坍缩坐标、6~9 native 四面体）。**真实 bug 修复**
+            （Part7 文档阶段2"执行状态更新"节）：`axis_arr`/`side_arr` 对
+            native 四面体面（`face_flux_points_merge.py` 里 `_CF_AXIS`/
+            `_CF_SIDE` 把 axis 槽位复用成 excluded_vertex）给出的值与
+            坍缩坐标的 (axis,side) 语义**在数值上会碰撞**（如
+            excluded_vertex=0 与坍缩坐标 "a=-1" 面同样是 (axis=0,side=-1)，
+            excluded_vertex=3 则不落在任何坍缩坐标条目里，得到全零）——
+            不传 `code_arr` 时这个碰撞会被静默放行（对应旧行为，纯坍缩
+            坐标网格不受影响，因为那时 `axis_arr` 从不会取到"实为
+            excluded_vertex"的含义）；传入且其中有 `>=6` 的项时，那些
+            face 改用 `_native_tet_adj_row_batched`（excluded_vertex=
+            code-6）单独计算，不再落入下面按 (axis,side) 匹配的坍缩坐标
+            分支。
     """
     n_fp = n1d * n1d
     adj_row_out = np.zeros((n_faces, n_fp, 3))
     valid = np.ones(n_faces, dtype=bool) if valid_mask is None else valid_mask
     is_prism_cell = cell_arr < n_prism
 
+    is_native = valid & (code_arr >= 6) if code_arr is not None else np.zeros(n_faces, dtype=bool)
+
     for name, axis, side, jac_fn, is_prism in _FACE_DEFS:
         type_mask = is_prism_cell if is_prism else ~is_prism_cell
-        face_mask = valid & type_mask & (axis_arr == axis) & (side_arr == side)
+        face_mask = valid & ~is_native & type_mask & (axis_arr == axis) & (side_arr == side)
         faces_here = np.nonzero(face_mask)[0]
         if len(faces_here) == 0:
             continue
@@ -205,6 +270,19 @@ def compute_exact_adj_rows(
         inv_J = np.linalg.inv(J)
         adj_row_out[faces_here] = det_J[..., None] * inv_J[:, :, axis, :]
 
+    if np.any(is_native):
+        # native 四面体永远不是棱柱（is_prism_cell 恒为 False），excluded_vertex
+        # 0~3 各自单独分桶（复用 code_arr 本身分组，不需要额外表）。
+        excluded_vertex_arr = code_arr - 6
+        for ev in range(4):
+            faces_here = np.nonzero(is_native & (excluded_vertex_arr == ev))[0]
+            if len(faces_here) == 0:
+                continue
+            cells_here = cell_arr[faces_here]
+            node_ids = tet_conn[cells_here - n_prism]
+            cell_nodes = node_coords[node_ids]  # (k,4,3)
+            adj_row_out[faces_here] = _native_tet_adj_row_batched(ev, cell_nodes, n1d, sps_1d)
+
     return adj_row_out
 
 
@@ -220,9 +298,18 @@ def compute_exact_face_normals_and_weights(
     prism_conn: np.ndarray,
     tet_conn: np.ndarray,
     node_coords: np.ndarray,
+    owner_code: Optional[np.ndarray] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """对每个面的每个 Flux Point，用其 owner 单元在该 FP 精确参考坐标处
     的解析 Jacobian，算出局部外法向 + 面积微元（取代此前面级别常数值）。
+
+    Args:
+        owner_code: (n_faces,) 或 None——owner 侧原始 cube face 编码，
+            透传给 `compute_exact_adj_rows` 做 native 四面体分派（见该
+            函数文档"真实 bug 修复"说明）；native 四面体面（code>=6）
+            对应的 `owner_side` 条目本函数不使用（`_native_tet_adj_row_
+            batched` 已经返回按 outward 定向好的行，不需要再乘 side），
+            调用方仍然可以照常传入 `_CF_SIDE` 查表得到的占位值。
 
     Returns:
         (true_normal, true_area_weight)：形状 (n_faces,n_fp,3) / (n_faces,n_fp)，
@@ -235,11 +322,19 @@ def compute_exact_face_normals_and_weights(
 
     adj_row = compute_exact_adj_rows(
         n_faces, n1d, sps_1d, n_prism, owner_cell, owner_axis, owner_side,
-        prism_conn, tet_conn, node_coords,
+        prism_conn, tet_conn, node_coords, code_arr=owner_code,
     )
     mag = np.linalg.norm(adj_row, axis=-1)
     mag_safe = np.maximum(mag, 1e-300)
-    true_normal = (adj_row / mag_safe[..., None]) * owner_side[:, None, None]
+    # native 四面体（owner_code>=6）：_native_tet_adj_row_batched 已经是
+    # 按 outward 定向好的行，这里的 side 因子必须视同 +1，不能用调用方
+    # 传入的 owner_side 占位值（对 excluded_vertex 复用的 axis 槽位没有
+    # +1/-1 语义，见 face_flux_points.py::CUBE_FACE_AXIS_SIDE 文档）。
+    if owner_code is not None:
+        side_factor = np.where(owner_code >= 6, 1.0, owner_side)
+    else:
+        side_factor = owner_side
+    true_normal = (adj_row / mag_safe[..., None]) * side_factor[:, None, None]
     true_area_weight = mag * w_fp[None, :]
 
     return true_normal, true_area_weight

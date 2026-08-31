@@ -18,6 +18,8 @@ from autoflowcfd.fr.collapsed_basis import (
 from autoflowcfd.fr.face_flux_points_helpers_numba import (
     _FACE_AXIS, _FACE_SIDE, _PQ_CODES,
     _face_ref_grid_nb, _map_ref_nb, _newton_locate_nb,
+    _native_tet_face_points_nb, _tet_native_locate_nb,
+    _native_interp_matrix_nb,
 )
 
 
@@ -35,6 +37,7 @@ def build_fp_newton_parallel(
     prism_conn, tet_conn, node_coords,
     owner_primary, neighbor_primary,
     v_sps_inv_tet, v_sps_inv_prism,
+    v_sps_inv_native, native_mode_i, native_mode_j, native_mode_k,
 ):
     """并行计算所有面的 Newton 自由坐标 + 插值矩阵。
 
@@ -49,6 +52,21 @@ def build_fp_newton_parallel(
     点位定位残差（绝对长度单位，未按面特征尺度归一化，未按容差分级）——
     调用方 face_flux_points_merge.py 负责归一化、按 ACCEPT_STRICT_REL/
     _ACCEPT_WARN_REL 分级、以及对多源棱柱四边形侧面按半区掩码取值。
+
+    native 四面体（路径C）支持（Part7 文档阶段2 numba 核函数移植）：
+    `owner_cube_face`/`neighbor_cube_face` 里 code>=6 的项目标记该侧是
+    native 四面体的真实面（`excluded_vertex = code-6`），本函数据此
+    分派到 `_tet_native_locate_nb`/`_native_tet_face_points_nb`/
+    `simplex3d_value`（`fr/face_flux_points_helpers_numba.py`/
+    `fr/native_simplex_basis.py` 的 numba 版本，与坍缩坐标分支平行），
+    不再假设 `_FACE_AXIS`/`_FACE_SIDE`（长度仅 6，对 code>=6 越界）
+    覆盖所有 cube face code。code>=6 只可能出现在 native 四面体的真实面
+    （棱柱四边形侧面恒为 0~5，见 grid/connectivity/face_connectivity.py::
+    with_native_tet_faces 文档），因此本函数所有 native 分支只需要判断
+    `code>=6`，不需要额外与 is_prism 组合判断。`v_sps_inv_native`/
+    `native_mode_{i,j,k}` 在整个网格不含任何 native 四面体时（既有
+    默认坍缩坐标路径）传入零长度占位数组即可，对应分支永远不会被执行，
+    不改变任何现有行为——见 face_flux_points_merge.py 调用处说明。
     """
     n_sps = n1d * n1d * n1d
     nb_fc = np.zeros((n_faces, n_fp, 2))
@@ -90,8 +108,20 @@ def build_fp_newton_parallel(
     for f in prange(n_faces):
         oc = owner_cell[f]
         oc_code = owner_cube_face[f]
-        o_axis = _FACE_AXIS[oc_code]
-        o_side = _FACE_SIDE[oc_code]
+        # code>=6 只可能是 native 四面体真实面（见函数文档），此时 axis/
+        # side 语义不适用——_FACE_AXIS/_FACE_SIDE 长度只有 6，不能对
+        # code>=6 索引（numba 不做边界检查，会读到未定义内存）。o_axis/
+        # o_side 在 native 分支下只是未使用的占位值（真正用到的是下面
+        # o_is_native 分支各自独立处理），仍然写入 geom_oa/geom_os 但那
+        # 两个数组本身在下游（face_flux_points_merge.py）已确认从不被
+        # 消费（owner 侧 axis/side 改用 CUBE_FACE_AXIS_SIDE 字典查表）。
+        o_is_native = oc_code >= 6
+        if o_is_native:
+            o_axis = 0
+            o_side = -1.0
+        else:
+            o_axis = _FACE_AXIS[oc_code]
+            o_side = _FACE_SIDE[oc_code]
 
         a_val = area[f]
         for fp in range(n_fp):
@@ -110,8 +140,13 @@ def build_fp_newton_parallel(
 
         nc = neighbor_cell[f]
         nc_code = neighbor_cube_face[f]
-        n_axis = _FACE_AXIS[nc_code]
-        n_side = _FACE_SIDE[nc_code]
+        n_is_native = nc_code >= 6
+        if n_is_native:
+            n_axis = 0
+            n_side = -1.0
+        else:
+            n_axis = _FACE_AXIS[nc_code]
+            n_side = _FACE_SIDE[nc_code]
         geom_na[f] = n_axis
         geom_ns[f] = n_side
 
@@ -149,9 +184,15 @@ def build_fp_newton_parallel(
                 n_nd[ni, 1] = node_coords[nid, 1]
                 n_nd[ni, 2] = node_coords[nid, 2]
 
-        # Owner 物理 FP
-        ref_o = _face_ref_grid_nb(n1d, o_axis, o_side, sps_1d)
-        phys_o = _map_ref_nb(o_is_prism, ref_o, o_nd)
+        # Owner 物理 FP —— native 四面体没有 (axis,side) 概念，面点物理
+        # 位置改用与棱柱三角形封盖相同的坍缩三角形采样（见
+        # _native_tet_face_points_nb 文档），不是 _face_ref_grid_nb 的
+        # 张量积网格。
+        if o_is_native:
+            phys_o = _native_tet_face_points_nb(n1d, oc_code - 6, o_nd, sps_1d)
+        else:
+            ref_o = _face_ref_grid_nb(n1d, o_axis, o_side, sps_1d)
+            phys_o = _map_ref_nb(o_is_prism, ref_o, o_nd)
 
         # ---- Neighbor 侧 Newton (owner_primary 才需要) ----
         if owner_primary[f]:
@@ -181,7 +222,21 @@ def build_fp_newton_parallel(
                     search[p, 2] = phys_o[p, 2] + t[2]
             else:
                 search = phys_o
-            fc, rs = _newton_locate_nb(n_is_prism, n_nd, n_axis, n_side, search, cl)
+
+            # rst_nb 只在 n_is_native 分支被赋值、也只在后面同样被
+            # n_is_native 分支守卫的地方被读取（运行时永远不会读到这个
+            # 占位初值）——预先给一个形状/类型一致的哑值，只是为了让
+            # numba 的类型推断在两条分支路径上都能确定该变量类型（它按
+            # 控制流图形状做定义可达性检查，不做"同一个未被重新赋值的
+            # 布尔变量在两处 if 判断结果必然一致"这种值层面的推理）。
+            rst_nb = np.zeros((n_fp, 3))
+            if n_is_native:
+                # native 目标：解析闭式解直接给出 (r,s,t)，与坍缩坐标版本
+                # 假设 (axis,side) 语义的 _newton_locate_nb 不兼容，见
+                # locate_native_tet_face_point 的 numba 移植文档。
+                fc, rst_nb, rs = _tet_native_locate_nb(n_nd, nc_code - 6, search)
+            else:
+                fc, rs = _newton_locate_nb(n_is_prism, n_nd, n_axis, n_side, search, cl)
             for p in range(n_fp):
                 nb_fc[f, p, 0] = fc[p, 0]
                 nb_fc[f, p, 1] = fc[p, 1]
@@ -195,34 +250,48 @@ def build_fp_newton_parallel(
                         is_pq = True
                         break
             if not is_pq:
-                # 构建插值矩阵: interp = V_target @ V_sps_inv
-                abc = np.empty((n_fp, 3))
-                for p in range(n_fp):
-                    abc[p, n_axis] = n_side
-                    ix2 = 0
-                    for ax in range(3):
-                        if ax != n_axis:
-                            abc[p, ax] = fc[p, ix2]
-                            ix2 += 1
-                if n_is_prism:
-                    V_t = prism_modal_basis_and_grad(abc[:,0], abc[:,1], abc[:,2], n1d-1)[0]
-                    V_inv = v_sps_inv_prism
+                if n_is_native:
+                    # native 目标插值矩阵：直接用上面闭式解已给出的
+                    # (r,s,t)（内部经 _rst_to_abc_nb 转换只用于取值，安全，
+                    # 不经过求导链式法则），不会重新引入坍缩坐标退化轴
+                    # 病态；按 Part6/7"补位对齐"原则自动只写前 n_native
+                    # 列，其余列保持零（见 _native_interp_matrix_nb 文档）。
+                    interp_native = _native_interp_matrix_nb(
+                        rst_nb, native_mode_i, native_mode_j, native_mode_k, v_sps_inv_native, n_sps
+                    )
+                    nb_interp[f] = interp_native
                 else:
-                    V_t = tet_modal_basis_and_grad(abc[:,0], abc[:,1], abc[:,2], n1d-1)[0]
-                    V_inv = v_sps_inv_tet
-                # interp = V_t @ V_inv  (n_fp, n_sps)
-                for p in range(n_fp):
-                    for s in range(n_sps):
-                        val = 0.0
-                        for m in range(n_sps):
-                            val += V_t[p, m] * V_inv[m, s]
-                        nb_interp[f, p, s] = val
+                    # 构建插值矩阵: interp = V_target @ V_sps_inv
+                    abc = np.empty((n_fp, 3))
+                    for p in range(n_fp):
+                        abc[p, n_axis] = n_side
+                        ix2 = 0
+                        for ax in range(3):
+                            if ax != n_axis:
+                                abc[p, ax] = fc[p, ix2]
+                                ix2 += 1
+                    if n_is_prism:
+                        V_t = prism_modal_basis_and_grad(abc[:,0], abc[:,1], abc[:,2], n1d-1)[0]
+                        V_inv = v_sps_inv_prism
+                    else:
+                        V_t = tet_modal_basis_and_grad(abc[:,0], abc[:,1], abc[:,2], n1d-1)[0]
+                        V_inv = v_sps_inv_tet
+                    # interp = V_t @ V_inv  (n_fp, n_sps)
+                    for p in range(n_fp):
+                        for s in range(n_sps):
+                            val = 0.0
+                            for m in range(n_sps):
+                                val += V_t[p, m] * V_inv[m, s]
+                            nb_interp[f, p, s] = val
                 nb_cell_id[f] = nc
 
         # ---- Owner 侧 Newton (neighbor_primary 才需要) ----
         if neighbor_primary[f]:
-            ref_n = _face_ref_grid_nb(n1d, n_axis, n_side, sps_1d)
-            phys_n = _map_ref_nb(n_is_prism, ref_n, n_nd)
+            if n_is_native:
+                phys_n = _native_tet_face_points_nb(n1d, nc_code - 6, n_nd, sps_1d)
+            else:
+                ref_n = _face_ref_grid_nb(n1d, n_axis, n_side, sps_1d)
+                phys_n = _map_ref_nb(n_is_prism, ref_n, n_nd)
             cl_o = np.sqrt(max(a_val, 1e-300))
             t = face_translation[f]
             ht = abs(t[0]) > 1e-300 or abs(t[1]) > 1e-300 or abs(t[2]) > 1e-300
@@ -237,7 +306,13 @@ def build_fp_newton_parallel(
                     search_o[p, 2] = phys_n[p, 2] - t[2]
             else:
                 search_o = phys_n
-            fc_o, rs_o = _newton_locate_nb(o_is_prism, o_nd, o_axis, o_side, search_o, cl_o)
+
+            # 同上 rst_nb 的说明。
+            rst_o_nb = np.zeros((n_fp, 3))
+            if o_is_native:
+                fc_o, rst_o_nb, rs_o = _tet_native_locate_nb(o_nd, oc_code - 6, search_o)
+            else:
+                fc_o, rs_o = _newton_locate_nb(o_is_prism, o_nd, o_axis, o_side, search_o, cl_o)
             for p in range(n_fp):
                 ow_fc[f, p, 0] = fc_o[p, 0]
                 ow_fc[f, p, 1] = fc_o[p, 1]
@@ -251,26 +326,32 @@ def build_fp_newton_parallel(
                         is_pq_n = True
                         break
             if not is_pq_n:
-                abc_o = np.empty((n_fp, 3))
-                for p in range(n_fp):
-                    abc_o[p, o_axis] = o_side
-                    ix2 = 0
-                    for ax in range(3):
-                        if ax != o_axis:
-                            abc_o[p, ax] = fc_o[p, ix2]
-                            ix2 += 1
-                if o_is_prism:
-                    V_to = prism_modal_basis_and_grad(abc_o[:,0], abc_o[:,1], abc_o[:,2], n1d-1)[0]
-                    V_inv_o = v_sps_inv_prism
+                if o_is_native:
+                    interp_o_native = _native_interp_matrix_nb(
+                        rst_o_nb, native_mode_i, native_mode_j, native_mode_k, v_sps_inv_native, n_sps
+                    )
+                    ow_interp[f] = interp_o_native
                 else:
-                    V_to = tet_modal_basis_and_grad(abc_o[:,0], abc_o[:,1], abc_o[:,2], n1d-1)[0]
-                    V_inv_o = v_sps_inv_tet
-                for p in range(n_fp):
-                    for s in range(n_sps):
-                        val = 0.0
-                        for m in range(n_sps):
-                            val += V_to[p, m] * V_inv_o[m, s]
-                        ow_interp[f, p, s] = val
+                    abc_o = np.empty((n_fp, 3))
+                    for p in range(n_fp):
+                        abc_o[p, o_axis] = o_side
+                        ix2 = 0
+                        for ax in range(3):
+                            if ax != o_axis:
+                                abc_o[p, ax] = fc_o[p, ix2]
+                                ix2 += 1
+                    if o_is_prism:
+                        V_to = prism_modal_basis_and_grad(abc_o[:,0], abc_o[:,1], abc_o[:,2], n1d-1)[0]
+                        V_inv_o = v_sps_inv_prism
+                    else:
+                        V_to = tet_modal_basis_and_grad(abc_o[:,0], abc_o[:,1], abc_o[:,2], n1d-1)[0]
+                        V_inv_o = v_sps_inv_tet
+                    for p in range(n_fp):
+                        for s in range(n_sps):
+                            val = 0.0
+                            for m in range(n_sps):
+                                val += V_to[p, m] * V_inv_o[m, s]
+                            ow_interp[f, p, s] = val
                 ow_cell_id[f] = oc
 
     return (nb_fc, nb_resid, ow_fc, ow_resid,

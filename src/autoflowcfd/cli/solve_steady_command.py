@@ -32,6 +32,15 @@ from autoflowcfd.cli.solve_commands import solve
                    "Huynh 记法 g_DG）；'gauss' 是与 Spectral Difference 等价的新方案"
                    "（见 fr/matrix_operators.py 文档）。目前仅单机 CPU 路径支持，"
                    "GPU/多 GPU/MPI 分布式路径传非默认值会报错而不是静默忽略")
+@click.option('--tet-basis-mode', type=click.Choice(['collapsed', 'native']), default='collapsed',
+              help="四面体体积基函数选择：'collapsed'（默认，行为与此前完全一致）；"
+                   "'native' 是路径C（见 fr/native_simplex_basis.py 与 ProjectFiles/V2.0/"
+                   "8_算法重构-微分算子对坍缩坐标退化参考轴的病态条件数-Part6~8.md），"
+                   "修复坍缩坐标 Duffy 变换在退化参考轴附近导致的 P1/P2 残差异常——"
+                   "已在合成小网格上做过体积项/修正项/模态滤波/过积分去混叠的端到端"
+                   "决定性验证，尚未在真实生产规模网格上验证过，请谨慎用于生产算例。"
+                   "目前仅单机 CPU 路径支持，GPU/多 GPU/MPI 分布式路径传 'native' 会"
+                   "报错而不是静默退回 'collapsed'")
 @click.option('--turbulence-model', type=click.Choice(['none', 'sst', 'ddes', 'wmles']), default='sst', help='湍流模型')
 @click.option('--max-iter', type=int, default=1000, help='最大迭代次数')
 @click.option('--output', '-o', 'output_dir', type=click.Path(), default='./results', help='结果输出目录')
@@ -58,7 +67,21 @@ from autoflowcfd.cli.solve_commands import solve
 @click.option('--config', 'config_path', type=click.Path(exists=True), default=None,
               help='从 YAML 文件读取物理常量默认值（mu_molecular/rho_inf/vel_inf/p_inf/'
                    'turbulence_intensity/viscosity_ratio）；显式传入的同名 --xxx 选项优先于此文件')
-def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_iter, output_dir, checkpoint_interval, use_eikonal, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path):
+@click.option('--artificial-viscosity', 'artificial_viscosity_enabled', is_flag=True,
+              help='启用 Persson-Peraire 模态传感器 + 局部人工粘性（2026-08-29 新增，默认关闭，'
+                   '见 core/fr_operators/artificial_viscosity.py 与 ProjectFiles/V2.0/'
+                   '7_重大问题修复-求解稳定性.md）。用解本身的模态谱衰减速率（而非残差量级）'
+                   '判断单元是否欠分辨率，只对触发传感器的单元叠加局部人工粘性')
+@click.option('--av-alpha', 'artificial_viscosity_alpha', type=float, default=1.0,
+              help='人工粘性强度标定常数（无量纲，默认1.0），只在 --artificial-viscosity 时有意义')
+@click.option('--entropy-stable-volume', 'entropy_stable_volume_enabled', is_flag=True,
+              help='体积项过积分分支启用 Chandrashekar (2013) 熵守恒两点通量替代逐点通量代入'
+                   '（2026-08-30 新增，默认关闭，见 core/fr_operators/flux_kernels.py::'
+                   'entropy_stable_volume_divergence_batch 与 ProjectFiles/V2.0/'
+                   '8_算法重构-Entropy-Stable_Split-Form通量重构-Part1/2.md）。真实测试确认在'
+                   '已启用过积分的基础上再改善约2~4倍，代价是体积项计算量从O(n_fine)升到'
+                   'O(n_fine^2)，仅 CPU 后端实现')
+def solve_steady(input_file, backend, order, flux_type, tet_basis_mode, turbulence_model, max_iter, output_dir, checkpoint_interval, use_eikonal, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, artificial_viscosity_enabled, artificial_viscosity_alpha, entropy_stable_volume_enabled):
     """执行稳态 FR 求解。
 
     支持高阶精度 (P1-P4) 和多种湍流模型 (SST, DDES, WMLES)。
@@ -119,6 +142,16 @@ def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_it
             "路径的算子构造尚未接入这个选择）。请去掉 --backend gpu/--multi-gpu/"
             "--n-ranks，或使用默认的 --flux-type radau。",
             param_hint="--flux-type",
+        )
+    # native 四面体（路径C）同样只有单机 CPU 路径支持（GPU/MPI 分布式路径
+    # 明确排除在外，见 ProjectFiles/V2.0/8_算法重构-...-Part6/8.md"GPU/MPI"
+    # 一节的既有决定）——与上面 flux_type 同一个"不允许静默降级"原则。
+    if tet_basis_mode != 'collapsed' and (backend == 'gpu' or n_ranks > 1):
+        raise click.BadParameter(
+            "--tet-basis-mode native 目前只有单机 CPU 路径支持（GPU/多GPU/MPI "
+            "分布式路径明确未实现，见项目文档）。请去掉 --backend gpu/--multi-gpu/"
+            "--n-ranks，或使用默认的 --tet-basis-mode collapsed。",
+            param_hint="--tet-basis-mode",
         )
     print(f"\nInput Grid : {input_file}")
     print(f"Backend    : {backend} | Order: P{order} | Method: rk3")
@@ -309,7 +342,8 @@ def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_it
     else:
         # 单机求解器路径：所有 rank 加载完整网格
         mesh, volume_data = load_mesh_for_solver(
-            input_file, order, surface_mesh=surface_mesh, skip_quality_check=skip_quality_check
+            input_file, order, surface_mesh=surface_mesh, skip_quality_check=skip_quality_check,
+            tet_basis_mode=tet_basis_mode,
         )
         # 单机求解器路径（默认）
         solver = FRSolver(
@@ -325,6 +359,9 @@ def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_it
             mu_molecular=mu_molecular,
             rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
             flux_type=flux_type,
+            artificial_viscosity_enabled=artificial_viscosity_enabled,
+            artificial_viscosity_alpha=artificial_viscosity_alpha,
+            entropy_stable_volume_enabled=entropy_stable_volume_enabled,
         )
 
         # 2.5. 计算壁面距离场（如果湍流模型需要）

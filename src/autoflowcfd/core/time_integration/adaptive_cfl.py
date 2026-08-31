@@ -196,10 +196,21 @@ class AdaptiveCFLController:
                 old_cfl = self.cfl_number
                 self.cfl_number = max(self.cfl_number * factor, self.cfl_min)
                 self._steps_since_last_change = 0
-                logger.info(
-                    f"[AdaptiveCFL] Step {self._step_count}: CFL {old_cfl:.3f} → "
-                    f"{self.cfl_number:.3f} ({label}, ratio={ratio:.3f})"
-                )
+                # 真实 bug 修复（2026-08-31，用户直接观察到真实日志报出
+                # "CFL 0.050 → 0.050 (shrink_mild, ratio=1.001)"发现）：
+                # CFL 已经触到下限 cfl_min 时，`max(cfl*factor, cfl_min)`
+                # 会把结果 clip 回与 old_cfl 完全相同的值——数值上什么都
+                # 没变，却无条件打印出"已调节"的日志，具有误导性（看起来
+                # 像是控制器在正常工作、CFL 却诡异地不降低，实际上是已经
+                # 到底、调节动作是空操作）。crawl（180行）/grow（222行）
+                # 两个分支早就有 `abs(new-old)>1e-10` 才打印的判断，唯独
+                # shrink 分支遗漏了同一道防护，是同一函数内三个并列分支
+                # 彼此不一致的真实疏漏，不是三处案例中特意如此设计。
+                if abs(self.cfl_number - old_cfl) > 1e-10:
+                    logger.info(
+                        f"[AdaptiveCFL] Step {self._step_count}: CFL {old_cfl:.3f} → "
+                        f"{self.cfl_number:.3f} ({label}, ratio={ratio:.3f})"
+                    )
             self._prev_residual = current_residual
             return self.cfl_number
         else:

@@ -151,6 +151,7 @@ def _cell_face_misalignment_kernel(
     true_normal: np.ndarray,
     owner_adj_row_exact: np.ndarray, neighbor_adj_row_exact: np.ndarray,
     n_faces: int, n_fp: int, n_cells: int,
+    owner_cube_face: np.ndarray, neighbor_cube_face: np.ndarray,
 ) -> np.ndarray:
     """`precompute_cell_face_misalignment` 的数值核心：`own_dir_outward`
     与 `true_normal` 逐行归一化后点积，取 `1-dot` 的单元内最大值。
@@ -165,12 +166,31 @@ def _cell_face_misalignment_kernel(
     精确值，不再需要这个内核自己重新做外插，函数也因此不再需要
     `det_jacs`/`inv_jacs`/`boundary_extrap`/`owner_axis`/`neighbor_axis`/
     `n_sps`/`n_prism` 这些只是为了做外插才需要的参数。
+
+    native 四面体（路径C）真实 bug 修复（2026-08-30，真实 cube_demo
+    生产网格 P1 native 模式跑通后发现——`log_degenerate_cell_report`
+    打印"87.736% 单元 face-normal misalignment"，与坍缩坐标模式同一
+    份网格上的 5.042% 形成巨大反差，排查后确认是本函数遗漏 native
+    分支，不是真实几何/残差问题）：`oside`/`nside`（`owner_side`/
+    `neighbor_side`）对 native 面是复用槽位哑值，不代表真正的
+    ±1 定向语义（见 face_flux_points_merge.py"轴槽位复用"说明、
+    inviscid_kernel.py 的 `side_factor` 判据文档）——用它去乘一个
+    `owner_adj_row_exact`/`neighbor_adj_row_exact` 已经自带正确 outward
+    定向的 native 面精确 adj 行，等于随机翻转方向，几乎必然把 `dot`
+    从接近 1 翻成接近 -1，`m=1-dot` 因此几乎恒为约 2、远超
+    `misalignment>1deg` 阈值——这是纯诊断层面的误报（`suppress_
+    residual_outliers`——真正在残差计算路径里生效的机制3——不消费
+    这个诊断量，所以不影响任何实际残差/收敛行为，仅仅是打印出来的
+    报告具有严重误导性）。修复：native 面的 side 因子固定为 +1（与
+    inviscid_kernel.py 的 `side_factor` 同一原则），不使用
+    `oside`/`nside` 复用槽位值。
     """
     cell_misalign = np.zeros(n_cells)
     for f in range(n_faces):
         if owner_is_primary[f]:
             oc = owner_cell[f]
-            oside = owner_side[f]
+            oc_code = owner_cube_face[f]
+            side_factor_o = 1.0 if oc_code >= 6 else owner_side[f]
             worst = 0.0
             for i in range(n_fp):
                 rx = owner_adj_row_exact[f, i, 0]
@@ -178,9 +198,9 @@ def _cell_face_misalignment_kernel(
                 rz = owner_adj_row_exact[f, i, 2]
                 mag = np.sqrt(rx * rx + ry * ry + rz * rz)
                 mag = mag if mag > 1e-300 else 1e-300
-                dx = (rx / mag) * oside
-                dy = (ry / mag) * oside
-                dz = (rz / mag) * oside
+                dx = (rx / mag) * side_factor_o
+                dy = (ry / mag) * side_factor_o
+                dz = (rz / mag) * side_factor_o
                 dot = dx * true_normal[f, i, 0] + dy * true_normal[f, i, 1] + dz * true_normal[f, i, 2]
                 m = 1.0 - dot
                 if m > worst:
@@ -189,7 +209,8 @@ def _cell_face_misalignment_kernel(
                 cell_misalign[oc] = worst
         if (not is_boundary[f]) and neighbor_is_primary[f]:
             nc = neighbor_cell[f]
-            nside = neighbor_side[f]
+            nc_code = neighbor_cube_face[f]
+            side_factor_n = 1.0 if nc_code >= 6 else neighbor_side[f]
             worst = 0.0
             for i in range(n_fp):
                 rx = neighbor_adj_row_exact[f, i, 0]
@@ -197,9 +218,9 @@ def _cell_face_misalignment_kernel(
                 rz = neighbor_adj_row_exact[f, i, 2]
                 mag = np.sqrt(rx * rx + ry * ry + rz * rz)
                 mag = mag if mag > 1e-300 else 1e-300
-                dx = (rx / mag) * nside
-                dy = (ry / mag) * nside
-                dz = (rz / mag) * nside
+                dx = (rx / mag) * side_factor_n
+                dy = (ry / mag) * side_factor_n
+                dz = (rz / mag) * side_factor_n
                 dot = dx * (-true_normal[f, i, 0]) + dy * (-true_normal[f, i, 1]) + dz * (-true_normal[f, i, 2])
                 m = 1.0 - dot
                 if m > worst:
@@ -257,6 +278,7 @@ def precompute_cell_face_misalignment(mesh) -> np.ndarray:
         flat.true_normal,
         flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
         flat.n_faces, flat.n_fp, mesh.n_cells,
+        flat.owner_cube_face, flat.neighbor_cube_face,
     )
 
 
@@ -392,6 +414,37 @@ def suppress_residual_outliers(
 
     Returns:
         清零异常 SP 后的残差，形状不变
+
+    2026-08-29 调查记录（尝试过但已放弃的改法，供后续参考）：确认过
+    一个真实缺陷——`ref_sibling` 只在*同一个单元内*比较，对"整个单元
+    所有 SP 均匀、连续地被放大"这类情形（四面体坍缩坐标各向异性，见
+    tet_collapsed_coord_anisotropy 项目记忆）结构性失明：合成验证里，
+    单点凸出型异常能被现有判据抓住，但让同一个单元全部 SP 均匀放大到
+    1e8（其余单元正常）时，`ref_sibling` 对该单元本身也同步被拖到
+    1e8 量级，判据完全放行。
+
+    曾尝试修复：新增 `ref_global`（所有单元 `ref_sibling` 的全局中位数）
+    作为不依赖"同单元"的独立参照，与局部判据做"或"关系。这个改法通过
+    了合成负控制测试与 tests/validation/test_couette.py / test_tgv.py
+    两个稳定性回归测试，但用在真实 cube_demo 网格、从均匀自由流场初场
+    起步的第 1 步残差评估时被证伪：真实流场里绝大多数单元深处远场、
+    残差天然接近零（自由流场保持性），只有边界附近少数单元有真实的大
+    残差（这正是边界条件驱动物理演化所必需的、合法的大梯度）——全局
+    中位数被这批"沉默的大多数"远场单元拖到接近机器噪声量级，导致边界
+    附近合法的大残差被误判成"全局异常"整片清零：真实复现，RMS 残差从
+    3.5e8（原始行为）骤降到 4.28e-4，气动力积分 F_pressure≈1.6e-11、
+    Cd=0.000000——不是收敛，是把边界条件驱动的真实物理当异常打掉，
+    求解器实质上被冻结在初始均匀流场附近，完全没有真实演化。这暴露了
+    "用全网格中心趋势统计量做参照"这个思路本身的结构性缺陷：真实流场
+    的残差分布天然、合理地高度不均匀（边界层/尾迹/驻点相对静止远场
+    残差大出好几个数量级是物理本身要求的，不是需要抑制的异常），任何
+    形式的"全局典型尺度"参照都无法可靠区分"合法的局部强物理"与"真正
+    的退化伪影"。已回退到本函数原始实现（只保留同单元内的局部判据）；
+    这个"整单元均匀放大逃过检测"的缺陷本身仍然真实存在、未被修复，
+    但目前没有已知的安全解法——需要的是一个不依赖任何全网格统计量、
+    真正独立于四面体坍缩坐标各向异性污染的参照（项目记忆里提到的
+    "真实几何法向的 P0 有限体积残差"是唯一有理论依据但尚未实现、且
+    有明显额外计算成本的方向），不在这次调查范围内解决。
     """
     ref_sibling = _median_abs_over_sps_kernel(residual)[:, np.newaxis, :]  # (n_cells,1,n_vars)
     ref_field = field_rel_floor * np.mean(np.abs(reference_field), axis=1, keepdims=True)

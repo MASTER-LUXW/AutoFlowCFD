@@ -33,6 +33,14 @@ from autoflowcfd.cli.solve_commands import solve
               help="FR 修正函数族（#14）：'radau'（默认，此前唯一使用过的方案，"
                    "Huynh 记法 g_DG）；'gauss' 是与 Spectral Difference 等价的新方案"
                    "（见 fr/matrix_operators.py 文档）")
+@click.option("--tet-basis-mode", type=click.Choice(["collapsed", "native"]), default="collapsed",
+              help="四面体体积基函数选择：'collapsed'（默认，行为与此前完全一致）；"
+                   "'native' 是路径C（见 fr/native_simplex_basis.py 与 ProjectFiles/V2.0/"
+                   "8_算法重构-微分算子对坍缩坐标退化参考轴的病态条件数-Part6~8.md），"
+                   "修复坍缩坐标 Duffy 变换在退化参考轴附近导致的 P1/P2 残差异常——"
+                   "已在合成小网格上做过端到端决定性验证，尚未在真实生产规模网格上"
+                   "验证过，请谨慎用于生产算例。仅 CPU 后端支持，--backend gpu 传 "
+                   "'native' 会报错而不是静默退回 'collapsed'")
 @click.option("--time-method", "-t",
               type=click.Choice(["rk3", "imex", "dual-time"]),
               default="rk3", help="时间推进方法")
@@ -76,7 +84,7 @@ from autoflowcfd.cli.solve_commands import solve
 @click.option('--config', 'config_path', type=click.Path(exists=True), default=None,
               help='从 YAML 文件读取物理常量默认值（mu_molecular/rho_inf/vel_inf/p_inf/'
                    'turbulence_intensity/viscosity_ratio）；显式传入的同名 --xxx 选项优先于此文件')
-def transient(input_file: str, backend: str, order: int, flux_type: str, time_method: str,
+def transient(input_file: str, backend: str, order: int, flux_type: str, tet_basis_mode: str, time_method: str,
               turbulence_model: str, max_iter: int, dt: float, physical_time: float,
               output_dir: str, use_eikonal: bool, surface_mesh: Optional[str],
               skip_quality_check: bool, reference_area: Optional[float],
@@ -92,6 +100,10 @@ def transient(input_file: str, backend: str, order: int, flux_type: str, time_me
             import-volume' 从面网格生成/导入体网格
         backend: 计算后端
         order: FR 阶数
+        tet_basis_mode: 四面体单元基函数方案，'collapsed'（默认，坍缩
+            坐标/张量积基）或 'native'（路径C，原生单纯形基，见项目
+            文档 8_算法重构-...-Part6/7/8）；仅 CPU 后端支持，与
+            --backend gpu 同时指定会被拒绝
         time_method: 时间推进方法
         turbulence_model: 湍流模型 (推荐 DDES 或 LES)
         max_iter: 最大迭代次数
@@ -149,6 +161,15 @@ def transient(input_file: str, backend: str, order: int, flux_type: str, time_me
         raise click.BadParameter("自由流速度必须 > 0", param_hint="--vel-inf")
     if p_inf <= 0.0:
         raise click.BadParameter("自由流静压必须 > 0", param_hint="--p-inf")
+    # native 四面体（路径C）仅 CPU 后端支持，见 --tet-basis-mode 帮助文本、
+    # ProjectFiles/V2.0/8_算法重构-...-Part6/8.md"GPU/MPI"一节的既有决定——
+    # 与 solve_steady_command.py 同一个"不允许静默降级"原则。
+    if tet_basis_mode != 'collapsed' and backend == 'gpu':
+        raise click.BadParameter(
+            "--tet-basis-mode native 目前只有 CPU 后端支持（GPU 路径明确未实现，"
+            "见项目文档）。请去掉 --backend gpu，或使用默认的 --tet-basis-mode collapsed。",
+            param_hint="--tet-basis-mode",
+        )
     print(f"\nInput Grid : {input_file}")
     print(f"Backend    : {backend} | Order: P{order} | Method: {time_method}")
     print(f"Turbulence : {turbulence_model} | dt: {dt:.2e}")
@@ -162,7 +183,8 @@ def transient(input_file: str, backend: str, order: int, flux_type: str, time_me
 
     # 1. 网格加载与处理（含求解前质量门检查）
     mesh, volume_data = load_mesh_for_solver(
-        input_file, order, surface_mesh=surface_mesh, skip_quality_check=skip_quality_check
+        input_file, order, surface_mesh=surface_mesh, skip_quality_check=skip_quality_check,
+        tet_basis_mode=tet_basis_mode,
     )
 
     # 2. 映射时间推进方法

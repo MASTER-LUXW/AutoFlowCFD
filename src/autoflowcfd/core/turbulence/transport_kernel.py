@@ -27,11 +27,20 @@ def _extrap_owner_scalar_to_faces(
     scalar_sps, boundary_extrap,
     owner_cell, owner_axis, owner_side,
     n_prism, n_faces, n_fp, n_sps,
+    owner_cube_face, boundary_extrap_native,
 ):
     """owner 侧标量场外插到面通量点。
 
     对每个面 f，根据 owner_cell 的单元类型（prism/tet）和 axis/side 选择
     对应的 boundary_extrap 矩阵，将 owner 单元的 SPs 标量值外插到面通量点。
+
+    native 四面体（路径C）真实 bug 修复（2026-08-30，真实 cube_demo 生产
+    网格 P2+SST 首次冒烟测试段错误崩溃后发现——整条湍流标量输运链路
+    此前完全没有 native 分支，与 fr_residual/viscous_flux_kernel.py 此前
+    的遗漏是同一类问题，见该模块修复记录）：`owner_cube_face[f]>=6` 判定
+    native 面，改用 `boundary_extrap_native[excluded_vertex]`（不使用
+    `owner_axis`/`owner_side`——对 native 面它们是复用槽位哑值，直接
+    索引 `boundary_extrap` 会越界读取，是真实的段错误根源）。
 
     Args:
         scalar_sps: (n_cells, n_sps)
@@ -39,6 +48,8 @@ def _extrap_owner_scalar_to_faces(
         owner_cell/owner_axis/owner_side: (n_faces,) 面几何数组
         n_prism: 棱柱单元数
         n_faces, n_fp, n_sps: 维度
+        owner_cube_face: (n_faces,) 原始 cube face 编码，>=6 即 native 面
+        boundary_extrap_native: (4, n_fp, n_sps) native 自身面外插矩阵
 
     Returns:
         phi_owner_fp: (n_faces, n_fp)
@@ -46,12 +57,15 @@ def _extrap_owner_scalar_to_faces(
     phi_owner_fp = np.zeros((n_faces, n_fp))
     for f in range(n_faces):
         oc = owner_cell[f]
-        oax = owner_axis[f]
-        oside = owner_side[f]
-        oside_idx = 0 if oside <= 0.0 else 1
-        celltype_o = 0 if oc < n_prism else 1
-
-        E = boundary_extrap[celltype_o, oax, oside_idx]  # (n_fp, n_sps)
+        oc_code = owner_cube_face[f]
+        if oc_code >= 6:
+            E = boundary_extrap_native[oc_code - 6]  # (n_fp, n_sps)
+        else:
+            oax = owner_axis[f]
+            oside = owner_side[f]
+            oside_idx = 0 if oside <= 0.0 else 1
+            celltype_o = 0 if oc < n_prism else 1
+            E = boundary_extrap[celltype_o, oax, oside_idx]  # (n_fp, n_sps)
         # phi_owner_fp[f, :] = E @ scalar_sps[oc, :]
         for i in range(n_fp):
             val = 0.0
@@ -110,6 +124,7 @@ def extrapolate_scalar_to_faces_kernel(
     mixed_nb_partner, mixed_nb_mask,
     has_wall_dirichlet_value,
     wall_dirichlet_value_face,
+    owner_cube_face, boundary_extrap_native,
 ):
     """将 SPs 标量场外插到所有面的通量点（owner + neighbor 两侧）。
 
@@ -170,6 +185,7 @@ def extrapolate_scalar_to_faces_kernel(
         scalar_sps, boundary_extrap,
         owner_cell, owner_axis, owner_side,
         n_prism, n_faces, n_fp, n_sps,
+        owner_cube_face, boundary_extrap_native,
     )
     phi_neighbor = _extrap_neighbor_scalar_to_faces(
         scalar_sps,
@@ -232,9 +248,39 @@ def _distribute_point_scalar(fp_data, fp_of_sp_axis, axis_coord_of_sp_axis, g_pr
     return out
 
 
+@njit(cache=True, inline='always')
+def _weighted_jump_collapsed(raw_jump_f, adj_row_f, n_fp):
+    """collapsed 面：跳变量按 |adj_row|（度量张量的 adj 行模长，即体积项
+    里 `adj(J)` 逆变通量投影用的同一个度量因子）加权——与
+    inviscid_kernel.py/viscous_flux_kernel.py 送进 `_distribute_point`/
+    lift 之前"物理通量密度差 × 面元幅值因子"是同一原则，这里只是标量场
+    版本。"""
+    weighted = np.empty(n_fp)
+    for i in range(n_fp):
+        rx = adj_row_f[i, 0]
+        ry = adj_row_f[i, 1]
+        rz = adj_row_f[i, 2]
+        adj_mag = np.sqrt(rx * rx + ry * ry + rz * rz)
+        weighted[i] = adj_mag * raw_jump_f[i]
+    return weighted
+
+
+@njit(cache=True, inline='always')
+def _weighted_jump_native(raw_jump_f, true_area_weight_f, n_fp):
+    """native 面：跳变量按真实物理面积权重加权，供 DG 提升算子消费——
+    与 inviscid_kernel.py/viscous_flux_kernel.py 的 native 分支
+    `true_area_weight⊙jump` 同一原则（native 单纯形基没有"坍缩计算
+    方向"，1D 修正函数分布机制不适用，必须用弱形式提升算子，见
+    native_simplex_basis.py::build_native_tet_lift 文档）。"""
+    weighted = np.empty(n_fp)
+    for i in range(n_fp):
+        weighted[i] = true_area_weight_f[i] * raw_jump_f[i]
+    return weighted
+
+
 @njit(cache=True, parallel=True)
 def distribute_corrections_to_cells_kernel(
-    correction_fp,
+    raw_jump_fp,
     owner_cell, neighbor_cell,
     owner_axis, owner_side,
     neighbor_axis, neighbor_side,
@@ -243,26 +289,52 @@ def distribute_corrections_to_cells_kernel(
     dist_fp_of_sp, dist_axis_coord_of_sp,
     n_cells, n_sps, n_faces,
     n_threads,
+    owner_cube_face, neighbor_cube_face,
+    owner_adj_row_exact, neighbor_adj_row_exact,
+    true_area_weight,
+    lift_native,
 ):
     """将面通量点校正量分配回 SPs（prange + per-thread buffer）。
 
     对每个面 f：
-    - owner 侧：correction[oc, sp] -= correction_fp[f, ...] * g'_owner / detJ[oc]
-    - neighbor 侧（内部面）：correction[nc, sp] += correction_fp[f, ...] * g'_neighbor / detJ[nc]
+    - owner 侧：correction[oc, sp] -= weighted_jump[f, ...] 分配 / detJ[oc]
+    - neighbor 侧（内部面）：correction[nc, sp] += weighted_jump[f, ...] 分配 / detJ[nc]
 
     使用 per-thread buffer 避免 scatter-add 写冲突，最后 sum(axis=0) 归约。
 
+    native 四面体（路径C）真实 bug 修复（2026-08-30，见
+    `_extrap_owner_scalar_to_faces` 同名记录，真实 cube_demo P2+SST 段
+    错误崩溃后发现）：此前本函数直接接收"已经预乘 |adj_row| 面元幅值
+    因子"的 `correction_fp`，用 `owner_axis`/`owner_side` 索引
+    `g_left`/`g_right`/`dist_fp_of_sp` 做 1D 修正函数分布——这套机制
+    对 native 单纯形基完全不适用（无"坍缩计算方向"概念，`owner_axis`/
+    `owner_side` 对 native 面是复用槽位哑值，索引会越界，是真实的段
+    错误根源）。改为接收**未加权**的原始物理跳变量 `raw_jump_fp`（不
+    含任何面元幅值因子），按 `owner_cube_face[f]>=6` 分派：collapsed
+    面在这里才乘 `|owner_adj_row_exact|` 加权、走原有 1D distribute；
+    native 面乘 `true_area_weight` 加权、走 `lift_native[excluded_
+    vertex]` DG 提升算子——两条分支算出的 `contrib_owner`/`contrib_
+    neighbor` 语义（"待除以 det(J) 累加进 correction 的贡献量"）完全
+    一致，只是加权方式和分配矩阵不同，调用方（`transport.py`）外部的
+    owner"-="/neighbor"+="符号约定不受影响。
+
     Args:
-        correction_fp: (n_faces, n_fp) 面通量点校正量
+        raw_jump_fp: (n_faces, n_fp) 未加权的原始物理通量密度/梯度跳变
         owner_cell, neighbor_cell: (n_faces,) int64
-        owner_axis, owner_side: (n_faces,)
-        neighbor_axis, neighbor_side: (n_faces,)
+        owner_axis, owner_side: (n_faces,)（仅 collapsed 面使用）
+        neighbor_axis, neighbor_side: (n_faces,)（仅 collapsed 面使用）
         det_jacs: (n_cells, n_sps)
-        g_left, g_right: (n1d,) 校正函数导数
-        dist_fp_of_sp: (3, n_sps) int64
-        dist_axis_coord_of_sp: (3, n_sps) int64
+        g_left, g_right: (n1d,) 校正函数导数（仅 collapsed 面使用）
+        dist_fp_of_sp: (3, n_sps) int64（仅 collapsed 面使用）
+        dist_axis_coord_of_sp: (3, n_sps) int64（仅 collapsed 面使用）
         n_cells, n_sps, n_faces: int
         n_threads: int（调用方从 numba.get_num_threads() 取值传入）
+        owner_cube_face, neighbor_cube_face: (n_faces,) 原始 cube face
+            编码，>=6 即 native 面
+        owner_adj_row_exact, neighbor_adj_row_exact: (n_faces, n_fp, 3)
+            逐 FP 精确 adj 行（collapsed 面加权用）
+        true_area_weight: (n_faces, n_fp) 物理面积权重（native 面加权用）
+        lift_native: (4, n_sps, n_fp) native DG 提升算子
 
     Returns:
         correction_sps: (n_cells, n_sps)
@@ -272,17 +344,23 @@ def distribute_corrections_to_cells_kernel(
     for f in prange(n_faces):
         tid = get_thread_id()
         oc = owner_cell[f]
-        oax = owner_axis[f]
-        oside = owner_side[f]
+        oc_code = owner_cube_face[f]
+        o_is_native = oc_code >= 6
 
         # --- owner 侧分配 ---
-        g_prime_owner = g_right if oside > 0 else g_left
-        fp_ids_owner = dist_fp_of_sp[oax]
-        axis_coords_owner = dist_axis_coord_of_sp[oax]
-
-        contrib_owner = _distribute_point_scalar(
-            correction_fp[f], fp_ids_owner, axis_coords_owner, g_prime_owner
-        )
+        if o_is_native:
+            weighted_o = _weighted_jump_native(raw_jump_fp[f], true_area_weight[f], raw_jump_fp.shape[1])
+            contrib_owner = lift_native[oc_code - 6] @ weighted_o  # (n_sps,)
+        else:
+            oax = owner_axis[f]
+            oside = owner_side[f]
+            weighted_o = _weighted_jump_collapsed(raw_jump_fp[f], owner_adj_row_exact[f], raw_jump_fp.shape[1])
+            g_prime_owner = g_right if oside > 0 else g_left
+            fp_ids_owner = dist_fp_of_sp[oax]
+            axis_coords_owner = dist_axis_coord_of_sp[oax]
+            contrib_owner = _distribute_point_scalar(
+                weighted_o, fp_ids_owner, axis_coords_owner, g_prime_owner
+            )
         for s in range(n_sps):
             dj = det_jacs[oc, s]
             correction_per_thread[tid, oc, s] -= contrib_owner[s] / dj
@@ -290,16 +368,21 @@ def distribute_corrections_to_cells_kernel(
         # --- neighbor 侧分配（内部面）---
         nc = neighbor_cell[f]
         if nc >= 0:
-            nax = neighbor_axis[f]
-            nside = neighbor_side[f]
-            g_prime_neighbor = g_right if nside > 0 else g_left
-
-            fp_ids_neighbor = dist_fp_of_sp[nax]
-            axis_coords_neighbor = dist_axis_coord_of_sp[nax]
-
-            contrib_neighbor = _distribute_point_scalar(
-                correction_fp[f], fp_ids_neighbor, axis_coords_neighbor, g_prime_neighbor
-            )
+            nc_code = neighbor_cube_face[f]
+            n_is_native = nc_code >= 6
+            if n_is_native:
+                weighted_n = _weighted_jump_native(raw_jump_fp[f], true_area_weight[f], raw_jump_fp.shape[1])
+                contrib_neighbor = lift_native[nc_code - 6] @ weighted_n
+            else:
+                nax = neighbor_axis[f]
+                nside = neighbor_side[f]
+                weighted_n = _weighted_jump_collapsed(raw_jump_fp[f], neighbor_adj_row_exact[f], raw_jump_fp.shape[1])
+                g_prime_neighbor = g_right if nside > 0 else g_left
+                fp_ids_neighbor = dist_fp_of_sp[nax]
+                axis_coords_neighbor = dist_axis_coord_of_sp[nax]
+                contrib_neighbor = _distribute_point_scalar(
+                    weighted_n, fp_ids_neighbor, axis_coords_neighbor, g_prime_neighbor
+                )
             for s in range(n_sps):
                 dj = det_jacs[nc, s]
                 correction_per_thread[tid, nc, s] += contrib_neighbor[s] / dj
@@ -309,7 +392,7 @@ def distribute_corrections_to_cells_kernel(
 
 @njit(cache=True, parallel=True)
 def distribute_corrections_to_cells_kernel_colored(
-    correction_fp,
+    raw_jump_fp,
     owner_cell, neighbor_cell,
     owner_axis, owner_side,
     neighbor_axis, neighbor_side,
@@ -319,10 +402,15 @@ def distribute_corrections_to_cells_kernel_colored(
     n_cells, n_sps,
     face_indices,    # 当前颜色组的面索引
     correction_sps,  # 共享输出 buffer（同色面无冲突，直接写入）
+    owner_cube_face, neighbor_cube_face,
+    owner_adj_row_exact, neighbor_adj_row_exact,
+    true_area_weight,
+    lift_native,
 ):
     """图着色版本的标量校正分配 kernel。
 
-    与 distribute_corrections_to_cells_kernel 相同逻辑，但：
+    与 distribute_corrections_to_cells_kernel 相同逻辑（含 native 四面体
+    分支，两处必须同步修改，见该函数模块文档），但：
     1. 只处理 face_indices 指定的面（当前颜色组）
     2. 直接写入共享 correction_sps buffer（同色面无 owner_cell 冲突）
     3. 无需 per-thread buffer 和 sum 归约
@@ -331,21 +419,28 @@ def distribute_corrections_to_cells_kernel_colored(
     内存从 O(n_threads * n_cells * n_sps) 降至 O(n_cells * n_sps)。
     """
     n_faces_in_color = face_indices.shape[0]
+    n_fp = raw_jump_fp.shape[1]
 
     for fi in prange(n_faces_in_color):
         f = face_indices[fi]
         oc = owner_cell[f]
-        oax = owner_axis[f]
-        oside = owner_side[f]
+        oc_code = owner_cube_face[f]
+        o_is_native = oc_code >= 6
 
         # --- owner 侧分配 ---
-        g_prime_owner = g_right if oside > 0 else g_left
-        fp_ids_owner = dist_fp_of_sp[oax]
-        axis_coords_owner = dist_axis_coord_of_sp[oax]
-
-        contrib_owner = _distribute_point_scalar(
-            correction_fp[f], fp_ids_owner, axis_coords_owner, g_prime_owner
-        )
+        if o_is_native:
+            weighted_o = _weighted_jump_native(raw_jump_fp[f], true_area_weight[f], n_fp)
+            contrib_owner = lift_native[oc_code - 6] @ weighted_o
+        else:
+            oax = owner_axis[f]
+            oside = owner_side[f]
+            weighted_o = _weighted_jump_collapsed(raw_jump_fp[f], owner_adj_row_exact[f], n_fp)
+            g_prime_owner = g_right if oside > 0 else g_left
+            fp_ids_owner = dist_fp_of_sp[oax]
+            axis_coords_owner = dist_axis_coord_of_sp[oax]
+            contrib_owner = _distribute_point_scalar(
+                weighted_o, fp_ids_owner, axis_coords_owner, g_prime_owner
+            )
         for s in range(n_sps):
             dj = det_jacs[oc, s]
             correction_sps[oc, s] -= contrib_owner[s] / dj
@@ -353,16 +448,21 @@ def distribute_corrections_to_cells_kernel_colored(
         # --- neighbor 侧分配（内部面）---
         nc = neighbor_cell[f]
         if nc >= 0:
-            nax = neighbor_axis[f]
-            nside = neighbor_side[f]
-            g_prime_neighbor = g_right if nside > 0 else g_left
-
-            fp_ids_neighbor = dist_fp_of_sp[nax]
-            axis_coords_neighbor = dist_axis_coord_of_sp[nax]
-
-            contrib_neighbor = _distribute_point_scalar(
-                correction_fp[f], fp_ids_neighbor, axis_coords_neighbor, g_prime_neighbor
-            )
+            nc_code = neighbor_cube_face[f]
+            n_is_native = nc_code >= 6
+            if n_is_native:
+                weighted_n = _weighted_jump_native(raw_jump_fp[f], true_area_weight[f], n_fp)
+                contrib_neighbor = lift_native[nc_code - 6] @ weighted_n
+            else:
+                nax = neighbor_axis[f]
+                nside = neighbor_side[f]
+                weighted_n = _weighted_jump_collapsed(raw_jump_fp[f], neighbor_adj_row_exact[f], n_fp)
+                g_prime_neighbor = g_right if nside > 0 else g_left
+                fp_ids_neighbor = dist_fp_of_sp[nax]
+                axis_coords_neighbor = dist_axis_coord_of_sp[nax]
+                contrib_neighbor = _distribute_point_scalar(
+                    weighted_n, fp_ids_neighbor, axis_coords_neighbor, g_prime_neighbor
+                )
             for s in range(n_sps):
                 dj = det_jacs[nc, s]
                 correction_sps[nc, s] += contrib_neighbor[s] / dj

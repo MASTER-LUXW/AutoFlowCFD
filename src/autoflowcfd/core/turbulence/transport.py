@@ -90,6 +90,7 @@ def _extrapolate_scalar_to_faces(
         flat.mixed_nb_partner, flat.mixed_nb_mask,
         has_wall_dirichlet_value,
         wall_dirichlet_value_face,
+        flat.owner_cube_face, flat.boundary_extrap_native,
     )
 
 
@@ -119,15 +120,28 @@ def _extrapolate_owner_only_to_faces(scalar_sps, flat):
         scalar_sps, flat.boundary_extrap,
         flat.owner_cell, flat.owner_axis, flat.owner_side,
         flat.n_prism, flat.n_faces, flat.n_fp, flat.n_sps,
+        flat.owner_cube_face, flat.boundary_extrap_native,
     )
 
 
-def _distribute_correction_to_cells(correction_fp, flat, ops, mesh):
-    """将面通量点上的校正量分配回 SPs 残差（numba kernel 版本）。
+def _distribute_correction_to_cells(raw_jump_fp, flat, ops, mesh):
+    """将面通量点上的**未加权**跳变量分配回 SPs 残差（numba kernel 版本）。
 
     使用 turbulence_transport_kernel.py 的 kernel 替代纯 Python for f in range(n_faces) 循环。
     默认使用图着色方案（同色面无冲突，直接写入共享 buffer），
     通过环境变量 AFCFD_USE_COLORING 可回退到 per-thread buffer 方案。
+
+    native 四面体（路径C）真实 bug 修复（2026-08-30，见
+    transport_kernel.py::distribute_corrections_to_cells_kernel 文档）：
+    参数从"已经预乘 |adj_row| 面元幅值因子的 correction_fp"改为
+    **未加权**的 `raw_jump_fp`（调用方 `compute_scalar_convection_
+    residual`/`compute_scalar_diffusion_residual` 不再自己乘 `adj_mag`），
+    加权方式（collapsed 用 `|adj_row|`、native 用 `true_area_weight`）
+    与分配方式（collapsed 用 1D `_distribute_point`、native 用 DG 提升
+    算子）都下沉到 kernel 内部按 `owner_cube_face`/`neighbor_cube_face`
+    分派——原因：native 面需要的加权量（真实物理面积权重）与 collapsed
+    面（度量张量 adj 行模长）不是同一个量，不能在 Python 层统一预乘
+    后再传给一个"只认 collapsed 分配方式"的 kernel。
 
     Returns:
         correction_sps: (n_cells, n_sps)
@@ -145,7 +159,7 @@ def _distribute_correction_to_cells(correction_fp, flat, ops, mesh):
             if len(face_indices) == 0:
                 continue
             distribute_corrections_to_cells_kernel_colored(
-                correction_fp,
+                raw_jump_fp,
                 flat.owner_cell, flat.neighbor_cell,
                 flat.owner_axis, flat.owner_side,
                 flat.neighbor_axis, flat.neighbor_side,
@@ -155,12 +169,16 @@ def _distribute_correction_to_cells(correction_fp, flat, ops, mesh):
                 n_cells, n_sps,
                 face_indices,
                 correction_sps,
+                flat.owner_cube_face, flat.neighbor_cube_face,
+                flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
+                flat.true_area_weight,
+                flat.lift_native,
             )
         return correction_sps
     else:
         n_threads = numba.get_num_threads()
         return distribute_corrections_to_cells_kernel(
-            correction_fp,
+            raw_jump_fp,
             flat.owner_cell, flat.neighbor_cell,
             flat.owner_axis, flat.owner_side,
             flat.neighbor_axis, flat.neighbor_side,
@@ -169,6 +187,10 @@ def _distribute_correction_to_cells(correction_fp, flat, ops, mesh):
             flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
             n_cells, n_sps, flat.n_faces,
             n_threads,
+            flat.owner_cube_face, flat.neighbor_cube_face,
+            flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
+            flat.true_area_weight,
+            flat.lift_native,
         )
 
 
@@ -219,14 +241,28 @@ def compute_scalar_convection_residual(
     rho_u_phi = rho[..., None] * velocity * scalar_field[..., None]  # (n_cells, n_sps, 3)
     # 逆变通量: F_tilde[...,m] = adj(J)[m,i] * F_phys[i]
     F_tilde = np.matmul(adj_j, rho_u_phi[..., None]).squeeze(-1)  # (n_cells, n_sps, 3)
+    # 真实内存修复（V2.0 专家组盲审第四次评审，2026-08-28，cube_demo 79万
+    # 单元/187万面生产网格 P2+DDES 真实 CLI 冒烟测试触发 OOM 崩溃后追查）：
+    # adj_j((n_cells,n_sps,3,3)~1.7GB)/rho_u_phi((n_cells,n_sps,3)~500MB)
+    # 用完 F_tilde 后就不再需要，但作为局部变量名会一直占着这块内存直到
+    # 函数返回（CPython 引用计数不会因为"逻辑上不再用到"就提前释放，只有
+    # 名字被重新绑定/del 或函数返回时才会）——本函数后面还有相当长的界面
+    # 项计算，显式 del 能让这块内存在那之前就真正释放，而不是继续陪着
+    # 后面的大数组一起占用峰值。
+    del adj_j, rho_u_phi
     # 散度: div(F_tilde) = sum_m D_3d[m,:] . F_tilde[...,m]
+    # native 四面体（路径C）：D_3d_tet 是坍缩坐标专属微分矩阵，对 native
+    # 单纯形基节点没有意义，需改用已零填充到全局宽度的 D_native_tet_padded
+    # （理由与 gradients.py::compute_physical_gradient/viscous_flux.py
+    # 体积项同一处文档，此前这里从未适配，见本模块 native 分支引入记录）。
+    _tet_op_D = ops.D_native_tet_padded if getattr(ops, "D_native_tet_padded", None) is not None else ops.D_3d_tet
     div_F = np.zeros((n_cells, n_sps))
     if n_prism > 0:
         for m in range(3):
             div_F[:n_prism] += np.tensordot(F_tilde[:n_prism, :, m], ops.D_3d_prism[:, :, m], axes=([1], [1]))
     if n_cells > n_prism:
         for m in range(3):
-            div_F[n_prism:] += np.tensordot(F_tilde[n_prism:, :, m], ops.D_3d_tet[:, :, m], axes=([1], [1]))
+            div_F[n_prism:] += np.tensordot(F_tilde[n_prism:, :, m], _tet_op_D[:, :, m], axes=([1], [1]))
 
     # 真实复现（2026-08-21，79万单元生产网格，Order Continuation P0->P1
     # 切换后）：退化单元（坍缩坐标/BL 挤出导致 det(J) 局部极小，见
@@ -243,6 +279,7 @@ def compute_scalar_convection_residual(
     # 说明。
     with np.errstate(over='ignore', invalid='ignore'):
         residual = -div_F / det_jacs  # 体积项对流残差
+    del F_tilde, div_F  # 同上，体积项已经收尾，界面项不再需要它们
 
     # === 界面项（上风校正）===
     flat = get_flat_face_geometry(mesh, ops)
@@ -265,12 +302,14 @@ def compute_scalar_convection_residual(
     # mass_flux_phys[f,fp] = (rho * U) . n̂_true
     rho_u_owner = rho_owner_fp[..., None] * vel_owner_fp  # (n_faces, n_fp, 3)
     mass_flux = np.sum(rho_u_owner * flat.true_normal, axis=-1)  # (n_faces, n_fp)
+    del rho_owner_fp, vel_owner_fp, rho_u_owner  # 同上"真实内存修复"一节，及时释放
 
     # 迎风选择
     phi_upwind = np.where(mass_flux >= 0, phi_owner_fp, phi_neighbor_fp)
 
     # 通量差（用于校正分配）
     delta_phi = phi_upwind - phi_owner_fp  # (n_faces, n_fp)
+    del phi_upwind, phi_owner_fp, phi_neighbor_fp
     # 面元幅值因子（真实修复，2026-08-25 代码审查）：上面用单位法向算出的是物理
     # 通量密度差，而平均流无粘/粘性界面项送进同一套分配链路的跳越量都是协变
     # 通量（物理通量 × |adj_row|，含面元幅值）：inviscid_kernel.py L197
@@ -278,11 +317,20 @@ def compute_scalar_convection_residual(
     # viscous_flux_kernel.py L182 `adjrow_o · G`。缺这个 ~O(h²) 因子会把校正放大
     # ~1/h²（细网格 10²~10³ 倍）。true_normal 是单位向量（见
     # face_flux_points_exact_normal.py），必须补回 |adj_row|。
-    adj_mag = np.linalg.norm(flat.owner_adj_row_exact, axis=-1)  # (n_faces, n_fp)
-    correction_fp = adj_mag * mass_flux * delta_phi  # (n_faces, n_fp)
+    #
+    # native 四面体（路径C）真实 bug 修复（2026-08-30，见
+    # transport_kernel.py::distribute_corrections_to_cells_kernel 文档）：
+    # 此前这里统一用 |owner_adj_row_exact| 当面元幅值因子——但 native 面
+    # 需要的是真实物理面积权重 `true_area_weight`（DG 提升算子弱形式积分
+    # 用的量），与 collapsed 面的度量张量 adj 行模长不是同一个量，不能
+    # 在这里统一预乘后再传给下游。改为只传"未加权"的 `mass_flux*delta_phi`，
+    # 加权方式按面类型分派下沉到 `_distribute_correction_to_cells`/
+    # kernel 内部。
+    raw_jump_fp = mass_flux * delta_phi  # (n_faces, n_fp)，未加权物理通量密度差
+    del mass_flux, delta_phi
 
     # 分配回 SPs
-    interface_correction = _distribute_correction_to_cells(correction_fp, flat, ops, mesh)
+    interface_correction = _distribute_correction_to_cells(raw_jump_fp, flat, ops, mesh)
     with np.errstate(over='ignore', invalid='ignore'):
         residual = residual + interface_correction
 
@@ -351,14 +399,20 @@ def compute_scalar_diffusion_residual(
     G_phys = gamma_field[..., None] * grad_phi  # (n_cells, n_sps, 3)
     # 逆变通量
     G_tilde = np.matmul(adj_j, G_phys[..., None]).squeeze(-1)  # (n_cells, n_sps, 3)
-    # 散度
+    # 真实内存修复（V2.0 专家组盲审第四次评审，2026-08-28，见
+    # compute_scalar_convection_residual 同名注释的完整理由）：adj_j/
+    # G_phys 用完 G_tilde 后不再需要，及时释放（grad_phi 除外——下面
+    # 界面项的逐分量外插还要用它，不能提前删）。
+    del adj_j, G_phys
+    # 散度（native 分支同上 compute_scalar_convection_residual 处文档）
+    _tet_op_D = ops.D_native_tet_padded if getattr(ops, "D_native_tet_padded", None) is not None else ops.D_3d_tet
     div_G = np.zeros((n_cells, n_sps))
     if n_prism > 0:
         for m in range(3):
             div_G[:n_prism] += np.tensordot(G_tilde[:n_prism, :, m], ops.D_3d_prism[:, :, m], axes=([1], [1]))
     if n_cells > n_prism:
         for m in range(3):
-            div_G[n_prism:] += np.tensordot(G_tilde[n_prism:, :, m], ops.D_3d_tet[:, :, m], axes=([1], [1]))
+            div_G[n_prism:] += np.tensordot(G_tilde[n_prism:, :, m], _tet_op_D[:, :, m], axes=([1], [1]))
 
     # 扩散对 dphi/dt 的贡献是 +div(G)/det(J)（见本函数文档符号约定，
     # 与 viscous_flux.py::"residual = div_comp / det_jacs"同一约定）。
@@ -367,6 +421,7 @@ def compute_scalar_diffusion_residual(
     # compute_turbulence_transport_residual 末尾被下游清零处理的溢出。
     with np.errstate(over='ignore', invalid='ignore'):
         residual = div_G / det_jacs
+    del G_tilde, div_G
 
     # === 界面项（BR1 平均通量校正）===
     flat = get_flat_face_geometry(mesh, ops)
@@ -384,9 +439,11 @@ def compute_scalar_diffusion_residual(
         go, gn = _extrapolate_scalar_to_faces(grad_phi[:, :, d], flat, ops, mesh)
         grad_owner_fp[:, :, d] = go
         grad_neighbor_fp[:, :, d] = gn
+    del grad_phi  # 体积项+这里的逐分量外插都用完了，终于可以释放
 
     # BR1 平均：gamma_face = 0.5*(gamma_o + gamma_n)
     gamma_face = 0.5 * (gamma_owner_fp + gamma_neighbor_fp)
+    del gamma_owner_fp, gamma_neighbor_fp
 
     # 通量差（真实修复，2026-08-25）：G_common - G_internal =
     # gamma_face*(grad_avg - grad_owner) = gamma_face*0.5*(grad_n - grad_o)
@@ -400,6 +457,7 @@ def compute_scalar_diffusion_residual(
         # 取法向分量：扩散通量差是矢量差的法向投影，坐标不变；简单三分量
         # 求和会随坐标系旋转变号/变幅值，不是标量不变量。
         flux_jump_phys = gamma_face * np.sum(delta_grad * flat.true_normal, axis=-1)
+    del grad_owner_fp, grad_neighbor_fp, delta_grad, gamma_face
 
     # 面元幅值因子（真实修复，2026-08-25 代码审查）：上面用单位法向点积算出的是物理
     # 通量密度差，而平均流无粘/粘性界面项送进同一套分配链路的跳越量都是协变
@@ -409,11 +467,15 @@ def compute_scalar_diffusion_residual(
     # ~1/h²（细网格 10²~10³ 倍），破坏体积项与界面项的量级平衡——实测：
     # 修复前抛物线场内部残差均值被界面项主导（+143 界面 / -21 体积），
     # 补 |adj_row| 后界面项回到与体积项同量级。true_normal 是单位向量，必须补回。
-    adj_mag = np.linalg.norm(flat.owner_adj_row_exact, axis=-1)  # (n_faces, n_fp)
-    correction_fp = adj_mag * flux_jump_phys
+    #
+    # native 四面体（路径C）真实 bug 修复（2026-08-30，理由同
+    # compute_scalar_convection_residual 同名注释）：不在这里统一预乘
+    # |adj_row|，改为传未加权的 flux_jump_phys，加权方式按面类型分派
+    # 下沉到 _distribute_correction_to_cells/kernel 内部。
+    raw_jump_fp = flux_jump_phys
 
     # 分配回 SPs（kernel 对 owner 侧 -=、neighbor 侧 +=）
-    interface_correction = _distribute_correction_to_cells(correction_fp, flat, ops, mesh)
+    interface_correction = _distribute_correction_to_cells(raw_jump_fp, flat, ops, mesh)
     # 扩散校正合成符号（见本函数文档符号约定）：kernel 返回的 owner 侧贡献是
     # -lift(correction_fp)，这里 residual - interface_correction =
     # +lift(G_common - G_internal)，即对 dphi/dt 施加标准 +lift 校正：

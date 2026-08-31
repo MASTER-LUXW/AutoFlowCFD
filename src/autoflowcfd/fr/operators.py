@@ -91,7 +91,46 @@ class FROperators:
     overint_D_fine_prism: np.ndarray = None
     overint_restrict_f2c_tet: np.ndarray = None
     overint_restrict_f2c_prism: np.ndarray = None
-    
+    # 四面体路径C（独立于坍缩坐标，见 fr/native_simplex_basis.py 与
+    # `8_算法重构-微分算子对坍缩坐标退化参考轴的病态条件数-Part6.md`
+    # 阶段0/1）：只在 tet_basis_mode="native" 时非 None。D_native_tet
+    # 形状 (n_native_sps_tet, n_native_sps_tet, 3)，参考坐标是四面体
+    # 自己的 (r,s,t) 单纯形，不是 D_3d_tet 的坍缩坐标立方体——两者
+    # 节点数一般不同（n_native_sps_tet <= (order+1)^3），消费方不能
+    # 直接互换，必须按 tet_basis_mode 分派。
+    tet_basis_mode: str = "collapsed"
+    D_native_tet: np.ndarray = None
+    ref_native_tet: np.ndarray = None
+    n_native_sps_tet: int = None
+    # native 四面体体积->自身面外插矩阵（Part7 阶段2设计文档"二·五"节+
+    # `native_simplex_basis.py::build_native_tet_boundary_extrap`），
+    # 键是被排除的局部顶点 0~3（与坍缩坐标的 boundary_extrap_tet 键
+    # 是 (axis,side) 元组不同）；只在 tet_basis_mode="native" 时非 None。
+    boundary_extrap_native_tet: Dict[int, np.ndarray] = None
+    # native 四面体 DG 提升算子（`native_simplex_basis.py::
+    # build_native_tet_lift` 文档），把面通量跳跃提升成体积节点修正
+    # 贡献——是坍缩坐标方案"1D Radau/VCJH 修正函数 + _distribute_point"
+    # 对非张量积单纯形基的唯一正确推广（native 基没有"坍缩计算方向"，
+    # 1D 修正函数沿某一轴分布这个概念不适用）。键同样是被排除的局部
+    # 顶点 0~3；只在 tet_basis_mode="native" 时非 None。
+    lift_native_tet: Dict[int, np.ndarray] = None
+    # `D_native_tet`/`lift_native_tet` 零填充到全局统一 SPs 宽度 `n_sps`
+    # 之后的版本（`fr/native_tet_padding.py::pad_native_tet_matrix_to_
+    # global`，见 Part8 文档"一、核心不变量：零填充块对角"）——生产
+    # 残差 kernel（`inviscid.py`/`inviscid_kernel.py` 等）要消费的是
+    # 这两个已经填充好的版本，不是上面两个原始（n_native 宽）版本；
+    # 保留原始版本是因为部分测试/未来诊断代码可能只关心真实自由度本身，
+    # 不需要每次都从填充版本反推。只在 tet_basis_mode="native" 时非 None。
+    D_native_tet_padded: np.ndarray = None
+    lift_native_tet_padded: Dict[int, np.ndarray] = None
+    # native 四面体指数模态滤波器（`native_tet_filter.py::build_native_
+    # tet_modal_filter`，抑制混叠失稳，见该模块与 fr/modal_filter.py
+    # 文档），填充到全局 n_sps 宽度（`native_tet_padding.py::pad_native_
+    # tet_filter_matrix_to_global`——填充块是单位矩阵，不是零，与
+    # D_native_tet_padded/lift_native_tet_padded 的"零填充"约定不同，
+    # 见该函数文档）。只在 tet_basis_mode="native" 时非 None。
+    filter_native_tet_padded: np.ndarray = None
+
     def get_operators(self) -> Dict[str, np.ndarray]:
         """返回算子字典，兼容旧接口。"""
         return {
@@ -102,7 +141,7 @@ class FROperators:
         }
 
 
-def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROperators:
+def generate_fr_operators(order: int, flux_point_type: str = 'radau', tet_basis_mode: str = 'collapsed') -> FROperators:
     """
     生成完整的 FR 算子集合。
 
@@ -123,6 +162,17 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
               通量在 SPs 处直接重构，不是在额外的 Lobatto 求积点插值）——
               这个 FP 位置选择与校正函数选择是同一个物理方案的两个方面，
               绑定在同一个 flux_point_type 参数下，不单独暴露。
+        tet_basis_mode: 四面体体积微分算子选择（Part6 整改计划阶段0/1）：
+            - 'collapsed'（默认，行为与此前完全一致）：现有坍缩坐标
+              （Duffy变换）方案，`D_3d_tet` 走 `(order+1)^3` 张量积
+              立方体族。
+            - 'native'：路径C，四面体独立于坍缩坐标构造（见
+              `fr/native_simplex_basis.py` 文档），`D_native_tet`/
+              `ref_native_tet`/`n_native_sps_tet` 被填充为非 None，
+              `D_3d_tet` 等坍缩坐标相关字段仍然照常计算（不是互斥
+              关系，只是暂时未被消费——阶段1目前只有体积残差路径
+              会读取 native 字段，界面/过积分/滤波器仍然读取坍缩坐标
+              字段，属于 Part6 阶段2/3 范围，本参数不改变那些字段）。
 
     Returns:
         operators: 包含所有预计算算子的 FROperators 对象
@@ -200,6 +250,85 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
             build_overintegration_operators("prism", order, overint_order, ref_cube_sps)
         )
 
+    # 3e. 四面体路径C（Part6 阶段0/1）：只在显式请求时构造，不影响
+    # 'collapsed'（默认）路径的任何既有计算或返回值。
+    ref_native_tet = D_native_tet = None
+    n_native_sps_tet = None
+    boundary_extrap_native_tet = None
+    lift_native_tet = None
+    D_native_tet_padded = None
+    lift_native_tet_padded = None
+    filter_native_tet_padded = None
+    if tet_basis_mode == "native":
+        from .native_simplex_basis import (
+            build_native_tet_operators, build_native_tet_boundary_extrap, build_native_tet_lift,
+        )
+        from .native_tet_padding import (
+            pad_native_tet_matrix_to_global, pad_native_tet_filter_matrix_to_global,
+        )
+        from .native_tet_filter import build_native_tet_modal_filter
+
+        ref_native_tet, D_native_tet = build_native_tet_operators(order)
+        n_native_sps_tet = ref_native_tet.shape[0]
+        boundary_extrap_native_tet = {
+            excluded_vertex: build_native_tet_boundary_extrap(order, excluded_vertex)
+            for excluded_vertex in range(4)
+        }
+        lift_native_tet = {
+            excluded_vertex: build_native_tet_lift(order, excluded_vertex)
+            for excluded_vertex in range(4)
+        }
+        n_sps_global = n ** 3
+        D_native_tet_padded = pad_native_tet_matrix_to_global(D_native_tet, n_sps_global, pad_axes=(0, 1))
+        lift_native_tet_padded = {
+            excluded_vertex: pad_native_tet_matrix_to_global(lift_native_tet[excluded_vertex], n_sps_global, pad_axes=(0,))
+            for excluded_vertex in range(4)
+        }
+        filter_native_tet = build_native_tet_modal_filter(order)
+        filter_native_tet_padded = pad_native_tet_filter_matrix_to_global(filter_native_tet, n_sps_global)
+
+        # native 单纯形基过积分（去混叠）算子（Part8 文档"四·七"节）：
+        # 直接覆盖上面（第 6 步）已经无条件按坍缩坐标构造好的
+        # overint_interp_c2f_tet/overint_D_fine_tet/overint_restrict_
+        # f2c_tet——两套算子字段名相同、消费方式相同（inviscid.py 的
+        # 过积分分支不需要感知 tet_basis_mode，直接读 ops.overint_*_tet
+        # 即可），只是这里换成 native 单纯形基构造。fine 网格宽度沿用
+        # 与棱柱相同的 (over_order+1)^3（`n_sps_per_cell_fine`，见
+        # high_order_mesh_order.py::build_order_geometry native 分支），
+        # native 自己的 fine 点数 `(over_order+1)(over_order+2)
+        # (over_order+3)/6` 严格更小——D_fine/interp_c2f/restrict_f2c
+        # 三者都需要按"零填充块对角"（Part8 文档"一"节）填充到这个
+        # 全局宽度；interp_c2f/restrict_f2c 的两个轴分别对应不同的
+        # native 长度（fine 轴 vs coarse 轴），`pad_native_tet_matrix_
+        # to_global` 一次只处理同一个 native 长度的轴集合，因此分两步
+        # 各自填充对应的轴，而不是一次性传两个轴（详见该函数文档）。
+        if order >= 1:
+            from .native_tet_overintegration import build_native_tet_overintegration_operators
+
+            ref_fine_native, interp_c2f_native, D_fine_native, restrict_f2c_native = (
+                build_native_tet_overintegration_operators(order, overint_order)
+            )
+            n_fine_global = (overint_order + 1) ** 3
+
+            overint_ref_fine = ref_fine_native
+            overint_D_fine_tet = pad_native_tet_matrix_to_global(
+                D_fine_native, n_fine_global, pad_axes=(0, 1)
+            )
+            _interp_col_padded = pad_native_tet_matrix_to_global(
+                interp_c2f_native, n_sps_global, pad_axes=(1,)
+            )
+            overint_interp_c2f_tet = pad_native_tet_matrix_to_global(
+                _interp_col_padded, n_fine_global, pad_axes=(0,)
+            )
+            _restrict_col_padded = pad_native_tet_matrix_to_global(
+                restrict_f2c_native, n_fine_global, pad_axes=(1,)
+            )
+            overint_restrict_f2c_tet = pad_native_tet_matrix_to_global(
+                _restrict_col_padded, n_sps_global, pad_axes=(0,)
+            )
+    elif tet_basis_mode != "collapsed":
+        raise ValueError(f"未知 tet_basis_mode: {tet_basis_mode!r}，只接受 'collapsed' 或 'native'")
+
     return FROperators(
         D_1d=D_1d,
         D_3d=D_3d,
@@ -220,6 +349,15 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
         overint_D_fine_prism=overint_D_fine_prism,
         overint_restrict_f2c_tet=overint_restrict_f2c_tet,
         overint_restrict_f2c_prism=overint_restrict_f2c_prism,
+        tet_basis_mode=tet_basis_mode,
+        D_native_tet=D_native_tet,
+        ref_native_tet=ref_native_tet,
+        n_native_sps_tet=n_native_sps_tet,
+        boundary_extrap_native_tet=boundary_extrap_native_tet,
+        lift_native_tet=lift_native_tet,
+        D_native_tet_padded=D_native_tet_padded,
+        lift_native_tet_padded=lift_native_tet_padded,
+        filter_native_tet_padded=filter_native_tet_padded,
     )
 
 

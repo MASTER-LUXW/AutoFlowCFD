@@ -52,7 +52,19 @@ def compute_physical_gradient(field: np.ndarray, mesh, ops) -> np.ndarray:
         grad_comp[:n_prism] = contract_shared_operator_1axis(D2, field[:n_prism]).reshape(n_prism, n_sps, 3, n_field_vars)
     if n_cells > n_prism:
         n_tet = n_cells - n_prism
-        D2 = np.ascontiguousarray(np.transpose(ops.D_3d_tet, (0, 2, 1))).reshape(n_sps * 3, n_sps)
+        # native 四面体（路径C）：`D_3d_tet`（坍缩坐标专属微分矩阵）对
+        # native 单纯形基节点毫无意义（native 节点不是坍缩坐标张量积
+        # 采样点），必须改用已经零填充到全局 n_sps 宽度的
+        # `D_native_tet_padded`（Part8 文档"零填充块对角"不变量：填充行
+        # 的散度贡献恒为 0，与这里"物理梯度"用途——同样是对体积节点场
+        # 求导——完全兼容，不需要额外处理）。这是 Part8 native 支持范围
+        # 此前遗漏的一处：`compute_physical_gradient` 是粘性残差
+        # （viscous_flux.py）以及 SST/DES 湍流输运（transport.py）梯度
+        # 计算共用的唯一入口，此前一直无条件读取 `D_3d_tet`，对 native
+        # 网格会产生完全错误的梯度（用坍缩坐标基函数的导数系数去解释
+        # native 节点上的场值）。
+        tet_ops = ops.D_native_tet_padded if getattr(ops, "D_native_tet_padded", None) is not None else ops.D_3d_tet
+        D2 = np.ascontiguousarray(np.transpose(tet_ops, (0, 2, 1))).reshape(n_sps * 3, n_sps)
         grad_comp[n_prism:] = contract_shared_operator_1axis(D2, field[n_prism:]).reshape(n_tet, n_sps, 3, n_field_vars)
     # 链式法则转物理空间：grad_phys[c,s,v,n] = sum_m inv_jac[c,s,m,n] * grad_comp[c,s,m,v]
     # 输出维度顺序 (n_cells,n_sps,n_field_vars,3)，与代码库既有 grad_U 约定一致。

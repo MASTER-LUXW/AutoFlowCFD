@@ -26,6 +26,11 @@ from autoflowcfd.fr.face_flux_points_numba import (
     _map_ref_nb,
     _newton_locate_nb,
 )
+from autoflowcfd.fr.face_flux_points_helpers_numba import (
+    _tet_native_locate_nb,
+    _native_alpha_beta_to_rst_nb,
+    _native_interp_matrix_nb,
+)
 
 
 @njit(parallel=True, cache=True)
@@ -42,6 +47,7 @@ def build_ms_interp_parallel(
     prism_conn, tet_conn, node_coords,
     nb_fc, ow_fc,
     v_sps_inv_tet, v_sps_inv_prism,
+    v_sps_inv_native, native_mode_i, native_mode_j, native_mode_k,
     nb_interp, ow_interp,
     nb_cell_id, ow_cell_id,
     nb_extra_mat, ow_extra_mat,
@@ -50,6 +56,16 @@ def build_ms_interp_parallel(
     nb_sec_resid, ow_sec_resid,
 ):
     """为 multi-source 面构建主/次插值矩阵（含 Newton + 对角线掩码）。
+
+    native 四面体（路径C）支持：本 kernel 处理的棱柱四边形侧面自身
+    （`oc_code`/`nc_code`）恒为 0~5（棱柱专属，见调用方 face_flux_points_
+    merge.py 的分组条件），但跨单元的目标（`pn_code`/`sec_code`）可能是
+    与之相邻的 native 四面体（code>=6，excluded_vertex=code-6）——两处
+    都需要与 face_flux_points_numba.py::build_fp_newton_parallel 同样的
+    native 分支，见下方 pn_code/sec_code 判断处。primary interp 用的
+    `nb_fc`/`ow_fc` 已经是主 kernel 算好的 native (alpha,beta) 自由坐标
+    （原样存进同一个数组槽位，见 _tet_native_locate_nb 文档），这里只需
+    `_native_alpha_beta_to_rst_nb` 还原成 (r,s,t)，不需要重新定位。
 
     直接写入 nb_interp/ow_interp（primary half）和 nb_extra_mat/ow_extra_mat
     （secondary half），避免额外内存分配。
@@ -115,34 +131,44 @@ def build_ms_interp_parallel(
         # 计算的，primary interp 必须使用同一邻居的节点和参考坐标
         pn_c = ms_nb_pn_cell[idx]
         pn_code = ms_nb_pn_code[idx]
-        pn_axis = _FACE_AXIS[pn_code]
-        pn_side = _FACE_SIDE[pn_code]
-        pn_is_prism = pn_c < n_prism
-        abc_n = np.empty((n_fp, 3))
-        for p in range(n_fp):
-            abc_n[p, pn_axis] = pn_side
-            ix2 = 0
-            for ax in range(3):
-                if ax != pn_axis:
-                    abc_n[p, ax] = nb_fc[f, p, ix2]
-                    ix2 += 1
-        if pn_is_prism:
-            V_t = prism_modal_basis_and_grad(
-                abc_n[:, 0], abc_n[:, 1], abc_n[:, 2], n1d - 1
-            )[0]
-            V_inv = v_sps_inv_prism
+        pn_is_native = pn_code >= 6
+        if pn_is_native:
+            rst_pn = _native_alpha_beta_to_rst_nb(pn_code - 6, nb_fc[f])
+            interp_pn = _native_interp_matrix_nb(
+                rst_pn, native_mode_i, native_mode_j, native_mode_k, v_sps_inv_native, n_sps
+            )
+            for p in range(n_fp):
+                if nb_mask[f, p]:
+                    nb_interp[f, p] = interp_pn[p]
         else:
-            V_t = tet_modal_basis_and_grad(
-                abc_n[:, 0], abc_n[:, 1], abc_n[:, 2], n1d - 1
-            )[0]
-            V_inv = v_sps_inv_tet
-        for p in range(n_fp):
-            if nb_mask[f, p]:
-                for s in range(n_sps):
-                    val = 0.0
-                    for m in range(n_sps):
-                        val += V_t[p, m] * V_inv[m, s]
-                    nb_interp[f, p, s] = val
+            pn_axis = _FACE_AXIS[pn_code]
+            pn_side = _FACE_SIDE[pn_code]
+            pn_is_prism = pn_c < n_prism
+            abc_n = np.empty((n_fp, 3))
+            for p in range(n_fp):
+                abc_n[p, pn_axis] = pn_side
+                ix2 = 0
+                for ax in range(3):
+                    if ax != pn_axis:
+                        abc_n[p, ax] = nb_fc[f, p, ix2]
+                        ix2 += 1
+            if pn_is_prism:
+                V_t = prism_modal_basis_and_grad(
+                    abc_n[:, 0], abc_n[:, 1], abc_n[:, 2], n1d - 1
+                )[0]
+                V_inv = v_sps_inv_prism
+            else:
+                V_t = tet_modal_basis_and_grad(
+                    abc_n[:, 0], abc_n[:, 1], abc_n[:, 2], n1d - 1
+                )[0]
+                V_inv = v_sps_inv_tet
+            for p in range(n_fp):
+                if nb_mask[f, p]:
+                    for s in range(n_sps):
+                        val = 0.0
+                        for m in range(n_sps):
+                            val += V_t[p, m] * V_inv[m, s]
+                        nb_interp[f, p, s] = val
 
         if ms_nb_mixed[idx]:
             # 混合分组：另半区是域边界，无真实邻居，残差 kernel 逐 FP 取
@@ -153,8 +179,7 @@ def build_ms_interp_parallel(
         # ---- Secondary Newton + interp ----
         sec_cell = ms_nb_sec_cell[idx]
         sec_code = ms_nb_sec_cube_face[idx]
-        sec_axis = _FACE_AXIS[sec_code]
-        sec_side = _FACE_SIDE[sec_code]
+        sec_is_native = sec_code >= 6
         sec_is_prism = sec_cell < n_prism
         if sec_is_prism:
             sec_nd = np.empty((6, 3))
@@ -183,37 +208,50 @@ def build_ms_interp_parallel(
                 search_sec[p, 2] = phys_o[p, 2] + t[2]
         else:
             search_sec = phys_o
-        sec_fc, sec_rs = _newton_locate_nb(
-            sec_is_prism, sec_nd, sec_axis, sec_side, search_sec, cl
-        )
 
-        abc_sec = np.empty((n_fp, 3))
-        for p in range(n_fp):
-            abc_sec[p, sec_axis] = sec_side
-            ix2 = 0
-            for ax in range(3):
-                if ax != sec_axis:
-                    abc_sec[p, ax] = sec_fc[p, ix2]
-                    ix2 += 1
-        if sec_is_prism:
-            V_sec = prism_modal_basis_and_grad(
-                abc_sec[:, 0], abc_sec[:, 1], abc_sec[:, 2], n1d - 1
-            )[0]
-            V_inv_sec = v_sps_inv_prism
-        else:
-            V_sec = tet_modal_basis_and_grad(
-                abc_sec[:, 0], abc_sec[:, 1], abc_sec[:, 2], n1d - 1
-            )[0]
-            V_inv_sec = v_sps_inv_tet
         ei = ms_nb_extra_idx[idx]
-        for p in range(n_fp):
-            nb_sec_resid[ei, p] = sec_rs[p]
-            if not nb_mask[f, p]:
-                for s in range(n_sps):
-                    val = 0.0
-                    for m in range(n_sps):
-                        val += V_sec[p, m] * V_inv_sec[m, s]
-                    nb_extra_mat[ei, p, s] = val
+        if sec_is_native:
+            sec_free, sec_rst, sec_rs = _tet_native_locate_nb(sec_nd, sec_code - 6, search_sec)
+            interp_sec = _native_interp_matrix_nb(
+                sec_rst, native_mode_i, native_mode_j, native_mode_k, v_sps_inv_native, n_sps
+            )
+            for p in range(n_fp):
+                nb_sec_resid[ei, p] = sec_rs[p]
+                if not nb_mask[f, p]:
+                    nb_extra_mat[ei, p] = interp_sec[p]
+        else:
+            sec_axis = _FACE_AXIS[sec_code]
+            sec_side = _FACE_SIDE[sec_code]
+            sec_fc, sec_rs = _newton_locate_nb(
+                sec_is_prism, sec_nd, sec_axis, sec_side, search_sec, cl
+            )
+
+            abc_sec = np.empty((n_fp, 3))
+            for p in range(n_fp):
+                abc_sec[p, sec_axis] = sec_side
+                ix2 = 0
+                for ax in range(3):
+                    if ax != sec_axis:
+                        abc_sec[p, ax] = sec_fc[p, ix2]
+                        ix2 += 1
+            if sec_is_prism:
+                V_sec = prism_modal_basis_and_grad(
+                    abc_sec[:, 0], abc_sec[:, 1], abc_sec[:, 2], n1d - 1
+                )[0]
+                V_inv_sec = v_sps_inv_prism
+            else:
+                V_sec = tet_modal_basis_and_grad(
+                    abc_sec[:, 0], abc_sec[:, 1], abc_sec[:, 2], n1d - 1
+                )[0]
+                V_inv_sec = v_sps_inv_tet
+            for p in range(n_fp):
+                nb_sec_resid[ei, p] = sec_rs[p]
+                if not nb_mask[f, p]:
+                    for s in range(n_sps):
+                        val = 0.0
+                        for m in range(n_sps):
+                            val += V_sec[p, m] * V_inv_sec[m, s]
+                        nb_extra_mat[ei, p, s] = val
         nb_cell_id[f] = pn_c
 
     # ---- Owner multi-source ----
@@ -253,34 +291,44 @@ def build_ms_interp_parallel(
         # ---- Primary interp（primary owner cell, 用预计算自由坐标）----
         pn_c = ms_ow_pn_cell[idx]
         pn_code = ms_ow_pn_code[idx]
-        pn_axis = _FACE_AXIS[pn_code]
-        pn_side = _FACE_SIDE[pn_code]
-        pn_is_prism = pn_c < n_prism
-        abc_o = np.empty((n_fp, 3))
-        for p in range(n_fp):
-            abc_o[p, pn_axis] = pn_side
-            ix2 = 0
-            for ax in range(3):
-                if ax != pn_axis:
-                    abc_o[p, ax] = ow_fc[f, p, ix2]
-                    ix2 += 1
-        if pn_is_prism:
-            V_to = prism_modal_basis_and_grad(
-                abc_o[:, 0], abc_o[:, 1], abc_o[:, 2], n1d - 1
-            )[0]
-            V_inv_o = v_sps_inv_prism
+        pn_is_native = pn_code >= 6
+        if pn_is_native:
+            rst_pn_o = _native_alpha_beta_to_rst_nb(pn_code - 6, ow_fc[f])
+            interp_pn_o = _native_interp_matrix_nb(
+                rst_pn_o, native_mode_i, native_mode_j, native_mode_k, v_sps_inv_native, n_sps
+            )
+            for p in range(n_fp):
+                if ow_mask[f, p]:
+                    ow_interp[f, p] = interp_pn_o[p]
         else:
-            V_to = tet_modal_basis_and_grad(
-                abc_o[:, 0], abc_o[:, 1], abc_o[:, 2], n1d - 1
-            )[0]
-            V_inv_o = v_sps_inv_tet
-        for p in range(n_fp):
-            if ow_mask[f, p]:
-                for s in range(n_sps):
-                    val = 0.0
-                    for m in range(n_sps):
-                        val += V_to[p, m] * V_inv_o[m, s]
-                    ow_interp[f, p, s] = val
+            pn_axis = _FACE_AXIS[pn_code]
+            pn_side = _FACE_SIDE[pn_code]
+            pn_is_prism = pn_c < n_prism
+            abc_o = np.empty((n_fp, 3))
+            for p in range(n_fp):
+                abc_o[p, pn_axis] = pn_side
+                ix2 = 0
+                for ax in range(3):
+                    if ax != pn_axis:
+                        abc_o[p, ax] = ow_fc[f, p, ix2]
+                        ix2 += 1
+            if pn_is_prism:
+                V_to = prism_modal_basis_and_grad(
+                    abc_o[:, 0], abc_o[:, 1], abc_o[:, 2], n1d - 1
+                )[0]
+                V_inv_o = v_sps_inv_prism
+            else:
+                V_to = tet_modal_basis_and_grad(
+                    abc_o[:, 0], abc_o[:, 1], abc_o[:, 2], n1d - 1
+                )[0]
+                V_inv_o = v_sps_inv_tet
+            for p in range(n_fp):
+                if ow_mask[f, p]:
+                    for s in range(n_sps):
+                        val = 0.0
+                        for m in range(n_sps):
+                            val += V_to[p, m] * V_inv_o[m, s]
+                        ow_interp[f, p, s] = val
 
         if ms_ow_mixed[idx]:
             # 混合分组（neighbor 角色）：另半区是域边界，处理同 nb 分支。
@@ -290,8 +338,7 @@ def build_ms_interp_parallel(
         # ---- Secondary Newton + interp ----
         sec_cell = ms_ow_sec_cell[idx]
         sec_code = ms_ow_sec_cube_face[idx]
-        sec_axis = _FACE_AXIS[sec_code]
-        sec_side = _FACE_SIDE[sec_code]
+        sec_is_native = sec_code >= 6
         sec_is_prism = sec_cell < n_prism
         if sec_is_prism:
             sec_nd = np.empty((6, 3))
@@ -319,35 +366,48 @@ def build_ms_interp_parallel(
                 search_sec[p, 2] = phys_n[p, 2] - t[2]
         else:
             search_sec = phys_n
-        sec_fc, sec_rs = _newton_locate_nb(
-            sec_is_prism, sec_nd, sec_axis, sec_side, search_sec, cl_o
-        )
 
-        abc_sec = np.empty((n_fp, 3))
-        for p in range(n_fp):
-            abc_sec[p, sec_axis] = sec_side
-            ix2 = 0
-            for ax in range(3):
-                if ax != sec_axis:
-                    abc_sec[p, ax] = sec_fc[p, ix2]
-                    ix2 += 1
-        if sec_is_prism:
-            V_sec = prism_modal_basis_and_grad(
-                abc_sec[:, 0], abc_sec[:, 1], abc_sec[:, 2], n1d - 1
-            )[0]
-            V_inv_sec = v_sps_inv_prism
-        else:
-            V_sec = tet_modal_basis_and_grad(
-                abc_sec[:, 0], abc_sec[:, 1], abc_sec[:, 2], n1d - 1
-            )[0]
-            V_inv_sec = v_sps_inv_tet
         ei = ms_ow_extra_idx[idx]
-        for p in range(n_fp):
-            ow_sec_resid[ei, p] = sec_rs[p]
-            if not ow_mask[f, p]:
-                for s in range(n_sps):
-                    val = 0.0
-                    for m in range(n_sps):
-                        val += V_sec[p, m] * V_inv_sec[m, s]
-                    ow_extra_mat[ei, p, s] = val
+        if sec_is_native:
+            sec_free_o, sec_rst_o, sec_rs = _tet_native_locate_nb(sec_nd, sec_code - 6, search_sec)
+            interp_sec_o = _native_interp_matrix_nb(
+                sec_rst_o, native_mode_i, native_mode_j, native_mode_k, v_sps_inv_native, n_sps
+            )
+            for p in range(n_fp):
+                ow_sec_resid[ei, p] = sec_rs[p]
+                if not ow_mask[f, p]:
+                    ow_extra_mat[ei, p] = interp_sec_o[p]
+        else:
+            sec_axis = _FACE_AXIS[sec_code]
+            sec_side = _FACE_SIDE[sec_code]
+            sec_fc, sec_rs = _newton_locate_nb(
+                sec_is_prism, sec_nd, sec_axis, sec_side, search_sec, cl_o
+            )
+
+            abc_sec = np.empty((n_fp, 3))
+            for p in range(n_fp):
+                abc_sec[p, sec_axis] = sec_side
+                ix2 = 0
+                for ax in range(3):
+                    if ax != sec_axis:
+                        abc_sec[p, ax] = sec_fc[p, ix2]
+                        ix2 += 1
+            if sec_is_prism:
+                V_sec = prism_modal_basis_and_grad(
+                    abc_sec[:, 0], abc_sec[:, 1], abc_sec[:, 2], n1d - 1
+                )[0]
+                V_inv_sec = v_sps_inv_prism
+            else:
+                V_sec = tet_modal_basis_and_grad(
+                    abc_sec[:, 0], abc_sec[:, 1], abc_sec[:, 2], n1d - 1
+                )[0]
+                V_inv_sec = v_sps_inv_tet
+            for p in range(n_fp):
+                ow_sec_resid[ei, p] = sec_rs[p]
+                if not ow_mask[f, p]:
+                    for s in range(n_sps):
+                        val = 0.0
+                        for m in range(n_sps):
+                            val += V_sec[p, m] * V_inv_sec[m, s]
+                        ow_extra_mat[ei, p, s] = val
         ow_cell_id[f] = pn_c

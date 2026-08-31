@@ -48,32 +48,26 @@ def map_ref_points(is_prism: bool, ref_pts: np.ndarray, cell_nodes: np.ndarray) 
     return map_prism_to_physical(ref_pts, cell_nodes) if is_prism else map_tet_to_physical(ref_pts, cell_nodes)
 
 
-def _tet_exact_locate_on_face(
-    cell_nodes: np.ndarray, fixed_axis: int, fixed_val: float, targets_phys: np.ndarray
+def _tet_solve_barycentric_on_face(
+    cell_nodes: np.ndarray, face_vertex_idx: Tuple[int, int, int], targets_phys: np.ndarray
 ) -> np.ndarray:
-    """四面体某个真实面（fixed_axis=fixed_val）上一批目标物理点的精确点位
-    定位——直接在物理空间解重心坐标，不用 Newton 迭代（原因见
-    `newton_locate_on_face` 文档）。
+    """共享核心：给定四面体某个真实面（由 3 个局部顶点下标确定，第 4 个
+    顶点的重心坐标恒为 0），在物理空间解出一批目标点的重心坐标 L1..L4。
 
-    该面由 `curved_mapping.TET_CUBE_FACES` 约定的 3 个局部顶点（第 4 个
-    顶点的重心坐标恒为 0）张成的平面唯一确定。物理空间里"3 点确定一个
-    平面，求平面内一点的重心坐标"恒为良态的 3×2 最小二乘问题——条件数
-    只取决于这 3 点自身构成的三角形的边长比（与三角形本身的几何形状
-    绑定，不会像参考坐标系下的雅可比那样被坍缩坐标变换的非线性放大到
-    接近奇异），求解后用 `cube_to_tet_rst` 的解析逆（t=c 直接已知；
-    s=(1+b)(1-c)/2-1 与 r=-(1+a)(s+t)/2-1 都是关于单个未知量的线性方程，
-    顺序回代求解，不需要迭代）换算回立方体坐标里的两个自由方向。
+    "3 点确定一个平面，求平面内一点的重心坐标"恒为良态的 3×2 最小二乘
+    问题——条件数只取决于这 3 点自身构成的三角形的边长比（与三角形本身
+    的几何形状绑定，不会像参考坐标系下的雅可比那样被坍缩坐标变换的
+    非线性放大到接近奇异）。这一步对坍缩坐标（Part7 阶段2设计文档
+    `_tet_exact_locate_on_face`）与 native 路径C（`locate_native_tet_
+    face_point`）完全通用，两者的区别只在于"解出重心坐标之后要不要
+    转换成 (a,b,c) 坍缩坐标"这一步（收尾，见调用方）——这一点正是
+    native 模式点位定位不会出现退化轴附近病态的原因：native 模式压根
+    不需要走这一步转换。
 
     Returns:
-        free_coords: (n_pts, 2)，两个自由方向的坐标（顺序 = other_axes 升序）
+        L: (n_pts, 4) 重心坐标
     """
-    other_axes = [a for a in range(3) if a != fixed_axis]
-    key = (fixed_axis, float(fixed_val))
-    face_vertex_idx = _TET_FIXED_TO_FACE_VERTICES.get(key)
-    if face_vertex_idx is None:
-        raise RuntimeError(f"Not a valid tet face: fixed_axis={fixed_axis}, fixed_val={fixed_val}")
     i, j, k = face_vertex_idx
-
     P_i, P_j, P_k = cell_nodes[i], cell_nodes[j], cell_nodes[k]
     e1 = P_j - P_i
     e2 = P_k - P_i
@@ -100,6 +94,32 @@ def _tet_exact_locate_on_face(
     L[:, i] = 1.0 - alpha - beta
     L[:, j] = alpha
     L[:, k] = beta
+    return L
+
+
+def _tet_exact_locate_on_face(
+    cell_nodes: np.ndarray, fixed_axis: int, fixed_val: float, targets_phys: np.ndarray
+) -> np.ndarray:
+    """四面体某个真实面（fixed_axis=fixed_val）上一批目标物理点的精确点位
+    定位——直接在物理空间解重心坐标（`_tet_solve_barycentric_on_face`），
+    不用 Newton 迭代（原因见 `newton_locate_on_face` 文档）；再用
+    `cube_to_tet_rst` 的解析逆（t=c 直接已知；s=(1+b)(1-c)/2-1 与
+    r=-(1+a)(s+t)/2-1 都是关于单个未知量的线性方程，顺序回代求解，
+    不需要迭代）换算回立方体坐标里的两个自由方向——**这一步转换含显式
+    除以 `1-c`/`s+t`，是坍缩坐标退化轴病态的来源（Part1 3.1节），
+    native 模式（`locate_native_tet_face_point`）没有这一步，见该函数
+    文档。
+
+    Returns:
+        free_coords: (n_pts, 2)，两个自由方向的坐标（顺序 = other_axes 升序）
+    """
+    other_axes = [a for a in range(3) if a != fixed_axis]
+    key = (fixed_axis, float(fixed_val))
+    face_vertex_idx = _TET_FIXED_TO_FACE_VERTICES.get(key)
+    if face_vertex_idx is None:
+        raise RuntimeError(f"Not a valid tet face: fixed_axis={fixed_axis}, fixed_val={fixed_val}")
+
+    L = _tet_solve_barycentric_on_face(cell_nodes, face_vertex_idx, targets_phys)
 
     r = 2.0 * L[:, 1] - 1.0
     s = 2.0 * L[:, 2] - 1.0
@@ -111,6 +131,56 @@ def _tet_exact_locate_on_face(
 
     full = {0: a_coord, 1: b_coord, 2: c}
     return np.column_stack([full[other_axes[0]], full[other_axes[1]]])
+
+
+def locate_native_tet_face_point(
+    cell_nodes: np.ndarray, excluded_vertex: int, targets_phys: np.ndarray, char_length: float = 1.0
+) -> Tuple[np.ndarray, float]:
+    """路径C（native basis，见 `fr/native_simplex_basis.py`）版本的精确
+    点位定位：四面体某个真实面（对面被排除的局部顶点 `excluded_vertex`
+    给定，编码约定与 `native_simplex_basis.py::face_node_indices` 一致）
+    上一批目标物理点，直接给出它们在四面体**自己的原生参考坐标**
+    `(r,s,t)` 里的位置。
+
+    与 `_tet_exact_locate_on_face`（坍缩坐标版本）共享同一个核心解算
+    （`_tet_solve_barycentric_on_face`），区别只在收尾：native 模式的
+    "目标坐标系"就是 `(r,s,t)` 本身，解出重心坐标 L1..L4 后直接换算
+    `r=2*L2-1, s=2*L3-1, t=2*L4-1` 即可，不需要（也不应该）再转换到
+    `(a,b,c)` 坍缩坐标——这正是 native 模式点位定位不会在退化轴附近
+    出现条件数变差问题的根本原因：它压根不经过 `_tet_exact_locate_
+    on_face` 那个含显式除法的转换公式。
+
+    Returns:
+        (rst, final_resid)：rst 形状 (n_pts, 3)；final_resid 是该批点的
+        最大物理残差（绝对长度单位），与 `newton_locate_on_face`/
+        `_tet_exact_locate_on_face` 的调用惯例一致，供调用方按
+        `char_length` 分级处理。
+    """
+    from ..grid.curved_mapping.curved_mapping import tet_barycentric
+
+    face_vertex_idx = tuple(v for v in range(4) if v != excluded_vertex)
+    L = _tet_solve_barycentric_on_face(cell_nodes, face_vertex_idx, targets_phys)
+
+    r = 2.0 * L[:, 1] - 1.0
+    s = 2.0 * L[:, 2] - 1.0
+    t = 2.0 * L[:, 3] - 1.0
+    rst = np.column_stack([r, s, t])
+
+    L1, L2, L3, L4 = tet_barycentric(r, s, t)
+    p0, p1, p2, p3 = cell_nodes
+    phys_check = L1[:, None] * p0 + L2[:, None] * p1 + L3[:, None] * p2 + L4[:, None] * p3
+    final_resid = float(np.max(np.linalg.norm(phys_check - targets_phys, axis=1)))
+
+    scale = max(char_length, 1e-300)
+    warn_tol = max(1e-9, _ACCEPT_WARN_REL * scale)
+    if final_resid > warn_tol:
+        raise RuntimeError(
+            f"Native tet face exact point-location failed to converge: max residual {final_resid:.3e} "
+            f"({100 * final_resid / scale:.2f}% of local face scale {scale:.3e}). "
+            f"This indicates a genuinely non-conforming mesh face (target point not actually "
+            f"coplanar with this tet's face) rather than a numerical precision issue."
+        )
+    return rst, final_resid
 
 
 def newton_locate_on_face(

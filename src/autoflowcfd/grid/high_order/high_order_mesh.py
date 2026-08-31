@@ -58,12 +58,18 @@ class HighOrderMesh:
         face_connectivity: 真实单元-面连接关系（FRFaceConnectivity）
     """
 
-    def __init__(self, order: int = 2):
+    def __init__(self, order: int = 2, tet_basis_mode: str = "collapsed"):
         self.order = order
         self.n_points_1d = order + 1
         self.n_sps_per_cell = self.n_points_1d**3
+        # 四面体体积基函数选择（Part6/7/8 文档，路径C/native 分支）：
+        # 默认 "collapsed" 与此前完全一致；"native" 时 `_build_order_
+        # geometry`/`set_order` 改用 native 直边常数 Jacobian 构造几何、
+        # `self.operators` 携带 `D_native_tet_padded`/`lift_native_tet_
+        # padded` 等 native 字段（见 Part8 文档"三、本次会话实现范围"）。
+        self.tet_basis_mode = tet_basis_mode
 
-        self.operators = generate_fr_operators(order)
+        self.operators = generate_fr_operators(order, tet_basis_mode=tet_basis_mode)
 
         self.sps_coords: Optional[np.ndarray] = None
         self.jacobians: Optional[Dict[str, np.ndarray]] = None
@@ -189,6 +195,18 @@ class HighOrderMesh:
             self.face_connectivity = build_face_connectivity(
                 fixed_prism_conn, fixed_tet_conn, nodes
             )
+
+            # native 四面体（路径C，Part6/7/8 文档）：build_face_connectivity
+            # 无论 tet_basis_mode 是什么都只产出坍缩坐标编码（0~5，见该函数
+            # 及 face_connectivity.py 模块文档"`build_face_connectivity`
+            # 因此保持完全不变、只产出坍缩坐标编码"一节）——这里翻译成
+            # native 编码（6~9），下游 `build_face_flux_points`
+            # （`face_flux_points_merge.py`）按 `code>=6` 自动探测启用
+            # numba native 分支（Part7 文档"执行状态更新"节），不需要另外
+            # 传参。只翻译四面体侧记录，棱柱不受影响（`with_native_tet_
+            # faces` 文档）。
+            if self.tet_basis_mode == "native":
+                self.face_connectivity = self.face_connectivity.with_native_tet_faces(n_prisms)
 
             # 周期边界配对：必须在这里、build_face_flux_points 之前完成——
             # 配对把周期面从 is_boundary=True 翻转成内部面，需要在
@@ -400,9 +418,18 @@ class HighOrderMesh:
         使用 Gauss-Legendre 张量积求积权重做精确积分（∫∫∫ det(J) da db dc），
         而不是旧版本"假设行列式在单元内近似常数"的简化平均——对坍缩坐标
         映射而言 det(J) 本身就强烈非均匀，简单平均会引入明显误差。
+
+        native 四面体（`tet_basis_mode=="native"`）不走这套张量积求积
+        权重——理由见 `get_all_cell_volumes` 文档，这里用同一个常数
+        Jacobian*参考体积的精确公式。
         """
         if self.jacobians is None or cell_id >= self.n_cells:
             return 0.0
+
+        if getattr(self, "tet_basis_mode", "collapsed") == "native" and cell_id >= self.n_prism_cells:
+            _NATIVE_REF_TET_VOLUME = 4.0 / 3.0
+            det_j = self.jacobians["det_jacs"][cell_id * self.n_sps_per_cell]
+            return float(det_j * _NATIVE_REF_TET_VOLUME)
 
         from autoflowcfd.fr.operators import gauss_legendre
 
@@ -420,6 +447,18 @@ class HighOrderMesh:
         后者被 core/fr_solver.py 的 CFL/网格尺度估计沿用了很久，已在此
         统一替换为正确的加权积分）。
 
+        `tet_basis_mode=="native"` 时四面体部分**不能**沿用这套张量积
+        求积权重（Part8 文档"三、本次会话实现范围"新发现的一个真实
+        坑）：`weights_3d` 的和是 8（[-1,1]^3 立方体体积），坍缩坐标下
+        `det_jacs` 逐点变化、乘积分本来就是把"立方体计算域"积分变换到
+        "物理四面体"，这个 8 已经隐含在坍缩映射的度量变化里；但 native
+        直边四面体的 `det_jacs` 是**常数**（不依赖计算域参数化），直接
+        乘 `weights_3d` 会把体积算大 8/(4/3)=6 倍（4/3 是标准参考四面体
+        `(-1,-1,-1),(1,-1,-1),(-1,1,-1),(-1,-1,1)` 的体积，见
+        `native_simplex_basis.py::compute_native_tet_jacobian` 文档）。
+        native 四面体单元直接用 `det_j*4/3`，不需要任何求积（常数
+        Jacobian 乘参考体积就是精确物理体积，见该函数文档）。
+
         Returns:
             volumes: 形状 (n_cells,)
         """
@@ -433,4 +472,10 @@ class HighOrderMesh:
         weights_3d = (wx * wy * wz).ravel()
 
         det_jacs = self.jacobians["det_jacs"].reshape(self.n_cells, self.n_sps_per_cell)
-        return np.sum(det_jacs * weights_3d[np.newaxis, :], axis=1)
+        volumes = np.sum(det_jacs * weights_3d[np.newaxis, :], axis=1)
+
+        if getattr(self, "tet_basis_mode", "collapsed") == "native" and self.n_prism_cells < self.n_cells:
+            _NATIVE_REF_TET_VOLUME = 4.0 / 3.0
+            volumes[self.n_prism_cells:] = det_jacs[self.n_prism_cells:, 0] * _NATIVE_REF_TET_VOLUME
+
+        return volumes

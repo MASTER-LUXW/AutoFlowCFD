@@ -29,7 +29,7 @@ import numpy as np
 
 from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
 from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
-from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_batch
+from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_batch, entropy_stable_volume_divergence_batch
 from autoflowcfd.core.fr_operators.volume_contract import contract_shared_operator_1axis, contract_shared_operator_2axis, compute_adj_j
 
 GAMMA = 1.4
@@ -145,6 +145,7 @@ def compute_inviscid_residual_fr(
     boundary_ghost_provider: Optional[Callable[[int, np.ndarray, np.ndarray], np.ndarray]] = None,
     mach_ref: float = 0.1,
     flat_face_override=None,
+    entropy_stable_volume: bool = False,
 ) -> np.ndarray:
     """计算真实面耦合的 FR 无粘残差 dU/dt（物理空间，已除以 det(J)）。
 
@@ -164,6 +165,19 @@ def compute_inviscid_residual_fr(
             不能依赖这个默认值——CFL 步长估计（cfl.py）用的就是这同一个
             真实值，两者不同步正是 2026-08-14 那次失稳的根因，见 cfl.py
             模块文档"已撤销"一节。
+        entropy_stable_volume: 体积项非线性通量混叠优化开关（默认关闭，
+            行为与此前完全一致）。开启后过积分分支（`mesh.jacobians_fine
+            is not None`）改用 Chandrashekar (2013) 熵守恒两点通量 +
+            对称平均度量项替代逐点通量代入（见
+            `core/fr_operators/flux_kernels.py::entropy_stable_volume_
+            divergence_batch` 与 `8_算法重构-Entropy-Stable_Split-Form
+            通量重构-Part1/2.md` 完整推导/验证）——真实决定性测试确认
+            方向一致、幅度真实但有限的改善（P2 中位数额外再改善约
+            3.5 倍，在已经用了过积分的基础上），代价是体积项计算复杂度
+            从 O(n_fine) 升到 O(n_fine^2)（两点通量需要遍历 SP 对，是
+            entropy-stable 方案的固有代价），默认关闭以避免无条件拖慢
+            现有全部生产用例；无过积分分支（P0）或用户显式设为 False
+            时行为完全不变。
 
     Returns:
         residual: 形状 (n_cells, n_sps, 5)
@@ -228,7 +242,10 @@ def compute_inviscid_residual_fr(
         # 0.7GiB）。prism/tet 两段分开切块是因为两者用不同的算子，且单元存储
         # 本来就是 prism 在前 tet 在后，块不会跨类型。
         div_comp_fine = np.zeros((n_cells, n_fine, 5))
-        _OVERINT_CHUNK_CELLS = 32768
+        # entropy-stable 路径是 O(n_fine^2)（两点通量遍历 SP 对），用比
+        # 强形式更小的分块降低单块瞬态峰值/便于 numba prange 调度粒度，
+        # 强形式路径块大小不变（沿用既有 P2 OOM 修复的取值）。
+        _OVERINT_CHUNK_CELLS = 4096 if entropy_stable_volume else 32768
         for seg_lo, seg_hi, op_c2f, op_D_fine in (
             (0, n_prism, ops.overint_interp_c2f_prism, ops.overint_D_fine_prism),
             (n_prism, n_cells, ops.overint_interp_c2f_tet, ops.overint_D_fine_tet),
@@ -236,15 +253,25 @@ def compute_inviscid_residual_fr(
             for c0 in range(seg_lo, seg_hi, _OVERINT_CHUNK_CELLS):
                 c1 = min(c0 + _OVERINT_CHUNK_CELLS, seg_hi)
                 Q_fine = contract_shared_operator_1axis(op_c2f, Q[c0:c1])
-                F_phys_fine = euler_physical_flux_batch(
-                    Q_fine.reshape(-1, 5)
-                ).reshape(c1 - c0, n_fine, 3, 5)
-                del Q_fine  # 块内用完即弃，下一轮迭代变量重新绑定
                 adj_j_fine = compute_adj_j(det_jacs_fine[c0:c1], inv_jacs_fine[c0:c1])
-                F_tilde_fine = np.matmul(adj_j_fine, F_phys_fine)  # (块长,n_fine,3,5)
-                del adj_j_fine, F_phys_fine
-                div_comp_fine[c0:c1] = contract_shared_operator_2axis(op_D_fine, F_tilde_fine)
-                del F_tilde_fine
+                if entropy_stable_volume:
+                    # Chandrashekar 两点熵守恒通量 + 对称平均度量项，见
+                    # entropy_stable_volume_divergence_batch 文档；该函数
+                    # 内部已经把 "-2*div_comp/det_jacs" 里的 2.0 折进
+                    # 返回值（与 8_算法重构-Entropy-Stable_Split-Form
+                    # 通量重构-Part2.md 决定性验证脚本同一约定），下游
+                    # `residual = -div_comp/det_jacs` 不需要再乘 2。
+                    div_comp_fine[c0:c1] = entropy_stable_volume_divergence_batch(Q_fine, adj_j_fine, op_D_fine)
+                    del adj_j_fine
+                else:
+                    F_phys_fine = euler_physical_flux_batch(
+                        Q_fine.reshape(-1, 5)
+                    ).reshape(c1 - c0, n_fine, 3, 5)
+                    F_tilde_fine = np.matmul(adj_j_fine, F_phys_fine)  # (块长,n_fine,3,5)
+                    del adj_j_fine, F_phys_fine
+                    div_comp_fine[c0:c1] = contract_shared_operator_2axis(op_D_fine, F_tilde_fine)
+                    del F_tilde_fine
+                del Q_fine  # 块内用完即弃，下一轮迭代变量重新绑定
 
         div_comp = np.zeros((n_cells, n_sps, 5))
         if n_prism > 0:
@@ -253,10 +280,18 @@ def compute_inviscid_residual_fr(
             div_comp[n_prism:] = contract_shared_operator_1axis(ops.overint_restrict_f2c_tet, div_comp_fine[n_prism:])
         del div_comp_fine  # ~1.9GiB，用完即弃
     else:
-        # 没有 fine 几何（理论上只有 order==0 会发生，但 P0 在函数入口就
-        # 已经短路到 _compute_inviscid_residual_fv_p0，不会走到这里；保留
-        # 这条分支只是为了在任何未预见的 jacobians_fine 缺失场景下不静默
-        # 得到错误答案，而是仍用未去混叠的朴素路径，不崩溃）。
+        # 没有 fine 几何——理论上有两种情形：(a) order==0，但 P0 在函数
+        # 入口就已经短路到 _compute_inviscid_residual_fv_p0，不会走到
+        # 这里；(b) tet_basis_mode=="native"（Part8 文档"四、明确未做
+        # 的后续工作"第4条：native 单纯形基的过积分算子尚未设计，
+        # `build_order_geometry` 因此故意不为 native 网格构建
+        # jacobians_fine，见该函数文档），四面体部分需要改用
+        # `D_native_tet_padded`（Part8 文档"零填充块对角"不变量，填充
+        # 行的散度贡献恒为 0）——棱柱部分不受影响，仍是坍缩坐标
+        # `D_3d_prism`（棱柱没有 native 概念）。这条分支对普通坍缩坐标
+        # P1+ 网格理论上不会被触发（保留只是为了任何未预见的
+        # jacobians_fine 缺失场景不静默得到错误答案，而是仍用未去混叠
+        # 的朴素路径，不崩溃）。
         Q_flat = np.ascontiguousarray(Q.reshape(-1, 5))
         F_phys = euler_physical_flux_batch(Q_flat).reshape(n_cells, n_sps, 3, 5)
         F_tilde = np.matmul(adj_j, F_phys)  # (n_cells,n_sps,3,5)
@@ -264,7 +299,12 @@ def compute_inviscid_residual_fr(
         if n_prism > 0:
             div_comp[:n_prism] = contract_shared_operator_2axis(ops.D_3d_prism, F_tilde[:n_prism])
         if n_cells > n_prism:
-            div_comp[n_prism:] = contract_shared_operator_2axis(ops.D_3d_tet, F_tilde[n_prism:])
+            D_tet_op = (
+                ops.D_native_tet_padded
+                if getattr(mesh, "tet_basis_mode", "collapsed") == "native"
+                else ops.D_3d_tet
+            )
+            div_comp[n_prism:] = contract_shared_operator_2axis(D_tet_op, F_tilde[n_prism:])
 
     residual = -div_comp / det_jacs[..., None]  # 物理空间残差（体积项部分）
     # div_comp（~854MiB）用完即弃，理由同上（over-integration 分支/朴素
@@ -335,6 +375,9 @@ def compute_inviscid_residual_fr(
                 flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
                 flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
                 n_prism, face_indices, correction, mach_ref,
+                flat.owner_cube_face, flat.neighbor_cube_face,
+                flat.true_area_weight,
+                flat.boundary_extrap_native, flat.lift_native,
             )
     else:
         # 回退到 per-thread buffer 方案（小网格 + 低线程数可能更快）
@@ -356,6 +399,9 @@ def compute_inviscid_residual_fr(
             flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
             flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
             n_prism, n_threads, mach_ref,
+            flat.owner_cube_face, flat.neighbor_cube_face,
+            flat.true_area_weight,
+            flat.boundary_extrap_native, flat.lift_native,
         )
     residual = residual + correction
 

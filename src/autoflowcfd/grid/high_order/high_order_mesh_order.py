@@ -103,6 +103,112 @@ def compute_jacobians_at_ref_points(
     return result
 
 
+def compute_native_tet_jacobians(
+    mesh: "HighOrderMesh", order: int, n_sps_per_cell: int, want_scaled_quality: bool
+) -> Optional[Dict[str, np.ndarray]]:
+    """native 四面体（路径C）版本的 Jacobian 构造——见 Part8 文档"一、
+    核心不变量：零填充块对角"第3点：直边单元 Jacobian 是每单元一个
+    常数（`compute_native_tet_jacobian`，不依赖参考点位置），不像坍缩
+    坐标那样需要在 `ref_cube_sps` 上逐点求值；这个常数原样广播填满
+    该单元全部 `n_sps_per_cell` 槽位（真实 `n_native` 行与填充行一视
+    同仁，因为它们对应同一个 det_j——这也是本设计"填充行必须有限"这个
+    强制要求最容易满足的一种情形：native 直边单元根本没有"填充行专属
+    的合理值"这个问题，复用同一个真实常数即可，不需要另外编造占位值）。
+
+    `scaled_quality`（诊断量）用与坍缩坐标分支
+    `troubled_cell.py::compute_scaled_jacobian_quality` 完全相同的定义
+    （`det_j/prod(col_norms(J))`）手算——直边单元只有一个 J，不需要
+    调用那个批量/逐点版本。
+    """
+    from autoflowcfd.fr.native_simplex_basis import compute_native_tet_jacobian
+
+    n_prisms = mesh.n_prism_cells
+    n_tets = len(mesh._fixed_tet_conn) if mesh._fixed_tet_conn is not None else 0
+    if n_tets == 0:
+        return None
+
+    all_dets = np.empty(n_tets * n_sps_per_cell)
+    all_inv_jacs = np.empty((n_tets * n_sps_per_cell, 3, 3))
+    all_scaled_quality = np.empty(n_tets * n_sps_per_cell) if want_scaled_quality else None
+
+    for i in range(n_tets):
+        cell_nodes = mesh._node_coords[mesh._fixed_tet_conn[i]]
+        det_j, adj_j = compute_native_tet_jacobian(cell_nodes)
+        inv_j = adj_j / det_j
+        lo, hi = i * n_sps_per_cell, (i + 1) * n_sps_per_cell
+        all_dets[lo:hi] = det_j
+        all_inv_jacs[lo:hi] = inv_j
+        if want_scaled_quality:
+            p0, p1, p2, p3 = cell_nodes
+            J = 0.5 * np.column_stack([p1 - p0, p2 - p0, p3 - p0])
+            col_norms = np.linalg.norm(J, axis=0)
+            quality = det_j / max(np.prod(col_norms), 1e-300)
+            all_scaled_quality[lo:hi] = quality
+
+    result = {"det_jacs": all_dets, "inv_jacs": all_inv_jacs}
+    if want_scaled_quality:
+        result["scaled_quality"] = all_scaled_quality
+    return result
+
+
+def _combine_prism_and_tet_jacobians(
+    prism_part: Optional[Dict[str, np.ndarray]], tet_part: Optional[Dict[str, np.ndarray]]
+) -> Optional[Dict[str, np.ndarray]]:
+    """把只算了棱柱部分（native 四面体分支专用，见 `build_order_geometry`）
+    的 jacobians 与单独算好的 native 四面体部分按 prism-在前/tet-在后
+    的既有顺序拼接——与 `compute_jacobians_at_ref_points` 一次性算全部
+    单元时的拼接顺序保持一致，下游（`mesh.jacobians["det_jacs"].reshape
+    (n_cells, n_sps)` 等）不需要关心这里是分两段算的。"""
+    if prism_part is None:
+        return tet_part
+    if tet_part is None:
+        return prism_part
+    result = {}
+    for key in prism_part:
+        result[key] = np.concatenate([prism_part[key], tet_part[key]])
+    return result
+
+
+def _compute_prism_only_jacobians(
+    mesh: "HighOrderMesh", mapper: CurvedMapping, ref_pts: np.ndarray, want_scaled_quality: bool
+) -> Optional[Dict[str, np.ndarray]]:
+    """`compute_jacobians_at_ref_points` 的棱柱专属子集——只在
+    `tet_basis_mode=="native"` 时使用（那时四面体部分要走
+    `compute_native_tet_jacobians`，两部分分别算好再按 prism-在前/
+    tet-在后拼接，见 `build_order_geometry`）。逻辑与
+    `compute_jacobians_at_ref_points` 的棱柱分支逐行一致，只是提取出来
+    单独调用，不是重新实现一遍。
+    """
+    from autoflowcfd.core.fr_operators.troubled_cell import compute_scaled_jacobian_quality
+
+    n_prisms = mesh.n_prism_cells
+    if mesh._fixed_prism_conn is None or n_prisms == 0:
+        return None
+    n_ref = ref_pts.shape[0]
+    all_dets = np.empty(n_prisms * n_ref)
+    all_inv_jacs = np.empty((n_prisms * n_ref, 3, 3))
+    all_scaled_quality = np.empty(n_prisms * n_ref) if want_scaled_quality else None
+
+    for i in range(n_prisms):
+        cell_nodes = mesh._node_coords[mesh._fixed_prism_conn[i]]
+        phys_pts = map_prism_to_physical(ref_pts, cell_nodes)
+        jac_data = mapper.compute_jacobian(
+            phys_pts, cell_id=i, cell_type="prism", cell_nodes=cell_nodes, ref_cube_sps=ref_pts
+        )
+        lo, hi = i * n_ref, (i + 1) * n_ref
+        all_dets[lo:hi] = jac_data["det_jacs"].ravel()
+        all_inv_jacs[lo:hi] = jac_data["inv_jacs"].reshape(-1, 3, 3)
+        if want_scaled_quality:
+            all_scaled_quality[lo:hi] = compute_scaled_jacobian_quality(
+                jac_data["jacobians"], jac_data["det_jacs"]
+            ).ravel()
+
+    result = {"det_jacs": all_dets, "inv_jacs": all_inv_jacs}
+    if want_scaled_quality:
+        result["scaled_quality"] = all_scaled_quality
+    return result
+
+
 def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndarray]:
     """在给定阶数下，从已修正朝向的 connectivity/节点坐标重新推导
     SPs 物理坐标与 Jacobian（不依赖 mesh.order/mesh.n_points_1d 的当前值，
@@ -113,6 +219,12 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
     推导这里的量，P0/P1 阶段的梯度/残差计算会直接用错误维度的
     Jacobian（真实网格已复现：reshape 到 27 SPs/单元 的 Jacobian 硬套
     1 SP/单元 的状态场，直接崩溃）。
+
+    `mesh.tet_basis_mode=="native"`（Part6/7/8 文档路径C）时，四面体
+    部分改走 `compute_native_tet_jacobians`/`map_native_tet_to_physical`
+    （直边常数 Jacobian + 零填充，见该函数与 Part8 文档），棱柱部分
+    完全不受影响、仍走原有坍缩坐标路径——两者按 prism-在前/tet-在后
+    拼接（`_combine_prism_and_tet_jacobians`）。
 
     Returns:
         {"sps_coords", "jacobians", "ref_cube_sps", "jacobians_fine",
@@ -125,19 +237,41 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
 
     ref_cube_sps = generate_reference_cube_sps(mesh, order)
     n_prisms = mesh.n_prism_cells
+    tet_basis_mode = getattr(mesh, "tet_basis_mode", "collapsed")
+    n_tets = len(mesh._fixed_tet_conn) if mesh._fixed_tet_conn is not None else 0
 
     if mesh._fixed_prism_conn is not None and n_prisms > 0:
         for i in range(n_prisms):
             cell_nodes = mesh._node_coords[mesh._fixed_prism_conn[i]]
             sps_coords[i] = map_prism_to_physical(ref_cube_sps, cell_nodes)
 
-    if mesh._fixed_tet_conn is not None and len(mesh._fixed_tet_conn) > 0:
-        n_tets = len(mesh._fixed_tet_conn)
+    if tet_basis_mode == "native" and n_tets > 0:
+        from autoflowcfd.fr.native_simplex_basis import build_native_tet_operators, map_native_tet_to_physical
+
+        ref_native, _ = build_native_tet_operators(order)
+        n_native = ref_native.shape[0]
+        for i in range(n_tets):
+            cell_nodes = mesh._node_coords[mesh._fixed_tet_conn[i]]
+            phys_native = map_native_tet_to_physical(ref_native, cell_nodes)
+            sps_coords[n_prisms + i, :n_native] = phys_native
+            # 填充行：复制真实 SP #0 的物理坐标（有限、物理上合法的占位值，
+            # 见 Part8 文档"一、核心不变量"第4点——不能留 np.zeros 默认值,
+            # 那对应原点，可能被后处理/可视化误当成真实几何位置）。
+            sps_coords[n_prisms + i, n_native:] = phys_native[0]
+    elif mesh._fixed_tet_conn is not None and n_tets > 0:
         for i in range(n_tets):
             cell_nodes = mesh._node_coords[mesh._fixed_tet_conn[i]]
             sps_coords[n_prisms + i] = map_tet_to_physical(ref_cube_sps, cell_nodes)
 
-    jacobians = compute_jacobians_at_ref_points(mesh, mapper, ref_cube_sps, want_scaled_quality=True)
+    if tet_basis_mode == "native" and n_tets > 0:
+        prism_jacobians = (
+            _compute_prism_only_jacobians(mesh, mapper, ref_cube_sps, want_scaled_quality=True)
+            if n_prisms > 0 else None
+        )
+        tet_jacobians = compute_native_tet_jacobians(mesh, order, n_sps_per_cell, want_scaled_quality=True)
+        jacobians = _combine_prism_and_tet_jacobians(prism_jacobians, tet_jacobians)
+    else:
+        jacobians = compute_jacobians_at_ref_points(mesh, mapper, ref_cube_sps, want_scaled_quality=True)
 
     # 体积项去混叠（超过-积分，V2.0 二次评审 Tier 0 #2）用的
     # 细网格几何：过积分阶数 over_order=2*order，与 fr/operators.py::
@@ -147,6 +281,16 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
     # order==0（P0）没有意义（P0 走独立的有限体积残差路径，见
     # fr_residual_inviscid.py::compute_inviscid_residual_fr 的
     # n_points_1d==1 分支），跳过以节省内存/构建时间。
+    #
+    # native 模式（tet_basis_mode=="native"）：native 单纯形基过积分算子
+    # 已实现（`native_tet_overintegration.py::build_native_tet_
+    # overintegration_operators`，Part8 文档"四·七"节，用与坍缩坐标同一个
+    # `over_order=min(2*order,OVERINTEGRATION_MAX_ORDER)` 经验法则）。
+    # `jacobians_fine` 对 native 四面体单元的构造复用 `compute_native_tet_
+    # jacobians`（同一个"直边单元常数 Jacobian 广播"函数，只是这里传入
+    # FINE 网格的 `n_sps_per_cell_fine` 计数而不是 coarse 的
+    # `n_sps_per_cell`——直边单元 Jacobian 不依赖参考点位置，广播到多少个
+    # 槽位都是同一个常数，不需要为"fine"专门重新推导）。
     jacobians_fine = None
     n_sps_per_cell_fine = 0
     if order >= 1:
@@ -159,9 +303,20 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
         fine_1d, _ = gauss_legendre(n_points_1d_fine)
         xf, yf, zf = np.meshgrid(fine_1d, fine_1d, fine_1d, indexing="ij")
         ref_cube_sps_fine = np.column_stack([xf.ravel(), yf.ravel(), zf.ravel()])
-        jacobians_fine = compute_jacobians_at_ref_points(
-            mesh, mapper, ref_cube_sps_fine, want_scaled_quality=False
-        )
+
+        if tet_basis_mode == "native" and n_tets > 0:
+            prism_jacobians_fine = (
+                _compute_prism_only_jacobians(mesh, mapper, ref_cube_sps_fine, want_scaled_quality=False)
+                if n_prisms > 0 else None
+            )
+            tet_jacobians_fine = compute_native_tet_jacobians(
+                mesh, order, n_sps_per_cell_fine, want_scaled_quality=False
+            )
+            jacobians_fine = _combine_prism_and_tet_jacobians(prism_jacobians_fine, tet_jacobians_fine)
+        else:
+            jacobians_fine = compute_jacobians_at_ref_points(
+                mesh, mapper, ref_cube_sps_fine, want_scaled_quality=False
+            )
 
     return {
         "sps_coords": sps_coords,
@@ -201,7 +356,7 @@ def set_order(mesh: "HighOrderMesh", order: int) -> None:
         mesh._ref_cube_sps = geom["ref_cube_sps"]
         mesh.jacobians_fine = geom["jacobians_fine"]
         mesh.n_sps_per_cell_fine = geom["n_sps_per_cell_fine"]
-        mesh.operators = generate_fr_operators(order)
+        mesh.operators = generate_fr_operators(order, tet_basis_mode=getattr(mesh, "tet_basis_mode", "collapsed"))
 
         face_flux_points = None
         cell_face_misalignment = None

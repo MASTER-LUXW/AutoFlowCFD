@@ -156,6 +156,22 @@ class FlatFaceGeometry:
     # 不会读取）。
     owner_adj_row_exact: np.ndarray     # float64 (n_faces, n_fp, 3)
     neighbor_adj_row_exact: np.ndarray  # float64 (n_faces, n_fp, 3)
+    # native 四面体（路径C，Part8 文档"三、本次会话实现范围"）支持新增：
+    # 原始 cube face 编码（0~5 坍缩坐标，6~9 native，见
+    # grid/connectivity/face_connectivity.py::CUBE_FACE_CODES），
+    # `owner_axis`/`owner_side`（上面两个字段）对 native 面存的是复用
+    # 的 excluded_vertex/哑值，不能用来判断是否 native、也不能安全地
+    # 当 axis/side 语义使用——必须用这两个原始编码字段消除歧义。
+    owner_cube_face: np.ndarray     # int64 (n_faces,)
+    neighbor_cube_face: np.ndarray  # int64 (n_faces,)
+    # 物理面积权重（`fr/face_flux_points_exact_normal.py::compute_exact_
+    # face_normals_and_weights` 已经算好、验证过的量）——坍缩坐标的
+    # 1D Radau/VCJH 修正函数 + 微分矩阵机制不需要它（那套数学结构本身
+    # 不含物理面积因子），但 native 四面体的 DG 提升算子（`native_
+    # simplex_basis.py::build_native_tet_lift` 文档"弱形式提升定义"）
+    # 需要它按面点物理面积加权跳跃量，因此新增这个字段——对坍缩坐标
+    # 面同样有意义（本来就已经算好），只是此前从未被这个 kernel 消费过。
+    true_area_weight: np.ndarray    # float64 (n_faces, n_fp)
 
     # --- neighbor_sources（owner 侧用来组装 Q_neighbor 的来源）---
     neighbor_src0_cell: np.ndarray   # int64 (n_faces,)，-1 表示无来源
@@ -193,6 +209,17 @@ class FlatFaceGeometry:
     #     这种 float 键的 dict）---
     # 形状 (2, 3, 2, n_fp, n_sps)：[celltype(0=prism,1=tet), axis, side_idx(0:-1,1:+1)]
     boundary_extrap: np.ndarray
+
+    # --- native 四面体（路径C）专属算子（Part8 文档），键是 excluded_
+    #     vertex（0~3），不含坍缩坐标网格时是零长度占位（对应分支永远
+    #     不会被 code>=6 触发，见 native_mode_active 说明）---
+    # 体积->自身面外插矩阵，(4, n_fp, n_sps)（列已填充到全局 n_sps 宽度，
+    # 与坍缩坐标 boundary_extrap 消费方式一致：E @ Q_volume_nodal）。
+    boundary_extrap_native: np.ndarray
+    # DG 提升算子，(4, n_sps, n_fp)（行已填充到 n_sps，见
+    # native_tet_padding.py::pad_native_tet_matrix_to_global 与
+    # native_simplex_basis.py::build_native_tet_lift 文档）。
+    lift_native: np.ndarray
 
     # --- g_left/g_right（Radau/VCJH 校正函数导数，(n1d,) 向量，随 side 选择）---
     g_left: np.ndarray
@@ -268,6 +295,12 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     n_sps = n1d ** 3
     n_prism = mesh.n_prism_cells
 
+    # 原始 cube face 编码：不受快速/慢速路径影响，`fc` 本身就带着，
+    # native 分支据此判断（code>=6，见 FlatFaceGeometry.owner_cube_face
+    # 文档），不依赖 owner_axis/owner_side 那套可能有歧义的复用槽位。
+    owner_cube_face = fc.owner_cube_face.astype(np.int64)
+    neighbor_cube_face = fc.neighbor_cube_face.astype(np.int64)
+
     # 检查是否为 _KernelFaceData 快速路径
     from autoflowcfd.fr.face_flux_points_merge import _KernelFaceData
     if isinstance(ffp_data, _KernelFaceData):
@@ -292,6 +325,7 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
         owner_src1_mat = ffp_data.ow_extra_mat
         owner_adj_row_exact = ffp_data.owner_adj_row_exact
         neighbor_adj_row_exact = ffp_data.neighbor_adj_row_exact
+        true_area_weight = ffp_data.true_area_weight
         # 混合分组面（B-8）：merge 层检测后填入，_KernelFaceData 恒定提供这 6 个数组。
         mixed_nb_partner = ffp_data.mixed_nb_partner
         mixed_nb_mask = ffp_data.mixed_nb_mask
@@ -308,6 +342,7 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
         owner_is_primary = np.empty(n_faces, dtype=np.bool_)
         neighbor_is_primary = np.empty(n_faces, dtype=np.bool_)
         true_normal = np.empty((n_faces, n_fp, 3), dtype=np.float64)
+        true_area_weight = np.empty((n_faces, n_fp), dtype=np.float64)
 
         neighbor_sources_per_face = [None] * n_faces
         owner_sources_per_face = [None] * n_faces
@@ -321,6 +356,7 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
             owner_is_primary[f] = ffp.owner_is_primary
             neighbor_is_primary[f] = ffp.neighbor_is_primary
             true_normal[f] = ffp.true_normal
+            true_area_weight[f] = ffp.true_area_weight
             neighbor_sources_per_face[f] = ffp.neighbor_sources
             owner_sources_per_face[f] = ffp.owner_sources
 
@@ -354,6 +390,29 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
             boundary_extrap[0, axis, side_idx] = ops.boundary_extrap_prism[(axis, side)]
             boundary_extrap[1, axis, side_idx] = ops.boundary_extrap_tet[(axis, side)]
 
+    # native 四面体（路径C）专属算子（Part8 文档）：`ops.boundary_extrap_
+    # native_tet`/`ops.lift_native_tet_padded` 只在 `tet_basis_mode==
+    # "native"` 时非 None——不含 native 四面体的既有网格传零长度占位
+    # 数组，下游 kernel 对应分支（判据同样是 code>=6）永远不会被执行，
+    # 不改变任何现有行为（与 face_flux_points_merge.py 里同一个"自动
+    # 探测/零占位"原则一致）。boundary_extrap_native 的列同样需要填充
+    # 到全局 n_sps 宽度（native_tet_boundary_extrap 原始形状是
+    # (n_fp,n_native)，不像 D_native_tet_padded/lift_native_tet_padded
+    # 那样已经在 fr/operators.py 里填充过）。
+    if ops.boundary_extrap_native_tet is not None:
+        from autoflowcfd.fr.native_tet_padding import pad_native_tet_matrix_to_global
+
+        boundary_extrap_native = np.zeros((4, n_fp, n_sps), dtype=np.float64)
+        lift_native = np.zeros((4, n_sps, n_fp), dtype=np.float64)
+        for ev in range(4):
+            boundary_extrap_native[ev] = pad_native_tet_matrix_to_global(
+                ops.boundary_extrap_native_tet[ev], n_sps, pad_axes=(1,)
+            )
+            lift_native[ev] = ops.lift_native_tet_padded[ev]
+    else:
+        boundary_extrap_native = np.zeros((0, n_fp, n_sps), dtype=np.float64)
+        lift_native = np.zeros((0, n_sps, n_fp), dtype=np.float64)
+
     dist_fp_of_sp, dist_axis_coord_of_sp = _derive_distribute_mapping(n1d)
 
     # 面图着色：一次性计算，后续残差求值直接复用（不再重复着色）。
@@ -382,6 +441,8 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
         neighbor_axis=neighbor_axis, neighbor_side=neighbor_side,
         owner_is_primary=owner_is_primary, neighbor_is_primary=neighbor_is_primary,
         true_normal=true_normal,
+        owner_cube_face=owner_cube_face, neighbor_cube_face=neighbor_cube_face,
+        true_area_weight=true_area_weight,
         owner_adj_row_exact=owner_adj_row_exact, neighbor_adj_row_exact=neighbor_adj_row_exact,
         neighbor_src0_cell=neighbor_src0_cell, neighbor_src0_mat=neighbor_src0_mat,
         neighbor_src1_idx=neighbor_src1_idx, neighbor_src1_cell=neighbor_src1_cell,
@@ -393,6 +454,8 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
         mixed_ow_partner=mixed_ow_partner, mixed_ow_mask=mixed_ow_mask,
         mixed_bnd_face=mixed_bnd_face, mixed_p0_bnd_frac=mixed_p0_bnd_frac,
         boundary_extrap=boundary_extrap,
+        boundary_extrap_native=boundary_extrap_native,
+        lift_native=lift_native,
         g_left=np.asarray(ops.g_left, dtype=np.float64),
         g_right=np.asarray(ops.g_right, dtype=np.float64),
         n1d=n1d,

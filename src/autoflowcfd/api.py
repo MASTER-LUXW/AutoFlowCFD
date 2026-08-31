@@ -166,6 +166,7 @@ class AutoFlowCFDAPI:
         threads: int = -1,
         output_dir: str = "./results",
         config: Optional[SteadyConfig] = None,
+        tet_basis_mode: str = "collapsed",
         **kwargs
     ) -> Any:
         """Run steady-state FR simulation.
@@ -190,6 +191,16 @@ class AutoFlowCFDAPI:
                 `mu_molecular`/`turbulence_intensity`/`viscosity_ratio`
                 这三个 `SolverConfig` 基类字段同理，未显式经由 `**kwargs`
                 传入时会从 `config` 补上，再透传给 FRSolver 构造函数。
+            tet_basis_mode: 四面体体积基函数选择——"collapsed"（默认，
+                行为与此前完全一致）或 "native"（路径C，见
+                `fr/native_simplex_basis.py`/`ProjectFiles/V2.0/
+                8_算法重构-微分算子对坍缩坐标退化参考轴的病态条件数-
+                Part6~8.md`，修复坍缩坐标 Duffy 变换在退化参考轴附近
+                导致的 P1/P2 残差异常；已在合成小网格上做过体积项/
+                修正项/模态滤波/过积分去混叠的端到端决定性验证，尚未
+                在真实生产规模网格上验证过）。直接决定 `HighOrderMesh`
+                的构造参数，不经过 `config`/`SteadyConfig`（那套 YAML
+                配置层尚未加这个字段，属于独立的后续工作）。
             dt, tol: 时间步长与收敛容差，直接透传给 FRSolver.solve()
             threads: CPU 后端 numba 并行线程数
             output_dir: Output directory
@@ -235,7 +246,7 @@ class AutoFlowCFDAPI:
             for field in ("mu_molecular", "turbulence_intensity", "viscosity_ratio"):
                 kwargs.setdefault(field, getattr(config, field))
 
-        mesh = HighOrderMesh(order=order)
+        mesh = HighOrderMesh(order=order, tet_basis_mode=tet_basis_mode)
         mesh.load_from_volume_mesh(volume_mesh)
 
         solver = FRSolver(
@@ -276,6 +287,7 @@ class AutoFlowCFDAPI:
         threads: int = -1,
         output_dir: str = "./transient_results",
         config: Optional[TransientConfig] = None,
+        tet_basis_mode: str = "collapsed",
         **kwargs
     ) -> Any:
         """Run transient FR simulation (DES/LES).
@@ -303,6 +315,8 @@ class AutoFlowCFDAPI:
                 run_steady 同名参数的文档（`mu_molecular`/
                 `turbulence_intensity`/`viscosity_ratio` 同样从
                 `config` 补入 `kwargs`）。
+            tet_basis_mode: 四面体体积基函数选择，见 run_steady 同名
+                参数文档（"collapsed"/"native"）。
             **kwargs: 其余参数透传给 FRSolver 构造函数
 
         Returns:
@@ -363,7 +377,7 @@ class AutoFlowCFDAPI:
 
         max_iter = int(physical_time / dt) if physical_time is not None else 1000
 
-        mesh = HighOrderMesh(order=order)
+        mesh = HighOrderMesh(order=order, tet_basis_mode=tet_basis_mode)
         mesh.load_from_volume_mesh(volume_mesh)
 
         solver = TransientSolver(

@@ -200,9 +200,13 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
     n_prism = mesh.n_prism_cells
     _VISC_CHUNK_CELLS = 32768
     div_comp = np.zeros((n_cells, n_sps, 5))
+    # native 四面体（路径C）：体积项散度同样必须改用 D_native_tet_padded，
+    # 理由与 gradients.py::compute_physical_gradient 同一处文档——D_3d_tet
+    # 是坍缩坐标专属微分矩阵，对 native 单纯形基节点没有意义。
+    _tet_op_D = ops.D_native_tet_padded if getattr(ops, "D_native_tet_padded", None) is not None else ops.D_3d_tet
     for seg_lo, seg_hi, op_D in (
         (0, n_prism, ops.D_3d_prism),
-        (n_prism, n_cells, ops.D_3d_tet),
+        (n_prism, n_cells, _tet_op_D),
     ):
         for c0 in range(seg_lo, seg_hi, _VISC_CHUNK_CELLS):
             c1 = min(c0 + _VISC_CHUNK_CELLS, seg_hi)
@@ -262,6 +266,9 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
             flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
             flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
             n_prism, n_threads,
+            flat.owner_cube_face, flat.neighbor_cube_face,
+            flat.true_area_weight,
+            flat.boundary_extrap_native, flat.lift_native,
         )
     else:
         # P≥1 通用路径：图着色或 per-thread buffer
@@ -299,6 +306,9 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
                     flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
                     flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
                     n_prism, face_indices, correction,
+                    flat.owner_cube_face, flat.neighbor_cube_face,
+                    flat.true_area_weight,
+                    flat.boundary_extrap_native, flat.lift_native,
                 )
         else:
             # 回退到 per-thread buffer 方案（小网格 + 低线程数可能更快）
@@ -320,6 +330,9 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
                 flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
                 flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
                 n_prism, n_threads,
+                flat.owner_cube_face, flat.neighbor_cube_face,
+                flat.true_area_weight,
+                flat.boundary_extrap_native, flat.lift_native,
             )
     residual = residual + correction
 

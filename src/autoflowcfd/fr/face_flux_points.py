@@ -28,8 +28,22 @@ import numpy as np
 from autoflowcfd.fr.matrix_operators import compute_interpolation_matrix
 from autoflowcfd.fr.collapsed_basis import tet_modal_basis_and_grad, prism_modal_basis_and_grad
 from autoflowcfd.fr.face_flux_points_locate import map_ref_points, newton_locate_on_face
+from autoflowcfd.grid.connectivity.face_connectivity import CUBE_FACE_NAMES
 
-# 每个立方体面标识 -> (被坍缩掉的计算方向索引, 边界取值)
+# 每个立方体面标识 -> (被坍缩掉的计算方向索引, 边界取值)。
+# tet_native_v0~v3：native 四面体（路径C）没有 (axis,side) 这个概念，
+# 这四项复用同一个查找表的存储位置，把"被排除的局部顶点 0~3"直接放进
+# axis 槽位、side 槽位固定填 -1.0（只是为了让 face_flux_points_merge.py
+# 里 `_CF_AXIS=[v[0] for v in ...values()]`/`_CF_SIDE=[v[1] for v in
+# ...values()]` 这两个按字典插入顺序构造的查找表在扩到 10 项后依然
+# 给出有效值——下游消费方（core/fr_operators/face_kernels.py::
+# boundary_extrap 数组、inviscid_kernel.py/inviscid_kernel_colored.py
+# 的 celltype/axis 索引）按 celltype==2（native tet）时把这个"axis"值
+# 重新解释成 excluded_vertex，不是真的把 native 面塞进坍缩坐标的
+# (axis,side) 语义里，见 Part7 文档相关小节）。`build_cross_interp`
+# 的 native 分支（`target_face_code>=6`）不读这个字典，直接从
+# `target_face_code-6` 算 excluded_vertex，这里的扩展只服务于
+# `_CF_AXIS`/`_CF_SIDE` 这一条查找路径。
 CUBE_FACE_AXIS_SIDE = {
     "a=-1": (0, -1.0),
     "a=+1": (0, 1.0),
@@ -37,6 +51,10 @@ CUBE_FACE_AXIS_SIDE = {
     "b=+1": (1, 1.0),
     "c=-1": (2, -1.0),
     "c=+1": (2, 1.0),
+    "tet_native_v0": (0, -1.0),
+    "tet_native_v1": (1, -1.0),
+    "tet_native_v2": (2, -1.0),
+    "tet_native_v3": (3, -1.0),
 }
 
 ACCEPT_STRICT_REL = 1e-6  # 严格通过阈值：相对局部面特征尺度，供 face_flux_points_merge.py 判断是否需要记录容忍案例
@@ -154,6 +172,36 @@ def face_ref_grid(n1d: int, axis: int, side: float, sps_1d: np.ndarray) -> np.nd
     return pts
 
 
+def native_tet_face_points_physical(
+    n1d: int, excluded_vertex: int, cell_nodes: np.ndarray, sps_1d: np.ndarray
+) -> np.ndarray:
+    """native 四面体（路径C）某个真实面（对面被排除的局部顶点
+    `excluded_vertex` 给定）上，生成 `n1d*n1d` 个物理点位置——数量
+    与坍缩坐标方案的 `face_ref_grid` 完全一致（Part7 文档"二·五"节：
+    `n_fp` 是全网格统一的单一标量，native 面必须提供同样数量的点，
+    不能用原生最小面节点数 `(order+1)(order+2)/2`，否则破坏
+    `_KernelFaceData` flat 数组的统一形状假设）。
+
+    复用与棱柱三角形封盖（`map_prism_to_physical` 内部 c=-1/c=+1 分支）
+    完全相同的坍缩三角形网格构造（`cube_to_tri_rs`/`tri_barycentric`）
+    ——这里坍缩三角形只用来**选取物理点位置**（纯几何采样问题，与
+    "用哪套基函数表示体积场"无关，不涉及本次调查关心的对退化轴求导
+    病态），是安全的复用，不是重新引入坍缩坐标的病态机制。
+
+    Returns:
+        phys: (n1d*n1d, 3)
+    """
+    from ..grid.curved_mapping.curved_mapping import cube_to_tri_rs, tri_barycentric
+
+    face_vertex_idx = tuple(v for v in range(4) if v != excluded_vertex)
+    p_i, p_j, p_k = cell_nodes[face_vertex_idx[0]], cell_nodes[face_vertex_idx[1]], cell_nodes[face_vertex_idx[2]]
+
+    g1, g2 = np.meshgrid(sps_1d, sps_1d, indexing="ij")
+    r_tri, s_tri = cube_to_tri_rs(g1.ravel(), g2.ravel())
+    l1, l2, l3 = tri_barycentric(r_tri, s_tri)
+    return l1[:, None] * p_i + l2[:, None] * p_j + l3[:, None] * p_k
+
+
 def cell_info(mesh, cell_id: int):
     is_prism = cell_id < mesh.n_prism_cells
     node_ids = (
@@ -162,13 +210,33 @@ def cell_info(mesh, cell_id: int):
     return is_prism, mesh._node_coords[node_ids]
 
 
+def _get_v_sps_lu_native(order: int):
+    """native 四面体（路径C）版本体积 Vandermonde LU 缓存——键只用
+    `order`（native 没有 n1d/张量积立方体节点这个概念），复用
+    `native_simplex_basis.build_native_tet_operators` 内部已经对同一组
+    体积节点算过的模态取值，避免重复分解。"""
+    key = ("tet_native", order)
+    cached = _V_SPS_LU_CACHE.get(key)
+    if cached is not None:
+        return cached[0], cached[1]
+    from .native_simplex_basis import build_native_tet_operators, restricted_tet_modes, simplex3d_value, rst_to_abc
+
+    ref_rst, _ = build_native_tet_operators(order)
+    a, b, c = rst_to_abc(ref_rst[:, 0], ref_rst[:, 1], ref_rst[:, 2])
+    modes = restricted_tet_modes(order)
+    V_sps = np.column_stack([simplex3d_value(a, b, c, i, j, k) for (i, j, k) in modes])
+    from scipy.linalg import lu_factor
+    lu_piv = lu_factor(V_sps.T)
+    _V_SPS_LU_CACHE[key] = (lu_piv, modes)
+    return lu_piv, modes
+
+
 def build_cross_interp(
     mesh,
     n1d: int,
     sps_1d: np.ndarray,
     target_cell: int,
-    target_axis: int,
-    target_side: float,
+    target_face_code: int,
     source_phys: np.ndarray,
     char_length: float = 1.0,
     translation: np.ndarray = None,
@@ -176,7 +244,13 @@ def build_cross_interp(
     precomputed_resid: float = None,
 ) -> tuple:
     """求 target_cell 的解在给定 source_phys 目标物理点集上的取值算子，
-    形状 (n_source_pts, n_sps)。target_cell 的固定面由 (target_axis,target_side) 给定。
+    形状 (n_source_pts, n_sps)（n_sps=n1d**3，与 coarse 网格全局体积
+    数组宽度一致——native 四面体的有效自由度更少，按 Part6/7"补位对齐"
+    原则，插值矩阵多出的列恒为零，不改变全局数组统一形状这个既有假设，
+    见下方 native 分支）。target_cell 的固定面由 `target_face_code`
+    给定（`grid.connectivity.face_connectivity.CUBE_FACE_CODES` 编码：
+    0~5 是坍缩坐标 6 个立方体面，6~9 是 native 四面体的 4 个真实面，
+    见该模块与 Part7 文档第一节完整设计说明）。
 
     Args:
         translation: (3,) 或 None。周期边界配对面专用（见
@@ -187,12 +261,48 @@ def build_cross_interp(
             的物理坐标系平移到"目标"侧的物理坐标系。非周期面（绝大多数
             调用）传 None，等价于零平移。
         precomputed_free_coords: (n_pts, 2) 或 None。numba 并行 kernel
-            预计算的 Newton 自由坐标。提供时跳过 Newton 迭代，直接用于
-            构造插值矩阵（性能优化：避免对同一 cell-face 重复 Newton）。
+            预计算的 Newton 自由坐标（native 分支目前不支持这个预计算
+            路径，传入非 None 会报错——native 定位是解析闭式解，比
+            Newton 迭代本身还快，不需要这个性能优化，见 Part7 文档
+            "实现顺序建议"未覆盖 numba 层这一如实说明）。
         precomputed_resid: float 或 None。与 precomputed_free_coords 配套
             的预计算残差。
     """
     is_prism, cell_nodes = cell_info(mesh, target_cell)
+    is_tet_native = (not is_prism) and target_face_code >= 6
+
+    if is_tet_native:
+        if precomputed_free_coords is not None:
+            raise NotImplementedError(
+                "native 四面体分支暂不支持 precomputed_free_coords（numba 预计算路径）——"
+                "见 build_cross_interp 文档，闭式解本身已经足够快，未来如需要可以补上。"
+            )
+        excluded_vertex = target_face_code - 6
+        from .face_flux_points_locate import locate_native_tet_face_point
+
+        search_phys = source_phys if translation is None else source_phys - translation[np.newaxis, :]
+        rst, final_resid = locate_native_tet_face_point(
+            cell_nodes, excluded_vertex, search_phys, char_length=char_length
+        )
+
+        order = n1d - 1
+        from .native_simplex_basis import rst_to_abc, simplex3d_value
+
+        a, b, c = rst_to_abc(rst[:, 0], rst[:, 1], rst[:, 2])
+        _, modes = _get_v_sps_lu_native(order)
+        V_target = np.column_stack([simplex3d_value(a, b, c, i, j, k) for (i, j, k) in modes])
+
+        from scipy.linalg import lu_solve
+        lu_piv, _ = _get_v_sps_lu_native(order)
+        interp_native = lu_solve(lu_piv, V_target.T).T  # (n_pts, n_native_sps)
+
+        n_pts = source_phys.shape[0]
+        n_sps = n1d**3
+        interp = np.zeros((n_pts, n_sps))
+        interp[:, : interp_native.shape[1]] = interp_native
+        return interp, final_resid
+
+    target_axis, target_side = CUBE_FACE_AXIS_SIDE[CUBE_FACE_NAMES[target_face_code]]
 
     if precomputed_free_coords is not None:
         free_coords = precomputed_free_coords

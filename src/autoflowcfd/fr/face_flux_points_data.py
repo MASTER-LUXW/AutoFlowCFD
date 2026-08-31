@@ -17,6 +17,7 @@ from autoflowcfd.fr.face_flux_points import (
     cell_info,
     face_ref_grid,
     map_ref_points,
+    native_tet_face_points_physical,
 )
 from autoflowcfd.grid.curved_mapping.curved_mapping import PRISM_CUBE_FACES
 from autoflowcfd.grid.connectivity.face_connectivity import CUBE_FACE_CODES, CUBE_FACE_NAMES, FRFaceConnectivity
@@ -223,10 +224,19 @@ def _resolve_multi_source(
     Returns:
         (sources, worst_resid, char_length)
     """
-    axis, side = CUBE_FACE_AXIS_SIDE[CUBE_FACE_NAMES[code]]
     is_prism_c, nodes_c = cell_info(mesh, cell_id)
-    ref_grid_full = face_ref_grid(n1d, axis, side, sps_1d)
-    phys_fp_full = map_ref_points(is_prism_c, ref_grid_full, nodes_c)
+    if code >= 6:
+        # native 四面体（路径C）自身面——不存在 (axis,side) 概念，用
+        # face_flux_points.py::native_tet_face_points_physical 直接生成
+        # 与其余面数量一致（n1d*n1d）的物理点，见该函数与 Part7 文档
+        # "二·五"节。四面体不会触发下面的 multi-source（len==2）分支
+        # （那只发生在棱柱四边形侧面，见模块文档），所以这里的分支只
+        # 需要覆盖 len(group_faces)==1 这一条路径实际会用到的取值。
+        phys_fp_full = native_tet_face_points_physical(n1d, code - 6, nodes_c, sps_1d)
+    else:
+        axis, side = CUBE_FACE_AXIS_SIDE[CUBE_FACE_NAMES[code]]
+        ref_grid_full = face_ref_grid(n1d, axis, side, sps_1d)
+        phys_fp_full = map_ref_points(is_prism_c, ref_grid_full, nodes_c)
 
     def other_side(gf: int) -> tuple:
         if role == "owner":
@@ -242,13 +252,18 @@ def _resolve_multi_source(
     if len(group_faces) == 1:
         gf = group_faces[0]
         other_cell, other_code = other_side(gf)
-        other_axis, other_side_val = CUBE_FACE_AXIS_SIDE[CUBE_FACE_NAMES[other_code]]
         char_length = float(np.sqrt(max(face_conn.area[gf], 1e-300)))
+        # other_code>=6（native 四面体真实面）时强制丢弃 numba kernel 预算的
+        # (owner/neighbor axis,side) 语义自由坐标——build_cross_interp 的
+        # native 分支明确拒绝 precomputed_free_coords（见其文档），让它用
+        # 自己的解析闭式解重新定位（本身足够快，不是性能瓶颈）。这条分支
+        # 只会在"棱柱四边形侧面被拆成 1 条记录、对面恰好是 native 四面体"
+        # 时触发。
         interp, resid = build_cross_interp(
-            mesh, n1d, sps_1d, other_cell, other_axis, other_side_val, phys_fp_full,
+            mesh, n1d, sps_1d, other_cell, other_code, phys_fp_full,
             char_length=char_length, translation=cross_translation(gf),
-            precomputed_free_coords=precomputed_free_coords,
-            precomputed_resid=precomputed_resid,
+            precomputed_free_coords=precomputed_free_coords if other_code < 6 else None,
+            precomputed_resid=precomputed_resid if other_code < 6 else None,
         )
         return [(other_cell, interp)], resid, char_length
 
@@ -260,7 +275,6 @@ def _resolve_multi_source(
     worst_char_length = 1.0
     for gi, gf in enumerate(group_faces):
         other_cell, other_code = other_side(gf)
-        other_axis, other_side_val = CUBE_FACE_AXIS_SIDE[CUBE_FACE_NAMES[other_code]]
         half, is_standard = _classify_half(cell_node_ids, quad_local_idx, face_conn.face_node_ids[gf])
         is_lower_fp = is_lower_fp_standard if is_standard else is_lower_fp_flipped
         mask = is_lower_fp if half == "lower" else ~is_lower_fp
@@ -269,12 +283,16 @@ def _resolve_multi_source(
         if sub_pts.shape[0] > 0:
             sub_fc = None
             sub_resid = None
-            if gi == 0 and precomputed_free_coords is not None:
+            # 同上：other_code>=6（native 四面体）时不转发预算自由坐标，
+            # 见上方 len(group_faces)==1 分支的详细说明——这里 other_cell/
+            # other_code 是棱柱四边形每条子面各自的真实相邻单元，两条
+            # 子面完全可能对应两个不同的 native 四面体。
+            if gi == 0 and precomputed_free_coords is not None and other_code < 6:
                 sub_fc = precomputed_free_coords[mask]
                 sub_resid = precomputed_resid
             char_length = float(np.sqrt(max(face_conn.area[gf], 1e-300)))
             sub_interp, resid = build_cross_interp(
-                mesh, n1d, sps_1d, other_cell, other_axis, other_side_val, sub_pts,
+                mesh, n1d, sps_1d, other_cell, other_code, sub_pts,
                 char_length=char_length, translation=cross_translation(gf),
                 precomputed_free_coords=sub_fc,
                 precomputed_resid=sub_resid,
