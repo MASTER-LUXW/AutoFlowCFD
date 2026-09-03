@@ -148,14 +148,19 @@ def extrapolate_scalar_to_faces_kernel(
     真正实现每种边界类型各自正确的 k/omega ghost 值（WALL 上 k=0、
     omega 按 Wilcox 解析式随近壁距离变化，OUTLET/FARFIELD 用来流值，
     SYMMETRY 零法向梯度等）需要把 boundary_ghost_provider 的分组信息
-    接入这个纯标量输运模块，是一项更大的独立工作。这里先修正最基本、
-    对所有边界类型都成立的最小合理默认——零梯度（Neumann）ghost：
-    ghost 值取 owner 侧外插值本身，边界处 delta_phi=0，不再凭空引入
-    虚假跳跃/虚假源项。这不是"引入新阈值掩盖问题"，是把一个连"当前
-    场是否收敛"都不敏感、对任何输入都会触发的错误 ghost 值改成没有
-    额外假设的中性默认（对 SYMMETRY 严格物理正确；对 OUTLET/WALL 是
-    比"隐式当作0"更保守、更不容易引入数值毛刺的近似，真正的解析壁面
-    condition 留待后续工作补齐)。
+    接入这个纯标量输运模块。这里先修正最基本、对所有边界类型都成立的
+    最小合理默认——零梯度（Neumann）ghost：ghost 值取 owner 侧外插值
+    本身，边界处 delta_phi=0，不再凭空引入虚假跳跃/虚假源项。这不是
+    "引入新阈值掩盖问题"，是把一个连"当前场是否收敛"都不敏感、对任何
+    输入都会触发的错误 ghost 值改成没有额外假设的中性默认（对 SYMMETRY
+    严格物理正确；对 OUTLET/FARFIELD 是比"隐式当作0"更保守、更不容易
+    引入数值毛刺的近似，目前仍是这两种边界类型的实际处理方式）。
+    **WALL 上 k/omega 的解析 Dirichlet 值已经补齐**（见下方两段，
+    2026-08-21/2026-08-28 两次真实修复）——本段开头列出的"真正实现每种
+    边界类型各自正确的 ghost 值"这个目标，WALL 部分已完成，OUTLET/
+    FARFIELD/SYMMETRY 仍是本段描述的 Neumann 默认（SYMMETRY 本来就是
+    严格正确的物理边界条件，不需要另外补齐；OUTLET/FARFIELD 用来流值
+    这项仍是未来可选的精化方向，不是当前已知有问题的近似）。
 
     WALL 上 k=0 的 Dirichlet 处理（真实修复，2026-08-21）：k 在无滑移
     壁面上严格为零，这是标准 k-omega/SST 边界条件（Wilcox《Turbulence
@@ -293,6 +298,7 @@ def distribute_corrections_to_cells_kernel(
     owner_adj_row_exact, neighbor_adj_row_exact,
     true_area_weight,
     lift_native,
+    owner_is_primary, neighbor_is_primary,
 ):
     """将面通量点校正量分配回 SPs（prange + per-thread buffer）。
 
@@ -343,31 +349,41 @@ def distribute_corrections_to_cells_kernel(
 
     for f in prange(n_faces):
         tid = get_thread_id()
-        oc = owner_cell[f]
-        oc_code = owner_cube_face[f]
-        o_is_native = oc_code >= 6
 
-        # --- owner 侧分配 ---
-        if o_is_native:
-            weighted_o = _weighted_jump_native(raw_jump_fp[f], true_area_weight[f], raw_jump_fp.shape[1])
-            contrib_owner = lift_native[oc_code - 6] @ weighted_o  # (n_sps,)
-        else:
-            oax = owner_axis[f]
-            oside = owner_side[f]
-            weighted_o = _weighted_jump_collapsed(raw_jump_fp[f], owner_adj_row_exact[f], raw_jump_fp.shape[1])
-            g_prime_owner = g_right if oside > 0 else g_left
-            fp_ids_owner = dist_fp_of_sp[oax]
-            axis_coords_owner = dist_axis_coord_of_sp[oax]
-            contrib_owner = _distribute_point_scalar(
-                weighted_o, fp_ids_owner, axis_coords_owner, g_prime_owner
-            )
-        for s in range(n_sps):
-            dj = det_jacs[oc, s]
-            correction_per_thread[tid, oc, s] -= contrib_owner[s] / dj
+        # --- owner 侧分配（真实 bug 修复，2026-09-02，实现分布式湍流
+        # 模型时用非均匀流场端到端测试发现——此前本函数无条件对每个面
+        # 都写 owner 侧贡献，完全没有 owner_is_primary 过滤，与
+        # inviscid_kernel.py/viscous_flux_kernel.py 早已验证过、必须
+        # 有的"owner-primary/neighbor-primary 两段式累加"约定不一致
+        # （B-8 混合拆分面场景——同一个物理面被拆成2条记录，只有
+        # owner_is_primary=True 的那条记录才应该贡献 owner 侧——本函数
+        # 此前对两条记录都无条件累加，等价于把这批面的 owner 侧贡献
+        # 重复计入 2 次）。这不是分布式专属问题，单机路径遇到 B-8
+        # 混合拆分面同样会中招，只是没有被现有测试覆盖到。）
+        if owner_is_primary[f]:
+            oc = owner_cell[f]
+            oc_code = owner_cube_face[f]
+            o_is_native = oc_code >= 6
+            if o_is_native:
+                weighted_o = _weighted_jump_native(raw_jump_fp[f], true_area_weight[f], raw_jump_fp.shape[1])
+                contrib_owner = lift_native[oc_code - 6] @ weighted_o  # (n_sps,)
+            else:
+                oax = owner_axis[f]
+                oside = owner_side[f]
+                weighted_o = _weighted_jump_collapsed(raw_jump_fp[f], owner_adj_row_exact[f], raw_jump_fp.shape[1])
+                g_prime_owner = g_right if oside > 0 else g_left
+                fp_ids_owner = dist_fp_of_sp[oax]
+                axis_coords_owner = dist_axis_coord_of_sp[oax]
+                contrib_owner = _distribute_point_scalar(
+                    weighted_o, fp_ids_owner, axis_coords_owner, g_prime_owner
+                )
+            for s in range(n_sps):
+                dj = det_jacs[oc, s]
+                correction_per_thread[tid, oc, s] -= contrib_owner[s] / dj
 
-        # --- neighbor 侧分配（内部面）---
+        # --- neighbor 侧分配（内部面，同一处修复，见上方 owner 侧注释）---
         nc = neighbor_cell[f]
-        if nc >= 0:
+        if nc >= 0 and neighbor_is_primary[f]:
             nc_code = neighbor_cube_face[f]
             n_is_native = nc_code >= 6
             if n_is_native:
@@ -406,6 +422,7 @@ def distribute_corrections_to_cells_kernel_colored(
     owner_adj_row_exact, neighbor_adj_row_exact,
     true_area_weight,
     lift_native,
+    owner_is_primary, neighbor_is_primary,
 ):
     """图着色版本的标量校正分配 kernel。
 
@@ -423,31 +440,34 @@ def distribute_corrections_to_cells_kernel_colored(
 
     for fi in prange(n_faces_in_color):
         f = face_indices[fi]
-        oc = owner_cell[f]
-        oc_code = owner_cube_face[f]
-        o_is_native = oc_code >= 6
 
-        # --- owner 侧分配 ---
-        if o_is_native:
-            weighted_o = _weighted_jump_native(raw_jump_fp[f], true_area_weight[f], n_fp)
-            contrib_owner = lift_native[oc_code - 6] @ weighted_o
-        else:
-            oax = owner_axis[f]
-            oside = owner_side[f]
-            weighted_o = _weighted_jump_collapsed(raw_jump_fp[f], owner_adj_row_exact[f], n_fp)
-            g_prime_owner = g_right if oside > 0 else g_left
-            fp_ids_owner = dist_fp_of_sp[oax]
-            axis_coords_owner = dist_axis_coord_of_sp[oax]
-            contrib_owner = _distribute_point_scalar(
-                weighted_o, fp_ids_owner, axis_coords_owner, g_prime_owner
-            )
-        for s in range(n_sps):
-            dj = det_jacs[oc, s]
-            correction_sps[oc, s] -= contrib_owner[s] / dj
+        # --- owner 侧分配（真实 bug 修复，2026-09-02，与
+        # distribute_corrections_to_cells_kernel 同一处、同一理由，见
+        # 该函数模块文档"owner 侧分配"注释）---
+        if owner_is_primary[f]:
+            oc = owner_cell[f]
+            oc_code = owner_cube_face[f]
+            o_is_native = oc_code >= 6
+            if o_is_native:
+                weighted_o = _weighted_jump_native(raw_jump_fp[f], true_area_weight[f], n_fp)
+                contrib_owner = lift_native[oc_code - 6] @ weighted_o
+            else:
+                oax = owner_axis[f]
+                oside = owner_side[f]
+                weighted_o = _weighted_jump_collapsed(raw_jump_fp[f], owner_adj_row_exact[f], n_fp)
+                g_prime_owner = g_right if oside > 0 else g_left
+                fp_ids_owner = dist_fp_of_sp[oax]
+                axis_coords_owner = dist_axis_coord_of_sp[oax]
+                contrib_owner = _distribute_point_scalar(
+                    weighted_o, fp_ids_owner, axis_coords_owner, g_prime_owner
+                )
+            for s in range(n_sps):
+                dj = det_jacs[oc, s]
+                correction_sps[oc, s] -= contrib_owner[s] / dj
 
-        # --- neighbor 侧分配（内部面）---
+        # --- neighbor 侧分配（内部面，同一处修复）---
         nc = neighbor_cell[f]
-        if nc >= 0:
+        if nc >= 0 and neighbor_is_primary[f]:
             nc_code = neighbor_cube_face[f]
             n_is_native = nc_code >= 6
             if n_is_native:

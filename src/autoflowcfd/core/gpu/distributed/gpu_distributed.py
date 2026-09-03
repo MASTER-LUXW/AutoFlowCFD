@@ -78,6 +78,21 @@ class _CompactMeshDataView:
                 'inv_jacs': inv_jacs[compact_global_ids],
             }
 
+        # 真实 bug 修复（2026-09-02，实现 Order Continuation 时首次真正
+        # 端到端构造 `MultiGPUDistributedSolver`——用 numpy-as-cupy 替身
+        # 完整走一遍 __init__——才发现）：`GPUArrayManager.upload_mesh_
+        # data` 在 `mesh.jacobians_fine is not None` 时无条件读
+        # `mesh.n_sps_per_cell_fine`（`array_manager.py:204`），但本类
+        # 此前从未把它设成 `self` 的属性（只在下面这个 if 块内部当局部
+        # 变量 `n_fine` 用，构造完就丢失）——任何真正启用了过积分
+        # （`jacobians_fine`，P>=1 阶数的默认反混叠策略，几乎所有真实
+        # 生产网格都会触发）的 `MultiGPUDistributedSolver` 构造都会在
+        # `upload_mesh_data` 里 `AttributeError` 崩溃。此前从未被任何
+        # 测试捕捉到，是因为所有既有 GPU 分布式测试都只测试更底层的
+        # 独立函数（`distributed_compute_les_viscosity` 等价 GPU 函数），
+        # 从未真正走过 `MultiGPUDistributedSolver.__init__` 这条完整
+        # 构造路径。
+        self.n_sps_per_cell_fine = getattr(mesh, 'n_sps_per_cell_fine', None)
         self.jacobians_fine = None
         if getattr(mesh, 'jacobians_fine', None) is not None:
             n_fine = mesh.n_sps_per_cell_fine
@@ -126,6 +141,8 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         vel_inf: float = 33.33,
         p_inf: float = 101325.0,
         turb_model: str = "NONE",
+        turbulence_intensity: float = 0.01,
+        viscosity_ratio: float = 5.0,
     ):
         """初始化多 GPU 分布式求解器。
 
@@ -151,41 +168,56 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         # 真实 bug 修复（V2.0 专家组盲审发现，2026-08-27）：此前这里对
         # turb_model 不做任何校验，SST 之外的任何值（包括 DDES/WMLES/LES）
         # 会静默跳过下面的 GPUTurbulenceSST 初始化、`self.turb_model_gpu`
-        # 保持 None，等价于悄悄退化成层流，且没有任何报错/警告——CLI
-        # 侧同样从未真正传过 turb_model（另一处已修复的独立 bug），两者
-        # 叠加此前 `--multi-gpu --turbulence-model ddes` 之类的请求会
-        # 完全静默地跑出层流结果。
+        # 保持 None，等价于悄悄退化成层流，且没有任何报错/警告。
         #
-        # 收紧为只接受 'none'（V2.0 专家组盲审第4轮，2026-08-28，#1 修复的
-        # 一部分）：此前这里允许 'sst'，但 #1 修复过程中发现
-        # `_compute_turbulence_source_distributed` 本身有更深的架构缺口——
-        # `self.mesh_data`/`self.flat_face_gpu` 现在是按 local+halo 压缩
-        # 索引空间构造的（见 __init__ 下方 mesh_data 构造处的说明），但
-        # `self.wall_distance_gpu`（_init_wall_distance_distributed 构造）
-        # 只有 n_local 大小、且是 partition.local_cells 自身顺序，与压缩
-        # 索引空间是两套不同的排列——湍流源项计算需要把 grad_U 等场也按
-        # 压缩索引空间对齐（与残差计算同一个道理，见 compute_inviscid_
-        # residual_gpu 的 perm/inv_perm 重排文档），这部分尚未实现，
-        # 勉强让它跑起来只会得到看似正常、实际物理错误的湍流场（读到
-        # 错位的壁面距离/梯度）。与 DistributedFRSolver（CPU MPI 路径）
-        # 对不支持湍流模型的处理方式保持一致：显式拒绝，而不是让一个
-        # 尚未验证正确的路径悄悄跑完。
-        if turb_model is not None and str(turb_model).upper() != "NONE":
+        # SST 真正接入分布式状态与残差计算（2026-09-02，见
+        # `_compute_turbulence_source_distributed` 文档——复用单机
+        # `compute_source_terms_gpu`/`update_fields_gpu`/`compute_
+        # turbulence_transport_residual_gpu` 的数值逻辑，只是把 halo
+        # 交换+compact 索引空间重排接上，同一套模式已经在 CPU MPI 路径
+        # （`core/mpi/distributed_turbulence.py`）验证过）：此前 2026-08-28
+        # #1 修复只收紧到 'none' 是因为 wall_distance/compact 索引空间
+        # 对齐这部分工作本身还没做，不是设计上不可行——现在补齐。
+        # DDES/IDDES 已于 2026-09-02 真正移植（复用单机 GPUDDESModel/
+        # GPUIDDESModel 数值逻辑+CPU MPI 分布式同一套 halo 交换+compact
+        # 重排模式，见 `_compute_turbulence_source_distributed` 文档）。
+        # LES 同日移植——WALE 是纯代数模型（不像 SST 的 k/omega 有跨步
+        # ODE 积分状态），不需要"halo 交换持久状态"这层复杂度，只需要
+        # 用当前状态现算 mu_t，实现和验证成本远低于 SST/DDES/IDDES。
+        # WMLES（2026-09-02 续接）：此前认为"壁面剪应力修正需要分布式
+        # 面级外插——WALL 面可能横跨分区边界"是独立更大的架构缺口，
+        # 排查后发现这个理由不成立——WALL 面必然完全属于拥有该 owner
+        # 单元的单个 rank（边界面没有"neighbor 侧"，不是内部面，不
+        # 可能横跨分区），真正的障碍是 `compute_wmles_wall_stress_
+        # correction` 此前直接用全局 `mesh.face_flux_points`对象列表
+        # 逐面取值，不认 compact 索引空间——现已改用 `flat_face_
+        # override`+`boundary_ghost_provider.group_code`识别 WALL 面
+        # （与 CPU MPI 分布式同一处修复，见 core/utils/solver_helpers.py
+        # 文档），不再需要完整全局网格的边界几何信息。
+        if turb_model is not None and str(turb_model).upper() not in ("NONE", "SST", "DDES", "IDDES", "LES", "WMLES"):
             raise NotImplementedError(
                 f"MultiGPUDistributedSolver（--multi-gpu）目前只支持 "
-                f"turbulence_model='none'，收到的是 '{turb_model}'。SST 分布式 "
-                f"湍流源项计算还需要把 wall_distance/梯度场对齐到 local+halo "
-                f"压缩索引空间（#1 修复已解决平均流残差的这个问题，湍流输运"
-                f"部分尚未做，见本方法文档），请显式传入 --turbulence-model "
-                f"none（CLI `solve steady/transient` 的 --turbulence-model "
-                f"默认值是 'sst'，不显式覆盖就会触发本错误）或改用单机 "
-                f"GPU/CPU 后端。"
+                f"turbulence_model='none'/'sst'/'ddes'/'iddes'/'les'/'wmles'，"
+                f"收到的是 '{turb_model}'。请改用 --turbulence-model "
+                f"none/sst/ddes/iddes/les/wmles，或改用单机 GPU/CPU 后端。"
             )
 
         self.rank = rank if rank is not None else get_rank()
         self.n_ranks = n_ranks
         self.mesh = mesh
         self.ops = ops
+
+        # Order Continuation 支持（2026-09-02，见 core/gpu/distributed/
+        # gpu_distributed_order_continuation.py 模块文档）——与 CPU
+        # `DistributedFRSolver` 同一约定：`self.order`（目标阶数）/
+        # `self.current_order`（当前实际所在阶数）。构造函数没有单独的
+        # `order` 参数（`mesh`/`ops` 已经在调用方按目标阶数构造好），
+        # 直接从 `mesh.order` 推断。
+        self.order = int(getattr(mesh, 'order', 0))
+        self.current_order = self.order
+        self.order_continuation_enabled = True
+        self.flux_type = 'radau'
+
         self.mu_molecular = mu_molecular
         # mach_ref：与 CPU 版 FRSolver.__init__（fr_solver/solver.py）
         # 同一套计算方式/同一个用途，见该文件对应注释。物理下限钳制同样与
@@ -282,6 +314,15 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         compact_mesh_view = _CompactMeshDataView(
             mesh, self.dist_flat_face.compact_global_ids, self.dist_flat_face.base_flat.n_prism,
         )
+        # WMLES 壁面剪应力修正（见下方 wmles_model 构造处）需要一个
+        # numpy（非 GPU 上传）、compact 索引空间的 mesh-like 对象——
+        # `compute_wmles_wall_stress_correction` 读 `mesh.n_prism_cells`/
+        # `n_points_1d`/`jacobians['det_jacs']`，直接用 `self.mesh`（"传统
+        # 模式"下是完整全局网格）会按全局索引空间取值，压缩索引传进去
+        # 会读到不相关单元——`compact_mesh_view` 本身已经是这个 numpy
+        # compact 视图（升 GPU 前的中间产物），保存下来复用，不需要再
+        # 构造一份。
+        self._compact_mesh_view = compact_mesh_view
         self.mesh_data = self.array_mgr.upload_mesh_data(compact_mesh_view, ops)
         self.n_compact = compact_mesh_view.n_cells
         # perm/inv_perm 常驻 GPU，避免每步残差计算都重新上传（见
@@ -289,6 +330,17 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         # 它们的消费方式）。
         self._perm_gpu = cp.asarray(self.dist_flat_face.perm)
         self._inv_perm_gpu = cp.asarray(self.dist_flat_face.inv_perm)
+
+        # ops_data：与单机 GPUFRSolver 同一个约定（gpu_solver.py::
+        # `self.ops_data = {k: v for k, v in self.mesh_data.items()}`）——
+        # `upload_mesh_data(mesh, ops)` 本来就把网格几何和 FR 算子
+        # （D_3d_tet/D_3d_prism 等）打包进同一个字典，`mesh_data`/
+        # `ops_data` 两个参数名只是历史上分别读取的接口约定，内容
+        # 完全相同。`_compute_turbulence_source_distributed` 需要这个
+        # 属性名（单机版 compute_turbulence_source_gpu 复用的同一套
+        # `compute_physical_gradient_gpu(..., self.mesh_data,
+        # self.ops_data)` 调用约定），此前分布式类从未设置过。
+        self.ops_data = {k: v for k, v in self.mesh_data.items()}
 
         # GPU 直接 Halo 交换（支持 CUDA-aware MPI 和 staging buffer 两种模式）
         self.gpu_halo = GPUHaloExchange(
@@ -304,19 +356,126 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
 
         # 时间积分器
         self.time_integrator = GPUTimeIntegrator(scheme=time_scheme, cfl=cfl)
+        # DUAL_TIME 模式下 BDF2 需要的上一物理时间层状态（2026-09-02，
+        # 见 step() 里 DUAL_TIME 分支说明）——None 表示尚未跑过一个
+        # 物理步，退化为 BDF1，与单机 GPU `gpu_solver.py` 同一个约定。
+        self._dual_time_U_prev = None
 
-        # 初始化 GPU 湍流模型（与单机版一致）
+        # 初始化 GPU 湍流模型（与单机版 gpu_solver.py 同一套 Tu/VR 推导
+        # k_inf/omega_inf + k_max/omega_max 物理上界公式，2026-09-02
+        # 补齐——此前这里只构造了默认初值的 GPUTurbulenceSST，没有做
+        # 单机版早就有的这层初始化）。`self.turb_model_gpu` 只按
+        # `n_local_cells` 分配（与 `self.state`/`self.U_gpu` 一致，
+        # local+halo 的 k/omega 通过独立的 2-var halo 交换器实时获取，
+        # 不常驻）——与 CPU 分布式 SST（`distributed_turbulence.py`）
+        # 同一个设计。
         self.turb_model_gpu = None
-        if turb_model == "SST":
+        self.turb_halo_gpu = None
+        self.ddes_model_gpu = None
+        self.iddes_h_max_compact = None
+        self.iddes_h_wn_compact = None
+        self.des_length_scale_halo_gpu = None
+        if turb_model in ("SST", "DDES", "IDDES"):
             from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
             n_local_cells = self.partition.n_local_cells
-            self.turb_model_gpu = GPUTurbulenceSST(n_local_cells, n_sps, device_id)
-            logger.info(f"Rank {self.rank}: GPU SST model initialized")
+            nu = mu_molecular / max(rho_inf, 1e-10)
+            k_inf = 1.5 * (vel_inf * turbulence_intensity) ** 2
+            nu_t_inf = viscosity_ratio * nu
+            omega_inf = k_inf / max(nu_t_inf, 1e-30)
+            self.turb_model_gpu = GPUTurbulenceSST(
+                n_local_cells, n_sps, device_id, k_inf=k_inf, omega_inf=omega_inf
+            )
+            self.turb_model_gpu.k_max = 0.5 * vel_inf ** 2
+            self.turb_model_gpu.omega_max = 1e6
+            self.turb_halo_gpu = GPUHaloExchange(self.partition, n_sps=n_sps, n_vars=2, device_id=device_id)
+            logger.info(f"Rank {self.rank}: GPU SST model initialized "
+                        f"(k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
 
-        # 预计算壁面距离
+            # DDES/IDDES（2026-09-02）：与单机 GPU 路径同一套构造
+            # （gpu_solver.py），复用 CPU 版 des.py::compute_h_max_and_h_wn
+            # （纯逐单元几何量，与相邻单元/分区无关，"传统模式"下
+            # self.mesh 是完整全局网格，算完按 compact_global_ids 切一次
+            # 片即可，不需要新的跨 rank 几何交换）。des_length_scale_
+            # halo_gpu 是跨步持久状态专用的 1-var halo 交换器，见
+            # `_compute_turbulence_source_distributed` 对应修复文档。
+            if turb_model == "DDES":
+                from autoflowcfd.core.gpu.turbulence.gpu_turbulence_des import GPUDDESModel
+                from autoflowcfd.core.turbulence.des import compute_h_max_and_h_wn
+                self.ddes_model_gpu = GPUDDESModel()
+                # h_max（2026-09-02 补齐，与下面 IDDES 分支同一处几何量、
+                # 同一个持久化+按 compact_global_ids 切片策略）：
+                # `apply_to_sst_model_gpu` 现在优先用各向异性感知的
+                # max_edge 网格尺度，见 CPU 版 des.py 对应方法文档。
+                # 只需要 h_max，h_wn 是 IDDES 专属几何量。
+                h_max_cpu, _ = compute_h_max_and_h_wn(mesh)
+                self._iddes_h_max_global = h_max_cpu
+                compact_global_ids = self.dist_flat_face.compact_global_ids
+                with cp.cuda.Device(device_id):
+                    self.iddes_h_max_compact = cp.asarray(h_max_cpu[compact_global_ids])
+                logger.info(f"Rank {self.rank}: GPU DDES model initialized (based on SST)")
+            elif turb_model == "IDDES":
+                from autoflowcfd.core.gpu.turbulence.gpu_turbulence_des import GPUIDDESModel
+                from autoflowcfd.core.turbulence.des import compute_h_max_and_h_wn
+                self.ddes_model_gpu = GPUIDDESModel()
+                h_max_cpu, h_wn_cpu = compute_h_max_and_h_wn(mesh)
+                # 持久化全局（阶数无关）h_max/h_wn（2026-09-02，Order
+                # Continuation 支持需要——见 gpu_distributed_order_
+                # continuation.py 文档）：阶数切换后 compact_global_ids
+                # 会变，需要重新切片，但 compute_h_max_and_h_wn(mesh) 本身
+                # 是纯逐单元几何量、与阶数无关（见该函数文档），不需要
+                # 重新计算，只需要保留这份全局结果供重新切片。
+                self._iddes_h_max_global = h_max_cpu
+                self._iddes_h_wn_global = h_wn_cpu
+                compact_global_ids = self.dist_flat_face.compact_global_ids
+                with cp.cuda.Device(device_id):
+                    self.iddes_h_max_compact = cp.asarray(h_max_cpu[compact_global_ids])
+                    self.iddes_h_wn_compact = cp.asarray(h_wn_cpu[compact_global_ids])
+                logger.info(f"Rank {self.rank}: GPU IDDES model initialized (based on SST)")
+
+            if self.ddes_model_gpu is not None:
+                self.des_length_scale_halo_gpu = GPUHaloExchange(
+                    self.partition, n_sps=n_sps, n_vars=1, device_id=device_id
+                )
+
+        # LES（2026-09-02）：WALE 是纯代数模型（不像 SST 的 k/omega 有
+        # 跨步 ODE 积分状态），`_compute_turbulence_source_distributed`
+        # 用当前状态现算 mu_t，不需要任何跨步持久 halo 交换基础设施。
+        self.sgs_model_gpu = None
+        self._grid_scale_compact = None
+        if turb_model == "LES":
+            from autoflowcfd.core.gpu.turbulence.gpu_sgs import GPUWALEModel
+            self.sgs_model_gpu = GPUWALEModel()
+            logger.info(f"Rank {self.rank}: GPU LES with WALE SGS model initialized")
+
+        self._turbulence_intensity = turbulence_intensity
+        self._viscosity_ratio = viscosity_ratio
+
+        # WMLES（2026-09-02）：没有 k/omega ODE 状态，不需要
+        # turb_model_gpu/turb_halo_gpu——只需要真实的 CPU 版 WMLESModel
+        # 实例（与单机 gpu_solver.py/CPU FRSolver.__init__ 构造
+        # wmles_model 同一个模式：必须在下面 build_boundary_ghost_
+        # provider 之前构造，该函数用 getattr(self,"wmles_model",None)
+        # 判断 WALL 组是否要切换成 is_no_slip=False）+ wall_distance_gpu
+        # （y+ 计算需要，见下方统一计算）。
+        self.wmles_model = None
+        if turb_model == "WMLES":
+            from autoflowcfd.core.turbulence.wmles import WMLESModel
+            self.wmles_model = WMLESModel(nu=mu_molecular / max(rho_inf, 1e-10))
+            logger.info(f"Rank {self.rank}: GPU-distributed WMLES model initialized")
+
+        # 预计算壁面距离（compact 索引空间，见 _init_wall_distance_
+        # distributed 文档"真实 bug 修复"一节）
         self.wall_distance_gpu = None
-        if self.turb_model_gpu is not None:
+        if self.turb_model_gpu is not None or self.wmles_model is not None:
             self._init_wall_distance_distributed()
+
+        # 网格尺度 Delta = V^(1/3)（WALE 用，compact 索引空间——
+        # `mesh_data['cell_volumes']` 已经是 compact 大小，见
+        # `_CompactMeshDataView` 构造处，直接用不需要再切片）。
+        if self.sgs_model_gpu is not None:
+            cell_volumes_compact = self.mesh_data.get('cell_volumes')
+            delta = cp.abs(cell_volumes_compact) ** (1.0 / 3.0)
+            self._grid_scale_compact = cp.tile(delta[:, None], (1, n_sps))
 
         # 初始化 GPU 模态滤波
         self.filter_func_gpu = None
@@ -347,11 +506,59 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         # 的 ghost provider，而不是让调用方各自传 None 退化成
         # DefaultGhostProvider。
         from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-        self.wmles_model = None  # build_boundary_ghost_provider 用 getattr 防御性读取
-        self._turbulence_intensity = 0.01
-        self._viscosity_ratio = 5.0
+        # self.wmles_model 已在上面湍流模型初始化处构造好（WMLES 时为
+        # 真实 WMLESModel 实例，否则 None）——不在这里重置，
+        # build_boundary_ghost_provider 用 getattr(self,"wmles_model",
+        # None) 判断 WALL 组 is_no_slip 取值，必须能读到真实值。
+        # self._turbulence_intensity/_viscosity_ratio 已在上面湍流模型
+        # 初始化处设置（构造参数，不再在这里用硬编码默认值覆盖）。
         self._sem_num_eddies = 200
         self.boundary_ghost_provider = build_boundary_ghost_provider(self, bc_overrides={})
+
+        # 真实 bug 修复（2026-09-02，实现分布式湍流模型时排查发现，与
+        # 湍流本身无关——任何使用真实 WALL/INLET/OUTLET/FARFIELD/SYMMETRY
+        # 区分的分布式算例都会中招）：`build_boundary_ghost_provider(self,
+        # ...)` 用 `self.mesh`（完整全局网格）构造 `BoundaryGhostStateProvider.
+        # group_code`，其长度/索引是**全局**面编号（0..n_faces_global-1）。
+        # 但 `compute_boundary_ghost_states`（inviscid_kernel.py/gpu_
+        # inviscid.py）调用 `ghost_provider(f, ...)` 时，`f` 是本 rank
+        # 的 local+halo **压缩索引空间**面编号（0..n_faces_compact-1，
+        # 见 distributed_flat_face.py 模块文档"棱柱在前"排列）——两套
+        # 编号不是同一个索引空间的子区间（`partition.local_faces[i]`
+        # 给出压缩空间第 i 个面对应的真实全局面编号，不是恒等映射，见
+        # `build_distributed_flat_face` 用它切片 `global_flat.*
+        # [local_face_indices]` 构造 `base_flat` 处）——用压缩索引直接
+        # 查全局编号的 `group_code` 数组会读到不相关面的边界类型。真实
+        # 合成网格验证（2-rank 分区，12 个压缩面）：8/12（67%）面被
+        # 分配到错误的边界组编码。修复：把 `group_code` 重映射到本 rank
+        # 的压缩索引空间——`group_code[i]`（压缩空间）= 原
+        # `group_code[partition.local_faces[i]]`（全局空间）。只有真正
+        # 构造出 `BoundaryGhostStateProvider`（有 `group_code` 属性）时
+        # 才重映射，`None`/自定义 callable（没有这个属性）不受影响。
+        if self.boundary_ghost_provider is not None and hasattr(self.boundary_ghost_provider, 'group_code'):
+            self.boundary_ghost_provider.group_code = (
+                self.boundary_ghost_provider.group_code[self.partition.local_faces]
+            )
+
+        # WALL 边界面拓扑掩码（compact 索引空间，SST k/omega 输运
+        # Dirichlet BC 用，2026-09-02 补齐——与单机 GPUFRSolver 同一个
+        # 一次性缓存策略，见 gpu_solver.py 对应构造处）：`compute_wall_
+        # dirichlet_mask_gpu` 只需要 `mesh.face_connectivity.n_faces`
+        # （纯计数）和 `boundary_ghost_provider.group_code`（上面已经
+        # 重映射到 compact 空间）——用一个只提供这个计数的最小鸭子类型
+        # `mesh` 代替真正的全局网格，`n_faces` 直接取 `dist_flat_face.
+        # base_flat.n_faces`（compact 索引空间的面数，与 group_code 长度
+        # 一致）。
+        self._wall_mask_k_gpu = None
+        if self.turb_model_gpu is not None:
+            import types
+            from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_wall_dirichlet_mask_gpu
+            compact_mesh_stub = types.SimpleNamespace(
+                face_connectivity=types.SimpleNamespace(n_faces=self.dist_flat_face.base_flat.n_faces)
+            )
+            wall_mask_np = compute_wall_dirichlet_mask_gpu(compact_mesh_stub, self.boundary_ghost_provider)
+            with cp.cuda.Device(device_id):
+                self._wall_mask_k_gpu = cp.asarray(wall_mask_np)
 
         self.residual_history = []
         self.iteration = 0
@@ -374,6 +581,45 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         2. Staging buffer：GPU→CPU→MPI→CPU→GPU（只传输必要数据）
         """
         self.U_extended_gpu = self.gpu_halo.exchange(self.U_gpu)
+
+    @classmethod
+    def from_fully_distributed_package(cls, package: dict, n_ranks: int,
+                                        device_id=None, rank=None, root_context=None):
+        """真正的"完全分布式加载"构造入口（#1，2026-09-02）——与主
+        `__init__`（"传统模式"：每个 rank 独立加载完整全局网格）的关键
+        区别：`package` 是 root rank 预先算好、已经按本 rank 的 compact
+        索引空间切好的紧凑数据，本 rank 从未持有、也不需要持有完整
+        全局网格。与 CPU `DistributedFRSolver.from_fully_distributed_
+        package` 共用同一套 `build_fully_distributed_rank_package`/
+        `distributed_mesh_load_v2`（package 构造逻辑与后端无关）。
+
+        实现拆到独立模块 `gpu_distributed_fully_distributed.py`（控制
+        单文件行数，与 `_interpolate_to_new_order`/
+        `gpu_distributed_order_continuation.py` 同一个拆分动机），见该
+        模块文档完整说明（范围边界：支持 turbulence_model='none'/'sst'/
+        'ddes'/'iddes'/'wmles'/'les'，DUAL_TIME/checkpoint/Order
+        Continuation 均已接入）。
+
+        Args:
+            package: `build_fully_distributed_rank_package` 的返回值
+                （或 `distributed_mesh_load_v2` 经 MPI 收发后本 rank
+                收到的那一份）
+            n_ranks: MPI rank 总数
+            device_id: GPU 设备号（None 时按 rank 轮询分配）
+            rank: 当前 rank（None 时从 MPI 获取）
+            root_context: 仅 root rank 需要非 None——`distributed_mesh_
+                load_v2` 返回的第二个值，供 Order Continuation 使用，
+                见 `gpu_distributed_fully_distributed.py` 模块文档。
+
+        Returns:
+            MultiGPUDistributedSolver 实例
+        """
+        from autoflowcfd.core.gpu.distributed.gpu_distributed_fully_distributed import (
+            build_multi_gpu_solver_from_fully_distributed_package,
+        )
+        return build_multi_gpu_solver_from_fully_distributed_package(
+            cls, package, n_ranks, device_id=device_id, rank=rank, root_context=root_context,
+        )
 
     def _permute_to_compact(self, U_native):
         """把 halo 交换协议原生排列（local在前、halo在后）的场数组重排到
@@ -427,9 +673,7 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
 
         mu_t_field: 湍流涡粘度场（可选）——此前本方法签名只有 self，
         但调用方 step() 以 mu_t_field=mu_t_field 关键字调用它，签名/
-        调用不匹配，必然 TypeError（V2.0 专家组评审逐行核实）。目前
-        __init__ 已把 turb_model 收紧为只接受 'none'，这个参数恒为 None，
-        见 __init__ 里对应的 NotImplementedError 说明。
+        调用不匹配，必然 TypeError（V2.0 专家组评审逐行核实）。
 
         halo 交换/压缩索引空间重排逻辑与 compute_inviscid_residual_gpu
         完全一致，见该方法文档。
@@ -447,6 +691,40 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
             flat_face_cpu=self.dist_flat_face.base_flat,
             device_id=self.device_id,
         )
+
+        # WMLES 壁面剪应力修正（2026-09-02）：与单机 GPUFRSolver.
+        # compute_viscous_residual_gpu 同一个施加时机（残差组装阶段，
+        # 时间积分之前），直接调用 CPU 核心函数而不是
+        # gpu_turbulence_wmles.py 的单机 facade（后者用 `solver.mesh`
+        # 构造 extrap 所需的 n_prism_cells/jacobians，单机语境下就是
+        # compact 空间本身；分布式场景下 `self.mesh` 在"传统模式"下是
+        # **全局**网格，必须换成 `self._compact_mesh_view`，见该属性
+        # 构造处的说明），自己搭建同样结构的 facade——与 CPU MPI 分布式
+        # `distributed_compute_viscous_residual` 完全同一个模式。
+        if self.wmles_model is not None:
+            cp = get_cupy()
+            import types
+            from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
+            from autoflowcfd.core.utils.solver_helpers import compute_wmles_wall_stress_correction
+
+            U_compact_cpu = cp.asnumpy(U_compact)
+            Q_compact_cpu = conserved_to_primitive(U_compact_cpu[..., :5])
+            wall_distance_cpu = (
+                cp.asnumpy(self.wall_distance_gpu) if self.wall_distance_gpu is not None else None
+            )
+            facade = types.SimpleNamespace(
+                wmles_model=self.wmles_model, mesh=self._compact_mesh_view, ops=self.ops,
+                wall_distance=wall_distance_cpu,
+                state=types.SimpleNamespace(U=U_compact_cpu, Q=Q_compact_cpu),
+                boundary_ghost_provider=self.boundary_ghost_provider,
+            )
+            correction_cpu = compute_wmles_wall_stress_correction(
+                facade, flat_face_override=self.dist_flat_face.base_flat,
+            )
+            if correction_cpu is not None:
+                correction_compact = cp.asarray(correction_cpu)
+                residual_compact = residual_compact + correction_compact[..., :residual_compact.shape[-1]]
+
         residual_native = self._unpermute_from_compact(residual_compact)
         return residual_native[: self.partition.n_local_cells]
 
@@ -518,6 +796,18 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         visc_res = self.compute_viscous_residual_gpu(mu_t_field=mu_t_field)
         return inv_res + visc_res
 
+    def _interpolate_to_new_order(self, target_p: int) -> None:
+        """阶数切换（2026-09-02，见 core/gpu/distributed/
+        gpu_distributed_order_continuation.py 模块文档）——与 CPU
+        `DistributedFRSolver._interpolate_to_new_order` 同一个命名/
+        调用约定，供 `run_distributed_order_continuation`（CPU/GPU
+        共用同一份迭代循环，见 core/mpi/distributed_order_
+        continuation.py）统一调用。"""
+        from autoflowcfd.core.gpu.distributed.gpu_distributed_order_continuation import (
+            gpu_interpolate_to_new_order,
+        )
+        gpu_interpolate_to_new_order(self, target_p)
+
     def step(self, dt: float = 0.0) -> float:
         """执行一个分布式时间步（SSP-RK 多 stage）。
 
@@ -554,6 +844,46 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         # 文档新增的说明）；直接复用调用方传入的 `dt`（物理时间步长），
         # 对所有 rank/cell 一致，不做自适应步长，是与 CPU 分布式路径
         # 一致的、已被接受的简化，不是本次新引入的简化。
+        # 真实 bug 修复（2026-09-02，与 CPU 分布式 `DistributedFRSolver.
+        # step` 同一处修复、同一个理由——用户明确要求"不允许出现完成度
+        # 不是100%的功能点"后排查发现）：此前这里无论 `self.time_
+        # integrator.scheme` 是什么都无条件走下面手动展开的 RK stage
+        # 逻辑，`scheme` 只被用来查系数表——DUAL_TIME（真正时间精度的
+        # 瞬态仿真，DES/LES 场景理应使用的模式）请求了也完全无路可走。
+        # 与单机 GPU `gpu_solver.py::step` 同一个分派方式（`GPUTime
+        # Integrator.step_dual_time` 本身早已实现，只是从未被这条
+        # 分布式路径调用过）：构造一个把 trial U 临时写入 `self.U_gpu`
+        # 再调用既有 `_compute_total_residual_gpu`（自带 halo 交换）的
+        # 残差闭包，直接复用，不需要另起一套残差组装逻辑。
+        if self.time_integrator.scheme == "dual_time":
+            mu_t_field = self._compute_turbulence_source_distributed(dt)
+            U_flat = self.U_gpu.reshape(n_local * n_sps, 5)
+
+            def _spatial_residual(U_flat_trial):
+                U_trial = U_flat_trial.reshape(n_local, n_sps, 5)
+                saved_U = self.U_gpu
+                self.U_gpu = U_trial
+                try:
+                    res = self._compute_total_residual_gpu(mu_t_field=mu_t_field)
+                finally:
+                    self.U_gpu = saved_U
+                return (-res).reshape(n_local * n_sps, 5)
+
+            pseudo_dt = cp.full((n_local * n_sps,), dt, dtype=cp.float64)
+            max_inner_iter = getattr(self.time_integrator, 'dual_time_steps', 5)
+            U_new_flat = self.time_integrator.step_dual_time(
+                U_flat, _spatial_residual, pseudo_dt, dt_physical=dt,
+                solution_prev=self._dual_time_U_prev, max_inner_iter=max_inner_iter,
+                filter_func=self.filter_func_gpu,
+            )
+            self._dual_time_U_prev = U_flat.copy()
+            self.U_gpu = U_new_flat.reshape(n_local, n_sps, 5)
+            final_res_flat = _spatial_residual(U_new_flat)
+            residual_norm = self._global_residual_norm(final_res_flat)
+            self.residual_history.append(residual_norm)
+            self.iteration += 1
+            return residual_norm
+
         dt_flat = cp.full((n_local * n_sps, 1), dt, dtype=cp.float64)
 
         # RK 系数表
@@ -563,9 +893,11 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         beta = table["beta"]
         n_stages = table["stages"]
 
-        # 湍流源项求值（算子分裂，每个 step 开始时计算一次）——turb_model
-        # 已在 __init__ 收紧为只接受 'none'，这里恒返回 None。
-        mu_t_field = self._compute_turbulence_source_distributed()
+        # 湍流源项求值（算子分裂，每个 step 开始时计算一次，用当前——
+        # 上一步末尾——的状态，与 CPU 分布式 SST 同一个时序，见
+        # distributed_solver.py::step 文档）。turb_model_gpu 为 None
+        # （turbulence_model='none'）时恒返回 None。
+        mu_t_field = self._compute_turbulence_source_distributed(dt)
 
         U_flat = self.U_gpu.reshape(n_local * n_sps, 5)
         U0 = U_flat.copy()
@@ -646,18 +978,53 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         dt: float = 1e-4,
         tol: float = 1e-6,
         output_interval: int = 10,
+        checkpoint_callback=None,
+        phase_max_iter: Optional[int] = None,
+        residual_drop_threshold: float = 1e2,
     ) -> Dict[str, Any]:
         """执行分布式稳态求解循环。
+
+        真实 bug 修复（2026-09-02，与 CPU MPI 分布式 `DistributedFRSolver.
+        solve` 同一处修复、同一个理由——用户明确要求"不允许出现完成度
+        不是100%的功能点"后排查发现）：此前 `output_interval` 只控制
+        `print` 进度打印频率，没有任何中间 checkpoint 保存机制。补上
+        与单机 `FRSolver.solve`/CPU 分布式 `DistributedFRSolver.solve`
+        同一个约定的 `checkpoint_callback(solver, iteration)` 回调。
+
+        Order Continuation 自动分派（2026-09-02，见 core/gpu/distributed/
+        gpu_distributed_order_continuation.py 模块文档）：与 CPU
+        `DistributedFRSolver.solve()` 同一个判据——`self.order`（目标
+        阶数）>= 2 时自动改用逐阶爬坡（`run_distributed_order_
+        continuation`，CPU/GPU 共用同一份迭代循环），不需要调用方显式
+        请求。该函数返回 `SolverResult`（dataclass），这里适配转换成
+        本方法一贯的 dict 返回约定，不改变调用方（CLI）已有的
+        `result['final_residual']`/`result['iterations']` 访问方式。
 
         Args:
             max_iter: 最大迭代次数
             dt: 时间步长
             tol: 收敛容差
             output_interval: 输出间隔
+            checkpoint_callback: 可选，`callback(solver, iteration)`，
+                每步结束后调用一次
 
         Returns:
             结果字典
         """
+        if getattr(self, 'order_continuation_enabled', True) and self.order >= 2:
+            from autoflowcfd.core.mpi.distributed_order_continuation import (
+                run_distributed_order_continuation,
+            )
+            result = run_distributed_order_continuation(
+                self, max_iter, dt, tol, checkpoint_callback=checkpoint_callback,
+                phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold,
+            )
+            return {
+                'converged': result.converged,
+                'iterations': result.iterations,
+                'final_residual': result.final_residual,
+            }
+
         if is_root():
             print(f"Starting multi-GPU solve: {self.n_ranks} ranks, max_iter={max_iter}")
 
@@ -676,6 +1043,11 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
                         f"Multi-GPU Iter {i+1}: Residual = {res:.6e} | "
                         f"Time/step: {t_end-t_start:.3f}s"
                     )
+
+            if checkpoint_callback is not None:
+                # 全部 rank 都要调用——保存需要每个 rank 各自贡献 local
+                # cells 数据（见 CPU 分布式 solve 同一处注释）。
+                checkpoint_callback(self, i + 1)
 
             if res < tol:
                 converged = True

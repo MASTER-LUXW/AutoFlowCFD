@@ -33,20 +33,15 @@ class BackendType(str, Enum):
 class TurbulenceModel(str, Enum):
     """湍流模型枚举。
 
-    真实修复（V2.0 专家组盲审发现，2026-08-28，配套 #6 配置层接入）：
-    此前完全没有 `WMLES` 取值——FRSolver/CLI 真正支持的湍流模型是
-    NONE/SST/DDES/WMLES/LES（见 fr_solver/turbulence.py::
-    init_turbulence_models），这里却漏了 WMLES，导致 YAML/`create_steady_
-    config` 路径根本无法选择 WMLES。`SA`/`DES`（纯 Spalart-Allmaras、
-    非延迟 DES）保留只是为了不破坏已引用它们的既有代码/测试，但求解器
-    从未真正实现这两种模型——一旦真正接入求解器构造（见 api.py::
-    run_steady/run_transient 的 config 解析逻辑），选择这两个值会显式
-    报错而不是静默退化成其他模型或崩溃在无关的地方。
+    与求解器真正支持的集合逐一对应（见 fr_solver/turbulence.py::
+    init_turbulence_models）：NONE/SST/DDES/IDDES/WMLES/LES。此前这里
+    还有 `SA`（Spalart-Allmaras）/`DES`（非延迟 DES）两个值，但求解器
+    从未实现过这两种模型——配置层能表示、真正接入求解器构造时才报错，
+    是"信息源"层面的过度承诺；用户确认没有这两种模型的需求后
+    （2026-09-02）移除，不再保留这两个从未有对应实现的占位值。
     """
     NONE = "none"       # 层流 Navier-Stokes（无湍流模型）
     SST_KW = "sst_kw"
-    SA = "sa"            # 未实现，见上方类文档
-    DES = "des"          # 未实现（非延迟 DES），见上方类文档
     DDES = "ddes"
     IDDES = "iddes"
     WMLES = "wmles"
@@ -109,6 +104,21 @@ class SolverConfig:
             （历史教训见该参数在 FRSolver 里的文档）。CLI `solve steady`/
             `solve transient` 的 `--mu-molecular` 选项、或本 YAML 配置的
             `mu_molecular` 键，都改这一个字段。
+        phase_max_iter: Order Continuation（`order>=2` 时触发）非最终
+            阶段（P0/P1/...，不含目标阶数）各自的最大迭代步数上限。
+            None（默认）时保留旧行为——`max_iter // len(orders)` 按阶段
+            数机械均分，目标阶数与非最终阶段拿到同一份额，与目标阶数
+            本身是否已经收敛毫无关系。传具体值后非最终阶段各自最多跑
+            这么多步，**目标阶数改为吃掉这次求解剩余的全部步数**，不再
+            随阶段数被稀释——见 `core/utils/order_continuation.py::
+            run_order_continuation` 同名参数文档（2026-09-01，用户直接
+            指出"不想机械地按 max_iter // len(orders) 判断"）。CLI
+            `--phase-max-iter` 选项、或本 YAML 配置的 `phase_max_iter`
+            键，都改这一个字段。
+        residual_drop_threshold: 同上，仅 Order Continuation 生效，单个
+            非最终阶段判定"可以提前升阶"的残差下降倍数，默认 100（降 2
+            个数量级），原来硬编码，现在可配置。CLI
+            `--residual-drop-threshold` 选项对应本字段。
 
     **关于 C-01 的 flux_type (Radau/Gauss) 参数**：本类刻意不提供这个
     字段。V2.0 专家组评审核实：`fr/matrix_operators.py::
@@ -138,6 +148,8 @@ class SolverConfig:
     turbulence_intensity: float = 0.01  # 来流湍流强度 Tu（默认 1%）
     viscosity_ratio: float = 5.0  # 来流粘性比 VR = nu_t/nu
     mu_molecular: float = 1.8e-5  # 分子动力粘度 (Pa*s)，默认标准状态下空气
+    phase_max_iter: Optional[int] = None  # Order Continuation 非最终阶段最大步数上限，None=旧行为(按阶段数均分)
+    residual_drop_threshold: float = 1e2  # Order Continuation 单阶段提前升阶所需的残差下降倍数
 
     def __post_init__(self):
         """初始化后验证配置。"""

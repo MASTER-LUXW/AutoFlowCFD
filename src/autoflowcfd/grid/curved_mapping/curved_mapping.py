@@ -379,27 +379,52 @@ class CurvedMapping:
         用它的均匀性做 GCL 判据在数学上是错误的判据，已废弃。
 
         度量项 adj(J) 本身现在由 tet_exact_jacobian/prism_exact_jacobian
-        解析求出（见该函数文档），不再有谱微分矩阵的截断/插值误差；这里
-        散度检验用的 D_3d_tet/D_3d_prism 仍是流场残差组装实际使用的同一套
+        解析求出（见该函数文档），不再有谱微分矩阵的截断/插值误差；棱柱
+        这里散度检验用的 D_3d_prism 仍是流场残差组装实际使用的同一套
         算子，真实网格验证（含 det(J)~2e-14 的极端偏斜过渡区四面体）残差
         降到 ~1e-19，与单元偏斜程度、det(J) 大小无关。
 
+        四面体（2026-09-03 更正，坍缩坐标四面体基已删除，见
+        fr/operators.py 模块文档）：不再走 `tet_exact_jacobian`（对 (a,b,c)
+        坍缩坐标求导，与现在的 native 单纯形基参考坐标 (r,s,t) 不是
+        同一个参考系，`_select_d3d("tet")` 现在返回的 `D_native_tet_
+        padded` 是对 (r,s,t) 求导，混用会导致链式法则本身就是错的，不只是
+        节点布局不匹配）。改用与生产残差组装同一套 native machinery：
+        `compute_native_tet_jacobian` 给出的常数 adj(J)（native 直边
+        单元，不依赖参考坐标位置，见该函数文档），广播到全部 `n_sps`
+        槽位后用 `D_native_tet_padded` 微分——常数场的离散散度检验退化
+        为"D 是否正确零化常数场"这一更基本但同样有效的正确性判据（真实
+        直边四面体的度量场在 native 参考系下就是严格常数，这不是近似）。
+
         Args:
-            cell_type: "tet"/"prism" 用解析精确雅可比 + 坍缩坐标专用散度
-                算子；此时须提供 cell_nodes/ref_cube_sps。
+            cell_type: "tet"/"prism" 用解析精确雅可比 + 专用散度算子；
+                此时须提供 cell_nodes（"tet" 不再需要 ref_cube_sps，见
+                上文）。
 
         Returns:
             residual: 形状 (n_sps, 3)，每个 SP、每个物理方向的度量恒等式残差
         """
-        D_3d = self._select_d3d(cell_type)
-        jac_data = self.compute_jacobian(
-            phys_nodes, cell_type=cell_type, cell_nodes=cell_nodes, ref_cube_sps=ref_cube_sps
-        )
-        det_jacs = jac_data["det_jacs"]
-        inv_jacs = jac_data["inv_jacs"]
-        adj = det_jacs[:, None, None] * inv_jacs  # adj[:, m, i] = adj(J)_{m,i}
+        if cell_type == "tet":
+            from ...fr.native_simplex_basis import compute_native_tet_jacobian
 
-        n_sps = phys_nodes.shape[0]
+            D_3d = self.operators.D_native_tet_padded
+            n_sps = D_3d.shape[0]
+            det_j, adj_const = compute_native_tet_jacobian(cell_nodes)
+            if det_j <= 0:
+                raise MeshDistortionError(
+                    f"Negative or zero Jacobian determinant detected in native tet! det(J)={det_j:.6e}."
+                )
+            adj = np.broadcast_to(adj_const, (n_sps, 3, 3))
+        else:
+            D_3d = self._select_d3d(cell_type)
+            jac_data = self.compute_jacobian(
+                phys_nodes, cell_type=cell_type, cell_nodes=cell_nodes, ref_cube_sps=ref_cube_sps
+            )
+            det_jacs = jac_data["det_jacs"]
+            inv_jacs = jac_data["inv_jacs"]
+            adj = det_jacs[:, None, None] * inv_jacs  # adj[:, m, i] = adj(J)_{m,i}
+            n_sps = phys_nodes.shape[0]
+
         residual = np.zeros((n_sps, 3))
         for i in range(3):
             for m in range(3):

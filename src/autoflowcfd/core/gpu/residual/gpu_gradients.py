@@ -18,10 +18,35 @@ def compute_physical_gradient_gpu(field, mesh_data, ops_data):
 
     与 core/fr_gradients.py::compute_physical_gradient 公式完全一致。
 
+    真实 bug 修复（2026-09-03，排查"native 是否已补全"时用真实含
+    native 四面体的合成网格 + numpy-as-cupy 替身首次决定性对照 CPU
+    才发现——本机没有真实 CuPy，这个函数此前从未被真正执行验证过）：
+    四面体分支此前无条件用 `ops_data['D_3d_tet']`（坍缩坐标微分算子），
+    从未像 `gpu_inviscid_volume.py::compute_volume_term_gpu` 那样按
+    `tet_basis_mode` 分派到 `D_native_tet_padded`——`tet_basis_mode=
+    "native"` 时四面体的物理梯度因此用了完全错误的参考空间微分算子，
+    与 CPU 版 `core/fr_gradients.py::compute_physical_gradient`（早已
+    正确按 `mesh.tet_basis_mode` 分派）不一致，误差量级与场本身同阶
+    （不是浮点噪声）。棱柱不受影响（棱柱不区分 collapsed/native，两种
+    模式下都用同一个 `D_3d_prism`），这也是此前"均匀/近似均匀"这类
+    测试从未捕捉到的原因——需要真正非零、且四面体单元占比不小的场景
+    才会暴露。
+
+    修复：不需要额外的 `tet_basis_mode` 显式参数——`ops_data` 本身已经
+    足够自描述：`generate_fr_operators`/`prepare_ops_data` 只在
+    `tet_basis_mode="native"` 时才会往 `ops_data` 里写
+    `D_native_tet_padded` 这个 key（collapsed 模式下该 key 根本不存在，
+    见 `compute_volume_term_gpu` 同一处判据"纯坍缩坐标网格下
+    `ops.D_native_tet_padded` 恒为 None，不写入 data"的说明）——用
+    `'D_native_tet_padded' in ops_data` 自描述判断，不需要改动本函数
+    任何一个调用点的签名（分布在 gpu_viscous.py/gpu_solver_io.py/
+    gpu_distributed_init.py/gpu_scalar_transport.py 共 7 处）。
+
     Args:
         field: CuPy 数组 (n_cells, n_sps, n_field_vars)
         mesh_data: dict，包含 'inv_jacs', 'n_prism' 等
-        ops_data: dict，包含 'D_3d_tet', 'D_3d_prism' 等
+        ops_data: dict，包含 'D_3d_tet', 'D_3d_prism'，native 网格上
+            还含 'D_native_tet_padded' 等
 
     Returns:
         grad: CuPy 数组 (n_cells, n_sps, n_field_vars, 3)
@@ -43,8 +68,12 @@ def compute_physical_gradient_gpu(field, mesh_data, ops_data):
 
     if n_cells > n_prism:
         n_tet = n_cells - n_prism
-        D_3d_tet = ops_data['D_3d_tet']  # (n_sps, n_sps, 3)
-        D2 = cp.ascontiguousarray(D_3d_tet.transpose(0, 2, 1).reshape(n_sps * 3, n_sps))
+        D_tet_op = (
+            ops_data['D_native_tet_padded']
+            if 'D_native_tet_padded' in ops_data
+            else ops_data['D_3d_tet']
+        )  # (n_sps, n_sps, 3)
+        D2 = cp.ascontiguousarray(D_tet_op.transpose(0, 2, 1).reshape(n_sps * 3, n_sps))
         grad_comp[n_prism:] = gpu_contract_shared_operator_1axis(
             D2, field[n_prism:]
         ).reshape(n_tet, n_sps, 3, n_field_vars)

@@ -117,3 +117,41 @@ def test_gpu_wall_boundary_uses_real_ghost_state():
     max_diff = np.max(np.abs(cpu_residual - gpu_residual_np))
     rel_diff = max_diff / p_inf
     assert rel_diff < 1e-6, f"max|cpu-gpu|={max_diff:.3e}, rel={rel_diff:.3e}"
+
+
+@pytest.mark.parametrize("order", [1, 2])
+def test_gpu_matches_cpu_native_tet_basis_nonuniform_flow(order):
+    """native 四面体基（路径C）GPU 移植（2026-09-02）crosscheck——非均匀
+    扰动流场+湍流涡粘场，覆盖体积项 D_native_tet_padded 分派 + 界面项
+    面校正分配的 lift_native 分派（owner-primary/neighbor-primary 各一
+    处）。粘性 kernel 不需要 side_factor/true_normal 安全阀分支（与无粘
+    不同，见 gpu_viscous.py 模块文档），Q_o/Q_n 状态外插沿用既有的
+    owner_src0/neighbor_src0 机制（该机制本身与 tet_basis_mode 无关，
+    已在 CPU 端验证过对 native 面同样正确）。"""
+    mesh = _build_synthetic_mixed_mesh(order, tet_basis_mode="native")
+    rng = np.random.default_rng(order * 4000 + 41)
+
+    rho_inf, u_inf, v_inf, w_inf, p_inf = 1.225, 30.0, 5.0, -3.0, 101325.0
+    Q_inf = np.array([rho_inf, u_inf, v_inf, w_inf, p_inf])
+    U_inf = primitive_to_conserved(Q_inf)
+    U = np.tile(U_inf, (mesh.n_cells, mesh.n_sps_per_cell, 1))
+
+    n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
+    Q = conserved_to_primitive(U)
+    Q[..., 0] *= 1.0 + rng.uniform(-0.05, 0.05, size=(n_cells, n_sps))
+    Q[..., 1] += rng.uniform(-5.0, 5.0, size=(n_cells, n_sps))
+    Q[..., 2] += rng.uniform(-5.0, 5.0, size=(n_cells, n_sps))
+    Q[..., 3] += rng.uniform(-5.0, 5.0, size=(n_cells, n_sps))
+    Q[..., 4] *= 1.0 + rng.uniform(-0.05, 0.05, size=(n_cells, n_sps))
+    U = primitive_to_conserved(Q)
+    mu_t_field = rng.uniform(0.0, 5e-3, size=(n_cells, n_sps))
+
+    cpu_residual = compute_viscous_residual_fr(U, mesh, mesh.operators, MU, PR, mu_t_field=mu_t_field)
+    gpu_residual = compute_viscous_residual_fr_gpu(U, mesh, mesh.operators, MU, PR, mu_t_field=mu_t_field)
+    gpu_residual_np = cp.asnumpy(gpu_residual) if not isinstance(gpu_residual, np.ndarray) else gpu_residual
+
+    max_diff = np.max(np.abs(cpu_residual - gpu_residual_np))
+    scale = max(np.max(np.abs(cpu_residual)), 1.0)
+    assert max_diff < max(1e-6, scale * 1e-6), (
+        f"native P={order}: max|cpu-gpu|={max_diff:.3e}, scale={scale:.3e}"
+    )

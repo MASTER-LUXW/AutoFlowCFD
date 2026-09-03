@@ -140,6 +140,14 @@ def init_turbulence_models(solver, n_cells: int, n_sps: int) -> None:
         _set_turbulence_bounds(solver)
         _update_production_ramp(solver)
         solver.ddes_model = DDESModel()
+        # h_max（2026-09-02 补齐，与下面 IDDES 分支同一处几何量、同一个
+        # 一次性缓存策略）：`apply_to_sst_model` 现在优先用各向异性感知
+        # 的 max_edge 网格尺度而不是 cube_root(V)，见该方法文档——本项目
+        # 高度依赖棱柱边界层网格，cube_root 会系统性低估扁平单元的 Δ。
+        # 只需要 h_max（第一个返回值），h_wn 是 IDDES 专属几何量，DDES
+        # 不用，但 compute_h_max_and_h_wn 只有一个返回两者的接口，丢弃
+        # 用不到的 h_wn 即可。
+        solver._iddes_h_max, _ = compute_h_max_and_h_wn(solver.mesh)
         print(f"   [OK] DDES model initialized (based on SST, "
               f"k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e}, "
               f"production ramp: {solver._turb_production_ramp_steps} steps)")
@@ -160,7 +168,15 @@ def init_turbulence_models(solver, n_cells: int, n_sps: int) -> None:
               f"production ramp: {solver._turb_production_ramp_steps} steps)")
 
     elif solver.turb_model_name == "WMLES":
-        solver.wmles_model = WMLESModel()
+        # `solver.wmles_model` 已在 `FRSolver.__init__` 第 3 步提前构造
+        # （必须先于 boundary_ghost_provider 构造，见该处说明——2026-
+        # 09-02 修复的构造顺序 bug）；这里不再重复构造，只在它意外为
+        # None 时（例如某个不经过 FRSolver.__init__ 第 3 步、直接调用
+        # 本函数的测试/脚本场景）按 GPU 版同一个公式补建，避免真正生产
+        # 路径下出现两个物理等价但对象不同的 WMLESModel 实例。
+        if getattr(solver, "wmles_model", None) is None:
+            rho_inf = solver.freestream.get("rho_inf", 1.225)
+            solver.wmles_model = WMLESModel(nu=solver.mu_molecular / max(rho_inf, 1e-10))
         solver.sgs_model = WALEModel()
         print(f"   [OK] WMLES model initialized")
 
@@ -438,7 +454,17 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
             )
         else:
             cell_volumes = solver._get_cell_volumes()
-            solver.ddes_model.apply_to_sst_model(solver.turb_model, d_wall, cell_volumes, nu_field, grad_vel)
+            # h_max（2026-09-02）：`init_turbulence_models` 的 DDES 分支
+            # 现在也会设置 `solver._iddes_h_max`（与 IDDES 同一处几何量、
+            # 同一个一次性缓存，见该分支文档）——传入后 apply_to_sst_
+            # model 改用各向异性感知的 max_edge 网格尺度，不再是
+            # cube_root(V)。`getattr` 兜底：极少数不经过 init_
+            # turbulence_models（例如脱离 solver 直接构造 DDESModel 的
+            # 测试场景）没有这个属性时，退化为 cube_root，不报错。
+            solver.ddes_model.apply_to_sst_model(
+                solver.turb_model, d_wall, cell_volumes, nu_field, grad_vel,
+                h_max=getattr(solver, '_iddes_h_max', None),
+            )
 
     # Sk/S_omega 是 compute_source_terms 按标准 SST 公式算出的 rho*k、
     # rho*omega 方程源项（P_k/D_k/P_omega/D_omega/CD_omega 都显式带 rho
@@ -498,6 +524,7 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
         # 的输入重新检查同一个阈值必然是 no-op，不会改变数值结果。
         transport_k, transport_omega = compute_turbulence_transport_residual(
             solver, grad_vel=grad_vel, grad_k=grad_k, grad_omega=grad_omega,
+            flat_face_override=getattr(solver, "_turbulence_flat_face_override", None),
         )
 
     solver.turb_model.update_fields(dt, dk_dt, domega_dt,

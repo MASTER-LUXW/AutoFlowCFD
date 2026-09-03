@@ -28,9 +28,45 @@ from autoflowcfd.grid.curved_mapping.curved_mapping import (
     tet_barycentric,
     tri_barycentric,
 )
-from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
+from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh, _MockNodes, _MockCells
+from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
 
 GAMMA = 1.4
+
+
+def _build_pure_tet_mesh(order: int) -> HighOrderMesh:
+    """纯四面体合成网格（无棱柱）——验证 order=3 四面体高阶导出时不能用
+    `_build_synthetic_mixed_mesh`（含棱柱，棱柱侧限制在 order<=2，会在
+    到达四面体检查之前先因棱柱阶数超限报错，测不到四面体本身的行为）。
+    """
+    from types import SimpleNamespace
+    nodes = np.array(
+        [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1]],
+        dtype=float,
+    )
+    tet_conn = np.array([[0, 1, 2, 3], [1, 2, 3, 4]], dtype=np.int32)
+    mock_volume = SimpleNamespace(
+        cell_count=len(tet_conn),
+        nodes=_MockNodes(nodes),
+        cells=_MockCells(tet_conn),
+        prism_cells=_MockCells(np.zeros((0, 6), dtype=np.int32)),
+    )
+    mesh = HighOrderMesh(order=order)
+    mesh.load_from_volume_mesh(mock_volume)
+    return mesh
+
+
+def _cubic_field(xyz: np.ndarray) -> np.ndarray:
+    """物理空间三次多项式，P=3 下应能被 FR 解精确表示——用于决定性
+    验证 order=3 四面体高阶导出（含新增的面内部点）。"""
+    x, y, z = xyz[..., 0], xyz[..., 1], xyz[..., 2]
+    return (
+        101325.0 + 50.0 * x - 30.0 * y + 20.0 * z
+        + 5.0 * x * y - 3.0 * y * z + 2.0 * x * z
+        + 1.5 * x**2 - 0.8 * y**2 + 0.4 * z**2
+        + 0.7 * x**3 - 0.5 * y**3 + 0.3 * z**3
+        + 0.2 * x * y * z
+    )
 
 
 def _quadratic_field(xyz: np.ndarray) -> np.ndarray:
@@ -80,9 +116,19 @@ class TestVtkNodeLayoutCounts:
         bary = _tet_vtk_node_barycentrics(2)
         assert bary.shape == (10, 4)
 
-    def test_tet_order3_raises_not_implemented(self):
+    def test_tet_order3_has_20_nodes(self):
+        """order=3 已实现（2026-09-02）：4 角点 + 6 棱各 2 内部点(12) +
+        4 面各 1 内部点(4) = 20 = C(3+3,3)（标准四面体 Lagrange 节点
+        计数公式），无体内部点（order<4）。"""
+        bary = _tet_vtk_node_barycentrics(3)
+        assert bary.shape == (20, 4)
+        np.testing.assert_allclose(bary.sum(axis=1), 1.0, atol=1e-12)
+
+    def test_tet_order4_raises_not_implemented(self):
+        """order>=4 已实测证伪（面内部点排列对面顶点顺序敏感，见模块
+        文档），显式拒绝而不是虚报支持。"""
         with pytest.raises(NotImplementedError):
-            _tet_vtk_node_barycentrics(3)
+            _tet_vtk_node_barycentrics(4)
 
     def test_wedge_order1_is_just_corners(self):
         tri_bary, z = _wedge_vtk_node_layout(1)
@@ -158,13 +204,84 @@ class TestExportHighorderVtk:
         assert rel_err < 1e-6, f"Interior-probe mismatch: rel_err={rel_err:.3e}"
 
     def test_order_above_max_supported_raises(self, tmp_path):
+        """混合网格（含棱柱）在 order=3 仍应报错——棱柱侧限制在
+        order<=2，这个检查独立于四面体侧新增的 order=3 支持。"""
         mesh = _build_synthetic_mixed_mesh(order=3)
-        assert mesh.order > _MAX_SUPPORTED_ORDER
+        assert mesh.n_prism_cells > 0
         U = np.zeros((mesh.n_cells, mesh.n_sps_per_cell, 5))
         U[..., 0] = 1.0
         U[..., 4] = 1.0
         with pytest.raises(NotImplementedError):
             export_highorder_vtk(mesh, U, tmp_path / "should_not_be_written.vtu")
+
+
+class TestExportHighorderVtkOrder3Tet:
+    """order=3 四面体高阶导出端到端决定性验证（2026-09-02 新增）——与
+    `TestExportHighorderVtk`（order=2）同一套判据，换成纯四面体网格
+    （无棱柱，避免棱柱侧的 order<=2 限制先触发）+ 三次解析场（P=3 下
+    应精确表示，含新增的面内部点这条链路）。
+    """
+
+    def _build_conserved_field(self, mesh):
+        n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
+        p_at_sps = _cubic_field(mesh.sps_coords)
+        U = np.zeros((n_cells, n_sps, 5))
+        U[..., 0] = 1.0
+        U[..., 4] = p_at_sps / (GAMMA - 1.0)
+        return U
+
+    def test_interpolated_node_values_match_analytic_field(self, tmp_path):
+        mesh = _build_pure_tet_mesh(order=3)
+        U = self._build_conserved_field(mesh)
+
+        out_path = tmp_path / "highorder_order3_test.vtu"
+        export_highorder_vtk(mesh, U, out_path, fields=['pressure'])
+        assert out_path.exists()
+
+        import pyvista as pv
+        grid = pv.read(str(out_path))
+        assert grid.n_cells == mesh.n_cells
+
+        node_pressures = grid.point_data['Pressure']
+        node_points = grid.points
+        expected = _cubic_field(node_points)
+
+        rel_err = np.max(np.abs(node_pressures - expected)) / np.max(np.abs(expected))
+        assert rel_err < 1e-6, f"order=3 node-value interpolation mismatch: rel_err={rel_err:.3e}"
+
+    def test_probed_interior_value_matches_analytic_field(self, tmp_path):
+        """比节点值比较更强的判据：VTK 自身形函数在单元内部非节点位置
+        重新插值——真正验证 order=3 新增的面内部点排序（4个面各1个，
+        见 _TET_FACES_VTK 文档）对 VTK 读取器同样正确。"""
+        mesh = _build_pure_tet_mesh(order=3)
+        U = self._build_conserved_field(mesh)
+
+        out_path = tmp_path / "highorder_order3_probe_test.vtu"
+        export_highorder_vtk(mesh, U, out_path, fields=['pressure'])
+
+        import pyvista as pv
+        grid = pv.read(str(out_path))
+
+        cell_centers = grid.cell_centers().points
+        sampled = pv.PolyData(cell_centers).sample(grid)
+        valid = sampled['vtkValidPointMask'].astype(bool)
+        assert np.any(valid), "No successfully probed points"
+
+        sampled_pressure = sampled['Pressure'][valid]
+        expected = _cubic_field(cell_centers[valid])
+
+        rel_err = np.max(np.abs(sampled_pressure - expected)) / np.max(np.abs(expected))
+        assert rel_err < 1e-6, f"order=3 interior-probe mismatch: rel_err={rel_err:.3e}"
+
+    def test_order4_tet_raises_not_implemented(self, tmp_path):
+        """order=4 已实测证伪（见 vtk_export_highorder.py 模块文档），
+        必须显式拒绝，不能悄悄产出错误结果。"""
+        mesh = _build_pure_tet_mesh(order=4)
+        U = np.zeros((mesh.n_cells, mesh.n_sps_per_cell, 5))
+        U[..., 0] = 1.0
+        U[..., 4] = 1.0
+        with pytest.raises(NotImplementedError):
+            export_highorder_vtk(mesh, U, tmp_path / "should_not_be_written_order4.vtu")
 
 
 if __name__ == "__main__":

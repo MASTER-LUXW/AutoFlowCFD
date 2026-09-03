@@ -44,17 +44,21 @@ def mesh_and_ops():
     return mesh, ops
 
 
-def _make_wall_mock(mesh):
+def _make_wall_provider(mesh):
     """把该网格的前两个边界面标记为 WALL 组，其余保留为未匹配（-1）——
-    足以让 compute_wmles_wall_stress_correction 里的
-    `tag_boundary_groups_for_mesh` mock 产出至少一个真实 WALL 面。"""
+    构造一个与真实 `BoundaryGhostStateProvider` 同样接口
+    （`.group_code`/`.code_to_config`）的最小替身，足以让
+    `compute_wmles_wall_stress_correction` 识别出至少一个真实 WALL 面
+    （2026-09-02 起该函数改用 `solver.boundary_ghost_provider` 识别
+    WALL 面，不再自己调用 `tag_boundary_groups_for_mesh`，见该函数
+    文档）。"""
     fc = mesh.face_connectivity
     n_faces = fc.n_faces
     boundary_idx = np.nonzero(fc.is_boundary)[0]
     group_code = np.full(n_faces, -1, dtype=np.int32)
     group_code[boundary_idx[:2]] = 0
-    name_to_code = {"wall_group": 0}
-    return group_code, name_to_code
+    code_to_config = {0: {"type": "WALL"}}
+    return types.SimpleNamespace(group_code=group_code, code_to_config=code_to_config)
 
 
 class TestGpuWmlesWallStressFacadeMatchesCpu:
@@ -80,22 +84,19 @@ class TestGpuWmlesWallStressFacadeMatchesCpu:
         wall_distance = rng.uniform(1e-4, 1e-2, size=(n_cells, n_sps))
 
         wmles_model = WMLESModel(nu=1.5e-5)
-        group_code, name_to_code = _make_wall_mock(mesh)
-        mesh.boundary_bc_types = {"wall_group": "WALL"}
+        provider = _make_wall_provider(mesh)
 
         gpu_solver = types.SimpleNamespace(
             wmles_model=wmles_model, mesh=mesh, ops=ops,
             wall_distance_gpu=wall_distance, U_gpu=U, Q_gpu=Q,
+            boundary_ghost_provider=provider,
         )
         cpu_facade = types.SimpleNamespace(
             wmles_model=wmles_model, mesh=mesh, ops=ops, wall_distance=wall_distance,
-            state=types.SimpleNamespace(U=U, Q=Q),
+            state=types.SimpleNamespace(U=U, Q=Q), boundary_ghost_provider=provider,
         )
 
         with patch(
-            "autoflowcfd.grid.connectivity.face_connectivity.tag_boundary_groups_for_mesh",
-            return_value=(group_code, name_to_code),
-        ), patch(
             "autoflowcfd.core.gpu.turbulence.gpu_turbulence_wmles.get_cupy", return_value=_NumpyAsCupy(),
         ):
             expected = compute_wmles_wall_stress_correction(cpu_facade)
@@ -117,16 +118,14 @@ class TestGpuWmlesWallStressFacadeMatchesCpu:
 
         fc = mesh.face_connectivity
         group_code = np.full(fc.n_faces, -1, dtype=np.int32)
-        name_to_code = {}
+        provider = types.SimpleNamespace(group_code=group_code, code_to_config={})
 
         gpu_solver = types.SimpleNamespace(
             wmles_model=wmles_model, mesh=mesh, ops=ops,
             wall_distance_gpu=wall_distance, U_gpu=Q, Q_gpu=Q,
+            boundary_ghost_provider=provider,
         )
         with patch(
-            "autoflowcfd.grid.connectivity.face_connectivity.tag_boundary_groups_for_mesh",
-            return_value=(group_code, name_to_code),
-        ), patch(
             "autoflowcfd.core.gpu.turbulence.gpu_turbulence_wmles.get_cupy", return_value=_NumpyAsCupy(),
         ):
             assert compute_wmles_wall_stress_correction_gpu(gpu_solver) is None

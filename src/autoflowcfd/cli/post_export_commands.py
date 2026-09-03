@@ -21,26 +21,25 @@ from .post_helpers import _load_case
 
 @click.command(name="export-vtk")
 @click.option("--case", "-c", required=True, type=click.Path(exists=True),
-              help="Case directory")
+              help="算例目录")
 @click.option("--output", "-o", type=click.Path(), default="output.vtk",
-              help="Output VTK file")
+              help="输出 VTK 文件路径")
 @click.option("--variables", multiple=True,
-              help="Variables to export (pressure, velocity, etc.)")
-@click.option("--time-step", type=int, help="Specific time step (for transient)")
+              help="要导出的变量（pressure、velocity 等）")
+@click.option("--time-step", type=int, help="指定时间步（瞬态算例用）")
 @click.option("--grid", "-g", type=click.Path(exists=True),
-              help="Grid file path (if not in case directory)")
+              help="网格文件路径（若不在算例目录里则需显式指定）")
 @click.option("--checkpoint", type=click.Path(exists=True),
-              help="Checkpoint file path (defaults to latest)")
+              help="checkpoint 文件路径（默认取最新一个）")
 @click.option("--binary/--ascii", "binary", default=None,
-              help="Write binary payloads instead of ASCII text (much smaller/"
-                   "faster for real mesh sizes). Default: ASCII for .vtk, "
-                   "binary+compressed for .vtu.")
+              help="写二进制而非 ASCII 文本（真实网格规模下体积小得多、速度也"
+                   "快得多）。默认：.vtk 用 ASCII，.vtu 用二进制+压缩。")
 @click.option("--boundaries-only", is_flag=True, default=False,
-              help="Export only the named boundary patches (WALL/INLET/OUTLET/"
-                   "...), tagged with BoundaryID/BoundaryTypeID + a name "
-                   "legend, instead of the full volume mesh - lets you filter/"
-                   "color by named zone in ParaView (Fluent/OpenFOAM-style "
-                   "patch workflow). Requires a volume mesh (VolumeMeshData).")
+              help="只导出命名边界面片（WALL/INLET/OUTLET/...），带 "
+                   "BoundaryID/BoundaryTypeID 标记 + 名称图例，而不是完整体"
+                   "网格——可以在 ParaView 里按命名分区筛选/着色（类似 "
+                   "Fluent/OpenFOAM 的 patch 工作流）。需要体网格数据"
+                   "（VolumeMeshData）。")
 def export_vtk(
     case: str,
     output: str,
@@ -51,49 +50,48 @@ def export_vtk(
     binary: Optional[bool],
     boundaries_only: bool,
 ) -> None:
-    """Export field data to VTK format.
+    """把场数据导出为 VTK 格式。
 
-    Export simulation results to VTK format for visualization in
-    ParaView or other VTK-compatible viewers.
+    把仿真结果导出为 VTK 格式，供 ParaView 或其他兼容 VTK 的查看器可视化。
 
     Args:
-        case: Case directory containing simulation results
-        output: Output VTK file path
-        variables: Variables to export (velocity, pressure, k, omega, nut)
-        time_step: Specific time step for transient simulations
-        grid: Path to volume mesh file (.nas)
-        checkpoint: Path to checkpoint file (.h5)
+        case: 存有仿真结果的算例目录
+        output: 输出 VTK 文件路径
+        variables: 要导出的变量（velocity、pressure、k、omega、nut）
+        time_step: 瞬态仿真的指定时间步
+        grid: 体网格文件路径（.nas）
+        checkpoint: checkpoint 文件路径（.h5）
 
     Examples:
-        # Basic export (auto-detects grid and checkpoint from case dir)
+        # 基本导出（自动从算例目录探测网格和 checkpoint）
         $ autoflowcfd post export-vtk --case results/steady/
 
-        # Specify grid and checkpoint explicitly
+        # 显式指定网格和 checkpoint
         $ autoflowcfd post export-vtk \
           --case results/ \
           --grid results/grid/sedan.nas \
           --checkpoint results/checkpoints/checkpoint_0500.h5 \
           --output flow_field.vtk
 
-        # Export specific variables
+        # 导出指定变量
         $ autoflowcfd post export-vtk \
           --case results/ \
           --variables velocity pressure \
           --output vel_pres.vtk
 
-        # Transient: export specific time step
+        # 瞬态：导出指定时间步
         $ autoflowcfd post export-vtk \
           --case results/transient/ \
           --time-step 100 \
           --output step_100.vtk
 
-    Required Data:
-        1. Volume mesh file (.nas) - provides grid geometry
-        2. Checkpoint file (.h5) - provides solution vector (velocity, pressure, etc.)
+    所需数据：
+        1. 体网格文件（.nas）——提供网格几何
+        2. checkpoint 文件（.h5）——提供解向量（velocity、pressure 等）
 
     Note:
-        If --grid and --checkpoint are not specified, the command will attempt
-        to auto-detect them from the case directory structure.
+        若未指定 --grid 和 --checkpoint，命令会尝试从算例目录结构里自动
+        探测。
     """
     logger.info(f"Exporting VTK data from case: {case}")
 
@@ -102,7 +100,7 @@ def export_vtk(
 
         grid_data, solution, history, iteration, metadata = _load_case(case, grid, checkpoint)
 
-        # Step 5: Prepare variables list
+        # 准备变量列表
         if not variables:
             var_list = ['velocity', 'pressure']
             logger.info(f"No variables specified, using defaults: {var_list}")
@@ -110,7 +108,7 @@ def export_vtk(
             var_list = list(variables)
             logger.info(f"Exporting variables: {var_list}")
 
-        # Validate variable names
+        # 校验变量名
         valid_vars = {'velocity', 'pressure', 'k', 'omega', 'nut', 'q_criterion'}
         invalid_vars = set(var_list) - valid_vars
         if invalid_vars:
@@ -119,11 +117,11 @@ def export_vtk(
                 f"Valid options: {valid_vars}"
             )
 
-        # Step 6: Create VTK exporter and export
-        # mu_t (exact solver eddy viscosity), if the checkpoint has it -
-        # see CheckpointManager.save's extra_fields / VTKExporter's mu_t
-        # param. Absent for checkpoints written before this was added, in
-        # which case 'nut' falls back to a logged-as-approximate estimate.
+        # 创建 VTK 导出器并导出。
+        # mu_t（求解器算出的精确涡粘），如果 checkpoint 里有的话——见
+        # CheckpointManager.save 的 extra_fields / VTKExporter 的 mu_t
+        # 参数。在这个字段加入之前写的 checkpoint 没有它，此时 'nut'
+        # 会退回一个标记为近似估计的值。
         mu_t = metadata.get('fields', {}).get('mu_t')
         logger.info("Creating VTK exporter...")
         exporter = VTKExporter(
@@ -132,7 +130,7 @@ def export_vtk(
             mu_t=mu_t,
         )
 
-        # Determine output format based on extension
+        # 根据扩展名确定输出格式
         output_path = Path(output)
         if output_path.suffix == '.vtu':
             fmt = 'xml'
@@ -159,7 +157,7 @@ def export_vtk(
                 binary=binary,
             )
 
-        # Success message
+        # 成功提示
         click.echo("\n" + "="*70)
         click.echo("✅ VTK Export Successful")
         click.echo("="*70)

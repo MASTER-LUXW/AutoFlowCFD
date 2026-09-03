@@ -154,10 +154,16 @@ class TestCLIPostCommands:
         assert "--output" in result.output
 
     def test_post_report_help(self) -> None:
-        """Test post report help."""
+        """Test post report help.
+
+        `--format` 已于 2026-09-02 移除（此前的 markdown/html/pdf 选项
+        从未真正实现，只会退回 JSON——用户确认没有这几种格式的需求后
+        直接删除这个假选项，不再保留一个只有 json 一个真实取值的
+        `--format`，见 post_commands.py::report 文档）。
+        """
         result = self.runner.invoke(cli, ["post", "report", "--help"])
         assert result.exit_code == 0
-        assert "--format" in result.output
+        assert "--output" in result.output
 
     def test_post_convergence_help(self) -> None:
         """Test post convergence help."""

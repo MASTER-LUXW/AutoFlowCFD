@@ -38,8 +38,8 @@ def identify_boundaries_from_surface(
     from ...schema.grid_boundaries import BoundaryMap
     
     logger.info("Identifying boundary conditions from surface mesh...")
-    
-    # Extract tetrahedron faces (each tet has 4 triangular faces)
+
+    # 提取四面体的面（每个四面体有 4 个三角形面）
     n_tets = len(volume_cells)
     
     # 向量化生成所有四面体面 - 比循环快得多
@@ -61,10 +61,10 @@ def identify_boundaries_from_surface(
     
     logger.info(f"Generated {len(tet_faces)} total faces")
     
-    # Sort nodes in each face to enable comparison (canonical form)
+    # 对每个面内的节点排序，得到可比较的规范形式
     tet_faces_sorted = np.sort(tet_faces, axis=1)
-    
-    # Find faces that appear only once (boundary faces) - Fully vectorized approach
+
+    # 找出只出现一次的面（边界面）——全向量化实现
     logger.info("Finding boundary faces (vectorized)...")
     
     # 转换每行为单个 void 类型以便哈希
@@ -88,7 +88,7 @@ def identify_boundaries_from_surface(
         f"{len(np.unique(boundary_cell_indices))} cells"
     )
     
-    # If surface boundaries are provided, try to map them to volume mesh
+    # 若提供了表面边界，尝试映射到体网格
     if surface_boundaries is not None and len(surface_boundaries.groups) > 0:
         logger.info(
             f"Inheriting {len(surface_boundaries.groups)} boundary groups "
@@ -100,13 +100,13 @@ def identify_boundaries_from_surface(
             direct_cell_groups=direct_cell_groups,
         )
     
-    # Fallback: create a single "wall" boundary group with all boundary cells
+    # 回退：把所有边界单元创建成单个 "wall" 边界组
     groups = {}
     bc_types = {}
     
     if len(boundary_cell_indices) > 0:
         unique_boundary_cells = np.unique(boundary_cell_indices)
-        # Convert to numpy int32 array (required by BoundaryMap)
+        # 转换为 numpy int32 数组（BoundaryMap 要求）
         groups['wall'] = unique_boundary_cells.astype(np.int32)
         bc_types['wall'] = 'WALL'
         logger.info(f"Created 'wall' boundary group with {len(unique_boundary_cells)} cells")
@@ -177,18 +177,17 @@ def map_surface_boundaries(
     for i, face in enumerate(boundary_faces):
         cell_idx = boundary_cell_indices[i]
         if cell_idx in volume_cell_to_boundary:
-            continue  # already attributed directly (BL-extruded cell)
+            continue  # 已经被直接归属过（边界层挤出单元）
         face_key = tuple(sorted(face))
         if face_key in surface_face_to_boundary:
             boundary_name = surface_face_to_boundary[face_key]
             volume_cell_to_boundary[cell_idx] = boundary_name
 
-    # A boundary cell matched by neither direct_cell_groups nor node-triplet
-    # lookup used to just silently vanish from every group - it still has an
-    # exterior face in the mesh, but no boundary condition at all, and
-    # nothing downstream (the solver's BC handler) would know why. Put such
-    # cells in an explicit catch-all group instead so a solver setup that
-    # can't find a BC for some cells has a concrete, loud reason.
+    # 既没被 direct_cell_groups 归属、也没匹配上节点三元组的边界单元，
+    # 以前会从所有分组里静默消失——它在网格里仍然有一个外部面，却完全
+    # 没有边界条件，下游（求解器的 BC 处理逻辑）也无从知道原因。改为
+    # 把这些单元放进一个显式的兜底分组，让"某些单元找不到 BC"的求解器
+    # 配置有一个具体、响亮的原因可查。
     unique_boundary_cells = np.unique(boundary_cell_indices)
     unmatched = np.setdiff1d(unique_boundary_cells, np.fromiter(
         volume_cell_to_boundary.keys(), dtype=np.int64, count=len(volume_cell_to_boundary)
@@ -303,10 +302,9 @@ def map_boundaries_by_geometry(
         verts = surf_faces[face_idx]
         pts = surf_nodes[verts]
         centroids = pts.mean(axis=1)
-        # Circumradius proxy: max distance from centroid to any of its
-        # own 3 vertices - a cheap, sufficient local-scale estimate (no
-        # need for the exact circumradius, just something proportional
-        # to "how big is this face").
+        # 外接半径的代理量：形心到自身 3 个顶点中最远那个的距离——一个
+        # 廉价但够用的局部尺度估计（不需要精确外接半径，只要与"这个面
+        # 有多大"成正比即可）。
         radius = np.linalg.norm(pts - centroids[:, None, :], axis=2).max(axis=1)
         surf_centroids_list.append(centroids)
         surf_radius_list.append(radius)

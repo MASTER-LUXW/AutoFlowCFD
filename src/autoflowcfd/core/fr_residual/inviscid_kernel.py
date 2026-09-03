@@ -368,13 +368,12 @@ def compute_inviscid_interface_correction_kernel(
 
 
 
-def compute_boundary_ghost_states(flat, Q: np.ndarray, adj_j: np.ndarray, ghost_provider) -> np.ndarray:
-    """边界面幽灵态预处理（纯 Python，只跑边界面这一小部分——约占全部
-    面的 3%，`boundary_ghost_provider` 是任意 Python 可调用对象，numba
-    调不了，见模块文档）。与主 kernel 共用同一个 `_extrap_matmul`。
-
-    Returns:
-        Q_ghost: (n_faces, n_fp, 5)，只有边界面对应的行有意义。
+def _compute_boundary_ghost_states_per_face(flat, Q: np.ndarray, ghost_provider) -> np.ndarray:
+    """边界面幽灵态预处理的通用逐面回退实现——只依赖 `ghost_provider`
+    满足最小鸭子类型接口 `(face_idx, Q_owner_fp, true_normal) -> Q_ghost`，
+    对任意实现都正确（含 `DefaultGhostProvider`、测试里的自定义 stub 等，
+    见 `compute_boundary_ghost_states` 分派说明）。约占全部面的 3%，
+    `ghost_provider` 是任意 Python 可调用对象，numba 调不了。
     """
     Q_ghost = np.zeros((flat.n_faces, flat.n_fp, 5))
     for f in range(flat.n_faces):
@@ -400,3 +399,128 @@ def compute_boundary_ghost_states(flat, Q: np.ndarray, adj_j: np.ndarray, ghost_
         Q_o = _extrap_matmul(Q[oc], E_o)
         Q_ghost[f] = ghost_provider(f, Q_o, flat.true_normal[f])
     return Q_ghost
+
+
+def _compute_boundary_ghost_states_batched(flat, Q: np.ndarray, ghost_provider) -> np.ndarray:
+    """`compute_boundary_ghost_states` 的向量化实现——只在 `ghost_provider`
+    是 `BoundaryGhostStateProvider` 实例时使用（见该分派条件说明）：按
+    `group_code` 分组批量调用底层幽灵态函数（`wall_ghost_state` 等，
+    本身已经是接受任意长度批量的向量化函数），替代逐面 Python 调度
+    （2026-09-03 性能优化，真实 profile 显示每步 ~24万次这类逐面调用，
+    约占单步耗时 3~6%，见排查记录）。
+
+    数学结果与 `_compute_boundary_ghost_states_per_face` 逐位一致（同一套
+    E_o 外插 + 同一批底层幽灵态函数，只是把"逐面调用"改成"先向量化算出
+    全部活跃边界面的 Q_o，再按边界组一次性批量调用"，不改变任何计算
+    本身）——已用真实含 WALL/INLET/OUTLET/棱柱四边形混合拆分面的合成
+    网格与逐面版本决定性交叉验证到逐位相等，见
+    tests/unit/test_boundary_ghost_states_batched_crosscheck.py。
+
+    INLET + SEM（合成湍流入口，逐面涡核位置相关）不做批量化，组内退回
+    逐面调用——SEM 组内面数远小于总边界面数，不是性能热点，见
+    `InletSEMGhostState.__call__` 文档。
+    """
+    from autoflowcfd.boundary.fr_ghost_state import (
+        wall_ghost_state, farfield_ghost_state, inlet_ghost_state,
+        outlet_ghost_state, symmetry_ghost_state,
+    )
+
+    n_fp = flat.n_fp
+    Q_ghost = np.zeros((flat.n_faces, n_fp, 5))
+
+    active_mask = flat.is_boundary & (flat.owner_is_primary | flat.mixed_bnd_face)
+    active_faces = np.where(active_mask)[0]
+    if active_faces.size == 0:
+        return Q_ghost
+
+    # --- 向量化 Q_o 外插（与逐面版本同一套 E_o 选择逻辑，见
+    # gpu_inviscid.py::_native_self_extrap 同一个"提前 clip 避免越界"
+    # 原则——native 面的 oax 是复用槽位，不能无条件拿去 gather 坍缩坐标
+    # 表）---
+    oc = flat.owner_cell[active_faces]
+    oc_code = flat.owner_cube_face[active_faces]
+    is_native = oc_code >= 6
+
+    oax = flat.owner_axis[active_faces]
+    oside = flat.owner_side[active_faces]
+    oside_idx = np.where(oside < 0, 0, 1)
+    celltype_o = np.where(oc < flat.n_prism, 0, 1)
+    oax_safe = np.where(is_native, 0, oax)
+    E_o_collapsed = flat.boundary_extrap[celltype_o, oax_safe, oside_idx]  # (n_active,n_fp,n_sps)
+
+    if flat.boundary_extrap_native.shape[0] == 0:
+        E_o = E_o_collapsed
+    else:
+        excluded_vertex = np.clip(oc_code - 6, 0, flat.boundary_extrap_native.shape[0] - 1)
+        E_o_native = flat.boundary_extrap_native[excluded_vertex]
+        E_o = np.where(is_native[:, None, None], E_o_native, E_o_collapsed)
+
+    Q_o_all = np.einsum('fps,fsv->fpv', E_o, Q[oc])  # (n_active,n_fp,5)
+    normal_all = flat.true_normal[active_faces]  # (n_active,n_fp,3)
+
+    # --- 按边界组编码分组（同一 group_code 保证共享同一份 cfg，含
+    # WALL 的 is_no_slip/wall_velocity 这类逐组参数，不是全局常量）---
+    codes = ghost_provider.group_code[active_faces]
+    for code in np.unique(codes):
+        in_group = np.where(codes == code)[0]
+        faces_in_group = active_faces[in_group]
+        cfg = ghost_provider.code_to_config.get(int(code), ghost_provider.default_config)
+        bc_type = cfg["type"]
+
+        Q_o_group = Q_o_all[in_group]        # (n_group,n_fp,5)
+        normal_group = normal_all[in_group]  # (n_group,n_fp,3)
+        n_group = Q_o_group.shape[0]
+
+        if bc_type == "INLET" and cfg.get("sem") is not None:
+            sem_ghost = cfg["sem"]
+            for k in range(n_group):
+                f = faces_in_group[k]
+                Q_ghost[f] = sem_ghost(f, Q_o_group[k], normal_group[k])
+            continue
+
+        Q_o_flat = Q_o_group.reshape(-1, 5)
+        normal_flat = normal_group.reshape(-1, 3)
+
+        if bc_type == "WALL":
+            result = wall_ghost_state(
+                Q_o_flat, normal_flat,
+                is_no_slip=cfg.get("is_no_slip", True),
+                wall_velocity=cfg.get("wall_velocity"),
+            )
+        elif bc_type == "FARFIELD":
+            result = farfield_ghost_state(Q_o_flat, cfg["Q_free"])
+        elif bc_type == "INLET":
+            result = inlet_ghost_state(Q_o_flat, cfg["Q_inlet"], normal_flat)
+        elif bc_type == "OUTLET":
+            result = outlet_ghost_state(Q_o_flat, cfg["p_outlet"], normal_flat)
+        elif bc_type == "SYMMETRY":
+            result = symmetry_ghost_state(Q_o_flat, normal_flat)
+        else:
+            raise ValueError(f"Unknown boundary condition type '{bc_type}' for group code {code}")
+
+        Q_ghost[faces_in_group] = result.reshape(n_group, n_fp, 5)
+
+    return Q_ghost
+
+
+def compute_boundary_ghost_states(flat, Q: np.ndarray, adj_j: np.ndarray, ghost_provider) -> np.ndarray:
+    """边界面幽灵态预处理（纯 Python，只跑边界面这一小部分——约占全部
+    面的 3%，`boundary_ghost_provider` 是任意 Python 可调用对象，numba
+    调不了）。
+
+    分派（2026-09-03 性能优化新增）：`ghost_provider` 是
+    `BoundaryGhostStateProvider`（生产求解器实际使用的实现，见
+    `fr_solver/boundary.py::build_boundary_ghost_provider`）时走按边界组
+    批量化的 `_compute_boundary_ghost_states_batched`；否则（
+    `DefaultGhostProvider`、测试里的自定义 stub 等只满足最小鸭子类型
+    接口的实现）回退到逐面版本——不假设"任意 ghost_provider"都能被
+    按 group_code 分组，那样会破坏这个函数一直保持的"boundary_ghost_
+    provider 是任意 Python 可调用对象"的通用契约。
+
+    Returns:
+        Q_ghost: (n_faces, n_fp, 5)，只有边界面对应的行有意义。
+    """
+    from autoflowcfd.boundary.fr_ghost_state import BoundaryGhostStateProvider
+    if isinstance(ghost_provider, BoundaryGhostStateProvider):
+        return _compute_boundary_ghost_states_batched(flat, Q, ghost_provider)
+    return _compute_boundary_ghost_states_per_face(flat, Q, ghost_provider)

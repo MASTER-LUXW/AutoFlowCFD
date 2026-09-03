@@ -462,12 +462,22 @@ def build_distributed_flat_face(
         true_normal=global_flat.true_normal[local_face_indices],
         owner_adj_row_exact=global_flat.owner_adj_row_exact[local_face_indices],
         neighbor_adj_row_exact=global_flat.neighbor_adj_row_exact[local_face_indices],
-        # native 四面体（路径C）字段：分布式/MPI 路径明确不支持 native
-        # 模式（Part6 阶段5/Part8 文档"五、诚实的范围声明"一致的既有
-        # 决定），这里只是把全局 flat 已有的（对纯坍缩坐标网格恒为
-        # 占位/空数组）同名字段原样按面切片/原样透传，不引入任何 native
-        # 分派逻辑——保持 FlatFaceGeometry 构造完整，不改变分布式路径
-        # 现有行为。
+        # native 四面体（路径C）字段（2026-09-02 更新：此前这里的注释写
+        # "分布式/MPI 路径明确不支持 native 模式"，已用端到端残差比对
+        # 决定性验证证伪这个保守说法——见 tests/unit/
+        # test_distributed_compute_residual.py::
+        # TestDistributedResidualMatchesSingleMachineNative，分布式与
+        # 单机路径残差逐位一致（rel_diff<6e-11）。原样透传本来就是
+        # 正确、完整的处理方式，不需要额外分派：`owner_cube_face`/
+        # `neighbor_cube_face` 按面索引正确切片（每个面各自的原始
+        # cube face 编码，与是否 MPI 分区无关）；`boundary_extrap_native`/
+        # `lift_native` 是只依赖 `(order, excluded_vertex)` 的全局共享
+        # 常量算子（与 `boundary_extrap` 同一个"可预计算一次、全网格
+        # 同阶数单元共享"的性质，见 native_simplex_basis.py 模块文档），
+        # 不是逐面数据，原样透传（不切片）本来就是唯一正确的做法。CPU
+        # 端残差 kernel（`inviscid_kernel.py`/`viscous_flux_kernel.py`）
+        # 本身的 native/collapsed 分派逻辑与调用方是否处于 MPI 分区
+        # 场景无关，两者天然独立。
         owner_cube_face=global_flat.owner_cube_face[local_face_indices],
         neighbor_cube_face=global_flat.neighbor_cube_face[local_face_indices],
         true_area_weight=global_flat.true_area_weight[local_face_indices],

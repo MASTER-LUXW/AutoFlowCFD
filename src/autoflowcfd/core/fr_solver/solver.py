@@ -257,22 +257,12 @@ class FRSolver(_SolverGeometryMixin):
             # 导致的可预见的数值不稳定，工业代码从来不会这样初始化）。
             self.state.initialize_uniform(rho=rho_inf, u=vel_inf, v=0.0, w=0.0, p=p_inf)
         
-        # 2. 预计算算子 (G-04)
-        # 真实 bug 修复（native 四面体路径C接入 CLI/solver 时发现）：这里
-        # 此前无条件按 tet_basis_mode="collapsed"（generate_fr_operators
-        # 默认值）重新构造 self.ops，完全无视 mesh 自己在 load_from_
-        # volume_mesh 时已经用哪个 tet_basis_mode 构造（含 face_
-        # connectivity 是否已经翻译成 native 编码）——如果两者不一致
-        # （mesh 是 native 但这里构造出 collapsed 的 ops，或反之），
-        # inviscid_kernel.py 会拿到"face 编码显示是 native 但 ops 里
-        # boundary_extrap_native/lift_native 是零长度占位数组"这种自相
-        # 矛盾的组合，触发 IndexError 或更隐蔽的错误。改为直接读
-        # `mesh.tet_basis_mode`（`HighOrderMesh` 已有该属性，见
-        # grid/high_order/high_order_mesh.py），不要求调用方另外维护
-        # 一份必须保持同步的 FRSolver 级别参数——从根上消除不一致的
-        # 可能性，而不是指望"调用方自己记得传一致的值"。
-        tet_basis_mode = getattr(mesh, "tet_basis_mode", "collapsed")
-        self.ops = generate_fr_operators(order, flux_point_type=flux_type, tet_basis_mode=tet_basis_mode)
+        # 2. 预计算算子 (G-04)——四面体坍缩坐标基已删除（2026-09-03，
+        # 见 fr/operators.py 模块文档），`generate_fr_operators` 不再
+        # 接受 `tet_basis_mode` 参数，恒生成 native 四面体算子，与
+        # `mesh`（同样恒为 native，见 HighOrderMesh 文档）天然一致，
+        # 不再需要从 mesh 读取这个属性来保持两者同步。
+        self.ops = generate_fr_operators(order, flux_point_type=flux_type)
         
         # 3. 初始化边界条件 (BD-01) —— 真正参与残差组装的幽灵态边界条件
         # （不再持有未被使用的 FRWeakBC 罚项处理器实例——那是旧版本从未被
@@ -282,10 +272,28 @@ class FRSolver(_SolverGeometryMixin):
         # self.turb_model_name 必须先于 boundary_ghost_provider 构造
         # （BD-02：LES/DDES 模式下要给 VELOCITY_INLET 组接入合成湍流
         # 入口，需要在构造 ghost provider 时就知道湍流模型），其余湍流
-        # 模型对象（turb_model/wmles_model/sgs_model）留到下面第 5 步
-        # 再真正初始化——ghost provider 构造时只用 getattr(...,None) 安全
-        # 读取 wmles_model，不依赖它已经存在。
+        # 模型对象（turb_model/sgs_model）留到下面第 5 步再真正初始化。
+        #
+        # 真实 bug 修复（2026-09-02，排查分布式 WMLES 支持时发现，与
+        # 分布式本身无关，是本文件独立的一个真实回归）：上面这句"ghost
+        # provider 构造时只用 getattr(...,None) 安全读取 wmles_model，
+        # 不依赖它已经存在"是过时的错误理解——`build_boundary_ghost_
+        # provider` 用 `getattr(solver,"wmles_model",None) is None` 判断
+        # WALL 组是否要切换成 is_no_slip=False（见该函数文档 #9 修复
+        # 说明），但 `self.wmles_model` 真正被赋值（`_init_turbulence_
+        # models`，下面第 5 步）发生在 `boundary_ghost_provider` 构造
+        # **之后**——`getattr` 在属性完全不存在时同样返回 None，不会
+        # 报错，但这意味着 `wall_is_no_slip` 恒为 True，#9 修复的
+        # "WMLES 假滑移边界"效果自那次修复写下起就从未真正生效过（只是
+        # 不崩溃，掩盖了这个事实）。这里提前构造真正的 wmles_model（只
+        # 需要 mu_molecular/rho_inf 两个已经是构造参数的标量，不依赖
+        # 第 5 步其余状态），下面第 5 步改为不再重复构造（见该处新增的
+        # guard）。
         self.turb_model_name = turb_model_name.upper()
+        self.wmles_model = None
+        if self.turb_model_name == "WMLES":
+            from autoflowcfd.core.turbulence.wmles import WMLESModel
+            self.wmles_model = WMLESModel(nu=mu_molecular / max(rho_inf, 1e-10))
         # mach_ref：AUSM+up Weiss-Smith 低马赫数预处理（kernels.py::
         # compute_ausm_up_flux）和 CFL 步长估计（cfl.py）共用的同一个
         # 参考马赫数，从真实自由来流条件算一次，不再各处各用一套（2026-
@@ -335,10 +343,12 @@ class FRSolver(_SolverGeometryMixin):
         self.backend = None
         self.backend_type = solver_helpers.resolve_backend_type(self.backend_type)
 
-        # 5. 初始化湍流模型（self.turb_model_name 已在第 3 步设置）
+        # 5. 初始化湍流模型（self.turb_model_name 已在第 3 步设置；
+        # self.wmles_model 若适用也已在第 3 步提前构造好，供
+        # boundary_ghost_provider 正确读取，这里不再重置，见第 3 步
+        # 的说明与 _init_turbulence_models 里对应的 guard）
         self.turb_model = None
         self.ddes_model = None
-        self.wmles_model = None
         self.sgs_model = None
 
         self._init_turbulence_models(n_cells, n_sps)
@@ -412,10 +422,12 @@ class FRSolver(_SolverGeometryMixin):
         )
 
     def solve(self, max_iter: int = 1000, dt: float = 1e-4, tol: float = 1e-6,
-              checkpoint_callback=None) -> SolverResult:
+              checkpoint_callback=None,
+              phase_max_iter: Optional[int] = None,
+              residual_drop_threshold: float = 1e2) -> SolverResult:
         """
         执行稳态/瞬态求解循环。
-        
+
         Args:
             max_iter: 最大迭代次数
             dt: 时间步长
@@ -426,7 +438,14 @@ class FRSolver(_SolverGeometryMixin):
             checkpoint_callback: 可选的中间 checkpoint 回调函数，
                 签名为 callback(solver, iteration_number)，每步迭代后调用。
                 用于在求解过程中定期保存状态到磁盘。
-            
+            phase_max_iter: 仅 Order Continuation（`self.order>=2` 时）生效，
+                非最终阶段（P0/P1/...）各自的最大迭代步数上限，None 时保留
+                旧行为（`max_iter // len(orders)` 按阶段数均分）——见
+                `order_continuation.run_order_continuation` 同名参数文档。
+            residual_drop_threshold: 仅 Order Continuation 生效，单阶段
+                判定"可以提前升阶"的残差下降倍数，默认 1e2（降 2 个数量级），
+                原来硬编码，现在可配置。
+
         Returns:
             SolverResult: 包含收敛状态、最终残差和迭代次数的结果对象
         """
@@ -434,10 +453,14 @@ class FRSolver(_SolverGeometryMixin):
         if self.turb_model_name != "NONE":
             logger_msg += f", turbulence={self.turb_model_name}"
         print(logger_msg)
-        
+
         # Order Continuation: 从低阶开始逐步提升精度
         if self.order_continuation_enabled and self.order >= 2:
-            return self._solve_with_order_continuation(max_iter, dt, tol, checkpoint_callback)
+            return self._solve_with_order_continuation(
+                max_iter, dt, tol, checkpoint_callback,
+                phase_max_iter=phase_max_iter,
+                residual_drop_threshold=residual_drop_threshold,
+            )
         
         import time
         converged = False
@@ -493,9 +516,15 @@ class FRSolver(_SolverGeometryMixin):
         return SolverResult(converged=converged, iterations=i+1, final_residual=final_residual)
     
     def _solve_with_order_continuation(self, max_iter: int, dt: float, tol: float,
-                                        checkpoint_callback=None) -> SolverResult:
+                                        checkpoint_callback=None,
+                                        phase_max_iter: Optional[int] = None,
+                                        residual_drop_threshold: float = 1e2) -> SolverResult:
         """实现 Order Continuation 策略：从P0逐步提升到目标阶数（委托给 order_continuation）。"""
-        return order_continuation.run_order_continuation(self, max_iter, dt, tol, checkpoint_callback)
+        return order_continuation.run_order_continuation(
+            self, max_iter, dt, tol, checkpoint_callback,
+            phase_max_iter=phase_max_iter,
+            residual_drop_threshold=residual_drop_threshold,
+        )
 
     def _interpolate_to_new_order(self, new_order: int):
         """将解从当前阶数插值到新的阶数（委托给 order_continuation）。"""

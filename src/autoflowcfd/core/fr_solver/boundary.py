@@ -39,7 +39,6 @@ def _compute_inlet_fp_positions(solver, face_conn, is_target_face: np.ndarray) -
     """
     mesh = solver.mesh
     ops = solver.ops
-    n_prism = mesh.n_prism_cells
     positions: Dict[int, np.ndarray] = {}
 
     for f in np.nonzero(is_target_face)[0]:
@@ -48,8 +47,23 @@ def _compute_inlet_fp_positions(solver, face_conn, is_target_face: np.ndarray) -
             continue
         owner_cell = int(face_conn.owner_cell[f])
         axis, side = ffp.owner_axis, ffp.owner_side
-        E = ops.boundary_extrap_prism[(axis, side)] if owner_cell < n_prism else ops.boundary_extrap_tet[(axis, side)]
-        positions[f] = E @ mesh.sps_coords[owner_cell]  # (n_fp, 3)
+        oc_code = int(face_conn.owner_cube_face[f])
+        # 真实 bug 修复（2026-09-03，同一处见 postprocess/fr_coefficients.py::
+        # extrap_to_face 文档）：四面体坍缩坐标基已删除，`axis`
+        # （`ffp.owner_axis`）对 native 四面体面存的是复用槽位的
+        # excluded_vertex（可达 3），不能无条件拿去索引占位全零的
+        # `ops.boundary_extrap_tet` 字典——按 `oc_code>=6` 分派到
+        # `ops.boundary_extrap_native_tet[excluded_vertex]`（形状
+        # (n_fp,n_native)，只对 `mesh.sps_coords` 的真实自由度切片
+        # `[:n_native]` 求值）。这条路径只在 LES/DDES 的 INLET SEM 合成
+        # 湍流入口用到——若某个 INLET 面恰好被四面体单元拥有会真实触发。
+        if oc_code >= 6:
+            excluded_vertex = oc_code - 6
+            E = ops.boundary_extrap_native_tet[excluded_vertex]  # (n_fp, n_native)
+            positions[f] = E @ mesh.sps_coords[owner_cell][:E.shape[1]]
+        else:
+            E = ops.boundary_extrap_prism[(axis, side)]
+            positions[f] = E @ mesh.sps_coords[owner_cell]  # (n_fp, 3)
 
     return positions
 

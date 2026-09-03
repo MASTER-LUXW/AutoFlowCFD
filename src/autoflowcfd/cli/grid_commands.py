@@ -35,18 +35,18 @@ from loguru import logger
 
 @click.group()
 def grid() -> None:
-    """Grid processing commands.
-    
-    Parse, validate, and analyze ANSA .nas grid files.
-    
+    """网格处理命令。
+
+    解析、校验、分析 ANSA .nas 网格文件。
+
     Examples:
-        # Parse grid file
+        # 解析网格文件
         $ autoflowcfd grid parse sedan.nas
-        
-        # Validate grid quality
+
+        # 校验网格质量
         $ autoflowcfd grid validate sedan.nas
-        
-        # Show grid info
+
+        # 显示网格信息
         $ autoflowcfd grid info sedan.nas
     """
     pass
@@ -55,11 +55,11 @@ def grid() -> None:
 @grid.command()
 @click.argument("input_file", type=click.Path(exists=True))
 @click.option("--output", "-o", type=click.Path(), default="grid_info.json",
-              help="Output JSON file path")
-@click.option("--encoding", default="UTF-8", help="File encoding")
-@click.option("--streaming", is_flag=True, help="Enable streaming parse for large files")
-@click.option("--skip-validation", is_flag=True, help="Skip grid quality validation")
-@click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
+              help="输出 JSON 文件路径")
+@click.option("--encoding", default="UTF-8", help="文件编码")
+@click.option("--streaming", is_flag=True, help="大文件启用流式解析")
+@click.option("--skip-validation", is_flag=True, help="跳过网格质量校验")
+@click.option("--json", "-j", "json_output", is_flag=True, help="以 JSON 格式输出")
 def parse(
     input_file: str,
     output: str,
@@ -68,57 +68,57 @@ def parse(
     skip_validation: bool,
     json_output: bool
 ) -> None:
-    """Parse ANSA .nas grid file.
-    
-    Extract nodes, cells, and boundary information from NAS format.
-    
+    """解析 ANSA .nas 网格文件。
+
+    从 NAS 格式提取节点、单元和边界信息。
+
     Args:
-        input_file: Path to .nas grid file
-        output: Output JSON file path
-        encoding: File encoding
-        streaming: Enable streaming mode for large files
-        skip_validation: Skip quality validation
-        json_output: Output result as JSON
-    
+        input_file: .nas 网格文件路径
+        output: 输出 JSON 文件路径
+        encoding: 文件编码
+        streaming: 大文件启用流式模式
+        skip_validation: 跳过质量校验
+        json_output: 以 JSON 格式输出结果
+
     Examples:
-        # Basic parsing
+        # 基本解析
         $ autoflowcfd grid parse sedan.nas
-        
-        # With custom output
+
+        # 自定义输出路径
         $ autoflowcfd grid parse sedan.nas -o output/grid.json
-        
-        # Streaming mode for large files
+
+        # 大文件用流式模式
         $ autoflowcfd grid parse large.nas --streaming
     """
     from autoflowcfd.grid import NASParser
-    
+
     logger.info(f"Parsing grid file: {input_file}")
-    
+
     try:
-        # Parse grid
+        # 解析网格
         parser = NASParser(input_file, encoding=encoding)
-        
+
         if streaming:
             logger.info(
                 "NASParser already parses node/cell cards line-by-line; "
                 "--streaming has no additional effect"
             )
         grid_data = parser.parse()
-        
-        # Get grid statistics
+
+        # 获取网格统计信息
         result = {
             "node_count": grid_data.node_count,
             "cell_count": grid_data.cell_count,
             "boundary_groups": {},
         }
-        
-        # Get boundary information
+
+        # 获取边界信息
         if hasattr(grid_data, 'boundaries'):
             for name in grid_data.boundaries.boundary_names:
                 nodes = grid_data.boundaries.get_node_indices(name)
                 result["boundary_groups"][name] = len(nodes)
-        
-        # Quality report (if not skipped)
+
+        # 质量报告（若未跳过）
         quality_passed = True
         if not skip_validation:
             from autoflowcfd.grid import GridValidator
@@ -127,11 +127,11 @@ def parse(
             result["quality_report"] = quality_report
             quality_passed = quality_report['passed']
 
-        # Output
+        # 输出
         if json_output:
             click.echo(json.dumps(result, indent=2))
         else:
-            # Save to file
+            # 保存到文件
             output_path = Path(output)
             output_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -145,12 +145,10 @@ def parse(
             if not quality_passed:
                 click.echo("✗ Quality validation failed - see quality_report for details")
 
-        # Exit non-zero when the embedded quality_report failed, matching
-        # `grid validate`'s identical-shaped report (which does gate on
-        # this). Previously `parse` always exited 0 regardless of
-        # quality_report['passed'], so a caller relying on the exit code
-        # alone (rather than digging into the JSON) had no signal that
-        # quality failed.
+        # 内嵌的 quality_report 未通过时以非零码退出，与 `grid validate`
+        # 同形状的报告保持一致（那边确实会拿它当门槛）。此前 `parse`
+        # 无论 quality_report['passed'] 是什么恒退出 0，只看退出码
+        # （不深挖 JSON 内容）的调用方完全得不到质量未过关的信号。
         if not quality_passed:
             raise SystemExit(2)
 
@@ -169,17 +167,17 @@ def parse(
 @grid.command()
 @click.argument("input_file", type=click.Path(exists=True))
 @click.option("--report", "-r", type=click.Path(), default="quality_report.json",
-              help="Quality report output file")
+              help="质量报告输出文件")
 @click.option("--threshold-aspect-ratio", type=float, default=100.0,
-              help="Aspect ratio threshold (matches GridValidator's own "
-              "default - see validator.py - so an unmodified `grid validate` "
-              "run agrees with `grid parse`/`generate-volume`'s quality gate "
-              "on the same mesh instead of being 10x more permissive)")
+              help="长宽比阈值（与 GridValidator 自身默认值一致——见 "
+              "validator.py——保证未修改参数的 `grid validate` 在同一"
+              "网格上与 `grid parse`/`generate-volume` 的质量门判据一致，"
+              "而不是宽松 10 倍）")
 @click.option("--threshold-area", type=float, default=1e-12,
-              help="Minimum cell area threshold (m²)")
-@click.option("--fix-duplicates", is_flag=True, help="Auto-merge duplicate nodes")
-@click.option("--fix-normals", is_flag=True, help="Auto-fix normal directions")
-@click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
+              help="最小单元面积阈值 (m²)")
+@click.option("--fix-duplicates", is_flag=True, help="自动合并重复节点")
+@click.option("--fix-normals", is_flag=True, help="自动修正法向")
+@click.option("--json", "-j", "json_output", is_flag=True, help="以 JSON 格式输出")
 def validate(
     input_file: str,
     report: str,
@@ -189,28 +187,27 @@ def validate(
     fix_normals: bool,
     json_output: bool
 ) -> None:
-    """Validate grid quality and compatibility.
-    
-    Check mesh quality metrics including aspect ratio, skewness,
-    and Jacobian determinant.
-    
+    """校验网格质量与兼容性。
+
+    检查长宽比、扭曲度、Jacobian 行列式等网格质量指标。
+
     Args:
-        input_file: Path to .nas grid file
-        report: Quality report output file
-        threshold_aspect_ratio: Aspect ratio threshold
-        threshold_area: Minimum cell area threshold
-        fix_duplicates: Auto-merge duplicate nodes
-        fix_normals: Auto-fix normal directions
-        json_output: Output result as JSON
-    
+        input_file: .nas 网格文件路径
+        report: 质量报告输出文件
+        threshold_aspect_ratio: 长宽比阈值
+        threshold_area: 最小单元面积阈值
+        fix_duplicates: 自动合并重复节点
+        fix_normals: 自动修正法向
+        json_output: 以 JSON 格式输出结果
+
     Examples:
-        # Basic validation
+        # 基本校验
         $ autoflowcfd grid validate sedan.nas
-        
-        # Custom thresholds
+
+        # 自定义阈值
         $ autoflowcfd grid validate sedan.nas --threshold-aspect-ratio 500.0
-        
-        # Auto-fix issues
+
+        # 自动修复问题
         $ autoflowcfd grid validate sedan.nas --fix-duplicates --fix-normals
     """
     from autoflowcfd.grid import NASParser, GridValidator
@@ -218,12 +215,12 @@ def validate(
     logger.info(f"Validating grid: {input_file}")
 
     try:
-        # Parse grid
+        # 解析网格
         parser = NASParser(input_file)
         grid_data = parser.parse()
 
-        # Validate (GridValidator only checks aspect ratio / skewness /
-        # Jacobian; there is no per-cell area threshold or auto-fix support)
+        # 校验（GridValidator 只检查长宽比/扭曲度/Jacobian；不支持
+        # 逐单元面积阈值或自动修复）
         validator = GridValidator(grid_data)
         validator.thresholds['aspect_ratio_max'] = threshold_aspect_ratio
 
@@ -239,7 +236,7 @@ def validate(
 
         quality_report = validator.validate()
 
-        # Determine status
+        # 确定状态
         passed = quality_report['passed']
         status = "success" if passed else "error"
         exit_code = 0 if passed else 2
@@ -250,11 +247,11 @@ def validate(
             "result": quality_report,
         }
 
-        # Output
+        # 输出
         if json_output:
             click.echo(json.dumps(result, indent=2))
         else:
-            # Save report
+            # 保存报告
             report_path = Path(report)
             report_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -263,7 +260,7 @@ def validate(
 
             logger.info(f"Quality report saved to {report_path}")
 
-            # Print summary
+            # 打印摘要
             click.echo(quality_report['summary'])
             click.echo(f"\n✓ Report saved to {report}")
 
@@ -284,59 +281,59 @@ def validate(
 
 @grid.command()
 @click.argument("input_file", type=click.Path(exists=True))
-@click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
+@click.option("--json", "-j", "json_output", is_flag=True, help="以 JSON 格式输出")
 def info(input_file: str, json_output: bool) -> None:
-    """Display grid statistics.
-    
-    Quick view of grid information without generating files.
-    
+    """显示网格统计信息。
+
+    不生成任何文件，快速查看网格信息。
+
     Args:
-        input_file: Path to .nas grid file
-        json_output: Output result as JSON
-    
+        input_file: .nas 网格文件路径
+        json_output: 以 JSON 格式输出结果
+
     Examples:
-        # Quick view
+        # 快速查看
         $ autoflowcfd grid info sedan.nas
-        
-        # JSON output
+
+        # JSON 输出
         $ autoflowcfd grid info sedan.nas --json
     """
     from autoflowcfd.grid import NASParser
-    
+
     logger.info(f"Getting grid info: {input_file}")
-    
+
     try:
-        # Parse grid
+        # 解析网格
         parser = NASParser(input_file)
         grid_data = parser.parse()
-        
-        # Get statistics
+
+        # 获取统计信息
         node_count = grid_data.node_count
         cell_count = grid_data.cell_count
-        
+
         result = {
             "file": input_file,
             "node_count": node_count,
             "cell_count": cell_count,
             "boundary_groups": {},
         }
-        
-        # Boundary info
+
+        # 边界信息
         if hasattr(grid_data, 'boundaries'):
             for name in grid_data.boundaries.boundary_names:
                 nodes = grid_data.boundaries.get_node_indices(name)
                 result["boundary_groups"][name] = len(nodes)
-        
-        # Estimate memory usage (rough estimate)
-        # ~44 bytes per cell + ~24 bytes per node
+
+        # 估算内存占用（粗略估计）
+        # 每单元约 44 字节 + 每节点约 24 字节
         estimated_memory_mb = (cell_count * 44 + node_count * 24) / (1024 * 1024)
         result["estimated_memory_mb"] = round(estimated_memory_mb, 2)
-        
-        # Output
+
+        # 输出
         if json_output:
             click.echo(json.dumps(result, indent=2))
         else:
-            # Pretty print
+            # 美化打印
             filename = Path(input_file).name
             click.echo(f"\nGrid Information: {filename}")
             click.echo(f"{'='*50}")
@@ -364,37 +361,35 @@ def info(input_file: str, json_output: bool) -> None:
 @grid.command()
 @click.argument("input_file", type=click.Path(exists=True))
 @click.option("--format", "-f", type=click.Choice(["vtk", "cgns", "stl"]),
-              required=True, help="Output format")
-@click.option("--output", "-o", type=click.Path(), help="Output file path")
-@click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
+              required=True, help="输出格式")
+@click.option("--output", "-o", type=click.Path(), help="输出文件路径")
+@click.option("--json", "-j", "json_output", is_flag=True, help="以 JSON 格式输出")
 def convert(input_file: str, format: str, output: str, json_output: bool) -> None:
-    """Convert grid to different format.
+    """转换网格为其他格式。
 
-    Convert .nas grid to VTK, CGNS, or STL format.
+    把 .nas 网格转换为 VTK、CGNS 或 STL 格式。
 
     Args:
-        input_file: Path to .nas grid file
-        format: Output format (vtk/cgns/stl)
-        output: Output file path
-        json_output: Output result as JSON
+        input_file: .nas 网格文件路径
+        format: 输出格式（vtk/cgns/stl）
+        output: 输出文件路径
+        json_output: 以 JSON 格式输出结果
 
     Examples:
-        # Convert to VTK
+        # 转换为 VTK
         $ autoflowcfd grid convert sedan.nas -f vtk -o sedan.vtk
 
-        # Convert to STL
+        # 转换为 STL
         $ autoflowcfd grid convert sedan.nas -f stl -o sedan.stl
 
     Note:
-        This feature is planned for v1.0 release. Every other grid/solve
-        subcommand supports --json and emits real JSON on both success and
-        error paths; this one previously had neither (no --json flag, and
-        click.echo({...}) prints Python's dict repr - single-quoted keys,
-        not parseable by json.loads()) despite otherwise matching their
-        {"command", "status", ...} shape, which would misinform a caller
-        that reasonably expects the same contract as every sibling command.
-        This command still isn't implemented; it just now fails that way
-        loudly and machine-readably instead of silently.
+        这个功能计划在 v1.0 发布。其余全部 grid/solve 子命令都支持
+        --json，成功/失败两条路径都产出真正的 JSON；这个命令此前两者
+        都没有（没有 --json 选项，且 `click.echo({...})` 打印的是
+        Python dict 的 repr——单引号键名，`json.loads()` 解析不了），
+        尽管形状上其余部分与其他命令的 `{"command", "status", ...}`
+        约定一致，会误导调用方以为它遵循同一套契约。这个命令本身仍未
+        实现；现在只是让它以响亮、机器可读的方式失败，而不是静默。
     """
     logger.warning("Grid conversion is planned for v1.0 release")
     result = {

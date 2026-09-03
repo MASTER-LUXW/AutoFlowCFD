@@ -71,9 +71,32 @@ from autoflowcfd.cli.solve_steady_commands import _report_aerodynamic_coefficien
 @click.option('--checkpoint-interval', type=int, default=100,
               help='中间 checkpoint 保存间隔（本次 resume 自己新跑的额外迭代数，'
                    '非绝对迭代数）——与 solve steady 同名参数含义一致')
+@click.option('--phase-max-iter', type=int, default=None,
+              help='Order Continuation（目标阶数>=2 时触发）非最终阶段各自的最大迭代'
+                   '步数上限。默认(不传)时保留旧行为——本次续算新增的额外迭代数按剩余'
+                   '阶段数机械均分。传具体值后目标阶数改为吃掉这次续算剩余的全部步数，'
+                   '见 core/utils/order_continuation.py 文档。仅 checkpoint 原始/覆盖'
+                   '后端为 CPU 时支持')
+@click.option('--residual-drop-threshold', type=float, default=100.0,
+              help='Order Continuation 单个非最终阶段判定"可以提前升阶"的残差下降倍数，'
+                   '默认100(降2个数量级)。仅 CPU 后端支持')
+@click.option('--n-ranks', type=int, default=1,
+              help='MPI rank 总数（>1 时重建为分布式求解器——CPU MPI"传统模式"，'
+                   '或配合 --multi-gpu/--fully-distributed 走对应的分布式构造入口）。'
+                   '必须与本次 mpirun -np 启动的进程数一致。2026-09-02 补齐：此前分布式'
+                   '路径只能保存一次最终 checkpoint，完全没有续算机制')
+@click.option('--multi-gpu', is_flag=True,
+              help='重建为多GPU分布式求解器（需要 --n-ranks>1）')
+@click.option('--fully-distributed', is_flag=True,
+              help='走"完全分布式加载"重建（只有 root rank 加载完整网格，需要 --n-ranks>1，'
+                   '与 --multi-gpu 互斥）')
+@click.option('--gpu-device', type=int, default=None, help='--multi-gpu 时的 GPU 设备号')
 def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
            surface_mesh: Optional[str], reference_area: Optional[float], threads: int,
-           skip_quality_check: bool, checkpoint_interval: int) -> None:
+           skip_quality_check: bool, checkpoint_interval: int,
+           phase_max_iter: Optional[int], residual_drop_threshold: float,
+           n_ranks: int, multi_gpu: bool, fully_distributed: bool,
+           gpu_device: Optional[int]) -> None:
     """从检查点真正恢复并继续求解（不是只打印元信息）。
 
     重建流程：checkpoint 的 metadata 记录了重建 FRSolver 所需的全部
@@ -95,8 +118,18 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
             input_file 是 .nas 体网格、且两者都缺失时才会报错
         reference_area: 气动系数参考面积
         checkpoint_interval: 中间 checkpoint 保存间隔（额外迭代数）
+        phase_max_iter: Order Continuation 非最终阶段最大步数上限，None=旧行为
+        residual_drop_threshold: Order Continuation 单阶段提前升阶所需的残差下降倍数
     """
     logger.info(f"Resuming simulation from checkpoint: {checkpoint_file}")
+
+    if n_ranks > 1 or multi_gpu:
+        _resume_distributed(
+            checkpoint_file, max_iter, n_ranks, multi_gpu, fully_distributed,
+            gpu_device, backend, surface_mesh, threads, skip_quality_check,
+            checkpoint_interval,
+        )
+        return
 
     solver, iteration, metadata = rebuild_solver_from_checkpoint(
         checkpoint_file, backend=backend, surface_mesh=surface_mesh, threads=threads,
@@ -109,6 +142,18 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
     target_backend = metadata["backend"]
     resolved_surface_mesh = metadata.get("surface_mesh")
     output_dir = str(Path(checkpoint_file).parent.parent)
+
+    # 真实 bug 更正（2026-09-02）：上面这两个参数此前被无条件拒绝
+    # `target_backend == 'gpu'`——但 `rebuild_solver_from_checkpoint`
+    # 这条非分布式 resume 路径构造的是单机 `FRSolver(backend='gpu',
+    # ...)`（`core/fr_solver/solver.py` 的 GPU 加速内核分支），不是
+    # `solve steady` 单 GPU 分支专用的独立 `GPUFRSolver` 类——`FRSolver.
+    # solve()` 的 Order Continuation 分派（`self.order>=2` 时自动
+    # 逐阶爬坡）与 `backend_type` 无关，这个拒绝从一开始就是错的、
+    # 不必要地拒绝了本来就能工作的组合，不是"待补齐"的功能缺口。
+    # （2026-09-02 同一批还真正给了 `GPUFRSolver` 本身独立的 Order
+    # Continuation 机制，见 core/gpu/solver/gpu_solver_order_
+    # continuation.py，所以即便按原先的假设也不再需要这个拒绝。）
 
     # 真实 bug（已修复，2026-08-22，用户直接问"多少步存一个ckpt"发现）：
     # 此前 resume() 从不把 checkpoint_callback 传给 solver.solve()，只在
@@ -138,7 +183,9 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
     logger.info(f"State restored from checkpoint (iter={iteration}), "
                 f"continuing for {max_iter} more iterations...")
     result = solver.solve(max_iter=max_iter, dt=1e-3, tol=1e-6,
-                           checkpoint_callback=_checkpoint_cb)
+                           checkpoint_callback=_checkpoint_cb,
+                           phase_max_iter=phase_max_iter,
+                           residual_drop_threshold=residual_drop_threshold)
     print(f"\n✅ Resumed simulation finished: total_iterations~={iteration + result.iterations}, "
           f"Residual={result.final_residual:.6e}")
 
@@ -157,6 +204,127 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
     # 参数会导致明明整个 resume 过程都在用自动估算出的参考面积算 Cd/Cl，
     # 这里却因为用户没显式传 --reference-area 而误报"未提供，跳过"。
     _report_aerodynamic_coefficients(solver, getattr(solver, "_reference_area", None))
+
+
+def _resume_distributed(
+    checkpoint_file: str, max_iter: int, n_ranks: int, multi_gpu: bool,
+    fully_distributed: bool, gpu_device: Optional[int], backend: Optional[str],
+    surface_mesh: Optional[str], threads: int, skip_quality_check: bool,
+    checkpoint_interval: int,
+) -> None:
+    """`resume` 的分布式分支（2026-09-02 补齐，见 `resume` 文档"完成度"
+    一节）——CPU MPI"传统模式"/"完全分布式加载"/多GPU 三条路径共用同一个
+    重建入口 `rebuild_distributed_solver_from_checkpoint`，之后的续算
+    循环 + 中途 checkpoint 保存 + 最终保存与单机分支同一个设计
+    （`checkpoint_callback`），只是三种求解器的 `solve()` 返回值/最终
+    保存调用各自的真实签名不同，分别处理。
+
+    不做气动系数报告（`_report_aerodynamic_coefficients` 假设单机
+    `FRSolver` 的 `.state`/`.mesh` 布局，与分布式求解器的 local+halo
+    布局不兼容）——`solve_steady_command.py` 的分布式分支本身同样不
+    调用它，这里保持同一个范围边界。
+    """
+    from autoflowcfd.core.mpi import is_root
+    from autoflowcfd.cli.solve_distributed_checkpoint_io import (
+        rebuild_distributed_solver_from_checkpoint,
+    )
+
+    solver, iteration, metadata = rebuild_distributed_solver_from_checkpoint(
+        checkpoint_file, n_ranks=n_ranks, multi_gpu=multi_gpu,
+        fully_distributed=fully_distributed, gpu_device=gpu_device,
+        backend=backend, surface_mesh=surface_mesh, threads=threads,
+        skip_quality_check=skip_quality_check,
+    )
+    input_file = metadata["input_file"]
+    order = metadata["order"]
+    turbulence_model = metadata["turbulence_model"]
+    target_backend = "gpu" if multi_gpu else (backend or "cpu")
+    resolved_surface_mesh = metadata.get("surface_mesh")
+    output_dir = str(Path(checkpoint_file).parent.parent)
+
+    if is_root():
+        logger.info(
+            f"[Distributed resume] State restored from checkpoint (iter={iteration}), "
+            f"continuing for {max_iter} more iterations..."
+        )
+
+    if multi_gpu:
+        def _checkpoint_cb(solver_ref, local_iteration):
+            if local_iteration % checkpoint_interval != 0:
+                return
+            absolute_iteration = iteration + local_iteration
+            try:
+                # order/target_order 分离（2026-09-02）：见
+                # solve_steady_command.py 的 _multi_gpu_checkpoint_cb
+                # 同一处修复文档——resume 之后若仍在 Order Continuation
+                # 爬坡中途，必须记录 solver_ref.current_order。
+                saved_path = solver_ref.save_checkpoint_distributed(
+                    output_dir, absolute_iteration, input_file,
+                    solver_ref.current_order, turbulence_model, backend="gpu",
+                    target_order=solver_ref.order,
+                )
+                if saved_path and is_root():
+                    print(f"   [Checkpoint] iter {absolute_iteration} saved: {saved_path}")
+            except Exception as e:
+                if is_root():
+                    print(f"   [Checkpoint] Warning: save failed at iter {absolute_iteration}: {e}")
+
+        result = solver.solve(
+            max_iter=max_iter, dt=1e-3, tol=1e-6, checkpoint_callback=_checkpoint_cb,
+        )
+        if is_root():
+            print(
+                f"\n✅ Resumed multi-GPU simulation finished: "
+                f"total_iterations~={iteration + max_iter}, "
+                f"Residual={result['final_residual']:.6e}"
+            )
+        saved_path = solver.save_checkpoint_distributed(
+            output_dir, iteration + max_iter, input_file,
+            solver.current_order, turbulence_model, backend="gpu",
+            target_order=solver.order,
+        )
+        if saved_path and is_root():
+            print(f"   Checkpoint saved: {saved_path}")
+        solver.cleanup()
+        return
+
+    # CPU MPI（"传统模式"/"完全分布式加载"共用同一个 solve()/checkpoint 格式）。
+    from autoflowcfd.core.mpi.distributed_checkpoint import (
+        distributed_save_results, distributed_save_checkpoint,
+    )
+
+    def _checkpoint_cb(solver_ref, local_iteration):
+        if local_iteration % checkpoint_interval != 0:
+            return
+        absolute_iteration = iteration + local_iteration
+        try:
+            # order/target_order 分离（2026-09-02）：resume 之后若仍在
+            # Order Continuation 爬坡中途，必须记录 solver_ref.
+            # current_order（U_sps 实际形状），不是 metadata 里那个
+            # "checkpoint 保存时"的旧 order 值。
+            saved_path = distributed_save_checkpoint(
+                solver_ref, output_dir, absolute_iteration, input_file,
+                solver_ref.current_order, turbulence_model, target_backend,
+                target_order=solver_ref.order,
+            )
+            if saved_path and is_root():
+                print(f"   [Checkpoint] iter {absolute_iteration} saved: {saved_path}")
+        except Exception as e:
+            if is_root():
+                print(f"   [Checkpoint] Warning: save failed at iter {absolute_iteration}: {e}")
+
+    solver.solve(n_steps=max_iter, dt=1e-3, output_interval=checkpoint_interval,
+                 checkpoint_callback=_checkpoint_cb)
+    if is_root():
+        print(f"\n✅ Resumed distributed simulation finished: "
+              f"total_iterations~={iteration + max_iter}")
+
+    distributed_save_results(solver, output_dir)
+    distributed_save_checkpoint(
+        solver, output_dir, iteration + max_iter, input_file,
+        solver.current_order, turbulence_model, target_backend,
+        target_order=solver.order,
+    )
 
 
 @solve.command()

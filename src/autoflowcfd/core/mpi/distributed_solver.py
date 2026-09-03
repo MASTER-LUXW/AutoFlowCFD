@@ -74,29 +74,67 @@ class DistributedFRSolver:
             **solver_kwargs: 传递给 FRSolver 的参数
 
         Raises:
-            NotImplementedError: 请求了 'none' 以外的湍流模型时。分布式
-                残差/状态目前只接了纯层流（5-var，无 mu_t 耦合）路径——
-                湍流模型的 k/omega 输运方程需要 turb_model 实例接入分布式
-                状态与逐 RK 子步的 halo 交换，尚未实现（见本构造器下方的运行期报错与
-                distributed_compute.py 末尾说明）。静默忽略请求的湍流模型、跑出一个看似正常实际上
-                物理不完整的结果，比直接报错更糟——所以这里在构造时就
-                拒绝，而不是等到求解中途才发现。单机模式
-                （不带 --n-ranks/--np）已完整支持 SST/DDES/WMLES/LES。
+            NotImplementedError: 请求了 'none'/'sst'/'ddes'/'iddes'/'wmles'/
+                'les' 以外的湍流模型时。SST/DDES/IDDES 已真正接入分布式
+                状态与残差计算（SST 2026-09-02，DDES/IDDES 同日续接，见
+                core/mpi/distributed_turbulence.py）——三者共享同一套
+                k/omega 输运基础设施，DDES/IDDES 只是多了一段 DES 长度
+                尺度替换，且所需的额外几何量（cell_volumes、IDDES 的
+                h_max/h_wn）都是纯逐单元局部量，不需要新的跨 rank 几何
+                交换。WMLES（2026-09-02 续接）壁面剪应力修正本身也只是
+                纯逐 owner 单元的局部操作（WALL 面必然只属于拥有该单元
+                的 rank，不需要跨 rank 数据）——真正的障碍是
+                `compute_wmles_wall_stress_correction`此前直接用全局
+                `mesh.face_flux_points`对象列表逐面取值，不认 compact
+                索引空间，现已改用`flat_face_override`（与本文件其余
+                面残差函数同一个约定）+`boundary_ghost_provider.
+                group_code`识别 WALL 面，不再需要完整全局网格的边界
+                几何信息，见该函数文档。LES（同日续接）是纯代数 SGS
+                模型（WALE，没有跨步 ODE 状态），"每步现算"即可，走独立
+                的 `distributed_compute_les_viscosity`，不经过 SST/DDES/
+                IDDES 共用的那套 k/omega 输运基础设施。单机模式已完整
+                支持全部模型。
         """
         turb_model_name = solver_kwargs.get('turb_model_name', 'none')
-        if turb_model_name is not None and str(turb_model_name).upper() != 'NONE':
+        turb_model_upper = str(turb_model_name).upper() if turb_model_name is not None else 'NONE'
+        if turb_model_upper not in ('NONE', 'SST', 'DDES', 'IDDES', 'WMLES', 'LES'):
             raise NotImplementedError(
                 f"MPI 分布式求解器（--n-ranks/--np > 1，或 --multi-gpu）目前只支持 "
-                f"turbulence_model='none'，收到的是 '{turb_model_name}'。分布式湍流"
-                f"输运（k/omega 对流+扩散、wall_distance 分发、SGS/壁面应力模型）"
-                f"尚未接入分布式状态与残差计算（见 core/mpi/distributed_compute.py "
-                f"末尾说明）。请去掉 --turbulence-model（默认 none）或改用单机模式。"
+                f"turbulence_model='none'/'sst'/'ddes'/'iddes'/'wmles'/'les'，"
+                f"收到的是 '{turb_model_name}'。"
+                f"请改用 --turbulence-model none/sst/ddes/iddes/wmles/les，"
+                f"或改用单机模式。"
             )
+        self._turb_model_upper = turb_model_upper
+        # 真实 bug 修复（2026-09-02，扩展 DDES/IDDES 分布式支持时发现，
+        # 与本次新增功能无关，SST 分布式路径同样中招）：下面 SST/DDES/
+        # IDDES 分支调用 `init_turbulence_models(self, n_local, n_sps)`
+        # 内部按 `solver.turb_model_name` 分派，但此前这里从未真正
+        # 设置过 `self.turb_model_name` 这个属性——`DistributedFRSolver`
+        # 构造时只要请求 SST（或本次新增的 DDES/IDDES），必然在这里
+        # `AttributeError` 崩溃。此前从未被测试捕捉到是因为
+        # `test_distributed_turbulence.py` 只单独测试更底层的
+        # `distributed_compute_turbulence_source_and_viscosity`，从未
+        # 真正走过 `DistributedFRSolver.__init__` 这条构造路径。
+        self.turb_model_name = turb_model_upper
 
         self.rank = rank if rank is not None else get_rank()
         self.n_ranks = n_ranks
         self.mesh = mesh
         self.ops = ops
+
+        # Order Continuation 支持（2026-09-02，见 core/mpi/
+        # distributed_order_continuation.py 模块文档）：`self.order`/
+        # `self.current_order` 与单机 FRSolver 同一约定
+        # （`order`=目标阶数，`current_order`=当前实际所在阶数，两者
+        # 在阶数爬升过程中的中间阶段不相等）。默认从 `solver_kwargs`
+        # 里读取目标 order（CLI 恒显式传入），退化用 `mesh` 当前活动
+        # 阶数兜底。
+        self.order = int(solver_kwargs.get('order', getattr(mesh, 'order', 0)))
+        self.current_order = self.order
+        self.order_continuation_enabled = solver_kwargs.get('order_continuation_enabled', True)
+        self.flux_type = solver_kwargs.get('flux_point_type', solver_kwargs.get('flux_type', 'radau'))
+        self._is_fully_distributed = False
 
         # 分布式模式：使用传入的分区信息
         if partition_info is not None:
@@ -115,6 +153,18 @@ class DistributedFRSolver:
             n_global_cells = face_connectivity.owner_cell.max() + 1
         else:
             raise ValueError("Either face_connectivity or partition_info must be provided")
+
+        # Order Continuation 分布式支持（2026-09-02）：阶数切换需要用
+        # 同一个 cell_partition 重建 partition/dist_flat_face（`mesh`
+        # 在"传统模式"下是每个 rank 都持有的完整全局网格，`mesh.
+        # face_connectivity` 是阶数无关的拓扑信息，见
+        # `high_order_mesh_order.py::set_order` 文档——不随阶数变化，
+        # 不需要额外持久化）。只对 `face_connectivity is not None`
+        # 这条"兼容旧接口"/CLI 生产路径分支支持（`partition_info` 这条
+        # 分支要求调用方自带一个可能不是完整全局网格的 `mesh`，CLI 从未
+        # 真正使用过这条分支构造 `DistributedFRSolver`，见该分支上方
+        # 文档——如实标注为不支持，而不是假装能用）。
+        self._oc_cell_partition = cell_partition if face_connectivity is not None else None
 
         # 构建本 rank 的分区数据结构。
         #
@@ -212,6 +262,15 @@ class DistributedFRSolver:
         n_sps = mesh.n_sps_per_cell
         n_vars = solver_kwargs.get('n_vars', 5)
         self.state = DistributedFRState(self.partition, n_sps, n_vars)
+        # 均匀自由流场初始化（真实 bug 修复，2026-09-02，见
+        # DistributedFRState.initialize_uniform 文档）：此前这里从未
+        # 对新构造的 state 赋初值，conserved state 恒为全零。
+        self.state.initialize_uniform(
+            rho=solver_kwargs.get('rho_inf', 1.225),
+            u=solver_kwargs.get('vel_inf', 33.33),
+            v=0.0, w=0.0,
+            p=solver_kwargs.get('p_inf', 101325.0),
+        )
 
         # 5. 初始化 halo 交换器（同样必须在面几何/halo 扩展之后构造，
         # 理由见上）
@@ -220,16 +279,383 @@ class DistributedFRSolver:
         # 6. 保存 solver kwargs 用于创建本地求解器
         self.solver_kwargs = solver_kwargs
         self._local_solver = None  # 延迟初始化
+        self._p0_global_boundary_ghost_provider = None  # P0 分布式残差路径专用，见 local_solver 属性文档
+
+        # 6b. SST 湍流模型初始化（2026-09-02，见 core/mpi/
+        # distributed_turbulence.py 模块文档）。turb_model 只按
+        # n_local_cells 分配（与 self.state 一致，local+halo 的 k/omega
+        # 通过独立的 2-var halo 交换器实时获取，不常驻）。复用单机路径
+        # 完全相同的 `init_turbulence_models`（鸭子类型：只需要
+        # `.turb_model_name`/`.freestream`/`.mu_molecular`/
+        # `._turbulence_intensity`/`._viscosity_ratio` 这几个属性，
+        # `self` 已经或即将全部满足）。
+        n_local = self.partition.n_local_cells
+        self.turb_model = None
+        self.turb_halo_exchange = None
+        self.wall_distance_compact = None
+        self.ddes_model = None
+        self.iddes_h_max_compact = None
+        self.iddes_h_wn_compact = None
+        self.des_length_scale_halo_exchange = None
+        self.wmles_model = None
+        # LES（2026-09-02）：WALE 是纯代数 SGS 模型，没有 k/omega 那样的
+        # 跨步 ODE 状态，也不需要 wall_distance（不像 WMLES 的 y+ 计算）
+        # ——单独一个分支，不并入下面 SST/DDES/IDDES/WMLES 共用的构造块。
+        self.sgs_model = None
+        if turb_model_upper == 'LES':
+            from autoflowcfd.core.turbulence.sgs import WALEModel
+            self.sgs_model = WALEModel()
+        if turb_model_upper in ('SST', 'DDES', 'IDDES', 'WMLES'):
+            self.rho_inf = solver_kwargs.get('rho_inf', 1.225)
+            self.vel_inf = solver_kwargs.get('vel_inf', 33.33)
+            self.p_inf = solver_kwargs.get('p_inf', 101325.0)
+            self.mu_molecular = solver_kwargs.get('mu_molecular', 1.8e-5)
+            self.freestream = {"rho_inf": self.rho_inf, "vel_inf": self.vel_inf, "p_inf": self.p_inf}
+            self._turbulence_intensity = solver_kwargs.get('turbulence_intensity', 0.01)
+            self._viscosity_ratio = solver_kwargs.get('viscosity_ratio', 5.0)
+
+            if turb_model_upper in ('SST', 'DDES', 'IDDES'):
+                from autoflowcfd.core.fr_solver.turbulence import init_turbulence_models
+                init_turbulence_models(self, n_local, n_sps)  # 设置 self.turb_model,
+                # self._turb_ramp_step/_turb_production_ramp_steps（产项渐变，
+                # 见该函数与 _update_production_ramp 文档）。distributed_compute_
+                # turbulence_source_and_viscosity 内部用的是一个每步都重新构造
+                # 的临时 adapter 对象，_turb_ramp_step 的递增不会自动持久化，
+                # step() 显式在每次调用后把结果写回 self._turb_ramp_step
+                # （见该方法对应注释）。
+
+                self.turb_halo_exchange = HaloExchange(self.partition, n_sps, 2)
+            else:
+                # WMLES（2026-09-02）：没有 k/omega ODE 状态，不需要
+                # init_turbulence_models/turb_halo_exchange——只需要真实
+                # 的 CPU 版 WMLESModel 实例（与单机 `gpu_solver.py`/CPU
+                # `FRSolver.__init__` 构造 wmles_model 同一个模式）+
+                # 下面统一计算的 wall_distance_compact（y+ 计算需要）。
+                from autoflowcfd.core.turbulence.wmles import WMLESModel
+                self.wmles_model = WMLESModel(nu=self.mu_molecular / max(self.rho_inf, 1e-10))
+
+            wall_node_indices = None
+            # 真实 bug 修复（2026-09-02，排查多GPU分布式SST时发现同一处
+            # 拷贝粘贴的 bug，本文件同样中招）：`hasattr(mesh,
+            # 'boundary_groups')` 对"属性存在但值是 None"恒为 True，
+            # `.items()` 会真实 AttributeError——用 `getattr(...) is not
+            # None` 才是正确的存在性判据。
+            boundary_groups = getattr(mesh, 'boundary_groups', None)
+            if boundary_groups is not None:
+                for bg_name, bg in boundary_groups.items():
+                    if 'WALL' in bg_name.upper() or bg.get('type', '').upper() == 'WALL':
+                        wall_node_indices = bg.get('node_indices')
+                        break
+            from autoflowcfd.core.mpi.distributed_turbulence import compute_distributed_wall_distance
+            self.wall_distance_compact = compute_distributed_wall_distance(
+                self.partition, self.dist_flat_face, mesh, wall_node_indices,
+            )
+
+            # DDES/IDDES（2026-09-02）：`init_turbulence_models` 的 DDES/
+            # IDDES 分支已经把 `self.ddes_model` 设成真实的 DDESModel/
+            # IDDESModel 实例（复用单机同一份初始化逻辑，鸭子类型只需要
+            # `.turb_model_name`）。IDDES 分支还顺带把
+            # `self._iddes_h_max`/`self._iddes_h_wn` 设成了**全局**尺寸
+            # （`compute_h_max_and_h_wn(solver.mesh)` 用 `self.mesh`——
+            # "传统模式"下就是完整全局网格，与 h_max/h_wn 纯粹是"每个
+            # 单元自身节点坐标的函数、和相邻单元/分区无关"这一事实一致，
+            # 见 des.py::compute_h_max_and_h_wn 文档）——这里只需要按
+            # compact_global_ids 切一次片，得到分布式 adapter 真正需要
+            # 的 compact 索引空间版本，不需要任何新的跨 rank 几何交换。
+            if turb_model_upper in ('DDES', 'IDDES'):
+                assert self.ddes_model is not None, (
+                    "init_turbulence_models 应该已经为 DDES/IDDES 设置了 "
+                    "self.ddes_model，这里是 None 说明该函数的对应分支"
+                    "被跳过或修改，需要检查 turbulence.py::init_turbulence_"
+                    "models 的 DDES/IDDES 分支是否还在。"
+                )
+            if turb_model_upper == 'IDDES':
+                compact_global_ids = self.dist_flat_face.compact_global_ids
+                self.iddes_h_max_compact = self._iddes_h_max[compact_global_ids]
+                self.iddes_h_wn_compact = self._iddes_h_wn[compact_global_ids]
+            elif turb_model_upper == 'DDES':
+                # DDES（2026-09-02 补齐，与 IDDES 同一处理）：
+                # `init_turbulence_models` 现在也会为 DDES 分支设置
+                # `self._iddes_h_max`（见 fr_solver/turbulence.py 对应
+                # 分支——`apply_to_sst_model` 用它换成各向异性感知的
+                # max_edge 网格尺度，不再是 cube_root(V)），这里同样切
+                # 一次片得到 compact 索引空间版本。DDES 不需要 h_wn
+                # （那是 IDDES 专属的近壁法向间距量），不切它。
+                compact_global_ids = self.dist_flat_face.compact_global_ids
+                self.iddes_h_max_compact = self._iddes_h_max[compact_global_ids]
+
+            if turb_model_upper in ('DDES', 'IDDES'):
+                # 真实 bug 修复（2026-09-02，两次连续调用才测出来）：
+                # `des_length_scale` 是跨步持久状态，需要与 k_field/
+                # omega_field 同一套 halo 交换+compact 重排才能在
+                # 第二次及以后的调用里正确使用，见 distributed_
+                # turbulence.py::distributed_compute_turbulence_source_
+                # and_viscosity 对应修复文档。只有 1 个分量，不能复用
+                # 2-var 的 turb_halo_exchange。
+                self.des_length_scale_halo_exchange = HaloExchange(self.partition, n_sps, 1)
 
         # 7. 时间推进器：与单机 FRSolver 同一套 Shu-Osher SSP-RK3 stage
         # 实现（core/time_integration/base.py），保证分布式与单机路径
         # 时间精度一致（见 step() 文档：此前这里是自称"RK3"实际执行单步
         # 前向欧拉的简化实现）。dt 在这里只是占位——真正推进用的步长由
         # step() 每次显式构造的 dt_local 数组决定，不读 self.dt。
-        self._time_integrator = TimeIntegrator(scheme=TimeIntegrationScheme.SSP_RK3, dt=1.0)
+        #
+        # 真实 bug 修复（2026-09-02，用户明确要求"不允许出现完成度不是
+        # 100%的功能点"后排查发现）：此前这里无条件硬编码
+        # `scheme=TimeIntegrationScheme.SSP_RK3`，完全忽略调用方通过
+        # `solver_kwargs['time_scheme']` 传入的值——DUAL_TIME（真正
+        # 时间精度的瞬态仿真，DES/LES 场景应该用的模式）请求了也会被
+        # 静默换成稳态收敛加速模式，`step()` 内部原本也只会
+        # `_ssp_rk_stage_step`，即便这里读对了 scheme 也无路可走。
+        # 现在真正读取 `time_scheme`/`dual_time_inner_iter`，`step()`
+        # 相应按 scheme 分派（与单机 `fr_solver/step.py` 同一个设计）。
+        time_scheme = solver_kwargs.get('time_scheme', TimeIntegrationScheme.SSP_RK3)
+        dual_time_steps = solver_kwargs.get('dual_time_inner_iter', 20)
+        self._time_integrator = TimeIntegrator(
+            scheme=time_scheme, dt=1.0, dual_time_steps=dual_time_steps,
+        )
+        # DUAL_TIME 模式下 BDF2 需要的上一物理时间层状态（None 表示
+        # 尚未跑过一个物理步，退化为 BDF1——与单机
+        # `solver._dual_time_U_prev` 同一个约定）。
+        self._dual_time_U_prev = None
 
         # 8. 同步
         barrier()
+
+    @classmethod
+    def from_fully_distributed_package(cls, package: dict, n_ranks: int, rank: Optional[int] = None,
+                                        root_context: Optional[dict] = None):
+        """真正的"完全分布式加载"构造入口（2026-09-02，见 core/mpi/
+        distributed_mesh_loader.py::distributed_mesh_load_v2/
+        build_fully_distributed_rank_package 模块文档）。
+
+        与主构造函数（`__init__`，"传统模式"：每个 rank 独立加载完整
+        全局网格）的关键区别：这里的 `package` 是 root rank 预先算好、
+        已经按本 rank 的 compact 索引空间切好的紧凑数据（`partition`/
+        `dist_fc`/`PrecompactedMeshData`/切好 `group_code` 的边界幽灵态
+        提供者），本 rank 从未持有、也不需要持有完整全局网格——这是
+        "完全分布式加载"名副其实的内存优化。
+
+        用 `cls.__new__(cls)` 绕开主 `__init__`（那个构造函数的很多步骤
+        ——如 `build_distributed_partition`/`build_distributed_flat_face`
+        ——本身就要求一个完整全局网格，在这条路径下没有意义、也没有
+        数据可用），直接把 package 里已经算好的内容赋到对应属性上。
+
+        范围边界（与 `build_fully_distributed_rank_package` 文档一致，
+        这里重复一遍避免只读一处文档漏掉）：支持 `turbulence_
+        model='none'/'sst'/'ddes'/'iddes'/'wmles'/'les'`（2026-09-02
+        补齐 SST/DDES/IDDES，同日续接 WMLES/LES——两者此前"需要额外
+        基础设施"的排除理由排查后不成立：WMLES 壁面剪应力修正只是
+        纯逐 owner 单元的局部操作，真正的障碍是 `compute_wmles_wall_
+        stress_correction` 没有跟随 `flat_face_override` 约定，现已
+        修复；LES（WALE）纯代数现算，不需要 root 预计算任何几何量）。
+        DUAL_TIME、checkpoint 已接入。Order Continuation（2026-09-02
+        续接）——见 `core/mpi/distributed_order_continuation.py` 模块
+        文档：本 rank 只持有 compact 数据，阶数切换需要 root 用完整
+        全局网格重新算一遍紧凑包再重新分发（"完全分布式加载"名副
+        其实的代价），本方法本身不做这件事，由
+        `DistributedFRSolver._interpolate_to_new_order` 调用
+        `distributed_order_continuation.py::redistribute_fully_
+        distributed_for_new_order`（需要 root 持有的 `_root_context`，
+        见下面 `root_context` 参数）触发。
+
+        Args:
+            package: `build_fully_distributed_rank_package` 的返回值
+                （或 `distributed_mesh_load_v2` 经 MPI 收发后本 rank
+                收到的那一份）
+            n_ranks: MPI rank 总数
+            rank: 当前 rank（默认从 MPI 获取）
+            root_context: 仅 root rank（rank 0）需要非 None——
+                `distributed_mesh_load_v2` 返回的第二个值（见该函数
+                文档"Order Continuation 支持"一节），持有完整全局
+                `mesh`/`ops`/`cell_partition`/`face_connectivity`/
+                `boundary_ghost_provider_global`/冻结的 root 端配置，
+                供后续阶数切换时重新计算+重新分发紧凑包。非 root rank
+                永远传 None（它们从未持有、也不需要这份数据）。不提供
+                时（None）意味着这个 solver 实例无法执行 Order
+                Continuation（`order>=2` 时 `solve()` 会 fail-fast
+                拒绝而不是静默跳过升阶爬坡）。
+
+        Returns:
+            DistributedFRSolver 实例
+        """
+        import types
+        from autoflowcfd.fr.operators import generate_fr_operators
+
+        self = cls.__new__(cls)
+        self.rank = rank if rank is not None else get_rank()
+        self._is_fully_distributed = True
+        self._root_context = root_context
+        self.order = int(package['order'])
+        self.current_order = self.order
+        self.order_continuation_enabled = package.get('order_continuation_enabled', True)
+        self.flux_type = package.get('flux_type', 'radau')
+        self.n_ranks = n_ranks
+
+        precompacted_mesh = package['precompacted_mesh']
+        self.mesh = precompacted_mesh
+        # 每个 rank 本地重新生成算子（纯函数，只依赖 order/tet_basis_
+        # mode/flux_point_type，见 fr/operators.py），而不是把 root 算好
+        # 的 FROperators 对象整个 pickle 发过来——避免不必要的大数组
+        # 序列化开销（微分算子矩阵与单元数无关，每个 rank 反正都要
+        # 用同一份，本地重算比跨进程传输更便宜）。
+        self.ops = generate_fr_operators(package['order'])
+
+        self.partition = package['partition']
+        self.dist_flat_face = package['dist_fc']
+
+        n_sps = precompacted_mesh.n_sps_per_cell
+        n_vars = 5
+        self.state = DistributedFRState(self.partition, n_sps, n_vars)
+        # 均匀自由流场初始化（同一处真实 bug 修复，见
+        # DistributedFRState.initialize_uniform 文档）——"完全分布式
+        # 加载"路径同样从未初始化过 state，同一个根因。
+        self.state.initialize_uniform(
+            rho=package['freestream'].get('rho_inf', 1.225),
+            u=package['freestream'].get('vel_inf', 33.33),
+            v=0.0, w=0.0,
+            p=package['freestream'].get('p_inf', 101325.0),
+        )
+        self.halo_exchange = HaloExchange(self.partition, n_sps, n_vars)
+
+        self.solver_kwargs = {}
+        # SST/DDES/IDDES/WMLES（2026-09-02 补齐）：root 已经把
+        # wall_distance/h_max/h_wn 算好、按本 rank 的 compact 索引空间
+        # 切好放进 package，这里只需要构造真正的 turb_model（compact
+        # 索引空间外的部分，即 n_local 大小的持久状态）+ 对应的 halo
+        # 交换器，不需要重新算任何几何量。
+        turb_model_name = package.get('turb_model_name', 'NONE')
+        # fail-fast 护栏（真实 bug 修复，2026-09-02）：拒绝任何拼写错误/
+        # 未知的 turb_model_name，而不是静默把 `self.turb_model_name`
+        # 设成该值但 `self.turb_model`/`.wmles_model`/`.sgs_model` 都
+        # 留空——`step()` 会静默把它当成 'none' 跑（湍流物理完全缺失，
+        # 不会有任何报错或警告）。
+        if turb_model_name not in ('NONE', 'SST', 'DDES', 'IDDES', 'WMLES', 'LES'):
+            raise NotImplementedError(
+                f"DistributedFRSolver.from_fully_distributed_package: "
+                f"'完全分布式加载' 模式目前只支持 turbulence_model="
+                f"'none'/'sst'/'ddes'/'iddes'/'wmles'/'les'，收到的是 "
+                f"'{turb_model_name}'。"
+            )
+        self.turb_model_name = turb_model_name
+        self._turb_model_upper = turb_model_name
+        # Order Continuation 支持（2026-09-02，见 core/mpi/distributed_
+        # mesh_loader.py::redistribute_fully_distributed_for_new_order
+        # 文档）：`self.freestream` 只在 SST/DDES/IDDES 分支才会被设置
+        # （见下方），但阶数切换时需要对**任意** turb_model_name 都能
+        # 拿到自由来流条件（重置 P0 均匀流场需要），这里存一份通用的、
+        # 不依赖 turb_model_name 分支的副本。
+        self._package_freestream = package['freestream']
+        self.turb_model = None
+        self.turb_halo_exchange = None
+        self.wall_distance_compact = package.get('wall_distance_compact')
+        self.ddes_model = None
+        self.iddes_h_max_compact = package.get('iddes_h_max_compact')
+        self.iddes_h_wn_compact = package.get('iddes_h_wn_compact')
+        self.des_length_scale_halo_exchange = None
+        # `step()` 的 `residual_func` 无条件读取 `self.wmles_model`/
+        # `self.sgs_model`（与主 `__init__` 同一个属性名约定），必须
+        # 存在这两个属性，否则任何 turb_model_name 都会在 step() 里
+        # AttributeError——两者默认 None，只在下面对应分支里真正构造。
+        self.wmles_model = None
+        self.sgs_model = None
+
+        if turb_model_name == 'LES':
+            # LES（2026-09-02）：WALE 纯代数 SGS 模型，不需要 root 预
+            # 计算任何几何量（不像 SST 需要 wall_distance），package
+            # 里也没有为它准备任何字段——直接构造即可。
+            from autoflowcfd.core.turbulence.sgs import WALEModel
+            self.sgs_model = WALEModel()
+        elif turb_model_name == 'WMLES':
+            # WMLES（2026-09-02）：没有 k/omega ODE 状态，不需要
+            # SSTModelFR/turb_halo_exchange——只需要真实的 WMLESModel
+            # 实例 + package 里 root 已经算好的 wall_distance_compact
+            # （y+ 计算需要，上面 `self.wall_distance_compact = package.
+            # get('wall_distance_compact')` 已经取到）。
+            from autoflowcfd.core.turbulence.wmles import WMLESModel
+            mu_molecular = package['mu_molecular']
+            rho_inf = package['freestream'].get('rho_inf', 1.225)
+            self.wmles_model = WMLESModel(nu=mu_molecular / max(rho_inf, 1e-10))
+
+        if turb_model_name in ('SST', 'DDES', 'IDDES'):
+            self.mu_molecular = package['mu_molecular']
+            self.freestream = {**package['freestream'], "mach_ref": package['mach_ref']}
+            self._turbulence_intensity = package.get('turbulence_intensity', 0.01)
+            self._viscosity_ratio = package.get('viscosity_ratio', 5.0)
+
+            n_local = self.partition.n_local_cells
+            # 直接复用单机路径同一套 Tu/VR 推导 k_inf/omega_inf +
+            # k_max/omega_max 物理上界公式（`_set_freestream_
+            # turbulence`/`_set_turbulence_bounds` 都是鸭子类型函数，
+            # 只需要 `.freestream`/`.mu_molecular`/`._turbulence_
+            # intensity`/`._viscosity_ratio`/`.turb_model`，`self` 此时
+            # 已经全部满足）——不直接调用 `init_turbulence_models`，
+            # 因为它的 IDDES 分支会用 `solver.mesh` 重新计算 h_max/
+            # h_wn（这里 `self.mesh` 是 `PrecompactedMeshData`，没有
+            # 完整节点坐标/连接关系，算不出来），而 h_max/h_wn 本来就
+            # 已经由 root 算好放进 package 了，不需要重算。
+            from autoflowcfd.core.fr_solver.turbulence import (
+                _set_freestream_turbulence, _set_turbulence_bounds,
+            )
+            from autoflowcfd.core.turbulence.sst import SSTModelFR
+            k_inf, omega_inf = _set_freestream_turbulence(self)
+            self.turb_model = SSTModelFR(n_local, n_sps, k_inf=k_inf, omega_inf=omega_inf)
+            _set_turbulence_bounds(self)
+            self._turb_ramp_step = 0
+            self._turb_production_ramp_steps = 50
+            self._turb_production_ramp_complete = False
+
+            self.turb_halo_exchange = HaloExchange(self.partition, n_sps, 2)
+
+            if turb_model_name == 'DDES':
+                from autoflowcfd.core.turbulence.des import DDESModel
+                self.ddes_model = DDESModel()
+            elif turb_model_name == 'IDDES':
+                from autoflowcfd.core.turbulence.des import IDDESModel
+                self.ddes_model = IDDESModel()
+
+            if self.ddes_model is not None:
+                self.des_length_scale_halo_exchange = HaloExchange(self.partition, n_sps, 1)
+
+        # 轻量级鸭子类型"local_solver"替身（不构造真正的 FRSolver——那
+        # 需要完整全局网格重新生成 sps 几何/差分算子，在这条路径下既
+        # 没有数据也没有必要）：`step()` 只读它的 `.config.physics.
+        # enable_viscous`/`.mu_molecular`/`.boundary_ghost_provider`/
+        # `.freestream["mach_ref"]` 这 4 个属性（已逐行核实
+        # distributed_solver.py 全文只有这 4 处 `self.local_solver.`
+        # 访问），不需要真正的 FRSolver 实例。
+        self._local_solver = types.SimpleNamespace(
+            config=types.SimpleNamespace(
+                physics=types.SimpleNamespace(enable_viscous=package['enable_viscous'])
+            ),
+            mu_molecular=package['mu_molecular'],
+            boundary_ghost_provider=package['boundary_ghost_provider'],
+            freestream={**package['freestream'], "mach_ref": package['mach_ref']},
+        )
+        # `_p0_global_boundary_ghost_provider` 是"传统模式"专用的全局
+        # provider（本 rank 持有完整全局网格时才有意义），"完全分布式
+        # 加载"下恒为 None——但这**不代表** P0 阶段的分布式残差本身
+        # 不支持：那条路径改用 `distributed_order_continuation.py::
+        # compute_distributed_p0_inviscid_residual` 里 `_is_
+        # fully_distributed` 分支的另一套机制（只有 root 通过
+        # `self._root_context` 持有的完整网格计算，算完 broadcast 给
+        # 全部 rank），2026-09-02 已实现，见该函数文档。
+        self._p0_global_boundary_ghost_provider = None
+
+        # 真实读取 package 里的 time_scheme/dual_time_inner_iter（不再
+        # 硬编码 SSP_RK3）——`build_fully_distributed_rank_package`
+        # 2026-09-02 已接入这两个字段（见 distributed_mesh_loader.py
+        # 模块文档"DUAL_TIME 支持"一节），`.get(...)` 默认值只是兼容
+        # 没有这两个字段的旧 checkpoint/package。
+        time_scheme = package.get('time_scheme', TimeIntegrationScheme.SSP_RK3)
+        dual_time_steps = package.get('dual_time_inner_iter', 20)
+        self._time_integrator = TimeIntegrator(
+            scheme=time_scheme, dt=1.0, dual_time_steps=dual_time_steps,
+        )
+        self._dual_time_U_prev = None
+
+        barrier()
+        return self
 
     @property
     def local_solver(self):
@@ -254,7 +680,59 @@ class DistributedFRSolver:
             kwargs = dict(self.solver_kwargs)
             kwargs.setdefault('order', self.mesh.order)
             self._local_solver = FRSolver(self.mesh, **kwargs)
+
+            # 真实 bug 修复（2026-09-02，实现分布式湍流模型时排查发现，
+            # 与湍流本身无关——任何使用真实 WALL/INLET/OUTLET/FARFIELD/
+            # SYMMETRY 区分的分布式算例都会中招，与 gpu_distributed.py
+            # 同一处修复同一个根因）：`FRSolver(self.mesh, ...)` 用
+            # `self.mesh`（完整全局网格，"传统模式"下如此）构造的
+            # `boundary_ghost_provider.group_code` 是**全局**面编号索引，
+            # 但 `distributed_compute_inviscid_residual`/`_viscous_residual`
+            # 最终调用 `ghost_provider(f, ...)` 时 `f` 是本 rank 的
+            # local+halo**压缩索引空间**面编号——两套编号不是同一个索引
+            # 空间的子区间（见 `distributed_flat_face.py::partition.
+            # local_faces` 文档）。真实合成网格验证：2-rank 分区，8/12
+            # （67%）压缩面会被分配到错误的边界组编码。修复：把
+            # `group_code` 重映射到压缩索引空间。
+            provider = getattr(self._local_solver, 'boundary_ghost_provider', None)
+            if provider is not None and hasattr(provider, 'group_code'):
+                # P0 分布式残差路径（2026-09-02，见 core/mpi/
+                # distributed_order_continuation.py 模块文档"P0 有限
+                # 体积残差"一节）需要一份**未经压缩索引空间重映射**的
+                # provider——P0 kernel 直接对 `self.mesh`（完整全局网格）
+                # 逐全局面 id 调用，不经过下面这行的压缩重映射。在原地
+                # 覆写 `group_code` 之前，先浅拷贝一份 provider 对象、
+                # 保留原始全局 `group_code`，供 P0 路径使用；下面这行
+                # 仍然原地重映射 `self._local_solver.boundary_ghost_
+                # provider` 本身（P1+ 路径继续使用压缩索引空间版本，
+                # 行为不变）。
+                import copy as _copy
+                self._p0_global_boundary_ghost_provider = _copy.copy(provider)
+                provider.group_code = provider.group_code[self.partition.local_faces]
         return self._local_solver
+
+    def _interpolate_to_new_order(self, target_p: int) -> None:
+        """将解从当前阶数插值到新的阶数（分布式 Order Continuation
+        核心逻辑，2026-09-02，见 core/mpi/distributed_order_
+        continuation.py 模块文档）——按本实例的构造方式分派到对应的
+        重建函数：'传统模式'（`self._is_fully_distributed is False`，
+        每个 rank 持有完整全局网格）复用同一进程内的 `cell_partition`
+        重建 partition/dist_flat_face；'完全分布式加载'
+        （`self._is_fully_distributed is True`）需要 root 重新计算+
+        重新分发紧凑包，见 `redistribute_fully_distributed_for_new_
+        order` 文档。
+        """
+        from autoflowcfd.core.mpi.distributed_order_continuation import (
+            cpu_traditional_interpolate_to_new_order,
+        )
+
+        if self._is_fully_distributed:
+            from autoflowcfd.core.mpi.distributed_mesh_loader import (
+                redistribute_fully_distributed_for_new_order,
+            )
+            redistribute_fully_distributed_for_new_order(self, target_p)
+        else:
+            cpu_traditional_interpolate_to_new_order(self, target_p)
 
     def exchange_halo(self, U_local: np.ndarray) -> np.ndarray:
         """执行 halo 交换。
@@ -320,8 +798,12 @@ class DistributedFRSolver:
            转换），但复用 `_ssp_rk_stage_step` 就必须显式取负，否则解会
            往错误的时间方向积分。
 
-        目前只支持纯层流（无 mu_t 耦合）——`__init__` 已经在构造时拒绝
-        非 'none' 的湍流模型，这里不需要再判断。
+        SST 湍流模型（2026-09-02）：与单机 `fr_solver/step.py::step` 同一个
+        算子分裂设计——湍流源项+输运在物理步开始时求值一次（用当前状态，
+        不在每个 RK 子迭代里重算），产出的 `mu_t_field_compact` 在本步
+        全部 RK 子阶段内保持不变，供粘性残差 BR1 界面项消费；k/omega 场
+        本身用独立于平均流 RK 的显式-半隐式更新（`SSTModelFR.update_
+        fields`），不在这里更新。`__init__` 只接受 'none'/'SST'。
 
         Args:
             dt: 物理时间步长（分布式路径目前用全局固定步长，不做单机
@@ -338,8 +820,26 @@ class DistributedFRSolver:
         )
         from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
 
-        config = self.local_solver.config
-        enable_viscous = config.physics.enable_viscous
+        # 真实 bug 修复（2026-09-02，"传统模式"主 __init__ + 真正 step()
+        # 端到端测试此前从未存在，用户明确要求补齐测试覆盖后才发现）：
+        # `self.local_solver.config.physics.enable_viscous` 假设
+        # `local_solver` 是"完全分布式加载"专用的 `types.SimpleNamespace`
+        # 鸭子类型替身（见 `from_fully_distributed_package` 里
+        # `config=types.SimpleNamespace(physics=types.SimpleNamespace(
+        # enable_viscous=...))` 的构造），但"传统模式"下 `local_solver`
+        # 是 `local_solver` 这个 @property 真正构造出的、货真价实的
+        # `FRSolver` 实例——`FRSolver` 类本身完全没有 `.config` 属性
+        # （单机路径的粘性残差本来就无条件计算，从未有过开关），这里
+        # 无条件访问 `.config` 必然 `AttributeError`——"传统模式"这条
+        # CLI 生产路径（`solve steady --n-ranks>1`，不加 `--fully-
+        # distributed`）因此 100% 必现崩溃，此前从未被任何测试捕捉到。
+        # 修复：`local_solver` 没有 `.config` 时（真实 FRSolver 场景）
+        # 退回 `True`，与单机 `FRSolver` 的真实行为（粘性残差恒计算）
+        # 一致；"完全分布式加载"的替身仍按其显式提供的值。
+        _local_config = getattr(self.local_solver, 'config', None)
+        enable_viscous = (
+            _local_config.physics.enable_viscous if _local_config is not None else True
+        )
         mu = self.local_solver.mu_molecular
         boundary_ghost_provider = self.local_solver.boundary_ghost_provider
         mach_ref = self.local_solver.freestream["mach_ref"]
@@ -347,22 +847,71 @@ class DistributedFRSolver:
         n_sps = self.state.n_sps
         n_vars = self.state.n_vars
 
+        # SST 湍流源项+输运（算子分裂，物理步开始时求值一次，见本方法
+        # 文档）——用当前（上一步末尾的）状态，产出的 mu_t_field_compact
+        # 供本步全部 RK 子阶段的粘性残差使用。
+        mu_t_field_compact = None
+        if self.turb_model is not None:
+            from autoflowcfd.core.mpi.distributed_turbulence import (
+                distributed_compute_turbulence_source_and_viscosity,
+            )
+            dt_local = np.full((n_local, n_sps), dt)
+            mu_t_field_compact, self._turb_ramp_step = distributed_compute_turbulence_source_and_viscosity(
+                self.state.get_local_U()[..., :5], self.partition, self.halo_exchange,
+                self.turb_halo_exchange, self.dist_flat_face, self.mesh, self.ops,
+                self.turb_model, mu, self.wall_distance_compact, dt_local,
+                turb_ramp_step=self._turb_ramp_step,
+                turb_ramp_steps=self._turb_production_ramp_steps,
+                turb_model_name=self.turb_model_name, ddes_model=self.ddes_model,
+                iddes_h_max_compact=self.iddes_h_max_compact,
+                iddes_h_wn_compact=self.iddes_h_wn_compact,
+                des_length_scale_halo_exchange=self.des_length_scale_halo_exchange,
+            )
+        elif self.sgs_model is not None:
+            # LES（2026-09-02）：WALE 纯代数模型，用当前状态现算，见
+            # distributed_compute_les_viscosity 文档。
+            from autoflowcfd.core.mpi.distributed_turbulence import (
+                distributed_compute_les_viscosity,
+            )
+            mu_t_field_compact = distributed_compute_les_viscosity(
+                self.state.get_local_U()[..., :5], self.partition, self.halo_exchange,
+                self.dist_flat_face, self.mesh, self.ops, self.sgs_model,
+            )
+
         def residual_func(U_flat_trial: np.ndarray) -> np.ndarray:
             """TimeIntegrator 约定：dU/dt = -residual_func(U)。RK3 每个
             stage 都会调用一次：对该 stage 的中间解重新做 halo 交换 +
             残差求值（halo 数据在每个 stage 之间会变化，不能复用上一个
             stage 交换到的邻居数据）。"""
             U_stage_local = U_flat_trial.reshape(n_local, n_sps, n_vars)
-            inviscid_residual = distributed_compute_inviscid_residual(
-                U_stage_local, self.partition, self.halo_exchange,
-                self.dist_flat_face, self.mesh, self.ops,
-                boundary_ghost_provider, mach_ref=mach_ref,
-            )
+            if n_sps == 1:
+                # P0（Order Continuation 最低阶）：单机无粘残差在这个
+                # 阶数完全绕开 flat-face 压缩抽象（见 core/fr_residual/
+                # inviscid.py::compute_inviscid_residual_fr 的
+                # `mesh.n_points_1d==1` 分支文档），P1+ 路径共用的
+                # compact/halo 机制在这里不适用，见
+                # distributed_order_continuation.py::compute_
+                # distributed_p0_inviscid_residual 文档。
+                from autoflowcfd.core.mpi.distributed_order_continuation import (
+                    compute_distributed_p0_inviscid_residual,
+                )
+                inviscid_residual = compute_distributed_p0_inviscid_residual(
+                    self, U_stage_local,
+                )
+            else:
+                inviscid_residual = distributed_compute_inviscid_residual(
+                    U_stage_local, self.partition, self.halo_exchange,
+                    self.dist_flat_face, self.mesh, self.ops,
+                    boundary_ghost_provider, mach_ref=mach_ref,
+                )
             if enable_viscous:
                 viscous_residual = distributed_compute_viscous_residual(
                     U_stage_local, self.partition, self.halo_exchange,
                     self.dist_flat_face, self.mesh, self.ops,
                     mu, boundary_ghost_provider,
+                    mu_t_field_compact=mu_t_field_compact,
+                    wmles_model=self.wmles_model,
+                    wall_distance_compact=self.wall_distance_compact,
                 )
                 total_dudt = inviscid_residual + viscous_residual
             else:
@@ -378,9 +927,24 @@ class DistributedFRSolver:
         residual0 = residual_func(U_flat)
         self.state.dU_dt[:n_local] = (-residual0).reshape(n_local, n_sps, n_vars)
 
-        U_new_flat = self._time_integrator._ssp_rk_stage_step(
-            U_flat, residual_func, dt_local_flat, p_floor=1.0, residual0=residual0,
-        )
+        # 真实 bug 修复（2026-09-02，见 __init__ 里 self._time_integrator
+        # 构造处同一处说明）：此前这里无条件调用 `_ssp_rk_stage_step`，
+        # DUAL_TIME（真正时间精度的瞬态仿真）请求了也无路可走——现在
+        # 与单机 `fr_solver/step.py::step` 同一个分派方式：`residual_
+        # func` 本身就是 `spatial_residual(U) -> R(U)`（`dU/dt=-R(U)`
+        # 约定，与 `step_dual_time` 需要的语义完全一致，不需要额外
+        # 包装），直接复用。
+        if self._time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME:
+            U_new_flat = self._time_integrator.step_dual_time(
+                U_flat, residual_func, dt_local_flat, dt_physical=dt,
+                solution_prev=self._dual_time_U_prev,
+                max_inner_iter=self._time_integrator.dual_time_steps,
+            )
+            self._dual_time_U_prev = U_flat.copy()
+        else:
+            U_new_flat = self._time_integrator._ssp_rk_stage_step(
+                U_flat, residual_func, dt_local_flat, p_floor=1.0, residual0=residual0,
+            )
 
         U_new_local = U_new_flat.reshape(n_local, n_sps, n_vars)
         self.state.U[:n_local] = U_new_local
@@ -388,15 +952,57 @@ class DistributedFRSolver:
 
         return self.compute_global_residual_norm()
 
-    def solve(self, n_steps: int, dt: float, output_interval: int = 100):
+    def solve(self, n_steps: int, dt: float, output_interval: int = 100, checkpoint_callback=None,
+              tol: float = 1e-6, phase_max_iter: Optional[int] = None,
+              residual_drop_threshold: float = 1e2):
         """运行分布式求解循环。
+
+        真实 bug 修复（2026-09-02，用户明确要求"不允许出现完成度不是
+        100%的功能点"后排查发现）：此前 `output_interval` 只控制
+        `logger.info` 进度打印的频率，从未触发任何中间 checkpoint
+        保存——分布式路径此前只在 CLI 里 `solve()` 返回*之后*保存一次
+        最终 checkpoint（见 `solve_steady_command.py`），跑到一半被
+        杀掉/崩溃会丢失全部进度，且没有任何"从分布式 checkpoint 继续
+        跑"的机制（`solve resume` 命令对 `--n-ranks`/`--multi-gpu`
+        完全没有感知）。与单机路径 `FRSolver.solve(...,
+        checkpoint_callback=...)` 同一个设计补上回调机制：调用方
+        （CLI）传入的 `checkpoint_callback(solver, iteration)` 在每步
+        结束后被调用，由回调自己决定何时/如何保存（通常内部判断
+        `iteration % checkpoint_interval`），不在这里耦合具体的保存
+        格式——与单机路径的分工完全一致。
+
+        Order Continuation 自动分派（2026-09-02，见 core/mpi/
+        distributed_order_continuation.py 模块文档）：与单机
+        `FRSolver.solve()`（`self.order_continuation_enabled and
+        self.order >= 2` 时自动改用逐阶爬坡）同一个判据——`self.order`
+        （目标阶数）>= 2 时自动委托给 `run_distributed_order_
+        continuation`，不需要 CLI/调用方显式请求。P0/P1 直接求解
+        （真实数值复核见 order_continuation.py 文档"曾经在这里跳过
+        P=1"一节，两条阶数下均匀自由流场残差都很好，不需要爬坡）。
 
         Args:
             n_steps: 最大时间步数
             dt: 时间步长
             output_interval: 输出间隔
+            checkpoint_callback: 可选，`callback(solver, iteration)`，
+                每步结束后调用一次（与单机 `FRSolver.solve` 同名参数
+                同一个约定）
+            tol, phase_max_iter, residual_drop_threshold: 仅在触发
+                Order Continuation（`self.order >= 2`）时生效，与单机
+                `run_order_continuation` 同名参数同一含义。
         """
         from autoflowcfd.core.mpi.comm import barrier
+
+        if getattr(self, 'order_continuation_enabled', True) and self.order >= 2:
+            from autoflowcfd.core.mpi.distributed_order_continuation import (
+                run_distributed_order_continuation,
+            )
+            return run_distributed_order_continuation(
+                self, n_steps, dt, tol,
+                checkpoint_callback=checkpoint_callback,
+                phase_max_iter=phase_max_iter,
+                residual_drop_threshold=residual_drop_threshold,
+            )
 
         if is_root():
             logger.info(f"Starting distributed solve: {n_steps} steps, dt={dt}")
@@ -411,6 +1017,14 @@ class DistributedFRSolver:
                     f"Step {step_idx}/{n_steps}, "
                     f"residual_norm={residual_norm:.6e}"
                 )
+
+            if checkpoint_callback is not None:
+                # 全部 rank 都要调用（checkpoint_callback 内部的
+                # distributed_save_checkpoint 本身就是集体操作——需要
+                # 每个 rank 各自贡献 local cells 数据才能在 root 组装
+                # 出正确的全局状态，只在 root 调用会在非 root rank 的
+                # gather 那一侧永久阻塞）。
+                checkpoint_callback(self, step_idx + 1)
 
             # 同步（可选，用于调试）
             # barrier()

@@ -144,6 +144,13 @@ def _reference_cell_face_misalignment(mesh):
     n1d = mesh.n_points_1d
     sps_1d = ffp_list._sps_1d
 
+    # native 四面体（路径C）：四面体坍缩坐标基删除后合成测试网格默认
+    # 即为 native（2026-09-03），必须传 `code_arr` 让 `compute_exact_
+    # adj_rows` 按 `owner_cube_face`/`neighbor_cube_face>=6` 分派到它
+    # 已有的 native 分支（`_native_tet_adj_row_batched`）——不传的话
+    # `axis_arr`（对 native 面是复用槽位的 excluded_vertex）会与坍缩
+    # 坐标 (axis,side) 语义发生数值碰撞，见该函数 `code_arr` 参数文档
+    # "真实 bug 修复"一节。
     owner_adj_row = compute_exact_adj_rows(
         fc.n_faces, n1d, sps_1d, n_prism,
         cell_arr=fc.owner_cell.astype(np.int64),
@@ -152,6 +159,7 @@ def _reference_cell_face_misalignment(mesh):
         prism_conn=mesh._fixed_prism_conn if mesh._fixed_prism_conn is not None else np.empty((0, 6), dtype=np.int64),
         tet_conn=mesh._fixed_tet_conn if mesh._fixed_tet_conn is not None else np.empty((0, 4), dtype=np.int64),
         node_coords=mesh._node_coords,
+        code_arr=fc.owner_cube_face.astype(np.int64),
     )
     neighbor_adj_row = compute_exact_adj_rows(
         fc.n_faces, n1d, sps_1d, n_prism,
@@ -162,23 +170,34 @@ def _reference_cell_face_misalignment(mesh):
         tet_conn=mesh._fixed_tet_conn if mesh._fixed_tet_conn is not None else np.empty((0, 4), dtype=np.int64),
         node_coords=mesh._node_coords,
         valid_mask=~fc.is_boundary,
+        code_arr=fc.neighbor_cube_face.astype(np.int64),
     )
 
     def own_dir(row, side):
         mag = np.linalg.norm(row, axis=-1)
         return (row / np.maximum(mag[:, None], 1e-300)) * side
 
+    # native 四面体（路径C）同一处修复（2026-09-03，四面体坍缩坐标基
+    # 删除后合成测试网格默认即为 native，此前只有显式请求 native 时才
+    # 会走到这个分支，这个参考实现从未被真正练到过）：`ffp.owner_side`/
+    # `ffp.neighbor_side` 对 native 面是复用槽位哑值（恒为 -1.0），不
+    # 代表真正的定向语义——与 `_cell_face_misalignment_kernel` 生产
+    # 实现同一处修复同一个理由（见该函数文档"native 四面体...真实
+    # bug 修复"一节）：native 面（`owner_cube_face>=6`）的 side 因子
+    # 固定为 +1，不使用复用槽位值。
     cell_misalign = np.zeros(mesh.n_cells)
     for f in range(fc.n_faces):
         ffp = ffp_list[f]
         if ffp.owner_is_primary:
             owner_cell = int(fc.owner_cell[f])
-            d = own_dir(owner_adj_row[f], ffp.owner_side)
+            side_o = 1.0 if int(fc.owner_cube_face[f]) >= 6 else ffp.owner_side
+            d = own_dir(owner_adj_row[f], side_o)
             misalign = 1.0 - np.sum(d * ffp.true_normal, axis=-1)
             cell_misalign[owner_cell] = max(cell_misalign[owner_cell], float(misalign.max()))
         if (not fc.is_boundary[f]) and ffp.neighbor_is_primary:
             neighbor_cell = int(fc.neighbor_cell[f])
-            d = own_dir(neighbor_adj_row[f], ffp.neighbor_side)
+            side_n = 1.0 if int(fc.neighbor_cube_face[f]) >= 6 else ffp.neighbor_side
+            d = own_dir(neighbor_adj_row[f], side_n)
             misalign = 1.0 - np.sum(d * (-ffp.true_normal), axis=-1)
             cell_misalign[neighbor_cell] = max(cell_misalign[neighbor_cell], float(misalign.max()))
     return cell_misalign

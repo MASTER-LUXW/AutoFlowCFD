@@ -88,14 +88,32 @@ class DistributedMeshAdapter:
         self.n_prism_cells = dist_fc.base_flat.n_prism
 
         n_sps = self.n_sps_per_cell
+
+        # "完全分布式加载"模式（2026-09-02，见 distributed_mesh_loader.py::
+        # PrecompactedMeshData 文档）：`local_mesh` 已经是 root rank 预先
+        # 按 compact_global_ids 切好的紧凑数据，形状已经是
+        # (n_compact, n_sps, ...)，不能也不需要再按 compact_global_ids
+        # 二次索引（那会用 0..n_compact-1 的紧凑局部编号去索引一个已经
+        # 只有 n_compact 行的数组，读到完全不对应的单元，且大多数情况下
+        # compact_global_ids 的取值范围（真实全局单元编号，可能远大于
+        # n_compact）会直接越界崩溃——用是否已经是 PrecompactedMeshData
+        # 实例判断走哪条路径，两条路径产出的 self._jacobians 等最终形状
+        # 完全一致，只是"传统模式"多一步"从全局数组按 compact_global_ids
+        # 抽取"，这里已经在 root 侧做过了。
+        from autoflowcfd.core.mpi.distributed_mesh_loader import PrecompactedMeshData
+        is_precompacted = isinstance(local_mesh, PrecompactedMeshData)
+
         self._jacobians = None
         if getattr(local_mesh, 'jacobians', None) is not None:
-            det_jacs = local_mesh.jacobians['det_jacs'].reshape(local_mesh.n_cells, n_sps)
-            inv_jacs = local_mesh.jacobians['inv_jacs'].reshape(local_mesh.n_cells, n_sps, 3, 3)
-            self._jacobians = {
-                'det_jacs': det_jacs[compact_global_ids],
-                'inv_jacs': inv_jacs[compact_global_ids],
-            }
+            if is_precompacted:
+                self._jacobians = local_mesh.jacobians
+            else:
+                det_jacs = local_mesh.jacobians['det_jacs'].reshape(local_mesh.n_cells, n_sps)
+                inv_jacs = local_mesh.jacobians['inv_jacs'].reshape(local_mesh.n_cells, n_sps, 3, 3)
+                self._jacobians = {
+                    'det_jacs': det_jacs[compact_global_ids],
+                    'inv_jacs': inv_jacs[compact_global_ids],
+                }
 
         # #2 补充修复：compute_inviscid_residual_fr 的 over-integration
         # 分支（order>=1 时恒会走到，见该函数文档）读 `mesh.n_sps_per_cell_
@@ -105,17 +123,23 @@ class DistributedMeshAdapter:
 
         self._jacobians_fine = None
         if getattr(local_mesh, 'jacobians_fine', None) is not None:
-            n_fine = local_mesh.n_sps_per_cell_fine
-            det_jacs_fine = local_mesh.jacobians_fine['det_jacs'].reshape(local_mesh.n_cells, n_fine)
-            inv_jacs_fine = local_mesh.jacobians_fine['inv_jacs'].reshape(local_mesh.n_cells, n_fine, 3, 3)
-            self._jacobians_fine = {
-                'det_jacs': det_jacs_fine[compact_global_ids],
-                'inv_jacs': inv_jacs_fine[compact_global_ids],
-            }
+            if is_precompacted:
+                self._jacobians_fine = local_mesh.jacobians_fine
+            else:
+                n_fine = local_mesh.n_sps_per_cell_fine
+                det_jacs_fine = local_mesh.jacobians_fine['det_jacs'].reshape(local_mesh.n_cells, n_fine)
+                inv_jacs_fine = local_mesh.jacobians_fine['inv_jacs'].reshape(local_mesh.n_cells, n_fine, 3, 3)
+                self._jacobians_fine = {
+                    'det_jacs': det_jacs_fine[compact_global_ids],
+                    'inv_jacs': inv_jacs_fine[compact_global_ids],
+                }
 
         self._cell_volumes = None
         if getattr(local_mesh, 'cell_volumes', None) is not None:
-            self._cell_volumes = local_mesh.cell_volumes[compact_global_ids]
+            if is_precompacted:
+                self._cell_volumes = local_mesh.cell_volumes
+            else:
+                self._cell_volumes = local_mesh.cell_volumes[compact_global_ids]
 
     @property
     def face_connectivity(self):
@@ -219,6 +243,9 @@ def distributed_compute_viscous_residual(
     ops,
     mu: float,
     boundary_ghost_provider=None,
+    mu_t_field_compact: Optional[np.ndarray] = None,
+    wmles_model=None,
+    wall_distance_compact: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """分布式粘性残差计算。
 
@@ -235,10 +262,13 @@ def distributed_compute_viscous_residual(
     重新计算 primitive 变量与梯度，不需要调用方预先算好并传入，`grad_U`
     参数因此整个不再需要）。
 
-    尚未支持湍流涡粘度耦合（`mu_t_field` 恒为 None，等价于纯层流粘性
-    应力）——`DistributedFRSolver.__init__` 已经在构造时拒绝
-    `turbulence_model != 'none'`，所以这里不会在有湍流模型的场景下
-    被静默调用。
+    湍流涡粘度耦合（2026-09-02 新增，见 core/mpi/distributed_turbulence.py
+    模块文档）：`mu_t_field_compact` 非 None 时传给底层
+    `compute_viscous_residual_ldg` 的 `mu_t_field` 参数——必须已经是
+    compact 索引空间（local+halo，"棱柱在前"排列，与本函数内部的
+    `U_compact` 同一个索引空间），由调用方（`distributed_compute_
+    turbulence_source_and_viscosity`）在 halo 交换 k/omega 后算出。
+    `DistributedFRSolver.__init__` 现在只接受 'none'/'SST'。
 
     Args:
         U_local: (n_local_cells, n_sps, 5) 本 rank 的 local cell 守恒变量
@@ -249,10 +279,19 @@ def distributed_compute_viscous_residual(
         ops: FR 算子
         mu: 分子动力粘度（标量）
         boundary_ghost_provider: 边界幽灵态提供者
+        mu_t_field_compact: (n_compact, n_sps) 湍流动力涡粘度场（compact
+            索引空间），None 时等价于纯层流（此前唯一行为）
+        wmles_model: WMLESModel 实例（2026-09-02 新增，见 `core/utils/
+            solver_helpers.py::compute_wmles_wall_stress_correction`
+            文档），None 时跳过壁面剪应力修正（此前唯一行为）
+        wall_distance_compact: (n_compact, n_sps) 壁面距离场（compact
+            索引空间，与 `mu_t_field_compact` 同一个索引空间），WMLES
+            激活时必须提供
 
     Returns:
         residual: (n_local_cells, n_sps, 5) local cells 的粘性残差
     """
+    import types
     from autoflowcfd.core.fr_residual.viscous import compute_viscous_residual as compute_viscous_residual_ldg
     from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
 
@@ -274,9 +313,31 @@ def distributed_compute_viscous_residual(
     Q_compact = conserved_to_primitive(U_compact[..., :5])
     residual_compact = compute_viscous_residual_ldg(
         U_compact, Q_compact, ops, adapter, mu=mu,
+        mu_t_field=mu_t_field_compact,
         boundary_ghost_provider=boundary_ghost_provider,
         flat_face_override=dist_fc.base_flat,
     )
+
+    # 4b. WMLES 壁面剪应力修正（2026-09-02）：与单机路径
+    # `FRSolver.compute_viscous_residual` 同一个施加时机（残差组装
+    # 阶段，时间积分之前）——复用同一个 CPU 核心函数，
+    # `flat_face_override=dist_fc.base_flat` 与上面粘性残差调用同一个
+    # 对象，避免它退回到对 `adapter` 重新调用
+    # `get_flat_face_geometry`（那样会因 `adapter.face_flux_points`
+    # 是"传统模式"下真实全局 mesh 的 face_flux_points 对象、但这里的
+    # 面索引是 compact 空间而语义错位——与 `_compute_omega_wall_target`
+    # 此前的同一类 bug，见该函数文档）。
+    if wmles_model is not None:
+        facade = types.SimpleNamespace(
+            wmles_model=wmles_model, mesh=adapter, ops=ops,
+            wall_distance=wall_distance_compact,
+            state=types.SimpleNamespace(U=U_compact, Q=Q_compact),
+            boundary_ghost_provider=boundary_ghost_provider,
+        )
+        from autoflowcfd.core.utils.solver_helpers import compute_wmles_wall_stress_correction
+        correction_compact = compute_wmles_wall_stress_correction(facade, flat_face_override=dist_fc.base_flat)
+        if correction_compact is not None:
+            residual_compact = residual_compact + correction_compact[..., :residual_compact.shape[-1]]
 
     # 5. 换回原生排列，再只返回 local cells 的残差
     residual_native = residual_compact[dist_fc.inv_perm]
@@ -335,8 +396,10 @@ def distributed_compute_physical_gradient(
     return grad_U_local
 
 
-# 分布式湍流输运（k/omega 对流+扩散）尚未接入分布式状态：DistributedFRSolver
-# 构造期已 fail-fast 拒绝非 none 湍流模型（见 distributed_solver.py 构造器文档），
-# 因此本模块不提供任何湍流输运入口——不留恒报错的占位函数，避免占位死代码；
-# 未来接入时以 core/turbulence/transport.py::compute_turbulence_transport_residual
-# 为蓝本实现（需 7-var 分布式状态、wall_distance 分发、逐 RK 子步 k/omega halo 交换）。
+# 分布式湍流输运（k/omega 对流+扩散）已接入（2026-09-02，SST 模型）：
+# 见 core/mpi/distributed_turbulence.py::
+# distributed_compute_turbulence_source_and_viscosity——独立于本文件
+# （k/omega 走自己的 2-var halo 交换，不是 7-var 分布式状态；本文件的
+# `distributed_compute_viscous_residual` 新增 `mu_t_field_compact` 参数
+# 消费其产出）。DDES/IDDES/WMLES/LES 分布式支持仍未实现，见该模块文档
+# "范围边界"一节。

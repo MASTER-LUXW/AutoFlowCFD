@@ -48,21 +48,34 @@ class TestDistributeFaceCorrectionMatchesCpuGroundTruth:
         assert flat.n_faces > flat.g_left.shape[0]
 
     def test_5var_case_matches_cpu_distribute_point(self, flat_face_p2):
+        """2026-09-03 更正：四面体坍缩坐标基已删除（见 fr/operators.py
+        模块文档），合成测试网格默认即为 native——`distribute_face_
+        correction_to_sps` 的 1D 修正函数分布本身只对 collapsed（棱柱）
+        面有意义（native 面走完全不同的 `lift_native` DG 提升算子，见
+        gpu_inviscid.py::_native_or_collapsed_contrib），`owner_axis`
+        对 native 面存的是复用槽位的 excluded_vertex（可达 3），不能
+        无条件拿去 gather 只有 3 个轴的表——只在棱柱面（
+        `owner_cube_face<6`）上验证这个函数，与生产代码里这个函数
+        实际只服务棱柱面的事实一致。"""
         flat = flat_face_p2
-        n_faces, n_fp, n_sps, n_vars = flat.n_faces, flat.n_fp, flat.n_sps, 5
+        n_fp, n_sps, n_vars = flat.n_fp, flat.n_sps, 5
+        prism_mask = flat.owner_cube_face < 6
+        face_ids = np.nonzero(prism_mask)[0]
+        assert len(face_ids) > 0, "合成网格应该至少有棱柱面"
 
         rng = np.random.default_rng(0)
-        jump = rng.standard_normal((n_faces, n_fp, n_vars))
-        axis = flat.owner_axis
-        side = flat.owner_side
+        jump_full = rng.standard_normal((flat.n_faces, n_fp, n_vars))
+        axis = flat.owner_axis[face_ids]
+        side = flat.owner_side[face_ids]
+        jump = jump_full[face_ids]
 
-        expected = np.zeros((n_faces, n_sps, n_vars))
-        for f in range(n_faces):
-            ax = axis[f]
-            g_prime = flat.g_right if side[f] > 0 else flat.g_left
+        expected = np.zeros((len(face_ids), n_sps, n_vars))
+        for i in range(len(face_ids)):
+            ax = axis[i]
+            g_prime = flat.g_right if side[i] > 0 else flat.g_left
             fp_of_sp = flat.dist_fp_of_sp[ax]
             axis_coord = flat.dist_axis_coord_of_sp[ax]
-            expected[f] = _distribute_point(jump[f], fp_of_sp, axis_coord, g_prime)
+            expected[i] = _distribute_point(jump[i], fp_of_sp, axis_coord, g_prime)
 
         actual = distribute_face_correction_to_sps(
             np, jump, axis, side, flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
@@ -72,23 +85,26 @@ class TestDistributeFaceCorrectionMatchesCpuGroundTruth:
 
     def test_scalar_case_matches_cpu_distribute_point_scalar(self, flat_face_p2):
         """标量（无 trailing V 轴）版本，供 gpu_scalar_transport.py 复用同一个
-        函数时验证。"""
+        函数时验证。2026-09-03 更正：同上，只在棱柱面上验证。"""
         flat = flat_face_p2
-        n_faces, n_fp, n_sps = flat.n_faces, flat.n_fp, flat.n_sps
+        n_fp, n_sps = flat.n_fp, flat.n_sps
+        prism_mask = flat.owner_cube_face < 6
+        face_ids = np.nonzero(prism_mask)[0]
 
         rng = np.random.default_rng(1)
-        correction_fp = rng.standard_normal((n_faces, n_fp))
-        axis = flat.owner_axis
-        side = flat.owner_side
+        correction_fp_full = rng.standard_normal((flat.n_faces, n_fp))
+        axis = flat.owner_axis[face_ids]
+        side = flat.owner_side[face_ids]
+        correction_fp = correction_fp_full[face_ids]
 
-        expected = np.zeros((n_faces, n_sps))
-        for f in range(n_faces):
-            ax = axis[f]
-            g_prime = flat.g_right if side[f] > 0 else flat.g_left
+        expected = np.zeros((len(face_ids), n_sps))
+        for i in range(len(face_ids)):
+            ax = axis[i]
+            g_prime = flat.g_right if side[i] > 0 else flat.g_left
             fp_of_sp = flat.dist_fp_of_sp[ax]
             axis_coord = flat.dist_axis_coord_of_sp[ax]
             for s in range(n_sps):
-                expected[f, s] = g_prime[axis_coord[s]] * correction_fp[f, fp_of_sp[s]]
+                expected[i, s] = g_prime[axis_coord[s]] * correction_fp[i, fp_of_sp[s]]
 
         actual = distribute_face_correction_to_sps(
             np, correction_fp, axis, side, flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
@@ -99,18 +115,23 @@ class TestDistributeFaceCorrectionMatchesCpuGroundTruth:
     def test_negative_control_wrong_axis_choice_would_diverge(self, flat_face_p2):
         """反向对照：用 neighbor_axis（而不是各面自己真正应该用的 owner_axis）
         去分配，数值上应与正确结果不同——证明本测试真的在检验对应关系，
-        不是即便传错 axis 也凑巧全部相等的退化情形。"""
+        不是即便传错 axis 也凑巧全部相等的退化情形。2026-09-03 更正：
+        只在两侧都是棱柱面的面上验证（同上，native 面的 axis 槽位不是
+        这个函数的合法输入）。"""
         flat = flat_face_p2
         rng = np.random.default_rng(2)
-        n_faces, n_fp = flat.n_faces, flat.n_fp
-        correction_fp = rng.standard_normal((n_faces, n_fp))
+        n_fp = flat.n_fp
+        both_prism = (flat.owner_cube_face < 6) & (flat.neighbor_cube_face < 6) & (flat.neighbor_cube_face >= 0)
+        face_ids = np.nonzero(both_prism)[0]
+        assert len(face_ids) > 0, "合成网格应该至少有一个棱柱-棱柱内部面"
+        correction_fp = rng.standard_normal((len(face_ids), n_fp))
 
         correct = distribute_face_correction_to_sps(
-            np, correction_fp, flat.owner_axis, flat.owner_side,
+            np, correction_fp, flat.owner_axis[face_ids], flat.owner_side[face_ids],
             flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp, flat.g_left, flat.g_right,
         )
         wrong = distribute_face_correction_to_sps(
-            np, correction_fp, flat.neighbor_axis, flat.owner_side,
+            np, correction_fp, flat.neighbor_axis[face_ids], flat.owner_side[face_ids],
             flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp, flat.g_left, flat.g_right,
         )
         # 只要存在至少一个内部面（owner_axis != neighbor_axis 是常见但非

@@ -148,6 +148,7 @@ ProjectFiles/
 results/
 results_*/
 checkpoints/
+transient_results/
 *.pkl
 *.log
 cases/

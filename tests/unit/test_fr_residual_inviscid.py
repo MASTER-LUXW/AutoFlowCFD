@@ -39,8 +39,20 @@ class _MockCells:
         self.connectivity = connectivity
 
 
-def _build_synthetic_mixed_mesh(order: int) -> HighOrderMesh:
-    """2 个共享面的四面体 + 2 个共享侧面的棱柱，覆盖内部面 + 边界面两种情形。"""
+def _build_synthetic_mixed_mesh(order: int, tet_basis_mode: str = "native") -> HighOrderMesh:
+    """2 个共享面的四面体 + 2 个共享侧面的棱柱，覆盖内部面 + 边界面两种情形。
+
+    tet_basis_mode: 保留这个参数名只是为了不用同步修改大量既有调用点
+    （2026-09-03 起四面体只有 native 一种实现，见 `fr/operators.py`
+    模块文档"删除 collapsed 相关内容"一节）——只接受 "native"（或默认
+    省略），传 "collapsed" 会显式报错而不是静默忽略，强制调用方去确认
+    该处测试意图是否也需要跟着更新，而不是继续假设一个已经不存在的
+    独立代码路径。"""
+    if tet_basis_mode != "native":
+        raise ValueError(
+            f"tet_basis_mode={tet_basis_mode!r} 已不再支持——四面体坍缩坐标基"
+            "已删除，只剩 native 一种实现（见 fr/operators.py 模块文档）。"
+        )
     nodes = np.array(
         [
             [0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1],

@@ -32,10 +32,17 @@ class _MockCells:
         self.connectivity = connectivity
 
 
-def _build_synthetic_mixed_mesh(order: int, tet_basis_mode: str) -> HighOrderMesh:
+def _build_synthetic_mixed_mesh(order: int, tet_basis_mode: str = "native") -> HighOrderMesh:
     """与 test_fr_residual_inviscid.py::_build_synthetic_mixed_mesh 同一个
-    合成网格构造（2 个共享面的四面体 + 2 个共享侧面的棱柱），加上
-    tet_basis_mode 参数。"""
+    合成网格构造（2 个共享面的四面体 + 2 个共享侧面的棱柱）。
+
+    tet_basis_mode: 四面体坍缩坐标基已删除（2026-09-03，见 `fr/
+    operators.py` 模块文档），只接受 "native"（或默认省略）。"""
+    if tet_basis_mode != "native":
+        raise ValueError(
+            f"tet_basis_mode={tet_basis_mode!r} 已不再支持——四面体坍缩坐标基"
+            "已删除，只剩 native 一种实现（见 fr/operators.py 模块文档）。"
+        )
     nodes = np.array(
         [
             [0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1],
@@ -60,7 +67,7 @@ def _build_synthetic_mixed_mesh(order: int, tet_basis_mode: str) -> HighOrderMes
         prism_cells=_MockCells(prism_conn),
     )
 
-    mesh = HighOrderMesh(order=order, tet_basis_mode=tet_basis_mode)
+    mesh = HighOrderMesh(order=order)
     mesh.load_from_volume_mesh(mock_volume)
     return mesh
 
@@ -126,10 +133,12 @@ def test_native_det_jacs_are_constant_and_match_reference_and_prism_unaffected(o
         det_j_expected, _ = compute_native_tet_jacobian(cell_nodes)
         np.testing.assert_allclose(det_jacs[cell_id], det_j_expected, atol=1e-12)
 
-    # 棱柱部分完全不受影响：与非 native 网格逐位一致
-    mesh_collapsed = _build_synthetic_mixed_mesh(order, "collapsed")
-    det_jacs_collapsed = mesh_collapsed.jacobians["det_jacs"].reshape(mesh_collapsed.n_cells, n_sps)
-    np.testing.assert_allclose(det_jacs[:n_prisms], det_jacs_collapsed[:n_prisms], atol=1e-12)
+    # 棱柱部分与再次独立构造的同一个网格逐位一致（棱柱坍缩坐标构造是
+    # 确定性的，不依赖四面体侧——这里不再有"collapsed 模式"可对比，
+    # 四面体基已删除，验证退化为可重复性检查）。
+    mesh_again = _build_synthetic_mixed_mesh(order, "native")
+    det_jacs_again = mesh_again.jacobians["det_jacs"].reshape(mesh_again.n_cells, n_sps)
+    np.testing.assert_allclose(det_jacs[:n_prisms], det_jacs_again[:n_prisms], atol=1e-12)
 
 
 @pytest.mark.parametrize("order", [1, 2, 3])
@@ -150,7 +159,7 @@ def test_native_cell_volumes_match_independent_tetrahedron_volume_formula(order)
         # get_cell_volume（单元级别接口）必须给出同样的值
         assert mesh.get_cell_volume(cell_id) == pytest.approx(expected_volume, rel=1e-10)
 
-    mesh_collapsed = _build_synthetic_mixed_mesh(order, "collapsed")
+    mesh_again = _build_synthetic_mixed_mesh(order, "native")
     np.testing.assert_allclose(
-        mesh.cell_volumes[:n_prisms], mesh_collapsed.cell_volumes[:n_prisms], rtol=1e-10
+        mesh.cell_volumes[:n_prisms], mesh_again.cell_volumes[:n_prisms], rtol=1e-10
     )

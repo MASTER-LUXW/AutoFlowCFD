@@ -4,6 +4,7 @@
 """
 
 import click
+from loguru import logger
 
 from autoflowcfd.core import FRSolver
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
@@ -32,17 +33,26 @@ from autoflowcfd.cli.solve_commands import solve
                    "Huynh 记法 g_DG）；'gauss' 是与 Spectral Difference 等价的新方案"
                    "（见 fr/matrix_operators.py 文档）。目前仅单机 CPU 路径支持，"
                    "GPU/多 GPU/MPI 分布式路径传非默认值会报错而不是静默忽略")
-@click.option('--tet-basis-mode', type=click.Choice(['collapsed', 'native']), default='collapsed',
-              help="四面体体积基函数选择：'collapsed'（默认，行为与此前完全一致）；"
-                   "'native' 是路径C（见 fr/native_simplex_basis.py 与 ProjectFiles/V2.0/"
-                   "8_算法重构-微分算子对坍缩坐标退化参考轴的病态条件数-Part6~8.md），"
-                   "修复坍缩坐标 Duffy 变换在退化参考轴附近导致的 P1/P2 残差异常——"
-                   "已在合成小网格上做过体积项/修正项/模态滤波/过积分去混叠的端到端"
-                   "决定性验证，尚未在真实生产规模网格上验证过，请谨慎用于生产算例。"
-                   "目前仅单机 CPU 路径支持，GPU/多 GPU/MPI 分布式路径传 'native' 会"
-                   "报错而不是静默退回 'collapsed'")
-@click.option('--turbulence-model', type=click.Choice(['none', 'sst', 'ddes', 'wmles']), default='sst', help='湍流模型')
+@click.option('--turbulence-model', type=click.Choice(['none', 'sst', 'ddes', 'iddes', 'wmles', 'les']), default='sst',
+              help='湍流模型。真实bug修复（2026-09-02，排查多GPU分布式DDES/IDDES时发现）：此前这里的'
+                   'Choice列表缺 iddes/les 两项——底层单机/CPU MPI/多GPU分布式路径均已支持这两个模型'
+                   '（solve transient命令的Choice列表本来就包含它们），steady命令这里一直没有同步，'
+                   '导致 --turbulence-model iddes/les 在steady命令下无法使用（会被click直接拒绝），'
+                   '与transient命令行为不一致。另外注意：ddes/iddes/les 会在 VELOCITY_INLET 边界'
+                   '自动启用 BD-02 合成湍流入口 (SEM)；wmles 不会（WMLES 依赖壁面模型本身正确'
+                   '预测近壁应力，不需要额外的入口湍流结构，见 core/fr_solver/boundary.py 文档）')
 @click.option('--max-iter', type=int, default=1000, help='最大迭代次数')
+@click.option('--phase-max-iter', type=int, default=None,
+              help='Order Continuation（--order>=2 时触发）非最终阶段(P0/P1/...，不含目标'
+                   '阶数)各自的最大迭代步数上限。默认(不传)时保留旧行为——总步数按阶段数'
+                   '机械均分(max_iter // 阶段数)，目标阶数与非最终阶段拿到同一份额。传具体值'
+                   '后非最终阶段各自最多跑这么多步(提前满足--residual-drop-threshold仍可'
+                   '提前升阶)，目标阶数改为吃掉这次求解剩余的全部步数，不再随阶段数被稀释。'
+                   '目前仅单机 CPU 路径支持，GPU/多GPU/MPI 分布式路径传非默认值会报错')
+@click.option('--residual-drop-threshold', type=float, default=100.0,
+              help='Order Continuation 单个非最终阶段判定"可以提前升阶"的残差下降倍数，'
+                   '默认100(降2个数量级)，原来硬编码，现在可配置。目前仅单机 CPU 路径支持，'
+                   'GPU/多GPU/MPI 分布式路径传非默认值会报错')
 @click.option('--output', '-o', 'output_dir', type=click.Path(), default='./results', help='结果输出目录')
 @click.option('--checkpoint-interval', type=int, default=100, help='检查点保存间隔')
 @click.option('--use-eikonal', is_flag=True, help='使用 Eikonal 方程求解壁面距离（更精确但较慢）')
@@ -52,6 +62,17 @@ from autoflowcfd.cli.solve_commands import solve
 @click.option('--reference-area', type=float, default=None, help='气动系数参考面积 (m^2)，提供时求解结束后打印 Cd/Cl')
 @click.option('--threads', '-j', type=int, default=-1, help='CPU 后端 numba 并行 kernel 使用的线程数，默认 -1 = 4（本机真实网格实测扩展性甜点，不是核数）')
 @click.option('--n-ranks', '--np', type=int, default=1, help='MPI 并行 rank 数（域分解并行，需配合 mpirun 使用。默认 1 = 单机模式）')
+@click.option('--fully-distributed', is_flag=True,
+              help='真正的完全分布式网格加载（2026-09-02 新增，同日/次日续接补齐 SST/DDES/'
+                   'IDDES/WMLES/LES 全部湍流模型 + Order Continuation + checkpoint resume + '
+                   '多 GPU）：只有 root rank 加载完整网格，其余 rank 只接收 root 预先切好的'
+                   '紧凑数据，不需要各自持有完整网格（--n-ranks>1 默认走的"传统模式"是每个'
+                   ' rank 独立加载完整网格，内存上不是最优）。可单独用（CPU MPI），也可配合'
+                   '--multi-gpu 使用（多 GPU 完全分布式加载，见 '
+                   'gpu_distributed_fully_distributed.py 模块文档）。需要 --n-ranks>1 才生效。'
+                   '此前这段帮助文本声称"只支持 turbulence_model none 且不支持 Order '
+                   'Continuation/resume"是过时信息（写于该功能刚实现、后续批次未同步更新），'
+                   '已更正。')
 @click.option('--gpu-device', type=int, default=0, help='GPU 设备 ID（默认 0，多 GPU 时每个 rank 自动分配）')
 @click.option('--multi-gpu', is_flag=True, help='启用多 GPU + MPI 分布式求解（每个 rank 使用一块 GPU）')
 @click.option('--turbulence-intensity', type=float, default=0.01,
@@ -81,7 +102,7 @@ from autoflowcfd.cli.solve_commands import solve
                    '8_算法重构-Entropy-Stable_Split-Form通量重构-Part1/2.md）。真实测试确认在'
                    '已启用过积分的基础上再改善约2~4倍，代价是体积项计算量从O(n_fine)升到'
                    'O(n_fine^2)，仅 CPU 后端实现')
-def solve_steady(input_file, backend, order, flux_type, tet_basis_mode, turbulence_model, max_iter, output_dir, checkpoint_interval, use_eikonal, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, artificial_viscosity_enabled, artificial_viscosity_alpha, entropy_stable_volume_enabled):
+def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_iter, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, use_eikonal, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, artificial_viscosity_enabled, artificial_viscosity_alpha, entropy_stable_volume_enabled):
     """执行稳态 FR 求解。
 
     支持高阶精度 (P1-P4) 和多种湍流模型 (SST, DDES, WMLES)。
@@ -101,6 +122,7 @@ def solve_steady(input_file, backend, order, flux_type, tet_basis_mode, turbulen
             'turbulence_intensity': turbulence_intensity, 'viscosity_ratio': viscosity_ratio,
             'mu_molecular': mu_molecular, 'rho_inf': rho_inf, 'vel_inf': vel_inf, 'p_inf': p_inf,
             'order': order, 'max_iter': max_iter,
+            'phase_max_iter': phase_max_iter, 'residual_drop_threshold': residual_drop_threshold,
         },
         _phys_cfg,
     )
@@ -112,6 +134,8 @@ def solve_steady(input_file, backend, order, flux_type, tet_basis_mode, turbulen
     p_inf = _resolved['p_inf']
     order = _resolved['order']
     max_iter = _resolved['max_iter']
+    phase_max_iter = _resolved['phase_max_iter']
+    residual_drop_threshold = _resolved['residual_drop_threshold']
     # turbulence_model：CLI 字符串词汇与 SteadyConfig.turbulence 的枚举
     # 命名不完全一致，需要专门的映射，不能靠 resolve_physical_constants
     # 的同名 getattr（见 resolve_turbulence_model 文档）。
@@ -143,16 +167,13 @@ def solve_steady(input_file, backend, order, flux_type, tet_basis_mode, turbulen
             "--n-ranks，或使用默认的 --flux-type radau。",
             param_hint="--flux-type",
         )
-    # native 四面体（路径C）同样只有单机 CPU 路径支持（GPU/MPI 分布式路径
-    # 明确排除在外，见 ProjectFiles/V2.0/8_算法重构-...-Part6/8.md"GPU/MPI"
-    # 一节的既有决定）——与上面 flux_type 同一个"不允许静默降级"原则。
-    if tet_basis_mode != 'collapsed' and (backend == 'gpu' or n_ranks > 1):
-        raise click.BadParameter(
-            "--tet-basis-mode native 目前只有单机 CPU 路径支持（GPU/多GPU/MPI "
-            "分布式路径明确未实现，见项目文档）。请去掉 --backend gpu/--multi-gpu/"
-            "--n-ranks，或使用默认的 --tet-basis-mode collapsed。",
-            param_hint="--tet-basis-mode",
-        )
+    # --phase-max-iter/--residual-drop-threshold（2026-09-02 续接）：
+    # 全部四种后端（单机 CPU/单 GPU/多GPU/MPI 分布式，含"传统模式"与
+    # "完全分布式加载"）现在都真正接入了 Order Continuation（`solve()`
+    # 在 `self.order>=2` 时自动分派到 `run_distributed_order_
+    # continuation`，见 core/mpi/distributed_order_continuation.py/
+    # core/gpu/solver/gpu_solver_order_continuation.py 模块文档），
+    # 不再需要任何"某后端不支持"的拒绝。
     print(f"\nInput Grid : {input_file}")
     print(f"Backend    : {backend} | Order: P{order} | Method: rk3")
     print(f"Turbulence : {turbulence_model} | Max Iter: {max_iter}")
@@ -179,31 +200,97 @@ def solve_steady(input_file, backend, order, flux_type, tet_basis_mode, turbulen
         from autoflowcfd.core.gpu.distributed.gpu_distributed import MultiGPUDistributedSolver
         from autoflowcfd.fr.operators import generate_fr_operators
 
-        mesh, volume_data = load_mesh_for_solver(
-            input_file, order, surface_mesh=surface_mesh, skip_quality_check=skip_quality_check
-        )
-        ops = generate_fr_operators(order)
+        if fully_distributed:
+            # 多 GPU"完全分布式加载"（#1，2026-09-02 实现——此前只有
+            # "传统模式"，见 MultiGPUDistributedSolver.from_fully_
+            # distributed_package/gpu_distributed_fully_distributed.py
+            # 模块文档）：只有 root rank 加载完整网格，root 预先按每个
+            # rank 的 compact 索引空间切好紧凑包再分发，与 CPU
+            # `--fully-distributed`（不加 --multi-gpu）同一套
+            # `distributed_mesh_load_v2`/`build_fully_distributed_rank_
+            # package`，只是构造出的是 GPU 常驻状态的求解器。
+            import math
+            from autoflowcfd.core.mpi.distributed_mesh_loader import distributed_mesh_load_v2
+            from autoflowcfd.core.fr_solver.solver import _MACH_REF_FLOOR
 
-        solver = MultiGPUDistributedSolver(
-            mesh=mesh, ops=ops, n_ranks=n_ranks,
-            device_id=gpu_device,
-            mu_molecular=mu_molecular,
-            rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
-            # 真实 bug 修复（V2.0 专家组盲审发现）：此前从不传 turb_model，
-            # --turbulence-model 无论填什么都被静默丢弃、恒定跑层流，
-            # 终端打印的 Turbulence 行却仍显示用户输入的模型名。
-            turb_model=turbulence_model.upper(),
-        )
+            freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf}
+            mach_ref = max(
+                vel_inf / math.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10)),
+                _MACH_REF_FLOOR,
+            )
+            package, root_context = distributed_mesh_load_v2(
+                input_file, order, surface_mesh, n_ranks,
+                freestream=freestream, mu_molecular=mu_molecular, mach_ref=mach_ref,
+                enable_viscous=True, skip_quality_check=skip_quality_check,
+                turb_model_name=turbulence_model.upper(),
+                turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
+            )
+            solver = MultiGPUDistributedSolver.from_fully_distributed_package(
+                package, n_ranks=n_ranks, device_id=gpu_device, root_context=root_context,
+            )
+        else:
+            mesh, volume_data = load_mesh_for_solver(
+                input_file, order, surface_mesh=surface_mesh, skip_quality_check=skip_quality_check
+            )
+            ops = generate_fr_operators(order)
+
+            solver = MultiGPUDistributedSolver(
+                mesh=mesh, ops=ops, n_ranks=n_ranks,
+                device_id=gpu_device,
+                mu_molecular=mu_molecular,
+                rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
+                # 真实 bug 修复（V2.0 专家组盲审发现）：此前从不传 turb_model，
+                # --turbulence-model 无论填什么都被静默丢弃、恒定跑层流，
+                # 终端打印的 Turbulence 行却仍显示用户输入的模型名。
+                turb_model=turbulence_model.upper(),
+                # SST 分布式湍流真正接入后（2026-09-02）才需要这两个值算
+                # k_inf/omega_inf——此前 turb_model 恒被拒绝，这两个 CLI
+                # 选项从未真正传到这里过，与单机 GPU 路径（上面
+                # GPUFRSolver 构造处）保持一致。
+                turbulence_intensity=turbulence_intensity,
+                viscosity_ratio=viscosity_ratio,
+            )
+
+        # 中间 checkpoint 保存回调（2026-09-02 补齐——此前 output_interval
+        # 只控制进度打印，跑到一半崩溃/被杀会丢失全部进度，与单机路径
+        # `_checkpoint_cb` 同一个设计，见 solver.solve/save_checkpoint_
+        # distributed 文档"完成度"一节说明）。
+        def _multi_gpu_checkpoint_cb(solver_ref, iteration):
+            if iteration % checkpoint_interval != 0:
+                return
+            try:
+                # order/target_order 分离（2026-09-02，Order Continuation
+                # 接入多GPU分布式路径后补齐——与 CPU 分布式
+                # _distributed_checkpoint_cb 同一处修复同一个理由）：
+                # 爬坡阶段中途的 checkpoint 必须记录
+                # solver_ref.current_order（U_sps 实际形状），不是固定
+                # 的目标 order。
+                saved_path = solver_ref.save_checkpoint_distributed(
+                    output_dir, iteration, input_file,
+                    solver_ref.current_order, turbulence_model, backend="gpu",
+                    target_order=solver_ref.order,
+                )
+                if saved_path and is_root():
+                    print(f"   [Checkpoint] iter {iteration} saved: {saved_path}")
+            except Exception as e:
+                if is_root():
+                    print(f"   [Checkpoint] Warning: save failed at iter {iteration}: {e}")
 
         try:
-            result = solver.solve(max_iter=max_iter, dt=1e-3, tol=1e-6)
+            result = solver.solve(
+                max_iter=max_iter, dt=1e-3, tol=1e-6,
+                checkpoint_callback=_multi_gpu_checkpoint_cb,
+                phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold,
+            )
             print(f"\n✅ Multi-GPU Simulation Finished")
             # #4（2026-08-28）：此前这里从不保存结果——分布式 checkpoint
             # save/load 依赖的 self.U_gpu 本地尺寸缺陷（#1）修复之前，
             # 保存也没有意义，见 MultiGPUDistributedSolver.
             # save_checkpoint_distributed 文档。
             saved_path = solver.save_checkpoint_distributed(
-                output_dir, max_iter, input_file, order, turbulence_model, backend="gpu",
+                output_dir, max_iter, input_file,
+                solver.current_order, turbulence_model, backend="gpu",
+                target_order=solver.order,
             )
             if saved_path and is_root():
                 print(f"   Checkpoint saved: {saved_path}")
@@ -241,7 +328,10 @@ def solve_steady(input_file, backend, order, flux_type, tet_basis_mode, turbulen
         )
 
         try:
-            result = solver.solve(max_iter=max_iter, dt=1e-3, tol=1e-6)
+            result = solver.solve(
+                max_iter=max_iter, dt=1e-3, tol=1e-6,
+                phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold,
+            )
             print(f"\n✅ GPU Simulation Finished: Iterations={result['iterations']}")
 
             # 保存结果
@@ -276,7 +366,7 @@ def solve_steady(input_file, backend, order, flux_type, tet_basis_mode, turbulen
         # connectivity 是真实、完整的，build_distributed_flat_face 能
         # 正确工作，DistributedMeshAdapter/distributed_compute_*_residual
         # 的 local+halo 压缩索引空间重排（#2 修复）才有意义。
-        from autoflowcfd.core.mpi import mpi_available
+        from autoflowcfd.core.mpi import mpi_available, is_root
         if not mpi_available:
             print("\n❌ MPI not available. Please install mpi4py and run with mpirun.")
             print("   pip install mpi4py")
@@ -286,53 +376,131 @@ def solve_steady(input_file, backend, order, flux_type, tet_basis_mode, turbulen
         from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
         from autoflowcfd.fr.operators import generate_fr_operators
 
-        # 传统模式：每个 rank 独立加载完整网格（与单机/--multi-gpu 路径
-        # 同一个 load_mesh_for_solver 入口）。
-        mesh, volume_data = load_mesh_for_solver(
-            input_file, order, surface_mesh=surface_mesh, skip_quality_check=skip_quality_check
-        )
-        ops = generate_fr_operators(order)
+        if fully_distributed:
+            # 真正的完全分布式网格加载（2026-09-02 实现，同日续接补齐
+            # SST/DDES/IDDES/WMLES/LES——见 distributed_mesh_loader.py::
+            # distributed_mesh_load_v2/DistributedFRSolver.from_fully_
+            # distributed_package 文档"范围边界"一节）。此前这里的
+            # 硬编码 `!= 'NONE'` 拒绝早于 SST 支持接入、且从未跟随后续
+            # 批次同步更新，是过时的信息源——真实 bug：既拒绝了后端已经
+            # 支持的全部湍流模型，也从未把 `turbulence_model` 传给
+            # `distributed_mesh_load_v2`（该函数签名里 `turb_model_name`
+            # 参数一直被忽略，恒用默认值 'NONE'）。
+            import math
+            from autoflowcfd.core.mpi.distributed_mesh_loader import distributed_mesh_load_v2
+            from autoflowcfd.core.fr_solver.solver import _MACH_REF_FLOOR
 
-        # 创建分布式求解器（传入 face_connectivity 触发"传统模式"分区，
-        # 见 DistributedFRSolver.__init__ 的"兼容旧接口"分支——本次修复
-        # 之前这条分支就存在，只是 CLI 从未真正用过它，见上方说明）。
-        solver = DistributedFRSolver(
-            mesh=mesh,
-            ops=ops,
-            face_connectivity=mesh.face_connectivity,
-            n_ranks=n_ranks,
-            backend=backend,
-            order=order,
-            turb_model_name=turbulence_model,
-            time_scheme=TimeIntegrationScheme.SSP_RK3,
-            n_threads=threads,
-            turbulence_intensity=turbulence_intensity,
-            viscosity_ratio=viscosity_ratio,
-            mu_molecular=mu_molecular,
-            rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
+            freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf}
+            # 与 FRSolver.__init__ 同一个公式（见该文件 mach_ref 计算处），
+            # 不是本处新发明的近似——AUSM+up Weiss-Smith 预处理要求分区
+            # 两侧用同一个真实值，公式本身也必须与单机路径逐字一致。
+            mach_ref = max(
+                vel_inf / math.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10)),
+                _MACH_REF_FLOOR,
+            )
+            # root_context（2026-09-02，Order Continuation 支持）：只有
+            # root rank 非 None，持有完整全局网格供后续阶数切换重新
+            # 分发用，见 distributed_mesh_load_v2/redistribute_fully_
+            # distributed_for_new_order 文档。
+            package, root_context = distributed_mesh_load_v2(
+                input_file, order, surface_mesh, n_ranks,
+                freestream=freestream, mu_molecular=mu_molecular,
+                mach_ref=mach_ref,
+                enable_viscous=True, skip_quality_check=skip_quality_check,
+                turb_model_name=turbulence_model.upper(),
+                turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
+            )
+            solver = DistributedFRSolver.from_fully_distributed_package(
+                package, n_ranks=n_ranks, root_context=root_context,
+            )
+
+            print(f"[Distributed] Initialized with {n_ranks} ranks (fully-distributed mode: "
+                  f"only root rank loaded the full mesh)")
+            print(f"[Distributed] {solver.partition.n_local_cells} local cells, "
+                  f"{solver.partition.n_halo} halo cells")
+        else:
+            # 传统模式：每个 rank 独立加载完整网格（与单机/--multi-gpu 路径
+            # 同一个 load_mesh_for_solver 入口）。
+            mesh, volume_data = load_mesh_for_solver(
+                input_file, order, surface_mesh=surface_mesh, skip_quality_check=skip_quality_check
+            )
+            ops = generate_fr_operators(order)
+
+            # 创建分布式求解器（传入 face_connectivity 触发"传统模式"分区，
+            # 见 DistributedFRSolver.__init__ 的"兼容旧接口"分支——本次修复
+            # 之前这条分支就存在，只是 CLI 从未真正用过它，见上方说明）。
+            solver = DistributedFRSolver(
+                mesh=mesh,
+                ops=ops,
+                face_connectivity=mesh.face_connectivity,
+                n_ranks=n_ranks,
+                backend=backend,
+                order=order,
+                turb_model_name=turbulence_model,
+                time_scheme=TimeIntegrationScheme.SSP_RK3,
+                n_threads=threads,
+                turbulence_intensity=turbulence_intensity,
+                viscosity_ratio=viscosity_ratio,
+                mu_molecular=mu_molecular,
+                rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
+            )
+
+            # 初始化状态
+            print(f"[Distributed] Initialized with {n_ranks} ranks")
+            print(f"[Distributed] {solver.partition.n_local_cells} local cells, "
+                  f"{solver.partition.n_halo} halo cells")
+            print(f"[Distributed] Traditional mode: every rank loaded the full mesh "
+                  f"(not memory-optimal, see #2 fix notes; use --fully-distributed "
+                  f"for the memory-optimal path)")
+
+        # 中间 checkpoint 保存回调（2026-09-02 补齐——此前只在 solve()
+        # 返回之后保存一次最终 checkpoint，跑到一半崩溃/被杀会丢失全部
+        # 进度，且没有任何"从分布式 checkpoint 继续跑"的机制，与单机
+        # 路径 `_checkpoint_cb` 同一个设计，见 `DistributedFRSolver.
+        # solve`/`solve_commands.py::resume` 的 `--n-ranks`/`--multi-gpu`
+        # 分支说明）。
+        from autoflowcfd.core.mpi.distributed_checkpoint import (
+            distributed_save_results,
+            distributed_save_checkpoint,
         )
 
-        # 初始化状态
-        print(f"[Distributed] Initialized with {n_ranks} ranks")
-        print(f"[Distributed] {solver.partition.n_local_cells} local cells, "
-              f"{solver.partition.n_halo} halo cells")
-        print(f"[Distributed] Traditional mode: every rank loaded the full mesh "
-              f"(not memory-optimal, see #2 fix notes)")
+        def _distributed_checkpoint_cb(solver_ref, iteration):
+            if iteration % checkpoint_interval != 0:
+                return
+            try:
+                # order 传 solver_ref.current_order（不是固定的目标
+                # order）：Order Continuation 接入分布式路径后
+                # （2026-09-02），爬坡阶段中途保存的 checkpoint 的
+                # `U_sps` 形状对应的是当时的 current_order，不是最终
+                # 目标阶数，见 distributed_save_checkpoint 同名参数
+                # 文档。target_order 记录真正的目标，供 resume 时继续
+                # 爬坡。
+                saved_path = distributed_save_checkpoint(
+                    solver_ref, output_dir, iteration,
+                    input_file, solver_ref.current_order, turbulence_model, backend,
+                    target_order=solver_ref.order,
+                )
+                if saved_path and is_root():
+                    print(f"   [Checkpoint] iter {iteration} saved: {saved_path}")
+            except Exception as e:
+                if is_root():
+                    print(f"   [Checkpoint] Warning: save failed at iter {iteration}: {e}")
 
         # 执行分布式求解
         try:
-            solver.solve(n_steps=max_iter, dt=1e-3, output_interval=checkpoint_interval)
+            solver.solve(
+                n_steps=max_iter, dt=1e-3, output_interval=checkpoint_interval,
+                checkpoint_callback=_distributed_checkpoint_cb,
+                phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold,
+            )
             print(f"\n✅ Distributed Simulation Finished")
 
             # 保存结果（分布式版本：root 收集全局数据后保存）
-            from autoflowcfd.core.mpi.distributed_checkpoint import (
-                distributed_save_results,
-                distributed_save_checkpoint,
-            )
             distributed_save_results(solver, output_dir)
             distributed_save_checkpoint(
                 solver, output_dir, max_iter,
-                input_file, order, turbulence_model, backend,
+                input_file, solver.current_order, turbulence_model, backend,
+                target_order=solver.order,
             )
 
         except Exception as e:
@@ -343,7 +511,6 @@ def solve_steady(input_file, backend, order, flux_type, tet_basis_mode, turbulen
         # 单机求解器路径：所有 rank 加载完整网格
         mesh, volume_data = load_mesh_for_solver(
             input_file, order, surface_mesh=surface_mesh, skip_quality_check=skip_quality_check,
-            tet_basis_mode=tet_basis_mode,
         )
         # 单机求解器路径（默认）
         solver = FRSolver(
@@ -399,7 +566,9 @@ def solve_steady(input_file, backend, order, flux_type, tet_basis_mode, turbulen
         # 3. 执行求解
         try:
             result = solver.solve(max_iter=max_iter, dt=1e-3, tol=1e-6,
-                                  checkpoint_callback=_checkpoint_cb)
+                                  checkpoint_callback=_checkpoint_cb,
+                                  phase_max_iter=phase_max_iter,
+                                  residual_drop_threshold=residual_drop_threshold)
             print(f"\n✅ Simulation Finished: Iterations={result.iterations}, Residual={result.final_residual:.6e}")
 
             # 4. 保存结果（.pkl 全量状态 + HDF5 checkpoint，后者供 solve resume 使用）

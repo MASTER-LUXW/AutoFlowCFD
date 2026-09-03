@@ -19,7 +19,6 @@ def load_mesh_for_solver(
     order: int,
     surface_mesh: Optional[str] = None,
     skip_quality_check: bool = False,
-    tet_basis_mode: str = "collapsed",
 ) -> Tuple['HighOrderMesh', VolumeMeshData]:
     """
     工业级网格加载器：接受已经生成好的体网格，.pkl（VolumeMeshData 序列化）
@@ -143,7 +142,7 @@ def load_mesh_for_solver(
             )
         print("✅ Volume mesh quality gate passed")
 
-    mesh = HighOrderMesh(order=order, tet_basis_mode=tet_basis_mode)
+    mesh = HighOrderMesh(order=order)
     try:
         mesh.load_from_volume_mesh(volume_data)
     except MeshDistortionError as e:

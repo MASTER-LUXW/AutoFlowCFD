@@ -87,8 +87,32 @@ def compute_aerodynamic_coefficients_fr(
     mu = solver.mu_molecular
     mu_t_field = solver._get_turbulent_viscosity_field()
 
-    def extrap_to_face(cell: int, field: np.ndarray, axis: int, side: float) -> np.ndarray:
-        E = ops.boundary_extrap_prism[(axis, side)] if cell < n_prism else ops.boundary_extrap_tet[(axis, side)]
+    def extrap_to_face(cell: int, field: np.ndarray, axis: int, side: float, oc_code: int) -> np.ndarray:
+        """体积场外插到某个 WALL 面的 Flux Points。
+
+        真实 bug 修复（2026-09-03，"delete collapsed"后用真实 cube_demo
+        网格端到端 CLI 冒烟测试首次触发——之前的生产缓存网格恰好没有
+        WALL 面被四面体单元拥有，掩盖了这个此前就存在的缺口）：四面体
+        坍缩坐标基已删除（见 fr/operators.py 模块文档），`ops.boundary_
+        extrap_tet` 现在是占位全零字典，键仍是 (axis,side)（axis∈{0,1,2}）
+        ——但 `axis`（`ffp.owner_axis`）对 native 四面体面存的是复用槽位
+        的 excluded_vertex（可达 3），不在这个占位字典任何合法键里，会
+        直接 `KeyError: (3, -1.0)`（真实复现）。改用 `oc_code`（
+        `fc.owner_cube_face[f]`，>=6 即 native 真实面，与本项目其余
+        所有消费点同一个判据）分派到 `ops.boundary_extrap_native_tet
+        [excluded_vertex]`——这个矩阵形状是 (n_fp,n_native)，不是 padded
+        到全局 n_sps 宽度的版本，必须先把 `field` 按 `[:n_native]` 切片
+        （填充槽位不携带真实自由度，见 native_tet_padding.py 文档），
+        再做矩阵乘法，不能直接对全宽度 `field` 求值。
+        """
+        if oc_code >= 6:
+            excluded_vertex = oc_code - 6
+            E = ops.boundary_extrap_native_tet[excluded_vertex]  # (n_fp, n_native)
+            n_native = E.shape[1]
+            trailing = field.shape[1:]
+            flat = E @ field[:n_native].reshape(n_native, -1)
+            return flat.reshape((E.shape[0],) + trailing)
+        E = ops.boundary_extrap_prism[(axis, side)]
         trailing = field.shape[1:]
         flat = E @ field.reshape(field.shape[0], -1)
         return flat.reshape((E.shape[0],) + trailing)
@@ -117,22 +141,23 @@ def compute_aerodynamic_coefficients_fr(
             continue
         owner_cell = int(fc.owner_cell[f])
         axis, side = ffp.owner_axis, ffp.owner_side
+        oc_code = int(fc.owner_cube_face[f])
 
-        Q_fp = extrap_to_face(owner_cell, Q[owner_cell], axis, side)  # (n_fp,5)
+        Q_fp = extrap_to_face(owner_cell, Q[owner_cell], axis, side, oc_code)  # (n_fp,5)
         p_fp = Q_fp[:, 4]
         normal = ffp.true_normal  # (n_fp,3)
         area_w = ffp.true_area_weight  # (n_fp,)
         # 本面各 Flux Point 的物理坐标（外插 SPs 坐标场），减去力矩参考点得臂向量
-        r_arm = extrap_to_face(owner_cell, mesh.sps_coords[owner_cell], axis, side) - mc  # (n_fp,3)
+        r_arm = extrap_to_face(owner_cell, mesh.sps_coords[owner_cell], axis, side, oc_code) - mc  # (n_fp,3)
 
         d_force_p = p_fp[:, None] * normal * area_w[:, None]
         force_pressure += np.sum(d_force_p, axis=0)
         moment_pressure += np.sum(np.cross(r_arm, d_force_p), axis=0)
 
         if include_viscous:
-            gv_fp = extrap_to_face(owner_cell, grad_vel_full[owner_cell], axis, side)  # (n_fp,3,3)
+            gv_fp = extrap_to_face(owner_cell, grad_vel_full[owner_cell], axis, side, oc_code)  # (n_fp,3,3)
             mu_t_fp = (
-                extrap_to_face(owner_cell, mu_t_field[owner_cell][:, None], axis, side)[:, 0]
+                extrap_to_face(owner_cell, mu_t_field[owner_cell][:, None], axis, side, oc_code)[:, 0]
                 if mu_t_field is not None
                 else np.zeros(gv_fp.shape[0])
             )
@@ -206,7 +231,6 @@ def compute_forces_pressure_only(solver, reference_area: float) -> dict:
 
         ops = solver.ops
         Q = solver.state.Q
-        n_prism = mesh.n_prism_cells
 
         force = np.zeros(3)
         for f in np.nonzero(is_wall_face)[0]:
@@ -215,10 +239,24 @@ def compute_forces_pressure_only(solver, reference_area: float) -> dict:
                 continue
             owner_cell = int(fc.owner_cell[f])
             axis, side = ffp.owner_axis, ffp.owner_side
+            oc_code = int(fc.owner_cube_face[f])
 
-            E = (ops.boundary_extrap_prism[(axis, side)] if owner_cell < n_prism
-                 else ops.boundary_extrap_tet[(axis, side)])
-            Q_fp = E @ Q[owner_cell, :, 4]  # pressure only, (n_fp,)
+            # 真实 bug 修复（2026-09-03，同一处见 compute_aerodynamic_
+            # coefficients_fr::extrap_to_face 文档）：四面体坍缩坐标基
+            # 已删除，`axis`（`ffp.owner_axis`）对 native 四面体面存的是
+            # 复用槽位的 excluded_vertex（可达 3），不能无条件拿去索引
+            # 占位全零的 `ops.boundary_extrap_tet` 字典（只有 axis∈{0,1,2}
+            # 的键，越界会直接 KeyError）——按 `oc_code>=6`（native 真实
+            # 面）分派到 `ops.boundary_extrap_native_tet[excluded_vertex]`
+            # （形状 (n_fp,n_native)，只对 `Q[...,4][:n_native]` 这部分
+            # 真实自由度求值，填充槽位不携带真实场值）。
+            if oc_code >= 6:
+                excluded_vertex = oc_code - 6
+                E = ops.boundary_extrap_native_tet[excluded_vertex]  # (n_fp, n_native)
+                Q_fp = E @ Q[owner_cell, :E.shape[1], 4]
+            else:
+                E = ops.boundary_extrap_prism[(axis, side)]
+                Q_fp = E @ Q[owner_cell, :, 4]  # pressure only, (n_fp,)
             normal = ffp.true_normal
             area_w = ffp.true_area_weight
             force += np.sum(Q_fp[:, None] * normal * area_w[:, None], axis=0)

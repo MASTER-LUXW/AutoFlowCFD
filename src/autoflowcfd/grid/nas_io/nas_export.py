@@ -58,17 +58,17 @@ def _format_nastran_compact_exponent(value: float, width: int = 8) -> str:
 
     mantissa_str, exp_sign, exp_str = _render(mantissa, exponent)
     if float(mantissa_str) >= 10.0:
-        # Rounding pushed the mantissa back up to two digits; re-render one
-        # exponent higher so the field width budget stays correct.
+        # 舍入把尾数又推回了两位数；改用高一级的指数重新渲染，
+        # 保持字段宽度预算正确。
         exponent += 1
         mantissa /= 10.0
         mantissa_str, exp_sign, exp_str = _render(mantissa, exponent)
 
     result = f"{sign}{mantissa_str}{exp_sign}{exp_str}"
     if len(result) > width:
-        # Only reachable for 3+ digit exponents (|value| >= 1e100 or
-        # <= 1e-100) - nonsensical for physical mesh coordinates, but clip
-        # rather than silently overflow the fixed-width field.
+        # 只有指数达到 3 位数（|value| >= 1e100 或 <= 1e-100）才会
+        # 走到这里——对物理网格坐标而言毫无意义，但还是截断而非
+        # 静默溢出这个固定宽度字段。
         result = result[:width]
     return result
 
@@ -119,14 +119,14 @@ def export_volume_mesh_to_nas(
         str: 导出文件的路径
 
     Example:
-        >>> 从 autoflowcfd.grid 导入 NASParser
+        >>> from autoflowcfd.grid import NASParser
         >>> parser = NASParser('surface.nas')
         >>> volume_mesh = parser.parse(generate_volume_mesh=True)
         >>> export_volume_mesh_to_nas(volume_mesh, 'volume_mesh.nas')
     """
     output_path = Path(output_path)
 
-    # 确保 .nas extension
+    # 确保 .nas 扩展名
     if output_path.suffix.lower() != '.nas':
         output_path = output_path.with_suffix('.nas')
 
@@ -139,10 +139,10 @@ def export_volume_mesh_to_nas(
         include_boundaries and volume_mesh.boundaries and volume_mesh.boundaries.groups
     )
     n_boundary_groups = len(volume_mesh.boundaries.groups) if write_boundaries else 0
-    # PSHELL PIDs 1..n_boundary_groups are used for boundary groups below, so the
-    # PSOLID property for the volume mesh must live past that range - otherwise
-    # it collides with a boundary's PSHELL PID as soon as there are >= 4 groups
-    # (a very common case: inlet/outlet/wall/symmetry/ground).
+    # 下方边界组用的是 PSHELL PID 1..n_boundary_groups，所以体网格的
+    # PSOLID 属性必须在这个范围之外——否则一旦分组数 >= 4（一个很常见
+    # 的情况：inlet/outlet/wall/symmetry/ground）就会与某个边界的
+    # PSHELL PID 冲突。
     solid_pid = n_boundary_groups + 1
 
     prism_cells = getattr(volume_mesh, 'prism_cells', None)
@@ -153,7 +153,7 @@ def export_volume_mesh_to_nas(
             # 写入 header
             _write_header(f, volume_mesh)
 
-            # Write nodes (GRID cards)
+            # 写入节点（GRID 卡片）
             logger.info("Writing nodes...")
             _write_nodes(f, volume_mesh.nodes, scale_factor)
 
@@ -199,15 +199,15 @@ def export_volume_mesh_to_nas(
 
 
 def _write_header(f, volume_mesh) -> None:
-    """写入 NAS 文件 header 与 metadata.
-    
+    """写入 NAS 文件头与元数据。
+
     Args:
-        f: File handle
-        volume_mesh: VolumeMeshData object
+        f: 文件句柄
+        volume_mesh: VolumeMeshData 对象
     """
     from datetime import datetime
     
-    # ANSA-style header
+    # ANSA 风格文件头
     f.write("$ANSA_VERSION;21.0.1;\n")
     f.write("$\n")
     f.write("$\n")
@@ -264,14 +264,14 @@ def _write_nodes(f, nodes, scale_factor: float) -> None:
             y_str = _format_coord_8char(y)
             z_str = _format_coord_8char(z)
 
-            # Small Field Format: each field is exactly 8 characters
-            # Field 1 (cols 1-8):   "GRID" keyword
-            # Field 2 (cols 9-16):  Node ID (right-aligned)
-            # Field 3 (cols 17-24): Coordinate system ID (0 = global, explicitly set)
-            # Field 4 (cols 25-32): X coordinate (right-aligned, max 8 chars)
-            # Field 5 (cols 33-40): Y coordinate (right-aligned, max 8 chars)
-            # Field 6 (cols 41-48): Z coordinate (right-aligned, max 8 chars)
-            # Fields 7-9: Omitted (trailing fields can be truncated)
+            # Small Field 格式：每个字段严格 8 字符
+            # Field 1 (列 1-8):   "GRID" 关键字
+            # Field 2 (列 9-16):  节点 ID（右对齐）
+            # Field 3 (列 17-24): 坐标系 ID（0 = 全局，显式设置）
+            # Field 4 (列 25-32): X 坐标（右对齐，最多 8 字符）
+            # Field 5 (列 33-40): Y 坐标（右对齐，最多 8 字符）
+            # Field 6 (列 41-48): Z 坐标（右对齐，最多 8 字符）
+            # Field 7-9：省略（末尾字段可以截断）
 
             lines.append(f"GRID    {node_id:>8}{0:>8}{x_str:>8}{y_str:>8}{z_str:>8}\n")
 
@@ -323,7 +323,7 @@ def _write_tetrahedra(f, connectivity: np.ndarray, solid_pid: int, start_eid: in
             g3 = int(connectivity[i, 2]) + 1
             g4 = int(connectivity[i, 3]) + 1
 
-            # ANSA format: fixed-width fields
+            # ANSA 格式：固定宽度字段
             line = f"CTETRA{elem_id:>10}{solid_pid:>8}{g1:>8}{g2:>8}{g3:>8}{g4:>8}\n"
             f.write(line)
 

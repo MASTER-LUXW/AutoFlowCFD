@@ -38,12 +38,10 @@ def _turbulence_model_str(turb_config_value) -> str:
     fr_solver/turbulence.py::init_turbulence_models）。
 
     配套 #6（配置层接入）：`SteadyConfig`/`TransientConfig.turbulence`
-    字段用的是这套独立枚举，命名（sst_kw vs sst）和取值范围
-    （多了从未实现的 sa/des）都和求解器实际接受的字符串不完全一致，
-    真正把 config 对象喂给 FRSolver 构造之前必须先做这层转换，而不是
-    直接 `.value` 传下去（那样 "sst_kw" 会被当成未知湍流模型字符串，
-    "sa"/"des" 会静默传给一个从不认识这两个值、只会当成"未识别输入"
-    处理的构造函数）。
+    字段用的是这套独立枚举，命名（sst_kw vs sst）和求解器实际接受的
+    字符串不完全一致，真正把 config 对象喂给 FRSolver 构造之前必须
+    先做这层转换，而不是直接 `.value` 传下去（那样 "sst_kw" 会被当成
+    未知湍流模型字符串处理，构造函数从不认识这个值）。
     """
     from autoflowcfd.config.solver_config import TurbulenceModel
     mapping = {
@@ -166,7 +164,8 @@ class AutoFlowCFDAPI:
         threads: int = -1,
         output_dir: str = "./results",
         config: Optional[SteadyConfig] = None,
-        tet_basis_mode: str = "collapsed",
+        phase_max_iter: Optional[int] = None,
+        residual_drop_threshold: Optional[float] = None,
         **kwargs
     ) -> Any:
         """Run steady-state FR simulation.
@@ -191,16 +190,11 @@ class AutoFlowCFDAPI:
                 `mu_molecular`/`turbulence_intensity`/`viscosity_ratio`
                 这三个 `SolverConfig` 基类字段同理，未显式经由 `**kwargs`
                 传入时会从 `config` 补上，再透传给 FRSolver 构造函数。
-            tet_basis_mode: 四面体体积基函数选择——"collapsed"（默认，
-                行为与此前完全一致）或 "native"（路径C，见
-                `fr/native_simplex_basis.py`/`ProjectFiles/V2.0/
-                8_算法重构-微分算子对坍缩坐标退化参考轴的病态条件数-
-                Part6~8.md`，修复坍缩坐标 Duffy 变换在退化参考轴附近
-                导致的 P1/P2 残差异常；已在合成小网格上做过体积项/
-                修正项/模态滤波/过积分去混叠的端到端决定性验证，尚未
-                在真实生产规模网格上验证过）。直接决定 `HighOrderMesh`
-                的构造参数，不经过 `config`/`SteadyConfig`（那套 YAML
-                配置层尚未加这个字段，属于独立的后续工作）。
+            phase_max_iter, residual_drop_threshold: None（默认）时按
+                "config（若提供）里的同名字段 > 内建默认值"解析，与
+                order/max_iter 等参数同一套优先级规则；直接透传给
+                `FRSolver.solve()`，见该方法/`order_continuation.
+                run_order_continuation` 同名参数文档。
             dt, tol: 时间步长与收敛容差，直接透传给 FRSolver.solve()
             threads: CPU 后端 numba 并行线程数
             output_dir: Output directory
@@ -242,11 +236,13 @@ class AutoFlowCFDAPI:
         rho_inf = rho_inf if rho_inf is not None else (config.rho_inf if config is not None else 1.225)
         vel_inf = vel_inf if vel_inf is not None else (config.vel_inf if config is not None else 33.33)
         p_inf = p_inf if p_inf is not None else (config.p_inf if config is not None else 101325.0)
+        phase_max_iter = phase_max_iter if phase_max_iter is not None else (config.phase_max_iter if config is not None else None)
+        residual_drop_threshold = residual_drop_threshold if residual_drop_threshold is not None else (config.residual_drop_threshold if config is not None else 1e2)
         if config is not None:
             for field in ("mu_molecular", "turbulence_intensity", "viscosity_ratio"):
                 kwargs.setdefault(field, getattr(config, field))
 
-        mesh = HighOrderMesh(order=order, tet_basis_mode=tet_basis_mode)
+        mesh = HighOrderMesh(order=order)
         mesh.load_from_volume_mesh(volume_mesh)
 
         solver = FRSolver(
@@ -260,7 +256,11 @@ class AutoFlowCFDAPI:
         )
         compute_wall_distance_for_solver(solver, volume_mesh)
 
-        result = solver.solve(max_iter=max_iter, dt=dt, tol=tol)
+        result = solver.solve(
+            max_iter=max_iter, dt=dt, tol=tol,
+            phase_max_iter=phase_max_iter,
+            residual_drop_threshold=residual_drop_threshold,
+        )
         self.solver = solver
 
         logger.info(
@@ -287,7 +287,8 @@ class AutoFlowCFDAPI:
         threads: int = -1,
         output_dir: str = "./transient_results",
         config: Optional[TransientConfig] = None,
-        tet_basis_mode: str = "collapsed",
+        phase_max_iter: Optional[int] = None,
+        residual_drop_threshold: Optional[float] = None,
         **kwargs
     ) -> Any:
         """Run transient FR simulation (DES/LES).
@@ -315,8 +316,10 @@ class AutoFlowCFDAPI:
                 run_steady 同名参数的文档（`mu_molecular`/
                 `turbulence_intensity`/`viscosity_ratio` 同样从
                 `config` 补入 `kwargs`）。
-            tet_basis_mode: 四面体体积基函数选择，见 run_steady 同名
-                参数文档（"collapsed"/"native"）。
+            phase_max_iter, residual_drop_threshold: 见 run_steady 同名
+                参数文档，瞬态同样共用 `FRSolver.solve()`/
+                `run_order_continuation` 这一套机制（`order>=2` 时才
+                生效）。
             **kwargs: 其余参数透传给 FRSolver 构造函数
 
         Returns:
@@ -354,6 +357,8 @@ class AutoFlowCFDAPI:
         rho_inf = rho_inf if rho_inf is not None else (config.rho_inf if config is not None else 1.225)
         vel_inf = vel_inf if vel_inf is not None else (config.vel_inf if config is not None else 33.33)
         p_inf = p_inf if p_inf is not None else (config.p_inf if config is not None else 101325.0)
+        phase_max_iter = phase_max_iter if phase_max_iter is not None else (config.phase_max_iter if config is not None else None)
+        residual_drop_threshold = residual_drop_threshold if residual_drop_threshold is not None else (config.residual_drop_threshold if config is not None else 1e2)
         if config is not None:
             for field in ("mu_molecular", "turbulence_intensity", "viscosity_ratio"):
                 kwargs.setdefault(field, getattr(config, field))
@@ -377,7 +382,7 @@ class AutoFlowCFDAPI:
 
         max_iter = int(physical_time / dt) if physical_time is not None else 1000
 
-        mesh = HighOrderMesh(order=order, tet_basis_mode=tet_basis_mode)
+        mesh = HighOrderMesh(order=order)
         mesh.load_from_volume_mesh(volume_mesh)
 
         solver = TransientSolver(
@@ -392,7 +397,11 @@ class AutoFlowCFDAPI:
         )
         compute_wall_distance_for_solver(solver, volume_mesh)
 
-        result = solver.solve(max_iter=max_iter, dt=dt, tol=tol)
+        result = solver.solve(
+            max_iter=max_iter, dt=dt, tol=tol,
+            phase_max_iter=phase_max_iter,
+            residual_drop_threshold=residual_drop_threshold,
+        )
         self.solver = solver
 
         logger.info(

@@ -21,6 +21,7 @@ from unittest.mock import patch
 import numpy as np
 
 from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
+from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 
 
 class _FakeMesh:
@@ -67,3 +68,70 @@ class TestWmlesWallBcNoDoubleCounting:
         config = provider.code_to_config[0]
         assert config["type"] == "WALL"
         assert config["is_no_slip"] is True
+
+
+class TestRealFRSolverWmlesConstructionOrder:
+    """收尾集成测试：真正构造 `FRSolver(..., turb_model_name="wmles")`，
+    不像上面两个测试那样用手搭的 `_FakeSolver`（提前把 `wmles_model`
+    设好再调用 `build_boundary_ghost_provider`）。
+
+    真实 bug（2026-09-02，排查分布式 WMLES 支持时发现，与分布式本身
+    无关）：`FRSolver.__init__` 此前先构造 `self.boundary_ghost_
+    provider`（第 3 步），几步之后才真正给 `self.wmles_model` 赋值
+    （第 5 步，`_init_turbulence_models`）——`build_boundary_ghost_
+    provider` 用 `getattr(solver,"wmles_model",None) is None` 判断是否
+    要切换 is_no_slip，但此时这个属性根本还不存在，`getattr` 安全返回
+    None、不报错，`wall_is_no_slip` 因此恒为 True。上面两个测试只验证
+    `build_boundary_ghost_provider` 这个纯函数本身的分支逻辑（调用时
+    `wmles_model` 已经摆在那——测试自己保证的前提，不是真实构造流程
+    保证的），从未捕捉到这个真实构造顺序问题——同一类"子函数测过、
+    完整入口没测过"的模式本次会话已经出现多次（grad_U/grad_vel、
+    DDES/IDDES 调用顺序）。"""
+
+    def test_fr_solver_wmles_wall_is_no_slip_false(self):
+        order = 2
+        mesh = _build_synthetic_mixed_mesh(order)
+        # 手动给一个真实边界面的 owner 单元打上 WALL 组标签（沿用
+        # BoundaryMap.groups 的既定约定：name -> owner 单元全局索引数组，
+        # 见 tag_boundary_groups 文档），不依赖 boundary_surface_mesh
+        # （回退到单元级别匹配 `tag_boundary_groups`，足以验证本次修复）。
+        fc = mesh.face_connectivity
+        boundary_face = int(np.nonzero(fc.is_boundary)[0][0])
+        wall_cell = int(fc.owner_cell[boundary_face])
+        mesh.boundary_groups = {"wall_group": np.array([wall_cell], dtype=np.int64)}
+        mesh.boundary_bc_types = {"wall_group": "WALL"}
+
+        from autoflowcfd.core.fr_solver.solver import FRSolver
+        solver = FRSolver(mesh, order=order, turb_model_name="wmles")
+
+        assert solver.wmles_model is not None
+        wall_configs = [
+            cfg for cfg in solver.boundary_ghost_provider.code_to_config.values()
+            if cfg.get("type") == "WALL"
+        ]
+        assert wall_configs, "test setup must produce at least one real WALL group"
+        for cfg in wall_configs:
+            assert cfg["is_no_slip"] is False
+
+    def test_fr_solver_non_wmles_wall_is_no_slip_true(self):
+        """反向对照：同一构造路径，非 WMLES 时必须保持 is_no_slip=True
+        不变（排除"任何 FRSolver 构造都变成 False"这种更粗暴的误判）。"""
+        order = 2
+        mesh = _build_synthetic_mixed_mesh(order)
+        fc = mesh.face_connectivity
+        boundary_face = int(np.nonzero(fc.is_boundary)[0][0])
+        wall_cell = int(fc.owner_cell[boundary_face])
+        mesh.boundary_groups = {"wall_group": np.array([wall_cell], dtype=np.int64)}
+        mesh.boundary_bc_types = {"wall_group": "WALL"}
+
+        from autoflowcfd.core.fr_solver.solver import FRSolver
+        solver = FRSolver(mesh, order=order, turb_model_name="sst")
+
+        assert solver.wmles_model is None
+        wall_configs = [
+            cfg for cfg in solver.boundary_ghost_provider.code_to_config.values()
+            if cfg.get("type") == "WALL"
+        ]
+        assert wall_configs
+        for cfg in wall_configs:
+            assert cfg["is_no_slip"] is True

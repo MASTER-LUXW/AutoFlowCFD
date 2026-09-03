@@ -29,11 +29,13 @@ def test_native_mesh_free_stream_preservation(order, rel_tol):
     """均匀自由流场：无粘残差在 native 四面体单元上必须处于机器精度
     量级附近（不是恒为 0——真实观测：3e-8~7.6e-7 相对残差，是 AUSM+up
     通量自身一致性、`D_native` 消灭常数场等多个环节各自的普通浮点截断
-    共同作用的结果，与本项目其它 AUSM+up 相关测试同一量级）——决定性
-    对照实测：同一份网格切到 tet_basis_mode="collapsed" 时，这两个
-    四面体单元的残差分别是 0.073、1.31（即本项目 Part1~6 文档反复记录
-    的坍缩坐标 P1/P2 发散问题本身），native 分支把残差压低了 5~7 个
-    数量级，是这次接入工作最终、端到端的决定性证据。
+    共同作用的结果，与本项目其它 AUSM+up 相关测试同一量级）。历史决定性
+    对照（坍缩坐标四面体基已于 2026-09-03 删除，不再能重新构造对照
+    网格，见 `fr/operators.py` 模块文档）：同一份网格切到当时的
+    `tet_basis_mode="collapsed"` 时，这两个四面体单元的残差分别是
+    0.073、1.31（即本项目 Part1~6 文档反复记录的坍缩坐标 P1/P2 发散
+    问题本身），native 分支把残差压低了 5~7 个数量级，是当初这次接入
+    工作最终、端到端的决定性证据。
 
     真实 bug 修复记录（本文件开发过程中发现，不是理论推导）：最初这里
     native 四面体残差在 order=1 时高达相对 1e6（灾难性），排查定位到
@@ -77,26 +79,14 @@ def test_native_mesh_free_stream_preservation(order, rel_tol):
         f"order={order}: native 四面体自由流场保持性残差 {tet_rel_res:.3e} 超出容差 {rel_tol:.1e}"
     )
 
-    # 棱柱：不要求与 collapsed 模式逐位相等——native/collapsed 两侧四面体
-    # 用完全不同的外插矩阵算出"数学上相等但浮点表示略有差异"的共享面
-    # 状态，这个差异经由 AUSM+up 通量计算里 jump=F_tilde_common-F_tilde_own
-    # 的抵消（本项目 test_fr_residual_inviscid_kernel_crosscheck.py 模块
-    # 文档记录过的同一个"12 个数量级灾难性抵消，对浮点运算顺序极度敏感"
-    # 现象）会被放大，阶数越高放大越明显——这不是本次改动引入的新问题，
-    # 是任何"改变四面体一侧浮点实现细节"都会触发的既有敏感性，用同一份
-    # 文档里验证过的按阶数分级相对容差判断"量级一致"，而不是要求逐位
-    # 相等。
-    mesh_collapsed = _build_synthetic_mixed_mesh(order, "collapsed")
-    residual_collapsed = compute_inviscid_residual_fr(
-        primitive_to_conserved(Q), mesh_collapsed, mesh_collapsed.operators, mach_ref=u_inf / 340.0
-    )
-    prism_rel_diff = (
-        np.max(np.abs(residual[:n_prisms] - residual_collapsed[:n_prisms])) / scale
-    )
-    prism_rel_tol = {1: 1e-8, 2: 1e-6, 3: 1e-3}[order]
-    assert prism_rel_diff < prism_rel_tol, (
-        f"order={order}: 棱柱残差相对差异 {prism_rel_diff:.3e} 与 collapsed 模式偏离过大"
-        f"（容差 {prism_rel_tol:.1e}），可能是 native 分支真的改变了棱柱侧结果，需要排查"
+    # 棱柱侧同一个自由流场保持性判据（棱柱基不受"delete collapsed"影响，
+    # 与四面体判据合并成同一份端到端验证，不再需要与 collapsed 模式的
+    # 棱柱残差交叉比对——collapsed 四面体基已删除，无法再构造对照网格，
+    # 见 fr/operators.py 模块文档）。
+    prism_rel_res = np.max(np.abs(residual[:n_prisms])) / scale
+    prism_rel_tol = {1: 1e-6, 2: 1e-6, 3: 1e-3}[order]
+    assert prism_rel_res < prism_rel_tol, (
+        f"order={order}: 棱柱自由流场保持性残差 {prism_rel_res:.3e} 超出容差 {prism_rel_tol:.1e}"
     )
 
 

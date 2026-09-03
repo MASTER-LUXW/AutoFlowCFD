@@ -21,16 +21,18 @@ import types
 from autoflowcfd.core.gpu import get_cupy
 
 
-def compute_wmles_wall_stress_correction_gpu(solver, U=None, Q=None):
+def compute_wmles_wall_stress_correction_gpu(solver, U=None, Q=None, flat_face_override=None):
     """GPU 版 WMLES 壁面剪应力修正入口，与 CPU 版
     `FRSolver.compute_viscous_residual` 里的同名调用点语义完全一致：
     必须在残差组装阶段（`compute_viscous_residual_gpu` 内部）叠加到
     粘性残差上，不能放到 step() 完成状态更新之后才生效。
 
     Args:
-        solver: GPUFRSolver 实例，需要 `solver.wmles_model` 已设置为真实
-            的 CPU 版 `WMLESModel` 实例（见 gpu_solver.py 构造处），
-            `solver.wall_distance_gpu` 已初始化。
+        solver: GPUFRSolver（或分布式 GPU 求解器）实例，需要
+            `solver.wmles_model` 已设置为真实的 CPU 版 `WMLESModel`
+            实例（见 gpu_solver.py 构造处），`solver.wall_distance_gpu`
+            已初始化，`solver.boundary_ghost_provider` 已构建（WALL 面
+            识别依据，见 `compute_wmles_wall_stress_correction` 文档）。
         U, Q: 可选，调用方（`compute_viscous_residual_gpu`）当前正在
             求值的试验解（CuPy 数组）——SSP-RK2/RK3 每个 stage 用的 U
             与 `solver.U_gpu`（已接受的上一步解）不同，必须用这一 stage
@@ -40,6 +42,10 @@ def compute_wmles_wall_stress_correction_gpu(solver, U=None, Q=None):
             语义要求，否则多 stage 格式下壁面剪应力会用错 stage 的状态）。
             两者都为 None 时退回 `solver.U_gpu`/`solver.Q_gpu`（对应
             forward-Euler 单 stage 或调用方明确要用当前接受态的场景）。
+        flat_face_override: 透传给 CPU 版同名参数——分布式 GPU 求解器
+            （`MultiGPUDistributedSolver`）传 `self.dist_flat_face.
+            base_flat`，单机 GPU 不传（走默认的全局
+            `get_flat_face_geometry(solver.mesh, solver.ops)`）。
 
     Returns:
         (n_cells, n_sps, 5) CuPy 数组，无 WMLES 模型/无 WALL 边界/尚未
@@ -71,9 +77,10 @@ def compute_wmles_wall_stress_correction_gpu(solver, U=None, Q=None):
         ops=solver.ops,
         wall_distance=wall_distance_cpu,
         state=state,
+        boundary_ghost_provider=solver.boundary_ghost_provider,
     )
 
-    correction_cpu = compute_wmles_wall_stress_correction(facade)
+    correction_cpu = compute_wmles_wall_stress_correction(facade, flat_face_override=flat_face_override)
     if correction_cpu is None:
         return None
     return cp.asarray(correction_cpu)

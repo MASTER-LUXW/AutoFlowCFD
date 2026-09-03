@@ -127,24 +127,22 @@ def split_sharp_corners(
         if ra != rb:
             parent[ra] = rb
 
-    boundary_edge_verts = []  # (v0, v1) with only 1 adjacent face
-    hard_edge_list = []  # (v0, v1, fa, fb) with 2 adjacent faces, angle > threshold
+    boundary_edge_verts = []  # (v0, v1)，只有 1 个相邻面
+    hard_edge_list = []  # (v0, v1, fa, fb)，2 个相邻面，夹角 > threshold
 
     for v0, v1, fidx in _unique_edges(faces):
         if len(fidx) == 1:
             boundary_edge_verts.append((int(v0), int(v1)))
             continue
         if len(fidx) != 2:
-            continue  # non-manifold edge - leave unioned-apart (safest: treat as hard, no bevel)
+            continue  # 非流形边——保持各自独立（最安全：视为硬边，不加倒角）
         fa, fb = int(fidx[0]), int(fidx[1])
         cosang = np.clip(np.dot(face_normals[fa], face_normals[fb]), -1.0, 1.0)
         angle = np.arccos(cosang)
         is_hard = angle > threshold
-        # An edge that crosses the plain angle threshold is still treated
-        # as an ordinary smooth edge if its own geometry implies a local
-        # curvature radius at or above min_feature_radius - see this
-        # function's own min_feature_radius docstring for why (and its
-        # documented limits).
+        # 一条超过普通角度阈值的边，若其自身几何暗示的局部曲率半径
+        # 达到或超过 min_feature_radius，仍视为普通平滑边——原因（及
+        # 已记录的局限）见本函数自己的 min_feature_radius 文档字符串。
         if is_hard and min_feature_radius > 0.0:
             edge_length = float(np.linalg.norm(nodes[v0] - nodes[v1]))
             implied_radius = _implied_edge_radius(edge_length, angle)
@@ -201,7 +199,7 @@ def split_sharp_corners(
             continue
         v = int(uk0_vertex[gs])
         if v in boundary_verts:
-            continue  # open fan - split is fine, just never capped (below)
+            continue  # 开放扇形——拆分没问题，只是永远不加帽盖（见下方）
         patches_here = uk0_patch[gs:ge].tolist()
         patches_set = set(patches_here)
         adj = vertex_patch_adj.get(v)
@@ -308,7 +306,7 @@ def split_sharp_corners(
         apex = int(copies[0])
         for i in range(1, len(cyclic) - 1):
             bevel_tris.append(np.array([[apex, int(copies[i]), int(copies[i + 1])]], dtype=np.int64))
-            bevel_source.append(np.array([-1], dtype=np.int64))  # filled in below
+            bevel_source.append(np.array([-1], dtype=np.int64))  # 下方再填充实际值
 
     if bevel_tris:
         extra_faces = np.vstack(bevel_tris)

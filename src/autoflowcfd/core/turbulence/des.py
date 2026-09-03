@@ -56,35 +56,47 @@ class DDESModel:
         self.l_eff = None  # 有效长度尺度场
         
     def compute_grid_scale(self, cell_volumes: np.ndarray,
-                          method: str = 'cube_root') -> np.ndarray:
+                          method: str = 'cube_root',
+                          h_max: Optional[np.ndarray] = None) -> np.ndarray:
         """
         计算网格尺度 Δ。
 
         Args:
             cell_volumes: 单元体积数组
             method: 计算方法
-                - 'cube_root': Δ = V^(1/3)（标准，唯一已实现的方法）
+                - 'cube_root': Δ = V^(1/3)（各向同性假设，扁平棱柱单元
+                  会被严重低估 Δ）
+                - 'max_edge': Δ = 逐单元最大边长（各向异性棱柱边界层
+                  网格的标准做法，见下方说明），需要提供 `h_max`
+            h_max: (n_cells,) 逐单元最大边长（`compute_h_max_and_h_wn`
+                的第一个返回值），method='max_edge' 时必需
 
         Returns:
             delta: 网格尺度
 
-        Note:
-            'max_edge'（各向异性棱柱边界层网格推荐用法，取最大边长而非
-            体积开三次方，避免扁平棱柱单元被 cube_root 严重低估 Δ）与
-            'wurz' 需要单元边长几何信息（当前接口只收到 cell_volumes，
-            没有该信息）。此前的实现曾把 'max_edge' 静默退化为与
-            'cube_root' 完全相同的结果并只打一条警告——对本项目高度依赖
-            棱柱边界层网格的场景，这正是"假通过"：调用方以为自己拿到了
-            按 'max_edge' 算的 Δ，实际只是 cube_root。在真正接入单元边长
-            数据前，未实现的方法必须显式报错，不能悄悄退化。
+        Note（2026-09-02 实现）：`max_edge` 此前长期声称"尚未实现，需要
+            单元边长几何数据"——但 `compute_h_max_and_h_wn(mesh)`（本
+            模块下方）早就实现了这个几何量的计算（IDDES 的 Δ_IDDES 公式
+            本来就要用它），只是从未把它接到 DDES 基类这个入口。现在
+            直接复用同一个函数的输出：调用方（`apply_to_sst_model`）
+            按与 IDDES 完全一致的方式，在求解器初始化时算好 `h_max`
+            （与流场状态无关，只依赖网格几何，算一次缓存即可）并传入。
+            `'wurz'`（Chapman/Scotti 各向异性修正）仍未实现——没有已知
+            调用方要求它，不在本次范围内。
         """
         if method == 'cube_root':
             return cell_volumes ** (1.0 / 3.0)
+        elif method == 'max_edge':
+            if h_max is None:
+                raise ValueError(
+                    "compute_grid_scale: method='max_edge' 需要提供 h_max"
+                    "（compute_h_max_and_h_wn(mesh) 的第一个返回值）。"
+                )
+            return h_max
         else:
             raise NotImplementedError(
-                f"compute_grid_scale: method='{method}' 尚未实现（需要单元"
-                f"边长几何数据，当前接口只有 cell_volumes）。仅 'cube_root' "
-                f"已实现，请勿静默退化为它。"
+                f"compute_grid_scale: method='{method}' 尚未实现——只有 "
+                f"'cube_root'/'max_edge' 已实现，请勿静默退化为其中之一。"
             )
 
     def compute_strain_rate_magnitude(self, grad_u: np.ndarray) -> np.ndarray:
@@ -244,7 +256,8 @@ class DDESModel:
     def apply_to_sst_model(self, sst_model, d_w: np.ndarray,
                           cell_volumes: np.ndarray,
                           nu: np.ndarray,
-                          grad_u: Optional[np.ndarray] = None):
+                          grad_u: Optional[np.ndarray] = None,
+                          h_max: Optional[np.ndarray] = None):
         """
         将 DDES 模型应用到 SST k-ω 模型。
 
@@ -253,13 +266,27 @@ class DDESModel:
         Args:
             sst_model: SSTModelFR 实例
             d_w: 壁面距离，形状 (n_cells, n_sps)
-            cell_volumes: 单元体积，形状 (n_cells,)
+            cell_volumes: 单元体积，形状 (n_cells,)——`h_max` 提供时只用于
+                兜底（`h_max is None` 时退化为各向同性 `cube_root(V)`），
+                否则不参与网格尺度计算
             nu: 分子运动粘度场 mu/rho，形状 (n_cells, n_sps)（屏蔽函数 r_d
                 公式需要，见 compute_shielding_function）
             grad_u: 速度梯度张量，形状 (n_cells, n_sps, 3, 3)
+            h_max: (n_cells,) 逐单元最大边长（2026-09-02 新增，见
+                `compute_grid_scale` 文档"Note"一节）。生产路径（`fr_
+                solver/turbulence.py`）总会提供它，改用各向异性感知的
+                `max_edge` 网格尺度——本项目高度依赖棱柱边界层网格，
+                `cube_root(V)` 会系统性低估这类扁平单元的 Δ。None 时
+                （例如脱离 solver 直接构造 `DDESModel` 的场景，见本文件
+                `__main__` 测试块）退化为 `cube_root`，不报错也不警告，
+                因为这条路径本来就没有网格几何可用。
         """
-        # 计算网格尺度
-        delta = self.compute_grid_scale(cell_volumes)
+        # 计算网格尺度：h_max 可用时用各向异性感知的 max_edge（标准做法，
+        # 见 compute_grid_scale 文档），否则退化为各向同性 cube_root。
+        if h_max is not None:
+            delta = self.compute_grid_scale(cell_volumes, method='max_edge', h_max=h_max)
+        else:
+            delta = self.compute_grid_scale(cell_volumes)
 
         # 获取湍流变量
         k = sst_model.k_field
@@ -361,9 +388,19 @@ class IDDESModel(DDESModel):
       l_IDDES = f_B*(1+f_e)*l_RANS + (1-f_B)*l_LES 混合公式结构；
       C_DES=0.78（SST kw 分支标准值，注意与 DDESModel 基类默认的 0.65——
       那是 SA 模型标定值——不同，两者不可混用）；C_w=0.15。
-    - **中等置信度**（本会话仅凭训练记忆写出，多次网络检索均未能独立
-      复核到原始文献 Table 1 数值，建议在生产使用前对照 Gritskevich et
-      al. 2012 原文核实）：f_e2 公式里的经验常数 c_t=1.87、c_l=5.0。
+    - **已独立核实**（2026-09-02，此前是"中等置信度：本会话仅凭训练
+      记忆写出，多次网络检索均未能独立复核到原始文献 Table 1 数值"）：
+      f_e2 公式里的经验常数 c_t=1.87、c_l=5.0，已对照 OpenFOAM 生产级
+      `kOmegaSSTIDDES` 实现（`Ct_=1.87`/`Cl_=5`，该实现本身就是
+      Gritskevich et al. 2012 SST-IDDES 公式的产业界广泛使用的独立
+      实现）逐值核对一致，不再是训练记忆孤证。核实来源：
+      github.com/fertinaz/kOmegaSSTIDDES（OpenFOAM 官方
+      `kOmegaSSTIDDES` 的社区移植版，常数定义在
+      `kOmegaSSTIDDES.C::Ct_`/`Cl_` 的
+      `dimensioned<scalar>::lookupOrAddToDict` 默认值参数）。附带
+      验证：本类 `c_w1=20.0` 与该实现的 `Cdt1_=20` 也一致（同一常数，
+      DDES 屏蔽函数延迟参数，本来就已经是高置信度项，这里是额外
+      交叉确认）。
     - **本项目场景下的必要近似**（非文献规定做法）：Shur et al. 2008
       的网格尺度 Δ 公式假设结构化网格、可直接给出"壁面法向网格间距"
       h_wn；本项目是非结构化棱柱+四面体混合网格，h_wn 通过
@@ -378,8 +415,8 @@ class IDDESModel(DDESModel):
 
     Attributes（新增于 DDESModel 基类的 c_des/c_w1/psi/l_eff）:
         c_w: IDDES 网格尺度公式里的常数，标准值 0.15。
-        c_t: f_e2 中 f_t 分量的常数（中等置信度，见上）。
-        c_l: f_e2 中 f_l 分量的常数（中等置信度，见上）。
+        c_t: f_e2 中 f_t 分量的常数（已独立核实，见上）。
+        c_l: f_e2 中 f_l 分量的常数（已独立核实，见上）。
     """
 
     def __init__(self, c_des: float = 0.78, c_w1: float = 20.0,

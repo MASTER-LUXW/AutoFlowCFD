@@ -280,18 +280,14 @@ def compute_inviscid_residual_fr(
             div_comp[n_prism:] = contract_shared_operator_1axis(ops.overint_restrict_f2c_tet, div_comp_fine[n_prism:])
         del div_comp_fine  # ~1.9GiB，用完即弃
     else:
-        # 没有 fine 几何——理论上有两种情形：(a) order==0，但 P0 在函数
-        # 入口就已经短路到 _compute_inviscid_residual_fv_p0，不会走到
-        # 这里；(b) tet_basis_mode=="native"（Part8 文档"四、明确未做
-        # 的后续工作"第4条：native 单纯形基的过积分算子尚未设计，
-        # `build_order_geometry` 因此故意不为 native 网格构建
-        # jacobians_fine，见该函数文档），四面体部分需要改用
-        # `D_native_tet_padded`（Part8 文档"零填充块对角"不变量，填充
-        # 行的散度贡献恒为 0）——棱柱部分不受影响，仍是坍缩坐标
-        # `D_3d_prism`（棱柱没有 native 概念）。这条分支对普通坍缩坐标
-        # P1+ 网格理论上不会被触发（保留只是为了任何未预见的
-        # jacobians_fine 缺失场景不静默得到错误答案，而是仍用未去混叠
-        # 的朴素路径，不崩溃）。
+        # 没有 fine 几何——只在 order==0 时发生，但 P0 在函数入口就已经
+        # 短路到 _compute_inviscid_residual_fv_p0，不会走到这里；order>=1
+        # 时 `build_order_geometry` 恒构造 native 单纯形基过积分算子
+        # + jacobians_fine（见该函数文档），这条朴素（无去混叠）分支
+        # 理论上不会被真实触发，保留只是防御性兜底，不静默得到错误
+        # 答案。四面体段用 `ops.D_3d_tet`（现别名到 `D_native_tet_
+        # padded`，见 fr/operators.py 模块文档），棱柱段仍是坍缩坐标
+        # `D_3d_prism`（棱柱没有 native 概念）。
         Q_flat = np.ascontiguousarray(Q.reshape(-1, 5))
         F_phys = euler_physical_flux_batch(Q_flat).reshape(n_cells, n_sps, 3, 5)
         F_tilde = np.matmul(adj_j, F_phys)  # (n_cells,n_sps,3,5)
@@ -299,12 +295,7 @@ def compute_inviscid_residual_fr(
         if n_prism > 0:
             div_comp[:n_prism] = contract_shared_operator_2axis(ops.D_3d_prism, F_tilde[:n_prism])
         if n_cells > n_prism:
-            D_tet_op = (
-                ops.D_native_tet_padded
-                if getattr(mesh, "tet_basis_mode", "collapsed") == "native"
-                else ops.D_3d_tet
-            )
-            div_comp[n_prism:] = contract_shared_operator_2axis(D_tet_op, F_tilde[n_prism:])
+            div_comp[n_prism:] = contract_shared_operator_2axis(ops.D_3d_tet, F_tilde[n_prism:])
 
     residual = -div_comp / det_jacs[..., None]  # 物理空间残差（体积项部分）
     # div_comp（~854MiB）用完即弃，理由同上（over-integration 分支/朴素

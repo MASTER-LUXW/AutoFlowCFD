@@ -218,8 +218,15 @@ class GPUArrayManager:
 
             # ── FR 算子（不依赖 cell，上传一次）──
             if ops is not None:
-                # 微分矩阵
-                for attr_name in ['D_3d_tet', 'D_3d_prism']:
+                # 微分矩阵。`D_native_tet_padded`（native 四面体/路径C 体积
+                # 项微分算子，2026-09-02 多GPU分布式移植新增）：与
+                # gpu_inviscid_volume.py::prepare_ops_data 同一"零填充块
+                # 对角"上传约定——这是一份独立、重复的算子上传实现（多GPU
+                # 分布式路径用 GPUArrayManager.upload_mesh_data，单机 GPU
+                # 路径用 prepare_ops_data，两者从未共享代码，是各自独立的
+                # 遗漏点，需要分别修复）。collapsed 网格下
+                # `ops.D_native_tet_padded` 恒为 None，不写入，行为不变。
+                for attr_name in ['D_3d_tet', 'D_3d_prism', 'D_native_tet_padded']:
                     D = getattr(ops, attr_name, None)
                     if D is not None:
                         self.mesh_data[attr_name] = self._cp.asarray(

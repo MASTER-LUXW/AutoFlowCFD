@@ -42,9 +42,15 @@ class FaceClassification:
         interior_mask: (n_local_faces,) bool, True = 内部面
         partition_boundary_mask: (n_local_faces,) bool, True = 分区边界面
         physical_boundary_mask: (n_local_faces,) bool, True = 物理边界面
+        halo_owner_mask: (n_local_faces,) bool, True = 本 rank 只持有
+            neighbor 侧（owner 是另一个 rank 的 local cell）的面——模块
+            文档"面分类"一节的第四类"halo"，2026-09-02 修复前从未真正
+            被选进 `local_faces`（见 build_distributed_partition 同名
+            注释的真实 bug 记录），现在真正生效。
         interior_indices: 内部面的局部索引
         partition_boundary_indices: 分区边界面的局部索引
         physical_boundary_indices: 物理边界面的局部索引
+        halo_owner_indices: halo_owner_mask 为 True 的局部索引
     """
     interior_mask: np.ndarray
     partition_boundary_mask: np.ndarray
@@ -52,6 +58,8 @@ class FaceClassification:
     interior_indices: np.ndarray
     partition_boundary_indices: np.ndarray
     physical_boundary_indices: np.ndarray
+    halo_owner_mask: np.ndarray = None
+    halo_owner_indices: np.ndarray = None
 
 
 @dataclass
@@ -338,17 +346,59 @@ def build_distributed_partition(
 
     neighbor_ranks = sorted(neighbor_ranks_set)
 
-    # 4. 确定本 rank 负责的面（owner 是 local cell 的面）
-    local_faces = np.flatnonzero(
-        np.isin(face_connectivity.owner_cell, local_cells)
-    ).astype(np.int64)
+    # 4. 确定本 rank 负责的面。
+    #
+    # 真实 bug 修复（2026-09-02，实现分布式湍流模型时用非均匀流场端到端
+    # 测试发现——本项目此前所有分布式残差验证都用均匀自由流场，均匀场下
+    # 任何面的真实解析跳跃恒为零，"漏掉一个本该算出来也是零的贡献"和
+    # "正确算出这个贡献（结果也是零）"在数值上完全无法区分，这个 bug
+    # 因此被完全掩盖，从未被现有测试捕捉到）：此前这里只选
+    # `owner_cell` 是 local cell 的面（模块文档"面分类"一节其实早就
+    # 写明了应该存在第四类"halo: neighbor 是 local，owner 在另一个
+    # rank"，但从未真正被选进 `local_faces`——是文档与实现不一致，
+    # 不是本次新发现的需求）。对一个跨 rank 分区边界的面，如果本 rank
+    # 只持有 neighbor 侧的 local cell（owner 侧是另一个 rank 的 local
+    # cell、对本 rank 而言是 halo），这个面完全不会出现在
+    # `local_faces` 里——真实残差计算（inviscid_kernel.py/
+    # viscous_flux_kernel.py/turbulence transport 的
+    # owner-primary/neighbor-primary 两段式累加）因此从未算出这个面对
+    # 本 rank 那个 local cell（neighbor 角色）的贡献，也没有任何其它
+    # rank 会替它算（owner 所在的 rank 只关心 owner 侧的贡献，写不到
+    # 属于另一个 rank 的 local cell 上）——等价于这类面对相关 local
+    # cell 完全"消失"，真实合成网格端到端验证：非均匀流场下该 cell
+    # 的无粘残差相对误差达 1239 倍（rel_diff=1.24e3，vs 单机路径），
+    # 不是量级噪声。
+    #
+    # 修复：`local_faces` 改为"owner 或 neighbor 任一侧是 local cell"
+    # 的并集——owner 侧仍按原逻辑分类（interior/partition_boundary/
+    # physical_boundary）；新增的"仅 neighbor 是 local"这批面额外标记
+    # 好，供下游 `owner_is_primary`/`neighbor_is_primary` 两段式累加
+    # 分别处理（这批面的 owner 是 halo，只需要神经它们的
+    # neighbor-primary 贡献，owner-primary 贡献留给拥有该 owner 的
+    # 另一个 rank 自己算）。
+    owner_local_mask = np.isin(face_connectivity.owner_cell, local_cells)
+    neighbor_local_mask = (
+        (face_connectivity.neighbor_cell >= 0)
+        & np.isin(face_connectivity.neighbor_cell, local_cells)
+    )
+    local_faces = np.flatnonzero(owner_local_mask | neighbor_local_mask).astype(np.int64)
 
     # 5. 面分类
     interior_mask = np.zeros(len(local_faces), dtype=bool)
     partition_boundary_mask = np.zeros(len(local_faces), dtype=bool)
     physical_boundary_mask = np.zeros(len(local_faces), dtype=bool)
+    # halo_owner_mask：本 rank 只持有 neighbor 侧（owner 是另一个 rank
+    # 的 local cell）的这批面——模块文档"面分类"一节里一直存在、但此前
+    # 从未真正生效的第四类。
+    halo_owner_mask = np.zeros(len(local_faces), dtype=bool)
 
     for i, f in enumerate(local_faces):
+        if not owner_local_mask[f]:
+            # owner 不是本 rank 的 local cell——本 rank 只是因为
+            # neighbor 是 local cell 才把这个面纳入（见上方修复），
+            # 不适用原有的"owner 是 local"分类体系。
+            halo_owner_mask[i] = True
+            continue
         if face_connectivity.is_boundary[f]:
             physical_boundary_mask[i] = True
         else:
@@ -365,6 +415,8 @@ def build_distributed_partition(
         interior_indices=np.flatnonzero(interior_mask),
         partition_boundary_indices=np.flatnonzero(partition_boundary_mask),
         physical_boundary_indices=np.flatnonzero(physical_boundary_mask),
+        halo_owner_mask=halo_owner_mask,
+        halo_owner_indices=np.flatnonzero(halo_owner_mask),
     )
 
     return DistributedPartition(

@@ -13,9 +13,10 @@ from autoflowcfd.core.fr_operators.flux_kernels import (
     euler_physical_flux_point,
     entropy_stable_volume_divergence_batch,
 )
+from autoflowcfd.fr.native_simplex_basis import (
+    build_native_tet_operators, map_native_tet_to_physical, compute_native_tet_jacobian,
+)
 from autoflowcfd.fr.operators import generate_fr_operators
-from autoflowcfd.fr.quadrature_points import gauss_legendre
-from autoflowcfd.grid.curved_mapping.curved_mapping import batched_det_inv_3x3, tet_barycentric, cube_to_tet_rst
 
 
 def _random_Q(rng):
@@ -52,26 +53,33 @@ def test_chandrashekar_flux_symmetric_mass_momentum():
 
 
 def _real_tet_geometry(order, cell_nodes):
-    """用真实生产坍缩坐标映射（不是随便编的度量数据——度量项 adj_j 和
-    微分矩阵 D 必须满足离散 GCL 恒等式，均匀场散度恒零这个检验才有意义，
-    随便拼凑的 adj_j/D 数据不满足这个恒等式，测出的非零散度是这套拼凑
-    数据本身不自洽，不是被测函数的 bug）。"""
-    n1d = order + 1
-    sps_1d, _ = gauss_legendre(n1d)
-    aa, bb, cc = np.meshgrid(sps_1d, sps_1d, sps_1d, indexing="ij")
-    ref = np.column_stack([aa.ravel(), bb.ravel(), cc.ravel()])
+    """用真实生产 native 单纯形基几何（不是随便编的度量数据——度量项
+    adj_j 和微分矩阵 D 必须满足离散 GCL 恒等式，均匀场散度恒零这个
+    检验才有意义，随便拼凑的 adj_j/D 数据不满足这个恒等式，测出的
+    非零散度是这套拼凑数据本身不自洽，不是被测函数的 bug）。
+
+    2026-09-03 更正：四面体坍缩坐标基已删除（见 fr/operators.py 模块
+    文档），`ops.D_3d_tet` 现在是 `D_native_tet_padded` 的别名——对
+    (r,s,t) 参考单纯形坐标求导，不再是对 (a,b,c) 坍缩坐标求导。度量项
+    改用与生产 `high_order_mesh_order.py::compute_native_tet_jacobians`
+    完全同一套构造：native 直边单元 Jacobian 是不依赖参考点位置的
+    常数（`compute_native_tet_jacobian` 解析闭式），直接广播到全部
+    `n_sps_global` 槽位（含填充槽位）——不能像坍缩坐标方案那样反过来
+    用 `D @ phys` 数值求导算 Jacobian：`D` 的填充行/列是零（"零填充块
+    对角"约定），若填充槽位的 `phys` 走真实仿射映射，`D@phys` 在填充
+    行会得到退化的零 Jacobian（奇异，`inv_jacs` 出 NaN/Inf），而这个
+    NaN 会通过 entropy-stable 核里的两两配对求和污染真实行的结果（
+    `0*NaN=NaN`，不会被后续乘零自动清零）——生产代码从一开始就不会
+    触碰到这个陷阱，因为它压根不用 D 矩阵算四面体 Jacobian，这里必须
+    复刻同一个"常数解析 Jacobian 广播"策略才自洽。
+    """
     ops = generate_fr_operators(order)
-    D = ops.D_3d_tet
+    D = ops.D_3d_tet  # 别名到 D_native_tet_padded，见模块文档
+    n_sps_global = D.shape[0]
 
-    r, s, t = cube_to_tet_rst(ref[:, 0], ref[:, 1], ref[:, 2])
-    L1, L2, L3, L4 = tet_barycentric(r, s, t)
-    p0, p1, p2, p3 = cell_nodes
-    phys = L1[:, None] * p0 + L2[:, None] * p1 + L3[:, None] * p2 + L4[:, None] * p3
-
-    jac = np.stack([D[:, :, m] @ phys for m in range(3)], axis=1)
-    jac = np.swapaxes(jac, 1, 2)
-    det_jacs, inv_jacs = batched_det_inv_3x3(np.ascontiguousarray(jac))
-    adj_j = det_jacs[:, None, None] * inv_jacs
+    det_j, adj_const = compute_native_tet_jacobian(cell_nodes)
+    det_jacs = np.full(n_sps_global, det_j)
+    adj_j = np.broadcast_to(adj_const, (n_sps_global, 3, 3)).copy()
     return D, adj_j, det_jacs
 
 
@@ -102,20 +110,28 @@ def test_entropy_stable_volume_divergence_batch_zero_on_uniform_field_real_geome
 def test_entropy_stable_volume_divergence_batch_matches_manual_reference_real_geometry():
     """与手写的纯 numpy 参考实现（`8_算法重构-Entropy-Stable_Split-Form
     通量重构-Part2.md` 决定性验证脚本同一套公式）逐位交叉核对，真实
-    坍缩坐标几何、非均匀（Couette 剪切）流场。"""
+    native 单纯形基几何、非均匀（Couette 剪切）流场。
+
+    2026-09-03 更正：Q 场按物理坐标求值必须用 `map_native_tet_to_
+    physical`（与 `D`——现在是 `D_native_tet_padded`——参考的同一套
+    (r,s,t) 单纯形坐标），不能再用坍缩坐标 `cube_to_tet_rst`/
+    `tet_barycentric` 那套往返（见 `_real_tet_geometry` 文档同一处
+    更正说明）。填充槽位（`[n_native:]`）复制真实 SP #0 的物理坐标
+    （与 build_order_geometry 同一约定），Q 场在这些槽位的取值本身
+    不影响真实自由度的结果——`D` 的填充列恒为零，真实行的散度求和
+    不会读到填充槽位的贡献。
+    """
     order = 2
     cell_nodes = np.array([[0.0, 0.0, 0.0], [1.3, -0.1, 0.2], [-0.1, 1.1, 0.0], [0.1, 0.0, 0.9]])
     D, adj_j, det_jacs = _real_tet_geometry(order, cell_nodes)
     n_sps = D.shape[0]
 
-    n1d = order + 1
-    sps_1d, _ = gauss_legendre(n1d)
-    aa, bb, cc = np.meshgrid(sps_1d, sps_1d, sps_1d, indexing="ij")
-    ref = np.column_stack([aa.ravel(), bb.ravel(), cc.ravel()])
-    r, s, t = cube_to_tet_rst(ref[:, 0], ref[:, 1], ref[:, 2])
-    L1, L2, L3, L4 = tet_barycentric(r, s, t)
-    p0, p1, p2, p3 = cell_nodes
-    phys = L1[:, None] * p0 + L2[:, None] * p1 + L3[:, None] * p2 + L4[:, None] * p3
+    ref_rst, _ = build_native_tet_operators(order)
+    n_native = ref_rst.shape[0]
+    phys_native = map_native_tet_to_physical(ref_rst, cell_nodes)
+    phys = np.zeros((n_sps, 3))
+    phys[:n_native] = phys_native
+    phys[n_native:] = phys_native[0]
 
     Q = np.zeros((n_sps, 5))
     Q[:, 0] = 1.225

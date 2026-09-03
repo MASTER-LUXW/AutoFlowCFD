@@ -50,10 +50,10 @@ def post() -> None:
     分析和可视化仿真结果。
 
     Examples:
-        # Calculate coefficients
+        # 计算气动系数
         $ autoflowcfd post coefficients --case results/
 
-        # Export to VTK
+        # 导出 VTK
         $ autoflowcfd post export-vtk --case results/
     """
     pass
@@ -61,14 +61,14 @@ def post() -> None:
 
 @post.command()
 @click.option("--case", "-c", required=True, type=click.Path(exists=True),
-              help="Case directory containing a checkpoint written by 'solve steady/transient/resume'")
+              help="算例目录，需包含 'solve steady/transient/resume' 写出的 checkpoint")
 @click.option("--checkpoint", type=click.Path(exists=True),
-              help="Checkpoint file path (defaults to latest under --case)")
+              help="checkpoint 文件路径（默认取 --case 目录下最新一个）")
 @click.option("--surface-mesh", "-s", type=click.Path(exists=True), default=None,
               help="原始面网格路径——checkpoint 记录的 input_file 若是 .nas 体网格则必填"
                    "（与 'solve resume --surface-mesh' 语义一致，用于反推边界分组）")
 @click.option("--reference-area", type=float, required=True,
-              help="Reference area A_ref (m^2), 通常是车辆正面投影面积——没有默认值，"
+              help="参考面积 A_ref (m^2)，通常是车辆正面投影面积——没有默认值，"
                    "错的参考面积会给出误导性的 Cd/Cl，宁可强制用户显式指定")
 @click.option("--backend", "-b", type=click.Choice(["cpu", "gpu"]), default=None,
               help="后端覆盖，默认沿用 checkpoint 记录的原始后端")
@@ -77,8 +77,8 @@ def post() -> None:
               help="跳过重建时的网格质量门检查（B-11：原求解靠该选项才跑得起来的"
                    "网格，后处理同样需要跳过；不建议，仅用于临时诊断）")
 @click.option("--output", "-o", type=click.Path(), default="coefficients.json",
-              help="Output file")
-@click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
+              help="输出文件")
+@click.option("--json", "-j", "json_output", is_flag=True, help="以 JSON 格式输出")
 def coefficients(
     case: str,
     checkpoint: Optional[str],
@@ -90,7 +90,7 @@ def coefficients(
     output: str,
     json_output: bool
 ) -> None:
-    """Calculate aerodynamic coefficients from a checkpoint (post-hoc, no re-solve).
+    """从 checkpoint 计算气动系数（事后计算，不重新求解）。
 
     在 checkpoint 保存的 FR 原生解（(n_cells,n_sps,n_vars) 多点存储）上重建一个
     完整的 FRSolver（网格+面几何+状态），复用与 `solve steady` 收尾阶段完全相同的
@@ -139,35 +139,26 @@ def coefficients(
 
 @post.command()
 @click.option("--case", "-c", required=True, type=click.Path(exists=True),
-              help="Case directory")
+              help="算例目录")
 @click.option("--checkpoint", type=click.Path(exists=True),
-              help="Checkpoint file path (defaults to latest)")
+              help="checkpoint 文件路径（默认取最新一个）")
 @click.option("--output", "-o", type=click.Path(), default="report.json",
-              help="Output report file")
-@click.option("--format", "-f", type=click.Choice(["markdown", "html", "pdf", "json"]),
-              default="json", help="Report format")
-def report(case: str, checkpoint: Optional[str], output: str, format: str) -> None:
-    """Generate simulation report.
+              help="输出报告文件")
+def report(case: str, checkpoint: Optional[str], output: str) -> None:
+    """生成仿真报告（JSON 格式——`SimulationReport` 只实现了这一种输出，
+    2026-09-02 移除此前从未真正实现过的 markdown/html/pdf 格式选项，
+    用户确认没有这几种格式的需求）。
 
-    Create a comprehensive report including convergence history and
-    aerodynamic coefficients, built from the checkpoint's saved
-    convergence history (residuals/coefficients/CFL per iteration).
+    从 checkpoint 保存的收敛历史（每次迭代的残差/系数/CFL）构建一份完整
+    报告，包含收敛历史和气动系数。
 
     Args:
-        case: Case directory
-        checkpoint: Checkpoint to report on (defaults to latest)
-        output: Output report file
-        format: Report format
+        case: 算例目录
+        checkpoint: 要生成报告的 checkpoint（默认取最新一个）
+        output: 输出报告文件
 
     Examples:
-        # JSON report (the only format actually implemented - see Note)
-        $ autoflowcfd post report --case results/ --format json
-
-    Note:
-        Only 'json' is currently implemented (SimulationReport writes
-        JSON). Requesting markdown/html/pdf falls back to JSON with a
-        warning rather than silently producing an empty/fake file in a
-        format nothing actually generates.
+        $ autoflowcfd post report --case results/
     """
     logger.info(f"Generating report for case: {case}")
 
@@ -177,17 +168,9 @@ def report(case: str, checkpoint: Optional[str], output: str, format: str) -> No
         history, iteration, metadata = _load_history_only(case, checkpoint)
         analyzer = _replay_history(history)
 
-        if format != "json":
-            logger.warning(
-                f"--format {format} was requested, but report generation only "
-                "implements JSON output - writing JSON instead of silently "
-                "producing an empty/fake file in an unsupported format."
-            )
-
-        # The checkpoint only stores a hash of the original solver
-        # configuration (see CheckpointManager._compute_config_hash), not
-        # the configuration itself - report honestly with what is actually
-        # available instead of fabricating a full config dict.
+        # checkpoint 只存了原始求解器配置的哈希（见
+        # CheckpointManager._compute_config_hash），没有存配置本身——
+        # 如实汇报实际可用的内容，不去伪造一份完整的配置 dict。
         config_summary = {
             'config_hash': metadata.get('config_hash'),
             'original_backend': metadata.get('original_backend'),
@@ -210,29 +193,29 @@ def report(case: str, checkpoint: Optional[str], output: str, format: str) -> No
 
 @post.command()
 @click.option("--case", "-c", required=True, type=click.Path(exists=True),
-              help="Case directory")
+              help="算例目录")
 @click.option("--checkpoint", type=click.Path(exists=True),
-              help="Checkpoint file path (defaults to latest)")
+              help="checkpoint 文件路径（默认取最新一个）")
 @click.option("--output", "-o", type=click.Path(), default="convergence.png",
-              help="Output plot file")
+              help="输出图片文件")
 @click.option("--variables", multiple=True, default=["residual"],
-              help="Variables to plot")
+              help="要绘制的变量")
 def convergence(case: str, checkpoint: Optional[str], output: str, variables: tuple) -> None:
-    """Plot convergence history.
+    """绘制收敛历史。
 
-    Visualize residual convergence history and other monitoring variables.
+    可视化残差收敛历史及其他监控变量。
 
     Args:
-        case: Case directory
-        checkpoint: Checkpoint to plot from (defaults to latest)
-        output: Output plot file
-        variables: Variables to plot ('residual' and/or 'cfl' and/or 'coefficients')
+        case: 算例目录
+        checkpoint: 要绘制的 checkpoint（默认取最新一个）
+        output: 输出图片文件
+        variables: 要绘制的变量（'residual' 和/或 'cfl' 和/或 'coefficients'）
 
     Examples:
-        # Plot residuals
+        # 绘制残差
         $ autoflowcfd post convergence --case results/
 
-        # Save to file
+        # 保存到文件
         $ autoflowcfd post convergence --case results/ -o conv.png
     """
     logger.info(f"Plotting convergence for case: {case}")

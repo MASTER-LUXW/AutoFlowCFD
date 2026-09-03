@@ -33,6 +33,7 @@ from autoflowcfd.core.gpu.residual.gpu_volume_contract import (
 )
 from autoflowcfd.core.gpu.residual.gpu_flux import viscous_physical_flux_gpu, conserved_to_primitive_gpu
 from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_gradient_gpu
+from autoflowcfd.core.gpu.residual.gpu_inviscid import _native_or_collapsed_contrib
 
 GAMMA = 1.4
 R_AIR = 287.0
@@ -116,11 +117,23 @@ def compute_viscous_residual_fr_gpu(
     det_jacs = mesh_data['det_jacs']
 
     # 1. 计算物理梯度
+    #
+    # 真实 bug 修复（第三个独立发现，2026-09-03，用真实非均匀密度场
+    # 交叉验证时发现——常密度/小密度扰动流场差异很小，容易被当成噪声
+    # 忽略）：此前这里对**守恒变量** `U`（rho, rho*u, rho*v, rho*w,
+    # rho*E）求梯度，再直接把 `grad_U[...,1:4,:]` 当"速度梯度"用——
+    # 但 `grad(rho*u) = rho*grad(u) + u*grad(rho)`，不是 `grad(u)`，
+    # 只有密度处处均匀（`grad(rho)=0`）时两者才恰好相等，这正是本项目
+    # 大量"均匀自由流场"/"小密度扰动"测试从未捕捉到这个 bug 的原因。
+    # CPU 版 `viscous_flux.py::compute_viscous_residual_fr` 一直是对
+    # **原始变量** `Q`（`grad_Q=compute_physical_gradient(Q,...)`，
+    # `grad_vel=grad_Q[:,:,1:4,:]`，`Q[1:4]` 本来就是 u/v/w 本身）求梯度
+    # ——改为与 CPU 一致：对 `Q` 求梯度，不对 `U` 求梯度。
     Q = conserved_to_primitive_gpu(U[..., :5])
-    grad_U = compute_physical_gradient_gpu(U[..., :5], mesh_data, ops_data)
+    grad_Q = compute_physical_gradient_gpu(Q, mesh_data, ops_data)
 
     # 速度梯度和温度梯度
-    grad_vel = grad_U[..., 1:4, :]  # (n_cells, n_sps, 3, 3)
+    grad_vel = grad_Q[..., 1:4, :]  # (n_cells, n_sps, 3, 3)
     grad_T_scalar = compute_temperature_gpu(Q)
     grad_T = compute_physical_gradient_gpu(
         grad_T_scalar[..., None], mesh_data, ops_data
@@ -157,6 +170,9 @@ def compute_viscous_residual_fr_gpu(
             ops_data['D_3d_prism'], G_tilde[:n_prism]
         )
     if n_cells > n_prism:
+        # 四面体坍缩坐标基已删除（2026-09-03，见 fr/operators.py 模块
+        # 文档）：`ops_data['D_3d_tet']` 现在恒别名到 `D_native_tet_
+        # padded`，不再需要按 tet_basis_mode 分派。
         div_G[n_prism:] = gpu_contract_shared_operator_2axis(
             ops_data['D_3d_tet'], G_tilde[n_prism:]
         )
@@ -203,14 +219,31 @@ def compute_viscous_residual_fr_gpu(
         Q, grad_vel, grad_T, mu_t_gpu,
         det_jacs, mu, Pr, Pr_t,
         flat_face_gpu, Q_ghost_gpu,
-        n_cells, n_sps, device_id,
+        n_cells, n_sps, n_prism, device_id,
     )
 
     viscous_residual = viscous_residual + interface_correction
 
-    if input_is_numpy:
-        return cp.asnumpy(viscous_residual)
-    return viscous_residual
+    # 真实 bug 修复（2026-09-03，排查"native tet P2 粘性残差与 CPU 不符"
+    # 时决定性定位——用真实合成网格逐项对照 CPU 参考实现，发现 P1 完全
+    # 一致但 P2 有真实数值分歧，volume/interface 两项单独拿出来对照都
+    # 逐位相同，只有把两者相加、比较"最终返回值"才复现分歧，说明分歧
+    # 发生在"相加之后"这一步——CPU 版 `viscous_flux.py::compute_
+    # viscous_residual_fr` 的最后一步是 `return suppress_residual_
+    # outliers(residual, U[...,:5])`（机制3：按 cell/SP/变量粒度检测
+    # 残差量级异常并清零，见 troubled_cell.py 模块文档），但本函数此前
+    # 直接 `return viscous_residual`——完全没有这一步。P1 阶段残差量级
+    # 小，从未越过异常判据的阈值，两者恰好"看起来"一致；P2 阶段（这次
+    # 合成测试用的随机扰动流场）残差量级更大，CPU 侧机制3 真实触发、
+    # 清零了部分 SP，GPU 侧未清零，二者从这一步起分道扬镳——不是
+    # native/collapsed 专属缺陷，是任意网格上 GPU 粘性残差路径一直
+    # 缺失的一个功能点（`gpu_inviscid.py::compute_inviscid_residual_fr_
+    # gpu` 早就在做同一件事，这里之前被漏掉了，两个函数本该对称）。
+    from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
+    residual_np = cp.asnumpy(viscous_residual)
+    U_np = cp.asnumpy(U)
+    result = suppress_residual_outliers(residual_np, U_np[..., :5])
+    return result if input_is_numpy else cp.asarray(result)
 
 
 def _extrap_to_fp(cp, mat, src_cell, field):
@@ -268,6 +301,79 @@ def _extrap_side(cp, idx, src0_cell_all, src0_mat_all, src1_idx_all, src1_cell_a
     return Q_fp, gv_fp, gT_fp, mut_fp[..., 0]
 
 
+def _self_extrap_side(cp, cell_idx, cube_face_code, axis, side, n_prism,
+                       boundary_extrap, boundary_extrap_native,
+                       Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu,
+                       compact_cell_type=None):
+    """自身面外插——某一侧单元用自己的场值按自身面几何外插到 FP
+    （owner-primary 块的 `Q_o`/`gv_o`/`gT_o`/`mut_o`，或 neighbor-primary
+    块的 `Q_n_native`/`gv_n_native`/`gT_n_native`/`mut_n_native`）。
+
+    与 CPU 版 `viscous_flux_kernel.py` 的 `E_o = boundary_extrap[
+    celltype_o, oax, oside_idx]` / `Q_o = _extrap_matmul(Q[oc], E_o)`
+    逐字对应，native 分派复用与 `gpu_inviscid.py::_compute_interface_
+    correction_gpu` 完全同一个 `_native_self_extrap` helper。
+
+    真实 bug 修复（问题清单 #5 排查附带发现，2026-09-02，均匀自由流场
+    残差本应精确为零，实测非零且量级与真实物理量相当才发现）：此前
+    `_compute_viscous_interface_correction_gpu` 对"自身"状态错误地
+    复用了 `_extrap_side`（src0/src1 跨单元交叉引用机制），owner-primary
+    块传的是 `owner_src0_cell`/`owner_src0_mat`，neighbor-primary 块传的
+    是 `neighbor_src0_cell`/`neighbor_src0_mat`——但这两组数组的真实
+    语义是"对侧记录用来查询*另一侧*单元值的交叉引用表"（`owner_src0_*`
+    是给 neighbor-primary 块查 owner 值用的，`neighbor_src0_*` 是给
+    owner-primary 块查 neighbor 值用的，见 `gpu_inviscid.py::_compute_
+    interface_correction_gpu` 里 `Q_n=_extrap_q_to_fp(...,ff.neighbor_
+    src0_mat[idx_o],...)`/`Q_o_at_n=_extrap_q_to_fp(...,ff.owner_src0_
+    mat[idx_n],...)` 的对称用法），不是"本单元查自己"——对 owner-primary
+    面自身而言 `owner_src0_mat[idx_o]` 恒为零/未设置（那一行本来就不是
+    为这个查询设计的），导致 `Q_o`/`gv_o`/`gT_o`/`mut_o` 恒为零而不是
+    真实自身状态：BR1 平均态 `Q_avg=0.5*(Q_o+Q_n)` 与边界 IP 罚项
+    `pen=-scale*(Q_o[1:4]-Q_n[1:4])` 全部从错误的"自身值"算起，均匀
+    自由流场下 `Q_o=0 != Q_n=真实自由流值`，IP 罚项产出物理量级的
+    虚假非零残差（实测 ~0.43，CPU 参考给出 ~2e-12）。
+
+    Args:
+        cell_idx: (n,) 本侧单元全局索引（owner 块传 `oc`，neighbor 块
+            传 `nc`）
+        cube_face_code: (n,) 本侧 owner_cube_face/neighbor_cube_face
+        axis, side: (n,) 本侧 owner_axis/owner_side 或
+            neighbor_axis/neighbor_side
+        n_prism: 分布式 compact 索引空间棱柱数（`compact_cell_type`
+            不存在时的单机路径回退阈值判据）
+        boundary_extrap: (2,3,2,n_fp,n_sps) collapsed 自身外插表
+        boundary_extrap_native: native 四面体自身外插表（可能是空数组）
+        compact_cell_type: 分布式路径下逐单元类型查表（None 时用
+            `cell_idx < n_prism` 阈值判据，与 gpu_inviscid.py 同一约定）
+
+    Returns:
+        (Q, gv, gT, mut)：形状分别为 (n,n_fp,5)/(n,n_fp,3,3)/(n,n_fp,3)/
+        (n,n_fp)
+    """
+    from autoflowcfd.core.gpu.residual.gpu_inviscid import _native_self_extrap
+
+    if compact_cell_type is not None:
+        celltype = compact_cell_type[cell_idx]
+    else:
+        celltype = cp.where(cell_idx < n_prism, 0, 1)
+    side_idx = cp.where(side < 0, 0, 1)
+    is_native = cube_face_code >= 6
+
+    # 真实 bug 修复（2026-09-03，见 gpu_inviscid.py::_compute_interface_
+    # correction_gpu 同名注释——同一处、同一根因）：`axis` 对 native 面
+    # 存的是复用的 excluded_vertex（0~3），`boundary_extrap` 的轴维度
+    # 只有 3，不能无条件拿 native 面的 `axis` 去 gather。
+    axis_safe = cp.where(is_native, 0, axis)
+    E_collapsed = boundary_extrap[celltype, axis_safe, side_idx]  # (n,n_fp,n_sps)
+    E = _native_self_extrap(cp, is_native, cube_face_code, boundary_extrap_native, E_collapsed)
+
+    Q = _extrap_to_fp(cp, E, cell_idx, Q_gpu)
+    gv = _extrap_to_fp(cp, E, cell_idx, grad_vel_gpu)
+    gT = _extrap_to_fp(cp, E, cell_idx, grad_T_gpu)
+    mut = _extrap_to_fp(cp, E, cell_idx, mu_t_gpu)[..., 0]
+    return Q, gv, gT, mut
+
+
 def _viscous_tilde_flux_pair(Q_common, gv_common, gT_common, mut_common,
                               Q_own, gv_own, gT_own, mut_own,
                               adjrow, mu, Pr, Pr_t):
@@ -299,7 +405,7 @@ def _compute_viscous_interface_correction_gpu(
     Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu,
     det_jacs, mu, Pr, Pr_t,
     flat_face_gpu, Q_ghost_gpu,
-    n_cells, n_sps, device_id,
+    n_cells, n_sps, n_prism, device_id,
 ):
     """GPU 粘性界面校正（BR1 平均 + 边界 IP 罚项），按图着色逐色处理。
 
@@ -324,6 +430,15 @@ def _compute_viscous_interface_correction_gpu(
     "算一次通量分配两侧"的写法）：两侧的 G_tilde_own 分别用各自侧的
     adjrow 和各自的"自身原始态"算出来，是两个不同的物理量，不是同一个
     共享数值通量的两次分配。
+
+    真实 bug 修复（问题清单 #5 排查附带发现，2026-09-02）："自身原始态"
+    （`Q_o`/`gv_o`/`gT_o`/`mut_o`，`Q_n_native`/`gv_n_native`/
+    `gT_n_native`/`mut_n_native`）现在用 `_self_extrap_side`（自身面
+    boundary_extrap/native 查表外插，与 CPU 版一致）计算，不再错误地
+    复用 `_extrap_side`（src0/src1 跨单元交叉引用机制，专门给"对侧"
+    数据用）——完整推导见 `_self_extrap_side` 文档。新增 `n_prism`
+    形参就是给这个自身外插用的（`compact_cell_type` 不存在时的分类
+    阈值，与 `gpu_inviscid.py` 同一约定）。
     """
     cp = get_cupy()
     correction = cp.zeros((n_cells, n_sps, 5), dtype=cp.float64)
@@ -351,10 +466,22 @@ def _compute_viscous_interface_correction_gpu(
             oside = ff.owner_side[idx_o]
             is_bnd_o = ff.is_boundary[idx_o]
 
-            Q_o, gv_o, gT_o, mut_o = _extrap_side(
-                cp, idx_o, ff.owner_src0_cell, ff.owner_src0_mat,
-                ff.owner_src1_idx, ff.owner_src1_cell, ff.owner_src1_mat,
+            # 自身原始态：与 CPU 版 `E_o=boundary_extrap[...]`/native
+            # 分派完全对应，不能用 `_extrap_side`（那是"对侧交叉引用"
+            # 机制，见 `_self_extrap_side` 文档"真实 bug 修复"一节）。
+            compact_cell_type = getattr(ff, 'compact_cell_type', None)
+            oc_code_o = ff.owner_cube_face[idx_o]
+            # is_native_o/oax_safe 提到这里（本块唯一算一次）：分配步骤
+            # （下方 distribute_face_correction_to_sps 调用）与
+            # `_native_or_collapsed_contrib` 都需要用到，见两处各自的
+            # "真实 bug 修复"说明。
+            is_native_o = oc_code_o >= 6
+            oax_safe = cp.where(is_native_o, 0, oax)
+            Q_o, gv_o, gT_o, mut_o = _self_extrap_side(
+                cp, oc, oc_code_o, oax, oside, n_prism,
+                ff.boundary_extrap, ff.boundary_extrap_native,
                 Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu,
+                compact_cell_type=compact_cell_type,
             )
             Q_n, gv_n, gT_n, mut_n = _extrap_side(
                 cp, idx_o, ff.neighbor_src0_cell, ff.neighbor_src0_mat,
@@ -418,9 +545,27 @@ def _compute_viscous_interface_correction_gpu(
             # （会在真实 GPU 上 IndexError），见
             # gpu_inviscid_volume.py::distribute_face_correction_to_sps
             # 文档的完整推导（gpu_inviscid.py 同一处修复）。
-            contrib_o = distribute_face_correction_to_sps(
-                cp, jump_owner, oax, oside, ff.dist_fp_of_sp, ff.dist_axis_coord_of_sp,
+            # 真实 bug 修复（2026-09-03）：用 `oax_safe`（native 面 clip
+            # 到 0），不能用原始 `oax`——见 gpu_inviscid.py 同名注释、
+            # 同一根因（`dist_fp_of_sp`/`dist_axis_coord_of_sp` 同样
+            # 只有 3 个轴）。
+            contrib_o_collapsed = distribute_face_correction_to_sps(
+                cp, jump_owner, oax_safe, oside, ff.dist_fp_of_sp, ff.dist_axis_coord_of_sp,
                 ff.g_left, ff.g_right,
+            )
+            # native 四面体（路径C）GPU 移植（2026-09-02）：分配步骤改用
+            # DG 提升算子 `lift_native[excluded_vertex] @ (true_area_weight
+            # ⊙ jump)`，与 CPU 版 viscous_flux_kernel.py 逐字对应——粘性
+            # kernel 不需要像无粘那样处理 side_factor/true_normal 安全阀
+            # （viscous_flux_kernel.py 模块文档："viscous kernels 只需要
+            # owner_adj_row_exact/neighbor_adj_row_exact 就足够做线性
+            # 收缩，不像无粘那样需要额外的方向安全阀"），本函数前面的
+            # tilde 通量计算全程未受影响，native/collapsed 唯一的分派点
+            # 就是这里的面校正分配方式。
+            # oc_code_o/is_native_o 已在本块开头（自身外插处）算过，直接复用。
+            contrib_o = _native_or_collapsed_contrib(
+                cp, is_native_o, oc_code_o, ff.lift_native, ff.true_area_weight[idx_o],
+                jump_owner, contrib_o_collapsed,
             )
             contrib_o = contrib_o / det_jacs[oc][..., None]
             _scatter_add_to_correction(correction, contrib_o, oc, n_cells, n_sps)
@@ -433,10 +578,18 @@ def _compute_viscous_interface_correction_gpu(
             nax = ff.neighbor_axis[idx_n]
             nside = ff.neighbor_side[idx_n]
 
-            Q_n_native, gv_n_native, gT_n_native, mut_n_native = _extrap_side(
-                cp, idx_n, ff.neighbor_src0_cell, ff.neighbor_src0_mat,
-                ff.neighbor_src1_idx, ff.neighbor_src1_cell, ff.neighbor_src1_mat,
+            # 自身原始态：同上方 owner-primary 块同名注释，同一处修复
+            # （`_extrap_side`+`neighbor_src0_*` 是"对侧交叉引用"机制，
+            # 不是"自身外插"）。
+            compact_cell_type_n = getattr(ff, 'compact_cell_type', None)
+            nc_code_n = ff.neighbor_cube_face[idx_n]
+            is_native_n = nc_code_n >= 6
+            nax_safe = cp.where(is_native_n, 0, nax)
+            Q_n_native, gv_n_native, gT_n_native, mut_n_native = _self_extrap_side(
+                cp, nc, nc_code_n, nax, nside, n_prism,
+                ff.boundary_extrap, ff.boundary_extrap_native,
                 Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu,
+                compact_cell_type=compact_cell_type_n,
             )
             Q_o_at_n, gv_o_at_n, gT_o_at_n, mut_o_at_n = _extrap_side(
                 cp, idx_n, ff.owner_src0_cell, ff.owner_src0_mat,
@@ -483,10 +636,18 @@ def _compute_viscous_interface_correction_gpu(
                 pen_full_n[..., 1:4] = pen_n
                 jump_neighbor = cp.where(mixed_sel_n[..., None], jump_neighbor + pen_full_n, jump_neighbor)
 
-            # 见上方 owner-primary 块同名注释，同一处修复。
-            contrib_n = distribute_face_correction_to_sps(
-                cp, jump_neighbor, nax, nside, ff.dist_fp_of_sp, ff.dist_axis_coord_of_sp,
+            # 见上方 owner-primary 块同名注释，同一处修复——用
+            # `nax_safe`，不能用原始 `nax`。
+            contrib_n_collapsed = distribute_face_correction_to_sps(
+                cp, jump_neighbor, nax_safe, nside, ff.dist_fp_of_sp, ff.dist_axis_coord_of_sp,
                 ff.g_left, ff.g_right,
+            )
+            # native 四面体（路径C）GPU 移植（2026-09-02）：见上方
+            # owner-primary 块同名注释，同一处修复。nc_code_n/is_native_n
+            # 已在本块开头（自身外插处）算过，直接复用。
+            contrib_n = _native_or_collapsed_contrib(
+                cp, is_native_n, nc_code_n, ff.lift_native, ff.true_area_weight[idx_n],
+                jump_neighbor, contrib_n_collapsed,
             )
             contrib_n = contrib_n / det_jacs[nc][..., None]
             _scatter_add_to_correction(correction, contrib_n, nc, n_cells, n_sps)

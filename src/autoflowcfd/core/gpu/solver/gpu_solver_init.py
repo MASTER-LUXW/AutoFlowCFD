@@ -93,8 +93,14 @@ class _GPUSolverInitMixin:
             )
 
         wall_indices = None
-        if hasattr(self.mesh, 'boundary_groups'):
-            for bg_name, bg in self.mesh.boundary_groups.items():
+        # 真实 bug 修复（2026-09-02，排查多GPU分布式SST时发现，与分布式
+        # 本身无关，单机路径同样中招）：`hasattr(mesh, 'boundary_groups')`
+        # 对"属性存在但值是 None"（没有边界组元数据的网格）恒为 True，
+        # `.items()` 会真实 AttributeError——用 `getattr(...) is not None`
+        # 才是正确的存在性判据。
+        boundary_groups = getattr(self.mesh, 'boundary_groups', None)
+        if boundary_groups is not None:
+            for bg_name, bg in boundary_groups.items():
                 if 'WALL' in bg_name.upper() or bg.get('type', '').upper() == 'WALL':
                     wall_indices = bg.get('node_indices')
                     break

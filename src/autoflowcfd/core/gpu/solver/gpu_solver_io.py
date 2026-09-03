@@ -193,11 +193,46 @@ class _GPUSolverIOMixin:
             scale_omega = max_grad_mag / cp.maximum(grad_omega_mag, 1e-10)
             grad_omega *= cp.clip(scale_omega, 0, 1)[..., None]
 
-        # DDES/IDDES 长度尺度（#7）：必须在 compute_source_terms_gpu 之前
-        # 写入 self.turb_model_gpu.des_length_scale——该方法内部的 k 方程
-        # 耗散项 D_k 读取的正是这个字段，与 CPU 版
-        # fr_solver_turbulence.py::compute_turbulence_source 里
-        # ddes_model.apply_to_sst_model[_iddes] 的调用顺序完全一致。
+        # 真实 bug 修复（2026-09-02，排查多GPU分布式SST时对照发现，与
+        # 分布式本身无关，单机 GPU 路径同样中招，此前从未被端到端验证
+        # 过）：`compute_source_terms_gpu` 的 `grad_U` 参数按文档/CPU版
+        # `SSTModelFR.compute_source_terms` 同名参数实际期望的是**速度
+        # 梯度**（(n_cells,n_sps,3,3)，内部 `compute_strain_rate_
+        # magnitude_gpu` 直接对末两维做转置相加），不是这里同名局部变量
+        # `grad_U`（5 变量梯度，(n_cells,n_sps,5,3)）——此前这里传的是
+        # 后者，`compute_strain_rate_magnitude_gpu` 内部
+        # `cp.transpose(grad_u,(0,1,3,2))` 会产出 (...,3,5) 与
+        # (...,5,3) 无法广播相加，真实 CUDA 环境下必然 ValueError 崩溃。
+        # 应该传 20 行前已经算好的 `grad_vel = grad_U[...,1:4,:]`（与
+        # CPU 版 `fr_solver_turbulence.py::compute_turbulence_source`
+        # 里 `grad_vel = grad_U[:,:,1:4,:]` 后传给 `compute_source_
+        # terms(Q, grad_vel, ...)` 完全同一个道理）。
+        Sk, S_omega = self.turb_model_gpu.compute_source_terms_gpu(
+            self.Q_gpu, grad_vel, d_wall, self.mu_molecular,
+            grad_k, grad_omega,
+        )
+
+        # 真实 bug 修复（2026-09-02，排查"GPU侧DDES/IDDES是否有同类未
+        # 发现的bug"时对照 CPU 版发现，与上面 grad_U/grad_vel 是两个
+        # 独立的问题）：此前这里的 DDES/IDDES 长度尺度更新排在
+        # `compute_source_terms_gpu` **之前**，注释还声称"与 CPU 版
+        # 调用顺序完全一致"——但 CPU 版
+        # `fr_solver_turbulence.py::compute_turbulence_source` 的真实
+        # 顺序是反的：`compute_source_terms`（用*上一步*遗留的
+        # `des_length_scale`，写死为"慢一拍"耦合，见 CPU 版 turbulence.py
+        # "DDES 的有效长度尺度"一节注释的完整推导——`apply_to_sst_model`
+        # 依赖当前 nu_t，而 nu_t 只有 `compute_source_terms` 算完才是
+        # 当前值，两者互相依赖对方的输出，只能先后错开一步，且顺序不能
+        # 颠倒）在前，`apply_to_sst_model[_iddes]`（为*下一步*写入新的
+        # `des_length_scale`）在后。此前 GPU 版顺序颠倒，等价于让
+        # DDES/IDDES 长度尺度提前一步生效（"快一拍"耦合，且用的还是
+        # `apply_to_sst_model_gpu` 内部读取的 `nu_t`——此时 `nu_t` 还是
+        # 上一次调用（或初始值）遗留的，语义上更混乱），与 CPU 版数值
+        # 结果不一致——用真实非均匀状态实测：DDES 在这份测试数据下巧合
+        # 数值一致（f_d 恰好被推到掩盖差异的区间），IDDES 上实测出
+        # 2.2% 相对差异，暴露了这个顺序错误。现改为与 CPU 版逐字一致
+        # 的顺序：`compute_source_terms_gpu` 在前，DDES/IDDES 长度尺度
+        # 更新在后。
         if self.ddes_model_gpu is not None:
             nu_field = self.mu_molecular / cp.maximum(rho, 1e-10)
             from autoflowcfd.core.gpu.turbulence.gpu_turbulence_des import GPUIDDESModel
@@ -212,12 +247,8 @@ class _GPUSolverIOMixin:
                     cell_volumes = cp.asarray(self.mesh.get_all_cell_volumes())
                 self.ddes_model_gpu.apply_to_sst_model_gpu(
                     self.turb_model_gpu, d_wall, cell_volumes, nu_field, grad_vel,
+                    h_max=getattr(self, '_iddes_h_max_gpu', None),
                 )
-
-        Sk, S_omega = self.turb_model_gpu.compute_source_terms_gpu(
-            self.Q_gpu, grad_U, d_wall, self.mu_molecular,
-            grad_k, grad_omega,
-        )
 
         dk_dt = Sk / cp.maximum(rho, 1e-10)
         domega_dt = S_omega / cp.maximum(rho, 1e-10)

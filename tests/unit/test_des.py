@@ -180,6 +180,89 @@ class TestIDDESGridScaleGeometry:
         np.testing.assert_allclose(h_wn[1], expected_tet_h_max, rtol=1e-10)
 
 
+class TestDDESGridScaleMaxEdge:
+    """`DDESModel.compute_grid_scale`/`apply_to_sst_model` 的 'max_edge'
+    支持（2026-09-02 实现，此前长期声称"尚未实现"）。用一个真实
+    "扁平棱柱"场景（h_max=sqrt(2) 远大于 V^(1/3)，与
+    TestIDDESGridScaleGeometry 的薄棱柱同一个物理直觉）钉住：
+    'cube_root' 会系统性低估 Δ，'max_edge' 给出正确的、大得多的 Δ。
+    """
+
+    def test_max_edge_returns_h_max_directly(self):
+        ddes = DDESModel()
+        cell_volumes = np.array([1e-8, 2e-8])  # 极扁平单元，体积很小
+        h_max = np.array([np.sqrt(2.0), 1.0])
+        delta = ddes.compute_grid_scale(cell_volumes, method='max_edge', h_max=h_max)
+        np.testing.assert_allclose(delta, h_max)
+
+    def test_max_edge_without_h_max_raises(self):
+        ddes = DDESModel()
+        with pytest.raises(ValueError):
+            ddes.compute_grid_scale(np.array([1e-8]), method='max_edge')
+
+    def test_unknown_method_still_raises(self):
+        ddes = DDESModel()
+        with pytest.raises(NotImplementedError):
+            ddes.compute_grid_scale(np.array([1e-8]), method='wurz')
+
+    def test_cube_root_severely_underestimates_flat_prism_delta(self):
+        """决定性验证本次修复要解决的真实问题：扁平棱柱单元
+        （体积很小但最大边长不小）下，cube_root(V) 给出的 Δ 比
+        max_edge 小好几个数量级——不是"轻微差异"，是系统性低估。"""
+        ddes = DDESModel()
+        # 与 TestIDDESGridScaleGeometry 同一个薄棱柱直觉：三角形对角边
+        # sqrt(2)，挤出高度 0.01 -> 体积 ~ 0.5*1*1*0.01 = 0.005。
+        cell_volumes = np.array([0.005])
+        h_max = np.array([np.sqrt(2.0)])
+        delta_cube_root = ddes.compute_grid_scale(cell_volumes, method='cube_root')
+        delta_max_edge = ddes.compute_grid_scale(cell_volumes, method='max_edge', h_max=h_max)
+        assert delta_max_edge[0] > 5.0 * delta_cube_root[0]
+
+    def test_apply_to_sst_model_uses_max_edge_when_h_max_provided(self):
+        """真正调用 `apply_to_sst_model`（不是底层 compute_grid_scale
+        本身）：提供 h_max 后必须产出与不提供 h_max（退化 cube_root）
+        不同的 des_length_scale——证明 h_max 参数真的被用上了，而不是
+        接了个参数但没接进计算链路。"""
+        from autoflowcfd.core.turbulence.sst import SSTModelFR
+
+        n_cells, n_sps = 1, 4
+        ddes_a = DDESModel()
+        ddes_b = DDESModel()
+        sst_a = SSTModelFR(n_cells, n_sps)
+        sst_b = SSTModelFR(n_cells, n_sps)
+        # 第一次实现踩过的坑（已修复，留作记录）：`SSTModelFR.__init__`
+        # 的 `nu_t` 恒初始化为 0（不是从 k_inf/omega_inf 推导），只改
+        # k_inf/omega_inf 构造参数不会让 nu_t 非零——而 f_d 的公式
+        # `r_d=(nu_t+nu)/(kappa^2*d_w^2*S_Omega)` 在 nu_t=0 时仍可能算出
+        # 一个不大不小的 r_d，但配合 d_w=0.01 这类偏小值会让
+        # `(c_w1*r_d)^3` 早早饱和到 tanh(...)≈1，f_d≈0——DDES 公式
+        # `l_eff=l_rans-f_d*max(0,l_rans-l_les)` 里 f_d≈0 时同样与 Δ
+        # 无关（跟 l_rans<l_les 时的退化是同一类问题，只是触发路径不同）。
+        # 这里改为像生产路径（`turbulence.py::compute_turbulence_source`
+        # 在调用 DDES 前已经跑过一次 SST 源项计算并更新了 nu_t）一样，
+        # 直接把 k_field/omega_field/nu_t 设成物理上自洽、且让 r_d 落在
+        # 中等量级（f_d 明显非 0 也非 1）的手算值，同时让 l_rans 明显
+        # 大于两种 Δ 候选值对应的 l_les=c_des*Δ（cube_root≈0.171，
+        # max_edge≈1.414），确保真正进入依赖 Δ 的分支。
+        d_w = np.full((n_cells, n_sps), 0.1)
+        cell_volumes = np.array([0.005])
+        h_max = np.array([np.sqrt(2.0)])
+        nu = np.full((n_cells, n_sps), 1.5e-5)
+
+        for sst in (sst_a, sst_b):
+            sst.k_field = np.full((n_cells, n_sps), 20.25)
+            sst.omega_field = np.full((n_cells, n_sps), 10.0)
+            sst.nu_t = np.full((n_cells, n_sps), 0.001)
+
+        ddes_a.apply_to_sst_model(sst_a, d_w, cell_volumes, nu, h_max=None)
+        ddes_b.apply_to_sst_model(sst_b, d_w, cell_volumes, nu, h_max=h_max)
+
+        # f_d 必须落在 (0, 1) 开区间内（不能饱和到 0 或 1），否则本测试
+        # 选值本身就没有真正进入依赖 Δ 的分支，属于测试设计缺陷。
+        assert 0.0 < ddes_a.psi[0, 0] < 1.0
+        assert not np.allclose(sst_a.des_length_scale, sst_b.des_length_scale)
+
+
 class TestIDDESFormulaComponents:
     """逐个手算钉住 IDDES 各公式分量（alpha/f_B/f_e1/f_e2/Δ/l_IDDES），
     与本次实现（IDDESModel 类文档字符串所列公式/常数置信度说明）一一

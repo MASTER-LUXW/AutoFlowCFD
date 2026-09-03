@@ -4,7 +4,7 @@
 和从检查点恢复仿真等方法。
 """
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from pathlib import Path
 from loguru import logger
 
@@ -26,8 +26,6 @@ def api_create_steady_config(
         'none': TurbulenceModel.NONE,
         'sst': TurbulenceModel.SST_KW,
         'sst_kw': TurbulenceModel.SST_KW,
-        'sa': TurbulenceModel.SA,
-        'des': TurbulenceModel.DES,
         'ddes': TurbulenceModel.DDES,
         'iddes': TurbulenceModel.IDDES,
         'wmles': TurbulenceModel.WMLES,
@@ -84,8 +82,6 @@ def api_create_transient_config(
         'none': TurbulenceModel.NONE,
         'sst': TurbulenceModel.SST_KW,
         'sst_kw': TurbulenceModel.SST_KW,
-        'sa': TurbulenceModel.SA,
-        'des': TurbulenceModel.DES,
         'ddes': TurbulenceModel.DDES,
         'iddes': TurbulenceModel.IDDES,
         'wmles': TurbulenceModel.WMLES,
@@ -142,6 +138,8 @@ def api_resume_simulation(
     backend: str = None,
     surface_mesh: str = None,
     threads: int = -1,
+    phase_max_iter: Optional[int] = None,
+    residual_drop_threshold: float = 1e2,
 ) -> Any:
     """从检查点恢复仿真（委托函数）。
 
@@ -170,6 +168,10 @@ def api_resume_simulation(
         surface_mesh: checkpoint 记录的 input_file 若是 .nas 体网格，
             需要提供原始面网格来反推边界分组
         threads: CPU 后端 numba 并行线程数
+        phase_max_iter, residual_drop_threshold: 见 run_steady 同名参数
+            文档，续算同样共用 `FRSolver.solve()`/
+            `run_order_continuation` 这一套机制（仅目标阶数`order>=2`
+            时生效）。
 
     Returns:
         SolverResult
@@ -199,5 +201,9 @@ def api_resume_simulation(
             final_residual=float('nan'),
         )
 
-    result = solver.solve(max_iter=max_iter, dt=dt, tol=tol)
+    result = solver.solve(
+        max_iter=max_iter, dt=dt, tol=tol,
+        phase_max_iter=phase_max_iter,
+        residual_drop_threshold=residual_drop_threshold,
+    )
     return result

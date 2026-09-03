@@ -125,6 +125,12 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         self.mesh = mesh
         self.ops = ops
         self.order = order
+        # Order Continuation 支持（2026-09-02，见 core/gpu/solver/
+        # gpu_solver_order_continuation.py 模块文档）——与 CPU/GPU
+        # 分布式版本同一约定：`self.order`（目标阶数）/
+        # `self.current_order`（当前实际所在阶数）。
+        self.current_order = order
+        self.order_continuation_enabled = True
         self.n_vars = n_vars
         self.device_id = device_id
         self.mu_molecular = mu_molecular
@@ -214,7 +220,18 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
 
             if turb_model_upper == "DDES":
                 from autoflowcfd.core.gpu.turbulence.gpu_turbulence_des import GPUDDESModel
+                from autoflowcfd.core.turbulence.des import compute_h_max_and_h_wn
                 self.ddes_model_gpu = GPUDDESModel()
+                # h_max（2026-09-02 补齐，与下面 IDDES 分支同一处几何量、
+                # 同一个一次性缓存策略）：`apply_to_sst_model_gpu` 现在
+                # 优先用各向异性感知的 max_edge 网格尺度而不是
+                # cube_root(V)，见 CPU 版 des.py::DDESModel.compute_
+                # grid_scale 文档"Note"一节——本项目高度依赖棱柱边界层
+                # 网格，cube_root 会系统性低估扁平单元的 Δ。只需要
+                # h_max（第一个返回值），h_wn 是 IDDES 专属几何量。
+                h_max_cpu, _ = compute_h_max_and_h_wn(mesh)
+                with cp.cuda.Device(device_id):
+                    self._iddes_h_max_gpu = cp.asarray(h_max_cpu)
                 print(f"   [OK] GPU DDES model initialized (based on SST)")
             elif turb_model_upper == "IDDES":
                 from autoflowcfd.core.gpu.turbulence.gpu_turbulence_des import GPUIDDESModel
@@ -299,6 +316,15 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         self.wmles_model，在这个调用点之前均已设置好）。"""
         from autoflowcfd.core.fr_solver import boundary as fr_solver_boundary
         return fr_solver_boundary.build_boundary_ghost_provider(self, bc_overrides)
+
+    def _interpolate_to_new_order(self, target_p: int) -> None:
+        """阶数切换（2026-09-02，见 core/gpu/solver/gpu_solver_order_
+        continuation.py 模块文档）——与 CPU/GPU 分布式版本同一个命名/
+        调用约定。"""
+        from autoflowcfd.core.gpu.solver.gpu_solver_order_continuation import (
+            gpu_solver_interpolate_to_new_order,
+        )
+        gpu_solver_interpolate_to_new_order(self, target_p)
 
     def _update_primitives_gpu(self):
         """GPU 上更新原始变量。"""
@@ -629,18 +655,47 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         dt: float = 1e-4,
         tol: float = 1e-6,
         output_interval: int = 10,
+        phase_max_iter: Optional[int] = None,
+        residual_drop_threshold: float = 1e2,
     ) -> Dict[str, Any]:
         """执行稳态求解循环。
+
+        Order Continuation 自动分派（2026-09-02，见 core/gpu/solver/
+        gpu_solver_order_continuation.py 模块文档）：与 CPU `FRSolver.
+        solve()`/GPU 分布式版本同一个判据——`self.order`（目标阶数）
+        >= 2 时自动改用逐阶爬坡（`run_distributed_order_continuation`，
+        尽管函数名带"distributed"，逻辑本身对 solver 只要求
+        `step()`/`order`/`current_order`/`_interpolate_to_new_order`
+        这几个鸭子类型接口，不依赖任何分布式概念，单机 GPU 复用同一份
+        实现，不需要另写一份等价的迭代循环）。
 
         Args:
             max_iter: 最大迭代次数
             dt: 时间步长（稳态模式下被 CFL 覆盖）
             tol: 收敛容差
             output_interval: 输出间隔
+            phase_max_iter, residual_drop_threshold: 仅在触发 Order
+                Continuation（`self.order >= 2`）时生效，与单机 CPU
+                `run_order_continuation` 同名参数同一含义。
 
         Returns:
             结果字典
         """
+        if getattr(self, 'order_continuation_enabled', True) and self.order >= 2:
+            from autoflowcfd.core.mpi.distributed_order_continuation import (
+                run_distributed_order_continuation,
+            )
+            result = run_distributed_order_continuation(
+                self, max_iter, dt, tol,
+                phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold,
+            )
+            return {
+                'converged': result.converged,
+                'iterations': result.iterations,
+                'final_residual': result.final_residual,
+                'residual_history': self.residual_history,
+            }
+
         print(f"Starting GPU solve: max_iter={max_iter}, tol={tol}")
         converged = False
         final_residual = 1e10

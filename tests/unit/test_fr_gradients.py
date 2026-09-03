@@ -11,6 +11,7 @@ import numpy as np
 from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient, compute_physical_scalar_gradient
 from autoflowcfd.grid.curved_mapping.curved_mapping import map_prism_to_physical, map_tet_to_physical
 from autoflowcfd.fr.operators import generate_fr_operators, gauss_legendre
+from autoflowcfd.fr.native_simplex_basis import build_native_tet_operators
 from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
 
 
@@ -50,28 +51,47 @@ def _build_mesh(order):
 
 
 def test_linear_function_gradient_exact_for_tet_and_prism():
-    # P=2 是本项目当前实际生产阶数，要求机器精度；P=3 的四面体坍缩坐标
-    # 模态基 Vandermonde 矩阵条件数已明显增长（真实测得 cond(V)~1e9，见
-    # fr/collapsed_basis.py::jacobi_polynomial 文档——未做节点优化的
-    # 张量积-Duffy 组合在高阶下的已知谱方法限制，不是正确性 bug），
-    # 判据相应放宽但仍需明确、有界，如实记录已知数值局限而非静默放宽。
+    # P=2 是本项目当前实际生产阶数，要求机器精度；P=3 容差沿用同一档
+    # （四面体 native 单纯形基在高阶下的条件数特征与坍缩坐标不同，
+    # 但同样在此判据下有界，见 native_simplex_basis.py 文档）。
+    #
+    # 2026-09-03 更正：四面体坍缩坐标基已删除（见 fr/operators.py 模块
+    # 文档），四面体单元的梯度输出在"零填充块对角"约定下，填充行
+    # （`[n_native:]`）恒为零梯度（`D_native_tet_padded` 的填充行本身
+    # 是零，不是真实自由度的物理梯度取值，见 native_tet_padding.py
+    # 文档）——这是既有、已验证的设计不变量，不是本次改动引入的新
+    # 近似；对比时必须只看真实自由度（`[:n_native]`），不能再要求
+    # 填充行也精确等于常数梯度。
     tolerances = {1: 1e-9, 2: 1e-9, 3: 1e-6}
     for order in [1, 2, 3]:
         mesh = _build_mesh(order)
+        n_native = build_native_tet_operators(order)[0].shape[0]
         a_coef = np.array([2.0, -3.0, 5.0])
         phi = mesh.sps_coords @ a_coef + 7.0  # (n_cells, n_sps)
         grad = compute_physical_scalar_gradient(phi, mesh, mesh.operators)
-        max_err = np.max(np.abs(grad - a_coef))
+        # 单元全局索引约定"棱柱在前、四面体在后"（见 HighOrderMesh 模块
+        # 文档）：cell 0 是棱柱（不受本次删除 collapsed 四面体基影响，
+        # 全部检查），cell 1 是四面体（只检查真实自由度，填充行恒为零
+        # 梯度，见上）。
+        max_err_prism = np.max(np.abs(grad[0] - a_coef))
+        max_err_tet = np.max(np.abs(grad[1, :n_native] - a_coef))
+        max_err = max(max_err_tet, max_err_prism)
         assert max_err < tolerances[order], f"order={order}: max_err={max_err}"
 
 
 def test_multi_variable_field_gradient_matches_scalar_case():
     mesh = _build_mesh(order=2)
+    n_native = build_native_tet_operators(2)[0].shape[0]
     a1 = np.array([1.0, 0.0, 0.0])
     a2 = np.array([0.0, 2.0, 0.0])
     phi1 = mesh.sps_coords @ a1
     phi2 = mesh.sps_coords @ a2
     field = np.stack([phi1, phi2], axis=-1)  # (n_cells, n_sps, 2)
     grad = compute_physical_gradient(field, mesh, mesh.operators)  # (n_cells,n_sps,2,3)
-    assert np.allclose(grad[:, :, 0, :], a1, atol=1e-9)
-    assert np.allclose(grad[:, :, 1, :], a2, atol=1e-9)
+    # 见 test_linear_function_gradient_exact_for_tet_and_prism 同一处
+    # 更正说明（"棱柱在前、四面体在后"）：cell 0 是棱柱，全部检查；
+    # cell 1 是四面体，只检查真实自由度 [:n_native]。
+    assert np.allclose(grad[0, :, 0, :], a1, atol=1e-9)
+    assert np.allclose(grad[0, :, 1, :], a2, atol=1e-9)
+    assert np.allclose(grad[1, :n_native, 0, :], a1, atol=1e-9)
+    assert np.allclose(grad[1, :n_native, 1, :], a2, atol=1e-9)

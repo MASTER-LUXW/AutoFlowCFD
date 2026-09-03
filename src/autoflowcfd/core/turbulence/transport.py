@@ -173,6 +173,7 @@ def _distribute_correction_to_cells(raw_jump_fp, flat, ops, mesh):
                 flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
                 flat.true_area_weight,
                 flat.lift_native,
+                flat.owner_is_primary, flat.neighbor_is_primary,
             )
         return correction_sps
     else:
@@ -191,6 +192,7 @@ def _distribute_correction_to_cells(raw_jump_fp, flat, ops, mesh):
             flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
             flat.true_area_weight,
             flat.lift_native,
+            flat.owner_is_primary, flat.neighbor_is_primary,
         )
 
 
@@ -203,6 +205,7 @@ def compute_scalar_convection_residual(
     wall_dirichlet_zero_face: np.ndarray = None,
     wall_dirichlet_value_face: np.ndarray = None,
     has_wall_dirichlet_value: np.ndarray = None,
+    flat_face_override=None,
 ) -> np.ndarray:
     """计算标量对流 FR 残差（体积项 + 界面上风校正）。
 
@@ -223,6 +226,16 @@ def compute_scalar_convection_residual(
         wall_dirichlet_value_face, has_wall_dirichlet_value: 见
             `_extrapolate_scalar_to_faces` 文档，omega 壁面解析式用，
             与 wall_dirichlet_zero_face 互斥。
+        flat_face_override: 显式传入时优先使用，不再调用
+            `get_flat_face_geometry(mesh, ops)`（2026-09-02 分布式湍流
+            移植新增，与 `core/fr_residual/inviscid.py::compute_
+            inviscid_residual_fr` 同名参数同一个道理）——分布式路径下
+            `mesh` 是 `DistributedMeshAdapter`，其 `face_connectivity`
+            是 local+halo 压缩索引空间下的 `DistributedFlatFaceGeometry`，
+            不是 `get_flat_face_geometry` 内部期望的完整全局
+            `FRFaceConnectivity`，用它重新构建一遍会得到错误的面几何。
+            调用方需要传入已经按同一套压缩索引空间构造好的
+            `dist_fc.base_flat`。单机路径不传，行为完全不变。
 
     Returns:
         residual: (n_cells, n_sps) 对流残差（dphi/dt 量纲，已除以 rho 前的
@@ -234,35 +247,38 @@ def compute_scalar_convection_residual(
 
     det_jacs = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
     inv_jacs = mesh.jacobians["inv_jacs"].reshape(n_cells, n_sps, 3, 3)
-    adj_j = det_jacs[..., None, None] * inv_jacs  # (n_cells, n_sps, 3, 3)
 
-    # === 体积项 ===
-    # 标量通量: F_phys[...,i] = rho * u_i * phi
-    rho_u_phi = rho[..., None] * velocity * scalar_field[..., None]  # (n_cells, n_sps, 3)
-    # 逆变通量: F_tilde[...,m] = adj(J)[m,i] * F_phys[i]
-    F_tilde = np.matmul(adj_j, rho_u_phi[..., None]).squeeze(-1)  # (n_cells, n_sps, 3)
-    # 真实内存修复（V2.0 专家组盲审第四次评审，2026-08-28，cube_demo 79万
-    # 单元/187万面生产网格 P2+DDES 真实 CLI 冒烟测试触发 OOM 崩溃后追查）：
-    # adj_j((n_cells,n_sps,3,3)~1.7GB)/rho_u_phi((n_cells,n_sps,3)~500MB)
-    # 用完 F_tilde 后就不再需要，但作为局部变量名会一直占着这块内存直到
-    # 函数返回（CPython 引用计数不会因为"逻辑上不再用到"就提前释放，只有
-    # 名字被重新绑定/del 或函数返回时才会）——本函数后面还有相当长的界面
-    # 项计算，显式 del 能让这块内存在那之前就真正释放，而不是继续陪着
-    # 后面的大数组一起占用峰值。
-    del adj_j, rho_u_phi
-    # 散度: div(F_tilde) = sum_m D_3d[m,:] . F_tilde[...,m]
+    # === 体积项：按单元分块执行 adj_j 构造→物理通量→逆变通量→散度 全链路
+    # （真实内存修复，2026-09-01，见项目 memory：cube_demo 79万单元 P2+SST
+    # 组合内存峰值实测约需 37GB，超过常见 32GB 工作站配置，会在 P2 阶段
+    # 第一步内触发 numpy ArrayMemoryError）。此前这里一次性对全场分配
+    # `adj_j`（(n_cells,n_sps,3,3)~1.7GB）+ `rho_u_phi`/`F_tilde`
+    # （各~500MB），SST 每步要独立调用本函数 4 次（k 对流/k 扩散/omega
+    # 对流/omega 扩散，见 compute_turbulence_transport_residual），即使
+    # 每次都及时 del，瞬时峰值仍会与同一步里平均流 inviscid.py/
+    # viscous_flux.py 自己的大数组同时驻留，合计推高总峰值。这条链上
+    # 每一步都是 cell 局部的（`np.matmul`/`np.tensordot` 按 cell 批量，
+    # cell 之间零数据依赖），把 cell 轴切块、块内走完链路再进下一块，
+    # 与 `fr_residual/inviscid.py`/`viscous_flux.py` 的过积分/体积项
+    # 分块修复同一个原理、同一个分块大小（`_VISC_CHUNK_CELLS`），块内
+    # 计算形状/求和顺序与全场版逐位一致，数值结果不变。
     # native 四面体（路径C）：D_3d_tet 是坍缩坐标专属微分矩阵，对 native
     # 单纯形基节点没有意义，需改用已零填充到全局宽度的 D_native_tet_padded
     # （理由与 gradients.py::compute_physical_gradient/viscous_flux.py
     # 体积项同一处文档，此前这里从未适配，见本模块 native 分支引入记录）。
     _tet_op_D = ops.D_native_tet_padded if getattr(ops, "D_native_tet_padded", None) is not None else ops.D_3d_tet
+    _TRANSPORT_CHUNK_CELLS = 32768
     div_F = np.zeros((n_cells, n_sps))
-    if n_prism > 0:
-        for m in range(3):
-            div_F[:n_prism] += np.tensordot(F_tilde[:n_prism, :, m], ops.D_3d_prism[:, :, m], axes=([1], [1]))
-    if n_cells > n_prism:
-        for m in range(3):
-            div_F[n_prism:] += np.tensordot(F_tilde[n_prism:, :, m], _tet_op_D[:, :, m], axes=([1], [1]))
+    for seg_lo, seg_hi, op_D in ((0, n_prism, ops.D_3d_prism), (n_prism, n_cells, _tet_op_D)):
+        for c0 in range(seg_lo, seg_hi, _TRANSPORT_CHUNK_CELLS):
+            c1 = min(c0 + _TRANSPORT_CHUNK_CELLS, seg_hi)
+            adj_j_chunk = det_jacs[c0:c1, :, None, None] * inv_jacs[c0:c1]  # (块长,n_sps,3,3)
+            rho_u_phi_chunk = rho[c0:c1, :, None] * velocity[c0:c1] * scalar_field[c0:c1, :, None]
+            F_tilde_chunk = np.matmul(adj_j_chunk, rho_u_phi_chunk[..., None]).squeeze(-1)  # (块长,n_sps,3)
+            del adj_j_chunk, rho_u_phi_chunk  # 块内用完即弃，下一轮迭代变量重新绑定
+            for m in range(3):
+                div_F[c0:c1] += np.tensordot(F_tilde_chunk[:, :, m], op_D[:, :, m], axes=([1], [1]))
+            del F_tilde_chunk
 
     # 真实复现（2026-08-21，79万单元生产网格，Order Continuation P0->P1
     # 切换后）：退化单元（坍缩坐标/BL 挤出导致 det(J) 局部极小，见
@@ -279,10 +295,10 @@ def compute_scalar_convection_residual(
     # 说明。
     with np.errstate(over='ignore', invalid='ignore'):
         residual = -div_F / det_jacs  # 体积项对流残差
-    del F_tilde, div_F  # 同上，体积项已经收尾，界面项不再需要它们
+    del div_F  # 体积项已经收尾，界面项不再需要它（F_tilde_chunk 已在分块循环内逐块释放）
 
     # === 界面项（上风校正）===
-    flat = get_flat_face_geometry(mesh, ops)
+    flat = flat_face_override if flat_face_override is not None else get_flat_face_geometry(mesh, ops)
     n_fp = flat.n_fp
 
     # 外插 rho, velocity, scalar 到面通量点——rho/velocity 只需要 owner 侧
@@ -345,6 +361,7 @@ def compute_scalar_diffusion_residual(
     wall_dirichlet_zero_face: np.ndarray = None,
     wall_dirichlet_value_face: np.ndarray = None,
     has_wall_dirichlet_value: np.ndarray = None,
+    flat_face_override=None,
 ) -> np.ndarray:
     """计算标量扩散 FR 残差（体积项 + BR1 界面校正），返回值为 dphi/dt。
 
@@ -381,6 +398,9 @@ def compute_scalar_diffusion_residual(
             的上风 ghost 生效，diffusion 侧的解析壁面通量是更大的独立工作
             （与 k=0 情形是同一个已有的架构限制，不是本次新引入的差异）。
 
+        flat_face_override: 见 `compute_scalar_convection_residual` 同名
+            参数文档，分布式路径复用同一个约定。
+
     Returns:
         residual: (n_cells, n_sps) 扩散残差
     """
@@ -390,29 +410,30 @@ def compute_scalar_diffusion_residual(
 
     det_jacs = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
     inv_jacs = mesh.jacobians["inv_jacs"].reshape(n_cells, n_sps, 3, 3)
-    adj_j = det_jacs[..., None, None] * inv_jacs
 
     # === 体积项 ===
-    # 计算标量梯度（度量项一致）
+    # 计算标量梯度（度量项一致）——grad_phi 下面界面项的逐分量外插还要
+    # 复用，不能纳入分块（只能分块处理它之后、只在体积项内部一次性
+    # 使用的 adj_j/G_phys/G_tilde）。
     grad_phi = compute_physical_scalar_gradient(scalar_field, mesh, ops)  # (n_cells, n_sps, 3)
-    # 扩散通量: G_phys[...,i] = Gamma * grad(phi)[...,i]
-    G_phys = gamma_field[..., None] * grad_phi  # (n_cells, n_sps, 3)
-    # 逆变通量
-    G_tilde = np.matmul(adj_j, G_phys[..., None]).squeeze(-1)  # (n_cells, n_sps, 3)
-    # 真实内存修复（V2.0 专家组盲审第四次评审，2026-08-28，见
-    # compute_scalar_convection_residual 同名注释的完整理由）：adj_j/
-    # G_phys 用完 G_tilde 后不再需要，及时释放（grad_phi 除外——下面
-    # 界面项的逐分量外插还要用它，不能提前删）。
-    del adj_j, G_phys
-    # 散度（native 分支同上 compute_scalar_convection_residual 处文档）
+
+    # 按单元分块执行 adj_j 构造→扩散通量→逆变通量→散度 全链路（真实
+    # 内存修复，2026-09-01，理由与 compute_scalar_convection_residual
+    # 体积项分块同一处文档：cube_demo 79万单元 P2+SST 组合内存峰值实测
+    # 约需 37GB，超过常见 32GB 工作站配置）。
     _tet_op_D = ops.D_native_tet_padded if getattr(ops, "D_native_tet_padded", None) is not None else ops.D_3d_tet
+    _TRANSPORT_CHUNK_CELLS = 32768
     div_G = np.zeros((n_cells, n_sps))
-    if n_prism > 0:
-        for m in range(3):
-            div_G[:n_prism] += np.tensordot(G_tilde[:n_prism, :, m], ops.D_3d_prism[:, :, m], axes=([1], [1]))
-    if n_cells > n_prism:
-        for m in range(3):
-            div_G[n_prism:] += np.tensordot(G_tilde[n_prism:, :, m], _tet_op_D[:, :, m], axes=([1], [1]))
+    for seg_lo, seg_hi, op_D in ((0, n_prism, ops.D_3d_prism), (n_prism, n_cells, _tet_op_D)):
+        for c0 in range(seg_lo, seg_hi, _TRANSPORT_CHUNK_CELLS):
+            c1 = min(c0 + _TRANSPORT_CHUNK_CELLS, seg_hi)
+            adj_j_chunk = det_jacs[c0:c1, :, None, None] * inv_jacs[c0:c1]
+            G_phys_chunk = gamma_field[c0:c1, :, None] * grad_phi[c0:c1]
+            G_tilde_chunk = np.matmul(adj_j_chunk, G_phys_chunk[..., None]).squeeze(-1)
+            del adj_j_chunk, G_phys_chunk
+            for m in range(3):
+                div_G[c0:c1] += np.tensordot(G_tilde_chunk[:, :, m], op_D[:, :, m], axes=([1], [1]))
+            del G_tilde_chunk
 
     # 扩散对 dphi/dt 的贡献是 +div(G)/det(J)（见本函数文档符号约定，
     # 与 viscous_flux.py::"residual = div_comp / det_jacs"同一约定）。
@@ -421,10 +442,10 @@ def compute_scalar_diffusion_residual(
     # compute_turbulence_transport_residual 末尾被下游清零处理的溢出。
     with np.errstate(over='ignore', invalid='ignore'):
         residual = div_G / det_jacs
-    del G_tilde, div_G
+    del div_G
 
     # === 界面项（BR1 平均通量校正）===
-    flat = get_flat_face_geometry(mesh, ops)
+    flat = flat_face_override if flat_face_override is not None else get_flat_face_geometry(mesh, ops)
     n_fp = flat.n_fp
 
     # 外插 Gamma 和标量梯度到面通量点。标量场本身不再外插：2026-08-25 校正改
@@ -518,7 +539,9 @@ def _compute_wall_dirichlet_face_mask(solver) -> np.ndarray:
     return np.isin(group_code, wall_codes)
 
 
-def _compute_omega_wall_target(solver, wall_mask: np.ndarray, mu: float, rho: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+def _compute_omega_wall_target(
+    solver, wall_mask: np.ndarray, mu: float, rho: np.ndarray, flat_face_override=None,
+) -> Tuple[np.ndarray, np.ndarray]:
     """按 Wilcox 解析式计算 WALL 面各自的 omega 目标值（真实修复，
     V2.0 专家组盲审发现，2026-08-28）：
 
@@ -545,6 +568,21 @@ def _compute_omega_wall_target(solver, wall_mask: np.ndarray, mu: float, rho: np
             _compute_wall_dirichlet_face_mask 的返回值）
         mu: 分子动力粘度
         rho: (n_cells, n_sps) 密度场，用于取 owner 单元的代表密度算 nu
+        flat_face_override: 显式传入时优先使用，不再调用
+            `get_flat_face_geometry(solver.mesh, solver.ops)`（真实修复，
+            2026-09-02，见 `compute_turbulence_transport_residual` 同名参数
+            文档——本函数此前是该文件里唯一没有跟随 flat_face_override 传参
+            约定的函数，分布式场景下 `solver.mesh.face_connectivity` 是
+            `DistributedFlatFaceGeometry`，不具备 `owner_cube_face` 等字段，
+            "完全分布式加载"模式下会直接崩溃；"传统模式"不崩溃是因为
+            `get_flat_face_geometry` 按 `mesh.face_flux_points` 对象身份
+            缓存，而"传统模式"下这个身份与构造 `dist_fc` 时已经缓存过的
+            全局 mesh 是同一个对象，命中缓存返回的是**全局**（非 compact）
+            FlatFaceGeometry——`wall_face_idx`（来自 compact 空间的
+            wall_mask）被当成全局面索引使用，语义上是错的，只是在
+            现有测试里因为从未真正匹配到 WALL 边界组（wall_mask 恒为全
+            False，见 `_compute_wall_dirichlet_face_mask` 提前返回分支）
+            而没有被触发）
 
     Returns:
         (omega_wall_value_face, has_value_face)：
@@ -555,7 +593,7 @@ def _compute_omega_wall_target(solver, wall_mask: np.ndarray, mu: float, rho: np
           对应位置为 False）
         - has_value_face: (n_faces,) bool，与 wall_mask 相同
     """
-    flat = get_flat_face_geometry(solver.mesh, solver.ops)
+    flat = flat_face_override if flat_face_override is not None else get_flat_face_geometry(solver.mesh, solver.ops)
     n_faces = flat.n_faces
     n_fp = flat.n_fp
     beta1 = getattr(solver.turb_model, "beta1", 0.075)
@@ -579,6 +617,7 @@ def compute_turbulence_transport_residual(
     grad_vel: np.ndarray = None,
     grad_k: np.ndarray = None,
     grad_omega: np.ndarray = None,
+    flat_face_override=None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """计算 k/omega 的完整输运残差（对流 + 扩散）。
 
@@ -599,6 +638,13 @@ def compute_turbulence_transport_residual(
             的重复调用是三次里的一次，真实测得省下约 1.6s/步。三者任一
             为 None 时退回原来的内部计算（保持本函数可独立调用的公开
             API 行为不变，不依赖调用方一定会传）。
+        flat_face_override: 显式传入时优先使用，透传给内部四次
+            `compute_scalar_convection_residual`/`compute_scalar_
+            diffusion_residual` 调用（2026-09-02 分布式湍流移植新增，
+            见这两个函数同名参数文档）——分布式路径下 `solver` 是
+            `DistributedTurbulenceSolverAdapter`（`solver.mesh` 是
+            `DistributedMeshAdapter`），必须传入 `dist_fc.base_flat`，
+            否则会尝试从压缩索引空间的适配器重新构建全局面几何。
 
     Returns:
         (dk_dt_transport, domega_dt_transport): 各自 (n_cells, n_sps)，
@@ -690,10 +736,12 @@ def compute_turbulence_transport_residual(
 
     # 计算 k 的对流 + 扩散残差
     conv_k = compute_scalar_convection_residual(
-        turb.k_field, rho, vel, solver.mesh, solver.ops, wall_dirichlet_zero_face=wall_mask_k
+        turb.k_field, rho, vel, solver.mesh, solver.ops, wall_dirichlet_zero_face=wall_mask_k,
+        flat_face_override=flat_face_override,
     )
     diff_k = compute_scalar_diffusion_residual(
-        turb.k_field, gamma_k, solver.mesh, solver.ops, wall_dirichlet_zero_face=wall_mask_k
+        turb.k_field, gamma_k, solver.mesh, solver.ops, wall_dirichlet_zero_face=wall_mask_k,
+        flat_face_override=flat_face_override,
     )
     with np.errstate(over='ignore', invalid='ignore'):
         dk_dt_transport = (conv_k + diff_k) / np.maximum(rho, 1e-10)
@@ -706,16 +754,20 @@ def compute_turbulence_transport_residual(
     # fr_solver/turbulence.py），否则 _compute_omega_wall_target 里的
     # np.min(solver.wall_distance[...]) 会直接因 wall_distance 为 None
     # 报错——这是有意的（没有壁面距离场，压根不该假装能算出解析壁面值）。
-    omega_wall_value_face, has_omega_wall = _compute_omega_wall_target(solver, wall_mask_k, mu, rho)
+    omega_wall_value_face, has_omega_wall = _compute_omega_wall_target(
+        solver, wall_mask_k, mu, rho, flat_face_override=flat_face_override,
+    )
 
     # 计算 omega 的对流 + 扩散残差
     conv_w = compute_scalar_convection_residual(
         turb.omega_field, rho, vel, solver.mesh, solver.ops,
         wall_dirichlet_value_face=omega_wall_value_face, has_wall_dirichlet_value=has_omega_wall,
+        flat_face_override=flat_face_override,
     )
     diff_w = compute_scalar_diffusion_residual(
         turb.omega_field, gamma_w, solver.mesh, solver.ops,
         wall_dirichlet_value_face=omega_wall_value_face, has_wall_dirichlet_value=has_omega_wall,
+        flat_face_override=flat_face_override,
     )
     with np.errstate(over='ignore', invalid='ignore'):
         domega_dt_transport = (conv_w + diff_w) / np.maximum(rho, 1e-10)

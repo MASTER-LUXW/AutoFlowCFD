@@ -115,3 +115,60 @@ def test_gpu_split_prism_quad_face_no_duplicate_counting():
     max_diff = np.max(np.abs(cpu_residual - gpu_residual_np))
     scale = max(np.max(np.abs(cpu_residual)), 1.0)
     assert max_diff < max(1e-6, scale * 1e-6), f"max|cpu-gpu|={max_diff:.3e}, scale={scale:.3e}"
+
+
+@pytest.mark.parametrize("order,rel_tol", [(1, 1e-6), (2, 1e-5)])
+def test_gpu_matches_cpu_native_tet_basis_uniform_flow(order, rel_tol):
+    """native 四面体基（路径C）GPU 移植（2026-09-02）crosscheck——均匀
+    自由流场，覆盖体积项 D_native_tet_padded 分派 + 界面项
+    boundary_extrap_native/lift_native 分派全部三处（owner-primary/
+    neighbor-primary 的自身面外插 + 面校正分配）。本机没有 CuPy/CUDA，
+    这个测试和上面几个一样从未在本机实际执行过，需要在真实 GPU 环境
+    运行确认。"""
+    mesh = _build_synthetic_mixed_mesh(order, tet_basis_mode="native")
+    rho_inf, u_inf, v_inf, w_inf, p_inf = 1.225, 30.0, 5.0, -3.0, 101325.0
+    Q_inf = np.array([rho_inf, u_inf, v_inf, w_inf, p_inf])
+    U_inf = primitive_to_conserved(Q_inf)
+    U = np.tile(U_inf, (mesh.n_cells, mesh.n_sps_per_cell, 1))
+
+    cpu_residual = compute_inviscid_residual_fr(U, mesh, mesh.operators, mach_ref=MACH_REF)
+    gpu_residual = compute_inviscid_residual_fr_gpu(U, mesh, mesh.operators, mach_ref=MACH_REF)
+    gpu_residual_np = cp.asnumpy(gpu_residual) if not isinstance(gpu_residual, np.ndarray) else gpu_residual
+
+    max_diff = np.max(np.abs(cpu_residual - gpu_residual_np))
+    rel_diff = max_diff / p_inf
+    assert rel_diff < rel_tol, f"native P={order}: max|cpu-gpu|={max_diff:.3e}, rel={rel_diff:.3e}"
+
+
+@pytest.mark.parametrize("order", [1, 2])
+def test_gpu_matches_cpu_native_tet_basis_nonuniform_perturbed_flow(order):
+    """native 四面体基 GPU 移植——非均匀扰动流场，覆盖 native 面的
+    AUSM+up 非线性通量求值（side_factor 固定+1 分支）+ DG 提升算子
+    分配。"""
+    mesh = _build_synthetic_mixed_mesh(order, tet_basis_mode="native")
+    rng = np.random.default_rng(order * 7000 + 31)
+
+    rho_inf, u_inf, v_inf, w_inf, p_inf = 1.225, 30.0, 5.0, -3.0, 101325.0
+    Q_inf = np.array([rho_inf, u_inf, v_inf, w_inf, p_inf])
+    U_inf = primitive_to_conserved(Q_inf)
+    U = np.tile(U_inf, (mesh.n_cells, mesh.n_sps_per_cell, 1))
+
+    n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
+    from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
+    Q = conserved_to_primitive(U)
+    Q[..., 0] *= 1.0 + rng.uniform(-0.05, 0.05, size=(n_cells, n_sps))
+    Q[..., 1] += rng.uniform(-5.0, 5.0, size=(n_cells, n_sps))
+    Q[..., 2] += rng.uniform(-5.0, 5.0, size=(n_cells, n_sps))
+    Q[..., 3] += rng.uniform(-5.0, 5.0, size=(n_cells, n_sps))
+    Q[..., 4] *= 1.0 + rng.uniform(-0.05, 0.05, size=(n_cells, n_sps))
+    U = primitive_to_conserved(Q)
+
+    cpu_residual = compute_inviscid_residual_fr(U, mesh, mesh.operators, mach_ref=MACH_REF)
+    gpu_residual = compute_inviscid_residual_fr_gpu(U, mesh, mesh.operators, mach_ref=MACH_REF)
+    gpu_residual_np = cp.asnumpy(gpu_residual) if not isinstance(gpu_residual, np.ndarray) else gpu_residual
+
+    max_diff = np.max(np.abs(cpu_residual - gpu_residual_np))
+    scale = max(np.max(np.abs(cpu_residual)), 1.0)
+    assert max_diff < max(1e-6, scale * 1e-6), (
+        f"native P={order}: max|cpu-gpu|={max_diff:.3e}, scale={scale:.3e}"
+    )

@@ -23,19 +23,19 @@ from loguru import logger
 
 @click.command(name="generate-volume")
 @click.argument("input_file", type=click.Path(exists=True))
-@click.option("--output", "-o", required=True, help="Output volume mesh .nas file path")
-@click.option("--growth-rate", default=1.2, show_default=True, help="Boundary layer growth rate")
-@click.option("--min-cell-size", default=0.001, show_default=True, help="Minimum cell size (m)")
-@click.option("--target-cells", default=500000, show_default=True, help="Target total volume cell count")
-@click.option("--max-cell-size", default=None, type=float, help="Maximum cell size (m)")
-@click.option("--bl-layers", default=None, type=int, help="Number of BL layers")
-@click.option("--skip-quality-report", is_flag=True, help="Skip quality report computation")
-@click.option("--json-output", is_flag=True, help="Output result as JSON")
-@click.option("--bl-only", is_flag=True, help="Generate and export only the BL prism layer mesh")
+@click.option("--output", "-o", required=True, help="输出体网格 .nas 文件路径")
+@click.option("--growth-rate", default=1.2, show_default=True, help="边界层增长率")
+@click.option("--min-cell-size", default=0.001, show_default=True, help="最小单元尺寸 (m)")
+@click.option("--target-cells", default=500000, show_default=True, help="目标体网格单元总数")
+@click.option("--max-cell-size", default=None, type=float, help="最大单元尺寸 (m)")
+@click.option("--bl-layers", default=None, type=int, help="边界层层数")
+@click.option("--skip-quality-report", is_flag=True, help="跳过质量报告计算")
+@click.option("--json-output", is_flag=True, help="以 JSON 格式输出结果")
+@click.option("--bl-only", is_flag=True, help="只生成并导出边界层棱柱层网格")
 @click.option(
     "--core-only", is_flag=True,
-    help="Export the mesh right after core-region tetgen fill (core tets "
-    "alone, not spliced with BL) - skips all later steps",
+    help="在核心区 tetgen 填充完成后立即导出网格（只有核心区四面体，未与"
+    "边界层拼接）——跳过后续全部步骤",
 )
 def generate_volume(
     input_file: str,
@@ -50,35 +50,32 @@ def generate_volume(
     bl_only: bool,
     core_only: bool,
 ) -> None:
-    """Generate a volume mesh from a surface .nas file and export it.
+    """从面网格 .nas 文件生成体网格并导出。
 
-    Runs the full grid pipeline: parse surface mesh -> validate surface
-    quality -> generate hybrid volume mesh (BL extrusion + Cartesian
-    background) -> validate volume mesh quality -> export to Nastran .nas.
-    The volume mesh is always exported, whether or not it passes the
-    quality report - a case that genuinely can't converge (see
-    mesh_repair.py's documented limits) should still produce a mesh file to
-    inspect or hand off, not nothing at all. `autoflowcfd solve steady` is
-    the actual enforcement point that blocks solving a mesh that fails this
-    check.
+    运行完整的网格流水线：解析面网格 -> 校验面网格质量 -> 生成混合体网格
+    （边界层挤出 + 笛卡尔背景网格）-> 校验体网格质量 -> 导出为 Nastran
+    .nas。无论质量报告是否通过，体网格都会被导出——一个真正无法收敛的
+    case（见 mesh_repair.py 里记录的已知极限）也应该产出一个可供检查或
+    转交的网格文件，而不是什么都不产出。真正拦截"质量不过关的网格不能
+    求解"的地方是 `autoflowcfd solve steady`。
 
     Args:
-        input_file: Path to surface .nas grid file
-        output: Output volume mesh .nas file path
-        growth_rate: Boundary layer growth rate
-        min_cell_size: Minimum cell size (m)
-        target_cells: Target total volume cell count
-        bl_layers: How many layers the BL stage extrudes before the
-            remaining volume is filled directly from the BL's own outer
-            surface by tetgen (see mesh_background_merge._build_merged_mesh
-            - there is no separate structured "transition" stage anymore,
-            ProjectFiles Part13 P49); None defaults to 8
-        skip_quality_report: Skip computing/printing the quality report
-            (export always happens regardless)
-        json_output: Output result as JSON
-        bl_only: If set, only generate and export the BL prism layer mesh.
-        core_only: If set, export right after core-region tetgen fill (core
-            tets alone, not spliced with BL) and stop.
+        input_file: 面网格 .nas 文件路径
+        output: 输出体网格 .nas 文件路径
+        growth_rate: 边界层增长率
+        min_cell_size: 最小单元尺寸 (m)
+        target_cells: 目标体网格单元总数
+        bl_layers: 边界层阶段挤出多少层之后，剩余体积直接由边界层自身
+            外表面交给 tetgen 填充（见
+            mesh_background_merge._build_merged_mesh——现在已经没有单独
+            的结构化"过渡层"阶段了，见 ProjectFiles Part13 P49）；
+            None 时默认为 8
+        skip_quality_report: 跳过质量报告的计算/打印（导出本身始终照常
+            进行）
+        json_output: 以 JSON 格式输出结果
+        bl_only: 若设置，只生成并导出边界层棱柱层网格。
+        core_only: 若设置，在核心区 tetgen 填充完成后立即导出（只有核心区
+            四面体，未与边界层拼接）并停止。
     """
     from autoflowcfd.grid import (
         NASParser, GridValidator, MeshQualityValidator, export_volume_mesh_to_nas
@@ -107,9 +104,9 @@ def generate_volume(
             )
 
         logger.info("Step 3/4: Generating volume mesh (BL extrusion + background)...")
-        # Reuses surface_grid (already parsed above for the Step 2 quality
-        # check) directly - parser.parse(generate_volume_mesh=True) would
-        # re-parse the same NAS file from scratch a second time.
+        # 直接复用 surface_grid（上面 Step 2 质量检查时已经解析过）——
+        # parser.parse(generate_volume_mesh=True) 会把同一个 NAS 文件
+        # 从头再解析一遍。
         volume_mesh = parser.generate_volume_mesh_from_surface(
             surface_grid,
             volume_mesh_params={
@@ -128,22 +125,17 @@ def generate_volume(
         if not skip_quality_report:
             logger.info("Validating volume mesh quality...")
             quality_report = MeshQualityValidator().validate_volume_mesh(volume_mesh)
-            # Stage A/B (mesh_gen/mesh_repair.py) already ran to completion
-            # during generation above - this is purely informational on
-            # their outcome, not an export gate: the volume mesh file is
-            # always written below regardless of pass/fail, since a case
-            # that genuinely can't converge (e.g. a real sharp convex
-            # corner - see mesh_repair.py's own documented, measured
-            # limits here) would otherwise never produce any output at all
-            # to inspect or hand-fix. There used to also be a Stage C
-            # (global min_cell_size backoff + full regeneration) here -
-            # removed per user request: measured to be an unreliable net
-            # win (2 of 3 controlled cube_demo comparisons were worse, not
-            # better, than the original parameters) while guaranteeing the
-            # exported mesh silently deviates from the min_cell_size the
-            # user actually asked for. The solve-time quality gate
-            # (cli/solve_commands.py) is the actual enforcement point
-            # before any iterations run.
+            # Stage A/B（mesh_gen/mesh_repair.py）在上面生成体网格的过程中
+            # 已经跑完了——这里纯粹是对其结果的信息展示，不是导出门槛：
+            # 无论通过与否，下面都会照常写出体网格文件，因为一个真正无法
+            # 收敛的 case（例如真实的尖锐凸角——见 mesh_repair.py 自己
+            # 记录的、实测出的极限）否则就完全产不出任何可供检查/手动
+            # 修复的结果。这里以前还有一个 Stage C（全局 min_cell_size
+            # 退让 + 完整重新生成）——按用户要求已移除：实测下来是个不
+            # 可靠的净收益（3 组受控 cube_demo 对比里有 2 组反而比原始
+            # 参数更差），同时还会让导出的网格静默偏离用户实际要求的
+            # min_cell_size。真正的求解期质量门（cli/solve_commands.py）
+            # 才是任何迭代开始前真正拦截的地方。
             if quality_report.passed:
                 logger.info(f"\n{quality_report.summary()}")
             else:
@@ -214,22 +206,22 @@ def generate_volume(
 @click.command(name="import-volume")
 @click.argument("volume_mesh_file", type=click.Path(exists=True))
 @click.option("--surface-mesh", "-s", type=click.Path(exists=True), required=True,
-              help="Original surface .nas file the volume mesh was generated from "
-                   "(supplies boundary-group geometry for inlet/outlet/wall/... "
-                   "attribution - the volume mesh file itself typically carries none)")
+              help="生成该体网格所用的原始面网格 .nas 文件（提供 inlet/"
+                   "outlet/wall/... 边界分组归属所需的几何信息——体网格"
+                   "文件本身通常不携带这些信息）")
 @click.option("--output", "-o", type=click.Path(), required=True,
-              help="Output path for the validated/repaired mesh, as a pickled "
-                   "VolumeMeshData (.pkl) ready for 'autoflowcfd solve steady'/"
-                   "'transient' - NOT a .nas file")
+              help="校验/修复后网格的输出路径，格式为 pickle 化的 "
+                   "VolumeMeshData (.pkl)，可直接供 'autoflowcfd solve "
+                   "steady'/'transient' 使用——不是 .nas 文件")
 @click.option("--skip-repair", is_flag=True,
-              help="Skip Stage A smoothing when the initial quality check fails - "
-                   "just report and export the mesh exactly as parsed")
+              help="初始质量检查未通过时跳过 Stage A 平滑——按解析结果原样"
+                   "报告并导出网格")
 @click.option("--max-repair-passes", type=int, default=5,
-              help="Stage A smoothing's own max passes")
+              help="Stage A 平滑自身的最大迭代次数")
 @click.option("--skip-overlap-check", is_flag=True,
-              help="Skip the physical-overlap check (the most expensive single "
-                   "quality check on a large mesh) - use for a quick preliminary look")
-@click.option("--json", "-j", "json_output", is_flag=True, help="Output as JSON")
+              help="跳过物理重叠检查（大网格上单项开销最大的质量检查）——"
+                   "用于快速预览")
+@click.option("--json", "-j", "json_output", is_flag=True, help="以 JSON 格式输出")
 def import_volume(
     volume_mesh_file: str,
     surface_mesh: str,
@@ -239,33 +231,32 @@ def import_volume(
     skip_overlap_check: bool,
     json_output: bool,
 ) -> None:
-    """Import an externally-generated volume mesh (e.g. ANSA's own volume
-    export) for quality-checking, best-effort repair, and solving.
+    """导入外部生成的体网格（例如 ANSA 自己导出的体网格），做质量检查、
+    尽力修复、并准备求解。
 
-    Parses a volume-mesh .nas file (GRID + CTETRA + CPENTA cards) some
-    OTHER tool produced, attributes boundary groups (inlet/outlet/wall/...)
-    from the companion surface mesh it was generated from by geometric
-    (nearest-centroid) matching, runs the same MeshQualityValidator this
-    project's own generate-volume uses, and - if the check fails - applies
-    Stage A smoothing (quality-gated Laplacian smoothing of skewed/non-
-    orthogonal/volume-mismatched cells) as a best-effort repair. The
-    result is saved as a pickled VolumeMeshData, the same cache format
-    'autoflowcfd solve steady'/'transient' already consume directly.
+    解析某个其他工具产出的体网格 .nas 文件（GRID + CTETRA + CPENTA
+    卡片），通过几何（最近形心）匹配，从生成该体网格所用的配套面网格
+    反推边界分组（inlet/outlet/wall/...），运行本项目自己
+    generate-volume 用的同一套 MeshQualityValidator——若检查未通过，
+    应用 Stage A 平滑（对畸变/非正交/体积失配单元做质量门控的
+    Laplacian 平滑）作为尽力修复。结果保存为 pickle 化的
+    VolumeMeshData，与 'autoflowcfd solve steady'/'transient' 已经直接
+    消费的缓存格式相同。
 
     Args:
-        volume_mesh_file: Path to the volume-mesh .nas file
-        surface_mesh: Path to the original surface .nas file
-        output: Output .pkl path
-        skip_repair: Skip Stage A smoothing on a failing quality check
-        max_repair_passes: Stage A's own max passes
-        skip_overlap_check: Skip the (expensive) physical-overlap check
-        json_output: Output result as JSON
+        volume_mesh_file: 体网格 .nas 文件路径
+        surface_mesh: 原始面网格 .nas 文件路径
+        output: 输出 .pkl 路径
+        skip_repair: 质量检查未通过时跳过 Stage A 平滑
+        max_repair_passes: Stage A 自身的最大迭代次数
+        skip_overlap_check: 跳过（开销较大的）物理重叠检查
+        json_output: 以 JSON 格式输出结果
 
     Examples:
-        # Import, repair if needed, and prepare for solving
+        # 导入、按需修复、并准备求解
         $ autoflowcfd grid import-volume car_volume.nas -s car_surface.nas -o car_volume.pkl
 
-        # Then solve directly from the cache
+        # 然后直接从缓存求解
         $ autoflowcfd solve steady car_volume.pkl
     """
     from autoflowcfd.grid.mesh_gen.utils.mesh_external_import import import_external_volume_mesh

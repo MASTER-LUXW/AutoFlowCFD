@@ -37,8 +37,14 @@ class GPUDDESModel:
         self.c_des = c_des
         self.c_w1 = c_w1
 
-    def compute_grid_scale_gpu(self, cell_volumes):
-        """Delta = V^(1/3)，与 CPU 版 compute_grid_scale(method='cube_root') 一致。"""
+    def compute_grid_scale_gpu(self, cell_volumes, h_max=None):
+        """网格尺度 Δ：`h_max` 提供时用各向异性感知的 max_edge
+        （`Δ=h_max`），否则退化为各向同性 `cube_root(V)`——与 CPU 版
+        `compute_grid_scale(method='max_edge'/'cube_root')` 逐字对应，
+        见该方法文档"Note"一节（2026-09-02 补齐 max_edge）。
+        """
+        if h_max is not None:
+            return h_max
         cp = get_cupy()
         return cp.abs(cell_volumes) ** (1.0 / 3.0)
 
@@ -85,13 +91,14 @@ class GPUDDESModel:
         l_eff = l_rans - f_d * cp.maximum(0.0, l_rans - l_les)
         return cp.maximum(l_eff, 1e-10)
 
-    def apply_to_sst_model_gpu(self, sst_model_gpu, d_w, cell_volumes, nu, grad_u):
+    def apply_to_sst_model_gpu(self, sst_model_gpu, d_w, cell_volumes, nu, grad_u, h_max=None):
         """把 DDES 应用到 GPU SST 模型：写 sst_model_gpu.des_length_scale。
 
-        与 CPU 版 DDESModel.apply_to_sst_model 逐字对应。
+        与 CPU 版 DDESModel.apply_to_sst_model 逐字对应，含 `h_max`
+        参数（2026-09-02 补齐，见 CPU 版同名参数文档）。
         """
         cp = get_cupy()
-        delta = self.compute_grid_scale_gpu(cell_volumes)
+        delta = self.compute_grid_scale_gpu(cell_volumes, h_max=h_max)
         n_sps = sst_model_gpu.k_field.shape[1]
         if delta.ndim == 1:
             delta = cp.tile(delta[:, None], (1, n_sps))

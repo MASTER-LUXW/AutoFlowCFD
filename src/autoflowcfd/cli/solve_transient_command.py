@@ -6,6 +6,7 @@
 from typing import Optional
 
 import click
+from loguru import logger
 
 from autoflowcfd.core import FRSolver
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
@@ -21,6 +22,7 @@ from autoflowcfd.cli.solve_helpers import (
 )
 from autoflowcfd.cli.solve_aero_coefficients import _report_aerodynamic_coefficients
 from autoflowcfd.cli.solve_commands import solve
+from autoflowcfd.cli.solve_transient_distributed import _solve_transient_distributed
 
 
 @solve.command(name='transient')
@@ -33,14 +35,6 @@ from autoflowcfd.cli.solve_commands import solve
               help="FR 修正函数族（#14）：'radau'（默认，此前唯一使用过的方案，"
                    "Huynh 记法 g_DG）；'gauss' 是与 Spectral Difference 等价的新方案"
                    "（见 fr/matrix_operators.py 文档）")
-@click.option("--tet-basis-mode", type=click.Choice(["collapsed", "native"]), default="collapsed",
-              help="四面体体积基函数选择：'collapsed'（默认，行为与此前完全一致）；"
-                   "'native' 是路径C（见 fr/native_simplex_basis.py 与 ProjectFiles/V2.0/"
-                   "8_算法重构-微分算子对坍缩坐标退化参考轴的病态条件数-Part6~8.md），"
-                   "修复坍缩坐标 Duffy 变换在退化参考轴附近导致的 P1/P2 残差异常——"
-                   "已在合成小网格上做过端到端决定性验证，尚未在真实生产规模网格上"
-                   "验证过，请谨慎用于生产算例。仅 CPU 后端支持，--backend gpu 传 "
-                   "'native' 会报错而不是静默退回 'collapsed'")
 @click.option("--time-method", "-t",
               type=click.Choice(["rk3", "imex", "dual-time"]),
               default="rk3", help="时间推进方法")
@@ -55,6 +49,14 @@ from autoflowcfd.cli.solve_commands import solve
                    "正确预测近壁应力，不需要额外的入口湍流结构，见 "
                    "core/fr_solver/boundary.py 文档）")
 @click.option("--max-iter", "-n", default=100, help="最大迭代次数")
+@click.option('--phase-max-iter', type=int, default=None,
+              help='Order Continuation（--order>=2 时触发）非最终阶段(P0/P1/...，不含目标'
+                   '阶数)各自的最大迭代步数上限。默认(不传)时保留旧行为——总步数按阶段数'
+                   '机械均分。传具体值后目标阶数改为吃掉这次求解剩余的全部步数，不再随'
+                   '阶段数被稀释，见 core/utils/order_continuation.py 文档。仅 CPU 后端支持')
+@click.option('--residual-drop-threshold', type=float, default=100.0,
+              help='Order Continuation 单个非最终阶段判定"可以提前升阶"的残差下降倍数，'
+                   '默认100(降2个数量级)。仅 CPU 后端支持')
 @click.option("--dt", default=1e-5, help="时间步长 (秒)")
 @click.option("--physical-time", default=None, help="总物理时间（秒）")
 @click.option("--output", "-o", "output_dir", default="./transient_results", help="输出目录")
@@ -84,14 +86,31 @@ from autoflowcfd.cli.solve_commands import solve
 @click.option('--config', 'config_path', type=click.Path(exists=True), default=None,
               help='从 YAML 文件读取物理常量默认值（mu_molecular/rho_inf/vel_inf/p_inf/'
                    'turbulence_intensity/viscosity_ratio）；显式传入的同名 --xxx 选项优先于此文件')
-def transient(input_file: str, backend: str, order: int, flux_type: str, tet_basis_mode: str, time_method: str,
-              turbulence_model: str, max_iter: int, dt: float, physical_time: float,
+@click.option('--n-ranks', type=int, default=1,
+              help='MPI rank 总数（>1 时走分布式求解器——CPU MPI"传统模式"，或配合 '
+                   '--multi-gpu/--fully-distributed 走对应的分布式构造入口）。'
+                   '2026-09-02 补齐：此前本命令完全没有分布式支持，DUAL_TIME/DES/LES '
+                   '瞬态仿真只能单机跑，与 solve steady 已有的分布式覆盖不一致')
+@click.option('--multi-gpu', is_flag=True, help='启用多 GPU + MPI 分布式求解（每个 rank 使用一块 GPU）')
+@click.option('--fully-distributed', is_flag=True,
+              help='"完全分布式加载"（只有 root rank 加载完整网格），需要 --n-ranks>1，'
+                   '与 --multi-gpu 互斥；已支持 --time-method dual-time（2026-09-02 起，'
+                   'package 已接入 time_scheme 字段）')
+@click.option('--gpu-device', type=int, default=None, help='--multi-gpu 时的 GPU 设备号')
+@click.option('--checkpoint-interval', type=int, default=100,
+              help='分布式路径中间 checkpoint 保存间隔（单机路径瞬态求解不做中间保存，'
+                   '只在结束后写一次，与 solve steady 的分布式分支同一个约定）')
+def transient(input_file: str, backend: str, order: int, flux_type: str, time_method: str,
+              turbulence_model: str, max_iter: int, phase_max_iter: Optional[int], residual_drop_threshold: float,
+              dt: float, physical_time: float,
               output_dir: str, use_eikonal: bool, surface_mesh: Optional[str],
               skip_quality_check: bool, reference_area: Optional[float],
               dual_time_inner_iter: int, threads: int, init_checkpoint: Optional[str],
               turbulence_intensity: float, viscosity_ratio: float, sem_num_eddies: int,
               mu_molecular: float, rho_inf: float, vel_inf: float, p_inf: float,
-              config_path: Optional[str]) -> None:
+              config_path: Optional[str], n_ranks: int, multi_gpu: bool,
+              fully_distributed: bool, gpu_device: Optional[int],
+              checkpoint_interval: int) -> None:
     """运行瞬态 FR 仿真 (DES/LES)。
 
     Args:
@@ -100,13 +119,13 @@ def transient(input_file: str, backend: str, order: int, flux_type: str, tet_bas
             import-volume' 从面网格生成/导入体网格
         backend: 计算后端
         order: FR 阶数
-        tet_basis_mode: 四面体单元基函数方案，'collapsed'（默认，坍缩
-            坐标/张量积基）或 'native'（路径C，原生单纯形基，见项目
-            文档 8_算法重构-...-Part6/7/8）；仅 CPU 后端支持，与
-            --backend gpu 同时指定会被拒绝
         time_method: 时间推进方法
         turbulence_model: 湍流模型 (推荐 DDES 或 LES)
         max_iter: 最大迭代次数
+        phase_max_iter: Order Continuation(--order>=2 时触发)非最终阶段各自的
+            最大迭代步数上限，None(默认)时保留旧行为(按阶段数均分)；仅 CPU 后端支持
+        residual_drop_threshold: Order Continuation 单阶段提前升阶所需的残差
+            下降倍数，默认100
         dt: 时间步长
         physical_time: 总物理时间（秒）
         output_dir: 输出目录
@@ -126,6 +145,7 @@ def transient(input_file: str, backend: str, order: int, flux_type: str, tet_bas
             'turbulence_intensity': turbulence_intensity, 'viscosity_ratio': viscosity_ratio,
             'mu_molecular': mu_molecular, 'rho_inf': rho_inf, 'vel_inf': vel_inf, 'p_inf': p_inf,
             'order': order, 'dt': dt,
+            'phase_max_iter': phase_max_iter, 'residual_drop_threshold': residual_drop_threshold,
         },
         _phys_cfg,
     )
@@ -137,6 +157,8 @@ def transient(input_file: str, backend: str, order: int, flux_type: str, tet_bas
     p_inf = _resolved['p_inf']
     order = _resolved['order']
     dt = _resolved['dt']
+    phase_max_iter = _resolved['phase_max_iter']
+    residual_drop_threshold = _resolved['residual_drop_threshold']
     # turbulence_model：见 solve_steady_command.py 同一处的说明。
     turbulence_model = resolve_turbulence_model(click.get_current_context(), turbulence_model, _phys_cfg)
     # physical_time ← config.total_time：字段名不同（CLI 用 physical_time，
@@ -161,15 +183,10 @@ def transient(input_file: str, backend: str, order: int, flux_type: str, tet_bas
         raise click.BadParameter("自由流速度必须 > 0", param_hint="--vel-inf")
     if p_inf <= 0.0:
         raise click.BadParameter("自由流静压必须 > 0", param_hint="--p-inf")
-    # native 四面体（路径C）仅 CPU 后端支持，见 --tet-basis-mode 帮助文本、
-    # ProjectFiles/V2.0/8_算法重构-...-Part6/8.md"GPU/MPI"一节的既有决定——
-    # 与 solve_steady_command.py 同一个"不允许静默降级"原则。
-    if tet_basis_mode != 'collapsed' and backend == 'gpu':
-        raise click.BadParameter(
-            "--tet-basis-mode native 目前只有 CPU 后端支持（GPU 路径明确未实现，"
-            "见项目文档）。请去掉 --backend gpu，或使用默认的 --tet-basis-mode collapsed。",
-            param_hint="--tet-basis-mode",
-        )
+    # --phase-max-iter/--residual-drop-threshold（2026-09-02 续接）：
+    # 全部四种后端（单机 CPU/单 GPU/多GPU/MPI 分布式）现在都真正接入了
+    # Order Continuation，不再需要任何"某后端不支持"的拒绝，见
+    # solve_steady_command.py 同一处修复文档。
     print(f"\nInput Grid : {input_file}")
     print(f"Backend    : {backend} | Order: P{order} | Method: {time_method}")
     print(f"Turbulence : {turbulence_model} | dt: {dt:.2e}")
@@ -181,18 +198,47 @@ def transient(input_file: str, backend: str, order: int, flux_type: str, tet_bas
     else:
         print(f"Iterations : {max_iter}\n")
 
-    # 1. 网格加载与处理（含求解前质量门检查）
-    mesh, volume_data = load_mesh_for_solver(
-        input_file, order, surface_mesh=surface_mesh, skip_quality_check=skip_quality_check,
-        tet_basis_mode=tet_basis_mode,
-    )
-
-    # 2. 映射时间推进方法
     time_scheme_map = {
         'rk3': TimeIntegrationScheme.SSP_RK3,
         'imex': TimeIntegrationScheme.IMEX_EULER,
-        'dual-time': TimeIntegrationScheme.DUAL_TIME
+        'dual-time': TimeIntegrationScheme.DUAL_TIME,
     }
+
+    if n_ranks > 1 or multi_gpu:
+        # 分布式瞬态求解路径（2026-09-02 补齐——此前本命令完全没有
+        # 分布式支持，DUAL_TIME/DES/LES 瞬态仿真只能单机跑，与
+        # solve_steady_command.py 已有的分布式覆盖不一致；同一批还
+        # 补齐了 DistributedFRSolver/MultiGPUDistributedSolver 对
+        # DUAL_TIME 本身的支持，见 core/mpi/distributed_solver.py 与
+        # core/gpu/distributed/gpu_distributed.py 对应说明——没有这里
+        # 的 CLI 入口，那两处修复也无法被真正用到）。
+        # --init-from（2026-09-02 续接）：三条分布式路径已真正接入
+        # （`restore_distributed_state_from_checkpoint`，见 core/mpi/
+        # distributed_checkpoint.py 模块文档——复用 `gather_global_
+        # state`/`scatter_local_state` 这套既有基础设施，"没有实现"
+        # 从一开始就不是设计上的限制，只是没人接上），不再拒绝。
+        # --phase-max-iter/--residual-drop-threshold（2026-09-02 续接）：
+        # 三条分布式路径已真正接入 Order Continuation（见
+        # solve_steady_command.py 同一处修复文档），不再拒绝，直接
+        # 透传给 `_solve_transient_distributed`。
+        _solve_transient_distributed(
+            input_file, order, surface_mesh, skip_quality_check,
+            time_scheme_map.get(time_method, TimeIntegrationScheme.SSP_RK3), dual_time_inner_iter,
+            turbulence_model, max_iter, dt, use_eikonal, output_dir,
+            reference_area, threads, turbulence_intensity, viscosity_ratio,
+            mu_molecular, rho_inf, vel_inf, p_inf,
+            n_ranks, multi_gpu, fully_distributed, gpu_device, backend,
+            checkpoint_interval, phase_max_iter, residual_drop_threshold,
+            init_checkpoint,
+        )
+        return
+
+    # 1. 网格加载与处理（含求解前质量门检查）
+    mesh, volume_data = load_mesh_for_solver(
+        input_file, order, surface_mesh=surface_mesh, skip_quality_check=skip_quality_check,
+    )
+
+    # 2. 映射时间推进方法
     time_scheme = time_scheme_map.get(time_method, TimeIntegrationScheme.SSP_RK3)
 
     # 3. 初始化求解器
@@ -231,7 +277,9 @@ def transient(input_file: str, backend: str, order: int, flux_type: str, tet_bas
     # 5. 执行瞬态求解
     try:
         # 瞬态求解通常不需要 tol，而是跑满指定的时间步
-        result = solver.solve(max_iter=max_iter, dt=dt, tol=0.0)
+        result = solver.solve(max_iter=max_iter, dt=dt, tol=0.0,
+                               phase_max_iter=phase_max_iter,
+                               residual_drop_threshold=residual_drop_threshold)
         print(f"\n✅ Transient Simulation Finished: Steps={result.iterations}, Final Residual={result.final_residual:.6e}")
 
         # 6. 保存结果（.pkl 全量状态 + HDF5 checkpoint，后者供 solve resume 使用）

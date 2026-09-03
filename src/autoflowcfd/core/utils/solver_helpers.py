@@ -4,6 +4,19 @@ AutoFlowCFD V2.0 - Solver Helper Functions
 本模块包含 FRSolver 的辅助函数：WMLES 壁面剪应力建模的接入。目的是减少
 fr_solver.py 的代码复杂度。
 
+native tet + WMLES 真实 bug 修复（2026-09-02，见
+ProjectFiles/V2.0/19_重大问题修复-湍流模型跨后端逐项排查与完全分布式加载补齐.md
+第6.5节）：`compute_wmles_wall_stress_correction`此前对四面体单元恒用
+坍缩坐标专属的`ops.boundary_extrap_tet[(axis,side)]`/1D Radau/VCJH
+修正函数导数（`_distribute_from_face`），未区分`tet_basis_mode`。
+native 面的`owner_axis`/`owner_side`存的是复用的 excluded_vertex/
+哑值（见 face_kernels.py::FlatFaceGeometry 字段文档），拿去查坍缩
+坐标专用的矩阵字典在语义上是错的。现在改用`owner_cube_face`
+（>=6 即 native，与 inviscid_kernel.py 界面项分派同一个判据）分派
+到 native 专属算子：自身面外插改用`boundary_extrap_native_tet`
+（按需 pad 到全局 n_sps 宽度），面修正项改用 DG 提升算子
+`lift_native_tet_padded`替代`_distribute_from_face`。
+
 V2.0 二次评审修复记录（T-05，三个独立 bug 叠加，见
 ProjectFiles/V2.0/6_整体专家组二次评审.md）：
 1. 壁面 SP/FP 提取此前三条路径全部失效（`solver.boundary_manager`/
@@ -41,13 +54,15 @@ Kang et al. 2024 arXiv:2405.15899 在 DG 类弱式框架下的对应公式与"�
 的唯一来源，不再与一个虚假的解析梯度剪应力共存。
 """
 
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 from loguru import logger
 
 
-def compute_wmles_wall_stress_correction(solver: Any) -> Optional[np.ndarray]:
+def compute_wmles_wall_stress_correction(
+    solver: Any, flat_face_override: Optional[Any] = None,
+) -> Optional[np.ndarray]:
     """计算 WMLES 壁面剪应力对动量残差的修正贡献。
 
     对每个 WALL 类型边界面：用 owner 单元的坍缩坐标模态基外插（与
@@ -58,63 +73,129 @@ def compute_wmles_wall_stress_correction(solver: Any) -> Optional[np.ndarray]:
     里所有"面上的物理量 -> 单元残差贡献"共用的标准机制（无粘/粘性残差
     都是同一套），不是另起一套简化路径。
 
+    Args:
+        solver: 需要 `.wmles_model`/`.wall_distance`/`.mesh`/`.ops`/
+            `.state.U`/`.state.Q`/`.boundary_ghost_provider`。
+        flat_face_override: 显式传入时优先使用（本代码库其余面残差
+            函数同名参数同一个约定，见 `compute_scalar_convection_
+            residual` 文档），不再调用`get_flat_face_geometry(solver.
+            mesh, solver.ops)`——真实修复（2026-09-02，排查分布式 WMLES
+            支持时发现）：此前本函数直接用 `mesh.face_flux_points[f]`
+            这个全局对象列表逐面取值，分布式场景下 `solver.mesh` 是
+            compact 索引空间的适配器，`f` 是 compact 面索引，拿去索引
+            全局 `face_flux_points` 列表在语义上是错的（与
+            `_compute_omega_wall_target` 此前的同一类 bug 完全一样）。
+            现在改用 `FlatFaceGeometry` 的批量数组字段（`owner_cell`/
+            `owner_axis`/`owner_side`/`owner_is_primary`/`true_normal`/
+            `true_area_weight`），它们本来就与残差组装用的其余代码
+            共享同一个索引空间（分布式场景下传 `dist_fc.base_flat`
+            即可，与 `distributed_compute_viscous_residual` 已经在用
+            的 `flat_face_override=dist_fc.base_flat` 同一个对象）。
+
     Returns:
         (n_cells, n_sps, 5) 的动量修正数组（只有分量 1:4 非零），
         无 WMLES 模型/无 WALL 边界/尚未构建面连接关系时返回 None。
     """
     if solver.wmles_model is None:
         return None
-    mesh = solver.mesh
-    fc = mesh.face_connectivity
-    if fc is None or mesh.face_flux_points is None:
-        return None
     if solver.wall_distance is None:
         logger.warning("WMLES requires wall distance field but none is available; skipping wall stress")
         return None
 
-    from autoflowcfd.grid.connectivity.face_connectivity import tag_boundary_groups_for_mesh
-    from autoflowcfd.core.fr_residual.inviscid import _distribute_from_face
-
-    group_code, name_to_code = tag_boundary_groups_for_mesh(mesh, fc)
-    bc_types = mesh.boundary_bc_types or {}
-    wall_codes = {code for name, code in name_to_code.items() if bc_types.get(name, "") == "WALL"}
+    # WALL 面识别：真实修复（2026-09-02）——此前这里用 `tag_boundary_
+    # groups_for_mesh(mesh, fc)` + `mesh.boundary_bc_types` 独立重新
+    # 推导一遍边界分组，只依赖 `solver.mesh` 是否携带完整全局边界几何
+    # 信息，分布式场景下不成立。`solver.boundary_ghost_provider`（构建
+    # 时调的正是同一个 `tag_boundary_groups_for_mesh`，见
+    # fr_solver/boundary.py::build_boundary_ghost_provider）已经在单机/
+    # 全部分布式后端里正确初始化好，且它的 `group_code` 天然就是与
+    # 本函数需要的面索引空间一致（分布式场景下已按 rank 切好），直接
+    # 复用而不是重新推导——与 `_compute_wall_dirichlet_face_mask`
+    # （transport.py）识别 WALL 面的方式完全同一个模式。
+    provider = getattr(solver, "boundary_ghost_provider", None)
+    group_code = getattr(provider, "group_code", None)
+    code_to_config = getattr(provider, "code_to_config", None)
+    if group_code is None or code_to_config is None:
+        return None
+    wall_codes = [code for code, cfg in code_to_config.items() if cfg.get("type") == "WALL"]
     if not wall_codes:
         return None
-    is_wall_face = np.isin(group_code, list(wall_codes))
+    is_wall_face = np.isin(group_code, wall_codes)
     if not np.any(is_wall_face):
         return None
+
+    from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+    from autoflowcfd.core.fr_residual.inviscid import _distribute_from_face
+
+    mesh = solver.mesh
+    ops = solver.ops
+    flat = flat_face_override if flat_face_override is not None else get_flat_face_geometry(mesh, ops)
 
     n_cells, n_sps, n_vars = solver.state.U.shape
     n_prism = mesh.n_prism_cells
     n1d = mesh.n_points_1d
-    ops = solver.ops
     Q = solver.state.Q
     det_jacs = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
 
-    def extrap_to_face(cell: int, field: np.ndarray, axis: int, side: float) -> np.ndarray:
-        E = ops.boundary_extrap_prism[(axis, side)] if cell < n_prism else ops.boundary_extrap_tet[(axis, side)]
+    # native 四面体（`tet_basis_mode="native"`）支持（真实 bug 修复，
+    # 2026-09-02，见本函数模块文档"native tet + WMLES"一节）：此前
+    # `extrap_to_face`/下方的 `_distribute_from_face` 对四面体单元恒用
+    # 坍缩坐标专属算子（`ops.boundary_extrap_tet[(axis,side)]`/1D
+    # Radau/VCJH 修正函数导数），而 native 面的 `owner_axis`/`owner_side`
+    # 存的是复用的 excluded_vertex/哑值（见 face_kernels.py::
+    # FlatFaceGeometry 字段文档），拿去查坍缩坐标专用的矩阵字典在语义上
+    # 是错的（要么查到无意义的值，要么伪键不在 6 个合法 (axis,side)
+    # 组合里直接 KeyError）。改用 `owner_cube_face`（>=6 即 native，
+    # excluded_vertex=code-6，与 inviscid_kernel.py 界面项分派同一个
+    # 判据）分派到 native 专属算子：自身面外插矩阵改用
+    # `boundary_extrap_native_tet[excluded_vertex]`（按需 pad 到全局
+    # n_sps 宽度，与 face_kernels.py 界面项 kernel 同一个 pad 约定）；
+    # 面修正项改用 DG 提升算子 `lift_native_tet_padded[excluded_vertex]`
+    # 替代 `_distribute_from_face`（native 单纯形基没有"坍缩计算方向"，
+    # 1D 修正函数分布机制不适用，见 native_simplex_basis.py::
+    # build_native_tet_lift"弱形式提升定义"）。棱柱（`cell < n_prism`）
+    # 恒用坍缩坐标算子，不受 tet_basis_mode 影响（native 只针对四面体）。
+    _padded_extrap_native_cache: Dict[int, np.ndarray] = {}
+
+    def _get_padded_extrap_native(excluded_vertex: int) -> np.ndarray:
+        if excluded_vertex not in _padded_extrap_native_cache:
+            from autoflowcfd.fr.native_tet_padding import pad_native_tet_matrix_to_global
+            _padded_extrap_native_cache[excluded_vertex] = pad_native_tet_matrix_to_global(
+                ops.boundary_extrap_native_tet[excluded_vertex], n_sps, pad_axes=(1,)
+            )
+        return _padded_extrap_native_cache[excluded_vertex]
+
+    def extrap_to_face(cell: int, field: np.ndarray, axis: int, side: float, cube_face: int) -> np.ndarray:
+        if cube_face >= 6:
+            E = _get_padded_extrap_native(cube_face - 6)
+        elif cell < n_prism:
+            E = ops.boundary_extrap_prism[(axis, side)]
+        else:
+            E = ops.boundary_extrap_tet[(axis, side)]
         trailing = field.shape[1:]
-        flat = E @ field.reshape(field.shape[0], -1)
-        return flat.reshape((E.shape[0],) + trailing)
+        flat_field = E @ field.reshape(field.shape[0], -1)
+        return flat_field.reshape((E.shape[0],) + trailing)
 
     correction = np.zeros((n_cells, n_sps, n_vars))
     n_wall_faces_applied = 0
     y_plus_samples = []
 
     for f in np.nonzero(is_wall_face)[0]:
-        ffp = mesh.face_flux_points[f]
-        if not ffp.owner_is_primary:
+        if not flat.owner_is_primary[f]:
             continue
-        owner_cell = int(fc.owner_cell[f])
-        axis, side = ffp.owner_axis, ffp.owner_side
+        owner_cell = int(flat.owner_cell[f])
+        axis, side = int(flat.owner_axis[f]), float(flat.owner_side[f])
+        cube_face = int(flat.owner_cube_face[f])
 
-        Q_fp = extrap_to_face(owner_cell, Q[owner_cell], axis, side)  # (n_fp,5)
-        wd_fp = extrap_to_face(owner_cell, solver.wall_distance[owner_cell][:, None], axis, side)[:, 0]
+        Q_fp = extrap_to_face(owner_cell, Q[owner_cell], axis, side, cube_face)  # (n_fp,5)
+        wd_fp = extrap_to_face(
+            owner_cell, solver.wall_distance[owner_cell][:, None], axis, side, cube_face,
+        )[:, 0]
         wd_fp = np.maximum(wd_fp, 1e-8)
 
         rho_fp = Q_fp[:, 0]
         vel_fp = Q_fp[:, 1:4]
-        normal = ffp.true_normal  # (n_fp,3) 指向域外
+        normal = flat.true_normal[f]  # (n_fp,3) 指向域外
         vel_n = np.sum(vel_fp * normal, axis=1, keepdims=True)
         vel_tangent = vel_fp - vel_n * normal
 
@@ -125,10 +206,15 @@ def compute_wmles_wall_stress_correction(solver: Any) -> Optional[np.ndarray]:
         y_plus_samples.append(getattr(solver.wmles_model, "y_plus", np.array([])))
 
         # 剪应力对流体做负功（阻力），换算成动量源项：S_mom = -tau_w * area，
-        # 用与其余面校正项完全一致的 g_prime 投影/除以 det_jacs 组装方式。
-        momentum_fp = -tau_w * ffp.true_area_weight[:, None]
-        g_prime = ops.g_left if side < 0 else ops.g_right
-        contrib = _distribute_from_face(momentum_fp, n1d, axis, g_prime)  # (n_sps,3)
+        # 用与其余面校正项完全一致的 g_prime 投影/除以 det_jacs 组装方式
+        # （native 面改用 DG 提升算子，见上方 extrap_to_face 同一处
+        # native 分支说明）。
+        momentum_fp = -tau_w * flat.true_area_weight[f][:, None]
+        if cube_face >= 6:
+            contrib = ops.lift_native_tet_padded[cube_face - 6] @ momentum_fp  # (n_sps,3)
+        else:
+            g_prime = ops.g_left if side < 0 else ops.g_right
+            contrib = _distribute_from_face(momentum_fp, n1d, axis, g_prime)  # (n_sps,3)
         correction[owner_cell, :, 1:4] += contrib / det_jacs[owner_cell][:, None]
         n_wall_faces_applied += 1
 

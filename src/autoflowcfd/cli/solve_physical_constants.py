@@ -63,9 +63,9 @@ def resolve_physical_constants(ctx, values: Dict[str, Any], config_obj) -> Dict[
 # resolve_physical_constants 的通用 getattr 匹配对它们同样适用——可以直接
 # 把这两个名字加进调用方传的 values 字典里复用同一个函数，不需要专门的
 # 解析器。`turbulence_model` 例外：CLI/求解器用的字符串词汇
-# （none/sst/ddes/wmles/les）与 SteadyConfig.turbulence 字段的
-# TurbulenceModel 枚举（none/sst_kw/sa/des/ddes/wmles/les）命名不完全
-# 一致，必须显式映射，不能靠同名 getattr。
+# （none/sst/ddes/iddes/wmles/les）与 SteadyConfig.turbulence 字段的
+# TurbulenceModel 枚举（none/sst_kw/ddes/iddes/wmles/les）命名不完全
+# 一致（仅 sst_kw vs sst 一处），必须显式映射，不能靠同名 getattr。
 _TURBULENCE_ENUM_TO_CLI_STR = {
     "none": "none",
     "sst_kw": "sst",
@@ -73,10 +73,6 @@ _TURBULENCE_ENUM_TO_CLI_STR = {
     "iddes": "iddes",
     "wmles": "wmles",
     "les": "les",
-    # "sa"/"des" 故意不在映射表里——求解器从未实现这两种模型，见
-    # config/solver_config.py::TurbulenceModel 类文档；YAML 里真的写了
-    # 这两个值时应该让下面的 KeyError 转成明确报错，而不是静默映射到
-    # 一个错误的默认模型。
 }
 
 

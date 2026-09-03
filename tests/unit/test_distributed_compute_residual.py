@@ -44,6 +44,8 @@ max(abs(residual))/p_inf < 3e-5`）。分布式路径与单机路径在这类
 在某个退化单元残差本身量级偏大时会产生误导性的"相对误差"数字。
 """
 
+import copy
+
 import numpy as np
 import pytest
 
@@ -78,6 +80,32 @@ class _FakeHaloExchange:
 def mixed_mesh_and_ops():
     order = 2
     mesh = _build_synthetic_mixed_mesh(order)
+    ops = generate_fr_operators(order)
+    assert mesh.n_prism_cells == 2
+    assert mesh.n_cells == 4
+    return mesh, ops
+
+
+@pytest.fixture(scope="module")
+def mixed_mesh_and_ops_native():
+    """native 四面体（路径C）MPI 分布式移植（2026-09-02）验证用——与
+    `mixed_mesh_and_ops` 同一份合成网格，唯一区别是 tet_basis_mode="native"。
+
+    背景：`distributed_flat_face.py` 此前的模块文档一直写"分布式/MPI 路径
+    明确不支持 native 模式"，只把 native 相关字段原样透传、不引入分派。
+    本次移植前先决定性验证这个"不支持"的说法是否仍然成立——用本文件已经
+    建立的"分布式残差必须与单机路径逐位一致"判据直接测（见下方
+    TestDistributedResidualMatchesSingleMachineNative），结果证实：这套
+    透传机制本身就是完整、正确的（`owner_cube_face`/`neighbor_cube_face`
+    按面索引正确切片，`boundary_extrap_native`/`lift_native` 是与面无关
+    的全局常量查找表，原样传递即可），不需要任何额外分派代码——CPU 端
+    分布式残差计算复用的正是同一套已经支持 native 的
+    `compute_inviscid_interface_correction_kernel`/`compute_viscous_
+    interface_correction_kernel`，MPI 分区只影响单元切分方式，不影响
+    这两个 kernel 内部的 native/collapsed 分派逻辑。"不支持"的表述已经
+    过时，本次更新为"已验证支持"。"""
+    order = 2
+    mesh = _build_synthetic_mixed_mesh(order, tet_basis_mode="native")
     ops = generate_fr_operators(order)
     assert mesh.n_prism_cells == 2
     assert mesh.n_cells == 4
@@ -179,6 +207,145 @@ class TestDistributedResidualMatchesSingleMachine:
         # 抽取）产生不同的舍入噪声本身是预期的，不是正确性问题；这里
         # 用绝对容差而不是相对容差比较，避免在真值本身接近零时被
         # 无意义的"相对误差 248 倍"这类噪声比噪声的比值吓到。
+        np.testing.assert_allclose(residual_local, expected_local, atol=1e-8)
+
+    @pytest.mark.parametrize("rank", [0, 1])
+    def test_viscous_residual_with_wmles_matches(self, mixed_mesh_and_ops, rank):
+        """WMLES 壁面剪应力修正的分布式支持（2026-09-02）：核心判据与
+        上面的纯层流版本完全一致，唯一区别是同时激活一个真实 WALL 组
+        +真实 `WMLESModel`+`boundary_ghost_provider`。这也顺带覆盖了
+        `compute_wmles_wall_stress_correction` 本次改用 `flat_face_
+        override`/`boundary_ghost_provider` 之后的分布式正确性——此前
+        这条路径完全不存在（WMLES 是 MPI 分布式明确拒绝的湍流模型之一，
+        见 DistributedFRSolver.__init__ 文档）。"""
+        mesh, ops = mixed_mesh_and_ops
+        U = _uniform_freestream_U(mesh)
+        n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
+        mu = 1.8e-5
+        rho_inf = 1.225
+
+        from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
+        from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
+        from autoflowcfd.core.turbulence.wmles import WMLESModel
+        from autoflowcfd.core.utils.solver_helpers import compute_wmles_wall_stress_correction
+
+        # 真实 WALL 组：取一个真实边界面的 owner 单元打标签（与
+        # test_wmles_wall_bc_wiring.py 新增的端到端测试同一个手法）。
+        fc = mesh.face_connectivity
+        boundary_face = int(np.nonzero(fc.is_boundary)[0][0])
+        wall_cell = int(fc.owner_cell[boundary_face])
+        mesh.boundary_groups = {"wall_group": np.array([wall_cell], dtype=np.int64)}
+        mesh.boundary_bc_types = {"wall_group": "WALL"}
+
+        import types
+        root_stub = types.SimpleNamespace(
+            mesh=mesh, freestream={"rho_inf": rho_inf, "vel_inf": 30.0, "p_inf": 101325.0},
+            turb_model_name="WMLES", wmles_model=object(),  # 触发 is_no_slip=False
+        )
+        provider_global = build_boundary_ghost_provider(root_stub, bc_overrides={})
+        wall_distance = np.full((n_cells, n_sps), 1e-2)
+        wmles_model = WMLESModel(nu=mu / rho_inf)
+
+        Q = conserved_to_primitive(U[..., :5])
+        residual_single = compute_viscous_residual(
+            U, Q, ops, mesh, mu=mu, boundary_ghost_provider=provider_global,
+        )
+        facade = types.SimpleNamespace(
+            wmles_model=wmles_model, mesh=mesh, ops=ops, wall_distance=wall_distance,
+            state=types.SimpleNamespace(U=U, Q=Q), boundary_ghost_provider=provider_global,
+        )
+        correction_single = compute_wmles_wall_stress_correction(facade)
+        assert correction_single is not None, "test setup must produce at least one real WALL face"
+        residual_single = residual_single + correction_single[..., :residual_single.shape[-1]]
+
+        cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
+        partition = build_distributed_partition(fc, cell_partition, rank=rank, n_ranks=2)
+        dist_fc = build_distributed_flat_face(mesh, ops, partition, cell_partition=cell_partition)
+
+        provider_local = copy.copy(provider_global)
+        provider_local.group_code = provider_global.group_code[partition.local_faces]
+        wall_distance_compact = wall_distance[dist_fc.compact_global_ids]
+
+        n_halo = partition.n_halo
+        native_global_ids = (
+            np.concatenate([partition.local_cells, partition.halo_cells])
+            if n_halo > 0 else partition.local_cells
+        )
+        fake_halo = _FakeHaloExchange(U[native_global_ids])
+
+        U_local = U[partition.local_cells]
+        residual_local = distributed_compute_viscous_residual(
+            U_local, partition, fake_halo, dist_fc, mesh, ops, mu=mu,
+            boundary_ghost_provider=provider_local,
+            wmles_model=wmles_model, wall_distance_compact=wall_distance_compact,
+        )
+
+        expected_local = residual_single[partition.local_cells]
+        np.testing.assert_allclose(residual_local, expected_local, atol=1e-8)
+
+
+class TestDistributedResidualMatchesSingleMachineNative:
+    """native 四面体（路径C）MPI 分布式移植验证（2026-09-02）——与
+    `TestDistributedResidualMatchesSingleMachine` 完全同一判据/结构，
+    唯一区别是用 native tet_basis_mode 的网格/算子。"""
+
+    @pytest.mark.parametrize("rank", [0, 1])
+    def test_inviscid_residual_matches(self, mixed_mesh_and_ops_native, rank):
+        mesh, ops = mixed_mesh_and_ops_native
+        U = _uniform_freestream_U(mesh)
+        mach_ref = 0.2
+
+        residual_single = compute_inviscid_residual_fr(U, mesh, ops, mach_ref=mach_ref)
+
+        cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
+        fc = mesh.face_connectivity
+        partition = build_distributed_partition(fc, cell_partition, rank=rank, n_ranks=2)
+        dist_fc = build_distributed_flat_face(mesh, ops, partition, cell_partition=cell_partition)
+
+        n_halo = partition.n_halo
+        native_global_ids = (
+            np.concatenate([partition.local_cells, partition.halo_cells])
+            if n_halo > 0 else partition.local_cells
+        )
+        U_extended_correct = U[native_global_ids]
+        fake_halo = _FakeHaloExchange(U_extended_correct)
+
+        U_local = U[partition.local_cells]
+        residual_local = distributed_compute_inviscid_residual(
+            U_local, partition, fake_halo, dist_fc, mesh, ops, mach_ref=mach_ref,
+        )
+
+        expected_local = residual_single[partition.local_cells]
+        rel_diff = np.max(np.abs(residual_local - expected_local)) / 101325.0
+        assert rel_diff < 3e-5, f"native: 分布式与单机残差不一致: rel_diff={rel_diff:.3e}"
+
+    @pytest.mark.parametrize("rank", [0, 1])
+    def test_viscous_residual_matches(self, mixed_mesh_and_ops_native, rank):
+        mesh, ops = mixed_mesh_and_ops_native
+        U = _uniform_freestream_U(mesh)
+        mu = 1.8e-5
+
+        residual_single = compute_viscous_residual(U, None, ops, mesh, mu=mu)
+
+        cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
+        fc = mesh.face_connectivity
+        partition = build_distributed_partition(fc, cell_partition, rank=rank, n_ranks=2)
+        dist_fc = build_distributed_flat_face(mesh, ops, partition, cell_partition=cell_partition)
+
+        n_halo = partition.n_halo
+        native_global_ids = (
+            np.concatenate([partition.local_cells, partition.halo_cells])
+            if n_halo > 0 else partition.local_cells
+        )
+        U_extended_correct = U[native_global_ids]
+        fake_halo = _FakeHaloExchange(U_extended_correct)
+
+        U_local = U[partition.local_cells]
+        residual_local = distributed_compute_viscous_residual(
+            U_local, partition, fake_halo, dist_fc, mesh, ops, mu=mu,
+        )
+
+        expected_local = residual_single[partition.local_cells]
         np.testing.assert_allclose(residual_local, expected_local, atol=1e-8)
 
 

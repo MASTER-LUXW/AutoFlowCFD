@@ -32,11 +32,11 @@ from .post_helpers import (
 
 @click.command(name="transient-mean")
 @click.option("--case", "-c", required=True, type=click.Path(exists=True),
-              help="Case directory")
+              help="案例目录")
 @click.option("--grid", "-g", type=click.Path(exists=True),
-              help="Grid file path (if not in case directory)")
+              help="网格文件路径（如果不在案例目录中）")
 @click.option("--output", "-o", type=click.Path(), default="mean_flow.vtk",
-              help="Output file")
+              help="输出文件")
 @click.option("--warmup-time", type=float, default=0.0,
               help="排除物理时间早于此值的 checkpoint（启动瞬态，例如从"
                    "静止/自由来流阶跃启动时尾流/边界层尚未发展完全的阶段），"
@@ -48,22 +48,19 @@ from .post_helpers import (
                    "系数统计（不猜一个可能误导的值）。")
 def transient_mean(case: str, grid: Optional[str], output: str,
                     warmup_time: float, reference_area: Optional[float]) -> None:
-    """Calculate time-averaged flow field.
+    """计算时间平均流场。
 
-    Compute mean flow statistics from transient simulation data by
-    accumulating every saved checkpoint in the case directory's
-    checkpoints/ folder (see TransientStatistics.accumulate) and
-    exporting the resulting node-resolution mean fields to VTK.
-    Also accumulates time-averaged aerodynamic coefficients (Cd/Cl/Cs)
-    when a reference area is available (P-03).
+    通过累积案例目录 checkpoints/ 文件夹下每个已保存的 checkpoint（参见
+    TransientStatistics.accumulate），从瞬态仿真数据计算平均流场统计量，
+    并把节点分辨率的平均场导出为 VTK。当参考面积可用时（P-03），同时
+    累积时间平均气动系数（Cd/Cl/Cs）。
 
     Args:
-        case: Case directory
-        grid: Grid file path (auto-detected from case dir if omitted)
-        output: Output file
-        warmup_time: physical time before which checkpoints are excluded
-            from the statistics (startup transient)
-        reference_area: reference area for aerodynamic coefficients
+        case: 案例目录
+        grid: 网格文件路径（如果省略则从案例目录自动检测）
+        output: 输出文件
+        warmup_time: 排除早于此物理时间的 checkpoint（启动瞬态）
+        reference_area: 气动系数用的参考面积
 
     Examples:
         $ autoflowcfd post transient-mean --case transient_results/
@@ -330,10 +327,9 @@ def transient_psd(case: str, grid: Optional[str], output: str, probe_location: t
             times.append(float(metadata.get('current_time', iteration)))
             pressures_per_ckpt.append([float(p_field[idx]) for idx in probe_cell_idx])
 
-        # PSD via FFT assumes uniform sampling - use the median spacing
-        # between saved checkpoints (they are normally saved at a fixed
-        # iteration/time interval) and warn if the actual spacing varies
-        # a lot, rather than silently feeding a non-uniform series into rfft.
+        # 基于 FFT 的 PSD 假设采样均匀——用已保存 checkpoint 之间的
+        # 间隔中位数作为 dt（通常按固定迭代数/时间间隔保存），如果实际
+        # 间隔波动很大就给出警告，而不是静默把非均匀采样序列喂进 rfft。
         dts = np.diff(times)
         dt = float(np.median(dts)) if len(dts) else 1.0
         if len(dts) and np.std(dts) > 0.1 * abs(dt):

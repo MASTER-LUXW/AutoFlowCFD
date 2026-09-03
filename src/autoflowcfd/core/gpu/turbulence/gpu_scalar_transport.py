@@ -6,24 +6,62 @@ AutoFlowCFD V2.0 - GPU 版湍流标量（k/omega）输运残差 (#7 第四次评
 逐点源项 ODE，`update_fields_gpu` 的 `transport_k`/`transport_omega`
 参数从未被调用方传入，见 gpu_turbulence_sst.py 模块文档）。
 
-与 CPU 版的一处刻意保留的行为差异（不是遗漏，是逐字复刻 CPU 实际行为）：
-CPU 版 `extrapolate_scalar_to_faces_kernel`/`distribute_corrections_to_
-cells_kernel[_colored]` 都不做 owner_is_primary/neighbor_is_primary 过滤
-——与 `fr_residual/inviscid_kernel.py`/`viscous_flux_kernel.py`（及其
-GPU 版 gpu_inviscid.py/gpu_viscous.py）不同，那两处数值上被证实必须过滤
-（棱柱四边形侧面拆分面场景，见 gpu_inviscid.py 模块文档）。这里没有新增
-一个 CPU 没有的过滤，避免制造 GPU/CPU 分歧；若 CPU 版本身在分裂面场景
-下有同一类问题，那是 transport.py/transport_kernel.py 自身的既有行为，
-不在本次 GPU 移植范围内。
-
 不需要图着色分组：CPU numba 版本用图着色规避多线程写冲突（per-thread
 buffer 的替代方案），但 `cp.scatter_add` 本身就正确处理重复索引累加，
-对全部面一次性向量化处理即可，颜色分组对 GPU 版本的正确性和性能都没有
-必要（也没有 owner_is_primary 那样的强制要求）。
+对全部面一次性向量化处理即可，颜色分组对 GPU 版本的正确性没有必要。
 
 分配机制复用 `gpu_inviscid_volume.py::distribute_face_correction_to_sps`
 （V2.0 专家组盲审第四轮修复的 gather 机制，与 CPU numba kernel
-`_distribute_point_scalar` 完全一致），不是矩阵乘法。
+`_distribute_point_scalar` 完全一致，仅 collapsed 面使用），不是矩阵乘法。
+
+真实 bug 修复 + native 四面体（路径C）完整补全（2026-09-03，"把 native
+全部补充完整"排查——本机没有真实 CuPy，本模块此前从未被真正执行验证过，
+与本次同一排查发现的 gpu_inviscid.py/gpu_viscous.py/gpu_gradients.py 系列
+bug 同源）：
+
+1. **owner_is_primary/neighbor_is_primary 过滤缺失**（不是"刻意保留的
+   行为差异"——本模块旧文档曾这样声称，但去核对 CPU 参考
+   `transport_kernel.py::distribute_corrections_to_cells_kernel` 发现
+   CPU 早在 2026-09-02（该函数自己的文档"真实 bug 修复"一节）就已经
+   补上了这个过滤，旧文档的说法是过时信息，不是事实）：B-8 混合拆分面
+   场景下，同一个物理面会被拆成 2 条记录，只有 `owner_is_primary=True`/
+   `neighbor_is_primary=True` 的那条记录才应该贡献对应侧——本模块
+   `_distribute_scalar_correction_gpu` 此前对全部面（含非 primary 的
+   重复记录）无条件累加，等价于把这批面的贡献重复计入。现在补齐过滤，
+   与 CPU 版逐字对应。
+
+2. **完全没有 native 分派**：`_extrapolate_scalar_to_faces_gpu` 自身
+   外插、`_distribute_scalar_correction_gpu` 面校正分配，此前都无条件
+   走 collapsed 路径（`boundary_extrap[celltype,axis,side_idx]` 查表 +
+   `distribute_face_correction_to_sps` 1D 修正函数分布）——对 native
+   四面体面，`owner_axis`/`neighbor_axis` 存的是复用的 excluded_vertex
+   （0~3），既会在 `axis` 维度只有 3 的表上越界（`==3` 时崩溃），修复
+   越界后也仍然是错误结果（native 单纯形基没有"坍缩计算方向"，1D 分布
+   机制本身不适用，必须用 `boundary_extrap_native`/`lift_native` DG
+   提升算子）。现在按 CPU 版 `_extrap_owner_scalar_to_faces`/
+   `distribute_corrections_to_cells_kernel` 的 native 分支逐字补齐：
+   - 自身外插复用 `gpu_inviscid.py::_native_self_extrap`（形状签名
+     `(n,n_fp,n_sps)` 与变量个数无关，标量场直接复用不需要改写）。
+   - 面校正分配新增标量版 `_native_or_collapsed_contrib_scalar`（对照
+     `gpu_inviscid.py::_native_or_collapsed_contrib`，去掉 5 变量末轴，
+     `jump`/`contrib` 都是 `(n,n_fp)`/`(n,n_sps)`）。与 CPU 版一致，
+     加权方式按面类型分派（collapsed 面乘 `|adj_row|`，native 面乘
+     `true_area_weight`），加权发生在分配阶段，不再像旧版那样在调用方
+     （`compute_scalar_convection/diffusion_residual_gpu`）提前统一乘
+     `|owner_adj_row_exact|`——旧版这个提前加权对 native 面是错误的
+     （native 面应该用 `true_area_weight` 而不是 `|adj_row|`），必须
+     像 CPU 版一样把**未加权**的 `raw_jump_fp` 一路传到分配阶段，加权
+     方式才能按面类型正确分派。
+   - `compute_scalar_convection_residual_gpu`/
+     `compute_scalar_diffusion_residual_gpu` 的四面体段 divergence
+     收缩此前无条件用 `ops_data['D_3d_tet']`（坍缩坐标微分算子），与
+     `gpu_gradients.py::compute_physical_gradient_gpu` 同一类遗漏——
+     改用 `gpu_gradients.py` 已确立的自描述判据
+     `'D_native_tet_padded' in ops_data`。
+
+Args/Returns 类型标注、`_distribute_scalar_correction_gpu` 的调用方签名
+均已同步更新（`correction_fp` 参数改名 `raw_jump_fp`，语义从"已加权"变
+"未加权"，与 CPU 版 `raw_jump_fp` 命名及语义完全对齐）。
 """
 
 from typing import Optional, Tuple
@@ -32,6 +70,39 @@ from autoflowcfd.core.gpu import get_cupy
 from autoflowcfd.core.gpu.residual.gpu_volume_contract import gpu_contract_shared_operator_2axis
 from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_gradient_gpu
 from autoflowcfd.core.gpu.residual.gpu_inviscid_volume import distribute_face_correction_to_sps
+from autoflowcfd.core.gpu.residual.gpu_inviscid import _native_self_extrap
+
+
+def _native_or_collapsed_contrib_scalar(
+    cp, is_native, cube_face_code, lift_native, true_area_weight_face, jump, contrib_collapsed,
+):
+    """标量版 `gpu_inviscid.py::_native_or_collapsed_contrib`：native 面用
+    `lift_native[excluded_vertex] @ (true_area_weight ⊙ jump)`，collapsed
+    面用调用方已经算好的 `contrib_collapsed`——与 CPU 版
+    `transport_kernel.py::distribute_corrections_to_cells_kernel` 的
+    native/collapsed 分支逐字对应，仅去掉 5 变量的末轴（标量场没有这一维）。
+
+    Args:
+        is_native, cube_face_code: (n,)
+        lift_native: (4, n_sps, n_fp)
+        true_area_weight_face: (n, n_fp)
+        jump: (n, n_fp) 未加权原始跳变量
+        contrib_collapsed: (n, n_sps)
+
+    Returns:
+        contrib: (n, n_sps)
+    """
+    # 与 `_native_self_extrap`/`_native_or_collapsed_contrib` 同一处修复：
+    # `tet_basis_mode="collapsed"` 时 `lift_native` 是空数组
+    # `(0, n_sps, n_fp)`，`is_native` 恒为 False，短路直接返回
+    # `contrib_collapsed`，避免对空数组做越界 gather。
+    if lift_native.shape[0] == 0:
+        return contrib_collapsed
+    excluded_vertex = cp.clip(cube_face_code - 6, 0, lift_native.shape[0] - 1)
+    lift = lift_native[excluded_vertex]  # (n, n_sps, n_fp)
+    weighted_jump = true_area_weight_face * jump  # (n, n_fp)
+    contrib_native = cp.einsum('nsf,nf->ns', lift, weighted_jump)  # (n, n_sps)
+    return cp.where(is_native[:, None], contrib_native, contrib_collapsed)
 
 
 def _extrapolate_scalar_to_faces_gpu(
@@ -67,7 +138,18 @@ def _extrapolate_scalar_to_faces_gpu(
         celltype_o = compact_cell_type[oc]
     else:
         celltype_o = cp.where(oc < n_prism, 0, 1)
-    E_o = ff.boundary_extrap[celltype_o, oax, oside_idx]  # (n_faces, n_fp, n_sps)
+
+    # native 四面体（路径C）自身外插（2026-09-03 补齐，见模块文档）：
+    # `oax` 对 native 面存的是复用的 excluded_vertex（0~3），不能无条件
+    # gather 只有 3 个轴的 `boundary_extrap`——先 clip 到安全哑值 0，
+    # 再用 `_native_self_extrap` 按 `oc_code_o>=6` 分派到
+    # `boundary_extrap_native[excluded_vertex]`；纯 collapsed 网格下
+    # `boundary_extrap_native` 是空数组，短路直接退化为原有行为。
+    oc_code_o = ff.owner_cube_face
+    is_native_o = oc_code_o >= 6
+    oax_safe = cp.where(is_native_o, 0, oax)
+    E_o_collapsed = ff.boundary_extrap[celltype_o, oax_safe, oside_idx]  # (n_faces, n_fp, n_sps)
+    E_o = _native_self_extrap(cp, is_native_o, oc_code_o, ff.boundary_extrap_native, E_o_collapsed)
     phi_owner = cp.einsum('fps,fs->fp', E_o, scalar_sps[oc])
 
     c0 = ff.neighbor_src0_cell
@@ -121,38 +203,76 @@ def _extrapolate_scalar_to_faces_gpu(
     return phi_owner, phi_neighbor
 
 
-def _distribute_scalar_correction_gpu(cp, ff, correction_fp, det_jacs, n_cells, n_sps):
+def _distribute_scalar_correction_gpu(cp, ff, raw_jump_fp, det_jacs, n_cells, n_sps):
     """CuPy 版 `distribute_corrections_to_cells_kernel[_colored]`，标量版，
     对全部面一次性向量化处理（不分色，见模块文档）。
 
-    correction_fp: (n_faces, n_fp)
+    2026-09-03 重写（见模块文档"真实 bug 修复 + native 完整补全"一节）：
+    (1) 新增 owner_is_primary/neighbor_is_primary 过滤，与 CPU 版
+        2026-09-02 的修复对齐；(2) 参数从"已按 |adj_row| 预加权"的
+        `correction_fp` 改为**未加权**的 `raw_jump_fp`，加权方式（collapsed
+        用 |adj_row|，native 用 true_area_weight）延后到本函数内部按面
+        类型分派，与 CPU 版 `_weighted_jump_collapsed`/`_weighted_jump_
+        native` 逐字对应；(3) 新增 native 分支（`boundary_extrap_native`/
+        `lift_native` DG 提升算子）。
+
+    raw_jump_fp: (n_faces, n_fp) 未加权原始物理跳变量
     Returns: (n_cells, n_sps)
     """
     correction = cp.zeros((n_cells, n_sps), dtype=cp.float64)
 
-    oc = ff.owner_cell
-    oax = ff.owner_axis
-    oside = ff.owner_side
-    contrib_owner = distribute_face_correction_to_sps(
-        cp, correction_fp, oax, oside, ff.dist_fp_of_sp, ff.dist_axis_coord_of_sp,
-        ff.g_left, ff.g_right,
-    )  # (n_faces, n_sps)
-    contrib_owner = contrib_owner / det_jacs[oc]
-    cp.scatter_add(correction, (oc, slice(None)), -contrib_owner)
+    # ── owner 侧分配（B-8 混合拆分面：只有 owner_is_primary 的记录才
+    # 贡献 owner 侧，见模块文档）──
+    owner_primary = ff.owner_is_primary
+    sel_o = cp.where(owner_primary)[0]
+    if bool(sel_o.shape[0] > 0):
+        oc = ff.owner_cell[sel_o]
+        oax = ff.owner_axis[sel_o]
+        oside = ff.owner_side[sel_o]
+        raw_o = raw_jump_fp[sel_o]
 
+        oc_code_o = ff.owner_cube_face[sel_o]
+        is_native_o = oc_code_o >= 6
+        oax_safe = cp.where(is_native_o, 0, oax)
+
+        adj_mag_o = cp.linalg.norm(ff.owner_adj_row_exact[sel_o], axis=-1)
+        weighted_o_collapsed = adj_mag_o * raw_o
+        contrib_o_collapsed = distribute_face_correction_to_sps(
+            cp, weighted_o_collapsed, oax_safe, oside, ff.dist_fp_of_sp, ff.dist_axis_coord_of_sp,
+            ff.g_left, ff.g_right,
+        )  # (nO, n_sps)
+        contrib_o = _native_or_collapsed_contrib_scalar(
+            cp, is_native_o, oc_code_o, ff.lift_native, ff.true_area_weight[sel_o], raw_o, contrib_o_collapsed,
+        )
+        contrib_o = contrib_o / det_jacs[oc]
+        cp.scatter_add(correction, (oc, slice(None)), -contrib_o)
+
+    # ── neighbor 侧分配（内部面，同一处 B-8 过滤）──
     nc = ff.neighbor_cell
-    has_neighbor = nc >= 0
+    neighbor_primary = ff.neighbor_is_primary
+    has_neighbor = (nc >= 0) & neighbor_primary
     if bool(cp.any(has_neighbor)):
-        sel = cp.where(has_neighbor)[0]
-        nc_sel = nc[sel]
-        nax_sel = ff.neighbor_axis[sel]
-        nside_sel = ff.neighbor_side[sel]
-        contrib_neighbor = distribute_face_correction_to_sps(
-            cp, correction_fp[sel], nax_sel, nside_sel,
+        sel_n = cp.where(has_neighbor)[0]
+        nc_sel = nc[sel_n]
+        nax_sel = ff.neighbor_axis[sel_n]
+        nside_sel = ff.neighbor_side[sel_n]
+        raw_n = raw_jump_fp[sel_n]
+
+        nc_code_n = ff.neighbor_cube_face[sel_n]
+        is_native_n = nc_code_n >= 6
+        nax_safe = cp.where(is_native_n, 0, nax_sel)
+
+        adj_mag_n = cp.linalg.norm(ff.neighbor_adj_row_exact[sel_n], axis=-1)
+        weighted_n_collapsed = adj_mag_n * raw_n
+        contrib_n_collapsed = distribute_face_correction_to_sps(
+            cp, weighted_n_collapsed, nax_safe, nside_sel,
             ff.dist_fp_of_sp, ff.dist_axis_coord_of_sp, ff.g_left, ff.g_right,
         )
-        contrib_neighbor = contrib_neighbor / det_jacs[nc_sel]
-        cp.scatter_add(correction, (nc_sel, slice(None)), contrib_neighbor)
+        contrib_n = _native_or_collapsed_contrib_scalar(
+            cp, is_native_n, nc_code_n, ff.lift_native, ff.true_area_weight[sel_n], raw_n, contrib_n_collapsed,
+        )
+        contrib_n = contrib_n / det_jacs[nc_sel]
+        cp.scatter_add(correction, (nc_sel, slice(None)), contrib_n)
 
     return correction
 
@@ -176,8 +296,15 @@ def compute_scalar_convection_residual_gpu(
             ops_data['D_3d_prism'], F_tilde[:n_prism, :, :, None]
         )[..., 0]
     if n_cells > n_prism:
+        # native 四面体 D 矩阵分派（2026-09-03 补齐，见模块文档 /
+        # gpu_gradients.py::compute_physical_gradient_gpu 同一处判据）。
+        D_tet_op = (
+            ops_data['D_native_tet_padded']
+            if 'D_native_tet_padded' in ops_data
+            else ops_data['D_3d_tet']
+        )
         div_F[n_prism:] = gpu_contract_shared_operator_2axis(
-            ops_data['D_3d_tet'], F_tilde[n_prism:, :, :, None]
+            D_tet_op, F_tilde[n_prism:, :, :, None]
         )[..., 0]
 
     residual = -div_F / det_jacs
@@ -197,10 +324,13 @@ def compute_scalar_convection_residual_gpu(
     phi_upwind = cp.where(mass_flux >= 0, phi_o, phi_n)
     delta_phi = phi_upwind - phi_o
 
-    adj_mag = cp.linalg.norm(ff.owner_adj_row_exact, axis=-1)
-    correction_fp = adj_mag * mass_flux * delta_phi
+    # 未加权原始跳变量（2026-09-03 修复，见 `_distribute_scalar_correction_
+    # gpu` 文档）：不再在这里提前乘 |owner_adj_row_exact|——加权方式（
+    # collapsed 用 |adj_row|，native 用 true_area_weight）延后到分配阶段
+    # 按面类型分派，与 CPU 版 `raw_jump_fp = mass_flux * delta_phi` 逐字对应。
+    raw_jump_fp = mass_flux * delta_phi
 
-    interface_correction = _distribute_scalar_correction_gpu(cp, ff, correction_fp, det_jacs, n_cells, n_sps)
+    interface_correction = _distribute_scalar_correction_gpu(cp, ff, raw_jump_fp, det_jacs, n_cells, n_sps)
     return residual + interface_correction
 
 
@@ -224,8 +354,14 @@ def compute_scalar_diffusion_residual_gpu(
             ops_data['D_3d_prism'], G_tilde[:n_prism, :, :, None]
         )[..., 0]
     if n_cells > n_prism:
+        # native 四面体 D 矩阵分派（2026-09-03 补齐，同上）。
+        D_tet_op = (
+            ops_data['D_native_tet_padded']
+            if 'D_native_tet_padded' in ops_data
+            else ops_data['D_3d_tet']
+        )
         div_G[n_prism:] = gpu_contract_shared_operator_2axis(
-            ops_data['D_3d_tet'], G_tilde[n_prism:, :, :, None]
+            D_tet_op, G_tilde[n_prism:, :, :, None]
         )[..., 0]
 
     residual = div_G / det_jacs
@@ -243,10 +379,12 @@ def compute_scalar_diffusion_residual_gpu(
     delta_grad = 0.5 * (grad_n - grad_o)
     flux_jump_phys = gamma_face * cp.sum(delta_grad * ff.true_normal, axis=-1)
 
-    adj_mag = cp.linalg.norm(ff.owner_adj_row_exact, axis=-1)
-    correction_fp = adj_mag * flux_jump_phys
+    # 未加权原始跳变量（2026-09-03 修复，同 convection 侧，见
+    # `_distribute_scalar_correction_gpu` 文档），与 CPU 版
+    # `raw_jump_fp = flux_jump_phys` 逐字对应。
+    raw_jump_fp = flux_jump_phys
 
-    interface_correction = _distribute_scalar_correction_gpu(cp, ff, correction_fp, det_jacs, n_cells, n_sps)
+    interface_correction = _distribute_scalar_correction_gpu(cp, ff, raw_jump_fp, det_jacs, n_cells, n_sps)
     return residual - interface_correction
 
 
@@ -306,13 +444,18 @@ def compute_turbulence_transport_residual_gpu(
     """GPU 版 k/omega 完整输运残差入口（对流+扩散），与 CPU 版
     `compute_turbulence_transport_residual` 逐字对应。
 
-    真实差异说明（不是简化）：不做 CPU 版末尾的
-    `suppress_residual_outliers`（troubled_cell.py 的中位数离群值抑制，
-    该函数是纯 numba/numpy 实现，本身就没有 GPU 版本）——只保留 CPU 版
-    自己也称为"最后一道防线"的 isfinite 归零。这是本次移植唯一没有
-    对应实现的 CPU 侧安全网，明确记录，不是隐藏的简化：GPU 湍流输运
-    整体仍然是本项目未在真实硬件验证过的新功能，缺这一层次要防护不会
-    掩盖其余数值行为，但退化网格上的离群值抑制确实比 CPU 路径弱。
+    2026-09-02 补齐：此前这里不做 CPU 版末尾的 `suppress_residual_
+    outliers`（troubled_cell.py 的中位数离群值抑制机制3），理由是"该
+    函数是纯 numba/numpy 实现，本身就没有 GPU 版本"——但 `gpu_inviscid.
+    py::compute_inviscid_residual_fr_gpu` 处理平均流残差的同一个问题
+    时，从未真正重新实现一份 GPU 版本，而是直接 `cp.asnumpy` 把残差
+    倒回 CPU、调用现成的 numba 版 `suppress_residual_outliers`、再
+    `cp.asarray` 传回 GPU——本函数此前没有照抄这个已经在生产路径上使用
+    的既有模式，是一处遗漏，不是"没有对应实现"（对应实现本来就不需要
+    在 GPU 上重写，跨设备复制小数组的开销远小于跳过这层安全网的风险）。
+    现在补齐，与 `gpu_inviscid.py` 同一个模式：小规模跨设备拷贝（形状
+    (n_cells,n_sps)，不是大数组，每步 2 次可忽略的 H2D/D2H 往返），
+    换来与 CPU 路径逐位一致的离群值抑制行为。
 
     Args:
         solver: GPUFRSolver 实例，需要 turb_model_gpu 已初始化
@@ -396,6 +539,22 @@ def compute_turbulence_transport_residual_gpu(
         turb.omega_field, gamma_w, solver.mesh_data, solver.ops_data, ff, n_cells, n_prism, n_sps,
     )
     domega_dt_transport = (conv_w + diff_w) / cp.maximum(rho, 1e-10)
+
+    # 机制3离群值抑制（2026-09-02 补齐，与 gpu_inviscid.py 同一个"跨设备
+    # 拷贝复用 CPU numba 实现"模式，见上方函数文档）——CPU 版
+    # reference_field 用的是 k_field/omega_field 自身（不是残差本身），
+    # 逐字对应 transport.py 里的同一处调用。
+    from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
+    dk_dt_np = cp.asnumpy(dk_dt_transport)
+    domega_dt_np = cp.asnumpy(domega_dt_transport)
+    k_field_np = cp.asnumpy(turb.k_field)
+    omega_field_np = cp.asnumpy(turb.omega_field)
+    dk_dt_np = suppress_residual_outliers(dk_dt_np[:, :, None], k_field_np[:, :, None])[:, :, 0]
+    domega_dt_np = suppress_residual_outliers(
+        domega_dt_np[:, :, None], omega_field_np[:, :, None]
+    )[:, :, 0]
+    dk_dt_transport = cp.asarray(dk_dt_np)
+    domega_dt_transport = cp.asarray(domega_dt_np)
 
     dk_dt_transport = cp.where(cp.isfinite(dk_dt_transport), dk_dt_transport, 0.0)
     domega_dt_transport = cp.where(cp.isfinite(domega_dt_transport), domega_dt_transport, 0.0)

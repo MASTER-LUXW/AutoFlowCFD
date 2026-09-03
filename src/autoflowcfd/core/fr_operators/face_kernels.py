@@ -240,52 +240,16 @@ class FlatFaceGeometry:
     n_colors: int
 
 
-def _build_source_arrays(sources_per_face, n_faces: int, n_fp: int, n_sps: int):
-    """把每个面最多 2 个 `(cell_id, matrix)` 的变长列表，拆成稠密槽 0 +
-    稀疏槽 1 两部分。sources_per_face[f] 是该面的 sources 列表（长度 0/1/2）。
-    """
-    src0_cell = np.full(n_faces, -1, dtype=np.int64)
-    src0_mat = np.zeros((n_faces, n_fp, n_sps), dtype=np.float64)
-    src1_idx = np.full(n_faces, -1, dtype=np.int64)
-
-    extra_cells = []
-    extra_mats = []
-
-    for f in range(n_faces):
-        sources = sources_per_face[f]
-        n_src = len(sources)
-        if n_src == 0:
-            continue
-        if n_src > 2:
-            raise ValueError(
-                f"face {f}: {n_src} sources，超出网格生成器保证的 1~2 个来源不变量"
-                f"（见 fr/face_flux_points_merge.py::_resolve_multi_source 文档）——"
-                f"说明该不变量已被破坏，必须先查清原因，不能静默截断/忽略多出来的来源。"
-            )
-        cell0, mat0 = sources[0]
-        src0_cell[f] = cell0
-        src0_mat[f] = mat0
-        if n_src == 2:
-            cell1, mat1 = sources[1]
-            src1_idx[f] = len(extra_cells)
-            extra_cells.append(cell1)
-            extra_mats.append(mat1)
-
-    src1_cell = np.asarray(extra_cells, dtype=np.int64) if extra_cells else np.empty((0,), dtype=np.int64)
-    src1_mat = (
-        np.stack(extra_mats, axis=0) if extra_mats else np.empty((0, n_fp, n_sps), dtype=np.float64)
-    )
-    return src0_cell, src0_mat, src1_idx, src1_cell, src1_mat
-
-
 def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     """把 `mesh.face_flux_points` + `mesh.face_connectivity` 展平成
     `FlatFaceGeometry`。不缓存（缓存由 `get_flat_face_geometry` 负责），
     每次调用都重新构建——调用方必须通过 `get_flat_face_geometry` 走缓存。
 
-    快速路径：当 `mesh.face_flux_points` 是 `_KernelFaceData`（numba kernel
-    直接输出的 flat 数组容器）时，跳过 180 万次逐面 Python 对象访问，直接
-    使用已有的 flat 数组。
+    `mesh.face_flux_points` 恒为 `_KernelFaceData`（numba kernel 直接输出
+    的 flat 数组容器，见 `fr/face_flux_points_merge.py::build_face_flux_
+    points` 唯一的 return 语句）——本函数不再有"逐面 Python 对象访问"的
+    慢速路径分支（2026-09-03 删除，全仓库确认过该分支自 2026-08-30 起
+    从未有任何调用方触发过，见该次删除记录）。
     """
     fc = mesh.face_connectivity
     ffp_data = mesh.face_flux_points
@@ -295,92 +259,51 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     n_sps = n1d ** 3
     n_prism = mesh.n_prism_cells
 
-    # 原始 cube face 编码：不受快速/慢速路径影响，`fc` 本身就带着，
-    # native 分支据此判断（code>=6，见 FlatFaceGeometry.owner_cube_face
-    # 文档），不依赖 owner_axis/owner_side 那套可能有歧义的复用槽位。
+    # 原始 cube face 编码：`fc` 本身就带着，native 分支据此判断（code>=6，
+    # 见 FlatFaceGeometry.owner_cube_face 文档），不依赖 owner_axis/
+    # owner_side 那套可能有歧义的复用槽位。
     owner_cube_face = fc.owner_cube_face.astype(np.int64)
     neighbor_cube_face = fc.neighbor_cube_face.astype(np.int64)
 
-    # 检查是否为 _KernelFaceData 快速路径
     from autoflowcfd.fr.face_flux_points_merge import _KernelFaceData
-    if isinstance(ffp_data, _KernelFaceData):
-        # 快速路径：直接使用 kernel 输出的 flat 数组
-        owner_axis = ffp_data.owner_axis
-        owner_side = ffp_data.owner_side
-        neighbor_axis = ffp_data.neighbor_axis
-        neighbor_side = ffp_data.neighbor_side
-        owner_is_primary = ffp_data.owner_is_primary
-        neighbor_is_primary = ffp_data.neighbor_is_primary
-        true_normal = ffp_data.true_normal
-        neighbor_src0_cell = ffp_data.nb_src0_cell
-        neighbor_src0_mat = ffp_data.nb_src0_mat
-        neighbor_src1_idx = ffp_data.nb_src1_idx
-        owner_src0_cell = ffp_data.ow_src0_cell
-        owner_src0_mat = ffp_data.ow_src0_mat
-        owner_src1_idx = ffp_data.ow_src1_idx
-        # extra sources → src1（紧凑数组，通过 src1_idx 索引）
-        neighbor_src1_cell = ffp_data.nb_extra_cell
-        neighbor_src1_mat = ffp_data.nb_extra_mat
-        owner_src1_cell = ffp_data.ow_extra_cell
-        owner_src1_mat = ffp_data.ow_extra_mat
-        owner_adj_row_exact = ffp_data.owner_adj_row_exact
-        neighbor_adj_row_exact = ffp_data.neighbor_adj_row_exact
-        true_area_weight = ffp_data.true_area_weight
-        # 混合分组面（B-8）：merge 层检测后填入，_KernelFaceData 恒定提供这 6 个数组。
-        mixed_nb_partner = ffp_data.mixed_nb_partner
-        mixed_nb_mask = ffp_data.mixed_nb_mask
-        mixed_ow_partner = ffp_data.mixed_ow_partner
-        mixed_ow_mask = ffp_data.mixed_ow_mask
-        mixed_bnd_face = ffp_data.mixed_bnd_face
-        mixed_p0_bnd_frac = ffp_data.mixed_p0_bnd_frac
-    else:
-        # 慢速路径：逐面访问 FaceFluxPointGeometry 对象
-        owner_axis = np.empty(n_faces, dtype=np.int64)
-        owner_side = np.empty(n_faces, dtype=np.float64)
-        neighbor_axis = np.empty(n_faces, dtype=np.int64)
-        neighbor_side = np.empty(n_faces, dtype=np.float64)
-        owner_is_primary = np.empty(n_faces, dtype=np.bool_)
-        neighbor_is_primary = np.empty(n_faces, dtype=np.bool_)
-        true_normal = np.empty((n_faces, n_fp, 3), dtype=np.float64)
-        true_area_weight = np.empty((n_faces, n_fp), dtype=np.float64)
-
-        neighbor_sources_per_face = [None] * n_faces
-        owner_sources_per_face = [None] * n_faces
-
-        for f in range(n_faces):
-            ffp = ffp_data[f]
-            owner_axis[f] = ffp.owner_axis
-            owner_side[f] = ffp.owner_side
-            neighbor_axis[f] = ffp.neighbor_axis
-            neighbor_side[f] = ffp.neighbor_side
-            owner_is_primary[f] = ffp.owner_is_primary
-            neighbor_is_primary[f] = ffp.neighbor_is_primary
-            true_normal[f] = ffp.true_normal
-            true_area_weight[f] = ffp.true_area_weight
-            neighbor_sources_per_face[f] = ffp.neighbor_sources
-            owner_sources_per_face[f] = ffp.owner_sources
-
-        (neighbor_src0_cell, neighbor_src0_mat, neighbor_src1_idx,
-         neighbor_src1_cell, neighbor_src1_mat) = _build_source_arrays(
-            neighbor_sources_per_face, n_faces, n_fp, n_sps
+    if not isinstance(ffp_data, _KernelFaceData):
+        raise TypeError(
+            f"build_flat_face_geometry: mesh.face_flux_points 必须是 "
+            f"_KernelFaceData（build_face_flux_points 的唯一产出类型），"
+            f"收到的是 {type(ffp_data).__name__}——这不是一个已知的合法"
+            f"构造方式，之前支持过的逐面对象慢速路径已确认没有任何调用方"
+            f"后删除（2026-09-03），如果这里真的需要一种新的 mesh.face_"
+            f"flux_points 构造方式，需要先补上对应的展平逻辑，不能假装"
+            f"可以正确产出结果。"
         )
-        (owner_src0_cell, owner_src0_mat, owner_src1_idx,
-         owner_src1_cell, owner_src1_mat) = _build_source_arrays(
-            owner_sources_per_face, n_faces, n_fp, n_sps
-        )
-        # 慢速路径（逐面 FaceFluxPointGeometry 对象）目前没有任何生产
-        # 或测试代码路径会触发（全仓库搜索确认 `face_flux_points` 只会
-        # 被赋值为 _KernelFaceData，见 face_flux_points_exact_normal.py
-        # 相关改动的验证记录）——精确 adj(J) 行的计算需要单元节点坐标，
-        # 这条路径没有随身带这份数据，宁可在真被触发时报错，也不要
-        # 静默填零产出错误物理量。
-        raise NotImplementedError(
-            "build_flat_face_geometry 的慢速路径（非 _KernelFaceData）不支持"
-            "owner_adj_row_exact/neighbor_adj_row_exact 的精确计算——该路径"
-            "目前没有任何已知调用方，如果这里被触发，说明出现了一个新的、"
-            "尚未适配本次 adj(J) 精确化修复的 mesh.face_flux_points 构造方式，"
-            "需要先补上这部分逻辑，不能假装可以正确产出结果。"
-        )
+    owner_axis = ffp_data.owner_axis
+    owner_side = ffp_data.owner_side
+    neighbor_axis = ffp_data.neighbor_axis
+    neighbor_side = ffp_data.neighbor_side
+    owner_is_primary = ffp_data.owner_is_primary
+    neighbor_is_primary = ffp_data.neighbor_is_primary
+    true_normal = ffp_data.true_normal
+    neighbor_src0_cell = ffp_data.nb_src0_cell
+    neighbor_src0_mat = ffp_data.nb_src0_mat
+    neighbor_src1_idx = ffp_data.nb_src1_idx
+    owner_src0_cell = ffp_data.ow_src0_cell
+    owner_src0_mat = ffp_data.ow_src0_mat
+    owner_src1_idx = ffp_data.ow_src1_idx
+    # extra sources → src1（紧凑数组，通过 src1_idx 索引）
+    neighbor_src1_cell = ffp_data.nb_extra_cell
+    neighbor_src1_mat = ffp_data.nb_extra_mat
+    owner_src1_cell = ffp_data.ow_extra_cell
+    owner_src1_mat = ffp_data.ow_extra_mat
+    owner_adj_row_exact = ffp_data.owner_adj_row_exact
+    neighbor_adj_row_exact = ffp_data.neighbor_adj_row_exact
+    true_area_weight = ffp_data.true_area_weight
+    # 混合分组面（B-8）：merge 层检测后填入，_KernelFaceData 恒定提供这 6 个数组。
+    mixed_nb_partner = ffp_data.mixed_nb_partner
+    mixed_nb_mask = ffp_data.mixed_nb_mask
+    mixed_ow_partner = ffp_data.mixed_ow_partner
+    mixed_ow_mask = ffp_data.mixed_ow_mask
+    mixed_bnd_face = ffp_data.mixed_bnd_face
+    mixed_p0_bnd_frac = ffp_data.mixed_p0_bnd_frac
 
     # boundary_extrap_tet/prism: Dict[(axis:int,side:float), (n_fp,n_sps)矩阵]
     # -> (2,3,2,n_fp,n_sps)，[celltype(0=prism,1=tet), axis, side_idx]

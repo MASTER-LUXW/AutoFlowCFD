@@ -69,7 +69,11 @@ def prepare_ops_data(cp, ops, device_id):
     """准备 FR 算子数据到 GPU。"""
     with cp.cuda.Device(device_id):
         data = {}
-        for attr_name in ['D_3d_tet', 'D_3d_prism']:
+        # `D_native_tet_padded`（native 四面体/路径C 体积项微分算子）：
+        # 2026-09-03 起恒非 None（坍缩坐标四面体基已删除，见
+        # fr/operators.py 模块文档），`ops.D_3d_tet` 现在就是它的别名，
+        # 两个键上传的是同一份数据，下游直接读 `D_3d_tet` 即可。
+        for attr_name in ['D_3d_tet', 'D_3d_prism', 'D_native_tet_padded']:
             D = getattr(ops, attr_name, None)
             if D is not None:
                 data[attr_name] = cp.asarray(np.ascontiguousarray(D, dtype=np.float64))
@@ -86,7 +90,14 @@ def prepare_ops_data(cp, ops, device_id):
 
 
 def compute_volume_term_gpu(cp, U, mesh_data, ops_data, n_cells, n_sps, n_prism):
-    """计算体积项（CuPy 向量化）。"""
+    """计算体积项（CuPy 向量化）。
+
+    四面体坍缩坐标基已删除（2026-09-03，见 fr/operators.py 模块文档），
+    不再接受 `tet_basis_mode` 参数——`ops_data['D_3d_tet']` 现在恒别名到
+    `D_native_tet_padded`（`prepare_ops_data`/`array_manager.py` 上传
+    的键与 CPU 侧 `FROperators.D_3d_tet` 同一个别名约定），两条分支
+    直接用它即可，不需要按模式分派。
+    """
     Q = conserved_to_primitive_gpu(U[..., :5])  # (n_cells, n_sps, 5)
     det_jacs = mesh_data['det_jacs']
 
