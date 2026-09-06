@@ -249,3 +249,76 @@ class TestGpuInterpolateToNewOrderCoreMath:
         solver = types.SimpleNamespace(current_order=0, cell_partition=None)
         with pytest.raises(NotImplementedError):
             gpu_interpolate_to_new_order(solver, 1)
+
+
+class TestResumeCeilingFractionResetHeuristicGpu:
+    """真实完整性缺口修复回归测试（2026-09-05）：多 GPU 分布式（以及
+    单机 `GPUFRSolver`，鸭子类型复用同一份实现，见
+    `distributed_order_continuation.py::run_distributed_order_
+    continuation` 模块文档"三条后端统一走本模块"一节）此前完全没有
+    单机 CPU 早就有的"resume 时检测湍流场是否被上界大面积钳制"安全网，
+    见 `_reset_turbulence_if_resumed_field_exploded` 文档完整推导。
+
+    这里只需要验证被测函数本身只用 `.sum()`/`.size`/`>=`/`float(...)`
+    这几个 numpy 与 CuPy 语义完全一致的数组 API（函数体内没有任何
+    `get_cupy()`/`cp.xxx` 调用，直接对传入的 `turb_model_gpu.k_field`
+    数组操作），不需要真正的 CUDA 设备就能决定性验证——用一个只暴露
+    `turb_model_gpu`/`freestream`/`mu_molecular` 这几个被读取属性的
+    最小 stub（同本文件其余测试类的既有方法论），数组用 numpy 构造
+    （不经过 `_NumpyAsCupy` shim 也可以，因为函数本身不调用 `get_cupy()`；
+    这里仍然用 shim 构造只是与本文件既有风格保持一致）。
+    """
+
+    def _make_solver_stub(self, k_value, omega_value, n_cells=8, n_sps=8,
+                           k_max=555.44, omega_max=1e6):
+        turb = types.SimpleNamespace(
+            k_field=np.full((n_cells, n_sps), k_value, dtype=np.float64),
+            omega_field=np.full((n_cells, n_sps), omega_value, dtype=np.float64),
+            nu_t=np.full((n_cells, n_sps), 0.5, dtype=np.float64),
+            k_max=k_max, omega_max=omega_max,
+        )
+        return types.SimpleNamespace(
+            turb_model_gpu=turb,
+            freestream={"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0},
+            mu_molecular=1.8e-5,
+            _turbulence_intensity=0.01,
+            _viscosity_ratio=5.0,
+        )
+
+    def test_healthy_high_turbulence_field_is_not_falsely_reset(self):
+        from autoflowcfd.core.mpi.distributed_order_continuation import (
+            _reset_turbulence_if_resumed_field_exploded,
+        )
+        solver = self._make_solver_stub(k_value=38.11, omega_value=28459.5)
+
+        _reset_turbulence_if_resumed_field_exploded(solver)
+
+        np.testing.assert_allclose(solver.turb_model_gpu.k_field, 38.11)
+        np.testing.assert_allclose(solver.turb_model_gpu.omega_field, 28459.5)
+
+    def test_genuinely_clamped_field_still_gets_reset(self):
+        from autoflowcfd.core.mpi.distributed_order_continuation import (
+            _reset_turbulence_if_resumed_field_exploded,
+        )
+        solver = self._make_solver_stub(k_value=555.44, omega_value=1e6)
+
+        _reset_turbulence_if_resumed_field_exploded(solver)
+
+        k_inf_expected = 1.5 * (33.33 * 0.01) ** 2
+        assert not np.allclose(solver.turb_model_gpu.k_field, 555.44)
+        np.testing.assert_allclose(solver.turb_model_gpu.k_field, k_inf_expected, rtol=1e-6)
+        assert np.all(solver.turb_model_gpu.nu_t == 0.0)
+
+    def test_partial_clamping_below_threshold_is_not_reset(self):
+        from autoflowcfd.core.mpi.distributed_order_continuation import (
+            _reset_turbulence_if_resumed_field_exploded,
+        )
+        solver = self._make_solver_stub(k_value=1.0, omega_value=100.0, n_cells=100, n_sps=8)
+
+        flat = solver.turb_model_gpu.k_field.reshape(-1)
+        n_clamp = max(1, int(0.05 * flat.size))
+        flat[:n_clamp] = solver.turb_model_gpu.k_max
+
+        _reset_turbulence_if_resumed_field_exploded(solver)
+
+        assert np.any(np.isclose(solver.turb_model_gpu.k_field, 1.0))

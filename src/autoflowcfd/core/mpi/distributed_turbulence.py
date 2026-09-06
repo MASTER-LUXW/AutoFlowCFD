@@ -407,14 +407,18 @@ def distributed_compute_les_viscosity(
     mesh_adapter = DistributedMeshAdapter(partition, dist_fc, local_mesh, ops)
     n_sps = local_mesh.n_sps_per_cell
 
-    grad_U = compute_gradients(U_compact[..., :5], ops, mesh_adapter)
-    grad_vel = grad_U[:, :, 1:4, :]
+    # 真实 bug 修复（2026-09-03，同 fr_solver/turbulence.py::
+    # compute_turbulence_source 文档同一处）：此前对*守恒*变量 U_compact
+    # 求梯度再切片动量分量冒充速度梯度——grad(rho*u) != rho*grad(u)，
+    # 除非密度梯度处处为零。改为先转成原始变量 Q_compact 再对速度分量
+    # 求梯度（提前到这里，供下面 rho_compact 复用同一份）。
+    Q_compact = conserved_to_primitive(U_compact[..., :5])
+    grad_vel = compute_gradients(Q_compact[..., 1:4], ops, mesh_adapter)
 
     cell_volumes = mesh_adapter.cell_volumes
     delta = np.power(np.abs(cell_volumes), 1.0 / 3.0)
     delta = np.tile(delta[:, None], (1, n_sps))
 
     nu_t = sgs_model.compute_eddy_viscosity(grad_vel, delta)
-    Q_compact = conserved_to_primitive(U_compact[..., :5])
     rho_compact = Q_compact[..., 0]
     return rho_compact * nu_t

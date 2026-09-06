@@ -129,7 +129,7 @@ def _patch_gpu_modules(monkeypatch):
             monkeypatch.setattr(m, "gpu_available", True)
 
 
-def _make_solver(order, turb_model="none"):
+def _make_solver(order, turb_model="none", turbulence_intensity=0.01, viscosity_ratio=5.0):
     from autoflowcfd.fr.operators import generate_fr_operators
     from autoflowcfd.core.gpu.solver.gpu_solver import GPUFRSolver
     from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
@@ -140,6 +140,7 @@ def _make_solver(order, turb_model="none"):
         mesh=mesh, ops=ops, order=order, device_id=0,
         mu_molecular=1.8e-5, rho_inf=1.225, vel_inf=33.33, p_inf=101325.0,
         turb_model=turb_model,
+        turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
     )
 
 
@@ -230,3 +231,40 @@ class TestGpuSolverInterpolateToNewOrder:
         assert solver.current_order == 2
         # 阶数相同时应该直接返回，不重建（对象引用不变）。
         assert solver.mesh_data is mesh_data_before
+
+
+class TestGpuSolverStoresTurbulenceIntensityAndViscosityRatio:
+    """真实 bug 回归测试（2026-09-05，代码复审发现）：`GPUFRSolver.
+    __init__` 此前接收 `turbulence_intensity`/`viscosity_ratio` 构造
+    参数、只用它们算一次初始 k_inf/omega_inf，却从不存成
+    `self._turbulence_intensity`/`self._viscosity_ratio`——CPU 版
+    `DistributedFRSolver`/`MultiGPUDistributedSolver` 都会存这两个
+    属性（见 `core/fr_solver/turbulence.py::_set_freestream_turbulence`
+    文档：`getattr(solver, '_turbulence_intensity', 0.01)`）。任何后续
+    需要重新推导来流湍流值的调用点（`_interpolate_to_new_order` 降阶
+    重置分支、`distributed_order_continuation.py::_reset_turbulence_
+    if_resumed_field_exploded` resume 安全重置）在此前的代码上都会
+    因为取不到真实属性而静默退回默认值 Tu=0.01/VR=5.0，用非默认湍流
+    强度/粘性比构造的算例会被静默重置成错误的来流值——本类验证属性
+    真的被存了下来、且 `_set_freestream_turbulence` 用的确实是这份
+    真实值而不是默认值。"""
+
+    def test_non_default_values_are_stored_and_used(self):
+        from autoflowcfd.core.fr_solver.turbulence import _set_freestream_turbulence
+
+        solver = _make_solver(1, turb_model="sst", turbulence_intensity=0.05, viscosity_ratio=8.0)
+
+        assert solver._turbulence_intensity == 0.05
+        assert solver._viscosity_ratio == 8.0
+
+        k_inf, omega_inf = _set_freestream_turbulence(solver)
+        vel_inf, rho_inf, mu = 33.33, 1.225, 1.8e-5
+        nu = mu / rho_inf
+        k_inf_expected = 1.5 * (vel_inf * 0.05) ** 2
+        omega_inf_expected = k_inf_expected / (8.0 * nu)
+        np.testing.assert_allclose(k_inf, k_inf_expected, rtol=1e-10)
+        np.testing.assert_allclose(omega_inf, omega_inf_expected, rtol=1e-10)
+        # 用默认值算出的结果必须明显不同——否则这个测试对"是否真的用了
+        # 非默认配置"没有区分度。
+        k_inf_default = 1.5 * (vel_inf * 0.01) ** 2
+        assert not np.isclose(k_inf, k_inf_default)

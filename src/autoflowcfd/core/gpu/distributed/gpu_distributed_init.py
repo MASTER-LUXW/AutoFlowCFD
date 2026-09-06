@@ -234,8 +234,11 @@ class _GPUDistributedInitMixin:
             from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_gradient_gpu
             Q_compact = conserved_to_primitive_gpu(U_compact[..., :5])
             rho_compact = Q_compact[:, :, 0]
-            grad_U = compute_physical_gradient_gpu(U_compact[..., :5], self.mesh_data, self.ops_data)
-            grad_vel = grad_U[..., 1:4, :]
+            # 真实 bug 修复（2026-09-03，同下面 300 行附近 compute_source_
+            # terms_gpu 调用点同一处修复）：不能对*守恒*变量 U_compact
+            # 求梯度再切片动量分量冒充速度梯度，直接对 Q_compact 的速度
+            # 分量求梯度。
+            grad_vel = compute_physical_gradient_gpu(Q_compact[..., 1:4], self.mesh_data, self.ops_data)
             nu_t_compact = self.sgs_model_gpu.compute_eddy_viscosity_gpu(grad_vel, self._grid_scale_compact)
             return rho_compact * nu_t_compact
 
@@ -299,14 +302,16 @@ class _GPUDistributedInitMixin:
         Q_compact = conserved_to_primitive_gpu(U_compact[..., :5])
         rho_compact = Q_compact[:, :, 0]
 
-        grad_U = compute_physical_gradient_gpu(U_compact[..., :5], self.mesh_data, self.ops_data)
-        # 真实 bug 修复（2026-09-02，与单机 GPU 路径 gpu_solver_io.py
-        # 同一处独立发现的 bug 同一个根因，见该文件对应修复说明）：
-        # `compute_source_terms_gpu` 的 `grad_U` 形参实际期望速度梯度
-        # (n_cells,n_sps,3,3)（内部 compute_strain_rate_magnitude_gpu
-        # 直接对末两维转置相加），不是这里的 5 变量梯度
-        # (n_cells,n_sps,5,3)——必须先切片成 grad_vel。
-        grad_vel = grad_U[..., 1:4, :]
+        # 真实 bug 修复（2026-09-02 的 shape 修复 + 2026-09-03 的进一步
+        # 修正，与单机 GPU 路径 gpu_solver_io.py 同一处独立发现的 bug
+        # 同一个根因，见该文件对应修复说明）：`compute_source_terms_gpu`
+        # 的 `grad_U` 形参实际期望速度梯度 (n_cells,n_sps,3,3)（内部
+        # compute_strain_rate_magnitude_gpu 直接对末两维转置相加）。
+        # 2026-09-02 的修复只解决了"切片成 3 变量"这一半（避免 shape
+        # 崩溃），但对*守恒*变量 U_compact 求梯度再切片动量分量仍然是
+        # 冒充速度梯度——grad(rho*u) != rho*grad(u)，除非密度梯度处处
+        # 为零。改为直接对 Q_compact 的速度分量求梯度。
+        grad_vel = compute_physical_gradient_gpu(Q_compact[..., 1:4], self.mesh_data, self.ops_data)
 
         d_wall = self.wall_distance_gpu
         if d_wall is None:
@@ -400,6 +405,21 @@ class _GPUDistributedInitMixin:
             float(dt), dk_dt, domega_dt,
             transport_k=transport_k, transport_omega=transport_omega,
         )
+
+        # 5.5 真实缺口修复（2026-09-05，代码复审发现，与单机 GPU 路径
+        # gpu_solver_io.py 同一处修复同一个根因）：omega 壁面 Wilcox
+        # 解析值扩散侧未闭合，此前多GPU分布式路径完全没有移植这一步
+        # ——直接复用上面已经构造好的 transport_adapter（它已经暴露了
+        # enforce_omega_wall_relaxation_gpu 需要的全部属性：Q_gpu/
+        # turb_model_gpu/flat_face_gpu/wall_distance_gpu/mu_molecular/
+        # _wall_mask_k_gpu/mesh.n_cells），turb_view 是同一个对象引用，
+        # 函数内部对 turb_model_gpu.omega_field 的原地修改直接反映到
+        # turb_view 上。
+        if getattr(self, "turb_model_name", "").upper() in ("SST", "DDES", "IDDES"):
+            from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import (
+                enforce_omega_wall_relaxation_gpu,
+            )
+            enforce_omega_wall_relaxation_gpu(cp, transport_adapter)
 
         # 6. 只把 local cells 的更新结果写回真正的 turb_model_gpu（native
         # 排列，见 dist_flat_face.inv_perm 文档——turb_view.k_field 是

@@ -380,5 +380,135 @@ class TestTurbulenceTransportResidualGpuMatchesCpu:
         assert np.all(np.isfinite(domega_gpu))
 
 
+class TestOmegaWallRelaxationGpuMatchesCpu:
+    """真实缺口修复回归测试（2026-09-05，代码复审发现）：GPU SST/DDES/
+    IDDES 输运路径此前完全没有移植 CPU 版
+    `transport.py::enforce_omega_wall_relaxation`（omega 壁面 Wilcox
+    解析值扩散侧未闭合的缓解措施，见该函数文档完整推导）以及
+    `_compute_omega_wall_target` 的 `omega_max` 上限保护——本类覆盖
+    `enforce_omega_wall_relaxation_gpu`/`compute_omega_wall_target_gpu`
+    两个新/改动点，与已验证的 CPU 版在同一份真实（合成）网格上做逐位
+    一致性交叉验证，而不是重新独立实现一份去检查。
+    """
+
+    def _build_cpu_solver(self, mesh, wall_distance_value=0.01):
+        fc = mesh.face_connectivity
+        n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
+        wall_faces = np.nonzero(fc.is_boundary)[0]
+        assert len(wall_faces) > 0, "synthetic mesh 应该有边界面"
+        group_code = np.where(fc.is_boundary, 0, -1)
+        boundary_ghost_provider = types.SimpleNamespace(
+            group_code=group_code,
+            code_to_config={0: {"type": "WALL"}},
+        )
+
+        rho_inf, u_inf, p_inf = 1.225, 30.0, 101325.0
+        Q = np.zeros((n_cells, n_sps, 5))
+        Q[..., 0] = rho_inf
+        Q[..., 1] = u_inf
+        Q[..., 4] = p_inf
+
+        turb_model = types.SimpleNamespace(
+            k_field=np.full((n_cells, n_sps), 1.0),
+            omega_field=np.full((n_cells, n_sps), 1.0),  # 远低于解析壁面值，模拟塌陷场景
+            nu_t=np.full((n_cells, n_sps), 0.5),
+            beta1=0.075, sigma_w2=0.856, omega_max=1e6,
+        )
+        solver = types.SimpleNamespace(
+            mesh=mesh, ops=mesh.operators,
+            state=types.SimpleNamespace(Q=Q, n_cells=n_cells),
+            mu_molecular=1.8e-5,
+            wall_distance=np.full((n_cells, n_sps), wall_distance_value),
+            turb_model=turb_model,
+            boundary_ghost_provider=boundary_ghost_provider,
+            _turbulence_flat_face_override=None,
+        )
+        return solver
+
+    def _build_gpu_solver(self, mesh, flat, cpu_solver):
+        """与 CPU 版共享同一份初始 Q/k/omega/wall_distance/mu，只是把
+        `turb_model`/`state.Q` 换成 GPU 侧期望的属性名
+        （`turb_model_gpu`/`Q_gpu`），`_wall_mask_k_gpu` 用同样的
+        WALL 面掩码（CPU 版通过 boundary_ghost_provider 间接算出的
+        `wall_mask`，这里直接用同一个布尔数组，语义完全一致）。"""
+        fc = mesh.face_connectivity
+        wall_mask = fc.is_boundary.copy()
+        turb = types.SimpleNamespace(
+            k_field=cpu_solver.turb_model.k_field.copy(),
+            omega_field=cpu_solver.turb_model.omega_field.copy(),
+            nu_t=cpu_solver.turb_model.nu_t.copy(),
+            beta1=cpu_solver.turb_model.beta1,
+            omega_max=cpu_solver.turb_model.omega_max,
+        )
+        return types.SimpleNamespace(
+            mesh=mesh,
+            turb_model_gpu=turb,
+            Q_gpu=cpu_solver.state.Q.copy(),
+            mu_molecular=cpu_solver.mu_molecular,
+            wall_distance_gpu=cpu_solver.wall_distance.copy(),
+            flat_face_gpu=flat,
+            _wall_mask_k_gpu=wall_mask,
+        )
+
+    def test_enforce_relaxation_matches_cpu_exactly(self, mesh_ops_flat):
+        from autoflowcfd.core.turbulence.transport import enforce_omega_wall_relaxation
+
+        mesh, ops, flat = mesh_ops_flat
+        cpu_solver = self._build_cpu_solver(mesh)
+        gpu_solver = self._build_gpu_solver(mesh, flat, cpu_solver)
+
+        enforce_omega_wall_relaxation(cpu_solver, dt=1e-3)  # dt 未使用，见函数文档
+        gst.enforce_omega_wall_relaxation_gpu(gst.get_cupy(), gpu_solver)
+
+        np.testing.assert_allclose(
+            gpu_solver.turb_model_gpu.omega_field, cpu_solver.turb_model.omega_field,
+            rtol=1e-12, atol=1e-12,
+        )
+        # 基线（非退化 wall_distance）不应该触发 omega_max 上限——两版
+        # 都应该产生一个真正的"半程混合"结果，而不是恰好等于上限（否则
+        # 这个测试对上限保护本身就没有区分度）。
+        assert not np.allclose(cpu_solver.turb_model.omega_field, cpu_solver.turb_model.omega_max)
+
+    def test_custom_relax_coefficient_matches_cpu(self, mesh_ops_flat):
+        from autoflowcfd.core.turbulence.transport import enforce_omega_wall_relaxation
+
+        mesh, ops, flat = mesh_ops_flat
+        cpu_solver = self._build_cpu_solver(mesh)
+        gpu_solver = self._build_gpu_solver(mesh, flat, cpu_solver)
+
+        enforce_omega_wall_relaxation(cpu_solver, dt=1e-3, relax=0.2)
+        gst.enforce_omega_wall_relaxation_gpu(gst.get_cupy(), gpu_solver, relax=0.2)
+
+        np.testing.assert_allclose(
+            gpu_solver.turb_model_gpu.omega_field, cpu_solver.turb_model.omega_field,
+            rtol=1e-12, atol=1e-12,
+        )
+
+    def test_degenerate_tiny_wall_distance_capped_matches_cpu(self, mesh_ops_flat):
+        """真实网格上确认存在的退化场景（wall_distance 卡在
+        `_compute_omega_wall_target`/`compute_omega_wall_target_gpu`
+        共同的 1e-8 除零下限）——此前只在 CPU 版修了 `omega_max` 上限，
+        GPU 镜像版本本次一并补上，这里验证两者结果仍然逐位一致（都被
+        夹到同一个上限，不会像修复前的 GPU 版那样飙到 ~1e14）。"""
+        from autoflowcfd.core.turbulence.transport import enforce_omega_wall_relaxation
+
+        mesh, ops, flat = mesh_ops_flat
+        cpu_solver = self._build_cpu_solver(mesh, wall_distance_value=1e-9)
+        gpu_solver = self._build_gpu_solver(mesh, flat, cpu_solver)
+
+        enforce_omega_wall_relaxation(cpu_solver, dt=1e-3)
+        gst.enforce_omega_wall_relaxation_gpu(gst.get_cupy(), gpu_solver)
+
+        np.testing.assert_allclose(
+            gpu_solver.turb_model_gpu.omega_field, cpu_solver.turb_model.omega_field,
+            rtol=1e-12, atol=1e-12,
+        )
+        # 两者都必须真正被 omega_max 上限保护住（松弛的目标是 omega_max，
+        # 不是失控的 ~1e14），否则这个"退化场景"测试本身就没测到点子上。
+        omega_max = cpu_solver.turb_model.omega_max
+        assert np.all(cpu_solver.turb_model.omega_field <= omega_max + 1e-6)
+        assert np.all(gpu_solver.turb_model_gpu.omega_field <= omega_max + 1e-6)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

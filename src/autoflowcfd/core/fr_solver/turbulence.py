@@ -18,6 +18,7 @@ from autoflowcfd.core.turbulence.des import DDESModel, IDDESModel, compute_h_max
 from autoflowcfd.core.turbulence.wmles import WMLESModel
 from autoflowcfd.core.turbulence.sgs import WALEModel
 from autoflowcfd.core.utils.wall_distance import compute_wall_distance
+from autoflowcfd.core.fr_residual.viscous import compute_gradients as _compute_gradients_generic
 
 
 def _set_freestream_turbulence(solver) -> tuple:
@@ -247,6 +248,11 @@ def compute_wall_distance_field(
                 f"Eikonal wall distance field mapped: shape={solver.wall_distance.shape}, "
                 f"min={solver.wall_distance.min():.6f}, max={solver.wall_distance.max():.6f}"
             )
+            # 见下面 KD-Tree 分支同一处缓存的文档：Eikonal 求解出的
+            # `node_distances`（节点级、拓扑传播结果）与 `mesh_nodes`
+            # 同样是与阶数无关的量——缓存下来供阶数切换时重新映射到新
+            # SPs，不需要重新解一遍昂贵的 Eikonal 图最短路径问题。
+            solver._eikonal_recompute_cache = (mesh_nodes, node_distances)
             return
         solver.wall_distance = np.ones((n_cells, n_sps)) * node_distances.mean()
         logger.info(f"Eikonal wall distance field initialized (no SP/cell-center coords available, using mean): "
@@ -267,6 +273,14 @@ def compute_wall_distance_field(
                 f"Wall distance field mapped to SPs: shape={solver.wall_distance.shape}, "
                 f"min={solver.wall_distance.min():.6f}, max={solver.wall_distance.max():.6f}"
             )
+            # 真实 bug 修复（2026-09-06，cube_demo 真实网格 Order
+            # Continuation P0->P1 升阶后 k_mean 持续增长排查发现，见
+            # `recompute_wall_distance_for_current_order` 文档完整推导）：
+            # 缓存这个纯几何量（`wall_coords`，WALL 节点物理坐标，与阶数
+            # 完全无关）供阶数切换时重新查询用，不是留给 Order
+            # Continuation 去插值/平均这个已经算好的解——壁面距离不是
+            # 解多项式场，插值/平均它在数学上没有依据（见该函数文档）。
+            solver._wall_coords_for_recompute = wall_coords
         except Exception as e:
             logger.warning(f"SP-level mapping failed ({e}), falling back to cell-center mapping")
             _map_wall_distance_fallback(solver, node_distances, mesh_nodes, wall_indices, n_cells, n_sps)
@@ -311,6 +325,13 @@ def _map_wall_distance_fallback(solver, node_distances, mesh_nodes, wall_indices
             tree = cKDTree(wall_coords)
             dist_centers, _ = tree.query(centers, k=1)
             solver.wall_distance = np.tile(dist_centers[:, np.newaxis], (1, n_sps))
+            # 见 compute_wall_distance_field 主 KD-Tree 分支同一处缓存的
+            # 文档。这条回退路径本来就是单元中心近似（同一单元内全部 SP
+            # 共享一个值），阶数切换后重新查询不会恢复出真正的逐 SP
+            # 分辨率（那需要 sps_coords，这条分支恰恰是它不可用时才走到
+            # 这里）——但缓存下来仍然让"阶数切换后重新查询"这个统一机制
+            # 对这条分支也保持诚实一致，而不是让它继续被插值/平均污染。
+            solver._wall_coords_for_recompute = wall_coords
             return
         except Exception as e:
             # 第四次评审修复：此前静默吞掉异常且不记录原因（对比姊妹分支
@@ -326,6 +347,102 @@ def _map_wall_distance_fallback(solver, node_distances, mesh_nodes, wall_indices
 
     solver.wall_distance = np.ones((n_cells, n_sps)) * node_distances.mean()
     logger.info(f"Wall distance field initialized (fallback): mean={solver.wall_distance.mean():.6f}")
+
+
+def recompute_wall_distance_for_current_order(solver) -> bool:
+    """真实 bug 修复（2026-09-06，cube_demo 791,492 单元真实网格 Order
+    Continuation P0->P1 升阶后长程续算 k_mean 持续增长排查发现）：阶数
+    切换（`run_order_continuation`/`interpolate_to_new_order`）此前对
+    `solver.wall_distance` 做的是和 U/k_field/omega_field 同一套精确
+    Lagrange 延拓插值（升阶时）或 `np.mean` 压缩（resume 场景重置到 P0
+    时）——但壁面距离**不是解多项式场**，它是纯几何量（每个 SP 到最近
+    WALL 节点的欧氏/Eikonal 距离），插值/平均它在数学上没有依据：
+    - 升阶时：P0 只有 1 个 SP，其 Lagrange 基函数恒为常数 1（见
+      `_lagrange_basis_matrix_1d` 文档"n=1 时退化为常数基函数"一节），
+      所以"插值"实际上是把 P0 那 1 个 SP（本质是单元形心附近的壁面
+      距离）**原样广播**给新阶数的全部 SP——边界层棱柱单元内近壁 SP
+      和远壁 SP 的真实壁面距离可以相差好几个数量级，广播后这个差异
+      被完全抹平，所有 SP 拿到同一个（通常偏大，因为是形心附近而不是
+      最近壁面的那个 SP）值。
+    - resume 重置到 P0 时：`np.mean` 把原阶数逐 SP 的精确值压缩成 1 个
+      单元平均值，同样丢失了单元内的空间分辨率，且这个丢失是**不可逆
+      的**——因为后续升阶用的插值就是把这个已经丢了分辨率的 P0 值
+      原样广播回去，见上一条。
+
+    真实后果（真实网格决定性验证，见项目记忆 cube_demo_gradvel_and_
+    omega_wall_fixes_2026_09_05）：壁面距离是 SST F1 blending 判据、
+    Wilcox 壁面 omega 目标值（`omega_wall=60*nu/(beta1*d1^2)`，
+    `d1=np.min(wall_distance[owner_cells],axis=1)`）的关键输入——一旦
+    同一单元内全部 SP 共享同一个值，`np.min(...)` 这一步彻底失效（常数
+    数组取 min 恒等于其自身），"该单元里离墙最近的 SP"这个信息在阶数
+    切换时就已经在上游被抹掉了，d1 系统性偏大，omega_wall 目标值系统性
+    偏小（平方反比放大误差），`enforce_omega_wall_relaxation` 把 omega
+    往一个本来就偏低的目标值松弛，近壁约束天然弱化，omega 更容易塌陷，
+    经 nu_t 近零分母被放大，持续向平均流注入过量涡粘——这是 bug②
+    （omega 壁面扩散侧未闭合）修复后问题被推迟而非根治的直接原因：
+    "病灶"从"omega 扩散侧未闭合"变成了"约束用的 d1 输入值本身在阶数
+    切换后就已经失真"。
+
+    修复：不插值/不平均，阶数切换后直接用缓存下来的、与阶数无关的纯
+    几何量（`solver._wall_coords_for_recompute`——WALL 节点物理坐标；
+    或 `solver._eikonal_recompute_cache`——Eikonal 节点级距离场，避免
+    重新解一遍图最短路径问题）+ 当前阶数真实的 `solver.mesh.sps_coords`
+    重新做一次 KD-Tree/最近节点映射查询，与 `compute_wall_distance_
+    field` 首次构造时完全同一套逻辑，只是复用缓存、不重新遍历边界节点。
+
+    调用时机：必须在 `solver.mesh.set_order(target_p)`（或 P0 重置分支
+    的 `set_order(0)`）**之后**调用——`solver.mesh.sps_coords` 只有在
+    `set_order` 完成后才反映新阶数的真实 SP 坐标。
+
+    Returns:
+        True：成功用缓存的几何量重新查询，`solver.wall_distance` 已是
+            当前阶数下精确的逐 SP 值。
+        False：没有可用的缓存（例如从未调用过 `compute_wall_distance_
+            field`，或该次调用走的是"既没有 sps_coords 也没有
+            cell_centers"的最终兜底分支）——调用方应保留原有的插值/
+            平均结果作为退化但至少形状正确的后备，不能让
+            `solver.wall_distance` 变成 None 或形状不匹配。
+    """
+    if getattr(solver, "wall_distance", None) is None:
+        return False
+
+    n_cells = solver.mesh.n_cells
+    n_sps = solver.mesh.n_sps_per_cell
+
+    wall_coords = getattr(solver, "_wall_coords_for_recompute", None)
+    if wall_coords is not None:
+        from scipy.spatial import cKDTree
+
+        tree = cKDTree(wall_coords)
+        if hasattr(solver.mesh, "sps_coords") and solver.mesh.sps_coords is not None:
+            flat_sps = solver.mesh.sps_coords.reshape(-1, 3)
+            dist_flat, _ = tree.query(flat_sps, k=1)
+            solver.wall_distance = dist_flat.reshape(n_cells, n_sps)
+        elif hasattr(solver.mesh, "cell_centers") and solver.mesh.cell_centers is not None:
+            dist_centers, _ = tree.query(solver.mesh.cell_centers, k=1)
+            solver.wall_distance = np.tile(dist_centers[:, np.newaxis], (1, n_sps))
+        else:
+            return False
+        logger.info(
+            f"[Order Continuation] Wall distance recomputed (not interpolated) for P{solver.current_order}: "
+            f"shape={solver.wall_distance.shape}, min={solver.wall_distance.min():.6e}, "
+            f"max={solver.wall_distance.max():.6e}"
+        )
+        return True
+
+    eikonal_cache = getattr(solver, "_eikonal_recompute_cache", None)
+    if eikonal_cache is not None and hasattr(solver.mesh, "sps_coords") and solver.mesh.sps_coords is not None:
+        mesh_nodes, node_distances = eikonal_cache
+        query_points = solver.mesh.sps_coords.reshape(-1, 3)
+        mapped = _map_node_distances_to_points(mesh_nodes, node_distances, query_points)
+        solver.wall_distance = mapped.reshape(n_cells, n_sps)
+        logger.info(
+            f"[Order Continuation] Eikonal wall distance remapped (not interpolated) for "
+            f"P{solver.current_order}: shape={solver.wall_distance.shape}"
+        )
+        return True
+
+    return False
 
 
 def compute_turbulence_source(solver, dt) -> Optional[tuple]:
@@ -350,8 +467,20 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
     _update_production_ramp(solver)
 
     Q = solver.state.Q
-    grad_U = solver._compute_gradients()
-    grad_vel = grad_U[:, :, 1:4, :]
+    # 真实 bug 修复（2026-09-03，cube_demo 791,492 单元真实网格 Order
+    # Continuation P0->P1 跨阶后延迟发散排查发现）：此前这里对*守恒*变量
+    # U 求梯度、直接切片 [1:4] 当速度梯度用——U[...,1:4] 是动量
+    # (rho*u,rho*v,rho*w)，grad(rho*u) != rho*grad(u)，除非密度梯度处处
+    # 为零。低马赫数流场里密度接近均匀，这个误差通常小到不可见，一旦
+    # 出现哪怕很小的局部密度扰动（真实复现：Order Continuation 插值截断
+    # 误差），这里算出的"应变率"就会混入一个虚假的 u_i*grad(rho)/rho
+    # 分量，經 SST 产生项(P_k~nu_t*S^2)反馈进涡粘系数，涡粘再反馈进动量
+    # 残差放大速度/密度扰动——形成真实的正反馈失稳（真实网格上表现为
+    # P1 阶段前~20步几乎不动、随后 100 步内速度峰值从 50 m/s 涨到 600+
+    # m/s，k/omega 双双撞上安全上限）。同一代码库里
+    # `fr_residual/viscous_flux.py` 的主残差路径一直是对的（先
+    # conserved_to_primitive 转 Q 再求梯度、再切片），这里改成同一模式。
+    grad_vel = _compute_gradients_generic(Q[:, :, 1:4], solver.ops, solver.mesh)
 
     d_wall = solver.wall_distance
     if d_wall is not None:
@@ -531,6 +660,26 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
                                      transport_k=transport_k,
                                      transport_omega=transport_omega)
 
+    # 真实 bug 修复（2026-09-04）：omega 壁面 Wilcox 解析值只在对流项
+    # （近壁趋于零，因为无滑移）生效，扩散项（近壁 omega 动力学的主导
+    # 机制）此前完全没有把这个约束传递进去——见 transport.py::
+    # enforce_omega_wall_relaxation 文档，这是 grad_vel 修复后长程复现
+    # 里仍持续发散的第二个独立根因（边界层单元 omega 长期不受约束地
+    # 衰减到下界，经 nu_t 近零分母奇点放大湍流粘性比，持续向平均流
+    # 注入过量粘性应力）。
+    #
+    # 2026-09-05 曾尝试把下面这个松弛改成按 dt/d1/扩散系数物理推导的
+    # "点隐式"动态系数（数学上无条件稳定），真实网格验证证伪（细网格
+    # 近壁单元动态系数天然趋近 1，几步内把 k_mean 从 38 打到 0.17）
+    # 已完整撤销，见 enforce_omega_wall_relaxation 文档。**当前实现是
+    # 固定 relax=0.5，`dt` 只是为了不破坏调用方签名而保留的未使用参数
+    # ——不要被这行调用误导，真正的行为以被调用函数的文档为准。**
+    if solver.turb_model_name in ["SST", "DDES", "IDDES"]:
+        from autoflowcfd.core.turbulence.transport import enforce_omega_wall_relaxation
+        enforce_omega_wall_relaxation(
+            solver, dt, flat_face_override=getattr(solver, "_turbulence_flat_face_override", None),
+        )
+
     return (Sk, S_omega)
 
 
@@ -543,8 +692,10 @@ def apply_turbulence_corrections(solver) -> None:
     更新之后，为时已晚）。
     """
     if solver.sgs_model is not None:
-        grad_U = solver._compute_gradients()
-        grad_u = grad_U[:, :, 1:4, :]
+        # 真实 bug 修复（2026-09-03）：同 compute_turbulence_source 里的
+        # grad_vel 修复，理由见该函数文档——LES/WMLES 的 SGS 涡粘同样
+        # 不能用动量梯度冒充速度梯度。
+        grad_u = _compute_gradients_generic(solver.state.Q[:, :, 1:4], solver.ops, solver.mesh)
         delta = solver._get_grid_scale()
         nu_t = solver.sgs_model.compute_eddy_viscosity(grad_u, delta)
 

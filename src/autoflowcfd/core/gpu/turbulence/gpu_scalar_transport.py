@@ -388,15 +388,30 @@ def compute_scalar_diffusion_residual_gpu(
     return residual - interface_correction
 
 
-def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, mu, beta1):
+def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, mu, beta1, omega_max=1e6):
     """CuPy 版 `_compute_omega_wall_target`：omega_wall = 60*nu/(beta1*d1^2)
     （Wilcox 解析式），逐字对应 CPU 版同名函数——全程 GPU 原生实现（不像
     边界幽灵态那样需要 CPU round-trip：wall_distance_gpu/Q_gpu/owner_cell
     都已经常驻显存，没有必要为这个小计算专门下载/上传）。
 
+    真实 bug 修复（2026-09-05，代码复审发现，与 CPU 版
+    `transport.py::_compute_omega_wall_target` 2026-09-05 那次真实网格
+    验证决定性发现的 bug 同一个根因，此前只修了 CPU 版、GPU 镜像版本
+    漏了）：`d1 = cp.maximum(d1, 1e-8)` 只防止除零，不防止结果本身失控
+    ——cube_demo 真实网格上确认存在 wall_distance 恰好卡在这个 1e-8
+    下限的退化 WALL 面 owner 单元，代入公式算出 `omega_wall~1e14`，比
+    "应急安全上限" `omega_max`（SST 模型 `k_max`/`omega_max` 属性，
+    默认 1e6）大 8 个数量级。此前唯一的消费者（对流项上风 ghost）碰巧
+    被壁面处趋零的对流通量掩盖，没暴露这个缺口；GPU 版
+    `enforce_omega_wall_relaxation_gpu`（本文件同日新增，直接把这个值
+    混合进 omega_field 本身）不再有这层天然保护，必须在这里、唯一的
+    真值来源处夹到 `omega_max`。
+
     Args:
         wall_mask: (n_faces,) CuPy bool，WALL 边界面掩码（由
             `compute_wall_dirichlet_masks_gpu` 一次性算出并缓存）
+        omega_max: 湍流模型的应急安全上限（`solver.turb_model_gpu.omega_max`，
+            调用方未提供时退回 1e6，与 CPU 版同一个默认值）
 
     Returns:
         (omega_wall_value_face, has_value_face)，与 CPU 版返回语义一致
@@ -412,8 +427,72 @@ def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, m
         rho_owner = cp.mean(Q_gpu[owner_cells, :, 0], axis=1)
         nu_owner = mu / cp.maximum(rho_owner, 1e-10)
         omega_wall = 60.0 * nu_owner / (beta1 * d1 ** 2)
+        omega_wall = cp.minimum(omega_wall, omega_max)
         omega_wall_value_face[wall_idx, :] = omega_wall[:, None]
     return omega_wall_value_face, wall_mask
+
+
+def enforce_omega_wall_relaxation_gpu(cp, solver, relax=None):
+    """CuPy 版 `transport.py::enforce_omega_wall_relaxation`——GPU SST/
+    DDES/IDDES 输运路径此前完全没有移植这个修复（2026-09-05 代码复审
+    发现，不是本次新引入的差异）：`compute_omega_wall_target_gpu` 算出
+    的 Wilcox 解析值此前只喂给对流项上风 ghost（`compute_scalar_
+    convection_residual_gpu` 的 `wall_dirichlet_value_face` 参数），
+    扩散项同样没有把这个约束传递进去——与 CPU 版被修复前完全同一个
+    架构缺口（见 CPU 版 `enforce_omega_wall_relaxation` 文档的完整
+    推导：边界层单元 omega 长期不受约束衰减到下界，经 nu_t 近零分母
+    奇点放大湍流粘性比，持续向平均流注入过量粘性应力）。GPU SST/DDES/
+    IDDES 长期运行（真实生产场景，例如 cube_demo 这类真实网格）会
+    出现与 CPU 版修复前完全相同的中长期发散机制。
+
+    实现逐字对应 CPU 版（同样的固定 relax=0.5 事后松弛，不是 CPU 版
+    2026-09-05 那次被真实数据证伪撤销的"点隐式"动态松弛——不要重复
+    那次已经证伪的尝试，见 CPU 版文档完整失败记录）：`update_fields_gpu`
+    之后，对 WALL 面 owner 单元的 `omega_field` 做一次向解析壁面目标值
+    的固定比例松弛。`np.add.at`（CPU 版处理"同一 owner 单元是多个 WALL
+    面的 owner（角部单元）"）在这里换成 GPU 原生的 `cp.scatter_add`
+    （本模块模块文档已说明：正确处理重复索引累加，不需要图着色）。
+
+    Args:
+        solver: `GPUFRSolver` 实例
+        relax: 松弛系数，默认 0.5（与 CPU 版同一个经验证的安全值）
+    """
+    if relax is None:
+        relax = 0.5
+    wall_mask = getattr(solver, "_wall_mask_k_gpu", None)
+    if wall_mask is None or not cp.any(wall_mask):
+        return
+
+    Q = solver.Q_gpu
+    turb = solver.turb_model_gpu
+    ff = solver.flat_face_gpu
+    omega_max = getattr(turb, "omega_max", 1e6)
+    omega_wall_value_face, has_wall = compute_omega_wall_target_gpu(
+        cp, ff, wall_mask, solver.wall_distance_gpu, Q, solver.mu_molecular,
+        getattr(turb, "beta1", 0.075), omega_max=omega_max,
+    )
+
+    wall_face_idx = cp.where(has_wall)[0]
+    if wall_face_idx.shape[0] == 0:
+        return
+    owner_cells = ff.owner_cell[wall_face_idx]
+    target = omega_wall_value_face[wall_face_idx, 0]  # 同一面上恒为同一常数，见函数文档
+
+    n_cells = solver.mesh.n_cells
+    # 同一个 owner 单元可能是多个 WALL 面的 owner（角部单元）——用
+    # scatter_add 累加再除以命中次数取平均目标值，不能直接花式索引赋值
+    # 覆盖（后写的面会覆盖先写的面，不是真正的平均），与 CPU 版
+    # `np.add.at` 同一个理由。
+    sum_target = cp.zeros(n_cells, dtype=cp.float64)
+    count = cp.zeros(n_cells, dtype=cp.float64)
+    cp.scatter_add(sum_target, owner_cells, target)
+    cp.scatter_add(count, owner_cells, 1.0)
+    hit_cells = cp.where(count > 0)[0]
+    avg_target = sum_target[hit_cells] / count[hit_cells]
+
+    turb.omega_field[hit_cells, :] = (
+        (1.0 - relax) * turb.omega_field[hit_cells, :] + relax * avg_target[:, None]
+    )
 
 
 def compute_wall_dirichlet_mask_gpu(mesh, boundary_ghost_provider):
@@ -482,9 +561,12 @@ def compute_turbulence_transport_residual_gpu(
     rho_nu_t = rho * turb.nu_t
 
     if grad_vel is None:
+        # 真实 bug 修复（2026-09-03，同 fr_solver/turbulence.py::
+        # compute_turbulence_source 文档同一处）：不能对*守恒*变量 U_gpu
+        # 求梯度再切片动量分量冒充速度梯度——`vel`（上面已从 Q 取出）
+        # 本来就是真正的速度，直接对它求梯度。
         from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_gradient_gpu
-        grad_U = compute_physical_gradient_gpu(solver.U_gpu[..., :5], solver.mesh_data, solver.ops_data)
-        grad_vel = grad_U[..., 1:4, :]
+        grad_vel = compute_physical_gradient_gpu(vel, solver.mesh_data, solver.ops_data)
 
     nu = mu / cp.maximum(rho, 1e-10)
 
@@ -528,7 +610,8 @@ def compute_turbulence_transport_residual_gpu(
     dk_dt_transport = (conv_k + diff_k) / cp.maximum(rho, 1e-10)
 
     omega_wall_value_face, has_omega_wall = compute_omega_wall_target_gpu(
-        cp, ff, wall_mask_k, d_wall, Q, mu, getattr(turb, "beta1", 0.075)
+        cp, ff, wall_mask_k, d_wall, Q, mu, getattr(turb, "beta1", 0.075),
+        omega_max=getattr(turb, "omega_max", 1e6),
     )
 
     conv_w = compute_scalar_convection_residual_gpu(

@@ -16,12 +16,26 @@
    （`orders` 序列退化成单元素）。
 """
 
+import types
+
 import numpy as np
 import pytest
 
 from autoflowcfd.fr.operators import generate_fr_operators
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
+
+
+@pytest.fixture()
+def mesh_p2_and_ops_order1():
+    """同 `mesh_p2_and_ops` 文档"不能用 module 级共享 fixture"的理由，
+    只是阶数换成 1（`TestResumeCeilingFractionResetHeuristicDistributed`
+    不需要 P2 的构造开销，只需要一个真实、形状/属性完整的
+    `turb_model`）。"""
+    order = 1
+    mesh = _build_synthetic_mixed_mesh(order)
+    ops = generate_fr_operators(order)
+    return mesh, ops
 
 
 @pytest.fixture()
@@ -106,6 +120,90 @@ class TestDistributedOrderContinuationDispatch:
         assert np.all(np.isfinite(solver.state.U[:solver.partition.n_local_cells]))
 
 
+class TestResumeCeilingFractionResetHeuristicDistributed:
+    """真实完整性缺口修复回归测试（2026-09-05）：CPU MPI 分布式路径
+    此前完全没有单机版早就有的"resume 时检测湍流场是否被上界大面积
+    钳制、若是则重置到来流初值"安全网，见
+    `distributed_order_continuation.py::
+    _reset_turbulence_if_resumed_field_exploded` 文档完整推导。直接
+    测这个 helper 函数本身（不跑完整 `run_distributed_order_
+    continuation` 迭代循环——那样后续真实物理 step() 会继续演化
+    k_field/omega_field，让"重置前后是否等于 k_inf"这个断言变得不精确，
+    与单机版 `TestResumeCeilingFractionResetHeuristic` 用 fake solver
+    隔离测试是同一个理由，这里换成真实 `DistributedFRSolver`（n_ranks=1，
+    单进程测试环境天然验证了 `allreduce_sum` 在 n_ranks=1 时的 no-op
+    退化路径，多 rank 下的真正全局归约行为本身已经是 `allreduce_sum`
+    自身的既有职责，不是本次要重新验证的范围）取得真实、形状/属性
+    完整的 `turb_model`。"""
+
+    def _make_solver_with_turb(self, mesh, ops, k_value, omega_value,
+                                k_max=555.44, omega_max=1e6):
+        from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
+
+        solver = DistributedFRSolver(
+            mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
+            n_ranks=1, backend="cpu", order=1, turb_model_name="sst",
+            time_scheme=TimeIntegrationScheme.SSP_RK3,
+            mu_molecular=1.8e-5, rho_inf=1.225, vel_inf=33.33, p_inf=101325.0,
+        )
+        solver.turb_model.k_field[:] = k_value
+        solver.turb_model.omega_field[:] = omega_value
+        solver.turb_model.k_max = k_max
+        solver.turb_model.omega_max = omega_max
+        return solver
+
+    def test_healthy_high_turbulence_field_is_not_falsely_reset(self, mesh_p2_and_ops_order1):
+        """真实复现场景同单机版：k_mean 远超"旧公式"会误判的阈值，但
+        只是钝体尾流健康发展的高湍流度场，钳制占比很低，不应该被
+        重置。"""
+        from autoflowcfd.core.mpi.distributed_order_continuation import (
+            _reset_turbulence_if_resumed_field_exploded,
+        )
+        mesh, ops = mesh_p2_and_ops_order1
+        solver = self._make_solver_with_turb(mesh, ops, k_value=38.11, omega_value=28459.5)
+
+        _reset_turbulence_if_resumed_field_exploded(solver)
+
+        np.testing.assert_allclose(solver.turb_model.k_field, 38.11)
+        np.testing.assert_allclose(solver.turb_model.omega_field, 28459.5)
+
+    def test_genuinely_clamped_field_still_gets_reset(self, mesh_p2_and_ops_order1):
+        """100% 的单元都钉在上界——必须仍然触发重置，这个修复只是改
+        判据的统计口径（全局钳制比例），不是把安全网整个拆掉。"""
+        from autoflowcfd.core.mpi.distributed_order_continuation import (
+            _reset_turbulence_if_resumed_field_exploded,
+        )
+        mesh, ops = mesh_p2_and_ops_order1
+        solver = self._make_solver_with_turb(mesh, ops, k_value=555.44, omega_value=1e6)
+
+        _reset_turbulence_if_resumed_field_exploded(solver)
+
+        k_inf_expected = 1.5 * (33.33 * 0.01) ** 2
+        assert not np.allclose(solver.turb_model.k_field, 555.44)
+        np.testing.assert_allclose(solver.turb_model.k_field, k_inf_expected, rtol=1e-6)
+        assert np.all(solver.turb_model.nu_t == 0.0)
+
+    def test_partial_clamping_below_threshold_is_not_reset(self, mesh_p2_and_ops_order1):
+        """只有少数 SP（低于10%）触及上界——不应该触发重置。"""
+        from autoflowcfd.core.mpi.distributed_order_continuation import (
+            _reset_turbulence_if_resumed_field_exploded,
+        )
+        mesh, ops = mesh_p2_and_ops_order1
+        solver = self._make_solver_with_turb(mesh, ops, k_value=1.0, omega_value=100.0)
+
+        # 把 5% 的 (cell, sp) 元素钳制在上界（低于10%阈值）——用扁平化
+        # 索引在整个 (n_local, n_sps) 数组上直接选取，不依赖具体单元数
+        # 是否能整除出"5%"这种粒度。
+        flat = solver.turb_model.k_field.reshape(-1)
+        n_clamp = max(1, int(0.05 * flat.size))
+        flat[:n_clamp] = solver.turb_model.k_max
+
+        _reset_turbulence_if_resumed_field_exploded(solver)
+
+        # 未被重置：绝大多数元素应该还是原来的 1.0，不是被清零的 k_inf。
+        assert np.any(np.isclose(solver.turb_model.k_field, 1.0))
+
+
 class TestDistributedOrderContinuationWithTurbulence:
     def test_sst_order_continuation_keeps_turb_fields_consistent(self, mesh_p2_and_ops):
         """湍流场（k_field/omega_field/nu_t）随阶数切换正确重塑形状，
@@ -132,3 +230,57 @@ class TestDistributedOrderContinuationWithTurbulence:
         assert np.isfinite(result.final_residual)
         assert np.all(np.isfinite(solver.turb_model.k_field))
         assert np.all(np.isfinite(solver.turb_model.omega_field))
+
+
+class TestPhaseMaxIterDefaultGivesFinalStageRemainingBudgetDistributed:
+    """Same real bug/fix as the single-machine `run_order_continuation`
+    (see `test_order_continuation_resume.py::
+    TestPhaseMaxIterDefaultGivesFinalStageRemainingBudget` for the full
+    write-up) — `run_distributed_order_continuation` had the exact same
+    `if phase_max_iter is not None: ... else: ...` bifurcation, gating
+    "final stage eats the remaining budget" behind an explicit
+    `--phase-max-iter`. Verified here with a minimal fake solver (the
+    phase-budget arithmetic is pure orchestration logic, independent of
+    any real distributed/GPU state) rather than a real
+    `DistributedFRSolver`, mirroring the single-machine test's
+    methodology."""
+
+    def _make_fake_solver(self, residuals):
+        calls = {"i": 0}
+
+        def _scripted_step(dt):
+            i = calls["i"]
+            calls["i"] += 1
+            return residuals[min(i, len(residuals) - 1)]
+
+        def _fake_interpolate(new_order):
+            solver.current_order = new_order
+
+        solver = types.SimpleNamespace(
+            order=1, current_order=0, step=_scripted_step,
+            _resumed_from_checkpoint=False,
+        )
+        solver._interpolate_to_new_order = _fake_interpolate
+        return solver
+
+    def test_final_stage_gets_leftover_budget_without_explicit_phase_max_iter(self):
+        from autoflowcfd.core.mpi.distributed_order_continuation import (
+            run_distributed_order_continuation,
+        )
+        # Same construction as the single-machine test: P0 promotes early
+        # (at i=20, the default residual_drop_threshold=100 met exactly),
+        # using only 21 of its 50-iteration default share (max_iter=100,
+        # len(orders)=2 -> 100//2=50); P1 (final) never triggers any exit
+        # condition on its own (residual held flat at 10.0 once the
+        # scripted sequence is exhausted) and must run for whatever budget
+        # it's actually given.
+        residuals = [1000.0] * 20 + [10.0]
+        solver = self._make_fake_solver(residuals)
+
+        result = run_distributed_order_continuation(solver, max_iter=100, dt=1e-3, tol=1e-6)
+
+        # Old (buggy) behaviour: P1 capped at the same 50-iteration share
+        # as P0 -> total_iter = 21 + 50 = 71. Fixed behaviour: P1 gets all
+        # of max_iter's remainder -> total_iter = 21 + (100 - 21) = 100.
+        assert result.iterations == 100
+        assert result.converged is False

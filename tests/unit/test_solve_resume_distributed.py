@@ -155,3 +155,107 @@ class TestResumeDistributedMultiGpu(object):
         assert 505 in written_iterations
         assert 510 in written_iterations
         fake_solver.cleanup.assert_called_once()
+
+
+class TestResumeDistributedPhaseMaxIterForwarding(object):
+    """真实 bug 回归测试（2026-09-05，用户直接问"--residual-drop-
+    threshold phase_max_iter 可以在 resume 重置吗"发现）：`resume()`
+    顶层确实解析了这两个 Order Continuation CLI 选项，但 `_resume_
+    distributed` 此前的签名根本不接收它们，两处 `solver.solve(...)`
+    调用也完全没有传递——用户对分布式/多GPU resume 传
+    `--phase-max-iter`/`--residual-drop-threshold` 会被静默忽略，
+    实际生效的永远是 `DistributedFRSolver.solve`/
+    `MultiGPUDistributedSolver.solve` 自身的函数签名默认值
+    （`None`/`100.0`），不是用户的真实意图。"""
+
+    def test_cpu_traditional_mode_forwards_explicit_values(self, tmp_path):
+        checkpoint_file = tmp_path / "checkpoint_iter_002000.h5"
+        checkpoint_file.write_bytes(b"")
+
+        fake_solver = _fake_distributed_solver(solve_return=None)
+        fake_metadata = {
+            "input_file": "volume.nas", "order": 2, "turbulence_model": "none",
+            "backend": "cpu", "surface_mesh": "surface.nas",
+        }
+
+        with patch(
+            "autoflowcfd.cli.solve_distributed_checkpoint_io.rebuild_distributed_solver_from_checkpoint",
+            return_value=(fake_solver, 2000, fake_metadata),
+        ), patch(
+            "autoflowcfd.core.mpi.distributed_checkpoint.distributed_save_results"
+        ), patch(
+            "autoflowcfd.core.mpi.distributed_checkpoint.distributed_save_checkpoint"
+        ):
+            runner = CliRunner()
+            result = runner.invoke(
+                cli,
+                ["solve", "resume", str(checkpoint_file), "--max-iter", "10",
+                 "--n-ranks", "2", "--phase-max-iter", "37",
+                 "--residual-drop-threshold", "250.0"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert fake_solver.solve.call_args.kwargs["phase_max_iter"] == 37
+        assert fake_solver.solve.call_args.kwargs["residual_drop_threshold"] == 250.0
+
+    def test_multi_gpu_forwards_explicit_values(self, tmp_path):
+        checkpoint_file = tmp_path / "checkpoint_iter_000500.h5"
+        checkpoint_file.write_bytes(b"")
+
+        fake_solver = _fake_distributed_solver(solve_return={"final_residual": 1e-4, "converged": True})
+        fake_solver.save_checkpoint_distributed.return_value = "fake_ckpt_path.h5"
+        fake_metadata = {
+            "input_file": "volume.nas", "order": 2, "turbulence_model": "none",
+            "backend": "gpu", "surface_mesh": None,
+        }
+
+        with patch(
+            "autoflowcfd.cli.solve_distributed_checkpoint_io.rebuild_distributed_solver_from_checkpoint",
+            return_value=(fake_solver, 500, fake_metadata),
+        ):
+            runner = CliRunner()
+            result = runner.invoke(
+                cli,
+                ["solve", "resume", str(checkpoint_file), "--max-iter", "5",
+                 "--n-ranks", "2", "--multi-gpu",
+                 "--phase-max-iter", "12", "--residual-drop-threshold", "99.0"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert fake_solver.solve.call_args.kwargs["phase_max_iter"] == 12
+        assert fake_solver.solve.call_args.kwargs["residual_drop_threshold"] == 99.0
+
+    def test_cpu_traditional_mode_default_none_is_forwarded_not_dropped(self, tmp_path):
+        """Not passing `--phase-max-iter` must still reach `solver.solve`
+        as an explicit `phase_max_iter=None` kwarg (the callee's own
+        default-value logic then takes over, see `run_distributed_order_
+        continuation` docs) — not silently omitted from the call
+        entirely (which would be indistinguishable from this test's
+        perspective, but the point is the wiring itself, not just the
+        non-default case)."""
+        checkpoint_file = tmp_path / "checkpoint_iter_002000.h5"
+        checkpoint_file.write_bytes(b"")
+
+        fake_solver = _fake_distributed_solver(solve_return=None)
+        fake_metadata = {
+            "input_file": "volume.nas", "order": 2, "turbulence_model": "none",
+            "backend": "cpu", "surface_mesh": "surface.nas",
+        }
+
+        with patch(
+            "autoflowcfd.cli.solve_distributed_checkpoint_io.rebuild_distributed_solver_from_checkpoint",
+            return_value=(fake_solver, 2000, fake_metadata),
+        ), patch(
+            "autoflowcfd.core.mpi.distributed_checkpoint.distributed_save_results"
+        ), patch(
+            "autoflowcfd.core.mpi.distributed_checkpoint.distributed_save_checkpoint"
+        ):
+            runner = CliRunner()
+            result = runner.invoke(
+                cli,
+                ["solve", "resume", str(checkpoint_file), "--max-iter", "10", "--n-ranks", "2"],
+            )
+
+        assert result.exit_code == 0, result.output
+        assert fake_solver.solve.call_args.kwargs["phase_max_iter"] is None
+        assert fake_solver.solve.call_args.kwargs["residual_drop_threshold"] == 100.0

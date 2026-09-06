@@ -272,15 +272,27 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
         checkpoint_callback: 可选的中间 checkpoint 回调函数，
             签名为 callback(solver, iteration_number)，每步迭代后调用。
         phase_max_iter: 非最终阶段（P0/P1/...，不含目标阶数）各自的最大
-            迭代步数上限。None（默认）时保留旧行为——`max_iter //
-            len(orders)` 按阶段数机械均分，目标阶数与非最终阶段拿到
-            同一份额。传具体值后：非最终阶段各自最多跑这么多步（提前
-            满足 `residual_drop_threshold` 判据仍可提前升阶），**目标
-            阶数不再受这个上限约束，吃掉这次求解剩余的全部步数**——
+            迭代步数上限。None（默认）时取 `max_iter // len(orders)`
+            作为这个参数本身的默认值（按阶段数机械均分），传具体值则
+            用显式值——**这只是 `phase_max_iter` 这一个数字的默认值来源，
+            不是切换整套预算分配策略的开关**。不论 `phase_max_iter` 是
+            默认算出来的还是显式传入的，**目标阶数永远不受这个上限约束，
+            吃掉这次求解剩余的全部步数**（`max_iter - total_iter`）——
             这是本参数要解决的真实问题（2026-09-01，用户直接指出"不想
-            机械地按 max_iter // len(orders) 判断"）：旧行为下阶段数越
+            机械地按 max_iter // len(orders) 判断"），旧行为下阶段数越
             多、目标阶数分到的步数占比越小，且与用户真正关心的目标阶数
             收敛程度毫无关系，纯粹是阶段计数的副作用。
+
+            真实 bug 修复（2026-09-05，用户指出）：此前用
+            `if phase_max_iter is not None` 分岔出两套完全不同的预算
+            分配逻辑，等价于把"目标阶数不该被稀释"这条改进做成了必须
+            显式传 `--phase-max-iter` 才能享受的 opt-in 特性——不传这个
+            CLI 选项（生产环境最常见的用法）的用户，目标阶数依然被和
+            非最终阶段一样按 `max_iter // len(orders)` 机械均分，本参数
+            当初要解决的问题在默认路径上完全没有解决。现在改成：
+            `phase_max_iter` 先按上述规则确定这一个数字本身（默认值或
+            显式值），"目标阶数吃掉剩余全部步数"这条规则对两种来源
+            一视同仁、无条件生效。
         residual_drop_threshold: 单个非最终阶段判定"可以提前升阶"的残差
             下降倍数，原来硬编码 `1e2`（降 2 个数量级），现在可配置。
 
@@ -331,26 +343,48 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
                 print(f"[INFO] Resume: skipping production ramp")
 
                 # 检测湍流场是否被上界大面积钳制（旧 checkpoint k/omega 爆炸后
-                # resume 被上界截断）。如果超过 10% 的单元 k 接近上界，说明湍流场
-                # 从未真正恢复，必须重置到来流初值让 SST 源项重新建立平衡。
+                # resume 被上界截断）。如果超过 10% 的单元 k/omega 接近上界，
+                # 说明湍流场从未真正恢复，必须重置到来流初值让 SST 源项重新
+                # 建立平衡。
+                #
+                # 真实 bug 修复（2026-09-05，cube_demo 791,492 单元真实网格
+                # `solve resume` 长程验证决定性发现）：本节注释一直描述的
+                # 判据是"统计有多大比例的单元被钳制在上界附近"，但下面这段
+                # 代码此前从未真正这样算过——只拿 k_mean 和一个
+                # max(1%*k_max, 10*k_inf) 公式比较，是对注释意图的错误实现。
+                # 真实复现：cube_demo 这类强分离钝体绕流（尾流/剪切层湍流度
+                # 远高于来流），健康、充分发展的 k 场 k_mean=38.11（是
+                # k_inf=0.167 的 228 倍），但 reset_threshold=max(5.55,1.67)
+                # =5.55——k_mean 远超这个阈值，被误判成"爆炸残留"，
+                # resume 第一次调用 solver.solve() 就把整个 k_field/
+                # omega_field 直接清零重置回自由流初值，销毁了几千步真实
+                # 演化出的湍流场（同一批 solve resume 直接调用
+                # rebuild_solver_from_checkpoint+手动 solver.step() 不经过
+                # 这段 resumed 分支时完全正常，交叉验证坐实了问题就在这里）。
+                # 用真实数据核实：这份健康 checkpoint 上，真正被钳制在
+                # k_max/omega_max 90%以上的单元占比分别只有 4.36%/0.07%，
+                # 远低于注释一直声称的 10% 判据——现在改成真正按这个比例
+                # 判断，而不是看均值。
                 if hasattr(solver.turb_model, 'k_max') and hasattr(solver.turb_model, 'k_field'):
                     k = solver.turb_model.k_field
+                    omega = getattr(solver.turb_model, 'omega_field', None)
                     k_max_limit = solver.turb_model.k_max
-                    # 检查是否大面积触及上界（取平均值判断，避免单点噪声）
-                    k_mean = float(np.mean(k))
-                    # 阈值锚定到本算例的物理期望值（真实修复，2026-08-25 代码审查）：
-                    # 仅用 0.01·k_max 时，高 Tu 配置（k_inf = 1.5·(U·Tu)²，
-                    # Tu ≳ 5.8% 即超过该阈值）会把完全健康的场误重置；取与 10·k_inf
-                    # 的较大值——爆炸后的场被钳在 k_max 附近（≫ 两者），健康场即使有
-                    # 充分发展边界层抬升也远低于 10 倍来流值。
-                    k_inf, omega_inf = _set_freestream_turbulence(solver)
-                    reset_threshold = max(0.01 * k_max_limit, 10.0 * k_inf)
-                    if k_mean > reset_threshold:
-                        print(f"[WARN] Resume: k_field mean={k_mean:.2f} exceeds "
-                              f"reset threshold={reset_threshold:.2f} "
-                              f"(max(1% of k_max={k_max_limit:.2f}, 10x k_inf={k_inf:.2e})) "
-                              f"— turbulence field not recovered "
-                              f"from previous explosion. Resetting to freestream values.")
+                    omega_max_limit = getattr(solver.turb_model, 'omega_max', None)
+
+                    k_near_ceiling_frac = float(np.mean(k >= 0.9 * k_max_limit))
+                    omega_near_ceiling_frac = (
+                        float(np.mean(omega >= 0.9 * omega_max_limit))
+                        if omega is not None and omega_max_limit is not None else 0.0
+                    )
+                    ceiling_frac_threshold = 0.10
+                    if k_near_ceiling_frac > ceiling_frac_threshold or omega_near_ceiling_frac > ceiling_frac_threshold:
+                        k_inf, omega_inf = _set_freestream_turbulence(solver)
+                        print(f"[WARN] Resume: {100*k_near_ceiling_frac:.2f}% of k / "
+                              f"{100*omega_near_ceiling_frac:.2f}% of omega values are clamped "
+                              f"near their ceiling (k_max={k_max_limit:.2f}, "
+                              f"omega_max={omega_max_limit}) — exceeds {100*ceiling_frac_threshold:.0f}% "
+                              f"threshold, turbulence field not recovered from previous explosion. "
+                              f"Resetting to freestream values.")
                         # 用 Tu/VR 推导的物理自洽值重置（与初始化一致）
                         solver.turb_model.k_field[:] = k_inf
                         solver.turb_model.omega_field[:] = omega_inf
@@ -410,6 +444,17 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
         # 'gauss' 修正函数方案，退回默认的 'radau'。
         solver.ops = generate_fr_operators(0, flux_point_type=getattr(solver, 'flux_type', 'radau'))
         solver.mesh.set_order(0)
+
+        # 真实 bug 修复（2026-09-06）：上面第 434-439 行的 `np.mean` 压缩
+        # 只是权宜的形状占位，不是壁面距离在 P0 下的正确值——见
+        # `recompute_wall_distance_for_current_order` 文档完整推导。
+        # `set_order(0)` 之后 `solver.mesh.sps_coords` 才反映 P0 真实的
+        # 单 SP 坐标，这里重新查询覆盖掉那个被压缩、失真的值；如果没有
+        # 缓存（没调用过 `compute_wall_distance_field`，或本来就没有
+        # wall_distance），保留上面的均值压缩结果作为退化但形状正确的
+        # 后备。
+        from autoflowcfd.core.fr_solver.turbulence import recompute_wall_distance_for_current_order
+        recompute_wall_distance_for_current_order(solver)
 
         print(f"[INFO] Reinitialized to P0 ({expected_p0_n_sps} SP/cell)")
 
@@ -495,6 +540,21 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
         # 否则梯度/残差计算会用错误维度的几何量崩溃。
         solver.mesh.set_order(target_p)
 
+        # 真实 bug 修复（2026-09-06，cube_demo 真实网格 P0->P1 升阶后
+        # k_mean 持续增长排查发现，见 fr_solver/turbulence.py::
+        # recompute_wall_distance_for_current_order 文档完整推导）：
+        # `interpolate_to_new_order`（上面 `solver._interpolate_to_new_
+        # order(target_p)` 调用，发生在 `set_order` 之前）对 wall_distance
+        # 做的是和 U/k_field 同一套 Lagrange 插值——但壁面距离不是解
+        # 多项式场，P0 单 SP 的常数基函数会把"单元里离墙最近的 SP"这个
+        # 空间分辨率信息广播抹平。`set_order(target_p)` 之后
+        # `solver.mesh.sps_coords` 才反映新阶数真实的 SP 坐标，这里
+        # 用缓存的纯几何量（WALL 节点坐标/Eikonal 节点距离场，与阶数
+        # 无关）重新做一次精确查询，覆盖掉那个被插值污染的近似值；没有
+        # 缓存时保留插值结果作为退化但形状正确的后备。
+        from autoflowcfd.core.fr_solver.turbulence import recompute_wall_distance_for_current_order
+        recompute_wall_distance_for_current_order(solver)
+
         # B-9 修复（2026-08-25，真实复现：solve transient ddes P0 阶段第一步
         # 幽灵态形状 (9,5) 无法广播进 (1,5)）：BD-02 的 SEM 入口幽灵态在
         # 构造时按当时阶数的 FP 几何预存了每面 FP 物理坐标（n_fp 阶数相关），
@@ -521,16 +581,19 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
             _cfl_ctrl.reset()
 
         # 非最终阶段（P0/P1/...）vs 目标阶数的步数预算分派（2026-09-01，
-        # 见函数文档 phase_max_iter 参数说明）：`phase_max_iter` 为 None
-        # 时完全保留旧行为（不区分是否最终阶段，一律 `max_iter //
-        # len(orders)`）；显式传值后，只有非最终阶段受这个上限约束，
-        # 目标阶数改为吃掉这次求解剩余的全部步数（`max_iter -
-        # total_iter`），不再随阶段数量被稀释。
+        # 2026-09-05 修正，见函数文档 phase_max_iter 参数说明）：
+        # `phase_max_iter` 未显式传入时只是取 `max_iter // len(orders)`
+        # 作为这一个数字本身的默认值——不是切换整套预算分配策略的开关。
+        # "目标阶数吃掉剩余全部步数、不再随阶段数量被稀释"这条规则对
+        # 默认值和显式值一视同仁、无条件生效（真实 bug 修复：此前用
+        # `is not None` 分岔，等价于把这条规则做成了必须显式传
+        # `--phase-max-iter` 才能享受的 opt-in 特性，不传这个 CLI 选项
+        # 的默认路径上，本参数当初要解决的问题完全没有解决）。
         is_final_stage = (target_p == original_order)
-        if phase_max_iter is not None:
-            stage_iter_budget = (max_iter - total_iter) if is_final_stage else phase_max_iter
-        else:
-            stage_iter_budget = max_iter // len(orders)
+        effective_phase_max_iter = (
+            phase_max_iter if phase_max_iter is not None else max_iter // len(orders)
+        )
+        stage_iter_budget = (max_iter - total_iter) if is_final_stage else effective_phase_max_iter
         phase_tol = tol * (10 ** (original_order - target_p))
 
         # CL-02 修复：阶数提升触发条件改为残差下降判据

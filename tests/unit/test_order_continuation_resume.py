@@ -122,6 +122,91 @@ class TestResumeSkipsP0Reinit:
         assert solver.mesh.set_order_calls == [0, 0, 1, 2]
 
 
+class TestResumeCeilingFractionResetHeuristic:
+    """真实 bug 回归测试（2026-09-05，cube_demo 791,492 单元真实网格
+    `solve resume` 长程验证决定性发现）：`run_order_continuation` 的
+    "resume 时检测湍流场是否从未真正恢复"启发式，此前用
+    `k_mean > max(1%*k_max, 10*k_inf)` 判断——这不是注释一直描述的
+    "统计有多大比例单元被钳制在上界附近"，是对该意图的错误实现。
+    真实复现：cube_demo 这类强分离钝体绕流，健康充分发展的
+    k_mean=38.11（k_inf=0.167 的 228 倍）被这个公式误判成"爆炸残留"，
+    resume 第一次调用就把整个 k_field/omega_field 清零重置回自由流
+    初值，销毁真实演化的湍流场（表现为 CLI 观测到的"k 场几步内从
+    38 崩溃到 0.166≈k_inf"——0.166 这个数字不是巧合，就是被强制
+    重置成的 k_inf 本身）。现在改成真正统计 `k>=0.9*k_max`/
+    `omega>=0.9*omega_max` 的比例，超过 10% 才判定为真爆炸。"""
+
+    def _fake_solver_with_turb(self, current_order, target_order, k_field, omega_field,
+                                k_max=555.44, omega_max=1e6):
+        solver = _fake_solver(current_order=current_order, target_order=target_order, resumed=True)
+        n_cells, n_sps = solver.state.n_cells, _n_sps(current_order)
+        solver.turb_model = SimpleNamespace(
+            k_field=np.full((n_cells, n_sps), k_field, dtype=np.float64),
+            omega_field=np.full((n_cells, n_sps), omega_field, dtype=np.float64),
+            k_max=k_max, omega_max=omega_max,
+            nu_t=np.zeros((n_cells, n_sps)),
+            production_factor=0.0,
+        )
+        return solver
+
+    def test_healthy_high_turbulence_field_is_not_falsely_reset(self):
+        """真实复现场景：k_mean=38.11，远超旧公式的 reset_threshold≈5.55，
+        但只是钝体尾流健康发展的高湍流度场，不应该被重置。"""
+        solver = self._fake_solver_with_turb(
+            current_order=1, target_order=2, k_field=38.11, omega_field=28459.5,
+        )
+        with patch(
+            "autoflowcfd.fr.operators.generate_fr_operators", side_effect=_fake_generate_ops,
+        ):
+            run_order_continuation(solver, max_iter=10, dt=1e-3, tol=1e-6)
+
+        # 健康场必须原封不动地保留，不能被静默清零重置成来流初值。
+        np.testing.assert_allclose(solver.turb_model.k_field, 38.11)
+        np.testing.assert_allclose(solver.turb_model.omega_field, 28459.5)
+
+    def test_genuinely_clamped_field_still_gets_reset(self):
+        """真正的爆炸残留（大面积钉在上界）必须仍然触发重置——这个
+        修复只是改判据的统计口径，不是把安全网整个拆掉。"""
+        solver = self._fake_solver_with_turb(
+            current_order=1, target_order=2, k_field=555.44, omega_field=1e6,
+        )
+        with patch(
+            "autoflowcfd.fr.operators.generate_fr_operators", side_effect=_fake_generate_ops,
+        ):
+            run_order_continuation(solver, max_iter=10, dt=1e-3, tol=1e-6)
+
+        # 100% 的单元都钉在上界，必须被重置到自由流初值，不能保持在 555.44/1e6。
+        k_inf_expected = 1.5 * (33.33 * 0.01) ** 2
+        assert not np.allclose(solver.turb_model.k_field, 555.44)
+        np.testing.assert_allclose(solver.turb_model.k_field, k_inf_expected, rtol=1e-6)
+
+    def test_partial_clamping_below_threshold_is_not_reset(self):
+        """只有少数单元（低于10%）触及上界——健康网格上真实观测到的
+        比例是 4.36%（k）/0.07%（omega）——不应该触发重置。用足够多的
+        伪单元数（100）才能有意义地表达"5%"这种小比例（_fake_solver
+        默认只有 2 个单元，容不下 <50% 的粒度）。"""
+        solver = self._fake_solver_with_turb(
+            current_order=1, target_order=2, k_field=1.0, omega_field=100.0,
+        )
+        n_cells = 100
+        n_sps = _n_sps(1)
+        solver.state.n_cells = n_cells
+        solver.turb_model.k_field = np.full((n_cells, n_sps), 1.0)
+        solver.turb_model.omega_field = np.full((n_cells, n_sps), 100.0)
+        solver.turb_model.nu_t = np.zeros((n_cells, n_sps))
+        # 5% 的单元钳制在上界（低于10%阈值）。
+        n_clamped = 5
+        solver.turb_model.k_field[:n_clamped] = solver.turb_model.k_max
+
+        with patch(
+            "autoflowcfd.fr.operators.generate_fr_operators", side_effect=_fake_generate_ops,
+        ):
+            run_order_continuation(solver, max_iter=10, dt=1e-3, tol=1e-6)
+
+        # 未被重置：绝大多数单元应该还是原来的 1.0，不是被清零的 k_inf。
+        assert np.any(np.isclose(solver.turb_model.k_field, 1.0))
+
+
 def _fake_solver_with_residual_sequence(current_order, target_order, resumed,
                                          residuals, phase_initial_residual=None):
     """Like _fake_solver, but `step()` returns a scripted residual sequence
@@ -271,3 +356,59 @@ class TestResumeSeedsPhaseInitialResidualFromCheckpoint:
         assert seen_values[3] == 30.0  # P1's own first step, not 50.0 leaked from P0
         assert seen_values[4] == 30.0
         assert seen_values[5] == 30.0
+
+
+class TestPhaseMaxIterDefaultGivesFinalStageRemainingBudget:
+    """Regression test for a real bug found 2026-09-05 (user directly
+    pointed out: "phase_max_iter 的默认值应该是 max_iter // len(orders)，
+    两者不是或的关系"): the final (target) stage's "eat the rest of the
+    budget, don't get diluted by len(orders)" rule — the entire point of
+    the `phase_max_iter` parameter (2026-09-01) — was gated behind
+    `phase_max_iter is not None`, i.e. only active when a caller explicitly
+    passes `--phase-max-iter`. Callers who never pass it (the common CLI
+    case) got the *old*, pre-fix behaviour by construction: the final
+    stage capped at the same `max_iter // len(orders)` share as every
+    other stage, silently truncated regardless of how much budget earlier
+    stages left unused.
+
+    Fix: `phase_max_iter`'s absence only supplies *this one number's*
+    default value (`max_iter // len(orders)`); "final stage gets whatever
+    budget remains" applies unconditionally, default or explicit alike.
+
+    This test constructs a scenario where the difference is observable
+    without relying on any residual-drop/convergence coincidence: P0
+    (non-final) promotes early via the CL-02 residual-drop criterion,
+    leaving unused budget; P1 (final) is scripted to never trigger any
+    exit condition on its own, so it runs for exactly its assigned
+    `stage_iter_budget` - directly exposing which budget it was given.
+    """
+
+    def test_final_stage_gets_leftover_budget_without_explicit_phase_max_iter(self):
+        # P0: constant residual (drop=1) for 20 steps (i=0..19, below
+        # min_iter_before_transition=20), then a single big drop at i=20
+        # (drop=1000/10=100, exactly meeting the default
+        # residual_drop_threshold=100) - promotes at i=20, having run 21
+        # iterations (i=0..20 inclusive), well short of its 50-iteration
+        # default share (max_iter=100, len(orders)=2 -> 100//2=50).
+        residuals = [1000.0] * 20 + [10.0]
+        solver = _fake_solver_with_residual_sequence(
+            current_order=0, target_order=1, resumed=False, residuals=residuals,
+        )
+
+        with patch(
+            "autoflowcfd.fr.operators.generate_fr_operators", side_effect=_fake_generate_ops,
+        ):
+            result = run_order_continuation(solver, max_iter=100, dt=1e-3, tol=1e-6)
+
+        # P0 used 21 of its 50-iteration share, leaving 29 unused. P1
+        # (final) never converges on its own (residual held flat at 10.0
+        # once the scripted sequence is exhausted, see
+        # _fake_solver_with_residual_sequence) - it must run for its full
+        # assigned budget, then the whole call ends (not converged).
+        # Old (buggy) behaviour: P1 capped at the same 50-iteration share
+        # as P0 -> total_iter = 21 + 50 = 71, wasting the 29 P0 left
+        # behind. Fixed behaviour: P1 gets *all* of max_iter's remainder
+        # -> total_iter = 21 + (100 - 21) = 100, using the full budget the
+        # caller asked for.
+        assert result.iterations == 100
+        assert result.converged is False

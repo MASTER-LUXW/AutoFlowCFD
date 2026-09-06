@@ -377,6 +377,91 @@ def cpu_traditional_interpolate_to_new_order(solver, target_p: int) -> None:
     _rebuild_cpu_traditional_partition_and_state(solver, target_p, new_local_U)
 
 
+def _reset_turbulence_if_resumed_field_exploded(solver) -> None:
+    """真实完整性缺口修复（2026-09-05）：单机 CPU `run_order_continuation`
+    早就有的"resume 时检测湍流场是否被上界大面积钳制、若是则重置到
+    来流初值"安全网（见 `core/utils/order_continuation.py::
+    run_order_continuation` 该处文档完整推导——cube_demo 791,492 单元
+    真实网格 `solve resume` 决定性验证发现并修复的判据本身的 bug），
+    此前**从未移植**到本模块——CPU MPI"传统模式"/"完全分布式加载"、
+    单机 GPU（`GPUFRSolver`）、多 GPU 分布式，三种后端全部统一走本
+    模块的 `run_distributed_order_continuation`，但这个函数从头到尾
+    都没有这项安全检查，等价于这三条路径的 resume 完全没有保护——
+    真正爆炸的 checkpoint 被 resume 之后会静默从垃圾状态继续演化到底，
+    没有任何救援机制（用户主动要求代码复审时发现，见项目记忆
+    `cube_demo_gradvel_and_omega_wall_fixes_2026_09_05` "发现但未修复
+    的真实完整性缺口"一节）。
+
+    正确性关键——为什么不能直接照搬单机版 `np.mean`/`np.sum`：湍流场
+    在这三条后端上都是**按 rank/设备本地分片**存储的（`turb_model.
+    k_field`/`turb_model_gpu.k_field` 构造时就是 `(n_local_cells,
+    n_sps)`，见 `distributed_solver.py`/`gpu_distributed.py` 对应
+    `SSTModelFR(n_local, ...)`/`GPUTurbulenceSST(n_local_cells, ...)`
+    构造调用——不含 halo，纯本 rank/设备份额）。如果每个 rank/设备只用
+    自己的本地数据独立计算钳制比例、独立决定是否重置，不同 rank 可能
+    对同一次 resume 做出不一致的判断（比如某个 rank 的本地分片恰好
+    健康、另一个 rank 的本地分片真的大面积爆炸）——有的 rank 重置了
+    湍流场、有的没有，后续每一步的 halo 交换会把这种"部分 rank 已重置、
+    部分没有"的不一致状态混合扩散到全场，是比完全没有这项安全网更
+    危险的半吊子实现，不能这样做。
+
+    解决方式：用 `allreduce_sum`（`core/mpi/comm.py`，非 MPI/单 rank
+    环境下自动降级为 no-op 直接返回本地值，见该函数文档——单机 GPU
+    复用这条路径天然正确，不需要单独分支）分别对本 rank/设备的
+    "钳制单元数""总单元数"两个标量求全局和，全局占比 =
+    全局钳制数/全局总数，保证所有 rank/设备用同一个全局统计量做出
+    同一个决定，不会出现前一段说的分裂状态。
+
+    Args:
+        solver: `DistributedFRSolver`（两种模式）/ `GPUFRSolver`（单机
+            GPU，`_interpolate_to_new_order` 走 `gpu_solver_order_
+            continuation.py`）/ `MultiGPUDistributedSolver`。
+    """
+    from autoflowcfd.core.mpi.comm import allreduce_sum
+    from autoflowcfd.core.fr_solver.turbulence import _set_freestream_turbulence
+
+    turb = getattr(solver, 'turb_model', None) or getattr(solver, 'turb_model_gpu', None)
+    if turb is None or not hasattr(turb, 'k_max') or not hasattr(turb, 'k_field'):
+        return
+
+    k = turb.k_field
+    omega = getattr(turb, 'omega_field', None)
+    k_max_limit = turb.k_max
+    omega_max_limit = getattr(turb, 'omega_max', None)
+
+    # `.sum()`/`.size`/`float(...)` 对 numpy 和 CuPy 数组语义完全一致
+    # （CuPy 0-d 数组 `float()` 会做一次隐式 device->host 拷贝，是
+    # 已有的既定用法，见 gpu_solver_io.py 的 `float(dt_mean)`），不需要
+    # 区分后端。
+    k_hit_local = float((k >= 0.9 * k_max_limit).sum())
+    n_local_total = float(k.size)
+    omega_hit_local = 0.0
+    if omega is not None and omega_max_limit is not None:
+        omega_hit_local = float((omega >= 0.9 * omega_max_limit).sum())
+
+    k_hit_global = allreduce_sum(k_hit_local)
+    omega_hit_global = allreduce_sum(omega_hit_local)
+    n_total_global = allreduce_sum(n_local_total)
+
+    k_near_ceiling_frac = k_hit_global / max(n_total_global, 1.0)
+    omega_near_ceiling_frac = omega_hit_global / max(n_total_global, 1.0)
+    ceiling_frac_threshold = 0.10
+
+    if k_near_ceiling_frac > ceiling_frac_threshold or omega_near_ceiling_frac > ceiling_frac_threshold:
+        k_inf, omega_inf = _set_freestream_turbulence(solver)
+        if is_root():
+            print(f"[WARN] Resume: {100*k_near_ceiling_frac:.2f}% of k / "
+                  f"{100*omega_near_ceiling_frac:.2f}% of omega values (global, "
+                  f"summed across all ranks/devices) are clamped near their ceiling "
+                  f"(k_max={k_max_limit:.2f}, omega_max={omega_max_limit}) — exceeds "
+                  f"{100*ceiling_frac_threshold:.0f}% threshold, turbulence field not "
+                  f"recovered from previous explosion. Resetting to freestream values.")
+        turb.k_field[:] = k_inf
+        turb.omega_field[:] = omega_inf
+        if hasattr(turb, 'nu_t'):
+            turb.nu_t[:] = 0.0
+
+
 def run_distributed_order_continuation(
     solver, max_iter: int, dt: float, tol: float,
     checkpoint_callback=None,
@@ -393,11 +478,16 @@ def run_distributed_order_continuation(
       实现，见各自文档），不是直接调用某个具体重建函数。
     - 打印只在 root rank 上做（`is_root()` 门控），避免 N-rank 场景下
       重复输出。
-    - 没有单机路径的"resume 检测重置产生项渐变"/"aerodynamic 系数
-      打印"等与本次分布式移植无关的特性——分布式 resume+Order
-      Continuation 组合、分布式气动力系数打印都是各自独立的既有范围
-      边界（前者见 solve_distributed_checkpoint_io.py 文档，后者
-      "分布式路径不报告气动力系数"是本项目一贯的既有做法，见
+    - "resume 时检测湍流场是否被上界大面积钳制、若是则重置到来流初值"
+      这项单机版早就有的安全网，**2026-09-05 之前本函数完全没有**——
+      同日已补齐（见 `_reset_turbulence_if_resumed_field_exploded`
+      文档，含"为什么不能直接照搬单机版 np.mean/np.sum"一节完整推导：
+      湍流场在这三条后端上都是按 rank/设备本地分片存储，必须用
+      `allreduce_sum` 做全局归约才能得到正确、所有 rank/设备一致的
+      钳制比例，不是机械复制单机实现）。
+    - 没有单机路径的"aerodynamic 系数打印"这项与本次分布式移植无关的
+      特性——分布式气动力系数打印是独立的既有范围边界（"分布式路径
+      不报告气动力系数"是本项目一贯的既有做法，见
       solve_steady_command.py 对应分支），不在本次任务范围内引入。
 
     Args:
@@ -428,6 +518,10 @@ def run_distributed_order_continuation(
     resumed = getattr(solver, '_resumed_from_checkpoint', False)
     if not resumed and solver.current_order != 0:
         solver._interpolate_to_new_order(0)
+    elif resumed:
+        # 真实完整性缺口修复（2026-09-05）：见
+        # `_reset_turbulence_if_resumed_field_exploded` 文档完整推导。
+        _reset_turbulence_if_resumed_field_exploded(solver)
 
     if is_root():
         print("\n=== Distributed Order Continuation Strategy ===")
@@ -448,11 +542,18 @@ def run_distributed_order_continuation(
             solver._interpolate_to_new_order(target_p)
         solver.current_order = target_p
 
+        # 真实 bug 修复（2026-09-05，用户指出，与单机 `run_order_
+        # continuation` 同一处同一个根因——见该函数文档 phase_max_iter
+        # 参数说明完整推导）：`phase_max_iter` 未显式传入时只是取
+        # `max_iter // len(orders)` 作为这一个数字本身的默认值，不是
+        # 切换整套预算分配策略的开关。"目标阶数吃掉剩余全部步数"这条
+        # 规则对默认值和显式值一视同仁、无条件生效，不再要求用户显式
+        # 传 `--phase-max-iter` 才能享受。
         is_final_stage = (target_p == original_order)
-        if phase_max_iter is not None:
-            stage_iter_budget = (max_iter - total_iter) if is_final_stage else phase_max_iter
-        else:
-            stage_iter_budget = max_iter // len(orders)
+        effective_phase_max_iter = (
+            phase_max_iter if phase_max_iter is not None else max_iter // len(orders)
+        )
+        stage_iter_budget = (max_iter - total_iter) if is_final_stage else effective_phase_max_iter
         phase_tol = tol * (10 ** (original_order - target_p))
 
         initial_residual_this_order = None

@@ -73,13 +73,14 @@ from autoflowcfd.cli.solve_steady_commands import _report_aerodynamic_coefficien
                    '非绝对迭代数）——与 solve steady 同名参数含义一致')
 @click.option('--phase-max-iter', type=int, default=None,
               help='Order Continuation（目标阶数>=2 时触发）非最终阶段各自的最大迭代'
-                   '步数上限。默认(不传)时保留旧行为——本次续算新增的额外迭代数按剩余'
-                   '阶段数机械均分。传具体值后目标阶数改为吃掉这次续算剩余的全部步数，'
-                   '见 core/utils/order_continuation.py 文档。仅 checkpoint 原始/覆盖'
-                   '后端为 CPU 时支持')
+                   '步数上限。默认(不传)时取本次续算新增的额外迭代数按剩余阶段数机械'
+                   '均分的结果作为这一个数字的默认值；不论默认还是显式传值，目标阶数'
+                   '永远吃掉这次续算剩余的全部步数，不会被稀释——见'
+                   'core/utils/order_continuation.py 文档。CPU/单GPU/CPU MPI分布式/'
+                   '多GPU分布式全部支持')
 @click.option('--residual-drop-threshold', type=float, default=100.0,
               help='Order Continuation 单个非最终阶段判定"可以提前升阶"的残差下降倍数，'
-                   '默认100(降2个数量级)。仅 CPU 后端支持')
+                   '默认100(降2个数量级)。CPU/单GPU/CPU MPI分布式/多GPU分布式全部支持')
 @click.option('--n-ranks', type=int, default=1,
               help='MPI rank 总数（>1 时重建为分布式求解器——CPU MPI"传统模式"，'
                    '或配合 --multi-gpu/--fully-distributed 走对应的分布式构造入口）。'
@@ -118,7 +119,9 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
             input_file 是 .nas 体网格、且两者都缺失时才会报错
         reference_area: 气动系数参考面积
         checkpoint_interval: 中间 checkpoint 保存间隔（额外迭代数）
-        phase_max_iter: Order Continuation 非最终阶段最大步数上限，None=旧行为
+        phase_max_iter: Order Continuation 非最终阶段最大步数上限，None 时取
+            max_iter // len(orders) 作为这个数字的默认值——不论默认还是
+            显式值，目标阶数都吃掉剩余全部步数，见同名 CLI 选项帮助文本
         residual_drop_threshold: Order Continuation 单阶段提前升阶所需的残差下降倍数
     """
     logger.info(f"Resuming simulation from checkpoint: {checkpoint_file}")
@@ -127,7 +130,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
         _resume_distributed(
             checkpoint_file, max_iter, n_ranks, multi_gpu, fully_distributed,
             gpu_device, backend, surface_mesh, threads, skip_quality_check,
-            checkpoint_interval,
+            checkpoint_interval, phase_max_iter, residual_drop_threshold,
         )
         return
 
@@ -211,6 +214,8 @@ def _resume_distributed(
     fully_distributed: bool, gpu_device: Optional[int], backend: Optional[str],
     surface_mesh: Optional[str], threads: int, skip_quality_check: bool,
     checkpoint_interval: int,
+    phase_max_iter: Optional[int] = None,
+    residual_drop_threshold: float = 100.0,
 ) -> None:
     """`resume` 的分布式分支（2026-09-02 补齐，见 `resume` 文档"完成度"
     一节）——CPU MPI"传统模式"/"完全分布式加载"/多GPU 三条路径共用同一个
@@ -218,6 +223,21 @@ def _resume_distributed(
     循环 + 中途 checkpoint 保存 + 最终保存与单机分支同一个设计
     （`checkpoint_callback`），只是三种求解器的 `solve()` 返回值/最终
     保存调用各自的真实签名不同，分别处理。
+
+    真实 bug 修复（2026-09-05，用户直接问"--residual-drop-threshold
+    phase_max_iter 可以在 resume 重置吗"发现）：`resume()` 命令顶层
+    确实解析了这两个 CLI 选项，但此前本函数的签名根本不接收它们，两处
+    `solver.solve(...)` 调用（多GPU分支/CPU MPI分支）也完全没有传递
+    ——`DistributedFRSolver.solve`/`MultiGPUDistributedSolver.solve`
+    早在 2026-09-02（Order Continuation 分布式移植当天）就已经真正
+    支持这两个参数（签名完全对应单机 `run_order_continuation`），只是
+    CLI 这一层从未把用户在命令行传的值接力传下去——用户传了
+    `--phase-max-iter`/`--residual-drop-threshold` 也会被静默忽略，
+    分布式/多GPU resume 时这两个 Order Continuation 参数永远等于
+    `DistributedFRSolver.solve`/`MultiGPUDistributedSolver.solve` 自己
+    的函数签名默认值（`None`/`100.0`），不是用户的真实意图。CLI
+    帮助文本此前写的"仅 CPU 后端支持"因此也是过时/错误的说法，一并
+    改正。
 
     不做气动系数报告（`_report_aerodynamic_coefficients` 假设单机
     `FRSolver` 的 `.state`/`.mesh` 布局，与分布式求解器的 local+halo
@@ -271,6 +291,7 @@ def _resume_distributed(
 
         result = solver.solve(
             max_iter=max_iter, dt=1e-3, tol=1e-6, checkpoint_callback=_checkpoint_cb,
+            phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold,
         )
         if is_root():
             print(
@@ -314,7 +335,8 @@ def _resume_distributed(
                 print(f"   [Checkpoint] Warning: save failed at iter {absolute_iteration}: {e}")
 
     solver.solve(n_steps=max_iter, dt=1e-3, output_interval=checkpoint_interval,
-                 checkpoint_callback=_checkpoint_cb)
+                 checkpoint_callback=_checkpoint_cb,
+                 phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold)
     if is_root():
         print(f"\n✅ Resumed distributed simulation finished: "
               f"total_iterations~={iteration + max_iter}")

@@ -153,10 +153,14 @@ class _GPUSolverIOMixin:
             compute_physical_gradient_gpu,
             compute_physical_scalar_gradient_gpu,
         )
-        grad_U = compute_physical_gradient_gpu(
-            self.U_gpu[..., :5], self.mesh_data, self.ops_data,
+        # 真实 bug 修复（2026-09-03，与下面 296 行附近同一类，CPU 版
+        # 见 fr_solver/turbulence.py::compute_turbulence_source 文档）：
+        # 此前对*守恒*变量 U_gpu 求梯度再切片动量分量冒充速度梯度——
+        # grad(rho*u) != rho*grad(u)，除非密度梯度处处为零。直接对
+        # Q_gpu（原始变量，已经是真正的速度）求梯度。
+        grad_vel = compute_physical_gradient_gpu(
+            self.Q_gpu[..., 1:4], self.mesh_data, self.ops_data,
         )
-        grad_vel = grad_U[..., 1:4, :]
 
         d_wall = self.wall_distance_gpu
         if d_wall is None:
@@ -198,15 +202,14 @@ class _GPUSolverIOMixin:
         # 过）：`compute_source_terms_gpu` 的 `grad_U` 参数按文档/CPU版
         # `SSTModelFR.compute_source_terms` 同名参数实际期望的是**速度
         # 梯度**（(n_cells,n_sps,3,3)，内部 `compute_strain_rate_
-        # magnitude_gpu` 直接对末两维做转置相加），不是这里同名局部变量
-        # `grad_U`（5 变量梯度，(n_cells,n_sps,5,3)）——此前这里传的是
-        # 后者，`compute_strain_rate_magnitude_gpu` 内部
+        # magnitude_gpu` 直接对末两维做转置相加），不是 5 变量梯度
+        # ((n_cells,n_sps,5,3))——此前这里传的是后者，
+        # `compute_strain_rate_magnitude_gpu` 内部
         # `cp.transpose(grad_u,(0,1,3,2))` 会产出 (...,3,5) 与
         # (...,5,3) 无法广播相加，真实 CUDA 环境下必然 ValueError 崩溃。
-        # 应该传 20 行前已经算好的 `grad_vel = grad_U[...,1:4,:]`（与
-        # CPU 版 `fr_solver_turbulence.py::compute_turbulence_source`
-        # 里 `grad_vel = grad_U[:,:,1:4,:]` 后传给 `compute_source_
-        # terms(Q, grad_vel, ...)` 完全同一个道理）。
+        # 应该传上面已经算好的 `grad_vel`（2026-09-03 起直接对 Q_gpu 速度
+        # 分量求梯度算出，不再是从 5 变量梯度切片，见上面 grad_vel 赋值
+        # 处文档）。
         Sk, S_omega = self.turb_model_gpu.compute_source_terms_gpu(
             self.Q_gpu, grad_vel, d_wall, self.mu_molecular,
             grad_k, grad_omega,
@@ -276,6 +279,19 @@ class _GPUSolverIOMixin:
             transport_k=transport_k, transport_omega=transport_omega,
         )
 
+        # 真实缺口修复（2026-09-05，代码复审发现）：CPU 版
+        # fr_solver/turbulence.py::compute_turbulence_source 在
+        # update_fields 之后调用 enforce_omega_wall_relaxation 修补
+        # omega 壁面扩散侧未闭合的架构缺口（见该处文档完整推导），
+        # GPU 版此前完全没有移植这一步——GPU SST/DDES/IDDES 长期运行
+        # 会重现与 CPU 版修复前完全相同的中长期发散机制（边界层 omega
+        # 衰减到下界 -> nu_t 近零分母奇点 -> 湍流粘性比失控）。
+        if self.turb_model_name.upper() in ("SST", "DDES", "IDDES"):
+            from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import (
+                enforce_omega_wall_relaxation_gpu,
+            )
+            enforce_omega_wall_relaxation_gpu(cp, self)
+
         mu_t = rho * self.turb_model_gpu.nu_t
         if self.sgs_model_gpu is not None and self.sgs_model_gpu.nu_t is not None:
             mu_t = mu_t + rho * self.sgs_model_gpu.nu_t
@@ -297,10 +313,12 @@ class _GPUSolverIOMixin:
         cp = get_cupy()
         from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_gradient_gpu
 
-        grad_U = compute_physical_gradient_gpu(
-            self.U_gpu[..., :5], self.mesh_data, self.ops_data,
+        # 真实 bug 修复（2026-09-03）：同上面 156 行附近 compute_turbulence_
+        # source_gpu 里的 grad_vel 修复，理由见该处文档——LES/WMLES 的
+        # SGS 涡粘同样不能用动量梯度冒充速度梯度。
+        grad_vel = compute_physical_gradient_gpu(
+            self.Q_gpu[..., 1:4], self.mesh_data, self.ops_data,
         )
-        grad_vel = grad_U[..., 1:4, :]
         nu_t = self.sgs_model_gpu.compute_eddy_viscosity_gpu(grad_vel, self._grid_scale_gpu)
 
         if self.turb_model_gpu is not None and hasattr(self.turb_model_gpu, "nu_t"):

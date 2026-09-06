@@ -34,7 +34,7 @@ from typing import Optional, Tuple
 
 import numba
 
-from autoflowcfd.core.fr_operators.gradients import compute_physical_scalar_gradient
+from autoflowcfd.core.fr_operators.gradients import compute_physical_scalar_gradient, compute_physical_gradient
 from autoflowcfd.core.fr_operators.volume_contract import contract_shared_operator_2axis
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
@@ -398,6 +398,26 @@ def compute_scalar_diffusion_residual(
             的上风 ghost 生效，diffusion 侧的解析壁面通量是更大的独立工作
             （与 k=0 情形是同一个已有的架构限制，不是本次新引入的差异）。
 
+            2026-09-05 曾尝试补上这里的 SIPG（对称内罚 Galerkin）风格
+            Dirichlet 罚通量（`penalty = gamma_face*(C_pen/d1)*(target-
+            phi_owner)`，显式加进 flux_jump_phys），真实网格验证（从
+            cube_demo 791,492 单元真实 checkpoint 续算 20 步）**决定性
+            证伪**：C_pen/d1 这个有效"弹簧系数"在细网格近壁单元上
+            （y+~1 设计意味着 d1 可以小到 1e-5~1e-4 量级）过大，用和
+            其余残差项相同的显式时间积分（没有做成 point-implicit，
+            对比 sst.py::update_fields 里 destruction 项那样的处理）
+            必然刚性超调——20 步内把全域 omega_mean 从 2.8e4 打到
+            5.4e11（远超 1e6 的安全上限，且是全域均值，不是局部
+            异常），k_mean 被连带压垮到 0.16，是真实的数值失稳而不是
+            "改善"。已完整撤销（Git 历史可查这次尝试+撤销的完整过程），
+            扩散侧解析壁面通量这个架构缺口依然存在，如需真正补上，
+            必须先把罚项做成 point-implicit（或大幅限制 dt/加严格的
+            CFL 缩放），不能像这次一样直接显式代入——留给后续需要
+            专门处理数值刚性的独立工作，不要重复这次已经证伪的显式
+            实现方式。当前生产代码依赖 `enforce_omega_wall_relaxation`
+            （事后松弛，已用真实 900+ 步续算验证是稳定的）作为这个
+            架构缺口的安全缓解措施。
+
         flat_face_override: 见 `compute_scalar_convection_residual` 同名
             参数文档，分布式路径复用同一个约定。
 
@@ -592,11 +612,33 @@ def _compute_omega_wall_target(
           逐 FP 精细区分），非 WALL 面为 0（不会被使用，has_value_face
           对应位置为 False）
         - has_value_face: (n_faces,) bool，与 wall_mask 相同
+
+    真实 bug 修复（2026-09-05，真实网格验证决定性发现）：`d1 = np.maximum(
+    d1, 1e-8)` 只防止除零，不防止结果本身失控——cube_demo 791,492 单元
+    真实网格上至少有一个 WALL 面 owner 单元的 wall_distance 恰好卡在
+    这个 1e-8 下限（真实反推：观测到的 omega_wall 异常值 1.176e14 精确
+    对应 d1=1e-8 代入公式的结果），算出 `omega_wall=60*nu/(beta1*d1^2)
+    ~1e14`——比"远超任何工程壁面 omega 值"的安全上限 `omega_max`
+    (=1e6，sst.py::SSTModelFR.k_max/omega_max 文档) 还要大 8 个数量级。
+    此前唯一的消费者（`compute_scalar_convection_residual` 的上风
+    ghost）碰巧没有暴露这个问题——无滑移壁面上对流通量本身趋于零，
+    ghost 值再大也乘的是接近零的质量通量，天然被掩盖；2026-09-04/05
+    新增的两个消费者（`enforce_omega_wall_relaxation` 直接把这个值
+    混合进 omega_field 本身、以及当天当场被证伪撤销的 SIPG 罚项）
+    都没有这层"乘以近零对流通量"的天然保护，完全暴露了这个此前从未
+    触发过的缺口——真实复现：`enforce_omega_wall_relaxation` 点隐式
+    公式本身完全正确（bounded in [0,1) 已有专门单元测试钉住），但
+    "正确地"把 omega 松弛向一个物理上荒谬的 1e14 目标值，5 步内就把
+    全域 omega_mean 打到 1.08e12。修复：在这里、也就是唯一的真值来源，
+    把 `omega_wall` 夹到 `solver.turb_model.omega_max`（没有该属性时
+    退回 1e6 保守默认），让所有消费者（现在的和未来任何新增的）都
+    自动受益，不需要各自重复防御。
     """
     flat = flat_face_override if flat_face_override is not None else get_flat_face_geometry(solver.mesh, solver.ops)
     n_faces = flat.n_faces
     n_fp = flat.n_fp
     beta1 = getattr(solver.turb_model, "beta1", 0.075)
+    omega_max = getattr(solver.turb_model, "omega_max", 1e6)
 
     omega_wall_value_face = np.zeros((n_faces, n_fp), dtype=np.float64)
     wall_face_idx = np.nonzero(wall_mask)[0]
@@ -607,9 +649,104 @@ def _compute_omega_wall_target(
         rho_owner = np.mean(rho[owner_cells], axis=1)
         nu_owner = mu / np.maximum(rho_owner, 1e-10)
         omega_wall = 60.0 * nu_owner / (beta1 * d1**2)
+        omega_wall = np.minimum(omega_wall, omega_max)
         omega_wall_value_face[wall_face_idx, :] = omega_wall[:, None]
 
     return omega_wall_value_face, wall_mask
+
+
+def enforce_omega_wall_relaxation(solver, dt, relax: float = None,
+                                   flat_face_override=None) -> None:
+    """真实 bug 修复（2026-09-04，cube_demo 791,492 单元真实网格 Order
+    Continuation P0->P1 跨阶后长程发散排查发现，grad_vel 修复之后仍持续
+    发散的第二个独立根因）：`_compute_omega_wall_target` 按 Wilcox 解析式
+    算出的壁面 omega 目标值（`omega_wall=60*nu/(beta1*d1^2)`，量级可达
+    1e5~1e6）**只通过 `compute_scalar_convection_residual` 的上风 ghost
+    生效**——`compute_scalar_diffusion_residual`（近壁 omega 动力学的
+    主导机制，因为壁面无滑移使对流通量本身趋于零）文档明确写明这个
+    解析值"当前对本函数的数值结果没有影响"，是已知、有意搁置的架构
+    缺口（"diffusion 侧的解析壁面通量是更大的独立工作"）。
+
+    真实后果（决定性验证，见 verify_gradfix_500steps.py 长程复现）：
+    没有扩散侧的强约束，纯靠耗散项 D_omega=rho*beta*omega^2 的显式
+    积分，边界层棱柱单元的 omega 会在数十~上百步内被压向下界
+    （真实测得：166,980个边界层单元里 90,416 个、66%在150步内至少有
+    一个解点 omega<1e-6，且这个比例逐步增长而非趋于稳定）——omega
+    塌陷经 nu_t=a1*k/max(a1*omega,...) 的近零分母奇点反过来把湍流
+    粘性比推到安全上限（真实测得 nu_t/nu_molecular~1e5，触及
+    TURBULENT_VISCOSITY_RATIO_MAX），持续向平均流注入过量粘性应力，
+    是 grad_vel 修复后仍能观测到的中长期（~100步后）持续增长的直接
+    驱动源（而不是 grad_vel bug 本身遗留的影响——那个 bug 修复后已
+    验证首个~90步完全无发散迹象，本机制独立起效于其后）。
+
+    本函数用最低数值风险的方式补上这个缺口：不改动扩散残差/DG通量
+    的稳定性特征，而是在 update_fields+positivity limiter 之后，
+    直接对 WALL 面 owner 单元的 omega_field 做一次向解析壁面目标值的
+    松弛（标准壁面函数做法，等价于 OpenFOAM omegaWallFunction 对
+    近壁单元值的直接赋值/松弛处理，不是发明新方案）。`relax` 是
+    固定松弛系数（每步只走向目标值的这个比例，不是硬性 hard-set，
+    避免单步冲击过大引入新的震荡）。
+
+    2026-09-05 曾尝试把这里改成"点隐式"推导的动态松弛系数
+    （`relax_eff = dt*c_wall/(1+dt*c_wall)`，c_wall 正比于 1/d1^2）
+    ——数学上确实排除了显式罚项的刚性超调（另一次已撤销的 SIPG
+    尝试），但真实网格验证**再次证伪**：动态 relax_eff 对细网格近壁
+    单元（d1 小）天然趋近 1（几乎每步都把 omega 直接怼到 target），
+    而 target 本身（哪怕已经被下面 `_compute_omega_wall_target` 的
+    `omega_max` 上限保护，不再是失控的 1e14）仍然是 1e6 这个量级的
+    "应急上限"，不是"日常合理松弛目标"——把大量边界层单元在几步内
+    强行拉到这个量级，会让 D_k=rho*beta_star*k*omega 这个耗散项跟着
+    暴涨，2 步内就把全域 k_mean 从 38 打到 0.17（真实数值，不是
+    NaN/Inf，但同样是不可接受的物理扰动）。而固定的 `relax=0.5`
+    对*所有*单元一视同仁地只走一半路程，天然更温和、给耦合系统留出
+    调整时间——这版已用真实生产续算验证 900+ 步保持平均流场零漂移
+    （见项目记忆），比"数学上更精确"但经验证更具破坏性的点隐式版本
+    更适合作为当前的工程选择。教训：这类近壁松弛的"正确性"不能只看
+    单个 ODE 是否无条件稳定，还要看它对耦合场（k 反过来依赖 omega）
+    造成的扰动幅度是否温和——本函数改回固定 relax，`dt` 参数保留
+    只是为了不破坏调用方签名，不再参与计算。
+
+    Args:
+        solver: FRSolver 实例
+        dt: 未使用（保留参数位置以兼容调用方签名，见上面"教训"一节）。
+        relax: 松弛系数，每步 omega_field[wall_owner] 更新为
+            `(1-relax)*old + relax*omega_wall_target`
+        flat_face_override: 分布式路径复用同一约定，见
+            `compute_turbulence_transport_residual` 同名参数文档
+    """
+    if relax is None:
+        relax = 0.5
+    wall_mask = _compute_wall_dirichlet_face_mask(solver)
+    if not np.any(wall_mask):
+        return
+
+    Q = solver.state.Q
+    rho = Q[:, :, 0]
+    omega_wall_value_face, has_wall = _compute_omega_wall_target(
+        solver, wall_mask, solver.mu_molecular, rho, flat_face_override=flat_face_override,
+    )
+
+    flat = flat_face_override if flat_face_override is not None else get_flat_face_geometry(solver.mesh, solver.ops)
+    wall_face_idx = np.nonzero(has_wall)[0]
+    if len(wall_face_idx) == 0:
+        return
+    owner_cells = flat.owner_cell[wall_face_idx]
+    target = omega_wall_value_face[wall_face_idx, 0]  # 同一面上恒为同一常数，见函数文档
+
+    turb = solver.turb_model
+    # 同一个 owner 单元可能是多个 WALL 面的 owner（角部单元）——用
+    # np.add.at 累加再除以命中次数取平均目标值，不能直接花式索引赋值
+    # 覆盖（后写的面会覆盖先写的面，不是真正的平均）。
+    sum_target = np.zeros(solver.state.n_cells)
+    count = np.zeros(solver.state.n_cells)
+    np.add.at(sum_target, owner_cells, target)
+    np.add.at(count, owner_cells, 1.0)
+    hit_cells = np.nonzero(count > 0)[0]
+    avg_target = sum_target[hit_cells] / count[hit_cells]
+
+    turb.omega_field[hit_cells, :] = (
+        (1.0 - relax) * turb.omega_field[hit_cells, :] + relax * avg_target[:, None]
+    )
 
 
 def compute_turbulence_transport_residual(
@@ -665,8 +802,12 @@ def compute_turbulence_transport_residual(
     # 计算有效扩散系数 Gamma_k, Gamma_omega
     # 需要 F1 blending 来确定 sigma_k, sigma_omega
     if grad_vel is None:
-        grad_U = solver._compute_gradients()
-        grad_vel = grad_U[:, :, 1:4, :]
+        # 真实 bug 修复（2026-09-03）：同 fr_solver/turbulence.py::
+        # compute_turbulence_source 里的 grad_vel 修复——不能对*守恒*
+        # 变量 U 求梯度再切片动量分量冒充速度梯度，见该处文档。这里
+        # `Q`/`vel`（上面已经从 solver.state.Q 取出的原始变量）本来就是
+        # 正确的速度，直接对它求梯度。
+        grad_vel = compute_physical_gradient(vel, solver.mesh, solver.ops)
     S_mag = turb.compute_strain_rate_magnitude(grad_vel)
     nu = mu / np.maximum(rho, 1e-10)
 

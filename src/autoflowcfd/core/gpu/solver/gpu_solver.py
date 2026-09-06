@@ -142,6 +142,24 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         mach_ref = vel_inf / np.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10))
         mach_ref = max(mach_ref, 0.1)
         self.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf, "mach_ref": mach_ref}
+        # 真实 bug 修复（2026-09-05，代码复审发现）：CPU 版
+        # `DistributedFRSolver`/`MultiGPUDistributedSolver` 都把构造期
+        # 传入的 `turbulence_intensity`/`viscosity_ratio` 存成
+        # `self._turbulence_intensity`/`self._viscosity_ratio` 供后续
+        # `_set_freestream_turbulence(solver)`（P0 降阶重置/resume 爆炸
+        # 重置等场景都会调用）读取真实配置值；单机 `GPUFRSolver` 此前
+        # 完全没有存这两个属性——虽然构造函数确实接收了这两个参数（见
+        # 下面 k_inf/omega_inf 推导），但只用于构造期算一次初值，从不
+        # 存到 self 上。后续任何需要重新推导来流湍流值的调用点（例如
+        # `gpu_solver_order_continuation.py::gpu_solver_interpolate_to_
+        # new_order` 的降阶重置分支、本次新增的 `distributed_order_
+        # continuation.py::_reset_turbulence_if_resumed_field_exploded`
+        # resume 安全重置）都会因为 `getattr(solver, '_turbulence_
+        # intensity', 0.01)` 取不到真实值，静默退回默认值 Tu=0.01/
+        # VR=5.0——用户配置了非默认湍流强度/粘性比的单机 GPU 算例，这些
+        # 场景会重置成错误的来流湍流值而不报错。
+        self._turbulence_intensity = turbulence_intensity
+        self._viscosity_ratio = viscosity_ratio
         self.turb_model_name = turb_model
         self.turb_model_gpu = None  # GPU SST 模型（SST/DDES/IDDES 共用，可选）
         self.ddes_model_gpu = None  # GPU DDES/IDDES 长度尺度计算器（可选）
