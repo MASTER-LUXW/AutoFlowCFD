@@ -48,6 +48,89 @@ _MACH_REF_FLOOR = 0.1
 # 本代码库统一用的 loguru，两处修复是同一个根因。
 
 
+def _limit_blas_threads(n: int = 1) -> bool:
+    """把已加载的 OpenBLAS/MKL 线程数在**运行时**限制为 `n`（默认 1）。
+
+    为什么需要运行时这一道（`autoflowcfd/__init__.py` 已经在 import numpy
+    之前设过 `OPENBLAS_NUM_THREADS=1` 等环境变量）：那条路径只在
+    "先 import autoflowcfd、再由它间接 import numpy" 时生效。如果调用方
+    （交互式会话、第三方脚本、pytest 插件等）在导入本包之前就已经
+    import 过 numpy，OpenBLAS 早已按 cpu_count 建好线程池，环境变量
+    不再有任何作用——那正是与 numba 线程池 2 倍超额订阅、实测慢 9~11%
+    的情形（数据见 `autoflowcfd/__init__.py` 顶部注释）。
+
+    实现用 ctypes 直接调 OpenBLAS 导出的 `openblas_set_num_threads`
+    （numpy 的 wheel 里是 64 位整型变体 `openblas_set_num_threads64_`）。
+    找不到符号/不是 OpenBLAS 后端时静默跳过——这是纯性能调优，任何
+    失败都不应影响求解本身。用户显式设过 `OPENBLAS_NUM_THREADS` 时
+    同样跳过，尊重显式配置。
+
+    Returns:
+        True 表示确实调到了某个后端的 set_num_threads；False 表示没找到
+        可用入口（静默跳过，不影响求解）。返回值供
+        `tests/unit/test_blas_thread_limit.py` 断言"这条路径在当前环境里
+        真的有效"——不要把它改成 `None`，否则那个自检就失去意义。
+    """
+    if os.environ.get("AFCFD_NO_BLAS_THREAD_LIMIT") == "1":
+        return False
+    try:
+        import ctypes
+        import glob
+        import numpy as _np
+
+        # numpy 自带的 BLAS 动态库已经在进程里（numpy import 时加载），
+        # 重新 `CDLL` 同一个路径拿到的是同一个已加载模块的句柄，因此
+        # 调用它导出的 set_num_threads 会作用在**正在用的那个实例**上。
+        #
+        # 搜索路径要覆盖三种真实的 wheel 布局（2026-09-13 真实踩坑：
+        # 第一版只找了包内的 `.libs`/`libs`，而本机 numpy 2.x Windows
+        # wheel 把 dll 放在 **site-packages/numpy.libs/**——numpy 包的
+        # *同级*目录，于是 ctypes 路径静默失效、9~11% 的收益并没有真正
+        # 拿到。用一个"限制前后测同一个大 gemm 耗时"的探针才发现，光看
+        # 代码不会发现——详见本函数末尾的自检说明）：
+        #   1) <site-packages>/numpy.libs/          （Windows wheel）
+        #   2) <numpy>/.libs/、<numpy>/libs/        （旧布局/部分 Linux wheel）
+        #   3) 系统安装的 libopenblas（Linux 发行版包管理器装的）
+        np_dir = os.path.dirname(_np.__file__)
+        site_dir = os.path.dirname(np_dir)
+        patterns = [
+            os.path.join(site_dir, "*.libs", "*openblas*"),
+            os.path.join(np_dir, ".libs", "*openblas*"),
+            os.path.join(np_dir, "libs", "*openblas*"),
+        ]
+        candidates = []
+        for pat in patterns:
+            candidates += [f for f in glob.glob(pat)
+                           if f.endswith((".dll", ".so", ".dylib")) or ".so." in f]
+        for lib_path in candidates:
+            try:
+                lib = ctypes.CDLL(lib_path)
+            except OSError:
+                continue
+            # 64 位整型接口的 OpenBLAS（numpy 用的就是 openblas64）导出的是
+            # 带 `64_` 后缀的符号名；两个都试，取到哪个用哪个。
+            for sym in ("openblas_set_num_threads64_", "openblas_set_num_threads"):
+                try:
+                    fn = getattr(lib, sym)
+                except AttributeError:
+                    continue
+                fn.argtypes = [ctypes.c_int]
+                fn.restype = None
+                fn(int(n))
+                return True
+        # MKL 后端（Intel 发行版 numpy）走另一个入口
+        try:
+            mkl = ctypes.CDLL("mkl_rt")
+            mkl.MKL_Set_Num_Threads(ctypes.c_int(int(n)))
+            return True
+        except OSError:
+            pass
+        return False
+    except Exception:
+        # 纯性能调优，任何异常都不应影响求解
+        return False
+
+
 class FRSolver(_SolverGeometryMixin):
     """
     基于通量重构 (FR) 方法的 N-S 方程求解器。
@@ -114,16 +197,14 @@ class FRSolver(_SolverGeometryMixin):
             n_threads: numba 并行 kernel（无粘/粘性残差界面项，见
                 core/fr_residual_inviscid_kernel.py、
                 core/fr_viscous_flux_kernel.py 模块文档"多核并行"一节）
-                使用的 CPU 线程数。默认 -1 **不是** `os.cpu_count()`——真实
-                545,597 单元生产网格上实测的线程数扩展曲线（P2，16 物理核
-                机器）：nt=1 87.63s、nt=2 61.25s、nt=4 57.35s（峰值）、
-                nt=8 61.46s、nt=16 67.19s，超过 4 线程后不是收益递减而是
-                净倒退（16 线程比 4 线程还慢），根因见下方与 kernel 模块
-                文档"多核并行的扩展性上限"一节。因此 -1 解析成 **4**（本机
-                实测的甜点，不是理论值），不是自动检测到的物理核数——这是
-                目前唯一有真实网格实测数据支撑的默认值；调用方仍可显式传
-                更大或更小的 n_threads 覆盖（CLI 见 `--threads`/`-j`），但
-                默认不应该让用户在毫无预警的情况下用一个实测更差的核数。
+                使用的 CPU 线程数。默认 -1 **不是** `os.cpu_count()`，
+                而是解析成 **8**——见下方 `_DEFAULT_N_THREADS` 处的完整
+                实测记录（2026-09-13 重新测量：体积项/梯度链路改成 numba
+                kernel 且 BLAS 线程限制为 1 之后，79 万单元真实网格 P1
+                的甜点从此前的 4 上移到 8，nt=12/16 仍然净倒退，根因是
+                界面项按图着色逐色串行调用导致的屏障开销 + 本机 P/E 混合
+                核在静态均分调度下的不均衡）。调用方仍可显式传更大或更小
+                的 n_threads 覆盖（CLI 见 `--threads`/`-j`）。
                 只在这里调用一次 `numba.set_num_threads`——两个界面
                 kernel 的 `n_threads` 参数要求调用方紧邻调用前取
                 `numba.get_num_threads()`，如果这个全局状态在其他地方
@@ -174,10 +255,30 @@ class FRSolver(_SolverGeometryMixin):
         """
         # numba 全局线程数只在这里设置一次（求解器生命周期内不再修改），
         # 理由见本方法 n_threads 参数文档。必须在任何残差 kernel 被调用
-        # 之前设置。-1 解析成 4（本机真实网格实测的扩展性甜点），不是
-        # os.cpu_count()——见 n_threads 参数文档，超过 4 线程实测是净
-        # 倒退，盲目用满全部核数在这个 kernel 的当前实现下是有害默认值。
-        _DEFAULT_N_THREADS = 4
+        # 之前设置。-1 解析成 8，不是 os.cpu_count()。
+        #
+        # 默认值从 4 上调到 8（2026-09-13，用户反馈"每步耗时太长、且对
+        # CPU 核数不敏感"后重新实测）：原来的 4 是在体积项/梯度链路还
+        # 大量依赖 numpy 批量 matmul（**完全不随线程数并行**，见
+        # fr_operators/volume_contract.py 模块文档的性能优化记录）时测出
+        # 来的甜点——那时增加线程只会加剧内存带宽争用而没有任何可并行的
+        # 新工作，所以 4 以上净倒退。这些链路改成 numba prange kernel 后
+        # 重新在同一台 16 核机器、同一份 79 万单元真实网格 P1 状态上实测
+        # （BLAS 线程已按下方 `_limit_blas_threads` 限制为 1）：
+        #   nt=4  inviscid 5.61s viscous 5.35s turb 9.88s -> 约 45.5s/步
+        #   nt=8  inviscid 5.28s viscous 5.21s turb 9.59s -> 约 43.8s/步（最优）
+        #   nt=12 inviscid 6.09s viscous 7.02s turb 9.40s -> 约 51.4s/步
+        #   nt=16 inviscid 7.03s viscous 8.59s turb 9.39s -> 约 59.0s/步
+        # 8 之后仍然净倒退，根因不再是"没有可并行的工作"，而是界面项
+        # 按图着色**逐色串行调用** kernel（每色一次并行区+同步屏障，见
+        # fr_residual/inviscid.py 界面项注释）：线程越多、每色分到的面
+        # 越少，屏障与调度开销占比越高，加上本机是 P 核/E 核混合架构、
+        # numba prange 是静态均分调度（最慢的 E 核决定每个屏障的时间），
+        # 两者叠加。要真正吃满 16 核需要把 scatter 改成"逐面算通量 +
+        # 逐单元 gather"的两趟无冲突结构（不需要着色、没有逐色屏障），
+        # 是独立的架构改动，不在本次优化范围内；8 是当前实现下有实测
+        # 数据支撑的最优默认值。
+        _DEFAULT_N_THREADS = 8
         resolved_n_threads = n_threads if n_threads > 0 else _DEFAULT_N_THREADS
         numba.set_num_threads(resolved_n_threads)
 
@@ -265,6 +366,16 @@ class FRSolver(_SolverGeometryMixin):
         # `mesh`（同样恒为 native，见 HighOrderMesh 文档）天然一致，
         # 不再需要从 mesh 读取这个属性来保持两者同步。
         self.ops = generate_fr_operators(order, flux_point_type=flux_type)
+
+        # BLAS 线程数压到 1（性能优化 2026-09-13，见 `_limit_blas_threads`
+        # 与 `autoflowcfd/__init__.py` 顶部的完整实测记录）。**位置很关键**：
+        # 必须在网格几何（mesh.jacobians，调用方在构造 solver 之前就算好）
+        # 与上面这行 FR 算子构造**之后**才限制——这两处的 LAPACK 结果会随
+        # 线程数在最后一位上变化，而离散 GCL/自由流场保持性依赖度量量之间
+        # 近乎精确的抵消（把限制提前会让棱柱 P2 保持性判据从 8.07e-7 退化到
+        # 3.35e-6、真实测试失败）。在这之后限制：残差与全程多线程逐位相同，
+        # 同时求解循环拿到 9~11% 的收益。
+        _limit_blas_threads()
         
         # 3. 初始化边界条件 (BD-01) —— 真正参与残差组装的幽灵态边界条件
         # （不再持有未被使用的 FRWeakBC 罚项处理器实例——那是旧版本从未被

@@ -44,7 +44,9 @@ import numpy as np
 from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient
 from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
 from autoflowcfd.core.fr_operators.flux_kernels import viscous_physical_flux_batch
-from autoflowcfd.core.fr_operators.volume_contract import contract_shared_operator_2axis, compute_adj_j
+from autoflowcfd.core.fr_operators.volume_contract import (
+    contract_shared_operator_2axis, compute_adj_j, contravariant_flux_from_metric,
+)
 
 GAMMA = 1.4
 R_AIR = 287.0  # 空气比气体常数 J/(kg*K)
@@ -218,7 +220,14 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
                 np.ascontiguousarray(mu_t_field[c0:c1].reshape(-1)),
                 Pr_t,
             ).reshape(c1 - c0, n_sps, 3, 5)
-            G_tilde = np.matmul(adj_j[c0:c1], G_phys)  # (块长,n_sps,3,5)
+            # 度量×通量融合 kernel（性能优化 2026-09-13，见 volume_contract.py
+            # ::contravariant_flux_from_metric 文档：原 `np.matmul(adj_j, G_phys)`
+            # 是逐点 3x3@3x5 批量微型 gemm，调用开销主导且不随核数并行）。
+            # 数学上逐位等价（adj_j 本身就是 det_jacs*inv_jacs，这里直接从
+            # 两者融合算出同一个乘积）；`adj_j` 仍保留物化，界面项 kernel 要用。
+            G_tilde = contravariant_flux_from_metric(
+                det_jacs[c0:c1], inv_jacs[c0:c1], G_phys
+            )
             del G_phys  # 块内用完即弃，下一轮迭代变量重新绑定
             div_comp[c0:c1] = contract_shared_operator_2axis(op_D, G_tilde)
             del G_tilde

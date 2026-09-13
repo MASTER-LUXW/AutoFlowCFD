@@ -30,7 +30,7 @@ ODE 源项弛豫，而是通过 FR 高阶离散真正参与空间输运。
 
 import os
 import numpy as np
-from typing import Optional, Tuple
+from typing import NamedTuple, Optional, Tuple
 
 import numba
 
@@ -43,7 +43,10 @@ from autoflowcfd.core.turbulence.transport_kernel import (
     distribute_corrections_to_cells_kernel,
     distribute_corrections_to_cells_kernel_colored,
     _extrap_owner_scalar_to_faces,
+    scalar_convection_volume_kernel,
+    scalar_volume_divergence_kernel,
 )
+from autoflowcfd.core.fr_operators.volume_contract import contravariant_flux_from_metric
 
 
 def _extrapolate_scalar_to_faces(
@@ -122,6 +125,54 @@ def _extrapolate_owner_only_to_faces(scalar_sps, flat):
         flat.n_prism, flat.n_faces, flat.n_fp, flat.n_sps,
         flat.owner_cube_face, flat.boundary_extrap_native,
     )
+
+
+class ScalarConvectionGeometry(NamedTuple):
+    """k/omega 两次标量对流调用共享的、**与标量本身无关**的几何/流场量。
+
+    性能优化（2026-09-13，用户反馈"每步耗时过长"后的真实剖析结论）：
+    `compute_turbulence_transport_residual` 对 k 和 omega 各调一次
+    `compute_scalar_convection_residual`，两次传入的 `rho`/`velocity`/
+    `mesh`/`ops` 完全相同，于是下面这两个量此前被**逐字重复计算了两遍**：
+
+    - `rho_u_tilde`：逆变质量通量 adj(J) @ (rho*u)，体积项用。原实现是
+      `np.matmul(adj_j_chunk, (rho*vel*phi))`，其中 phi 在该点是标量、
+      可以从度量乘法里提出来（`adj_j@(rho*u*phi) == phi*(adj_j@(rho*u))`），
+      因此这份与 phi 无关的部分只需算一次。
+    - `mass_flux`：面通量点上的 (rho*u)·n̂（owner 侧），界面上风项用。
+      算它需要把 rho 和 3 个速度分量各外插一次到全部 187 万面×n_fp 个
+      通量点（4 次 numba 外插 kernel + 一次归约），同样与 phi 无关。
+
+    共享后这两块工作从每步 2 次降为 1 次。数值上：两次调用此前拿到的
+    就是同一个数学量（同一段代码、同一份输入），共享只是不再重算，
+    k/omega 各自的上风选择/跳变量计算完全不受影响。
+    """
+    rho_u_tilde: np.ndarray   # (n_cells, n_sps, 3)
+    mass_flux: np.ndarray     # (n_faces, n_fp)
+
+
+def precompute_scalar_convection_geometry(rho, velocity, mesh, ops, flat):
+    """算出 k/omega 共享的 `ScalarConvectionGeometry`（见该类文档）。"""
+    n_cells = mesh.n_cells
+    n_sps = mesh.n_sps_per_cell
+    det_jacs = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
+    inv_jacs = mesh.jacobians["inv_jacs"].reshape(n_cells, n_sps, 3, 3)
+
+    rho_u = rho[:, :, None] * velocity                      # (n_cells,n_sps,3)
+    rho_u_tilde = contravariant_flux_from_metric(
+        det_jacs, inv_jacs, rho_u[..., None]
+    )[..., 0]                                               # (n_cells,n_sps,3)
+    del rho_u
+
+    n_fp = flat.n_fp
+    rho_owner_fp = _extrapolate_owner_only_to_faces(rho, flat)
+    vel_owner_fp = np.empty((flat.n_faces, n_fp, 3))
+    for d in range(3):
+        vel_owner_fp[:, :, d] = _extrapolate_owner_only_to_faces(velocity[:, :, d], flat)
+    mass_flux = np.sum(rho_owner_fp[..., None] * vel_owner_fp * flat.true_normal, axis=-1)
+    del rho_owner_fp, vel_owner_fp
+
+    return ScalarConvectionGeometry(rho_u_tilde=rho_u_tilde, mass_flux=mass_flux)
 
 
 def _distribute_correction_to_cells(raw_jump_fp, flat, ops, mesh, raw_jump_fp_neighbor=None):
@@ -220,6 +271,7 @@ def compute_scalar_convection_residual(
     wall_dirichlet_value_face: np.ndarray = None,
     has_wall_dirichlet_value: np.ndarray = None,
     flat_face_override=None,
+    conv_geom: "ScalarConvectionGeometry" = None,
 ) -> np.ndarray:
     """计算标量对流 FR 残差（体积项 + 界面上风校正）。
 
@@ -281,18 +333,33 @@ def compute_scalar_convection_residual(
     # （理由与 gradients.py::compute_physical_gradient/viscous_flux.py
     # 体积项同一处文档，此前这里从未适配，见本模块 native 分支引入记录）。
     _tet_op_D = ops.D_native_tet_padded if getattr(ops, "D_native_tet_padded", None) is not None else ops.D_3d_tet
-    _TRANSPORT_CHUNK_CELLS = 32768
-    div_F = np.zeros((n_cells, n_sps))
-    for seg_lo, seg_hi, op_D in ((0, n_prism, ops.D_3d_prism), (n_prism, n_cells, _tet_op_D)):
-        for c0 in range(seg_lo, seg_hi, _TRANSPORT_CHUNK_CELLS):
-            c1 = min(c0 + _TRANSPORT_CHUNK_CELLS, seg_hi)
-            adj_j_chunk = det_jacs[c0:c1, :, None, None] * inv_jacs[c0:c1]  # (块长,n_sps,3,3)
-            rho_u_phi_chunk = rho[c0:c1, :, None] * velocity[c0:c1] * scalar_field[c0:c1, :, None]
-            F_tilde_chunk = np.matmul(adj_j_chunk, rho_u_phi_chunk[..., None]).squeeze(-1)  # (块长,n_sps,3)
-            del adj_j_chunk, rho_u_phi_chunk  # 块内用完即弃，下一轮迭代变量重新绑定
-            for m in range(3):
-                div_F[c0:c1] += np.tensordot(F_tilde_chunk[:, :, m], op_D[:, :, m], axes=([1], [1]))
-            del F_tilde_chunk
+    # 性能优化（2026-09-13）：整条"度量×通量→散度"链压进 `scalar_convection_
+    # volume_kernel`（按 cell prange，见该 kernel 文档），并复用调用方预先
+    # 算好的、与标量无关的 `rho_u_tilde`（k/omega 两次调用共享，见
+    # `ScalarConvectionGeometry` 文档）。原实现是 Python 层分块 +
+    # `np.matmul` 逐点 3x3@3x1 微型 gemm + 3 次 `np.tensordot`，既物化多份
+    # 块中间数组、又完全不随 CPU 核数并行。
+    if conv_geom is not None:
+        rho_u_tilde = conv_geom.rho_u_tilde
+    else:
+        rho_u = rho[:, :, None] * velocity
+        rho_u_tilde = contravariant_flux_from_metric(det_jacs, inv_jacs, rho_u[..., None])[..., 0]
+        del rho_u
+    div_F = np.empty((n_cells, n_sps))
+    if n_prism > 0:
+        scalar_convection_volume_kernel(
+            np.ascontiguousarray(scalar_field[:n_prism]),
+            np.ascontiguousarray(rho_u_tilde[:n_prism]),
+            np.ascontiguousarray(ops.D_3d_prism), div_F[:n_prism],
+        )
+    if n_cells > n_prism:
+        scalar_convection_volume_kernel(
+            np.ascontiguousarray(scalar_field[n_prism:]),
+            np.ascontiguousarray(rho_u_tilde[n_prism:]),
+            np.ascontiguousarray(_tet_op_D), div_F[n_prism:],
+        )
+    if conv_geom is None:
+        del rho_u_tilde
 
     # 真实复现（2026-08-21，79万单元生产网格，Order Continuation P0->P1
     # 切换后）：退化单元（坍缩坐标/BL 挤出导致 det(J) 局部极小，见
@@ -319,10 +386,11 @@ def compute_scalar_convection_residual(
     # （下面 mass_flux 只用 owner 侧状态，见 _extrapolate_owner_only_to_faces
     # 文档"真实内存修复"一节：neighbor 侧此前算出来从未被读取，纯浪费）；
     # 只有标量场本身需要两侧（上风选择要比较 owner/neighbor）。
-    rho_owner_fp = _extrapolate_owner_only_to_faces(rho, flat)
-    vel_owner_fp = np.zeros((flat.n_faces, n_fp, 3))
-    for d in range(3):
-        vel_owner_fp[:, :, d] = _extrapolate_owner_only_to_faces(velocity[:, :, d], flat)
+    if conv_geom is None:
+        rho_owner_fp = _extrapolate_owner_only_to_faces(rho, flat)
+        vel_owner_fp = np.zeros((flat.n_faces, n_fp, 3))
+        for d in range(3):
+            vel_owner_fp[:, :, d] = _extrapolate_owner_only_to_faces(velocity[:, :, d], flat)
     phi_owner_fp, phi_neighbor_fp = _extrapolate_scalar_to_faces(
         scalar_field, flat, ops, mesh, wall_dirichlet_zero_face,
         wall_dirichlet_value_face, has_wall_dirichlet_value,
@@ -330,9 +398,15 @@ def compute_scalar_convection_residual(
 
     # 计算每个面通量点的物理质量通量（使用 true_normal）
     # mass_flux_phys[f,fp] = (rho * U) . n̂_true
-    rho_u_owner = rho_owner_fp[..., None] * vel_owner_fp  # (n_faces, n_fp, 3)
-    mass_flux = np.sum(rho_u_owner * flat.true_normal, axis=-1)  # (n_faces, n_fp)
-    del rho_owner_fp, vel_owner_fp, rho_u_owner  # 同上"真实内存修复"一节，及时释放
+    # `mass_flux` 与标量无关，k/omega 共享（见 `ScalarConvectionGeometry`
+    # 文档）——传入 conv_geom 时直接复用，省掉 rho 与 3 个速度分量各一次
+    # 全场面外插（187 万面×n_fp 个通量点）。
+    if conv_geom is not None:
+        mass_flux = conv_geom.mass_flux
+    else:
+        rho_u_owner = rho_owner_fp[..., None] * vel_owner_fp  # (n_faces, n_fp, 3)
+        mass_flux = np.sum(rho_u_owner * flat.true_normal, axis=-1)  # (n_faces, n_fp)
+        del rho_owner_fp, vel_owner_fp, rho_u_owner  # 同上"真实内存修复"一节，及时释放
 
     # 迎风选择
     phi_upwind = np.where(mass_flux >= 0, phi_owner_fp, phi_neighbor_fp)
@@ -517,18 +591,26 @@ def compute_scalar_diffusion_residual(
     # 体积项分块同一处文档：cube_demo 79万单元 P2+SST 组合内存峰值实测
     # 约需 37GB，超过常见 32GB 工作站配置）。
     _tet_op_D = ops.D_native_tet_padded if getattr(ops, "D_native_tet_padded", None) is not None else ops.D_3d_tet
-    _TRANSPORT_CHUNK_CELLS = 32768
-    div_G = np.zeros((n_cells, n_sps))
-    for seg_lo, seg_hi, op_D in ((0, n_prism, ops.D_3d_prism), (n_prism, n_cells, _tet_op_D)):
-        for c0 in range(seg_lo, seg_hi, _TRANSPORT_CHUNK_CELLS):
-            c1 = min(c0 + _TRANSPORT_CHUNK_CELLS, seg_hi)
-            adj_j_chunk = det_jacs[c0:c1, :, None, None] * inv_jacs[c0:c1]
-            G_phys_chunk = gamma_field[c0:c1, :, None] * grad_phi[c0:c1]
-            G_tilde_chunk = np.matmul(adj_j_chunk, G_phys_chunk[..., None]).squeeze(-1)
-            del adj_j_chunk, G_phys_chunk
-            for m in range(3):
-                div_G[c0:c1] += np.tensordot(G_tilde_chunk[:, :, m], op_D[:, :, m], axes=([1], [1]))
-            del G_tilde_chunk
+    # 性能优化（2026-09-13，与对流项体积项同一次剖析、同一手法）：整条
+    # "度量×扩散通量→散度"链换成 `contravariant_flux_from_metric` +
+    # `scalar_volume_divergence_kernel` 两个 numba prange kernel，取代
+    # 原来 Python 层分块 + 逐点 3x3@3x1 微型 gemm + 3 次 tensordot 的
+    # numpy 链路（见两个 kernel 各自的文档）。
+    G_phys = gamma_field[:, :, None] * grad_phi                      # (n_cells,n_sps,3)
+    G_tilde = contravariant_flux_from_metric(det_jacs, inv_jacs, G_phys[..., None])[..., 0]
+    del G_phys
+    div_G = np.empty((n_cells, n_sps))
+    if n_prism > 0:
+        scalar_volume_divergence_kernel(
+            np.ascontiguousarray(G_tilde[:n_prism]),
+            np.ascontiguousarray(ops.D_3d_prism), div_G[:n_prism],
+        )
+    if n_cells > n_prism:
+        scalar_volume_divergence_kernel(
+            np.ascontiguousarray(G_tilde[n_prism:]),
+            np.ascontiguousarray(_tet_op_D), div_G[n_prism:],
+        )
+    del G_tilde
 
     # 扩散对 dphi/dt 的贡献是 +div(G)/det(J)（见本函数文档符号约定，
     # 与 viscous_flux.py::"residual = div_comp / det_jacs"同一约定）。
@@ -982,10 +1064,19 @@ def compute_turbulence_transport_residual(
     # 以保持接口一致。
     wall_mask_k = _compute_wall_dirichlet_face_mask(solver)
 
+    # 共享几何量（性能优化 2026-09-13，见 `ScalarConvectionGeometry` 文档）：
+    # k 与 omega 的对流调用此前各自重复算了一遍与标量无关的逆变质量通量
+    # 和面上 mass_flux，这里统一算一次传给两者。
+    _flat_conv = (flat_face_override if flat_face_override is not None
+                  else get_flat_face_geometry(solver.mesh, solver.ops))
+    conv_geom = precompute_scalar_convection_geometry(
+        rho, vel, solver.mesh, solver.ops, _flat_conv,
+    )
+
     # 计算 k 的对流 + 扩散残差
     conv_k = compute_scalar_convection_residual(
         turb.k_field, rho, vel, solver.mesh, solver.ops, wall_dirichlet_zero_face=wall_mask_k,
-        flat_face_override=flat_face_override,
+        flat_face_override=flat_face_override, conv_geom=conv_geom,
     )
     diff_k = compute_scalar_diffusion_residual(
         turb.k_field, gamma_k, solver.mesh, solver.ops, wall_dirichlet_zero_face=wall_mask_k,
@@ -1010,7 +1101,7 @@ def compute_turbulence_transport_residual(
     conv_w = compute_scalar_convection_residual(
         turb.omega_field, rho, vel, solver.mesh, solver.ops,
         wall_dirichlet_value_face=omega_wall_value_face, has_wall_dirichlet_value=has_omega_wall,
-        flat_face_override=flat_face_override,
+        flat_face_override=flat_face_override, conv_geom=conv_geom,
     )
     diff_w = compute_scalar_diffusion_residual(
         turb.omega_field, gamma_w, solver.mesh, solver.ops,

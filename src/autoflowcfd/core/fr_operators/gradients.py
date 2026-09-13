@@ -17,7 +17,9 @@ tests/unit/test_fr_gradients.py）。
 
 import numpy as np
 
-from autoflowcfd.core.fr_operators.volume_contract import contract_shared_operator_1axis
+from autoflowcfd.core.fr_operators.volume_contract import (
+    contract_shared_operator_1axis, grad_computational_to_physical,
+)
 
 
 def compute_physical_gradient(field: np.ndarray, mesh, ops) -> np.ndarray:
@@ -72,7 +74,11 @@ def compute_physical_gradient(field: np.ndarray, mesh, ops) -> np.ndarray:
     # einsum（把 grad_comp 的 (m,v) 两轴转置成 (v,m) 再与 inv_jacs 的
     # (m,n) 相乘，结果正是 (v,n)），验证见 fr_volume_contract.py 同批
     # 验证脚本，随机数据下与原 einsum 逐位一致（diff=0.0）。
-    grad_phys = np.matmul(np.swapaxes(grad_comp, -1, -2), inv_jacs)
+    # 融合 kernel（性能优化 2026-09-13，见 volume_contract.py::
+    # grad_computational_to_physical 文档：原 `np.matmul(np.swapaxes(...))`
+    # 要先物化一份非连续转置副本、再做 630 万次 (V,3)@(3,3) 微型 gemm，
+    # 开销主导且不随核数并行）。对 m 求和顺序一致，结果逐位相同。
+    grad_phys = grad_computational_to_physical(grad_comp, inv_jacs)
     return grad_phys
 
 

@@ -80,6 +80,184 @@ def compute_adj_j(det_jacs: np.ndarray, inv_jacs: np.ndarray) -> np.ndarray:
     return out
 
 
+@njit(cache=True, parallel=True)
+def _contravariant_flux_kernel(det_jacs, inv_jacs, F_phys, out) -> None:
+    """`out[c,p,i,v] = det_jacs[c,p] * sum_j inv_jacs[c,p,i,j] * F_phys[c,p,j,v]`。"""
+    C, P = det_jacs.shape
+    V = F_phys.shape[3]
+    for c in prange(C):
+        for p in range(P):
+            d = det_jacs[c, p]
+            for i in range(3):
+                a0 = d * inv_jacs[c, p, i, 0]
+                a1 = d * inv_jacs[c, p, i, 1]
+                a2 = d * inv_jacs[c, p, i, 2]
+                for v in range(V):
+                    out[c, p, i, v] = (a0 * F_phys[c, p, 0, v]
+                                       + a1 * F_phys[c, p, 1, v]
+                                       + a2 * F_phys[c, p, 2, v])
+
+
+def contravariant_flux_from_metric(det_jacs: np.ndarray, inv_jacs: np.ndarray,
+                                   F_phys: np.ndarray) -> np.ndarray:
+    """等价于 `np.matmul(compute_adj_j(det_jacs, inv_jacs), F_phys)`——把
+    "构造 adj(J) = det(J)*J^{-1}" 与 "逆变通量 F_tilde = adj(J) @ F_phys"
+    融合成一个 numba 并行 kernel。
+
+    Args:
+        det_jacs: (C, P)
+        inv_jacs: (C, P, 3, 3)
+        F_phys: (C, P, 3, V) 物理通量
+
+    Returns:
+        F_tilde: (C, P, 3, V) 逆变通量
+
+    性能优化（2026-09-13，与 `_contract_shared` 同一次真实剖析）：原路径
+    先用 `compute_adj_j` 物化一份 (C,P,3,3) 的 adj(J)（P1 过积分细点
+    P=27 时，79万单元下约 1.5GiB），再交给 `np.matmul` 做逐点
+    3x3 @ 3xV 的批量微型 gemm——单次只有 45~135 FLOPs，纯调用开销主导，
+    且同样**不随 CPU 核数并行**。融合后 adj(J) 只作为寄存器里的 3 个临时
+    标量存在（完全不落内存），逐点工作集只有几十个 double、留在 L1 内，
+    对 cell 轴 prange 并行。数学公式逐项对应原实现（`adj_j[c,p,i,j] =
+    det*inv_jacs[c,p,i,j]`，再对 j 求和），乘加顺序与 `np.matmul` 的
+    j=0,1,2 顺序一致，因此 V>=2 时结果与原路径**逐位相同**（随机张量实测
+    最大误差 0.0；生产路径的平均流无粘/粘性通量都是 V=5）。V==1 时
+    `np.matmul` 退化成矩阵-向量（gemv）路径、累加方式与 gemm 不同，只能到
+    机器精度（实测 9.3e-17 相对误差，1 ULP）——生产路径里 V=1 只出现在
+    标量对流的共享逆变质量通量（`core/turbulence/transport.py::
+    precompute_scalar_convection_geometry`）。等价性回归测试见
+    tests/unit/test_perf_fusion_kernels.py。
+    """
+    det_c = np.ascontiguousarray(det_jacs)
+    inv_c = np.ascontiguousarray(inv_jacs)
+    F_c = np.ascontiguousarray(F_phys)
+    out = np.empty_like(F_c)
+    _contravariant_flux_kernel(det_c, inv_c, F_c, out)
+    return out
+
+
+@njit(cache=True, parallel=True)
+def _grad_to_physical_kernel(grad_comp, inv_jacs, out) -> None:
+    """`out[c,s,v,n] = sum_m grad_comp[c,s,m,v] * inv_jacs[c,s,m,n]`。"""
+    C, S, _, V = grad_comp.shape
+    for c in prange(C):
+        for s in range(S):
+            for v in range(V):
+                g0 = grad_comp[c, s, 0, v]
+                g1 = grad_comp[c, s, 1, v]
+                g2 = grad_comp[c, s, 2, v]
+                for n in range(3):
+                    out[c, s, v, n] = (g0 * inv_jacs[c, s, 0, n]
+                                       + g1 * inv_jacs[c, s, 1, n]
+                                       + g2 * inv_jacs[c, s, 2, n])
+
+
+def grad_computational_to_physical(grad_comp: np.ndarray, inv_jacs: np.ndarray) -> np.ndarray:
+    """等价于 `np.matmul(np.swapaxes(grad_comp, -1, -2), inv_jacs)`——把
+    计算空间梯度按链式法则转到物理空间。
+
+    Args:
+        grad_comp: (C, S, 3, V) 计算空间梯度（3 是计算坐标方向 m）
+        inv_jacs: (C, S, 3, 3) 逆 Jacobian（inv_jacs[c,s,m,n]）
+
+    Returns:
+        grad_phys: (C, S, V, 3)
+
+    性能优化（2026-09-13，与本模块其余两处同一次真实剖析）：原
+    `np.matmul(np.swapaxes(grad_comp,-1,-2), inv_jacs)` 的左操作数是
+    **非连续的转置视图**，numpy 为了做批量 gemm 必须先物化一份连续副本
+    （79万单元 P1、V=5 时约 760MiB），随后又是逐 (cell,SP) 的
+    (V,3)@(3,3) 微型 gemm——单次仅 45 FLOPs、630 万次，纯开销主导，同样
+    不随 CPU 核数并行。融合成一个 prange kernel 后既不需要转置副本、也
+    不再有 gemm 调用开销。对 m 的求和顺序（m=0,1,2）与 `np.matmul` 一致，
+    结果逐位相同（随机张量实测最大误差 0.0）。
+    """
+    g_c = np.ascontiguousarray(grad_comp)
+    inv_c = np.ascontiguousarray(inv_jacs)
+    C, S, _, V = g_c.shape
+    out = np.empty((C, S, V, 3))
+    _grad_to_physical_kernel(g_c, inv_c, out)
+    return out
+
+
+@njit(cache=True, parallel=True)
+def _contract_shared_kernel(D_flat: np.ndarray, X_flat: np.ndarray, out: np.ndarray) -> None:
+    """`out[c,f,v] = sum_k D_flat[f,k] * X_flat[c,k,v]`，按 cell 轴 prange 并行。
+
+    1axis/2axis 两个公开入口收缩的都是"共享算子 × 逐 cell 场"这同一个
+    形状（2axis 只是先把相邻的 (J,M) 两个收缩轴合并成一个 K 轴，见各自
+    文档），因此共用这一个 kernel，不写两份。
+
+    4 路累加器：K 轴按 4 拆成 4 个独立部分和再合并，而不是单个标量顺序
+    累加。两个理由——(a) 4 条独立依赖链让 SIMD/流水线更容易填满；
+    (b) 误差增长从 O(K·eps) 降到约 O(K/4·eps)，在本项目这种"长求和近乎
+    精确抵消"的场景（离散 GCL / 自由流场保持性；P2 过积分细点下
+    K = n_fine*3 = 375，P3 是 1029）更接近被替换掉的 BLAS gemm 的分块
+    累加行为。
+
+    **一次归因更正（2026-09-13，避免后人误读）**：这 4 路累加器最初是
+    为了修复 `tests/unit/test_native_tet_inviscid_residual_wiring.py::
+    test_native_mesh_free_stream_preservation` 棱柱 P2 判据的一次失败
+    （8.07e-7 -> 3.35e-6，容差 1e-6）而加的，但随后的逐项回退实验**证伪
+    了那个假设**：把本文件三个融合核全部换回原 numpy 实现后该判据仍是
+    3.35e-6，单独把 BLAS 线程数从 1 改回 16 才恢复到 8.0e-7——真正的原因
+    是当时把 BLAS 线程数在**进程级**压到了 1，改变了网格几何（inv_jacs
+    由 LAPACK 求逆）与 FR 算子构造的最后一位，而保持性依赖这些度量量
+    之间的精确抵消（完整记录见 `autoflowcfd/__init__.py` 顶部与
+    `core/fr_solver/solver.py::_limit_blas_threads`）。4 路累加器本身对
+    该判据几乎没有影响（3.3470e-6 -> 3.3394e-6），保留是因为上面 (a)(b)
+    两条理由本身成立，**不是**那次失败的修复手段。
+    """
+    C = X_flat.shape[0]
+    K = X_flat.shape[1]
+    V = X_flat.shape[2]
+    F = D_flat.shape[0]
+    K4 = (K // 4) * 4
+    for c in prange(C):
+        for f in range(F):
+            for v in range(V):
+                s0 = 0.0
+                s1 = 0.0
+                s2 = 0.0
+                s3 = 0.0
+                for k in range(0, K4, 4):
+                    s0 += D_flat[f, k] * X_flat[c, k, v]
+                    s1 += D_flat[f, k + 1] * X_flat[c, k + 1, v]
+                    s2 += D_flat[f, k + 2] * X_flat[c, k + 2, v]
+                    s3 += D_flat[f, k + 3] * X_flat[c, k + 3, v]
+                tail = 0.0
+                for k in range(K4, K):
+                    tail += D_flat[f, k] * X_flat[c, k, v]
+                out[c, f, v] = (s0 + s1) + (s2 + s3) + tail
+
+
+def _contract_shared(D_flat: np.ndarray, X_flat: np.ndarray) -> np.ndarray:
+    """`_contract_shared_kernel` 的分配 + 连续性包装。
+
+    性能优化（2026-09-13，用户反馈"每步耗时过长、且计算效率对 CPU 核数
+    不敏感"后的真实剖析结论）：此前两个公开入口都用 `np.matmul(D, X)` 的
+    批量矩阵乘广播语义。数学上正确，但在本项目的真实形状上是最坏情况：
+    P1 是逐 cell 的 (8,24)@(24,5)、P2 是 (27,81)@(81,5)——单次 gemm 只有
+    几百到几千 FLOPs，79万个 cell 的批量循环几乎全是 BLAS 调用开销，且
+    **numpy 对批量维度不做任何并行**（OpenBLAS 只会在单个 gemm 内部尝试
+    多线程，这种尺寸下线程化只会更慢），所以整条体积项/梯度链路的耗时
+    与 numba 线程数、与 CPU 核数完全无关——这正是用户观察到"加核不提速"
+    的直接原因之一。
+    换成按 cell `prange` 的显式三重循环后：79万单元 P1 形状实测
+    163.5ms -> 34.6ms（4.7x）、P2 形状 1166ms -> 334ms（3.5x），且
+    1->8 线程有 7.7 倍真实扩展性（277.9ms -> 35.9ms，16 线程 34.3ms 起
+    受内存带宽限制）。数值上 P1 形状与原 `np.matmul` 路径**逐位完全相同**
+    （随机张量实测最大误差 0.0），P2 形状 7.7e-16 相对误差（求和顺序不同
+    导致的浮点重结合，与本模块文档记载的 einsum->matmul 那次替换是同一
+    类、同一量级的现象）。
+    """
+    D_c = np.ascontiguousarray(D_flat)
+    X_c = np.ascontiguousarray(X_flat)
+    out = np.empty((X_c.shape[0], D_c.shape[0], X_c.shape[2]))
+    _contract_shared_kernel(D_c, X_c, out)
+    return out
+
+
 def contract_shared_operator_1axis(D: np.ndarray, X: np.ndarray) -> np.ndarray:
     """等价于 `np.einsum("fs,csv->cfv", D, X)`。
 
@@ -90,10 +268,7 @@ def contract_shared_operator_1axis(D: np.ndarray, X: np.ndarray) -> np.ndarray:
     Returns:
         (C, F, V)
     """
-    # np.matmul 对 2D @ 3D 按批量矩阵乘广播：D (F,S) 广播为逐 cell 共享的
-    # 左矩阵，与 X 的每个 (S,V) 切片做 gemm，得到 (C,F,V)——不转置 X 的
-    # cell 轴，见模块文档。
-    return np.ascontiguousarray(np.matmul(D, X))
+    return _contract_shared(D, X)
 
 
 def contract_shared_operator_2axis(D: np.ndarray, X: np.ndarray) -> np.ndarray:
@@ -108,6 +283,5 @@ def contract_shared_operator_2axis(D: np.ndarray, X: np.ndarray) -> np.ndarray:
     """
     F, J, M = D.shape
     C, _, _, V = X.shape
-    D_flat = D.reshape(F, J * M)  # 小数组，reshape 是 no-copy view
-    X_flat = X.reshape(C, J * M, V)  # J,M 相邻，合并成 K 轴同样是 no-copy view
-    return np.ascontiguousarray(np.matmul(D_flat, X_flat))
+    # J,M 相邻，合并成 K 轴是 no-copy view（小算子 D 同理）。
+    return _contract_shared(D.reshape(F, J * M), X.reshape(C, J * M, V))

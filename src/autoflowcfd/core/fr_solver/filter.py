@@ -24,6 +24,59 @@ TimeIntegrator.step()/step_dual_time()，由它们在*每个* stage 的正定性
 from typing import Callable
 
 import numpy as np
+from numba import njit, prange
+
+
+@njit(cache=True, parallel=True)
+def _filter_leading_vars_inplace_kernel(U, F, n_var_filter) -> None:
+    """就地对每个 cell 施加模态滤波矩阵，只作用于前 `n_var_filter` 个变量：
+    `U[c,s,v] <- sum_j F[s,j] * U[c,j,v]`（v < n_var_filter）。
+
+    性能优化（2026-09-13，用户反馈"每步耗时过长、对 CPU 核数不敏感"后的
+    真实剖析）：原实现是
+    `U[:n_prism,:,:5] = np.einsum("sj,cjv->csv", filter_prism, U[:n_prism,:,:5])`。
+    这个 einsum **没有传 `optimize=True`**，走的是 numpy 的通用逐元素求和
+    路径（不是 BLAS gemm），既单线程、又要为切片赋值物化一份完整中间
+    数组；`U[...,:5]` 在 SST（n_vars=7）下还是跨步长切片，赋值两端各来
+    一次跨步拷贝。79 万单元 P1 实测每次调用约 0.55s，而 SSP-RK3 每步要
+    在 3 个 stage 各调一次（约 1.6s/步）。
+
+    改成按 cell `prange` 的就地 kernel 后：无任何大中间数组、不受
+    `:5` 跨步切片影响（直接按索引读写原数组）、完全并行。对 j 的求和
+    顺序与非优化 einsum 的 j 递增顺序一致，结果逐位相同（等价性回归见
+    tests/unit/test_perf_fusion_kernels.py）。
+    """
+    C, S, _ = U.shape
+    for c in prange(C):
+        tmp = np.empty((S, n_var_filter))
+        for s in range(S):
+            for v in range(n_var_filter):
+                acc = 0.0
+                for j in range(S):
+                    acc += F[s, j] * U[c, j, v]
+                tmp[s, v] = acc
+        for s in range(S):
+            for v in range(n_var_filter):
+                U[c, s, v] = tmp[s, v]
+
+
+@njit(cache=True, parallel=True)
+def _filter_scalar_kernel(phi, F, out) -> None:
+    """`out[c,s] = sum_j F[s,j] * phi[c,j]`（标量场版本，见
+    `_filter_leading_vars_inplace_kernel` 同一处性能优化说明）。
+
+    与原 `np.einsum("sj,cj->cs", ...)` 的等价性（实测）：n_sps=1 时逐位
+    相同，n_sps=4/8/27 时为机器精度（1.4e-16~4.8e-16 相对误差）——2D
+    einsum 的累加方式与这里的顺序循环略有不同。5 变量主流滤波
+    （`_filter_leading_vars_inplace_kernel`）实测在全部形状下**逐位相同**。
+    """
+    C, S = phi.shape
+    for c in prange(C):
+        for s in range(S):
+            acc = 0.0
+            for j in range(S):
+                acc += F[s, j] * phi[c, j]
+            out[c, s] = acc
 
 
 def _filter_flat_U(U_flat: np.ndarray, n_cells: int, n_sps: int, n_prism: int, filter_prism, filter_tet) -> np.ndarray:
@@ -40,10 +93,13 @@ def _filter_flat_U(U_flat: np.ndarray, n_cells: int, n_sps: int, n_prism: int, f
     滤波（见该函数完整推导），这里的说明同步更正。
     """
     U = U_flat.reshape(n_cells, n_sps, -1)
+    # 就地并行 kernel（性能优化 2026-09-13，见
+    # `_filter_leading_vars_inplace_kernel` 文档：原 einsum 未开 optimize、
+    # 走单线程通用求和路径，且 `:5` 跨步切片赋值要额外两次大拷贝）。
     if n_prism > 0:
-        U[:n_prism, :, :5] = np.einsum("sj,cjv->csv", filter_prism, U[:n_prism, :, :5])
+        _filter_leading_vars_inplace_kernel(U[:n_prism], np.ascontiguousarray(filter_prism), 5)
     if n_cells > n_prism:
-        U[n_prism:, :, :5] = np.einsum("sj,cjv->csv", filter_tet, U[n_prism:, :, :5])
+        _filter_leading_vars_inplace_kernel(U[n_prism:], np.ascontiguousarray(filter_tet), 5)
     return U.reshape(U_flat.shape)
 
 
@@ -84,10 +140,13 @@ def filter_scalar_field(phi: np.ndarray, n_prism: int, filter_prism, filter_tet)
     """
     n_cells = phi.shape[0]
     out = phi.copy()
+    # 同上并行 kernel（机器精度等价，见 `_filter_scalar_kernel` 文档）
     if n_prism > 0:
-        out[:n_prism] = np.einsum("sj,cj->cs", filter_prism, phi[:n_prism])
+        _filter_scalar_kernel(np.ascontiguousarray(phi[:n_prism]),
+                              np.ascontiguousarray(filter_prism), out[:n_prism])
     if n_cells > n_prism:
-        out[n_prism:] = np.einsum("sj,cj->cs", filter_tet, phi[n_prism:])
+        _filter_scalar_kernel(np.ascontiguousarray(phi[n_prism:]),
+                              np.ascontiguousarray(filter_tet), out[n_prism:])
     return out
 
 

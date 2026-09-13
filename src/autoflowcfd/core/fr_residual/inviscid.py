@@ -30,7 +30,10 @@ import numpy as np
 from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
 from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
 from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_batch, entropy_stable_volume_divergence_batch
-from autoflowcfd.core.fr_operators.volume_contract import contract_shared_operator_1axis, contract_shared_operator_2axis, compute_adj_j
+from autoflowcfd.core.fr_operators.volume_contract import (
+    contract_shared_operator_1axis, contract_shared_operator_2axis, compute_adj_j,
+    contravariant_flux_from_metric,
+)
 
 GAMMA = 1.4
 
@@ -253,8 +256,13 @@ def compute_inviscid_residual_fr(
             for c0 in range(seg_lo, seg_hi, _OVERINT_CHUNK_CELLS):
                 c1 = min(c0 + _OVERINT_CHUNK_CELLS, seg_hi)
                 Q_fine = contract_shared_operator_1axis(op_c2f, Q[c0:c1])
-                adj_j_fine = compute_adj_j(det_jacs_fine[c0:c1], inv_jacs_fine[c0:c1])
                 if entropy_stable_volume:
+                    # adj(J) 只有 entropy-stable 分支需要显式物化（该 kernel
+                    # 的对称平均度量项要按 SP 对访问 adj_j 本身）；强形式
+                    # 分支已改用 `contravariant_flux_from_metric` 融合计算，
+                    # 不再需要这份 (块长,n_fine,3,3) 中间数组（性能优化
+                    # 2026-09-13，79万单元 P1 细点下约 1.5GiB）。
+                    adj_j_fine = compute_adj_j(det_jacs_fine[c0:c1], inv_jacs_fine[c0:c1])
                     # Chandrashekar 两点熵守恒通量 + 对称平均度量项，见
                     # entropy_stable_volume_divergence_batch 文档；该函数
                     # 内部已经把 "-2*div_comp/det_jacs" 里的 2.0 折进
@@ -267,8 +275,14 @@ def compute_inviscid_residual_fr(
                     F_phys_fine = euler_physical_flux_batch(
                         Q_fine.reshape(-1, 5)
                     ).reshape(c1 - c0, n_fine, 3, 5)
-                    F_tilde_fine = np.matmul(adj_j_fine, F_phys_fine)  # (块长,n_fine,3,5)
-                    del adj_j_fine, F_phys_fine
+                    # 度量×通量融合 kernel（性能优化 2026-09-13，见
+                    # volume_contract.py::contravariant_flux_from_metric
+                    # 文档：原 `np.matmul(adj_j_fine, F_phys_fine)` 是逐点
+                    # 3x3@3x5 批量微型 gemm，不随核数并行）。逐位等价。
+                    F_tilde_fine = contravariant_flux_from_metric(
+                        det_jacs_fine[c0:c1], inv_jacs_fine[c0:c1], F_phys_fine
+                    )
+                    del F_phys_fine
                     div_comp_fine[c0:c1] = contract_shared_operator_2axis(op_D_fine, F_tilde_fine)
                     del F_tilde_fine
                 del Q_fine  # 块内用完即弃，下一轮迭代变量重新绑定
@@ -290,7 +304,8 @@ def compute_inviscid_residual_fr(
         # `D_3d_prism`（棱柱没有 native 概念）。
         Q_flat = np.ascontiguousarray(Q.reshape(-1, 5))
         F_phys = euler_physical_flux_batch(Q_flat).reshape(n_cells, n_sps, 3, 5)
-        F_tilde = np.matmul(adj_j, F_phys)  # (n_cells,n_sps,3,5)
+        # 同上融合 kernel（逐位等价，见 contravariant_flux_from_metric 文档）
+        F_tilde = contravariant_flux_from_metric(det_jacs, inv_jacs, F_phys)
         div_comp = np.zeros((n_cells, n_sps, 5))
         if n_prism > 0:
             div_comp[:n_prism] = contract_shared_operator_2axis(ops.D_3d_prism, F_tilde[:n_prism])

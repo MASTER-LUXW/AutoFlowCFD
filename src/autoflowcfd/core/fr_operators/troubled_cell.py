@@ -395,6 +395,72 @@ def _median_abs_over_sps_kernel(residual: np.ndarray) -> np.ndarray:
     return out
 
 
+@njit(cache=True, parallel=True)
+def _outlier_ref_and_flag_kernel(residual, reference_field, factor, field_rel_floor):
+    """一趟算出逐 (cell,var) 的异常判据参照量 `ref`，并给出全场是否存在异常值。
+
+    `ref[c,v] = max( median_s(|residual[c,s,v]|),
+                     field_rel_floor * mean_s(|reference_field[c,s,v]|),
+                     1e-300 )`
+    与原 numpy 实现逐项对应（中位数定义见 `_median_abs_over_sps_kernel`：
+    偶数个 SP 取中间两个的平均，与 `np.median` 一致）。
+
+    Returns:
+        (ref, has_outlier)：ref 形状 (n_cells, n_vars)；has_outlier 为
+        bool（等价于原实现的 `np.any(outlier)`）。
+    """
+    n_cells, n_sps, n_vars = residual.shape
+    ref = np.empty((n_cells, n_vars))
+    flags = np.zeros(n_cells, dtype=np.bool_)
+    half = n_sps // 2
+    even = (n_sps % 2 == 0)
+    for c in prange(n_cells):
+        buf = np.empty(n_sps)
+        local_flag = False
+        for v in range(n_vars):
+            acc = 0.0
+            for s in range(n_sps):
+                x = residual[c, s, v]
+                buf[s] = x if x >= 0.0 else -x
+                y = reference_field[c, s, v]
+                acc += y if y >= 0.0 else -y
+            buf_sorted = np.sort(buf)
+            if even:
+                med = 0.5 * (buf_sorted[half - 1] + buf_sorted[half])
+            else:
+                med = buf_sorted[half]
+            r = med
+            rf = field_rel_floor * (acc / n_sps)
+            if rf > r:
+                r = rf
+            if r < 1e-300:
+                r = 1e-300
+            ref[c, v] = r
+            thresh = factor * r
+            for s in range(n_sps):
+                a = buf[s]
+                if a > thresh:
+                    local_flag = True
+        flags[c] = local_flag
+    return ref, bool(np.any(flags))
+
+
+@njit(cache=True, parallel=True)
+def _outlier_zero_kernel(residual, ref, factor, out) -> None:
+    """按 `_outlier_ref_and_flag_kernel` 给出的参照量清零异常 (cell,SP,var)。
+
+    等价于原实现的 `np.where(np.abs(residual) > factor*ref, 0.0, residual)`。
+    """
+    n_cells, n_sps, n_vars = residual.shape
+    for c in prange(n_cells):
+        for v in range(n_vars):
+            thresh = factor * ref[c, v]
+            for s in range(n_sps):
+                x = residual[c, s, v]
+                a = x if x >= 0.0 else -x
+                out[c, s, v] = 0.0 if a > thresh else x
+
+
 def suppress_residual_outliers(
     residual: np.ndarray,
     reference_field: np.ndarray,
@@ -446,11 +512,23 @@ def suppress_residual_outliers(
     "真实几何法向的 P0 有限体积残差"是唯一有理论依据但尚未实现、且
     有明显额外计算成本的方向），不在这次调查范围内解决。
     """
-    ref_sibling = _median_abs_over_sps_kernel(residual)[:, np.newaxis, :]  # (n_cells,1,n_vars)
-    ref_field = field_rel_floor * np.mean(np.abs(reference_field), axis=1, keepdims=True)
-    ref = np.maximum(np.maximum(ref_sibling, ref_field), 1e-300)
-    with np.errstate(over='ignore', invalid='ignore'):
-        outlier = np.abs(residual) > factor * ref
-    if not np.any(outlier):
+    # 性能优化（2026-09-13，真实剖析：本函数每步被调用 8 次——无粘/粘性
+    # 残差各 3 次 RK stage + k/omega 输运各 1 次，79 万单元 P1 实测合计
+    # 约 2.5s/步）：原实现是 "numba 中位数 kernel + 5~7 趟 numpy 全场
+    # 遍历"（np.mean、np.abs、比较、np.any、np.where 各自一趟，每趟读写
+    # 253MiB 的 (79万,8,5) 数组，且 numpy 逐元素运算**全部单线程**）。
+    # 现在把参照量计算与异常检测合并进一个按 cell prange 的 kernel
+    # （`_outlier_ref_and_flag_kernel`），只有真的存在异常值时才走第二个
+    # kernel 写出清零后的数组——"无异常值时原样返回同一个数组对象"这条
+    # 既有语义完全保留。数学判据逐项对应原实现（同一个中位数定义、同一个
+    # `max(median, floor*mean, 1e-300)` 参照、同一个 `|res| > factor*ref`
+    # 比较），结果逐位相同（见 tests/unit/test_troubled_cell_*.py）。
+    ref, has_outlier = _outlier_ref_and_flag_kernel(
+        np.ascontiguousarray(residual), np.ascontiguousarray(reference_field),
+        factor, field_rel_floor,
+    )
+    if not has_outlier:
         return residual
-    return np.where(outlier, 0.0, residual)
+    out = np.empty_like(residual)
+    _outlier_zero_kernel(np.ascontiguousarray(residual), ref, factor, out)
+    return out
