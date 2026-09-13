@@ -71,6 +71,12 @@ from autoflowcfd.cli.solve_steady_commands import _report_aerodynamic_coefficien
 @click.option('--checkpoint-interval', type=int, default=100,
               help='中间 checkpoint 保存间隔（本次 resume 自己新跑的额外迭代数，'
                    '非绝对迭代数）——与 solve steady 同名参数含义一致')
+@click.option('--cfl-start', type=float, default=0.1,
+              help='自适应 CFL 初始值/下限（默认 0.1）。CFL 是纯数值加速参数，不影响'
+                   '物理解，每次 resume 可根据上一段收敛表现重新调')
+@click.option('--cfl-max', type=float, default=0.5,
+              help='自适应 CFL 上限（默认 0.5）。上一段稳定收敛可试 0.8；发散则回调到'
+                   '0.3 或更低。仅单机 CPU 路径（非 --n-ranks>1/--multi-gpu）支持')
 @click.option('--phase-max-iter', type=int, default=None,
               help='Order Continuation（目标阶数>=2 时触发）非最终阶段各自的最大迭代'
                    '步数上限。默认(不传)时取本次续算新增的额外迭代数按剩余阶段数机械'
@@ -95,6 +101,7 @@ from autoflowcfd.cli.solve_steady_commands import _report_aerodynamic_coefficien
 def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
            surface_mesh: Optional[str], reference_area: Optional[float], threads: int,
            skip_quality_check: bool, checkpoint_interval: int,
+           cfl_start: float, cfl_max: float,
            phase_max_iter: Optional[int], residual_drop_threshold: float,
            n_ranks: int, multi_gpu: bool, fully_distributed: bool,
            gpu_device: Optional[int]) -> None:
@@ -119,6 +126,9 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
             input_file 是 .nas 体网格、且两者都缺失时才会报错
         reference_area: 气动系数参考面积
         checkpoint_interval: 中间 checkpoint 保存间隔（额外迭代数）
+        cfl_start, cfl_max: 自适应 CFL 的初始值/上限（纯数值加速参数，不影响
+            物理解，不从 checkpoint 恢复——每次 resume 由本次命令行重新指定，
+            方便根据上一段收敛表现调整）。仅单机 CPU 路径生效。
         phase_max_iter: Order Continuation 非最终阶段最大步数上限，None 时取
             max_iter // len(orders) 作为这个数字的默认值——不论默认还是
             显式值，目标阶数都吃掉剩余全部步数，见同名 CLI 选项帮助文本
@@ -138,6 +148,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
         checkpoint_file, backend=backend, surface_mesh=surface_mesh, threads=threads,
         reference_area=reference_area,
         skip_quality_check=skip_quality_check,
+        cfl_start=cfl_start, cfl_max=cfl_max,
     )
     input_file = metadata["input_file"]
     order = metadata["order"]

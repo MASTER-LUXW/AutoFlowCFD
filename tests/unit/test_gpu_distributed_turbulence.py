@@ -54,6 +54,7 @@ import autoflowcfd.core.gpu.turbulence.gpu_scalar_transport as gst_mod
 import autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst as gpu_turbulence_sst_mod
 import autoflowcfd.core.gpu.turbulence.gpu_turbulence_des as gpu_turbulence_des_mod
 import autoflowcfd.core.gpu.turbulence.gpu_sgs as gpu_sgs_mod
+import autoflowcfd.core.gpu.gpu_modal_filter as gpu_modal_filter_mod
 
 
 class _NumpyAsCupy:
@@ -88,7 +89,8 @@ class _NumpyAsCupy:
 def _patch_get_cupy(monkeypatch):
     shim = _NumpyAsCupy()
     for mod in (gdi_mod, gd_mod, gpu_gradients_mod, gpu_volume_contract_mod, gpu_flux_mod,
-                gst_mod, gpu_turbulence_sst_mod, gpu_turbulence_des_mod, gpu_sgs_mod):
+                gst_mod, gpu_turbulence_sst_mod, gpu_turbulence_des_mod, gpu_sgs_mod,
+                gpu_modal_filter_mod):
         monkeypatch.setattr(mod, "get_cupy", lambda: shim)
     # `GPUTurbulenceSST.__init__`/`GPUDDESModel.__init__`/`GPUWALEModel.
     # __init__` 单独检查模块级 `gpu_available` 标志（与 `get_cupy()` 是
@@ -233,7 +235,7 @@ def test_gpu_distributed_sst_matches_cpu_distributed_sst(rank, turb_model_name):
     stub = types.SimpleNamespace(
         rank=rank, device_id=0, mu_molecular=mu,
         partition=partition, mesh=mesh, dist_flat_face=dist_fc,
-        mesh_data=mesh_data, ops_data=mesh_data,
+        mesh_data=mesh_data, ops_data=mesh_data, ops=ops,
         flat_face_gpu=dist_fc.base_flat,
         turb_model_gpu=turb_gpu, turb_halo_gpu=fake_halo_turb_gpu, gpu_halo=fake_halo_5var_gpu,
         _perm_gpu=dist_fc.perm, _inv_perm_gpu=dist_fc.inv_perm, n_compact=n_compact,
@@ -323,7 +325,7 @@ def test_gpu_distributed_ddes_two_consecutive_calls_does_not_crash(turb_model_na
     stub = types.SimpleNamespace(
         rank=rank, device_id=0, mu_molecular=mu,
         partition=partition, mesh=mesh, dist_flat_face=dist_fc,
-        mesh_data=mesh_data, ops_data=mesh_data,
+        mesh_data=mesh_data, ops_data=mesh_data, ops=ops,
         flat_face_gpu=dist_fc.base_flat,
         turb_model_gpu=turb_gpu, turb_halo_gpu=fake_halo_turb_gpu, gpu_halo=fake_halo_5var_gpu,
         _perm_gpu=dist_fc.perm, _inv_perm_gpu=dist_fc.inv_perm, n_compact=n_compact,

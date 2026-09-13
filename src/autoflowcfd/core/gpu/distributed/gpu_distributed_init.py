@@ -406,6 +406,24 @@ class _GPUDistributedInitMixin:
             transport_k=transport_k, transport_omega=transport_omega,
         )
 
+        # 5.4 真实 bug 修复（2026-09-12，与单机 GPU 路径 gpu_solver_io.py、
+        # CPU 分布式路径（经 compute_turbulence_source 自动获得，见该处
+        # 文档）同一处修复，完整推导见 gpu_modal_filter.py::
+        # filter_scalar_field_gpu 文档）：k/omega 场同样需要模态滤波。
+        # compact 索引空间下 n_prism 用 dist_fc.base_flat.n_prism（"棱柱
+        # 在前"的既定 compact 排序约定，与 CPU 分布式路径的 mesh_adapter
+        # 同一个量）。
+        if n_sps > 1:
+            from autoflowcfd.core.gpu.gpu_modal_filter import filter_scalar_field_gpu
+            n_prism_compact = self.flat_face_gpu.n_prism
+            turb_view.k_field = filter_scalar_field_gpu(
+                turb_view.k_field, n_prism_compact, self.ops.filter_prism, self.ops.filter_tet,
+            )
+            turb_view.omega_field = filter_scalar_field_gpu(
+                turb_view.omega_field, n_prism_compact, self.ops.filter_prism, self.ops.filter_tet,
+            )
+            turb_view.apply_positivity_limiter_gpu()
+
         # 5.5 真实缺口修复（2026-09-05，代码复审发现，与单机 GPU 路径
         # gpu_solver_io.py 同一处修复同一个根因）：omega 壁面 Wilcox
         # 解析值扩散侧未闭合，此前多GPU分布式路径完全没有移植这一步

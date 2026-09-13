@@ -279,6 +279,21 @@ class _GPUSolverIOMixin:
             transport_k=transport_k, transport_omega=transport_omega,
         )
 
+        # 真实 bug 修复（2026-09-12，与 CPU 版
+        # fr_solver/turbulence.py::compute_turbulence_source 同一处修复，
+        # 完整推导见 gpu_modal_filter.py::filter_scalar_field_gpu 文档）：
+        # k/omega 场同样需要模态滤波，理由/CPU-GPU一致性要求同上。
+        if self.mesh.n_sps_per_cell > 1:
+            from autoflowcfd.core.gpu.gpu_modal_filter import filter_scalar_field_gpu
+            n_prism = self.mesh.n_prism_cells
+            self.turb_model_gpu.k_field = filter_scalar_field_gpu(
+                self.turb_model_gpu.k_field, n_prism, self.ops.filter_prism, self.ops.filter_tet,
+            )
+            self.turb_model_gpu.omega_field = filter_scalar_field_gpu(
+                self.turb_model_gpu.omega_field, n_prism, self.ops.filter_prism, self.ops.filter_tet,
+            )
+            self.turb_model_gpu.apply_positivity_limiter_gpu()
+
         # 真实缺口修复（2026-09-05，代码复审发现）：CPU 版
         # fr_solver/turbulence.py::compute_turbulence_source 在
         # update_fields 之后调用 enforce_omega_wall_relaxation 修补

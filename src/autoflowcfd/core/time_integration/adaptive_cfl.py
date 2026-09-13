@@ -60,7 +60,7 @@ class AdaptiveCFLController:
     def __init__(
         self,
         cfl_start: float = 0.1,
-        cfl_max: float = 0.3,
+        cfl_max: float = 0.5,
         cfl_min: float = 0.05,
         growth_factor: float = 1.1,
         shrink_factor: float = 0.8,
@@ -78,8 +78,11 @@ class AdaptiveCFLController:
 
         Args:
             cfl_start: 初始 CFL 数（已验证稳定的保守值）。
-            cfl_max: CFL 上限。SSP-RK3 稳定极限 ~1.0，实际可用上限取决于
-                网格/物理问题，0.3 是安全保守值。
+            cfl_max: CFL 上限。SSP-RK3 线性稳定极限 ~1.0，实际可用上限
+                取决于网格/物理问题（AUSM+up 低马赫预处理激活时更低）。
+                默认 0.5（2026-09-07 从 0.3 上调——0.3 对本项目多数网格
+                过于保守、稳态收敛慢）；不稳定时用 CLI `--cfl-max` 回调
+                到 0.3 或更低。
             cfl_min: CFL 下限。低于此值说明问题本身很难，继续缩小意义不大。
             growth_factor: 快速放大因子（1.1 = 每次放大 10%）。
             shrink_factor: 重度缩小因子（0.8 = 每次缩小 20%，ratio > 1.1）。

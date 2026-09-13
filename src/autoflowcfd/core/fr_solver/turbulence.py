@@ -660,6 +660,28 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
                                      transport_k=transport_k,
                                      transport_omega=transport_omega)
 
+    # 真实 bug 修复（2026-09-12，cube_demo 791,492 单元真实网格 P1 直连
+    # 长程测试发现）：k/omega 场同样需要与平均流一致的模态滤波，见
+    # fr_solver/filter.py::filter_scalar_field 完整推导——此前"湍流走
+    # 单步显式更新、不经过多级 RK 因此不会积累混叠"的排除理由已被真实
+    # 数据证伪（P1 独立发散，omega 8.6% 单元逼近安全上限，定位到具体
+    # 单元内部相邻解点间出现数量级跳变，外插到面后被上风格式放大成
+    # 巨大虚假对流残差）。用与平均流完全同一套 filter_prism/filter_tet
+    # 矩阵，P0（n_sps=1）下矩阵退化为单位矩阵，天然是无操作。
+    if solver.mesh.n_sps_per_cell > 1:
+        from autoflowcfd.core.fr_solver.filter import filter_scalar_field
+        n_prism = solver.mesh.n_prism_cells
+        solver.turb_model.k_field = filter_scalar_field(
+            solver.turb_model.k_field, n_prism, solver.ops.filter_prism, solver.ops.filter_tet,
+        )
+        solver.turb_model.omega_field = filter_scalar_field(
+            solver.turb_model.omega_field, n_prism, solver.ops.filter_prism, solver.ops.filter_tet,
+        )
+        # 滤波可能把场值推到正性下限以下（滤波器系数含负权重，理论上
+        # 可能），滤波后必须重新过一遍正性/上界限制器，不能假设滤波
+        # 输出天然满足这些约束。
+        solver.turb_model.apply_positivity_limiter()
+
     # 真实 bug 修复（2026-09-04）：omega 壁面 Wilcox 解析值只在对流项
     # （近壁趋于零，因为无滑移）生效，扩散项（近壁 omega 动力学的主导
     # 机制）此前完全没有把这个约束传递进去——见 transport.py::

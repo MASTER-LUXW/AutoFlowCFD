@@ -510,5 +510,31 @@ class TestOmegaWallRelaxationGpuMatchesCpu:
         assert np.all(gpu_solver.turb_model_gpu.omega_field <= omega_max + 1e-6)
 
 
+class TestComputeWallDirichletMaskGpu:
+    """真实 bug 回归测试（2026-09-12，与 CPU 版
+    `test_turbulence_transport.py::TestComputeWallDirichletFaceMask::
+    test_slip_wall_excluded_only_no_slip_wall_included` 同一个 bug 的
+    GPU 镜像验证）：`is_no_slip=False` 的滑移壁不应被
+    `compute_wall_dirichlet_mask_gpu` 计入需要 Wilcox omega 壁面解析式
+    处理的壁面集合，只有 `is_no_slip=True`（默认值）的 WALL 编码才应
+    计入。函数本身是纯 numpy 实现（无需真实 CuPy 设备）。
+    """
+
+    def test_slip_wall_excluded_only_no_slip_wall_included(self):
+        mesh = types.SimpleNamespace(face_connectivity=types.SimpleNamespace(n_faces=4))
+        provider = types.SimpleNamespace(
+            group_code=np.array([0, 1, 2, -1]),
+            code_to_config={
+                0: {"type": "WALL", "is_no_slip": True},   # body（真实固壁）
+                1: {"type": "WALL", "is_no_slip": False},  # tunnel（滑移壁）
+                2: {"type": "OUTLET"},
+            },
+        )
+
+        mask = gst.compute_wall_dirichlet_mask_gpu(mesh, provider)
+
+        np.testing.assert_array_equal(mask, [True, False, False, False])
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

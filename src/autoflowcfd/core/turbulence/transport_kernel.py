@@ -299,6 +299,7 @@ def distribute_corrections_to_cells_kernel(
     true_area_weight,
     lift_native,
     owner_is_primary, neighbor_is_primary,
+    raw_jump_fp_neighbor,
 ):
     """将面通量点校正量分配回 SPs（prange + per-thread buffer）。
 
@@ -381,18 +382,20 @@ def distribute_corrections_to_cells_kernel(
                 dj = det_jacs[oc, s]
                 correction_per_thread[tid, oc, s] -= contrib_owner[s] / dj
 
-        # --- neighbor 侧分配（内部面，同一处修复，见上方 owner 侧注释）---
+        # --- neighbor 侧分配（内部面，同一处修复；跳变量改用
+        # raw_jump_fp_neighbor，理由见 distribute_corrections_to_cells_
+        # kernel_colored 同名参数文档）---
         nc = neighbor_cell[f]
         if nc >= 0 and neighbor_is_primary[f]:
             nc_code = neighbor_cube_face[f]
             n_is_native = nc_code >= 6
             if n_is_native:
-                weighted_n = _weighted_jump_native(raw_jump_fp[f], true_area_weight[f], raw_jump_fp.shape[1])
+                weighted_n = _weighted_jump_native(raw_jump_fp_neighbor[f], true_area_weight[f], raw_jump_fp.shape[1])
                 contrib_neighbor = lift_native[nc_code - 6] @ weighted_n
             else:
                 nax = neighbor_axis[f]
                 nside = neighbor_side[f]
-                weighted_n = _weighted_jump_collapsed(raw_jump_fp[f], neighbor_adj_row_exact[f], raw_jump_fp.shape[1])
+                weighted_n = _weighted_jump_collapsed(raw_jump_fp_neighbor[f], neighbor_adj_row_exact[f], raw_jump_fp.shape[1])
                 g_prime_neighbor = g_right if nside > 0 else g_left
                 fp_ids_neighbor = dist_fp_of_sp[nax]
                 axis_coords_neighbor = dist_axis_coord_of_sp[nax]
@@ -423,17 +426,29 @@ def distribute_corrections_to_cells_kernel_colored(
     true_area_weight,
     lift_native,
     owner_is_primary, neighbor_is_primary,
+    raw_jump_fp_neighbor,
 ):
     """图着色版本的标量校正分配 kernel。
 
     与 distribute_corrections_to_cells_kernel 相同逻辑（含 native 四面体
     分支，两处必须同步修改，见该函数模块文档），但：
     1. 只处理 face_indices 指定的面（当前颜色组）
-    2. 直接写入共享 correction_sps buffer（同色面无 owner_cell 冲突）
+    2. 直接写入共享 correction_sps buffer（同色面无冲突）
     3. 无需 per-thread buffer 和 sum 归约
 
     调用方按颜色循环调用此函数，每种颜色处理约 n_faces/n_colors 个面。
     内存从 O(n_threads * n_cells * n_sps) 降至 O(n_cells * n_sps)。
+
+    raw_jump_fp_neighbor（真实 bug 修复，2026-09-12，见
+    `compute_scalar_convection_residual` 模块文档"owner/neighbor 跳变量
+    不对称"一节完整推导）：neighbor 侧的正确校正必须相对 neighbor 自己的
+    面值 phi_neighbor_fp 计算（`mass_flux*(phi_upwind-phi_neighbor_fp)`），
+    不能复用 owner 侧那份相对 phi_owner_fp 算出的 `raw_jump_fp`——两者只在
+    phi_owner_fp==phi_neighbor_fp（面上无跳变）时才恰好相等。调用方
+    （`_distribute_correction_to_cells`）现在总是传入这个独立数组；对
+    `compute_scalar_diffusion_residual`（跳变量本身按 BR1 公共梯度定义、
+    对 owner/neighbor 天然对称）调用方直接传 `raw_jump_fp_neighbor=
+    raw_jump_fp`（同一个数组），保持该调用方数值结果不变。
     """
     n_faces_in_color = face_indices.shape[0]
     n_fp = raw_jump_fp.shape[1]
@@ -465,18 +480,19 @@ def distribute_corrections_to_cells_kernel_colored(
                 dj = det_jacs[oc, s]
                 correction_sps[oc, s] -= contrib_owner[s] / dj
 
-        # --- neighbor 侧分配（内部面，同一处修复）---
+        # --- neighbor 侧分配（内部面，同一处修复；跳变量改用
+        # raw_jump_fp_neighbor，见上方函数文档）---
         nc = neighbor_cell[f]
         if nc >= 0 and neighbor_is_primary[f]:
             nc_code = neighbor_cube_face[f]
             n_is_native = nc_code >= 6
             if n_is_native:
-                weighted_n = _weighted_jump_native(raw_jump_fp[f], true_area_weight[f], n_fp)
+                weighted_n = _weighted_jump_native(raw_jump_fp_neighbor[f], true_area_weight[f], n_fp)
                 contrib_neighbor = lift_native[nc_code - 6] @ weighted_n
             else:
                 nax = neighbor_axis[f]
                 nside = neighbor_side[f]
-                weighted_n = _weighted_jump_collapsed(raw_jump_fp[f], neighbor_adj_row_exact[f], n_fp)
+                weighted_n = _weighted_jump_collapsed(raw_jump_fp_neighbor[f], neighbor_adj_row_exact[f], n_fp)
                 g_prime_neighbor = g_right if nside > 0 else g_left
                 fp_ids_neighbor = dist_fp_of_sp[nax]
                 axis_coords_neighbor = dist_axis_coord_of_sp[nax]

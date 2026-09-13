@@ -75,3 +75,39 @@ def build_gpu_filter_func(
         return U.reshape(n_cells * n_sps, n_vars)
 
     return gpu_filter_func
+
+
+def filter_scalar_field_gpu(phi, n_prism: int, filter_prism, filter_tet):
+    """GPU 版湍流标量场（k 或 omega）模态滤波，与 CPU 版
+    `core/fr_solver/filter.py::filter_scalar_field` 完全同一套公式/矩阵
+    （真实 bug 修复，2026-09-12，见 CPU 版文档完整推导：k/omega 此前
+    不参与模态滤波，cube_demo 真实网格 P1 直连长程测试发现全新、干净的
+    P1 启动会在数十步内 omega 大范围失控增长，根因是同一类"坍缩坐标
+    节点配置法高阶模态混叠"病理）。
+
+    CPU/GPU 一致性（本项目一贯要求，见 test_gpu_distributed_turbulence.py
+    等大量既有交叉验证测试）：只给 CPU 侧加这个滤波、GPU 侧不加，会让
+    两者从这里开始产生真实数值分歧——本函数与单 GPU
+    （gpu_solver_io.py）、GPU 分布式（gpu_distributed_init.py）两条
+    调用路径必须同步接入，缺一个都会破坏 CPU/GPU 交叉验证。
+
+    Args:
+        phi: (n_cells, n_sps) CuPy 数组
+        n_prism: 棱柱单元数
+        filter_prism, filter_tet: 与平均流共用的同一套 CuPy 滤波矩阵
+
+    Returns:
+        滤波后的标量场，形状不变
+    """
+    cp = get_cupy()
+    n_cells = phi.shape[0]
+    if not hasattr(filter_prism, 'device'):
+        filter_prism = cp.asarray(filter_prism)
+    if not hasattr(filter_tet, 'device'):
+        filter_tet = cp.asarray(filter_tet)
+    out = phi.copy()
+    if n_prism > 0:
+        out[:n_prism] = cp.einsum("sj,cj->cs", filter_prism, phi[:n_prism])
+    if n_cells > n_prism:
+        out[n_prism:] = cp.einsum("sj,cj->cs", filter_tet, phi[n_prism:])
+    return out

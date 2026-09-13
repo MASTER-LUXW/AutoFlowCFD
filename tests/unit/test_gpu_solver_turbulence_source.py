@@ -52,6 +52,7 @@ import autoflowcfd.core.gpu.residual.gpu_flux as gpu_flux_mod
 import autoflowcfd.core.gpu.turbulence.gpu_scalar_transport as gst_mod
 import autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst as gpu_turbulence_sst_mod
 import autoflowcfd.core.gpu.turbulence.gpu_turbulence_des as gpu_turbulence_des_mod
+import autoflowcfd.core.gpu.gpu_modal_filter as gpu_modal_filter_mod
 
 
 class _NumpyAsCupy:
@@ -80,7 +81,8 @@ class _NumpyAsCupy:
 def _patch_get_cupy(monkeypatch):
     shim = _NumpyAsCupy()
     for mod in (gpu_solver_io_mod, gpu_solver_mod, gpu_gradients_mod, gpu_volume_contract_mod,
-                gpu_flux_mod, gst_mod, gpu_turbulence_sst_mod, gpu_turbulence_des_mod):
+                gpu_flux_mod, gst_mod, gpu_turbulence_sst_mod, gpu_turbulence_des_mod,
+                gpu_modal_filter_mod):
         monkeypatch.setattr(mod, "get_cupy", lambda: shim)
     monkeypatch.setattr(gpu_turbulence_sst_mod, "gpu_available", True)
     monkeypatch.setattr(gpu_turbulence_des_mod, "gpu_available", True)
@@ -165,7 +167,7 @@ def test_compute_turbulence_source_gpu_matches_cpu_single_machine(turb_model_nam
     dt_used = 1e-3  # 见 TestDdesModelDistinctFromSst 同一处 dt 放大注释
 
     stub = types.SimpleNamespace(
-        mesh=mesh, mesh_data=mesh_data, ops_data=mesh_data,
+        mesh=mesh, mesh_data=mesh_data, ops_data=mesh_data, ops=ops,
         U_gpu=U, Q_gpu=conserved_to_primitive(U[..., :5]),
         mu_molecular=mu, turb_model_gpu=turb_gpu, sgs_model_gpu=None,
         ddes_model_gpu=_make_ddes_model_gpu(turb_model_name),

@@ -71,6 +71,8 @@ class FRSolver(_SolverGeometryMixin):
                  dual_time_inner_iter: int = 20,
                  n_threads: int = -1,
                  adaptive_cfl: bool = True,
+                 cfl_start: float = 0.1,
+                 cfl_max: float = 0.5,
                  turbulence_intensity: float = 0.01,
                  viscosity_ratio: float = 5.0,
                  sem_num_eddies: int = 200,
@@ -362,7 +364,17 @@ class FRSolver(_SolverGeometryMixin):
         self._cfl_controller = None
         if adaptive_cfl and time_scheme != TimeIntegrationScheme.DUAL_TIME:
             from autoflowcfd.core.time_integration.adaptive_cfl import AdaptiveCFLController
-            self._cfl_controller = AdaptiveCFLController()
+            # cfl_start/cfl_max 现在是构造参数（2026-09-07）：此前
+            # `AdaptiveCFLController()` 恒用硬编码默认值（0.1/0.3），
+            # `SteadyConfig.cfl_init`/`cfl_max` 这两个 config 字段从未
+            # 真正接到控制器上——CLI `--cfl-start`/`--cfl-max` 现在直接
+            # 透传到这里。cfl_max 默认值同步从 0.3 上调到 0.5（SSP-RK3
+            # 线性稳定极限 ~1.0，0.3 对本项目多数网格过于保守；AUSM+up
+            # 低马赫预处理激活的算例真实可用上限更低，需要时用
+            # `--cfl-max` 显式回调）。
+            self._cfl_controller = AdaptiveCFLController(
+                cfl_start=cfl_start, cfl_max=cfl_max,
+            )
             print(f"   Adaptive CFL: enabled (start={self._cfl_controller.cfl_start}, "
                   f"max={self._cfl_controller.cfl_max})")
         else:
@@ -497,8 +509,19 @@ class FRSolver(_SolverGeometryMixin):
                 from autoflowcfd.postprocess.fr_coefficients import compute_forces_pressure_only
                 aero = compute_forces_pressure_only(self, ref_area)
                 msg += f" | Cd={aero['Cd']:.4f} Cl={aero['Cl']:.4f} Cs={aero['Cs']:.4f}"
+            # 按方程分别归一化残差 + 最大残差定位（与 order_continuation.py
+            # 同一处新增，参照 Fluent scaled residuals / STAR-CCM+ Max
+            # 监视器，见 residual_diagnostics.py 模块文档"背景"一节）：
+            # 只新增打印，不改变本函数自己的 `tol`/`drop` 收敛判据。
+            freestream = getattr(self, 'freestream', None)
+            if freestream is not None and hasattr(self.state, 'dU_dt'):
+                from autoflowcfd.core.fr_solver.residual_diagnostics import (
+                    compute_scaled_residuals, format_scaled_residual_line,
+                )
+                diag = compute_scaled_residuals(self.state.dU_dt, freestream)
+                msg += " | " + format_scaled_residual_line(diag)
             print(msg)
-            
+
             # 中间 checkpoint 保存
             if checkpoint_callback is not None:
                 checkpoint_callback(self, i + 1)

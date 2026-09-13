@@ -204,6 +204,33 @@ class TestComputeWallDirichletFaceMask:
 
         np.testing.assert_array_equal(mask, [False, False])
 
+    def test_slip_wall_excluded_only_no_slip_wall_included(self):
+        """真实 bug 回归测试（2026-09-12，cube_demo 791,492 单元真实网格
+        P1 阶段 omega 独立于历史、确定性地在 7286 个单元收敛到同一数值
+        ~984312 的排查发现）：`is_no_slip=False` 的滑移壁（如 cube_demo
+        的风洞外壁 "tunnel"，物理上零剪切、不是真实边界层）不应该被
+        当作需要 Wilcox omega 壁面解析式处理的壁面——否则这些单元的
+        omega 会被 `enforce_omega_wall_relaxation` 每步强行拉向一个
+        物理上荒谬的目标值（决定性验证：手术式重置 omega 场后单步内
+        从 2268 跳到 501133，精确等于 0.5*2268+0.5*1e6，即 relax=0.5
+        松弛向 omega_max 安全上限 1e6 的结果）。只有 `is_no_slip=True`
+        （默认值，与 body 表面这类真实固壁一致）的 WALL 编码才应计入。
+        """
+        mesh = SimpleNamespace(face_connectivity=SimpleNamespace(n_faces=4))
+        provider = SimpleNamespace(
+            group_code=np.array([0, 1, 2, -1]),
+            code_to_config={
+                0: {"type": "WALL", "is_no_slip": True},   # body（真实固壁）
+                1: {"type": "WALL", "is_no_slip": False},  # tunnel（滑移壁）
+                2: {"type": "OUTLET"},
+            },
+        )
+        solver = SimpleNamespace(mesh=mesh, boundary_ghost_provider=provider)
+
+        mask = _compute_wall_dirichlet_face_mask(solver)
+
+        np.testing.assert_array_equal(mask, [True, False, False, False])
+
 
 class _MockNodes:
     def __init__(self, coords):

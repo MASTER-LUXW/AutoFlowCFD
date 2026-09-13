@@ -112,6 +112,23 @@ def compute_wmles_wall_stress_correction(
     # 本函数需要的面索引空间一致（分布式场景下已按 rank 切好），直接
     # 复用而不是重新推导——与 `_compute_wall_dirichlet_face_mask`
     # （transport.py）识别 WALL 面的方式完全同一个模式。
+    # 注（2026-09-12，排查 transport.py::_compute_wall_dirichlet_face_mask
+    # 的滑移壁 omega 误处理 bug 时曾经尝试、随即撤销的改法，记录下来避免
+    # 后续重蹈覆辙）：曾在这里同步加上"排除 is_no_slip=False 的 WALL 编码"，
+    # 类比 SST omega 壁面处理的修复——但真实回归测试（`test_wmles_native_
+    # tet.py`/`test_distributed_compute_residual.py` 的 WMLES 用例）决定性
+    # 证伪：`fr_solver/boundary.py::build_boundary_ghost_provider` 对
+    # WMLES **激活时**的 WALL 组本来就故意把 `is_no_slip` 设为 `wmles_model
+    # is None`（即 WMLES 激活时恒为 False）——这是 2026-08-28（#9）修复
+    # "WMLES 假滑移边界"时的既有设计：让真实固壁在 WMLES 模式下退化成
+    # is_no_slip=False 的 ghost state 构造，使 tau_w 成为该面切向应力的
+    # 唯一来源、避免与解析剪应力双重计权，不是"这面墙其实是滑移远场"的
+    # 语义。本函数只在 `solver.wmles_model is not None`（上面已 return None
+    # 排除）时才会执行到这里，此时 WALL 组永远是真实固壁、`is_no_slip`
+    # 恒为 False 只是内部机制——加上这个排除会让 `wall_codes` 恒为空，
+    # WMLES 壁面剪应力修正完全失效。omega 壁面处理与 WMLES 壁面应力处理
+    # 面对的是同一个 `is_no_slip` 字段在两种不同上下文下的不同语义，不能
+    # 共用同一条排除逻辑——本函数保留原始行为（任何 WALL 类型编码都计入）。
     provider = getattr(solver, "boundary_ghost_provider", None)
     group_code = getattr(provider, "group_code", None)
     code_to_config = getattr(provider, "code_to_config", None)

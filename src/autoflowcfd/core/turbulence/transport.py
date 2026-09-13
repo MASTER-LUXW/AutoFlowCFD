@@ -124,7 +124,7 @@ def _extrapolate_owner_only_to_faces(scalar_sps, flat):
     )
 
 
-def _distribute_correction_to_cells(raw_jump_fp, flat, ops, mesh):
+def _distribute_correction_to_cells(raw_jump_fp, flat, ops, mesh, raw_jump_fp_neighbor=None):
     """将面通量点上的**未加权**跳变量分配回 SPs 残差（numba kernel 版本）。
 
     使用 turbulence_transport_kernel.py 的 kernel 替代纯 Python for f in range(n_faces) 循环。
@@ -143,12 +143,24 @@ def _distribute_correction_to_cells(raw_jump_fp, flat, ops, mesh):
     面（度量张量 adj 行模长）不是同一个量，不能在 Python 层统一预乘
     后再传给一个"只认 collapsed 分配方式"的 kernel。
 
+    Args:
+        raw_jump_fp_neighbor: (n_faces, n_fp) 可选，neighbor 侧独立的
+            未加权跳变量（真实 bug 修复，2026-09-12，见
+            `compute_scalar_convection_residual` 模块文档"owner/neighbor
+            跳变量不对称"一节完整推导）。默认为 None 时回退为
+            `raw_jump_fp`（与此前行为一致）——`compute_scalar_diffusion_
+            residual` 的跳变量本身按 BR1 公共梯度定义、对 owner/neighbor
+            天然对称，不需要独立的 neighbor 侧跳变量，继续用这个默认值
+            保持数值结果不变。
+
     Returns:
         correction_sps: (n_cells, n_sps)
     """
     n_cells = mesh.n_cells
     n_sps = flat.n_sps
     det_jacs = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
+    if raw_jump_fp_neighbor is None:
+        raw_jump_fp_neighbor = raw_jump_fp
 
     use_coloring = os.environ.get("AFCFD_USE_COLORING", "1") == "1"
 
@@ -174,6 +186,7 @@ def _distribute_correction_to_cells(raw_jump_fp, flat, ops, mesh):
                 flat.true_area_weight,
                 flat.lift_native,
                 flat.owner_is_primary, flat.neighbor_is_primary,
+                raw_jump_fp_neighbor,
             )
         return correction_sps
     else:
@@ -193,6 +206,7 @@ def _distribute_correction_to_cells(raw_jump_fp, flat, ops, mesh):
             flat.true_area_weight,
             flat.lift_native,
             flat.owner_is_primary, flat.neighbor_is_primary,
+            raw_jump_fp_neighbor,
         )
 
 
@@ -323,8 +337,66 @@ def compute_scalar_convection_residual(
     # 迎风选择
     phi_upwind = np.where(mass_flux >= 0, phi_owner_fp, phi_neighbor_fp)
 
-    # 通量差（用于校正分配）
-    delta_phi = phi_upwind - phi_owner_fp  # (n_faces, n_fp)
+    # 通量差（用于校正分配）——真实 bug 修复（2026-09-12，cube_demo
+    # 791,492 单元真实网格 P0 阶段长程续算 k_max/omega_max 复合增长排查
+    # 发现，见下方"owner/neighbor 跳变量不对称"完整推导）：owner 侧和
+    # neighbor 侧的校正必须分别相对各自的面值计算，不能共用同一个相对
+    # phi_owner_fp 的跳变量。
+    #
+    # 完整推导（DG/FR 标准做法，见 core/fr_residual/inviscid_kernel.py
+    # 里 AUSM+up 通量分两次、分别用 owner/neighbor 各自状态当"内部通量"
+    # 计算 jump_owner/jump_neighbor 的既有正确实现——本函数此前没有跟
+    # 那个模式对齐，是本模块独立实现、独立踩坑的同一类问题）：
+    #   owner 侧："体积项"（P1+ 时由 D_3d 算出，P0 时恒为 0）隐含假设
+    #     该单元通过每个面的"自身内部通量"是 mass_flux*phi_owner_fp
+    #     （用 owner 自己的面值）；界面校正 = 真实通量(common,用上风值)
+    #     减去这个假设值 = mass_flux*(phi_upwind-phi_owner_fp)，即现有
+    #     的 raw_jump_fp，continue 用于 owner 侧不变。
+    #   neighbor 侧：同一个面，站在 neighbor 自己的体积项视角，它的
+    #     "自身内部通量"假设是（用 neighbor 自己的面值，法向对调一次，
+    #     两次取负抵消）mass_flux*phi_neighbor_fp——不是 phi_owner_fp！
+    #     neighbor 侧真正的界面校正 = mass_flux*(phi_upwind-phi_neighbor_fp)，
+    #     是一个独立于 raw_jump_fp 的量，只在 phi_owner_fp==phi_neighbor_fp
+    #     （面上没有跳变）时才恰好相等。
+    #
+    # 此前代码把 owner 侧算出的 raw_jump_fp 原样又给 neighbor 侧用（只是
+    # 累加符号相反），在 owner 恰好处于该面上风侧时（mass_flux>=0）
+    # phi_upwind==phi_owner_fp，raw_jump_fp 恒为 0——这种情形下 neighbor
+    # （下风侧，真实网格中占全部内部面里的一半）完全没有从这个面收到
+    # 任何对流稀释/浓缩效果，等价于凭空丢弃了这部分物理输运。这是 P0
+    # 阶段（体积项恒零、全部输运只能靠界面项）唯一的输运来源，这个缺口
+    # 因此完全暴露：局部单元一旦（哪怕因为其他机制）值略高于周围，会因为
+    # 系统性地收不到来自上风侧的正确稀释而持续偏高，若同时有其他面
+    # 贡献哪怕很小的净流入，缺乏正确抵消的稀释就会造成真实、持续、复合
+    # 的数值增长（真实观测：cube_demo 单元 87035，k 从 iter 2600 的 0.99
+    # 复合增长到 iter 3100 的 2.05，约 1.2x/100步；最小 2-四面体合成网格
+    # 决定性复现：owner 上风时 neighbor 完全收不到本该有的稀释，conv_k
+    # 恒为 0，与真实物理应有的非零稀释矛盾）。P1+ 阶段体积项非零、能
+    # 部分补偿这个缺口，这也是该问题只在长期停留 P0 的场景下才充分暴露
+    # 的原因。
+    # 注（2026-09-12，尝试并撤销的一次修复，记录下来避免后续重蹈覆辙）：
+    # 这里曾经尝试在 P0（n_sps==1）时改用"直接有限体积"公式（跳变量直接
+    # 取 phi_upwind，不减任何一侧自身面值），模仿 core/fr_residual/
+    # inviscid_p0.py 的做法，理由是 P0 架构上 volume_term 恒为 0（D_3d
+    # 是 1x1 零矩阵），下面这套"跳变量=上风值-自身面值"的 DG 差额公式
+    # 因此永远缺失一部分理应由 volume_term 提供的贡献。用合成网格做
+    # 独立正确性检验（均匀标量场、无跳变，纯对流残差必须处处精确为
+    # 零——这是不依赖具体公式、只依赖"无源无跳变"这个前提的基本不变量）
+    # 时**决定性证伪**：改成"不减自身面值"后，均匀场在某些单元上给出
+    # 高达 451 的伪残差（应为 0），根源是这个简化后的公式又变得对
+    # `sum_faces(mass_flux)`（局部质量守恒残差，真实网格计算中后期该量
+    # 远非零，尤其是本次真实排查最早定位到的"驻点残差"单元）敏感——
+    # inviscid_p0.py 的直接公式之所以安全，是因为它求解的是完整
+    # 5 变量 Euler 方程组本身（该公式与连续性方程自洽是同一个解），而
+    # k/omega 是附着在已经独立演化、瞬时并不精确满足连续性的密度场上的
+    # 被动标量方程，直接照搬会重新引入当天早些时候已经用真实数据证伪过
+    # 的"质量不守恒交叉项"敏感性——绕了一圈证实那次证伪的判断没错，只是
+    # 用错了地方（旧公式的"减自身面值"设计正是为了规避这个敏感性，代价
+    # 是缺一部分 dilution；不能两者都要）。已撤销，保留下面的原始形式，
+    # 只保留 owner/neighbor 跳变量分别独立计算这一个改动（见上方修复
+    # 说明），未继续尝试消除"缺失 dilution"这个更深的架构缺口。
+    delta_phi_owner = phi_upwind - phi_owner_fp  # (n_faces, n_fp)
+    delta_phi_neighbor = phi_upwind - phi_neighbor_fp  # (n_faces, n_fp)
     del phi_upwind, phi_owner_fp, phi_neighbor_fp
     # 面元幅值因子（真实修复，2026-08-25 代码审查）：上面用单位法向算出的是物理
     # 通量密度差，而平均流无粘/粘性界面项送进同一套分配链路的跳越量都是协变
@@ -342,11 +414,14 @@ def compute_scalar_convection_residual(
     # 在这里统一预乘后再传给下游。改为只传"未加权"的 `mass_flux*delta_phi`，
     # 加权方式按面类型分派下沉到 `_distribute_correction_to_cells`/
     # kernel 内部。
-    raw_jump_fp = mass_flux * delta_phi  # (n_faces, n_fp)，未加权物理通量密度差
-    del mass_flux, delta_phi
+    raw_jump_fp = mass_flux * delta_phi_owner  # (n_faces, n_fp)，owner 侧未加权物理通量密度差
+    raw_jump_fp_neighbor = mass_flux * delta_phi_neighbor  # neighbor 侧独立的未加权跳变量
+    del mass_flux, delta_phi_owner, delta_phi_neighbor
 
     # 分配回 SPs
-    interface_correction = _distribute_correction_to_cells(raw_jump_fp, flat, ops, mesh)
+    interface_correction = _distribute_correction_to_cells(
+        raw_jump_fp, flat, ops, mesh, raw_jump_fp_neighbor=raw_jump_fp_neighbor,
+    )
     with np.errstate(over='ignore', invalid='ignore'):
         residual = residual + interface_correction
 
@@ -528,16 +603,45 @@ def compute_scalar_diffusion_residual(
 
 
 def _compute_wall_dirichlet_face_mask(solver) -> np.ndarray:
-    """算出哪些面是 WALL 边界面，供 k 场的 Dirichlet-zero ghost 使用
-    （见 extrapolate_scalar_to_faces_kernel 文档）。
+    """算出哪些面是**真实无滑移**WALL 边界面，供 k 场的 Dirichlet-zero
+    ghost 及 omega 壁面解析式（Wilcox omega wall function）使用（见
+    extrapolate_scalar_to_faces_kernel 文档）。
 
     数据来源：`solver.boundary_ghost_provider`——真实求解路径下是
     `boundary.fr_ghost_state.BoundaryGhostStateProvider`，持有
     `group_code`（每个面所属边界组的整数编码，-1 表示内部面/未匹配）和
-    `code_to_config`（编码 -> {'type': 'WALL'/...}）。用
+    `code_to_config`（编码 -> {'type': 'WALL', 'is_no_slip': bool,...}）。用
     `code_to_config` 里显式标记为 WALL 的编码集合对 `group_code` 做一次
     向量化匹配（`np.isin`），成本是对 187 万面级别网格的一次数组比较，
     不是逐面 Python 循环。
+
+    真实 bug 修复（2026-09-12，cube_demo 791,492 单元真实网格 P1 阶段
+    omega 独立于历史、确定性地在特定单元收敛到同一个数值~984312 的排查
+    发现，完整推导见 `enforce_omega_wall_relaxation` 文档）：此前这里把
+    `cfg.get("type")=="WALL"` 的编码**不加区分**全部当作需要 Wilcox 近壁
+    omega 解析式（`omega_wall=60*nu/(beta1*d1^2)`，专为*真实粘性无滑移*
+    边界层设计）处理的壁面——但本项目的 WALL 类型边界组同时覆盖两种物理
+    上完全不同的情形（见 `boundary/fr_ghost_state.py::build_wall_ghost_
+    state` 的 `is_no_slip` 参数）：`is_no_slip=True`（真实固壁，如
+    cube_demo 的 "body"）与 `is_no_slip=False`（滑移壁，如 cube_demo 的
+    风洞外壁 "tunnel"，用于近似远场/对称边界，物理上零剪切、不产生真实
+    边界层）。滑移壁没有真实的近壁粘性子层，Wilcox 公式在这里没有物理
+    意义；真实复现：cube_demo 的 "tunnel" 边界组配置为
+    `is_no_slip=False`，其 owner 单元因为不属于任何 BL 棱柱加密区、`d1`
+    （该单元到最近 body 表面的距离）经常很小，代入公式得到远超合理量级
+    的值，被 `_compute_omega_wall_target` 内部的 `omega_max` 安全上限
+    钳成 1,000,000，随后 `enforce_omega_wall_relaxation` 每步把这些
+    "滑移壁"owner 单元的 omega 强行按固定 relax=0.5 拉向这个物理上荒谬
+    的目标（0.5*2267.82+0.5*1e6=501133.91，与真实观测的单步跳变值精确
+    吻合，决定性验证：手术式重置 omega 场后单步复现同一批单元同一数值），
+    与流场是否真的发展出边界层完全无关——这些单元的平均流速度全程精确
+    等于来流值（无滑移损耗），却因为这个 bug 被反复拉向 1e6 附近，最终
+    稳定在耗散项与松弛项相互竞争的一个不动点 984312.6254，与该单元是否
+    真的靠近任何真实固壁毫无关系。修复：只把 `is_no_slip` 非 False
+    （默认 True，与 `fr_ghost_state.py` 的默认值一致）的 WALL 编码计入——
+    真实无滑移壁（body）行为完全不变，滑移壁（tunnel）的 k/omega 现在
+    正确地退回默认 Neumann（零梯度）处理，与它"物理上应表现得像对称面/
+    远场"这个建模意图一致。
 
     防御性回退：如果 `boundary_ghost_provider` 不是这个类型（例如某些
     测试用的自定义 ghost provider 只是一个普通 callable，没有
@@ -553,7 +657,10 @@ def _compute_wall_dirichlet_face_mask(solver) -> np.ndarray:
     if group_code is None or code_to_config is None:
         return np.zeros(n_faces, dtype=np.bool_)
 
-    wall_codes = [code for code, cfg in code_to_config.items() if cfg.get("type") == "WALL"]
+    wall_codes = [
+        code for code, cfg in code_to_config.items()
+        if cfg.get("type") == "WALL" and cfg.get("is_no_slip", True)
+    ]
     if not wall_codes:
         return np.zeros(n_faces, dtype=np.bool_)
     return np.isin(group_code, wall_codes)

@@ -42,6 +42,13 @@ from autoflowcfd.cli.solve_commands import solve
                    '自动启用 BD-02 合成湍流入口 (SEM)；wmles 不会（WMLES 依赖壁面模型本身正确'
                    '预测近壁应力，不需要额外的入口湍流结构，见 core/fr_solver/boundary.py 文档）')
 @click.option('--max-iter', type=int, default=1000, help='最大迭代次数')
+@click.option('--cfl-start', type=float, default=0.1,
+              help='自适应 CFL 初始值/下限（稳态伪时间迭代，默认 0.1）。残差不下降时'
+                   'CFL 会一直停在这个值——复杂网格上如果起步就发散可调低到 0.05')
+@click.option('--cfl-max', type=float, default=0.5,
+              help='自适应 CFL 上限（稳态，默认 0.5，2026-09-07 从 0.3 上调）。'
+                   'SSP-RK3 线性稳定极限 ~1.0，残差稳定下降的算例可以试 0.8；'
+                   'AUSM+up 低马赫预处理激活的算例真实可用上限更低，发散时回调到 0.3')
 @click.option('--phase-max-iter', type=int, default=None,
               help='Order Continuation（--order>=2 时触发）非最终阶段(P0/P1/...，不含目标'
                    '阶数)各自的最大迭代步数上限。默认(不传)时保留旧行为——总步数按阶段数'
@@ -102,7 +109,7 @@ from autoflowcfd.cli.solve_commands import solve
                    '8_算法重构-Entropy-Stable_Split-Form通量重构-Part1/2.md）。真实测试确认在'
                    '已启用过积分的基础上再改善约2~4倍，代价是体积项计算量从O(n_fine)升到'
                    'O(n_fine^2)，仅 CPU 后端实现')
-def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_iter, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, use_eikonal, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, artificial_viscosity_enabled, artificial_viscosity_alpha, entropy_stable_volume_enabled):
+def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_iter, cfl_start, cfl_max, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, use_eikonal, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, artificial_viscosity_enabled, artificial_viscosity_alpha, entropy_stable_volume_enabled):
     """执行稳态 FR 求解。
 
     支持高阶精度 (P1-P4) 和多种湍流模型 (SST, DDES, WMLES)。
@@ -520,6 +527,8 @@ def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_it
             turb_model_name=turbulence_model,
             time_scheme=TimeIntegrationScheme.SSP_RK3,
             n_threads=threads,
+            cfl_start=cfl_start,
+            cfl_max=cfl_max,
             turbulence_intensity=turbulence_intensity,
             viscosity_ratio=viscosity_ratio,
             sem_num_eddies=sem_num_eddies,

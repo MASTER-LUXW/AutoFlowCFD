@@ -65,6 +65,14 @@ class GPUTurbulenceSST:
             self.omega_field = cp.ones((n_cells, n_sps), dtype=cp.float64) * omega_inf
             self.nu_t = cp.zeros((n_cells, n_sps), dtype=cp.float64)
 
+        # 来流 omega/k（持久属性）：与 CPU 版 sst.py 同一处真实 bug 修复
+        # 同一个理由——P0 阶段 grad_vel 恒为零导致 S_mag 恒零，omega
+        # realizability 下限若只依赖 S_mag 会完全失效，需要一个不依赖
+        # 阶数的物理量纲下限；k_inf 供 apply_positivity_limiter_gpu 里
+        # k 的同类下限使用（2026-09-11，见该处文档）。
+        self.omega_inf = omega_inf
+        self.k_inf = k_inf
+
         # SST 模型常数（与 CPU 版一致）
         self.sigma_k1 = 0.85
         self.sigma_k2 = 1.0
@@ -246,8 +254,12 @@ class GPUTurbulenceSST:
         Omega_mag = self.compute_vorticity_magnitude_gpu(grad_U)
         S_omega_prod = S_mag * Omega_mag
 
-        # 时间尺度 realization：动态 ω 下限
-        self._omega_realizability_min = 0.1 * float(cp.max(S_mag))
+        # 时间尺度 realization：动态 ω 下限。真实 bug 修复（2026-09-07，
+        # 与 CPU 版 sst.py 同一处同一个真实bug——完整推导见该文件文档）：
+        # P0 阶段 grad_vel/S_mag 恒为零，只用 S_mag 会让这个下限完全
+        # 失效，加一个与阶数无关的物理量纲下限（来流 omega_inf 的保守
+        # 比例），两者取更大值。
+        self._omega_realizability_min = max(0.1 * float(cp.max(S_mag)), 0.1 * self.omega_inf)
 
         # 交叉扩散项
         grad_dot = cp.sum(grad_k * grad_omega, axis=2)
@@ -338,6 +350,12 @@ class GPUTurbulenceSST:
         self.omega_field = cp.maximum(self.omega_field, min_omega)
         self.k_field = cp.minimum(self.k_field, self.k_max)
         self.omega_field = cp.minimum(self.omega_field, self.omega_max)
+
+        # k 的来流下限（与 CPU 版 sst.py::apply_positivity_limiter 同一处
+        # 真实 bug 修复，2026-09-11，理由/量级选取见该处完整文档）。
+        k_inf = getattr(self, 'k_inf', None)
+        if k_inf is not None and k_inf > 0:
+            self.k_field = cp.maximum(self.k_field, 1e-3 * k_inf)
 
         # 时间尺度 realization（与 CPU 版一致）
         if hasattr(self, '_omega_realizability_min'):

@@ -55,6 +55,13 @@ class SSTModelFR:
         self.omega_field = np.ones((n_cells, n_sps)) * omega_inf
         self.nu_t = np.zeros((n_cells, n_sps))
 
+        # 来流 omega/k（保留为持久属性）。omega_inf 供 compute_source_terms
+        # 里 omega realizability 下限在 S_mag 恒零时使用（见该处真实 bug
+        # 修复文档完整推导）；k_inf 供 apply_positivity_limiter 里 k 的
+        # 同类下限使用（2026-09-11 真实 bug 修复，见该处文档）。
+        self.omega_inf = omega_inf
+        self.k_inf = k_inf
+
         # k/omega 物理上界（防止输运方程数值爆炸）。
         # 默认值保守（1e6），应在求解器初始化时根据来流条件设置：
         #   k_max = 0.5 * vel_inf^2（湍动能不超过平均流动能）
@@ -326,7 +333,48 @@ class SSTModelFR:
         # 时间尺度 realization：动态计算 ω 下限（供 apply_positivity_limiter 使用）。
         # 约束 ω ≥ C * S，防止远场 ω 衰减到过小值导致 τ = 1/(β*ω) 过大。
         # C=0.1 是保守值（Fluent 默认时间尺度限制等价于 C≈0.1-0.3）。
-        self._omega_realizability_min = 0.1 * np.max(S_mag)
+        #
+        # 真实 bug 修复（2026-09-07，cube_demo 791,492 单元真实网格
+        # Order Continuation P0->P1 升阶后长程续算 k_mean 持续增长排查
+        # 发现，是本次排查的真正根因——此前 grad_vel/omega 壁面松弛/
+        # resume 误重置/wall_distance 阶数切换污染 4 个真实bug均已修复
+        # 但问题依旧，逐一排除 P_k 上限失控、网格局部退化(ANSA 高质量
+        # 网格，真实交叉体积比 1.27~2.28，完全正常)后，用历史 checkpoint
+        # 数据（iter_001900~002300，早于本次排查所有事件、纯 P0 阶段）
+        # 直接定位到：cell=81600/81552/81546 等一小撮单元的 omega_field
+        # 在 P0 阶段极早期（iter~2000左右）就已经塌陷到 1e-12（`apply_
+        # positivity_limiter` 的裸正性下限——只防负值，不是物理意义上的
+        # 下限），k 未同步跌落，形成天文数字级的 k/omega 比值。
+        #
+        # 根因：**P0 阶段 grad_vel 恒为零（P0 是分片常数场，多项式导数
+        # 恒为零，见 fr_solver/turbulence.py 模块文档"为什么P0阶段摩擦
+        # 阻力算不出来"一节同一个事实）**，本行原公式 `0.1*max(S_mag)`
+        # 在 P0 阶段因此恒为 0——这个本该防止 ω 衰减过度的 realizability
+        # 下限在整个 P0 阶段是完全失效的空话，一旦某个 SP 的显式积分把
+        # ω 打到裸正性下限 1e-12，P0 阶段内没有任何机制能让它恢复（此时
+        # 产生项 P_omega~S*Ω=0、耗散项 D_omega=beta*rho*omega²≈0，是这套
+        # ODE 系统在 P0 阶段的一个稳定不动点，会原样冻结直到阶数真正
+        # 切换）。冻结在 ω≈1e-12 的这些单元升阶到 P1 后，S_mag 变为非零，
+        # 巨大的 k/omega 比值被 nu_t 湍流粘性比上限(TURBULENT_VISCOSITY_
+        # RATIO_MAX=1e5)钳到 ~1.47（不是零！），这个虽被钳制但依然很大
+        # 的 nu_t 撑起一条异常畅通的扩散通道（Gamma_k=mu+sigma_k*rho*
+        # nu_t），持续从周围真正有产生项的区域把 k 抽/扩散进来，最终把
+        # 这些单元（以及被扩散波及的邻居）顶到 k_max 安全上限——这正是
+        # 之前排查看到的"局部单元 k_max/nu_t_max 双双撞墙"现象的真正
+        # 成因，跟 wall_distance/omega 壁面边界条件精度都无关（这两者
+        # 已用真实数据决定性证伪：omega 实际值/Wilcox 目标值比值全程
+        # 稳定在 0.947，未衰减；30/100 步 A/B 对照两版 wall_distance
+        # 处理方式下 k_mean 轨迹几乎完全一致）。
+        #
+        # 修复：realizability 下限不能只依赖 S_mag（P0 下恒零、形同虚设），
+        # 加一个与阶数/S_mag 无关、恒定有效的物理量纲下限——来流 omega_inf
+        # 的一个保守比例（沿用同一个 C=0.1 系数，物理意义："本地湍流
+        # 时间尺度不应该比来流环境值大 10 倍以上"这个 realizability 的
+        # 精神在 S_mag 不可用时同样适用于来流尺度）。两者取更大值，S_mag
+        # 非零时（P1+）这条新增下限通常远小于 0.1*max(S_mag)、不改变
+        # 既有行为；S_mag 恒零时（P0）它是唯一起作用的下限，防止 ω 塌陷
+        # 到物理上毫无意义的 1e-12。
+        self._omega_realizability_min = max(0.1 * np.max(S_mag), 0.1 * self.omega_inf)
 
         # 交叉扩散项 CD_kw（F1 与 S_omega 的 CD_omega 项共用同一个量，
         # 标准做法是先算这个再算两处，避免重复计算且保证一致）
@@ -434,6 +482,37 @@ class SSTModelFR:
         # 下界：正性约束（T-02 规范要求的 k,omega >= 0）
         self.k_field = np.maximum(self.k_field, min_k)
         self.omega_field = np.maximum(self.omega_field, min_omega)
+
+        # k 的来流下限（真实 bug 修复，2026-09-11，cube_demo 791,492 单元
+        # 真实网格 P0 阶段长程续算发现）：P0（阶数延续热身阶段，1 SP/cell）
+        # 架构上速度梯度恒为零（见 fr_residual/viscous_flux.py 的 1x1 零
+        # 微分矩阵——这是本项目多处已确认的既有事实，不是本次新发现），
+        # 意味着 P_k（湍动能产生项）在整个 P0 阶段对*所有*单元恒为零，k
+        # 只能靠 D_k=rho*beta_star*k*omega（耗散，point-implicit 阻尼，
+        # 无条件稳定但仍单调衰减）和对流/扩散输运维持。只要 P0 停留时间
+        # 足够长，任何单元（不限于回流区——真实复现里撞到裸下限 1e-12 的
+        # 62 个单元中有相当一部分局部速度接近自由来流 27~30 m/s，与"对流
+        # 补给弱"的回流区假设不符，真正共同点只是"停留在 P0 里足够久"）
+        # 都会被这个纯衰减过程压到裸正性下限 1e-12，且数量随迭代持续扩散
+        # （真实观测：iter 1600→2000→2300→2500 撞底单元数 2→9→39→62，
+        # 非孤立个例、非收敛，是真实、在扩大的失稳，此前一次诊断误判为
+        # "2个孤立单元、良性"是错误结论，已撤销）。
+        #
+        # 与 omega realizability 下限（本文件另一处、2026-09-05 真实
+        # bug 修复）同源同构，但下限量级刻意选得更保守：omega=0 在 SST
+        # 公式里是真正的数学奇点（涡粘公式/混合函数均除以 omega），
+        # 0.1*omega_inf 这个量级有 Fluent turbulence time scale limiter
+        # 的标准依据；k=0 本身是合法物理状态（层流区 k 确实应该趋于 0），
+        # 不是奇点，没有对应的"标准建议值"可以照抄——这里的下限纯粹是为了
+        # 防止 P0 这个人为零产生项阶段把 k numerically 拖到裸下限这一种
+        # 具体失效模式，不是要把 k 强行钉在接近来流的量级（那样会在真正
+        # 层流的区域人为注入湍流粘性，扭曲解）。选取 1e-3*k_inf（比
+        # k_inf 小 3 个量级，比裸下限 1e-12 大 9 个量级）：足以在 P0 期间
+        # 拦住这个衰减轨迹，量级又远小于任何有意义的物理湍流强度，对
+        # 最终收敛解的失真可忽略。
+        k_inf = getattr(self, 'k_inf', None)
+        if k_inf is not None and k_inf > 0:
+            self.k_field = np.maximum(self.k_field, 1e-3 * k_inf)
 
         # 上界：物理约束——防止 k/omega 输运方程数值爆炸
         self.k_field = np.minimum(self.k_field, self.k_max)

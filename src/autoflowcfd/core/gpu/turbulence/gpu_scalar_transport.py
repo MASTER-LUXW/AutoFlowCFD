@@ -203,7 +203,8 @@ def _extrapolate_scalar_to_faces_gpu(
     return phi_owner, phi_neighbor
 
 
-def _distribute_scalar_correction_gpu(cp, ff, raw_jump_fp, det_jacs, n_cells, n_sps):
+def _distribute_scalar_correction_gpu(cp, ff, raw_jump_fp, det_jacs, n_cells, n_sps,
+                                       raw_jump_fp_neighbor=None):
     """CuPy 版 `distribute_corrections_to_cells_kernel[_colored]`，标量版，
     对全部面一次性向量化处理（不分色，见模块文档）。
 
@@ -216,9 +217,19 @@ def _distribute_scalar_correction_gpu(cp, ff, raw_jump_fp, det_jacs, n_cells, n_
         native` 逐字对应；(3) 新增 native 分支（`boundary_extrap_native`/
         `lift_native` DG 提升算子）。
 
+    raw_jump_fp_neighbor（真实 bug 修复，2026-09-12，与 CPU 版
+    `transport.py::_distribute_correction_to_cells` 同名参数同一处修复，
+    完整推导见 `compute_scalar_convection_residual_gpu` 模块文档）：
+    neighbor 侧必须用相对 phi_neighbor 计算的独立跳变量，不能复用 owner
+    侧那份相对 phi_owner 算出的 `raw_jump_fp`。默认 None 时退化为与
+    `raw_jump_fp` 相同（扩散残差的 BR1 跳变量对 owner/neighbor 天然
+    对称，调用方不传此参数，行为不变）。
+
     raw_jump_fp: (n_faces, n_fp) 未加权原始物理跳变量
     Returns: (n_cells, n_sps)
     """
+    if raw_jump_fp_neighbor is None:
+        raw_jump_fp_neighbor = raw_jump_fp
     correction = cp.zeros((n_cells, n_sps), dtype=cp.float64)
 
     # ── owner 侧分配（B-8 混合拆分面：只有 owner_is_primary 的记录才
@@ -256,7 +267,7 @@ def _distribute_scalar_correction_gpu(cp, ff, raw_jump_fp, det_jacs, n_cells, n_
         nc_sel = nc[sel_n]
         nax_sel = ff.neighbor_axis[sel_n]
         nside_sel = ff.neighbor_side[sel_n]
-        raw_n = raw_jump_fp[sel_n]
+        raw_n = raw_jump_fp_neighbor[sel_n]
 
         nc_code_n = ff.neighbor_cube_face[sel_n]
         is_native_n = nc_code_n >= 6
@@ -322,15 +333,29 @@ def compute_scalar_convection_residual_gpu(
 
     mass_flux = cp.sum(rho_o[..., None] * vel_o * ff.true_normal, axis=-1)  # (n_faces,n_fp)
     phi_upwind = cp.where(mass_flux >= 0, phi_o, phi_n)
-    delta_phi = phi_upwind - phi_o
+    # 真实 bug 修复（2026-09-12，与 CPU 版 `transport.py::
+    # compute_scalar_convection_residual` 同一处修复，完整推导见该函数
+    # 模块文档"owner/neighbor 跳变量不对称"一节）：owner/neighbor 两侧
+    # 的正确校正必须分别相对各自的面值计算——owner 侧沿用
+    # `phi_upwind-phi_o`；neighbor 侧此前错误地复用了同一个 owner 参照
+    # 的跳变量，在 owner 恰好是上风侧（mass_flux>=0，phi_upwind==phi_o）
+    # 时该跳变量恒为 0，等价于 neighbor（真实网格中占全部内部面一半）
+    # 完全收不到这个面本该有的对流稀释/浓缩效果。
+    delta_phi_owner = phi_upwind - phi_o
+    delta_phi_neighbor = phi_upwind - phi_n
 
     # 未加权原始跳变量（2026-09-03 修复，见 `_distribute_scalar_correction_
     # gpu` 文档）：不再在这里提前乘 |owner_adj_row_exact|——加权方式（
     # collapsed 用 |adj_row|，native 用 true_area_weight）延后到分配阶段
-    # 按面类型分派，与 CPU 版 `raw_jump_fp = mass_flux * delta_phi` 逐字对应。
-    raw_jump_fp = mass_flux * delta_phi
+    # 按面类型分派，与 CPU 版 `raw_jump_fp = mass_flux * delta_phi_owner`
+    # 逐字对应。
+    raw_jump_fp = mass_flux * delta_phi_owner
+    raw_jump_fp_neighbor = mass_flux * delta_phi_neighbor
 
-    interface_correction = _distribute_scalar_correction_gpu(cp, ff, raw_jump_fp, det_jacs, n_cells, n_sps)
+    interface_correction = _distribute_scalar_correction_gpu(
+        cp, ff, raw_jump_fp, det_jacs, n_cells, n_sps,
+        raw_jump_fp_neighbor=raw_jump_fp_neighbor,
+    )
     return residual + interface_correction
 
 
@@ -497,10 +522,18 @@ def enforce_omega_wall_relaxation_gpu(cp, solver, relax=None):
 
 def compute_wall_dirichlet_mask_gpu(mesh, boundary_ghost_provider):
     """CuPy 版 `_compute_wall_dirichlet_face_mask`：纯拓扑查询（哪些面是
-    WALL 类型边界组），与 wall_distance/流场状态无关，只依赖网格自身，
-    求解过程中不变——调用方（gpu_solver_io.py）应该只在初始化时调用一次
-    并缓存结果，不是每步都重新算（CPU 版每步都重算是因为它本身开销可
-    忽略；这里直接给出 numpy 版本供调用方自行决定何时上传/缓存）。
+    **真实无滑移** WALL 类型边界组），与 wall_distance/流场状态无关，
+    只依赖网格自身，求解过程中不变——调用方（gpu_solver_io.py）应该只在
+    初始化时调用一次并缓存结果，不是每步都重新算（CPU 版每步都重算是
+    因为它本身开销可忽略；这里直接给出 numpy 版本供调用方自行决定何时
+    上传/缓存）。
+
+    真实 bug 修复（2026-09-12）：与 CPU 版 `transport.py::_compute_wall_
+    dirichlet_face_mask` 同一处、同一理由——`is_no_slip=False` 的滑移壁
+    （如 cube_demo 的 "tunnel" 远场边界）物理上零剪切、没有真实边界层，
+    不应享受 Wilcox omega 壁面解析式/k 的 Dirichlet-zero 处理，否则会
+    把这些单元的 omega 强行拉向物理上荒谬的近壁目标值（完整推导见 CPU
+    版同名函数文档）。只把 `is_no_slip` 非 False 的 WALL 编码计入。
 
     Returns:
         wall_mask: (n_faces,) numpy bool 数组
@@ -511,7 +544,10 @@ def compute_wall_dirichlet_mask_gpu(mesh, boundary_ghost_provider):
     code_to_config = getattr(boundary_ghost_provider, "code_to_config", None)
     if group_code is None or code_to_config is None:
         return np.zeros(n_faces, dtype=np.bool_)
-    wall_codes = [code for code, cfg in code_to_config.items() if cfg.get("type") == "WALL"]
+    wall_codes = [
+        code for code, cfg in code_to_config.items()
+        if cfg.get("type") == "WALL" and cfg.get("is_no_slip", True)
+    ]
     if not wall_codes:
         return np.zeros(n_faces, dtype=np.bool_)
     return np.isin(group_code, wall_codes)

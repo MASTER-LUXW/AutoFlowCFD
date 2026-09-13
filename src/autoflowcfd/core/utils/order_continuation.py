@@ -686,6 +686,22 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
                     from autoflowcfd.postprocess.fr_coefficients import compute_forces_pressure_only
                     aero = compute_forces_pressure_only(solver, ref_area)
                     msg += f" | Cd={aero['Cd']:.4f} Cl={aero['Cl']:.4f} Cs={aero['Cs']:.4f}"
+                # 按方程分别归一化残差 + 最大残差定位（参照 Fluent scaled
+                # residuals / STAR-CCM+ Max 监视器，2026-09-12 新增，见
+                # residual_diagnostics.py 模块文档"背景"一节完整推导）：
+                # 合并 RMS（上面的 `res`）在少数单元残差幅值远超全场时会
+                # 被这几个单元主导、掩盖其余方程真实的收敛/发散趋势——
+                # 这次真实排查里方块前驻点单元的能量方程残差比全局RMS
+                # 还大，只用一个合并数字完全看不出来。这里只新增打印，
+                # 不改变 `initial_residual_this_order`/`drop_ratio` 这条
+                # 现有升阶判据的任何行为。
+                freestream = getattr(solver, 'freestream', None)
+                if freestream is not None and hasattr(solver.state, 'dU_dt'):
+                    from autoflowcfd.core.fr_solver.residual_diagnostics import (
+                        compute_scaled_residuals, format_scaled_residual_line,
+                    )
+                    diag = compute_scaled_residuals(solver.state.dU_dt, freestream)
+                    msg += " | " + format_scaled_residual_line(diag)
                 print(msg)
 
             # 中间 checkpoint 保存（按 --checkpoint-interval 间隔）

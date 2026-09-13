@@ -114,6 +114,8 @@ def rebuild_solver_from_checkpoint(
     threads: int = -1,
     reference_area: Optional[float] = None,
     skip_quality_check: bool = False,
+    cfl_start: float = 0.1,
+    cfl_max: float = 0.5,
 ):
     """从 checkpoint 完整重建一个带解场的 FRSolver（不继续迭代）。
 
@@ -216,6 +218,13 @@ def rebuild_solver_from_checkpoint(
         vel_inf=metadata.get("vel_inf", 33.33),
         p_inf=metadata.get("p_inf", 101325.0),
         n_threads=threads,
+        # CFL（2026-09-07）：resume 时的自适应 CFL 参数由调用方（CLI
+        # `--cfl-start`/`--cfl-max`）显式指定，不从 checkpoint 恢复——
+        # CFL 是纯数值加速参数、不影响物理解，用户每次 resume 都可以
+        # 根据上一段的收敛表现重新调（比如上一段稳定收敛了就调高、
+        # 发散了就调低）。
+        cfl_start=cfl_start,
+        cfl_max=cfl_max,
         # Tu/VR 从 checkpoint metadata 恢复（2026-08-25 添加）：
         # 保证 Resume 时湍流场重置用的参数与原始计算一致。
         # 旧 checkpoint 没有这两个字段，回退到默认值（Tu=0.01, VR=5.0）。

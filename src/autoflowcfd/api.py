@@ -241,6 +241,12 @@ class AutoFlowCFDAPI:
         if config is not None:
             for field in ("mu_molecular", "turbulence_intensity", "viscosity_ratio"):
                 kwargs.setdefault(field, getattr(config, field))
+            # SteadyConfig.cfl_init/cfl_max -> FRSolver.cfl_start/cfl_max
+            # （2026-09-07：此前这两个 config 字段从未真正接到求解器上）。
+            if getattr(config, "cfl_init", None) is not None:
+                kwargs.setdefault("cfl_start", config.cfl_init)
+            if getattr(config, "cfl_max", None) is not None:
+                kwargs.setdefault("cfl_max", config.cfl_max)
 
         mesh = HighOrderMesh(order=order)
         mesh.load_from_volume_mesh(volume_mesh)
