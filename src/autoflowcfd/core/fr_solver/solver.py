@@ -513,8 +513,12 @@ class FRSolver(_SolverGeometryMixin):
             # 同一处新增，参照 Fluent scaled residuals / STAR-CCM+ Max
             # 监视器，见 residual_diagnostics.py 模块文档"背景"一节）：
             # 只新增打印，不改变本函数自己的 `tol`/`drop` 收敛判据。
+            #
+            # 打印频率（2026-09-13 用户反馈修复，与 order_continuation.py
+            # 同一处、同一理由）：只在第 1 步和其后每 10 步打印一次，避免
+            # 正常运行时每步都刷出这行长诊断信息。
             freestream = getattr(self, 'freestream', None)
-            if freestream is not None and hasattr(self.state, 'dU_dt'):
+            if freestream is not None and hasattr(self.state, 'dU_dt') and (i == 0 or (i + 1) % 10 == 0):
                 from autoflowcfd.core.fr_solver.residual_diagnostics import (
                     compute_scaled_residuals, format_scaled_residual_line,
                 )

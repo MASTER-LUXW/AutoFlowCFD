@@ -695,8 +695,14 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
                 # 还大，只用一个合并数字完全看不出来。这里只新增打印，
                 # 不改变 `initial_residual_this_order`/`drop_ratio` 这条
                 # 现有升阶判据的任何行为。
+                #
+                # 打印频率（2026-09-13 用户反馈修复）：此前每一步都打印这行
+                # 扩展诊断，正常收敛过程中绝大多数步的信息量重复（长期跟踪
+                # 用不需要逐步都看），把终端刷成大量看似"无用"的长行——只在
+                # 第 1 步（立即看到基线）和其后每 10 步打印一次，兼顾"排查
+                # 问题时能及时看到"和"正常运行时不刷屏"两者。
                 freestream = getattr(solver, 'freestream', None)
-                if freestream is not None and hasattr(solver.state, 'dU_dt'):
+                if freestream is not None and hasattr(solver.state, 'dU_dt') and (i == 0 or (i + 1) % 10 == 0):
                     from autoflowcfd.core.fr_solver.residual_diagnostics import (
                         compute_scaled_residuals, format_scaled_residual_line,
                     )
