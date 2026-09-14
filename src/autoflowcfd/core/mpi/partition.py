@@ -292,53 +292,65 @@ def build_distributed_partition(
         recv_lists[owner_rank].append(int(hc))
 
     # send_lists[r] = 本 rank 需要发给 rank r 的 local cell 局部索引
-    # （rank r 需要这些 cell 的数据来填充它的 halo）
+    # （rank r 需要这些 cell 的数据来填充它的 halo）。
+    #
+    # **这段计算是精确的，不是近似**（2026-09-14 更正）：此前这里的注释
+    # 写"这需要通过全局通信确定——首版简化：通过面连接直接判断"，把一个
+    # 精确计算错标成了简化。实际上 `rank r 的 halo` 完全由
+    # `(face_connectivity, cell_partition)` 这两份**每个 rank 都已经持有
+    # 的全局数据**唯一决定：一个 local cell 需要发给 rank r，当且仅当它
+    # 通过某个内部面与一个属于 rank r 的 cell 相邻。因此不需要任何通信，
+    # 也没有任何精度损失——绕开全局通信是这份数据可得性带来的结果，
+    # 不是"用近似换简单"。
+    #
+    # 但原实现有两处**真实的性能缺陷**（2026-09-14 向量化重写）：
+    #   1. 外层按 rank、内层按面的双层 Python 循环：O(n_ranks × n_faces)
+    #      次解释器迭代。79 万单元 cube_demo 有 188 万个面，16 rank 下是
+    #      3000 万次迭代，光这一步就要分钟级。
+    #   2. `if local_idx not in send_cells` 对一个 **list** 做成员测试，
+    #      整体是 O(n_send²)。一个 rank 的分区边界单元数上万时这一项
+    #      就是数亿次比较。
+    # 现在改成纯 numpy：一次性取出所有内部面的 (owner_part, neigh_part)，
+    # 按两个方向分别筛出"本 rank 一侧 + 对端 rank 一侧"的单元，用
+    # `np.unique` 同时完成去重与排序。
+    #
+    # 全局 id 升序这条约束必须保留（第五次评审自查发现的真实 bug）：
+    # `halo.py::HaloExchange.exchange()` 的通信协议是"发送方按
+    # send_lists[r] 的顺序把数据打包进一段连续 buffer，接收方按自己的
+    # recv_lists[发送方 rank] 的顺序原样解包"——没有随数据传输任何单元
+    # id，完全依赖两端按同一顺序约定摆放数据。recv_lists 是按已排序的
+    # halo_cells 构建的、天然全局 id 升序；原实现的 send_cells 按"哪个面
+    # 先发现这个单元"的遍历顺序收集，与全局 id 升序无关。用一个 3 rank、
+    # 6x6 网格的合成算例实测复现过：发送方顺序 [22,23,18,21,19,20] vs
+    # 接收方期望 [18,19,20,21,22,23]——集合相同但顺序不同，会把 halo
+    # 数据静默对应到错误的单元上（不报错，只是物理结果错误）。
+    # `np.unique` 返回的就是升序的**全局** id，正好满足这个约定，
+    # 所以下面直接对全局 id 排序、再映射成局部索引。
+    internal_mask = (~np.asarray(face_connectivity.is_boundary)) & (
+        np.asarray(face_connectivity.neighbor_cell) >= 0)
+    oc_int = np.asarray(face_connectivity.owner_cell)[internal_mask]
+    nc_int = np.asarray(face_connectivity.neighbor_cell)[internal_mask]
+    oc_part = cell_partition[oc_int]
+    nc_part = cell_partition[nc_int]
+
+    # 本 rank 在 owner 侧 / neighbor 侧两个方向（一个面可能两侧都不是本
+    # rank，也不可能两侧都是本 rank 又跨 rank——下面按对端 rank 分组）
+    own_here = (oc_part == rank)
+    nbr_here = (nc_part == rank)
+
     for other_rank in range(n_ranks):
         if other_rank == rank:
             continue
-        # 哪些 local cell 是 other_rank 的 halo？
-        # 即：other_rank 的 recv_lists[rank] 中的 cell
-        # 这需要通过全局通信确定——首版简化：通过面连接直接判断
-        send_cells = []
-        for f in range(n_faces):
-            if face_connectivity.is_boundary[f]:
-                continue
-            oc = face_connectivity.owner_cell[f]
-            nc = face_connectivity.neighbor_cell[f]
-            if nc < 0:
-                continue
-            oc_part = cell_partition[oc]
-            nc_part = cell_partition[nc]
-            # local cell 的 neighbor 在 other_rank → 需要发送给 other_rank
-            if oc_part == rank and nc_part == other_rank:
-                local_idx = int(global_to_local[oc])
-                if local_idx not in send_cells:
-                    send_cells.append(local_idx)
-            # local cell 的 owner 在 other_rank → 需要发送给 other_rank
-            if nc_part == rank and oc_part == other_rank:
-                local_idx = int(global_to_local[nc])
-                if local_idx not in send_cells:
-                    send_cells.append(local_idx)
-        if send_cells:
-            # 关键正确性约束（第五次评审自查发现的真实 bug，独立于本轮
-            # 之前发现的所有问题）：halo.py::HaloExchange.exchange() 的
-            # 通信协议是"发送方按 send_lists[r] 的顺序把数据打包进一段
-            # 连续 buffer，接收方按自己的 recv_lists[发送方 rank] 的顺序
-            # 原样解包"——没有随数据一起传输任何单元 id 信息，完全依赖
-            # 两端按同一个顺序约定摆放数据。recv_lists[owner_rank] 是
-            # 按 halo_cells（已按全局 id 升序排序）遍历构建的，天然是
-            # 全局 id 升序；但这里 send_cells 是按"哪个面先发现这个单元"
-            # 的遍历顺序收集的，与全局 id 升序毫无关系。用一个 3 rank、
-            # 6x6 网格的合成算例实测复现过：发送方顺序 [22,23,18,21,19,20]
-            # vs 接收方期望顺序 [18,19,20,21,22,23]——集合相同但顺序不同，
-            # 会把 halo 数据静默对应到错误的单元上（不报错，只是物理结果
-            # 错误）。修复：显式按全局 cell id 升序重排 send_cells，与
-            # recv_lists 的构建约定保持一致。
-            send_cells_arr = np.array(send_cells, dtype=np.int64)
-            global_ids_of_send = local_cells[send_cells_arr]
-            order = np.argsort(global_ids_of_send)
-            send_lists[other_rank] = send_cells_arr[order]
-            neighbor_ranks_set.add(other_rank)
+        # 方向一：本 rank 的 owner cell，其 neighbor 属于 other_rank
+        g1 = oc_int[own_here & (nc_part == other_rank)]
+        # 方向二：本 rank 的 neighbor cell，其 owner 属于 other_rank
+        g2 = nc_int[nbr_here & (oc_part == other_rank)]
+        if g1.size == 0 and g2.size == 0:
+            continue
+        # np.unique：去重 + 按**全局 id 升序**排序（通信协议要求，见上）
+        send_global = np.unique(np.concatenate([g1, g2]))
+        send_lists[other_rank] = global_to_local[send_global].astype(np.int64)
+        neighbor_ranks_set.add(other_rank)
 
     # 转换 recv_lists 为 numpy 数组
     for r in recv_lists:

@@ -202,9 +202,11 @@ class _GPUDistributedInitMixin:
 
         Args:
             dt: 本步物理时间步长（标量）——与本类 mean-flow RK 推进
-                同一个"分布式路径目前用全局固定步长，不做单机路径那种
-                逐 cell 局部 CFL 时间步"的既定简化（见 gpu_distributed.py
-                模块/step() 文档），也与单机 GPU 路径的既定约定一致
+                本步的**逐单元局部物理步长的均值**（2026-09-14：分布式
+                路径已补齐逐 cell 局部 CFL，此前"用全局固定步长"的既定
+                简化已不存在，见 gpu_distributed.py::
+                _compute_local_time_step_gpu 的重写说明），与单机 GPU
+                路径的既定约定一致
                 （`update_fields_gpu(dt: float, ...)` 本来就接受标量，
                 单机版用 `float(cp.mean(dt_local))`，不是 CPU 路径那种
                 per-cell dt_local 数组）。
@@ -396,11 +398,16 @@ class _GPUDistributedInitMixin:
             transport_adapter, grad_vel=grad_vel,
         )
 
-        # 5. 场更新（点隐式阻尼+输运，见 update_fields_gpu 文档）——用
-        # 调用方传入的物理 dt（标量），不在这里另算 CFL（本类分布式路径
-        # 目前统一用全局固定步长，_compute_local_time_step_gpu 本身还
-        # 依赖完整全局 face_connectivity，与 compact 索引空间不兼容，
-        # 与 CPU 分布式同一个既定简化，见本方法 Args 文档）。
+        # 5. 场更新（点隐式阻尼+输运，见 update_fields_gpu 文档）。
+        # `dt` 现在由调用方传入**逐单元局部物理步长的均值**（2026-09-14，
+        # 与 CPU 分布式/单机同一时序：湍流标量必须用按**物理**波速算出的
+        # 那一份 dt，不能跟着低马赫数预处理放大——k/omega 的显式更新刻意
+        # 没有 point-implicit 阻尼）。此前这里用的是调用方传入的全局固定
+        # dt，并注明"本类分布式路径目前统一用全局固定步长、
+        # _compute_local_time_step_gpu 与 compact 索引空间不兼容"——那个
+        # 前提已经不成立：该方法已重写为紧凑索引空间、逐 SP 取最小值。
+        # `update_fields_gpu` 接标量，所以这里取均值（与该函数在其它路径
+        # 上的既有用法一致，见 gpu_solver_io.py 的 `cp.mean(dt_physical)`）。
         turb_view.update_fields_gpu(
             float(dt), dk_dt, domega_dt,
             transport_k=transport_k, transport_omega=transport_omega,

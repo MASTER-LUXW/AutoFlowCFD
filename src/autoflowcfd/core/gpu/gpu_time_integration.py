@@ -95,6 +95,7 @@ def compute_local_cfl_step_gpu(
     normals, areas, cell_owner, cell_areas,
     cfl: float = 1.0, mu_eff=None, poly_order: int = 0,
     det_jacs_sp=None, metric_flux_scale_sp=None,
+    mach_ref=None, return_physical_too: bool = False,
 ):
     """GPU 版局部 CFL 时间步长计算。
 
@@ -110,7 +111,8 @@ def compute_local_cfl_step_gpu(
     稳定极限。order_factor 与 CPU 侧同一公式 1/(2p+1)。
 
     Args:
-        U: CuPy 数组 (n_cells, n_sps, n_vars)
+        U: CuPy 数组 (n_cells, 1, n_vars)——**必须是单 SP 切片**，见下方
+            函数体开头的校验与说明
         cell_volumes: CuPy 数组 (n_cells,)
         owner_cell, neighbor_cell, is_boundary: 面连接关系
         normals: CuPy 数组 (n_faces, 3)
@@ -133,14 +135,47 @@ def compute_local_cfl_step_gpu(
         metric_flux_scale_sp: 本次调用对应 SP 的度量"通量面积"标度
             sum_m||adj(J)[:,m,:]||，CuPy 数组 (n_cells,)（可选，与
             det_jacs_sp 一起提供时才生效）。
+        mach_ref: 不为 None 时，额外算一份**预处理后**的平均流 dt——
+            把对流项与几何项里的声速换成有效声速 sqrt(beta^2)*a
+            （beta^2 按速度模取，见 gpu_preconditioning.py）。这一份
+            **只有在调用方真的把 Gamma 作用到平均流残差上时才可以使用**
+            （见上方"谱半径用物理声速"那段记录的 2026-08-25 事故：
+            只改 CFL 不改方程必然失稳）。粘性限制与声速无关，原样复用。
+        return_physical_too: True 时返回 (dt_mean_flow, dt_physical)。
+            湍流标量（k/omega）必须用后者——它们是被动输运量、不含声学
+            模态，但其显式更新刻意没有 point-implicit 阻尼，保守起见不跟着
+            放大步长（与 CPU 侧 cfl.py 同一处理）。
 
     Returns:
-        dt_local: CuPy 数组 (n_cells,)
+        return_physical_too=False（默认）: dt_local，CuPy 数组 (n_cells,)
+        return_physical_too=True: (dt_mean_flow, dt_physical)；未启用
+            预处理（mach_ref is None）时两者是同一个数组对象。
     """
     cp = get_cupy()
     n_cells = U.shape[0]
 
-    # 使用 SP0 的值计算时间步长（简化：取每个 cell 第一个 SP）
+    # **本函数按约定只处理单个 SP**（2026-09-14 更正）：
+    # 此前这里写"使用 SP0 的值计算时间步长（简化：取每个 cell 第一个
+    # SP）"——那个标注已不成立。两条生产调用方（单机
+    # `gpu_solver.py::_compute_local_time_step_gpu` 与多 GPU
+    # `gpu_distributed.py` 同名方法）都在**逐 SP 循环**里传
+    # `U[:, sp:sp+1, :]` 这样的单 SP 切片、并对结果取单元内最小值，
+    # 所以 `U[:, 0, ...]` 取到的就是当前那个 SP，不是"只用第一个 SP"
+    # 的近似。（多 GPU 那条原先确实只传 SP0，那是真实简化，已在同一批
+    # 改动里随该方法的重写一起修掉。）
+    #
+    # 下面这道校验把这条隐式契约变成显式失败：如果有人传完整的
+    # (n_cells, n_sps, n_vars) 数组，旧代码会**静默**只用 SP0 算步长——
+    # 逐 SP 的几何/度量 CFL 限制（dt_geometric，专门用来防坍缩坐标下
+    # 同一单元内 det(J) 相差几百倍导致的局部刚性失稳）会因此大部分
+    # 失效，而且不报任何错。宁可直接失败。
+    if U.ndim != 3 or U.shape[1] != 1:
+        raise ValueError(
+            f"compute_local_cfl_step_gpu 期望单 SP 切片 (n_cells, 1, n_vars)，"
+            f"实际收到 {tuple(U.shape)}——调用方必须按 SP 循环、逐 SP 调用"
+            f"并对结果取单元内最小值（见 gpu_solver.py/gpu_distributed.py 的"
+            f"_compute_local_time_step_gpu）。传完整数组会静默只用 SP0、"
+            f"让逐 SP 的几何/度量 CFL 保护失效。")
     rho = cp.maximum(U[:, 0, 0], 1e-9)
     vel = U[:, 0, 1:4] / rho[:, None]
     ke = 0.5 * rho * cp.sum(vel**2, axis=1)
@@ -196,7 +231,40 @@ def compute_local_cfl_step_gpu(
         )
         dt = cp.minimum(dt, dt_geometric)
 
-    return dt
+    if mach_ref is None:
+        return (dt, dt) if return_physical_too else dt
+
+    # === 预处理后的平均流 dt（与 CPU 侧 cfl.py 的同名段落逐项对应）===
+    from .gpu_preconditioning import preconditioned_sound_speed_gpu
+    vel_mag = cp.sqrt(cp.sum(vel ** 2, axis=1))
+    c_pre = preconditioned_sound_speed_gpu(vel_mag, a, float(mach_ref))
+
+    spectral_p = cp.zeros(n_cells, dtype=cp.float64)
+    un_o_p = cp.abs(cp.einsum('nd,nd->n', vel[io], n_int)) + c_pre[io]
+    un_n_p = cp.abs(cp.einsum('nd,nd->n', vel[ineigh], n_int)) + c_pre[ineigh]
+    cp.scatter_add(spectral_p, io, un_o_p * a_int)
+    cp.scatter_add(spectral_p, ineigh, un_n_p * a_int)
+    if bo.size > 0:
+        un_b_p = cp.abs(cp.einsum('nd,nd->n', vel[bo], n_b)) + c_pre[bo]
+        cp.scatter_add(spectral_p, bo, un_b_p * a_b)
+    spectral_p = cp.maximum(spectral_p, 1e-30)
+    dt_mean = cfl * order_factor_advective * cell_volumes / spectral_p
+
+    if mu_eff is not None:
+        Lc2 = cell_volumes ** (2.0 / 3.0)
+        dt_mean = cp.minimum(
+            dt_mean,
+            0.25 * cfl * order_factor_viscous * rho * Lc2 / cp.maximum(mu_eff, 1e-30),
+        )
+    if det_jacs_sp is not None and metric_flux_scale_sp is not None:
+        wave_speed_p = cp.maximum(vel_mag + c_pre, 1e-10)
+        dt_mean = cp.minimum(
+            dt_mean,
+            cfl * cp.abs(det_jacs_sp) / cp.maximum(
+                metric_flux_scale_sp * wave_speed_p, 1e-300),
+        )
+
+    return (dt_mean, dt) if return_physical_too else dt_mean
 
 
 class GPUTimeIntegrator:

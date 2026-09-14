@@ -1,17 +1,43 @@
-"""
-AutoFlowCFD V2.0 - WALE 亚格子应力模型 (T-06)
+"""亚格子（SGS）应力模型：WALE 与 Smagorinsky-Lilly。
 
-本模块实现 Wall-Adapting Local Eddy-viscosity (WALE) 模型，
-用于纯 LES 模式下的耗散补偿。同时提供 Smagorinsky-Lilly 备选方案。
+生产路径只用 WALE：`fr_solver/turbulence.py::init_turbulence_models` 的
+WMLES 与 LES 两个分支都是 `solver.sgs_model = WALEModel()`。
+`SmagorinskyModel` 从未被实例化，但它是 `core.turbulence.__init__` 导出的
+公开 API、且 `compute_eddy_viscosity` 是标准且完整的 Smagorinsky-Lilly
+公式（不是简化），因此保留。
 
-核心功能:
-1. WALE 模型：自动适应壁面，近壁处涡粘系数趋于零
-2. Smagorinsky-Lilly 模型：经典SGS模型
-3. 动态模型支持（可选，DynamicSmagorinskyModel 已搬到
-   turbulence_sgs_dynamic.py——本文件原有 406 行，超过 400 行硬性拆分
-   阈值，该模型是 SmagorinskyModel 的可选变体，与本文件里主要在用的
-   WALE/Smagorinsky 模型没有其它耦合，独立成文件最清晰）
-4. 亚格子应力张量计算
+## 2026-09-14 死代码清理（用户明确要求"本项目从不接受简化"后的普查）
+
+删除了三个方法和一个类，全部经全仓库 grep 确认**零引用**（生产代码、
+测试、CLI 都没有），而且每一个都带着"简化"标注或有实质缺陷——保留它们
+等于在仓库里留下带简化标记的、无人使用的代码：
+
+- `WALEModel.compute_subgrid_stress`：注释自述"简化：忽略各向同性部分"。
+  Boussinesq 形式 `tau_ij = 2*rho*nu_t*S_ij` 缺了 `-(2/3)*rho*k_sgs*delta_ij`
+  这一项。不可压 LES 里把它并进压力是标准做法，但**可压缩** LES 通常要
+  保留（需要一个 k_sgs 闭合，例如 Yoshizawa）。这个方法从未被调用过
+  （粘性残差走的是 `nu_t` 叠加进 mu_eff 那条路，不经过显式的 tau_ij），
+  GPU 版移植时就已经 grep 确认过它是死代码而刻意不移植。
+- `WALEModel.compute_velocity_gradients`：同样是 GPU 移植时已确认的死
+  代码——真实路径用的是 `fr_operators/gradients.py::
+  compute_physical_gradient`（真正的 FR 物理梯度），不是这里这份。
+- `WALEModel.apply_van_driest_damping`：零引用。近壁阻尼在本项目里由
+  WMLES 壁面模型承担，不走这条。
+- `DynamicSmagorinskyModel`（原 `sgs_dynamic.py`，整文件删除）：既未在
+  `__init__` 导出、也无任何引用，**而且数学上是坏的**。它的
+  `L_ij = tau_fine - tau_coarse_filtered` 用的是两个涡粘模型应力之差，
+  代入自己定义的 `M_ij` 后恒有 `L_ij == 2*M_ij`，于是 Lilly 最小二乘解
+  `C_s^2 = <L:M>/<M:M> == 2` 恒成立，被 `min(..., 0.04)` 钳住后**恒定
+  返回 c_s = 0.2**，与流场完全无关。一个"动态"模型却恒返回常数，比不
+  存在更危险（会让人以为它在自适应）。
+  真正的 Germano/Lilly 动态系数要求对速度**乘积**做测试滤波：
+  `L_ij = filter(u_i u_j) - filter(u_i) filter(u_j)`，
+  `M_ij = 2[(alpha*Delta)^2 |S_hat| S_hat_ij - Delta^2 filter(|S| S_ij)]`。
+  原函数的签名只收梯度（`grad_u_coarse`/`grad_u_fine`），结构上就表达
+  不了 `L_ij`。要正确实现必须改成接收速度场 + 一个测试滤波算子（本项目
+  的模态滤波器可以充当），并且即便代数写对了，仍是一个没有 LES 验证
+  数据支撑的新模型——因此本轮选择删除而不是"补完"，把这段推导记录在
+  这里，需要时按上面两个公式重新实现。
 """
 
 import numpy as np
@@ -42,43 +68,6 @@ class WALEModel:
         self.c_wale = c_wale
         self.nu_t = None  # 亚格子涡粘系数
         
-    def compute_velocity_gradients(self, u_field: np.ndarray, 
-                                  v_field: np.ndarray,
-                                  w_field: np.ndarray,
-                                  grad_operator: np.ndarray) -> np.ndarray:
-        """
-        计算速度梯度张量 ∂u_i/∂x_j。
-        
-        Args:
-            u_field, v_field, w_field: 速度分量场，形状 (n_cells, n_sps)
-            grad_operator: FR 微分算子，形状 (n_sps, n_sps, 3)
-            
-        Returns:
-            grad_u: 速度梯度张量，形状 (n_cells, n_sps, 3, 3)
-                   最后两维对应 (i, j)，即 ∂u_i/∂x_j
-        """
-        n_cells, n_sps = u_field.shape
-        
-        # 初始化梯度张量
-        grad_u = np.zeros((n_cells, n_sps, 3, 3))
-        
-        # 对每个单元计算梯度
-        for cell in range(n_cells):
-            # x方向导数
-            grad_u[cell, :, 0, 0] = np.dot(grad_operator[:, :, 0], u_field[cell, :])
-            grad_u[cell, :, 0, 1] = np.dot(grad_operator[:, :, 1], u_field[cell, :])
-            grad_u[cell, :, 0, 2] = np.dot(grad_operator[:, :, 2], u_field[cell, :])
-            
-            grad_u[cell, :, 1, 0] = np.dot(grad_operator[:, :, 0], v_field[cell, :])
-            grad_u[cell, :, 1, 1] = np.dot(grad_operator[:, :, 1], v_field[cell, :])
-            grad_u[cell, :, 1, 2] = np.dot(grad_operator[:, :, 2], v_field[cell, :])
-            
-            grad_u[cell, :, 2, 0] = np.dot(grad_operator[:, :, 0], w_field[cell, :])
-            grad_u[cell, :, 2, 1] = np.dot(grad_operator[:, :, 1], w_field[cell, :])
-            grad_u[cell, :, 2, 2] = np.dot(grad_operator[:, :, 2], w_field[cell, :])
-        
-        return grad_u
-    
     def compute_strain_and_rotation_tensors(self, grad_u: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         """
         计算应变率张量 S_ij 和旋转率张量 Ω_ij。
@@ -201,29 +190,6 @@ class WALEModel:
         
         return nu_t
     
-    def compute_subgrid_stress(self, nu_t: np.ndarray, S_ij: np.ndarray,
-                              rho: np.ndarray) -> np.ndarray:
-        """
-        计算亚格子应力张量 τ_ij。
-        
-        τ_ij = 2 * ρ * ν_t * S_ij - (2/3) * ρ * k_sgs * δ_ij
-        
-        简化：忽略各向同性部分
-        
-        Args:
-            nu_t: 亚格子涡粘系数
-            S_ij: 应变率张量
-            rho: 密度
-            
-        Returns:
-            tau_ij: 亚格子应力张量，形状 (n_cells, n_sps, 3, 3)
-        """
-        # Boussinesq 假设
-        tau_ij = 2.0 * rho[:, :, np.newaxis, np.newaxis] * nu_t[:, :, np.newaxis, np.newaxis] * S_ij
-        
-        return tau_ij
-
-
 class SmagorinskyModel:
     """
     Smagorinsky-Lilly 亚格子模型。
@@ -276,71 +242,3 @@ class SmagorinskyModel:
         self.nu_t = nu_t
         
         return nu_t
-    
-    def apply_van_driest_damping(self, nu_t: np.ndarray, y_dist: np.ndarray,
-                                nu: float, u_tau: Optional[np.ndarray] = None) -> np.ndarray:
-        """
-        应用 Van Driest 阻尼函数（近壁修正）。
-        
-        f_d = 1 - exp(-y+/A+)
-        
-        Args:
-            nu_t: 原始涡粘系数
-            y_dist: 到壁面的距离
-            nu: 运动粘度
-            u_tau: 摩擦速度（可选）。提供时精确计算 y+；
-                   未提供时用涡粘系数估计。
-            
-        Returns:
-            nu_t_damped: 阻尼后的涡粘系数
-        """
-        A_plus = 25.0  # Van Driest 常数
-        
-        if u_tau is not None:
-            # 精确 y+ = y * u_tau / nu
-            y_plus = y_dist * np.abs(u_tau) / nu
-        else:
-            # 无摩擦速度时，用涡粘系数估计特征速度
-            nu_t_max = np.max(nu_t)
-            u_tau_est = np.sqrt(nu_t_max) if nu_t_max > 0 else 0.1
-            y_plus = y_dist * u_tau_est / nu
-        
-        # 阻尼函数
-        f_d = 1.0 - np.exp(-y_plus / A_plus)
-        
-        nu_t_damped = nu_t * f_d
-        
-        return nu_t_damped
-
-
-if __name__ == "__main__":
-    # 测试代码
-    np.random.seed(42)
-    
-    n_cells = 50
-    n_sps = 8
-    
-    # 创建测试速度场
-    u = np.random.rand(n_cells, n_sps) * 10.0
-    v = np.random.rand(n_cells, n_sps) * 10.0
-    w = np.random.rand(n_cells, n_sps) * 10.0
-    
-    # 模拟速度梯度张量
-    grad_u = np.random.rand(n_cells, n_sps, 3, 3) * 100.0
-    
-    # 网格尺度
-    delta = np.ones((n_cells, n_sps)) * 0.01
-    
-    # 测试 WALE 模型
-    print("Testing WALE model...")
-    wale = WALEModel(c_wale=0.325)
-    nu_t_wale = wale.compute_eddy_viscosity(grad_u, delta)
-    print(f"WALE nu_t: min={nu_t_wale.min():.6e}, max={nu_t_wale.max():.6e}")
-    
-    # 测试 Smagorinsky 模型
-    print("\nTesting Smagorinsky model...")
-    smago = SmagorinskyModel(c_s=0.1)
-    nu_t_smago = smago.compute_eddy_viscosity(grad_u, delta)
-    print(f"Smagorinsky nu_t: min={nu_t_smago.min():.6e}, max={nu_t_smago.max():.6e}")
-    
-    print("\nSGS models test completed.")

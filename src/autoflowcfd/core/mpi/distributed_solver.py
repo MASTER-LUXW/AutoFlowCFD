@@ -18,6 +18,8 @@ AutoFlowCFD V2.0 - 分布式 FRSolver
         solver.step(dt)
 """
 
+import os
+
 import numpy as np
 from typing import Optional
 from loguru import logger
@@ -419,6 +421,39 @@ class DistributedFRSolver:
         # `solver._dual_time_U_prev` 同一个约定）。
         self._dual_time_U_prev = None
 
+        # 自适应 CFL + 低马赫数伪时间预处理（2026-09-14 补齐）。
+        # 这两个机制此前在分布式路径上都不存在，因为它们都以"存在一个由
+        # CFL 数决定的逐单元局部步长"为前提，而这条路径当时用全局固定
+        # dt（被记作"已接受的简化"）。局部步长已补齐（见
+        # `_compute_distributed_local_time_step`），这两个机制随之接入，
+        # 语义与单机 `FRSolver` 完全一致：
+        #   * 控制器按**全局**残差范数更新（allreduce 之后的那个值），
+        #     所有 rank 因此得到同一个 CFL 数——这是分布式下唯一正确的
+        #     做法，按各自的局部残差更新会让各 rank 的 CFL 漂移、
+        #     破坏一致性；
+        #   * 预处理只在 SSP-RK2/RK3 下启用（DUAL_TIME 的物理时间导数项
+        #     与 IMEX 的残差拆分都需要单独推导 Gamma 的分配方式）；
+        #   * 环境变量 AFCFD_LOW_MACH_PRECOND / AFCFD_CFL_LEGACY 同样生效。
+        self._cfl_controller = None
+        if time_scheme in (TimeIntegrationScheme.SSP_RK2,
+                           TimeIntegrationScheme.SSP_RK3):
+            from autoflowcfd.core.time_integration.adaptive_cfl import (
+                AdaptiveCFLController,
+            )
+            self._cfl_controller = AdaptiveCFLController(
+                cfl_start=solver_kwargs.get('cfl_start', 0.1),
+                cfl_max=solver_kwargs.get('cfl_max', 0.5),
+            )
+        _env_pc = os.environ.get("AFCFD_LOW_MACH_PRECOND")
+        _req_pc = (bool(solver_kwargs.get('low_mach_precond', True))
+                   if _env_pc is None else (_env_pc == "1"))
+        self.low_mach_precond_enabled = _req_pc and time_scheme in (
+            TimeIntegrationScheme.SSP_RK2, TimeIntegrationScheme.SSP_RK3)
+        # 上一步的涡粘场（local 排列），供下一步的粘性 CFL 限制使用——
+        # 与单机 `_get_turbulent_viscosity_field` 读取湍流模型已存字段
+        # （即上一步的结果）是同一个时序。
+        self._prev_mu_t_local = None
+
         # 8. 同步
         barrier()
 
@@ -654,6 +689,39 @@ class DistributedFRSolver:
         )
         self._dual_time_U_prev = None
 
+        # 自适应 CFL + 低马赫数伪时间预处理（2026-09-14 补齐）。
+        # 这两个机制此前在分布式路径上都不存在，因为它们都以"存在一个由
+        # CFL 数决定的逐单元局部步长"为前提，而这条路径当时用全局固定
+        # dt（被记作"已接受的简化"）。局部步长已补齐（见
+        # `_compute_distributed_local_time_step`），这两个机制随之接入，
+        # 语义与单机 `FRSolver` 完全一致：
+        #   * 控制器按**全局**残差范数更新（allreduce 之后的那个值），
+        #     所有 rank 因此得到同一个 CFL 数——这是分布式下唯一正确的
+        #     做法，按各自的局部残差更新会让各 rank 的 CFL 漂移、
+        #     破坏一致性；
+        #   * 预处理只在 SSP-RK2/RK3 下启用（DUAL_TIME 的物理时间导数项
+        #     与 IMEX 的残差拆分都需要单独推导 Gamma 的分配方式）；
+        #   * 环境变量 AFCFD_LOW_MACH_PRECOND / AFCFD_CFL_LEGACY 同样生效。
+        self._cfl_controller = None
+        if time_scheme in (TimeIntegrationScheme.SSP_RK2,
+                           TimeIntegrationScheme.SSP_RK3):
+            from autoflowcfd.core.time_integration.adaptive_cfl import (
+                AdaptiveCFLController,
+            )
+            self._cfl_controller = AdaptiveCFLController(
+                cfl_start=package.get('cfl_start', 0.1),
+                cfl_max=package.get('cfl_max', 0.5),
+            )
+        _env_pc = os.environ.get("AFCFD_LOW_MACH_PRECOND")
+        _req_pc = (bool(package.get('low_mach_precond', True))
+                   if _env_pc is None else (_env_pc == "1"))
+        self.low_mach_precond_enabled = _req_pc and time_scheme in (
+            TimeIntegrationScheme.SSP_RK2, TimeIntegrationScheme.SSP_RK3)
+        # 上一步的涡粘场（local 排列），供下一步的粘性 CFL 限制使用——
+        # 与单机 `_get_turbulent_viscosity_field` 读取湍流模型已存字段
+        # （即上一步的结果）是同一个时序。
+        self._prev_mu_t_local = None
+
         barrier()
         return self
 
@@ -773,6 +841,51 @@ class DistributedFRSolver:
             f"Global total: {total_local} cells, {total_halo} halo."
         )
 
+    def _compute_distributed_local_time_step(self, U_local, mu_t_local=None,
+                                             return_physical_too: bool = False):
+        """逐单元局部 CFL 步长（2026-09-14 补齐，取代此前的全局固定 dt）。
+
+        此前这条路径用调用方传入的全局固定 dt 铺满所有单元，源码里记作
+        "已接受的简化"。那条"简化"有三重真实代价（步长被全场最苛刻单元
+        卡死、逐 SP 的几何/度量 CFL 保护完全失效、自适应 CFL 与低马赫数
+        预处理都无从生效），完整论证与实现见
+        `core/mpi/distributed_cfl.py` 模块文档。
+
+        需要一次额外的 halo 交换：局部 dt 的谱半径求和必须读到邻居单元
+        （含 halo）的速度与声速，这是这项功能的内在需求，不是可以省掉的
+        开销（相比之下 RK3 每个 stage 各有一次交换）。
+        """
+        from autoflowcfd.core.mpi.distributed_cfl import (
+            compute_distributed_local_time_step,
+        )
+        from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
+
+        dist_fc = self.dist_flat_face
+        U_extended = self.halo_exchange.exchange(U_local)
+        U_compact = U_extended[dist_fc.perm]
+        Q_compact = conserved_to_primitive(U_compact[..., :5])
+
+        # 几何量（jacobians/cell_volumes）复用 DistributedMeshAdapter 的
+        # 抽取逻辑——它已经处理好"传统模式 vs 完全分布式加载"两种索引
+        # 语义的区别（见该类文档），这里不重复那段判断。
+        from autoflowcfd.core.mpi.distributed_compute import DistributedMeshAdapter
+        adapter = DistributedMeshAdapter(self.partition, dist_fc, self.mesh, self.ops)
+
+        return compute_distributed_local_time_step(
+            U_compact, Q_compact, dist_fc, self.mesh,
+            jacobians=adapter.jacobians,
+            cell_volumes=adapter.cell_volumes,
+            n_local_cells=self.partition.n_local_cells,
+            mu_molecular=self.local_solver.mu_molecular,
+            freestream=self.local_solver.freestream,
+            cfl_controller=self._cfl_controller,
+            current_order=getattr(self, "current_order", self.order),
+            low_mach_precond_enabled=getattr(
+                self, "low_mach_precond_enabled", False),
+            mu_t_local=mu_t_local,
+            return_physical_too=return_physical_too,
+        )
+
     def step(self, dt: float) -> float:
         """执行一步时间推进（分布式版本）。
 
@@ -850,12 +963,24 @@ class DistributedFRSolver:
         # SST 湍流源项+输运（算子分裂，物理步开始时求值一次，见本方法
         # 文档）——用当前（上一步末尾的）状态，产出的 mu_t_field_compact
         # 供本步全部 RK 子阶段的粘性残差使用。
+        # 逐单元局部 CFL 步长（2026-09-14 取代全局固定 dt，见
+        # `_compute_distributed_local_time_step` 与
+        # core/mpi/distributed_cfl.py 模块文档）。
+        # `dt_mean_local` 是平均流用的（启用低马赫数预处理时按预处理
+        # 波速放大），`dt_phys_local` 是按物理波速那一份——湍流标量必须
+        # 用后者，与单机 `fr_solver/step.py` 里 `turb_dt = dt_physical`
+        # 完全一致（k/omega 的显式更新刻意没有 point-implicit 阻尼）。
+        U_local_now = self.state.get_local_U()
+        dt_mean_local, dt_phys_local = self._compute_distributed_local_time_step(
+            U_local_now, mu_t_local=self._prev_mu_t_local, return_physical_too=True,
+        )
+
         mu_t_field_compact = None
         if self.turb_model is not None:
             from autoflowcfd.core.mpi.distributed_turbulence import (
                 distributed_compute_turbulence_source_and_viscosity,
             )
-            dt_local = np.full((n_local, n_sps), dt)
+            dt_local = dt_phys_local
             mu_t_field_compact, self._turb_ramp_step = distributed_compute_turbulence_source_and_viscosity(
                 self.state.get_local_U()[..., :5], self.partition, self.halo_exchange,
                 self.turb_halo_exchange, self.dist_flat_face, self.mesh, self.ops,
@@ -878,8 +1003,8 @@ class DistributedFRSolver:
                 self.dist_flat_face, self.mesh, self.ops, self.sgs_model,
             )
 
-        def residual_func(U_flat_trial: np.ndarray) -> np.ndarray:
-            """TimeIntegrator 约定：dU/dt = -residual_func(U)。RK3 每个
+        def residual_func_raw(U_flat_trial: np.ndarray) -> np.ndarray:
+            """未经预处理的物理残差（TimeIntegrator 约定 dU/dt = -R）。RK3 每个
             stage 都会调用一次：对该 stage 的中间解重新做 halo 交换 +
             残差求值（halo 数据在每个 stage 之间会变化，不能复用上一个
             stage 交换到的邻居数据）。"""
@@ -916,16 +1041,71 @@ class DistributedFRSolver:
                 total_dudt = inviscid_residual + viscous_residual
             else:
                 total_dudt = inviscid_residual
-            return -total_dudt.reshape(n_local * n_sps, n_vars)
+            return -total_dudt
+
+        def residual_func(U_flat_trial: np.ndarray) -> np.ndarray:
+            """供时间积分器推进用：启用低马赫数预处理时返回 `Gamma R`。
+
+            Gamma 线性、逐点，作用在 R 上与作用在 dU/dtau 上等价；它
+            **必须**与上面按预处理波速取的 `dt_mean_local` 成对出现
+            （完整推导见 core/utils/preconditioning.py 模块末尾；只改
+            步长不改方程就是 2026-08-24 那次失稳）。
+            Gamma 需要的原始变量由 `apply_low_mach_preconditioner` 从
+            试探态算出的 Q 提供——这里显式转换，不依赖任何调用顺序上的
+            隐式副作用（与单机 CPU 路径复用 `state.Q` 的做法不同，
+            理由同 GPU 侧，见 core/gpu/gpu_preconditioning.py 文档）。
+            """
+            res = residual_func_raw(U_flat_trial)
+            if self.low_mach_precond_enabled:
+                from autoflowcfd.core.utils.preconditioning import (
+                    apply_low_mach_preconditioner,
+                )
+                U_trial = U_flat_trial.reshape(n_local, n_sps, n_vars)
+                Q_trial = conserved_to_primitive(U_trial[..., :5])
+                res = apply_low_mach_preconditioner(
+                    res, Q_trial, mach_ref, out=res)
+            return res.reshape(n_local * n_sps, n_vars)
 
         U_flat = self.state.get_local_U().reshape(n_local * n_sps, n_vars)
-        dt_local_flat = np.full(n_local * n_sps, dt)
+        dt_local_flat = dt_mean_local.reshape(n_local * n_sps)
+
+        # 模态滤波（2026-09-14 补齐）：单机 `fr_solver/step.py` 每个 RK
+        # stage 后都施加（`build_filter_func`），多 GPU 分布式也有
+        # `filter_func_gpu`——CPU 分布式此前是唯一没有施加的路径。它是
+        # P>=1 的稳定性机制，不是可选项（坍缩坐标/配置点法对高阶模态
+        # 混叠天然敏感，真实复现记录见 fr_solver/filter.py）。
+        # local 排列里棱柱/四面体交错，所以用按单元类型掩码分派的变体；
+        # 单元类型取自 `dist_fc.compact_cell_type`（0=棱柱/1=四面体，
+        # 紧凑排列），换回原生排列后切 local 段。
+        filter_func = None
+        if n_sps > 1:
+            from autoflowcfd.core.fr_solver.filter import (
+                build_filter_func_by_cell_type,
+            )
+            cct = self.dist_flat_face.compact_cell_type
+            cell_is_prism = (cct[self.dist_flat_face.inv_perm][:n_local] == 0)
+            filter_func = build_filter_func_by_cell_type(
+                self.ops, n_local, n_sps, cell_is_prism)
 
         # Stage 0 残差单独算一次：既用于收敛监控（与旧实现报告口径一致），
         # 也通过 residual0= 传给 _ssp_rk_stage_step 复用，避免它内部再重复
         # 算一次同样的 R(U^n)。
-        residual0 = residual_func(U_flat)
-        self.state.dU_dt[:n_local] = (-residual0).reshape(n_local, n_sps, n_vars)
+        # `residual0_raw` 是**物理**残差：收敛监控（state.dU_dt ->
+        # compute_global_residual_norm）与自适应 CFL 都必须用它，不能用
+        # 预处理值（Gamma 可逆、两者同时趋零，但量级不同，用预处理值会
+        # 让打印的残差与历史算例失去可比性）。与单机 step.py 同一分工。
+        residual0_raw = residual_func_raw(U_flat)
+        self.state.dU_dt[:n_local] = -residual0_raw
+        if self.low_mach_precond_enabled:
+            from autoflowcfd.core.utils.preconditioning import (
+                apply_low_mach_preconditioner,
+            )
+            residual0 = apply_low_mach_preconditioner(
+                residual0_raw, self.state.Q[:n_local], mach_ref,
+                out=residual0_raw,
+            ).reshape(n_local * n_sps, n_vars)
+        else:
+            residual0 = residual0_raw.reshape(n_local * n_sps, n_vars)
 
         # 真实 bug 修复（2026-09-02，见 __init__ 里 self._time_integrator
         # 构造处同一处说明）：此前这里无条件调用 `_ssp_rk_stage_step`，
@@ -939,18 +1119,34 @@ class DistributedFRSolver:
                 U_flat, residual_func, dt_local_flat, dt_physical=dt,
                 solution_prev=self._dual_time_U_prev,
                 max_inner_iter=self._time_integrator.dual_time_steps,
+                filter_func=filter_func,
             )
             self._dual_time_U_prev = U_flat.copy()
         else:
             U_new_flat = self._time_integrator._ssp_rk_stage_step(
                 U_flat, residual_func, dt_local_flat, p_floor=1.0, residual0=residual0,
+                filter_func=filter_func,
             )
 
         U_new_local = U_new_flat.reshape(n_local, n_sps, n_vars)
         self.state.U[:n_local] = U_new_local
         self.state.Q[:n_local] = conserved_to_primitive(U_new_local[..., :5])
 
-        return self.compute_global_residual_norm()
+        # 下一步的粘性 CFL 限制要用本步算出的涡粘（与单机读取湍流模型
+        # 已存字段是同一时序）。转成 local 排列缓存：mu_t_field_compact
+        # 在"棱柱在前"紧凑空间，必须先 inv_perm 换回原生排列再切 local
+        # （紧凑空间的前 n_local 段**不是** local 单元，见
+        # distributed_cfl.py 模块文档）。
+        if mu_t_field_compact is not None:
+            self._prev_mu_t_local = (
+                mu_t_field_compact[self.dist_flat_face.inv_perm][:n_local])
+
+        residual_norm = self.compute_global_residual_norm()
+        # 自适应 CFL 按**全局**残差范数更新：所有 rank 喂同一个值，因此
+        # 得到同一个 CFL 数（按各自局部残差更新会让 rank 间 CFL 漂移）。
+        if self._cfl_controller is not None:
+            self._cfl_controller.update(residual_norm)
+        return residual_norm
 
     def solve(self, n_steps: int, dt: float, output_interval: int = 100, checkpoint_callback=None,
               tol: float = 1e-6, phase_max_iter: Optional[int] = None,

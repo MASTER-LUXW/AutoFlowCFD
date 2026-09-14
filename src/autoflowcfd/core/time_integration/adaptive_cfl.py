@@ -11,10 +11,91 @@ AutoFlowCFD V2.0 - 稳态求解器自适应 CFL 控制器
     2. 五级调节策略：
        - grow：ratio < 0.9（残差快速下降），连续 5 步确认后 ×1.1
        - crawl：0.9 ≤ ratio < 0.95（缓慢收敛），连续 5 步确认后 ×1.05
-       - 死区：0.95 ≤ ratio ≤ 1.0，CFL 不变
+       - 死区：0.95 ≤ ratio ≤ 1.0 —— 单步比值看不出进展，改由
+         **窗口趋势判据**接管（见下方第 4 条），不再是"CFL 不变"
        - shrink(轻)：1.0 < ratio ≤ 1.1（轻微恶化），立即 ×0.9
        - shrink(重)：ratio > 1.1（明显恶化），立即 ×0.8
        所有调节均有 5 步冷却期，避免 CFL 振荡。
+    4. 窗口趋势放大（2026-09-14 新增，修一个真实的收敛速度缺陷）：
+       上面五个区间是按**瞬态**式的快速残差下降标定的（grow 要求单步
+       降 >10%）。但显式稳态迭代进入渐近段后，每步残差只降千分之几是
+       **正常且健康**的——79 万单元 cube_demo P1 实测每步 ratio≈0.99916
+       并持续单调下降，正好落在死区里，于是 CFL 被永久钉在 cfl_start
+       （实测 30 步全程 0.100），cfl_max=0.5 从来到不了，白白丢掉约 5 倍
+       步长。这直接是用户反馈"从开始计算到收敛要数万步"的一个成因。
+       修法：死区里改看**累计**趋势——若最近 trend_window 步的残差累计
+       下降超过 trend_threshold（默认 20 步累计降到 0.995 以下），说明
+       确实在收敛，只是慢，于是放大 CFL。任何一步恶化（ratio>1.0）都会
+       立即走 shrink 分支并清空趋势窗口，所以放大是单向试探、随时可退。
+       为什么放大 CFL 不会反过来推高残差：残差范数 ‖R(U)‖ 只依赖解 U、
+       不显含 dt；在稳定极限内加大 dt 只是沿同一下降方向走得更远，残差
+       降得更快，超出稳定极限才会上升——反馈符号天然正确，控制器因此能
+       自己找到稳定边界。
+    5. 轻度恶化需要连续确认（2026-09-14 新增，与第 4 条同一批、修的是
+       同一个"CFL 到不了上限"症状的另一半成因）：`shrink_mild` 原先对
+       **单步** ratio > 1.0 就立刻 ×0.9（只受 5 步冷却约束）。但稳态显式
+       迭代的残差范数并不单调——即使迭代稳定且在收敛，也约有一半的步
+       会出现小幅上升。于是 CFL 在任何带噪声的算例里单向棘轮下滑到
+       cfl_min 并卡住。真实实测（128 单元压力扰动算例，4000 步，已启用
+       第 4 条的趋势放大）：grow 触发 114 次、shrink_mild 触发 112 次，
+       净效果 1.1^114 × 0.9^112 ≈ 0.39，CFL 从 0.1 被压到下限 0.05；此前
+       79 万单元真实网格上 CFL 30 步内 0.1 → 0.053 的持续节流、以及另一
+       个算例里 CFL 卡在 0.05 再也回不来，都是同一机制。
+       现在轻度恶化要连续 mild_shrink_confirm_steps 步才收缩（与同函数
+       里 grow/crawl 一直要求的"连续 N 步确认"对齐，原先唯独这一支不
+       要求，是不对称的疏漏）。**重度**恶化（ratio > shrink_threshold，
+       NaN/inf 被规约成 +inf 也走这里）不受确认约束、仍然立即收缩——
+       真实失稳必须第一时间响应，这一条安全性不能让。
+       同批的第二处调整：趋势窗口只在 CFL **真的被调节**时清空，不再
+       对每个 ratio>1 的噪声步都清空——否则噪声会让窗口永远攒不满、
+       第 4 条的趋势放大形同废置；窗口判据本身用的是 20 步**累计**比值，
+       窗口内的个别上升步已经计入其中，不需要另外剔除。
+    6. 两个方向都由同一个窗口判据仲裁（2026-09-14 同批第三处）：只做完
+       第 4、5 条之后实测仍然不够——128 单元算例里 CFL 先爬到 0.2975
+       （残差 4000 步降 150 倍，修复前同步数只有 67 倍），随后触发 18 次
+       **重度** shrink（CFL 真的越界了）又塌回下限 0.05 卡住，净效果
+       1.1^183 × 0.9^138 × 0.8^18 ≈ 0.32 仍是负的。根源是**方向不对称**：
+       收缩最快每 cooldown_steps(5) 步一次、幅度 ×0.8/×0.9；放大最快每
+       trend_window(20) 步一次、幅度 ×1.1。收缩的"事件速率 × 幅度"是放大
+       的数倍，于是任何带噪声的区段都单向棘轮下滑，最终卡在 cfl_min
+       （比 cfl_start 还低）再也回不来。
+       改法：**轻度**恶化除了连续确认，还必须窗口内没有累计下降才收缩
+       ——两个方向于是共用同一个时间尺度和同一个判据，棘轮效应从机制上
+       消失。窗口未攒满时退回纯连续确认，保留调节后头 20 步的快速保护。
+       **重度**恶化始终不受任何窗口/确认约束（安全底线）。
+    8. 软上限：记住失败过的 CFL（2026-09-14，由 79 万单元真实网格长程
+       对照的数据逼出来的，是本批最后一处）。做完第 4~7 条之后，真实
+       网格上出现了一个新的、更根本的问题：控制器**不记得自己在哪个
+       CFL 上失败过**，于是每隔约 trend_window 步就重新探过稳定边界一次，
+       每次探过都要付一段残差过冲的代价。实测（同一个 P1 检查点、
+       预处理开启、400 步）：CFL 由 0.100 经 7 次 grow_trend 爬到 0.195，
+       在第 161 步起失稳、残差累计涨 9% 后于第 168 步被拉回 0.175；
+       随后又爬到 0.174 再次过冲、退到 0.156……残差长期在 3.2e8 附近
+       churn，而**CFL 冻结在 0.100 的对照**同期稳步降到 2.961e8。也就是
+       说，只有第 4~7 条时这套机制在这个算例上是**净负**的——每次探过
+       边界的损失超过大步长的收益。
+       修法：每次发生收缩时把"软上限"设为 `ceiling_backoff * 收缩前的
+       CFL`（默认 0.95），此后放大不得越过它；上限随每次失败几何式下降，
+       因此从上方收敛到稳定边界并停住，不再周期性穿越。取"收缩前"而不是
+       "收缩后"的值，是为了让上限贴着边界而不是一步退到远低于边界处。
+       阶数切换（`reset()`）时软上限作废——那是换了一个离散问题，旧的
+       稳定边界不再适用。
+       还有一个必须堵住的漏洞：窗口在每次 CFL 调节后清空，于是放大之后
+       有 trend_window 步的"盲区"。第一版让盲区退回"连续 3 步确认"，实测
+       噪声在盲区内稳定凑出 3 连升，每次放大都被紧随其后的收缩抵消，
+       CFL 在 0.050 <-> 0.055 之间无限往复（单元测试直接复现）。现在盲区
+       内只对**持续**恶化反应（连续 trend_window//2 步）——噪声连不出
+       这么多步，真实的单调上升 10 步内仍会被抓到，比这更快的失稳本来
+       就走 severe 分支。
+    7. 迟滞带（2026-09-14 同批第四处，也是最后一处）：第 6 条让两个方向
+       共用窗口判据后，实测 CFL 不再塌到下限，但会在稳定边界上形成
+       **极限环**——128 单元算例稳定后 CFL 在 0.106 <-> 0.120 之间每约
+       26 步往复一次（grow_trend 与 shrink_mild 交替），因为两者用的是
+       同一个阈值 0.995（累计 < 0.995 放大、>= 0.995 收缩），边界上必然
+       抖动。现在收缩改用独立的 trend_shrink_threshold（默认 1.0，即窗口
+       **确实变差**才收缩），与放大阈值之间留出 0.995~1.0 的迟滞带：带内
+       （窗口在下降但幅度不够）CFL 保持不动。这既消掉了极限环，也让 CFL
+       调节日志从"每 26 步一条"回到只在真正需要时才出现。
     3. 与 dual.py 的双时间步自适应逻辑独立——两者面向不同的迭代结构
        （稳态每步一次 RK3 vs 双时间每步多次内迭代），参数和策略不同。
 
@@ -29,7 +110,9 @@ AutoFlowCFD V2.0 - 稳态求解器自适应 CFL 控制器
 from __future__ import annotations
 
 import math
-from typing import List, Tuple
+import os
+from collections import deque
+from typing import Deque, List, Tuple
 
 from loguru import logger
 
@@ -47,7 +130,9 @@ class AdaptiveCFLController:
              连续 5 步确认后 CFL ×1.1（grow）
            - 0.9 ≤ ratio < 0.95（缓慢收敛）：
              连续 5 步确认后 CFL ×1.05（crawl）
-           - 0.95 ≤ ratio ≤ 1.0（死区）：CFL 不变
+           - 0.95 ≤ ratio ≤ 1.0（死区）：单步比值无信息，交给窗口趋势
+             判据（最近 trend_window 步累计下降 < trend_threshold 则
+             ×trend_factor），见模块文档第 4 条
            - 1.0 < ratio ≤ 1.1（轻微恶化）：立即 CFL ×0.9（shrink）
            - ratio > 1.1（明显恶化）：立即 CFL ×0.8（shrink）
         3. 冷却期：两次 CFL 调节之间至少间隔 cooldown_steps 步，
@@ -73,6 +158,13 @@ class AdaptiveCFLController:
         crawl_factor: float = 1.05,
         crawl_confirm_steps: int = 5,
         mild_shrink_factor: float = 0.9,
+        trend_window: int = 20,
+        trend_threshold: float = 0.995,
+        trend_factor: float = 1.1,
+        mild_shrink_confirm_steps: int = 3,
+        trend_shrink_threshold: float = 1.0,
+        ceiling_backoff: float = 0.95,
+        ceiling_release_steps: int = 100,
     ):
         """初始化自适应 CFL 控制器。
 
@@ -95,6 +187,39 @@ class AdaptiveCFLController:
             crawl_factor: 慢速放大因子（1.05 = 每次放大 5%）。
             crawl_confirm_steps: 慢速放大前需连续满足条件的步数。
             mild_shrink_factor: 轻度缩小因子（0.9 = 每次缩小 10%，1.0 < ratio ≤ 1.1）。
+            trend_window: 窗口趋势判据的窗口长度（步）。取 20 是因为渐近段
+                每步只降千分之几，单步比值被死区吞掉，必须跨足够多步才
+                能把真实趋势与噪声分开。
+            trend_threshold: 窗口内累计残差比的上界。0.995 对应"20 步至少
+                累计下降 0.5%"，比实测的健康值（0.99916^20≈0.983）宽松
+                一个量级，因此不会把停滞误判成进展。
+            trend_factor: 窗口趋势成立时的放大因子（1.1，与 growth_factor
+                同——每次只放大 10%，且每次放大后窗口清空重新积累，所以
+                从 0.1 爬到 0.5 约需 17 次、~340 步，属于单向温和试探）。
+            mild_shrink_confirm_steps: **轻度**恶化（1.0 < ratio <= 1.1）需要
+                连续满足的步数。取 3 的理由见模块文档第 5 条：单步残差上升
+                在稳态显式迭代里是正常噪声，据此立刻收缩会让 CFL 在任何
+                残差略带噪声的算例里单向棘轮下滑到下限。重度恶化
+                （ratio > shrink_threshold，含 NaN/inf）**不受这个确认约束**，
+                仍然立即收缩——那是真实失稳信号，必须第一时间响应。
+            ceiling_release_steps: 连续这么多步没有发生任何收缩时，把软
+                上限**放开一档**（乘 1/ceiling_backoff）。没有这条释放
+                机制，带噪声的收敛轨迹里偶发的收缩会把上限不断压低、
+                放大再也回不去——实测（噪声 sigma=0.4%、均值每步降 0.05%
+                的 6000 步轨迹）CFL 会一路滑到 0.034，比 cfl_start=0.1
+                还低，等于把第 5/6 条修掉的棘轮效应换了个形式又引回来。
+                默认 100（= 5 倍 trend_window）：贴着稳定边界时收缩频繁、
+                上限稳稳压住；真正安静的区段才缓慢放开。
+            ceiling_backoff: 每次发生收缩时，把"软上限"设为
+                `ceiling_backoff * 收缩前的 CFL`（默认 0.95），此后放大
+                不得越过这个上限。理由见模块文档第 8 条：没有它，控制器
+                会周期性地重新探过稳定边界，每次探过都要付一段残差过冲
+                的代价——79 万单元真实网格实测因此变成净负收益。
+            trend_shrink_threshold: 轻度收缩的**窗口**阈值，与 trend_threshold
+                之间构成迟滞带（默认 0.995 ~ 1.0）。两个方向共用一个阈值时
+                CFL 会在稳定边界上无限抖动——实测 128 单元算例稳定后 CFL
+                在 0.106 <-> 0.120 之间每约 26 步往复一次（见模块文档第 7
+                条）。落在带内（窗口有下降但幅度不够）时 CFL 保持不动。
         """
         # 参数
         self.cfl_start = cfl_start
@@ -111,6 +236,28 @@ class AdaptiveCFLController:
         self.crawl_factor = crawl_factor
         self.crawl_confirm_steps = crawl_confirm_steps
         self.mild_shrink_factor = mild_shrink_factor
+        self.trend_window = trend_window
+        self.trend_threshold = trend_threshold
+        self.trend_factor = trend_factor
+        self.mild_shrink_confirm_steps = mild_shrink_confirm_steps
+        self.trend_shrink_threshold = trend_shrink_threshold
+        self.ceiling_backoff = ceiling_backoff
+        self.ceiling_release_steps = ceiling_release_steps
+
+        # 环境变量 `AFCFD_CFL_LEGACY=1`：整体退回 2026-09-14 之前的行为
+        # （死区里 CFL 完全不动 + 轻度恶化单步立即收缩），供现场排查与
+        # 受控 A/B 用。与 `AFCFD_LOW_MACH_PRECOND` 同一原则："把这个新
+        # 机制单独关掉再跑一遍"必须是一条随时可用的路径、不需要改代码。
+        # 这条口子不是可选的锦上添花：本次做真实网格 CFL 对照时，"修复
+        # 前"的基线只能靠"进程在改动落盘之前启动"这种巧合来获得，没有
+        # 干净的 A/B 手段——这就是需要它的直接证据。
+        self.legacy_mode = os.environ.get("AFCFD_CFL_LEGACY") == "1"
+        if self.legacy_mode:
+            logger.warning(
+                "[AdaptiveCFL] AFCFD_CFL_LEGACY=1：已退回 2026-09-14 之前的"
+                "调节策略（死区不调节 + 轻度恶化单步立即收缩）。稳态收敛"
+                "步数会明显增多，仅用于对照/排查。"
+            )
     
         # 状态
         self.cfl_number: float = cfl_start
@@ -118,8 +265,16 @@ class AdaptiveCFLController:
         self._step_count: int = 0
         self._consecutive_good: int = 0      # 连续"快速下降"步数计数
         self._consecutive_crawl: int = 0     # 连续"缓慢收敛"步数计数
+        self._consecutive_mild_bad: int = 0  # 连续"轻度恶化"步数计数
+        # 软上限：放大不得越过它。None 表示尚未发生过收缩、只受 cfl_max
+        # 约束。见模块文档第 8 条。
+        self._cfl_ceiling = None
+        self._steps_since_shrink: int = 0
         self._steps_since_last_change: int = 0  # 距上次 CFL 调节的步数
         self._history: List[Tuple[int, float, float]] = []  # (step, cfl, residual)
+        # 窗口趋势判据的残差滑动窗口。长度 trend_window+1，使 [0] 与 [-1]
+        # 正好相隔 trend_window 步。任何恶化或一次放大都会清空它。
+        self._res_window: Deque[float] = deque(maxlen=max(2, trend_window + 1))
 
     def update(self, current_residual: float) -> float:
         """根据当前步残差更新 CFL，返回下一步使用的 CFL 值。
@@ -141,7 +296,17 @@ class AdaptiveCFLController:
         """
         self._step_count += 1
         self._steps_since_last_change += 1
+        self._steps_since_shrink += 1
+        # 软上限的缓慢释放（见模块文档第 8 条与 ceiling_release_steps）
+        if (self._cfl_ceiling is not None
+                and self._steps_since_shrink >= self.ceiling_release_steps):
+            self._cfl_ceiling = min(
+                self.cfl_max, self._cfl_ceiling / self.ceiling_backoff)
+            self._steps_since_shrink = 0
+            if self._cfl_ceiling >= self.cfl_max - 1e-12:
+                self._cfl_ceiling = None   # 已放开到 cfl_max，不再需要
         self._history.append((self._step_count, self.cfl_number, current_residual))
+        self._res_window.append(current_residual)
 
         # 首步：无前值可比，仅记录
         if self._prev_residual <= 0:
@@ -168,18 +333,21 @@ class AdaptiveCFLController:
             # 快速下降（ratio < 0.9）→ grow
             self._consecutive_good += 1
             self._consecutive_crawl = 0
+            self._consecutive_mild_bad = 0
         elif ratio < self.crawl_threshold:
             # 缓慢收敛（0.9 ≤ ratio < 0.95）→ crawl
             self._consecutive_crawl += 1
             self._consecutive_good = 0
+            self._consecutive_mild_bad = 0
             if (self._consecutive_crawl >= self.crawl_confirm_steps
                     and self._steps_since_last_change >= self.cooldown_steps):
                 old_cfl = self.cfl_number
                 self.cfl_number = min(
-                    self.cfl_number * self.crawl_factor, self.cfl_max
+                    self.cfl_number * self.crawl_factor, self._growth_cap()
                 )
                 self._consecutive_crawl = 0
                 self._steps_since_last_change = 0
+                self._res_window.clear()
                 if abs(self.cfl_number - old_cfl) > 1e-10:
                     logger.info(
                         f"[AdaptiveCFL] Step {self._step_count}: "
@@ -192,13 +360,79 @@ class AdaptiveCFLController:
             # 恶化：分轻度 (1.0 < ratio ≤ 1.1) 和重度 (ratio > 1.1)
             self._consecutive_good = 0
             self._consecutive_crawl = 0
-            factor = (self.shrink_factor if ratio > self.shrink_threshold
-                      else self.mild_shrink_factor)
-            label = "shrink" if ratio > self.shrink_threshold else "shrink_mild"
+            severe = ratio > self.shrink_threshold
+            factor = self.shrink_factor if severe else self.mild_shrink_factor
+            label = "shrink" if severe else "shrink_mild"
+            # **轻度恶化需要连续确认**（2026-09-14，见模块文档第 5 条）：
+            # 单步残差上升在稳态显式迭代里是正常噪声，旧实现对它立刻
+            # ×0.9，使 CFL 在任何残差略带噪声的算例里单向棘轮下滑到下限
+            # ——真实实测（128 单元压力扰动算例，4000 步）：grow 触发 114
+            # 次、shrink_mild 触发 112 次，净效果 1.1^114 × 0.9^112 ≈ 0.39，
+            # CFL 从 0.1 一路被压到下限 0.05。同函数内 grow/crawl 本来都
+            # 要求连续 5 步确认，唯独这一支不要求，是不对称的疏漏。
+            # 重度恶化（含 NaN/inf，ratio=+inf）不受确认约束、仍然立即
+            # 收缩——那是真实失稳，必须第一时间响应。
+            if severe:
+                self._consecutive_mild_bad = 0
+            else:
+                self._consecutive_mild_bad += 1
+            # 轻度恶化还要过**窗口判据**（2026-09-14 同批第三处，见模块
+            # 文档第 6 条）：只要窗口内（自上次 CFL 调节以来的
+            # trend_window 步）残差**确有累计下降**，就说明当前 CFL 整体
+            # 是在起作用的，个别连续几步的小幅上升不构成收缩理由。窗口
+            # 还没攒满时退回纯连续确认（保留调节后头 20 步的快速保护）。
+            window_full = (self._res_window.maxlen is not None
+                           and len(self._res_window) >= self._res_window.maxlen)
+            # 迟滞带（见模块文档第 7 条）：放大要求窗口累计 < trend_threshold
+            # (0.995)，收缩要求窗口累计 > trend_shrink_threshold (1.0)，两者
+            # 之间留出空档。共用一个阈值时 CFL 必然在稳定边界上无限抖动。
+            window_worsened = False
+            if window_full:
+                r_old, r_new = self._res_window[0], self._res_window[-1]
+                window_worsened = (
+                    math.isfinite(r_old) and math.isfinite(r_new) and r_old > 0
+                    and r_new / r_old > self.trend_shrink_threshold)
+            if severe or self.legacy_mode:
+                confirmed = True
+            elif window_full:
+                # 与放大同一个时间尺度、同一个窗口量，只是阈值留了迟滞
+                confirmed = (window_worsened
+                             and self._consecutive_mild_bad
+                             >= self.mild_shrink_confirm_steps)
+            else:
+                # 窗口盲区（刚调节过、还没攒满 trend_window 步）：这里如果
+                # 退回"连续 3 步确认"，噪声会稳定地在盲区内凑出 3 连升，
+                # 于是每次放大后马上被收缩抵消——实测就是 CFL 在
+                # 0.050 <-> 0.055 之间无限往复（见模块文档第 6 条）。
+                # 盲区内只对**持续**恶化反应：连续 trend_window//2 步。
+                # 噪声几乎不可能连出这么多步，而真实的单调上升 10 步内
+                # 就会被抓到；更快的失稳本来就走 severe 分支。
+                confirmed = (self._consecutive_mild_bad
+                             >= max(self.mild_shrink_confirm_steps,
+                                    self.trend_window // 2))
+            if not confirmed:
+                self._prev_residual = current_residual
+                return self.cfl_number
+            self._consecutive_mild_bad = 0
             if self._steps_since_last_change >= self.cooldown_steps:
                 old_cfl = self.cfl_number
+                # 软上限：记住"这个 CFL 失败过"，此后放大不得越过它
+                # （见模块文档第 8 条）。取收缩前的值而不是收缩后的值，
+                # 这样上限随每次失败几何式下降、从上方收敛到稳定边界，
+                # 而不是一步跳到远低于边界的位置。
+                # 软上限**不低于 cfl_start**：那是调用方断言过稳定的
+                # 保守起始值（见 cfl_start 参数文档），把"能否回到起点"
+                # 也禁掉就是把第 5/6 条修掉的棘轮换个形式引回来（实测
+                # 会让带噪声的收敛轨迹滑到 0.034 << cfl_start=0.1）。
+                # 注意这只约束**放大**：真实持续恶化时 cfl_number 仍会
+                # 被收缩到 cfl_min 以下界限，不受软上限影响。
+                ceiling = max(old_cfl * self.ceiling_backoff, self.cfl_start)
+                self._cfl_ceiling = (ceiling if self._cfl_ceiling is None
+                                     else min(self._cfl_ceiling, ceiling))
+                self._steps_since_shrink = 0
                 self.cfl_number = max(self.cfl_number * factor, self.cfl_min)
                 self._steps_since_last_change = 0
+                self._res_window.clear()
                 # 真实 bug 修复（2026-08-31，用户直接观察到真实日志报出
                 # "CFL 0.050 → 0.050 (shrink_mild, ratio=1.001)"发现）：
                 # CFL 已经触到下限 cfl_min 时，`max(cfl*factor, cfl_min)`
@@ -217,11 +451,18 @@ class AdaptiveCFLController:
             self._prev_residual = current_residual
             return self.cfl_number
         else:
-            # 死区（0.95 ≤ ratio ≤ 1.0）：CFL 不变。同时复位连续计数，
-            # 否则 good/crawl 步隔着死区步交替也能凑满确认步数，与文档的
-            # "连续 N 步确认"语义不符。
+            # 死区（0.95 ≤ ratio ≤ 1.0）：单步比值分不出"慢速收敛"和
+            # "停滞"，所以不按单步比值动 CFL；但也不能就此不动——显式
+            # 稳态迭代的渐近段本来就长期停在这个区间（实测每步
+            # ratio≈0.999 且持续单调下降），旧实现在这里直接 return，
+            # CFL 于是被永久钉在 cfl_start，是一个真实的收敛速度缺陷。
+            # 改由窗口趋势判据接管，见 `_maybe_grow_on_trend`。
+            # 连续计数照旧复位：否则 good/crawl 步隔着死区步交替也能凑满
+            # 确认步数，与文档的"连续 N 步确认"语义不符。
             self._consecutive_good = 0
             self._consecutive_crawl = 0
+            self._consecutive_mild_bad = 0
+            self._maybe_grow_on_trend()
             self._prev_residual = current_residual
             return self.cfl_number
 
@@ -230,9 +471,11 @@ class AdaptiveCFLController:
         if (self._consecutive_good >= self.growth_confirm_steps
                 and self._steps_since_last_change >= self.cooldown_steps):
             old_cfl = self.cfl_number
-            self.cfl_number = min(self.cfl_number * self.growth_factor, self.cfl_max)
+            self.cfl_number = min(self.cfl_number * self.growth_factor,
+                                  self._growth_cap())
             self._consecutive_good = 0
             self._steps_since_last_change = 0
+            self._res_window.clear()
             if abs(self.cfl_number - old_cfl) > 1e-10:
                 logger.info(
                     f"[AdaptiveCFL] Step {self._step_count}: CFL {old_cfl:.3f} → "
@@ -241,6 +484,49 @@ class AdaptiveCFLController:
 
         self._prev_residual = current_residual
         return self.cfl_number
+
+    def _growth_cap(self) -> float:
+        """放大的实际上限：`cfl_max` 与软上限取小。
+
+        软上限（`_cfl_ceiling`）由每次收缩时设置，见模块文档第 8 条。
+        """
+        if self._cfl_ceiling is None:
+            return self.cfl_max
+        return min(self.cfl_max, self._cfl_ceiling)
+
+    def _maybe_grow_on_trend(self) -> None:
+        """窗口趋势判据：最近 `trend_window` 步累计确有下降则放大 CFL。
+
+        只在死区（单步比值 0.95~1.0）里调用——其余四个区间本来就已经
+        各自动作。完整动机见模块文档第 4 条。
+
+        要求窗口必须**攒满**才判断：窗口每次放大后清空，所以两次放大
+        之间至少相隔 trend_window 步，放大速率因此自带上限（默认 20 步
+        最多 ×1.1），不需要额外的振荡抑制。冷却期仍然叠加生效，保证与
+        shrink/crawl 之间也不会挤在一起。
+        """
+        if self.legacy_mode:
+            return   # 见 __init__ 里 AFCFD_CFL_LEGACY 的说明
+        if self._res_window.maxlen is None or len(self._res_window) < self._res_window.maxlen:
+            return
+        if self._steps_since_last_change < self.cooldown_steps:
+            return
+        r_old, r_new = self._res_window[0], self._res_window[-1]
+        if not (math.isfinite(r_old) and math.isfinite(r_new)) or r_old <= 0:
+            return
+        if r_new / r_old >= self.trend_threshold:
+            return   # 窗口内没有实质进展：停滞或原地震荡，不放大
+
+        old_cfl = self.cfl_number
+        self.cfl_number = min(self.cfl_number * self.trend_factor, self._growth_cap())
+        self._steps_since_last_change = 0
+        self._res_window.clear()
+        if abs(self.cfl_number - old_cfl) > 1e-10:
+            logger.info(
+                f"[AdaptiveCFL] Step {self._step_count}: CFL {old_cfl:.3f} → "
+                f"{self.cfl_number:.3f} (grow_trend, {self.trend_window} 步累计 "
+                f"ratio={r_new / r_old:.5f})"
+            )
 
     def reset(self):
         """重置控制器状态。
@@ -253,6 +539,11 @@ class AdaptiveCFLController:
             f"(CFL was {self.cfl_number:.3f})"
         )
         self.cfl_number = self.cfl_start
+        self._res_window.clear()
+        self._consecutive_mild_bad = 0
+        # 阶数切换 = 换了一个离散问题，旧的稳定边界不再适用，软上限作废
+        self._cfl_ceiling = None
+        self._steps_since_shrink = 0
         self._prev_residual = 0.0
         self._step_count = 0
         self._consecutive_good = 0

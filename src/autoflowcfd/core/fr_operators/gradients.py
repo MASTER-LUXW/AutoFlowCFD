@@ -47,38 +47,61 @@ def compute_physical_gradient(field: np.ndarray, mesh, ops) -> np.ndarray:
     # 原因/验证方式见 fr_volume_contract.py 模块文档——生产网格上
     # `compute_physical_gradient` 的 einsum 是体积项性能优化里的另一个
     # 主要热点（py-spy 采样证实）。
-    n_prism = mesh.n_prism_cells
-    grad_comp = np.zeros((n_cells, n_sps, 3, n_field_vars))
-    if n_prism > 0:
-        D2 = np.ascontiguousarray(np.transpose(ops.D_3d_prism, (0, 2, 1))).reshape(n_sps * 3, n_sps)
-        grad_comp[:n_prism] = contract_shared_operator_1axis(D2, field[:n_prism]).reshape(n_prism, n_sps, 3, n_field_vars)
-    if n_cells > n_prism:
-        n_tet = n_cells - n_prism
-        # native 四面体（路径C）：`D_3d_tet`（坍缩坐标专属微分矩阵）对
-        # native 单纯形基节点毫无意义（native 节点不是坍缩坐标张量积
-        # 采样点），必须改用已经零填充到全局 n_sps 宽度的
-        # `D_native_tet_padded`（Part8 文档"零填充块对角"不变量：填充行
-        # 的散度贡献恒为 0，与这里"物理梯度"用途——同样是对体积节点场
-        # 求导——完全兼容，不需要额外处理）。这是 Part8 native 支持范围
-        # 此前遗漏的一处：`compute_physical_gradient` 是粘性残差
-        # （viscous_flux.py）以及 SST/DES 湍流输运（transport.py）梯度
-        # 计算共用的唯一入口，此前一直无条件读取 `D_3d_tet`，对 native
-        # 网格会产生完全错误的梯度（用坍缩坐标基函数的导数系数去解释
-        # native 节点上的场值）。
-        tet_ops = ops.D_native_tet_padded if getattr(ops, "D_native_tet_padded", None) is not None else ops.D_3d_tet
-        D2 = np.ascontiguousarray(np.transpose(tet_ops, (0, 2, 1))).reshape(n_sps * 3, n_sps)
-        grad_comp[n_prism:] = contract_shared_operator_1axis(D2, field[n_prism:]).reshape(n_tet, n_sps, 3, n_field_vars)
     # 链式法则转物理空间：grad_phys[c,s,v,n] = sum_m inv_jac[c,s,m,n] * grad_comp[c,s,m,v]
     # 输出维度顺序 (n_cells,n_sps,n_field_vars,3)，与代码库既有 grad_U 约定一致。
-    # 两个操作数都依赖 (c,s)，是逐点批量小矩阵乘，用 np.matmul 替代
-    # einsum（把 grad_comp 的 (m,v) 两轴转置成 (v,m) 再与 inv_jacs 的
-    # (m,n) 相乘，结果正是 (v,n)），验证见 fr_volume_contract.py 同批
-    # 验证脚本，随机数据下与原 einsum 逐位一致（diff=0.0）。
-    # 融合 kernel（性能优化 2026-09-13，见 volume_contract.py::
-    # grad_computational_to_physical 文档：原 `np.matmul(np.swapaxes(...))`
-    # 要先物化一份非连续转置副本、再做 630 万次 (V,3)@(3,3) 微型 gemm，
-    # 开销主导且不随核数并行）。对 m 求和顺序一致，结果逐位相同。
-    grad_phys = grad_computational_to_physical(grad_comp, inv_jacs)
+    # 计算用 `grad_computational_to_physical` 融合 kernel（性能优化
+    # 2026-09-13，见 volume_contract.py 同名函数文档：原
+    # `np.matmul(np.swapaxes(grad_comp,-1,-2), inv_jacs)` 要先物化一份
+    # 非连续转置副本、再做数百万次 (V,3)@(3,3) 微型 gemm，开销主导且
+    # 不随核数并行）。对 m 求和顺序与 np.matmul 一致，结果逐位相同。
+    #
+    # **按单元分块**（内存优化 2026-09-14，为 P2 OOM 排查新增）：本函数
+    # 此前先为全场物化 `grad_comp`（(n_cells,n_sps,3,V)），再整体转物理
+    # 空间，于是 `grad_comp` + 收缩临时结果 + 输出 `grad_phys` 三份大数组
+    # 同时存活。79 万单元 P2（n_sps=27）、V=5 时每份约 2.56GiB，实测峰值
+    # 约 7.2GiB——而这条链每一步都是**逐单元独立**的（收缩只在单元内的
+    # SPs 之间、链式法则只在同一 (cell,SP) 上），完全可以切块：现在只有
+    # 输出是全场数组，块内临时量按 32768 单元计只有约 106MiB×2。P2/V=5
+    # 下峰值从约 7.2GiB 降到约 2.8GiB（省约 4.4GiB）。分块不改变任何
+    # 逐单元的计算顺序与形状，结果与全场版**逐位相同**（见
+    # tests/unit/test_fr_gradients.py 与
+    # tests/unit/test_perf_fusion_kernels.py 的等价性用例）。
+    # prism/tet 两段分开切块：两者用不同的微分矩阵，且单元存储本来就是
+    # prism 在前 tet 在后，块不会跨类型。
+    n_prism = mesh.n_prism_cells
+    grad_phys = np.empty((n_cells, n_sps, n_field_vars, 3))
+    D2_prism = None
+    if n_prism > 0:
+        D2_prism = np.ascontiguousarray(
+            np.transpose(ops.D_3d_prism, (0, 2, 1))).reshape(n_sps * 3, n_sps)
+    # native 四面体（路径C）：`D_3d_tet`（坍缩坐标专属微分矩阵）对
+    # native 单纯形基节点毫无意义（native 节点不是坍缩坐标张量积
+    # 采样点），必须改用已经零填充到全局 n_sps 宽度的
+    # `D_native_tet_padded`（Part8 文档"零填充块对角"不变量：填充行
+    # 的散度贡献恒为 0，与这里"物理梯度"用途——同样是对体积节点场
+    # 求导——完全兼容，不需要额外处理）。这是 Part8 native 支持范围
+    # 此前遗漏的一处：`compute_physical_gradient` 是粘性残差
+    # （viscous_flux.py）以及 SST/DES 湍流输运（transport.py）梯度
+    # 计算共用的唯一入口，此前一直无条件读取 `D_3d_tet`，对 native
+    # 网格会产生完全错误的梯度（用坍缩坐标基函数的导数系数去解释
+    # native 节点上的场值）。
+    D2_tet = None
+    if n_cells > n_prism:
+        tet_ops = (ops.D_native_tet_padded
+                   if getattr(ops, "D_native_tet_padded", None) is not None else ops.D_3d_tet)
+        D2_tet = np.ascontiguousarray(
+            np.transpose(tet_ops, (0, 2, 1))).reshape(n_sps * 3, n_sps)
+
+    _GRAD_CHUNK_CELLS = 32768
+    for seg_lo, seg_hi, D2 in ((0, n_prism, D2_prism), (n_prism, n_cells, D2_tet)):
+        if D2 is None or seg_hi <= seg_lo:
+            continue
+        for c0 in range(seg_lo, seg_hi, _GRAD_CHUNK_CELLS):
+            c1 = min(c0 + _GRAD_CHUNK_CELLS, seg_hi)
+            gc = contract_shared_operator_1axis(D2, field[c0:c1]).reshape(
+                c1 - c0, n_sps, 3, n_field_vars)
+            grad_phys[c0:c1] = grad_computational_to_physical(gc, inv_jacs[c0:c1])
+            del gc  # 块内用完即弃，下一轮迭代变量重新绑定
     return grad_phys
 
 

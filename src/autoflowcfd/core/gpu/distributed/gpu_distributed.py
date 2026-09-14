@@ -17,6 +17,7 @@ AutoFlowCFD V2.0 - 多 GPU + MPI 分布式求解器
     mpirun -np 4 autoflowcfd solve steady <grid> --backend gpu --multi-gpu
 """
 
+import os
 import time
 import numpy as np
 from typing import Optional, Dict, Any
@@ -143,6 +144,8 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         turb_model: str = "NONE",
         turbulence_intensity: float = 0.01,
         viscosity_ratio: float = 5.0,
+        cfl_start: Optional[float] = None,
+        cfl_max: Optional[float] = None,
     ):
         """初始化多 GPU 分布式求解器。
 
@@ -156,6 +159,10 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
             device_id: GPU 设备 ID（默认 rank % n_gpus）
             time_scheme: 时间积分方案
             cfl: CFL 数
+            cfl_start, cfl_max: 自适应 CFL 的初始值/上限（与单机
+                FRSolver/GPUFRSolver 同名参数同一语义）。None 时
+                cfl_start 退回 `cfl`、cfl_max 退回 max(cfl, 0.5)，
+                这样不传这两个参数的既有调用方行为不变。
             mu_molecular: 分子动力粘度
             rho_inf, vel_inf, p_inf: 自由来流条件
         """
@@ -356,6 +363,28 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
 
         # 时间积分器
         self.time_integrator = GPUTimeIntegrator(scheme=time_scheme, cfl=cfl)
+        # 自适应 CFL + 低马赫数伪时间预处理（2026-09-14 补齐）：与 CPU
+        # 分布式同一批改动、同一套语义。两者都以"存在由 CFL 数决定的
+        # 逐单元局部步长"为前提，而这条路径此前用全局固定 dt（被记作
+        # "已接受的简化"）。局部步长已补齐（见
+        # `_compute_local_time_step_gpu` 的重写说明）。
+        # 控制器按**全局**残差范数更新，所有 rank 得到同一个 CFL 数。
+        self._cfl_controller = None
+        if str(time_scheme) in ("ssp_rk2", "ssp_rk3") or getattr(
+                time_scheme, "value", None) in ("ssp_rk2", "ssp_rk3"):
+            from autoflowcfd.core.time_integration.adaptive_cfl import (
+                AdaptiveCFLController,
+            )
+            self._cfl_controller = AdaptiveCFLController(
+                cfl_start=cfl_start if cfl_start is not None else cfl,
+                cfl_max=cfl_max if cfl_max is not None else max(cfl, 0.5),
+            )
+        _env_pc = os.environ.get("AFCFD_LOW_MACH_PRECOND")
+        _req_pc = True if _env_pc is None else (_env_pc == "1")
+        self.low_mach_precond_enabled = _req_pc and (
+            str(time_scheme) in ("ssp_rk2", "ssp_rk3")
+            or getattr(time_scheme, "value", None) in ("ssp_rk2", "ssp_rk3"))
+
         # DUAL_TIME 模式下 BDF2 需要的上一物理时间层状态（2026-09-02，
         # 见 step() 里 DUAL_TIME 分支说明）——None 表示尚未跑过一个
         # 物理步，退化为 BDF1，与单机 GPU `gpu_solver.py` 同一个约定。
@@ -728,62 +757,124 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         residual_native = self._unpermute_from_compact(residual_compact)
         return residual_native[: self.partition.n_local_cells]
 
-    def _compute_local_time_step_gpu(self):
-        """GPU 计算局部 CFL 步长。"""
+    def _compute_local_time_step_gpu(self, return_physical_too: bool = False):
+        """逐单元局部 CFL 步长（2026-09-14 重写）。
+
+        **这个方法此前是坏的，而且坏在两处**，只是从未被 `step()` 调用过
+        （`step()` 当时用调用方传入的全局固定 dt，记作"已接受的简化"），
+        所以两个 bug 一直潜伏：
+
+        1. 它读 `self.mesh.face_connectivity`（**全局**面连接关系，
+           owner/neighbor 是全局单元编号）去索引 `self.U_gpu`（现在只有
+           local+halo 紧凑大小），是与 #1 修复同一类的索引空间不一致；
+        2. 它把 `dist_fc` 当 `fc` 传给 `_extract_p0_face_geometry`，而
+           `DistributedFlatFaceGeometry` 没有 `.normal`/`.area` 属性——
+           一旦被调用必定 `AttributeError`（本轮在 CPU 侧实现分布式局部
+           CFL 时实测触发过同一个错误）。
+
+        另有一处被记作"与既有实现保持一致，不在此扩大范围"的简化：只用
+        SP0 算谱半径。逐 SP 的几何/度量 CFL 限制（`dt_geometric`）正是
+        为了防住坍缩坐标下同一单元内不同 SP 的 det(J) 相差几百倍导致的
+        局部刚性失稳（项目记忆 `tet_collapsed_coord_anisotropy`），只取
+        SP0 等于把这层保护削掉大部分。现在与单机 GPU 路径一致：按所有 SP
+        逐个算、取单元内最小值。
+
+        实现方式与 CPU 分布式一致：面积/法向取**与单机同一个几何量**
+        （全局 `FRFaceConnectivity` 的逐面 area/normal，按
+        `partition.local_faces` 切片），owner/neighbor 用紧凑索引空间，
+        分区边界面与"halo"类面都按内部面处理（两侧累加谱半径）。完整
+        论证见 `core/mpi/distributed_cfl.py` 模块文档。
+
+        Returns:
+            return_physical_too=False: (n_compact,) 紧凑排列的 dt；
+            True: (dt_mean_flow, dt_physical)。**注意返回的是紧凑排列**，
+            调用方按 `inv_perm` 换回原生排列后再切 local 段。
+        """
         cp = get_cupy()
-        fc = self.mesh.face_connectivity
-        n_faces = fc.n_faces
+        dist_fc = self.dist_flat_face
+        n_faces = dist_fc.n_faces
 
-        owner_cell = cp.asarray(fc.owner_cell)
-        neighbor_cell = cp.asarray(
-            np.where(fc.is_boundary, 0, fc.neighbor_cell)
+        owner_cell = cp.asarray(dist_fc.owner_cell_local)
+        neighbor_raw = np.asarray(dist_fc.neighbor_cell_local)
+        # 与 CPU 侧 _DistributedFaceConnectivityView 完全同一套语义：
+        # 只有物理边界面（以及邻居索引无效的面）算边界；分区边界面与
+        # "halo"类面（三个掩码全 False、本 rank 只持有 neighbor 侧）都
+        # 有真实邻居，必须按内部面两侧累加。
+        is_bnd_np = dist_fc.physical_boundary_mask | (neighbor_raw < 0)
+        is_boundary = cp.asarray(is_bnd_np)
+        neighbor_cell = cp.asarray(np.where(neighbor_raw < 0, 0, neighbor_raw))
+
+        from autoflowcfd.core.mpi.distributed_cfl import (
+            extract_local_face_area_normal,
         )
-        is_boundary = cp.asarray(fc.is_boundary)
-
-        # 面法向和面积：每步热路径性能修复，理由/验证方式同
-        # gpu_solver.py::_compute_local_time_step_gpu（同一个真实复现、
-        # 同一处遗漏，见该方法文档）。
-        from autoflowcfd.core.fr_residual.inviscid_p0 import _extract_p0_face_geometry
-        normal, area_w = _extract_p0_face_geometry(self.mesh.face_flux_points, fc, n_faces)
-        normals_gpu = cp.asarray(normal)
-        areas_gpu = cp.asarray(area_w)
+        area_np, normal_np = extract_local_face_area_normal(dist_fc, self.mesh)
+        norms = np.linalg.norm(normal_np, axis=1, keepdims=True)
+        unit_normal_np = normal_np / np.maximum(norms, 1e-30)
+        normals_gpu = cp.asarray(np.ascontiguousarray(unit_normal_np))
+        areas_gpu = cp.asarray(np.ascontiguousarray(area_np))
+        assert areas_gpu.shape[0] == n_faces
 
         cell_volumes = self.mesh_data.get('cell_volumes')
         if cell_volumes is None:
-            cell_volumes = cp.asarray(self.mesh.get_all_cell_volumes())
+            raise RuntimeError(
+                "mesh_data 缺少 cell_volumes——紧凑网格视图构造有误，"
+                "不能静默回退到全局 cell volumes（索引空间不同）")
 
-        # 几何/度量 CFL 限制（与 gpu_solver.py::_compute_local_time_step_gpu
-        # 同一机制，见 compute_local_cfl_step_gpu 参数文档；此前 GPU 分布式
-        # 路径完全没有这一限制，可能重新触发 CPU 侧已修复过的坍缩坐标
-        # 度量刚性发散）。本路径只用 SP0（与上方 self.U_gpu 直接使用、不
-        # 按 SP 循环的既有实现保持一致，不在此扩大范围引入 per-SP 循环）。
         det_jacs_gpu = self.mesh_data.get('det_jacs')
         adj_j_gpu = self.mesh_data.get('adj_j')
-        det_jacs_sp0 = det_jacs_gpu[:, 0] if det_jacs_gpu is not None else None
-        metric_flux_scale_sp0 = None
+        metric_flux_scale_gpu = None
         if adj_j_gpu is not None:
-            metric_flux_scale_gpu = getattr(self, '_metric_flux_scale_gpu_cache', None)
-            # 形状校验（不能只判断 is None）：见 gpu_solver.py 同名缓存的
-            # 第四次评审第二轮复核说明，CPU 侧 _get_metric_flux_scale
-            # 曾因漏比对 n_sps 维度复现过跨阶数切换后返回陈旧缓存的真实
-            # bug，这里保持同等防御水位。
+            cached = getattr(self, '_metric_flux_scale_gpu_cache', None)
             expected_shape = adj_j_gpu.shape[:2]
-            if metric_flux_scale_gpu is None or metric_flux_scale_gpu.shape != expected_shape:
+            if cached is None or cached.shape != expected_shape:
                 adj_row_norms = cp.linalg.norm(adj_j_gpu, axis=-1)
-                metric_flux_scale_gpu = cp.sum(adj_row_norms, axis=-1)
-                self._metric_flux_scale_gpu_cache = metric_flux_scale_gpu
-            metric_flux_scale_sp0 = metric_flux_scale_gpu[:, 0]
+                cached = cp.sum(adj_row_norms, axis=-1)
+                self._metric_flux_scale_gpu_cache = cached
+            metric_flux_scale_gpu = cached
 
-        return compute_local_cfl_step_gpu(
-            self.U_gpu, cell_volumes,
-            owner_cell, neighbor_cell, is_boundary,
-            normals_gpu, areas_gpu,
-            None, None,
-            cfl=self.time_integrator.cfl,
-            poly_order=getattr(self, "order", 0),
-            det_jacs_sp=det_jacs_sp0,
-            metric_flux_scale_sp=metric_flux_scale_sp0,
-        )
+        n_compact = self.U_gpu.shape[0]
+        n_sps = self.U_gpu.shape[1]
+        precond = getattr(self, "low_mach_precond_enabled", False)
+        dt_all = cp.zeros((n_compact, n_sps), dtype=cp.float64)
+        dt_phys_all = cp.zeros((n_compact, n_sps), dtype=cp.float64) if precond else None
+
+        for sp in range(n_sps):
+            U_sp = self.U_gpu[:, sp:sp + 1, :]
+            det_sp = det_jacs_gpu[:, sp] if det_jacs_gpu is not None else None
+            mfs_sp = (metric_flux_scale_gpu[:, sp]
+                      if metric_flux_scale_gpu is not None else None)
+            out_sp = compute_local_cfl_step_gpu(
+                U_sp, cell_volumes,
+                owner_cell, neighbor_cell, is_boundary,
+                normals_gpu, areas_gpu,
+                None, None,
+                cfl=self._current_cfl(),
+                poly_order=getattr(self, "order", 0),
+                det_jacs_sp=det_sp,
+                metric_flux_scale_sp=mfs_sp,
+                mach_ref=(self.freestream["mach_ref"] if precond else None),
+                return_physical_too=precond,
+            )
+            if precond:
+                dt_all[:, sp], dt_phys_all[:, sp] = out_sp
+            else:
+                dt_all[:, sp] = out_sp
+
+        dt_mean = cp.min(dt_all, axis=1)
+        if not return_physical_too:
+            return dt_mean
+        dt_phys = cp.min(dt_phys_all, axis=1) if precond else dt_mean
+        return dt_mean, dt_phys
+
+    def _current_cfl(self) -> float:
+        """当前 CFL 数：有自适应控制器时用它，否则退回固定值。
+
+        与单机 GPU `GPUFRSolver._current_cfl` / CPU 侧 cfl.py 同一逻辑。
+        控制器按**全局**残差范数更新（见 `step()` 末尾），所有 rank 因此
+        得到同一个 CFL 数。
+        """
+        c = getattr(self, "_cfl_controller", None)
+        return c.cfl_number if c is not None else self.time_integrator.cfl
 
     def _compute_total_residual_gpu(self, mu_t_field=None):
         """计算总残差（无粘 + 粘性），先执行 halo 交换。
@@ -833,17 +924,13 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         # 展平/reshape self.U_gpu——self.U_gpu 现在只有 n_local 个单元，
         # 用全局尺寸 reshape 会形状不匹配崩溃。改为统一使用 n_local。
         #
-        # 局部 CFL 步长：与 CPU 版 DistributedFRSolver.step() 同一个
-        # 已明确接受的简化（该文件模块文档："分布式路径目前用全局固定
-        # 步长，不做单机路径那种逐 cell 局部 CFL 时间步"）——不调用
-        # `_compute_local_time_step_gpu()`：那个方法读 `self.mesh.
-        # face_connectivity`（完整全局面连接关系，owner/neighbor 是
-        # 全局单元编号）去索引 `self.U_gpu`（现在是 n_local 大小、
-        # partition.local_cells 自身顺序），这是与本次 #1 修复同一类的
-        # 全局/local+halo 压缩索引空间不一致问题，尚未解决（见该方法
-        # 文档新增的说明）；直接复用调用方传入的 `dt`（物理时间步长），
-        # 对所有 rank/cell 一致，不做自适应步长，是与 CPU 分布式路径
-        # 一致的、已被接受的简化，不是本次新引入的简化。
+        # 逐单元局部 CFL 步长（2026-09-14）：此前这里直接铺用调用方传入
+        # 的全局固定 `dt`，并把它记作"与 CPU 分布式路径一致的、已被接受
+        # 的简化"。用户明确指出本项目不接受简化，本轮与 CPU 分布式同批
+        # 补齐——`_compute_local_time_step_gpu` 已重写（修掉两处潜伏 bug
+        # 与"只用 SP0"的简化，见该方法文档），这里改用它。
+        # 返回值是**紧凑排列**（棱柱在前），按 inv_perm 换回原生排列后
+        # 切 local 段才能与 `self.U_gpu` 对齐。
         # 真实 bug 修复（2026-09-02，与 CPU 分布式 `DistributedFRSolver.
         # step` 同一处修复、同一个理由——用户明确要求"不允许出现完成度
         # 不是100%的功能点"后排查发现）：此前这里无论 `self.time_
@@ -856,7 +943,11 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         # 再调用既有 `_compute_total_residual_gpu`（自带 halo 交换）的
         # 残差闭包，直接复用，不需要另起一套残差组装逻辑。
         if self.time_integrator.scheme == "dual_time":
-            mu_t_field = self._compute_turbulence_source_distributed(dt)
+            # DUAL_TIME 下预处理不启用，局部 dt 只有一份；湍流仍用它
+            # （物理波速那一份）。
+            _dtm = self._compute_local_time_step_gpu()
+            _dt_turb = float(cp.mean(_dtm[self._inv_perm_gpu][:n_local]))
+            mu_t_field = self._compute_turbulence_source_distributed(_dt_turb)
             U_flat = self.U_gpu.reshape(n_local * n_sps, 5)
 
             def _spatial_residual(U_flat_trial):
@@ -869,7 +960,12 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
                     self.U_gpu = saved_U
                 return (-res).reshape(n_local * n_sps, 5)
 
-            pseudo_dt = cp.full((n_local * n_sps,), dt, dtype=cp.float64)
+            # 内层伪时间迭代的局部加速步长：与单机一致用局部 CFL 步长
+            # （`dt` 仍然是真正的物理时间步长，通过 dt_physical= 传入）。
+            dt_mean_c = self._compute_local_time_step_gpu()
+            dt_mean_local = dt_mean_c[self._inv_perm_gpu][:n_local]
+            pseudo_dt = cp.broadcast_to(
+                dt_mean_local[:, None], (n_local, n_sps)).reshape(n_local * n_sps)
             max_inner_iter = getattr(self.time_integrator, 'dual_time_steps', 5)
             U_new_flat = self.time_integrator.step_dual_time(
                 U_flat, _spatial_residual, pseudo_dt, dt_physical=dt,
@@ -882,9 +978,15 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
             residual_norm = self._global_residual_norm(final_res_flat)
             self.residual_history.append(residual_norm)
             self.iteration += 1
+            self._update_cfl_controller(residual_norm)
             return residual_norm
 
-        dt_flat = cp.full((n_local * n_sps, 1), dt, dtype=cp.float64)
+        dt_mean_c, dt_phys_c = self._compute_local_time_step_gpu(
+            return_physical_too=True)
+        dt_mean_local = dt_mean_c[self._inv_perm_gpu][:n_local]
+        dt_phys_local = dt_phys_c[self._inv_perm_gpu][:n_local]
+        dt_flat = cp.broadcast_to(
+            dt_mean_local[:, None], (n_local, n_sps)).reshape(n_local * n_sps, 1)
 
         # RK 系数表
         scheme = self.time_integrator.scheme
@@ -897,15 +999,40 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         # 上一步末尾——的状态，与 CPU 分布式 SST 同一个时序，见
         # distributed_solver.py::step 文档）。turb_model_gpu 为 None
         # （turbulence_model='none'）时恒返回 None。
-        mu_t_field = self._compute_turbulence_source_distributed(dt)
+        # 湍流标量用**物理**波速算出的那一份 dt（见
+        # gpu_distributed_init.py::_compute_turbulence_source_distributed
+        # 第 5 步的说明与单机 step.py 的 `turb_dt = dt_physical`）。
+        mu_t_field = self._compute_turbulence_source_distributed(
+            float(cp.mean(dt_phys_local)))
 
         U_flat = self.U_gpu.reshape(n_local * n_sps, 5)
         U0 = U_flat.copy()
 
+        def _precond(dudt_flat, U_state_flat):
+            """施加低马赫数预处理：L = Gamma * (-R) = Gamma * dU/dt。
+
+            Gamma 线性、逐点，作用在 dU/dt 上与作用在残差上等价（见
+            core/utils/preconditioning.py 模块末尾）。它**必须**与上面
+            按预处理波速取的 `dt_flat` 成对出现——只改步长不改方程就是
+            2026-08-24 那次失稳。未启用时原样返回。
+            残差范数用的仍是**未预处理**的 `resN_flat`（物理残差），与
+            单机/CPU 分布式同一分工。
+            """
+            if not self.low_mach_precond_enabled:
+                return dudt_flat
+            from autoflowcfd.core.gpu.gpu_preconditioning import (
+                apply_low_mach_preconditioner_gpu,
+            )
+            L3 = dudt_flat.reshape(n_local, n_sps, 5)
+            out = apply_low_mach_preconditioner_gpu(
+                L3, U_state_flat.reshape(n_local, n_sps, 5),
+                self.freestream["mach_ref"], out=L3)
+            return out.reshape(n_local * n_sps, 5)
+
         # === Stage 0: 初始残差 ===
         res0 = self._compute_total_residual_gpu(mu_t_field=mu_t_field)
         res0_flat = res0.reshape(n_local * n_sps, 5)
-        L0 = -res0_flat
+        L0 = _precond(-res0_flat, U0)
 
         # === Stage 1 ===
         U_stage1 = U0 + dt_flat * L0
@@ -919,12 +1046,13 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
             residual_norm = self._global_residual_norm(res0_flat)
             self.residual_history.append(residual_norm)
             self.iteration += 1
+            self._update_cfl_controller(residual_norm)
             return residual_norm
 
         # === Stage 2 ===
         res1 = self._compute_total_residual_gpu(mu_t_field=mu_t_field)
         res1_flat = res1.reshape(n_local * n_sps, 5)
-        L1 = -res1_flat
+        L1 = _precond(-res1_flat, U_stage1)
         U_stage2 = (alpha[1][0] * U0 + alpha[1][1] * U_stage1 + beta[1] * dt_flat * L1)
         enforce_positivity_gpu(U_stage2)
         if self.filter_func_gpu is not None:
@@ -935,12 +1063,13 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
             residual_norm = self._global_residual_norm(res1_flat)
             self.residual_history.append(residual_norm)
             self.iteration += 1
+            self._update_cfl_controller(residual_norm)
             return residual_norm
 
         # === Stage 3 (RK3) ===
         res2 = self._compute_total_residual_gpu(mu_t_field=mu_t_field)
         res2_flat = res2.reshape(n_local * n_sps, 5)
-        L2 = -res2_flat
+        L2 = _precond(-res2_flat, U_stage2)
         U_stage3 = (alpha[2][0] * U0 + alpha[2][1] * U_stage1 +
                     alpha[2][2] * U_stage2 + beta[2] * dt_flat * L2)
         enforce_positivity_gpu(U_stage3)
@@ -951,7 +1080,19 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         residual_norm = self._global_residual_norm(res2_flat)
         self.residual_history.append(residual_norm)
         self.iteration += 1
+        self._update_cfl_controller(residual_norm)
         return residual_norm
+
+    def _update_cfl_controller(self, residual_norm: float) -> None:
+        """用**全局**残差范数更新自适应 CFL 控制器。
+
+        必须用全局值：所有 rank 因此得到同一个 CFL 数，进而得到一致的
+        局部步长缩放。按各自的局部残差更新会让 rank 间 CFL 漂移，
+        破坏分布式一致性。
+        """
+        c = getattr(self, "_cfl_controller", None)
+        if c is not None:
+            c.update(residual_norm)
 
     def _global_residual_norm(self, res_flat) -> float:
         """MPI 全局残差归约。

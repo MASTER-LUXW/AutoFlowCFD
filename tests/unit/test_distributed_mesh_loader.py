@@ -646,30 +646,34 @@ class TestDistributedFRSolverFromFullyDistributedPackage:
         solver.step(dt)
         U_distributed = solver.state.U[:n_cells].copy()
 
-        # 单机参照：直接用同一套 TimeIntegrator._ssp_rk_stage_step +
-        # compute_inviscid_residual_fr/compute_viscous_residual，与
-        # DistributedFRSolver.step() 内部逐字同一个算法（约定：
-        # dU/dt=-R(U)）。
-        def residual_func(U_flat):
-            U_full = U_flat.reshape(n_cells, n_sps, 5)
-            r_inv = compute_inviscid_residual_fr(
-                U_full, mesh, ops, mach_ref=mach_ref,
-                boundary_ghost_provider=boundary_ghost_provider,
-            )
-            Q_full = conserved_to_primitive(U_full[..., :5])
-            r_visc = compute_viscous_residual(
-                U_full, Q_full, ops, mesh, mu=mu, boundary_ghost_provider=boundary_ghost_provider,
-            )
-            return -(r_inv + r_visc).reshape(n_cells * n_sps, 5)
+        # 单机参照：直接用**真正的** FRSolver.step()。
+        #
+        # 参照方式已更新（2026-09-14）：此前这里自己拼一套
+        # `TimeIntegrator._ssp_rk_stage_step` + 残差函数，并把
+        # `dt_flat = np.full(..., dt)` 当步长——那是当时分布式路径的真实
+        # 行为（全局固定 dt，被记作"已接受的简化"）。那条简化已经补齐：
+        # 分布式现在用与单机**同一个** `cfl.py::compute_local_time_step`
+        # 算逐单元局部步长，并且同样施加模态滤波与低马赫数预处理。手工
+        # 拼参照就必须把这三件事逐一复刻一遍，既冗余又容易与生产代码
+        # 失去同步——直接用真正的单机 `FRSolver.step()` 作参照，判据更强
+        # （覆盖步长/滤波/预处理全部环节），也不会再有这种同步风险。
+        from autoflowcfd.core.fr_solver.solver import FRSolver
 
-        integrator = TimeIntegrator(scheme=TimeIntegrationScheme.SSP_RK3, dt=1.0)
-        U_flat0 = U0.reshape(n_cells * n_sps, 5)
-        dt_flat = np.full(n_cells * n_sps, dt)
-        residual0 = residual_func(U_flat0)
-        U_new_flat = integrator._ssp_rk_stage_step(
-            U_flat0, residual_func, dt_flat, p_floor=1.0, residual0=residual0,
+        single = FRSolver(
+            mesh, order=mesh.order, turb_model_name="none",
+            time_scheme=TimeIntegrationScheme.SSP_RK3,
+            mu_molecular=mu, rho_inf=freestream["rho_inf"],
+            vel_inf=freestream["vel_inf"], p_inf=freestream["p_inf"],
         )
-        U_single = U_new_flat.reshape(n_cells, n_sps, 5)
+        single.order_continuation_enabled = False
+        # mach_ref 在本用例里被显式指定为 0.2（不是从 vel_inf/p_inf 推出来
+        # 的那个值），分布式包里存的就是它——参照必须用同一个，否则
+        # AUSM+up 的低马赫修正与 Gamma 的 beta^2 下限都会不一致。
+        single.freestream["mach_ref"] = mach_ref
+        single.state.U[...] = U0
+        single.state._update_primitives()
+        single.step(dt)
+        U_single = single.state.U.copy()
 
         np.testing.assert_allclose(U_distributed, U_single, rtol=1e-9, atol=1e-9)
 

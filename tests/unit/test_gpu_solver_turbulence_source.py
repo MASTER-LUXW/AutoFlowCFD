@@ -199,7 +199,16 @@ def test_compute_turbulence_source_gpu_matches_cpu_single_machine(turb_model_nam
     stub._update_production_ramp_gpu = types.MethodType(
         _GPUSolverIOMixin._update_production_ramp_gpu, stub
     )
-    stub._compute_local_time_step_gpu = lambda: np.full(n_cells, dt_used)
+    # 签名随 2026-09-14 低马赫数预处理接入 GPU 而变化：湍流场更新必须
+    # 取**物理**波速算出的那一份 dt（`return_physical_too=True` 的第二个
+    # 返回值），不能跟着平均流的预处理步长放大约 7 倍——k/omega 的显式
+    # 更新刻意没有 point-implicit 阻尼。替身这里两份都给同一个常量，
+    # 与 CPU 参照严格对齐，仍然满足本测试"逐位对照 SST 更新公式"的目的。
+    def _dt_stub(return_physical_too=False):
+        dt_arr = np.full(n_cells, dt_used)
+        return (dt_arr, dt_arr) if return_physical_too else dt_arr
+
+    stub._compute_local_time_step_gpu = _dt_stub
 
     mu_t_gpu = _GPUSolverIOMixin.compute_turbulence_source_gpu(stub)
 

@@ -272,8 +272,13 @@ class _GPUSolverIOMixin:
                 self, grad_vel=grad_vel,
             )
 
-        dt_local = self._compute_local_time_step_gpu()
-        dt_mean = cp.mean(dt_local)
+        # 湍流标量必须用**物理**波速算出的那一份 dt（2026-09-14，低马赫数
+        # 预处理接入 GPU 时同步）：启用预处理后平均流的 dt 按预处理波速
+        # 放大约 7 倍，而 k/omega 的显式更新刻意没有做 point-implicit
+        # 阻尼（见 turbulence/sst.py::update_fields 文档），不能跟着放大。
+        # 与 CPU 侧 step.py 里 `turb_dt = dt_physical` 同一处理。
+        _, dt_physical = self._compute_local_time_step_gpu(return_physical_too=True)
+        dt_mean = cp.mean(dt_physical)
         self.turb_model_gpu.update_fields_gpu(
             float(dt_mean), dk_dt, domega_dt,
             transport_k=transport_k, transport_omega=transport_omega,

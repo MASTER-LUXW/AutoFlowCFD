@@ -77,6 +77,7 @@ class PrecompactedMeshData:
         self, det_jacs, inv_jacs, det_jacs_fine, inv_jacs_fine,
         cell_volumes, sps_coords, cell_types,
         n_prism_cells, n_points_1d, n_sps_per_cell, n_sps_per_cell_fine,
+        face_area=None, face_normal=None,
     ):
         self.n_cells = det_jacs.shape[0]  # compact（local+halo）大小
         self.n_prism_cells = n_prism_cells
@@ -96,6 +97,18 @@ class PrecompactedMeshData:
         # 见类文档"哨兵值说明"一节。
         self.face_connectivity = None
         self.face_flux_points = self._FACE_FLUX_POINTS_SENTINEL
+
+        # 逐面 area/normal（2026-09-14 新增）：本 rank 局部面那一段，由
+        # root 按 `partition.local_faces` 从全局 `FRFaceConnectivity` 切好
+        # 后随包下发。**这是逐单元局部 CFL 步长的必需输入**——局部 dt 的
+        # 谱半径求和是逐面的，而本对象刻意不持有全局 face_connectivity。
+        # 这两个数组很小（n_local_faces×1 + n_local_faces×3 个 double），
+        # 与本类"只持有 local+halo 那一份"的内存目标不冲突。
+        # 为什么必须用与单机同一个几何量（而不是从 base_flat 的逐 flux
+        # point 量现算）：见 core/mpi/distributed_cfl.py::
+        # _DistributedFaceConnectivityView 文档。
+        self.face_area = face_area
+        self.face_normal = face_normal
 
 
 def build_fully_distributed_rank_package(
@@ -220,12 +233,28 @@ def build_fully_distributed_rank_package(
         if getattr(mesh, 'cell_types', None) is not None else None
     )
 
+    # 逐面 area/normal（2026-09-14）：按 partition.local_faces 从全局
+    # FRFaceConnectivity 切出本 rank 那一段，随包下发——逐单元局部 CFL
+    # 步长的必需输入（本对象刻意不持有全局 face_connectivity），见
+    # PrecompactedMeshData.face_area 字段注释。
+    _lf = partition.local_faces
+    _fc_global = face_connectivity if face_connectivity is not None else getattr(
+        mesh, 'face_connectivity', None)
+    if _fc_global is None or getattr(_fc_global, 'area', None) is None:
+        raise ValueError(
+            "root 侧需要完整的 face_connectivity（含 area/normal）才能为各 "
+            "rank 切出局部面几何——这是逐单元局部 CFL 步长的必需输入，"
+            "不能静默回退到全局固定步长（被禁止的简化）")
+    face_area_local = np.ascontiguousarray(_fc_global.area[_lf])
+    face_normal_local = np.ascontiguousarray(_fc_global.normal[_lf])
+
     precompacted_mesh = PrecompactedMeshData(
         det_jacs=det_jacs, inv_jacs=inv_jacs,
         det_jacs_fine=det_jacs_fine, inv_jacs_fine=inv_jacs_fine,
         cell_volumes=cell_volumes, sps_coords=sps_coords, cell_types=cell_types,
         n_prism_cells=dist_fc.base_flat.n_prism,
         n_points_1d=mesh.n_points_1d, n_sps_per_cell=n_sps, n_sps_per_cell_fine=n_sps_fine,
+        face_area=face_area_local, face_normal=face_normal_local,
     )
 
     # 边界条件：`boundary_ghost_provider_global` 只需要构建一次（root

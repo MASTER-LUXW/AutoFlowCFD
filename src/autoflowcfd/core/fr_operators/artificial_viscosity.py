@@ -28,13 +28,25 @@ Galerkin Methods") 传感器的局部人工粘性——这个传感器看的不�
 参数）——复用已经过充分验证的 BR1 面耦合粘性通量组装机制，不新建一条
 独立的扩散残差路径。
 
-已知的范围限制（如实记录，非隐藏）：Persson & Peraire 原始方法是对*全部*
-守恒变量（含质量/连续性方程）叠加人工扩散项；本实现只通过动量/能量方程
-既有的粘性应力/热传导通道施加，不直接扩散密度——这是许多实际 DG/FR
-实现采用的简化（复用已验证的粘性耦合机制而不新增一条质量扩散通道），
-真实 cube_demo 残差分布诊断显示密度变化幅度（~2%）远小于速度/压力
-（后者是本次要压制的主要目标），这个简化预期影响有限，但如果传感器
-将来发现密度本身有显著欠分辨率内容，这个限制会成为后续改进方向。
+**原先的范围限制已补齐（2026-09-14）**：Persson & Peraire 原始方法对
+*全部*守恒变量（含质量/连续性方程）叠加人工扩散项；本实现最初只通过
+动量/能量方程既有的粘性应力/热传导通道施加，不直接扩散密度
+（`viscous_physical_flux` 的质量分量 G[...,0] 恒为 0），当时把这一点
+记作"许多实际 DG/FR 实现采用的简化"。用户明确指出本项目不接受简化，
+现已补上缺的那一项：`FRSolver._artificial_mass_diffusion_residual`
+把 `+div(epsilon * grad(rho))` 加进连续性方程。
+
+实现选择（为什么不改粘性通量本身）：AV 默认关闭，没有理由为它给所有
+运行的 `viscous_physical_flux_batch` 热路径增加参数与分支。而
+`div(eps*grad(rho))` 本身就是一个标量扩散算子，直接复用湍流输运已经
+验证过的 BR1 面耦合标量扩散装配
+（`turbulence/transport.py::compute_scalar_diffusion_residual`，它返回的
+就是 `+div(Gamma*grad(phi))`，与 dU/dt 的符号约定一致）。AV 关闭时这段
+完全不执行，零开销。
+
+性质：散度形式 -> 严格守恒；均匀流场下 grad(rho)=0 -> 该项恒为 0，
+不破坏自由流场保持性。两条都有测试钉住
+（tests/unit/test_artificial_viscosity_mass_diffusion.py）。
 
 公式来源：Persson & Peraire (2006) 原始传感器公式 + mirgecom
 （Illinois/DOE 现役生产级 DG 代码）文档给出的精确数值实现细节

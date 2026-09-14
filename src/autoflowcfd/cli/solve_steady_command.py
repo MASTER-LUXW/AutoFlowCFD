@@ -332,6 +332,13 @@ def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_it
             # --turbulence-model 无论填什么都被静默丢弃、恒定跑层流，
             # 终端打印的 Turbulence 行却仍显示用户输入的模型名。
             turb_model=turbulence_model.upper(),
+            # 真实缺口修复（2026-09-14）：`--cfl-start/--cfl-max` 此前只
+            # 到得了 CPU 的 FRSolver，GPU 路径连自适应 CFL 控制器都没有、
+            # 恒用固定 CFL。GPUFRSolver 现在有了控制器（见
+            # core/gpu/solver/gpu_solver.py 里 _cfl_controller 的注释），
+            # 这两个 CLI 选项必须一并透传，否则又是一个"选项在 GPU 下被
+            # 静默丢弃"的陷阱（与上面 turb_model 那处同类）。
+            cfl_start=cfl_start, cfl_max=cfl_max,
         )
 
         try:

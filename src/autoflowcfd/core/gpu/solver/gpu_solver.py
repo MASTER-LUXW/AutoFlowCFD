@@ -17,6 +17,7 @@ AutoFlowCFD V2.0 - GPU FRSolver
     result = solver.solve(max_iter=1000, dt=1e-4, tol=1e-6)
 """
 
+import os
 import time
 import numpy as np
 from typing import Optional, Dict, Any
@@ -66,6 +67,9 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         turb_model: str = "NONE",
         turbulence_intensity: float = 0.01,
         viscosity_ratio: float = 5.0,
+        low_mach_precond: bool = True,
+        cfl_start: Optional[float] = None,
+        cfl_max: Optional[float] = None,
     ):
         """初始化 GPU FRSolver。
 
@@ -79,6 +83,13 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
             cfl: CFL 数
             rho_inf, vel_inf, p_inf: 自由来流条件
             mu_molecular: 分子动力粘度
+            low_mach_precond: 是否启用低马赫数伪时间预处理（默认 True，
+                与 CPU 版一致）。环境变量 AFCFD_LOW_MACH_PRECOND=0/1
+                优先于本参数。
+            cfl_start, cfl_max: 自适应 CFL 的初始值/上限（与 CPU 版
+                FRSolver 同名参数、同一语义）。None 时 cfl_start 退回
+                `cfl`、cfl_max 退回 max(cfl, 0.5)——这样不传这两个参数的
+                既有调用方行为不变（起始 CFL 仍是它们传的 cfl）。
             boundary_ghost_provider: 边界幽灵态提供者。None 时按
                 CPU 版 FRSolver 同一套逻辑（fr_solver/boundary.py::
                 build_boundary_ghost_provider）自行构建——真实 bug
@@ -142,6 +153,19 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         mach_ref = vel_inf / np.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10))
         mach_ref = max(mach_ref, 0.1)
         self.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf, "mach_ref": mach_ref}
+
+        # 低马赫数伪时间预处理（2026-09-14，与 CPU 版 FRSolver 同一机制/
+        # 同一开关语义）：dt 按预处理波速放大**必须**与把 Gamma 作用到
+        # 平均流残差上成对出现，缺一半就是 2026-08-25 在本文件
+        # compute_local_cfl_step_gpu 里记录的那次失稳。完整推导见
+        # core/utils/preconditioning.py 模块末尾；GPU 侧实现见
+        # core/gpu/gpu_preconditioning.py。
+        # 只在 SSP-RK2/RK3 下启用：DUAL_TIME 的物理时间导数项与 IMEX 的
+        # 残差拆分都需要单独推导 Gamma 的分配方式，不套未经验证的近似
+        # （与 CPU 侧同一判据）。
+        _env = os.environ.get("AFCFD_LOW_MACH_PRECOND")
+        _req = bool(low_mach_precond) if _env is None else (_env == "1")
+        self.low_mach_precond_enabled = _req and time_scheme in ("ssp_rk2", "ssp_rk3")
         # 真实 bug 修复（2026-09-05，代码复审发现）：CPU 版
         # `DistributedFRSolver`/`MultiGPUDistributedSolver` 都把构造期
         # 传入的 `turbulence_intensity`/`viscosity_ratio` 存成
@@ -195,6 +219,26 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
 
         # 时间积分器
         self.time_integrator = GPUTimeIntegrator(scheme=time_scheme, cfl=cfl)
+
+        # 自适应 CFL 控制器（2026-09-14 补齐）：GPU 路径此前**完全没有**
+        # 接入它，`compute_local_cfl_step_gpu` 一直用构造时传入的固定
+        # `time_integrator.cfl`——CPU 侧 2026-08-24 就有 AdaptiveCFLController
+        # 并且 CLI 的 `--cfl-start/--cfl-max` 只对 CPU 生效，这是一处先于
+        # 本轮存在的后端不对等缺口（不是本轮引入的）。稳态收敛步数强依赖
+        # 这个机制（见 core/time_integration/adaptive_cfl.py 模块文档第
+        # 4~7 条记录的四处真实缺陷与实测收益），GPU 不能只拿固定 CFL。
+        # 与 CPU 同一原则：只在稳态收敛加速模式下启用；DUAL_TIME 的内层
+        # 伪时间迭代有自己独立的自适应逻辑（time_integration/dual.py），
+        # 两者面向不同的迭代结构、不能互相套用。
+        self._cfl_controller = None
+        if time_scheme in ("ssp_rk2", "ssp_rk3", "forward_euler"):
+            from autoflowcfd.core.time_integration.adaptive_cfl import (
+                AdaptiveCFLController,
+            )
+            self._cfl_controller = AdaptiveCFLController(
+                cfl_start=cfl_start if cfl_start is not None else cfl,
+                cfl_max=cfl_max if cfl_max is not None else max(cfl, 0.5),
+            )
 
         # 初始化求解状态
         n_cells = mesh.n_cells
@@ -344,6 +388,18 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         )
         gpu_solver_interpolate_to_new_order(self, target_p)
 
+        # 自适应 CFL 控制器必须在阶数切换时复位（2026-09-14，与 CPU 侧
+        # order_continuation.py 里 `_cfl_ctrl.reset()` 同一理由）：阶数变化
+        # 会让残差发生一次跳变（插值误差），那不是"解在恶化"，不应触发
+        # CFL 收缩。
+        # **这条对单机 GPU 是必需的、不能照抄分布式路径的"不用管"**：
+        # CPU MPI 分布式在阶数切换时把 `_local_solver` 置 None、下次访问
+        # 重新构造一个全新 FRSolver（连带全新控制器），相当于免费拿到了
+        # 复位；而这里 `gpu_solver_interpolate_to_new_order` 是**原地**改
+        # mesh/ops/GPU 常驻数组，`self._cfl_controller` 会跨阶数存活下来。
+        if getattr(self, "_cfl_controller", None) is not None:
+            self._cfl_controller.reset()
+
     def _update_primitives_gpu(self):
         """GPU 上更新原始变量。"""
         from autoflowcfd.core.gpu.residual.gpu_flux import conserved_to_primitive_gpu
@@ -479,8 +535,14 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
 
         return res
 
-    def _compute_local_time_step_gpu(self):
-        """GPU 计算局部 CFL 时间步长（使用所有 SP 的谱半径）。"""
+    def _compute_local_time_step_gpu(self, return_physical_too: bool = False):
+        """GPU 计算局部 CFL 时间步长（使用所有 SP 的谱半径）。
+
+        `return_physical_too=True` 时额外返回"用物理波速算出的"那一份：
+        启用低马赫数预处理时平均流的 dt 按预处理波速放大，而湍流标量
+        （k/omega）必须继续用物理波速那一份（与 CPU 侧 cfl.py 同一处理，
+        理由见那里的文档）。未启用预处理时两者是同一个数组对象。
+        """
         cp = get_cupy()
         n_cells = self.mesh.n_cells
         n_sps = self.mesh.n_sps_per_cell
@@ -533,25 +595,46 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         # 使用所有 SP 计算谱半径（取最大值），而非仅 SP0
         # 对每个 SP 独立计算 CFL 步长，然后取 cell 内最小值
         dt_all_sps = cp.zeros((n_cells, n_sps), dtype=cp.float64)
+        precond = getattr(self, "low_mach_precond_enabled", False)
+        dt_phys_all_sps = (cp.zeros((n_cells, n_sps), dtype=cp.float64)
+                           if precond else None)
         for sp in range(n_sps):
             U_sp = self.U_gpu[:, sp:sp+1, :]  # (n_cells, 1, n_vars)
             det_jacs_sp = det_jacs_gpu[:, sp] if det_jacs_gpu is not None else None
             metric_flux_scale_sp = (
                 metric_flux_scale_gpu[:, sp] if metric_flux_scale_gpu is not None else None
             )
-            dt_sp = compute_local_cfl_step_gpu(
+            out_sp = compute_local_cfl_step_gpu(
                 U_sp, cell_volumes,
                 owner_cell, neighbor_cell, is_boundary,
                 normals_gpu, areas_gpu,
                 None, None,
-                cfl=self.time_integrator.cfl,
+                cfl=self._current_cfl(),
                 poly_order=getattr(self, "order", 0),
                 det_jacs_sp=det_jacs_sp,
                 metric_flux_scale_sp=metric_flux_scale_sp,
+                mach_ref=(self.freestream["mach_ref"] if precond else None),
+                return_physical_too=precond,
             )
-            dt_all_sps[:, sp] = dt_sp
+            if precond:
+                dt_all_sps[:, sp], dt_phys_all_sps[:, sp] = out_sp
+            else:
+                dt_all_sps[:, sp] = out_sp
 
-        return cp.min(dt_all_sps, axis=1)  # (n_cells,)
+        dt_mean = cp.min(dt_all_sps, axis=1)  # (n_cells,)
+        if not return_physical_too:
+            return dt_mean
+        dt_phys = (cp.min(dt_phys_all_sps, axis=1) if precond else dt_mean)
+        return dt_mean, dt_phys
+
+    def _current_cfl(self) -> float:
+        """当前 CFL 数：有自适应控制器时用它，否则退回固定值。
+
+        与 CPU 侧 cfl.py 里同一段逻辑对应（那里是
+        `_cfl_controller.cfl_number if ... else 0.1`）。
+        """
+        c = getattr(self, "_cfl_controller", None)
+        return c.cfl_number if c is not None else self.time_integrator.cfl
 
     def step(self, dt: float = 0.0) -> float:
         """执行一个时间步。
@@ -580,8 +663,11 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         # 湍流源项在当前状态下求值（算子分裂）
         mu_t_field = self.compute_turbulence_source_gpu()
 
-        # 局部 CFL 步长
-        dt_local = self._compute_local_time_step_gpu()
+        # 局部 CFL 步长。启用低马赫数预处理时 dt_local 是**预处理后**的
+        # 平均流步长（按 |un|+c_precond 取），dt_physical 是按物理波速那
+        # 一份；两者的分工与 CPU 侧 step.py 完全一致。
+        dt_local, dt_physical = self._compute_local_time_step_gpu(
+            return_physical_too=True)
         dt_local_full = cp.broadcast_to(
             dt_local[:, None], (n_cells, n_sps)
         ).reshape(n_cells * n_sps)
@@ -590,15 +676,59 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         U_flat = self.U_gpu.reshape(n_cells * n_sps, self.n_vars)
 
         # 构建平均流残差函数（含湍流涡粘耦合）
-        def mean_flow_residual(U_flat_trial):
+        def mean_flow_residual_raw(U_flat_trial):
+            """未经预处理的原始残差 R（约定 dU/dt = -R）。
+
+            残差监控与自适应 CFL 都必须用这一份**物理**残差：Gamma 可逆、
+            两者同时趋零，但量级不同，用预处理值会让打印的残差、收敛判据
+            以及与历史算例的对比全部失去可比性（与 CPU 侧 step.py 里
+            同名函数一致）。
+            """
             U_trial = U_flat_trial.reshape(n_cells, n_sps, self.n_vars)
             inv_res = self.compute_inviscid_residual_gpu(U_trial)
             visc_res = self.compute_viscous_residual_gpu(U_trial, mu_t_field=mu_t_field)
             total = inv_res + visc_res
-            return -total.reshape(n_cells * n_sps, self.n_vars)
+            return -total
 
-        # 初始残差
-        residual0 = mean_flow_residual(U_flat)
+        def mean_flow_residual(U_flat_trial):
+            """供时间积分器推进用：启用预处理时返回 `Gamma R`，否则就是 R。
+
+            Gamma 线性，作用在 R 上与作用在 dU/dtau 上等价；它**必须**与
+            上面按预处理波速取的 dt 成对出现（见
+            core/gpu/gpu_preconditioning.py 与 CPU 侧
+            core/utils/preconditioning.py 模块文档）。
+            Gamma 需要的原始变量由 `apply_low_mach_preconditioner_gpu`
+            从 U_trial 自己推导——GPU 侧不依赖 `self.Q_gpu` 是否与试探态
+            同步这条隐式契约（与 CPU 侧的刻意差异，见那份模块文档）。
+            """
+            res = mean_flow_residual_raw(U_flat_trial)
+            if self.low_mach_precond_enabled:
+                from autoflowcfd.core.gpu.gpu_preconditioning import (
+                    apply_low_mach_preconditioner_gpu,
+                )
+                # `out=res` 就地写：`res` 是 `mean_flow_residual_raw` 刚
+                # 算出来的新数组，stage 内施加完 Gamma 后原始值不再需要，
+                # 省掉每个 RK stage 一份全场数组的显存（79 万单元 P2 约
+                # 1.2GiB/stage）。`residual0` 那一处不能这样做——那里必须
+                # 保留物理残差给残差范数与自适应 CFL 用。
+                res = apply_low_mach_preconditioner_gpu(
+                    res, U_flat_trial.reshape(n_cells, n_sps, self.n_vars),
+                    self.freestream["mach_ref"], out=res,
+                )
+            return res.reshape(n_cells * n_sps, self.n_vars)
+
+        # 初始残差：`residual0_raw` 供残差范数/自适应 CFL 使用（物理残差），
+        # `residual0` 供积分器复用 Stage 0（必要时已施加 Gamma）。
+        residual0_raw = mean_flow_residual_raw(U_flat)
+        if self.low_mach_precond_enabled:
+            from autoflowcfd.core.gpu.gpu_preconditioning import (
+                apply_low_mach_preconditioner_gpu,
+            )
+            residual0 = apply_low_mach_preconditioner_gpu(
+                residual0_raw, self.U_gpu, self.freestream["mach_ref"],
+            ).reshape(n_cells * n_sps, self.n_vars)
+        else:
+            residual0 = residual0_raw.reshape(n_cells * n_sps, self.n_vars)
 
         # 根据时间方案选择推进方式
         scheme = self.time_integrator.scheme
@@ -660,10 +790,19 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         # _apply_turbulence_corrections_gpu 文档。
         self._apply_turbulence_corrections_gpu()
 
-        # 残差范数
-        residual_norm = float(cp.linalg.norm(residual0) / max(1, np.sqrt(residual0.size)))
+        # 残差范数：用**未预处理**的物理残差（见 mean_flow_residual_raw）
+        # 显式 ravel：`residual0_raw` 现在是 3 维 (n_cells,n_sps,n_vars)，
+        # `linalg.norm` 只在 ord=None 时才隐式对 >2 维做 ravel，依赖那条
+        # 特殊语义没必要；ravel 后与改动前那份 2 维输入的范数逐位相同。
+        _r = residual0_raw.ravel()
+        residual_norm = float(cp.linalg.norm(_r) / max(1, np.sqrt(_r.size)))
         self.residual_history.append(residual_norm)
         self.iteration += 1
+
+        # 自适应 CFL：按物理残差更新（与 CPU 侧 step.py 同一时序——在残差
+        # 范数算出来之后、返回之前）
+        if self._cfl_controller is not None:
+            self._cfl_controller.update(residual_norm)
 
         return residual_norm
 

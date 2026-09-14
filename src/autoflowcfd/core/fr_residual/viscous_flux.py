@@ -143,10 +143,38 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
             逐面精确为 0，与是否退化/网格质量无关，是恒等式）。现在真正
             调用 boundary_ghost_provider 取得反映边界条件的幽灵原始变量
             （例如 WALL 用速度镜像取反构造 Q_avg 速度=0，真正的无滑移），
-            只有梯度（gv_n/gT_n）仍取内部值镜像（标准 BR1/LDG 简化处理：
-            梯度本身没有独立的边界"真值"可用，用内部外插值是常见做法，
-            边界约束通过状态跳跃在通量里体现，不需要也没有单独的梯度
-            幽灵值）。
+            只有梯度（gv_n/gT_n）仍取内部值镜像——这是标准 BR1/LDG 做法：
+            梯度本身没有独立的边界"真值"可用，边界约束通过状态跳跃在
+            通量里体现（动量方向另有 IP 罚项，见
+            fr_operators/flux_kernels.py::viscous_boundary_penalty_tilde）。
+
+            **已量化的局限（2026-09-14，措辞从"简化"改为带实测数字的
+            明确局限）**：这条处理对**能量方程的热通量**留下一处不自洽——
+            壁面 ghost 态复制 rho/p（温度无跳跃，见 fr_ghost_state.py::
+            wall_ghost_state 的"热边界条件"一节，语义上是绝热壁），而
+            IP 罚项只覆盖动量分量（`for v in range(1,4)`），于是面上平均
+            法向温度梯度等于**内部值**、一般非零：实现出来的壁面热条件
+            既不是严格绝热（q_w=0）也不是等温，而是"按内部梯度透射"。
+            严格绝热要把 ∇T 的法向分量镜像掉
+            （∇T_ghost = ∇T_int − 2(∇T_int·n)n），那需要按 BC 类型在
+            kernel 里分派（WALL/SYMMETRY 镜像、INLET/OUTLET/FARFIELD
+            透射），是对核心粘性路径的改动。
+
+            **实测量级（79 万单元 cube_demo，P1，iter=300 真实检查点）**：
+              温度场全域变化 5.086 K，但**胞内**梯度
+              |∇T| mean=5.9e-12、p99=6.4e-11、max=3.7e-10 K/m
+              （P1 在该状态下温度几乎是分片常数，热通量基本全由界面项
+              承载，胞内梯度接近零）。
+              据此虚假壁面热通量密度 |q_n| = k|∇T| ≈ 6.1e-14 W/m^2，
+              相对来流焓通量密度 rho*U*cp*T = 1.18e7 W/m^2 约 5e-21。
+            所以在**当前已验证的低速绝热外流工况下这一项完全可忽略**，
+            改动核心粘性边界路径没有可测收益、只有风险，因此本轮不改。
+            它会变得重要的条件也写明：带传热的壁面（需要等温壁 BC 或
+            壁面热通量模型，本项目目前都没有）、或胞内温度梯度真正被
+            分辨出来的工况（更高阶数 / 更细的近壁网格）。
+            （校验说明：上述 |∇T| 数字所用的 `compute_physical_gradient`
+            调用方式已在已知线性场 T=x / T=3y 上验证到机器精度
+            7.6e-16，不是算子用错导致的虚低。）
 
     Returns:
         residual: (n_cells, n_sps, 5)
@@ -251,7 +279,9 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
     Q_ghost = compute_boundary_ghost_states(flat, Q, adj_j, ghost_provider)
 
     if n_sps == 1:
-        # P0 专用路径：使用简化 kernel（消除 SP 循环，外插简化为标量乘）
+        # P0 专用路径：使用 n_sps=1 特化 kernel（消除 SP 循环，外插写成
+        # 标量乘——n_sps=1 下与矩阵乘是同一个运算，不是近似，见
+        # viscous_p0_kernel.py 模块文档的用词更正）
         # 性能优化：Order Continuation P0 阶段 n_sps=1，通用 kernel 的
         # for s in range(n_sps) 循环虽只有 1 次迭代但仍有分支/索引开销，
         # P0 专用 kernel 在编译期消除所有 SP 循环。

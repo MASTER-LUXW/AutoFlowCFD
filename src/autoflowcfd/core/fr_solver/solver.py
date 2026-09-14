@@ -131,6 +131,50 @@ def _limit_blas_threads(n: int = 1) -> bool:
         return False
 
 
+class blas_threads_limited:
+    """把 BLAS 线程数限制在 `n`（默认 1）的上下文管理器，退出时恢复。
+
+    **为什么必须是"有作用域"的，而不是构造时设一次就不管**（2026-09-14
+    真实 bug 修复）：`_limit_blas_threads` 改的是**进程级**状态。第一版把
+    它放在 `FRSolver.__init__` 里，于是一个进程里构造第二个求解器时，
+    它的网格几何（LAPACK 求逆得到的 `inv_jacs`）与 FR 算子构造就落在
+    "BLAS 只剩 1 线程"的环境下——而这两者的结果会随 BLAS/LAPACK 线程数
+    在最后一位上变化，离散 GCL / 自由流场保持性依赖这些度量量之间的
+    精确抵消（完整记录见 `autoflowcfd/__init__.py` 顶部）。真实后果：
+    `tests/validation/test_couette.py` 单独跑每个用例都过，整文件连跑时
+    第三个用例 `test_couette_prism_residual_trend` 必然失败（残差到最后
+    一步仍在上升、从未回落）——因为它构造求解器时 BLAS 已被前面的用例
+    永久限制成了 1。用 `AFCFD_NO_BLAS_THREAD_LIMIT=1` 关掉限制后整文件
+    3 项全过，是这个因果链的决定性验证。
+
+    现在只在**求解循环**（`FRSolver.solve` / `run_order_continuation`）
+    期间限制：求解阶段 9~11% 的收益完整保留（那本来就是收益的来源），
+    而任何构造/几何/算子生成阶段都仍然拿到多线程 BLAS，进程内前后
+    构造的求解器因此得到逐位一致的度量量。
+    """
+
+    def __init__(self, n: int = 1):
+        self._n = n
+        self._applied = False
+
+    def __enter__(self):
+        self._applied = _limit_blas_threads(self._n)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._applied:
+            # 恢复到包默认值（`autoflowcfd/__init__.py` 把 BLAS 环境变量
+            # 设为 cpu_count）；用户显式设过 OPENBLAS_NUM_THREADS 时以它为准。
+            import multiprocessing
+            try:
+                restore = int(os.environ.get("OPENBLAS_NUM_THREADS",
+                                             multiprocessing.cpu_count()))
+            except ValueError:
+                restore = multiprocessing.cpu_count()
+            _limit_blas_threads(max(1, restore))
+        return False
+
+
 class FRSolver(_SolverGeometryMixin):
     """
     基于通量重构 (FR) 方法的 N-S 方程求解器。
@@ -162,7 +206,8 @@ class FRSolver(_SolverGeometryMixin):
                  flux_type: str = 'radau',
                  artificial_viscosity_enabled: bool = False,
                  artificial_viscosity_alpha: float = 1.0,
-                 entropy_stable_volume_enabled: bool = False):
+                 entropy_stable_volume_enabled: bool = False,
+                 low_mach_precond: bool = True):
         """
         初始化 FRSolver。
 
@@ -280,6 +325,23 @@ class FRSolver(_SolverGeometryMixin):
         # 数据支撑的最优默认值。
         _DEFAULT_N_THREADS = 8
         resolved_n_threads = n_threads if n_threads > 0 else _DEFAULT_N_THREADS
+        # 真实健壮性 bug 修复（2026-09-14）：`numba.set_num_threads(n)` 要求
+        # n <= numba 线程池上限（`NUMBA_NUM_THREADS`，默认取 cpu_count，但
+        # 用户/CI/作业调度器可以把它设成更小的值），否则直接抛
+        # `ValueError: The number of threads must be between 1 and N`——
+        # 求解器在**构造期**就崩溃，且报错完全看不出与这个环境变量有关。
+        # 真实复现：跑对照实验时设了 `NUMBA_NUM_THREADS=6`，而这里的默认
+        # 值是 8，两个进程都在构造 FRSolver 时直接异常退出。
+        # 现在按线程池上限钳制并在被钳制时明确告知，而不是崩溃。
+        _pool_max = int(getattr(numba.config, "NUMBA_NUM_THREADS", resolved_n_threads))
+        if resolved_n_threads > _pool_max:
+            logger.warning(
+                f"n_threads={resolved_n_threads} 超过 numba 线程池上限 "
+                f"{_pool_max}（由 NUMBA_NUM_THREADS 或 CPU 核数决定），"
+                f"按上限钳制为 {_pool_max}"
+            )
+            resolved_n_threads = _pool_max
+        resolved_n_threads = max(1, resolved_n_threads)
         numba.set_num_threads(resolved_n_threads)
 
         # 防御性内存检查：两个界面 kernel 各自的私有累加缓冲区峰值约
@@ -365,6 +427,39 @@ class FRSolver(_SolverGeometryMixin):
         # 接受 `tet_basis_mode` 参数，恒生成 native 四面体算子，与
         # `mesh`（同样恒为 native，见 HighOrderMesh 文档）天然一致，
         # 不再需要从 mesh 读取这个属性来保持两者同步。
+        # 低马赫数伪时间预处理（2026-09-14 新增，用户提出"收敛需要数万步"
+        # 后的根本性优化）。完整推导/正确性论证见
+        # `core/utils/preconditioning.py` 模块末尾"伪时间预处理矩阵 Gamma"
+        # 一节；接入点见 `step.py::mean_flow_residual`（残差侧）与
+        # `cfl.py::compute_local_time_step`（步长侧）——两者**必须成对启用**。
+        #
+        # 为什么默认开：本项目的目标工况是汽车外流场，M~0.09（33m/s vs
+        # 声速 340m/s）。不做预处理时显式格式的 dt 被声速限制，比对流
+        # 时间尺度小约 11 倍，收敛步数因此白付约一个数量级——这正是
+        # 用户观察到"需要数万步"的主因之一。预处理后 dt 由预处理波速
+        # (|un|+c_precond) 决定，M=0.1 下放大约 5 倍。
+        # 不动点不变（det(Gamma)=beta^2>0），收敛解与关闭时是同一个解。
+        #
+        # DUAL_TIME（真正的非稳态物理时间推进）下强制关闭：那条路径的
+        # dt 是有物理时间精度含义的物理步长，不是伪时间步长，预处理的
+        # 前提（"只要收敛到 R=0，路径无所谓"）不成立。
+        # 只对 SSP-RK2/RK3 这两个"纯稳态伪时间推进"方案启用：
+        # * DUAL_TIME 的 dt 是有物理时间精度含义的物理步长，不是伪时间
+        #   步长，预处理的前提（"只要收敛到 R=0，路径无所谓"）不成立；
+        # * IMEX 把残差**拆成**对流/扩散两半分别显式/隐式处理
+        #   （见 step.py 的 convective_residual_only/diffusive_residual_only），
+        #   Gamma 作用在拆分后的任一半上都不等价于作用在整体残差上，
+        #   需要专门推导如何在两半之间分配预处理——不在本次范围内，
+        #   所以这里直接不启用，而不是套一个未经验证的近似。
+        # 环境变量 `AFCFD_LOW_MACH_PRECOND=0/1` 可强制关闭/开启，优先于
+        # 构造参数——供 A/B 对照实验与现场排查用（"把这个新机制单独关掉
+        # 再跑一遍"必须是一条随时可用的路径，不需要改代码）。
+        _env = os.environ.get("AFCFD_LOW_MACH_PRECOND")
+        _req = bool(low_mach_precond) if _env is None else (_env == "1")
+        self.low_mach_precond_enabled = _req and time_scheme in (
+            TimeIntegrationScheme.SSP_RK2, TimeIntegrationScheme.SSP_RK3,
+        )
+
         self.ops = generate_fr_operators(order, flux_point_type=flux_type)
 
         # BLAS 线程数压到 1（性能优化 2026-09-13，见 `_limit_blas_threads`
@@ -375,7 +470,10 @@ class FRSolver(_SolverGeometryMixin):
         # 近乎精确的抵消（把限制提前会让棱柱 P2 保持性判据从 8.07e-7 退化到
         # 3.35e-6、真实测试失败）。在这之后限制：残差与全程多线程逐位相同，
         # 同时求解循环拿到 9~11% 的收益。
-        _limit_blas_threads()
+        # 注意：**不要**在这里调 `_limit_blas_threads()`——那样是进程级、
+        # 粘性的，会污染同一进程里后续求解器的几何/算子构造（真实 bug，
+        # 见 `blas_threads_limited` 文档记录的 Couette 连跑失败）。
+        # 限制只在求解循环内生效，见 `solve()` 里的 `blas_threads_limited`。
         
         # 3. 初始化边界条件 (BD-01) —— 真正参与残差组装的幽灵态边界条件
         # （不再持有未被使用的 FRWeakBC 罚项处理器实例——那是旧版本从未被
@@ -579,6 +677,8 @@ class FRSolver(_SolverGeometryMixin):
 
         # Order Continuation: 从低阶开始逐步提升精度
         if self.order_continuation_enabled and self.order >= 2:
+            # Order Continuation 路径在 `core/utils/order_continuation.py`
+            # 里自己套 `blas_threads_limited`（求解循环在那边）。
             return self._solve_with_order_continuation(
                 max_iter, dt, tol, checkpoint_callback,
                 phase_max_iter=phase_max_iter,
@@ -590,66 +690,70 @@ class FRSolver(_SolverGeometryMixin):
         final_residual = 1e10
         initial_res = None
         
-        for i in range(max_iter):
-            t_start = time.time()
-            res = self.step(dt)
-            t_end = time.time()
-            final_residual = res
-            self.residual_history.append(res)
+        # BLAS 线程数只在求解循环期间限制为 1（性能：求解阶段实测快
+        # 9~11%；作用域必须是"循环期间"而不是"构造时一次"，理由见
+        # `blas_threads_limited` 文档记录的真实 bug）。
+        with blas_threads_limited(1):
+            for i in range(max_iter):
+                t_start = time.time()
+                res = self.step(dt)
+                t_end = time.time()
+                final_residual = res
+                self.residual_history.append(res)
 
-            if initial_res is None:
-                initial_res = res
+                if initial_res is None:
+                    initial_res = res
             
-            # 每步打印详细信息（真实功能缺口修复，2026-08-31，用户直接
-            # 指出"P0/P1直接运算和P2 order continuation打印的信息应该
-            # 一样"）：这条"非 order continuation"常规循环（目标阶数<2，
-            # 例如单独求解 P0/P1）此前打印频率（每10步一次）、字段顺序
-            # （CFL 在 Time 之前）、前缀（"Iteration N"而非"P{order} Iter
-            # N"）、Time 标签（"Time/step"而非"Time"）都与
-            # order_continuation.py::run_order_continuation（目标阶数>=2
-            # 时走的分阶段路径）不一致——两条路径各自独立发展、从未同步
-            # 过格式。这里改成逐字段对齐 order_continuation.py 的格式
-            # （以其为准），包括每步都打印、同样的字段顺序与 Cd/Cl/Cs
-            # 气动力系数打印。
-            drop = initial_res / max(res, 1e-30)
-            msg = f"P{self.order} Iter {i+1}: Residual = {res:.6e} | Drop: {drop:.1f}x | Time: {t_end - t_start:.2f}s"
-            if self._cfl_controller is not None:
-                msg += f" | CFL={self._cfl_controller.cfl_number:.3f}"
-            ref_area = getattr(self, '_reference_area', None)
-            if ref_area is not None and ref_area > 0:
-                from autoflowcfd.postprocess.fr_coefficients import compute_forces_pressure_only
-                aero = compute_forces_pressure_only(self, ref_area)
-                msg += f" | Cd={aero['Cd']:.4f} Cl={aero['Cl']:.4f} Cs={aero['Cs']:.4f}"
-            # 按方程分别归一化残差 + 最大残差定位（与 order_continuation.py
-            # 同一处新增，参照 Fluent scaled residuals / STAR-CCM+ Max
-            # 监视器，见 residual_diagnostics.py 模块文档"背景"一节）：
-            # 只新增打印，不改变本函数自己的 `tol`/`drop` 收敛判据。
-            #
-            # 打印频率（2026-09-13 用户反馈修复，与 order_continuation.py
-            # 同一处、同一理由）：只在第 1 步和其后每 10 步打印一次，避免
-            # 正常运行时每步都刷出这行长诊断信息。
-            freestream = getattr(self, 'freestream', None)
-            if freestream is not None and hasattr(self.state, 'dU_dt') and (i == 0 or (i + 1) % 10 == 0):
-                from autoflowcfd.core.fr_solver.residual_diagnostics import (
-                    compute_scaled_residuals, format_scaled_residual_line,
-                )
-                diag = compute_scaled_residuals(self.state.dU_dt, freestream)
-                msg += " | " + format_scaled_residual_line(diag)
-            print(msg)
+                # 每步打印详细信息（真实功能缺口修复，2026-08-31，用户直接
+                # 指出"P0/P1直接运算和P2 order continuation打印的信息应该
+                # 一样"）：这条"非 order continuation"常规循环（目标阶数<2，
+                # 例如单独求解 P0/P1）此前打印频率（每10步一次）、字段顺序
+                # （CFL 在 Time 之前）、前缀（"Iteration N"而非"P{order} Iter
+                # N"）、Time 标签（"Time/step"而非"Time"）都与
+                # order_continuation.py::run_order_continuation（目标阶数>=2
+                # 时走的分阶段路径）不一致——两条路径各自独立发展、从未同步
+                # 过格式。这里改成逐字段对齐 order_continuation.py 的格式
+                # （以其为准），包括每步都打印、同样的字段顺序与 Cd/Cl/Cs
+                # 气动力系数打印。
+                drop = initial_res / max(res, 1e-30)
+                msg = f"P{self.order} Iter {i+1}: Residual = {res:.6e} | Drop: {drop:.1f}x | Time: {t_end - t_start:.2f}s"
+                if self._cfl_controller is not None:
+                    msg += f" | CFL={self._cfl_controller.cfl_number:.3f}"
+                ref_area = getattr(self, '_reference_area', None)
+                if ref_area is not None and ref_area > 0:
+                    from autoflowcfd.postprocess.fr_coefficients import compute_forces_pressure_only
+                    aero = compute_forces_pressure_only(self, ref_area)
+                    msg += f" | Cd={aero['Cd']:.4f} Cl={aero['Cl']:.4f} Cs={aero['Cs']:.4f}"
+                # 按方程分别归一化残差 + 最大残差定位（与 order_continuation.py
+                # 同一处新增，参照 Fluent scaled residuals / STAR-CCM+ Max
+                # 监视器，见 residual_diagnostics.py 模块文档"背景"一节）：
+                # 只新增打印，不改变本函数自己的 `tol`/`drop` 收敛判据。
+                #
+                # 打印频率（2026-09-13 用户反馈修复，与 order_continuation.py
+                # 同一处、同一理由）：只在第 1 步和其后每 10 步打印一次，避免
+                # 正常运行时每步都刷出这行长诊断信息。
+                freestream = getattr(self, 'freestream', None)
+                if freestream is not None and hasattr(self.state, 'dU_dt') and (i == 0 or (i + 1) % 10 == 0):
+                    from autoflowcfd.core.fr_solver.residual_diagnostics import (
+                        compute_scaled_residuals, format_scaled_residual_line,
+                    )
+                    diag = compute_scaled_residuals(self.state.dU_dt, freestream)
+                    msg += " | " + format_scaled_residual_line(diag)
+                print(msg)
 
-            # 中间 checkpoint 保存
-            if checkpoint_callback is not None:
-                checkpoint_callback(self, i + 1)
+                # 中间 checkpoint 保存
+                if checkpoint_callback is not None:
+                    checkpoint_callback(self, i + 1)
                 
-            # 相对收敛判据：残差相对初始值下降 1/tol 倍
-            # tol=1e-6 表示需要下降 6 个量级；tol<=0 表示纯定步数迭代（
-            # B-10：transient 命令固定传 tol=0.0，此前 1.0 / tol 在第 2 步
-            # 直接 ZeroDivisionError 崩溃），此时不启用收敛判据。
-            if i >= 1 and tol > 0.0 and initial_res / max(res, 1e-30) >= 1.0 / tol:
-                converged = True
-                print(f"[OK] Converged at iteration {i+1} with residual {res:.6e} "
-                      f"(dropped {initial_res/res:.1e}x)")
-                break
+                # 相对收敛判据：残差相对初始值下降 1/tol 倍
+                # tol=1e-6 表示需要下降 6 个量级；tol<=0 表示纯定步数迭代（
+                # B-10：transient 命令固定传 tol=0.0，此前 1.0 / tol 在第 2 步
+                # 直接 ZeroDivisionError 崩溃），此时不启用收敛判据。
+                if i >= 1 and tol > 0.0 and initial_res / max(res, 1e-30) >= 1.0 / tol:
+                    converged = True
+                    print(f"[OK] Converged at iteration {i+1} with residual {res:.6e} "
+                          f"(dropped {initial_res/res:.1e}x)")
+                    break
         
         return SolverResult(converged=converged, iterations=i+1, final_residual=final_residual)
     
@@ -775,7 +879,58 @@ class FRSolver(_SolverGeometryMixin):
             if wall_stress_correction is not None:
                 res = res + wall_stress_correction[..., : res.shape[-1]]
 
+        # 人工粘性的**质量扩散通道**（2026-09-14 补齐）。
+        #
+        # 此前 `artificial_viscosity.py` 模块文档里如实记录了一条范围
+        # 限制、并把它称作"许多实际 DG/FR 实现采用的简化"：Persson &
+        # Peraire (2006) 原方法对**全部**守恒变量（含连续性方程）叠加
+        # 人工扩散，而本实现只把 epsilon 叠进 `mu_t_field`，于是它只能
+        # 通过动量/能量方程既有的粘性应力/热传导通道起作用，密度本身
+        # 完全不被扩散（`viscous_physical_flux` 的质量分量 G[...,0]
+        # 恒为 0）。用户明确指出本项目不接受简化，这里补上缺的那一项。
+        #
+        # 实现方式：不改粘性热路径。AV 默认关闭，没有理由为它给所有
+        # 运行的 `viscous_physical_flux_batch` 增加参数与分支；而
+        # `div(eps*grad(rho))` 正是一个标量扩散算子，直接复用湍流输运
+        # 已经验证过的 BR1 面耦合标量扩散装配
+        # （`turbulence/transport.py::compute_scalar_diffusion_residual`，
+        # 它返回的就是 +div(Gamma*grad(phi))，与这里 dU/dt 的符号约定
+        # 一致）。AV 关闭时这段完全不执行，零开销。
+        #
+        # 守恒性与自由流场保持性：`div(eps*grad(rho))` 是散度形式，
+        # 因此严格守恒；均匀流场下 grad(rho)=0，这一项恒为 0，不破坏
+        # 自由流场保持性（已用测试钉住，见
+        # tests/unit/test_artificial_viscosity_mass_diffusion.py）。
+        if getattr(self, "artificial_viscosity_enabled", False):
+            res = res + self._artificial_mass_diffusion_residual()
+
         return res
+
+    def _artificial_mass_diffusion_residual(self) -> np.ndarray:
+        """Persson-Peraire 人工粘性作用在连续性方程上的那一项。
+
+        返回形状与粘性残差相同的数组，只有质量分量（索引 0）非零，
+        其值为 `+div(epsilon * grad(rho))`（dU/dt 约定）。
+        完整动机见 `compute_viscous_residual` 里的调用点注释。
+        """
+        from autoflowcfd.core.fr_operators.artificial_viscosity import (
+            compute_persson_peraire_artificial_viscosity,
+        )
+        from autoflowcfd.core.turbulence.transport import (
+            compute_scalar_diffusion_residual,
+        )
+
+        epsilon_av = compute_persson_peraire_artificial_viscosity(
+            self, alpha_av=self.artificial_viscosity_alpha
+        )
+        rho = self.state.U[..., 0]
+        d_rho_dt = compute_scalar_diffusion_residual(
+            np.ascontiguousarray(rho), np.ascontiguousarray(epsilon_av),
+            self.mesh, self.ops,
+        )
+        out = np.zeros_like(self.state.U[..., : self.state.U.shape[-1]])
+        out[..., 0] = d_rho_dt
+        return out
 
     def _get_turbulent_viscosity_field(self) -> Optional[np.ndarray]:
         """汇总当前激活的湍流模型给出的动力涡粘度场 mu_t = rho * nu_t（委托给 fr_solver_turbulence），

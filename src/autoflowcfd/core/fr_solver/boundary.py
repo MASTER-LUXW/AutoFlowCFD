@@ -114,9 +114,14 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
     # 不再与之共存。法向速度仍然是不可穿透边界，物理上不受影响。
     #
     # 这把"粘性 WALL + WMLES"与"SLIP_WALL"底层复用同一个 ghost state
-    # 构造，但两者物理动机不同（前者是壁面模型的应力条件，后者是真正的
-    # 无粘/对称滑移边界）——共享同一个数值机制是刻意的工程简化，不是
-    # 混淆，见 wall_ghost_state 文档字符串的对应说明。
+    # 构造。**措辞更正（2026-09-14）**：此前这里写"共享同一个数值机制是
+    # 刻意的工程简化"——"简化"不准确。两者的**正确** ghost 态恰好就是
+    # 同一个（滑移/对称壁的物理条件 u_n=0+切向自由滑移，与 WMLES 要求的
+    # "切向无跳跃以免双重计权、法向仍不可穿透"，都精确对应"法向镜像反号
+    # + 切向保持"这一个构造），是同一个精确构造被两个不同物理条件同时
+    # 要求，不是用一个近似去凑合两种情形，复用它没有引入任何误差。
+    # 完整论证与热边界条件（两个分支都是绝热壁；本项目目前没有等温壁
+    # 这种 BC 类型）见 wall_ghost_state 文档字符串。
     wall_is_no_slip = getattr(solver, "wmles_model", None) is None
     type_map = {
         "WALL": ("WALL", {"is_no_slip": wall_is_no_slip}),

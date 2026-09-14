@@ -244,14 +244,25 @@ def compute_inviscid_residual_fr(
         # 峰值降为常驻的 div_comp_fine（~1.9GiB）+ 块内瞬态（32768 单元块约
         # 0.7GiB）。prism/tet 两段分开切块是因为两者用不同的算子，且单元存储
         # 本来就是 prism 在前 tet 在后，块不会跨类型。
-        div_comp_fine = np.zeros((n_cells, n_fine, 5))
+        # 内存优化（2026-09-14，P2 OOM 攻关）：此前这里先物化一份**全场**的
+        # 细点散度 `div_comp_fine`（(n_cells,n_fine,5)，79 万单元 P2/n_fine=64
+        # 下约 2.0GiB），等两段分块循环全部跑完之后再整体做一次"细->粗"限制
+        # （restrict_f2c）。但限制算子同样是**逐单元**的（只在单元自己的
+        # fine 点与 SPs 之间收缩，单元之间零耦合），完全没必要等全场算完：
+        # 现在在块内算完细点散度就立刻限制、直接写进粗网格的 `div_comp`，
+        # 于是细点数组只需要块大小（32768 单元约 84MiB），全场那份 2.0GiB
+        # 彻底消失。分块不改变任何逐单元的计算顺序/形状，结果与全场版
+        # 逐位相同。
+        div_comp = np.zeros((n_cells, n_sps, 5))
         # entropy-stable 路径是 O(n_fine^2)（两点通量遍历 SP 对），用比
         # 强形式更小的分块降低单块瞬态峰值/便于 numba prange 调度粒度，
         # 强形式路径块大小不变（沿用既有 P2 OOM 修复的取值）。
         _OVERINT_CHUNK_CELLS = 4096 if entropy_stable_volume else 32768
-        for seg_lo, seg_hi, op_c2f, op_D_fine in (
-            (0, n_prism, ops.overint_interp_c2f_prism, ops.overint_D_fine_prism),
-            (n_prism, n_cells, ops.overint_interp_c2f_tet, ops.overint_D_fine_tet),
+        for seg_lo, seg_hi, op_c2f, op_D_fine, op_f2c in (
+            (0, n_prism, ops.overint_interp_c2f_prism, ops.overint_D_fine_prism,
+             ops.overint_restrict_f2c_prism),
+            (n_prism, n_cells, ops.overint_interp_c2f_tet, ops.overint_D_fine_tet,
+             ops.overint_restrict_f2c_tet),
         ):
             for c0 in range(seg_lo, seg_hi, _OVERINT_CHUNK_CELLS):
                 c1 = min(c0 + _OVERINT_CHUNK_CELLS, seg_hi)
@@ -269,7 +280,7 @@ def compute_inviscid_residual_fr(
                     # 返回值（与 8_算法重构-Entropy-Stable_Split-Form
                     # 通量重构-Part2.md 决定性验证脚本同一约定），下游
                     # `residual = -div_comp/det_jacs` 不需要再乘 2。
-                    div_comp_fine[c0:c1] = entropy_stable_volume_divergence_batch(Q_fine, adj_j_fine, op_D_fine)
+                    div_fine_chunk = entropy_stable_volume_divergence_batch(Q_fine, adj_j_fine, op_D_fine)
                     del adj_j_fine
                 else:
                     F_phys_fine = euler_physical_flux_batch(
@@ -283,16 +294,13 @@ def compute_inviscid_residual_fr(
                         det_jacs_fine[c0:c1], inv_jacs_fine[c0:c1], F_phys_fine
                     )
                     del F_phys_fine
-                    div_comp_fine[c0:c1] = contract_shared_operator_2axis(op_D_fine, F_tilde_fine)
+                    div_fine_chunk = contract_shared_operator_2axis(op_D_fine, F_tilde_fine)
                     del F_tilde_fine
                 del Q_fine  # 块内用完即弃，下一轮迭代变量重新绑定
-
-        div_comp = np.zeros((n_cells, n_sps, 5))
-        if n_prism > 0:
-            div_comp[:n_prism] = contract_shared_operator_1axis(ops.overint_restrict_f2c_prism, div_comp_fine[:n_prism])
-        if n_cells > n_prism:
-            div_comp[n_prism:] = contract_shared_operator_1axis(ops.overint_restrict_f2c_tet, div_comp_fine[n_prism:])
-        del div_comp_fine  # ~1.9GiB，用完即弃
+                # 细->粗限制在块内立刻做（见上方内存优化说明），块内细点
+                # 数组随即释放，不再需要全场 (n_cells,n_fine,5) 那一份。
+                div_comp[c0:c1] = contract_shared_operator_1axis(op_f2c, div_fine_chunk)
+                del div_fine_chunk
     else:
         # 没有 fine 几何——只在 order==0 时发生，但 P0 在函数入口就已经
         # 短路到 _compute_inviscid_residual_fv_p0，不会走到这里；order>=1

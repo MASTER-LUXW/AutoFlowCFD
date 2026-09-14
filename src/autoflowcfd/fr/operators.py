@@ -84,7 +84,7 @@ class FROperators:
         g_left, g_right: 左右 Radau/VCJH 校正函数**导数**在各 SP 处的取值，
             形状均为 (n_sps,)（不是校正函数本身的值，见
             matrix_operators.compute_correction_weights 文档说明）
-        boundary_extrap_tet: {(axis:int,side:float): (n_fp,n_sps) 全零
+        boundary_extrap_tet: {(axis:int,side:float): (n_fp,n_sps) 全 NaN
             占位矩阵}——**不再是真实的坍缩坐标外插算子**（2026-09-03
             起已删除，见模块文档），只保留字典形状供
             `core/fr_operators/face_kernels.py` 无条件按 (celltype,
@@ -313,15 +313,27 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
     # 旧字段名的调用点直接得到正确的 native 结果，不需要逐一修改）。
     D_3d_tet = D_native_tet_padded
     filter_tet = filter_native_tet_padded
-    # `boundary_extrap_tet` 保留为占位全零字典（形状与坍缩坐标版本一致：
+    # `boundary_extrap_tet` 保留为占位字典（形状与坍缩坐标版本一致：
     # (n_fp,n_sps)=((order+1)**2,(order+1)**3)）——只是为了不用同步修改
     # `core/fr_operators/face_kernels.py` 里"无条件按 (celltype,axis,
     # side) 拼表"那段代码；四面体面经 `with_native_tet_faces` 翻译后
     # 恒为 native 编码，这些占位行在生产路径上不会被真正读取，见模块
     # 文档"提前无条件求值导致越界"一节的同一原理。
+    #
+    # **占位值从 0 改为 NaN（2026-09-14）**：这是"不变量成立才是死代码"
+    # 的典型情形——只要哪天"四面体面恒为 native 编码"这条不变量被破坏
+    # （新的面翻译路径、某个绕过 `with_native_tet_faces` 的构造方式），
+    # 全零算子会把外插态**静默**算成 0（常数外插本该得常数），残差随之
+    # 完全错误，而且不报任何错、也不会触发正性限制器。填 NaN 则会立刻
+    # 沿残差传播、被求解器既有的 `np.all(np.isfinite(...))` 检查抓住，
+    # 把静默错误变成显式失败。
+    # 前提已核实：改成 NaN 后全量测试仍然通过，说明生产路径确实从不
+    # 读取这些行（否则 NaN 会立刻让测试失败——这本身就是对该不变量
+    # 最直接的一次验证）。
     _n_fp_placeholder = boundary_extrap_prism[(0, -1.0)].shape[0]
     boundary_extrap_tet = {
-        (axis, side): np.zeros((_n_fp_placeholder, n_sps_global), dtype=np.float64)
+        (axis, side): np.full((_n_fp_placeholder, n_sps_global), np.nan,
+                              dtype=np.float64)
         for axis in range(3) for side in (-1.0, 1.0)
     }
 

@@ -103,6 +103,59 @@ def _filter_flat_U(U_flat: np.ndarray, n_cells: int, n_sps: int, n_prism: int, f
     return U.reshape(U_flat.shape)
 
 
+def _filter_flat_U_by_cell_type(U_flat: np.ndarray, n_cells: int, n_sps: int,
+                                cell_is_prism: np.ndarray,
+                                filter_prism, filter_tet) -> np.ndarray:
+    """与 `_filter_flat_U` 完全等价，但按**单元类型掩码**分派而不是按
+    "棱柱在前"的 `n_prism` 分界切分。
+
+    为什么需要它（2026-09-14）：CPU 分布式路径的 local 单元按
+    `partition.local_cells` 自身顺序排列，棱柱与四面体是**交错**的，
+    没有"前 n_prism 个是棱柱"这个性质，`_filter_flat_U` 直接用不了。
+    而模态滤波是纯逐单元操作（无邻居耦合），只要每个单元用对自己的
+    滤波矩阵，结果就与单机逐位相同——这一点由
+    `tests/unit/test_distributed_solver_main_init.py::
+    TestDistributedStepMatchesSingleMachine` 的"推进一步后状态必须与
+    单机一致"判据保证。
+
+    分成两次按掩码取子集调用（而不是逐单元循环）：`U[mask]` 会产生副本，
+    滤波后必须写回——这里显式写回，不依赖视图语义。
+    """
+    U = U_flat.reshape(n_cells, n_sps, -1)
+    mask = np.asarray(cell_is_prism, dtype=bool)
+    if mask.shape[0] != n_cells:
+        raise ValueError(
+            f"cell_is_prism 长度 {mask.shape[0]} 与 n_cells {n_cells} 不符")
+    for sel, mat in ((mask, filter_prism), (~mask, filter_tet)):
+        if not np.any(sel):
+            continue
+        sub = np.ascontiguousarray(U[sel])
+        _filter_leading_vars_inplace_kernel(sub, np.ascontiguousarray(mat), 5)
+        U[sel] = sub
+    return U.reshape(U_flat.shape)
+
+
+def build_filter_func_by_cell_type(ops, n_cells: int, n_sps: int,
+                                   cell_is_prism: np.ndarray):
+    """`build_filter_func` 的掩码版，供 CPU 分布式路径使用。
+
+    分布式路径此前**完全没有**施加模态滤波（单机每个 RK stage 都施加，
+    多 GPU 分布式也有 `filter_func_gpu`）——CPU 分布式是唯一的缺口，
+    2026-09-14 补齐。模态滤波是 P>=1 的稳定性机制（坍缩坐标/配置点法
+    对高阶模态混叠天然敏感，见 `_filter_flat_U` 与 `filter_scalar_field`
+    的完整推导与真实复现记录），缺它意味着这条路径少了一层已经被真实
+    算例证明必要的保护。
+    """
+    filter_prism = ops.filter_prism
+    filter_tet = ops.filter_tet
+
+    def filter_func(U_flat: np.ndarray) -> np.ndarray:
+        return _filter_flat_U_by_cell_type(
+            U_flat, n_cells, n_sps, cell_is_prism, filter_prism, filter_tet)
+
+    return filter_func
+
+
 def filter_scalar_field(phi: np.ndarray, n_prism: int, filter_prism, filter_tet) -> np.ndarray:
     """对湍流标量场（k 或 omega，形状 (n_cells, n_sps)）施加与平均流
     完全同一套模态滤波矩阵（真实 bug 修复，2026-09-12，cube_demo

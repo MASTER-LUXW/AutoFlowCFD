@@ -3,11 +3,18 @@ AutoFlowCFD V2.0 - P0 专用粘性界面校正 numba kernel
 
 从 viscous_flux_kernel.py 拆出。当 n_sps=1（P0 order continuation 阶段）
 时使用本 kernel 替代通用 kernel，消除所有 SP 循环（编译期常量 n_sps=1），
-将外插矩阵乘法简化为标量乘法。
+把外插矩阵乘写成标量乘。
+
+**用词更正（2026-09-14）**：本文件多处把这种写法称为「简化」，那个说法
+不准确——n_sps=1 时 `E (n_fp,1) @ field (1,k)` 与 `E[i,0]*field[0,...]`
+是**同一个矩阵乘**（求和只有一项），不是任何形式的近似。本 kernel 相对
+通用 kernel 是 n_sps=1 的**特化**（specialization）：去掉编译期已知为 1
+的循环、把单项求和写成乘法，数学上逐项等价，只有浮点运算顺序不同。
+现已把各处「简化」改为「特化」/「n_sps=1 恒等式」这类准确表述。
 
 性能收益（791K 单元 / 188 万面网格，P0 阶段）：
 - 消除 for s in range(n_sps) 循环（n_sps=1 时仍有一次迭代开销）
-- 外插 E@field 简化为 E[i,0]*field[0]（标量乘，避免矩阵乘法开销）
+- 外插 E@field 写成 E[i,0]*field[0]（n_sps=1 下的同一个乘法，避免矩阵乘调用开销）
 - 输出 correction 形状 (n_cells, 1, 5) 而非 (n_cells, n_sps, 5)
 
 算法与通用 viscous_flux_kernel.py 完全一致（n_sps=1 的特化），
@@ -68,8 +75,8 @@ def compute_viscous_interface_correction_p0_kernel(
 
     与通用 compute_viscous_interface_correction_kernel 数学等价，
     但 n_sps=1 时：
-    - 外插简化为标量乘：E[i,0]*field[0,...]
-    - 分布简化为单 SP：out[0,v] = g * fp_data[fp_i, v]
+    - 外插写成标量乘：E[i,0]*field[0,...]（n_sps=1 恒等式，非近似）
+    - 分布特化为单 SP：out[0,v] = g * fp_data[fp_i, v]
     - correction 形状 (n_cells, 1, 5)
 
     native 四面体（路径C）支持：与通用 kernel（viscous_flux_kernel.py）
@@ -78,7 +85,7 @@ def compute_viscous_interface_correction_p0_kernel(
     vertex]`，面修正项改用 `lift_native[excluded_vertex] @ (true_area_
     weight⊙jump)`。native 阶数0 时 `n_native_sps` 恰好也是1（受限 PKD
     模态数 `(0+1)(0+2)(0+3)/6=1`），`lift_native[excluded_vertex]`
-    形状 `(1, n_fp)`，矩阵乘法本身已经是这里"P0 简化"要的标量化形式
+    形状 `(1, n_fp)`，矩阵乘法本身已经是这里 P0 特化要的标量化形式
     （单行矩阵乘向量），不需要像坍缩坐标分支那样额外手写标量循环。此前
     这里完全没有 native 分支——是本次 order continuation P0 阶段验证
     （真实 CLI smoke test，native+order continuation 组合此前从未被
@@ -111,7 +118,13 @@ def compute_viscous_interface_correction_p0_kernel(
             else:
                 E_o = boundary_extrap[celltype_o, oax, oside_idx]  # (n_fp, 1)
 
-            # P0 简化外插：E (n_fp,1) @ field (1,k) -> E[i,0]*field[0,...]
+            # P0 外插：n_sps=1 时 E (n_fp,1) @ field (1,k) 与
+            # E[i,0]*field[0,...] 是**同一个矩阵乘**，不是近似——原注释
+            # 写成「P0 简化外插」不准确（2026-09-14 更正）。
+            # 而且 P0 的唯一基函数是常数 1，正确的插值算子在这里恒有
+            # E[i,0]=1（已实测核实：order=0 下 boundary_extrap_prism 与
+            # boundary_extrap_native_tet 全为 1.0），所以外插结果就等于
+            # 单元自身的值——这正是 P0 常数重构应有的行为。
             Q_o_s0 = Q[oc, 0]  # (5,)
             gv_o_s0 = grad_vel[oc, 0]  # (3,3)
             gT_o_s0 = grad_T[oc, 0]  # (3,)
@@ -125,7 +138,8 @@ def compute_viscous_interface_correction_p0_kernel(
                 is_bnd_i = is_boundary[f] or (mp >= 0 and mixed_nb_mask[f, i])
                 e_i = E_o[i, 0]  # 标量
 
-                # 外插到 FP i（P0 简化：标量乘）
+                # 外插到 FP i：n_sps=1 下标量乘 == 矩阵乘（见上方说明，
+                # 不是简化）
                 Q_o_i = np.empty(5)
                 for v in range(5):
                     Q_o_i[v] = e_i * Q_o_s0[v]
@@ -138,7 +152,8 @@ def compute_viscous_interface_correction_p0_kernel(
                     gT_o_i[a] = e_i * gT_o_s0[a]
                 mut_o_i = e_i * mut_o_s0
 
-                # 邻居状态（源矩阵插值，n_sps=1 简化）
+                # 邻居状态（源矩阵插值；n_sps=1 时同样是标量乘 == 矩阵乘
+                # 的恒等式，不是简化）
                 if is_boundary[f]:
                     Q_n = Q_ghost[f, i]
                     gv_n = gv_o_i.copy()
@@ -239,14 +254,14 @@ def compute_viscous_interface_correction_p0_kernel(
                 for v in range(5):
                     correction_per_thread[tid, oc, 0, v] += contrib_owner[0, v] / dj
             else:
-                # P0 简化分布：n_sps=1，只有 s=0
+                # P0 特化分布：n_sps=1，只有 s=0
                 g_prime_owner = g_left if oside < 0 else g_right
                 fp_i = dist_fp_of_sp[oax, 0]
                 g_val = g_prime_owner[dist_axis_coord_of_sp[oax, 0]]
                 for v in range(5):
                     correction_per_thread[tid, oc, 0, v] += g_val * jump_owner[fp_i, v] / dj
 
-        # Neighbor 侧（与通用 kernel 相同逻辑，n_sps=1 简化）
+        # Neighbor 侧（与通用 kernel 相同逻辑，n_sps=1 特化）
         if (not is_boundary[f]) and neighbor_is_primary[f]:
             nc = neighbor_cell[f]
             nc_code = neighbor_cube_face[f]
@@ -283,7 +298,7 @@ def compute_viscous_interface_correction_p0_kernel(
                     gT_n_i[a] = e_i * gT_n_s0[a]
                 mut_n_i = e_i * mut_n_s0
 
-                # Owner 侧插值（n_sps=1 简化）
+                # Owner 侧插值（n_sps=1 特化）
                 Q_o_at_n = np.zeros(5)
                 gv_o_at_n = np.zeros((3, 3))
                 gT_o_at_n = np.zeros(3)
@@ -372,7 +387,7 @@ def compute_viscous_interface_correction_p0_kernel(
                 for v in range(5):
                     correction_per_thread[tid, nc, 0, v] += contrib_neighbor[0, v] / dj
             else:
-                # P0 简化分布
+                # P0 特化分布
                 g_prime_neighbor = g_left if nside < 0 else g_right
                 fp_i = dist_fp_of_sp[nax, 0]
                 g_val = g_prime_neighbor[dist_axis_coord_of_sp[nax, 0]]

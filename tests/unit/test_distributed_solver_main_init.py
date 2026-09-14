@@ -55,17 +55,15 @@ class TestDistributedFRSolverMainInitStep:
     `step()` 对应代码）必须与直接构造一个单机 `FRSolver` 读到的完全
     一致——即 `local_solver` 这层间接确实把正确的值传导过去了。
 
-    不比较 `step()` 完整跑完一步之后的状态：单机 `FRSolver` 在
-    SSP-RK3（稳态收敛加速）模式下 `dt` 参数本身被忽略、改用逐 SP 局部
-    CFL 步长 `_compute_local_time_step()`（`fr_solver/step.py` 模块
-    文档"dt 参数的语义"一节明确记录），而分布式路径"目前用全局固定
-    步长，不做单机路径那种逐 cell 局部 CFL"（`DistributedFRSolver.step`
-    文档）——这是两条路径一直如此、有意的架构差异，不是bug，用同一个
-    `dt` 比较两者跑完一步后的状态因此不是有效判据（本测试最初就是
-    按这个错误假设写的，被真实数值差异证伪后改用这里的判据）。真正
-    需要验证的是"主 __init__ 构造出的 local_solver 属性是否正确"，
-    这一点通过直接比对这几个属性值本身来验证，比通过时间积分再反推
-    更直接、也不受与本次改动无关的 CFL 差异干扰。"""
+    **本段文档已更新（2026-09-14）**：此前这里写"分布式路径目前用全局
+    固定步长、不做单机那种逐 cell 局部 CFL——这是两条路径一直如此、
+    有意的架构差异"，因此刻意不比较 `step()` 跑完一步之后的状态。
+    那条"简化"已经补齐（`core/mpi/distributed_cfl.py`），两条路径现在
+    用的是**同一个** `cfl.py::compute_local_time_step`，所以"跑完一步
+    后的状态必须一致"重新成为有效、而且远更强的判据——见
+    `TestDistributedStepMatchesSingleMachine`。本类保留原有的属性级
+    比对（它验证的是 local_solver 这层间接是否把值正确传导过去，与
+    时间积分无关，仍然有独立价值）。"""
 
     def test_local_solver_wiring_matches_direct_fr_solver_construction(self, mesh_and_ops):
         from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
@@ -125,6 +123,93 @@ class TestDistributedFRSolverMainInitStep:
 
         assert np.isfinite(residual_norm)
         assert np.all(np.isfinite(dist_solver.state.U[:n_cells]))
+
+
+class TestDistributedStepMatchesSingleMachine:
+    """n_ranks=1 下分布式 `step()` 必须与单机 `step()` 推进出同一个状态。
+
+    为什么这是最强的端到端判据：n_ranks=1 没有 halo、没有跨 rank 通信，
+    分布式路径与单机路径面对的是同一个网格、同一个初场、同一个时间方案，
+    因此**任何**差异都只能来自分布式实现自己引入的错误。而且"棱柱在前"
+    的紧凑重排在 n_ranks=1 下依然生效，所以这条判据同时覆盖了 perm/
+    inv_perm 的正确性。
+
+    2026-09-14 之前这条判据不成立，因为分布式用全局固定 dt 而单机用逐
+    cell 局部 CFL（当时被记作"有意的架构差异"）。局部 CFL 补齐后两条
+    路径共用同一个步长公式，差异应当只剩浮点重结合噪声。
+
+    容差说明：不要求逐位相同。两条路径对同一批单元的算术**顺序**不同
+    （单机一次性全场计算；分布式按 compact 子集抽取+重排后计算），
+    浮点重结合会产生 ~1e-13 量级的相对差异——这与
+    `test_distributed_compute_residual.py` 模块文档记录的同一类现象
+    同源，不是正确性问题。判据取相对 1e-10，比噪声高两个数量级、
+    又远低于任何真实索引/公式错误会产生的差异（实测破坏性验证：
+    跳过 inv_perm 重排会产生 O(1) 的差异）。
+    """
+
+    def _build(self, mesh, ops, U0, scheme):
+        from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
+        from autoflowcfd.core.fr_solver.solver import FRSolver
+
+        kw = dict(mu_molecular=1.8e-5, rho_inf=1.225, vel_inf=33.33, p_inf=101325.0)
+        single = FRSolver(mesh, order=mesh.order, turb_model_name="none",
+                          time_scheme=scheme, **kw)
+        single.order_continuation_enabled = False
+        single.state.U[...] = U0
+        single.state._update_primitives()
+
+        dist = DistributedFRSolver(
+            mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
+            n_ranks=1, backend="cpu", order=mesh.order, turb_model_name="none",
+            time_scheme=scheme, **kw)
+        n = mesh.n_cells
+        dist.state.U[:n] = U0
+        dist.state.Q[:n] = conserved_to_primitive(U0[..., :5])
+        return single, dist
+
+    @pytest.mark.parametrize("precond", [False, True])
+    def test_local_dt_matches_single_machine(self, mesh_and_ops, precond, monkeypatch):
+        """先单独比对**步长**本身——它是本次补齐的核心产物，单独钉住能在
+        出问题时直接指出是 dt 还是时间积分的问题。"""
+        monkeypatch.setenv("AFCFD_LOW_MACH_PRECOND", "1" if precond else "0")
+        mesh, ops = mesh_and_ops
+        rng = np.random.default_rng(31337)
+        U0 = _nonuniform_U(mesh, rng)
+        single, dist = self._build(mesh, ops, U0, TimeIntegrationScheme.SSP_RK3)
+        assert single.low_mach_precond_enabled is precond
+        assert dist.low_mach_precond_enabled is precond
+
+        ref_mean, ref_phys = single._compute_local_time_step(return_physical_too=True)
+        got_mean, got_phys = dist._compute_distributed_local_time_step(
+            dist.state.get_local_U(), return_physical_too=True)
+        for name, got, exp in (("mean_flow", got_mean, ref_mean),
+                               ("physical", got_phys, ref_phys)):
+            rel = np.abs(got - exp) / np.maximum(np.abs(exp), 1e-300)
+            assert rel.max() <= 1e-12, f"{name} dt 与单机不一致：{rel.max():.3e}"
+        if precond:
+            assert ref_mean.max() > ref_phys.max() * 1.5, (
+                "预处理没有真的放大 dt，本用例失去判别力")
+
+    @pytest.mark.parametrize("precond", [False, True])
+    def test_one_step_matches_single_machine(self, mesh_and_ops, precond, monkeypatch):
+        monkeypatch.setenv("AFCFD_LOW_MACH_PRECOND", "1" if precond else "0")
+        mesh, ops = mesh_and_ops
+        rng = np.random.default_rng(4242)
+        U0 = _nonuniform_U(mesh, rng)
+        single, dist = self._build(mesh, ops, U0, TimeIntegrationScheme.SSP_RK3)
+
+        single.step(1e-6)
+        dist.step(1e-6)
+
+        n = mesh.n_cells
+        got = dist.state.U[:n]
+        exp = single.state.U
+        assert np.all(np.isfinite(got))
+        scale = np.maximum(np.abs(exp).max(axis=(0, 1)), 1e-300)
+        rel = (np.abs(got - exp) / scale).max()
+        assert rel <= 1e-10, (
+            f"分布式推进一步后的状态与单机不一致（相对 {rel:.3e}）"
+            f"，precond={precond}")
 
 
 class TestDistributedDualTimeStepping:

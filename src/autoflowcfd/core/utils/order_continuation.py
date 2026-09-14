@@ -494,254 +494,261 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
     orders = list(range(starting_order, original_order + 1))
 
     total_iter = 0
-    for target_p in orders:
-        print(f"\n--- Phase: P{target_p} ---")
+    # BLAS 线程数只在求解循环期间限制为 1（求解阶段实测快 9~11%）。
+    # 作用域必须是「循环期间」而非「构造求解器时一次」——后者是进程级
+    # 粘性状态，会让同进程里后续构造的求解器在 BLAS=1 下生成几何/算子，
+    # 改变度量项末位并破坏离散 GCL（真实 bug，完整记录见
+    # core/fr_solver/solver.py::blas_threads_limited 文档）。
+    from autoflowcfd.core.fr_solver.solver import blas_threads_limited
+    with blas_threads_limited(1):
+        for target_p in orders:
+            print(f"\n--- Phase: P{target_p} ---")
 
-        if target_p > 0 and target_p != solver.current_order:
-            solver._interpolate_to_new_order(target_p)
+            if target_p > 0 and target_p != solver.current_order:
+                solver._interpolate_to_new_order(target_p)
 
-        solver.current_order = target_p
-        # flux_point_type 显式透传，见上面 P0 重置分支同一处修复的说明。
-        solver.ops = generate_fr_operators(target_p, flux_point_type=getattr(solver, 'flux_type', 'radau'))
+            solver.current_order = target_p
+            # flux_point_type 显式透传，见上面 P0 重置分支同一处修复的说明。
+            solver.ops = generate_fr_operators(target_p, flux_point_type=getattr(solver, 'flux_type', 'radau'))
 
-        # 在构建新阶数几何*之前*先释放已经离开的阶段的完整几何缓存——
-        # 原先这段清理放在下面 set_order 之后，导致新阶数几何构建期间旧阶数
-        # 缓存仍完整驻留：79 万单元生产网格 P1→P2 切换时，P2 过积分几何构建峰值（预分配优化后仍有 ~4GB）
-        # 叠加 P1 缓存 ~2.5GB 超出可用内存，分配失败崩溃（两次独立复现，
-        # 2026-08-26）。set_order 构建新阶数几何时不读任何旧阶数缓存条目，
-        # 提前清理语义不变。
-        #
-        # 背景（保留自首次修复，2026-08-21）：HighOrderMesh._order_geometry_
-        # cache 的缓存语义是为“阶数可能被重新访问”的通用场景设计的，不知道
-        # 本函数的调用模式是单调递增的，会让每个阶段完整的 Flux Points 几何
-        # （逐面 Newton 插值算子，187 万面级别的网格上单阶数就有明显体量）
-        # 无限期累积。首次修复时实测：79 万单元网格进入 P2 阶段第一次残差
-        # 求值时，因同时驻留 P0+P1+P2 三份完整几何，一次 1.56 GiB 的过积分
-        # 张量收缩分配失败崩溃。
-        #
-        # 只保留当前阶段 `target_p`，不对 `original_order` 破例（真实复现，
-        # 2026-08-21，79 万单元/187 万面生产网格、本机 33GiB 物理内存：只破例保留
-        # original_order 这一个改动版本，P0->P1 切换时依然 OOM——P1 阶段仍要同时驻留
-        # P1 的完整 Flux Points 几何 + 被破例保留的 P2（original_order）几何两份，
-        # 对 187 万面规模的网格，两份仍然超出可用内存，说 3->2 份不够，必须是
-        # 3->1 份）。`orders = list(range(0, original_order+1))` 决定了循环最后一个
-        # target_p 恰好就是 original_order，那次 `solver.mesh.set_order(target_p)`
-        # 本来就会在缓存缺失时透明地触发重建（见 set_order 文档：
-        # `if order not in mesh._order_geometry_cache: 重建`，不是异常路径）。
-        stale_orders = [
-            o for o in list(solver.mesh._order_geometry_cache)
-            if o != target_p
-        ]
-        for o in stale_orders:
-            del solver.mesh._order_geometry_cache[o]
+            # 在构建新阶数几何*之前*先释放已经离开的阶段的完整几何缓存——
+            # 原先这段清理放在下面 set_order 之后，导致新阶数几何构建期间旧阶数
+            # 缓存仍完整驻留：79 万单元生产网格 P1→P2 切换时，P2 过积分几何构建峰值（预分配优化后仍有 ~4GB）
+            # 叠加 P1 缓存 ~2.5GB 超出可用内存，分配失败崩溃（两次独立复现，
+            # 2026-08-26）。set_order 构建新阶数几何时不读任何旧阶数缓存条目，
+            # 提前清理语义不变。
+            #
+            # 背景（保留自首次修复，2026-08-21）：HighOrderMesh._order_geometry_
+            # cache 的缓存语义是为“阶数可能被重新访问”的通用场景设计的，不知道
+            # 本函数的调用模式是单调递增的，会让每个阶段完整的 Flux Points 几何
+            # （逐面 Newton 插值算子，187 万面级别的网格上单阶数就有明显体量）
+            # 无限期累积。首次修复时实测：79 万单元网格进入 P2 阶段第一次残差
+            # 求值时，因同时驻留 P0+P1+P2 三份完整几何，一次 1.56 GiB 的过积分
+            # 张量收缩分配失败崩溃。
+            #
+            # 只保留当前阶段 `target_p`，不对 `original_order` 破例（真实复现，
+            # 2026-08-21，79 万单元/187 万面生产网格、本机 33GiB 物理内存：只破例保留
+            # original_order 这一个改动版本，P0->P1 切换时依然 OOM——P1 阶段仍要同时驻留
+            # P1 的完整 Flux Points 几何 + 被破例保留的 P2（original_order）几何两份，
+            # 对 187 万面规模的网格，两份仍然超出可用内存，说 3->2 份不够，必须是
+            # 3->1 份）。`orders = list(range(0, original_order+1))` 决定了循环最后一个
+            # target_p 恰好就是 original_order，那次 `solver.mesh.set_order(target_p)`
+            # 本来就会在缓存缺失时透明地触发重建（见 set_order 文档：
+            # `if order not in mesh._order_geometry_cache: 重建`，不是异常路径）。
+            stale_orders = [
+                o for o in list(solver.mesh._order_geometry_cache)
+                if o != target_p
+            ]
+            for o in stale_orders:
+                del solver.mesh._order_geometry_cache[o]
 
-        # mesh 的 SPs/Jacobian/Flux Points 几何是阶数相关的（见
-        # HighOrderMesh.set_order 文档）——必须随 solver.ops 一起切换，
-        # 否则梯度/残差计算会用错误维度的几何量崩溃。
-        solver.mesh.set_order(target_p)
+            # mesh 的 SPs/Jacobian/Flux Points 几何是阶数相关的（见
+            # HighOrderMesh.set_order 文档）——必须随 solver.ops 一起切换，
+            # 否则梯度/残差计算会用错误维度的几何量崩溃。
+            solver.mesh.set_order(target_p)
 
-        # 真实 bug 修复（2026-09-06，cube_demo 真实网格 P0->P1 升阶后
-        # k_mean 持续增长排查发现，见 fr_solver/turbulence.py::
-        # recompute_wall_distance_for_current_order 文档完整推导）：
-        # `interpolate_to_new_order`（上面 `solver._interpolate_to_new_
-        # order(target_p)` 调用，发生在 `set_order` 之前）对 wall_distance
-        # 做的是和 U/k_field 同一套 Lagrange 插值——但壁面距离不是解
-        # 多项式场，P0 单 SP 的常数基函数会把"单元里离墙最近的 SP"这个
-        # 空间分辨率信息广播抹平。`set_order(target_p)` 之后
-        # `solver.mesh.sps_coords` 才反映新阶数真实的 SP 坐标，这里
-        # 用缓存的纯几何量（WALL 节点坐标/Eikonal 节点距离场，与阶数
-        # 无关）重新做一次精确查询，覆盖掉那个被插值污染的近似值；没有
-        # 缓存时保留插值结果作为退化但形状正确的后备。
-        from autoflowcfd.core.fr_solver.turbulence import recompute_wall_distance_for_current_order
-        recompute_wall_distance_for_current_order(solver)
+            # 真实 bug 修复（2026-09-06，cube_demo 真实网格 P0->P1 升阶后
+            # k_mean 持续增长排查发现，见 fr_solver/turbulence.py::
+            # recompute_wall_distance_for_current_order 文档完整推导）：
+            # `interpolate_to_new_order`（上面 `solver._interpolate_to_new_
+            # order(target_p)` 调用，发生在 `set_order` 之前）对 wall_distance
+            # 做的是和 U/k_field 同一套 Lagrange 插值——但壁面距离不是解
+            # 多项式场，P0 单 SP 的常数基函数会把"单元里离墙最近的 SP"这个
+            # 空间分辨率信息广播抹平。`set_order(target_p)` 之后
+            # `solver.mesh.sps_coords` 才反映新阶数真实的 SP 坐标，这里
+            # 用缓存的纯几何量（WALL 节点坐标/Eikonal 节点距离场，与阶数
+            # 无关）重新做一次精确查询，覆盖掉那个被插值污染的近似值；没有
+            # 缓存时保留插值结果作为退化但形状正确的后备。
+            from autoflowcfd.core.fr_solver.turbulence import recompute_wall_distance_for_current_order
+            recompute_wall_distance_for_current_order(solver)
 
-        # B-9 修复（2026-08-25，真实复现：solve transient ddes P0 阶段第一步
-        # 幽灵态形状 (9,5) 无法广播进 (1,5)）：BD-02 的 SEM 入口幽灵态在
-        # 构造时按当时阶数的 FP 几何预存了每面 FP 物理坐标（n_fp 阶数相关），
-        # 切阶后与新阶幽灵数组形状失配；provider 其余部分（分组映射/
-        # 幽灵态公式）无阶数相关状态。每次切阶后按当前阶数重建（开销仅
-        # 边界面级循环，每个阶段切换只发生一次，可忽略）。
-        if hasattr(solver, "_build_boundary_ghost_provider"):
-            solver.boundary_ghost_provider = solver._build_boundary_ghost_provider(
-                getattr(solver, "bc_overrides", {})
+            # B-9 修复（2026-08-25，真实复现：solve transient ddes P0 阶段第一步
+            # 幽灵态形状 (9,5) 无法广播进 (1,5)）：BD-02 的 SEM 入口幽灵态在
+            # 构造时按当时阶数的 FP 几何预存了每面 FP 物理坐标（n_fp 阶数相关），
+            # 切阶后与新阶幽灵数组形状失配；provider 其余部分（分组映射/
+            # 幽灵态公式）无阶数相关状态。每次切阶后按当前阶数重建（开销仅
+            # 边界面级循环，每个阶段切换只发生一次，可忽略）。
+            if hasattr(solver, "_build_boundary_ghost_provider"):
+                solver.boundary_ghost_provider = solver._build_boundary_ghost_provider(
+                    getattr(solver, "bc_overrides", {})
+                )
+
+            expected_n_sps = solver.ops.D_3d.shape[0]
+            actual_n_sps = solver.state.U.shape[1]
+            if actual_n_sps != expected_n_sps:
+                raise RuntimeError(
+                    f"Order Continuation dimension mismatch after interpolation to P{target_p}: "
+                    f"State has {actual_n_sps} SPs but operators expect {expected_n_sps} SPs"
+                )
+
+            # 自适应 CFL 重置（2026-08-24）：阶数切换导致残差跳变（插值误差），
+            # 不应触发 CFL 缩小。重置后重新开始爬升阶段。
+            _cfl_ctrl = getattr(solver, '_cfl_controller', None)
+            if _cfl_ctrl is not None:
+                _cfl_ctrl.reset()
+
+            # 非最终阶段（P0/P1/...）vs 目标阶数的步数预算分派（2026-09-01，
+            # 2026-09-05 修正，见函数文档 phase_max_iter 参数说明）：
+            # `phase_max_iter` 未显式传入时只是取 `max_iter // len(orders)`
+            # 作为这一个数字本身的默认值——不是切换整套预算分配策略的开关。
+            # "目标阶数吃掉剩余全部步数、不再随阶段数量被稀释"这条规则对
+            # 默认值和显式值一视同仁、无条件生效（真实 bug 修复：此前用
+            # `is not None` 分岔，等价于把这条规则做成了必须显式传
+            # `--phase-max-iter` 才能享受的 opt-in 特性，不传这个 CLI 选项
+            # 的默认路径上，本参数当初要解决的问题完全没有解决）。
+            is_final_stage = (target_p == original_order)
+            effective_phase_max_iter = (
+                phase_max_iter if phase_max_iter is not None else max_iter // len(orders)
             )
+            stage_iter_budget = (max_iter - total_iter) if is_final_stage else effective_phase_max_iter
+            phase_tol = tol * (10 ** (original_order - target_p))
 
-        expected_n_sps = solver.ops.D_3d.shape[0]
-        actual_n_sps = solver.state.U.shape[1]
-        if actual_n_sps != expected_n_sps:
-            raise RuntimeError(
-                f"Order Continuation dimension mismatch after interpolation to P{target_p}: "
-                f"State has {actual_n_sps} SPs but operators expect {expected_n_sps} SPs"
-            )
+            # CL-02 修复：阶数提升触发条件改为残差下降判据
+            # 规范要求"残差降 2 个数量级后提升阶数"，而非固定迭代预算
+            # 记录本阶数初始残差，用于判断相对下降量
+            initial_residual_this_order = None
+            min_iter_before_transition = 20  # 最少迭代次数，避免过早提升
 
-        # 自适应 CFL 重置（2026-08-24）：阶数切换导致残差跳变（插值误差），
-        # 不应触发 CFL 缩小。重置后重新开始爬升阶段。
-        _cfl_ctrl = getattr(solver, '_cfl_controller', None)
-        if _cfl_ctrl is not None:
-            _cfl_ctrl.reset()
+            # resume 状态持久化修复（2026-08-23，真实 bug）：
+            # `initial_residual_this_order` 是纯局部变量，每次调用
+            # `run_order_continuation` 都从 None 重新记录——`solve steady`
+            # 单次连续运行里 `run_order_continuation` 只调用一次，这个变量
+            # 天然在每个阶数真正开始时被正确捕获一次；但 `solve resume`
+            # 是全新进程、全新一次 `run_order_continuation` 调用，checkpoint
+            # 恢复出来的状态通常已经在当前阶数收敛了一部分甚至大部分，
+            # resume 后这里第一步测出来的残差会被错当成"这个阶数刚开始时
+            # 的残差"，导致下面的残差下降判据（要求下降
+            # residual_drop_threshold 倍）在还没有真实下降那么多的情况下
+            # 被满足，过早升阶——真实复现：cube_demo 791k 网格从 P0
+            # checkpoint resume，本该继续在 P0 收敛却在 resume 后几步内就
+            # 满足了"下降 100 倍"判据升到 P1，插值到更高阶引入的截断误差
+            # 精确对应之前长期排查的"P0->P1 残差暴涨"现象的一个独立成因
+            # （与同一次调查里定位到的棱柱四边形侧面重复计数几何 bug是两个
+            # 不同的问题，此前那次的具体案例最终由几何 bug 完全解释，但这个
+            # resume 状态丢失的逻辑漏洞本身依然存在、换一个 checkpoint 就可能
+            # 复现）。resume 恢复出来的第一个阶段（target_p == starting_order）
+            # 如果 checkpoint 里带了上次持久化的阶段起始残差
+            # （solver._phase_initial_residual，见 solve_checkpoint_io.py
+            # write_checkpoint/rebuild_solver_from_checkpoint），直接用它做
+            # 种子而不是等第一步重新捕获——这样"下降了多少倍"就是相对
+            # *真正*的阶段起点算的，不是相对"这次 resume 调用第一步"算的。
+            # 旧版本 checkpoint 没有这个字段时保留原有行为（第一步捕获），
+            # 但打印警告，让用户知道这次 resume 的升阶判据可能提前触发
+            # （与 k_field/omega_field 缺失时的向后兼容处理方式一致）。
+            if resumed and target_p == starting_order:
+                _persisted = getattr(solver, "_phase_initial_residual", None)
+                if _persisted is not None:
+                    initial_residual_this_order = _persisted
+                    print(f"[INFO] P{target_p} resume：用 checkpoint 里保存的阶段起始残差 "
+                          f"({_persisted:.6e}) 做种子，升阶判据按真实阶段起点计算")
+                else:
+                    print(f"[WARN] P{target_p} 从旧版本 checkpoint resume（缺少阶段起始残差记录）："
+                          f"残差下降升阶判据将从这次 resume 的第一步重新开始计算，可能提前触发。")
 
-        # 非最终阶段（P0/P1/...）vs 目标阶数的步数预算分派（2026-09-01，
-        # 2026-09-05 修正，见函数文档 phase_max_iter 参数说明）：
-        # `phase_max_iter` 未显式传入时只是取 `max_iter // len(orders)`
-        # 作为这一个数字本身的默认值——不是切换整套预算分配策略的开关。
-        # "目标阶数吃掉剩余全部步数、不再随阶段数量被稀释"这条规则对
-        # 默认值和显式值一视同仁、无条件生效（真实 bug 修复：此前用
-        # `is not None` 分岔，等价于把这条规则做成了必须显式传
-        # `--phase-max-iter` 才能享受的 opt-in 特性，不传这个 CLI 选项
-        # 的默认路径上，本参数当初要解决的问题完全没有解决）。
-        is_final_stage = (target_p == original_order)
-        effective_phase_max_iter = (
-            phase_max_iter if phase_max_iter is not None else max_iter // len(orders)
-        )
-        stage_iter_budget = (max_iter - total_iter) if is_final_stage else effective_phase_max_iter
-        phase_tol = tol * (10 ** (original_order - target_p))
+            converged = False
+            final_residual = 1e10
 
-        # CL-02 修复：阶数提升触发条件改为残差下降判据
-        # 规范要求"残差降 2 个数量级后提升阶数"，而非固定迭代预算
-        # 记录本阶数初始残差，用于判断相对下降量
-        initial_residual_this_order = None
-        min_iter_before_transition = 20  # 最少迭代次数，避免过早提升
+            for i in range(stage_iter_budget):
+                t_start = _time.time()
+                res = solver.step(dt)
+                t_end = _time.time()
+                final_residual = res
+                total_iter += 1
+                # 收敛历史记录（V2.0 专家组盲审发现，2026-08-27，与
+                # solver.py::solve() 的普通循环同一约定）：api.py::
+                # get_convergence_history 读这个列表。
+                if hasattr(solver, 'residual_history'):
+                    solver.residual_history.append(res)
 
-        # resume 状态持久化修复（2026-08-23，真实 bug）：
-        # `initial_residual_this_order` 是纯局部变量，每次调用
-        # `run_order_continuation` 都从 None 重新记录——`solve steady`
-        # 单次连续运行里 `run_order_continuation` 只调用一次，这个变量
-        # 天然在每个阶数真正开始时被正确捕获一次；但 `solve resume`
-        # 是全新进程、全新一次 `run_order_continuation` 调用，checkpoint
-        # 恢复出来的状态通常已经在当前阶数收敛了一部分甚至大部分，
-        # resume 后这里第一步测出来的残差会被错当成"这个阶数刚开始时
-        # 的残差"，导致下面的残差下降判据（要求下降
-        # residual_drop_threshold 倍）在还没有真实下降那么多的情况下
-        # 被满足，过早升阶——真实复现：cube_demo 791k 网格从 P0
-        # checkpoint resume，本该继续在 P0 收敛却在 resume 后几步内就
-        # 满足了"下降 100 倍"判据升到 P1，插值到更高阶引入的截断误差
-        # 精确对应之前长期排查的"P0->P1 残差暴涨"现象的一个独立成因
-        # （与同一次调查里定位到的棱柱四边形侧面重复计数几何 bug是两个
-        # 不同的问题，此前那次的具体案例最终由几何 bug 完全解释，但这个
-        # resume 状态丢失的逻辑漏洞本身依然存在、换一个 checkpoint 就可能
-        # 复现）。resume 恢复出来的第一个阶段（target_p == starting_order）
-        # 如果 checkpoint 里带了上次持久化的阶段起始残差
-        # （solver._phase_initial_residual，见 solve_checkpoint_io.py
-        # write_checkpoint/rebuild_solver_from_checkpoint），直接用它做
-        # 种子而不是等第一步重新捕获——这样"下降了多少倍"就是相对
-        # *真正*的阶段起点算的，不是相对"这次 resume 调用第一步"算的。
-        # 旧版本 checkpoint 没有这个字段时保留原有行为（第一步捕获），
-        # 但打印警告，让用户知道这次 resume 的升阶判据可能提前触发
-        # （与 k_field/omega_field 缺失时的向后兼容处理方式一致）。
-        if resumed and target_p == starting_order:
-            _persisted = getattr(solver, "_phase_initial_residual", None)
-            if _persisted is not None:
-                initial_residual_this_order = _persisted
-                print(f"[INFO] P{target_p} resume：用 checkpoint 里保存的阶段起始残差 "
-                      f"({_persisted:.6e}) 做种子，升阶判据按真实阶段起点计算")
-            else:
-                print(f"[WARN] P{target_p} 从旧版本 checkpoint resume（缺少阶段起始残差记录）："
-                      f"残差下降升阶判据将从这次 resume 的第一步重新开始计算，可能提前触发。")
-
-        converged = False
-        final_residual = 1e10
-
-        for i in range(stage_iter_budget):
-            t_start = _time.time()
-            res = solver.step(dt)
-            t_end = _time.time()
-            final_residual = res
-            total_iter += 1
-            # 收敛历史记录（V2.0 专家组盲审发现，2026-08-27，与
-            # solver.py::solve() 的普通循环同一约定）：api.py::
-            # get_convergence_history 读这个列表。
-            if hasattr(solver, 'residual_history'):
-                solver.residual_history.append(res)
-
-            if initial_residual_this_order is None:
-                initial_residual_this_order = res
-            solver._phase_initial_residual = initial_residual_this_order
-
-            # Production ramp 完成检测（2026-08-25）：
-            # 渐变期间（前 50 步）湍流产生项被抑制，残差反映的是无湍流状态。
-            # 渐变完成后湍流突然开启，残差可能跳升，导致相对 step 0 的“下降
-            # 100x”判据永远无法满足（分母是 step 0 无湍流时的残差，分子是
-            # 湍流开启后的残差，两者不在同一物理基准上）。
-            # 修复：检测到渐变完成标记后，立即将基准残差重置为当前值，
-            # 让 100x 判据从湍流完全开启后的第一个真实残差开始计算。
-            if getattr(solver, '_turb_production_ramp_complete', False):
-                if not getattr(solver, '_ramp_baseline_reset_done', False):
-                    old_baseline = initial_residual_this_order
+                if initial_residual_this_order is None:
                     initial_residual_this_order = res
-                    solver._phase_initial_residual = res
-                    solver._ramp_baseline_reset_done = True
-                    print(f"[INFO] P{target_p} Iter {i+1}: Production ramp complete, "
-                          f"resetting residual baseline: {old_baseline:.6e} → {res:.6e}")
+                solver._phase_initial_residual = initial_residual_this_order
 
-            if True:  # 每步都输出残差与气动力系数
-                drop_ratio = initial_residual_this_order / max(res, 1e-30)
-                msg = f"P{target_p} Iter {i+1}: Residual = {res:.6e} | Drop: {drop_ratio:.1f}x | Time: {t_end - t_start:.2f}s"
-                # 自适应 CFL 状态
-                _cfl_ctrl = getattr(solver, '_cfl_controller', None)
-                if _cfl_ctrl is not None:
-                    msg += f" | CFL={_cfl_ctrl.cfl_number:.3f}"
-                # 每步输出气动力系数（轻量级压力积分，不含粘性力梯度）
-                ref_area = getattr(solver, '_reference_area', None)
-                if ref_area is not None and ref_area > 0:
-                    from autoflowcfd.postprocess.fr_coefficients import compute_forces_pressure_only
-                    aero = compute_forces_pressure_only(solver, ref_area)
-                    msg += f" | Cd={aero['Cd']:.4f} Cl={aero['Cl']:.4f} Cs={aero['Cs']:.4f}"
-                # 按方程分别归一化残差 + 最大残差定位（参照 Fluent scaled
-                # residuals / STAR-CCM+ Max 监视器，2026-09-12 新增，见
-                # residual_diagnostics.py 模块文档"背景"一节完整推导）：
-                # 合并 RMS（上面的 `res`）在少数单元残差幅值远超全场时会
-                # 被这几个单元主导、掩盖其余方程真实的收敛/发散趋势——
-                # 这次真实排查里方块前驻点单元的能量方程残差比全局RMS
-                # 还大，只用一个合并数字完全看不出来。这里只新增打印，
-                # 不改变 `initial_residual_this_order`/`drop_ratio` 这条
-                # 现有升阶判据的任何行为。
-                #
-                # 打印频率（2026-09-13 用户反馈修复）：此前每一步都打印这行
-                # 扩展诊断，正常收敛过程中绝大多数步的信息量重复（长期跟踪
-                # 用不需要逐步都看），把终端刷成大量看似"无用"的长行——只在
-                # 第 1 步（立即看到基线）和其后每 10 步打印一次，兼顾"排查
-                # 问题时能及时看到"和"正常运行时不刷屏"两者。
-                freestream = getattr(solver, 'freestream', None)
-                if freestream is not None and hasattr(solver.state, 'dU_dt') and (i == 0 or (i + 1) % 10 == 0):
-                    from autoflowcfd.core.fr_solver.residual_diagnostics import (
-                        compute_scaled_residuals, format_scaled_residual_line,
-                    )
-                    diag = compute_scaled_residuals(solver.state.dU_dt, freestream)
-                    msg += " | " + format_scaled_residual_line(diag)
-                print(msg)
+                # Production ramp 完成检测（2026-08-25）：
+                # 渐变期间（前 50 步）湍流产生项被抑制，残差反映的是无湍流状态。
+                # 渐变完成后湍流突然开启，残差可能跳升，导致相对 step 0 的“下降
+                # 100x”判据永远无法满足（分母是 step 0 无湍流时的残差，分子是
+                # 湍流开启后的残差，两者不在同一物理基准上）。
+                # 修复：检测到渐变完成标记后，立即将基准残差重置为当前值，
+                # 让 100x 判据从湍流完全开启后的第一个真实残差开始计算。
+                if getattr(solver, '_turb_production_ramp_complete', False):
+                    if not getattr(solver, '_ramp_baseline_reset_done', False):
+                        old_baseline = initial_residual_this_order
+                        initial_residual_this_order = res
+                        solver._phase_initial_residual = res
+                        solver._ramp_baseline_reset_done = True
+                        print(f"[INFO] P{target_p} Iter {i+1}: Production ramp complete, "
+                              f"resetting residual baseline: {old_baseline:.6e} → {res:.6e}")
 
-            # 中间 checkpoint 保存（按 --checkpoint-interval 间隔）
-            if checkpoint_callback is not None:
-                checkpoint_callback(solver, total_iter)
+                if True:  # 每步都输出残差与气动力系数
+                    drop_ratio = initial_residual_this_order / max(res, 1e-30)
+                    msg = f"P{target_p} Iter {i+1}: Residual = {res:.6e} | Drop: {drop_ratio:.1f}x | Time: {t_end - t_start:.2f}s"
+                    # 自适应 CFL 状态
+                    _cfl_ctrl = getattr(solver, '_cfl_controller', None)
+                    if _cfl_ctrl is not None:
+                        msg += f" | CFL={_cfl_ctrl.cfl_number:.3f}"
+                    # 每步输出气动力系数（轻量级压力积分，不含粘性力梯度）
+                    ref_area = getattr(solver, '_reference_area', None)
+                    if ref_area is not None and ref_area > 0:
+                        from autoflowcfd.postprocess.fr_coefficients import compute_forces_pressure_only
+                        aero = compute_forces_pressure_only(solver, ref_area)
+                        msg += f" | Cd={aero['Cd']:.4f} Cl={aero['Cl']:.4f} Cs={aero['Cs']:.4f}"
+                    # 按方程分别归一化残差 + 最大残差定位（参照 Fluent scaled
+                    # residuals / STAR-CCM+ Max 监视器，2026-09-12 新增，见
+                    # residual_diagnostics.py 模块文档"背景"一节完整推导）：
+                    # 合并 RMS（上面的 `res`）在少数单元残差幅值远超全场时会
+                    # 被这几个单元主导、掩盖其余方程真实的收敛/发散趋势——
+                    # 这次真实排查里方块前驻点单元的能量方程残差比全局RMS
+                    # 还大，只用一个合并数字完全看不出来。这里只新增打印，
+                    # 不改变 `initial_residual_this_order`/`drop_ratio` 这条
+                    # 现有升阶判据的任何行为。
+                    #
+                    # 打印频率（2026-09-13 用户反馈修复）：此前每一步都打印这行
+                    # 扩展诊断，正常收敛过程中绝大多数步的信息量重复（长期跟踪
+                    # 用不需要逐步都看），把终端刷成大量看似"无用"的长行——只在
+                    # 第 1 步（立即看到基线）和其后每 10 步打印一次，兼顾"排查
+                    # 问题时能及时看到"和"正常运行时不刷屏"两者。
+                    freestream = getattr(solver, 'freestream', None)
+                    if freestream is not None and hasattr(solver.state, 'dU_dt') and (i == 0 or (i + 1) % 10 == 0):
+                        from autoflowcfd.core.fr_solver.residual_diagnostics import (
+                            compute_scaled_residuals, format_scaled_residual_line,
+                        )
+                        diag = compute_scaled_residuals(solver.state.dU_dt, freestream)
+                        msg += " | " + format_scaled_residual_line(diag)
+                    print(msg)
 
-            # 收敛判据：相对容差（残差相对本阶段初始值下降 1/tol 倍）
-            # tol=1e-6 配合 phase_tol 的阶数缩放，实际含义：
-            #   P0: 下降 4 个量级 (1/(tol*100) = 1e4)
-            #   P1: 下降 5 个量级 (1/(tol*10)  = 1e5)
-            #   P2: 下降 6 个量级 (1/(tol*1)   = 1e6)
-            # 替代此前的绝对判据 res < phase_tol（要求 RMS 残差低于 1e-4~1e-6，
-            # 对 Mach 0.1~0.3 流动初始残差 ~1e8 需下降 12~14 个量级，永远不可达）。
-            drop_for_convergence = initial_residual_this_order / max(res, 1e-30)
-            required_drop = 1.0 / max(phase_tol, 1e-30)
-            if i >= 1 and drop_for_convergence >= required_drop:
-                converged = True
-                print(f"[OK] P{target_p} converged at iter {i+1} "
-                      f"(residual dropped {drop_for_convergence:.1e}x >= {required_drop:.1e}x)")
-                break
+                # 中间 checkpoint 保存（按 --checkpoint-interval 间隔）
+                if checkpoint_callback is not None:
+                    checkpoint_callback(solver, total_iter)
 
-            # 阶数提升判据（CL-02）：残差相对初始值下降足够多
-            # 非最高阶时，满足下降条件即可提前进入下一阶
-            if (target_p < original_order
-                    and i >= min_iter_before_transition
-                    and initial_residual_this_order > 0
-                    and initial_residual_this_order / max(res, 1e-30) >= residual_drop_threshold):
-                print(f"[OK] P{target_p} residual dropped {initial_residual_this_order/res:.1f}x "
-                      f"(>= {residual_drop_threshold:.0e}x), advancing to next order at iter {i+1}")
-                break
+                # 收敛判据：相对容差（残差相对本阶段初始值下降 1/tol 倍）
+                # tol=1e-6 配合 phase_tol 的阶数缩放，实际含义：
+                #   P0: 下降 4 个量级 (1/(tol*100) = 1e4)
+                #   P1: 下降 5 个量级 (1/(tol*10)  = 1e5)
+                #   P2: 下降 6 个量级 (1/(tol*1)   = 1e6)
+                # 替代此前的绝对判据 res < phase_tol（要求 RMS 残差低于 1e-4~1e-6，
+                # 对 Mach 0.1~0.3 流动初始残差 ~1e8 需下降 12~14 个量级，永远不可达）。
+                drop_for_convergence = initial_residual_this_order / max(res, 1e-30)
+                required_drop = 1.0 / max(phase_tol, 1e-30)
+                if i >= 1 and drop_for_convergence >= required_drop:
+                    converged = True
+                    print(f"[OK] P{target_p} converged at iter {i+1} "
+                          f"(residual dropped {drop_for_convergence:.1e}x >= {required_drop:.1e}x)")
+                    break
 
-        if target_p == original_order and converged:
-            print(f"\n[OK] Order Continuation completed: Final P{original_order} converged")
-            return SolverResult(converged=True, iterations=total_iter, final_residual=final_residual)
+                # 阶数提升判据（CL-02）：残差相对初始值下降足够多
+                # 非最高阶时，满足下降条件即可提前进入下一阶
+                if (target_p < original_order
+                        and i >= min_iter_before_transition
+                        and initial_residual_this_order > 0
+                        and initial_residual_this_order / max(res, 1e-30) >= residual_drop_threshold):
+                    print(f"[OK] P{target_p} residual dropped {initial_residual_this_order/res:.1f}x "
+                          f"(>= {residual_drop_threshold:.0e}x), advancing to next order at iter {i+1}")
+                    break
+
+            if target_p == original_order and converged:
+                print(f"\n[OK] Order Continuation completed: Final P{original_order} converged")
+                return SolverResult(converged=True, iterations=total_iter, final_residual=final_residual)
 
     solver.order = original_order
     solver.ops = original_ops

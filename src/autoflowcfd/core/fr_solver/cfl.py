@@ -9,7 +9,7 @@ AutoFlowCFD V2.0 - FRSolver 局部时间步长计算 (从 fr_solver.py 拆分)
 import numpy as np
 
 
-def compute_local_time_step(solver) -> np.ndarray:
+def compute_local_time_step(solver, return_physical_too: bool = False):
     """
     计算局部时间步长（基于CFL条件）。
 
@@ -56,8 +56,28 @@ def compute_local_time_step(solver) -> np.ndarray:
        直接类比：用该 SP 自己的 det(J) 当作局部"体积"，
        sum_m ||adj(J)[SP,m,:]|| 当作局部"总通量面积"。
 
+    低马赫数伪时间预处理（2026-09-14 新增，见 `core/utils/preconditioning.py`
+    模块末尾"伪时间预处理矩阵 Gamma"一节完整推导）：`solver.
+    low_mach_precond_enabled` 为真时，平均流的 dt 改用**预处理后**的波速
+    (|un| + c_precond) 而不是物理波速 (|un| + a)。这与上面第 0 条记录的
+    2026-08-24 事故**不是同一件事**：那次只把 c_precond 塞进 CFL、没有改
+    被积分的方程，必然失稳；现在 `step.py` 会把同一套 beta^2 定义下的
+    预处理矩阵 Gamma 作用到平均流残差上（`dU/dtau = -Gamma R`），
+    Jacobian 谱半径本身就变成了 (|un| + c_precond)，两者成对出现才成立。
+    M=0.1 的外流场下这一对改动让平均流 dt 放大约 5 倍（(33+340)/(33+36)）。
+
+    湍流标量（k/omega）拿到的仍然是**物理波速**算出的那份 dt（调用方传
+    `return_physical_too=True` 取第二个返回值）：湍流输运是被动标量的
+    对流+扩散，不含声学模态，本来就不该被声速限制——但它的显式更新里
+    `transport_k/transport_omega` 刻意没有做 point-implicit 阻尼（见
+    `turbulence/sst.py::update_fields` 文档），所以这里保持保守、不跟着
+    放大，把预处理的收益严格限制在平均流上，避免把一个已经验证稳定的
+    湍流更新推到未经验证的步长上。
+
     Returns:
-        dt_local: 局部时间步长，形状 (n_cells, n_sps)
+        return_physical_too=False（默认）: dt_local，形状 (n_cells, n_sps)
+        return_physical_too=True: (dt_mean_flow, dt_physical)——前者可能是
+            预处理后的（未启用预处理时两者是同一个数组对象）
     """
     n_cells, n_sps, n_vars = solver.state.U.shape
 
@@ -189,4 +209,38 @@ def compute_local_time_step(solver) -> np.ndarray:
         metric_flux_scale = np.tile(metric_flux_scale, (1, rep))[:, :n_sps]
     dt_geometric = CFL * np.abs(det_jacs) / np.maximum(metric_flux_scale * wave_speed, 1e-300)
 
-    return np.minimum(np.minimum(dt_advective, dt_visc), dt_geometric)
+    dt_physical = np.minimum(np.minimum(dt_advective, dt_visc), dt_geometric)
+
+    if not getattr(solver, "low_mach_precond_enabled", False):
+        return (dt_physical, dt_physical) if return_physical_too else dt_physical
+
+    # === 预处理后的平均流 dt（见本函数文档"低马赫数伪时间预处理"一节）===
+    # 只有对流项与几何/度量项里的波速需要换成预处理声速；粘性限制
+    # （dt_visc）与声速无关，原样复用。
+    # beta^2 必须按**速度模**取，不能按面法向速度 un 取——完整论证见
+    # `preconditioning.py::preconditioned_sound_speed` 文档：Gamma 里的
+    # beta^2 是速度模定义的，而 |un| <= |u| 使 beta^2(un) <= beta^2(|u|)，
+    # 误用前者会让有效声速偏小、dt 被系统性高估（流动与面法向越斜越严重），
+    # 与 2026-08-24 那次"步长与算子不成对"的事故同类。
+    # （`preconditioned_acoustic_eigs` 从它的第一个参数自算 beta^2，服务的
+    #  是逐面通量特征值，不能直接拿来定伪时间步长。）
+    from autoflowcfd.core.utils.preconditioning import preconditioned_sound_speed
+    mach_ref = solver.freestream["mach_ref"]
+    vel_mag_owner = vel_mag[owner_cells, 0]
+    c_pre_face = preconditioned_sound_speed(vel_mag_owner, a_o, mach_ref)
+    spectral_p = np.zeros(n_cells, dtype=np.float64)
+    np.add.at(spectral_p, owner_cells, (np.abs(un_owner) + c_pre_face) * face_areas)
+    if np.any(internal):
+        c_pre_nb = preconditioned_sound_speed(vel_mag[nc, 0], a_n, mach_ref)
+        np.add.at(spectral_p, nc, (np.abs(un_neigh) + c_pre_nb) * face_areas[internal])
+    spectral_p = np.maximum(spectral_p, 1e-30)
+    dt_adv_p = np.tile((CFL * order_factor_advective * volumes / spectral_p)[:, np.newaxis],
+                       (1, n_sps))
+
+    # 几何/度量项：逐 SP 的波速同样换成预处理值，beta^2 同样按速度模取
+    c_pre_sp = preconditioned_sound_speed(vel_mag, a, mach_ref)
+    wave_speed_p = np.maximum(vel_mag + c_pre_sp, 1e-10)
+    dt_geo_p = CFL * np.abs(det_jacs) / np.maximum(metric_flux_scale * wave_speed_p, 1e-300)
+
+    dt_mean = np.minimum(np.minimum(dt_adv_p, dt_visc), dt_geo_p)
+    return (dt_mean, dt_physical) if return_physical_too else dt_mean

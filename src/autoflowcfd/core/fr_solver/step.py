@@ -79,7 +79,13 @@ def step(solver, dt: float) -> float:
             sem.advance(dt, mean_velocity=np.array([solver.freestream["vel_inf"], 0.0, 0.0]))
 
         n_cells, n_sps, n_vars = solver.state.U.shape
-        dt_local = solver._compute_local_time_step()  # (n_cells, n_sps)
+        # 低马赫数伪时间预处理（2026-09-14 新增）：`dt_local` 是**平均流**用
+        # 的步长（启用预处理时按预处理波速 (|un|+c_precond) 放大，M~0.1 下
+        # 约 5 倍）；`dt_physical` 是按物理波速算出的那份，留给湍流标量
+        # 更新用——完整理由见 cfl.py::compute_local_time_step 文档
+        # "低马赫数伪时间预处理"一节（湍流输运的显式更新刻意没有 point-
+        # implicit 阻尼，不跟着放大步长）。未启用预处理时两者是同一个数组。
+        dt_local, dt_physical = solver._compute_local_time_step(return_physical_too=True)
 
         # 湍流源项在当前状态下求值一次（沿用旧有的单步显式-半隐式
         # 阻尼更新，见 turbulence_sst.py::update_fields）。
@@ -112,14 +118,21 @@ def step(solver, dt: float) -> float:
         # 不同的“时间”上，物理时间精度失去意义。稳态收敛加速模式
         # （SSP-RK/IMEX）下 dt 参数定义上就应被忽略（见文档），
         # 用 dt_local 才是这里的一致行为。
-        turb_dt = dt if solver.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME else dt_local
+        turb_dt = (dt if solver.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME
+                   else dt_physical)
         turb_source = solver.compute_turbulence_source(turb_dt)
 
         U_flat = solver.state.U.reshape(n_cells * n_sps, n_vars)
         dt_local_flat = dt_local.reshape(n_cells * n_sps)
 
-        def mean_flow_residual(U_flat_trial: np.ndarray) -> np.ndarray:
-            """TimeIntegrator 约定：dU/dt = -residual_func(U)。"""
+        def mean_flow_residual_raw(U_flat_trial: np.ndarray) -> np.ndarray:
+            """未经预处理的原始残差 R（TimeIntegrator 约定 dU/dt = -R）。
+
+            残差监控（`state.dU_dt` -> `get_residual_norm`）与自适应 CFL
+            都必须用这一份**物理**残差，不能用预处理后的：Gamma 可逆、
+            两者同时趋零，但量级不同，用预处理值会让打印出来的残差、
+            收敛判据以及与历史算例的对比全部失去可比性。
+            """
             U_trial = U_flat_trial.reshape(n_cells, n_sps, n_vars)
             saved_U = solver.state.U
             solver.state.U = U_trial
@@ -134,7 +147,30 @@ def step(solver, dt: float) -> float:
             # 峰值降 2.4GB。见 time_integration/base.py 的 del L0/L1 同类注释。
             visc_res += inv_res
             visc_res *= -1  # dU/dt → R(U)（TimeIntegrator 约定 dU/dt=-R）
-            return visc_res.reshape(n_cells * n_sps, n_vars)
+            return visc_res
+
+        def mean_flow_residual(U_flat_trial: np.ndarray) -> np.ndarray:
+            """供 TimeIntegrator 推进用的残差：启用低马赫数预处理时返回
+            `Gamma R`，否则就是原始 R。
+
+            `Gamma` 线性，直接作用在 R 上与作用在 dU/dtau 上等价。它
+            **必须**与 cfl.py 里按预处理波速取的 dt 成对出现，缺一个就是
+            2026-08-24 那次失稳（完整推导/正确性论证见
+            core/utils/preconditioning.py 模块末尾"伪时间预处理矩阵 Gamma"）。
+            `solver.state.Q` 此刻正是 U_trial 对应的原始变量——
+            `compute_inviscid_residual` 入口的 `_update_primitives()` 是用
+            U_trial 算的（闭包里刚把 state.U 换成 U_trial），不是基态；
+            这一点是这里能直接用它的前提。
+            """
+            res = mean_flow_residual_raw(U_flat_trial)
+            if solver.low_mach_precond_enabled:
+                from autoflowcfd.core.utils.preconditioning import (
+                    apply_low_mach_preconditioner,
+                )
+                res = apply_low_mach_preconditioner(
+                    res, solver.state.Q, solver.freestream["mach_ref"], out=res,
+                )
+            return res.reshape(n_cells * n_sps, n_vars)
 
         def convective_residual_only(U_flat_trial: np.ndarray) -> np.ndarray:
             """IMEX 显式项：只含无粘对流残差，供 step_imex 使用。"""
@@ -166,8 +202,22 @@ def step(solver, dt: float) -> float:
         # solver.state.dU_dt——收敛监控 (get_residual_norm) 依赖这个量，
         # 重构 step() 时若遗漏这一步，会让残差历史恒为 0（表面上"已收敛"，
         # 实际只是从未被更新过），已用非均匀扰动初场验证发现并修复。
-        residual0 = mean_flow_residual(U_flat)
-        solver.state.dU_dt = (-residual0).reshape(n_cells, n_sps, n_vars)
+        # `residual0` 复用给积分器省掉一次 Stage 0 残差求值；但监控用的
+        # `state.dU_dt` 必须是**未预处理**的物理残差（见
+        # `mean_flow_residual_raw` 文档）。下面先算原始残差、取负存进
+        # dU_dt（`-res` 本身产生独立副本），再就地把同一块内存预处理成
+        # 积分器要的 `Gamma R`——不额外分配 1.2GiB（P2 规模）的数组。
+        residual0_raw = mean_flow_residual_raw(U_flat)
+        solver.state.dU_dt = (-residual0_raw).reshape(n_cells, n_sps, n_vars)
+        if solver.low_mach_precond_enabled:
+            from autoflowcfd.core.utils.preconditioning import (
+                apply_low_mach_preconditioner,
+            )
+            residual0_raw = apply_low_mach_preconditioner(
+                residual0_raw, solver.state.Q, solver.freestream["mach_ref"],
+                out=residual0_raw,
+            )
+        residual0 = residual0_raw.reshape(n_cells * n_sps, n_vars)
 
         # 模态滤波回调（S-05 补充修复）：见 fr_solver_filter.py 文档——
         # 必须传给 TimeIntegrator，由它在*每个* RK stage 的正定性投影

@@ -92,6 +92,31 @@ def _make_stub(n_local, n_sps, n_vars, target):
     stub.filter_func_gpu = None
     stub.residual_history = []
     stub.iteration = 0
+    # 逐单元局部 CFL 步长（2026-09-14）：`step()` 的 DUAL_TIME 分支现在
+    # 用 `_compute_local_time_step_gpu()` 算内层伪时间步长，而不是把调用
+    # 方传入的全局 `dt` 铺满（那条"已接受的简化"已补齐，见
+    # gpu_distributed.py::_compute_local_time_step_gpu 的重写说明）。
+    # 本 stub 刻意不构造真实网格几何/紧凑面数据（那会把这个专注于
+    # "trial U 是否正确临时写入再恢复""dual_time_U_prev 是否持久化"的
+    # 用例变成一个完整求解器集成测试），所以这里给一个常量步长替身——
+    # 与原先 `dt` 铺满的数值行为完全一致，这两个风险点的判据不受影响
+    # （只要 DUAL_TIME 收敛，U_gpu 必须收敛到 target，是纯不动点性质）。
+    _PSEUDO_DT = 1.0e-3
+
+    def _compute_local_time_step_gpu(return_physical_too: bool = False):
+        arr = np.full(n_local, _PSEUDO_DT)
+        return (arr, arr) if return_physical_too else arr
+    stub._compute_local_time_step_gpu = _compute_local_time_step_gpu
+    # 紧凑<->原生排列置换：本 stub 只有 local（无 halo）、且不做"棱柱在前"
+    # 重排，所以是恒等置换。
+    stub._inv_perm_gpu = np.arange(n_local)
+    stub._perm_gpu = np.arange(n_local)
+    stub.low_mach_precond_enabled = False
+    stub._cfl_controller = None
+
+    def _update_cfl_controller(residual_norm):
+        return None
+    stub._update_cfl_controller = _update_cfl_controller
 
     calls = {"count": 0}
 
