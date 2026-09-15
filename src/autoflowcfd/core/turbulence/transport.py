@@ -462,8 +462,21 @@ def compute_scalar_convection_residual(
 
     # 真实复现（2026-08-21，79万单元生产网格，Order Continuation P0->P1
     # 切换后）：退化单元（坍缩坐标/BL 挤出导致 det(J) 局部极小，见
-    # troubled_cell.py 模块文档——平均流残差有 mechanism-1/2 两道专门
-    # 保护，本模块至今没有）上这里会真的溢出到 inf，`np.errstate` 只是
+    # troubled_cell.py 模块文档）上这里会真的溢出到 inf，`np.errstate` 只是
+    #
+    # **过时表述已更正（2026-09-15）**：这里原先写的是"平均流残差有
+    # mechanism-1/2 两道专门保护，本模块至今没有"。两句都不再成立：
+    # (a) 平均流对残差的**实际干预**早已全部由机制 3
+    #     （`suppress_residual_outliers`）承担，机制 1/2 的检测判据只
+    #     保留用于诊断报告（见 troubled_cell.py 文档"机制3"一节）；
+    # (b) 本模块**已经接入**机制 3——见
+    #     `compute_turbulence_transport_residual` 末尾对
+    #     `dk_dt_transport`/`domega_dt_transport` 的
+    #     `suppress_residual_outliers` 调用（那里的注释记录了接入过程）。
+    # 也就是说本模块现在与平均流用的是同一套、也是唯一在实际起作用的
+    # 那套保护。排查"湍流输运缺 troubled-cell 保护"这条疑点时是靠核实
+    # 代码而不是照搬这段注释才发现它过时的——本项目有过多次过时标注被
+    # 当成真实缺口的先例。
     # 让这个*已知、已经在下游处理*的溢出不再往 stderr 打印 RuntimeWarning
     # 噪音——不改变任何数值结果：`compute_turbulence_transport_residual`
     # 末尾的 `np.where(np.isfinite(...), ..., 0.0)` 本来就会把这类 inf/nan
@@ -609,15 +622,36 @@ def _scalar_diffusion_volume_overintegrated(gamma_field, grad_phi, oi, n_sps):
     FINE 点相乘**，用 FINE 点度量算逆变通量、FINE 微分矩阵求散度，再
     精确限制回 coarse。
 
-    **有意保留的一处局限（不是疏漏）**：`Gamma = mu + sigma*rho*nu_t` 里
-    `nu_t = k/omega` 是**商**、根本不是多项式，所以它在 coarse 点上的
-    节点值本身已经是一个投影结果——这里只能把这份节点表示精确插值到
-    FINE 点，无法像平均流那样"在 FINE 点重新求值非线性通量函数"
-    （`fr_residual/inviscid.py` 能那样做是因为它手里有 Q、可以在 FINE
-    点重算 `euler_physical_flux`；本函数拿到的是已经组装好的
-    `gamma_field`）。因此去掉的是 **Gamma×grad_phi 这个乘积以及与度量
-    项乘积**的混叠，Gamma 自身的混叠仍在。要把后者也去掉需要把 k/omega/
-    rho 一路传进来、在 FINE 点重算 nu_t，是独立的一步改动。
+    **`Gamma` 自身的混叠：已量化、刻意不实施（2026-09-15 结论）**。
+    `Gamma = mu + sigma*rho*nu_t` 里 `nu_t` 是**商**、根本不是多项式，
+    它在 coarse 点上的节点值本身已经是一个投影结果——本函数只能把这份
+    节点表示精确插值到 FINE 点，无法像平均流那样"在 FINE 点重新求值
+    非线性通量函数"（`fr_residual/inviscid.py` 能那样做是因为它手里有 Q）。
+    所以这里去掉的是 **Gamma×grad_phi 乘积以及与度量项乘积**的混叠。
+
+    要不要把 Gamma 自身那层也去掉，做过受控测量（`Gamma = mu +
+    s*rho*k/omega`，rho/k/omega 全取一次场，与解析散度比较，相对 L-inf）：
+
+        order=1 prism: 插值 Gamma 1.0019e-02 -> 细点精确 3.2491e-05  (308x 更好)
+        order=1 tet  : 插值 Gamma 9.3413e-03 -> 细点精确 1.4530e-04  ( 64x 更好)
+        order=2 prism: 插值 Gamma 1.7408e-02 -> 细点精确 3.4978e-02  (0.50x **更差**)
+        order=2 tet  : 插值 Gamma 1.8643e-03 -> 细点精确 1.6869e-03  (1.11x)
+
+    **order=2 上"细点精确求值"反而更差**，不是测量噪声：在细点精确求值
+    一个有理函数、再对它的 degree-over_order 插值求导，会把更多高频内容
+    带进微分算子；而插值过的 Gamma 本身更平滑。也就是说这条改动**不是
+    单调有益**的。
+
+    代价侧同样不小：生产里 `sigma` 来自 SST 混合函数 `F1`，而 `F1` 依赖
+    `wall_distance`——那是纯几何量，**必须重新 KD-Tree 查询、不能插值**
+    （2026-09-05 真实 bug 修复：阶数切换时把 wall_distance 当解多项式场
+    插值导致 d1 系统性偏大），细点是 791492x64 ≈ 5070 万个查询点；此外
+    每步还要在 8 倍点数上重算 `F1`/`nu_t`/`CD_kw`。
+
+    综合判断：在 order=2 净负、order=1 的收益又落在一个相对误差已经只有
+    1e-2 的项上（对比本轮去掉的 200%~498%），不值这个代价。**这是一条
+    有数据支撑的结论，不是待办项**——若将来工作阶数或精度诉求变化需要
+    重新评估，上面的数字与代价分析可以直接复用。
     """
     n_cells = gamma_field.shape[0]
     det_fine, inv_fine = oi["det_fine"], oi["inv_fine"]
