@@ -45,7 +45,9 @@ from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient
 from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
 from autoflowcfd.core.fr_operators.flux_kernels import viscous_physical_flux_batch
 from autoflowcfd.core.fr_operators.volume_contract import (
-    contract_shared_operator_2axis, compute_adj_j, contravariant_flux_from_metric,
+    contract_shared_operator_1axis, contract_shared_operator_2axis,
+    compute_adj_j, contravariant_flux_from_metric,
+    OVERINT_CHUNK_CELLS, get_overintegration_context,
 )
 
 GAMMA = 1.4
@@ -110,6 +112,95 @@ def viscous_physical_flux(
     G[..., :, 1:4] = np.swapaxes(tau, -1, -2)  # G[...,i,1+j] = tau[...,j,i] = tau[...,i,j] (对称)
     G[..., :, 4] = work + q
     return G
+
+
+def resolve_viscous_overintegration() -> str:
+    """粘性体积项是否走过积分（去混叠）：`AFCFD_VISC_OVERINT = off | on`，
+    默认 off。
+
+    **为什么需要它（2026-09-15）**：去混叠机制
+    （`fr/collapsed_basis.py::build_overintegration_operators` 有完整动机
+    与实测数字——不去混叠的 P2 体积项对解析残差恒为 0 的线性剪切场算出
+    的残差是真值的 43~62 倍）一直**只接在平均流的无粘体积项**上。粘性项
+    完全没有（grep 确认本文件 overint/jacobians_fine 零命中）。
+
+    而粘性通量 `G(Q, grad_vel, grad_T, mu_t)` 里有 `tau = mu_eff*(...)`
+    与 `u·tau`、`k_cond*grad_T` 这些乘积，再乘 `adj(J)`，真实多项式次数
+    远高于 order。
+
+    它此前无所谓的原因**已经消失**：legacy 模态滤波器下 `grad_vel` 是
+    机器零（实测胞内 |grad u|/(U/h)=7.7e-16），粘性体积项几乎只剩边界
+    IP 罚项；一旦真正关掉滤波器（零阶数损失），`grad_vel` 变成 O(0.08)
+    的真实量，这一项立刻活跃。
+
+    与 k/omega 那边不同的是**这里没有"Gamma 自身混叠"那种局限**：本函数
+    手上有 Q/grad_vel/grad_T/mu_t，可以像无粘路径那样在 FINE 点**重新
+    求值非线性通量函数本身**，不是只能插值一个已经组装好的乘积。
+
+    仍然存在的一处上游局限（如实写明）：`grad_vel`/`grad_T` 本身是
+    `compute_physical_gradient` 在 coarse SPs 上算出来的，而那个算子
+    **也没有**去混叠（`adj(J)*D*Q/det(J)` 同样是乘积）。这里把它们精确
+    插值到 FINE 点，去掉的是**通量与度量项这一层**的混叠，梯度自身在
+    coarse 上就带进来的混叠还在。补那一层是独立的一步。
+    """
+    v = os.environ.get("AFCFD_VISC_OVERINT", "off").lower()
+    if v not in ("off", "on"):
+        raise ValueError(
+            f"AFCFD_VISC_OVERINT={v!r} 不是合法取值（off | on）。"
+            f"'off' 是既有行为（体积项直接在 coarse SPs 上微分），"
+            f"'on' 把粘性体积项改走 FINE 点去混叠。")
+    return v
+
+
+def _viscous_volume_overintegrated(Q, grad_vel, grad_T, mu_t_field,
+                                   mu, Pr, Pr_t, oi, n_sps):
+    """粘性体积项 `div(adj(J)*G(Q,grad_vel,grad_T,mu_t))` 的去混叠版，
+    返回 (n_cells, n_sps, 5)。
+
+    链路与 `fr_residual/inviscid.py` 的过积分分支逐项对应：
+      ① Q/grad_vel/grad_T/mu_t 各自精确插值到 FINE 点（各自次数 <= order）；
+      ② 在 FINE 点**重新求值** `viscous_physical_flux_batch`（非线性函数
+         本身在细点求值，不是把 coarse 上的乘积插过去——这正是去混叠的
+         全部内容）；
+      ③ 用解析精确的 FINE 点度量算逆变通量；
+      ④ 用 FINE 网格自己的微分矩阵求散度；
+      ⑤ 精确插值限制回 coarse SPs。
+    """
+    n_cells = Q.shape[0]
+    det_fine, inv_fine = oi["det_fine"], oi["inv_fine"]
+    n_fine = oi["n_fine"]
+    div_comp = np.zeros((n_cells, n_sps, 5))
+    for seg_lo, seg_hi, op_c2f, op_D_fine, op_f2c in oi["segs"]:
+        for c0 in range(seg_lo, seg_hi, OVERINT_CHUNK_CELLS):
+            c1 = min(c0 + OVERINT_CHUNK_CELLS, seg_hi)
+            nb = c1 - c0
+            Q_f = contract_shared_operator_1axis(
+                op_c2f, np.ascontiguousarray(Q[c0:c1]))              # (nb,n_fine,5)
+            gv_f = contract_shared_operator_1axis(
+                op_c2f, np.ascontiguousarray(
+                    grad_vel[c0:c1].reshape(nb, n_sps, 9))).reshape(nb, n_fine, 3, 3)
+            gT_f = contract_shared_operator_1axis(
+                op_c2f, np.ascontiguousarray(grad_T[c0:c1]))         # (nb,n_fine,3)
+            mut_f = contract_shared_operator_1axis(
+                op_c2f, np.ascontiguousarray(
+                    mu_t_field[c0:c1][:, :, None]))[..., 0]          # (nb,n_fine)
+            G_phys_f = viscous_physical_flux_batch(
+                np.ascontiguousarray(Q_f.reshape(-1, 5)),
+                np.ascontiguousarray(gv_f.reshape(-1, 3, 3)),
+                np.ascontiguousarray(gT_f.reshape(-1, 3)),
+                mu, Pr,
+                np.ascontiguousarray(mut_f.reshape(-1)),
+                Pr_t,
+            ).reshape(nb, n_fine, 3, 5)
+            del Q_f, gv_f, gT_f, mut_f
+            G_tilde_f = contravariant_flux_from_metric(
+                det_fine[c0:c1], inv_fine[c0:c1], G_phys_f)
+            del G_phys_f
+            div_f = contract_shared_operator_2axis(op_D_fine, G_tilde_f)
+            del G_tilde_f
+            div_comp[c0:c1] = contract_shared_operator_1axis(op_f2c, div_f)
+            del div_f
+    return div_comp
 
 
 def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
@@ -243,10 +334,22 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
     # 理由与 gradients.py::compute_physical_gradient 同一处文档——D_3d_tet
     # 是坍缩坐标专属微分矩阵，对 native 单纯形基节点没有意义。
     _tet_op_D = ops.D_native_tet_padded if getattr(ops, "D_native_tet_padded", None) is not None else ops.D_3d_tet
-    for seg_lo, seg_hi, op_D in (
+    # 去混叠（AFCFD_VISC_OVERINT=on）：粘性通量是 tau/u·tau/k_cond*grad_T
+    # 这些乘积再乘 adj(J)，直接在 coarse SPs 上微分等价于"先混叠再求导"。
+    # 理由、实测背景与保留的上游局限见 `resolve_viscous_overintegration`。
+    # 默认 off，行为逐位不变。
+    _oi = (get_overintegration_context(mesh, ops)
+           if resolve_viscous_overintegration() == "on" else None)
+    if _oi is not None:
+        div_comp = _viscous_volume_overintegrated(
+            Q, grad_vel, grad_T, mu_t_field, mu, Pr, Pr_t, _oi, n_sps)
+        residual = div_comp / det_jacs[..., None]
+        del div_comp
+    else:
+      for seg_lo, seg_hi, op_D in (
         (0, n_prism, ops.D_3d_prism),
         (n_prism, n_cells, _tet_op_D),
-    ):
+      ):
         for c0 in range(seg_lo, seg_hi, _VISC_CHUNK_CELLS):
             c1 = min(c0 + _VISC_CHUNK_CELLS, seg_hi)
             G_phys = viscous_physical_flux_batch(
@@ -268,8 +371,9 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
             del G_phys  # 块内用完即弃，下一轮迭代变量重新绑定
             div_comp[c0:c1] = contract_shared_operator_2axis(op_D, G_tilde)
             del G_tilde
-    residual = div_comp / det_jacs[..., None]  # 注意：粘性项是 +div(G)（见模块文档的符号约定）
-    del div_comp  # ~854MiB，用完即弃
+      # 注意：粘性项是 +div(G)（见模块文档的符号约定）
+      residual = div_comp / det_jacs[..., None]
+      del div_comp  # ~854MiB，用完即弃
 
     # --- 界面项：numba 逐点标量 kernel（性能优化，替代原纯 Python
     # `for f in range(fc.n_faces)` 逐面循环，理由/验证方式与

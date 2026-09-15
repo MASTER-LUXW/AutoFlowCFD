@@ -285,3 +285,46 @@ def contract_shared_operator_2axis(D: np.ndarray, X: np.ndarray) -> np.ndarray:
     C, _, _, V = X.shape
     # J,M 相邻，合并成 K 轴是 no-copy view（小算子 D 同理）。
     return _contract_shared(D.reshape(F, J * M), X.reshape(C, J * M, V))
+
+#: 过积分（去混叠）分块大小，与 `fr_residual/inviscid.py` 的强形式分支
+#: 同一取值，理由见该处 P2 OOM 修复说明。
+OVERINT_CHUNK_CELLS = 32768
+
+
+def get_overintegration_context(mesh, ops):
+    """取过积分所需的全部算子与细点度量；任一缺失则返回 None（调用方
+    退回 coarse 路径）。
+
+    三个消费方共用同一份：`fr_residual/inviscid.py`（无粘体积项，本项目
+    唯一一直开着的）、`core/turbulence/transport.py`（k/omega 对流与
+    扩散体积项）、`fr_residual/viscous_flux.py`（粘性体积项）。
+
+    缺失的唯一正常情形是 `order == 0`：P0 是分片常数场、多项式导数恒为
+    零，没有可去混叠的内容，`jacobians_fine` 与 overint 算子都不构造。
+
+    Returns:
+        dict 或 None。dict 含 `n_fine`、`det_fine`/`inv_fine`（均按
+        (n_cells, n_fine, ...) 重整形）、以及 `segs`——
+        [(lo, hi, interp_c2f, D_fine, restrict_f2c), ...] 两段（棱柱在前、
+        四面体在后），与"棱柱在前"的单元存储顺序一致。
+    """
+    if getattr(mesh, "jacobians_fine", None) is None:
+        return None
+    for name in ("overint_interp_c2f_prism", "overint_D_fine_prism",
+                 "overint_restrict_f2c_prism", "overint_interp_c2f_tet",
+                 "overint_D_fine_tet", "overint_restrict_f2c_tet"):
+        if getattr(ops, name, None) is None:
+            return None
+    n_fine = mesh.n_sps_per_cell_fine
+    n_cells = mesh.n_cells
+    return dict(
+        n_fine=n_fine,
+        det_fine=mesh.jacobians_fine["det_jacs"].reshape(n_cells, n_fine),
+        inv_fine=mesh.jacobians_fine["inv_jacs"].reshape(n_cells, n_fine, 3, 3),
+        segs=(
+            (0, mesh.n_prism_cells, ops.overint_interp_c2f_prism,
+             ops.overint_D_fine_prism, ops.overint_restrict_f2c_prism),
+            (mesh.n_prism_cells, n_cells, ops.overint_interp_c2f_tet,
+             ops.overint_D_fine_tet, ops.overint_restrict_f2c_tet),
+        ),
+    )

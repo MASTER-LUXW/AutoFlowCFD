@@ -36,8 +36,9 @@ import numba
 
 from autoflowcfd.core.fr_operators.gradients import compute_physical_scalar_gradient, compute_physical_gradient
 from autoflowcfd.core.fr_operators.volume_contract import (
-    contract_shared_operator_1axis, contract_shared_operator_2axis,
-    contravariant_flux_from_metric,
+    OVERINT_CHUNK_CELLS, contract_shared_operator_1axis,
+    contract_shared_operator_2axis, contravariant_flux_from_metric,
+    get_overintegration_context,
 )
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
@@ -304,39 +305,12 @@ def resolve_turb_overintegration() -> str:
     return v
 
 
-def _turb_overint_ops(mesh, ops):
-    """取过积分所需的全部算子与细点度量；任一缺失则返回 None（调用方
-    退回 coarse 路径）。
+#: `get_overintegration_context` 的旧名别名：三个消费方（无粘体积项、
+#: 本模块的 k/omega 输运、粘性体积项）共用同一份实现，见
+#: `fr_operators/volume_contract.py::get_overintegration_context`。
+_turb_overint_ops = get_overintegration_context
 
-    缺失的唯一正常情形是 `order==0`：P0 没有可去混叠的内容
-    （分片常数场的多项式导数恒为零），`jacobians_fine` 与 overint 算子
-    都不构造。
-    """
-    if getattr(mesh, "jacobians_fine", None) is None:
-        return None
-    for name in ("overint_interp_c2f_prism", "overint_D_fine_prism",
-                 "overint_restrict_f2c_prism", "overint_interp_c2f_tet",
-                 "overint_D_fine_tet", "overint_restrict_f2c_tet"):
-        if getattr(ops, name, None) is None:
-            return None
-    n_fine = mesh.n_sps_per_cell_fine
-    n_cells = mesh.n_cells
-    return dict(
-        n_fine=n_fine,
-        det_fine=mesh.jacobians_fine["det_jacs"].reshape(n_cells, n_fine),
-        inv_fine=mesh.jacobians_fine["inv_jacs"].reshape(n_cells, n_fine, 3, 3),
-        segs=(
-            (0, mesh.n_prism_cells, ops.overint_interp_c2f_prism,
-             ops.overint_D_fine_prism, ops.overint_restrict_f2c_prism),
-            (mesh.n_prism_cells, n_cells, ops.overint_interp_c2f_tet,
-             ops.overint_D_fine_tet, ops.overint_restrict_f2c_tet),
-        ),
-    )
-
-
-#: 过积分分块大小，与 `fr_residual/inviscid.py` 的强形式分支同一取值
-#: （那边 `_OVERINT_CHUNK_CELLS = 32768`），理由见该处 P2 OOM 修复说明。
-_TURB_OVERINT_CHUNK_CELLS = 32768
+_TURB_OVERINT_CHUNK_CELLS = OVERINT_CHUNK_CELLS
 
 
 def _scalar_convection_volume_overintegrated(
