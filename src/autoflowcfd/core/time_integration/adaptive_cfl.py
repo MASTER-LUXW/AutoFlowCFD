@@ -145,6 +145,44 @@ AutoFlowCFD V2.0 - 稳态求解器自适应 CFL 控制器
        （0.0576）是否落在稳定边界内**尚无数据**——现有数据只确定 0.03
        稳定、0.0608 不稳定。
 
+   11. `cfl_min` 会把收缩变成**放大**、并越过调用方给定的 `cfl_max`
+       （2026-09-15 晚，真实运行日志直接暴露）。收缩分支写的是
+
+           self.cfl_number = max(self.cfl_number * factor, self.cfl_min)
+
+       只钳下界、完全不看 `cfl_max`。于是当调用方刻意把 `cfl_max`（连带
+       `cfl_start`）设到默认 `cfl_min=0.05` **以下**时——做低 CFL 稳定边界
+       扫描正需要这样——第一次收缩就会
+
+           max(0.045 * 0.9, 0.05) = 0.05 > cfl_max = 0.045
+
+       把 CFL **调高**，而且日志照旧标成 `shrink_mild`。真实日志原文：
+
+           [AdaptiveCFL] Step 25: CFL 0.045 → 0.050 (shrink_mild, ratio=1.057)
+
+       一个名为"收缩"的分支把步长变大、并突破了调用方声明的硬上限，
+       这在任何情形下都不是可接受的行为。后果不只是标签不对：软上限
+       （第 8 条）只约束放大路径，所以这条通道能绕过全部越界保护，把
+       CFL 推到一个调用方明确禁止的值上——本轮的 CFL 0.045 探针就是这样
+       从 step 25 起变成了 0.05 的运行，整段数据作废。
+
+       与 2026-08-31 那次修复是**同一个表达式的两种病**：那次修的是
+       `cfl_number` 已经等于 `cfl_min` 时结果被 clip 成原值、却照样打印
+       "已调节"日志（空操作）；这次是 `cfl_number` 低于 `cfl_min` 时结果
+       被 clip 成**更大**的值（反向操作）。当时只补了打印判断，没有回头
+       问"为什么 clip 的结果可以不等于收缩的意图"。
+
+       修法分三处，都是收紧而不是放松：
+         (a) `__init__` 里协调三个参数——`cfl_min > cfl_max` 是自相矛盾
+             的配置，`cfl_max` 是调用方更强的意图声明，所以把 `cfl_min`
+             钳到 `cfl_max` 并**打 warning**（不静默）；`cfl_start` 同样
+             钳进 `[cfl_min, cfl_max]`。
+         (b) 收缩分支改成 `min(max(cfl*factor, cfl_min), cfl_max)`——即便
+             (a) 被绕过（比如外部直接改属性），也不可能产出高于 cfl_max
+             的值。
+         (c) 软上限的 `ceiling_floor` 同样用 `min(..., cfl_max)` 收口，
+             否则上限本身可以被顶到 cfl_max 之上。
+
     3. 与 dual.py 的双时间步自适应逻辑独立——两者面向不同的迭代结构
        （稳态每步一次 RK3 vs 双时间每步多次内迭代），参数和策略不同。
 
@@ -310,6 +348,26 @@ class AdaptiveCFLController:
         # 这条口子不是可选的锦上添花：本次做真实网格 CFL 对照时，"修复
         # 前"的基线只能靠"进程在改动落盘之前启动"这种巧合来获得，没有
         # 干净的 A/B 手段——这就是需要它的直接证据。
+        # 三个 CFL 边界参数的协调（见模块文档第 11 条）：`cfl_min > cfl_max`
+        # 是自相矛盾的配置，而 `cfl_max` 是调用方更强的意图声明（"这个问题
+        # 在这个值以上不稳定"），所以以它为准把 `cfl_min` 钳下去。不静默：
+        # 打 warning 说明发生了什么、为什么。
+        if self.cfl_min > self.cfl_max:
+            logger.warning(
+                f"[AdaptiveCFL] cfl_min={self.cfl_min} 高于 cfl_max="
+                f"{self.cfl_max}，是自相矛盾的配置；以 cfl_max 为准把 "
+                f"cfl_min 钳到 {self.cfl_max}。低 CFL 稳定边界扫描时请显式"
+                f"传 cfl_min，否则默认下限会顶住你想测的值。"
+            )
+            self.cfl_min = self.cfl_max
+        if not (self.cfl_min <= self.cfl_start <= self.cfl_max):
+            _clamped = min(max(self.cfl_start, self.cfl_min), self.cfl_max)
+            logger.warning(
+                f"[AdaptiveCFL] cfl_start={self.cfl_start} 不在 "
+                f"[{self.cfl_min}, {self.cfl_max}] 内，钳到 {_clamped}。"
+            )
+            self.cfl_start = _clamped
+
         self.legacy_mode = os.environ.get("AFCFD_CFL_LEGACY") == "1"
         if self.legacy_mode:
             logger.warning(
@@ -319,7 +377,10 @@ class AdaptiveCFLController:
             )
     
         # 状态
-        self.cfl_number: float = cfl_start
+        # 用**钳制后**的 self.cfl_start，不是局部形参 cfl_start——第 11 条的
+        # 协调逻辑改的是 self.cfl_start，若这里仍读形参，初值就会绕过协调
+        # （cfl_start=0.5 / cfl_max=0.08 时第一步就跑在 0.5 上）。
+        self.cfl_number: float = self.cfl_start
         self._prev_residual: float = 0.0
         self._step_count: int = 0
         self._consecutive_good: int = 0      # 连续"快速下降"步数计数
@@ -531,7 +592,8 @@ class AdaptiveCFLController:
                 if old_cfl >= self.cfl_start:
                     ceiling_floor = self.cfl_start
                 else:
-                    ceiling_floor = max(old_cfl * factor, self.cfl_min)
+                    ceiling_floor = min(
+                        max(old_cfl * factor, self.cfl_min), self.cfl_max)
                 ceiling = max(old_cfl * self.ceiling_backoff, ceiling_floor)
                 self._cfl_ceiling = (ceiling if self._cfl_ceiling is None
                                      else min(self._cfl_ceiling, ceiling))
@@ -542,7 +604,11 @@ class AdaptiveCFLController:
                     self._res_at_ceiling = min(self._res_at_ceiling,
                                                current_residual)
                 self._steps_since_shrink = 0
-                self.cfl_number = max(self.cfl_number * factor, self.cfl_min)
+                # 双向钳制（见模块文档第 11 条）：下界 cfl_min 之外还必须
+                # 钳住上界 cfl_max——否则 cfl_number 低于 cfl_min 时这一行
+                # 会把"收缩"变成放大、并突破调用方给定的硬上限。
+                self.cfl_number = min(
+                    max(self.cfl_number * factor, self.cfl_min), self.cfl_max)
                 self._steps_since_last_change = 0
                 self._res_window.clear()
                 # 真实 bug 修复（2026-08-31，用户直接观察到真实日志报出
