@@ -21,6 +21,7 @@ TimeIntegrator.step()/step_dual_time()，由它们在*每个* stage 的正定性
 恒等，见 fr/modal_filter.py 单元验证）。
 """
 
+import os
 from typing import Callable
 
 import numpy as np
@@ -203,6 +204,104 @@ def filter_scalar_field(phi: np.ndarray, n_prism: int, filter_prism, filter_tet)
     return out
 
 
+def filter_scalar_field_gated(
+    phi: np.ndarray, filter_prism, filter_tet, troubled: np.ndarray,
+    *, n_prism=None, cell_is_prism=None,
+) -> np.ndarray:
+    """`filter_scalar_field` 的逐单元门控版：只对 `troubled` 为真的单元
+    施加滤波矩阵，其余单元逐位原样返回。
+
+    矩阵与全局版完全相同，唯一区别是"对哪些单元施加"——`troubled` 全 True
+    时结果与 `filter_scalar_field` 逐位一致（同一个 kernel、同一个矩阵、
+    同样的分组顺序）。
+    """
+    if (n_prism is None) == (cell_is_prism is None):
+        raise ValueError("n_prism 与 cell_is_prism 必须且只能给一个")
+    n_cells = phi.shape[0]
+    out = phi.copy()
+    if not np.any(troubled):
+        return out
+    if cell_is_prism is not None:
+        cip = np.asarray(cell_is_prism, dtype=bool)
+        groups = ((np.flatnonzero(cip), filter_prism),
+                  (np.flatnonzero(~cip), filter_tet))
+    else:
+        groups = ((np.arange(0, n_prism), filter_prism),
+                  (np.arange(n_prism, n_cells), filter_tet))
+    for sel_all, mat in groups:
+        sel = sel_all[troubled[sel_all]]
+        if sel.size == 0:
+            continue
+        sub_out = np.ascontiguousarray(phi[sel])
+        _filter_scalar_kernel(np.ascontiguousarray(phi[sel]),
+                              np.ascontiguousarray(mat), sub_out)
+        out[sel] = sub_out
+    return out
+
+
+#: k/omega 滤波的门控方式，由 `AFCFD_FILTER_TURB_GATE` 选择：
+#:   "all"（默认，与此前行为逐位一致）—— 所有单元都滤波
+#:   "sensor"                         —— 只对传感器判定欠分辨的单元滤波
+#:
+#: **为什么这一维必须与 `AFCFD_FILTER_MODE` 独立**（2026-09-15 实测结论）：
+#: `filter_scalar_field` 直接用 `ops.filter_prism`、完全不经过平均流那边
+#: 的传感器门控，所以 `AFCFD_FILTER_MODE=sensor` 实际的语义一直是
+#: "平均流门控 + k/omega 仍被完整清掉一整阶"。79 万单元真实网格 250 步
+#: 对照决定性分离出了这一点：
+#:
+#:   档       平均流       k/omega     om_max 轨迹（起始 1.63e4）
+#:   legacy   全局清零     全局清零    受控
+#:   off      不滤波       **不滤波**  step100 达 1.65e5，增速持续加速
+#:   sensor   门控(≈不滤波) 全局清零    step140 才 7.32e4，增速持续减速
+#:
+#: off 与 sensor 的**平均流**轨迹几乎逐位相同（step100 残差都是 2.211e9、
+#: Cd 3.0831 vs 3.0830），说明传感器在平均流上几乎不触发；两者 om_max 的
+#: 巨大差异**全部**来自 k/omega 那一维。也就是说 sensor 档的好处与"传感器
+#: 在平均流上起作用"无关，而是来自 k/omega 仍被滤波——这正是
+#: `filter_scalar_field` 文档记录的 2026-09-12 真实 P1 发散所需要的保护。
+#:
+#: 既然两维的效果可以完全分离，就不能再让一个环境变量同时决定它们。
+def resolve_turb_filter_gate() -> str:
+    """返回 k/omega 滤波的门控方式，并校验取值。
+
+    每次调用都重读环境变量（不缓存模块级常量）：与
+    `AFCFD_FILTER_MODE` 不同，这一维不影响算子构造，运行期读取是安全的，
+    而且让测试可以用 monkeypatch 切换而不必 reload 模块。
+    """
+    gate = os.environ.get("AFCFD_FILTER_TURB_GATE", "all").lower()
+    if gate not in ("all", "sensor"):
+        raise ValueError(
+            f"AFCFD_FILTER_TURB_GATE={gate!r} 不是合法取值（all | sensor）。"
+            f"'all' 是既有行为（所有单元都滤波），'sensor' 只对传感器判定"
+            f"欠分辨的单元滤波。注意 AFCFD_FILTER_MODE=off 会把滤波矩阵本身"
+            f"变成单位阵，此时这一维无论取什么都是无操作。")
+    return gate
+
+
+def compute_turb_troubled_mask(k_field: np.ndarray, omega_field: np.ndarray,
+                               order: int, *, n_prism=None,
+                               cell_is_prism=None) -> np.ndarray:
+    """k/omega 门控用的欠分辨掩码：对 k 与 omega **分别**求
+    Persson-Peraire 指示器后取并集。
+
+    为什么取并集而不是只看一个：2026-09-12 记录的真实发散发生在 omega
+    （单元内部相邻解点间数量级跳变），而更早一轮攻关里失控的是 k（局部
+    单元撞 k_max 上限，见 cube_demo omega realizability 那条记录）。两个
+    场各自都会混叠，任一出问题都需要该单元被滤波，所以取并集而不是交集。
+
+    为什么不复用平均流的掩码：一个单元完全可以密度光滑而 omega 有尖峰
+    （实测 off/sensor 两档平均流轨迹几乎逐位相同、om_max 却差一个量级，
+    就是这件事的直接证据）。
+    """
+    from autoflowcfd.core.fr_operators.artificial_viscosity import (
+        compute_troubled_cell_mask,
+    )
+    kw = dict(n_prism=n_prism, cell_is_prism=cell_is_prism)
+    mask_k = compute_troubled_cell_mask(np.ascontiguousarray(k_field), order, **kw)
+    mask_om = compute_troubled_cell_mask(np.ascontiguousarray(omega_field), order, **kw)
+    return mask_k | mask_om
+
+
 #: 目前实现了 `sensor` 档的后端。`legacy`/`off`/`mild` 三档**不需要**
 #: 出现在这里——它们是在算子构造期改 `ops.filter_prism`/`filter_tet` 本身
 #: （见 fr/modal_filter.py 的模块级常量），因此对全部后端自动生效；只有
@@ -230,7 +329,6 @@ def resolve_filter_mode(backend: str) -> str:
     Raises:
         NotImplementedError: 请求了 `sensor` 但该后端尚未接线。
     """
-    import os
     mode = os.environ.get("AFCFD_FILTER_MODE", "legacy").lower()
     if mode == "sensor" and backend not in _SENSOR_MODE_SUPPORTED_BACKENDS:
         raise NotImplementedError(
@@ -243,6 +341,69 @@ def resolve_filter_mode(backend: str) -> str:
     return mode
 
 
+def build_sensor_gated_filter_func_arrays(
+    n_cells: int, n_sps: int, order: int, filter_prism, filter_tet,
+    *, n_prism=None, cell_is_prism=None,
+) -> Callable[[np.ndarray], np.ndarray]:
+    """传感器门控模态滤波的**后端无关**实现（只吃数组，不吃 solver）。
+
+    这是 `build_sensor_gated_filter_func` 的内核。拆出来的理由见
+    `fr_operators/artificial_viscosity.py::compute_troubled_cell_mask`：
+    第一版门控靠"把当前 stage 的解临时塞进 `solver.state.U` 再调用
+    solver 版传感器"实现，那是个副作用 hack，而且让门控只能用在单机
+    CPU 推进循环里。现在传感器是纯数组接口，CPU MPI 那条路径（local
+    排列、棱柱/四面体交错，用 `cell_is_prism`）可以用同一个内核。
+
+    门控判据：对**守恒密度**求 Persson-Peraire 指示器。守恒密度与原始
+    密度只差一个整体缩放，而 S_e 是能量比值、对缩放不变，所以两者给出
+    同一个判据——不需要先反算原始变量。
+
+    施加方式：欠分辨的单元走完整的滤波矩阵（该单元确实有需要压制的
+    混叠内容），其余单元**完全不动**（保留全部已解析的多项式内容）。
+    本函数不改变滤波矩阵本身（仍用传入的 filter_prism/filter_tet），
+    只改变"对哪些单元施加"——`AFCFD_FILTER_MODE=off/mild` 那两档改的是
+    矩阵，两个维度可以独立组合，便于受控 A/B。
+
+    Args:
+        n_cells, n_sps: 单元数与每单元解点数
+        order: 当前多项式阶数（order==0 时传感器恒不触发，等价于不滤波）
+        filter_prism, filter_tet: 滤波矩阵
+        n_prism / cell_is_prism: 单元类型划分，恰好给一个，语义同
+            `compute_troubled_cell_mask`
+    """
+    from autoflowcfd.core.fr_operators.artificial_viscosity import (
+        compute_troubled_cell_mask,
+    )
+    if (n_prism is None) == (cell_is_prism is None):
+        raise ValueError("n_prism 与 cell_is_prism 必须且只能给一个")
+    if cell_is_prism is not None:
+        cip = np.asarray(cell_is_prism, dtype=bool)
+        prism_idx_all = np.flatnonzero(cip)
+        tet_idx_all = np.flatnonzero(~cip)
+    else:
+        prism_idx_all = np.arange(0, n_prism)
+        tet_idx_all = np.arange(n_prism, n_cells)
+
+    def filter_func(U_flat: np.ndarray) -> np.ndarray:
+        U = U_flat.reshape(n_cells, n_sps, -1)
+        troubled = compute_troubled_cell_mask(
+            np.ascontiguousarray(U[:, :, 0]), order,
+            n_prism=n_prism, cell_is_prism=cell_is_prism)
+        if not np.any(troubled):
+            return U_flat
+        for sel_all, mat in ((prism_idx_all, filter_prism),
+                             (tet_idx_all, filter_tet)):
+            sel = sel_all[troubled[sel_all]]
+            if sel.size == 0:
+                continue
+            sub = np.ascontiguousarray(U[sel])
+            _filter_leading_vars_inplace_kernel(sub, np.ascontiguousarray(mat), 5)
+            U[sel] = sub
+        return U.reshape(U_flat.shape)
+
+    return filter_func
+
+
 def build_sensor_gated_filter_func(solver) -> Callable[[np.ndarray], np.ndarray]:
     """按 Persson-Peraire 传感器**逐单元门控**的模态滤波（2026-09-15）。
 
@@ -252,57 +413,23 @@ def build_sensor_gated_filter_func(solver) -> Callable[[np.ndarray], np.ndarray]
     任何 sigma<1 都会随步数复合累积，单纯调小 alpha 只是把清零推迟——
     正确的方向是**只在确实需要的单元上施加**。
 
-    本项目已经有现成的欠分辨传感器：`fr_operators/artificial_viscosity.py::
-    compute_persson_peraire_artificial_viscosity` 返回的 epsilon 场在解
-    光滑（高阶模态能量占比低）的单元上恒为 0，只在真正欠分辨/振荡的单元
-    上非零——这正是"哪些单元需要滤波"的判据，不需要另造一个传感器。
+    本函数只是 `build_sensor_gated_filter_func_arrays` 的单机适配层
+    （"棱柱在前"排列，order 取 `current_order`/`order`），全部说明见
+    那边与 `fr_operators/artificial_viscosity.py::compute_troubled_cell_mask`。
 
-    施加方式：epsilon>0 的单元走完整的 legacy 滤波矩阵（该单元确实有
-    需要压制的混叠内容），epsilon==0 的单元完全不动（保留全部已解析的
-    多项式内容）。这样光滑区不再损失阶数，振荡区仍有与此前相同强度的
-    保护。
-
-    注意本函数**不改变滤波矩阵本身**（仍用 ops.filter_prism/filter_tet），
-    只改变"对哪些单元施加"。`AFCFD_FILTER_MODE=off/mild` 那两档改的是
-    矩阵，两个维度可以独立组合，便于受控 A/B。
+    **重要范围说明**：本函数（以及 `AFCFD_FILTER_MODE=sensor`）只门控
+    **平均流**滤波。k/omega 走的是 `filter_scalar_field`，由
+    `fr_solver/turbulence.py` 单独调用、有**独立**的门控开关，理由见
+    `filter_scalar_field` 文档"为什么 k/omega 的门控必须独立判定"一节。
     """
     mesh = solver.mesh
     ops = solver.ops
-    n_sps = mesh.n_sps_per_cell
-    n_prism = mesh.n_prism_cells
-    filter_prism = ops.filter_prism
-    filter_tet = ops.filter_tet
-
-    def filter_func(U_flat: np.ndarray) -> np.ndarray:
-        from autoflowcfd.core.fr_operators.artificial_viscosity import (
-            compute_persson_peraire_artificial_viscosity,
-        )
-        n_cells = mesh.n_cells
-        U = U_flat.reshape(n_cells, n_sps, -1)
-        # 传感器要在**当前** stage 的解上求值（不是步首的解）——U_flat
-        # 就是当前 stage 的解，临时装进 state 以复用现成的传感器入口。
-        saved = solver.state.U
-        solver.state.U = U
-        try:
-            eps = compute_persson_peraire_artificial_viscosity(
-                solver, alpha_av=getattr(solver, "artificial_viscosity_alpha", 1.0))
-        finally:
-            solver.state.U = saved
-        troubled = np.any(eps > 0.0, axis=1)
-        if not np.any(troubled):
-            return U_flat
-        idx = np.flatnonzero(troubled)
-        pr = idx[idx < n_prism]
-        te = idx[idx >= n_prism]
-        for sel, mat in ((pr, filter_prism), (te, filter_tet)):
-            if sel.size == 0:
-                continue
-            sub = np.ascontiguousarray(U[sel])
-            _filter_leading_vars_inplace_kernel(sub, np.ascontiguousarray(mat), 5)
-            U[sel] = sub
-        return U.reshape(U_flat.shape)
-
-    return filter_func
+    order = getattr(solver, "current_order", None)
+    if order is None:
+        order = solver.order
+    return build_sensor_gated_filter_func_arrays(
+        mesh.n_cells, mesh.n_sps_per_cell, int(order),
+        ops.filter_prism, ops.filter_tet, n_prism=mesh.n_prism_cells)
 
 
 def build_filter_func(solver) -> Callable[[np.ndarray], np.ndarray]:

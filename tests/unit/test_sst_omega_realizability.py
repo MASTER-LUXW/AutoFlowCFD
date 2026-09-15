@@ -52,8 +52,14 @@ class TestOmegaRealizabilityMinAtP0:
 
         # 修复前这里恒为 0（0.1*max(S_mag)=0.1*0=0）——真实 bug 的直接
         # 数值证据。
-        assert model._omega_realizability_min == pytest.approx(0.1 * omega_inf)
-        assert model._omega_realizability_min > 0
+        # 2026-09-15 起下限是**逐点**数组（见 sst.py 该处第二次 bug 修复），
+        # 但 P0 下 S_mag 恒为钳位值 1e-10，0.1*S_mag=1e-11 远小于
+        # 0.1*omega_inf，所以每一点都恰好等于 0.1*omega_inf——与修复前的
+        # 标量取值逐位相同，这正是那次改动的安全保证。
+        rmin = np.asarray(model._omega_realizability_min)
+        assert rmin.shape == (n_cells, n_sps)
+        np.testing.assert_allclose(rmin, 0.1 * omega_inf, rtol=1e-12)
+        assert np.all(rmin > 0)
 
     def test_positivity_limiter_recovers_collapsed_omega_at_p0(self):
         """真实复现场景：某个 SP 的 omega 被(模拟的)显式积分打到裸正性
@@ -89,8 +95,14 @@ class TestOmegaRealizabilityMinAtP0:
     def test_p1_with_real_strain_rate_still_uses_larger_bound(self):
         """S_mag 非零且其对应的下限比 0.1*omega_inf 更大时（典型 P1+
         近壁高剪切场景），不应该被 omega_inf 这个新增下限"拉低"——两者
-        取更大值，不能是新增下限意外覆盖掉本该更严格的 S_mag 下限。"""
-        n_cells, n_sps = 1, 1
+        取更大值，不能是新增下限意外覆盖掉本该更严格的 S_mag 下限。
+
+        2026-09-15 起同时验证**局部性**：只有高应变的那一点下限被抬高，
+        其余点保持 0.1*omega_inf。修复前 `0.1*max(S_mag)` 是全域标量，
+        一个尖峰会把整场 omega 一起抬起来——真实网格上那正是发散的起点。
+        所以这里用 4 个单元而不是 1 个，否则局部性无从检验。
+        """
+        n_cells, n_sps = 4, 1
         omega_inf = 100.0  # 故意设小，让 S_mag 下限更大
         model = SSTModelFR(n_cells, n_sps, k_inf=0.1, omega_inf=omega_inf)
         # grad_U 对角项非零 -> S_mag 非零且较大
@@ -102,7 +114,16 @@ class TestOmegaRealizabilityMinAtP0:
         model.compute_source_terms(Q, grad_U, d_wall, mu=1.8e-5,
                                     grad_k=grad_k, grad_omega=grad_omega)
 
-        assert model._omega_realizability_min > 0.1 * omega_inf
+        rmin = np.asarray(model._omega_realizability_min)
+        # 高应变的那一点下限被抬高
+        assert rmin[0, 0] > 0.1 * omega_inf
+        # **其余点不受影响**——这是 2026-09-15 修复的核心：下限是逐点的
+        # realizability 约束，不是"全场耦合到单个最差点"。修复前
+        # `0.1*max(S_mag)` 是标量，这里每一个点都会被抬到同一个值。
+        assert n_cells * n_sps > 1, "本判据需要至少两个点才有意义"
+        others = np.ones(rmin.shape, dtype=bool)
+        others[0, 0] = False
+        np.testing.assert_allclose(rmin[others], 0.1 * omega_inf, rtol=1e-12)
 
 
 class TestKFloorAtP0:

@@ -259,7 +259,10 @@ class GPUTurbulenceSST:
         # P0 阶段 grad_vel/S_mag 恒为零，只用 S_mag 会让这个下限完全
         # 失效，加一个与阶数无关的物理量纲下限（来流 omega_inf 的保守
         # 比例），两者取更大值。
-        self._omega_realizability_min = max(0.1 * float(cp.max(S_mag)), 0.1 * self.omega_inf)
+        # 逐点 realizability 下限，与 CPU 端 core/turbulence/sst.py 同一处
+        # 2026-09-15 真实 bug 修复逐字对应（此前是全域标量 cp.max(S_mag)，
+        # 会把整个 omega 场耦合到单个最差点上，真实网格实测导致发散）。
+        self._omega_realizability_min = cp.maximum(0.1 * S_mag, 0.1 * self.omega_inf)
 
         # 交叉扩散项
         grad_dot = cp.sum(grad_k * grad_omega, axis=2)

@@ -415,7 +415,32 @@ class SSTModelFR:
         # 非零时（P1+）这条新增下限通常远小于 0.1*max(S_mag)、不改变
         # 既有行为；S_mag 恒零时（P0）它是唯一起作用的下限，防止 ω 塌陷
         # 到物理上毫无意义的 1e-12。
-        self._omega_realizability_min = max(0.1 * np.max(S_mag), 0.1 * self.omega_inf)
+        # **真实 bug 修复（2026-09-15）：这条下限此前用的是全域最大值
+        # `np.max(S_mag)`，是一个标量，被施加到每一个单元的 omega 上。**
+        # 那让"局部 realizability 约束"退化成"全场耦合到单个最差点"：
+        # 79 万单元 cube_demo 真实网格 250 步对照里，一旦模态滤波器不再
+        # 把 P1 内容清零（grad_vel 真正非零），max(S_mag) 由全场最差的
+        # 那一个点决定，整个 omega 场被抬到同一个值上 -> nu_t = rho*k/omega
+        # 全场被同比压低 -> 湍流扩散崩塌 -> 局部应变更大 -> 下限更高，
+        # 正反馈。实测 om_min 10 步内从 1.28e2 跳到 1.85e4（176 倍），
+        # 最终 om_min≈om_max≈1e6（整个场被钉在下限上）并发散
+        # （AFCFD_FILTER_MODE=off step 103、sensor step 157）。
+        #
+        # 它此前一直没有暴露，恰恰是因为 P0 阶段 grad_vel 恒为零（见下方
+        # 2026-09-05 那段）、而 P1/P2 阶段模态滤波器每个 RK stage 把非常数
+        # 模态清零（见 fr/modal_filter.py：order=1 保留秩 1/8，P1 实际是
+        # P0），两者都让 S_mag 恒等于钳位值 1e-10——也就是说这个 bug 被
+        # 另外两个缺陷共同掩盖了。
+        #
+        # Durbin 的 realizability / Wilcox 的时间尺度约束、以及本行注释
+        # 原本声称等价的 Fluent turbulence time scale limiter，**都是逐点
+        # 的**，没有任何一个是"取全域最大"。改为逐点后：
+        #   - P0 阶段 S_mag 恒为钳位值 1e-10 => 0.1*S_mag = 1e-11 远小于
+        #     0.1*omega_inf，逐点下限**逐位等于**此前的标量下限，P0 行为
+        #     完全不变（这是这次改动的安全保证，有对应回归测试）；
+        #   - P1+ 阶段每个单元按**自己的**应变率定下限，不再被别处的
+        #     尖峰绑架。
+        self._omega_realizability_min = np.maximum(0.1 * S_mag, 0.1 * self.omega_inf)
 
         # 交叉扩散项 CD_kw（F1 与 S_omega 的 CD_omega 项共用同一个量，
         # 标准做法是先算这个再算两处，避免重复计算且保证一致）
@@ -562,8 +587,10 @@ class SSTModelFR:
         # 时间尺度 realization（工业 RANS 标配）：限制湍流时间尺度
         # τ = 1/(β*ω) 不超过基于应变率的最小时间尺度的倒数。
         # 防止远场 ω 衰减到过小值导致 τ 过大、k 有时间大幅增长。
-        # 动态下限由 compute_source_terms 计算：ω_min = 0.1 * max(S_mag)
-        # （与 Fluent 的 turbulence time scale limit 等价）。
+        # 动态下限由 compute_source_terms 计算，**逐点**：
+        # ω_min[c,s] = max(0.1*S_mag[c,s], 0.1*omega_inf)，与 Fluent 的
+        # turbulence time scale limit 一致（那个也是逐点的）。2026-09-15
+        # 之前这里是全域标量 0.1*max(S_mag)，见该处 bug 修复说明。
         if hasattr(self, '_omega_realizability_min'):
             self.omega_field = np.maximum(self.omega_field, self._omega_realizability_min)
 

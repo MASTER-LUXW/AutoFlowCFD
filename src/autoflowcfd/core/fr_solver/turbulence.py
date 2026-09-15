@@ -669,14 +669,39 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
     # 巨大虚假对流残差）。用与平均流完全同一套 filter_prism/filter_tet
     # 矩阵，P0（n_sps=1）下矩阵退化为单位矩阵，天然是无操作。
     if solver.mesh.n_sps_per_cell > 1:
-        from autoflowcfd.core.fr_solver.filter import filter_scalar_field
+        from autoflowcfd.core.fr_solver.filter import (
+            compute_turb_troubled_mask, filter_scalar_field,
+            filter_scalar_field_gated, resolve_turb_filter_gate,
+        )
         n_prism = solver.mesh.n_prism_cells
-        solver.turb_model.k_field = filter_scalar_field(
-            solver.turb_model.k_field, n_prism, solver.ops.filter_prism, solver.ops.filter_tet,
-        )
-        solver.turb_model.omega_field = filter_scalar_field(
-            solver.turb_model.omega_field, n_prism, solver.ops.filter_prism, solver.ops.filter_tet,
-        )
+        # 门控维度与平均流的 `AFCFD_FILTER_MODE` **独立**（2026-09-15）：
+        # 真实网格 250 步对照决定性证明两维的效果可以完全分离——off 与
+        # sensor 两档的平均流轨迹几乎逐位相同，om_max 却差一个量级，差异
+        # 全部来自这里。理由与实测数据见 filter.py::resolve_turb_filter_gate。
+        # 默认 "all" 与此前行为逐位一致。
+        if resolve_turb_filter_gate() == "sensor":
+            order = getattr(solver, "current_order", None)
+            if order is None:
+                order = solver.order
+            troubled = compute_turb_troubled_mask(
+                solver.turb_model.k_field, solver.turb_model.omega_field,
+                int(order), n_prism=n_prism)
+            solver._turb_filter_troubled_frac = float(np.mean(troubled))
+            solver.turb_model.k_field = filter_scalar_field_gated(
+                solver.turb_model.k_field, solver.ops.filter_prism,
+                solver.ops.filter_tet, troubled, n_prism=n_prism,
+            )
+            solver.turb_model.omega_field = filter_scalar_field_gated(
+                solver.turb_model.omega_field, solver.ops.filter_prism,
+                solver.ops.filter_tet, troubled, n_prism=n_prism,
+            )
+        else:
+            solver.turb_model.k_field = filter_scalar_field(
+                solver.turb_model.k_field, n_prism, solver.ops.filter_prism, solver.ops.filter_tet,
+            )
+            solver.turb_model.omega_field = filter_scalar_field(
+                solver.turb_model.omega_field, n_prism, solver.ops.filter_prism, solver.ops.filter_tet,
+            )
         # 滤波可能把场值推到正性下限以下（滤波器系数含负权重，理论上
         # 可能），滤波后必须重新过一遍正性/上界限制器，不能假设滤波
         # 输出天然满足这些约束。
