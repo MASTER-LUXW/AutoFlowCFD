@@ -55,6 +55,8 @@ sigma 分段/截断就能兼得的问题。改动已回退到本文档描述的�
 对整个网格全局施加同一套滤波强度），不在这次调查的范围内解决。
 """
 
+import os
+
 import numpy as np
 
 from autoflowcfd.fr.collapsed_basis import prism_modal_basis_and_grad, tet_modal_basis_and_grad
@@ -66,8 +68,45 @@ from autoflowcfd.fr.collapsed_basis import prism_modal_basis_and_grad, tet_modal
 # （常数模态）处 sigma=1 恒成立（自由流场保持性不受影响，见本模块
 # 单元测试）。FILTER_ORDER=4：中低阶模态（eta 明显小于 1）衰减因子
 # 接近 1，只有最高一两阶模态被显著压制，不牺牲已解析到的真实物理精度。
-FILTER_ALPHA = -np.log(np.finfo(np.float64).eps)
+#
+# **2026-09-15 实测更正：这段"不牺牲已解析到的真实物理精度"的说明与实现
+# 不符。** ALPHA=-ln(eps) 使 sigma(eta=1)=2.2e-16，那是**清零**而不是
+# "显著压制"；而 eta=max(i,j,k)/order 这个判据下 eta=1 恰好覆盖该阶
+# **全部新增模态**。实测滤波矩阵的秩：
+#     order=1 -> 秩 1（只剩常数模态）      => P1 实际是 P0
+#     order=2 -> 秩 8 = 2^3（只剩双线性）  => P2 实际是 P1
+#     order=3 -> 秩 27 = 3^3               => P3 实际是 P2
+# 即**每个阶数都精确损失一整阶**。算子层面直接验证（order=1，线性场 x）：
+# 胞内变化 5.77e-3 -> 2.06e-18，保留比 3.6e-16。
+# 真实网格印证（79 万单元 P1 iter=300 检查点）：胞内 |grad u| 相对参照
+# 剪切率 U/h 只有 7.7e-16，粘性残差几乎只来自边界 IP 罚项。
+#
+# alpha=-ln(eps) 本身是 Hesthaven & Warburton 的标准取值，但那是为**高阶**
+# 设计的：在 P8 上清掉第 8 阶无关紧要，在 P1 上清掉第 1 阶就只剩常数。
+# 本项目只跑 P1/P2，正好落在这个取值最糟的区间。
+#
+# 另一个关键点：滤波器是**每个 RK stage 都施加**的，因此任何 sigma<1 都会
+# 随步数复合累积（sigma=0.9 时每步 0.9^3=0.73，100 步后 ~1e-14）。平衡点
+# 取决于"物理每步再生该模态的幅度"与"滤波每步压制的幅度"之比——单纯把
+# alpha 调小只是把清零推迟，不改变"滤波压倒物理"的性质。所以正确的方向
+# 是**按需施加**（逐单元用传感器门控），而不是全局调强度。
+#
+# `AFCFD_FILTER_MODE` 环境变量（默认 legacy = 保持既有行为，不改变默认）：
+#   legacy  当前行为（alpha=-ln(eps)，全局每 stage 施加）
+#   off     恒等滤波（完全不施加），用于对照"滤波是否必需"
+#   mild    sigma(eta=1)=AFCFD_FILTER_SIGMA_TOP（默认 0.99），其余同形式
+# 这三档供受控 A/B 用；"按传感器逐单元门控"那一档在应用层实现
+# （core/fr_solver/filter.py），不在这里改矩阵。
+_FILTER_MODE = os.environ.get("AFCFD_FILTER_MODE", "legacy").lower()
+_SIGMA_TOP = float(os.environ.get("AFCFD_FILTER_SIGMA_TOP", "0.99"))
+
+if _FILTER_MODE == "mild":
+    # 由 sigma(1)=exp(-alpha) 反解 alpha
+    FILTER_ALPHA = -np.log(max(min(_SIGMA_TOP, 1.0 - 1e-300), 1e-300))
+else:
+    FILTER_ALPHA = -np.log(np.finfo(np.float64).eps)
 FILTER_ORDER = 4
+FILTER_MODE = _FILTER_MODE
 
 
 def _exp_filter_sigma(degree_frac: np.ndarray) -> np.ndarray:
@@ -101,7 +140,8 @@ def build_tet_modal_filter(order: int, ref_cube_sps: np.ndarray) -> np.ndarray:
     Returns:
         F: (n_sps,n_sps) 滤波矩阵，F @ field(SPs) 给出滤波后的节点值
     """
-    if order == 0:
+    if order == 0 or FILTER_MODE == "off":
+        # off：恒等滤波（AFCFD_FILTER_MODE=off，见模块顶部说明）
         return np.eye(ref_cube_sps.shape[0])
 
     a, b, c = ref_cube_sps[:, 0], ref_cube_sps[:, 1], ref_cube_sps[:, 2]
@@ -133,7 +173,8 @@ def build_prism_modal_filter(order: int, ref_cube_sps: np.ndarray) -> np.ndarray
     Returns:
         F: (n_sps,n_sps) 滤波矩阵
     """
-    if order == 0:
+    if order == 0 or FILTER_MODE == "off":
+        # off：恒等滤波（AFCFD_FILTER_MODE=off，见模块顶部说明）
         return np.eye(ref_cube_sps.shape[0])
 
     a, b, c = ref_cube_sps[:, 0], ref_cube_sps[:, 1], ref_cube_sps[:, 2]

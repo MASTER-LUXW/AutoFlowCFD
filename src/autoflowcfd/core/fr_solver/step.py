@@ -6,6 +6,8 @@ AutoFlowCFD V2.0 - FRSolver 单时间步推进 (从 fr_solver.py 拆分)
 调用方式不变。
 """
 
+import os
+
 import numpy as np
 
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
@@ -224,7 +226,17 @@ def step(solver, dt: float) -> float:
         # 之后立即施加，抑制坍缩坐标节点配置法固有的混叠噪声放大；
         # 只在最终组合结果上滤波一次不够，真实复现噪声在中间 stage
         # 就已放大到 NaN。
-        filter_func = build_filter_func(solver)
+        # `AFCFD_FILTER_MODE=sensor`：按 Persson-Peraire 传感器逐单元门控
+        # （见 filter.py::build_sensor_gated_filter_func）。默认 legacy
+        # 行为不变，这一档供受控 A/B 与"光滑区不损失阶数"的正式方案用。
+        from autoflowcfd.core.fr_solver.filter import resolve_filter_mode
+        if resolve_filter_mode("cpu-single") == "sensor":
+            from autoflowcfd.core.fr_solver.filter import (
+                build_sensor_gated_filter_func,
+            )
+            filter_func = build_sensor_gated_filter_func(solver)
+        else:
+            filter_func = build_filter_func(solver)
 
         if solver.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME:
             # 真正时间精度的物理时间推进：dt 是物理时间步长（不再被

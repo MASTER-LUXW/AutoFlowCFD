@@ -207,8 +207,15 @@ def compute_viscous_residual_fr_gpu(
     )
     Q_cpu = cp.asnumpy(Q)
     Q_ghost_np = compute_boundary_ghost_states(flat_face, Q_cpu, None, ghost_provider)
+    # 边界温度梯度按热边界类型分派（WALL/SYMMETRY 法向镜像 ⇒ 离散壁面热
+    # 通量精确为零；INLET/OUTLET/FARFIELD 透射），与 CPU
+    # viscous_flux_kernel.py 模块文档"边界温度梯度"一节逐字对应。
+    from autoflowcfd.boundary.fr_ghost_state import build_boundary_adiabatic_mask
+    bnd_adiabatic_np = build_boundary_adiabatic_mask(
+        flat_face.n_faces, flat_face.is_boundary, ghost_provider)
     with cp.cuda.Device(device_id):
         Q_ghost_gpu = cp.asarray(Q_ghost_np)
+        bnd_adiabatic_gpu = cp.asarray(bnd_adiabatic_np)
 
     if mu_t_field is None:
         mu_t_gpu = cp.zeros((n_cells, n_sps, 1), dtype=cp.float64)
@@ -218,7 +225,7 @@ def compute_viscous_residual_fr_gpu(
     interface_correction = _compute_viscous_interface_correction_gpu(
         Q, grad_vel, grad_T, mu_t_gpu,
         det_jacs, mu, Pr, Pr_t,
-        flat_face_gpu, Q_ghost_gpu,
+        flat_face_gpu, Q_ghost_gpu, bnd_adiabatic_gpu,
         n_cells, n_sps, n_prism, device_id,
     )
 
@@ -404,7 +411,7 @@ def _viscous_tilde_flux_pair(Q_common, gv_common, gT_common, mut_common,
 def _compute_viscous_interface_correction_gpu(
     Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu,
     det_jacs, mu, Pr, Pr_t,
-    flat_face_gpu, Q_ghost_gpu,
+    flat_face_gpu, Q_ghost_gpu, bnd_adiabatic_gpu,
     n_cells, n_sps, n_prism, device_id,
 ):
     """GPU 粘性界面校正（BR1 平均 + 边界 IP 罚项），按图着色逐色处理。
@@ -490,14 +497,22 @@ def _compute_viscous_interface_correction_gpu(
             )
             adjrow_o = ff.owner_adj_row_exact[idx_o]
 
-            # 边界面：状态用幽灵态，梯度/涡粘镜像内部值本身（不能改成
+            # 边界面：状态用幽灵态，速度梯度/涡粘镜像内部值本身（不能改成
             # 用 sources/幽灵态梯度，见 viscous_flux_kernel.py 模块文档
-            # "边界面梯度处理"一节）。
+            # "边界面梯度处理"一节）；温度梯度按热边界类型分派（同文档
+            # "边界温度梯度"一节）。
             bmask3 = is_bnd_o[:, None, None]
             Q_ghost_sub = Q_ghost_gpu[idx_o]
             Q_n = cp.where(bmask3, Q_ghost_sub, Q_n)
             gv_n = cp.where(is_bnd_o[:, None, None, None], gv_o, gv_n)
-            gT_n = cp.where(bmask3, gT_o, gT_n)
+            # ∇T 法向分量镜像：gT - 2*((gT·a)/|a|^2)*a（|a|=0 的退化面原样返回，
+            # 那种面的通量投影本来就是零）。用逆变行 adjrow_o 而非
+            # true_normal，理由见 flux_kernels.py::mirror_normal_component。
+            a2_o = cp.sum(adjrow_o * adjrow_o, axis=-1, keepdims=True)
+            d_o = cp.sum(gT_o * adjrow_o, axis=-1, keepdims=True) / cp.where(a2_o > 0.0, a2_o, 1.0)
+            gT_mirror_o = cp.where(a2_o > 0.0, gT_o - 2.0 * d_o * adjrow_o, gT_o)
+            adiab_o = bnd_adiabatic_gpu[idx_o][:, None, None]
+            gT_n = cp.where(bmask3, cp.where(adiab_o, gT_mirror_o, gT_o), gT_n)
             mut_n = cp.where(is_bnd_o[:, None], mut_o, mut_n)
 
             # 混合拆分面（B-8，镜像 CPU viscous_flux_kernel.py 同名分支）：边界半区用配对面幽灵态，
@@ -509,7 +524,8 @@ def _compute_viscous_interface_correction_gpu(
             Q_ghost_partner_o = Q_ghost_gpu[cp.maximum(mp_o, 0)]  # (nO, n_fp, 5)
             Q_n = cp.where(mixed3_o, Q_ghost_partner_o, Q_n)
             gv_n = cp.where(mixed_sel_o[:, :, None, None], gv_o, gv_n)
-            gT_n = cp.where(mixed3_o, gT_o, gT_n)
+            adiab_mp_o = bnd_adiabatic_gpu[cp.maximum(mp_o, 0)][:, None, None]
+            gT_n = cp.where(mixed3_o, cp.where(adiab_mp_o, gT_mirror_o, gT_o), gT_n)
             mut_n = cp.where(mixed_sel_o, mut_o, mut_n)
             # 逐 FP 的"边界半区"标记（真边界面全 FP 生效 + 混合面仅掩码 FP 生效），下方 IP 罚项共用。
             is_bnd_i_o = is_bnd_o[:, None] | mixed_sel_o
@@ -605,7 +621,11 @@ def _compute_viscous_interface_correction_gpu(
             Q_ghost_partner_n = Q_ghost_gpu[cp.maximum(mp_n, 0)]  # (nN, n_fp, 5)
             Q_o_at_n = cp.where(mixed3_n, Q_ghost_partner_n, Q_o_at_n)
             gv_o_at_n = cp.where(mixed_sel_n[:, :, None, None], gv_n_native, gv_o_at_n)
-            gT_o_at_n = cp.where(mixed3_n, gT_n_native, gT_o_at_n)
+            a2_n = cp.sum(adjrow_n * adjrow_n, axis=-1, keepdims=True)
+            d_n = cp.sum(gT_n_native * adjrow_n, axis=-1, keepdims=True) / cp.where(a2_n > 0.0, a2_n, 1.0)
+            gT_mirror_n = cp.where(a2_n > 0.0, gT_n_native - 2.0 * d_n * adjrow_n, gT_n_native)
+            adiab_mp_n = bnd_adiabatic_gpu[cp.maximum(mp_n, 0)][:, None, None]
+            gT_o_at_n = cp.where(mixed3_n, cp.where(adiab_mp_n, gT_mirror_n, gT_n_native), gT_o_at_n)
             mut_o_at_n = cp.where(mixed_sel_n, mut_n_native, mut_o_at_n)
 
             Q_avg_n = 0.5 * (Q_n_native + Q_o_at_n)

@@ -36,7 +36,9 @@ primary 门控，本 kernel 从一开始就没有这个问题，不需要改动�
 import numpy as np
 from numba import njit, prange, get_thread_id
 
-from autoflowcfd.core.fr_operators.flux_kernels import viscous_physical_flux_point, viscous_boundary_penalty_tilde
+from autoflowcfd.core.fr_operators.flux_kernels import (
+    viscous_physical_flux_point, viscous_boundary_penalty_tilde, mirror_normal_component,
+)
 
 _VISCOUS_BOUNDARY_IP_C = 4.0
 
@@ -63,6 +65,7 @@ def compute_viscous_interface_correction_p0_kernel(
     boundary_extrap: np.ndarray,  # (2, 3, 2, n_fp, 1)
     g_left: np.ndarray, g_right: np.ndarray,
     Q_ghost: np.ndarray,          # (n_boundary_faces, n_fp, 5)
+    bnd_adiabatic: np.ndarray,    # (n_faces,) 该边界面要求法向 dT/dn=0
     dist_fp_of_sp: np.ndarray,    # (3, 1)
     dist_axis_coord_of_sp: np.ndarray,  # (3, 1)
     n_prism: int,
@@ -155,9 +158,14 @@ def compute_viscous_interface_correction_p0_kernel(
                 # 邻居状态（源矩阵插值；n_sps=1 时同样是标量乘 == 矩阵乘
                 # 的恒等式，不是简化）
                 if is_boundary[f]:
+                    # 边界温度梯度按热边界类型分派，见 viscous_flux_kernel.py
+                    # 模块文档"边界温度梯度"一节（三处 kernel 必须同步）。
                     Q_n = Q_ghost[f, i]
                     gv_n = gv_o_i.copy()
-                    gT_n = gT_o_i.copy()
+                    if bnd_adiabatic[f]:
+                        gT_n = mirror_normal_component(gT_o_i, adj_o_s0)
+                    else:
+                        gT_n = gT_o_i.copy()
                     mut_n = mut_o_i
                 else:
                     Q_n = np.zeros(5)
@@ -193,10 +201,14 @@ def compute_viscous_interface_correction_p0_kernel(
                     if mp >= 0 and mixed_nb_mask[f, i]:
                         for v in range(5):
                             Q_n[v] = Q_ghost[mp, i, v]
+                        if bnd_adiabatic[mp]:
+                            gT_bnd = mirror_normal_component(gT_o_i, adj_o_s0)
+                        else:
+                            gT_bnd = gT_o_i
                         for a in range(3):
                             for b in range(3):
                                 gv_n[a, b] = gv_o_i[a, b]
-                            gT_n[a] = gT_o_i[a]
+                            gT_n[a] = gT_bnd[a]
                         mut_n = mut_o_i
 
                 # 算术平均
@@ -333,10 +345,14 @@ def compute_viscous_interface_correction_p0_kernel(
                 if mp_o >= 0 and mixed_ow_mask[f, i]:
                     for v in range(5):
                         Q_o_at_n[v] = Q_ghost[mp_o, i, v]
+                    if bnd_adiabatic[mp_o]:
+                        gT_bnd_n = mirror_normal_component(gT_n_i, adj_n_s0)
+                    else:
+                        gT_bnd_n = gT_n_i
                     for a in range(3):
                         for b in range(3):
                             gv_o_at_n[a, b] = gv_n_i[a, b]
-                        gT_o_at_n[a] = gT_n_i[a]
+                        gT_o_at_n[a] = gT_bnd_n[a]
                     mut_o_at_n = mut_n_i
 
                 Q_avg_n = np.empty(5)

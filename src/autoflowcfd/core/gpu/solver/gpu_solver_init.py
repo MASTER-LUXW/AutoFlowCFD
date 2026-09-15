@@ -44,6 +44,12 @@ class _GPUSolverInitMixin:
         n_sps = self.mesh.n_sps_per_cell
         n_prism = self.mesh.n_prism_cells
 
+        # sensor 档尚未在本后端接线，直接报错而不是静默按 legacy 跑
+        # （见 fr_solver/filter.py::resolve_filter_mode）。放在 try 之外，
+        # 否则会被下面那个 `except Exception -> warning` 吞掉。
+        from autoflowcfd.core.fr_solver.filter import resolve_filter_mode
+        resolve_filter_mode("gpu-single")
+
         try:
             filter_prism = self.ops.filter_prism
             filter_tet = self.ops.filter_tet

@@ -15,11 +15,25 @@ fr_viscous_flux.py 里原来的纯 Python `for f in range(fc.n_faces)` 循环)�
 见 fr_viscous_flux.py 模块文档"注意：粘性项是 +div(G)"。
 
 **边界面梯度处理（不能改成用 sources 或幽灵态）**：边界面的状态 Q_n
-反映真实边界条件（幽灵态提供者），但梯度 gv_n/gT_n/mut_n 恒等于内部
+反映真实边界条件（幽灵态提供者），速度梯度 gv_n 与 mut_n 恒等于内部
 值本身的镜像（gv_n=gv_o 等）——这是本项目对"没有独立 BR1/IP 罚项方程
 处理梯度边界值"这一已知局限的数学自洽选择，见 fr_viscous_flux.py 里
 `compute_viscous_residual_fr` 对应分支的详细文档，不要"顺手"改成边界
 梯度也走 ghost_provider 或 sources。
+
+**边界温度梯度按热边界类型分派（2026-09-15 修复）**：gT_n **不再**
+一律取内部值。`bnd_adiabatic[f]` 为真（WALL/SYMMETRY，见
+boundary/fr_ghost_state.py::ADIABATIC_THERMAL_BC_TYPES）时改为法向分量
+镜像 `gT_n = gT_o - 2(gT_o·n)n`（`mirror_normal_component`），于是 BR1
+面平均 `gT_avg` 的法向分量精确为零、该面的离散传导热通量
+`a·q_avg` **恒等于零**。
+
+修的是一处真实的不自洽：壁面 ghost 态复制 rho/p（温度无跳跃 ⇒ 语义
+绝热），而 IP 罚项只覆盖动量 `for v in range(1,4)`，于是此前实现出来的
+壁面热条件既不是绝热也不是等温，而是"按内部梯度透射"。INLET/OUTLET/
+FARFIELD 保持透射（那里热通量本就应该穿越边界），非
+`BoundaryGhostStateProvider` 的 provider 全部按透射处理，逐位保持既有
+行为。
 
 **多核并行（阶段二）**：与 `fr_residual_inviscid_kernel.py` 同一套
 scatter-add 处理方式（每线程私有累加缓冲区 `correction_per_thread[tid,
@@ -37,7 +51,9 @@ scatter-add 处理方式（每线程私有累加缓冲区 `correction_per_thread
 import numpy as np
 from numba import njit, prange, get_thread_id
 
-from autoflowcfd.core.fr_operators.flux_kernels import viscous_physical_flux_point, viscous_boundary_penalty_tilde
+from autoflowcfd.core.fr_operators.flux_kernels import (
+    viscous_physical_flux_point, viscous_boundary_penalty_tilde, mirror_normal_component,
+)
 from autoflowcfd.core.fr_residual.inviscid_kernel import _extrap_matmul, _distribute_point
 
 _VISCOUS_BOUNDARY_IP_C = 4.0
@@ -72,7 +88,7 @@ def compute_viscous_interface_correction_kernel(
     mixed_ow_partner: np.ndarray, mixed_ow_mask: np.ndarray,
     boundary_extrap: np.ndarray,
     g_left: np.ndarray, g_right: np.ndarray,
-    Q_ghost: np.ndarray,
+    Q_ghost: np.ndarray, bnd_adiabatic: np.ndarray,
     dist_fp_of_sp: np.ndarray, dist_axis_coord_of_sp: np.ndarray,
     n_prism: int,
     n_threads: int,
@@ -150,11 +166,15 @@ def compute_viscous_interface_correction_kernel(
                 mp = mixed_nb_partner[f]
                 is_bnd_i = is_boundary[f] or (mp >= 0 and mixed_nb_mask[f, i])
                 if is_boundary[f]:
-                    # 边界面：状态反映真实边界条件，梯度镜像内部值本身
-                    # （见模块文档"边界面梯度处理"一节，不能改成 sources/幽灵态）。
+                    # 边界面：状态反映真实边界条件，速度梯度镜像内部值本身
+                    # （见模块文档"边界面梯度处理"一节，不能改成 sources/幽灵态）；
+                    # **温度梯度按热边界类型分派**（模块文档"边界温度梯度"一节）。
                     Q_n = Q_ghost[f, i]
                     gv_n = gv_o[i]
-                    gT_n = gT_o[i]
+                    if bnd_adiabatic[f]:
+                        gT_n = mirror_normal_component(gT_o[i], adjrow_o[i])
+                    else:
+                        gT_n = gT_o[i].copy()
                     mut_n = mut_o[i]
                 else:
                     Q_n = np.zeros(5)
@@ -193,10 +213,14 @@ def compute_viscous_interface_correction_kernel(
                     if mp >= 0 and mixed_nb_mask[f, i]:
                         for v in range(5):
                             Q_n[v] = Q_ghost[mp, i, v]
+                        if bnd_adiabatic[mp]:
+                            gT_bnd = mirror_normal_component(gT_o[i], adjrow_o[i])
+                        else:
+                            gT_bnd = gT_o[i]
                         for a in range(3):
                             for b in range(3):
                                 gv_n[a, b] = gv_o[i, a, b]
-                            gT_n[a] = gT_o[i, a]
+                            gT_n[a] = gT_bnd[a]
                         mut_n = mut_o[i]
 
                 Q_avg = np.empty(5)
@@ -320,10 +344,14 @@ def compute_viscous_interface_correction_kernel(
                 if mp_o >= 0 and mixed_ow_mask[f, i]:
                     for v in range(5):
                         Q_o_at_n[v] = Q_ghost[mp_o, i, v]
+                    if bnd_adiabatic[mp_o]:
+                        gT_bnd_n = mirror_normal_component(gT_n_native[i], adjrow_n_native[i])
+                    else:
+                        gT_bnd_n = gT_n_native[i]
                     for a in range(3):
                         for b in range(3):
                             gv_o_at_n[a, b] = gv_n_native[i, a, b]
-                        gT_o_at_n[a] = gT_n_native[i, a]
+                        gT_o_at_n[a] = gT_bnd_n[a]
                     mut_o_at_n = mut_n_native[i]
 
                 Q_avg_n = np.empty(5)

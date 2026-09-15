@@ -138,6 +138,43 @@ def viscous_physical_flux_point(
 
 
 @njit(cache=True, inline='always')
+def mirror_normal_component(g: np.ndarray, adj_row: np.ndarray) -> np.ndarray:
+    """把向量 g 关于面（法向由 `adj_row` 给出方向）做**法向分量镜像**：
+
+        g_mirror = g - 2 (g·n) n,    n = adj_row / |adj_row|
+
+    用于 BR1 边界面的温度梯度（见 boundary/fr_ghost_state.py::
+    ADIABATIC_THERMAL_BC_TYPES）。取 BR1 面平均后
+
+        g_avg = 0.5 (g + g_mirror) = g - (g·n) n
+
+    其法向分量**精确为零**，于是投影到该面的离散传导热通量
+    `a·q_avg = -k (adj_row·∇T_avg)` 恒等于零——这是绝热/对称壁的精确
+    离散表述，不是"近似到某个容差"。
+
+    方向说明：这里用的是 `adj_row`（逆变行，即 det(J)∇ξ，与面法向平行），
+    **不是** `true_normal`。两者平行，但用 `adj_row` 才能保证"恒等于零"
+    的是真正进入残差的那个投影量 `a0*q_x+a1*q_y+a2*q_z` 本身，而不是
+    一个与之只差截断误差的替代量。镜像对 n 取反不变，因此内/外法向
+    朝向约定无关紧要。
+
+    退化保护：`|adj_row|` 为零（退化面）时原样返回 g——此时该面的通量
+    投影本来就是零，镜不镜像都不影响结果。
+    """
+    m2 = adj_row[0] * adj_row[0] + adj_row[1] * adj_row[1] + adj_row[2] * adj_row[2]
+    out = np.empty(3)
+    if m2 <= 0.0:
+        for a in range(3):
+            out[a] = g[a]
+        return out
+    # 不必显式开方归一化：(g·a)/|a|^2 * a 就是 (g·n)n
+    d = (g[0] * adj_row[0] + g[1] * adj_row[1] + g[2] * adj_row[2]) / m2
+    for a in range(3):
+        out[a] = g[a] - 2.0 * d * adj_row[a]
+    return out
+
+
+@njit(cache=True, inline='always')
 def viscous_boundary_penalty_tilde(
     Q_o: np.ndarray, Q_ghost: np.ndarray, mu_total: float,
     vol: float, adj_mag: float, oside: float, c_ip: float,
@@ -172,6 +209,25 @@ def viscous_boundary_penalty_tilde(
     是各自独立算出的真实局部梯度（不是镜像），已有非零、物理有意义的
     耦合，不属于本次修复范围，不额外加罚项，避免改动已通过验证的内部
     粘性通量路径。
+
+    **为什么只有动量分量、能量分量不需要对应的罚项（2026-09-15 结论，
+    不是遗留项）**：IP 罚项存在的理由是"梯度被镜像 ⇒ 该分量的跳跃恒为
+    零 ⇒ Dirichlet 型边界条件在扩散算子里完全没被施加"。对能量方程，
+    这个理由按热边界类型逐类检查后都不成立：
+
+    - **绝热类（WALL/SYMMETRY）**：正确的边界条件是 q_n = 0，是
+      Neumann 型而不是 Dirichlet 型——它已经由 ∇T 的法向分量镜像**精确**
+      施加（见 `mirror_normal_component` 与 boundary/fr_ghost_state.py::
+      ADIABATIC_THERMAL_BC_TYPES），罚项在这里无事可做，加了反而是往
+      "零热通量"这个恒等式上叠加一个非零项。
+    - **透射类（INLET/OUTLET/FARFIELD）**：∇T 不镜像、取内部值，能量
+      跳跃项本来就非零，不存在"约束没被施加"的问题。这些边界位于远场、
+      对流主导（Pe>>1），温度由无粘特征通量携带的 ghost 态施加。
+    - **等温壁**：这才是真正需要能量罚项（η_T=c·k_eff/h 乘以 [[T]]，注意
+      系数是热传导率 k=μ·cp/Pr 而不是 μ）的情形——而**本项目没有等温壁
+      BC，也没有壁面热通量模型**（见 fr_ghost_state.py::wall_ghost_state
+      的"热边界条件"一节）。将来若新增带传热的壁面类型，必须在这里同时
+      补上对应的能量罚项，否则壁面温度条件在扩散算子里不会被施加。
 
     Args:
         Q_o: (5,) 面上 owner 侧原始变量外插值 (rho,u,v,w,p)

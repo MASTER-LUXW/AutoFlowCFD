@@ -1080,8 +1080,11 @@ class DistributedFRSolver:
         filter_func = None
         if n_sps > 1:
             from autoflowcfd.core.fr_solver.filter import (
-                build_filter_func_by_cell_type,
+                build_filter_func_by_cell_type, resolve_filter_mode,
             )
+            # sensor 档尚未在本后端接线，直接报错而不是静默按 legacy 跑
+            # （同一个环境变量在不同后端不能意味着不同的数值方案）。
+            resolve_filter_mode("cpu-mpi")
             cct = self.dist_flat_face.compact_cell_type
             cell_is_prism = (cct[self.dist_flat_face.inv_perm][:n_local] == 0)
             filter_func = build_filter_func_by_cell_type(

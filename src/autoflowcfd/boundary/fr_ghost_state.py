@@ -221,3 +221,75 @@ class BoundaryGhostStateProvider:
             return symmetry_ghost_state(Q_owner_fp, true_normal)
         else:
             raise ValueError(f"Unknown boundary condition type '{bc_type}' for face {face_idx}")
+
+
+# ---------------------------------------------------------------------------
+# 边界面热条件分类（BR1 边界温度梯度处理用，2026-09-15）
+# ---------------------------------------------------------------------------
+
+#: 法向温度梯度必须为零的边界类型。
+#:
+#: - ``WALL``：本项目的壁面 ghost 态一律复制 rho/p（见 wall_ghost_state 的
+#:   "热边界条件"一节），温度无跳跃 ⇒ 语义上就是**绝热壁**；无滑移与滑移
+#:   （含 WMLES 激活时的壁面）两个分支都一样，因为项目里既没有等温壁 BC，
+#:   也没有壁面热通量模型。绝热的精确表述是 q_n = -k dT/dn = 0。
+#: - ``SYMMETRY``：对称面上一切通量的法向分量为零，热通量也不例外。
+#:
+#: ``INLET``/``OUTLET``/``FARFIELD`` **不在**此列：它们是流入/流出边界，
+#: 法向热通量本就应该非零（对流/扩散都在穿越），沿用"梯度取内部值"的透射
+#: 处理才是自洽的。
+ADIABATIC_THERMAL_BC_TYPES = frozenset({"WALL", "SYMMETRY"})
+
+
+def build_boundary_adiabatic_mask(n_faces: int, is_boundary: np.ndarray,
+                                  ghost_provider) -> np.ndarray:
+    """逐面标记"该边界面要求法向温度梯度为零"。
+
+    粘性 kernel 用它在边界面上把 ∇T 的法向分量镜像掉
+    （``∇T_ghost = ∇T_int - 2(∇T_int·n)n``），使 BR1 的面平均梯度
+    ``∇T_avg = ∇T_int - (∇T_int·n)n`` 法向分量**精确为零**，于是投影到面
+    法向的离散传导热通量恒等于零——这正是绝热/对称的精确离散表述。
+    未标记的面保持原有的透射处理（``∇T_ghost = ∇T_int``）。
+
+    Args:
+        n_faces: 面总数（返回数组长度）
+        is_boundary: (n_faces,) 物理边界面掩码
+        ghost_provider: 幽灵态提供者。只有 ``BoundaryGhostStateProvider``
+            带有逐面的 BC 分类信息（``group_code``/``code_to_config``）；
+            其它满足最小鸭子类型接口的实现（``DefaultGhostProvider``、
+            测试 stub）没有 BC 语义可言——``DefaultGhostProvider`` 的
+            ``Q_ghost = Q_owner`` 本身就是纯透射，因此一律返回全 False，
+            **保持它们的既有行为逐位不变**。
+
+    Returns:
+        (n_faces,) bool 数组。
+
+    结果按 provider 实例缓存（``group_code``/``code_to_config`` 在构造后
+    不再变化），避免每次残差求值重复扫描边界面。
+    """
+    cached = getattr(ghost_provider, "_afcfd_adiabatic_mask", None)
+    if cached is not None and cached.shape[0] == n_faces:
+        return cached
+
+    mask = np.zeros(n_faces, dtype=np.bool_)
+    if isinstance(ghost_provider, BoundaryGhostStateProvider):
+        bnd = np.where(is_boundary)[0]
+        if bnd.size > 0:
+            codes = ghost_provider.group_code[bnd]
+            default_adiabatic = (
+                ghost_provider.default_config["type"] in ADIABATIC_THERMAL_BC_TYPES
+            )
+            for code in np.unique(codes):
+                cfg = ghost_provider.code_to_config.get(int(code))
+                if cfg is None:
+                    hit = default_adiabatic
+                else:
+                    hit = cfg["type"] in ADIABATIC_THERMAL_BC_TYPES
+                if hit:
+                    mask[bnd[codes == code]] = True
+
+    try:
+        ghost_provider._afcfd_adiabatic_mask = mask
+    except AttributeError:  # 只读/带 __slots__ 的 provider，放弃缓存即可
+        pass
+    return mask

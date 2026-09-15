@@ -11,7 +11,9 @@ scatter-add 冲突、直接写入共享 buffer 而不是 per-thread buffer + 归
 import numpy as np
 from numba import njit, prange
 
-from autoflowcfd.core.fr_operators.flux_kernels import viscous_physical_flux_point, viscous_boundary_penalty_tilde
+from autoflowcfd.core.fr_operators.flux_kernels import (
+    viscous_physical_flux_point, viscous_boundary_penalty_tilde, mirror_normal_component,
+)
 from autoflowcfd.core.fr_residual.inviscid_kernel import _extrap_matmul, _distribute_point
 from autoflowcfd.core.fr_residual.viscous_flux_kernel import _extrap_matrix3x3, _VISCOUS_BOUNDARY_IP_C
 
@@ -33,7 +35,7 @@ def compute_viscous_interface_correction_kernel_colored(
     mixed_ow_partner: np.ndarray, mixed_ow_mask: np.ndarray,
     boundary_extrap: np.ndarray,
     g_left: np.ndarray, g_right: np.ndarray,
-    Q_ghost: np.ndarray,
+    Q_ghost: np.ndarray, bnd_adiabatic: np.ndarray,
     dist_fp_of_sp: np.ndarray, dist_axis_coord_of_sp: np.ndarray,
     n_prism: int,
     face_indices: np.ndarray,  # 当前颜色组的面索引
@@ -99,9 +101,14 @@ def compute_viscous_interface_correction_kernel_colored(
                 mp = mixed_nb_partner[f]
                 is_bnd_i = is_boundary[f] or (mp >= 0 and mixed_nb_mask[f, i])
                 if is_boundary[f]:
+                    # 边界温度梯度按热边界类型分派，见非着色版模块文档
+                    # "边界温度梯度"一节（两处必须同步）。
                     Q_n = Q_ghost[f, i]
                     gv_n = gv_o[i]
-                    gT_n = gT_o[i]
+                    if bnd_adiabatic[f]:
+                        gT_n = mirror_normal_component(gT_o[i], adjrow_o[i])
+                    else:
+                        gT_n = gT_o[i].copy()
                     mut_n = mut_o[i]
                 else:
                     Q_n = np.zeros(5)
@@ -140,10 +147,14 @@ def compute_viscous_interface_correction_kernel_colored(
                     if mp >= 0 and mixed_nb_mask[f, i]:
                         for v in range(5):
                             Q_n[v] = Q_ghost[mp, i, v]
+                        if bnd_adiabatic[mp]:
+                            gT_bnd = mirror_normal_component(gT_o[i], adjrow_o[i])
+                        else:
+                            gT_bnd = gT_o[i]
                         for a in range(3):
                             for b in range(3):
                                 gv_n[a, b] = gv_o[i, a, b]
-                            gT_n[a] = gT_o[i, a]
+                            gT_n[a] = gT_bnd[a]
                         mut_n = mut_o[i]
 
                 Q_avg = np.empty(5)
@@ -266,10 +277,14 @@ def compute_viscous_interface_correction_kernel_colored(
                 if mp_o >= 0 and mixed_ow_mask[f, i]:
                     for v in range(5):
                         Q_o_at_n[v] = Q_ghost[mp_o, i, v]
+                    if bnd_adiabatic[mp_o]:
+                        gT_bnd_n = mirror_normal_component(gT_n_native[i], adjrow_n_native[i])
+                    else:
+                        gT_bnd_n = gT_n_native[i]
                     for a in range(3):
                         for b in range(3):
                             gv_o_at_n[a, b] = gv_n_native[i, a, b]
-                        gT_o_at_n[a] = gT_n_native[i, a]
+                        gT_o_at_n[a] = gT_bnd_n[a]
                     mut_o_at_n = mut_n_native[i]
 
                 Q_avg_n = np.empty(5)
