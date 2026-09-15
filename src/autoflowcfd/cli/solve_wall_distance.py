@@ -6,6 +6,92 @@
 import click
 
 
+def wall_nodes_from_boundary_faces(volume_data, bm):
+    """从 WALL 组的**边界面**取出真正位于壁面上的节点索引。
+
+    **这是 2026-09-15 发现的一处一阶物理错误的修复。** 原实现是：
+
+        indices = bm.get_node_indices(bc_name)
+        if len(indices) > 0 and np.max(indices) >= n_nodes:
+            ...把 indices 当单元索引，转成节点...
+        else:
+            valid = indices[indices < n_nodes]   # 把 indices 当**节点**索引
+            wall_nodes.update(valid)
+
+    `BoundaryMap.groups` 按其自身文档存的**恒定是单元索引**
+    （`{boundary_name: cell_indices_array}`，两条生产路径——
+    `mesh_boundary.map_surface_boundaries` 与 `map_boundaries_by_geometry`
+    ——都如此声明）。那个 `max(indices) >= n_nodes` 判据是在猜一件本来
+    已经确定的事，而且**恰好只在 WALL 组上猜错**：壁面的边界单元就是
+    边界层棱柱，占据单元索引的低位区间 `[0, n_prism)`，而两张真实网格
+    都满足 `n_prism < n_nodes`，于是判据为假、单元索引被当成节点索引：
+
+        cube_demo : body  range=[0,136974]  n_nodes=187702  -> 猜错
+        plate_demo: body  range=[0, 65235]  n_nodes= 88496  -> 猜错
+        （tunnel/inlet/outlet 贴四面体、索引超过 n_nodes，反而猜对了）
+
+    后果是壁距场变成"到 13048 个按编号散布在全域的任意节点的距离"。
+    plate_demo 实测 max 壁距 0.976 m，而到平板的真实最远距离是 4.359 m。
+    SST 的 F1/F2 混合、omega 壁面目标值、nu_t 限幅、DDES/IDDES 长度尺度
+    与 WMLES 全部由壁距驱动，所以这不是精度问题而是物理错误。
+
+    **为什么用边界面而不是"单元的全部节点"**：一个边界层棱柱有 3 个节点
+    在壁面上、3 个在第一层之外。把整个单元的节点都算作壁面节点会让壁距
+    在近壁虚胖一层（第一层外侧节点的壁距变成 0 而不是真实的第一层厚度
+    ~1e-5 m），而近壁正是 SST 最敏感的区域。取边界面的节点是精确的。
+
+    已知的边际情形：`map_boundaries_by_geometry` 逐**面**匹配之后把结果
+    折叠成 `{owner_cell: group}`，所以同一个单元若同时拥有属于不同组的
+    边界面（只可能发生在组与组的交界棱上），这里会把它的全部边界面都
+    计入。相对于原缺陷这是可忽略的过包含，且只影响交界棱一圈。
+
+    Returns:
+        (wall_node_indices, n_wall_faces)：前者是去重排序后的节点索引
+        （int64），后者是参与统计的边界面数（供调用方打印/校验）。
+    """
+    import numpy as np
+
+    n_cells = volume_data.cell_count
+    wall_cells = set()
+    for bc_name, bc_type in bm.bc_types.items():
+        if bc_type != 'WALL' or not bm.has_boundary(bc_name):
+            continue
+        idx = np.asarray(bm.get_cell_indices(bc_name))
+        if idx.size == 0:
+            continue
+        # 不静默截断：越界索引说明 BoundaryMap 与这份体网格不是一对
+        if int(idx.max()) >= n_cells:
+            raise click.ClickException(
+                f"边界组 '{bc_name}' 的单元索引最大值 {int(idx.max())} 超出体"
+                f"网格单元数 {n_cells}——BoundaryMap 与体网格不匹配，拒绝"
+                f"继续（壁面距离场会整体错位）。"
+            )
+        wall_cells.update(int(c) for c in idx)
+
+    if not wall_cells:
+        return np.empty(0, dtype=np.int64), 0
+
+    faces = volume_data.ensure_faces_exist()
+    if faces.node_connectivity is None:
+        raise click.ClickException(
+            "体网格的面数据缺少 node_connectivity，无法从边界面取壁面节点"
+            "——不能退回'把单元全部节点当壁面'（那会让近壁壁距虚胖一层，"
+            "见 wall_nodes_from_boundary_faces 文档）。"
+        )
+    bidx = faces.get_boundary_face_indices()
+    if len(bidx) == 0:
+        return np.empty(0, dtype=np.int64), 0
+    owner = faces.connectivity[bidx, 0]
+    keep = np.fromiter((int(o) in wall_cells for o in owner), dtype=bool,
+                       count=len(owner))
+    sel = bidx[keep]
+    if len(sel) == 0:
+        return np.empty(0, dtype=np.int64), 0
+    nodes = faces.node_connectivity[sel].ravel()
+    nodes = nodes[nodes >= 0]
+    return np.unique(nodes).astype(np.int64), int(len(sel))
+
+
 def compute_wall_distance_for_solver(solver, volume_data, use_eikonal=False):
     """
     为求解器计算壁面距离场。
@@ -32,42 +118,26 @@ def compute_wall_distance_for_solver(solver, volume_data, use_eikonal=False):
             print("\n🔍 Computing wall distance field...")
 
             bm = volume_data.boundaries
-            wall_nodes = set()
             n_nodes = volume_data.node_count
 
-            # 获取体网格连接关系用于单元->节点转换
-            all_connectivity = []
-            if volume_data.prism_cells:
-                all_connectivity.extend(volume_data.prism_cells.connectivity)
-            if volume_data.cells:
-                all_connectivity.extend(volume_data.cells.connectivity)
-
-            # 识别所有 WALL 类型的边界
+            # 壁面节点取自 WALL 组的**边界面**（2026-09-15 修复一处一阶
+            # 物理错误——原实现用 `max(indices) >= n_nodes` 猜 BoundaryMap
+            # 存的是单元还是节点索引，而它按契约恒为单元索引，那个判据
+            # 恰好只在 WALL 组上猜错。完整推导、实测数字与"为什么不能用
+            # 单元的全部节点"见 `wall_nodes_from_boundary_faces` 文档）。
+            wall_indices_arr, n_wall_faces = wall_nodes_from_boundary_faces(
+                volume_data, bm)
+            wall_nodes = wall_indices_arr
             for bc_name, bc_type in bm.bc_types.items():
                 if bc_type == 'WALL' and bm.has_boundary(bc_name):
-                    indices = bm.get_node_indices(bc_name)
+                    print(f"   - Boundary '{bc_name}': "
+                          f"{len(bm.get_cell_indices(bc_name))} wall cells")
+            if len(wall_nodes) > 0:
+                print(f"   {n_wall_faces} wall boundary faces -> "
+                      f"{len(wall_nodes)} unique wall nodes")
 
-                    # 检查是否为单元索引（如果最大索引 >= 节点数）
-                    if len(indices) > 0 and np.max(indices) >= n_nodes:
-                        print(f"   - Boundary '{bc_name}': Detected as cell indices, converting...")
-                        node_indices_from_cells = set()
-                        for cell_idx in indices:
-                            if cell_idx < len(all_connectivity):
-                                cell_nodes = all_connectivity[cell_idx]
-                                valid_nodes = [n for n in cell_nodes if n != -1 and n < n_nodes]
-                                node_indices_from_cells.update(valid_nodes)
-
-                        if node_indices_from_cells:
-                            wall_nodes.update(node_indices_from_cells)
-                            print(f"     Converted {len(indices)} cells to {len(node_indices_from_cells)} nodes")
-                    else:
-                        valid_indices = indices[indices < n_nodes]
-                        if len(valid_indices) > 0:
-                            wall_nodes.update(valid_indices.tolist())
-                            print(f"   - Boundary '{bc_name}': {len(valid_indices)} nodes")
-
-            if wall_nodes:
-                wall_indices = np.array(list(wall_nodes))
+            if len(wall_nodes) > 0:
+                wall_indices = wall_nodes
                 mesh_nodes = volume_data.nodes.get_coordinates()
 
                 print(f"   Total unique wall nodes: {len(wall_indices)}")

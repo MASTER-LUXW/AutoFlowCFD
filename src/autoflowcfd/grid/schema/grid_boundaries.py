@@ -180,22 +180,17 @@ class BoundaryMap:
         """
         return boundary_name in self.groups
     
-    def get_node_indices(self, boundary_name: str) -> np.ndarray:
-        """获取边界节点索引数组（兼容旧接口）
-        
-        Args:
-            boundary_name: 边界名称
-            
-        Returns:
-            np.ndarray: 节点索引数组（int32）
-            
-        抛出异常:
-            KeyError: 边界名称不存在
-        """
-        if boundary_name not in self.groups:
-            raise KeyError(f"Boundary '{boundary_name}' not found")
-        return self.groups[boundary_name]
-    
+    # `get_node_indices` 已于 2026-09-15 删除。它是 `get_cell_indices` 的
+    # 错名"兼容旧接口"别名——返回的恒是**单元**索引（见本类 `groups`
+    # 字段文档），但名字让调用方以为是节点索引。这个错名直接造成了一处
+    # 一阶物理错误：`cli/solve_wall_distance.py` 据此用
+    # `max(indices) >= n_nodes` 去猜索引含义，而该判据恰好只在 WALL 组上
+    # 猜错（壁面边界单元是边界层棱柱、索引落在 [0, n_prism)，两张真实
+    # 网格都满足 n_prism < n_nodes），使壁面距离场变成"到一堆按编号散布
+    # 在全域的任意节点的距离"。完整推导见
+    # `solve_wall_distance.wall_nodes_from_boundary_faces` 的文档。
+    # 需要单元索引用 `get_cell_indices`；需要壁面节点用那个函数。
+
     def get_cell_indices(self, boundary_name: str) -> np.ndarray:
         """获取边界单元索引数组
         

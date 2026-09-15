@@ -115,8 +115,11 @@ def parse(
         # 获取边界信息
         if hasattr(grid_data, 'boundaries'):
             for name in grid_data.boundaries.boundary_names:
-                nodes = grid_data.boundaries.get_node_indices(name)
-                result["boundary_groups"][name] = len(nodes)
+                # 这里统计的是该边界组的**单元**数（BoundaryMap.groups 按
+                # 契约存单元索引）。原变量名 `nodes` 是错的，且用的是已删除
+                # 的错名别名 get_node_indices，见 grid_boundaries.py 那处说明。
+                cells = grid_data.boundaries.get_cell_indices(name)
+                result["boundary_groups"][name] = len(cells)
 
         # 质量报告（若未跳过）
         quality_passed = True
@@ -321,8 +324,11 @@ def info(input_file: str, json_output: bool) -> None:
         # 边界信息
         if hasattr(grid_data, 'boundaries'):
             for name in grid_data.boundaries.boundary_names:
-                nodes = grid_data.boundaries.get_node_indices(name)
-                result["boundary_groups"][name] = len(nodes)
+                # 这里统计的是该边界组的**单元**数（BoundaryMap.groups 按
+                # 契约存单元索引）。原变量名 `nodes` 是错的，且用的是已删除
+                # 的错名别名 get_node_indices，见 grid_boundaries.py 那处说明。
+                cells = grid_data.boundaries.get_cell_indices(name)
+                result["boundary_groups"][name] = len(cells)
 
         # 估算内存占用（粗略估计）
         # 每单元约 44 字节 + 每节点约 24 字节
