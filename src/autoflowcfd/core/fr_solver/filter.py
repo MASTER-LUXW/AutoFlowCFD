@@ -302,6 +302,16 @@ def resolve_turb_filter_gate() -> str:
     每次调用都重读环境变量（不缓存模块级常量）：与
     `AFCFD_FILTER_MODE` 不同，这一维不影响算子构造，运行期读取是安全的，
     而且让测试可以用 monkeypatch 切换而不必 reload 模块。
+
+    已接线的后端：**全部四条**——单机 CPU 与 CPU MPI 分布式
+    （都经 `fr_solver/turbulence.py::compute_turbulence_source`，后者的
+    `turb_view`/`mesh_adapter` 都在 compact"棱柱在前"索引空间，所以同一段
+    `n_prism` 切片代码两条路径都正确）、单 GPU（`gpu_solver_io.py`）、
+    多 GPU 分布式（`gpu_distributed_init.py`，后两条用
+    `core/gpu/gpu_troubled_cell.py` 的 GPU 版同一套传感器，2026-09-15
+    补齐）。所以这一维**不需要** `resolve_filter_mode` 那样的后端白名单
+    ——平均流的 `sensor` 档要在 RK stage 内部逐 stage 求指标，k/omega 这
+    一维只在每步湍流源项之后施加一次，补齐成本低得多。
     """
     gate = os.environ.get("AFCFD_FILTER_TURB_GATE", "all").lower()
     if gate not in ("all", "sensor"):

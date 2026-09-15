@@ -1074,7 +1074,19 @@ def _compute_omega_wall_target(
         wd_owner = solver.wall_distance[owner_cells]
         d1 = wd_owner.min(axis=1) if _d1_mode == "min" else wd_owner.mean(axis=1)
         d1 = np.maximum(d1, 1e-8)
-        rho_owner = np.mean(rho[owner_cells], axis=1)
+        # 只统计真实自由度（2026-09-15 审计）：`rho[owner_cells]` 的行
+        # 单元类型任意混合，所以用逐行掩码版。native 四面体的零填充槽位
+        # 冻结在初值、会变馊，混进 nu = mu/rho 会带进几个百分点的偏差。
+        # 阶数从**数组自身**的 SP 轴反解，不读 solver.current_order/order：
+        # 填充划分由被归约数组的 n_sps 决定，从数组反解恒与它自洽（理由见
+        # `order_from_n_sps` 文档）。
+        from autoflowcfd.fr.native_tet_padding import (
+            order_from_n_sps, reduce_rows_over_real_sps,
+        )
+        _rows = rho[owner_cells]
+        rho_owner = reduce_rows_over_real_sps(
+            _rows, owner_cells < solver.mesh.n_prism_cells,
+            order_from_n_sps(_rows.shape[1]), 'mean')
         nu_owner = mu / np.maximum(rho_owner, 1e-10)
         omega_wall = 60.0 * nu_owner / (beta1 * d1**2)
         omega_wall = np.minimum(omega_wall, omega_max)

@@ -238,6 +238,17 @@ class AutoFlowCFDAPI:
         p_inf = p_inf if p_inf is not None else (config.p_inf if config is not None else 101325.0)
         phase_max_iter = phase_max_iter if phase_max_iter is not None else (config.phase_max_iter if config is not None else None)
         residual_drop_threshold = residual_drop_threshold if residual_drop_threshold is not None else (config.residual_drop_threshold if config is not None else 1e2)
+        if config is not None and getattr(config, "flux_type", "radau") != "radau":
+            # flux_type 只有单机 CPU 路径支持（GPU/多 GPU/MPI 的 ops 构造
+            # 不带 flux_point_type）。CLI 侧已有同一条护栏，见
+            # cli/solve_steady_command.py；这里同样显式报错而不是静默
+            # 退回 radau——否则用户在 YAML 里写的数值方案会被无声忽略。
+            if backend != "cpu":
+                raise ValueError(
+                    f"flux_type={config.flux_type!r} 目前只有单机 CPU 后端支持"
+                    f"（GPU/多 GPU/MPI 分布式的 FR 算子构造不接 "
+                    f"flux_point_type），当前 backend={backend!r}。")
+            kwargs.setdefault("flux_type", config.flux_type)
         if config is not None:
             for field in ("mu_molecular", "turbulence_intensity", "viscosity_ratio"):
                 kwargs.setdefault(field, getattr(config, field))
@@ -368,6 +379,14 @@ class AutoFlowCFDAPI:
         if config is not None:
             for field in ("mu_molecular", "turbulence_intensity", "viscosity_ratio"):
                 kwargs.setdefault(field, getattr(config, field))
+            # flux_type：与 run_steady 同一条护栏，理由见那里。
+            if getattr(config, "flux_type", "radau") != "radau":
+                if backend != "cpu":
+                    raise ValueError(
+                        f"flux_type={config.flux_type!r} 目前只有单机 CPU 后端"
+                        f"支持（GPU/多 GPU/MPI 分布式的 FR 算子构造不接 "
+                        f"flux_point_type），当前 backend={backend!r}。")
+                kwargs.setdefault("flux_type", config.flux_type)
 
         time_scheme_map = {
             'rk3': CoreTimeScheme.SSP_RK3,

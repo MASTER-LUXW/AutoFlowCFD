@@ -33,7 +33,7 @@ from autoflowcfd.core.mpi.distributed_state import DistributedFRState
 from autoflowcfd.core.mpi.distributed_flat_face import (
     DistributedFlatFaceGeometry, build_distributed_flat_face
 )
-from autoflowcfd.core.mpi.comm import allreduce_sum, allreduce_min, barrier
+from autoflowcfd.core.mpi.comm import allreduce_sum, barrier
 from autoflowcfd.core.time_integration.base import TimeIntegrator, TimeIntegrationScheme
 
 
@@ -816,11 +816,6 @@ class DistributedFRSolver:
     def compute_global_residual_norm(self) -> float:
         """全局残差 L2 范数。"""
         return self.state.global_residual_norm()
-
-    def compute_global_min_dt(self, dt_local: np.ndarray) -> float:
-        """全局最小时间步长（MPI Allreduce MIN）。"""
-        local_min = float(np.min(dt_local[:self.partition.n_local_cells]))
-        return allreduce_min(local_min)
 
     def get_load_balance_report(self) -> str:
         """生成分区负载平衡报告。"""

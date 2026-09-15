@@ -457,7 +457,30 @@ def write_checkpoint(
     )
     manager = CheckpointManager(config, output_dir=output_dir, quiet=quiet)
 
-    solution_cell_avg = solver.state.U.mean(axis=1)  # (n_cells, n_vars)，供粗粒度消费方使用
+    # 只对**真实自由度**取平均（2026-09-15 系统性审计）：直接
+    # `.mean(axis=1)` 会把 native 四面体的零填充槽位一起算进去，而那些
+    # 槽位按约定在初始化时复制真实 SP #0、之后残差行填零/滤波行是单位阵，
+    # **永远冻结在初值**（实测推进 10 步后与真实 SP#0 相差 3.4%，order=1
+    # 下占一半槽位）。见 fr/native_tet_padding.py::
+    # reduce_per_cell_over_real_sps。
+    # 注意 `U_sps`（下方 extra_fields）始终是精确的逐 SP 数据，所有内部
+    # 消费方（resume、气动力后处理）都强制要求它并在缺失时报错；本字段
+    # 只供粗粒度外部消费方使用。
+    from autoflowcfd.fr.native_tet_padding import (
+        native_tet_n_real_sps, order_from_n_sps, reduce_per_cell_over_real_sps,
+    )
+    _U_ck = solver.state.U
+    _order_ck = order_from_n_sps(_U_ck.shape[1])
+    if native_tet_n_real_sps(_order_ck) >= _U_ck.shape[1]:
+        # order==0：n_native == n_sps == 1，**根本不存在填充槽位**，掩码
+        # 在数学上是恒等操作。走这条分支只是为了不去碰 `solver.mesh`
+        # ——P0 的检查点写出路径（含只提供 state/freestream 的调用方）
+        # 本来就不需要网格。这不是兜底，是一个可证的无操作。
+        solution_cell_avg = _U_ck.mean(axis=1)  # (n_cells, n_vars)
+    else:
+        solution_cell_avg = reduce_per_cell_over_real_sps(
+            _U_ck, solver.mesh.n_prism_cells, _order_ck,
+            'mean')  # (n_cells, n_vars)
     extra_fields = {"U_sps": solver.state.U, "Q_sps": solver.state.Q}
 
     # 湍流场 (k_field/omega_field) 持久化（真实 bug，2026-08-23，用户直接

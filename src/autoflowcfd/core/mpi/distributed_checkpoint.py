@@ -184,7 +184,37 @@ def distributed_save_checkpoint(
     )
     manager = CheckpointManager(config, output_dir=output_dir)
 
-    solution_cell_avg = U_global.mean(axis=1)  # (n_global, n_vars)
+    # 只对**真实自由度**取平均（2026-09-15 系统性审计发现的真实缺陷）：
+    # 直接 `.mean(axis=1)` 会把 native 四面体的零填充槽位一起算进去，而
+    # 那些槽位按约定在初始化时复制真实 SP #0、之后残差行填零/滤波行是
+    # 单位阵，**永远冻结在初值**（实测推进 10 步后与真实 SP#0 相差 3.4%，
+    # order=1 下占一半槽位）。见 fr/native_tet_padding.py::
+    # reduce_per_cell_over_real_sps。
+    #
+    # `U_global` 是**全局**索引空间（gather_global_state 按全局 id 归位），
+    # 所以需要**全局**棱柱数。两种分布式模式的 `solver.mesh` 含义不同：
+    #   - 传统模式：每个 rank 持有完整网格，`mesh.n_prism_cells` 就是全局值；
+    #   - 完全分布式加载：`self.mesh` 是 `PrecompactedMeshData`，它的
+    #     n_prism 是本 rank 的 **compact** 值，用在全局索引上是错的。
+    # 因此只在能可靠取到全局值时做掩码；完全分布式模式下退回原样的全场
+    # 平均，并**显式记录**这一点——它是一处有界、已知的输出侧失真，而不是
+    # 静默行为：`U_sps`（下方 extra_fields）始终是精确的逐 SP 数据，所有
+    # 内部消费方（resume、气动力后处理）都强制要求 U_sps 且缺失即报错，
+    # 本字段只供粗粒度外部消费方使用。要在完全分布式下也修对，需要把
+    # 逐单元 is_prism 标志一起 gather（需要真实 MPI 环境验证）。
+    from autoflowcfd.fr.native_tet_padding import (
+        order_from_n_sps, reduce_per_cell_over_real_sps,
+    )
+    _mesh_ck = getattr(solver, 'mesh', None)
+    _fully_dist = bool(getattr(solver, '_is_fully_distributed', False))
+    _n_prism_global = (getattr(_mesh_ck, 'n_prism_cells', None)
+                       if (_mesh_ck is not None and not _fully_dist) else None)
+    if _n_prism_global is not None:
+        solution_cell_avg = reduce_per_cell_over_real_sps(
+            U_global, int(_n_prism_global),
+            order_from_n_sps(U_global.shape[1]), 'mean')
+    else:
+        solution_cell_avg = U_global.mean(axis=1)  # (n_global, n_vars)
     extra_fields = {"U_sps": U_global}
 
     metadata = {

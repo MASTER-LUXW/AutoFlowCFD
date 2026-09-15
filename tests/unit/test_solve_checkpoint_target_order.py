@@ -46,6 +46,12 @@ def _fake_solver(n_cells=2, n_sps=1, n_vars=7, order=0):
         state=state,
         order=order,
         current_order=order,
+        # 2026-09-15：`write_checkpoint` 写出的单元平均现在只统计**真实
+        # 自由度**（native 四面体的零填充槽位冻结在初值、会变馊，见
+        # fr/native_tet_padding.py::reduce_per_cell_over_real_sps），因此
+        # P>=1 的替身必须给出单元类型划分。这里全当棱柱（n_prism ==
+        # n_cells）——本文件测的是 target_order 的读写，单元类型不参与。
+        mesh=SimpleNamespace(n_prism_cells=n_cells),
         freestream={"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0},
     )
 

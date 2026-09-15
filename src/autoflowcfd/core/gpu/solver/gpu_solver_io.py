@@ -289,14 +289,43 @@ class _GPUSolverIOMixin:
         # 完整推导见 gpu_modal_filter.py::filter_scalar_field_gpu 文档）：
         # k/omega 场同样需要模态滤波，理由/CPU-GPU一致性要求同上。
         if self.mesh.n_sps_per_cell > 1:
-            from autoflowcfd.core.gpu.gpu_modal_filter import filter_scalar_field_gpu
+            from autoflowcfd.core.fr_solver.filter import resolve_turb_filter_gate
+            from autoflowcfd.core.gpu.gpu_modal_filter import (
+                filter_scalar_field_gated_gpu, filter_scalar_field_gpu,
+            )
             n_prism = self.mesh.n_prism_cells
-            self.turb_model_gpu.k_field = filter_scalar_field_gpu(
-                self.turb_model_gpu.k_field, n_prism, self.ops.filter_prism, self.ops.filter_tet,
-            )
-            self.turb_model_gpu.omega_field = filter_scalar_field_gpu(
-                self.turb_model_gpu.omega_field, n_prism, self.ops.filter_prism, self.ops.filter_tet,
-            )
+        # 门控维度 `AFCFD_FILTER_TURB_GATE`（2026-09-15 系统性审计的 A 类
+        # 发现）：这一维此前只在 CPU 路径接线过，GPU 这边无条件全场滤波
+        # ——同一个环境变量在不同后端意味着不同的数值方案且无任何提示。
+        # 现已用 GPU 版同一套传感器补齐（gpu_troubled_cell.py），默认
+        # "all" 与此前行为逐位一致。
+            if resolve_turb_filter_gate() == "sensor":
+                from autoflowcfd.core.gpu.gpu_troubled_cell import (
+                    compute_turb_troubled_mask_gpu,
+                )
+                _order = int(getattr(self, "current_order", None)
+                             or getattr(self, "order", 0))
+                troubled = compute_turb_troubled_mask_gpu(
+                    self.turb_model_gpu.k_field, self.turb_model_gpu.omega_field,
+                    n_prism, _order)
+                self._turb_filter_troubled_frac = float(cp.mean(troubled))
+                self.turb_model_gpu.k_field = filter_scalar_field_gated_gpu(
+                    self.turb_model_gpu.k_field, n_prism,
+                    self.ops.filter_prism, self.ops.filter_tet, troubled,
+                )
+                self.turb_model_gpu.omega_field = filter_scalar_field_gated_gpu(
+                    self.turb_model_gpu.omega_field, n_prism,
+                    self.ops.filter_prism, self.ops.filter_tet, troubled,
+                )
+            else:
+                self.turb_model_gpu.k_field = filter_scalar_field_gpu(
+                    self.turb_model_gpu.k_field, n_prism,
+                    self.ops.filter_prism, self.ops.filter_tet,
+                )
+                self.turb_model_gpu.omega_field = filter_scalar_field_gpu(
+                    self.turb_model_gpu.omega_field, n_prism,
+                    self.ops.filter_prism, self.ops.filter_tet,
+                )
             self.turb_model_gpu.apply_positivity_limiter_gpu()
 
         # 真实缺口修复（2026-09-05，代码复审发现）：CPU 版

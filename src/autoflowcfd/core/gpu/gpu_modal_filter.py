@@ -111,3 +111,44 @@ def filter_scalar_field_gpu(phi, n_prism: int, filter_prism, filter_tet):
     if n_cells > n_prism:
         out[n_prism:] = cp.einsum("sj,cj->cs", filter_tet, phi[n_prism:])
     return out
+
+
+def filter_scalar_field_gated_gpu(phi, n_prism: int, filter_prism, filter_tet,
+                                  troubled):
+    """`filter_scalar_field_gpu` 的逐单元门控版（`AFCFD_FILTER_TURB_GATE=
+    sensor`）：只对 `troubled` 为真的单元施加滤波矩阵，其余单元逐位原样
+    返回。
+
+    与 CPU 版 `fr_solver/filter.py::filter_scalar_field_gated` 语义完全
+    一致：矩阵相同、分组顺序相同，`troubled` 全 True 时结果与
+    `filter_scalar_field_gpu` 逐位一致。
+
+    实现上用 `cp.where` 做整场混合而不是花式索引（`out[sel] = ...`）：
+    GPU 上布尔/整数索引会触发额外的 gather/scatter 与同步，而滤波矩阵
+    乘法本身对全部单元算一遍的成本远低于此（(n_sps,n_sps) 的小矩阵，
+    n_sps<=64），所以"全算再按掩码选"是更快且数值等价的形式——被选中
+    的单元取滤波结果、未选中的取原值，与逐单元施加逐位相同。
+
+    Args:
+        phi: (n_cells, n_sps) CuPy 数组
+        n_prism: 棱柱单元数（前 n_prism 个）
+        filter_prism, filter_tet: 滤波矩阵
+        troubled: (n_cells,) CuPy 布尔数组
+    """
+    cp = get_cupy()
+    n_cells = phi.shape[0]
+    if not hasattr(filter_prism, 'device'):
+        filter_prism = cp.asarray(filter_prism)
+    if not hasattr(filter_tet, 'device'):
+        filter_tet = cp.asarray(filter_tet)
+    out = phi.copy()
+    if not bool(cp.any(troubled)):
+        return out
+    sel2 = troubled[:, cp.newaxis]
+    if n_prism > 0:
+        filt = cp.einsum("sj,cj->cs", filter_prism, phi[:n_prism])
+        out[:n_prism] = cp.where(sel2[:n_prism], filt, phi[:n_prism])
+    if n_cells > n_prism:
+        filt = cp.einsum("sj,cj->cs", filter_tet, phi[n_prism:])
+        out[n_prism:] = cp.where(sel2[n_prism:], filt, phi[n_prism:])
+    return out

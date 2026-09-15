@@ -356,6 +356,7 @@ class ConfigLoader:
             'mu_molecular': '分子动力粘度，单位 Pa*s（默认标准状态下空气 1.8e-5）',
             'turbulence_intensity': '来流湍流强度 Tu（默认 0.01=1%）',
             'viscosity_ratio': '来流粘性比 VR=nu_t/nu（默认 5.0）',
+            'flux_type': 'FR 修正函数族: radau（默认，VCJH g2）| gauss（仅单机 CPU 后端）',
         }
         return comments.get(param, '')
 

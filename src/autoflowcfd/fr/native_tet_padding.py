@@ -105,3 +105,143 @@ def pad_native_tet_filter_matrix_to_global(filter_matrix: np.ndarray, n_sps: int
     padded[:n_native, n_native:] = 0.0
     padded[n_native:, :n_native] = 0.0
     return padded
+
+
+def native_tet_n_real_sps(order: int) -> int:
+    """native 四面体的**真实自由度**个数 `(p+1)(p+2)(p+3)/6`。
+
+    其余槽位是零填充（见 `pad_native_tet_matrix_to_global` 的"零填充块
+    对角"不变量）：它们不贡献任何真实输出，但**值本身会变馊**——按
+    `high_order_mesh_order.py::build_order_geometry` 的约定它们在初始化时
+    复制真实 SP #0，之后残差行填零、滤波行是单位阵，于是永远冻结在初值。
+    实测 79 万单元合成算例推进 10 步后，填充块与真实 SP#0 已相差 3.4%。
+    """
+    return (order + 1) * (order + 2) * (order + 3) // 6
+
+
+def order_from_n_sps(n_sps: int) -> int:
+    """从每单元解点数反解多项式阶数：`n_sps = (p+1)^3` => `p`。
+
+    为什么优先用这个而不是 `solver.current_order`/`solver.order`：本项目
+    的填充/真实自由度划分完全由**数组自身的 SP 轴长度**决定，而 solver
+    上的阶数属性是另一条信息来源——两者在 Order Continuation 期间可以
+    短暂不一致，而且不是所有调用点都拿得到一个完整的 solver（GPU 侧只有
+    数组与 flat face，分布式 checkpoint 只有 gather 出来的全局数组，测试
+    替身更是只有必需的几个属性）。从数组反解则**恒与被归约的数组自洽**。
+
+    Raises:
+        ValueError: `n_sps` 不是某个整数的立方——那说明调用方传进来的不是
+            张量积解点布局的数组，不能猜。
+    """
+    p = int(round(float(n_sps) ** (1.0 / 3.0))) - 1
+    for cand in (p - 1, p, p + 1):  # 立方根浮点误差的邻域
+        if cand >= 0 and (cand + 1) ** 3 == n_sps:
+            return cand
+    raise ValueError(
+        f"order_from_n_sps: n_sps={n_sps} 不是 (order+1)^3 形式，"
+        f"无法反解阶数（调用方传进来的不是张量积解点布局的数组）")
+
+
+def _check_order_matches_n_sps(order: int, n_sps: int, who: str) -> int:
+    """确认传入的 `order` 与数组的 SP 轴长度自洽，并返回真实自由度个数。
+
+    零填充的行数是 `n_sps - n_native`，两者都由**当前解阶数**决定
+    (`n_sps=(p+1)^3`)。调用方通常从 solver 上取 `current_order`，而在
+    Order Continuation 期间网格几何量的 `n_sps` 可以短暂地属于另一个
+    阶数——那种情形下按错的 `n_native` 切片会静默地把真实解点当成填充
+    丢掉（或反过来把填充当真实算进去），是一个无声的精度损失。本项目
+    在跨阶数缓存上已经复现过同一类真实 bug（见
+    `gpu_solver.py::_compute_local_time_step_gpu` 里 metric_flux_scale
+    缓存那段注释），所以这里显式报错而不是静默继续。
+    """
+    if (order + 1) ** 3 != n_sps:
+        raise ValueError(
+            f"{who}: order={order} 对应 n_sps=(order+1)^3={(order + 1) ** 3}，"
+            f"但数组的 SP 轴长度是 {n_sps}——阶数与数组不自洽，"
+            f"不能静默按其中之一继续（会把真实解点当填充丢掉，或反之）")
+    return native_tet_n_real_sps(order)
+
+
+def reduce_rows_over_real_sps(field, row_is_prism, order: int, how: str,
+                              xp=None):
+    """`reduce_per_cell_over_real_sps` 的**逐行掩码**版。
+
+    用于行不是"棱柱在前"排列的情形——典型是按 `owner_cell` 索引出来的
+    逐面数组（`rho[owner_cells]`，每行的单元类型任意混合），这时按
+    `n_prism` 切片没有意义。
+
+    Args:
+        field: `(n_rows, n_sps)`
+        row_is_prism: `(n_rows,)` 布尔，True=该行对应棱柱单元
+        order, how, xp: 同 `reduce_per_cell_over_real_sps`
+    """
+    if xp is None:
+        import numpy as _np
+        xp = _np
+    if how not in ('mean', 'min', 'max', 'sum'):
+        raise ValueError(f"reduce_rows_over_real_sps: how={how!r} 不支持")
+    n_sps = field.shape[1]
+    n_native = _check_order_matches_n_sps(
+        order, n_sps, 'reduce_rows_over_real_sps')
+    if n_native >= n_sps:
+        return getattr(xp, how)(field, axis=1)
+    full = getattr(xp, how)(field, axis=1)
+    part = getattr(xp, how)(field[:, :n_native], axis=1)
+    return xp.where(row_is_prism, full, part)
+
+
+def reduce_per_cell_over_real_sps(field, n_prism: int, order: int, how: str,
+                                  xp=None):
+    """对 `(n_cells, n_sps[, ...])` 的逐单元场在 **SP 轴**做归约，**只统计
+    真实自由度**。
+
+    **为什么必须有这个函数（2026-09-15 系统性审计）**：对 SP 轴直接做
+    `.mean(axis=1)` / `.min(axis=1)` 会把 native 四面体的零填充槽位一起
+    算进去，而那些槽位冻结在初值、会随推进变馊（见
+    `native_tet_n_real_sps`）。审计中确认受影响的真实调用点：
+
+    - `core/mpi/distributed_checkpoint.py`：写进检查点/后处理的**单元
+      平均**被污染（填充占一半槽位、实测偏差 3.4%）；
+    - `core/fr_operators/artificial_viscosity.py`：`rho_local`/`vel_local`
+      （人工粘性上限的尺度因子）；
+    - `core/turbulence/transport.py` 与 GPU 对应处：`rho_owner`
+      （omega 壁面目标值里的 nu = mu/rho）；
+    - `core/gpu/solver/gpu_solver.py` 与多 GPU 对应处：局部 dt 的
+      `min(axis=1)`（会被填充槽位的馊状态过度限制）。
+
+    注意 `mean` 与 `min/max` 的差别：把填充同步成 SP#0 的副本能让
+    `min/max` 恰好正确（重复一个真实值不改变极值），但**修不了 `mean`**
+    ——权重会变成"4 个真实 + 4 份 SP#0 副本"。所以统一按掩码处理，而不是
+    去维护填充值。
+
+    单元存储是"棱柱在前、四面体在后"（本项目的既有不变量），所以直接切片
+    就够，不需要构造布尔掩码。
+
+    Args:
+        field: `(n_cells, n_sps)` 或 `(n_cells, n_sps, V)`
+        n_prism: 棱柱单元数（前 n_prism 个）
+        order: 多项式阶数
+        how: 'mean' | 'min' | 'max' | 'sum'
+        xp: 数组模块（numpy 或 cupy）；None 时按 numpy
+
+    Returns:
+        `(n_cells,)` 或 `(n_cells, V)`
+    """
+    if xp is None:
+        import numpy as _np
+        xp = _np
+    if how not in ('mean', 'min', 'max', 'sum'):
+        raise ValueError(f"reduce_per_cell_over_real_sps: how={how!r} 不支持"
+                         f"（mean | min | max | sum）")
+    n_cells = field.shape[0]
+    n_native = _check_order_matches_n_sps(
+        order, field.shape[1], 'reduce_per_cell_over_real_sps')
+    fn = getattr(xp, how)
+    out_prism = fn(field[:n_prism], axis=1) if n_prism > 0 else None
+    out_tet = (fn(field[n_prism:, :n_native], axis=1)
+               if n_cells > n_prism else None)
+    if out_prism is None:
+        return out_tet
+    if out_tet is None:
+        return out_prism
+    return xp.concatenate([out_prism, out_tet], axis=0)

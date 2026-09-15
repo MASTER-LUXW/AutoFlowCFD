@@ -860,10 +860,36 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
             else:
                 dt_all[:, sp] = out_sp
 
-        dt_mean = cp.min(dt_all, axis=1)
+        # 单元内取最小值时**只看真实自由度**（2026-09-15 系统性审计）：
+        # native 四面体的 n_sps 槽位里只有前 n_native=(p+1)(p+2)(p+3)/6 个
+        # 是真实解点，其余是零填充槽位——它们在初始化时复制真实 SP #0、
+        # 之后残差行被填零，于是**永远冻结在初始条件上**。CPU 侧
+        # `cfl.py::compute_local_time_step` 返回的是逐 SP 的 (n_cells,n_sps)
+        # 数组、填充槽位的 dt 只会乘到一个恒为零的残差上，所以那边不受
+        # 影响；这里做了 `min(axis=1)` 把它归约成逐单元一个标量，冻结
+        # 槽位就真的参与了竞争。
+        # 具体污染路径：det_jacs/adj_j 对直边 native 四面体是**每单元一个
+        # 常数**（见 high_order_mesh_order.py::compute_native_tet_jacobians，
+        # 真实行与填充行同值），所以 dt_geometric 不受影响；受影响的是
+        # 逐 SP 的波速 (|u|+a) 与 rho/mu_eff——填充槽位给的是初始条件的值。
+        # min 取的是"最大波速/最大 mu_eff"那一侧，因此典型来流初始化下
+        # （壁面附近流动减速）冻结槽位会把 dt 压得偏小：方向上偏保守、
+        # 不会失稳，但它是用初始条件去限制当前时间步，而且会让 CPU-GPU
+        # 交叉校验在四面体上无声地对不上。
+        from autoflowcfd.fr.native_tet_padding import (
+            order_from_n_sps, reduce_per_cell_over_real_sps,
+        )
+        # compact 索引空间同样是"棱柱在前"（见 base_flat.n_prism 文档）。
+        _np_cells = int(self.dist_flat_face.base_flat.n_prism)
+        # 阶数从数组的 SP 轴反解（见 order_from_n_sps 文档）：填充划分由
+        # 被归约数组自身决定，不读 solver 上可能短暂不同步的阶数属性。
+        _p = order_from_n_sps(dt_all.shape[1])
+        dt_mean = reduce_per_cell_over_real_sps(
+            dt_all, _np_cells, _p, 'min', xp=cp)
         if not return_physical_too:
             return dt_mean
-        dt_phys = cp.min(dt_phys_all, axis=1) if precond else dt_mean
+        dt_phys = (reduce_per_cell_over_real_sps(
+            dt_phys_all, _np_cells, _p, 'min', xp=cp) if precond else dt_mean)
         return dt_mean, dt_phys
 
     def _current_cfl(self) -> float:

@@ -431,8 +431,13 @@ def compute_persson_peraire_artificial_viscosity(
     rho = Q[:, :, 0]
     vel_mag = np.sqrt(Q[:, :, 1] ** 2 + Q[:, :, 2] ** 2 + Q[:, :, 3] ** 2)
     h_cell = np.cbrt(np.maximum(mesh.cell_volumes, 1e-300))
-    rho_local = rho.mean(axis=1)
-    vel_local = vel_mag.mean(axis=1)
+    # 只统计**真实自由度**（2026-09-15 系统性审计）：直接 `.mean(axis=1)`
+    # 会把 native 四面体的零填充槽位一起算进去，而那些槽位冻结在初值、
+    # 会随推进变馊（实测 10 步后偏差 3.4%，且占一半槽位）。详见
+    # fr/native_tet_padding.py::reduce_per_cell_over_real_sps。
+    from autoflowcfd.fr.native_tet_padding import reduce_per_cell_over_real_sps
+    rho_local = reduce_per_cell_over_real_sps(rho, n_prism, order, 'mean')
+    vel_local = reduce_per_cell_over_real_sps(vel_mag, n_prism, order, 'mean')
     epsilon_max = alpha_av * rho_local * h_cell * vel_local / order
 
     if n_prism > 0:

@@ -292,32 +292,13 @@ def _distribute_scalar_correction_gpu(cp, ff, raw_jump_fp, det_jacs, n_cells, n_
 
 from autoflowcfd.core.turbulence.transport import resolve_turb_overintegration
 
-_OVERINT_KEYS = (
-    'overint_interp_c2f_prism', 'overint_D_fine_prism', 'overint_restrict_f2c_prism',
-    'overint_interp_c2f_tet', 'overint_D_fine_tet', 'overint_restrict_f2c_tet',
+# 过积分上下文已提取到 `core/gpu/gpu_overintegration.py`（2026-09-15，
+# 粘性体积项 GPU 侧补齐时共用同一份，避免 residual 模块反向依赖
+# turbulence 模块）。这里保留原名别名，调用点不变。
+from autoflowcfd.core.gpu.gpu_overintegration import (  # noqa: E402
+    OVERINT_OPS_KEYS as _OVERINT_KEYS,
+    get_overintegration_segs_gpu as _turb_overint_segs_gpu,
 )
-
-
-def _turb_overint_segs_gpu(mesh_data, ops_data, n_cells, n_prism):
-    """GPU 侧过积分上下文；任一算子/细点度量缺失则返回 None（退回 coarse）。
-
-    与 CPU 端 `core/fr_operators/volume_contract.py::
-    get_overintegration_context` 逐字对应。GPU 侧的细点度量用
-    `mesh_data['adj_j_fine']`（= det_fine*inv_fine，`array_manager.py`
-    已预乘好并上传，无粘体积项也是用它），所以不需要再分别取 det/inv。
-    缺失的唯一正常情形是 order==0。
-    """
-    if 'adj_j_fine' not in mesh_data:
-        return None
-    for k in _OVERINT_KEYS:
-        if k not in ops_data:
-            return None
-    return (
-        (0, n_prism, ops_data['overint_interp_c2f_prism'],
-         ops_data['overint_D_fine_prism'], ops_data['overint_restrict_f2c_prism']),
-        (n_prism, n_cells, ops_data['overint_interp_c2f_tet'],
-         ops_data['overint_D_fine_tet'], ops_data['overint_restrict_f2c_tet']),
-    )
 
 
 def _scalar_volume_div_overintegrated_gpu(cp, factors, adj_j_fine, segs,
@@ -541,7 +522,27 @@ def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, m
         _wd = wall_distance_gpu[owner_cells]
         d1 = _wd.min(axis=1) if _d1_mode == "min" else _wd.mean(axis=1)
         d1 = cp.maximum(d1, 1e-8)
-        rho_owner = cp.mean(Q_gpu[owner_cells, :, 0], axis=1)
+        # 只统计真实自由度，与 CPU 端 transport.py::
+        # _compute_omega_wall_target 同一处 2026-09-15 审计逐字对应。
+        # 阶数从 SP 数反解（棱柱是张量积 n_sps=(order+1)^3），棱柱数从
+        # flat face 几何取——都不需要改本函数签名。
+        # 用与 CPU 端**同一个**共享辅助（2026-09-15 统一）：原先这里是
+        # 一份手写的等价逻辑，等价性只能靠人工比对维护；共享版还附带
+        # "order 与 n_sps 必须自洽"的显式校验。
+        from autoflowcfd.fr.native_tet_padding import (
+            order_from_n_sps, reduce_rows_over_real_sps,
+        )
+        _np_prism = getattr(ff, 'n_prism', None)
+        _rows = Q_gpu[owner_cells, :, 0]
+        _order = order_from_n_sps(_rows.shape[1])
+        if _np_prism is None:
+            # 拿不到棱柱数就不能判断行的单元类型；此时退回全场平均并
+            # 保持既有行为（flat face 几何一定带 n_prism，这条分支只在
+            # 测试替身缺字段时才会走到）。
+            rho_owner = cp.mean(_rows, axis=1)
+        else:
+            rho_owner = reduce_rows_over_real_sps(
+                _rows, owner_cells < _np_prism, _order, 'mean', xp=cp)
         nu_owner = mu / cp.maximum(rho_owner, 1e-10)
         omega_wall = 60.0 * nu_owner / (beta1 * d1 ** 2)
         omega_wall = cp.minimum(omega_wall, omega_max)
