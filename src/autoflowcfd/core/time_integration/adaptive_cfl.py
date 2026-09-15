@@ -96,6 +96,55 @@ AutoFlowCFD V2.0 - 稳态求解器自适应 CFL 控制器
        **确实变差**才收缩），与放大阈值之间留出 0.995~1.0 的迟滞带：带内
        （窗口在下降但幅度不够）CFL 保持不动。这既消掉了极限环，也让 CFL
        调节日志从"每 26 步一条"回到只在真正需要时才出现。
+    9. 绝对基准：记住"自己到过的最好残差"（2026-09-15，由 79 万单元真实
+       网格一次**已跑完**的发散逼出来的）。第 4~8 条全部看的都是**相对
+       最近过去**的量——单步比值、20 步累计窗口——于是一条"缓慢离开收敛
+       盆"的轨迹可以穿过它们**全部**判据：实测（同一 P1 检查点、模态
+       滤波器关闭即真实 P1 内容、cfl_start=0.1）残差在 step 2 到达全程
+       最低 2.744e8，随后冲到 5.26e9（最低点的 **19.2 倍**），再缓慢衰减
+       到 1.02e9（仍是 **3.7 倍**），最后在 step 174 发散成 NaN。控制器
+       在这全程里**两次放大 CFL**：step 45 在 15.8 倍处 0.0576 -> 0.0608、
+       step 129 在 4.6 倍处 0.0608 -> 0.064。两次都"合规"——因为
+       5.26e9 -> 1.26e9 这段衰减确实让 20 步窗口累计比值低于 0.995，是一个
+       全局已失败轨迹里的真实局部下降。
+
+       换句话说，第 4 条论证放大反馈符号天然正确所依赖的前提（"残差降得
+       更快说明还在稳定极限内"）只在**解还在收敛盆里**时成立；一旦已经
+       离开，局部斜率就不再携带稳定性信息。
+
+       修法是加一个**绝对**基准 `_res_best`（自构造/reset 以来见过的最小
+       有限残差），并只用它做两件事，两件都只会**阻止**动作、不会主动
+       收缩：
+
+         (a) `res / res_best > grow_block_ratio`（默认 2.0）时**禁止任何
+             放大**（grow / crawl / grow_trend 三条路径）。"比自己到过的
+             最好成绩还差一倍以上却要加大步长"没有任何情形下是对的。
+         (b) 软上限的时间性释放（第 8 条的 `ceiling_release_steps`）额外
+             要求"当前残差不差于上限设定时的残差"。释放的理由是"问题随
+             收敛变容易了"；残差比当时更差时这个理由不成立，释放就只是
+             去重探一个已知失败的 CFL。实测 step 129 那次放大正是释放
+             造成的——它回到了 step 24 已经失败过的 0.064。
+
+       阈值的依据（同一批日志，逐条算例实测 `res/res_best` 的上界）：
+
+         健康算例（legacy 档、以及固定 CFL 0.03 的真实 P1 档）：全程恒为
+         **1.00**——残差严格单调下降，当前值**就是**历史最好值；
+         失败算例（off / sensor / 自适应真实 P1 各档）：20 步内就达到
+         **17.5**，之后 20.47 起跳。
+
+       1.00 与 17.5 之间隔着一个数量级以上，所以 2.0 这个阈值离两侧都
+       很远，不是需要调参的量。**默认值不变、健康轨迹逐位不变**：健康
+       轨迹上比值恒为 1.00，(a)(b) 两条永不触发。
+
+       **本条不做的事**：没有加"绝对回退即判定重度恶化并强制收缩"。那
+       在上面这条轨迹上会在 step 3~20 的启动暂态里触发（续算 P0 检查点
+       进入真实 P1，解本来就还不在 P1 的盆里），而那一段是不是"发散"并
+       没有数据支撑。本项目已经有三次"短窗口得出符号相反结论"的先例，
+       所以只落地有真实长程数据支撑的那部分。同样要说清楚的是：(a)(b)
+       两条**可证地**消掉了上述两次不该发生的放大，但由此停住的 CFL
+       （0.0576）是否落在稳定边界内**尚无数据**——现有数据只确定 0.03
+       稳定、0.0608 不稳定。
+
     3. 与 dual.py 的双时间步自适应逻辑独立——两者面向不同的迭代结构
        （稳态每步一次 RK3 vs 双时间每步多次内迭代），参数和策略不同。
 
@@ -165,6 +214,7 @@ class AdaptiveCFLController:
         trend_shrink_threshold: float = 1.0,
         ceiling_backoff: float = 0.95,
         ceiling_release_steps: int = 100,
+        grow_block_ratio: float = 2.0,
     ):
         """初始化自适应 CFL 控制器。
 
@@ -251,6 +301,7 @@ class AdaptiveCFLController:
         self.trend_shrink_threshold = trend_shrink_threshold
         self.ceiling_backoff = ceiling_backoff
         self.ceiling_release_steps = ceiling_release_steps
+        self.grow_block_ratio = grow_block_ratio
 
         # 环境变量 `AFCFD_CFL_LEGACY=1`：整体退回 2026-09-14 之前的行为
         # （死区里 CFL 完全不动 + 轻度恶化单步立即收缩），供现场排查与
@@ -278,6 +329,11 @@ class AdaptiveCFLController:
         # 约束。见模块文档第 8 条。
         self._cfl_ceiling = None
         self._steps_since_shrink: int = 0
+        # 绝对基准（见模块文档第 9 条）：自构造/reset 以来见过的最小
+        # **有限**残差，以及"软上限设定当时"的残差（用于给时间性释放
+        # 加条件）。None 表示尚无有限残差样本。
+        self._res_best = None
+        self._res_at_ceiling: float = float("inf")
         self._steps_since_last_change: int = 0  # 距上次 CFL 调节的步数
         self._history: List[Tuple[int, float, float]] = []  # (step, cfl, residual)
         # 窗口趋势判据的残差滑动窗口。长度 trend_window+1，使 [0] 与 [-1]
@@ -305,8 +361,24 @@ class AdaptiveCFLController:
         self._step_count += 1
         self._steps_since_last_change += 1
         self._steps_since_shrink += 1
-        # 软上限的缓慢释放（见模块文档第 8 条与 ceiling_release_steps）
+        # 绝对基准（见模块文档第 9 条）：先更新"到过的最好残差"，本步
+        # 后续所有判断都能用上它。非有限值不入基准（那是发散本身，
+        # 由 ratio=+inf 的 severe 分支处理）。
+        if math.isfinite(current_residual) and current_residual > 0:
+            if self._res_best is None or current_residual < self._res_best:
+                self._res_best = current_residual
+
+        # 软上限的缓慢释放（见模块文档第 8 条与 ceiling_release_steps）。
+        # 释放额外要求"当前残差不差于上限设定当时"（第 9 条 (b)）：释放的
+        # 理由是"问题随收敛变容易了"，残差比当时更差时这个理由不成立，
+        # 释放就只是去重探一个已知失败的 CFL——实测 step 129 那次正是
+        # 这样回到了 step 24 已经失败过的 0.064，并在 45 步后发散。
+        _release_justified = (
+            not math.isfinite(self._res_at_ceiling)
+            or (math.isfinite(current_residual)
+                and current_residual <= self._res_at_ceiling))
         if (self._cfl_ceiling is not None
+                and _release_justified
                 and self._steps_since_shrink >= self.ceiling_release_steps):
             self._cfl_ceiling = min(
                 self.cfl_max, self._cfl_ceiling / self.ceiling_backoff)
@@ -348,7 +420,8 @@ class AdaptiveCFLController:
             self._consecutive_good = 0
             self._consecutive_mild_bad = 0
             if (self._consecutive_crawl >= self.crawl_confirm_steps
-                    and self._steps_since_last_change >= self.cooldown_steps):
+                    and self._steps_since_last_change >= self.cooldown_steps
+                    and not self._growth_blocked(current_residual)):
                 old_cfl = self.cfl_number
                 self.cfl_number = min(
                     self.cfl_number * self.crawl_factor, self._growth_cap()
@@ -462,6 +535,12 @@ class AdaptiveCFLController:
                 ceiling = max(old_cfl * self.ceiling_backoff, ceiling_floor)
                 self._cfl_ceiling = (ceiling if self._cfl_ceiling is None
                                      else min(self._cfl_ceiling, ceiling))
+                # 记住"上限是在多差的残差上设的"，供时间性释放做条件判断
+                # （见模块文档第 9 条 (b)）。上限只会下降，所以这里也只
+                # 记录更严格（更小）的那个残差基准。
+                if math.isfinite(current_residual):
+                    self._res_at_ceiling = min(self._res_at_ceiling,
+                                               current_residual)
                 self._steps_since_shrink = 0
                 self.cfl_number = max(self.cfl_number * factor, self.cfl_min)
                 self._steps_since_last_change = 0
@@ -502,7 +581,8 @@ class AdaptiveCFLController:
         # --- 快速放大 CFL（需要连续确认 + 冷却期）---
 
         if (self._consecutive_good >= self.growth_confirm_steps
-                and self._steps_since_last_change >= self.cooldown_steps):
+                and self._steps_since_last_change >= self.cooldown_steps
+                and not self._growth_blocked(current_residual)):
             old_cfl = self.cfl_number
             self.cfl_number = min(self.cfl_number * self.growth_factor,
                                   self._growth_cap())
@@ -517,6 +597,21 @@ class AdaptiveCFLController:
 
         self._prev_residual = current_residual
         return self.cfl_number
+
+    def _growth_blocked(self, current_residual: float) -> bool:
+        """当前残差比"自己到过的最好成绩"差 `grow_block_ratio` 倍以上时
+        禁止放大（模块文档第 9 条 (a)）。
+
+        这只**阻止放大**，从不主动收缩——所以它不可能引入第 5/6 条修掉的
+        那种棘轮效应。健康轨迹上残差严格单调下降、当前值就是历史最好值，
+        比值恒为 1.00，本函数恒返回 False，行为逐位不变（实测见第 9 条
+        列出的逐算例数据：健康档 1.00，失败档 20 步内 17.5）。
+        """
+        if self._res_best is None or self._res_best <= 0:
+            return False
+        if not math.isfinite(current_residual):
+            return True   # 非有限值绝不是放大的时机
+        return current_residual / self._res_best > self.grow_block_ratio
 
     def _growth_cap(self) -> float:
         """放大的实际上限：`cfl_max` 与软上限取小。
@@ -549,6 +644,12 @@ class AdaptiveCFLController:
             return
         if r_new / r_old >= self.trend_threshold:
             return   # 窗口内没有实质进展：停滞或原地震荡，不放大
+        # 绝对基准闸门（模块文档第 9 条 (a)）：窗口内确有下降、但整条轨迹
+        # 已经比自己到过的最好残差差 grow_block_ratio 倍以上时不放大。
+        # `_res_window[-1]` 就是本步刚 append 进去的当前残差。这一条正是
+        # 第 9 条实测那两次不该发生的放大（15.8 倍处、4.6 倍处）的阻断点。
+        if self._growth_blocked(r_new):
+            return
 
         old_cfl = self.cfl_number
         self.cfl_number = min(self.cfl_number * self.trend_factor, self._growth_cap())
@@ -577,6 +678,10 @@ class AdaptiveCFLController:
         # 阶数切换 = 换了一个离散问题，旧的稳定边界不再适用，软上限作废
         self._cfl_ceiling = None
         self._steps_since_shrink = 0
+        # 阶数切换 = 换了一个离散问题，旧的残差量级不可比，绝对基准同样
+        # 作废（否则新阶数的第一步残差会被拿去和旧阶数的最好值比）
+        self._res_best = None
+        self._res_at_ceiling = float("inf")
         self._prev_residual = 0.0
         self._step_count = 0
         self._consecutive_good = 0
