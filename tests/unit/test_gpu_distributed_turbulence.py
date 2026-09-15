@@ -121,6 +121,12 @@ def _prepare_compact_mesh_data(mesh, ops, compact_global_ids):
         'n_cells': len(compact_global_ids), 'n_prism': None,  # 调用方会覆盖 n_prism
         'D_3d_prism': ops.D_3d_prism, 'D_3d_tet': ops.D_3d_tet,
     }
+    # 补齐生产 GPU 路径会上传、替身容易漏掉的键，见
+    # _gpu_standin_helpers 模块文档。本文件算子与网格数据在同一个
+    # dict，且细点度量要按 compact 索引空间切。
+    from ._gpu_standin_helpers import complete_gpu_standin
+    complete_gpu_standin(mesh, ops, mesh_data, mesh_data,
+                         compact_ids=compact_global_ids)
     return mesh_data
 
 

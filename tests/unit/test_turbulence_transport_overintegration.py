@@ -452,6 +452,103 @@ class TestOverintegrationIsNoOpAtOrder3:
             f"这个事实矛盾，说明 OVERINTEGRATION_MAX_ORDER 或算子构造被改过")
 
 
+class TestFullConvectionResidualVsAnalytic:
+    """**整条对流残差**（体积项 + 界面上风校正）与解析值比较。
+
+    这是本轮系统遍历核心计算环节时发现的最重要一条：前面的用例只单独
+    考察体积项，这一条走公开接口 `compute_scalar_convection_residual`。
+
+    算例设计：`rho`/`u` 取**常数**（于是通过每个单元各面的质量通量精确
+    守恒，避开 `filter_scalar_field`/"缺失 dilution"那段文档记录过的
+    "对 sum_faces(mass_flux) 敏感"这个已被证伪的方向），`phi = 1 + G·x`
+    取线性。于是
+
+        d(rho*phi)/dt = -div(rho*u*phi) = -rho*(u·G)   （处处同一个常数）
+
+    有闭式解，且 `rho*u*phi` 本身只有一次、完全落在 P1 解空间内——也就是
+    说**任何非零误差都只能来自离散算子本身**，不是表示能力不足。
+
+    实测（默认 `AFCFD_TURB_OVERINT=off`）：
+
+        order=1 棱柱 相对误差 1.1294  （113%！残差范围 [-12.26, +1.11]，
+                                      解析值 -8.5750）
+        order=1 四面体 6.84e-15       （机器零）
+        order=2 棱柱 2.26e-09
+        order=2 四面体 1.97e-14
+
+    打开去混叠后 order=1 棱柱降到 **4.61e-10**（改善约 2.4e9 倍），
+    order=2 逐位不变（2.2597e-09 -> 2.2576e-09）。
+
+    根因：非仿射棱柱上 `adj(J)` 是非平凡多项式，`adj(J)*rho*u*phi` 的
+    真实次数高于 1，在 P1 空间里对它求导就是"先混叠再求导"；四面体在
+    这张网格上是仿射的（实测同一单元内 det(J) 跨度恰好 0），adj(J) 是
+    常数，所以没有这个问题——这也解释了为什么两类单元差了 14 个数量级。
+
+    **边界条件不是原因**：order=1 与 order=2 的边界面数完全相同
+    （cell0 8 面其中 6 边界、cell1 6 面其中 6 边界、…），而 order=2 给出
+    的是**精确的** -8.5750。
+    """
+
+    RHO = 1.225
+    UVEC = np.array([30.0, 7.0, -4.0])
+    GRAD = np.array([0.3, -0.2, 0.15])
+
+    def _run(self, order, overint):
+        old = os.environ.get("AFCFD_TURB_OVERINT")
+        os.environ["AFCFD_TURB_OVERINT"] = overint
+        try:
+            mesh = _build_synthetic_mixed_mesh(order)
+            ops = generate_fr_operators(order)
+            nc, ns = mesh.n_cells, mesh.n_sps_per_cell
+            X = mesh.sps_coords.reshape(-1, 3)
+            phi = (1.0 + X @ self.GRAD).reshape(nc, ns)
+            rho = np.full((nc, ns), self.RHO)
+            vel = np.tile(self.UVEC, (nc, ns, 1))
+            res = tp.compute_scalar_convection_residual(phi, rho, vel, mesh, ops)
+        finally:
+            if old is None:
+                os.environ.pop("AFCFD_TURB_OVERINT", None)
+            else:
+                os.environ["AFCFD_TURB_OVERINT"] = old
+        exact = -self.RHO * float(self.UVEC @ self.GRAD)
+        errs = {}
+        for name, sl in _per_type_slices(mesh, order):
+            errs[name] = np.abs(res[sl] - exact).max() / abs(exact)
+        return errs
+
+    def test_order1_prism_has_large_error_without_dealiasing(self):
+        """`off` 档（2026-09-15 之前的默认）在生产阶数 P1 的棱柱上有
+        O(1) 相对误差——这正是把默认值改成 `on` 的依据。
+
+        这条刻意断言"off 档确实有这个误差"而不是只断言"on 更好"：它把
+        改默认值的依据本身钉住，任何人想把默认值改回 off 都会先看到这个
+        数字。
+        """
+        errs = self._run(1, "off")
+        assert errs["prism"] > 0.5, (
+            f"order=1 棱柱在 off 档下的相对误差只有 {errs['prism']:.3e}，"
+            f"与实测 1.1294 不符")
+        assert errs["tet"] < 1e-12, (
+            f"order=1 四面体相对误差 {errs['tet']:.3e} 不是机器零——"
+            f"这张网格上四面体是仿射的，adj(J) 常数，不该有混叠")
+
+    def test_dealiasing_fixes_order1_prism(self):
+        errs = self._run(1, "on")
+        assert errs["prism"] < 1e-8, (
+            f"打开去混叠后 order=1 棱柱相对误差仍有 {errs['prism']:.3e}"
+            f"（实测应为 ~4.6e-10）")
+        assert errs["tet"] < 1e-12
+
+    def test_order2_is_unaffected_by_the_switch(self):
+        """order=2 上两档必须都已足够精确——说明 order=1 那个 113% 不是
+        "这套离散本来就这么差"，而是 order=1 特有的混叠。"""
+        off = self._run(2, "off")
+        on = self._run(2, "on")
+        for k in ("prism", "tet"):
+            assert off[k] < 1e-7, f"order=2 {k} 默认档相对误差 {off[k]:.3e}"
+            assert on[k] < 1e-7, f"order=2 {k} 去混叠档相对误差 {on[k]:.3e}"
+
+
 class TestFreestreamPreservation:
     """安全性：常数场的散度必须为零——去混叠不能破坏自由流场保持性。"""
 
@@ -502,10 +599,14 @@ class TestSwitchSemantics:
         else:
             os.environ["AFCFD_TURB_OVERINT"] = old
 
-    def test_default_is_off(self):
+    def test_default_is_on(self):
+        """默认已于 2026-09-15 改为 `on`——解析判据显示 `off` 在生产阶数
+        P1 的棱柱上有 113% 相对误差，代价只有约 +10.2%/步，且真实网格
+        250 步运行本来就是带 on 跑的。理由全文见
+        `resolve_turb_overintegration` 文档。"""
         old = self._env(None)
         try:
-            assert tp.resolve_turb_overintegration() == "off"
+            assert tp.resolve_turb_overintegration() == "on"
         finally:
             self._restore(old)
 
@@ -531,7 +632,7 @@ class TestSwitchSemantics:
 
     @pytest.mark.parametrize("order", [1, 2])
     def test_public_api_bit_identical_when_off(self, order):
-        """默认关闭时，公开接口必须逐位等于此前实现。
+        """显式 `off` 时，公开接口必须逐位等于 2026-09-15 之前的实现。
 
         判据取"显式 off"与"手工复刻的 coarse 体积项 + 同一条公开接口"
         之间的一致性：直接比对流残差整体（体积项 + 界面项），任何把

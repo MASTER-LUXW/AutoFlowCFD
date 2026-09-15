@@ -214,6 +214,35 @@ class TestFreeStreamAndConservation:
 
 
 class TestDiffusionIsDissipative:
+    """扩散算子的耗散性——**两档去混叠开关下都必须成立**。
+
+    `quad_form < 0` 是这里真正要守住的性质（反扩散是本项目真实踩过的坑，
+    见下方用例文档）。去混叠会改变耗散的**量**（实测约减半，见
+    `test_quadratic_form_is_negative` 里的数字与解释），但绝不能改变
+    **符号**。
+    """
+
+    @pytest.mark.parametrize("overint", ["off", "on"])
+    def test_sign_is_negative_under_both_dealiasing_modes(self, overint):
+        import os
+        old = os.environ.get("AFCFD_TURB_OVERINT")
+        os.environ["AFCFD_TURB_OVERINT"] = overint
+        try:
+            solver, mesh = _build(av_enabled=True)
+            pert = _set_density_bump(solver, mesh)
+            mass_res = solver._artificial_mass_diffusion_residual()[..., 0]
+        finally:
+            if old is None:
+                os.environ.pop("AFCFD_TURB_OVERINT", None)
+            else:
+                os.environ["AFCFD_TURB_OVERINT"] = old
+        n_cells, n_sps = mass_res.shape
+        det_jacs = np.abs(mesh.jacobians["det_jacs"].reshape(n_cells, n_sps))
+        quad_form = float(np.sum(pert * mass_res * det_jacs))
+        assert quad_form < 0.0, (
+            f"AFCFD_TURB_OVERINT={overint} 下二次型 {quad_form:.6e} >= 0——"
+            f"算子不是耗散的（反扩散会指数放大高频模态）")
+
     def test_quadratic_form_is_negative(self):
         """判据 5（严格形式）：扩散算子必须是**耗散**的，不是反扩散。
 
@@ -241,6 +270,24 @@ class TestDiffusionIsDissipative:
             f"<d_rho, div(eps*grad(d_rho))> = {quad_form:.6e} >= 0——"
             "算子不是耗散的（反扩散：符号写反或界面校正装配错误），"
             "会指数放大高频模态")
-        # 不只是"略小于零"：真实扩散下这个二次型应当被 |.| 范数主导
-        assert quad_form / norm < -0.1, (
-            f"耗散性太弱（quad/norm={quad_form / norm:.3f}），疑似部分项符号相反")
+        # 不只是"略小于零"：真实扩散下这个二次型应当被 |.| 范数主导。
+        #
+        # 门槛 2026-09-15 由 -0.1 放宽到 -0.05，原因是量化过的、有解释的
+        # 行为变化，不是为了让测试通过而放松判据：
+        #
+        #     AFCFD_TURB_OVERINT=off: quad_form=-2.221e-04  quad/norm=-0.1287
+        #     AFCFD_TURB_OVERINT=on : quad_form=-1.232e-04  quad/norm=-0.0743
+        #
+        # 去混叠（该开关默认已改为 on，见 transport.py::
+        # resolve_turb_overintegration）让耗散量约减半。**符号不变**——
+        # 仍然是耗散、没有引入反扩散，这才是本用例真正要守住的性质。
+        # 减半与理论一致：混叠在扩散算子上通常表现为**额外的数值耗散**，
+        # 也就是 coarse 档在过度耗散（约 1.8 倍），去混叠后更接近真值
+        # `-integral(eps*|grad(d_rho)|^2)`。
+        #
+        # 保留一个明确、有界的门槛（而不是只断言 <0）仍然是为了抓"部分项
+        # 符号相反"这类错误：那会让比值掉到 -0.01 量级甚至变正。
+        ratio = quad_form / norm
+        assert ratio < -0.05, (
+            f"耗散性太弱（quad/norm={ratio:.4f}），疑似部分项符号相反。"
+            f"实测参考值：TURB_OVERINT=on 档 -0.0743、off 档 -0.1287")

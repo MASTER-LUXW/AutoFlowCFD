@@ -67,7 +67,9 @@ Args/Returns 类型标注、`_distribute_scalar_correction_gpu` 的调用方签�
 from typing import Optional, Tuple
 
 from autoflowcfd.core.gpu import get_cupy
-from autoflowcfd.core.gpu.residual.gpu_volume_contract import gpu_contract_shared_operator_2axis
+from autoflowcfd.core.gpu.residual.gpu_volume_contract import (
+    gpu_contract_shared_operator_1axis, gpu_contract_shared_operator_2axis,
+)
 from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_gradient_gpu
 from autoflowcfd.core.gpu.residual.gpu_inviscid_volume import distribute_face_correction_to_sps
 from autoflowcfd.core.gpu.residual.gpu_inviscid import _native_self_extrap
@@ -288,6 +290,63 @@ def _distribute_scalar_correction_gpu(cp, ff, raw_jump_fp, det_jacs, n_cells, n_
     return correction
 
 
+from autoflowcfd.core.turbulence.transport import resolve_turb_overintegration
+
+_OVERINT_KEYS = (
+    'overint_interp_c2f_prism', 'overint_D_fine_prism', 'overint_restrict_f2c_prism',
+    'overint_interp_c2f_tet', 'overint_D_fine_tet', 'overint_restrict_f2c_tet',
+)
+
+
+def _turb_overint_segs_gpu(mesh_data, ops_data, n_cells, n_prism):
+    """GPU 侧过积分上下文；任一算子/细点度量缺失则返回 None（退回 coarse）。
+
+    与 CPU 端 `core/fr_operators/volume_contract.py::
+    get_overintegration_context` 逐字对应。GPU 侧的细点度量用
+    `mesh_data['adj_j_fine']`（= det_fine*inv_fine，`array_manager.py`
+    已预乘好并上传，无粘体积项也是用它），所以不需要再分别取 det/inv。
+    缺失的唯一正常情形是 order==0。
+    """
+    if 'adj_j_fine' not in mesh_data:
+        return None
+    for k in _OVERINT_KEYS:
+        if k not in ops_data:
+            return None
+    return (
+        (0, n_prism, ops_data['overint_interp_c2f_prism'],
+         ops_data['overint_D_fine_prism'], ops_data['overint_restrict_f2c_prism']),
+        (n_prism, n_cells, ops_data['overint_interp_c2f_tet'],
+         ops_data['overint_D_fine_tet'], ops_data['overint_restrict_f2c_tet']),
+    )
+
+
+def _scalar_volume_div_overintegrated_gpu(cp, factors, adj_j_fine, segs,
+                                          n_cells, n_sps):
+    """标量体积项 `div(adj(J) * prod(factors))` 的去混叠版（GPU）。
+
+    `factors` 是一串 (n_cells, n_sps, k) 的场，k 为 1 或 3；各自精确插值
+    到 FINE 点后**在 FINE 点相乘**（去混叠的全部内容就是"先插值再相乘"），
+    再用细点度量算逆变通量、细网格微分矩阵求散度、精确限制回 coarse。
+
+    对流用 (rho, phi, u)、扩散用 (gamma, grad_phi)，与 CPU 端
+    `_scalar_convection_volume_overintegrated` /
+    `_scalar_diffusion_volume_overintegrated` 逐字对应。
+    """
+    div = cp.zeros((n_cells, n_sps), dtype=cp.float64)
+    for lo, hi, c2f, D_fine, f2c in segs:
+        if hi <= lo:
+            continue
+        prod = None
+        for f in factors:
+            ff_ = gpu_contract_shared_operator_1axis(c2f, f[lo:hi])
+            prod = ff_ if prod is None else prod * ff_
+        F_tilde = cp.matmul(adj_j_fine[lo:hi], prod[..., None]).squeeze(-1)
+        div_f = gpu_contract_shared_operator_2axis(D_fine, F_tilde[..., None])[..., 0]
+        div[lo:hi] = gpu_contract_shared_operator_1axis(
+            f2c, div_f[..., None])[..., 0]
+    return div
+
+
 def compute_scalar_convection_residual_gpu(
     scalar_field, rho, velocity, mesh_data, ops_data, ff, n_cells, n_prism, n_sps,
     wall_dirichlet_zero_face=None, wall_dirichlet_value_face=None, has_wall_dirichlet_value=None,
@@ -298,25 +357,37 @@ def compute_scalar_convection_residual_gpu(
     det_jacs = mesh_data['det_jacs']
     adj_j = mesh_data['adj_j']
 
-    rho_u_phi = rho[..., None] * velocity * scalar_field[..., None]  # (n_cells,n_sps,3)
-    F_tilde = cp.matmul(adj_j, rho_u_phi[..., None]).squeeze(-1)  # (n_cells,n_sps,3)
+    # 去混叠（AFCFD_TURB_OVERINT，默认 on）：与 CPU 端
+    # `compute_scalar_convection_residual` 同一个开关、同一条链路。
+    # 此前 GPU 侧完全没有这一层，导致同一个环境变量在两个后端意味着
+    # 不同的数值方案——本项目不接受这种静默不一致（同一原则见
+    # fr_solver/filter.py::resolve_filter_mode）。
+    _segs = (_turb_overint_segs_gpu(mesh_data, ops_data, n_cells, n_prism)
+             if resolve_turb_overintegration() == "on" else None)
+    if _segs is not None:
+        div_F = _scalar_volume_div_overintegrated_gpu(
+            cp, (rho[..., None], scalar_field[..., None], velocity),
+            mesh_data['adj_j_fine'], _segs, n_cells, n_sps)
+    else:
+        rho_u_phi = rho[..., None] * velocity * scalar_field[..., None]  # (n_cells,n_sps,3)
+        F_tilde = cp.matmul(adj_j, rho_u_phi[..., None]).squeeze(-1)  # (n_cells,n_sps,3)
 
-    div_F = cp.zeros((n_cells, n_sps), dtype=cp.float64)
-    if n_prism > 0:
-        div_F[:n_prism] = gpu_contract_shared_operator_2axis(
-            ops_data['D_3d_prism'], F_tilde[:n_prism, :, :, None]
-        )[..., 0]
-    if n_cells > n_prism:
-        # native 四面体 D 矩阵分派（2026-09-03 补齐，见模块文档 /
-        # gpu_gradients.py::compute_physical_gradient_gpu 同一处判据）。
-        D_tet_op = (
-            ops_data['D_native_tet_padded']
-            if 'D_native_tet_padded' in ops_data
-            else ops_data['D_3d_tet']
-        )
-        div_F[n_prism:] = gpu_contract_shared_operator_2axis(
-            D_tet_op, F_tilde[n_prism:, :, :, None]
-        )[..., 0]
+        div_F = cp.zeros((n_cells, n_sps), dtype=cp.float64)
+        if n_prism > 0:
+            div_F[:n_prism] = gpu_contract_shared_operator_2axis(
+                ops_data['D_3d_prism'], F_tilde[:n_prism, :, :, None]
+            )[..., 0]
+        if n_cells > n_prism:
+            # native 四面体 D 矩阵分派（2026-09-03 补齐，见模块文档 /
+            # gpu_gradients.py::compute_physical_gradient_gpu 同一处判据）。
+            D_tet_op = (
+                ops_data['D_native_tet_padded']
+                if 'D_native_tet_padded' in ops_data
+                else ops_data['D_3d_tet']
+            )
+            div_F[n_prism:] = gpu_contract_shared_operator_2axis(
+                D_tet_op, F_tilde[n_prism:, :, :, None]
+            )[..., 0]
 
     residual = -div_F / det_jacs
 
@@ -370,24 +441,34 @@ def compute_scalar_diffusion_residual_gpu(
     adj_j = mesh_data['adj_j']
 
     grad_phi = compute_physical_scalar_gradient_gpu(scalar_field, mesh_data, ops_data)  # (n_cells,n_sps,3)
-    G_phys = gamma_field[..., None] * grad_phi
-    G_tilde = cp.matmul(adj_j, G_phys[..., None]).squeeze(-1)  # (n_cells,n_sps,3)
 
-    div_G = cp.zeros((n_cells, n_sps), dtype=cp.float64)
-    if n_prism > 0:
-        div_G[:n_prism] = gpu_contract_shared_operator_2axis(
-            ops_data['D_3d_prism'], G_tilde[:n_prism, :, :, None]
-        )[..., 0]
-    if n_cells > n_prism:
-        # native 四面体 D 矩阵分派（2026-09-03 补齐，同上）。
-        D_tet_op = (
-            ops_data['D_native_tet_padded']
-            if 'D_native_tet_padded' in ops_data
-            else ops_data['D_3d_tet']
-        )
-        div_G[n_prism:] = gpu_contract_shared_operator_2axis(
-            D_tet_op, G_tilde[n_prism:, :, :, None]
-        )[..., 0]
+    # 去混叠，与 CPU 端 `_scalar_diffusion_volume_overintegrated` 对应
+    # （含那边写明的"Gamma 自身混叠仍在"这条已量化、刻意不实施的局限）。
+    _segs = (_turb_overint_segs_gpu(mesh_data, ops_data, n_cells, n_prism)
+             if resolve_turb_overintegration() == "on" else None)
+    if _segs is not None:
+        div_G = _scalar_volume_div_overintegrated_gpu(
+            cp, (gamma_field[..., None], grad_phi),
+            mesh_data['adj_j_fine'], _segs, n_cells, n_sps)
+    else:
+        G_phys = gamma_field[..., None] * grad_phi
+        G_tilde = cp.matmul(adj_j, G_phys[..., None]).squeeze(-1)  # (n_cells,n_sps,3)
+
+        div_G = cp.zeros((n_cells, n_sps), dtype=cp.float64)
+        if n_prism > 0:
+            div_G[:n_prism] = gpu_contract_shared_operator_2axis(
+                ops_data['D_3d_prism'], G_tilde[:n_prism, :, :, None]
+            )[..., 0]
+        if n_cells > n_prism:
+            # native 四面体 D 矩阵分派（2026-09-03 补齐，同上）。
+            D_tet_op = (
+                ops_data['D_native_tet_padded']
+                if 'D_native_tet_padded' in ops_data
+                else ops_data['D_3d_tet']
+            )
+            div_G[n_prism:] = gpu_contract_shared_operator_2axis(
+                D_tet_op, G_tilde[n_prism:, :, :, None]
+            )[..., 0]
 
     residual = div_G / det_jacs
 
