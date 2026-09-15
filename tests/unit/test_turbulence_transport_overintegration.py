@@ -58,6 +58,19 @@ def _real_dof_mask(mesh, order):
     return mask
 
 
+def _actual_over_order(oi):
+    """从过积分上下文**实际读出** over_order，而不是在测试里重算规则。
+
+    2026-09-15 的教训：本文件原来内部写死 `min(2*order, 3)`，而生产规则
+    随后改成了 `3*order`（只影响 order=1，见 fr/operators.py 该处文档）。
+    测试当时仍然通过，但走的是错误的分支、判据的理由已经和现实脱节。
+    细点数 `n_fine = (over_order+1)^3`，反解即得。
+    """
+    n1d = round(oi["n_fine"] ** (1.0 / 3.0))
+    assert n1d ** 3 == oi["n_fine"], f"n_fine={oi['n_fine']} 不是完全立方数"
+    return n1d - 1
+
+
 def _per_type_slices(mesh, order):
     """[("prism", 切片), ("tet", 切片)]，四面体那一片只取真实自由度。
 
@@ -190,11 +203,13 @@ class TestOverintegrationIsMoreAccurate:
             errs[name] = (np.abs(div_co[sl] - exact[sl]).max() / sc,
                           np.abs(div_oi[sl] - exact[sl]).max() / sc)
 
-        # 实测（相对 L-inf）：
-        #   order=1 prism: coarse 4.9816e+00 (498%!) -> 1.3602e-01   36.6x
-        #   order=1 tet  : coarse 4.4823e-01         -> 5.6166e-02    8.0x
+        # 实测（相对 L-inf；over_order 规则 2026-09-15 起是
+        # `min(3*order, 3)`，order=1 因此从 2 变成 3）：
+        #   order=1 prism: coarse 4.9816e+00 (498%!) -> 2.1243e-03  2345x
+        #   order=1 tet  : coarse 4.4823e-01         -> 3.6341e-13  机器零
         #   order=2 prism: coarse 7.6441e-01         -> 9.5333e-03   80.2x
-        #   order=2 tet  : coarse 5.6166e-02         -> 9.8492e-14   机器零
+        #   order=2 tet  : coarse 5.6166e-02         -> 9.8492e-14  机器零
+        # （order=1 在旧规则 over_order=2 下曾是 1.3602e-01 / 5.6166e-02）
         err_co, err_oi = errs["prism"]
         assert err_co > 0.5, (
             f"order={order} prism: coarse 误差只有 {err_co:.3e}，这个算例没有"
@@ -216,10 +231,10 @@ class TestOverintegrationIsMoreAccurate:
         # 改动会同时影响已验证的平均流路径，且会把 order=1 的细点数从
         # 27 抬到 64（P2 OOM 有前科），属于独立一步。
         tet_co, tet_oi = errs["tet"]
-        if min(2 * order, 3) >= 3:
+        if _actual_over_order(oi) >= 3:
             assert tet_oi < 1e-11, (
                 f"order={order} tet: 去混叠误差 {tet_oi:.3e} 不是机器零——"
-                f"over_order={min(2*order,3)}>=3 且四面体度量仿射时，三次"
+                f"over_order={_actual_over_order(oi)}>=3 且四面体度量仿射时，三次"
                 f"乘积应当被细网格空间精确包含")
         else:
             assert tet_oi < tet_co / 3.0, (
@@ -313,7 +328,8 @@ class TestOverintegrationIsMoreAccurate:
         tet_co, tet_oi = errs["tet"]
         assert tet_oi < 1e-11, (
             f"order={order} tet: 扩散项去混叠误差 {tet_oi:.3e} 不是机器零——"
-            f"二次乘积在 over_order={min(2*order,3)}>=2 的仿射四面体上应当精确")
+            f"二次乘积在 over_order={_actual_over_order(oi)}>=2 的仿射四面体"
+            f"上应当精确")
         pr_co, pr_oi = errs["prism"]
         if order == 1:
             assert pr_oi < pr_co, (
@@ -337,9 +353,14 @@ class TestOverintegrationIsNoOpAtOrder3:
     """
 
     def test_over_order_equals_order_at_3(self):
+        """从**实际构造出的算子**读 over_order，不重算规则。"""
         from autoflowcfd.fr.collapsed_basis import OVERINTEGRATION_MAX_ORDER
-        assert OVERINTEGRATION_MAX_ORDER == 3
-        assert min(2 * 3, OVERINTEGRATION_MAX_ORDER) == 3
+        assert OVERINTEGRATION_MAX_ORDER == 3, (
+            "上限被改动了——它有真实回归背景（放宽到 4 会让 P2 均匀自由"
+            "流场残差从 1.06e-5 恶化到 5.6e-3），见该常量处文档")
+        mesh = _build_synthetic_mixed_mesh(3)
+        oi = tp._turb_overint_ops(mesh, generate_fr_operators(3))
+        assert _actual_over_order(oi) == 3
 
     def test_no_accuracy_change_at_order3(self):
         mesh, ops, phi, rho, vel, exact = _setup(3)
