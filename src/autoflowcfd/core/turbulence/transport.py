@@ -1014,7 +1014,38 @@ def _compute_omega_wall_target(
     wall_face_idx = np.nonzero(wall_mask)[0]
     if len(wall_face_idx) > 0:
         owner_cells = flat.owner_cell[wall_face_idx]
-        d1 = np.min(solver.wall_distance[owner_cells], axis=1)
+        # **长度尺度口径（2026-09-15 发现的系统性偏差，可切换）**
+        #
+        # Menter 的 omega 壁面处理 `omega_wall = 10*6*nu/(beta1*Δy1^2)`
+        # （这里的 60 就是 10x6）是按**第一层单元中心**的壁距标定的经验
+        # 公式。而这里原先取的是 `min`——单元内**全部解点**壁距的最小值。
+        # 那既不是单元中心也不是单元高度，不对应任何标准口径，而且因为
+        # Gauss-Legendre 解点在高阶时向单元边界聚集，它让目标值产生
+        # **随阶数变化**的系统性高估（解点相对壁面的归一化位置实测）：
+        #
+        #   order=1: 最近解点 0.2113*h -> (0.5/0.2113)^2 =  5.60x 高估
+        #   order=2: 最近解点 0.1127*h -> (0.5/0.1127)^2 = 19.68x 高估
+        #   order=3: 最近解点 0.0694*h -> (0.5/0.0694)^2 = 51.86x 高估
+        #
+        # 一个经过标定的壁面函数绝不该有这种阶数依赖。这也解释了为什么
+        # 本函数的目标值会顶到 `omega_max`、被下游文档称作"1e6 量级的
+        # 应急上限"而不是"日常合理松弛目标"（见
+        # `enforce_omega_wall_relaxation` 里两次被真实数据证伪的尝试
+        # 记录）——它被喂了一个小 2.4~7.2 倍的长度尺度。
+        #
+        # `mean`（单元内解点壁距的均值，≈ 形心壁距）与 Menter 的口径
+        # 一致，且对阶数是一阶无关的。**默认仍为 `min`**：这是湍流模型
+        # 的物理改动，降低近壁 omega 会抬高 nu_t，必须用真实长程数据
+        # 验证过才能改默认值——本项目在 omega 壁面处理上已经有两次
+        # "数学上更对但真实数据证伪"的先例。
+        _d1_mode = os.environ.get("AFCFD_OMEGA_WALL_D1", "min").lower()
+        if _d1_mode not in ("min", "mean"):
+            raise ValueError(
+                f"AFCFD_OMEGA_WALL_D1={_d1_mode!r} 不是合法取值（min | mean）。"
+                f"'min' 是既有行为（单元内解点壁距最小值），'mean' 是与 "
+                f"Menter 标定口径一致的形心壁距。")
+        wd_owner = solver.wall_distance[owner_cells]
+        d1 = wd_owner.min(axis=1) if _d1_mode == "min" else wd_owner.mean(axis=1)
         d1 = np.maximum(d1, 1e-8)
         rho_owner = np.mean(rho[owner_cells], axis=1)
         nu_owner = mu / np.maximum(rho_owner, 1e-10)

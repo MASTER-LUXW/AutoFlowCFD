@@ -447,7 +447,18 @@ def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, m
     wall_idx = cp.where(wall_mask)[0]
     if wall_idx.shape[0] > 0:
         owner_cells = ff.owner_cell[wall_idx]
-        d1 = cp.min(wall_distance_gpu[owner_cells], axis=1)
+        # 长度尺度口径可切换，与 CPU 端 core/turbulence/transport.py::
+        # _compute_omega_wall_target 同一处 2026-09-15 发现逐字对应
+        # （`min` 既不是单元中心也不是单元高度，会让这个经标定的壁面
+        # 函数产生随阶数变化的系统性高估：order=1/2/3 分别 5.60x /
+        # 19.68x / 51.86x）。**默认仍为 `min`**，理由见 CPU 端注释。
+        import os as _os
+        _d1_mode = _os.environ.get("AFCFD_OMEGA_WALL_D1", "min").lower()
+        if _d1_mode not in ("min", "mean"):
+            raise ValueError(
+                f"AFCFD_OMEGA_WALL_D1={_d1_mode!r} 不是合法取值（min | mean）")
+        _wd = wall_distance_gpu[owner_cells]
+        d1 = _wd.min(axis=1) if _d1_mode == "min" else _wd.mean(axis=1)
         d1 = cp.maximum(d1, 1e-8)
         rho_owner = cp.mean(Q_gpu[owner_cells, :, 0], axis=1)
         nu_owner = mu / cp.maximum(rho_owner, 1e-10)
