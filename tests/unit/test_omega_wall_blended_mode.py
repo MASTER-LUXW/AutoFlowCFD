@@ -282,3 +282,60 @@ class TestTransientTimeAccuracyWarning:
         out = CliRunner().invoke(transient, ['--help']).output
         flat = ' '.join(out.split())
         assert '只有 dual-time 是时间精确的' in flat
+
+
+class TestArtificialViscosityIsInertAtP1:
+    """`--artificial-viscosity` 在 order=1（生产阶数）上是精确的无操作。
+
+    Persson-Peraire 的 ramp 判据是 `s0 = -4*log10(order)`，order=1 时 s0=0，
+    触发门限成了"顶模态能量占全胞 >= 10%"（`S_e >= 10^(s0-kappa) = 0.1`）。
+    而 P1 的"顶模态"**就是全部非常数模态**，已解析的物理与混叠无法区分。
+
+    实测（plate_demo 363,392 单元 ANSA 网格，order=1，固定 CFL 0.03，其余
+    参数逐项相同的 A/B）：开与不开该开关，**前 51 步的残差与 Cd 逐字符
+    完全相同**。
+
+    这一点要紧，因为项目对退化单元残差放大的既定修复路线是"网格质量门
+    + 耗散"，而耗散那一半在生产阶数上不可用。
+    """
+
+    @pytest.mark.parametrize("order,expect_threshold", [
+        (1, 1.0e-1),      # s0=0      -> 10^(0-1)
+        (2, 6.25e-3),     # s0=-1.204 -> 10^(-2.204)
+        (3, 1.235e-3),    # s0=-1.909 -> 10^(-2.909)
+    ])
+    def test_sensor_threshold_by_order(self, order, expect_threshold):
+        from autoflowcfd.core.fr_operators.artificial_viscosity import SENSOR_KAPPA
+        s0 = -4.0 * np.log10(max(order, 1))
+        assert 10 ** (s0 - SENSOR_KAPPA) == pytest.approx(expect_threshold, rel=2e-3)
+
+    def test_p1_threshold_demands_ten_percent_of_total_energy(self):
+        """P1 的门限要求顶模态占全胞能量 10%——而顶模态就是全部非常数
+        模态，所以这等于要求"胞内变化占 10% 以上"，正常解析的流场达不到。"""
+        from autoflowcfd.core.fr_operators.artificial_viscosity import SENSOR_KAPPA
+        s0_p1 = -4.0 * np.log10(1)
+        assert s0_p1 == 0.0
+        assert 10 ** (s0_p1 - SENSOR_KAPPA) == pytest.approx(0.1)
+
+    def test_enabling_at_p1_warns_explicitly(self):
+        """不接受静默无操作：用户以为打开了一层保护，实际什么都没发生。"""
+        import inspect
+
+        from autoflowcfd.core.fr_solver import solver as solver_mod
+        src = inspect.getsource(solver_mod)
+        assert "artificial_viscosity_enabled and order <= 1" in src
+        assert "warnings.warn" in src
+        i = src.index("artificial_viscosity_enabled and order <= 1")
+        ctx = src[i:i + 1200]
+        assert "无操作" in ctx
+        assert "order>=2" in ctx
+
+    def test_startup_log_shows_both_switches(self):
+        """启动日志必须显示人工粘性与滤波档——否则"这份日志是哪个配置跑
+        出来的"只能事后考古。"""
+        import inspect
+
+        from autoflowcfd.core.fr_solver import solver as solver_mod
+        src = inspect.getsource(solver_mod)
+        assert "Artificial viscosity:" in src
+        assert "Modal filter mode:" in src

@@ -384,6 +384,36 @@ class FRSolver(_SolverGeometryMixin):
         self.flux_type = flux_type
         self.artificial_viscosity_enabled = artificial_viscosity_enabled
         self.artificial_viscosity_alpha = artificial_viscosity_alpha
+        # **order == 1 时人工粘性是精确的无操作**（2026-09-15 实测确认）。
+        # Persson-Peraire 的 ramp 判据是 `s0 = -4*log10(order)`，order=1 时
+        # s0 = 0，于是触发门限成了"顶模态能量占全胞 10% 以上"
+        # （`S_e >= 10^(s0-kappa) = 0.1`）。而 P1 的"顶模态"**就是全部
+        # 非常数模态**，即胞内变化本身——已解析的 P1 物理与混叠在这个
+        # 指标下无法区分，传感器几乎不触发。
+        #
+        # 实测（plate_demo 363,392 单元，order=1，固定 CFL 0.03，其余参数
+        # 逐项相同的 A/B）：开与不开 `--artificial-viscosity`，**前 51 步的
+        # 残差与 Cd 逐字符完全相同**——人工粘性贡献精确为零。
+        #
+        # 这一点要紧，因为项目对退化单元残差放大的既定修复路线是
+        # "网格质量门 + 耗散"（见 industry_practice_degenerate_cell_gcl
+        # 项目记忆），而耗散那一半在**生产阶数**上不可用。order=2/3 的
+        # 门限分别是 6.25e-3 / 1.24e-3，才是传感器的正常工作区间。
+        #
+        # 按本项目"不接受静默无操作"的约定，这里显式警告而不是让用户以为
+        # 自己已经打开了一层保护。同源结论见 fr_solver/filter.py 里
+        # `AFCFD_FILTER_MODE=sensor` 在 P1 上原理不适用的说明。
+        if artificial_viscosity_enabled and order <= 1:
+            import warnings
+            warnings.warn(
+                f"--artificial-viscosity 在 order={order} 上是**无操作**："
+                f"Persson-Peraire 判据 s0=-4*log10(order)=0 使触发门限变成"
+                f"顶模态能量占比 >= 10%，而 P1 的顶模态就是全部非常数模态，"
+                f"传感器几乎不触发（真实网格 A/B 实测前 51 步残差/Cd 逐字符"
+                f"相同）。要用人工粘性请在 order>=2 上使用；P1 的退化单元"
+                f"问题目前只能靠网格质量门拦。",
+                RuntimeWarning, stacklevel=2,
+            )
         self.entropy_stable_volume_enabled = entropy_stable_volume_enabled
         if entropy_stable_volume_enabled and backend.lower() == "gpu":
             import warnings
