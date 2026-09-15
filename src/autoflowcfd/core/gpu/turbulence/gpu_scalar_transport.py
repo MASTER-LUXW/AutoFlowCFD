@@ -475,7 +475,8 @@ def compute_scalar_diffusion_residual_gpu(
     return residual - interface_correction
 
 
-def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, mu, beta1, omega_max=1e6):
+def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, mu, beta1,
+                                 omega_max=1e6, turb_k_field=None):
     """CuPy 版 `_compute_omega_wall_target`：omega_wall = 60*nu/(beta1*d1^2)
     （Wilcox 解析式），逐字对应 CPU 版同名函数——全程 GPU 原生实现（不像
     边界幽灵态那样需要 CPU round-trip：wall_distance_gpu/Q_gpu/owner_cell
@@ -544,7 +545,30 @@ def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, m
             rho_owner = reduce_rows_over_real_sps(
                 _rows, owner_cells < _np_prism, _order, 'mean', xp=cp)
         nu_owner = mu / cp.maximum(rho_owner, 1e-10)
-        omega_wall = 60.0 * nu_owner / (beta1 * d1 ** 2)
+        # omega 壁面公式族可切换（2026-09-15，B-6），与 CPU 端
+        # transport.py::_omega_wall_formula 同一套判据与常数（文献依据见
+        # 那里的 _OMEGA_WALL_MODES 一节）。默认 amplified，逐位不变。
+        from autoflowcfd.core.turbulence.transport import (
+            _OMEGA_WALL_CMU, _OMEGA_WALL_KAPPA, resolve_omega_wall_mode,
+        )
+        omega_vis = 6.0 * nu_owner / (beta1 * d1 ** 2)
+        if resolve_omega_wall_mode() == "amplified":
+            omega_wall = 10.0 * omega_vis
+        else:
+            if turb_k_field is None:
+                raise RuntimeError(
+                    "AFCFD_OMEGA_WALL_MODE=blended 需要 turb_k_field（对数支 "
+                    "omega_log = sqrt(k)/(Cmu^0.25*kappa*d1) 用到它）。调用方"
+                    "必须显式传入 k 场，不接受静默退回 amplified 档。")
+            k_rows = turb_k_field[owner_cells]
+            if _np_prism is None:
+                k_owner = cp.mean(k_rows, axis=1)
+            else:
+                k_owner = reduce_rows_over_real_sps(
+                    k_rows, owner_cells < _np_prism, _order, 'mean', xp=cp)
+            omega_log = (cp.sqrt(cp.maximum(k_owner, 0.0))
+                         / (_OMEGA_WALL_CMU ** 0.25 * _OMEGA_WALL_KAPPA * d1))
+            omega_wall = cp.sqrt(omega_vis ** 2 + omega_log ** 2)
         omega_wall = cp.minimum(omega_wall, omega_max)
         omega_wall_value_face[wall_idx, :] = omega_wall[:, None]
     return omega_wall_value_face, wall_mask
@@ -588,6 +612,8 @@ def enforce_omega_wall_relaxation_gpu(cp, solver, relax=None):
     omega_wall_value_face, has_wall = compute_omega_wall_target_gpu(
         cp, ff, wall_mask, solver.wall_distance_gpu, Q, solver.mu_molecular,
         getattr(turb, "beta1", 0.075), omega_max=omega_max,
+        # blended 档的对数支需要 k（见 compute_omega_wall_target_gpu）
+        turb_k_field=getattr(turb, "k_field", None),
     )
 
     wall_face_idx = cp.where(has_wall)[0]
@@ -741,6 +767,7 @@ def compute_turbulence_transport_residual_gpu(
     omega_wall_value_face, has_omega_wall = compute_omega_wall_target_gpu(
         cp, ff, wall_mask_k, d_wall, Q, mu, getattr(turb, "beta1", 0.075),
         omega_max=getattr(turb, "omega_max", 1e6),
+        turb_k_field=getattr(turb, "k_field", None),
     )
 
     conv_w = compute_scalar_convection_residual_gpu(

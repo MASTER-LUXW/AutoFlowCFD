@@ -956,6 +956,95 @@ def _compute_wall_dirichlet_face_mask(solver) -> np.ndarray:
     return np.isin(group_code, wall_codes)
 
 
+#: omega 壁面目标值的公式族，由 `AFCFD_OMEGA_WALL_MODE` 选择：
+#:   "amplified"（默认，既有行为逐位不变）—— Menter 的放大式
+#:       omega_wall = 10 * 6*nu/(beta1*d1^2)
+#:   "blended"                          —— Menter 的二项混合式
+#:       omega_vis = 6*nu/(beta1*d1^2)
+#:       omega_log = sqrt(k)/(C_mu^0.25 * kappa * d1)
+#:       omega_wall = sqrt(omega_vis^2 + omega_log^2)
+#:
+#: **文献依据**（2026-09-15 联网核实，B-6）：混合式与两个渐近支的形式、
+#: 以及常数取值，与 OpenFOAM `omegaWallFunction` 的实现逐项一致——
+#: `omegaVis = 6*nuw/(beta1_*sqr(y))`、
+#: `omegaLog = sqrt(k)/(Cmu25*kappa_*y)`、
+#: `omega = sqrt(sqr(omegaVis) + sqr(omegaLog))`，其中 `Cmu25 = pow025(Cmu)`。
+#: 默认常数：`beta1_ = 0.075`（该类构造函数）、`Cmu = 0.09`、`kappa = 0.41`
+#: （`nutWallFunction` 的默认值，omegaWallFunction 经 nutw 取用）。较新
+#: 版本把二项混合换成了分数权重线性混合（`lamFrac*omegaVis +
+#: turbFrac*omegaLog`），本项目实现的是经典二项式——它是 Menter 原始
+#: 形式，且在两个极限下都渐近正确。
+#:
+#: **为什么混合式在原理上更可靠**：`amplified` 档那个 10 倍是 Menter 为
+#: **有限体积、近壁不解析** 的情形设计的数值手段（把 omega 抬得足够高，
+#: 以在粗近壁网格上强制出正确的渐近行为），不是一个物理值；混合式没有
+#: 任何这类自由因子，两个支各自是渐近精确解。注意在**壁面解析**（低 Re）
+#: 网格上粘性支占绝对主导，于是两档的差别基本就是那个 10 倍。
+#:
+#: **默认值没有改**：这是湍流模型的物理改动。本项目在 omega 壁面处理上
+#: 已经有两次"数学上更对但被真实数据证伪"的先例（显式 SIPG 罚项、点隐式
+#: 动态松弛系数，均见 `enforce_omega_wall_relaxation` 文档），所以这里
+#: 只提供开关与判据，改默认值必须有真实长程数据。
+#:
+#: 另注：本档与 `AFCFD_OMEGA_WALL_D1`（长度尺度口径 min|mean）是**两个
+#: 独立的维度**，且两者的偏差会**相乘**——`min` 口径在 order=1 上已经
+#: 高估 5.60 倍，叠加 10 倍放大就是约 56 倍。
+_OMEGA_WALL_MODES = ("amplified", "blended")
+#: 混合式的经验常数（来源见上）
+_OMEGA_WALL_CMU = 0.09
+_OMEGA_WALL_KAPPA = 0.41
+
+
+def resolve_omega_wall_mode() -> str:
+    """读取 `AFCFD_OMEGA_WALL_MODE` 并校验取值（非法值显式报错，不静默
+    退回默认——与本项目其余开关同一条约定）。"""
+    mode = os.environ.get("AFCFD_OMEGA_WALL_MODE", "amplified").lower()
+    if mode not in _OMEGA_WALL_MODES:
+        raise ValueError(
+            f"AFCFD_OMEGA_WALL_MODE={mode!r} 不是合法取值"
+            f"（{' | '.join(_OMEGA_WALL_MODES)}）。"
+            f"'amplified' 是既有行为（Menter 放大式 10*6nu/(beta1*d1^2)），"
+            f"'blended' 是 Menter 二项混合式 sqrt(omega_vis^2+omega_log^2)，"
+            f"见 transport.py 里 _OMEGA_WALL_MODES 一节的文献依据。")
+    return mode
+
+
+def _omega_wall_formula(solver, owner_cells, nu_owner, d1, beta1):
+    """按 `AFCFD_OMEGA_WALL_MODE` 算 omega 壁面目标值（未做 omega_max 钳制，
+    由调用方统一钳）。
+
+    Args:
+        solver: 需要 `turb_model.k_field`（仅 blended 档用到）
+        owner_cells: (n_wall_faces,) 各 WALL 面的 owner 单元索引
+        nu_owner: (n_wall_faces,) 该单元的运动粘度 mu/rho
+        d1: (n_wall_faces,) 近壁特征长度（口径由 AFCFD_OMEGA_WALL_D1 决定）
+        beta1: SST 内层 beta 系数
+    """
+    omega_vis = 6.0 * nu_owner / (beta1 * d1 ** 2)
+    if resolve_omega_wall_mode() == "amplified":
+        # 10 * 6nu/(beta1*d1^2)——与改动前逐位一致
+        return 10.0 * omega_vis
+    # blended：需要 owner 单元的 k。取该单元**真实自由度**上的均值，
+    # 与本文件 rho_owner 同一处理（native 四面体的零填充槽位冻结在初值，
+    # 混进来会带偏；见 fr/native_tet_padding.py）。
+    from autoflowcfd.fr.native_tet_padding import (
+        order_from_n_sps, reduce_rows_over_real_sps,
+    )
+    k_field = getattr(getattr(solver, "turb_model", None), "k_field", None)
+    if k_field is None:
+        raise RuntimeError(
+            "AFCFD_OMEGA_WALL_MODE=blended 需要 solver.turb_model.k_field "
+            "（对数支 omega_log = sqrt(k)/(Cmu^0.25*kappa*d1) 用到它），"
+            "但当前湍流模型没有这个场——不接受静默退回 amplified 档。")
+    k_rows = np.asarray(k_field)[owner_cells]
+    k_owner = reduce_rows_over_real_sps(
+        k_rows, owner_cells < solver.mesh.n_prism_cells,
+        order_from_n_sps(k_rows.shape[1]), 'mean')
+    omega_log = (np.sqrt(np.maximum(k_owner, 0.0))
+                 / (_OMEGA_WALL_CMU ** 0.25 * _OMEGA_WALL_KAPPA * d1))
+    return np.sqrt(omega_vis ** 2 + omega_log ** 2)
+
+
 def _compute_omega_wall_target(
     solver, wall_mask: np.ndarray, mu: float, rho: np.ndarray, flat_face_override=None,
 ) -> Tuple[np.ndarray, np.ndarray]:
@@ -1088,7 +1177,8 @@ def _compute_omega_wall_target(
             _rows, owner_cells < solver.mesh.n_prism_cells,
             order_from_n_sps(_rows.shape[1]), 'mean')
         nu_owner = mu / np.maximum(rho_owner, 1e-10)
-        omega_wall = 60.0 * nu_owner / (beta1 * d1**2)
+        omega_wall = _omega_wall_formula(
+            solver, owner_cells, nu_owner, d1, beta1)
         omega_wall = np.minimum(omega_wall, omega_max)
         omega_wall_value_face[wall_face_idx, :] = omega_wall[:, None]
 
