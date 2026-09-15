@@ -244,3 +244,65 @@ class TestEveryBackendConstructsAController:
             src = inspect.getsource(mod)
             assert 'AdaptiveCFLController(' in src, mod.__name__
             assert 'cfl_min' in src, f"{mod.__name__} 的控制器构造没有接 cfl_min"
+
+
+class TestConfigLayerCflDefaultsAreConsistent:
+    """配置层与 CLI 是同一个物理量的两个入口，默认值不能互相矛盾。
+
+    2026-09-15 发现：`SteadyConfig.cfl_max` 的默认值是 **10.0**，而 CLI
+    `--cfl-max` 的默认是 0.5——差 20 倍；10.0 还是 SSP-RK3 线性稳定极限
+    （~1.0）的 10 倍，而自适应控制器会真的往上限爬（软上限只在失败之后
+    才收紧，见 adaptive_cfl.py 模块文档第 8 条），于是 YAML 驱动的算例会
+    反复穿越稳定边界。文档示例里当时还写着 `cfl_max=5.0`。
+    同时配置层完全没有 `cfl_min` 字段。
+    """
+
+    def test_cfl_max_default_matches_cli_and_stability_limit(self):
+        from autoflowcfd.config.solver_config import SteadyConfig
+        assert SteadyConfig().cfl_max == pytest.approx(0.5)
+        # SSP-RK3 线性稳定极限 ~1.0：默认上限不得超过它
+        assert SteadyConfig().cfl_max <= 1.0
+
+    def test_cfl_min_field_exists_and_leaves_shrink_room(self):
+        """下限必须严格小于初始值，否则控制器一步也收缩不了。"""
+        from autoflowcfd.config.solver_config import SteadyConfig
+        c = SteadyConfig()
+        assert c.cfl_min < c.cfl_init, "cfl_min == cfl_init 会让收缩失效"
+
+    def test_cfl_min_default_does_not_block_the_measured_stable_value(self):
+        """0.03 是唯一在真实网格上被 250 步验证过稳定的 CFL；默认下限
+        不得挡住它。"""
+        from autoflowcfd.config.solver_config import SteadyConfig
+        assert SteadyConfig().cfl_min <= 0.03
+
+    @pytest.mark.parametrize("kw", [
+        dict(cfl_min=0.2, cfl_init=0.05, cfl_max=0.5),   # min > init
+        dict(cfl_min=0.6, cfl_init=0.6, cfl_max=0.5),    # min > max
+        dict(cfl_min=0.0, cfl_init=0.05, cfl_max=0.5),   # min <= 0
+    ])
+    def test_inconsistent_ordering_rejected(self, kw):
+        """矛盾配置要在配置层就拦下，不要等到控制器里变成"收缩把 CFL
+        调高"（第 11 条那个缺陷）。"""
+        from autoflowcfd.config.solver_config import SteadyConfig
+        with pytest.raises(ValueError, match="CFL"):
+            SteadyConfig(**kw)
+
+    def test_low_cfl_config_is_expressible(self):
+        """真 P1 的工作点必须能通过配置层表达出来。"""
+        from autoflowcfd.config.solver_config import SteadyConfig
+        c = SteadyConfig(cfl_min=0.01, cfl_init=0.03, cfl_max=0.5)
+        assert (c.cfl_min, c.cfl_init, c.cfl_max) == (0.01, 0.03, 0.5)
+
+    def test_api_forwards_cfl_min(self):
+        import inspect
+
+        from autoflowcfd import api
+        src = inspect.getsource(api)
+        assert 'kwargs.setdefault("cfl_min", config.cfl_min)' in src
+
+    def test_docstring_example_is_not_above_the_stability_limit(self):
+        """文档示例也不能给出一个越界的值——它会被照抄。"""
+        from autoflowcfd.config.solver_config import SteadyConfig
+        doc = SteadyConfig.__doc__
+        assert 'cfl_max=5.0' not in doc
+        assert 'cfl_max=0.5' in doc

@@ -221,8 +221,26 @@ class SteadyConfig(SolverConfig):
     
     属性:
         max_iter: 最大迭代步数
-        cfl_init: 初始 CFL 数（推荐：复杂网格为 0.05-0.1）
-        cfl_max: 最大 CFL 数
+        cfl_init: 初始 CFL 数（推荐：复杂网格为 0.05-0.1）。**刻意低于 CLI
+            `--cfl-start` 的默认 0.1**：79 万单元 cube_demo 上真 P1
+            （AFCFD_FILTER_MODE=off、零阶数损失）实测稳定的 CFL 在 0.03
+            量级，0.05 更靠近可用区间。不要为了"两边一致"把它调高。
+        cfl_max: 最大 CFL 数。**2026-09-15 从 10.0 改为 0.5**：10.0 是
+            CLI `--cfl-max` 默认值（0.5）的 20 倍，也是 SSP-RK3 线性稳定
+            极限（~1.0）的 10 倍——自适应控制器会真的往那个上限爬（软上限
+            只在失败之后才收紧，见 core/time_integration/adaptive_cfl.py
+            模块文档第 8 条），于是 YAML 驱动的算例会反复穿越稳定边界。
+            同一个物理量在两个配置面上差 20 倍本身就是缺陷。
+        cfl_min: 自适应 CFL 下限（2026-09-15 新增，与 CLI `--cfl-min` 对应）。
+            此前配置层完全没有这个字段，而控制器默认 0.05 **高于**上面提到
+            的实测稳定值 0.03——也就是说通过 YAML 根本到不了那个已验证可用
+            的工作点（`cfl_init` 会被下限钳上去，见 adaptive_cfl.py 第 11 条）。
+
+            默认取 **0.01** 而不是跟随控制器的 0.05，有两个理由：(a) 0.05
+            会恰好等于 `cfl_init` 的默认 0.05，那样控制器**一步也收缩不了**，
+            YAML 驱动的算例就完全失去了向下的保护；(b) 0.05 挡住 0.03 这个
+            唯一在真实网格上被 250 步验证过稳定的值。0.01 远低于任何实测值，
+            只留作"再低就说明问题本身不对"的兜底。
         convergence_tol: 收敛容差（残差）
         monitor_coefficients: 在迭代期间监控气动系数
         growth_rate: 边界层几何增长率（表面 -> 体网格）
@@ -255,13 +273,14 @@ class SteadyConfig(SolverConfig):
         ...     backend="gpu",
         ...     order=3,
         ...     max_iter=5000,
-        ...     cfl_init=0.1,
-        ...     cfl_max=5.0
+        ...     cfl_init=0.03,
+        ...     cfl_max=0.5
         ... )
     """
     max_iter: int = 50
     cfl_init: float = 0.05  # 复杂网格的保守默认值（原为 1.0）
-    cfl_max: float = 10.0
+    cfl_max: float = 0.5    # 2026-09-15：原为 10.0，见本类文档 cfl_max 一节
+    cfl_min: float = 0.01   # 2026-09-15 新增，见本类文档 cfl_min 一节
     convergence_tol: float = 1e-3
     monitor_coefficients: bool = True
     growth_rate: float = 1.15
@@ -289,6 +308,19 @@ class SteadyConfig(SolverConfig):
             raise ValueError(f"最大 CFL 必须为正数，得到 {self.cfl_max}")
         if self.cfl_init > self.cfl_max:
             raise ValueError(f"初始 CFL ({self.cfl_init}) 不能超过最大 CFL ({self.cfl_max})")
+        # 三者的序关系必须自洽（2026-09-15）：控制器里 cfl_min > cfl_max
+        # 会让"收缩"分支把 CFL 调高并突破 cfl_max（adaptive_cfl.py 第 11 条
+        # 记录的真实缺陷），配置层应当在更早的地方就拦下这种矛盾配置。
+        if self.cfl_min <= 0:
+            raise ValueError(f"CFL 下限必须为正数，得到 {self.cfl_min}")
+        if self.cfl_min > self.cfl_max:
+            raise ValueError(
+                f"CFL 下限 ({self.cfl_min}) 不能超过最大 CFL ({self.cfl_max})")
+        if self.cfl_min > self.cfl_init:
+            raise ValueError(
+                f"CFL 下限 ({self.cfl_min}) 不能超过初始 CFL "
+                f"({self.cfl_init})——否则控制器会把初始值钳上去，"
+                f"实际跑的不是你要的那个 CFL")
 
         # 验证收敛容差
         if self.convergence_tol <= 0:

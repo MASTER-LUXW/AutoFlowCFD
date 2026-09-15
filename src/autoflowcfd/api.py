@@ -258,6 +258,11 @@ class AutoFlowCFDAPI:
                 kwargs.setdefault("cfl_start", config.cfl_init)
             if getattr(config, "cfl_max", None) is not None:
                 kwargs.setdefault("cfl_max", config.cfl_max)
+            # cfl_min（2026-09-15）：配置层此前没有这个字段，于是 YAML 用户
+            # 到不了低于控制器默认下限 0.05 的工作点——而真 P1 实测稳定的
+            # CFL 在 0.03 量级。见 SteadyConfig.cfl_min 文档。
+            if getattr(config, "cfl_min", None) is not None:
+                kwargs.setdefault("cfl_min", config.cfl_min)
 
         mesh = HighOrderMesh(order=order)
         mesh.load_from_volume_mesh(volume_mesh)
