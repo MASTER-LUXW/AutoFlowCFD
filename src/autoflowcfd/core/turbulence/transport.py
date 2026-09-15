@@ -35,7 +35,10 @@ from typing import NamedTuple, Optional, Tuple
 import numba
 
 from autoflowcfd.core.fr_operators.gradients import compute_physical_scalar_gradient, compute_physical_gradient
-from autoflowcfd.core.fr_operators.volume_contract import contract_shared_operator_2axis
+from autoflowcfd.core.fr_operators.volume_contract import (
+    contract_shared_operator_1axis, contract_shared_operator_2axis,
+    contravariant_flux_from_metric,
+)
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
 from autoflowcfd.core.turbulence.transport_kernel import (
@@ -261,6 +264,120 @@ def _distribute_correction_to_cells(raw_jump_fp, flat, ops, mesh, raw_jump_fp_ne
         )
 
 
+#: k/omega 输运体积项是否走过积分（去混叠），由 `AFCFD_TURB_OVERINT` 选择：
+#:   "off"（默认，与此前行为逐位一致）
+#:   "on" —— 对流/扩散体积项都在 FINE 点上算完再限制回 coarse
+#:
+#: **为什么需要它（2026-09-15）**：`fr/collapsed_basis.py::
+#: build_overintegration_operators` 文档记录了去混叠的动机，并给出实测
+#: 数字——对解析残差恒为 0 的线性剪切场，不去混叠的 P2 体积项算出的残差
+#: 是真值的 43~62 倍。那套机制一直**只接在平均流的无粘体积项**上
+#: （`fr_residual/inviscid.py` 的 `mesh.jacobians_fine is not None` 分支），
+#: 粘性项与本模块的 k/omega 输运项**完全没有**。
+#:
+#: 而 k/omega 对流体积项算的是 `div(adj(J)·rho·u·phi)`——一个**三重**
+#: 非线性乘积，真实多项式次数约 `3*order + 度量次数`，远高于 order。
+#: 直接在 coarse SPs 上对它做微分就是"先混叠再求导"。
+#:
+#: 这与 `filter_scalar_field` 文档记录的 2026-09-12 真实 P1 发散症状
+#: 直接对应：那次的诊断原文是"P1 多项式在单元内部相邻解点间出现数量级
+#: 跳变 -> 外插到面通量点后被上风格式放大成巨大的虚假对流残差"，正是
+#: 对流项混叠的形态。当时的处置是给 k/omega 加模态滤波器，而那个滤波器
+#: 每个 RK stage 清掉一整阶（见 `fr/modal_filter.py`）——用牺牲阶数换
+#: 稳定。去混叠是同一个问题的**不牺牲阶数**的正解。
+#:
+#: 默认仍为 "off"：本项目的规矩是先跑受控 A/B 再改默认值。
+def resolve_turb_overintegration() -> str:
+    """返回 k/omega 输运体积项的去混叠开关，并校验取值。
+
+    每次调用都重读环境变量（不缓存模块级常量）：这一维不影响算子构造
+    （过积分三件套与 `jacobians_fine` 在 `order>=1` 时本来就无条件构造
+    好了，见 `fr/operators.py` 与 `grid/high_order/high_order_mesh_order.py`），
+    运行期读取是安全的，也让测试可以直接 monkeypatch 环境变量。
+    """
+    v = os.environ.get("AFCFD_TURB_OVERINT", "off").lower()
+    if v not in ("off", "on"):
+        raise ValueError(
+            f"AFCFD_TURB_OVERINT={v!r} 不是合法取值（off | on）。"
+            f"'off' 是既有行为（体积项直接在 coarse SPs 上微分），"
+            f"'on' 把对流/扩散体积项改走 FINE 点去混叠。")
+    return v
+
+
+def _turb_overint_ops(mesh, ops):
+    """取过积分所需的全部算子与细点度量；任一缺失则返回 None（调用方
+    退回 coarse 路径）。
+
+    缺失的唯一正常情形是 `order==0`：P0 没有可去混叠的内容
+    （分片常数场的多项式导数恒为零），`jacobians_fine` 与 overint 算子
+    都不构造。
+    """
+    if getattr(mesh, "jacobians_fine", None) is None:
+        return None
+    for name in ("overint_interp_c2f_prism", "overint_D_fine_prism",
+                 "overint_restrict_f2c_prism", "overint_interp_c2f_tet",
+                 "overint_D_fine_tet", "overint_restrict_f2c_tet"):
+        if getattr(ops, name, None) is None:
+            return None
+    n_fine = mesh.n_sps_per_cell_fine
+    n_cells = mesh.n_cells
+    return dict(
+        n_fine=n_fine,
+        det_fine=mesh.jacobians_fine["det_jacs"].reshape(n_cells, n_fine),
+        inv_fine=mesh.jacobians_fine["inv_jacs"].reshape(n_cells, n_fine, 3, 3),
+        segs=(
+            (0, mesh.n_prism_cells, ops.overint_interp_c2f_prism,
+             ops.overint_D_fine_prism, ops.overint_restrict_f2c_prism),
+            (mesh.n_prism_cells, n_cells, ops.overint_interp_c2f_tet,
+             ops.overint_D_fine_tet, ops.overint_restrict_f2c_tet),
+        ),
+    )
+
+
+#: 过积分分块大小，与 `fr_residual/inviscid.py` 的强形式分支同一取值
+#: （那边 `_OVERINT_CHUNK_CELLS = 32768`），理由见该处 P2 OOM 修复说明。
+_TURB_OVERINT_CHUNK_CELLS = 32768
+
+
+def _scalar_convection_volume_overintegrated(
+    scalar_field, rho, velocity, oi, n_sps,
+):
+    """对流体积项 `div(adj(J)*rho*u*phi)` 的去混叠版，返回 (n_cells,n_sps)。
+
+    链路与 `fr_residual/inviscid.py` 的过积分分支逐项对应：
+      ① phi/rho/u 各自精确插值到 FINE 点（它们各自次数 <= order，
+         插值不引入误差——**乘积必须在 FINE 点上做**，这正是去混叠的
+         全部内容：先插值再相乘，而不是先相乘再插值）；
+      ② 用解析精确的 FINE 点度量算逆变通量；
+      ③ 用 FINE 网格自己的微分矩阵求散度；
+      ④ 精确插值限制回 coarse SPs。
+    """
+    n_cells = scalar_field.shape[0]
+    n_fine = oi["n_fine"]
+    det_fine, inv_fine = oi["det_fine"], oi["inv_fine"]
+    div_F = np.empty((n_cells, n_sps))
+    for seg_lo, seg_hi, op_c2f, op_D_fine, op_f2c in oi["segs"]:
+        for c0 in range(seg_lo, seg_hi, _TURB_OVERINT_CHUNK_CELLS):
+            c1 = min(c0 + _TURB_OVERINT_CHUNK_CELLS, seg_hi)
+            phi_f = contract_shared_operator_1axis(
+                op_c2f, np.ascontiguousarray(scalar_field[c0:c1, :, None]))
+            rho_f = contract_shared_operator_1axis(
+                op_c2f, np.ascontiguousarray(rho[c0:c1, :, None]))
+            u_f = contract_shared_operator_1axis(
+                op_c2f, np.ascontiguousarray(velocity[c0:c1]))       # (n,n_fine,3)
+            # rho*u*phi 在 FINE 点上相乘（去混叠的核心）
+            F_phys_f = (rho_f * phi_f * u_f)[..., None]              # (n,n_fine,3,1)
+            del phi_f, rho_f, u_f
+            F_tilde_f = contravariant_flux_from_metric(
+                det_fine[c0:c1], inv_fine[c0:c1], F_phys_f)
+            del F_phys_f
+            div_f = contract_shared_operator_2axis(op_D_fine, F_tilde_f)  # (n,n_fine,1)
+            del F_tilde_f
+            div_F[c0:c1] = contract_shared_operator_1axis(op_f2c, div_f)[..., 0]
+            del div_f
+    return div_F
+
+
 def compute_scalar_convection_residual(
     scalar_field: np.ndarray,
     rho: np.ndarray,
@@ -345,19 +462,27 @@ def compute_scalar_convection_residual(
         rho_u = rho[:, :, None] * velocity
         rho_u_tilde = contravariant_flux_from_metric(det_jacs, inv_jacs, rho_u[..., None])[..., 0]
         del rho_u
-    div_F = np.empty((n_cells, n_sps))
-    if n_prism > 0:
-        scalar_convection_volume_kernel(
-            np.ascontiguousarray(scalar_field[:n_prism]),
-            np.ascontiguousarray(rho_u_tilde[:n_prism]),
-            np.ascontiguousarray(ops.D_3d_prism), div_F[:n_prism],
-        )
-    if n_cells > n_prism:
-        scalar_convection_volume_kernel(
-            np.ascontiguousarray(scalar_field[n_prism:]),
-            np.ascontiguousarray(rho_u_tilde[n_prism:]),
-            np.ascontiguousarray(_tet_op_D), div_F[n_prism:],
-        )
+    # 去混叠（AFCFD_TURB_OVERINT=on）：`rho*u*phi` 是三重非线性乘积，
+    # 直接在 coarse SPs 上微分等价于"先混叠再求导"，理由与实测数字见
+    # `resolve_turb_overintegration` 文档。默认 off，行为逐位不变。
+    _oi = _turb_overint_ops(mesh, ops) if resolve_turb_overintegration() == "on" else None
+    if _oi is not None:
+        div_F = _scalar_convection_volume_overintegrated(
+            scalar_field, rho, velocity, _oi, n_sps)
+    else:
+        div_F = np.empty((n_cells, n_sps))
+        if n_prism > 0:
+            scalar_convection_volume_kernel(
+                np.ascontiguousarray(scalar_field[:n_prism]),
+                np.ascontiguousarray(rho_u_tilde[:n_prism]),
+                np.ascontiguousarray(ops.D_3d_prism), div_F[:n_prism],
+            )
+        if n_cells > n_prism:
+            scalar_convection_volume_kernel(
+                np.ascontiguousarray(scalar_field[n_prism:]),
+                np.ascontiguousarray(rho_u_tilde[n_prism:]),
+                np.ascontiguousarray(_tet_op_D), div_F[n_prism:],
+            )
     if conv_geom is None:
         del rho_u_tilde
 
@@ -502,6 +627,46 @@ def compute_scalar_convection_residual(
     return residual
 
 
+def _scalar_diffusion_volume_overintegrated(gamma_field, grad_phi, oi, n_sps):
+    """扩散体积项 `div(adj(J)*Gamma*grad_phi)` 的去混叠版，返回
+    (n_cells,n_sps)。
+
+    与对流版同一条链路：Gamma 与 grad_phi 各自精确插值到 FINE 点后**在
+    FINE 点相乘**，用 FINE 点度量算逆变通量、FINE 微分矩阵求散度，再
+    精确限制回 coarse。
+
+    **有意保留的一处局限（不是疏漏）**：`Gamma = mu + sigma*rho*nu_t` 里
+    `nu_t = k/omega` 是**商**、根本不是多项式，所以它在 coarse 点上的
+    节点值本身已经是一个投影结果——这里只能把这份节点表示精确插值到
+    FINE 点，无法像平均流那样"在 FINE 点重新求值非线性通量函数"
+    （`fr_residual/inviscid.py` 能那样做是因为它手里有 Q、可以在 FINE
+    点重算 `euler_physical_flux`；本函数拿到的是已经组装好的
+    `gamma_field`）。因此去掉的是 **Gamma×grad_phi 这个乘积以及与度量
+    项乘积**的混叠，Gamma 自身的混叠仍在。要把后者也去掉需要把 k/omega/
+    rho 一路传进来、在 FINE 点重算 nu_t，是独立的一步改动。
+    """
+    n_cells = gamma_field.shape[0]
+    det_fine, inv_fine = oi["det_fine"], oi["inv_fine"]
+    div_G = np.empty((n_cells, n_sps))
+    for seg_lo, seg_hi, op_c2f, op_D_fine, op_f2c in oi["segs"]:
+        for c0 in range(seg_lo, seg_hi, _TURB_OVERINT_CHUNK_CELLS):
+            c1 = min(c0 + _TURB_OVERINT_CHUNK_CELLS, seg_hi)
+            gam_f = contract_shared_operator_1axis(
+                op_c2f, np.ascontiguousarray(gamma_field[c0:c1, :, None]))
+            grad_f = contract_shared_operator_1axis(
+                op_c2f, np.ascontiguousarray(grad_phi[c0:c1]))        # (n,n_fine,3)
+            G_phys_f = (gam_f * grad_f)[..., None]                    # (n,n_fine,3,1)
+            del gam_f, grad_f
+            G_tilde_f = contravariant_flux_from_metric(
+                det_fine[c0:c1], inv_fine[c0:c1], G_phys_f)
+            del G_phys_f
+            div_f = contract_shared_operator_2axis(op_D_fine, G_tilde_f)
+            del G_tilde_f
+            div_G[c0:c1] = contract_shared_operator_1axis(op_f2c, div_f)[..., 0]
+            del div_f
+    return div_G
+
+
 def compute_scalar_diffusion_residual(
     scalar_field: np.ndarray,
     gamma_field: np.ndarray,
@@ -596,21 +761,29 @@ def compute_scalar_diffusion_residual(
     # `scalar_volume_divergence_kernel` 两个 numba prange kernel，取代
     # 原来 Python 层分块 + 逐点 3x3@3x1 微型 gemm + 3 次 tensordot 的
     # numpy 链路（见两个 kernel 各自的文档）。
-    G_phys = gamma_field[:, :, None] * grad_phi                      # (n_cells,n_sps,3)
-    G_tilde = contravariant_flux_from_metric(det_jacs, inv_jacs, G_phys[..., None])[..., 0]
-    del G_phys
-    div_G = np.empty((n_cells, n_sps))
-    if n_prism > 0:
-        scalar_volume_divergence_kernel(
-            np.ascontiguousarray(G_tilde[:n_prism]),
-            np.ascontiguousarray(ops.D_3d_prism), div_G[:n_prism],
-        )
-    if n_cells > n_prism:
-        scalar_volume_divergence_kernel(
-            np.ascontiguousarray(G_tilde[n_prism:]),
-            np.ascontiguousarray(_tet_op_D), div_G[n_prism:],
-        )
-    del G_tilde
+    # 去混叠（AFCFD_TURB_OVERINT=on），理由见 `resolve_turb_overintegration`
+    # 与 `_scalar_diffusion_volume_overintegrated`（含那里明确写出的、
+    # Gamma 自身混叠仍在的局限）。默认 off，行为逐位不变。
+    _oi = _turb_overint_ops(mesh, ops) if resolve_turb_overintegration() == "on" else None
+    if _oi is not None:
+        div_G = _scalar_diffusion_volume_overintegrated(
+            gamma_field, grad_phi, _oi, n_sps)
+    else:
+        G_phys = gamma_field[:, :, None] * grad_phi                      # (n_cells,n_sps,3)
+        G_tilde = contravariant_flux_from_metric(det_jacs, inv_jacs, G_phys[..., None])[..., 0]
+        del G_phys
+        div_G = np.empty((n_cells, n_sps))
+        if n_prism > 0:
+            scalar_volume_divergence_kernel(
+                np.ascontiguousarray(G_tilde[:n_prism]),
+                np.ascontiguousarray(ops.D_3d_prism), div_G[:n_prism],
+            )
+        if n_cells > n_prism:
+            scalar_volume_divergence_kernel(
+                np.ascontiguousarray(G_tilde[n_prism:]),
+                np.ascontiguousarray(_tet_op_D), div_G[n_prism:],
+            )
+        del G_tilde
 
     # 扩散对 dphi/dt 的贡献是 +div(G)/det(J)（见本函数文档符号约定，
     # 与 viscous_flux.py::"residual = div_comp / det_jacs"同一约定）。
