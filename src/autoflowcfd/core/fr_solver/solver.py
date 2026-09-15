@@ -595,6 +595,16 @@ class FRSolver(_SolverGeometryMixin):
             print(f"   Adaptive CFL: enabled (start={self._cfl_controller.cfl_start}, "
                   f"max={self._cfl_controller.cfl_max}, "
                   f"min={self._cfl_controller.cfl_min})")
+            # 影响物理/数值的开关必须在启动日志里可见（2026-09-15）：做
+            # 人工粘性 A/B 对照时发现，`--artificial-viscosity` 生效与否在
+            # 整份日志里**没有任何痕迹**，只能靠翻进程命令行确认——那让
+            # "这份日志是哪个配置跑出来的"变成了事后考古。模态滤波档同理，
+            # 它直接决定解的多项式阶数有没有被清掉一整阶。
+            from autoflowcfd.fr.modal_filter import FILTER_MODE as _fm
+            _av = ("enabled (alpha=%g)" % self.artificial_viscosity_alpha
+                   if self.artificial_viscosity_enabled else "disabled")
+            print(f"   Artificial viscosity: {_av}")
+            print(f"   Modal filter mode: {_fm}")
         else:
             print(f"   Adaptive CFL: disabled")
 
