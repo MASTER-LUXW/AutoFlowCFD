@@ -169,7 +169,15 @@ class AdaptiveCFLController:
         """初始化自适应 CFL 控制器。
 
         Args:
-            cfl_start: 初始 CFL 数（已验证稳定的保守值）。
+            cfl_start: 初始 CFL 数（调用方认为已验证稳定的保守值）。
+                **注意它只是一个断言、不是事实**：软上限（第 8 条）原先
+                无条件把 cfl_start 当下界，结果在真实稳定 CFL 低于
+                cfl_start 的工况下那道保护被完全抵消（79 万单元 cube_demo
+                实测：稳定 CFL 约 0.063、cfl_start=0.1，控制器爬到 0.0697
+                失败后又爬回 0.0690 并在 2 步内发散）。现在只有**收缩发生
+                在 cfl_start 之上**时才用它当下界；一旦在它以下发生收缩，
+                就说明这个断言对当前问题不成立，下界改用收缩后的 CFL，
+                详见 `_shrink` 分支里该处的完整说明。
             cfl_max: CFL 上限。SSP-RK3 线性稳定极限 ~1.0，实际可用上限
                 取决于网格/物理问题（AUSM+up 低马赫预处理激活时更低）。
                 默认 0.5（2026-09-07 从 0.3 上调——0.3 对本项目多数网格
@@ -420,13 +428,38 @@ class AdaptiveCFLController:
                 # （见模块文档第 8 条）。取收缩前的值而不是收缩后的值，
                 # 这样上限随每次失败几何式下降、从上方收敛到稳定边界，
                 # 而不是一步跳到远低于边界的位置。
-                # 软上限**不低于 cfl_start**：那是调用方断言过稳定的
-                # 保守起始值（见 cfl_start 参数文档），把"能否回到起点"
-                # 也禁掉就是把第 5/6 条修掉的棘轮换个形式引回来（实测
-                # 会让带噪声的收敛轨迹滑到 0.034 << cfl_start=0.1）。
+                # 软上限的下界**只有在 cfl_start 本身尚未被证伪时**才取
+                # cfl_start：那是调用方断言过稳定的保守起始值（见
+                # cfl_start 参数文档），把"能否回到起点"也禁掉就是把第
+                # 5/6 条修掉的棘轮换个形式引回来（实测会让带噪声的收敛
+                # 轨迹滑到 0.034 << cfl_start=0.1）。
+                #
+                # **真实 bug 修复（2026-09-15）**：但一旦收缩发生在**低于**
+                # cfl_start 的 CFL 上，就已经有直接证据说明 cfl_start 对
+                # 这个问题不稳定，再用它兜底等于把上限抬到一个**已知不稳**
+                # 的值上，第 8 条这道保护被完全抵消。真实复现（79 万单元
+                # cube_demo，P1 真实内容、模态滤波器关闭，稳定 CFL 约
+                # 0.063 而 cfl_start=0.1）：上限被钉在 0.1 形同不存在，
+                # 控制器 step 66 爬到 0.0697 -> step 79 被判定过高退回
+                # 0.0627 -> step 100 **又爬回 0.0690** -> step 102 残差
+                # 一步从 2.17e9 跳到 1.87e25，step 103 发散。CFL 历史在
+                # 修复前后的两次运行里逐位相同，死亡步号也相同（103），
+                # 这正是第 8 条要消灭的"周期性穿越稳定边界"本身。
+                #
+                # 改法是最小的、有证据支撑的：`old_cfl >= cfl_start` 时
+                # 行为逐位不变（那正是第 8 条原本设计的工况）；
+                # `old_cfl < cfl_start` 时下界改用**收缩后的 CFL**——它
+                # 保证上限不会挡住"停在当前值"（不构成棘轮），同时绝不
+                # 高于刚刚失败的那个值。恢复仍由 ceiling_release_steps
+                # 这条时间性释放负责，不依赖 cfl_start。
+                #
                 # 注意这只约束**放大**：真实持续恶化时 cfl_number 仍会
                 # 被收缩到 cfl_min 以下界限，不受软上限影响。
-                ceiling = max(old_cfl * self.ceiling_backoff, self.cfl_start)
+                if old_cfl >= self.cfl_start:
+                    ceiling_floor = self.cfl_start
+                else:
+                    ceiling_floor = max(old_cfl * factor, self.cfl_min)
+                ceiling = max(old_cfl * self.ceiling_backoff, ceiling_floor)
                 self._cfl_ceiling = (ceiling if self._cfl_ceiling is None
                                      else min(self._cfl_ceiling, ceiling))
                 self._steps_since_shrink = 0

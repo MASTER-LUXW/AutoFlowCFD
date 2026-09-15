@@ -397,22 +397,73 @@ class TestSoftCeilingPreventsRepeatedOvershoot:
             f"安静 60 步（> ceiling_release_steps=50）后软上限没有放开："
             f"{ceiling0:.5f} -> {released}")
 
-    def test_ceiling_never_below_cfl_start(self):
-        """软上限不得低于 cfl_start——那是调用方断言过稳定的保守起始值。
+    def test_ceiling_stays_at_cfl_start_while_shrinks_come_from_above(self):
+        """**只要每次收缩都发生在 cfl_start 之上**，软上限不得低于
+        cfl_start——那是调用方断言过稳定的保守起始值，禁止 CFL 回到自己
+        的起点又是一种棘轮。
 
-        允许上限跌到 cfl_start 以下，就等于禁止 CFL 回到它自己的起点，
-        又是一种棘轮。注意这只约束**放大**：真实持续恶化时 cfl_number
-        仍会被收缩到 cfl_min（见 test_ceiling_does_not_block_shrinking）。
+        这是原 `test_ceiling_never_below_cfl_start` 的**受限版本**：那条
+        用例断言的是"上限在任何情况下都不低于 cfl_start"，已被真实数据
+        证伪，见下一条用例的说明。这里把它仍然成立的那一半保留下来。
+        """
+        c = AdaptiveCFLController(cfl_start=0.2, cfl_max=1.0, cfl_min=0.01,
+                                  ceiling_backoff=0.95,
+                                  ceiling_release_steps=10 ** 9)
+        _feed(c, [REAL_SLOW_RATIO] * 200)
+        assert c.cfl_number > 0.2, "本用例需要 CFL 先爬到 cfl_start 之上"
+        for _ in range(3):
+            if c.cfl_number < 0.2:
+                break                      # 已经掉到 cfl_start 以下，超出本用例范围
+            c.update(c._history[-1][2] * 1.5)
+            assert c._cfl_ceiling >= 0.2 - 1e-12, (
+                f"收缩发生在 cfl_start 之上，软上限却跌到了 "
+                f"{c._cfl_ceiling:.5f} < 0.2")
+            _feed(c, [REAL_SLOW_RATIO] * 30)
+
+    def test_ceiling_follows_down_when_shrink_happens_below_cfl_start(self):
+        """一旦收缩发生在 **cfl_start 以下**，软上限必须跟着下来——不能
+        继续钉在一个**已经被证伪**的 cfl_start 上。
+
+        **真实 bug 修复（2026-09-15）**：原实现是
+        `ceiling = max(old_cfl*backoff, cfl_start)`，于是当真实稳定 CFL
+        落在 cfl_start 以下时，上限恒等于 cfl_start、第 8 条那道保护被
+        完全抵消。79 万单元 cube_demo 上（P1 真实内容、模态滤波器关闭，
+        稳定 CFL 约 0.063 而 cfl_start=0.1）复现出来的就是第 8 条本该
+        消灭的"周期性穿越稳定边界"：
+
+            step 66  CFL 爬到 0.0697
+            step 79  被判定过高 -> 退回 0.0627（连续 23 步单调收敛）
+            step 100 **又爬回 0.0690**
+            step 102 残差一步从 2.17e9 跳到 1.87e25
+            step 103 发散
+
+        修复前后两次运行的 CFL 历史逐位相同、死亡步号也相同（103），
+        是这条因果最直接的证据。
+
+        判据同时钉住"不构成新棘轮"：上限必须 >= 收缩后的 cfl_number，
+        也就是绝不挡住"停在当前值"。恢复由 ceiling_release_steps 负责
+        （见 test_ceiling_is_released_after_long_quiet_period）。
         """
         c = AdaptiveCFLController(cfl_start=0.2, cfl_max=1.0, cfl_min=0.01,
                                   ceiling_backoff=0.5,
                                   ceiling_release_steps=10 ** 9)
         _feed(c, [REAL_SLOW_RATIO] * 100)
+        saw_shrink_below_start = False
         for _ in range(6):
+            old = c.cfl_number
             c.update(c._history[-1][2] * 1.5)
+            if old < 0.2:
+                saw_shrink_below_start = True
+                assert c._cfl_ceiling < 0.2, (
+                    f"收缩发生在 cfl_start 以下（old_cfl={old:.5f}），软上限"
+                    f"却仍是 {c._cfl_ceiling:.5f} >= cfl_start=0.2——那个值"
+                    f"已经被证伪，继续用它兜底就是把第 8 条的保护抵消掉")
+                assert c._cfl_ceiling >= c.cfl_number - 1e-12, (
+                    f"软上限 {c._cfl_ceiling:.5f} 低于收缩后的 CFL "
+                    f"{c.cfl_number:.5f}——挡住了'停在当前值'，构成新棘轮")
             _feed(c, [REAL_SLOW_RATIO] * 10)
-        assert c._cfl_ceiling >= 0.2 - 1e-12, (
-            f"软上限跌到了 cfl_start 以下：{c._cfl_ceiling:.5f} < 0.2")
+        assert saw_shrink_below_start, (
+            "这个算例没有制造出'在 cfl_start 以下收缩'的情形，判据失去意义")
 
     def test_reset_clears_ceiling(self):
         """阶数切换后软上限必须作废（换了离散问题，旧边界不再适用）。"""
