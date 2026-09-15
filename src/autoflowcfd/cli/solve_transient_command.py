@@ -37,7 +37,14 @@ from autoflowcfd.cli.solve_transient_distributed import _solve_transient_distrib
                    "（见 fr/matrix_operators.py 文档）")
 @click.option("--time-method", "-t",
               type=click.Choice(["rk3", "imex", "dual-time"]),
-              default="rk3", help="时间推进方法")
+              default="rk3",
+              help="时间推进方法。**只有 dual-time 是时间精确的**："
+                   "rk3/imex 下 --dt 参数被忽略，平均流与湍流场都按逐单元"
+                   "局部 CFL 步长推进（稳态收敛加速手段，见 "
+                   "core/fr_solver/step.py::step 的 dt 语义一节），各单元"
+                   "推进的物理时间并不相同。DES/LES/WMLES 这类以时间解析"
+                   "湍流结构为目的的模型必须用 dual-time，否则结果不能当作"
+                   "非稳态数据解读——组合不当时本命令会显式警告。")
 @click.option("--turbulence-model", "-m",
               type=click.Choice(["sst", "ddes", "iddes", "wmles", "les"]),
               default="ddes",
@@ -240,6 +247,39 @@ def transient(input_file: str, backend: str, order: int, flux_type: str, time_me
 
     # 2. 映射时间推进方法
     time_scheme = time_scheme_map.get(time_method, TimeIntegrationScheme.SSP_RK3)
+
+    # 时间精度与湍流模型的组合校验（2026-09-15）：本命令的默认组合是
+    # `--time-method rk3` + `--turbulence-model ddes`，而 rk3/imex 下
+    # `step()` **忽略** --dt、按逐单元局部 CFL 步长推进（见
+    # core/fr_solver/step.py::step 文档"dt 参数的语义按 time_scheme 分两种
+    # 情况"一节）。各单元因此推进的物理时间并不相同，结果不是时间精确解。
+    # DES/LES/WMLES 的全部意义就在于时间上解析湍流结构，用非时间精确的
+    # 推进跑出来的场不能当作非稳态数据解读——而此前这个组合没有任何提示。
+    #
+    # 这里**不直接拒绝**：rk3 + DES 作为"先把流场大致吹起来"的快速冒烟
+    # 是有用的（本项目既有的 DDES/LES CLI 端到端验证就是这么跑的），
+    # 拒绝会破坏一条已验证可用的路径。但必须显式、醒目地说清它不是什么。
+    _TIME_RESOLVED_MODELS = ("ddes", "iddes", "les", "wmles")
+    if (time_method in ("rk3", "imex")
+            and turbulence_model.lower() in _TIME_RESOLVED_MODELS):
+        click.secho(
+            "\n⚠️  时间精度警告：--turbulence-model "
+            + turbulence_model
+            + " 是以**时间解析**湍流结构为目的的模型，但 --time-method "
+            + time_method + " **不是时间精确的**。",
+            fg="yellow", bold=True)
+        click.secho(
+            "   rk3/imex 下 --dt 被忽略，平均流与湍流场按逐单元局部 CFL "
+            "步长推进（稳态收敛加速手段），各单元推进的物理时间并不相同。",
+            fg="yellow")
+        click.secho(
+            "   本次结果可用于观察流场大致形态，但**不能当作非稳态/频谱"
+            "数据解读**（涡脱落频率、TKE 谱、相位等一概无效）。",
+            fg="yellow")
+        click.secho(
+            "   要做真正的非稳态仿真请用：--time-method dual-time"
+            "（配合 --dt 与 --dual-time-inner-iter）。\n",
+            fg="yellow")
 
     # 3. 初始化求解器
     solver = FRSolver(

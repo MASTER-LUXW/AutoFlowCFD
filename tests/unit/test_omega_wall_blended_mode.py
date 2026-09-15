@@ -239,3 +239,46 @@ class TestGpuMirrorIsWired:
         from autoflowcfd.core.turbulence import transport
         src = inspect.getsource(transport)
         assert "60.0 * nu_owner" not in src
+
+
+class TestTransientTimeAccuracyWarning:
+    """`solve transient` 的默认组合是 `--time-method rk3` +
+    `--turbulence-model ddes`，而 rk3/imex 下 `step()` **忽略** --dt、按
+    逐单元局部 CFL 步长推进（见 core/fr_solver/step.py::step 的 dt 语义
+    一节），各单元推进的物理时间并不相同。
+
+    DES/LES/WMLES 的全部意义就在于时间上解析湍流结构，所以这个默认组合
+    跑出来的场不能当作非稳态数据解读——而此前完全没有提示。不直接拒绝是
+    因为 rk3 + DES 作为"先把流场吹起来"的快速冒烟有实际用途（本项目既有
+    的 DDES/LES CLI 端到端验证就是这么跑的）。
+    """
+
+    @pytest.mark.parametrize("model", ["ddes", "iddes", "les", "wmles"])
+    @pytest.mark.parametrize("method", ["rk3", "imex"])
+    def test_warning_source_covers_every_time_resolved_model(self, model, method):
+        import inspect
+
+        from autoflowcfd.cli import solve_transient_command as stc
+        src = inspect.getsource(stc)
+        assert '_TIME_RESOLVED_MODELS' in src
+        assert model in src
+        assert '时间精度警告' in src
+        assert 'dual-time' in src
+
+    def test_sst_is_not_warned(self):
+        """SST 是 RANS 模型，不在时间解析模型清单里。"""
+        import inspect
+
+        from autoflowcfd.cli import solve_transient_command as stc
+        src = inspect.getsource(stc)
+        i = src.index('_TIME_RESOLVED_MODELS = (')
+        decl = src[i:src.index(')', i)]
+        assert 'sst' not in decl
+
+    def test_help_text_states_only_dual_time_is_time_accurate(self):
+        from click.testing import CliRunner
+
+        from autoflowcfd.cli.solve_transient_command import transient
+        out = CliRunner().invoke(transient, ['--help']).output
+        flat = ' '.join(out.split())
+        assert '只有 dual-time 是时间精确的' in flat
