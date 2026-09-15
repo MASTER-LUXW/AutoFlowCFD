@@ -391,3 +391,125 @@ def test_default_ghost_provider_behavior_is_bit_identical(order, monkeypatch):
     res_old = vf.compute_viscous_residual_fr(
         U, mesh, ops, MU, PR, boundary_ghost_provider=None)
     np.testing.assert_allclose(res_new, res_old, rtol=0, atol=0)
+
+
+# ---------------------------------------------------------------------------
+# 5. 混合拆分面（B-8）的两个半区 —— 手工合成配置
+# ---------------------------------------------------------------------------
+#
+# 为什么要手工合成：B-8 混合拆分面是 BL 挤出在几何尖角棱处产生拓扑缝隙的
+# 固有产物（见 fr/face_flux_points_merge.py 的"混合分组检测"一节），只在
+# 真实带边界层的网格上出现——`_build_synthetic_mixed_mesh` 实测
+# `mixed_nb_partner`/`mixed_ow_partner` **全为 -1**，也就是说本文件前面
+# 那些端到端用例一次都没有走进这两个分支。
+#
+# 而这次改动在每条 kernel 里都有 3 个分派点：真边界面 + B-8 owner 半区 +
+# B-8 neighbor 半区。只验证第一个是不够的。
+#
+# 做法：取真实合成网格的 flat 几何，把某个**内部面** f_int 手工登记成
+# "混合拆分面，配对面是边界面 bf、整张面都取边界半区"。这个拓扑在物理上
+# 不成立，但它让 kernel 真的走进 B-8 分支，而分支里的**分派逻辑**正是要
+# 验证的东西。
+#
+# 归因设计（关键）：保持 flat 与 provider 完全不变，只切换绝热掩码
+# （bf 绝热 vs 全透射）。此时两次计算唯一的差别就是 ∇T 的处理，且只发生在
+# 两个地方：(a) bf 自己的真边界面分支、(b) f_int 的 B-8 半区。因此只要
+# **挑一个 owner 与 bf 的 owner 不同的 f_int**，那么 f_int 的 owner 单元上
+# 出现的任何差异就只可能来自 (b)。
+
+import dataclasses
+
+
+def _pick_faces_for_mixed(flat, need_neighbor_side):
+    """挑一对 (f_int, bf)：f_int 是内部面，bf 是边界面，且两者的相关
+    单元不同 —— 差异归因的前提。"""
+    bnd = np.nonzero(flat.is_boundary & flat.owner_is_primary)[0]
+    interior = np.nonzero((~flat.is_boundary) & flat.owner_is_primary
+                          & flat.neighbor_is_primary)[0]
+    assert bnd.size > 0 and interior.size > 0
+    for f_int in interior:
+        target = (flat.neighbor_cell[f_int] if need_neighbor_side
+                  else flat.owner_cell[f_int])
+        for bf in bnd:
+            if flat.owner_cell[bf] != target:
+                return int(f_int), int(bf), int(target)
+    raise AssertionError("找不到满足归因条件的 (f_int, bf) 组合")
+
+
+def _flat_with_mixed(flat, f_int, bf, side):
+    """返回一份把 f_int 登记成混合拆分面的 flat 副本（整张面取边界半区）。"""
+    nb_partner = flat.mixed_nb_partner.copy()
+    nb_mask = flat.mixed_nb_mask.copy()
+    ow_partner = flat.mixed_ow_partner.copy()
+    ow_mask = flat.mixed_ow_mask.copy()
+    if side == "owner":
+        nb_partner[f_int] = bf
+        nb_mask[f_int, :] = True
+    else:
+        ow_partner[f_int] = bf
+        ow_mask[f_int, :] = True
+    return dataclasses.replace(
+        flat,
+        mixed_nb_partner=nb_partner, mixed_nb_mask=nb_mask,
+        mixed_ow_partner=ow_partner, mixed_ow_mask=ow_mask,
+    )
+
+
+@pytest.mark.parametrize("order", [1, 2])
+@pytest.mark.parametrize("side", ["owner", "neighbor"])
+def test_mixed_split_half_dispatches_grad_T_by_partner_bc(order, side, monkeypatch):
+    """B-8 两个半区都必须按**配对面**的热边界类型分派 ∇T。
+
+    判据：
+    1. 目标单元（owner 半区看 f_int 的 owner，neighbor 半区看 f_int 的
+       neighbor）的**能量**残差在"bf 绝热"与"全透射"两种掩码下必须不同
+       —— 说明 B-8 分支真的读了 `bnd_adiabatic[配对面]` 并做了镜像。
+    2. 同一单元的质量/动量分量必须逐位相同 —— 说明只动了能量传导项。
+    """
+    mesh = _build_synthetic_mixed_mesh(order)
+    ops = generate_fr_operators(order)
+    flat = get_flat_face_geometry(mesh, ops)
+    f_int, bf, target_cell = _pick_faces_for_mixed(flat, side == "neighbor")
+    flat2 = _flat_with_mixed(flat, f_int, bf, side)
+    U = _zero_velocity_nonuniform_T_state(mesh)
+
+    # bf 是 WALL（绝热），其余边界面 FARFIELD（透射）——只让 bf 这一个面
+    # 的分类在两次运行间起作用。
+    group_code = np.full(flat.n_faces, -1, dtype=np.int64)
+    group_code[flat.is_boundary] = 1
+    group_code[bf] = 0
+    provider = BoundaryGhostStateProvider(
+        group_code,
+        {0: {"type": "WALL", "is_no_slip": True},
+         1: {"type": "FARFIELD", "Q_free": Q_FREE}},
+        {"type": "FARFIELD", "Q_free": Q_FREE})
+    assert build_boundary_adiabatic_mask(
+        flat.n_faces, flat.is_boundary, provider)[bf], "bf 应被判为绝热面"
+
+    res_adiabatic = vf.compute_viscous_residual_fr(
+        U, mesh, ops, MU, PR, boundary_ghost_provider=provider,
+        flat_face_override=flat2)
+
+    _force_transmissive(monkeypatch)
+    provider2 = BoundaryGhostStateProvider(
+        group_code,
+        {0: {"type": "WALL", "is_no_slip": True},
+         1: {"type": "FARFIELD", "Q_free": Q_FREE}},
+        {"type": "FARFIELD", "Q_free": Q_FREE})
+    res_transmissive = vf.compute_viscous_residual_fr(
+        U, mesh, ops, MU, PR, boundary_ghost_provider=provider2,
+        flat_face_override=flat2)
+
+    e_diff = np.abs(res_adiabatic[target_cell, :, 4]
+                    - res_transmissive[target_cell, :, 4]).max()
+    e_scale = max(np.abs(res_transmissive[target_cell, :, 4]).max(), 1e-300)
+    assert e_diff / e_scale > 1e-6, (
+        f"side={side} order={order}: 单元 {target_cell}（f_int={f_int} 的"
+        f"{'neighbor' if side == 'neighbor' else 'owner'}，与 bf={bf} 的 owner "
+        f"{flat.owner_cell[bf]} 不同）能量残差没变（相对差 {e_diff/e_scale:.3e}）"
+        f"——B-8 {side} 半区没有按配对面的热边界类型分派 ∇T")
+
+    np.testing.assert_allclose(
+        res_adiabatic[target_cell, :, :4], res_transmissive[target_cell, :, :4],
+        rtol=0, atol=0,
+        err_msg=f"side={side}: B-8 半区的质量/动量分量被改动了")
