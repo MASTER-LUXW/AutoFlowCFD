@@ -157,3 +157,90 @@ class TestCflMaxIsRespectedOnEveryPath:
         flat = " ".join(src.split())
         assert ("self.cfl_number = min( max(self.cfl_number * factor, self.cfl_min), "
                 "self.cfl_max)") in flat, "收缩分支没有双向钳制"
+
+
+class TestEveryBackendConstructsAController:
+    """五条求解器路径都必须构造自适应 CFL 控制器，并且都能接 cfl_min。
+
+    2026-09-15 发现两个真实缺口：
+      1. `cfl_min` 在**全部五处**控制器构造点都没有被传递，恒用默认 0.05
+         ——而那个值高于真 P1 在 79 万单元 cube_demo 上实测稳定的 0.03，
+         使一个已验证可用的工作点通过 CLI/API 根本到不了；
+      2. 多 GPU **完全分布式**路径根本没有控制器
+         （`gpu_distributed_fully_distributed.py` 只设
+         `GPUTimeIntegrator(cfl=1.0)`，而 `_current_cfl()` 的回退正是
+         `time_integrator.cfl`），于是它以 CFL=1.0 运行——远超 P>=1 的
+         SSP-RK3 稳定极限；同一个类的"传统模式"一直是有控制器的。
+    """
+
+    def test_all_solver_entry_points_accept_cfl_min(self):
+        import inspect
+
+        from autoflowcfd.core.fr_solver.solver import FRSolver
+        from autoflowcfd.core.gpu.distributed.gpu_distributed import (
+            MultiGPUDistributedSolver,
+        )
+        from autoflowcfd.core.gpu.solver.gpu_solver import GPUFRSolver
+        for cls in (FRSolver, GPUFRSolver, MultiGPUDistributedSolver):
+            assert 'cfl_min' in inspect.signature(cls.__init__).parameters, cls.__name__
+
+    def test_checkpoint_rebuild_accepts_cfl_min(self):
+        """resume 低 CFL 工况同样需要它。"""
+        import inspect
+
+        from autoflowcfd.cli.solve_checkpoint_io import (
+            rebuild_solver_from_checkpoint,
+        )
+        assert 'cfl_min' in inspect.signature(
+            rebuild_solver_from_checkpoint).parameters
+
+    def test_cli_exposes_cfl_min(self):
+        from click.testing import CliRunner
+
+        from autoflowcfd.cli.solve_steady_command import solve_steady
+        out = CliRunner().invoke(solve_steady, ['--help']).output
+        assert '--cfl-min' in out
+
+    def test_distributed_package_carries_cfl_bounds(self):
+        """完全分布式：三个量必须进 rank package，否则 CLI 选项在这条
+        路径上被静默丢弃（与本模块记录过的 turb_model 同类缺口）。"""
+        import inspect
+
+        from autoflowcfd.core.mpi import distributed_mesh_loader as dml
+        for fn in (dml.build_fully_distributed_rank_package,
+                   dml.distributed_mesh_load_v2):
+            params = inspect.signature(fn).parameters
+            for k in ('cfl_start', 'cfl_max', 'cfl_min'):
+                assert k in params, f"{fn.__name__} 缺 {k}"
+        src = inspect.getsource(dml.build_fully_distributed_rank_package)
+        for k in ('cfl_start', 'cfl_max', 'cfl_min'):
+            assert f"'{k}': {k}" in src, f"package 里没写入 {k}"
+
+    def test_multi_gpu_fully_distributed_builds_a_controller(self):
+        """这条路径此前完全没有控制器，会以 CFL=1.0 运行。"""
+        import inspect
+
+        from autoflowcfd.core.gpu.distributed import (
+            gpu_distributed_fully_distributed as fd,
+        )
+        src = inspect.getsource(fd)
+        assert 'AdaptiveCFLController' in src
+        assert '_cfl_controller' in src
+        # 且必须是 None 感知地从 package 取三个边界值
+        assert "('cfl_start', 0.1), ('cfl_max', 0.5), ('cfl_min', None)" in src
+
+    def test_all_five_controller_sites_pass_cfl_min(self):
+        """五处构造点逐一核对，防止将来新增后端时又漏一处。"""
+        import inspect
+
+        from autoflowcfd.core.fr_solver import solver as cpu_single
+        from autoflowcfd.core.gpu.distributed import gpu_distributed as gpu_multi
+        from autoflowcfd.core.gpu.distributed import (
+            gpu_distributed_fully_distributed as gpu_multi_fd,
+        )
+        from autoflowcfd.core.gpu.solver import gpu_solver as gpu_single
+        from autoflowcfd.core.mpi import distributed_solver as cpu_mpi
+        for mod in (cpu_single, gpu_single, gpu_multi, gpu_multi_fd, cpu_mpi):
+            src = inspect.getsource(mod)
+            assert 'AdaptiveCFLController(' in src, mod.__name__
+            assert 'cfl_min' in src, f"{mod.__name__} 的控制器构造没有接 cfl_min"

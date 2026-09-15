@@ -195,6 +195,32 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     time_scheme_enum = package.get('time_scheme', TimeIntegrationScheme.SSP_RK3)
     time_scheme_str = getattr(time_scheme_enum, 'value', time_scheme_enum)
     self.time_integrator = GPUTimeIntegrator(scheme=time_scheme_str, cfl=1.0)
+
+    # 自适应 CFL 控制器（2026-09-15 补齐真实缺口）：这条路径此前**完全
+    # 没有**控制器，而 `_current_cfl()` 的回退是 `self.time_integrator.cfl`
+    # ——上面那行给的是 1.0，远超 P>=1 的 SSP-RK3 稳定极限（对流项
+    # ~1/(2p+1)，P1 上可用 CFL 实测在 0.03 量级）。也就是说
+    # `--multi-gpu --fully-distributed` 会用一个比可用值大一到两个数量级
+    # 的 CFL 跑，而同一个类的"传统模式" `__init__` 里控制器一直是有的：
+    # 同一个后端的两种模式在最基本的时间步长策略上不一致。
+    # `cfl=1.0` 这个占位值本身保留不动——它只是 GPUTimeIntegrator 的构造
+    # 参数，真正生效的是控制器给出的 CFL（见 `_current_cfl()`）。
+    self._cfl_controller = None
+    if str(time_scheme_str) in ("ssp_rk2", "ssp_rk3"):
+        from autoflowcfd.core.time_integration.adaptive_cfl import (
+            AdaptiveCFLController,
+        )
+        # None 感知：package 现在总是带这三个键（CLI 未指定时为 None），
+        # 不能用 `.get(k, default)`——那会拿到显式的 None。与 CPU 侧
+        # `DistributedFRSolver.from_fully_distributed_package` 同一处理。
+        _cfl_kw = {}
+        for _k, _d in (('cfl_start', 0.1), ('cfl_max', 0.5), ('cfl_min', None)):
+            _v = package.get(_k)
+            if _v is not None:
+                _cfl_kw[_k] = _v
+            elif _d is not None:
+                _cfl_kw[_k] = _d
+        self._cfl_controller = AdaptiveCFLController(**_cfl_kw)
     # `dual_time_steps`：GPUTimeIntegrator 构造函数本身不接受这个参数
     # （与 gpu_distributed.py::step() 的 `getattr(...,'dual_time_steps',5)`
     # 回退设计一致，见该方法调用点），这里显式设置成 package 携带的值。
