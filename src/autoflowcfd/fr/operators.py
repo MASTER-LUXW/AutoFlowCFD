@@ -52,6 +52,7 @@ from .collapsed_basis import (
     build_collapsed_boundary_extrap,
     build_overintegration_operators,
     OVERINTEGRATION_MAX_ORDER,
+    resolve_overintegration_order_rule,
 )
 from .modal_filter import build_prism_modal_filter
 
@@ -273,34 +274,30 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
         # jacobians_fine 的 over_order 计算逐字一致（同一个上限常量），
         # 否则 fr_residual_inviscid.py 里插值/微分/限制三个算子的形状
         # 会和 mesh.jacobians_fine 对不上。
-        # 过积分阶数规则（2026-09-15 由 `2*order` 改为 `3*order`）：
-        # `2*order` 是为平均流的**二次**非线性（欧拉通量 × 度量项）设计的
-        # 经验法则。但去混叠机制此后被接到了两处**三重**乘积上——
-        # k/omega 对流体积项 `div(adj(J)*rho*u*phi)`（三个场相乘）与粘性
-        # 体积项 `div(adj(J)*G(Q,grad_vel,grad_T,mu_t))`，三个一次场的
-        # 乘积是三次，`over_order=2` 的细网格（二次空间）表示不了它，
-        # 残余混叠必然存在。
+        # 过积分阶数规则（2026-09-15 起**可切换**，见
+        # collapsed_basis.py::resolve_overintegration_order_rule）：
+        # `over_order = min(rule*order, OVERINTEGRATION_MAX_ORDER)`，
+        # `AFCFD_OVERINT_ORDER_RULE = 2x | 3x`，**默认 2x**（此前已被
+        # 长期验证的行为）。
+        #
+        # `2x` 是为平均流的**二次**非线性（欧拉通量 x 度量项）设计的经验
+        # 法则。去混叠此后被接到了两处**三重**乘积上——k/omega 对流体积项
+        # `div(adj(J)*rho*u*phi)` 与粘性体积项
+        # `div(adj(J)*G(Q,grad_vel,grad_T,mu_t))`，三个一次场的乘积是三次，
+        # `over_order=2` 的细网格（二次空间）表示不了它。
         #
         # **`OVERINTEGRATION_MAX_ORDER = 3` 的上限不动**（见
         # collapsed_basis.py 该常量处记录的真实回归：放宽到 4 会让 P2
         # 均匀自由流场残差从 1.06e-5 恶化到 5.6e-3，根因是 D_fine 绝对
-        # 量级暴涨约 6.3 万倍），所以这条改动**只影响 order=1**：
-        #   order=1: min(2,3)=2 -> min(3,3)=3   （细点 27 -> 64）
-        #   order=2: min(4,3)=3 -> min(6,3)=3   （不变）
-        #   order=3: min(6,3)=3 -> min(9,3)=3   （不变）
+        # 量级暴涨约 6.3 万倍），所以 `3x` 与 `2x` 的差别**只在 order=1**：
+        #   order=1: 2x -> over_order 2（细点 27）； 3x -> 3（细点 64）
+        #   order>=2: 两者都被 cap 到 3，完全相同
         #
-        # order=1 的实测收益（合成混合网格，与解析散度比较，相对 L-inf）：
-        #   k/omega 对流  prism 1.360e-1 -> 2.124e-3（64x）
-        #                 tet   5.617e-2 -> 3.634e-13（机器零）
-        #   粘性体积项    prism 4.615e-3 -> 3.617e-6（1276x）
-        #                 tet   4.688e-5 -> 5.514e-13（机器零）
-        # 代价：`jacobians_fine` 对 79 万单元从 1.59GB 涨到 3.77GB
-        # （+2.18GB 常驻）。
-        # 按该常量处记录的同一套"黄金标准判据"复核过**没有**回归：
-        # order=1 均匀自由流场相对残差 4.1101e-11 -> 4.3839e-11（噪声级，
-        # 注意那条测试只参数化了 order=2/3，order=1 是本轮单独量的）；
-        # order=2/3 的残差逐位不变。
-        overint_order = min(3 * order, OVERINTEGRATION_MAX_ORDER)
+        # `3x` 在 order=1 的实测精度收益 / 已知代价，以及"为什么默认不改"，
+        # 全部记在 `resolve_overintegration_order_rule` 的文档里。
+        overint_order = min(
+            resolve_overintegration_order_rule() * order,
+            OVERINTEGRATION_MAX_ORDER)
         _, overint_interp_c2f_prism, overint_D_fine_prism, overint_restrict_f2c_prism = (
             build_overintegration_operators("prism", order, overint_order, ref_cube_sps)
         )

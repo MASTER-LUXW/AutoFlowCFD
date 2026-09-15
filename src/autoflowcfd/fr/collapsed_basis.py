@@ -43,6 +43,7 @@ extrapolate_to_face），与坍缩坐标的 3D 体积微分奇异性无关，不
 
 from typing import Tuple
 
+import os
 import numpy as np
 from numba import njit
 
@@ -321,6 +322,39 @@ def build_collapsed_diff_matrices(cell_type: str, order: int, ref_cube_sps: np.n
 # 从那份文档和这段注释就能重新实现，不需要现在占着一份不会被执行
 # 的代码。
 OVERINTEGRATION_MAX_ORDER = 3
+
+
+def resolve_overintegration_order_rule() -> int:
+    """过积分阶数规则的倍率：`AFCFD_OVERINT_ORDER_RULE = 2x | 3x`，默认 `2x`。
+
+    `over_order = min(rule * order, OVERINTEGRATION_MAX_ORDER)`。
+
+    **为什么是可切换的而不是直接改成 3x（2026-09-15）**：`3x` 在 order=1
+    上带来很大的精度收益（细点 27 -> 64）——
+
+        k/omega 对流  prism 1.360e-1 -> 2.124e-3（64x）  tet -> 机器零
+        粘性体积项    prism 4.615e-3 -> 3.617e-6（1276x）tet -> 机器零
+
+    ——而且自由流场保持性没有回归（order=1 相对残差 4.1101e-11 ->
+    4.3839e-11，噪声级；order>=2 因为被 MAX_ORDER=3 卡住、逐位不变）。
+
+    但它有**尚未在真实网格上量化的代价**：过积分链路里的细网格微分是
+    `O(n_fine^2)`，微基准（5 万单元、3 线程、5 变量、单次链路）实测
+    3.47s -> 14.30s（按 79 万单元线性外推，4.1x）；无粘体积项每个 RK
+    stage 调一次、每步 3 次，据此外推每步可能从约 53s 涨到约 85s
+    （~1.6x）。精度收益是否值这个代价必须用真实网格的"步数 x 每步耗时"
+    一起判，不能只看精度。
+
+    因此默认保持此前已被长期验证的 `2x`，`3x` 作为受控 A/B 的入口。
+    这与本项目"先跑对照再改默认值"的既有约定一致。
+    """
+    v = os.environ.get("AFCFD_OVERINT_ORDER_RULE", "2x").lower()
+    if v not in ("2x", "3x"):
+        raise ValueError(
+            f"AFCFD_OVERINT_ORDER_RULE={v!r} 不是合法取值（2x | 3x）。"
+            f"'2x' 是既有行为（为平均流的二次非线性设计），'3x' 针对标量"
+            f"输运/粘性项里的三重乘积，见 resolve_overintegration_order_rule。")
+    return 2 if v == "2x" else 3
 
 
 def build_overintegration_operators(

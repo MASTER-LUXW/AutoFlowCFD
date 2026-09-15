@@ -203,13 +203,15 @@ class TestOverintegrationIsMoreAccurate:
             errs[name] = (np.abs(div_co[sl] - exact[sl]).max() / sc,
                           np.abs(div_oi[sl] - exact[sl]).max() / sc)
 
-        # 实测（相对 L-inf；over_order 规则 2026-09-15 起是
-        # `min(3*order, 3)`，order=1 因此从 2 变成 3）：
-        #   order=1 prism: coarse 4.9816e+00 (498%!) -> 2.1243e-03  2345x
-        #   order=1 tet  : coarse 4.4823e-01         -> 3.6341e-13  机器零
-        #   order=2 prism: coarse 7.6441e-01         -> 9.5333e-03   80.2x
-        #   order=2 tet  : coarse 5.6166e-02         -> 9.8492e-14  机器零
-        # （order=1 在旧规则 over_order=2 下曾是 1.3602e-01 / 5.6166e-02）
+        # 实测（相对 L-inf）。注意 over_order 由
+        # `AFCFD_OVERINT_ORDER_RULE` 决定（默认 `2x`），所以 order=1 有
+        # 两组数字；断言用 `_actual_over_order(oi)` 读实际值来分派：
+        #   order=1 over_order=2（默认）: prism 4.9816e+00 -> 1.3602e-01  36.6x
+        #                                 tet   4.4823e-01 -> 5.6166e-02   8.0x
+        #   order=1 over_order=3（3x 档）: prism 4.9816e+00 -> 2.1243e-03  2345x
+        #                                 tet   4.4823e-01 -> 3.6341e-13  机器零
+        #   order=2（两档都是 3）        : prism 7.6441e-01 -> 9.5333e-03  80.2x
+        #                                 tet   5.6166e-02 -> 9.8492e-14  机器零
         err_co, err_oi = errs["prism"]
         assert err_co > 0.5, (
             f"order={order} prism: coarse 误差只有 {err_co:.3e}，这个算例没有"
@@ -335,6 +337,78 @@ class TestOverintegrationIsMoreAccurate:
             assert pr_oi < pr_co, (
                 f"order=1 prism: 去混叠误差 {pr_oi:.3e} 不低于 coarse 的 "
                 f"{pr_co:.3e}")
+
+
+class TestOrderRuleSwitch:
+    """`AFCFD_OVERINT_ORDER_RULE` 的语义（2026-09-15）。
+
+    默认 `2x` 必须复现此前已被长期验证的行为；`3x` 只在 order=1 上与它
+    不同（order>=2 两者都被 `OVERINTEGRATION_MAX_ORDER=3` 卡住）。
+    """
+
+    def _env(self, v):
+        old = os.environ.get("AFCFD_OVERINT_ORDER_RULE")
+        if v is None:
+            os.environ.pop("AFCFD_OVERINT_ORDER_RULE", None)
+        else:
+            os.environ["AFCFD_OVERINT_ORDER_RULE"] = v
+        return old
+
+    def _restore(self, old):
+        if old is None:
+            os.environ.pop("AFCFD_OVERINT_ORDER_RULE", None)
+        else:
+            os.environ["AFCFD_OVERINT_ORDER_RULE"] = old
+
+    def test_default_is_2x(self):
+        from autoflowcfd.fr.collapsed_basis import (
+            resolve_overintegration_order_rule,
+        )
+        old = self._env(None)
+        try:
+            assert resolve_overintegration_order_rule() == 2
+        finally:
+            self._restore(old)
+
+    @pytest.mark.parametrize("v,expected", [("2x", 2), ("3x", 3), ("3X", 3)])
+    def test_accepted_values(self, v, expected):
+        from autoflowcfd.fr.collapsed_basis import (
+            resolve_overintegration_order_rule,
+        )
+        old = self._env(v)
+        try:
+            assert resolve_overintegration_order_rule() == expected
+        finally:
+            self._restore(old)
+
+    @pytest.mark.parametrize("v", ["2", "3", "", "two"])
+    def test_rejects_unknown(self, v):
+        from autoflowcfd.fr.collapsed_basis import (
+            resolve_overintegration_order_rule,
+        )
+        old = self._env(v)
+        try:
+            with pytest.raises(ValueError, match="AFCFD_OVERINT_ORDER_RULE"):
+                resolve_overintegration_order_rule()
+        finally:
+            self._restore(old)
+
+    @pytest.mark.parametrize("order,nf_2x,nf_3x", [(1, 27, 64), (2, 64, 64), (3, 64, 64)])
+    def test_fine_point_counts_per_rule(self, order, nf_2x, nf_3x):
+        """两档实际构造出的细点数——直接读算子，不重算规则。
+
+        order>=2 上两档相同，这是 `OVERINTEGRATION_MAX_ORDER = 3` 的
+        直接后果，也是"这条切换只影响 order=1"这句话的依据。
+        """
+        for v, want in (("2x", nf_2x), ("3x", nf_3x)):
+            old = self._env(v)
+            try:
+                ops = generate_fr_operators(order)
+                got = ops.overint_D_fine_prism.shape[0]
+                assert got == want, (
+                    f"rule={v} order={order}: 细点数 {got} != {want}")
+            finally:
+                self._restore(old)
 
 
 class TestOverintegrationIsNoOpAtOrder3:
