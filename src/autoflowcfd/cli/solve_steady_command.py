@@ -43,12 +43,20 @@ from autoflowcfd.cli.solve_commands import solve
                    '预测近壁应力，不需要额外的入口湍流结构，见 core/fr_solver/boundary.py 文档）')
 @click.option('--max-iter', type=int, default=1000, help='最大迭代次数')
 @click.option('--cfl-start', type=float, default=0.1,
-              help='自适应 CFL 初始值/下限（稳态伪时间迭代，默认 0.1）。残差不下降时'
-                   'CFL 会一直停在这个值——复杂网格上如果起步就发散可调低到 0.05')
+              help='自适应 CFL 初始值（稳态伪时间迭代，默认 0.1）。残差不下降时 CFL '
+                   '会一直停在这个值——复杂网格上如果起步就发散可调低。下限是独立的 '
+                   '--cfl-min（2026-09-15 起；此前本文案把两者混为一谈，而下限默认 '
+                   '0.05 会把低于它的 --cfl-start 钳上去）。')
 @click.option('--cfl-max', type=float, default=0.5,
               help='自适应 CFL 上限（稳态，默认 0.5，2026-09-07 从 0.3 上调）。'
                    'SSP-RK3 线性稳定极限 ~1.0，残差稳定下降的算例可以试 0.8；'
                    'AUSM+up 低马赫预处理激活的算例真实可用上限更低，发散时回调到 0.3')
+@click.option('--cfl-min', type=float, default=0.05,
+              help='自适应 CFL 下限（稳态，默认 0.05）。**注意这个默认值高于'
+                   '真 P1（AFCFD_FILTER_MODE=off，零阶数损失）在 79 万单元 '
+                   'cube_demo 上实测稳定的 0.03**——做低 CFL 工况时必须显式'
+                   '调低，否则 --cfl-start 会被这个下限钳上去（见 '
+                   'core/time_integration/adaptive_cfl.py 模块文档第 11 条）。')
 @click.option('--phase-max-iter', type=int, default=None,
               help='Order Continuation（--order>=2 时触发）非最终阶段(P0/P1/...，不含目标'
                    '阶数)各自的最大迭代步数上限。默认(不传)时保留旧行为——总步数按阶段数'
@@ -109,7 +117,7 @@ from autoflowcfd.cli.solve_commands import solve
                    '8_算法重构-Entropy-Stable_Split-Form通量重构-Part1/2.md）。真实测试确认在'
                    '已启用过积分的基础上再改善约2~4倍，代价是体积项计算量从O(n_fine)升到'
                    'O(n_fine^2)，仅 CPU 后端实现')
-def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_iter, cfl_start, cfl_max, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, use_eikonal, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, artificial_viscosity_enabled, artificial_viscosity_alpha, entropy_stable_volume_enabled):
+def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_iter, cfl_start, cfl_max, cfl_min, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, use_eikonal, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, artificial_viscosity_enabled, artificial_viscosity_alpha, entropy_stable_volume_enabled):
     """执行稳态 FR 求解。
 
     支持高阶精度 (P1-P4) 和多种湍流模型 (SST, DDES, WMLES)。
@@ -231,6 +239,7 @@ def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_it
                 enable_viscous=True, skip_quality_check=skip_quality_check,
                 turb_model_name=turbulence_model.upper(),
                 turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
+                cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
             )
             solver = MultiGPUDistributedSolver.from_fully_distributed_package(
                 package, n_ranks=n_ranks, device_id=gpu_device, root_context=root_context,
@@ -256,6 +265,12 @@ def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_it
                 # GPUFRSolver 构造处）保持一致。
                 turbulence_intensity=turbulence_intensity,
                 viscosity_ratio=viscosity_ratio,
+                # 真实缺口修复（2026-09-15）：`--cfl-start/--cfl-max/--cfl-min`
+                # 此前在**全部分布式路径**上被静默丢弃（这四处构造点都不传），
+                # 与本文件上方注释记录过的 turb_model/turbulence_intensity
+                # 同类。多 GPU 传统模式有自适应控制器（见 gpu_distributed.py
+                # 里 _cfl_controller 构造处），必须一并透传。
+                cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
             )
 
         # 中间 checkpoint 保存回调（2026-09-02 补齐——此前 output_interval
@@ -338,7 +353,7 @@ def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_it
             # core/gpu/solver/gpu_solver.py 里 _cfl_controller 的注释），
             # 这两个 CLI 选项必须一并透传，否则又是一个"选项在 GPU 下被
             # 静默丢弃"的陷阱（与上面 turb_model 那处同类）。
-            cfl_start=cfl_start, cfl_max=cfl_max,
+            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
         )
 
         try:
@@ -423,6 +438,7 @@ def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_it
                 enable_viscous=True, skip_quality_check=skip_quality_check,
                 turb_model_name=turbulence_model.upper(),
                 turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
+                cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
             )
             solver = DistributedFRSolver.from_fully_distributed_package(
                 package, n_ranks=n_ranks, root_context=root_context,
@@ -457,6 +473,10 @@ def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_it
                 viscosity_ratio=viscosity_ratio,
                 mu_molecular=mu_molecular,
                 rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
+                # 见多 GPU 传统模式同一处注释：CFL 边界参数此前在分布式
+                # 路径上被静默丢弃。DistributedFRSolver 从 solver_kwargs
+                # 读这三个键（见其 _cfl_controller 构造处）。
+                cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
             )
 
             # 初始化状态
@@ -536,6 +556,7 @@ def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_it
             n_threads=threads,
             cfl_start=cfl_start,
             cfl_max=cfl_max,
+            cfl_min=cfl_min,
             turbulence_intensity=turbulence_intensity,
             viscosity_ratio=viscosity_ratio,
             sem_num_eddies=sem_num_eddies,

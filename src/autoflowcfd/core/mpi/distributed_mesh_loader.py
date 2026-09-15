@@ -125,6 +125,9 @@ def build_fully_distributed_rank_package(
     viscosity_ratio: float = 5.0,
     time_scheme=None,
     dual_time_inner_iter: int = 20,
+    cfl_start: Optional[float] = None,
+    cfl_max: Optional[float] = None,
+    cfl_min: Optional[float] = None,
 ) -> dict:
     """Root rank 专用：为指定 rank 算好它需要的全部紧凑数据（不需要该
     rank 自己持有完整全局网格）。
@@ -329,6 +332,11 @@ def build_fully_distributed_rank_package(
         'viscosity_ratio': viscosity_ratio,
         'time_scheme': time_scheme,
         'dual_time_inner_iter': dual_time_inner_iter,
+        # 见本函数 Args 里 cfl_* 一节：这三个量此前从未进入 package，
+        # 使 CLI 的 --cfl-start/--cfl-max 在完全分布式路径上被静默丢弃。
+        'cfl_start': cfl_start,
+        'cfl_max': cfl_max,
+        'cfl_min': cfl_min,
     }
 
 
@@ -348,6 +356,9 @@ def distributed_mesh_load_v2(
     viscosity_ratio: float = 5.0,
     time_scheme=None,
     dual_time_inner_iter: int = 20,
+    cfl_start: Optional[float] = None,
+    cfl_max: Optional[float] = None,
+    cfl_min: Optional[float] = None,
 ):
     """真正的完全分布式网格加载（2026-09-02）——只有 root rank 加载
     完整网格并对每个 rank 分别调用 `build_fully_distributed_rank_
@@ -469,6 +480,7 @@ def distributed_mesh_load_v2(
                 h_max_global=h_max_global, h_wn_global=h_wn_global,
                 turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
                 time_scheme=time_scheme, dual_time_inner_iter=dual_time_inner_iter,
+                cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
             )
             for r in range(n_ranks)
         ]
@@ -496,6 +508,7 @@ def distributed_mesh_load_v2(
             'turbulence_intensity': turbulence_intensity, 'viscosity_ratio': viscosity_ratio,
             'bc_overrides': bc_overrides or {}, 'n_ranks': n_ranks,
             'time_scheme': time_scheme, 'dual_time_inner_iter': dual_time_inner_iter,
+            'cfl_start': cfl_start, 'cfl_max': cfl_max, 'cfl_min': cfl_min,
         }
     else:
         import pickle
@@ -660,6 +673,12 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
                 viscosity_ratio=root_context['viscosity_ratio'],
                 time_scheme=root_context.get('time_scheme'),
                 dual_time_inner_iter=root_context.get('dual_time_inner_iter', 20),
+                # 阶数切换重分发时同样要带上（2026-09-15）：否则升阶之后
+                # CFL 边界参数会悄悄退回硬编码默认值，是一个只在 Order
+                # Continuation 路径上出现的静默回退。
+                cfl_start=root_context.get('cfl_start'),
+                cfl_max=root_context.get('cfl_max'),
+                cfl_min=root_context.get('cfl_min'),
             )
             for r in range(n_ranks)
         ]

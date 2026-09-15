@@ -200,6 +200,7 @@ class FRSolver(_SolverGeometryMixin):
                  adaptive_cfl: bool = True,
                  cfl_start: float = 0.1,
                  cfl_max: float = 0.5,
+                 cfl_min: float = 0.05,
                  turbulence_intensity: float = 0.01,
                  viscosity_ratio: float = 5.0,
                  sem_num_eddies: int = 200,
@@ -581,11 +582,19 @@ class FRSolver(_SolverGeometryMixin):
             # 线性稳定极限 ~1.0，0.3 对本项目多数网格过于保守；AUSM+up
             # 低马赫预处理激活的算例真实可用上限更低，需要时用
             # `--cfl-max` 显式回调）。
+            # cfl_min 同样是构造参数（2026-09-15）：此前五处控制器构造点
+            # 全都没有传它，于是恒用控制器默认 0.05。那个值**高于**真 P1
+            # （模态滤波器关闭、零阶数损失）在 79 万单元 cube_demo 上实测
+            # 稳定的 CFL 0.03——也就是说一个已验证可用的工作点通过 CLI
+            # 根本到不了：`--cfl-start 0.03` 会被 cfl_min 钳回 0.05
+            # （修复前是第一次收缩时静默跳到 0.05，见 adaptive_cfl.py
+            # 模块文档第 11 条），必然发散。下限必须可配。
             self._cfl_controller = AdaptiveCFLController(
-                cfl_start=cfl_start, cfl_max=cfl_max,
+                cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
             )
             print(f"   Adaptive CFL: enabled (start={self._cfl_controller.cfl_start}, "
-                  f"max={self._cfl_controller.cfl_max})")
+                  f"max={self._cfl_controller.cfl_max}, "
+                  f"min={self._cfl_controller.cfl_min})")
         else:
             print(f"   Adaptive CFL: disabled")
 

@@ -116,6 +116,7 @@ def rebuild_solver_from_checkpoint(
     skip_quality_check: bool = False,
     cfl_start: float = 0.1,
     cfl_max: float = 0.5,
+    cfl_min: float = 0.05,
 ):
     """从 checkpoint 完整重建一个带解场的 FRSolver（不继续迭代）。
 
@@ -225,6 +226,10 @@ def rebuild_solver_from_checkpoint(
         # 发散了就调低）。
         cfl_start=cfl_start,
         cfl_max=cfl_max,
+        # cfl_min 必须能透传（2026-09-15）：控制器默认下限 0.05 高于真 P1
+        # 在 79 万单元 cube_demo 上实测稳定的 0.03，resume 低 CFL 工况时
+        # 不传它会被钳回 0.05（见 adaptive_cfl.py 模块文档第 11 条）。
+        cfl_min=cfl_min,
         # Tu/VR 从 checkpoint metadata 恢复（2026-08-25 添加）：
         # 保证 Resume 时湍流场重置用的参数与原始计算一致。
         # 旧 checkpoint 没有这两个字段，回退到默认值（Tu=0.01, VR=5.0）。

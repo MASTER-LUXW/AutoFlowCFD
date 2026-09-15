@@ -146,6 +146,7 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         viscosity_ratio: float = 5.0,
         cfl_start: Optional[float] = None,
         cfl_max: Optional[float] = None,
+        cfl_min: Optional[float] = None,
     ):
         """初始化多 GPU 分布式求解器。
 
@@ -378,6 +379,7 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
             self._cfl_controller = AdaptiveCFLController(
                 cfl_start=cfl_start if cfl_start is not None else cfl,
                 cfl_max=cfl_max if cfl_max is not None else max(cfl, 0.5),
+                **({} if cfl_min is None else {'cfl_min': cfl_min}),
             )
         _env_pc = os.environ.get("AFCFD_LOW_MACH_PRECOND")
         _req_pc = True if _env_pc is None else (_env_pc == "1")

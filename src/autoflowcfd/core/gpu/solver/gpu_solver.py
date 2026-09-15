@@ -70,6 +70,7 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         low_mach_precond: bool = True,
         cfl_start: Optional[float] = None,
         cfl_max: Optional[float] = None,
+        cfl_min: Optional[float] = None,
     ):
         """初始化 GPU FRSolver。
 
@@ -238,6 +239,7 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
             self._cfl_controller = AdaptiveCFLController(
                 cfl_start=cfl_start if cfl_start is not None else cfl,
                 cfl_max=cfl_max if cfl_max is not None else max(cfl, 0.5),
+                **({} if cfl_min is None else {'cfl_min': cfl_min}),
             )
 
         # 初始化求解状态

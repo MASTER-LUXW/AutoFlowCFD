@@ -443,6 +443,8 @@ class DistributedFRSolver:
             self._cfl_controller = AdaptiveCFLController(
                 cfl_start=solver_kwargs.get('cfl_start', 0.1),
                 cfl_max=solver_kwargs.get('cfl_max', 0.5),
+                **({'cfl_min': solver_kwargs['cfl_min']}
+                   if solver_kwargs.get('cfl_min') is not None else {}),
             )
         _env_pc = os.environ.get("AFCFD_LOW_MACH_PRECOND")
         _req_pc = (bool(solver_kwargs.get('low_mach_precond', True))
@@ -708,10 +710,17 @@ class DistributedFRSolver:
             from autoflowcfd.core.time_integration.adaptive_cfl import (
                 AdaptiveCFLController,
             )
-            self._cfl_controller = AdaptiveCFLController(
-                cfl_start=package.get('cfl_start', 0.1),
-                cfl_max=package.get('cfl_max', 0.5),
-            )
+            # None 感知（2026-09-15）：package 现在**总是**带 cfl_* 三个键
+            # （CLI 未指定时值为 None），所以不能用 `.get(k, default)`
+            # ——那会拿到显式的 None 而不是 default。
+            _cfl_kw = {}
+            for _k, _d in (('cfl_start', 0.1), ('cfl_max', 0.5), ('cfl_min', None)):
+                _v = package.get(_k)
+                if _v is not None:
+                    _cfl_kw[_k] = _v
+                elif _d is not None:
+                    _cfl_kw[_k] = _d
+            self._cfl_controller = AdaptiveCFLController(**_cfl_kw)
         _env_pc = os.environ.get("AFCFD_LOW_MACH_PRECOND")
         _req_pc = (bool(package.get('low_mach_precond', True))
                    if _env_pc is None else (_env_pc == "1"))
