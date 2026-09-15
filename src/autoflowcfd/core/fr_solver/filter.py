@@ -28,6 +28,34 @@ import numpy as np
 from numba import njit, prange
 
 
+def _matrices_are_identity(*mats) -> bool:
+    """给定的滤波矩阵是否都是**机器精度意义上的**单位阵。
+
+    用容差而不是 `array_equal`：`AFCFD_FILTER_MODE=off` 的矩阵是
+    `np.eye` 直接返回、逐位相等，但 `mild` 档取 `sigma_top=1.0` 时矩阵是
+    数值算出的 `V @ diag(1) @ inv(V)`——数学上是单位阵、浮点上偏差
+    ~1e-16。那种配置同样是无操作，同样应当被短路。
+
+    容差取 1e-12：矩阵元素是 O(1) 量级，Vandermonde 求逆的条件数在本
+    项目工作阶数下只有个位数（order=3 也才 56），1e-12 远高于舍入噪声、
+    又远低于任何有意义的滤波强度（legacy 档顶模态 sigma=2.2e-16，矩阵
+    偏离单位阵是 O(1)）。
+
+    `core/fr_solver/turbulence.py::_filter_matrices_are_identity` 是
+    k/omega 那一侧的同一套判据（那里不经过 build_filter_func，所以
+    独立实现），两者必须保持一致——有回归测试直接比对两个实现的结论。
+    """
+    for M in mats:
+        if M is None:
+            continue
+        A = np.asarray(M)
+        if not (A.ndim == 2 and A.shape[0] == A.shape[1]):
+            return False
+        if not np.allclose(A, np.eye(A.shape[0]), rtol=0.0, atol=1e-12):
+            return False
+    return True
+
+
 @njit(cache=True, parallel=True)
 def _filter_leading_vars_inplace_kernel(U, F, n_var_filter) -> None:
     """就地对每个 cell 施加模态滤波矩阵，只作用于前 `n_var_filter` 个变量：
@@ -149,6 +177,13 @@ def build_filter_func_by_cell_type(ops, n_cells: int, n_sps: int,
     """
     filter_prism = ops.filter_prism
     filter_tet = ops.filter_tet
+
+    # 与 `build_filter_func` 同一条短路（两个矩阵都是机器精度意义上的
+    # 单位阵时返回 None，让调用方整个跳过），理由见那边文档。分布式
+    # 调用方（`core/mpi/distributed_solver.py`）把结果直接传给
+    # `TimeIntegrator.step`，对 None 有显式支持。
+    if _matrices_are_identity(filter_prism, filter_tet):
+        return None
 
     def filter_func(U_flat: np.ndarray) -> np.ndarray:
         return _filter_flat_U_by_cell_type(
@@ -437,6 +472,13 @@ def build_filter_func(solver) -> Callable[[np.ndarray], np.ndarray]:
     调用的滤波回调，操作对象是展平形状 (n_cells*n_sps, n_vars) 的数组
     （TimeIntegrator 内部约定，与 fr_solver.py::step 里 U_flat 的展平
     方式一致）。
+
+    Returns:
+        滤波回调，**或 None**——两个滤波矩阵都是单位阵时（`AFCFD_FILTER_
+        MODE=off`，或 mild 档取 sigma_top=1.0）返回 None，让调用方整个
+        跳过这次调用而不是白乘一遍单位阵。`TimeIntegrator.step`/
+        `step_dual_time` 对 `filter_func=None` 有显式支持（分布式路径在
+        n_sps==1 时本来就传 None）。
     """
     mesh = solver.mesh
     ops = solver.ops
@@ -451,6 +493,20 @@ def build_filter_func(solver) -> Callable[[np.ndarray], np.ndarray]:
     # 直接作用在 U 本身，不是残差贡献，填充行必须原样通过而不是被
     # 重置为 0）。
     filter_tet = ops.filter_tet
+
+    # `AFCFD_FILTER_MODE=off` 下两个矩阵都是单位阵（见 fr/modal_filter.py
+    # 的 `FILTER_MODE == "off"` 短路），继续每个 RK stage 乘一遍是纯浪费：
+    # 79 万单元 P1 下 U 是 (791492,8,5) ≈ 253MB，一步三个 stage 要多读写
+    # 约 1.5GB，全是内存带宽。`TimeIntegrator.step`/`step_dual_time` 对
+    # `filter_func=None` 有显式支持（分布式路径在 n_sps==1 时本来就传
+    # None），所以直接返回 None 让调用方跳过整个调用。
+    #
+    # 判据不看环境变量而是**直接检查矩阵是否为单位阵（机器精度容差）**：
+    # 那样连 `AFCFD_FILTER_SIGMA_TOP=1.0`（mild 档取 sigma_top=1，矩阵是
+    # 数值算出的 V@I@inv(V)、不逐位等于 eye）这种等价配置也一并短路，
+    # 而且不依赖"环境变量与算子构造保持同步"这个隐含假设。
+    if _matrices_are_identity(filter_prism, filter_tet):
+        return None
 
     def filter_func(U_flat: np.ndarray) -> np.ndarray:
         return _filter_flat_U(U_flat, n_cells, n_sps, n_prism, filter_prism, filter_tet)

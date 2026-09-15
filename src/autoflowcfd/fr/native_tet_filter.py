@@ -22,6 +22,7 @@ native 基（`native_simplex_basis.py`）不是同一个数学对象：模态严
 
 import numpy as np
 
+from . import modal_filter as _mf
 from .modal_filter import _exp_filter_sigma
 from .native_simplex_basis import (
     build_native_tet_operators,
@@ -49,6 +50,25 @@ def build_native_tet_modal_filter(order: int) -> np.ndarray:
     """
     if order == 0:
         return np.eye(1)
+
+    # **真实 bug 修复（2026-09-15）**：此前这里只短路 order==0，漏了
+    # `FILTER_MODE == "off"`——`fr/modal_filter.py` 的两个坍缩/棱柱
+    # 构造函数都有这条短路（见那边 `if order == 0 or FILTER_MODE ==
+    # "off"`），native 四面体这条没有。后果是 `AFCFD_FILTER_MODE=off`
+    # **只关掉了棱柱的滤波器，四面体照旧每个 RK stage 被清掉一整阶**。
+    #
+    # 实测（79 万单元 cube_demo，order=1）：off 档下 filter_prism 秩
+    # 8/8（确实是单位阵）而 filter_tet 秩仍是 5/8——与 legacy 档完全
+    # 相同。那张网格 n_prism=136980，四面体 654512 个占 **82.7%**，
+    # 也就是说"关掉滤波器"的对照实验里绝大多数单元根本没被关掉。
+    # 排查时因为日志只打印了 filter_prism 的秩而漏掉了这一点，教训是
+    # 两套基的算子必须**分别**自证，不能用其中一个代表另一个。
+    #
+    # mild 档不受影响：它是通过 `FILTER_ALPHA`（由 sigma_top 反解）
+    # 生效的，`_exp_filter_sigma` 本来就会读到调整后的值。
+    if _mf.FILTER_MODE == "off":
+        n_native = len(restricted_tet_modes(order))
+        return np.eye(n_native)
 
     ref_rst, _ = build_native_tet_operators(order)
     a, b, c = rst_to_abc(ref_rst[:, 0], ref_rst[:, 1], ref_rst[:, 2])

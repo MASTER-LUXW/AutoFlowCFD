@@ -21,6 +21,33 @@ from autoflowcfd.core.utils.wall_distance import compute_wall_distance
 from autoflowcfd.core.fr_residual.viscous import compute_gradients as _compute_gradients_generic
 
 
+
+def _filter_matrices_are_identity(ops) -> bool:
+    """两个模态滤波矩阵是否都是单位阵。
+
+    `AFCFD_FILTER_MODE=off` 下（以及 mild 档取 sigma_top=1.0 这种等价
+    配置）矩阵就是单位阵，继续对 k/omega 各乘一遍纯属浪费内存带宽
+    （79 万单元 P1 下每个标量场 (791492,8) ≈ 50MB，k 与 omega 各一遍，
+    每步一次）。判据直接看矩阵内容而不是环境变量，不依赖"环境变量与
+    算子构造保持同步"这个隐含假设——与 fr_solver/filter.py::
+    build_filter_func 里的短路同一个理由、同一套判据。
+    """
+    for M in (getattr(ops, 'filter_prism', None), getattr(ops, 'filter_tet', None)):
+        if M is None:
+            continue
+        A = np.asarray(M)
+        if not (A.ndim == 2 and A.shape[0] == A.shape[1]):
+            return False
+        # 容差而不是逐位相等：`off` 档矩阵是 np.eye 直接返回、逐位相等，
+        # 但 `mild` 档取 sigma_top=1.0 时矩阵是数值算出的
+        # `V @ diag(1) @ inv(V)`——数学上是单位阵、浮点上偏差 ~1e-16。
+        # 那种配置同样是无操作，同样应当被短路。容差 1e-12：元素是 O(1)、
+        # Vandermonde 条件数在本项目工作阶数下只有个位数（order=3 才 56），
+        # 1e-12 远高于舍入噪声又远低于任何有意义的滤波强度。
+        if not np.allclose(A, np.eye(A.shape[0]), rtol=0.0, atol=1e-12):
+            return False
+    return True
+
 def _set_freestream_turbulence(solver) -> tuple:
     """根据来流条件从 Tu/VR 推导物理自洽的 k/omega 初值。
 
@@ -668,7 +695,7 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
     # 单元内部相邻解点间出现数量级跳变，外插到面后被上风格式放大成
     # 巨大虚假对流残差）。用与平均流完全同一套 filter_prism/filter_tet
     # 矩阵，P0（n_sps=1）下矩阵退化为单位矩阵，天然是无操作。
-    if solver.mesh.n_sps_per_cell > 1:
+    if solver.mesh.n_sps_per_cell > 1 and not _filter_matrices_are_identity(solver.ops):
         from autoflowcfd.core.fr_solver.filter import (
             compute_turb_troubled_mask, filter_scalar_field,
             filter_scalar_field_gated, resolve_turb_filter_gate,

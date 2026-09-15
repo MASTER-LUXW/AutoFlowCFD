@@ -223,6 +223,128 @@ class TestSensorModeIsNotSilentlyIgnored:
                 os.environ["AFCFD_FILTER_MODE"] = old
 
 
+class TestBothBasesMustBeCheckedSeparately:
+    """**两套基的滤波矩阵必须分别自证**——真实 bug 回归（2026-09-15）。
+
+    `fr/native_tet_filter.py::build_native_tet_modal_filter` 此前只短路
+    `order == 0`，漏了 `FILTER_MODE == "off"`（`fr/modal_filter.py` 的
+    棱柱/坍缩两个构造函数都有那条短路）。后果是
+    **`AFCFD_FILTER_MODE=off` 只关掉了棱柱的滤波器，四面体照旧每个
+    RK stage 被清掉一整阶**：
+
+        MODE=off order=1: prism 秩 8/8 是单位阵 | tet 秩 5/8 与 legacy 完全相同
+        MODE=off order=2: prism 秩 27/27      | tet 秩 21/27
+
+    79 万单元 cube_demo 的 `n_prism=136980`，四面体 654512 个占 **82.7%**
+    ——也就是说"关掉滤波器"的几轮对照实验里，绝大多数单元根本没被关掉，
+    整组实验的前提是错的。排查时之所以漏掉，是因为诊断日志只打印了
+    `filter_prism` 的秩、用它代表了另一套基。
+
+    本类对**两个矩阵**逐一断言，覆盖三档全部组合。
+    """
+
+    @pytest.mark.parametrize("order", [1, 2, 3])
+    def test_off_makes_both_matrices_exactly_identity(self, order):
+        _, ops_mod = _reload_with_env(AFCFD_FILTER_MODE="off")
+        ops = ops_mod.generate_fr_operators(order)
+        for name in ("filter_prism", "filter_tet"):
+            M = np.asarray(getattr(ops, name))
+            np.testing.assert_array_equal(
+                M, np.eye(M.shape[0]),
+                err_msg=f"off 档 order={order} 的 {name} 不是单位阵——"
+                        f"该档位承诺零阶数损失，任何一套基漏掉都会让"
+                        f"对照实验的前提失效")
+
+    @pytest.mark.parametrize("order", [1, 2])
+    def test_legacy_annihilates_in_both_bases(self, order):
+        """默认档两套基都必须真的在清零（否则'损失一整阶'这个事实本身
+        就只对其中一套成立）。"""
+        _, ops_mod = _reload_with_env(AFCFD_FILTER_MODE=None)
+        ops = ops_mod.generate_fr_operators(order)
+        n = (order + 1) ** 3
+        rank_p = int(np.linalg.matrix_rank(np.asarray(ops.filter_prism), 1e-10))
+        rank_t = int(np.linalg.matrix_rank(np.asarray(ops.filter_tet), 1e-10))
+        assert rank_p == order ** 3, f"prism 秩 {rank_p} != order^3={order**3}"
+        # native 四面体：真实自由度里只剩 i+j+k<=order-1 的那些，
+        # 再加 (n - n_native) 个单位阵填充行。
+        n_native = (order + 1) * (order + 2) * (order + 3) // 6
+        n_keep = order * (order + 1) * (order + 2) // 6
+        assert rank_t == n_keep + (n - n_native), (
+            f"tet 秩 {rank_t} 与'保留 i+j+k<=order-1 + 填充行'不符"
+            f"（期望 {n_keep}+{n - n_native}）")
+
+    @pytest.mark.parametrize("order", [1, 2])
+    def test_mild_keeps_both_matrices_full_rank(self, order):
+        _, ops_mod = _reload_with_env(AFCFD_FILTER_MODE="mild",
+                                      AFCFD_FILTER_SIGMA_TOP="0.99")
+        ops = ops_mod.generate_fr_operators(order)
+        n = (order + 1) ** 3
+        for name in ("filter_prism", "filter_tet"):
+            M = np.asarray(getattr(ops, name))
+            assert int(np.linalg.matrix_rank(M, 1e-10)) == n, (
+                f"mild 档 order={order} 的 {name} 不满秩")
+            assert not np.array_equal(M, np.eye(n)), (
+                f"mild 档 {name} 退化成了单位阵（那是 off 档的语义）")
+
+
+class TestIdentityFilterIsShortCircuited:
+    """滤波矩阵是单位阵时必须**整个跳过**调用，而不是白乘一遍。
+
+    `AFCFD_FILTER_MODE=off` 下两个矩阵都是单位阵（mild 档取
+    sigma_top=1.0 也一样）。79 万单元 P1 下 U 是 (791492,8,5) ≈ 253MB，
+    一步三个 RK stage 白读写约 1.5GB 纯内存带宽；k/omega 两个标量场各
+    ≈ 50MB、每步一次。`TimeIntegrator.step`/`step_dual_time` 对
+    `filter_func=None` 有显式支持（分布式路径在 n_sps==1 时本来就传
+    None），所以 `build_filter_func` 直接返回 None。
+
+    判据刻意**看矩阵内容**而不是环境变量：那样连 sigma_top=1.0 这种
+    等价配置也一并短路，也不依赖"环境变量与算子构造保持同步"这个隐含
+    假设。
+    """
+
+    def _solver_stub(self, ops_mod, order):
+        from types import SimpleNamespace
+        ops = ops_mod.generate_fr_operators(order)
+        mesh = SimpleNamespace(n_cells=4, n_sps_per_cell=(order + 1) ** 3,
+                               n_prism_cells=2)
+        return SimpleNamespace(mesh=mesh, ops=ops)
+
+    @pytest.mark.parametrize("order", [1, 2])
+    def test_off_returns_none(self, order):
+        from autoflowcfd.core.fr_solver.filter import build_filter_func
+        _, ops_mod = _reload_with_env(AFCFD_FILTER_MODE="off")
+        assert build_filter_func(self._solver_stub(ops_mod, order)) is None
+
+    @pytest.mark.parametrize("order", [1, 2])
+    def test_legacy_returns_callable(self, order):
+        """默认档必须仍然返回可调用对象——短路不能误伤生产默认路径。"""
+        from autoflowcfd.core.fr_solver.filter import build_filter_func
+        _, ops_mod = _reload_with_env(AFCFD_FILTER_MODE=None)
+        f = build_filter_func(self._solver_stub(ops_mod, order))
+        assert f is not None and callable(f)
+
+    def test_mild_with_sigma_top_one_also_short_circuits(self):
+        """sigma_top=1.0 与 off 数学等价，也必须短路。"""
+        from autoflowcfd.core.fr_solver.filter import build_filter_func
+        _, ops_mod = _reload_with_env(AFCFD_FILTER_MODE="mild",
+                                      AFCFD_FILTER_SIGMA_TOP="1.0")
+        assert build_filter_func(self._solver_stub(ops_mod, 1)) is None
+
+    @pytest.mark.parametrize("mode,expected_identity", [
+        ("off", True), ("legacy", False),
+    ])
+    def test_turbulence_side_helper_agrees(self, mode, expected_identity):
+        """k/omega 那一侧用的是同一套判据（独立实现在 turbulence.py，
+        因为那里不经过 build_filter_func）。两者必须给出一致的判断。"""
+        from autoflowcfd.core.fr_solver.turbulence import (
+            _filter_matrices_are_identity,
+        )
+        _, ops_mod = _reload_with_env(
+            AFCFD_FILTER_MODE=(None if mode == "legacy" else mode))
+        ops = ops_mod.generate_fr_operators(1)
+        assert _filter_matrices_are_identity(ops) is expected_identity
+
+
 class TestCompoundingOverStages:
     """把"每个 RK stage 都施加 => 任何 sigma<1 都会复合累积"这条量化清楚。
 
