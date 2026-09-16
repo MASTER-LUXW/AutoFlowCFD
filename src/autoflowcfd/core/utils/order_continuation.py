@@ -724,7 +724,17 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
                             compute_scaled_residuals, format_scaled_residual_line,
                         )
                         diag = compute_scaled_residuals(solver.state.dU_dt, freestream)
-                        msg += " | " + format_scaled_residual_line(diag)
+                        msg += " | " + format_scaled_residual_line(
+                        diag,
+                        # 最大残差单元的体积分位：残差被 det(J) 除，体积
+                        # 极小的退化单元天然把任何通量不平衡放大若干个
+                        # 量级，所以这个数字是区分"退化单元机制"与"壁面
+                        # 处理机制"最直接的单个指标（2026-09-16 真实排查
+                        # 驱动，见 residual_diagnostics.py::
+                        # cell_volume_percentile 文档）。
+                        cell_volumes=getattr(
+                            getattr(solver, "mesh", None), "cell_volumes", None),
+                    )
                     print(msg)
 
                 # 中间 checkpoint 保存（按 --checkpoint-interval 间隔）

@@ -114,17 +114,72 @@ def compute_scaled_residuals(dU_dt: np.ndarray, freestream: dict) -> "ResidualDi
     )
 
 
-def format_scaled_residual_line(diag: "ResidualDiagnostics") -> str:
+#: `cell_volume_percentile` 的缓存：键是 `id(cell_volumes)` 与数组长度，
+#: 值是 0~100 的体积分位数组。分位数要对全部单元做一次 argsort（79 万
+#: 单元约 0.1s），逐步重算会白白拖慢每一步诊断。
+_VOL_PCT_CACHE: dict = {}
+
+
+def cell_volume_percentile(cell_volumes) -> Optional[np.ndarray]:
+    """逐单元的体积分位（0 = 全场最小，100 = 最大）。
+
+    为什么把它接到残差诊断里（2026-09-16，真实排查驱动）：
+    plate_demo_volume_les 上 P1 固定 CFL 0.03 的三条对照运行，100 步里
+    最大残差**恒定落在同一个单元**（cell18708，rho_E，8.7e10 → 3.65e11），
+    随后全局发散。要判断"这是退化单元机制还是壁面处理机制"，当时只能
+    另写脚本重新加载整张体网格（约 10 分钟）算出该单元体积分位 0.523%、
+    并统计出超压点 81% 落在体积最小的 1% 单元里、99.8% 距板侧边 2cm 内。
+
+    那次结论是决定性的（LES 网格上主导机制是边缘退化薄单元，不是壁面
+    处理），但**这条信息本该在日志里一眼看到**：残差被 `det(J)` 除，
+    体积极小的单元天然把任何通量不平衡放大若干个量级，所以"最大残差
+    单元的体积分位"是区分这两类机制最直接的单个数字。
+
+    Args:
+        cell_volumes: (n_cells,) 单元体积；None 时返回 None（调用方
+            按"没有几何信息"处理，不报错——合成网格测试替身可能不带它）。
+
+    Returns:
+        (n_cells,) 的 0~100 分位数组，或 None。
+    """
+    if cell_volumes is None:
+        return None
+    vols = np.asarray(cell_volumes)
+    if vols.ndim != 1 or vols.size == 0:
+        return None
+    key = (id(cell_volumes), vols.size)
+    cached = _VOL_PCT_CACHE.get(key)
+    if cached is not None and cached.size == vols.size:
+        return cached
+    pct = np.argsort(np.argsort(vols)) * (100.0 / max(vols.size - 1, 1))
+    _VOL_PCT_CACHE[key] = pct
+    return pct
+
+
+def format_scaled_residual_line(diag: "ResidualDiagnostics",
+                                cell_volumes=None) -> str:
     """格式化成一行可读文本，供 CLI 打印（与 Fluent scaled residuals
-    表格、STAR-CCM+ Max 监视器同一个信息量级，压缩成单行）。"""
+    表格、STAR-CCM+ Max 监视器同一个信息量级，压缩成单行）。
+
+    Args:
+        diag: `compute_scaled_residuals` 的结果
+        cell_volumes: 可选的 (n_cells,) 单元体积。给出时在最大残差定位
+            后面附上该单元的体积分位（`vol 0.5%` 表示它属于全场体积最小
+            的 0.5%）——见 `cell_volume_percentile` 文档里记录的那次
+            排查：这个数字直接区分"退化单元机制"与"壁面处理机制"。
+    """
     n_vars = diag.scaled_rms_per_var.shape[0]
     parts = []
     for i in range(min(n_vars, len(_VAR_NAMES))):
         parts.append(f"{_VAR_NAMES[i]}={diag.scaled_rms_per_var[i]:.3e}")
     scaled_str = " ".join(parts)
     var_name = _VAR_NAMES[diag.max_abs_var] if diag.max_abs_var < len(_VAR_NAMES) else f"var{diag.max_abs_var}"
+    loc = f"{var_name}@cell{diag.max_abs_cell}"
+    pct = cell_volume_percentile(cell_volumes)
+    if pct is not None and diag.max_abs_cell < pct.size:
+        loc += f", vol {pct[diag.max_abs_cell]:.2f}%"
     return (f"Scaled[{scaled_str}] | Max={diag.max_abs:.3e} "
-            f"({var_name}@cell{diag.max_abs_cell})")
+            f"({loc})")
 
 
 class SolverDivergedError(RuntimeError):
@@ -177,5 +232,10 @@ def check_residual_finite(res, iteration: int, order=None,
         f"       —— 该档在固壁上有 7.3 倍虚假超压，实测会在固定 CFL 0.03\n"
         f"       下于百步量级发散，见 fr_operators/kernels.py 的 PRECOND_*\n"
         f"       常量注释\n"
+        f"  先看日志里最后几行 `Max=...(var@cellN, vol X%)` 的 `vol X%`：\n"
+        f"  那是最大残差单元的体积分位。若它持续很小（<1%，即该单元属于\n"
+        f"  全场体积最小的 1%），成因是上面第 2 条（退化薄单元被 1/det(J)\n"
+        f"  放大），换 CFL 或换通量格式都只能推迟发散、不能避免；若它是\n"
+        f"  正常量级，才去查第 1、3 条。\n"
         + (f"  {extra_hint}\n" if extra_hint else "")
     )

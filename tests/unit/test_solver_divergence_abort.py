@@ -236,3 +236,84 @@ class TestSolveLoopActuallyAborts:
         with pytest.raises(SolverDivergedError):
             FRSolver.solve(stub, max_iter=3, dt=1e-4, tol=0.0)
         assert calls['step'] == 2
+
+
+class TestCellVolumePercentileDiagnostic:
+    """最大残差单元的体积分位必须出现在诊断行里。
+
+    动机（2026-09-16 真实排查）：plate_demo_volume_les 上三条对照运行
+    100 步里最大残差恒定落在同一个单元（cell18708），而判断"这是退化
+    单元机制还是壁面处理机制"当时只能另写脚本重新加载整张体网格（约
+    10 分钟）才算出该单元体积分位是 0.523%、超压点 81% 落在体积最小的
+    1% 单元里。那个数字本该在日志里一眼看到。
+    """
+
+    def _diag(self, max_cell):
+        import numpy as np
+
+        from autoflowcfd.core.fr_solver.residual_diagnostics import ResidualDiagnostics
+
+        return ResidualDiagnostics(
+            rms_per_var=np.ones(5),
+            scaled_rms_per_var=np.ones(5),
+            max_abs=3.654e11,
+            max_abs_cell=max_cell,
+            max_abs_sp=6,
+            max_abs_var=4,
+        )
+
+    def test_percentile_is_zero_for_smallest_and_hundred_for_largest(self):
+        from autoflowcfd.core.fr_solver.residual_diagnostics import (
+            cell_volume_percentile,
+        )
+
+        vols = np.array([5.0, 1.0, 3.0, 2.0, 4.0])
+        pct = cell_volume_percentile(vols)
+        assert pct[1] == pytest.approx(0.0)      # 最小
+        assert pct[0] == pytest.approx(100.0)    # 最大
+        assert pct[3] == pytest.approx(25.0)
+        assert pct[2] == pytest.approx(50.0)
+
+    def test_line_includes_volume_percentile(self):
+        from autoflowcfd.core.fr_solver.residual_diagnostics import (
+            format_scaled_residual_line,
+        )
+
+        # 1000 个单元，第 7 个是全场最小 -> 分位 0.00%
+        vols = np.linspace(1.0, 2.0, 1000)
+        vols[7] = 1e-8
+        line = format_scaled_residual_line(self._diag(7), cell_volumes=vols)
+        assert 'cell7' in line
+        assert 'vol 0.00%' in line
+
+    def test_line_omits_percentile_without_volumes(self):
+        """没有几何信息时不能报错，也不能编一个分位出来。"""
+        from autoflowcfd.core.fr_solver.residual_diagnostics import (
+            format_scaled_residual_line,
+        )
+
+        line = format_scaled_residual_line(self._diag(7))
+        assert 'cell7' in line
+        assert 'vol' not in line
+
+    def test_percentile_handles_degenerate_inputs(self):
+        """合成网格/测试替身可能不带 cell_volumes，或带一个空数组、
+        多维数组 —— 都必须安静地退化为"没有信息"，而不是抛异常把整个
+        求解循环打断（诊断行不该有能力弄崩求解）。"""
+        from autoflowcfd.core.fr_solver.residual_diagnostics import (
+            cell_volume_percentile,
+        )
+
+        assert cell_volume_percentile(None) is None
+        assert cell_volume_percentile(np.array([])) is None
+        assert cell_volume_percentile(np.zeros((3, 3))) is None
+        # 单单元网格不能除以零
+        assert cell_volume_percentile(np.array([1.0]))[0] == pytest.approx(0.0)
+
+    def test_divergence_message_points_at_the_percentile_field(self):
+        """发散报错必须告诉用户先去看那个字段，否则新增字段没人会用。"""
+        with pytest.raises(SolverDivergedError) as ei:
+            check_residual_finite(np.nan, iteration=104, order=1, last_finite=1.0)
+        msg = str(ei.value)
+        assert 'vol X%' in msg
+        assert 'det(J)' in msg
