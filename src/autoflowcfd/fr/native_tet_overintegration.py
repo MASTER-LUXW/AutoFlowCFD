@@ -23,9 +23,29 @@ Warp&Blend 节点），数学结构完全一致：
 
 与坍缩坐标版本的关键差异：native 单纯形基节点数随阶数增长的方式不同
 （`(order+1)(order+2)(order+3)/6` vs `(order+1)^3`），过积分阶数
-`over_order` 仍然沿用与坍缩坐标完全相同的 `min(2*order,
-OVERINTEGRATION_MAX_ORDER)` 经验法则（二次非线性去混叠的标准做法，
-两套基没有理由用不同的过积分阶数选择）。
+`over_order` 目前沿用与坍缩坐标完全相同的
+`min(rule*order, OVERINTEGRATION_MAX_ORDER)`。
+
+**注意这里是两件独立的事，2026-09-16 前本段把它们混成了一件**：
+
+  * `rule*order`（默认 2x）是**与基无关**的去混叠经验法则（二次非线性
+    的标准做法），native 照搬是对的；
+  * 而 `OVERINTEGRATION_MAX_ORDER = 3` 这个**上限**是坍缩坐标模态
+    Vandermonde 的**数值条件数**极限（cond 在 N=4 达约 1e14、`max|D|`
+    暴涨约 6.3 万倍，见 collapsed_basis.py 该常量处的完整记录），
+    native 没有理由继承它——实测 native 在 over_order=6 才 cond=3856、
+    `max|D|` 从 3 到 6 只长 3.5 倍（
+    `tests/unit/test_native_tet_overintegration_conditioning.py`）。
+
+native 目前仍受这个上限约束的**真实**原因是一条架构约束（`jacobians_fine`
+是棱柱/四面体共用一个 `n_sps_per_cell_fine` 维度的合并数组，按较大者
+分配会让 plate_demo P2 的该数组从约 1.86 GB 涨到约 3.63 GB，而该算例
+P2 实测常驻已是 13.9 GB），不是数值条件数。完整说明与解法见
+collapsed_basis.py 里 `OVERINTEGRATION_MAX_ORDER` 上方的注释。
+
+这个上限对 P2/P3 的后果是实打实的截断：P2 理想 over_order=4 被压到 3，
+P3 理想 6 被压到 3 —— **而 P3 的 over_order 恰好等于 order，插值/限制
+算子退化为恒等矩阵，过积分完全失效**。
 """
 
 from typing import Tuple

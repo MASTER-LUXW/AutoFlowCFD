@@ -286,10 +286,17 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
         # `div(adj(J)*G(Q,grad_vel,grad_T,mu_t))`，三个一次场的乘积是三次，
         # `over_order=2` 的细网格（二次空间）表示不了它。
         #
-        # **`OVERINTEGRATION_MAX_ORDER = 3` 的上限不动**（见
-        # collapsed_basis.py 该常量处记录的真实回归：放宽到 4 会让 P2
-        # 均匀自由流场残差从 1.06e-5 恶化到 5.6e-3，根因是 D_fine 绝对
-        # 量级暴涨约 6.3 万倍），所以 `3x` 与 `2x` 的差别**只在 order=1**：
+        # **`OVERINTEGRATION_MAX_ORDER = 3` 的上限不动**，但要注意它的
+        # **适用范围**（2026-09-16 实测更正）：那条"放宽到 4 会让 P2 均匀
+        # 自由流场残差从 1.06e-5 恶化到 5.6e-3、根因是 D_fine 绝对量级暴涨
+        # 约 6.3 万倍"的论证只对**坍缩坐标**基成立（也就是这里的棱柱）。
+        # native 四面体实测在 over_order=6 才 cond(V)=3856、`max|D|` 从 3
+        # 到 6 只长 3.5 倍，那条数值论证对它不适用；它目前仍受这个上限
+        # 约束的真实原因是 `jacobians_fine` 棱柱/四面体共用一个
+        # `n_sps_per_cell_fine` 维度这条架构约束。完整说明见
+        # collapsed_basis.py 该常量上方的注释与
+        # tests/unit/test_native_tet_overintegration_conditioning.py。
+        # 所以 `3x` 与 `2x` 的差别**只在 order=1**：
         #   order=1: 2x -> over_order 2（细点 27）； 3x -> 3（细点 64）
         #   order>=2: 两者都被 cap 到 3，完全相同
         #

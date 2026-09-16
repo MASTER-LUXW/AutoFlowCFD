@@ -321,6 +321,37 @@ def build_collapsed_diff_matrices(cell_type: str, order: int, ref_cube_sps: np.n
 # 与结论，未来若要重新做"用户显式选择更高 over_order"这个可选项，
 # 从那份文档和这段注释就能重新实现，不需要现在占着一份不会被执行
 # 的代码。
+#
+# ===== 2026-09-16：这条上限的适用范围（实测）=====
+#
+# 上面整条论证是对**坍缩坐标张量积**基做的。坍缩四面体基已于 2026-09-03
+# 删除，四面体现在走 native 受限 PKD/Dubiner 基——单纯形上的**正交**基，
+# 条件数性质与坍缩坐标完全不在一个量级。实测（
+# `tests/unit/test_native_tet_overintegration_conditioning.py` 是该实测的
+# 可执行形式）：
+#
+#     over_order  n_pts   cond(V)     max|D|    D@1/max|D|    D@r - 1
+#              3     20   5.637e+01  4.045e+00   9.057e-16   2.998e-15
+#              4     35   2.070e+02  6.757e+00   1.376e-14   2.243e-14
+#              6     84   3.856e+03  1.420e+01   1.202e-13   6.610e-13
+#
+# native 在 over_order=6 才 cond(V)=3856（坍缩基 N=4 就约 1e14），
+# `max|D|` 从 3 到 6 只长 3.5 倍（坍缩基同区间暴涨约 6.3 万倍）。
+# **上面那条数值论证对 native 四面体不适用。**
+#
+# 那为什么上限还没按单元类型分开放开？不是数值条件数，而是一条**架构**
+# 约束（如实记录，不是数值理由）：`mesh.jacobians_fine` 是棱柱与四面体
+# **共用一个** `n_sps_per_cell_fine` 维度的合并数组
+# （`high_order_mesh_order.py` 的 `_combine_prism_and_tet_jacobians`），
+# 四面体经 `native_tet_padding.pad_native_tet_matrix_to_global` 填进
+# `(over_order+1)^3` 槽位。"四面体用 4、棱柱仍用 3"要求合并数组按较大者
+# 分配（125 槽 vs 64 槽），plate_demo（363,392 单元）P2 的 jacobians_fine
+# 内存从约 1.86 GB 涨到约 3.63 GB，而该算例 P2 实测常驻已是 13.9 GB。
+#
+# 真正的解法是利用"直边四面体 Jacobian 逐单元为常数"给四面体单独存一份
+# 紧凑的（O(n_cells) 而不是 O(n_cells*n_fine)）细网格 Jacobian——那同时
+# 是一项独立的内存优化。它要改 jacobians_fine 的布局与全部消费点，必须
+# 在真实网格上重新量过 P2/P3 的内存与自由流场保持性才能上线。
 OVERINTEGRATION_MAX_ORDER = 3
 
 
