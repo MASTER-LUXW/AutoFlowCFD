@@ -29,6 +29,7 @@ from autoflowcfd.core.utils import order_continuation
 from . import turbulence as fr_solver_turbulence
 from . import boundary as fr_solver_boundary
 from . import step as fr_solver_step
+from .residual_diagnostics import check_residual_finite
 from .solver_geometry import _SolverGeometryMixin
 
 # AUSM+up Weiss-Smith 预处理参考马赫数的物理下限（见 __init__ 内 mach_ref
@@ -756,6 +757,7 @@ class FRSolver(_SolverGeometryMixin):
         # BLAS 线程数只在求解循环期间限制为 1（性能：求解阶段实测快
         # 9~11%；作用域必须是"循环期间"而不是"构造时一次"，理由见
         # `blas_threads_limited` 文档记录的真实 bug）。
+        last_finite = None
         with blas_threads_limited(1):
             for i in range(max_iter):
                 t_start = time.time()
@@ -763,6 +765,17 @@ class FRSolver(_SolverGeometryMixin):
                 t_end = time.time()
                 final_residual = res
                 self.residual_history.append(res)
+
+                # 发散即中止（2026-09-16，真实事故驱动）：此前这条循环
+                # 完全没有有限性检查，残差变成 inf/nan 之后照常继续迭代、
+                # 照常调用 checkpoint_callback，会把 NaN 状态写进
+                # checkpoint 并在收尾时用 NaN 覆盖 final_state.pkl。
+                # GPU 单机与多 GPU 路径本来就有这个检查，CPU 路径此前
+                # 遗漏——是路径不对等，不是有意设计。检查必须在
+                # checkpoint 回调**之前**。
+                check_residual_finite(res, i + 1, order=self.order,
+                                      last_finite=last_finite)
+                last_finite = res
 
                 if initial_res is None:
                     initial_res = res

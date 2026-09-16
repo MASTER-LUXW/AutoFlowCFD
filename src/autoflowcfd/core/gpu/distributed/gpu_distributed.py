@@ -23,6 +23,7 @@ import numpy as np
 from typing import Optional, Dict, Any
 from loguru import logger
 
+from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
 from autoflowcfd.core.gpu import gpu_available, get_cupy
 from autoflowcfd.core.gpu.array_manager import GPUArrayManager
 from autoflowcfd.core.gpu.gpu_time_integration import (
@@ -1199,6 +1200,7 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
 
         converged = False
         final_residual = 1e10
+        _last_finite = None
 
         for i in range(max_iter):
             t_start = time.time()
@@ -1213,6 +1215,17 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
                         f"Time/step: {t_end-t_start:.3f}s"
                     )
 
+            # 发散检查必须在 checkpoint 回调**之前**（2026-09-16 修复）：
+            # 此前顺序是先保存再检查，于是发散那一步的 NaN 状态会被如实
+            # 写进 checkpoint。`res` 来自 `self.step()` 的全域 allreduce，
+            # 各 rank 取值相同，所以全部 rank 会同时抛出、不会死锁。
+            check_residual_finite(
+                res, i + 1, last_finite=_last_finite,
+                extra_hint=f"分布式路径：{self.n_ranks} 个 rank，"
+                           f"残差是全域 allreduce 值（各 rank 一致）",
+            )
+            _last_finite = res
+
             if checkpoint_callback is not None:
                 # 全部 rank 都要调用——保存需要每个 rank 各自贡献 local
                 # cells 数据（见 CPU 分布式 solve 同一处注释）。
@@ -1222,11 +1235,6 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
                 converged = True
                 if is_root():
                     print(f"✅ Multi-GPU Converged at iteration {i+1}")
-                break
-
-            if not np.isfinite(res):
-                if is_root():
-                    print(f"❌ Multi-GPU Diverged at iteration {i+1}")
                 break
 
         return {

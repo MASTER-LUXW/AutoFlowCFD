@@ -56,6 +56,8 @@ import numpy as np
 from typing import Any, Optional
 from loguru import logger
 
+from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
+
 from autoflowcfd.core.mpi import is_root
 from autoflowcfd.core.utils.order_continuation import _build_linear_interp_matrix_3d
 
@@ -559,11 +561,23 @@ def run_distributed_order_continuation(
         initial_residual_this_order = None
         min_iter_before_transition = 20
         converged = False
+        _last_finite = None
 
         for i in range(stage_iter_budget):
             res = solver.step(dt)
             final_residual = res
             total_iter += 1
+
+            # 发散即中止（2026-09-16）：这条循环此前没有任何有限性
+            # 检查，而下面的 `checkpoint_callback` 是无条件调用的
+            # ——残差变 NaN 之后会把 NaN 状态如实写进分布式
+            # checkpoint。`res` 是 `solver.step()` 的全域 allreduce
+            # 结果，各 rank 一致，所以全部 rank 同时抛出、不会死锁。
+            check_residual_finite(
+                res, i + 1, order=target_p, last_finite=_last_finite,
+                extra_hint='分布式路径：残差是全域 allreduce 值（各 rank 一致）',
+            )
+            _last_finite = res
 
             if initial_residual_this_order is None:
                 initial_residual_this_order = res

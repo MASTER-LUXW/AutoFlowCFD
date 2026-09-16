@@ -10,6 +10,7 @@ import numpy as np
 from typing import Any, Optional
 from loguru import logger
 
+from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
 from autoflowcfd.core.fr_solver.turbulence import _set_freestream_turbulence
 
 
@@ -647,6 +648,7 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
 
             converged = False
             final_residual = 1e10
+            _last_finite = None
 
             for i in range(stage_iter_budget):
                 t_start = _time.time()
@@ -671,6 +673,14 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
                 # 湍流开启后的残差，两者不在同一物理基准上）。
                 # 修复：检测到渐变完成标记后，立即将基准残差重置为当前值，
                 # 让 100x 判据从湍流完全开启后的第一个真实残差开始计算。
+                # 发散即中止（2026-09-16）：这条是 Order Continuation 的
+                # 逐阶循环，也就是全部 P2/P3 运行实际走的路径，此前同样
+                # 没有任何有限性检查——项目记忆里那条“P2 第 4 步 inf”的
+                # 运行就是在 inf 上继续迭代到预算耗尽的。
+                check_residual_finite(res, i + 1, order=target_p,
+                                      last_finite=_last_finite)
+                _last_finite = res
+
                 if getattr(solver, '_turb_production_ramp_complete', False):
                     if not getattr(solver, '_ramp_baseline_reset_done', False):
                         old_baseline = initial_residual_this_order

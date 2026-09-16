@@ -125,3 +125,57 @@ def format_scaled_residual_line(diag: "ResidualDiagnostics") -> str:
     var_name = _VAR_NAMES[diag.max_abs_var] if diag.max_abs_var < len(_VAR_NAMES) else f"var{diag.max_abs_var}"
     return (f"Scaled[{scaled_str}] | Max={diag.max_abs:.3e} "
             f"({var_name}@cell{diag.max_abs_cell})")
+
+
+class SolverDivergedError(RuntimeError):
+    """残差变成 inf/nan —— 求解已经不可恢复，必须立刻中止。
+
+    为什么需要一个专门的异常而不是"打印警告后继续"（2026-09-16，真实
+    事故驱动）：plate_demo_volume_les 上一条 AUSM+up 预处理档对照运行在
+    iter 103 катastrophic 发散（Cd 冲到 3.1e48）、iter 104 残差 inf、
+    iter 105 起全部 nan，而求解循环**毫不在意地继续迭代**——直到人工发现
+    为止已经白烧了若干步机时，而且每一步都照常调用 `checkpoint_callback`，
+    会把 NaN 状态写进 checkpoint、并在收尾时用 NaN 覆盖 `final_state.pkl`。
+
+    工业级求解器在这里的标准行为是立刻中止并给出非零退出码，而不是产出
+    一份看起来完整、内容全是 NaN 的结果目录。
+    """
+
+
+def check_residual_finite(res, iteration: int, order=None,
+                          last_finite=None, extra_hint: str = "") -> None:
+    """残差非有限即抛 `SolverDivergedError`。
+
+    必须在**调用 checkpoint 回调之前**检查，否则 NaN 状态会被落盘。
+
+    Args:
+        res: 本步残差范数
+        iteration: 1 起算的迭代号（打印用）
+        order: 当前多项式阶数，None 表示调用方不区分阶数
+        last_finite: 上一次有限的残差值，用于告诉用户"从哪里开始坏的"
+        extra_hint: 调用方补充的定位提示（例如分布式路径的 rank 信息）
+
+    Raises:
+        SolverDivergedError: `res` 不是有限值。
+    """
+    if np.isfinite(res):
+        return
+    tag = "" if order is None else f"P{order} "
+    lf = "（无）" if last_finite is None else f"{last_finite:.6e}"
+    raise SolverDivergedError(
+        f"{tag}Iter {iteration}: 残差为 {res} —— 求解已发散，立刻中止。\n"
+        f"  上一个有限残差 = {lf}\n"
+        f"  本步之后不再迭代、不再写 checkpoint（避免用 NaN 覆盖已有的\n"
+        f"  正常 checkpoint 与 final_state）。\n"
+        f"  常见成因（按本项目实测频率排序）：\n"
+        f"    1. CFL 超过该网格/阶数的真实稳定边界 —— 用 --cfl-start/\n"
+        f"       --cfl-max 下调；注意越界一次之后收缩救不回来（见\n"
+        f"       adaptive_cfl.py 模块文档第 12 条）\n"
+        f"    2. 网格质量门未通过而用 --skip-quality-check 强行求解 ——\n"
+        f"       退化单元会把残差放大若干个量级\n"
+        f"    3. AUSM+up 预处理档设成了 legacy（AFCFD_AUSM_PRECOND_MODE）\n"
+        f"       —— 该档在固壁上有 7.3 倍虚假超压，实测会在固定 CFL 0.03\n"
+        f"       下于百步量级发散，见 fr_operators/kernels.py 的 PRECOND_*\n"
+        f"       常量注释\n"
+        + (f"  {extra_hint}\n" if extra_hint else "")
+    )

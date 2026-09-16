@@ -23,6 +23,7 @@ import numpy as np
 from typing import Optional, Dict, Any
 from loguru import logger
 
+from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
 from autoflowcfd.core.gpu import gpu_available, get_cupy
 from autoflowcfd.core.gpu.array_manager import GPUArrayManager
 from autoflowcfd.core.gpu.gpu_time_integration import (
@@ -894,6 +895,7 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         print(f"Starting GPU solve: max_iter={max_iter}, tol={tol}")
         converged = False
         final_residual = 1e10
+        _last_finite = None
 
         for i in range(max_iter):
             t_start = time.time()
@@ -909,13 +911,16 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
                     f"GPU mem: {mem['used_mb']:.0f}/{mem['total_mb']:.0f} MB"
                 )
 
+            # 发散即中止（2026-09-16 统一）：此前这里只是 break，于是
+            # 调用方拿到的是 converged=False，与"跑满预算仍未收敛"完全
+            # 无法区分，收尾还会把 NaN 状态写成结果文件。改用与另外四条
+            # 求解循环共享的 SolverDivergedError，让 CLI 非零退出。
+            check_residual_finite(res, i + 1, last_finite=_last_finite)
+            _last_finite = res
+
             if res < tol:
                 converged = True
                 print(f"✅ GPU Converged at iteration {i+1} with residual {res:.6e}")
-                break
-
-            if not np.isfinite(res):
-                print(f"❌ GPU Diverged at iteration {i+1} with residual {res}")
                 break
 
         return {
