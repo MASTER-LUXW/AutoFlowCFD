@@ -105,6 +105,9 @@ def compute_inviscid_interface_correction_kernel(
     n_prism: int,
     n_threads: int,
     mach_ref: float,
+    precond_mode: int,   # AUSM+up 预处理声速作用域，见 kernels.py::
+                         # compute_ausm_up_flux 文档；必须由纯 Python 层
+                         # 用 resolve_ausm_precond_mode() 解析后传入
     owner_cube_face: np.ndarray, neighbor_cube_face: np.ndarray,
     true_area_weight: np.ndarray,
     boundary_extrap_native: np.ndarray, lift_native: np.ndarray,
@@ -227,7 +230,7 @@ def compute_inviscid_interface_correction_kernel(
                 normal[0] = dirx
                 normal[1] = diry
                 normal[2] = dirz
-                F_common_n = compute_ausm_up_flux(Q_o[i], Q_n, normal, mach_ref)  # (5,)
+                F_common_n = compute_ausm_up_flux(Q_o[i], Q_n, normal, mach_ref, precond_mode)  # (5,)
 
                 F_tilde_common = np.empty(5)
                 for v in range(5):
@@ -333,7 +336,7 @@ def compute_inviscid_interface_correction_kernel(
                 normal[0] = dirx
                 normal[1] = diry
                 normal[2] = dirz
-                F_common_n_native = compute_ausm_up_flux(Q_n_native[i], Q_o_at_n, normal, mach_ref)
+                F_common_n_native = compute_ausm_up_flux(Q_n_native[i], Q_o_at_n, normal, mach_ref, precond_mode)
 
                 F_tilde_common_n = np.empty(5)
                 for v in range(5):

@@ -27,7 +27,10 @@ import os
 
 import numpy as np
 
-from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
+from autoflowcfd.core.fr_operators.kernels import (
+    compute_ausm_up_flux,
+    resolve_ausm_precond_mode,
+)
 from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
 from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_batch, entropy_stable_volume_divergence_batch
 from autoflowcfd.core.fr_operators.volume_contract import (
@@ -87,21 +90,26 @@ def euler_physical_flux(Q: np.ndarray) -> np.ndarray:
     return F
 
 
-def ausm_up_flux_batch(Q_L: np.ndarray, Q_R: np.ndarray, normal: np.ndarray, mach_ref: float = 0.1) -> np.ndarray:
+def ausm_up_flux_batch(Q_L: np.ndarray, Q_R: np.ndarray, normal: np.ndarray,
+                       mach_ref: float = 0.1,
+                       precond_mode: Optional[int] = None) -> np.ndarray:
     """对一批 Flux Points 逐点调用 Numba 版 AUSM+up (标量法向通量密度)。
 
     Args:
         Q_L, Q_R: (n_fp, 5)
         normal: (n_fp, 3) 单位法向量（由 L 指向 R）
         mach_ref: 见 kernels.py::compute_ausm_up_flux 文档
+        precond_mode: 见 kernels.py::compute_ausm_up_flux 文档；None 时按
+            环境变量 `AFCFD_AUSM_PRECOND_MODE` 解析
 
     Returns:
         flux: (n_fp, 5)，F*·n （每单位面积的物理通量密度）
     """
+    pm = resolve_ausm_precond_mode() if precond_mode is None else int(precond_mode)
     n_fp = Q_L.shape[0]
     flux = np.zeros((n_fp, 5))
     for i in range(n_fp):
-        flux[i] = compute_ausm_up_flux(Q_L[i], Q_R[i], normal[i], mach_ref)
+        flux[i] = compute_ausm_up_flux(Q_L[i], Q_R[i], normal[i], mach_ref, pm)
     return flux
 
 
@@ -132,13 +140,16 @@ def _compute_inviscid_residual_fv_p0(
     mesh,
     boundary_ghost_provider: Optional[Callable[[int, np.ndarray, np.ndarray], np.ndarray]] = None,
     mach_ref: float = 0.1,
+    precond_mode: Optional[int] = None,
 ) -> np.ndarray:
     """P0 专用有限体积无粘残差。实现见
     inviscid_p0.py::compute_inviscid_residual_fv_p0（从本
     文件拆出，控制单文件行数），文档字符串也在那里。"""
     from .inviscid_p0 import compute_inviscid_residual_fv_p0
 
-    return compute_inviscid_residual_fv_p0(U, mesh, boundary_ghost_provider, mach_ref)
+    return compute_inviscid_residual_fv_p0(
+        U, mesh, boundary_ghost_provider, mach_ref, precond_mode
+    )
 
 
 def compute_inviscid_residual_fr(
@@ -149,6 +160,7 @@ def compute_inviscid_residual_fr(
     mach_ref: float = 0.1,
     flat_face_override=None,
     entropy_stable_volume: bool = False,
+    precond_mode: Optional[int] = None,
 ) -> np.ndarray:
     """计算真实面耦合的 FR 无粘残差 dU/dt（物理空间，已除以 det(J)）。
 
@@ -168,6 +180,14 @@ def compute_inviscid_residual_fr(
             不能依赖这个默认值——CFL 步长估计（cfl.py）用的就是这同一个
             真实值，两者不同步正是 2026-08-14 那次失稳的根因，见 cfl.py
             模块文档"已撤销"一节。
+        precond_mode: AUSM+up 预处理声速在通量内部的作用域（
+            `PRECOND_PHYSICAL` / `PRECOND_PRESSURE_PHYSICAL` /
+            `PRECOND_LEGACY`，见 kernels.py 模块级常量上方的长注释）。
+            None 表示按环境变量 `AFCFD_AUSM_PRECOND_MODE` 解析，未设置时
+            用 `DEFAULT_PRECOND_MODE`。解析必须发生在**纯 Python 层**、
+            以实参形式传进 njit kernel：numba 的 `cache=True` 会把 njit
+            里读到的模块级全局量冻结成编译期常量（2026-09-16 已真实踩过
+            一次，见 resolve_ausm_precond_mode 文档）。
         entropy_stable_volume: 体积项非线性通量混叠优化开关（默认关闭，
             行为与此前完全一致）。开启后过积分分支（`mesh.jacobians_fine
             is not None`）改用 Chandrashekar (2013) 熵守恒两点通量 +
@@ -191,12 +211,18 @@ def compute_inviscid_residual_fr(
             "call load_from_volume_mesh(build_faces=True) first."
         )
 
+    if precond_mode is None:
+        precond_mode = resolve_ausm_precond_mode()
+    precond_mode = int(precond_mode)
+
     if mesh.n_points_1d == 1:
         # P0（Order Continuation 最低阶）：坍缩坐标单点度量方向在数学上
         # 无法代表单元各面各自的真实法向，完全绕开度量张量外插机制，走
         # 独立的真实几何有限体积路径，见 _compute_inviscid_residual_fv_p0
         # 文档。
-        return _compute_inviscid_residual_fv_p0(U, mesh, boundary_ghost_provider, mach_ref)
+        return _compute_inviscid_residual_fv_p0(
+            U, mesh, boundary_ghost_provider, mach_ref, precond_mode
+        )
 
     n_cells = mesh.n_cells
     n_sps = mesh.n_sps_per_cell
@@ -388,7 +414,7 @@ def compute_inviscid_residual_fr(
                 flat.mixed_ow_partner, flat.mixed_ow_mask,
                 flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
                 flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
-                n_prism, face_indices, correction, mach_ref,
+                n_prism, face_indices, correction, mach_ref, precond_mode,
                 flat.owner_cube_face, flat.neighbor_cube_face,
                 flat.true_area_weight,
                 flat.boundary_extrap_native, flat.lift_native,
@@ -412,7 +438,7 @@ def compute_inviscid_residual_fr(
             flat.mixed_ow_partner, flat.mixed_ow_mask,
             flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
             flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
-            n_prism, n_threads, mach_ref,
+            n_prism, n_threads, mach_ref, precond_mode,
             flat.owner_cube_face, flat.neighbor_cube_face,
             flat.true_area_weight,
             flat.boundary_extrap_native, flat.lift_native,

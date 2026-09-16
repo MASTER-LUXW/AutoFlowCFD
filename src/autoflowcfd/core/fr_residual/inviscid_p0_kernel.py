@@ -37,6 +37,7 @@ def _p0_inviscid_kernel(
     n_cells,
     n_threads,
     mach_ref,         # float，见 kernels.py::compute_ausm_up_flux 文档
+    precond_mode,     # int，同上（必须由纯 Python 层解析后传入）
 ):
     """P0 有限体积无粘残差并行 kernel。
 
@@ -79,7 +80,7 @@ def _p0_inviscid_kernel(
         normal[2] = unit_normals[f, 2]
 
         # AUSM+up 黎曼求解（返回单位面积通量）
-        F_common_n = compute_ausm_up_flux(Q_o, Q_n, normal, mach_ref)
+        F_common_n = compute_ausm_up_flux(Q_o, Q_n, normal, mach_ref, precond_mode)
 
         # 混合拆分面（B-8，见 fr/face_flux_points_merge.py）：整张四边形面的通量按子面面积占比混合——
         # 内部半区用上方内部通量，边界半区用同一 owner 单元的幽灵态另解一次黎曼问题。
@@ -89,7 +90,7 @@ def _p0_inviscid_kernel(
             Q_nb = np.empty(5, dtype=np.float64)
             for v in range(5):
                 Q_nb[v] = Q_ghost[f, v]
-            F_bnd = compute_ausm_up_flux(Q_o, Q_nb, normal, mach_ref)
+            F_bnd = compute_ausm_up_flux(Q_o, Q_nb, normal, mach_ref, precond_mode)
             one_minus = 1.0 - bfrac
             for v in range(5):
                 F_common_n[v] = one_minus * F_common_n[v] + bfrac * F_bnd[v]

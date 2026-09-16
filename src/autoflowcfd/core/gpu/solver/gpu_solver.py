@@ -371,6 +371,17 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         print(f"   Cells: {n_cells}, Order: P{order}")
         print(f"   Device: {device_id} ({self.array_mgr._device_name})")
         print(f"   Time Scheme: {time_scheme}, CFL: {cfl}")
+        # 与 CPU 版 FRSolver 的启动日志对等（2026-09-16）：影响物理/数值
+        # 的开关必须在日志里留痕，否则"这份日志是哪个配置跑出来的"只能
+        # 靠翻进程命令行考古。GPU 侧此前完全没有这几行，而 CPU/GPU 交叉
+        # 一致性对照恰恰要求两边确认取到同一档。
+        from autoflowcfd.core.fr_operators.kernels import (
+            ausm_precond_mode_label as _pm_label,
+            resolve_ausm_precond_mode as _pm_resolve,
+        )
+        from autoflowcfd.fr.modal_filter import FILTER_MODE as _fm
+        print(f"   Modal filter mode: {_fm}")
+        print(f"   AUSM+up precond mode: {_pm_label(_pm_resolve())}")
 
 
     def _build_boundary_ghost_provider(self, bc_overrides):

@@ -625,18 +625,32 @@ class FRSolver(_SolverGeometryMixin):
             print(f"   Adaptive CFL: enabled (start={self._cfl_controller.cfl_start}, "
                   f"max={self._cfl_controller.cfl_max}, "
                   f"min={self._cfl_controller.cfl_min})")
-            # 影响物理/数值的开关必须在启动日志里可见（2026-09-15）：做
-            # 人工粘性 A/B 对照时发现，`--artificial-viscosity` 生效与否在
-            # 整份日志里**没有任何痕迹**，只能靠翻进程命令行确认——那让
-            # "这份日志是哪个配置跑出来的"变成了事后考古。模态滤波档同理，
-            # 它直接决定解的多项式阶数有没有被清掉一整阶。
-            from autoflowcfd.fr.modal_filter import FILTER_MODE as _fm
-            _av = ("enabled (alpha=%g)" % self.artificial_viscosity_alpha
-                   if self.artificial_viscosity_enabled else "disabled")
-            print(f"   Artificial viscosity: {_av}")
-            print(f"   Modal filter mode: {_fm}")
         else:
             print(f"   Adaptive CFL: disabled")
+
+        # 影响物理/数值的开关必须在启动日志里可见（2026-09-15 引入）：做
+        # 人工粘性 A/B 对照时发现，`--artificial-viscosity` 生效与否在
+        # 整份日志里**没有任何痕迹**，只能靠翻进程命令行确认——那让
+        # "这份日志是哪个配置跑出来的"变成了事后考古。模态滤波档同理，
+        # 它直接决定解的多项式阶数有没有被清掉一整阶。
+        #
+        # 2026-09-16：这三行原先写在上面 `if adaptive_cfl and ...` 的
+        # **then 分支里**，所以关掉自适应 CFL（含全部 DUAL_TIME 运行）
+        # 时它们一行都不打印——恰好复刻了它本该消除的那个问题。已移到
+        # 分支外，与 CFL 档无关。同时补上 AUSM+up 预处理档：它决定壁面
+        # 压力是否被推进 P5± 的饱和分支（legacy 档在固壁上有 7.3 倍虚假
+        # 超压，见 fr_operators/kernels.py 模块级 PRECOND_* 常量上方的
+        # 长注释），是比滤波档更强的物理开关，绝不能只能靠命令行考古。
+        from autoflowcfd.core.fr_operators.kernels import (
+            ausm_precond_mode_label as _pm_label,
+            resolve_ausm_precond_mode as _pm_resolve,
+        )
+        from autoflowcfd.fr.modal_filter import FILTER_MODE as _fm
+        _av = ("enabled (alpha=%g)" % self.artificial_viscosity_alpha
+               if self.artificial_viscosity_enabled else "disabled")
+        print(f"   Artificial viscosity: {_av}")
+        print(f"   Modal filter mode: {_fm}")
+        print(f"   AUSM+up precond mode: {_pm_label(_pm_resolve())}")
 
         # DUAL_TIME 专用：物理时间层 n-1 的解（BDF2 时间导数项需要），
         # None 表示还没有跑过物理步（下一步会退化为 BDF1），见 step()

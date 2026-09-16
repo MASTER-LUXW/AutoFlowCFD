@@ -24,6 +24,7 @@ from autoflowcfd.core.fr_residual.inviscid import (
     DefaultGhostProvider,
 )
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+from autoflowcfd.core.fr_operators.kernels import resolve_ausm_precond_mode
 from autoflowcfd.core.fr_residual.inviscid_kernel import (
     compute_inviscid_interface_correction_kernel,
     compute_boundary_ghost_states,
@@ -113,6 +114,12 @@ def _compute_residual_via_new_kernel(U, mesh, ops, boundary_ghost_provider=None,
         flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
         flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
         n_prism, n_threads, mach_ref,
+        # precond_mode：与生产路径共用同一个解析器（见
+        # fr_operators/kernels.py::resolve_ausm_precond_mode）。这里走
+        # 默认档而不是写死常量，这样 CPU 内核新旧实现的交叉对照永远
+        # 比的是当前默认行为，不会在默认档变更后悄悄比一个已经不再
+        # 使用的档。
+        resolve_ausm_precond_mode(),
         flat.owner_cube_face, flat.neighbor_cube_face,
         flat.true_area_weight,
         flat.boundary_extrap_native, flat.lift_native,

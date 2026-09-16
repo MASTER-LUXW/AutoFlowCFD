@@ -62,7 +62,8 @@ def gpu_p0_available() -> bool:
 if _CUDA_IMPORT_OK:
 
     @cuda.jit(device=True, inline=True)
-    def _ausm_up_flux_device(rhoL, uL, vL, wL, pL, rhoR, uR, vR, wR, pR, nx, ny, nz, mach_ref, flux):
+    def _ausm_up_flux_device(rhoL, uL, vL, wL, pL, rhoR, uR, vR, wR, pR,
+                             nx, ny, nz, mach_ref, precond_mode, flux):
         """AUSM+up 数值通量（含 Weiss-Smith 低马赫数预处理），逐字对照
         core/fr_kernels.py::compute_ausm_up_flux 移植（同一套物理/参数，
         只是把嵌套函数 M_plus/M_minus/P_plus/P_minus 展开成内联分支——
@@ -103,12 +104,27 @@ if _CUDA_IMPORT_OK:
         # _WEISS_SMITH_K=1.1 同一个安全裕度常数、同一套 beta2 公式）。
         beta2 = min(1.0, max(max(Mbar2, 1.1 * mach_ref * mach_ref), 1e-10))
         sqrt_beta2 = math.sqrt(beta2)
-        aL_p = sqrt_beta2 * aL
-        aR_p = sqrt_beta2 * aR
-        a_half_p = sqrt_beta2 * a_half
 
-        M_L = unL / max(aL_p, 1e-10)
-        M_R = unR / max(aR_p, 1e-10)
+        # 预处理声速的作用域按 precond_mode 分派（0=physical 默认 /
+        # 1=pressure_physical / 2=legacy），与 kernels.py::
+        # compute_ausm_up_flux 的 s_mass/s_pres 逐字对应。
+        s_mass = sqrt_beta2
+        s_pres = sqrt_beta2
+        if precond_mode == 0:
+            s_mass = 1.0
+            s_pres = 1.0
+        elif precond_mode == 1:
+            s_pres = 1.0
+
+        aL_m = s_mass * aL
+        aR_m = s_mass * aR
+        a_half_m = s_mass * a_half
+        a_half_pr = s_pres * a_half
+
+        M_L = unL / max(aL_m, 1e-10)
+        M_R = unR / max(aR_m, 1e-10)
+        M_L_pr = unL / max(s_pres * aL, 1e-10)
+        M_R_pr = unR / max(s_pres * aR, 1e-10)
 
         if abs(M_L) >= 1.0:
             Mp_L = 0.5 * (M_L + abs(M_L))
@@ -131,25 +147,27 @@ if _CUDA_IMPORT_OK:
         one_minus_sigma_mbar2 = 1.0 - sigma_p * Mbar2
         if one_minus_sigma_mbar2 < 0.0:
             one_minus_sigma_mbar2 = 0.0
-        Mp = -(Kp / fa) * one_minus_sigma_mbar2 * (pR_s - pL_s) / (rho_half * a_half_p * a_half_p)
-        mass_flux = 0.5 * (rhoL_s * aL_p + rhoR_s * aR_p) * (M_half + Mp)
+        Mp = -(Kp / fa) * one_minus_sigma_mbar2 * (pR_s - pL_s) / (rho_half * a_half_m * a_half_m)
+        mass_flux = 0.5 * (rhoL_s * aL_m + rhoR_s * aR_m) * (M_half + Mp)
 
-        if abs(M_L) >= 1.0:
-            sign_ML = 1.0 if M_L > 0.0 else (-1.0 if M_L < 0.0 else 0.0)
+        if abs(M_L_pr) >= 1.0:
+            sign_ML = 1.0 if M_L_pr > 0.0 else (-1.0 if M_L_pr < 0.0 else 0.0)
             Pp_L = 0.5 * (1.0 + sign_ML)
         else:
-            Pp_L = 0.25 * ((M_L + 1.0) ** 2 * (2.0 - M_L) + alpha_pressure * M_L * (M_L**2 - 1.0) ** 2)
+            Pp_L = 0.25 * ((M_L_pr + 1.0) ** 2 * (2.0 - M_L_pr)
+                           + alpha_pressure * M_L_pr * (M_L_pr**2 - 1.0) ** 2)
 
-        if abs(M_R) >= 1.0:
-            sign_MR = 1.0 if M_R > 0.0 else (-1.0 if M_R < 0.0 else 0.0)
+        if abs(M_R_pr) >= 1.0:
+            sign_MR = 1.0 if M_R_pr > 0.0 else (-1.0 if M_R_pr < 0.0 else 0.0)
             Pm_R = 0.5 * (1.0 - sign_MR)
         else:
-            Pm_R = 0.25 * ((M_R - 1.0) ** 2 * (2.0 + M_R) - alpha_pressure * M_R * (M_R**2 - 1.0) ** 2)
+            Pm_R = 0.25 * ((M_R_pr - 1.0) ** 2 * (2.0 + M_R_pr)
+                           - alpha_pressure * M_R_pr * (M_R_pr**2 - 1.0) ** 2)
 
         # pu 速度扩散项 (Liou 2006 AUSM+up 式18)，与 Mp 项配套。
         Ku = 0.75
         p_half = Pp_L * pL_s + Pm_R * pR_s \
-            - Ku * Pp_L * Pm_R * (rhoL_s + rhoR_s) * fa * a_half_p * (unR - unL)
+            - Ku * Pp_L * Pm_R * (rhoL_s + rhoR_s) * fa * a_half_pr * (unR - unL)
 
         upwind_L = mass_flux >= 0.0
         flux[0] = mass_flux
@@ -167,6 +185,7 @@ if _CUDA_IMPORT_OK:
     def _p0_inviscid_residual_kernel(
         owner_cell, neighbor_cell, is_boundary, normal, area_w,
         Q_all, Q_ghost, cell_volumes, mixed_bnd_frac, residual_out, mach_ref,
+        precond_mode,
     ):
         """一个 CUDA 线程处理一条面记录：计算该面的 AUSM+up 公共通量，
         原子累加到 owner（总是）与 neighbor（仅内部面）两侧的残差——
@@ -205,7 +224,8 @@ if _CUDA_IMPORT_OK:
             pR = Q_all[nc, 4]
 
         flux = cuda.local.array(5, dtype=_CUDA_FLUX_DTYPE)
-        _ausm_up_flux_device(rhoL, uL, vL, wL, pL, rhoR, uR, vR, wR, pR, nx, ny, nz, mach_ref, flux)
+        _ausm_up_flux_device(rhoL, uL, vL, wL, pL, rhoR, uR, vR, wR, pR,
+                             nx, ny, nz, mach_ref, precond_mode, flux)
 
         # 混合拆分面（B-8，镜像 CPU inviscid_p0_kernel.py / gpu_p0_inviscid.py
         # 同名分支）：整张四边形面的通量按子面面积占比混合，边界半区用同一
@@ -216,7 +236,7 @@ if _CUDA_IMPORT_OK:
             _ausm_up_flux_device(
                 rhoL, uL, vL, wL, pL,
                 Q_ghost[f, 0], Q_ghost[f, 1], Q_ghost[f, 2], Q_ghost[f, 3], Q_ghost[f, 4],
-                nx, ny, nz, mach_ref, flux_b,
+                nx, ny, nz, mach_ref, precond_mode, flux_b,
             )
             for v in range(5):
                 flux[v] = (1.0 - bfrac) * flux[v] + bfrac * flux_b[v]
@@ -239,6 +259,7 @@ def compute_inviscid_residual_p0_gpu(
     mesh,
     boundary_ghost_provider: Optional[Callable[[int, np.ndarray, np.ndarray], np.ndarray]] = None,
     mach_ref: float = 0.1,
+    precond_mode: Optional[int] = None,
 ) -> np.ndarray:
     """P0 无粘残差的 GPU（CUDA）实现，函数签名/返回值契约与
     `core/fr_residual_inviscid.py::_compute_inviscid_residual_fv_p0` 完全一致
@@ -258,6 +279,11 @@ def compute_inviscid_residual_p0_gpu(
             （真实设备或 NUMBA_ENABLE_CUDASIM 都没有）——不做静默 CPU 回退，
             调用方（FRSolver）负责在外层决定回退策略并如实记录日志。
     """
+    if precond_mode is None:
+        from autoflowcfd.core.fr_operators.kernels import resolve_ausm_precond_mode
+
+        precond_mode = resolve_ausm_precond_mode()
+
     if not _CUDA_IMPORT_OK or not gpu_p0_available():
         raise RuntimeError("CUDA is not available (no real device and NUMBA_ENABLE_CUDASIM not set)")
     if mesh.n_points_1d != 1:
@@ -322,6 +348,7 @@ def compute_inviscid_residual_p0_gpu(
     _p0_inviscid_residual_kernel[blocks_per_grid, threads_per_block](
         d_owner, d_neighbor, d_is_boundary, d_normal, d_area_w,
         d_Q, d_Q_ghost, d_volumes, d_mixed_frac, d_residual, np.float64(mach_ref),
+        np.int32(precond_mode),
     )
     cuda.synchronize()
 

@@ -17,7 +17,17 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
+from autoflowcfd.core.fr_operators.kernels import (
+    DEFAULT_PRECOND_MODE,
+    PRECOND_LEGACY,
+    PRECOND_PHYSICAL,
+    PRECOND_PRESSURE_PHYSICAL,
+    ausm_precond_mode_label,
+    compute_ausm_up_flux,
+    resolve_ausm_precond_mode,
+)
+
+_ALL_PRECOND_MODES = (PRECOND_PHYSICAL, PRECOND_PRESSURE_PHYSICAL, PRECOND_LEGACY)
 from autoflowcfd.core.fr_residual.inviscid import (
     compute_inviscid_residual_fr,
     euler_physical_flux,
@@ -94,26 +104,38 @@ class TestAusmUpConsistency:
             n = rng.normal(size=3)
             n /= np.linalg.norm(n)
 
-            flux_ausm = compute_ausm_up_flux(q, q, n, 0.2)
             F_exact = euler_physical_flux(q[None, :])[0]
             flux_exact_n = F_exact.T @ n
 
-            rel_diff = np.abs(flux_ausm - flux_exact_n) / (np.abs(flux_exact_n) + 1e-6)
-            assert np.max(rel_diff) < 1e-9
+            # 相容性对三档 precond_mode 都必须成立（解析上与声速归一
+            # 无关，见 kernels.py 里 s_mass/s_pres 分派处的注释）
+            for mode in _ALL_PRECOND_MODES:
+                flux_ausm = compute_ausm_up_flux(q, q, n, 0.2, mode)
+                rel_diff = np.abs(flux_ausm - flux_exact_n) / (np.abs(flux_exact_n) + 1e-6)
+                assert np.max(rel_diff) < 1e-9, (
+                    f"mode={ausm_precond_mode_label(mode)} 相容性被破坏"
+                )
 
     def test_mass_flux_matches_normal_velocity_for_uniform_state(self):
         """M+(M)+M-(M) 应恒等于 M，故 qL=qR 时 mass_flux 应精确等于 rho*u_n。"""
         q = np.array([1.225, 30.0, 5.0, -3.0, 101325.0])
         n = np.array([0.6, 0.8, 0.0])
-        flux = compute_ausm_up_flux(q, q, n, 0.2)
         u_n = q[1] * n[0] + q[2] * n[1] + q[3] * n[2]
-        assert abs(flux[0] - q[0] * u_n) < 1e-6 * abs(q[0] * u_n)
+        for mode in _ALL_PRECOND_MODES:
+            flux = compute_ausm_up_flux(q, q, n, 0.2, mode)
+            assert abs(flux[0] - q[0] * u_n) < 1e-6 * abs(q[0] * u_n), (
+                f"mode={ausm_precond_mode_label(mode)}"
+            )
 
 
 class TestAusmUpWeissSmithPreconditioning:
-    """AUSM+up Weiss-Smith 特征值预处理（2026-08-23 新增，见
-    kernels.py::compute_ausm_up_flux 模块文档）的专项验证——证明预处理
-    真的改变了低马赫数区域的数值行为，不是加了个没生效的参数。
+    """AUSM+up 内部 Weiss-Smith 预处理声速（`PRECOND_LEGACY` 档）的
+    专项验证——这些用例本来是"证明预处理真的改变了低马赫数区域的数值
+    行为"的正向测试，2026-09-16 起改为 **legacy 档的回归钉**：该档已
+    被确认在固壁上产生 7.3 倍虚假超压（见本文件
+    TestAusmUpWallPressureVsExactRiemann 与 kernels.py 模块级 PRECOND_*
+    常量上方的长注释），不再是默认值，但仍必须保持可复现——否则
+    legacy/physical 的 A/B 对照就失去了基线。
 
     mach_ref=1.0（配合 _WEISS_SMITH_K=1.1）会让 beta2 恒被上限 clip
     到 1.0（floor=1.1*1.0^2=1.1>1.0），等价于完全关闭预处理，用作
@@ -135,8 +157,8 @@ class TestAusmUpWeissSmithPreconditioning:
         噪声级的浮点重结合差异。"""
         qL, qR, n = self._near_stagnation_pair()
 
-        flux_baseline = compute_ausm_up_flux(qL, qR, n, 1.0)
-        flux_precond = compute_ausm_up_flux(qL, qR, n, 0.01)
+        flux_baseline = compute_ausm_up_flux(qL, qR, n, 1.0, PRECOND_LEGACY)
+        flux_precond = compute_ausm_up_flux(qL, qR, n, 0.01, PRECOND_LEGACY)
 
         diff = np.abs(flux_precond - flux_baseline)
         rel_diff = diff / (np.abs(flux_baseline) + 1e-6)
@@ -153,8 +175,8 @@ class TestAusmUpWeissSmithPreconditioning:
         qR = np.array([1.2, 380.0, 0.0, 0.0, 101500.0])
         n = np.array([1.0, 0.0, 0.0])
 
-        flux_a = compute_ausm_up_flux(qL, qR, n, 1.0)
-        flux_b = compute_ausm_up_flux(qL, qR, n, 0.01)
+        flux_a = compute_ausm_up_flux(qL, qR, n, 1.0, PRECOND_LEGACY)
+        flux_b = compute_ausm_up_flux(qL, qR, n, 0.01, PRECOND_LEGACY)
 
         assert np.max(np.abs(flux_a - flux_b)) < 1e-9 * (np.max(np.abs(flux_a)) + 1.0)
 
@@ -166,10 +188,12 @@ class TestAusmUpWeissSmithPreconditioning:
         n = np.array([0.6, 0.8, 0.0])
         u_n = q[1] * n[0] + q[2] * n[1] + q[3] * n[2]
         for mach_ref in [1.0, 0.5, 0.1, 0.05, 0.01, 0.001]:
-            flux = compute_ausm_up_flux(q, q, n, mach_ref)
-            assert abs(flux[0] - q[0] * u_n) < 1e-6 * abs(q[0] * u_n), (
-                f"mach_ref={mach_ref}: mass flux consistency broken"
-            )
+            for mode in _ALL_PRECOND_MODES:
+                flux = compute_ausm_up_flux(q, q, n, mach_ref, mode)
+                assert abs(flux[0] - q[0] * u_n) < 1e-6 * abs(q[0] * u_n), (
+                    f"mach_ref={mach_ref} mode={ausm_precond_mode_label(mode)}: "
+                    f"mass flux consistency broken"
+                )
 
 
 class TestAusmUpM4P5CoefficientsMatchLiterature:
@@ -220,7 +244,7 @@ class TestAusmUpM4P5CoefficientsMatchLiterature:
         # mach_ref=1.0：M0_sq 恒为 1（fa=1），beta2 恒被 clip 到 1.0（见
         # 既有测试类 test_preconditioning_reduces_to_unpreconditioned_at_sonic
         # 文档），aL_p=aR_p=a_target；pL=pR 时 Mp 修正项恒为零。
-        flux_correct = compute_ausm_up_flux(qL, qR, n, 1.0)
+        flux_correct = compute_ausm_up_flux(qL, qR, n, 1.0, PRECOND_LEGACY)
 
         Mp_expected, _, _, _ = self._reference_split_functions(M_L_target, alpha_pressure_val=0.1875)
         _, Mm_expected, _, _ = self._reference_split_functions(M_R_target, alpha_pressure_val=0.1875)
@@ -239,7 +263,7 @@ class TestAusmUpM4P5CoefficientsMatchLiterature:
         qL = np.array([1.2, 100.0, 0.0, 0.0, 101300.0])
         qR = np.array([1.2, -80.0, 0.0, 0.0, 101500.0])
 
-        flux_fixed = compute_ausm_up_flux(qL, qR, n, 1.0)
+        flux_fixed = compute_ausm_up_flux(qL, qR, n, 1.0, PRECOND_LEGACY)
 
         # 用修复前的（交换错配）系数独立重算一遍 p_half，只替换 P+/P-
         # 系数、其余（a_half/beta2/fa/Kp/Ku 等）沿用与生产代码相同的

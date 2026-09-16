@@ -17,6 +17,12 @@ import numpy as np
 from typing import Callable, Optional
 from loguru import logger
 
+from autoflowcfd.core.fr_operators.kernels import (
+    PRECOND_LEGACY,
+    PRECOND_PHYSICAL,
+    PRECOND_PRESSURE_PHYSICAL,
+    resolve_ausm_precond_mode,
+)
 from autoflowcfd.core.gpu import get_cupy
 from autoflowcfd.core.gpu.residual.gpu_flux import (
     euler_physical_flux_gpu,
@@ -48,6 +54,7 @@ def compute_inviscid_residual_fr_gpu(
     flat_face_cpu=None,
     device_id=0,
     mach_ref=0.1,
+    precond_mode=None,
 ):
     """P>=1 高阶 FR 无粘残差的 GPU 实现。
 
@@ -66,6 +73,9 @@ def compute_inviscid_residual_fr_gpu(
             kernels.py::compute_ausm_up_flux 文档）。默认值 0.1 只是
             保留旧硬编码值，真正的求解器路径（gpu_solver.py）必须显式
             传入 `solver.freestream["mach_ref"]`，不能依赖这个默认值。
+        precond_mode: AUSM+up 预处理声速作用域，None 表示按环境变量
+            `AFCFD_AUSM_PRECOND_MODE` 解析（与 CPU 端同一个解析器，
+            保证同一次运行里 CPU/GPU 两条路径取到同一档）。
 
     Returns:
         residual: CuPy 数组 (n_cells, n_sps, 5) 或 numpy 数组（与输入同类型）
@@ -155,7 +165,7 @@ def compute_inviscid_residual_fr_gpu(
     # 界面校正（按图着色逐色处理）
     correction = _compute_interface_correction_gpu(
         Q_gpu, adj_j, det_jacs, flat_face_gpu, Q_ghost_gpu,
-        n_cells, n_sps, n_prism, device_id, mach_ref,
+        n_cells, n_sps, n_prism, device_id, mach_ref, precond_mode,
     )
 
     residual = residual + correction
@@ -367,7 +377,7 @@ def _native_or_collapsed_contrib(
 
 def _compute_interface_correction_gpu(
     Q_gpu, adj_j, det_jacs, flat_face_gpu, Q_ghost_gpu,
-    n_cells, n_sps, n_prism, device_id, mach_ref,
+    n_cells, n_sps, n_prism, device_id, mach_ref, precond_mode=None,
 ):
     """GPU 界面校正计算（按图着色逐色处理）。
 
@@ -406,6 +416,10 @@ def _compute_interface_correction_gpu(
     已经过详细验证的 CPU kernel 逐字核对；请在有真实 GPU 的环境上跑
     该新增测试文件做最终确认。
     """
+    if precond_mode is None:
+        precond_mode = resolve_ausm_precond_mode()
+    precond_mode = int(precond_mode)
+
     cp = get_cupy()
     ff = flat_face_gpu
     correction = cp.zeros((n_cells, n_sps, 5), dtype=cp.float64)
@@ -505,6 +519,7 @@ def _compute_interface_correction_gpu(
             nO = Q_o.shape[0]
             flux_o = _ausm_up_flux_batch_gpu(
                 Q_o.reshape(nO, n_fp, 5), Q_n.reshape(nO, n_fp, 5), direction_o, mach_ref,
+                precond_mode,
             )
             F_tilde_common_o = flux_o * adj_mag_o[..., None] * side_factor_o[:, None, None]
 
@@ -604,6 +619,7 @@ def _compute_interface_correction_gpu(
 
             flux_n = _ausm_up_flux_batch_gpu(
                 Q_n_native.reshape(nN, n_fp, 5), Q_o_at_n.reshape(nN, n_fp, 5), direction_n, mach_ref,
+                precond_mode,
             )
             F_tilde_common_n = flux_n * adj_mag_n[..., None] * side_factor_n[:, None, None]
 
@@ -635,7 +651,7 @@ def _compute_interface_correction_gpu(
     return correction
 
 
-def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref):
+def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref, precond_mode):
     """GPU 批量 AUSM+up 通量计算（CuPy 向量化版本，含 Weiss-Smith 低马赫
     数预处理）。与 kernels.py::compute_ausm_up_flux 逐字对应，理由/推导
     见该函数文档，这里不重复；两处必须同步修改（该文件模块文档要求
@@ -672,6 +688,12 @@ def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref):
         Q_L, Q_R: (N, n_fp, 5) 左右状态
         normal: (N, n_fp, 3) 单位法向量——逐 FP 各自独立（不是逐面共享
             同一个值，见上方"真实 bug 修复"说明）
+        precond_mode: AUSM+up 预处理声速在通量内部的作用域（
+            kernels.py 的 PRECOND_PHYSICAL/PRECOND_PRESSURE_PHYSICAL/
+            PRECOND_LEGACY，语义与 CPU 端逐字对应，推导见该文件模块级
+            常量上方的长注释）。GPU 侧不存在 numba 磁盘缓存冻结全局量的
+            问题，但仍然按实参传入，以保证 CPU/GPU 交叉一致性测试能对
+            同一档逐项比对。
         mach_ref: 参考（自由来流）马赫数，见 kernels.py::
             compute_ausm_up_flux 文档
 
@@ -718,12 +740,31 @@ def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref):
     # _WEISS_SMITH_K=1.1 同一个安全裕度常数、同一套 beta2 公式）。
     beta2 = cp.minimum(1.0, cp.maximum(cp.maximum(Mbar2, 1.1 * mach_ref**2), 1e-10))
     sqrt_beta2 = cp.sqrt(beta2)
-    aL_p = sqrt_beta2 * aL
-    aR_p = sqrt_beta2 * aR
-    a_half_p = sqrt_beta2 * a_half
 
-    M_L = unL / cp.maximum(aL_p, 1e-10)
-    M_R = unR / cp.maximum(aR_p, 1e-10)
+    # 预处理声速的作用域按 precond_mode 分派，与 kernels.py::
+    # compute_ausm_up_flux 的 s_mass/s_pres 逐字对应（PRECOND_PHYSICAL
+    # 是默认值，此时两个因子都是 1.0、本函数精确退化为标准 AUSM+up）。
+    if precond_mode == PRECOND_PHYSICAL:
+        s_mass = 1.0
+        s_pres = 1.0
+    elif precond_mode == PRECOND_PRESSURE_PHYSICAL:
+        s_mass = sqrt_beta2
+        s_pres = 1.0
+    elif precond_mode == PRECOND_LEGACY:
+        s_mass = sqrt_beta2
+        s_pres = sqrt_beta2
+    else:
+        raise ValueError(f'未知 precond_mode: {precond_mode!r}')
+
+    aL_m = s_mass * aL
+    aR_m = s_mass * aR
+    a_half_m = s_mass * a_half
+    a_half_pr = s_pres * a_half
+
+    M_L = unL / cp.maximum(aL_m, 1e-10)
+    M_R = unR / cp.maximum(aR_m, 1e-10)
+    M_L_pr = unL / cp.maximum(s_pres * aL, 1e-10)
+    M_R_pr = unR / cp.maximum(s_pres * aR, 1e-10)
 
     # M+ / M-
     abs_ML = cp.abs(M_L)
@@ -744,24 +785,29 @@ def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref):
     Kp = 0.25
     sigma_p = 1.0
     one_minus_sigma = cp.maximum(1.0 - sigma_p * Mbar2, 0.0)
-    Mp = -(Kp / fa) * one_minus_sigma * (pR - pL) / (rho_half * a_half_p**2)
-    mass_flux = 0.5 * (rhoL * aL_p + rhoR * aR_p) * (M_half + Mp)
+    Mp = -(Kp / fa) * one_minus_sigma * (pR - pL) / (rho_half * a_half_m**2)
+    mass_flux = 0.5 * (rhoL * aL_m + rhoR * aR_m) * (M_half + Mp)
 
-    # P+ / P-
+    # P+ / P-（用压力分裂专属的马赫数 M_*_pr，见上方 s_pres 分派）
+    abs_ML_pr = cp.abs(M_L_pr)
+    abs_MR_pr = cp.abs(M_R_pr)
     Pp_L = cp.where(
-        abs_ML >= 1.0,
-        0.5 * (1.0 + cp.sign(M_L)),
-        0.25 * ((M_L + 1.0)**2 * (2.0 - M_L) + alpha_pressure * M_L * (M_L**2 - 1.0)**2),
+        abs_ML_pr >= 1.0,
+        0.5 * (1.0 + cp.sign(M_L_pr)),
+        0.25 * ((M_L_pr + 1.0)**2 * (2.0 - M_L_pr)
+                + alpha_pressure * M_L_pr * (M_L_pr**2 - 1.0)**2),
     )
     Pm_R = cp.where(
-        abs_MR >= 1.0,
-        0.5 * (1.0 - cp.sign(M_R)),
-        0.25 * ((M_R - 1.0)**2 * (2.0 + M_R) - alpha_pressure * M_R * (M_R**2 - 1.0)**2),
+        abs_MR_pr >= 1.0,
+        0.5 * (1.0 - cp.sign(M_R_pr)),
+        0.25 * ((M_R_pr - 1.0)**2 * (2.0 + M_R_pr)
+                - alpha_pressure * M_R_pr * (M_R_pr**2 - 1.0)**2),
     )
 
     # pu 速度扩散
     Ku = 0.75
-    p_half = Pp_L * pL + Pm_R * pR - Ku * Pp_L * Pm_R * (rhoL + rhoR) * fa * a_half_p * (unR - unL)
+    p_half = (Pp_L * pL + Pm_R * pR
+              - Ku * Pp_L * Pm_R * (rhoL + rhoR) * fa * a_half_pr * (unR - unL))
 
     # 上风通量
     upwind_L = (mass_flux >= 0.0)

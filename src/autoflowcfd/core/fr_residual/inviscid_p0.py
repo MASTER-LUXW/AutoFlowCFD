@@ -20,6 +20,7 @@ def compute_inviscid_residual_fv_p0(
     mesh,
     boundary_ghost_provider: Optional[Callable[[int, np.ndarray, np.ndarray], np.ndarray]] = None,
     mach_ref: float = 0.1,
+    precond_mode: Optional[int] = None,
 ) -> np.ndarray:
     """P0（1 SP/cell，Order Continuation 最低阶）专用有限体积残差。
 
@@ -53,12 +54,21 @@ def compute_inviscid_residual_fv_p0(
         U: 守恒变量，形状 (n_cells, 1, n_vars)
         mesh: HighOrderMesh 实例（n_points_1d 必须为 1）
         boundary_ghost_provider: 同 compute_inviscid_residual_fr
+        precond_mode: AUSM+up 预处理声速作用域，None 表示按环境变量
+            `AFCFD_AUSM_PRECOND_MODE` 解析（见 kernels.py::
+            resolve_ausm_precond_mode）。在**纯 Python 层**解析、以
+            实参形式传进 njit kernel 是硬性要求，不能改成 njit 里读
+            全局量。
 
     Returns:
         residual: 形状 (n_cells, 1, 5)
     """
     from .inviscid import conserved_to_primitive, DefaultGhostProvider
     from .inviscid_p0_kernel import _p0_inviscid_kernel
+    from autoflowcfd.core.fr_operators.kernels import resolve_ausm_precond_mode
+
+    if precond_mode is None:
+        precond_mode = resolve_ausm_precond_mode()
 
     n_cells = mesh.n_cells
     if mesh.cell_volumes is None:
@@ -96,7 +106,7 @@ def compute_inviscid_residual_fv_p0(
         unit_normals, area_weights,
         Q_all, Q_ghost, cell_volumes,
         mixed_p0_bnd_frac,
-        n_cells, n_threads, mach_ref,
+        n_cells, n_threads, mach_ref, int(precond_mode),
     )
 
     # --- per-thread buffer 归约 ---
