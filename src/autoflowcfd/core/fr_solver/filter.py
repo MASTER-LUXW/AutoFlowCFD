@@ -389,6 +389,9 @@ def resolve_filter_mode(backend: str) -> str:
 def build_sensor_gated_filter_func_arrays(
     n_cells: int, n_sps: int, order: int, filter_prism, filter_tet,
     *, n_prism=None, cell_is_prism=None,
+    sensor: str = "persson",
+    owner_cell=None, neighbor_cell=None, is_boundary=None,
+    freestream=None,
 ) -> Callable[[np.ndarray], np.ndarray]:
     """传感器门控模态滤波的**后端无关**实现（只吃数组，不吃 solver）。
 
@@ -415,12 +418,55 @@ def build_sensor_gated_filter_func_arrays(
         filter_prism, filter_tet: 滤波矩阵
         n_prism / cell_is_prism: 单元类型划分，恰好给一个，语义同
             `compute_troubled_cell_mask`
+        sensor: 门控判据（`AFCFD_TROUBLED_SENSOR`，见
+            `fr_operators/bounds_sensor.py::resolve_troubled_sensor`）：
+
+              persson  Persson-Peraire 模态能量指示器（默认，既有行为）
+              bounds   邻居极值越界（BJ 型）
+              both     两者取并集
+
+            **为什么需要第二个判据**：Persson-Peraire 的 `s0 =
+            -4*log10(order)` 在 order=1 时为 0，门限退化成"顶模态能量
+            占比 >= 10%"，而 P1 的顶模态就是全部非常数模态——它在生产
+            阶数 P1 上原理上不适用（实测 A/B 前 51 步逐字符相同）。
+            BJ 型判据不依赖模态分解，没有这个退化。完整推导与真实网格
+            实测见 `fr_operators/bounds_sensor.py` 模块文档。
+        owner_cell / neighbor_cell / is_boundary: 面连接数组，`sensor`
+            含 "bounds" 时**必须**给出（BJ 判据要邻居均值）。索引空间
+            必须与 `n_cells` 一致——分布式 local 排列传 local 面数组。
+        freestream: `solver.freestream` 字典，`sensor` 含 "bounds" 时
+            **必须**给出——BJ 判据的绝对地板要用来流参考量级
+            （见 `bounds_sensor.py` 模块文档"第一版用全场 RMS 做尺度
+            为什么不行"一节：用全场 RMS 时实测标记了 11.08% 的单元）。
     """
     from autoflowcfd.core.fr_operators.artificial_viscosity import (
         compute_troubled_cell_mask,
     )
+    from autoflowcfd.core.fr_operators.bounds_sensor import (
+        compute_bounds_violation_mask,
+    )
+    from autoflowcfd.core.fr_solver.residual_diagnostics import (
+        _reference_scales,
+    )
     if (n_prism is None) == (cell_is_prism is None):
         raise ValueError("n_prism 与 cell_is_prism 必须且只能给一个")
+    sensor = str(sensor).lower()
+    if sensor not in ("persson", "bounds", "both"):
+        raise ValueError(f"未知 sensor: {sensor!r}")
+    need_conn = sensor in ("bounds", "both")
+    if need_conn and freestream is None:
+        raise ValueError(
+            f"sensor={sensor!r} 需要 freestream（BJ 判据的绝对地板用来流"
+            f"参考量级），不能静默退回用全场 RMS——实测那会标记 11% 的单元"
+        )
+    if need_conn and (owner_cell is None or neighbor_cell is None
+                      or is_boundary is None):
+        # 不静默退回 persson：那会让"我明明开了 bounds 档"与实际行为
+        # 不一致，而这种不一致在日志里完全看不出来。
+        raise ValueError(
+            f"sensor={sensor!r} 需要 owner_cell/neighbor_cell/is_boundary "
+            f"三个面连接数组，缺失的不能静默忽略"
+        )
     if cell_is_prism is not None:
         cip = np.asarray(cell_is_prism, dtype=bool)
         prism_idx_all = np.flatnonzero(cip)
@@ -431,9 +477,22 @@ def build_sensor_gated_filter_func_arrays(
 
     def filter_func(U_flat: np.ndarray) -> np.ndarray:
         U = U_flat.reshape(n_cells, n_sps, -1)
-        troubled = compute_troubled_cell_mask(
-            np.ascontiguousarray(U[:, :, 0]), order,
-            n_prism=n_prism, cell_is_prism=cell_is_prism)
+        # Persson-Peraire 只探**守恒密度**（S_e 是能量比值、对整体缩放
+        # 不变，所以守恒密度与原始密度给出同一个判据）。BJ 判据则探
+        # 全部 5 个守恒变量并取并集：2026-09-16 的真实 checkpoint 实测
+        # 里越界量最大的是横向动量与压力，只探密度会漏掉它们
+        # （同一类问题：人工粘性的 DEFAULT_SENSOR_VAR_INDEX = 0 只探
+        # 密度，而 P2 的失效模态在能量上）。
+        troubled = np.zeros(n_cells, dtype=bool)
+        if sensor in ("persson", "both"):
+            troubled |= compute_troubled_cell_mask(
+                np.ascontiguousarray(U[:, :, 0]), order,
+                n_prism=n_prism, cell_is_prism=cell_is_prism)
+        if sensor in ("bounds", "both"):
+            troubled |= compute_bounds_violation_mask(
+                np.ascontiguousarray(U[:, :, :5]),
+                owner_cell, neighbor_cell, is_boundary,
+                ref_scales=_reference_scales(freestream, 5))
         if not np.any(troubled):
             return U_flat
         for sel_all, mat in ((prism_idx_all, filter_prism),
@@ -467,14 +526,32 @@ def build_sensor_gated_filter_func(solver) -> Callable[[np.ndarray], np.ndarray]
     `fr_solver/turbulence.py` 单独调用、有**独立**的门控开关，理由见
     `filter_scalar_field` 文档"为什么 k/omega 的门控必须独立判定"一节。
     """
+    from autoflowcfd.core.fr_operators.bounds_sensor import (
+        resolve_troubled_sensor,
+    )
+
     mesh = solver.mesh
     ops = solver.ops
     order = getattr(solver, "current_order", None)
     if order is None:
         order = solver.order
+    sensor = resolve_troubled_sensor()
+    conn = {}
+    if sensor in ("bounds", "both"):
+        fc = mesh.face_connectivity
+        if fc is None:
+            raise RuntimeError(
+                "AFCFD_TROUBLED_SENSOR=bounds/both 需要 mesh.face_connectivity"
+                "（BJ 判据要面邻居均值），当前网格没有构建面连接"
+            )
+        conn = dict(owner_cell=np.asarray(fc.owner_cell),
+                    neighbor_cell=np.asarray(fc.neighbor_cell),
+                    is_boundary=np.asarray(fc.is_boundary, dtype=bool),
+                    freestream=solver.freestream)
     return build_sensor_gated_filter_func_arrays(
         mesh.n_cells, mesh.n_sps_per_cell, int(order),
-        ops.filter_prism, ops.filter_tet, n_prism=mesh.n_prism_cells)
+        ops.filter_prism, ops.filter_tet, n_prism=mesh.n_prism_cells,
+        sensor=sensor, **conn)
 
 
 def build_filter_func(solver) -> Callable[[np.ndarray], np.ndarray]:

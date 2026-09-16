@@ -652,6 +652,13 @@ class FRSolver(_SolverGeometryMixin):
         print(f"   Artificial viscosity: {_av}")
         print(f"   Modal filter mode: {_fm}")
         print(f"   AUSM+up precond mode: {_pm_label(_pm_resolve())}")
+        # troubled-cell 门控判据（只在 FILTER_MODE=sensor 档生效，
+        # 两个维度刻意独立以便受控 A/B）。它决定 P>=1 时"对哪些
+        # 单元施加模态滤波"，是与滤波档同等量级的物理开关。
+        from autoflowcfd.core.fr_operators.bounds_sensor import (
+            resolve_troubled_sensor as _ts_resolve,
+        )
+        print(f"   Troubled-cell sensor: {_ts_resolve()}")
 
         # DUAL_TIME 专用：物理时间层 n-1 的解（BDF2 时间导数项需要），
         # None 表示还没有跑过物理步（下一步会退化为 BDF1），见 step()

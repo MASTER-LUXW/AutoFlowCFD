@@ -383,6 +383,13 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         from autoflowcfd.fr.modal_filter import FILTER_MODE as _fm
         print(f"   Modal filter mode: {_fm}")
         print(f"   AUSM+up precond mode: {_pm_label(_pm_resolve())}")
+        # troubled-cell 门控判据（只在 FILTER_MODE=sensor 档生效，
+        # 两个维度刻意独立以便受控 A/B）。它决定 P>=1 时"对哪些
+        # 单元施加模态滤波"，是与滤波档同等量级的物理开关。
+        from autoflowcfd.core.fr_operators.bounds_sensor import (
+            resolve_troubled_sensor as _ts_resolve,
+        )
+        print(f"   Troubled-cell sensor: {_ts_resolve()}")
 
 
     def _build_boundary_ghost_provider(self, bc_overrides):
