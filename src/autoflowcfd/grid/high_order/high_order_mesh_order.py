@@ -151,6 +151,43 @@ def compute_native_tet_jacobians(
     return result
 
 
+def _verify_tet_fine_metric_is_cellwise_constant(
+    tet_part: Optional[Dict[str, np.ndarray]], n_sps_per_cell_fine: int
+) -> None:
+    """校验四面体细点度量在单元内逐槽位完全相同。
+
+    `get_overintegration_context` 的四面体段只取第 0 列再广播到该段自己的
+    `n_fine_tet` 宽度——这让四面体的过积分阶数不再受棱柱布局宽度约束
+    （P3 因此能取到理想的 over_order=6，去混叠误差 3.37e-3 -> 4.80e-6）。
+    这个等价性依赖"直边单元 Jacobian 不依赖参考点位置"，也就是
+    `compute_native_tet_jacobians` 的常数广播。
+
+    判据用**逐位相同**而不是容差：那些值本来就是同一次赋值广播出来的，
+    任何差异都说明构造方式变了（例如引入曲边四面体后改成逐点求值），
+    那时必须显式改掉广播路径，而不是让它悄悄给出"第 0 个细点的度量"。
+    """
+    if tet_part is None:
+        return
+    for key in ("det_jacs", "inv_jacs"):
+        arr = tet_part.get(key)
+        if arr is None:
+            continue
+        per_cell = arr.reshape((-1, n_sps_per_cell_fine) + arr.shape[1:])
+        if per_cell.shape[0] == 0:
+            continue
+        ref_col = per_cell[:, :1]
+        if not np.array_equal(per_cell, np.broadcast_to(ref_col, per_cell.shape)):
+            bad = int((per_cell != np.broadcast_to(ref_col, per_cell.shape)).any(
+                axis=tuple(range(1, per_cell.ndim))).sum())
+            raise ValueError(
+                f"四面体细点度量 '{key}' 在 {bad} 个单元内部不是逐槽位常数"
+                f"——`get_overintegration_context` 的四面体段取第 0 列广播的"
+                f"前提不再成立（典型原因：引入了曲边四面体、Jacobian 改成"
+                f"逐点求值）。必须改掉那条广播，不能让它静默只用第 0 个"
+                f"细点的度量。"
+            )
+
+
 def _combine_prism_and_tet_jacobians(
     prism_part: Optional[Dict[str, np.ndarray]], tet_part: Optional[Dict[str, np.ndarray]]
 ) -> Optional[Dict[str, np.ndarray]]:
@@ -274,14 +311,22 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
     # n_points_1d==1 分支），跳过以节省内存/构建时间。
     #
     # native 单纯形基过积分算子已实现（`native_tet_overintegration.py::
-    # build_native_tet_overintegration_operators`，Part8 文档"四·七"节，
-    # 用与棱柱坍缩坐标同一个 `over_order=min(2*order,
-    # OVERINTEGRATION_MAX_ORDER)` 经验法则）。`jacobians_fine` 对四面体
-    # 单元的构造复用 `compute_native_tet_jacobians`（同一个"直边单元
-    # 常数 Jacobian 广播"函数，只是这里传入 FINE 网格的
-    # `n_sps_per_cell_fine` 计数而不是 coarse 的 `n_sps_per_cell`——
-    # 直边单元 Jacobian 不依赖参考点位置，广播到多少个槽位都是同一个
-    # 常数，不需要为"fine"专门重新推导）。
+    # build_native_tet_overintegration_operators`，Part8 文档"四·七"节）。
+    # **四面体的 over_order 自 2026-09-17 起与棱柱不同**（native PKD 基不
+    # 受坍缩基条件数上限约束，见 `fr/native_tet_overintegration.py::
+    # NATIVE_TET_OVERINTEGRATION_MAX_ORDER`）：P2 是 4 而棱柱是 3、P3 是 5。
+    # 这里算的 `n_sps_per_cell_fine` 仍然只由**棱柱**的 over_order 决定，
+    # 它同时充当四面体那一段的**布局宽度**上界（`fr/operators.py` 的
+    # `resolve_tet_overintegration_order` 会据此把四面体阶数夹到装得下）。
+    #
+    # `jacobians_fine` 对四面体单元的构造复用 `compute_native_tet_jacobians`
+    # （同一个"直边单元常数 Jacobian 广播"函数，只是这里传入 FINE 网格的
+    # `n_sps_per_cell_fine` 计数而不是 coarse 的 `n_sps_per_cell`——直边
+    # 单元 Jacobian 不依赖参考点位置，广播到多少个槽位都是同一个常数，
+    # 不需要为"fine"专门重新推导）。**正是这个"原样广播"让四面体可以只取
+    # 前 `n_fine_tet` 列**：那些列上的度量与在真实细点上求值恒等，所以
+    # 四面体用更高的 over_order 不需要把这个共用数组加宽（见
+    # `core/fr_operators/volume_contract.get_overintegration_context`）。
     jacobians_fine = None
     n_sps_per_cell_fine = 0
     if order >= 1:
@@ -302,19 +347,19 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
         # `div(adj(J)*G(Q,grad_vel,grad_T,mu_t))`，三个一次场的乘积是三次，
         # `over_order=2` 的细网格（二次空间）表示不了它。
         #
-        # **`OVERINTEGRATION_MAX_ORDER = 3` 的上限不动**，但要注意它的
-        # **适用范围**（2026-09-16 实测更正）：那条"放宽到 4 会让 P2 均匀
-        # 自由流场残差从 1.06e-5 恶化到 5.6e-3、根因是 D_fine 绝对量级暴涨
-        # 约 6.3 万倍"的论证只对**坍缩坐标**基成立（也就是这里的棱柱）。
-        # native 四面体实测在 over_order=6 才 cond(V)=3856、`max|D|` 从 3
-        # 到 6 只长 3.5 倍，那条数值论证对它不适用；它目前仍受这个上限
-        # 约束的真实原因是 `jacobians_fine` 棱柱/四面体共用一个
-        # `n_sps_per_cell_fine` 维度这条架构约束。完整说明见
-        # collapsed_basis.py 该常量上方的注释与
-        # tests/unit/test_native_tet_overintegration_conditioning.py。
-        # 所以 `3x` 与 `2x` 的差别**只在 order=1**：
+        # **`OVERINTEGRATION_MAX_ORDER = 3` 自 2026-09-17 起只约束棱柱**。
+        # 那条"放宽到 4 会让 P2 均匀自由流场残差从 1.06e-5 恶化到 5.6e-3、
+        # 根因是 D_fine 绝对量级暴涨约 6.3 万倍"的论证只对**坍缩坐标**基
+        # 成立，也就是这里算的棱柱；native 四面体实测在 over_order=6 才
+        # cond(V)=3856、`max|D|` 从 3 到 6 只长 3.5 倍，已按自己的上限
+        # 独立解析（见上方注释与 collapsed_basis.py 该常量上方的说明、
+        # tests/unit/test_native_tet_overintegration_conditioning.py）。
+        #
+        # 所以 `3x` 与 `2x` 对**棱柱**的差别只在 order=1：
         #   order=1: 2x -> over_order 2（细点 27）； 3x -> 3（细点 64）
         #   order>=2: 两者都被 cap 到 3，完全相同
+        # （四面体在各阶数上两者都有区别，但那由 `fr/operators.py` 解析，
+        # 不影响这里的 `n_sps_per_cell_fine`。）
         #
         # `3x` 在 order=1 的实测精度收益 / 已知代价，以及"为什么默认不改"，
         # 全部记在 `resolve_overintegration_order_rule` 的文档里。
@@ -334,6 +379,12 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
         tet_jacobians_fine = compute_native_tet_jacobians(
             mesh, order, n_sps_per_cell_fine, want_scaled_quality=False
         )
+        # 过积分的四面体段直接取第 0 列广播（见 `core/fr_operators/
+        # volume_contract.get_overintegration_context`），前提是"该单元
+        # 全部细点槽位的度量完全相同"。这里显式校验，不默默假设——将来
+        # 若引入曲边四面体，这条会当场失败而不是静默给出错误度量。
+        _verify_tet_fine_metric_is_cellwise_constant(
+            tet_jacobians_fine, n_sps_per_cell_fine)
         jacobians_fine = _combine_prism_and_tet_jacobians(prism_jacobians_fine, tet_jacobians_fine)
 
     return {

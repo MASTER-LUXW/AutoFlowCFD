@@ -323,14 +323,31 @@ def get_overintegration_context(mesh, ops):
     `KeyError`，而不是静默用棱柱的 `n_fine` 去切四面体段的度量——后者
     会产生形状不匹配或（更糟）安静的错误答案。
 
-    ## 四面体段的细点度量为什么可以直接切前 n_fine_tet 列
+    ## 四面体段的细点度量从**第 0 列广播**（2026-09-17 第二次改动）
 
     直边四面体的 Jacobian **逐单元为常数**（`compute_native_tet_jacobian`
     不依赖参考点位置），`compute_native_tet_jacobians` 把同一个常数写满
-    该单元的全部细点槽位。所以"前 `n_fine_tet` 列"与"native 真实细点上的
-    度量"**恒等**，不需要另存一份、也不需要重新求值。
-    （`(oo+1)^3 >= (oo+1)(oo+2)(oo+3)/6` 对任意 oo>=0 成立，切片永不越界；
-    下面有显式断言，不依赖这条不变量默默成立。）
+    该单元的全部细点槽位。所以这一段的度量只有 `n_tet` 个真实数值，
+    取第 0 列再广播到 `n_fine_tet` 列与"在 native 真实细点上求值"恒等。
+
+    第一版是"切前 `n_fine_tet` 列"，那等价但带来一条**多余的约束**
+    `n_fine_tet <= n_fine_prism`——四面体的过积分阶数因此被棱柱的布局宽度
+    夹住。实测代价在 P3 上很大：去混叠误差在 `oo = 2*order` 处断崖式下降
+    （P3 oo=3 6.26e-2 / oo=4 2.66e-2 / oo=5 3.37e-3 / **oo=6 4.80e-6**），
+    被夹到 5 只拿到 18.6 倍中的 13000 倍。改成广播后这条约束彻底消失，
+    P3 可以直接取理想的 oo=6。
+
+    **这条广播依赖的不变量在网格构造时被显式校验**（
+    `high_order_mesh_order.build_order_geometry` 里的
+    `_verify_tet_fine_metric_is_cellwise_constant`），不是默默假设——
+    将来若引入曲边四面体，那条校验会当场失败而不是静默给出错误度量。
+
+    顺带的事实（如实记录，不是本函数的问题）：`jacobians_fine` 里属于
+    四面体的那 `n_tet * n_fine_prism * 10` 个浮点数现在对过积分路径完全
+    冗余，只需要每单元 10 个。plate_demo（363,392 单元）P2 下这是约
+    1.5 GB vs 24 MB。把那块压缩掉是一项独立的**内存**优化，要改
+    `jacobians_fine` 的全局形状与 GPU/MPI/分布式加载共 9 处消费点，
+    与本函数要解决的精度问题无关。
     """
     if getattr(mesh, "jacobians_fine", None) is None:
         return None
@@ -357,14 +374,13 @@ def get_overintegration_context(mesh, ops):
             f"形状 {ops.overint_D_fine_tet.shape} 不一致——算子构造有 bug，"
             f"不静默采用其中一个"
         )
-    if n_fine_tet > n_fine_prism:
-        raise ValueError(
-            f"四面体真实细点数 {n_fine_tet} 超过了棱柱细点布局宽度 "
-            f"{n_fine_prism}——`jacobians_fine` 的列数不足以覆盖四面体段。"
-            f"这在 prism/tet 共用同一个 over_order 时不可能发生；若是"
-            f"刻意给四面体更高的 over_order，需要先为四面体单独存一份"
-            f"紧凑（逐单元常数）的细点度量，见本函数文档。"
-        )
+    # 四面体段：逐单元常数 -> 取第 0 列广播到 n_fine_tet 宽。
+    # `np.broadcast_to` 是零拷贝视图；消费方在分块时自己
+    # `np.ascontiguousarray` 物化当前块（numba kernel 需要连续输入）。
+    n_tet = n_cells - n_prism
+    det_tet = np.broadcast_to(det_all[n_prism:, :1], (n_tet, n_fine_tet))
+    inv_tet = np.broadcast_to(
+        inv_all[n_prism:, :1], (n_tet, n_fine_tet, 3, 3))
 
     return dict(
         segs=(
@@ -373,7 +389,7 @@ def get_overintegration_context(mesh, ops):
              ops.overint_interp_c2f_prism, ops.overint_D_fine_prism,
              ops.overint_restrict_f2c_prism),
             (n_prism, n_cells, n_fine_tet,
-             det_all[n_prism:, :n_fine_tet], inv_all[n_prism:, :n_fine_tet],
+             det_tet, inv_tet,
              ops.overint_interp_c2f_tet, ops.overint_D_fine_tet,
              ops.overint_restrict_f2c_tet),
         ),

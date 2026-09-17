@@ -5,9 +5,23 @@
 
 "P2 理想 over_order=4 被压到 3、P3 理想 6 被压到 3（= order，过积分完全
 失效）"——这条结论此前只是按经验法则 `rule*order` 推出来的**定性**说法，
-没有人量过它的**代价**。而放开这个上限要改 `jacobians_fine` 的布局与全部
-消费点（见 `fr/collapsed_basis.py::OVERINTEGRATION_MAX_ORDER` 上方注释），
-是个跨多文件的改动——**先量收益再付代价**。
+没有人量过它的**代价**。而放开这个上限看起来要改 `jacobians_fine` 的布局
+与全部消费点，是个跨多文件的改动——**先量收益再付代价**。
+
+## 后续（2026-09-17）：本文件量出的收益已经被兑现
+
+四面体的上限已按单元类型独立出去（`fr/native_tet_overintegration.py::
+NATIVE_TET_OVERINTEGRATION_MAX_ORDER = 6`，env `AFCFD_TET_OVERINT_MAX_ORDER`），
+实际取到 P1 oo=2 / P2 oo=4（**完整达到理想**）/ P3 oo=5。"要改 jacobians_fine
+布局"那条前提被推翻了：直边四面体的细点度量是一个逐单元常数的原样广播，
+取前 `n_fine_tet` 列与在真实细点上求值恒等，不需要加宽任何数组。完整说明与
+真实网格实测见 `test_tet_overintegration_cap_raised.py`。
+
+所以下面表格里 P2 的 3->4 与 P3 的 3->6 现在是**已实现的收益**（P3 受布局
+夹到 5，差理想约 4 倍），不再是"若放开则可得"。本文件的作用相应变成：钉住
+各档去混叠误差的量级，让任何人改动过积分算子实现后立刻看到精度变化。
+**`OVERINTEGRATION_MAX_ORDER` 现在只约束棱柱**——下面几处用它来表示"当前
+上限"的地方保留原样，是为了记录量这些数时的历史状态。
 
 ## 算例设计（含一处必须避开的陷阱）
 
@@ -70,6 +84,12 @@ from autoflowcfd.fr.native_tet_overintegration import (
 )
 
 GAMMA, RHO, P0, U = 1.4, 1.225, 101325.0, 30.0
+
+
+def _resolve_rule():
+    from autoflowcfd.fr.collapsed_basis import resolve_overintegration_order_rule
+
+    return resolve_overintegration_order_rule()
 
 #: 参照档：8 次已远高于任何被测档，用它当"精确"解
 _REF_OVER_ORDER = 8
@@ -191,9 +211,57 @@ class TestCapCostIsLarge:
         """P1：`min(2*1, 3) == 2`，上限不约束（理想阶数就是 2）。
 
         这条说明"上限只在 P2/P3 上造成截断"——P1（当前生产阶数）不受
-        影响，所以放开上限不改变已验证的 P1 结果。
+        影响，所以放开上限不改变已验证的 P1 的过积分阶数。2026-09-17
+        放开四面体上限后实测确实如此（四面体仍取 oo=2），见
+        `test_tet_overintegration_cap_raised.py::
+        TestProductionOrders::test_p1_unchanged_from_before_the_raise`。
         """
         assert min(2 * 1, OVERINTEGRATION_MAX_ORDER) == 2 * 1
+
+    def test_the_raised_tet_cap_actually_delivers_the_measured_gain(self):
+        """放开后四面体**实际**取到的阶数，其误差就是本文件量出的那一档。
+
+        把"量到的收益"和"实际生效的配置"钉在同一个文件里，避免出现
+        "收益量过了但默认值没改"这种状态（本项目此前真实发生过）。
+        """
+        from autoflowcfd.fr.native_tet_overintegration import (
+            resolve_tet_overintegration_order,
+        )
+
+        if _resolve_rule() != 2:
+            pytest.skip("AFCFD_OVERINT_ORDER_RULE 非默认 2x")
+        # 布局宽度不再约束（四面体段的细点度量改成"第 0 列广播"），
+        # 所以 P2/P3 都取到理想的 2*order
+        assert resolve_tet_overintegration_order(2) == 4
+        err_old = _median_rel_error(2, 3)
+        err_new = _median_rel_error(2, 4)
+        assert err_new < err_old / 100.0, (
+            f"P2 实际生效的 oo=4 误差 {err_new:.3e} 相对旧上限 oo=3 的 "
+            f"{err_old:.3e} 只改善了 {err_old/err_new:.1f} 倍（实测 3400 倍）")
+        assert resolve_tet_overintegration_order(3) == 6
+        err_p3_old = _median_rel_error(3, 3)
+        err_p3_new = _median_rel_error(3, 6)
+        assert err_p3_new < err_p3_old / 100.0, (
+            f"P3 实际生效的 oo=6 误差 {err_p3_new:.3e} 相对 oo=3（完全无操作）"
+            f"的 {err_p3_old:.3e} 只改善了 {err_p3_old/err_p3_new:.1f} 倍"
+            f"（实测 13000 倍）")
+
+    def test_the_cliff_is_at_twice_the_order(self):
+        """去混叠误差在 `oo = 2*order` 处**断崖式**下降，低于它基本无收益。
+
+        这条是"为什么必须取到 2*order、取 2*order-1 不够"的依据——P3 一度
+        被布局夹到 5，看起来"只差一阶"，实测却只拿到 18.6 倍中的 13000 倍：
+
+            P2  oo=2 6.89e-2  oo=3 2.27e-2  oo=4 7.19e-6  oo=5 1.74e-6
+            P3  oo=3 6.26e-2  oo=4 2.66e-2  oo=5 3.37e-3  oo=6 4.80e-6
+        """
+        for order in (2, 3):
+            below = _median_rel_error(order, 2 * order - 1)
+            at = _median_rel_error(order, 2 * order)
+            assert at < below / 100.0, (
+                f"P{order}: oo={2*order} 的误差 {at:.3e} 相对 oo={2*order-1} 的 "
+                f"{below:.3e} 只改善了 {below/at:.1f} 倍——断崖不在 2*order 处了，"
+                f"`rule*order` 这条经验法则的依据需要重新评估")
 
     def test_linear_couette_case_cannot_detect_the_cap(self):
         """记录方法论：线性 Couette 算例量不出上限的代价。

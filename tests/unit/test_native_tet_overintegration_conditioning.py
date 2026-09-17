@@ -33,27 +33,31 @@ AutoFlowCFD V2.0 - native 四面体过积分算子的条件数/量级实测钉�
 over_order=3 到 6 只长 3.5 倍（坍缩基同区间暴涨 6.3 万倍）。**上限 3
 的那条论证对 native 完全不适用。**
 
-## 那为什么上限还没放开
+## 上限已于 2026-09-17 放开（本文件的数据是那次放开的依据）
 
-不是因为数值条件数，而是一条**架构**约束（如实记录，不是数值理由）：
+四面体的过积分阶数已独立出去（`fr/native_tet_overintegration.py::
+NATIVE_TET_OVERINTEGRATION_MAX_ORDER = 6`，env `AFCFD_TET_OVERINT_MAX_ORDER`），
+P1/P2/P3 都取到理想的 `2*order`（2/4/6）。
 
-`mesh.jacobians_fine` 是棱柱与四面体**共用一个** `n_sps_per_cell_fine`
-维度的合并数组（`high_order_mesh_order.py::_build_order_geometry` 里
-`_combine_prism_and_tet_jacobians`），四面体通过
-`native_tet_padding.pad_native_tet_matrix_to_global` 填进
-`(over_order+1)^3` 的槽位布局。所以"四面体用 over_order=4、棱柱仍用 3"
-要求合并数组按二者的较大者分配（125 槽 vs 64 槽），P2 的
-`jacobians_fine` 内存从约 1.86 GB 涨到约 3.63 GB——而 plate_demo
-（363,392 单元）P2 实测常驻已经是 13.9 GB。
+本段曾记录一条"架构约束"作为不放开的理由：`mesh.jacobians_fine` 是棱柱与
+四面体共用一个 `n_sps_per_cell_fine` 维度的合并数组，"四面体用 4、棱柱用 3"
+要按较大者分配（125 槽 vs 64 槽），plate_demo P2 的这块内存会从约 1.86 GB
+涨到约 3.63 GB。**那条论证是错的，被自己的代码推翻**：
+`high_order_mesh_order.compute_native_tet_jacobians` 对直边四面体只算一个
+逐单元常数、**原样广播**填满全部槽位，所以四面体段的度量取第 0 列广播到
+本段自己的 `n_fine_tet` 即可，完全不需要更宽的数组（见
+`core/fr_operators/volume_contract.get_overintegration_context`）。
 
-真正的解法是利用"直边四面体 Jacobian 逐单元为常数"这一事实给四面体
-单独存一份紧凑的（O(n_cells) 而不是 O(n_cells * n_fine)）细网格
-Jacobian，那同时也是一项独立的内存优化；它要改 `jacobians_fine` 的
-布局与全部消费点，必须在真实网格上重新量过 P2/P3 才能上线。
+放开的收益已量化（`test_overintegration_cap_cost.py`）：去混叠误差在
+`oo = 2*order` 处断崖式下降，P2 3400 倍、P3 13000 倍。放开本身会抬高自由流
+保持性的误差底（下表 `D@1/max|D|` 那一列随阶数增长就是它），已同批用
+`fr/diff_matrix_consistency.enforce_constant_annihilation` 消掉——**所以下表
+的 `D@1/max|D|` 与 `D@r - 1` 两列现在只反映"修正前"的构造，本文件仍按那个
+构造独立复算，用途是监控 Vandermonde 条件数本身的变化。**
 
-本文件的作用是把上面的实测数据固定下来，使得
-(a) 任何人读到那个上限时不会再以为它对 native 也有数值依据，
-(b) 真去放开上限时有一个现成的、机器可验证的起点。
+本文件的作用相应是：
+(a) 任何人读到坍缩基那个上限时不会再以为它对 native 也有数值依据，
+(b) 把 native 到 over_order=6 仍然良态这件事钉成可执行的证据。
 """
 
 import numpy as np

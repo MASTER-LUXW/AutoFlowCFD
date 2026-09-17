@@ -188,6 +188,7 @@ def build_native_tet_operators(order: int) -> Tuple[np.ndarray, np.ndarray]:
         第 m 个方向——这里是 r/s/t，不是 a/b/c——的导数）。
     """
     from .warp_blend_nodes import warp_blend_nodes_3d
+    from .diff_matrix_consistency import enforce_constant_annihilation
 
     r, s, t = warp_blend_nodes_3d(order)
     a, b, c = rst_to_abc(r, s, t)
@@ -213,6 +214,13 @@ def build_native_tet_operators(order: int) -> Tuple[np.ndarray, np.ndarray]:
 
     lu = lu_factor(V.T)
     D = np.stack([lu_solve(lu, Vr.T).T, lu_solve(lu, Vs.T).T, lu_solve(lu, Vt.T).T], axis=-1)
+    # 强制逐位精确地零化常数（`D @ 1 = 0`）。解析上必然成立，但 LU 求解
+    # 的舍入残余会留到 `eps*cond(V)`，而**直边四面体的自由流保持性完全
+    # 由这个残余决定**（度量逐单元常数，均匀流下体积项散度恰好等于
+    # `adj(J)*F*(D@1)/det(J)`，还会被小体积单元放大）。实测 order=4 的
+    # 残余 9.3e-14 在真实网格上放大成 3.06e-3 的伪残差。详细推导、代价
+    # 与适用范围见 `diff_matrix_consistency.py` 模块文档。
+    enforce_constant_annihilation(D)
     return np.column_stack([r, s, t]), D
 
 

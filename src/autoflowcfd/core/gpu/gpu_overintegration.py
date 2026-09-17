@@ -39,9 +39,13 @@ def get_overintegration_segs_gpu(mesh_data, ops_data, n_cells, n_prism):
     其中 `D_fine` 的收缩是 O(n_fine^2)（P2 上 10.2 倍无效 FLOPs）。
     CPU 侧实测 P1 加速 3.04x、P2 加速 4.63x，最大相对差 1.4e-16 / 0.0。
 
-    四面体段的细点度量直接切 `adj_j_fine[n_prism:, :n_fine_tet]`：直边
-    四面体的 Jacobian 逐单元为**常数**，全部细点槽位存的是同一个值，所以
-    前 n_fine_tet 列与"native 真实细点上的度量"恒等。
+    四面体段的细点度量取 `adj_j_fine[n_prism:, :1]` 再**广播**到该段自己的
+    `n_fine_tet` 宽：直边四面体的 Jacobian 逐单元为**常数**，全部细点槽位
+    存的是同一个值，所以第 0 列就是那个常数。与 CPU 端
+    `volume_contract.get_overintegration_context` 完全同一条做法（第一版
+    两边都是"切前 n_fine_tet 列"，那等价但额外要求
+    `n_fine_tet <= n_fine_prism`，把 P3 的过积分阶数从理想的 6 夹到 5，
+    实测去混叠误差因此从 4.80e-6 退到 3.37e-3）。
 
     `n_fine_tet` 从 `overint_D_fine_tet` 的**形状**推导（与 CPU 端同一个
     做法）——矩阵是单一事实来源，从形状推导在结构上不可能与它不同步。
@@ -54,17 +58,38 @@ def get_overintegration_segs_gpu(mesh_data, ops_data, n_cells, n_prism):
     adj_all = mesh_data['adj_j_fine']
     n_fine_prism = int(adj_all.shape[1])
     n_fine_tet = int(ops_data['overint_D_fine_tet'].shape[0])
-    if n_fine_tet > n_fine_prism:
-        raise ValueError(
-            f"四面体真实细点数 {n_fine_tet} 超过了 adj_j_fine 的细点宽度 "
-            f"{n_fine_prism}——与 CPU 端 get_overintegration_context 同一条"
-            f"约束，见该函数文档"
-        )
+    # CuPy 与 NumPy 的 broadcast_to 同名同义；`adj_all` 的后续轴（3,3 等）
+    # 原样保留，只把细点轴从 1 扩到 n_fine_tet。
+    xp = _array_module(adj_all)
+    # 显式物化而不是留一个 0 步长的广播视图：GPU 侧这一段是**整段**一次
+    # `matmul`（不像 CPU 端按 32768 单元分块后逐块 ascontiguousarray），
+    # 0 步长视图喂给 cuBLAS 的行为不该依赖库的内部处理。物化的大小与
+    # 改动前那个切片视图的逻辑大小相同，不是新增的内存开销。
+    adj_tet = xp.ascontiguousarray(
+        xp.broadcast_to(
+            adj_all[n_prism:, :1],
+            (n_cells - n_prism, n_fine_tet) + tuple(adj_all.shape[2:])))
     return (
         (0, n_prism, n_fine_prism, adj_all[:n_prism],
          ops_data['overint_interp_c2f_prism'],
          ops_data['overint_D_fine_prism'], ops_data['overint_restrict_f2c_prism']),
-        (n_prism, n_cells, n_fine_tet, adj_all[n_prism:, :n_fine_tet],
+        (n_prism, n_cells, n_fine_tet, adj_tet,
          ops_data['overint_interp_c2f_tet'],
          ops_data['overint_D_fine_tet'], ops_data['overint_restrict_f2c_tet']),
     )
+
+
+def _array_module(arr):
+    """返回 `arr` 所属的数组模块（CuPy 或 NumPy）。
+
+    不能无条件 `import cupy`：本机与 CI 都没有 CuPy，GPU 模块是按
+    "有则用、无则跳过测试"的方式组织的（见 `core/gpu/__init__.py`）。
+    """
+    mod = type(arr).__module__
+    if mod.startswith("cupy"):
+        import cupy
+
+        return cupy
+    import numpy
+
+    return numpy

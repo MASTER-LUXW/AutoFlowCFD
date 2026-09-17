@@ -55,6 +55,7 @@ def _n_fine_native(oo):
 
 
 def _over_order(order):
+    """棱柱的过积分阶数（受坍缩基条件数上限约束）。"""
     from autoflowcfd.fr.collapsed_basis import (
         OVERINTEGRATION_MAX_ORDER,
         resolve_overintegration_order_rule,
@@ -63,15 +64,32 @@ def _over_order(order):
                OVERINTEGRATION_MAX_ORDER)
 
 
+def _over_order_tet(order):
+    """四面体的过积分阶数——**与棱柱不同**（2026-09-17 起解耦）。
+
+    native PKD 基不受坍缩基条件数上限约束，实际阶数由
+    `resolve_tet_overintegration_order` 按"经验法则 / 四面体自己的上限 /
+    与棱柱共用的 jacobians_fine 布局宽度"三重约束定。P2 因此是 4（不是 3），
+    P3 是 5（理想 6 被布局夹住）。
+    """
+    from autoflowcfd.fr.native_tet_overintegration import (
+        resolve_tet_overintegration_order,
+    )
+    return resolve_tet_overintegration_order(order, (_over_order(order) + 1) ** 3)
+
+
 class TestOperatorShapes:
     """细轴取真实长度、粗轴保持填充宽度。"""
 
     @pytest.mark.parametrize("order", [1, 2, 3])
     def test_shapes(self, order):
         ops = generate_fr_operators(order)
-        oo = _over_order(order)
+        oo = _over_order_tet(order)
         nf = _n_fine_native(oo)
         ns = (order + 1) ** 3
+
+        assert ops.overint_order_tet == oo, (
+            f"P{order}: 四面体过积分阶数 {ops.overint_order_tet} != {oo}")
 
         assert ops.overint_D_fine_tet.shape == (nf, nf, 3), (
             f"P{order}: D_fine_tet 形状 {ops.overint_D_fine_tet.shape} != "
@@ -214,11 +232,12 @@ class TestContextContract:
         assert t_det.shape == (7, t_nf) and t_inv.shape == (7, t_nf, 3, 3)
 
     @pytest.mark.parametrize("order", [1, 2])
-    def test_tet_metric_slice_equals_the_per_cell_constant(self, order):
-        """四面体段"切前 n_fine_tet 列"必须恒等于该单元的常数度量。
+    def test_tet_metric_is_the_broadcast_per_cell_constant(self, order):
+        """四面体段的度量必须恒等于该单元的常数度量。
 
-        这是"不需要另存一份紧凑度量"的依据：直边四面体的 Jacobian 逐单元
-        为常数，全部细点槽位存的是同一个值。
+        实现是"取第 0 列广播"（2026-09-17 第二次改动；第一版是"切前
+        n_fine_tet 列"，两者在直边四面体上等价，但切列额外要求
+        `n_fine_tet <= n_fine_prism`，把 P3 从理想的 oo=6 夹到 5）。
         """
         from autoflowcfd.core.fr_operators.volume_contract import (
             get_overintegration_context,
@@ -231,12 +250,14 @@ class TestContextContract:
             assert np.all(t_det[i] == det[5 + i, 0])
             assert np.all(t_inv[i] == inv[5 + i, 0])
 
-    def test_raises_when_tet_needs_more_fine_points_than_layout(self, order=2):
-        """四面体细点数超过棱柱布局宽度时必须**报错**。
+    def test_tet_fine_points_may_exceed_the_prism_layout_width(self, order=2):
+        """四面体细点数**可以**超过棱柱布局宽度——那条约束已被移除。
 
-        那只会在刻意给四面体更高的 over_order 时发生（例如 P3 理想的
-        oo=6 -> 84 个细点 > 棱柱 oo=3 的 64 列）。那时必须先为四面体单独
-        存一份紧凑度量——不能静默切出一个宽度不足的数组。
+        它曾经是个真实约束（度量靠"切前 n_fine_tet 列"），并且把 P3 的
+        过积分阶数从理想的 6（84 个细点）夹到 5（56），而去混叠误差在
+        `oo = 2*order` 处断崖式下降：P3 oo=5 是 3.37e-3、oo=6 是 4.80e-6。
+        改成"第 0 列广播"后宽度不再相关。这条测试把**移除**钉住，避免有人
+        因为"看起来越界"又把限制加回去。
         """
         from types import SimpleNamespace
 
@@ -245,19 +266,29 @@ class TestContextContract:
         )
 
         ops = generate_fr_operators(order)
-        # 人为把棱柱布局宽度压到比四面体真实细点数还小
-        narrow = ops.overint_D_fine_tet.shape[0] - 1
-        n_cells, n_prism = 4, 2
+        n_fine_tet = ops.overint_D_fine_tet.shape[0]
+        narrow = n_fine_tet - 1          # 刻意比四面体真实细点数还小
+        n_cells, n_prism, n_tet = 4, 2, 2
+        det = np.arange(1.0, n_cells * narrow + 1.0).reshape(n_cells, narrow)
+        inv = np.tile(np.eye(3), (n_cells, narrow, 1, 1)) * det[:, :, None, None]
+        # 四面体段按真实行为填成逐单元常数
+        det[n_prism:] = det[n_prism:, :1]
+        inv[n_prism:] = inv[n_prism:, :1]
         mesh = SimpleNamespace(
             n_cells=n_cells, n_prism_cells=n_prism,
             n_sps_per_cell_fine=narrow,
-            jacobians_fine={
-                "det_jacs": np.ones(n_cells * narrow),
-                "inv_jacs": np.ones((n_cells * narrow, 3, 3)),
-            },
+            jacobians_fine={"det_jacs": det.ravel(),
+                            "inv_jacs": inv.reshape(-1, 3, 3)},
         )
-        with pytest.raises(ValueError, match="超过了棱柱细点布局宽度"):
-            get_overintegration_context(mesh, ops)
+        oi = get_overintegration_context(mesh, ops)
+        assert oi is not None
+        _, (_, _, t_nf, t_det, t_inv, *_) = oi["segs"]
+        assert t_nf == n_fine_tet > narrow
+        assert t_det.shape == (n_tet, n_fine_tet)
+        assert t_inv.shape == (n_tet, n_fine_tet, 3, 3)
+        for i in range(n_tet):
+            assert np.all(t_det[i] == det[n_prism + i, 0])
+            assert np.all(t_inv[i] == inv[n_prism + i, 0])
 
 
 class TestAllConsumersUsePerSegmentMetric:

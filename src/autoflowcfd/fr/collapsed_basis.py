@@ -268,7 +268,20 @@ def build_collapsed_diff_matrices(cell_type: str, order: int, ref_cube_sps: np.n
     Da = lu_solve(lu_piv, Va.T).T
     Db = lu_solve(lu_piv, Vb.T).T
     Dc = lu_solve(lu_piv, Vc.T).T
-    return np.stack([Da, Db, Dc], axis=-1)
+    D = np.stack([Da, Db, Dc], axis=-1)
+    # 强制逐位精确地零化常数（`D @ 1 = 0`）。上一段已经把"显式求逆 ->
+    # lu_solve"这一层舍入压下去了，但残余仍是 `eps*cond(V)` 量级，而它
+    # 直接进自由流保持性：坍缩基 over_order=3 的 D_fine 实测
+    # `max|D@1|` = 5.6e-14，经 restrict 放大到 5.8e-13，在真实网格上表现
+    # 为棱柱段均匀自由流残差 4.72e-3。
+    #
+    # 对棱柱这个修正只是**部分**的：度量逐点变化，自由流保持需要完整的
+    # 离散 GCL `sum_m D_m(adj(J)_m) = 0`，行和修正只消掉"度量恒定部分"
+    # 那一项。适用范围与实测见 `diff_matrix_consistency.py` 模块文档。
+    from .diff_matrix_consistency import enforce_constant_annihilation
+
+    enforce_constant_annihilation(D)
+    return D
 
 
 # 过积分（over-integration）细网格阶数的硬上限。理想去混叠阶数是
@@ -339,19 +352,35 @@ def build_collapsed_diff_matrices(cell_type: str, order: int, ref_cube_sps: np.n
 # `max|D|` 从 3 到 6 只长 3.5 倍（坍缩基同区间暴涨约 6.3 万倍）。
 # **上面那条数值论证对 native 四面体不适用。**
 #
-# 那为什么上限还没按单元类型分开放开？不是数值条件数，而是一条**架构**
-# 约束（如实记录，不是数值理由）：`mesh.jacobians_fine` 是棱柱与四面体
-# **共用一个** `n_sps_per_cell_fine` 维度的合并数组
-# （`high_order_mesh_order.py` 的 `_combine_prism_and_tet_jacobians`），
-# 四面体经 `native_tet_padding.pad_native_tet_matrix_to_global` 填进
-# `(over_order+1)^3` 槽位。"四面体用 4、棱柱仍用 3"要求合并数组按较大者
-# 分配（125 槽 vs 64 槽），plate_demo（363,392 单元）P2 的 jacobians_fine
-# 内存从约 1.86 GB 涨到约 3.63 GB，而该算例 P2 实测常驻已是 13.9 GB。
+# ===== 2026-09-17：已按单元类型分开，本常量现在**只管棱柱** =====
 #
-# 真正的解法是利用"直边四面体 Jacobian 逐单元为常数"给四面体单独存一份
-# 紧凑的（O(n_cells) 而不是 O(n_cells*n_fine)）细网格 Jacobian——那同时
-# 是一项独立的内存优化。它要改 jacobians_fine 的布局与全部消费点，必须
-# 在真实网格上重新量过 P2/P3 的内存与自由流场保持性才能上线。
+# 上面那段"为什么还没分开放开"曾把原因记成一条架构约束：要让四面体用 4、
+# 棱柱用 3，就得把共用的 `mesh.jacobians_fine` 按较大者分配（125 槽 vs
+# 64 槽），plate_demo P2 的这块内存会从约 1.86 GB 涨到约 3.63 GB。
+#
+# **那条论证是错的**（自己的数据推翻的）：`high_order_mesh_order.
+# compute_native_tet_jacobians` 对直边四面体只算一个逐单元常数、再把它
+# **原样广播**填满该单元全部槽位。所以四面体的细点度量不需要更宽的数组，
+# 只需要"够宽"——把前 `n_fine_tet` 列取出来，与在真实细点上求值恒等。
+# 真实约束因此只是 `native_tet_n_fine(oo_tet) <= (oo_prism+1)^3`，不需要
+# 任何额外内存。
+#
+# 于是四面体的过积分阶数已独立出去（`native_tet_overintegration.
+# NATIVE_TET_OVERINTEGRATION_MAX_ORDER = 6`，env
+# `AFCFD_TET_OVERINT_MAX_ORDER`），本常量只约束棱柱。实际取到的阶数：
+#
+#     P1  棱柱 2  四面体 2（= 理想，与改动前相同）
+#     P2  棱柱 3  四面体 4（= 理想；去混叠相对误差 2.38e-2 -> 7.01e-6）
+#     P3  棱柱 3  四面体 5（理想 6 需 84 个细点 > 布局 64，被夹）
+#
+# P3 要完整到 6 仍然需要给四面体单独存一份紧凑的（O(n_cells) 而非
+# O(n_cells*n_fine)）细点度量——那是布局层面的独立改动，收益已量化
+# （oo=5 -> 6 约 4 倍），不是这条常量的问题。
+#
+# 放开上限本身会抬高自由流保持性的误差底（`D_fine` 对常数的零化残余随
+# 阶数增长），已同批用 `diff_matrix_consistency.enforce_constant_
+# annihilation` 消掉，真实网格实测见
+# `tests/unit/test_tet_overintegration_cap_raised.py`。
 OVERINTEGRATION_MAX_ORDER = 3
 
 

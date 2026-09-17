@@ -90,8 +90,20 @@ def test_generate_fr_operators_native_mode_populates_expected_fields():
     # （最大相对差 1.4e-16 / 0.0）。粗网格轴仍必须填充到 n_sps_global，
     # 因为 Q 数组是那个布局。见 fr/operators.py 该分支的说明与
     # tests/unit/test_overintegration_unpadded_fine_axis.py。
-    n_fine_native = (over_order + 1) * (over_order + 2) * (over_order + 3) // 6
+    # 四面体的过积分阶数 2026-09-17 起**与棱柱解耦**（native PKD 基不受
+    # 坍缩基条件数上限约束，那条上限的代价实测 P2 3400 倍、P3 18600 倍，
+    # 见 tests/unit/test_overintegration_cap_cost.py）。所以这里不能再用
+    # 棱柱的 over_order 去推四面体的细点数。
+    from autoflowcfd.fr.native_tet_overintegration import (
+        resolve_tet_overintegration_order,
+    )
+    over_order_tet = resolve_tet_overintegration_order(
+        order, (over_order + 1) ** 3)
+    n_fine_native = (
+        (over_order_tet + 1) * (over_order_tet + 2) * (over_order_tet + 3) // 6
+    )
     assert ops.overint_order == over_order
+    assert ops.overint_order_tet == over_order_tet
     assert ops.overint_n_fine_tet == n_fine_native
     assert ops.overint_D_fine_tet.shape == (n_fine_native, n_fine_native, 3)
     assert ops.overint_interp_c2f_tet.shape == (n_fine_native, n_sps_global)

@@ -130,6 +130,11 @@ class FROperators:
     #: n_sps_per_cell_fine`（`(oo+1)^3`）**不同**——细网格轴
     #: 不再填充，见 `generate_fr_operators` 里那段说明。
     overint_n_fine_tet: int = 0
+    #: 四面体**实际**使用的过积分阶数（2026-09-17）。与 `overint_order`
+    #: （棱柱的）可以不同：四面体走 native PKD 基，不受坍缩基条件数上限
+    #: 约束，见 `native_tet_overintegration.NATIVE_TET_OVERINTEGRATION_MAX_ORDER`。
+    #: order>=1 时 >0；P1 与 `overint_order` 相同（都是 2）。
+    overint_order_tet: int = 0
     overint_interp_c2f_tet: np.ndarray = None
     overint_interp_c2f_prism: np.ndarray = None
     overint_D_fine_tet: np.ndarray = None
@@ -272,6 +277,7 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
     overint_order = None
     overint_ref_fine = None
     n_fine_tet = 0
+    overint_order_tet = 0
     overint_interp_c2f_tet = overint_interp_c2f_prism = None
     overint_D_fine_tet = overint_D_fine_prism = None
     overint_restrict_f2c_tet = overint_restrict_f2c_prism = None
@@ -292,19 +298,20 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
         # `div(adj(J)*G(Q,grad_vel,grad_T,mu_t))`，三个一次场的乘积是三次，
         # `over_order=2` 的细网格（二次空间）表示不了它。
         #
-        # **`OVERINTEGRATION_MAX_ORDER = 3` 的上限不动**，但要注意它的
-        # **适用范围**（2026-09-16 实测更正）：那条"放宽到 4 会让 P2 均匀
-        # 自由流场残差从 1.06e-5 恶化到 5.6e-3、根因是 D_fine 绝对量级暴涨
-        # 约 6.3 万倍"的论证只对**坍缩坐标**基成立（也就是这里的棱柱）。
+        # **`OVERINTEGRATION_MAX_ORDER = 3` 只约束棱柱**（2026-09-17 起，
+        # 见下方 3e 与 `native_tet_overintegration.
+        # NATIVE_TET_OVERINTEGRATION_MAX_ORDER`）。那条"放宽到 4 会让 P2
+        # 均匀自由流场残差从 1.06e-5 恶化到 5.6e-3、根因是 D_fine 绝对量级
+        # 暴涨约 6.3 万倍"的论证只对**坍缩坐标**基成立，也就是这里的棱柱；
         # native 四面体实测在 over_order=6 才 cond(V)=3856、`max|D|` 从 3
-        # 到 6 只长 3.5 倍，那条数值论证对它不适用；它目前仍受这个上限
-        # 约束的真实原因是 `jacobians_fine` 棱柱/四面体共用一个
-        # `n_sps_per_cell_fine` 维度这条架构约束。完整说明见
-        # collapsed_basis.py 该常量上方的注释与
-        # tests/unit/test_native_tet_overintegration_conditioning.py。
-        # 所以 `3x` 与 `2x` 的差别**只在 order=1**：
+        # 到 6 只长 3.5 倍（tests/unit/
+        # test_native_tet_overintegration_conditioning.py），所以它已经
+        # 不再继承这个上限。
+        #
+        # 于是 `3x` 与 `2x` 对**棱柱**的差别只在 order=1：
         #   order=1: 2x -> over_order 2（细点 27）； 3x -> 3（细点 64）
         #   order>=2: 两者都被 cap 到 3，完全相同
+        # （对四面体两者在各阶数上都有区别，见 3e。）
         #
         # `3x` 在 order=1 的实测精度收益 / 已知代价，以及"为什么默认不改"，
         # 全部记在 `resolve_overintegration_order_rule` 的文档里。
@@ -385,10 +392,62 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
     # 轴集合，因此分两步各自填充对应的轴，而不是一次性传两个轴（详见
     # 该函数文档）。
     if order >= 1:
-        from .native_tet_overintegration import build_native_tet_overintegration_operators
+        from .native_tet_overintegration import (
+            NATIVE_TET_OVERINTEGRATION_MAX_ORDER,
+            build_native_tet_overintegration_operators,
+            resolve_tet_overintegration_order,
+        )
+
+        # ===== 四面体过积分阶数与棱柱**解耦**（2026-09-17）=====
+        #
+        # 此前这里直接复用棱柱的 `overint_order`，也就是让 native 四面体
+        # 继承 `OVERINTEGRATION_MAX_ORDER = 3` 这个**坍缩基条件数上限**。
+        # 实测证明那条依据对 native PKD 基不成立（见上方 3d 注释），而
+        # 上限的代价是量过的（tests/unit/test_overintegration_cap_cost.py，
+        # 以 over_order=8 为参照的体积项去混叠相对误差中位数）：
+        #
+        #     P2  oo=3 -> oo=4    2.38e-2 -> 7.01e-6      3400 倍
+        #     P3  oo=3 -> oo=6    9.17e-2 -> 4.92e-6     18600 倍
+        #                （P3 的 oo=3 == order，过积分完全无操作）
+        #
+        # 四面体段的细点度量取自 `mesh.jacobians_fine` 的**第 0 列广播**
+        # （直边四面体的 Jacobian 逐单元为常数、被原样广播填满全部槽位，
+        # 见 `high_order_mesh_order.compute_native_tet_jacobians` 与
+        # `core/fr_operators/volume_contract.get_overintegration_context`），
+        # 所以 `n_fine_tet` **不受**棱柱布局宽度 `(oo_prism+1)^3` 约束——
+        # P3 的 84 个细点可以超过棱柱的 64 列。实际取到的阶数：
+        #
+        #     P1  棱柱 oo=2  四面体 oo=2  细点 10   = 理想
+        #     P2  棱柱 oo=3  四面体 oo=4  细点 35   = 理想
+        #     P3  棱柱 oo=3  四面体 oo=6  细点 84   = 理想
+        #
+        # P1 的阶数与改动前相同，所以"放开上限"这一项不改变已验证的 P1
+        # 生产结果（同批的 `enforce_constant_annihilation` 会在舍入量级上
+        # 改动它，见 tests/unit/test_diff_matrix_constant_annihilation.py）。
+        overint_order_tet = resolve_tet_overintegration_order(order)
+        _oo_tet_ideal = resolve_overintegration_order_rule() * order
+        if overint_order_tet < _oo_tet_ideal:
+            from loguru import logger
+            from .native_tet_overintegration import (
+                resolve_tet_overintegration_max_order,
+            )
+
+            # 现在只剩"上限"一条可能夹住它，而默认上限 6 >= 任何 rule*order
+            # （rule<=3、order<=2 时）——所以这条只在用户显式调低
+            # `AFCFD_TET_OVERINT_MAX_ORDER`、或 order>=3 且 rule=3x 时出现。
+            logger.warning(
+                f"P{order} 四面体过积分阶数被夹到 {overint_order_tet}"
+                f"（理想 {_oo_tet_ideal}）：上限 "
+                f"AFCFD_TET_OVERINT_MAX_ORDER="
+                f"{resolve_tet_overintegration_max_order()} 在约束（默认 "
+                f"{NATIVE_TET_OVERINTEGRATION_MAX_ORDER}）。去混叠精度因此"
+                f"低于可达水平——实测误差在 `oo = 2*order` 处断崖式下降，"
+                f"低于它基本拿不到去混叠收益（见 tests/unit/"
+                f"test_overintegration_cap_cost.py）"
+            )
 
         ref_fine_native, interp_c2f_native, D_fine_native, restrict_f2c_native = (
-            build_native_tet_overintegration_operators(order, overint_order)
+            build_native_tet_overintegration_operators(order, overint_order_tet)
         )
         # ===== 细网格轴**不再**填充到全局张量积宽度（2026-09-17）=====
         #
@@ -446,6 +505,7 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
         overint_order=overint_order,
         overint_ref_fine=overint_ref_fine,
         overint_n_fine_tet=n_fine_tet,
+        overint_order_tet=overint_order_tet,
         overint_interp_c2f_tet=overint_interp_c2f_tet,
         overint_interp_c2f_prism=overint_interp_c2f_prism,
         overint_D_fine_tet=overint_D_fine_tet,
