@@ -35,7 +35,46 @@ from .solver_geometry import _SolverGeometryMixin
 # AUSM+up Weiss-Smith 预处理参考马赫数的物理下限（见 __init__ 内 mach_ref
 # 钳制处的完整推导/实证标定记录）。低于此值时预处理通量的压差放大系数
 # ~1/mach_ref² 会让显式时间推进在任何声学 CFL 步长下失稳。
-_MACH_REF_FLOOR = 0.1
+#
+# **按 AUSM+up 预处理档分派（2026-09-17）。** 原来是与档位无关的 0.1，而
+# 那个值是在 `legacy` 档上标定的——`PRECOND_PHYSICAL`（2026-09-16 起的
+# 默认）把压力分裂改用物理声速之后，`1/mach_ref²` 那条放大路径本身就变了。
+# 用直接谱测量重新标定（组装预处理后算子 Γ⁻¹R 的稠密 Jacobian 求特征值，
+# 与 SSP-RK3 稳定域 |Im|<=1.732 比；**扫的是自洽的 mach_ref**，即随 vel_inf
+# 一起变，而不是在固定来流上人为改 mach_ref——后者是物理上不存在的组合）：
+#
+#   vel_inf  M_true    用 0.1 的裕度   用真实值 dt      用真实值裕度
+#      30    0.0882      6.50x        1.04e-5 (+14%)     5.33x  稳定
+#      17    0.0500      —            1.78e-5            3.55x  稳定
+#     13.6   0.0400      —            2.22e-5            2.96x  稳定
+#     10.2   0.0300      —            2.96e-5            2.32x  稳定
+#      3     0.0088      5.66x        1.01e-4            0.74x  越界
+#      1     0.0029      5.59x        3.02e-4            0.25x  越界
+#
+# 下限的最坏情形恰好是 `M_true == FLOOR` 那一点（那时 mach_ref 最小、dt
+# 最大），所以上表第 2~4 行就是各候选下限的裕度。取 **0.05**（3.55 倍裕度）。
+#
+# `legacy` 档保持 0.1：同一套测量下它在 mach_ref=0.0088 就已越界 4.5 倍
+# （max|dt*λ|=7.81）、在 0.00088 是 768——正是原注释记录的那条
+# `1/mach_ref²` 放大，它的标定仍然有效。（legacy 只作回归对照用。）
+#
+# 收益：真实马赫数落在 [0.05, 0.1) 的算例不再被抬到 0.1。plate_demo
+# （M=0.0882）dt +14%；M=0.05 的算例 dt +50%。
+_MACH_REF_FLOOR_LEGACY = 0.1
+_MACH_REF_FLOOR_PHYSICAL = 0.05
+
+
+def _mach_ref_floor_for_mode(precond_mode: int) -> float:
+    """按 AUSM+up 预处理档给出 mach_ref 下限（见上方常量的完整标定）。"""
+    from autoflowcfd.core.fr_operators.kernels import PRECOND_LEGACY
+
+    return (_MACH_REF_FLOOR_LEGACY if precond_mode == PRECOND_LEGACY
+            else _MACH_REF_FLOOR_PHYSICAL)
+
+
+#: 向后兼容的别名：外部若引用过这个名字，拿到的是 legacy 档那条（更保守的）
+#: 下限。新代码请用 `_mach_ref_floor_for_mode`。
+_MACH_REF_FLOOR = _MACH_REF_FLOOR_LEGACY
 
 # `logger` 本文件自己不直接调用（真实排查过：0 处 `logger.xxx(...)`），
 # 但 `step.py::mean_flow_residual` 用 `from autoflowcfd.core.fr_solver.
@@ -587,8 +626,25 @@ class FRSolver(_SolverGeometryMixin):
         # 因此下限取 0.1——恰好等于 kernels.py 历史注释记载的遗留硬编码值，
         # 那次把硬编码改成传入真实值的重构正是这两个算例的共同回归点；
         # 0.1 以上真实马赫数的算例不受影响。
+        # 下限按 AUSM+up 预处理档分派（见 `_MACH_REF_FLOOR_PHYSICAL` 上方
+        # 的重标定记录）：physical/pressure_physical 档 0.05、legacy 档 0.1。
+        from autoflowcfd.core.fr_operators.kernels import (
+            resolve_ausm_precond_mode,
+        )
+
         mach_ref = vel_inf / np.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10))
-        mach_ref = max(mach_ref, _MACH_REF_FLOOR)
+        _floor = _mach_ref_floor_for_mode(resolve_ausm_precond_mode())
+        if mach_ref < _floor:
+            from loguru import logger
+
+            logger.info(
+                f"[mach_ref] 真实来流马赫数 {mach_ref:.4g} 低于当前 AUSM+up "
+                f"预处理档的下限 {_floor:g}，钳到下限。低于它时预处理通量的"
+                f"压差放大系数 ~1/mach_ref^2 会让显式推进在任何声学 CFL 步长"
+                f"下失稳（实测标定见 solver.py 里 _MACH_REF_FLOOR_PHYSICAL "
+                f"上方的表）。代价是低马赫预处理在这个算例上只能部分生效。"
+            )
+        mach_ref = max(mach_ref, _floor)
         # aoa_deg/aos_deg 进 freestream 字典：下游的 Q_free 构造、SEM 入口
         # 方向、气动力风轴系分解都从这里读，不各自再传一遍参数（那样任何
         # 一条路径漏传都会静默退回 +x）。
