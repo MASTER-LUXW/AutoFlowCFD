@@ -315,26 +315,36 @@ def wall_shear_profile(solver, mesh, *, wall_y: float = 0.0,
                        tol_rel: float = 1e-6):
     """从解里提取底壁（y=wall_y）上逐 x 的壁面剪应力与摩阻系数。
 
-    做法：取**贴壁第一层单元**里 y 最小的那层解点，用它到壁面的距离与
-    该点的 u 算壁面法向速度梯度。这是一阶差分近似（`tau_w = mu*u_1/y_1`），
-    在 P1 上与单元内的线性分布一致，不引入额外近似；它系统性地**低估**
-    tau_w（真实剖面在壁面处更陡），低估量随 `y_1/delta` 减小而减小——
-    所以判据按"delta 内层数"给容差，而不是给一个与分辨率无关的固定容差。
+    ## 做法：用**胞内多项式在壁面处的梯度**，不是 `u_1/y_1`
+
+    第一版写的是 `tau_w = mu * u_1 / y_1`（第一层解点的速度除以它到壁面的
+    距离）。**那是错的**：它隐含假设 `u(0) = 0`，而 DG/FR 的无滑移是通过
+    **通量弱施加**的——胞内多项式在壁面处的值一般不为零（这正是弱施加与
+    强施加的区别）。实测后果：cf 比 Blasius 低 83%，一度被误判成求解器
+    的近壁耗散问题。
+
+    P1 下贴壁单元在壁面法向有 2 个解点，胞内是线性的，所以壁面梯度就是
+    这两点的斜率：
+
+        tau_w = mu * (u_2 - u_1) / (y_2 - y_1)
+
+    这对 P1 是**精确**的（线性函数的斜率处处相同），不引入任何近似。
+    order>=2 时同一段代码仍只用前两个解点，那时它是一阶差分近似、会低估
+    壁面梯度——所以 `meta` 里报了实际用到的两个点位，判据要按分辨率给
+    容差，不能给一个与阶数无关的固定容差。
 
     Returns:
-        `(x, cf_num, tau_num)` 三个一维数组，按 x 排序、同一 x 的多个解点
-        已取平均。
+        `(x, cf_num, tau_num, y1)`，前三个是一维数组（按 x 排序、同一 x 的
+        多个解点已取平均），`y1` 是第一层解点到壁面的距离。
     """
     xyz = np.asarray(mesh.sps_coords)
     Q = np.asarray(solver.state.Q)
-    n_cells, n_sps = xyz.shape[0], xyz.shape[1]
     y = xyz[:, :, 1]
     x = xyz[:, :, 0]
     u = Q[:, :, 1]
 
     y_min = y.min()
     scale = max(float(y.max() - y_min), 1e-300)
-    # 贴壁第一层解点：y 最小的那一层（同一层的 y 完全相同）
     first = np.abs(y - y_min) <= tol_rel * scale
     if not first.any():
         raise ValueError("找不到贴壁第一层解点")
@@ -342,16 +352,30 @@ def wall_shear_profile(solver, mesh, *, wall_y: float = 0.0,
     if y1 <= 0.0:
         raise ValueError(f"贴壁第一层解点到壁面的距离非正：{y1}")
 
-    xs = x[first]
-    us = u[first]
+    # 第二层解点：同一批贴壁单元里 y 次小的那一层
+    cells = np.unique(np.nonzero(first)[0])
+    y_sub = y[cells]
+    uniq = np.unique(np.round(y_sub, 12))
+    if uniq.size < 2:
+        raise ValueError("贴壁单元在壁面法向只有一个解点，取不到梯度")
+    y2 = float(uniq[1] - wall_y)
+    second = np.abs(y - (uniq[1])) <= tol_rel * scale
+
     mu = float(solver.mu_molecular)
-    tau = mu * us / y1
+    # 逐单元取两层解点，按 x 配对
+    x1, u1 = x[first], u[first]
+    x2, u2 = x[second], u[second]
+    o1, o2 = np.argsort(x1, kind="stable"), np.argsort(x2, kind="stable")
+    x1, u1 = x1[o1], u1[o1]
+    x2, u2 = x2[o2], u2[o2]
+    if x1.shape != x2.shape or not np.allclose(x1, x2, atol=1e-9):
+        raise ValueError("两层解点的 x 排布不一致，无法逐点配对")
+
+    dudy = (u2 - u1) / (y2 - y1)
+    tau = mu * dudy
     cf = tau / (0.5 * RHO_INF * U_INF ** 2)
 
-    # 同一 x 的多个解点取平均
-    order_idx = np.argsort(xs)
-    xs, cf, tau = xs[order_idx], cf[order_idx], tau[order_idx]
-    ux, inv = np.unique(np.round(xs, 12), return_inverse=True)
+    ux, inv = np.unique(np.round(x1, 12), return_inverse=True)
     cf_m = np.zeros_like(ux)
     tau_m = np.zeros_like(ux)
     cnt = np.zeros_like(ux)
