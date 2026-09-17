@@ -203,8 +203,8 @@ class FRSolver(_SolverGeometryMixin):
                  dual_time_inner_iter: int = 20,
                  n_threads: int = -1,
                  adaptive_cfl: bool = True,
-                 cfl_start: float = 0.1,
-                 cfl_max: float = 0.5,
+                 cfl_start: float = 0.03,
+                 cfl_max: float = 0.06,
                  # 2026-09-17：0.05 -> 0.01，与 CLI `--cfl-min` 和配置层
                  # `SteadyConfig.cfl_min` 对齐（此前三处分别是 0.05 / 0.05
                  # / 0.01，是提交 5e4e18a"配置层与 CLI 默认值相差 20 倍"
@@ -657,7 +657,24 @@ class FRSolver(_SolverGeometryMixin):
                   f"max={self._cfl_controller.cfl_max}, "
                   f"min={self._cfl_controller.cfl_min})")
         else:
-            print(f"   Adaptive CFL: disabled")
+            # ===== 真实缺陷修复（2026-09-17）=====
+            #
+            # `cfl.py::compute_local_time_step` 此前是
+            #     CFL = ctrl.cfl_number if ctrl is not None else 0.1
+            # 也就是**没有控制器时静默用硬编码 0.1**，把调用方传进来的
+            # `cfl_start/cfl_max/cfl_min` 全部丢掉。后果是
+            # `adaptive_cfl=False` 的每一次运行都跑在 0.1 上，不管请求的
+            # 是多少：本次排查里两条"CFL 0.10"与"CFL 0.05"的平板边界层
+            # 运行给出**逐位相同**的残差轨迹、在同一步（3187）发散，就是
+            # 这个 bug；`tests/validation/test_couette.py` 等全部
+            # `adaptive_cfl=False` 的用法同样一直静默跑在 0.1。
+            #
+            # 固定 CFL 是一条一等需求（稳定边界扫描、A/B 对照都靠它），
+            # 所以这里把请求值显式记下来给 cfl.py 用。取 `cfl_start` 而
+            # 不是 `cfl_max`：关掉自适应时"初始值"就是全程唯一的值。
+            self.fixed_cfl_number = float(cfl_start)
+            print(f"   Adaptive CFL: disabled (fixed CFL = "
+                  f"{self.fixed_cfl_number:g})")
 
         # 影响物理/数值的开关必须在启动日志里可见（2026-09-15 引入）：做
         # 人工粘性 A/B 对照时发现，`--artificial-viscosity` 生效与否在

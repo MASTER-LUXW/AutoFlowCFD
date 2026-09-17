@@ -42,15 +42,29 @@ from autoflowcfd.cli.solve_commands import solve
                    '自动启用 BD-02 合成湍流入口 (SEM)；wmles 不会（WMLES 依赖壁面模型本身正确'
                    '预测近壁应力，不需要额外的入口湍流结构，见 core/fr_solver/boundary.py 文档）')
 @click.option('--max-iter', type=int, default=1000, help='最大迭代次数')
-@click.option('--cfl-start', type=float, default=0.1,
-              help='自适应 CFL 初始值（稳态伪时间迭代，默认 0.1）。残差不下降时 CFL '
-                   '会一直停在这个值——复杂网格上如果起步就发散可调低。下限是独立的 '
-                   '--cfl-min（2026-09-15 起；此前本文案把两者混为一谈，而下限默认 '
-                   '0.05 会把低于它的 --cfl-start 钳上去）。')
-@click.option('--cfl-max', type=float, default=0.5,
-              help='自适应 CFL 上限（稳态，默认 0.5，2026-09-07 从 0.3 上调）。'
-                   'SSP-RK3 线性稳定极限 ~1.0，残差稳定下降的算例可以试 0.8；'
-                   'AUSM+up 低马赫预处理激活的算例真实可用上限更低，发散时回调到 0.3')
+@click.option('--cfl-start', type=float, default=0.03,
+              help='自适应 CFL 初始值（稳态伪时间迭代，默认 0.03）。残差不下降时 '
+                   'CFL 会一直停在这个值——复杂网格上如果起步就发散可调低。下限是'
+                   '独立的 --cfl-min。**2026-09-17 从 0.1 下调**：0.1 是 AUSM+up '
+                   'P5± 饱和缺陷（提交 837cd95）修复之前定的，而那个缺陷本身让通量'
+                   '的谱半径大 5.2 倍；修复后重新定界（见 --cfl-max 帮助）。0.03 是'
+                   '唯一在真实网格上跑过 350+ 步单调下降的起步值，控制器从它往 '
+                   '--cfl-max 爬。')
+@click.option('--cfl-max', type=float, default=0.06,
+              help='自适应 CFL 上限（稳态，默认 0.06）。**2026-09-17 从 0.5 '
+                   '下调**，依据是三类实测：(1) 直接谱测量——预处理后算子 '
+                   'Gamma^-1 R 在干净通道网格上 max|dt*lambda| = 0.444 @CFL 0.03、'
+                   '裕度 3.9 倍，对应线性极限 CFL 约 0.117（同一测量还发现旧的 '
+                   'AUSM+up legacy 档在 CFL 0.03 就已越界 1.33 倍，这解释了为什么'
+                   '此前记录的稳定边界只有 0.036）；(2) 真实网格 plate_demo'
+                   '（363k 单元）0.03 稳、0.10 稳（峰后回落 8.5%）、0.30 第 13 步'
+                   '发散；(3) 平板边界层通道在 0.10 第 3187 步发散——所以 0.10 '
+                   '不是普遍安全值。0.06 低于每一个实测失效点且留 1.7 倍以上裕度。'
+                   '为什么必须留这么多：越界一次之后收缩救不回来（见 '
+                   'core/time_integration/adaptive_cfl.py 模块文档第 12 条）。'
+                   '旧文案里那句"SSP-RK3 线性稳定极限 ~1.0"是标量对流的教科书值，'
+                   '与本项目 CFL 参数的定义（面基谱半径 + 低马赫预处理波速）不是'
+                   '同一个量纲，已删除。')
 @click.option('--cfl-min', type=float, default=0.01,
               help='自适应 CFL 下限（稳态，默认 0.01）。**2026-09-17 从 0.05 '
                    '改为 0.01**：0.05 高于真 P1（AFCFD_FILTER_MODE=off，零阶数'

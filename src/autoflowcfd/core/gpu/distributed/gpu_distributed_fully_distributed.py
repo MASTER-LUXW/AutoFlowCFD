@@ -213,13 +213,14 @@ def build_multi_gpu_solver_from_fully_distributed_package(
         # None 感知：package 现在总是带这三个键（CLI 未指定时为 None），
         # 不能用 `.get(k, default)`——那会拿到显式的 None。与 CPU 侧
         # `DistributedFRSolver.from_fully_distributed_package` 同一处理。
-        _cfl_kw = {}
-        for _k, _d in (('cfl_start', 0.1), ('cfl_max', 0.5), ('cfl_min', None)):
-            _v = package.get(_k)
-            if _v is not None:
-                _cfl_kw[_k] = _v
-            elif _d is not None:
-                _cfl_kw[_k] = _d
+        # **不再硬编码兜底默认值**（2026-09-17，与 CPU 分布式路径同一次
+        # 改动）：此前写死 `cfl_start=0.1, cfl_max=0.5`，控制器默认值一改
+        # （同日按直接谱测量与真实网格失效点重定为 0.03/0.06）这条路径
+        # 就与单机脱节。只传**非 None** 的键，默认值的单一事实来源是
+        # `AdaptiveCFLController.__init__` 的签名。
+        _cfl_kw = {k: package[k]
+                   for k in ('cfl_start', 'cfl_max', 'cfl_min')
+                   if package.get(k) is not None}
         self._cfl_controller = AdaptiveCFLController(**_cfl_kw)
     # `dual_time_steps`：GPUTimeIntegrator 构造函数本身不接受这个参数
     # （与 gpu_distributed.py::step() 的 `getattr(...,'dual_time_steps',5)`

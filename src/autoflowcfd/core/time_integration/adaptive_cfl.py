@@ -231,9 +231,9 @@ class AdaptiveCFLController:
 
     def __init__(
         self,
-        cfl_start: float = 0.1,
-        cfl_max: float = 0.5,
-        cfl_min: float = 0.05,
+        cfl_start: float = 0.03,
+        cfl_max: float = 0.06,
+        cfl_min: float = 0.01,
         growth_factor: float = 1.1,
         shrink_factor: float = 0.8,
         growth_threshold: float = 0.9,
@@ -368,6 +368,33 @@ class AdaptiveCFLController:
             )
             self.cfl_start = _clamped
 
+        # ===== `cfl_start == cfl_max` 表示"固定 CFL"（2026-09-17）=====
+        #
+        # 这条此前是**偶然**成立的：控制器默认 `cfl_min=0.05` 高于用户请求
+        # 的 0.045/0.03/0.02，于是 `min(max(cfl*0.9, cfl_min), cfl_max)` 把
+        # 收缩结果顶回 cfl_max，看起来像"钉住"。2026-09-17 把 cfl_min 默认
+        # 从 0.05 降到 0.01（真实可用工作点通过 CLI 到不了，见本模块文档
+        # 第 11 条）之后，那个偶然的顶住消失了，定 CFL 探针会自己往下滑
+        # （实测 0.045 -> 0.03645），而"探针全程恒定"正是稳定边界扫描的
+        # 前提——扫出来的数才是所请求的那个 CFL。
+        #
+        # 所以这里把它变成**显式语义**：两端相等就是用户在要求固定 CFL，
+        # 控制器整条调节逻辑旁路。这也是它唯一自洽的读法（一个上下限相等
+        # 的区间里没有任何可调空间）。
+        # 必须用**钳之前**的请求值判断，不能用钳之后的 `self.cfl_start`：
+        # 传 `cfl_start=0.3` 而 `cfl_max=0.06` 时 start 会被钳到 0.06，
+        # 与 max 相等，那是"请求越界被纠正"，**不是**"请求固定 CFL"，
+        # 按固定 CFL 处理会把收缩机制整个关掉（第一版就这么错了，被
+        # test_adaptive_cfl_trend_growth.py 的三条收缩测试当场抓到）。
+        self.fixed_cfl = abs(self.cfl_max - float(cfl_start)) <= 1e-12 * max(
+            self.cfl_max, 1.0)
+        if self.fixed_cfl:
+            logger.info(
+                f"[AdaptiveCFL] cfl_start == cfl_max == {self.cfl_start:g}"
+                f"，按固定 CFL 处理：自适应调节全程旁路（这是稳定边界扫描"
+                f"所需的语义；要让控制器工作请让 cfl_max > cfl_start）"
+            )
+
         self.legacy_mode = os.environ.get("AFCFD_CFL_LEGACY") == "1"
         if self.legacy_mode:
             logger.warning(
@@ -419,6 +446,14 @@ class AdaptiveCFLController:
         Returns:
             cfl_number: 下一步使用的 CFL 值
         """
+        if getattr(self, "fixed_cfl", False):
+            # 固定 CFL：仍然记录历史（诊断/日志要用），但不调节。
+            self._step_count += 1
+            self.cfl_number = self.cfl_start
+            self._history.append(
+                (self._step_count, self.cfl_number, current_residual))
+            return self.cfl_number
+
         self._step_count += 1
         self._steps_since_last_change += 1
         self._steps_since_shrink += 1

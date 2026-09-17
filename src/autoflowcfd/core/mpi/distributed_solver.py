@@ -451,12 +451,17 @@ class DistributedFRSolver:
             from autoflowcfd.core.time_integration.adaptive_cfl import (
                 AdaptiveCFLController,
             )
-            self._cfl_controller = AdaptiveCFLController(
-                cfl_start=solver_kwargs.get('cfl_start', 0.1),
-                cfl_max=solver_kwargs.get('cfl_max', 0.5),
-                **({'cfl_min': solver_kwargs['cfl_min']}
-                   if solver_kwargs.get('cfl_min') is not None else {}),
-            )
+            # **不再硬编码兜底默认值**（2026-09-17）：此前这里写死
+            # `cfl_start=0.1, cfl_max=0.5`，于是控制器默认值一改（同日按
+            # 直接谱测量与真实网格失效点重定为 0.03/0.06）分布式路径就与
+            # 单机路径脱节——`test_distributed_solver_main_init.py::
+            # TestDistributedStepMatchesSingleMachine` 当场测出 dt 相差
+            # 2.33 倍。现在只传**非 None** 的键，默认值的单一事实来源是
+            # `AdaptiveCFLController.__init__` 的签名。
+            _cfl_kw = {k: solver_kwargs[k]
+                       for k in ('cfl_start', 'cfl_max', 'cfl_min')
+                       if solver_kwargs.get(k) is not None}
+            self._cfl_controller = AdaptiveCFLController(**_cfl_kw)
         _env_pc = os.environ.get("AFCFD_LOW_MACH_PRECOND")
         _req_pc = (bool(solver_kwargs.get('low_mach_precond', True))
                    if _env_pc is None else (_env_pc == "1"))
@@ -730,13 +735,16 @@ class DistributedFRSolver:
             # None 感知（2026-09-15）：package 现在**总是**带 cfl_* 三个键
             # （CLI 未指定时值为 None），所以不能用 `.get(k, default)`
             # ——那会拿到显式的 None 而不是 default。
-            _cfl_kw = {}
-            for _k, _d in (('cfl_start', 0.1), ('cfl_max', 0.5), ('cfl_min', None)):
-                _v = package.get(_k)
-                if _v is not None:
-                    _cfl_kw[_k] = _v
-                elif _d is not None:
-                    _cfl_kw[_k] = _d
+            # **不再硬编码兜底默认值**（2026-09-17）：此前这里写死
+            # `cfl_start=0.1, cfl_max=0.5`，于是控制器默认值一改（同日按
+            # 直接谱测量与真实网格失效点重定为 0.03/0.06）分布式路径就与
+            # 单机路径脱节——`test_distributed_solver_main_init.py::
+            # TestDistributedStepMatchesSingleMachine` 当场测出 dt 相差
+            # 2.33 倍。现在只传**非 None** 的键，默认值的单一事实来源是
+            # `AdaptiveCFLController.__init__` 的签名。
+            _cfl_kw = {k: package[k]
+                       for k in ('cfl_start', 'cfl_max', 'cfl_min')
+                       if package.get(k) is not None}
             self._cfl_controller = AdaptiveCFLController(**_cfl_kw)
         _env_pc = os.environ.get("AFCFD_LOW_MACH_PRECOND")
         _req_pc = (bool(package.get('low_mach_precond', True))

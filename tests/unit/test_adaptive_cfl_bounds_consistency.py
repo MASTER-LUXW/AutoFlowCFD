@@ -46,13 +46,63 @@ def _falling(n, start=1.0e9, rate=0.9):
     return [start * rate ** k for k in range(n)]
 
 
+def _cli_default(opt_name: str) -> float:
+    """从 `solve steady` 的 click 选项里读出某个默认值。
+
+    直接读 click 的元数据而不是复制一份常量：配置层与 CLI 默认值"相差
+    20 倍"那次事故（2026-09-15）的根源正是两处各自硬编码。
+    """
+    from autoflowcfd.cli.solve_steady_command import solve_steady
+
+    for p in solve_steady.params:
+        if opt_name in getattr(p, "opts", []):
+            return float(p.default)
+    raise AssertionError(f"solve steady 没有选项 {opt_name}")
+
+
 class TestConstructorReconcilesBounds:
     """`cfl_min > cfl_max` 是自相矛盾的配置，以 cfl_max 为准。"""
 
     def test_cfl_min_is_clamped_to_cfl_max(self):
-        c = AdaptiveCFLController(cfl_start=0.045, cfl_max=0.045)
+        # 必须显式传一个高于 cfl_max 的 cfl_min 才能测"钳住"这件事：
+        # 2026-09-17 把默认 cfl_min 从 0.05 降到 0.01 之后，
+        # `cfl_start=cfl_max=0.045` 这个配置里 0.01 < 0.045 本来就不矛盾，
+        # 原来的写法已经走不到那条钳位分支（它当初能走到是因为默认下限
+        # 恰好高于 0.045，属于偶然）。
+        c = AdaptiveCFLController(cfl_start=0.045, cfl_max=0.045,
+                                  cfl_min=0.2)
         assert c.cfl_min == pytest.approx(0.045)
         assert c.cfl_max == pytest.approx(0.045)
+
+    def test_equal_start_and_max_means_fixed_cfl(self):
+        """`cfl_start == cfl_max` 是**显式的固定 CFL 语义**（2026-09-17）。
+
+        此前"定 CFL 探针全程恒定"是偶然成立的：默认 `cfl_min=0.05` 高于
+        被请求的 0.045/0.03/0.02，于是 `min(max(cfl*0.9, cfl_min), cfl_max)`
+        把收缩结果顶回 cfl_max。默认下限降到 0.01 之后那个偶然消失，探针
+        会自己往下滑（实测 0.045 -> 0.03645），而"探针恒定"正是稳定边界
+        扫描的前提。现在它是显式语义。
+        """
+        c = AdaptiveCFLController(cfl_start=0.045, cfl_max=0.045)
+        assert c.fixed_cfl is True
+        vals = [c.update(r) for r in [3.0e8, 2.0e8] + _rising(30)]
+        assert min(vals) == pytest.approx(0.045)
+        assert max(vals) == pytest.approx(0.045)
+
+    def test_clamped_start_is_not_mistaken_for_fixed_cfl(self):
+        """请求越界被纠正 != 请求固定 CFL。
+
+        传 `cfl_start=0.3` 而 `cfl_max=0.06` 时 start 会被钳到 0.06、与 max
+        相等——若据此判定"固定 CFL"，收缩机制会被整个关掉。第一版就是这么
+        错的（用了钳**之后**的值），被 `test_adaptive_cfl_trend_growth.py`
+        的三条收缩测试当场抓到。
+        """
+        c = AdaptiveCFLController(cfl_start=0.3, cfl_max=0.06, cfl_min=0.01)
+        assert c.cfl_start == pytest.approx(0.06)
+        assert c.fixed_cfl is False
+        for r in [3.0e8, 2.0e8] + _rising(30):
+            c.update(r)
+        assert c.cfl_number < 0.06, "收缩机制被误关掉了"
 
     def test_warning_is_emitted_not_silent(self):
         """本项目不接受静默兜底——必须留下痕迹。"""
@@ -226,8 +276,20 @@ class TestEveryBackendConstructsAController:
         src = inspect.getsource(fd)
         assert 'AdaptiveCFLController' in src
         assert '_cfl_controller' in src
-        # 且必须是 None 感知地从 package 取三个边界值
-        assert "('cfl_start', 0.1), ('cfl_max', 0.5), ('cfl_min', None)" in src
+        # 且必须 None 感知地从 package 取三个边界值。判据改成查"取值方式"
+        # 而不是查那一行的字面量（2026-09-17）：原判据把兜底默认值
+        # `('cfl_start', 0.1), ('cfl_max', 0.5)` 写进断言，于是它反过来
+        # **锁死**了硬编码——而硬编码兜底正是问题所在（控制器默认值同日
+        # 重定为 0.03/0.06 后，这条路径会与单机脱节；CPU 分布式那份同样的
+        # 硬编码已被 `test_distributed_solver_main_init.py` 测出 dt 相差
+        # 2.33 倍）。现在三处都只传**非 None** 的键，默认值的单一事实
+        # 来源是 `AdaptiveCFLController.__init__` 的签名。
+        for key in ('cfl_start', 'cfl_max', 'cfl_min'):
+            assert key in src, f"{key} 没有从 package 里取"
+        assert 'is not None' in src, "必须是 None 感知的取值"
+        assert "('cfl_start', 0.1)" not in src, (
+            "又把兜底默认值硬编码回去了——默认值只能有一个事实来源"
+            "（AdaptiveCFLController 的签名）")
 
     def test_all_five_controller_sites_pass_cfl_min(self):
         """五处构造点逐一核对，防止将来新增后端时又漏一处。"""
@@ -250,18 +312,45 @@ class TestConfigLayerCflDefaultsAreConsistent:
     """配置层与 CLI 是同一个物理量的两个入口，默认值不能互相矛盾。
 
     2026-09-15 发现：`SteadyConfig.cfl_max` 的默认值是 **10.0**，而 CLI
-    `--cfl-max` 的默认是 0.5——差 20 倍；10.0 还是 SSP-RK3 线性稳定极限
-    （~1.0）的 10 倍，而自适应控制器会真的往上限爬（软上限只在失败之后
-    才收紧，见 adaptive_cfl.py 模块文档第 8 条），于是 YAML 驱动的算例会
-    反复穿越稳定边界。文档示例里当时还写着 `cfl_max=5.0`。
-    同时配置层完全没有 `cfl_min` 字段。
+    `--cfl-max` 的默认是 0.5——差 20 倍。2026-09-17 两边一起重定为
+    **0.06**，依据是三类实测（见 `cli/solve_steady_command.py` 的
+    --cfl-max 帮助）：直接谱测量给出线性极限约 0.117、真实网格
+    plate_demo 0.30 第 13 步发散、平板边界层通道 0.10 第 3187 步发散。
+
+    注意"SSP-RK3 线性稳定极限 ~1.0"这个旧判据已删除：它是标量对流的
+    教科书值，与本项目 CFL 参数的定义（面基谱半径 + 低马赫预处理波速）
+    不是同一个量纲，用它当上界等于没有上界。
     """
 
-    def test_cfl_max_default_matches_cli_and_stability_limit(self):
+    #: 实测线性极限（预处理后算子 Gamma^-1 R 的直接谱测量，干净通道网格）。
+    #: 默认上限必须低于它，且留出裕度——越界一次之后收缩救不回来
+    #: （adaptive_cfl.py 模块文档第 12 条）。
+    MEASURED_LINEAR_LIMIT = 0.117
+    #: 真实网格上实测的最低失效点（平板边界层通道 CFL 0.10 第 3187 步发散）。
+    MEASURED_LOWEST_FAILURE = 0.10
+
+    def test_cfl_max_default_matches_cli(self):
+        """配置层与 CLI 的默认上限必须是同一个数。"""
         from autoflowcfd.config.solver_config import SteadyConfig
-        assert SteadyConfig().cfl_max == pytest.approx(0.5)
-        # SSP-RK3 线性稳定极限 ~1.0：默认上限不得超过它
-        assert SteadyConfig().cfl_max <= 1.0
+        assert SteadyConfig().cfl_max == pytest.approx(_cli_default("--cfl-max"))
+
+    def test_cfl_max_default_is_below_every_measured_failure(self):
+        from autoflowcfd.config.solver_config import SteadyConfig
+        cm = SteadyConfig().cfl_max
+        assert cm < self.MEASURED_LOWEST_FAILURE, (
+            f"默认上限 {cm} 不低于实测失效点 "
+            f"{self.MEASURED_LOWEST_FAILURE}")
+        assert cm < self.MEASURED_LINEAR_LIMIT
+        # 裕度：至少 1.5 倍（越界不可恢复，见类文档）
+        assert self.MEASURED_LOWEST_FAILURE / cm >= 1.5, (
+            f"默认上限 {cm} 相对最低失效点只有 "
+            f"{self.MEASURED_LOWEST_FAILURE/cm:.2f} 倍裕度")
+
+    def test_cfl_max_default_is_not_pointlessly_small(self):
+        """反向判据：上限也不能压到比已验证可用的工作点还低，否则等于
+        把实测跑通过的加速度扔掉（0.03 在真实网格上跑过 350+ 步单调下降）。"""
+        from autoflowcfd.config.solver_config import SteadyConfig
+        assert SteadyConfig().cfl_max >= 0.03
 
     def test_cfl_min_field_exists_and_leaves_shrink_room(self):
         """下限必须严格小于初始值，否则控制器一步也收缩不了。"""

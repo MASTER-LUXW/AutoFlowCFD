@@ -278,8 +278,8 @@ class SteadyConfig(SolverConfig):
         ... )
     """
     max_iter: int = 50
-    cfl_init: float = 0.05  # 复杂网格的保守默认值（原为 1.0）
-    cfl_max: float = 0.5    # 2026-09-15：原为 10.0，见本类文档 cfl_max 一节
+    cfl_init: float = 0.03  # 2026-09-17：原为 0.05，与 CLI --cfl-start 对齐
+    cfl_max: float = 0.06   # 2026-09-17：原为 0.5，见本类文档 cfl_max 一节
     cfl_min: float = 0.01   # 2026-09-15 新增，见本类文档 cfl_min 一节
     convergence_tol: float = 1e-3
     monitor_coefficients: bool = True
@@ -391,8 +391,8 @@ class TransientConfig(SolverConfig):
     # FRSolver 的构造默认值，配置不出本项目实测稳定的 ~0.03。
     # （`dual-time` 档不构造这个控制器，内层伪时间有自己的逻辑，这三个
     # 字段对它无效——语义与 `solve steady` 完全一致。）
-    cfl_init: float = 0.05
-    cfl_max: float = 0.5
+    cfl_init: float = 0.03   # 2026-09-17：与 CLI --cfl-start 对齐
+    cfl_max: float = 0.06    # 2026-09-17：原为 0.5，见 SteadyConfig.cfl_max 一节
     cfl_min: float = 0.01
     sample_interval: int = 10
     warmup_time: float = 0.05

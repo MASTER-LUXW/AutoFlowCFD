@@ -120,10 +120,45 @@ def compute_local_time_step(solver, return_physical_too: bool = False):
     # 与 TimeIntegrator.local_time_step (base.py) 用同一公式。
     # 自适应 CFL（2026-08-24）：从 solver 上的 AdaptiveCFLController 读取
     # 当前 CFL 数，替代此前硬编码 0.1。控制器根据残差历史自动调节 CFL，
-    # 收敛好时逐步放大（加速收敛），恶化时缩小（保证稳定）。无控制器时
-    # 回退到固定 0.1（向后兼容，也用于诊断脚本的 monkey-patch 场景）。
+    # 收敛好时逐步放大（加速收敛），恶化时缩小（保证稳定）。
+    #
+    # ===== 真实缺陷修复（2026-09-17）=====
+    #
+    # 原来这一行是 `... if _cfl_controller is not None else 0.1`，即
+    # **没有控制器时静默用硬编码 0.1**，把调用方请求的 CFL 整个丢掉。
+    # 于是 `adaptive_cfl=False` 的每一次运行都跑在 0.1 上：本次排查里两条
+    # "CFL 0.10" 与 "CFL 0.05" 的平板边界层运行给出逐位相同的残差轨迹、
+    # 在同一步（3187）发散，就是这个 bug 的直接证据；
+    # `tests/validation/test_couette.py` 等全部 `adaptive_cfl=False`
+    # 的用法同样一直静默跑在 0.1。
+    #
+    # 现在按优先级取：控制器（自适应开启）> `solver.fixed_cfl_number`
+    # （自适应关闭时由构造函数记下的请求值）> 0.1（两者都没有的**替身
+    # 对象**，例如诊断脚本/测试 stub；这一档会打一次警告，不再静默）。
     _cfl_controller = getattr(solver, '_cfl_controller', None)
-    CFL = _cfl_controller.cfl_number if _cfl_controller is not None else 0.1
+    if _cfl_controller is not None:
+        CFL = _cfl_controller.cfl_number
+    else:
+        _fixed = getattr(solver, 'fixed_cfl_number', None)
+        if _fixed is not None:
+            CFL = float(_fixed)
+        else:
+            CFL = 0.1
+            if not getattr(solver, '_afcfd_cfl_fallback_warned', False):
+                from loguru import logger
+
+                logger.warning(
+                    "[CFL] 求解器既没有自适应控制器也没有 "
+                    "fixed_cfl_number，回退到 0.1。真实求解器不会走到这一"
+                    "档（构造函数两条分支都会设其中之一），走到这里说明"
+                    "调用方是个替身对象——若它本意是固定 CFL，请显式设 "
+                    "`solver.fixed_cfl_number`，否则这个 0.1 与你请求的值"
+                    "无关。"
+                )
+                try:
+                    solver._afcfd_cfl_fallback_warned = True
+                except Exception:
+                    pass
 
     # 阶数相关的 CFL 收紧：基于面的谱半径已经考虑了单元几何，
     # 但显式 FR/DG 格式的稳定性极限仍随阶数增长（微分矩阵谱半径随 p 增大），

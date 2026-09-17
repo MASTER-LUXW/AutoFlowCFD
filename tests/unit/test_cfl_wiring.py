@@ -18,11 +18,35 @@ from autoflowcfd.cli.main import cli
 
 
 class TestAdaptiveCFLControllerParams:
-    def test_default_cfl_max_bumped_to_0_5(self):
+    def test_controller_defaults_match_the_cli(self):
+        """控制器构造默认值必须与 CLI 默认值是同一个数。
+
+        2026-09-17 从 (0.1, 0.5) 重定为 (0.03, 0.06)，依据是三类实测（见
+        `cli/solve_steady_command.py` 的 --cfl-max 帮助与
+        `test_adaptive_cfl_bounds_consistency.py::
+        TestConfigLayerCflDefaultsAreConsistent`）。这里不再硬编码那两个
+        数字，而是从 click 元数据读——配置层与 CLI 默认值"相差 20 倍"
+        那次事故（2026-09-15）的根源正是两处各自硬编码。
+        """
+        from autoflowcfd.cli.solve_steady_command import solve_steady
+
+        want = {}
+        for prm in solve_steady.params:
+            for name, key in (("--cfl-start", "cfl_start"),
+                              ("--cfl-max", "cfl_max"),
+                              ("--cfl-min", "cfl_min")):
+                if name in getattr(prm, "opts", []):
+                    want[key] = float(prm.default)
+        assert set(want) == {"cfl_start", "cfl_max", "cfl_min"}
+
         c = AdaptiveCFLController()
-        assert c.cfl_max == 0.5
-        assert c.cfl_start == 0.1
-        assert c.cfl_number == 0.1  # 初始值 = cfl_start
+        assert c.cfl_start == want["cfl_start"]
+        assert c.cfl_max == want["cfl_max"]
+        assert c.cfl_min == want["cfl_min"]
+        assert c.cfl_number == want["cfl_start"]   # 初始值 = cfl_start
+        assert c.cfl_min < c.cfl_start < c.cfl_max, (
+            "三者必须严格递增，否则控制器一步也动不了（cfl_start==cfl_max "
+            "会被判定为固定 CFL，见 adaptive_cfl.py 构造函数）")
 
     def test_explicit_params_honored(self):
         c = AdaptiveCFLController(cfl_start=0.2, cfl_max=0.9)
@@ -99,8 +123,18 @@ class TestResumeCflOptionForwarded:
                 cli, ["solve", "resume", str(ckpt), "--max-iter", "5"],
             )
         assert result.exit_code == 0, result.output
-        assert mock_rebuild.call_args.kwargs["cfl_start"] == 0.1
-        assert mock_rebuild.call_args.kwargs["cfl_max"] == 0.5
+        # 不硬编码默认值：从 click 元数据读，与 CLI 保持单一事实来源
+        from autoflowcfd.cli.solve_commands import resume as _resume_cmd
+
+        _want = {}
+        for prm in _resume_cmd.params:
+            for name, key in (("--cfl-start", "cfl_start"),
+                              ("--cfl-max", "cfl_max"),
+                              ("--cfl-min", "cfl_min")):
+                if name in getattr(prm, "opts", []):
+                    _want[key] = float(prm.default)
+        assert mock_rebuild.call_args.kwargs["cfl_start"] == _want["cfl_start"]
+        assert mock_rebuild.call_args.kwargs["cfl_max"] == _want["cfl_max"]
         # rebuild_solver_from_checkpoint 内部把收到的 cfl_start/cfl_max
         # 原样传进 FRSolver(...) —— 这一步是源码里直接可见的
         # `cfl_start=cfl_start, cfl_max=cfl_max`（solve_checkpoint_io.py），

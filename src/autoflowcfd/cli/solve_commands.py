@@ -71,12 +71,15 @@ from autoflowcfd.cli.solve_steady_commands import _report_aerodynamic_coefficien
 @click.option('--checkpoint-interval', type=int, default=100,
               help='中间 checkpoint 保存间隔（本次 resume 自己新跑的额外迭代数，'
                    '非绝对迭代数）——与 solve steady 同名参数含义一致')
-@click.option('--cfl-start', type=float, default=0.1,
-              help='自适应 CFL 初始值/下限（默认 0.1）。CFL 是纯数值加速参数，不影响'
-                   '物理解，每次 resume 可根据上一段收敛表现重新调')
-@click.option('--cfl-max', type=float, default=0.5,
-              help='自适应 CFL 上限（默认 0.5）。上一段稳定收敛可试 0.8；发散则回调到'
-                   '0.3 或更低。仅单机 CPU 路径（非 --n-ranks>1/--multi-gpu）支持')
+@click.option('--cfl-start', type=float, default=0.03,
+              help='自适应 CFL 初始值（默认 0.03，2026-09-17 从 0.1 下调）。'
+                   'CFL 是纯数值加速参数，不影响物理解，每次 resume 可根据上一段'
+                   '收敛表现重新调。下调依据见 `solve steady --cfl-max` 的帮助：2026-09-17 按直接谱测量 + 两张真实网格的失效点重定，线性极限约 0.117、实测失效点 plate 0.30 / 平板边界层 0.10，默认值留 1.7 倍以上裕度。')
+@click.option('--cfl-max', type=float, default=0.06,
+              help='自适应 CFL 上限（默认 0.06，2026-09-17 从 0.5 下调）。'
+                   '仅单机 CPU 路径（非 --n-ranks>1/--multi-gpu）支持。原文案建议的'
+                   '"稳定收敛可试 0.8"已删除——0.8 比实测线性极限高近 7 倍，从来'
+                   '不是可达值。下调依据见 `solve steady --cfl-max` 的帮助：2026-09-17 按直接谱测量 + 两张真实网格的失效点重定，线性极限约 0.117、实测失效点 plate 0.30 / 平板边界层 0.10，默认值留 1.7 倍以上裕度。')
 @click.option('--cfl-min', type=float, default=0.01,
               help='自适应 CFL 下限（默认 0.01）。**真实缺口修复（2026-09-17）**：'
                    '`solve steady` 早在 2026-09-15 就有这个选项（控制器默认下限 0.05 '

@@ -13,6 +13,15 @@
 的残差比），确有下降就放大 CFL；停滞/震荡则不放大。下面的用例按
 "必须放大"与"绝不能放大"两类分别钉住，特别是第一个用例直接复刻了
 实测的 ratio=0.99916 轨迹——它在修复前必然断言失败。
+
+## 为什么这些用例都显式传 `cfl_max`（2026-09-17）
+
+本文件测的是**收缩/放大机制本身**，与默认上限无关。此前它们只传
+`cfl_start=0.3/0.4` 而吃默认 `cfl_max`——当默认从 0.5 降到 0.06
+（见 `cli/solve_steady_command.py` 的 --cfl-max 帮助：按直接谱测量与两张
+真实网格的失效点重定）之后，`cfl_start` 被钳到 0.06，可调区间只剩
+[cfl_min=0.05, 0.06]，机制根本展开不了，三条收缩测试当场失败。
+把上限显式写进构造参数，测试从此与调参默认值解耦。
 """
 
 import math
@@ -111,7 +120,7 @@ class TestWorseningInvalidatesTrend:
 
     def test_divergence_to_nan_still_shrinks(self):
         """趋势判据不能干扰既有的 NaN/inf 发散保护。"""
-        c = AdaptiveCFLController(cfl_start=0.3, cfl_min=0.05)
+        c = AdaptiveCFLController(cfl_start=0.3, cfl_min=0.05, cfl_max=0.5)
         _feed(c, [REAL_SLOW_RATIO] * 40)
         before = c.cfl_number
         for _ in range(10):
@@ -179,7 +188,7 @@ class TestMildShrinkNeedsConfirmation:
     def test_sustained_mild_worsening_still_shrinks(self):
         """持续的轻度恶化（真实的缓慢失稳）仍必须收缩——确认机制不能
         把保护本身关掉。"""
-        c = AdaptiveCFLController(cfl_start=0.3, cfl_min=0.05,
+        c = AdaptiveCFLController(cfl_start=0.3, cfl_min=0.05, cfl_max=0.5,
                                   mild_shrink_confirm_steps=3)
         _feed(c, [1.05] * 200)
         assert c.cfl_number < 0.3
@@ -196,7 +205,7 @@ class TestMildShrinkNeedsConfirmation:
     @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
     def test_severe_and_nonfinite_shrink_immediately(self, bad):
         """重度恶化 / NaN / inf 不受确认约束，必须立即收缩。"""
-        c = AdaptiveCFLController(cfl_start=0.4, cfl_min=0.05,
+        c = AdaptiveCFLController(cfl_start=0.4, cfl_min=0.05, cfl_max=0.5,
                                   ramp_steps=0, cooldown_steps=0,
                                   mild_shrink_confirm_steps=3)
         c.update(1.0)
@@ -207,7 +216,7 @@ class TestMildShrinkNeedsConfirmation:
             "非有限残差没有被立即节流——发散保护被确认机制削弱了")
 
     def test_severe_worsening_shrinks_on_first_step(self):
-        c = AdaptiveCFLController(cfl_start=0.4, cfl_min=0.05,
+        c = AdaptiveCFLController(cfl_start=0.4, cfl_min=0.05, cfl_max=0.5,
                                   ramp_steps=0, cooldown_steps=0,
                                   mild_shrink_confirm_steps=3)
         c.update(1.0)
@@ -257,7 +266,7 @@ class TestNoRatchetDown:
 
     def test_severe_shrink_never_gated_by_window(self):
         """即使窗口显示在下降，重度恶化也必须立即收缩。"""
-        c = AdaptiveCFLController(cfl_start=0.4, cfl_min=0.05,
+        c = AdaptiveCFLController(cfl_start=0.4, cfl_min=0.05, cfl_max=0.5,
                                   trend_window=20, cooldown_steps=0)
         _feed(c, [0.998] * 25)     # 窗口里是明确的下降
         before = c.cfl_number
@@ -298,7 +307,7 @@ class TestHysteresisNoLimitCycle:
 
     def test_shrink_still_fires_below_band(self):
         """窗口累计真的变差（> 1.0）且连续确认满足时仍然收缩。"""
-        c = AdaptiveCFLController(cfl_start=0.3, cfl_min=0.05)
+        c = AdaptiveCFLController(cfl_start=0.3, cfl_min=0.05, cfl_max=0.5)
         _feed(c, [1.003] * 200)
         assert c.cfl_number < 0.3
 
@@ -367,7 +376,7 @@ class TestSoftCeilingPreventsRepeatedOvershoot:
 
     def test_ceiling_does_not_block_shrinking(self):
         """软上限只约束**放大**；真实持续恶化仍必须一路收缩到下限。"""
-        c = AdaptiveCFLController(cfl_start=0.3, cfl_min=0.05,
+        c = AdaptiveCFLController(cfl_start=0.3, cfl_min=0.05, cfl_max=0.5,
                                   ceiling_backoff=0.95)
         _feed(c, [1.05] * 300)
         assert c.cfl_number == pytest.approx(0.05), (
