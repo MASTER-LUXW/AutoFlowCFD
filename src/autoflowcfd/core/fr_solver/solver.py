@@ -743,6 +743,56 @@ class FRSolver(_SolverGeometryMixin):
             self, mesh_nodes, wall_indices, connectivity=connectivity, use_eikonal=use_eikonal
         )
 
+    def _pseudo_time_budget(self, n_steps: int):
+        """本次求解已推进的伪时间与各层物理时标之比；拿不到就返回 None。
+
+        为什么这个量必须被报告：局部时间步进下不存在单一的"当前时间"，
+        而残差范数只说"离散方程的不平衡量在变小"，完全不说"物理场走了
+        多远"。两者可以同时成立且互不矛盾——plate_demo 上残差单调下降
+        350 步、而物理场只走完一个绕板特征时间的 **1.8%**，导致启动暂态的
+        压力分布被当成壁面处理缺陷追了好几天。完整记录与那次误判用错的
+        定常判据见 `pseudotime_budget.py` 模块文档。
+
+        `L_body` 取 `sqrt(reference_area)`（气动系数已经算过参考面积），
+        拿不到时只报全域尺度并在输出里标明，不拿域尺度冒充物体尺度。
+        """
+        tau = getattr(self, "tau_accum", None)
+        if tau is None:
+            return None
+        try:
+            from autoflowcfd.core.fr_solver.pseudotime_budget import (
+                _extent, pseudo_time_budget,
+            )
+
+            fs = getattr(self, "freestream", None) or {}
+            vel_inf = float(fs.get("vel_inf", 0.0) or 0.0)
+            if vel_inf <= 0.0:
+                return None
+            ref_area = getattr(self, "_reference_area", None)
+            body_len = float(np.sqrt(ref_area)) if (
+                ref_area is not None and ref_area > 0) else None
+            mesh = getattr(self, "mesh", None)
+            dt_cell = getattr(self, "dt_cell_last", None)
+            if dt_cell is None:
+                return None
+            return pseudo_time_budget(
+                dt_cell,
+                vel_inf=vel_inf,
+                cell_volumes=getattr(mesh, "cell_volumes", None),
+                body_length=body_len,
+                domain_length=_extent(mesh) if mesh is not None else None,
+                tau_accum=tau,
+                n_steps=n_steps,
+            )
+        except Exception:
+            # 纯诊断量，任何失败都不该影响求解本身；但**不静默**——
+            # 打一次警告，否则"这行诊断怎么不见了"无从查。
+            from loguru import logger
+
+            logger.opt(exception=True).warning(
+                "伪时间预算诊断计算失败（只影响这行日志，不影响求解）")
+            return None
+
     def solve(self, max_iter: int = 1000, dt: float = 1e-4, tol: float = 1e-6,
               checkpoint_callback=None,
               phase_max_iter: Optional[int] = None,
@@ -771,6 +821,11 @@ class FRSolver(_SolverGeometryMixin):
         Returns:
             SolverResult: 包含收敛状态、最终残差和迭代次数的结果对象
         """
+        # 每次 solve() 重新开始累计伪时间：`tau_accum` 的语义是"本次求解
+        # 调用已推进的伪时间"。resume 会跨调用延续物理场但不延续这个计数，
+        # 所以打印时始终标注步数（见 `pseudotime_budget.py`）。
+        self.tau_accum = None
+
         logger_msg = f"Starting solve loop with {self.time_integrator.scheme.value}"
         if self.turb_model_name != "NONE":
             logger_msg += f", turbulence={self.turb_model_name}"
@@ -862,6 +917,22 @@ class FRSolver(_SolverGeometryMixin):
                         cell_volumes=getattr(
                             getattr(self, "mesh", None), "cell_volumes", None),
                     )
+                    # 累计伪时间 / 物体尺度对流时标（2026-09-17）：与上面
+                    # 那行诊断同频打印。这个比值此前算得出来但从未被报告，
+                    # 结果"残差在降但物理场只走了 1.8% 个特征时间"这件事在
+                    # 日志里完全看不出来，直接导致一次把启动暂态误判成壁面
+                    # 处理缺陷、追了好几天的事故。完整记录见
+                    # `pseudotime_budget.py` 模块文档。
+                    _ptb_fn = getattr(
+                        self, "_pseudo_time_budget", None)
+                    _ptb = (_ptb_fn(n_steps=i + 1)
+                            if _ptb_fn is not None else None)
+                    if _ptb is not None:
+                        from autoflowcfd.core.fr_solver.pseudotime_budget import (
+                            format_pseudo_time_budget,
+                        )
+                        msg += " | " + format_pseudo_time_budget(
+                            _ptb, compact=True)
                 print(msg)
 
                 # 中间 checkpoint 保存
@@ -877,7 +948,21 @@ class FRSolver(_SolverGeometryMixin):
                     print(f"[OK] Converged at iteration {i+1} with residual {res:.6e} "
                           f"(dropped {initial_res/res:.1e}x)")
                     break
-        
+
+        # 收尾摘要：把"物理场到底走了多远"完整报一次。残差是否收敛与
+        # 物理场是否建立是**两件事**，只报前者会让人拿启动暂态的气动力
+        # 系数去和文献值比（这件事真实发生过，见 `pseudotime_budget.py`）。
+        # `getattr` 而不是直接调用：`test_solver_divergence_abort.py` 用
+        # SimpleNamespace 替身直接调用未绑定的 solve()（本仓库既有的测试
+        # 手法），那种替身没有这个方法；一行纯诊断不该让它失败。
+        _ptb_fn = getattr(self, "_pseudo_time_budget", None)
+        _ptb = _ptb_fn(n_steps=i + 1) if _ptb_fn is not None else None
+        if _ptb is not None:
+            from autoflowcfd.core.fr_solver.pseudotime_budget import (
+                format_pseudo_time_budget,
+            )
+            print(format_pseudo_time_budget(_ptb))
+
         return SolverResult(converged=converged, iterations=i+1, final_residual=final_residual)
     
     def _solve_with_order_continuation(self, max_iter: int, dt: float, tol: float,

@@ -735,6 +735,23 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
                         cell_volumes=getattr(
                             getattr(solver, "mesh", None), "cell_volumes", None),
                     )
+                        # 累计伪时间 / 物体尺度对流时标（2026-09-17）：与
+                        # 单阶数路径（solver.py::solve 的常规循环）逐字段
+                        # 对齐。残差是否收敛与物理场是否建立是两件事，只报
+                        # 前者会让人拿启动暂态的气动力系数去和文献值比；
+                        # 完整记录见 `fr_solver/pseudotime_budget.py`。
+                        # **n_steps 用 total_iter**（跨阶段累计），因为
+                        # `solver.tau_accum` 也是跨阶段累加的。
+                        _ptb_fn = getattr(
+                            solver, "_pseudo_time_budget", None)
+                        _ptb = (_ptb_fn(n_steps=total_iter)
+                                if _ptb_fn is not None else None)
+                        if _ptb is not None:
+                            from autoflowcfd.core.fr_solver.pseudotime_budget import (
+                                format_pseudo_time_budget,
+                            )
+                            msg += " | " + format_pseudo_time_budget(
+                                _ptb, compact=True)
                     print(msg)
 
                 # 中间 checkpoint 保存（按 --checkpoint-interval 间隔）
@@ -768,9 +785,35 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
 
             if target_p == original_order and converged:
                 print(f"\n[OK] Order Continuation completed: Final P{original_order} converged")
+                _print_pseudo_time_summary(solver, total_iter)
                 return SolverResult(converged=True, iterations=total_iter, final_residual=final_residual)
 
     solver.order = original_order
     solver.ops = original_ops
 
+    _print_pseudo_time_summary(solver, total_iter)
     return SolverResult(converged=False, iterations=total_iter, final_residual=final_residual)
+
+
+def _print_pseudo_time_summary(solver, total_iter: int) -> None:
+    """收尾时把"物理场到底走了多远"完整报一次（两个 return 点共用）。
+
+    为什么这不是可选的锦上添花：残差范数只说"离散方程的不平衡量在变小"，
+    完全不说"物理场走了多远"。两者可以同时成立且互不矛盾——plate_demo 上
+    残差单调下降 350 步而物理场只走完一个绕板特征时间的 1.8%，导致启动
+    暂态的压力分布被当成壁面处理缺陷追了好几天。见
+    `core/fr_solver/pseudotime_budget.py` 模块文档。
+    """
+    fn = getattr(solver, "_pseudo_time_budget", None)
+    if fn is None:
+        # 只有 FRSolver 定义了这个方法。本函数被写成对求解器类型宽容，
+        # 是因为 `run_order_continuation` 此后可能被别的求解器类复用，
+        # 那时缺一行诊断不该让求解失败。
+        return
+    b = fn(n_steps=total_iter)
+    if b is None:
+        return
+    from autoflowcfd.core.fr_solver.pseudotime_budget import (
+        format_pseudo_time_budget,
+    )
+    print(format_pseudo_time_budget(b))
