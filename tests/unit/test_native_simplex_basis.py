@@ -83,11 +83,19 @@ def test_generate_fr_operators_native_mode_populates_expected_fields():
     # 已被 native 版本覆盖——见 fr/operators.py 该分支的完整说明。
     from autoflowcfd.fr.collapsed_basis import OVERINTEGRATION_MAX_ORDER
     over_order = min(2 * order, OVERINTEGRATION_MAX_ORDER)
-    n_fine_global = (over_order + 1) ** 3
+    # 细网格轴取 native **真实**细点数、不再填充到 (over_order+1)^3
+    # （2026-09-17）：填充槽位恒为零、对结果零贡献，却让整条过积分链在
+    # 空点上白算，其中 D_fine 的收缩是 O(n_fine^2)（P2 上 64^2/20^2 =
+    # 10.2 倍无效 FLOPs）。实测 P1 加速 3.04x、P2 加速 4.63x，结果相同
+    # （最大相对差 1.4e-16 / 0.0）。粗网格轴仍必须填充到 n_sps_global，
+    # 因为 Q 数组是那个布局。见 fr/operators.py 该分支的说明与
+    # tests/unit/test_overintegration_unpadded_fine_axis.py。
+    n_fine_native = (over_order + 1) * (over_order + 2) * (over_order + 3) // 6
     assert ops.overint_order == over_order
-    assert ops.overint_D_fine_tet.shape == (n_fine_global, n_fine_global, 3)
-    assert ops.overint_interp_c2f_tet.shape == (n_fine_global, n_sps_global)
-    assert ops.overint_restrict_f2c_tet.shape == (n_sps_global, n_fine_global)
+    assert ops.overint_n_fine_tet == n_fine_native
+    assert ops.overint_D_fine_tet.shape == (n_fine_native, n_fine_native, 3)
+    assert ops.overint_interp_c2f_tet.shape == (n_fine_native, n_sps_global)
+    assert ops.overint_restrict_f2c_tet.shape == (n_sps_global, n_fine_native)
 
 
 def test_generate_fr_operators_rejects_unknown_tet_basis_mode():

@@ -381,25 +381,32 @@ class HighOrderMesh:
         用的是同一个 `contract_shared_operator_2axis`，不是重新实现一遍
         同一个数学操作的第二份独立代码。
         """
-        from autoflowcfd.core.fr_operators.volume_contract import contract_shared_operator_2axis
+        from autoflowcfd.core.fr_operators.volume_contract import (
+            contract_shared_operator_2axis, get_overintegration_context,
+        )
 
-        n_prism = self.n_prism_cells
-        n_fine = self.n_sps_per_cell_fine
-        det_jacs_fine = self.jacobians_fine["det_jacs"].reshape(self.n_cells, n_fine)
-        inv_jacs_fine = self.jacobians_fine["inv_jacs"].reshape(self.n_cells, n_fine, 3, 3)
-        adj_fine = det_jacs_fine[..., None, None] * inv_jacs_fine  # adj[c,j,m,i] = adj(J)_{m,i}
-
-        residual = np.zeros((self.n_cells, n_fine, 3))
-        if n_prism > 0:
-            residual[:n_prism] = contract_shared_operator_2axis(
-                self.operators.overint_D_fine_prism, adj_fine[:n_prism]
+        # 按段取细点度量（2026-09-17）：native 四面体过积分的细网格轴不再
+        # 填充到棱柱的 (oo+1)^3 宽度，两段的 n_fine 不同了，不能再共用一份
+        # `(n_cells, n_fine, ...)` 的整场数组。改用与真实体积项组装同一个
+        # 上下文 helper，保持"诊断与生产走同一份算子/度量"这条既定设计。
+        oi = get_overintegration_context(self, self.operators)
+        if oi is None:
+            # 与 verify_gcl 的分派保持一致：没有过积分上下文就不该走到这里
+            raise RuntimeError(
+                "_verify_gcl_overintegrated 被调用但过积分上下文不可用"
+                "（jacobians_fine 或 overint 算子缺失）——调用方的分派条件"
+                "与实际可用性不一致"
             )
-        if self.n_cells > n_prism:
-            residual[n_prism:] = contract_shared_operator_2axis(
-                self.operators.overint_D_fine_tet, adj_fine[n_prism:]
-            )
 
-        cell_max = np.max(np.abs(residual), axis=(1, 2))
+        cell_max = np.empty(self.n_cells)
+        for (seg_lo, seg_hi, n_fine, det_seg, inv_seg,
+             _c2f, op_D_fine, _f2c) in oi["segs"]:
+            if seg_hi <= seg_lo:
+                continue
+            adj_seg = np.ascontiguousarray(det_seg)[..., None, None]                 * np.ascontiguousarray(inv_seg)   # adj[c,j,m,i]
+            res_seg = contract_shared_operator_2axis(op_D_fine, adj_seg)
+            cell_max[seg_lo:seg_hi] = np.max(np.abs(res_seg), axis=(1, 2))
+
         max_residual = float(np.max(cell_max))
         n_failed = int(np.sum(cell_max >= tolerance))
 

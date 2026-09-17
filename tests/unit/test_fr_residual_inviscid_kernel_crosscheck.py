@@ -55,33 +55,33 @@ def _compute_residual_via_new_kernel(U, mesh, ops, boundary_ghost_provider=None,
     # fr_volume_contract.py 模块文档；这里必须跟着同步更新，否则本测试
     # 会把"体积项 einsum vs matmul 的浮点重结合差异"误判成"界面项新旧
     # kernel 不一致"——两者是完全独立的浮点重结合来源，不能混在一起）---
-    if mesh.jacobians_fine is not None:
-        n_fine = mesh.n_sps_per_cell_fine
-        det_jacs_fine = mesh.jacobians_fine["det_jacs"].reshape(n_cells, n_fine)
-        inv_jacs_fine = mesh.jacobians_fine["inv_jacs"].reshape(n_cells, n_fine, 3, 3)
-        adj_j_fine = det_jacs_fine[..., None, None] * inv_jacs_fine
+    # 过积分上下文改用共享 helper 并**按段**处理（2026-09-17）：native
+    # 四面体过积分的细网格轴不再填充到棱柱的 (oo+1)^3 宽度，两段的
+    # n_fine 不同了，不能再共用一份 (n_cells, n_fine, ...) 的整场数组。
+    # 这里跟着生产路径（fr_residual/inviscid.py）同步改——本测试的全部
+    # 意义就是"体积项逐字复制生产实现、只替换界面项"，体积项一旦与生产
+    # 不同步，测出的差异就会被误判成界面项 kernel 不一致。
+    from autoflowcfd.core.fr_operators.volume_contract import (
+        get_overintegration_context,
+    )
 
-        Q_fine = np.zeros((n_cells, n_fine, 5))
-        if n_prism > 0:
-            Q_fine[:n_prism] = contract_shared_operator_1axis(ops.overint_interp_c2f_prism, Q[:n_prism])
-        if n_cells > n_prism:
-            Q_fine[n_prism:] = contract_shared_operator_1axis(ops.overint_interp_c2f_tet, Q[n_prism:])
-
-        Q_fine_flat = np.ascontiguousarray(Q_fine.reshape(-1, 5))
-        F_phys_fine = euler_physical_flux_batch(Q_fine_flat).reshape(n_cells, n_fine, 3, 5)
-        F_tilde_fine = np.matmul(adj_j_fine, F_phys_fine)
-
-        div_comp_fine = np.zeros((n_cells, n_fine, 5))
-        if n_prism > 0:
-            div_comp_fine[:n_prism] = contract_shared_operator_2axis(ops.overint_D_fine_prism, F_tilde_fine[:n_prism])
-        if n_cells > n_prism:
-            div_comp_fine[n_prism:] = contract_shared_operator_2axis(ops.overint_D_fine_tet, F_tilde_fine[n_prism:])
-
+    _oi = get_overintegration_context(mesh, ops)
+    if _oi is not None:
         div_comp = np.zeros((n_cells, n_sps, 5))
-        if n_prism > 0:
-            div_comp[:n_prism] = contract_shared_operator_1axis(ops.overint_restrict_f2c_prism, div_comp_fine[:n_prism])
-        if n_cells > n_prism:
-            div_comp[n_prism:] = contract_shared_operator_1axis(ops.overint_restrict_f2c_tet, div_comp_fine[n_prism:])
+        for (seg_lo, seg_hi, n_fine, det_seg, inv_seg,
+             op_c2f, op_D_fine, op_f2c) in _oi["segs"]:
+            if seg_hi <= seg_lo:
+                continue
+            nb = seg_hi - seg_lo
+            adj_seg = np.ascontiguousarray(det_seg)[..., None, None]                 * np.ascontiguousarray(inv_seg)
+            Q_fine = contract_shared_operator_1axis(op_c2f, Q[seg_lo:seg_hi])
+            F_phys_fine = euler_physical_flux_batch(
+                np.ascontiguousarray(Q_fine.reshape(-1, 5))
+            ).reshape(nb, n_fine, 3, 5)
+            F_tilde_fine = np.matmul(adj_seg, F_phys_fine)
+            div_fine = contract_shared_operator_2axis(op_D_fine, F_tilde_fine)
+            div_comp[seg_lo:seg_hi] = contract_shared_operator_1axis(
+                op_f2c, div_fine)
     else:
         Q_flat = np.ascontiguousarray(Q.reshape(-1, 5))
         F_phys = euler_physical_flux_batch(Q_flat).reshape(n_cells, n_sps, 3, 5)

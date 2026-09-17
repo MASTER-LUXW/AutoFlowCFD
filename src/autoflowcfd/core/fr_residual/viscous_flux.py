@@ -167,13 +167,17 @@ def _viscous_volume_overintegrated(Q, grad_vel, grad_T, mu_t_field,
       ⑤ 精确插值限制回 coarse SPs。
     """
     n_cells = Q.shape[0]
-    det_fine, inv_fine = oi["det_fine"], oi["inv_fine"]
-    n_fine = oi["n_fine"]
     div_comp = np.zeros((n_cells, n_sps, 5))
-    for seg_lo, seg_hi, op_c2f, op_D_fine, op_f2c in oi["segs"]:
+    # 每段自带自己的 n_fine 与已切好的细点度量（2026-09-17）：native
+    # 四面体的过积分细网格轴不再填充到棱柱的 (oo+1)^3 宽度，两段的 n_fine
+    # 不同了。度量按**段内局部**索引切（`i0 = c0 - seg_lo`）——用全局 c0
+    # 去切段内数组会静默取到错误的单元。
+    for (seg_lo, seg_hi, n_fine, det_seg, inv_seg,
+         op_c2f, op_D_fine, op_f2c) in oi["segs"]:
         for c0 in range(seg_lo, seg_hi, OVERINT_CHUNK_CELLS):
             c1 = min(c0 + OVERINT_CHUNK_CELLS, seg_hi)
             nb = c1 - c0
+            i0, i1 = c0 - seg_lo, c1 - seg_lo
             Q_f = contract_shared_operator_1axis(
                 op_c2f, np.ascontiguousarray(Q[c0:c1]))              # (nb,n_fine,5)
             gv_f = contract_shared_operator_1axis(
@@ -194,7 +198,8 @@ def _viscous_volume_overintegrated(Q, grad_vel, grad_T, mu_t_field,
             ).reshape(nb, n_fine, 3, 5)
             del Q_f, gv_f, gT_f, mut_f
             G_tilde_f = contravariant_flux_from_metric(
-                det_fine[c0:c1], inv_fine[c0:c1], G_phys_f)
+                np.ascontiguousarray(det_seg[i0:i1]),
+                np.ascontiguousarray(inv_seg[i0:i1]), G_phys_f)
             del G_phys_f
             div_f = contract_shared_operator_2axis(op_D_fine, G_tilde_f)
             del G_tilde_f

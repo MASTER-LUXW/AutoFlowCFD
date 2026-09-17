@@ -35,7 +35,7 @@ from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outlie
 from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_batch, entropy_stable_volume_divergence_batch
 from autoflowcfd.core.fr_operators.volume_contract import (
     contract_shared_operator_1axis, contract_shared_operator_2axis, compute_adj_j,
-    contravariant_flux_from_metric,
+    contravariant_flux_from_metric, get_overintegration_context,
 )
 
 GAMMA = 1.4
@@ -239,7 +239,14 @@ def compute_inviscid_residual_fr(
 
     n_prism = mesh.n_prism_cells
 
-    if mesh.jacobians_fine is not None:
+    # 过积分上下文改用共享 helper（2026-09-17）：此前本函数自己直读
+    # `mesh.jacobians_fine` / `mesh.n_sps_per_cell_fine` 并硬编码两段
+    # 算子，与 `viscous_flux.py` / `turbulence/transport.py` 那两个消费方
+    # 各写一份。native 四面体的过积分细网格轴不再填充到棱柱宽度之后，
+    # "每段的 n_fine 和度量切片"这件事必须三处完全一致，所以收敛到
+    # `volume_contract.get_overintegration_context` 这一个来源。
+    _oi = get_overintegration_context(mesh, ops)
+    if _oi is not None:
         # 体积项去混叠（over-integration，V2.0 二次评审 Tier 0 #2）：直接
         # 在 coarse SPs 上对 adj(J)*F_phys(Q) 做 D_3d_tet/prism 散度会
         # 把这个非线性乘积（真实多项式次数远高于 order）混叠到
@@ -252,9 +259,6 @@ def compute_inviscid_residual_fr(
         # 的微分矩阵求散度（差分的是更接近真实非线性次数的插值多项式）；
         # ④ 把结果插值限制回 coarse SPs。见
         # fr/collapsed_basis.py::build_overintegration_operators 文档。
-        n_fine = mesh.n_sps_per_cell_fine
-        det_jacs_fine = mesh.jacobians_fine["det_jacs"].reshape(n_cells, n_fine)
-        inv_jacs_fine = mesh.jacobians_fine["inv_jacs"].reshape(n_cells, n_fine, 3, 3)
 
         # 按单元分块执行整条 插值→物理通量→逆变通量→散度 链（B-12 P2
         # OOM 修复，2026-08-26）：原实现把四个全场临时数组（adj_j_fine
@@ -284,14 +288,16 @@ def compute_inviscid_residual_fr(
         # 强形式更小的分块降低单块瞬态峰值/便于 numba prange 调度粒度，
         # 强形式路径块大小不变（沿用既有 P2 OOM 修复的取值）。
         _OVERINT_CHUNK_CELLS = 4096 if entropy_stable_volume else 32768
-        for seg_lo, seg_hi, op_c2f, op_D_fine, op_f2c in (
-            (0, n_prism, ops.overint_interp_c2f_prism, ops.overint_D_fine_prism,
-             ops.overint_restrict_f2c_prism),
-            (n_prism, n_cells, ops.overint_interp_c2f_tet, ops.overint_D_fine_tet,
-             ops.overint_restrict_f2c_tet),
-        ):
+        # 度量按**段内局部**索引切（`i0 = c0 - seg_lo`）——用全局 c0 去切
+        # 段内数组会静默取到错误的单元。
+        for (seg_lo, seg_hi, n_fine, det_seg, inv_seg,
+             op_c2f, op_D_fine, op_f2c) in _oi["segs"]:
             for c0 in range(seg_lo, seg_hi, _OVERINT_CHUNK_CELLS):
                 c1 = min(c0 + _OVERINT_CHUNK_CELLS, seg_hi)
+                i0, i1 = c0 - seg_lo, c1 - seg_lo
+                # 段内度量是带偏移的非连续视图，numba kernel 要连续输入
+                det_chunk = np.ascontiguousarray(det_seg[i0:i1])
+                inv_chunk = np.ascontiguousarray(inv_seg[i0:i1])
                 Q_fine = contract_shared_operator_1axis(op_c2f, Q[c0:c1])
                 if entropy_stable_volume:
                     # adj(J) 只有 entropy-stable 分支需要显式物化（该 kernel
@@ -299,7 +305,7 @@ def compute_inviscid_residual_fr(
                     # 分支已改用 `contravariant_flux_from_metric` 融合计算，
                     # 不再需要这份 (块长,n_fine,3,3) 中间数组（性能优化
                     # 2026-09-13，79万单元 P1 细点下约 1.5GiB）。
-                    adj_j_fine = compute_adj_j(det_jacs_fine[c0:c1], inv_jacs_fine[c0:c1])
+                    adj_j_fine = compute_adj_j(det_chunk, inv_chunk)
                     # Chandrashekar 两点熵守恒通量 + 对称平均度量项，见
                     # entropy_stable_volume_divergence_batch 文档；该函数
                     # 内部已经把 "-2*div_comp/det_jacs" 里的 2.0 折进
@@ -317,7 +323,7 @@ def compute_inviscid_residual_fr(
                     # 文档：原 `np.matmul(adj_j_fine, F_phys_fine)` 是逐点
                     # 3x3@3x5 批量微型 gemm，不随核数并行）。逐位等价。
                     F_tilde_fine = contravariant_flux_from_metric(
-                        det_jacs_fine[c0:c1], inv_jacs_fine[c0:c1], F_phys_fine
+                        det_chunk, inv_chunk, F_phys_fine
                     )
                     del F_phys_fine
                     div_fine_chunk = contract_shared_operator_2axis(op_D_fine, F_tilde_fine)

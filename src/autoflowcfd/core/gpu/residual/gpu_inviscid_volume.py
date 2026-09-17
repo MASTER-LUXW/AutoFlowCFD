@@ -101,50 +101,35 @@ def compute_volume_term_gpu(cp, U, mesh_data, ops_data, n_cells, n_sps, n_prism)
     Q = conserved_to_primitive_gpu(U[..., :5])  # (n_cells, n_sps, 5)
     det_jacs = mesh_data['det_jacs']
 
-    if 'adj_j_fine' in mesh_data:
-        # Over-integration 去混叠路径
-        n_fine = mesh_data['n_fine']
-        adj_j_fine = mesh_data['adj_j_fine']
+    # 过积分改用共享 GPU helper 并**按段**处理（2026-09-17，与 CPU 端
+    # 同一次改动）：native 四面体过积分的细网格轴不再填充到棱柱的
+    # (oo+1)^3 宽度（P1 10 vs 27、P2 20 vs 64，填充槽位恒为零、对结果零
+    # 贡献却要白算，其中 D_fine 的收缩是 O(n_fine^2)，P2 上 10.2 倍无效
+    # FLOPs；CPU 侧实测 P1 加速 3.04x、P2 加速 4.63x，最大相对差
+    # 1.4e-16 / 0.0）。两段 n_fine 不同，所以不能再共用一份
+    # `(n_cells, n_fine, ...)` 的整场细点数组，必须逐段各自分配。
+    from autoflowcfd.core.gpu.gpu_overintegration import (
+        get_overintegration_segs_gpu,
+    )
 
-        # 插值到 fine 点
-        Q_fine = cp.zeros((n_cells, n_fine, 5), dtype=cp.float64)
-        if n_prism > 0:
-            Q_fine[:n_prism] = gpu_contract_shared_operator_1axis(
-                ops_data['overint_interp_c2f_prism'], Q[:n_prism]
-            )
-        if n_cells > n_prism:
-            Q_fine[n_prism:] = gpu_contract_shared_operator_1axis(
-                ops_data['overint_interp_c2f_tet'], Q[n_prism:]
-            )
-
-        # 物理通量（fine 点）
-        Q_fine_flat = cp.ascontiguousarray(Q_fine.reshape(-1, 5))
-        F_phys_fine = euler_physical_flux_gpu(Q_fine_flat).reshape(n_cells, n_fine, 3, 5)
-
-        # 逆变通量
-        F_tilde_fine = cp.matmul(adj_j_fine, F_phys_fine)
-
-        # 散度（fine 点）
-        div_comp_fine = cp.zeros((n_cells, n_fine, 5), dtype=cp.float64)
-        if n_prism > 0:
-            div_comp_fine[:n_prism] = gpu_contract_shared_operator_2axis(
-                ops_data['overint_D_fine_prism'], F_tilde_fine[:n_prism]
-            )
-        if n_cells > n_prism:
-            div_comp_fine[n_prism:] = gpu_contract_shared_operator_2axis(
-                ops_data['overint_D_fine_tet'], F_tilde_fine[n_prism:]
-            )
-
-        # 限制回 coarse
+    _segs = get_overintegration_segs_gpu(mesh_data, ops_data, n_cells, n_prism)
+    if _segs is not None:
         div_comp = cp.zeros((n_cells, n_sps, 5), dtype=cp.float64)
-        if n_prism > 0:
-            div_comp[:n_prism] = gpu_contract_shared_operator_1axis(
-                ops_data['overint_restrict_f2c_prism'], div_comp_fine[:n_prism]
-            )
-        if n_cells > n_prism:
-            div_comp[n_prism:] = gpu_contract_shared_operator_1axis(
-                ops_data['overint_restrict_f2c_tet'], div_comp_fine[n_prism:]
-            )
+        for lo, hi, n_fine_seg, adj_seg, c2f, D_fine, f2c in _segs:
+            if hi <= lo:
+                continue
+            Q_fine = gpu_contract_shared_operator_1axis(c2f, Q[lo:hi])
+            F_phys_fine = euler_physical_flux_gpu(
+                cp.ascontiguousarray(Q_fine.reshape(-1, 5))
+            ).reshape(hi - lo, n_fine_seg, 3, 5)
+            del Q_fine
+            # `adj_seg` 已按段切好（整段处理，正好对应 [lo:hi]）
+            F_tilde_fine = cp.matmul(adj_seg, F_phys_fine)
+            del F_phys_fine
+            div_fine = gpu_contract_shared_operator_2axis(D_fine, F_tilde_fine)
+            del F_tilde_fine
+            div_comp[lo:hi] = gpu_contract_shared_operator_1axis(f2c, div_fine)
+            del div_fine
     else:
         # 无 fine 几何：朴素路径
         adj_j = mesh_data['adj_j']

@@ -301,7 +301,7 @@ from autoflowcfd.core.gpu.gpu_overintegration import (  # noqa: E402
 )
 
 
-def _scalar_volume_div_overintegrated_gpu(cp, factors, adj_j_fine, segs,
+def _scalar_volume_div_overintegrated_gpu(cp, factors, segs,
                                           n_cells, n_sps):
     """标量体积项 `div(adj(J) * prod(factors))` 的去混叠版（GPU）。
 
@@ -314,14 +314,18 @@ def _scalar_volume_div_overintegrated_gpu(cp, factors, adj_j_fine, segs,
     `_scalar_diffusion_volume_overintegrated` 逐字对应。
     """
     div = cp.zeros((n_cells, n_sps), dtype=cp.float64)
-    for lo, hi, c2f, D_fine, f2c in segs:
+    # 每段自带自己的 n_fine 与**已切好**的细点度量（2026-09-17，与 CPU 端
+    # 同一次改动）：四面体过积分的细网格轴不再填充到棱柱宽度，两段的
+    # n_fine 不同，所以不能再用一份共享的 adj_j_fine 按全局 [lo:hi] 切。
+    # 本循环一次处理整段，`adj_seg` 正好就对应 [lo:hi]，直接用即可。
+    for lo, hi, _n_fine_seg, adj_seg, c2f, D_fine, f2c in segs:
         if hi <= lo:
             continue
         prod = None
         for f in factors:
             ff_ = gpu_contract_shared_operator_1axis(c2f, f[lo:hi])
             prod = ff_ if prod is None else prod * ff_
-        F_tilde = cp.matmul(adj_j_fine[lo:hi], prod[..., None]).squeeze(-1)
+        F_tilde = cp.matmul(adj_seg, prod[..., None]).squeeze(-1)
         div_f = gpu_contract_shared_operator_2axis(D_fine, F_tilde[..., None])[..., 0]
         div[lo:hi] = gpu_contract_shared_operator_1axis(
             f2c, div_f[..., None])[..., 0]
@@ -348,7 +352,7 @@ def compute_scalar_convection_residual_gpu(
     if _segs is not None:
         div_F = _scalar_volume_div_overintegrated_gpu(
             cp, (rho[..., None], scalar_field[..., None], velocity),
-            mesh_data['adj_j_fine'], _segs, n_cells, n_sps)
+            _segs, n_cells, n_sps)
     else:
         rho_u_phi = rho[..., None] * velocity * scalar_field[..., None]  # (n_cells,n_sps,3)
         F_tilde = cp.matmul(adj_j, rho_u_phi[..., None]).squeeze(-1)  # (n_cells,n_sps,3)
@@ -430,7 +434,7 @@ def compute_scalar_diffusion_residual_gpu(
     if _segs is not None:
         div_G = _scalar_volume_div_overintegrated_gpu(
             cp, (gamma_field[..., None], grad_phi),
-            mesh_data['adj_j_fine'], _segs, n_cells, n_sps)
+            _segs, n_cells, n_sps)
     else:
         G_phys = gamma_field[..., None] * grad_phi
         G_tilde = cp.matmul(adj_j, G_phys[..., None]).squeeze(-1)  # (n_cells,n_sps,3)

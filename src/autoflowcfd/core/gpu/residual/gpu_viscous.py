@@ -48,7 +48,7 @@ def compute_temperature_gpu(Q):
 
 
 def _viscous_volume_overintegrated_gpu(cp, Q, grad_vel, grad_T, mu_t_field,
-                                       mu, Pr, Pr_t, adj_j_fine, segs,
+                                       mu, Pr, Pr_t, segs,
                                        n_cells, n_sps):
     """粘性体积项 `div(adj(J)*G(Q,grad_vel,grad_T,mu_t))` 的去混叠版（GPU），
     返回 (n_cells, n_sps, 5)。
@@ -61,7 +61,8 @@ def _viscous_volume_overintegrated_gpu(cp, Q, grad_vel, grad_T, mu_t_field,
       ② 在 FINE 点**重新求值** `viscous_physical_flux_gpu`——非线性函数本身
          在细点求值，而不是把 coarse 上算好的乘积插过去。这正是去混叠的
          全部内容；
-      ③ 用细点度量 `adj_j_fine`（= det_fine*inv_fine，已预乘）算逆变通量；
+      ③ 用细点度量（`segs` 里每段自带的 `adj_seg`，= det_fine*inv_fine
+         已预乘）算逆变通量；
       ④ 用 FINE 网格自己的微分矩阵求散度；
       ⑤ 精确插值限制回 coarse SPs。
 
@@ -77,7 +78,11 @@ def _viscous_volume_overintegrated_gpu(cp, Q, grad_vel, grad_T, mu_t_field,
     """
     div_comp = cp.zeros((n_cells, n_sps, 5), dtype=cp.float64)
     mut_is_array = mu_t_field is not None and hasattr(mu_t_field, 'shape')
-    for lo, hi, c2f, D_fine, f2c in segs:
+    # 每段自带自己的 n_fine 与**已切好**的细点度量（2026-09-17，与 CPU 端
+    # 同一次改动）：四面体过积分的细网格轴不再填充到棱柱宽度，两段的
+    # n_fine 不同，所以不能再用一份共享的 adj_j_fine 按全局 [lo:hi] 切。
+    # 本循环一次处理整段，`adj_seg` 正好就对应 [lo:hi]，直接用即可。
+    for lo, hi, _n_fine_seg, adj_seg, c2f, D_fine, f2c in segs:
         if hi <= lo:
             continue
         Q_f = gpu_contract_shared_operator_1axis(c2f, Q[lo:hi])
@@ -95,7 +100,7 @@ def _viscous_volume_overintegrated_gpu(cp, Q, grad_vel, grad_T, mu_t_field,
             Q_f, gv_f, gT_f, mu, Pr, mu_t=mut_f, Pr_t=Pr_t,
         )  # (nb, n_fine, 3, 5)
         del Q_f, gv_f, gT_f
-        G_tilde_f = cp.matmul(adj_j_fine[lo:hi], G_phys_f)
+        G_tilde_f = cp.matmul(adj_seg, G_phys_f)
         del G_phys_f
         div_f = gpu_contract_shared_operator_2axis(D_fine, G_tilde_f)
         del G_tilde_f
@@ -229,7 +234,7 @@ def compute_viscous_residual_fr_gpu(
     if _oi_segs is not None:
         div_G = _viscous_volume_overintegrated_gpu(
             cp, Q, grad_vel, grad_T, mu_t_arg, mu, Pr, Pr_t,
-            mesh_data['adj_j_fine'], _oi_segs, n_cells, n_sps)
+            _oi_segs, n_cells, n_sps)
         # `adj_j` 仍需物化：下方界面项 kernel 要用。
         adj_j = mesh_data['adj_j']
     else:

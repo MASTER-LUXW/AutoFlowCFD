@@ -64,10 +64,17 @@ def _actual_over_order(oi):
     2026-09-15 的教训：本文件原来内部写死 `min(2*order, 3)`，而生产规则
     随后改成了 `3*order`（只影响 order=1，见 fr/operators.py 该处文档）。
     测试当时仍然通过，但走的是错误的分支、判据的理由已经和现实脱节。
-    细点数 `n_fine = (over_order+1)^3`，反解即得。
+    取**棱柱段**的细点数反解：`n_fine_prism = (over_order+1)^3`。
+
+    2026-09-17 起上下文不再有共享的 `oi["n_fine"]`——native 四面体过积分
+    的细网格轴不再填充到棱柱宽度，两段的 n_fine 不同了（棱柱仍是
+    `(oo+1)^3`，四面体是真实的 `(oo+1)(oo+2)(oo+3)/6`）。所以这里明确
+    取棱柱段，而不是随便拿一段来开立方。
     """
-    n1d = round(oi["n_fine"] ** (1.0 / 3.0))
-    assert n1d ** 3 == oi["n_fine"], f"n_fine={oi['n_fine']} 不是完全立方数"
+    n_fine_prism = oi["segs"][0][2]
+    n1d = round(n_fine_prism ** (1.0 / 3.0))
+    assert n1d ** 3 == n_fine_prism, (
+        f"棱柱段 n_fine={n_fine_prism} 不是完全立方数")
     return n1d - 1
 
 

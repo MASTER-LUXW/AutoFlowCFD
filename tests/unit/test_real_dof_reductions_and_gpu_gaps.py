@@ -363,10 +363,21 @@ class TestGpuViscousOverintegration:
 
         mesh, ops, oi, Q, grad_vel, grad_T, mu_t = case
         n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
-        adj_j_fine = oi["det_fine"][..., None, None] * oi["inv_fine"]
+        # 细点度量现在由 `segs` 每段自带（2026-09-17）：四面体过积分的
+        # 细网格轴不再填充到棱柱宽度，两段 n_fine 不同，所以不再有一份
+        # 共享的 adj_j_fine 可以整场预乘。这里把 CPU 上下文的每段
+        # (det, inv) 预乘成 adj，拼成 GPU helper 的段格式。
+        gpu_segs = tuple(
+            (lo, hi, n_fine,
+             np.ascontiguousarray(det_seg)[..., None, None]
+             * np.ascontiguousarray(inv_seg),
+             c2f, D_fine, f2c)
+            for (lo, hi, n_fine, det_seg, inv_seg,
+                 c2f, D_fine, f2c) in oi["segs"]
+        )
         return gv._viscous_volume_overintegrated_gpu(
             shim, Q, grad_vel, grad_T, mu_t_arg, 1.8e-5, 0.72, 0.9,
-            adj_j_fine, oi["segs"], n_cells, n_sps)
+            gpu_segs, n_cells, n_sps)
 
     def test_matches_cpu_with_turbulent_viscosity(self, monkeypatch, case):
         from autoflowcfd.core.fr_residual.viscous_flux import (
@@ -454,12 +465,19 @@ class TestGpuViscousOverintegration:
         ops = generate_fr_operators(order)
         cpu = get_overintegration_context(mesh, ops)
         ops_data = {k: getattr(ops, k) for k in OVERINT_OPS_KEYS}
+        # GPU helper 现在要从 `adj_j_fine` 的形状读棱柱段的细点宽度、并按段
+        # 切度量，所以替身必须有真实形状（2026-09-17）。
+        n_fine_prism = cpu["segs"][0][2]
         gpu = get_overintegration_segs_gpu(
-            {'adj_j_fine': np.zeros(1)}, ops_data,
-            mesh.n_cells, mesh.n_prism_cells)
+            {'adj_j_fine': np.zeros((mesh.n_cells, n_fine_prism, 3, 3))},
+            ops_data, mesh.n_cells, mesh.n_prism_cells)
         assert gpu is not None
         assert [(lo, hi) for lo, hi, *_ in gpu] == \
                [(lo, hi) for lo, hi, *_ in cpu["segs"]]
+        # 两端每段的 n_fine 必须一致——这正是"同一份配置下两个后端跑的是
+        # 同一个数值方案"的核心不变量
+        assert [nf for _lo, _hi, nf, *_ in gpu] == \
+               [nf for _lo, _hi, nf, *_ in cpu["segs"]]
 
     def test_missing_keys_fall_back_to_coarse(self):
         """缺任何一个算子/细点度量都必须返回 None（退回 coarse），而不是
@@ -473,7 +491,8 @@ class TestGpuViscousOverintegration:
             partial = dict(full)
             del partial[k]
             assert get_overintegration_segs_gpu(
-                {'adj_j_fine': 1}, partial, 4, 2) is None, k
+                {'adj_j_fine': np.zeros((4, 64, 3, 3))},
+                partial, 4, 2) is None, k
 
 
 # ===========================================================================

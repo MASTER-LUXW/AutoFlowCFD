@@ -303,10 +303,34 @@ def get_overintegration_context(mesh, ops):
     零，没有可去混叠的内容，`jacobians_fine` 与 overint 算子都不构造。
 
     Returns:
-        dict 或 None。dict 含 `n_fine`、`det_fine`/`inv_fine`（均按
-        (n_cells, n_fine, ...) 重整形）、以及 `segs`——
-        [(lo, hi, interp_c2f, D_fine, restrict_f2c), ...] 两段（棱柱在前、
-        四面体在后），与"棱柱在前"的单元存储顺序一致。
+        dict 或 None。dict 只含 `segs`——
+        `[(lo, hi, n_fine, det_fine, inv_fine, c2f, D_fine, f2c), ...]`
+        两段（棱柱在前、四面体在后），与"棱柱在前"的单元存储顺序一致。
+        每段自带**自己的** `n_fine` 与已按 `(seg_len, n_fine, ...)` 切好的
+        细点度量。
+
+    ## 为什么每段各自带 n_fine（2026-09-17 改动）
+
+    此前返回的是**共享**的 `n_fine`/`det_fine`/`inv_fine`，因为棱柱与
+    四面体的过积分算子都被填充到同一个 `(over_order+1)^3` 宽度。但 native
+    四面体在 over_order 下只有 `(oo+1)(oo+2)(oo+3)/6` 个**真实**细点
+    （P1: 10 vs 27，P2: 20 vs 64），填充槽位恒为零、对结果零贡献，却让
+    整条过积分链在空点上白算——其中 `D_fine` 的收缩是 O(n_fine^2)，P2 上
+    是 10.2 倍的无效 FLOPs。实测去掉细轴填充后 P1 加速 3.04x、P2 加速
+    4.63x，最大相对差 1.4e-16 / 0.0（见 `fr/operators.py` 那段说明）。
+
+    **共享键被刻意移除**（不做向后兼容别名）：漏改的消费点会直接
+    `KeyError`，而不是静默用棱柱的 `n_fine` 去切四面体段的度量——后者
+    会产生形状不匹配或（更糟）安静的错误答案。
+
+    ## 四面体段的细点度量为什么可以直接切前 n_fine_tet 列
+
+    直边四面体的 Jacobian **逐单元为常数**（`compute_native_tet_jacobian`
+    不依赖参考点位置），`compute_native_tet_jacobians` 把同一个常数写满
+    该单元的全部细点槽位。所以"前 `n_fine_tet` 列"与"native 真实细点上的
+    度量"**恒等**，不需要另存一份、也不需要重新求值。
+    （`(oo+1)^3 >= (oo+1)(oo+2)(oo+3)/6` 对任意 oo>=0 成立，切片永不越界；
+    下面有显式断言，不依赖这条不变量默默成立。）
     """
     if getattr(mesh, "jacobians_fine", None) is None:
         return None
@@ -315,16 +339,42 @@ def get_overintegration_context(mesh, ops):
                  "overint_D_fine_tet", "overint_restrict_f2c_tet"):
         if getattr(ops, name, None) is None:
             return None
-    n_fine = mesh.n_sps_per_cell_fine
+    n_fine_prism = mesh.n_sps_per_cell_fine
     n_cells = mesh.n_cells
+    n_prism = mesh.n_prism_cells
+    det_all = mesh.jacobians_fine["det_jacs"].reshape(n_cells, n_fine_prism)
+    inv_all = mesh.jacobians_fine["inv_jacs"].reshape(n_cells, n_fine_prism, 3, 3)
+
+    # n_fine_tet 从**矩阵自身的形状**推导（`overint_D_fine_tet` 现在是
+    # (n_fine_tet, n_fine_tet, 3)），不读 `ops.overint_n_fine_tet` 那个
+    # 字段——矩阵才是单一事实来源，从形状推导在结构上不可能与它不同步。
+    # （那个字段仍然保留，供启动日志/诊断使用。）
+    n_fine_tet = int(ops.overint_D_fine_tet.shape[0])
+    _declared = int(getattr(ops, "overint_n_fine_tet", 0) or 0)
+    if _declared and _declared != n_fine_tet:
+        raise ValueError(
+            f"ops.overint_n_fine_tet={_declared} 与 overint_D_fine_tet 的"
+            f"形状 {ops.overint_D_fine_tet.shape} 不一致——算子构造有 bug，"
+            f"不静默采用其中一个"
+        )
+    if n_fine_tet > n_fine_prism:
+        raise ValueError(
+            f"四面体真实细点数 {n_fine_tet} 超过了棱柱细点布局宽度 "
+            f"{n_fine_prism}——`jacobians_fine` 的列数不足以覆盖四面体段。"
+            f"这在 prism/tet 共用同一个 over_order 时不可能发生；若是"
+            f"刻意给四面体更高的 over_order，需要先为四面体单独存一份"
+            f"紧凑（逐单元常数）的细点度量，见本函数文档。"
+        )
+
     return dict(
-        n_fine=n_fine,
-        det_fine=mesh.jacobians_fine["det_jacs"].reshape(n_cells, n_fine),
-        inv_fine=mesh.jacobians_fine["inv_jacs"].reshape(n_cells, n_fine, 3, 3),
         segs=(
-            (0, mesh.n_prism_cells, ops.overint_interp_c2f_prism,
-             ops.overint_D_fine_prism, ops.overint_restrict_f2c_prism),
-            (mesh.n_prism_cells, n_cells, ops.overint_interp_c2f_tet,
-             ops.overint_D_fine_tet, ops.overint_restrict_f2c_tet),
+            (0, n_prism, n_fine_prism,
+             det_all[:n_prism], inv_all[:n_prism],
+             ops.overint_interp_c2f_prism, ops.overint_D_fine_prism,
+             ops.overint_restrict_f2c_prism),
+            (n_prism, n_cells, n_fine_tet,
+             det_all[n_prism:, :n_fine_tet], inv_all[n_prism:, :n_fine_tet],
+             ops.overint_interp_c2f_tet, ops.overint_D_fine_tet,
+             ops.overint_restrict_f2c_tet),
         ),
     )
