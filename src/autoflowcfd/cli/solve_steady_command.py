@@ -106,6 +106,16 @@ from autoflowcfd.cli.solve_commands import solve
 @click.option('--rho-inf', type=float, default=1.225, help='自由流密度 (kg/m^3)，默认 1.225（标准海平面空气）')
 @click.option('--vel-inf', type=float, default=33.33, help='自由流速度大小 (m/s)，默认 33.33')
 @click.option('--p-inf', type=float, default=101325.0, help='自由流静压 (Pa)，默认 101325.0（标准大气压）')
+@click.option('--aoa', 'aoa_deg', type=float, default=0.0,
+              help='攻角 alpha（度，绕 y 轴、抬头为正，默认 0）。**2026-09-17 新增**：'
+                   '此前来流方向在全代码库被硬编码成 +x，没有任何攻角选项——而攻角'
+                   '扫掠是最常见的外流气动研究。开启后 Q_free（边界自由来流态）、'
+                   '初场、SEM 入口方向、气动力的风轴系分解（Cd 沿来流、Cl 垂直于来流）、'
+                   '参考面积的迎风投影五处统一按它构造。0 时与此前行为逐位相同。'
+                   '力矩 Cm/Cy/Cr 仍报在体轴系，不随攻角旋转（气动数据标准呈现方式）。'
+                   '约定与风轴系公式见 core/utils/flow_direction.py')
+@click.option('--aos', 'aos_deg', type=float, default=0.0,
+              help='侧滑角 beta（度，绕 z 轴，默认 0）。语义与 --aoa 同，见其说明')
 @click.option('--config', 'config_path', type=click.Path(exists=True), default=None,
               help='从 YAML 文件读取物理常量默认值（mu_molecular/rho_inf/vel_inf/p_inf/'
                    'turbulence_intensity/viscosity_ratio）；显式传入的同名 --xxx 选项优先于此文件')
@@ -123,7 +133,8 @@ from autoflowcfd.cli.solve_commands import solve
                    '8_算法重构-Entropy-Stable_Split-Form通量重构-Part1/2.md）。真实测试确认在'
                    '已启用过积分的基础上再改善约2~4倍，代价是体积项计算量从O(n_fine)升到'
                    'O(n_fine^2)，仅 CPU 后端实现')
-def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_iter, cfl_start, cfl_max, cfl_min, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, use_eikonal, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, artificial_viscosity_enabled, artificial_viscosity_alpha, entropy_stable_volume_enabled):
+def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_iter, cfl_start, cfl_max, cfl_min,
+                 aoa_deg, aos_deg, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, use_eikonal, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, artificial_viscosity_enabled, artificial_viscosity_alpha, entropy_stable_volume_enabled):
     """执行稳态 FR 求解。
 
     支持高阶精度 (P1-P4) 和多种湍流模型 (SST, DDES, WMLES)。
@@ -234,7 +245,9 @@ def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_it
             from autoflowcfd.core.mpi.distributed_mesh_loader import distributed_mesh_load_v2
             from autoflowcfd.core.fr_solver.solver import _MACH_REF_FLOOR
 
-            freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf}
+            freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf,
+                          "p_inf": p_inf,
+                          "aoa_deg": aoa_deg, "aos_deg": aos_deg}
             mach_ref = max(
                 vel_inf / math.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10)),
                 _MACH_REF_FLOOR,
@@ -261,6 +274,7 @@ def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_it
                 device_id=gpu_device,
                 mu_molecular=mu_molecular,
                 rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
+                aoa_deg=aoa_deg, aos_deg=aos_deg,
                 # 真实 bug 修复（V2.0 专家组盲审发现）：此前从不传 turb_model，
                 # --turbulence-model 无论填什么都被静默丢弃、恒定跑层流，
                 # 终端打印的 Turbulence 行却仍显示用户输入的模型名。
@@ -349,6 +363,7 @@ def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_it
             viscosity_ratio=viscosity_ratio,
             mu_molecular=mu_molecular,
             rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
+            aoa_deg=aoa_deg, aos_deg=aos_deg,
             # 真实 bug 修复（V2.0 专家组盲审发现）：此前从不传 turb_model，
             # --turbulence-model 无论填什么都被静默丢弃、恒定跑层流，
             # 终端打印的 Turbulence 行却仍显示用户输入的模型名。
@@ -425,7 +440,9 @@ def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_it
             from autoflowcfd.core.mpi.distributed_mesh_loader import distributed_mesh_load_v2
             from autoflowcfd.core.fr_solver.solver import _MACH_REF_FLOOR
 
-            freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf}
+            freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf,
+                          "p_inf": p_inf,
+                          "aoa_deg": aoa_deg, "aos_deg": aos_deg}
             # 与 FRSolver.__init__ 同一个公式（见该文件 mach_ref 计算处），
             # 不是本处新发明的近似——AUSM+up Weiss-Smith 预处理要求分区
             # 两侧用同一个真实值，公式本身也必须与单机路径逐字一致。
@@ -479,6 +496,7 @@ def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_it
                 viscosity_ratio=viscosity_ratio,
                 mu_molecular=mu_molecular,
                 rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
+                aoa_deg=aoa_deg, aos_deg=aos_deg,
                 # 见多 GPU 传统模式同一处注释：CFL 边界参数此前在分布式
                 # 路径上被静默丢弃。DistributedFRSolver 从 solver_kwargs
                 # 读这三个键（见其 _cfl_controller 构造处）。
@@ -568,6 +586,7 @@ def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_it
             sem_num_eddies=sem_num_eddies,
             mu_molecular=mu_molecular,
             rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
+            aoa_deg=aoa_deg, aos_deg=aos_deg,
             flux_type=flux_type,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
@@ -580,7 +599,15 @@ def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_it
         # 传递参考面积到求解器，供迭代中输出气动力系数
         # 如果未指定 --reference-area，尝试从面网格自动计算投影面积
         if reference_area is None:
-            auto_ref_area = _compute_reference_area_auto(volume_data)
+            from autoflowcfd.core.utils.flow_direction import (
+                direction_from_freestream,
+            )
+
+            # 参考面积必须沿**来流方向**投影（有攻角时按 X 投影会
+            # 偏大 1/cos(alpha)，15 度就是 3.5%，直接进 Cd 分母）
+            auto_ref_area = _compute_reference_area_auto(
+                volume_data,
+                direction=direction_from_freestream(solver.freestream))
             if auto_ref_area is not None:
                 reference_area = auto_ref_area
         solver._reference_area = reference_area

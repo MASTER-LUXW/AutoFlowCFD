@@ -181,12 +181,27 @@ def compute_aerodynamic_coefficients_fr(
     denom = max(q_inf * reference_area, 1e-300)
     denom_moment = max(q_inf * reference_area * reference_length, 1e-300)
 
-    # 来流沿 +x（见 FRSolver.freestream 文档），阻力=流向分量，升力=z向分量，
-    # 侧向力=y向分量。力矩按标准轴系映射：俯仰 Cm=绕 y 轴分量、
-    # 偏航 Cy=绕 z 轴分量、滚转 Cr=绕 x 轴分量（x=流向/y=侧向/z=法向右手系）。
-    Cd = float(force_total[0] / denom)
-    Cl = float(force_total[2] / denom)
-    Cs = float(force_total[1] / denom)
+    # 力按**风轴系**分解（2026-09-17）：此前这里直接取体轴分量
+    # （Cd=F[0]/Cl=F[2]/Cs=F[1]），那等价于假定来流恒沿 +x —— 一旦有
+    # 攻角，"阻力"就不再是来流方向的分量、"升力"也不再垂直于来流，
+    # 升阻比整个失去意义。现在按 core/utils/flow_direction.py::wind_axes
+    # 给出的正交三元组投影。
+    #
+    # aoa=aos=0 时该三元组严格等于单位基 (1,0,0)/(0,1,0)/(0,0,1)，所以
+    # 默认路径下与此前**逐位相同**。
+    #
+    # 力矩仍报在**体轴系**（俯仰 Cm=绕 y、偏航 Cy=绕 z、滚转 Cr=绕 x），
+    # 不随攻角旋转——这是气动数据的标准呈现方式，力与力矩混用不同轴系
+    # 会让同一份数据在不同攻角下不可比。见该模块文档"力矩留在体轴系"。
+    from autoflowcfd.core.utils.flow_direction import wind_axes
+
+    d_hat, s_hat, l_hat = wind_axes(
+        float(solver.freestream.get("aoa_deg", 0.0) or 0.0),
+        float(solver.freestream.get("aos_deg", 0.0) or 0.0),
+    )
+    Cd = float(np.dot(force_total, d_hat) / denom)
+    Cl = float(np.dot(force_total, l_hat) / denom)
+    Cs = float(np.dot(force_total, s_hat) / denom)
     Cm = float(moment_total[1] / denom_moment)
     Cy = float(moment_total[2] / denom_moment)
     Cr = float(moment_total[0] / denom_moment)
@@ -265,10 +280,20 @@ def compute_forces_pressure_only(solver, reference_area: float) -> dict:
         vel_inf = solver.freestream["vel_inf"]
         denom = max(0.5 * rho_inf * vel_inf**2 * reference_area, 1e-300)
 
+        # 与 compute_aerodynamic_coefficients 同一套风轴系分解（2026-09-17）。
+        # 这条轻量路径是**每迭代步**都调的监控，若它仍按体轴取分量、而收尾
+        # 的完整积分按风轴投影，同一次运行的逐步 Cd 与最终 Cd 在有攻角时
+        # 会对不上——那种不一致比两处都错更难排查。
+        from autoflowcfd.core.utils.flow_direction import wind_axes
+
+        d_hat, s_hat, l_hat = wind_axes(
+            float(solver.freestream.get("aoa_deg", 0.0) or 0.0),
+            float(solver.freestream.get("aos_deg", 0.0) or 0.0),
+        )
         return {
-            'Cd': float(force[0] / denom),
-            'Cl': float(force[2] / denom),
-            'Cs': float(force[1] / denom),
+            'Cd': float(np.dot(force, d_hat) / denom),
+            'Cl': float(np.dot(force, l_hat) / denom),
+            'Cs': float(np.dot(force, s_hat) / denom),
         }
     except Exception as e:
         logger.warning(f"compute_forces_pressure_only 计算失败，返回零系数（根因需要排查，不应被忽略）: {e}")

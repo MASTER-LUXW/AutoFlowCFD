@@ -33,6 +33,8 @@ def _solve_transient_distributed(
     cfl_start: float = 0.05,
     cfl_max: float = 0.5,
     cfl_min: float = 0.01,
+    aoa_deg: float = 0.0,
+    aos_deg: float = 0.0,
 ):
     """`solve transient` 的分布式分支实现。
 
@@ -78,6 +80,7 @@ def _solve_transient_distributed(
         n_ranks, checkpoint_interval, reference_area, phase_max_iter, residual_drop_threshold,
         init_checkpoint,
         cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+        aoa_deg=aoa_deg, aos_deg=aos_deg,
     )
 
 
@@ -92,6 +95,8 @@ def _solve_transient_cpu_traditional(
     cfl_start: float = 0.05,
     cfl_max: float = 0.5,
     cfl_min: float = 0.01,
+    aoa_deg: float = 0.0,
+    aos_deg: float = 0.0,
 ):
     """CPU MPI"传统模式"：每个 rank 独立加载完整网格（与 `solve steady`
     的对应分支同一套构造方式，见该文件 `elif n_ranks > 1:` 分支文档）。"""
@@ -130,6 +135,7 @@ def _solve_transient_cpu_traditional(
         # 默认值。与 `solve steady --n-ranks` 在 2026-09-15 补齐的那四处
         # 同类，瞬态这条被漏掉了。
         cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+        aoa_deg=aoa_deg, aos_deg=aos_deg,
     )
 
     if is_root():
@@ -211,7 +217,9 @@ def _solve_transient_fully_distributed(
     )
     from autoflowcfd.core.fr_solver.solver import _MACH_REF_FLOOR
 
-    freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf}
+    freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf,
+                  "p_inf": p_inf,
+                  "aoa_deg": aoa_deg, "aos_deg": aos_deg}
     mach_ref = max(
         vel_inf / math.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10)),
         _MACH_REF_FLOOR,
@@ -313,7 +321,9 @@ def _solve_transient_multi_gpu(
         from autoflowcfd.core.mpi.distributed_mesh_loader import distributed_mesh_load_v2
         from autoflowcfd.core.fr_solver.solver import _MACH_REF_FLOOR
 
-        freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf}
+        freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf,
+                      "p_inf": p_inf,
+                      "aoa_deg": aoa_deg, "aos_deg": aos_deg}
         mach_ref = max(
             vel_inf / math.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10)),
             _MACH_REF_FLOOR,

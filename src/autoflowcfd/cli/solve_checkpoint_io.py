@@ -218,6 +218,11 @@ def rebuild_solver_from_checkpoint(
         rho_inf=metadata.get("rho_inf", 1.225),
         vel_inf=metadata.get("vel_inf", 33.33),
         p_inf=metadata.get("p_inf", 101325.0),
+        # 攻角/侧滑角必须从 checkpoint 恢复（决定物理解，见 write_checkpoint
+        # 同一处说明）。旧 checkpoint 缺这两个键时退化为 0/0，与它们产生
+        # 时的真实行为一致。
+        aoa_deg=metadata.get("aoa_deg", 0.0),
+        aos_deg=metadata.get("aos_deg", 0.0),
         n_threads=threads,
         # CFL（2026-09-07）：resume 时的自适应 CFL 参数由调用方（CLI
         # `--cfl-start`/`--cfl-max`）显式指定，不从 checkpoint 恢复——
@@ -258,7 +263,12 @@ def rebuild_solver_from_checkpoint(
     resolved_reference_area = reference_area
     if resolved_reference_area is None:
         from autoflowcfd.cli.solve_aero_coefficients import _compute_reference_area_auto
-        resolved_reference_area = _compute_reference_area_auto(volume_data)
+        from autoflowcfd.core.utils.flow_direction import direction_from_freestream
+
+        # 参考面积沿**来流方向**投影（有攻角时按 X 投影会偏大
+        # 1/cos(alpha)，15 度就是 3.5%，直接进 Cd 的分母）
+        resolved_reference_area = _compute_reference_area_auto(
+            volume_data, direction=direction_from_freestream(solver.freestream))
     solver._reference_area = resolved_reference_area
 
     restore_solver_state_from_fields(solver, fields, metadata)
@@ -522,6 +532,14 @@ def write_checkpoint(
         "rho_inf": solver.freestream["rho_inf"],
         "vel_inf": solver.freestream["vel_inf"],
         "p_inf": solver.freestream["p_inf"],
+        # 攻角/侧滑角持久化（2026-09-17）：与 Tu/VR、mu_molecular 同一类
+        # ——它们决定**物理解本身**，必须从 checkpoint 恢复，不能像 CFL
+        # 那样让用户每次 resume 重新指定。漏掉它会让续算悄悄变成零攻角
+        # 工况，而日志里只能看到 Cd/Cl 突然跳变。旧 checkpoint 没有这两个
+        # 键，`rebuild` 侧用 metadata.get(..., 0.0) 退化为零攻角，与它们
+        # 产生时的真实行为一致。
+        "aoa_deg": float(solver.freestream.get("aoa_deg", 0.0) or 0.0),
+        "aos_deg": float(solver.freestream.get("aos_deg", 0.0) or 0.0),
         # Tu/VR 持久化（2026-08-25 添加）：Resume 时必须用原始 Tu/VR 值，
         # 否则会用默认值（Tu=0.01, VR=5.0）覆盖用户设置的值，导致湍流场
         # 重置时用的参数与原始计算不一致。

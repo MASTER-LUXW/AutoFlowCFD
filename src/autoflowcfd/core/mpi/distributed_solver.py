@@ -267,10 +267,15 @@ class DistributedFRSolver:
         # 均匀自由流场初始化（真实 bug 修复，2026-09-02，见
         # DistributedFRState.initialize_uniform 文档）：此前这里从未
         # 对新构造的 state 赋初值，conserved state 恒为全零。
+        # 初场速度方向必须与边界 Q_free 用同一个来流方向（2026-09-17）
+        from autoflowcfd.core.utils.flow_direction import freestream_velocity
+        _v0 = freestream_velocity(
+            solver_kwargs.get('vel_inf', 33.33),
+            solver_kwargs.get('aoa_deg', 0.0) or 0.0,
+            solver_kwargs.get('aos_deg', 0.0) or 0.0)
         self.state.initialize_uniform(
             rho=solver_kwargs.get('rho_inf', 1.225),
-            u=solver_kwargs.get('vel_inf', 33.33),
-            v=0.0, w=0.0,
+            u=float(_v0[0]), v=float(_v0[1]), w=float(_v0[2]),
             p=solver_kwargs.get('p_inf', 101325.0),
         )
 
@@ -312,7 +317,13 @@ class DistributedFRSolver:
             self.vel_inf = solver_kwargs.get('vel_inf', 33.33)
             self.p_inf = solver_kwargs.get('p_inf', 101325.0)
             self.mu_molecular = solver_kwargs.get('mu_molecular', 1.8e-5)
-            self.freestream = {"rho_inf": self.rho_inf, "vel_inf": self.vel_inf, "p_inf": self.p_inf}
+            self.freestream = {
+                "rho_inf": self.rho_inf, "vel_inf": self.vel_inf,
+                "p_inf": self.p_inf,
+                # 见 gpu_solver.py 同一处说明（2026-09-17）
+                "aoa_deg": float(solver_kwargs.get("aoa_deg", 0.0) or 0.0),
+                "aos_deg": float(solver_kwargs.get("aos_deg", 0.0) or 0.0),
+            }
             self._turbulence_intensity = solver_kwargs.get('turbulence_intensity', 0.01)
             self._viscosity_ratio = solver_kwargs.get('viscosity_ratio', 5.0)
 
@@ -547,10 +558,16 @@ class DistributedFRSolver:
         # 均匀自由流场初始化（同一处真实 bug 修复，见
         # DistributedFRState.initialize_uniform 文档）——"完全分布式
         # 加载"路径同样从未初始化过 state，同一个根因。
+        # 初场方向同上（2026-09-17）；aoa/aos 由 root 打进 package 的
+        # freestream 字典，见 distributed_mesh_loader.distributed_mesh_load_v2
+        from autoflowcfd.core.utils.flow_direction import freestream_velocity
+        _v0 = freestream_velocity(
+            package['freestream'].get('vel_inf', 33.33),
+            package['freestream'].get('aoa_deg', 0.0) or 0.0,
+            package['freestream'].get('aos_deg', 0.0) or 0.0)
         self.state.initialize_uniform(
             rho=package['freestream'].get('rho_inf', 1.225),
-            u=package['freestream'].get('vel_inf', 33.33),
-            v=0.0, w=0.0,
+            u=float(_v0[0]), v=float(_v0[1]), w=float(_v0[2]),
             p=package['freestream'].get('p_inf', 101325.0),
         )
         self.halo_exchange = HaloExchange(self.partition, n_sps, n_vars)

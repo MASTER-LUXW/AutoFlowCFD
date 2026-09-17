@@ -142,6 +142,10 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         rho_inf: float = 1.225,
         vel_inf: float = 33.33,
         p_inf: float = 101325.0,
+        # 攻角/侧滑角（度）。0/0 时来流严格沿 +x，与此前把方向硬编码
+        # 成 +x 的行为逐位相同。约定见 core/utils/flow_direction.py。
+        aoa_deg: float = 0.0,
+        aos_deg: float = 0.0,
         turb_model: str = "NONE",
         turbulence_intensity: float = 0.01,
         viscosity_ratio: float = 5.0,
@@ -235,7 +239,10 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         # 完整推导/实证标定记录见 fr_solver/solver.py::_MACH_REF_FLOOR。
         mach_ref = vel_inf / np.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10))
         mach_ref = max(mach_ref, 0.1)
-        self.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf, "mach_ref": mach_ref}
+        # 见 gpu_solver.py 同一处说明（2026-09-17）
+        self.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf,
+                           "mach_ref": mach_ref,
+                           "aoa_deg": float(aoa_deg), "aos_deg": float(aos_deg)}
         self.turb_model_name = turb_model
 
         # GPU 设备选择：默认 round-robin 分配

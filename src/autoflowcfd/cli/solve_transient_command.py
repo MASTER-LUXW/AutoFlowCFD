@@ -64,6 +64,16 @@ from autoflowcfd.cli.solve_transient_distributed import _solve_transient_distrib
 @click.option('--residual-drop-threshold', type=float, default=100.0,
               help='Order Continuation 单个非最终阶段判定"可以提前升阶"的残差下降倍数，'
                    '默认100(降2个数量级)。仅 CPU 后端支持')
+@click.option('--aoa', 'aoa_deg', type=float, default=0.0,
+              help='攻角 alpha（度，绕 y 轴、抬头为正，默认 0）。**2026-09-17 新增**：'
+                   '此前来流方向在全代码库被硬编码成 +x，没有任何攻角选项——而攻角'
+                   '扫掠是最常见的外流气动研究。开启后 Q_free（边界自由来流态）、'
+                   '初场、SEM 入口方向、气动力的风轴系分解（Cd 沿来流、Cl 垂直于来流）、'
+                   '参考面积的迎风投影五处统一按它构造。0 时与此前行为逐位相同。'
+                   '力矩 Cm/Cy/Cr 仍报在体轴系，不随攻角旋转（气动数据标准呈现方式）。'
+                   '约定与风轴系公式见 core/utils/flow_direction.py')
+@click.option('--aos', 'aos_deg', type=float, default=0.0,
+              help='侧滑角 beta（度，绕 z 轴，默认 0）。语义与 --aoa 同，见其说明')
 @click.option("--dt", default=1e-5, help="时间步长 (秒)")
 @click.option('--cfl-start', type=float, default=0.05,
               help='自适应 CFL 初始值（默认 0.05）。**只对 --time-method '
@@ -126,6 +136,7 @@ from autoflowcfd.cli.solve_transient_distributed import _solve_transient_distrib
 def transient(input_file: str, backend: str, order: int, flux_type: str, time_method: str,
               turbulence_model: str, max_iter: int, phase_max_iter: Optional[int], residual_drop_threshold: float,
               dt: float, cfl_start: float, cfl_max: float, cfl_min: float,
+        aoa_deg: float, aos_deg: float,
         physical_time: float,
               output_dir: str, use_eikonal: bool, surface_mesh: Optional[str],
               skip_quality_check: bool, reference_area: Optional[float],
@@ -255,6 +266,7 @@ def transient(input_file: str, backend: str, order: int, flux_type: str, time_me
             checkpoint_interval, phase_max_iter, residual_drop_threshold,
             init_checkpoint,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            aoa_deg=aoa_deg, aos_deg=aos_deg,
         )
         return
 
@@ -314,6 +326,7 @@ def transient(input_file: str, backend: str, order: int, flux_type: str, time_me
         flux_type=flux_type,
         mu_molecular=mu_molecular,
         rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
+        aoa_deg=aoa_deg, aos_deg=aos_deg,
         # CFL 三元组（2026-09-17 补齐）：rk3/imex 档走逐单元局部 CFL
         # 推进、自适应控制器是激活的，此前这里一个都不传。
         cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,

@@ -62,6 +62,10 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         rho_inf: float = 1.225,
         vel_inf: float = 33.33,
         p_inf: float = 101325.0,
+        # 攻角/侧滑角（度）。0/0 时来流严格沿 +x，与此前把方向硬编码
+        # 成 +x 的行为逐位相同。约定见 core/utils/flow_direction.py。
+        aoa_deg: float = 0.0,
+        aos_deg: float = 0.0,
         mu_molecular: float = 1.8e-5,
         boundary_ghost_provider=None,
         bc_overrides=None,
@@ -154,7 +158,12 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         # 完整推导/实证标定记录见 fr_solver/solver.py::_MACH_REF_FLOOR。
         mach_ref = vel_inf / np.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10))
         mach_ref = max(mach_ref, 0.1)
-        self.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf, "mach_ref": mach_ref}
+        # aoa_deg/aos_deg（2026-09-17）：下游的 Q_free / SEM 入口方向 /
+        # 气动力风轴系分解都从 freestream 字典读，GPU 这条路径同样要带上，
+        # 否则同一组 CLI 参数在 --backend gpu 上会静默退回零攻角。
+        self.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf,
+                           "mach_ref": mach_ref,
+                           "aoa_deg": float(aoa_deg), "aos_deg": float(aos_deg)}
 
         # 低马赫数伪时间预处理（2026-09-14，与 CPU 版 FRSolver 同一机制/
         # 同一开关语义）：dt 按预处理波速放大**必须**与把 Gamma 作用到

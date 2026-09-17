@@ -194,6 +194,10 @@ class FRSolver(_SolverGeometryMixin):
                  initial_state: Optional[FRState] = None,
                  backend: str = "cpu",
                  rho_inf: float = 1.225, vel_inf: float = 33.33, p_inf: float = 101325.0,
+                 # 攻角/侧滑角（度）。0/0 时来流严格沿 +x，与此前把方向
+                 # 硬编码成 +x 的行为**逐位相同**，默认路径数值不变。
+                 # 约定与风轴系公式见 core/utils/flow_direction.py。
+                 aoa_deg: float = 0.0, aos_deg: float = 0.0,
                  bc_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
                  mu_molecular: float = 1.8e-5,
                  dual_time_inner_iter: int = 20,
@@ -237,7 +241,12 @@ class FRSolver(_SolverGeometryMixin):
             time_scheme: 时间推进方案
             initial_state: 初始状态（用于 Order Continuation）
             backend: 计算后端 ("cpu" 或 "gpu")
-            rho_inf, vel_inf, p_inf: 自由来流条件（密度/速度大小[沿+x]/静压），
+            aoa_deg, aos_deg: 攻角/侧滑角（度）。此前来流方向在全代码库被
+                硬编码成 +x、没有任何攻角选项；现在 `Q_free`（边界自由来流
+                态）、初场、SEM 入口方向、气动力的风轴系分解、参考面积的
+                迎风投影五处统一按这两个角度构造。0/0 时逐位退化为原行为。
+            rho_inf, vel_inf, p_inf: 自由来流条件（密度/速度**大小**/静压；
+                方向由 aoa_deg/aos_deg 决定，不再固定 +x），
                 用作 FARFIELD 边界的幽灵态、未匹配到边界组的默认边界条件，
                 以及 INLET 组未显式覆盖时的默认入口状态
             bc_overrides: 按边界组名称覆盖 BC 类型/参数，例如
@@ -461,7 +470,14 @@ class FRSolver(_SolverGeometryMixin):
             # rho_inf~1.2, p_inf~1e5 相差 5 个数量级，显式格式在这种冲击下
             # 数值发散——这不是残差组装的 bug，是初始条件与边界条件不一致
             # 导致的可预见的数值不稳定，工业代码从来不会这样初始化）。
-            self.state.initialize_uniform(rho=rho_inf, u=vel_inf, v=0.0, w=0.0, p=p_inf)
+            # 初场速度方向必须与边界 Q_free 用同一个来流方向，否则第一步
+            # 就要吸收一个与攻角同量级的速度跳跃（与下面那段注释记录的
+            # "初场与边界条件不一致必然发散"是同一类问题）。
+            from autoflowcfd.core.utils.flow_direction import freestream_velocity
+            _v0 = freestream_velocity(vel_inf, aoa_deg, aos_deg)
+            self.state.initialize_uniform(
+                rho=rho_inf, u=float(_v0[0]), v=float(_v0[1]), w=float(_v0[2]),
+                p=p_inf)
         
         # 2. 预计算算子 (G-04)——四面体坍缩坐标基已删除（2026-09-03，
         # 见 fr/operators.py 模块文档），`generate_fr_operators` 不再
@@ -573,7 +589,12 @@ class FRSolver(_SolverGeometryMixin):
         # 0.1 以上真实马赫数的算例不受影响。
         mach_ref = vel_inf / np.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10))
         mach_ref = max(mach_ref, _MACH_REF_FLOOR)
-        self.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf, "mach_ref": mach_ref}
+        # aoa_deg/aos_deg 进 freestream 字典：下游的 Q_free 构造、SEM 入口
+        # 方向、气动力风轴系分解都从这里读，不各自再传一遍参数（那样任何
+        # 一条路径漏传都会静默退回 +x）。
+        self.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf,
+                           "mach_ref": mach_ref,
+                           "aoa_deg": float(aoa_deg), "aos_deg": float(aos_deg)}
         # Tu/VR/SEM 涡核数设置必须先于 boundary_ghost_provider 构造（与上面
         # turb_model_name 的顺序要求同理，2026-08-28 补充）：
         # build_boundary_ghost_provider 现在会读 solver._turbulence_intensity/

@@ -19,18 +19,33 @@ from loguru import logger
 # 估算失败时看不到任何提示。改成本代码库统一使用的 loguru。
 
 
-def _compute_reference_area_auto(volume_data) -> Optional[float]:
-    """从面网格自动计算参考面积（X 方向正投影面积）。
+def _compute_reference_area_auto(volume_data, direction=None) -> Optional[float]:
+    """从面网格自动计算参考面积（**沿来流方向**的正投影面积）。
 
     当用户未指定 --reference-area 时调用，从保存的原始面网格数据计算
     车身迎风面的投影面积，作为气动力系数的参考面积。
 
     Args:
         volume_data: VolumeMeshData 对象，应包含 surface_mesh 属性
+        direction: (3,) 来流单位方向。None 时取 +x —— 与此前把投影方向
+            硬编码成 X 的行为**逐位相同**，所以零攻角路径结果不变。
+            有攻角时必须传真实方向：迎风投影面积是"垂直于**来流**的
+            投影"，按 X 投影会系统性偏大（偏差因子 1/cos(alpha)，
+            15 度攻角就是 3.5%，直接进 Cd 的分母）。
 
     Returns:
         参考面积 (m^2)，计算失败返回 None
     """
+    if direction is None:
+        d = np.array([1.0, 0.0, 0.0])
+    else:
+        d = np.asarray(direction, dtype=np.float64).ravel()
+        if d.shape != (3,):
+            raise ValueError(f"direction 必须是 (3,) 向量，收到 {d.shape}")
+        nrm = float(np.linalg.norm(d))
+        if not np.isfinite(nrm) or nrm < 1e-12:
+            raise ValueError(f"direction 的模 {nrm!r} 无效")
+        d = d / nrm
     surface_mesh = getattr(volume_data, 'surface_mesh', None)
     if surface_mesh is None:
         logger.debug("Auto reference area: surface_mesh is None")
@@ -87,19 +102,21 @@ def _compute_reference_area_auto(volume_data) -> Optional[float]:
         norms = np.maximum(norms, 1e-10)
         unit_normals = normals / norms
 
-        # 计算 X 方向投影面积（迎风面：法向 n_x < 0）
-        x_component = unit_normals[:, 0]
-        upstream_mask = x_component < 0
-        projected_areas = -x_component[upstream_mask] * areas[upstream_mask]
+        # 沿**来流方向**的投影面积（迎风面：法向与来流方向的点积 < 0）
+        d_component = unit_normals @ d
+        upstream_mask = d_component < 0
+        projected_areas = -d_component[upstream_mask] * areas[upstream_mask]
         ref_area = np.sum(projected_areas)
 
         if ref_area <= 0 or not np.isfinite(ref_area):
-            # 兆底：用绝对投影除以 2（适用于对称车身）
-            projected_areas_all = np.abs(x_component) * areas
+            # 兜底：用绝对投影除以 2（适用于对称车身）
+            projected_areas_all = np.abs(d_component) * areas
             ref_area = np.sum(projected_areas_all) / 2.0
 
         if ref_area > 0 and np.isfinite(ref_area):
-            logger.info(f"Auto-computed reference area (frontal projected area): {ref_area:.6f} m^2")
+            logger.info(
+                f"Auto-computed reference area (projected along freestream "
+                f"direction {np.round(d, 6).tolist()}): {ref_area:.6f} m^2")
             return float(ref_area)
 
         return None

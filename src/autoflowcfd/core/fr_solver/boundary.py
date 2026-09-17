@@ -84,7 +84,12 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
         return None
 
     rho_inf, vel_inf, p_inf = solver.freestream["rho_inf"], solver.freestream["vel_inf"], solver.freestream["p_inf"]
-    Q_free = [rho_inf, vel_inf, 0.0, 0.0, p_inf]
+    # 来流方向由攻角/侧滑角决定（此前这里把它硬编码成 +x，见
+    # core/utils/flow_direction.py 模块文档列出的五处硬编码）。
+    from autoflowcfd.core.utils.flow_direction import direction_from_freestream
+    _dir = direction_from_freestream(solver.freestream)
+    _v_free = vel_inf * _dir
+    Q_free = [rho_inf, float(_v_free[0]), float(_v_free[1]), float(_v_free[2]), p_inf]
 
     boundary_groups = solver.mesh.boundary_groups or {}
     bc_types = solver.mesh.boundary_bc_types or {}
@@ -168,7 +173,8 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
             positions_by_face = _compute_inlet_fp_positions(solver, face_conn, is_this_group_face)
             if positions_by_face:
                 all_positions = np.concatenate(list(positions_by_face.values()), axis=0)
-                flow_direction = np.array([vel_inf, 0.0, 0.0])
+                # SEM 入口的平动方向同样按真实来流方向（此前硬编码 +x）
+                flow_direction = _v_free.copy()
                 # length_scale：入口面法向尺度的量级（用坐标散布估计），
                 # 太小涡核影响区退化、太大失去局部湍流结构，取入口面
                 # 特征尺度的 1/10 是标准 SEM 实践的经验起点。
