@@ -23,7 +23,7 @@ native 基（`native_simplex_basis.py`）不是同一个数学对象：模态严
 import numpy as np
 
 from . import modal_filter as _mf
-from .modal_filter import _exp_filter_sigma
+from .modal_filter import _exp_filter_sigma, filter_sigma
 from .native_simplex_basis import (
     build_native_tet_operators,
     restricted_tet_modes,
@@ -75,6 +75,9 @@ def build_native_tet_modal_filter(order: int) -> np.ndarray:
     modes = restricted_tet_modes(order)
     V = np.column_stack([simplex3d_value(a, b, c, i, j, k) for (i, j, k) in modes])
 
-    sigma = np.array([_exp_filter_sigma((i + j + k) / order) for (i, j, k) in modes])
+    # 用 filter_sigma 而不是 _exp_filter_sigma：project 档要求
+    # sigma 严格取 {0,1} 以保证幂等，见 modal_filter.py 模块文档
+    # "为什么需要 project 档"一节。
+    sigma = np.array([filter_sigma((i + j + k) / order) for (i, j, k) in modes])
 
     return V @ np.diag(sigma) @ np.linalg.inv(V)

@@ -95,10 +95,66 @@ from autoflowcfd.fr.collapsed_basis import prism_modal_basis_and_grad, tet_modal
 #   legacy  当前行为（alpha=-ln(eps)，全局每 stage 施加）
 #   off     恒等滤波（完全不施加），用于对照"滤波是否必需"
 #   mild    sigma(eta=1)=AFCFD_FILTER_SIGMA_TOP（默认 0.99），其余同形式
-# 这三档供受控 A/B 用；"按传感器逐单元门控"那一档在应用层实现
+#   project 精确投影：sigma 只取 0 或 1 —— eta<1 的模态严格保留 1，
+#           eta==1（最高阶）严格取 0。**幂等**，见下。
+#   sensor  逐单元门控（在应用层实现），矩阵与 project 相同 —— 门控的
+#           算子语义要求幂等，理由见 `filter_sigma` 里的注释。
+# 这四档供受控 A/B 用；"按传感器逐单元门控"那一档在应用层实现
 # （core/fr_solver/filter.py），不在这里改矩阵。
+#
+# ===== 为什么需要 project 档（2026-09-17 实测，一处此前被漏掉的缺陷）=====
+#
+# 上面那句"任何 sigma<1 都会随步数复合累积"此前只被当成 `mild` 档
+# （sigma_top=0.99）的问题。但实测各阶的 sigma 谱是：
+#
+#   P1  eta=[0, 1]                sigma=[1, 2.22e-16]
+#   P2  eta=[0, 0.5, 1]           sigma=[1, 0.868667, 2.22e-16]
+#   P3  eta=[0, 1/3, 2/3, 1]      sigma=[1, 0.994521, 0.245032, 2.22e-16]
+#
+# **`legacy` 档自己在 P2/P3 就有严格介于 0 和 1 的中间模态 sigma。**
+# 于是每个 RK stage 乘一次、每步三次：
+#
+#   P2  中间模态每步残留 0.6555  -> 约 100 步后 ~1e-18（实际退化到 P0，不是 P1）
+#   P3  eta=2/3 的模态每步残留 0.0147 -> **一步内就基本清零**（两阶）；
+#       eta=1/3 的模态每步 0.9837 -> 100 步后 0.192
+#
+# 项目记忆 `modal_filter_annihilates_one_order` 记的"每阶恰好损失一整阶"
+# 是用**单次施加**的矩阵秩验证的（P1 1/8、P2 8/27、P3 27/64 恰好等于低
+# 一阶的维数）——那个观测本身没错，但秩只反映"一次施加后哪些模态落到
+# 数值零"，**不反映中间模态被反复乘以 0.87 / 0.25 的累积效应**。所以
+# "P2≡P1 / P3≡P2"对长程运行是**不成立**的。
+#
+# 直接后果：矩阵不幂等。实测 |F@F - F| 的最大元
+#
+#   P1  2.2e-16（真投影）   P2  6.3e-02   P3  3.5e-01
+#
+# 而"按传感器逐单元门控"这套用法需要的算子语义恰恰是**"把这个单元降
+# 一阶"**——那必须是幂等投影，否则被标记的单元会被反复削、一路掉到 P0，
+# 并且退化后的单元更容易再次越界，形成正反馈。等熵涡精确解上的实测：
+# 门控在 P1（真投影）上渐近失活、收敛阶保住 2.16/2.18；在 P2（非幂等）
+# 上标记比例平台在 ~19%、收敛阶掉到 1.3。
+#
+# `project` 档就是把 sigma 取成严格的 {0,1}，于是
+#   * 幂等：F@F == F 到机器精度，逐 stage 施加不累积；
+#   * 语义精确："恰好削掉最高阶"，不多不少。
+# legacy 档保持逐位不变，供回归对照。
 _FILTER_MODE = os.environ.get("AFCFD_FILTER_MODE", "legacy").lower()
 _SIGMA_TOP = float(os.environ.get("AFCFD_FILTER_SIGMA_TOP", "0.99"))
+
+#: 合法档位。**必须校验**：此前未知取值会落进下面 `else` 分支、静默按
+#: legacy 跑——一次拼写错误（例如 `AFCFD_FILTER_MODE=projct`）就会让一整
+#: 轮 A/B 的两条运行悄悄变成同一档，而这在日志里完全看不出来（启动日志
+#: 只打印读到的字符串本身）。同类静默回退在本项目已出过多次事故，见
+#: `fr_operators/kernels.py::resolve_ausm_precond_mode` 文档。
+#: `sensor` 档不改矩阵（在应用层 `core/fr_solver/filter.py` 实现），但仍
+#: 是这里的合法取值——它走下面的 else 分支、用与 legacy 相同的矩阵。
+_VALID_FILTER_MODES = ("legacy", "off", "mild", "project", "sensor")
+if _FILTER_MODE not in _VALID_FILTER_MODES:
+    raise ValueError(
+        f"AFCFD_FILTER_MODE={_FILTER_MODE!r} 不是合法取值；"
+        f"合法值 {sorted(_VALID_FILTER_MODES)}。"
+        f"不静默回退到 legacy——那会让一次拼写错误伪装成默认行为。"
+    )
 
 if _FILTER_MODE == "mild":
     # 由 sigma(1)=exp(-alpha) 反解 alpha
@@ -112,6 +168,32 @@ FILTER_MODE = _FILTER_MODE
 def _exp_filter_sigma(degree_frac: np.ndarray) -> np.ndarray:
     """指数滤波器系数 sigma(eta)=exp(-alpha*eta^(2s))，eta=degree_frac。"""
     return np.exp(-FILTER_ALPHA * degree_frac ** (2 * FILTER_ORDER))
+
+
+def filter_sigma(degree_frac):
+    """按当前 `FILTER_MODE` 返回模态衰减系数 sigma(eta)。
+
+    `project` 档返回严格的 {0,1}（eta>=1-1e-12 取 0，其余取 1），使滤波
+    矩阵成为**幂等投影**；其余档沿用指数型 `_exp_filter_sigma`。
+    完整理由见模块顶部"为什么需要 project 档"一节。
+
+    单点标量与 numpy 数组都支持——两个坍缩/棱柱构造函数逐模态调用，
+    native 四面体构造函数按整个模态列表向量化调用。
+    """
+    eta = np.asarray(degree_frac, dtype=np.float64)
+    # `sensor` 与 `project` 共用投影型 sigma。**为什么 sensor 必须是投影**
+    # （2026-09-17）：sensor 档的语义是"按传感器逐单元门控，对被标记单元
+    # 施加这个矩阵"，而它每个 RK stage 都施加一次。所要表达的操作是
+    # "把这个单元降一阶"——那在数学上就是一个**幂等投影**。用指数型
+    # sigma（P2 中间模态 0.8687、P3 的 0.2450）会让被标记单元被反复削、
+    # 一路掉到 P0，而退化后的单元更容易再次被标记，形成正反馈。等熵涡
+    # 精确解实测：P2 上非幂等版本标记比例平台在 ~19%、收敛阶掉到 1.3。
+    # P1 上两者**逐位相同**（legacy 的 P1 sigma 本来就是 {1, 2.2e-16}），
+    # 所以此前用 sensor 档跑的 P1 对照结果不受影响。
+    if FILTER_MODE in ("project", "sensor"):
+        out = np.where(eta >= 1.0 - 1e-12, 0.0, 1.0)
+        return out if out.ndim else float(out)
+    return _exp_filter_sigma(eta)
 
 
 def build_tet_modal_filter(order: int, ref_cube_sps: np.ndarray) -> np.ndarray:
@@ -153,7 +235,7 @@ def build_tet_modal_filter(order: int, ref_cube_sps: np.ndarray) -> np.ndarray:
         for j in range(n1d):
             for k in range(n1d):
                 flat = i * n1d * n1d + j * n1d + k
-                sigma[flat] = _exp_filter_sigma(max(i, j, k) / order)
+                sigma[flat] = filter_sigma(max(i, j, k) / order)
 
     return V @ np.diag(sigma) @ np.linalg.inv(V)
 
@@ -186,6 +268,6 @@ def build_prism_modal_filter(order: int, ref_cube_sps: np.ndarray) -> np.ndarray
         for j in range(n1d):
             for k in range(n1d):
                 flat = i * n1d * n1d + j * n1d + k
-                sigma[flat] = _exp_filter_sigma(max(i, j, k) / order)
+                sigma[flat] = filter_sigma(max(i, j, k) / order)
 
     return V @ np.diag(sigma) @ np.linalg.inv(V)
