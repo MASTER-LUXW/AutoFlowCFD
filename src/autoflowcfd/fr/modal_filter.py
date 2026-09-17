@@ -91,7 +91,8 @@ from autoflowcfd.fr.collapsed_basis import prism_modal_basis_and_grad, tet_modal
 # alpha 调小只是把清零推迟，不改变"滤波压倒物理"的性质。所以正确的方向
 # 是**按需施加**（逐单元用传感器门控），而不是全局调强度。
 #
-# `AFCFD_FILTER_MODE` 环境变量（默认 legacy = 保持既有行为，不改变默认）：
+# `AFCFD_FILTER_MODE` 环境变量（**默认 sensor**，2026-09-17 从 legacy 改，
+# 依据见本文件下方那节实测数据）：
 #   legacy  当前行为（alpha=-ln(eps)，全局每 stage 施加）
 #   off     恒等滤波（完全不施加），用于对照"滤波是否必需"
 #   mild    sigma(eta=1)=AFCFD_FILTER_SIGMA_TOP（默认 0.99），其余同形式
@@ -138,7 +139,42 @@ from autoflowcfd.fr.collapsed_basis import prism_modal_basis_and_grad, tet_modal
 #   * 幂等：F@F == F 到机器精度，逐 stage 施加不累积；
 #   * 语义精确："恰好削掉最高阶"，不多不少。
 # legacy 档保持逐位不变，供回归对照。
-_FILTER_MODE = os.environ.get("AFCFD_FILTER_MODE", "legacy").lower()
+#
+# ===== 默认值 2026-09-17 从 legacy 改为 sensor =====
+#
+# 三档在 P1（生产阶数）上的实测（平板边界层算例，2304 单元，同一初场
+# 同一 CFL，80 步）：
+#
+#   filter=legacy  sensor=persson   176.2 ms/step   res 7.9426e+04
+#   filter=project sensor=persson   156.9 ms/step   res 7.9426e+04   <- 与 legacy 逐位相同
+#   filter=off     sensor=persson   179.7 ms/step   res 1.6658e+05
+#   filter=sensor  sensor=persson   154.3 ms/step   res 1.6658e+05   <- 与 off 逐位相同
+#   filter=sensor  sensor=bounds    183.1 ms/step   res 7.7280e+04   <- 残差最低
+#
+# 两条"逐位相同"各自印证了一件事：
+#   * legacy == project 在 P1 上成立，因为 P1 的顶模态**就是**全部非常数
+#     内容，两档都把它清零 -> 两档都让 P1 退化成 P0；
+#   * sensor + persson == off，因为 Persson-Peraire 在 order=1 上原理性
+#     退化、且它探的是守恒密度（真实解上光滑），掩码实测 0.000%
+#     （同一时刻 rho_v/rho_w 是 98.8%），等于没有门控。
+#
+# 所以 sensor 与 bounds 必须成对改：只把 filter 改成 sensor 而传感器还是
+# persson，等于把默认值悄悄改成了 off。
+#
+# 为什么 sensor + bounds 是每个阶数上都不差的那一档（等熵涡精确解）：
+#
+#   阶数   legacy / project                     sensor + bounds
+#   P1     退化成 P0（阶 1）                    阶 2.16/2.18，达到设计阶 2
+#   P2     legacy 非幂等、约 100 步退到 P0；     只在被标记的约 17.6% 单元
+#          project 精确降一阶（阶 2 vs 设计 3）  里降阶，全局阶约 2.1
+#
+# 代价：相对 legacy 每步 +3.9%（183.1 vs 176.2 ms）。真实网格上的决定性
+# 证据（plate_demo_volume_les，179,237 单元）：legacy 在 iter 112 发散，
+# 而 sensor+bounds 跑出 216 步残差单调下降 3.5 倍，Cd 漂移从零曲率的线性
+# 0.0167/步变成负曲率的 0.0071 -> 0.0042/步。
+#
+# legacy 保留为合法档，专供回归对照（它是唯一能复现历史结果的档）。
+_FILTER_MODE = os.environ.get("AFCFD_FILTER_MODE", "sensor").lower()
 _SIGMA_TOP = float(os.environ.get("AFCFD_FILTER_SIGMA_TOP", "0.99"))
 
 #: 合法档位。**必须校验**：此前未知取值会落进下面 `else` 分支、静默按

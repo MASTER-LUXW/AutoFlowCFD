@@ -237,14 +237,39 @@ class TestInputValidation:
 
 
 class TestSensorResolution:
-    def test_default_is_persson(self, monkeypatch):
-        """默认必须保持既有行为逐位不变。"""
+    def test_default_is_bounds(self, monkeypatch):
+        """默认 `bounds`（2026-09-17 从 `persson` 改）。
+
+        为什么改：Persson-Peraire 在 order=1 上原理性退化，而且它探的是
+        守恒密度——真实解上那一项光滑，掩码实测 **0.000%**（同一时刻
+        rho_v/rho_w 是 98.8%）。所以 `persson` 在 P1 上等于没有门控：
+        `FILTER_MODE=sensor` + `persson` 与 `FILTER_MODE=off` 实测**逐位
+        相同**（平板边界层算例 res 1.6658e+05）。必须与
+        `AFCFD_FILTER_MODE=sensor` 成对使用，只改一个等于把默认悄悄
+        改成了 off。真实网格证据与各阶收敛阶见
+        `resolve_troubled_sensor` 的文档字符串。
+        """
         monkeypatch.delenv('AFCFD_TROUBLED_SENSOR', raising=False)
-        assert resolve_troubled_sensor() == 'persson'
+        assert resolve_troubled_sensor() == 'bounds'
 
     def test_empty_env_is_default(self, monkeypatch):
         monkeypatch.setenv('AFCFD_TROUBLED_SENSOR', '  ')
-        assert resolve_troubled_sensor() == 'persson'
+        assert resolve_troubled_sensor() == 'bounds'
+
+    def test_default_pairs_with_the_filter_mode_default(self, monkeypatch):
+        """两个开关必须成对：`FILTER_MODE` 默认是 `sensor` 时，传感器
+        默认不能是那个掩码恒空的 `persson`——否则默认配置等价于 `off`，
+        而 `off` 的稳定 CFL 远低于按 legacy 标定的默认值。"""
+        import importlib
+
+        monkeypatch.delenv('AFCFD_TROUBLED_SENSOR', raising=False)
+        monkeypatch.delenv('AFCFD_FILTER_MODE', raising=False)
+        import autoflowcfd.fr.modal_filter as mf
+        mf = importlib.reload(mf)
+        if mf.FILTER_MODE == 'sensor':
+            assert resolve_troubled_sensor() != 'persson', (
+                "FILTER_MODE=sensor 配 persson 等于没有门控（掩码恒空），"
+                "默认配置会退化成 off")
 
     @pytest.mark.parametrize('raw,expect', [
         ('bounds', 'bounds'), ('BOTH', 'both'), (' Persson ', 'persson'),

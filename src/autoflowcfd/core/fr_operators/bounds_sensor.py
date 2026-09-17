@@ -300,9 +300,28 @@ def compute_bounds_violation_mask(
 def resolve_troubled_sensor(value: Optional[str] = None) -> str:
     """解析 `AFCFD_TROUBLED_SENSOR`：`persson` | `bounds` | `both`。
 
-    默认 `persson`——保持既有行为逐位不变。`bounds` 与 `both` 是本次新增
-    的档，必须经真实网格 A/B 才能改默认值（它改变**每一个** P>=1 算例
-    的数值行为）。
+    **默认 `bounds`（2026-09-17 从 `persson` 改）。**
+
+    为什么改：Persson-Peraire 在 `order=1` 上**原理性退化**（`s0 =
+    -4*log10(order)` 在 order=1 时为 0，触发门限成了"顶模态能量占比
+    >= 10%"，而 P1 的顶模态就是全部非常数内容），而且它探的是守恒密度
+    ——真实解上那一项是光滑的，掩码实测 **0.000%**（同一时刻 `rho_v`/
+    `rho_w` 是 98.8%）。所以 `persson` 在 P1 上等于**没有门控**：实测
+    `AFCFD_FILTER_MODE=sensor` + `persson` 与 `FILTER_MODE=off` **逐位
+    相同**（平板边界层算例 res 1.6658e+05）。
+
+    与 `AFCFD_FILTER_MODE=sensor` 必须**成对**使用（同日一起改默认）：
+    只改一个等于把默认值悄悄改成 `off`。三档在 P1 上的实测对照见
+    `fr/modal_filter.py` 里 `_FILTER_MODE` 上方那节。
+
+    真实网格上的决定性证据（plate_demo_volume_les，179,237 单元）：
+    `legacy` 在 iter 112 发散，而 `sensor`+`bounds` 跑出 216 步残差
+    **单调下降 3.5 倍**，Cd 漂移从零曲率的线性 0.0167/步变成负曲率的
+    0.0071 -> 0.0042/步。等熵涡精确解上 P1 的收敛阶保住 2.16/2.18
+    （设计阶 2）。
+
+    `persson` 保留为合法档：它在 order>=2 上判据本身是有效的，且是复现
+    历史结果的唯一途径。
 
     Raises:
         ValueError: 取值非法（不静默回退，理由同
@@ -315,7 +334,7 @@ def resolve_troubled_sensor(value: Optional[str] = None) -> str:
     if value is None:
         value = os.environ.get("AFCFD_TROUBLED_SENSOR", "").strip()
         if not value:
-            return "persson"
+            return "bounds"
     key = str(value).strip().lower()
     if key in ("persson", "bounds", "both"):
         return key

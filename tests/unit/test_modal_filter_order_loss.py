@@ -154,11 +154,32 @@ class TestSwitchableModesDoNotLoseOrder:
             assert got == pytest.approx(float(want), rel=1e-12), (
                 f"请求 sigma_top={want}，实得 {got}")
 
-    def test_default_mode_is_legacy(self):
-        """默认必须保持既有行为——本轮只加可切换档位，不改默认。"""
+    def test_default_mode_is_sensor(self):
+        """默认 `sensor`（2026-09-17 从 `legacy` 改）。
+
+        依据（P1 实测，平板边界层算例，同一初场同一 CFL）：
+
+            legacy  176.2 ms/step  res 7.9426e+04
+            project 156.9 ms/step  res 7.9426e+04  <- 与 legacy 逐位相同
+            off     179.7 ms/step  res 1.6658e+05
+            sensor+persson 154.3  res 1.6658e+05   <- 与 off 逐位相同
+            sensor+bounds  183.1  res 7.7280e+04   <- 残差最低，+3.9%
+
+        `legacy == project` 在 P1 上成立是因为 P1 的顶模态就是全部非常数
+        内容，两档都把它清零、都让 P1 退化成 P0。`sensor+bounds` 在等熵涡
+        精确解上保住收敛阶 2.16/2.18（设计阶 2）。完整依据见
+        `fr/modal_filter.py` 里 `_FILTER_MODE` 上方那节。
+        """
         mf, ops_mod = _reload_with_env(AFCFD_FILTER_MODE=None)
-        assert mf.FILTER_MODE == "legacy"
+        assert mf.FILTER_MODE == "sensor"
+        # sensor 档的矩阵与 project 相同：严格投影，P1 的秩仍是 1
+        # （门控在应用层，不在矩阵里——见 modal_filter.py 的说明）
         assert int(np.linalg.matrix_rank(_prism_filter(ops_mod, 1), 1e-10)) == 1
+
+    def test_legacy_stays_available_for_regression(self):
+        """`legacy` 是唯一能复现历史结果的档，必须保留为合法取值。"""
+        mf, ops_mod = _reload_with_env(AFCFD_FILTER_MODE="legacy")
+        assert mf.FILTER_MODE == "legacy"
 
 
 class TestSensorModeIsNotSilentlyIgnored:
