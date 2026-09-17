@@ -116,7 +116,44 @@ def viscous_physical_flux(
 
 def resolve_viscous_overintegration() -> str:
     """粘性体积项是否走过积分（去混叠）：`AFCFD_VISC_OVERINT = off | on`，
-    默认 off。
+    **默认 on（2026-09-17 从 off 改）**。
+
+    ## 为什么改默认（实测，平板边界层算例 2304 单元，跑到 400 步的真实
+    ## 粘性梯度状态上求一次粘性残差）
+
+    以 `on` + `AFCFD_OVERINT_ORDER_RULE=3x`（更高的过积分阶数）为参照：
+
+        off @ 2x（原默认）   能量分量相对差 0.632442
+        on  @ 2x（新默认）   能量分量相对差 0.000000   <- 逐位相同
+
+    也就是说**过积分的结果在生产过积分阶数上就已经收敛**（提到 3x 逐位
+    不变），而不过积分的结果差 63%。这是去混叠收敛性的标准签名：`on` 是
+    收敛值，`off` 是被混叠污染的值。
+
+    逐分量看更清楚（off vs on）：
+
+        rho / rho_u / rho_v / rho_w   逐位相同（0.0）
+        rho_E                          相对差 0.632442
+
+    动量分量不变是对的：P1 下常粘度的 `tau = mu*(grad u + grad u^T)` 是
+    逐单元 P0（线性场的导数），乘常数 `adj(J)` 仍是 P0，精确可微分、零
+    混叠。而能量通量含 `u·tau` 与 `k_cond*grad_T`，其中 `u = rho_u/rho`、
+    `T = p/(rho*R)` 都是 Q 的**有理**函数——真实非多项式，必然混叠。
+
+    代价：粘性项本身 +25%（25.6 -> 32.0 ms），整步约 **+5.3%**。
+
+    ## 为什么"off 无所谓"这个前提已经不成立
+
+    原文案写过（如实保留在下面）：legacy 模态滤波器下 `grad_vel` 是机器零
+    （实测胞内 |grad u|/(U/h) = 7.7e-16），粘性体积项几乎只剩边界 IP 罚项。
+    **2026-09-17 把 `AFCFD_FILTER_MODE` 默认从 `legacy` 改成 `sensor`
+    之后**（未被传感器标记的单元等于不滤波），`grad_vel` 在绝大部分域里
+    变成 O(0.08) 的真实量——这一项立刻活跃。所以把它打开是那次默认值改动
+    的**一致性要求**，不是可选的附加项。
+
+    `off` 保留为合法档，供回归对照与逐位复现历史结果。
+
+    ## 以下是原有的动机记录（仍然有效）
 
     **为什么需要它（2026-09-15）**：去混叠机制
     （`fr/collapsed_basis.py::build_overintegration_operators` 有完整动机
@@ -143,7 +180,7 @@ def resolve_viscous_overintegration() -> str:
     插值到 FINE 点，去掉的是**通量与度量项这一层**的混叠，梯度自身在
     coarse 上就带进来的混叠还在。补那一层是独立的一步。
     """
-    v = os.environ.get("AFCFD_VISC_OVERINT", "off").lower()
+    v = os.environ.get("AFCFD_VISC_OVERINT", "on").lower()
     if v not in ("off", "on"):
         raise ValueError(
             f"AFCFD_VISC_OVERINT={v!r} 不是合法取值（off | on）。"

@@ -233,8 +233,36 @@ class TestSwitchSemantics:
         else:
             os.environ["AFCFD_VISC_OVERINT"] = old
 
-    def test_default_is_off(self):
+    def test_default_is_on(self):
+        """默认 `on`（2026-09-17 从 `off` 改）。
+
+        依据（平板边界层算例 2304 单元，跑到 400 步的真实粘性梯度状态上求
+        一次粘性残差，以 `on` + `AFCFD_OVERINT_ORDER_RULE=3x` 为参照）：
+
+            off @ 2x（原默认）   能量分量相对差 0.632442
+            on  @ 2x（新默认）   能量分量相对差 0.000000   <- 逐位相同
+
+        即过积分的结果在生产过积分阶数上**已经收敛**（提到 3x 逐位不变），
+        不过积分的差 63%。动量分量两档逐位相同（P1 下常粘度的 tau 是逐单元
+        P0、精确可微分），差的只有能量分量——它含 `u = rho_u/rho` 与
+        `T = p/(rho*R)` 这些**有理**函数，真实非多项式。
+
+        代价：粘性项 +25%，整步约 +5.3%。
+
+        同时这是 `AFCFD_FILTER_MODE` 默认从 `legacy` 改成 `sensor` 的**一致性
+        要求**：legacy 滤波下 `grad_vel` 是机器零（7.7e-16）、粘性体积项几乎
+        只剩边界罚项，那个"off 无所谓"的前提随之消失。
+        """
         old = self._env(None)
+        try:
+            assert vf.resolve_viscous_overintegration() == "on"
+        finally:
+            self._restore(old)
+
+    def test_off_stays_available_for_regression(self):
+        """`off` 保留为合法档：逐位复现历史结果、以及隔离界面项的交叉
+        对比测试（`test_fr_viscous_flux_kernel_crosscheck.py`）都要用它。"""
+        old = self._env("off")
         try:
             assert vf.resolve_viscous_overintegration() == "off"
         finally:

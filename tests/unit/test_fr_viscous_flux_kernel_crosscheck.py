@@ -34,6 +34,24 @@ PR = 0.72
 PR_T = 0.9
 
 
+@pytest.fixture(autouse=True)
+def _coarse_volume_term(monkeypatch):
+    """本文件全部用例固定 `AFCFD_VISC_OVERINT=off`。
+
+    为什么必须固定（2026-09-17）：本文件测的是**界面项** kernel（新实现
+    vs 旧逐面循环），`_compute_residual_via_new_kernel` 里的体积项只是把
+    生产代码的**粗网格**版本抄了一遍来凑出完整残差。粘性体积项的默认
+    2026-09-17 改成了过积分（`AFCFD_VISC_OVERINT=on`，实测不过积分的能量
+    分量有 63.2% 的混叠误差，见 `viscous_flux.py::
+    resolve_viscous_overintegration`），于是两边比的成了两种不同的**体积
+    项离散**——差值 7.2e3（P1）/ 2.2e5（P2）是真实的物理差异，不是 kernel
+    不一致。固定成 off 把界面项重新隔离出来，这才是本文件的判据。
+
+    体积项那一档的正确性由 `test_viscous_volume_overintegration.py` 覆盖。
+    """
+    monkeypatch.setenv("AFCFD_VISC_OVERINT", "off")
+
+
 def _compute_temperature(Q):
     R_AIR = 287.0
     rho = np.maximum(Q[..., 0], 1e-10)

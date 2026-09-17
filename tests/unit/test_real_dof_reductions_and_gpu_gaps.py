@@ -444,11 +444,18 @@ class TestGpuViscousOverintegration:
         assert "resolve_viscous_overintegration()" in s
         assert "_viscous_volume_overintegrated_gpu(" in s
 
-    def test_default_is_off_so_coarse_path_unchanged(self):
+    def test_default_is_on_so_gpu_must_mirror_the_fine_path(self):
+        """默认 2026-09-17 从 `off` 改成 `on`（依据见
+        `viscous_flux.py::resolve_viscous_overintegration`）。
+
+        对 GPU 侧的含义变了：过积分分支从"默认不走、只需存在"变成
+        **默认路径**，所以 GPU 的分段必须与 CPU 的
+        `get_overintegration_context` 同构（下一条测试查这个）。
+        """
         from autoflowcfd.core.fr_residual.viscous_flux import (
             resolve_viscous_overintegration,
         )
-        assert resolve_viscous_overintegration() == "off"
+        assert resolve_viscous_overintegration() == "on"
 
     def test_shared_overint_context_is_backend_consistent(self):
         """GPU 的分段必须与 CPU 的 `get_overintegration_context` 同构。"""
