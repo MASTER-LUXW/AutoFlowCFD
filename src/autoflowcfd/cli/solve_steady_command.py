@@ -51,12 +51,18 @@ from autoflowcfd.cli.solve_commands import solve
               help='自适应 CFL 上限（稳态，默认 0.5，2026-09-07 从 0.3 上调）。'
                    'SSP-RK3 线性稳定极限 ~1.0，残差稳定下降的算例可以试 0.8；'
                    'AUSM+up 低马赫预处理激活的算例真实可用上限更低，发散时回调到 0.3')
-@click.option('--cfl-min', type=float, default=0.05,
-              help='自适应 CFL 下限（稳态，默认 0.05）。**注意这个默认值高于'
-                   '真 P1（AFCFD_FILTER_MODE=off，零阶数损失）在 79 万单元 '
-                   'cube_demo 上实测稳定的 0.03**——做低 CFL 工况时必须显式'
-                   '调低，否则 --cfl-start 会被这个下限钳上去（见 '
-                   'core/time_integration/adaptive_cfl.py 模块文档第 11 条）。')
+@click.option('--cfl-min', type=float, default=0.01,
+              help='自适应 CFL 下限（稳态，默认 0.01）。**2026-09-17 从 0.05 '
+                   '改为 0.01**：0.05 高于真 P1（AFCFD_FILTER_MODE=off，零阶数'
+                   '损失）在 79 万单元 cube_demo 与 plate_demo 两张真实网格上'
+                   '实测稳定的 ~0.03，等于一个已验证可用的工作点通过 CLI 根本'
+                   '到不了（--cfl-start 会被这个下限钳上去，见 '
+                   'core/time_integration/adaptive_cfl.py 模块文档第 11 条）。'
+                   '配置层 `SteadyConfig.cfl_min` 早在 2026-09-15 就是 0.01，'
+                   '这里没跟上——那正是提交 5e4e18a"配置层与 CLI 默认值相差 '
+                   '20 倍"没关完的另一半。改动方向是安全的：下限只允许控制器'
+                   '收缩得更多，绝不会抬高 CFL，因此不可能把原本稳定的运行变'
+                   '成不稳定。')
 @click.option('--phase-max-iter', type=int, default=None,
               help='Order Continuation（--order>=2 时触发）非最终阶段(P0/P1/...，不含目标'
                    '阶数)各自的最大迭代步数上限。默认(不传)时保留旧行为——总步数按阶段数'

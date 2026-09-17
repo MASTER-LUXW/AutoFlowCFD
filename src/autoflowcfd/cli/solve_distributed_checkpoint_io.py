@@ -29,6 +29,9 @@ def rebuild_distributed_solver_from_checkpoint(
     surface_mesh: Optional[str] = None,
     threads: int = -1,
     skip_quality_check: bool = False,
+    cfl_start: float = 0.1,
+    cfl_max: float = 0.5,
+    cfl_min: float = 0.01,
 ):
     """从 checkpoint 完整重建一个分布式求解器（不继续迭代）。
 
@@ -40,6 +43,15 @@ def rebuild_distributed_solver_from_checkpoint(
             state`/`scatter_local_state` 这类纯数组操作理论上支持变
             rank 数，但重建构造过程本身（分区）依赖调用方传入正确的
             `n_ranks`）
+        cfl_start / cfl_max / cfl_min: 自适应 CFL 的初始值/上限/下限。
+            **真实缺口修复（2026-09-17）**：本函数此前四个构造点一个都
+            不传 CFL 参数，于是全部分布式 `solve resume` 都静默使用控制器
+            自身的默认值（0.1 / 0.5 / 0.05）——那个下限 0.05 高于本项目在
+            两张真实网格上实测稳定的 CFL（~0.03），所以一条原本固定 CFL
+            0.03 稳定收敛的分布式运行，一旦 resume 就会被抬到发散。
+            `solve steady` 的同一组四个构造点早在 2026-09-15 就补齐了
+            （见 `solve_steady_command.py` 那处注释），resume 这条命令
+            被漏掉了。
         multi_gpu: 是否重建为 `MultiGPUDistributedSolver`
         fully_distributed: 是否走"完全分布式加载"重建（只有 root 加载
             完整网格）——与 `multi_gpu` 互斥，两者都为 False 时是 CPU
@@ -116,6 +128,7 @@ def rebuild_distributed_solver_from_checkpoint(
             enable_viscous=True, skip_quality_check=skip_quality_check,
             turb_model_name=turbulence_model.upper(),
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
+            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
         )
         solver = MultiGPUDistributedSolver.from_fully_distributed_package(
             package, n_ranks=n_ranks, device_id=gpu_device, root_context=root_context,
@@ -138,6 +151,7 @@ def rebuild_distributed_solver_from_checkpoint(
             mu_molecular=mu_molecular, rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
             turb_model=turbulence_model.upper(),
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
+            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
         )
         # GPU 版 checkpoint 加载是求解器自身方法（见
         # gpu_distributed_init.py::load_checkpoint_distributed），内部
@@ -164,6 +178,7 @@ def rebuild_distributed_solver_from_checkpoint(
             enable_viscous=True, skip_quality_check=skip_quality_check,
             turb_model_name=turbulence_model.upper(),
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
+            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
         )
         solver = DistributedFRSolver.from_fully_distributed_package(
             package, n_ranks=n_ranks, root_context=root_context,
@@ -196,6 +211,7 @@ def rebuild_distributed_solver_from_checkpoint(
             n_threads=threads, turbulence_intensity=turbulence_intensity,
             viscosity_ratio=viscosity_ratio, mu_molecular=mu_molecular,
             rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
+            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
         )
 
         U_local, loaded_metadata, loaded_iteration = distributed_load_checkpoint(checkpoint_path, solver)

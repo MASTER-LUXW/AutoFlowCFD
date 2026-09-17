@@ -77,6 +77,14 @@ from autoflowcfd.cli.solve_steady_commands import _report_aerodynamic_coefficien
 @click.option('--cfl-max', type=float, default=0.5,
               help='自适应 CFL 上限（默认 0.5）。上一段稳定收敛可试 0.8；发散则回调到'
                    '0.3 或更低。仅单机 CPU 路径（非 --n-ranks>1/--multi-gpu）支持')
+@click.option('--cfl-min', type=float, default=0.01,
+              help='自适应 CFL 下限（默认 0.01）。**真实缺口修复（2026-09-17）**：'
+                   '`solve steady` 早在 2026-09-15 就有这个选项（控制器默认下限 0.05 '
+                   '高于真 P1 在 79 万单元 cube_demo 上实测稳定的 CFL 0.03，也高于 '
+                   'plate_demo 实测的稳定边界，等于一个已验证可用的工作点通过 CLI 根本'
+                   '到不了），但 `solve resume` 从未跟上——续算会静默退回控制器默认 '
+                   '0.05，把原本固定 CFL 0.03 的稳定运行抬到发散。默认值与 `solve '
+                   'steady` 对齐为 0.01。仅单机 CPU 路径生效。')
 @click.option('--phase-max-iter', type=int, default=None,
               help='Order Continuation（目标阶数>=2 时触发）非最终阶段各自的最大迭代'
                    '步数上限。默认(不传)时取本次续算新增的额外迭代数按剩余阶段数机械'
@@ -101,7 +109,7 @@ from autoflowcfd.cli.solve_steady_commands import _report_aerodynamic_coefficien
 def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
            surface_mesh: Optional[str], reference_area: Optional[float], threads: int,
            skip_quality_check: bool, checkpoint_interval: int,
-           cfl_start: float, cfl_max: float,
+           cfl_start: float, cfl_max: float, cfl_min: float,
            phase_max_iter: Optional[int], residual_drop_threshold: float,
            n_ranks: int, multi_gpu: bool, fully_distributed: bool,
            gpu_device: Optional[int]) -> None:
@@ -126,7 +134,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
             input_file 是 .nas 体网格、且两者都缺失时才会报错
         reference_area: 气动系数参考面积
         checkpoint_interval: 中间 checkpoint 保存间隔（额外迭代数）
-        cfl_start, cfl_max: 自适应 CFL 的初始值/上限（纯数值加速参数，不影响
+        cfl_start, cfl_max, cfl_min: 自适应 CFL 的初始值/上限/下限（纯数值加速参数，不影响
             物理解，不从 checkpoint 恢复——每次 resume 由本次命令行重新指定，
             方便根据上一段收敛表现调整）。仅单机 CPU 路径生效。
         phase_max_iter: Order Continuation 非最终阶段最大步数上限，None 时取
@@ -141,6 +149,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
             checkpoint_file, max_iter, n_ranks, multi_gpu, fully_distributed,
             gpu_device, backend, surface_mesh, threads, skip_quality_check,
             checkpoint_interval, phase_max_iter, residual_drop_threshold,
+            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
         )
         return
 
@@ -148,7 +157,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
         checkpoint_file, backend=backend, surface_mesh=surface_mesh, threads=threads,
         reference_area=reference_area,
         skip_quality_check=skip_quality_check,
-        cfl_start=cfl_start, cfl_max=cfl_max,
+        cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
     )
     input_file = metadata["input_file"]
     order = metadata["order"]
@@ -227,6 +236,9 @@ def _resume_distributed(
     checkpoint_interval: int,
     phase_max_iter: Optional[int] = None,
     residual_drop_threshold: float = 100.0,
+    cfl_start: float = 0.1,
+    cfl_max: float = 0.5,
+    cfl_min: float = 0.01,
 ) -> None:
     """`resume` 的分布式分支（2026-09-02 补齐，见 `resume` 文档"完成度"
     一节）——CPU MPI"传统模式"/"完全分布式加载"/多GPU 三条路径共用同一个
@@ -264,6 +276,7 @@ def _resume_distributed(
         checkpoint_file, n_ranks=n_ranks, multi_gpu=multi_gpu,
         fully_distributed=fully_distributed, gpu_device=gpu_device,
         backend=backend, surface_mesh=surface_mesh, threads=threads,
+        cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
         skip_quality_check=skip_quality_check,
     )
     input_file = metadata["input_file"]

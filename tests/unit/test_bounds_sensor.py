@@ -3,11 +3,15 @@ AutoFlowCFD V2.0 - 邻居极值越界（BJ 型）troubled-cell 判据。
 
 ## 为什么要这个判据（一句话）
 
-Persson-Peraire 的 `s0 = -4*log10(order)` 在 order=1 时为 0，门限退化成
-"顶模态能量占比 >= 10%"，而 P1 的顶模态**就是**全部非常数模态——它在
-生产阶数 P1 上原理上不适用（实测 A/B 前 51 步残差与 Cd 逐字符相同）。
-BJ 型判据不依赖模态分解，没有这个退化。完整推导与真实网格实测见
-`core/fr_operators/bounds_sensor.py` 模块文档。
+Persson-Peraire 门控在生产阶数 P1 上实测是精确无操作（A/B 前 51 步残差
+与 Cd 逐字符相同）。真实原因不是"阈值不可能满足"，而是**它探的那个变量
+恰好光滑**：生产门控用 `DEFAULT_SENSOR_VAR_INDEX = 0`（守恒密度），而在
+plate_demo_volume_les iter 100 的真实解上 order=1 的 Persson 掩码按变量
+分别是 rho 0.000% / rho_u 3.546% / rho_v 98.827% / rho_w 98.756% /
+rho_E 0.000% —— 密度掩码**完全为空**，真正携带非光滑内容的是横向动量。
+
+BJ 型判据探全部 5 个守恒变量并取并集，且不依赖模态分解。完整推导与
+真实网格实测见 `core/fr_operators/bounds_sensor.py` 模块文档。
 
 ## 本文件覆盖的性质（按重要性排序）
 
