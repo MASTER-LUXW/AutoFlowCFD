@@ -384,6 +384,18 @@ class AutoFlowCFDAPI:
         if config is not None:
             for field in ("mu_molecular", "turbulence_intensity", "viscosity_ratio"):
                 kwargs.setdefault(field, getattr(config, field))
+            # 自适应 CFL 三元组（2026-09-17 补齐）。`TransientConfig` 此前
+            # 根本没有这三个字段，所以 YAML/config 用户配置不出瞬态的 CFL
+            # ——而 `--time-method rk3/imex` 下 `step()` 忽略 dt、按逐单元
+            # 局部 CFL 步长推进，那条路径上控制器是**激活**的。字段名映射
+            # 与 run_steady 一致（config.cfl_init -> FRSolver.cfl_start）。
+            # dual-time 档不构造这个控制器，这三个值对它无效。
+            if getattr(config, "cfl_init", None) is not None:
+                kwargs.setdefault("cfl_start", config.cfl_init)
+            if getattr(config, "cfl_max", None) is not None:
+                kwargs.setdefault("cfl_max", config.cfl_max)
+            if getattr(config, "cfl_min", None) is not None:
+                kwargs.setdefault("cfl_min", config.cfl_min)
             # flux_type：与 run_steady 同一条护栏，理由见那里。
             if getattr(config, "flux_type", "radau") != "radau":
                 if backend != "cpu":

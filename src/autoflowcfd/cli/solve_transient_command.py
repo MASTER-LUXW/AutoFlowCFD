@@ -65,6 +65,22 @@ from autoflowcfd.cli.solve_transient_distributed import _solve_transient_distrib
               help='Order Continuation 单个非最终阶段判定"可以提前升阶"的残差下降倍数，'
                    '默认100(降2个数量级)。仅 CPU 后端支持')
 @click.option("--dt", default=1e-5, help="时间步长 (秒)")
+@click.option('--cfl-start', type=float, default=0.05,
+              help='自适应 CFL 初始值（默认 0.05）。**只对 --time-method '
+                   'rk3/imex 生效**：那两档下 step() 忽略 --dt、按逐单元'
+                   '局部 CFL 步长推进，自适应控制器是激活的；dual-time 档'
+                   '不构造这个控制器（内层伪时间有自己的逻辑）。'
+                   '**2026-09-17 补齐**：此前 solve transient 一个 CFL 选项'
+                   '都没有，rk3/imex 瞬态只能吃 FRSolver 构造默认值，配置'
+                   '不出本项目在两张真实网格上实测稳定的 ~0.03。')
+@click.option('--cfl-max', type=float, default=0.5,
+              help='自适应 CFL 上限（默认 0.5）。语义与 --cfl-start 同，'
+                   '只对 rk3/imex 生效。')
+@click.option('--cfl-min', type=float, default=0.01,
+              help='自适应 CFL 下限（默认 0.01，与 solve steady/resume 对齐）。'
+                   '注意下限会把低于它的 --cfl-start 钳上去，做低 CFL 工况'
+                   '时三个都要一起调（见 core/time_integration/'
+                   'adaptive_cfl.py 模块文档第 11 条）。')
 @click.option("--physical-time", default=None, help="总物理时间（秒）")
 @click.option("--output", "-o", "output_dir", default="./transient_results", help="输出目录")
 @click.option("--use-eikonal", is_flag=True, help='使用 Eikonal 方程求解壁面距离')
@@ -109,7 +125,8 @@ from autoflowcfd.cli.solve_transient_distributed import _solve_transient_distrib
                    '只在结束后写一次，与 solve steady 的分布式分支同一个约定）')
 def transient(input_file: str, backend: str, order: int, flux_type: str, time_method: str,
               turbulence_model: str, max_iter: int, phase_max_iter: Optional[int], residual_drop_threshold: float,
-              dt: float, physical_time: float,
+              dt: float, cfl_start: float, cfl_max: float, cfl_min: float,
+        physical_time: float,
               output_dir: str, use_eikonal: bool, surface_mesh: Optional[str],
               skip_quality_check: bool, reference_area: Optional[float],
               dual_time_inner_iter: int, threads: int, init_checkpoint: Optional[str],
@@ -237,6 +254,7 @@ def transient(input_file: str, backend: str, order: int, flux_type: str, time_me
             n_ranks, multi_gpu, fully_distributed, gpu_device, backend,
             checkpoint_interval, phase_max_iter, residual_drop_threshold,
             init_checkpoint,
+            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
         )
         return
 
@@ -296,6 +314,9 @@ def transient(input_file: str, backend: str, order: int, flux_type: str, time_me
         flux_type=flux_type,
         mu_molecular=mu_molecular,
         rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
+        # CFL 三元组（2026-09-17 补齐）：rk3/imex 档走逐单元局部 CFL
+        # 推进、自适应控制器是激活的，此前这里一个都不传。
+        cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
     )
 
     # 4. 计算壁面距离场（DES/LES/WMLES 必须）

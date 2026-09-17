@@ -383,6 +383,17 @@ class TransientConfig(SolverConfig):
     dt: float = 1e-4
     total_time: float = 0.1
     time_scheme: TimeIntegrationScheme = TimeIntegrationScheme.BACKWARD_EULER
+    # 自适应 CFL 三元组（2026-09-17 新增）。为什么瞬态也需要：
+    # `--time-method rk3/imex` 下 `step()` 忽略 dt、按**逐单元局部 CFL
+    # 步长**推进（见 core/fr_solver/step.py 的 dt 语义一节），那条路径上
+    # 自适应 CFL 控制器是**激活**的；而此前 TransientConfig 没有这三个
+    # 字段、`solve transient` 也没有对应 CLI 选项，于是瞬态运行只能吃
+    # FRSolver 的构造默认值，配置不出本项目实测稳定的 ~0.03。
+    # （`dual-time` 档不构造这个控制器，内层伪时间有自己的逻辑，这三个
+    # 字段对它无效——语义与 `solve steady` 完全一致。）
+    cfl_init: float = 0.05
+    cfl_max: float = 0.5
+    cfl_min: float = 0.01
     sample_interval: int = 10
     warmup_time: float = 0.05
     init_from_checkpoint: Optional[str] = None

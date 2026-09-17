@@ -30,6 +30,9 @@ def _solve_transient_distributed(
     n_ranks, multi_gpu, fully_distributed, gpu_device, backend,
     checkpoint_interval, phase_max_iter=None, residual_drop_threshold=100.0,
     init_checkpoint=None,
+    cfl_start: float = 0.05,
+    cfl_max: float = 0.5,
+    cfl_min: float = 0.01,
 ):
     """`solve transient` 的分布式分支实现。
 
@@ -74,6 +77,7 @@ def _solve_transient_distributed(
         turbulence_intensity, viscosity_ratio, mu_molecular, rho_inf, vel_inf, p_inf,
         n_ranks, checkpoint_interval, reference_area, phase_max_iter, residual_drop_threshold,
         init_checkpoint,
+        cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
     )
 
 
@@ -85,6 +89,9 @@ def _solve_transient_cpu_traditional(
     n_ranks, checkpoint_interval, reference_area,
     phase_max_iter=None, residual_drop_threshold=100.0,
     init_checkpoint=None,
+    cfl_start: float = 0.05,
+    cfl_max: float = 0.5,
+    cfl_min: float = 0.01,
 ):
     """CPU MPI"传统模式"：每个 rank 独立加载完整网格（与 `solve steady`
     的对应分支同一套构造方式，见该文件 `elif n_ranks > 1:` 分支文档）。"""
@@ -118,6 +125,11 @@ def _solve_transient_cpu_traditional(
         dual_time_inner_iter=dual_time_inner_iter, n_threads=threads,
         turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
         mu_molecular=mu_molecular, rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
+        # CFL 三元组（2026-09-17 补齐）：rk3/imex 瞬态走的是逐单元局部
+        # CFL 推进、控制器是激活的，此前这里一个都不传 -> 恒用控制器
+        # 默认值。与 `solve steady --n-ranks` 在 2026-09-15 补齐的那四处
+        # 同类，瞬态这条被漏掉了。
+        cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
     )
 
     if is_root():

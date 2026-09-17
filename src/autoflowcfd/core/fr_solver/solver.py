@@ -201,7 +201,16 @@ class FRSolver(_SolverGeometryMixin):
                  adaptive_cfl: bool = True,
                  cfl_start: float = 0.1,
                  cfl_max: float = 0.5,
-                 cfl_min: float = 0.05,
+                 # 2026-09-17：0.05 -> 0.01，与 CLI `--cfl-min` 和配置层
+                 # `SteadyConfig.cfl_min` 对齐（此前三处分别是 0.05 / 0.05
+                 # / 0.01，是提交 5e4e18a"配置层与 CLI 默认值相差 20 倍"
+                 # 没关完的最后一处）。0.05 高于本项目在 cube_demo 与
+                 # plate_demo 两张真实网格上实测稳定的 CFL ~0.03，会把
+                 # 低于它的 cfl_start 钳上去（见 adaptive_cfl.py 第 11 条）。
+                 # 不传 CFL 的调用方（`solve transient` 的 rk3/imex 路径、
+                 # 不带 config 的 `api.run_steady/run_transient`）吃的就是
+                 # 这个默认值。方向安全：下限只允许控制器收缩得更多。
+                 cfl_min: float = 0.01,
                  turbulence_intensity: float = 0.01,
                  viscosity_ratio: float = 5.0,
                  sem_num_eddies: int = 200,
