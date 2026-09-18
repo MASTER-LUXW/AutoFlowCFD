@@ -271,3 +271,38 @@ def native_prism_exact_jacobian(ref_rst: np.ndarray,
     jac[:, :, 1] = half_m * d_bottom_ds[None, :] + half_p * d_top_ds[None, :]
     jac[:, :, 2] = 0.5 * (top - bottom)
     return jac
+
+
+def build_native_prism_modal_filter(order: int) -> np.ndarray:
+    """原生棱柱模态滤波矩阵，形状 `(n_sps, n_sps)`。
+
+    归一化判据 `eta = max(i+j, k) / order`：棱柱基是**张量积**
+    `psi_ij(r,s) * P_k(t)`，两个因子各自有自己的"逼近上限"——三角形因子
+    的阶数是总阶数 `i+j`（受限 PKD 模态集就是按 `i+j<=order` 定义的），
+    挤出因子的阶数是 `k`。某一个因子逼近 `order` 就意味着该模态处于那个
+    方向插值多项式的最高阶、数值噪声主导区间。
+
+    与坍缩棱柱 `build_prism_modal_filter` 的 `max(i,j,k)/order` 是**同一个
+    语义**（"某一根轴自己的索引逼近 order"），只是原生基里三角形那两个
+    方向不是独立的轴、它们合起来受一个总阶数约束，所以取 `i+j`。
+
+    **不能用总阶数 `(i+j+k)/(2*order)`**：那样顶模态的 eta 只有 1，但
+    `i+j=order, k=0` 这种"三角形方向已经到顶、挤出方向还是常数"的模态
+    eta 只有 0.5，会被当成充分解析的低阶模态放过——而它恰恰是被三角化
+    的那两个轴上的最高阶模态，也就是伪横流所在的那一支。同时这个归一化
+    会让 `legacy`/`project` 档不再"恰好削掉最高阶"，把那两档已经标定好的
+    语义（见 `modal_filter.py` 模块文档）一起改掉。
+
+    衰减公式、`off` 档短路与 sigma 的选取全部复用
+    `modal_filter.py::assemble_modal_filter`（一份实现服务全部基）。
+    """
+    if order == 0:
+        return np.eye(1)
+
+    from .modal_filter import assemble_modal_filter
+
+    ref = build_native_prism_nodes(order)
+    V, _, _, _ = build_native_prism_vandermonde(order, ref)
+    modes = restricted_prism_modes(order)
+    etas = [max(i + j, k) / order for (i, j, k) in modes]
+    return assemble_modal_filter(V, etas)

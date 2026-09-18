@@ -264,6 +264,64 @@ def filter_sigma(degree_frac):
     return _exp_filter_sigma(eta)
 
 
+def _tensor_max_etas(order: int) -> np.ndarray:
+    """坍缩基（"扩展张量积" `i,j,k` 各自独立 0..order）的 `max(i,j,k)/order`
+    归一化模态阶数，排列与 `tet_modal_basis_and_grad`/
+    `prism_modal_basis_and_grad` 的列序一致（`flat = i*n1d^2 + j*n1d + k`）。
+
+    坍缩四面体与坍缩棱柱用的是**同一个**判据与**同一个**模态排列，所以
+    只留一份。为什么是 `max` 而不是总阶数 `i+j+k`，见
+    `build_tet_modal_filter` 文档里那段实测（总阶数判据在四面体上把随机
+    白噪声*放大* 17.5 倍）。
+    """
+    n1d = order + 1
+    etas = np.empty(n1d ** 3)
+    for i in range(n1d):
+        for j in range(n1d):
+            for k in range(n1d):
+                etas[i * n1d * n1d + j * n1d + k] = max(i, j, k) / order
+    return etas
+
+
+def assemble_modal_filter(V: np.ndarray, etas) -> np.ndarray:
+    """`F = V @ diag(sigma(eta)) @ V^-1` —— 全部基**共用**的滤波器装配步。
+
+    Args:
+        V: `(n, n)` 模态 Vandermonde（节点 x 模态）
+        etas: 长度 `n` 的归一化模态阶数，逐项 `in [0, 1]`，列序与 `V` 的
+            列一致。各基自己决定怎么归一化（坍缩四面体/坍缩棱柱用
+            `max(i,j,k)/order`，原生四面体用 `(i+j+k)/order`，原生棱柱用
+            `max(i+j, k)/order`），理由分别见各构造函数文档。
+
+    Returns:
+        `(n, n)` 滤波矩阵，`F @ 节点值` 给出滤波后的节点值。
+
+    ## 为什么把这几行单独抽出来
+
+    `FILTER_MODE == "off"` 这条短路**当年真的被漏掉过**：坍缩四面体与
+    坍缩棱柱两个构造都有，原生四面体那个没有，后果是
+    `AFCFD_FILTER_MODE=off` **只关掉了棱柱的滤波器**，而那张 79 万单元
+    网格上四面体占 82.7% —— 也就是说"关掉滤波器"的对照实验里绝大多数
+    单元根本没被关掉，排查时因为日志只打印 `filter_prism` 的秩而没发现
+    （完整记录见 `native_tet_filter.py` 里那段注释）。
+
+    把装配与短路收到一处之后，再加一条基**不可能**漏掉它。
+    """
+    n = V.shape[0]
+    etas = np.asarray(etas, dtype=np.float64)
+    if etas.shape != (n,):
+        raise ValueError(
+            f"assemble_modal_filter: etas 形状 {etas.shape} 与 V 的列数 "
+            f"{n} 不一致 —— 两者必须逐项对应，不一致说明调用方把模态顺序"
+            f"弄错了，那会让滤波强度施加到错误的模态上（不会报错、只会"
+            f"静默地压掉物理内容）")
+    if FILTER_MODE == "off":
+        # off：恒等滤波（AFCFD_FILTER_MODE=off，见模块顶部说明）
+        return np.eye(n)
+    sigma = np.array([filter_sigma(float(e)) for e in etas])
+    return V @ np.diag(sigma) @ np.linalg.inv(V)
+
+
 def build_tet_modal_filter(order: int, ref_cube_sps: np.ndarray) -> np.ndarray:
     """四面体坍缩坐标模态滤波矩阵，形状 (n_sps,n_sps)。
 
@@ -290,22 +348,12 @@ def build_tet_modal_filter(order: int, ref_cube_sps: np.ndarray) -> np.ndarray:
     Returns:
         F: (n_sps,n_sps) 滤波矩阵，F @ field(SPs) 给出滤波后的节点值
     """
-    if order == 0 or FILTER_MODE == "off":
-        # off：恒等滤波（AFCFD_FILTER_MODE=off，见模块顶部说明）
+    if order == 0:
         return np.eye(ref_cube_sps.shape[0])
 
     a, b, c = ref_cube_sps[:, 0], ref_cube_sps[:, 1], ref_cube_sps[:, 2]
     V, _, _, _ = tet_modal_basis_and_grad(a, b, c, order)
-
-    n1d = order + 1
-    sigma = np.zeros(n1d ** 3)
-    for i in range(n1d):
-        for j in range(n1d):
-            for k in range(n1d):
-                flat = i * n1d * n1d + j * n1d + k
-                sigma[flat] = filter_sigma(max(i, j, k) / order)
-
-    return V @ np.diag(sigma) @ np.linalg.inv(V)
+    return assemble_modal_filter(V, _tensor_max_etas(order))
 
 
 def build_prism_modal_filter(order: int, ref_cube_sps: np.ndarray) -> np.ndarray:
@@ -323,19 +371,9 @@ def build_prism_modal_filter(order: int, ref_cube_sps: np.ndarray) -> np.ndarray
     Returns:
         F: (n_sps,n_sps) 滤波矩阵
     """
-    if order == 0 or FILTER_MODE == "off":
-        # off：恒等滤波（AFCFD_FILTER_MODE=off，见模块顶部说明）
+    if order == 0:
         return np.eye(ref_cube_sps.shape[0])
 
     a, b, c = ref_cube_sps[:, 0], ref_cube_sps[:, 1], ref_cube_sps[:, 2]
     V, _, _, _ = prism_modal_basis_and_grad(a, b, c, order)
-
-    n1d = order + 1
-    sigma = np.zeros(n1d ** 3)
-    for i in range(n1d):
-        for j in range(n1d):
-            for k in range(n1d):
-                flat = i * n1d * n1d + j * n1d + k
-                sigma[flat] = filter_sigma(max(i, j, k) / order)
-
-    return V @ np.diag(sigma) @ np.linalg.inv(V)
+    return assemble_modal_filter(V, _tensor_max_etas(order))

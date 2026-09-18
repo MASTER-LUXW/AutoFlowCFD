@@ -182,6 +182,31 @@ class FROperators:
     # 见该函数文档）。
     filter_native_tet_padded: np.ndarray = None
 
+    # ======================= 原生棱柱基（2026-09-18） =======================
+    #
+    # `AFCFD_PRISM_BASIS=native` 时构造并**别名到** `D_3d_prism`/
+    # `filter_prism`（与四面体那套完全同一个做法），所以任何无条件读这两个
+    # 旧字段名的消费点自动拿到原生结果。面算子（外插/提升）键是 0~4 的
+    # `face_id`，与坍缩棱柱的 `(axis, side)` 之间的换算**只允许**走
+    # `native_prism_face.cube_face_to_native_prism_face`。
+    #
+    # `collapsed` 档下这一整组恒为 None，`prism_basis_mode` 为 "collapsed"，
+    # 全部既有行为逐位不变。迁移终态见 `fr/prism_basis_mode.py` 模块文档
+    # （删除坍缩棱柱基、去掉那个开关）。
+    prism_basis_mode: str = "collapsed"
+    D_native_prism: np.ndarray = None
+    ref_native_prism: np.ndarray = None
+    n_native_sps_prism: int = None
+    #: `face_id (0~4)` -> `(n_fp, n_native_sps_prism)` 体积->面外插。
+    boundary_extrap_native_prism: Dict[int, np.ndarray] = None
+    #: `face_id (0~4)` -> `(n_native_sps_prism, n_fp)` DG 提升。
+    lift_native_prism: Dict[int, np.ndarray] = None
+    #: 上面两个零填充到全局统一宽度 `(order+1)^3` 之后的版本 —— 生产残差
+    #: kernel 要消费的是这些，不是原始 `n_native` 宽的版本。
+    D_native_prism_padded: np.ndarray = None
+    lift_native_prism_padded: Dict[int, np.ndarray] = None
+    filter_native_prism_padded: np.ndarray = None
+
     def get_operators(self) -> Dict[str, np.ndarray]:
         """返回算子字典，兼容旧接口。"""
         return {
@@ -357,6 +382,48 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
     # 旧字段名的调用点直接得到正确的 native 结果，不需要逐一修改）。
     D_3d_tet = D_native_tet_padded
     filter_tet = filter_native_tet_padded
+    # 3f. 棱柱原生基（迁移期，默认关闭）——见 fr/prism_basis_mode.py。
+    #
+    # **必须与几何一起切换**：原生 `D` 作用在**原生棱柱节点**上的场，而
+    # 坍缩档的 `sps_coords`/`jacobians` 建在张量积立方体节点上。把原生算子
+    # 套到坍缩节点采样的场上没有任何意义（不会报错，只会给出错的导数），
+    # 所以 `grid/high_order/high_order_mesh_order.py::build_order_geometry`
+    # 读同一个 `AFCFD_PRISM_BASIS` 分派棱柱段的点位与雅可比。
+    from .prism_basis_mode import resolve_prism_basis_mode
+
+    prism_basis_mode = resolve_prism_basis_mode()
+    D_native_prism = None
+    ref_native_prism = None
+    n_native_sps_prism = None
+    boundary_extrap_native_prism = None
+    lift_native_prism = None
+    D_native_prism_padded = None
+    lift_native_prism_padded = None
+    filter_native_prism_padded = None
+    if prism_basis_mode == "native":
+        from .native_prism_basis import (
+            build_native_prism_modal_filter,
+            build_native_prism_operators,
+        )
+        from .native_prism_face import build_all_native_prism_face_operators
+
+        ref_native_prism, D_native_prism = build_native_prism_operators(order)
+        n_native_sps_prism = ref_native_prism.shape[0]
+        boundary_extrap_native_prism, lift_native_prism = (
+            build_all_native_prism_face_operators(order))
+        D_native_prism_padded = pad_native_matrix_to_global(
+            D_native_prism, n_sps_global, pad_axes=(0, 1))
+        lift_native_prism_padded = {
+            f: pad_native_matrix_to_global(mat, n_sps_global, pad_axes=(0,))
+            for f, mat in lift_native_prism.items()
+        }
+        filter_native_prism_padded = pad_native_filter_matrix_to_global(
+            build_native_prism_modal_filter(order), n_sps_global)
+        # 与四面体同一个别名做法：无条件读 `D_3d_prism`/`filter_prism` 的
+        # 消费点自动拿到原生结果，形状恒等（零填充块对角设计保证）。
+        D_3d_prism = D_native_prism_padded
+        filter_prism = filter_native_prism_padded
+
     # `boundary_extrap_tet` 保留为占位字典（形状与坍缩坐标版本一致：
     # (n_fp,n_sps)=((order+1)**2,(order+1)**3)）——只是为了不用同步修改
     # `core/fr_operators/face_kernels.py` 里"无条件按 (celltype,axis,
@@ -520,6 +587,15 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
         D_native_tet_padded=D_native_tet_padded,
         lift_native_tet_padded=lift_native_tet_padded,
         filter_native_tet_padded=filter_native_tet_padded,
+        prism_basis_mode=prism_basis_mode,
+        D_native_prism=D_native_prism,
+        ref_native_prism=ref_native_prism,
+        n_native_sps_prism=n_native_sps_prism,
+        boundary_extrap_native_prism=boundary_extrap_native_prism,
+        lift_native_prism=lift_native_prism,
+        D_native_prism_padded=D_native_prism_padded,
+        lift_native_prism_padded=lift_native_prism_padded,
+        filter_native_prism_padded=filter_native_prism_padded,
     )
 
 

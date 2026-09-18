@@ -477,3 +477,147 @@ class TestRealSpsCountsFollowTheActivePrismBasis:
         monkeypatch.setenv("AFCFD_PRISM_BASIS", "nativ")
         with pytest.raises(ValueError, match="AFCFD_PRISM_BASIS"):
             resolve_prism_basis_mode()
+
+
+class TestOperatorsAndGeometrySwitchTogether:
+    """`FROperators` 与 `build_order_geometry` 必须**一起**切换棱柱基。
+
+    原生 `D` 作用在**原生棱柱节点**上的场，坍缩档的 `sps_coords`/
+    `jacobians` 建在张量积立方体节点上。把原生算子套到坍缩节点采样的场上
+    不会报错，只会给出错的导数 —— 所以两边读同一个 `AFCFD_PRISM_BASIS`，
+    这里钉住"确实读到了同一个值"。
+    """
+
+    @staticmethod
+    def _ops(order):
+        from autoflowcfd.fr.operators import generate_fr_operators
+
+        return generate_fr_operators(order)
+
+    def test_collapsed_leaves_every_native_field_none(self, monkeypatch):
+        monkeypatch.delenv("AFCFD_PRISM_BASIS", raising=False)
+        ops = self._ops(2)
+        assert ops.prism_basis_mode == "collapsed"
+        for name in ("D_native_prism", "ref_native_prism",
+                     "n_native_sps_prism", "boundary_extrap_native_prism",
+                     "lift_native_prism", "D_native_prism_padded",
+                     "lift_native_prism_padded",
+                     "filter_native_prism_padded"):
+            assert getattr(ops, name) is None, f"{name} 应当是 None"
+        assert np.abs(ops.D_3d_prism).max() > 20.0, "坍缩档的 max|D| 应当很大"
+
+    @pytest.mark.parametrize("order", [1, 2, 3])
+    def test_native_aliases_the_old_field_names(self, order, monkeypatch):
+        """`D_3d_prism`/`filter_prism` 必须别名到填充好的原生版本。
+
+        这是让"任何无条件读旧字段名的消费点自动拿到原生结果"成立的关键，
+        与四面体当年完全同一个做法。
+        """
+        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
+        ops = self._ops(order)
+        n_global = (order + 1) ** 3
+        assert ops.prism_basis_mode == "native"
+        assert ops.D_3d_prism is ops.D_native_prism_padded
+        assert ops.filter_prism is ops.filter_native_prism_padded
+        assert ops.D_3d_prism.shape == (n_global, n_global, 3)
+        assert ops.filter_prism.shape == (n_global, n_global)
+        assert ops.n_native_sps_prism == native_prism_n_sps(order)
+
+    @pytest.mark.parametrize("order", [1, 2, 3])
+    def test_padding_block_is_exactly_zero(self, order, monkeypatch):
+        """填充块必须**恰好**为零（"零填充块对角"不变量）。
+
+        行填零 -> 填充槽位的残差恒为零、不被时间推进改写；
+        列填零 -> 填充行里任何有限数值都不污染真实输出。
+        """
+        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
+        ops = self._ops(order)
+        nr = ops.n_native_sps_prism
+        D = ops.D_native_prism_padded
+        assert np.all(D[nr:, :, :] == 0.0)
+        assert np.all(D[:, nr:, :] == 0.0)
+        for mat in ops.lift_native_prism_padded.values():
+            assert np.all(mat[nr:, :] == 0.0)
+
+    @pytest.mark.parametrize("order", [1, 2, 3])
+    def test_native_operator_magnitude_is_far_smaller(self, order,
+                                                      monkeypatch):
+        """`max|D_3d_prism|` 必须大幅下降 —— 自由流保持性的直接控制量
+        （实测误差严格等于 `eps * max|D| / det(J)`）。
+        """
+        monkeypatch.delenv("AFCFD_PRISM_BASIS", raising=False)
+        mag_c = float(np.abs(self._ops(order).D_3d_prism).max())
+        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
+        mag_n = float(np.abs(self._ops(order).D_3d_prism).max())
+        gain = mag_c / mag_n
+        floor = {1: 1.5, 2: 4.0, 3: 30.0}[order]
+        assert gain >= floor, (
+            f"order={order}: max|D| 只改善了 {gain:.1f} 倍 "
+            f"(native {mag_n:.3f} vs collapsed {mag_c:.3f})")
+
+    def test_bad_face_key_is_rejected_not_silently_mapped(self, monkeypatch):
+        """按 `(axis, side)` 取原生棱柱面算子只允许走对应表。"""
+        from autoflowcfd.fr.native_prism_face import (
+            cube_face_to_native_prism_face,
+        )
+
+        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
+        ops = self._ops(2)
+        # 5 个合法立方体面都要能取到算子
+        for axis in range(3):
+            for side in (-1.0, 1.0):
+                if (axis, side) == (1, 1.0):
+                    continue
+                fid = cube_face_to_native_prism_face(axis, side)
+                assert fid in ops.boundary_extrap_native_prism
+                assert fid in ops.lift_native_prism_padded
+
+
+class TestNativePrismGeometry:
+    """生产几何在原生档下的两条硬性质。"""
+
+    @staticmethod
+    def _mesh(order):
+        import sys
+
+        sys.path.insert(0, "tests/validation")
+        from _channel_mesh import build_channel_mesh_prism
+
+        return build_channel_mesh_prism(order, nx=3, ny=2, nz=2,
+                                        Lx=0.1, H=0.01, Lz=0.004)
+
+    def test_right_prism_metric_is_constant_through_production_geometry(
+            self, monkeypatch):
+        """挤出网格（右棱柱）的 `det_jacs` 在整张网格上**恒定**。
+
+        坍缩档做不到：它的参考点在退化边附近聚集，同一张网格里 `det_jacs`
+        实测变化 7.9 倍。度量恒定 + `D@1` 机器零 = 均匀流下体积项散度机器零，
+        这就是"自由流保持性"的结构性依据。
+        """
+        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
+        mesh = self._mesh(2)
+        det = np.abs(mesh.jacobians["det_jacs"])
+        assert det.min() > 0.0
+        spread = det.max() / det.min()
+        assert spread < 1.0 + 1e-12, f"度量不恒定，极值比 {spread:.6f}"
+
+    def test_padding_slots_copy_real_sp0(self, monkeypatch):
+        """填充槽位必须复制真实 SP #0（有限、物理上合法的占位值）。
+
+        留 `np.zeros` 默认值对应原点，会被后处理/可视化误当成真实几何
+        位置；而 `det_jacs` 是**除数**，留 0 直接是除零。
+        """
+        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
+        mesh = self._mesh(2)
+        n_sps = mesh.n_sps_per_cell
+        n_real = native_prism_n_sps(2)
+        n_prism = mesh.n_prism_cells
+        assert n_real < n_sps
+        det = mesh.jacobians["det_jacs"].reshape(-1, n_sps)[:n_prism]
+        coords = mesh.sps_coords[:n_prism]
+        assert np.array_equal(det[:, n_real:],
+                              np.repeat(det[:, :1], n_sps - n_real, axis=1))
+        assert np.array_equal(
+            coords[:, n_real:],
+            np.repeat(coords[:, :1], n_sps - n_real, axis=1))
+        assert np.all(np.isfinite(det)) and np.all(np.abs(det) > 0.0)
