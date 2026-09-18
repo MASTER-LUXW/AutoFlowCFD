@@ -28,6 +28,8 @@ import numpy as np
 from loguru import logger
 from numba import njit, prange
 
+from autoflowcfd.core.utils.array_module import array_module as _array_module
+
 
 def _matrices_are_identity(*mats) -> bool:
     """给定的滤波矩阵是否都是**机器精度意义上的**单位阵。
@@ -376,11 +378,9 @@ def compute_turb_troubled_mask(k_field: np.ndarray, omega_field: np.ndarray,
 #:
 #: 在补齐之前，`resolve_filter_mode` 对**默认值**落到 sensor 的情形退到
 #: `project` 并打一条量化了数值后果的警告；对**显式**请求仍然报错。
-_SENSOR_MODE_SUPPORTED_BACKENDS = ("cpu-single", "cpu-mpi")
+_SENSOR_MODE_SUPPORTED_BACKENDS = ("cpu-single", "cpu-mpi",
+                                  "gpu-single", "gpu-mpi")
 
-#: 已经为哪些后端打过"默认 sensor 退到 project"的警告（每后端只打一次，
-#: 避免逐步刷屏；`resolve_filter_mode` 在每步都会被调用）。
-_SENSOR_FALLBACK_WARNED = set()
 
 
 def resolve_filter_mode(backend: str) -> str:
@@ -392,14 +392,28 @@ def resolve_filter_mode(backend: str) -> str:
     数值方案，而且**没有任何提示**——那正是本项目一贯不接受的静默行为
     （同一原则见 gpu_time_integration.py 把"只用第一个 SP"改成显式校验）。
 
-    **当前接线状态**：`cpu-single`（`fr_solver/step.py`）、`cpu-mpi`
-    （`core/mpi/distributed_solver.py::_build_sensor_gated_filter_func_
-    distributed`，2026-09-18）。两条 GPU 路径仍未接线，缺的是把 BJ 判据
-    的邻域包络搬到设备上：判据内核本身已经是数组模块无关的
-    （`bounds_sensor.compute_bounds_violation_mask` 通过
-    `_scatter_minmax` 分派到 `cupyx.scatter_max/scatter_min`），还差
-    `gpu_modal_filter.py::build_gpu_filter_func` 侧的逐单元类型选择性
-    施加与（多 GPU）把 `U_extended_gpu` 喂给判据。
+    **当前接线状态（2026-09-18 起全部四条）**：
+
+      cpu-single  `fr_solver/step.py`
+      cpu-mpi     `core/mpi/distributed_solver.py::
+                  _build_sensor_gated_filter_func_distributed`
+      gpu-single  `core/gpu/solver/gpu_solver_init.py::
+                  _build_sensor_gated_filter_gpu`
+      gpu-mpi     `core/gpu/distributed/gpu_distributed_init.py::
+                  _build_sensor_gated_filter_distributed_gpu`
+
+    四条共用**同一个**门控实现 `build_sensor_gated_filter_func_arrays`
+    ——它与两个判据内核（Persson-Peraire、BJ 越界）都已改成数组模块
+    无关，传 CuPy 矩阵进去整条回调就走 CuPy 的同名函数（BJ 的邻域散射
+    归约经 `bounds_sensor._scatter_minmax` 分派到
+    `cupyx.scatter_max/scatter_min`）。各后端只提供索引换算与 halo 扩展。
+
+    **两条 GPU 路径的验证边界（必须如实说明）**：本机没有 CUDA/CuPy，
+    所以 GPU 分支只能靠"同一份数组模块无关代码用 NumPy 跑"来验证逻辑
+    （逐位对照见 `tests/unit/test_sensor_gate_distributed.py` 与
+    `test_sensor_gate_gpu_paths.py`）；`cupyx.scatter_max/scatter_min`
+    与 `cp.einsum` 这两处 CuPy API 调用本身无法在此执行，需要在真实
+    GPU 环境上跑一次交叉验证才算完整确认。
 
     Args:
         backend: 调用方后端标识，取 `_SENSOR_MODE_SUPPORTED_BACKENDS` 里的
@@ -409,7 +423,8 @@ def resolve_filter_mode(backend: str) -> str:
         规范化（小写）后的模式名。
 
     Raises:
-        NotImplementedError: 请求了 `sensor` 但该后端尚未接线。
+        NotImplementedError: `sensor` 档但 `backend` 不在已接线列表里
+            （既包括拼错的后端名，也包括将来新增而忘了接线的后端）。
     """
     # **默认值必须与 `fr/modal_filter.py` 的同一个环境变量解析保持一致**
     # （2026-09-17 真实 bug）：那边定滤波**矩阵**的 sigma，这边定 `step.py`
@@ -425,33 +440,24 @@ def resolve_filter_mode(backend: str) -> str:
     mode = (_raw.lower() if explicit else _MATRIX_MODE.lower())
 
     if mode == "sensor" and backend not in _SENSOR_MODE_SUPPORTED_BACKENDS:
-        if explicit:
-            # **显式请求**得不到满足时必须报错：给了明确指令却拿到别的
-            # 数值方案，是本项目一贯不接受的静默行为。
-            raise NotImplementedError(
-                f"AFCFD_FILTER_MODE=sensor 尚未在后端 '{backend}' 上接线"
-                f"（已接线：{', '.join(_SENSOR_MODE_SUPPORTED_BACKENDS)}）。"
-                f"传感器门控需要在推进循环里逐单元求传感器指示器，不是算子"
-                f"构造期就能定下来的，必须逐后端实现。"
-                f"legacy/off/mild/project 四档对全部后端都有效，可先用它们；"
-                f"若确实需要在该后端用 sensor 档，请先补齐接线而不是忽略"
-                f"本错误。")
-        # **默认值**落到 sensor 而该后端未接线：退到 `project`（同一个
-        # 滤波矩阵、全局施加）并**大声**说明差异。为什么这一档可以退而
-        # 显式请求不可以：默认值必须让每个后端都能跑起来，而一条警告
-        # 使它不是"静默"——本项目禁止的是**无声**地把明确请求换掉。
-        global _SENSOR_FALLBACK_WARNED
-        if backend not in _SENSOR_FALLBACK_WARNED:
-            _SENSOR_FALLBACK_WARNED.add(backend)
-            logger.warning(
-                f"[FILTER] 默认滤波档是 'sensor'（逐单元门控），但后端 "
-                f"'{backend}' 尚未接线，本次退到 'project'（同一个精确投影"
-                f"矩阵、**全局逐 RK stage 施加**）。数值后果是明确的："
-                f"全局施加会精确抹掉最高一阶多项式内容，P1 因此退化成 P0，"
-                f"实测壁面法向速度梯度被清零（平板边界层算例 du/dy 从 1734 "
-                f"变成 0）。要在本后端拿到门控行为，需要补齐该后端的接线；"
-                f"要显式选别的档请设 AFCFD_FILTER_MODE=off|mild|project|legacy。")
-        return "project"
+        # 无论显式请求还是默认值，一律报错。
+        #
+        # 此前这里分两支：显式请求报错，默认值退到 `project` 并打警告。
+        # 那条退档分支的正当性建立在"默认值必须让每个后端都能跑起来"
+        # 之上——而 2026-09-18 起**四条后端全部接线**，它再也不会被
+        # 任何真实后端触发，成了死代码。留着它反而有害：将来新增一条
+        # 后端而忘了接线时，它会把"默认档在新后端上变成 project"这件事
+        # 降级成一条容易被忽略的 warning，而 project 的数值后果是精确
+        # 抹掉最高一阶多项式内容（P1 退化成 P0，实测壁面法向速度梯度
+        # 从 1734 变成 0）。所以直接报错，逼调用方去接线。
+        raise NotImplementedError(
+            f"AFCFD_FILTER_MODE=sensor 尚未在后端 '{backend}' 上接线"
+            f"（已接线：{', '.join(_SENSOR_MODE_SUPPORTED_BACKENDS)}）。"
+            f"传感器门控需要在推进循环里逐单元求传感器指示器，不是算子"
+            f"构造期就能定下来的，必须逐后端实现——判据内核与门控实现"
+            f"本身是后端无关的（`build_sensor_gated_filter_func_arrays`），"
+            f"新后端只需提供索引换算与（分布式时的）halo 扩展。"
+            f"legacy/off/mild/project 四档对全部后端都有效。")
     return mode
 
 
@@ -564,13 +570,30 @@ def build_sensor_gated_filter_func_arrays(
             f"sensor={sensor!r} 需要 owner_cell/neighbor_cell/is_boundary "
             f"三个面连接数组，缺失的不能静默忽略"
         )
+    # 数组模块由**滤波矩阵**决定：GPU 调用方传的是 CuPy 矩阵，于是整个
+    # 回调走 CuPy 的同名函数；CPU 调用方传 NumPy，走原来那条路。判据内核
+    # （Persson / BJ）本身已经是数组模块无关的，所以四条后端共用这一份
+    # 门控实现，而不是各抄一份（本项目的重复实现历来只改一份，见项目
+    # 记忆 `feedback-prefer-deleting-redundant-code`）。
+    xp = _array_module(filter_prism, filter_tet)
     if cell_is_prism is not None:
-        cip = np.asarray(cell_is_prism, dtype=bool)
-        prism_idx_all = np.flatnonzero(cip)
-        tet_idx_all = np.flatnonzero(~cip)
+        cip = xp.asarray(cell_is_prism).astype(bool)
+        # 掩码按单元类型分派时还要用它本身（Persson 的 tet/prism 两条
+        # 分支），保持与 xp 一致。
+        cell_is_prism = cip
     else:
-        prism_idx_all = np.arange(0, n_prism)
-        tet_idx_all = np.arange(n_prism, n_cells)
+        if not 0 <= n_prism <= n_cells:
+            # 不静默钳：`U[:n_prism]` 这种切片在 n_prism > n_cells 时会
+            # 被静默钳到 n_cells，后果是**四面体也被施加棱柱矩阵**而
+            # 不报任何错（多 GPU 路径 2026-09-18 真实踩到：传的是全局
+            # mesh.n_prism_cells，而数组只有 n_local 行）。
+            raise ValueError(
+                f"n_prism={n_prism} 超出 [0, n_cells={n_cells}]。"
+                f"分布式 local 排列里棱柱与四面体交错、且棱柱数是本 rank "
+                f"的局部量，必须用 cell_is_prism 而不是 n_prism。")
+        cip = xp.arange(n_cells) < n_prism
+    prism_idx_all = xp.flatnonzero(cip)
+    tet_idx_all = xp.flatnonzero(~cip)
 
     def filter_func(U_flat: np.ndarray) -> np.ndarray:
         U = U_flat.reshape(n_cells, n_sps, -1)
@@ -580,10 +603,10 @@ def build_sensor_gated_filter_func_arrays(
         # 里越界量最大的是横向动量与压力，只探密度会漏掉它们
         # （同一类问题：人工粘性的 DEFAULT_SENSOR_VAR_INDEX = 0 只探
         # 密度，而 P2 的失效模态在能量上）。
-        troubled = np.zeros(n_cells, dtype=bool)
+        troubled = xp.zeros(n_cells, dtype=bool)
         if sensor in ("persson", "both"):
             troubled |= compute_troubled_cell_mask(
-                np.ascontiguousarray(U[:, :, 0]), order,
+                xp.ascontiguousarray(U[:, :, 0]), order,
                 n_prism=n_prism, cell_is_prism=cell_is_prism)
         if sensor in ("bounds", "both"):
             # 分区边界上的 BJ 包络要读 halo 单元的均值，所以掩码在
@@ -591,19 +614,41 @@ def build_sensor_gated_filter_func_arrays(
             # halo 行邻域不完整，算出的掩码丢弃，只取前 n_cells 项。
             field = U if halo_extend is None else halo_extend(U)
             troubled |= compute_bounds_violation_mask(
-                np.ascontiguousarray(field[:, :, :5]),
+                xp.ascontiguousarray(field[:, :, :5]),
                 owner_cell, neighbor_cell, is_boundary,
                 ref_scales=_reference_scales(freestream, 5))[:n_cells]
-        if not np.any(troubled):
+        if not bool(xp.any(troubled)):
             return U_flat
-        for sel_all, mat in ((prism_idx_all, filter_prism),
-                             (tet_idx_all, filter_tet)):
-            sel = sel_all[troubled[sel_all]]
-            if sel.size == 0:
-                continue
-            sub = np.ascontiguousarray(U[sel])
-            _filter_leading_vars_inplace_kernel(sub, np.ascontiguousarray(mat), 5)
-            U[sel] = sub
+        if xp is np:
+            # CPU：只在被标记的单元上做，走 numba prange kernel。
+            # **不能**换成 einsum——那正是 2026-09-13 剖析掉的热点
+            # （79 万单元 P1 每次调用约 0.55s，每步 3 次），见
+            # `_filter_leading_vars_inplace_kernel` 文档。
+            for sel_all, mat in ((prism_idx_all, filter_prism),
+                                 (tet_idx_all, filter_tet)):
+                sel = sel_all[troubled[sel_all]]
+                if sel.size == 0:
+                    continue
+                sub = np.ascontiguousarray(U[sel])
+                _filter_leading_vars_inplace_kernel(
+                    sub, np.ascontiguousarray(mat), 5)
+                U[sel] = sub
+        else:
+            # GPU：「两个矩阵都对全场算一遍、再按掩码选」而不是花式索引。
+            # 理由与 `gpu_modal_filter.py::filter_scalar_field_gated_gpu`
+            # 同一条实测结论：设备上布尔/整数索引要触发额外的
+            # gather/scatter 与同步，而滤波矩阵是 (n_sps,n_sps) 的小矩阵
+            # （n_sps<=64）、einsum 落到 cuBLAS 批量 gemm，多算一遍的
+            # 成本远低于索引开销。数值上完全等价：被选中的单元取滤波
+            # 结果、未选中的取原值。
+            # 与 CPU 的差异只在求和顺序（einsum vs 顺序循环），因此两条
+            # 后端是机器精度一致而非逐位一致——与本项目其它 CPU/GPU
+            # 交叉验证同一口径（见 test_gpu_*_crosscheck.py）。
+            lead = U[:, :, :5]
+            filt = xp.where(cip[:, None, None],
+                            xp.einsum("sj,cjv->csv", filter_prism, lead),
+                            xp.einsum("sj,cjv->csv", filter_tet, lead))
+            U[:, :, :5] = xp.where(troubled[:, None, None], filt, lead)
         return U.reshape(U_flat.shape)
 
     return filter_func

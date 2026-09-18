@@ -189,10 +189,6 @@ class TestSwitchableModesDoNotLoseOrder:
 #: 硬编码一份会让"接线完成但测试仍钉着旧状态"这种失败反复出现，
 #: 2026-09-18 接线 cpu-mpi 时就是这么被绊了一次）。
 _ALL_FILTER_BACKENDS = ("cpu-single", "cpu-mpi", "gpu-single", "gpu-mpi")
-_WIRED_BACKENDS = [b for b in _ALL_FILTER_BACKENDS
-                   if b in _SENSOR_MODE_SUPPORTED_BACKENDS]
-_UNWIRED_BACKENDS = [b for b in _ALL_FILTER_BACKENDS
-                     if b not in _SENSOR_MODE_SUPPORTED_BACKENDS]
 
 
 class TestSensorModeIsNotSilentlyIgnored:
@@ -205,38 +201,36 @@ class TestSensorModeIsNotSilentlyIgnored:
     静默行为：显式请求直接报错，默认值退到 `project` 并打一条量化了
     数值后果的警告。
 
-    接线进度（2026-09-18：`cpu-mpi` 已补齐，见
-    `core/mpi/distributed_solver.py::_build_sensor_gated_filter_func_
-    distributed` 与 `tests/unit/test_sensor_gate_distributed.py`）由
-    `_SENSOR_MODE_SUPPORTED_BACKENDS` 单一决定，本类全部判据从它派生。
+    **2026-09-18：四条后端全部接线完成**，于是 `resolve_filter_mode`
+    里那条"默认值退到 project 并打警告"的分支成了死代码，已删除——
+    现在无论显式请求还是默认值，未接线的后端一律报错。本类原先针对
+    "未接线后端"的参数化判据随之删除（留着会是空参数集，静默地什么
+    都不测），换成下面两条：全部后端都必须已接线、未知后端名必须报错。
     """
 
-    def test_wired_and_unwired_sets_are_both_nonempty(self):
-        """两个集合都非空，否则下面的参数化测试会静默变成空集合。
+    def test_every_real_backend_is_wired(self):
+        """四条真实后端全部在已接线列表里。
 
-        接线全部完成之后这条会失败——那时应当删掉"未接线"那几条测试，
-        而不是让它们静默地什么都不测。
+        将来新增后端时这条会失败——那正是要的：新后端必须显式接线，
+        不能靠一条 warning 悄悄降级成 project（那会精确抹掉最高一阶
+        多项式内容，P1 退化成 P0）。
         """
-        assert _WIRED_BACKENDS, "没有任何已接线后端，参数化测试成了空集"
-        assert _UNWIRED_BACKENDS, (
-            "全部后端都已接线——请删除本类中针对未接线后端的判据，"
-            "而不是留着空参数化")
+        missing = [b for b in _ALL_FILTER_BACKENDS
+                   if b not in _SENSOR_MODE_SUPPORTED_BACKENDS]
+        assert not missing, f"这些后端还没接线 sensor 门控：{missing}"
 
-    @pytest.mark.parametrize("backend", _UNWIRED_BACKENDS)
-    def test_sensor_raises_on_unwired_backends(self, backend):
+    def test_unknown_backend_name_raises(self):
+        """拼错/未知的后端名必须报错，不能静默按某一档跑。"""
         from autoflowcfd.core.fr_solver.filter import resolve_filter_mode
-        old = os.environ.get("AFCFD_FILTER_MODE")
-        os.environ["AFCFD_FILTER_MODE"] = "sensor"
+        old = os.environ.pop("AFCFD_FILTER_MODE", None)
         try:
-            with pytest.raises(NotImplementedError, match="sensor"):
-                resolve_filter_mode(backend)
+            with pytest.raises(NotImplementedError, match="gpu-rocm"):
+                resolve_filter_mode("gpu-rocm")
         finally:
-            if old is None:
-                os.environ.pop("AFCFD_FILTER_MODE", None)
-            else:
+            if old is not None:
                 os.environ["AFCFD_FILTER_MODE"] = old
 
-    @pytest.mark.parametrize("backend", _WIRED_BACKENDS)
+    @pytest.mark.parametrize("backend", _ALL_FILTER_BACKENDS)
     def test_sensor_is_allowed_on_wired_backends(self, backend):
         from autoflowcfd.core.fr_solver.filter import resolve_filter_mode
         old = os.environ.get("AFCFD_FILTER_MODE")
@@ -267,20 +261,14 @@ class TestSensorModeIsNotSilentlyIgnored:
     def test_default_is_sensor_where_wired_and_project_elsewhere(self):
         """默认值（2026-09-17 起 `sensor`）的**逐后端**解析。
 
-        已接线的后端拿到 `sensor`；未接线的后端默认值退到 `project`
-        ——同一个精确投影矩阵、但**全局逐 RK stage
-        施加**。为什么默认可以退而显式请求不可以，见
-        `resolve_filter_mode` 里那段说明：本项目禁止的是**无声**地把
-        明确请求换掉，而默认值必须让每个后端都能跑起来，退档时打一条
-        量化了数值后果的警告。
+        2026-09-18 起四条后端全部接线，所以默认值在每一条上都解析成
+        `sensor`；未知后端名报错（见 `test_unknown_backend_name_raises`）。
         """
         from autoflowcfd.core.fr_solver.filter import resolve_filter_mode
         old = os.environ.pop("AFCFD_FILTER_MODE", None)
         try:
-            for b in _WIRED_BACKENDS:
+            for b in _ALL_FILTER_BACKENDS:
                 assert resolve_filter_mode(b) == "sensor", b
-            for b in _UNWIRED_BACKENDS:
-                assert resolve_filter_mode(b) == "project", b
         finally:
             if old is not None:
                 os.environ["AFCFD_FILTER_MODE"] = old
@@ -308,19 +296,18 @@ class TestSensorModeIsNotSilentlyIgnored:
             if old is not None:
                 os.environ["AFCFD_FILTER_MODE"] = old
 
-    def test_explicit_sensor_on_unwired_backend_raises(self):
-        """显式请求得不到满足必须报错，不能退档。"""
+    def test_explicit_sensor_resolves_on_every_backend(self):
+        """显式请求 sensor 在四条后端上都能满足（全部已接线）。"""
         import pytest as _pytest
 
         from autoflowcfd.core.fr_solver.filter import resolve_filter_mode
         old = os.environ.get("AFCFD_FILTER_MODE")
         os.environ["AFCFD_FILTER_MODE"] = "sensor"
         try:
-            for b in _WIRED_BACKENDS:
+            for b in _ALL_FILTER_BACKENDS:
                 assert resolve_filter_mode(b) == "sensor", b
-            for b in _UNWIRED_BACKENDS:
-                with _pytest.raises(NotImplementedError, match="尚未在后端"):
-                    resolve_filter_mode(b)
+            with _pytest.raises(NotImplementedError, match="尚未在后端"):
+                resolve_filter_mode("gpu-rocm")
         finally:
             if old is None:
                 os.environ.pop("AFCFD_FILTER_MODE", None)

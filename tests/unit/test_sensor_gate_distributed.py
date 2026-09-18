@@ -227,12 +227,17 @@ class TestBackendRegistration:
         assert resolve_filter_mode("cpu-mpi") == "sensor"
         assert resolve_filter_mode("cpu-single") == "sensor"
 
-    def test_unwired_backends_still_raise_on_explicit_request(self, monkeypatch):
-        """两条 GPU 路径仍未接线——显式请求必须报错，不能静默换方案。"""
+    def test_all_four_backends_resolve_to_sensor(self, monkeypatch):
+        """四条后端全部接线（2026-09-18），显式请求都能满足。"""
         monkeypatch.setenv("AFCFD_FILTER_MODE", "sensor")
-        for backend in ("gpu-single", "gpu-mpi"):
-            with pytest.raises(NotImplementedError, match=backend):
-                resolve_filter_mode(backend)
+        for backend in ("cpu-single", "cpu-mpi", "gpu-single", "gpu-mpi"):
+            assert resolve_filter_mode(backend) == "sensor", backend
+
+    def test_unknown_backend_still_raises(self, monkeypatch):
+        """未知后端名仍必须报错——退档分支删除后这是唯一的行为。"""
+        monkeypatch.setenv("AFCFD_FILTER_MODE", "sensor")
+        with pytest.raises(NotImplementedError, match="gpu-rocm"):
+            resolve_filter_mode("gpu-rocm")
 
 
 # ------------------------- DistributedFRSolver 方法本体（perm 换算 + 护栏）

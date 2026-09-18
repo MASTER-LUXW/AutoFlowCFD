@@ -60,6 +60,7 @@ import numpy as np
 
 from autoflowcfd.fr.collapsed_basis import prism_modal_basis_and_grad, tet_modal_basis_and_grad
 from autoflowcfd.fr.quadrature_points import gauss_legendre
+from autoflowcfd.core.utils.array_module import array_module as _array_module
 
 # Persson-Peraire 传感器分段过渡宽度（对数尺度），沿用 mirgecom 的默认值。
 SENSOR_KAPPA = 1.0
@@ -111,6 +112,26 @@ def _build_sensor_operators(cell_type: str, order: int, ref_cube_sps: np.ndarray
 
 
 _native_tet_sensor_cache: Dict[int, Tuple[np.ndarray, np.ndarray, int]] = {}
+
+#: 传感器算子的**设备侧**副本缓存，键是 (主机缓存键, 数组模块名)。
+#: 算子只依赖 (cell_type, order)，与流场状态无关，所以搬上设备一次即可；
+#: 不缓存的话每个 RK stage 都会重新 H2D 拷一遍（小矩阵，但是同步点）。
+_sensor_operator_xp_cache: Dict[Tuple, Tuple] = {}
+
+
+def _operators_on(xp, key, host_arrays):
+    """把主机侧算子元组搬到 `xp` 所在的设备并缓存。
+
+    `xp is np` 时原样返回——CPU 路径不多一次拷贝，因此改造前后逐位相同。
+    """
+    if xp is np:
+        return host_arrays
+    ck = (key, xp.__name__)
+    hit = _sensor_operator_xp_cache.get(ck)
+    if hit is None:
+        hit = tuple(xp.asarray(a) for a in host_arrays)
+        _sensor_operator_xp_cache[ck] = hit
+    return hit
 
 
 def _build_native_tet_sensor_operators(order: int):
@@ -199,25 +220,30 @@ def compute_persson_peraire_sensor_native_tet(
     Returns:
         s_e: (n_cells,)
     """
+    xp = _array_module(field_nodal)
     n_cells = field_nodal.shape[0]
     if order == 0:
-        return np.full(n_cells, -np.inf)
+        return xp.full(n_cells, -np.inf)
 
     V_inv, top_mask, n_native = _build_native_tet_sensor_operators(order)
+    V_inv, top_mask = _operators_on(
+        xp, ("native_tet", order), (V_inv, top_mask))
     if field_nodal.shape[1] < n_native:
         raise ValueError(
             f"field 每单元只有 {field_nodal.shape[1]} 个解点，少于 native "
             f"四面体 order={order} 所需的 {n_native} 个真实自由度")
 
-    real = np.ascontiguousarray(field_nodal[:, :n_native])
-    modal = np.einsum("ij,cj->ci", V_inv, real)            # (n_cells,n_native)
-    energy_all = np.einsum("ci,ci->c", modal, modal)
-    modal_top = np.where(top_mask[np.newaxis, :], modal, 0.0)
-    energy_top = np.einsum("ci,ci->c", modal_top, modal_top)
+    real = xp.ascontiguousarray(field_nodal[:, :n_native])
+    modal = xp.einsum("ij,cj->ci", V_inv, real)            # (n_cells,n_native)
+    energy_all = xp.einsum("ci,ci->c", modal, modal)
+    modal_top = xp.where(top_mask[xp.newaxis, :], modal, 0.0)
+    energy_top = xp.einsum("ci,ci->c", modal_top, modal_top)
 
-    S_e = energy_top / np.maximum(energy_all, 1e-300)
+    S_e = energy_top / xp.maximum(energy_all, 1e-300)
+    # `np.errstate` 只改 NumPy 自己的浮点错误策略，对 CuPy 数组是无操作，
+    # 留着即可（CuPy 不发这类 warning）。
     with np.errstate(divide="ignore"):
-        return np.log10(np.maximum(S_e, 1e-300))
+        return xp.log10(xp.maximum(S_e, 1e-300))
 
 
 def compute_persson_peraire_sensor(
@@ -247,22 +273,26 @@ def compute_persson_peraire_sensor(
             都不会触发人工粘性，与 order==0 没有可截断的高阶模态这一
             事实一致）
     """
+    xp = _array_module(field_nodal)
     n_cells = field_nodal.shape[0]
     if order == 0:
-        return np.full(n_cells, -np.inf)
+        return xp.full(n_cells, -np.inf)
 
-    V, V_inv, quad_weights_3d, top_mask = _build_sensor_operators(cell_type, order, ref_cube_sps)
+    V, V_inv, quad_weights_3d, top_mask = _build_sensor_operators(
+        cell_type, order, ref_cube_sps)
+    V, V_inv, quad_weights_3d, top_mask = _operators_on(
+        xp, (cell_type, order), (V, V_inv, quad_weights_3d, top_mask))
 
-    modal = np.einsum("ij,cj->ci", V_inv, field_nodal)
-    modal_top = np.where(top_mask[np.newaxis, :], modal, 0.0)
-    diff_nodal = np.einsum("ij,cj->ci", V, modal_top)
+    modal = xp.einsum("ij,cj->ci", V_inv, field_nodal)
+    modal_top = xp.where(top_mask[xp.newaxis, :], modal, 0.0)
+    diff_nodal = xp.einsum("ij,cj->ci", V, modal_top)
 
-    num = np.einsum("cs,s,cs->c", diff_nodal, quad_weights_3d, diff_nodal)
-    den = np.einsum("cs,s,cs->c", field_nodal, quad_weights_3d, field_nodal)
+    num = xp.einsum("cs,s,cs->c", diff_nodal, quad_weights_3d, diff_nodal)
+    den = xp.einsum("cs,s,cs->c", field_nodal, quad_weights_3d, field_nodal)
 
-    S_e = num / np.maximum(den, 1e-300)
-    with np.errstate(divide="ignore"):
-        s_e = np.log10(np.maximum(S_e, 1e-300))
+    S_e = num / xp.maximum(den, 1e-300)
+    with np.errstate(divide="ignore"):      # 见 native 版同一处说明
+        s_e = xp.log10(xp.maximum(S_e, 1e-300))
     return s_e
 
 
@@ -279,11 +309,12 @@ def compute_artificial_viscosity_ramp(s_e: np.ndarray, order: int, kappa: float 
     order==0 短路：s_e=-inf 恒小于任意有限 s0-kappa，ramp 天然为 0，
     这里不需要重复特判）。
     """
-    s0 = -4.0 * np.log10(max(order, 1))
-    ramp = np.zeros_like(s_e)
+    xp = _array_module(s_e)
+    s0 = -4.0 * np.log10(max(order, 1))     # 标量，与数组模块无关
+    ramp = xp.zeros_like(s_e)
     mid = (s_e >= s0 - kappa) & (s_e <= s0 + kappa)
     high = s_e > s0 + kappa
-    ramp[mid] = 0.5 * (1.0 + np.sin(np.pi * (s_e[mid] - s0) / (2.0 * kappa)))
+    ramp[mid] = 0.5 * (1.0 + xp.sin(np.pi * (s_e[mid] - s0) / (2.0 * kappa)))
     ramp[high] = 1.0
     return ramp
 
@@ -342,8 +373,9 @@ def compute_troubled_cell_mask(
             "恰好一个：前者是单机'棱柱在前'排列，后者是分布式交错排列。"
             "同时给或都不给都是调用方对索引空间没有明确认知的信号。")
 
+    xp = _array_module(field_nodal, cell_is_prism)
     n_cells = field_nodal.shape[0]
-    mask = np.zeros(n_cells, dtype=np.bool_)
+    mask = xp.zeros(n_cells, dtype=xp.bool_)
     if order == 0 or n_cells == 0:
         return mask
 
@@ -353,15 +385,15 @@ def compute_troubled_cell_mask(
     ref_cube_sps = np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
 
     if n_prism is not None:
-        groups = ((np.arange(0, n_prism), "prism"),
-                  (np.arange(n_prism, n_cells), "tet"))
+        groups = ((xp.arange(0, n_prism), "prism"),
+                  (xp.arange(n_prism, n_cells), "tet"))
     else:
-        cip = np.asarray(cell_is_prism, dtype=bool)
+        cip = xp.asarray(cell_is_prism).astype(bool)
         if cip.shape != (n_cells,):
             raise ValueError(
                 f"cell_is_prism 形状 {cip.shape} 与场的单元数 {n_cells} 不符")
-        groups = ((np.flatnonzero(cip), "prism"),
-                  (np.flatnonzero(~cip), "tet"))
+        groups = ((xp.flatnonzero(cip), "prism"),
+                  (xp.flatnonzero(~cip), "tet"))
 
     for sel, cell_type in groups:
         if sel.size == 0:
@@ -371,10 +403,11 @@ def compute_troubled_cell_mask(
         # `_build_native_tet_sensor_operators`。
         if cell_type == "tet":
             s_e = compute_persson_peraire_sensor_native_tet(
-                np.ascontiguousarray(field_nodal[sel]), order)
+                xp.ascontiguousarray(field_nodal[sel]), order)
         else:
             s_e = compute_persson_peraire_sensor(
-                np.ascontiguousarray(field_nodal[sel]), cell_type, order, ref_cube_sps)
+                xp.ascontiguousarray(field_nodal[sel]), cell_type, order,
+                ref_cube_sps)
         mask[sel] = compute_artificial_viscosity_ramp(s_e, order, kappa) > 0.0
     return mask
 

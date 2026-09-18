@@ -44,27 +44,88 @@ class _GPUSolverInitMixin:
         n_sps = self.mesh.n_sps_per_cell
         n_prism = self.mesh.n_prism_cells
 
-        # sensor 档尚未在本后端接线，直接报错而不是静默按 legacy 跑
-        # （见 fr_solver/filter.py::resolve_filter_mode）。放在 try 之外，
-        # 否则会被下面那个 `except Exception -> warning` 吞掉。
+        # 滤波档解析放在 try 之外，否则会被下面那个
+        # `except Exception -> warning` 吞掉（显式请求得不到满足必须
+        # 报错，见 fr_solver/filter.py::resolve_filter_mode）。
         from autoflowcfd.core.fr_solver.filter import resolve_filter_mode
-        resolve_filter_mode("gpu-single")
+        mode = resolve_filter_mode("gpu-single")
 
         try:
             filter_prism = self.ops.filter_prism
             filter_tet = self.ops.filter_tet
 
             if filter_prism is not None or filter_tet is not None:
-                from autoflowcfd.core.gpu.gpu_modal_filter import build_gpu_filter_func
-                self.filter_func_gpu = build_gpu_filter_func(
-                    n_cells, n_sps, n_prism,
-                    filter_prism, filter_tet,
-                    device_id=self.device_id,
-                )
-                logger.debug("GPU modal filter initialized")
+                if mode == "sensor":
+                    self.filter_func_gpu = self._build_sensor_gated_filter_gpu(
+                        n_cells, n_sps, n_prism, filter_prism, filter_tet)
+                else:
+                    from autoflowcfd.core.gpu.gpu_modal_filter import (
+                        build_gpu_filter_func,
+                    )
+                    self.filter_func_gpu = build_gpu_filter_func(
+                        n_cells, n_sps, n_prism,
+                        filter_prism, filter_tet,
+                        device_id=self.device_id,
+                    )
+                logger.debug(f"GPU modal filter initialized (mode={mode})")
         except Exception as e:
             logger.warning(f"Modal filter init failed: {e}, running without filter")
             self.filter_func_gpu = None
+
+    def _build_sensor_gated_filter_gpu(self, n_cells, n_sps, n_prism,
+                                       filter_prism, filter_tet):
+        """单 GPU 的**传感器门控**滤波回调（2026-09-18 接线）。
+
+        `AFCFD_FILTER_MODE=sensor` 是 2026-09-17 定下的默认档，此前只有
+        单机 CPU 接线，本后端默认退回 `project`（全局逐 RK stage 施加
+        精确投影 = 功能上等于 legacy，P1 退化成 P0、壁面剪应力恒为零）。
+
+        **不新写一份门控实现**：直接复用 CPU 那一个
+        `build_sensor_gated_filter_func_arrays`。它连同两个判据内核
+        （Persson-Peraire、BJ 越界）都已改成**数组模块无关**——传 CuPy
+        矩阵进去，整条回调就走 CuPy 的同名函数（BJ 的邻域散射归约经
+        `bounds_sensor._scatter_minmax` 分派到
+        `cupyx.scatter_max/scatter_min`；施加步骤在设备上用
+        「两个矩阵全场各算一遍再按掩码选」，理由见
+        `gpu_modal_filter.py::filter_scalar_field_gated_gpu`）。
+        一份实现服务四条后端，而不是各抄一份。
+
+        单 GPU 的全局单元编号满足"棱柱在前"约定，所以用 `n_prism` 即可
+        （分布式 local 排列不满足，走 `cell_is_prism`，见
+        `gpu_distributed_init.py`）；也不需要 halo 扩展——没有分区边界。
+        """
+        cp = get_cupy()
+        from autoflowcfd.core.fr_solver.filter import (
+            build_sensor_gated_filter_func_arrays,
+        )
+        from autoflowcfd.core.fr_operators.bounds_sensor import (
+            resolve_troubled_sensor,
+        )
+
+        sensor = resolve_troubled_sensor()
+        conn = {}
+        if sensor in ("bounds", "both"):
+            fc = self.mesh.face_connectivity
+            if fc is None:
+                raise RuntimeError(
+                    "AFCFD_TROUBLED_SENSOR=bounds/both 需要 "
+                    "mesh.face_connectivity（BJ 判据要面邻居均值），"
+                    "当前网格没有构建面连接")
+            with cp.cuda.Device(self.device_id):
+                conn = dict(
+                    owner_cell=cp.asarray(fc.owner_cell),
+                    neighbor_cell=cp.asarray(fc.neighbor_cell),
+                    is_boundary=cp.asarray(
+                        np.asarray(fc.is_boundary, dtype=bool)),
+                    freestream=self.freestream,
+                )
+        order = int(getattr(self, "current_order", self.order))
+        with cp.cuda.Device(self.device_id):
+            fp = filter_prism if hasattr(filter_prism, "device") else cp.asarray(filter_prism)
+            ft = filter_tet if hasattr(filter_tet, "device") else cp.asarray(filter_tet)
+            return build_sensor_gated_filter_func_arrays(
+                n_cells, n_sps, order, fp, ft, n_prism=n_prism,
+                sensor=sensor, **conn)
 
     def _init_wall_distance_gpu(self):
         """预计算壁面距离场并上传到 GPU。

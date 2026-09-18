@@ -157,6 +157,8 @@ from typing import Optional
 
 import numpy as np
 
+from autoflowcfd.core.utils.array_module import array_module as _array_module
+
 #: `tol = rel_tol * (nb_max - nb_min) + abs_tol` 里的相对项系数。
 #: 0.1 的含义：解点值要超出邻域区间**10% 的邻域跨度**才算越界。
 DEFAULT_BOUNDS_REL_TOL = 0.1
@@ -214,20 +216,6 @@ def _scatter_minmax(xp, nb_max, nb_min, idx, values):
         )
     smax(nb_max, idx, values)
     smin(nb_min, idx, values)
-
-
-def _array_module(*arrays):
-    """取数组所属的模块（`numpy` 或 `cupy`）。
-
-    判据全部按该模块的同名函数写，于是 CPU 与 GPU 共用同一份实现。
-    以"是否有 `__cuda_array_interface__`"判断，而不是 isinstance——
-    不强制 import cupy（本机无 CuPy 时该 import 会失败）。
-    """
-    for a in arrays:
-        if a is not None and hasattr(a, "__cuda_array_interface__"):
-            import cupy
-            return cupy
-    return np
 
 
 def compute_bounds_violation_mask(

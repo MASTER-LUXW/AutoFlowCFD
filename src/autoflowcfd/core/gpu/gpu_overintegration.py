@@ -10,6 +10,8 @@ get_overintegration_context`，这里是同一份算子/细点度量在 GPU 上�
 互相 import 会造成不该有的方向依赖。
 """
 
+from autoflowcfd.core.utils.array_module import array_module as _array_module
+
 #: 六个过积分算子键；缺任何一个就退回 coarse 路径。
 OVERINT_OPS_KEYS = (
     'overint_interp_c2f_prism', 'overint_D_fine_prism', 'overint_restrict_f2c_prism',
@@ -77,19 +79,3 @@ def get_overintegration_segs_gpu(mesh_data, ops_data, n_cells, n_prism):
          ops_data['overint_interp_c2f_tet'],
          ops_data['overint_D_fine_tet'], ops_data['overint_restrict_f2c_tet']),
     )
-
-
-def _array_module(arr):
-    """返回 `arr` 所属的数组模块（CuPy 或 NumPy）。
-
-    不能无条件 `import cupy`：本机与 CI 都没有 CuPy，GPU 模块是按
-    "有则用、无则跳过测试"的方式组织的（见 `core/gpu/__init__.py`）。
-    """
-    mod = type(arr).__module__
-    if mod.startswith("cupy"):
-        import cupy
-
-        return cupy
-    import numpy
-
-    return numpy

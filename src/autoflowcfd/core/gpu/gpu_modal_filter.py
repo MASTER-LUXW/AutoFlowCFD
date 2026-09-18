@@ -23,19 +23,38 @@ def build_gpu_filter_func(
     filter_prism,
     filter_tet,
     device_id: int = 0,
+    cell_is_prism=None,
 ) -> Callable:
-    """构造 GPU 版滤波回调函数。
+    """构造 GPU 版滤波回调函数（全局施加，非门控）。
 
     Args:
         n_cells: 单元数
         n_sps: 每单元解点数
-        n_prism: 棱柱单元数
+        n_prism: 棱柱单元数。**只在"棱柱在前"排列下有效**（单 GPU 的
+            全局编号满足这条约定）。分布式 local 排列不满足，必须走
+            `cell_is_prism`。
         filter_prism: 棱柱滤波矩阵 (n_sps, n_sps) CuPy 数组
         filter_tet: 四面体滤波矩阵 (n_sps, n_sps) CuPy 数组
         device_id: GPU 设备 ID
+        cell_is_prism: (n_cells,) 布尔，True=棱柱。给出时按掩码分派，
+            忽略 `n_prism`。
+
+            **为什么必须有这条路（2026-09-18 真实缺陷）**：多 GPU 分布式
+            的 `U_gpu` 是 halo 交换的**原生**排列（local 在前、halo 在后，
+            棱柱与四面体**交错**），而这里此前无条件按 `U[:n_prism]` 切片，
+            且调用方传的是**全局** `mesh.n_prism_cells`。两处叠加的后果是：
+            `n_prism > n_cells` 时切片被静默钳到 n_cells，于是**每个 local
+            单元、包括四面体，都被施加了棱柱滤波矩阵**，不报任何错。
+            四面体走的是 native PKD/Dubiner 基（带零填充槽位），与棱柱的
+            张量积基完全不同，混用在数值上没有意义。
+            与 CPU 分布式 `build_filter_func_by_cell_type` 同一处理由。
 
     Returns:
         filter_func: 接受 CuPy 数组 (N, n_vars)，返回滤波后的同形状数组
+
+    Raises:
+        ValueError: 未给 `cell_is_prism` 且 `n_prism` 不在 [0, n_cells]
+            之内——见上面那条缺陷，不静默钳。
     """
     cp = get_cupy()
 
@@ -45,6 +64,19 @@ def build_gpu_filter_func(
             filter_prism = cp.asarray(filter_prism)
         if not hasattr(filter_tet, 'device'):
             filter_tet = cp.asarray(filter_tet)
+        if cell_is_prism is not None:
+            cip = cp.asarray(cell_is_prism).astype(bool)
+            if cip.shape != (n_cells,):
+                raise ValueError(
+                    f"cell_is_prism 形状 {cip.shape} 与 n_cells={n_cells} 不符")
+            cip3 = cip[:, None, None]
+        else:
+            if not 0 <= n_prism <= n_cells:
+                raise ValueError(
+                    f"n_prism={n_prism} 超出 [0, n_cells={n_cells}]。"
+                    f"分布式 local 排列里棱柱与四面体交错、且棱柱数是本 "
+                    f"rank 的局部量，必须用 cell_is_prism 而不是 n_prism。")
+            cip3 = None
 
     def gpu_filter_func(U_flat):
         """对展平的守恒变量施加模态滤波。
@@ -62,6 +94,17 @@ def build_gpu_filter_func(
         U = U_flat.reshape(n_cells, n_sps, n_vars)
 
         # 只滤波前 5 个欧拉变量
+        if cip3 is not None:
+            # 交错排列：两个矩阵都对全场算一遍再按类型选。理由与
+            # `filter_scalar_field_gated_gpu` 同一条实测结论（设备上
+            # 花式索引的 gather/scatter 开销高于多做一遍小矩阵乘）。
+            lead = U[:, :, :5]
+            U[:, :, :5] = cp.where(
+                cip3,
+                cp.einsum("sj,cjv->csv", filter_prism, lead),
+                cp.einsum("sj,cjv->csv", filter_tet, lead),
+            )
+            return U.reshape(n_cells * n_sps, n_vars)
         if n_prism > 0:
             # prism: einsum("sj,cjv->csv", filter, U)
             U[:n_prism, :, :5] = cp.einsum(

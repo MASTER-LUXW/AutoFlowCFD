@@ -91,31 +91,148 @@ class _GPUDistributedInitMixin:
             ).copy()
 
     def _init_modal_filter_distributed(self):
-        """分布式模态滤波初始化。"""
+        """分布式（多 GPU）模态滤波初始化。
+
+        **真实缺陷修复（2026-09-18）**：此前这里传的是
+        `n_prism = self.mesh.n_prism_cells`，而 `build_gpu_filter_func`
+        按 `U[:n_prism]` 切片。两处叠加有两个错：
+
+        1. `self.U_gpu` 是 GPU halo 交换的**原生**排列（local 在前、
+           halo 在后，见 `gpu_halo_exchange.py::GPUHaloExchange.exchange`），
+           棱柱与四面体在其中是**交错**的——"棱柱在前"只对
+           `dist_flat_face` 的**紧凑**排列成立（残差计算靠 `_perm_gpu`
+           换过去、`_inv_perm_gpu` 换回来）。
+        2. "传统模式"下 `self.mesh` 是**完整全局网格**，
+           `mesh.n_prism_cells` 是全局棱柱数，通常**大于** `n_local`。
+           `U[:n_prism]` 于是被 CuPy 静默钳到 `n_local`，后果是**每个
+           local 单元、包括四面体，都被施加了棱柱滤波矩阵**，不报任何
+           错。四面体走 native PKD/Dubiner 基（带零填充槽位），与棱柱的
+           张量积基完全不同，混用在数值上没有意义。
+
+        改为传 `cell_is_prism`（原生 local 排列的单元类型掩码），与 CPU
+        分布式 `build_filter_func_by_cell_type` 同一处理方式；
+        `build_gpu_filter_func` 也加了"n_prism 越界就报错、不静默钳"。
+
+        同时补齐 `AFCFD_FILTER_MODE=sensor`（2026-09-17 起的默认档）
+        在本后端的接线，此前会退回 `project`（全局逐 stage 施加精确
+        投影，功能上等于 legacy：P1 退化成 P0、壁面剪应力恒为零）。
+        """
         cp = get_cupy()
         n_local = self.partition.n_local_cells
         n_sps = self.mesh.n_sps_per_cell
-        n_prism = self.mesh.n_prism_cells
 
-        # sensor 档尚未在本后端接线，直接报错而不是静默按 legacy 跑
-        # （见 fr_solver/filter.py::resolve_filter_mode）。放在 try 之外，
-        # 否则会被下面那个 `except Exception -> warning` 吞掉。
+        # 滤波档解析放在 try 之外，否则会被下面那个
+        # `except Exception -> warning` 吞掉（显式请求得不到满足必须
+        # 报错，见 fr_solver/filter.py::resolve_filter_mode）。
         from autoflowcfd.core.fr_solver.filter import resolve_filter_mode
-        resolve_filter_mode("gpu-mpi")
+        mode = resolve_filter_mode("gpu-mpi")
 
         try:
             filter_prism = self.ops.filter_prism
             filter_tet = self.ops.filter_tet
+            if filter_prism is None and filter_tet is None:
+                return
 
-            if filter_prism is not None or filter_tet is not None:
-                from autoflowcfd.core.gpu.gpu_modal_filter import build_gpu_filter_func
+            dist_fc = self.dist_flat_face
+            cct = np.asarray(dist_fc.compact_cell_type)
+            inv_perm = np.asarray(dist_fc.inv_perm)
+            # compact_cell_type 处在"棱柱在前"紧凑排列，用 inv_perm 换回
+            # 原生排列再切 local 段——`self.U_gpu` 所在的空间。
+            cell_is_prism = (cct[inv_perm][:n_local] == 0)
+
+            if mode == "sensor":
+                self.filter_func_gpu = (
+                    self._build_sensor_gated_filter_distributed_gpu(
+                        n_local, n_sps, cell_is_prism,
+                        filter_prism, filter_tet))
+            else:
+                from autoflowcfd.core.gpu.gpu_modal_filter import (
+                    build_gpu_filter_func,
+                )
                 self.filter_func_gpu = build_gpu_filter_func(
-                    n_local, n_sps, n_prism,
+                    n_local, n_sps, 0,
                     filter_prism, filter_tet,
                     device_id=self.device_id,
+                    cell_is_prism=cell_is_prism,
                 )
         except Exception as e:
             logger.warning(f"Rank {self.rank}: Modal filter init failed: {e}")
+
+    def _build_sensor_gated_filter_distributed_gpu(
+        self, n_local, n_sps, cell_is_prism, filter_prism, filter_tet
+    ):
+        """多 GPU 的**传感器门控**滤波回调（2026-09-18 接线）。
+
+        **不新写一份门控实现**：复用 CPU 那一个
+        `build_sensor_gated_filter_func_arrays`——它连同两个判据内核
+        （Persson-Peraire、BJ 越界）都已改成数组模块无关，传 CuPy 矩阵
+        进去整条回调就走 CuPy 的同名函数。一份实现服务四条后端。
+
+        与 CPU MPI（`core/mpi/distributed_solver.py::_build_sensor_gated_
+        filter_func_distributed`）完全同一套推导，三条约束逐字相同：
+
+        1. 分区边界面**不能**当边界面排除——否则掩码随 rank 数变化，
+           同一个算例换分区数得到不同的解；
+        2. halo 扩展必须用**当前 stage** 的解（滤波在正定性投影之后
+           施加），所以每 stage 多一次 halo 交换，不能复用残差求值时
+           缓存的 `U_extended_gpu`；
+        3. `owner_cell_local`/`neighbor_cell_local` 在"棱柱在前"紧凑
+           排列，而场在原生排列，用 `owner_native = perm[oc]` 换算。
+        """
+        cp = get_cupy()
+        from autoflowcfd.core.fr_solver.filter import (
+            build_sensor_gated_filter_func_arrays,
+        )
+        from autoflowcfd.core.fr_operators.bounds_sensor import (
+            resolve_troubled_sensor,
+        )
+
+        sensor = resolve_troubled_sensor()
+        conn = {}
+        if sensor in ("bounds", "both"):
+            dist_fc = self.dist_flat_face
+            perm = np.asarray(dist_fc.perm)
+            n_total = int(self.partition.n_total_cells)
+            if perm.size != n_total:
+                raise RuntimeError(
+                    f"dist_flat_face.perm 长度 {perm.size} 与 "
+                    f"n_total_cells {n_total} 不符，索引换算不可靠")
+            oc = np.asarray(dist_fc.owner_cell_local)
+            nc = np.asarray(dist_fc.neighbor_cell_local)
+            bnd = np.asarray(dist_fc.is_boundary, dtype=bool)
+            # 与 CPU 侧同一条自洽性护栏：边界面的 neighbor_cell_local
+            # 是 -1，两个集合必须严格重合，否则 BJ 包络会读到错误单元
+            # 而在日志里完全看不出来。
+            if not np.array_equal(nc < 0, bnd):
+                n_mismatch = int(np.count_nonzero((nc < 0) != bnd))
+                raise RuntimeError(
+                    f"分布式面几何自洽性失败：{n_mismatch} 条面的 "
+                    f"(neighbor_cell_local < 0) 与 is_boundary 不一致")
+            owner_native = perm[oc]
+            neigh_native = perm[np.where(nc >= 0, nc, 0)]
+            gpu_halo = self.gpu_halo
+
+            def halo_extend(U_local_3d):
+                # 返回 (n_total, n_sps, n_vars) 原生排列的 CuPy 数组。
+                return gpu_halo.exchange(cp.ascontiguousarray(U_local_3d))
+
+            with cp.cuda.Device(self.device_id):
+                conn = dict(owner_cell=cp.asarray(owner_native),
+                            neighbor_cell=cp.asarray(neigh_native),
+                            is_boundary=cp.asarray(bnd),
+                            freestream=self.freestream,
+                            halo_extend=halo_extend)
+
+        order = int(getattr(self, "current_order", self.order))
+        with cp.cuda.Device(self.device_id):
+            fp = (filter_prism if hasattr(filter_prism, "device")
+                  else cp.asarray(filter_prism))
+            ft = (filter_tet if hasattr(filter_tet, "device")
+                  else cp.asarray(filter_tet))
+            return build_sensor_gated_filter_func_arrays(
+                n_local, n_sps, order, fp, ft,
+                cell_is_prism=cp.asarray(cell_is_prism),
+                sensor=sensor, **conn)
 
     def _init_distributed_face_geometry(self):
         """初始化分布式面几何（GPU 版）。
