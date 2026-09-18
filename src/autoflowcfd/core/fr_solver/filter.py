@@ -376,7 +376,7 @@ def compute_turb_troubled_mask(k_field: np.ndarray, omega_field: np.ndarray,
 #:
 #: 在补齐之前，`resolve_filter_mode` 对**默认值**落到 sensor 的情形退到
 #: `project` 并打一条量化了数值后果的警告；对**显式**请求仍然报错。
-_SENSOR_MODE_SUPPORTED_BACKENDS = ("cpu-single",)
+_SENSOR_MODE_SUPPORTED_BACKENDS = ("cpu-single", "cpu-mpi")
 
 #: 已经为哪些后端打过"默认 sensor 退到 project"的警告（每后端只打一次，
 #: 避免逐步刷屏；`resolve_filter_mode` 在每步都会被调用）。
@@ -386,12 +386,20 @@ _SENSOR_FALLBACK_WARNED = set()
 def resolve_filter_mode(backend: str) -> str:
     """读取 `AFCFD_FILTER_MODE` 并校验当前后端是否支持它。
 
-    存在的理由：`sensor` 档只在单机 CPU 推进循环（`fr_solver/step.py`）里
-    接线过。如果 CPU MPI 分布式 / 单 GPU / 多 GPU 分布式路径只是"读不到
+    存在的理由：`sensor` 档需要在推进循环里逐单元求传感器指示器，不是
+    算子构造期就能定下来的，必须逐后端接线。如果未接线的后端只是"读不到
     这个分支所以按 legacy 跑"，同一个环境变量在不同后端就意味着不同的
     数值方案，而且**没有任何提示**——那正是本项目一贯不接受的静默行为
     （同一原则见 gpu_time_integration.py 把"只用第一个 SP"改成显式校验）。
-    所以这里直接报错，而不是 warning 后继续。
+
+    **当前接线状态**：`cpu-single`（`fr_solver/step.py`）、`cpu-mpi`
+    （`core/mpi/distributed_solver.py::_build_sensor_gated_filter_func_
+    distributed`，2026-09-18）。两条 GPU 路径仍未接线，缺的是把 BJ 判据
+    的邻域包络搬到设备上：判据内核本身已经是数组模块无关的
+    （`bounds_sensor.compute_bounds_violation_mask` 通过
+    `_scatter_minmax` 分派到 `cupyx.scatter_max/scatter_min`），还差
+    `gpu_modal_filter.py::build_gpu_filter_func` 侧的逐单元类型选择性
+    施加与（多 GPU）把 `U_extended_gpu` 喂给判据。
 
     Args:
         backend: 调用方后端标识，取 `_SENSOR_MODE_SUPPORTED_BACKENDS` 里的
@@ -452,7 +460,7 @@ def build_sensor_gated_filter_func_arrays(
     *, n_prism=None, cell_is_prism=None,
     sensor: str = "persson",
     owner_cell=None, neighbor_cell=None, is_boundary=None,
-    freestream=None,
+    freestream=None, halo_extend=None,
 ) -> Callable[[np.ndarray], np.ndarray]:
     """传感器门控模态滤波的**后端无关**实现（只吃数组，不吃 solver）。
 
@@ -494,7 +502,27 @@ def build_sensor_gated_filter_func_arrays(
             实测见 `fr_operators/bounds_sensor.py` 模块文档。
         owner_cell / neighbor_cell / is_boundary: 面连接数组，`sensor`
             含 "bounds" 时**必须**给出（BJ 判据要邻居均值）。索引空间
-            必须与 `n_cells` 一致——分布式 local 排列传 local 面数组。
+            必须与**掩码场的行数**一致：不给 `halo_extend` 时就是
+            `n_cells`（单机、GPU 单机）；给了 `halo_extend` 时是它返回的
+            `n_total = n_cells + n_halo`（CPU MPI / 多 GPU）。
+        halo_extend: 可选回调 `(n_cells, n_sps, n_vars) -> (n_total,
+            n_sps, n_vars)`，把本 rank 的场扩展成含 halo 的场。**分区
+            边界上的 BJ 包络必须读到 halo 单元的均值**，否则同一个算例
+            换 rank 数会得到不同的掩码——那是求解器不可接受的（结果依赖
+            分区）。把 halo 面当边界面排除也不行：分区边界并不是物理
+            边界，排除它等于在任意位置人为切断包络。
+
+            为什么是回调而不是让调用方直接传扩展场：滤波回调每个 RK
+            stage 被调用一次，扩展必须用**当前 stage** 的解做（用上一次
+            残差求值缓存的扩展场会比单机路径滞后半个 stage，两条后端就
+            不再逐位可比）。`core/mpi/distributed_solver.py` 传的就是
+            `halo_exchange.exchange` 的薄封装——与
+            `_compute_distributed_local_time_step` 同一个既有模式
+            （局部 dt 的谱半径同样需要额外一次 halo 交换）。
+
+            只影响**掩码**的计算域：滤波矩阵仍然只施加在 `[0, n_cells)`
+            的 local 单元上，halo 行算出来的掩码被丢弃（它们的邻域不
+            完整）。
         freestream: `solver.freestream` 字典，`sensor` 含 "bounds" 时
             **必须**给出——BJ 判据的绝对地板要用来流参考量级
             （见 `bounds_sensor.py` 模块文档"第一版用全场 RMS 做尺度
@@ -519,6 +547,14 @@ def build_sensor_gated_filter_func_arrays(
         raise ValueError(
             f"sensor={sensor!r} 需要 freestream（BJ 判据的绝对地板用来流"
             f"参考量级），不能静默退回用全场 RMS——实测那会标记 11% 的单元"
+        )
+    if halo_extend is not None and not need_conn:
+        # 不静默忽略：给了 halo_extend 说明调用方以为门控要跨分区，
+        # 而 persson 档是纯单元局部的、根本不会用到它——静默忽略会
+        # 让"我已经接线了分布式"这个错误认知留在调用方。
+        raise ValueError(
+            f"halo_extend 只对含 bounds 的 sensor 有意义（Persson-Peraire "
+            f"是纯单元局部判据，不读邻居），当前 sensor={sensor!r}"
         )
     if need_conn and (owner_cell is None or neighbor_cell is None
                       or is_boundary is None):
@@ -550,10 +586,14 @@ def build_sensor_gated_filter_func_arrays(
                 np.ascontiguousarray(U[:, :, 0]), order,
                 n_prism=n_prism, cell_is_prism=cell_is_prism)
         if sensor in ("bounds", "both"):
+            # 分区边界上的 BJ 包络要读 halo 单元的均值，所以掩码在
+            # **扩展场**上算（见 halo_extend 文档）；扩展场多出来的
+            # halo 行邻域不完整，算出的掩码丢弃，只取前 n_cells 项。
+            field = U if halo_extend is None else halo_extend(U)
             troubled |= compute_bounds_violation_mask(
-                np.ascontiguousarray(U[:, :, :5]),
+                np.ascontiguousarray(field[:, :, :5]),
                 owner_cell, neighbor_cell, is_boundary,
-                ref_scales=_reference_scales(freestream, 5))
+                ref_scales=_reference_scales(freestream, 5))[:n_cells]
         if not np.any(troubled):
             return U_flat
         for sel_all, mat in ((prism_idx_all, filter_prism),

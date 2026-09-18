@@ -312,18 +312,25 @@ class DistributedFRSolver:
         if turb_model_upper == 'LES':
             from autoflowcfd.core.turbulence.sgs import WALEModel
             self.sgs_model = WALEModel()
+        # 自由来流条件**无条件**设置（2026-09-18）：单机 FRSolver 的
+        # `self.freestream` 从来就是无条件的（solver.py::__init__），这边
+        # 却挂在湍流分支里——于是 `turbulence_model=none/les` 的分布式
+        # 运行没有 `.freestream`。任何"按来流量级归一化"的消费方都会因此
+        # 在这条路径上崩溃或静默退回内置缺省，BJ 越界判据（门控滤波的
+        # 默认判据，其绝对地板必须用来流参考量级）正是其中一个。
+        # 同一个语义只允许有一个事实来源、且两条后端不能有不同的可用性。
+        self.rho_inf = solver_kwargs.get('rho_inf', 1.225)
+        self.vel_inf = solver_kwargs.get('vel_inf', 33.33)
+        self.p_inf = solver_kwargs.get('p_inf', 101325.0)
+        self.freestream = {
+            "rho_inf": self.rho_inf, "vel_inf": self.vel_inf,
+            "p_inf": self.p_inf,
+            # 见 gpu_solver.py 同一处说明（2026-09-17）
+            "aoa_deg": float(solver_kwargs.get("aoa_deg", 0.0) or 0.0),
+            "aos_deg": float(solver_kwargs.get("aos_deg", 0.0) or 0.0),
+        }
         if turb_model_upper in ('SST', 'DDES', 'IDDES', 'WMLES'):
-            self.rho_inf = solver_kwargs.get('rho_inf', 1.225)
-            self.vel_inf = solver_kwargs.get('vel_inf', 33.33)
-            self.p_inf = solver_kwargs.get('p_inf', 101325.0)
             self.mu_molecular = solver_kwargs.get('mu_molecular', 1.8e-5)
-            self.freestream = {
-                "rho_inf": self.rho_inf, "vel_inf": self.vel_inf,
-                "p_inf": self.p_inf,
-                # 见 gpu_solver.py 同一处说明（2026-09-17）
-                "aoa_deg": float(solver_kwargs.get("aoa_deg", 0.0) or 0.0),
-                "aos_deg": float(solver_kwargs.get("aos_deg", 0.0) or 0.0),
-            }
             self._turbulence_intensity = solver_kwargs.get('turbulence_intensity', 0.01)
             self._viscosity_ratio = solver_kwargs.get('viscosity_ratio', 5.0)
 
@@ -605,6 +612,10 @@ class DistributedFRSolver:
         # 拿到自由来流条件（重置 P0 均匀流场需要），这里存一份通用的、
         # 不依赖 turb_model_name 分支的副本。
         self._package_freestream = package['freestream']
+        # 与传统模式同一条（见那边说明）：无条件设置 `self.freestream`。
+        # 这里不带 mach_ref（下面 SST 分支会覆写成含 mach_ref 的版本），
+        # 消费方只依赖 rho_inf/vel_inf/p_inf。
+        self.freestream = dict(package['freestream'])
         self.turb_model = None
         self.turb_halo_exchange = None
         self.wall_distance_compact = package.get('wall_distance_compact')
@@ -846,6 +857,100 @@ class DistributedFRSolver:
             U_extended: (n_total_cells, n_sps, n_vars) 含 halo 的扩展数据
         """
         return self.halo_exchange.exchange(U_local)
+
+    def _build_sensor_gated_filter_func_distributed(
+        self, n_local: int, n_sps: int, cell_is_prism: np.ndarray
+    ):
+        """CPU MPI 路径的**传感器门控**模态滤波回调（2026-09-18 接线）。
+
+        `AFCFD_FILTER_MODE=sensor` 是 2026-09-17 定下的默认档，但当时只有
+        单机 CPU 接线，本后端会退回 `project`（全局逐 stage 施加精确投影
+        = 功能上等于 legacy，P1 退化成 P0、壁面剪应力恒为零）。这里补齐。
+
+        缺的那一块是 BJ 越界判据要**面邻居的单元均值**，而分区边界上的
+        邻居是 halo 单元。三点必须说明：
+
+        1. **不能把分区边界面当边界面排除。** 分区边界不是物理边界，
+           排除它等于在任意位置人为切断邻域包络，掩码会随 rank 数变化
+           —— 同一个算例换分区数得到不同结果，这对求解器不可接受。
+        2. **必须用当前 stage 的解做扩展，不能复用残差求值时缓存的
+           `U_extended`。** 滤波在每个 stage 的正定性投影之后施加，那时
+           解已经更新过；用缓存值会比单机路径滞后，两条后端就不再逐位
+           可比。代价是每个 stage 多一次 halo 交换——与
+           `_compute_distributed_local_time_step` 同一个既有权衡（局部 dt
+           的谱半径同样需要额外一次交换），而滤波只在 `troubled` 非空时
+           才真正动数据，交换本身是 `n_halo * n_sps * n_vars`。
+        3. **索引空间**：`state.U` / 滤波回调的 `U_flat` 都是 halo 交换的
+           **原生**排列（local 在前、halo 在后），而 `dist_flat_face` 的
+           `owner_cell_local`/`neighbor_cell_local` 是"棱柱在前"的**紧凑**
+           排列。两者用 `perm` 换算：紧凑下标 k 对应原生下标 `perm[k]`
+           （因为 `array_native[perm] == array_permuted`），所以
+           `owner_native = perm[owner_cell_local]`。掩码在原生扩展空间上
+           算，取前 `n_local` 项；halo 行的邻域不完整、算出的掩码丢弃。
+
+        判据内核与后端无关（`bounds_sensor.compute_bounds_violation_mask`
+        是纯数组接口），这里不复制一份实现——只提供索引换算与 halo 扩展。
+        """
+        from autoflowcfd.core.fr_solver.filter import (
+            build_sensor_gated_filter_func_arrays,
+        )
+        from autoflowcfd.core.fr_operators.bounds_sensor import (
+            resolve_troubled_sensor,
+        )
+
+        sensor = resolve_troubled_sensor()
+        conn = {}
+        if sensor in ("bounds", "both"):
+            dist_fc = self.dist_flat_face
+            perm = np.asarray(dist_fc.perm)
+            if perm is None or perm.size == 0:
+                raise RuntimeError(
+                    "sensor+bounds 需要 dist_flat_face.perm 做紧凑->原生"
+                    "索引换算，当前分布式面几何没有它"
+                )
+            n_total = int(self.partition.n_total_cells)
+            if perm.size != n_total:
+                raise RuntimeError(
+                    f"dist_flat_face.perm 长度 {perm.size} 与 "
+                    f"n_total_cells {n_total} 不符，索引换算不可靠"
+                )
+            oc = np.asarray(dist_fc.owner_cell_local)
+            nc = np.asarray(dist_fc.neighbor_cell_local)
+            bnd = np.asarray(dist_fc.is_boundary, dtype=bool)
+            # 边界面的 neighbor_cell_local 是 -1（本类文档）。这两个集合
+            # 必须严格重合：不重合意味着"某条边界面带着真实邻居"或"某条
+            # 内部面没有邻居"，任一情形下 BJ 包络都会读到错误的单元，
+            # 而那种错误在残差日志里完全看不出来。
+            if not np.array_equal(nc < 0, bnd):
+                n_mismatch = int(np.count_nonzero((nc < 0) != bnd))
+                raise RuntimeError(
+                    f"分布式面几何自洽性失败：{n_mismatch} 条面的 "
+                    f"(neighbor_cell_local < 0) 与 is_boundary 不一致。"
+                    f"BJ 越界判据靠 is_boundary 排除没有邻居单元的面。"
+                )
+            # 紧凑 -> 原生。边界面的 -1 先填 0（占位），它们被
+            # is_boundary 排除，不会被读到。
+            owner_native = perm[oc]
+            neigh_native = perm[np.where(nc >= 0, nc, 0)]
+            halo_ex = self.halo_exchange
+
+            def halo_extend(U_local_3d):
+                # `exchange` 返回 (n_total, n_sps, n_vars) 原生排列；
+                # 无 MPI / 单 rank 时它只是把 local 拷进扩展数组，
+                # 于是掩码与单机路径逐位相同。
+                return halo_ex.exchange(np.ascontiguousarray(U_local_3d))
+
+            conn = dict(owner_cell=owner_native,
+                        neighbor_cell=neigh_native,
+                        is_boundary=bnd,
+                        freestream=self.freestream,
+                        halo_extend=halo_extend)
+
+        order = int(getattr(self, "current_order", self.order))
+        return build_sensor_gated_filter_func_arrays(
+            n_local, n_sps, order,
+            self.ops.filter_prism, self.ops.filter_tet,
+            cell_is_prism=cell_is_prism, sensor=sensor, **conn)
 
     def compute_global_residual_norm(self) -> float:
         """全局残差 L2 范数。"""
@@ -1111,13 +1216,15 @@ class DistributedFRSolver:
             from autoflowcfd.core.fr_solver.filter import (
                 build_filter_func_by_cell_type, resolve_filter_mode,
             )
-            # sensor 档尚未在本后端接线，直接报错而不是静默按 legacy 跑
-            # （同一个环境变量在不同后端不能意味着不同的数值方案）。
-            resolve_filter_mode("cpu-mpi")
+            mode = resolve_filter_mode("cpu-mpi")
             cct = self.dist_flat_face.compact_cell_type
             cell_is_prism = (cct[self.dist_flat_face.inv_perm][:n_local] == 0)
-            filter_func = build_filter_func_by_cell_type(
-                self.ops, n_local, n_sps, cell_is_prism)
+            if mode == "sensor":
+                filter_func = self._build_sensor_gated_filter_func_distributed(
+                    n_local, n_sps, cell_is_prism)
+            else:
+                filter_func = build_filter_func_by_cell_type(
+                    self.ops, n_local, n_sps, cell_is_prism)
 
         # Stage 0 残差单独算一次：既用于收敛监控（与旧实现报告口径一致），
         # 也通过 residual0= 传给 _ssp_rk_stage_step 复用，避免它内部再重复

@@ -180,6 +180,56 @@ DEFAULT_BOUNDS_REL_TOL = 0.1
 DEFAULT_BOUNDS_ABS_FRAC = 1e-3
 
 
+def _scatter_minmax(xp, nb_max, nb_min, idx, values):
+    """`nb_max[idx] = max(nb_max[idx], values)` 与 min 的对偶，**索引可重复**。
+
+    为什么要这个分派层：BJ 判据的邻域包络必须对同一个 owner 单元累积它
+    *全部*面邻居的均值，所以是一次索引重复的散射归约。NumPy 用
+    `np.maximum.at`，CuPy 没有 ufunc.at，对应的是 `cupyx.scatter_max`/
+    `cupyx.scatter_min`（语义完全一致：对重复索引做归约而不是后写覆盖）。
+
+    做成分派层而不是给 GPU 另写一份 `compute_bounds_violation_mask`：这个
+    判据要同时服务 CPU 单机 / CPU MPI / 单 GPU / 多 GPU 四条后端，四份
+    人工同步的副本在本项目已经反复出过"只改了一份"的真实缺陷（见项目
+    记忆 `feedback-prefer-deleting-redundant-code`）。除这三行散射之外，
+    整个判据本来就是纯数组运算，NumPy/CuPy 同名同义。
+
+    Raises:
+        RuntimeError: 传入的是 CuPy 数组但该版本 cupyx 没有 scatter_max/
+            scatter_min。不静默退回逐元素循环——那在 GPU 上是灾难性的
+            性能陷阱，而且会让"判据开着"与"判据实际生效"看起来一样。
+    """
+    if xp is np:
+        np.maximum.at(nb_max, idx, values)
+        np.minimum.at(nb_min, idx, values)
+        return
+    import cupyx
+    smax = getattr(cupyx, "scatter_max", None)
+    smin = getattr(cupyx, "scatter_min", None)
+    if smax is None or smin is None:
+        raise RuntimeError(
+            "BJ 越界判据在 GPU 上需要 cupyx.scatter_max/scatter_min（对重复"
+            "索引做归约的散射），当前 CuPy 版本没有提供。请升级 CuPy——"
+            "不退回逐元素循环：那在 GPU 上是灾难性的性能陷阱。"
+        )
+    smax(nb_max, idx, values)
+    smin(nb_min, idx, values)
+
+
+def _array_module(*arrays):
+    """取数组所属的模块（`numpy` 或 `cupy`）。
+
+    判据全部按该模块的同名函数写，于是 CPU 与 GPU 共用同一份实现。
+    以"是否有 `__cuda_array_interface__`"判断，而不是 isinstance——
+    不强制 import cupy（本机无 CuPy 时该 import 会失败）。
+    """
+    for a in arrays:
+        if a is not None and hasattr(a, "__cuda_array_interface__"):
+            import cupy
+            return cupy
+    return np
+
+
 def compute_bounds_violation_mask(
     field_nodal: np.ndarray,
     owner_cell: np.ndarray,
@@ -228,7 +278,8 @@ def compute_bounds_violation_mask(
         ValueError: 形状不自洽（不静默广播——静默广播会让一个形状 bug
             变成"判据恒不触发"，而恒不触发的门控在日志里看起来一切正常）。
     """
-    field = np.asarray(field_nodal)
+    xp = _array_module(field_nodal, owner_cell, neighbor_cell)
+    field = xp.asarray(field_nodal)
     if field.ndim == 2:
         field = field[:, :, None]
     if field.ndim != 3:
@@ -238,25 +289,26 @@ def compute_bounds_violation_mask(
         )
     n_cells = field.shape[0]
 
-    owner = np.asarray(owner_cell)
-    neigh = np.asarray(neighbor_cell)
-    bnd = np.asarray(is_boundary, dtype=bool)
+    owner = xp.asarray(owner_cell)
+    neigh = xp.asarray(neighbor_cell)
+    bnd = xp.asarray(is_boundary).astype(bool)
     if not (owner.shape == neigh.shape == bnd.shape) or owner.ndim != 1:
         raise ValueError(
             f"owner_cell/neighbor_cell/is_boundary 必须是同长度一维数组，"
             f"收到 {owner.shape} / {neigh.shape} / {bnd.shape}"
         )
-    if owner.size and (owner.max() >= n_cells or owner.min() < 0):
+    if owner.size and (int(owner.max()) >= n_cells or int(owner.min()) < 0):
         raise ValueError(
-            f"owner_cell 越界：[{owner.min()}, {owner.max()}] 超出 [0, {n_cells})"
+            f"owner_cell 越界：[{int(owner.min())}, {int(owner.max())}] "
+            f"超出 [0, {n_cells})"
         )
 
     interior = ~bnd
     o_i = owner[interior]
     n_i = neigh[interior]
-    if n_i.size and (n_i.max() >= n_cells or n_i.min() < 0):
+    if n_i.size and (int(n_i.max()) >= n_cells or int(n_i.min()) < 0):
         raise ValueError(
-            f"内部面的 neighbor_cell 越界：[{n_i.min()}, {n_i.max()}] "
+            f"内部面的 neighbor_cell 越界：[{int(n_i.min())}, {int(n_i.max())}] "
             f"超出 [0, {n_cells})"
         )
 
@@ -270,7 +322,7 @@ def compute_bounds_violation_mask(
     else:
         ref = None
 
-    mask = np.zeros(n_cells, dtype=bool)
+    mask = xp.zeros(n_cells, dtype=bool)
     for v in range(n_var):
         q = field[:, :, v]
         cell_mean = q.mean(axis=1)
@@ -282,15 +334,15 @@ def compute_bounds_violation_mask(
         nb_max = cell_mean.copy()
         nb_min = cell_mean.copy()
         if o_i.size:
-            np.maximum.at(nb_max, o_i, cell_mean[n_i])
-            np.maximum.at(nb_max, n_i, cell_mean[o_i])
-            np.minimum.at(nb_min, o_i, cell_mean[n_i])
-            np.minimum.at(nb_min, n_i, cell_mean[o_i])
+            # 两个方向都要做——一条内部面同时是 owner 的邻居来源和
+            # neighbor 的邻居来源。
+            _scatter_minmax(xp, nb_max, nb_min, o_i, cell_mean[n_i])
+            _scatter_minmax(xp, nb_max, nb_min, n_i, cell_mean[o_i])
 
         if ref is not None:
             scale = float(ref[v])
         else:
-            scale = float(np.sqrt(np.mean(cell_mean.astype(np.float64) ** 2)))
+            scale = float(xp.sqrt(xp.mean(cell_mean.astype(xp.float64) ** 2)))
         tol = rel_tol * (nb_max - nb_min) + abs_frac * max(scale, 1e-300)
         mask |= (cell_max > nb_max + tol) | (cell_min < nb_min - tol)
 
