@@ -58,8 +58,11 @@ def _compute_inlet_fp_positions(solver, face_conn, is_target_face: np.ndarray) -
         # `[:n_native]` 求值）。这条路径只在 LES/DDES 的 INLET SEM 合成
         # 湍流入口用到——若某个 INLET 面恰好被四面体单元拥有会真实触发。
         if oc_code >= 6:
-            excluded_vertex = oc_code - 6
-            E = ops.boundary_extrap_native_tet[excluded_vertex]  # (n_fp, n_native)
+            # 原生面（四面体 [6,10) / 棱柱 [10,15)）统一走
+            # `ops.native_face_extrap`，不在这里自己按 code-6 取表 ——
+            # 两类单元的键与 n_native 都不同，配错不会报错、只会静默用错
+            # 矩阵（见 FROperators 里那段说明）。
+            E = ops.native_face_extrap(oc_code)  # (n_fp, n_native)
             positions[f] = E @ mesh.sps_coords[owner_cell][:E.shape[1]]
         else:
             E = ops.boundary_extrap_prism[(axis, side)]

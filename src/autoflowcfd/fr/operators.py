@@ -207,6 +207,87 @@ class FROperators:
     lift_native_prism_padded: Dict[int, np.ndarray] = None
     filter_native_prism_padded: np.ndarray = None
 
+    # ---- 原生面算子的唯一分派入口（2026-09-18）----
+    #
+    # 两类单元的原生面算子键不同（四面体是 excluded_vertex 0~3，棱柱是
+    # face_id 0~4），而消费点拿到的是统一的 `cube_face_code`：
+    #
+    #     [6, 10)  -> native 四面体面，excluded_vertex = code - 6
+    #     [10, 15) -> native 棱柱面，  face_id        = code - 10
+    #
+    # **必须走这两个方法**，不要在消费点自己判断：面 id 配错不会报错，
+    # 只会静默地对某个面用错矩阵（与当年多 GPU"四面体拿到棱柱矩阵"完全
+    # 同一类缺陷）。numba kernel 不能调方法，它们读的是
+    # `face_kernels.build_flat_face_geometry` 按同一套规则**叠好**的
+    # flat 数组（0~3 四面体、4~8 棱柱，按 `code - 6` 连续索引，于是那边
+    # 所有 `code >= 6` / `code - 6` 的既有写法原样成立）。
+
+    def native_face_extrap(self, cube_face_code: int) -> np.ndarray:
+        """按 cube face code 取原生面的体积->面外插矩阵（**未填充**，
+        形状 `(n_fp, n_native)`，`n_native` 随单元类型不同）。
+
+        Raises:
+            ValueError: 不是原生面编码，或对应的基没有启用。
+        """
+        return self._native_face_op(cube_face_code, lift=False)
+
+    def native_face_lift(self, cube_face_code: int) -> np.ndarray:
+        """按 cube face code 取原生面的 DG 提升矩阵（**未填充**，
+        形状 `(n_native, n_fp)`）。"""
+        return self._native_face_op(cube_face_code, lift=True)
+
+    def native_face_lift_padded(self, cube_face_code: int) -> np.ndarray:
+        """按 cube face code 取**已填充到全局 `n_sps` 宽度**的 DG 提升矩阵，
+        形状 `(n_sps, n_fp)`。
+
+        生产残差路径消费的是填充版本（见 `lift_native_tet_padded` /
+        `lift_native_prism_padded` 字段说明）。
+        """
+        code = int(cube_face_code)
+        if 6 <= code < 10:
+            if self.lift_native_tet_padded is None:
+                raise ValueError(
+                    f"cube_face_code={code} 是 native 四面体面，但算子集里"
+                    f"没有填充好的提升算子")
+            return self.lift_native_tet_padded[code - 6]
+        if 10 <= code < 15:
+            if self.lift_native_prism_padded is None:
+                raise ValueError(
+                    f"cube_face_code={code} 是 native 棱柱面，但当前棱柱基"
+                    f"是 {self.prism_basis_mode!r}。面编码与棱柱基必须来自"
+                    f"同一个 AFCFD_PRISM_BASIS 取值")
+            return self.lift_native_prism_padded[code - 10]
+        raise ValueError(
+            f"cube_face_code={code} 不是原生面编码（四面体 [6,10)、"
+            f"棱柱 [10,15)）")
+
+    def _native_face_op(self, cube_face_code: int, lift: bool) -> np.ndarray:
+        code = int(cube_face_code)
+        if 6 <= code < 10:
+            table = (self.lift_native_tet if lift
+                     else self.boundary_extrap_native_tet)
+            if table is None:
+                raise ValueError(
+                    f"cube_face_code={code} 是 native 四面体面，但算子集里"
+                    f"没有对应的表 —— native 是四面体唯一实现，这说明算子"
+                    f"构造被跳过了")
+            return table[code - 6]
+        if 10 <= code < 15:
+            table = (self.lift_native_prism if lift
+                     else self.boundary_extrap_native_prism)
+            if table is None:
+                raise ValueError(
+                    f"cube_face_code={code} 是 native 棱柱面，但当前棱柱基"
+                    f"是 {self.prism_basis_mode!r}（算子集里没有原生棱柱面"
+                    f"算子）。面编码与棱柱基必须来自同一个 "
+                    f"AFCFD_PRISM_BASIS 取值，不一致说明网格的面编码翻译"
+                    f"与算子构造读到了不同的开关值")
+            return table[code - 10]
+        raise ValueError(
+            f"cube_face_code={code} 不是原生面编码（四面体 [6,10)、"
+            f"棱柱 [10,15)）。坍缩坐标面用 (axis, side) 键取 "
+            f"boundary_extrap_tet/prism，不走这个入口")
+
     def get_operators(self) -> Dict[str, np.ndarray]:
         """返回算子字典，兼容旧接口。"""
         return {

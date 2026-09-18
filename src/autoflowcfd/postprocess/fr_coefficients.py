@@ -106,8 +106,9 @@ def compute_aerodynamic_coefficients_fr(
         再做矩阵乘法，不能直接对全宽度 `field` 求值。
         """
         if oc_code >= 6:
-            excluded_vertex = oc_code - 6
-            E = ops.boundary_extrap_native_tet[excluded_vertex]  # (n_fp, n_native)
+            # 原生面统一走 `ops.native_face_extrap`（四面体 [6,10)、
+            # 棱柱 [10,15)，两类的 n_native 不同）。
+            E = ops.native_face_extrap(oc_code)  # (n_fp, n_native)
             n_native = E.shape[1]
             trailing = field.shape[1:]
             flat = E @ field[:n_native].reshape(n_native, -1)
@@ -266,8 +267,7 @@ def compute_forces_pressure_only(solver, reference_area: float) -> dict:
             # （形状 (n_fp,n_native)，只对 `Q[...,4][:n_native]` 这部分
             # 真实自由度求值，填充槽位不携带真实场值）。
             if oc_code >= 6:
-                excluded_vertex = oc_code - 6
-                E = ops.boundary_extrap_native_tet[excluded_vertex]  # (n_fp, n_native)
+                E = ops.native_face_extrap(oc_code)  # (n_fp, n_native)
                 Q_fp = E @ Q[owner_cell, :E.shape[1], 4]
             else:
                 E = ops.boundary_extrap_prism[(axis, side)]

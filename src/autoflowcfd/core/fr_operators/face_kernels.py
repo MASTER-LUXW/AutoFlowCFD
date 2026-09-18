@@ -323,16 +323,39 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     # 到全局 n_sps 宽度（native_tet_boundary_extrap 原始形状是
     # (n_fp,n_native)，不像 D_native_tet_padded/lift_native_tet_padded
     # 那样已经在 fr/operators.py 里填充过）。
+    #
+    # **两类原生单元叠进同一个数组**（2026-09-18）：行 0~3 是四面体的 4 个
+    # 面（编码 6~9），行 4~8 是原生棱柱的 5 个面（编码 10~14），于是
+    # 索引恒为 `code - 6`、连续。这样下游 kernel 里所有既有的
+    # `code >= 6` / `native[code - 6]` 写法**原样成立**，不需要为棱柱再加
+    # 一套平行分支 —— 平行分支正是本项目反复出过"两份实现只改一份"缺陷
+    # 的地方（面 id 配错不报错、只静默用错矩阵）。
+    #
+    # `side_factor = 1.0 if code >= 6` 那类判据对两类原生面同样正确：
+    # `*_adj_row_exact` 已经给出 outward 定向。
     if ops.boundary_extrap_native_tet is not None:
         from autoflowcfd.fr.native_padding import pad_native_matrix_to_global
+        from autoflowcfd.grid.connectivity.face_connectivity import (
+            CUBE_FACE_CODES,
+            NATIVE_FACE_CODE_BASE,
+            NATIVE_PRISM_FACE_CODE_RANGE,
+        )
 
-        boundary_extrap_native = np.zeros((4, n_fp, n_sps), dtype=np.float64)
-        lift_native = np.zeros((4, n_sps, n_fp), dtype=np.float64)
-        for ev in range(4):
-            boundary_extrap_native[ev] = pad_native_matrix_to_global(
-                ops.boundary_extrap_native_tet[ev], n_sps, pad_axes=(1,)
+        _prism_lo, _prism_hi = NATIVE_PRISM_FACE_CODE_RANGE
+        n_native_rows = (_prism_hi - NATIVE_FACE_CODE_BASE
+                         if ops.boundary_extrap_native_prism is not None
+                         else CUBE_FACE_CODES["prism_native_f0"]
+                         - NATIVE_FACE_CODE_BASE)
+        boundary_extrap_native = np.zeros((n_native_rows, n_fp, n_sps),
+                                          dtype=np.float64)
+        lift_native = np.zeros((n_native_rows, n_sps, n_fp), dtype=np.float64)
+        for code in range(NATIVE_FACE_CODE_BASE,
+                          NATIVE_FACE_CODE_BASE + n_native_rows):
+            row = code - NATIVE_FACE_CODE_BASE
+            boundary_extrap_native[row] = pad_native_matrix_to_global(
+                ops.native_face_extrap(code), n_sps, pad_axes=(1,)
             )
-            lift_native[ev] = ops.lift_native_tet_padded[ev]
+            lift_native[row] = ops.native_face_lift_padded(code)
     else:
         boundary_extrap_native = np.zeros((0, n_fp, n_sps), dtype=np.float64)
         lift_native = np.zeros((0, n_sps, n_fp), dtype=np.float64)

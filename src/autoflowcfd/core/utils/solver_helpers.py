@@ -167,24 +167,30 @@ def compute_wmles_wall_stress_correction(
     # 判据）分派到 native 专属算子：自身面外插矩阵改用
     # `boundary_extrap_native_tet[excluded_vertex]`（按需 pad 到全局
     # n_sps 宽度，与 face_kernels.py 界面项 kernel 同一个 pad 约定）；
-    # 面修正项改用 DG 提升算子 `lift_native_tet_padded[excluded_vertex]`
-    # 替代 `_distribute_from_face`（native 单纯形基没有"坍缩计算方向"，
-    # 1D 修正函数分布机制不适用，见 native_simplex_basis.py::
-    # build_native_tet_lift"弱形式提升定义"）。棱柱（`cell < n_prism`）
-    # 恒用坍缩坐标算子，不受 tet_basis_mode 影响（native 只针对四面体）。
+    # 面修正项改用 DG 提升算子（`ops.native_face_lift_padded(cube_face)`）
+    # 替代 `_distribute_from_face`（原生基没有"坍缩计算方向"，1D 修正函数
+    # 分布机制不适用，见 native_simplex_basis.py::build_native_tet_lift
+    # "弱形式提升定义"）。
+    # **2026-09-18 起棱柱也可能是原生基**（`AFCFD_PRISM_BASIS=native`，
+    # 面编码 [10,15)）：所以这里按 `cube_face >= 6` 分派、由
+    # `ops.native_face_*` 决定取哪一类的矩阵，不再假设"native 只针对
+    # 四面体、棱柱恒用坍缩算子"。
+    # 缓存按 **cube_face_code** 键（不是 excluded_vertex）：原生棱柱面
+    # 也走这条（编码 [10,15)），两类单元的键与 n_native 都不同，统一由
+    # `ops.native_face_extrap` 分派，见 FROperators 里那段说明。
     _padded_extrap_native_cache: Dict[int, np.ndarray] = {}
 
-    def _get_padded_extrap_native(excluded_vertex: int) -> np.ndarray:
-        if excluded_vertex not in _padded_extrap_native_cache:
+    def _get_padded_extrap_native(cube_face_code: int) -> np.ndarray:
+        if cube_face_code not in _padded_extrap_native_cache:
             from autoflowcfd.fr.native_padding import pad_native_matrix_to_global
-            _padded_extrap_native_cache[excluded_vertex] = pad_native_matrix_to_global(
-                ops.boundary_extrap_native_tet[excluded_vertex], n_sps, pad_axes=(1,)
+            _padded_extrap_native_cache[cube_face_code] = pad_native_matrix_to_global(
+                ops.native_face_extrap(cube_face_code), n_sps, pad_axes=(1,)
             )
-        return _padded_extrap_native_cache[excluded_vertex]
+        return _padded_extrap_native_cache[cube_face_code]
 
     def extrap_to_face(cell: int, field: np.ndarray, axis: int, side: float, cube_face: int) -> np.ndarray:
         if cube_face >= 6:
-            E = _get_padded_extrap_native(cube_face - 6)
+            E = _get_padded_extrap_native(cube_face)
         elif cell < n_prism:
             E = ops.boundary_extrap_prism[(axis, side)]
         else:
@@ -228,7 +234,7 @@ def compute_wmles_wall_stress_correction(
         # native 分支说明）。
         momentum_fp = -tau_w * flat.true_area_weight[f][:, None]
         if cube_face >= 6:
-            contrib = ops.lift_native_tet_padded[cube_face - 6] @ momentum_fp  # (n_sps,3)
+            contrib = ops.native_face_lift_padded(cube_face) @ momentum_fp  # (n_sps,3)
         else:
             g_prime = ops.g_left if side < 0 else ops.g_right
             contrib = _distribute_from_face(momentum_fp, n1d, axis, g_prime)  # (n_sps,3)

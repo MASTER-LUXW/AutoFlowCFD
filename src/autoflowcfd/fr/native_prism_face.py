@@ -332,3 +332,92 @@ def cube_face_to_native_prism_face(axis: int, side: float) -> int:
             f"合法的 5 个面见本模块的对应表；(1, +1) 是坍缩参考立方体上的"
             f"退化面（坍缩成一条侧棱），不携带独立通量信息。")
     return _CUBE_FACE_TO_NATIVE[key]
+
+
+# ---------------------------------------------------------------------------
+# 面的 adj 行与面积权重
+# ---------------------------------------------------------------------------
+#
+# 原生棱柱的 5 个面在参考空间里都是**常余向量**曲面：
+#
+#     face_id  参考面           外向余向量 c（未归一化）
+#       0      t = -1           (0, 0, -1)
+#       1      t = +1           (0, 0, +1)
+#       2      r + s = 0（斜边）(+1, +1, 0)
+#       3      r = -1           (-1, 0, 0)
+#       4      s = -1           (0, -1, 0)
+#
+# 于是"物理外法向 × 面积微元"就是 `sum_m c_m * adj(J)[m, :]`
+# （`adj(J) = det(J) * inv(J)`，`inv(J)[m, d] = d xi_m / d x_d`）——
+# 与坍缩路径 `compute_exact_adj_rows` 产出的 `adj_row` **同一个量、同一个
+# 消费方式**（调用方归一化得法向、取模乘求积权重得面积权重）。
+#
+# **余向量刻意不归一化**，因为它的模恰好补偿参考面的参数化：
+#   * 斜边面用 `lambda` 线性参数化（`r=-lambda, s=lambda`），参考边长元是
+#     `sqrt(2) d lambda`，而 `|(1,1,0)| = sqrt(2)` —— 两者相乘正好抵掉，
+#     配平凡的张量积权重 `w_lambda * w_t` 就是对的；
+#   * `r=-1` / `s=-1` 两个面的 `|c| = 1`、参考边长元就是 `d lambda`，同样直接。
+# 归一化余向量再另外乘一个"参考面度量因子"是等价的，但那等于把同一个
+# 事实拆成两处、迟早不一致。
+#
+# 两个三角形封盖多一个 **Duffy 因子**：它们的通量点用坍缩三角形采样
+# （`cube_to_tri_rs` 作用在张量积 Gauss-Legendre 方格上，与 native 四面体
+# 三角形面同一套），参考三角形的面积元是 `dr ds = (1-s)/2 * da db`
+# （`s = b`），所以求积权重要乘 `(1-s)/2`。
+
+#: `face_id -> (参考外向余向量, 是否是三角形封盖)`。
+_FACE_REF_COVECTOR: Dict[int, Tuple[np.ndarray, bool]] = {
+    0: (np.array([0.0, 0.0, -1.0]), True),
+    1: (np.array([0.0, 0.0, 1.0]), True),
+    2: (np.array([1.0, 1.0, 0.0]), False),
+    3: (np.array([-1.0, 0.0, 0.0]), False),
+    4: (np.array([0.0, -1.0, 0.0]), False),
+}
+
+
+def native_prism_face_adj_rows(order: int, face_id: int,
+                               cell_nodes: np.ndarray) -> np.ndarray:
+    """某个面每个通量点的 `adj_row`，形状 `(n1d^2, 3)`。
+
+    与坍缩路径 `fr/face_flux_points_exact_normal.py::compute_exact_adj_rows`
+    产出的量**语义完全相同**（"物理外法向 × 面积微元"的未归一化形式，
+    已按 outward 定向），所以下游 `side_factor = 1.0` 的既有处理对原生
+    棱柱面同样正确 —— 不需要再乘 `owner_side`。
+
+    Args:
+        order: 多项式阶数
+        face_id: 0~4
+        cell_nodes: `(6, 3)` 棱柱顶点，顺序同 `map_prism_to_physical`
+    """
+    from .native_prism_basis import native_prism_exact_jacobian
+
+    fp = native_prism_face_points(order, face_id)
+    jac = native_prism_exact_jacobian(fp, cell_nodes)          # (n_fp,3,3)
+    det = np.linalg.det(jac)
+    adj = det[:, None, None] * np.linalg.inv(jac)              # (n_fp,3,3)
+    cov, _is_cap = _FACE_REF_COVECTOR[face_id]
+    return np.einsum("pmd,m->pd", adj, cov)
+
+
+def native_prism_face_ref_weights(order: int, face_id: int,
+                                  weights_1d: np.ndarray) -> np.ndarray:
+    """某个面每个通量点的**参考**求积权重，形状 `(n1d^2,)`。
+
+    乘上 `|adj_row|` 就是物理面积权重（`true_area_weight`），与坍缩路径
+    `compute_exact_face_normals_and_weights` 里 `mag * w_fp` 同一个组合。
+
+    三角形封盖多一个 Duffy 因子 `(1-s)/2`（见本节顶部说明）；三个侧四边形
+    是平凡张量积权重。
+    """
+    n1d = order + 1
+    w = np.asarray(weights_1d, dtype=np.float64)
+    if w.shape != (n1d,):
+        raise ValueError(
+            f"weights_1d 形状 {w.shape} 应为 (n1d={n1d},)")
+    w1, w2 = np.meshgrid(w, w, indexing="ij")
+    w_fp = (w1 * w2).ravel()
+    _cov, is_cap = _FACE_REF_COVECTOR[face_id]
+    if not is_cap:
+        return w_fp
+    s = native_prism_face_points(order, face_id)[:, 1]
+    return w_fp * (1.0 - s) / 2.0
