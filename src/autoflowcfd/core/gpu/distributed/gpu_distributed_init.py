@@ -127,36 +127,40 @@ class _GPUDistributedInitMixin:
         from autoflowcfd.core.fr_solver.filter import resolve_filter_mode
         mode = resolve_filter_mode("gpu-mpi")
 
-        try:
-            filter_prism = self.ops.filter_prism
-            filter_tet = self.ops.filter_tet
-            if filter_prism is None and filter_tet is None:
-                return
+        # **2026-09-18：这里原本套着 `except Exception -> warning`，已删除。**
+        # 理由与 `gpu_solver_init.py::_init_modal_filter_gpu` 同一处说明
+        # 完全相同，也与本文件 `_init_distributed_face_geometry` 早已删掉
+        # 宽 except 的理由相同：本轮新加的硬护栏（`perm` 长度不符、
+        # `(neighbor_cell_local<0) != is_boundary` 自洽性、`n_prism` 越界、
+        # cupyx 缺 scatter_max）全部落在这个 try 内，会被降级成一条
+        # warning + **完全无滤波**继续跑。
+        filter_prism = self.ops.filter_prism
+        filter_tet = self.ops.filter_tet
+        if filter_prism is None and filter_tet is None:
+            return
 
-            dist_fc = self.dist_flat_face
-            cct = np.asarray(dist_fc.compact_cell_type)
-            inv_perm = np.asarray(dist_fc.inv_perm)
-            # compact_cell_type 处在"棱柱在前"紧凑排列，用 inv_perm 换回
-            # 原生排列再切 local 段——`self.U_gpu` 所在的空间。
-            cell_is_prism = (cct[inv_perm][:n_local] == 0)
+        dist_fc = self.dist_flat_face
+        cct = np.asarray(dist_fc.compact_cell_type)
+        inv_perm = np.asarray(dist_fc.inv_perm)
+        # compact_cell_type 处在"棱柱在前"紧凑排列，用 inv_perm 换回
+        # 原生排列再切 local 段——`self.U_gpu` 所在的空间。
+        cell_is_prism = (cct[inv_perm][:n_local] == 0)
 
-            if mode == "sensor":
-                self.filter_func_gpu = (
-                    self._build_sensor_gated_filter_distributed_gpu(
-                        n_local, n_sps, cell_is_prism,
-                        filter_prism, filter_tet))
-            else:
-                from autoflowcfd.core.gpu.gpu_modal_filter import (
-                    build_gpu_filter_func,
-                )
-                self.filter_func_gpu = build_gpu_filter_func(
-                    n_local, n_sps, 0,
-                    filter_prism, filter_tet,
-                    device_id=self.device_id,
-                    cell_is_prism=cell_is_prism,
-                )
-        except Exception as e:
-            logger.warning(f"Rank {self.rank}: Modal filter init failed: {e}")
+        if mode == "sensor":
+            self.filter_func_gpu = (
+                self._build_sensor_gated_filter_distributed_gpu(
+                    n_local, n_sps, cell_is_prism,
+                    filter_prism, filter_tet))
+        else:
+            from autoflowcfd.core.gpu.gpu_modal_filter import (
+                build_gpu_filter_func,
+            )
+            self.filter_func_gpu = build_gpu_filter_func(
+                n_local, n_sps, 0,
+                filter_prism, filter_tet,
+                device_id=self.device_id,
+                cell_is_prism=cell_is_prism,
+            )
 
     def _build_sensor_gated_filter_distributed_gpu(
         self, n_local, n_sps, cell_is_prism, filter_prism, filter_tet
@@ -178,79 +182,58 @@ class _GPUDistributedInitMixin:
            缓存的 `U_extended_gpu`；
         3. `owner_cell_local`/`neighbor_cell_local` 在"棱柱在前"紧凑
            排列，而场在原生排列，用 `owner_native = perm[oc]` 换算。
+
+        **没有 CuPy 时整条门控退回 numpy**（本机与 CI 的 numpy 替身
+        端到端测试就走这条）：`build_sensor_gated_filter_func_arrays` 从
+        滤波矩阵推断数组模块，传 numpy 进去它就是 numpy 路径，数值与
+        CPU 单机一致。**不静默跳过门控** —— 那会让"替身测试通过"与
+        "真实 GPU 上门控真的生效"脱钩，而这正是本文件此前那个
+        `except Exception -> warning` 兜底造成的问题（它把所有硬护栏
+        一起吞了，2026-09-18 删除）。完整论证见
+        `core/gpu/device_context.py` 模块文档。
         """
-        cp = get_cupy()
         from autoflowcfd.core.fr_solver.filter import (
+            build_distributed_bounds_conn,
             build_sensor_gated_filter_func_arrays,
         )
         from autoflowcfd.core.fr_operators.bounds_sensor import (
             resolve_troubled_sensor,
         )
+        from autoflowcfd.core.gpu.device_context import (
+            ascontiguous_like, device_transfer,
+        )
+
+        _dev, _to_dev = device_transfer(self.device_id)
 
         sensor = resolve_troubled_sensor()
         conn = {}
         if sensor in ("bounds", "both"):
-            dist_fc = self.dist_flat_face
-            perm = np.asarray(dist_fc.perm)
-            n_total = int(self.partition.n_total_cells)
-            if perm.size != n_total:
-                raise RuntimeError(
-                    f"dist_flat_face.perm 长度 {perm.size} 与 "
-                    f"n_total_cells {n_total} 不符，索引换算不可靠")
-            oc = np.asarray(dist_fc.owner_cell_local)
-            nc = np.asarray(dist_fc.neighbor_cell_local)
-            bnd = np.asarray(dist_fc.is_boundary, dtype=bool)
-            # 与 CPU 侧同一条自洽性护栏：边界面的 neighbor_cell_local
-            # 是 -1，两个集合必须严格重合，否则 BJ 包络会读到错误单元
-            # 而在日志里完全看不出来。
-            if not np.array_equal(nc < 0, bnd):
-                n_mismatch = int(np.count_nonzero((nc < 0) != bnd))
-                raise RuntimeError(
-                    f"分布式面几何自洽性失败：{n_mismatch} 条面的 "
-                    f"(neighbor_cell_local < 0) 与 is_boundary 不一致")
-            owner_native = perm[oc]
-            neigh_native = perm[np.where(nc >= 0, nc, 0)]
-            gpu_halo = self.gpu_halo
-
-            def halo_extend(U_local_3d):
-                # 返回 (n_total, n_sps, n_vars) 原生排列的 CuPy 数组。
-                return gpu_halo.exchange(cp.ascontiguousarray(U_local_3d))
-
-            _n_faces = int(bnd.size)
-
-            def _bnd_dirichlet():
-                # 无滑移壁面的动量 Dirichlet 值。**必须惰性求值**：本方法
-                # 在 `self.boundary_ghost_provider` 建好之前就被调用
-                # （gpu_distributed.py 里滤波初始化在 provider 构造之前）。
-                # provider 的 `group_code` 已被重切到 local 面索引空间。
-                from autoflowcfd.core.fr_solver.boundary import (
-                    build_boundary_dirichlet_table,
-                )
-                t = build_boundary_dirichlet_table(
-                    getattr(self, "boundary_ghost_provider", None),
-                    _n_faces, 5)
-                if t is None:
-                    return None
-                with cp.cuda.Device(self.device_id):
-                    return cp.asarray(t)
-
-            with cp.cuda.Device(self.device_id):
-                conn = dict(owner_cell=cp.asarray(owner_native),
-                            neighbor_cell=cp.asarray(neigh_native),
-                            is_boundary=cp.asarray(bnd),
-                            freestream=self.freestream,
-                            halo_extend=halo_extend,
-                            bnd_dirichlet=_bnd_dirichlet)
+            # 索引换算、两条自洽性护栏、halo 扩展时机、两张边界表的惰性
+            # 构造全部在共享实现里（见 `build_distributed_bounds_conn`），
+            # CPU MPI 走的是同一条 —— 两条后端的掩码因此不可能悄悄分叉。
+            #
+            # 惰性取 provider 在这条后端上**是必需的**：本方法在
+            # `self.boundary_ghost_provider` 建好之前就被调用
+            # （gpu_distributed.py 里滤波初始化在 provider 构造之前）。
+            with _dev:
+                conn = build_distributed_bounds_conn(
+                    self.dist_flat_face,
+                    self.partition.n_total_cells,
+                    lambda: self.gpu_halo,
+                    lambda: getattr(self, "boundary_ghost_provider", None),
+                    self.freestream,
+                    to_device=_to_dev,
+                    ascontiguous=ascontiguous_like)
 
         order = int(getattr(self, "current_order", self.order))
-        with cp.cuda.Device(self.device_id):
+        with _dev:
             fp = (filter_prism if hasattr(filter_prism, "device")
-                  else cp.asarray(filter_prism))
+                  else _to_dev(filter_prism))
             ft = (filter_tet if hasattr(filter_tet, "device")
-                  else cp.asarray(filter_tet))
+                  else _to_dev(filter_tet))
             return build_sensor_gated_filter_func_arrays(
                 n_local, n_sps, order, fp, ft,
-                cell_is_prism=cp.asarray(cell_is_prism),
+                cell_is_prism=_to_dev(cell_is_prism),
                 sensor=sensor, **conn)
 
     def _init_distributed_face_geometry(self):

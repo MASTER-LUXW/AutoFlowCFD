@@ -148,23 +148,6 @@ def simplex2d_grad(a: np.ndarray, b: np.ndarray, i: int,
     return dmode_dr * norm, dmode_ds * norm
 
 
-def _warpfactor(p: int, rout: np.ndarray) -> np.ndarray:
-    """`Warpfactor.m`：一维边缘 warp。
-
-    复用 `warp_blend_nodes._evalwarp`（同一个函数的显式 Lagrange 实现，
-    三维节点生成已经在用），这里只补上 `Warpfactor.m` 末尾那个端点修正
-    ——`_evalwarp` 本身不含它，三维路径是在 `_evalshift` 里通过 blend
-    因子抵消的。为了与 `Nodes2D.m` 逐行一致，这里显式写出来。
-    """
-    from .warp_blend_nodes import _evalwarp, _jacobi_gl
-
-    lglr = _jacobi_gl(p)
-    warp = _evalwarp(p, lglr, rout)
-    zerof = (np.abs(rout) < 1.0 - 1.0e-10).astype(np.float64)
-    sf = 1.0 - (zerof * rout) ** 2
-    return warp / sf + warp * (zerof - 1.0)
-
-
 def warp_blend_nodes_2d(p: int) -> Tuple[np.ndarray, np.ndarray]:
     """`Nodes2D.m` + `xytors.m` 逐行移植：参考三角形上的 Warp & Blend 节点。
 
@@ -197,6 +180,12 @@ def warp_blend_nodes_2d(p: int) -> Tuple[np.ndarray, np.ndarray]:
 
     # `_evalshift` 就是 Nodes2D 里那段 blend+warp（三维路径也调用它处理
     # 面内），签名 (p, alpha, L1, L2, L3) -> (dx, dy)。
+    #
+    # `Warpfactor.m` 末尾那个端点修正**不需要**在这里再写一遍：它已经被
+    # `_evalshift` 里的 blend 因子（L2*L3 等在端点为零）抵消掉。本文件
+    # 曾经为"与 MATLAB 逐行一致"单独实现过一份 `_warpfactor`，但它从未
+    # 被调用过（零引用、零测试覆盖），2026-09-18 删除 —— 留一份不跑的
+    # 实现只会让后来人以为要同步维护它。
     dx, dy = _evalshift(p, alpha, l1, l2, l3)
     x = x + dx
     y = y + dy
@@ -210,26 +199,43 @@ def warp_blend_nodes_2d(p: int) -> Tuple[np.ndarray, np.ndarray]:
     return r, s
 
 
-def build_native_tri_vandermonde(order: int, r: np.ndarray, s: np.ndarray):
-    """给定三角形节点，构造 `(V, Vr, Vs)`。
+def eval_tri_modes(order: int, r: np.ndarray, s: np.ndarray):
+    """在**任意**点集上求全部受限 PKD 模态及其对 `(r,s)` 的梯度。
 
-    Raises:
-        ValueError: 节点数与模态数不相等（两者理论上都必须是
-            `(order+1)(order+2)/2`；不等说明节点生成或模态索引有 bug，
-            不应当静默继续）。
+    Returns:
+        `(V, Vr, Vs)`，各 `(n_pts, (order+1)(order+2)/2)`，列序与
+        `restricted_tri_modes(order)` 一致。
+
+    与 `build_native_tri_vandermonde` 的区别只有一条：这里**不要求**
+    点数等于模态数。棱柱基要在 `(order+1)^2(order+2)/2` 个棱柱节点上求
+    三角形模态（点数远多于三角形模态数），走的就是这条；把模态求值循环
+    留在一处，棱柱侧不再抄一遍公式（抄一遍的代价是两份要同步的事实
+    来源，本项目已多次因此出真实缺陷）。
     """
     modes = restricted_tri_modes(order)
-    n_pts = len(r)
-    if n_pts != len(modes):
-        raise ValueError(
-            f"三角形节点数 {n_pts} 与受限 PKD 模态数 {len(modes)} 不一致"
-            f"（order={order}）——两者理论上必须相等"
-            f"（(order+1)(order+2)/2）。")
     a, b = rs_to_ab(r, s)
-    V = np.empty((n_pts, len(modes)))
+    V = np.empty((len(a), len(modes)))
     Vr = np.empty_like(V)
     Vs = np.empty_like(V)
     for m, (i, j) in enumerate(modes):
         V[:, m] = simplex2d_value(a, b, i, j)
         Vr[:, m], Vs[:, m] = simplex2d_grad(a, b, i, j)
     return V, Vr, Vs
+
+
+def build_native_tri_vandermonde(order: int, r: np.ndarray, s: np.ndarray):
+    """给定三角形**节点**，构造方阵 Vandermonde `(V, Vr, Vs)`。
+
+    Raises:
+        ValueError: 节点数与模态数不相等（两者理论上都必须是
+            `(order+1)(order+2)/2`；不等说明节点生成或模态索引有 bug，
+            不应当静默继续）。非方阵的取值请用 `eval_tri_modes`。
+    """
+    n_pts = len(r)
+    n_modes = (order + 1) * (order + 2) // 2
+    if n_pts != n_modes:
+        raise ValueError(
+            f"三角形节点数 {n_pts} 与受限 PKD 模态数 {n_modes} 不一致"
+            f"（order={order}）——两者理论上必须相等"
+            f"（(order+1)(order+2)/2）。")
+    return eval_tri_modes(order, r, s)

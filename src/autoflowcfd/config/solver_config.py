@@ -67,7 +67,6 @@ class TurbulenceModel(str, Enum):
 # 未知取值报错而不是静默换方案）。
 from autoflowcfd.core.time_integration.base import (  # noqa: E402
     TimeIntegrationScheme,
-    scheme_from_name as parse_time_scheme,
 )
 
 

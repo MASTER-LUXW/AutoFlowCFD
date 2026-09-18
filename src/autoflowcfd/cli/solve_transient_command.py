@@ -9,7 +9,6 @@ import click
 from loguru import logger
 
 from autoflowcfd.core import FRSolver
-from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 from autoflowcfd.cli.solve_helpers import (
     compute_wall_distance_for_solver,
     load_mesh_for_solver,

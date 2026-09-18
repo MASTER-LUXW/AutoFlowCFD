@@ -228,6 +228,7 @@ def compute_bounds_violation_mask(
     abs_frac: float = DEFAULT_BOUNDS_ABS_FRAC,
     ref_scales=None,
     bnd_dirichlet=None,
+    bnd_mirror_normal=None,
 ) -> np.ndarray:
     """逐单元判定"解点值越出了面邻居均值区间" —— **纯数组接口**。
 
@@ -288,6 +289,26 @@ def compute_bounds_violation_mask(
                  边界条件这一份外部信息。
 
             构造见 `core/fr_solver/boundary.py::build_boundary_dirichlet_table`。
+        bnd_mirror_normal: 可选 (n_faces, 3)，**镜像型**边界面的单位外法向；
+            非有限行 = 该面不适用镜像规则。
+
+            **为什么静态的 `bnd_dirichlet` 不够**：对称面与滑移壁的外侧
+            "邻居"是本单元的镜像，它的**单元均值**对动量分量是
+            `m' = m - 2 (m . n) n` —— 依赖解，每个 stage 都不同，放不进
+            静态表。我先前论证过"对称面上排除即精确"，**那是错的**：
+            `m_n = 0` 只在**面上那一点**成立，镜像邻居的单元均值
+            `-<m_n>` 一般不为零（`<m_n>` 约等于 `(h/2) d(m_n)/dn`，而
+            对称面上 `dw/dz = -(du/dx + dv/dy)` 一般非零）。于是法向动量
+            那一列留下的正是与无滑移壁同样结构的**单侧包络**。
+
+            这不是假想：本项目唯一有精确解的粘性算例（Blasius 平板）
+            展向两面都是 SYMMETRY、顶面是滑移壁，`nz=1` 时**每个**单元的
+            `rho_w` 列包络都是单侧的 —— 而那个算例的开放问题恰好就是
+            展向 `w` 的非物理增长。
+
+            标量与切向分量的镜像均值**恰好等于**本单元均值，所以只有
+            动量三列（索引 1..3）需要处理；其余列的镜像贡献对包络初值
+            `cell_mean` 是无操作，直接跳过。
         rel_tol: 相对容差系数，见模块文档
         abs_frac: 绝对地板系数（乘以下面的参考量级），见模块文档
         ref_scales: 可选的 (n_var,) **来流参考量级**（例如
@@ -341,6 +362,8 @@ def compute_bounds_violation_mask(
         )
 
     n_var = field.shape[2]
+    o_b = None
+    bd_b = None
     if bnd_dirichlet is not None:
         bd = xp.asarray(bnd_dirichlet, dtype=xp.float64)
         if bd.shape != (owner.size, n_var):
@@ -350,9 +373,35 @@ def compute_bounds_violation_mask(
             )
         o_b = owner[bnd]
         bd_b = bd[bnd]
-    else:
-        bd_b = None
-        o_b = owner[:0]
+
+    o_mir = None
+    if bnd_mirror_normal is not None:
+        nrm_all = xp.asarray(bnd_mirror_normal, dtype=xp.float64)
+        if nrm_all.shape != (owner.size, 3):
+            raise ValueError(
+                f"bnd_mirror_normal 形状 {nrm_all.shape} 应为 "
+                f"(n_faces={owner.size}, 3)"
+            )
+        if n_var < 4:
+            raise ValueError(
+                f"bnd_mirror_normal 需要至少 4 个变量（动量占索引 1..3），"
+                f"收到 n_var={n_var}"
+            )
+        sel_mir = bnd & xp.all(xp.isfinite(nrm_all), axis=1)
+        if bool(xp.any(sel_mir)):
+            o_mir = owner[sel_mir]
+            nrm = nrm_all[sel_mir]
+            # 单位化在这里一处完成（镜像公式 `m - 2(m.n)n` 只对单位法向
+            # 成立）：构造方给的可能是逐通量点法向按面平均的结果，曲面上
+            # 那不是单位向量。规模是边界面数、每 stage 一次，可忽略。
+            nlen = xp.sqrt((nrm ** 2).sum(axis=1, keepdims=True))
+            if not bool(xp.all(nlen > 0.0)):
+                raise ValueError(
+                    "bnd_mirror_normal 里存在零长度法向——镜像公式 "
+                    "m - 2(m.n)n 对它没有定义，静默跳过会让那些面退回"
+                    "单侧包络而在日志里看不出来")
+            nrm = nrm / nlen
+
     if ref_scales is not None:
         ref = np.asarray(ref_scales, dtype=np.float64).ravel()
         if ref.size != n_var:
@@ -362,20 +411,30 @@ def compute_bounds_violation_mask(
     else:
         ref = None
 
-    mask = xp.zeros(n_cells, dtype=bool)
-    for v in range(n_var):
-        q = field[:, :, v]
-        cell_mean = q.mean(axis=1)
-        cell_max = q.max(axis=1)
-        cell_min = q.min(axis=1)
+    # 三次全场归约一次算完**所有**变量（此前是逐变量 mean/max/min，
+    # 5 个变量 15 次全场遍历）。这条判据是四条后端的**默认**路径、每个
+    # RK stage 调一次，36 万单元实测那 15 次归约占 0.11 s/stage。
+    cell_means = field.mean(axis=1)          # (n_cells, n_var)
+    cell_maxs = field.max(axis=1)
+    cell_mins = field.min(axis=1)
 
+    # 镜像型边界的动量均值：m' = m - 2 (m . n) n。标量与切向分量的镜像
+    # 均值恰好等于本单元均值（对包络初值是无操作），所以只算动量三列，
+    # 而且只算一次、不进逐变量循环。
+    mir_mom = None
+    if o_mir is not None:
+        m = cell_means[o_mir, 1:4]
+        dot = (m * nrm).sum(axis=1, keepdims=True)
+        mir_mom = m - 2.0 * dot * nrm        # (n_mir, 3)
+
+    mask = None
+    for v in range(n_var):
+        cell_mean = cell_means[:, v]
         # 邻域区间：自身均值 + 全部面邻居的均值。两个方向都要做——
         # 一条内部面同时是 owner 的邻居来源和 neighbor 的邻居来源。
         nb_max = cell_mean.copy()
         nb_min = cell_mean.copy()
         if o_i.size:
-            # 两个方向都要做——一条内部面同时是 owner 的邻居来源和
-            # neighbor 的邻居来源。
             _scatter_minmax(xp, nb_max, nb_min, o_i, cell_mean[n_i])
             _scatter_minmax(xp, nb_max, nb_min, n_i, cell_mean[o_i])
         if bd_b is not None and o_b.size:
@@ -385,14 +444,17 @@ def compute_bounds_violation_mask(
             col = bd_b[:, v]
             val = xp.where(xp.isfinite(col), col, cell_mean[o_b])
             _scatter_minmax(xp, nb_max, nb_min, o_b, val)
+        if mir_mom is not None and 1 <= v <= 3:
+            _scatter_minmax(xp, nb_max, nb_min, o_mir, mir_mom[:, v - 1])
         if ref is not None:
             scale = float(ref[v])
         else:
             scale = float(xp.sqrt(xp.mean(cell_mean.astype(xp.float64) ** 2)))
         tol = rel_tol * (nb_max - nb_min) + abs_frac * max(scale, 1e-300)
-        mask |= (cell_max > nb_max + tol) | (cell_min < nb_min - tol)
+        hit = (cell_maxs[:, v] > nb_max + tol) | (cell_mins[:, v] < nb_min - tol)
+        mask = hit if mask is None else (mask | hit)
 
-    return mask
+    return mask if mask is not None else xp.zeros(n_cells, dtype=bool)
 
 
 def resolve_troubled_sensor(value: Optional[str] = None) -> str:

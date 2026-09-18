@@ -892,6 +892,7 @@ class DistributedFRSolver:
         是纯数组接口），这里不复制一份实现——只提供索引换算与 halo 扩展。
         """
         from autoflowcfd.core.fr_solver.filter import (
+            build_distributed_bounds_conn,
             build_sensor_gated_filter_func_arrays,
         )
         from autoflowcfd.core.fr_operators.bounds_sensor import (
@@ -901,69 +902,22 @@ class DistributedFRSolver:
         sensor = resolve_troubled_sensor()
         conn = {}
         if sensor in ("bounds", "both"):
-            dist_fc = self.dist_flat_face
-            perm = np.asarray(dist_fc.perm)
-            if perm is None or perm.size == 0:
-                raise RuntimeError(
-                    "sensor+bounds 需要 dist_flat_face.perm 做紧凑->原生"
-                    "索引换算，当前分布式面几何没有它"
-                )
-            n_total = int(self.partition.n_total_cells)
-            if perm.size != n_total:
-                raise RuntimeError(
-                    f"dist_flat_face.perm 长度 {perm.size} 与 "
-                    f"n_total_cells {n_total} 不符，索引换算不可靠"
-                )
-            oc = np.asarray(dist_fc.owner_cell_local)
-            nc = np.asarray(dist_fc.neighbor_cell_local)
-            bnd = np.asarray(dist_fc.is_boundary, dtype=bool)
-            # 边界面的 neighbor_cell_local 是 -1（本类文档）。这两个集合
-            # 必须严格重合：不重合意味着"某条边界面带着真实邻居"或"某条
-            # 内部面没有邻居"，任一情形下 BJ 包络都会读到错误的单元，
-            # 而那种错误在残差日志里完全看不出来。
-            if not np.array_equal(nc < 0, bnd):
-                n_mismatch = int(np.count_nonzero((nc < 0) != bnd))
-                raise RuntimeError(
-                    f"分布式面几何自洽性失败：{n_mismatch} 条面的 "
-                    f"(neighbor_cell_local < 0) 与 is_boundary 不一致。"
-                    f"BJ 越界判据靠 is_boundary 排除没有邻居单元的面。"
-                )
-            # 紧凑 -> 原生。边界面的 -1 先填 0（占位），它们被
-            # is_boundary 排除，不会被读到。
-            owner_native = perm[oc]
-            neigh_native = perm[np.where(nc >= 0, nc, 0)]
-            halo_ex = self.halo_exchange
-
-            def halo_extend(U_local_3d):
-                # `exchange` 返回 (n_total, n_sps, n_vars) 原生排列；
-                # 无 MPI / 单 rank 时它只是把 local 拷进扩展数组，
-                # 于是掩码与单机路径逐位相同。
-                return halo_ex.exchange(np.ascontiguousarray(U_local_3d))
-
-            # 无滑移壁面的动量 Dirichlet 值（见
-            # `fr_solver/boundary.py::build_boundary_dirichlet_table`）。
-            # 不给它，贴壁单元会被结构性误判、壁面剪应力被压掉 14 倍。
+            # 索引换算、两条自洽性护栏、halo 扩展时机、两张边界表的惰性
+            # 构造全部在共享实现里（见 `build_distributed_bounds_conn`），
+            # 多 GPU 走的是同一条。
+            #
             # provider 取自 `self.local_solver`（惰性属性），它的
             # `group_code` 已经被重切到 `partition.local_faces`——与
             # `dist_flat_face` 同一索引空间，见 `local_solver` 文档里那处
-            # "group_code 重映射"的说明。惰性求值（传 lambda）是因为
-            # 构造 local_solver 本身有代价、且此刻未必已经建好。
-            _n_faces = int(bnd.size)
-
-            def _bnd_dirichlet():
-                from autoflowcfd.core.fr_solver.boundary import (
-                    build_boundary_dirichlet_table,
-                )
-                prov = getattr(self.local_solver,
-                               "boundary_ghost_provider", None)
-                return build_boundary_dirichlet_table(prov, _n_faces, 5)
-
-            conn = dict(owner_cell=owner_native,
-                        neighbor_cell=neigh_native,
-                        is_boundary=bnd,
-                        freestream=self.freestream,
-                        halo_extend=halo_extend,
-                        bnd_dirichlet=_bnd_dirichlet)
+            # "group_code 重映射"的说明。惰性（传 lambda）是因为构造
+            # local_solver 本身有代价、且此刻未必已经建好。
+            conn = build_distributed_bounds_conn(
+                self.dist_flat_face,
+                self.partition.n_total_cells,
+                lambda: self.halo_exchange,
+                lambda: getattr(self.local_solver,
+                                "boundary_ghost_provider", None),
+                self.freestream)
 
         order = int(getattr(self, "current_order", self.order))
         return build_sensor_gated_filter_func_arrays(

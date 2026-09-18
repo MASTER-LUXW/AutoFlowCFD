@@ -51,10 +51,8 @@ import numpy as np
 
 from .collapsed_basis import grad_jacobi_polynomial, jacobi_polynomial
 from .native_triangle_basis import (
+    eval_tri_modes,
     restricted_tri_modes,
-    rs_to_ab,
-    simplex2d_grad,
-    simplex2d_value,
     warp_blend_nodes_2d,
 )
 from .quadrature_points import gauss_legendre
@@ -110,29 +108,30 @@ def build_native_prism_vandermonde(order: int, ref_rst: np.ndarray):
     """
     ref_rst = np.asarray(ref_rst, dtype=np.float64)
     r, s, t = ref_rst[:, 0], ref_rst[:, 1], ref_rst[:, 2]
-    a, b = rs_to_ab(r, s)
-    modes = restricted_prism_modes(order)
-    n_pts = len(r)
-    V = np.empty((n_pts, len(modes)))
-    Vr = np.empty_like(V)
-    Vs = np.empty_like(V)
-    Vt = np.empty_like(V)
 
-    # 三角形部分按 (i,j) 缓存：每个 (i,j) 对应 order+1 个 k，值相同。
-    tri_cache = {}
-    for m, (i, j, k) in enumerate(modes):
-        key = (i, j)
-        if key not in tri_cache:
-            psi = simplex2d_value(a, b, i, j)
-            dpsi_dr, dpsi_ds = simplex2d_grad(a, b, i, j)
-            tri_cache[key] = (psi, dpsi_dr, dpsi_ds)
-        psi, dpsi_dr, dpsi_ds = tri_cache[key]
-        lk = jacobi_polynomial(t, 0.0, 0.0, k)
-        dlk = grad_jacobi_polynomial(t, 0.0, 0.0, k)
-        V[:, m] = psi * lk
-        Vr[:, m] = dpsi_dr * lk
-        Vs[:, m] = dpsi_ds * lk
-        Vt[:, m] = psi * dlk
+    # 三角形那一半整块复用 `eval_tri_modes`（同一份公式，不抄第二遍）。
+    # 它一次给出全部 `n_tri` 个三角形模态在**全部**棱柱点上的值。
+    tri_V, tri_Vr, tri_Vs = eval_tri_modes(order, r, s)
+
+    # 挤出方向的 Legendre 只有 order+1 个，逐 k 求一次即可。
+    n_t = order + 1
+    leg = np.empty((len(t), n_t))
+    dleg = np.empty_like(leg)
+    for k in range(n_t):
+        leg[:, k] = jacobi_polynomial(t, 0.0, 0.0, k)
+        dleg[:, k] = grad_jacobi_polynomial(t, 0.0, 0.0, k)
+
+    # 模态排列是"三角形模态外层、挤出模态内层"（见模块文档），所以
+    # 第 m 个棱柱模态的三角形列号恰好是 `m // n_t`、Legendre 次数是
+    # `m % n_t` —— 不需要再查表。
+    n_tri = tri_V.shape[1]
+    tri_col = np.repeat(np.arange(n_tri), n_t)
+    leg_col = np.tile(np.arange(n_t), n_tri)
+
+    V = tri_V[:, tri_col] * leg[:, leg_col]
+    Vr = tri_Vr[:, tri_col] * leg[:, leg_col]
+    Vs = tri_Vs[:, tri_col] * leg[:, leg_col]
+    Vt = tri_V[:, tri_col] * dleg[:, leg_col]
     return V, Vr, Vs, Vt
 
 

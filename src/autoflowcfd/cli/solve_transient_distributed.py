@@ -17,7 +17,6 @@ core/mpi/distributed_mesh_loader.py 模块文档），此前的拒绝已放开�
 
 import click
 
-from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 from autoflowcfd.cli.solve_aero_coefficients import _report_aerodynamic_coefficients
 
 
@@ -310,11 +309,11 @@ def _solve_transient_multi_gpu(
 
     from autoflowcfd.core.gpu.distributed.gpu_distributed import MultiGPUDistributedSolver
 
-    time_scheme_str = {
-        TimeIntegrationScheme.SSP_RK3: "ssp_rk3",
-        TimeIntegrationScheme.IMEX_EULER: "imex_euler",
-        TimeIntegrationScheme.DUAL_TIME: "dual_time",
-    }.get(time_scheme, "ssp_rk3")
+    # 枚举自己的 `.value` 就是求解器认的字符串（见
+    # `core/time_integration/base.py`），不在这里再抄一张表——抄的那张
+    # 用 `.get(..., "ssp_rk3")` 兜底，于是新增一种格式时会**静默**退回
+    # SSP-RK3 跑完整个算例，日志里看不出任何异常。
+    time_scheme_str = time_scheme.value
 
     if fully_distributed:
         import math

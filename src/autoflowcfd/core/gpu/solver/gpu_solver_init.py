@@ -50,27 +50,37 @@ class _GPUSolverInitMixin:
         from autoflowcfd.core.fr_solver.filter import resolve_filter_mode
         mode = resolve_filter_mode("gpu-single")
 
-        try:
-            filter_prism = self.ops.filter_prism
-            filter_tet = self.ops.filter_tet
-
-            if filter_prism is not None or filter_tet is not None:
-                if mode == "sensor":
-                    self.filter_func_gpu = self._build_sensor_gated_filter_gpu(
-                        n_cells, n_sps, n_prism, filter_prism, filter_tet)
-                else:
-                    from autoflowcfd.core.gpu.gpu_modal_filter import (
-                        build_gpu_filter_func,
-                    )
-                    self.filter_func_gpu = build_gpu_filter_func(
-                        n_cells, n_sps, n_prism,
-                        filter_prism, filter_tet,
-                        device_id=self.device_id,
-                    )
-                logger.debug(f"GPU modal filter initialized (mode={mode})")
-        except Exception as e:
-            logger.warning(f"Modal filter init failed: {e}, running without filter")
-            self.filter_func_gpu = None
+        # **2026-09-18：这里原本套着 `except Exception -> warning +
+        # filter_func_gpu = None`，已删除。** 同一个文件的
+        # `_init_face_geometry` 早就因为完全同一条理由删掉了宽 except
+        # （见那边文档："必须让求解器初始化真正失败，而不是静默退化"）。
+        #
+        # 为什么必须一起删：本轮给门控接线新加的硬护栏**全部**落在这个
+        # try 内部 —— `mesh.face_connectivity is None`、`n_prism` 越界、
+        # `cell_is_prism` 形状不符、`cupyx` 缺 scatter_max（见
+        # `bounds_sensor._scatter_minmax`）。每一条的注释都写着"不静默
+        # 继续/不静默钳"，而实际执行路径是 except -> warning -> **完全
+        # 无滤波**继续跑。那比它替换掉的 `project` 退档离默认档更远，
+        # 而且只留一条 warning。`resolve_filter_mode` 承诺"四条后端全部
+        # 接线、不接线就报错"，靠这个出口整条承诺就落空了。
+        #
+        # 滤波档是数值方案的一部分，构建失败必须让构造失败。
+        filter_prism = self.ops.filter_prism
+        filter_tet = self.ops.filter_tet
+        if filter_prism is not None or filter_tet is not None:
+            if mode == "sensor":
+                self.filter_func_gpu = self._build_sensor_gated_filter_gpu(
+                    n_cells, n_sps, n_prism, filter_prism, filter_tet)
+            else:
+                from autoflowcfd.core.gpu.gpu_modal_filter import (
+                    build_gpu_filter_func,
+                )
+                self.filter_func_gpu = build_gpu_filter_func(
+                    n_cells, n_sps, n_prism,
+                    filter_prism, filter_tet,
+                    device_id=self.device_id,
+                )
+            logger.debug(f"GPU modal filter initialized (mode={mode})")
 
     def _build_sensor_gated_filter_gpu(self, n_cells, n_sps, n_prism,
                                        filter_prism, filter_tet):
@@ -93,14 +103,25 @@ class _GPUSolverInitMixin:
         单 GPU 的全局单元编号满足"棱柱在前"约定，所以用 `n_prism` 即可
         （分布式 local 排列不满足，走 `cell_is_prism`，见
         `gpu_distributed_init.py`）；也不需要 halo 扩展——没有分区边界。
+
+        **没有 CuPy 时整条门控退回 numpy**（本机与 CI 的 numpy 替身
+        端到端测试就走这条）：`build_sensor_gated_filter_func_arrays` 从
+        滤波矩阵推断数组模块，传 numpy 进去它就是 numpy 路径，数值与
+        CPU 单机一致。**不静默跳过门控** —— 那会让"替身测试通过"与
+        "真实 GPU 上门控真的生效"脱钩，而这正是本文件此前那个
+        `except Exception -> warning` 兜底造成的问题（它把所有硬护栏
+        一起吞了，2026-09-18 删除）。完整论证见
+        `core/gpu/device_context.py` 模块文档。
         """
-        cp = get_cupy()
         from autoflowcfd.core.fr_solver.filter import (
             build_sensor_gated_filter_func_arrays,
         )
         from autoflowcfd.core.fr_operators.bounds_sensor import (
             resolve_troubled_sensor,
         )
+        from autoflowcfd.core.gpu.device_context import device_transfer
+
+        _dev, _to_dev = device_transfer(self.device_id)
 
         sensor = resolve_troubled_sensor()
         conn = {}
@@ -112,36 +133,33 @@ class _GPUSolverInitMixin:
                     "mesh.face_connectivity（BJ 判据要面邻居均值），"
                     "当前网格没有构建面连接")
             _n_faces = int(np.asarray(fc.owner_cell).size)
+            # BJ 判据的两张边界表。不给它们，贴壁单元会被结构性误判、
+            # 壁面剪应力被压掉 14 倍（见 `fr_solver/boundary.py::
+            # make_bj_boundary_tables`，惰性求值的理由也在那里）。
+            from autoflowcfd.core.fr_solver.boundary import (
+                make_bj_boundary_tables,
+            )
+            _nrm = getattr(fc, "normal", None)
 
-            def _bnd_dirichlet():
-                # 无滑移壁面的动量 Dirichlet 值。不给它，贴壁单元会被
-                # 结构性误判、壁面剪应力被压掉 14 倍（见
-                # `fr_solver/boundary.py::build_boundary_dirichlet_table`）。
-                # 惰性求值：本方法可能在 provider 建好之前被调用。
-                from autoflowcfd.core.fr_solver.boundary import (
-                    build_boundary_dirichlet_table,
-                )
-                t = build_boundary_dirichlet_table(
-                    getattr(self, "boundary_ghost_provider", None),
-                    _n_faces, 5)
-                if t is None:
-                    return None
-                with cp.cuda.Device(self.device_id):
-                    return cp.asarray(t)
-
-            with cp.cuda.Device(self.device_id):
+            with _dev:
                 conn = dict(
-                    owner_cell=cp.asarray(fc.owner_cell),
-                    neighbor_cell=cp.asarray(fc.neighbor_cell),
-                    is_boundary=cp.asarray(
+                    owner_cell=_to_dev(fc.owner_cell),
+                    neighbor_cell=_to_dev(fc.neighbor_cell),
+                    is_boundary=_to_dev(
                         np.asarray(fc.is_boundary, dtype=bool)),
                     freestream=self.freestream,
-                    bnd_dirichlet=_bnd_dirichlet,
+                    bnd_tables=make_bj_boundary_tables(
+                        lambda: getattr(self, "boundary_ghost_provider", None),
+                        _n_faces,
+                        None if _nrm is None else np.asarray(_nrm),
+                        to_device=_to_dev),
                 )
         order = int(getattr(self, "current_order", self.order))
-        with cp.cuda.Device(self.device_id):
-            fp = filter_prism if hasattr(filter_prism, "device") else cp.asarray(filter_prism)
-            ft = filter_tet if hasattr(filter_tet, "device") else cp.asarray(filter_tet)
+        with _dev:
+            fp = (filter_prism if hasattr(filter_prism, "device")
+                  else _to_dev(filter_prism))
+            ft = (filter_tet if hasattr(filter_tet, "device")
+                  else _to_dev(filter_tet))
             return build_sensor_gated_filter_func_arrays(
                 n_cells, n_sps, order, fp, ft, n_prism=n_prism,
                 sensor=sensor, **conn)

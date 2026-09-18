@@ -11,6 +11,10 @@ legacy：P1 退化成 P0、壁面剪应力恒为零）。2026-09-18 补齐 CPU M
 """
 
 import numpy as np
+
+from autoflowcfd.core.fr_solver.residual_diagnostics import (
+    _reference_scales,
+)
 import pytest
 
 from autoflowcfd.core.fr_operators.bounds_sensor import (
@@ -70,7 +74,10 @@ def _build_global_case(seed=11, n_cells=240, n_sps=6, n_var=5):
 
 
 _FREESTREAM = {"rho_inf": 1.225, "vel_inf": 30.0, "p_inf": 101325.0}
-_REF = np.array([1.225, 1.225 * 30.0, 1.225 * 30.0, 1.225 * 30.0, 101325.0])
+#: 参考量级**读**生产实现，不在测试里再抄一份常量。抄一份的后果是：
+#: 哪天 `_reference_scales` 改了口径，测试仍按旧口径通过，于是这套
+#: "分布式与单机掩码必须逐位一致"的判据会静默失效。
+_REF = _reference_scales(_FREESTREAM, 5)
 
 
 def _rank_view(owner, neigh, is_bnd, local_ids):
@@ -263,11 +270,18 @@ def _stub_solver(field, owner, neigh, is_bnd, local_ids, n_sps):
     o_cmp = inv[o_nat]
     n_cmp = np.where(b_r, -1, inv[n_nat])
 
+    # `true_normal` 是逐**通量点**的 (n_faces, n_fp, 3)（真实
+    # FlatFaceGeometry 就是这个形状），门控要靠它给对称面/滑移壁补镜像
+    # 包络贡献。这里给两个通量点，顺带钉住"逐通量点要被归约成逐面"。
+    n_faces_stub = len(b_r)
+    tn = np.zeros((n_faces_stub, 2, 3))
+    tn[:, :, 2] = 1.0
     dist_fc = SimpleNamespace(
         perm=perm, inv_perm=inv,
         owner_cell_local=o_cmp, neighbor_cell_local=n_cmp,
         is_boundary=b_r,
         compact_cell_type=np.zeros(n_total, dtype=np.int8),
+        true_normal=tn,
     )
     F = np.full((n_sps, n_sps), 1.0 / n_sps)
     # `local_solver` 是真实类上的惰性属性，门控从它取
@@ -480,3 +494,61 @@ class TestDirichletTableReachesTheDistributedPath:
             stub, n_local, n_sps, np.zeros(n_local, dtype=bool))
         flat = field[local_ids].reshape(n_local * n_sps, 5).copy()
         assert ff(flat.copy()).shape == flat.shape
+
+
+class TestMirrorNormalsReachTheDistributedPath:
+    """对称面/滑移壁的镜像法向必须真的进到分布式门控的判据内核里。
+
+    与上面那条 Dirichlet 表的测试是同一个缺陷的两半：边界面没有邻居单元
+    均值 -> 包络单侧收窄 -> "线性场恒不触发"这个设计不变量被破坏。漏掉
+    这条后端不会报错，只会让对称面旁的单元被结构性误判，而那在残差日志里
+    完全看不出来。
+    """
+
+    def test_kernel_receives_reduced_per_face_normals(self, monkeypatch):
+        from types import SimpleNamespace
+
+        monkeypatch.setenv("AFCFD_TROUBLED_SENSOR", "bounds")
+        from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
+        from autoflowcfd.core.fr_operators import bounds_sensor as bs
+
+        field, owner, neigh, is_bnd, _ = _build_global_case()
+        n_cells, n_sps = field.shape[0], field.shape[1]
+        local_ids = np.arange(0, n_cells // 2)
+        _, _, _o_r, _n_r, b_r = _rank_view(owner, neigh, is_bnd, local_ids)
+        n_faces = len(b_r)
+
+        gc = np.full(n_faces, -1, dtype=np.int64)
+        gc[np.asarray(b_r, dtype=bool)] = 3
+        sym = SimpleNamespace(
+            group_code=gc,
+            code_to_config={3: {"type": "SYMMETRY"}},
+            default_config={"type": "FARFIELD"})
+
+        seen = {}
+        orig = bs.compute_bounds_violation_mask
+
+        def spy(*a, **kw):
+            seen["mir"] = kw.get("bnd_mirror_normal")
+            return orig(*a, **kw)
+
+        monkeypatch.setattr(bs, "compute_bounds_violation_mask", spy)
+
+        stub, _, n_local = _stub_solver(
+            field, owner, neigh, is_bnd, local_ids, n_sps)
+        stub.local_solver = SimpleNamespace(boundary_ghost_provider=sym)
+        ff = DistributedFRSolver._build_sensor_gated_filter_func_distributed(
+            stub, n_local, n_sps, np.zeros(n_local, dtype=bool))
+        flat = field[local_ids].reshape(n_local * n_sps, 5).copy()
+        ff(flat.copy())
+
+        mir = seen.get("mir")
+        assert mir is not None, "判据内核根本没收到 bnd_mirror_normal"
+        mir = np.asarray(mir)
+        assert mir.shape == (n_faces, 3), (
+            f"形状 {mir.shape} 不对——逐通量点的 true_normal 应当被归约成"
+            f"逐面 (n_faces, 3)")
+        is_b = np.asarray(b_r, dtype=bool)
+        assert np.allclose(mir[is_b], np.array([0.0, 0.0, 1.0])), (
+            "对称面应当拿到单位外法向")
+        assert np.all(~np.isfinite(mir[~is_b])), "内部面应当全是 NaN"

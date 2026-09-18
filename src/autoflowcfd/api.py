@@ -360,7 +360,6 @@ class AutoFlowCFDAPI:
 
         from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
         from autoflowcfd.cli.solve_wall_distance import compute_wall_distance_for_solver
-        from autoflowcfd.core.time_integration.base import TimeIntegrationScheme as CoreTimeScheme
 
         if mode is not None:
             turbulence_model = mode
