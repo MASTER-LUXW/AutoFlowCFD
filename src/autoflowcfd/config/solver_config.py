@@ -190,8 +190,29 @@ class SolverConfig:
             raise ValueError(
                 f"flux_type 必须是 'radau' 或 'gauss'，得到 {self.flux_type!r}")
 
-        # 如果输出目录不存在则创建
+        # **2026-09-18：这里原本 `os.makedirs(self.output_dir)`，已删除。**
+        #
+        # 那是"构造一个值对象就产生文件系统副作用"——只要有人构造
+        # `SteadyConfig()` / `TransientConfig()`（默认 output_dir 是
+        # `./results` / `./transient_results`），当前工作目录下就会凭空
+        # 出现那个目录。真实后果：**跑一遍 `pytest tests/unit` 就在仓库
+        # 根目录留下 `results/`、`transient_results/`、`checkpoints/`**
+        # ——用户两次明确要求项目文件夹里不许出现这些目录，根源就在这。
+        #
+        # 而且它是**冗余**的：真正写输出的两处都自己建目录
+        # （`cli/solve_checkpoint_io.py::save_results` 与
+        # `cli/solve_steady_command.py` 的保存分支都有
+        # `os.makedirs(output_dir, exist_ok=True)`）。要显式预建请调用
+        # 下面的 `ensure_output_dir()`。
+
+    def ensure_output_dir(self) -> str:
+        """真正需要写输出时再建目录，返回路径。
+
+        与构造期建目录的区别：**调用者显式表达了"我要写了"这个意图**。
+        配置对象本身是纯值对象，构造它不应当碰文件系统。
+        """
         os.makedirs(self.output_dir, exist_ok=True)
+        return self.output_dir
     
     @property
     def is_gpu(self) -> bool:

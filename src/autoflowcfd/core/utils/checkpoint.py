@@ -71,11 +71,19 @@ class CheckpointManager:
         self.output_dir = Path(output_dir)
         self.checkpoint_interval = checkpoint_interval
         self.checkpoint_dir = self.output_dir / "checkpoints"
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        # **2026-09-18：构造期不再 mkdir**，改到首次 `save()` 时建
+        # （见 `_ensure_checkpoint_dir`）。构造一个管理器对象不应当产生
+        # 文件系统副作用：`output_dir` 默认相对 CWD，于是任何在项目目录
+        # 里构造它的代码（包括只验证字段的单元测试）都会凭空留下
+        # `checkpoints/`。用户两次明确要求项目文件夹里不许出现这些目录。
         self.quiet = quiet
 
         if not quiet:
             logger.info(f"CheckpointManager initialized: {self.checkpoint_dir}")
+
+    def _ensure_checkpoint_dir(self) -> None:
+        """首次真正写 checkpoint 时创建目录（见 `__init__` 里的说明）。"""
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
     def _compute_config_hash(self) -> str:
         """计算求解器配置的 SHA256 哈希。
@@ -131,6 +139,7 @@ class CheckpointManager:
         try:
             # 生成 checkpoint 文件名
             ckpt_filename = f"checkpoint_iter_{iteration:06d}.h5"
+            self._ensure_checkpoint_dir()
             ckpt_path = self.checkpoint_dir / ckpt_filename
 
             logger.debug(f"Saving checkpoint: {ckpt_path}")

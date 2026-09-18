@@ -217,6 +217,7 @@ def build_blasius_solver(
     cells_in_delta: float = 6.0,
     delta_margin: float = 6.0,
     turb_model: str = "NONE",
+    lz_over_h: float = 0.25,
 ):
     """构造平板边界层求解器；返回 `(solver, meta)`。
 
@@ -238,6 +239,14 @@ def build_blasius_solver(
         re_l: 板长雷诺数
         cells_in_delta: x=L 处 delta99 内要求的层数
         delta_margin: 通道高度是 delta99(L) 的多少倍
+        lz_over_h: 展向宽度与通道高度之比，`Lz = lz_over_h * H`。默认
+            0.25（原先写死的值，所以默认行为不变）。
+
+            **为什么做成参数（2026-09-18）**：本算例的三角形在 **x–z
+            平面**（挤出沿壁面法向 y，理由见 `_channel_mesh.py`），所以
+            `Lz` 决定三角形的**流向/展向长宽比**。展向 w 长到来流 4~5%
+            这个开放问题的下一个待验证方向就是"流向强梯度通过坍缩三角形
+            基耦合出 w"，而判别它需要扫这个长宽比——写死的常数扫不了。
         turb_model: 湍流模型名（层流验证用 "NONE"）
     """
     import sys
@@ -259,7 +268,7 @@ def build_blasius_solver(
     H = delta_margin * d99_L
     ny_needed = int(round(delta_margin * cells_in_delta))
     ny_use = int(ny) if ny else ny_needed
-    Lz = H / 4.0
+    Lz = float(lz_over_h) * H
 
     mesh = build_channel_mesh_prism(order, nx=nx, ny=ny_use, nz=nz,
                                     Lx=L_PLATE, H=H, Lz=Lz)
