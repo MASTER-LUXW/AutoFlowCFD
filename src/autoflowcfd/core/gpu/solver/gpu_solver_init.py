@@ -111,6 +111,24 @@ class _GPUSolverInitMixin:
                     "AFCFD_TROUBLED_SENSOR=bounds/both 需要 "
                     "mesh.face_connectivity（BJ 判据要面邻居均值），"
                     "当前网格没有构建面连接")
+            _n_faces = int(np.asarray(fc.owner_cell).size)
+
+            def _bnd_dirichlet():
+                # 无滑移壁面的动量 Dirichlet 值。不给它，贴壁单元会被
+                # 结构性误判、壁面剪应力被压掉 14 倍（见
+                # `fr_solver/boundary.py::build_boundary_dirichlet_table`）。
+                # 惰性求值：本方法可能在 provider 建好之前被调用。
+                from autoflowcfd.core.fr_solver.boundary import (
+                    build_boundary_dirichlet_table,
+                )
+                t = build_boundary_dirichlet_table(
+                    getattr(self, "boundary_ghost_provider", None),
+                    _n_faces, 5)
+                if t is None:
+                    return None
+                with cp.cuda.Device(self.device_id):
+                    return cp.asarray(t)
+
             with cp.cuda.Device(self.device_id):
                 conn = dict(
                     owner_cell=cp.asarray(fc.owner_cell),
@@ -118,6 +136,7 @@ class _GPUSolverInitMixin:
                     is_boundary=cp.asarray(
                         np.asarray(fc.is_boundary, dtype=bool)),
                     freestream=self.freestream,
+                    bnd_dirichlet=_bnd_dirichlet,
                 )
         order = int(getattr(self, "current_order", self.order))
         with cp.cuda.Device(self.device_id):

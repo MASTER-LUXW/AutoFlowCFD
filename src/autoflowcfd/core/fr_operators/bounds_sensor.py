@@ -227,6 +227,7 @@ def compute_bounds_violation_mask(
     rel_tol: float = DEFAULT_BOUNDS_REL_TOL,
     abs_frac: float = DEFAULT_BOUNDS_ABS_FRAC,
     ref_scales=None,
+    bnd_dirichlet=None,
 ) -> np.ndarray:
     """逐单元判定"解点值越出了面邻居均值区间" —— **纯数组接口**。
 
@@ -245,9 +246,48 @@ def compute_bounds_violation_mask(
         owner_cell: (n_faces,) 面的 owner 单元索引
         neighbor_cell: (n_faces,) 面的 neighbor 单元索引；边界面该项不被
             读取（可以是任意占位值，例如 -1）
-        is_boundary: (n_faces,) 布尔，True=边界面。边界面不参与邻域区间
-            构造——边界外侧没有"邻居单元均值"，用幽灵态会把边界条件的
-            物理跳跃（例如壁面镜像的法向速度反号）误判成越界。
+        is_boundary: (n_faces,) 布尔，True=边界面。边界面不提供"邻居单元
+            均值"——用**幽灵态**会把边界条件本身的物理跳跃（壁面镜像把
+            法向速度取反）误判成越界。缺失那一侧要用 `bnd_dirichlet`
+            给出的**物理边界值**补上，见该参数。
+        bnd_dirichlet: 可选 (n_faces, n_var)，边界面上该变量的物理边界
+            值（守恒变量口径）；非有限值（NaN/inf）= 该面该变量没有
+            Dirichlet 值，退回"排除"（对 `nb_max`/`nb_min` 的初值
+            `cell_mean` 恰好是无操作，所以与不给它时逐位一致）。
+
+            **为什么必须有它（2026-09-18 真实缺陷）**：单纯"排除"会让该
+            单元在那个方向上的包络变成**单侧**的，从而破坏本判据的设计
+            不变量"线性场恒不触发"——贴壁单元靠壁那个解点必然低于本单元
+            均值、也低于上方邻居均值，而包络下界恰好就是本单元均值。
+
+            定量（Blasius 平板，有精确解，nx=16，400 步，**固定 CFL 0.03
+            同步数**的干净对照；壁面剪应力用胞内两点斜率提取，该提取已用
+            "把解析解直接放到同一网格上"验证到中位 -0.49%、最大 1.82%）：
+
+                off / sensor+persson（掩码恒空）  du/dy 1312.7  cf  -6.33%
+                sensor+bounds（修复前）           du/dy   93.0  cf -93.37%
+
+            全域标记率只有 0.400%，但**贴壁那一层是 14.393%**（集中 36
+            倍，逐变量 rho_u 1.401% / rho_w 0.698%），而壁面剪应力恰好
+            只由这一层决定：单元内扩散重建梯度约需 `h^2/nu/dt ~ 26` 步，
+            而每 stage 14% 的投影率平均每 2 步就再清一次，梯度永远建不
+            起来。这是 Barth-Jespersen 的已知性质——它是**单调性**判据，
+            强梯度边界层本来就越出邻居均值包络（经典的"BJ 在光滑极值处
+            损失精度"）。
+
+            **两条被自己数据否掉的替代方案**（不要再试）：
+              1. 边界侧用 owner 自身解点极值撑开包络 —— 边界单元恒不
+                 可能被标记，而 `nz=1` 的准二维算例里每个单元都贴着两个
+                 对称面，实测标记率变成全域 0.000%，判据整个失效；
+              2. 把内部包络对本单元均值作**镜像**补上缺失一侧 —— 线性场
+                 不变量恢复了（贴壁层 14.393% -> 2.099%），但贴边界单元
+                 内部一个 50 倍的**真实**过冲也抓不到：镜像半宽由"本单元
+                 均值与邻居均值之差"决定，而单元自身就是异常值时这个差
+                 正好被它自己撑大。单邻居情形下仅凭单元均值在信息上
+                 **无法**区分"陡峭单调"与"本单元是异常值"——必须引入
+                 边界条件这一份外部信息。
+
+            构造见 `core/fr_solver/boundary.py::build_boundary_dirichlet_table`。
         rel_tol: 相对容差系数，见模块文档
         abs_frac: 绝对地板系数（乘以下面的参考量级），见模块文档
         ref_scales: 可选的 (n_var,) **来流参考量级**（例如
@@ -301,6 +341,18 @@ def compute_bounds_violation_mask(
         )
 
     n_var = field.shape[2]
+    if bnd_dirichlet is not None:
+        bd = xp.asarray(bnd_dirichlet, dtype=xp.float64)
+        if bd.shape != (owner.size, n_var):
+            raise ValueError(
+                f"bnd_dirichlet 形状 {bd.shape} 应为 "
+                f"(n_faces={owner.size}, n_var={n_var})"
+            )
+        o_b = owner[bnd]
+        bd_b = bd[bnd]
+    else:
+        bd_b = None
+        o_b = owner[:0]
     if ref_scales is not None:
         ref = np.asarray(ref_scales, dtype=np.float64).ravel()
         if ref.size != n_var:
@@ -326,7 +378,13 @@ def compute_bounds_violation_mask(
             # neighbor 的邻居来源。
             _scatter_minmax(xp, nb_max, nb_min, o_i, cell_mean[n_i])
             _scatter_minmax(xp, nb_max, nb_min, n_i, cell_mean[o_i])
-
+        if bd_b is not None and o_b.size:
+            # 边界面：有 Dirichlet 值的把它当"外侧均值"计入包络；NaN 的
+            # 用 cell_mean 顶上 —— 而 nb_max/nb_min 的初值就是 cell_mean，
+            # 所以那一支是无操作、与不给 bnd_dirichlet 时逐位一致。
+            col = bd_b[:, v]
+            val = xp.where(xp.isfinite(col), col, cell_mean[o_b])
+            _scatter_minmax(xp, nb_max, nb_min, o_b, val)
         if ref is not None:
             scale = float(ref[v])
         else:

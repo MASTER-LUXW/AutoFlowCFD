@@ -270,7 +270,20 @@ def _stub_solver(field, owner, neigh, is_bnd, local_ids, n_sps):
         compact_cell_type=np.zeros(n_total, dtype=np.int8),
     )
     F = np.full((n_sps, n_sps), 1.0 / n_sps)
+    # `local_solver` 是真实类上的惰性属性，门控从它取
+    # `boundary_ghost_provider` 来构造无滑移壁面的动量 Dirichlet 表
+    # （不给表，贴壁单元会被结构性误判、壁面剪应力被压掉 14 倍，见
+    # tests/unit/test_bounds_sensor.py::
+    # TestBoundaryDirichletCompletesTheEnvelope）。这里默认给一个
+    # 全 FARFIELD 的 provider：表里全是 NaN，等价于不给表，于是下面
+    # 那几条关于 perm 换算的判据不受影响。
+    prov = SimpleNamespace(
+        group_code=np.full(len(b_r), -1, dtype=np.int64),
+        code_to_config={},
+        default_config={"type": "FARFIELD"},
+    )
     stub = SimpleNamespace(
+        local_solver=SimpleNamespace(boundary_ghost_provider=prov),
         dist_flat_face=dist_fc,
         partition=SimpleNamespace(n_total_cells=n_total,
                                   n_local_cells=n_local),
@@ -381,6 +394,88 @@ class TestDistributedSolverMethod:
         local_ids = np.arange(0, n_cells // 2)
         stub, _, n_local = _stub_solver(
             field, owner, neigh, is_bnd, local_ids, n_sps)
+        ff = DistributedFRSolver._build_sensor_gated_filter_func_distributed(
+            stub, n_local, n_sps, np.zeros(n_local, dtype=bool))
+        flat = field[local_ids].reshape(n_local * n_sps, 5).copy()
+        assert ff(flat.copy()).shape == flat.shape
+
+
+class TestDirichletTableReachesTheDistributedPath:
+    """壁面 Dirichlet 表必须真的进到分布式门控的判据内核里。
+
+    不然这条后端会重犯那个已修的缺陷：贴壁单元被结构性误判、壁面剪应力
+    被压掉 14 倍（实测表见 tests/unit/test_bounds_sensor.py::
+    TestBoundaryDirichletCompletesTheEnvelope）。
+
+    判据用**给内核装仪表**而不是"看掩码变不变"：BJ 掩码是 5 个变量取
+    并集，合成场上别的变量很容易主导，掩码不变并不能说明表没到
+    （第一版就是这么写的，它对真实缺陷没有区分力）。
+    """
+
+    def test_kernel_receives_a_table_with_finite_wall_entries(self, monkeypatch):
+        from types import SimpleNamespace
+
+        monkeypatch.setenv("AFCFD_TROUBLED_SENSOR", "bounds")
+        from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
+        from autoflowcfd.core.fr_operators import bounds_sensor as bs
+
+        field, owner, neigh, is_bnd, _ = _build_global_case()
+        n_cells, n_sps = field.shape[0], field.shape[1]
+        local_ids = np.arange(0, n_cells // 2)
+        _, _, o_r, n_r, b_r = _rank_view(owner, neigh, is_bnd, local_ids)
+        n_faces = len(b_r)
+
+        gc = np.full(n_faces, -1, dtype=np.int64)
+        gc[np.asarray(b_r, dtype=bool)] = 7
+        wall = SimpleNamespace(
+            group_code=gc,
+            code_to_config={7: {"type": "WALL", "is_no_slip": True,
+                                "wall_velocity": [0.0, 0.0, 0.0]}},
+            default_config={"type": "FARFIELD"})
+
+        seen = {}
+        orig = bs.compute_bounds_violation_mask
+
+        def spy(*a, **kw):
+            seen["bd"] = kw.get("bnd_dirichlet")
+            return orig(*a, **kw)
+
+        monkeypatch.setattr(bs, "compute_bounds_violation_mask", spy)
+
+        stub, _, n_local = _stub_solver(
+            field, owner, neigh, is_bnd, local_ids, n_sps)
+        stub.local_solver = SimpleNamespace(boundary_ghost_provider=wall)
+        ff = DistributedFRSolver._build_sensor_gated_filter_func_distributed(
+            stub, n_local, n_sps, np.zeros(n_local, dtype=bool))
+        flat = field[local_ids].reshape(n_local * n_sps, 5).copy()
+        ff(flat.copy())
+
+        bd = seen.get("bd")
+        assert bd is not None, "判据内核根本没收到 bnd_dirichlet"
+        bd = np.asarray(bd)
+        assert bd.shape == (n_faces, 5), f"表形状 {bd.shape} 不对"
+        is_b = np.asarray(b_r, dtype=bool)
+        assert np.all(bd[is_b, 1:4] == 0.0), (
+            "边界面的动量三列应当是 0（静止无滑移壁）")
+        assert np.all(~np.isfinite(bd[~is_b])), "内部面应当全是 NaN"
+
+    def test_no_provider_means_no_table_rather_than_a_crash(self, monkeypatch):
+        """provider 还没建好时必须退回"不给表"，不能崩。
+
+        构造顺序在不同后端不同（多 GPU 的滤波初始化就在 provider 之前），
+        所以这条路径必须是安全的——退回的行为与修复前逐位一致。
+        """
+        from types import SimpleNamespace
+
+        monkeypatch.setenv("AFCFD_TROUBLED_SENSOR", "bounds")
+        from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
+
+        field, owner, neigh, is_bnd, _ = _build_global_case()
+        n_cells, n_sps = field.shape[0], field.shape[1]
+        local_ids = np.arange(0, n_cells // 2)
+        stub, _, n_local = _stub_solver(
+            field, owner, neigh, is_bnd, local_ids, n_sps)
+        stub.local_solver = SimpleNamespace(boundary_ghost_provider=None)
         ff = DistributedFRSolver._build_sensor_gated_filter_func_distributed(
             stub, n_local, n_sps, np.zeros(n_local, dtype=bool))
         flat = field[local_ids].reshape(n_local * n_sps, 5).copy()

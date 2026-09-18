@@ -216,12 +216,31 @@ class _GPUDistributedInitMixin:
                 # 返回 (n_total, n_sps, n_vars) 原生排列的 CuPy 数组。
                 return gpu_halo.exchange(cp.ascontiguousarray(U_local_3d))
 
+            _n_faces = int(bnd.size)
+
+            def _bnd_dirichlet():
+                # 无滑移壁面的动量 Dirichlet 值。**必须惰性求值**：本方法
+                # 在 `self.boundary_ghost_provider` 建好之前就被调用
+                # （gpu_distributed.py 里滤波初始化在 provider 构造之前）。
+                # provider 的 `group_code` 已被重切到 local 面索引空间。
+                from autoflowcfd.core.fr_solver.boundary import (
+                    build_boundary_dirichlet_table,
+                )
+                t = build_boundary_dirichlet_table(
+                    getattr(self, "boundary_ghost_provider", None),
+                    _n_faces, 5)
+                if t is None:
+                    return None
+                with cp.cuda.Device(self.device_id):
+                    return cp.asarray(t)
+
             with cp.cuda.Device(self.device_id):
                 conn = dict(owner_cell=cp.asarray(owner_native),
                             neighbor_cell=cp.asarray(neigh_native),
                             is_boundary=cp.asarray(bnd),
                             freestream=self.freestream,
-                            halo_extend=halo_extend)
+                            halo_extend=halo_extend,
+                            bnd_dirichlet=_bnd_dirichlet)
 
         order = int(getattr(self, "current_order", self.order))
         with cp.cuda.Device(self.device_id):

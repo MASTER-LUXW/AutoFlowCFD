@@ -215,3 +215,115 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
     )
 
     return BoundaryGhostStateProvider(group_code, code_to_config, default_config)
+
+
+#: BJ 越界判据里"没有 Dirichlet 值"的标记。用 NaN 而不是哨兵数值：任何
+#: 有限哨兵都可能与真实边界值撞车，而 NaN 在 `xp.isfinite` 下是无歧义的。
+_NO_DIRICHLET = float("nan")
+
+
+def build_boundary_dirichlet_table(provider, n_faces: int, n_var: int = 5):
+    """给 BJ 越界判据构造逐边界面的**物理边界值**表，(n_faces, n_var)。
+
+    为什么需要它（完整推导与实测见
+    `fr_operators/bounds_sensor.py::compute_bounds_violation_mask` 的
+    `bnd_dirichlet` 参数文档）：边界面不提供"邻居单元均值"，单纯排除会让
+    该单元在那个方向上的包络变成**单侧**的，从而破坏判据的设计不变量
+    "线性场恒不触发"。后果是贴壁单元被结构性误判——实测贴壁层命中率
+    14.393%（全域只有 0.400%），壁面剪应力被压掉 14 倍
+    （Blasius 平板 du/dy 93.0 vs `off` 的 1312.7，cf -93.37% vs -6.33%）。
+
+    单邻居情形下仅凭单元均值**无法**区分"陡峭单调"与"本单元是异常值"
+    （两条替代方案已被实测否掉，见那边文档），必须引入边界条件这一份
+    外部信息。本函数就是那份信息。
+
+    ## 各边界类型给什么
+
+    * **无滑移壁面（WALL 且 `is_no_slip`）**：动量三列给 `0.0`。静止壁
+      上 `rho*u_wall = 0`，与密度无关，所以这一项是精确的、不需要知道
+      壁面密度。密度与总能没有 Dirichlet 值（本项目的壁面都是绝热壁，
+      没有等温壁这种 BC 类型），留 NaN。
+      这一档正是上面那个缺陷的全部来源：边界层的动量剖面单调终止于壁面。
+    * **其余全部类型留 NaN**（退回排除，与修复前逐位一致）。逐项理由：
+        - `SYMMETRY` / 滑移壁：镜像邻居的均值对标量与切向分量**恰好
+          等于**本单元均值，而"排除"对包络初值 `cell_mean` 是无操作
+          ——所以排除在这里就是精确的；法向分量的真实镜像均值是 `-m_n`，
+          而对称面上 `m_n` 物理上为零，两者一致。
+        - `INLET` / `FARFIELD`：来流场在边界附近是均匀的，没有终止于
+          边界的强梯度，单侧包络不构成约束。SEM 合成湍流入口逐面逐步
+          变化，不存在可预先制表的定值。
+        - `OUTLET`：只给定静压，动量无 Dirichlet；且出口处剖面的法向
+          邻居都在内部，不存在单侧问题。
+    * **移动壁面**（`wall_velocity` 存在且**有非零分量**；静止壁在配置里
+      写作 `[0,0,0]`，按静止处理）：留 NaN 并打一次警告。
+      `rho*u_wall` 需要壁面密度，而这里拿不到逐面密度；给个错的值比
+      退回排除更糟。本项目目前没有移动壁算例。
+
+    Args:
+        provider: `build_boundary_ghost_provider` 的返回值。读它的
+            `group_code`（(n_faces,) 每面的边界组编码，内部面为 -1）与
+            `code_to_config`/`default_config`。**分布式路径无需特殊处理**：
+            那几条路径已经把 `provider.group_code` 重切到
+            `partition.local_faces`（见 `core/mpi/distributed_mesh_loader.py`
+            与 `distributed_order_continuation.py`），与 `dist_flat_face`
+            同一索引空间。
+        n_faces: 面数，必须与判据里 `owner_cell` 的长度一致
+        n_var: 变量数（守恒变量，通常 5）
+
+    Returns:
+        (n_faces, n_var) float64；`provider` 为 None 或没有 `group_code`
+        时返回 None（调用方据此退回"排除"行为）。
+
+    Raises:
+        ValueError: `provider.group_code` 长度与 `n_faces` 不符 —— 索引
+            空间对不上时静默继续会让整张表错位，那是一个看不出来的错误。
+    """
+    if provider is None:
+        return None
+    group_code = getattr(provider, "group_code", None)
+    if group_code is None:
+        return None
+    gc = np.asarray(group_code)
+    if gc.size != n_faces:
+        raise ValueError(
+            f"boundary_ghost_provider.group_code 长度 {gc.size} 与 n_faces "
+            f"{n_faces} 不符——两者必须处在同一个面索引空间，否则整张"
+            f"Dirichlet 表会错位"
+        )
+    if n_var < 4:
+        raise ValueError(f"n_var={n_var} 至少要覆盖 3 个动量分量")
+
+    table = np.full((n_faces, n_var), _NO_DIRICHLET, dtype=np.float64)
+    code_to_config = getattr(provider, "code_to_config", {}) or {}
+    default_config = getattr(provider, "default_config", None) or {}
+
+    moving_wall_seen = False
+    codes = np.unique(gc)
+    for code in codes:
+        cfg = code_to_config.get(int(code), default_config)
+        if not cfg or cfg.get("type") != "WALL":
+            continue
+        if not cfg.get("is_no_slip", True):
+            # 滑移壁：与 SYMMETRY 同一条理由，排除即精确。
+            continue
+        # 静止壁在配置里写作 `wall_velocity=[0,0,0]` 而不是 None
+        # （见 build_boundary_ghost_provider 的 type_map），所以判据是
+        # "全零即静止"，不能写成 `is not None`——那会把所有真实算例的
+        # 壁面都当成移动壁跳过（2026-09-18 实测踩到：表里 5 列全是 NaN，
+        # 贴壁层命中率毫无变化）。
+        wv = cfg.get("wall_velocity")
+        if wv is not None and np.any(np.asarray(wv, dtype=np.float64) != 0.0):
+            moving_wall_seen = True
+            continue
+        table[gc == code, 1:4] = 0.0
+
+    if moving_wall_seen:
+        logger.warning(
+            "[BJ 判据] 检测到给定了 wall_velocity 的移动壁面。构造动量的"
+            "Dirichlet 值需要逐面壁面密度（rho*u_wall），这里拿不到，"
+            "因此这些面退回'排除'——那会让贴壁单元的邻域包络在壁面方向上"
+            "单侧收窄、可能被误判（静止壁的定量后果是壁面剪应力被压掉 "
+            "14 倍）。若本算例确实有移动壁且用到 sensor+bounds 门控，"
+            "需要先把逐面壁面密度接进来。"
+        )
+    return table

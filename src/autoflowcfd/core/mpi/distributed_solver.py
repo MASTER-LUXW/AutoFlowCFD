@@ -940,11 +940,30 @@ class DistributedFRSolver:
                 # 于是掩码与单机路径逐位相同。
                 return halo_ex.exchange(np.ascontiguousarray(U_local_3d))
 
+            # 无滑移壁面的动量 Dirichlet 值（见
+            # `fr_solver/boundary.py::build_boundary_dirichlet_table`）。
+            # 不给它，贴壁单元会被结构性误判、壁面剪应力被压掉 14 倍。
+            # provider 取自 `self.local_solver`（惰性属性），它的
+            # `group_code` 已经被重切到 `partition.local_faces`——与
+            # `dist_flat_face` 同一索引空间，见 `local_solver` 文档里那处
+            # "group_code 重映射"的说明。惰性求值（传 lambda）是因为
+            # 构造 local_solver 本身有代价、且此刻未必已经建好。
+            _n_faces = int(bnd.size)
+
+            def _bnd_dirichlet():
+                from autoflowcfd.core.fr_solver.boundary import (
+                    build_boundary_dirichlet_table,
+                )
+                prov = getattr(self.local_solver,
+                               "boundary_ghost_provider", None)
+                return build_boundary_dirichlet_table(prov, _n_faces, 5)
+
             conn = dict(owner_cell=owner_native,
                         neighbor_cell=neigh_native,
                         is_boundary=bnd,
                         freestream=self.freestream,
-                        halo_extend=halo_extend)
+                        halo_extend=halo_extend,
+                        bnd_dirichlet=_bnd_dirichlet)
 
         order = int(getattr(self, "current_order", self.order))
         return build_sensor_gated_filter_func_arrays(

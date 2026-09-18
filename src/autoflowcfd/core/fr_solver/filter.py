@@ -466,7 +466,7 @@ def build_sensor_gated_filter_func_arrays(
     *, n_prism=None, cell_is_prism=None,
     sensor: str = "persson",
     owner_cell=None, neighbor_cell=None, is_boundary=None,
-    freestream=None, halo_extend=None,
+    freestream=None, halo_extend=None, bnd_dirichlet=None,
 ) -> Callable[[np.ndarray], np.ndarray]:
     """传感器门控模态滤波的**后端无关**实现（只吃数组，不吃 solver）。
 
@@ -511,6 +511,16 @@ def build_sensor_gated_filter_func_arrays(
             必须与**掩码场的行数**一致：不给 `halo_extend` 时就是
             `n_cells`（单机、GPU 单机）；给了 `halo_extend` 时是它返回的
             `n_total = n_cells + n_halo`（CPU MPI / 多 GPU）。
+        bnd_dirichlet: (n_faces, n_var) 边界面物理边界值表，**或**一个
+            返回它的零参可调用（惰性求值）。传可调用是为了解耦构造顺序：
+            多 GPU 的 `_init_modal_filter_distributed` 在
+            `boundary_ghost_provider` 建好**之前**就被调用，CPU 分布式的
+            provider 又挂在惰性 `local_solver` 属性上。表只依赖静态 BC
+            配置，所以首次调用时求值并缓存即可。
+            完整理由见 `bounds_sensor.compute_bounds_violation_mask` 的
+            同名参数与 `fr_solver/boundary.py::
+            build_boundary_dirichlet_table`：**不给它，贴壁单元会被结构性
+            误判，壁面剪应力被压掉 14 倍**。
         halo_extend: 可选回调 `(n_cells, n_sps, n_vars) -> (n_total,
             n_sps, n_vars)`，把本 rank 的场扩展成含 halo 的场。**分区
             边界上的 BJ 包络必须读到 halo 单元的均值**，否则同一个算例
@@ -595,6 +605,16 @@ def build_sensor_gated_filter_func_arrays(
     prism_idx_all = xp.flatnonzero(cip)
     tet_idx_all = xp.flatnonzero(~cip)
 
+    # 惰性求值 + 缓存（见 bnd_dirichlet 文档）。用单元素列表而不是
+    # nonlocal：闭包里改 nonlocal 需要额外声明，列表更直接。
+    _bd_cache = []
+
+    def _resolve_bnd_dirichlet():
+        if not _bd_cache:
+            _bd_cache.append(bnd_dirichlet() if callable(bnd_dirichlet)
+                             else bnd_dirichlet)
+        return _bd_cache[0]
+
     def filter_func(U_flat: np.ndarray) -> np.ndarray:
         U = U_flat.reshape(n_cells, n_sps, -1)
         # Persson-Peraire 只探**守恒密度**（S_e 是能量比值、对整体缩放
@@ -616,7 +636,8 @@ def build_sensor_gated_filter_func_arrays(
             troubled |= compute_bounds_violation_mask(
                 xp.ascontiguousarray(field[:, :, :5]),
                 owner_cell, neighbor_cell, is_boundary,
-                ref_scales=_reference_scales(freestream, 5))[:n_cells]
+                ref_scales=_reference_scales(freestream, 5),
+                bnd_dirichlet=_resolve_bnd_dirichlet())[:n_cells]
         if not bool(xp.any(troubled)):
             return U_flat
         if xp is np:
@@ -690,10 +711,17 @@ def build_sensor_gated_filter_func(solver) -> Callable[[np.ndarray], np.ndarray]
                 "AFCFD_TROUBLED_SENSOR=bounds/both 需要 mesh.face_connectivity"
                 "（BJ 判据要面邻居均值），当前网格没有构建面连接"
             )
+        from autoflowcfd.core.fr_solver.boundary import (
+            build_boundary_dirichlet_table,
+        )
+        _n_faces = int(np.asarray(fc.owner_cell).size)
         conn = dict(owner_cell=np.asarray(fc.owner_cell),
                     neighbor_cell=np.asarray(fc.neighbor_cell),
                     is_boundary=np.asarray(fc.is_boundary, dtype=bool),
-                    freestream=solver.freestream)
+                    freestream=solver.freestream,
+                    bnd_dirichlet=lambda: build_boundary_dirichlet_table(
+                        getattr(solver, "boundary_ghost_provider", None),
+                        _n_faces, 5))
     return build_sensor_gated_filter_func_arrays(
         mesh.n_cells, mesh.n_sps_per_cell, int(order),
         ops.filter_prism, ops.filter_tet, n_prism=mesh.n_prism_cells,
