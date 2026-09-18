@@ -32,8 +32,30 @@ tests/validation/test_tgv.py 通过，这两个是真正有效的稳定性回归
 
 import numpy as np
 
+import pytest
+
 from autoflowcfd.fr.modal_filter import build_prism_modal_filter, build_tet_modal_filter
 from autoflowcfd.fr.operators import gauss_legendre
+from tests.unit._filter_mode import (
+    reload_filter_modules,
+    restore_default_filter_modules,
+)
+
+
+@pytest.fixture
+def legacy_mode():
+    """在 `legacy` 档下运行本用例，退出时恢复默认档。
+
+    **为什么需要它（2026-09-18）**：本文件此前全部用**默认档**去测
+    "顶模态被压到机器精度""线性模态在 180 次 stage 后被磨灭"这类性质
+    ——而那些性质是 `legacy`（全局清零型）的性质，不是"滤波器"的性质。
+    默认档从 legacy 改到 sensor（顶模态 sigma=0.99 的有界衰减，见
+    `fr/modal_filter.py::filter_sigma`）之后它们全部失败，暴露出这些
+    测试从来不是在测自己文档里说的那一档。
+    """
+    reload_filter_modules(AFCFD_FILTER_MODE="legacy")
+    yield
+    restore_default_filter_modules()
 
 
 def _ref_cube_sps(order: int) -> np.ndarray:
@@ -90,11 +112,22 @@ class TestConstantFieldPreserved:
 
 
 class TestTopModeStronglyDamped:
-    """最高阶模态（max(i,j,k)==order）在每个阶数下都必须被压到机器
-    精度量级——这是抑制混叠失稳的核心机制，2026-08-29 的两次"减少
-    滤波强度"尝试都证明了：一旦削弱这一点（哪怕只放松"次高阶"模态），
-    tests/validation/test_tgv.py 和 test_couette.py 就会在数步内
-    复现灾难性失稳。这个测试组是那次真实教训的永久回归防线。
+    """**legacy 档**：最高阶模态（max(i,j,k)==order）在每个阶数下都被
+    压到机器精度量级。
+
+    2026-08-29 的两次"减少滤波强度"尝试证明：在**全局逐 stage 施加**的
+    前提下一旦削弱这一点（哪怕只放松"次高阶"模态），
+    tests/validation/test_tgv.py 与 test_couette.py 会在数步内复现灾难性
+    失稳。本组是那次教训的永久回归防线。
+
+    **范围更正（2026-09-18）**：那条教训的前提是"全局施加"。默认档现在
+    是**逐单元门控 + 顶模态有界衰减**（sensor + sigma_top=0.99），它不
+    依赖"一次清零"来稳定——靠的是"只要传感器还在报就持续慢慢耗散"。
+    Blasius 平板（唯一有精确解的粘性算例）实测：一次清零会把壁面剪应力
+    压掉 2.3 倍（cf -74.5% vs -6.3%），有界衰减下 cf 与无滤波完全一致。
+    所以本组现在显式跑在 `legacy` 档，默认档的矩阵性质见
+    `test_modal_filter_order_loss.py::
+    test_default_mode_matrix_is_bounded_damping_not_projection`。
     """
 
     def _top_mode_nodal_field(self, order, basis_fn, ref):
@@ -108,7 +141,7 @@ class TestTopModeStronglyDamped:
         top_modal[top_flat] = 1.0
         return V @ top_modal
 
-    def test_tet_top_mode_damped_order_1(self):
+    def test_tet_top_mode_damped_order_1(self, legacy_mode):
         from autoflowcfd.fr.collapsed_basis import tet_modal_basis_and_grad
 
         order = 1
@@ -118,7 +151,7 @@ class TestTopModeStronglyDamped:
         filtered = F @ top_nodal
         assert np.max(np.abs(filtered)) < 1e-8 * np.max(np.abs(top_nodal))
 
-    def test_tet_top_mode_damped_order_2(self):
+    def test_tet_top_mode_damped_order_2(self, legacy_mode):
         from autoflowcfd.fr.collapsed_basis import tet_modal_basis_and_grad
 
         order = 2
@@ -130,18 +163,26 @@ class TestTopModeStronglyDamped:
 
 
 class TestKnownLimitationModesErodeOverManyIterations:
-    """已确认、暂不修复的限制的量化记录（不是要修复，是为了让这个
-    已知限制被明确记录下来，避免未来有人在不知情的情况下改动
-    FILTER_ALPHA/FILTER_ORDER 时，既没意识到会加剧这个限制，也没
-    意识到降低强度会重新触发混叠失稳）。
+    """**legacy 档**的量化记录：P1 的线性模态在 60 个完整 SSP-RK3 步
+    （=180 次 stage 滤波）后被磨灭到原幅值跨度的机器精度量级。
 
-    P1 下，唯一的非常数（线性）模态在 60 个完整 SSP-RK3 步
-    （=180 次 stage 滤波）后会被磨灭到原幅值跨度的机器精度量级——
-    这正是 cube_demo 真实复现里"单元内 8 个 SP 彼此只差 ~1e-14"的
-    量化重现，目前没有已知的安全修复方式（见模块文档）。
+    这正是 cube_demo 真实复现里"单元内 8 个 SP 彼此只差 ~1e-14"的量化
+    重现。
+
+    **2026-09-18：这条限制已经被解决，不再是"暂不修复"。** 默认档改成
+    逐单元门控 + 顶模态有界衰减（sigma_top=0.99）后：
+      * 只有被传感器标记的单元才被施加（Blasius 上全域 0.2%、贴壁层
+        7.5%），光滑区一个单元都不动；
+      * 每次只衰减顶模态 1%，而物理残差每步都在重建梯度 —— 两者达到
+        平衡的结果是壁面 du/dy 与**完全不滤波**逐位量级一致
+        （1312.68 vs 1312.68）。
+    本组保留为 legacy 档的历史记录（`legacy` 仍是唯一能复现历史结果的
+    档），新默认档的对应性质见
+    `test_modal_filter_order_loss.py::
+    test_default_mode_intermediate_modes_are_essentially_untouched`。
     """
 
-    def test_tet_order_1_linear_mode_erodes_after_many_iterations(self):
+    def test_tet_order_1_linear_mode_erodes_after_many_iterations(self, legacy_mode):
         order = 1
         ref = _ref_cube_sps(order)
         F = build_tet_modal_filter(order, ref)
@@ -154,7 +195,7 @@ class TestKnownLimitationModesErodeOverManyIterations:
         # 记录已确认的磨灭幅度（不是期望值，是现状）：远小于原跨度
         assert filtered_spread < 1e-10 * original_spread
 
-    def test_prism_order_1_linear_mode_erodes_after_many_iterations(self):
+    def test_prism_order_1_linear_mode_erodes_after_many_iterations(self, legacy_mode):
         order = 1
         ref = _ref_cube_sps(order)
         F = build_prism_modal_filter(order, ref)

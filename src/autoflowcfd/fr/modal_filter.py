@@ -98,7 +98,9 @@ from autoflowcfd.fr.collapsed_basis import prism_modal_basis_and_grad, tet_modal
 #   mild    sigma(eta=1)=AFCFD_FILTER_SIGMA_TOP（默认 0.99），其余同形式
 #   project 精确投影：sigma 只取 0 或 1 —— eta<1 的模态严格保留 1，
 #           eta==1（最高阶）严格取 0。**幂等**，见下。
-#   sensor  逐单元门控（在应用层实现），矩阵与 project 相同 —— 门控的
+#   sensor  逐单元门控（在应用层实现）；矩阵自 2026-09-18 起用 mild 型
+#           **有界衰减**（顶模态 sigma=AFCFD_FILTER_SIGMA_TOP，默认 0.99）
+#           而不再是精确投影，理由见 filter_sigma 里那一节 —— 门控的
 #           算子语义要求幂等，理由见 `filter_sigma` 里的注释。
 # 这四档供受控 A/B 用；"按传感器逐单元门控"那一档在应用层实现
 # （core/fr_solver/filter.py），不在这里改矩阵。
@@ -192,8 +194,10 @@ if _FILTER_MODE not in _VALID_FILTER_MODES:
         f"不静默回退到 legacy——那会让一次拼写错误伪装成默认行为。"
     )
 
-if _FILTER_MODE == "mild":
-    # 由 sigma(1)=exp(-alpha) 反解 alpha
+if _FILTER_MODE in ("mild", "sensor"):
+    # 由 sigma(1)=exp(-alpha) 反解 alpha。
+    # `sensor` 档 2026-09-18 起也走这一支（此前用精确投影），理由见下方
+    # filter_sigma 里"为什么 sensor 从精确投影改成有界衰减"一节。
     FILTER_ALPHA = -np.log(max(min(_SIGMA_TOP, 1.0 - 1e-300), 1e-300))
 else:
     FILTER_ALPHA = -np.log(np.finfo(np.float64).eps)
@@ -217,16 +221,44 @@ def filter_sigma(degree_frac):
     native 四面体构造函数按整个模态列表向量化调用。
     """
     eta = np.asarray(degree_frac, dtype=np.float64)
-    # `sensor` 与 `project` 共用投影型 sigma。**为什么 sensor 必须是投影**
-    # （2026-09-17）：sensor 档的语义是"按传感器逐单元门控，对被标记单元
-    # 施加这个矩阵"，而它每个 RK stage 都施加一次。所要表达的操作是
-    # "把这个单元降一阶"——那在数学上就是一个**幂等投影**。用指数型
-    # sigma（P2 中间模态 0.8687、P3 的 0.2450）会让被标记单元被反复削、
-    # 一路掉到 P0，而退化后的单元更容易再次被标记，形成正反馈。等熵涡
-    # 精确解实测：P2 上非幂等版本标记比例平台在 ~19%、收敛阶掉到 1.3。
-    # P1 上两者**逐位相同**（legacy 的 P1 sigma 本来就是 {1, 2.2e-16}），
-    # 所以此前用 sensor 档跑的 P1 对照结果不受影响。
-    if FILTER_MODE in ("project", "sensor"):
+    # ===== 为什么 sensor 从精确投影改成有界衰减（2026-09-18 更正）=====
+    #
+    # 此前这里写的是"sensor 与 project 共用投影型 sigma"，论证是：门控的
+    # 语义是"把这个单元降一阶"，而它每个 RK stage 都施加一次，所以算子
+    # 必须**幂等**，否则被标记单元会被反复削到 P0。那条论证的**前提**
+    # 是"非投影"只能取 legacy 的 alpha —— 那个 alpha 下 P2 中间模态是
+    # 0.8687、P3 是 0.2450，确实会把中间模态一起削掉，等熵涡上实测标记
+    # 比例平台 ~19%、收敛阶掉到 1.3。
+    #
+    # 但 `mild` 的 alpha 完全不同。sigma_top=0.99 -> alpha=0.01005，
+    # sigma(eta)=exp(-alpha*eta^8)：
+    #
+    #     P2  eta={0, 0.5, 1}          sigma={1, 0.999961, 0.99}
+    #     P3  eta={0, 1/3, 2/3, 1}     sigma={1, 1-1.5e-6, 0.99961, 0.99}
+    #
+    # 也就是说**只有顶模态被动，每次只衰减 1%**；"中间模态被反复削"这条
+    # 担忧在这个 alpha 下不成立，非幂等性被限制在顶模态自身的 0.99^n 上
+    # ——那正是想要的"只要传感器还在报，就持续慢慢耗散"。
+    #
+    # 为什么必须改（Blasius 平板，本项目唯一有精确解的粘性算例，nx=16、
+    # 400 步、固定 CFL 0.03、同步数的干净对照；壁面剪应力用胞内两点斜率
+    # 提取，该提取已用"把解析解放到同一网格上"验证到中位 -0.49%）：
+    #
+    #     档位                          贴壁命中率  du/dy 中位   cf vs Blasius
+    #     off（无滤波，会发散）              --      1312.68      -6.33%
+    #     sensor+bounds 精确投影           0.831%     561.94     -74.54%
+    #     sensor+bounds 有界衰减 0.99      7.510%    1312.68      -6.33%
+    #     sensor+bounds 有界衰减 0.90      3.167%    1312.68      -6.33%
+    #
+    # 精确投影把被标记单元一次清零，而单元内扩散重建壁面梯度约需
+    # `h^2/nu/dt ~ 26` 步——0.83%/stage 意味着平均每 40 步就再清一次，
+    # 梯度永远恢复不到位（实测 du/dy 的**最大值**是对的、中位被拉低
+    # 2.3 倍）。有界衰减下 cf 与 `off` **完全一致**，而滤波仍然在工作
+    # （贴壁层每 stage 仍标记 3~7.5% 并施加衰减）。
+    #
+    # 命中率反而比投影档**高**是应当的：投影把单元压平之后它就不再越界，
+    # 而衰减保留梯度、于是持续（合理地）越界。
+    if FILTER_MODE == "project":
         out = np.where(eta >= 1.0 - 1e-12, 0.0, 1.0)
         return out if out.ndim else float(out)
     return _exp_filter_sigma(eta)

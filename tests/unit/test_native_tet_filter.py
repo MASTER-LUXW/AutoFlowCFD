@@ -15,6 +15,26 @@ import numpy as np
 import pytest
 
 from autoflowcfd.fr.native_tet_filter import build_native_tet_modal_filter
+from tests.unit._filter_mode import (
+    reload_filter_modules,
+    restore_default_filter_modules,
+)
+
+
+@pytest.fixture
+def project_mode():
+    """在 `project` 档（严格投影：sigma 只取 0 或 1）下运行本用例。
+
+    **为什么需要它（2026-09-18）**：本文件此前用**默认档**去测"顶模态被
+    压到机器精度""矩阵幂等""节点 std 比值等于某个实测值"——那些都是
+    **投影型**矩阵的性质，不是"滤波器"的性质。默认档的 sensor 从精确
+    投影改成顶模态 sigma=0.99 的有界衰减（理由与 Blasius 实测见
+    `fr/modal_filter.py::filter_sigma`）之后它们全部失败，暴露出这些测试
+    从来不是在测自己文档里说的那一档。
+    """
+    reload_filter_modules(AFCFD_FILTER_MODE="project")
+    yield
+    restore_default_filter_modules()
 from autoflowcfd.fr.native_simplex_basis import (
     build_native_tet_operators, restricted_tet_modes, simplex3d_value, rst_to_abc,
 )
@@ -38,11 +58,15 @@ class TestConstantFieldPreserved:
 
 
 class TestTopModeStronglyDamped:
-    """最高阶模态（i+j+k==order）必须被压到机器精度量级——抑制混叠
-    失稳的核心机制，与坍缩坐标版本同一个设计承诺。"""
+    """**project/legacy 档**：最高阶模态（i+j+k==order）被压到机器精度
+    量级，与坍缩坐标版本同一个设计承诺。
+
+    默认档（sensor）现在是顶模态 sigma=0.99 的**有界衰减**而不是清零，
+    对应性质见本文件 `TestDefaultModeIsBoundedDamping`。
+    """
 
     @pytest.mark.parametrize("order", [1, 2, 3])
-    def test_top_mode_damped(self, order):
+    def test_top_mode_damped(self, order, project_mode):
         modes = restricted_tet_modes(order)
         top_indices = [m for m, (i, j, k) in enumerate(modes) if i + j + k == order]
         assert len(top_indices) > 0
@@ -135,7 +159,7 @@ class TestFilterNeverAmplifiesInTheRightNorm:
             f"滤波在 L2 意义下放大了——它不是正交投影")
 
     @pytest.mark.parametrize("order", [1, 2, 3, 4])
-    def test_filter_is_idempotent(self, order):
+    def test_filter_is_idempotent(self, order, project_mode):
         """幂等是"按单元门控降一阶"这套用法的前提：非幂等的话被标记的
         单元会被反复削、一路掉到 P0，退化后更容易再次越界，形成正反馈
         （legacy 档 P2/P3 的 |F@F-F| 是 6.3e-2 / 3.5e-1，正是这个病）。"""
@@ -154,7 +178,7 @@ class TestFilterNeverAmplifiesInTheRightNorm:
             f"{self._SPECTRAL[order]} 的 1.3 倍")
 
     @pytest.mark.parametrize("order", [1, 2, 3, 4])
-    def test_nodal_std_ratio_matches_measurement(self, order):
+    def test_nodal_std_ratio_matches_measurement(self, order, project_mode):
         """把"节点 std 在高阶确实会 > 1"这个事实钉住。
 
         它曾被当作失败判据（第二版），实际是 V 不正交的必然结果。钉住它
@@ -171,3 +195,68 @@ class TestFilterNeverAmplifiesInTheRightNorm:
         assert np.median(ratios) == pytest.approx(expected, abs=0.02), (
             f"order={order}: 节点 std 中位比值 {np.median(ratios):.4f}，"
             f"实测 {expected}")
+
+
+class TestDefaultModeIsBoundedDamping:
+    """默认档（`sensor`）的 native 四面体矩阵：**有界衰减，不是投影**。
+
+    2026-09-18 改动，完整推导与 Blasius 实测见
+    `fr/modal_filter.py::filter_sigma`。判据方向与上面那几类刻意相反：
+    这里要求矩阵**满秩**且**非幂等**，因为"只要传感器还在报就持续慢慢
+    耗散"正是设计意图；而 L2 不增（不放大）这条对两档都必须成立。
+    """
+
+    @pytest.mark.parametrize("order", [1, 2, 3])
+    def test_matrix_is_full_rank(self, order):
+        F = build_native_tet_modal_filter(order)
+        assert int(np.linalg.matrix_rank(F, 1e-10)) == F.shape[0], (
+            f"order={order}: 默认档矩阵不满秩——投影型会丢掉一整阶，"
+            f"而实测那会把壁面剪应力压掉 2.3 倍")
+
+    @pytest.mark.parametrize("order", [1, 2, 3])
+    def test_top_mode_is_damped_to_sigma_top_not_zero(self, order):
+        """顶模态被乘上 0.99，而不是清零。"""
+        from autoflowcfd.fr.native_simplex_basis import (
+            build_native_tet_operators, restricted_tet_modes,
+            simplex3d_value, rst_to_abc,
+        )
+
+        modes = restricted_tet_modes(order)
+        ref_rst, _ = build_native_tet_operators(order)
+        a, b, c = rst_to_abc(ref_rst[:, 0], ref_rst[:, 1], ref_rst[:, 2])
+        V = np.column_stack(
+            [simplex3d_value(a, b, c, i, j, k) for (i, j, k) in modes])
+        F = build_native_tet_modal_filter(order)
+        tops = [m for m, (i, j, k) in enumerate(modes) if i + j + k == order]
+        assert tops
+        for m in tops:
+            coeff = np.zeros(len(modes))
+            coeff[m] = 1.0
+            nodal = V @ coeff
+            got = F @ nodal
+            # 特征向量：结果应当是同一个模态乘 0.99
+            ratio = np.linalg.norm(got) / np.linalg.norm(nodal)
+            assert abs(ratio - 0.99) < 1e-9, (
+                f"order={order} mode {m}: 顶模态被乘了 {ratio:.9f}，"
+                f"应当是 0.99（默认 AFCFD_FILTER_SIGMA_TOP）")
+
+    @pytest.mark.parametrize("order", [1, 2, 3])
+    def test_is_not_idempotent_by_design(self, order):
+        """非幂等是**刻意的**：重复施加持续耗散。
+
+        这条与 `TestFilterNeverAmplifiesInTheRightNorm::
+        test_filter_is_idempotent`（project 档）方向相反，两者都对——
+        它们测的是两个不同的档。
+        """
+        F = build_native_tet_modal_filter(order)
+        err = np.max(np.abs(F @ F - F))
+        assert err > 1e-6, (
+            f"order={order}: 默认档矩阵是幂等的（|F@F-F|={err:.2e}）——"
+            f"那说明它退回成了投影型")
+
+    @pytest.mark.parametrize("order", [1, 2, 3])
+    def test_constant_field_still_exactly_preserved(self, order):
+        """自由流场保持性：常数场必须逐位不变（sigma(0)=1 严格）。"""
+        F = build_native_tet_modal_filter(order)
+        ones = np.ones(F.shape[0])
+        np.testing.assert_allclose(F @ ones, ones, rtol=0, atol=1e-14)

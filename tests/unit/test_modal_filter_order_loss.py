@@ -40,29 +40,17 @@ import numpy as np
 import pytest
 
 from autoflowcfd.core.fr_solver.filter import _SENSOR_MODE_SUPPORTED_BACKENDS
+from tests.unit._filter_mode import (
+    reload_filter_modules,
+    restore_default_filter_modules,
+)
 
 
-def _reload_with_env(**env):
-    """在给定环境变量下重新导入 modal_filter 与 operators（模块级常量
-    在导入时求值，必须重载才能生效）。"""
-    old = {k: os.environ.get(k) for k in env}
-    try:
-        for k, v in env.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-        import autoflowcfd.fr.modal_filter as mf
-        importlib.reload(mf)
-        import autoflowcfd.fr.operators as ops_mod
-        importlib.reload(ops_mod)
-        return mf, ops_mod
-    finally:
-        for k, v in old.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
+# 本文件原有一份本地 `_reload_with_env`，2026-09-18 抽到
+# `tests/unit/_filter_mode.py` 作为唯一事实来源——另外两个滤波测试文件
+# 此前根本没有这个能力，于是直接用**默认档**去测"顶模态被压到机器精度"
+# 这类性质，默认档一改就全体失败。理由见那个模块的文档。
+_reload_with_env = reload_filter_modules
 
 
 @pytest.fixture(autouse=True)
@@ -70,7 +58,7 @@ def _restore_modules():
     """每个用例结束后把两个模块恢复成默认环境下的状态，避免污染其它
     测试文件（它们会 import 这两个模块的模块级常量/算子）。"""
     yield
-    _reload_with_env(AFCFD_FILTER_MODE=None, AFCFD_FILTER_SIGMA_TOP=None)
+    restore_default_filter_modules()
 
 
 def _prism_filter(ops_mod, order):
@@ -78,11 +66,19 @@ def _prism_filter(ops_mod, order):
 
 
 class TestLegacyFilterLosesExactlyOneOrder:
-    """默认（legacy）行为：保留模态数恰好是 order^3，即损失一整阶。"""
+    """**legacy 档**：保留模态数恰好是 order^3，即损失一整阶。
+
+    2026-09-18 更正：本类此前全部用 `AFCFD_FILTER_MODE=None`（**默认档**）
+    —— 类名写着 legacy，测的却是默认值。历史上默认档恰好也把顶模态清零
+    （legacy -> sensor 时 sensor 的矩阵是精确投影），所以一直通过；直到
+    默认档的 sensor 改成顶模态 sigma=0.99 的**有界衰减**（见
+    `fr/modal_filter.py::filter_sigma` 里"为什么 sensor 从精确投影改成
+    有界衰减"一节）才暴露出来。现在显式指定 legacy。
+    """
 
     @pytest.mark.parametrize("order,expected_rank", [(1, 1), (2, 8), (3, 27)])
     def test_rank_equals_order_cubed(self, order, expected_rank):
-        mf, ops_mod = _reload_with_env(AFCFD_FILTER_MODE=None)
+        mf, ops_mod = _reload_with_env(AFCFD_FILTER_MODE="legacy")
         F = _prism_filter(ops_mod, order)
         n = (order + 1) ** 3
         assert F.shape == (n, n)
@@ -93,7 +89,7 @@ class TestLegacyFilterLosesExactlyOneOrder:
             f"必须显式确认而不是顺带改掉")
 
     def test_top_mode_sigma_is_annihilation_not_damping(self):
-        mf, _ = _reload_with_env(AFCFD_FILTER_MODE=None)
+        mf, _ = _reload_with_env(AFCFD_FILTER_MODE="legacy")
         sigma_top = float(mf._exp_filter_sigma(np.array(1.0)))
         assert sigma_top < 1e-12, (
             f"sigma(eta=1)={sigma_top:.3e}，不再是'清零'量级——"
@@ -104,7 +100,7 @@ class TestLegacyFilterLosesExactlyOneOrder:
     def test_p1_annihilates_linear_intra_cell_content(self):
         """order=1 时线性场的**胞内**变化被抹到机器零——P1 退化为 P0
         最直接的证据（不依赖任何真实网格）。"""
-        mf, ops_mod = _reload_with_env(AFCFD_FILTER_MODE=None)
+        mf, ops_mod = _reload_with_env(AFCFD_FILTER_MODE="legacy")
         F = _prism_filter(ops_mod, 1)
         # order=1 的节点空间里，任何非常数向量都只能由常数模态 + 那些
         # max(i,j,k)=1 的模态张成，所以用随机向量减去其常数部分就是
@@ -174,9 +170,48 @@ class TestSwitchableModesDoNotLoseOrder:
         """
         mf, ops_mod = _reload_with_env(AFCFD_FILTER_MODE=None)
         assert mf.FILTER_MODE == "sensor"
-        # sensor 档的矩阵与 project 相同：严格投影，P1 的秩仍是 1
-        # （门控在应用层，不在矩阵里——见 modal_filter.py 的说明）
-        assert int(np.linalg.matrix_rank(_prism_filter(ops_mod, 1), 1e-10)) == 1
+
+    def test_default_mode_matrix_is_bounded_damping_not_projection(self):
+        """**2026-09-18 更正**：`sensor` 的矩阵是**有界衰减**，不是投影。
+
+        此前这里断言"sensor 的矩阵与 project 相同：严格投影，P1 的秩仍是
+        1"。那条设计被 Blasius 平板（本项目唯一有精确解的粘性算例）的
+        实测否掉：精确投影把被标记单元一次清零，而单元内扩散重建壁面
+        梯度约需 `h^2/nu/dt ~ 26` 步，0.83%/stage 的贴壁命中率意味着平均
+        每 40 步就再清一次 —— 壁面剪应力被压掉 2.3 倍（du/dy 中位 561.9
+        vs `off` 的 1312.7，cf -74.54% vs -6.33%）。换成顶模态
+        sigma=0.99 的有界衰减后 cf 与 `off` **完全一致**（du/dy 1312.68），
+        而滤波仍在工作（贴壁层每 stage 仍标记 3~7.5%）。
+        完整推导与数据见 `fr/modal_filter.py::filter_sigma`。
+
+        判据：矩阵**满秩**（不丢任何模态）、顶模态 sigma 恰好等于
+        `AFCFD_FILTER_SIGMA_TOP`、常数模态严格为 1。
+        """
+        mf, ops_mod = _reload_with_env(AFCFD_FILTER_MODE=None)
+        F1 = _prism_filter(ops_mod, 1)
+        assert int(np.linalg.matrix_rank(F1, 1e-10)) == F1.shape[0], (
+            "sensor 档的矩阵必须满秩——投影型会丢掉一整阶")
+        sigma_top = float(mf.filter_sigma(np.array(1.0)))
+        assert abs(sigma_top - 0.99) < 1e-12, (
+            f"顶模态 sigma={sigma_top:.6g}，应当等于默认 "
+            f"AFCFD_FILTER_SIGMA_TOP=0.99")
+        assert float(mf.filter_sigma(np.array(0.0))) == 1.0, "常数模态必须严格保留"
+
+    def test_default_mode_intermediate_modes_are_essentially_untouched(self):
+        """有界衰减必须**只动顶模态**。
+
+        这是"非幂等没关系"那条论证的前提：`mild` 的 alpha 下
+        sigma(eta)=exp(-0.01005*eta^8)，P2/P3 的中间模态都在 1 的 1e-3
+        以内。legacy 的 alpha 完全不同（P2 中间模态 0.8687、P3 的
+        0.2450），那才是"会把中间模态一起反复削掉"的来源——若哪天
+        默认 alpha 变大到动了中间模态，这条会失败，届时必须重新评估
+        "门控 + 非幂等算子"的正当性而不是放宽本判据。
+        """
+        mf, _ = _reload_with_env(AFCFD_FILTER_MODE=None)
+        for etas in ([0.0, 0.5], [0.0, 1 / 3, 2 / 3]):
+            sig = np.asarray(mf.filter_sigma(np.array(etas)))
+            assert np.all(sig > 1.0 - 1e-3), (
+                f"中间模态 sigma={sig} 偏离 1 超过 1e-3")
 
     def test_legacy_stays_available_for_regression(self):
         """`legacy` 是唯一能复现历史结果的档，必须保留为合法取值。"""
@@ -349,9 +384,12 @@ class TestBothBasesMustBeCheckedSeparately:
 
     @pytest.mark.parametrize("order", [1, 2])
     def test_legacy_annihilates_in_both_bases(self, order):
-        """默认档两套基都必须真的在清零（否则'损失一整阶'这个事实本身
-        就只对其中一套成立）。"""
-        _, ops_mod = _reload_with_env(AFCFD_FILTER_MODE=None)
+        """**legacy 档**两套基都必须真的在清零（否则'损失一整阶'这个
+        事实本身就只对其中一套成立）。
+
+        2026-09-18：此前写的是"默认档"并用 `AFCFD_FILTER_MODE=None`，
+        见 TestLegacyFilterLosesExactlyOneOrder 的同一处更正。"""
+        _, ops_mod = _reload_with_env(AFCFD_FILTER_MODE="legacy")
         ops = ops_mod.generate_fr_operators(order)
         n = (order + 1) ** 3
         rank_p = int(np.linalg.matrix_rank(np.asarray(ops.filter_prism), 1e-10))
@@ -409,9 +447,15 @@ class TestIdentityFilterIsShortCircuited:
 
     @pytest.mark.parametrize("order", [1, 2])
     def test_legacy_returns_callable(self, order):
-        """默认档必须仍然返回可调用对象——短路不能误伤生产默认路径。"""
+        """legacy 档必须仍然返回可调用对象——短路不能误伤真实滤波档。
+
+        2026-09-18 改成显式 legacy（此前用默认档，见
+        TestLegacyFilterLosesExactlyOneOrder 的同一处更正）。默认档现在是
+        `sensor`（顶模态 0.99 有界衰减），它的矩阵同样不是单位阵、同样
+        必须返回可调用对象——由 `test_default_mode_matrix_is_bounded_
+        damping` 覆盖。"""
         from autoflowcfd.core.fr_solver.filter import build_filter_func
-        _, ops_mod = _reload_with_env(AFCFD_FILTER_MODE=None)
+        _, ops_mod = _reload_with_env(AFCFD_FILTER_MODE="legacy")
         f = build_filter_func(self._solver_stub(ops_mod, order))
         assert f is not None and callable(f)
 
