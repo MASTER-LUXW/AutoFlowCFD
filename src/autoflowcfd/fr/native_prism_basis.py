@@ -170,3 +170,104 @@ def build_native_prism_operators(order: int) -> Tuple[np.ndarray, np.ndarray]:
                   lu_solve(lu, Vt.T).T], axis=-1)
     enforce_constant_annihilation(D)
     return ref_rst, D
+
+# ---------------------------------------------------------------------------
+# 几何映射与雅可比（原生参考坐标版本）
+# ---------------------------------------------------------------------------
+#
+# 与坍缩版本（`grid/curved_mapping/curved_mapping.py::map_prism_to_physical`
+# 与 `curved_mapping_exact_jacobian.py::prism_exact_jacobian`）是**同一个
+# 几何映射**，只是自变量换成原生 `(r,s,t)`：
+#
+#     x(r,s,t) = (1-t)/2 * bottom(r,s) + (1+t)/2 * top(r,s)
+#     bottom   = l1 p0 + l2 p1 + l3 p2,   top = l1 p3 + l2 p4 + l3 p5
+#
+# 重心坐标 `l1 = -(r+s)/2`、`l2 = (1+r)/2`、`l3 = (1+s)/2` 是 `(r,s)` 的
+# **仿射**函数，所以 `d(bottom)/dr` 等是**常向量**。坍缩版本里对应的偏导
+# 带着 `(1-b)/4` 这个因子（因为 `(r,s)` 本身是 `(a,b)` 的多项式），它在
+# 退化边 `b -> 1` 上趋零 —— 这正是坍缩度量在那一带病态的来源。
+#
+# 直棱柱（top = bottom + h，h 为常向量）在原生坐标下雅可比**逐单元恒定**：
+# `d/dr`、`d/ds` 两列的上下面贡献相同、与 t 无关，`d/dt = h/2`。于是均匀
+# 流下体积项散度恰好正比于 `D @ 1`，而那是机器零（见
+# `build_native_prism_operators` 里 `enforce_constant_annihilation` 的说明）
+# —— 这就是"自由流保持性从 ~1e-9 回到机器零"的结构性依据。
+
+
+def map_native_prism_to_physical(ref_rst: np.ndarray,
+                                 cell_nodes: np.ndarray) -> np.ndarray:
+    """把原生参考棱柱坐标 `(r,s,t)` 映射到物理棱柱单元。
+
+    Args:
+        ref_rst: `(n_pts, 3)`，列为 `(r, s, t)`
+        cell_nodes: `(6, 3)` 顶点物理坐标，顺序 `(v0,v1,v2,w0,w1,w2)`
+            —— 与 `map_prism_to_physical` **完全相同**的约定（v 为底面
+            三角形，w_i 在 v_i 正上方）。顺序不一致会静默给出翻转/扭曲
+            的单元，所以这里刻意复用同一个顶点约定与同一个重心坐标实现。
+
+    Returns:
+        `(n_pts, 3)` 物理坐标。
+    """
+    from autoflowcfd.grid.curved_mapping.curved_mapping import tri_barycentric
+
+    ref_rst = np.asarray(ref_rst, dtype=np.float64)
+    if cell_nodes.shape != (6, 3):
+        raise ValueError(
+            f"棱柱顶点数组形状 {cell_nodes.shape} 应为 (6, 3)")
+    r, s, t = ref_rst[:, 0], ref_rst[:, 1], ref_rst[:, 2]
+    l1, l2, l3 = tri_barycentric(r, s)
+    bottom = (l1[:, None] * cell_nodes[0][None, :]
+              + l2[:, None] * cell_nodes[1][None, :]
+              + l3[:, None] * cell_nodes[2][None, :])
+    top = (l1[:, None] * cell_nodes[3][None, :]
+           + l2[:, None] * cell_nodes[4][None, :]
+           + l3[:, None] * cell_nodes[5][None, :])
+    tt = t[:, None]
+    return 0.5 * (1.0 - tt) * bottom + 0.5 * (1.0 + tt) * top
+
+
+def native_prism_exact_jacobian(ref_rst: np.ndarray,
+                                cell_nodes: np.ndarray) -> np.ndarray:
+    """直边棱柱在**原生**参考坐标下的解析精确雅可比。
+
+    Returns:
+        `(n_pts, 3, 3)`，`J[:, :, m] = d(phys)/d(xi_m)`，m=0,1,2 对应
+        `r, s, t`。
+
+    解析求导而不是用谱微分矩阵作用在 `sps_coords` 上：后者会把算子的
+    舍入放大进度量，而度量的误差直接进自由流保持性（坍缩棱柱那 ~1e-9
+    实测严格等于 `eps * max|D| / det(J)`）。与
+    `curved_mapping_exact_jacobian.py::prism_exact_jacobian` 同一条理由、
+    同一个几何映射，只是自变量是原生坐标（见本节顶部说明）。
+    """
+    from autoflowcfd.grid.curved_mapping.curved_mapping import tri_barycentric
+
+    ref_rst = np.asarray(ref_rst, dtype=np.float64)
+    if cell_nodes.shape != (6, 3):
+        raise ValueError(
+            f"棱柱顶点数组形状 {cell_nodes.shape} 应为 (6, 3)")
+    r, s, t = ref_rst[:, 0], ref_rst[:, 1], ref_rst[:, 2]
+    p0, p1, p2, p3, p4, p5 = cell_nodes
+
+    # 重心坐标对 (r,s) 的偏导是常数：
+    #   dl1/dr = -1/2, dl2/dr = +1/2, dl3/dr = 0
+    #   dl1/ds = -1/2, dl2/ds = 0,    dl3/ds = +1/2
+    d_bottom_dr = 0.5 * (p1 - p0)
+    d_top_dr = 0.5 * (p4 - p3)
+    d_bottom_ds = 0.5 * (p2 - p0)
+    d_top_ds = 0.5 * (p5 - p3)
+
+    l1, l2, l3 = tri_barycentric(r, s)
+    bottom = (l1[:, None] * p0[None, :] + l2[:, None] * p1[None, :]
+              + l3[:, None] * p2[None, :])
+    top = (l1[:, None] * p3[None, :] + l2[:, None] * p4[None, :]
+           + l3[:, None] * p5[None, :])
+
+    n = ref_rst.shape[0]
+    jac = np.empty((n, 3, 3))
+    half_m = 0.5 * (1.0 - t)[:, None]
+    half_p = 0.5 * (1.0 + t)[:, None]
+    jac[:, :, 0] = half_m * d_bottom_dr[None, :] + half_p * d_top_dr[None, :]
+    jac[:, :, 1] = half_m * d_bottom_ds[None, :] + half_p * d_top_ds[None, :]
+    jac[:, :, 2] = 0.5 * (top - bottom)
+    return jac
