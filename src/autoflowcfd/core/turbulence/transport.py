@@ -1039,8 +1039,8 @@ def _omega_wall_formula(solver, owner_cells, nu_owner, d1, beta1):
         return 10.0 * omega_vis
     # blended：需要 owner 单元的 k。取该单元**真实自由度**上的均值，
     # 与本文件 rho_owner 同一处理（native 四面体的零填充槽位冻结在初值，
-    # 混进来会带偏；见 fr/native_tet_padding.py）。
-    from autoflowcfd.fr.native_tet_padding import (
+    # 混进来会带偏；见 fr/native_padding.py）。
+    from autoflowcfd.fr.native_padding import (
         order_from_n_sps, reduce_rows_over_real_sps,
     )
     k_field = getattr(getattr(solver, "turb_model", None), "k_field", None)
@@ -1182,7 +1182,7 @@ def _compute_omega_wall_target(
         # 阶数从**数组自身**的 SP 轴反解，不读 solver.current_order/order：
         # 填充划分由被归约数组的 n_sps 决定，从数组反解恒与它自洽（理由见
         # `order_from_n_sps` 文档）。
-        from autoflowcfd.fr.native_tet_padding import (
+        from autoflowcfd.fr.native_padding import (
             order_from_n_sps, reduce_rows_over_real_sps,
         )
         _rows = rho[owner_cells]

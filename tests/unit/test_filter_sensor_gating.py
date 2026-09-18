@@ -58,7 +58,7 @@ def ops1():
 
 
 #: order=1 native 四面体的真实自由度个数（`(p+1)(p+2)(p+3)/6`）。
-#: 后 4 个槽位是零填充，按 `fr/native_tet_padding.py` 的约定"初始化时
+#: 后 4 个槽位是零填充，按 `fr/native_padding.py` 的约定"初始化时
 #: 复制真实 SP #0"、之后残差行填零、滤波行是单位阵——**永远冻结在初值**，
 #: 不是自由度。往那里注入尖峰是构造不出物理场的，传感器也**必须**忽略它
 #: （见 `TestNativeTetPaddingIsIgnored`）。

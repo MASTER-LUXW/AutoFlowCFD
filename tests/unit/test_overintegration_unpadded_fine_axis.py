@@ -3,7 +3,7 @@ native 四面体过积分的**细网格轴不再填充**——纯速度收益，
 
 ## 缺口
 
-`pad_native_tet_matrix_to_global` 的"零填充块对角"不变量保证填充槽位恒为
+`pad_native_matrix_to_global` 的"零填充块对角"不变量保证填充槽位恒为
 零、对结果零贡献。但此前三个过积分算子的**细网格轴**也被填到了与棱柱
 共用的 `(over_order+1)^3` 宽度，而 native 四面体在 `over_order` 下只有
 `(oo+1)(oo+2)(oo+3)/6` 个**真实**细点：
@@ -46,7 +46,7 @@ from autoflowcfd.core.fr_operators.volume_contract import (
 from autoflowcfd.fr.native_tet_overintegration import (
     build_native_tet_overintegration_operators,
 )
-from autoflowcfd.fr.native_tet_padding import pad_native_tet_matrix_to_global
+from autoflowcfd.fr.native_padding import pad_native_matrix_to_global
 from autoflowcfd.fr.operators import generate_fr_operators
 
 
@@ -116,7 +116,7 @@ class TestEquivalenceWithPaddedVersion:
     """**核心正确性**：不填充与显式填充跑完整过积分链结果相同。
 
     这条是整项改动能成立的唯一依据——填充槽位恒为零所以"零贡献"是
-    `pad_native_tet_matrix_to_global` 的设计不变量，但不变量要被真实
+    `pad_native_matrix_to_global` 的设计不变量，但不变量要被真实
     验证过才算。
     """
 
@@ -131,16 +131,16 @@ class TestEquivalenceWithPaddedVersion:
         n_nat = c2f_n.shape[1]
 
         # 显式填充版（改动前的构造方式）
-        Df_pad = pad_native_tet_matrix_to_global(Df_n, n_fine_g, pad_axes=(0, 1))
-        c2f_pad = pad_native_tet_matrix_to_global(
-            pad_native_tet_matrix_to_global(c2f_n, n_sps_g, pad_axes=(1,)),
+        Df_pad = pad_native_matrix_to_global(Df_n, n_fine_g, pad_axes=(0, 1))
+        c2f_pad = pad_native_matrix_to_global(
+            pad_native_matrix_to_global(c2f_n, n_sps_g, pad_axes=(1,)),
             n_fine_g, pad_axes=(0,))
-        f2c_pad = pad_native_tet_matrix_to_global(
-            pad_native_tet_matrix_to_global(f2c_n, n_fine_g, pad_axes=(1,)),
+        f2c_pad = pad_native_matrix_to_global(
+            pad_native_matrix_to_global(f2c_n, n_fine_g, pad_axes=(1,)),
             n_sps_g, pad_axes=(0,))
         # 只填粗轴（改动后）
-        c2f_u = pad_native_tet_matrix_to_global(c2f_n, n_sps_g, pad_axes=(1,))
-        f2c_u = pad_native_tet_matrix_to_global(f2c_n, n_sps_g, pad_axes=(0,))
+        c2f_u = pad_native_matrix_to_global(c2f_n, n_sps_g, pad_axes=(1,))
+        f2c_u = pad_native_matrix_to_global(f2c_n, n_sps_g, pad_axes=(0,))
 
         rng = np.random.default_rng(20260917)
         NC = 64

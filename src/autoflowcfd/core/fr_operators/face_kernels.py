@@ -217,7 +217,7 @@ class FlatFaceGeometry:
     # 与坍缩坐标 boundary_extrap 消费方式一致：E @ Q_volume_nodal）。
     boundary_extrap_native: np.ndarray
     # DG 提升算子，(4, n_sps, n_fp)（行已填充到 n_sps，见
-    # native_tet_padding.py::pad_native_tet_matrix_to_global 与
+    # native_padding.py::pad_native_matrix_to_global 与
     # native_simplex_basis.py::build_native_tet_lift 文档）。
     lift_native: np.ndarray
 
@@ -323,12 +323,12 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     # (n_fp,n_native)，不像 D_native_tet_padded/lift_native_tet_padded
     # 那样已经在 fr/operators.py 里填充过）。
     if ops.boundary_extrap_native_tet is not None:
-        from autoflowcfd.fr.native_tet_padding import pad_native_tet_matrix_to_global
+        from autoflowcfd.fr.native_padding import pad_native_matrix_to_global
 
         boundary_extrap_native = np.zeros((4, n_fp, n_sps), dtype=np.float64)
         lift_native = np.zeros((4, n_sps, n_fp), dtype=np.float64)
         for ev in range(4):
-            boundary_extrap_native[ev] = pad_native_tet_matrix_to_global(
+            boundary_extrap_native[ev] = pad_native_matrix_to_global(
                 ops.boundary_extrap_native_tet[ev], n_sps, pad_axes=(1,)
             )
             lift_native[ev] = ops.lift_native_tet_padded[ev]

@@ -30,7 +30,7 @@ GPU 侧的两节用与 `test_gpu_scalar_transport.py` 同一个手法：把
 import numpy as np
 import pytest
 
-from autoflowcfd.fr.native_tet_padding import (
+from autoflowcfd.fr.native_padding import (
     native_tet_n_real_sps,
     reduce_per_cell_over_real_sps,
     reduce_rows_over_real_sps,

@@ -188,7 +188,7 @@ def distributed_save_checkpoint(
     # 直接 `.mean(axis=1)` 会把 native 四面体的零填充槽位一起算进去，而
     # 那些槽位按约定在初始化时复制真实 SP #0、之后残差行填零/滤波行是
     # 单位阵，**永远冻结在初值**（实测推进 10 步后与真实 SP#0 相差 3.4%，
-    # order=1 下占一半槽位）。见 fr/native_tet_padding.py::
+    # order=1 下占一半槽位）。见 fr/native_padding.py::
     # reduce_per_cell_over_real_sps。
     #
     # `U_global` 是**全局**索引空间（gather_global_state 按全局 id 归位），
@@ -202,7 +202,7 @@ def distributed_save_checkpoint(
     # 内部消费方（resume、气动力后处理）都强制要求 U_sps 且缺失即报错，
     # 本字段只供粗粒度外部消费方使用。要在完全分布式下也修对，需要把
     # 逐单元 is_prism 标志一起 gather（需要真实 MPI 环境验证）。
-    from autoflowcfd.fr.native_tet_padding import (
+    from autoflowcfd.fr.native_padding import (
         order_from_n_sps, reduce_per_cell_over_real_sps,
     )
     _mesh_ck = getattr(solver, 'mesh', None)

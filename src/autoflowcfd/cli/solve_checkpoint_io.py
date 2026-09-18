@@ -476,12 +476,12 @@ def write_checkpoint(
     # `.mean(axis=1)` 会把 native 四面体的零填充槽位一起算进去，而那些
     # 槽位按约定在初始化时复制真实 SP #0、之后残差行填零/滤波行是单位阵，
     # **永远冻结在初值**（实测推进 10 步后与真实 SP#0 相差 3.4%，order=1
-    # 下占一半槽位）。见 fr/native_tet_padding.py::
+    # 下占一半槽位）。见 fr/native_padding.py::
     # reduce_per_cell_over_real_sps。
     # 注意 `U_sps`（下方 extra_fields）始终是精确的逐 SP 数据，所有内部
     # 消费方（resume、气动力后处理）都强制要求它并在缺失时报错；本字段
     # 只供粗粒度外部消费方使用。
-    from autoflowcfd.fr.native_tet_padding import (
+    from autoflowcfd.fr.native_padding import (
         native_tet_n_real_sps, order_from_n_sps, reduce_per_cell_over_real_sps,
     )
     _U_ck = solver.state.U

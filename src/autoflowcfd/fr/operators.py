@@ -24,7 +24,7 @@ extrap("tet",...)`/`modal_filter.py::build_tet_modal_filter`）不再被
 
 `D_3d_tet`/`filter_tet` 两个字段现在直接**别名**到对应的 native 填充
 版本（`D_native_tet_padded`/`filter_native_tet_padded`，两者形状恒等，
-是"零填充块对角"设计从一开始就保证的，见 native_tet_padding.py 文档）；
+是"零填充块对角"设计从一开始就保证的，见 native_padding.py 文档）；
 `boundary_extrap_tet` 保留为占位零矩阵字典（形状与之前一致），只是为了
 不用同步修改 `core/fr_operators/face_kernels.py` 里"无条件按 (celltype,
 axis,side) 读取 boundary_extrap_tet/prism 拼成统一查找表"这一段代码——
@@ -165,7 +165,7 @@ class FROperators:
     # 顶点 0~3。
     lift_native_tet: Dict[int, np.ndarray] = None
     # `D_native_tet`/`lift_native_tet` 零填充到全局统一 SPs 宽度 `n_sps`
-    # 之后的版本（`fr/native_tet_padding.py::pad_native_tet_matrix_to_
+    # 之后的版本（`fr/native_padding.py::pad_native_matrix_to_
     # global`，见 Part8 文档"一、核心不变量：零填充块对角"）——生产
     # 残差 kernel（`inviscid.py`/`inviscid_kernel.py` 等）要消费的是
     # 这两个已经填充好的版本，不是上面两个原始（n_native 宽）版本；
@@ -176,7 +176,7 @@ class FROperators:
     lift_native_tet_padded: Dict[int, np.ndarray] = None
     # native 四面体指数模态滤波器（`native_tet_filter.py::build_native_
     # tet_modal_filter`，抑制混叠失稳，见该模块与 fr/modal_filter.py
-    # 文档），填充到全局 n_sps 宽度（`native_tet_padding.py::pad_native_
+    # 文档），填充到全局 n_sps 宽度（`native_padding.py::pad_native_
     # tet_filter_matrix_to_global`——填充块是单位矩阵，不是零，与
     # D_native_tet_padded/lift_native_tet_padded 的"零填充"约定不同，
     # 见该函数文档）。
@@ -327,8 +327,8 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
     from .native_simplex_basis import (
         build_native_tet_operators, build_native_tet_boundary_extrap, build_native_tet_lift,
     )
-    from .native_tet_padding import (
-        pad_native_tet_matrix_to_global, pad_native_tet_filter_matrix_to_global,
+    from .native_padding import (
+        pad_native_matrix_to_global, pad_native_filter_matrix_to_global,
     )
     from .native_tet_filter import build_native_tet_modal_filter
 
@@ -343,13 +343,13 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
         for excluded_vertex in range(4)
     }
     n_sps_global = n ** 3
-    D_native_tet_padded = pad_native_tet_matrix_to_global(D_native_tet, n_sps_global, pad_axes=(0, 1))
+    D_native_tet_padded = pad_native_matrix_to_global(D_native_tet, n_sps_global, pad_axes=(0, 1))
     lift_native_tet_padded = {
-        excluded_vertex: pad_native_tet_matrix_to_global(lift_native_tet[excluded_vertex], n_sps_global, pad_axes=(0,))
+        excluded_vertex: pad_native_matrix_to_global(lift_native_tet[excluded_vertex], n_sps_global, pad_axes=(0,))
         for excluded_vertex in range(4)
     }
     filter_native_tet = build_native_tet_modal_filter(order)
-    filter_native_tet_padded = pad_native_tet_filter_matrix_to_global(filter_native_tet, n_sps_global)
+    filter_native_tet_padded = pad_native_filter_matrix_to_global(filter_native_tet, n_sps_global)
 
     # `D_3d_tet`/`filter_tet` 别名到 native 填充版本（见模块文档"删除
     # collapsed 相关内容"一节）——两者形状恒等（"零填充块对角"设计
@@ -388,7 +388,7 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
     # 更小——D_fine/interp_c2f/restrict_f2c 三者都需要按"零填充块对角"
     # （Part8 文档"一"节）填充到这个全局宽度；interp_c2f/restrict_f2c
     # 的两个轴分别对应不同的 native 长度（fine 轴 vs coarse 轴），
-    # `pad_native_tet_matrix_to_global` 一次只处理同一个 native 长度的
+    # `pad_native_matrix_to_global` 一次只处理同一个 native 长度的
     # 轴集合，因此分两步各自填充对应的轴，而不是一次性传两个轴（详见
     # 该函数文档）。
     if order >= 1:
@@ -451,14 +451,14 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
         )
         # ===== 细网格轴**不再**填充到全局张量积宽度（2026-09-17）=====
         #
-        # 此前这三个矩阵的**细网格轴**也被 `pad_native_tet_matrix_to_global`
+        # 此前这三个矩阵的**细网格轴**也被 `pad_native_matrix_to_global`
         # 填到 `(overint_order+1)^3`（与棱柱共用同一个 `n_fine`）。但 native
         # 四面体在 over_order 下只有 `(oo+1)(oo+2)(oo+3)/6` 个真实细点：
         #
         #     P1 (oo=2)   真实 10   填充 27
         #     P2 (oo=3)   真实 20   填充 64
         #
-        # 填充槽位恒为零（见 `pad_native_tet_matrix_to_global` 文档"零填充
+        # 填充槽位恒为零（见 `pad_native_matrix_to_global` 文档"零填充
         # 块对角"不变量），所以它们对结果**零贡献**——但整条过积分链
         # （插值 -> 物理通量 -> 逆变通量 -> 散度 -> 限制）都在这些空点上
         # 白算，而其中 `D_fine` 的收缩是 **O(n_fine^2)**：
@@ -482,11 +482,11 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
         # D_fine：两个轴都是细网格轴 -> 完全不填充
         overint_D_fine_tet = D_fine_native
         # interp c2f：列（粗轴）填充到 n_sps_global，行（细轴）保持真实长度
-        overint_interp_c2f_tet = pad_native_tet_matrix_to_global(
+        overint_interp_c2f_tet = pad_native_matrix_to_global(
             interp_c2f_native, n_sps_global, pad_axes=(1,)
         )
         # restrict f2c：行（粗轴）填充到 n_sps_global，列（细轴）保持真实长度
-        overint_restrict_f2c_tet = pad_native_tet_matrix_to_global(
+        overint_restrict_f2c_tet = pad_native_matrix_to_global(
             restrict_f2c_native, n_sps_global, pad_axes=(0,)
         )
 

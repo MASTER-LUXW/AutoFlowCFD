@@ -667,7 +667,7 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         # （壁面附近流动减速）冻结槽位会把 dt 压得偏小：方向上偏保守、
         # 不会失稳，但它是用初始条件去限制当前时间步，而且会让 CPU-GPU
         # 交叉校验在四面体上无声地对不上。
-        from autoflowcfd.fr.native_tet_padding import (
+        from autoflowcfd.fr.native_padding import (
             order_from_n_sps, reduce_per_cell_over_real_sps,
         )
         _np_cells = int(self.mesh.n_prism_cells)

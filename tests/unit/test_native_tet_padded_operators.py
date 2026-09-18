@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - native 四面体（路径C）算子零填充决定性验证。
 
-见 `fr/native_tet_padding.py` 与
+见 `fr/native_padding.py` 与
 `ProjectFiles/V2.0/8_算法重构-微分算子对坍缩坐标退化参考轴的病态条件数-Part8.md`
 "一、核心不变量：零填充块对角"一节。本文件的核心判据
 （`test_padded_matmul_survives_nan_in_padding_rows`）直接构造填充行为 NaN
@@ -12,8 +12,8 @@
 import numpy as np
 import pytest
 
-from autoflowcfd.fr.native_tet_padding import (
-    pad_native_tet_matrix_to_global, pad_native_tet_filter_matrix_to_global,
+from autoflowcfd.fr.native_padding import (
+    pad_native_matrix_to_global, pad_native_filter_matrix_to_global,
 )
 from autoflowcfd.fr.native_simplex_basis import build_native_tet_operators, build_native_tet_lift
 from autoflowcfd.fr.native_tet_filter import build_native_tet_modal_filter
@@ -26,7 +26,7 @@ def test_pad_preserves_real_block_and_zeros_elsewhere_for_d_native(order):
     n1d = order + 1
     n_sps = n1d ** 3
 
-    padded = pad_native_tet_matrix_to_global(D_native, n_sps, pad_axes=(0, 1))
+    padded = pad_native_matrix_to_global(D_native, n_sps, pad_axes=(0, 1))
     assert padded.shape == (n_sps, n_sps, 3)
     np.testing.assert_array_equal(padded[:n_native, :n_native, :], D_native)
     assert np.all(padded[n_native:, :, :] == 0.0)
@@ -41,7 +41,7 @@ def test_pad_preserves_real_block_and_zeros_elsewhere_for_lift(order):
     for ev in range(4):
         Lift_ref = build_native_tet_lift(order, ev)
         n_native = Lift_ref.shape[0]
-        padded = pad_native_tet_matrix_to_global(Lift_ref, n_sps, pad_axes=(0,))
+        padded = pad_native_matrix_to_global(Lift_ref, n_sps, pad_axes=(0,))
         assert padded.shape == (n_sps, n_fp)
         np.testing.assert_array_equal(padded[:n_native, :], Lift_ref)
         assert np.all(padded[n_native:, :] == 0.0)
@@ -60,7 +60,7 @@ def test_padded_matmul_with_finite_padding_rows_freezes_padding_output_at_exact_
     n1d = order + 1
     n_sps = n1d ** 3
 
-    padded = pad_native_tet_matrix_to_global(D_native, n_sps, pad_axes=(0, 1))
+    padded = pad_native_matrix_to_global(D_native, n_sps, pad_axes=(0, 1))
 
     rng = np.random.default_rng(0)
     field_real = rng.standard_normal((n_native, 5))
@@ -95,7 +95,7 @@ def test_padded_matmul_does_not_isolate_nan_in_padding_rows_finite_discipline_is
     n1d = order + 1
     n_sps = n1d ** 3
 
-    padded = pad_native_tet_matrix_to_global(D_native, n_sps, pad_axes=(0, 1))
+    padded = pad_native_matrix_to_global(D_native, n_sps, pad_axes=(0, 1))
 
     rng = np.random.default_rng(0)
     field_real = rng.standard_normal((n_native, 5))
@@ -126,7 +126,7 @@ def test_padded_lift_matmul_survives_nan_in_padding_columns_of_jump_is_not_appli
     ev = 1
     Lift_ref = build_native_tet_lift(order, ev)
     n_native = Lift_ref.shape[0]
-    padded = pad_native_tet_matrix_to_global(Lift_ref, n_sps, pad_axes=(0,))
+    padded = pad_native_matrix_to_global(Lift_ref, n_sps, pad_axes=(0,))
 
     rng = np.random.default_rng(1)
     jump = rng.standard_normal((n_fp, 5))
@@ -146,7 +146,7 @@ def test_filter_padding_uses_identity_block_and_freezes_padding_rows(order):
     n_sps = n1d ** 3
     F_native = build_native_tet_modal_filter(order)
     n_native = F_native.shape[0]
-    padded = pad_native_tet_filter_matrix_to_global(F_native, n_sps)
+    padded = pad_native_filter_matrix_to_global(F_native, n_sps)
     assert padded.shape == (n_sps, n_sps)
 
     rng = np.random.default_rng(3)
@@ -165,7 +165,7 @@ def test_pad_rejects_mismatched_axis_lengths():
     _, D_native = build_native_tet_operators(order)
     bad = D_native[:, :-1, :]  # 人为制造两个待填充轴长度不一致
     with pytest.raises(ValueError):
-        pad_native_tet_matrix_to_global(bad, 27, pad_axes=(0, 1))
+        pad_native_matrix_to_global(bad, 27, pad_axes=(0, 1))
 
 
 def test_pad_rejects_n_sps_smaller_than_n_native():
@@ -173,4 +173,4 @@ def test_pad_rejects_n_sps_smaller_than_n_native():
     _, D_native = build_native_tet_operators(order)
     n_native = D_native.shape[0]
     with pytest.raises(ValueError):
-        pad_native_tet_matrix_to_global(D_native, n_native - 1, pad_axes=(0, 1))
+        pad_native_matrix_to_global(D_native, n_native - 1, pad_axes=(0, 1))

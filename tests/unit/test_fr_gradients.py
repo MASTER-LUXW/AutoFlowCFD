@@ -59,7 +59,7 @@ def test_linear_function_gradient_exact_for_tet_and_prism():
     # 2026-09-03 更正：四面体坍缩坐标基已删除（见 fr/operators.py 模块
     # 文档），四面体单元的梯度输出在"零填充块对角"约定下，填充行
     # （`[n_native:]`）恒为零梯度（`D_native_tet_padded` 的填充行本身
-    # 是零，不是真实自由度的物理梯度取值，见 native_tet_padding.py
+    # 是零，不是真实自由度的物理梯度取值，见 native_padding.py
     # 文档）——这是既有、已验证的设计不变量，不是本次改动引入的新
     # 近似；对比时必须只看真实自由度（`[:n_native]`），不能再要求
     # 填充行也精确等于常数梯度。

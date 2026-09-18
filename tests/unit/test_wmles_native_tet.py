@@ -49,7 +49,7 @@ class TestNativeTetWmlesBoundaryExtrap:
         的 native 外插（`boundary_extrap_native_tet`，按需 pad）不同。
         这证明这是一个需要真正修复的真实 bug，而不是理论上的边界情况。"""
         from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
-        from autoflowcfd.fr.native_tet_padding import pad_native_tet_matrix_to_global
+        from autoflowcfd.fr.native_padding import pad_native_matrix_to_global
 
         order = 2
         mesh = _build_synthetic_mixed_mesh(order, tet_basis_mode="native")
@@ -73,7 +73,7 @@ class TestNativeTetWmlesBoundaryExtrap:
         for f in native_faces:
             axis, side = int(flat.owner_axis[f]), float(flat.owner_side[f])
             excluded_vertex = int(flat.owner_cube_face[f]) - 6
-            E_correct = pad_native_tet_matrix_to_global(
+            E_correct = pad_native_matrix_to_global(
                 ops.boundary_extrap_native_tet[excluded_vertex], n_sps, pad_axes=(1,)
             )
             result_correct = E_correct @ field

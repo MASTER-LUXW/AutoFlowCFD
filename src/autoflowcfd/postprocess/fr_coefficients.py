@@ -102,7 +102,7 @@ def compute_aerodynamic_coefficients_fr(
         所有消费点同一个判据）分派到 `ops.boundary_extrap_native_tet
         [excluded_vertex]`——这个矩阵形状是 (n_fp,n_native)，不是 padded
         到全局 n_sps 宽度的版本，必须先把 `field` 按 `[:n_native]` 切片
-        （填充槽位不携带真实自由度，见 native_tet_padding.py 文档），
+        （填充槽位不携带真实自由度，见 native_padding.py 文档），
         再做矩阵乘法，不能直接对全宽度 `field` 求值。
         """
         if oc_code >= 6:

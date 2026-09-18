@@ -863,7 +863,7 @@ def build_filter_func(solver) -> Callable[[np.ndarray], np.ndarray]:
     # native 四面体（路径C，Part8 文档）：`filter_tet` 现在直接别名到
     # `filter_native_tet_padded`（见 fr/operators.py 模块文档"删除
     # collapsed 相关内容"一节，零填充行改用单位矩阵，见 native_tet_
-    # padding.py::pad_native_tet_filter_matrix_to_global 文档——滤波器
+    # padding.py::pad_native_filter_matrix_to_global 文档——滤波器
     # 直接作用在 U 本身，不是残差贡献，填充行必须原样通过而不是被
     # 重置为 0）。
     filter_tet = ops.filter_tet

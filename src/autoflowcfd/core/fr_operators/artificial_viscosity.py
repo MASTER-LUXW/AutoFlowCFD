@@ -146,7 +146,7 @@ def _build_native_tet_sensor_operators(order: int):
 
       1. 用一个**不是解所在空间**的基去做模态分解；
       2. 把填充 SP 当成真实自由度一起喂进指标——而填充槽位按
-         `native_tet_padding.py` 的约定是"初始化时复制真实 SP #0"、
+         `native_padding.py` 的约定是"初始化时复制真实 SP #0"、
          之后残差行填零、滤波行是单位阵，**永远冻结在初值**。实测
          推进 10 步后填充块与真实 SP#0 已相差 3.4%，也就是说指标里
          混进了一个纯人造的阶跃。
@@ -467,8 +467,8 @@ def compute_persson_peraire_artificial_viscosity(
     # 只统计**真实自由度**（2026-09-15 系统性审计）：直接 `.mean(axis=1)`
     # 会把 native 四面体的零填充槽位一起算进去，而那些槽位冻结在初值、
     # 会随推进变馊（实测 10 步后偏差 3.4%，且占一半槽位）。详见
-    # fr/native_tet_padding.py::reduce_per_cell_over_real_sps。
-    from autoflowcfd.fr.native_tet_padding import reduce_per_cell_over_real_sps
+    # fr/native_padding.py::reduce_per_cell_over_real_sps。
+    from autoflowcfd.fr.native_padding import reduce_per_cell_over_real_sps
     rho_local = reduce_per_cell_over_real_sps(rho, n_prism, order, 'mean')
     vel_local = reduce_per_cell_over_real_sps(vel_mag, n_prism, order, 'mean')
     epsilon_max = alpha_av * rho_local * h_cell * vel_local / order

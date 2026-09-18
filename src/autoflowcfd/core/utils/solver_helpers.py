@@ -176,8 +176,8 @@ def compute_wmles_wall_stress_correction(
 
     def _get_padded_extrap_native(excluded_vertex: int) -> np.ndarray:
         if excluded_vertex not in _padded_extrap_native_cache:
-            from autoflowcfd.fr.native_tet_padding import pad_native_tet_matrix_to_global
-            _padded_extrap_native_cache[excluded_vertex] = pad_native_tet_matrix_to_global(
+            from autoflowcfd.fr.native_padding import pad_native_matrix_to_global
+            _padded_extrap_native_cache[excluded_vertex] = pad_native_matrix_to_global(
                 ops.boundary_extrap_native_tet[excluded_vertex], n_sps, pad_axes=(1,)
             )
         return _padded_extrap_native_cache[excluded_vertex]

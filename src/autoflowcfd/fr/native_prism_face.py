@@ -273,3 +273,62 @@ def build_all_native_prism_face_operators(
               for f in PRISM_FACE_IDS}
     lift = {f: build_native_prism_lift(order, f) for f in PRISM_FACE_IDS}
     return extrap, lift
+
+
+# ---------------------------------------------------------------------------
+# 立方体面 <-> 原生棱柱面 的对应表
+# ---------------------------------------------------------------------------
+#
+# 现有面连接/残差 kernel 用 `(axis, side)`（"立方体面"）给单元的面编号，
+# 因为坍缩棱柱的参考单元就是个立方体（其中 `b=+1` 退化为一条侧棱、不携带
+# 独立通量信息，见 `grid/curved_mapping/curved_mapping.py::PRISM_CUBE_FACES`）。
+# 原生棱柱的参考单元不是立方体，它的 5 个面用本模块的 `face_id` 编号。
+# 两者之间是**精确双射**：
+#
+#     立方体面        物理面（PRISM_CUBE_FACES 的局部顶点）   face_id
+#     c=-1 (2,-1)     (0,1,2)  底面三角形                      0
+#     c=+1 (2,+1)     (3,4,5)  顶面三角形                      1
+#     a=+1 (0,+1)     (1,2,5,4) 侧面（对边 v1v2，排除 v0）      2
+#     a=-1 (0,-1)     (0,2,5,3) 侧面（对边 v0v2，排除 v1）      3
+#     b=-1 (1,-1)     (0,1,4,3) 侧面（对边 v0v1，排除 v2）      4
+#     b=+1 (1,+1)     退化（侧棱）                             无
+#
+# 这张表是**唯一事实来源**：任何"按 (axis,side) 取原生棱柱算子"的消费点
+# 都必须走 `cube_face_to_native_prism_face`，不许各处自己判断 —— 面 id 配错
+# 不会报错，只会静默地对某个面用错外插/提升矩阵（与当年多 GPU"四面体拿到
+# 棱柱矩阵"完全同一类缺陷）。对应关系已用几何方式验证（见
+# `tests/unit/test_native_prism_face.py::TestCubeFaceMapping`：把原生面
+# 通量点映射到物理空间，检验它们确实落在该立方体面所对应的那组物理顶点
+# 张成的平面上）。
+
+#: `(axis, side)` -> `face_id`。`(1, +1.0)` 不在表里：它是退化面。
+_CUBE_FACE_TO_NATIVE: Dict[Tuple[int, float], int] = {
+    (2, -1.0): 0,
+    (2, 1.0): 1,
+    (0, 1.0): 2,
+    (0, -1.0): 3,
+    (1, -1.0): 4,
+}
+
+#: 反向表，供诊断/测试用。
+NATIVE_PRISM_FACE_TO_CUBE_FACE: Dict[int, Tuple[int, float]] = {
+    v: k for k, v in _CUBE_FACE_TO_NATIVE.items()
+}
+
+
+def cube_face_to_native_prism_face(axis: int, side: float) -> int:
+    """把 `(axis, side)` 立方体面编号换成原生棱柱的 `face_id`。
+
+    Raises:
+        ValueError: `(1, +1)` —— 坍缩棱柱参考立方体上那个**退化**面
+            （坍缩成一条侧棱）。它不携带独立通量信息，原生棱柱里根本
+            没有对应的面。静默返回某个 face_id 会让一条不存在的面参与
+            界面项组装，所以这里硬失败。
+    """
+    key = (int(axis), float(side))
+    if key not in _CUBE_FACE_TO_NATIVE:
+        raise ValueError(
+            f"立方体面 (axis={axis}, side={side:+.0f}) 没有对应的原生棱柱面。"
+            f"合法的 5 个面见本模块的对应表；(1, +1) 是坍缩参考立方体上的"
+            f"退化面（坍缩成一条侧棱），不携带独立通量信息。")
+    return _CUBE_FACE_TO_NATIVE[key]

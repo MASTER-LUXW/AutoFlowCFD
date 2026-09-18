@@ -399,7 +399,7 @@ def _build_native_tet_vtk_lagrange_export_data(order: int) -> Tuple[np.ndarray, 
     坍缩坐标四面体基已删除（见 fr/operators.py 模块文档），四面体 SPs
     现在恒为 native 单纯形基节点（`n_native = (order+1)(order+2)
     (order+3)/6` 个真实自由度 + 零填充块对角到全局 `(order+1)^3` 宽度，
-    见 native_tet_padding.py），不再对应坍缩坐标 (a,b,c) 网格——继续
+    见 native_padding.py），不再对应坍缩坐标 (a,b,c) 网格——继续
     用旧路径会把插值矩阵拟合在错误的节点位置上，静默给出错误结果
     （不会报错，因为矩阵形状仍然对得上）。
 

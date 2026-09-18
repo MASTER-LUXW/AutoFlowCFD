@@ -534,7 +534,7 @@ def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, m
         # 用与 CPU 端**同一个**共享辅助（2026-09-15 统一）：原先这里是
         # 一份手写的等价逻辑，等价性只能靠人工比对维护；共享版还附带
         # "order 与 n_sps 必须自洽"的显式校验。
-        from autoflowcfd.fr.native_tet_padding import (
+        from autoflowcfd.fr.native_padding import (
             order_from_n_sps, reduce_rows_over_real_sps,
         )
         _np_prism = getattr(ff, 'n_prism', None)

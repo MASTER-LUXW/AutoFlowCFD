@@ -1,4 +1,5 @@
-"""AutoFlowCFD V2.0 - native 四面体（路径C）算子零填充到全局统一 SPs 宽度。
+"""AutoFlowCFD V2.0 - 原生基算子零填充到全局统一 SPs 宽度，及"只统计真实
+自由度"的归约。
 
 从 `native_simplex_basis.py` 拆出（控制单文件行数，>400 行需拆分的项目
 规范）。完整架构设计见
@@ -6,12 +7,27 @@
 "一、核心不变量：零填充块对角"一节——本文件只提供该不变量要求的、单一
 的填充实现，供 `fr/operators.py::generate_fr_operators` 消费，避免各处
 各写一份、未来不一致。
+
+**2026-09-18 起同时服务原生棱柱基**（`AFCFD_PRISM_BASIS=native`，见
+`prism_basis_mode.py`）。填充函数本身与单元类型无关（只是把矩阵某些轴补到
+全局宽度），原先名字里带 `tet` 纯属历史，已正名；真正与单元类型绑定的只有
+"真实自由度个数"，见 `real_sps_per_cell`。
+
+**这一点是引入原生棱柱时必须同时改的**：本文件的
+`reduce_rows_over_real_sps`/`reduce_per_cell_over_real_sps` 原先假设
+**棱柱用满全部槽位**（只对四面体块切 `:n_native`）。原生棱柱一上线棱柱
+也有填充槽位，那批消费点（checkpoint 的单元均值、人工粘性的尺度因子、
+omega 壁面目标值里的 rho、GPU 局部 dt 的 min）会**静默算错**——填充槽位
+冻结在初值、随推进变馊（实测 10 步后偏差 3.4%）。所以两个归约现在都按
+`real_sps_per_cell` 给出的**两个**真实长度分别切片。
 """
+
+from typing import Tuple
 
 import numpy as np
 
 
-def pad_native_tet_matrix_to_global(matrix: np.ndarray, n_sps: int, pad_axes: tuple) -> np.ndarray:
+def pad_native_matrix_to_global(matrix: np.ndarray, n_sps: int, pad_axes: tuple) -> np.ndarray:
     """把 native 四面体算子矩阵嵌入到全局统一宽度 `n_sps`（=`n1d**3`，
     棱柱/坍缩坐标四面体共用的张量积节点数）的零矩阵左上角，其余槽位
     （"填充行/列"）恒为零——Part8 文档"零填充块对角"不变量的具体实现：
@@ -47,13 +63,13 @@ def pad_native_tet_matrix_to_global(matrix: np.ndarray, n_sps: int, pad_axes: tu
     for ax in pad_axes:
         if matrix.shape[ax] != n_native:
             raise ValueError(
-                f"pad_native_tet_matrix_to_global: 待填充的轴长度不一致（axes={pad_axes}，"
+                f"pad_native_matrix_to_global: 待填充的轴长度不一致（axes={pad_axes}，"
                 f"shape={matrix.shape}）——同一个矩阵里被要求填充的几个轴理应是同一个"
                 f"n_native_sps，不一致说明调用方传错了矩阵或轴下标。"
             )
     if n_sps < n_native:
         raise ValueError(
-            f"pad_native_tet_matrix_to_global: n_sps={n_sps} 小于 n_native={n_native}——"
+            f"pad_native_matrix_to_global: n_sps={n_sps} 小于 n_native={n_native}——"
             "native 基自由度理应严格不多于全局统一宽度（(order+1)(order+2)(order+3)/6 "
             "<= (order+1)^3），出现相反的情形说明上游传错了参数，不应该静默截断。"
         )
@@ -68,8 +84,8 @@ def pad_native_tet_matrix_to_global(matrix: np.ndarray, n_sps: int, pad_axes: tu
     return padded
 
 
-def pad_native_tet_filter_matrix_to_global(filter_matrix: np.ndarray, n_sps: int) -> np.ndarray:
-    """滤波矩阵专用填充——与 `pad_native_tet_matrix_to_global` 用途不同，
+def pad_native_filter_matrix_to_global(filter_matrix: np.ndarray, n_sps: int) -> np.ndarray:
+    """滤波矩阵专用填充——与 `pad_native_matrix_to_global` 用途不同，
     不能直接复用：滤波矩阵直接作用在 `U` 本身（`U_new = F @ U`，不是像
     `D_native_tet`/`lift_native_tet` 那样产出一份*残差贡献*）。如果填充
     槽位照搬"行填零"（`D`/`lift` 用的约定），滤波器每次调用都会把填充
@@ -94,11 +110,11 @@ def pad_native_tet_filter_matrix_to_global(filter_matrix: np.ndarray, n_sps: int
     n_native = filter_matrix.shape[0]
     if filter_matrix.shape[1] != n_native:
         raise ValueError(
-            f"pad_native_tet_filter_matrix_to_global: 滤波矩阵必须是方阵，实际 {filter_matrix.shape}"
+            f"pad_native_filter_matrix_to_global: 滤波矩阵必须是方阵，实际 {filter_matrix.shape}"
         )
     if n_sps < n_native:
         raise ValueError(
-            f"pad_native_tet_filter_matrix_to_global: n_sps={n_sps} 小于 n_native={n_native}"
+            f"pad_native_filter_matrix_to_global: n_sps={n_sps} 小于 n_native={n_native}"
         )
     padded = np.eye(n_sps, dtype=filter_matrix.dtype)
     padded[:n_native, :n_native] = filter_matrix
@@ -110,13 +126,48 @@ def pad_native_tet_filter_matrix_to_global(filter_matrix: np.ndarray, n_sps: int
 def native_tet_n_real_sps(order: int) -> int:
     """native 四面体的**真实自由度**个数 `(p+1)(p+2)(p+3)/6`。
 
-    其余槽位是零填充（见 `pad_native_tet_matrix_to_global` 的"零填充块
+    其余槽位是零填充（见 `pad_native_matrix_to_global` 的"零填充块
     对角"不变量）：它们不贡献任何真实输出，但**值本身会变馊**——按
     `high_order_mesh_order.py::build_order_geometry` 的约定它们在初始化时
     复制真实 SP #0，之后残差行填零、滤波行是单位阵，于是永远冻结在初值。
     实测 79 万单元合成算例推进 10 步后，填充块与真实 SP#0 已相差 3.4%。
     """
     return (order + 1) * (order + 2) * (order + 3) // 6
+
+
+def native_prism_n_real_sps(order: int) -> int:
+    """原生棱柱的**真实自由度**个数 `(p+1)^2 (p+2)/2`。
+
+    公式**读** `fr/native_prism_basis.py::native_prism_n_sps`，不在这里
+    再写一遍——同一语义只允许一个事实来源（自由度数同时决定节点生成、
+    Vandermonde 尺寸、填充布局与这里的归约切片，任何一处与其它处不一致
+    都会静默算错）。
+    """
+    from .native_prism_basis import native_prism_n_sps
+
+    return native_prism_n_sps(order)
+
+
+def real_sps_per_cell(order: int) -> Tuple[int, int]:
+    """`(棱柱真实自由度, 四面体真实自由度)`，按**当前生效的棱柱基**。
+
+    全局统一 SPs 宽度恒为 `(p+1)^3`；这两个数是那个宽度里真正携带自由度
+    的前缀长度，其余是零填充。
+
+      * 坍缩棱柱（迁移期默认）：棱柱**用满** `(p+1)^3`，没有填充；
+      * 原生棱柱：棱柱只用前 `(p+1)^2(p+2)/2` 个。
+
+    四面体恒为 `(p+1)(p+2)(p+3)/6`（native 是唯一实现）。
+
+    这是"哪些槽位是真的"的**唯一判据来源**：归约、checkpoint 的单元均值、
+    人工粘性尺度、GPU 局部 dt 全都读它，任何一处自己判断都会在切换基的
+    时候漏改。
+    """
+    from .prism_basis_mode import prism_basis_is_native
+
+    n_prism_real = (native_prism_n_real_sps(order) if prism_basis_is_native()
+                    else (order + 1) ** 3)
+    return n_prism_real, native_tet_n_real_sps(order)
 
 
 def order_from_n_sps(n_sps: int) -> int:
@@ -181,13 +232,16 @@ def reduce_rows_over_real_sps(field, row_is_prism, order: int, how: str,
     if how not in ('mean', 'min', 'max', 'sum'):
         raise ValueError(f"reduce_rows_over_real_sps: how={how!r} 不支持")
     n_sps = field.shape[1]
-    n_native = _check_order_matches_n_sps(
-        order, n_sps, 'reduce_rows_over_real_sps')
-    if n_native >= n_sps:
-        return getattr(xp, how)(field, axis=1)
-    full = getattr(xp, how)(field, axis=1)
-    part = getattr(xp, how)(field[:, :n_native], axis=1)
-    return xp.where(row_is_prism, full, part)
+    _check_order_matches_n_sps(order, n_sps, 'reduce_rows_over_real_sps')
+    n_prism_real, n_tet_real = real_sps_per_cell(order)
+    fn = getattr(xp, how)
+    if n_prism_real >= n_sps and n_tet_real >= n_sps:
+        return fn(field, axis=1)
+    prism_val = (fn(field, axis=1) if n_prism_real >= n_sps
+                 else fn(field[:, :n_prism_real], axis=1))
+    tet_val = (fn(field, axis=1) if n_tet_real >= n_sps
+               else fn(field[:, :n_tet_real], axis=1))
+    return xp.where(row_is_prism, prism_val, tet_val)
 
 
 def reduce_per_cell_over_real_sps(field, n_prism: int, order: int, how: str,
@@ -215,7 +269,8 @@ def reduce_per_cell_over_real_sps(field, n_prism: int, order: int, how: str,
     去维护填充值。
 
     单元存储是"棱柱在前、四面体在后"（本项目的既有不变量），所以直接切片
-    就够，不需要构造布尔掩码。
+    就够，不需要构造布尔掩码。**两段各按自己的真实长度切**（见
+    `real_sps_per_cell`）：原生棱柱上线后棱柱段也有填充槽位。
 
     Args:
         field: `(n_cells, n_sps)` 或 `(n_cells, n_sps, V)`
@@ -234,11 +289,17 @@ def reduce_per_cell_over_real_sps(field, n_prism: int, order: int, how: str,
         raise ValueError(f"reduce_per_cell_over_real_sps: how={how!r} 不支持"
                          f"（mean | min | max | sum）")
     n_cells = field.shape[0]
-    n_native = _check_order_matches_n_sps(
-        order, field.shape[1], 'reduce_per_cell_over_real_sps')
+    n_sps = field.shape[1]
+    _check_order_matches_n_sps(
+        order, n_sps, 'reduce_per_cell_over_real_sps')
+    # 两个真实长度都从 `real_sps_per_cell` 取：坍缩棱柱是 (p+1)^3（用满、
+    # 无填充），原生棱柱是 (p+1)^2(p+2)/2（有填充）。写死"棱柱用满"会在
+    # 切换棱柱基时静默算错，见本模块文档。
+    n_prism_real, n_tet_real = real_sps_per_cell(order)
     fn = getattr(xp, how)
-    out_prism = fn(field[:n_prism], axis=1) if n_prism > 0 else None
-    out_tet = (fn(field[n_prism:, :n_native], axis=1)
+    out_prism = (fn(field[:n_prism, :n_prism_real], axis=1)
+                 if n_prism > 0 else None)
+    out_tet = (fn(field[n_prism:, :n_tet_real], axis=1)
                if n_cells > n_prism else None)
     if out_prism is None:
         return out_tet

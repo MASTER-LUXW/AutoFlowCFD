@@ -302,3 +302,178 @@ class TestGeometryJacobian:
         with pytest.raises(ValueError, match=r"\(6, 3\)"):
             native_prism_exact_jacobian(
                 build_native_prism_nodes(1), np.zeros((4, 3)))
+
+
+class TestCubeFaceMapping:
+    """`(axis, side)` 立方体面 <-> 原生棱柱 `face_id` 的对应表。
+
+    **为什么必须几何验证**：面 id 配错不会报错，只会静默地对某个面用错
+    外插/提升矩阵 —— 与当年多 GPU"四面体拿到棱柱矩阵"完全同一类缺陷
+    （那条是靠真实网格发散才暴露的）。
+
+    **判据怎么选**：第一版判"通量点落在该面顶点张成的平面上"，那是错的
+    —— 不规则棱柱的**四边形侧面本来就不共面**（实测非平面性 2e-2，与面
+    id 无关）。改用形状无关的精确判据：几何映射对 6 个顶点是**线性**的，
+    所以每个通量点都是 6 个顶点的一组权重；某个面的点必须**只**依赖
+    `PRISM_CUBE_FACES` 给出的那几个顶点，被排除的顶点权重恒为零。
+    """
+
+    @staticmethod
+    def _vertex_weights(order, face_id):
+        """通量点对 6 个顶点的权重 `(n_fp, 6)`。
+
+        只用公开的 `native_prism_face_points_physical`：映射对顶点线性，
+        所以把第 i 个顶点设成 `[1,1,1]`、其余设成 0，返回值就是第 i 个
+        顶点的权重（三列相同）。这样不会拿被测公式去验证它自己。
+        """
+        w = np.empty(((order + 1) ** 2, 6))
+        for i in range(6):
+            nodes = np.zeros((6, 3))
+            nodes[i] = 1.0
+            got = native_prism_face_points_physical(order, face_id, nodes)
+            assert np.allclose(got[:, 0], got[:, 1]) and np.allclose(
+                got[:, 0], got[:, 2]), "权重提取假设被破坏"
+            w[:, i] = got[:, 0]
+        return w
+
+    def test_each_native_face_depends_only_on_its_cube_faces_vertices(self):
+        from autoflowcfd.fr.native_prism_face import (
+            NATIVE_PRISM_FACE_TO_CUBE_FACE,
+            cube_face_to_native_prism_face,
+        )
+        from autoflowcfd.grid.curved_mapping.curved_mapping import (
+            PRISM_CUBE_FACES,
+        )
+
+        axis_name = {0: "a", 1: "b", 2: "c"}
+        for face_id, (axis, side) in NATIVE_PRISM_FACE_TO_CUBE_FACE.items():
+            key = f"{axis_name[axis]}={'+1' if side > 0 else '-1'}"
+            on_face = set(PRISM_CUBE_FACES[key])
+            w = self._vertex_weights(3, face_id)
+            off = [i for i in range(6) if i not in on_face]
+            worst = float(np.max(np.abs(w[:, off])))
+            assert worst < 1e-14, (
+                f"face_id={face_id} 被映射到立方体面 {key}（物理顶点 "
+                f"{sorted(on_face)}），但它的通量点对面外顶点 {off} 仍有"
+                f"权重 {worst:.3e} —— 对应表配错了")
+            # 面上的顶点必须真的被用到（否则"权重为零"这条判据会退化成
+            # 对任何配错都成立）
+            assert np.max(np.abs(w[:, sorted(on_face)])) > 0.1
+            assert cube_face_to_native_prism_face(axis, side) == face_id
+
+    def test_weights_form_a_partition_of_unity(self):
+        """权重和恒为 1 —— 映射必须是顶点的仿射组合。"""
+        for face_id in PRISM_FACE_IDS:
+            w = self._vertex_weights(2, face_id)
+            assert np.allclose(w.sum(axis=1), 1.0, atol=1e-14)
+
+    def test_mapping_is_a_bijection_onto_the_five_real_faces(self):
+        from autoflowcfd.fr.native_prism_face import (
+            NATIVE_PRISM_FACE_TO_CUBE_FACE,
+        )
+        from autoflowcfd.grid.curved_mapping.curved_mapping import (
+            PRISM_CUBE_FACES,
+        )
+
+        assert set(NATIVE_PRISM_FACE_TO_CUBE_FACE) == set(PRISM_FACE_IDS)
+        assert len(set(NATIVE_PRISM_FACE_TO_CUBE_FACE.values())) == 5
+        assert len(PRISM_CUBE_FACES) == 5, (
+            "PRISM_CUBE_FACES 不再是 5 个面，对应表必须重新核对")
+
+    def test_degenerate_cube_face_is_rejected(self):
+        """`(1, +1)` 是坍缩参考立方体上的退化面（坍缩成一条侧棱）。
+
+        静默返回某个 face_id 会让一条不存在的面参与界面项组装。
+        """
+        from autoflowcfd.fr.native_prism_face import (
+            cube_face_to_native_prism_face,
+        )
+
+        with pytest.raises(ValueError, match="退化面"):
+            cube_face_to_native_prism_face(1, 1.0)
+
+
+class TestRealSpsCountsFollowTheActivePrismBasis:
+    """`real_sps_per_cell` —— "哪些槽位是真的"的唯一判据来源。
+
+    **为什么这条必须有测试**：`reduce_*_over_real_sps` 原先写死"棱柱用满
+    全部槽位"。原生棱柱一上线棱柱也有填充槽位，而那些槽位冻结在初值、
+    随推进变馊（实测 10 步后偏差 3.4%）。漏改不会报错，只会让 checkpoint
+    的单元均值、人工粘性尺度、omega 壁面目标值里的 rho、GPU 局部 dt 的
+    min 全部**静默**算错。
+    """
+
+    @pytest.mark.parametrize("order", [1, 2, 3, 4])
+    def test_collapsed_prism_uses_every_slot(self, order, monkeypatch):
+        from autoflowcfd.fr.native_padding import real_sps_per_cell
+
+        monkeypatch.delenv("AFCFD_PRISM_BASIS", raising=False)
+        n_prism, n_tet = real_sps_per_cell(order)
+        assert n_prism == (order + 1) ** 3, "坍缩棱柱没有填充槽位"
+        assert n_tet == (order + 1) * (order + 2) * (order + 3) // 6
+
+    @pytest.mark.parametrize("order", [1, 2, 3, 4])
+    def test_native_prism_reports_its_own_count(self, order, monkeypatch):
+        from autoflowcfd.fr.native_padding import real_sps_per_cell
+
+        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
+        n_prism, _ = real_sps_per_cell(order)
+        assert n_prism == native_prism_n_sps(order)
+        assert n_prism < (order + 1) ** 3
+
+    def test_reduction_excludes_prism_padding_under_native(self, monkeypatch):
+        """决定性判据：棱柱填充槽位塞进一个巨大值，均值必须不受影响。"""
+        from autoflowcfd.fr.native_padding import (
+            reduce_per_cell_over_real_sps,
+        )
+
+        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
+        f = np.zeros((4, 27))
+        f[:, :18] = 2.0
+        f[:2, 18:] = 1e6          # 棱柱段的填充槽位：变馊的初值
+        got = reduce_per_cell_over_real_sps(f, 2, 2, "mean")
+        assert np.allclose(got[:2], 2.0), (
+            f"棱柱填充槽位被算进均值了：{got[:2]}")
+
+    def test_collapsed_reduction_is_bit_identical_to_plain_mean(
+            self, monkeypatch):
+        """坍缩模式下必须与"直接对整个 SP 轴求均值"**逐位**相同。
+
+        这条保证改动对已长期验证的默认路径零影响。
+        """
+        from autoflowcfd.fr.native_padding import (
+            reduce_per_cell_over_real_sps,
+        )
+
+        monkeypatch.delenv("AFCFD_PRISM_BASIS", raising=False)
+        rng = np.random.default_rng(11)
+        f = rng.normal(size=(6, 27))
+        got = reduce_per_cell_over_real_sps(f, 4, 2, "mean")
+        assert np.array_equal(got[:4], f[:4].mean(axis=1))
+
+    def test_row_masked_reduction_excludes_prism_padding(self, monkeypatch):
+        """逐行掩码版（按 owner_cell 索引出来的逐面数组）同样要正确。"""
+        from autoflowcfd.fr.native_padding import reduce_rows_over_real_sps
+
+        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
+        f = np.zeros((3, 27))
+        f[:, :10] = 5.0
+        f[:, 10:18] = 5.0
+        f[:, 18:] = -1e6
+        is_prism = np.array([True, False, True])
+        got = reduce_rows_over_real_sps(f, is_prism, 2, "mean")
+        assert np.allclose(got, 5.0), got
+
+    def test_bad_mode_raises_rather_than_falling_back(self, monkeypatch):
+        """拼错环境变量必须报错。
+
+        静默退回默认值会让 A/B 对照失去意义 —— 本项目已经吃过一次
+        "固定 CFL 请求被静默丢弃、两条不同配置给出逐位相同轨迹"的亏。
+        """
+        from autoflowcfd.fr.prism_basis_mode import resolve_prism_basis_mode
+
+        monkeypatch.setenv("AFCFD_PRISM_BASIS", "Native ")
+        assert resolve_prism_basis_mode() == "native", "应当容忍大小写与空格"
+        monkeypatch.setenv("AFCFD_PRISM_BASIS", "nativ")
+        with pytest.raises(ValueError, match="AFCFD_PRISM_BASIS"):
+            resolve_prism_basis_mode()
