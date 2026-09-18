@@ -401,5 +401,16 @@ def distributed_compute_physical_gradient(
 # distributed_compute_turbulence_source_and_viscosity——独立于本文件
 # （k/omega 走自己的 2-var halo 交换，不是 7-var 分布式状态；本文件的
 # `distributed_compute_viscous_residual` 新增 `mu_t_field_compact` 参数
-# 消费其产出）。DDES/IDDES/WMLES/LES 分布式支持仍未实现，见该模块文档
-# "范围边界"一节。
+# 消费其产出）。
+#
+# **2026-09-18 更正**：这里原先写着"DDES/IDDES/WMLES/LES 分布式支持仍未
+# 实现"，那是**过时信息**——`distributed_turbulence.py` 的模块文档与
+# `compute_turbulence_source` 都表明 DDES/IDDES 已于 2026-09-02 补齐
+# （与 SST 复用同一条 k/omega 输运路径，按 `turb_model_name` 与
+# `ddes_model` 分派），WMLES/LES 则**不经过**本文件这条 k/omega 路径
+# （前者没有 ODE 状态、走壁面应力修正，后者是纯代数 SGS），
+# `DistributedFRSolver` 的构造护栏接受
+# 'none'/'sst'/'ddes'/'iddes'/'wmles'/'les' 全部六种。
+# 本项目已经因为"直接引用过时注释当成当前事实"出过真实误判（见
+# ProjectFiles/V2.0 的整改计划文件顶部那条"信息源更正记录"），所以这里
+# 把结论改正而不是只删掉。
