@@ -218,3 +218,73 @@ class TestTriangulatedAxisShowsSpuriousCrossflow:
         assert ratio > 1e6, (
             f"三角化轴/挤出轴 的伪横流之比只有 {ratio:.3e}（实测应为 ~1e11）。"
             f"两者相差若干数量级正是'病根是被三角化的坍缩轴'这个结论的依据。")
+
+
+# ----------------------------------------------------------------------
+# P2 发散的**最小复现**
+# ----------------------------------------------------------------------
+
+#: P2 在本算例上发散的步数（CFL 0.1 实测第 75 步出现非有限值）。留余量
+#: 到 150：只要在 150 步内发散，缺陷就还在。
+_P2_DIVERGES_WITHIN = 150
+#: P1 必须干净跑过的步数（实测 22000 步不发散，|w| 饱和在 ~1.3）。
+_P1_MUST_SURVIVE = 300
+#: P1 的 |w| 上限（相对来流）。实测 22000 步饱和在 4.3%，300 步时远小于它。
+_P1_W_MAX = 0.10
+
+
+def _run_until_nonfinite(order, nx, cfl, max_steps):
+    """推进到出现非有限值或用完步数；返回 (发散步数或 None, max|w|/U)。"""
+    solver, _ = build_blasius_solver(order=order, nx=nx, nz=1, cfl=cfl)
+    worst = 0.0
+    for it in range(1, max_steps + 1):
+        solver.step(dt=1e-6)
+        U = np.asarray(solver.state.U)
+        if not np.all(np.isfinite(U)):
+            return it, float("inf")
+        rho = np.maximum(np.abs(U[:, :, 0]), 1e-30)
+        worst = max(worst, float(np.max(np.abs(U[:, :, 3] / rho))) / U_INF)
+    return None, worst
+
+
+class TestP2DivergesOnACleanPrismMesh:
+    """**已知缺陷的最小复现**：P2 在干净结构化棱柱网格上发散。
+
+    为什么要把"它现在会发散"写成测试：plate_demo 363k 的 P2 重测每步
+    150 s、第 68 步发散，调试循环极慢；同一个失效在这里 1152 单元、
+    **一分钟一轮**就能复现。任何针对 P2 发散的修复都应当先在这上面验证，
+    而这条测试会在修复生效的那一刻**失败**，强制更新文档与判据 ——
+    这正是想要的行为，不要通过放宽判据来"修"它。
+
+    这张网格**全是规整棱柱、无退化单元、均匀分布**，算例是**层流**且有
+    精确解 —— 所以它同时排除了两条常被怀疑的成因：网格质量、湍流模型。
+
+    实测（2026-09-18）：
+
+        P2, CFL 0.1    第 75 步 nan   |w| 0 -> 0.037(25) -> 22.57(50)
+        P2, CFL 0.03   第 220 步 nan
+        P2, CFL 0.01   400 步未发散但 |w| 涨到 0.632、残差 6e6 -> 1.4e9
+        P1, CFL 0.1    22000 步不发散，|w| 饱和在 ~1.3（4.3% of U）
+
+    降 CFL 只推迟不解决，是这类失稳的既有特征。P1 上同一模态**饱和**、
+    P2 上**无界增长** —— 差别只在阶数。
+    """
+
+    def test_p2_still_diverges(self):
+        step, _ = _run_until_nonfinite(2, _NX, 0.1, _P2_DIVERGES_WITHIN)
+        assert step is not None, (
+            f"P2 在 {_P2_DIVERGES_WITHIN} 步内**没有**发散 —— 若这是真实"
+            f"修复，请把本类改成正向判据（P2 必须稳定）并更新模块文档；"
+            f"不要靠放宽判据让它继续通过。")
+        assert step <= _P2_DIVERGES_WITHIN
+
+    def test_p1_on_the_same_mesh_stays_bounded(self):
+        """同一张网格上 P1 必须稳定且 |w| 有界 —— 这是正向要求。
+
+        没有这一条，上面那条可能只是因为整个算例设置有问题。
+        """
+        step, worst_w = _run_until_nonfinite(1, _NX, 0.1, _P1_MUST_SURVIVE)
+        assert step is None, f"P1 在第 {step} 步就发散了 —— 算例本身有问题"
+        assert worst_w < _P1_W_MAX, (
+            f"P1 的伪横流 {100 * worst_w:.3f}% of U 超出已记录量级 "
+            f"{100 * _P1_W_MAX:.0f}%，说明比 2026-09-18 记录的情况更糟")
