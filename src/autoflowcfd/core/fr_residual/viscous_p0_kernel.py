@@ -71,7 +71,7 @@ def compute_viscous_interface_correction_p0_kernel(
     n_prism: int,
     n_threads: int,
     owner_cube_face: np.ndarray, neighbor_cube_face: np.ndarray,
-    true_area_weight: np.ndarray,
+    ref_area_weight: np.ndarray,
     boundary_extrap_native: np.ndarray, lift_native: np.ndarray,
 ) -> np.ndarray:
     """P0 专用粘性界面校正 kernel。
@@ -259,7 +259,7 @@ def compute_viscous_interface_correction_p0_kernel(
                 # @ 之后直接得到 (1,5)——本身已经是 P0 需要的标量化形式。
                 weighted_jump_o = np.empty((n_fp, 5))
                 for i in range(n_fp):
-                    w_area = true_area_weight[f, i]
+                    w_area = ref_area_weight[i]
                     for v in range(5):
                         weighted_jump_o[i, v] = w_area * jump_owner[i, v]
                 contrib_owner = lift_native[oc_code - 6] @ weighted_jump_o  # (1,5)
@@ -396,7 +396,7 @@ def compute_viscous_interface_correction_p0_kernel(
             if n_is_native:
                 weighted_jump_n = np.empty((n_fp, 5))
                 for i in range(n_fp):
-                    w_area = true_area_weight[f, i]
+                    w_area = ref_area_weight[i]
                     for v in range(5):
                         weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
                 contrib_neighbor = lift_native[nc_code - 6] @ weighted_jump_n  # (1,5)

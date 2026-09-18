@@ -67,7 +67,7 @@ def test_wrapper_object_missing_gpu_required_attributes(dist_fc_native):
         name for name in (
             "owner_cell", "neighbor_cell", "owner_adj_row_exact",
             "neighbor_adj_row_exact", "owner_cube_face", "neighbor_cube_face",
-            "true_area_weight", "boundary_extrap_native", "lift_native",
+            "true_area_weight", "ref_area_weight", "boundary_extrap_native", "lift_native",
             "color_face_indices", "n_colors", "mixed_nb_partner",
         )
         if not hasattr(dist_fc_native, name)

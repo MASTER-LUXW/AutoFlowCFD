@@ -474,7 +474,7 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
             flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
             n_prism, n_threads,
             flat.owner_cube_face, flat.neighbor_cube_face,
-            flat.true_area_weight,
+            flat.ref_area_weight,
             flat.boundary_extrap_native, flat.lift_native,
         )
     else:
@@ -514,7 +514,7 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
                     flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
                     n_prism, face_indices, correction,
                     flat.owner_cube_face, flat.neighbor_cube_face,
-                    flat.true_area_weight,
+                    flat.ref_area_weight,
                     flat.boundary_extrap_native, flat.lift_native,
                 )
         else:
@@ -538,7 +538,7 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
                 flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
                 n_prism, n_threads,
                 flat.owner_cube_face, flat.neighbor_cube_face,
-                flat.true_area_weight,
+                flat.ref_area_weight,
                 flat.boundary_extrap_native, flat.lift_native,
             )
     residual = residual + correction
@@ -547,4 +547,6 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
     # 最终粘性残差做 (cell,SP,变量) 粒度的量级异常检测并清零，取代按
     # 整个单元降阶的旧机制1/2 门控，理由同 fr_residual_inviscid.py 的
     # 同名改动。
-    return suppress_residual_outliers(residual, U[..., :5])
+    # `n_prism` 的必要性见 inviscid.py 同一处调用的说明。
+    return suppress_residual_outliers(residual, U[..., :5],
+                                      mesh.n_prism_cells)

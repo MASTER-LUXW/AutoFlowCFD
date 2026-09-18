@@ -55,6 +55,26 @@ CUBE_FACE_AXIS_SIDE = {
     "tet_native_v1": (1, -1.0),
     "tet_native_v2": (2, -1.0),
     "tet_native_v3": (3, -1.0),
+    # 原生棱柱面（编码 10~14）：这里填的是**真实**的 (axis, side)，不是
+    # 四面体那种"axis 槽位复用成 excluded_vertex"的哑值。
+    #
+    # 理由：原生棱柱面的通量点与坍缩立方体面的通量点已验证是**同一批物理
+    # 点、同一顺序**（坍缩面在 (r,s) 里的像恰好是原生的 5 个面：
+    # a=-1 -> r=-1 边、a=+1 -> 斜边 r+s=0、b=-1 -> s=-1 边、c=∓1 -> 两个
+    # 三角形封盖），所以"在目标单元里定位面点"这一步继续走坍缩的
+    # `newton_locate_on_face`，它需要真实的 (axis, side)。
+    # 实测等价性（P1~P3、右棱柱与不规则棱柱）：通量点 0.0~7.5e-17、
+    # 法向 3.3e-16、物理面积权重 2.4e-15。
+    #
+    # 与 `NATIVE_PRISM_FACE_TO_CUBE_FACE` 的一致性由
+    # `tests/unit/test_native_prism_face.py` 断言（那张表是对应关系的唯一
+    # 事实来源、有形状无关的几何验证；这里不 import 它是为了避免模块级
+    # 循环导入，改由测试钉住两者不会漂移）。
+    "prism_native_f0": (2, -1.0),
+    "prism_native_f1": (2, 1.0),
+    "prism_native_f2": (0, 1.0),
+    "prism_native_f3": (0, -1.0),
+    "prism_native_f4": (1, -1.0),
 }
 
 ACCEPT_STRICT_REL = 1e-6  # 严格通过阈值：相对局部面特征尺度，供 face_flux_points_merge.py 判断是否需要记录容忍案例

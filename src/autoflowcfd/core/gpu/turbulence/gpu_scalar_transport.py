@@ -792,9 +792,10 @@ def compute_turbulence_transport_residual_gpu(
     domega_dt_np = cp.asnumpy(domega_dt_transport)
     k_field_np = cp.asnumpy(turb.k_field)
     omega_field_np = cp.asnumpy(turb.omega_field)
-    dk_dt_np = suppress_residual_outliers(dk_dt_np[:, :, None], k_field_np[:, :, None])[:, :, 0]
+    dk_dt_np = suppress_residual_outliers(
+        dk_dt_np[:, :, None], k_field_np[:, :, None], n_prism)[:, :, 0]
     domega_dt_np = suppress_residual_outliers(
-        domega_dt_np[:, :, None], omega_field_np[:, :, None]
+        domega_dt_np[:, :, None], omega_field_np[:, :, None], n_prism
     )[:, :, 0]
     dk_dt_transport = cp.asarray(dk_dt_np)
     domega_dt_transport = cp.asarray(domega_dt_np)

@@ -93,7 +93,7 @@ def compute_viscous_interface_correction_kernel(
     n_prism: int,
     n_threads: int,
     owner_cube_face: np.ndarray, neighbor_cube_face: np.ndarray,
-    true_area_weight: np.ndarray,
+    ref_area_weight: np.ndarray,
     boundary_extrap_native: np.ndarray, lift_native: np.ndarray,
 ) -> np.ndarray:
     """返回 correction，形状 (n_cells, n_sps, 5)，与
@@ -121,7 +121,7 @@ def compute_viscous_interface_correction_kernel(
     owner/neighbor 两侧独立调用各自读取同一份精确 adj row 就自洽，
     不需要额外定向）。native 分支只涉及两处：(a) 自身面外插矩阵改用
     `boundary_extrap_native[excluded_vertex]`；(b) 面修正项改用 DG
-    提升算子 `lift_native[excluded_vertex] @ (true_area_weight⊙jump)`
+    提升算子 `lift_native[excluded_vertex] @ (ref_area_weight⊙jump)`
     代替 `_distribute_point`（1D 坍缩坐标修正函数分布机制对 native
     单纯形基不适用，理由同 inviscid_kernel.py/native_simplex_basis.py
     ::build_native_tet_lift 文档）。
@@ -265,7 +265,7 @@ def compute_viscous_interface_correction_kernel(
             if o_is_native:
                 weighted_jump_o = np.empty((n_fp, 5))
                 for i in range(n_fp):
-                    w_area = true_area_weight[f, i]
+                    w_area = ref_area_weight[i]
                     for v in range(5):
                         weighted_jump_o[i, v] = w_area * jump_owner[i, v]
                 contrib_owner = lift_native[oc_code - 6] @ weighted_jump_o  # (n_sps,5)
@@ -395,7 +395,7 @@ def compute_viscous_interface_correction_kernel(
             if n_is_native:
                 weighted_jump_n = np.empty((n_fp, 5))
                 for i in range(n_fp):
-                    w_area = true_area_weight[f, i]
+                    w_area = ref_area_weight[i]
                     for v in range(5):
                         weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
                 contrib_neighbor = lift_native[nc_code - 6] @ weighted_jump_n

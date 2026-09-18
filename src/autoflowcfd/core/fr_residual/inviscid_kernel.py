@@ -109,7 +109,7 @@ def compute_inviscid_interface_correction_kernel(
                          # compute_ausm_up_flux 文档；必须由纯 Python 层
                          # 用 resolve_ausm_precond_mode() 解析后传入
     owner_cube_face: np.ndarray, neighbor_cube_face: np.ndarray,
-    true_area_weight: np.ndarray,
+    ref_area_weight: np.ndarray,
     boundary_extrap_native: np.ndarray, lift_native: np.ndarray,
 ) -> np.ndarray:
     """返回 correction，形状 (n_cells, n_sps, 5)，与
@@ -125,7 +125,7 @@ def compute_inviscid_interface_correction_kernel(
     points_exact_normal.py::_native_tet_adj_row_batched` 已经给出正确
     outward 定向的 adj 行，不需要像坍缩坐标那样再乘 side 翻转——这是
     Part7 文档记录过的同一个坑，这里必须复刻同一个原则）；(c) 面修正项
-    改用 DG 提升算子 `lift_native[excluded_vertex] @ (true_area_weight
+    改用 DG 提升算子 `lift_native[excluded_vertex] @ (ref_area_weight
     ⊙ jump)`（`native_simplex_basis.py::build_native_tet_lift`
     "弱形式提升定义"，替代坍缩坐标 1D Radau/VCJH 修正函数
     `_distribute_point`——native 单纯形基没有"坍缩计算方向"，那套 1D
@@ -251,7 +251,7 @@ def compute_inviscid_interface_correction_kernel(
                 # "弱形式提升定义"。
                 weighted_jump_o = np.empty((n_fp, 5))
                 for i in range(n_fp):
-                    w_area = true_area_weight[f, i]
+                    w_area = ref_area_weight[i]
                     for v in range(5):
                         weighted_jump_o[i, v] = w_area * jump_owner[i, v]
                 contrib_owner = lift_native[oc_code - 6] @ weighted_jump_o  # (n_sps, 5)
@@ -353,7 +353,7 @@ def compute_inviscid_interface_correction_kernel(
             if n_is_native:
                 weighted_jump_n = np.empty((n_fp, 5))
                 for i in range(n_fp):
-                    w_area = true_area_weight[f, i]
+                    w_area = ref_area_weight[i]
                     for v in range(5):
                         weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
                 contrib_neighbor = lift_native[nc_code - 6] @ weighted_jump_n

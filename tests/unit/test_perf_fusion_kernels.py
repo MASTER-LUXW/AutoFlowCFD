@@ -259,7 +259,7 @@ class TestSuppressResidualOutliersFused:
         r = rng.standard_normal((97, n_sps, n_vars)) * 1e3
         f = rng.standard_normal((97, n_sps, n_vars)) * 10.0
         ref = self._reference(r.copy(), f.copy())
-        got = suppress_residual_outliers(r.copy(), f.copy())
+        got = suppress_residual_outliers(r.copy(), f.copy(), r.shape[0])
         assert np.array_equal(ref, got)
 
     @pytest.mark.parametrize("n_sps", [4, 8, 27])
@@ -270,14 +270,14 @@ class TestSuppressResidualOutliersFused:
         f = rng.standard_normal((53, n_sps, 5)) * 10.0
         r[7, 0, 4] = 1e12
         ref = self._reference(r.copy(), f.copy())
-        got = suppress_residual_outliers(r.copy(), f.copy())
+        got = suppress_residual_outliers(r.copy(), f.copy(), r.shape[0])
         assert np.array_equal(ref, got)
         assert got[7, 0, 4] == 0.0
 
     def test_all_zero_residual_returns_unchanged(self):
         r = np.zeros((13, 8, 5))
         f = np.ones((13, 8, 5))
-        got = suppress_residual_outliers(r.copy(), f.copy())
+        got = suppress_residual_outliers(r.copy(), f.copy(), r.shape[0])
         assert np.array_equal(got, r)
 
     def test_input_not_mutated(self):
@@ -288,7 +288,7 @@ class TestSuppressResidualOutliersFused:
         r[3, 2, 1] = 1e13
         r_copy = r.copy()
         f = np.ones((29, 8, 5))
-        suppress_residual_outliers(r, f)
+        suppress_residual_outliers(r, f, r.shape[0])
         assert np.array_equal(r, r_copy)
 
 

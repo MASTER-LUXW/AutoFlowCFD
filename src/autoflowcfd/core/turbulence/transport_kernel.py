@@ -272,11 +272,24 @@ def _weighted_jump_collapsed(raw_jump_f, adj_row_f, n_fp):
 
 @njit(cache=True, inline='always')
 def _weighted_jump_native(raw_jump_f, true_area_weight_f, n_fp):
-    """native 面：跳变量按真实物理面积权重加权，供 DG 提升算子消费——
-    与 inviscid_kernel.py/viscous_flux_kernel.py 的 native 分支
-    `true_area_weight⊙jump` 同一原则（native 单纯形基没有"坍缩计算
-    方向"，1D 修正函数分布机制不适用，必须用弱形式提升算子，见
-    native_simplex_basis.py::build_native_tet_lift 文档）。"""
+    """native 面：跳变量按真实**物理面积**权重加权，供 DG 提升算子消费。
+
+    **本函数与 inviscid/viscous 那两路的权重不同，而且两边都是对的** ——
+    差别在传进来的 `raw_jump` 处在哪个空间（2026-09-18 核实）：
+
+      * 本路（湍流标量输运）：`raw_jump = mass_flux * delta_phi` 是**物理**
+        通量密度差（见 `transport.py` 里 `raw_jump_fp` 的构造），所以
+        坍缩分支要自己乘 `|adj_row|`（`_weighted_jump_collapsed`）、
+        native 分支乘**物理面积权重** `true_area_weight = |adj_row|*w_ref`
+        —— 正好是弱形式 `∮ Psi * jump dA` 的正确离散。
+      * inviscid/viscous 两路：`jump = adj_row . (F* - F_own)` 已经是
+        **参考空间**的法向通量差，所以那边的正确权重是**参考**求积权重
+        `ref_area_weight`（那处原先误用物理面积权重、多乘一个 `|adj_row|`，
+        已修，完整记录见 `face_kernels.py::FlatFaceGeometry.ref_area_weight`）。
+
+    两路的最终乘积其实是同一个量 `|adj_row| * w_ref * 物理跳跃`，只是
+    `|adj_row|` 由谁提供不同。改动任一路之前先看清 `raw_jump` 在哪个空间。
+    """
     weighted = np.empty(n_fp)
     for i in range(n_fp):
         weighted[i] = true_area_weight_f[i] * raw_jump_f[i]
@@ -340,7 +353,9 @@ def distribute_corrections_to_cells_kernel(
             编码，>=6 即 native 面
         owner_adj_row_exact, neighbor_adj_row_exact: (n_faces, n_fp, 3)
             逐 FP 精确 adj 行（collapsed 面加权用）
-        true_area_weight: (n_faces, n_fp) 物理面积权重（native 面加权用）
+        true_area_weight: (n_faces, n_fp) 物理面积权重（native 面加权用；
+            本路的 raw_jump 是物理量，所以这里**就该**是物理面积权重，
+            见 `_weighted_jump_native` 文档里两路的对比）
         lift_native: (4, n_sps, n_fp) native DG 提升算子
 
     Returns:

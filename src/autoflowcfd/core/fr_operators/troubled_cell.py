@@ -396,14 +396,38 @@ def _median_abs_over_sps_kernel(residual: np.ndarray) -> np.ndarray:
 
 
 @njit(cache=True, parallel=True)
-def _outlier_ref_and_flag_kernel(residual, reference_field, factor, field_rel_floor):
+def _outlier_ref_and_flag_kernel(residual, reference_field, factor,
+                                 field_rel_floor, n_prism,
+                                 n_real_prism, n_real_tet):
     """一趟算出逐 (cell,var) 的异常判据参照量 `ref`，并给出全场是否存在异常值。
 
-    `ref[c,v] = max( median_s(|residual[c,s,v]|),
-                     field_rel_floor * mean_s(|reference_field[c,s,v]|),
+    `ref[c,v] = max( median_{s<n_real}(|residual[c,s,v]|),
+                     field_rel_floor * mean_{s<n_real}(|reference_field[c,s,v]|),
                      1e-300 )`
-    与原 numpy 实现逐项对应（中位数定义见 `_median_abs_over_sps_kernel`：
-    偶数个 SP 取中间两个的平均，与 `np.median` 一致）。
+    中位数定义与 `np.median` 一致（偶数个取中间两个的平均）。
+
+    ## 只统计**真实**槽位（2026-09-18 修掉的真实生产缺陷）
+
+    原生基的零填充槽位**残差恒为零**（"零填充块对角"不变量刻意保证：
+    填充槽位不被时间推进改写）。如果把它们一起排进中位数：
+
+        order   n_sps   真实   零填充   中位数落点
+          P1      8       4      4      sorted[3],sorted[4] 均值 = 最小真实值/2 > 0
+          P2     27      10     17      sorted[13] 落在零区                    = 0
+          P3     64      20     44      sorted[32] 落在零区                    = 0
+
+    P2/P3 上参照量因此塌到 `field_rel_floor * mean|U|` 这个地板（密度约
+    1.2e-9），阈值 `1e4 * 1.2e-9 = 1.2e-5`，而真实残差是 1e5 量级 ——
+    **整个四面体单元的残差被全部清零、单元完全不演化**。P1 侥幸逃过
+    （中位数非零），所以 P1 的生产运行看起来正常、掩盖了这条缺陷。
+
+    真实槽位数来自 `fr/native_padding.py::real_sps_per_cell`（"哪些槽位
+    是真的"的唯一判据来源），由调用方取好传进来 —— numba nopython 不能
+    调那个函数。
+
+    Args:
+        n_prism: 棱柱单元数（"棱柱在前"排列下的分界）
+        n_real_prism / n_real_tet: 两段各自的真实槽位数
 
     Returns:
         (ref, has_outlier)：ref 形状 (n_cells, n_vars)；has_outlier 为
@@ -412,14 +436,15 @@ def _outlier_ref_and_flag_kernel(residual, reference_field, factor, field_rel_fl
     n_cells, n_sps, n_vars = residual.shape
     ref = np.empty((n_cells, n_vars))
     flags = np.zeros(n_cells, dtype=np.bool_)
-    half = n_sps // 2
-    even = (n_sps % 2 == 0)
     for c in prange(n_cells):
-        buf = np.empty(n_sps)
+        n_real = n_real_prism if c < n_prism else n_real_tet
+        half = n_real // 2
+        even = (n_real % 2 == 0)
+        buf = np.empty(n_real)
         local_flag = False
         for v in range(n_vars):
             acc = 0.0
-            for s in range(n_sps):
+            for s in range(n_real):
                 x = residual[c, s, v]
                 buf[s] = x if x >= 0.0 else -x
                 y = reference_field[c, s, v]
@@ -430,14 +455,14 @@ def _outlier_ref_and_flag_kernel(residual, reference_field, factor, field_rel_fl
             else:
                 med = buf_sorted[half]
             r = med
-            rf = field_rel_floor * (acc / n_sps)
+            rf = field_rel_floor * (acc / n_real)
             if rf > r:
                 r = rf
             if r < 1e-300:
                 r = 1e-300
             ref[c, v] = r
             thresh = factor * r
-            for s in range(n_sps):
+            for s in range(n_real):
                 a = buf[s]
                 if a > thresh:
                     local_flag = True
@@ -446,24 +471,30 @@ def _outlier_ref_and_flag_kernel(residual, reference_field, factor, field_rel_fl
 
 
 @njit(cache=True, parallel=True)
-def _outlier_zero_kernel(residual, ref, factor, out) -> None:
+def _outlier_zero_kernel(residual, ref, factor, out, n_prism,
+                         n_real_prism, n_real_tet) -> None:
     """按 `_outlier_ref_and_flag_kernel` 给出的参照量清零异常 (cell,SP,var)。
 
-    等价于原实现的 `np.where(np.abs(residual) > factor*ref, 0.0, residual)`。
+    只在**真实**槽位上判定（填充槽位残差恒为零、原样拷过去），理由见
+    `_outlier_ref_and_flag_kernel` 文档那节。
     """
     n_cells, n_sps, n_vars = residual.shape
     for c in prange(n_cells):
+        n_real = n_real_prism if c < n_prism else n_real_tet
         for v in range(n_vars):
             thresh = factor * ref[c, v]
-            for s in range(n_sps):
+            for s in range(n_real):
                 x = residual[c, s, v]
                 a = x if x >= 0.0 else -x
                 out[c, s, v] = 0.0 if a > thresh else x
+            for s in range(n_real, n_sps):
+                out[c, s, v] = residual[c, s, v]
 
 
 def suppress_residual_outliers(
     residual: np.ndarray,
     reference_field: np.ndarray,
+    n_prism: int,
     factor: float = RESIDUAL_OUTLIER_FACTOR,
     field_rel_floor: float = RESIDUAL_OUTLIER_FIELD_REL_FLOOR,
 ) -> np.ndarray:
@@ -523,12 +554,38 @@ def suppress_residual_outliers(
     # 既有语义完全保留。数学判据逐项对应原实现（同一个中位数定义、同一个
     # `max(median, floor*mean, 1e-300)` 参照、同一个 `|res| > factor*ref`
     # 比较），结果逐位相同（见 tests/unit/test_troubled_cell_*.py）。
+    # 真实槽位数（**必须**只在真实槽位上统计，否则原生基的零填充会把
+    # 中位数拖到 0、把整个单元的残差判成异常清零 —— 见
+    # `_outlier_ref_and_flag_kernel` 文档那节的量级分析）。
+    from autoflowcfd.fr.native_padding import (
+        order_from_n_sps,
+        real_sps_per_cell,
+    )
+
+    n_cells, n_sps = residual.shape[0], residual.shape[1]
+    if not (0 <= n_prism <= n_cells):
+        raise ValueError(
+            f"n_prism={n_prism} 超出 [0, n_cells={n_cells}] —— 它是"
+            f'"棱柱在前"排列下的分界，越界说明调用方传错了参数，'
+            f"而按错的分界统计真实槽位会静默把残差判成异常清零")
+    from autoflowcfd.fr.prism_basis_mode import prism_basis_is_native
+
+    if n_prism == n_cells and not prism_basis_is_native():
+        # 没有四面体、且棱柱走坍缩基 -> 全网格没有任何填充槽位，全部
+        # SP 都是真实自由度。这条短路同时让"合成形状"（`n_sps` 不是
+        # 某个 `(p+1)^3`，例如只关心归约语义的单元测试）不必先反解阶数。
+        n_real_prism = n_real_tet = n_sps
+    else:
+        order = order_from_n_sps(n_sps)
+        n_real_prism, n_real_tet = real_sps_per_cell(order)
+
     ref, has_outlier = _outlier_ref_and_flag_kernel(
         np.ascontiguousarray(residual), np.ascontiguousarray(reference_field),
-        factor, field_rel_floor,
+        factor, field_rel_floor, n_prism, n_real_prism, n_real_tet,
     )
     if not has_outlier:
         return residual
     out = np.empty_like(residual)
-    _outlier_zero_kernel(np.ascontiguousarray(residual), ref, factor, out)
+    _outlier_zero_kernel(np.ascontiguousarray(residual), ref, factor, out,
+                         n_prism, n_real_prism, n_real_tet)
     return out

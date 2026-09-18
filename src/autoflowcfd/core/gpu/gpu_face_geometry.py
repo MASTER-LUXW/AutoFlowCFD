@@ -114,6 +114,10 @@ class GPUFlatFaceGeometry:
             self.owner_cube_face = cp.asarray(flat_face.owner_cube_face)
             self.neighbor_cube_face = cp.asarray(flat_face.neighbor_cube_face)
             self.true_area_weight = cp.asarray(flat_face.true_area_weight)
+            # 参考面求积权重（DG 提升算子用的**正确**权重，见
+            # `core/fr_operators/face_kernels.py::FlatFaceGeometry.
+            # ref_area_weight` 字段文档）。逐面相同，只有 (n_fp,)。
+            self.ref_area_weight = cp.asarray(flat_face.ref_area_weight)
             self.boundary_extrap_native = cp.asarray(flat_face.boundary_extrap_native)
             self.lift_native = cp.asarray(flat_face.lift_native)
 

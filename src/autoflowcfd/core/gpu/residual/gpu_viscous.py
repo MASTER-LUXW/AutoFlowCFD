@@ -331,7 +331,8 @@ def compute_viscous_residual_fr_gpu(
     from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
     residual_np = cp.asnumpy(viscous_residual)
     U_np = cp.asnumpy(U)
-    result = suppress_residual_outliers(residual_np, U_np[..., :5])
+    result = suppress_residual_outliers(residual_np, U_np[..., :5],
+                                        n_prism)
     return result if input_is_numpy else cp.asarray(result)
 
 
@@ -662,7 +663,7 @@ def _compute_viscous_interface_correction_gpu(
             # 就是这里的面校正分配方式。
             # oc_code_o/is_native_o 已在本块开头（自身外插处）算过，直接复用。
             contrib_o = _native_or_collapsed_contrib(
-                cp, is_native_o, oc_code_o, ff.lift_native, ff.true_area_weight[idx_o],
+                cp, is_native_o, oc_code_o, ff.lift_native, ff.ref_area_weight,
                 jump_owner, contrib_o_collapsed,
             )
             contrib_o = contrib_o / det_jacs[oc][..., None]
@@ -748,7 +749,7 @@ def _compute_viscous_interface_correction_gpu(
             # owner-primary 块同名注释，同一处修复。nc_code_n/is_native_n
             # 已在本块开头（自身外插处）算过，直接复用。
             contrib_n = _native_or_collapsed_contrib(
-                cp, is_native_n, nc_code_n, ff.lift_native, ff.true_area_weight[idx_n],
+                cp, is_native_n, nc_code_n, ff.lift_native, ff.ref_area_weight,
                 jump_neighbor, contrib_n_collapsed,
             )
             contrib_n = contrib_n / det_jacs[nc][..., None]

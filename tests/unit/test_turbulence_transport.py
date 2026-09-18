@@ -591,7 +591,7 @@ class TestTransportResidualOutlierSuppressionWrapping:
         dk_dt[0, 2] = 1e6  # one wildly anomalous SP in cell 0
         k_field = np.ones((n_cells, n_sps)) * 1e-3
 
-        result = suppress_residual_outliers(dk_dt[:, :, None], k_field[:, :, None])[:, :, 0]
+        result = suppress_residual_outliers(dk_dt[:, :, None], k_field[:, :, None], dk_dt.shape[0])[:, :, 0]
 
         assert result.shape == dk_dt.shape
         assert result[0, 2] == 0.0

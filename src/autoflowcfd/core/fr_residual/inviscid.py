@@ -422,7 +422,7 @@ def compute_inviscid_residual_fr(
                 flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
                 n_prism, face_indices, correction, mach_ref, precond_mode,
                 flat.owner_cube_face, flat.neighbor_cube_face,
-                flat.true_area_weight,
+                flat.ref_area_weight,
                 flat.boundary_extrap_native, flat.lift_native,
             )
     else:
@@ -446,7 +446,7 @@ def compute_inviscid_residual_fr(
             flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
             n_prism, n_threads, mach_ref, precond_mode,
             flat.owner_cube_face, flat.neighbor_cube_face,
-            flat.true_area_weight,
+            flat.ref_area_weight,
             flat.boundary_extrap_native, flat.lift_native,
         )
     residual = residual + correction
@@ -455,4 +455,8 @@ def compute_inviscid_residual_fr(
     # det(J)/法向失配几何量预判、按整个单元降阶"的机制1/2，直接对算出的
     # 最终残差本身做 (cell,SP,变量) 粒度的量级异常检测——只清零真正异常
     # 的那几个 SP，不牵连同一单元里其余健康的 SP，也不依赖网格绝对尺度。
-    return suppress_residual_outliers(residual, U[..., :5])
+    # `n_prism`：机制3 的中位数参照只统计真实槽位，否则原生基的零填充
+    # 会把中位数拖到 0、把整个单元的残差判成异常清零（P2/P3 实测全清零、
+    # 单元完全不演化）。见 `troubled_cell.py::_outlier_ref_and_flag_kernel`。
+    return suppress_residual_outliers(residual, U[..., :5],
+                                      mesh.n_prism_cells)

@@ -121,11 +121,11 @@ def _compute_residual_via_new_kernel(U, mesh, ops, boundary_ghost_provider=None,
         # 使用的档。
         resolve_ausm_precond_mode(),
         flat.owner_cube_face, flat.neighbor_cube_face,
-        flat.true_area_weight,
+        flat.ref_area_weight,
         flat.boundary_extrap_native, flat.lift_native,
     )
     residual = residual + correction
-    return suppress_residual_outliers(residual, U[..., :5])
+    return suppress_residual_outliers(residual, U[..., :5], flat.n_prism)
 
 
 @pytest.mark.parametrize("order,rel_tol", [(1, 1e-9), (2, 1e-7), (3, 1e-3)])

@@ -178,7 +178,8 @@ def compute_inviscid_residual_fr_gpu(
     from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
     residual_np = cp.asnumpy(residual)
     U_np = cp.asnumpy(U)
-    result = suppress_residual_outliers(residual_np, U_np[..., :5])
+    result = suppress_residual_outliers(residual_np, U_np[..., :5],
+                                        n_prism)
     return result if input_is_numpy else cp.asarray(result)
 
 
@@ -343,19 +344,27 @@ def _native_self_extrap(cp, is_native, cube_face_code, boundary_extrap_native, E
 
 
 def _native_or_collapsed_contrib(
-    cp, is_native, cube_face_code, lift_native, true_area_weight_face, jump, contrib_collapsed,
+    cp, is_native, cube_face_code, lift_native, ref_area_weight, jump, contrib_collapsed,
 ):
     """面校正分配到体积节点：native 面用 DG 提升算子
-    `lift_native[excluded_vertex] @ (true_area_weight ⊙ jump)`，collapsed
+    `lift_native[excluded_vertex] @ (ref_area_weight ⊙ jump)`，collapsed
     面用调用方已经算好的 `contrib_collapsed`（1D 修正函数分布，见
     `distribute_face_correction_to_sps`）——与 CPU 版
     `contrib_owner = lift_native[oc_code-6] @ weighted_jump_o if
     o_is_native else _distribute_point(...)` 逐字对应。
 
+    **权重是参考求积权重、不是物理面积权重**（2026-09-18 修掉的真实缺陷，
+    完整记录见 `core/fr_operators/face_kernels.py::FlatFaceGeometry.
+    ref_area_weight` 字段文档）：这一路的 `jump` 是 `adj_row . (F*-F_own)`，
+    已经是参考空间的法向通量差，再乘物理面积权重会多乘一个 `|adj_row|
+    ~ h^2`，界面项从 `~1/h` 变成 `~h`。
+    （注意 `gpu_scalar_transport.py` 里同名的那个函数**用物理面积权重是
+    对的** —— 它的 `jump` 是物理通量密度差，两路的 `jump` 不在同一个空间。）
+
     Args:
         cube_face_code: (n,)
-        lift_native: (4, n_sps, n_fp)
-        true_area_weight_face: (n, n_fp)
+        lift_native: (n_native_faces, n_sps, n_fp)
+        ref_area_weight: (n_fp,) 参考面求积权重（逐面相同）
         jump: (n, n_fp, 5)
         contrib_collapsed: (n, n_sps, 5)
 
@@ -370,7 +379,7 @@ def _native_or_collapsed_contrib(
         return contrib_collapsed
     excluded_vertex = cp.clip(cube_face_code - 6, 0, lift_native.shape[0] - 1)
     lift = lift_native[excluded_vertex]  # (n, n_sps, n_fp)
-    weighted_jump = true_area_weight_face[..., None] * jump  # (n, n_fp, 5)
+    weighted_jump = ref_area_weight[None, :, None] * jump  # (n, n_fp, 5)
     contrib_native = cp.matmul(lift, weighted_jump)  # (n, n_sps, 5)
     return cp.where(is_native[:, None, None], contrib_native, contrib_collapsed)
 
@@ -554,7 +563,7 @@ def _compute_interface_correction_gpu(
                 ff.g_left, ff.g_right,
             )
             contrib_o = _native_or_collapsed_contrib(
-                cp, is_native_o, oc_code_o, ff.lift_native, ff.true_area_weight[idx_o],
+                cp, is_native_o, oc_code_o, ff.lift_native, ff.ref_area_weight,
                 jump_owner, contrib_o_collapsed,
             )
             contrib_o = contrib_o / det_jacs[oc][..., None]
@@ -642,7 +651,7 @@ def _compute_interface_correction_gpu(
                 ff.g_left, ff.g_right,
             )
             contrib_n = _native_or_collapsed_contrib(
-                cp, is_native_n, nc_code_n, ff.lift_native, ff.true_area_weight[idx_n],
+                cp, is_native_n, nc_code_n, ff.lift_native, ff.ref_area_weight,
                 jump_neighbor, contrib_n_collapsed,
             )
             contrib_n = contrib_n / det_jacs[nc][..., None]

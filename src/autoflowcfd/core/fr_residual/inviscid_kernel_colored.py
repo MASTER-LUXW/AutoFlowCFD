@@ -67,7 +67,7 @@ def compute_inviscid_interface_correction_kernel_colored(
                          # compute_ausm_up_flux 文档；必须由纯 Python 层
                          # 用 resolve_ausm_precond_mode() 解析后传入
     owner_cube_face: np.ndarray, neighbor_cube_face: np.ndarray,
-    true_area_weight: np.ndarray,
+    ref_area_weight: np.ndarray,
     boundary_extrap_native: np.ndarray, lift_native: np.ndarray,
 ) -> None:
     """图着色版本的无粘界面 kernel。
@@ -182,7 +182,7 @@ def compute_inviscid_interface_correction_kernel_colored(
             if o_is_native:
                 weighted_jump_o = np.empty((n_fp, 5))
                 for i in range(n_fp):
-                    w_area = true_area_weight[f, i]
+                    w_area = ref_area_weight[i]
                     for v in range(5):
                         weighted_jump_o[i, v] = w_area * jump_owner[i, v]
                 contrib_owner = lift_native[oc_code - 6] @ weighted_jump_o
@@ -280,7 +280,7 @@ def compute_inviscid_interface_correction_kernel_colored(
             if n_is_native:
                 weighted_jump_n = np.empty((n_fp, 5))
                 for i in range(n_fp):
-                    w_area = true_area_weight[f, i]
+                    w_area = ref_area_weight[i]
                     for v in range(5):
                         weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
                 contrib_neighbor = lift_native[nc_code - 6] @ weighted_jump_n

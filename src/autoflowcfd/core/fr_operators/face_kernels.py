@@ -172,6 +172,33 @@ class FlatFaceGeometry:
     # 需要它按面点物理面积加权跳跃量，因此新增这个字段——对坍缩坐标
     # 面同样有意义（本来就已经算好），只是此前从未被这个 kernel 消费过。
     true_area_weight: np.ndarray    # float64 (n_faces, n_fp)
+    # **参考**面求积权重，float64 (n_fp,) —— 逐面相同（所有面都用同一套
+    # `[-1,1]^2` 上的张量积 Gauss-Legendre 网格），所以只存一份。
+    #
+    # ## 这是 2026-09-18 修掉的一个真实缺陷
+    #
+    # DG 提升算子的正确权重是**参考**求积权重，不是 `true_area_weight`
+    # （物理面积权重 = `|adj_row| * w_ref`，实测 `sum_p taw_p` 恰好等于物理
+    # 面积）。原因：kernel 里 `jump = adj_row . (F* - F_own)` 已经是**参考
+    # 空间**的法向通量差（Nanson 关系 `n_hat dA_phys = adj_row dA_ref`
+    # 把物理面积因子吃进去了），坍缩分支的 `g'` 分布也正是按这个约定消费
+    # 它的。再乘一次 `true_area_weight` 等于多乘一个 `|adj_row|`。
+    #
+    # **量级后果**：界面项本应 `~1/h`（与体积项同阶，导数的正确量纲），
+    # 多乘 `|adj_row| ~ h^2` 之后变成 `~h` —— 网格越细，界面耦合与上风
+    # 耗散被压得越狠。细长四面体上实测差 5 个数量级。
+    #
+    # **判定方式**（无法混淆）：同一张混合网格、同一个不连续初场，把坐标
+    # 整体缩放减半，量生产残差 ——
+    #     棱柱（坍缩，1D 修正函数）  2.000x   即 ~1/h   正确
+    #     四面体（native DG 提升）   0.500x   即 ~h     错，正好差 h^2
+    # 修复后两者都是 2.000x。
+    #
+    # 守恒律侧的独立验证：人为构造常数跳跃 `F* = F_own + delta*n_hat`，
+    # 界面项对单元总量的贡献必须是 `-delta * 总表面积`。用参考权重得到的
+    # 比值恰好 1.000000（全部面、全部阶数）；用物理面积权重是 0.211
+    # （规整四面体）到 0.000003（细长四面体）。
+    ref_area_weight: np.ndarray     # float64 (n_fp,)
 
     # --- neighbor_sources（owner 侧用来组装 Q_neighbor 的来源）---
     neighbor_src0_cell: np.ndarray   # int64 (n_faces,)，-1 表示无来源
@@ -360,6 +387,15 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
         boundary_extrap_native = np.zeros((0, n_fp, n_sps), dtype=np.float64)
         lift_native = np.zeros((0, n_sps, n_fp), dtype=np.float64)
 
+    # 参考面求积权重（见 `ref_area_weight` 字段文档）：所有面共用同一套
+    # `[-1,1]^2` 张量积 Gauss-Legendre 网格，与 `fr/face_flux_points_merge.py`
+    # 里生成面通量点用的是**同一个** `gauss_legendre(n1d)`，必须一致。
+    from autoflowcfd.fr.operators import gauss_legendre
+
+    _sps_1d, _w_1d = gauss_legendre(n1d)
+    _w1, _w2 = np.meshgrid(_w_1d, _w_1d, indexing="ij")
+    ref_area_weight = np.ascontiguousarray((_w1 * _w2).ravel())
+
     dist_fp_of_sp, dist_axis_coord_of_sp = _derive_distribute_mapping(n1d)
 
     # 面图着色：一次性计算，后续残差求值直接复用（不再重复着色）。
@@ -390,6 +426,7 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
         true_normal=true_normal,
         owner_cube_face=owner_cube_face, neighbor_cube_face=neighbor_cube_face,
         true_area_weight=true_area_weight,
+        ref_area_weight=ref_area_weight,
         owner_adj_row_exact=owner_adj_row_exact, neighbor_adj_row_exact=neighbor_adj_row_exact,
         neighbor_src0_cell=neighbor_src0_cell, neighbor_src0_mat=neighbor_src0_mat,
         neighbor_src1_idx=neighbor_src1_idx, neighbor_src1_cell=neighbor_src1_cell,

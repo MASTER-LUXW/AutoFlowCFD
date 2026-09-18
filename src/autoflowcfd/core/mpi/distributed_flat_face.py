@@ -124,6 +124,14 @@ class DistributedFlatFaceGeometry:
         return self.base_flat.true_normal
 
     @property
+    def ref_area_weight(self) -> np.ndarray:
+        return self.base_flat.ref_area_weight
+
+    @property
+    def true_area_weight(self) -> np.ndarray:
+        return self.base_flat.true_area_weight
+
+    @property
     def is_boundary(self) -> np.ndarray:
         return self.base_flat.is_boundary
 
@@ -481,6 +489,9 @@ def build_distributed_flat_face(
         owner_cube_face=global_flat.owner_cube_face[local_face_indices],
         neighbor_cube_face=global_flat.neighbor_cube_face[local_face_indices],
         true_area_weight=global_flat.true_area_weight[local_face_indices],
+        # `ref_area_weight` 是**逐面相同**的参考求积权重（(n_fp,)），
+        # 所以不按 local_face_indices 切、整块复用。
+        ref_area_weight=global_flat.ref_area_weight,
         boundary_extrap_native=global_flat.boundary_extrap_native,
         lift_native=global_flat.lift_native,
         # src0/src1 cell 字段存的是*单元*索引（不是面索引），必须重映射到

@@ -50,7 +50,7 @@ class TestSuppressResidualOutliers:
         rng = np.random.default_rng(2)
         residual = rng.standard_normal((50, 8, 5)) * 1e-3
         reference = np.ones((50, 8, 5))
-        out = suppress_residual_outliers(residual, reference)
+        out = suppress_residual_outliers(residual, reference, residual.shape[0])
         np.testing.assert_array_equal(out, residual)
 
     def test_single_outlier_sp_zeroed_siblings_untouched(self):
@@ -60,7 +60,7 @@ class TestSuppressResidualOutliers:
         reference = np.ones((n_cells, n_sps, n_vars))
         # Inject one wildly-out-of-scale value in cell 0, SP 0, var 1.
         residual[0, 0, 1] = 1e5
-        out = suppress_residual_outliers(residual, reference)
+        out = suppress_residual_outliers(residual, reference, residual.shape[0])
         assert out[0, 0, 1] == 0.0
         # Every other entry must be untouched.
         mask = np.ones_like(residual, dtype=bool)
@@ -92,7 +92,7 @@ class TestSuppressResidualOutliers:
         # cell's own sibling-median rises right along with it, so the
         # (still current, unmodified) local-only criterion lets it through.
         residual[5, :, :] = 1e5
-        out = suppress_residual_outliers(residual, reference)
+        out = suppress_residual_outliers(residual, reference, residual.shape[0])
         assert np.array_equal(out[5], residual[5]), (
             "known gap: whole-cell uniform blowup is NOT caught by the current "
             "(local-only) criterion - see docstring for the falsified fix attempt"
@@ -111,7 +111,7 @@ class TestSuppressResidualOutliers:
         # Roughly half the mesh has a genuinely larger (but not pathological)
         # residual scale - only 50x the rest, far below the 1e4 safety factor.
         residual[:9] *= 50.0
-        out = suppress_residual_outliers(residual, reference)
+        out = suppress_residual_outliers(residual, reference, residual.shape[0])
         np.testing.assert_array_equal(out, residual)
 
 

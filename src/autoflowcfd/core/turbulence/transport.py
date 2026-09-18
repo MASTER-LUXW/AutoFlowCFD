@@ -1479,11 +1479,15 @@ def compute_turbulence_transport_residual(
     # 按 (cell,SP) 粒度清零，不牵连同一单元里其余健康 SP；下面的
     # isfinite 归零保留作最后一道防线（例如整个单元所有 SP 都异常、
     # 中位数参照本身也失真的极端情形）。
+    # `n_prism` 的必要性见 `troubled_cell.py::_outlier_ref_and_flag_kernel`
+    # 文档（零填充会把中位数拖到 0、整单元残差被清零）。
     dk_dt_transport = suppress_residual_outliers(
-        dk_dt_transport[:, :, None], turb.k_field[:, :, None]
+        dk_dt_transport[:, :, None], turb.k_field[:, :, None],
+        solver.mesh.n_prism_cells
     )[:, :, 0]
     domega_dt_transport = suppress_residual_outliers(
-        domega_dt_transport[:, :, None], turb.omega_field[:, :, None]
+        domega_dt_transport[:, :, None], turb.omega_field[:, :, None],
+        solver.mesh.n_prism_cells
     )[:, :, 0]
 
     # NaN/Inf 隔离（最后一道防线）：退化网格上梯度/Jacobian 可能产生非

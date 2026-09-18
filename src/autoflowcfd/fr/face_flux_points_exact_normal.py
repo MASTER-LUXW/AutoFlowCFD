@@ -228,7 +228,7 @@ def compute_exact_adj_rows(
             `~face_conn.is_boundary`，跳过边界面（其 neighbor_axis 是
             -1 的哨兵值，不是一个真实的坍缩方向）
         code_arr: (n_faces,) 或 None——原始 cube face 编码（`CUBE_FACE_CODES`
-            约定，0~5 坍缩坐标、6~9 native 四面体）。**真实 bug 修复**
+            约定，0~5 坍缩坐标、6~9 native 四面体、10~14 native 棱柱）。**真实 bug 修复**
             （Part7 文档阶段2"执行状态更新"节）：`axis_arr`/`side_arr` 对
             native 四面体面（`face_flux_points_merge.py` 里 `_CF_AXIS`/
             `_CF_SIDE` 把 axis 槽位复用成 excluded_vertex）给出的值与
@@ -271,17 +271,39 @@ def compute_exact_adj_rows(
         adj_row_out[faces_here] = det_J[..., None] * inv_J[:, :, axis, :]
 
     if np.any(is_native):
-        # native 四面体永远不是棱柱（is_prism_cell 恒为 False），excluded_vertex
-        # 0~3 各自单独分桶（复用 code_arr 本身分组，不需要额外表）。
-        excluded_vertex_arr = code_arr - 6
+        # 两类原生面分开：四面体是 [6,10)、棱柱是 [10,15)。**必须分开**：
+        # 棱柱面走 `ev = code - 6` 会取到 4~8，落在
+        # `_native_tet_adj_row_batched` 的 `else` 分支上（那个函数只认
+        # 0~3），静默按"排除顶点 3"的四面体公式算出完全错误的法向。
         for ev in range(4):
-            faces_here = np.nonzero(is_native & (excluded_vertex_arr == ev))[0]
+            faces_here = np.nonzero(is_native & (code_arr == 6 + ev))[0]
             if len(faces_here) == 0:
                 continue
             cells_here = cell_arr[faces_here]
             node_ids = tet_conn[cells_here - n_prism]
             cell_nodes = node_coords[node_ids]  # (k,4,3)
             adj_row_out[faces_here] = _native_tet_adj_row_batched(ev, cell_nodes, n1d, sps_1d)
+
+        # 原生棱柱面（编码 10~14）：`native_prism_face_adj_rows` 给出的行
+        # 已按 outward 定向（参考余向量自带符号），与下游
+        # `side_factor = 1.0 if code >= 6` 的既有处理自洽。
+        #
+        # 实测这批行与坍缩路径逐点等价（法向 3.3e-16、物理面积权重
+        # 2.4e-15），所以换基**不改变面几何的量**，只是走了自带定向的
+        # 那条公式，从而让"原生面 side_factor 恒为 1"这个统一约定成立。
+        for fid in range(5):
+            faces_here = np.nonzero(is_native & (code_arr == 10 + fid))[0]
+            if len(faces_here) == 0:
+                continue
+            from .native_prism_face import native_prism_face_adj_rows
+
+            order = n1d - 1
+            cells_here = cell_arr[faces_here]
+            node_ids = prism_conn[cells_here]
+            cell_nodes = node_coords[node_ids]  # (k,6,3)
+            for idx, f in enumerate(faces_here):
+                adj_row_out[f] = native_prism_face_adj_rows(
+                    order, fid, cell_nodes[idx])
 
     return adj_row_out
 
