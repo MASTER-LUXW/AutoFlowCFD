@@ -25,6 +25,7 @@ import os
 from typing import Callable
 
 import numpy as np
+from loguru import logger
 from numba import njit, prange
 
 
@@ -347,11 +348,39 @@ def compute_turb_troubled_mask(k_field: np.ndarray, omega_field: np.ndarray,
     return mask_k | mask_om
 
 
-#: 目前实现了 `sensor` 档的后端。`legacy`/`off`/`mild` 三档**不需要**
-#: 出现在这里——它们是在算子构造期改 `ops.filter_prism`/`filter_tet` 本身
-#: （见 fr/modal_filter.py 的模块级常量），因此对全部后端自动生效；只有
-#: `sensor` 需要在推进循环里逐单元门控，必须逐后端接线。
+#: 目前实现了 `sensor` 档的后端。`legacy`/`off`/`mild`/`project` 四档
+#: **不需要**出现在这里——它们是在算子构造期改 `ops.filter_prism`/
+#: `filter_tet` 本身（见 fr/modal_filter.py 的模块级常量），因此对全部
+#: 后端自动生效；只有 `sensor` 需要在推进循环里逐单元门控。
+#:
+#: ## 另外三个后端缺的到底是什么（2026-09-17 查清，写成可执行的规格）
+#:
+#: 不是"接线没写"，是一处**真实的架构约束**：`bounds`（BJ 型）判据要的是
+#: **面邻居的单元均值**，而分区边界上的邻居是 halo 单元；而 RK stage 的
+#: 滤波回调 `filter_func(U_flat)` 只拿到**本地** U（`n_local` 个单元），
+#: 拿不到 halo。所以补齐它需要把 halo 的单元均值也传进 stage 回调——那是
+#: 时间积分器回调契约的改动，不是几行接线。
+#:
+#: 三个后端各自缺的：
+#:   * `cpu-mpi`：面连接数组（`owner_cell_local`/`neighbor_cell_local`/
+#:     `is_boundary`）与 `cell_is_prism` 都已就位（见
+#:     `mpi/distributed_solver.py` 里 `build_filter_func_by_cell_type` 的
+#:     调用处），**只缺 halo 单元均值**。注意索引空间：那些数组是"棱柱
+#:     在前"的置换排列，而 `filter_func` 收到的是原生排列，映射是
+#:     `native = perm[permuted]`（见 `distributed_flat_face` 的 inv_perm
+#:     文档）——接线时必须转，否则会静默用错单元。
+#:   * `gpu-single` / `gpu-mpi`：除上面那条外，还缺 `compute_bounds_
+#:     violation_mask` 的 CuPy 版——它用 `np.add.at`/`np.maximum.at` 做
+#:     scatter 归约，CuPy 没有直接对应（要用 `cupyx.scatter_add` 与
+#:     手写的 scatter-max），不是把 np 换成 cp 就行。
+#:
+#: 在补齐之前，`resolve_filter_mode` 对**默认值**落到 sensor 的情形退到
+#: `project` 并打一条量化了数值后果的警告；对**显式**请求仍然报错。
 _SENSOR_MODE_SUPPORTED_BACKENDS = ("cpu-single",)
+
+#: 已经为哪些后端打过"默认 sensor 退到 project"的警告（每后端只打一次，
+#: 避免逐步刷屏；`resolve_filter_mode` 在每步都会被调用）。
+_SENSOR_FALLBACK_WARNED = set()
 
 
 def resolve_filter_mode(backend: str) -> str:
@@ -374,15 +403,47 @@ def resolve_filter_mode(backend: str) -> str:
     Raises:
         NotImplementedError: 请求了 `sensor` 但该后端尚未接线。
     """
-    mode = os.environ.get("AFCFD_FILTER_MODE", "legacy").lower()
+    # **默认值必须与 `fr/modal_filter.py` 的同一个环境变量解析保持一致**
+    # （2026-09-17 真实 bug）：那边定滤波**矩阵**的 sigma，这边定 `step.py`
+    # 走不走**逐单元门控**分支。把默认值从 legacy 改成 sensor 时只改了
+    # 那一处，于是默认路径变成"矩阵是精确投影、但全局逐 stage 施加"——
+    # 功能上等于 legacy（实测 legacy 与 project 在 P1 上逐位相同），
+    # 壁面剪应力照样被清零（实测 du/dy 恒为 0）。两处必须同源，所以这里
+    # 直接复用那个模块的常量而不是再写一遍默认值。
+    from autoflowcfd.fr.modal_filter import FILTER_MODE as _MATRIX_MODE
+
+    _raw = os.environ.get("AFCFD_FILTER_MODE")
+    explicit = _raw is not None and _raw.strip() != ""
+    mode = (_raw.lower() if explicit else _MATRIX_MODE.lower())
+
     if mode == "sensor" and backend not in _SENSOR_MODE_SUPPORTED_BACKENDS:
-        raise NotImplementedError(
-            f"AFCFD_FILTER_MODE=sensor 尚未在后端 '{backend}' 上接线"
-            f"（已接线：{', '.join(_SENSOR_MODE_SUPPORTED_BACKENDS)}）。"
-            f"传感器门控需要在推进循环里逐单元求 Persson-Peraire 指示器，"
-            f"不是算子构造期就能定下来的，必须逐后端实现。"
-            f"legacy/off/mild 三档对全部后端都有效，可先用它们；"
-            f"若确实需要在该后端用 sensor 档，请先补齐接线而不是忽略本错误。")
+        if explicit:
+            # **显式请求**得不到满足时必须报错：给了明确指令却拿到别的
+            # 数值方案，是本项目一贯不接受的静默行为。
+            raise NotImplementedError(
+                f"AFCFD_FILTER_MODE=sensor 尚未在后端 '{backend}' 上接线"
+                f"（已接线：{', '.join(_SENSOR_MODE_SUPPORTED_BACKENDS)}）。"
+                f"传感器门控需要在推进循环里逐单元求传感器指示器，不是算子"
+                f"构造期就能定下来的，必须逐后端实现。"
+                f"legacy/off/mild/project 四档对全部后端都有效，可先用它们；"
+                f"若确实需要在该后端用 sensor 档，请先补齐接线而不是忽略"
+                f"本错误。")
+        # **默认值**落到 sensor 而该后端未接线：退到 `project`（同一个
+        # 滤波矩阵、全局施加）并**大声**说明差异。为什么这一档可以退而
+        # 显式请求不可以：默认值必须让每个后端都能跑起来，而一条警告
+        # 使它不是"静默"——本项目禁止的是**无声**地把明确请求换掉。
+        global _SENSOR_FALLBACK_WARNED
+        if backend not in _SENSOR_FALLBACK_WARNED:
+            _SENSOR_FALLBACK_WARNED.add(backend)
+            logger.warning(
+                f"[FILTER] 默认滤波档是 'sensor'（逐单元门控），但后端 "
+                f"'{backend}' 尚未接线，本次退到 'project'（同一个精确投影"
+                f"矩阵、**全局逐 RK stage 施加**）。数值后果是明确的："
+                f"全局施加会精确抹掉最高一阶多项式内容，P1 因此退化成 P0，"
+                f"实测壁面法向速度梯度被清零（平板边界层算例 du/dy 从 1734 "
+                f"变成 0）。要在本后端拿到门控行为，需要补齐该后端的接线；"
+                f"要显式选别的档请设 AFCFD_FILTER_MODE=off|mild|project|legacy。")
+        return "project"
     return mode
 
 

@@ -233,14 +233,65 @@ class TestSensorModeIsNotSilentlyIgnored:
             else:
                 os.environ["AFCFD_FILTER_MODE"] = old
 
-    def test_default_is_legacy_everywhere(self):
+    def test_default_is_sensor_where_wired_and_project_elsewhere(self):
+        """默认值（2026-09-17 起 `sensor`）的**逐后端**解析。
+
+        `cpu-single` 拿到 `sensor`（门控已接线）；另外三个后端尚未接线，
+        默认值退到 `project`——同一个精确投影矩阵、但**全局逐 RK stage
+        施加**。为什么默认可以退而显式请求不可以，见
+        `resolve_filter_mode` 里那段说明：本项目禁止的是**无声**地把
+        明确请求换掉，而默认值必须让每个后端都能跑起来，退档时打一条
+        量化了数值后果的警告。
+        """
         from autoflowcfd.core.fr_solver.filter import resolve_filter_mode
         old = os.environ.pop("AFCFD_FILTER_MODE", None)
         try:
-            for b in ("cpu-single", "cpu-mpi", "gpu-single", "gpu-mpi"):
-                assert resolve_filter_mode(b) == "legacy"
+            assert resolve_filter_mode("cpu-single") == "sensor"
+            for b in ("cpu-mpi", "gpu-single", "gpu-mpi"):
+                assert resolve_filter_mode(b) == "project", b
         finally:
             if old is not None:
+                os.environ["AFCFD_FILTER_MODE"] = old
+
+    def test_two_resolvers_share_one_default(self):
+        """**真实 bug 回归（2026-09-17）**：滤波档有两个独立解析器——
+        `fr/modal_filter.py` 定矩阵的 sigma、`fr_solver/filter.py` 定
+        `step.py` 走不走门控分支。把默认从 `legacy` 改成 `sensor` 时只改了
+        前者，于是默认路径变成"矩阵是精确投影、但全局逐 stage 施加"，
+        功能上等于 legacy（实测两者在 P1 上逐位相同），壁面剪应力照样被
+        清零（平板边界层算例 du/dy 从 1734 变成 0）。两处必须同源。
+        """
+        import importlib
+
+        from autoflowcfd.core.fr_solver import filter as f
+        import autoflowcfd.fr.modal_filter as mf
+
+        old = os.environ.pop("AFCFD_FILTER_MODE", None)
+        try:
+            mf = importlib.reload(mf)
+            assert f.resolve_filter_mode("cpu-single") == mf.FILTER_MODE, (
+                "两个解析器的默认值不一致——会出现「矩阵按一档、施加方式"
+                "按另一档」这种没人能从日志里看出来的组合")
+        finally:
+            if old is not None:
+                os.environ["AFCFD_FILTER_MODE"] = old
+
+    def test_explicit_sensor_on_unwired_backend_raises(self):
+        """显式请求得不到满足必须报错，不能退档。"""
+        import pytest as _pytest
+
+        from autoflowcfd.core.fr_solver.filter import resolve_filter_mode
+        old = os.environ.get("AFCFD_FILTER_MODE")
+        os.environ["AFCFD_FILTER_MODE"] = "sensor"
+        try:
+            assert resolve_filter_mode("cpu-single") == "sensor"
+            for b in ("cpu-mpi", "gpu-single", "gpu-mpi"):
+                with _pytest.raises(NotImplementedError, match="尚未在后端"):
+                    resolve_filter_mode(b)
+        finally:
+            if old is None:
+                os.environ.pop("AFCFD_FILTER_MODE", None)
+            else:
                 os.environ["AFCFD_FILTER_MODE"] = old
 
 
