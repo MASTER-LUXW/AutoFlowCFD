@@ -30,14 +30,93 @@ class TimeIntegrationScheme(Enum):
     FORWARD_EULER = "forward_euler"
     SSP_RK2 = "ssp_rk2"
     SSP_RK3 = "ssp_rk3"
-    IMEX_EULER = "imex_euler"  # 新增：一阶 IMEX
-    DUAL_TIME = "dual_time"    # 新增：双时间步长
-    
-    # 保留旧别名，使已有的 config/测试仍能正常导入。
-    BACKWARD_EULER = "forward_euler"
-    RUNGE_KUTTA_2 = "ssp_rk2"
-    ADAMS_BASHFORTH_3 = "ssp_rk3"
+    IMEX_EULER = "imex_euler"  # 一阶 IMEX（阻尼 Picard 子迭代，见 imex.py）
+    DUAL_TIME = "dual_time"    # 双时间步长
 
+    # **2026-09-18 删除三个旧别名**：
+    #     BACKWARD_EULER = "forward_euler"
+    #     RUNGE_KUTTA_2 = "ssp_rk2"
+    #     ADAMS_BASHFORTH_3 = "ssp_rk3"
+    # 它们的值与已有成员重复，在 Python 里因此是**同一个成员的别名**
+    # （实测 `TimeIntegrationScheme.BACKWARD_EULER is
+    # TimeIntegrationScheme.FORWARD_EULER` 为 True）。后果是选"后向 Euler"
+    # （**隐式**格式）静默拿到前向 Euler（**显式**格式）——这正是本项目
+    # 一贯不接受的假选项：一个看起来能选、实际给别的数值方案、且毫无提示
+    # 的枚举值。全仓库 grep 确认这三个名字除定义处外零引用，所以删除不
+    # 破坏任何调用方；真要复现历史配置请显式写 FORWARD_EULER/SSP_RK2/
+    # SSP_RK3。
+    #
+    # 本项目**目前没有任何隐式时间格式**：IMEX_EULER 只对粘性/源项做阻尼
+    # Picard 子迭代（不是 Newton），DUAL_TIME 的内层仍是显式推进。真正的
+    # 隐式稳态求解器（矩阵自由 Newton-Krylov + 块 Jacobi 预处理 + 伪瞬态
+    # 延拓）尚未实现——不要再用一个别名把这个缺口盖住。
+
+
+
+#: **用户词汇 -> 枚举的唯一事实来源**（2026-09-18）。
+#:
+#: 此前同一个语义有**三套**词汇表、各自一份映射：
+#:   * CLI `--time-method`：`rk3` / `imex` / `dual-time`
+#:     （`cli/solve_transient_command.py` 一份 3 项的表）
+#:   * `api.run_transient`：上面那些 + 枚举自身的取值
+#:     （`api.py` 一份 8 项的表）
+#:   * YAML/配置层：`backward_euler` / `rk2` / `rk3` / `ab3`
+#:     （`config/solver_config.py` 里**另一个同名枚举**，取值范围与核心层
+#:     不兼容，其中 `backward_euler`/`ab3` 在核心层根本没有实现）
+#:
+#: 三份之中 `api_config.py` 那一份是错的：它把 `dual-time` 映到
+#: `BACKWARD_EULER`、把 `imex` 映到 `RK3`（都是静默给错值），未知取值还
+#: 静默退到 RK3。本项目已多次因"同一件事有多份实现、只改了一份"出真实
+#: 缺陷，所以这里合并成一份。
+_SCHEME_ALIASES = {
+    "rk3": TimeIntegrationScheme.SSP_RK3,
+    "ssp_rk3": TimeIntegrationScheme.SSP_RK3,
+    "rk2": TimeIntegrationScheme.SSP_RK2,
+    "ssp_rk2": TimeIntegrationScheme.SSP_RK2,
+    "imex": TimeIntegrationScheme.IMEX_EULER,
+    "imex_euler": TimeIntegrationScheme.IMEX_EULER,
+    "dual-time": TimeIntegrationScheme.DUAL_TIME,
+    "dual_time": TimeIntegrationScheme.DUAL_TIME,
+    "forward_euler": TimeIntegrationScheme.FORWARD_EULER,
+    "euler": TimeIntegrationScheme.FORWARD_EULER,
+}
+
+
+def scheme_names():
+    """全部合法的用户侧取值（已排序），供错误信息与 CLI 帮助文本使用。
+
+    **不要**在别处硬编码这张表——那正是被合并掉的那三份重复。
+    """
+    return sorted(_SCHEME_ALIASES)
+
+
+def scheme_from_name(name):
+    """把用户侧字符串（CLI/YAML/API）解析成 `TimeIntegrationScheme`。
+
+    Args:
+        name: 用户给的取值，大小写不敏感；也接受已经是枚举的对象（直接
+            返回，便于调用方不必先判类型）。
+
+    Returns:
+        `TimeIntegrationScheme` 成员。
+
+    Raises:
+        ValueError: 取值不合法。**不静默退回默认值**——那会让一次拼写
+            错误静默地把整个算例换成别的时间积分方案（`api_config.py`
+            此前正是 `.get(name, RK3)`）。报错信息里列出全部合法取值。
+    """
+    if isinstance(name, TimeIntegrationScheme):
+        return name
+    key = str(name).strip().lower()
+    scheme = _SCHEME_ALIASES.get(key)
+    if scheme is None:
+        raise ValueError(
+            f"未知的时间积分方案 {name!r}；合法取值：{scheme_names()}。"
+            f"注意本项目**没有隐式时间格式**：`backward_euler`/`ab3` 这类"
+            f"名字曾经出现在配置层枚举里，但核心层从未实现，已删除而不是"
+            f"留成静默映射到显式格式的假选项。"
+        )
+    return scheme
 
 # SSP-RK Shu-Osher 系数：各阶段形如
 #   u^(i) = sum_k alpha[i,k] u^(k) + beta[i] dt L(u^(i-1))

@@ -55,17 +55,14 @@ def api_create_transient_config(
     **kwargs
 ) -> TransientConfig:
     """创建瞬态仿真配置（委托函数）。"""
-    from autoflowcfd.config.solver_config import TimeIntegrationScheme
+    # **2026-09-18 修掉三处静默错误**：此前这里用配置层那个**独立的
+    # 同名枚举**，并且 `dual-time` 被映到 `BACKWARD_EULER`、`imex` 被映到
+    # `RK3`（两者都不是所选的方案），未知取值还 `.get(..., RK3)` 静默退回。
+    # 现在配置层与核心层共用同一个枚举，解析走唯一那个
+    # `scheme_from_name`（未知取值报错而不是静默换方案）。
+    from autoflowcfd.core.time_integration.base import scheme_from_name
 
-    time_scheme_map = {
-        'backward_euler': TimeIntegrationScheme.BACKWARD_EULER,
-        'rk2': TimeIntegrationScheme.RK2,
-        'rk3': TimeIntegrationScheme.RK3,
-        'ab3': TimeIntegrationScheme.AB3,
-        'dual-time': TimeIntegrationScheme.BACKWARD_EULER,
-        'imex': TimeIntegrationScheme.RK3,
-    }
-    time_scheme = time_scheme_map.get(time_method, TimeIntegrationScheme.RK3)
+    time_scheme = scheme_from_name(time_method)
 
     if mode is not None and turbulence_model is None:
         turbulence_model = mode

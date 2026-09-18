@@ -142,12 +142,16 @@ class ConfigSchema:
         errors = []
         
         if isinstance(scheme, str):
+            # 走唯一那张词汇表（见 loader.py 同一处说明）。
+            from autoflowcfd.core.time_integration.base import (
+                scheme_from_name, scheme_names,
+            )
             try:
-                scheme = TimeIntegrationScheme(scheme.lower())
+                scheme = scheme_from_name(scheme)
             except ValueError:
                 errors.append(
                     f"无效的时间格式: '{scheme}'。"
-                    f"必须是以下之一: {[s.value for s in TimeIntegrationScheme]}"
+                    f"必须是以下之一: {scheme_names()}"
                 )
                 return errors
         

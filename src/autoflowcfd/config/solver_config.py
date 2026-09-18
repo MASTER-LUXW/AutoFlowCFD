@@ -48,36 +48,27 @@ class TurbulenceModel(str, Enum):
     LES = "les"
 
 
-class TimeIntegrationScheme(str, Enum):
-    """时间积分方案枚举。
-
-    **部分修复（C-01，V2.0 专家组盲审发现，2026-08-28）**：这个枚举与
-    真正被求解器使用的 `core.time_integration.base.TimeIntegrationScheme`
-    仍是两个独立的 Python 类（这个是 `str, Enum`，取值
-    backward_euler/rk2/rk3/ab3；那个是普通 `Enum`，取值
-    forward_euler/ssp_rk2/ssp_rk3/imex_euler/dual_time），且 `AB3`
-    （Adams-Bashforth 三阶）在核心层依然没有真正实现——核心层没有
-    对应取值，选它会在 `run_transient` 里因 `time_method not in
-    time_scheme_map` 直接报错，而不是静默退化成 SSP-RK3（这一点已
-    诚实化：宁可报错也不要偷偷跑错格式）。
-
-    `SteadyConfig`/`TransientConfig` 对象本身现在**确实**能真正驱动
-    求解行为：`AutoFlowCFDAPI.run_steady(config=...)`/
-    `run_transient(config=...)`（以及对应的 CLI `--config <file.yaml>`
-    选项，经由 `config/loader.py::ConfigLoader` 加载）会把
-    `order`/`turbulence`/`max_iter`/`dt`/`total_time`/`rho_inf`/
-    `vel_inf`/`p_inf`/`mu_molecular`/`turbulence_intensity`/
-    `viscosity_ratio` 这些字段真正解析进 FRSolver 构造参数——但
-    `time_scheme`（这个枚举本身管的字段）**仍未接入**：`run_transient`
-    的 `time_method` 目前始终是一个独立传入的字符串参数，不从
-    `config.time_scheme` 读取，因为两套枚举取值范围/命名都不兼容，
-    贸然做一层"尽量映射"的转换风险比价值大。选择时间积分方案请继续
-    显式传 `time_method`/CLI `--time-method`，不要依赖这个字段生效。
-    """
-    BACKWARD_EULER = "backward_euler"
-    RK2 = "rk2"
-    RK3 = "rk3"
-    AB3 = "ab3"  # Adams-Bashforth 三阶——核心层无对应实现，选中会显式报错
+# **2026-09-18：配置层原本在这里定义了一个独立的同名枚举，已删除。**
+#
+# 那是一个"同一语义两个事实来源"的典型：配置层的是 `str, Enum`、取值
+# `backward_euler/rk2/rk3/ab3`；核心层的是普通 `Enum`、取值
+# `forward_euler/ssp_rk2/ssp_rk3/imex_euler/dual_time`。两者取值范围既
+# 不相同、也不可互相表达（配置层没有 dual_time/imex_euler，核心层没有
+# backward_euler/ab3 —— 后两个在核心层**从未实现**）。
+#
+# 后果不是理论上的：`api_config.py::api_create_transient_config` 把
+# `dual-time` 映到 `BACKWARD_EULER`、把 `imex` 映到 `RK3`（两者都不是
+# 所选的方案），未知取值还 `.get(..., RK3)` 静默退回。之所以一直没人
+# 发现，是因为这个字段本身未接入求解器 —— 而"未接入"不是让错误映射
+# 留在代码里的理由：一旦有人把它接上就是静默跑错格式。
+#
+# 现在配置层直接复用核心层那个枚举，字符串解析统一走
+# `core/time_integration/base.py::scheme_from_name`（唯一那张词汇表，
+# 未知取值报错而不是静默换方案）。
+from autoflowcfd.core.time_integration.base import (  # noqa: E402
+    TimeIntegrationScheme,
+    scheme_from_name as parse_time_scheme,
+)
 
 
 @dataclass
@@ -377,12 +368,12 @@ class TransientConfig(SolverConfig):
         ...     order=3,
         ...     dt=1e-4,
         ...     total_time=0.3,
-        ...     time_scheme="backward_euler"
+        ...     time_scheme="dual-time"
         ... )
     """
     dt: float = 1e-4
     total_time: float = 0.1
-    time_scheme: TimeIntegrationScheme = TimeIntegrationScheme.BACKWARD_EULER
+    time_scheme: TimeIntegrationScheme = TimeIntegrationScheme.SSP_RK3
     # 自适应 CFL 三元组（2026-09-17 新增）。为什么瞬态也需要：
     # `--time-method rk3/imex` 下 `step()` 忽略 dt、按**逐单元局部 CFL
     # 步长**推进（见 core/fr_solver/step.py 的 dt 语义一节），那条路径上

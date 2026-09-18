@@ -29,7 +29,10 @@ class TestConfigLoaderTemplateRoundTrip:
         config = ConfigLoader().load(str(yaml_path))
 
         assert isinstance(config, TransientConfig)
-        assert config.time_scheme == TimeIntegrationScheme.RK3
+        assert config.time_scheme == TimeIntegrationScheme.SSP_RK3, (
+            "YAML 里的 time_scheme 必须真的进到 TransientConfig。"
+            "2026-09-18：配置层那个独立的同名枚举已删除，`rk3` 现在解析成"
+            "核心层的 SSP_RK3（此前是配置层的 RK3，两者是不同的类）")
 
     def test_generated_transient_template_uses_the_real_field_name(self):
         """The hardcoded template text in `cli/config_commands.py` must use

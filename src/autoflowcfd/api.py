@@ -405,22 +405,12 @@ class AutoFlowCFDAPI:
                         f"flux_point_type），当前 backend={backend!r}。")
                 kwargs.setdefault("flux_type", config.flux_type)
 
-        time_scheme_map = {
-            'rk3': CoreTimeScheme.SSP_RK3,
-            'ssp_rk3': CoreTimeScheme.SSP_RK3,
-            'rk2': CoreTimeScheme.SSP_RK2,
-            'ssp_rk2': CoreTimeScheme.SSP_RK2,
-            'imex': CoreTimeScheme.IMEX_EULER,
-            'dual-time': CoreTimeScheme.DUAL_TIME,
-            'dual_time': CoreTimeScheme.DUAL_TIME,
-            'forward_euler': CoreTimeScheme.FORWARD_EULER,
-        }
-        if time_method not in time_scheme_map:
-            raise ValueError(
-                f"Unknown time_method '{time_method}', expected one of "
-                f"{sorted(time_scheme_map)}"
-            )
-        core_time_scheme = time_scheme_map[time_method]
+        # 词汇->枚举的唯一事实来源在
+        # `core/time_integration/base.py::scheme_from_name`（2026-09-18
+        # 合并，此前这里、CLI、配置层各有一份，其中配置层那份把
+        # dual-time 映到 backward_euler、imex 映到 RK3，都是静默给错值）。
+        from autoflowcfd.core.time_integration.base import scheme_from_name
+        core_time_scheme = scheme_from_name(time_method)
 
         max_iter = int(physical_time / dt) if physical_time is not None else 1000
 

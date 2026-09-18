@@ -233,11 +233,8 @@ def transient(input_file: str, backend: str, order: int, flux_type: str, time_me
     else:
         print(f"Iterations : {max_iter}\n")
 
-    time_scheme_map = {
-        'rk3': TimeIntegrationScheme.SSP_RK3,
-        'imex': TimeIntegrationScheme.IMEX_EULER,
-        'dual-time': TimeIntegrationScheme.DUAL_TIME,
-    }
+    # 词汇->枚举唯一事实来源（见 core/time_integration/base.py）。
+    from autoflowcfd.core.time_integration.base import scheme_from_name
 
     if n_ranks > 1 or multi_gpu:
         # 分布式瞬态求解路径（2026-09-02 补齐——此前本命令完全没有
@@ -258,7 +255,7 @@ def transient(input_file: str, backend: str, order: int, flux_type: str, time_me
         # 透传给 `_solve_transient_distributed`。
         _solve_transient_distributed(
             input_file, order, surface_mesh, skip_quality_check,
-            time_scheme_map.get(time_method, TimeIntegrationScheme.SSP_RK3), dual_time_inner_iter,
+            scheme_from_name(time_method), dual_time_inner_iter,
             turbulence_model, max_iter, dt, use_eikonal, output_dir,
             reference_area, threads, turbulence_intensity, viscosity_ratio,
             mu_molecular, rho_inf, vel_inf, p_inf,
@@ -276,7 +273,7 @@ def transient(input_file: str, backend: str, order: int, flux_type: str, time_me
     )
 
     # 2. 映射时间推进方法
-    time_scheme = time_scheme_map.get(time_method, TimeIntegrationScheme.SSP_RK3)
+    time_scheme = scheme_from_name(time_method)
 
     # 时间精度与湍流模型的组合校验（2026-09-15）：本命令的默认组合是
     # `--time-method rk3` + `--turbulence-model ddes`，而 rk3/imex 下

@@ -87,6 +87,12 @@ verbose: false
 """
         else:  # transient
             config_obj = TransientConfig()
+            # 取值表从唯一那张词汇表读，不在模板里硬编码——此前这里写的是
+            # `backward_euler, rk2, rk3, ab3`，其中 backward_euler/ab3 在
+            # 核心层**从未实现**（面向用户的假选项），又漏了真实存在的
+            # imex/dual-time。
+            from autoflowcfd.core.time_integration.base import scheme_names
+            _TIME_SCHEME_CHOICES = ", ".join(scheme_names())
             template_content = f"""# AutoFlowCFD 瞬态配置
 # 由 'autoflowcfd config init' 生成
 
@@ -98,7 +104,7 @@ order: 3       # FR 阶数 (1, 2, 或 3)
 turbulence: des  # des, ddes, les
 
 # 时间积分
-time_scheme: backward_euler  # backward_euler, rk2, rk3, ab3
+time_scheme: dual-time  # {_TIME_SCHEME_CHOICES}
 dt: 1.0e-4     # 时间步长 (s)
 total_time: 0.3  # 总物理时间 (s)
 

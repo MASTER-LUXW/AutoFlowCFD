@@ -14,6 +14,11 @@
 
 import yaml
 from enum import Enum
+
+from autoflowcfd.core.time_integration.base import (
+    scheme_from_name,
+    scheme_names,
+)
 from pathlib import Path
 from typing import Union, Dict, Any
 from loguru import logger
@@ -223,12 +228,16 @@ class ConfigLoader:
             
             # 转换 TimeIntegrationScheme
             elif field_type == TimeIntegrationScheme and isinstance(value, str):
+                # 走唯一那张词汇表（`core/time_integration/base.py::
+                # scheme_from_name`）而不是 `Enum(value)`：YAML 里既可以写
+                # CLI 词汇（`rk3`/`imex`/`dual-time`）也可以写枚举取值
+                # （`ssp_rk3`/`imex_euler`/`dual_time`），两边不再各有一套。
                 try:
-                    converted[key] = TimeIntegrationScheme(value.lower())
+                    converted[key] = scheme_from_name(value)
                 except ValueError:
                     raise ValueError(
                         f"无效的时间积分方案: {value}。"
-                        f"必须是以下之一: {[s.value for s in TimeIntegrationScheme]}"
+                        f"必须是以下之一: {scheme_names()}"
                     )
         
         return converted
@@ -342,7 +351,10 @@ class ConfigLoader:
             'convergence_tol': '残差收敛容差（仅定常）',
             'dt': '时间步长，单位秒（仅瞬态）',
             'total_time': '总物理时间，单位秒（仅瞬态）',
-            'time_scheme': '时间积分方案: backward_euler, rk2, rk3, ab3（仅瞬态）',
+            # 取值表从唯一那张词汇表读，不在这里硬编码——此前这里写的是
+            # `backward_euler, rk2, rk3, ab3`，其中前两个在核心层从未实现、
+            # 后面又漏了真实存在的 imex/dual-time。
+            'time_scheme': '时间积分方案: ' + ', '.join(scheme_names()) + '（仅瞬态）',
             'output_dir': '结果输出目录',
             'checkpoint_interval': '检查点保存间隔，单位步数',
             'growth_rate': '边界层几何增长率（仅定常）',
