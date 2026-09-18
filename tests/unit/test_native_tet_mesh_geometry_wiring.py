@@ -84,7 +84,7 @@ def test_native_mesh_loads_without_crashing_and_operators_are_native(order):
 @pytest.mark.parametrize("order", [1, 2, 3])
 def test_native_face_connectivity_codes_are_translated(order):
     """四面体侧的 cube face code 必须落在 native 范围 [6,9]，棱柱侧
-    完全不受影响（仍然是 [0,5]）——见 with_native_tet_faces 文档。"""
+    完全不受影响（仍然是 [0,5]）——见 with_native_face_codes 文档。"""
     mesh = _build_synthetic_mixed_mesh(order, "native")
     n_prisms = mesh.n_prism_cells
     fc = mesh.face_connectivity

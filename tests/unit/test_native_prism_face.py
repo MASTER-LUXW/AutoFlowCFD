@@ -574,17 +574,30 @@ class TestOperatorsAndGeometrySwitchTogether:
 
 
 class TestNativePrismGeometry:
-    """生产几何在原生档下的两条硬性质。"""
+    """生产几何在原生档下的两条硬性质。
+
+    **网格在坍缩档下建、几何在原生档下重算**：`load_from_volume_mesh`
+    在原生档下会撞上面编码的硬护栏（残差 kernel 还没适配，见那条护栏的
+    说明）。而几何是 `(mesh, order, mode)` 的**纯函数**，所以直接调
+    `build_order_geometry` 就能在不碰面编码的前提下验证它 —— 这不是绕过
+    护栏，护栏挡的正是"原生几何配坍缩面编码去跑残差"那件事。
+    """
 
     @staticmethod
-    def _mesh(order):
+    def _geometry(order, monkeypatch):
         import sys
 
         sys.path.insert(0, "tests/validation")
         from _channel_mesh import build_channel_mesh_prism
+        from autoflowcfd.grid.high_order.high_order_mesh_order import (
+            build_order_geometry,
+        )
 
-        return build_channel_mesh_prism(order, nx=3, ny=2, nz=2,
+        monkeypatch.delenv("AFCFD_PRISM_BASIS", raising=False)
+        mesh = build_channel_mesh_prism(order, nx=3, ny=2, nz=2,
                                         Lx=0.1, H=0.01, Lz=0.004)
+        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
+        return mesh, build_order_geometry(mesh, order)
 
     def test_right_prism_metric_is_constant_through_production_geometry(
             self, monkeypatch):
@@ -594,12 +607,32 @@ class TestNativePrismGeometry:
         实测变化 7.9 倍。度量恒定 + `D@1` 机器零 = 均匀流下体积项散度机器零，
         这就是"自由流保持性"的结构性依据。
         """
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
-        mesh = self._mesh(2)
-        det = np.abs(mesh.jacobians["det_jacs"])
+        _mesh, geom = self._geometry(2, monkeypatch)
+        det = np.abs(geom["jacobians"]["det_jacs"])
         assert det.min() > 0.0
         spread = det.max() / det.min()
         assert spread < 1.0 + 1e-12, f"度量不恒定，极值比 {spread:.6f}"
+
+    def test_collapsed_metric_really_does_vary(self, monkeypatch):
+        """自检：同一张网格在坍缩档下 `det_jacs` **确实**随点变化。
+
+        否则上面那条"恒定"判据无从判断是原生基的功劳还是网格太规整。
+        """
+        import sys
+
+        sys.path.insert(0, "tests/validation")
+        from _channel_mesh import build_channel_mesh_prism
+        from autoflowcfd.grid.high_order.high_order_mesh_order import (
+            build_order_geometry,
+        )
+
+        monkeypatch.delenv("AFCFD_PRISM_BASIS", raising=False)
+        mesh = build_channel_mesh_prism(2, nx=3, ny=2, nz=2,
+                                        Lx=0.1, H=0.01, Lz=0.004)
+        det = np.abs(build_order_geometry(mesh, 2)["jacobians"]["det_jacs"])
+        assert det.max() / det.min() > 2.0, (
+            f"坍缩档的度量极值比只有 {det.max() / det.min():.3f}，"
+            f"这张网格区分不出两条基")
 
     def test_padding_slots_copy_real_sp0(self, monkeypatch):
         """填充槽位必须复制真实 SP #0（有限、物理上合法的占位值）。
@@ -607,17 +640,34 @@ class TestNativePrismGeometry:
         留 `np.zeros` 默认值对应原点，会被后处理/可视化误当成真实几何
         位置；而 `det_jacs` 是**除数**，留 0 直接是除零。
         """
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
-        mesh = self._mesh(2)
+        mesh, geom = self._geometry(2, monkeypatch)
         n_sps = mesh.n_sps_per_cell
         n_real = native_prism_n_sps(2)
         n_prism = mesh.n_prism_cells
         assert n_real < n_sps
-        det = mesh.jacobians["det_jacs"].reshape(-1, n_sps)[:n_prism]
-        coords = mesh.sps_coords[:n_prism]
+        det = geom["jacobians"]["det_jacs"].reshape(-1, n_sps)[:n_prism]
+        coords = geom["sps_coords"][:n_prism]
         assert np.array_equal(det[:, n_real:],
                               np.repeat(det[:, :1], n_sps - n_real, axis=1))
         assert np.array_equal(
             coords[:, n_real:],
             np.repeat(coords[:, :1], n_sps - n_real, axis=1))
         assert np.all(np.isfinite(det)) and np.all(np.abs(det) > 0.0)
+
+    def test_solver_path_is_hard_guarded_under_native(self, monkeypatch):
+        """原生档下建带面的网格必须**硬失败**，不能跑出静默错误的残差。
+
+        残差 kernel 判断"是不是 native 面"的判据是 `code >= 6`（原本等价于
+        "是 native 四面体面"），原生棱柱面的 10~14 号编码会被它当成四面体
+        面、按 `code-6` 取到 4~8 行 —— 那些数组只有 4 行，而 numba
+        nopython **不做边界检查**。
+        """
+        import sys
+
+        sys.path.insert(0, "tests/validation")
+        from _channel_mesh import build_channel_mesh_prism
+
+        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
+        with pytest.raises(NotImplementedError, match="尚未适配"):
+            build_channel_mesh_prism(1, nx=2, ny=2, nz=2,
+                                     Lx=0.05, H=0.01, Lz=0.004)

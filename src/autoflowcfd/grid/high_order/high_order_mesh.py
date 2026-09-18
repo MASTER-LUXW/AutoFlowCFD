@@ -204,8 +204,38 @@ class HighOrderMesh:
             # 下游 `build_face_flux_points`（`face_flux_points_merge.py`）
             # 按 `code>=6` 自动探测启用 numba native 分支（Part7 文档
             # "执行状态更新"节），不需要另外传参。只翻译四面体侧记录，
-            # 棱柱不受影响（`with_native_tet_faces` 文档）。
-            self.face_connectivity = self.face_connectivity.with_native_tet_faces(n_prisms)
+            # 棱柱侧只在 `AFCFD_PRISM_BASIS=native` 时一并翻译 —— 必须
+            # 与 `FROperators`/`build_order_geometry` 读到的是**同一个**
+            # 开关值，三者不一致会让面算子、体积算子、几何度量分属不同
+            # 的基（不会报错、只会给出错的残差）。
+            from autoflowcfd.fr.prism_basis_mode import prism_basis_is_native
+
+            prism_native = prism_basis_is_native()
+            # ===== 原生棱柱面的硬护栏（2026-09-18）=====
+            #
+            # 原生棱柱的算子层与几何层已完成并验证，但**残差 kernel 的面
+            # 分派还没改**：下游判断"是不是 native 面"的判据是 `code >= 6`，
+            # 那个字面量原本等价于"是 native 四面体面"；原生棱柱面用 10~14
+            # 号编码，会被那些判据当成 native 四面体面、按
+            # `excluded_vertex = code - 6` 取到 4~8 —— 而那些数组只有 4 行，
+            # **numba nopython 不做边界检查，会读到未定义内存**。
+            #
+            # 护栏放在这里（产生这些编码的**唯一**生产调用点）而不是放在
+            # 下游：下游第一个碰到它的是 `_CF_AXIS[code]` 的越界 IndexError，
+            # 那是个崩溃而不是静默错误，但报错完全看不出真实原因。
+            if prism_native:
+                raise NotImplementedError(
+                    "AFCFD_PRISM_BASIS=native：棱柱原生基的算子层与几何层"
+                    "已完成并验证（体积微分算子、面通量点、体积->面外插、"
+                    "DG 提升、模态滤波、FROperators 接线、sps_coords/"
+                    "jacobians/度量恒定性、真实自由度归约、面编码翻译表）；"
+                    "尚未适配的是残差 kernel 的面分派（外插/提升按 face_id "
+                    "取原生算子）、面通量点几何（法向/面积权重/邻居插值"
+                    "矩阵）、过积分、GPU/MPI。在它们改完之前这条路径会把"
+                    "棱柱面当成 native 四面体面、按 code-6 越界取矩阵，"
+                    "所以这里硬失败而不是让它跑出看不出异常的错残差。")
+            self.face_connectivity = self.face_connectivity.with_native_face_codes(
+                n_prisms, prism_native=prism_native)
 
             # 周期边界配对：必须在这里、build_face_flux_points 之前完成——
             # 配对把周期面从 is_boundary=True 翻转成内部面，需要在

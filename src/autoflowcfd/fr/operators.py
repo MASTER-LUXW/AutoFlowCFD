@@ -28,7 +28,7 @@ extrap("tet",...)`/`modal_filter.py::build_tet_modal_filter`）不再被
 `boundary_extrap_tet` 保留为占位零矩阵字典（形状与之前一致），只是为了
 不用同步修改 `core/fr_operators/face_kernels.py` 里"无条件按 (celltype,
 axis,side) 读取 boundary_extrap_tet/prism 拼成统一查找表"这一段代码——
-四面体面在 `with_native_tet_faces` 静态翻译（现在总是执行，见
+四面体面在 `with_native_face_codes` 静态翻译（现在总是执行，见
 `grid/connectivity/face_connectivity.py`/`grid/high_order/high_order_
 mesh.py`）之后恒为 `tet_native_v*` 编码（>=6），这些占位行在生产路径上
 永远不会被真正读取（`_native_self_extrap` 等函数按 `is_native` 掩码
@@ -427,13 +427,13 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
     # `boundary_extrap_tet` 保留为占位字典（形状与坍缩坐标版本一致：
     # (n_fp,n_sps)=((order+1)**2,(order+1)**3)）——只是为了不用同步修改
     # `core/fr_operators/face_kernels.py` 里"无条件按 (celltype,axis,
-    # side) 拼表"那段代码；四面体面经 `with_native_tet_faces` 翻译后
+    # side) 拼表"那段代码；四面体面经 `with_native_face_codes` 翻译后
     # 恒为 native 编码，这些占位行在生产路径上不会被真正读取，见模块
     # 文档"提前无条件求值导致越界"一节的同一原理。
     #
     # **占位值从 0 改为 NaN（2026-09-14）**：这是"不变量成立才是死代码"
     # 的典型情形——只要哪天"四面体面恒为 native 编码"这条不变量被破坏
-    # （新的面翻译路径、某个绕过 `with_native_tet_faces` 的构造方式），
+    # （新的面翻译路径、某个绕过 `with_native_face_codes` 的构造方式），
     # 全零算子会把外插态**静默**算成 0（常数外插本该得常数），残差随之
     # 完全错误，而且不报任何错、也不会触发正性限制器。填 NaN 则会立刻
     # 沿残差传播、被求解器既有的 `np.all(np.isfinite(...))` 检查抓住，

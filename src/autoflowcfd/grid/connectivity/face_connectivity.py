@@ -52,11 +52,30 @@ from ..curved_mapping.curved_mapping import TET_CUBE_FACES, PRISM_CUBE_FACES
 CUBE_FACE_CODES: Dict[str, int] = {
     "a=-1": 0, "a=+1": 1, "b=-1": 2, "b=+1": 3, "c=-1": 4, "c=+1": 5,
     "tet_native_v0": 6, "tet_native_v1": 7, "tet_native_v2": 8, "tet_native_v3": 9,
+    # 原生棱柱的 5 个面（2026-09-18）。编码含义见
+    # `fr/native_prism_face.py` 模块文档的表：0/1 是两个三角形封盖、
+    # 2/3/4 是三个侧四边形。坍缩参考立方体的 `b=+1` 面是退化面（坍缩成
+    # 一条侧棱），原生棱柱里没有对应的面，所以只有 5 个。
+    "prism_native_f0": 10, "prism_native_f1": 11, "prism_native_f2": 12,
+    "prism_native_f3": 13, "prism_native_f4": 14,
 }
 CUBE_FACE_NAMES: List[str] = [
     "a=-1", "a=+1", "b=-1", "b=+1", "c=-1", "c=+1",
     "tet_native_v0", "tet_native_v1", "tet_native_v2", "tet_native_v3",
+    "prism_native_f0", "prism_native_f1", "prism_native_f2",
+    "prism_native_f3", "prism_native_f4",
 ]
+
+#: 原生编码的起点。判据统一写成 `code >= NATIVE_FACE_CODE_BASE`，不要
+#: 再散落 `code >= 6` 这种字面量 —— 加了棱柱编码之后那个字面量的含义
+#: 从"是 native 四面体面"变成了"是任意 native 面"，两者在需要分派到
+#: **不同**算子组的地方不能混用。
+NATIVE_FACE_CODE_BASE: int = CUBE_FACE_CODES["tet_native_v0"]
+#: 原生四面体面编码区间 `[6, 10)`，原生棱柱面编码区间 `[10, 15)`。
+NATIVE_TET_FACE_CODE_RANGE = (CUBE_FACE_CODES["tet_native_v0"],
+                              CUBE_FACE_CODES["prism_native_f0"])
+NATIVE_PRISM_FACE_CODE_RANGE = (CUBE_FACE_CODES["prism_native_f0"],
+                                CUBE_FACE_CODES["prism_native_f4"] + 1)
 
 # 现有坍缩坐标四面体编码 -> native 编码的翻译表——网格拓扑本身（这个面
 # 是四面体的哪个真实几何面）不依赖 tet_basis_mode，`build_face_
@@ -71,6 +90,31 @@ _COLLAPSED_TO_NATIVE_TET_CODE: Dict[int, int] = {
     CUBE_FACE_CODES["b=-1"]: CUBE_FACE_CODES["tet_native_v2"],
     CUBE_FACE_CODES["c=-1"]: CUBE_FACE_CODES["tet_native_v3"],
 }
+
+
+def _build_collapsed_to_native_prism_code() -> Dict[int, int]:
+    """坍缩棱柱的 5 个立方体面编码 -> 原生棱柱面编码。
+
+    **不手写这张表**：`(axis, side) -> face_id` 的对应关系只有一个事实来源
+    （`fr/native_prism_face.py::cube_face_to_native_prism_face`，那边有
+    形状无关的几何验证），这里只是把它换成"编码 -> 编码"的形式。手抄一份
+    会在两处不一致时静默地对某个面用错外插/提升矩阵。
+    """
+    from autoflowcfd.fr.native_prism_face import (
+        cube_face_to_native_prism_face,
+    )
+
+    axis_name = {0: "a", 1: "b", 2: "c"}
+    table: Dict[int, int] = {}
+    for axis in range(3):
+        for side in (-1.0, 1.0):
+            if (axis, side) == (1, 1.0):
+                continue          # 退化面，没有对应的原生面
+            key = f"{axis_name[axis]}={'+1' if side > 0 else '-1'}"
+            fid = cube_face_to_native_prism_face(axis, side)
+            table[CUBE_FACE_CODES[key]] = CUBE_FACE_CODES[
+                f"prism_native_f{fid}"]
+    return table
 
 
 class FaceTopologyError(RuntimeError):
@@ -155,28 +199,55 @@ class FRFaceConnectivity:
     def get_interior_face_indices(self) -> np.ndarray:
         return np.flatnonzero(~self.is_boundary)
 
-    def with_native_tet_faces(self, n_prism_cells: int) -> "FRFaceConnectivity":
-        """返回一份翻译过面编码的浅拷贝：四面体侧（`owner_cell`/`neighbor_cell
-        >= n_prism_cells`）的坍缩坐标编码（0/1/2/4）替换成对应的
-        `tet_native_v*` 编码（6~9），棱柱侧、边界面（编码 -1）不变。
+    def with_native_face_codes(self, n_prism_cells: int,
+                               prism_native: bool = False) -> "FRFaceConnectivity":
+        """返回一份翻译过面编码的浅拷贝。
 
-        网格拓扑本身（这个面是四面体的哪个真实几何面）不依赖求解阶段的
-        `tet_basis_mode` 选择，`build_face_connectivity` 因此保持完全
-        不变、只产出坍缩坐标编码；这个方法是求解器按 `tet_basis_mode=
-        "native"` 请求时的一次性静态翻译，不重新做任何几何识别（翻译表
-        见 `_COLLAPSED_TO_NATIVE_TET_CODE` 文档）。其余字段（法向量、
-        面积、周期平移量等纯几何量）原样复用，不受影响。
+        * **四面体侧恒翻译**（`owner_cell`/`neighbor_cell >= n_prism_cells`）：
+          坍缩坐标编码 0/1/2/4 -> `tet_native_v*`（6~9）。native 是四面体
+          唯一实现（见 `fr/operators.py` 模块文档）。
+        * **棱柱侧按 `prism_native` 翻译**：坍缩编码 0/1/2/4/5 ->
+          `prism_native_f*`（10~14）。`b=+1`（编码 3）是退化面、不在表里，
+          原样保留。
+        * 边界面（编码 -1）两种情形都不变。
+
+        网格拓扑本身（这个面是该单元的哪个真实几何面）不依赖求解阶段选的
+        基，`build_face_connectivity` 因此保持完全不变、只产出坍缩坐标
+        编码；这个方法是一次性**静态**翻译，不重新做任何几何识别（两张
+        翻译表分别见 `_COLLAPSED_TO_NATIVE_TET_CODE` 与
+        `_build_collapsed_to_native_prism_code` 的文档）。其余字段（法向量、
+        面积、周期平移量等纯几何量）原样复用。
+
+        Args:
+            n_prism_cells: 棱柱单元数（"棱柱在前"排列下的分界）
+            prism_native: 是否同时把棱柱面翻译成原生编码。由调用方从
+                `fr/prism_basis_mode.py::prism_basis_is_native()` 取 ——
+                **必须与 `FROperators`/`build_order_geometry` 读到的是
+                同一个值**，三者不一致会让面算子、体积算子、几何度量
+                分属不同的基，那不会报错、只会给出错的残差。
         """
         owner_cube_face = self.owner_cube_face.copy()
         neighbor_cube_face = self.neighbor_cube_face.copy()
 
-        def _translate(codes: np.ndarray, is_tet_side: np.ndarray) -> None:
-            for old_code, new_code in _COLLAPSED_TO_NATIVE_TET_CODE.items():
-                mask = is_tet_side & (codes == old_code)
-                codes[mask] = new_code
+        def _translate(codes: np.ndarray, side_mask: np.ndarray,
+                       table: Dict[int, int]) -> None:
+            for old_code, new_code in table.items():
+                codes[side_mask & (codes == old_code)] = new_code
 
-        _translate(owner_cube_face, self.owner_cell >= n_prism_cells)
-        _translate(neighbor_cube_face, (self.neighbor_cell >= n_prism_cells) & (self.neighbor_cell >= 0))
+        owner_is_tet = self.owner_cell >= n_prism_cells
+        neigh_is_tet = ((self.neighbor_cell >= n_prism_cells)
+                        & (self.neighbor_cell >= 0))
+        _translate(owner_cube_face, owner_is_tet, _COLLAPSED_TO_NATIVE_TET_CODE)
+        _translate(neighbor_cube_face, neigh_is_tet,
+                   _COLLAPSED_TO_NATIVE_TET_CODE)
+
+        if prism_native:
+            prism_tbl = _build_collapsed_to_native_prism_code()
+            owner_is_prism = self.owner_cell < n_prism_cells
+            neigh_is_prism = ((self.neighbor_cell < n_prism_cells)
+                              & (self.neighbor_cell >= 0))
+            _translate(owner_cube_face, owner_is_prism, prism_tbl)
+            _translate(neighbor_cube_face, neigh_is_prism, prism_tbl)
 
         return FRFaceConnectivity(
             owner_cell=self.owner_cell,

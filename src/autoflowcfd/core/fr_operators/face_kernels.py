@@ -259,11 +259,12 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     n_sps = n1d ** 3
     n_prism = mesh.n_prism_cells
 
-    # 原始 cube face 编码：`fc` 本身就带着，native 分支据此判断（code>=6，
-    # 见 FlatFaceGeometry.owner_cube_face 文档），不依赖 owner_axis/
-    # owner_side 那套可能有歧义的复用槽位。
+    # 原始 cube face 编码：`fc` 本身就带着，native 分支据此判断（四面体
+    # native 面是 [6,10)，见 FlatFaceGeometry.owner_cube_face 文档），
+    # 不依赖 owner_axis/owner_side 那套可能有歧义的复用槽位。
     owner_cube_face = fc.owner_cube_face.astype(np.int64)
     neighbor_cube_face = fc.neighbor_cube_face.astype(np.int64)
+
 
     from autoflowcfd.fr.face_flux_points_merge import _KernelFaceData
     if not isinstance(ffp_data, _KernelFaceData):

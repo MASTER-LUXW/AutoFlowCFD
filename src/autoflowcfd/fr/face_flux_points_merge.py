@@ -205,14 +205,14 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
     v_sps_inv_prism = np.ascontiguousarray(lu_solve(lu_prism, I_n).T)
     # native 四面体（路径C）V_sps_inv + 模态索引——只在 face_conn 里真的
     # 出现过 native 四面体面（cube face code>=6，见
-    # grid/connectivity/face_connectivity.py::with_native_tet_faces）时
+    # grid/connectivity/face_connectivity.py::with_native_face_codes）时
     # 才计算；不含 native 四面体的既有网格（默认坍缩坐标路径）传零长度
     # 占位数组，kernel 内对应分支（判据同样是 code>=6）永远不会被执行，
     # 不改变任何现有行为——这是本函数自动探测是否启用 native 分支的唯一
     # 入口，不需要单独的 tet_basis_mode 参数贯穿调用链（Part7 文档"实现
     # 顺序建议"里"求解器/网格加载路径接入 tet_basis_mode"仍是独立的、
     # 尚未做的后续工作，见该文档；这里只保证一旦上游把 face_conn 换成
-    # `.with_native_tet_faces()` 翻译后的版本，这条 numba 路径立即可用）。
+    # `.with_native_face_codes()` 翻译后的版本，这条 numba 路径立即可用）。
     has_native_tet = bool(np.any(np.asarray(face_conn.owner_cube_face) >= 6)) or bool(
         np.any(np.asarray(face_conn.neighbor_cube_face) >= 6)
     )

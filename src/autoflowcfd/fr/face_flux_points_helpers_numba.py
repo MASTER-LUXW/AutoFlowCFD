@@ -385,7 +385,7 @@ _PQ_CODES = np.array([0, 1, 2], dtype=np.int32)  # a=-1, a=+1, b=-1
 # parallel` 内部对 native 四面体面（cube face code>=6，excluded_vertex=
 # code-6）分支消费，避免退回到假设 (axis,side) 语义的 `_newton_locate_nb`/
 # `_face_ref_grid_nb`。face code>=6 只可能出现在 native 四面体的真实面上
-# （见 grid/connectivity/face_connectivity.py::with_native_tet_faces
+# （见 grid/connectivity/face_connectivity.py::with_native_face_codes
 # 文档），棱柱四边形侧面恒为 0~5，因此本节所有分支判据只需要检查
 # `code>=6`，不需要额外的 is_prism 判据。
 # ============================================================================

@@ -62,7 +62,7 @@ def build_fp_newton_parallel(
     不再假设 `_FACE_AXIS`/`_FACE_SIDE`（长度仅 6，对 code>=6 越界）
     覆盖所有 cube face code。code>=6 只可能出现在 native 四面体的真实面
     （棱柱四边形侧面恒为 0~5，见 grid/connectivity/face_connectivity.py::
-    with_native_tet_faces 文档），因此本函数所有 native 分支只需要判断
+    with_native_face_codes 文档），因此本函数所有 native 分支只需要判断
     `code>=6`，不需要额外与 is_prism 组合判断。`v_sps_inv_native`/
     `native_mode_{i,j,k}` 在整个网格不含任何 native 四面体时（既有
     默认坍缩坐标路径）传入零长度占位数组即可，对应分支永远不会被执行，
