@@ -59,8 +59,10 @@ import numpy as np
 
 # Jacobi 多项式与其导数复用坍缩基模块里那一份（正交多项式本身与"节点
 # 怎么取"无关，是同一个数学对象；再抄一份等于多一个要同步的事实来源）。
-from .collapsed_basis import grad_jacobi_polynomial, jacobi_polynomial
-from .warp_blend_nodes import _evalshift
+from numba import njit
+
+from ..collapsed_basis import grad_jacobi_polynomial, jacobi_polynomial
+from ..warp_blend_nodes import _evalshift
 
 #: `Nodes2D.m` 的 alpha 优化表（三角形专用，与三维那张表不同）。
 #: N >= 16 时原实现取 5/3。
@@ -97,6 +99,7 @@ def rs_to_ab(r: np.ndarray, s: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     return a, s.copy()
 
 
+@njit(cache=True)
 def simplex2d_value(a: np.ndarray, b: np.ndarray, i: int, j: int) -> np.ndarray:
     """`Simplex2DP.m` 逐行移植：三角形正交模态基在 `(a,b)` 处的取值。
 
@@ -104,6 +107,11 @@ def simplex2d_value(a: np.ndarray, b: np.ndarray, i: int, j: int) -> np.ndarray:
 
     处处有限（`b=1` 时 `(1-b)^i` 在 `i>0` 直接为零，`i=0` 时该因子为 1），
     不需要任何 L'Hopital 或 fallback。
+
+    **`@njit` 是刻意的**：残差 kernel 的 numba 分支要在这里求值（原生棱柱
+    目标单元的插值矩阵，见 `interp_numba.py`）。njit 函数同样可以从纯 Python
+    调用，所以**只需要这一份实现** —— 再写一份"numba 版"就是两个要同步的
+    事实来源，而本项目已多次因此出真实缺陷。
     """
     h1 = jacobi_polynomial(a, 0.0, 0.0, i)
     h2 = jacobi_polynomial(b, float(2 * i + 1), 0.0, j)

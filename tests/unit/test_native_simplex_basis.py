@@ -102,7 +102,7 @@ def test_generate_fr_operators_native_mode_populates_expected_fields():
     n_fine_native = (
         (over_order_tet + 1) * (over_order_tet + 2) * (over_order_tet + 3) // 6
     )
-    assert ops.overint_order == over_order
+    assert ops.overint_order_prism == over_order
     assert ops.overint_order_tet == over_order_tet
     assert ops.overint_n_fine_tet == n_fine_native
     assert ops.overint_D_fine_tet.shape == (n_fine_native, n_fine_native, 3)

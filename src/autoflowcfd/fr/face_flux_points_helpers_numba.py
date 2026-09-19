@@ -9,7 +9,17 @@ AutoFlowCFD - FP 几何构建 numba 辅助函数
 import numpy as np
 from numba import njit
 
+from autoflowcfd.fr.collapsed_basis import (
+    prism_modal_basis_and_grad,
+    tet_modal_basis_and_grad,
+)
+from autoflowcfd.fr.native_prism.interp_numba import (
+    native_prism_interp_matrix_nb,
+)
+from autoflowcfd.fr.face_flux_points import CUBE_FACE_AXIS_SIDE
+from autoflowcfd.fr.face_flux_points_data import _PRISM_QUAD_CODES
 from autoflowcfd.fr.native_simplex_basis import simplex3d_value
+from autoflowcfd.grid.connectivity.face_connectivity import CUBE_FACE_CODES
 
 
 # ============================================================================
@@ -370,9 +380,53 @@ def _newton_locate_nb(is_prism, cell_nodes, fixed_axis, fixed_val, targets_phys,
 # 查找表
 # ============================================================================
 
-_FACE_AXIS = np.array([0, 0, 1, 1, 2, 2], dtype=np.int32)
-_FACE_SIDE = np.array([-1.0, 1.0, -1.0, 1.0, -1.0, 1.0])
-_PQ_CODES = np.array([0, 1, 2], dtype=np.int32)  # a=-1, a=+1, b=-1
+# cube face code -> (axis, side) 查表。**必须覆盖全部 15 个编码**：numba
+# nopython 不做边界检查，对 code>=len 索引会读到未定义内存（原生四面体
+# 编码当年就踩过这条，见 `face_flux_points_exact_normal_kernel.py` 里那段
+# "真实 bug 修复背景"）。
+#
+#   [0, 6)   坍缩立方体面 a=-1/a=+1/b=-1/b=+1/c=-1/c=+1
+#   [6, 10)  原生四面体面 —— axis 槽位复用成 excluded_vertex、side 是哑值
+#            （那条分支不走 (axis,side) 语义，见主 kernel 里的分派）
+#   [10, 15) 原生棱柱面 —— 填的是**真实**的 (axis, side)：原生棱柱面的
+#            通量点与坍缩立方体面的通量点已验证是同一批物理点、同一顺序，
+#            所以定位仍走坍缩的 `_newton_locate_nb`，它需要真实的 axis/side。
+#
+# **由 `face_flux_points.py::CUBE_FACE_AXIS_SIDE` 逐项派生**（2026-09-19）。
+# 此前这里是一份手抄的字面量数组，靠注释+一条测试"钉住两者不漂移" ——
+# 而原生棱柱接入时正是从这类重复里漏出真实缺陷（`_PQ_CODES` 漏了原生那
+# 三个侧面编码，`_PRISM_QUAD_CODES` 同样漏了，导致原生档第一次端到端
+# 构造直接 `KeyError: (0, 14)`）。派生之后"漂移"在结构上不可能发生。
+#
+# 导入方向安全：`face_flux_points.py` 与 `face_flux_points_data.py` 都不
+# import 本模块（只有 `face_flux_points_numba.py`/`_ms_numba.py` 会），
+# 所以这里反向 import 不构成环。
+_FACE_AXIS = np.zeros(len(CUBE_FACE_CODES), dtype=np.int32)
+_FACE_SIDE = np.zeros(len(CUBE_FACE_CODES), dtype=np.float64)
+for _name, _code in CUBE_FACE_CODES.items():
+    _ax, _sd = CUBE_FACE_AXIS_SIDE[_name]
+    _FACE_AXIS[_code] = _ax
+    _FACE_SIDE[_code] = _sd
+del _name, _code, _ax, _sd
+
+#: **多源面**（棱柱的三个四边形侧面）的 cube face code —— 这类面在对侧
+#: 被三角化成两个面，插值矩阵要走 multi-source kernel。坍缩编码是
+#: a=-1/a=+1/b=-1 = 0/1/2，原生棱柱的对应面是 f3/f2/f4 = 13/12/14。
+#: **漏掉原生那三个会让棱柱侧面走单源路径、静默拿到错的邻居插值**。
+#:
+#: 从 `face_flux_points_data.py::_PRISM_QUAD_CODES` 派生（那个集合是唯一
+#: 定义；这里只是把它变成 numba 能索引的有序数组）。
+_PQ_CODES = np.array(sorted(_PRISM_QUAD_CODES), dtype=np.int32)
+
+#: 原生面编码区间（与 `grid/connectivity/face_connectivity.py` 的
+#: `NATIVE_TET_FACE_CODE_RANGE`/`NATIVE_PRISM_FACE_CODE_RANGE` 同源）。
+#: numba 分支判据统一用这两个常量，不要再写 `code >= 6` 这种字面量 ——
+#: 加了棱柱编码之后那个字面量的含义从"是原生四面体面"变成了"是任意
+#: 原生面"，而两者要分派到**不同**的算子组。
+_NATIVE_TET_LO = 6
+_NATIVE_TET_HI = 10
+_NATIVE_PRISM_LO = 10
+_NATIVE_PRISM_HI = 15
 
 # ============================================================================
 # native 四面体（路径C，非坍缩坐标）numba 版几何原语
@@ -583,3 +637,63 @@ def _native_interp_matrix_nb(rst, native_mode_i, native_mode_j, native_mode_k, v
                 val += V_t[p, m] * v_sps_inv_native[m, s]
             interp[p, s] = val
     return interp
+
+
+@njit(cache=True)
+def interp_matrix_from_cube_coords_nb(
+    abc, is_prism, is_native_prism, n1d, n_sps,
+    v_sps_inv_prism, v_sps_inv_tet,
+    v_sps_inv_np, np_mode_i, np_mode_j, np_mode_k,
+):
+    """给定目标点的**坍缩立方体**参考坐标，构造"面点 -> 体积节点"插值矩阵。
+
+    三条基共用这**一个**入口：坍缩棱柱 / 坍缩四面体 / 原生棱柱。
+
+    ## 为什么抽出来
+
+    主 kernel 与 multi-source kernel 里原本有 **6 处**逐字相同的
+    "构造 V_t、再手写三重循环做矩阵乘"。给原生棱柱加支持如果按老样子
+    在每处再加一个分支，就是 6 份要同步的实现 —— 而本项目已多次因为
+    "两份实现只改了一份"出真实缺陷，且这里改错不会报错、只会静默拿到
+    错的邻居插值。
+
+    ## 原生棱柱为什么也能用**坍缩**坐标进来
+
+    坐标往返恰好是恒等（`cube_to_tri_rs` 之后 `rs_to_ab` 回到原值），所以
+    原生棱柱模态可以直接在 `(a,b,c)` 上求值、零换算；实测与走
+    `build_native_prism_vandermonde` 吻合 9.4e-16 相对。完整推导见
+    `fr/native_prism/interp_numba.py` 模块文档。
+
+    Args:
+        abc: `(n_pts, 3)` 目标点的坍缩立方体坐标
+        is_prism: 目标单元是棱柱（否则四面体）
+        is_native_prism: 目标面是**原生棱柱**面（编码 [10,15)）
+        n1d: `order + 1`
+        n_sps: 全局统一宽度 `n1d**3`
+        v_sps_inv_prism / v_sps_inv_tet: 两条坍缩基的节点 Vandermonde 逆
+        v_sps_inv_np / np_mode_*: 原生棱柱的 Vandermonde 逆与模态索引
+
+    Returns:
+        `(n_pts, n_sps)`。原生棱柱只写前 `n_native` 列、其余为零
+        （"补位对齐"约定，与原生四面体那条一致）。
+    """
+    if is_native_prism:
+        return native_prism_interp_matrix_nb(
+            abc, np_mode_i, np_mode_j, np_mode_k, v_sps_inv_np, n_sps)
+    n_pts = abc.shape[0]
+    if is_prism:
+        V_t = prism_modal_basis_and_grad(
+            abc[:, 0], abc[:, 1], abc[:, 2], n1d - 1)[0]
+        V_inv = v_sps_inv_prism
+    else:
+        V_t = tet_modal_basis_and_grad(
+            abc[:, 0], abc[:, 1], abc[:, 2], n1d - 1)[0]
+        V_inv = v_sps_inv_tet
+    out = np.zeros((n_pts, n_sps))
+    for p in range(n_pts):
+        for s in range(n_sps):
+            val = 0.0
+            for m in range(n_sps):
+                val += V_t[p, m] * V_inv[m, s]
+            out[p, s] = val
+    return out

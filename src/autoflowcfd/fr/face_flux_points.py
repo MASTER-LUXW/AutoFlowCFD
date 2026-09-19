@@ -28,7 +28,11 @@ import numpy as np
 from autoflowcfd.fr.matrix_operators import compute_interpolation_matrix
 from autoflowcfd.fr.collapsed_basis import tet_modal_basis_and_grad, prism_modal_basis_and_grad
 from autoflowcfd.fr.face_flux_points_locate import map_ref_points, newton_locate_on_face
-from autoflowcfd.grid.connectivity.face_connectivity import CUBE_FACE_NAMES
+from autoflowcfd.grid.connectivity.face_connectivity import (
+    CUBE_FACE_NAMES,
+    NATIVE_PRISM_FACE_CODE_RANGE,
+    NATIVE_TET_FACE_CODE_RANGE,
+)
 
 # 每个立方体面标识 -> (被坍缩掉的计算方向索引, 边界取值)。
 # tet_native_v0~v3：native 四面体（路径C）没有 (axis,side) 这个概念，
@@ -67,7 +71,7 @@ CUBE_FACE_AXIS_SIDE = {
     # 法向 3.3e-16、物理面积权重 2.4e-15。
     #
     # 与 `NATIVE_PRISM_FACE_TO_CUBE_FACE` 的一致性由
-    # `tests/unit/test_native_prism_face.py` 断言（那张表是对应关系的唯一
+    # `tests/unit/test_native_prism/face.py` 断言（那张表是对应关系的唯一
     # 事实来源、有形状无关的几何验证；这里不 import 它是为了避免模块级
     # 循环导入，改由测试钉住两者不会漂移）。
     "prism_native_f0": (2, -1.0),
@@ -289,7 +293,16 @@ def build_cross_interp(
             的预计算残差。
     """
     is_prism, cell_nodes = cell_info(mesh, target_cell)
-    is_tet_native = (not is_prism) and target_face_code >= 6
+    is_tet_native = (not is_prism) and (
+        NATIVE_TET_FACE_CODE_RANGE[0] <= target_face_code
+        < NATIVE_TET_FACE_CODE_RANGE[1])
+    # 原生棱柱目标面（编码 [10,15)）：**定位**走坍缩的 Newton（两条基的
+    # 几何映射逐位恒等，见 fr/native_prism/__init__.py），只有最后求
+    # Vandermonde 时换成原生的 —— 与 numba 侧
+    # `interp_matrix_from_cube_coords_nb` 完全同一条逻辑。
+    is_prism_native = is_prism and (
+        NATIVE_PRISM_FACE_CODE_RANGE[0] <= target_face_code
+        < NATIVE_PRISM_FACE_CODE_RANGE[1])
 
     if is_tet_native:
         if precomputed_free_coords is not None:
@@ -350,6 +363,40 @@ def build_cross_interp(
     abc[:, target_axis] = target_side
     abc[:, other_axes[0]] = free_coords[:, 0]
     abc[:, other_axes[1]] = free_coords[:, 1]
+
+    if is_prism_native:
+        # 原生棱柱目标：坍缩 Newton 给出的 `abc` **直接**就能求原生棱柱
+        # 模态（坐标往返恰好是恒等，实测吻合 9.4e-16 相对）。复用 numba 侧
+        # **同一个实现** `native_prism_interp_matrix_nb`（njit 函数同样可以
+        # 从纯 Python 调用）—— 不在这里另写一份 Python 版，那会是第二个
+        # 要同步的事实来源。
+        from autoflowcfd.fr.native_prism.basis import (
+            build_native_prism_nodes,
+            build_native_prism_vandermonde,
+            restricted_prism_modes,
+        )
+        from autoflowcfd.fr.native_prism.interp_numba import (
+            native_prism_interp_matrix_nb,
+        )
+        from scipy.linalg import lu_factor, lu_solve
+
+        modes_np = restricted_prism_modes(order)
+        n_np = len(modes_np)
+        V_np, _, _, _ = build_native_prism_vandermonde(
+            order, build_native_prism_nodes(order))
+        v_inv_np = np.ascontiguousarray(
+            lu_solve(lu_factor(V_np.T), np.eye(n_np)).T)
+        interp = native_prism_interp_matrix_nb(
+            np.ascontiguousarray(abc),
+            np.array([m[0] for m in modes_np], dtype=np.int32),
+            np.array([m[1] for m in modes_np], dtype=np.int32),
+            np.array([m[2] for m in modes_np], dtype=np.int32),
+            v_inv_np, n_sps)
+        if interp.shape != (n_pts, n_sps):
+            raise ValueError(
+                f"原生棱柱插值矩阵形状 {interp.shape} 应为 "
+                f"({n_pts}, {n_sps})")
+        return interp, final_resid
 
     cell_type = "prism" if is_prism else "tet"
     if cell_type == "tet":

@@ -246,7 +246,8 @@ def _compute_prism_only_jacobians(
 
 
 def compute_native_prism_jacobians(
-    mesh: "HighOrderMesh", order: int, n_sps_per_cell: int, want_scaled_quality: bool
+    mesh: "HighOrderMesh", ref_native: np.ndarray, n_sps_per_cell: int,
+    want_scaled_quality: bool
 ) -> Optional[Dict[str, np.ndarray]]:
     """原生棱柱基（`AFCFD_PRISM_BASIS=native`）版本的 Jacobian 构造。
 
@@ -264,24 +265,31 @@ def compute_native_prism_jacobians(
 
     `scaled_quality`（诊断量）调用与坍缩分支**同一个**
     `troubled_cell.py::compute_scaled_jacobian_quality`，不另写一份定义。
+
+    Args:
+        ref_native: `(n_native, 3)` 原生参考棱柱坐标 `(r,s,t)`。**由调用
+            方传入而不是这里按 order 现算**：coarse 几何那一处已经为
+            `sps_coords` 生成过同一批节点（不重算），而体积项去混叠的
+            FINE 几何要的是 `over_order` 的节点集——两者只差参考点集，
+            度量公式完全相同，没有理由写两个函数。
+        n_sps_per_cell: 该段的布局宽度（coarse 是 `(order+1)^3`，fine 是
+            `overintegration_order.prism_n_fine(over_order)`，原生档下后者
+            恰好等于 `ref_native.shape[0]`、不产生填充槽位）。
     """
     from autoflowcfd.core.fr_operators.troubled_cell import compute_scaled_jacobian_quality
-    from autoflowcfd.fr.native_prism_basis import (
-        build_native_prism_nodes,
-        native_prism_exact_jacobian,
-    )
+    from autoflowcfd.fr.native_prism.basis import native_prism_exact_jacobian
 
     n_prisms = mesh.n_prism_cells
     if mesh._fixed_prism_conn is None or n_prisms == 0:
         return None
 
-    ref_native = build_native_prism_nodes(order)
+    ref_native = np.asarray(ref_native, dtype=np.float64)
     n_native = ref_native.shape[0]
     if n_native > n_sps_per_cell:
         raise ValueError(
-            f"原生棱柱自由度 {n_native} 超过全局统一宽度 {n_sps_per_cell}"
-            f"（order={order}）——零填充设计要求前者不多于后者，"
-            f"出现相反情形说明上游传错了阶数，不应静默截断")
+            f"原生棱柱参考点数 {n_native} 超过布局宽度 {n_sps_per_cell}"
+            f"——零填充设计要求前者不多于后者，出现相反情形说明上游"
+            f"传错了点集/宽度，不应静默截断")
 
     all_dets = np.empty(n_prisms * n_sps_per_cell)
     all_inv_jacs = np.empty((n_prisms * n_sps_per_cell, 3, 3))
@@ -341,21 +349,27 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
     n_tets = len(mesh._fixed_tet_conn) if mesh._fixed_tet_conn is not None else 0
 
     # 棱柱的解点位置与度量按**当前生效的棱柱基**分派（见
-    # `fr/prism_basis_mode.py`）：原生基的节点不是张量积立方体点，把原生
+    # `fr/native_prism/mode.py`）：原生基的节点不是张量积立方体点，把原生
     # 微分算子套到坍缩节点采样的场上不会报错、只会给出错的导数，所以算子
     # 与几何**必须一起**切换。
-    from autoflowcfd.fr.prism_basis_mode import prism_basis_is_native
+    from autoflowcfd.fr.native_prism.mode import prism_basis_is_native
 
     prism_native = prism_basis_is_native()
 
+    ref_native_prism = None
+    if prism_native:
+        # 原生档要用到的三样东西一次导入（下面 coarse 的 sps_coords/
+        # Jacobian 与再下面 fine 的细点几何都在同一个 `prism_native`
+        # 守卫下使用它们）。
+        from autoflowcfd.fr.native_prism.basis import (
+            build_native_prism_nodes,
+            map_native_prism_to_physical,
+        )
+
+        ref_native_prism = build_native_prism_nodes(order)
+
     if mesh._fixed_prism_conn is not None and n_prisms > 0:
         if prism_native:
-            from autoflowcfd.fr.native_prism_basis import (
-                build_native_prism_nodes,
-                map_native_prism_to_physical,
-            )
-
-            ref_native_prism = build_native_prism_nodes(order)
             n_native_prism = ref_native_prism.shape[0]
             for i in range(n_prisms):
                 cell_nodes = mesh._node_coords[mesh._fixed_prism_conn[i]]
@@ -388,88 +402,70 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
         prism_jacobians = None
     elif prism_native:
         prism_jacobians = compute_native_prism_jacobians(
-            mesh, order, n_sps_per_cell, want_scaled_quality=True)
+            mesh, ref_native_prism, n_sps_per_cell, want_scaled_quality=True)
     else:
         prism_jacobians = _compute_prism_only_jacobians(
             mesh, mapper, ref_cube_sps, want_scaled_quality=True)
     tet_jacobians = compute_native_tet_jacobians(mesh, order, n_sps_per_cell, want_scaled_quality=True)
     jacobians = _combine_prism_and_tet_jacobians(prism_jacobians, tet_jacobians)
 
-    # 体积项去混叠（超过-积分，V2.0 二次评审 Tier 0 #2）用的
-    # 细网格几何：过积分阶数 over_order=2*order，与 fr/operators.py::
-    # generate_fr_operators 里构造 overint_interp_c2f_*/overint_D_fine_*
-    # 用的过积分阶数必须一致（否则 fr_residual_inviscid.py 里插值/
-    # 微分/限制三个算子的形状与这里的 jacobians_fine 对不上）。
-    # order==0（P0）没有意义（P0 走独立的有限体积残差路径，见
-    # fr_residual_inviscid.py::compute_inviscid_residual_fr 的
-    # n_points_1d==1 分支），跳过以节省内存/构建时间。
+    # 体积项去混叠（over-integration）用的细网格几何。order==0（P0）没有
+    # 意义（P0 走独立的有限体积残差路径，见 `fr_residual/inviscid.py::
+    # compute_inviscid_residual_fr` 的 n_points_1d==1 分支），跳过以节省
+    # 内存/构建时间。
     #
-    # native 单纯形基过积分算子已实现（`native_tet_overintegration.py::
-    # build_native_tet_overintegration_operators`，Part8 文档"四·七"节）。
-    # **四面体的 over_order 自 2026-09-17 起与棱柱不同**（native PKD 基不
-    # 受坍缩基条件数上限约束，见 `fr/native_tet_overintegration.py::
-    # NATIVE_TET_OVERINTEGRATION_MAX_ORDER`）：P2 是 4 而棱柱是 3、P3 是 5。
-    # 这里算的 `n_sps_per_cell_fine` 仍然只由**棱柱**的 over_order 决定，
-    # 它同时充当四面体那一段的**布局宽度**上界（`fr/operators.py` 的
-    # `resolve_tet_overintegration_order` 会据此把四面体阶数夹到装得下）。
+    # **过积分阶数与细点数一律走 `fr/overintegration_order.py`**
+    # （2026-09-19）：此前这里和 `fr/operators.py::generate_fr_operators`
+    # 各写一遍同一个 `min(rule*order, cap)`，两处注释都在提醒"必须逐字
+    # 一致，否则三个算子的形状与这里的 jacobians_fine 对不上"。靠注释维持
+    # 一致在本项目已经出过真实缺陷（滤波档双解析器、CFL 三处硬编码兜底），
+    # 而原生/坍缩分档又要再叠一层，所以合并成唯一入口。
     #
-    # `jacobians_fine` 对四面体单元的构造复用 `compute_native_tet_jacobians`
-    # （同一个"直边单元常数 Jacobian 广播"函数，只是这里传入 FINE 网格的
-    # `n_sps_per_cell_fine` 计数而不是 coarse 的 `n_sps_per_cell`——直边
-    # 单元 Jacobian 不依赖参考点位置，广播到多少个槽位都是同一个常数，
-    # 不需要为"fine"专门重新推导）。**正是这个"原样广播"让四面体可以只取
-    # 前 `n_fine_tet` 列**：那些列上的度量与在真实细点上求值恒等，所以
-    # 四面体用更高的 over_order 不需要把这个共用数组加宽（见
-    # `core/fr_operators/volume_contract.get_overintegration_context`）。
+    # `n_sps_per_cell_fine` 是 `jacobians_fine` 的**每单元布局宽度**，由
+    # 棱柱决定（坍缩档 `(oo+1)^3`、原生档 `(oo+1)^2(oo+2)/2`）。四面体段
+    # **不受它约束**：直边四面体的 Jacobian 逐单元常数，
+    # `compute_native_tet_jacobians` 把同一个常数写满全部槽位，而过积分
+    # 只取第 0 列广播（见 `core/fr_operators/volume_contract.
+    # get_overintegration_context`），所以四面体可以用更高的 over_order
+    # 而不需要把这个共用数组加宽。
+    #
+    # 棱柱的细点度量**必须逐点求值**（两档都是）：棱柱即便直边也一般随点
+    # 变化，只有顶面是底面纯平移的右棱柱才恒定，不能像四面体那样广播。
+    # 原生档下要在**原生**细点上求（原生微分算子配坍缩点采样的场不会报错、
+    # 只会给出错的导数），所以两档各自生成自己的参考点集。
     jacobians_fine = None
     n_sps_per_cell_fine = 0
     if order >= 1:
-        from autoflowcfd.fr.operators import gauss_legendre
-        from autoflowcfd.fr.collapsed_basis import (
-            OVERINTEGRATION_MAX_ORDER, resolve_overintegration_order_rule,
+        from autoflowcfd.fr.overintegration_order import (
+            prism_n_fine, resolve_prism_overintegration_order,
         )
 
-        # 过积分阶数规则（2026-09-15 起**可切换**，见
-        # collapsed_basis.py::resolve_overintegration_order_rule）：
-        # `over_order = min(rule*order, OVERINTEGRATION_MAX_ORDER)`，
-        # `AFCFD_OVERINT_ORDER_RULE = 2x | 3x`，**默认 2x**（此前已被
-        # 长期验证的行为）。
-        #
-        # `2x` 是为平均流的**二次**非线性（欧拉通量 x 度量项）设计的经验
-        # 法则。去混叠此后被接到了两处**三重**乘积上——k/omega 对流体积项
-        # `div(adj(J)*rho*u*phi)` 与粘性体积项
-        # `div(adj(J)*G(Q,grad_vel,grad_T,mu_t))`，三个一次场的乘积是三次，
-        # `over_order=2` 的细网格（二次空间）表示不了它。
-        #
-        # **`OVERINTEGRATION_MAX_ORDER = 3` 自 2026-09-17 起只约束棱柱**。
-        # 那条"放宽到 4 会让 P2 均匀自由流场残差从 1.06e-5 恶化到 5.6e-3、
-        # 根因是 D_fine 绝对量级暴涨约 6.3 万倍"的论证只对**坍缩坐标**基
-        # 成立，也就是这里算的棱柱；native 四面体实测在 over_order=6 才
-        # cond(V)=3856、`max|D|` 从 3 到 6 只长 3.5 倍，已按自己的上限
-        # 独立解析（见上方注释与 collapsed_basis.py 该常量上方的说明、
-        # tests/unit/test_native_tet_overintegration_conditioning.py）。
-        #
-        # 所以 `3x` 与 `2x` 对**棱柱**的差别只在 order=1：
-        #   order=1: 2x -> over_order 2（细点 27）； 3x -> 3（细点 64）
-        #   order>=2: 两者都被 cap 到 3，完全相同
-        # （四面体在各阶数上两者都有区别，但那由 `fr/operators.py` 解析，
-        # 不影响这里的 `n_sps_per_cell_fine`。）
-        #
-        # `3x` 在 order=1 的实测精度收益 / 已知代价，以及"为什么默认不改"，
-        # 全部记在 `resolve_overintegration_order_rule` 的文档里。
-        over_order = min(
-            resolve_overintegration_order_rule() * order,
-            OVERINTEGRATION_MAX_ORDER)
-        n_points_1d_fine = over_order + 1
-        n_sps_per_cell_fine = n_points_1d_fine**3
-        fine_1d, _ = gauss_legendre(n_points_1d_fine)
-        xf, yf, zf = np.meshgrid(fine_1d, fine_1d, fine_1d, indexing="ij")
-        ref_cube_sps_fine = np.column_stack([xf.ravel(), yf.ravel(), zf.ravel()])
+        over_order = resolve_prism_overintegration_order(order)
+        n_sps_per_cell_fine = prism_n_fine(over_order)
 
-        prism_jacobians_fine = (
-            _compute_prism_only_jacobians(mesh, mapper, ref_cube_sps_fine, want_scaled_quality=False)
-            if n_prisms > 0 else None
-        )
+        if n_prisms == 0:
+            prism_jacobians_fine = None
+        elif prism_native:
+            ref_fine_prism = build_native_prism_nodes(over_order)
+            if ref_fine_prism.shape[0] != n_sps_per_cell_fine:
+                raise ValueError(
+                    f"原生棱柱细点数不一致：节点生成给出 "
+                    f"{ref_fine_prism.shape[0]}，`prism_n_fine` 给出 "
+                    f"{n_sps_per_cell_fine}（over_order={over_order}）——"
+                    f"后者是 jacobians_fine 的布局宽度，必须相同")
+            prism_jacobians_fine = compute_native_prism_jacobians(
+                mesh, ref_fine_prism, n_sps_per_cell_fine,
+                want_scaled_quality=False)
+        else:
+            from autoflowcfd.fr.operators import gauss_legendre
+
+            fine_1d, _ = gauss_legendre(over_order + 1)
+            xf, yf, zf = np.meshgrid(fine_1d, fine_1d, fine_1d, indexing="ij")
+            ref_cube_sps_fine = np.column_stack(
+                [xf.ravel(), yf.ravel(), zf.ravel()])
+            prism_jacobians_fine = _compute_prism_only_jacobians(
+                mesh, mapper, ref_cube_sps_fine, want_scaled_quality=False)
+
         tet_jacobians_fine = compute_native_tet_jacobians(
             mesh, order, n_sps_per_cell_fine, want_scaled_quality=False
         )

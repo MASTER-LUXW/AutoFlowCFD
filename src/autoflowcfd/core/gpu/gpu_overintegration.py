@@ -58,7 +58,19 @@ def get_overintegration_segs_gpu(mesh_data, ops_data, n_cells, n_prism):
         if k not in ops_data:
             return None
     adj_all = mesh_data['adj_j_fine']
-    n_fine_prism = int(adj_all.shape[1])
+    # 两段的 n_fine 都从**矩阵自身的形状**推导（矩阵是单一事实来源），
+    # 棱柱段再与上传的布局宽度对账 —— 两档下都是恒等式（坍缩
+    # `(oo+1)^3`、原生 `(oo+1)^2(oo+2)/2`，见
+    # `fr/overintegration_order.prism_n_fine`），不一致即算子与网格几何
+    # 用了不同的 over_order 或不同的棱柱基档，与 CPU 端
+    # `volume_contract.get_overintegration_context` 同一道闸。
+    n_fine_layout = int(adj_all.shape[1])
+    n_fine_prism = int(ops_data['overint_D_fine_prism'].shape[0])
+    if n_fine_prism != n_fine_layout:
+        raise ValueError(
+            f"棱柱过积分细点数不一致：算子 overint_D_fine_prism 的 n_fine="
+            f"{n_fine_prism}，而上传的 adj_j_fine 布局宽度={n_fine_layout}"
+        )
     n_fine_tet = int(ops_data['overint_D_fine_tet'].shape[0])
     # CuPy 与 NumPy 的 broadcast_to 同名同义；`adj_all` 的后续轴（3,3 等）
     # 原样保留，只把细点轴从 1 扩到 n_fine_tet。

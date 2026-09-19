@@ -47,12 +47,12 @@ from typing import Dict, List, Tuple
 
 import numpy as np
 
-from .native_prism_basis import (
+from .basis import (
     build_native_prism_nodes,
     build_native_prism_vandermonde,
     restricted_prism_modes,
 )
-from .quadrature_points import gauss_legendre
+from ..quadrature_points import gauss_legendre
 
 __all__ = [
     "PRISM_FACE_IDS",
@@ -97,7 +97,7 @@ def native_prism_face_points(order: int, face_id: int) -> np.ndarray:
     if face_id in (0, 1):
         # 三角形封盖：与 native 四面体的三角形面**同一套**坍缩三角形
         # 采样（一份实现、一个事实来源）。
-        from ..grid.curved_mapping.curved_mapping import cube_to_tri_rs
+        from ...grid.curved_mapping.curved_mapping import cube_to_tri_rs
 
         g1, g2 = np.meshgrid(g_1d, g_1d, indexing="ij")
         r, s = cube_to_tri_rs(g1.ravel(), g2.ravel())
@@ -127,7 +127,7 @@ def native_prism_face_points_physical(order: int, face_id: int,
     是为了让面几何构造方（`fr/face_flux_points.py`）有一个与
     `native_tet_face_points_physical` 对称的入口，而不是各处自己拼。
     """
-    from .native_prism_basis import map_native_prism_to_physical
+    from .basis import map_native_prism_to_physical
 
     return map_native_prism_to_physical(
         native_prism_face_points(order, face_id), cell_nodes)
@@ -363,9 +363,32 @@ def cube_face_to_native_prism_face(axis: int, side: float) -> int:
 # 两个三角形封盖多一个 **Duffy 因子**：它们的通量点用坍缩三角形采样
 # （`cube_to_tri_rs` 作用在张量积 Gauss-Legendre 方格上，与 native 四面体
 # 三角形面同一套），参考三角形的面积元是 `dr ds = (1-s)/2 * da db`
-# （`s = b`），所以求积权重要乘 `(1-s)/2`。
+# （`s = b`）。
+#
+# **这个因子乘在 adj 行里，不是乘在求积权重里**（2026-09-19 改）——
+# 与 native 四面体三角形面**同一个约定**：下游
+# （`FlatFaceGeometry.ref_area_weight`、
+# `compute_exact_face_normals_and_weights` 的 `true_area_weight = mag*w_fp`、
+# GPU 侧 `gpu_face_geometry.ref_area_weight`）全部只有**一套**逐 fp 的平凡
+# 张量积权重 `(n_fp,)`，对全部 15 种面编码共用。
+#
+# 两条直接测量把这个约定钉死（`tests/unit/test_native_prism_face.py`）：
+#
+#   * 四面体：平凡张量权重 `sum_p w_p |adj_row_p|` 给出**精确**三角面积
+#     （四个面全部到 1e-15），说明 `_native_tet_adj_row_batched` 的行里
+#     已经含着 Duffy 因子；
+#   * 棱柱封盖：不含因子时同一个和给出 1.000000，而单位直棱柱的底/顶面积
+#     是 0.500000 —— 恰好差 2 倍，即差一个 `(1-s)/2` 的积分均值。
+#     参考空间闭合面恒等式同样只在含因子时成立（1.5e-16 vs 5.2e-2）。
+#
+# 曾经的另一套写法是"余向量不含因子 + 一个逐面 `native_prism_face_ref_
+# weights`"。它数学上等价，但要求下游把 `ref_area_weight` 从 `(n_fp,)`
+# 扩成 `(n_codes, n_fp)` 并逐面查表 —— 而**四面体那半边并不需要**，于是
+# 同一个物理量会有两套约定并存。本项目已经多次因此出真实缺陷（配错的
+# 那一半不报错、只给出错的面积权重），所以统一到"因子在 adj 行里"。
 
-#: `face_id -> (参考外向余向量, 是否是三角形封盖)`。
+#: `face_id -> (参考外向余向量, 是否是三角形封盖)`。封盖标记用来决定是否
+#: 乘 Duffy 因子 `(1-s)/2`（见上节）。
 _FACE_REF_COVECTOR: Dict[int, Tuple[np.ndarray, bool]] = {
     0: (np.array([0.0, 0.0, -1.0]), True),
     1: (np.array([0.0, 0.0, 1.0]), True),
@@ -384,40 +407,23 @@ def native_prism_face_adj_rows(order: int, face_id: int,
     已按 outward 定向），所以下游 `side_factor = 1.0` 的既有处理对原生
     棱柱面同样正确 —— 不需要再乘 `owner_side`。
 
+    两个三角形封盖的行里**已经乘好** Duffy 因子 `(1-s)/2`（见本节顶部
+    说明），所以调用方配平凡张量积求积权重即可 —— 与 native 四面体三角形
+    面同一套约定，下游不需要逐面编码查权重表。
+
     Args:
         order: 多项式阶数
         face_id: 0~4
         cell_nodes: `(6, 3)` 棱柱顶点，顺序同 `map_prism_to_physical`
     """
-    from .native_prism_basis import native_prism_exact_jacobian
+    from .basis import native_prism_exact_jacobian
 
     fp = native_prism_face_points(order, face_id)
     jac = native_prism_exact_jacobian(fp, cell_nodes)          # (n_fp,3,3)
     det = np.linalg.det(jac)
     adj = det[:, None, None] * np.linalg.inv(jac)              # (n_fp,3,3)
-    cov, _is_cap = _FACE_REF_COVECTOR[face_id]
-    return np.einsum("pmd,m->pd", adj, cov)
-
-
-def native_prism_face_ref_weights(order: int, face_id: int,
-                                  weights_1d: np.ndarray) -> np.ndarray:
-    """某个面每个通量点的**参考**求积权重，形状 `(n1d^2,)`。
-
-    乘上 `|adj_row|` 就是物理面积权重（`true_area_weight`），与坍缩路径
-    `compute_exact_face_normals_and_weights` 里 `mag * w_fp` 同一个组合。
-
-    三角形封盖多一个 Duffy 因子 `(1-s)/2`（见本节顶部说明）；三个侧四边形
-    是平凡张量积权重。
-    """
-    n1d = order + 1
-    w = np.asarray(weights_1d, dtype=np.float64)
-    if w.shape != (n1d,):
-        raise ValueError(
-            f"weights_1d 形状 {w.shape} 应为 (n1d={n1d},)")
-    w1, w2 = np.meshgrid(w, w, indexing="ij")
-    w_fp = (w1 * w2).ravel()
-    _cov, is_cap = _FACE_REF_COVECTOR[face_id]
-    if not is_cap:
-        return w_fp
-    s = native_prism_face_points(order, face_id)[:, 1]
-    return w_fp * (1.0 - s) / 2.0
+    cov, is_cap = _FACE_REF_COVECTOR[face_id]
+    rows = np.einsum("pmd,m->pd", adj, cov)
+    if is_cap:
+        rows = rows * ((1.0 - fp[:, 1]) / 2.0)[:, None]
+    return rows

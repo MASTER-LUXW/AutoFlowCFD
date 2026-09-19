@@ -9,7 +9,7 @@
 各写一份、未来不一致。
 
 **2026-09-18 起同时服务原生棱柱基**（`AFCFD_PRISM_BASIS=native`，见
-`prism_basis_mode.py`）。填充函数本身与单元类型无关（只是把矩阵某些轴补到
+`native_prism/mode.py`）。填充函数本身与单元类型无关（只是把矩阵某些轴补到
 全局宽度），原先名字里带 `tet` 纯属历史，已正名；真正与单元类型绑定的只有
 "真实自由度个数"，见 `real_sps_per_cell`。
 
@@ -138,12 +138,12 @@ def native_tet_n_real_sps(order: int) -> int:
 def native_prism_n_real_sps(order: int) -> int:
     """原生棱柱的**真实自由度**个数 `(p+1)^2 (p+2)/2`。
 
-    公式**读** `fr/native_prism_basis.py::native_prism_n_sps`，不在这里
+    公式**读** `fr/native_prism/basis.py::native_prism_n_sps`，不在这里
     再写一遍——同一语义只允许一个事实来源（自由度数同时决定节点生成、
     Vandermonde 尺寸、填充布局与这里的归约切片，任何一处与其它处不一致
     都会静默算错）。
     """
-    from .native_prism_basis import native_prism_n_sps
+    from .native_prism.basis import native_prism_n_sps
 
     return native_prism_n_sps(order)
 
@@ -163,7 +163,7 @@ def real_sps_per_cell(order: int) -> Tuple[int, int]:
     人工粘性尺度、GPU 局部 dt 全都读它，任何一处自己判断都会在切换基的
     时候漏改。
     """
-    from .prism_basis_mode import prism_basis_is_native
+    from .native_prism.mode import prism_basis_is_native
 
     n_prism_real = (native_prism_n_real_sps(order) if prism_basis_is_native()
                     else (order + 1) ** 3)

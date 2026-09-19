@@ -180,7 +180,7 @@ class TestProductionOrders:
             pytest.skip("AFCFD_OVERINT_ORDER_RULE 非默认 2x")
         oo_prism_exp, oo_tet_exp, n_fine_exp = self.EXPECTED[order]
         ops = generate_fr_operators(order)
-        assert ops.overint_order == oo_prism_exp, "棱柱阶数不应被本改动影响"
+        assert ops.overint_order_prism == oo_prism_exp, "棱柱阶数不应被本改动影响"
         assert ops.overint_order_tet == oo_tet_exp
         assert ops.overint_n_fine_tet == n_fine_exp
         assert ops.overint_D_fine_tet.shape == (n_fine_exp, n_fine_exp, 3)
@@ -215,7 +215,7 @@ class TestProductionOrders:
         assert resolve_tet_overintegration_order(3) == 6
         ops = generate_fr_operators(3)
         assert ops.overint_order_tet == 6
-        assert ops.overint_n_fine_tet == 84 > (ops.overint_order + 1) ** 3
+        assert ops.overint_n_fine_tet == 84 > (ops.overint_order_prism + 1) ** 3
 
 
 class TestLayoutInvariantHolds:
@@ -232,7 +232,7 @@ class TestLayoutInvariantHolds:
             pass
 
         ops = generate_fr_operators(order)
-        n_fine_prism = (ops.overint_order + 1) ** 3
+        n_fine_prism = (ops.overint_order_prism + 1) ** 3
         n_cells, n_prism = 7, 3
         mesh = _FakeMesh()
         mesh.n_cells = n_cells

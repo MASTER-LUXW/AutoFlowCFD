@@ -250,7 +250,7 @@ class TestContextContract:
             assert np.all(t_det[i] == det[5 + i, 0])
             assert np.all(t_inv[i] == inv[5 + i, 0])
 
-    def test_tet_fine_points_may_exceed_the_prism_layout_width(self, order=2):
+    def test_tet_fine_points_may_exceed_the_prism_layout_width(self):
         """四面体细点数**可以**超过棱柱布局宽度——那条约束已被移除。
 
         它曾经是个真实约束（度量靠"切前 n_fine_tet 列"），并且把 P3 的
@@ -258,6 +258,14 @@ class TestContextContract:
         `oo = 2*order` 处断崖式下降：P3 oo=5 是 3.37e-3、oo=6 是 4.80e-6。
         改成"第 0 列广播"后宽度不再相关。这条测试把**移除**钉住，避免有人
         因为"看起来越界"又把限制加回去。
+
+        用 **P3 的真实生产组合**来测（2026-09-19 改）：坍缩棱柱 oo=3 ->
+        64 个细点，native 四面体 oo=6 -> 84 个，天然就是 84 > 64。
+        此前这里是"把 `n_sps_per_cell_fine` 人为设成比四面体细点数还小
+        一格"的合成 mesh，那个组合在生产里不可能出现 —— 而棱柱段现在
+        也会校验"算子 n_fine == 布局宽度"（原生/坍缩两档下都是恒等式），
+        合成值直接撞上那道闸。用真实组合既保住了原意，又不再依赖一个
+        构造不出来的状态。
         """
         from types import SimpleNamespace
 
@@ -265,30 +273,72 @@ class TestContextContract:
             get_overintegration_context,
         )
 
+        order = 3
         ops = generate_fr_operators(order)
         n_fine_tet = ops.overint_D_fine_tet.shape[0]
-        narrow = n_fine_tet - 1          # 刻意比四面体真实细点数还小
+        n_fine_prism = ops.overint_D_fine_prism.shape[0]
+        assert n_fine_tet > n_fine_prism, (
+            f"P{order} 下四面体细点数 {n_fine_tet} 应当超过棱柱的 "
+            f"{n_fine_prism} —— 这条测试的前提就是这个不等式")
+
         n_cells, n_prism, n_tet = 4, 2, 2
-        det = np.arange(1.0, n_cells * narrow + 1.0).reshape(n_cells, narrow)
-        inv = np.tile(np.eye(3), (n_cells, narrow, 1, 1)) * det[:, :, None, None]
+        det = np.arange(
+            1.0, n_cells * n_fine_prism + 1.0).reshape(n_cells, n_fine_prism)
+        inv = (np.tile(np.eye(3), (n_cells, n_fine_prism, 1, 1))
+               * det[:, :, None, None])
         # 四面体段按真实行为填成逐单元常数
         det[n_prism:] = det[n_prism:, :1]
         inv[n_prism:] = inv[n_prism:, :1]
         mesh = SimpleNamespace(
             n_cells=n_cells, n_prism_cells=n_prism,
-            n_sps_per_cell_fine=narrow,
+            n_sps_per_cell_fine=n_fine_prism,
             jacobians_fine={"det_jacs": det.ravel(),
                             "inv_jacs": inv.reshape(-1, 3, 3)},
         )
         oi = get_overintegration_context(mesh, ops)
         assert oi is not None
         _, (_, _, t_nf, t_det, t_inv, *_) = oi["segs"]
-        assert t_nf == n_fine_tet > narrow
+        assert t_nf == n_fine_tet > n_fine_prism
         assert t_det.shape == (n_tet, n_fine_tet)
         assert t_inv.shape == (n_tet, n_fine_tet, 3, 3)
         for i in range(n_tet):
             assert np.all(t_det[i] == det[n_prism + i, 0])
             assert np.all(t_inv[i] == inv[n_prism + i, 0])
+
+    def test_prism_layout_width_mismatch_is_rejected(self):
+        """棱柱段的"算子 n_fine == 布局宽度"必须是**硬失败**。
+
+        两者在两档下都是恒等式（坍缩 `(oo+1)^3`、原生
+        `(oo+1)^2(oo+2)/2`，见 `fr/overintegration_order.prism_n_fine`）。
+        不相等只可能是算子与网格几何用了不同的 over_order 或不同的棱柱
+        基档 —— 那会静默切出一个"看起来合法"的错误度量数组，所以这里
+        必须报错而不是取其中一个。
+
+        （历史：这两处的一致性此前只靠两个文件各自的注释互相提醒"必须
+        逐字一致"，阶数公式在 `fr/operators.py` 与
+        `high_order_mesh_order.py` 里各写一遍。现在公式合并到
+        `overintegration_order.py` 唯一入口，这条是运行期的第二道闸。）
+        """
+        from types import SimpleNamespace
+
+        from autoflowcfd.core.fr_operators.volume_contract import (
+            get_overintegration_context,
+        )
+
+        ops = generate_fr_operators(2)
+        n_fine_prism = ops.overint_D_fine_prism.shape[0]
+        wrong = n_fine_prism - 1
+        n_cells = 4
+        det = np.ones((n_cells, wrong))
+        inv = np.tile(np.eye(3), (n_cells, wrong, 1, 1))
+        mesh = SimpleNamespace(
+            n_cells=n_cells, n_prism_cells=2,
+            n_sps_per_cell_fine=wrong,
+            jacobians_fine={"det_jacs": det.ravel(),
+                            "inv_jacs": inv.reshape(-1, 3, 3)},
+        )
+        with pytest.raises(ValueError, match="棱柱过积分细点数不一致"):
+            get_overintegration_context(mesh, ops)
 
 
 class TestAllConsumersUsePerSegmentMetric:

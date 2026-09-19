@@ -356,11 +356,28 @@ def get_overintegration_context(mesh, ops):
                  "overint_D_fine_tet", "overint_restrict_f2c_tet"):
         if getattr(ops, name, None) is None:
             return None
-    n_fine_prism = mesh.n_sps_per_cell_fine
+    # `n_fine_layout` 是 `jacobians_fine` 的**每单元布局宽度**（由棱柱
+    # 的过积分阶数与基档决定，见 `fr/overintegration_order.prism_n_fine`）。
+    n_fine_layout = mesh.n_sps_per_cell_fine
     n_cells = mesh.n_cells
     n_prism = mesh.n_prism_cells
-    det_all = mesh.jacobians_fine["det_jacs"].reshape(n_cells, n_fine_prism)
-    inv_all = mesh.jacobians_fine["inv_jacs"].reshape(n_cells, n_fine_prism, 3, 3)
+    det_all = mesh.jacobians_fine["det_jacs"].reshape(n_cells, n_fine_layout)
+    inv_all = mesh.jacobians_fine["inv_jacs"].reshape(n_cells, n_fine_layout, 3, 3)
+
+    # 棱柱段的 n_fine 与四面体段一样从**矩阵自身的形状**推导（矩阵才是
+    # 单一事实来源），再与布局宽度对账。坍缩档两者恒等（都是 `(oo+1)^3`）；
+    # 原生档两者也恒等（`prism_n_fine` 在原生下就返回真实细点数、不填充）
+    # —— 所以这条在两档下都是恒等式，不一致就是算子与网格几何的
+    # over_order 脱节（本项目此前靠两处注释维持一致，现在已合并到
+    # `fr/overintegration_order.py` 唯一入口，这里是运行期的第二道闸）。
+    n_fine_prism = int(ops.overint_D_fine_prism.shape[0])
+    if n_fine_prism != n_fine_layout:
+        raise ValueError(
+            f"棱柱过积分细点数不一致：算子 overint_D_fine_prism 是 "
+            f"{ops.overint_D_fine_prism.shape}（n_fine={n_fine_prism}），"
+            f"而 mesh.n_sps_per_cell_fine={n_fine_layout}——两者必须相同，"
+            f"说明算子与网格几何用了不同的 over_order 或不同的棱柱基档"
+        )
 
     # n_fine_tet 从**矩阵自身的形状**推导（`overint_D_fine_tet` 现在是
     # (n_fine_tet, n_fine_tet, 3)），不读 `ops.overint_n_fine_tet` 那个

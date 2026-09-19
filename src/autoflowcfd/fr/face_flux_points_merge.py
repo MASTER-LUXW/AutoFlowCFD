@@ -20,14 +20,18 @@ from autoflowcfd.fr.face_flux_points import (
     FaceFluxPointGeometry,
 )
 from autoflowcfd.fr.face_flux_points_data import (
-    _KernelFaceData, _PRISM_QUAD_CODES, _classify_half,
+    _KernelFaceData, _PRISM_QUAD_CODES, _classify_half, prism_quad_local_idx,
 )
 from autoflowcfd.fr.face_flux_points_exact_normal import (
     compute_exact_face_normals_and_weights,
 )
 from autoflowcfd.fr.face_flux_points_validation import validate_face_flux_point_residuals
 from autoflowcfd.grid.curved_mapping.curved_mapping import PRISM_CUBE_FACES
-from autoflowcfd.grid.connectivity.face_connectivity import CUBE_FACE_NAMES, FRFaceConnectivity
+from autoflowcfd.grid.connectivity.face_connectivity import (
+    CUBE_FACE_NAMES,
+    NATIVE_PRISM_FACE_CODE_RANGE,
+    FRFaceConnectivity,
+)
 
 # numba 并行 kernel（延迟导入避免启动时 numba 编译阻塞）
 _build_fp_newton_parallel = None
@@ -136,7 +140,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         mixed_bnd_face[bf] = True
         partner_arr[f_int] = bf
         cell_node_ids = mesh._fixed_prism_conn[key[0]]
-        quad_local_idx = PRISM_CUBE_FACES[CUBE_FACE_NAMES[key[1]]]
+        quad_local_idx = prism_quad_local_idx(key[1])
         half, is_std = _classify_half(
             cell_node_ids, quad_local_idx, face_conn.face_node_ids[f_int]
         )
@@ -194,7 +198,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
     node_coords = np.ascontiguousarray(mesh._node_coords.astype(np.float64))
     # 预计算 V_sps 逆矩阵（用于 kernel 内插值矩阵构建）
     from autoflowcfd.fr.face_flux_points import _get_v_sps_lu
-    from scipy.linalg import lu_solve
+    from scipy.linalg import lu_factor, lu_solve
     n_sps = n1d ** 3
     # 四面体 V_sps_inv
     lu_tet = _get_v_sps_lu("tet", n1d, sps_1d)
@@ -230,6 +234,48 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         native_mode_i = np.zeros(0, dtype=np.int32)
         native_mode_j = np.zeros(0, dtype=np.int32)
         native_mode_k = np.zeros(0, dtype=np.int32)
+
+    # 原生**棱柱**（编码 [10,15)）的 Vandermonde 逆与模态索引 —— 与上面
+    # 四面体那一段同一个"自动探测 + 零占位"原则：面编码里没出现原生棱柱面
+    # 时传零长度数组，kernel 内对应分支（判据 `code >= _NATIVE_PRISM_LO`）
+    # 永远不会被执行，既有行为逐位不变。
+    #
+    # `lu_factor(V.T)` 之后再 `.T` —— 与四面体那条**同一个约定**
+    # （`v_sps_inv = V^{-1}`，不是 `V^{-T}`）。这一点必须一致：搞反了不会
+    # 报错，只会让插值矩阵变成另一个矩阵（实测相对误差 5.44，而正确时是
+    # 1.0e-15）。
+    _pf_lo, _pf_hi = NATIVE_PRISM_FACE_CODE_RANGE
+    _oc = np.asarray(face_conn.owner_cube_face)
+    _nc = np.asarray(face_conn.neighbor_cube_face)
+    has_native_prism = bool(
+        np.any((_oc >= _pf_lo) & (_oc < _pf_hi))
+        or np.any((_nc >= _pf_lo) & (_nc < _pf_hi)))
+    if has_native_prism:
+        from autoflowcfd.fr.native_prism.basis import (
+            build_native_prism_nodes,
+            build_native_prism_vandermonde,
+            restricted_prism_modes,
+        )
+
+        _order_np = n1d - 1
+        _ref_np = build_native_prism_nodes(_order_np)
+        _V_np, _, _, _ = build_native_prism_vandermonde(_order_np, _ref_np)
+        _modes_np = restricted_prism_modes(_order_np)
+        _n_np = len(_modes_np)
+        if _V_np.shape != (_n_np, _n_np):
+            raise ValueError(
+                f"原生棱柱节点 Vandermonde 形状 {_V_np.shape} 应为方阵 "
+                f"({_n_np}, {_n_np}) —— 节点数与模态数理论上必须相等")
+        v_sps_inv_np = np.ascontiguousarray(
+            lu_solve(lu_factor(_V_np.T), np.eye(_n_np)).T)
+        np_mode_i = np.array([m[0] for m in _modes_np], dtype=np.int32)
+        np_mode_j = np.array([m[1] for m in _modes_np], dtype=np.int32)
+        np_mode_k = np.array([m[2] for m in _modes_np], dtype=np.int32)
+    else:
+        v_sps_inv_np = np.zeros((0, 0))
+        np_mode_i = np.zeros(0, dtype=np.int32)
+        np_mode_j = np.zeros(0, dtype=np.int32)
+        np_mode_k = np.zeros(0, dtype=np.int32)
     (
         _nb_fc, _nb_resid, _ow_fc, _ow_resid,
         _nb_interp, _ow_interp, _nb_cell_id, _ow_cell_id,
@@ -255,6 +301,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         v_sps_inv_prism,
         v_sps_inv_native,
         native_mode_i, native_mode_j, native_mode_k,
+        v_sps_inv_np, np_mode_i, np_mode_j, np_mode_k,
     )
     logger.info("Numba parallel kernel completed.")
 
@@ -438,7 +485,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
             group = sorted(owner_groups[key])
             primary_f = group[0]
             cell_node_ids = mesh._fixed_prism_conn[key[0]]
-            quad_local_idx = PRISM_CUBE_FACES[CUBE_FACE_NAMES[key[1]]]
+            quad_local_idx = prism_quad_local_idx(key[1])
             half, is_std = _classify_half(
                 cell_node_ids, quad_local_idx, face_conn.face_node_ids[primary_f]
             )
@@ -451,7 +498,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
             group = sorted(neighbor_groups[key])
             primary_f = group[0]
             cell_node_ids = mesh._fixed_prism_conn[key[0]]
-            quad_local_idx = PRISM_CUBE_FACES[CUBE_FACE_NAMES[key[1]]]
+            quad_local_idx = prism_quad_local_idx(key[1])
             half, is_std = _classify_half(
                 cell_node_ids, quad_local_idx, face_conn.face_node_ids[primary_f]
             )
@@ -512,6 +559,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
             _nb_fc, _ow_fc,
             v_sps_inv_tet, v_sps_inv_prism,
             v_sps_inv_native, native_mode_i, native_mode_j, native_mode_k,
+            v_sps_inv_np, np_mode_i, np_mode_j, np_mode_k,
             _nb_interp, _ow_interp,
             _nb_cell_id, _ow_cell_id,
             _nb_extra_mats_arr, _ow_extra_mats_arr,

@@ -26,10 +26,78 @@
 import numpy as np
 from numba import njit, prange
 
+from autoflowcfd.grid.connectivity.face_connectivity import (
+    NATIVE_PRISM_FACE_CODE_RANGE,
+    NATIVE_TET_FACE_CODE_RANGE,
+)
+
 
 # ======================================================================
 # 3×3 线性代数内联辅助函数
 # ======================================================================
+
+@njit(inline='always')
+def _native_prism_adj_row_at(cov0, cov1, cov2, duffy,
+                             r, s_, t, p0, p1, p2, p3, p4, p5):
+    """原生棱柱某个面在参考点 `(r,s_,t)` 处的 `adj_row`（未归一化的
+    "物理外法向 x 面积微元"），返回三个分量。
+
+    与 `fr/native_prism/face.py::native_prism_face_adj_rows` **同一个公式**
+    （那里是 numpy 批量版，这里是 numba 逐点版，本项目生产路径走的是
+    numba 这条，见 `face_flux_points_merge.py` 的调用点）：
+
+        adj_row_d = duffy * sum_m cov_m * adj(J)[m, d]
+
+    `J[d, m] = d(phys_d)/d(xi_m)`（与 `native_prism_exact_jacobian` 的
+    约定一致），`adj(J) = det(J) inv(J)`，`cov` 是该面的参考外向余向量，
+    `duffy` 是三角封盖的 `(1-s)/2`（侧四边形传 1.0）—— 因子乘在行里而
+    不是乘在求积权重里，理由与实测数据见 `native_prism/face.py` 里
+    `_FACE_REF_COVECTOR` 上方那段。
+
+    **全标量实现、不分配任何临时数组**：`prange` 体内的 `np.empty` 会让
+    numba 的并行数组分析尝试把分配提升出循环，实测在本 kernel 里直接
+    段错误（不是异常、没有任何输出）。既有的 `_adj3`/`_tet_jac_at` 走的是
+    坍缩分支那条已经编译通过的路径，不能据此推断新分支也安全。
+    """
+    l1 = -0.5 * (r + s_)
+    l2 = 0.5 * (1.0 + r)
+    l3 = 0.5 * (1.0 + s_)
+    hm = 0.5 * (1.0 - t)
+    hp = 0.5 * (1.0 + t)
+
+    # J[d, m]，逐分量展开
+    b0 = l1 * p0[0] + l2 * p1[0] + l3 * p2[0]
+    b1 = l1 * p0[1] + l2 * p1[1] + l3 * p2[1]
+    b2 = l1 * p0[2] + l2 * p1[2] + l3 * p2[2]
+    t0 = l1 * p3[0] + l2 * p4[0] + l3 * p5[0]
+    t1 = l1 * p3[1] + l2 * p4[1] + l3 * p5[1]
+    t2 = l1 * p3[2] + l2 * p4[2] + l3 * p5[2]
+
+    j00 = hm * 0.5 * (p1[0] - p0[0]) + hp * 0.5 * (p4[0] - p3[0])
+    j10 = hm * 0.5 * (p1[1] - p0[1]) + hp * 0.5 * (p4[1] - p3[1])
+    j20 = hm * 0.5 * (p1[2] - p0[2]) + hp * 0.5 * (p4[2] - p3[2])
+    j01 = hm * 0.5 * (p2[0] - p0[0]) + hp * 0.5 * (p5[0] - p3[0])
+    j11 = hm * 0.5 * (p2[1] - p0[1]) + hp * 0.5 * (p5[1] - p3[1])
+    j21 = hm * 0.5 * (p2[2] - p0[2]) + hp * 0.5 * (p5[2] - p3[2])
+    j02 = 0.5 * (t0 - b0)
+    j12 = 0.5 * (t1 - b1)
+    j22 = 0.5 * (t2 - b2)
+
+    # adj(J)[m, d]，与 `_adj3` 逐项同式
+    a00 = j11 * j22 - j12 * j21
+    a01 = j02 * j21 - j01 * j22
+    a02 = j01 * j12 - j02 * j11
+    a10 = j12 * j20 - j10 * j22
+    a11 = j00 * j22 - j02 * j20
+    a12 = j02 * j10 - j00 * j12
+    a20 = j10 * j21 - j11 * j20
+    a21 = j01 * j20 - j00 * j21
+    a22 = j00 * j11 - j01 * j10
+
+    return (duffy * (cov0 * a00 + cov1 * a10 + cov2 * a20),
+            duffy * (cov0 * a01 + cov1 * a11 + cov2 * a21),
+            duffy * (cov0 * a02 + cov1 * a12 + cov2 * a22))
+
 
 @njit(inline='always')
 def _det3(m):
@@ -252,6 +320,9 @@ def compute_exact_adj_rows_kernel(
     code_arr,
     n1d,
     sps_1d,
+    np_ref_pts_table,
+    np_cov,
+    np_duffy,
 ):
     """compute_exact_adj_rows 的 numba 并行 kernel。
 
@@ -284,19 +355,46 @@ def compute_exact_adj_rows_kernel(
 
         cell = cell_arr[f]
         code = code_arr[f]
-        is_native = code >= 6
 
-        if is_native:
-            # native 四面体真实面：直边常数 Jacobian（性质上不依赖参考
-            # 坐标），但面法向"原始向量"（未归一化）本身随采样点 (a,b)
-            # 变化（见 _native_tet_adj_row_at/_native_tet_adj_row_batched
-            # 文档——坍缩三角形采样引入的非线性，不是常数捷径能处理的）。
+        if code >= _NP_LO:
+            # 原生棱柱真实面（编码 [10,15)）：**判据必须是区间**——写成
+            # `code >= 6` 会把它们送进下面的四面体分支、按 `code - 6` 取到
+            # excluded_vertex 4~8，而那个函数只认 0~3，numba nopython 不做
+            # 边界检查，会读到未定义内存或静默给出完全错误的法向。
+            fid = code - _NP_LO
+            cov0 = np_cov[fid, 0]
+            cov1 = np_cov[fid, 1]
+            cov2 = np_cov[fid, 2]
+            q0 = node_coords[prism_conn[cell, 0]]
+            q1 = node_coords[prism_conn[cell, 1]]
+            q2 = node_coords[prism_conn[cell, 2]]
+            q3 = node_coords[prism_conn[cell, 3]]
+            q4 = node_coords[prism_conn[cell, 4]]
+            q5 = node_coords[prism_conn[cell, 5]]
+            for fp in range(n_fp):
+                r0, r1, r2 = _native_prism_adj_row_at(
+                    cov0, cov1, cov2, np_duffy[fid, fp],
+                    np_ref_pts_table[fid, fp, 0],
+                    np_ref_pts_table[fid, fp, 1],
+                    np_ref_pts_table[fid, fp, 2],
+                    q0, q1, q2, q3, q4, q5)
+                adj_row_out[f, fp, 0] = r0
+                adj_row_out[f, fp, 1] = r1
+                adj_row_out[f, fp, 2] = r2
+            continue
+
+        if code >= _NT_LO:
+            # native 四面体真实面（编码 [6,10)）：直边常数 Jacobian（性质上
+            # 不依赖参考坐标），但面法向"原始向量"（未归一化）本身随采样点
+            # (a,b) 变化（见 _native_tet_adj_row_at/_native_tet_adj_row_
+            # batched 文档——坍缩三角形采样引入的非线性，不是常数捷径能
+            # 处理的）。
             tc = cell - n_prism
             p0 = node_coords[tet_conn[tc, 0]]
             p1 = node_coords[tet_conn[tc, 1]]
             p2 = node_coords[tet_conn[tc, 2]]
             p3 = node_coords[tet_conn[tc, 3]]
-            ev = code - 6
+            ev = code - _NT_LO
             for fp in range(n_fp):
                 i = fp // n1d
                 j = fp % n1d
@@ -352,6 +450,42 @@ def compute_exact_adj_rows_kernel(
 # Python 封装：预计算参考坐标表 + 调用 kernel
 # ======================================================================
 
+#: 原生面编码区间（唯一事实来源在
+#: `grid/connectivity/face_connectivity.py`，这里做模块级常量以便 numba
+#: kernel 里用具名判据而不是 `>= 6` 这种字面量）。
+_NT_LO = NATIVE_TET_FACE_CODE_RANGE[0]
+_NP_LO = NATIVE_PRISM_FACE_CODE_RANGE[0]
+
+
+def precompute_native_prism_face_tables(order):
+    """预计算原生棱柱 5 个面的 `(参考点, 余向量, Duffy 因子)` 三张表。
+
+    Returns:
+        `(ref_pts (5,n_fp,3), cov (5,3), duffy (5,n_fp))`。三张表都从
+        `fr/native_prism/face.py` 里那份唯一定义派生（面点生成器与
+        `_FACE_REF_COVECTOR`），不在这里重抄公式。
+    """
+    from .native_prism.face import (
+        PRISM_FACE_IDS,
+        _FACE_REF_COVECTOR,
+        native_prism_face_points,
+    )
+
+    n_faces_np = len(PRISM_FACE_IDS)
+    n_fp = (order + 1) ** 2
+    ref_pts = np.zeros((n_faces_np, n_fp, 3), dtype=np.float64)
+    cov = np.zeros((n_faces_np, 3), dtype=np.float64)
+    duffy = np.ones((n_faces_np, n_fp), dtype=np.float64)
+    for fid in PRISM_FACE_IDS:
+        pts = native_prism_face_points(order, fid)
+        ref_pts[fid] = pts
+        c, is_cap = _FACE_REF_COVECTOR[fid]
+        cov[fid] = c
+        if is_cap:
+            duffy[fid] = (1.0 - pts[:, 1]) / 2.0
+    return ref_pts, cov, duffy
+
+
 def precompute_ref_pts_table(n1d, sps_1d):
     """预计算所有 (axis, side) 组合的参考坐标网格。
 
@@ -401,7 +535,30 @@ def compute_exact_adj_rows_fast(
     if code_arr is None:
         code_arr = np.full(n_faces, -1, dtype=np.int64)
 
+    # ===== 两张连接表必须**同一个**整数 dtype（真实段错误修复） =====
+    #
+    # kernel 里 `p0 = node_coords[prism_conn[cell, 0]]` 与
+    # `p0 = node_coords[tet_conn[tc, 0]]` 是同一个变量的 if/else 两支。
+    # 两张表的索引 dtype 不同时，`parallel=True` 下的 numba 会生成**直接
+    # 段错误**的代码（不是异常、没有任何 Python 栈，只有一串
+    # "Windows fatal exception: access violation"）。
+    #
+    # 生产里这个组合真实存在且**必然命中**：`face_flux_points_merge.py`
+    # 在 `mesh._fixed_prism_conn is None`（纯四面体网格）时传的兜底是
+    # `np.empty((0, 6), dtype=np.int64)`，而真实的 `_fixed_tet_conn` 是
+    # int32 —— 于是任何纯四面体网格在建面几何时段错误。实测：order 1/2/3
+    # 全部 exit 139（`tests/unit/test_exact_adj_rows_dtype_mix.py`）。
+    #
+    # 修在这里而不是去改那两处兜底的 dtype：本函数已经在对
+    # `code_arr`/`sps_1d` 做同样的归一化，调用方传什么 dtype 都不该让
+    # kernel 崩。只改兜底的话，将来任何一个 int64 连接表的网格会从另一
+    # 边再踩一次同一个坑。
+    prism_conn = np.ascontiguousarray(prism_conn, dtype=np.int64)
+    tet_conn = np.ascontiguousarray(tet_conn, dtype=np.int64)
+
     ref_pts_table = precompute_ref_pts_table(n1d, sps_1d)
+    np_ref_pts_table, np_cov, np_duffy = precompute_native_prism_face_tables(
+        n1d - 1)
 
     compute_exact_adj_rows_kernel(
         n_faces, n_fp, n_prism,
@@ -410,5 +567,6 @@ def compute_exact_adj_rows_fast(
         valid_mask, ref_pts_table, adj_row_out,
         np.asarray(code_arr, dtype=np.int64),
         n1d, np.asarray(sps_1d, dtype=np.float64),
+        np_ref_pts_table, np_cov, np_duffy,
     )
     return adj_row_out

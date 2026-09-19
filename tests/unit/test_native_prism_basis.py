@@ -3,7 +3,7 @@
 ## 它要解决什么
 
 棱柱至今用**坍缩坐标基**，实测三条后果（完整数据见
-`fr/native_triangle_basis.py` 模块文档）：
+`fr/native_prism/triangle_basis.py` 模块文档）：
 
   1. 微分矩阵元素量级随阶数爆炸（`max|D_3d_prism|` P1 2.05 -> P4 33929）；
   2. 自由流保持性只有 ~1e-9，且实测严格等于 `eps * max|D| / det(J)`
@@ -31,14 +31,14 @@ import numpy as np
 import pytest
 
 from autoflowcfd.fr.collapsed_basis import build_collapsed_diff_matrices
-from autoflowcfd.fr.native_prism_basis import (
+from autoflowcfd.fr.native_prism.basis import (
     build_native_prism_nodes,
     build_native_prism_operators,
     build_native_prism_vandermonde,
     native_prism_n_sps,
     restricted_prism_modes,
 )
-from autoflowcfd.fr.native_triangle_basis import (
+from autoflowcfd.fr.native_prism.triangle_basis import (
     build_native_tri_vandermonde,
     restricted_tri_modes,
     warp_blend_nodes_2d,

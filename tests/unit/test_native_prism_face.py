@@ -16,20 +16,20 @@
 坍缩棱柱基的 `max|D|` 随阶数爆炸（P1 2.05 -> P3 560.1），后果是自由流
 保持性只有 ~1e-9、以及只在被三角化的两个参考轴上长出的伪横流（P1 饱和、
 P2 无界增长导致发散，1152 单元干净网格第 75 步）。完整数据见
-`fr/native_triangle_basis.py` 模块文档。
+`fr/native_prism/triangle_basis.py` 模块文档。
 """
 
 import numpy as np
 import pytest
 
-from autoflowcfd.fr.native_prism_basis import (
+from autoflowcfd.fr.native_prism.basis import (
     build_native_prism_nodes,
     build_native_prism_vandermonde,
     native_prism_exact_jacobian,
     native_prism_n_sps,
     restricted_prism_modes,
 )
-from autoflowcfd.fr.native_prism_face import (
+from autoflowcfd.fr.native_prism.face import (
     PRISM_FACE_IDS,
     build_all_native_prism_face_operators,
     build_native_prism_boundary_extrap,
@@ -277,7 +277,7 @@ class TestGeometryJacobian:
 
     def test_matches_finite_difference_of_the_map(self):
         """解析雅可比必须与几何映射的数值微分一致（防公式抄错）。"""
-        from autoflowcfd.fr.native_prism_basis import (
+        from autoflowcfd.fr.native_prism.basis import (
             map_native_prism_to_physical,
         )
 
@@ -337,7 +337,7 @@ class TestCubeFaceMapping:
         return w
 
     def test_each_native_face_depends_only_on_its_cube_faces_vertices(self):
-        from autoflowcfd.fr.native_prism_face import (
+        from autoflowcfd.fr.native_prism.face import (
             NATIVE_PRISM_FACE_TO_CUBE_FACE,
             cube_face_to_native_prism_face,
         )
@@ -368,7 +368,7 @@ class TestCubeFaceMapping:
             assert np.allclose(w.sum(axis=1), 1.0, atol=1e-14)
 
     def test_mapping_is_a_bijection_onto_the_five_real_faces(self):
-        from autoflowcfd.fr.native_prism_face import (
+        from autoflowcfd.fr.native_prism.face import (
             NATIVE_PRISM_FACE_TO_CUBE_FACE,
         )
         from autoflowcfd.grid.curved_mapping.curved_mapping import (
@@ -385,7 +385,7 @@ class TestCubeFaceMapping:
 
         静默返回某个 face_id 会让一条不存在的面参与界面项组装。
         """
-        from autoflowcfd.fr.native_prism_face import (
+        from autoflowcfd.fr.native_prism.face import (
             cube_face_to_native_prism_face,
         )
 
@@ -470,7 +470,7 @@ class TestRealSpsCountsFollowTheActivePrismBasis:
         静默退回默认值会让 A/B 对照失去意义 —— 本项目已经吃过一次
         "固定 CFL 请求被静默丢弃、两条不同配置给出逐位相同轨迹"的亏。
         """
-        from autoflowcfd.fr.prism_basis_mode import resolve_prism_basis_mode
+        from autoflowcfd.fr.native_prism.mode import resolve_prism_basis_mode
 
         monkeypatch.setenv("AFCFD_PRISM_BASIS", "Native ")
         assert resolve_prism_basis_mode() == "native", "应当容忍大小写与空格"
@@ -557,7 +557,7 @@ class TestOperatorsAndGeometrySwitchTogether:
 
     def test_bad_face_key_is_rejected_not_silently_mapped(self, monkeypatch):
         """按 `(axis, side)` 取原生棱柱面算子只允许走对应表。"""
-        from autoflowcfd.fr.native_prism_face import (
+        from autoflowcfd.fr.native_prism.face import (
             cube_face_to_native_prism_face,
         )
 
@@ -654,23 +654,67 @@ class TestNativePrismGeometry:
             np.repeat(coords[:, :1], n_sps - n_real, axis=1))
         assert np.all(np.isfinite(det)) and np.all(np.abs(det) > 0.0)
 
-    def test_solver_path_is_hard_guarded_under_native(self, monkeypatch):
-        """原生档下建带面的网格必须**硬失败**，不能跑出静默错误的残差。
+    @pytest.mark.parametrize("order", [1, 2])
+    def test_solver_path_builds_end_to_end_under_native(self, monkeypatch,
+                                                        order):
+        """原生档下建带面的网格必须**成功**，并且确实走的是原生那一套。
 
-        残差 kernel 判断"是不是 native 面"的判据是 `code >= 6`（原本等价于
-        "是 native 四面体面"），原生棱柱面的 10~14 号编码会被它当成四面体
-        面、按 `code-6` 取到 4~8 行 —— 那些数组只有 4 行，而 numba
-        nopython **不做边界检查**。
+        这条曾经是一条"必须硬失败"的护栏测试（2026-09-18）：当时残差
+        kernel 判断"是不是 native 面"的判据是 `code >= 6`，原生棱柱面的
+        10~14 号编码会被当成四面体面、按 `code-6` 取到 4~8 行，而那些
+        数组只有 4 行、numba nopython 不做边界检查。
+
+        护栏已于 2026-09-19 移除 —— 原生算子改成**堆叠**成一个数组
+        （行 0~3 四面体、行 4~8 棱柱，索引恒为 `code - 6`），于是既有的
+        `code >= 6` 写法对两类原生面原样成立。这里改成正向判据，并额外
+        钉住三件事，任何一件退化都说明分派又断了：
+
+          1. 面编码里真的出现了原生棱柱编码 [10,15)（而不是悄悄退回坍缩）；
+          2. `n_sps_per_cell_fine` 是**原生**细点数 `(oo+1)^2(oo+2)/2`
+             而不是坍缩的 `(oo+1)^3`（过积分接线生效的标志）；
+          3. 六个 `overint_*` 算子全部非 None，且棱柱段的 `n_fine` 与上面
+             那个布局宽度相等 —— 缺一个会让整条过积分链（**含四面体段**）
+             静默退回 coarse 路径。
         """
         import sys
 
         sys.path.insert(0, "tests/validation")
         from _channel_mesh import build_channel_mesh_prism
 
+        from autoflowcfd.core.fr_operators.volume_contract import (
+            get_overintegration_context,
+        )
+        from autoflowcfd.fr.overintegration_order import (
+            prism_n_fine, resolve_prism_overintegration_order,
+        )
+        from autoflowcfd.grid.connectivity.face_connectivity import (
+            NATIVE_PRISM_FACE_CODE_RANGE,
+        )
+
         monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
-        with pytest.raises(NotImplementedError, match="尚未适配"):
-            build_channel_mesh_prism(1, nx=2, ny=2, nz=2,
-                                     Lx=0.05, H=0.01, Lz=0.004)
+        mesh = build_channel_mesh_prism(order, nx=2, ny=2, nz=2,
+                                        Lx=0.05, H=0.01, Lz=0.004)
+
+        lo, hi = NATIVE_PRISM_FACE_CODE_RANGE
+        codes = np.concatenate([
+            np.asarray(mesh.face_connectivity.owner_cube_face),
+            np.asarray(mesh.face_connectivity.neighbor_cube_face)])
+        assert np.any((codes >= lo) & (codes < hi)), (
+            "原生档下面编码里没有任何原生棱柱面 —— 说明 "
+            "with_native_face_codes 的 prism_native 分派没生效")
+
+        oo = resolve_prism_overintegration_order(order)
+        expect_fine = prism_n_fine(oo)
+        assert expect_fine == (oo + 1) ** 2 * (oo + 2) // 2
+        assert expect_fine < (oo + 1) ** 3, "原生细点数应当少于坍缩张量积"
+        assert mesh.n_sps_per_cell_fine == expect_fine
+
+        ctx = get_overintegration_context(mesh, mesh.operators)
+        assert ctx is not None, (
+            "六个 overint_* 算子有缺失 —— 过积分会整体（含四面体段）"
+            "静默退回 coarse 路径")
+        prism_seg = ctx["segs"][0]
+        assert prism_seg[2] == expect_fine
 
 
 class TestTwoPrismMapsAreTheSameGeometry:
@@ -697,7 +741,7 @@ class TestTwoPrismMapsAreTheSameGeometry:
         return rng.uniform(-1.0, 1.0, size=(n, 3))
 
     def test_maps_agree_bit_for_bit(self):
-        from autoflowcfd.fr.native_prism_basis import (
+        from autoflowcfd.fr.native_prism.basis import (
             map_native_prism_to_physical,
         )
         from autoflowcfd.grid.curved_mapping.curved_mapping import (
@@ -722,7 +766,7 @@ class TestTwoPrismMapsAreTheSameGeometry:
         `(dr/da)(ds/db)(dt/dc) = (1-b)/2`。这条同时交叉验证两个解析雅可比
         实现（任一处抄错公式都会让比值偏离）。
         """
-        from autoflowcfd.fr.native_prism_basis import (
+        from autoflowcfd.fr.native_prism.basis import (
             native_prism_exact_jacobian,
         )
         from autoflowcfd.grid.curved_mapping.curved_mapping import (
@@ -756,7 +800,7 @@ class TestTwoPrismMapsAreTheSameGeometry:
         `TestNativePrismGeometry::test_right_prism_metric_is_constant_
         through_production_geometry` 单独覆盖。
         """
-        from autoflowcfd.fr.native_prism_basis import (
+        from autoflowcfd.fr.native_prism.basis import (
             native_prism_exact_jacobian,
         )
         from autoflowcfd.grid.curved_mapping.curved_mapping import (
@@ -815,21 +859,34 @@ class TestFaceAdjRowsAndWeights:
     ])
 
     @staticmethod
-    def _accumulate(order, nodes):
-        from autoflowcfd.fr.native_prism_face import (
-            native_prism_face_adj_rows,
-            native_prism_face_ref_weights,
-        )
+    def _plain_weights(order):
+        """**平凡**张量积求积权重 —— 全部 15 种面编码共用的那一套。
+
+        原生棱柱三角封盖的 Duffy 因子 `(1-s)/2` 现在乘在 `adj_row` 里
+        （2026-09-19，与 native 四面体三角形面统一约定，见
+        `native_prism/face.py` 里 `_FACE_REF_COVECTOR` 上方那段实测
+        依据），所以这里配的就是下游 `FlatFaceGeometry.ref_area_weight`
+        那一份，不再有逐面的参考权重函数。
+        """
         from autoflowcfd.fr.quadrature_points import gauss_legendre
 
         _pts, w1d = gauss_legendre(order + 1)
+        w1, w2 = np.meshgrid(w1d, w1d, indexing="ij")
+        return (w1 * w2).ravel()
+
+    @classmethod
+    def _accumulate(cls, order, nodes):
+        from autoflowcfd.fr.native_prism.face import (
+            native_prism_face_adj_rows,
+        )
+
+        w = cls._plain_weights(order)
         total = np.zeros(3)
         area = 0.0
         for f in PRISM_FACE_IDS:
             adj = native_prism_face_adj_rows(order, f, nodes)
-            wr = native_prism_face_ref_weights(order, f, w1d)
-            total += (adj * wr[:, None]).sum(axis=0)
-            area += float((np.linalg.norm(adj, axis=1) * wr).sum())
+            total += (adj * w[:, None]).sum(axis=0)
+            area += float((np.linalg.norm(adj, axis=1) * w).sum())
         return total, area
 
     @pytest.mark.parametrize("order", [1, 2, 3])
@@ -862,7 +919,7 @@ class TestFaceAdjRowsAndWeights:
         """反转任一个面的余向量必须让恒等式**失败** —— 否则这条判据
         对符号错误没有区分力。
         """
-        from autoflowcfd.fr import native_prism_face as npf
+        from autoflowcfd.fr.native_prism import face as npf
 
         for f in PRISM_FACE_IDS:
             orig = npf._FACE_REF_COVECTOR[f]
@@ -876,28 +933,57 @@ class TestFaceAdjRowsAndWeights:
                 f"判据对符号错误没有区分力")
 
     @pytest.mark.parametrize("order", [1, 2])
-    def test_dropping_the_duffy_factor_breaks_the_identity(self, order):
-        """去掉三角形封盖的 Duffy 因子必须让恒等式失败。"""
-        from autoflowcfd.fr.native_prism_face import (
-            native_prism_face_adj_rows,
-        )
-        from autoflowcfd.fr.quadrature_points import gauss_legendre
+    def test_dropping_the_duffy_factor_breaks_the_identity(self, order,
+                                                           monkeypatch):
+        """去掉三角形封盖的 Duffy 因子必须让恒等式失败。
 
-        _pts, w1d = gauss_legendre(order + 1)
-        w1, w2 = np.meshgrid(w1d, w1d, indexing="ij")
-        w_plain = (w1 * w2).ravel()
-        total = np.zeros(3)
-        area = 0.0
-        for f in PRISM_FACE_IDS:
-            adj = native_prism_face_adj_rows(order, f, self._IRREGULAR)
-            total += (adj * w_plain[:, None]).sum(axis=0)
-            area += float((np.linalg.norm(adj, axis=1) * w_plain).sum())
+        因子现在乘在 `adj_row` 里（由 `_FACE_REF_COVECTOR` 的 `is_cap`
+        标记控制），所以"去掉"的做法是把两个封盖的标记改成 False。
+        """
+        from autoflowcfd.fr.native_prism import face as npf
+
+        for f in (0, 1):
+            cov, _is_cap = npf._FACE_REF_COVECTOR[f]
+            monkeypatch.setitem(npf._FACE_REF_COVECTOR, f, (cov, False))
+        total, area = self._accumulate(order, self._IRREGULAR)
         assert float(np.linalg.norm(total)) / area > 1e-3, (
             "漏掉 Duffy 因子后恒等式仍然通过，判据没有区分力")
 
+    @pytest.mark.parametrize("order", [1, 2, 3])
+    def test_plain_weight_gives_the_exact_area_like_native_tet(self, order):
+        """**约定的钉子**：平凡张量积权重直接给出精确面积。
+
+        这就是"Duffy 因子必须在 adj 行里"的判据。native 四面体三角形面
+        本来就满足它（`_native_tet_adj_row_batched` 的行里含着因子，实测
+        四个面的 `sum_p w_p |adj_row_p|` 到 1e-15 等于精确三角面积），
+        棱柱如果把因子放在权重里，这里的单位直棱柱底/顶面就会算成
+        1.000000 而不是 0.500000 —— 恰好差 2 倍。
+
+        下游只有**一套** `(n_fp,)` 的参考权重（`FlatFaceGeometry.
+        ref_area_weight`、`compute_exact_face_normals_and_weights` 的
+        `true_area_weight = mag * w_fp`、GPU 侧同名字段），对全部 15 种
+        面编码共用，所以这条不成立就等于面积权重错。
+        """
+        from autoflowcfd.fr.native_prism.face import (
+            native_prism_face_adj_rows,
+        )
+
+        unit = np.array([
+            [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0], [1.0, 0.0, 1.0], [0.0, 1.0, 1.0],
+        ])
+        expect = {0: 0.5, 1: 0.5, 2: np.sqrt(2.0), 3: 1.0, 4: 1.0}
+        w = self._plain_weights(order)
+        for f in PRISM_FACE_IDS:
+            adj = native_prism_face_adj_rows(order, f, unit)
+            got = float((np.linalg.norm(adj, axis=1) * w).sum())
+            assert abs(got / expect[f] - 1.0) < 1e-12, (
+                f"order={order} face {f}: 平凡权重给出面积 {got:.6f}，"
+                f"精确值 {expect[f]:.6f}")
+
     def test_adj_rows_point_outward(self):
         """右棱柱上逐面核对法向朝外（与手算方向比对）。"""
-        from autoflowcfd.fr.native_prism_face import (
+        from autoflowcfd.fr.native_prism.face import (
             native_prism_face_adj_rows,
         )
 
@@ -925,11 +1011,11 @@ class TestFaceAdjRowsAndWeights:
         闭合面恒等式对全局翻转没有区分力（全翻之后求和仍然为零），所以
         这条单独钉住。生产路径由 `fix_prism_orientation` 保证定向。
         """
-        from autoflowcfd.fr.native_prism_basis import (
+        from autoflowcfd.fr.native_prism.basis import (
             build_native_prism_nodes,
             native_prism_exact_jacobian,
         )
-        from autoflowcfd.fr.native_prism_face import (
+        from autoflowcfd.fr.native_prism.face import (
             native_prism_face_adj_rows,
         )
 

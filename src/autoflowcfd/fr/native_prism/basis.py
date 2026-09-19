@@ -49,13 +49,13 @@ from typing import List, Tuple
 
 import numpy as np
 
-from .collapsed_basis import grad_jacobi_polynomial, jacobi_polynomial
-from .native_triangle_basis import (
+from ..collapsed_basis import grad_jacobi_polynomial, jacobi_polynomial
+from .triangle_basis import (
     eval_tri_modes,
     restricted_tri_modes,
     warp_blend_nodes_2d,
 )
-from .quadrature_points import gauss_legendre
+from ..quadrature_points import gauss_legendre
 
 
 def native_prism_n_sps(order: int) -> int:
@@ -153,7 +153,7 @@ def build_native_prism_operators(order: int) -> Tuple[np.ndarray, np.ndarray]:
     """
     from scipy.linalg import lu_factor, lu_solve
 
-    from .diff_matrix_consistency import enforce_constant_annihilation
+    from ..diff_matrix_consistency import enforce_constant_annihilation
 
     ref_rst = build_native_prism_nodes(order)
     V, Vr, Vs, Vt = build_native_prism_vandermonde(order, ref_rst)
@@ -299,7 +299,7 @@ def build_native_prism_modal_filter(order: int) -> np.ndarray:
     if order == 0:
         return np.eye(1)
 
-    from .modal_filter import assemble_modal_filter
+    from ..modal_filter import assemble_modal_filter
 
     ref = build_native_prism_nodes(order)
     V, _, _, _ = build_native_prism_vandermonde(order, ref)

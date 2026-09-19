@@ -55,6 +55,10 @@ from typing import Optional, Tuple
 
 import numpy as np
 
+from .overintegration_order import (
+    resolve_native_overintegration_max_order,
+    resolve_native_overintegration_order,
+)
 from .native_simplex_basis import (
     build_native_tet_operators,
     restricted_tet_modes,
@@ -156,40 +160,18 @@ def resolve_tet_overintegration_max_order() -> int:
     """读 `AFCFD_TET_OVERINT_MAX_ORDER`，默认
     `NATIVE_TET_OVERINTEGRATION_MAX_ORDER`。
 
-    非法取值直接报错、不静默回退——静默回退会让一次拼写错误伪装成默认
-    行为，把 A/B 的两条运行悄悄变成同一档（同一原则见
-    `fr_operators/kernels.py::resolve_ausm_precond_mode`）。
+    实现在 `fr/overintegration_order.py`（与原生棱柱共用同一份
+    env 解析，见该模块文档"为什么单独一个模块"）；这里只是保留四面体
+    自己的公开名与默认值。
     """
-    import os
-
-    raw = os.environ.get("AFCFD_TET_OVERINT_MAX_ORDER", "").strip()
-    if not raw:
-        return NATIVE_TET_OVERINTEGRATION_MAX_ORDER
-    try:
-        v = int(raw)
-    except ValueError:
-        raise ValueError(
-            f"AFCFD_TET_OVERINT_MAX_ORDER={raw!r} 不是整数"
-        ) from None
-    if not (1 <= v <= 8):
-        raise ValueError(
-            f"AFCFD_TET_OVERINT_MAX_ORDER={v} 超出 [1, 8]。上界 8 不是"
-            f"数值极限而是常识护栏：n_fine 按 (oo+1)(oo+2)(oo+3)/6 增长，"
-            f"oo=8 已是 165 个细点、体积项收缩 O(n_fine^2)"
-        )
-    return v
+    return resolve_native_overintegration_max_order(
+        "AFCFD_TET_OVERINT_MAX_ORDER", NATIVE_TET_OVERINTEGRATION_MAX_ORDER)
 
 
 def resolve_tet_overintegration_order(
     order: int, n_fine_layout: Optional[int] = None
 ) -> int:
-    """定四面体实际用的 over_order。
-
-    两条约束：
-      1. 去混叠经验法则 `rule * order`（与棱柱同一个规则，见
-         `collapsed_basis.resolve_overintegration_order_rule`）；
-      2. 四面体自己的上限（`AFCFD_TET_OVERINT_MAX_ORDER`，默认 6 =
-         不额外设限）。
+    """定四面体实际用的 over_order（`rule*order` 与自身上限取 min）。
 
     Args:
         order: 求解阶数 P
@@ -203,8 +185,6 @@ def resolve_tet_overintegration_order(
     Returns:
         实际 over_order（>= order；等于 order 时过积分退化为恒等）。
     """
-    from .collapsed_basis import resolve_overintegration_order_rule
-
-    oo = min(resolve_overintegration_order_rule() * order,
-             resolve_tet_overintegration_max_order())
-    return max(oo, order)
+    return resolve_native_overintegration_order(
+        order, "AFCFD_TET_OVERINT_MAX_ORDER",
+        NATIVE_TET_OVERINTEGRATION_MAX_ORDER)

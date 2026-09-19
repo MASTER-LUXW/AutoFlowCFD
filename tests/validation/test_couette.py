@@ -126,7 +126,7 @@ def test_couette_prism_preserves_the_exactly_representable_shear(order, tol):
     `blasius_spanwise_w_open`：伪横流在 P1 上饱和、在 P2 上无界增长；
     病根是棱柱仍用坍缩坐标基）。它由
     `test_couette_prism_residual_trend`（标记为 xfail）跟踪，修复路径是
-    原生棱柱基迁移（`fr/native_prism_basis.py` / `native_prism_face.py`，
+    原生棱柱基迁移（`fr/native_prism/basis.py` / `native_prism/face.py`，
     算子层与几何层已完成、残差 kernel 面分派待适配）。
 
     所以本测试**只参数化 P1**：它是当前真正成立、且必须防回归的那一档。

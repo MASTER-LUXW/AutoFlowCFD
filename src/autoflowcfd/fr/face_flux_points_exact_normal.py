@@ -295,7 +295,7 @@ def compute_exact_adj_rows(
             faces_here = np.nonzero(is_native & (code_arr == 10 + fid))[0]
             if len(faces_here) == 0:
                 continue
-            from .native_prism_face import native_prism_face_adj_rows
+            from .native_prism.face import native_prism_face_adj_rows
 
             order = n1d - 1
             cells_here = cell_arr[faces_here]

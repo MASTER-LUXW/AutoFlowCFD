@@ -78,6 +78,11 @@ def _run_kernel_single_face(
         np.array([True]), np.array([True]),
         v_sps_inv_tet, v_sps_inv_prism,
         v_sps_inv_native, native_mode_i, native_mode_j, native_mode_k,
+        # 原生**棱柱**的零占位（本测试只造原生四面体面，编码 [10,15)
+        # 不出现，kernel 内对应分支永不执行 —— 与生产里
+        # `face_flux_points_merge.py` 的 `has_native_prism=False` 同一路径）
+        np.zeros((0, 0)), np.zeros(0, dtype=np.int32),
+        np.zeros(0, dtype=np.int32), np.zeros(0, dtype=np.int32),
     )
     return result, n1d, sps_1d
 

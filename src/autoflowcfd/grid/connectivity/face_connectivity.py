@@ -53,7 +53,7 @@ CUBE_FACE_CODES: Dict[str, int] = {
     "a=-1": 0, "a=+1": 1, "b=-1": 2, "b=+1": 3, "c=-1": 4, "c=+1": 5,
     "tet_native_v0": 6, "tet_native_v1": 7, "tet_native_v2": 8, "tet_native_v3": 9,
     # 原生棱柱的 5 个面（2026-09-18）。编码含义见
-    # `fr/native_prism_face.py` 模块文档的表：0/1 是两个三角形封盖、
+    # `fr/native_prism/face.py` 模块文档的表：0/1 是两个三角形封盖、
     # 2/3/4 是三个侧四边形。坍缩参考立方体的 `b=+1` 面是退化面（坍缩成
     # 一条侧棱），原生棱柱里没有对应的面，所以只有 5 个。
     "prism_native_f0": 10, "prism_native_f1": 11, "prism_native_f2": 12,
@@ -96,11 +96,11 @@ def _build_collapsed_to_native_prism_code() -> Dict[int, int]:
     """坍缩棱柱的 5 个立方体面编码 -> 原生棱柱面编码。
 
     **不手写这张表**：`(axis, side) -> face_id` 的对应关系只有一个事实来源
-    （`fr/native_prism_face.py::cube_face_to_native_prism_face`，那边有
+    （`fr/native_prism/face.py::cube_face_to_native_prism_face`，那边有
     形状无关的几何验证），这里只是把它换成"编码 -> 编码"的形式。手抄一份
     会在两处不一致时静默地对某个面用错外插/提升矩阵。
     """
-    from autoflowcfd.fr.native_prism_face import (
+    from autoflowcfd.fr.native_prism.face import (
         cube_face_to_native_prism_face,
     )
 
@@ -221,7 +221,7 @@ class FRFaceConnectivity:
         Args:
             n_prism_cells: 棱柱单元数（"棱柱在前"排列下的分界）
             prism_native: 是否同时把棱柱面翻译成原生编码。由调用方从
-                `fr/prism_basis_mode.py::prism_basis_is_native()` 取 ——
+                `fr/native_prism/mode.py::prism_basis_is_native()` 取 ——
                 **必须与 `FROperators`/`build_order_geometry` 读到的是
                 同一个值**，三者不一致会让面算子、体积算子、几何度量
                 分属不同的基，那不会报错、只会给出错的残差。

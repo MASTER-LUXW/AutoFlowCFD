@@ -568,7 +568,7 @@ def suppress_residual_outliers(
             f"n_prism={n_prism} 超出 [0, n_cells={n_cells}] —— 它是"
             f'"棱柱在前"排列下的分界，越界说明调用方传错了参数，'
             f"而按错的分界统计真实槽位会静默把残差判成异常清零")
-    from autoflowcfd.fr.prism_basis_mode import prism_basis_is_native
+    from autoflowcfd.fr.native_prism.mode import prism_basis_is_native
 
     if n_prism == n_cells and not prism_basis_is_native():
         # 没有四面体、且棱柱走坍缩基 -> 全网格没有任何填充槽位，全部

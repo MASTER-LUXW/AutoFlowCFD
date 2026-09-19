@@ -208,32 +208,25 @@ class HighOrderMesh:
             # 与 `FROperators`/`build_order_geometry` 读到的是**同一个**
             # 开关值，三者不一致会让面算子、体积算子、几何度量分属不同
             # 的基（不会报错、只会给出错的残差）。
-            from autoflowcfd.fr.prism_basis_mode import prism_basis_is_native
+            from autoflowcfd.fr.native_prism.mode import prism_basis_is_native
 
             prism_native = prism_basis_is_native()
-            # ===== 原生棱柱面的硬护栏（2026-09-18）=====
-            #
-            # 原生棱柱的算子层与几何层已完成并验证，但**残差 kernel 的面
-            # 分派还没改**：下游判断"是不是 native 面"的判据是 `code >= 6`，
-            # 那个字面量原本等价于"是 native 四面体面"；原生棱柱面用 10~14
-            # 号编码，会被那些判据当成 native 四面体面、按
-            # `excluded_vertex = code - 6` 取到 4~8 —— 而那些数组只有 4 行，
-            # **numba nopython 不做边界检查，会读到未定义内存**。
-            #
-            # 护栏放在这里（产生这些编码的**唯一**生产调用点）而不是放在
-            # 下游：下游第一个碰到它的是 `_CF_AXIS[code]` 的越界 IndexError，
-            # 那是个崩溃而不是静默错误，但报错完全看不出真实原因。
-            if prism_native:
-                raise NotImplementedError(
-                    "AFCFD_PRISM_BASIS=native：棱柱原生基的算子层与几何层"
-                    "已完成并验证（体积微分算子、面通量点、体积->面外插、"
-                    "DG 提升、模态滤波、FROperators 接线、sps_coords/"
-                    "jacobians/度量恒定性、真实自由度归约、面编码翻译表）；"
-                    "尚未适配的是残差 kernel 的面分派（外插/提升按 face_id "
-                    "取原生算子）、面通量点几何（法向/面积权重/邻居插值"
-                    "矩阵）、过积分、GPU/MPI。在它们改完之前这条路径会把"
-                    "棱柱面当成 native 四面体面、按 code-6 越界取矩阵，"
-                    "所以这里硬失败而不是让它跑出看不出异常的错残差。")
+            # 原生棱柱面（编码 [10,15)）的硬护栏已移除（2026-09-19）：
+            # 它当时挡住的四项已全部完成 ——
+            #   1. 残差 kernel 的面分派：原生算子改为**堆叠**成一个数组
+            #      （行 0~3 四面体、行 4~8 棱柱，索引恒为 `code - 6`），
+            #      于是全部既有的 `code >= 6` / `native[code-6]` 写法对两类
+            #      原生面原样成立，没有新增平行分支（见
+            #      `core/fr_operators/face_kernels.py` 那段说明）；
+            #   2. 面通量点几何：邻居插值矩阵走
+            #      `interp_matrix_from_cube_coords_nb` 共用入口；adj 行与
+            #      面积权重两条实现（numpy 与生产用的 numba）都补齐并交叉
+            #      验证到 4e-16，参考空间闭合面恒等式 1e-16；
+            #   3. 过积分：`fr/native_prism/overintegration.py` +
+            #      `fr/overintegration_order.py` 的跨档唯一入口；
+            #   4. GPU/MPI：两者都只消费 `FlatFaceGeometry` 的堆叠数组与
+            #      `mesh.n_sps_per_cell_fine` 布局宽度，随上面三项自动覆盖，
+            #      并各加了一道"算子 n_fine 与布局宽度必须相等"的运行期闸。
             self.face_connectivity = self.face_connectivity.with_native_face_codes(
                 n_prisms, prism_native=prism_native)
 
