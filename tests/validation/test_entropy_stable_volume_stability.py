@@ -46,17 +46,38 @@ def test_tgv_stable_and_still_dissipative_with_entropy_stable_volume():
 
     ke0 = _kinetic_energy(solver)
     ke_history = [ke0]
+    dt_history = []
     for i in range(N_STEPS):
         dt_this = float(solver._compute_local_time_step()[0, 0])
+        dt_history.append(dt_this)
         solver.step(dt_this)
         assert np.all(np.isfinite(solver.state.U)), f"solution diverged (NaN/Inf) at global step {i}"
         ke_history.append(_kinetic_energy(solver))
 
+    # 判据换成解析的（2026-09-19）：原判据是 `0.3 < KE/KE0 < 0.9`，一个
+    # **校准值**，其基线 0.678 来自两个已不成立的前提（`FILTER_MODE=legacy`
+    # 的人工耗散、P2 四面体残差被机制3 整体清零；两条见 `test_tgv.py`
+    # 里那段说明）。entropy-stable 体积项改的是无粘通量的混叠处理、不改
+    # 粘性耗散物理，所以正确的判据是"与解析耗散率同量级、且与关闭时接近"。
+    # 实测：启用后 K/K0 = 0.98919695，关闭时 0.98919717，相对差 2.3e-7
+    # —— 光滑场上混叠本来就极小，这个量级差正是预期。
+    from tests.validation.test_tgv import (
+        RHO_INF as _RHO, _analytic_tgv_dissipation,
+    )
+
+    eps_ana, k_ana = _analytic_tgv_dissipation()
+    ke_base = ke_history[1]
+    t_total = sum(dt_history[1:])
+    expect_drop = (_RHO * eps_ana / k_ana) * t_total
+    actual_drop = 1.0 - ke_history[-1] / ke_base
     ke_ratio = ke_history[-1] / ke0
-    # 关闭时实测 KE/KE0≈0.678（见 test_tgv.py 模块文档）；entropy-stable
-    # 体积项改的是无粘通量的混叠处理，不直接改变粘性耗散物理，预期
-    # 衰减比例与关闭时接近，留足安全边际防止真正的行为回归。
-    assert 0.3 < ke_ratio < 0.9, f"unexpected KE ratio with entropy-stable volume: {ke_ratio:.4f}"
+    assert actual_drop > 0.0, (
+        f"启用 entropy-stable 体积项后动能净增长 {-actual_drop * 100:+.3f}%"
+        f" —— 那个构造的设计目的之一就是不产能")
+    assert 0.1 < actual_drop / expect_drop < 3.0, (
+        f"净衰减 {actual_drop * 100:.3f}% 与解析耗散率给出的 "
+        f"{expect_drop * 100:.3f}% 相差 {actual_drop / expect_drop:.2f} 倍"
+        f"（允许 0.1~3 倍）；KE/KE0={ke_ratio:.6f}")
 
 
 def test_entropy_stable_volume_stays_off_by_default():

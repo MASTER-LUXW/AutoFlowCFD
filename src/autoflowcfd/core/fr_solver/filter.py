@@ -439,6 +439,16 @@ def resolve_filter_mode(backend: str) -> str:
     explicit = _raw is not None and _raw.strip() != ""
     mode = (_raw.lower() if explicit else _MATRIX_MODE.lower())
 
+    # 后端名**无条件**校验（2026-09-19）：它是代码级标识，四条真实调用点
+    # 传的都是固定字符串，拼错只可能是 bug。此前这条校验寄生在下面那个
+    # `mode == "sensor"` 判据里，于是默认值从 `sensor` 改成 `off` 之后
+    # 拼错的后端名会**静默放行** —— 正是本项目一贯不接受的那类静默行为。
+    if backend not in _SENSOR_MODE_SUPPORTED_BACKENDS:
+        raise NotImplementedError(
+            f"未知后端标识 {backend!r}；已知的四条是 "
+            f"{list(_SENSOR_MODE_SUPPORTED_BACKENDS)}。后端名是代码级标识，"
+            f"拼错只可能是 bug，不静默放行。")
+
     if mode == "sensor" and backend not in _SENSOR_MODE_SUPPORTED_BACKENDS:
         # 无论显式请求还是默认值，一律报错。
         #
@@ -467,6 +477,7 @@ def build_sensor_gated_filter_func_arrays(
     sensor: str = "persson",
     owner_cell=None, neighbor_cell=None, is_boundary=None,
     freestream=None, halo_extend=None, bnd_tables=None,
+    row_is_prism_extended=None,
 ) -> Callable[[np.ndarray], np.ndarray]:
     """传感器门控模态滤波的**后端无关**实现（只吃数组，不吃 solver）。
 
@@ -517,6 +528,16 @@ def build_sensor_gated_filter_func_arrays(
             惰性的理由、两张表各自的含义、以及"不给它贴壁单元会被结构性
             误判、壁面剪应力被压掉 14 倍"的实测，全部见那边与
             `bounds_sensor.compute_bounds_violation_mask` 的同名参数。
+        row_is_prism_extended: 可选 (n_total,) 布尔 —— **扩展场每一行**
+            是否是棱柱单元，供 BJ 判据只在**真实**自由度槽位上统计单元
+            极值/均值。不给时按 `cell_is_prism`/`n_prism` 推（只在没有
+            `halo_extend` 时够用）。
+
+            为什么必需：原生基的零填充槽位残差恒为零、解**冻结在初值**，
+            而真实槽位在演化 —— 实测 TGV（P2 四面体）30 步后填充值已越出
+            真实槽位区间 14% 区间宽。不排除它们就是在冻结的馊值上统计。
+            完整说明见 `bounds_sensor.compute_bounds_violation_mask` 的
+            `row_is_prism` 参数文档。
         halo_extend: 可选回调 `(n_cells, n_sps, n_vars) -> (n_total,
             n_sps, n_vars)`，把本 rank 的场扩展成含 halo 的场。**分区
             边界上的 BJ 包络必须读到 halo 单元的均值**，否则同一个算例
@@ -601,6 +622,37 @@ def build_sensor_gated_filter_func_arrays(
     prism_idx_all = xp.flatnonzero(cip)
     tet_idx_all = xp.flatnonzero(~cip)
 
+    # 真实自由度槽位（见 `row_is_prism_extended` 文档）。两类单元各自的
+    # 真实槽位数来自 `real_sps_per_cell` —— "哪些槽位是真的"的唯一判据
+    # 来源，不在这里重算公式。
+    from autoflowcfd.fr.native_padding import real_sps_per_cell
+
+    # 零填充布局**只在** SP 轴等于全局统一宽度 `(order+1)^3` 时存在 ——
+    # 这是构造上的事实，不是兜底：宽度不等于它的数组（例如只关心门控
+    # 逻辑的合成布局）根本没有填充槽位可言。
+    if n_sps == (order + 1) ** 3:
+        _n_real_prism, _n_real_tet = real_sps_per_cell(order)
+    else:
+        _n_real_prism = _n_real_tet = n_sps
+
+    if _n_real_prism == _n_real_tet:
+        # 两类单元真实槽位数相同 -> 行类型与统计无关，不需要行掩码
+        # （纯坍缩棱柱网格、或上面那种合成布局）。
+        _row_is_prism = None
+    elif row_is_prism_extended is not None:
+        _row_is_prism = xp.asarray(row_is_prism_extended, dtype=bool)
+    elif halo_extend is None:
+        # 单机：掩码场的行数就是 n_cells，`cip` 正好覆盖
+        _row_is_prism = cip
+    else:
+        # 分布式且调用方没给扩展版 -> 硬失败。静默退回"全槽位统计"会让
+        # halo 行在冻结的填充值上参与包络，而那在日志里完全看不出来。
+        raise ValueError(
+            "给了 halo_extend（分布式掩码在扩展场上算）却没给 "
+            "row_is_prism_extended —— 扩展场的 halo 行也要知道自己有多少"
+            "真实槽位，否则 BJ 包络会读到冻结的零填充值。"
+            "见 `core/fr_solver/filter.py::build_distributed_bounds_conn`。")
+
     # 惰性求值与缓存都在 `make_bj_boundary_tables` 里（见那边文档）；
     # 这里只在"直接传了二元组"时补一个同形状的取值器，让下游只有一条
     # 取值路径。
@@ -630,7 +682,11 @@ def build_sensor_gated_filter_func_arrays(
                 xp.ascontiguousarray(field[:, :, :5]),
                 owner_cell, neighbor_cell, is_boundary,
                 ref_scales=_reference_scales(freestream, 5),
-                bnd_dirichlet=bd, bnd_mirror_normal=bmn)[:n_cells]
+                bnd_dirichlet=bd, bnd_mirror_normal=bmn,
+                row_is_prism=_row_is_prism,
+                n_real_prism=_n_real_prism if _row_is_prism is not None else None,
+                n_real_tet=_n_real_tet if _row_is_prism is not None else None,
+                )[:n_cells]
         if not bool(xp.any(troubled)):
             return U_flat
         if xp is np:
@@ -769,6 +825,21 @@ def build_distributed_bounds_conn(dist_fc, n_total_cells, get_halo,
                 "静默发生。")
         return halo.exchange(ascontiguous(U_local_3d))
 
+    # 扩展场每一行是否是棱柱（BJ 判据只在真实槽位上统计，见
+    # `build_sensor_gated_filter_func_arrays` 的 `row_is_prism_extended`）。
+    # `compact_cell_type` 处在"棱柱在前"的**紧凑**排列，而掩码场处在
+    # halo 交换的**原生**排列 —— 用 `perm` 换回去（`array_native[perm]
+    # == array_permuted`，所以 `native[perm[k]] = permuted[k]`）。
+    cct = getattr(dist_fc, "compact_cell_type", None)
+    if cct is None:
+        raise RuntimeError(
+            "sensor+bounds 需要 dist_flat_face.compact_cell_type 才能知道"
+            "扩展场每一行有多少真实自由度槽位（原生基的零填充槽位冻结在"
+            "初值，不排除它们就是在馊值上统计单元极值）")
+    cct = np.asarray(cct)
+    row_is_prism_native = np.empty(n_total, dtype=bool)
+    row_is_prism_native[perm] = (cct == 0)
+
     # `true_normal` 是单位外法向、与 dist_fc 同一（local 面）索引空间，
     # 逐通量点形状由 `make_bj_boundary_tables` 归约成逐面。
     nrm = getattr(dist_fc, "true_normal", None)
@@ -777,6 +848,7 @@ def build_distributed_bounds_conn(dist_fc, n_total_cells, get_halo,
                 is_boundary=to_device(bnd),
                 freestream=freestream,
                 halo_extend=halo_extend,
+                row_is_prism_extended=to_device(row_is_prism_native),
                 bnd_tables=make_bj_boundary_tables(
                     get_provider, int(bnd.size),
                     None if nrm is None else np.asarray(nrm),

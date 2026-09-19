@@ -197,20 +197,35 @@ class TestFilterNeverAmplifiesInTheRightNorm:
             f"实测 {expected}")
 
 
-class TestDefaultModeIsBoundedDamping:
-    """默认档（`sensor`）的 native 四面体矩阵：**有界衰减，不是投影**。
+class TestSensorModeIsBoundedDamping:
+    """**`sensor`/`mild` 档**的 native 四面体矩阵：有界衰减，不是投影。
 
-    2026-09-18 改动，完整推导与 Blasius 实测见
-    `fr/modal_filter.py::filter_sigma`。判据方向与上面那几类刻意相反：
-    这里要求矩阵**满秩**且**非幂等**，因为"只要传感器还在报就持续慢慢
-    耗散"正是设计意图；而 L2 不增（不放大）这条对两档都必须成立。
+    2026-09-18 引入这种矩阵，完整推导见 `fr/modal_filter.py::filter_sigma`。
+    判据方向与上面那几类刻意相反：这里要求矩阵**满秩**且**非幂等**，因为
+    "只要传感器还在报就持续慢慢耗散"是那一档的设计意图；而 L2 不增
+    （不放大）这条对两档都必须成立。
+
+    **不再叫"默认档"（2026-09-19）**：默认值已改成 `off`（恒等滤波），
+    依据是修掉原生四面体路径两个重大缺陷之后用有解析解的算例重新判定 ——
+    `sensor` 在 Blasius 上与 `off` 逐位相同（实质无操作），但在 TGV 上
+    因 BJ 判据 100% 标记而退化成全局施加，450 次累积出非物理的能量增长
+    （+5.14%）。完整依据见 `fr/modal_filter.py` 里"默认值 2026-09-19 改为
+    off"那一节。本类保留是因为 `sensor`/`mild` 仍是合法档，其矩阵契约
+    必须继续被钉住。
     """
+
+    @pytest.fixture(autouse=True)
+    def _sensor_mode(self):
+        """本类**显式**在 `sensor` 档下运行（默认档已是 `off`=恒等）。"""
+        reload_filter_modules(AFCFD_FILTER_MODE="sensor")
+        yield
+        restore_default_filter_modules()
 
     @pytest.mark.parametrize("order", [1, 2, 3])
     def test_matrix_is_full_rank(self, order):
         F = build_native_tet_modal_filter(order)
         assert int(np.linalg.matrix_rank(F, 1e-10)) == F.shape[0], (
-            f"order={order}: 默认档矩阵不满秩——投影型会丢掉一整阶，"
+            f"order={order}: sensor 档矩阵不满秩——投影型会丢掉一整阶，"
             f"而实测那会把壁面剪应力压掉 2.3 倍")
 
     @pytest.mark.parametrize("order", [1, 2, 3])

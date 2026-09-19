@@ -241,25 +241,57 @@ class TestFilterIsIdempotentProjection:
             rows[(nm, int(order))] = (float(idem), int(rank))
         return rows
 
-    @pytest.mark.parametrize("mode", ["project", "sensor"])
-    def test_idempotent_at_all_orders(self, mode):
-        rows = self._run(mode)
+    def test_project_is_idempotent_at_all_orders(self):
+        """`project` 档必须幂等：门控每个 RK stage 施加一次，非幂等会随
+        步数累积、把被标记单元一路削到常数。"""
+        rows = self._run("project")
         for (nm, order), (idem, _rank) in rows.items():
             assert idem < 1e-12, (
-                f"{mode} 档 {nm} P{order} 不幂等：|F@F-F| = {idem:.3e}。"
-                f"门控每个 RK stage 施加一次，非幂等会随步数累积、"
-                f"把被标记单元一路削到常数"
-            )
+                f"project 档 {nm} P{order} 不幂等：|F@F-F| = {idem:.3e}")
 
-    @pytest.mark.parametrize("mode", ["project", "sensor"])
-    def test_rank_equals_next_lower_order_dimension(self, mode):
+    def test_project_rank_equals_next_lower_order_dimension(self):
         """秩必须恰好等于低一阶的维数（棱柱 order^3）——"恰好削掉最高阶"。"""
-        rows = self._run(mode)
+        rows = self._run("project")
         for order in (1, 2, 3):
-            idem, rank = rows[("filter_prism", order)]
+            _idem, rank = rows[("filter_prism", order)]
             assert rank == order ** 3, (
-                f"{mode} 档 P{order} 棱柱滤波秩 {rank} != 低一阶维数 {order**3}"
-            )
+                f"project 档 P{order} 棱柱滤波秩 {rank} != "
+                f"低一阶维数 {order ** 3}")
+
+    def test_sensor_is_bounded_damping_not_projection_and_why_that_matters(self):
+        """`sensor` 档**刻意不是**投影，而是顶模态 0.99 的有界衰减 ——
+        并且这条设计有已实测的代价，一起钉在这里。
+
+        ## 两难（2026-09-19 用两个有精确解的算例量清）
+
+        * 幂等投影（`project`）在 **P1** 上等于把被标记单元**拍平成 P0**
+          （P1 的顶模态就是全部非常数内容）：Blasius 平板的壁面剪应力
+          实测塌 **-87.69%**（cf 中位偏差），不可用；
+        * mild 型有界衰减（`sensor`，2026-09-18 起）非幂等，每 stage 施加
+          一次会累积：P2 四面体 TGV 上 BJ 判据对那个**欠分辨光滑场 100%
+          标记**，于是退化成"全局施加"，450 次之后动能**净增长 +5.14%**
+          —— 非物理（滤波只可能耗散）。而同一算例 `off` 单调衰减、
+          `dK/dt` 是解析耗散率的 0.31~0.54 倍。
+        * `sensor` 在 Blasius 上与 `off` **逐位相同**（cf 中位都是 +9.52%）
+          —— 也就是说它在那个算例上实质无操作。
+
+        所以两种动作各自破坏一个物理量，默认值因此在 2026-09-19 改成
+        `off`（完整依据见 `fr/modal_filter.py` 里"默认值 2026-09-19 改为
+        off"那一节）。`sensor`/`project` 都保留为合法档，本测试把各自的
+        矩阵契约钉住，避免将来有人以为 `sensor` 是投影型。
+        """
+        rows = self._run("sensor")
+        for (nm, order), (idem, rank) in rows.items():
+            assert idem > 1e-6, (
+                f"sensor 档 {nm} P{order} 变成了幂等（|F@F-F| = {idem:.3e}）"
+                f"—— 若这是刻意改动，请同时更新本测试与 `fr/modal_filter.py`"
+                f"里那节依据，并重新在 Blasius（cf）与 TGV（动能）两个算例"
+                f"上判定")
+        for order in (1, 2, 3):
+            _idem, rank = rows[("filter_prism", order)]
+            assert rank == (order + 1) ** 3, (
+                f"sensor 档 P{order} 棱柱滤波秩 {rank} != 满秩 "
+                f"{(order + 1) ** 3} —— 有界衰减不该丢秩")
 
     def test_legacy_is_not_idempotent_at_p2_p3(self):
         """反向对照：`legacy` 档在 P2/P3 上确实不幂等。

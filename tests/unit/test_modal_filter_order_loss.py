@@ -152,26 +152,38 @@ class TestSwitchableModesDoNotLoseOrder:
             assert got == pytest.approx(float(want), rel=1e-12), (
                 f"请求 sigma_top={want}，实得 {got}")
 
-    def test_default_mode_is_sensor(self):
-        """默认 `sensor`（2026-09-17 从 `legacy` 改）。
+    def test_default_mode_is_off(self):
+        """默认 `off`（2026-09-19 从 `sensor` 改）。
 
-        依据（P1 实测，平板边界层算例，同一初场同一 CFL）：
+        ## 为什么此前那轮标定整体失效
 
-            legacy  176.2 ms/step  res 7.9426e+04
-            project 156.9 ms/step  res 7.9426e+04  <- 与 legacy 逐位相同
-            off     179.7 ms/step  res 1.6658e+05
-            sensor+persson 154.3  res 1.6658e+05   <- 与 off 逐位相同
-            sensor+bounds  183.1  res 7.7280e+04   <- 残差最低，+3.9%
+        2026-09-19 在已上线的原生四面体路径上查出并修掉两个重大缺陷
+        （见 `core/fr_operators/face_kernels.py::FlatFaceGeometry.
+        ref_area_weight` 与 `core/fr_operators/troubled_cell.py::
+        _outlier_ref_and_flag_kernel` 的文档）：DG 提升的界面项多乘了一个
+        `|adj_row| ~ h^2`（上风耗散被系统性压制），以及 P2/P3 的四面体
+        残差被机制3 **整体清零**（单元完全不演化）。此前"必须靠滤波才
+        稳定"的印象是在那个前提下形成的。
 
-        `legacy == project` 在 P1 上成立是因为 P1 的顶模态就是全部非常数
-        内容，两档都把它清零、都让 P1 退化成 P0。`sensor+bounds` 在等熵涡
-        精确解上保住收敛阶 2.16/2.18（设计阶 2）。完整依据见
-        `fr/modal_filter.py` 里 `_FILTER_MODE` 上方那节。
+        ## 修完之后用有解析解的算例重新判定
+
+            档       Blasius cf 中位      TGV 动能（解析耗散率判据）
+            off      +9.52%               通过
+            sensor   +9.52%（与 off 逐位相同）  失败：能量净增长 +5.14%
+            project  -87.69%              通过
+            legacy   --                   失败：过耗散 7.6 倍
+
+        `sensor` 在 Blasius 上与 `off` **逐位相同**（它实质上什么都没做），
+        但在 TGV 上 BJ 判据对欠分辨光滑场 100% 标记、退化成"全局每 stage
+        施加 mild 非幂等衰减"，450 次累积出非物理的能量增长。
+        `project` 在 P1 上等于把被标记单元拍平成 P0，壁面剪应力塌 88%。
+
+        完整依据见 `fr/modal_filter.py` 里"默认值 2026-09-19 改为 off"那节。
         """
         mf, ops_mod = _reload_with_env(AFCFD_FILTER_MODE=None)
-        assert mf.FILTER_MODE == "sensor"
+        assert mf.FILTER_MODE == "off"
 
-    def test_default_mode_matrix_is_bounded_damping_not_projection(self):
+    def test_sensor_mode_matrix_is_bounded_damping_not_projection(self):
         """**2026-09-18 更正**：`sensor` 的矩阵是**有界衰减**，不是投影。
 
         此前这里断言"sensor 的矩阵与 project 相同：严格投影，P1 的秩仍是
@@ -187,7 +199,7 @@ class TestSwitchableModesDoNotLoseOrder:
         判据：矩阵**满秩**（不丢任何模态）、顶模态 sigma 恰好等于
         `AFCFD_FILTER_SIGMA_TOP`、常数模态严格为 1。
         """
-        mf, ops_mod = _reload_with_env(AFCFD_FILTER_MODE=None)
+        mf, ops_mod = _reload_with_env(AFCFD_FILTER_MODE="sensor")
         F1 = _prism_filter(ops_mod, 1)
         assert int(np.linalg.matrix_rank(F1, 1e-10)) == F1.shape[0], (
             "sensor 档的矩阵必须满秩——投影型会丢掉一整阶")
@@ -197,7 +209,7 @@ class TestSwitchableModesDoNotLoseOrder:
             f"AFCFD_FILTER_SIGMA_TOP=0.99")
         assert float(mf.filter_sigma(np.array(0.0))) == 1.0, "常数模态必须严格保留"
 
-    def test_default_mode_intermediate_modes_are_essentially_untouched(self):
+    def test_sensor_mode_intermediate_modes_are_essentially_untouched(self):
         """有界衰减必须**只动顶模态**。
 
         这是"非幂等没关系"那条论证的前提：`mild` 的 alpha 下
@@ -207,7 +219,7 @@ class TestSwitchableModesDoNotLoseOrder:
         默认 alpha 变大到动了中间模态，这条会失败，届时必须重新评估
         "门控 + 非幂等算子"的正当性而不是放宽本判据。
         """
-        mf, _ = _reload_with_env(AFCFD_FILTER_MODE=None)
+        mf, _ = _reload_with_env(AFCFD_FILTER_MODE="sensor")
         for etas in ([0.0, 0.5], [0.0, 1 / 3, 2 / 3]):
             sig = np.asarray(mf.filter_sigma(np.array(etas)))
             assert np.all(sig > 1.0 - 1e-3), (
@@ -293,17 +305,18 @@ class TestSensorModeIsNotSilentlyIgnored:
             else:
                 os.environ["AFCFD_FILTER_MODE"] = old
 
-    def test_default_is_sensor_where_wired_and_project_elsewhere(self):
-        """默认值（2026-09-17 起 `sensor`）的**逐后端**解析。
+    def test_default_resolves_to_off_on_every_backend(self):
+        """默认值（2026-09-19 起 `off`）的**逐后端**解析。
 
-        2026-09-18 起四条后端全部接线，所以默认值在每一条上都解析成
-        `sensor`；未知后端名报错（见 `test_unknown_backend_name_raises`）。
+        `off` 不需要任何后端接线（它是恒等滤波、`build_filter_func` 直接
+        返回 None），所以四条后端都必须解析成 `off`；未知后端名报错
+        （见 `test_unknown_backend_name_raises`）。
         """
         from autoflowcfd.core.fr_solver.filter import resolve_filter_mode
         old = os.environ.pop("AFCFD_FILTER_MODE", None)
         try:
             for b in _ALL_FILTER_BACKENDS:
-                assert resolve_filter_mode(b) == "sensor", b
+                assert resolve_filter_mode(b) == "off", b
         finally:
             if old is not None:
                 os.environ["AFCFD_FILTER_MODE"] = old
@@ -341,7 +354,11 @@ class TestSensorModeIsNotSilentlyIgnored:
         try:
             for b in _ALL_FILTER_BACKENDS:
                 assert resolve_filter_mode(b) == "sensor", b
-            with _pytest.raises(NotImplementedError, match="尚未在后端"):
+            # 未知后端名现在被**无条件**的后端校验先拦住（2026-09-19：
+            # 那条校验此前寄生在 `mode == "sensor"` 判据里，默认值改成
+            # `off` 之后就会静默放行，所以提到了前面）。两种情形都必须
+            # 报 NotImplementedError，只是先触发的那条变了。
+            with _pytest.raises(NotImplementedError, match="未知后端标识"):
                 resolve_filter_mode("gpu-rocm")
         finally:
             if old is None:
@@ -475,8 +492,11 @@ class TestIdentityFilterIsShortCircuited:
         from autoflowcfd.core.fr_solver.turbulence import (
             _filter_matrices_are_identity,
         )
-        _, ops_mod = _reload_with_env(
-            AFCFD_FILTER_MODE=(None if mode == "legacy" else mode))
+        # 两档都**显式**传（此前 legacy 那一支传 None、靠"默认值就是
+        # legacy"，那个假设在 2026-09-17 默认改成 sensor 时就已过时、
+        # 只因 sensor 也非恒等而侥幸通过；2026-09-19 默认改成 off 之后
+        # 就直接失败了）。
+        _, ops_mod = _reload_with_env(AFCFD_FILTER_MODE=mode)
         ops = ops_mod.generate_fr_operators(1)
         assert _filter_matrices_are_identity(ops) is expected_identity
 

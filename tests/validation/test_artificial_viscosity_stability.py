@@ -28,7 +28,10 @@ import numpy as np
 
 from tests.validation._channel_mesh import build_face_exact_ghost_provider, build_channel_mesh_prism
 from tests.validation.test_couette import _build_couette_solver
-from tests.validation.test_tgv import N_STEPS, _build_tgv_solver, _kinetic_energy, _set_tgv_ic
+from tests.validation.test_tgv import (
+    N_STEPS, RHO_INF, _analytic_tgv_dissipation, _build_tgv_solver,
+    _kinetic_energy, _set_tgv_ic,
+)
 
 from autoflowcfd.core.fr_solver import FRSolver
 from autoflowcfd.core.time_integration import TimeIntegrationScheme
@@ -60,9 +63,28 @@ def test_couette_stable_from_wrong_ic_with_artificial_viscosity():
 def test_tgv_stable_and_still_dissipative_with_artificial_viscosity():
     """复用 test_tgv.py 的真实 fixture（含针对 TGV 特定 MU 的 monkeypatch
     与动态 CFL 步长），启用人工粘性后：(a) 150 步全程数值稳定；(b) 动能
-    仍然呈现真实的粘性衰减签名（不要求与关闭时的衰减比例完全一致——
-    人工粘性额外耗散一些能量是预期行为，只要求量级合理、仍然衰减而不是
-    异常增长或几乎不变）。
+    衰减仍与**解析耗散率**同量级、且不增长。
+
+    ## 判据换过一次（2026-09-19）
+
+    原判据是 `0.05 < KE/KE0 < 0.75`，一个**校准值**，而它的前提是
+    "启用人工粘性后会额外耗散、比值应当更小"。这个前提在**光滑**场上是
+    错的：人工粘性的传感器（Persson-Peraire 探守恒密度）在光滑解上掩码
+    为空，所以它**正确地什么都不做** —— 实测启用 `alpha=1.0` 之后
+    `K/K0 = 0.98919717`，与基线**逐位相同**（差 0.000e+00）。
+
+    那个区间此前能通过，是因为基线本身当时是 0.678，而那个 0.678 来自
+    两个已经不成立的前提（`FILTER_MODE=legacy` 的人工耗散、以及 P2 四面体
+    残差被机制3 整体清零 —— 两条见 `test_tgv.py` 里那段说明）。
+
+    所以本测试现在断言三件**物理必须**的事：
+      1. 全程有限（这是"stable"的本义，也是本测试最初的目的）；
+      2. 动能不增长；
+      3. 净衰减与解析耗散率同量级（人工粘性只能额外耗散，所以上限放宽）。
+    并显式钉住"光滑场上它是无操作"这条设计行为 —— 那是可验证的事实，
+    不是遗憾。人工粘性真正生效的场景由
+    `test_couette_stable_from_wrong_ic_with_artificial_viscosity`（错误
+    初场、有真实间断）与单元测试覆盖。
     """
     solver, mesh = _build_tgv_solver()
     _set_tgv_ic(solver, mesh)
@@ -71,18 +93,42 @@ def test_tgv_stable_and_still_dissipative_with_artificial_viscosity():
 
     ke0 = _kinetic_energy(solver)
     ke_history = [ke0]
+    dt_history = []
     for i in range(N_STEPS):
         dt_this = float(solver._compute_local_time_step()[0, 0])
+        dt_history.append(dt_this)
         solver.step(dt_this)
         assert np.all(np.isfinite(solver.state.U)), f"solution diverged (NaN/Inf) at global step {i}"
         ke_history.append(_kinetic_energy(solver))
 
+    # 解析判据（见本函数文档）：与 test_tgv.py 同一套，基准取 step 1 以
+    # 排除初场在 SPs 上的一次性离散适应。
+    eps_ana, k_ana = _analytic_tgv_dissipation()
+    ke_base = ke_history[1]
+    t_total = sum(dt_history[1:])
+    expect_drop = (RHO_INF * eps_ana / k_ana) * t_total
+    actual_drop = 1.0 - ke_history[-1] / ke_base
+    assert actual_drop > 0.0, (
+        f"启用人工粘性后动能净增长 {-actual_drop * 100:+.3f}% —— 人工粘性"
+        f"只可能耗散能量，增长意味着传感器/耗散方向有 bug")
+    assert 0.1 < actual_drop / expect_drop < 10.0, (
+        f"净衰减 {actual_drop * 100:.3f}% 与解析耗散率给出的 "
+        f"{expect_drop * 100:.3f}% 相差 {actual_drop / expect_drop:.2f} 倍"
+        f"（允许 0.1~10 倍；上限比 test_tgv 宽，因为人工粘性可以额外耗散）")
+
+    # **光滑场上它必须是无操作**（传感器掩码为空）：这是设计行为，
+    # 实测与基线逐位相同。钉住它，将来若哪天在光滑场上开始耗散能量，
+    # 说明传感器误触发了。
+    solver_ref, mesh_ref = _build_tgv_solver()
+    _set_tgv_ic(solver_ref, mesh_ref)
+    ke0_ref = _kinetic_energy(solver_ref)
+    for _ in range(N_STEPS):
+        solver_ref.step(float(solver_ref._compute_local_time_step()[0, 0]))
+    ratio_ref = _kinetic_energy(solver_ref) / ke0_ref
     ke_ratio = ke_history[-1] / ke0
-    # 关闭人工粘性时实测 KE/KE0≈0.678（见 test_tgv.py 模块文档）；启用后
-    # 额外耗散预期让比值更小，但不应该崩溃到接近 0（那意味着人工粘性
-    # 强度过大，把真实流动物理也一并抹掉）或反而增长（意味着传感器/
-    # 耗散方向有 bug）。留足安全边际：[0.05, 0.75] 区间。
-    assert 0.05 < ke_ratio < 0.75, f"unexpected KE ratio with artificial viscosity: {ke_ratio:.4f}"
+    assert abs(ke_ratio - ratio_ref) / ratio_ref < 1e-6, (
+        f"人工粘性在**光滑** TGV 上不该有可测影响（传感器掩码为空），"
+        f"实测启用 {ke_ratio:.8f} vs 关闭 {ratio_ref:.8f}")
 
 
 def test_artificial_viscosity_stays_off_by_default():

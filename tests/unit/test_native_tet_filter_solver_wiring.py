@@ -18,10 +18,34 @@ def test_native_filter_freezes_padding_rows_and_preserves_constant_field(order):
     mesh = _build_synthetic_mixed_mesh(order, "native")
     n_prisms = mesh.n_prism_cells
     ref_native, _ = build_native_tet_operators(order)
-    n_native = ref_native.shape[0]
 
-    solver = SimpleNamespace(mesh=mesh, ops=mesh.operators)
-    filter_func = build_filter_func(solver)
+    # **显式在 `sensor` 档下**构造算子与回调：本测试钉的是"滤波器真的
+    # 施加时填充行不被改写"，需要一个非恒等矩阵。默认档已于 2026-09-19
+    # 改成 `off`（恒等 -> `build_filter_func` 返回 None，见
+    # `fr/modal_filter.py` 里"默认值 2026-09-19 改为 off"那一节），在默认
+    # 档下这条契约没有可测对象 —— 显式指定档位比 skip 强：契约仍然被执行。
+    from ._filter_mode import (
+        reload_filter_modules,
+        restore_default_filter_modules,
+    )
+
+    _, ops_mod = reload_filter_modules(AFCFD_FILTER_MODE="sensor")
+    try:
+        ops = ops_mod.generate_fr_operators(order)
+        solver = SimpleNamespace(mesh=mesh, ops=ops)
+        filter_func = build_filter_func(solver)
+        assert filter_func is not None, (
+            "sensor 档下滤波矩阵应当非恒等、build_filter_func 不该返回 None")
+        _run_padding_freeze_checks(mesh, order, filter_func,
+                                   ref_native, n_prisms)
+    finally:
+        restore_default_filter_modules()
+    return
+
+
+def _run_padding_freeze_checks(mesh, order, filter_func, ref_native,
+                               n_prisms):
+    n_native = ref_native.shape[0]
 
     n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
     n_vars = 7  # 5 欧拉变量 + k, omega（滤波器只作用于前5个，见 filter.py 文档）

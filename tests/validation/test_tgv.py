@@ -69,7 +69,19 @@ def _build_tgv_solver():
 
     orig_local_dt = solver._compute_local_time_step
 
-    def _global_dt():
+    def _global_dt(return_physical_too: bool = False):
+        """全局最小 dt（TGV 要求所有单元同步推进，见本函数下方说明）。
+
+        `return_physical_too` 是生产 `step()` 的契约（2026-09-14 低马赫数
+        伪时间预处理引入）：平均流用 `dt_local`、湍流标量更新用
+        `dt_physical`。本算例是层流、且这里不做预处理放大，所以两者是
+        同一个数组 —— 与生产实现在"未启用预处理时两者是同一个数组"这条
+        约定一致（见 `core/fr_solver/cfl.py::compute_local_time_step`）。
+
+        **这个参数此前缺失导致本测试整体跑不起来**（TypeError），于是
+        四面体网格上唯一的稳定性/物理量回归算例长期处于"失败但原因是
+        测试桩腐化"的状态 —— 2026-09-18 修复。
+        """
         n_cells, n_sps, _ = solver.state.U.shape
         Q = solver.state.Q
         rho = Q[:, :, 0]
@@ -86,8 +98,13 @@ def _build_tgv_solver():
         dt_adv = CFL * h_exp / wave_speed
         dt_visc = 0.25 * CFL * rho * h_exp**2 / MU
         dt = np.minimum(dt_adv, dt_visc)
-        dt = np.minimum(dt, orig_local_dt())  # 叠加原函数的几何/度量 CFL 限制
-        return np.full_like(dt, dt.min())
+        # 叠加原函数的几何/度量 CFL 限制（原函数同样接受这个 kwarg，
+        # 取它的平均流那一份）
+        dt = np.minimum(dt, orig_local_dt())
+        dt_global = np.full_like(dt, dt.min())
+        if return_physical_too:
+            return dt_global, dt_global
+        return dt_global
 
     solver._compute_local_time_step = _global_dt
     return solver, mesh
@@ -119,6 +136,44 @@ def _kinetic_energy(solver) -> float:
     return float(ke_density.mean())
 
 
+def _analytic_tgv_dissipation(n: int = 128):
+    """TGV 初场的 `(eps, K)` 闭式/解析解，用解析导数在细网格上积分。
+
+    完全不依赖被测代码（导数是手写的解析式），所以可以当独立判据。
+
+        u =  U0 sin(x/LC) cos(y/LC) cos(z/LC)
+        v = -U0 cos(x/LC) sin(y/LC) cos(z/LC)
+        w =  0
+        S_ij = 0.5 (d_i u_j + d_j u_i),   eps = 2 nu <S_ij S_ij>
+        K = <rho/2 (u^2+v^2+w^2)>
+
+    Returns:
+        `(eps, K)`
+    """
+    nu = MU / RHO_INF
+    g = (np.arange(n) + 0.5) * L / n
+    X, Y, Z = np.meshgrid(g, g, g, indexing="ij")
+    sx, cx = np.sin(X / LC), np.cos(X / LC)
+    sy, cy = np.sin(Y / LC), np.cos(Y / LC)
+    sz, cz = np.sin(Z / LC), np.cos(Z / LC)
+    u = U0 * sx * cy * cz
+    v = -U0 * cx * sy * cz
+    ux = U0 * cx * cy * cz / LC
+    uy = -U0 * sx * sy * cz / LC
+    uz = -U0 * sx * cy * sz / LC
+    vx = U0 * sx * sy * cz / LC
+    vy = -U0 * cx * cy * cz / LC
+    vz = U0 * cx * sy * sz / LC
+    s12 = 0.5 * (uy + vx)
+    s13 = 0.5 * uz
+    s23 = 0.5 * vz
+    ss = (ux ** 2 + vy ** 2
+          + 2.0 * (s12 ** 2 + s13 ** 2 + s23 ** 2))
+    eps = 2.0 * nu * float(ss.mean())
+    K = 0.5 * RHO_INF * float((u ** 2 + v ** 2).mean())
+    return eps, K
+
+
 def test_tgv_kinetic_energy_decays_monotonically():
     """从标准 TGV 解析初场出发推进 150 个全局步，验证：(a) 全程数值
     稳定；(b) 排除第 0 步的初场-离散适应瞬态后，动能单调不增（真正的
@@ -129,8 +184,10 @@ def test_tgv_kinetic_energy_decays_monotonically():
 
     ke0 = _kinetic_energy(solver)
     ke_history = [ke0]
+    dt_history = []
     for i in range(N_STEPS):
         dt_this = float(solver._compute_local_time_step()[0, 0])
+        dt_history.append(dt_this)
         solver.step(dt_this)
         assert np.all(np.isfinite(solver.state.U)), f"solution diverged (NaN/Inf) at global step {i}"
         ke_history.append(_kinetic_energy(solver))
@@ -142,8 +199,57 @@ def test_tgv_kinetic_energy_decays_monotonically():
     increases = [tail[i] for i in range(1, len(tail)) if tail[i] > tail[i - 1] * 1.001]
     assert len(increases) == 0, f"kinetic energy increased after the initial transient: {increases}"
 
-    final_ratio = ke_history[-1] / ke0
-    assert 0.5 < final_ratio < 0.85, f"final KE/KE0 ratio outside calibrated range: {final_ratio:.4f}"
+    # ===== 净衰减：用**解析耗散率**判，不用校准区间 =====
+    #
+    # 此前这里是 `0.5 < KE/KE0 < 0.85`，一个**校准值**。2026-09-18 查明
+    # 它在两个前提下才成立，而两个前提都已不再成立：
+    #   (a) `FILTER_MODE=legacy`（每个 RK stage 清掉一整阶），默认值已于
+    #       2026-09-17 改成 `sensor`；
+    #   (b) P2 四面体残差被机制3 **整体清零**（零填充槽位把中位数拖到 0，
+    #       见 `core/fr_operators/troubled_cell.py::_outlier_ref_and_flag_
+    #       kernel` 文档），也就是说当时根本没有物理演化 —— 那 15~50% 的
+    #       "粘性衰减"记录的是滤波器的人工耗散。
+    # 而本测试因为一处测试桩腐化（`_global_dt` 没跟上 `return_physical_too`
+    # 契约）长期 TypeError、跑都跑不起来，所以这个过时一直没暴露。
+    #
+    # 换成解析判据：TGV 初场的动能耗散率有闭式解
+    #     K   = <rho/2 (u^2+v^2+w^2)>
+    #     eps = 2 nu <S_ij S_ij>,   dK/dt|_0 = -rho * eps
+    # 本算例实测（150 步）走完的物理时间只有衰减时标 K/(rho*eps) 的
+    # **1~3%**，所以净衰减本来就应当是**百分之几**，不可能是 15~50%。
+    #
+    # 三档实测（同一算例、同一初场）：
+    #     off      K/K0=0.9892   dK/dt/解析 = +0.31~+0.54   单调、始终为负
+    #     sensor   K/K0=1.0513   dK/dt/解析 = -3.1~-5.7     **能量增长**
+    #     legacy   K/K0=0.8492   早期 dK/dt/解析 = +327      过耗散 300 倍
+    # `off` 是唯一物理自洽的那一档（欠耗散可预期：4^3 个 P2 四面体对 TGV
+    # 严重欠分辨，且这里的 K 是 SP 算术平均、与体积平均口径不同）。
+    #
+    # 判据取两条，都是**物理必须**、不是校准：
+    #   1. 动能不得增长（滤波/离散只可能耗散，不可能产能）；
+    #   2. 净衰减量级要与解析耗散率同量级（0.1~3 倍），既排除"几乎不耗散"
+    #      也排除"过耗散一个数量级"。
+    # 基准取 **step 1**（与上面的单调性判据同一口径）：step 0 那次是初场
+    # 在 SPs 上的离散表示适应，一次性、与物理耗散无关（`project` 档实测
+    # 跳到 1.0756 之后才开始正常衰减）。
+    eps_ana, k_ana = _analytic_tgv_dissipation()
+    ke_base = ke_history[1]
+    t_total = sum(dt_history[1:])
+    expect_drop = (RHO_INF * eps_ana / k_ana) * t_total     # 线性估计的相对衰减
+    actual_drop = 1.0 - ke_history[-1] / ke_base
+    assert actual_drop > 0.0, (
+        f"动能净增长 {-actual_drop * 100:+.2f}%（相对 step 1；"
+        f"KE/KE0={ke_history[-1] / ke0:.4f}）—— 滤波与离散耗散只可能"
+        f"减少动能。"
+        f"实测 `FILTER_MODE=sensor`（默认，BJ 判据在这个欠分辨光滑场上"
+        f"100% 标记、等价于全局施加 mild 非幂等衰减）会出现这个现象，"
+        f"`off` 与 `project` 都不会。")
+    ratio = actual_drop / expect_drop
+    assert 0.1 < ratio < 3.0, (
+        f"净衰减 {actual_drop * 100:.3f}% 与解析耗散率给出的 "
+        f"{expect_drop * 100:.3f}% 相差 {ratio:.2f} 倍（允许 0.1~3 倍）。"
+        f"总物理时间 {t_total:.5e} s，占衰减时标 "
+        f"{t_total / (k_ana / (RHO_INF * eps_ana)) * 100:.2f}%")
 
 
 def test_tgv_freestream_preservation():

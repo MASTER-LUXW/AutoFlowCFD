@@ -13,6 +13,8 @@ AutoFlowCFD V2.0 - GPU 版模态滤波
 
 from typing import Callable, Optional
 
+import numpy as np
+
 from autoflowcfd.core.gpu import get_cupy
 
 
@@ -57,15 +59,25 @@ def build_gpu_filter_func(
             之内——见上面那条缺陷，不静默钳。
     """
     cp = get_cupy()
+    # 没有 CuPy 时退回 numpy（本机与 CI 的 numpy 替身端到端测试走这条）：
+    # `get_cupy()` 返回 None，直接 `cp.cuda` 会抛一个与真实原因毫无关系的
+    # AttributeError。完整论证见 `core/gpu/device_context.py` 模块文档。
+    # 这条此前没暴露是因为默认档走的是门控分支（`build_sensor_gated_
+    # filter_gpu`）；2026-09-19 默认值改成 `off` 之后这条非门控分支才成为
+    # 默认路径。
+    from autoflowcfd.core.gpu.device_context import device_transfer
 
-    with cp.cuda.Device(device_id):
+    _dev, _to_dev = device_transfer(device_id)
+    _xp = cp if cp is not None else np
+
+    with _dev:
         # 确保滤波矩阵在正确的设备上
         if not hasattr(filter_prism, 'device'):
-            filter_prism = cp.asarray(filter_prism)
+            filter_prism = _to_dev(filter_prism)
         if not hasattr(filter_tet, 'device'):
-            filter_tet = cp.asarray(filter_tet)
+            filter_tet = _to_dev(filter_tet)
         if cell_is_prism is not None:
-            cip = cp.asarray(cell_is_prism).astype(bool)
+            cip = _to_dev(cell_is_prism).astype(bool)
             if cip.shape != (n_cells,):
                 raise ValueError(
                     f"cell_is_prism 形状 {cip.shape} 与 n_cells={n_cells} 不符")
@@ -99,19 +111,19 @@ def build_gpu_filter_func(
             # `filter_scalar_field_gated_gpu` 同一条实测结论（设备上
             # 花式索引的 gather/scatter 开销高于多做一遍小矩阵乘）。
             lead = U[:, :, :5]
-            U[:, :, :5] = cp.where(
+            U[:, :, :5] = _xp.where(
                 cip3,
-                cp.einsum("sj,cjv->csv", filter_prism, lead),
-                cp.einsum("sj,cjv->csv", filter_tet, lead),
+                _xp.einsum("sj,cjv->csv", filter_prism, lead),
+                _xp.einsum("sj,cjv->csv", filter_tet, lead),
             )
             return U.reshape(n_cells * n_sps, n_vars)
         if n_prism > 0:
             # prism: einsum("sj,cjv->csv", filter, U)
-            U[:n_prism, :, :5] = cp.einsum(
+            U[:n_prism, :, :5] = _xp.einsum(
                 "sj,cjv->csv", filter_prism, U[:n_prism, :, :5]
             )
         if n_cells > n_prism:
-            U[n_prism:, :, :5] = cp.einsum(
+            U[n_prism:, :, :5] = _xp.einsum(
                 "sj,cjv->csv", filter_tet, U[n_prism:, :, :5]
             )
 

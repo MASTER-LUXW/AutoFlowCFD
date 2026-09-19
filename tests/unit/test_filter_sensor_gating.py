@@ -54,7 +54,24 @@ from autoflowcfd.fr.operators import generate_fr_operators
 
 @pytest.fixture(scope="module")
 def ops1():
-    return generate_fr_operators(1)
+    """order=1 的算子，**显式在 `sensor` 档下**构造。
+
+    本文件测的是"门控只改变对哪些单元施加、不改变矩阵本身"这条不变量，
+    所以需要一个**非恒等**的滤波矩阵。默认档已于 2026-09-19 改成 `off`
+    （恒等滤波，依据见 `fr/modal_filter.py` 里"默认值 2026-09-19 改为
+    off"那一节），在默认档下这些判据会退化成"什么都没变"而假通过 ——
+    所以这里显式指定档位，不依赖默认值。
+    """
+    from tests.unit._filter_mode import (
+        reload_filter_modules,
+        restore_default_filter_modules,
+    )
+
+    _, ops_mod = reload_filter_modules(AFCFD_FILTER_MODE="sensor")
+    try:
+        yield ops_mod.generate_fr_operators(1)
+    finally:
+        restore_default_filter_modules()
 
 
 #: order=1 native 四面体的真实自由度个数（`(p+1)(p+2)(p+3)/6`）。

@@ -63,9 +63,23 @@ def _build_vortex_solver():
     # 全局（非逐单元局部）时间步长，见模块文档第 1 条。
     orig_local_dt = solver._compute_local_time_step
 
-    def _global_dt():
+    def _global_dt(return_physical_too: bool = False):
+        """全局最小 dt。
+
+        `return_physical_too` 是生产 `step()` 的契约（2026-09-14 低马赫数
+        伪时间预处理引入）：平均流用 `dt_local`、湍流标量更新用
+        `dt_physical`；未启用预处理时两者是同一个数组。本算例是无粘等熵涡、
+        不做预处理放大，所以直接给同一个数组。
+
+        **这个参数此前缺失导致本测试整体 TypeError、跑都跑不起来**，于是
+        唯一的精确解收敛阶算例长期处于"失败但原因是测试桩腐化"的状态
+        （同一处腐化也出现在 `test_tgv.py`）—— 2026-09-19 修复。
+        """
         local = orig_local_dt()
-        return np.full_like(local, local.min())
+        dt_global = np.full_like(local, local.min())
+        if return_physical_too:
+            return dt_global, dt_global
+        return dt_global
 
     solver._compute_local_time_step = _global_dt
     return solver, mesh

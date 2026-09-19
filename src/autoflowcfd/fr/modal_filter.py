@@ -91,8 +91,10 @@ from autoflowcfd.fr.collapsed_basis import prism_modal_basis_and_grad, tet_modal
 # alpha 调小只是把清零推迟，不改变"滤波压倒物理"的性质。所以正确的方向
 # 是**按需施加**（逐单元用传感器门控），而不是全局调强度。
 #
-# `AFCFD_FILTER_MODE` 环境变量（**默认 sensor**，2026-09-17 从 legacy 改，
-# 依据见本文件下方那节实测数据）：
+# `AFCFD_FILTER_MODE` 环境变量（**默认 off**，2026-09-19 从 sensor 改，
+# 依据见本文件下方"默认值 2026-09-19 改为 off"那一节 —— 简述：修掉原生
+# 四面体路径两个重大缺陷之后，用 Blasius 的 cf 与 TGV 的解析耗散率重新
+# 判定，`off` 是唯一在两个算例上都物理自洽的档）：
 #   legacy  当前行为（alpha=-ln(eps)，全局每 stage 施加）
 #   off     恒等滤波（完全不施加），用于对照"滤波是否必需"
 #   mild    sigma(eta=1)=AFCFD_FILTER_SIGMA_TOP（默认 0.99），其余同形式
@@ -142,7 +144,53 @@ from autoflowcfd.fr.collapsed_basis import prism_modal_basis_and_grad, tet_modal
 #   * 语义精确："恰好削掉最高阶"，不多不少。
 # legacy 档保持逐位不变，供回归对照。
 #
-# ===== 默认值 2026-09-17 从 legacy 改为 sensor =====
+# ===== 默认值 2026-09-19 改为 off（依据见下，取代 2026-09-17 那次）=====
+#
+# 先说为什么此前那轮标定**整体失效**：2026-09-19 在已上线的原生四面体路径上
+# 查出并修掉两个重大缺陷（见 `core/fr_operators/face_kernels.py::
+# FlatFaceGeometry.ref_area_weight` 与 `core/fr_operators/troubled_cell.py::
+# _outlier_ref_and_flag_kernel` 的文档）：
+#   * DG 提升算子的界面项多乘了一个 `|adj_row| ~ h^2`，界面耦合与**上风
+#     耗散**在细网格上被系统性压制（细长四面体实测差 5 个数量级）；
+#   * P2/P3 的四面体残差被机制3 **整体清零**，单元完全不演化。
+# 也就是说：此前"必须靠滤波才稳定"这个印象，是在格式本身缺了应有的上风
+# 耗散（甚至 P2/P3 干脆没有四面体动力学）的前提下形成的。那批标定不能沿用。
+#
+# 修完之后用**有解析解**的两个算例重新判定（都不含激波，所以任何限制器
+# 动作本来就不该发生）：
+#
+#   档       Blasius cf 中位偏差      TGV 动能（解析耗散率判据）
+#   off      +9.52%                   通过（单调衰减，dK/dt 为解析值的
+#                                     0.31~0.54 倍 —— 欠分辨下欠耗散是
+#                                     可预期的）
+#   sensor   +9.52%（与 off **逐位相同**）  **失败：能量净增长 +5.14%**
+#   project  **-87.69%**              通过
+#   legacy   --                       **失败：过耗散 7.6 倍**
+#
+# 三条由此确定的事实：
+#   1. `sensor` 档（2026-09-18 起用 mild 型有界衰减）在 Blasius 上与 `off`
+#      **逐位相同** —— 它实质上什么都没做。这与另一条既有观测是同一事实的
+#      两面：「sensor + persson == off，因为 Persson 掩码实测 0.000%」。
+#   2. 但它并不是真的无操作：TGV 上 BJ 判据对这个**欠分辨光滑场 100% 标记**
+#      （正弦每波长只有 4 个单元、曲率强，单元内极值确实超出邻域均值包络
+#      —— 这是 BJ 这类判据的固有行为，不是缺陷），于是退化成"全局每 stage
+#      施加 mild 非幂等衰减"，450 次累积出**非物理的能量增长**。这与既有
+#      记录「非幂等 -> 反复削 -> 正反馈」吻合。
+#   3. `project`（幂等、语义精确）在 P1 上等于把被标记单元**拍平成 P0**，
+#      Blasius 的壁面剪应力因此塌掉 88% —— P1 的顶模态就是全部非常数内容。
+#      所以"把动作换成幂等投影"这条路在生产阶数 P1 上不可用。
+#
+# 结论：门控滤波这套机制在当前实现下没有提供可测的正面价值，而两种全局
+# 强档各自破坏一个物理量。默认值定为 `off`，稳定性交给格式本身应有的机制
+# —— 上风通量耗散（AUSM+up，界面项现已修正）、体积项去混叠
+# （`AFCFD_VISC_OVERINT`，默认开）、以及真有激波时才该出现的人工粘性。
+# 这与工业/文献里高阶 DG/FR 的标准做法一致：限制器/滤波只在真实不连续处
+# 动作，不作为常规耗散来源。
+#
+# 其余四档全部保留为合法取值：`legacy` 是唯一能复现历史结果的档（回归
+# 对照），`project`/`mild`/`sensor` 供将来真有激波的算例与受控 A/B。
+#
+# ===== 默认值 2026-09-17 从 legacy 改为 sensor（已被上面那轮取代）=====
 #
 # 三档在 P1（生产阶数）上的实测（平板边界层算例，2304 单元，同一初场
 # 同一 CFL，80 步）：
@@ -176,7 +224,7 @@ from autoflowcfd.fr.collapsed_basis import prism_modal_basis_and_grad, tet_modal
 # 0.0167/步变成负曲率的 0.0071 -> 0.0042/步。
 #
 # legacy 保留为合法档，专供回归对照（它是唯一能复现历史结果的档）。
-_FILTER_MODE = os.environ.get("AFCFD_FILTER_MODE", "sensor").lower()
+_FILTER_MODE = os.environ.get("AFCFD_FILTER_MODE", "off").lower()
 _SIGMA_TOP = float(os.environ.get("AFCFD_FILTER_SIGMA_TOP", "0.99"))
 
 #: 合法档位。**必须校验**：此前未知取值会落进下面 `else` 分支、静默按

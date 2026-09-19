@@ -229,6 +229,9 @@ def compute_bounds_violation_mask(
     ref_scales=None,
     bnd_dirichlet=None,
     bnd_mirror_normal=None,
+    row_is_prism=None,
+    n_real_prism=None,
+    n_real_tet=None,
 ) -> np.ndarray:
     """逐单元判定"解点值越出了面邻居均值区间" —— **纯数组接口**。
 
@@ -309,6 +312,29 @@ def compute_bounds_violation_mask(
             标量与切向分量的镜像均值**恰好等于**本单元均值，所以只有
             动量三列（索引 1..3）需要处理；其余列的镜像贡献对包络初值
             `cell_mean` 是无操作，直接跳过。
+        row_is_prism / n_real_prism / n_real_tet: 可选，**真实自由度**的
+            行掩码与两类单元各自的真实槽位数。三个要么全给、要么全不给。
+
+            ## 为什么必须有（2026-09-18 实测的真实缺陷）
+
+            原生基的零填充槽位**残差恒为零**（"零填充块对角"不变量刻意
+            保证），于是那些槽位的解**冻结在初值**，而真实槽位在演化 ——
+            实测 TGV（P2 四面体）30 步后填充值已经越出真实槽位区间达
+            **14% 区间宽**。而本判据用 `field.max(axis=1)` /
+            `.min(axis=1)` / `.mean(axis=1)`：不排除填充槽位就是在**冻结
+            的馊值**上统计单元极值与均值。
+
+            与 `fr/native_padding.py::real_sps_per_cell`（"哪些槽位是真的"
+            的唯一判据来源）配套；本判据这个调用点此前漏掉了它，同一
+            缺陷家族的另外两处是机制3（`troubled_cell.py`）与那两个
+            `reduce_*_over_real_sps` 归约。
+
+            **如实记录一条被自己数据否掉的假设**：我曾以为这就是 BJ 判据
+            在 TGV 上 100% 误标的原因。**不是** —— step 0（填充与真实还
+            完全一致时）就已经 100%，而且只用真实槽位重算仍然 100%。
+            100% 误标是 BJ 判据在**欠分辨光滑场**上的固有行为（正弦场每
+            波长只有 4 个单元、曲率强，单元内极值确实超出邻域均值包络），
+            与填充无关。填充污染是另一条独立的、真实的缺陷。
         rel_tol: 相对容差系数，见模块文档
         abs_frac: 绝对地板系数（乘以下面的参考量级），见模块文档
         ref_scales: 可选的 (n_var,) **来流参考量级**（例如
@@ -414,9 +440,47 @@ def compute_bounds_violation_mask(
     # 三次全场归约一次算完**所有**变量（此前是逐变量 mean/max/min，
     # 5 个变量 15 次全场遍历）。这条判据是四条后端的**默认**路径、每个
     # RK stage 调一次，36 万单元实测那 15 次归约占 0.11 s/stage。
-    cell_means = field.mean(axis=1)          # (n_cells, n_var)
-    cell_maxs = field.max(axis=1)
-    cell_mins = field.min(axis=1)
+    #
+    # **只统计真实槽位**（见 `row_is_prism` 参数文档）。实现方式是"两段
+    # 切片 + 小尺寸合并"而不是掩码数组：真实槽位恒为**前缀**，所以
+    #   ① 先在两类单元共有的前 `n_lo` 个槽位上归约（纯切片、零拷贝）；
+    #   ② 再在 `[n_lo, n_hi)` 上归约，只对真实槽位更多的那类行合并。
+    # 临时量只有 `(n_rows, n_var)` 量级 —— 用 `where(mask, field, ±inf)`
+    # 那种写法会物化一个与 `field` 同样大的数组（79 万单元 P2 下 850 MB）。
+    if row_is_prism is None:
+        cell_means = field.mean(axis=1)      # (n_cells, n_var)
+        cell_maxs = field.max(axis=1)
+        cell_mins = field.min(axis=1)
+    else:
+        rip = xp.asarray(row_is_prism, dtype=bool)
+        if rip.shape != (n_cells,):
+            raise ValueError(
+                f"row_is_prism 形状 {rip.shape} 应为 (n_rows={n_cells},)")
+        n_rp = int(n_real_prism)
+        n_rt = int(n_real_tet)
+        n_sps_here = field.shape[1]
+        for nm, v in (("n_real_prism", n_rp), ("n_real_tet", n_rt)):
+            if not (1 <= v <= n_sps_here):
+                raise ValueError(
+                    f"{nm}={v} 超出 [1, n_sps={n_sps_here}] —— 真实槽位数"
+                    f"必须落在 SP 轴长度内，越界说明上游的阶数/基与数组"
+                    f"不自洽（按错的数统计会把冻结的填充值算进极值）")
+        n_lo, n_hi = min(n_rp, n_rt), max(n_rp, n_rt)
+        # 真实槽位更多的那一类：`row_hi` 为 True 的行多统计 [n_lo, n_hi)
+        row_hi = rip if n_rp >= n_rt else ~rip
+        sum_lo = field[:, :n_lo].sum(axis=1)
+        cell_maxs = field[:, :n_lo].max(axis=1)
+        cell_mins = field[:, :n_lo].min(axis=1)
+        if n_hi > n_lo:
+            ext = field[:, n_lo:n_hi]
+            m2 = row_hi[:, None]
+            sum_lo = xp.where(m2, sum_lo + ext.sum(axis=1), sum_lo)
+            cell_maxs = xp.where(m2, xp.maximum(cell_maxs, ext.max(axis=1)),
+                                 cell_maxs)
+            cell_mins = xp.where(m2, xp.minimum(cell_mins, ext.min(axis=1)),
+                                 cell_mins)
+        cnt = xp.where(row_hi, float(n_hi), float(n_lo))[:, None]
+        cell_means = sum_lo / cnt
 
     # 镜像型边界的动量均值：m' = m - 2 (m . n) n。标量与切向分量的镜像
     # 均值恰好等于本单元均值（对包络初值是无操作），所以只算动量三列，
