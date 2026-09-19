@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 from autoflowcfd.core.fr_solver.filter import build_filter_func
-from autoflowcfd.fr.native_simplex_basis import build_native_tet_operators
+from autoflowcfd.fr.native_tet.basis import build_native_tet_operators
 
 from .test_native_tet_mesh_geometry_wiring import _build_synthetic_mixed_mesh
 

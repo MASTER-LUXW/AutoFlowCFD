@@ -11,10 +11,14 @@ face_flux_points_helpers_numba 模块，被本 kernel 和 ms_numba kernel 共用
 import numpy as np
 from numba import njit, prange
 
-from autoflowcfd.fr.face_flux_points_helpers_numba import (
+from .face_code_tables import (
     _FACE_AXIS, _FACE_SIDE, _PQ_CODES,
     _NATIVE_PRISM_LO, _NATIVE_TET_HI, _NATIVE_TET_LO,
+)
+from .ref_geometry_nb import (
     _face_ref_grid_nb, _map_ref_nb, _newton_locate_nb,
+)
+from .native_geometry_nb import (
     _native_tet_face_points_nb, _tet_native_locate_nb,
     _native_interp_matrix_nb, interp_matrix_from_cube_coords_nb,
 )
@@ -48,15 +52,15 @@ def build_fp_newton_parallel(
               geom_oa, geom_os, geom_na, geom_ns, geom_aw, geom_n)
     nb_resid/ow_resid 形状 (n_faces, n_fp)：逐 Flux Point 的 Newton 精确
     点位定位残差（绝对长度单位，未按面特征尺度归一化，未按容差分级）——
-    调用方 face_flux_points_merge.py 负责归一化、按 ACCEPT_STRICT_REL/
+    调用方 face_flux_points/merge.py 负责归一化、按 ACCEPT_STRICT_REL/
     _ACCEPT_WARN_REL 分级、以及对多源棱柱四边形侧面按半区掩码取值。
 
     native 四面体（路径C）支持（Part7 文档阶段2 numba 核函数移植）：
     `owner_cube_face`/`neighbor_cube_face` 里 code>=6 的项目标记该侧是
     native 四面体的真实面（`excluded_vertex = code-6`），本函数据此
     分派到 `_tet_native_locate_nb`/`_native_tet_face_points_nb`/
-    `simplex3d_value`（`fr/face_flux_points_helpers_numba.py`/
-    `fr/native_simplex_basis.py` 的 numba 版本，与坍缩坐标分支平行），
+    `simplex3d_value`（`fr/face_flux_points/native_geometry_nb.py`/
+    `fr/native_tet/basis.py` 的 numba 版本，与坍缩坐标分支平行），
     不再假设 `_FACE_AXIS`/`_FACE_SIDE`（长度仅 6，对 code>=6 越界）
     覆盖所有 cube face code。code>=6 只可能出现在 native 四面体的真实面
     （棱柱四边形侧面恒为 0~5，见 grid/connectivity/face_connectivity.py::
@@ -64,12 +68,12 @@ def build_fp_newton_parallel(
     `code>=6`，不需要额外与 is_prism 组合判断。`v_sps_inv_native`/
     `native_mode_{i,j,k}` 在整个网格不含任何 native 四面体时（既有
     默认坍缩坐标路径）传入零长度占位数组即可，对应分支永远不会被执行，
-    不改变任何现有行为——见 face_flux_points_merge.py 调用处说明。
+    不改变任何现有行为——见 face_flux_points/merge.py 调用处说明。
     """
     n_sps = n1d * n1d * n1d
     nb_fc = np.zeros((n_faces, n_fp, 2))
     # nb_resid/ow_resid：逐 Flux Point 残差（不在这里归约成单一标量），
-    # 供 face_flux_points_merge.py 对多源棱柱四边形侧面按对角线半区
+    # 供 face_flux_points/merge.py 对多源棱柱四边形侧面按对角线半区
     # 分别掩码取 max——见 _newton_locate_nb 文档，同一批点里混有真正
     # 属于该 cell 和根本不属于该 cell（对角线另一半）的目标点，提前
     # 归约成全批次单一 max 会把两者混在一起，对多源面产生系统性误报。
@@ -91,7 +95,7 @@ def build_fp_newton_parallel(
     # residual| 从应有的 <1e-2 暴涨到 1.512e+05——不是"略微变差"，是完全
     # 破坏了这两个此前专门为控制舍入误差而做的修复(G-04 跨单元插值统一 +
     # S-02 体积项去混叠)，因此保留 float64，只保留"消除冗余拷贝"这一个
-    # 真正安全的内存优化（见 fr/face_flux_points_merge.py 顶部内存说明）。
+    # 真正安全的内存优化（见 fr/face_flux_points/merge.py 顶部内存说明）。
     nb_interp = np.zeros((n_faces, n_fp, n_sps), dtype=np.float64)
     ow_interp = np.zeros((n_faces, n_fp, n_sps), dtype=np.float64)
     nb_cell_id = np.full(n_faces, -1, dtype=np.int32)
@@ -111,7 +115,7 @@ def build_fp_newton_parallel(
         # code>=6 索引（numba 不做边界检查，会读到未定义内存）。o_axis/
         # o_side 在 native 分支下只是未使用的占位值（真正用到的是下面
         # o_is_native 分支各自独立处理），仍然写入 geom_oa/geom_os 但那
-        # 两个数组本身在下游（face_flux_points_merge.py）已确认从不被
+        # 两个数组本身在下游（face_flux_points/merge.py）已确认从不被
         # 消费（owner 侧 axis/side 改用 CUBE_FACE_AXIS_SIDE 字典查表）。
         # 两类原生面必须**分开**判（2026-09-19）：`code >= 6` 原本等价于
         # "是原生四面体面"，加了原生棱柱编码 [10,15) 之后它变成了"是任意
@@ -219,7 +223,7 @@ def build_fp_newton_parallel(
                 # owner 变成 neighbor_cell）。要把 owner 侧物理 FP 平移到
                 # neighbor 单元所在的区域去定位，必须 **加** translation，
                 # 此前这里写成减——这个安全网此前从未真正被激活过（见
-                # face_flux_points_validation.py 模块文档"safety net
+                # face_flux_points/validation.py 模块文档"safety net
                 # 架空"一节），直到本次评审把 _classify_and_record 真正
                 # 接上，才第一次在真实周期网格上暴露：残差恰好等于
                 # 2*|translation|（符号取反导致的偏差是 -t 相对正确值 +t

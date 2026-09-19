@@ -82,7 +82,7 @@ def _p0_inviscid_kernel(
         # AUSM+up 黎曼求解（返回单位面积通量）
         F_common_n = compute_ausm_up_flux(Q_o, Q_n, normal, mach_ref, precond_mode)
 
-        # 混合拆分面（B-8，见 fr/face_flux_points_merge.py）：整张四边形面的通量按子面面积占比混合——
+        # 混合拆分面（B-8，见 fr/face_flux_points/merge.py）：整张四边形面的通量按子面面积占比混合——
         # 内部半区用上方内部通量，边界半区用同一 owner 单元的幽灵态另解一次黎曼问题。
         # P0 每面仅 1 个 FP，无法像 P≥1 kernel 那样逐 FP 掩码分支，只能面积加权。
         bfrac = mixed_p0_bnd_frac[f]

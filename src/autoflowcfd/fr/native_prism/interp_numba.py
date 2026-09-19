@@ -24,7 +24,7 @@
 
 ## 与四面体那一份的关系
 
-`face_flux_points_helpers_numba.py::_native_interp_matrix_nb` 是四面体版
+`face_flux_points/native_geometry_nb.py::_native_interp_matrix_nb` 是四面体版
 （输入是原生 `(r,s,t)`，内部还要 `_rst_to_abc_nb`）。两者输入空间不同
 （四面体那边拿到的是解析定位器直接给出的原生坐标，这边拿到的是坍缩 Newton
 给出的立方体坐标），所以不是重复实现，而是两种输入各一条最短路径。

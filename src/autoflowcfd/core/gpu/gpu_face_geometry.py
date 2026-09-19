@@ -64,7 +64,7 @@ class GPUFlatFaceGeometry:
 
             # ── 自洽方向 adj(J) 行（未归一化、未按 side 定向的原始值，
             # 语义与 CPU 端 owner_adj_row_exact/neighbor_adj_row_exact 一致，
-            # 见 fr/face_flux_points_exact_normal.py 模块文档）——2026-08-23
+            # 见 fr/face_flux_points/exact_normal.py 模块文档）——2026-08-23
             # 新增，供 GPU 粘性界面校正使用：CPU 端粘性 kernel
             # （viscous_flux_kernel.py）用这两行的原始 (a0,a1,a2) 分量直接
             # 把物理通量投影成逆变（tilde）形式，不是先归一化成单位法向

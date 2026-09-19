@@ -1,12 +1,12 @@
 """AutoFlowCFD V2.0 - native 四面体（路径C）体积项去混叠（过积分）算子
-(`fr/native_tet_overintegration.py`) 决定性验证。
+(`fr/native_tet/overintegration.py`) 决定性验证。
 """
 
 import numpy as np
 import pytest
 
-from autoflowcfd.fr.native_tet_overintegration import build_native_tet_overintegration_operators
-from autoflowcfd.fr.native_simplex_basis import (
+from autoflowcfd.fr.native_tet.overintegration import build_native_tet_overintegration_operators
+from autoflowcfd.fr.native_tet.basis import (
     build_native_tet_operators, map_native_tet_to_physical, compute_native_tet_jacobian,
     restricted_tet_modes,
 )

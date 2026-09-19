@@ -2,7 +2,7 @@
 
 ## 缺陷
 
-`fr/face_flux_points_exact_normal_kernel.py::compute_exact_adj_rows_kernel`
+`fr/face_flux_points/exact_normal_kernel.py::compute_exact_adj_rows_kernel`
 的坍缩分支里，`p0 = node_coords[prism_conn[cell, 0]]` 与
 `p0 = node_coords[tet_conn[tc, 0]]` 是同一个变量的 if/else 两支。两张表
 的索引 dtype 不同时，`parallel=True` 下的 numba 生成**直接段错误**的代码
@@ -11,7 +11,7 @@
 
 ## 为什么它在生产里必然命中
 
-`fr/face_flux_points_merge.py` 在 `mesh._fixed_prism_conn is None`
+`fr/face_flux_points/merge.py` 在 `mesh._fixed_prism_conn is None`
 （**纯四面体网格**）时传的兜底是 `np.empty((0, 6), dtype=np.int64)`，
 而真实的 `_fixed_tet_conn` 是 `int32`。于是任何纯四面体网格在
 `build_face_flux_points` 阶段就段错误 —— 也就是 `solve steady/transient`
@@ -47,7 +47,7 @@ _REPO_ROOT_SNIPPET = textwrap.dedent(
     import sys
     sys.path.insert(0, {src!r})
     import numpy as np
-    from autoflowcfd.fr.face_flux_points_exact_normal_kernel import (
+    from autoflowcfd.fr.face_flux_points.exact_normal_kernel import (
         compute_exact_adj_rows_fast,
     )
     from autoflowcfd.fr.quadrature_points import gauss_legendre
@@ -114,7 +114,7 @@ def test_wrapper_normalizes_both_tables_to_int64():
     """
     import inspect
 
-    from autoflowcfd.fr import face_flux_points_exact_normal_kernel as K
+    from autoflowcfd.fr.face_flux_points import exact_normal_kernel as K
 
     src = inspect.getsource(K.compute_exact_adj_rows_fast)
     assert "prism_conn = np.ascontiguousarray(prism_conn, dtype=np.int64)" in src

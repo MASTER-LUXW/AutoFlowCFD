@@ -462,7 +462,7 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
             is_bnd = cp.asarray(fc.is_boundary)
             # 面法向和面积（性能修复，真实复现：本函数是 GPU P0 无粘残差
             # 每步都要调用的热路径，此前这里逐面 `ffp_list[f]` 索引——自
-            # face_flux_points_merge.py 的 flat array 重构后
+            # face_flux_points/merge.py 的 flat array 重构后
             # `mesh.face_flux_points` 是 `_KernelFaceData`，`[f]` 会按需
             # *构造*一个完整 FaceFluxPointGeometry 对象，187 万面级别的
             # 网格上每步都这样做是灾难级开销，与

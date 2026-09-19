@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 
 from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
-from autoflowcfd.fr.native_simplex_basis import (
+from autoflowcfd.fr.native_tet.basis import (
     build_native_tet_operators, map_native_tet_to_physical, compute_native_tet_jacobian,
 )
 

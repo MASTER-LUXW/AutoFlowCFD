@@ -405,7 +405,7 @@ class CurvedMapping:
             residual: 形状 (n_sps, 3)，每个 SP、每个物理方向的度量恒等式残差
         """
         if cell_type == "tet":
-            from ...fr.native_simplex_basis import compute_native_tet_jacobian
+            from ...fr.native_tet.basis import compute_native_tet_jacobian
 
             D_3d = self.operators.D_native_tet_padded
             n_sps = D_3d.shape[0]

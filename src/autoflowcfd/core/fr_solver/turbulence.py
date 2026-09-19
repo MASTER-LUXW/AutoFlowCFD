@@ -662,7 +662,7 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
         # 更新"，只打一条 warning，不中断求解——与本项目在别处反复强调
         # 的"不允许静默地什么都不做"（见 boundary/fr_ghost_state.py::
         # BoundaryGhostStateProvider 文档）、"必须先查清原因，不能静默
-        # 截断/忽略"（见 face_flux_points_merge.py 文档）等原则相悖：
+        # 截断/忽略"（见 face_flux_points/merge.py 文档）等原则相悖：
         # 真实 bug 会被这个 except 吞掉，求解器带着一个悄悄退化、外部
         # 毫无察觉的湍流模型继续跑完整个仿真。真实复现过的输运计算失败
         # 目前没有已知的"预期内、可安全忽略"的情形，故不再兜底捕获，

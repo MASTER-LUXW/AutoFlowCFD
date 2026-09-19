@@ -1,4 +1,4 @@
-"""Unit tests for face_flux_points_exact_normal.py — the real fix for
+"""Unit tests for face_flux_points/exact_normal.py — the real fix for
 core/fr_residual/inviscid_kernel.py's `true_normal`/`true_area_weight`
 previously being one constant (flat, triangulated) value per face, reused
 across every Flux Point on that face regardless of whether the face
@@ -27,7 +27,7 @@ wired into the real geometry pipeline:
 import numpy as np
 import pytest
 
-from autoflowcfd.fr.face_flux_points_exact_normal import (
+from autoflowcfd.fr.face_flux_points.exact_normal import (
     compute_exact_face_normals_and_weights,
     compute_exact_adj_rows,
     _tet_exact_jacobian_batched,

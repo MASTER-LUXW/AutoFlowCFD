@@ -33,7 +33,7 @@
    P1 上饱和、在 P2 上无界增长导致发散（1152 单元干净网格上第 75 步）。
 
 四面体当年有**完全同类**的病理，解法就是整套换成 native PKD/Dubiner 基
-（见 `native_simplex_basis.py` 与项目记忆 `tet-collapsed-coord-anisotropy` /
+（见 `native_tet/basis.py` 与项目记忆 `tet-collapsed-coord-anisotropy` /
 `native-tet-basis-production-readiness`）。本模块是棱柱侧的同一条路：
 棱柱 = 三角形 ⊗ 直线，三角形用这里的原生 PKD 基 + Warp & Blend 节点，
 挤出方向保持现有的 Legendre/Gauss-Legendre（那个方向本来就是精确的，
@@ -123,7 +123,7 @@ def simplex2d_grad(a: np.ndarray, b: np.ndarray, i: int,
     """`GradSimplex2DP.m` 逐行移植：对**参考三角形原生坐标 `(r,s)`** 的
     梯度（不是对 `(a,b)` 的梯度）。
 
-    与 `native_simplex_basis.simplex3d_grad` 同一条技巧：把 `(1-b)` 权重
+    与 `native_tet.basis.simplex3d_grad` 同一条技巧：把 `(1-b)` 权重
     因子的幂次**代数地减一**，等价于提前吸收了链式法则本该出现、原本
     会奇异的那个因子 —— 全程只用非负整数次幂、不含除法，因此在退化轴
     （`b=1`）上同样处处有限。

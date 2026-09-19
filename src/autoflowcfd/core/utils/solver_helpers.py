@@ -169,7 +169,7 @@ def compute_wmles_wall_stress_correction(
     # n_sps 宽度，与 face_kernels.py 界面项 kernel 同一个 pad 约定）；
     # 面修正项改用 DG 提升算子（`ops.native_face_lift_padded(cube_face)`）
     # 替代 `_distribute_from_face`（原生基没有"坍缩计算方向"，1D 修正函数
-    # 分布机制不适用，见 native_simplex_basis.py::build_native_tet_lift
+    # 分布机制不适用，见 native_tet/basis.py::build_native_tet_lift
     # "弱形式提升定义"）。
     # **2026-09-18 起棱柱也可能是原生基**（`AFCFD_PRISM_BASIS=native`，
     # 面编码 [10,15)）：所以这里按 `cube_face >= 6` 分派、由

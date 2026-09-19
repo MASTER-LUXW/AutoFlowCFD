@@ -1,5 +1,5 @@
 """AutoFlowCFD V2.0 - native 四面体（路径C）DG 提升算子
-`native_simplex_basis.py::build_native_tet_lift` 决定性验证。
+`native_tet/basis.py::build_native_tet_lift` 决定性验证。
 
 背景：坍缩坐标 FR 方案用 1D Radau/VCJH 修正函数 + `_distribute_point`
 把面通量跳跃"修正"回体积自由度——这个机制建立在张量积/坍缩坐标结构上，
@@ -22,7 +22,7 @@ import pytest
 from scipy import integrate
 from scipy.linalg import lu_factor, lu_solve
 
-from autoflowcfd.fr.native_simplex_basis import (
+from autoflowcfd.fr.native_tet.basis import (
     build_native_tet_operators,
     build_native_tet_lift,
     restricted_tet_modes,
@@ -49,7 +49,7 @@ def _reference_mass_matrix(order):
 
 
 def _face_physical_weight_and_points(order, excluded_vertex, cell_nodes):
-    """与 `face_flux_points_exact_normal.py::_native_tet_adj_row_batched`
+    """与 `face_flux_points/exact_normal.py::_native_tet_adj_row_batched`
     同一套坍缩三角形采样 + 真实物理面积微元公式（生产路径），供
     LHS（Lift_ref 消费方）使用——与下面独立的 (u,v) dblquad 参数化
     (RHS) 刻意不同，避免"用同一套错误互相印证"。

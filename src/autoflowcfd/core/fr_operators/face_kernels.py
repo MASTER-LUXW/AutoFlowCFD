@@ -8,7 +8,7 @@ Python 解释器 + 每次循环体内十几个小 numpy 调用的调度开销，
 评审反复修复过的最核心正确性代码），只把执行方式换成 numba 编译的原生
 代码。numba 的 nopython 模式不能直接消费 `mesh.face_flux_points`（一个
 由 `FaceFluxPointGeometry` dataclass 组成的 Python list，见
-`fr/face_flux_points.py`，其中 `owner_sources`/`neighbor_sources` 是
+`fr/face_flux_points/geometry.py`，其中 `owner_sources`/`neighbor_sources` 是
 变长的 `(cell_id, matrix)` 元组列表），本模块负责把它一次性展平成 numba
 可以直接读的定长 numpy 数组，缓存后供无粘/粘性两个 kernel 共用（面几何
 本身在无粘/粘性残差之间是共享的，且在同一批 RK 子迭代内不变）。
@@ -39,7 +39,7 @@ np.dot`（形状对不上直接崩溃，运气好被抓住了）；同样的两�
 
 内存设计：`owner_sources`/`neighbor_sources` 长度恒为 1 或 2（网格生成器
 把棱柱四边形侧面恒定拆分成 2 个三角子面，不会更多，见
-`fr/face_flux_points_merge.py::_resolve_multi_source` 文档），但绝大多数
+`fr/face_flux_points/merge.py::_resolve_multi_source` 文档），但绝大多数
 面（普通四面体-四面体内部面、未拆分的棱柱面）只有 1 个来源。如果统一按
 2 槽稠密填充，多出来的一半矩阵纯粹是浪费——在 P2、n_fp=9、n_sps=27 下，
 1.3M 面 × 2 角色(owner/neighbor) × 2 槽 × (9×27×8字节) 约 10GB，这在真实
@@ -147,7 +147,7 @@ class FlatFaceGeometry:
     owner_is_primary: np.ndarray     # bool (n_faces,)
     neighbor_is_primary: np.ndarray  # bool (n_faces,)
     true_normal: np.ndarray      # float64 (n_faces, n_fp, 3)
-    # 真实 bug 修复（2026-08-23，见 fr/face_flux_points_exact_normal.py
+    # 真实 bug 修复（2026-08-23，见 fr/face_flux_points/exact_normal.py
     # 模块文档）：owner/neighbor 各自的精确 adj(J) 行（未归一化、未按
     # side 定向），取代此前 inviscid_kernel.py 内部对 SP 网格 adj_j 做
     # Lagrange 外插得到"自洽方向"的做法——外插对坍缩坐标下本质是有理
@@ -164,7 +164,7 @@ class FlatFaceGeometry:
     # 当 axis/side 语义使用——必须用这两个原始编码字段消除歧义。
     owner_cube_face: np.ndarray     # int64 (n_faces,)
     neighbor_cube_face: np.ndarray  # int64 (n_faces,)
-    # 物理面积权重（`fr/face_flux_points_exact_normal.py::compute_exact_
+    # 物理面积权重（`fr/face_flux_points/exact_normal.py::compute_exact_
     # face_normals_and_weights` 已经算好、验证过的量）——坍缩坐标的
     # 1D Radau/VCJH 修正函数 + 微分矩阵机制不需要它（那套数学结构本身
     # 不含物理面积因子），但 native 四面体的 DG 提升算子（`native_
@@ -215,7 +215,7 @@ class FlatFaceGeometry:
     owner_src1_mat: np.ndarray
 
     # --- 混合分组面（B-8：棱柱四边形侧面三角化拆分后一条子面落在域边界、
-    #     另一条为内部界面；见 fr/face_flux_points_merge.py 混合分组检测块文档）---
+    #     另一条为内部界面；见 fr/face_flux_points/merge.py 混合分组检测块文档）---
     # 内部界面侧：mixed_nb_partner[f_int] = 配对的边界面索引（-1 表示非混合面）；
     # mixed_nb_mask[f_int] 逐 FP 标记边界半区（True 处 Q_neighbor 应取配对面幽灵态）。
     mixed_nb_partner: np.ndarray   # int64 (n_faces,)
@@ -245,7 +245,7 @@ class FlatFaceGeometry:
     boundary_extrap_native: np.ndarray
     # DG 提升算子，(4, n_sps, n_fp)（行已填充到 n_sps，见
     # native_padding.py::pad_native_matrix_to_global 与
-    # native_simplex_basis.py::build_native_tet_lift 文档）。
+    # native_tet/basis.py::build_native_tet_lift 文档）。
     lift_native: np.ndarray
 
     # --- g_left/g_right（Radau/VCJH 校正函数导数，(n1d,) 向量，随 side 选择）---
@@ -273,7 +273,7 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     每次调用都重新构建——调用方必须通过 `get_flat_face_geometry` 走缓存。
 
     `mesh.face_flux_points` 恒为 `_KernelFaceData`（numba kernel 直接输出
-    的 flat 数组容器，见 `fr/face_flux_points_merge.py::build_face_flux_
+    的 flat 数组容器，见 `fr/face_flux_points/merge.py::build_face_flux_
     points` 唯一的 return 语句）——本函数不再有"逐面 Python 对象访问"的
     慢速路径分支（2026-09-03 删除，全仓库确认过该分支自 2026-08-30 起
     从未有任何调用方触发过，见该次删除记录）。
@@ -293,7 +293,7 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     neighbor_cube_face = fc.neighbor_cube_face.astype(np.int64)
 
 
-    from autoflowcfd.fr.face_flux_points_merge import _KernelFaceData
+    from autoflowcfd.fr.face_flux_points.merge import _KernelFaceData
     if not isinstance(ffp_data, _KernelFaceData):
         raise TypeError(
             f"build_flat_face_geometry: mesh.face_flux_points 必须是 "
@@ -345,7 +345,7 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     # native_tet`/`ops.lift_native_tet_padded` 只在 `tet_basis_mode==
     # "native"` 时非 None——不含 native 四面体的既有网格传零长度占位
     # 数组，下游 kernel 对应分支（判据同样是 code>=6）永远不会被执行，
-    # 不改变任何现有行为（与 face_flux_points_merge.py 里同一个"自动
+    # 不改变任何现有行为（与 face_flux_points/merge.py 里同一个"自动
     # 探测/零占位"原则一致）。boundary_extrap_native 的列同样需要填充
     # 到全局 n_sps 宽度（native_tet_boundary_extrap 原始形状是
     # (n_fp,n_native)，不像 D_native_tet_padded/lift_native_tet_padded
@@ -388,7 +388,7 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
         lift_native = np.zeros((0, n_sps, n_fp), dtype=np.float64)
 
     # 参考面求积权重（见 `ref_area_weight` 字段文档）：所有面共用同一套
-    # `[-1,1]^2` 张量积 Gauss-Legendre 网格，与 `fr/face_flux_points_merge.py`
+    # `[-1,1]^2` 张量积 Gauss-Legendre 网格，与 `fr/face_flux_points/merge.py`
     # 里生成面通量点用的是**同一个** `gauss_legendre(n1d)`，必须一致。
     from autoflowcfd.fr.operators import gauss_legendre
 

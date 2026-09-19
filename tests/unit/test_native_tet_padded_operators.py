@@ -15,8 +15,8 @@ import pytest
 from autoflowcfd.fr.native_padding import (
     pad_native_matrix_to_global, pad_native_filter_matrix_to_global,
 )
-from autoflowcfd.fr.native_simplex_basis import build_native_tet_operators, build_native_tet_lift
-from autoflowcfd.fr.native_tet_filter import build_native_tet_modal_filter
+from autoflowcfd.fr.native_tet.basis import build_native_tet_operators, build_native_tet_lift
+from autoflowcfd.fr.native_tet.filter import build_native_tet_modal_filter
 
 
 @pytest.mark.parametrize("order", [1, 2, 3])

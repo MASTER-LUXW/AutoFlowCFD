@@ -1,5 +1,5 @@
 """AutoFlowCFD V2.0 - native 四面体（路径C）指数模态滤波器
-(`fr/native_tet_filter.py`) 决定性验证。
+(`fr/native_tet/filter.py`) 决定性验证。
 
 判据设计直接对应 `fr/modal_filter.py` 模块文档记录的真实教训——该
 文档明确警告"总阶数 i+j+k 归一化在坍缩坐标四面体基上会*放大*白噪声"
@@ -14,7 +14,7 @@
 import numpy as np
 import pytest
 
-from autoflowcfd.fr.native_tet_filter import build_native_tet_modal_filter
+from autoflowcfd.fr.native_tet.filter import build_native_tet_modal_filter
 from tests.unit._filter_mode import (
     reload_filter_modules,
     restore_default_filter_modules,
@@ -35,7 +35,7 @@ def project_mode():
     reload_filter_modules(AFCFD_FILTER_MODE="project")
     yield
     restore_default_filter_modules()
-from autoflowcfd.fr.native_simplex_basis import (
+from autoflowcfd.fr.native_tet.basis import (
     build_native_tet_operators, restricted_tet_modes, simplex3d_value, rst_to_abc,
 )
 
@@ -130,10 +130,10 @@ class TestFilterNeverAmplifiesInTheRightNorm:
     _SPECTRAL = {1: 1.0, 2: 1.581, 3: 1.861, 4: 2.581}
 
     def _modal_l2_ratio(self, F, order, n_trials=120):
-        from autoflowcfd.fr.native_simplex_basis import (
+        from autoflowcfd.fr.native_tet.basis import (
             build_native_tet_operators, restricted_tet_modes,
         )
-        from autoflowcfd.fr.native_tet_overintegration import (
+        from autoflowcfd.fr.native_tet.overintegration import (
             _native_modal_vandermonde,
         )
 
@@ -231,7 +231,7 @@ class TestSensorModeIsBoundedDamping:
     @pytest.mark.parametrize("order", [1, 2, 3])
     def test_top_mode_is_damped_to_sigma_top_not_zero(self, order):
         """顶模态被乘上 0.99，而不是清零。"""
-        from autoflowcfd.fr.native_simplex_basis import (
+        from autoflowcfd.fr.native_tet.basis import (
             build_native_tet_operators, restricted_tet_modes,
             simplex3d_value, rst_to_abc,
         )

@@ -12,7 +12,7 @@ import pytest
 from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient, compute_physical_scalar_gradient
 from autoflowcfd.grid.curved_mapping.curved_mapping import map_prism_to_physical, map_tet_to_physical
 from autoflowcfd.fr.operators import generate_fr_operators, gauss_legendre
-from autoflowcfd.fr.native_simplex_basis import build_native_tet_operators
+from autoflowcfd.fr.native_tet.basis import build_native_tet_operators
 from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
 
 
@@ -54,7 +54,7 @@ def _build_mesh(order):
 def test_linear_function_gradient_exact_for_tet_and_prism():
     # P=2 是本项目当前实际生产阶数，要求机器精度；P=3 容差沿用同一档
     # （四面体 native 单纯形基在高阶下的条件数特征与坍缩坐标不同，
-    # 但同样在此判据下有界，见 native_simplex_basis.py 文档）。
+    # 但同样在此判据下有界，见 native_tet.basis.py 文档）。
     #
     # 2026-09-03 更正：四面体坍缩坐标基已删除（见 fr/operators.py 模块
     # 文档），四面体单元的梯度输出在"零填充块对角"约定下，填充行

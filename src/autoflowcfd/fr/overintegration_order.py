@@ -9,7 +9,7 @@ Vandermonde 的数值条件数极限**（cond 在 N=4 达约 1e14、`max|D|` 暴
 环境变量。
 
 两者的 env 解析与"`rule*order` 取 min 再对 order 取 max"这套规则逐字
-相同。此前只有四面体一份，写在 `native_tet_overintegration.py` 里；棱柱
+相同。此前只有四面体一份，写在 `native_tet/overintegration.py` 里；棱柱
 接入时把它抄第二遍是本项目明确禁止的（同一语义两份实现，改一份漏一份
 已经出过真实缺陷——滤波档双解析器、CFL 三处硬编码兜底）。所以这里做成
 参数化的唯一实现，两个基各自只保留一行"传自己的 env 名与默认值"的薄

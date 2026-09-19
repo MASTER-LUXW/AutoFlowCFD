@@ -6,7 +6,7 @@
 执行过）。
 
 真实根因：`owner_axis`/`neighbor_axis` 对 native 四面体面存的是复用的
-`excluded_vertex`（取值 0~3，见 `fr/face_flux_points_merge.py` 模块
+`excluded_vertex`（取值 0~3，见 `fr/face_flux_points/merge.py` 模块
 文档"owner_axis 对 native 面存的是复用的 excluded_vertex"一节），不是
 坍缩坐标的真实轴（0~2）——`gpu_inviscid.py::_compute_interface_
 correction_gpu` 里两处：(1) `E_o_collapsed = ff.boundary_extrap[

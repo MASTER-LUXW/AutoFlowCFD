@@ -80,7 +80,7 @@ def compute_inviscid_interface_correction_kernel_colored(
     调用方按颜色循环调用此函数，每种颜色处理约 n_faces/n_colors 个面。
     内存从 O(n_threads * n_cells * n_sps * 5) 降至 O(n_cells * n_sps * 5)。
 
-    真实 bug 修复（2026-08-23，见 fr/face_flux_points_exact_normal.py
+    真实 bug 修复（2026-08-23，见 fr/face_flux_points/exact_normal.py
     模块文档）：`owner_adj_row_exact`/`neighbor_adj_row_exact` 取代了
     此前这里对 `adj_j` 做 Lagrange 外插得到"自洽方向"的做法，理由与
     compute_inviscid_interface_correction_kernel（非 colored 版本）

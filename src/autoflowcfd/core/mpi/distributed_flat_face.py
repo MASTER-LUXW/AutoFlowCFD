@@ -481,7 +481,7 @@ def build_distributed_flat_face(
         # cube face 编码，与是否 MPI 分区无关）；`boundary_extrap_native`/
         # `lift_native` 是只依赖 `(order, excluded_vertex)` 的全局共享
         # 常量算子（与 `boundary_extrap` 同一个"可预计算一次、全网格
-        # 同阶数单元共享"的性质，见 native_simplex_basis.py 模块文档），
+        # 同阶数单元共享"的性质，见 native_tet.basis.py 模块文档），
         # 不是逐面数据，原样透传（不切片）本来就是唯一正确的做法。CPU
         # 端残差 kernel（`inviscid_kernel.py`/`viscous_flux_kernel.py`）
         # 本身的 native/collapsed 分派逻辑与调用方是否处于 MPI 分区

@@ -15,17 +15,20 @@ from typing import Dict, List, Tuple
 import numpy as np
 from loguru import logger
 
-from autoflowcfd.fr.face_flux_points import (
+from .geometry import (
     CUBE_FACE_AXIS_SIDE,
     FaceFluxPointGeometry,
 )
-from autoflowcfd.fr.face_flux_points_data import (
+from .basis_inverses import build_basis_inverses
+from .face_metrics import build_face_metrics
+from .grouping import build_face_groups
+from .data import (
     _KernelFaceData, _PRISM_QUAD_CODES, _classify_half, prism_quad_local_idx,
 )
-from autoflowcfd.fr.face_flux_points_exact_normal import (
+from .exact_normal import (
     compute_exact_face_normals_and_weights,
 )
-from autoflowcfd.fr.face_flux_points_validation import validate_face_flux_point_residuals
+from .validation import validate_face_flux_point_residuals
 from autoflowcfd.grid.curved_mapping.curved_mapping import PRISM_CUBE_FACES
 from autoflowcfd.grid.connectivity.face_connectivity import (
     CUBE_FACE_NAMES,
@@ -42,7 +45,7 @@ def _get_numba_kernel():
     """延迟导入并返回 numba 并行 kernel。"""
     global _build_fp_newton_parallel
     if _build_fp_newton_parallel is None:
-        from autoflowcfd.fr.face_flux_points_numba import build_fp_newton_parallel
+        from .kernel import build_fp_newton_parallel
         _build_fp_newton_parallel = build_fp_newton_parallel
     return _build_fp_newton_parallel
 
@@ -51,7 +54,7 @@ def _get_ms_numba_kernel():
     """延迟导入并返回 multi-source 插值矩阵 numba kernel。"""
     global _build_ms_interp_parallel
     if _build_ms_interp_parallel is None:
-        from autoflowcfd.fr.face_flux_points_ms_numba import build_ms_interp_parallel
+        from .kernel_multisource import build_ms_interp_parallel
         _build_ms_interp_parallel = build_ms_interp_parallel
     return _build_ms_interp_parallel
 
@@ -77,106 +80,20 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
     is_lower_fp_standard = g1.ravel() >= g2.ravel()
     is_lower_fp_flipped = (g1.ravel() + g2.ravel()) <= 0.0
 
-    owner_groups: Dict[Tuple[int, int], List[int]] = {}
-    neighbor_groups: Dict[Tuple[int, int], List[int]] = {}
-    # 边界面单独分组（不需要 neighbor 侧、不需要按对角线拆分 sources——
-    # 幽灵态对整张四边形面统一取值，与两条子面记录各自覆盖对角线哪一半
-    # 无关），只是为了标记同一 (owner_cell, 立方体面) 的重复子面记录，
-    # 避免下面主循环对每条记录都各自完整跑一遍原生 FP 外插+校正投影导致
-    # 边界校正项翻倍——与非边界分支的 owner_groups 是同一个 bug 的另一半，
-    # 此前只修了 non-boundary 分支，边界分支被漏掉了（真实复现：Couette
-    # 合成算例棱柱网格上，几乎每个贴着 z_min/z_max 的单元在时间推进的
-    # 前几步内边界校正项残差就被放大到 0.1~0.93 量级，根因就是这里）。
-    boundary_owner_groups: Dict[Tuple[int, int], List[int]] = {}
-    for f in range(n_faces):
-        if face_conn.is_boundary[f]:
-            oc_cell, oc_code = int(face_conn.owner_cell[f]), int(face_conn.owner_cube_face[f])
-            if oc_cell < n_prism and oc_code in _PRISM_QUAD_CODES:
-                boundary_owner_groups.setdefault((oc_cell, oc_code), []).append(f)
-            continue
-        oc_cell, oc_code = int(face_conn.owner_cell[f]), int(face_conn.owner_cube_face[f])
-        if oc_cell < n_prism and oc_code in _PRISM_QUAD_CODES:
-            owner_groups.setdefault((oc_cell, oc_code), []).append(f)
-        nc_cell, nc_code = int(face_conn.neighbor_cell[f]), int(face_conn.neighbor_cube_face[f])
-        if nc_cell < n_prism and nc_code in _PRISM_QUAD_CODES:
-            neighbor_groups.setdefault((nc_cell, nc_code), []).append(f)
-
-    owner_primary = np.ones(n_faces, dtype=bool)
-    neighbor_primary = np.ones(n_faces, dtype=bool)
-    for flist in owner_groups.values():
-        for f in sorted(flist)[1:]:
-            owner_primary[f] = False
-    for flist in neighbor_groups.values():
-        for f in sorted(flist)[1:]:
-            neighbor_primary[f] = False
-    for flist in boundary_owner_groups.values():
-        for f in sorted(flist)[1:]:
-            owner_primary[f] = False
-
-    # ---- 混合分组检测（B-8 修复，2026-08-25）----
-    # BL 挤出在几何尖角棱处产生拓扑缝隙的固有产物：某个棱柱四边形侧面
-    # 的 2 条三角化子面记录中，一条在域边界分组（单侧暴露、无真实邻居）、
-    # 另一条是内部界面（与真实邻居配对）——内部分组只有 1 条记录，旧版
-    # multi-source 代码按组内 2 条记录取 group[1] 直接越界崩溃（真实复现：
-    # cube_demo 尖角网格，solve steady 在 FP 几何构建阶段 IndexError）。
-    # 语义：内部子面记录担任整张四边形面的 primary——子面覆盖的对角线半区
-    # 内照常构建跨单元插值，另半区逐 FP 取边界子面记录的幽灵态（两条
-    # 记录共享同一 owner 棱柱与立方体面，FP 网格逐点重合）。边界子面记录
-    # 不再参与残差累加（否则与内部记录在整张面上重复计数），但幽灵态仍需
-    # 计算（见 mixed_bnd_face 与 inviscid_kernel.py 幽灵态预计算的分支）。
-    mixed_nb_keys = sorted(set(owner_groups) & set(boundary_owner_groups))
-    mixed_ow_keys = sorted(set(neighbor_groups) & set(boundary_owner_groups))
-    mixed_nb_partner = np.full(n_faces, -1, dtype=np.int64)
-    mixed_ow_partner = np.full(n_faces, -1, dtype=np.int64)
-    mixed_nb_mask = np.zeros((n_faces, n_fp), dtype=np.bool_)
-    mixed_ow_mask = np.zeros((n_faces, n_fp), dtype=np.bool_)
-    mixed_bnd_face = np.zeros(n_faces, dtype=np.bool_)
-    mixed_p0_bnd_frac = np.zeros(n_faces, dtype=np.float64)
-
-    def _register_mixed(key, int_faces, bnd_faces, partner_arr, mask_arr):
-        """登记一个混合分组：f_int 为整张面 primary，bf 供幽灵态取用。"""
-        f_int, bf = int_faces[0], bnd_faces[0]
-        owner_primary[bf] = False
-        mixed_bnd_face[bf] = True
-        partner_arr[f_int] = bf
-        cell_node_ids = mesh._fixed_prism_conn[key[0]]
-        quad_local_idx = prism_quad_local_idx(key[1])
-        half, is_std = _classify_half(
-            cell_node_ids, quad_local_idx, face_conn.face_node_ids[f_int]
-        )
-        is_lower = is_lower_fp_standard if is_std else is_lower_fp_flipped
-        interior_mask = is_lower if half == "lower" else ~is_lower
-        mask_arr[f_int] = ~interior_mask  # True = 边界半区（取幽灵态）
-        # P0 单态/面粒度：边界半区通量单独用幽灵态算，按面积占比混合，
-        # 见 inviscid_p0_kernel.py 的 mixed_p0_bnd_frac 分支。
-        total_area = float(face_conn.area[f_int]) + float(face_conn.area[bf])
-        mixed_p0_bnd_frac[f_int] = float(face_conn.area[bf]) / max(total_area, 1e-300)
-
-    for key in mixed_nb_keys:
-        int_faces = sorted(owner_groups[key])
-        bnd_faces = sorted(boundary_owner_groups[key])
-        if len(int_faces) != 1 or len(bnd_faces) != 1:
-            raise RuntimeError(
-                f"混合边界/内部棱柱四边形分组 (cell={key[0]}, face={key[1]}) 含 "
-                f"{len(int_faces)} 条内部子面 + {len(bnd_faces)} 条边界子面记录，"
-                f"仅支持 1+1（非协调网格拓扑，需检查网格生成）。"
-            )
-        _register_mixed(key, int_faces, bnd_faces, mixed_nb_partner, mixed_nb_mask)
-    for key in mixed_ow_keys:
-        int_faces = sorted(neighbor_groups[key])
-        bnd_faces = sorted(boundary_owner_groups[key])
-        if len(int_faces) != 1 or len(bnd_faces) != 1:
-            raise RuntimeError(
-                f"混合边界/内部棱柱四边形分组（neighbor 角色）(cell={key[0]}, "
-                f"face={key[1]}) 含 {len(int_faces)} 条内部子面 + {len(bnd_faces)} 条边界"
-                f"子面记录，仅支持 1+1（非协调网格拓扑，需检查网格生成）。"
-            )
-        _register_mixed(key, int_faces, bnd_faces, mixed_ow_partner, mixed_ow_mask)
-    if mixed_nb_keys or mixed_ow_keys:
-        logger.info(
-            f"检测到混合边界/内部四边形分组（尖角缝隙面）：nb={len(mixed_nb_keys)}, "
-            f"ow={len(mixed_ow_keys)}，内部子面记录担任整张面 primary"
-        )
+    grp = build_face_groups(
+        face_conn, mesh, n_faces, n_fp, n_prism,
+        is_lower_fp_standard, is_lower_fp_flipped)
+    owner_groups = grp.owner_groups
+    neighbor_groups = grp.neighbor_groups
+    boundary_owner_groups = grp.boundary_owner_groups
+    owner_primary = grp.owner_primary
+    neighbor_primary = grp.neighbor_primary
+    mixed_nb_partner = grp.mixed_nb_partner
+    mixed_ow_partner = grp.mixed_ow_partner
+    mixed_nb_mask = grp.mixed_nb_mask
+    mixed_ow_mask = grp.mixed_ow_mask
+    mixed_bnd_face = grp.mixed_bnd_face
+    mixed_p0_bnd_frac = grp.mixed_p0_bnd_frac
 
     # ---- numba 并行 Newton + 插值矩阵预计算 ----
     logger.info("Running numba parallel Newton+interp kernel for FP geometry...")
@@ -196,86 +113,18 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
          else np.empty((0, 4), dtype=np.int64)).ravel().astype(np.int32)
     )
     node_coords = np.ascontiguousarray(mesh._node_coords.astype(np.float64))
-    # 预计算 V_sps 逆矩阵（用于 kernel 内插值矩阵构建）
-    from autoflowcfd.fr.face_flux_points import _get_v_sps_lu
-    from scipy.linalg import lu_factor, lu_solve
     n_sps = n1d ** 3
-    # 四面体 V_sps_inv
-    lu_tet = _get_v_sps_lu("tet", n1d, sps_1d)
-    I_n = np.eye(n_sps)
-    v_sps_inv_tet = np.ascontiguousarray(lu_solve(lu_tet, I_n).T)
-    # 棱柱 V_sps_inv
-    lu_prism = _get_v_sps_lu("prism", n1d, sps_1d)
-    v_sps_inv_prism = np.ascontiguousarray(lu_solve(lu_prism, I_n).T)
-    # native 四面体（路径C）V_sps_inv + 模态索引——只在 face_conn 里真的
-    # 出现过 native 四面体面（cube face code>=6，见
-    # grid/connectivity/face_connectivity.py::with_native_face_codes）时
-    # 才计算；不含 native 四面体的既有网格（默认坍缩坐标路径）传零长度
-    # 占位数组，kernel 内对应分支（判据同样是 code>=6）永远不会被执行，
-    # 不改变任何现有行为——这是本函数自动探测是否启用 native 分支的唯一
-    # 入口，不需要单独的 tet_basis_mode 参数贯穿调用链（Part7 文档"实现
-    # 顺序建议"里"求解器/网格加载路径接入 tet_basis_mode"仍是独立的、
-    # 尚未做的后续工作，见该文档；这里只保证一旦上游把 face_conn 换成
-    # `.with_native_face_codes()` 翻译后的版本，这条 numba 路径立即可用）。
-    has_native_tet = bool(np.any(np.asarray(face_conn.owner_cube_face) >= 6)) or bool(
-        np.any(np.asarray(face_conn.neighbor_cube_face) >= 6)
-    )
-    if has_native_tet:
-        from autoflowcfd.fr.face_flux_points import _get_v_sps_lu_native
-        order_native = n1d - 1
-        lu_native, modes_native = _get_v_sps_lu_native(order_native)
-        n_native = len(modes_native)
-        v_sps_inv_native = np.ascontiguousarray(lu_solve(lu_native, np.eye(n_native)).T)
-        native_mode_i = np.array([m[0] for m in modes_native], dtype=np.int32)
-        native_mode_j = np.array([m[1] for m in modes_native], dtype=np.int32)
-        native_mode_k = np.array([m[2] for m in modes_native], dtype=np.int32)
-    else:
-        v_sps_inv_native = np.zeros((0, 0))
-        native_mode_i = np.zeros(0, dtype=np.int32)
-        native_mode_j = np.zeros(0, dtype=np.int32)
-        native_mode_k = np.zeros(0, dtype=np.int32)
-
-    # 原生**棱柱**（编码 [10,15)）的 Vandermonde 逆与模态索引 —— 与上面
-    # 四面体那一段同一个"自动探测 + 零占位"原则：面编码里没出现原生棱柱面
-    # 时传零长度数组，kernel 内对应分支（判据 `code >= _NATIVE_PRISM_LO`）
-    # 永远不会被执行，既有行为逐位不变。
-    #
-    # `lu_factor(V.T)` 之后再 `.T` —— 与四面体那条**同一个约定**
-    # （`v_sps_inv = V^{-1}`，不是 `V^{-T}`）。这一点必须一致：搞反了不会
-    # 报错，只会让插值矩阵变成另一个矩阵（实测相对误差 5.44，而正确时是
-    # 1.0e-15）。
-    _pf_lo, _pf_hi = NATIVE_PRISM_FACE_CODE_RANGE
-    _oc = np.asarray(face_conn.owner_cube_face)
-    _nc = np.asarray(face_conn.neighbor_cube_face)
-    has_native_prism = bool(
-        np.any((_oc >= _pf_lo) & (_oc < _pf_hi))
-        or np.any((_nc >= _pf_lo) & (_nc < _pf_hi)))
-    if has_native_prism:
-        from autoflowcfd.fr.native_prism.basis import (
-            build_native_prism_nodes,
-            build_native_prism_vandermonde,
-            restricted_prism_modes,
-        )
-
-        _order_np = n1d - 1
-        _ref_np = build_native_prism_nodes(_order_np)
-        _V_np, _, _, _ = build_native_prism_vandermonde(_order_np, _ref_np)
-        _modes_np = restricted_prism_modes(_order_np)
-        _n_np = len(_modes_np)
-        if _V_np.shape != (_n_np, _n_np):
-            raise ValueError(
-                f"原生棱柱节点 Vandermonde 形状 {_V_np.shape} 应为方阵 "
-                f"({_n_np}, {_n_np}) —— 节点数与模态数理论上必须相等")
-        v_sps_inv_np = np.ascontiguousarray(
-            lu_solve(lu_factor(_V_np.T), np.eye(_n_np)).T)
-        np_mode_i = np.array([m[0] for m in _modes_np], dtype=np.int32)
-        np_mode_j = np.array([m[1] for m in _modes_np], dtype=np.int32)
-        np_mode_k = np.array([m[2] for m in _modes_np], dtype=np.int32)
-    else:
-        v_sps_inv_np = np.zeros((0, 0))
-        np_mode_i = np.zeros(0, dtype=np.int32)
-        np_mode_j = np.zeros(0, dtype=np.int32)
-        np_mode_k = np.zeros(0, dtype=np.int32)
+    binv = build_basis_inverses(face_conn, n1d, sps_1d)
+    v_sps_inv_tet = binv.v_sps_inv_tet
+    v_sps_inv_prism = binv.v_sps_inv_prism
+    v_sps_inv_native = binv.v_sps_inv_native
+    native_mode_i = binv.native_mode_i
+    native_mode_j = binv.native_mode_j
+    native_mode_k = binv.native_mode_k
+    v_sps_inv_np = binv.v_sps_inv_np
+    np_mode_i = binv.np_mode_i
+    np_mode_j = binv.np_mode_j
+    np_mode_k = binv.np_mode_k
     (
         _nb_fc, _nb_resid, _ow_fc, _ow_resid,
         _nb_interp, _ow_interp, _nb_cell_id, _ow_cell_id,
@@ -317,80 +166,13 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
     _is_bnd = face_conn.is_boundary
     _op = owner_primary
     _np_ = neighbor_primary
-    # 真实 bug 修复（2026-08-23，见 face_flux_points_exact_normal.py 模块
-    # 文档完整原理）：此前这里对每个面只取*一个*常数法向/面积（`_normals`/
-    # `_areas`，来自三角化的平面近似），在该面全部 n_fp 个 Flux Points 上
-    # 重复使用（`np.repeat`）——核心通量 kernel（inviscid_kernel.py 等）
-    # 因此对棱柱四边形侧面这类物理上一般非平面的面，用同一个错误的局部
-    # 切平面方向做黎曼求解，与 troubled_cell.py 机制2诊断的"面法向失配"
-    # 是同一个问题，只是此前只用于事后诊断、从未修正过通量本身实际使用
-    # 的法向。改为逐 Flux Point 精确求值（`compute_exact_face_normals_
-    # and_weights`，用已经验证过的解析精确 Jacobian，不是新的近似）——
-    # 对平面面（绝大多数四面体面、未翘曲的棱柱四边形面）结果与旧的常数
-    # 值逐位一致（见对应单元测试），只有真正非平面的棱柱四边形侧面才会
-    # 表现出per-FP的真实差异。
-    # owner_code 透传（native 四面体 owner_code>=6 分派，见
-    # compute_exact_face_normals_and_weights/compute_exact_adj_rows 文档
-    # "真实 bug 修复"说明——_o_axis_arr 对 native 面存的是复用的
-    # excluded_vertex，与坍缩坐标 (axis,side) 语义会数值碰撞，必须靠
-    # 原始 cube face code 消除歧义）。
-    _all_normals, _all_area_w = compute_exact_face_normals_and_weights(
-        n_faces=n_faces, n1d=n1d, sps_1d=sps_1d, weights_1d=weights_1d, n_prism=n_prism,
-        owner_cell=np.asarray(face_conn.owner_cell, dtype=np.int64),
-        owner_axis=_o_axis_arr.astype(np.int64), owner_side=_o_side_arr.astype(np.float64),
-        owner_code=np.asarray(face_conn.owner_cube_face, dtype=np.int64),
-        prism_conn=(mesh._fixed_prism_conn if mesh._fixed_prism_conn is not None
-                    else np.empty((0, 6), dtype=np.int64)),
-        tet_conn=(mesh._fixed_tet_conn if mesh._fixed_tet_conn is not None
-                  else np.empty((0, 4), dtype=np.int64)),
-        node_coords=mesh._node_coords,
-    )
-
-    # 真实 bug 修复的第二部分（2026-08-23）：P1+ 内部面主通量（
-    # inviscid_kernel.py/inviscid_kernel_colored.py）与 troubled_cell.py
-    # 机制2诊断此前用的"自洽方向"（`own_dir_outward`/`a0,a1,a2`）是对
-    # SP 网格上的 adj(J) 做 Lagrange 外插到 FP，不是本次同款的逐点精确
-    # 求值——这里预计算 owner/neighbor 两侧各自的精确 adj(J) 行（未归一化、
-    # 未按 side 定向的原始值，与下游消费点 `a0,a1,a2` 变量的语义一致），
-    # 供这些 kernel 直接查表读取，取代它们内部的 `_extrap_matmul(adj_j
-    # [cell,:,axis,:], E)` 外插调用。neighbor 侧对边界面无意义（
-    # neighbor_axis/side 是 -1/0.0 哨兵值），用 `~_is_bnd` 排除。
-    # 用 numba 并行加速版替代纯 NumPy 桶循环版（第四次评审接入）：
-    # compute_exact_adj_rows 在 P2+ 大网格上是真实存在的性能瓶颈（逐面
-    # 类型分桶 + 批量 NumPy 临时数组，峰值内存 ~5GB，P2 网格初始化卡住
-    # 10+ 分钟——见 face_flux_points_exact_normal_kernel.py 模块文档）。
-    # `compute_exact_adj_rows_fast` 此前虽已实现且接口完全一致，但从未
-    # 被接入生产路径；本轮评审用 order 1/2/3 × tet/prism 合成算例逐位
-    # 交叉验证（最大绝对误差 ~3e-16，机器精度量级），确认可以安全替换。
-    from autoflowcfd.fr.face_flux_points_exact_normal_kernel import compute_exact_adj_rows_fast
-
-    # code_arr 透传（native 四面体分派，见 compute_exact_adj_rows_kernel/
-    # _native_tet_adj_row_at 文档"真实 bug 修复"说明——owner_axis/
-    # owner_side 对 native 面存的是复用的 excluded_vertex/哑值，此前
-    # 这个"fast" kernel 完全不知道这一点，见该函数文档完整原理）。
-    _owner_adj_row_exact = compute_exact_adj_rows_fast(
-        n_faces, n1d, sps_1d, n_prism,
-        cell_arr=np.asarray(face_conn.owner_cell, dtype=np.int64),
-        axis_arr=_o_axis_arr.astype(np.int64), side_arr=_o_side_arr.astype(np.float64),
-        prism_conn=(mesh._fixed_prism_conn if mesh._fixed_prism_conn is not None
-                    else np.empty((0, 6), dtype=np.int64)),
-        tet_conn=(mesh._fixed_tet_conn if mesh._fixed_tet_conn is not None
-                  else np.empty((0, 4), dtype=np.int64)),
-        node_coords=mesh._node_coords,
-        code_arr=np.asarray(face_conn.owner_cube_face, dtype=np.int64),
-    )
-    _neighbor_adj_row_exact = compute_exact_adj_rows_fast(
-        n_faces, n1d, sps_1d, n_prism,
-        cell_arr=np.asarray(face_conn.neighbor_cell, dtype=np.int64),
-        axis_arr=_n_axis_arr.astype(np.int64), side_arr=_n_side_arr.astype(np.float64),
-        prism_conn=(mesh._fixed_prism_conn if mesh._fixed_prism_conn is not None
-                    else np.empty((0, 6), dtype=np.int64)),
-        tet_conn=(mesh._fixed_tet_conn if mesh._fixed_tet_conn is not None
-                  else np.empty((0, 4), dtype=np.int64)),
-        node_coords=mesh._node_coords,
-        valid_mask=~_is_bnd,
-        code_arr=np.asarray(face_conn.neighbor_cube_face, dtype=np.int64),
-    )
+    fm = build_face_metrics(
+        face_conn, mesh, n_faces, n1d, n_prism, sps_1d, weights_1d,
+        _o_axis_arr, _o_side_arr, _n_axis_arr, _n_side_arr, _is_bnd)
+    _all_normals = fm.true_normal
+    _all_area_w = fm.true_area_weight
+    _owner_adj_row_exact = fm.owner_adj_row_exact
+    _neighbor_adj_row_exact = fm.neighbor_adj_row_exact
 
     # ---- 直接构建 flat 源数组（跳过 180 万 FaceFluxPointGeometry 对象创建）----
     # 内存说明（P3 阶数 OOM 排查，2026-08-21）：nb_src0_mat/ow_src0_mat 曾经
@@ -507,7 +289,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
 
         # 分配 extra 数组（float64——同一套跨单元插值矩阵，与 nb_interp/
         # ow_interp 一样存在坍缩坐标模态 Vandermonde 条件数病态问题，
-        # 见 face_flux_points_numba.py::build_fp_newton_parallel 文档，
+        # 见 face_flux_points/kernel.py::build_fp_newton_parallel 文档，
         # 不能降精度）
         n_extra_nb = len(_multi_nb_faces)
         n_extra_ow = len(_multi_ow_faces)
@@ -516,7 +298,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         _ms_nb_extra_idx = np.arange(n_extra_nb, dtype=np.int64)
         _ms_ow_extra_idx = np.arange(n_extra_ow, dtype=np.int64)
         # secondary Newton 逐 FP 残差输出（此前算出即丢弃，见
-        # face_flux_points_ms_numba.py::build_ms_interp_parallel 文档）；
+        # face_flux_points/kernel_multisource.py::build_ms_interp_parallel 文档）；
         # mixed 分组（无 secondary Newton）对应行保持全零，下面校验时按
         # ~_ms_{nb,ow}_mixed 排除。
         _nb_sec_resid_arr = np.zeros((max(n_extra_nb, 1), n_fp), dtype=np.float64)
@@ -612,7 +394,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
     ow_extra_cell = _ow_extra_cells
     ow_extra_mat = _ow_extra_mats_arr
 
-    # 校验 Newton/精确点位定位残差（拆到 face_flux_points_validation.py，
+    # 校验 Newton/精确点位定位残差（拆到 face_flux_points/validation.py，
     # 见该模块文档——本文件此前超过 600 行硬性拆分阈值，这段"接回此前
     # 被丢弃的 kernel 残差输出、按阈值分级、超差即 raise"的收尾校验只读
     # 上面已经算好的残差数组和分组掩码，不产生 build_face_flux_points

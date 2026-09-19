@@ -51,7 +51,7 @@ from typing import List, Tuple
 import numpy as np
 from numba import njit
 
-from .collapsed_basis import jacobi_polynomial, grad_jacobi_polynomial
+from ..collapsed_basis import jacobi_polynomial, grad_jacobi_polynomial
 
 
 def restricted_tet_modes(order: int) -> List[Tuple[int, int, int]]:
@@ -187,8 +187,8 @@ def build_native_tet_operators(order: int) -> Tuple[np.ndarray, np.ndarray]:
         `D_3d_tet` 同样的消费方式（`D[:,:,m]@field` 给出对参考坐标
         第 m 个方向——这里是 r/s/t，不是 a/b/c——的导数）。
     """
-    from .warp_blend_nodes import warp_blend_nodes_3d
-    from .diff_matrix_consistency import enforce_constant_annihilation
+    from ..warp_blend_nodes import warp_blend_nodes_3d
+    from ..diff_matrix_consistency import enforce_constant_annihilation
 
     r, s, t = warp_blend_nodes_3d(order)
     a, b, c = rst_to_abc(r, s, t)
@@ -237,7 +237,7 @@ def map_native_tet_to_physical(ref_rst: np.ndarray, cell_nodes: np.ndarray) -> n
     Returns:
         phys: (n_native_sps, 3)
     """
-    from ..grid.curved_mapping.curved_mapping import tet_barycentric
+    from ...grid.curved_mapping.curved_mapping import tet_barycentric
 
     r, s, t = ref_rst[:, 0], ref_rst[:, 1], ref_rst[:, 2]
     L1, L2, L3, L4 = tet_barycentric(r, s, t)
@@ -268,7 +268,7 @@ def face_node_indices(ref_rst: np.ndarray, excluded_vertex: int, tol: float = 1e
     Returns:
         (n_face_nodes,) 整数下标数组
     """
-    from ..grid.curved_mapping.curved_mapping import tet_barycentric
+    from ...grid.curved_mapping.curved_mapping import tet_barycentric
 
     r, s, t = ref_rst[:, 0], ref_rst[:, 1], ref_rst[:, 2]
     L = np.column_stack(tet_barycentric(r, s, t))
@@ -316,8 +316,8 @@ def _native_face_value_vandermondes(order: int, excluded_vertex: int):
         (V_sps, V_fp, modes)：V_sps (n_native_sps,n_modes)，
         V_fp (n1d*n1d,n_modes)，modes 列表（与两个矩阵的列顺序一致）。
     """
-    from .quadrature_points import gauss_legendre
-    from ..grid.curved_mapping.curved_mapping import cube_to_tri_rs, tri_barycentric
+    from ..quadrature_points import gauss_legendre
+    from ...grid.curved_mapping.curved_mapping import cube_to_tri_rs, tri_barycentric
 
     n1d = order + 1
     sps_1d, _ = gauss_legendre(n1d)
@@ -381,7 +381,7 @@ def build_native_tet_boundary_extrap(order: int, excluded_vertex: int) -> np.nda
     但只依赖 `(order, excluded_vertex)`，与具体物理单元形状无关——
     与坍缩坐标方案的 `boundary_extrap_tet[(axis,side)]` 同一个可预计算
     一次、全网格所有同阶数单元共享的性质（已用真实数值验证：两个形状
-    差异很大的四面体，用 `fr/face_flux_points.py::native_tet_face_points_
+    差异很大的四面体，用 `fr/face_flux_points/geometry.py::native_tet_face_points_
     physical` 生成的面物理点，反解出的参考坐标 (r,s,t) 完全相同，机器
     精度，因为反解本质上是在还原生成这些物理点时用过的同一组重心坐标
     权重，这组权重只取决于 (a,b) 采样网格本身，不取决于具体单元形状）。
@@ -391,7 +391,7 @@ def build_native_tet_boundary_extrap(order: int, excluded_vertex: int) -> np.nda
     `(order+1)(order+2)/2`）——这是 Part7 文档"二·五"节记录的必要修正：
     `_KernelFaceData` flat 数组假设全网格所有面的 Flux Points 数量统一，
     native 面必须提供同样数量的点，用与棱柱三角形封盖相同的坍缩三角形
-    采样网格生成面上的参考点位置（见 `face_flux_points.py::
+    采样网格生成面上的参考点位置（见 `face_flux_points/geometry.py::
     native_tet_face_points_physical` 的物理版本，这里是它的参考坐标
     版本，直接给出 (r,s,t) 不需要另外反解）。
 
@@ -438,7 +438,7 @@ def build_native_tet_lift(order: int, excluded_vertex: int) -> np.ndarray:
 
     弱形式提升定义（对每个体积节点基函数 Ψ_s 取矩）：
     `M_phys@LiftedJump_nodal = ∮_face Ψ(x)*jump(x) dA`，右端离散化为
-    该面自己的物理面积权重求积（`w_p`=`fr/face_flux_points_exact_normal.py::
+    该面自己的物理面积权重求积（`w_p`=`fr/face_flux_points/exact_normal.py::
     compute_exact_face_normals_and_weights` 已经算好并验证过的
     `true_area_weight`，本函数只组装参考部分，物理面积权重在残差
     kernel 消费时按面才知道，不在这里，`Lift_ref` 只依赖 `(order,
@@ -479,7 +479,7 @@ def compute_native_tet_jacobian(cell_nodes: np.ndarray) -> Tuple[float, np.ndarr
         adj_j 是 (3,3) 常数伴随矩阵（`det_j*inv(J)`，与 `compute_adj_j`
         输出同一约定），调用方对该单元的每个 SP 都复用同一份。
     """
-    from ..grid.curved_mapping.curved_mapping import batched_det_inv_3x3
+    from ...grid.curved_mapping.curved_mapping import batched_det_inv_3x3
 
     p0, p1, p2, p3 = cell_nodes
     J = 0.5 * np.column_stack([p1 - p0, p2 - p0, p3 - p0])  # (3,3)

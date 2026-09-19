@@ -95,7 +95,7 @@ def compute_viscous_interface_correction_p0_kernel(
     实际跑到过）新发现的缺口：不加判断直接对 native 面读取 `boundary_
     extrap[celltype,oax,...]`/`g_left/g_right[dist_axis_coord_of_sp[
     oax,...]]`，其中 `oax`（`owner_axis`）对 native 面是复用槽位哑值
-    （见 face_flux_points_merge.py"轴槽位复用"说明），会造成越界内存
+    （见 face_flux_points/merge.py"轴槽位复用"说明），会造成越界内存
     访问——真实复现：Windows access violation 段错误（不是 Python
     异常），见 Part8 文档"四、明确未做的后续工作"补记。
     """

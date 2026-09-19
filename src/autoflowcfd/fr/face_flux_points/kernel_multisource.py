@@ -15,18 +15,20 @@ AutoFlowCFD - Multi-source 面插值矩阵 numba 并行 kernel
 import numpy as np
 from numba import njit, prange
 
-from autoflowcfd.fr.face_flux_points_numba import (
+from .kernel import (
     _FACE_AXIS,
     _FACE_SIDE,
     _face_ref_grid_nb,
     _map_ref_nb,
     _newton_locate_nb,
 )
-from autoflowcfd.fr.face_flux_points_helpers_numba import (
+from .face_code_tables import (
+    _NATIVE_PRISM_LO, _NATIVE_TET_HI, _NATIVE_TET_LO,
+)
+from .native_geometry_nb import (
     _tet_native_locate_nb,
     _native_alpha_beta_to_rst_nb,
     _native_interp_matrix_nb, interp_matrix_from_cube_coords_nb,
-    _NATIVE_PRISM_LO, _NATIVE_TET_HI, _NATIVE_TET_LO,
 )
 
 
@@ -59,7 +61,7 @@ def build_ms_interp_parallel(
     （`oc_code`/`nc_code`）恒为 0~5（棱柱专属，见调用方 face_flux_points_
     merge.py 的分组条件），但跨单元的目标（`pn_code`/`sec_code`）可能是
     与之相邻的 native 四面体（code>=6，excluded_vertex=code-6）——两处
-    都需要与 face_flux_points_numba.py::build_fp_newton_parallel 同样的
+    都需要与 face_flux_points/kernel.py::build_fp_newton_parallel 同样的
     native 分支，见下方 pn_code/sec_code 判断处。primary interp 用的
     `nb_fc`/`ow_fc` 已经是主 kernel 算好的 native (alpha,beta) 自由坐标
     （原样存进同一个数组槽位，见 _tet_native_locate_nb 文档），这里只需
@@ -82,7 +84,7 @@ def build_ms_interp_parallel(
 
     nb_sec_resid/ow_sec_resid：(max(n_ms_{nb,ow},1), n_fp) 输出数组，
     Secondary Newton 的逐 Flux Point 残差（sec_rs，绝对长度单位，未归约、
-    未归一化）——之前算出来直接丢弃，现在写回供 face_flux_points_merge.py
+    未归一化）——之前算出来直接丢弃，现在写回供 face_flux_points/merge.py
     按 ~{nb,ow}_mask（secondary 半区掩码）取值校验。混合分组（Secondary
     Newton 被跳过）对应行保持初始化的全零，调用方必须只在非 mixed 索引上
     读取。
@@ -189,7 +191,7 @@ def build_ms_interp_parallel(
         t = face_translation_arr[f]
         ht = abs(t[0]) > 1e-300 or abs(t[1]) > 1e-300 or abs(t[2]) > 1e-300
         if ht:
-            # 真实 bug 修复（同 face_flux_points_numba.py::build_fp_newton_parallel
+            # 真实 bug 修复（同 face_flux_points/kernel.py::build_fp_newton_parallel
             # 的 owner_primary 分支，见该处详细说明）：把 owner 侧物理 FP
             # 平移到 secondary（neighbor 一侧）单元所在区域，必须加
             # translation，此前写成减，残差恰好偏了 2*|translation|。

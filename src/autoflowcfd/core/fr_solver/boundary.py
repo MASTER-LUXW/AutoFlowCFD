@@ -31,7 +31,7 @@ _SEM_DEFAULT_NUM_EDDIES = 200
 def _compute_inlet_fp_positions(solver, face_conn, is_target_face: np.ndarray) -> Dict[int, np.ndarray]:
     """预计算一组边界面各自 Flux Points 的物理坐标。
 
-    Flux Points 几何（fr/face_flux_points.py::FaceFluxPointGeometry）本身
+    Flux Points 几何（fr/face_flux_points/geometry.py::FaceFluxPointGeometry）本身
     不存储物理坐标（只存插值矩阵/法向/面积权重，见 G-01 数值审计发现），
     这里用同一个外插矩阵直接作用在 `mesh.sps_coords`（SPs 的物理坐标场）
     上——外插算子是线性的，对坐标分量和对流场分量做外插是同一个矩阵

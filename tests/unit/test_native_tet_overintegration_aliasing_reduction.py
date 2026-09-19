@@ -27,10 +27,10 @@ order=2 时也不稳定）。改成简单的**线性**剖面（对任何阶数 Q
 import numpy as np
 import pytest
 
-from autoflowcfd.fr.native_simplex_basis import (
+from autoflowcfd.fr.native_tet.basis import (
     build_native_tet_operators, map_native_tet_to_physical, compute_native_tet_jacobian,
 )
-from autoflowcfd.fr.native_tet_overintegration import build_native_tet_overintegration_operators
+from autoflowcfd.fr.native_tet.overintegration import build_native_tet_overintegration_operators
 from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_batch
 from autoflowcfd.fr.collapsed_basis import OVERINTEGRATION_MAX_ORDER
 

@@ -1,12 +1,12 @@
 """AutoFlowCFD V2.0 - 四面体独立（路径C，非坍缩坐标）基函数/微分算子
-单元测试。见 fr/native_simplex_basis.py 模块文档，
+单元测试。见 fr/native_tet/basis.py 模块文档，
 `8_算法重构-微分算子对坍缩坐标退化参考轴的病态条件数-Part6.md` 阶段0。
 """
 
 import numpy as np
 import pytest
 
-from autoflowcfd.fr.native_simplex_basis import (
+from autoflowcfd.fr.native_tet.basis import (
     restricted_tet_modes,
     simplex3d_value,
     simplex3d_grad,
@@ -94,7 +94,7 @@ def test_generate_fr_operators_native_mode_populates_expected_fields():
     # 坍缩基条件数上限约束，那条上限的代价实测 P2 3400 倍、P3 18600 倍，
     # 见 tests/unit/test_overintegration_cap_cost.py）。所以这里不能再用
     # 棱柱的 over_order 去推四面体的细点数。
-    from autoflowcfd.fr.native_tet_overintegration import (
+    from autoflowcfd.fr.native_tet.overintegration import (
         resolve_tet_overintegration_order,
     )
     over_order_tet = resolve_tet_overintegration_order(

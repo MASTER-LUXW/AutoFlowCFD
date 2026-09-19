@@ -395,7 +395,7 @@ def _compute_interface_correction_gpu(
 
     1. **无 owner_is_primary/neighbor_is_primary 过滤**：`owner_src0`/
        `neighbor_src0` 字段的真实语义是"跨单元交叉引用数据，只在对应
-       角色 primary 时才被写入"（见 face_flux_points_merge.py
+       角色 primary 时才被写入"（见 face_flux_points/merge.py
        "kernel 只在 owner_primary[f] 为真...时写入 _nb_interp[f]，其余
        情形保持全零"的说明）——此前这里把它们当"这条记录自己的原生值"
        无条件读取。对约 5% 因棱柱四边形侧面拆分成 2 条记录的面：非
@@ -476,7 +476,7 @@ def _compute_interface_correction_gpu(
             # 此前"native/collapsed crosscheck"测试文件整体
             # `pytest.importorskip("cupy")` 跳过，从未真正执行过这个
             # 组合）：`oax`（owner_axis）对 native 面存的是复用的
-            # excluded_vertex（取值 0~3，见 face_flux_points_merge.py
+            # excluded_vertex（取值 0~3，见 face_flux_points/merge.py
             # 模块文档"owner_axis 对 native 面存的是复用的 excluded_
             # vertex"一节），不是坍缩坐标的真实轴（0~2）——
             # `ff.boundary_extrap` 的轴维度只有 3（0/1/2），native 面

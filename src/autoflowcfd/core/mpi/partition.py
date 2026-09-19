@@ -461,7 +461,7 @@ def extend_halo_for_flux_point_cross_references(
 
     第四次评审发现（真实网格验证）：`build_distributed_partition` 的
     halo 层只由 `face_connectivity` 的直接 owner/neighbor 1-ring 邻接
-    决定，但棱柱四边形侧面的多源交叉插值（`fr/face_flux_points_merge.py`
+    决定，但棱柱四边形侧面的多源交叉插值（`fr/face_flux_points/merge.py`
     的 src0/src1 机制，用于重建跨单元 Flux Point 状态）会引用**不是**
     这个面的直接 neighbor 的其它单元——在 cube_demo 真实网格（37万单元，
     4-rank 简单 block 分区）上实测：16%~19% 的单元存在这类未被基础

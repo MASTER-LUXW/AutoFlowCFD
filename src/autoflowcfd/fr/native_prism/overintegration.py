@@ -49,7 +49,7 @@ rule=2，P1/P2/P3 = 2/4/6）。上限常量存在只为留一个可调旋钮。
 18 vs 坍缩 27；oo=4: 75 vs 125），填充槽位恒为零、零贡献，却让整条
 过积分链在空点上白算，其中 `D_fine` 的收缩是 O(n_fine^2)。粗网格轴
 仍然必须填充到 `(order+1)^3`，因为 `Q` 数组是那个宽度的填充布局（同
-`native_tet_overintegration` 的说明）。
+`native_tet/overintegration.py` 的说明）。
 """
 
 from typing import Tuple

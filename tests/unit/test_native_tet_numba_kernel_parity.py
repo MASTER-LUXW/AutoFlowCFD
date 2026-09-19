@@ -1,5 +1,5 @@
 """AutoFlowCFD V2.0 - native 四面体（路径C）numba 主并行核函数
-(`face_flux_points_numba.py::build_fp_newton_parallel`) 与纯 Python
+(`face_flux_points/kernel.py::build_fp_newton_parallel`) 与纯 Python
 参考实现（`build_cross_interp`/`native_tet_face_points_physical`）的
 决定性一致性验证。
 
@@ -7,7 +7,7 @@
 点位定位/插值矩阵构建逻辑（`_newton_locate_nb`/`_FACE_AXIS` 假设坍缩
 坐标 (axis,side) 语义），与 Python 层已经验证过的 native 分支
 （`locate_native_tet_face_point`/`build_cross_interp`）完全不共享代码，
-必须独立移植（`face_flux_points_helpers_numba.py` 新增的 `_tet_native_
+必须独立移植（`face_flux_points/native_geometry_nb.py` 新增的 `_tet_native_
 locate_nb`/`_native_tet_face_points_nb`/`_native_interp_matrix_nb`）并
 独立验证数值一致——本文件直接调用核函数（构造最小合成连接数组，绕开
 完整网格加载/求解器接入，那是仍然独立、尚未做的后续工作），覆盖两类
@@ -17,14 +17,14 @@ locate_nb`/`_native_tet_face_points_nb`/`_native_interp_matrix_nb`）并
 import numpy as np
 from scipy.linalg import lu_solve
 
-from autoflowcfd.fr.face_flux_points_numba import build_fp_newton_parallel
+from autoflowcfd.fr.face_flux_points.kernel import build_fp_newton_parallel
 from autoflowcfd.fr.face_flux_points import (
     _get_v_sps_lu_native,
     build_cross_interp,
     native_tet_face_points_physical,
     face_ref_grid,
 )
-from autoflowcfd.fr.face_flux_points_locate import map_ref_points
+from autoflowcfd.fr.face_flux_points.locate import map_ref_points
 from autoflowcfd.fr.quadrature_points import gauss_legendre
 
 
@@ -56,7 +56,7 @@ def _run_kernel_single_face(
     native_mode_k = np.array([m[2] for m in modes_native], dtype=np.int32)
     # 坍缩坐标 V_sps_inv 必须真算（不能用零占位）：即便本测试的 owner/
     # neighbor 至少一侧恒为 native，另一侧（棱柱或坍缩四面体）仍然是
-    # 真实的坍缩坐标插值目标，与 face_flux_points_merge.py 生产调用处
+    # 真实的坍缩坐标插值目标，与 face_flux_points/merge.py 生产调用处
     # 完全一样的构造方式——这里只有真正"整个网格不含该单元类型"时才
     # 应该用零占位（那种情况下对应分支确实永远不会被执行到）。
     from autoflowcfd.fr.face_flux_points import _get_v_sps_lu
@@ -80,7 +80,7 @@ def _run_kernel_single_face(
         v_sps_inv_native, native_mode_i, native_mode_j, native_mode_k,
         # 原生**棱柱**的零占位（本测试只造原生四面体面，编码 [10,15)
         # 不出现，kernel 内对应分支永不执行 —— 与生产里
-        # `face_flux_points_merge.py` 的 `has_native_prism=False` 同一路径）
+        # `face_flux_points/merge.py` 的 `has_native_prism=False` 同一路径）
         np.zeros((0, 0)), np.zeros(0, dtype=np.int32),
         np.zeros(0, dtype=np.int32), np.zeros(0, dtype=np.int32),
     )

@@ -406,7 +406,7 @@ def _build_native_tet_vtk_lagrange_export_data(order: int) -> Tuple[np.ndarray, 
     native 基下这条路径实际上更直接：VTK 节点的重心坐标本身就是四面体
     单纯形基的原生参数化，不需要经过任何坍缩坐标的解析求逆——
     `r=2*L1-1, s=2*L2-1, t=2*L3-1`（`L0,L1,L2,L3` 是重心坐标，
-    与 `native_simplex_basis.py::_native_face_value_vandermondes`
+    与 `native_tet/basis.py::_native_face_value_vandermondes`
     构造面 Vandermonde 时用的同一个线性映射，验证方式同源）。物理坐标
     同样直接用重心坐标仿射组合（`map_native_tet_to_physical` 同一个
     公式），不经过任何参考立方体中间表示。
@@ -421,7 +421,7 @@ def _build_native_tet_vtk_lagrange_export_data(order: int) -> Tuple[np.ndarray, 
         插值，调用方（`export_highorder_vtk`）对四面体单元的场数据要
         先按 `[:n_native]` 切片，不能像棱柱那样直接用完整宽度。
     """
-    from ..fr.native_simplex_basis import (
+    from ..fr.native_tet.basis import (
         build_native_tet_operators, restricted_tet_modes, simplex3d_value, rst_to_abc,
     )
     from ..grid.curved_mapping.curved_mapping import tet_barycentric
@@ -492,7 +492,7 @@ def export_highorder_vtk(
 
     from ..core.fr_residual.inviscid import conserved_to_primitive
     from ..grid.curved_mapping.curved_mapping import map_prism_to_physical, tet_barycentric
-    from ..fr.native_simplex_basis import build_native_tet_operators
+    from ..fr.native_tet.basis import build_native_tet_operators
 
     order = mesh.order
     n_prism_check = mesh.n_prism_cells

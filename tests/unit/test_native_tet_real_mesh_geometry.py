@@ -1,7 +1,7 @@
 """AutoFlowCFD V2.0 - 四面体路径C（native basis）在真实网格连接关系上
 的几何/体积残差验证（Part6 阶段1，体积项部分）。
 
-区别于 `test_native_simplex_basis.py`（用手造的随机四面体样本）：本文件
+区别于 `test_native_tet.basis.py`（用手造的随机四面体样本）：本文件
 复用 `test_fr_residual_inviscid.py::_build_synthetic_mixed_mesh` 构造的
 **真实通过 `HighOrderMesh.load_from_volume_mesh` 生产管线加载**的网格，
 提取其中真实的四面体连接关系（`mesh._fixed_tet_conn`/`_node_coords`），
@@ -12,7 +12,7 @@
 
 import numpy as np
 
-from autoflowcfd.fr.native_simplex_basis import (
+from autoflowcfd.fr.native_tet.basis import (
     build_native_tet_operators,
     map_native_tet_to_physical,
     compute_native_tet_jacobian,

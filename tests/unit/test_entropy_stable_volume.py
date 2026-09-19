@@ -13,7 +13,7 @@ from autoflowcfd.core.fr_operators.flux_kernels import (
     euler_physical_flux_point,
     entropy_stable_volume_divergence_batch,
 )
-from autoflowcfd.fr.native_simplex_basis import (
+from autoflowcfd.fr.native_tet.basis import (
     build_native_tet_operators, map_native_tet_to_physical, compute_native_tet_jacobian,
 )
 from autoflowcfd.fr.operators import generate_fr_operators

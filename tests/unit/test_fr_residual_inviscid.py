@@ -313,7 +313,7 @@ class TestFreeStreamPreservation:
     # P=2 容差从 1e-7 放宽到 3e-5（G-04 跨单元插值统一 + S-02 体积项
     # 去混叠两项修复的共同后果，均见
     # ProjectFiles/V2.0/6_整体专家组二次评审.md）：
-    # 1. 跨单元插值（fr/face_flux_points.py::build_cross_interp）此前用
+    # 1. 跨单元插值（fr/face_flux_points/geometry.py::build_cross_interp）此前用
     #    与 owner 侧自身外插不同的朴素张量积 Lagrange 基，两者在同一
     #    物理点上最大相差 2070（G-04 缺陷 9），已改为与 owner 侧同源的
     #    坍缩坐标模态基，用 scipy.linalg.lu_solve 而不是显式求逆控制

@@ -17,9 +17,14 @@ import numpy as np
 import pytest
 
 from autoflowcfd.core.fr_operators.troubled_cell import (
-    _median_abs_over_sps_kernel,
     precompute_cell_face_misalignment,
     suppress_residual_outliers,
+)
+# 私有 kernel 从它**真正的**所在模块导入，而不是靠 troubled_cell
+# 的 re-export（那里只 re-export 三个公开名；机制3 已于 2026-09-19
+# 拆到 residual_outliers.py，见该模块文档）。
+from autoflowcfd.core.fr_operators.residual_outliers import (
+    _median_abs_over_sps_kernel,
 )
 
 
@@ -123,7 +128,7 @@ def _reference_cell_face_misalignment(mesh):
     1.88M such constructions measured to cost minutes on a production mesh,
     see `_cell_face_misalignment_kernel`'s docstring for the fix).
 
-    Updated 2026-08-23 (see fr/face_flux_points_exact_normal.py module
+    Updated 2026-08-23 (see fr/face_flux_points/exact_normal.py module
     docstring): `own_dir_outward` used to be computed here via its own
     independent SP-grid Lagrange extrapolation of `adj_j` - an
     *approximation* of the true local metric direction, with real
@@ -136,7 +141,7 @@ def _reference_cell_face_misalignment(mesh):
     the new kernel against a stale, less-accurate approximation of a
     different quantity.
     """
-    from autoflowcfd.fr.face_flux_points_exact_normal import compute_exact_adj_rows
+    from autoflowcfd.fr.face_flux_points.exact_normal import compute_exact_adj_rows
 
     fc = mesh.face_connectivity
     ffp_list = mesh.face_flux_points

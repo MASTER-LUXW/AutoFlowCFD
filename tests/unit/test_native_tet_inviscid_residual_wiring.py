@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 
 from autoflowcfd.core.fr_residual.inviscid import compute_inviscid_residual_fr, primitive_to_conserved
-from autoflowcfd.fr.native_simplex_basis import build_native_tet_operators
+from autoflowcfd.fr.native_tet.basis import build_native_tet_operators
 
 from .test_native_tet_mesh_geometry_wiring import _build_synthetic_mixed_mesh
 
@@ -40,7 +40,7 @@ def test_native_mesh_free_stream_preservation(order, rel_tol):
     真实 bug 修复记录（本文件开发过程中发现，不是理论推导）：最初这里
     native 四面体残差在 order=1 时高达相对 1e6（灾难性），排查定位到
     一个此前完全独立、未被 Part7/8 的 code_arr 修复覆盖到的重复实现——
-    `face_flux_points_exact_normal_kernel.py::compute_exact_adj_rows_
+    `face_flux_points/exact_normal_kernel.py::compute_exact_adj_rows_
     fast`（一个专为大网格做性能优化、与 `face_flux_points_exact_
     normal.py::compute_exact_adj_rows` 逻辑重复的独立 numba kernel）。
     该 kernel 把 native 面的 excluded_vertex 直接当坍缩坐标 axis 使用，

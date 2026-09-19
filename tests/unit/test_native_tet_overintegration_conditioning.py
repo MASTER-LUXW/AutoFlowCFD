@@ -13,7 +13,7 @@ AutoFlowCFD V2.0 - native 四面体过积分算子的条件数/量级实测钉�
 
 这整条链条是对**坍缩坐标张量积**基做的。坍缩四面体基已于 2026-09-03
 删除，四面体现在走 native 受限 PKD/Dubiner 基——单纯形上的**正交**基。
-而 `fr/native_tet_overintegration.py` 的模块文档当时写的是"两套基没有
+而 `fr/native_tet/overintegration.py` 的模块文档当时写的是"两套基没有
 理由用不同的过积分阶数选择"，把两件独立的事混成了一件：
 
   * `over_order = rule * order` 是与基无关的去混叠经验法则（这句对）
@@ -35,7 +35,7 @@ over_order=3 到 6 只长 3.5 倍（坍缩基同区间暴涨 6.3 万倍）。**�
 
 ## 上限已于 2026-09-17 放开（本文件的数据是那次放开的依据）
 
-四面体的过积分阶数已独立出去（`fr/native_tet_overintegration.py::
+四面体的过积分阶数已独立出去（`fr/native_tet/overintegration.py::
 NATIVE_TET_OVERINTEGRATION_MAX_ORDER = 6`，env `AFCFD_TET_OVERINT_MAX_ORDER`），
 P1/P2/P3 都取到理想的 `2*order`（2/4/6）。
 
@@ -64,7 +64,7 @@ import numpy as np
 import pytest
 
 from autoflowcfd.fr.collapsed_basis import OVERINTEGRATION_MAX_ORDER
-from autoflowcfd.fr.native_simplex_basis import (
+from autoflowcfd.fr.native_tet.basis import (
     build_native_tet_operators,
     restricted_tet_modes,
     rst_to_abc,

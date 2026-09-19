@@ -1,11 +1,11 @@
-"""AutoFlowCFD V2.0 - `face_flux_points_locate.py` 重构(共享重心坐标
+"""AutoFlowCFD V2.0 - `face_flux_points/locate.py` 重构(共享重心坐标
 求解) + 新增 `locate_native_tet_face_point` 单元测试（Part7 阶段2
 第二节）。
 """
 
 import numpy as np
 
-from autoflowcfd.fr.face_flux_points_locate import (
+from autoflowcfd.fr.face_flux_points.locate import (
     _tet_exact_locate_on_face,
     locate_native_tet_face_point,
 )

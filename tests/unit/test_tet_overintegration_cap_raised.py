@@ -79,7 +79,7 @@ from autoflowcfd.fr.collapsed_basis import (
     OVERINTEGRATION_MAX_ORDER,
     resolve_overintegration_order_rule,
 )
-from autoflowcfd.fr.native_tet_overintegration import (
+from autoflowcfd.fr.native_tet.overintegration import (
     NATIVE_TET_OVERINTEGRATION_MAX_ORDER,
     native_tet_n_fine,
     resolve_tet_overintegration_max_order,

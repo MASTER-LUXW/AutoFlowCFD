@@ -10,7 +10,7 @@ native 哪套基函数无关，native 单纯形基同样需要它。
 网格在 order>=1 时无条件构造 `jacobians_fine` 与本文件的三件套。）
 
 本文件的三件套与 `build_overintegration_operators` 逐项对应，只是
-换成 native 单纯形基（`native_simplex_basis.py` 的受限 PKD 模态 +
+换成 native 单纯形基（`native_tet/basis.py` 的受限 PKD 模态 +
 Warp&Blend 节点），数学结构完全一致：
 1. `interp_c2f`：**COARSE 阶数**模态基在 FINE 点上取值——Q 本身次数
    <=order，这一步是精确插值，不引入混叠。
@@ -55,11 +55,11 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from .overintegration_order import (
+from ..overintegration_order import (
     resolve_native_overintegration_max_order,
     resolve_native_overintegration_order,
 )
-from .native_simplex_basis import (
+from .basis import (
     build_native_tet_operators,
     restricted_tet_modes,
     simplex3d_value,

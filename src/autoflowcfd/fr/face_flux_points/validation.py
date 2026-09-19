@@ -1,6 +1,6 @@
 """FR Flux Points 几何组装——Newton/精确点位定位残差分级校验与诊断汇总。
 
-从 face_flux_points_merge.py 拆出（该文件原有 745 行，超过项目 600 行
+从 face_flux_points/merge.py 拆出（该文件原有 745 行，超过项目 600 行
 硬性拆分阈值；`build_face_flux_points` 主循环产出逐面 Newton/精确点位
 残差数组后，末尾这段"按 ACCEPT_STRICT_REL/_ACCEPT_WARN_REL 分级校验、
 写诊断 JSON、超差即 raise"的逻辑是一个自成一体的收尾步骤——只读取
@@ -15,8 +15,8 @@ from typing import List
 import numpy as np
 from loguru import logger
 
-from autoflowcfd.fr.face_flux_points import ACCEPT_STRICT_REL
-from autoflowcfd.fr.face_flux_points_locate import _ACCEPT_WARN_REL
+from .geometry import ACCEPT_STRICT_REL
+from .locate import _ACCEPT_WARN_REL
 
 
 def validate_face_flux_point_residuals(
@@ -45,7 +45,7 @@ def validate_face_flux_point_residuals(
     与任何阈值比较——真正不相容的网格拓扑（T-junction、BL 挤出产生的
     非协调面等）会被 Newton 跑满迭代次数后返回一个可能远超容差的"最优
     逼近"插值矩阵，且没有任何警告或报错。旧的纯 Python 慢速路径
-    （face_flux_points_locate.py::newton_locate_on_face）里这个校验是完整的：
+    （face_flux_points/locate.py::newton_locate_on_face）里这个校验是完整的：
     残差相对局部面特征尺度 char_length=sqrt(area) 超过 _ACCEPT_WARN_REL
     （15%）直接 raise；未超但超过 ACCEPT_STRICT_REL（1e-6，即非机器精度）
     记入 _tolerated 仅做日志。这里用向量化 numpy 操作复现同一套判据，

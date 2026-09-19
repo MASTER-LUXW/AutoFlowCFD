@@ -43,7 +43,7 @@ from autoflowcfd.core.fr_operators.volume_contract import (
     contract_shared_operator_2axis,
     contravariant_flux_from_metric,
 )
-from autoflowcfd.fr.native_tet_overintegration import (
+from autoflowcfd.fr.native_tet.overintegration import (
     build_native_tet_overintegration_operators,
 )
 from autoflowcfd.fr.native_padding import pad_native_matrix_to_global
@@ -72,7 +72,7 @@ def _over_order_tet(order):
     与棱柱共用的 jacobians_fine 布局宽度"三重约束定。P2 因此是 4（不是 3），
     P3 是 5（理想 6 被布局夹住）。
     """
-    from autoflowcfd.fr.native_tet_overintegration import (
+    from autoflowcfd.fr.native_tet.overintegration import (
         resolve_tet_overintegration_order,
     )
     return resolve_tet_overintegration_order(order, (_over_order(order) + 1) ** 3)

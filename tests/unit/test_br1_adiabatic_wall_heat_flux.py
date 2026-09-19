@@ -398,7 +398,7 @@ def test_default_ghost_provider_behavior_is_bit_identical(order, monkeypatch):
 # ---------------------------------------------------------------------------
 #
 # 为什么要手工合成：B-8 混合拆分面是 BL 挤出在几何尖角棱处产生拓扑缝隙的
-# 固有产物（见 fr/face_flux_points_merge.py 的"混合分组检测"一节），只在
+# 固有产物（见 fr/face_flux_points/merge.py 的"混合分组检测"一节），只在
 # 真实带边界层的网格上出现——`_build_synthetic_mixed_mesh` 实测
 # `mixed_nb_partner`/`mixed_ow_partner` **全为 -1**，也就是说本文件前面
 # 那些端到端用例一次都没有走进这两个分支。

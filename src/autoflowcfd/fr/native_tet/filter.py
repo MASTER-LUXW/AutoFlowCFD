@@ -7,7 +7,7 @@ modal_filter` 按 `max(i,j,k)/order` 归一化——这是坍缩坐标"扩展张
 真实四面体多项式空间维度的冗余自由度）的专属判据，该模块文档明确记录
 了"总阶数 i+j+k 归一化在四面体上会放大随机白噪声"这一真实反例。
 
-native 基（`native_simplex_basis.py`）不是同一个数学对象：模态严格是
+native 基（`native_tet/basis.py`）不是同一个数学对象：模态严格是
 `i+j+k<=order` 的最小 PKD/Dubiner 单纯形基，`i+j+k` 本身就是标准意义
 下的多项式总阶数（不含任何冗余自由度）——这是 Hesthaven-Warburton
 《Nodal DG》原书对单纯形谱元用的标准指数滤波器归一化方式，不是需要
@@ -22,8 +22,8 @@ Vandermonde —— 那才是两套基真正不同的地方。
 
 import numpy as np
 
-from .modal_filter import assemble_modal_filter
-from .native_simplex_basis import (
+from ..modal_filter import assemble_modal_filter
+from .basis import (
     build_native_tet_operators,
     restricted_tet_modes,
     simplex3d_value,

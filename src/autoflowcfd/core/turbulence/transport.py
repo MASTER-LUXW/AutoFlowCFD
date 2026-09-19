@@ -624,7 +624,7 @@ def compute_scalar_convection_residual(
     # `F_common_n * adj_mag`（adj_mag 归一化只用于方向对齐检查，幅值随后乘回）、
     # viscous_flux_kernel.py L182 `adjrow_o · G`。缺这个 ~O(h²) 因子会把校正放大
     # ~1/h²（细网格 10²~10³ 倍）。true_normal 是单位向量（见
-    # face_flux_points_exact_normal.py），必须补回 |adj_row|。
+    # face_flux_points/exact_normal.py），必须补回 |adj_row|。
     #
     # native 四面体（路径C）真实 bug 修复（2026-08-30，见
     # transport_kernel.py::distribute_corrections_to_cells_kernel 文档）：

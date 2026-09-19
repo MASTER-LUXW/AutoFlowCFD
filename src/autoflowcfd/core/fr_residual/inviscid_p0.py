@@ -36,7 +36,7 @@ def compute_inviscid_residual_fv_p0(
     保证闭合单元面积/法向积分 Σ(n̂·A)=0"——只在旧的 true_normal/
     true_area_weight 实现（每条三角化子面记录各自是真实的局部半面
     几何）下成立。当天引入的"逐 Flux Point 精确法向"修复
-    （face_flux_points_exact_normal.py）把 true_normal/true_area_weight
+    （face_flux_points/exact_normal.py）把 true_normal/true_area_weight
     改成了 (owner_cell,owner_axis,owner_side) 的纯函数，棱柱四边形
     侧面的 2 条拆分记录因此变成完全相同的"整张四边形面"的值——不再
     过滤 owner_is_primary 就会让几乎所有棱柱四边形侧面的通量被
@@ -151,7 +151,7 @@ def _extract_p0_face_geometry(ffp_list, fc, n_faces: int):
         unit_normals: (n_faces, 3) float64
         area_weights: (n_faces,) float64
     """
-    from autoflowcfd.fr.face_flux_points_data import _KernelFaceData
+    from autoflowcfd.fr.face_flux_points.data import _KernelFaceData
 
     if not isinstance(ffp_list, _KernelFaceData):
         # 慢速路径：逐面提取（仅在非 _KernelFaceData 时，不做棱柱四边形

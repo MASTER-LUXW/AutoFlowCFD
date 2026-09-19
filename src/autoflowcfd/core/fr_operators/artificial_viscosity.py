@@ -176,7 +176,7 @@ def _build_native_tet_sensor_operators(order: int):
     if order in _native_tet_sensor_cache:
         return _native_tet_sensor_cache[order]
 
-    from autoflowcfd.fr.native_simplex_basis import (
+    from autoflowcfd.fr.native_tet.basis import (
         build_native_tet_operators, restricted_tet_modes, rst_to_abc,
         simplex3d_value,
     )

@@ -56,81 +56,29 @@ Barth-Jespersen 型：一个单元"可疑"当且仅当它的解点值**超出了
 第一项让"邻域本身变化就很小"的光滑区自动失活（相对判据），第二项是
 绝对地板，防止 `nb_max == nb_min` 的均匀区因浮点噪声触发。
 
-## 实测依据（2026-09-16，plate_demo_volume_les iter 100）
+## 标定与"为什么不外科"（数据表见 ProjectFiles）
 
-按 `tol = 0` 量这个越界量（`scratchpad/plate/diag_slope_overshoot.py`）：
+在 plate_demo_volume_les iter 100 的真实守恒场上做过完整标定，两条结论
+决定了本判据现在的形态，完整数据表见
+`ProjectFiles/V2.0/20_判据标定-BJ型越界判据在真实网格上的定量标定.md`：
 
-    变量   越界量最大值/场尺度   越界单元占比   体积最小1%单元的越界贡献
-    rho          0.249 (25%)        16.59%              35.4%
-    p            0.665 (66%)        17.91%              37.1%
-    u           12.18               19.23%              16.8%
+1. **绝对地板必须用来流参考量级**，不能用"全场 cell_mean 的 RMS"。后者
+   对 `rho_v`/`rho_w` 这类"大部分域内均值约 0、RMS 被尾迹局部主导"的
+   变量既不是局部量级也不是物理量级，标记比例 11.08%；改用
+   `ref_scales`（与 `fr_solver/residual_diagnostics.py::_reference_scales`
+   同一套构造）后降到 8.43%。
+2. **越界并不集中在退化单元**：要把标记比例压到 3.68%，体积最小 1% 单元
+   的召回就掉到 42.7%；要保住 98.9% 的召回就得标记 8.43% 的计算域，两头
+   不可兼得。这说明"网格质量门 + 耗散"这条既定路线的**耗散那一半在这类
+   网格上做不成外科式的**，瓶颈仍然是网格（与项目记忆
+   `industry_practice_degenerate_cell_gcl` 一致，这是第一份定量数据）。
 
-体积最小 1% 的单元贡献了越界总量的 17~37%（超出其占比 17~37 倍），而
-同一份 checkpoint 的空间诊断显示超压点 99.8% 挤在板侧边 2.2mm 内、81%
-属于体积最小 1% 的单元。**判据对症**（坏单元确实主导越界量），但
-**不外科**（另有 16~19% 的单元存在小幅越界）——这正是必须带 `rel_tol`
-而不能用裸 BJ 的原因。
-
-## 第一版用"全场 cell_mean 的 RMS"做绝对地板尺度为什么不行（2026-09-16 实测）
-
-事先写定的判据是"默认容差下标记比例 <= 3% 且多数是小体积单元 -> 可用；
->= 10% -> 太松"。在 plate_demo_volume_les iter 100 的真实守恒场上实测
-（`scratchpad/plate/diag_bounds_mask.py`）：
-
-    rel_tol  abs_frac   标记比例    其中小体积   小体积召回
-      0.000   0.0e+00   96.878%        1.0%      100.0%
-      0.000   1.0e-03   11.086%        9.0%       99.7%
-      0.100   1.0e-03   11.083%        9.0%       99.7%
-      0.500   1.0e-03    9.001%       10.3%       92.5%
-      0.100   1.0e-01    7.127%       13.7%       97.9%
-
-**判据不通过**：默认 11.08%，而且 `rel_tol` 从 0.05 扫到 0.5 几乎无效
-（11.1% -> 9.0%），说明违反量根本不是由"邻域跨度"这一项决定的。
-
-原理性成因（不是调参问题）：`abs_frac * RMS(cell_mean)` 用的是**全场**
-单元均值的 RMS 做尺度。对 `rho_v` / `rho_w` 这类"大部分域内均值≈0、
-RMS 被尾迹局部主导"的变量，这个尺度既不是局部量级、也不是物理量级
-——自由来流区里微小的横向动量脉动会被拿去和一个由尾迹决定的尺度比。
-
-修正（用项目自己早就在用的那套尺度，不是为了让数字好看而挑的）：
-绝对地板改用**来流参考量级** `ref_scales`
-（`[rho_inf, rho_inf*vel_inf, rho_inf*vel_inf, rho_inf*vel_inf, p_inf]`，
-与 `fr_solver/residual_diagnostics.py::_reference_scales` 同一套构造、
-同一套理由——包括 rho_E 用 p_inf 而不是 rho_inf*vel_inf^2）。
-
-## 改用来流参考量级之后的实测，以及**为什么默认仍然是关闭的**
-
-同一份 checkpoint、绝对地板改用来流参考量级
-`[1.225, 40.83, 40.83, 40.83, 101325]` 重测：
-
-    rel_tol  abs_frac   标记比例   其中小体积   小体积召回
-      0.000   0.0e+00   96.878%       1.0%      100.0%
-      0.000   1.0e-03   10.951%       9.1%       99.7%
-      0.100   1.0e-03    8.431%      11.7%       98.9%   <- 默认容差
-      0.500   1.0e-03    4.949%      16.0%       79.1%
-      0.100   1.0e-01    3.676%      11.6%       42.7%
-
-从 11.08% 改善到 8.43%，但**事先写定的判据（<=3% 标记比例且高召回）
-仍然不满足**：要把标记比例压到 3.68%，体积最小 1% 单元的召回就掉到
-42.7%（漏掉一半以上的退化单元）；要保住 98.9% 的召回，就得标记 8.43%
-的计算域。两头不可兼得。
-
-这个负面结果本身是有信息量的：**越界并不集中在退化单元**。8~11% 的
-计算域都有超出邻居均值区间的内容——在相邻单元体积比达 32.95、非正交
-达 81.92 度的网格上这说得通，因为 BJ 的"邻居均值区间"本身就被悬殊的
-单元尺度扭曲了。也就是说，"网格质量门 + 耗散"这条既定路线的**耗散
-那一半在这类网格上无法做成外科式的**，真正的瓶颈仍然是网格
-（与 [[industry_practice_degenerate_cell_gcl]] 的结论一致，本次是第一次
-有定量数据支持它）。
-
-因此本判据**默认关闭**（`AFCFD_TROUBLED_SENSOR` 默认 `persson`），
-定位是：
-  1. P1 上**唯一可用**的 troubled-cell 判据（Persson-Peraire 在 P1
-     原理上不适用），供受控 A/B 与诊断使用；
-  2. 一个可量化的"解的单调性越界"指标，可以直接回答"这张网格上有多少
-     比例的域承载了非物理过冲"。
-
-它**不是**稳定性问题的解决方案，不要这样引用。
+本判据**不是**稳定性问题的解决方案，不要这样引用。它的定位是：P1 上
+唯一可用的 troubled-cell 判据（Persson-Peraire 在 P1 原理上不适用），
+以及一个可量化的"解的单调性越界"指标。默认值见
+`troubled_sensor_mode.py::resolve_troubled_sensor`（2026-09-17 起是
+`bounds`，真实网格上让 `legacy` 的"iter 112 发散"变成"216 步残差单调
+下降 3.5 倍"）。
 
 ## 施加方式与守恒性
 
@@ -521,48 +469,7 @@ def compute_bounds_violation_mask(
     return mask if mask is not None else xp.zeros(n_cells, dtype=bool)
 
 
-def resolve_troubled_sensor(value: Optional[str] = None) -> str:
-    """解析 `AFCFD_TROUBLED_SENSOR`：`persson` | `bounds` | `both`。
-
-    **默认 `bounds`（2026-09-17 从 `persson` 改）。**
-
-    为什么改：Persson-Peraire 在 `order=1` 上**原理性退化**（`s0 =
-    -4*log10(order)` 在 order=1 时为 0，触发门限成了"顶模态能量占比
-    >= 10%"，而 P1 的顶模态就是全部非常数内容），而且它探的是守恒密度
-    ——真实解上那一项是光滑的，掩码实测 **0.000%**（同一时刻 `rho_v`/
-    `rho_w` 是 98.8%）。所以 `persson` 在 P1 上等于**没有门控**：实测
-    `AFCFD_FILTER_MODE=sensor` + `persson` 与 `FILTER_MODE=off` **逐位
-    相同**（平板边界层算例 res 1.6658e+05）。
-
-    与 `AFCFD_FILTER_MODE=sensor` 必须**成对**使用（同日一起改默认）：
-    只改一个等于把默认值悄悄改成 `off`。三档在 P1 上的实测对照见
-    `fr/modal_filter.py` 里 `_FILTER_MODE` 上方那节。
-
-    真实网格上的决定性证据（plate_demo_volume_les，179,237 单元）：
-    `legacy` 在 iter 112 发散，而 `sensor`+`bounds` 跑出 216 步残差
-    **单调下降 3.5 倍**，Cd 漂移从零曲率的线性 0.0167/步变成负曲率的
-    0.0071 -> 0.0042/步。等熵涡精确解上 P1 的收敛阶保住 2.16/2.18
-    （设计阶 2）。
-
-    `persson` 保留为合法档：它在 order>=2 上判据本身是有效的，且是复现
-    历史结果的唯一途径。
-
-    Raises:
-        ValueError: 取值非法（不静默回退，理由同
-            `fr_operators/kernels.py::resolve_ausm_precond_mode`：静默回退
-            会让一次拼写错误伪装成默认行为、把 A/B 的两条运行悄悄变成
-            同一档）。
-    """
-    import os
-
-    if value is None:
-        value = os.environ.get("AFCFD_TROUBLED_SENSOR", "").strip()
-        if not value:
-            return "bounds"
-    key = str(value).strip().lower()
-    if key in ("persson", "bounds", "both"):
-        return key
-    raise ValueError(
-        f"AFCFD_TROUBLED_SENSOR 取值非法: {value!r}；"
-        f"合法值 ['bounds', 'both', 'persson']"
-    )
+# 档位解析（`AFCFD_TROUBLED_SENSOR`）已拆到 `troubled_sensor_mode.py`
+# （2026-09-19，项目"单文件不超 500 行"规范）。这里 re-export，全仓库
+# `from ...bounds_sensor import resolve_troubled_sensor` 不用改。
+from .troubled_sensor_mode import resolve_troubled_sensor  # noqa: E402,F401

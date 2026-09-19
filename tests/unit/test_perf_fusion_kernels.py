@@ -26,8 +26,13 @@ from autoflowcfd.core.fr_operators.volume_contract import (
 from autoflowcfd.core.fr_operators.troubled_cell import (
     RESIDUAL_OUTLIER_FACTOR,
     RESIDUAL_OUTLIER_FIELD_REL_FLOOR,
-    _median_abs_over_sps_kernel,
     suppress_residual_outliers,
+)
+# 私有 kernel 从它**真正的**所在模块导入，而不是靠 troubled_cell
+# 的 re-export（那里只 re-export 三个公开名；机制3 已于 2026-09-19
+# 拆到 residual_outliers.py，见该模块文档）。
+from autoflowcfd.core.fr_operators.residual_outliers import (
+    _median_abs_over_sps_kernel,
 )
 from autoflowcfd.core.turbulence.sst import compute_strain_and_vorticity_magnitude
 from autoflowcfd.core.turbulence.transport_kernel import scalar_convection_volume_kernel

@@ -17,7 +17,7 @@
 import numpy as np
 from scipy.linalg import lu_factor, lu_solve
 
-from autoflowcfd.fr.native_simplex_basis import (
+from autoflowcfd.fr.native_tet.basis import (
     build_native_tet_operators,
     simplex3d_value,
     restricted_tet_modes,

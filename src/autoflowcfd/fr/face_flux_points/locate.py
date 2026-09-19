@@ -39,7 +39,7 @@ _NEWTON_TOL_REL = 1e-10  # 收敛判据：相对局部面特征尺度（不是�
 # 离散化都有的截断误差），不是算法缺陷；15% 的阈值留有余量覆盖这一真实
 # 分布的同时，仍能可靠地把"真正不相容/断裂的面"（残差应远超此量级，
 # 通常是数量级的差异）与"翘曲但合法的面"区分开——超过阈值报错中止而不是
-# 静默放宽，接受阈值内的情形也会被完整记录（见 face_flux_points_merge.py
+# 静默放宽，接受阈值内的情形也会被完整记录（见 face_flux_points/merge.py
 # 的 tolerated 汇总日志），不是简化或掩盖。
 _ACCEPT_WARN_REL = 0.15
 
@@ -136,9 +136,9 @@ def _tet_exact_locate_on_face(
 def locate_native_tet_face_point(
     cell_nodes: np.ndarray, excluded_vertex: int, targets_phys: np.ndarray, char_length: float = 1.0
 ) -> Tuple[np.ndarray, float]:
-    """路径C（native basis，见 `fr/native_simplex_basis.py`）版本的精确
+    """路径C（native basis，见 `fr/native_tet/basis.py`）版本的精确
     点位定位：四面体某个真实面（对面被排除的局部顶点 `excluded_vertex`
-    给定，编码约定与 `native_simplex_basis.py::face_node_indices` 一致）
+    给定，编码约定与 `native_tet/basis.py::face_node_indices` 一致）
     上一批目标物理点，直接给出它们在四面体**自己的原生参考坐标**
     `(r,s,t)` 里的位置。
 
@@ -156,7 +156,7 @@ def locate_native_tet_face_point(
         `_tet_exact_locate_on_face` 的调用惯例一致，供调用方按
         `char_length` 分级处理。
     """
-    from ..grid.curved_mapping.curved_mapping import tet_barycentric
+    from ...grid.curved_mapping.curved_mapping import tet_barycentric
 
     face_vertex_idx = tuple(v for v in range(4) if v != excluded_vertex)
     L = _tet_solve_barycentric_on_face(cell_nodes, face_vertex_idx, targets_phys)

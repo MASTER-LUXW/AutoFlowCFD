@@ -9,7 +9,7 @@ axis 槽位存储会与真坍缩坐标语义数值碰撞——本文件验证修
 
 import numpy as np
 
-from autoflowcfd.fr.face_flux_points_exact_normal import compute_exact_face_normals_and_weights
+from autoflowcfd.fr.face_flux_points.exact_normal import compute_exact_face_normals_and_weights
 from autoflowcfd.fr.quadrature_points import gauss_legendre
 
 # 一个真实、非退化、正体积（右手系）四面体
@@ -44,7 +44,7 @@ def test_native_tet_face_normal_matches_cross_product_reference_all_excluded_ver
     for ev in range(4):
         code = 6 + ev
         owner_cell = np.array([0], dtype=np.int64)
-        # owner_axis/owner_side：模拟 face_flux_points_merge.py 实际会
+        # owner_axis/owner_side：模拟 face_flux_points/merge.py 实际会
         # 传入的、复用 axis 槽位存 excluded_vertex 的占位值（对 ev=0,1,2
         # 会恰好与真坍缩坐标 (axis,-1.0) 条目数值相同——这正是本测试要
         # 确认已被 owner_code 分派规避掉的碰撞）。

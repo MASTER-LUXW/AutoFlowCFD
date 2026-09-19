@@ -5,7 +5,7 @@
 
 import numpy as np
 
-from autoflowcfd.fr.native_simplex_basis import (
+from autoflowcfd.fr.native_tet.basis import (
     build_native_tet_operators,
     build_native_tet_boundary_extrap,
     map_native_tet_to_physical,

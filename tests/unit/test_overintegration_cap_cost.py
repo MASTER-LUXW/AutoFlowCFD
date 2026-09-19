@@ -10,7 +10,7 @@
 
 ## 后续（2026-09-17）：本文件量出的收益已经被兑现
 
-四面体的上限已按单元类型独立出去（`fr/native_tet_overintegration.py::
+四面体的上限已按单元类型独立出去（`fr/native_tet/overintegration.py::
 NATIVE_TET_OVERINTEGRATION_MAX_ORDER = 6`，env `AFCFD_TET_OVERINT_MAX_ORDER`），
 实际取到 P1 oo=2 / P2 oo=4（**完整达到理想**）/ P3 oo=5。"要改 jacobians_fine
 布局"那条前提被推翻了：直边四面体的细点度量是一个逐单元常数的原样广播，
@@ -74,12 +74,12 @@ import pytest
 
 from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_batch
 from autoflowcfd.fr.collapsed_basis import OVERINTEGRATION_MAX_ORDER
-from autoflowcfd.fr.native_simplex_basis import (
+from autoflowcfd.fr.native_tet.basis import (
     build_native_tet_operators,
     compute_native_tet_jacobian,
     map_native_tet_to_physical,
 )
-from autoflowcfd.fr.native_tet_overintegration import (
+from autoflowcfd.fr.native_tet.overintegration import (
     build_native_tet_overintegration_operators,
 )
 
@@ -224,7 +224,7 @@ class TestCapCostIsLarge:
         把"量到的收益"和"实际生效的配置"钉在同一个文件里，避免出现
         "收益量过了但默认值没改"这种状态（本项目此前真实发生过）。
         """
-        from autoflowcfd.fr.native_tet_overintegration import (
+        from autoflowcfd.fr.native_tet.overintegration import (
             resolve_tet_overintegration_order,
         )
 

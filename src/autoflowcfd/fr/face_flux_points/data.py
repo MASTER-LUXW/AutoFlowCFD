@@ -9,7 +9,7 @@ from typing import List, Tuple
 
 import numpy as np
 
-from autoflowcfd.fr.face_flux_points import (
+from .geometry import (
     ACCEPT_STRICT_REL,
     CUBE_FACE_AXIS_SIDE,
     FaceFluxPointGeometry,
@@ -92,7 +92,7 @@ class _KernelFaceData:
     对象创建。后处理代码（fr_coefficients、boundary 等）通过 __getitem__
     按需创建 FaceFluxPointGeometry（仅边界面 ~39K 个，可忽略）。
 
-    混合分组字段（B-8，2026-08-25，见 face_flux_points_merge.py 同名段注释）：
+    混合分组字段（B-8，2026-08-25，见 face_flux_points/merge.py 同名段注释）：
     mixed_nb_partner/mixed_ow_partner：(n_faces,) int64，混合面内部记录 ->
     边界子面记录索引（-1 表示普通面）；mixed_nb_mask/mixed_ow_mask：
     (n_faces, n_fp) bool，True 的 FP 落在边界半区（残差 kernel 逐 FP 取幽灵态）；

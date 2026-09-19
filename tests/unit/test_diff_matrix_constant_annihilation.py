@@ -68,8 +68,8 @@ from autoflowcfd.fr.diff_matrix_consistency import (
     enforce_constant_annihilation,
 )
 from autoflowcfd.fr.quadrature_points import gauss_legendre
-from autoflowcfd.fr.native_simplex_basis import build_native_tet_operators
-from autoflowcfd.fr.native_tet_overintegration import (
+from autoflowcfd.fr.native_tet.basis import build_native_tet_operators
+from autoflowcfd.fr.native_tet.overintegration import (
     build_native_tet_overintegration_operators,
 )
 

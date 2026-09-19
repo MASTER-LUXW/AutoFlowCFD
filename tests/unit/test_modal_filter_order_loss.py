@@ -370,7 +370,7 @@ class TestSensorModeIsNotSilentlyIgnored:
 class TestBothBasesMustBeCheckedSeparately:
     """**两套基的滤波矩阵必须分别自证**——真实 bug 回归（2026-09-15）。
 
-    `fr/native_tet_filter.py::build_native_tet_modal_filter` 此前只短路
+    `fr/native_tet/filter.py::build_native_tet_modal_filter` 此前只短路
     `order == 0`，漏了 `FILTER_MODE == "off"`（`fr/modal_filter.py` 的
     棱柱/坍缩两个构造函数都有那条短路）。后果是
     **`AFCFD_FILTER_MODE=off` 只关掉了棱柱的滤波器，四面体照旧每个

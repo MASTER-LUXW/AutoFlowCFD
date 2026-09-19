@@ -12,7 +12,7 @@ AutoFlowCFD V2.0 - FR 无粘残差组装 (Tier-0 重建版, 对应 S-02/S-04)
    （即本代码库中的每一个四面体/棱柱单元）给出的都是错误导数。
 
 2. **界面项**：用真实单元-面连接关系（grid/face_connectivity.py +
-   fr/face_flux_points.py）取得 owner/neighbor 双方在物理重合点上的解，
+   fr/face_flux_points/geometry.py）取得 owner/neighbor 双方在物理重合点上的解，
    用已验证正确的 AUSM+up 黎曼求解器（fr_kernels.compute_ausm_up_flux）
    结合 FaceExtractor 给出的真实物理法向量/面积计算公共通量，再通过
    Radau/VCJH 校正函数导数 (matrix_operators.compute_correction_weights)

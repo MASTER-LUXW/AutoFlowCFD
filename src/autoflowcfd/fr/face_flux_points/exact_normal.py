@@ -4,12 +4,12 @@
 inviscid_kernel.py 等核心通量 kernel 实际使用的法向/面积）此前对每个面
 只取*一个*常数值（`face_connectivity.py::build_face_connectivity` 三角化
 出的平面近似），在该面所有 Flux Points 上重复使用（
-`face_flux_points_merge.py`: `_all_normals = np.repeat(_normals, n_fp, ...)`）。
+`face_flux_points/merge.py`: `_all_normals = np.repeat(_normals, n_fp, ...)`）。
 
 棱柱四边形侧面在物理上一般不是平面（4 个角点定义的是一个双线性曲面，
 只有角点严格共面时才退化为平面）——这不是网格缺陷，是棱柱+曲面挤出这
 个几何表示组合固有的性质（真实网格实测最大翘曲 11.13%，见
-face_flux_points_merge.py 的既有记录）。P0（每个面只有 1 个"平均"通量
+face_flux_points/merge.py 的既有记录）。P0（每个面只有 1 个"平均"通量
 点）感受不到这个差异；P1 起，一个面上有多个 Flux Points 分布在面内部
 不同位置，用同一个常数法向计算通量，实质上是对一个非平面曲面用错误的
 局部切平面方向做黎曼求解——`core/fr_operators/troubled_cell.py` 的机制2
@@ -57,7 +57,7 @@ from autoflowcfd.grid.curved_mapping.curved_mapping import (
 from autoflowcfd.grid.curved_mapping.curved_mapping_exact_jacobian import (
     tet_exact_jacobian, prism_exact_jacobian,
 )
-from autoflowcfd.fr.face_flux_points import CUBE_FACE_AXIS_SIDE, face_ref_grid
+from .geometry import CUBE_FACE_AXIS_SIDE, face_ref_grid
 
 
 def _tet_exact_jacobian_batched(ref_pts: np.ndarray, cell_nodes: np.ndarray) -> np.ndarray:
@@ -185,7 +185,7 @@ def _native_tet_adj_row_batched(
 
     # phys(a,b) = l1(r_tri,s_tri)*p_i + l2*p_j + l3*p_k，其中
     # (r_tri,s_tri)=cube_to_tri_rs(a,b)：见 curved_mapping.py/
-    # face_flux_points_helpers_numba.py::_cube_to_tri_rs_nb 同一约定
+    # face_flux_points/ref_geometry_nb.py::_cube_to_tri_rs_nb 同一约定
     # （r=(1+a)(1-b)/2-1, s=b）与 _tri_barycentric_nb（l1=-(r+s)/2,
     # l2=(1+r)/2, l3=(1+s)/2）——链式法则直接展开：
     # d phys/da = (1-b)/4 * e1；d phys/db = -(1+a)/4*e1 + 0.5*e2。
@@ -230,7 +230,7 @@ def compute_exact_adj_rows(
         code_arr: (n_faces,) 或 None——原始 cube face 编码（`CUBE_FACE_CODES`
             约定，0~5 坍缩坐标、6~9 native 四面体、10~14 native 棱柱）。**真实 bug 修复**
             （Part7 文档阶段2"执行状态更新"节）：`axis_arr`/`side_arr` 对
-            native 四面体面（`face_flux_points_merge.py` 里 `_CF_AXIS`/
+            native 四面体面（`face_flux_points/merge.py` 里 `_CF_AXIS`/
             `_CF_SIDE` 把 axis 槽位复用成 excluded_vertex）给出的值与
             坍缩坐标的 (axis,side) 语义**在数值上会碰撞**（如
             excluded_vertex=0 与坍缩坐标 "a=-1" 面同样是 (axis=0,side=-1)，
@@ -295,7 +295,7 @@ def compute_exact_adj_rows(
             faces_here = np.nonzero(is_native & (code_arr == 10 + fid))[0]
             if len(faces_here) == 0:
                 continue
-            from .native_prism.face import native_prism_face_adj_rows
+            from ..native_prism.face import native_prism_face_adj_rows
 
             order = n1d - 1
             cells_here = cell_arr[faces_here]

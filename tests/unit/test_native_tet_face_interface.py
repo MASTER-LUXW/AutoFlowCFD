@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - 四面体路径C（native basis）单元-单元界面耦合的
 数学原理决定性验证（Part6 阶段2 范围的核心数学问题，尚未接入生产
-`face_flux_points.py`/`inviscid_kernel.py` 管线——本文件只验证"这套
+`face_flux_points/geometry.py`/`inviscid_kernel.py` 管线——本文件只验证"这套
 方法在原理上、在真实相邻单元几何上是否成立"，是否接入现有 Newton
 迭代匹配/numba 界面核函数的工程实现，留作后续独立工作）。
 
@@ -14,7 +14,7 @@ Vandermonde 系统构造"体积->面"外插矩阵。Warp & Blend（GLL 型）节
 
 import numpy as np
 
-from autoflowcfd.fr.native_simplex_basis import (
+from autoflowcfd.fr.native_tet.basis import (
     build_native_tet_operators,
     map_native_tet_to_physical,
     face_node_indices,

@@ -1,7 +1,7 @@
 """AutoFlowCFD V2.0 - 原生棱柱基的面算子：面通量点、体积->面外插、DG 提升。
 
 从 `native_prism_basis.py` 拆出（单文件 400 行上限的项目约定）。与
-`native_simplex_basis.py` 里四面体那三个同名构造是**同一套推导**，只是
+`native_tet/basis.py` 里四面体那三个同名构造是**同一套推导**，只是
 参考单元换成 `三角形 × 直线`：
 
     build_native_tet_boundary_extrap  ->  build_native_prism_boundary_extrap
@@ -24,7 +24,7 @@
 
 **每个面恒有 `n1d^2 = (order+1)^2` 个通量点**，与坍缩棱柱方案、与 native
 四面体方案完全一致 —— `_KernelFaceData` 的 flat 数组假设全网格所有面的
-通量点数统一（见 `native_simplex_basis.py::build_native_tet_boundary_
+通量点数统一（见 `native_tet/basis.py::build_native_tet_boundary_
 extrap` 文档"二·五"节记录的那条必要修正）。这里不需要任何填充：
   * 两个三角形封盖用**与 native 四面体三角形面相同**的坍缩三角形采样
     网格（`cube_to_tri_rs` 作用在张量积 Gauss-Legendre 方格上），
@@ -124,7 +124,7 @@ def native_prism_face_points_physical(order: int, face_id: int,
 
     只是 `native_prism_face_points` 与
     `native_prism_basis.map_native_prism_to_physical` 的合成 —— 单独给出
-    是为了让面几何构造方（`fr/face_flux_points.py`）有一个与
+    是为了让面几何构造方（`fr/face_flux_points/geometry.py`）有一个与
     `native_tet_face_points_physical` 对称的入口，而不是各处自己拼。
     """
     from .basis import map_native_prism_to_physical
@@ -402,7 +402,7 @@ def native_prism_face_adj_rows(order: int, face_id: int,
                                cell_nodes: np.ndarray) -> np.ndarray:
     """某个面每个通量点的 `adj_row`，形状 `(n1d^2, 3)`。
 
-    与坍缩路径 `fr/face_flux_points_exact_normal.py::compute_exact_adj_rows`
+    与坍缩路径 `fr/face_flux_points/exact_normal.py::compute_exact_adj_rows`
     产出的量**语义完全相同**（"物理外法向 × 面积微元"的未归一化形式，
     已按 outward 定向），所以下游 `side_factor = 1.0` 的既有处理对原生
     棱柱面同样正确 —— 不需要再乘 `owner_side`。

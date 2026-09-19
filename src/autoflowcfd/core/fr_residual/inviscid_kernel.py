@@ -126,7 +126,7 @@ def compute_inviscid_interface_correction_kernel(
     outward 定向的 adj 行，不需要像坍缩坐标那样再乘 side 翻转——这是
     Part7 文档记录过的同一个坑，这里必须复刻同一个原则）；(c) 面修正项
     改用 DG 提升算子 `lift_native[excluded_vertex] @ (ref_area_weight
-    ⊙ jump)`（`native_simplex_basis.py::build_native_tet_lift`
+    ⊙ jump)`（`native_tet/basis.py::build_native_tet_lift`
     "弱形式提升定义"，替代坍缩坐标 1D Radau/VCJH 修正函数
     `_distribute_point`——native 单纯形基没有"坍缩计算方向"，那套 1D
     分布机制不适用）。`n_prism`+`boundary_extrap`+`dist_fp_of_sp` 等
@@ -139,7 +139,7 @@ def compute_inviscid_interface_correction_kernel(
     内部自己查询（会破坏磁盘缓存）。多线程下累加顺序不再是严格的
     `range(n_faces)` 顺序，验证判据也相应分层，见模块文档。
 
-    真实 bug 修复（2026-08-23，见 fr/face_flux_points_exact_normal.py
+    真实 bug 修复（2026-08-23，见 fr/face_flux_points/exact_normal.py
     模块文档完整原理）：`owner_adj_row_exact`/`neighbor_adj_row_exact`
     取代了此前这里对 `adj_j`（SP 网格上的度量）用 `E_o`/`E_n` 做
     Lagrange 外插到 FP 得到"自洽方向"的做法——外插对坍缩坐标下本质是
@@ -219,7 +219,7 @@ def compute_inviscid_interface_correction_kernel(
                             if w != 0.0:
                                 for v in range(5):
                                     Q_n[v] += w * Q[c1, s, v]
-                    # 混合拆分面（B-8，见 fr/face_flux_points_merge.py）：内部半区由上方多源插值覆盖，
+                    # 混合拆分面（B-8，见 fr/face_flux_points/merge.py）：内部半区由上方多源插值覆盖，
                     # 边界半区逐 FP 取配对边界面的幽灵态（两条记录共享同一 owner 棱柱与立方体面，
                     # FP 网格逐点重合）。掩码行内多源插值矩阵权重为 0，先算再覆盖不冲突。
                     mp = mixed_nb_partner[f]
@@ -247,7 +247,7 @@ def compute_inviscid_interface_correction_kernel(
             if o_is_native:
                 # DG 提升算子（见函数文档）：物理面积权重逐 FP 加权跳跃量，
                 # 再用提升算子映射回体积节点——替代坍缩坐标的 1D 修正函数
-                # 分布机制，见 native_simplex_basis.py::build_native_tet_lift
+                # 分布机制，见 native_tet/basis.py::build_native_tet_lift
                 # "弱形式提升定义"。
                 weighted_jump_o = np.empty((n_fp, 5))
                 for i in range(n_fp):

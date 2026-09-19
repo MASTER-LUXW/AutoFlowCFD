@@ -145,7 +145,7 @@ def build_native_prism_operators(order: int) -> Tuple[np.ndarray, np.ndarray]:
         参考坐标第 m 个方向（r/s/t）的导数 —— 与 `D_3d_prism` 同样的
         消费方式，但参考坐标是**原生**的 `(r,s,t)` 而不是坍缩的 `(a,b,c)`。
 
-    与 `native_simplex_basis.build_native_tet_operators` 同一套做法，
+    与 `native_tet.basis.build_native_tet_operators` 同一套做法，
     包括最后那步 `enforce_constant_annihilation`：解析上 `D @ 1 = 0`
     必然成立，但 LU 求解的舍入残余会留到 `eps*cond(V)`，而**直边单元的
     自由流保持性完全由这个残余决定**（度量逐单元常数，均匀流下体积项

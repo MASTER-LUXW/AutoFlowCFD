@@ -38,16 +38,16 @@ from ..curved_mapping.curved_mapping import TET_CUBE_FACES, PRISM_CUBE_FACES
 
 # 立方体面标识 -> 整数编码，供 numpy 数组存储（避免存字符串）。
 # tet_native_v0~v3（编码 6~9）是四面体路径C（native basis，不经过坍缩
-# 坐标，见 fr/native_simplex_basis.py 与
+# 坐标，见 fr/native_tet/basis.py 与
 # `8_算法重构-微分算子对坍缩坐标退化参考轴的病态条件数-Part6/7.md`）
 # 专用的面标识——不是新建一套并行枚举，是在现有 0~5（坍缩坐标 6 个
 # 立方体面）基础上追加 4 个新编码（四面体只有 4 个真实面，用"被排除
-# 的局部顶点下标 0~3"标识，与 fr/native_simplex_basis.py::
+# 的局部顶点下标 0~3"标识，与 fr/native_tet/basis.py::
 # face_node_indices 的约定一致）。这个推广让绝大部分消费这套编码的
 # 下游代码（法向量/面积、周期边界配对、multi-source 分类、numba flat
 # 数组、界面残差核函数）不需要感知"这个面是坍缩坐标面还是 native 面"
 # 这个区别，只有真正需要区别对待的两处（点位定位、体积->面插值，见
-# fr/face_flux_points_locate.py、fr/face_flux_points.py::build_cross_interp）
+# fr/face_flux_points/locate.py、fr/face_flux_points/geometry.py::build_cross_interp）
 # 才分派，见 Part7 文档第一节完整设计说明。
 CUBE_FACE_CODES: Dict[str, int] = {
     "a=-1": 0, "a=+1": 1, "b=-1": 2, "b=+1": 3, "c=-1": 4, "c=+1": 5,
@@ -80,7 +80,7 @@ NATIVE_PRISM_FACE_CODE_RANGE = (CUBE_FACE_CODES["prism_native_f0"],
 # 现有坍缩坐标四面体编码 -> native 编码的翻译表——网格拓扑本身（这个面
 # 是四面体的哪个真实几何面）不依赖 tet_basis_mode，`build_face_
 # connectivity` 按现有方式识别出的 4 种坍缩坐标 (axis,side) 组合与
-# 四面体 4 个真实面是固定的一一映射（见 fr/face_flux_points_locate.py::
+# 四面体 4 个真实面是固定的一一映射（见 fr/face_flux_points/locate.py::
 # _TET_FIXED_TO_FACE_VERTICES：(0,-1.0)排除顶点1、(0,1.0)排除顶点0、
 # (1,-1.0)排除顶点2、(2,-1.0)排除顶点3），因此只需要一次静态查找表
 # 翻译，不需要重新做任何几何识别——见本文件 `translate_tet_faces_to_native`。
@@ -167,7 +167,7 @@ class FRFaceConnectivity:
         face_translation: (n_faces, 3) float64，周期边界配对面的平移向量（见
             pair_periodic_boundary_faces 文档），非周期面恒为零向量。方向
             约定：把 owner 侧面上一点加上这个向量，得到 邻居 侧对应
-            周期像点的物理坐标——fr/face_flux_points_merge.py 里定位跨
+            周期像点的物理坐标——fr/face_flux_points/merge.py 里定位跨
             单元 Flux 点 时，owner->邻居 方向的搜索目标点要*减去*
             这个向量（因为周期面物理上不重合，不能直接用 owner 的物理坐标
             去 邻居 单元里找，必须先按周期平移量对齐），邻居->owner
@@ -273,7 +273,7 @@ def build_face_connectivity(
     棱柱的四边形侧面会被 FaceExtractor 恒定三角化拆分成 2 个子面记录
     （即使相邻的也是同一个棱柱的单一四边形邻居）；本函数如实返回这些
     原始记录，不做任何去重/合并——正确处理"1 个立方体面对应 1~2 个真实
-    相邻单元"这一情形是 fr/face_flux_points_merge.py 的职责（每个
+    相邻单元"这一情形是 fr/face_flux_points/merge.py 的职责（每个
     (cell,立方体面) 分组只让一条记录触发一次自身外插+校正投影，其余
     记录仅贡献跨单元插值信息），不应该在更底层的拓扑构建阶段就丢弃或
     报错——那样反而丢失了"这条记录到底对应四边形哪一半"的信息。

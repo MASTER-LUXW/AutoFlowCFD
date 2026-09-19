@@ -24,7 +24,7 @@ print(f"Mesh: n_cells={mesh.n_cells}, n_faces={mesh.face_connectivity.n_faces}, 
 fc = mesh.face_connectivity
 
 # ---- Phase 1: build_face_flux_points ----
-from autoflowcfd.fr.face_flux_points_merge import build_face_flux_points, _KernelFaceData
+from autoflowcfd.fr.face_flux_points.merge import build_face_flux_points, _KernelFaceData
 
 t0 = time.perf_counter()
 result = build_face_flux_points(fc, mesh)

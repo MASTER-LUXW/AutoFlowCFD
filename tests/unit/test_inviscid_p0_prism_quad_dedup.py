@@ -2,7 +2,7 @@
 investigation on a 791k-cell cube_demo run: every prism quadrilateral side
 face is triangulated into 2 face-connectivity records by the mesh
 generator (face_connectivity.py). Before this session's "exact per-FP
-normal" fix (face_flux_points_exact_normal.py), `true_normal`/
+normal" fix (face_flux_points/exact_normal.py), `true_normal`/
 `true_area_weight` were each record's own genuine triangulated half-face
 geometry, so two records naturally summed to the whole quad's area/normal.
 After that fix, `true_normal`/`true_area_weight` became a pure function of
@@ -41,7 +41,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from autoflowcfd.core.fr_residual.inviscid_p0 import _extract_p0_face_geometry
-from autoflowcfd.fr.face_flux_points_data import _KernelFaceData
+from autoflowcfd.fr.face_flux_points.data import _KernelFaceData
 
 
 def _make_ffp(n_faces, true_normal, true_area_weight, owner_is_primary,

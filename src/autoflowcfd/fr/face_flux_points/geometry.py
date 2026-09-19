@@ -16,7 +16,7 @@ AutoFlowCFD - FR 单元-面 Flux Points 几何预计算：核心数值原语 (V2
 
 真正把这些原语组装成完整 Flux Points 几何（含棱柱四边形侧面被网格生成器
 恒定拆分成 2 个三角形子面、可能对应 1~2 个不同真实相邻单元这一拓扑情形
-的正确处理）在 `fr/face_flux_points_merge.py`，避免本文件超过代码规范的
+的正确处理）在 `fr/face_flux_points/merge.py`，避免本文件超过代码规范的
 400 行限制。
 """
 
@@ -27,7 +27,7 @@ import numpy as np
 
 from autoflowcfd.fr.matrix_operators import compute_interpolation_matrix
 from autoflowcfd.fr.collapsed_basis import tet_modal_basis_and_grad, prism_modal_basis_and_grad
-from autoflowcfd.fr.face_flux_points_locate import map_ref_points, newton_locate_on_face
+from .locate import map_ref_points, newton_locate_on_face
 from autoflowcfd.grid.connectivity.face_connectivity import (
     CUBE_FACE_NAMES,
     NATIVE_PRISM_FACE_CODE_RANGE,
@@ -37,7 +37,7 @@ from autoflowcfd.grid.connectivity.face_connectivity import (
 # 每个立方体面标识 -> (被坍缩掉的计算方向索引, 边界取值)。
 # tet_native_v0~v3：native 四面体（路径C）没有 (axis,side) 这个概念，
 # 这四项复用同一个查找表的存储位置，把"被排除的局部顶点 0~3"直接放进
-# axis 槽位、side 槽位固定填 -1.0（只是为了让 face_flux_points_merge.py
+# axis 槽位、side 槽位固定填 -1.0（只是为了让 face_flux_points/merge.py
 # 里 `_CF_AXIS=[v[0] for v in ...values()]`/`_CF_SIDE=[v[1] for v in
 # ...values()]` 这两个按字典插入顺序构造的查找表在扩到 10 项后依然
 # 给出有效值——下游消费方（core/fr_operators/face_kernels.py::
@@ -81,7 +81,7 @@ CUBE_FACE_AXIS_SIDE = {
     "prism_native_f4": (1, -1.0),
 }
 
-ACCEPT_STRICT_REL = 1e-6  # 严格通过阈值：相对局部面特征尺度，供 face_flux_points_merge.py 判断是否需要记录容忍案例
+ACCEPT_STRICT_REL = 1e-6  # 严格通过阈值：相对局部面特征尺度，供 face_flux_points/merge.py 判断是否需要记录容忍案例
 
 # 模态 Vandermonde 矩阵 V_sps 的 LU 分解缓存，键为 (cell_type, n1d)：
 # ref_cube_sps（sps_1d 的张量积）与模态基函数定义只依赖单元类型和阶数，
@@ -215,7 +215,7 @@ def native_tet_face_points_physical(
     Returns:
         phys: (n1d*n1d, 3)
     """
-    from ..grid.curved_mapping.curved_mapping import cube_to_tri_rs, tri_barycentric
+    from ...grid.curved_mapping.curved_mapping import cube_to_tri_rs, tri_barycentric
 
     face_vertex_idx = tuple(v for v in range(4) if v != excluded_vertex)
     p_i, p_j, p_k = cell_nodes[face_vertex_idx[0]], cell_nodes[face_vertex_idx[1]], cell_nodes[face_vertex_idx[2]]
@@ -237,13 +237,13 @@ def cell_info(mesh, cell_id: int):
 def _get_v_sps_lu_native(order: int):
     """native 四面体（路径C）版本体积 Vandermonde LU 缓存——键只用
     `order`（native 没有 n1d/张量积立方体节点这个概念），复用
-    `native_simplex_basis.build_native_tet_operators` 内部已经对同一组
+    `native_tet.basis.build_native_tet_operators` 内部已经对同一组
     体积节点算过的模态取值，避免重复分解。"""
     key = ("tet_native", order)
     cached = _V_SPS_LU_CACHE.get(key)
     if cached is not None:
         return cached[0], cached[1]
-    from .native_simplex_basis import build_native_tet_operators, restricted_tet_modes, simplex3d_value, rst_to_abc
+    from ..native_tet.basis import build_native_tet_operators, restricted_tet_modes, simplex3d_value, rst_to_abc
 
     ref_rst, _ = build_native_tet_operators(order)
     a, b, c = rst_to_abc(ref_rst[:, 0], ref_rst[:, 1], ref_rst[:, 2])
@@ -311,7 +311,7 @@ def build_cross_interp(
                 "见 build_cross_interp 文档，闭式解本身已经足够快，未来如需要可以补上。"
             )
         excluded_vertex = target_face_code - 6
-        from .face_flux_points_locate import locate_native_tet_face_point
+        from .locate import locate_native_tet_face_point
 
         search_phys = source_phys if translation is None else source_phys - translation[np.newaxis, :]
         rst, final_resid = locate_native_tet_face_point(
@@ -319,7 +319,7 @@ def build_cross_interp(
         )
 
         order = n1d - 1
-        from .native_simplex_basis import rst_to_abc, simplex3d_value
+        from ..native_tet.basis import rst_to_abc, simplex3d_value
 
         a, b, c = rst_to_abc(rst[:, 0], rst[:, 1], rst[:, 2])
         _, modes = _get_v_sps_lu_native(order)

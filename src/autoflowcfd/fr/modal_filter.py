@@ -351,7 +351,7 @@ def assemble_modal_filter(V: np.ndarray, etas) -> np.ndarray:
     `AFCFD_FILTER_MODE=off` **只关掉了棱柱的滤波器**，而那张 79 万单元
     网格上四面体占 82.7% —— 也就是说"关掉滤波器"的对照实验里绝大多数
     单元根本没被关掉，排查时因为日志只打印 `filter_prism` 的秩而没发现
-    （完整记录见 `native_tet_filter.py` 里那段注释）。
+    （完整记录见 `native_tet/filter.py` 里那段注释）。
 
     把装配与短路收到一处之后，再加一条基**不可能**漏掉它。
     """

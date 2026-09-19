@@ -103,7 +103,7 @@ def compute_viscous_interface_correction_kernel(
     累加顺序不再是严格的 `range(n_faces)` 顺序，验证判据分层，同
     fr_residual_inviscid_kernel.py。
 
-    真实 bug 修复（2026-08-23，见 fr/face_flux_points_exact_normal.py
+    真实 bug 修复（2026-08-23，见 fr/face_flux_points/exact_normal.py
     模块文档）：`owner_adj_row_exact`/`neighbor_adj_row_exact` 取代了
     此前这里对 `adj_j` 做 Lagrange 外插得到自洽方向的做法，理由与
     inviscid_kernel.py 完全相同——本函数没有 inviscid_kernel.py 那样的
@@ -123,7 +123,7 @@ def compute_viscous_interface_correction_kernel(
     `boundary_extrap_native[excluded_vertex]`；(b) 面修正项改用 DG
     提升算子 `lift_native[excluded_vertex] @ (ref_area_weight⊙jump)`
     代替 `_distribute_point`（1D 坍缩坐标修正函数分布机制对 native
-    单纯形基不适用，理由同 inviscid_kernel.py/native_simplex_basis.py
+    单纯形基不适用，理由同 inviscid_kernel.py/native_tet.basis.py
     ::build_native_tet_lift 文档）。
     """
     n_cells = Q.shape[0]
@@ -162,7 +162,7 @@ def compute_viscous_interface_correction_kernel(
 
             jump_owner = np.zeros((n_fp, 5))
             for i in range(n_fp):
-                # 混合拆分面（B-8，见 fr/face_flux_points_merge.py）：边界半区与真边界面同等处理。
+                # 混合拆分面（B-8，见 fr/face_flux_points/merge.py）：边界半区与真边界面同等处理。
                 mp = mixed_nb_partner[f]
                 is_bnd_i = is_boundary[f] or (mp >= 0 and mixed_nb_mask[f, i])
                 if is_boundary[f]:

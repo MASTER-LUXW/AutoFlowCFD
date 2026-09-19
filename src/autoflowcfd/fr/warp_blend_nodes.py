@@ -5,9 +5,9 @@ Codes1.1/Codes3D/，2026-08-30 抓取核实）逐行移植，不是重新发明�
 原始 MATLAB 文件：Nodes3D.m, EquiNodes3D.m, WarpShiftFace3D.m,
 evalshift.m, evalwarp.m, xyztorst.m。
 
-用于 `native_simplex_basis.py::build_native_tet_operators`（Part6
+用于 `native_tet/basis.py::build_native_tet_operators`（Part6
 整改计划阶段0，四面体路径C——独立于坍缩坐标的体积微分算子构造）。
-优化节点分布本身不是这次修复的必要条件（`native_simplex_basis.py`
+优化节点分布本身不是这次修复的必要条件（`native_tet/basis.py`
 的正规原生梯度公式在任意节点分布上都同样规避坐标奇点），选用
 Warp & Blend 是因为它同时给出比等距节点更好的插值 Lebesgue 常数，
 是标准做法，不引入额外假设。

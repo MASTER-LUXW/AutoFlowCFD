@@ -54,7 +54,7 @@ def reload_filter_modules(**env):
         importlib.reload(ops_mod)
         # native 四面体滤波器读的是 modal_filter 的模块级常量，但它自己
         # 缓存了矩阵（按 order），重载后必须清掉，否则拿到上一档的矩阵。
-        import autoflowcfd.fr.native_tet_filter as ntf
+        import autoflowcfd.fr.native_tet.filter as ntf
         importlib.reload(ntf)
         return mf, ops_mod
     finally:

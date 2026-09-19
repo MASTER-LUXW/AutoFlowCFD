@@ -3,7 +3,7 @@
 
 判据：与坍缩坐标过积分机制同一个物理场景——线性 Couette 剪切场
 `u=U_WALL*y/H`（analytical residual 恒为 0，见
-`fr/native_tet_overintegration.py` 模块文档"关键动机"）——真正的非
+`fr/native_tet/overintegration.py` 模块文档"关键动机"）——真正的非
 线性来自 `F_phys(Q)` 本身（能量通量 `u*(E+p)` 含 u^3 项），不是 Q
 自身构造出来的假高阶内容（早期孤立脚本验证中曾误把"Q 自身按 order
 次方构造"当成混叠源，被真实数值结果纠正，如实记录见开发过程，这里
