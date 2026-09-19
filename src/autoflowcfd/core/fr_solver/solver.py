@@ -769,6 +769,20 @@ class FRSolver(_SolverGeometryMixin):
         # 变化后 SPs 布局改变，必须让这份历史失效，否则形状不匹配/物理
         # 上不连续的历史层会被静默用于 BDF2）。
         self._dual_time_U_prev: Optional[np.ndarray] = None
+
+        # NEWTON_KRYLOV（隐式稳态）专用状态：
+        #  * `_newton_forcing` 是 inexact-Newton 的 forcing term
+        #    （Eisenstat-Walker），它**必须跨 Newton 步保持状态**——它用
+        #    "上一步实际取得的残差下降"决定下一步该把线性系统解多准，
+        #    每步新建一个等于永远走首步那档最保守的容差。
+        #  * `_newton_last_info` 是上一步的诊断（eta / GMRES 迭代数 /
+        #    theta / 残差求值次数），供日志与测试读取。
+        # 阶数变化后这两个都要失效（见
+        # `order_continuation.interpolate_to_new_order_checked`）：残差
+        # 量级随阶数跳变，沿用旧的 forcing 状态会让升阶后的第一步用一个
+        # 按旧量级算出的容差。
+        self._newton_forcing = None
+        self._newton_last_info: Optional[dict] = None
         
         # 7. 壁面距离场（用于DDES/WMLES）
         self.wall_distance = None

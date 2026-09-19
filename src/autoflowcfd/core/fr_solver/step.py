@@ -269,6 +269,54 @@ def step(solver, dt: float) -> float:
                 filter_func=filter_func,
             )
             solver._dual_time_U_prev = U_flat.copy()
+        elif solver.time_integrator.scheme == TimeIntegrationScheme.NEWTON_KRYLOV:
+            # 隐式稳态步（矩阵自由 Newton-Krylov + 伪瞬态延拓）。
+            #
+            # `dt_local_flat` 同时充当 PTC 的 `dtau` 与对角预处理 ——
+            # 于是 `--cfl-start/--cfl-max` 那套自适应控制器原样生效：
+            # CFL 小 -> 对角项主导、接近显式、鲁棒；CFL 大 -> 接近纯
+            # Newton、快。参考量级用残差诊断那一套唯一来源，不另定义。
+            #
+            # **一次 step() 做一个 Newton 步**：外层 `solver.solve()` 已经
+            # 在做残差监控、自适应 CFL、checkpoint、Order Continuation，
+            # Newton 外迭代放在它里面让这些机制原样生效（见
+            # `implicit/jfnk.py` 模块文档）。
+            #
+            # `filter_func` 在这条路径上**不施加**：模态滤波是显式 RK
+            # 逐 stage 的正定性/去噪手段，而 Newton 步里"解"是线性系统
+            # 的解、不存在 stage 的概念；在 Newton 步之后滤一次会改变
+            # 被求解的那个不动点方程本身（`R(U)=0` 变成
+            # `F(U)=0` 的另一个问题），让残差与收敛判据失去意义。默认档
+            # `FILTER_MODE=off` 本来就不构造 filter_func；显式指定了非
+            # off 档时下面会明确报错而不是静默忽略。
+            from autoflowcfd.core.fr_solver.residual_diagnostics import (
+                _reference_scales,
+            )
+            from autoflowcfd.core.time_integration.implicit import (
+                EisenstatWalkerForcing, step_newton_krylov,
+            )
+
+            if filter_func is not None:
+                raise ValueError(
+                    "NEWTON_KRYLOV（隐式稳态）与模态滤波不能同时启用："
+                    "滤波会改变被求解的不动点方程本身（R(U)=0 变成另一个"
+                    "问题），使残差与收敛判据失去意义。请用 "
+                    "AFCFD_FILTER_MODE=off（默认值），或改用显式格式。"
+                )
+            if solver._newton_forcing is None:
+                solver._newton_forcing = EisenstatWalkerForcing()
+            U_new_flat, _nk_info = step_newton_krylov(
+                mean_flow_residual, U_flat, dt_local_flat,
+                _reference_scales(solver.freestream, n_vars),
+                forcing=solver._newton_forcing,
+            )
+            solver._newton_last_info = _nk_info
+            if _nk_info["theta"] <= 0.0:
+                logger.warning(
+                    "Newton 步未能前进（theta=0, gmres_info=%s, "
+                    "gmres_iters=%d）——这一步原地不动，自适应 CFL 应当"
+                    "缩小 dtau 让系统更接近对角主导"
+                    % (_nk_info["gmres_info"], _nk_info["gmres_iters"]))
         elif solver.time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
             # 显式处理无粘对流项、隐式处理粘性+湍流扩散项——通用的
             # step(...) 单一残差入口表达不了这个拆分（见该方法里的

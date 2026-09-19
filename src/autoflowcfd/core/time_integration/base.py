@@ -32,6 +32,11 @@ class TimeIntegrationScheme(Enum):
     SSP_RK3 = "ssp_rk3"
     IMEX_EULER = "imex_euler"  # 一阶 IMEX（阻尼 Picard 子迭代，见 imex.py）
     DUAL_TIME = "dual_time"    # 双时间步长
+    #: 矩阵自由 Newton-Krylov + 伪瞬态延拓（**唯一的真隐式格式**，
+    #: 2026-09-19 新增，见 `time_integration/implicit/jfnk.py`）。
+    #: 只用于**稳态**求解：它把"收敛步数由 h_min 决定"这条显式格式的
+    #: 固有约束换成"由非线性程度决定"。
+    NEWTON_KRYLOV = "newton_krylov"
 
     # **2026-09-18 删除三个旧别名**：
     #     BACKWARD_EULER = "forward_euler"
@@ -46,10 +51,17 @@ class TimeIntegrationScheme(Enum):
     # 破坏任何调用方；真要复现历史配置请显式写 FORWARD_EULER/SSP_RK2/
     # SSP_RK3。
     #
-    # 本项目**目前没有任何隐式时间格式**：IMEX_EULER 只对粘性/源项做阻尼
-    # Picard 子迭代（不是 Newton），DUAL_TIME 的内层仍是显式推进。真正的
-    # 隐式稳态求解器（矩阵自由 Newton-Krylov + 块 Jacobi 预处理 + 伪瞬态
-    # 延拓）尚未实现——不要再用一个别名把这个缺口盖住。
+    # **2026-09-19 更新**：真正的隐式稳态求解器已实现，见
+    # `NEWTON_KRYLOV` 与 `time_integration/implicit/`（矩阵自由
+    # Newton-Krylov + 伪瞬态延拓 + inexact-Newton forcing term）。
+    # 预处理目前是伪瞬态**对角**形式而不是块 Jacobi —— 矩阵自由地构造
+    # 逐单元稠密块需要每单元 `n_sps*n_var` 次残差求值（P2 五方程下 135
+    # 次），成本不可接受；那条路要转向解析 Jacobian，是独立的一项。
+    # 这一点在 `implicit/preconditioner.py` 里如实记录，没有当成已完成。
+    #
+    # 其余两个仍然**不是**隐式格式：IMEX_EULER 只对粘性/源项做阻尼
+    # Picard 子迭代（不是 Newton），DUAL_TIME 的内层仍是显式推进。
+    # 不要再用一个别名把这些区别盖住。
 
 
 
@@ -75,6 +87,10 @@ _SCHEME_ALIASES = {
     "ssp_rk2": TimeIntegrationScheme.SSP_RK2,
     "imex": TimeIntegrationScheme.IMEX_EULER,
     "imex_euler": TimeIntegrationScheme.IMEX_EULER,
+    "newton-krylov": TimeIntegrationScheme.NEWTON_KRYLOV,
+    "newton_krylov": TimeIntegrationScheme.NEWTON_KRYLOV,
+    "jfnk": TimeIntegrationScheme.NEWTON_KRYLOV,
+    "implicit": TimeIntegrationScheme.NEWTON_KRYLOV,
     "dual-time": TimeIntegrationScheme.DUAL_TIME,
     "dual_time": TimeIntegrationScheme.DUAL_TIME,
     "forward_euler": TimeIntegrationScheme.FORWARD_EULER,
@@ -318,6 +334,19 @@ class TimeIntegrator:
             raise ValueError(
                 "DUAL_TIME scheme 需要 dt_physical/solution_prev，请直接调用 "
                 "step_dual_time(...)，不要通过通用的 step(...) 入口"
+            )
+
+        elif self.scheme == TimeIntegrationScheme.NEWTON_KRYLOV:
+            # 隐式稳态步需要逐 SP 的伪时间步长（PTC 对角项）与守恒变量的
+            # 参考量级（Fréchet 差分的无量纲化），后者这个通用接口里没有。
+            # 与上面两条同一个原则：拒绝走通用入口，不静默退化成显式 RK。
+            # 调用方（`fr_solver/step.py`）直接调
+            # `time_integration.implicit.step_newton_krylov(...)`。
+            raise ValueError(
+                "NEWTON_KRYLOV scheme 需要守恒变量参考量级（Fréchet 差分的"
+                "无量纲化，见 implicit/jacobian_vector.py），这个通用 "
+                "step(...) 入口里没有；请直接调用 "
+                "time_integration.implicit.step_newton_krylov(...)"
             )
 
         else:
