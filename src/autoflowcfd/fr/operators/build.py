@@ -8,7 +8,6 @@ import numpy as np
 
 from ..quadrature_points import gauss_legendre, gauss_lobatto
 from ..matrix_operators import (
-    compute_vandermonde,
     compute_diff_matrix_1d,
     compute_diff_matrix_3d,
     compute_interpolation_matrix,

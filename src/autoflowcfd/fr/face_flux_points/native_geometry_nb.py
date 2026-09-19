@@ -20,12 +20,7 @@ from autoflowcfd.fr.native_prism.interp_numba import (
     native_prism_interp_matrix_nb,
 )
 from autoflowcfd.fr.native_tet.basis import simplex3d_value
-from .face_code_tables import _NATIVE_PRISM_LO
-from .ref_geometry_nb import (
-    _cube_to_tet_rst_nb,
-    _cube_to_tri_rs_nb,
-    _tri_barycentric_nb,
-)
+from .ref_geometry_nb import _cube_to_tri_rs_nb, _tri_barycentric_nb
 
 
 # ============================================================================

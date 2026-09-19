@@ -60,16 +60,13 @@ from .basis import (
     build_native_prism_operators,
     build_native_prism_vandermonde,
 )
-# 阶数策略（上限常量/env/`rule*order` 规则）统一住在
-# `fr/overintegration_order.py` —— 那里是棱柱两档与四面体共用的唯一
-# 事实来源；本模块只负责矩阵构造。这里 re-export 是为了让调用点
-# 可以只从本模块导入一套东西。
-from ..overintegration_order import (  # noqa: F401
-    NATIVE_PRISM_OVERINTEGRATION_MAX_ORDER,
-    NATIVE_PRISM_OVERINT_MAX_ORDER_ENV,
-    resolve_prism_overintegration_max_order,
-    resolve_prism_overintegration_order,
-)
+# 阶数策略（上限常量/env/`rule*order` 规则）**不在本模块**：它统一住在
+# `fr/overintegration_order.py`，那里是棱柱两档与四面体共用的唯一事实
+# 来源。本模块只负责矩阵构造，不做 re-export —— 全仓库唯一的调用点
+# （`fr/operators/build.py`）只需要下面这个构造函数，而阶数是由
+# `overintegration_order.resolve_prism_overintegration_order` 在那里
+# 直接解析的。多一层 re-export 就多一份要同步的名单。
+
 
 def build_native_prism_overintegration_operators(
     order: int, over_order: int

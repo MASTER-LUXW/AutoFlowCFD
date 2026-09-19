@@ -10,14 +10,12 @@
 from typing import TYPE_CHECKING, Dict, Optional
 
 import numpy as np
-from loguru import logger
 
 from ..curved_mapping.curved_mapping import (
     CurvedMapping,
     map_prism_to_physical,
     map_tet_to_physical,
 )
-from autoflowcfd.fr.operators import generate_fr_operators
 
 if TYPE_CHECKING:
     from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
@@ -101,7 +99,6 @@ def compute_native_tet_jacobians(
     """
     from autoflowcfd.fr.native_tet.basis import compute_native_tet_jacobian
 
-    n_prisms = mesh.n_prism_cells
     n_tets = len(mesh._fixed_tet_conn) if mesh._fixed_tet_conn is not None else 0
     if n_tets == 0:
         return None

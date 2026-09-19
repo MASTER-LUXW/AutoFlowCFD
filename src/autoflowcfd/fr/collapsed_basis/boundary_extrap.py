@@ -4,8 +4,6 @@
 未改。
 """
 
-from typing import Tuple
-
 import numpy as np
 
 from .modal import prism_modal_basis_and_grad, tet_modal_basis_and_grad

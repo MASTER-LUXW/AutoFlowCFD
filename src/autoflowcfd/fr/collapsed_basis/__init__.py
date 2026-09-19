@@ -56,7 +56,7 @@ from .jacobi import (  # noqa: F401
     jacobi_polynomial,
 )
 from .modal import (  # noqa: F401
-    _collapsed_triangle_mode,
+    _collapsed_triangle_mode,  # noqa: F401  测试与诊断在用
     build_collapsed_diff_matrices,
     prism_modal_basis_and_grad,
     tet_modal_basis_and_grad,

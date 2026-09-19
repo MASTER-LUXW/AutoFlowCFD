@@ -40,6 +40,8 @@ from .geometry import (  # noqa: F401
     ACCEPT_STRICT_REL,
     CUBE_FACE_AXIS_SIDE,
     FaceFluxPointGeometry,
+    # 两个私有 LU 缓存：`tests/unit/test_native_tet_numba_kernel_parity.py`
+    # 直接从包根导入它们来复现 kernel 内部的插值矩阵构造。
     _get_v_sps_lu,
     _get_v_sps_lu_native,
     build_cross_interp,

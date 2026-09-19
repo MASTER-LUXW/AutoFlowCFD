@@ -53,7 +53,6 @@ def build_basis_inverses(face_conn: FRFaceConnectivity, n1d: int,
 
     # 预计算 V_sps 逆矩阵（用于 kernel 内插值矩阵构建）
     from .geometry import _get_v_sps_lu
-    from scipy.linalg import lu_factor, lu_solve
     n_sps = n1d ** 3
     # 四面体 V_sps_inv
     lu_tet = _get_v_sps_lu("tet", n1d, sps_1d)
