@@ -477,7 +477,7 @@ def build_sensor_gated_filter_func_arrays(
     sensor: str = "persson",
     owner_cell=None, neighbor_cell=None, is_boundary=None,
     freestream=None, halo_extend=None, bnd_tables=None,
-    row_is_prism_extended=None,
+    row_is_prism_extended=None, vertex_stencil=None,
 ) -> Callable[[np.ndarray], np.ndarray]:
     """传感器门控模态滤波的**后端无关**实现（只吃数组，不吃 solver）。
 
@@ -528,6 +528,19 @@ def build_sensor_gated_filter_func_arrays(
             惰性的理由、两张表各自的含义、以及"不给它贴壁单元会被结构性
             误判、壁面剪应力被压掉 14 倍"的实测，全部见那边与
             `bounds_sensor.compute_bounds_violation_mask` 的同名参数。
+        vertex_stencil: 可选 `fr_operators/vertex_stencil.VertexStencil`
+            —— 给了它 BJ 的邻域包络就**额外**计入顶点邻居（共享任一顶点
+            的全部单元）的均值。
+
+            **必须给**（生产路径）：面邻居在三维四面体上只有 4 个，其
+            单元均值不能把本单元夹住，于是 O(h|grad u|) 的合法光滑变化
+            被当成越界 —— 实测在欠解析光滑场（TGV 解析初场）上标记
+            **100%** 的单元，换顶点模板后降到 **6.18%**、中位越界降到
+            恰好 0。完整数据（含"经典 TVB 的 M h^2 修不了它"那条被测量
+            否掉的方案）见 `fr_operators/vertex_stencil.py` 模块文档。
+
+            `None` 时只用面邻居（2026-09-19 之前的行为），供没有单元-
+            顶点连接的合成单元测试网格与历史对照使用。
         row_is_prism_extended: 可选 (n_total,) 布尔 —— **扩展场每一行**
             是否是棱柱单元，供 BJ 判据只在**真实**自由度槽位上统计单元
             极值/均值。不给时按 `cell_is_prism`/`n_prism` 推（只在没有
@@ -686,6 +699,7 @@ def build_sensor_gated_filter_func_arrays(
                 row_is_prism=_row_is_prism,
                 n_real_prism=_n_real_prism if _row_is_prism is not None else None,
                 n_real_tet=_n_real_tet if _row_is_prism is not None else None,
+                vertex_stencil=vertex_stencil,
                 )[:n_cells]
         if not bool(xp.any(troubled)):
             return U_flat
@@ -907,10 +921,21 @@ def build_sensor_gated_filter_func(solver) -> Callable[[np.ndarray], np.ndarray]
                                         None),
                         _n_faces,
                         None if nrm is None else np.asarray(nrm)))
+    # 顶点邻域模板（BJ 判据用；面邻居在三维四面体上不能把本单元夹住，
+    # 实测在欠解析光滑场上标记 100%，见
+    # `fr_operators/vertex_stencil.py` 模块文档）。只在真的要用 bounds
+    # 判据时才建 —— 它要遍历一遍单元-顶点连接，persson 档不需要。
+    vstencil = None
+    if sensor in ("bounds", "both"):
+        from autoflowcfd.core.fr_operators.vertex_stencil import (
+            build_vertex_stencil,
+        )
+
+        vstencil = build_vertex_stencil(mesh)
     return build_sensor_gated_filter_func_arrays(
         mesh.n_cells, mesh.n_sps_per_cell, int(order),
         ops.filter_prism, ops.filter_tet, n_prism=mesh.n_prism_cells,
-        sensor=sensor, **conn)
+        sensor=sensor, vertex_stencil=vstencil, **conn)
 
 
 def build_filter_func(solver) -> Callable[[np.ndarray], np.ndarray]:
@@ -958,3 +983,26 @@ def build_filter_func(solver) -> Callable[[np.ndarray], np.ndarray]:
         return _filter_flat_U(U_flat, n_cells, n_sps, n_prism, filter_prism, filter_tet)
 
     return filter_func
+
+_DIST_FACE_STENCIL_WARNED = [False]
+
+
+def _warn_distributed_face_stencil(sensor: str) -> None:
+    """分布式路径用 BJ 判据时提示"顶点模板尚不可用"，只提示一次。
+
+    一次性：这个函数在每次构造滤波回调时被调用（Order Continuation
+    换阶数会重建），逐次刷屏会把真正的日志淹掉。
+    """
+    if sensor not in ("bounds", "both") or _DIST_FACE_STENCIL_WARNED[0]:
+        return
+    _DIST_FACE_STENCIL_WARNED[0] = True
+    from loguru import logger
+
+    logger.warning(
+        "分布式路径的 BJ 越界判据仍用**面邻居**模板：顶点邻域模板需要"
+        "按顶点的归约交换（现有 halo 是按单元的 1 层面邻居），尚未实现。"
+        "面模板在欠解析光滑场上过度标记（实测标记比例在三档网格加密上"
+        "恒为 100%、不收敛；顶点模板是 100%->25%->6.18%），所以分布式上"
+        "这个门控会比单机保守得多。需要精确门控请用单机路径，或用 "
+        "AFCFD_TROUBLED_SENSOR=persson / AFCFD_FILTER_MODE=off（默认值）。"
+        "详见 core/fr_operators/vertex_stencil.py 模块文档。")

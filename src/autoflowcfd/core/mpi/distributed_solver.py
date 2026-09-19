@@ -892,6 +892,7 @@ class DistributedFRSolver:
         是纯数组接口），这里不复制一份实现——只提供索引换算与 halo 扩展。
         """
         from autoflowcfd.core.fr_solver.filter import (
+            _warn_distributed_face_stencil,
             build_distributed_bounds_conn,
             build_sensor_gated_filter_func_arrays,
         )
@@ -920,6 +921,31 @@ class DistributedFRSolver:
                 self.freestream)
 
         order = int(getattr(self, "current_order", self.order))
+        # 顶点邻域模板（BJ 判据用）在**分布式**路径上还不可用 ——
+        # 如实记录为未完成项，不静默当成已修。
+        #
+        # 缺陷：面邻居在三维四面体上只有 4 个，其单元均值不能把本
+        # 单元夹住，于是 O(h|grad u|) 的合法光滑变化被当成越界。
+        # 实测标记比例在三档加密上**恒为 100%**（不收敛），换顶点
+        # 邻域模板后 100% -> 25% -> 6.18%。完整数据见
+        # `core/fr_operators/vertex_stencil.py` 模块文档。
+        #
+        # 为什么这里不接顶点模板：共享同一顶点的两个单元通过面邻接
+        # 可能相隔 **2 个以上**面跳，而本项目的 halo 是 1 层面邻居。
+        # 不完整的顶点邻域会让包络在分区边界上变窄，于是**同一算例
+        # 换 rank 数得到不同的掩码** —— 结果依赖分区，这是求解器
+        # 不可接受的（正是 `test_sensor_gate_distributed.py` 钉住的
+        # 那条性质）。
+        #
+        # 为什么不硬失败：面模板在分布式上**是分区独立的**、现在就
+        # 能用，只是带着上面那个过度标记的缺陷（与单机在本次修复前
+        # 同一个缺陷）。把它改成崩溃等于删掉一个可用功能。
+        #
+        # 要在分布式上用顶点模板，需要的是一次**按顶点**的归约交换
+        # （每个 rank 先算本地 node_max/node_min，再对共享顶点做
+        # allreduce，然后散射回单元），那是一条与现有按单元的 halo
+        # 交换不同的通信模式，属于独立一项。
+        _warn_distributed_face_stencil(sensor)
         return build_sensor_gated_filter_func_arrays(
             n_local, n_sps, order,
             self.ops.filter_prism, self.ops.filter_tet,

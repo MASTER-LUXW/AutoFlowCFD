@@ -160,9 +160,20 @@ class _GPUSolverInitMixin:
                   else _to_dev(filter_prism))
             ft = (filter_tet if hasattr(filter_tet, "device")
                   else _to_dev(filter_tet))
+            # 顶点邻域模板（BJ 判据用）——与单机 CPU 路径同一个构造
+            # 函数、同一个理由（面邻居在三维四面体上不能把本单元夹住，
+            # 见 `fr_operators/vertex_stencil.py`）。单 GPU 是全局网格、
+            # 无 halo，所以直接用全局模板即可，不需要重映射。
+            vstencil = None
+            if sensor in ("bounds", "both"):
+                from autoflowcfd.core.fr_operators.vertex_stencil import (
+                    build_vertex_stencil,
+                )
+
+                vstencil = build_vertex_stencil(self.mesh)
             return build_sensor_gated_filter_func_arrays(
                 n_cells, n_sps, order, fp, ft, n_prism=n_prism,
-                sensor=sensor, **conn)
+                sensor=sensor, vertex_stencil=vstencil, **conn)
 
     def _init_wall_distance_gpu(self):
         """预计算壁面距离场并上传到 GPU。

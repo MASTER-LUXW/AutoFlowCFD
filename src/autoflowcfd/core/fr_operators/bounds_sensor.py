@@ -106,6 +106,7 @@ from typing import Optional
 import numpy as np
 
 from autoflowcfd.core.utils.array_module import array_module as _array_module
+from .vertex_stencil import accumulate_vertex_envelope
 
 #: `tol = rel_tol * (nb_max - nb_min) + abs_tol` 里的相对项系数。
 #: 0.1 的含义：解点值要超出邻域区间**10% 的邻域跨度**才算越界。
@@ -180,6 +181,7 @@ def compute_bounds_violation_mask(
     row_is_prism=None,
     n_real_prism=None,
     n_real_tet=None,
+    vertex_stencil=None,
 ) -> np.ndarray:
     """逐单元判定"解点值越出了面邻居均值区间" —— **纯数组接口**。
 
@@ -202,6 +204,25 @@ def compute_bounds_violation_mask(
             均值"——用**幽灵态**会把边界条件本身的物理跳跃（壁面镜像把
             法向速度取反）误判成越界。缺失那一侧要用 `bnd_dirichlet`
             给出的**物理边界值**补上，见该参数。
+        vertex_stencil: 可选 `VertexStencil`（`vertex_stencil.py::
+            build_vertex_stencil` 的产物）。给了它就**额外**把顶点邻域
+            （共享任一顶点的全部单元）的均值计入包络。
+
+            **这是 2026-09-19 对"欠解析光滑场上标记 100%"那条缺陷的修复**：
+            面邻居在三维四面体上只有 4 个，其单元均值不能把本单元夹住，
+            漏掉的 O(h|grad u|) 合法光滑变化被当成越界。实测（TGV 解析
+            初场、三档加密）：
+
+                模板       越界量观测阶      默认容差标记比例（n=16）
+                面邻居     0.72 / 0.96          100.00%
+                顶点邻居   1.58 / 1.28            6.18%
+
+            中位越界从 8.04e-02 降到**恰好 0**。完整数据与那条被否掉的
+            TVB 方案见 `vertex_stencil.py` 模块文档。
+
+            `None` 时只用面邻居 —— 那是 2026-09-19 之前的行为，保留是
+            为了让合成单元测试（没有 `_fixed_*_conn` 的网格）与历史对照
+            仍然可跑；生产路径由 `fr_solver/filter.py` 负责传入。
         bnd_dirichlet: 可选 (n_faces, n_var)，边界面上该变量的物理边界
             值（守恒变量口径）；非有限值（NaN/inf）= 该面该变量没有
             Dirichlet 值，退回"排除"（对 `nb_max`/`nb_min` 的初值
@@ -449,6 +470,15 @@ def compute_bounds_violation_mask(
         if o_i.size:
             _scatter_minmax(xp, nb_max, nb_min, o_i, cell_mean[n_i])
             _scatter_minmax(xp, nb_max, nb_min, n_i, cell_mean[o_i])
+        if vertex_stencil is not None:
+            # **顶点邻域**（共享任一顶点的全部单元）——面邻居在三维四面体
+            # 上不能把本单元夹住，实测因此把 O(h|grad u|) 的合法光滑变化
+            # 当成越界、在欠解析光滑场上标记 100% 的单元。完整实测数据
+            # （含"经典 TVB 的 M h^2 修不了它"那条被否掉的方案）见
+            # `vertex_stencil.py` 模块文档。
+            accumulate_vertex_envelope(
+                xp, _scatter_minmax, nb_max, nb_min, cell_mean,
+                vertex_stencil)
         if bd_b is not None and o_b.size:
             # 边界面：有 Dirichlet 值的把它当"外侧均值"计入包络；NaN 的
             # 用 cell_mean 顶上 —— 而 nb_max/nb_min 的初值就是 cell_mean，
