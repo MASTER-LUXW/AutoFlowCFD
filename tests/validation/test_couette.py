@@ -107,31 +107,63 @@ def test_couette_prism_stable_from_wrong_ic():
         assert np.all(np.isfinite(solver.state.U)), f"solution diverged (NaN/Inf) at iter {i}"
 
 
-@pytest.mark.parametrize("order,tol", [(1, 1e-7)])
-def test_couette_prism_preserves_the_exactly_representable_shear(order, tol):
+#: 两个棱柱基档在"精确线性剪切保持性"上的实测上界（1600 步，
+#: `FILTER_MODE=off` 即默认档，判据 `|u - u_exact|/U_wall`）。
+#:
+#: 2026-09-19 原生棱柱基接入残差全链路之后测得：
+#:
+#:     档        P1         P2         P3
+#:     坍缩    6.62e-09   1.78e-02   第 5 步 NaN
+#:     原生    2.05e-09   8.40e-09   4.38e-08
+#:
+#: **P2 改善约 210 万倍、P3 从发散变成稳定。** 残差侧同向：坍缩 P2 的
+#: 残差 1600 步涨 5e7 倍（1.6e-5 -> 8.7e2），原生 P2 只涨 23 倍
+#: （3.0e-6 -> 7.0e-5），与 P1 同样的缓慢线性爬升 —— 那是壁面边界条件的
+#: 瞬态，不是失稳。
+#:
+#: 上界取实测值的约 3 倍余量。坍缩档那两条**刻意保留**为"记录当前真实
+#: 行为"的判据（不是目标值）：默认档仍是坍缩，这两条一旦变好说明坍缩
+#: 侧也被改动了，应当来更新这里而不是放宽。
+_SHEAR_TOL = {
+    ("collapsed", 1): 1e-7,
+    ("collapsed", 2): 6e-2,     # 记录：实测 1.78e-2，不是目标值
+    ("native", 1): 1e-8,
+    ("native", 2): 3e-8,
+    ("native", 3): 1.5e-7,
+}
+
+
+@pytest.mark.parametrize("basis,order", [
+    ("collapsed", 1),
+    ("collapsed", 2),
+    ("native", 1),
+    ("native", 2),
+    ("native", 3),
+])
+def test_couette_prism_preserves_the_exactly_representable_shear(
+        basis, order, monkeypatch):
     """**精确可表示的线性剪切解必须被保持** —— 本文件最硬的物理判据。
 
     Couette 的精确解 `u = U_wall * y / H` 是 `y` 的**线性**函数，在 P1/P2/P3
     的多项式空间里**都精确可表示**。所以"从精确解出发、推进 1600 步之后
     还在精确解上"是一条与分辨率无关的硬性质：偏离只可能来自离散本身。
 
-    实测（1600 步，`FILTER_MODE=off` 即默认档，`|u - u_exact|/U_wall`）：
+    实测上界与两档对照见 `_SHEAR_TOL` 上方那节。
 
-        P1   6.62e-09    <- 本测试覆盖：精确解被保持到机器精度级
-        P2   1.78e-02    <- 偏离 1.8%
-        P3   NaN（第 5 步发散）
+    ## 为什么这条判据能定性地分开两个基档
 
-    P2/P3 那两档**不是分辨率问题**（同一个线性解在它们的空间里同样精确
-    可表示），是已记录在案的那条**棱柱 P2/P3 离散不稳定**（项目记忆
-    `blasius_spanwise_w_open`：伪横流在 P1 上饱和、在 P2 上无界增长；
-    病根是棱柱仍用坍缩坐标基）。它由
-    `test_couette_prism_residual_trend`（标记为 xfail）跟踪，修复路径是
-    原生棱柱基迁移（`fr/native_prism/basis.py` / `native_prism/face.py`，
-    算子层与几何层已完成、残差 kernel 面分派待适配）。
+    坍缩档 P2/P3 的失效**不是分辨率问题**（同一个线性解在它们的空间里
+    同样精确可表示），而是坍缩坐标基在被三角化的那两个参考轴上的病理
+    （`max|D_3d_prism|` P1 2.05 -> P3 560.1，每阶约 x25；项目记忆
+    `blasius_spanwise_w_open`）。换成原生 PKD⊗Legendre 基之后 `max|D|`
+    P3 只有 4.86，这条判据随之回到机器精度级。
 
-    所以本测试**只参数化 P1**：它是当前真正成立、且必须防回归的那一档。
-    P2/P3 的同一判据会在原生棱柱基接入之后加上来。
+    **坍缩 P3 不在参数表里**：它在第 5 步就出非有限值，连"跑完 1600 步"
+    这个前提都不成立，写成一条会 NaN 的用例没有信息量；那一档的现状由
+    上面 `_SHEAR_TOL` 的注释如实记录。
     """
+    monkeypatch.setenv("AFCFD_PRISM_BASIS", basis)
+    tol = _SHEAR_TOL[(basis, order)]
     solver, mesh, H, U_wall, Lx, rho_inf, p_inf = _build_couette_solver(
         order=order)
 
@@ -149,80 +181,114 @@ def test_couette_prism_preserves_the_exactly_representable_shear(order, tol):
 
     err = float(np.max(np.abs(solver.state.Q[:, :, 1] - u0))) / U_wall
     assert err < tol, (
-        f"P{order}: 精确可表示的线性剪切解没有被保持，"
+        f"{basis} P{order}: 精确可表示的线性剪切解没有被保持，"
         f"|u-u_exact|/U_wall = {err:.4e} > {tol:.1e}")
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "棱柱 P2 的离散不稳定（已记录：伪横流在 P1 上饱和、P2 上无界增长）。"
-    "残差全程单调上升、不存在'峰值后回落'这个阶段。修复路径是原生棱柱基"
-    "迁移，见本函数文档与项目记忆 blasius_spanwise_w_open。"))
-def test_couette_prism_residual_trend():
-    """从几乎精确的解析解（叠加机器精度量级扰动）出发，验证残差在初始
-    瞬态爬升后确实呈下降趋势——真实复现过的行为模式：能量场粘性加热
-    弛豫在最初几百步内让残差先上升，随后随真实物理弛豫下降，是"求解器
-    动力学物理正确"最直接、最能在合理测试预算内验证到的证据（完整
-    收敛到解析解需要的步数量级见 test_couette_prism_stable_from_wrong_ic
-    文档，不适合放进自动化测试预算）。
+#: 残差"后半段斜率 / 前半段斜率"的判据阈值（见
+#: `test_couette_prism_residual_growth_is_at_most_linear` 文档）。
+#: 线性漂移 -> 约 1；指数失稳 -> 远大于 1。实测把两档分得很开：
+#:
+#:     档/阶数      slope2/slope1
+#:     原生 P1          0.93
+#:     原生 P2          0.93
+#:     原生 P3          1.07
+#:     坍缩 P1          0.99
+#:     坍缩 P2         34.7      <- 指数失稳
+_LINEAR_GROWTH_MAX = 2.0
+_SUPERLINEAR_MIN = 10.0
 
-    重要更正（判据数值已过期，重新校准）：文档曾记录"2000 步内残差
-    1.83e-2（iter 100）-> 1.90e-3（iter 2000），约 1 个数量级"，据此
-    要求 1600 步内降到峰值的 50% 以下。这组数字是在 WALL 边界还没有
-    真正施加无滑移约束（此前粘性壁面 BC 对动量零效果的 bug，本项目
-    另一轮修复引入了 IP penalty 项才真正生效）时测得的——修复后重新
-    实测（真实网格，同一份初场/步数/CFL）：peak_res=1.319e-3（iter 28），
-    final_res=1.244e-3（iter 1599），final/peak≈0.943，且从 iter 100
-    往后到结束是持续、真实的缓慢单调下降（iter100 1.291e-3 -> iter1599
-    1.244e-3），不是停滞或反弹。量级更小、衰减更慢是物理上合理的：真正
-    施加壁面剪切力后，系统本身阻尼更强、瞬态响应幅度更小，收敛到稳态
-    profile 需要更长的物理时间——不是数值退化，是这套 Couette 算例现在
-    真正受壁面粘性力控制的、更贴近真实物理的动力学。0.5 这个比例假设的
-    衰减速率不再成立，用真实观测到的衰减比例（留出安全边际）重新校准，
-    仍然是"确实持续下降、不是简单地在峰值附近停滞或反弹"这个核心断言的
-    严格证据。
 
-    ## 2026-09-19：这条断言当前不成立，已标记 xfail(strict)
+@pytest.mark.parametrize("basis,order", [
+    ("collapsed", 1),
+    ("native", 1),
+    ("native", 2),
+    ("native", 3),
+])
+def test_couette_prism_residual_growth_is_at_most_linear(basis, order,
+                                                         monkeypatch):
+    """从**精确解**出发推进时，残差的增长必须最多是**线性**的。
 
-    实测（本函数的原始配置，1600 步）：峰值出现在**最后一步**，即残差
-    **全程单调上升**，根本不存在"峰值之后"这个阶段。三档对照：
+    ## 这条判据取代了什么，以及为什么原来那条是判据本身错了
 
-        档       首         末         增长      |u-u_exact|/U_wall
-        off      1.62e-05   8.69e+02   5.3e7x    1.78e-02
-        sensor   1.62e-05   7.25e+02   4.5e7x    2.97e-02
-        legacy   1.62e-05   1.37e-03   84x       6.46e-02
+    这里原来是一条"残差先瞬态爬升、之后回落到峰值的 96% 以下"的断言，
+    2026-09-19 被标记成 `xfail(strict)`，理由记作"棱柱 P2 离散不稳定"。
+    那个理由只对**坍缩 P2** 成立；把它挂成整条测试的 xfail 掩盖了一个
+    更基本的问题：**在默认档（`FILTER_MODE=off`）下，那条断言对任何基、
+    任何阶数都不成立**，因为它要求的"回落"需要的伪时间预算远超 1600 步：
 
-    两条由此确定的事实：
+        档/阶数   首残差     末残差     峰值位置
+        坍缩 P1   1.52e-06   2.37e-04   最后一步
+        原生 P1   1.17e-06   7.98e-06   最后一步
+        原生 P2   3.03e-06   7.02e-05   最后一步
 
-    1. **上面那个 `final/peak≈0.943` 的校准值是在 `legacy` 档下测的**
-       （量级 1.37e-3 与它记的 1.319e-3/1.244e-3 吻合）。默认档 2026-09-19
-       改成 `off` 之后，同一条断言面对的是一个 5e7 倍增长的残差。
-    2. **`legacy` 的"残差小"不是精度，是滤波把解压离了精确解** —— 它的
-       残差最小（84x）而与精确解的偏差**最大**（6.46e-2，是 `off` 的 3.6 倍）。
-       这是把默认档改成 `off` 的一条独立证据。
+    三条都是"全程单调上升、峰值在最后一步"。原来那个 `final/peak≈0.943`
+    的校准值是在 `legacy` 滤波档下测的（量级 1.37e-3 与它记的
+    1.319e-3/1.244e-3 吻合），默认档改成 `off` 之后它就不再适用 ——
+    这与项目记忆 `precond_validation_case_design_conflict` 的教训同一
+    类型：**残差下降 != 稳态已到**，判据必须先确认伪时间预算够不够。
 
-    逐阶数（`off` 档）把病根定位得很干净 —— Couette 的精确解是 `y` 的
-    **线性**函数、在各阶空间里**都精确可表示**：
+    ## 这个线性上升本身是什么（已查明，不是失稳）
 
-        P1   残差增长 155x      |u-u_exact|/U_wall = 6.62e-09
-        P2   残差增长 5.3e7x                        1.78e-02
-        P3   第 5 步发散                            NaN
+    曾怀疑是绝热壁的粘性耗散加热（那样就没有稳态）。**被自己的数据
+    否掉**：压力与内能 1200 步增量恰好 `0.000000e+00`；解析体积耗散率
+    `mu*(du/dy)^2 = 1.8e-09 W/m^3`，在 1.2e-3 s 的物理时间里相对内能
+    密度只有 8.5e-18，低于双精度。
 
-    所以 P2/P3 的偏离与发散**不是分辨率问题**，是离散本身不稳定 —— 与
-    项目记忆 `blasius_spanwise_w_open` 记录的"伪横流在 P1 上饱和、P2 上
-    无界增长、病根是棱柱仍用坍缩坐标基"完全同一特征。降 CFL 只减缓不解决
-    （另一个配置上实测 CFL 0.03 -> 0.001 把增长从 1.27e10 倍降到 4.4e3 倍，
-    但末/峰始终是 1.0000）。
+    真实机制是**解以恒定速率线性漂移**：`|u-u_exact|/U_wall` 每 300 步
+    增加 1.48e-09（300/600/900/1200 步分别 1.97/3.45/4.92/6.41e-09，
+    二阶差分为零）。也就是离散稳态与解析线性剪切差一个**舍入量级的常量
+    驱动**，把它积起来就是线性漂移，而残差正比于误差、所以也线性。
+    1600 步后仍只有 8.4e-09；它随阶数增大（P1 2.05e-09、P2 8.40e-09、
+    P3 4.38e-08）与 `max|D|` 随阶数增大一致，是舍入被算子量级放大。
 
-    **为什么用 xfail(strict) 而不是放宽判据**：放宽就等于把这条缺陷藏起来。
-    `strict=True` 意味着它一旦通过就会**报错** —— 原生棱柱基接入之后这条
-    会自动变成正信号，提醒把 xfail 摘掉。现在真正成立的那一档由
-    `test_couette_prism_preserves_the_exactly_representable_shear`（P1，
-    活跃判据）防回归。
+    ## 判据
 
-    **确认这不是本轮改动引入的**：已用 git worktree 在改动前的提交
-    （1d8f9fa）上跑同一条测试，同样失败。
+    取残差序列前后两半的平均斜率之比。线性漂移给出约 1；指数失稳给出
+    远大于 1（坍缩 P2 实测 34.7）。阈值与实测值见 `_LINEAR_GROWTH_MAX`
+    上方那节。
+
+    **坍缩 P2/P3 不在参数表里**，它们由下面那条**负控制**覆盖 —— 那条
+    断言它们必须**超线性**，也就是把"原生基修好了什么"明确写成可执行的
+    判据，而不是靠 xfail 记一笔。
     """
-    solver, mesh, H, U_wall, Lx, rho_inf, p_inf = _build_couette_solver()
+    monkeypatch.setenv("AFCFD_PRISM_BASIS", basis)
+    ratio, hist = _residual_slope_ratio(order)
+    assert ratio < _LINEAR_GROWTH_MAX, (
+        f"{basis} P{order}: 残差增长超线性，后/前半段斜率比 = {ratio:.2f}"
+        f"（首 {hist[0]:.3e}、中 {hist[len(hist) // 2]:.3e}、"
+        f"末 {hist[-1]:.3e}）—— 线性漂移应当约为 1")
+
+
+def test_couette_collapsed_p2_residual_growth_is_superlinear():
+    """**负控制**：坍缩棱柱基在 P2 上必须是超线性增长。
+
+    这条把"原生棱柱基修好了什么"写成可执行判据，取代原先那条
+    `xfail(strict)`：
+
+        档       |u-u_exact|/U_wall (1600 步)   残差增长      斜率比
+        坍缩 P2   1.78e-02                      5.3e7 倍      34.7
+        原生 P2   8.40e-09                      23 倍          0.93
+
+    Couette 的精确解是 `y` 的**线性**函数、在 P2 空间里精确可表示，所以
+    坍缩档那 1.78e-02 的偏离**不是分辨率问题**，是坍缩坐标基在被三角化的
+    两个参考轴上的病理（`max|D_3d_prism|` P1 2.05 -> P3 560.1，每阶约
+    x25；项目记忆 `blasius_spanwise_w_open`）。
+
+    **这条测试一旦失败就意味着坍缩档被改动了**（它是当前默认档），应当
+    来更新这里的记录值，而不是放宽阈值。
+    """
+    ratio, hist = _residual_slope_ratio(2)
+    assert ratio > _SUPERLINEAR_MIN, (
+        f"坍缩 P2 的残差增长不再超线性（斜率比 {ratio:.2f}）—— 若这是"
+        f"真实修复，请把它挪到上面那条正向参数表里并更新文档记录值"
+    )
+
+
+def _residual_slope_ratio(order: int):
+    """从精确线性剪切出发推进 1600 步，返回 `(后/前半段斜率比, 残差序列)`。"""
+    solver, mesh, H, U_wall, Lx, rho_inf, p_inf = _build_couette_solver(
+        order=order)
 
     gamma = 1.4
     y = mesh.sps_coords[:, :, 1]
@@ -233,29 +299,16 @@ def test_couette_prism_residual_trend():
     solver.state._update_primitives()
 
     n_iter = 1600
-    res_history = []
+    hist = []
     for i in range(n_iter):
         res = solver.step(1e-6)
-        assert np.all(np.isfinite(solver.state.U)), f"solution diverged (NaN/Inf) at iter {i}"
-        res_history.append(res)
+        assert np.all(np.isfinite(solver.state.U)), f"第 {i} 步出现非有限值"
+        hist.append(res)
 
-    peak_res = max(res_history)
-    peak_idx = res_history.index(peak_res)
-    final_res = res_history[-1]
-
-    # 残差必须先经历一次真实的瞬态爬升（否则说明能量场根本没有真正
-    # 演化，参见 low_mach_cfl_ausm_inconsistency 记忆里 DUAL_TIME
-    # 假收敛 bug 的教训——爬升本身也是"确实在做功"的证据）。
-    assert peak_res > res_history[0] * 2.0, (
-        f"residual never showed the expected transient rise: {res_history[0]:.4e} -> peak {peak_res:.4e}"
-    )
-    # 爬升之后必须持续、真实地回落——真实观测比例 final/peak≈0.943（见
-    # 上方文档"重要更正"），阈值取 0.96 留安全边际，仍然严格排除"停滞
-    # 在峰值附近"或"反弹"这两种会指向真正 bug 的行为。
-    assert final_res < peak_res * 0.96, (
-        f"residual did not trend down after its transient peak: peak={peak_res:.4e} "
-        f"(iter {peak_idx}) -> final={final_res:.4e}"
-    )
+    mid = n_iter // 2
+    slope1 = (hist[mid - 1] - hist[0]) / mid
+    slope2 = (hist[-1] - hist[mid - 1]) / (n_iter - mid)
+    return float(slope2 / max(slope1, 1e-300)), hist
 
 
 def test_couette_prism_freestream_preservation():
