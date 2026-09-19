@@ -136,25 +136,34 @@ def blasius_thicknesses(x: float, nu: float = None) -> Dict[str, float]:
     }
 
 
-def blasius_profile(eta: np.ndarray) -> np.ndarray:
-    """`u/U = f'(eta)`：现场积分 Blasius 方程（RK4 + 打靶），不查表。
+def _blasius_shoot(eta_max: float, n: int = 20000):
+    """打靶积分 Blasius 方程，返回 `(grid, eta_grid)`。
 
-    Blasius：`f''' + 0.5*f*f'' = 0`，`f(0)=f'(0)=0`，`f'(inf)=1`。
-    打靶量是 `f''(0)`，已知解约 0.33206；这里从它出发用二分把
-    `f'(eta_max)` 打到 1，所以返回值不依赖任何硬编码表。
+    Blasius 方程 `f''' + 0.5 f f'' = 0`，边条件 `f(0)=f'(0)=0`、
+    `f'(inf)=1`。打靶量是 `f''(0)`（已知解约 0.33206）；这里用二分把
+    `f'(eta_max)` 打到 1，所以结果不依赖任何硬编码表。
+
+    `grid[:, 0:3]` 依次是 `f`、`f'`、`f''`。
+
+    **单独提出来**（2026-09-19）：原先这段积分内嵌在 `blasius_profile`
+    里、只把 `f'` 返回出来。而无前缘奇点档的入口需要横向速度
+    `v = 0.5 sqrt(nu U / x) (eta f' - f)`，它要 `f` 本身。
+
+    （那时曾用 `v = 0` 近似并把它记成"不影响下游 cf"——**被测量否掉**：
+    `v = 0` 与连续性方程不相容，入口面上被迫产生一个大的 v 修正，实测
+    让 `le_offset=0.5` 的残差比含奇点那档还差 4.5 倍（2.39e6 vs
+    5.31e5）、`|v|/U` 大 4 倍（0.265 vs 0.067）。所以那不是"可接受的
+    近似"，是错的。）
     """
-    eta = np.asarray(eta, dtype=float)
-    eta_max = max(float(eta.max()) if eta.size else 0.0, 10.0)
+    h = eta_max / n
 
-    def shoot(fpp0, n=20000):
-        h = eta_max / n
+    def rhs(v):
+        return np.array([v[1], v[2], -0.5 * v[0] * v[2]])
+
+    def shoot(fpp0):
         y = np.array([0.0, 0.0, fpp0])           # f, f', f''
         grid = np.empty((n + 1, 3))
         grid[0] = y
-
-        def rhs(v):
-            return np.array([v[1], v[2], -0.5 * v[0] * v[2]])
-
         for i in range(n):
             k1 = rhs(y)
             k2 = rhs(y + 0.5 * h * k1)
@@ -162,18 +171,47 @@ def blasius_profile(eta: np.ndarray) -> np.ndarray:
             k4 = rhs(y + h * k3)
             y = y + (h / 6.0) * (k1 + 2 * k2 + 2 * k3 + k4)
             grid[i + 1] = y
-        return grid, np.linspace(0.0, eta_max, n + 1)
+        return grid
 
     lo, hi = 0.1, 1.0
     for _ in range(80):
         mid = 0.5 * (lo + hi)
-        grid, gx = shoot(mid)
-        if grid[-1, 1] < 1.0:
+        if shoot(mid)[-1, 1] < 1.0:
             lo = mid
         else:
             hi = mid
-    grid, gx = shoot(0.5 * (lo + hi))
-    return np.interp(eta, gx, grid[:, 1])
+    return shoot(0.5 * (lo + hi)), np.linspace(0.0, eta_max, n + 1)
+
+
+def blasius_f_and_fp(eta: np.ndarray):
+    """返回 `(f(eta), f'(eta))`。
+
+    `f'` 就是 `u/U`；`f` 只有横向速度 `v` 需要。
+    """
+    eta = np.asarray(eta, dtype=float)
+    eta_max = max(float(eta.max()) if eta.size else 0.0, 10.0)
+    grid, gx = _blasius_shoot(eta_max)
+    return np.interp(eta, gx, grid[:, 0]), np.interp(eta, gx, grid[:, 1])
+
+
+def blasius_profile(eta: np.ndarray) -> np.ndarray:
+    """`u/U = f'(eta)`：现场积分 Blasius 方程（RK4 + 打靶），不查表。"""
+    return blasius_f_and_fp(eta)[1]
+
+
+def blasius_v_over_u(eta: np.ndarray, re_x: float) -> np.ndarray:
+    """横向速度 `v/U_inf = (eta f' - f) / (2 sqrt(Re_x))`。
+
+    由 `v = 0.5 sqrt(nu U / x) (eta f' - f)` 除以 `U`、再用
+    `sqrt(nu/(U x)) = 1/sqrt(Re_x)` 化简得到。
+
+    `eta -> inf` 时 `eta f' - f -> 1.7208`（正是 `delta*` 的系数），
+    于是外缘 `v/U -> 0.8604/sqrt(Re_x)` —— 与教科书那个 `0.86/sqrt(Re_x)`
+    一致。这条恰好能当实现自检，见
+    `tests/validation/test_blasius.py::TestReferenceSolutionItself`。
+    """
+    f, fp = blasius_f_and_fp(eta)
+    return (np.asarray(eta, dtype=float) * fp - f) / (2.0 * np.sqrt(re_x))
 
 
 def blasius_fpp0() -> float:
@@ -218,6 +256,7 @@ def build_blasius_solver(
     delta_margin: float = 6.0,
     turb_model: str = "NONE",
     lz_over_h: float = 0.25,
+    le_offset: float = 0.0,
 ):
     """构造平板边界层求解器；返回 `(solver, meta)`。
 
@@ -248,6 +287,40 @@ def build_blasius_solver(
             这个开放问题的下一个待验证方向就是"流向强梯度通过坍缩三角形
             基耦合出 w"，而判别它需要扫这个长宽比——写死的常数扫不了。
         turb_model: 湍流模型名（层流验证用 "NONE"）
+        le_offset: **虚拟原点偏移**，单位是板长 `L_PLATE` 的倍数。
+
+            `0.0`（默认，保持既有行为）：无滑移壁面从 `x=0` 开始，而
+            `x=0` 就是入口面 —— 于是**平板前缘落在入口面上**，那里
+            Blasius 解有 `du/dy -> inf` 的可积奇点。
+
+            `> 0`：域被当成虚拟前缘**下游** `le_offset * L_PLATE` 处的
+            一段，入口携带该处的**解析 Blasius 剖面**，精确解在域内处处
+            是 `x_v = x + le_offset*L_PLATE` 处的 Blasius 解。域内**不含
+            前缘**，因此存在真正的稳态。
+
+            ## 为什么这个参数是必须的（实测依据，2026-09-19）
+
+            `le_offset=0` 那一档**不是**一个可用于稳态收敛/摩阻定量验证
+            的算例。推进 400 步后按位置统计残差：
+
+                x/L in [0.000,0.125)   占残差总平方和 99.5%
+                其余 7 个 x 箱          各 0.1%
+                y/H in [0.000,0.125)   占 100.0%
+
+            最大残差点在 `x/L=0.0000, y/H=0.0059`（能量方程）——正是前缘
+            角。后果是：残差在显式 CFL 0.03 下跑 2000 步仍单调上升到
+            6.6e5、从未回落；P2 最终发散，且发散**时刻与 dt 完全无关**
+
+                CFL 0.03   第 2834 步
+                CFL 0.02   第 4251 步   = 2834 x 1.5
+                CFL 0.01   第 8501 步   = 2834 x 3（事先预言 8502）
+
+            这同时解释了项目记忆 `blasius_spanwise_w_open` 里那条
+            "**不收敛**（均匀加密不降反升）"——奇点的固有行为。
+
+            **两档都保留**：`le_offset=0` 是那条 P2 发散的最小复现
+            （1728 单元、一分钟一轮），删掉它会失去这个诊断入口；
+            `le_offset>0` 才是稳态收敛与 cf 定量验证该用的那一档。
     """
     import sys
     from pathlib import Path
@@ -286,6 +359,8 @@ def build_blasius_solver(
         "z_max": {"type": "SYMMETRY"},
         # INLET 需要显式给 `Q_inlet`（原始变量 rho,u,v,w,p）：`bc_overrides`
         # 走底层 BC 名，不经过 `VELOCITY_INLET -> ("INLET", {...})` 那层映射。
+        # `le_offset > 0` 时这个常量只是占位：下面会把这一组换成逐通量点
+        # 的解析 Blasius 剖面（见 `le_offset` 参数文档）。
         "x_min": {"type": "INLET",
                   "Q_inlet": [RHO_INF, U_INF, 0.0, 0.0, P_INF]},
         "x_max": {"type": "OUTLET", "p_outlet": P_INF},
@@ -305,6 +380,41 @@ def build_blasius_solver(
     # 现象，`test_couette.py` 同样必须这么接）。
     solver.boundary_ghost_provider = build_face_exact_ghost_provider(
         mesh, L_PLATE, H, Lz, bc_overrides)
+
+    x0 = float(le_offset) * L_PLATE
+    if x0 > 0.0:
+        # 无前缘奇点档：入口换成虚拟原点下游 x0 处的解析 Blasius 剖面。
+        from validation._channel_mesh import wrap_inlet_with_profile
+
+        re_x0 = U_INF * x0 / nu
+
+        def _inlet_profile(positions):
+            """`(n_fp,3) -> (n_fp,5)`：该批通量点处的 Blasius 入口状态。
+
+            `u` 与 `v` **都**给精确值：
+
+                u/U = f'(eta)
+                v/U = (eta f' - f) / (2 sqrt(Re_x0))
+
+            `v` 必须给：它与 `u` 剖面由连续性方程绑死。令 `v=0` 会在
+            入口面上违反连续性、逼出一个大的局部修正 —— 实测那一版让
+            本档的残差比含前缘奇点那档还**差 4.5 倍**（2.39e6 vs
+            5.31e5）、`|v|/U` 大 4 倍（0.265 vs 0.067）。
+            """
+            y = np.asarray(positions)[:, 1]
+            eta = y / np.sqrt(nu * x0 / U_INF)
+            q = np.empty((len(y), 5))
+            q[:, 0] = RHO_INF
+            q[:, 1] = U_INF * blasius_profile(eta)
+            q[:, 2] = U_INF * blasius_v_over_u(eta, re_x0)
+            q[:, 3] = 0.0
+            q[:, 4] = P_INF
+            return q
+
+        solver.boundary_ghost_provider = wrap_inlet_with_profile(
+            solver.boundary_ghost_provider, solver, "x_min",
+            bc_overrides, _inlet_profile)
+
     solver._reference_area = L_PLATE * Lz
 
     dy = H / ny_use
@@ -316,6 +426,9 @@ def build_blasius_solver(
         "cells_in_delta_at_L": d99_L / dy,
         "flow_through_time": L_PLATE / U_INF,
         "n_cells": int(mesh.n_cells),
+        # 虚拟原点偏移（0 = 前缘在入口面上、含奇点，见 le_offset 文档）
+        "le_offset": float(le_offset),
+        "x_virtual_origin": x0,
     }
     return solver, meta
 

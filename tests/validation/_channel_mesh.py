@@ -66,6 +66,96 @@ def build_face_exact_ghost_provider(mesh, Lx, H, Lz, bc_by_plane, tol_scale=1e-6
     return BoundaryGhostStateProvider(group_code, code_to_config, default_config)
 
 
+class ProfileInletGhostProvider:
+    """把某个边界组的 INLET 状态换成**逐通量点**的给定剖面。
+
+    ## 为什么需要它
+
+    `BoundaryGhostStateProvider` 的 INLET 配置是一个 `(5,)` 常量（整面
+    统一），而无前缘奇点的 Blasius 验证算例要求入口携带**解析 Blasius
+    剖面**（`u = U_inf f'(y / sqrt(nu x0 / U_inf))`）。底层
+    `boundary/fr_ghost_state.py::inlet_ghost_state` 本来就支持
+    `(n_fp, 5)` 的逐点形式（合成湍流入口 SEM 用的就是它），缺的只是一个
+    按通量点物理坐标求值的粘合层。
+
+    通量点的物理坐标复用生产代码里那一份唯一实现
+    （`core/fr_solver/boundary.py::_compute_inlet_fp_positions`：用体积
+    到面的外插矩阵作用在 `mesh.sps_coords` 上 —— 外插是线性的，对坐标
+    分量和对流场分量是同一个矩阵运算），不在测试里另写一套参考坐标到
+    物理坐标的映射。
+
+    ## 委托而不是继承
+
+    本类只截获 INLET 那一个组，其余面**原样委托**给包装的 provider。
+    这样边界条件的全部既有语义（OUTLET/WALL/SYMMETRY、流出时的内部
+    延拓、绝热壁掩码等）都不需要在这里重复一遍。
+    """
+
+    def __init__(self, inner, inlet_group_code, positions_by_face,
+                 profile_fn):
+        """
+        Args:
+            inner: 被包装的 `BoundaryGhostStateProvider`。
+            inlet_group_code: 要替换的那个组的 `group_code` 值。
+            positions_by_face: `{face_idx: (n_fp, 3) 物理坐标}`。
+            profile_fn: `(n_fp, 3) -> (n_fp, 5)`，给出该批通量点处的
+                原始变量入口状态。
+        """
+        self._inner = inner
+        self._code = int(inlet_group_code)
+        self._q_by_face = {
+            int(f): np.ascontiguousarray(profile_fn(pos), dtype=np.float64)
+            for f, pos in positions_by_face.items()
+        }
+        # 与被包装对象共享这两个属性：下游（绝热壁掩码构造、批量化路径）
+        # 会直接读它们，缺了会静默走回逐面慢路径或错标绝热壁。
+        self.group_code = inner.group_code
+        self.code_to_config = inner.code_to_config
+
+    def __call__(self, face_idx, Q_owner_fp, true_normal):
+        from autoflowcfd.boundary.fr_ghost_state import inlet_ghost_state
+
+        q_inlet = self._q_by_face.get(int(face_idx))
+        if q_inlet is None:
+            return self._inner(face_idx, Q_owner_fp, true_normal)
+        return inlet_ghost_state(Q_owner_fp, q_inlet, true_normal)
+
+
+def wrap_inlet_with_profile(provider, solver, inlet_plane_name,
+                            bc_by_plane, profile_fn):
+    """把 `provider` 的 `inlet_plane_name` 组换成逐点剖面入口。
+
+    `inlet_plane_name` 必须在 `bc_by_plane` 里被配成 `"INLET"`；否则这是
+    调用方的配置错误（把剖面挂到一个非入口面上不会报错、只会静默不生效），
+    所以这里硬失败。
+    """
+    if bc_by_plane.get(inlet_plane_name, {}).get("type") != "INLET":
+        raise ValueError(
+            f"{inlet_plane_name} 在 bc_by_plane 里不是 INLET，"
+            f"给它挂剖面入口没有意义")
+    from autoflowcfd.core.fr_solver.boundary import (
+        _compute_inlet_fp_positions,
+    )
+
+    target_cfg = bc_by_plane[inlet_plane_name]
+    code = None
+    for c, cfg in provider.code_to_config.items():
+        if cfg is target_cfg:
+            code = c
+            break
+    if code is None:
+        raise ValueError(
+            f"在 provider 里找不到 {inlet_plane_name} 对应的 group_code")
+    is_target = np.asarray(provider.group_code) == code
+    positions = _compute_inlet_fp_positions(
+        solver, solver.mesh.face_connectivity, is_target)
+    if not positions:
+        raise ValueError(
+            f"{inlet_plane_name} 组里没有 owner_is_primary 的边界面 —— "
+            f"剖面入口不会生效")
+    return ProfileInletGhostProvider(provider, code, positions, profile_fn)
+
+
 class _MockNodes:
     def __init__(self, coords):
         self._coords = coords

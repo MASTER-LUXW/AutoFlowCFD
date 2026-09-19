@@ -159,6 +159,42 @@ class TestReferenceSolutionItself:
         d = blasius_delta99(np.array([0.25, 1.0]), nu)
         assert d[1] / d[0] == pytest.approx(2.0, rel=1e-12)
 
+    def test_f_and_fp_are_consistent_with_each_other(self):
+        """`f` 与 `f'` 来自同一次积分，必须互为导数。
+
+        `blasius_f_and_fp` 是 2026-09-19 为"无前缘奇点"入口剖面加的
+        （横向速度 `v` 需要 `f` 本身，不只是 `f'`）。这条把它与既有的
+        `f'` 实现绑在一起：`d f/d eta` 的数值微分必须回到 `f'`。
+        """
+        from ._blasius_case import blasius_f_and_fp
+
+        eta = np.linspace(0.0, 8.0, 801)
+        f, fp = blasius_f_and_fp(eta)
+        dfde = np.gradient(f, eta)
+        # 端点用单侧差分、精度低，只比内部
+        assert np.abs(dfde[2:-2] - fp[2:-2]).max() < 5e-5
+        assert f[0] == pytest.approx(0.0, abs=1e-12)
+
+    def test_transverse_velocity_matches_the_textbook_coefficient(self):
+        """外缘横向速度 `v/U -> 0.8604 / sqrt(Re_x)`（教科书系数）。
+
+        这是 `blasius_v_over_u` 的独立校验：`eta f' - f` 在 `eta -> inf`
+        处趋于 `delta*` 的系数 1.7208，除以 2 正是 0.8604。所以这条同时
+        校验了 `f`、`f'` 与那个化简。
+
+        它不是装饰性的：入口剖面把 `v` 取成 0 的那一版（曾被记成"可接受
+        近似"）实测让无奇点档的残差比含奇点档还差 4.5 倍 —— `v` 与 `u`
+        由连续性方程绑死，取零就是在入口面上违反连续性。
+        """
+        from ._blasius_case import blasius_v_over_u
+
+        for re_x in (1.0e3, 5.0e3, 1.0e5):
+            got = float(blasius_v_over_u(np.array([10.0]), re_x)[0])
+            assert got == pytest.approx(0.8604 / np.sqrt(re_x), rel=2e-4), (
+                f"Re_x={re_x:.1e}: v/U={got:.6e}")
+        # 壁面上 v 必须严格为零（无滑移 + 不可穿透）
+        assert float(blasius_v_over_u(np.array([0.0]), 1.0e4)[0]) ==             pytest.approx(0.0, abs=1e-14)
+
 
 class TestCaseConstruction:
     """算例的几何/分辨率是按 Blasius 反推的，不是拍的。"""
