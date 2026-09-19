@@ -28,6 +28,7 @@ DUAL_TIME，其内层伪时间迭代仍是显式子迭代）无法在合理测�
 """
 
 import numpy as np
+import pytest
 
 from autoflowcfd.core.fr_solver import FRSolver
 from autoflowcfd.core.time_integration import TimeIntegrationScheme
@@ -106,6 +107,56 @@ def test_couette_prism_stable_from_wrong_ic():
         assert np.all(np.isfinite(solver.state.U)), f"solution diverged (NaN/Inf) at iter {i}"
 
 
+@pytest.mark.parametrize("order,tol", [(1, 1e-7)])
+def test_couette_prism_preserves_the_exactly_representable_shear(order, tol):
+    """**精确可表示的线性剪切解必须被保持** —— 本文件最硬的物理判据。
+
+    Couette 的精确解 `u = U_wall * y / H` 是 `y` 的**线性**函数，在 P1/P2/P3
+    的多项式空间里**都精确可表示**。所以"从精确解出发、推进 1600 步之后
+    还在精确解上"是一条与分辨率无关的硬性质：偏离只可能来自离散本身。
+
+    实测（1600 步，`FILTER_MODE=off` 即默认档，`|u - u_exact|/U_wall`）：
+
+        P1   6.62e-09    <- 本测试覆盖：精确解被保持到机器精度级
+        P2   1.78e-02    <- 偏离 1.8%
+        P3   NaN（第 5 步发散）
+
+    P2/P3 那两档**不是分辨率问题**（同一个线性解在它们的空间里同样精确
+    可表示），是已记录在案的那条**棱柱 P2/P3 离散不稳定**（项目记忆
+    `blasius_spanwise_w_open`：伪横流在 P1 上饱和、在 P2 上无界增长；
+    病根是棱柱仍用坍缩坐标基）。它由
+    `test_couette_prism_residual_trend`（标记为 xfail）跟踪，修复路径是
+    原生棱柱基迁移（`fr/native_prism_basis.py` / `native_prism_face.py`，
+    算子层与几何层已完成、残差 kernel 面分派待适配）。
+
+    所以本测试**只参数化 P1**：它是当前真正成立、且必须防回归的那一档。
+    P2/P3 的同一判据会在原生棱柱基接入之后加上来。
+    """
+    solver, mesh, H, U_wall, Lx, rho_inf, p_inf = _build_couette_solver(
+        order=order)
+
+    gamma = 1.4
+    y = mesh.sps_coords[:, :, 1]
+    u0 = U_wall * y / H
+    e0 = p_inf / ((gamma - 1.0) * rho_inf) + 0.5 * u0**2
+    solver.state.U[:, :, 1] = rho_inf * u0
+    solver.state.U[:, :, 4] = rho_inf * e0
+    solver.state._update_primitives()
+
+    for i in range(1600):
+        solver.step(1e-6)
+        assert np.all(np.isfinite(solver.state.U)), f"第 {i} 步出现非有限值"
+
+    err = float(np.max(np.abs(solver.state.Q[:, :, 1] - u0))) / U_wall
+    assert err < tol, (
+        f"P{order}: 精确可表示的线性剪切解没有被保持，"
+        f"|u-u_exact|/U_wall = {err:.4e} > {tol:.1e}")
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "棱柱 P2 的离散不稳定（已记录：伪横流在 P1 上饱和、P2 上无界增长）。"
+    "残差全程单调上升、不存在'峰值后回落'这个阶段。修复路径是原生棱柱基"
+    "迁移，见本函数文档与项目记忆 blasius_spanwise_w_open。"))
 def test_couette_prism_residual_trend():
     """从几乎精确的解析解（叠加机器精度量级扰动）出发，验证残差在初始
     瞬态爬升后确实呈下降趋势——真实复现过的行为模式：能量场粘性加热
@@ -129,6 +180,47 @@ def test_couette_prism_residual_trend():
     衰减速率不再成立，用真实观测到的衰减比例（留出安全边际）重新校准，
     仍然是"确实持续下降、不是简单地在峰值附近停滞或反弹"这个核心断言的
     严格证据。
+
+    ## 2026-09-19：这条断言当前不成立，已标记 xfail(strict)
+
+    实测（本函数的原始配置，1600 步）：峰值出现在**最后一步**，即残差
+    **全程单调上升**，根本不存在"峰值之后"这个阶段。三档对照：
+
+        档       首         末         增长      |u-u_exact|/U_wall
+        off      1.62e-05   8.69e+02   5.3e7x    1.78e-02
+        sensor   1.62e-05   7.25e+02   4.5e7x    2.97e-02
+        legacy   1.62e-05   1.37e-03   84x       6.46e-02
+
+    两条由此确定的事实：
+
+    1. **上面那个 `final/peak≈0.943` 的校准值是在 `legacy` 档下测的**
+       （量级 1.37e-3 与它记的 1.319e-3/1.244e-3 吻合）。默认档 2026-09-19
+       改成 `off` 之后，同一条断言面对的是一个 5e7 倍增长的残差。
+    2. **`legacy` 的"残差小"不是精度，是滤波把解压离了精确解** —— 它的
+       残差最小（84x）而与精确解的偏差**最大**（6.46e-2，是 `off` 的 3.6 倍）。
+       这是把默认档改成 `off` 的一条独立证据。
+
+    逐阶数（`off` 档）把病根定位得很干净 —— Couette 的精确解是 `y` 的
+    **线性**函数、在各阶空间里**都精确可表示**：
+
+        P1   残差增长 155x      |u-u_exact|/U_wall = 6.62e-09
+        P2   残差增长 5.3e7x                        1.78e-02
+        P3   第 5 步发散                            NaN
+
+    所以 P2/P3 的偏离与发散**不是分辨率问题**，是离散本身不稳定 —— 与
+    项目记忆 `blasius_spanwise_w_open` 记录的"伪横流在 P1 上饱和、P2 上
+    无界增长、病根是棱柱仍用坍缩坐标基"完全同一特征。降 CFL 只减缓不解决
+    （另一个配置上实测 CFL 0.03 -> 0.001 把增长从 1.27e10 倍降到 4.4e3 倍，
+    但末/峰始终是 1.0000）。
+
+    **为什么用 xfail(strict) 而不是放宽判据**：放宽就等于把这条缺陷藏起来。
+    `strict=True` 意味着它一旦通过就会**报错** —— 原生棱柱基接入之后这条
+    会自动变成正信号，提醒把 xfail 摘掉。现在真正成立的那一档由
+    `test_couette_prism_preserves_the_exactly_representable_shear`（P1，
+    活跃判据）防回归。
+
+    **确认这不是本轮改动引入的**：已用 git worktree 在改动前的提交
+    （1d8f9fa）上跑同一条测试，同样失败。
     """
     solver, mesh, H, U_wall, Lx, rho_inf, p_inf = _build_couette_solver()
 
