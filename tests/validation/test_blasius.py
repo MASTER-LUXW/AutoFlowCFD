@@ -101,6 +101,7 @@ from ._blasius_case import (
     build_blasius_solver,
     inlet_outlet_mass_flux,
     nu_for,
+    set_blasius_exact_state,
     wall_shear_profile,
 )
 
@@ -218,6 +219,66 @@ class TestCaseConstruction:
         assert meta["mu"] == pytest.approx(RHO_INF * meta["nu"])
 
 
+class TestWallShearPreservesTheAnalyticSolution:
+    """从**解析 Blasius 场**出发，短程运行必须保持住壁面剪应力。
+
+    ## 为什么换成这条判据（2026-09-20）
+
+    本类取代了原先 `TestExactCriteriaOnAShortRun` 里的
+    `test_wall_shear_is_positive_and_decays_downstream`（"tau>0 且沿流向
+    衰减"）。那条判据在**均匀初场**的 400 步窗口上测不出离散精度：实测
+    两条棱柱基给出的都是沿全板近似**恒定**的 tau（坍缩 +6.484、原生
+    -7.708），Blasius 的 `x^{-1/2}` 衰减完全没出现；坍缩那档之所以通过，
+    是因为"首尾对比"恰好被常数剖面上 5e-3 的噪声满足。完整数据与成因见
+    `_blasius_case.set_blasius_exact_state` 的文档。
+
+    换成解析初场之后判据变成**精确解保持性**（与 `test_couette.py` 同一
+    类）：解析解是真解，偏离只能来自离散本身。实测 cf/cf_exact 中位
+    坍缩 0.993->0.987、原生 0.993->0.981（400 步），最差点 0.967。
+    """
+
+    N_STEPS = 400
+
+    @pytest.fixture(scope="class")
+    def run_exact(self):
+        solver, meta = build_blasius_solver(nx=16, cells_in_delta=4.0,
+                                            cfl=0.10, le_offset=0.5)
+        set_blasius_exact_state(solver, meta)
+        for _ in range(self.N_STEPS):
+            r = solver.step(1e-4)
+            if not np.isfinite(r):
+                raise AssertionError("从解析初场出发就发散了")
+        return solver, meta
+
+    def test_wall_shear_stays_within_a_few_percent_of_blasius(self, run_exact):
+        """400 步后 cf 相对解析值的偏差必须在 5% 以内、且 tau 处处为正。"""
+        solver, meta = run_exact
+        x, cf, tau, _y1 = wall_shear_profile(solver, solver.mesh)
+        x0 = meta["x_virtual_origin"]
+        cf_ex = blasius_cf(x + x0, meta["nu"])
+        m = x > 0.2 * L_PLATE
+        assert m.sum() >= 3
+        assert np.all(tau[m] > 0.0), (
+            f"壁面剪应力出现非正值：{tau[m]}")
+        ratio = cf[m] / cf_ex[m]
+        assert abs(float(np.median(ratio)) - 1.0) < 0.03, (
+            f"cf 中位比值 {float(np.median(ratio)):.4f} 偏离解析值超过 3%"
+            f"（实测坍缩 0.987、原生 0.981）")
+        assert float(np.abs(ratio - 1.0).max()) < 0.05, (
+            f"cf 最差点比值 {ratio[np.argmax(np.abs(ratio - 1.0))]:.4f} "
+            f"偏离解析值超过 5%（实测最差 0.967）")
+
+    def test_wall_shear_decays_downstream_like_blasius(self, run_exact):
+        """保持住解析解也就保持住了 `x^{-1/2}` 衰减 —— 这条在解析初场上
+        才是真判据（均匀初场那 400 步里它根本不成立，见类文档）。"""
+        solver, meta = run_exact
+        x, cf, _tau, _y1 = wall_shear_profile(solver, solver.mesh)
+        m = x > 0.2 * L_PLATE
+        assert cf[m][-1] < 0.9 * cf[m][0], (
+            f"cf 沿流向没有按 Blasius 衰减：首 {cf[m][0]:.4e} "
+            f"末 {cf[m][-1]:.4e}")
+
+
 class TestExactCriteriaOnAShortRun:
     """与"是否已收敛"无关的精确判据 —— 短程运行即可断言。"""
 
@@ -308,18 +369,6 @@ class TestExactCriteriaOnAShortRun:
         assert m_in > 0.0 and m_out > 0.0
         assert imb < 5.0e-2, f"in={m_in:.6e} out={m_out:.6e} imb={imb:.3e}"
 
-    def test_wall_shear_is_positive_and_decays_downstream(self, run):
-        """壁面剪应力必须为正，且沿流向单调减（Blasius 的 x^{-1/2}）。
-
-        这条不依赖分辨率，只查**趋势**——定量误差要长程运行，见模块文档。
-        """
-        solver, meta, res = run
-        x, cf, tau, y1 = wall_shear_profile(solver, solver.mesh)
-        m = x > 0.3 * L_PLATE          # 上游启动区先排除
-        assert m.sum() >= 3
-        assert np.all(tau[m] > 0.0)
-        # 允许离散噪声，用首尾对比而不是逐点单调
-        assert cf[m][-1] < cf[m][0], f"cf 沿流向没有衰减：{cf[m]}"
 
     def test_wall_normal_velocity_is_small_at_the_wall(self, run):
         """贴壁第一层的 v 应远小于 U（边界层里 v/U ~ 1/sqrt(Re_x)）。"""

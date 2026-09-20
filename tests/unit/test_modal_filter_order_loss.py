@@ -65,8 +65,55 @@ def _prism_filter(ops_mod, order):
     return np.asarray(ops_mod.generate_fr_operators(order).filter_prism)
 
 
+def _real_block(F, order):
+    """取滤波矩阵里**真实自由度**的方块子矩阵。
+
+    零填充槽位的滤波行按 `fr/native_padding.py` 的约定是单位阵（填充块
+    必须保持初值不变），把它们算进"还剩多少非常数内容"这类判据里，等于
+    在问"单位阵有没有清零"。坍缩档 `n_real == n_sps`，这一步是恒等。
+    """
+    from autoflowcfd.fr.native_padding import real_sps_per_cell
+
+    n_real, _ = real_sps_per_cell(order)
+    return F[:n_real, :n_real]
+
+
+def _expected_legacy_rank(order):
+    """legacy 档滤波矩阵在**全局 `(order+1)^3` 宽度**下的期望秩。
+
+    两条棱柱基的"保留集"不同，但**语义相同**（保留 `eta < 1` 的模态，
+    即"每根轴/每个因子都没到顶"的那些）：
+
+    * 坍缩档：保留集 `{i,j,k <= order-1}`，大小 `order^3`，没有填充槽位；
+    * 原生档：模态是 `psi_ij(r,s) * P_k(t)`，判据 `max(i+j, k) < order`
+      的模态数是"三角形次数 <= order-1 的模态数"× `order`
+      = `order(order+1)/2 * order`；另外零填充槽位的滤波行是**单位阵**
+      （`fr/native_padding.py` 的约定），每个填充槽位贡献 1 个秩。
+
+    实测（2026-09-20）：原生档 P1 秩 3 = 1 + 2 个填充、P2 秩 15 = 6 + 9、
+    P3 秩 42 = 18 + 24 —— 与这里的公式逐一对上。也就是说**"每阶损失一整
+    阶"这条结论在两条基上都成立**（原生档 P1 的真实保留秩同样只有 1，
+    即只剩常数），这正是本文件要钉的事实。
+    """
+    from autoflowcfd.fr.native_padding import real_sps_per_cell
+    from autoflowcfd.fr.native_prism.mode import prism_basis_is_native
+
+    n_global = (order + 1) ** 3
+    if not prism_basis_is_native():
+        return order ** 3
+    n_real, _ = real_sps_per_cell(order)
+    kept_real = (order * (order + 1) // 2) * order
+    return kept_real + (n_global - n_real)
+
+
 class TestLegacyFilterLosesExactlyOneOrder:
-    """**legacy 档**：保留模态数恰好是 order^3，即损失一整阶。
+    """**legacy 档**：保留模态数恰好等于"少一阶"的模态数，即损失一整阶。
+
+    2026-09-20：判据从"秩 == order^3"改成"秩 == 少一阶的模态数"
+    （`_expected_legacy_rank`）。`order^3` 是**坍缩棱柱基**下那个数的
+    具体取值；默认基改成 native 之后模态集不同（还多了零填充槽位的单位
+    行），但**结论不变** —— 两条基都是精确损失一整阶。写成公式而不是
+    写死数字，才是这条结论本身的判据。
 
     2026-09-18 更正：本类此前全部用 `AFCFD_FILTER_MODE=None`（**默认档**）
     —— 类名写着 legacy，测的却是默认值。历史上默认档恰好也把顶模态清零
@@ -76,15 +123,18 @@ class TestLegacyFilterLosesExactlyOneOrder:
     有界衰减"一节）才暴露出来。现在显式指定 legacy。
     """
 
-    @pytest.mark.parametrize("order,expected_rank", [(1, 1), (2, 8), (3, 27)])
-    def test_rank_equals_order_cubed(self, order, expected_rank):
+    @pytest.mark.parametrize("order", [1, 2, 3])
+    def test_rank_is_exactly_one_order_lower(self, order):
+        """保留秩恰好等于"少一阶"的模态数（两条棱柱基各自的形式见
+        `_expected_legacy_rank`）。"""
         mf, ops_mod = _reload_with_env(AFCFD_FILTER_MODE="legacy")
         F = _prism_filter(ops_mod, order)
         n = (order + 1) ** 3
         assert F.shape == (n, n)
+        expected_rank = _expected_legacy_rank(order)
         rank = int(np.linalg.matrix_rank(F, 1e-10))
         assert rank == expected_rank, (
-            f"order={order}: 滤波矩阵秩={rank}，期望 {expected_rank}=order^3。"
+            f"order={order}: 滤波矩阵秩={rank}，期望 {expected_rank}。"
             f"秩变化意味着'损失几阶'变了——这是精度层面的行为改变，"
             f"必须显式确认而不是顺带改掉")
 
@@ -101,10 +151,13 @@ class TestLegacyFilterLosesExactlyOneOrder:
         """order=1 时线性场的**胞内**变化被抹到机器零——P1 退化为 P0
         最直接的证据（不依赖任何真实网格）。"""
         mf, ops_mod = _reload_with_env(AFCFD_FILTER_MODE="legacy")
-        F = _prism_filter(ops_mod, 1)
+        F = _real_block(_prism_filter(ops_mod, 1), 1)
         # order=1 的节点空间里，任何非常数向量都只能由常数模态 + 那些
-        # max(i,j,k)=1 的模态张成，所以用随机向量减去其常数部分就是
-        # "纯胞内变化"，不需要显式构造线性场坐标。
+        # 到顶的模态张成，所以用随机向量减去其常数部分就是"纯胞内变化"，
+        # 不需要显式构造线性场坐标。
+        # **只取真实自由度子块**（2026-09-20）：零填充槽位的滤波行是
+        # 单位阵（`fr/native_padding.py` 的约定），把它们算进来等于在问
+        # "单位阵有没有清零"，与本条要钉的性质无关。
         rng = np.random.default_rng(3)
         for _ in range(5):
             f = rng.standard_normal(F.shape[1])
@@ -411,7 +464,10 @@ class TestBothBasesMustBeCheckedSeparately:
         n = (order + 1) ** 3
         rank_p = int(np.linalg.matrix_rank(np.asarray(ops.filter_prism), 1e-10))
         rank_t = int(np.linalg.matrix_rank(np.asarray(ops.filter_tet), 1e-10))
-        assert rank_p == order ** 3, f"prism 秩 {rank_p} != order^3={order**3}"
+        expect_p = _expected_legacy_rank(order)
+        assert rank_p == expect_p, (
+            f"prism 秩 {rank_p} != 期望 {expect_p}"
+            f"（见 `_expected_legacy_rank`：两条棱柱基各自的形式）")
         # native 四面体：真实自由度里只剩 i+j+k<=order-1 的那些，
         # 再加 (n - n_native) 个单位阵填充行。
         n_native = (order + 1) * (order + 2) * (order + 3) // 6
@@ -511,7 +567,9 @@ class TestCompoundingOverStages:
     def test_mild_filter_still_annihilates_over_many_stages(self, sigma_top, stages):
         mf, ops_mod = _reload_with_env(AFCFD_FILTER_MODE="mild",
                                        AFCFD_FILTER_SIGMA_TOP=str(sigma_top))
-        F = _prism_filter(ops_mod, 1)
+        # 只取真实自由度子块，理由同
+        # `test_p1_annihilates_linear_intra_cell_content`。
+        F = _real_block(_prism_filter(ops_mod, 1), 1)
         rng = np.random.default_rng(11)
         f = rng.standard_normal(F.shape[1])
         var0 = np.abs(f - f.mean()).max()

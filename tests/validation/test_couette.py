@@ -122,8 +122,9 @@ def test_couette_prism_stable_from_wrong_ic():
 #: 瞬态，不是失稳。
 #:
 #: 上界取实测值的约 3 倍余量。坍缩档那两条**刻意保留**为"记录当前真实
-#: 行为"的判据（不是目标值）：默认档仍是坍缩，这两条一旦变好说明坍缩
-#: 侧也被改动了，应当来更新这里而不是放宽。
+#: 行为"的判据（不是目标值）：坍缩那两档一旦变好说明坍缩侧也被改动了，
+#: 应当来更新这里而不是放宽。（"默认档仍是坍缩"这句已于 2026-09-20 作废，
+#: 默认改为 native，见 `fr/native_prism/mode.py`。）
 _SHEAR_TOL = {
     ("collapsed", 1): 1e-7,
     ("collapsed", 2): 6e-2,     # 记录：实测 1.78e-2，不是目标值
@@ -260,7 +261,7 @@ def test_couette_prism_residual_growth_is_at_most_linear(basis, order,
         f"末 {hist[-1]:.3e}）—— 线性漂移应当约为 1")
 
 
-def test_couette_collapsed_p2_residual_growth_is_superlinear():
+def test_couette_collapsed_p2_residual_growth_is_superlinear(monkeypatch):
     """**负控制**：坍缩棱柱基在 P2 上必须是超线性增长。
 
     这条把"原生棱柱基修好了什么"写成可执行判据，取代原先那条
@@ -275,9 +276,15 @@ def test_couette_collapsed_p2_residual_growth_is_superlinear():
     两个参考轴上的病理（`max|D_3d_prism|` P1 2.05 -> P3 560.1，每阶约
     x25；项目记忆 `blasius_spanwise_w_open`）。
 
-    **这条测试一旦失败就意味着坍缩档被改动了**（它是当前默认档），应当
-    来更新这里的记录值，而不是放宽阈值。
+    **这条测试一旦失败就意味着坍缩档被改动了**，应当来更新这里的记录值，
+    而不是放宽阈值。
+
+    坍缩档**自 2026-09-20 起不再是默认**（`AFCFD_PRISM_BASIS` 默认值改为
+    `native`，三份证据见 `fr/native_prism/mode.py`），所以这里必须显式
+    设置环境变量 —— 否则这条负控制会跑在原生档上、断言"原生也超线性"，
+    正好把结论反过来。
     """
+    monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")
     ratio, hist = _residual_slope_ratio(2)
     assert ratio > _SUPERLINEAR_MIN, (
         f"坍缩 P2 的残差增长不再超线性（斜率比 {ratio:.2f}）—— 若这是"

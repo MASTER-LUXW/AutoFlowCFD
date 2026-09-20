@@ -433,6 +433,60 @@ def build_blasius_solver(
     return solver, meta
 
 
+def set_blasius_exact_state(solver, meta) -> None:
+    """把求解器状态置成**解析 Blasius 解**（就地修改 `solver.state`）。
+
+    ## 为什么需要它
+
+    从均匀初场（`u = U_inf` 处处）起步的短程运行处在一个**增长的暂态**
+    里：400 步之后近壁多项式还没形成边界层，壁面剪应力的取值与符号都由
+    暂态决定，而不是由离散精度决定。实测（`le_offset=0.5`、nx=16、
+    CFL 0.1、400 步）：
+
+        坍缩棱柱基   tau 沿全板恒为 +6.484（不衰减，cf/cf_exact 0.06->1.77）
+        原生棱柱基   tau 沿全板恒为 -7.708（**负值**）
+
+    两者都不是物理的（Blasius 的 tau 按 `x^{-1/2}` 衰减），符号差别只是
+    两条基的解点位置不同（原生的近壁解点在单元角点上）在同一个暂态里的
+    两种表现。也就是说"tau>0 且沿流向衰减"这类判据在这个窗口上**测不出
+    离散精度**，此前它能通过靠的是常数剖面上 5e-3 的噪声。
+
+    把初场换成解析解之后，判据变成与 Couette 同类的**精确解保持性**：
+    解析解是真解，任何偏离都只能来自离散本身。实测 cf/cf_exact 中位：
+
+        步数      0       25      100     200     400
+        坍缩    0.993   0.993   0.991   0.989   0.987
+        原生    0.993   0.992   0.990   0.987   0.981
+
+    两条基都在 2% 以内，这才是"粘性链路 + 壁面剪应力提取"的有效判据。
+
+    Args:
+        solver: `build_blasius_solver` 返回的求解器
+        meta: 同一次调用返回的 `meta`（要用 `nu` 与 `x_virtual_origin`）
+    """
+    nu = float(meta["nu"])
+    x0 = float(meta["x_virtual_origin"])
+    xyz = np.asarray(solver.mesh.sps_coords)
+    xv = xyz[:, :, 0] + x0
+    if np.any(xv <= 0.0):
+        raise ValueError(
+            "存在 x_virtual <= 0 的解点 —— 解析 Blasius 解在虚拟原点处有"
+            "奇点，这个初场只对 le_offset > 0 的档有意义")
+    eta = xyz[:, :, 1] / np.sqrt(nu * xv / U_INF)
+    re_x = U_INF * xv / nu
+    u0 = U_INF * blasius_profile(eta.ravel()).reshape(eta.shape)
+    v0 = U_INF * blasius_v_over_u(eta.ravel(), re_x.ravel()).reshape(eta.shape)
+
+    gamma = 1.4
+    solver.state.U[:, :, 0] = RHO_INF
+    solver.state.U[:, :, 1] = RHO_INF * u0
+    solver.state.U[:, :, 2] = RHO_INF * v0
+    solver.state.U[:, :, 3] = 0.0
+    solver.state.U[:, :, 4] = RHO_INF * (
+        P_INF / ((gamma - 1.0) * RHO_INF) + 0.5 * (u0 ** 2 + v0 ** 2))
+    solver.state._update_primitives()
+
+
 def wall_shear_profile(solver, mesh, *, wall_y: float = 0.0,
                        tol_rel: float = 1e-6):
     """从解里提取底壁（y=wall_y）上逐 x 的壁面剪应力与摩阻系数。
@@ -465,8 +519,22 @@ def wall_shear_profile(solver, mesh, *, wall_y: float = 0.0,
     x = xyz[:, :, 0]
     u = Q[:, :, 1]
 
+    # **零填充槽位必须排除**（2026-09-20）：原生棱柱基下每单元只有
+    # `(p+1)^2(p+2)/2` 个真实解点，其余槽位按 `fr/native_padding.py` 的
+    # 约定复制真实 SP #0 的坐标 —— 于是它们的 y 与第一层相同、会被下面
+    # 的 `first` 掩码收进来，让两层解点的 x 排布对不上（实测报
+    # "两层解点的 x 排布不一致"）。把填充槽位的 y 置成 +inf 就自然被
+    # 所有层选择排除，且不影响坍缩档（那里 n_real == n_sps）。
+    from autoflowcfd.fr.native_padding import real_sps_per_cell
+
+    n_real_prism, n_real_tet = real_sps_per_cell(mesh.order)
+    y = y.copy()
+    y[:mesh.n_prism_cells, n_real_prism:] = np.inf
+    y[mesh.n_prism_cells:, n_real_tet:] = np.inf
+
     y_min = y.min()
-    scale = max(float(y.max() - y_min), 1e-300)
+    y_finite = y[np.isfinite(y)]
+    scale = max(float(y_finite.max() - y_min), 1e-300)
     first = np.abs(y - y_min) <= tol_rel * scale
     if not first.any():
         raise ValueError("找不到贴壁第一层解点")
@@ -477,7 +545,7 @@ def wall_shear_profile(solver, mesh, *, wall_y: float = 0.0,
     # 第二层解点：同一批贴壁单元里 y 次小的那一层
     cells = np.unique(np.nonzero(first)[0])
     y_sub = y[cells]
-    uniq = np.unique(np.round(y_sub, 12))
+    uniq = np.unique(np.round(y_sub[np.isfinite(y_sub)], 12))
     if uniq.size < 2:
         raise ValueError("贴壁单元在壁面法向只有一个解点，取不到梯度")
     y2 = float(uniq[1] - wall_y)
@@ -529,7 +597,11 @@ def inlet_outlet_mass_flux(solver, mesh, Lx: float, H: float, Lz: float):
             owner = int(fc.owner_cell[f])
             oc = int(fc.owner_cube_face[f])
             if oc >= 6:
-                E = ops.boundary_extrap_native_tet[oc - 6]
+                # 统一访问器（2026-09-20）：原生面编码是四面体 [6,10)、
+                # **棱柱 [10,15)**，此前这里写死 `..._native_tet[oc-6]`，
+                # 原生棱柱基下 oc=10~14 会 KeyError。生产路径本来就用
+                # 这个按编码分派的访问器，测试也走同一份。
+                E = ops.native_face_extrap(oc)
                 sl = slice(0, E.shape[1])
             else:
                 E = ops.boundary_extrap_prism[(ffp.owner_axis, ffp.owner_side)]

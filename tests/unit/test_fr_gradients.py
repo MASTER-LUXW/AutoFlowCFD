@@ -63,26 +63,33 @@ def test_linear_function_gradient_exact_for_tet_and_prism():
     # 文档）——这是既有、已验证的设计不变量，不是本次改动引入的新
     # 近似；对比时必须只看真实自由度（`[:n_native]`），不能再要求
     # 填充行也精确等于常数梯度。
+    # 2026-09-20 追加：**棱柱同样可能有零填充槽位**。原生棱柱基
+    # （`AFCFD_PRISM_BASIS=native`，当前默认）每单元只有
+    # `(p+1)^2(p+2)/2` 个真实自由度，填充行同样恒为零梯度。所以两类
+    # 单元都只比较真实自由度，真实数走唯一入口
+    # `fr/native_padding.real_sps_per_cell`（它按当前基给出两个数）。
+    from autoflowcfd.fr.native_padding import real_sps_per_cell
+
     tolerances = {1: 1e-9, 2: 1e-9, 3: 1e-6}
     for order in [1, 2, 3]:
         mesh = _build_mesh(order)
-        n_native = build_native_tet_operators(order)[0].shape[0]
+        n_real_prism, n_real_tet = real_sps_per_cell(order)
         a_coef = np.array([2.0, -3.0, 5.0])
         phi = mesh.sps_coords @ a_coef + 7.0  # (n_cells, n_sps)
         grad = compute_physical_scalar_gradient(phi, mesh, mesh.operators)
         # 单元全局索引约定"棱柱在前、四面体在后"（见 HighOrderMesh 模块
-        # 文档）：cell 0 是棱柱（不受本次删除 collapsed 四面体基影响，
-        # 全部检查），cell 1 是四面体（只检查真实自由度，填充行恒为零
-        # 梯度，见上）。
-        max_err_prism = np.max(np.abs(grad[0] - a_coef))
-        max_err_tet = np.max(np.abs(grad[1, :n_native] - a_coef))
+        # 文档）：cell 0 是棱柱、cell 1 是四面体，两者都只检查真实自由度。
+        max_err_prism = np.max(np.abs(grad[0, :n_real_prism] - a_coef))
+        max_err_tet = np.max(np.abs(grad[1, :n_real_tet] - a_coef))
         max_err = max(max_err_tet, max_err_prism)
         assert max_err < tolerances[order], f"order={order}: max_err={max_err}"
 
 
 def test_multi_variable_field_gradient_matches_scalar_case():
+    from autoflowcfd.fr.native_padding import real_sps_per_cell
+
     mesh = _build_mesh(order=2)
-    n_native = build_native_tet_operators(2)[0].shape[0]
+    n_real_prism, n_real_tet = real_sps_per_cell(2)
     a1 = np.array([1.0, 0.0, 0.0])
     a2 = np.array([0.0, 2.0, 0.0])
     phi1 = mesh.sps_coords @ a1
@@ -92,10 +99,10 @@ def test_multi_variable_field_gradient_matches_scalar_case():
     # 见 test_linear_function_gradient_exact_for_tet_and_prism 同一处
     # 更正说明（"棱柱在前、四面体在后"）：cell 0 是棱柱，全部检查；
     # cell 1 是四面体，只检查真实自由度 [:n_native]。
-    assert np.allclose(grad[0, :, 0, :], a1, atol=1e-9)
-    assert np.allclose(grad[0, :, 1, :], a2, atol=1e-9)
-    assert np.allclose(grad[1, :n_native, 0, :], a1, atol=1e-9)
-    assert np.allclose(grad[1, :n_native, 1, :], a2, atol=1e-9)
+    assert np.allclose(grad[0, :n_real_prism, 0, :], a1, atol=1e-9)
+    assert np.allclose(grad[0, :n_real_prism, 1, :], a2, atol=1e-9)
+    assert np.allclose(grad[1, :n_real_tet, 0, :], a1, atol=1e-9)
+    assert np.allclose(grad[1, :n_real_tet, 1, :], a2, atol=1e-9)
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +146,9 @@ def test_gradient_is_exact_for_in_space_polynomials(order):
     ops = generate_fr_operators(order)
     n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
     n_prism = mesh.n_prism_cells
-    n_native = (order + 1) * (order + 2) * (order + 3) // 6
+    from autoflowcfd.fr.native_padding import real_sps_per_cell
+
+    n_real_prism, n_real_tet = real_sps_per_cell(order)
     X = mesh.sps_coords.reshape(-1, 3)
 
     # 总次数 <= order 的全部单项式（严格落在解空间内）
@@ -169,9 +178,12 @@ def test_gradient_is_exact_for_in_space_polynomials(order):
     exact = grad_f(X).reshape(n_cells, n_sps, 3)
     scale = np.abs(exact).max()
 
-    err_prism = np.abs(got[:n_prism] - exact[:n_prism]).max() / scale
+    err_prism = np.abs(
+        got[:n_prism, :n_real_prism]
+        - exact[:n_prism, :n_real_prism]).max() / scale
     err_tet = np.abs(
-        got[n_prism:, :n_native] - exact[n_prism:, :n_native]).max() / scale
+        got[n_prism:, :n_real_tet]
+        - exact[n_prism:, :n_real_tet]).max() / scale
     assert err_prism < 1e-11, (
         f"order={order} 棱柱梯度相对误差 {err_prism:.3e} 不是机器精度——"
         f"实测应为 ~1e-14~1e-12")

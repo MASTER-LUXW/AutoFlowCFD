@@ -60,6 +60,7 @@ import numpy as np
 
 from autoflowcfd.fr.collapsed_basis import prism_modal_basis_and_grad, tet_modal_basis_and_grad
 from autoflowcfd.fr.quadrature_points import gauss_legendre
+from autoflowcfd.fr.native_prism.mode import prism_basis_is_native
 from autoflowcfd.core.utils.array_module import array_module as _array_module
 
 # Persson-Peraire 传感器分段过渡宽度（对数尺度），沿用 mirgecom 的默认值。
@@ -112,6 +113,7 @@ def _build_sensor_operators(cell_type: str, order: int, ref_cube_sps: np.ndarray
 
 
 _native_tet_sensor_cache: Dict[int, Tuple[np.ndarray, np.ndarray, int]] = {}
+_native_prism_sensor_cache: Dict[int, Tuple] = {}
 
 #: 传感器算子的**设备侧**副本缓存，键是 (主机缓存键, 数组模块名)。
 #: 算子只依赖 (cell_type, order)，与流场状态无关，所以搬上设备一次即可；
@@ -243,6 +245,124 @@ def compute_persson_peraire_sensor_native_tet(
     # `np.errstate` 只改 NumPy 自己的浮点错误策略，对 CuPy 数组是无操作，
     # 留着即可（CuPy 不发这类 warning）。
     with np.errstate(divide="ignore"):
+        return xp.log10(xp.maximum(S_e, 1e-300))
+
+
+def _build_native_prism_sensor_operators(order: int):
+    """构造/缓存 native 棱柱传感器算子：`(V_inv, mass_diag, top_mask, n_native)`。
+
+    **与四面体同一类的真实缺陷（2026-09-20 修复）**：`compute_persson_
+    peraire_sensor` 的 `cell_type="prism"` 分支用的是
+    `collapsed_basis.py::prism_modal_basis_and_grad` —— 坍缩坐标族的
+    `(order+1)^3` 个模态、且把 `(order+1)^3` 个张量积 Gauss 点当成解点。
+    原生棱柱基（`AFCFD_PRISM_BASIS=native`，2026-09-20 起是默认）下解是
+    `(p+1)^2(p+2)/2` 维的 PKD(三角形)⊗Legendre(挤出) 空间、解点是
+    Warp&Blend⊗Gauss 点、其余槽位是**冻结在初值**的零填充。继续用坍缩
+    分支等于：(a) 用一个不是解所在空间的基做模态分解；(b) 把冻结的填充
+    槽位当成自由度喂进指标。与 2026-09-15 修掉的四面体那处是同一个
+    错误类型（那次的完整说明见 `_build_native_tet_sensor_operators`）。
+
+    ## 内积形式：对角质量矩阵，不是节点求积权重
+
+    原生棱柱基在参考棱柱上**正交但不归一**（实测非对角 <6e-15，对角
+    在 P1 上是 8/2.667/4/1.333/5.333/1.778 这样一组各不相同的数）。所以
+    L2 能量是 `Σ_m M_mm * chat_m^2`，其中 `M_mm = ∫ φ_m^2`。
+
+    * 四面体那条分支能直接用 `Σ chat^2` 是因为 PKD 基**正交归一**；
+    * 坍缩那条分支能用张量积 GL 权重是因为解点与求积点重合；
+    * 原生棱柱两条都不成立，必须显式带上对角质量。
+
+    `M_mm` 用 Duffy 变换后的张量积 Gauss 求积算（被积函数是多项式，
+    点数取 `2*order+4` 时是精确的，不是近似），每个阶数只算一次。
+
+    ## "最高阶模态"的判据
+
+    原生棱柱空间是"三角形次数 <= order"⊗"挤出次数 <= order"的张量积，
+    所以最高阶模态的判据是 `max(三角形次数, 挤出次数) == order` ——
+    与坍缩族的 `max(i,j,k)==order` 同构，而不是单纯形族的 `i+j+k`。
+
+    Returns:
+        `(V_inv, mass_diag, top_mask, n_native)`，前三个形状分别是
+        `(n_native,n_native)`、`(n_native,)`、`(n_native,)`。
+    """
+    if order in _native_prism_sensor_cache:
+        return _native_prism_sensor_cache[order]
+
+    from autoflowcfd.fr.native_prism.basis import (
+        build_native_prism_nodes, build_native_prism_vandermonde,
+        restricted_prism_modes,
+    )
+    from autoflowcfd.fr.quadrature_points import gauss_legendre
+
+    nodes = build_native_prism_nodes(order)
+    V, _, _, _ = build_native_prism_vandermonde(order, nodes)
+    n_native = V.shape[0]
+    if V.shape[0] != V.shape[1]:
+        raise AssertionError(
+            f"native 棱柱 Vandermonde 不是方阵 {V.shape} —— 节点数与模态数"
+            f"必须相同才能求逆")
+
+    # 对角质量 M_mm = ∫ φ_m^2（Duffy 变换后的张量积 Gauss，多项式精确）
+    n_q = 2 * order + 4
+    a_1d, w_a = gauss_legendre(n_q)
+    b_1d, w_b = gauss_legendre(n_q)
+    t_1d, w_t = gauss_legendre(n_q)
+    a, b, t = np.meshgrid(a_1d, b_1d, t_1d, indexing="ij")
+    wa, wb, wt = np.meshgrid(w_a, w_b, w_t, indexing="ij")
+    a, b, t = a.ravel(), b.ravel(), t.ravel()
+    weight = (wa * wb * wt).ravel() * ((1.0 - b) / 2.0)
+    r = (1.0 + a) * (1.0 - b) / 2.0 - 1.0
+    V_q, _, _, _ = build_native_prism_vandermonde(
+        order, np.stack([r, b, t], axis=1))
+    mass_diag = weight @ (V_q * V_q)
+
+    # 最高阶模态掩码：模态排列是"三角形模态外层、挤出模态内层"
+    # （见 `build_native_prism_vandermonde`），三角形模态的次数由
+    # `restricted_prism_modes` 给出的 (i, j, k) 里的 i+j 决定。
+    top_mask = np.zeros(n_native, dtype=bool)
+    for m, (i, j, k) in enumerate(restricted_prism_modes(order)):
+        top_mask[m] = max(i + j, k) == order
+
+    result = (np.linalg.inv(V), mass_diag, top_mask, n_native)
+    _native_prism_sensor_cache[order] = result
+    return result
+
+
+def compute_persson_peraire_sensor_native_prism(
+    field_nodal: np.ndarray, order: int
+) -> np.ndarray:
+    """native 棱柱专属的 Persson-Peraire 传感器，`s_e = log10(S_e)`。
+
+    `S_e = Σ_{top} M_mm chat_m^2 / Σ_all M_mm chat_m^2`，`M_mm` 是对角
+    质量（基正交但不归一，见 `_build_native_prism_sensor_operators`）。
+
+    Args:
+        field_nodal: `(n_cells, n_sps)`，只使用**前 n_native 列**（其余是
+            冻结在初值的零填充槽位，不是自由度）。
+        order: 当前多项式阶数；`order==0` 时返回 `-inf`。
+    """
+    xp = _array_module(field_nodal)
+    n_cells = field_nodal.shape[0]
+    if order == 0:
+        return xp.full(n_cells, -np.inf)
+
+    V_inv, mass_diag, top_mask, n_native = (
+        _build_native_prism_sensor_operators(order))
+    V_inv, mass_diag, top_mask = _operators_on(
+        xp, ("native_prism", order), (V_inv, mass_diag, top_mask))
+    if field_nodal.shape[1] < n_native:
+        raise ValueError(
+            f"field 每单元只有 {field_nodal.shape[1]} 个解点，少于 native "
+            f"棱柱 order={order} 所需的 {n_native} 个真实自由度")
+
+    real = xp.ascontiguousarray(field_nodal[:, :n_native])
+    modal = xp.einsum("ij,cj->ci", V_inv, real)
+    energy = modal * modal * mass_diag[xp.newaxis, :]
+    energy_all = xp.sum(energy, axis=1)
+    energy_top = xp.sum(xp.where(top_mask[xp.newaxis, :], energy, 0.0), axis=1)
+
+    S_e = energy_top / xp.maximum(energy_all, 1e-300)
+    with np.errstate(divide="ignore"):      # 见 native 四面体版同一处说明
         return xp.log10(xp.maximum(S_e, 1e-300))
 
 
@@ -404,6 +524,9 @@ def compute_troubled_cell_mask(
         if cell_type == "tet":
             s_e = compute_persson_peraire_sensor_native_tet(
                 xp.ascontiguousarray(field_nodal[sel]), order)
+        elif prism_basis_is_native():
+            s_e = compute_persson_peraire_sensor_native_prism(
+                xp.ascontiguousarray(field_nodal[sel]), order)
         else:
             s_e = compute_persson_peraire_sensor(
                 xp.ascontiguousarray(field_nodal[sel]), cell_type, order,
@@ -474,7 +597,14 @@ def compute_persson_peraire_artificial_viscosity(
     epsilon_max = alpha_av * rho_local * h_cell * vel_local / order
 
     if n_prism > 0:
-        s_e = compute_persson_peraire_sensor(field[:n_prism], "prism", order, ref_cube_sps)
+        # 棱柱同样按基分派（2026-09-20，与四面体那处同一类缺陷，见
+        # `_build_native_prism_sensor_operators`）。
+        if prism_basis_is_native():
+            s_e = compute_persson_peraire_sensor_native_prism(
+                field[:n_prism], order)
+        else:
+            s_e = compute_persson_peraire_sensor(
+                field[:n_prism], "prism", order, ref_cube_sps)
         ramp = compute_artificial_viscosity_ramp(s_e, order, kappa)
         epsilon_av[:n_prism, :] = (ramp * epsilon_max[:n_prism])[:, np.newaxis]
     if n_cells > n_prism:

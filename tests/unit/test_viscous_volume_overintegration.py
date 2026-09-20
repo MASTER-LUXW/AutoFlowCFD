@@ -42,6 +42,7 @@ from autoflowcfd.core.fr_operators.volume_contract import (
     get_overintegration_context,
 )
 from autoflowcfd.core.fr_residual import viscous_flux as vf
+from autoflowcfd.fr.native_prism.mode import resolve_prism_basis_mode
 from autoflowcfd.fr.operators import generate_fr_operators
 
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
@@ -52,10 +53,20 @@ PR_T = 0.9
 
 
 def _per_type_slices(mesh, order):
-    n_native = (order + 1) * (order + 2) * (order + 3) // 6
+    """两类单元各自的**真实自由度**切片。
+
+    2026-09-20：棱柱那一段此前写的是 `slice(None)`（整个 `(p+1)^3` 宽度
+    都算自由度），那只对坍缩棱柱基成立；原生棱柱基（当前默认）每单元只有
+    `(p+1)^2(p+2)/2` 个真实自由度，把零填充槽位算进来会让误差被填充位
+    主导、去混叠与不去混叠算出逐位相同的数字。真实自由度数走唯一入口。
+    """
+    from autoflowcfd.fr.native_padding import real_sps_per_cell
+
+    n_real_prism, n_real_tet = real_sps_per_cell(order)
     return [
-        ("prism", (slice(0, mesh.n_prism_cells), slice(None))),
-        ("tet", (slice(mesh.n_prism_cells, mesh.n_cells), slice(0, n_native))),
+        ("prism", (slice(0, mesh.n_prism_cells), slice(0, n_real_prism))),
+        ("tet", (slice(mesh.n_prism_cells, mesh.n_cells),
+                 slice(0, n_real_tet))),
     ]
 
 
@@ -174,9 +185,17 @@ class TestOverintegrationIsMoreAccurate:
             errs[name] = (np.abs(div_co[sl][..., 1:] - e).max() / sc,
                           np.abs(div_oi[sl][..., 1:] - e).max() / sc)
 
+        # coarse 误差的下界按棱柱基分档（2026-09-20）：原生棱柱基的
+        # coarse 本身就准得多（P1 实测 1.8e-3 vs 坍缩 2.7e-2、P2 实测
+        # 4.2e-5 vs 坍缩 1.5e-3），用坍缩档那条 1e-3 会把一次正常通过
+        # 判成"算例没造出混叠"。下界仍然保留 —— 它防的是"判据空转"。
+        _CO_MIN = {("collapsed", 1): 1e-3, ("collapsed", 2): 1e-3,
+                   ("native", 1): 1e-4, ("native", 2): 1e-6}
+        basis = resolve_prism_basis_mode()
         pr_co, pr_oi = errs["prism"]
-        assert pr_co > 1e-3, (
-            f"order={order} prism: coarse 误差只有 {pr_co:.3e}，这个算例没有"
+        assert pr_co > _CO_MIN[(basis, order)], (
+            f"{basis} order={order} prism: coarse 误差只有 {pr_co:.3e}，"
+            f"低于该档下界 {_CO_MIN[(basis, order)]:.1e} —— 这个算例没有"
             f"真正制造出混叠，判据失去意义")
         assert pr_oi < pr_co, (
             f"order={order} prism: 去混叠误差 {pr_oi:.3e} 不低于 coarse 的 "

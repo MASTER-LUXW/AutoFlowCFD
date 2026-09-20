@@ -55,13 +55,27 @@ def _n_fine_native(oo):
 
 
 def _over_order(order):
-    """棱柱的过积分阶数（受坍缩基条件数上限约束）。"""
-    from autoflowcfd.fr.collapsed_basis import (
-        OVERINTEGRATION_MAX_ORDER,
-        resolve_overintegration_order_rule,
+    """棱柱的过积分阶数。
+
+    走 `fr/overintegration_order.py` 这个唯一入口（2026-09-20）：它按当前
+    棱柱基分档 —— 坍缩档受条件数上限 3 约束，原生档走自己的上限。此前
+    这里复制了坍缩档那条公式，原生档下会与算子实际用的阶数脱节。
+    """
+    from autoflowcfd.fr.overintegration_order import (
+        resolve_prism_overintegration_order,
     )
-    return min(resolve_overintegration_order_rule() * order,
-               OVERINTEGRATION_MAX_ORDER)
+    return resolve_prism_overintegration_order(order)
+
+
+def _n_fine_prism(order):
+    """棱柱过积分的细点数（= `jacobians_fine` 的每单元布局宽度）。
+
+    坍缩档 `(oo+1)^3`、原生档 `(oo+1)^2(oo+2)/2`，同样只有
+    `fr/overintegration_order.prism_n_fine` 这一个事实来源。
+    """
+    from autoflowcfd.fr.overintegration_order import prism_n_fine
+
+    return prism_n_fine(_over_order(order))
 
 
 def _over_order_tet(order):
@@ -75,7 +89,7 @@ def _over_order_tet(order):
     from autoflowcfd.fr.native_tet.overintegration import (
         resolve_tet_overintegration_order,
     )
-    return resolve_tet_overintegration_order(order, (_over_order(order) + 1) ** 3)
+    return resolve_tet_overintegration_order(order, _n_fine_prism(order))
 
 
 class TestOperatorShapes:
@@ -109,7 +123,7 @@ class TestOperatorShapes:
         """真实细点数必须**严格小于**填充宽度——否则这项改动没有收益，
         说明填充宽度的定义变了，本文件的前提需要复核。"""
         oo = _over_order(order)
-        assert _n_fine_native(oo) < (oo + 1) ** 3
+        assert _n_fine_native(oo) < _n_fine_prism(order)
 
 
 class TestEquivalenceWithPaddedVersion:
@@ -124,7 +138,8 @@ class TestEquivalenceWithPaddedVersion:
     def test_full_chain_matches(self, order):
         oo = _over_order(order)
         n_sps_g = (order + 1) ** 3
-        n_fine_g = (oo + 1) ** 3
+        # 填充目标宽度 = 棱柱布局宽度（两条棱柱基不同，见 `_n_fine_prism`）
+        n_fine_g = _n_fine_prism(order)
         ref_f, c2f_n, Df_n, f2c_n = build_native_tet_overintegration_operators(
             order, oo)
         nf = ref_f.shape[0]
@@ -191,7 +206,7 @@ class TestContextContract:
         from types import SimpleNamespace
 
         ops = generate_fr_operators(order)
-        n_fine_prism = (_over_order(order) + 1) ** 3
+        n_fine_prism = _n_fine_prism(order)
         n_cells = n_prism + n_tet
         rng = np.random.default_rng(3)
         det = rng.random(n_cells * n_fine_prism) + 1.0
@@ -226,7 +241,7 @@ class TestContextContract:
         (p_lo, p_hi, p_nf, p_det, p_inv, *_), \
             (t_lo, t_hi, t_nf, t_det, t_inv, *_) = oi["segs"]
         assert (p_lo, p_hi) == (0, 5) and (t_lo, t_hi) == (5, 12)
-        assert p_nf == (_over_order(order) + 1) ** 3
+        assert p_nf == _n_fine_prism(order)
         assert t_nf == ops.overint_D_fine_tet.shape[0]
         assert p_det.shape == (5, p_nf) and p_inv.shape == (5, p_nf, 3, 3)
         assert t_det.shape == (7, t_nf) and t_inv.shape == (7, t_nf, 3, 3)
@@ -250,7 +265,8 @@ class TestContextContract:
             assert np.all(t_det[i] == det[5 + i, 0])
             assert np.all(t_inv[i] == inv[5 + i, 0])
 
-    def test_tet_fine_points_may_exceed_the_prism_layout_width(self):
+    def test_tet_fine_points_may_exceed_the_prism_layout_width(
+            self, monkeypatch):
         """四面体细点数**可以**超过棱柱布局宽度——那条约束已被移除。
 
         它曾经是个真实约束（度量靠"切前 n_fine_tet 列"），并且把 P3 的
@@ -266,7 +282,14 @@ class TestContextContract:
         也会校验"算子 n_fine == 布局宽度"（原生/坍缩两档下都是恒等式），
         合成值直接撞上那道闸。用真实组合既保住了原意，又不再依赖一个
         构造不出来的状态。
+
+        **显式跑在坍缩档（2026-09-20）**：默认棱柱基改成 native 之后，P3
+        的棱柱布局宽度是 `prism_n_fine(6) = 196`，反而比四面体的 84 宽，
+        "四面体超过棱柱布局"这个前提在默认档下构造不出来。而那条被移除的
+        约束在坍缩档下仍然是真实可达的（64 < 84），所以这里显式指定
+        坍缩档来保住这条回归判据 —— 换成"跳过"等于悄悄失去覆盖。
         """
+        monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")
         from types import SimpleNamespace
 
         from autoflowcfd.core.fr_operators.volume_contract import (

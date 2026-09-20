@@ -61,7 +61,18 @@ class TestRealDofReductionHelpers:
     填充槽位全 50。order=1 下 n_native=4、n_sps=8，所以
       - 全场 mean = (4*1 + 4*50)/8 = 25.5
       - 只看真实自由度 = 1
+
+    **本类显式跑在坍缩棱柱档（2026-09-20）**：它钉的是"归约只屏蔽四面体
+    的填充槽位、棱柱 8 个槽位全是真实自由度"这条语义，而那只在坍缩棱柱基
+    下成立。原生棱柱基（当前默认）下棱柱同样有填充槽位（P1 6/8），归约
+    会把棱柱也一起屏蔽 —— 那是**正确**的行为，但会让这里手算的 25.5
+    变成 1.0，判据失去"能分辨对错"的意义。原生档的对应行为由
+    `TestNativePrismIsAlsoMasked` 覆盖。
     """
+
+    @pytest.fixture(autouse=True)
+    def _collapsed_prism(self, monkeypatch):
+        monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")
 
     def _field(self, n_cells=4, order=1):
         n_sps = (order + 1) ** 3
@@ -128,6 +139,34 @@ class TestRealDofReductionHelpers:
             with pytest.raises(ValueError, match="不自洽"):
                 reduce_rows_over_real_sps(
                     f, np.zeros(3, dtype=bool), bad_order, 'mean')
+
+
+
+class TestNativePrismIsAlsoMasked:
+    """原生棱柱基（2026-09-20 起的默认）下，棱柱的填充槽位同样被屏蔽。
+
+    这是上面那类的对偶：归约辅助读的是
+    `fr/native_padding.real_sps_per_cell`，它按当前棱柱基给出两个数，
+    所以"只屏蔽四面体"这句话只对坍缩档成立。P1 原生棱柱 6/8，所以
+    同一份构造（真实槽位 1、填充槽位 50）下棱柱也应当得到 1.0。
+    """
+
+    def test_prism_padding_is_masked_in_native_mode(self, monkeypatch):
+        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
+        from autoflowcfd.fr.native_padding import real_sps_per_cell
+
+        n_real_prism, n_real_tet = real_sps_per_cell(1)
+        assert (n_real_prism, n_real_tet) == (6, 4), (
+            "P1 原生档的真实自由度数应当是 (棱柱 6, 四面体 4)")
+        f = np.empty((4, 8))
+        f[:, :4] = 1.0
+        f[:, 4:] = 50.0
+        got = reduce_per_cell_over_real_sps(f, 2, 1, 'mean')
+        # 棱柱前 6 个槽位：4 个 1 + 2 个 50 -> (4+100)/6
+        prism_expect = (4 * 1.0 + 2 * 50.0) / 6.0
+        np.testing.assert_allclose(
+            got, [prism_expect, prism_expect, 1.0, 1.0])
+
 
 
 class TestRealDofReductionCallSitesAreWired:

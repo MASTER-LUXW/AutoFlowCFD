@@ -22,6 +22,8 @@ _compute_viscous_interface_correction_gpu` 此前用 `ff.g_left[idx_o]`/
 gather 公式，不是近似），不是"都接近零"这种弱判据。
 """
 
+import os
+
 import numpy as np
 import pytest
 
@@ -34,9 +36,24 @@ from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 
 @pytest.fixture(scope="module")
 def flat_face_p2():
-    mesh = _build_synthetic_mixed_mesh(order=2)
-    ops = generate_fr_operators(order=2)
-    return get_flat_face_geometry(mesh, ops)
+    """**坍缩棱柱档**下的合成网格面几何（2026-09-20）。
+
+    本文件验证的 `distribute_face_correction_to_sps` 只服务坍缩棱柱面
+    （native 面走 `lift_native` DG 提升算子，是另一条路径），所以网格
+    必须在坍缩档下构造 —— 环境变量要在**建网格与建算子之前**设好，
+    放在类级 fixture 里来不及（module 级 fixture 先于它求值）。
+    """
+    old = os.environ.get("AFCFD_PRISM_BASIS")
+    os.environ["AFCFD_PRISM_BASIS"] = "collapsed"
+    try:
+        mesh = _build_synthetic_mixed_mesh(order=2)
+        ops = generate_fr_operators(order=2)
+        return get_flat_face_geometry(mesh, ops)
+    finally:
+        if old is None:
+            os.environ.pop("AFCFD_PRISM_BASIS", None)
+        else:
+            os.environ["AFCFD_PRISM_BASIS"] = old
 
 
 class TestDistributeFaceCorrectionMatchesCpuGroundTruth:

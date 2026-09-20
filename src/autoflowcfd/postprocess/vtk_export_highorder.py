@@ -388,6 +388,54 @@ def _build_vtk_lagrange_export_data(cell_type: str, order: int, ref_cube_sps: np
     return target_cube, E
 
 
+def _build_native_prism_vtk_lagrange_export_data(
+        order: int) -> Tuple[np.ndarray, np.ndarray]:
+    """棱柱 VTK Lagrange 节点导出插值矩阵 —— **native 棱柱基专属版本**
+    （2026-09-20 新增，与四面体 2026-09-03 那次是同一类修正）。
+
+    坍缩档走的路径是"VTK 节点重心坐标 -> 解析求逆到坍缩坐标 (a,b,c) ->
+    用坍缩模态基 `prism_modal_basis_and_grad` 构造 Vandermonde"。原生
+    棱柱基（`AFCFD_PRISM_BASIS=native`，2026-09-20 起是默认）的 SPs 是
+    三角形 Warp&Blend ⊗ 挤出 Gauss 的 `(p+1)^2(p+2)/2` 个原生节点，
+    既不在坍缩坐标网格上、模态族也不同 —— 继续走旧路径会把插值矩阵拟合
+    在错误的节点位置上，**静默给出错误结果**（矩阵形状仍然对得上，所以
+    不会报错）。实测：P2 混合网格上导出节点值与解析场的相对误差
+    1.66e-02，而正确路径是机器零。
+
+    原生档下这条路径同样更直接：VTK wedge 节点的三角形重心坐标就是原生
+    参考三角形的原生参数化，`r = 2*l2 - 1`、`s = 2*l3 - 1`
+    （`tri_barycentric` 的解析逆，与 `native_prism_exact_jacobian` 里
+    `dl2/dr = +1/2`、`dl3/ds = +1/2` 是同一组关系），挤出方向
+    `t = 2*z_frac - 1`，不需要任何坍缩坐标中间表示。
+
+    Returns:
+        `(target_rst, E)`：`target_rst` 形状 `(n_vtk_nodes, 3)`（原生
+        参考坐标，供调用方用 `map_native_prism_to_physical` 直接求物理
+        坐标），`E` 形状 `(n_vtk_nodes, n_native)` —— **宽度是
+        `n_native` 而不是全局 `(order+1)^3`**，理由与四面体那条完全相同
+        （零填充行不携带真实场值），调用方必须先按 `[:n_native]` 切片。
+    """
+    from ..fr.native_prism.basis import (
+        build_native_prism_nodes, build_native_prism_vandermonde,
+    )
+    from scipy.linalg import lu_factor, lu_solve
+
+    tri_bary, z_frac = _wedge_vtk_node_layout(order)
+    r_t = 2.0 * tri_bary[:, 1] - 1.0
+    s_t = 2.0 * tri_bary[:, 2] - 1.0
+    t_t = 2.0 * z_frac - 1.0
+    target_rst = np.column_stack([r_t, s_t, t_t])
+
+    nodes = build_native_prism_nodes(order)
+    V_sps, _, _, _ = build_native_prism_vandermonde(order, nodes)
+    V_target, _, _, _ = build_native_prism_vandermonde(order, target_rst)
+
+    lu_piv = lu_factor(V_sps.T)
+    E = lu_solve(lu_piv, V_target.T).T          # (n_vtk_nodes, n_native)
+    assert E.shape == (target_rst.shape[0], nodes.shape[0])
+    return target_rst, E
+
+
 def _build_native_tet_vtk_lagrange_export_data(order: int) -> Tuple[np.ndarray, np.ndarray]:
     """四面体 VTK Lagrange 节点导出插值矩阵——native 单纯形基专属版本
     （2026-09-03 更正，删除 collapsed 四面体基后新增）。
@@ -492,6 +540,7 @@ def export_highorder_vtk(
 
     from ..core.fr_residual.inviscid import conserved_to_primitive
     from ..grid.curved_mapping.curved_mapping import map_prism_to_physical, tet_barycentric
+    from ..fr.native_prism.mode import prism_basis_is_native
     from ..fr.native_tet.basis import build_native_tet_operators
 
     order = mesh.order
@@ -541,18 +590,35 @@ def export_highorder_vtk(
 
     node_offset = 0
 
-    # --- 棱柱：坍缩坐标模态基插值 + map_prism_to_physical（不受本次
-    # 删除 collapsed 四面体基影响，棱柱没有 native 方案可换）---
+    # --- 棱柱：按棱柱基分派（2026-09-20）---
+    # 坍缩档走坍缩模态基 + `map_prism_to_physical`；原生档走原生模态基 +
+    # `map_native_prism_to_physical`，且场值只取前 `n_native` 行（零填充
+    # 槽位不携带真实场值）。两条的理由见
+    # `_build_native_prism_vtk_lagrange_export_data` 文档。
     if n_prism > 0:
-        target_cube, E = _build_vtk_lagrange_export_data("prism", order, ref_cube_sps)
-        n_vtk_nodes = target_cube.shape[0]
+        if prism_basis_is_native():
+            from ..fr.native_prism.basis import (
+                map_native_prism_to_physical, native_prism_n_sps,
+            )
+
+            n_real_prism = native_prism_n_sps(order)
+            target_ref, E = _build_native_prism_vtk_lagrange_export_data(order)
+            prism_map = map_native_prism_to_physical
+        else:
+            n_real_prism = None
+            target_ref, E = _build_vtk_lagrange_export_data(
+                "prism", order, ref_cube_sps)
+            prism_map = map_prism_to_physical
+        n_vtk_nodes = target_ref.shape[0]
         for local_i in range(n_prism):
             global_cell = local_i
             cell_nodes_phys = mesh._node_coords[mesh._fixed_prism_conn[local_i]]
-            phys_pts = map_prism_to_physical(target_cube, cell_nodes_phys)
+            phys_pts = prism_map(target_ref, cell_nodes_phys)
             all_points.append(phys_pts)
 
             q_at_sps = Q[global_cell]  # (n_sps, 5)
+            if n_real_prism is not None:
+                q_at_sps = q_at_sps[:n_real_prism]
             for name in fields:
                 comp = field_component[name](q_at_sps)  # (n_sps, k)
                 field_values[name].append(E @ comp)

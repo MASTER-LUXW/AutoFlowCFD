@@ -407,7 +407,7 @@ class TestRealSpsCountsFollowTheActivePrismBasis:
     def test_collapsed_prism_uses_every_slot(self, order, monkeypatch):
         from autoflowcfd.fr.native_padding import real_sps_per_cell
 
-        monkeypatch.delenv("AFCFD_PRISM_BASIS", raising=False)
+        monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")  # 2026-09-20 起默认已是 native，坍缩档必须显式指定
         n_prism, n_tet = real_sps_per_cell(order)
         assert n_prism == (order + 1) ** 3, "坍缩棱柱没有填充槽位"
         assert n_tet == (order + 1) * (order + 2) * (order + 3) // 6
@@ -445,7 +445,7 @@ class TestRealSpsCountsFollowTheActivePrismBasis:
             reduce_per_cell_over_real_sps,
         )
 
-        monkeypatch.delenv("AFCFD_PRISM_BASIS", raising=False)
+        monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")  # 2026-09-20 起默认已是 native，坍缩档必须显式指定
         rng = np.random.default_rng(11)
         f = rng.normal(size=(6, 27))
         got = reduce_per_cell_over_real_sps(f, 4, 2, "mean")
@@ -495,7 +495,7 @@ class TestOperatorsAndGeometrySwitchTogether:
         return generate_fr_operators(order)
 
     def test_collapsed_leaves_every_native_field_none(self, monkeypatch):
-        monkeypatch.delenv("AFCFD_PRISM_BASIS", raising=False)
+        monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")  # 2026-09-20 起默认已是 native，坍缩档必须显式指定
         ops = self._ops(2)
         assert ops.prism_basis_mode == "collapsed"
         for name in ("D_native_prism", "ref_native_prism",
@@ -545,7 +545,7 @@ class TestOperatorsAndGeometrySwitchTogether:
         """`max|D_3d_prism|` 必须大幅下降 —— 自由流保持性的直接控制量
         （实测误差严格等于 `eps * max|D| / det(J)`）。
         """
-        monkeypatch.delenv("AFCFD_PRISM_BASIS", raising=False)
+        monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")  # 2026-09-20 起默认已是 native，坍缩档必须显式指定
         mag_c = float(np.abs(self._ops(order).D_3d_prism).max())
         monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
         mag_n = float(np.abs(self._ops(order).D_3d_prism).max())
@@ -593,7 +593,7 @@ class TestNativePrismGeometry:
             build_order_geometry,
         )
 
-        monkeypatch.delenv("AFCFD_PRISM_BASIS", raising=False)
+        monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")  # 2026-09-20 起默认已是 native，坍缩档必须显式指定
         mesh = build_channel_mesh_prism(order, nx=3, ny=2, nz=2,
                                         Lx=0.1, H=0.01, Lz=0.004)
         monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
@@ -626,7 +626,7 @@ class TestNativePrismGeometry:
             build_order_geometry,
         )
 
-        monkeypatch.delenv("AFCFD_PRISM_BASIS", raising=False)
+        monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")  # 2026-09-20 起默认已是 native，坍缩档必须显式指定
         mesh = build_channel_mesh_prism(2, nx=3, ny=2, nz=2,
                                         Lx=0.1, H=0.01, Lz=0.004)
         det = np.abs(build_order_geometry(mesh, 2)["jacobians"]["det_jacs"])

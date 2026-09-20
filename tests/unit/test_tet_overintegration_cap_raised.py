@@ -172,15 +172,26 @@ class TestOrderResolverConstraints:
 class TestProductionOrders:
     """生产默认（rule=2x）下各阶数实际取到的过积分阶数。"""
 
-    EXPECTED = {1: (2, 2, 10), 2: (3, 4, 35), 3: (3, 6, 84)}
+    #: `order -> (四面体过积分阶数, 四面体细点数)`。**棱柱那一列已移除**
+    #: （2026-09-20）：它随棱柱基分档（坍缩受条件数上限 3 约束，原生走
+    #: 自己的上限 6），不是一个与基无关的常数；本测试要钉的是**四面体**
+    #: 那一侧与棱柱解耦，所以棱柱的期望值直接向唯一入口
+    #: `resolve_prism_overintegration_order` 要，而不是再抄一份分档逻辑。
+    EXPECTED = {1: (2, 10), 2: (4, 35), 3: (6, 84)}
 
     @pytest.mark.parametrize("order", [1, 2, 3])
     def test_operators_expose_decoupled_orders(self, order):
+        from autoflowcfd.fr.overintegration_order import (
+            resolve_prism_overintegration_order,
+        )
+
         if resolve_overintegration_order_rule() != 2:
             pytest.skip("AFCFD_OVERINT_ORDER_RULE 非默认 2x")
-        oo_prism_exp, oo_tet_exp, n_fine_exp = self.EXPECTED[order]
+        oo_tet_exp, n_fine_exp = self.EXPECTED[order]
+        oo_prism_exp = resolve_prism_overintegration_order(order)
         ops = generate_fr_operators(order)
-        assert ops.overint_order_prism == oo_prism_exp, "棱柱阶数不应被本改动影响"
+        assert ops.overint_order_prism == oo_prism_exp, (
+            "棱柱阶数必须等于唯一入口给出的值（它按棱柱基分档）")
         assert ops.overint_order_tet == oo_tet_exp
         assert ops.overint_n_fine_tet == n_fine_exp
         assert ops.overint_D_fine_tet.shape == (n_fine_exp, n_fine_exp, 3)
@@ -203,19 +214,32 @@ class TestProductionOrders:
         assert native_tet_n_fine(4) == 35
         assert native_tet_n_fine(4) <= 64
 
-    def test_p3_reaches_the_ideal_despite_exceeding_the_prism_layout(self):
-        """P3 取到理想的 oo=6，尽管它的 84 个细点超过棱柱的 64 列。
+    def test_p3_reaches_the_ideal_regardless_of_the_prism_layout(self):
+        """P3 取到理想的 oo=6，**与棱柱布局宽度无关**。
 
         这是把度量改成"第 0 列广播"之后才成立的（切列版本会被夹到 5）。
         P3 的去混叠误差因此从 6.26e-2（oo=3，完全无操作）降到 4.80e-6，
         而不是停在 oo=5 的 3.37e-3。
+
+        **判据从"84 > 棱柱布局"改成"与棱柱布局无关"（2026-09-20）**：
+        原判据把"不等式成立"当成结论，而那只在坍缩档下成立
+        （坍缩 P3 布局 64 < 84）。默认棱柱基改成 native 之后 P3 布局是
+        196 > 84，不等式反向 —— 但**结论没变**：四面体照样取到 6。
+        两档都断言这一点，才是"解耦"本身的判据；只断言不等式等于把
+        一个附带现象当成了结论。
         """
+        from autoflowcfd.fr.overintegration_order import prism_n_fine
+
         assert native_tet_n_fine(6) == 84
-        assert native_tet_n_fine(6) > (3 + 1) ** 3, "84 确实超过棱柱布局 64"
         assert resolve_tet_overintegration_order(3) == 6
         ops = generate_fr_operators(3)
         assert ops.overint_order_tet == 6
-        assert ops.overint_n_fine_tet == 84 > (ops.overint_order_prism + 1) ** 3
+        assert ops.overint_n_fine_tet == 84
+        # 无论棱柱布局是 64（坍缩）还是 196（原生），四面体都是 84：
+        n_fine_prism = prism_n_fine(ops.overint_order_prism)
+        assert ops.overint_n_fine_tet == 84 and n_fine_prism in (64, 196), (
+            f"棱柱布局宽度 {n_fine_prism} 既不是坍缩档的 64 也不是原生档的 "
+            f"196 —— 布局定义变了，本测试的记录值需要复核")
 
 
 class TestLayoutInvariantHolds:
@@ -231,8 +255,12 @@ class TestLayoutInvariantHolds:
         class _FakeMesh:
             pass
 
+        from autoflowcfd.fr.overintegration_order import prism_n_fine
+
         ops = generate_fr_operators(order)
-        n_fine_prism = (ops.overint_order_prism + 1) ** 3
+        # 布局宽度按棱柱基分档（坍缩 `(oo+1)^3`、原生 `(oo+1)^2(oo+2)/2`），
+        # 只有 `prism_n_fine` 这一个事实来源。
+        n_fine_prism = prism_n_fine(ops.overint_order_prism)
         n_cells, n_prism = 7, 3
         mesh = _FakeMesh()
         mesh.n_cells = n_cells

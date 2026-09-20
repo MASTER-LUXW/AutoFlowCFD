@@ -36,6 +36,42 @@ from ..curved_mapping.curved_mapping_orientation import (
 )
 from ..connectivity.face_connectivity import FRFaceConnectivity, build_face_connectivity
 
+#: 标准参考四面体 `(-1,-1,-1),(1,-1,-1),(-1,1,-1),(-1,-1,1)` 的体积
+#: （见 `fr/native_tet/basis.py::compute_native_tet_jacobian`）。
+_NATIVE_REF_TET_VOLUME = 4.0 / 3.0
+
+
+def _prism_sp_volume_weights(order: int, n_sps_per_cell: int) -> np.ndarray:
+    """棱柱逐解点的参考体积求积权重，形状 `(n_sps_per_cell,)`。
+
+    两条棱柱基的解点布局与参考体积都不同，这里是唯一的分派点
+    （`get_cell_volume` 与 `get_all_cell_volumes` 共用它，不各写一份）：
+
+    * 坍缩档：解点就是 `[-1,1]^3` 上的张量积 Gauss 点，权重是一维权重的
+      张量积，和为 8；
+    * 原生档：解点是三角形 Warp&Blend ⊗ 挤出方向 Gauss 的
+      `(p+1)^2(p+2)/2` 个点，权重由
+      `fr/native_prism/quadrature.build_native_prism_sp_weights` 给出
+      （和为参考棱柱体积 4），**零填充槽位权重为 0**。
+    """
+    from autoflowcfd.fr.native_prism.mode import prism_basis_is_native
+
+    if prism_basis_is_native():
+        from autoflowcfd.fr.native_prism.quadrature import (
+            build_native_prism_sp_weights,
+        )
+
+        w_native = build_native_prism_sp_weights(order)
+        w = np.zeros(n_sps_per_cell, dtype=np.float64)
+        w[: w_native.shape[0]] = w_native
+        return w
+
+    from autoflowcfd.fr.operators import gauss_legendre
+
+    _, w_1d = gauss_legendre(order + 1)
+    wx, wy, wz = np.meshgrid(w_1d, w_1d, w_1d, indexing="ij")
+    return (wx * wy * wz).ravel()
+
 
 class HighOrderMesh:
     """高阶 FR 网格数据结构。
@@ -341,22 +377,17 @@ class HighOrderMesh:
 
         四面体（native 单纯形基）不走这套张量积求积权重——理由见
         `get_all_cell_volumes` 文档，这里用同一个常数 Jacobian*参考体积
-        的精确公式。
+        的精确公式。棱柱的权重按当前棱柱基分派，见
+        `_prism_sp_volume_weights`。
         """
         if self.jacobians is None or cell_id >= self.n_cells:
             return 0.0
 
         if cell_id >= self.n_prism_cells:
-            _NATIVE_REF_TET_VOLUME = 4.0 / 3.0
             det_j = self.jacobians["det_jacs"][cell_id * self.n_sps_per_cell]
             return float(det_j * _NATIVE_REF_TET_VOLUME)
 
-        from autoflowcfd.fr.operators import gauss_legendre
-
-        _, w_1d = gauss_legendre(self.n_points_1d)
-        wx, wy, wz = np.meshgrid(w_1d, w_1d, w_1d, indexing="ij")
-        weights_3d = (wx * wy * wz).ravel()
-
+        weights_3d = _prism_sp_volume_weights(self.order, self.n_sps_per_cell)
         start = cell_id * self.n_sps_per_cell
         det_jacs = self.jacobians["det_jacs"][start : start + self.n_sps_per_cell]
         return float(np.sum(det_jacs * weights_3d))
@@ -379,23 +410,23 @@ class HighOrderMesh:
         native 四面体单元直接用 `det_j*4/3`，不需要任何求积（常数
         Jacobian 乘参考体积就是精确物理体积，见该函数文档）。
 
+        **棱柱的权重按棱柱基分派（2026-09-20）**：原生棱柱基的解点不是
+        张量积 Gauss 点、参考棱柱体积是 4 而不是 8，沿用张量积权重会把
+        棱柱体积算成 2 倍（实测 1.0 vs 真值 0.5）。见
+        `_prism_sp_volume_weights` 与 `fr/native_prism/quadrature.py`。
+
         Returns:
             volumes: 形状 (n_cells,)
         """
         if self.jacobians is None:
             return np.zeros(self.n_cells)
 
-        from autoflowcfd.fr.operators import gauss_legendre
-
-        _, w_1d = gauss_legendre(self.n_points_1d)
-        wx, wy, wz = np.meshgrid(w_1d, w_1d, w_1d, indexing="ij")
-        weights_3d = (wx * wy * wz).ravel()
-
+        weights_3d = _prism_sp_volume_weights(self.order, self.n_sps_per_cell)
         det_jacs = self.jacobians["det_jacs"].reshape(self.n_cells, self.n_sps_per_cell)
         volumes = np.sum(det_jacs * weights_3d[np.newaxis, :], axis=1)
 
         if self.n_prism_cells < self.n_cells:
-            _NATIVE_REF_TET_VOLUME = 4.0 / 3.0
-            volumes[self.n_prism_cells:] = det_jacs[self.n_prism_cells:, 0] * _NATIVE_REF_TET_VOLUME
+            volumes[self.n_prism_cells:] = (
+                det_jacs[self.n_prism_cells:, 0] * _NATIVE_REF_TET_VOLUME)
 
         return volumes

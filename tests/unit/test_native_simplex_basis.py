@@ -81,8 +81,14 @@ def test_generate_fr_operators_native_mode_populates_expected_fields():
 
     # 过积分算子：与坍缩坐标共用同一批字段名（ops.overint_*_tet），
     # 已被 native 版本覆盖——见 fr/operators.py 该分支的完整说明。
-    from autoflowcfd.fr.collapsed_basis import OVERINTEGRATION_MAX_ORDER
-    over_order = min(2 * order, OVERINTEGRATION_MAX_ORDER)
+    # 棱柱的过积分阶数与细点数按棱柱基分档，走唯一入口（2026-09-20）：
+    # 坍缩档受条件数上限 3 约束、细点数 `(oo+1)^3`；原生档上限 6、细点数
+    # `(oo+1)^2(oo+2)/2`。此前这里复制了坍缩档那条公式。
+    from autoflowcfd.fr.overintegration_order import (
+        prism_n_fine, resolve_prism_overintegration_order,
+    )
+
+    over_order = resolve_prism_overintegration_order(order)
     # 细网格轴取 native **真实**细点数、不再填充到 (over_order+1)^3
     # （2026-09-17）：填充槽位恒为零、对结果零贡献，却让整条过积分链在
     # 空点上白算，其中 D_fine 的收缩是 O(n_fine^2)（P2 上 64^2/20^2 =
@@ -98,7 +104,7 @@ def test_generate_fr_operators_native_mode_populates_expected_fields():
         resolve_tet_overintegration_order,
     )
     over_order_tet = resolve_tet_overintegration_order(
-        order, (over_order + 1) ** 3)
+        order, prism_n_fine(over_order))
     n_fine_native = (
         (over_order_tet + 1) * (over_order_tet + 2) * (over_order_tet + 3) // 6
     )

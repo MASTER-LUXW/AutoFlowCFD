@@ -57,7 +57,11 @@ class TestNativeTetWmlesBoundaryExtrap:
         flat = get_flat_face_geometry(mesh, ops)
         n_sps = mesh.n_sps_per_cell
 
-        native_faces = np.nonzero(flat.owner_cube_face >= 6)[0]
+        # 只取 native **四面体**面 [6,10)（2026-09-20）：原生棱柱基下
+        # 棱柱面也是 native 编码（[10,15)），但本文件钉的是四面体那条
+        # 分派，把棱柱面混进来会用四面体的表去查棱柱编码。
+        oc = flat.owner_cube_face
+        native_faces = np.nonzero((oc >= 6) & (oc < 10))[0]
         assert len(native_faces) > 0, "test setup must produce at least one native tet face"
 
         rng = np.random.default_rng(0)

@@ -92,7 +92,16 @@ def test_native_face_connectivity_codes_are_translated(order):
     owner_is_tet = fc.owner_cell >= n_prisms
     neighbor_is_tet = (~fc.is_boundary) & (fc.neighbor_cell >= n_prisms)
     assert np.all(fc.owner_cube_face[owner_is_tet] >= 6)
-    assert np.all(fc.owner_cube_face[~owner_is_tet] < 6)
+    # 棱柱面编码按棱柱基分档（2026-09-20）：坍缩档 [0,6)、原生档
+    # [10,15)。本文件钉的是**四面体**那一侧的翻译，所以棱柱只断言
+    # "落在当前基对应的区间里"，而不是写死 <6。
+    from autoflowcfd.fr.native_prism.mode import prism_basis_is_native
+
+    if prism_basis_is_native():
+        assert np.all(fc.owner_cube_face[~owner_is_tet] >= 10)
+        assert np.all(fc.owner_cube_face[~owner_is_tet] < 15)
+    else:
+        assert np.all(fc.owner_cube_face[~owner_is_tet] < 6)
     assert np.all(fc.neighbor_cube_face[neighbor_is_tet] >= 6)
 
 

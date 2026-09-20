@@ -33,6 +33,7 @@ from typing import Dict, Tuple
 
 from autoflowcfd.fr.operators import generate_fr_operators
 from .curved_mapping_exact_jacobian import tet_exact_jacobian, prism_exact_jacobian
+from ...fr.native_prism.mode import prism_basis_is_native
 
 
 @njit(cache=True)
@@ -415,6 +416,33 @@ class CurvedMapping:
                     f"Negative or zero Jacobian determinant detected in native tet! det(J)={det_j:.6e}."
                 )
             adj = np.broadcast_to(adj_const, (n_sps, 3, 3))
+        elif cell_type == "prism" and prism_basis_is_native():
+            # 原生棱柱基（2026-09-20）：与四面体那条同一个理由 ——
+            # `D_3d_prism` 在原生档下已被别名成对 `(r,s,t)` 求导的
+            # `D_native_prism_padded`，而 `prism_exact_jacobian` 求的是对
+            # 坍缩坐标 `(a,b,c)` 的导数，两者不是同一个参考系，混用会让
+            # 链式法则本身就错。改用同一套 native machinery：
+            # `native_prism_exact_jacobian` 在原生解点上给出解析精确
+            # Jacobian。零填充槽位的 adj 置零（`D_native_prism_padded`
+            # 的填充行本身是零行，所以那些槽位的残差恒为零，不影响
+            # `max|residual|` 判据）。
+            from ...fr.native_prism.basis import (
+                build_native_prism_nodes,
+                native_prism_exact_jacobian,
+                native_prism_n_sps,
+            )
+            D_3d = self.operators.D_3d_prism
+            n_sps = D_3d.shape[0]
+            n_native = native_prism_n_sps(self.order)
+            jac = native_prism_exact_jacobian(
+                build_native_prism_nodes(self.order), cell_nodes)
+            det_jacs, inv_jacs = batched_det_inv_3x3(np.ascontiguousarray(jac))
+            if np.any(det_jacs <= 0):
+                raise MeshDistortionError(
+                    f"Negative or zero Jacobian determinant detected in "
+                    f"native prism! Min det(J) = {float(det_jacs.min()):.6e}.")
+            adj = np.zeros((n_sps, 3, 3))
+            adj[:n_native] = det_jacs[:, None, None] * inv_jacs
         else:
             D_3d = self._select_d3d(cell_type)
             jac_data = self.compute_jacobian(
