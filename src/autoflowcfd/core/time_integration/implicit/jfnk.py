@@ -26,7 +26,11 @@
   （`preconditioner.py`）；
 * 线性求解容差由 inexact-Newton 的 forcing term 自适应给出
   （`forcing.py`），不把线性系统解到机器精度；
-* `theta` 是物理性限幅，见 `_physicality_limited_step`。
+* `theta` 是物理性限幅，见 `_physicality_limited_step`；
+* 一步不被接受（`theta = 0`）时**当场缩小 `dtau` 重试**，而不是原地
+  不动等外层控制器 —— 那条交接被真实运行证明从来没有发生过（残差逐位
+  不变让按残差历史工作的控制器看不到停滞），完整证据与修法见
+  `dtau_control.py`。
 
 **一次调用一个 Newton 步**是刻意的：外层的 `solver.solve()` 已经在做
 残差监控、自适应 CFL、checkpoint、Order Continuation，把 Newton 外迭代
@@ -45,6 +49,7 @@ from typing import Callable, Optional, Tuple
 
 import numpy as np
 
+from .dtau_control import MIN_SCALE as DTAU_MIN_SCALE, PtcDtauScale
 from .forcing import EisenstatWalkerForcing
 from .jacobian_vector import MatrixFreeJacobian
 from .preconditioner import PseudoTransientDiagonal
@@ -84,6 +89,16 @@ RESIDUAL_ACCEPT_GROWTH = 1.5
 #: 回溯次数上限。每次回溯把 `theta` 减半并重算一次残差，所以代价是
 #: 最多这么多次额外残差求值。4 次即 `theta` 最小到 1/16。
 MAX_BACKTRACK = 4
+
+#: 单次 `step_newton_krylov` 调用里允许缩小 `dtau` 重试的档数
+#: （每档 `dtau_control.FAIL_SHRINK`，即 4 倍）。
+#:
+#: 3 档 = `dtau` 最小到 1/64，按 `dtau_control.py` 里的论证足以穿过
+#: "方向不可信"的区间（实测停滞出现在 CFL=10、CFL=1 没有，跨度约一个
+#: 数量级）。每次重试要重解一次 GMRES，所以不能无上限；用不完的档由
+#: **下一次调用**继续（`dtau_scale` 跨步持久化），于是极端情形下总档数
+#: 不受这个值限制、单步成本却受它限制。
+DTAU_MAX_CUTS_PER_STEP = 3
 
 #: 物理性限幅允许的单步最大相对变化（对 `rho` 与 `p`）。
 #: 0.5 的含义：一个 Newton 步不允许把任何一点的密度或压力改变超过 50%。
@@ -161,11 +176,12 @@ def _accept_step(residual: Callable[[np.ndarray], np.ndarray],
 
         ||R(U0 + theta*dU)||  <=  RESIDUAL_ACCEPT_GROWTH * ||R(U0)||
 
-    全部回溯都不被接受时返回 `theta = 0`（**这一步不前进**），把处置交给
-    外层自适应 CFL —— 缩小 `dtau` 会让 PTC 系统更接近对角主导、方向更
-    可信。这比"硬着头皮走一步"正确：本项目已经吃过一次"越界之后收缩救
-    不回来"的亏（项目记忆 `adaptive_cfl_four_defects_and_soft_ceiling`
-    第 12 条），所以宁可原地不动也不要走出一步坏的。
+    全部回溯都不被接受时返回 `theta = 0`（**这一步不前进**）。调用方
+    `step_newton_krylov` 据此**当场缩小 `dtau` 重解一次**（见
+    `dtau_control.py`），而不是把状态原样交出去 —— 后者被真实运行证明
+    会永久停滞。不"硬着头皮走一步"是刻意的：本项目已经吃过一次"越界
+    之后收缩救不回来"的亏（项目记忆
+    `adaptive_cfl_four_defects_and_soft_ceiling` 第 12 条）。
 
     为什么不用标准线搜索（Armijo）：那需要一个 merit function
     （通常 `0.5||R||^2`）与它的方向导数，而伪瞬态解的不是
@@ -189,54 +205,21 @@ def _accept_step(residual: Callable[[np.ndarray], np.ndarray],
     return u0_flat, 0.0, res_norm0, n_eval
 
 
-def step_newton_krylov(
-    residual: Callable[[np.ndarray], np.ndarray],
-    u0_flat: np.ndarray,
-    dtau_flat: np.ndarray,
-    scales: np.ndarray,
-    *,
-    forcing: Optional[EisenstatWalkerForcing] = None,
-    tol_nonlinear: float = 1e-10,
-    gmres_restart: int = GMRES_RESTART,
-    gmres_max_iter: int = GMRES_MAX_ITER,
-) -> Tuple[np.ndarray, dict]:
-    """做**一个** PTC-Newton-Krylov 步，返回 `(U_new_flat, info)`。
+def _solve_direction(jac: MatrixFreeJacobian, dtau_flat: np.ndarray,
+                     r0: np.ndarray, n_var: int, eta: float,
+                     gmres_restart: int, gmres_max_iter: int):
+    """解 `(I/dtau + J) dU = -R`，返回 `(du, gmres_iters, gmres_info)`。
 
-    Args:
-        residual: `R(U_flat) -> (N, n_var)`，与 `fr_solver/step.py` 里
-            `mean_flow_residual` 同一个约定（`dU/dt = -R`）。
-        u0_flat: `(N, n_var)` 当前守恒变量。
-        dtau_flat: `(N,)` 逐 SP 伪时间步长（`cfl.py` 的 `dt_local`）。
-        scales: `(n_var,)` 守恒变量参考量级（Fréchet 差分的无量纲化，
-            见 `jacobian_vector.py`）。
-        forcing: 跨 Newton 步复用的 forcing-term 状态；`None` 时本步用
-            固定的保守容差。
-        tol_nonlinear: 外迭代目标绝对容差，只用来给 forcing term 定
-            安全下限。
-        gmres_restart / gmres_max_iter: 见模块级常量。
+    `du` 为 `None` 表示线性求解产出了非有限方向（调用方据此缩小 `dtau`
+    重试或放弃这一步，**不**静默用一个截断后的方向凑一步）。
 
-    Returns:
-        `(U_new_flat, info)`。`info` 含 `res_norm`（步前的 `||R||` RMS）、
-        `eta`、`gmres_iters`、`n_matvec`、`theta`、`gmres_info`。
-        `theta == 0.0` 表示这一步**没有前进**（线性求解失败或物理性限幅
-        归零），调用方应当把它当成"需要缩小 dtau"的信号。
+    `jac` 由调用方构造并跨重试复用：它只依赖基态 `(U0, R0)` 与参考量级，
+    与 `dtau` 无关，所以缩小 `dtau` 重试时不需要重算基残差、也不需要
+    重建 Krylov 算子的基态部分（`n_matvec` 在它内部累计）。
     """
     from scipy.sparse.linalg import LinearOperator, gmres
 
-    u0_flat = np.ascontiguousarray(u0_flat, dtype=np.float64)
-    n_dof, n_var = u0_flat.shape
-
-    r0 = np.ascontiguousarray(residual(u0_flat), dtype=np.float64)
-    if r0.shape != u0_flat.shape:
-        raise ValueError(
-            f"残差形状 {r0.shape} 与状态形状 {u0_flat.shape} 不符")
-    res_norm = float(np.linalg.norm(r0) / np.sqrt(max(r0.size, 1)))
-    if res_norm == 0.0:
-        return u0_flat, dict(res_norm=0.0, res_norm_new=0.0, eta=0.0,
-                             gmres_iters=0, n_matvec=0, n_residual_extra=0,
-                             theta=0.0, theta_physicality=0.0, gmres_info=0)
-
-    jac = MatrixFreeJacobian(residual, u0_flat, r0, scales)
+    n_dof = r0.shape[0]
     prec = PseudoTransientDiagonal(dtau_flat, n_var)
 
     def _apply_A(x_1d):
@@ -251,9 +234,6 @@ def step_newton_krylov(
     a_op = LinearOperator((size, size), matvec=_apply_A, dtype=np.float64)
     m_op = LinearOperator((size, size), matvec=_apply_M, dtype=np.float64)
 
-    eta = (forcing.next_eta(res_norm, tol_nonlinear)
-           if forcing is not None else 0.1)
-
     # GMRES 迭代计数：scipy 不返回它，`callback_type="pr_norm"` 下
     # callback 每次迭代调用一次，正好用来数。
     iters = [0]
@@ -261,30 +241,139 @@ def step_newton_krylov(
     def _count(_pr_norm):
         iters[0] += 1
 
-    rhs = (-r0).reshape(-1)
     n_cycles = max(1, int(np.ceil(gmres_max_iter / max(1, gmres_restart))))
     du_1d, gmres_info = gmres(
-        a_op, rhs, rtol=eta, atol=0.0, restart=gmres_restart,
+        a_op, (-r0).reshape(-1), rtol=eta, atol=0.0, restart=gmres_restart,
         maxiter=n_cycles, M=m_op, callback=_count,
         callback_type="pr_norm",
     )
     du = du_1d.reshape(n_dof, n_var)
-
     if not np.all(np.isfinite(du)):
-        # 线性求解产出非有限方向：**不**走这一步，把处置交给外层自适应
-        # CFL（缩小 dtau 让系统更接近对角主导）。不静默用一个截断后的
-        # 方向凑一步 —— 那会让"这一步没能解出来"这件事消失在日志里。
-        return u0_flat, dict(res_norm=res_norm, res_norm_new=res_norm,
-                             eta=eta, gmres_iters=iters[0],
-                             n_matvec=jac.n_matvec, n_residual_extra=0,
-                             theta=0.0, theta_physicality=0.0,
-                             gmres_info=-1)
+        return None, iters[0], -1
+    return du, iters[0], int(gmres_info)
 
-    theta_phys = _physicality_limited_step(u0_flat, du)
-    u_new, theta, res_norm_new, n_extra = _accept_step(
-        residual, u0_flat, du, theta_phys, res_norm)
+
+def step_newton_krylov(
+    residual: Callable[[np.ndarray], np.ndarray],
+    u0_flat: np.ndarray,
+    dtau_flat: np.ndarray,
+    scales: np.ndarray,
+    *,
+    forcing: Optional[EisenstatWalkerForcing] = None,
+    tol_nonlinear: float = 1e-10,
+    gmres_restart: int = GMRES_RESTART,
+    gmres_max_iter: int = GMRES_MAX_ITER,
+    dtau_scale: float = 1.0,
+) -> Tuple[np.ndarray, dict]:
+    """做**一个** PTC-Newton-Krylov 步，返回 `(U_new_flat, info)`。
+
+    Args:
+        residual: `R(U_flat) -> (N, n_var)`，与 `fr_solver/step.py` 里
+            `mean_flow_residual` 同一个约定（`dU/dt = -R`）。
+        u0_flat: `(N, n_var)` 当前守恒变量。
+        dtau_flat: `(N,)` 逐 SP 伪时间步长（`cfl.py` 的 `dt_local`）。
+            它是**天花板**：本函数只会在它之下用 `dtau_scale` 缩放。
+        scales: `(n_var,)` 守恒变量参考量级（Fréchet 差分的无量纲化，
+            见 `jacobian_vector.py`）。
+        forcing: 跨 Newton 步复用的 forcing-term 状态；`None` 时本步用
+            固定的保守容差。
+        tol_nonlinear: 外迭代目标绝对容差，只用来给 forcing term 定
+            安全下限。
+        gmres_restart / gmres_max_iter: 见模块级常量。
+        dtau_scale: 上一次调用返回的 `info["dtau_scale"]`，把 PTC 的
+            `dtau` 缩放状态跨步带过来（见 `dtau_control.py`）。调用方
+            持久化它即可，不需要知道缩放策略。
+
+    Returns:
+        `(U_new_flat, info)`。`info` 含 `res_norm`（步前的 `||R||` RMS）、
+        `eta`、`gmres_iters`（本次调用**累计**的 Krylov 迭代数，含重试）、
+        `n_matvec`、`theta`、`gmres_info`、`dtau_scale`（下一次调用要
+        带回来的缩放因子）、`n_dtau_cuts`（本步缩了几档）。
+
+        `theta == 0.0` 表示这一步**没有前进**，但 `dtau` 还有档可缩
+        （本次调用的档数用完了，`dtau_scale` 带着已缩小的值返回，下一次
+        调用继续缩）。
+
+    Raises:
+        RuntimeError: `dtau_scale` 已经缩到 `dtau_control.MIN_SCALE` 仍
+            拿不到一个被接受的步。那不再是步长问题 —— `dtau -> 0` 退化
+            成显式前向 Euler、必然被残差接受判据接受（见
+            `dtau_control.py` 的论证），所以走到这里只可能是残差求值
+            本身在当前状态上已经失效（非有限值、或状态已非物理）。
+            **不静默原地打转**：那正是本次修复要消灭的停滞形态，只是
+            换了个位置（每步照样烧掉一次完整的 GMRES 求解）。
+    """
+    u0_flat = np.ascontiguousarray(u0_flat, dtype=np.float64)
+    n_var = u0_flat.shape[1]
+    ctrl = PtcDtauScale(dtau_scale)
+
+    r0 = np.ascontiguousarray(residual(u0_flat), dtype=np.float64)
+    if r0.shape != u0_flat.shape:
+        raise ValueError(
+            f"残差形状 {r0.shape} 与状态形状 {u0_flat.shape} 不符")
+    res_norm = float(np.linalg.norm(r0) / np.sqrt(max(r0.size, 1)))
+    if res_norm == 0.0:
+        return u0_flat, dict(res_norm=0.0, res_norm_new=0.0, eta=0.0,
+                             gmres_iters=0, n_matvec=0, n_residual_extra=0,
+                             theta=0.0, theta_physicality=0.0, gmres_info=0,
+                             dtau_scale=ctrl.scale, n_dtau_cuts=0)
+
+    jac = MatrixFreeJacobian(residual, u0_flat, r0, scales)
+    dtau_base = np.ascontiguousarray(dtau_flat, dtype=np.float64).ravel()
+    eta = (forcing.next_eta(res_norm, tol_nonlinear)
+           if forcing is not None else 0.1)
+
+    u_new = u0_flat
+    theta = 0.0
+    theta_phys = 0.0
+    res_norm_new = res_norm
+    gmres_info = 0
+    iters_total = 0
+    n_extra_total = 0
+    n_cuts = 0
+
+    # `dtau` 逐档缩小重试：一步不被接受说明当前 `dtau` 下的方向不可信，
+    # 缩小 `dtau` 让 PTC 系统更接近对角主导（`dtau -> 0` 即显式前向
+    # Euler，必然被接受）。为什么必须在这里重试、而不能像原先那样返回
+    # `theta=0` 交给外层自适应 CFL：见 `dtau_control.py` 模块文档里的
+    # 真实停滞记录（残差逐位不变 -> 按残差历史工作的控制器看不到它）。
+    while True:
+        du, iters, ginfo = _solve_direction(
+            jac, dtau_base * ctrl.scale, r0, n_var, eta,
+            gmres_restart, gmres_max_iter)
+        iters_total += iters
+        gmres_info = ginfo
+        if du is not None:
+            theta_phys = _physicality_limited_step(u0_flat, du)
+            u_try, theta, res_norm_new, n_extra = _accept_step(
+                residual, u0_flat, du, theta_phys, res_norm)
+            n_extra_total += n_extra
+            if theta > 0.0:
+                u_new = u_try
+                ctrl.reward(theta, theta_phys)
+                break
+        if ctrl.scale <= DTAU_MIN_SCALE:
+            raise RuntimeError(
+                "隐式稳态步在 dtau 缩到下限（scale=%.3e，相对自适应 CFL "
+                "给出的天花板）之后仍拿不到一个被残差判据接受的步。"
+                "dtau->0 时 PTC 退化成显式前向 Euler、必然被接受（前提"
+                "是 R 在该状态附近连续），所以这不是步长问题：要么残差"
+                "求值本身已失效（非有限值/非物理状态），要么 R 在这一点"
+                "附近不连续。"
+                "诊断：||R||=%.6e，R 全有限=%s，GMRES info=%s，"
+                "物理性限幅 theta=%.3e。"
+                % (ctrl.scale, res_norm, bool(np.all(np.isfinite(r0))),
+                   gmres_info, theta_phys))
+        if n_cuts >= DTAU_MAX_CUTS_PER_STEP or not ctrl.cut():
+            # 本次调用的档数用完：如实返回 `theta=0`，`dtau_scale` 带着
+            # 已经缩小的值回去，下一次调用接着缩（见 `dtau_control.py`）。
+            break
+        n_cuts += 1
+
     return u_new, dict(res_norm=res_norm, res_norm_new=res_norm_new,
-                       eta=eta, gmres_iters=iters[0],
-                       n_matvec=jac.n_matvec, n_residual_extra=n_extra,
+                       eta=eta, gmres_iters=iters_total,
+                       n_matvec=jac.n_matvec,
+                       n_residual_extra=n_extra_total,
                        theta=theta, theta_physicality=theta_phys,
-                       gmres_info=int(gmres_info))
+                       gmres_info=gmres_info,
+                       dtau_scale=ctrl.scale, n_dtau_cuts=n_cuts)

@@ -313,3 +313,154 @@ class TestInputValidation:
         assert info["res_norm"] == 0.0
         assert info["n_matvec"] == 0, "残差已为零时不该再做任何 J.v"
         assert np.array_equal(u1, u)
+
+
+def _step_limited_system(delta, seed=7):
+    """`R` 在"离基态超过 `delta`（无量纲 RMS 位移）"之外整体放大 1e6 倍。
+
+    用途：造出一个**方向不可信、但缩小 `dtau` 就可信**的情形，这正是
+    PTC 缩 `dtau` 存在的理由（`implicit/dtau_control.py`）。
+
+    为什么用一个不连续的"远支"而不是某个光滑强非线性：要钉住的是
+    "一步被残差判据拒绝之后会不会缩 `dtau` 重试"这条**控制逻辑**，
+    它需要的是"大步一定被拒、小步一定被接受"这个确定性，而光滑非线性
+    要靠调参数去凑这个分界（调出来的分界还会随 seed 漂）。这里不连续
+    是刻意的：它模拟"越过这一步残差求值就是垃圾"，而 Fréchet 差分用的
+    `eps ~ 1e-8` 始终落在近支，所以 `J` 仍是近支的真实 Jacobian。
+    """
+    rng = np.random.default_rng(seed)
+    a_var = rng.normal(size=(_NV, _NV)) + _NV * np.eye(_NV)
+    a = a_var * _SCALES[:, None] * (1.0 / _SCALES)[None, :]
+    u_star = _SCALES[None, :] * (1.0 + 0.1 * rng.normal(size=(_N, _NV)))
+    u0 = _SCALES[None, :] * np.ones((_N, _NV))
+
+    def residual(u_flat):
+        d = (u_flat - u0) / _SCALES[None, :]
+        base = (u_flat - u_star) @ a.T
+        if float(np.sqrt(np.mean(d ** 2))) > delta:
+            return base * 1.0e6
+        return base
+
+    return residual, u0
+
+
+class TestPtcDtauScaleStateMachine:
+    """`dtau_control.PtcDtauScale` 的策略本身（与残差链路无关）。"""
+
+    def test_cut_shrinks_by_one_notch_until_floor(self):
+        from autoflowcfd.core.time_integration.implicit import dtau_control as DC
+
+        ctrl = DC.PtcDtauScale()
+        assert ctrl.scale == 1.0
+        assert ctrl.cut() is True
+        assert ctrl.scale == pytest.approx(DC.FAIL_SHRINK)
+        for _ in range(200):
+            if not ctrl.cut():
+                break
+        assert ctrl.scale == pytest.approx(DC.MIN_SCALE)
+        assert ctrl.cut() is False, "已到下限时必须如实返回 False"
+
+    def test_reward_only_on_a_fully_accepted_step(self):
+        from autoflowcfd.core.time_integration.implicit import dtau_control as DC
+
+        ctrl = DC.PtcDtauScale(0.25)
+        ctrl.reward(theta=0.5, theta_physicality=1.0)   # 被回溯过
+        assert ctrl.scale == pytest.approx(0.25)
+        ctrl.reward(theta=0.5, theta_physicality=0.5)   # 被物理性限幅削过
+        assert ctrl.scale == pytest.approx(0.25)
+        ctrl.reward(theta=1.0, theta_physicality=1.0)   # 完整接受
+        assert ctrl.scale == pytest.approx(0.25 * DC.OK_GROW)
+
+    def test_scale_never_exceeds_one(self):
+        """`dtau` 的天花板由外层自适应 CFL 给（唯一事实来源），本层只在
+        它之下缩放 —— 所以放大永远封顶在 1.0。"""
+        from autoflowcfd.core.time_integration.implicit import dtau_control as DC
+
+        ctrl = DC.PtcDtauScale(0.5)
+        for _ in range(10):
+            ctrl.reward(theta=1.0, theta_physicality=1.0)
+        assert ctrl.scale == 1.0
+
+    @pytest.mark.parametrize("bad", [0.0, -1.0, np.nan, np.inf])
+    def test_invalid_initial_scale_raises(self, bad):
+        from autoflowcfd.core.time_integration.implicit import PtcDtauScale
+
+        with pytest.raises(ValueError, match="正有限值"):
+            PtcDtauScale(bad)
+
+
+class TestDtauCutOnRejectedStep:
+    """**这组钉住的是一个真实运行抓到的停滞**（完整记录见
+    `implicit/dtau_control.py` 模块文档）：固定 CFL=10 下 Blasius 从
+    step 48 起每步 `theta=0`、残差逐位不变、每步照烧 38 次残差求值，
+    一直到第 200 步 —— 因为"交给外层自适应 CFL"这条交接在残差不变时
+    原理上传不到控制器那里。"""
+
+    def test_rejected_direction_cuts_dtau_and_still_advances(self):
+        """实测（seed 固定）：`dtau=1` + `delta=1e-3` 下缩 3 档、
+        `theta=0.125`，残差 5.9057e4 -> 5.8420e4 —— 也就是从"原地不动"
+        变成"真的走了一步且残差下降"。"""
+        residual, u0 = _step_limited_system(1.0e-3)
+        u1, info = step_newton_krylov(
+            residual, u0, np.full(_N, 1.0), _SCALES)
+
+        assert info["n_dtau_cuts"] >= 1, "大步被拒时必须缩 dtau 重试"
+        assert info["theta"] > 0.0, "缩过 dtau 之后这一步必须真的前进"
+        assert info["dtau_scale"] < 1.0
+        assert not np.array_equal(u1, u0)
+        assert info["res_norm_new"] < info["res_norm"]
+
+    def test_unused_notches_carry_over_to_the_next_call(self):
+        """单步内的档数上限（`DTAU_MAX_CUTS_PER_STEP`）限制的是**单步
+        成本**，不是总档数：用不完的档由下一次调用带着 `dtau_scale`
+        继续缩。"""
+        from autoflowcfd.core.time_integration.implicit import (
+            DTAU_MAX_CUTS_PER_STEP,
+        )
+        from autoflowcfd.core.time_integration.implicit import dtau_control as DC
+
+        residual, u0 = _step_limited_system(1.0e-3)
+        dtau = np.full(_N, 1.0e12)   # 纯 Newton 档：缩 3 档远远不够
+
+        _u1, info1 = step_newton_krylov(residual, u0, dtau, _SCALES)
+        assert info1["theta"] == 0.0
+        assert info1["n_dtau_cuts"] == DTAU_MAX_CUTS_PER_STEP
+        assert info1["dtau_scale"] == pytest.approx(
+            DC.FAIL_SHRINK ** DTAU_MAX_CUTS_PER_STEP)
+
+        _u2, info2 = step_newton_krylov(
+            residual, u0, dtau, _SCALES, dtau_scale=info1["dtau_scale"])
+        assert info2["dtau_scale"] < info1["dtau_scale"], (
+            "第二次调用必须从上一次缩到的档位继续，而不是回到 1.0")
+
+    def test_floor_reached_raises_instead_of_spinning(self):
+        """缩到下限还拿不到被接受的步 = 不是步长问题。此时**硬失败**，
+        不每步照烧一次完整 GMRES 求解原地打转（那就是换个位置的停滞）。
+        """
+        residual, u0 = _step_limited_system(1.0e-3)
+        dtau = np.full(_N, 1.0e12)
+        scale = 1.0
+        n_calls = 0
+        with pytest.raises(RuntimeError, match="缩到下限"):
+            for _ in range(20):
+                _u, info = step_newton_krylov(
+                    residual, u0, dtau, _SCALES, dtau_scale=scale)
+                scale = info["dtau_scale"]
+                n_calls += 1
+        # 抛错发生在"缩到下限"的那一次调用里（它不返回），所以这里拿到的
+        # 是上一次返回的档位 —— 实测 5 次调用、最后一次返回 5.96e-08。
+        assert n_calls == 4
+        assert scale < 1.0e-6
+
+    def test_clean_step_grows_the_scale_back(self):
+        """一次失败不能把 `dtau` 永久压低（否则隐式路径退化成显式）：
+        良态问题上一步被完整接受就涨一档。"""
+        residual, _u_star, _a = _linear_system()
+        u = _SCALES[None, :] * np.ones((_N, _NV))
+        dtau = np.full(_N, _DTAU_PURE_NEWTON)
+
+        _u1, info = step_newton_krylov(
+            residual, u, dtau, _SCALES, dtau_scale=0.0625)
+        assert info["theta"] == pytest.approx(1.0)
+        assert info["n_dtau_cuts"] == 0
+        assert info["dtau_scale"] == pytest.approx(0.125)

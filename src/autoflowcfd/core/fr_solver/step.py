@@ -305,18 +305,33 @@ def step(solver, dt: float) -> float:
                 )
             if solver._newton_forcing is None:
                 solver._newton_forcing = EisenstatWalkerForcing()
+            # `_newton_dtau_scale` 把 PTC 的 dtau 缩放状态跨步带下去：
+            # 一步不被接受时 `step_newton_krylov` 会当场缩小 dtau 重试，
+            # 用不完的档数由下一步继续（见 `implicit/dtau_control.py`
+            # 里那段"固定 CFL 下永久停滞"的真实运行记录）。
             U_new_flat, _nk_info = step_newton_krylov(
                 mean_flow_residual, U_flat, dt_local_flat,
                 _reference_scales(solver.freestream, n_vars),
                 forcing=solver._newton_forcing,
+                dtau_scale=solver._newton_dtau_scale,
             )
             solver._newton_last_info = _nk_info
+            solver._newton_dtau_scale = _nk_info["dtau_scale"]
             if _nk_info["theta"] <= 0.0:
                 logger.warning(
                     "Newton 步未能前进（theta=0, gmres_info=%s, "
-                    "gmres_iters=%d）——这一步原地不动，自适应 CFL 应当"
-                    "缩小 dtau 让系统更接近对角主导"
-                    % (_nk_info["gmres_info"], _nk_info["gmres_iters"]))
+                    "gmres_iters=%d, dtau_scale=%.3e, 本步已缩 %d 档）"
+                    "——dtau 缩到下限仍拿不到被接受的步，那不再是步长"
+                    "问题（dtau->0 即显式前向 Euler、必然被接受），"
+                    "检查残差求值在当前状态上是否已经非物理"
+                    % (_nk_info["gmres_info"], _nk_info["gmres_iters"],
+                       _nk_info["dtau_scale"], _nk_info["n_dtau_cuts"]))
+            elif _nk_info["n_dtau_cuts"] > 0:
+                logger.info(
+                    "Newton 步缩 %d 档 dtau 后被接受"
+                    "（dtau_scale=%.3e, theta=%.3f）"
+                    % (_nk_info["n_dtau_cuts"], _nk_info["dtau_scale"],
+                       _nk_info["theta"]))
         elif solver.time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
             # 显式处理无粘对流项、隐式处理粘性+湍流扩散项——通用的
             # step(...) 单一残差入口表达不了这个拆分（见该方法里的
