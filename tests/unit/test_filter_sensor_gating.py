@@ -224,7 +224,7 @@ class TestNativeTetPaddingIsIgnored:
         钉住这两个数：任何人把判据改回张量积族的 `max(i,j,k)`、或者
         把模态集合改成 `(order+1)^3`，这里会立刻失败。
         """
-        from autoflowcfd.core.fr_operators.artificial_viscosity import (
+        from autoflowcfd.core.fr_operators.artificial_viscosity.sensor_operators import (
             _build_native_tet_sensor_operators,
         )
         V_inv, top_mask, got_n = _build_native_tet_sensor_operators(order)

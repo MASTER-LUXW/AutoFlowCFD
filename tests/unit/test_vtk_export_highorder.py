@@ -14,13 +14,16 @@
 import numpy as np
 import pytest
 
-from autoflowcfd.postprocess.vtk_export_highorder import (
+# 私有量从它们**真正的**所在模块导入，而不是靠包 `__init__` 的
+# re-export（那里只 re-export 公开名；本模块 2026-09-20 拆成子包，
+# 见该包文档）。
+from autoflowcfd.postprocess.vtk_export_highorder import export_highorder_vtk
+from autoflowcfd.postprocess.vtk_export_highorder.node_layout import (
     _MAX_SUPPORTED_ORDER,
     _tet_barycentric_to_cube,
     _tet_vtk_node_barycentrics,
     _tri_barycentric_to_cube_ab,
     _wedge_vtk_node_layout,
-    export_highorder_vtk,
 )
 from autoflowcfd.grid.curved_mapping.curved_mapping import (
     cube_to_tet_rst,

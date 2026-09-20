@@ -44,7 +44,9 @@ def _gpu_sensor_operators(order: int):
         return _gpu_sensor_cache[order]
 
     cp = get_cupy()
-    from autoflowcfd.core.fr_operators.artificial_viscosity import (
+    # 私有构造函数从它们**真正的**所在子模块导入（人工粘性模块
+    # 2026-09-20 拆成子包，包 `__init__` 只 re-export 公开名）。
+    from autoflowcfd.core.fr_operators.artificial_viscosity.sensor_operators import (  # noqa: E501
         _build_native_tet_sensor_operators,
         _build_sensor_operators,
     )

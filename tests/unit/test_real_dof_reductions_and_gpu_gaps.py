@@ -185,7 +185,11 @@ class TestRealDofReductionCallSitesAreWired:
         return inspect.getsource(mod)
 
     def test_artificial_viscosity_rho_and_vel_scale(self):
-        from autoflowcfd.core.fr_operators import artificial_viscosity as av
+        # 读**真正含有调用点**的那个子模块：人工粘性模块 2026-09-20 拆成
+        # 子包，包 `__init__` 只 re-export，源文本里没有调用点。
+        from autoflowcfd.core.fr_operators.artificial_viscosity import (
+            viscosity as av,
+        )
         s = self._src(av)
         assert "reduce_per_cell_over_real_sps(rho, n_prism, order, 'mean')" in s
         assert "reduce_per_cell_over_real_sps(vel_mag, n_prism, order, 'mean')" in s

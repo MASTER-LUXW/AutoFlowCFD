@@ -10,8 +10,13 @@ DG 代码）文档核实，不是凭记忆重新推导。
 
 import numpy as np
 
-from autoflowcfd.core.fr_operators.artificial_viscosity import (
+# 私有构造函数从它**真正的**所在模块导入，而不是靠包 `__init__`
+# 的 re-export（那里只 re-export 公开名；人工粘性模块 2026-09-20
+# 拆成子包，见该包文档）。
+from autoflowcfd.core.fr_operators.artificial_viscosity.sensor_operators import (
     _build_sensor_operators,
+)
+from autoflowcfd.core.fr_operators.artificial_viscosity import (
     compute_artificial_viscosity_ramp,
     compute_persson_peraire_artificial_viscosity,
     compute_persson_peraire_sensor,
