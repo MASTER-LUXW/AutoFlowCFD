@@ -557,12 +557,10 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
     from autoflowcfd.core.mpi.comm import get_comm
     from autoflowcfd.core.mpi import get_rank
     from autoflowcfd.fr.operators import generate_fr_operators
-    from autoflowcfd.fr.quadrature_points import gauss_legendre
     from autoflowcfd.core.mpi.distributed_state import DistributedFRState
     from autoflowcfd.core.mpi.halo import HaloExchange
     from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
     from autoflowcfd.core.fr_solver.turbulence import _set_freestream_turbulence
-    from autoflowcfd.core.utils.order_continuation import _build_linear_interp_matrix_3d
 
     old_order = solver.current_order
     if old_order == target_p:
@@ -599,18 +597,26 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
     p_inf = freestream.get('p_inf', 101325.0)
 
     if target_p > old_order:
-        old_sps_1d, _ = gauss_legendre(old_order + 1)
-        new_sps_1d, _ = gauss_legendre(target_p + 1)
-        W = _build_linear_interp_matrix_3d(old_sps_1d, new_sps_1d)
+        # 延拓算子按基分派（2026-09-20，理由见 `fr/order_interp.py`）
+        from autoflowcfd.fr.order_interp import apply_order_interp
+
+        n_prism_local = int(solver.mesh.n_prism_cells)
+
+        def _lift(field):
+            return apply_order_interp(field, n_prism_local, old_order,
+                                      target_p)
+
         old_local_U = solver.state.get_local_U()[:n_local]
-        new_local_U = np.einsum('ab,cbv->cav', W, old_local_U)
+        new_local_U = _lift(old_local_U)
 
         if solver.turb_model is not None and hasattr(solver.turb_model, 'k_field'):
-            solver.turb_model.k_field = np.einsum('ab,cb->ca', W, solver.turb_model.k_field[:n_local])
-            solver.turb_model.omega_field = np.einsum('ab,cb->ca', W, solver.turb_model.omega_field[:n_local])
+            solver.turb_model.k_field = _lift(
+                solver.turb_model.k_field[:n_local])
+            solver.turb_model.omega_field = _lift(
+                solver.turb_model.omega_field[:n_local])
             old_nu_t = getattr(solver.turb_model, 'nu_t', None)
             if old_nu_t is not None and old_nu_t.shape[1] == old_local_U.shape[1]:
-                solver.turb_model.nu_t = np.einsum('ab,cb->ca', W, old_nu_t[:n_local])
+                solver.turb_model.nu_t = _lift(old_nu_t[:n_local])
             if hasattr(solver.turb_model, 'des_length_scale'):
                 solver.turb_model.des_length_scale = None
         if getattr(solver, 'sgs_model', None) is not None and hasattr(solver.sgs_model, 'nu_t'):

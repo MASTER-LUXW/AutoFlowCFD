@@ -74,6 +74,11 @@ def _make_mesh_stub(order, n_cells=2):
     mesh.n_sps_per_cell = n_sps
     mesh.n_points_1d = order + 1
     mesh.n_cells = n_cells
+    # **局部棱柱数**（2026-09-20）：延拓算子按基与单元类型分派，需要知道
+    # compact 索引空间里"棱柱在前"的前缀长度（生产里由
+    # `_GPUDistributedMeshAdapter` 从 `base_flat.n_prism` 赋值）。这里的
+    # stub 代表一个全棱柱的局部分区。
+    mesh.n_prism_cells = n_cells
     mesh.jacobians = None
     mesh.jacobians_fine = None
     mesh.cell_volumes = np.ones(n_cells)

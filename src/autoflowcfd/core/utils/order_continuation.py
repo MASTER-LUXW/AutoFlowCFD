@@ -152,28 +152,33 @@ def interpolate_to_new_order(solver: Any, new_order: int):
         print(f"    Same order, skipping interpolation")
         return
 
-    # 获取参考单元内的SPs坐标
-    from autoflowcfd.fr.quadrature_points import gauss_legendre
+    # 延拓算子**按基分派**（2026-09-20 修复的真实生产缺陷）：一维 Gauss
+    # 点的张量积 Lagrange 插值只对**坍缩棱柱基**成立；native 四面体
+    # （自 2026-09-03 起是四面体唯一实现）与 native 棱柱（2026-09-20 起
+    # 是默认）的解点都不在那个张量积网格上。用线性场做判据实测 P1->P2
+    # 的相对误差：坍缩棱柱 4.3e-16（对）、native 四面体 7.0e-01、
+    # native 棱柱 1.4e-01。完整推导与零填充槽位的处理见
+    # `fr/order_interp.py` 模块文档。
+    #
+    # P0->P1 不受这条缺陷影响（P0 是常数场，任何插值都给出同一个常数），
+    # 所以走 `P0 -> P1 -> P2` 的生产运行只在最后那一跳被污染。
+    from autoflowcfd.fr.order_interp import apply_order_interp
 
-    # 旧阶数的SPs（参考单元）
-    old_sps_1d, _ = gauss_legendre(old_order + 1)
-    # 新阶数的SPs（参考单元）
-    new_sps_1d, _ = gauss_legendre(new_order + 1)
+    n_prism_cells = int(solver.mesh.n_prism_cells)
 
-    W = _build_linear_interp_matrix_3d(old_sps_1d, new_sps_1d)
+    def _lift(field):
+        return apply_order_interp(field, n_prism_cells, old_order, new_order)
 
     # 更新状态——(n_cells, old_n_sps, n_vars) -> (n_cells, new_n_sps, n_vars)
-    # 的向量化应用，取代原来的逐单元逐变量循环。
-    new_U = np.einsum('ab,cbv->cav', W, solver.state.U)
-    solver.state.U = new_U
+    solver.state.U = _lift(solver.state.U)
     solver.state.n_sps = new_n_sps
     solver.state.Q = np.zeros_like(solver.state.U)
     solver.state._update_primitives()
 
     # 更新湍流场（如果有）——(n_cells, old_n_sps) -> (n_cells, new_n_sps)
     if hasattr(solver.turb_model, 'k_field'):
-        solver.turb_model.k_field = np.einsum('ab,cb->ca', W, solver.turb_model.k_field)
-        solver.turb_model.omega_field = np.einsum('ab,cb->ca', W, solver.turb_model.omega_field)
+        solver.turb_model.k_field = _lift(solver.turb_model.k_field)
+        solver.turb_model.omega_field = _lift(solver.turb_model.omega_field)
 
     # nu_t（湍流涡粘系数）同样按每单元 SPs 存储，但不会随 k_field/
     # omega_field 自动变形——它只在 compute_turbulence_source 被调用时
@@ -186,7 +191,7 @@ def interpolate_to_new_order(solver: Any, new_order: int):
     # 没有一方是 1，相乘直接 ValueError 广播失败。用同一个 W 矩阵一并
     # 插值，与 k_field/omega_field 一致处理。
     if getattr(solver.turb_model, "nu_t", None) is not None and solver.turb_model.nu_t.shape[1] == old_n_sps:
-        solver.turb_model.nu_t = np.einsum('ab,cb->ca', W, solver.turb_model.nu_t)
+        solver.turb_model.nu_t = _lift(solver.turb_model.nu_t)
 
     # 壁面距离场同样按每单元 SPs 存储（core/fr_solver_turbulence.py 的湍流
     # 源项计算直接按 SP 索引取值），阶数变化后形状同样必须一起插值——
@@ -195,7 +200,10 @@ def interpolate_to_new_order(solver: Any, new_order: int):
     # （真实网格已复现：与 mesh Jacobian 缺少按阶数重建是同一类"阶数变化
     # 后遗漏同步派生量"问题的另一处）。
     if getattr(solver, "wall_distance", None) is not None:
-        solver.wall_distance = np.einsum('ab,cb->ca', W, solver.wall_distance)
+        # 这一步只是让形状先对上；真正的壁距在下面
+        # `recompute_wall_distance_for_current_order` 里按新解点重新做
+        # KD-Tree 查询（壁距是**纯几何量**，不是解多项式场，见该函数文档）。
+        solver.wall_distance = _lift(solver.wall_distance)
 
     # DDES 的有效长度尺度按上一个阶数的 SPs 维度算出，阶数变化后与刚插值
     # 完的 k_field 形状不再匹配——不能像 k_field/omega_field/wall_distance
@@ -249,6 +257,7 @@ def interpolate_to_new_order_checked(solver: Any, new_order: int) -> None:
     if hasattr(solver, "_newton_forcing"):
         solver._newton_forcing = None
         solver._newton_last_info = None
+        solver._newton_dtau_scale = 1.0
 
     n_points_1d = new_order + 1
     new_n_sps = n_points_1d ** 3

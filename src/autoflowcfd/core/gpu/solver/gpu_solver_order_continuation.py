@@ -22,7 +22,6 @@ P0 架构缺口完全不适用于这里。
 import numpy as np
 from typing import Optional
 
-from autoflowcfd.core.utils.order_continuation import _build_linear_interp_matrix_3d
 
 
 def gpu_solver_interpolate_to_new_order(solver, target_p: int) -> None:
@@ -33,7 +32,6 @@ def gpu_solver_interpolate_to_new_order(solver, target_p: int) -> None:
     """
     from autoflowcfd.core.gpu import get_cupy
     from autoflowcfd.fr.operators import generate_fr_operators
-    from autoflowcfd.fr.quadrature_points import gauss_legendre
     from autoflowcfd.core.fr_solver.turbulence import _set_freestream_turbulence
 
     cp = get_cupy()
@@ -53,23 +51,29 @@ def gpu_solver_interpolate_to_new_order(solver, target_p: int) -> None:
     # 写 CuPy 版本）---
     new_k_np = new_omega_np = new_nu_t_np = None
     if target_p > old_order:
-        old_sps_1d, _ = gauss_legendre(old_order + 1)
-        new_sps_1d, _ = gauss_legendre(target_p + 1)
-        W = _build_linear_interp_matrix_3d(old_sps_1d, new_sps_1d)
+        # 延拓算子**按基分派**（2026-09-20 修复）：一维 Gauss 张量积
+        # Lagrange 只对坍缩棱柱基的解点成立，native 四面体/棱柱都不在
+        # 那个网格上（线性场 P1->P2 实测相对误差 7.0e-01 / 1.4e-01）。
+        # 完整依据见 `fr/order_interp.py`。
+        from autoflowcfd.fr.order_interp import apply_order_interp
+
+        n_prism_local = int(solver.mesh.n_prism_cells)
+
+        def _lift(field):
+            return apply_order_interp(field, n_prism_local, old_order,
+                                      target_p)
 
         old_U_np = cp.asnumpy(solver.U_gpu)
-        new_U_np = np.einsum('ab,cbv->cav', W, old_U_np)
+        new_U_np = _lift(old_U_np)
 
         if solver.turb_model_gpu is not None:
-            old_k_np = cp.asnumpy(solver.turb_model_gpu.k_field)
-            old_omega_np = cp.asnumpy(solver.turb_model_gpu.omega_field)
-            new_k_np = np.einsum('ab,cb->ca', W, old_k_np)
-            new_omega_np = np.einsum('ab,cb->ca', W, old_omega_np)
+            new_k_np = _lift(cp.asnumpy(solver.turb_model_gpu.k_field))
+            new_omega_np = _lift(cp.asnumpy(solver.turb_model_gpu.omega_field))
             old_nu_t = getattr(solver.turb_model_gpu, 'nu_t', None)
             if old_nu_t is not None:
                 old_nu_t_np = cp.asnumpy(old_nu_t)
                 if old_nu_t_np.shape[1] == old_U_np.shape[1]:
-                    new_nu_t_np = np.einsum('ab,cb->ca', W, old_nu_t_np)
+                    new_nu_t_np = _lift(old_nu_t_np)
     else:
         new_n_sps = (target_p + 1) ** 3
         gamma = 1.4

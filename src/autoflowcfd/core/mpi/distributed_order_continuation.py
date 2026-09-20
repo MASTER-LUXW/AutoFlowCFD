@@ -59,7 +59,6 @@ from loguru import logger
 from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
 
 from autoflowcfd.core.mpi import is_root
-from autoflowcfd.core.utils.order_continuation import _build_linear_interp_matrix_3d
 
 
 def compute_distributed_p0_inviscid_residual(solver, U_local_p0: np.ndarray) -> np.ndarray:
@@ -146,29 +145,45 @@ def compute_distributed_p0_inviscid_residual(solver, U_local_p0: np.ndarray) -> 
     return residual_global[local_cells]
 
 
-def _interp_state_and_turbulence_local(solver, W: np.ndarray, n_local: int) -> np.ndarray:
-    """对 local cells（不含 halo）的守恒变量 + 湍流场做精确 Lagrange
-    延拓插值（复用 `order_continuation.py::interpolate_to_new_order`
-    同一套 einsum 公式，只是作用范围限定在 `[0, n_local)`——halo 部分
-    在下面几何重建之后由 halo 交换在下一步 `step()` 里重新获取，不需要
-    在这里插值一份很快就会被覆盖的值）。
+def _interp_state_and_turbulence_local(solver, old_order: int,
+                                       target_p: int,
+                                       n_local: int) -> np.ndarray:
+    """对 local cells（不含 halo）的守恒变量 + 湍流场做精确延拓插值
+    （复用 `fr/order_interp.py::apply_order_interp` 这一份实现，只是作用
+    范围限定在 `[0, n_local)`——halo 部分在下面几何重建之后由 halo 交换
+    在下一步 `step()` 里重新获取，不需要在这里插值一份很快就会被覆盖
+    的值）。
+
+    **按基分派（2026-09-20 修复）**：此前这里收一个一维 Gauss 张量积
+    Lagrange 矩阵 `W`，而那只对坍缩棱柱基的解点成立 —— native 四面体
+    （自 2026-09-03 起是四面体唯一实现）与 native 棱柱（2026-09-20 起是
+    默认）线性场 P1->P2 的相对误差实测 7.0e-01 / 1.4e-01。改成传阶数、
+    由 `apply_order_interp` 按当前基与单元类型分派。local 索引空间同样是
+    "棱柱在前"（见 `distributed_mesh_loader` 里 `n_prism_cells` 的来源）。
 
     Returns:
         (n_local, new_n_sps, n_vars) 插值后的 local 守恒变量，湍流场
         （若存在）直接原地写回 `solver.turb_model.k_field`/
         `.omega_field`/`.nu_t`。
     """
+    from autoflowcfd.fr.order_interp import apply_order_interp
+
+    n_prism_local = int(solver.mesh.n_prism_cells)
+
+    def _lift(field):
+        return apply_order_interp(field, n_prism_local, old_order, target_p)
+
     old_local_U = solver.state.get_local_U()[:n_local]
-    new_local_U = np.einsum('ab,cbv->cav', W, old_local_U)
+    new_local_U = _lift(old_local_U)
 
     turb_model = getattr(solver, 'turb_model', None)
     if turb_model is not None and hasattr(turb_model, 'k_field'):
-        turb_model.k_field = np.einsum('ab,cb->ca', W, turb_model.k_field[:n_local])
-        turb_model.omega_field = np.einsum('ab,cb->ca', W, turb_model.omega_field[:n_local])
+        turb_model.k_field = _lift(turb_model.k_field[:n_local])
+        turb_model.omega_field = _lift(turb_model.omega_field[:n_local])
         # nu_t：同 order_continuation.py 文档说明，只有形状匹配旧阶数时
         # 才插值（可能在 compute_source 刷新前已经是别的形状/尚未构造）。
         if getattr(turb_model, 'nu_t', None) is not None and turb_model.nu_t.shape[1] == old_local_U.shape[1]:
-            turb_model.nu_t = np.einsum('ab,cb->ca', W, turb_model.nu_t[:n_local])
+            turb_model.nu_t = _lift(turb_model.nu_t[:n_local])
         # des_length_scale：同 order_continuation.py 文档"DDES 有效长度
         # 尺度"一节的处理——清空而不是插值，下一步 compute_source 会
         # 用新阶数维度重新算出。
@@ -339,7 +354,6 @@ def cpu_traditional_interpolate_to_new_order(solver, target_p: int) -> None:
       意义），直接重置为均匀自由流场——与单机 `run_order_continuation`
       "状态不在 P0 就重置回 P0 均匀流场"分支同一个处理方式。
     """
-    from autoflowcfd.fr.quadrature_points import gauss_legendre
     from autoflowcfd.core.fr_solver.turbulence import _set_freestream_turbulence
 
     old_order = solver.current_order
@@ -350,10 +364,8 @@ def cpu_traditional_interpolate_to_new_order(solver, target_p: int) -> None:
     new_n_sps = (target_p + 1) ** 3
 
     if target_p > old_order:
-        old_sps_1d, _ = gauss_legendre(old_order + 1)
-        new_sps_1d, _ = gauss_legendre(target_p + 1)
-        W = _build_linear_interp_matrix_3d(old_sps_1d, new_sps_1d)
-        new_local_U = _interp_state_and_turbulence_local(solver, W, n_local)
+        new_local_U = _interp_state_and_turbulence_local(
+            solver, old_order, target_p, n_local)
     else:
         rho_inf = solver.solver_kwargs.get('rho_inf', 1.225)
         vel_inf = solver.solver_kwargs.get('vel_inf', 33.33)

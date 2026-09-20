@@ -351,6 +351,12 @@ class TestRedistributeMultiGpuFullyDistributedForNewOrder:
         solver.mu_molecular = root_context['mu_molecular']
         n_local = mesh.n_cells  # 单 rank：全部 local
         solver.partition = types.SimpleNamespace(n_local_cells=n_local)
+        # **升阶插值要读局部棱柱数**（2026-09-20）：延拓算子按基与单元
+        # 类型分派（见 `fr/order_interp.py`）。真实实例上这个属性来自
+        # `PrecompactedMeshData.n_prism_cells`（compact 索引空间、棱柱在
+        # 前）；stub 只暴露被真正读取的属性，所以这里补上它。
+        solver.mesh = types.SimpleNamespace(
+            n_prism_cells=int(mesh.n_prism_cells))
         solver.U_gpu = np.zeros((n_local, 1, 5))
         solver.U_gpu[:, :, 0] = rho_inf
         solver.U_gpu[:, :, 1] = rho_inf * vel_inf
