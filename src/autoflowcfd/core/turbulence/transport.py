@@ -41,7 +41,6 @@ from autoflowcfd.core.fr_operators.volume_contract import (
     get_overintegration_context,
 )
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
-from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
 from autoflowcfd.core.turbulence.transport_kernel import (
     extrapolate_scalar_to_faces_kernel,
     distribute_corrections_to_cells_kernel,
@@ -498,19 +497,19 @@ def compute_scalar_convection_residual(
     # 切换后）：退化单元（坍缩坐标/BL 挤出导致 det(J) 局部极小，见
     # troubled_cell.py 模块文档）上这里会真的溢出到 inf，`np.errstate` 只是
     #
-    # **过时表述已更正（2026-09-15）**：这里原先写的是"平均流残差有
-    # mechanism-1/2 两道专门保护，本模块至今没有"。两句都不再成立：
-    # (a) 平均流对残差的**实际干预**早已全部由机制 3
-    #     （`suppress_residual_outliers`）承担，机制 1/2 的检测判据只
-    #     保留用于诊断报告（见 troubled_cell.py 文档"机制3"一节）；
-    # (b) 本模块**已经接入**机制 3——见
-    #     `compute_turbulence_transport_residual` 末尾对
-    #     `dk_dt_transport`/`domega_dt_transport` 的
-    #     `suppress_residual_outliers` 调用（那里的注释记录了接入过程）。
-    # 也就是说本模块现在与平均流用的是同一套、也是唯一在实际起作用的
-    # 那套保护。排查"湍流输运缺 troubled-cell 保护"这条疑点时是靠核实
-    # 代码而不是照搬这段注释才发现它过时的——本项目有过多次过时标注被
-    # 当成真实缺口的先例。
+    # **本段已两次更正，当前状态（2026-09-19）**：
+    # 最初写的是"平均流残差有 mechanism-1/2 两道专门保护，本模块至今
+    # 没有"；2026-09-15 更正成"实际干预全部由机制3 承担，本模块已接入
+    # 机制3"。现在**机制3 也已整体删除**（真实网格消融对照证明它触发了
+    # 但只把残差轨迹改变 ~1e-10、不改变结局，见
+    # `fr_residual/inviscid.py`）。
+    #
+    # 所以现状是：平均流与湍流输运**都不做**残差量级异常抑制；机制1/2
+    # 只产出诊断报告；退化单元的对策是网格质量门。三者对称，没有哪条
+    # 路径比另一条多一层保护。
+    #
+    # 这段注释被改过两次都是因为"照搬旧注释"差点把过时表述当成事实 ——
+    # 核实代码而不是读注释。
     # 让这个*已知、已经在下游处理*的溢出不再往 stderr 打印 RuntimeWarning
     # 噪音——不改变任何数值结果：`compute_turbulence_transport_residual`
     # 末尾的 `np.where(np.isfinite(...), ..., 0.0)` 本来就会把这类 inf/nan
@@ -1465,31 +1464,17 @@ def compute_turbulence_transport_residual(
     with np.errstate(over='ignore', invalid='ignore'):
         domega_dt_transport = (conv_w + diff_w) / np.maximum(rho, 1e-10)
 
-    # 机制3（症状检测，2026-08-22）：退化单元（坍缩坐标/BL 挤出，见
-    # fr_operators/troubled_cell.py 模块文档）上本函数算出的残差可能
-    # 出现量级异常（真实复现：cube_demo 生产网格 P0->P1 切换后，
-    # transport.py 内部多处除以 det(J) 的地方溢出到 inf，见本文件
-    # 上方的 errstate 注释）——平均流残差（inviscid.py/viscous_flux.py）
-    # 早就用 suppress_residual_outliers 处理同一类问题（"取代此前先
-    # 用 det(J)/法向失配几何量预判、按整个单元降阶的机制1/2"，见
-    # troubled_cell.py 文档"机制3"一节），本函数此前一直没有接入这套
-    # 机制，只在最后做一次朴素的 isfinite 归零——两者不冲突：
-    # suppress_residual_outliers 用同单元其余 SP 的残差中位数做参照，
-    # 能捕捉"明显偏大但还是有限值"的异常（isfinite 捕捉不到这类），
-    # 按 (cell,SP) 粒度清零，不牵连同一单元里其余健康 SP；下面的
-    # isfinite 归零保留作最后一道防线（例如整个单元所有 SP 都异常、
-    # 中位数参照本身也失真的极端情形）。
-    # `n_prism` 的必要性见 `troubled_cell.py::_outlier_ref_and_flag_kernel`
-    # 文档（零填充会把中位数拖到 0、整单元残差被清零）。
-    dk_dt_transport = suppress_residual_outliers(
-        dk_dt_transport[:, :, None], turb.k_field[:, :, None],
-        solver.mesh.n_prism_cells
-    )[:, :, 0]
-    domega_dt_transport = suppress_residual_outliers(
-        domega_dt_transport[:, :, None], turb.omega_field[:, :, None],
-        solver.mesh.n_prism_cells
-    )[:, :, 0]
-
+    # 机制3（按 (cell,SP,变量) 粒度检测残差量级异常并清零）**已于
+    # 2026-09-19 整体删除**，本函数曾经在这里调用它。删除依据是真实网格
+    # （plate_demo_volume_les，179,237 单元，P1 + LES）上的消融对照：
+    # 机制3 触发 15 次、清零 729 个槽位，而残差轨迹与关掉它的那条只差
+    # ~1e-10 相对量，两条都在 146~148 步发散。完整记录见
+    # `fr_residual/inviscid.py` 同一处。
+    #
+    # 所以本函数现在只保留下面那道 isfinite 归零作为唯一防线 —— 那是
+    # 真正必要的（退化网格上梯度/Jacobian 会产生非有限值，非有限值一旦
+    # 进入 SST 的场更新就不可恢复），而"明显偏大但还是有限值"这一类
+    # 由机制3 处理的情形，实测它处理与不处理没有可观测差别。
     # NaN/Inf 隔离（最后一道防线）：退化网格上梯度/Jacobian 可能产生非
     # 有限值，归零后由 SST.update_fields 的二次防护和 positivity
     # limiter 接管

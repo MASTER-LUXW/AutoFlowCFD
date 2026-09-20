@@ -683,17 +683,13 @@ def compute_turbulence_transport_residual_gpu(
     `compute_turbulence_transport_residual` 逐字对应。
 
     2026-09-02 补齐：此前这里不做 CPU 版末尾的 `suppress_residual_
-    outliers`（troubled_cell.py 的中位数离群值抑制机制3），理由是"该
-    函数是纯 numba/numpy 实现，本身就没有 GPU 版本"——但 `gpu_inviscid.
-    py::compute_inviscid_residual_fr_gpu` 处理平均流残差的同一个问题
-    时，从未真正重新实现一份 GPU 版本，而是直接 `cp.asnumpy` 把残差
-    倒回 CPU、调用现成的 numba 版 `suppress_residual_outliers`、再
-    `cp.asarray` 传回 GPU——本函数此前没有照抄这个已经在生产路径上使用
-    的既有模式，是一处遗漏，不是"没有对应实现"（对应实现本来就不需要
-    在 GPU 上重写，跨设备复制小数组的开销远小于跳过这层安全网的风险）。
-    现在补齐，与 `gpu_inviscid.py` 同一个模式：小规模跨设备拷贝（形状
-    (n_cells,n_sps)，不是大数组，每步 2 次可忽略的 H2D/D2H 往返），
-    换来与 CPU 路径逐位一致的离群值抑制行为。
+    outliers`（机制3，中位数离群值抑制）。那条"遗漏"曾于 2026-09-02
+    被补齐（照抄 gpu_inviscid.py 的"倒回 CPU 复用 numba 实现"模式），
+    **而机制3 已于 2026-09-19 整体删除** —— 真实网格消融对照证明它触发
+    了但只把残差轨迹改变 ~1e-10 相对量、不改变发散结局（完整记录见
+    `fr_residual/inviscid.py`）。所以这里连带去掉了那次
+    `GPU -> CPU -> GPU` 往返，CPU 与 GPU 两侧现在都只有 isfinite 归零，
+    对称性由"都没有"保证。
 
     Args:
         solver: GPUFRSolver 实例，需要 turb_model_gpu 已初始化
@@ -783,22 +779,9 @@ def compute_turbulence_transport_residual_gpu(
     )
     domega_dt_transport = (conv_w + diff_w) / cp.maximum(rho, 1e-10)
 
-    # 机制3离群值抑制（2026-09-02 补齐，与 gpu_inviscid.py 同一个"跨设备
-    # 拷贝复用 CPU numba 实现"模式，见上方函数文档）——CPU 版
-    # reference_field 用的是 k_field/omega_field 自身（不是残差本身），
-    # 逐字对应 transport.py 里的同一处调用。
-    from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
-    dk_dt_np = cp.asnumpy(dk_dt_transport)
-    domega_dt_np = cp.asnumpy(domega_dt_transport)
-    k_field_np = cp.asnumpy(turb.k_field)
-    omega_field_np = cp.asnumpy(turb.omega_field)
-    dk_dt_np = suppress_residual_outliers(
-        dk_dt_np[:, :, None], k_field_np[:, :, None], n_prism)[:, :, 0]
-    domega_dt_np = suppress_residual_outliers(
-        domega_dt_np[:, :, None], omega_field_np[:, :, None], n_prism
-    )[:, :, 0]
-    dk_dt_transport = cp.asarray(dk_dt_np)
-    domega_dt_transport = cp.asarray(domega_dt_np)
+    # 机制3 已于 2026-09-19 删除（依据见 `fr_residual/inviscid.py`
+    # 同一处）。这里同时去掉了那次为复用 CPU numba 实现而做的
+    # `GPU -> CPU -> GPU` 往返（k/omega 的残差场与场值各拷一轮）。
 
     dk_dt_transport = cp.where(cp.isfinite(dk_dt_transport), dk_dt_transport, 0.0)
     domega_dt_transport = cp.where(cp.isfinite(domega_dt_transport), domega_dt_transport, 0.0)

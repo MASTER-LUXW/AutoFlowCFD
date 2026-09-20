@@ -120,10 +120,12 @@ class GPUFRSolver(_GPUSolverInitMixin, _GPUSolverIOMixin):
         gpu_turbulence_sst.py、gpu_turbulence_des.py、gpu_sgs.py、
         gpu_turbulence_wmles.py）。明确的、真实的既有限制（不是本次
         遗漏，是本次移植范围之外的独立大工作）：GPU 版 k/omega 输运
-        （gpu_scalar_transport.py）虽已实现并接入，但没有
-        `troubled_cell.py::suppress_residual_outliers` 那样的离群值抑制
-        （只有 isfinite 归零这一道最后防线，见 gpu_scalar_transport.py
-        模块文档）；GPU 侧整体仍未在真实 CUDA 硬件上执行验证过（本机
+        （gpu_scalar_transport.py）只有 isfinite 归零这一道防线 ——
+        **这条此前记作"缺少 suppress_residual_outliers 那样的离群值
+        抑制"，2026-09-19 起不再是缺口**：机制3 已整体删除（真实网格
+        消融对照证明它无效，见 fr_residual/inviscid.py），CPU 侧现在
+        同样只有 isfinite 归零，两侧对称。
+        GPU 侧整体仍未在真实 CUDA 硬件上执行验证过（本机
         无 CuPy），已用 numpy 替身对照 CPU 版逐位数值核对过所有新增
         公式，但真正的端到端 GPU 冒烟测试需要用户在有 GPU 的环境上补做。
         """

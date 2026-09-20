@@ -31,7 +31,6 @@ from autoflowcfd.core.fr_residual.inviscid_kernel import (
 )
 from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_batch
 from autoflowcfd.core.fr_operators.volume_contract import contract_shared_operator_1axis, contract_shared_operator_2axis
-from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
 
 from .test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 
@@ -125,7 +124,9 @@ def _compute_residual_via_new_kernel(U, mesh, ops, boundary_ghost_provider=None,
         flat.boundary_extrap_native, flat.lift_native,
     )
     residual = residual + correction
-    return suppress_residual_outliers(residual, U[..., :5], flat.n_prism)
+    # 机制3（残差量级离群清零）已于 2026-09-19 从生产实现里删除，
+    # 依据见 `core/fr_residual/inviscid.py`；本"新版"复制品同步去掉。
+    return residual
 
 
 @pytest.mark.parametrize("order,rel_tol", [(1, 1e-9), (2, 1e-7), (3, 1e-3)])

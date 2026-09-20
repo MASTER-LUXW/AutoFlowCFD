@@ -328,12 +328,12 @@ def compute_viscous_residual_fr_gpu(
     # native/collapsed 专属缺陷，是任意网格上 GPU 粘性残差路径一直
     # 缺失的一个功能点（`gpu_inviscid.py::compute_inviscid_residual_fr_
     # gpu` 早就在做同一件事，这里之前被漏掉了，两个函数本该对称）。
-    from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
-    residual_np = cp.asnumpy(viscous_residual)
-    U_np = cp.asnumpy(U)
-    result = suppress_residual_outliers(residual_np, U_np[..., :5],
-                                        n_prism)
-    return result if input_is_numpy else cp.asarray(result)
+    # 机制3 已于 2026-09-19 删除（完整依据见 `fr_residual/inviscid.py`
+    # 同一处）。上面那段"CPU 侧触发、GPU 侧未触发所以两条路径分道扬镳"
+    # 的记录因此成为历史：两侧现在都不做这一步，对称性由"都没有"保证。
+    # 同时省掉一次 `GPU -> CPU -> GPU` 往返。
+    return (cp.asnumpy(viscous_residual) if input_is_numpy
+            else viscous_residual)
 
 
 def _extrap_to_fp(cp, mat, src_cell, field):

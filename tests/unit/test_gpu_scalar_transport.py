@@ -252,9 +252,12 @@ class TestPhysicalScalarGradientGpuMatchesCpu:
 class TestTurbulenceTransportResidualGpuMatchesCpu:
     """`compute_turbulence_transport_residual_gpu` 完整入口函数的端到端
     一致性测试（此前本文件只测了它内部的几个子函数，没有测过入口函数
-    本身），同时覆盖 2026-09-02 新增的机制3离群值抑制（`suppress_
-    residual_outliers` round-trip，与 gpu_inviscid.py 同一个既有模式，
-    见该处新增代码文档）。"""
+    本身）。
+
+    原先这里还覆盖 2026-09-02 补齐的机制3 离群值抑制 round-trip；
+    **机制3 已于 2026-09-19 整体删除**（依据见
+    `core/fr_residual/inviscid.py`），那个用例随之删除，同时 GPU 侧
+    也不再需要为它做 `GPU -> CPU -> GPU` 往返。"""
 
     def _build_state(self, mesh, rng):
         n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
@@ -318,9 +321,8 @@ class TestTurbulenceTransportResidualGpuMatchesCpu:
         return stub, turb_ref
 
     def test_healthy_field_matches_cpu_exactly(self, mesh_ops_flat):
-        """基线（无离群值）场景：新增的 suppress_residual_outliers 调用
-        不应该改变任何健康值——GPU 入口函数的完整输出必须与 CPU 参考
-        逐位一致，不只是子函数级别一致。"""
+        """GPU 入口函数的完整输出必须与 CPU 参考逐位一致，不只是子函数
+        级别一致。"""
         mesh, ops, flat = mesh_ops_flat
         mesh_data, ops_data = _prepare_mesh_ops_data(mesh, ops)
         mu = 1.8e-5
@@ -337,53 +339,6 @@ class TestTurbulenceTransportResidualGpuMatchesCpu:
 
         np.testing.assert_allclose(dk_gpu, dk_cpu, rtol=1e-9, atol=1e-9)
         np.testing.assert_allclose(domega_gpu, domega_cpu, rtol=1e-9, atol=1e-9)
-
-    def test_outlier_suppression_is_actually_invoked_and_zeroes_outlier(self, mesh_ops_flat, monkeypatch):
-        """决定性判据：人为在其中一个 (cell, SP) 注入一个有限但离谱的
-        残差量级（isfinite 检查完全捕捉不到），验证 GPU 入口函数最终
-        输出里这个位置被清零——不是"看起来正常"，是真的执行了机制3。
-        用 monkeypatch 把 `suppress_residual_outliers` 换成一个记录调用
-        参数、但只在探测到人为注入的天文数字时才清零的版本，避免依赖
-        真实物理场景是否恰好触发中位数判据（那是 troubled_cell.py 自己
-        的测试职责，这里只验证"GPU 路径是否真的调用了它、调用时机是否
-        在返回结果之前"）。"""
-        mesh, ops, flat = mesh_ops_flat
-        mesh_data, ops_data = _prepare_mesh_ops_data(mesh, ops)
-        mu = 1.8e-5
-        rng = np.random.default_rng(7)
-        Q, U, k_field, omega_field, d_wall = self._build_state(mesh, rng)
-
-        gpu_solver = self._build_gpu_solver_stub(
-            mesh, mesh_data, ops_data, flat, Q, U, k_field, omega_field, d_wall, mu
-        )
-
-        calls = []
-
-        def _fake_suppress(residual, reference_field, *args, **kwargs):
-            calls.append((residual.copy(), reference_field.copy()))
-            # 真正把"离谱"的值（>1e50，isfinite 判不出来但明显是伪影）
-            # 清零，其余原样返回——足以验证清零效果确实传导到了最终输出。
-            outlier = np.abs(residual) > 1e50
-            return np.where(outlier, 0.0, residual)
-
-        monkeypatch.setattr(
-            "autoflowcfd.core.fr_operators.troubled_cell.suppress_residual_outliers",
-            _fake_suppress,
-        )
-
-        dk_gpu, domega_gpu = gst.compute_turbulence_transport_residual_gpu(gpu_solver)
-        # 两次调用（k 一次、omega 一次），且真的把 reference_field 设成了
-        # k_field/omega_field 自身（不是残差或别的量），与 CPU 版
-        # transport.py 里的同一处调用逐字对应。
-        assert len(calls) == 2
-        np.testing.assert_allclose(calls[0][1][:, :, 0], k_field)
-        np.testing.assert_allclose(calls[1][1][:, :, 0], omega_field)
-        # fake 本身是恒等函数（人为注入的离谱值场景已经由上面的调用记录
-        # 验证过参数正确性），dk_gpu/domega_gpu 在没有真实离群值时应
-        # 保持有限。
-        assert np.all(np.isfinite(dk_gpu))
-        assert np.all(np.isfinite(domega_gpu))
-
 
 class TestOmegaWallRelaxationGpuMatchesCpu:
     """真实缺口修复回归测试（2026-09-05，代码复审发现）：GPU SST/DDES/

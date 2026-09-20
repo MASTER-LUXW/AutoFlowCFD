@@ -570,32 +570,3 @@ class TestEnforceOmegaWallRelaxation:
             # 关键判据：即使这是"最刚性"的极端场景，固定 relax 也只走半程，
             # 绝不应该等于（或极接近）target 本身。
             assert not np.isclose(omega_after[oc, 0], target, rtol=1e-2)
-
-
-class TestTransportResidualOutlierSuppressionWrapping:
-    """`compute_turbulence_transport_residual` wraps its (n_cells,n_sps)
-    dk_dt/domega_dt transport residual as (n_cells,n_sps,1) to reuse
-    `suppress_residual_outliers` (mechanism 3 - the same statistical
-    outlier detection the mean-flow residual in inviscid.py/viscous_flux.py
-    already uses, see troubled_cell.py's "mechanism 3" docs), then squeezes
-    the trailing axis back off. These tests pin that reshape round-trip in
-    isolation, on the exact scalar shape transport.py actually uses -
-    `suppress_residual_outliers` itself is already covered by
-    test_troubled_cell.py::TestSuppressResidualOutliers."""
-
-    def test_outlier_sp_zeroed_siblings_and_shape_preserved(self):
-        from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
-
-        n_cells, n_sps = 2, 4
-        dk_dt = np.full((n_cells, n_sps), 1.0)
-        dk_dt[0, 2] = 1e6  # one wildly anomalous SP in cell 0
-        k_field = np.ones((n_cells, n_sps)) * 1e-3
-
-        result = suppress_residual_outliers(dk_dt[:, :, None], k_field[:, :, None], dk_dt.shape[0])[:, :, 0]
-
-        assert result.shape == dk_dt.shape
-        assert result[0, 2] == 0.0
-        # every other SP (both cells) must be untouched
-        mask = np.ones_like(dk_dt, dtype=bool)
-        mask[0, 2] = False
-        np.testing.assert_array_equal(result[mask], dk_dt[mask])

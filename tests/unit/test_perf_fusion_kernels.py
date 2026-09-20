@@ -23,17 +23,6 @@ from autoflowcfd.core.fr_operators.volume_contract import (
     contravariant_flux_from_metric,
     grad_computational_to_physical,
 )
-from autoflowcfd.core.fr_operators.troubled_cell import (
-    RESIDUAL_OUTLIER_FACTOR,
-    RESIDUAL_OUTLIER_FIELD_REL_FLOOR,
-    suppress_residual_outliers,
-)
-# 私有 kernel 从它**真正的**所在模块导入，而不是靠 troubled_cell
-# 的 re-export（那里只 re-export 三个公开名；机制3 已于 2026-09-19
-# 拆到 residual_outliers.py，见该模块文档）。
-from autoflowcfd.core.fr_operators.residual_outliers import (
-    _median_abs_over_sps_kernel,
-)
 from autoflowcfd.core.turbulence.sst import compute_strain_and_vorticity_magnitude
 from autoflowcfd.core.turbulence.transport_kernel import scalar_convection_volume_kernel
 
@@ -236,65 +225,6 @@ class TestScalarConvectionVolumeKernel:
         scalar_convection_volume_kernel(
             np.full((n_cells, n_sps), 3.25), rho_u_tilde, op_D, out_c)
         np.testing.assert_allclose(out_c, 3.25 * out_one, rtol=1e-13, atol=0.0)
-
-
-class TestSuppressResidualOutliersFused:
-    """`suppress_residual_outliers`：原实现是 "numba 中位数 kernel + 5~7 趟
-    numpy 全场遍历"（np.mean/np.abs/比较/np.any/np.where 各一趟，每趟读写
-    253MiB 且全部单线程）。融合成两个 prange kernel 后仍要与原判据逐位一致。
-    """
-
-    @staticmethod
-    def _reference(residual, reference_field,
-                   factor=RESIDUAL_OUTLIER_FACTOR,
-                   field_rel_floor=RESIDUAL_OUTLIER_FIELD_REL_FLOOR):
-        ref_sibling = _median_abs_over_sps_kernel(residual)[:, np.newaxis, :]
-        ref_field = field_rel_floor * np.mean(np.abs(reference_field), axis=1, keepdims=True)
-        ref = np.maximum(np.maximum(ref_sibling, ref_field), 1e-300)
-        with np.errstate(over="ignore", invalid="ignore"):
-            outlier = np.abs(residual) > factor * ref
-        if not np.any(outlier):
-            return residual
-        return np.where(outlier, 0.0, residual)
-
-    @pytest.mark.parametrize("n_sps", [1, 4, 8, 27])
-    @pytest.mark.parametrize("n_vars", [1, 5])
-    def test_matches_reference_no_outlier(self, n_sps, n_vars):
-        rng = np.random.default_rng(8)
-        r = rng.standard_normal((97, n_sps, n_vars)) * 1e3
-        f = rng.standard_normal((97, n_sps, n_vars)) * 10.0
-        ref = self._reference(r.copy(), f.copy())
-        got = suppress_residual_outliers(r.copy(), f.copy(), r.shape[0])
-        assert np.array_equal(ref, got)
-
-    @pytest.mark.parametrize("n_sps", [4, 8, 27])
-    def test_matches_reference_with_single_outlier(self, n_sps):
-        """真实病理形态：同一单元里绝大多数 SP 正常、个别 SP 量级暴涨。"""
-        rng = np.random.default_rng(9)
-        r = rng.standard_normal((53, n_sps, 5)) * 1e2
-        f = rng.standard_normal((53, n_sps, 5)) * 10.0
-        r[7, 0, 4] = 1e12
-        ref = self._reference(r.copy(), f.copy())
-        got = suppress_residual_outliers(r.copy(), f.copy(), r.shape[0])
-        assert np.array_equal(ref, got)
-        assert got[7, 0, 4] == 0.0
-
-    def test_all_zero_residual_returns_unchanged(self):
-        r = np.zeros((13, 8, 5))
-        f = np.ones((13, 8, 5))
-        got = suppress_residual_outliers(r.copy(), f.copy(), r.shape[0])
-        assert np.array_equal(got, r)
-
-    def test_input_not_mutated(self):
-        """原实现返回 `np.where(...)` 的新数组、从不就地改输入；融合版本
-        必须保持这个契约（调用方 transport.py 传的是带新轴的视图）。"""
-        rng = np.random.default_rng(10)
-        r = rng.standard_normal((29, 8, 5)) * 1e2
-        r[3, 2, 1] = 1e13
-        r_copy = r.copy()
-        f = np.ones((29, 8, 5))
-        suppress_residual_outliers(r, f, r.shape[0])
-        assert np.array_equal(r, r_copy)
 
 
 class TestModalFilterFusion:

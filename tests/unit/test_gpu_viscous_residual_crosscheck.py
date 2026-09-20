@@ -48,19 +48,15 @@ clip_crosscheck.py` 完整推导）又发现两个独立真实 bug，其中第�
    无条件用 `ops_data['D_3d_tet']`（坍缩坐标微分算子），从未按是否
    存在 `D_native_tet_padded` 分派——只影响 `tet_basis_mode="native"`，
    本文件不覆盖（见 native 专属测试文件）。
-5. `compute_viscous_residual_fr_gpu` 此前完全没有调用
-   `suppress_residual_outliers`（CPU 版"机制3"：按 cell/SP/变量粒度
-   检测残差量级异常并清零，`gpu_inviscid.py::compute_inviscid_
-   residual_fr_gpu` 早就在做这件事，两个函数本该对称）——残差量级
-   小时两者"看起来"一致，量级足够大、真实触发 CPU 侧异常清零阈值
-   （`RESIDUAL_OUTLIER_FACTOR=1e4`）时，GPU 侧未清零，从这一步起
-   分道扬镳。已修复：补上与 inviscid GPU 同款的调用。不是
-   native/collapsed 专属，但本文件（collapsed 模式）尝试构造的多组
-   随机/人工单点异常场景都没能真正触发 CPU 侧的异常判据（该判据本身
-   有意设计成保守、只在真正病态的量级下动作），决定性验证留给
-   `test_gpu_native_tet_axis_clip_crosscheck.py` 的 P2 native 组合
-   （那份合成网格的真实数值恰好触发了这个阈值，人工回退验证过确实
-   会失败）。
+5. GPU 粘性残差路径当年缺少 CPU 侧那一步"残差量级离群清零"（旧称
+   "机制3"，判据是同单元中位数的 1e4 倍），残差量级足够大时 CPU 清零、
+   GPU 不清零，两者分道扬镳；当年补上了同款调用。
+   **2026-09-19 起这一条不再存在**：机制3 已整体删除（依据见
+   `core/fr_residual/inviscid.py` —— 真实网格消融对照里它触发 15 次却
+   只把残差轨迹改变 ~1e-10 相对量、不改变结局），CPU/GPU 现在都不做
+   这一步。顺带说明：本文件（collapsed 模式）当年尝试构造的多组随机／
+   人工单点异常场景**从未真正触发**过那个判据，这本身就是"它在健康
+   与半健康场上都是惰性的"这一结论的早期证据之一。
 
 验证方式（本机没有真实 CUDA，用 numpy-as-cupy 替身实际执行，与
 `test_gpu_inviscid_ausm_mixed_face_crosscheck.py` 同一方法论）：

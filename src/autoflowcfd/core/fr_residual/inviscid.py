@@ -31,7 +31,6 @@ from autoflowcfd.core.fr_operators.kernels import (
     compute_ausm_up_flux,
     resolve_ausm_precond_mode,
 )
-from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
 from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_batch, entropy_stable_volume_divergence_batch
 from autoflowcfd.core.fr_operators.volume_contract import (
     contract_shared_operator_1axis, contract_shared_operator_2axis, compute_adj_j,
@@ -451,12 +450,36 @@ def compute_inviscid_residual_fr(
         )
     residual = residual + correction
 
-    # 机制3（症状检测，见 fr_troubled_cell.py 模块文档）：取代此前"先用
-    # det(J)/法向失配几何量预判、按整个单元降阶"的机制1/2，直接对算出的
-    # 最终残差本身做 (cell,SP,变量) 粒度的量级异常检测——只清零真正异常
-    # 的那几个 SP，不牵连同一单元里其余健康的 SP，也不依赖网格绝对尺度。
-    # `n_prism`：机制3 的中位数参照只统计真实槽位，否则原生基的零填充
-    # 会把中位数拖到 0、把整个单元的残差判成异常清零（P2/P3 实测全清零、
-    # 单元完全不演化）。见 `troubled_cell.py::_outlier_ref_and_flag_kernel`。
-    return suppress_residual_outliers(residual, U[..., :5],
-                                      mesh.n_prism_cells)
+    # 机制3（`suppress_residual_outliers`，按 (cell,SP,变量) 粒度检测残差
+    # 量级异常并清零）**已于 2026-09-19 删除**。删除依据是真实网格上的
+    # 消融对照（plate_demo_volume_les，179,237 单元，P1 + LES）：
+    #
+    #     机制3 开：888 次调用，触发 15 次，清零 729 个槽位，末残差 nan
+    #     机制3 关：876 次调用，触发  0 次，清零   0 个槽位，末残差 nan
+    #
+    #     step      开                    关                  相对差
+    #        1      9.9435206851e+08      9.9435206857e+08    6e-11
+    #      100      7.1528723012e+08      7.1528722999e+08    1.8e-10
+    #      140      9.0997334909e+08      9.0997334913e+08    4e-11
+    #
+    # 也就是它**触发了、清零了、但把残差轨迹只改变了 ~1e-10 相对量，
+    # 并且没有改变发散这个结局**（两条都在 146~148 步 nan）。健康运行上
+    # 它从不触发（真实 LES 网格前 40 步 240 次调用 0 次、检查 17.2 亿个
+    # 槽位；合成 Couette/Blasius 两档棱柱基 x 两个阶数 0 次）。
+    #
+    # 删除后在**健康**运行上做了逐位对照（同一份 plate_demo_volume_les
+    # 第 400 步 checkpoint 续算，固定 CFL 0.03、sensor+bounds 默认档，
+    # 删除前/删除后各跑 5 步）：`U` 与 `Q` 两个 (179237, 8, 7) 场
+    # **逐位完全相同**；另一组 20 步对照的逐步残差也在日志的 7 位
+    # 有效数字上全部相同。也就是删除它对健康运行零影响。
+    # 单步耗时 11.117 s -> 10.634 s（去掉前 2 步 JIT 预热后的均值，
+    # 20 步），省 4.34%。
+    #
+    # 它的设立理由是**坍缩坐标四面体基**的各向异性放大（1/3 的四面体
+    # 单元把残差放大 6~7 个量级），而那套基已于 2026-09-03 删除；原生基
+    # 的 `max|D|` 是 O(1~5)，"同单元内残差比达 1e4" 这个触发条件已不可
+    # 达。代价是实测 79 万单元 P1 约 2.5 s/步（约占单步 11%），GPU 三条
+    # 路径还要为它做一次 GPU->CPU->GPU 往返。
+    # 加上 F2 记录的那个"整单元均匀放大逃过检测"的固有盲区与一次
+    # 灾难性误判史（P2/P3 四面体残差被整体清零），结论是删除。
+    return residual

@@ -136,9 +136,13 @@ def cell_min_shape_quality(scaled_quality: np.ndarray) -> np.ndarray:
 def troubled_cell_mask(det_jacs: np.ndarray, threshold: float = TROUBLED_CELL_HARD_DET_JAC) -> np.ndarray:
     """机制1判据：单元内最小*原始* det(J) 低于 threshold 的单元掩码，形状 (n_cells,)。
 
-    只用作 log_degenerate_cell_report 的诊断统计（见模块文档"机制3"
-    一节：机制1/2 的*检测*判据保留用于诊断报告，但对残差本身的实际
-    干预已经全部由机制3——suppress_residual_outliers——取代）。
+    只用作 log_degenerate_cell_report 的诊断统计。
+
+    **本判据对残差没有任何干预**（2026-09-19 更新）：机制1/2 早先就
+    只保留*检测*、把干预交给机制3，而机制3 已被整体删除（依据见
+    `fr_residual/inviscid.py` 里那段消融对照）。所以现在退化单元在
+    运行期**没有**任何自动干预 —— 这是刻意的，对策是网格质量门，
+    见项目记忆 `industry_practice_degenerate_cell_gcl`。
     """
     return cell_min_det_jac(det_jacs) < threshold
 
@@ -178,10 +182,10 @@ def _cell_face_misalignment_kernel(
     `owner_adj_row_exact`/`neighbor_adj_row_exact` 已经自带正确 outward
     定向的 native 面精确 adj 行，等于随机翻转方向，几乎必然把 `dot`
     从接近 1 翻成接近 -1，`m=1-dot` 因此几乎恒为约 2、远超
-    `misalignment>1deg` 阈值——这是纯诊断层面的误报（`suppress_
-    residual_outliers`——真正在残差计算路径里生效的机制3——不消费
-    这个诊断量，所以不影响任何实际残差/收敛行为，仅仅是打印出来的
-    报告具有严重误导性）。修复：native 面的 side 因子固定为 +1（与
+    `misalignment>1deg` 阈值——这是纯诊断层面的误报（本量不被任何
+    残差路径消费，所以不影响实际残差/收敛行为，仅仅是打印出来的报告
+    具有严重误导性；2026-09-19 之前它也只被机制3 的文档提及、而机制3
+    本身从不读它，现在机制3 已删除）。修复：native 面的 side 因子固定为 +1（与
     inviscid_kernel.py 的 `side_factor` 同一原则），不使用
     `oside`/`nside` 复用槽位值。
     """
@@ -341,17 +345,19 @@ def log_degenerate_cell_report(
         f"Degenerate-cell check: {n_hard}/{n_cells} ({100*n_hard/n_cells:.2f}%) cells with det(J)<"
         f"{TROUBLED_CELL_HARD_DET_JAC:.0e} (mechanism 1 diagnostic criterion){shape_extra}"
         f"{misalign_extra}. {n_flagged} ({100*n_flagged/n_cells:.3f}%) "
-        f"cells flagged by mechanism 1 and/or 2's diagnostic criteria in total (union) - actual residual "
-        f"protection for these cells is handled at runtime by mechanism 3 (suppress_residual_outliers), "
-        f"not by this diagnostic. See fr_troubled_cell.py; consider mesh improvement if this fraction is large."
+        f"cells flagged by mechanism 1 and/or 2's diagnostic criteria in total (union). "
+        f"NOTE: this is diagnostic only - there is NO runtime residual protection for these cells. "
+        f"Mechanism 3 (residual-magnitude outlier zeroing) was removed on 2026-09-19 after an "
+        f"ablation on this very mesh showed it fired 15 times yet changed the residual trajectory "
+        f"by only ~1e-10 relative and did not prevent divergence; see fr_residual/inviscid.py. "
+        f"The remedy for a large fraction here is mesh improvement, not a runtime limiter."
     )
     return stats
 
-# 残差量级离群抑制（"机制3"）已拆到 `residual_outliers.py`
-# （2026-09-19，项目"单文件不超 500 行"规范）。这里 re-export 三个
-# 既有公开名，全仓库 `from ...troubled_cell import ...` 不用改。
-from .residual_outliers import (  # noqa: E402,F401
-    RESIDUAL_OUTLIER_FACTOR,
-    RESIDUAL_OUTLIER_FIELD_REL_FLOOR,
-    suppress_residual_outliers,
-)
+# 残差量级离群抑制（"机制3"）**已于 2026-09-19 整体删除**，连同
+# `residual_outliers.py` 一起。删除依据（真实网格消融对照、健康运行上
+# 从不触发、约 11% 单步成本、GPU 三条路径的 GPU->CPU->GPU 往返、以及
+# F2 记录的固有检测盲区）见 `fr_residual/inviscid.py` 里那段完整记录。
+#
+# 本文件保留的是**几何**退化诊断（scaled Jacobian、面法向失配，即
+# 机制1/2），它们只产出诊断量与日志，不修改残差。

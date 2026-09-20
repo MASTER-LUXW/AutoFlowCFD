@@ -46,17 +46,14 @@ fr_gpu` 与 CPU 参考实现 `compute_inviscid_residual_fr` 交叉验证到
    错误的参考空间微分算子（棱柱不受影响，两种模式下都用同一个
    `D_3d_prism`）。修复：`'D_native_tet_padded' in ops_data` 自描述
    判断，不需要改任何调用点签名。
-2. `gpu_viscous.py::compute_viscous_residual_fr_gpu` 此前完全没有调用
-   `suppress_residual_outliers`（CPU 版"机制3"：按 cell/SP/变量粒度
-   检测残差量级异常并清零，`gpu_inviscid.py::compute_inviscid_
-   residual_fr_gpu` 早就在做这件事，两个函数本该对称）——P1 阶段
-   残差量级小、从未触发这个异常判据的阈值，两者恰好"看起来"一致；
-   P2 阶段（本文件用的随机扰动流场）残差量级更大，CPU 侧真实触发、
-   清零部分 SP，GPU 侧未清零，从这一步起两者分道扬镳。**这不是
-   native/collapsed 专属缺陷**，是任意网格上 GPU 粘性残差路径的一个
-   通用缺口，collapsed 模式下残差量级足够大时同样会分歧（只是本次
-   排查是从 native 组合发现的）。修复：补上与 inviscid GPU 同款的
-   `suppress_residual_outliers` 调用。
+2. GPU 粘性残差路径当年缺少 CPU 侧那一步"残差量级离群清零"（旧称
+   "机制3"），P2 随机扰动流场上 CPU 真实触发、GPU 未触发，两者从
+   那一步起分道扬镳。当年的修法是给 GPU 补上同款调用。
+   **2026-09-19 起这一条不再存在**：机制3 已整体删除（真实网格消融
+   对照证明它触发了但只把残差轨迹改变 ~1e-10 相对量、不改变发散
+   结局，见 `core/fr_residual/inviscid.py`），CPU/GPU 两侧现在都不做
+   这一步，对称性由"都没有"保证。本文件的交叉验证因此只剩第 1 条
+   （梯度算子分派）这一个真实回归点，判据不变。
 
 两处修复后，`tet_basis_mode="native"` 下 `compute_viscous_residual_
 fr_gpu` 与 CPU 参考实现交叉验证到 ~1e-16/1e-17 相对精度（P1/P2 均

@@ -1,16 +1,14 @@
-"""Unit tests for core/fr_operators/troubled_cell.py's numba median kernel.
+"""core/fr_operators/troubled_cell.py 的几何退化诊断单元测试。
 
-`_median_abs_over_sps_kernel` replaced `np.median(np.abs(residual), axis=1)`
-inside `suppress_residual_outliers` - real perf bottleneck on production
-meshes (numpy's generic n-dimensional `partition`-based reduction pays a lot
-of per-call dispatch overhead when reducing millions of tiny (n_sps,) groups
-independently). These tests pin the numba kernel against `np.median` to
-guarantee it is bit-exact, not an approximation, across both parities of
-`np.median`'s definition (odd n_sps takes the middle value, even n_sps
-averages the two middle values) - P0/P2/P3 have odd n_sps ((order+1)^3 for
-even order+1... actually (order+1)^3 is odd only when order+1 is odd, i.e.
-order even), P1/P3 have even/odd depending on order+1's parity, so all four
-production orders are covered explicitly below.
+本文件原先还覆盖"机制3"（`suppress_residual_outliers` 与它内部的
+`_median_abs_over_sps_kernel` 中位数 kernel）。**机制3 已于 2026-09-19
+整体删除**（真实网格消融对照证明它触发了但只把残差轨迹改变 ~1e-10
+相对量、不改变发散结局，完整记录见 `core/fr_residual/inviscid.py`），
+对应的两个测试类随之删除。
+
+留下的是 `precompute_cell_face_misalignment`（机制2 的面法向失配
+诊断量）的独立 oracle 对照 —— 机制1/2 只产出诊断量与日志，不干预
+残差，所以它们的测试与机制3 的删除无关。
 """
 
 import numpy as np
@@ -18,106 +16,7 @@ import pytest
 
 from autoflowcfd.core.fr_operators.troubled_cell import (
     precompute_cell_face_misalignment,
-    suppress_residual_outliers,
 )
-# 私有 kernel 从它**真正的**所在模块导入，而不是靠 troubled_cell
-# 的 re-export（那里只 re-export 三个公开名；机制3 已于 2026-09-19
-# 拆到 residual_outliers.py，见该模块文档）。
-from autoflowcfd.core.fr_operators.residual_outliers import (
-    _median_abs_over_sps_kernel,
-)
-
-
-class TestMedianAbsOverSpsKernel:
-    @pytest.mark.parametrize("n_sps", [1, 8, 27, 64])  # P0, P1, P2, P3
-    def test_matches_numpy_median(self, n_sps):
-        rng = np.random.default_rng(0)
-        residual = rng.standard_normal((500, n_sps, 5)) * 10.0
-
-        expected = np.median(np.abs(residual), axis=1)
-        actual = _median_abs_over_sps_kernel(residual)
-
-        np.testing.assert_array_equal(actual, expected)
-
-    def test_matches_numpy_median_with_negative_and_zero_values(self):
-        """Explicit small case covering the sign-flip and zero-value paths
-        in the kernel's inline abs()."""
-        residual = np.array([
-            [[-3.0], [1.0], [0.0], [-2.0]],  # even n_sps=4 -> average of 2 middle
-        ])
-        expected = np.median(np.abs(residual), axis=1)
-        actual = _median_abs_over_sps_kernel(residual)
-        np.testing.assert_array_equal(actual, expected)
-
-
-class TestSuppressResidualOutliers:
-    def test_no_outliers_returns_input_unchanged(self):
-        rng = np.random.default_rng(2)
-        residual = rng.standard_normal((50, 8, 5)) * 1e-3
-        reference = np.ones((50, 8, 5))
-        out = suppress_residual_outliers(residual, reference, residual.shape[0])
-        np.testing.assert_array_equal(out, residual)
-
-    def test_single_outlier_sp_zeroed_siblings_untouched(self):
-        n_cells, n_sps, n_vars = 4, 8, 5
-        rng = np.random.default_rng(3)
-        residual = rng.standard_normal((n_cells, n_sps, n_vars)) * 1e-3
-        reference = np.ones((n_cells, n_sps, n_vars))
-        # Inject one wildly-out-of-scale value in cell 0, SP 0, var 1.
-        residual[0, 0, 1] = 1e5
-        out = suppress_residual_outliers(residual, reference, residual.shape[0])
-        assert out[0, 0, 1] == 0.0
-        # Every other entry must be untouched.
-        mask = np.ones_like(residual, dtype=bool)
-        mask[0, 0, 1] = False
-        np.testing.assert_array_equal(out[mask], residual[mask])
-
-    def test_whole_cell_uniform_blowup_is_a_known_undetected_gap(self):
-        """已确认、暂不修复的限制的量化记录（2026-08-29，见
-        tet_collapsed_coord_anisotropy 项目记忆与 suppress_residual_
-        outliers 模块文档"调查记录"一节）：`ref_sibling`（同单元内其余
-        SP 中位数）对"整个单元所有 SP 均匀放大"这类真实复现过的情形
-        结构性失明——该单元自己的 median-of-siblings 会跟着一起被拖
-        高，永远触不到相对阈值。
-
-        曾尝试用全网格中位数（`ref_global`）独立堵住这个缺口，但在真实
-        cube_demo 网格、从均匀自由流场初场起步时被证伪：真实残差分布
-        天然高度不均匀（边界附近合法的大残差 vs 远场天然接近零），全局
-        中位数会把边界驱动的真实物理也当异常清零（真实复现：RMS 残差
-        从 3.5e8 骤降到 4.28e-4，F_pressure≈1.6e-11，求解器实质冻结在
-        初场附近），已回退。这个测试不是要断言"这个缺口已修复"，而是
-        如实记录"这个缺口确实存在、目前没有已知的安全修复方式"——避免
-        未来有人在不知情的情况下重复踩坑。
-        """
-        n_cells, n_sps, n_vars = 10, 8, 5
-        rng = np.random.default_rng(4)
-        residual = rng.standard_normal((n_cells, n_sps, n_vars)) * 1e-3
-        reference = np.ones((n_cells, n_sps, n_vars))
-        # Cell 5: ALL SPs uniformly blown up (not a single spike) - the
-        # cell's own sibling-median rises right along with it, so the
-        # (still current, unmodified) local-only criterion lets it through.
-        residual[5, :, :] = 1e5
-        out = suppress_residual_outliers(residual, reference, residual.shape[0])
-        assert np.array_equal(out[5], residual[5]), (
-            "known gap: whole-cell uniform blowup is NOT caught by the current "
-            "(local-only) criterion - see docstring for the falsified fix attempt"
-        )
-
-    def test_widespread_moderately_elevated_region_not_falsely_suppressed(self):
-        """一大片（接近半个网格）合理地、均匀地比其余部分更大（比如
-        靠近驻点/入口的真实物理区域），但幅度远低于安全倍数 `factor`，
-        不应被误伤——局部（同单元）判据天然满足这一点，因为每个单元的
-        参照量都随自己的实际残差量级自适应缩放，不依赖任何全网格统计量。
-        """
-        n_cells, n_sps, n_vars = 20, 8, 5
-        rng = np.random.default_rng(5)
-        residual = rng.standard_normal((n_cells, n_sps, n_vars)) * 1e-3
-        reference = np.ones((n_cells, n_sps, n_vars))
-        # Roughly half the mesh has a genuinely larger (but not pathological)
-        # residual scale - only 50x the rest, far below the 1e4 safety factor.
-        residual[:9] *= 50.0
-        out = suppress_residual_outliers(residual, reference, residual.shape[0])
-        np.testing.assert_array_equal(out, residual)
 
 
 def _reference_cell_face_misalignment(mesh):

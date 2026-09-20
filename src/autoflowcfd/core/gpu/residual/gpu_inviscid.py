@@ -170,17 +170,11 @@ def compute_inviscid_residual_fr_gpu(
 
     residual = residual + correction
 
-    # ── 3. 异常残差抑制 ──
-    # 第四次评审修复：此前 if/else 两分支代码逐字相同，都以 cp.asarray(result)
-    # 结尾——不管 input_is_numpy 是 True 还是 False 都返回 CuPy 数组，
-    # 与函数文档承诺的"与输入同类型（numpy 输入返回 numpy）"矛盾，是一处
-    # 补丁堆叠后未清理的重复分支。
-    from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
-    residual_np = cp.asnumpy(residual)
-    U_np = cp.asnumpy(U)
-    result = suppress_residual_outliers(residual_np, U_np[..., :5],
-                                        n_prism)
-    return result if input_is_numpy else cp.asarray(result)
+    # 机制3（异常残差抑制）已于 2026-09-19 删除，完整依据见
+    # `fr_residual/inviscid.py` 同一处。**对 GPU 路径还额外省掉一次
+    # `GPU -> CPU -> GPU` 往返**：那一步是为了复用 CPU 的 numba 实现而
+    # 把整个残差场与守恒场都拷回主机再拷回来。
+    return cp.asnumpy(residual) if input_is_numpy else residual
 
 
 def _compute_boundary_ghost_states_gpu(

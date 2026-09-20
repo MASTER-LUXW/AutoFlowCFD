@@ -32,17 +32,21 @@ fr_troubled_cell.py 模块文档"机制3"一节）：(1) 绝对 det(J) 阈值是
 特定网格的绝对尺度标定的，换个尺度就可能失效（真实复现：det(J) 比阈值
 高 828 倍仍被放大到灾难量级）；(2) 按整个单元降阶，会在网格所有单元
 恰好同一绝对尺度、以至于机制1对*每个*单元都命中时（合成验证网格常见），
-把全网格的粘性物理都拍平成零梯度，等于关掉了粘性扩散本身。现改用机制3
-（`suppress_residual_outliers`）：直接对*算出的最终残差*做 (cell,SP,变量)
-粒度的量级异常检测并清零，不依赖网格绝对尺度，也只清零真正异常的
-那几个 SP，同一单元其余 SP 保留完整梯度耦合。
+把全网格的粘性物理都拍平成零梯度，等于关掉了粘性扩散本身。
+
+此后改用过机制3（按 (cell,SP,变量) 粒度检测残差量级异常并清零），
+**机制3 也已于 2026-09-19 删除** —— 真实网格消融对照证明它触发了但只把
+残差轨迹改变 ~1e-10 相对量、且不改变发散这个结局，完整依据见
+`fr_residual/inviscid.py` 里那段记录。
+
+所以本函数现在**不对残差做任何异常抑制**：退化单元的对策是网格质量门
+（项目记忆 `industry_practice_degenerate_cell_gcl`），不是运行期限制器。
 """
 
 import os
 import numpy as np
 
 from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient
-from autoflowcfd.core.fr_operators.troubled_cell import suppress_residual_outliers
 from autoflowcfd.core.fr_operators.flux_kernels import viscous_physical_flux_batch
 from autoflowcfd.core.fr_operators.volume_contract import (
     contract_shared_operator_1axis, contract_shared_operator_2axis,
@@ -543,10 +547,6 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
             )
     residual = residual + correction
 
-    # 机制3（症状检测，见 fr_troubled_cell.py 模块文档）：直接对算出的
-    # 最终粘性残差做 (cell,SP,变量) 粒度的量级异常检测并清零，取代按
-    # 整个单元降阶的旧机制1/2 门控，理由同 fr_residual_inviscid.py 的
-    # 同名改动。
-    # `n_prism` 的必要性见 inviscid.py 同一处调用的说明。
-    return suppress_residual_outliers(residual, U[..., :5],
-                                      mesh.n_prism_cells)
+    # 机制3 已删除，依据见 `fr_residual/inviscid.py` 同一处的完整记录
+    # （真实网格消融对照：触发 15 次但残差轨迹只差 ~1e-10、结局不变）。
+    return residual
