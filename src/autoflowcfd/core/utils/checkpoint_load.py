@@ -19,6 +19,65 @@ except ImportError:
     h5py = None
 
 
+def decode_attr(value):
+    """把 HDF5 字节串属性解码成 Python 字符串。
+
+    2026-09-20 从 `load_checkpoint` 内部提到模块级：`_check_prism_basis`
+    也要用它，两处各写一份就成了两个事实来源。
+    """
+    if isinstance(value, bytes):
+        return value.decode('utf-8')
+    return value
+
+
+def _check_prism_basis(meta_group, checkpoint_path) -> None:
+    """校验 checkpoint 的棱柱基与当前环境一致，不一致就硬失败。
+
+    **为什么必须硬失败**（2026-09-20）：两条棱柱基的每单元解点布局不同
+    —— 原生基 P1 每单元只有前 6 个槽位是自由度，其余是按
+    `fr/native_padding.py` 约定复制真实 SP#0 的填充位；坍缩基 8 个全是
+    自由度。同一份 `(n_cells, n_sps, n_vars)` 数组在两条基下**含义不同**，
+    跨基 resume 会静默重解释它，给出一个看不出异常的错解（不会报形状
+    不符：形状恰好相同）。
+
+    与 `config_hash` 那条**刻意不同级别**：配置哈希不一致只是"可能影响
+    结果"（例如 CFL 上限变了），而棱柱基不一致是"这份数据的含义变了"。
+
+    `prism_basis` 属性是 2026-09-20 才开始写的。属性缺失时：
+
+    * 当前是 `collapsed` -> 放行（那之前**唯一**的默认值就是 collapsed，
+      这是兼容的组合），只记一条 info；
+    * 当前是 `native` -> **拒绝**（正是危险组合：默认值改成 native 之后
+      去 resume 一份 collapsed 时代的 checkpoint）。
+    """
+    from autoflowcfd.fr.native_prism.mode import resolve_prism_basis_mode
+
+    current = resolve_prism_basis_mode()
+    if 'prism_basis' not in meta_group.attrs:
+        if current == "collapsed":
+            logger.info(
+                "Checkpoint 没有记录棱柱基（2026-09-20 之前写的），当前是 "
+                "collapsed —— 那之前唯一的默认值也是 collapsed，组合兼容。")
+            return
+        raise ValueError(
+            f"Checkpoint {checkpoint_path} 没有记录棱柱基（2026-09-20 之前"
+            f"写的，那时唯一的默认值是 collapsed），而当前 "
+            f"AFCFD_PRISM_BASIS={current!r}。两条基的每单元解点布局不同，"
+            f"跨基 resume 会静默给出错解（形状恰好相同、不会报错）。"
+            f"要么用 AFCFD_PRISM_BASIS=collapsed 续算这份 checkpoint，"
+            f"要么在当前基下从头开始。")
+
+    saved = decode_attr(meta_group.attrs['prism_basis'])
+    if saved != current:
+        raise ValueError(
+            f"Checkpoint {checkpoint_path} 是在棱柱基 {saved!r} 下写的，"
+            f"而当前 AFCFD_PRISM_BASIS={current!r}。两条基的每单元解点"
+            f"布局不同（原生基有零填充槽位），跨基 resume 会静默重解释"
+            f"同一份数组、给出看不出异常的错解。"
+            f"请把 AFCFD_PRISM_BASIS 设成 {saved!r} 续算，或在当前基下"
+            f"从头开始。")
+
+
 def load_checkpoint(
     manager,
     checkpoint_path: Union[str, Path],
@@ -56,13 +115,6 @@ def load_checkpoint(
             meta_group = f["metadata"]
             iteration = int(meta_group.attrs['iteration'])
 
-            # 把字节串解码成普通字符串
-            def decode_attr(value):
-                """把 HDF5 字节串属性解码成 Python 字符串。"""
-                if isinstance(value, bytes):
-                    return value.decode('utf-8')
-                return value
-
             timestamp = decode_attr(meta_group.attrs['timestamp'])
             original_backend = decode_attr(meta_group.attrs['backend'])
             config_hash = decode_attr(meta_group.attrs['config_hash'])
@@ -78,6 +130,9 @@ def load_checkpoint(
             for key in meta_group.attrs.keys():
                 if key not in ['iteration', 'timestamp', 'backend', 'config_hash']:
                     metadata[key] = decode_attr(meta_group.attrs[key])
+
+            # === 校验棱柱基（硬失败，不是警告）===
+            _check_prism_basis(meta_group, checkpoint_path)
 
             # === 校验配置 ===
             current_hash = manager._compute_config_hash()

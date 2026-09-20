@@ -24,6 +24,8 @@ from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 from loguru import logger
 
+from autoflowcfd.fr.native_prism.mode import resolve_prism_basis_mode
+
 try:
     import h5py
     H5PY_AVAILABLE = True
@@ -151,6 +153,14 @@ class CheckpointManager:
                 meta_group.attrs['timestamp'] = np.string_(datetime.now().isoformat())
                 meta_group.attrs['backend'] = np.string_(getattr(self.config, "backend", "cpu"))
                 meta_group.attrs['config_hash'] = np.string_(self._compute_config_hash())
+                # **棱柱基必须记进 checkpoint**（2026-09-20）：两条基的
+                # 每单元解点布局不同（原生 P1 只有前 6 个槽位是自由度、
+                # 其余是按约定复制 SP#0 的填充位；坍缩 8 个全是自由度），
+                # 所以跨基 resume 会**静默重解释**同一份数组，给出一个
+                # 看不出异常的错解。校验在 `checkpoint_load.py` 里，
+                # 不匹配直接硬失败。
+                meta_group.attrs['prism_basis'] = np.string_(
+                    resolve_prism_basis_mode())
 
                 if metadata:
                     for key, value in metadata.items():
