@@ -632,7 +632,11 @@ def _compute_viscous_interface_correction_gpu(
                 vol_o = cp.mean(det_jacs[oc], axis=-1)  # (nO,)
                 h = cp.maximum(vol_o ** (1.0 / 3.0), 1e-300)
                 eta = _VISCOUS_BOUNDARY_IP_C * (mu + mut_o) / h[:, None]
-                scale = eta * adj_mag_o * oside[:, None]
+                # 原生面的 side 因子必须是 +1，见 CPU 侧
+                # `viscous_flux_kernel.py` 里 `pen_side_o` 那段注释
+                # （同一处真实缺陷，2026-09-22 修复）。
+                pen_side_o = cp.where(is_native_o, 1.0, oside)
+                scale = eta * adj_mag_o * pen_side_o[:, None]
                 pen = -scale[..., None] * (Q_o[..., 1:4] - Q_n[..., 1:4])
                 pen_full = cp.zeros_like(jump_owner)
                 pen_full[..., 1:4] = pen
@@ -733,7 +737,7 @@ def _compute_viscous_interface_correction_gpu(
                 vol_n = cp.mean(det_jacs[nc], axis=-1)
                 h_n = cp.maximum(vol_n ** (1.0 / 3.0), 1e-300)
                 eta_n = _VISCOUS_BOUNDARY_IP_C * (mu + mut_n_native) / h_n[:, None]
-                scale_n = eta_n * adj_mag_n * nside[:, None]
+                scale_n = eta_n * adj_mag_n * cp.where(is_native_n, 1.0, nside)[:, None]
                 pen_n = -scale_n[..., None] * (Q_n_native[..., 1:4] - Q_o_at_n[..., 1:4])
                 pen_full_n = cp.zeros_like(jump_neighbor)
                 pen_full_n[..., 1:4] = pen_n

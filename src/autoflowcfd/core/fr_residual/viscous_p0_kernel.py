@@ -112,6 +112,15 @@ def compute_viscous_interface_correction_p0_kernel(
         o_is_native = oc_code >= 6
         oax = owner_axis[f]
         oside = owner_side[f]
+        # **原生面的罚项 side 因子必须是 +1**（2026-09-22 修复真实缺陷）：
+        # 原生面的 `owner_adj_row_exact` 已按 outward 定向（见
+        # `native_prism/face.py::native_prism_face_adj_rows` 与
+        # `exact_normal.py::compute_exact_face_normals_and_weights` 里
+        # `side_factor = np.where(owner_code >= 6, 1.0, owner_side)` 的同一
+        # 处理），而坍缩面的 adj_row 未定向、外向性由 `oside` 给出。此前
+        # 这里直接乘 `oside`，于是 `owner_side = -1` 的原生面（棱柱 f0/f3/f4、
+        # 四面体全部 4 个面）罚项符号反了 —— 从耗散变成往壁面单元注入动量。
+        pen_side_o = 1.0 if o_is_native else oside
         oside_idx = 0 if oside < 0 else 1
         celltype_o = 0 if oc < n_prism else 1
 
@@ -248,7 +257,7 @@ def compute_viscous_interface_correction_p0_kernel(
                     # n_sps 求平均）。
                     adj_mag_o = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
                     pen = viscous_boundary_penalty_tilde(
-                        Q_o_i, Q_n, mu + mut_o_i, det_jacs[oc, 0], adj_mag_o, oside, _VISCOUS_BOUNDARY_IP_C,
+                        Q_o_i, Q_n, mu + mut_o_i, det_jacs[oc, 0], adj_mag_o, pen_side_o, _VISCOUS_BOUNDARY_IP_C,
                     )
                     for v in range(1, 4):
                         jump_owner[i, v] += pen[v]
@@ -280,6 +289,8 @@ def compute_viscous_interface_correction_p0_kernel(
             n_is_native = nc_code >= 6
             nax = neighbor_axis[f]
             nside = neighbor_side[f]
+            # neighbor 侧同理（见 owner 侧那段注释）。
+            pen_side_n = 1.0 if n_is_native else nside
             nside_idx = 0 if nside < 0 else 1
             celltype_n = 0 if nc < n_prism else 1
 
@@ -387,7 +398,7 @@ def compute_viscous_interface_correction_p0_kernel(
                 if mp_o >= 0 and mixed_ow_mask[f, i]:
                     adj_mag_n = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
                     pen_n = viscous_boundary_penalty_tilde(
-                        Q_n_i, Q_o_at_n, mu + mut_n_i, det_jacs[nc, 0], adj_mag_n, nside, _VISCOUS_BOUNDARY_IP_C,
+                        Q_n_i, Q_o_at_n, mu + mut_n_i, det_jacs[nc, 0], adj_mag_n, pen_side_n, _VISCOUS_BOUNDARY_IP_C,
                     )
                     for v in range(1, 4):
                         jump_neighbor[i, v] += pen_n[v]
