@@ -92,17 +92,26 @@ class ProfileInletGhostProvider:
     """
 
     def __init__(self, inner, inlet_group_code, positions_by_face,
-                 profile_fn):
+                 profile_fn, bc_type="INLET"):
         """
         Args:
             inner: 被包装的 `BoundaryGhostStateProvider`。
             inlet_group_code: 要替换的那个组的 `group_code` 值。
             positions_by_face: `{face_idx: (n_fp, 3) 物理坐标}`。
             profile_fn: `(n_fp, 3) -> (n_fp, 5)`，给出该批通量点处的
-                原始变量入口状态。
+                原始变量状态。
+            bc_type: `"INLET"`（默认，流出时退回内部延拓）或 `"FARFIELD"`
+                （幽灵态就是给定态，流入/流出由黎曼求解器的特征分裂决定）。
+                **上边界必须用 FARFIELD**：Blasius 在 `y=H` 处有向上的
+                夹带速度，INLET 的"流出时用内部态"会把它退化成透射边界，
+                拿不到"把精确解加在外边界上"这个效果。
         """
         self._inner = inner
         self._code = int(inlet_group_code)
+        self._bc_type = str(bc_type).upper()
+        if self._bc_type not in ("INLET", "FARFIELD"):
+            raise ValueError(
+                f"bc_type={bc_type!r} 只支持 INLET | FARFIELD")
         self._q_by_face = {
             int(f): np.ascontiguousarray(profile_fn(pos), dtype=np.float64)
             for f, pos in positions_by_face.items()
@@ -115,24 +124,35 @@ class ProfileInletGhostProvider:
     def __call__(self, face_idx, Q_owner_fp, true_normal):
         from autoflowcfd.boundary.fr_ghost_state import inlet_ghost_state
 
-        q_inlet = self._q_by_face.get(int(face_idx))
-        if q_inlet is None:
+        q_given = self._q_by_face.get(int(face_idx))
+        if q_given is None:
             return self._inner(face_idx, Q_owner_fp, true_normal)
-        return inlet_ghost_state(Q_owner_fp, q_inlet, true_normal)
+        if self._bc_type == "FARFIELD":
+            # 远场幽灵态**就是**给定态（流入/流出由 AUSM+up 的特征分裂
+            # 决定，见 `boundary/fr_ghost_state.farfield_ghost_state`）。
+            # 不能走 `farfield_ghost_state`：那个函数把 `(5,)` 常量 tile
+            # 成逐点，这里已经是逐点的 `(n_fp,5)`。
+            return q_given
+        return inlet_ghost_state(Q_owner_fp, q_given, true_normal)
 
 
 def wrap_inlet_with_profile(provider, solver, inlet_plane_name,
-                            bc_by_plane, profile_fn):
-    """把 `provider` 的 `inlet_plane_name` 组换成逐点剖面入口。
+                            bc_by_plane, profile_fn,
+                            expect_types=("INLET",)):
+    """把 `provider` 的 `inlet_plane_name` 组换成逐点剖面态。
 
-    `inlet_plane_name` 必须在 `bc_by_plane` 里被配成 `"INLET"`；否则这是
-    调用方的配置错误（把剖面挂到一个非入口面上不会报错、只会静默不生效），
-    所以这里硬失败。
+    `inlet_plane_name` 在 `bc_by_plane` 里的类型必须落在 `expect_types`
+    里；否则这是调用方的配置错误（把剖面挂到一个不消费它的面上不会报错、
+    只会静默不生效），所以这里硬失败。
+
+    `expect_types` 默认只接受 `INLET`（既有行为）。上边界那一档要显式传
+    `("FARFIELD",)` —— 见 `ProfileInletGhostProvider` 的 `bc_type` 文档。
     """
-    if bc_by_plane.get(inlet_plane_name, {}).get("type") != "INLET":
+    bc_type = bc_by_plane.get(inlet_plane_name, {}).get("type")
+    if bc_type not in expect_types:
         raise ValueError(
-            f"{inlet_plane_name} 在 bc_by_plane 里不是 INLET，"
-            f"给它挂剖面入口没有意义")
+            f"{inlet_plane_name} 在 bc_by_plane 里是 {bc_type!r}，"
+            f"不在期望的 {expect_types} 里，给它挂剖面态不会生效")
     from autoflowcfd.core.fr_solver.boundary import (
         _compute_inlet_fp_positions,
     )
@@ -153,7 +173,8 @@ def wrap_inlet_with_profile(provider, solver, inlet_plane_name,
         raise ValueError(
             f"{inlet_plane_name} 组里没有 owner_is_primary 的边界面 —— "
             f"剖面入口不会生效")
-    return ProfileInletGhostProvider(provider, code, positions, profile_fn)
+    return ProfileInletGhostProvider(provider, code, positions, profile_fn,
+                                     bc_type=bc_type)
 
 
 class _MockNodes:

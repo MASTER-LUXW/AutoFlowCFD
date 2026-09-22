@@ -257,6 +257,7 @@ def build_blasius_solver(
     turb_model: str = "NONE",
     lz_over_h: float = 0.25,
     le_offset: float = 0.0,
+    exact_top_bc: bool = False,
 ):
     """构造平板边界层求解器；返回 `(solver, meta)`。
 
@@ -287,6 +288,39 @@ def build_blasius_solver(
             这个开放问题的下一个待验证方向就是"流向强梯度通过坍缩三角形
             基耦合出 w"，而判别它需要扫这个长宽比——写死的常数扫不了。
         turb_model: 湍流模型名（层流验证用 "NONE"）
+        exact_top_bc: 上边界（`y=H`）是否改用 **FARFIELD + 逐通量点解析
+            Blasius 态**（只在 `le_offset > 0` 时生效，因为需要解析解）。
+
+            ## 为什么需要这一档（实测依据，2026-09-20）
+
+            默认的滑移上壁强制 `v_n = 0`，而 Blasius 在 `y=H` 处有向上的
+            夹带速度 `v/U = 0.8604/sqrt(Re_x)`（本算例 `H=6*delta99(L)`
+            处实测解析值 7.0e-3 ~ 1.2e-2）。把解析初场投上去直接量 t=0
+            残差：**99.8% 的流向动量残差集中在最上面那一个 y/H 箱**，
+            两条棱柱基都一样。也就是上壁是那个持续存在的驻留残差源。
+
+            标准的平板验证设置正是"把精确解加在入口与上边界上"，所以这
+            一档把上壁换成 FARFIELD + 解析态（幽灵态就是给定态，流入/
+            流出由 AUSM+up 的特征分裂决定）。
+
+            ## 这一档给出的结论：上壁 BC **不是**近壁漂移的驱动（决定性）
+
+            4000 步对照（原生棱柱基、CFL 0.1、`le_offset=0.5`、nx=16），
+            cf/cf_exact 中位：
+
+                step        0      500     1000    2000    3000    4000
+                滑移上壁  0.9931  0.9763  0.9448  0.7581  -0.034  -3.2388
+                解析上壁  0.9931  0.9763  0.9448  0.7581  -0.034  -3.2710
+
+            两条轨迹**几乎逐位重合**，而解析上壁把残差水平压低约 15 倍。
+            也就是上壁确实是那个驻留残差源（把解析初场投上去，99.8% 的
+            流向动量残差集中在最上面那一个 y/H 箱），但它**只决定残差
+            量级、不驱动漂移**。漂移的成因在别处，不要再从这里找。
+
+            **两档都保留**：默认档是既有行为、也是"没有解析解可用时"唯一
+            能做的选择；`True` 档是上面那条否证的实验装置，也是将来任何
+            "怀疑外边界"的假设可以直接复用的对照。
+
         le_offset: **虚拟原点偏移**，单位是板长 `L_PLATE` 的倍数。
 
             `0.0`（默认，保持既有行为）：无滑移壁面从 `x=0` 开始，而
@@ -349,12 +383,17 @@ def build_blasius_solver(
         # y=0 是平板本体（无滑移绝热壁）
         "wall_bottom": {"type": "WALL", "is_no_slip": True,
                         "wall_velocity": [0.0, 0.0, 0.0]},
-        # y=H 是外场：滑移壁（法向不可穿透、切向自由）。取无滑移会在上壁
-        # 再长一层边界层、挤压核心产生顺流压降，破坏 Blasius 的零压梯度
-        # 前提（见模块文档）。底层 BC 名是 "WALL" + is_no_slip=False
-        # （"SLIP_WALL" 只是 `build_boundary_ghost_provider` 的上层别名，
-        # `bc_overrides` 走底层名，见该函数的 type_map）。
-        "wall_top": {"type": "WALL", "is_no_slip": False},
+        # y=H 是外场。两档（见 `exact_top_bc` 参数文档）：
+        #   False（默认，既有行为）：滑移壁（法向不可穿透、切向自由）。
+        #     取无滑移会在上壁再长一层边界层、挤压核心产生顺流压降，破坏
+        #     Blasius 的零压梯度前提（见模块文档）。底层 BC 名是 "WALL" +
+        #     is_no_slip=False（"SLIP_WALL" 只是
+        #     `build_boundary_ghost_provider` 的上层别名）。
+        #   True：FARFIELD + 逐通量点解析 Blasius 态。
+        "wall_top": ({"type": "FARFIELD",
+                      "Q_free": [RHO_INF, U_INF, 0.0, 0.0, P_INF]}
+                     if exact_top_bc else
+                     {"type": "WALL", "is_no_slip": False}),
         "z_min": {"type": "SYMMETRY"},
         "z_max": {"type": "SYMMETRY"},
         # INLET 需要显式给 `Q_inlet`（原始变量 rho,u,v,w,p）：`bc_overrides`
@@ -414,6 +453,25 @@ def build_blasius_solver(
         solver.boundary_ghost_provider = wrap_inlet_with_profile(
             solver.boundary_ghost_provider, solver, "x_min",
             bc_overrides, _inlet_profile)
+
+        if exact_top_bc:
+            # 上壁也喂解析态：这里的 eta 必须用**该通量点自己的 x**
+            # （上壁沿流向 eta 是变化的），不能沿用入口那个固定 x0。
+            def _top_profile(positions):
+                pos = np.asarray(positions)
+                xv = pos[:, 0] + x0
+                eta = pos[:, 1] / np.sqrt(nu * xv / U_INF)
+                q = np.empty((pos.shape[0], 5))
+                q[:, 0] = RHO_INF
+                q[:, 1] = U_INF * blasius_profile(eta)
+                q[:, 2] = U_INF * blasius_v_over_u(eta, U_INF * xv / nu)
+                q[:, 3] = 0.0
+                q[:, 4] = P_INF
+                return q
+
+            solver.boundary_ghost_provider = wrap_inlet_with_profile(
+                solver.boundary_ghost_provider, solver, "wall_top",
+                bc_overrides, _top_profile, expect_types=("FARFIELD",))
 
     solver._reference_area = L_PLATE * Lz
 
