@@ -32,7 +32,9 @@ from autoflowcfd.fr.native_tet.basis import (
 )
 from autoflowcfd.fr.native_tet.overintegration import build_native_tet_overintegration_operators
 from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_batch
-from autoflowcfd.fr.collapsed_basis import OVERINTEGRATION_MAX_ORDER
+from autoflowcfd.fr.native_tet.overintegration import (
+    resolve_tet_overintegration_order,
+)
 
 GAMMA = 1.4
 RHO_INF, P_INF, U_WALL, H = 1.225, 101325.0, 30.0, 1.0
@@ -95,7 +97,7 @@ def test_overintegration_reduces_analytical_zero_residual_for_couette_profile(or
     order=3：`over_order=min(6,3)=3=order`，过积分退化成无操作
     （`OVERINTEGRATION_MAX_ORDER` 封顶导致），因此不断言改善。
     """
-    over_order = min(2 * order, OVERINTEGRATION_MAX_ORDER)
+    over_order = resolve_tet_overintegration_order(order)
     ref_coarse, D_coarse = build_native_tet_operators(order)
     over_ops = build_native_tet_overintegration_operators(order, over_order)
 

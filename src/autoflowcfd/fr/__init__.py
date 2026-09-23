@@ -32,7 +32,6 @@ from .matrix_operators import (
     compute_diff_matrix_3d,
     compute_interpolation_matrix,
     compute_vandermonde,
-    compute_correction_weights,
 )
 
 __all__ = [
@@ -45,5 +44,4 @@ __all__ = [
     "compute_diff_matrix_3d",
     "compute_interpolation_matrix",
     "compute_vandermonde",
-    "compute_correction_weights",
 ]

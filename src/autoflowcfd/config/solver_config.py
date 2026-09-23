@@ -110,34 +110,6 @@ class SolverConfig:
             个数量级），原来硬编码，现在可配置。CLI
             `--residual-drop-threshold` 选项对应本字段。
 
-    flux_type: FR 修正函数族 + 通量点位置，'radau'（默认，VCJH g2）或
-        'gauss'。透传给 `fr/operators.py::generate_fr_operators` 的
-        `flux_point_type`，与 CLI `--flux-type` 同一个量。
-
-        **本字段的历史（2026-09-15 更正）**：这里原先写着一整段"本类刻意
-        不提供 flux_type 字段，因为 `compute_correction_weights` 的
-        `flux_point_type` 形参是彻底的空操作、数值层从未实现第二种修正
-        函数族"。那个结论在写下时或许成立，但**早已过时**：
-        `fr/matrix_operators.py::compute_correction_weights` 现在有真实
-        的 `if flux_point_type == 'gauss': return
-        _compute_gauss_correction_derivative(...)` 分支，
-        `generate_fr_operators` 也真实分派，CLI 两条 solve 命令都暴露了
-        `--flux-type`、`FRSolver.__init__` 有 `flux_type` 形参并存成
-        `self.flux_type` 供 Order Continuation 跨阶数复用。于是"配置类
-        少一个字段"从"避免假实现"变成了它自己就是一处缺口：用 YAML 配置
-        跑的用户拿不到一个 CLI 用户已经能用的真实数值方案。
-
-        同一类过时信息在本项目造成过真实误判（AUSM+up alpha/beta 那条
-        "已记录不改动"被后续会话当成当前事实复述，见
-        `~/.claude/plans/zippy-painting-balloon.md` 的"信息源更正记录"），
-        所以这里不只是加字段，而是把原来的论断连同它为什么过时一起写清。
-
-        注意 `gauss` 档目前只有单机 CPU 路径支持（GPU/多 GPU/MPI 分布式
-        的 ops 构造不带 `flux_point_type`），CLI 侧已有显式护栏
-        （`solve_steady_command.py`）；`api.py` 的 `run_steady`/
-        `run_transient` 同样会在 backend 不支持时显式报错，不静默退回
-        radau。
-
     示例:
         >>> config = SolverConfig(backend="gpu", order=3)
         >>> print(config.backend)
@@ -154,7 +126,6 @@ class SolverConfig:
     turbulence_intensity: float = 0.01  # 来流湍流强度 Tu（默认 1%）
     viscosity_ratio: float = 5.0  # 来流粘性比 VR = nu_t/nu
     mu_molecular: float = 1.8e-5  # 分子动力粘度 (Pa*s)，默认标准状态下空气
-    flux_type: str = "radau"  # FR 修正函数族：radau（VCJH g2）| gauss
     phase_max_iter: Optional[int] = None  # Order Continuation 非最终阶段最大步数上限，None=旧行为(按阶段数均分)
     residual_drop_threshold: float = 1e2  # Order Continuation 单阶段提前升阶所需的残差下降倍数
 
@@ -184,10 +155,6 @@ class SolverConfig:
         if self.mu_molecular <= 0:
             raise ValueError(f"分子动力粘度 mu_molecular 必须为正数，得到 {self.mu_molecular}")
 
-        # 验证 flux_type（不静默退回默认——与本项目其余开关同一条约定）
-        if self.flux_type not in ("radau", "gauss"):
-            raise ValueError(
-                f"flux_type 必须是 'radau' 或 'gauss'，得到 {self.flux_type!r}")
 
         # **2026-09-18：这里原本 `os.makedirs(self.output_dir)`，已删除。**
         #

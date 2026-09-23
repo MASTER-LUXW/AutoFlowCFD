@@ -47,6 +47,9 @@ import os
 import numpy as np
 
 from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient
+from autoflowcfd.core.fr_operators.flux_kernels import (
+    resolve_viscous_ip_constant,
+)
 from autoflowcfd.core.fr_operators.flux_kernels import viscous_physical_flux_batch
 from autoflowcfd.core.fr_operators.volume_contract import (
     contract_shared_operator_1axis, contract_shared_operator_2axis,
@@ -392,6 +395,9 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
     # 这些乘积再乘 adj(J)，直接在 coarse SPs 上微分等价于"先混叠再求导"。
     # 理由、实测背景与保留的上游局限见 `resolve_viscous_overintegration`。
     # 默认 off，行为逐位不变。
+    # IP 罚项常数按阶数解析一次（trace 不等式常数 ~ (p+1)(p+3)/3，
+    # 见 `flux_kernels.resolve_viscous_ip_constant`）。
+    _c_ip = resolve_viscous_ip_constant(int(mesh.order))
     _oi = (get_overintegration_context(mesh, ops)
            if resolve_viscous_overintegration() == "on" else None)
     if _oi is not None:
@@ -464,22 +470,23 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
         n_threads = numba.get_num_threads()
         correction = compute_viscous_interface_correction_p0_kernel(
             Q, grad_vel, grad_T, mu_t_field,
-            adj_j, det_jacs, mu, Pr, Pr_t,
+            det_jacs, mu, Pr, Pr_t,
             flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
-            flat.owner_axis, flat.owner_side, flat.neighbor_axis, flat.neighbor_side,
             flat.owner_is_primary, flat.neighbor_is_primary,
+            flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
             flat.neighbor_src0_cell, flat.neighbor_src0_mat,
             flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
             flat.owner_src0_cell, flat.owner_src0_mat,
             flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
             flat.mixed_nb_partner, flat.mixed_nb_mask,
             flat.mixed_ow_partner, flat.mixed_ow_mask,
-            flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost, bnd_adiabatic,
-            flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
-            n_prism, n_threads,
+            Q_ghost, bnd_adiabatic,
+            n_threads,
             flat.owner_cube_face, flat.neighbor_cube_face,
             flat.ref_area_weight,
             flat.boundary_extrap_native, flat.lift_native,
+            flat.face_area, flat.cell_volume,
+            _c_ip,
         )
     else:
         # P≥1 通用路径：图着色或 per-thread buffer
@@ -505,7 +512,6 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
                     Q, grad_vel, grad_T, mu_t_field,
                     det_jacs, mu, Pr, Pr_t,
                     flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
-                    flat.owner_axis, flat.owner_side, flat.neighbor_axis, flat.neighbor_side,
                     flat.owner_is_primary, flat.neighbor_is_primary,
                     flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
                     flat.neighbor_src0_cell, flat.neighbor_src0_mat,
@@ -514,12 +520,13 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
                     flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
                     flat.mixed_nb_partner, flat.mixed_nb_mask,
                     flat.mixed_ow_partner, flat.mixed_ow_mask,
-                    flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost, bnd_adiabatic,
-                    flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
-                    n_prism, face_indices, correction,
+                    Q_ghost, bnd_adiabatic,
+                    face_indices, correction,
                     flat.owner_cube_face, flat.neighbor_cube_face,
                     flat.ref_area_weight,
                     flat.boundary_extrap_native, flat.lift_native,
+                    flat.face_area, flat.cell_volume,
+                    _c_ip,
                 )
         else:
             # 回退到 per-thread buffer 方案（小网格 + 低线程数可能更快）
@@ -529,7 +536,6 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
                 Q, grad_vel, grad_T, mu_t_field,
                 det_jacs, mu, Pr, Pr_t,
                 flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
-                flat.owner_axis, flat.owner_side, flat.neighbor_axis, flat.neighbor_side,
                 flat.owner_is_primary, flat.neighbor_is_primary,
                 flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
                 flat.neighbor_src0_cell, flat.neighbor_src0_mat,
@@ -538,12 +544,13 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
                 flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
                 flat.mixed_nb_partner, flat.mixed_nb_mask,
                 flat.mixed_ow_partner, flat.mixed_ow_mask,
-                flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost, bnd_adiabatic,
-                flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
-                n_prism, n_threads,
+                Q_ghost, bnd_adiabatic,
+                n_threads,
                 flat.owner_cube_face, flat.neighbor_cube_face,
                 flat.ref_area_weight,
                 flat.boundary_extrap_native, flat.lift_native,
+                flat.face_area, flat.cell_volume,
+                _c_ip,
             )
     residual = residual + correction
 

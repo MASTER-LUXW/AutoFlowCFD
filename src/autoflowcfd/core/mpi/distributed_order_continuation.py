@@ -260,7 +260,7 @@ def _rebuild_cpu_traditional_partition_and_state(solver, target_p: int, new_loca
     for o in stale_orders:
         del solver.mesh._order_geometry_cache[o]
     solver.mesh.set_order(target_p)
-    solver.ops = generate_fr_operators(target_p, flux_point_type=getattr(solver, 'flux_type', 'radau'))
+    solver.ops = generate_fr_operators(target_p)
 
     new_partition = build_distributed_partition(
         solver.mesh.face_connectivity, cell_partition, solver.rank, solver.n_ranks

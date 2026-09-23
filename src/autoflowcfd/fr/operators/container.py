@@ -9,7 +9,7 @@
 """
 
 import numpy as np
-from typing import Tuple, Dict
+from typing import Dict
 from dataclasses import dataclass
 
 
@@ -37,25 +37,6 @@ class FROperators:
             能显著降低这一混叠误差（真实网格验证：某棱柱单元体积项
             残差从 3.15e-11 降到 6.53e-12，约 5 倍）。棱柱没有 native
             方案可换，这里的坍缩坐标构造不受本次删除影响。
-        L_interp: 插值矩阵 (SPs -> FPs)，形状 (n_fps, n_sps)
-        g_left, g_right: 左右 Radau/VCJH 校正函数**导数**在各 SP 处的取值，
-            形状均为 (n_sps,)（不是校正函数本身的值，见
-            matrix_operators.compute_correction_weights 文档说明）
-        boundary_extrap_tet: {(axis:int,side:float): (n_fp,n_sps) 全 NaN
-            占位矩阵}——**不再是真实的坍缩坐标外插算子**（2026-09-03
-            起已删除，见模块文档），只保留字典形状供
-            `core/fr_operators/face_kernels.py` 无条件按 (celltype,
-            axis,side) 拼表这一段代码不用跟着改；四面体面翻译成
-            native 编码后这些占位行在生产路径上不会被真正读取。
-        boundary_extrap_prism: {(axis:int,side:float): (n_fp,n_sps)
-            矩阵}，棱柱专用体积->边界外插矩阵，用与 D_3d_prism 同一套
-            坍缩坐标模态基构造（见 collapsed_basis.build_collapsed_
-            boundary_extrap 文档），取代 fr/face_flux_points/geometry.py::
-            extrapolate_to_face 的朴素 1D 张量积外插——真实网格验证
-            发现，朴素外插算出的等效界面法向方向在坍缩坐标退化边附近
-            与真实几何法向偏差可达近 30°（仍在现有校验阈值内、不报错，
-            但足以在残差公式除以该处真实偏小的 Jacobian 后放大到灾难
-            量级），必须换成与体积微分矩阵一致的坍缩坐标模态基外插。
         filter_tet: (n_sps,n_sps) 指数模态滤波矩阵——**别名到
             `filter_native_tet_padded`**（2026-09-03 起，不再是独立
             构造的坍缩坐标滤波器）。
@@ -70,11 +51,6 @@ class FROperators:
     D_3d: np.ndarray
     D_3d_tet: np.ndarray = None
     D_3d_prism: np.ndarray = None
-    L_interp: np.ndarray = None
-    g_left: np.ndarray = None
-    g_right: np.ndarray = None
-    boundary_extrap_tet: Dict[Tuple[int, float], np.ndarray] = None
-    boundary_extrap_prism: Dict[Tuple[int, float], np.ndarray] = None
     filter_tet: np.ndarray = None
     filter_prism: np.ndarray = None
     # 体积项去混叠（over-integration，见 collapsed_basis.build_overintegration_operators
@@ -118,8 +94,7 @@ class FROperators:
     n_native_sps_tet: int = None
     # native 四面体体积->自身面外插矩阵（Part7 阶段2设计文档"二·五"节+
     # `native_tet/basis.py::build_native_tet_boundary_extrap`），
-    # 键是被排除的局部顶点 0~3（与占位用的 boundary_extrap_tet 键
-    # 是 (axis,side) 元组不同）。
+    # 键是被排除的局部顶点 0~3。
     boundary_extrap_native_tet: Dict[int, np.ndarray] = None
     # native 四面体 DG 提升算子（`native_tet/basis.py::
     # build_native_tet_lift` 文档），把面通量跳跃提升成体积节点修正
@@ -154,10 +129,9 @@ class FROperators:
     # `face_id`，与坍缩棱柱的 `(axis, side)` 之间的换算**只允许**走
     # `native_prism_face.cube_face_to_native_prism_face`。
     #
-    # `collapsed` 档下这一整组恒为 None，`prism_basis_mode` 为 "collapsed"，
-    # 全部既有行为逐位不变。迁移终态见 `fr/native_prism/mode.py` 模块文档
-    # （删除坍缩棱柱基、去掉那个开关）。
-    prism_basis_mode: str = "collapsed"
+    # 坍缩棱柱基已于 2026-09-23 删除，所以这一整组**恒为非 None**；原先
+    # 记录档位的那个字段随之删除（只有一条基，再记"当前是哪条"就是冗余）。
+    # 删除前后的对照数据见 `fr/native_prism/mode.py` 的模块函数文档。
     D_native_prism: np.ndarray = None
     ref_native_prism: np.ndarray = None
     n_native_sps_prism: int = None
@@ -217,9 +191,9 @@ class FROperators:
         if 10 <= code < 15:
             if self.lift_native_prism_padded is None:
                 raise ValueError(
-                    f"cube_face_code={code} 是 native 棱柱面，但当前棱柱基"
-                    f"是 {self.prism_basis_mode!r}。面编码与棱柱基必须来自"
-                    f"同一个 AFCFD_PRISM_BASIS 取值")
+                    f"cube_face_code={code} 是 native 棱柱面，但算子集里"
+                    f"没有填充好的提升算子 —— 棱柱只有原生基一种实现"
+                    f"（2026-09-23 起），出现这个说明算子构造本身失败了")
             return self.lift_native_prism_padded[code - 10]
         raise ValueError(
             f"cube_face_code={code} 不是原生面编码（四面体 [6,10)、"
@@ -241,22 +215,10 @@ class FROperators:
                      else self.boundary_extrap_native_prism)
             if table is None:
                 raise ValueError(
-                    f"cube_face_code={code} 是 native 棱柱面，但当前棱柱基"
-                    f"是 {self.prism_basis_mode!r}（算子集里没有原生棱柱面"
-                    f"算子）。面编码与棱柱基必须来自同一个 "
-                    f"AFCFD_PRISM_BASIS 取值，不一致说明网格的面编码翻译"
-                    f"与算子构造读到了不同的开关值")
+                    f"cube_face_code={code} 是 native 棱柱面，但算子集里"
+                    f"没有原生棱柱面算子 —— 棱柱只有原生基一种实现"
+                    f"（2026-09-23 起），出现这个说明算子构造本身失败了")
             return table[code - 10]
         raise ValueError(
             f"cube_face_code={code} 不是原生面编码（四面体 [6,10)、"
-            f"棱柱 [10,15)）。坍缩坐标面用 (axis, side) 键取 "
-            f"boundary_extrap_tet/prism，不走这个入口")
-
-    def get_operators(self) -> Dict[str, np.ndarray]:
-        """返回算子字典，兼容旧接口。"""
-        return {
-            'diff_matrix': self.D_1d,
-            'interp_matrix': self.L_interp,
-            'g_left': self.g_left,
-            'g_right': self.g_right
-        }
+            f"棱柱 [10,15)）——原生是唯一实现，没有第二个入口")

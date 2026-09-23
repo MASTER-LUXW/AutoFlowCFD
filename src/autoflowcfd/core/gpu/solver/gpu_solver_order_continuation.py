@@ -101,7 +101,7 @@ def gpu_solver_interpolate_to_new_order(solver, target_p: int) -> None:
     for o in stale_orders:
         del solver.mesh._order_geometry_cache[o]
     solver.mesh.set_order(target_p)
-    solver.ops = generate_fr_operators(target_p, flux_point_type=getattr(solver, 'flux_type', 'radau'))
+    solver.ops = generate_fr_operators(target_p)
 
     # --- 3. GPU 常驻网格数据 + 面几何重新上传 ---
     solver.mesh_data = solver.array_mgr.upload_mesh_data(solver.mesh, solver.ops)

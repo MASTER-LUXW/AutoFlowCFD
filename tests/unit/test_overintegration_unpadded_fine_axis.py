@@ -265,8 +265,7 @@ class TestContextContract:
             assert np.all(t_det[i] == det[5 + i, 0])
             assert np.all(t_inv[i] == inv[5 + i, 0])
 
-    def test_tet_fine_points_may_exceed_the_prism_layout_width(
-            self, monkeypatch):
+    def test_each_segment_carries_its_own_fine_point_count(self):
         """四面体细点数**可以**超过棱柱布局宽度——那条约束已被移除。
 
         它曾经是个真实约束（度量靠"切前 n_fine_tet 列"），并且把 P3 的
@@ -283,13 +282,16 @@ class TestContextContract:
         合成值直接撞上那道闸。用真实组合既保住了原意，又不再依赖一个
         构造不出来的状态。
 
-        **显式跑在坍缩档（2026-09-20）**：默认棱柱基改成 native 之后，P3
-        的棱柱布局宽度是 `prism_n_fine(6) = 196`，反而比四面体的 84 宽，
-        "四面体超过棱柱布局"这个前提在默认档下构造不出来。而那条被移除的
-        约束在坍缩档下仍然是真实可达的（64 < 84），所以这里显式指定
-        坍缩档来保住这条回归判据 —— 换成"跳过"等于悄悄失去覆盖。
+        **2026-09-23 改（坍缩棱柱基删除）**：此前这条显式跑在坍缩档，
+        因为默认改 native 之后 P3 的棱柱布局宽度是
+        `prism_n_fine(6) = 196`，反而比四面体的 84 宽，"四面体细点数超过
+        棱柱布局宽度"这个前提在原生档下**构造不出来**（坍缩档下 64 < 84
+        是真实可达的）。坍缩档已删除，所以改成验证这条判据真正保护的
+        **契约本身**：两段各自带自己的 `n_fine`，而不是共享一个宽度。
+        原生 P3 下 196 != 84，不等号方向反了但"两段宽度不同、各自与自己
+        的算子形状一致"这个契约照样能被证伪 —— 如果哪天有人把
+        `get_overintegration_context` 改回共享宽度，这里立刻失败。
         """
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")
         from types import SimpleNamespace
 
         from autoflowcfd.core.fr_operators.volume_contract import (
@@ -300,9 +302,10 @@ class TestContextContract:
         ops = generate_fr_operators(order)
         n_fine_tet = ops.overint_D_fine_tet.shape[0]
         n_fine_prism = ops.overint_D_fine_prism.shape[0]
-        assert n_fine_tet > n_fine_prism, (
-            f"P{order} 下四面体细点数 {n_fine_tet} 应当超过棱柱的 "
-            f"{n_fine_prism} —— 这条测试的前提就是这个不等式")
+        assert n_fine_tet != n_fine_prism, (
+            f"P{order} 下四面体细点数 {n_fine_tet} 与棱柱的 {n_fine_prism} "
+            f"相同 —— 这条测试的前提是两段宽度**不同**（原生 P3 实测 "
+            f"84 vs 196），相同就验证不出『逐段各自 n_fine』这个契约")
 
         n_cells, n_prism, n_tet = 4, 2, 2
         det = np.arange(
@@ -321,7 +324,7 @@ class TestContextContract:
         oi = get_overintegration_context(mesh, ops)
         assert oi is not None
         _, (_, _, t_nf, t_det, t_inv, *_) = oi["segs"]
-        assert t_nf == n_fine_tet > n_fine_prism
+        assert t_nf == n_fine_tet != n_fine_prism
         assert t_det.shape == (n_tet, n_fine_tet)
         assert t_inv.shape == (n_tet, n_fine_tet, 3, 3)
         for i in range(n_tet):

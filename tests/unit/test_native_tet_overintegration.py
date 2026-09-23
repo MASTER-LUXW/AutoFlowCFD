@@ -10,7 +10,9 @@ from autoflowcfd.fr.native_tet.basis import (
     build_native_tet_operators, map_native_tet_to_physical, compute_native_tet_jacobian,
     restricted_tet_modes,
 )
-from autoflowcfd.fr.collapsed_basis import OVERINTEGRATION_MAX_ORDER
+from autoflowcfd.fr.native_tet.overintegration import (
+    resolve_tet_overintegration_order,
+)
 
 TET_NODES = np.array([
     [0.1, -0.3, 0.2], [1.2, 0.0, -0.1], [-0.1, 1.1, 0.0], [0.0, 0.1, 1.3],
@@ -18,7 +20,14 @@ TET_NODES = np.array([
 
 
 def _over_order(order):
-    return min(2 * order, OVERINTEGRATION_MAX_ORDER)
+    """被测的 over_order 直接取**生产解析器**给出的值。
+
+    2026-09-23 之前这里写的是 `min(2*order, OVERINTEGRATION_MAX_ORDER=3)`
+    —— 那是**坍缩基**的条件数上限，四面体早在 2026-09-17 就独立出去了
+    （上限 6，env `AFCFD_TET_OVERINT_MAX_ORDER`），所以这份测试一直在
+    P2/P3 上测一个生产从不使用的阶数（P2 测 3，生产 4；P3 测 3，生产 6）。
+    """
+    return resolve_tet_overintegration_order(order)
 
 
 @pytest.mark.parametrize("order", [1, 2, 3])

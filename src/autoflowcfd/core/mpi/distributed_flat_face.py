@@ -132,6 +132,14 @@ class DistributedFlatFaceGeometry:
         return self.base_flat.true_area_weight
 
     @property
+    def face_area(self) -> np.ndarray:
+        return self.base_flat.face_area
+
+    @property
+    def cell_volume(self) -> np.ndarray:
+        return self.base_flat.cell_volume
+
+    @property
     def is_boundary(self) -> np.ndarray:
         return self.base_flat.is_boundary
 
@@ -175,25 +183,6 @@ class DistributedFlatFaceGeometry:
     def owner_src1_mat(self) -> np.ndarray:
         return self.base_flat.owner_src1_mat
 
-    @property
-    def boundary_extrap(self) -> np.ndarray:
-        return self.base_flat.boundary_extrap
-
-    @property
-    def g_left(self) -> np.ndarray:
-        return self.base_flat.g_left
-
-    @property
-    def g_right(self) -> np.ndarray:
-        return self.base_flat.g_right
-
-    @property
-    def dist_fp_of_sp(self) -> np.ndarray:
-        return self.base_flat.dist_fp_of_sp
-
-    @property
-    def dist_axis_coord_of_sp(self) -> np.ndarray:
-        return self.base_flat.dist_axis_coord_of_sp
 
 
 def _expand_compact_src1(src1_idx: np.ndarray, src1_cell_compact: np.ndarray) -> np.ndarray:
@@ -480,7 +469,7 @@ def build_distributed_flat_face(
         # `neighbor_cube_face` 按面索引正确切片（每个面各自的原始
         # cube face 编码，与是否 MPI 分区无关）；`boundary_extrap_native`/
         # `lift_native` 是只依赖 `(order, excluded_vertex)` 的全局共享
-        # 常量算子（与 `boundary_extrap` 同一个"可预计算一次、全网格
+        # 常量算子（与其余面算子同一个"可预计算一次、全网格
         # 同阶数单元共享"的性质，见 native_tet.basis.py 模块文档），
         # 不是逐面数据，原样透传（不切片）本来就是唯一正确的做法。CPU
         # 端残差 kernel（`inviscid_kernel.py`/`viscous_flux_kernel.py`）
@@ -492,6 +481,14 @@ def build_distributed_flat_face(
         # `ref_area_weight` 是**逐面相同**的参考求积权重（(n_fp,)），
         # 所以不按 local_face_indices 切、整块复用。
         ref_area_weight=global_flat.ref_area_weight,
+        # `face_area` 是**逐面**物理面积 -> 按面轴切片。
+        face_area=global_flat.face_area[local_face_indices],
+        # `cell_volume` 存的是*单元*量，必须按 `compact_global_ids`
+        # （扩展索引 -> 全局单元编号）重排到"棱柱在前"的 local+halo 索引
+        # 空间，与 owner/neighbor cell 索引所在的空间一致 —— 与
+        # `_remap_cell_indices` 处理 src0/src1 cell 字段同一个理由（那处
+        # 漏做重映射曾是"P>=1 阶数分区边界读错邻居数据"的直接原因）。
+        cell_volume=global_flat.cell_volume[compact_global_ids],
         boundary_extrap_native=global_flat.boundary_extrap_native,
         lift_native=global_flat.lift_native,
         # src0/src1 cell 字段存的是*单元*索引（不是面索引），必须重映射到
@@ -525,12 +522,7 @@ def build_distributed_flat_face(
         mixed_ow_mask=global_flat.mixed_ow_mask[local_face_indices],
         mixed_bnd_face=global_flat.mixed_bnd_face[local_face_indices],
         mixed_p0_bnd_frac=global_flat.mixed_p0_bnd_frac[local_face_indices],
-        boundary_extrap=global_flat.boundary_extrap,
-        g_left=global_flat.g_left,
-        g_right=global_flat.g_right,
         n1d=global_flat.n1d,
-        dist_fp_of_sp=global_flat.dist_fp_of_sp,
-        dist_axis_coord_of_sp=global_flat.dist_axis_coord_of_sp,
         color_face_indices=local_color_face_indices,
         n_colors=global_flat.n_colors,
     )

@@ -2,7 +2,8 @@
 
 ## 缺口
 
-`collapsed_basis.OVERINTEGRATION_MAX_ORDER = 3` 是**坍缩坐标模态
+`collapsed_basis.OVERINTEGRATION_MAX_ORDER = 3`（已于 2026-09-23
+随坍缩棱柱基一并删除）曾是**坍缩坐标模态
 Vandermonde 的条件数极限**（cond 在 N=4 达约 1e14、`max|D|` 暴涨约 6.3 万
 倍）。native 四面体走受限 PKD 基，实测到 over_order=6 才 cond=3856、
 `max|D|` 从 3 到 6 只长 3.5 倍（`test_native_tet_overintegration_
@@ -75,8 +76,7 @@ P3 从理想的 oo=6（84 个细点）夹到 5（56 <= 64），而去混叠误�
 import numpy as np
 import pytest
 
-from autoflowcfd.fr.collapsed_basis import (
-    OVERINTEGRATION_MAX_ORDER,
+from autoflowcfd.fr.overintegration_order import (
     resolve_overintegration_order_rule,
 )
 from autoflowcfd.fr.native_tet.overintegration import (
@@ -86,6 +86,12 @@ from autoflowcfd.fr.native_tet.overintegration import (
     resolve_tet_overintegration_order,
 )
 from autoflowcfd.fr.operators import generate_fr_operators
+
+#: 已删除的坍缩基过积分上限（原 `collapsed_basis.OVERINTEGRATION_MAX_ORDER`
+#: = 3，随坍缩棱柱基于 2026-09-23 一并删除，因为两种**原生**基各有自己的
+#: 上限、再无生产调用点）。本文件对比的是"放开前 vs 放开后"，所以这个数字
+#: 必须以**历史参照**的形式留在这里，而不是去读一个随生产默认值漂移的常量。
+_LEGACY_COLLAPSED_CAP = 3
 
 
 class TestNFineFormula:
@@ -199,14 +205,14 @@ class TestProductionOrders:
     def test_p1_unchanged_from_before_the_raise(self):
         """P1（当前生产阶数）的四面体阶数与放开上限之前**完全相同**。
 
-        旧行为 `min(2*1, OVERINTEGRATION_MAX_ORDER=3) = 2`，新行为
+        旧行为 `min(2*1, _LEGACY_COLLAPSED_CAP=3) = 2`，新行为
         `min(2*1, 6) = 2`，布局 27 >= 10 不约束——所以 P1 的过积分算子不受
         "放开上限"这一项影响，已验证的 P1 生产结果不因它改变。
         （`enforce_constant_annihilation` 是同批的**另一项**改动，它确实会
         在舍入量级上改动 P1，见 `test_diff_matrix_constant_annihilation.py`。）
         """
         assert resolve_tet_overintegration_order(1, (2 + 1) ** 3) == 2
-        assert min(2 * 1, OVERINTEGRATION_MAX_ORDER) == 2
+        assert min(2 * 1, _LEGACY_COLLAPSED_CAP) == 2
 
     def test_p2_reaches_the_ideal(self):
         """P2 的理想 oo=4 完整达到——这是本改动的主要收益（3400 倍）。"""

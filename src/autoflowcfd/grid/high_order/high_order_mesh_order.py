@@ -89,9 +89,11 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
     # `fr/native_prism/mode.py`）：原生基的节点不是张量积立方体点，把原生
     # 微分算子套到坍缩节点采样的场上不会报错、只会给出错的导数，所以算子
     # 与几何**必须一起**切换。
-    from autoflowcfd.fr.native_prism.mode import prism_basis_is_native
-
-    prism_native = prism_basis_is_native()
+    # 棱柱恒为原生基（坍缩档已于 2026-09-23 删除）。保留这个局部名而不是
+    # 把下面几处 `if prism_native:` 一并摊平：它在本函数里同时充当"原生档
+    # 要额外构造的那几样东西"的作用域标记，摊平会让 coarse/fine 两段共用
+    # 的那批 import 失去显式边界。
+    prism_native = True
 
     ref_native_prism = None
     if prism_native:

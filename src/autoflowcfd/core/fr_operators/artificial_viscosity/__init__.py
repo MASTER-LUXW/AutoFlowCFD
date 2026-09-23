@@ -58,7 +58,9 @@ Galerkin Methods") 传感器的局部人工粘性——这个传感器看的不�
 规范）：
 
     sensor_operators.py   三条基各自的传感器算子构造 + 缓存 + 设备搬运
-    sensor.py             三个 `compute_persson_peraire_sensor*` 求值函数
+    sensor.py             两个 `compute_persson_peraire_sensor_native_*`
+                          求值函数（坍缩族那个第三个已于 2026-09-23 随
+                          坍缩棱柱基一起删除）
     viscosity.py          斜坡映射 / troubled-cell 掩码 / 完整流水线
 
 这里只 re-export 公开名，全仓库既有的
@@ -66,7 +68,6 @@ Galerkin Methods") 传感器的局部人工粘性——这个传感器看的不�
 """
 
 from .sensor import (  # noqa: F401
-    compute_persson_peraire_sensor,
     compute_persson_peraire_sensor_native_prism,
     compute_persson_peraire_sensor_native_tet,
 )
@@ -85,7 +86,6 @@ __all__ = [
     "SENSOR_KAPPA",
     "compute_artificial_viscosity_ramp",
     "compute_persson_peraire_artificial_viscosity",
-    "compute_persson_peraire_sensor",
     "compute_persson_peraire_sensor_native_prism",
     "compute_persson_peraire_sensor_native_tet",
     "compute_troubled_cell_mask",

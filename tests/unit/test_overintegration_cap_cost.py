@@ -1,5 +1,5 @@
 """
-过积分上限 `OVERINTEGRATION_MAX_ORDER = 3` 在 P2/P3 上到底截断了多少？
+过积分上限 `OVERINTEGRATION_MAX_ORDER = 3`（已于 2026-09-23 删除）在 P2/P3 上到底截断了多少？
 
 ## 为什么需要量这个
 
@@ -20,7 +20,7 @@ NATIVE_TET_OVERINTEGRATION_MAX_ORDER = 6`，env `AFCFD_TET_OVERINT_MAX_ORDER`）
 所以下面表格里 P2 的 3->4 与 P3 的 3->6 现在是**已实现的收益**（P3 受布局
 夹到 5，差理想约 4 倍），不再是"若放开则可得"。本文件的作用相应变成：钉住
 各档去混叠误差的量级，让任何人改动过积分算子实现后立刻看到精度变化。
-**`OVERINTEGRATION_MAX_ORDER` 现在只约束棱柱**——下面几处用它来表示"当前
+**`OVERINTEGRATION_MAX_ORDER` 当年只约束棱柱**——下面几处用它来表示"当前
 上限"的地方保留原样，是为了记录量这些数时的历史状态。
 
 ## 算例设计（含一处必须避开的陷阱）
@@ -73,7 +73,6 @@ import numpy as np
 import pytest
 
 from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_batch
-from autoflowcfd.fr.collapsed_basis import OVERINTEGRATION_MAX_ORDER
 from autoflowcfd.fr.native_tet.basis import (
     build_native_tet_operators,
     compute_native_tet_jacobian,
@@ -85,9 +84,18 @@ from autoflowcfd.fr.native_tet.overintegration import (
 
 GAMMA, RHO, P0, U = 1.4, 1.225, 101325.0, 30.0
 
+#: 已删除的坍缩基过积分上限（原 `collapsed_basis._LEGACY_COLLAPSED_CAP`
+#: = 3，随坍缩棱柱基于 2026-09-23 一并删除，因为两种**原生**基各有自己的
+#: 上限、再无生产调用点）。本文件量的是"当年那条上限的代价"，所以这个数字
+#: 必须以**历史参照**的形式留在这里，而不是去读一个随生产默认值漂移的常量
+#: —— 否则这份代价记录会跟着默认值一起变，失去可比性。
+_LEGACY_COLLAPSED_CAP = 3
+
 
 def _resolve_rule():
-    from autoflowcfd.fr.collapsed_basis import resolve_overintegration_order_rule
+    from autoflowcfd.fr.overintegration_order import (
+        resolve_overintegration_order_rule,
+    )
 
     return resolve_overintegration_order_rule()
 
@@ -184,14 +192,14 @@ class TestCapCostIsLarge:
     """上限的代价必须仍然是"大"的 —— 这是"值得放开"这个判断的依据。
 
     方向是刻意的：若哪天这些比值变小了（例如换了过积分算子的构造方式），
-    放开上限的性价比就变了，那时应当连同 `OVERINTEGRATION_MAX_ORDER`
+    放开上限的性价比就变了，那时应当连同 `_LEGACY_COLLAPSED_CAP`
     上方的注释与项目记忆 `overintegration_cap_is_collapsed_only` 一起
     重新评估，而不是照旧引用"3400 倍"这个数。
     """
 
     def test_p2_cap_costs_at_least_100x(self):
         """P2：当前上限 3 vs 理想 4。实测 3400 倍。"""
-        capped = _median_rel_error(2, min(2 * 2, OVERINTEGRATION_MAX_ORDER))
+        capped = _median_rel_error(2, min(2 * 2, _LEGACY_COLLAPSED_CAP))
         ideal = _median_rel_error(2, 2 * 2)
         assert capped / ideal > 100.0, (
             f"P2 上限代价只有 {capped/ideal:.1f} 倍（实测 3400 倍），"
@@ -200,7 +208,7 @@ class TestCapCostIsLarge:
 
     def test_p3_overintegration_is_currently_a_noop(self):
         """P3：`min(2*3, 3) == 3 == order`，过积分退化为恒等，完全无操作。"""
-        assert min(2 * 3, OVERINTEGRATION_MAX_ORDER) == 3
+        assert min(2 * 3, _LEGACY_COLLAPSED_CAP) == 3
         noop = _median_rel_error(3, 3)
         ideal = _median_rel_error(3, 2 * 3)
         assert noop / ideal > 100.0, (
@@ -216,7 +224,7 @@ class TestCapCostIsLarge:
         `test_tet_overintegration_cap_raised.py::
         TestProductionOrders::test_p1_unchanged_from_before_the_raise`。
         """
-        assert min(2 * 1, OVERINTEGRATION_MAX_ORDER) == 2 * 1
+        assert min(2 * 1, _LEGACY_COLLAPSED_CAP) == 2 * 1
 
     def test_the_raised_tet_cap_actually_delivers_the_measured_gain(self):
         """放开后四面体**实际**取到的阶数，其误差就是本文件量出的那一档。

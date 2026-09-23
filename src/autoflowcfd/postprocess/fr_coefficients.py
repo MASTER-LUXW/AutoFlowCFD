@@ -87,7 +87,7 @@ def compute_aerodynamic_coefficients_fr(
     mu = solver.mu_molecular
     mu_t_field = solver._get_turbulent_viscosity_field()
 
-    def extrap_to_face(cell: int, field: np.ndarray, axis: int, side: float, oc_code: int) -> np.ndarray:
+    def extrap_to_face(field: np.ndarray, oc_code: int) -> np.ndarray:
         """体积场外插到某个 WALL 面的 Flux Points。
 
         真实 bug 修复（2026-09-03，"delete collapsed"后用真实 cube_demo
@@ -105,17 +105,12 @@ def compute_aerodynamic_coefficients_fr(
         （填充槽位不携带真实自由度，见 native_padding.py 文档），
         再做矩阵乘法，不能直接对全宽度 `field` 求值。
         """
-        if oc_code >= 6:
-            # 原生面统一走 `ops.native_face_extrap`（四面体 [6,10)、
-            # 棱柱 [10,15)，两类的 n_native 不同）。
-            E = ops.native_face_extrap(oc_code)  # (n_fp, n_native)
-            n_native = E.shape[1]
-            trailing = field.shape[1:]
-            flat = E @ field[:n_native].reshape(n_native, -1)
-            return flat.reshape((E.shape[0],) + trailing)
-        E = ops.boundary_extrap_prism[(axis, side)]
+        # 原生面统一走 `ops.native_face_extrap`（四面体 [6,10)、
+        # 棱柱 [10,15)，两类的 n_native 不同）。
+        E = ops.native_face_extrap(oc_code)  # (n_fp, n_native)
+        n_native = E.shape[1]
         trailing = field.shape[1:]
-        flat = E @ field.reshape(field.shape[0], -1)
+        flat = E @ field[:n_native].reshape(n_native, -1)
         return flat.reshape((E.shape[0],) + trailing)
 
     force_pressure = np.zeros(3)
@@ -141,24 +136,23 @@ def compute_aerodynamic_coefficients_fr(
         if not ffp.owner_is_primary:
             continue
         owner_cell = int(fc.owner_cell[f])
-        axis, side = ffp.owner_axis, ffp.owner_side
         oc_code = int(fc.owner_cube_face[f])
 
-        Q_fp = extrap_to_face(owner_cell, Q[owner_cell], axis, side, oc_code)  # (n_fp,5)
+        Q_fp = extrap_to_face(Q[owner_cell], oc_code)  # (n_fp,5)
         p_fp = Q_fp[:, 4]
         normal = ffp.true_normal  # (n_fp,3)
         area_w = ffp.true_area_weight  # (n_fp,)
         # 本面各 Flux Point 的物理坐标（外插 SPs 坐标场），减去力矩参考点得臂向量
-        r_arm = extrap_to_face(owner_cell, mesh.sps_coords[owner_cell], axis, side, oc_code) - mc  # (n_fp,3)
+        r_arm = extrap_to_face(mesh.sps_coords[owner_cell], oc_code) - mc  # (n_fp,3)
 
         d_force_p = p_fp[:, None] * normal * area_w[:, None]
         force_pressure += np.sum(d_force_p, axis=0)
         moment_pressure += np.sum(np.cross(r_arm, d_force_p), axis=0)
 
         if include_viscous:
-            gv_fp = extrap_to_face(owner_cell, grad_vel_full[owner_cell], axis, side, oc_code)  # (n_fp,3,3)
+            gv_fp = extrap_to_face(grad_vel_full[owner_cell], oc_code)  # (n_fp,3,3)
             mu_t_fp = (
-                extrap_to_face(owner_cell, mu_t_field[owner_cell][:, None], axis, side, oc_code)[:, 0]
+                extrap_to_face(mu_t_field[owner_cell][:, None], oc_code)[:, 0]
                 if mu_t_field is not None
                 else np.zeros(gv_fp.shape[0])
             )
@@ -254,7 +248,6 @@ def compute_forces_pressure_only(solver, reference_area: float) -> dict:
             if not ffp.owner_is_primary:
                 continue
             owner_cell = int(fc.owner_cell[f])
-            axis, side = ffp.owner_axis, ffp.owner_side
             oc_code = int(fc.owner_cube_face[f])
 
             # 真实 bug 修复（2026-09-03，同一处见 compute_aerodynamic_
@@ -266,12 +259,8 @@ def compute_forces_pressure_only(solver, reference_area: float) -> dict:
             # 面）分派到 `ops.boundary_extrap_native_tet[excluded_vertex]`
             # （形状 (n_fp,n_native)，只对 `Q[...,4][:n_native]` 这部分
             # 真实自由度求值，填充槽位不携带真实场值）。
-            if oc_code >= 6:
-                E = ops.native_face_extrap(oc_code)  # (n_fp, n_native)
-                Q_fp = E @ Q[owner_cell, :E.shape[1], 4]
-            else:
-                E = ops.boundary_extrap_prism[(axis, side)]
-                Q_fp = E @ Q[owner_cell, :, 4]  # pressure only, (n_fp,)
+            E = ops.native_face_extrap(oc_code)  # (n_fp, n_native)
+            Q_fp = E @ Q[owner_cell, :E.shape[1], 4]  # pressure only, (n_fp,)
             normal = ffp.true_normal
             area_w = ffp.true_area_weight
             force += np.sum(Q_fp[:, None] * normal * area_w[:, None], axis=0)

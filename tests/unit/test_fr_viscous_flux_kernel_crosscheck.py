@@ -20,6 +20,9 @@ from autoflowcfd.core.fr_residual.inviscid import (
 from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
 from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+from autoflowcfd.core.fr_operators.flux_kernels import (
+    resolve_viscous_ip_constant,
+)
 from autoflowcfd.core.fr_residual.inviscid_kernel import compute_boundary_ghost_states
 from autoflowcfd.core.fr_residual.viscous_flux_kernel import compute_viscous_interface_correction_kernel
 from autoflowcfd.boundary.fr_ghost_state import build_boundary_adiabatic_mask
@@ -105,7 +108,6 @@ def _compute_residual_via_new_kernel(U, mesh, ops, mu_t_field=None, boundary_gho
         Q, grad_vel, grad_T, mu_t_field,
         det_jacs, MU, PR, PR_T,
         flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
-        flat.owner_axis, flat.owner_side, flat.neighbor_axis, flat.neighbor_side,
         flat.owner_is_primary, flat.neighbor_is_primary,
         flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
         flat.neighbor_src0_cell, flat.neighbor_src0_mat,
@@ -114,12 +116,18 @@ def _compute_residual_via_new_kernel(U, mesh, ops, mu_t_field=None, boundary_gho
         flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
         flat.mixed_nb_partner, flat.mixed_nb_mask,
         flat.mixed_ow_partner, flat.mixed_ow_mask,
-        flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost, bnd_adiabatic,
-        flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
-        n_prism, n_threads,
+        Q_ghost, bnd_adiabatic,
+        n_threads,
         flat.owner_cube_face, flat.neighbor_cube_face,
         flat.ref_area_weight,
         flat.boundary_extrap_native, flat.lift_native,
+        # IP 罚项的几何量与按阶数解析的常数（2026-09-23 新增形参，
+        # 见 `flux_kernels.viscous_ip_penalty_tilde` /
+        # `resolve_viscous_ip_constant`）——必须与生产调用方
+        # `fr_residual/viscous_flux.py` 传的完全一致，否则这条交叉验证
+        # 比的就不是同一个格式了。
+        flat.face_area, flat.cell_volume,
+        resolve_viscous_ip_constant(int(mesh.order)),
     )
     residual = residual + correction
     # 机制3（残差量级离群清零）已于 2026-09-19 从生产实现里删除，

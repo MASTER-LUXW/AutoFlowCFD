@@ -30,10 +30,6 @@ from autoflowcfd.cli.solve_transient_distributed import _solve_transient_distrib
               default="cpu", help="计算后端")
 @click.option("--order", "-p", type=click.IntRange(1, 3), default=2,
               help="FR 离散阶数")
-@click.option("--flux-type", type=click.Choice(["radau", "gauss"]), default="radau",
-              help="FR 修正函数族（#14）：'radau'（默认，此前唯一使用过的方案，"
-                   "Huynh 记法 g_DG）；'gauss' 是与 Spectral Difference 等价的新方案"
-                   "（见 fr/matrix_operators.py 文档）")
 @click.option("--time-method", "-t",
               type=click.Choice(["rk3", "imex", "dual-time"]),
               default="rk3",
@@ -132,7 +128,7 @@ from autoflowcfd.cli.solve_transient_distributed import _solve_transient_distrib
 @click.option('--checkpoint-interval', type=int, default=100,
               help='分布式路径中间 checkpoint 保存间隔（单机路径瞬态求解不做中间保存，'
                    '只在结束后写一次，与 solve steady 的分布式分支同一个约定）')
-def transient(input_file: str, backend: str, order: int, flux_type: str, time_method: str,
+def transient(input_file: str, backend: str, order: int, time_method: str,
               turbulence_model: str, max_iter: int, phase_max_iter: Optional[int], residual_drop_threshold: float,
               dt: float, cfl_start: float, cfl_max: float, cfl_min: float,
         aoa_deg: float, aos_deg: float,
@@ -319,7 +315,6 @@ def transient(input_file: str, backend: str, order: int, flux_type: str, time_me
         turbulence_intensity=turbulence_intensity,
         viscosity_ratio=viscosity_ratio,
         sem_num_eddies=sem_num_eddies,
-        flux_type=flux_type,
         mu_molecular=mu_molecular,
         rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
         aoa_deg=aoa_deg, aos_deg=aos_deg,

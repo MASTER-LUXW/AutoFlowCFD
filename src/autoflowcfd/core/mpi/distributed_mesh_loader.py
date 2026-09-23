@@ -77,11 +77,16 @@ class PrecompactedMeshData:
         self, det_jacs, inv_jacs, det_jacs_fine, inv_jacs_fine,
         cell_volumes, sps_coords, cell_types,
         n_prism_cells, n_points_1d, n_sps_per_cell, n_sps_per_cell_fine,
-        face_area=None, face_normal=None,
+        order, face_area=None, face_normal=None,
     ):
         self.n_cells = det_jacs.shape[0]  # compact（local+halo）大小
         self.n_prism_cells = n_prism_cells
         self.n_points_1d = n_points_1d
+        # 多项式阶数：残差链路真实会读它（粘性 IP 罚项常数按阶数解析，见
+        # `fr_operators/flux_kernels.resolve_viscous_ip_constant`），而本
+        # 对象是 mesh-like 鸭子类型，凡残差链路读的 mesh 属性都必须持有。
+        # 2026-09-23 补上；不给默认值，因为"猜错阶数"会静默用错罚项常数。
+        self.order = int(order)
         self.n_sps_per_cell = n_sps_per_cell
         self.n_sps_per_cell_fine = n_sps_per_cell_fine
 
@@ -257,6 +262,7 @@ def build_fully_distributed_rank_package(
         cell_volumes=cell_volumes, sps_coords=sps_coords, cell_types=cell_types,
         n_prism_cells=dist_fc.base_flat.n_prism,
         n_points_1d=mesh.n_points_1d, n_sps_per_cell=n_sps, n_sps_per_cell_fine=n_sps_fine,
+        order=mesh.order,
         face_area=face_area_local, face_normal=face_normal_local,
     )
 
@@ -654,7 +660,7 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
         for o in stale_orders:
             del mesh._order_geometry_cache[o]
         mesh.set_order(target_p)
-        ops = generate_fr_operators(target_p, flux_point_type=getattr(solver, 'flux_type', 'radau'))
+        ops = generate_fr_operators(target_p)
         root_context['ops'] = ops
 
         turb_model_name = root_context['turb_model_name']
@@ -706,7 +712,7 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
 
     # --- 3. 应用新包：替换 compact 相关属性，保留 turb_model/sgs_model/
     # wmles_model 对象本身（只是上一步已经替换过它们的数组）---
-    solver.ops = generate_fr_operators(target_p, flux_point_type=getattr(solver, 'flux_type', 'radau'))
+    solver.ops = generate_fr_operators(target_p)
     solver.mesh = my_package['precompacted_mesh']
     solver.partition = my_package['partition']
     solver.dist_flat_face = my_package['dist_fc']

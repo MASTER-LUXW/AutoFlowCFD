@@ -38,63 +38,32 @@ def _uniform_freestream_U(mesh) -> np.ndarray:
 
 
 class TestNativeTetWmlesBoundaryExtrap:
-    def test_old_collapsed_extrap_would_give_wrong_answer_on_native_face(self):
-        """决定性前提验证：修复前的做法（对 native 四面体 WALL 面仍用
-        `ops.boundary_extrap_tet[(owner_axis,owner_side)]`外插）不只是
-        理论上"语义不对"，在这个具体合成网格上真的会暴露问题——
-        `owner_axis`/`owner_side`对 native 面存的是复用的 excluded_
-        vertex/哑值，逐面检查发现两种暴露方式都出现了：有的面伪键
-        根本不在 6 个合法 (axis,side) 组合里，直接 KeyError；有的面
-        伪键凑巧撞上某个真实键，但取到的矩阵语义不对，外插结果与正确
-        的 native 外插（`boundary_extrap_native_tet`，按需 pad）不同。
-        这证明这是一个需要真正修复的真实 bug，而不是理论上的边界情况。"""
-        from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
-        from autoflowcfd.fr.native_padding import pad_native_matrix_to_global
+    def test_the_collapsed_extrap_table_is_gone(self):
+        """原「修复前的做法会出错」那条前提验证已随被测对象一并删除。
 
-        order = 2
-        mesh = _build_synthetic_mixed_mesh(order, tet_basis_mode="native")
-        ops = generate_fr_operators(order)
-        flat = get_flat_face_geometry(mesh, ops)
-        n_sps = mesh.n_sps_per_cell
+        它当年逐面证明了：对原生四面体 WALL 面沿用
+        `ops.boundary_extrap_tet[(owner_axis, owner_side)]` 外插，两种
+        暴露方式都会真的出现 —— 有的面伪键根本不在 6 个合法 (axis,side)
+        组合里、直接 `KeyError`；有的面伪键凑巧撞上某个真实键、取到的
+        矩阵语义不对，外插结果与正确的原生外插不同。那份证据保留在
+        `ProjectFiles/V2.0/19_重大问题修复-湍流模型跨后端逐项排查与完全
+        分布式加载补齐.md`。
 
-        # 只取 native **四面体**面 [6,10)（2026-09-20）：原生棱柱基下
-        # 棱柱面也是 native 编码（[10,15)），但本文件钉的是四面体那条
-        # 分派，把棱柱面混进来会用四面体的表去查棱柱编码。
-        oc = flat.owner_cube_face
-        native_faces = np.nonzero((oc >= 6) & (oc < 10))[0]
-        assert len(native_faces) > 0, "test setup must produce at least one native tet face"
+        2026-09-24 起 `FROperators` 上已经没有 `boundary_extrap_tet` /
+        `boundary_extrap_prism` 这两张坍缩外插表（随坍缩 1D 分布机制一并
+        删除，见 `fr_residual/inviscid_kernel.py::
+        compute_inviscid_interface_correction_kernel` 文档），那条错误做法
+        在代码层面已经不可能被写出来。这里把「表确实没了」钉住，取代
+        原来那条无法再运行的前提验证。
+        """
+        ops = generate_fr_operators(2)
+        for gone in ("boundary_extrap_tet", "boundary_extrap_prism",
+                     "g_left", "g_right", "L_interp"):
+            assert not hasattr(ops, gone), (
+                f"FROperators 又出现了 {gone} —— 那条坍缩路径已于 "
+                f"2026-09-24 删除，重新加回它需要先恢复一条一维张量积"
+                f"离散路径（见 ProjectFiles/V2.0/27_...md）")
 
-        rng = np.random.default_rng(0)
-        field = rng.uniform(-1.0, 1.0, size=(n_sps, 3))
-
-        # 逐个 native 面检查修复前的做法（用 owner_axis/owner_side 当
-        # 坍缩坐标键查 ops.boundary_extrap_tet）会不会暴露问题——两种
-        # 暴露方式都足以证明这是真实 bug：(a) 伪键根本不在 6 个合法
-        # (axis,side) 组合里，直接 KeyError；(b) 伪键凑巧撞上某个真实
-        # 键，但取到的矩阵语义不对，外插结果与正确的 native 外插不同。
-        found_keyerror = False
-        found_wrong_value = False
-        for f in native_faces:
-            axis, side = int(flat.owner_axis[f]), float(flat.owner_side[f])
-            excluded_vertex = int(flat.owner_cube_face[f]) - 6
-            E_correct = pad_native_matrix_to_global(
-                ops.boundary_extrap_native_tet[excluded_vertex], n_sps, pad_axes=(1,)
-            )
-            result_correct = E_correct @ field
-            try:
-                E_wrong = ops.boundary_extrap_tet[(axis, side)]
-            except KeyError:
-                found_keyerror = True
-                continue
-            result_wrong = E_wrong @ field
-            if result_wrong.shape != result_correct.shape or not np.allclose(result_wrong, result_correct):
-                found_wrong_value = True
-
-        assert found_keyerror or found_wrong_value, (
-            "修复前的坍缩坐标外插矩阵在这个网格的全部 native 面上都恰好"
-            "得到与正确 native 外插相同的结果——说明这份合成网格无法暴露"
-            "该 bug，需要换一个反例网格"
-        )
 
     def test_wmles_wall_stress_on_native_tet_face(self):
         order = 2

@@ -43,29 +43,27 @@ def _check_prism_basis(meta_group, checkpoint_path) -> None:
     与 `config_hash` 那条**刻意不同级别**：配置哈希不一致只是"可能影响
     结果"（例如 CFL 上限变了），而棱柱基不一致是"这份数据的含义变了"。
 
-    `prism_basis` 属性是 2026-09-20 才开始写的。属性缺失时：
+    `prism_basis` 属性是 2026-09-20 才开始写的，而坍缩棱柱基已于
+    2026-09-23 删除（原生是唯一实现）。于是只剩两种不兼容情形，**都必须
+    硬失败**：
 
-    * 当前是 `collapsed` -> 放行（那之前**唯一**的默认值就是 collapsed，
-      这是兼容的组合），只记一条 info；
-    * 当前是 `native` -> **拒绝**（正是危险组合：默认值改成 native 之后
-      去 resume 一份 collapsed 时代的 checkpoint）。
+    * 属性缺失 -> 那是 2026-09-20 之前写的 checkpoint，那时唯一的默认值
+      是 collapsed；
+    * 属性存在但不是 `"native"` -> 显式在坍缩档下写的。
+
+    两者都拒绝，因为两条基的每单元解点布局不同（原生基有零填充槽位），
+    而形状恰好相同、**不会报错**，只会静默重解释成错解。
     """
     from autoflowcfd.fr.native_prism.mode import resolve_prism_basis_mode
 
     current = resolve_prism_basis_mode()
     if 'prism_basis' not in meta_group.attrs:
-        if current == "collapsed":
-            logger.info(
-                "Checkpoint 没有记录棱柱基（2026-09-20 之前写的），当前是 "
-                "collapsed —— 那之前唯一的默认值也是 collapsed，组合兼容。")
-            return
         raise ValueError(
             f"Checkpoint {checkpoint_path} 没有记录棱柱基（2026-09-20 之前"
-            f"写的，那时唯一的默认值是 collapsed），而当前 "
-            f"AFCFD_PRISM_BASIS={current!r}。两条基的每单元解点布局不同，"
-            f"跨基 resume 会静默给出错解（形状恰好相同、不会报错）。"
-            f"要么用 AFCFD_PRISM_BASIS=collapsed 续算这份 checkpoint，"
-            f"要么在当前基下从头开始。")
+            f"写的，那时唯一的默认值是已删除的 collapsed）。两条基的每单元"
+            f"解点布局不同，跨基 resume 会静默给出错解（形状恰好相同、"
+            f"不会报错）。坍缩棱柱基已于 2026-09-23 删除，没有"
+            f"“用坍缩档续算”这个选项了 —— 只能在原生基下从头开始。")
 
     saved = decode_attr(meta_group.attrs['prism_basis'])
     if saved != current:

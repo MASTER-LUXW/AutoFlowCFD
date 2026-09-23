@@ -147,7 +147,20 @@ def prism_modal_basis_and_grad(
 
 
 def build_collapsed_diff_matrices(cell_type: str, order: int, ref_cube_sps: np.ndarray) -> np.ndarray:
-    """在给定参考点集（现有张量积 Gauss-Legendre SPs，Duffy 映射前的
+    """**这个函数已不在任何生产路径上**（2026-09-23）：坍缩四面体基
+    2026-09-03 删除、坍缩棱柱基 2026-09-23 删除，体积微分算子现在一律
+    是原生基的填充版（见 `fr/operators/build.py` 3e/3f 两段）。刻意保留
+    的理由是它承载**两份仍然有效的证据**，都不是重复实现：
+
+      1. 它是仍在生产中的坍缩模态基（`prism_modal_basis_and_grad` /
+         `tet_modal_basis_and_grad`，面通量点参数化与模态滤波器在用）的
+         直接数学检验 —— `D = V_xi @ inv(V)` 必须精确重现模态基自身的
+         解析导数（`tests/unit/test_collapsed_basis.py`）；
+      2. 它是"为什么换成原生基"这个决定的**条件数对照组**
+         （`tests/unit/test_native_prism_basis.py`、
+         `test_diff_matrix_constant_annihilation.py` 的史料数字）。
+
+    在给定参考点集（现有张量积 Gauss-Legendre SPs，Duffy 映射前的
     计算立方体坐标）上，构造该单元类型专用的微分矩阵 D，与
     fr/operators.py::FROperators.D_3d 同形状 (n_sps,n_sps,3)、同语义
     （D[:,:,m] 是对第 m 个参考坐标方向求导的矩阵），可直接替换 D_3d 在

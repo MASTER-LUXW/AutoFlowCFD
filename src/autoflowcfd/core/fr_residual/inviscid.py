@@ -112,16 +112,6 @@ def ausm_up_flux_batch(Q_L: np.ndarray, Q_R: np.ndarray, normal: np.ndarray,
     return flux
 
 
-def _distribute_from_face(fp_data: np.ndarray, n1d: int, axis: int, g_prime: np.ndarray) -> np.ndarray:
-    """把 (n1d^2, ...) 的面数据按 g'(x) 权重分配回 (n1d^3, ...) 的 SPs 残差贡献。"""
-    trailing_shape = fp_data.shape[1:]
-    other_axes = [a for a in range(3) if a != axis]
-    fp_grid = fp_data.reshape((n1d, n1d) + trailing_shape)
-    expanded = np.tensordot(g_prime, fp_grid, axes=0)  # (n1d_axis, n1d, n1d, ...)
-    result = np.moveaxis(expanded, 0, axis)
-    return result.reshape((n1d**3,) + trailing_shape)
-
-
 class DefaultGhostProvider:
     """默认的边界幽灵态提供者：零梯度外插（ghost = 内部外插态），
     仅用于尚未接入真实边界条件（BD-01，见 boundary/fr_weak_bc.py 的接入
@@ -167,7 +157,7 @@ def compute_inviscid_residual_fr(
         U: 守恒变量，形状 (n_cells, n_sps, n_vars)；只使用前5个欧拉变量
         mesh: HighOrderMesh 实例，需要已调用 load_from_volume_mesh
             （提供 face_connectivity, face_flux_points, jacobians）
-        ops: FROperators（D_3d, g_left, g_right）
+        ops: FROperators（D_3d_prism/D_3d_tet 等体积算子）
         boundary_ghost_provider: 可调用对象 (face_idx, Q_owner_fp, true_normal) -> Q_ghost_fp，
             用于给出边界面的幽灵态；None 时使用 DefaultGhostProvider（零梯度外插）
         mach_ref: AUSM+up Weiss-Smith 预处理用的参考（自由来流）马赫数
@@ -407,7 +397,6 @@ def compute_inviscid_residual_fr(
             compute_inviscid_interface_correction_kernel_colored(
                 Q, det_jacs,
                 flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
-                flat.owner_axis, flat.owner_side, flat.neighbor_axis, flat.neighbor_side,
                 flat.owner_is_primary, flat.neighbor_is_primary,
                 flat.true_normal,
                 flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
@@ -417,9 +406,8 @@ def compute_inviscid_residual_fr(
                 flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
                 flat.mixed_nb_partner, flat.mixed_nb_mask,
                 flat.mixed_ow_partner, flat.mixed_ow_mask,
-                flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
-                flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
-                n_prism, face_indices, correction, mach_ref, precond_mode,
+                Q_ghost,
+                face_indices, correction, mach_ref, precond_mode,
                 flat.owner_cube_face, flat.neighbor_cube_face,
                 flat.ref_area_weight,
                 flat.boundary_extrap_native, flat.lift_native,
@@ -431,7 +419,6 @@ def compute_inviscid_residual_fr(
         correction = compute_inviscid_interface_correction_kernel(
             Q, det_jacs,
             flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
-            flat.owner_axis, flat.owner_side, flat.neighbor_axis, flat.neighbor_side,
             flat.owner_is_primary, flat.neighbor_is_primary,
             flat.true_normal,
             flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
@@ -441,9 +428,8 @@ def compute_inviscid_residual_fr(
             flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
             flat.mixed_nb_partner, flat.mixed_nb_mask,
             flat.mixed_ow_partner, flat.mixed_ow_mask,
-            flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
-            flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
-            n_prism, n_threads, mach_ref, precond_mode,
+            Q_ghost,
+            n_threads, mach_ref, precond_mode,
             flat.owner_cube_face, flat.neighbor_cube_face,
             flat.ref_area_weight,
             flat.boundary_extrap_native, flat.lift_native,

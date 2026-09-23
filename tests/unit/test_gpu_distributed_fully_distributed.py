@@ -344,7 +344,6 @@ class TestRedistributeMultiGpuFullyDistributedForNewOrder:
         solver.n_ranks = 1
         solver.device_id = 0
         solver.current_order = 0
-        solver.flux_type = "radau"
         solver._root_context = root_context
         solver._package_freestream = root_context['freestream']
         solver.freestream = {**root_context['freestream'], "mach_ref": root_context['mach_ref']}
@@ -396,7 +395,6 @@ class TestRedistributeMultiGpuFullyDistributedForNewOrder:
         solver.n_ranks = 1
         solver.device_id = 0
         solver.current_order = 1
-        solver.flux_type = "radau"
         solver._root_context = root_context
         solver._package_freestream = root_context['freestream']
         solver.freestream = {**root_context['freestream'], "mach_ref": root_context['mach_ref']}

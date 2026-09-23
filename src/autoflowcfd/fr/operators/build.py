@@ -6,48 +6,34 @@
 
 import numpy as np
 
-from ..quadrature_points import gauss_legendre, gauss_lobatto
+from ..quadrature_points import gauss_legendre
 from ..matrix_operators import (
     compute_diff_matrix_1d,
     compute_diff_matrix_3d,
-    compute_interpolation_matrix,
-    compute_correction_weights,
 )
-from ..native_prism.mode import prism_basis_is_native
 from ..overintegration_order import (
     prism_n_fine,
+    resolve_overintegration_order_rule,
     resolve_prism_overintegration_order,
-)
-from ..collapsed_basis import (
-    build_collapsed_diff_matrices,
-    build_collapsed_boundary_extrap,
-    build_overintegration_operators,
 )
 from ..modal_filter import build_prism_modal_filter
 from .container import FROperators
 
 
-def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROperators:
+def generate_fr_operators(order: int) -> FROperators:
     """
     生成完整的 FR 算子集合。
 
     Args:
         order: 多项式阶数 P
-        flux_point_type: 修正函数族 + FP 位置选择：
-            - 'radau'（默认，此前默认值 'lobatto' 与其行为完全等价，见下）：
-              校正函数用 VCJH η_p=0 方案（Huynh 记法 "g_DG"，此前代码误
-              标为 "g2"，见 matrix_operators.py 2026-08-28 的命名修正
-              说明），FPs 用 Gauss-Lobatto 求积点——这是此前唯一被生产
-              路径实际使用过的组合（所有既有调用点都不显式传参，见
-              compute_correction_weights 调用处历史行为）。'lobatto' 仍
-              作为同义值保留，不破坏任何硬编码传了这个字符串的旧代码。
-            - 'gauss'（#14 新增）：校正函数用 VCJH η_p=p/(p+1) 方案，与
-              Spectral Difference (SD) 方法等价（matrix_operators.py::
-              _compute_gauss_correction_derivative 文档的完整推导/引用），
-              配套地把 FPs 改为 SPs 本身 + 两个边界点（标准 SD 做法：
-              通量在 SPs 处直接重构，不是在额外的 Lobatto 求积点插值）——
-              这个 FP 位置选择与校正函数选择是同一个物理方案的两个方面，
-              绑定在同一个 flux_point_type 参数下，不单独暴露。
+
+    **不再有 `flux_point_type` 形参**（2026-09-24）：FR 校正函数族
+    （VCJH η_p）是一维张量积 FR 形式特有的自由度，而原生单纯形/棱柱基的
+    界面项是 DG 提升算子、本身就是 nodal DG。删掉坍缩 1D 分布机制之后，
+    这个参数唯一影响的四个产物（`g_left`/`g_right`/`L_interp`/`fps`）
+    全部没有消费点，两个取值给出逐位相同的结果 —— 完整论证与两种修正函数
+    的公式/文献保留在 `ProjectFiles/V2.0/27_FR修正函数族在原生基下不适用-
+    flux-type移除.md`。
 
     四面体基（2026-09-03 起不再可选，见模块文档）：永远是 native 单纯形基
     （路径C），不再接受 `tet_basis_mode` 参数——坍缩坐标（Duffy 变换）
@@ -56,6 +42,18 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
     Returns:
         operators: 包含所有预计算算子的 FROperators 对象
     """
+    # `AFCFD_PRISM_BASIS` 的**唯一校验点**（2026-09-24）：坍缩棱柱基删除
+    # 之后，除 checkpoint 存/取之外再没有代码读这个环境变量，于是
+    # `AFCFD_PRISM_BASIS=collapsed` 会被**静默忽略**、照原生跑 —— 那正是
+    # 本项目明确禁止的静默降级（同一原则见 `fr_solver/filter.py::
+    # resolve_filter_mode`、`overintegration_order.py::
+    # resolve_native_overintegration_max_order`）。这里调一次纯为它的校验
+    # 副作用：非法取值当场报错。每条后端路径（单机 CPU / GPU / CPU MPI /
+    # 多 GPU / Order Continuation 重建算子）都要经过本函数，所以这一个点
+    # 就够，不需要在各入口重复。
+    from ..native_prism.mode import resolve_prism_basis_mode
+    resolve_prism_basis_mode()
+
     n = order + 1  # SPs 数量
     # 全局统一 SPs 宽度（张量积立方体点数）——原生基（四面体/棱柱）的
     # 真实自由度少于它，一律零填充到这个宽度，见 fr/native_padding.py
@@ -73,40 +71,17 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
     # 四面体走 native 单纯形基，见下方 3e）。
     D_3d = compute_diff_matrix_3d(D_1d)
 
-    # 3b. 棱柱专用坍缩坐标体积微分矩阵，SPs 与上面完全相同（张量积
-    # Gauss-Legendre 点），只是构造 D 用的基不同——见 collapsed_basis.py
-    # 与 FROperators.D_3d_prism 文档。棱柱没有 native 方案，坍缩坐标是
-    # 唯一、正确的构造方式，不受本次删除 collapsed 四面体基的影响。
-    aa, bb, cc = np.meshgrid(sps, sps, sps, indexing="ij")
-    ref_cube_sps = np.column_stack([aa.ravel(), bb.ravel(), cc.ravel()])
-    D_3d_prism = build_collapsed_diff_matrices("prism", order, ref_cube_sps)
-
-    # 3c. 棱柱专用体积->边界外插矩阵（同一套坍缩坐标模态基），见
-    # FROperators.boundary_extrap_prism 文档。
-    boundary_extrap_prism = {}
-    for axis in range(3):
-        for side in (-1.0, 1.0):
-            boundary_extrap_prism[(axis, side)] = build_collapsed_boundary_extrap(
-                "prism", order, ref_cube_sps, axis, side
-            )
-
-    # 3d. 棱柱指数模态滤波矩阵（见 fr/modal_filter.py 文档 与
-    # FROperators.filter_prism 文档）。
-    filter_prism = build_prism_modal_filter(order, ref_cube_sps)
-
-    # 4. 计算插值矩阵。判据键在 'gauss' 上（而不是此前的 'lobatto'）：
-    # 任何非 'gauss' 的取值（'radau'/'lobatto'/历史调用点省略此参数）都
-    # 路由到同一个 Gauss-Lobatto FP 分支，保证除新增的 'gauss' 外行为
-    # 完全不变——见本函数 flux_point_type 参数文档。
-    if flux_point_type == 'gauss':
-        fps = np.concatenate([[-1.0], sps, [1.0]])
-    else:
-        fps, _ = gauss_lobatto(n + 1)
-
-    L_interp = compute_interpolation_matrix(sps, fps)
-
-    # 5. 计算校正权重
-    g_left, g_right = compute_correction_weights(n, flux_point_type)
+    # 3b. `ref_cube_sps` 与 `boundary_extrap_prism` 都已删除
+    # （2026-09-24）：前者唯一的用途是喂给后者，后者的全部消费点随坍缩
+    # 1D 分布机制一并删除。原生棱柱/四面体的**面通量点定位**刻意复用
+    # 坍缩立方体面的参数化（`newton_locate_on_face`，等价性已验证到
+    # 7.5e-17），但那条路径自己在 `fr/face_flux_points/geometry.py` 里
+    # 调 `prism_modal_basis_and_grad`，不经过这里。
+    #
+    # 同批删除的还有 `fps`/`L_interp`（SP->FP 插值矩阵与 FP 位置）与
+    # `g_left`/`g_right`（修正函数导数）：面通量点的真实位置来自
+    # `fr/face_flux_points`（在物理面上 Newton 定位），修正函数族在
+    # DG lift 形式下不存在，两组都没有任何消费点。
 
     # 6. 棱柱体积项去混叠算子（order==0 时 P0 走独立有限体积路径，不
     # 需要）。四面体那份见下方 3e。
@@ -127,36 +102,37 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
     if order >= 1:
         overint_order_prism = resolve_prism_overintegration_order(order)
         n_fine_prism = prism_n_fine(overint_order_prism)
-        if prism_basis_is_native():
-            # 原生档：细网格轴取**真实**细点数、不填充到 `(oo+1)^3`
-            # （填充槽位恒为零、零贡献，而 `D_fine` 的收缩是
-            # O(n_fine^2)）；粗网格轴仍必须填充到 `n_sps_global`，因为
-            # `Q` 数组是那个宽度的填充布局。与四面体（下方 3e）逐条对应
-            # 的同一套做法，理由见 `native_prism/overintegration.py`
-            # 模块文档差异（三）。
-            from ..native_prism.overintegration import (
-                build_native_prism_overintegration_operators,
-            )
-            from ..native_padding import pad_native_matrix_to_global
+        # 棱柱恒为原生基（坍缩档已于 2026-09-23 删除）：细网格轴取
+        # **真实**细点数、不填充到 `(oo+1)^3` —— 填充槽位恒为零、零
+        # 贡献，而 `D_fine` 的收缩是 O(n_fine^2)（实测去掉细轴填充后
+        # P1 加速 3.04x、P2 加速 4.63x，最大相对差 1.4e-16）。粗网格
+        # 轴仍必须填充到 `n_sps_global`，因为 `Q` 数组是那个宽度的
+        # 填充布局。
+        # 原生档：细网格轴取**真实**细点数、不填充到 `(oo+1)^3`
+        # （填充槽位恒为零、零贡献，而 `D_fine` 的收缩是
+        # O(n_fine^2)）；粗网格轴仍必须填充到 `n_sps_global`，因为
+        # `Q` 数组是那个宽度的填充布局。与四面体（下方 3e）逐条对应
+        # 的同一套做法，理由见 `native_prism/overintegration.py`
+        # 模块文档差异（三）。
+        from ..native_prism.overintegration import (
+            build_native_prism_overintegration_operators,
+        )
+        from ..native_padding import pad_native_matrix_to_global
 
-            (_ref_fine_np, _c2f_np, overint_D_fine_prism,
-             _f2c_np) = build_native_prism_overintegration_operators(
-                order, overint_order_prism)
-            if _ref_fine_np.shape[0] != n_fine_prism:
-                raise ValueError(
-                    f"原生棱柱细点数不一致：算子给出 "
-                    f"{_ref_fine_np.shape[0]}，`prism_n_fine` 给出 "
-                    f"{n_fine_prism}（order={order}, "
-                    f"over_order={overint_order_prism}）——两者必须相同，"
-                    f"后者同时是 mesh.n_sps_per_cell_fine 的布局宽度")
-            overint_interp_c2f_prism = pad_native_matrix_to_global(
-                _c2f_np, n_sps_global, pad_axes=(1,))
-            overint_restrict_f2c_prism = pad_native_matrix_to_global(
-                _f2c_np, n_sps_global, pad_axes=(0,))
-        else:
-            (_, overint_interp_c2f_prism, overint_D_fine_prism,
-             overint_restrict_f2c_prism) = build_overintegration_operators(
-                "prism", order, overint_order_prism, ref_cube_sps)
+        (_ref_fine_np, _c2f_np, overint_D_fine_prism,
+         _f2c_np) = build_native_prism_overintegration_operators(
+            order, overint_order_prism)
+        if _ref_fine_np.shape[0] != n_fine_prism:
+            raise ValueError(
+                f"原生棱柱细点数不一致：算子给出 "
+                f"{_ref_fine_np.shape[0]}，`prism_n_fine` 给出 "
+                f"{n_fine_prism}（order={order}, "
+                f"over_order={overint_order_prism}）——两者必须相同，"
+                f"后者同时是 mesh.n_sps_per_cell_fine 的布局宽度")
+        overint_interp_c2f_prism = pad_native_matrix_to_global(
+            _c2f_np, n_sps_global, pad_axes=(1,))
+        overint_restrict_f2c_prism = pad_native_matrix_to_global(
+            _f2c_np, n_sps_global, pad_axes=(0,))
 
     # 3e. 四面体 native 单纯形基（路径C）——2026-09-03 起唯一实现，
     # 恒无条件构造（不再有 collapsed 分支可选，见模块文档）。
@@ -199,9 +175,6 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
     # 套到坍缩节点采样的场上没有任何意义（不会报错，只会给出错的导数），
     # 所以 `grid/high_order/high_order_mesh_order.py::build_order_geometry`
     # 读同一个 `AFCFD_PRISM_BASIS` 分派棱柱段的点位与雅可比。
-    from ..native_prism.mode import resolve_prism_basis_mode
-
-    prism_basis_mode = resolve_prism_basis_mode()
     D_native_prism = None
     ref_native_prism = None
     n_native_sps_prism = None
@@ -210,7 +183,7 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
     D_native_prism_padded = None
     lift_native_prism_padded = None
     filter_native_prism_padded = None
-    if prism_basis_mode == "native":
+    if True:  # 棱柱恒为原生基（坍缩档 2026-09-23 删除）
         from ..native_prism.basis import (
             build_native_prism_modal_filter,
             build_native_prism_operators,
@@ -234,30 +207,6 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
         D_3d_prism = D_native_prism_padded
         filter_prism = filter_native_prism_padded
 
-    # `boundary_extrap_tet` 保留为占位字典（形状与坍缩坐标版本一致：
-    # (n_fp,n_sps)=((order+1)**2,(order+1)**3)）——只是为了不用同步修改
-    # `core/fr_operators/face_kernels.py` 里"无条件按 (celltype,axis,
-    # side) 拼表"那段代码；四面体面经 `with_native_face_codes` 翻译后
-    # 恒为 native 编码，这些占位行在生产路径上不会被真正读取，见模块
-    # 文档"提前无条件求值导致越界"一节的同一原理。
-    #
-    # **占位值从 0 改为 NaN（2026-09-14）**：这是"不变量成立才是死代码"
-    # 的典型情形——只要哪天"四面体面恒为 native 编码"这条不变量被破坏
-    # （新的面翻译路径、某个绕过 `with_native_face_codes` 的构造方式），
-    # 全零算子会把外插态**静默**算成 0（常数外插本该得常数），残差随之
-    # 完全错误，而且不报任何错、也不会触发正性限制器。填 NaN 则会立刻
-    # 沿残差传播、被求解器既有的 `np.all(np.isfinite(...))` 检查抓住，
-    # 把静默错误变成显式失败。
-    # 前提已核实：改成 NaN 后全量测试仍然通过，说明生产路径确实从不
-    # 读取这些行（否则 NaN 会立刻让测试失败——这本身就是对该不变量
-    # 最直接的一次验证）。
-    _n_fp_placeholder = boundary_extrap_prism[(0, -1.0)].shape[0]
-    boundary_extrap_tet = {
-        (axis, side): np.full((_n_fp_placeholder, n_sps_global), np.nan,
-                              dtype=np.float64)
-        for axis in range(3) for side in (-1.0, 1.0)
-    }
-
     # native 单纯形基过积分（去混叠）算子（Part8 文档"四·七"节）：fine
     # 网格宽度沿用与棱柱相同的 (over_order+1)^3（`n_sps_per_cell_fine`，
     # 见 high_order_mesh_order.py::build_order_geometry），native 自己
@@ -278,7 +227,8 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
         # ===== 四面体过积分阶数与棱柱**解耦**（2026-09-17）=====
         #
         # 此前这里直接复用棱柱的 `overint_order`，也就是让 native 四面体
-        # 继承 `OVERINTEGRATION_MAX_ORDER = 3` 这个**坍缩基条件数上限**。
+        # 继承坍缩基那条 `OVERINTEGRATION_MAX_ORDER = 3` 条件数上限
+        # （该常量已随坍缩棱柱基于 2026-09-23 一并删除）。
         # 实测证明那条依据对 native PKD 基不成立（见上方 3d 注释），而
         # 上限的代价是量过的（tests/unit/test_overintegration_cap_cost.py，
         # 以 over_order=8 为参照的体积项去混叠相对误差中位数）：
@@ -301,8 +251,6 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
         # P1 的阶数与改动前相同，所以"放开上限"这一项不改变已验证的 P1
         # 生产结果（同批的 `enforce_constant_annihilation` 会在舍入量级上
         # 改动它，见 tests/unit/test_diff_matrix_constant_annihilation.py）。
-        from ..collapsed_basis import resolve_overintegration_order_rule
-
         overint_order_tet = resolve_tet_overintegration_order(order)
         _oo_tet_ideal = resolve_overintegration_order_rule() * order
         if overint_order_tet < _oo_tet_ideal:
@@ -373,11 +321,6 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
         D_3d=D_3d,
         D_3d_tet=D_3d_tet,
         D_3d_prism=D_3d_prism,
-        L_interp=L_interp,
-        g_left=g_left,
-        g_right=g_right,
-        boundary_extrap_tet=boundary_extrap_tet,
-        boundary_extrap_prism=boundary_extrap_prism,
         filter_tet=filter_tet,
         filter_prism=filter_prism,
         overint_order_prism=overint_order_prism,
@@ -398,7 +341,6 @@ def generate_fr_operators(order: int, flux_point_type: str = 'radau') -> FROpera
         D_native_tet_padded=D_native_tet_padded,
         lift_native_tet_padded=lift_native_tet_padded,
         filter_native_tet_padded=filter_native_tet_padded,
-        prism_basis_mode=prism_basis_mode,
         D_native_prism=D_native_prism,
         ref_native_prism=ref_native_prism,
         n_native_sps_prism=n_native_sps_prism,
@@ -418,6 +360,3 @@ if __name__ == "__main__":
     print(f"FR Operators for P={order}:")
     print(f"  D_1d shape: {ops.D_1d.shape}")
     print(f"  D_3d shape: {ops.D_3d.shape}")
-    print(f"  L_interp shape: {ops.L_interp.shape}")
-    print(f"  g_left shape: {ops.g_left.shape}")
-    print(f"  g_right shape: {ops.g_right.shape}")

@@ -100,7 +100,6 @@ def _compute_residual_via_new_kernel(U, mesh, ops, boundary_ghost_provider=None,
     correction = compute_inviscid_interface_correction_kernel(
         Q, det_jacs,
         flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
-        flat.owner_axis, flat.owner_side, flat.neighbor_axis, flat.neighbor_side,
         flat.owner_is_primary, flat.neighbor_is_primary,
         flat.true_normal,
         flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
@@ -110,9 +109,8 @@ def _compute_residual_via_new_kernel(U, mesh, ops, boundary_ghost_provider=None,
         flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
         flat.mixed_nb_partner, flat.mixed_nb_mask,
         flat.mixed_ow_partner, flat.mixed_ow_mask,
-        flat.boundary_extrap, flat.g_left, flat.g_right, Q_ghost,
-        flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
-        n_prism, n_threads, mach_ref,
+        Q_ghost,
+        n_threads, mach_ref,
         # precond_mode：与生产路径共用同一个解析器（见
         # fr_operators/kernels.py::resolve_ausm_precond_mode）。这里走
         # 默认档而不是写死常量，这样 CPU 内核新旧实现的交叉对照永远

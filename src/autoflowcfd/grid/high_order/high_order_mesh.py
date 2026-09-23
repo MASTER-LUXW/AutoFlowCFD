@@ -54,23 +54,18 @@ def _prism_sp_volume_weights(order: int, n_sps_per_cell: int) -> np.ndarray:
       `fr/native_prism/quadrature.build_native_prism_sp_weights` 给出
       （和为参考棱柱体积 4），**零填充槽位权重为 0**。
     """
-    from autoflowcfd.fr.native_prism.mode import prism_basis_is_native
+    # 棱柱恒为原生基（坍缩档已于 2026-09-23 删除）。**曾经的真实缺陷**：
+    # 这里一度无条件用张量积 Gauss 权重（和为立方体体积 8），而原生参考
+    # 棱柱体积是 4 —— 单元体积因此算成 2 倍，而它被 CFL 网格尺度与 LES
+    # 滤波宽度消费，不是诊断层面的小事（2026-09-20 修复）。
+    from autoflowcfd.fr.native_prism.quadrature import (
+        build_native_prism_sp_weights,
+    )
 
-    if prism_basis_is_native():
-        from autoflowcfd.fr.native_prism.quadrature import (
-            build_native_prism_sp_weights,
-        )
-
-        w_native = build_native_prism_sp_weights(order)
-        w = np.zeros(n_sps_per_cell, dtype=np.float64)
-        w[: w_native.shape[0]] = w_native
-        return w
-
-    from autoflowcfd.fr.operators import gauss_legendre
-
-    _, w_1d = gauss_legendre(order + 1)
-    wx, wy, wz = np.meshgrid(w_1d, w_1d, w_1d, indexing="ij")
-    return (wx * wy * wz).ravel()
+    w_native = build_native_prism_sp_weights(order)
+    w = np.zeros(n_sps_per_cell, dtype=np.float64)
+    w[: w_native.shape[0]] = w_native
+    return w
 
 
 class HighOrderMesh:
@@ -239,14 +234,10 @@ class HighOrderMesh:
             # 产出坍缩坐标编码"一节）——这里恒翻译成 native 编码（6~9），
             # 下游 `build_face_flux_points`（`face_flux_points/merge.py`）
             # 按 `code>=6` 自动探测启用 numba native 分支（Part7 文档
-            # "执行状态更新"节），不需要另外传参。只翻译四面体侧记录，
-            # 棱柱侧只在 `AFCFD_PRISM_BASIS=native` 时一并翻译 —— 必须
-            # 与 `FROperators`/`build_order_geometry` 读到的是**同一个**
-            # 开关值，三者不一致会让面算子、体积算子、几何度量分属不同
-            # 的基（不会报错、只会给出错的残差）。
-            from autoflowcfd.fr.native_prism.mode import prism_basis_is_native
-
-            prism_native = prism_basis_is_native()
+            # "执行状态更新"节），不需要另外传参。两类单元都恒为原生基
+            # （坍缩四面体 2026-09-03 删除、坍缩棱柱 2026-09-23 删除），
+            # 所以两侧记录一律翻译成原生编码。
+            prism_native = True
             # 原生棱柱面（编码 [10,15)）的硬护栏已移除（2026-09-19）：
             # 它当时挡住的四项已全部完成 ——
             #   1. 残差 kernel 的面分派：原生算子改为**堆叠**成一个数组

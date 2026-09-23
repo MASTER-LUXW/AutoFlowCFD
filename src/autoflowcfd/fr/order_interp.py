@@ -143,10 +143,11 @@ def build_order_interp_matrices(old_order: int, new_order: int
         raise ValueError(
             f"阶数必须非负，收到 old_order={old_order}, "
             f"new_order={new_order}")
-    from .native_prism.mode import prism_basis_is_native
-
-    return _build_cached(int(old_order), int(new_order),
-                         bool(prism_basis_is_native()))
+    # 棱柱恒为原生基（坍缩棱柱基已于 2026-09-23 删除）。`prism_native`
+    # 这个缓存键仍然保留：它是 2026-09-20 修掉"延拓算子按基分派"那处真实
+    # 缺陷时加的，键里带着基信息本身就是那次教训的一部分；恒传 True 让
+    # 缓存语义保持显式。
+    return _build_cached(int(old_order), int(new_order), True)
 
 
 def apply_order_interp(field: np.ndarray, n_prism_cells: int,

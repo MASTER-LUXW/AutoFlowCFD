@@ -7,13 +7,10 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-from autoflowcfd.fr.collapsed_basis import prism_modal_basis_and_grad, tet_modal_basis_and_grad
 from autoflowcfd.fr.quadrature_points import gauss_legendre
-from autoflowcfd.fr.native_prism.mode import prism_basis_is_native
 from autoflowcfd.core.utils.array_module import array_module as _array_module
 
 from .sensor import (
-    compute_persson_peraire_sensor,
     compute_persson_peraire_sensor_native_prism,
     compute_persson_peraire_sensor_native_tet,
 )
@@ -103,11 +100,6 @@ def compute_troubled_cell_mask(
     if order == 0 or n_cells == 0:
         return mask
 
-    n1d = order + 1
-    sps_1d, _ = gauss_legendre(n1d)
-    xx, yy, zz = np.meshgrid(sps_1d, sps_1d, sps_1d, indexing="ij")
-    ref_cube_sps = np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
-
     if n_prism is not None:
         groups = ((xp.arange(0, n_prism), "prism"),
                   (xp.arange(n_prism, n_cells), "tet"))
@@ -125,16 +117,14 @@ def compute_troubled_cell_mask(
         # 四面体走 native 专属传感器（正交归一 PKD 基 + 只用真实自由度），
         # 棱柱走张量积族 + GL 求积权重——两条分支各自精确，理由见
         # `_build_native_tet_sensor_operators`。
+        # 两种单元类型都只有原生基一种实现（坍缩四面体 2026-09-03 删除、
+        # 坍缩棱柱 2026-09-23 删除），所以这里只按单元类型分派。
         if cell_type == "tet":
             s_e = compute_persson_peraire_sensor_native_tet(
                 xp.ascontiguousarray(field_nodal[sel]), order)
-        elif prism_basis_is_native():
+        else:
             s_e = compute_persson_peraire_sensor_native_prism(
                 xp.ascontiguousarray(field_nodal[sel]), order)
-        else:
-            s_e = compute_persson_peraire_sensor(
-                xp.ascontiguousarray(field_nodal[sel]), cell_type, order,
-                ref_cube_sps)
         mask[sel] = compute_artificial_viscosity_ramp(s_e, order, kappa) > 0.0
     return mask
 
@@ -177,15 +167,10 @@ def compute_persson_peraire_artificial_viscosity(
     if order == 0:
         return epsilon_av
 
-    # `FROperators` 不对外暴露 ref_cube_sps（只是 generate_fr_operators
-    # 内部的局部变量，见 fr/operators.py），按同一套 Gauss-Legendre
-    # 张量积规则重新构造——与该函数构造 D_3d_tet/D_3d_prism/filter_tet/
-    # filter_prism 用的完全是同一组参考坐标。
-    n1d = order + 1
-    sps_1d, _ = gauss_legendre(n1d)
-    xx, yy, zz = np.meshgrid(sps_1d, sps_1d, sps_1d, indexing="ij")
-    ref_cube_sps = np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
-
+    # 原来这里重建过一份坍缩坐标的张量积 Gauss 参考点集，供坍缩模态族
+    # 传感器使用。两种单元类型的坍缩基都已删除（四面体 2026-09-03、
+    # 棱柱 2026-09-23），原生传感器只需要 `(field, order)`，所以那段
+    # 连同它的注释一并删掉。
     n_prism = mesh.n_prism_cells
     field = Q[:, :, sensor_var_index]
     rho = Q[:, :, 0]
@@ -201,14 +186,12 @@ def compute_persson_peraire_artificial_viscosity(
     epsilon_max = alpha_av * rho_local * h_cell * vel_local / order
 
     if n_prism > 0:
-        # 棱柱同样按基分派（2026-09-20，与四面体那处同一类缺陷，见
-        # `_build_native_prism_sensor_operators`）。
-        if prism_basis_is_native():
-            s_e = compute_persson_peraire_sensor_native_prism(
-                field[:n_prism], order)
-        else:
-            s_e = compute_persson_peraire_sensor(
-                field[:n_prism], "prism", order, ref_cube_sps)
+        # 棱柱恒为原生基（2026-09-23 删除坍缩档）。**曾经的真实缺陷**：
+        # 这里一度无条件走坍缩模态族，对原生基等于"用一个不是解所在空间
+        # 的基做模态分解 + 把冻结的零填充槽位当自由度"，见
+        # `_build_native_prism_sensor_operators` 文档。
+        s_e = compute_persson_peraire_sensor_native_prism(
+            field[:n_prism], order)
         ramp = compute_artificial_viscosity_ramp(s_e, order, kappa)
         epsilon_av[:n_prism, :] = (ramp * epsilon_max[:n_prism])[:, np.newaxis]
     if n_cells > n_prism:

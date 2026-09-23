@@ -24,6 +24,82 @@ from numba import njit, prange
 GAMMA = 1.4
 R_AIR = 287.0  # 空气比气体常数 J/(kg*K)，须与 fr_viscous_flux.py 保持一致
 
+#: 粘性 Interior Penalty 罚项常数。标准 DG 惯例取 O(1)~O(10)，理论要求
+#: `c > C_trace(p)`（3D P1 的 trace 常数约 2.7）。**边界面与内部面用同一个
+#: 值**：两者是同一个罚项、同一套量纲推导，没有理由给两个数。
+#:
+#: 此前这个常数在 `fr_residual/viscous_flux_kernel.py`、
+#: `fr_residual/viscous_p0_kernel.py`、`gpu/residual/gpu_viscous.py` **各有
+#: 一份独立的 `= 4.0`**，GPU 那边还把罚项公式整个抄了一遍。本项目已多次因
+#: "两份实现只改了一份"出真实缺陷（滤波档双解析器、CFL 三处硬编码兜底、
+#: 配置层与 CLI 相差 20 倍），所以统一到这里、由各 kernel 导入。
+#: **实测标定值（2026-09-23）**，见 `resolve_viscous_ip_constant` 文档里的
+#: 标定表。取 2.0 的四条判据：
+#:   ① 理论硬要求 `c_ip > C_trace = (p+1)(p+3)/3`（3D P1 = 2.667）——
+#:      BASE=1.0 给出的 c_ip 恰好等于下界、零余量，作为稳定化参数不可取；
+#:   ② 长窗口精度：Blasius 4000 步最差偏离 0.0536（BASE=4.0 是 0.0581）；
+#:   ③ 能量块谱改善在 `BASE>=2` 已饱和（33/96，与 BASE=4.0 相同），
+#:      再加大没有收益；
+#:   ④ 刚性因子 17（BASE=4.0 是 33）—— 虽然真实网格上实测代价为零
+#:      （粘性从来不是约束方），但没有理由白付。
+VISCOUS_IP_C_BASE = 2.0
+
+
+def resolve_viscous_ip_constant(order: int) -> float:
+    """按多项式阶数给出 IP 罚项常数 `c_ip`。
+
+    ## 为什么必须随阶数增长
+
+    IP 罚项要保证强制性（coercivity），常数必须压过**迹不等式常数**
+    （trace inequality）：对 d 维单元上的 p 次多项式，
+    `||v||_{dK}^2 <= C_tr * (p+1)(p+d)/d * |dK|/|K| * ||v||_K^2`。
+    所以 `c_ip` 必须 `~ (p+1)(p+d)/d`；3D 下即 `(p+1)(p+3)/3`
+    （P0 1.0、P1 2.67、P2 5.0、P3 8.0 —— 以 P0 归一后是 1 / 2.67 / 5 / 8）。
+
+    固定用一个与阶数无关的数是旧实现的真实缺口（原文档自己标着"未做
+    多项式阶数相关的最优 trace-inequality 常数标定"）。
+
+    ## 本项目的格式是 IIPG，不是 SIPG —— 它需要更大的罚项
+
+    `compute_physical_gradient` 拿不到面数据，所以 `sigma = grad(u)` 没有
+    BR1/SIPG 要求的提升项，缺的正是伴随一致性那一项 `-∮{∇v}·n[[u]]`。
+    这样的格式是 **IIPG**（incomplete interior penalty）：它收敛、稳定，
+    但强制性对罚项的下界要求比 SIPG 高。`VISCOUS_IP_C_BASE` 的取值因此是
+    **实测标定**的（见下），不是照 SIPG 的经验值抄的。
+
+    ## 标定依据（实测，2026-09-23）
+
+    ### 精度：Blasius 解析初场、原生 P1、nx=16、CFL 0.1、`cf/cf_exact`
+
+        BASE  c_ip    2000步(中位/最差)   4000步(中位/最差)   10000步
+        1.0   2.667   0.9912 / 0.0162    1.0074 / 0.0421    1.0169 / 0.1327
+        2.0   5.333   0.9955 / 0.0094    1.0126 / 0.0536    —
+        4.0  10.667   0.9976 / 0.0062    1.0149 / 0.0581    —
+
+    注意**排序在 2000~4000 步之间反转**：大罚项早期更准、长窗口反而更差。
+    项目有"短窗口反复给出符号相反结论"的历史教训，所以以长窗口为准。
+
+    ### 谱：均匀基态、16 单元、纯粘性算子数值雅可比逐块谱（原生）
+
+        BASE  c_ip    动量块 max Re  正实部   能量块 max Re  正实部
+        0.0   0.00    +4.09e-10      0/288    +5.70e+01      78/96
+        1.0   2.667   +0.00e+00      0/288    +4.99e+01      40/96
+        2.0   5.333   +0.00e+00      0/288    +4.83e+01      33/96
+        4.0  10.667   +0.00e+00      0/288    +4.70e+01      33/96
+
+    动量块与罚项无关（无罚项时就已严格耗散）；能量块的改善在 `BASE>=2`
+    **饱和**。两张表合起来给出 `VISCOUS_IP_C_BASE = 2.0`（见该常量处的
+    四条判据）。
+    """
+    if order < 0:
+        raise ValueError(f"order={order} 不合法")
+    return VISCOUS_IP_C_BASE * float((order + 1) * (order + 3)) / 3.0
+
+#: 定压比热 J/(kg*K)。此前在 `viscous_physical_flux_point` 里逐点算一次
+#: `cp = GAMMA * R_AIR / (GAMMA - 1.0)`；内部面罚项的热传导系数要用同一个
+#: cp，所以提到模块级（同一个表达式在导入期求值一次，逐位相同）。
+CP_AIR = GAMMA * R_AIR / (GAMMA - 1.0)
+
 
 @njit(cache=True)
 def euler_physical_flux_point(Q: np.ndarray) -> np.ndarray:
@@ -105,8 +181,7 @@ def viscous_physical_flux_point(
     tau02 = 2.0 * mu_total * S02
     tau12 = 2.0 * mu_total * S12
 
-    cp = GAMMA * R_AIR / (GAMMA - 1.0)
-    k_cond = mu * cp / Pr + mu_t * cp / Pr_t
+    k_cond = mu * CP_AIR / Pr + mu_t * CP_AIR / Pr_t
     qx = -k_cond * grad_T[0]
     qy = -k_cond * grad_T[1]
     qz = -k_cond * grad_T[2]
@@ -175,11 +250,86 @@ def mirror_normal_component(g: np.ndarray, adj_row: np.ndarray) -> np.ndarray:
 
 
 @njit(cache=True, inline='always')
-def viscous_boundary_penalty_tilde(
-    Q_o: np.ndarray, Q_ghost: np.ndarray, mu_total: float,
-    vol: float, adj_mag: float, oside: float, c_ip: float,
+def viscous_ip_penalty_tilde(
+    Q_o: np.ndarray, Q_other: np.ndarray, mu_total: float, k_total: float,
+    h: float, adj_mag: float, side: float, c_ip: float,
+    include_work: bool,
 ) -> np.ndarray:
-    """边界面粘性 Interior Penalty (IP) 罚项，动量分量，已转成 tilde（逆变）单位。
+    """粘性 Interior Penalty (IP) 罚项，已转成 tilde（逆变）单位。
+
+    ## 两种调用方式，同一个公式（一个事实来源）
+
+    * **边界面**：`k_total=0.0`、`include_work=False`，`Q_other` 是幽灵态。
+      能量分量恒为 `0.0`，退化成 2026-09-15 起的既有行为。
+    * **内部面**：`k_total` 传**面平均**热传导率、`include_work=True`，
+      `Q_other` 是邻居侧外插值。见下面"为什么内部面也必须加"。
+
+    ## 长度尺度 `h`：由调用方给出，**不再是 `vol**(1/3)`**（2026-09-23 修复）
+
+    此前本函数内部算 `h = vol**(1/3)`，而调用方传的 `vol` 是
+    `mean(det_jacs)`。两处都错：
+
+    1. `mean(det_jacs)` **不是单元体积**，是"体积 ÷ 参考单元体积"，而参考
+       体积是**基相关**的（坍缩张量积立方体 8、原生棱柱 4、原生四面体
+       4/3）。同一个物理单元在两条基下因此拿到相差 2 倍（四面体 6 倍）的
+       `vol`，罚项强度相差 21%（四面体 45%）。
+       `HighOrderMesh.get_all_cell_volumes()` 的文档里早就写明
+       "det(J)均值*8 是错的、已为 CFL/网格尺度那条路径改成正确的加权
+       积分"——**罚项这个消费点被漏掉了**。
+    2. 各向异性贴壁单元上 `vol**(1/3)` 是几何平均，远大于壁法向间距。IP
+       罚项的标准长度尺度是**面法向的单元厚度** `vol / A_face`（直棱柱
+       贴壁单元上恰好等于 `dy`）。实测平板算例贴壁单元
+       `vol**(1/3) = 3.0457e-02` vs `vol/A_face = 1.2275e-02`，**大 2.48
+       倍**，且该偏差随壁面层加密越来越严重（`dy` 减半时 `vol/A` 减半，
+       而 `vol**(1/3)` 只降 1.26 倍）。
+
+    现在由调用方传 `h = cell_volume[cell] / face_area[face]`，其中
+    `cell_volume` 取 `get_all_cell_volumes()` 那份正确实现、`face_area` 取
+    `true_area_weight` 逐面求和（该和等于物理面积这一点已独立验证：平板
+    算例六个边界平面与解析面积之比全部 1.000000）。
+
+    ## 为什么内部面也必须加（2026-09-23，真实缺陷修复）
+
+    本项目的粘性离散被文档称作 BR1，但 `compute_physical_gradient` 的签名
+    是 `(field, mesh, ops)` —— 它**拿不到任何面数据**，所以辅助变量
+    `sigma = grad(u)` 是**纯单元内局部梯度**，没有 BR1 要求的提升项
+    `lift({u} - u|_dK)`。界面耦合只存在于第二个方程（粘性通量取两侧算术
+    平均），而内部面**没有任何跳跃罚项**。在 Arnold-Brezzi-Cockburn-Marini
+    (2002) 的统一框架里这是"提升项与罚项都为零"的那一档 —— 它不满足强制性
+    （coercivity）：离散扩散算子完全不控制跨面跳跃。
+
+    **实测**（均匀基态、纯粘性算子的数值雅可比谱，两个差分步长逐位相同、
+    均匀基态与 Blasius 基态逐位相同）：
+
+        基         自由度  max Re(lambda)  无量纲 Re*h^2/nu  min Re(lambda)
+        native     2160    +1.1553e+02     +92.8            -5.9374e+01
+        collapsed  2880    +9.2344e+02     +742.1           -5.2781e+02
+
+    纯扩散算子必须**全部** `Re(lambda) <= 0`；这里正的一侧比负的一侧还大，
+    最不稳定特征向量 100% 落在能量分量上（两条基都是），即 BR1 热传导那一支。
+
+    为什么既有验证算例探不到：**Couette 的精确解连续且可精确表示**，跨面
+    跳跃恒为零，缺失的提升项与罚项贡献都恰好是零 —— "Couette 精确到
+    8.4e-9"对这条路径没有约束力；均匀流场同理（梯度恒零）。
+
+    **P0 是同一缺陷的极端形态**：分片常数的局部梯度恒为零，于是 `G_common`
+    与 `G_own` 全分量恒等于零 —— 内部面粘性通量**恒为零**，P0 阶单元之间
+    完全没有粘性扩散。罚项正是 P0 唯一可能的粘性耦合（形式上等价于有限
+    体积的两点扩散通量）。
+
+    ## 能量分量的两项
+
+        pen[4] = -(eta_v*{u}.[[u]] + eta_T*[[T]]) * adj_mag * side
+
+    * `eta_T*[[T]]`：热传导那一支的罚项，系数按 IP 惯例用**热传导率**
+      `k = mu*cp/Pr + mu_t*cp/Pr_t`（不是 mu）。
+    * `eta_v*{u}.[[u]]`：动量罚项做的功。把罚项看成一份附加应力
+      `tau_pen = eta_v*[[u]]`，它对能量方程的贡献就是 `{u}.tau_pen` ——
+      与物理通量里 `u.tau` 那一项同构。不加它，动量罚项做的功在能量方程
+      里没有对应，总能量不闭合。
+    * **静止无滑移壁上这一项恒为零**（`{u} = 0`），所以既有边界实现
+      "只有动量分量"在静止壁上本来就是一致的；`include_work=False` 保留
+      那个行为，避免改动已验证的 FARFIELD/INLET/OUTLET 边界。
 
     根因：`viscous_physical_flux_point` 算出的应力张量 tau 只依赖速度梯度
     `grad_vel`，不依赖状态 `Q` 本身；而边界面的梯度按本代码库既定策略镜像
@@ -205,15 +355,20 @@ def viscous_boundary_penalty_tilde(
     adj_mag * oside` 的同一套惯例）得到可以直接叠加进 `G_tilde_common`
     的量。
 
-    只在边界面调用（`is_boundary[f]==True` 分支）：内部面两侧的梯度本就
-    是各自独立算出的真实局部梯度（不是镜像），已有非零、物理有意义的
-    耦合，不属于本次修复范围，不额外加罚项，避免改动已通过验证的内部
-    粘性通量路径。
+    **2026-09-23 更正**：上面这段原文写的是"只在边界面调用……内部面两侧的
+    梯度本就是各自独立算出的真实局部梯度（不是镜像），已有非零、物理有
+    意义的耦合，不属于本次修复范围，不额外加罚项"。那个理由**为真但不
+    充分**，结论是错的：BR1 的病不是"内部面耦合为零"，而是**不控制跨面
+    跳跃**（缺强制性）。实测均匀基态纯粘性算子谱有正实部 328/2160，纯扩散
+    算子本应全部 <= 0。现在内部面也加罚项（`k_total` 传面平均热传导率、
+    `include_work=True`），完整依据见本函数开头"为什么内部面也必须加"。
 
-    **为什么只有动量分量、能量分量不需要对应的罚项（2026-09-15 结论，
-    不是遗留项）**：IP 罚项存在的理由是"梯度被镜像 ⇒ 该分量的跳跃恒为
-    零 ⇒ Dirichlet 型边界条件在扩散算子里完全没被施加"。对能量方程，
-    这个理由按热边界类型逐类检查后都不成立：
+    **为什么"边界面"这一档只有动量分量（2026-09-15 结论，2026-09-23
+    复核仍然成立，仅适用范围收窄到边界面）**：IP 罚项在边界面存在的理由是
+    "梯度被镜像 ⇒ 该分量的跳跃恒为零 ⇒ Dirichlet 型边界条件在扩散算子里
+    完全没被施加"。对能量方程，这个理由按热边界类型逐类检查后都不成立
+    （所以边界面传 `k_total=0.0`）——**但这条论证只覆盖边界面**，内部面
+    的能量跳跃既非镜像也非零，强制性要求它必须被罚，见上面那段更正：
 
     - **绝热类（WALL/SYMMETRY）**：正确的边界条件是 q_n = 0，是
       Neumann 型而不是 Dirichlet 型——它已经由 ∇T 的法向分量镜像**精确**
@@ -230,29 +385,51 @@ def viscous_boundary_penalty_tilde(
       补上对应的能量罚项，否则壁面温度条件在扩散算子里不会被施加。
 
     Args:
-        Q_o: (5,) 面上 owner 侧原始变量外插值 (rho,u,v,w,p)
-        Q_ghost: (5,) 边界幽灵态原始变量（含真实 BC，如 WALL 无滑移镜像）
-        mu_total: 分子+湍流动力粘度之和（该 FP 处）
-        vol: owner 单元的体积尺度（det_jacs 均值或 P0 的 det_jacs 本身）
-        adj_mag: 该 FP 处 owner 侧逆变行范数（与本文件其余处一致的度量量）
-        oside: owner 侧参考坐标方向（±1）
+        Q_o: (5,) 面上本侧原始变量外插值 (rho,u,v,w,p)
+        Q_other: (5,) 对侧原始变量 —— 边界面是幽灵态（含真实 BC，如 WALL
+            无滑移镜像），内部面是邻居侧在同一批 FP 上的外插值
+        mu_total: 分子+湍流动力粘度之和（边界面取本侧值、内部面取面平均，
+            与 `G_common` 用的 `mut_avg` 保持一致）
+        k_total: 热传导率 `mu*cp/Pr + mu_t*cp/Pr_t`。**边界面传 0.0**
+            （理由见下面"为什么只有动量分量"一节：绝热壁是 Neumann 型、
+            已由 ∇T 法向镜像精确施加，加 Dirichlet 型罚项反而是错的）
+        h: 面法向的单元厚度 `cell_volume / face_area`（见上面"长度尺度"
+            一节；**不要再传 `mean(det_jacs)` 或任何 `vol**(1/3)`**）
+        adj_mag: 该 FP 处本侧逆变行范数（与本文件其余处一致的度量量）
+        side: side 因子。**坍缩面传 `owner_side`/`neighbor_side`，原生面
+            （cube face 编码 >= 6）必须传 +1** —— 原生面的 `adj_row` 已按
+            outward 定向，再乘一次 side 会让 `side = -1` 的面上罚项反号、
+            从耗散变成往单元注入动量（2026-09-22 修复的真实缺陷，见
+            `viscous_flux_kernel.py` 里 `pen_side_o` 那段注释）
+        include_work: 是否叠加动量罚项做的功到能量分量（内部面 True、
+            边界面 False，理由见上面"能量分量的两项"）
         c_ip: 罚项常数（标准 DG 惯例取 O(1)~O(10)，本实现固定用 4.0，
             未做多项式阶数相关的最优 trace-inequality 常数标定——这是
             稳定性调优参数，不影响"罚项存在与否/符号是否耗散"这一
             正确性核心，若未来观测到边界层数值振荡可调大）
 
     Returns:
-        pen: (5,)，仅 [1:4] 非零（动量分量的罚项贡献），可直接
-        `G_tilde_common[v] += pen[v]` for v in range(5)
+        pen: (5,)。`[1:4]` 是动量分量，`[4]` 是能量分量（`k_total=0.0` 且
+        `include_work=False` 时恒为 `0.0`）。可直接
+        `G_tilde_common[v] += pen[v]` for v in range(1, 5)
     """
     pen = np.zeros(5)
-    h = vol ** (1.0 / 3.0)
-    if h < 1e-300:
-        h = 1e-300
-    eta = c_ip * mu_total / h
-    scale = eta * adj_mag * oside
+    h_safe = h
+    if h_safe < 1e-300:
+        h_safe = 1e-300
+    eta = c_ip * mu_total / h_safe
+    scale = eta * adj_mag * side
     for v in range(1, 4):
-        pen[v] = -scale * (Q_o[v] - Q_ghost[v])
+        pen[v] = -scale * (Q_o[v] - Q_other[v])
+    work = 0.0
+    if include_work:
+        for v in range(1, 4):
+            work += 0.5 * (Q_o[v] + Q_other[v]) * (Q_o[v] - Q_other[v])
+    eta_T = c_ip * k_total / h_safe
+    scale_T = eta_T * adj_mag * side
+    T_o = Q_o[4] / (Q_o[0] * R_AIR)
+    T_other = Q_other[4] / (Q_other[0] * R_AIR)
+    pen[4] = -scale * work - scale_T * (T_o - T_other)
     return pen
 
 

@@ -63,7 +63,10 @@ P1/P2/P3 都取到理想的 `2*order`（2/4/6）。
 import numpy as np
 import pytest
 
-from autoflowcfd.fr.collapsed_basis import OVERINTEGRATION_MAX_ORDER
+from autoflowcfd.fr.native_tet.overintegration import (
+    NATIVE_TET_OVERINTEGRATION_MAX_ORDER,
+    resolve_tet_overintegration_order,
+)
 from autoflowcfd.fr.native_tet.basis import (
     build_native_tet_operators,
     restricted_tet_modes,
@@ -144,25 +147,30 @@ def test_native_conditioning_growth_is_polynomial_not_explosive():
     )
 
 
-def test_cap_currently_truncates_dealiasing_at_p2_and_above():
-    """把"上限确实在截断 P2/P3 的去混叠"这一事实钉住。
+def test_tet_cap_no_longer_truncates_dealiasing_at_any_production_order():
+    """四面体的过积分阶数在 P1~P3 上都**完整达到理想值** `rule*order`。
 
-    理想去混叠阶数是 `rule*order`（默认 rule=2）：
-        P1 需要 2  -> min(2,3)=2  完整
-        P2 需要 4  -> min(4,3)=3  **被截断**
-        P3 需要 6  -> min(6,3)=3  **被截断，且 over_order==order，
-                                    等价于完全不做过积分**
-    这条测试不是要求上限改掉（改它有本文件模块文档说明的架构/内存代价），
-    而是保证这个已知缺口不会因为有人改了常量而悄悄变成"看起来没问题"。
+    这条判据的方向在 2026-09-17 反了过来，2026-09-23 才落到代码里：
+
+    * 旧状态：四面体继承坍缩基那条 `OVERINTEGRATION_MAX_ORDER = 3`，于是
+      `P2 需要 4 -> 得 3`（截断）、`P3 需要 6 -> 得 3 == order`（过积分
+      完全失效）。当时这份测试钉的是"这个已知缺口别被悄悄改掉"。
+    * 现状：四面体有自己的上限 `NATIVE_TET_OVERINTEGRATION_MAX_ORDER = 6`
+      （本文件上方那张条件数实测表就是它的依据：oo=6 时 cond(V)=3.86e3，
+      而坍缩基 N=4 就已到约 1e14），坍缩基那个常量已随坍缩棱柱基一并
+      删除。P1/P2/P3 分别取到 2/4/6，全部等于理想值。
+
+    代价与收益都已量过，见 `test_overintegration_cap_cost.py`
+    （P2 3400 倍、P3 18600 倍的去混叠误差改善）。
     """
-    assert OVERINTEGRATION_MAX_ORDER == 3, (
-        f"OVERINTEGRATION_MAX_ORDER 变成了 {OVERINTEGRATION_MAX_ORDER}；"
-        f"若是有意放开，请同步更新本测试与 "
-        f"test_native_tet_overintegration_conditioning 的模块文档，"
-        f"并在真实网格上重新量过 P2/P3 的内存与自由流场保持性"
-    )
+    assert NATIVE_TET_OVERINTEGRATION_MAX_ORDER == 6, (
+        f"四面体过积分上限变成了 {NATIVE_TET_OVERINTEGRATION_MAX_ORDER}；"
+        f"若是有意调整，请同步更新本文件的条件数实测表与 "
+        f"test_overintegration_cap_cost.py 量出的代价数字")
     rule = 2
-    assert min(rule * 1, OVERINTEGRATION_MAX_ORDER) == 2, 'P1 应当完整'
-    assert min(rule * 2, OVERINTEGRATION_MAX_ORDER) == 3 < rule * 2, 'P2 被截断'
-    assert min(rule * 3, OVERINTEGRATION_MAX_ORDER) == 3 == 3, \
-        'P3 的 over_order 退化到等于 order，过积分完全失效'
+    for order in (1, 2, 3):
+        got = resolve_tet_overintegration_order(order)
+        assert got == rule * order, (
+            f"P{order} 四面体 over_order={got}，理想 {rule * order}——"
+            f"被夹住了，去混叠精度低于可达水平")
+        assert got > order, f"P{order} 的过积分不应退化为恒等"

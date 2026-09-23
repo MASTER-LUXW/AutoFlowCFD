@@ -9,9 +9,7 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-from autoflowcfd.fr.collapsed_basis import prism_modal_basis_and_grad, tet_modal_basis_and_grad
 from autoflowcfd.fr.quadrature_points import gauss_legendre
-from autoflowcfd.fr.native_prism.mode import prism_basis_is_native
 from autoflowcfd.core.utils.array_module import array_module as _array_module
 
 
@@ -23,45 +21,8 @@ SENSOR_KAPPA = 1.0
 # 光滑性探测变量，也是 Persson-Peraire 原始论文与多数后续实现的默认选择。
 DEFAULT_SENSOR_VAR_INDEX = 0
 
-_sensor_operator_cache: Dict[Tuple[str, int], Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
 
 
-def _build_sensor_operators(cell_type: str, order: int, ref_cube_sps: np.ndarray):
-    """构造/缓存单个 (cell_type, order) 组合的传感器算子三件套：
-    (V, V_inv, top_mode_mask_times_quad_weight_diag_equivalent)。
-
-    实际缓存的是 (V, V_inv, quad_weights_3d, top_mask) 四件套，供
-    compute_persson_peraire_sensor 每步复用，避免每次残差求值都重新做
-    Vandermonde 矩阵求逆（(n_sps,n_sps) 规模，P2=27、P3=64，求逆本身
-    不便宜，且与 (cell_type, order) 唯一对应、和流场状态无关，只需算
-    一次）。
-
-    order==0 没有"上一阶"可截断，调用方必须在此之前短路处理（返回
-    全零传感器），这里不处理 order==0。
-    """
-    key = (cell_type, order)
-    if key in _sensor_operator_cache:
-        return _sensor_operator_cache[key]
-
-    a, b, c = ref_cube_sps[:, 0], ref_cube_sps[:, 1], ref_cube_sps[:, 2]
-    basis_fn = tet_modal_basis_and_grad if cell_type == "tet" else prism_modal_basis_and_grad
-    V, _, _, _ = basis_fn(a, b, c, order)
-    V_inv = np.linalg.inv(V)
-
-    n1d = order + 1
-    top_mask = np.zeros(n1d ** 3, dtype=bool)
-    for i in range(n1d):
-        for j in range(n1d):
-            for k in range(n1d):
-                if max(i, j, k) == order:
-                    top_mask[i * n1d * n1d + j * n1d + k] = True
-
-    sps_1d, w_1d = gauss_legendre(n1d)
-    quad_weights_3d = np.einsum("i,j,k->ijk", w_1d, w_1d, w_1d).reshape(-1)
-
-    result = (V, V_inv, quad_weights_3d, top_mask)
-    _sensor_operator_cache[key] = result
-    return result
 
 
 _native_tet_sensor_cache: Dict[int, Tuple[np.ndarray, np.ndarray, int]] = {}

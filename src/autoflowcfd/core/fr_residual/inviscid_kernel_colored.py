@@ -25,27 +25,10 @@ def _extrap_matmul(field_cell: np.ndarray, E: np.ndarray) -> np.ndarray:
     return E @ field_cell
 
 
-@njit(cache=True)
-def _distribute_point(fp_data: np.ndarray, fp_of_sp_axis: np.ndarray,
-                       axis_coord_of_sp_axis: np.ndarray, g_prime: np.ndarray) -> np.ndarray:
-    """`_distribute_from_face` 的逐点等价形式。"""
-    n_sps = fp_of_sp_axis.shape[0]
-    n_vars = fp_data.shape[1]
-    out = np.zeros((n_sps, n_vars))
-    for s in range(n_sps):
-        fp_i = fp_of_sp_axis[s]
-        g = g_prime[axis_coord_of_sp_axis[s]]
-        for v in range(n_vars):
-            out[s, v] = g * fp_data[fp_i, v]
-    return out
-
-
 @njit(cache=True, parallel=True)
 def compute_inviscid_interface_correction_kernel_colored(
     Q: np.ndarray, det_jacs: np.ndarray,
     owner_cell: np.ndarray, neighbor_cell: np.ndarray, is_boundary: np.ndarray,
-    owner_axis: np.ndarray, owner_side: np.ndarray,
-    neighbor_axis: np.ndarray, neighbor_side: np.ndarray,
     owner_is_primary: np.ndarray, neighbor_is_primary: np.ndarray,
     true_normal: np.ndarray,
     owner_adj_row_exact: np.ndarray, neighbor_adj_row_exact: np.ndarray,
@@ -55,11 +38,7 @@ def compute_inviscid_interface_correction_kernel_colored(
     owner_src1_idx: np.ndarray, owner_src1_cell: np.ndarray, owner_src1_mat: np.ndarray,
     mixed_nb_partner: np.ndarray, mixed_nb_mask: np.ndarray,
     mixed_ow_partner: np.ndarray, mixed_ow_mask: np.ndarray,
-    boundary_extrap: np.ndarray,
-    g_left: np.ndarray, g_right: np.ndarray,
     Q_ghost: np.ndarray,
-    dist_fp_of_sp: np.ndarray, dist_axis_coord_of_sp: np.ndarray,
-    n_prism: int,
     face_indices: np.ndarray,  # 当前颜色组的面索引
     correction: np.ndarray,    # 共享输出 buffer（同色面无冲突，直接写入）
     mach_ref: float,
@@ -86,11 +65,12 @@ def compute_inviscid_interface_correction_kernel_colored(
     compute_inviscid_interface_correction_kernel（非 colored 版本）
     完全相同，两处必须同步修改。`adj_j` 参数因此从签名中移除。
 
-    native 四面体（路径C）支持：与
+原生基（四面体 + 棱柱）：与
     `compute_inviscid_interface_correction_kernel`（非 colored 版本）
-    完全相同的分派原则，两处必须同步修改——见该函数文档完整说明
-    （`owner_cube_face`/`neighbor_cube_face` 判断 native、side 因子
-    固定 +1、DG 提升算子 `lift_native` 替代 `_distribute_point`）。
+    完全相同的做法，两处必须同步修改——见该函数文档完整说明
+    （`owner_cube_face`/`neighbor_cube_face` 减 6 索引原生算子表、side
+    因子固定 +1、DG 提升算子 `lift_native`）。坍缩坐标那条并行路径已于
+    2026-09-23 在两处同步删除（生产不可达，见该函数文档）。
     """
     n_cells = Q.shape[0]
     n_sps = Q.shape[1]
@@ -101,18 +81,9 @@ def compute_inviscid_interface_correction_kernel_colored(
         f = face_indices[fi]
         oc = owner_cell[f]
         oc_code = owner_cube_face[f]
-        o_is_native = oc_code >= 6
-        oax = owner_axis[f]
-        oside = owner_side[f]
-        side_factor_o = 1.0 if o_is_native else oside
-        oside_idx = 0 if oside < 0 else 1
-        celltype_o = 0 if oc < n_prism else 1
 
         if owner_is_primary[f]:
-            if o_is_native:
-                E_o = boundary_extrap_native[oc_code - 6]
-            else:
-                E_o = boundary_extrap[celltype_o, oax, oside_idx]
+            E_o = boundary_extrap_native[oc_code - 6]
 
             Q_o = _extrap_matmul(Q[oc], E_o)
             adjrow_o = owner_adj_row_exact[f]  # (n_fp, 3)，逐 FP 精确值，见函数文档
@@ -125,9 +96,9 @@ def compute_inviscid_interface_correction_kernel_colored(
                 adj_mag = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
                 if adj_mag < 1e-300:
                     adj_mag = 1e-300
-                dirx = a0 / adj_mag * side_factor_o
-                diry = a1 / adj_mag * side_factor_o
-                dirz = a2 / adj_mag * side_factor_o
+                dirx = a0 / adj_mag
+                diry = a1 / adj_mag
+                dirz = a2 / adj_mag
 
                 alignment = dirx * true_normal[f, i, 0] + diry * true_normal[f, i, 1] + dirz * true_normal[f, i, 2]
                 if alignment < 0.5:
@@ -169,7 +140,7 @@ def compute_inviscid_interface_correction_kernel_colored(
 
                 F_tilde_common = np.empty(5)
                 for v in range(5):
-                    F_tilde_common[v] = F_common_n[v] * adj_mag * side_factor_o
+                    F_tilde_common[v] = F_common_n[v] * adj_mag
 
                 F_phys_o = euler_physical_flux_point(Q_o[i])
                 F_tilde_own = np.zeros(5)
@@ -179,18 +150,12 @@ def compute_inviscid_interface_correction_kernel_colored(
                 for v in range(5):
                     jump_owner[i, v] = F_tilde_common[v] - F_tilde_own[v]
 
-            if o_is_native:
-                weighted_jump_o = np.empty((n_fp, 5))
-                for i in range(n_fp):
-                    w_area = ref_area_weight[i]
-                    for v in range(5):
-                        weighted_jump_o[i, v] = w_area * jump_owner[i, v]
-                contrib_owner = lift_native[oc_code - 6] @ weighted_jump_o
-            else:
-                g_prime_owner = g_left if oside < 0 else g_right
-                contrib_owner = _distribute_point(
-                    jump_owner, dist_fp_of_sp[oax], dist_axis_coord_of_sp[oax], g_prime_owner
-                )
+            weighted_jump_o = np.empty((n_fp, 5))
+            for i in range(n_fp):
+                w_area = ref_area_weight[i]
+                for v in range(5):
+                    weighted_jump_o[i, v] = w_area * jump_owner[i, v]
+            contrib_owner = lift_native[oc_code - 6] @ weighted_jump_o
             for s in range(n_sps):
                 dj = det_jacs[oc, s]
                 for v in range(5):
@@ -199,17 +164,7 @@ def compute_inviscid_interface_correction_kernel_colored(
         if (not is_boundary[f]) and neighbor_is_primary[f]:
             nc = neighbor_cell[f]
             nc_code = neighbor_cube_face[f]
-            n_is_native = nc_code >= 6
-            nax = neighbor_axis[f]
-            nside = neighbor_side[f]
-            side_factor_n = 1.0 if n_is_native else nside
-            nside_idx = 0 if nside < 0 else 1
-            celltype_n = 0 if nc < n_prism else 1
-
-            if n_is_native:
-                E_n = boundary_extrap_native[nc_code - 6]
-            else:
-                E_n = boundary_extrap[celltype_n, nax, nside_idx]
+            E_n = boundary_extrap_native[nc_code - 6]
 
             Q_n_native = _extrap_matmul(Q[nc], E_n)
             adjrow_n_native = neighbor_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
@@ -222,9 +177,9 @@ def compute_inviscid_interface_correction_kernel_colored(
                 adj_mag = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
                 if adj_mag < 1e-300:
                     adj_mag = 1e-300
-                dirx = a0 / adj_mag * side_factor_n
-                diry = a1 / adj_mag * side_factor_n
-                dirz = a2 / adj_mag * side_factor_n
+                dirx = a0 / adj_mag
+                diry = a1 / adj_mag
+                dirz = a2 / adj_mag
 
                 ntnx = -true_normal[f, i, 0]
                 ntny = -true_normal[f, i, 1]
@@ -267,7 +222,7 @@ def compute_inviscid_interface_correction_kernel_colored(
 
                 F_tilde_common_n = np.empty(5)
                 for v in range(5):
-                    F_tilde_common_n[v] = F_common_n_native[v] * adj_mag * side_factor_n
+                    F_tilde_common_n[v] = F_common_n_native[v] * adj_mag
 
                 F_phys_n = euler_physical_flux_point(Q_n_native[i])
                 F_tilde_own_n = np.zeros(5)
@@ -277,18 +232,12 @@ def compute_inviscid_interface_correction_kernel_colored(
                 for v in range(5):
                     jump_neighbor[i, v] = F_tilde_common_n[v] - F_tilde_own_n[v]
 
-            if n_is_native:
-                weighted_jump_n = np.empty((n_fp, 5))
-                for i in range(n_fp):
-                    w_area = ref_area_weight[i]
-                    for v in range(5):
-                        weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
-                contrib_neighbor = lift_native[nc_code - 6] @ weighted_jump_n
-            else:
-                g_prime_neighbor = g_left if nside < 0 else g_right
-                contrib_neighbor = _distribute_point(
-                    jump_neighbor, dist_fp_of_sp[nax], dist_axis_coord_of_sp[nax], g_prime_neighbor
-                )
+            weighted_jump_n = np.empty((n_fp, 5))
+            for i in range(n_fp):
+                w_area = ref_area_weight[i]
+                for v in range(5):
+                    weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
+            contrib_neighbor = lift_native[nc_code - 6] @ weighted_jump_n
             for s in range(n_sps):
                 dj = det_jacs[nc, s]
                 for v in range(5):

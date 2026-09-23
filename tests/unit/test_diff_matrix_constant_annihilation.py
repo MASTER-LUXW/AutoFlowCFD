@@ -59,9 +59,12 @@
 import numpy as np
 import pytest
 
-from autoflowcfd.fr.collapsed_basis import (
-    build_collapsed_diff_matrices,
-    build_overintegration_operators,
+from autoflowcfd.fr.native_prism.basis import build_native_prism_operators
+from autoflowcfd.fr.native_prism.overintegration import (
+    build_native_prism_overintegration_operators,
+)
+from autoflowcfd.fr.overintegration_order import (
+    resolve_prism_overintegration_order,
 )
 from autoflowcfd.fr.diff_matrix_consistency import (
     constant_annihilation_error,
@@ -223,43 +226,59 @@ class TestNativeTetDiffMatrices:
 
 
 class TestPrismDiffMatrices:
-    """棱柱：同一条不变量也施加，但改善可以忽略（原因见模块文档）。"""
+    """棱柱（原生基，唯一实现）：同一条不变量也施加。
+
+    2026-09-23 之前这一类跑的是**坍缩**棱柱算子
+    （`build_collapsed_diff_matrices("prism", ...)` +
+    `build_overintegration_operators("prism", ...)`），随坍缩棱柱基一并
+    删除。已按原生算子重新标定，见 `test_prism_floor_is_dot_product_
+    rounding` 里的实测表。
+    """
 
     @pytest.mark.parametrize("order", [1, 2, 3])
     def test_coarse_row_sums_at_resummation_floor(self, order):
-        ref = _prism_coarse_ref(order)
-        D = build_collapsed_diff_matrices("prism", order, ref)
+        _ref, D = build_native_prism_operators(order)
         err = constant_annihilation_error(D)
         limit = _RESUM_FLOOR_FACTOR * max(np.abs(D).max(), 1.0)
         assert err <= limit, f"P{order} 棱柱 coarse D: {err:.4e} > {limit:.4e}"
 
-    @pytest.mark.parametrize("order,over_order", [(1, 2), (2, 3), (3, 3)])
-    def test_fine_row_sums_at_resummation_floor(self, order, over_order):
-        ref = _prism_coarse_ref(order)
-        _, _, D_fine, _ = build_overintegration_operators(
-            "prism", order, over_order, ref)
+    @pytest.mark.parametrize("order", [1, 2, 3])
+    def test_fine_row_sums_at_resummation_floor(self, order):
+        over_order = resolve_prism_overintegration_order(order)
+        _, _, D_fine, _ = build_native_prism_overintegration_operators(
+            order, over_order)
         err = constant_annihilation_error(D_fine)
         limit = _RESUM_FLOOR_FACTOR * max(np.abs(D_fine).max(), 1.0)
         assert err <= limit, (
             f"P{order} oo={over_order} 棱柱 D_fine: {err:.4e} > {limit:.4e}")
 
-    def test_prism_floor_is_set_by_dot_product_rounding_not_row_sums(self):
-        """记录方法论：棱柱段 4.72e-3 的自由流误差**不是**行和残余造成的。
+    def test_prism_floor_is_dot_product_rounding(self):
+        """记录方法论：棱柱段的行和残余**远低于**点积自身的求和舍入底。
 
-        坍缩基 `max|D_fine|` 在 oo=3 上是约 560，点积自身的求和舍入
-        `~eps*max|D|*n` 就有 1e-13 量级，与行和残余同阶——所以强制行和为零
-        只消掉其中一部分，真实网格实测 4.7204e-3 -> 4.7213e-3（+0.02%）。
-        这条测试把"为什么棱柱没有改善"钉成一个可核对的事实，避免有人以为
-        修正没生效。
+        实测（原生棱柱，默认 `rule=2x` 下的生产 over_order）：
+
+            阶数  oo  n_fine  max|D_fine|  行和残余    点积舍入底
+            P1     2      18       2.582   2.85e-16    2.43e-15
+            P2     4      75       7.702   8.90e-16    1.48e-14
+            P3     6     196      15.083   1.67e-15    4.69e-14
+
+        行和残余比舍入底小约一个数量级，所以"强制行和为零"在原生棱柱上
+        不可能成为自由流误差的主导改善项 —— 这与已删除的坍缩棱柱基上
+        得到的**同一个结论**（那边 `max|D_fine|` 约 560、两者同阶，真实
+        网格实测 4.7204e-3 -> 4.7213e-3，+0.02%）来自不同的原因：坍缩是
+        "两者同阶所以只消掉一部分"，原生是"行和残余本来就远低于舍入底"。
+        这条测试把这个事实钉成可核对的数字，避免有人以为修正没生效。
         """
-        ref = _prism_coarse_ref(2)
-        _, _, D_fine, _ = build_overintegration_operators("prism", 2, 3, ref)
-        max_d = np.abs(D_fine).max()
-        assert max_d > 100.0, (
-            f"棱柱 oo=3 的 max|D_fine| 变成了 {max_d:.3e}（此前约 560）——"
-            f"若它真的降下来了，棱柱自由流误差的结论需要重测")
-        n = D_fine.shape[0]
-        dot_floor = np.finfo(float).eps * max_d * np.sqrt(n)
-        assert dot_floor > 1e-14, (
-            f"点积求和舍入底 {dot_floor:.3e} 已低于行和残余量级，"
-            f"那时行和修正才会成为棱柱段的主导改善项")
+        for order in (1, 2, 3):
+            oo = resolve_prism_overintegration_order(order)
+            _, _, D_fine, _ = build_native_prism_overintegration_operators(
+                order, oo)
+            max_d = np.abs(D_fine).max()
+            n = D_fine.shape[0]
+            dot_floor = np.finfo(float).eps * max_d * np.sqrt(n)
+            err = constant_annihilation_error(D_fine)
+            assert err < dot_floor, (
+                f"P{order} oo={oo}: 行和残余 {err:.3e} 已超过点积求和舍入底 "
+                f"{dot_floor:.3e} —— 那时行和修正才会成为棱柱段的主导改善"
+                f"项，本文件关于『棱柱没有改善』的结论需要重测")
+

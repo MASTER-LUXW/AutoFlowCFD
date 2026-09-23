@@ -31,16 +31,15 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
         flagged WALL-Dirichlet-zero, face 1 is not. Expect ghost = -owner for
         face 0 (enforces phi=0 at the wall) and ghost = owner for face 1
         (unchanged Neumann default)."""
-        n_faces, n_fp, n_sps, n_prism = 2, 1, 1, 0
+        n_faces, n_fp, n_sps = 2, 1, 1
         scalar_sps = np.array([[5.0]])
 
-        # boundary_extrap[celltype, axis, side_idx] -> (n_fp, n_sps); identity here.
-        boundary_extrap = np.zeros((2, 3, 2, n_fp, n_sps))
-        boundary_extrap[1, 0, 0] = np.array([[1.0]])  # tet(celltype=1), axis=0, side_idx=0 (side<=0)
+        # 原生自身面外插表按 `code - 6` 索引（四面体 [6,10)、棱柱
+        # [10,15) 同一张表，长 9）；这里取 code=6 并置成恒等。
+        boundary_extrap_native = np.zeros((9, n_fp, n_sps))
+        boundary_extrap_native[0] = np.array([[1.0]])
 
         owner_cell = np.array([0, 0], dtype=np.int64)
-        owner_axis = np.array([0, 0], dtype=np.int64)
-        owner_side = np.array([-1.0, -1.0])
 
         # Both faces are boundary faces: no real neighbor source.
         neighbor_src0_cell = np.array([-1, -1], dtype=np.int64)
@@ -56,17 +55,13 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
         # 无非零 Dirichlet 目标值（本测试只覆盖 k 的 Dirichlet-zero 分支）。
         has_wall_dirichlet_value = np.zeros(n_faces, dtype=np.bool_)
         wall_dirichlet_value_face = np.zeros((n_faces, n_fp), dtype=np.float64)
-        # 纯 collapsed 场景（无 native 四面体）：owner_cube_face 全 <6，
-        # boundary_extrap_native 空占位，见 kernel 文档 native 分支。
-        owner_cube_face = np.zeros(n_faces, dtype=np.int64)
-        boundary_extrap_native = np.zeros((0, n_fp, n_sps))
+        owner_cube_face = np.full(n_faces, 6, dtype=np.int64)
 
         phi_owner, phi_neighbor = extrapolate_scalar_to_faces_kernel(
-            scalar_sps, boundary_extrap,
+            scalar_sps,
             neighbor_src0_cell, neighbor_src0_mat,
             neighbor_src1_idx, neighbor_src1_cell, neighbor_src1_mat,
-            owner_cell, owner_axis, owner_side,
-            n_prism, n_faces, n_fp, n_sps,
+            owner_cell, n_faces, n_fp, n_sps,
             wall_dirichlet_zero_face,
             mixed_nb_partner, mixed_nb_mask,
             has_wall_dirichlet_value, wall_dirichlet_value_face,
@@ -81,13 +76,13 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
         """A mask of all False must reproduce the pre-fix behavior exactly
         (ghost = owner at every boundary face) - guards against the new
         parameter silently changing existing (non-WALL) callers."""
-        n_faces, n_fp, n_sps, n_prism = 1, 1, 1, 0
+        n_faces, n_fp, n_sps = 1, 1, 1
         scalar_sps = np.array([[3.0]])
-        boundary_extrap = np.zeros((2, 3, 2, n_fp, n_sps))
-        boundary_extrap[1, 0, 0] = np.array([[1.0]])
+        # 原生自身面外插表：编码 [6,10) 四面体、[10,15) 棱柱，统一按
+        # `code - 6` 索引，所以表长 9。这里用 code=6（四面体 v0 面）。
+        boundary_extrap_native = np.zeros((9, n_fp, n_sps))
+        boundary_extrap_native[0] = np.array([[1.0]])
         owner_cell = np.array([0], dtype=np.int64)
-        owner_axis = np.array([0], dtype=np.int64)
-        owner_side = np.array([-1.0])
         neighbor_src0_cell = np.array([-1], dtype=np.int64)
         neighbor_src0_mat = np.zeros((n_faces, n_fp, n_sps))
         neighbor_src1_idx = np.array([-1], dtype=np.int64)
@@ -98,15 +93,13 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
         mixed_nb_mask = np.zeros((n_faces, n_fp), dtype=np.bool_)
         has_wall_dirichlet_value = np.zeros(n_faces, dtype=np.bool_)
         wall_dirichlet_value_face = np.zeros((n_faces, n_fp), dtype=np.float64)
-        owner_cube_face = np.zeros(n_faces, dtype=np.int64)
-        boundary_extrap_native = np.zeros((0, n_fp, n_sps))
+        owner_cube_face = np.full(n_faces, 6, dtype=np.int64)
 
         _, phi_neighbor = extrapolate_scalar_to_faces_kernel(
-            scalar_sps, boundary_extrap,
+            scalar_sps,
             neighbor_src0_cell, neighbor_src0_mat,
             neighbor_src1_idx, neighbor_src1_cell, neighbor_src1_mat,
-            owner_cell, owner_axis, owner_side,
-            n_prism, n_faces, n_fp, n_sps,
+            owner_cell, n_faces, n_fp, n_sps,
             wall_dirichlet_zero_face,
             mixed_nb_partner, mixed_nb_mask,
             has_wall_dirichlet_value, wall_dirichlet_value_face,
@@ -118,13 +111,13 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
         """omega 解析壁面值分支：WALL 面标记 has_wall_dirichlet_value=True
         且给定 target=12.0 时，ghost 应满足 (ghost+owner)/2 == target
         （即 ghost = 2*target - owner），而不是 Dirichlet-zero 或 Neumann。"""
-        n_faces, n_fp, n_sps, n_prism = 1, 1, 1, 0
+        n_faces, n_fp, n_sps = 1, 1, 1
         scalar_sps = np.array([[5.0]])
-        boundary_extrap = np.zeros((2, 3, 2, n_fp, n_sps))
-        boundary_extrap[1, 0, 0] = np.array([[1.0]])
+        # 原生自身面外插表：编码 [6,10) 四面体、[10,15) 棱柱，统一按
+        # `code - 6` 索引，所以表长 9。这里用 code=6（四面体 v0 面）。
+        boundary_extrap_native = np.zeros((9, n_fp, n_sps))
+        boundary_extrap_native[0] = np.array([[1.0]])
         owner_cell = np.array([0], dtype=np.int64)
-        owner_axis = np.array([0], dtype=np.int64)
-        owner_side = np.array([-1.0])
         neighbor_src0_cell = np.array([-1], dtype=np.int64)
         neighbor_src0_mat = np.zeros((n_faces, n_fp, n_sps))
         neighbor_src1_idx = np.array([-1], dtype=np.int64)
@@ -135,15 +128,13 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
         mixed_nb_mask = np.zeros((n_faces, n_fp), dtype=np.bool_)
         has_wall_dirichlet_value = np.array([True])
         wall_dirichlet_value_face = np.array([[12.0]])
-        owner_cube_face = np.zeros(n_faces, dtype=np.int64)
-        boundary_extrap_native = np.zeros((0, n_fp, n_sps))
+        owner_cube_face = np.full(n_faces, 6, dtype=np.int64)
 
         phi_owner, phi_neighbor = extrapolate_scalar_to_faces_kernel(
-            scalar_sps, boundary_extrap,
+            scalar_sps,
             neighbor_src0_cell, neighbor_src0_mat,
             neighbor_src1_idx, neighbor_src1_cell, neighbor_src1_mat,
-            owner_cell, owner_axis, owner_side,
-            n_prism, n_faces, n_fp, n_sps,
+            owner_cell, n_faces, n_fp, n_sps,
             wall_dirichlet_zero_face,
             mixed_nb_partner, mixed_nb_mask,
             has_wall_dirichlet_value, wall_dirichlet_value_face,

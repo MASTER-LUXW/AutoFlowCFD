@@ -16,8 +16,6 @@
   此前只有 CPU 实现——GPU 后端读不到就按默认路径跑，没有任何提示。
 - **第 11 类，"留着但已无作用的代码/参数"**（D）：`compute_global_min_dt`
   零调用方。
-- **第 6 类，"声称有缺口的过时标注"**（E）：`SolverConfig` 里那段"刻意
-  不提供 flux_type，因为数值层从未实现第二种修正函数族"早已过时。
 
 ## 方法论
 
@@ -53,26 +51,28 @@ class _NumpyAsCupy:
 # ===========================================================================
 # 第 10 类：只对真实自由度归约
 # ===========================================================================
+# 第 10 类：只对真实自由度归约
+# ===========================================================================
 
 class TestRealDofReductionHelpers:
     """两个归约辅助本身。
 
-    构造方式刻意让"错"与"对"相差一个能手算的固定值：真实槽位全 1、
-    填充槽位全 50。order=1 下 n_native=4、n_sps=8，所以
-      - 全场 mean = (4*1 + 4*50)/8 = 25.5
-      - 只看真实自由度 = 1
+    构造方式刻意让"错"与"对"相差**三个**能手算、互不相同的值：真实槽位
+    全 1、填充槽位全 50。order=1 下 `n_sps=8`，两类单元的真实前缀分别是
+    棱柱 6（原生棱柱 `(p+1)^2(p+2)/2`）与四面体 4（`(p+1)(p+2)(p+3)/6`）：
 
-    **本类显式跑在坍缩棱柱档（2026-09-20）**：它钉的是"归约只屏蔽四面体
-    的填充槽位、棱柱 8 个槽位全是真实自由度"这条语义，而那只在坍缩棱柱基
-    下成立。原生棱柱基（当前默认）下棱柱同样有填充槽位（P1 6/8），归约
-    会把棱柱也一起屏蔽 —— 那是**正确**的行为，但会让这里手算的 25.5
-    变成 1.0，判据失去"能分辨对错"的意义。原生档的对应行为由
-    `TestNativePrismIsAlsoMasked` 覆盖。
+      - 不屏蔽任何填充（错）：`(4*1 + 4*50)/8 = 25.5`
+      - 按棱柱前缀屏蔽：`(4*1 + 2*50)/6 = 17.3333...`
+      - 按四面体前缀屏蔽：`1.0`
+
+    三个值两两不同，所以"把棱柱当成四面体切"与"棱柱不切"这两种错法都会
+    被判据抓住 —— 这一点在两类单元的真实前缀都小于 `n_sps` 之后才成立
+    （坍缩棱柱基时代棱柱用满 8 个槽位，那时前两个值重合）。
+
+    坍缩棱柱基已于 2026-09-23 删除，所以本类不再分档；原先那个只在原生档
+    下跑的对偶类 `TestNativePrismIsAlsoMasked` 已并入这里（同一语义两处
+    覆盖是本项目明确要精简的重复）。
     """
-
-    @pytest.fixture(autouse=True)
-    def _collapsed_prism(self, monkeypatch):
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")
 
     def _field(self, n_cells=4, order=1):
         n_sps = (order + 1) ** 3
@@ -85,16 +85,30 @@ class TestRealDofReductionHelpers:
     def test_n_real_sps_formula(self):
         assert [native_tet_n_real_sps(p) for p in (0, 1, 2, 3)] == [1, 4, 10, 20]
 
-    def test_per_cell_mean_masks_only_tets(self):
+    def test_real_prefix_per_cell_type(self):
+        """`real_sps_per_cell` 是"哪些槽位是真的"的唯一判据来源。
+
+        两类单元的真实前缀**都**小于 `n_sps=(p+1)^3`，这正是下面几条手算
+        判据能分辨三种错法的前提（并入自原 `TestNativePrismIsAlsoMasked`）。
+        """
+        from autoflowcfd.fr.native_padding import real_sps_per_cell
+
+        for p, expect in ((1, (6, 4)), (2, (18, 10)), (3, (40, 20))):
+            assert real_sps_per_cell(p) == expect, (
+                f"P{p} 的 (棱柱, 四面体) 真实自由度数应当是 {expect}")
+            assert max(expect) < (p + 1) ** 3
+
+    def test_per_cell_mean_masks_each_cell_types_padding(self):
         f = self._field()
-        # 未修正的写法：棱柱与四面体都被污染成同一个 25.5
+        # 未修正的写法：两类单元都被污染成同一个 25.5
         np.testing.assert_allclose(f.mean(axis=1), 25.5)
         got = reduce_per_cell_over_real_sps(f, 2, 1, 'mean')
-        # 前两个是棱柱（8 个槽位全是真实自由度，保持 25.5），
+        # 前两个是棱柱（只看前 6 个：4 个 1 + 2 个 50），
         # 后两个是四面体（只看前 4 个，得 1.0）
-        np.testing.assert_allclose(got, [25.5, 25.5, 1.0, 1.0])
+        prism_expect = (4 * 1.0 + 2 * 50.0) / 6.0
+        np.testing.assert_allclose(got, [prism_expect, prism_expect, 1.0, 1.0])
 
-    def test_per_cell_min_max_masks_only_tets(self):
+    def test_per_cell_min_max_masks_each_cell_types_padding(self):
         f = self._field()
         np.testing.assert_allclose(
             reduce_per_cell_over_real_sps(f, 2, 1, 'max'), [50.0, 50.0, 1.0, 1.0])
@@ -105,18 +119,31 @@ class TestRealDofReductionHelpers:
         """按 owner_cell 索引出的逐面数组里单元类型任意混合，不能切片。"""
         f = self._field()
         row_is_prism = np.array([True, False, True, False])
+        prism_expect = (4 * 1.0 + 2 * 50.0) / 6.0
         np.testing.assert_allclose(
             reduce_rows_over_real_sps(f, row_is_prism, 1, 'mean'),
-            [25.5, 1.0, 25.5, 1.0])
+            [prism_expect, 1.0, prism_expect, 1.0])
 
-    def test_all_prism_is_bit_identical_to_plain_reduction(self):
-        """n_prism == n_cells 时必须与朴素归约逐位一致（不引入行为变化）。"""
+    def test_all_prism_slices_exactly_the_prism_prefix(self):
+        """`n_prism == n_cells` 时必须**逐位等于**对棱柱前缀的朴素归约。
+
+        这条判据在 2026-09-23 之前写的是"逐位等于全宽度朴素归约"，那只对
+        已删除的坍缩棱柱基成立（棱柱用满 `(p+1)^3`）。原生棱柱有填充槽位，
+        所以正确的对照是 `field[:, :n_prism_real]` —— 仍然是逐位判据
+        （不引入任何多余的算术），只是前缀换对了。
+        """
+        from autoflowcfd.fr.native_padding import real_sps_per_cell
+
+        n_prism_real, _ = real_sps_per_cell(1)
         rng = np.random.default_rng(0)
         f = rng.normal(size=(6, 8))
         for how in ('mean', 'min', 'max', 'sum'):
+            masked = reduce_per_cell_over_real_sps(f, 6, 1, how)
             np.testing.assert_array_equal(
-                reduce_per_cell_over_real_sps(f, 6, 1, how),
-                getattr(np, how)(f, axis=1))
+                masked, getattr(np, how)(f[:, :n_prism_real], axis=1))
+            # 负对照：全宽度归约**不**应当等于它，否则填充没被屏蔽
+            assert not np.allclose(masked, getattr(np, how)(f, axis=1)), (
+                f"how={how}：全宽度归约与屏蔽后归约相等，判据失去分辨力")
 
     @pytest.mark.parametrize("how", ["median", "prod", ""])
     def test_rejects_unsupported_reduction(self, how):
@@ -139,33 +166,6 @@ class TestRealDofReductionHelpers:
             with pytest.raises(ValueError, match="不自洽"):
                 reduce_rows_over_real_sps(
                     f, np.zeros(3, dtype=bool), bad_order, 'mean')
-
-
-
-class TestNativePrismIsAlsoMasked:
-    """原生棱柱基（2026-09-20 起的默认）下，棱柱的填充槽位同样被屏蔽。
-
-    这是上面那类的对偶：归约辅助读的是
-    `fr/native_padding.real_sps_per_cell`，它按当前棱柱基给出两个数，
-    所以"只屏蔽四面体"这句话只对坍缩档成立。P1 原生棱柱 6/8，所以
-    同一份构造（真实槽位 1、填充槽位 50）下棱柱也应当得到 1.0。
-    """
-
-    def test_prism_padding_is_masked_in_native_mode(self, monkeypatch):
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
-        from autoflowcfd.fr.native_padding import real_sps_per_cell
-
-        n_real_prism, n_real_tet = real_sps_per_cell(1)
-        assert (n_real_prism, n_real_tet) == (6, 4), (
-            "P1 原生档的真实自由度数应当是 (棱柱 6, 四面体 4)")
-        f = np.empty((4, 8))
-        f[:, :4] = 1.0
-        f[:, 4:] = 50.0
-        got = reduce_per_cell_over_real_sps(f, 2, 1, 'mean')
-        # 棱柱前 6 个槽位：4 个 1 + 2 个 50 -> (4+100)/6
-        prism_expect = (4 * 1.0 + 2 * 50.0) / 6.0
-        np.testing.assert_allclose(
-            got, [prism_expect, prism_expect, 1.0, 1.0])
 
 
 
@@ -564,72 +564,3 @@ class TestDeadCodeRemoved:
         import inspect
         from autoflowcfd.core.mpi import distributed_solver
         assert "allreduce_min" not in inspect.getsource(distributed_solver)
-
-
-# ===========================================================================
-# E 类：flux_type 过时标注更正 + 配置字段补齐
-# ===========================================================================
-
-class TestFluxTypeConfigField:
-    """`SolverConfig` 里原先那段"刻意不提供 flux_type"早已过时。
-
-    数值层现在有真实实现：`fr/matrix_operators.py::compute_correction_weights`
-    有 `if flux_point_type == 'gauss'` 分支、`generate_fr_operators` 真实
-    分派、CLI 两条 solve 命令都暴露 `--flux-type`、`FRSolver.__init__` 有
-    `flux_type` 形参。于是"配置类少一个字段"从"避免假实现"变成了它自己
-    就是一处缺口：用 YAML 配置跑的用户拿不到一个 CLI 用户已经能用的真实
-    数值方案。
-    """
-
-    def test_field_exists_with_backward_compatible_default(self):
-        from autoflowcfd.config.solver_config import SteadyConfig, TransientConfig
-        assert SteadyConfig().flux_type == "radau"
-        assert TransientConfig().flux_type == "radau"
-
-    def test_gauss_is_accepted(self):
-        from autoflowcfd.config.solver_config import SteadyConfig
-        assert SteadyConfig(flux_type="gauss").flux_type == "gauss"
-
-    @pytest.mark.parametrize("bad", ["vcjh", "radau2", "", "RADAU"])
-    def test_invalid_value_raises(self, bad):
-        from autoflowcfd.config.solver_config import SteadyConfig
-        with pytest.raises(ValueError, match="flux_type"):
-            SteadyConfig(flux_type=bad)
-
-    def test_numerical_layer_really_implements_gauss(self):
-        """确认这不是又一个假实现：两种 flux_type 的修正函数导数必须真的
-        不同。"""
-        from autoflowcfd.fr.matrix_operators import compute_correction_weights
-        gl_r, gr_r = compute_correction_weights(3, 'radau')
-        gl_g, gr_g = compute_correction_weights(3, 'gauss')
-        assert not np.allclose(gl_r, gl_g)
-        assert not np.allclose(gr_r, gr_g)
-
-    def test_stale_paragraph_is_corrected(self):
-        """原来那段"数值层从未真正实现"的论断必须不复存在。"""
-        import inspect
-        from autoflowcfd.config import solver_config
-        s = inspect.getsource(solver_config)
-        assert "本类刻意不提供这个" not in s
-        # 原论断的文字仍在源码里，但只作为**被更正的历史**出现：判据是
-        # 它必须紧跟"早已过时"的说明，而不是作为当前事实陈述。
-        assert "那个结论在写下时或许成立，但**早已过时**" in s
-        assert "flux_type: FR 修正函数族" in s
-
-    def test_api_guards_unsupported_backend(self):
-        """`gauss` 只有单机 CPU 支持，非 CPU 后端必须显式报错而不是静默
-        退回 radau——否则用户在 YAML 里写的数值方案会被无声忽略。"""
-        import inspect
-        from autoflowcfd import api
-        s = inspect.getsource(api)
-        assert s.count('kwargs.setdefault("flux_type", config.flux_type)') == 2
-        assert s.count("只有单机 CPU 后端") == 2
-
-    def test_yaml_loader_exposes_the_field(self):
-        import dataclasses
-        from autoflowcfd.config.loader import ConfigLoader
-        from autoflowcfd.config.solver_config import SteadyConfig
-        names = {f.name for f in dataclasses.fields(SteadyConfig)}
-        assert "flux_type" in names
-        # 模板注释里也要有，否则用户无从得知这个键
-        assert ConfigLoader()._get_parameter_comment("flux_type", "steady")

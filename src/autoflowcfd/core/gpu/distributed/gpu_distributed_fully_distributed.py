@@ -125,7 +125,6 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     self.order = int(package['order'])
     self.current_order = self.order
     self.order_continuation_enabled = package.get('order_continuation_enabled', True)
-    self.flux_type = package.get('flux_type', 'radau')
 
     precompacted_mesh = package['precompacted_mesh']
     self.mesh = precompacted_mesh
@@ -440,7 +439,7 @@ def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int
         for o in stale_orders:
             del mesh._order_geometry_cache[o]
         mesh.set_order(target_p)
-        ops = generate_fr_operators(target_p, flux_point_type=getattr(solver, 'flux_type', 'radau'))
+        ops = generate_fr_operators(target_p)
         root_context['ops'] = ops
 
         turb_model_name = root_context['turb_model_name']
@@ -485,7 +484,7 @@ def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int
     # --- 3. 应用新包：替换 compact 相关属性，保留 turb_model_gpu/
     # sgs_model_gpu/wmles_model 对象本身（只是上一步已经替换过它们的
     # 数组）---
-    solver.ops = generate_fr_operators(target_p, flux_point_type=getattr(solver, 'flux_type', 'radau'))
+    solver.ops = generate_fr_operators(target_p)
     precompacted_mesh = my_package['precompacted_mesh']
     solver.mesh = precompacted_mesh
     solver.partition = my_package['partition']

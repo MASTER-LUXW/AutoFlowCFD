@@ -65,7 +65,6 @@ def export_highorder_vtk(
 
     from ...core.fr_residual.inviscid import conserved_to_primitive
     from ...grid.curved_mapping.curved_mapping import map_prism_to_physical, tet_barycentric
-    from ...fr.native_prism.mode import prism_basis_is_native
     from ...fr.native_tet.basis import build_native_tet_operators
 
     order = mesh.order
@@ -121,19 +120,16 @@ def export_highorder_vtk(
     # 槽位不携带真实场值）。两条的理由见
     # `_build_native_prism_vtk_lagrange_export_data` 文档。
     if n_prism > 0:
-        if prism_basis_is_native():
-            from ...fr.native_prism.basis import (
-                map_native_prism_to_physical, native_prism_n_sps,
-            )
+        # 棱柱恒为原生基（坍缩档已于 2026-09-23 删除）。**曾经的真实缺陷**：
+        # 这里一度无条件把插值矩阵拟合在坍缩节点上，对原生基**不报错、
+        # 静默给错值**（节点值相对误差 1.66e-2，2026-09-20 修复）。
+        from ...fr.native_prism.basis import (
+            map_native_prism_to_physical, native_prism_n_sps,
+        )
 
-            n_real_prism = native_prism_n_sps(order)
-            target_ref, E = _build_native_prism_vtk_lagrange_export_data(order)
-            prism_map = map_native_prism_to_physical
-        else:
-            n_real_prism = None
-            target_ref, E = _build_vtk_lagrange_export_data(
-                "prism", order, ref_cube_sps)
-            prism_map = map_prism_to_physical
+        n_real_prism = native_prism_n_sps(order)
+        target_ref, E = _build_native_prism_vtk_lagrange_export_data(order)
+        prism_map = map_native_prism_to_physical
         n_vtk_nodes = target_ref.shape[0]
         for local_i in range(n_prism):
             global_cell = local_i

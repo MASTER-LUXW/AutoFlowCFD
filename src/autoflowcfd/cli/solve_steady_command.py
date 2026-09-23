@@ -28,11 +28,6 @@ from autoflowcfd.cli.solve_commands import solve
 @click.argument('input_file', type=click.Path(exists=True))
 @click.option('--backend', type=click.Choice(['cpu', 'gpu']), default='cpu', help='计算后端 (CPU/GPU)')
 @click.option('--order', type=int, default=2, help='FR 多项式阶数 (P1/P2/P3)')
-@click.option('--flux-type', type=click.Choice(['radau', 'gauss']), default='radau',
-              help="FR 修正函数族（#14）：'radau'（默认，此前唯一使用过的方案，"
-                   "Huynh 记法 g_DG）；'gauss' 是与 Spectral Difference 等价的新方案"
-                   "（见 fr/matrix_operators.py 文档）。目前仅单机 CPU 路径支持，"
-                   "GPU/多 GPU/MPI 分布式路径传非默认值会报错而不是静默忽略")
 @click.option('--turbulence-model', type=click.Choice(['none', 'sst', 'ddes', 'iddes', 'wmles', 'les']), default='sst',
               help='湍流模型。真实bug修复（2026-09-02，排查多GPU分布式DDES/IDDES时发现）：此前这里的'
                    'Choice列表缺 iddes/les 两项——底层单机/CPU MPI/多GPU分布式路径均已支持这两个模型'
@@ -147,7 +142,7 @@ from autoflowcfd.cli.solve_commands import solve
                    '8_算法重构-Entropy-Stable_Split-Form通量重构-Part1/2.md）。真实测试确认在'
                    '已启用过积分的基础上再改善约2~4倍，代价是体积项计算量从O(n_fine)升到'
                    'O(n_fine^2)，仅 CPU 后端实现')
-def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_iter, cfl_start, cfl_max, cfl_min,
+def solve_steady(input_file, backend, order, turbulence_model, max_iter, cfl_start, cfl_max, cfl_min,
                  aoa_deg, aos_deg, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, use_eikonal, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, artificial_viscosity_enabled, artificial_viscosity_alpha, entropy_stable_volume_enabled):
     """执行稳态 FR 求解。
 
@@ -202,17 +197,6 @@ def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_it
         raise click.BadParameter("自由流速度必须 > 0", param_hint="--vel-inf")
     if p_inf <= 0.0:
         raise click.BadParameter("自由流静压必须 > 0", param_hint="--p-inf")
-    # #14：GPU/多GPU/MPI 分布式路径的 ops 构造未接入 flux_type（那些路径
-    # 直接调用 generate_fr_operators(order) 不带 flux_point_type，见下方
-    # 各分支），非默认值在这些路径上会被静默忽略——宁可显式报错，不静默
-    # 退回默认方案（与本项目其余地方"不允许静默降级"的一贯原则一致）。
-    if flux_type != 'radau' and (backend == 'gpu' or n_ranks > 1):
-        raise click.BadParameter(
-            "--flux-type gauss 目前只有单机 CPU 路径支持（GPU/多GPU/MPI 分布式"
-            "路径的算子构造尚未接入这个选择）。请去掉 --backend gpu/--multi-gpu/"
-            "--n-ranks，或使用默认的 --flux-type radau。",
-            param_hint="--flux-type",
-        )
     # --phase-max-iter/--residual-drop-threshold（2026-09-02 续接）：
     # 全部四种后端（单机 CPU/单 GPU/多GPU/MPI 分布式，含"传统模式"与
     # "完全分布式加载"）现在都真正接入了 Order Continuation（`solve()`
@@ -601,7 +585,6 @@ def solve_steady(input_file, backend, order, flux_type, turbulence_model, max_it
             mu_molecular=mu_molecular,
             rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
             aoa_deg=aoa_deg, aos_deg=aos_deg,
-            flux_type=flux_type,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
             entropy_stable_volume_enabled=entropy_stable_volume_enabled,

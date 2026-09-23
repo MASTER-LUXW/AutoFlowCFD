@@ -132,7 +132,7 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
     for o in stale_orders:
         del solver.mesh._order_geometry_cache[o]
     solver.mesh.set_order(target_p)
-    solver.ops = generate_fr_operators(target_p, flux_point_type=getattr(solver, 'flux_type', 'radau'))
+    solver.ops = generate_fr_operators(target_p)
 
     solver.partition = build_distributed_partition(
         solver.mesh.face_connectivity, solver.cell_partition, solver.rank, solver.n_ranks

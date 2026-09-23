@@ -458,10 +458,7 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
                 print(f"[INFO] Wall distance field reset to P0 dimensions")
 
         solver.current_order = 0
-        # flux_point_type 显式透传 solver.flux_type（#14，2026-08-28）：
-        # 此前恒用默认值重建算子，跨阶数切换后会静默丢失用户显式选择的
-        # 'gauss' 修正函数方案，退回默认的 'radau'。
-        solver.ops = generate_fr_operators(0, flux_point_type=getattr(solver, 'flux_type', 'radau'))
+        solver.ops = generate_fr_operators(0)
         solver.mesh.set_order(0)
 
         # 真实 bug 修复（2026-09-06）：上面第 434-439 行的 `np.mean` 压缩
@@ -527,8 +524,7 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
                 solver._interpolate_to_new_order(target_p)
 
             solver.current_order = target_p
-            # flux_point_type 显式透传，见上面 P0 重置分支同一处修复的说明。
-            solver.ops = generate_fr_operators(target_p, flux_point_type=getattr(solver, 'flux_type', 'radau'))
+            solver.ops = generate_fr_operators(target_p)
 
             # 在构建新阶数几何*之前*先释放已经离开的阶段的完整几何缓存——
             # 原先这段清理放在下面 set_order 之后，导致新阶数几何构建期间旧阶数

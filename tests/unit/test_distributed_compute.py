@@ -71,6 +71,10 @@ class TestDistributedMeshAdapter:
             n_cells = 12  # 完整全局网格单元数（compact_global_ids 索引进这个范围）
             n_points_1d = 2
             n_sps_per_cell = 8
+            # `order` 是残差链路真实会读的属性（粘性 IP 罚项常数按阶数解析，
+            # 见 `flux_kernels.resolve_viscous_ip_constant`），适配器必须转发，
+            # 所以 mock 也必须有 —— 与 `n_points_1d = 2` 对应即 P1。
+            order = 1
             cell_types = np.array([0] * 10 + [1] * 2)
             jacobians = {
                 "det_jacs": np.arange(12 * 8, dtype=float).reshape(12, 8),

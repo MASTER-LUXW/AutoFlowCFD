@@ -32,7 +32,6 @@ from autoflowcfd.core.gpu.residual.gpu_inviscid_volume import (
     prepare_mesh_data as _prepare_mesh_data,
     prepare_ops_data as _prepare_ops_data,
     compute_volume_term_gpu as _compute_volume_term_gpu_impl,
-    distribute_face_correction_to_sps,
 )
 
 
@@ -165,7 +164,7 @@ def compute_inviscid_residual_fr_gpu(
     # 界面校正（按图着色逐色处理）
     correction = _compute_interface_correction_gpu(
         Q_gpu, adj_j, det_jacs, flat_face_gpu, Q_ghost_gpu,
-        n_cells, n_sps, n_prism, device_id, mach_ref, precond_mode,
+        n_cells, n_sps, device_id, mach_ref, precond_mode,
     )
 
     residual = residual + correction
@@ -242,16 +241,18 @@ def _add_q_src1_to_fp(cp, out, src1_idx, src1_cell, src1_mat, Q_gpu):
     return out
 
 
-def _ausm_direction_with_fallback(cp, adjrow, side, true_normal_ref):
+def _ausm_direction_with_fallback(cp, adjrow, true_normal_ref):
     """按 CPU 版 inviscid_kernel.py 的"自洽方向 + true_normal 对齐安全阀"
     逻辑构造 AUSM+up 用的法向：adjrow 精确方向与 true_normal_ref 夹角
     过大（alignment<0.5）时回退到 true_normal_ref 本身。
 
     Args:
         adjrow: (n, n_fp, 3) 未归一化 adj(J) 行
-        side: (n,) ±1（collapsed 面）或恒为 1.0（native 面，见调用方
-            `_native_aware_side_factor` 文档——native 面用固定 +1 方向
-            系数，不能沿用 owner_side/neighbor_side 复用槽位的哑值）
+
+    **没有 side 参数**：原生面的 `adj_row` 已是 outward 定向（见
+    `fr/face_flux_points/exact_normal.py`），方向系数恒为 +1；已删除的
+    坍缩坐标面才需要乘 `owner_side`/`neighbor_side` 翻转。
+
         true_normal_ref: (n, n_fp, 3) 对齐基准（owner 侧用 true_normal，
             neighbor 侧用 -true_normal，见 CPU kernel"neighbor 视角外
             法向恒为 -true_normal"）
@@ -264,10 +265,9 @@ def _ausm_direction_with_fallback(cp, adjrow, side, true_normal_ref):
     a2 = adjrow[..., 2]
     adj_mag = cp.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
     adj_mag_safe = cp.maximum(adj_mag, 1e-300)
-    s = side[:, None]
-    dirx = a0 / adj_mag_safe * s
-    diry = a1 / adj_mag_safe * s
-    dirz = a2 / adj_mag_safe * s
+    dirx = a0 / adj_mag_safe
+    diry = a1 / adj_mag_safe
+    dirz = a2 / adj_mag_safe
     alignment = dirx * true_normal_ref[..., 0] + diry * true_normal_ref[..., 1] + dirz * true_normal_ref[..., 2]
     use_fallback = alignment < 0.5
     dirx = cp.where(use_fallback, true_normal_ref[..., 0], dirx)
@@ -277,110 +277,51 @@ def _ausm_direction_with_fallback(cp, adjrow, side, true_normal_ref):
     return direction, adj_mag
 
 
-def _native_aware_side_factor(cp, is_native, side):
-    """native 面方向系数固定 +1，collapsed 面沿用 owner_side/neighbor_side
-    ——与 CPU 版 inviscid_kernel.py `side_factor_o = 1.0 if o_is_native
-    else oside` 逐字对应（原理见该文件同名注释："_native_tet_adj_row_
-    batched 已给出正确 outward 定向，不能沿用 oside 那个复用槽位的哑值"）。
-    """
-    return cp.where(is_native, cp.float64(1.0), side.astype(cp.float64))
-
-
-def _native_self_extrap(cp, is_native, cube_face_code, boundary_extrap_native, E_collapsed):
-    """自身面外插矩阵：native 面用 `boundary_extrap_native[excluded_vertex]`
-    查表，collapsed 面用调用方已经按 (celltype,axis,side_idx) 索引好的
-    `E_collapsed`——与 CPU 版 `E_o = boundary_extrap_native[oc_code-6] if
-    o_is_native else boundary_extrap[celltype_o,oax,oside_idx]` 逐字对应。
+def _native_self_extrap(cp, cube_face_code, boundary_extrap_native):
+    """自身面外插矩阵：按 `code - 6` 逐面 gather 原生表（四面体 [6,10)、
+    棱柱 [10,15) 在同一张表里）——与 CPU 版
+    `E_o = boundary_extrap_native[oc_code - 6]` 逐字对应。
 
     Args:
-        is_native: (n,) bool
-        cube_face_code: (n,) int，原始 cube face 编码（>=6 时 -6 才是
-            合法的 excluded_vertex 索引；<6 时这个表达式本身无意义，但
-            仍会被算出来去 gather boundary_extrap_native——用 clip 确保
-            gather 本身不越界，实际值由下面 cp.where 按 is_native 丢弃，
-            不会污染结果，与 CPU 版"native 分支只在 o_is_native 为真时
-            才使用这个索引"的分派逻辑等价）。
-        boundary_extrap_native: (4, n_fp, n_sps)
-        E_collapsed: (n, n_fp, n_sps) 调用方已经用 celltype/axis/side_idx
-            gather 好的 collapsed 外插矩阵
+        cube_face_code: (n,) 原始 cube face 编码
+        boundary_extrap_native: (9, n_fp, n_sps)
 
     Returns:
         E: (n, n_fp, n_sps)
     """
-    # 真实 bug 修复（2026-09-02，实现单 GPU Order Continuation 时首次
-    # 真正端到端构造+调用 `GPUFRSolver.step()` 才发现——此前既有的
-    # native/collapsed crosscheck 测试恒用 `tet_basis_mode="native"`
-    # 构造网格，从未覆盖过默认的 `tet_basis_mode="collapsed"`
-    # + 网格里确实存在四面体这个组合）：`tet_basis_mode="collapsed"`
-    # 时整个网格没有任何单元走 native 分支，`boundary_extrap_native`
-    # 是形状 `(0, n_fp, n_sps)` 的空数组（`generate_fr_operators` 压根
-    # 不会为 collapsed 模式生成任何 native 表）——`cp.clip(x, 0,
-    # shape[0]-1)` 在 `shape[0]==0` 时退化成 `cp.clip(x, 0, -1)`
-    # （下界>上界的病态区间），`boundary_extrap_native[excluded_vertex]`
-    # 无论如何都会用某个越界下标去取一个长度为 0 的数组——不管
-    # `is_native` 掩码本身是否恒为 False（这正是 collapsed 模式下的
-    # 真实情形），`cp.where` 的两个分支都会被**提前**无条件求值，
-    # `E_native` 这一步本身就已经崩溃，`cp.where` 根本没有机会把它
-    # 丢弃。真实网格上任何 `--tet-basis-mode collapsed`（CLI 默认值）
-    # + 单 GPU 后端 + 阶数>=1 + 网格含四面体的组合都会在第一次调用
-    # `compute_inviscid_residual_gpu()` 时崩溃，与 Order Continuation
-    # 本身无关，是一个此前从未被任何测试捕捉到的独立真实 bug（既有
-    # crosscheck 测试从未测过这个组合）。修复：完全没有 native 单元时
-    # （`boundary_extrap_native.shape[0] == 0`，等价于 `is_native`
-    # 全为 False）直接短路返回 `E_collapsed`，不进入这条会越界的
-    # gather 路径——`is_native` 全 False 时结果本来就恒等于
-    # `E_collapsed`，这不是近似，是这个分支在该前提下唯一可能的取值。
-    if boundary_extrap_native.shape[0] == 0:
-        return E_collapsed
-    excluded_vertex = cp.clip(cube_face_code - 6, 0, boundary_extrap_native.shape[0] - 1)
-    E_native = boundary_extrap_native[excluded_vertex]  # (n,n_fp,n_sps)
-    return cp.where(is_native[:, None, None], E_native, E_collapsed)
+    return boundary_extrap_native[cube_face_code - 6]
 
 
-def _native_or_collapsed_contrib(
-    cp, is_native, cube_face_code, lift_native, ref_area_weight, jump, contrib_collapsed,
-):
-    """面校正分配到体积节点：native 面用 DG 提升算子
-    `lift_native[excluded_vertex] @ (ref_area_weight ⊙ jump)`，collapsed
-    面用调用方已经算好的 `contrib_collapsed`（1D 修正函数分布，见
-    `distribute_face_correction_to_sps`）——与 CPU 版
-    `contrib_owner = lift_native[oc_code-6] @ weighted_jump_o if
-    o_is_native else _distribute_point(...)` 逐字对应。
+def _lift_native_contrib(cp, cube_face_code, lift_native, ref_area_weight, jump):
+    """面校正分配到体积节点：DG 提升算子
+    `lift_native[code-6] @ (ref_area_weight ⊙ jump)`——与 CPU 版
+    `contrib_owner = lift_native[oc_code-6] @ weighted_jump_o` 逐字对应。
 
     **权重是参考求积权重、不是物理面积权重**（2026-09-18 修掉的真实缺陷，
     完整记录见 `core/fr_operators/face_kernels.py::FlatFaceGeometry.
     ref_area_weight` 字段文档）：这一路的 `jump` 是 `adj_row . (F*-F_own)`，
     已经是参考空间的法向通量差，再乘物理面积权重会多乘一个 `|adj_row|
     ~ h^2`，界面项从 `~1/h` 变成 `~h`。
-    （注意 `gpu_scalar_transport.py` 里同名的那个函数**用物理面积权重是
-    对的** —— 它的 `jump` 是物理通量密度差，两路的 `jump` 不在同一个空间。）
+    （注意 `gpu_scalar_transport.py` 里同一位置**用物理面积权重是对的**
+    —— 它的 `jump` 是物理通量密度差，两路的 `jump` 不在同一个空间。）
 
     Args:
         cube_face_code: (n,)
-        lift_native: (n_native_faces, n_sps, n_fp)
+        lift_native: (9, n_sps, n_fp)
         ref_area_weight: (n_fp,) 参考面求积权重（逐面相同）
         jump: (n, n_fp, 5)
-        contrib_collapsed: (n, n_sps, 5)
 
     Returns:
         contrib: (n, n_sps, 5)
     """
-    # 同一处真实 bug 修复，见 `_native_self_extrap` 文档——
-    # `tet_basis_mode="collapsed"` 时 `lift_native` 是空数组
-    # （`(0, n_sps, n_fp)`），`is_native` 恒为 False，短路直接返回
-    # `contrib_collapsed`，避免对空数组做越界 gather。
-    if lift_native.shape[0] == 0:
-        return contrib_collapsed
-    excluded_vertex = cp.clip(cube_face_code - 6, 0, lift_native.shape[0] - 1)
-    lift = lift_native[excluded_vertex]  # (n, n_sps, n_fp)
-    weighted_jump = ref_area_weight[None, :, None] * jump  # (n, n_fp, 5)
-    contrib_native = cp.matmul(lift, weighted_jump)  # (n, n_sps, 5)
-    return cp.where(is_native[:, None, None], contrib_native, contrib_collapsed)
+    lift = lift_native[cube_face_code - 6]              # (n, n_sps, n_fp)
+    weighted_jump = ref_area_weight[None, :, None] * jump   # (n, n_fp, 5)
+    return cp.matmul(lift, weighted_jump)               # (n, n_sps, 5)
 
 
 def _compute_interface_correction_gpu(
     Q_gpu, adj_j, det_jacs, flat_face_gpu, Q_ghost_gpu,
-    n_cells, n_sps, n_prism, device_id, mach_ref, precond_mode=None,
+    n_cells, n_sps, device_id, mach_ref, precond_mode=None,
 ):
     """GPU 界面校正计算（按图着色逐色处理）。
 
@@ -441,49 +382,13 @@ def _compute_interface_correction_gpu(
         if bool(cp.any(mask_o)):
             idx_o = face_idx[mask_o]
             oc = ff.owner_cell[idx_o]
-            oax = ff.owner_axis[idx_o]
-            oside = ff.owner_side[idx_o]
             is_bnd_o = ff.is_boundary[idx_o]
 
-            # #1（2026-08-28）：分布式 local+halo 扩展索引空间下，
-            # `oc < n_prism` 这个单一阈值判据不成立（见
-            # distributed_flat_face.py::DistributedFlatFaceGeometry.
-            # compact_cell_type 文档）——ff.compact_cell_type 存在时
-            # （分布式路径）改用逐位置查表；单机路径 ff 没有这个属性，
-            # getattr 回退到原有阈值判据，行为完全不变。
-            compact_cell_type = getattr(ff, 'compact_cell_type', None)
-            if compact_cell_type is not None:
-                celltype_o = compact_cell_type[oc]
-            else:
-                celltype_o = cp.where(oc < n_prism, 0, 1)
-            oside_idx = cp.where(oside < 0, 0, 1)
-
-            # native 四面体（路径C）GPU 移植（2026-09-02）：`owner_cube_face`
-            # >=6 即 native 真实面，自身面外插改用 `boundary_extrap_native`
-            # 查表，与 CPU 版 inviscid_kernel.py 逐字对应；纯坍缩坐标网格下
-            # `oc_code_o` 恒 <6，`is_native_o` 恒为 False，行为完全不变。
+            # 自身面外插按 `code - 6` gather 原生表（四面体 [6,10)、
+            # 棱柱 [10,15)），与 CPU 版 inviscid_kernel.py 逐字对应。
             oc_code_o = ff.owner_cube_face[idx_o]
-            is_native_o = oc_code_o >= 6
 
-            # 真实 bug 修复（2026-09-03，首次用完整 numpy-as-cupy 替身
-            # 真正端到端跑通 `tet_basis_mode="native"` + GPU 才发现——
-            # 此前"native/collapsed crosscheck"测试文件整体
-            # `pytest.importorskip("cupy")` 跳过，从未真正执行过这个
-            # 组合）：`oax`（owner_axis）对 native 面存的是复用的
-            # excluded_vertex（取值 0~3，见 face_flux_points/merge.py
-            # 模块文档"owner_axis 对 native 面存的是复用的 excluded_
-            # vertex"一节），不是坍缩坐标的真实轴（0~2）——
-            # `ff.boundary_extrap` 的轴维度只有 3（0/1/2），native 面
-            # `oax==3` 时这行无条件 gather 会直接 `IndexError`，不管
-            # 下面 `_native_self_extrap` 最终是否会丢弃这个结果（与
-            # `_native_self_extrap` 自己那处"`boundary_extrap_native`
-            # 空数组 + `cp.clip(x,0,-1)`"是同一类"提前无条件求值导致
-            # 越界"问题，只是这里是另一张表）。修复：native 面统一把
-            # `oax` clip 到 0（一个恒安全的哑值，结果本来就会被
-            # `is_native_o` 丢弃，不影响 collapsed 面的真实行为）。
-            oax_safe = cp.where(is_native_o, 0, oax)
-            E_o_collapsed = ff.boundary_extrap[celltype_o, oax_safe, oside_idx]  # (nO,n_fp,n_sps)
-            E_o = _native_self_extrap(cp, is_native_o, oc_code_o, ff.boundary_extrap_native, E_o_collapsed)
+            E_o = _native_self_extrap(cp, oc_code_o, ff.boundary_extrap_native)
             Q_o = cp.matmul(E_o, Q_gpu[oc])  # (nO,n_fp,5)
 
             Q_n = _extrap_q_to_fp(cp, ff.neighbor_src0_mat[idx_o], ff.neighbor_src0_cell[idx_o], Q_gpu)
@@ -513,10 +418,11 @@ def _compute_interface_correction_gpu(
                 Q_n,
             )
 
-            side_factor_o = _native_aware_side_factor(cp, is_native_o, oside)
+            # 原生面的 adj 行已是 outward 定向，方向系数恒为 +1（见
+            # `_native_self_extrap` 与 CPU 版同一处说明）。
             adjrow_o = ff.owner_adj_row_exact[idx_o]
             direction_o, adj_mag_o = _ausm_direction_with_fallback(
-                cp, adjrow_o, side_factor_o, ff.true_normal[idx_o],
+                cp, adjrow_o, ff.true_normal[idx_o],
             )
 
             nO = Q_o.shape[0]
@@ -524,7 +430,7 @@ def _compute_interface_correction_gpu(
                 Q_o.reshape(nO, n_fp, 5), Q_n.reshape(nO, n_fp, 5), direction_o, mach_ref,
                 precond_mode,
             )
-            F_tilde_common_o = flux_o * adj_mag_o[..., None] * side_factor_o[:, None, None]
+            F_tilde_common_o = flux_o * adj_mag_o[..., None]
 
             a0 = adjrow_o[..., 0]
             a1 = adjrow_o[..., 1]
@@ -538,27 +444,8 @@ def _compute_interface_correction_gpu(
 
             jump_owner = F_tilde_common_o - F_tilde_own_o
 
-            # 真实 bug 修复（V2.0 专家组盲审第四轮，2026-08-28）：分配
-            # 改用 dist_fp_of_sp/dist_axis_coord_of_sp gather，不再用
-            # `ff.g_left[idx_o]` 按面索引去索引这个长度仅 n1d 的数组
-            # （会在真实 GPU 上 IndexError），见
-            # gpu_inviscid_volume.py::distribute_face_correction_to_sps
-            # 文档的完整推导。
-            #
-            # 真实 bug 修复（2026-09-03）：这里必须用上面已经算好的
-            # `oax_safe`（native 面 clip 到 0），不能用原始 `oax`——
-            # `dist_fp_of_sp`/`dist_axis_coord_of_sp` 同样只有 3 个轴，
-            # 原始 `oax`（native 面上是 excluded_vertex，可达 3）会在
-            # 这里 `IndexError`，即便下面 `_native_or_collapsed_contrib`
-            # 最终会丢弃 collapsed 分支的结果（同一类"提前无条件求值"
-            # 问题，与本文件其余同类修复同一根因）。
-            contrib_o_collapsed = distribute_face_correction_to_sps(
-                cp, jump_owner, oax_safe, oside, ff.dist_fp_of_sp, ff.dist_axis_coord_of_sp,
-                ff.g_left, ff.g_right,
-            )
-            contrib_o = _native_or_collapsed_contrib(
-                cp, is_native_o, oc_code_o, ff.lift_native, ff.ref_area_weight,
-                jump_owner, contrib_o_collapsed,
+            contrib_o = _lift_native_contrib(
+                cp, oc_code_o, ff.lift_native, ff.ref_area_weight, jump_owner,
             )
             contrib_o = contrib_o / det_jacs[oc][..., None]
             _scatter_add_to_correction(correction, -contrib_o, oc, n_cells, n_sps)
@@ -568,29 +455,11 @@ def _compute_interface_correction_gpu(
         if bool(cp.any(mask_n)):
             idx_n = face_idx[mask_n]
             nc = ff.neighbor_cell[idx_n]
-            nax = ff.neighbor_axis[idx_n]
-            nside = ff.neighbor_side[idx_n]
-
-            # #1（2026-08-28）：见上方 owner-primary 块同名注释，同一处修复。
-            compact_cell_type = getattr(ff, 'compact_cell_type', None)
-            if compact_cell_type is not None:
-                celltype_n = compact_cell_type[nc]
-            else:
-                celltype_n = cp.where(nc < n_prism, 0, 1)
-            nside_idx = cp.where(nside < 0, 0, 1)
 
             # native 四面体（路径C）GPU 移植（2026-09-02）：见上方
             # owner-primary 块同名注释，同一处修复。
             nc_code_n = ff.neighbor_cube_face[idx_n]
-            is_native_n = nc_code_n >= 6
-
-            # 真实 bug 修复（2026-09-03）：见上方 owner-primary 块同名
-            # 注释，同一处修复——`nax` 对 native 面同样存的是复用的
-            # excluded_vertex（0~3），不能无条件拿去 gather 只有 3 个
-            # 轴的 `boundary_extrap`。
-            nax_safe = cp.where(is_native_n, 0, nax)
-            E_n_collapsed = ff.boundary_extrap[celltype_n, nax_safe, nside_idx]
-            E_n = _native_self_extrap(cp, is_native_n, nc_code_n, ff.boundary_extrap_native, E_n_collapsed)
+            E_n = _native_self_extrap(cp, nc_code_n, ff.boundary_extrap_native)
             Q_n_native = cp.matmul(E_n, Q_gpu[nc])  # (nN,n_fp,5)
 
             Q_o_at_n = _extrap_q_to_fp(cp, ff.owner_src0_mat[idx_n], ff.owner_src0_cell[idx_n], Q_gpu)
@@ -613,18 +482,17 @@ def _compute_interface_correction_gpu(
             nN = Q_n_native.shape[0]
 
             # neighbor 视角外法向恒为 -true_normal（见 CPU kernel 同名注释）
-            side_factor_n = _native_aware_side_factor(cp, is_native_n, nside)
             adjrow_n = ff.neighbor_adj_row_exact[idx_n]
             tn_neg = -ff.true_normal[idx_n]
             direction_n, adj_mag_n = _ausm_direction_with_fallback(
-                cp, adjrow_n, side_factor_n, tn_neg,
+                cp, adjrow_n, tn_neg,
             )
 
             flux_n = _ausm_up_flux_batch_gpu(
                 Q_n_native.reshape(nN, n_fp, 5), Q_o_at_n.reshape(nN, n_fp, 5), direction_n, mach_ref,
                 precond_mode,
             )
-            F_tilde_common_n = flux_n * adj_mag_n[..., None] * side_factor_n[:, None, None]
+            F_tilde_common_n = flux_n * adj_mag_n[..., None]
 
             a0n = adjrow_n[..., 0]
             a1n = adjrow_n[..., 1]
@@ -638,15 +506,8 @@ def _compute_interface_correction_gpu(
 
             jump_neighbor = F_tilde_common_n - F_tilde_own_n
 
-            # 见上方 owner-primary 块同名注释，同一处修复——用
-            # `nax_safe`（native 面 clip 到 0），不能用原始 `nax`。
-            contrib_n_collapsed = distribute_face_correction_to_sps(
-                cp, jump_neighbor, nax_safe, nside, ff.dist_fp_of_sp, ff.dist_axis_coord_of_sp,
-                ff.g_left, ff.g_right,
-            )
-            contrib_n = _native_or_collapsed_contrib(
-                cp, is_native_n, nc_code_n, ff.lift_native, ff.ref_area_weight,
-                jump_neighbor, contrib_n_collapsed,
+            contrib_n = _lift_native_contrib(
+                cp, nc_code_n, ff.lift_native, ff.ref_area_weight, jump_neighbor,
             )
             contrib_n = contrib_n / det_jacs[nc][..., None]
             _scatter_add_to_correction(correction, -contrib_n, nc, n_cells, n_sps)
@@ -682,7 +543,7 @@ def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref, precond_mode):
     但产出一个多出一维、内容完全错误的结果，`N!=n_fp` 的一般网格上
     会在这里直接 `ValueError`（这正是该测试文件此前报告的"P1/P2 直接
     构造时同样复现"的崩溃点，只是那次调查停在了更下游的
-    `distribute_face_correction_to_sps`）。修复：`nx=normal[...,0]`
+    `distribute_face_correction_to_sps`（已随坍缩路径删除））。修复：`nx=normal[...,0]`
     （不保留末尾维度）——这样在真实的 `(N,n_fp,3)` 输入下 `nx` 形状
     恰好是 `(N,n_fp)`，与 `uL` 等逐 FP 量逐元素精确匹配，不再依赖任何
     隐式广播。

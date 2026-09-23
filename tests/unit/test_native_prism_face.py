@@ -404,15 +404,6 @@ class TestRealSpsCountsFollowTheActivePrismBasis:
     """
 
     @pytest.mark.parametrize("order", [1, 2, 3, 4])
-    def test_collapsed_prism_uses_every_slot(self, order, monkeypatch):
-        from autoflowcfd.fr.native_padding import real_sps_per_cell
-
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")  # 2026-09-20 起默认已是 native，坍缩档必须显式指定
-        n_prism, n_tet = real_sps_per_cell(order)
-        assert n_prism == (order + 1) ** 3, "坍缩棱柱没有填充槽位"
-        assert n_tet == (order + 1) * (order + 2) * (order + 3) // 6
-
-    @pytest.mark.parametrize("order", [1, 2, 3, 4])
     def test_native_prism_reports_its_own_count(self, order, monkeypatch):
         from autoflowcfd.fr.native_padding import real_sps_per_cell
 
@@ -435,21 +426,24 @@ class TestRealSpsCountsFollowTheActivePrismBasis:
         assert np.allclose(got[:2], 2.0), (
             f"棱柱填充槽位被算进均值了：{got[:2]}")
 
-    def test_collapsed_reduction_is_bit_identical_to_plain_mean(
-            self, monkeypatch):
-        """坍缩模式下必须与"直接对整个 SP 轴求均值"**逐位**相同。
+    def test_tet_reduction_is_bit_identical_to_plain_mean(self):
+        """**四面体段**的归约必须与"直接对整个真实 SP 轴求均值"逐位相同。
 
-        这条保证改动对已长期验证的默认路径零影响。
+        原来这条测的是坍缩棱柱（那时棱柱没有填充槽位，所以对整个 SP 轴
+        求均值就是对的）。坍缩棱柱基已于 2026-09-23 删除，改测四面体段
+        —— 它的真实自由度数同样由 `real_sps_per_cell` 给出，判据的意图
+        （"掩码逻辑不能在没有填充的那一段上引入任何偏差"）完全保留。
         """
         from autoflowcfd.fr.native_padding import (
-            reduce_per_cell_over_real_sps,
+            real_sps_per_cell, reduce_per_cell_over_real_sps,
         )
 
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")  # 2026-09-20 起默认已是 native，坍缩档必须显式指定
+        _n_prism_real, n_tet_real = real_sps_per_cell(2)
         rng = np.random.default_rng(11)
         f = rng.normal(size=(6, 27))
-        got = reduce_per_cell_over_real_sps(f, 4, 2, "mean")
-        assert np.array_equal(got[:4], f[:4].mean(axis=1))
+        f[:, n_tet_real:] = np.nan          # 填充槽位：被正确掩掉才不会传染
+        got = reduce_per_cell_over_real_sps(f, 0, 2, "mean")
+        assert np.array_equal(got, f[:, :n_tet_real].mean(axis=1))
 
     def test_row_masked_reduction_excludes_prism_padding(self, monkeypatch):
         """逐行掩码版（按 owner_cell 索引出来的逐面数组）同样要正确。"""
@@ -494,29 +488,37 @@ class TestOperatorsAndGeometrySwitchTogether:
 
         return generate_fr_operators(order)
 
-    def test_collapsed_leaves_every_native_field_none(self, monkeypatch):
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")  # 2026-09-20 起默认已是 native，坍缩档必须显式指定
+    def test_every_native_prism_field_is_present(self):
+        """原生棱柱那一整组算子字段**恒为非 None**。
+
+        原来这条测的是反面（"坍缩档下它们全是 None"）。坍缩棱柱基已于
+        2026-09-23 删除，判据翻成正面：只剩一条基，那组字段必须永远建好
+        —— 任何一个是 None 都意味着算子构造静默失败了，而下游
+        `FROperators._native_face_op` 只会在真正取用时才抛错。
+        """
         ops = self._ops(2)
-        assert ops.prism_basis_mode == "collapsed"
         for name in ("D_native_prism", "ref_native_prism",
                      "n_native_sps_prism", "boundary_extrap_native_prism",
                      "lift_native_prism", "D_native_prism_padded",
                      "lift_native_prism_padded",
                      "filter_native_prism_padded"):
-            assert getattr(ops, name) is None, f"{name} 应当是 None"
-        assert np.abs(ops.D_3d_prism).max() > 20.0, "坍缩档的 max|D| 应当很大"
+            assert getattr(ops, name) is not None, f"{name} 不该是 None"
+        # 原来这里顺手自检"坍缩档 max|D| 应当很大（>20）"，作为改善倍数
+        # 判据的对照侧。坍缩棱柱基已于 2026-09-23 删除，该自检随之移除；
+        # 原生侧改用绝对上界判据，见
+        # `test_native_operator_magnitude_stays_small`。
 
     @pytest.mark.parametrize("order", [1, 2, 3])
-    def test_native_aliases_the_old_field_names(self, order, monkeypatch):
+    def test_native_aliases_the_old_field_names(self, order):
         """`D_3d_prism`/`filter_prism` 必须别名到填充好的原生版本。
 
         这是让"任何无条件读旧字段名的消费点自动拿到原生结果"成立的关键，
-        与四面体当年完全同一个做法。
+        与四面体当年完全同一个做法。（原先还断言 `ops.prism_basis_mode ==
+        "native"`；那个字段随坍缩档一起删除了 —— 只剩一条基时，再记录
+        "当前是哪条"就是冗余。）
         """
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
         ops = self._ops(order)
         n_global = (order + 1) ** 3
-        assert ops.prism_basis_mode == "native"
         assert ops.D_3d_prism is ops.D_native_prism_padded
         assert ops.filter_prism is ops.filter_native_prism_padded
         assert ops.D_3d_prism.shape == (n_global, n_global, 3)
@@ -540,20 +542,29 @@ class TestOperatorsAndGeometrySwitchTogether:
             assert np.all(mat[nr:, :] == 0.0)
 
     @pytest.mark.parametrize("order", [1, 2, 3])
-    def test_native_operator_magnitude_is_far_smaller(self, order,
-                                                      monkeypatch):
-        """`max|D_3d_prism|` 必须大幅下降 —— 自由流保持性的直接控制量
+    def test_native_operator_magnitude_stays_small(self, order):
+        """`max|D_3d_prism|` 必须保持在小量级 —— 自由流保持性的直接控制量
         （实测误差严格等于 `eps * max|D| / det(J)`）。
+
+        原来这条是"原生 vs 坍缩的改善倍数"。坍缩棱柱基已于 2026-09-23
+        删除、无法再构造对照侧，所以改成钉**原生侧的绝对上界**：
+
+            order   实测 max|D_3d_prism|   本测试上界（实测值 x1.5）
+              1          0.866025                  1.30
+              2          2.581989                  3.90
+              3          4.860154                  7.30
+
+        作为量级参照，坍缩棱柱基在删除前的同一个量是 P3 **560.1**
+        （项目记忆 `native-prism-basis-migration` 记的 `max|D|` 随阶数
+        爆炸：P1 2.05 -> P3 560.1），也就是原生把它压低了两个数量级 ——
+        这正是自由流保持性从 ~1e-9 改善到机器零的直接原因。
         """
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")  # 2026-09-20 起默认已是 native，坍缩档必须显式指定
-        mag_c = float(np.abs(self._ops(order).D_3d_prism).max())
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
         mag_n = float(np.abs(self._ops(order).D_3d_prism).max())
-        gain = mag_c / mag_n
-        floor = {1: 1.5, 2: 4.0, 3: 30.0}[order]
-        assert gain >= floor, (
-            f"order={order}: max|D| 只改善了 {gain:.1f} 倍 "
-            f"(native {mag_n:.3f} vs collapsed {mag_c:.3f})")
+        ceiling = {1: 1.30, 2: 3.90, 3: 7.30}[order]
+        assert mag_n <= ceiling, (
+            f"order={order}: max|D_3d_prism| = {mag_n:.6f} 超过上界 "
+            f"{ceiling}（2026-09-23 实测 "
+            f"{ {1: 0.866025, 2: 2.581989, 3: 4.860154}[order] }）")
 
     def test_bad_face_key_is_rejected_not_silently_mapped(self, monkeypatch):
         """按 `(axis, side)` 取原生棱柱面算子只允许走对应表。"""
@@ -574,13 +585,13 @@ class TestOperatorsAndGeometrySwitchTogether:
 
 
 class TestNativePrismGeometry:
-    """生产几何在原生档下的两条硬性质。
+    """生产几何的两条硬性质。
 
-    **网格在坍缩档下建、几何在原生档下重算**：`load_from_volume_mesh`
-    在原生档下会撞上面编码的硬护栏（残差 kernel 还没适配，见那条护栏的
-    说明）。而几何是 `(mesh, order, mode)` 的**纯函数**，所以直接调
-    `build_order_geometry` 就能在不碰面编码的前提下验证它 —— 这不是绕过
-    护栏，护栏挡的正是"原生几何配坍缩面编码去跑残差"那件事。
+    2026-09-24 之前这里刻意"网格在坍缩档下建、几何在原生档下重算" ——
+    那是因为 `load_from_volume_mesh` 在原生档下会撞上原生棱柱面编码的
+    硬护栏（当时残差 kernel 还没适配）。那道护栏已于 2026-09-19 随
+    "原生算子堆叠成一张表、索引恒为 `code - 6`" 一并移除，坍缩棱柱基
+    本身也已于 2026-09-23 删除，所以现在直接按生产路径建网格即可。
     """
 
     @staticmethod
@@ -593,10 +604,9 @@ class TestNativePrismGeometry:
             build_order_geometry,
         )
 
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")  # 2026-09-20 起默认已是 native，坍缩档必须显式指定
+        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
         mesh = build_channel_mesh_prism(order, nx=3, ny=2, nz=2,
                                         Lx=0.1, H=0.01, Lz=0.004)
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
         return mesh, build_order_geometry(mesh, order)
 
     def test_right_prism_metric_is_constant_through_production_geometry(
@@ -613,26 +623,14 @@ class TestNativePrismGeometry:
         spread = det.max() / det.min()
         assert spread < 1.0 + 1e-12, f"度量不恒定，极值比 {spread:.6f}"
 
-    def test_collapsed_metric_really_does_vary(self, monkeypatch):
-        """自检：同一张网格在坍缩档下 `det_jacs` **确实**随点变化。
+    # 原来这里有一条自检 `test_collapsed_metric_really_does_vary`：同一张
+    # 网格在坍缩档下 `det_jacs` 极值比 > 2.0，用来证明上面那条"原生档度量
+    # 恒定"不是因为网格太规整。坍缩棱柱基已于 2026-09-23 删除、无法再构造
+    # 对照侧，该自检随之移除。它当时的结论仍然有效并记录在此：**这张
+    # `build_channel_mesh_prism(2, nx=3, ny=2, nz=2, Lx=0.1, H=0.01,
+    # Lz=0.004)` 网格在坍缩档下度量确实随点变化（极值比 > 2）**，所以
+    # "原生档恒定"是基本身的功劳，不是网格规整的副产物。
 
-        否则上面那条"恒定"判据无从判断是原生基的功劳还是网格太规整。
-        """
-        import sys
-
-        sys.path.insert(0, "tests/validation")
-        from _channel_mesh import build_channel_mesh_prism
-        from autoflowcfd.grid.high_order.high_order_mesh_order import (
-            build_order_geometry,
-        )
-
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")  # 2026-09-20 起默认已是 native，坍缩档必须显式指定
-        mesh = build_channel_mesh_prism(2, nx=3, ny=2, nz=2,
-                                        Lx=0.1, H=0.01, Lz=0.004)
-        det = np.abs(build_order_geometry(mesh, 2)["jacobians"]["det_jacs"])
-        assert det.max() / det.min() > 2.0, (
-            f"坍缩档的度量极值比只有 {det.max() / det.min():.3f}，"
-            f"这张网格区分不出两条基")
 
     def test_padding_slots_copy_real_sp0(self, monkeypatch):
         """填充槽位必须复制真实 SP #0（有限、物理上合法的占位值）。

@@ -135,7 +135,6 @@ class DistributedFRSolver:
         self.order = int(solver_kwargs.get('order', getattr(mesh, 'order', 0)))
         self.current_order = self.order
         self.order_continuation_enabled = solver_kwargs.get('order_continuation_enabled', True)
-        self.flux_type = solver_kwargs.get('flux_point_type', solver_kwargs.get('flux_type', 'radau'))
         self._is_fully_distributed = False
 
         # 分布式模式：使用传入的分区信息
@@ -549,7 +548,6 @@ class DistributedFRSolver:
         self.order = int(package['order'])
         self.current_order = self.order
         self.order_continuation_enabled = package.get('order_continuation_enabled', True)
-        self.flux_type = package.get('flux_type', 'radau')
         self.n_ranks = n_ranks
 
         precompacted_mesh = package['precompacted_mesh']

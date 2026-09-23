@@ -257,7 +257,6 @@ class FRSolver(_SolverGeometryMixin):
                  turbulence_intensity: float = 0.01,
                  viscosity_ratio: float = 5.0,
                  sem_num_eddies: int = 200,
-                 flux_type: str = 'radau',
                  artificial_viscosity_enabled: bool = False,
                  artificial_viscosity_alpha: float = 1.0,
                  entropy_stable_volume_enabled: bool = False,
@@ -349,13 +348,6 @@ class FRSolver(_SolverGeometryMixin):
                 涡核数量（默认 200，此前恒为硬编码常量，见
                 fr_solver/boundary.py 模块文档 2026-08-28 的修复说明）。
                 只在 turb_model_name 为 LES/DDES/IDDES 且未激活 WMLES 时生效。
-            flux_type: FR 修正函数族选择，透传给 `fr/operators.py::
-                generate_fr_operators` 的 `flux_point_type` 参数（#14 新增，
-                见该函数文档）。默认 'radau'（此前唯一被使用过的方案，
-                数值行为不变），'gauss' 启用与 Spectral Difference 等价的
-                新方案。Order Continuation 跨阶数重建算子时
-                （order_continuation.py）会读取 `self.flux_type` 保持
-                同一个选择贯穿整个求解过程，不会在阶数切换时静默退回默认值。
         """
         # numba 全局线程数只在这里设置一次（求解器生命周期内不再修改），
         # 理由见本方法 n_threads 参数文档。必须在任何残差 kernel 被调用
@@ -439,7 +431,6 @@ class FRSolver(_SolverGeometryMixin):
 
         self.mesh = mesh
         self.order = order
-        self.flux_type = flux_type
         self.artificial_viscosity_enabled = artificial_viscosity_enabled
         self.artificial_viscosity_alpha = artificial_viscosity_alpha
         # **order == 1 时人工粘性是精确的无操作**（2026-09-15 实测确认）。
@@ -556,7 +547,7 @@ class FRSolver(_SolverGeometryMixin):
             TimeIntegrationScheme.SSP_RK2, TimeIntegrationScheme.SSP_RK3,
         )
 
-        self.ops = generate_fr_operators(order, flux_point_type=flux_type)
+        self.ops = generate_fr_operators(order)
 
         # BLAS 线程数压到 1（性能优化 2026-09-13，见 `_limit_blas_threads`
         # 与 `autoflowcfd/__init__.py` 顶部的完整实测记录）。**位置很关键**：

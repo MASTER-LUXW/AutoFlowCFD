@@ -8,15 +8,12 @@ from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-from autoflowcfd.fr.collapsed_basis import prism_modal_basis_and_grad, tet_modal_basis_and_grad
 from autoflowcfd.fr.quadrature_points import gauss_legendre
-from autoflowcfd.fr.native_prism.mode import prism_basis_is_native
 from autoflowcfd.core.utils.array_module import array_module as _array_module
 
 from .sensor_operators import (
     _build_native_prism_sensor_operators,
     _build_native_tet_sensor_operators,
-    _build_sensor_operators,
     _operators_on,
 )
 
@@ -102,53 +99,3 @@ def compute_persson_peraire_sensor_native_prism(
     S_e = energy_top / xp.maximum(energy_all, 1e-300)
     with np.errstate(divide="ignore"):      # 见 native 四面体版同一处说明
         return xp.log10(xp.maximum(S_e, 1e-300))
-
-
-def compute_persson_peraire_sensor(
-    field_nodal: np.ndarray, cell_type: str, order: int, ref_cube_sps: np.ndarray
-) -> np.ndarray:
-    """计算 Persson-Peraire 模态传感器 s_e = log10(S_e)。
-
-    S_e = <u_trunc, u_trunc>_e / <u, u>_e，其中 u_trunc 是把 u 变换到
-    模态系数空间、只保留 max(i,j,k)==order 的最高阶模态（其余模态清零）
-    后再变换回节点值——即 u 与"截断掉最高阶模态的 u"之间的差恰好等于
-    u_trunc 本身（线性算子的性质：完整重构 - 截断重构 = 只保留被截断
-    那部分模态的重构），<.,.>_e 是用节点所在 Gauss-Legendre 求积点权重
-    做的离散 L2 内积（张量积三维权重，逐元素与场值相乘再求和，不是
-    矩阵乘法意义上的质量矩阵内积，但对配置在求积点上的节点表示，两者
-    对多项式被积函数是精确等价的——求积点与解点重合正是配置法的定义）。
-
-    Args:
-        field_nodal: (n_cells, n_sps) 待探测的场（通常是密度）
-        cell_type: "tet" 或 "prism"
-        order: 当前多项式阶数
-        ref_cube_sps: (n_sps, 3) 计算立方体参考坐标，与 fr/operators.py
-            生成 D_3d_tet/D_3d_prism 用的完全一致
-
-    Returns:
-        s_e: (n_cells,) 传感器值（已取 log10），order==0 时返回 -inf
-            填充的数组（representing "无穷光滑"，任何下游 kappa 判据
-            都不会触发人工粘性，与 order==0 没有可截断的高阶模态这一
-            事实一致）
-    """
-    xp = _array_module(field_nodal)
-    n_cells = field_nodal.shape[0]
-    if order == 0:
-        return xp.full(n_cells, -np.inf)
-
-    V, V_inv, quad_weights_3d, top_mask = _build_sensor_operators(
-        cell_type, order, ref_cube_sps)
-    V, V_inv, quad_weights_3d, top_mask = _operators_on(
-        xp, (cell_type, order), (V, V_inv, quad_weights_3d, top_mask))
-
-    modal = xp.einsum("ij,cj->ci", V_inv, field_nodal)
-    modal_top = xp.where(top_mask[xp.newaxis, :], modal, 0.0)
-    diff_nodal = xp.einsum("ij,cj->ci", V, modal_top)
-
-    num = xp.einsum("cs,s,cs->c", diff_nodal, quad_weights_3d, diff_nodal)
-    den = xp.einsum("cs,s,cs->c", field_nodal, quad_weights_3d, field_nodal)
-
-    S_e = num / xp.maximum(den, 1e-300)
-    with np.errstate(divide="ignore"):      # 见 native 版同一处说明
-        s_e = xp.log10(xp.maximum(S_e, 1e-300))
-    return s_e

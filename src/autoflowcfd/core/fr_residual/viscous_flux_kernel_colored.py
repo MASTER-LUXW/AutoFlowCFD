@@ -12,10 +12,11 @@ import numpy as np
 from numba import njit, prange
 
 from autoflowcfd.core.fr_operators.flux_kernels import (
-    viscous_physical_flux_point, viscous_boundary_penalty_tilde, mirror_normal_component,
+    CP_AIR, viscous_physical_flux_point,
+    viscous_ip_penalty_tilde, mirror_normal_component,
 )
-from autoflowcfd.core.fr_residual.inviscid_kernel import _extrap_matmul, _distribute_point
-from autoflowcfd.core.fr_residual.viscous_flux_kernel import _extrap_matrix3x3, _VISCOUS_BOUNDARY_IP_C
+from autoflowcfd.core.fr_residual.inviscid_kernel import _extrap_matmul
+from autoflowcfd.core.fr_residual.viscous_flux_kernel import _extrap_matrix3x3
 
 
 @njit(cache=True, parallel=True)
@@ -23,8 +24,6 @@ def compute_viscous_interface_correction_kernel_colored(
     Q: np.ndarray, grad_vel: np.ndarray, grad_T: np.ndarray, mu_t_field: np.ndarray,
     det_jacs: np.ndarray, mu: float, Pr: float, Pr_t: float,
     owner_cell: np.ndarray, neighbor_cell: np.ndarray, is_boundary: np.ndarray,
-    owner_axis: np.ndarray, owner_side: np.ndarray,
-    neighbor_axis: np.ndarray, neighbor_side: np.ndarray,
     owner_is_primary: np.ndarray, neighbor_is_primary: np.ndarray,
     owner_adj_row_exact: np.ndarray, neighbor_adj_row_exact: np.ndarray,
     neighbor_src0_cell: np.ndarray, neighbor_src0_mat: np.ndarray,
@@ -33,16 +32,24 @@ def compute_viscous_interface_correction_kernel_colored(
     owner_src1_idx: np.ndarray, owner_src1_cell: np.ndarray, owner_src1_mat: np.ndarray,
     mixed_nb_partner: np.ndarray, mixed_nb_mask: np.ndarray,
     mixed_ow_partner: np.ndarray, mixed_ow_mask: np.ndarray,
-    boundary_extrap: np.ndarray,
-    g_left: np.ndarray, g_right: np.ndarray,
     Q_ghost: np.ndarray, bnd_adiabatic: np.ndarray,
-    dist_fp_of_sp: np.ndarray, dist_axis_coord_of_sp: np.ndarray,
-    n_prism: int,
     face_indices: np.ndarray,  # 当前颜色组的面索引
     correction: np.ndarray,    # 共享输出 buffer（同色面无冲突，直接写入）
     owner_cube_face: np.ndarray, neighbor_cube_face: np.ndarray,
     ref_area_weight: np.ndarray,
     boundary_extrap_native: np.ndarray, lift_native: np.ndarray,
+    # IP 罚项的长度尺度 `h_f = cell_volume[cell] / face_area[face]`
+    # （面法向的单元厚度）。见 `flux_kernels.viscous_ip_penalty_tilde`
+    # 的"长度尺度"一节：此前用 `mean(det_jacs)**(1/3)`，两处都错 ——
+    # `mean(det_jacs)` 不是体积而是体积/参考体积（参考体积基相关：
+    # 坍缩 8 / 原生棱柱 4 / 原生四面体 4/3），且几何平均在各向异性
+    # 贴壁单元上比壁法向厚度大 2.48 倍（实测平板算例）。
+    face_area: np.ndarray, cell_volume: np.ndarray,
+    # IP 罚项常数，按阶数解析（见 `flux_kernels.resolve_viscous_ip_constant`）。
+    # 做成形参而不是模块全局：njit 把全局当编译期常量、且
+    # `cache=True` 的磁盘缓存**不因全局值变化而失效**，那样
+    # 扫参数必须隔离缓存目录重编译，极易误读成"改了没生效"。
+    c_ip: float,
 ) -> None:
     """图着色版本的粘性界面 kernel。
 
@@ -72,26 +79,12 @@ def compute_viscous_interface_correction_kernel_colored(
         f = face_indices[fi]
         oc = owner_cell[f]
         oc_code = owner_cube_face[f]
-        o_is_native = oc_code >= 6
-        oax = owner_axis[f]
-        oside = owner_side[f]
-        # **原生面的罚项 side 因子必须是 +1**（2026-09-22 修复真实缺陷）：
-        # 原生面的 `owner_adj_row_exact` 已按 outward 定向（见
-        # `native_prism/face.py::native_prism_face_adj_rows` 与
-        # `exact_normal.py::compute_exact_face_normals_and_weights` 里
-        # `side_factor = np.where(owner_code >= 6, 1.0, owner_side)` 的同一
-        # 处理），而坍缩面的 adj_row 未定向、外向性由 `oside` 给出。此前
-        # 这里直接乘 `oside`，于是 `owner_side = -1` 的原生面（棱柱 f0/f3/f4、
-        # 四面体全部 4 个面）罚项符号反了 —— 从耗散变成往壁面单元注入动量。
-        pen_side_o = 1.0 if o_is_native else oside
-        oside_idx = 0 if oside < 0 else 1
-        celltype_o = 0 if oc < n_prism else 1
+        # 罚项 side 因子恒为 +1（与非 colored 版本同一条，见那边的完整
+        # 说明：原生面的 adj_row 已 outward 定向，此前误乘 `owner_side`
+        # 让一半的面把耗散变成注入）。
 
         if owner_is_primary[f]:
-            if o_is_native:
-                E_o = boundary_extrap_native[oc_code - 6]
-            else:
-                E_o = boundary_extrap[celltype_o, oax, oside_idx]
+            E_o = boundary_extrap_native[oc_code - 6]
 
             Q_o = _extrap_matmul(Q[oc], E_o)
             gv_o = _extrap_matrix3x3(grad_vel[oc], E_o)
@@ -99,10 +92,6 @@ def compute_viscous_interface_correction_kernel_colored(
             mut_o = E_o @ mu_t_field[oc]
             adjrow_o = owner_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
 
-            vol_o = 0.0
-            for s in range(n_sps):
-                vol_o += det_jacs[oc, s]
-            vol_o /= n_sps
 
             jump_owner = np.zeros((n_fp, 5))
             for i in range(n_fp):
@@ -194,28 +183,40 @@ def compute_viscous_interface_correction_kernel_colored(
                 for v in range(5):
                     jump_owner[i, v] = G_tilde_common[v] - G_tilde_own[v]
 
+                # `adj_mag_o` 与罚项长度尺度两条分支都要用，提到 if 之外。
+                adj_mag_o = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
+                h_ip_o = cell_volume[oc] / face_area[f]
                 if is_bnd_i:
                     # 边界 IP 罚项，见 compute_viscous_interface_correction_kernel
                     # 同名分支的文档（图着色版本，逻辑必须逐字保持一致；含混合面边界半区）。
-                    adj_mag_o = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
-                    pen = viscous_boundary_penalty_tilde(
-                        Q_o[i], Q_n, mu + mut_o[i], vol_o, adj_mag_o, pen_side_o, _VISCOUS_BOUNDARY_IP_C,
+                    pen = viscous_ip_penalty_tilde(
+                        Q_o[i], Q_n, mu + mut_o[i], 0.0, h_ip_o, adj_mag_o,
+                        1.0, c_ip, False,
                     )
-                    for v in range(1, 4):
-                        jump_owner[i, v] += pen[v]
+                else:
+                    # **内部面 IP 罚项**（2026-09-23 修复真实缺陷，完整依据见
+                    # `viscous_ip_penalty_tilde` 的"为什么内部面也必须加"）：
+                    # `sigma = grad(u)` 是纯单元内局部梯度
+                    # （`compute_physical_gradient(field, mesh, ops)` 的签名里
+                    # 没有任何面数据），没有 BR1 要求的提升项；界面耦合只有
+                    # "粘性通量取两侧算术平均"这一层，内部面此前**零罚项** ——
+                    # 正是 ABCM(2002) 框架里"提升项与罚项都为零"的那一档，
+                    # 不满足强制性（实测均匀基态纯粘性算子谱正实部 328/2160）。
+                    # 涡粘与热传导率都取**面平均**，与 `G_common` 一致。
+                    k_tot_o = mu * CP_AIR / Pr + mut_avg * CP_AIR / Pr_t
+                    pen = viscous_ip_penalty_tilde(
+                        Q_o[i], Q_n, mu + mut_avg, k_tot_o, h_ip_o, adj_mag_o,
+                        1.0, c_ip, True,
+                    )
+                for v in range(1, 5):
+                    jump_owner[i, v] += pen[v]
 
-            if o_is_native:
-                weighted_jump_o = np.empty((n_fp, 5))
-                for i in range(n_fp):
-                    w_area = ref_area_weight[i]
-                    for v in range(5):
-                        weighted_jump_o[i, v] = w_area * jump_owner[i, v]
-                contrib_owner = lift_native[oc_code - 6] @ weighted_jump_o
-            else:
-                g_prime_owner = g_left if oside < 0 else g_right
-                contrib_owner = _distribute_point(
-                    jump_owner, dist_fp_of_sp[oax], dist_axis_coord_of_sp[oax], g_prime_owner
-                )
+            weighted_jump_o = np.empty((n_fp, 5))
+            for i in range(n_fp):
+                w_area = ref_area_weight[i]
+                for v in range(5):
+                    weighted_jump_o[i, v] = w_area * jump_owner[i, v]
+            contrib_owner = lift_native[oc_code - 6] @ weighted_jump_o
             for s in range(n_sps):
                 dj = det_jacs[oc, s]
                 for v in range(5):
@@ -224,18 +225,7 @@ def compute_viscous_interface_correction_kernel_colored(
         if (not is_boundary[f]) and neighbor_is_primary[f]:
             nc = neighbor_cell[f]
             nc_code = neighbor_cube_face[f]
-            n_is_native = nc_code >= 6
-            nax = neighbor_axis[f]
-            nside = neighbor_side[f]
-            # neighbor 侧同理（见 owner 侧那段注释）。
-            pen_side_n = 1.0 if n_is_native else nside
-            nside_idx = 0 if nside < 0 else 1
-            celltype_n = 0 if nc < n_prism else 1
-
-            if n_is_native:
-                E_n = boundary_extrap_native[nc_code - 6]
-            else:
-                E_n = boundary_extrap[celltype_n, nax, nside_idx]
+            E_n = boundary_extrap_native[nc_code - 6]
 
             Q_n_native = _extrap_matmul(Q[nc], E_n)
             gv_n_native = _extrap_matrix3x3(grad_vel[nc], E_n)
@@ -243,11 +233,6 @@ def compute_viscous_interface_correction_kernel_colored(
             mut_n_native = E_n @ mu_t_field[nc]
             adjrow_n_native = neighbor_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
 
-            # neighbor 侧单元体积代理（混合面边界半区 IP 罚项用，B-8），算法同 vol_o。
-            vol_n = 0.0
-            for s in range(n_sps):
-                vol_n += det_jacs[nc, s]
-            vol_n /= n_sps
 
             jump_neighbor = np.zeros((n_fp, 5))
             for i in range(n_fp):
@@ -328,26 +313,37 @@ def compute_viscous_interface_correction_kernel_colored(
 
                 # 混合拆分面边界半区（B-8）：neighbor 侧同样需要边界 IP 罚项（罚项的“内部态”
                 # 是本单元外插值 Q_n_native、“对侧”是幽灵态），与 owner 侧一致。
+                adj_mag_n = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
+                h_ip_n = cell_volume[nc] / face_area[f]
                 if mp_o >= 0 and mixed_ow_mask[f, i]:
-                    adj_mag_n = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
-                    pen_n = viscous_boundary_penalty_tilde(
-                        Q_n_native[i], Q_o_at_n, mu + mut_n_native[i], vol_n, adj_mag_n, pen_side_n, _VISCOUS_BOUNDARY_IP_C,
+                    pen_n = viscous_ip_penalty_tilde(
+                        Q_n_native[i], Q_o_at_n, mu + mut_n_native[i], 0.0, h_ip_n, adj_mag_n,
+                        1.0, c_ip, False,
                     )
-                    for v in range(1, 4):
-                        jump_neighbor[i, v] += pen_n[v]
+                else:
+                    # **内部面 IP 罚项**（2026-09-23 修复真实缺陷，完整依据见
+                    # `viscous_ip_penalty_tilde` 的"为什么内部面也必须加"）：
+                    # `sigma = grad(u)` 是纯单元内局部梯度
+                    # （`compute_physical_gradient(field, mesh, ops)` 的签名里
+                    # 没有任何面数据），没有 BR1 要求的提升项；界面耦合只有
+                    # "粘性通量取两侧算术平均"这一层，内部面此前**零罚项** ——
+                    # 正是 ABCM(2002) 框架里"提升项与罚项都为零"的那一档，
+                    # 不满足强制性（实测均匀基态纯粘性算子谱正实部 328/2160）。
+                    # 涡粘与热传导率都取**面平均**，与 `G_common` 一致。
+                    k_tot_n = mu * CP_AIR / Pr + mut_avg_n * CP_AIR / Pr_t
+                    pen_n = viscous_ip_penalty_tilde(
+                        Q_n_native[i], Q_o_at_n, mu + mut_avg_n, k_tot_n, h_ip_n, adj_mag_n,
+                        1.0, c_ip, True,
+                    )
+                for v in range(1, 5):
+                    jump_neighbor[i, v] += pen_n[v]
 
-            if n_is_native:
-                weighted_jump_n = np.empty((n_fp, 5))
-                for i in range(n_fp):
-                    w_area = ref_area_weight[i]
-                    for v in range(5):
-                        weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
-                contrib_neighbor = lift_native[nc_code - 6] @ weighted_jump_n
-            else:
-                g_prime_neighbor = g_left if nside < 0 else g_right
-                contrib_neighbor = _distribute_point(
-                    jump_neighbor, dist_fp_of_sp[nax], dist_axis_coord_of_sp[nax], g_prime_neighbor
-                )
+            weighted_jump_n = np.empty((n_fp, 5))
+            for i in range(n_fp):
+                w_area = ref_area_weight[i]
+                for v in range(5):
+                    weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
+            contrib_neighbor = lift_native[nc_code - 6] @ weighted_jump_n
             for s in range(n_sps):
                 dj = det_jacs[nc, s]
                 for v in range(5):

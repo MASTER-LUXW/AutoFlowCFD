@@ -88,8 +88,8 @@ _WALL_PLANES = {
 }
 
 
-def _build(basis, wall_plane, order, monkeypatch):
-    monkeypatch.setenv("AFCFD_PRISM_BASIS", basis)
+def _build(wall_plane, order, monkeypatch):
+    monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
     from autoflowcfd.core.fr_solver import FRSolver
     from autoflowcfd.core.time_integration import TimeIntegrationScheme
 
@@ -143,16 +143,14 @@ def _wall_cells(mesh, wall_plane, n_real):
     return np.nonzero(dist <= dist.min() * (1.0 + 1e-9) + 1e-14)[0]
 
 
-@pytest.mark.parametrize("basis", ["native", "collapsed"])
 @pytest.mark.parametrize("wall_plane", sorted(_WALL_PLANES))
-def test_no_slip_penalty_decelerates_uniform_flow(monkeypatch, basis,
+def test_no_slip_penalty_decelerates_uniform_flow(monkeypatch,
                                                   wall_plane):
     """均匀流 + 单面无滑移壁：贴壁单元的流向动量残差必须为负。"""
     from autoflowcfd.fr.native_padding import real_sps_per_cell
 
-    solver, mesh = _build(basis, wall_plane, 1, monkeypatch)
-    n_real = (real_sps_per_cell(mesh.order)[0] if basis == "native"
-              else mesh.n_sps_per_cell)
+    solver, mesh = _build(wall_plane, 1, monkeypatch)
+    n_real = real_sps_per_cell(mesh.order)[0]
     R = np.asarray(solver.compute_viscous_residual())[:, :n_real, :]
     wall = _wall_cells(mesh, wall_plane, n_real)
     assert wall.size > 0, "取不到贴壁单元，测试装置本身失效"
@@ -160,20 +158,19 @@ def test_no_slip_penalty_decelerates_uniform_flow(monkeypatch, basis,
     rx = R[..., 1]
     scale = max(float(np.abs(rx).max()), 1e-300)
     assert float(rx[wall].sum()) < 0.0, (
-        f"{basis} / {wall_plane}（{_WALL_PLANES[wall_plane]}）：贴壁单元的"
+        f"{wall_plane}（{_WALL_PLANES[wall_plane]}）：贴壁单元的"
         f"流向动量残差合计 {float(rx[wall].sum()):+.6e} 不为负 —— 无滑移壁的"
         f"IP 罚项在往壁面单元**注入**动量而不是滞止流体，符号反了")
 
     other = np.setdiff1d(np.arange(mesh.n_cells), wall)
     if other.size:
         assert float(np.abs(rx[other]).max()) <= 1e-12 * scale, (
-            f"{basis} / {wall_plane}：非贴壁单元的流向动量残差不为零"
+            f"{wall_plane}：非贴壁单元的流向动量残差不为零"
             f"（{float(np.abs(rx[other]).max()):.3e}）—— 均匀流梯度恒零、"
             f"对称面跳跃恒零，这里本应严格为 0")
 
 
-@pytest.mark.parametrize("basis", ["native", "collapsed"])
-def test_no_slip_penalty_sign_at_p0(monkeypatch, basis):
+def test_no_slip_penalty_sign_at_p0(monkeypatch):
     """P0 同一判据（`viscous_p0_kernel` 是独立的一份实现，同样漏了分派）。
 
     P0 下局部梯度恒为零，所以粘性残差**整体**就是罚项本身，这条比 P1 那条
@@ -181,12 +178,11 @@ def test_no_slip_penalty_sign_at_p0(monkeypatch, basis):
     """
     from autoflowcfd.fr.native_padding import real_sps_per_cell
 
-    solver, mesh = _build(basis, "wall_bottom", 0, monkeypatch)
-    n_real = (real_sps_per_cell(mesh.order)[0] if basis == "native"
-              else mesh.n_sps_per_cell)
+    solver, mesh = _build("wall_bottom", 0, monkeypatch)
+    n_real = real_sps_per_cell(mesh.order)[0]
     R = np.asarray(solver.compute_viscous_residual())[:, :n_real, :]
     wall = _wall_cells(mesh, "wall_bottom", n_real)
     assert wall.size > 0
     assert float(R[wall, :, 1].sum()) < 0.0, (
-        f"{basis} P0：贴壁单元流向动量残差合计 "
+        f"P0：贴壁单元流向动量残差合计 "
         f"{float(R[wall, :, 1].sum()):+.6e} 不为负，罚项符号反了")

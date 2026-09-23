@@ -85,6 +85,12 @@ class DistributedMeshAdapter:
         self.n_halo_cells = partition.n_halo
         self.n_points_1d = local_mesh.n_points_1d
         self.n_sps_per_cell = local_mesh.n_sps_per_cell
+        # 多项式阶数：适配器的职责就是"在残差路径上看起来像 mesh"，
+        # 所以凡是残差链路会读的 mesh 属性都要转发。2026-09-23 补上
+        # 这一个 —— 粘性 IP 罚项常数按阶数解析
+        # （`flux_kernels.resolve_viscous_ip_constant`），`viscous_flux.py`
+        # 因此开始读 `mesh.order`，分布式路径当场 AttributeError。
+        self.order = int(local_mesh.order)
         self.n_prism_cells = dist_fc.base_flat.n_prism
 
         n_sps = self.n_sps_per_cell

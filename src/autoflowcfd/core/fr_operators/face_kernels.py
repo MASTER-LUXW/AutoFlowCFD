@@ -60,65 +60,6 @@ import numpy as np
 _FLAT_CACHE_KEY: object = None
 _FLAT_CACHE_VALUE: "FlatFaceGeometry" = None
 
-# n1d -> (dist_fp_of_sp (3,n_sps), dist_axis_coord_of_sp (3,n_sps))，与网格
-# 无关，只依赖阶数，缓存不需要按 mesh 失效。
-_DIST_MAP_CACHE: Dict[int, tuple] = {}
-
-
-def _derive_distribute_mapping(n1d: int) -> tuple:
-    """把 `fr_residual_inviscid.py::_distribute_from_face`（reshape+
-    tensordot+moveaxis，numba 不支持这两个 numpy 函数）等价地表达成一个
-    纯索引映射：每个输出 SP 只从唯一一个 (fp 行, g_prime 分量) 组合取值
-    （`_distribute_from_face` 本质是外积，任意基向量探针只会点亮一个
-    输出位置）。
-
-    不手工重新推导 moveaxis 的下标代数（容易出转录错误），而是直接用
-    one-hot 基向量喂给现有、已经过自由流场保持性等测试验证过的
-    `_distribute_from_face` 本身，机械地读出映射关系——映射的正确性
-    100% 继承自那个函数的正确性，不引入新的推导风险。
-
-    Returns:
-        (fp_of_sp, axis_coord_of_sp)，各自形状 (3, n_sps)：
-        对 axis in {0,1,2}、SP 下标 s，
-        `contrib[s,:] = g_prime[axis_coord_of_sp[axis,s]] * fp_data[fp_of_sp[axis,s],:]`
-        与 `_distribute_from_face(fp_data, n1d, axis, g_prime)[s,:]` 逐位相等。
-    """
-    cached = _DIST_MAP_CACHE.get(n1d)
-    if cached is not None:
-        return cached
-
-    from autoflowcfd.core.fr_residual.inviscid import _distribute_from_face
-
-    n_fp = n1d * n1d
-    n_sps = n1d ** 3
-    fp_of_sp = np.full((3, n_sps), -1, dtype=np.int64)
-    axis_coord_of_sp = np.full((3, n_sps), -1, dtype=np.int64)
-
-    for axis in range(3):
-        for i in range(n_fp):
-            for p in range(n1d):
-                fp_probe = np.zeros((n_fp, 1))
-                fp_probe[i, 0] = 1.0
-                g_probe = np.zeros(n1d)
-                g_probe[p] = 1.0
-                result = _distribute_from_face(fp_probe, n1d, axis, g_probe)[:, 0]
-                hits = np.flatnonzero(np.abs(result - 1.0) < 1e-12)
-                if len(hits) != 1:
-                    raise RuntimeError(
-                        f"_derive_distribute_mapping: n1d={n1d} axis={axis} i={i} p={p} "
-                        f"探针命中 {len(hits)} 个输出位置（应恰好 1 个）——"
-                        f"_distribute_from_face 的外积结构假设不成立，必须先查清原因。"
-                    )
-                s = hits[0]
-                fp_of_sp[axis, s] = i
-                axis_coord_of_sp[axis, s] = p
-
-    if np.any(fp_of_sp < 0) or np.any(axis_coord_of_sp < 0):
-        raise RuntimeError(f"_derive_distribute_mapping: n1d={n1d} 存在未被任何探针覆盖的 SP。")
-
-    result = (fp_of_sp, axis_coord_of_sp)
-    _DIST_MAP_CACHE[n1d] = result
-    return result
 
 
 @dataclass
@@ -200,6 +141,29 @@ class FlatFaceGeometry:
     # （规整四面体）到 0.000003（细长四面体）。
     ref_area_weight: np.ndarray     # float64 (n_fp,)
 
+    # 逐面**物理面积**，float64 (n_faces,) —— `true_area_weight` 沿 FP 轴
+    # 求和。该和恒等于物理面积这一点已独立验证：平板算例六个边界平面的
+    # `sum(true_area_weight)` 与解析平面面积之比全部是 1.000000（含原生
+    # 棱柱的两个三角形封盖，它们的通量点是 Duffy collapse 像、Duffy 因子
+    # `(1-s)/2` 已经乘在 `native_prism_face_adj_rows` 返回的行里）。
+    face_area: np.ndarray           # float64 (n_faces,)
+    # 逐单元**精确体积**，float64 (n_cells,) —— `mesh.get_all_cell_volumes()`
+    # 的那一份（Gauss-Legendre 加权积分，原生四面体段走常数 Jacobian ×
+    # 参考体积）。
+    #
+    # ## 为什么必须是它、不能是 `mean(det_jacs)`（2026-09-23）
+    #
+    # 粘性 IP 罚项的长度尺度此前是 `mean(det_jacs) ** (1/3)`。`mean(det_jacs)`
+    # 不是体积，是"体积 ÷ **参考单元**体积"，而参考体积**基相关**：坍缩张量积
+    # 立方体 8、原生棱柱 4、原生四面体 4/3。同一个物理单元在两条基下因此拿到
+    # 相差 2 倍（四面体 6 倍）的"体积"，罚项强度差 21%（四面体 45%）。
+    # `get_all_cell_volumes()` 的文档里早就写明"det(J)均值*8 是错的、已为
+    # CFL/网格尺度那条路径改成正确的加权积分"——罚项这个消费点被漏掉了。
+    #
+    # 与 `face_area` 配对给出 IP 罚项的正确长度尺度：`h_f = cell_volume /
+    # face_area`，即**面法向的单元厚度**（直棱柱贴壁单元上恰好等于 dy）。
+    cell_volume: np.ndarray         # float64 (n_cells,)
+
     # --- neighbor_sources（owner 侧用来组装 Q_neighbor 的来源）---
     neighbor_src0_cell: np.ndarray   # int64 (n_faces,)，-1 表示无来源
     neighbor_src0_mat: np.ndarray    # float64 (n_faces, n_fp, n_sps)
@@ -231,32 +195,17 @@ class FlatFaceGeometry:
     # P0 专用：混合面中边界子面的面积占比（面积加权混合通量用），非混合面为 0。
     mixed_p0_bnd_frac: np.ndarray  # float64 (n_faces,)
 
-    # --- 外插算子（重堆叠自 ops.boundary_extrap_tet/prism 这两个
-    #     Dict[(axis:int,side:float), ndarray]，numba nopython 模式不支持
-    #     这种 float 键的 dict）---
-    # 形状 (2, 3, 2, n_fp, n_sps)：[celltype(0=prism,1=tet), axis, side_idx(0:-1,1:+1)]
-    boundary_extrap: np.ndarray
-
-    # --- native 四面体（路径C）专属算子（Part8 文档），键是 excluded_
-    #     vertex（0~3），不含坍缩坐标网格时是零长度占位（对应分支永远
-    #     不会被 code>=6 触发，见 native_mode_active 说明）---
-    # 体积->自身面外插矩阵，(4, n_fp, n_sps)（列已填充到全局 n_sps 宽度，
-    # 与坍缩坐标 boundary_extrap 消费方式一致：E @ Q_volume_nodal）。
+    # --- 原生基面算子，按 `cube_face_code - 6` 索引（四面体真实面
+    #     [6,10) -> 0~3、棱柱真实面 [10,15) -> 4~8 都在同一张表里）---
+    # 体积->自身面外插矩阵，(9, n_fp, n_sps)（列已填充到全局 n_sps 宽度：
+    # 消费方式恒为 `E @ Q_volume_nodal`）。
     boundary_extrap_native: np.ndarray
-    # DG 提升算子，(4, n_sps, n_fp)（行已填充到 n_sps，见
+    # DG 提升算子，(9, n_sps, n_fp)（行已填充到 n_sps，见
     # native_padding.py::pad_native_matrix_to_global 与
     # native_tet/basis.py::build_native_tet_lift 文档）。
     lift_native: np.ndarray
 
-    # --- g_left/g_right（Radau/VCJH 校正函数导数，(n1d,) 向量，随 side 选择）---
-    g_left: np.ndarray
-    g_right: np.ndarray
     n1d: int
-
-    # --- _distribute_from_face 等价的索引映射（见 _derive_distribute_mapping
-    #     文档），形状 (3, n_sps)：[axis] -> (fp_of_sp, axis_coord_of_sp)
-    dist_fp_of_sp: np.ndarray        # int64 (3, n_sps)
-    dist_axis_coord_of_sp: np.ndarray  # int64 (3, n_sps)
 
     # --- 面图着色（消除 scatter-add 写冲突，替代 per-thread buffer）---
     # 在 build 时一次性计算，后续残差求值直接复用，不再重复着色。
@@ -333,14 +282,6 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     mixed_bnd_face = ffp_data.mixed_bnd_face
     mixed_p0_bnd_frac = ffp_data.mixed_p0_bnd_frac
 
-    # boundary_extrap_tet/prism: Dict[(axis:int,side:float), (n_fp,n_sps)矩阵]
-    # -> (2,3,2,n_fp,n_sps)，[celltype(0=prism,1=tet), axis, side_idx]
-    boundary_extrap = np.zeros((2, 3, 2, n_fp, n_sps), dtype=np.float64)
-    for axis in range(3):
-        for side_idx, side in enumerate((-1.0, 1.0)):
-            boundary_extrap[0, axis, side_idx] = ops.boundary_extrap_prism[(axis, side)]
-            boundary_extrap[1, axis, side_idx] = ops.boundary_extrap_tet[(axis, side)]
-
     # native 四面体（路径C）专属算子（Part8 文档）：`ops.boundary_extrap_
     # native_tet`/`ops.lift_native_tet_padded` 只在 `tet_basis_mode==
     # "native"` 时非 None——不含 native 四面体的既有网格传零长度占位
@@ -396,7 +337,17 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     _w1, _w2 = np.meshgrid(_w_1d, _w_1d, indexing="ij")
     ref_area_weight = np.ascontiguousarray((_w1 * _w2).ravel())
 
-    dist_fp_of_sp, dist_axis_coord_of_sp = _derive_distribute_mapping(n1d)
+    # 逐面物理面积 / 逐单元精确体积（见同名字段文档）。两者都只依赖几何，
+    # 与流场无关，随 flat 几何一次性构造并缓存。
+    face_area = np.ascontiguousarray(
+        np.asarray(true_area_weight, dtype=np.float64).sum(axis=1))
+    cell_volume = np.ascontiguousarray(
+        np.asarray(mesh.get_all_cell_volumes(), dtype=np.float64))
+    if cell_volume.shape[0] != int(mesh.n_cells):
+        raise ValueError(
+            f"cell_volume 长度 {cell_volume.shape[0]} 与网格单元数 "
+            f"{int(mesh.n_cells)} 不一致 —— IP 罚项按 owner/neighbor 单元"
+            f"下标直接索引它，长度不对会静默取到错误的单元")
 
     # 面图着色：一次性计算，后续残差求值直接复用（不再重复着色）。
     # 贪心着色覆盖 owner_cell 与非边界面 neighbor_cell 两侧的写冲突——
@@ -427,6 +378,7 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
         owner_cube_face=owner_cube_face, neighbor_cube_face=neighbor_cube_face,
         true_area_weight=true_area_weight,
         ref_area_weight=ref_area_weight,
+        face_area=face_area, cell_volume=cell_volume,
         owner_adj_row_exact=owner_adj_row_exact, neighbor_adj_row_exact=neighbor_adj_row_exact,
         neighbor_src0_cell=neighbor_src0_cell, neighbor_src0_mat=neighbor_src0_mat,
         neighbor_src1_idx=neighbor_src1_idx, neighbor_src1_cell=neighbor_src1_cell,
@@ -437,14 +389,9 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
         mixed_nb_partner=mixed_nb_partner, mixed_nb_mask=mixed_nb_mask,
         mixed_ow_partner=mixed_ow_partner, mixed_ow_mask=mixed_ow_mask,
         mixed_bnd_face=mixed_bnd_face, mixed_p0_bnd_frac=mixed_p0_bnd_frac,
-        boundary_extrap=boundary_extrap,
         boundary_extrap_native=boundary_extrap_native,
         lift_native=lift_native,
-        g_left=np.asarray(ops.g_left, dtype=np.float64),
-        g_right=np.asarray(ops.g_right, dtype=np.float64),
         n1d=n1d,
-        dist_fp_of_sp=dist_fp_of_sp,
-        dist_axis_coord_of_sp=dist_axis_coord_of_sp,
         color_face_indices=color_face_indices,
         n_colors=n_colors,
     )

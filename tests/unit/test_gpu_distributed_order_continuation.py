@@ -117,7 +117,6 @@ class TestGpuInterpolateToNewOrderCoreMath:
         solver.rank = 0
         solver.n_ranks = 1
         solver.device_id = 0
-        solver.flux_type = "radau"
         solver.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf}
         solver.partition = types.SimpleNamespace(n_local_cells=n_local, local_faces=np.array([], dtype=np.int64))
         solver.U_gpu = np.zeros((n_local, 1, 5))
@@ -195,7 +194,6 @@ class TestGpuInterpolateToNewOrderCoreMath:
         solver.rank = 0
         solver.n_ranks = 1
         solver.device_id = 0
-        solver.flux_type = "radau"
         solver.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf}
         solver.partition = types.SimpleNamespace(n_local_cells=n_local, local_faces=np.array([], dtype=np.int64))
         solver.U_gpu = np.random.default_rng(1).uniform(1, 2, size=(n_local, 27, 5))

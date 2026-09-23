@@ -38,11 +38,9 @@ def _linear(mesh):
     return mesh.sps_coords @ _A + 7.0
 
 
-@pytest.mark.parametrize("basis", ["collapsed", "native"])
 @pytest.mark.parametrize("p,q", [(1, 2), (2, 3), (1, 3)])
-def test_linear_field_is_lifted_exactly(basis, p, q, monkeypatch):
+def test_linear_field_is_lifted_exactly(p, q):
     """线性场延拓到更高阶必须是机器精度（两类单元、两条基）。"""
-    monkeypatch.setenv("AFCFD_PRISM_BASIS", basis)
     mesh_p = _build_synthetic_mixed_mesh(p)
     mesh_q = _build_synthetic_mixed_mesh(q)
     got = apply_order_interp(_linear(mesh_p), mesh_p.n_prism_cells, p, q)
@@ -59,23 +57,19 @@ def test_linear_field_is_lifted_exactly(basis, p, q, monkeypatch):
             f"不是机器精度 —— 延拓算子与该单元类型的解点/模态族不匹配")
 
 
-@pytest.mark.parametrize("basis", ["collapsed", "native"])
-def test_constant_field_survives_p0_to_p1(basis, monkeypatch):
+def test_constant_field_survives_p0_to_p1():
     """P0->P1：常数场必须逐位保持（这一跳对任何插值都成立，是护栏）。"""
-    monkeypatch.setenv("AFCFD_PRISM_BASIS", basis)
     mesh0 = _build_synthetic_mixed_mesh(0)
     f0 = np.full((mesh0.n_cells, mesh0.n_sps_per_cell), 7.0)
     got = apply_order_interp(f0, mesh0.n_prism_cells, 0, 1)
     np.testing.assert_array_equal(got, np.full_like(got, 7.0))
 
 
-@pytest.mark.parametrize("basis", ["collapsed", "native"])
 @pytest.mark.parametrize("p,q", [(1, 2), (2, 3)])
-def test_padding_rows_equal_real_sp0(basis, p, q, monkeypatch):
+def test_padding_rows_equal_real_sp0(p, q):
     """延拓后的零填充槽位必须等于该单元真实 SP #0 —— 与
     `fr/native_padding.py` 的初始化约定一致（否则新阶数的填充块从第一步
     起就带着一个与约定不符的值）。"""
-    monkeypatch.setenv("AFCFD_PRISM_BASIS", basis)
     mesh_p = _build_synthetic_mixed_mesh(p)
     got = apply_order_interp(_linear(mesh_p), mesh_p.n_prism_cells, p, q)
     n_real_prism, n_real_tet = real_sps_per_cell(q)
@@ -88,11 +82,10 @@ def test_padding_rows_equal_real_sp0(basis, p, q, monkeypatch):
         np.testing.assert_array_equal(
             got[sl][:, n_real:], np.repeat(got[sl][:, :1],
                                            n_sps_q - n_real, axis=1),
-            err_msg=f"{basis} {name}: 填充槽位不等于真实 SP #0")
+            err_msg=f"{name}: 填充槽位不等于真实 SP #0")
 
 
-@pytest.mark.parametrize("basis", ["collapsed", "native"])
-def test_padding_columns_of_the_source_do_not_contribute(basis, monkeypatch):
+def test_padding_columns_of_the_source_do_not_contribute():
     """**源**的填充列必须零贡献：把填充槽位改成任意值，延拓结果的真实
     自由度部分必须逐位不变。
 
@@ -100,7 +93,6 @@ def test_padding_columns_of_the_source_do_not_contribute(basis, monkeypatch):
     不变量；让它们参与插值就是把馊值搬进新阶数（坍缩档没有填充槽位，
     这条在那一档下恒真）。
     """
-    monkeypatch.setenv("AFCFD_PRISM_BASIS", basis)
     p, q = 1, 2
     mesh_p = _build_synthetic_mixed_mesh(p)
     f = _linear(mesh_p)
@@ -119,21 +111,18 @@ def test_padding_columns_of_the_source_do_not_contribute(basis, monkeypatch):
                                   b[n_prism:, :n_real_q_tet])
 
 
-def test_collapsed_prism_matrix_is_bit_identical_to_the_legacy_one(monkeypatch):
-    """坍缩档的棱柱矩阵必须与既有的一维 Lagrange 张量积实现**逐位相同**
-    —— 本次改动不允许改变已验证的坍缩档行为。"""
-    monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")
-    from autoflowcfd.core.utils.order_continuation import (
-        _build_linear_interp_matrix_3d,
-    )
-    from autoflowcfd.fr.quadrature_points import gauss_legendre
-
-    for p, q in ((0, 1), (1, 2), (2, 3)):
-        w_prism, _ = build_order_interp_matrices(p, q)
-        old_1d, _ = gauss_legendre(p + 1)
-        new_1d, _ = gauss_legendre(q + 1)
-        np.testing.assert_array_equal(
-            w_prism, _build_linear_interp_matrix_3d(old_1d, new_1d))
+# 原来这里有一条 `test_collapsed_prism_matrix_is_bit_identical_to_the_legacy_one`
+# ：坍缩档的棱柱延拓矩阵必须与既有的一维 Lagrange 张量积实现逐位相同，
+# 用来保证 2026-09-20 那次"延拓算子按基分派"的改动不触动已验证的坍缩档。
+# 坍缩棱柱基已于 2026-09-23 删除，该判据随之移除 —— 它当时是**通过**的
+# （`np.testing.assert_array_equal`，逐位相同）。
+#
+# 同时移除了本文件四组 `parametrize(["collapsed", "native"])` 的坍缩臂：
+# 删除坍缩档之后 `build_order_interp_matrices` 不再读
+# `AFCFD_PRISM_BASIS`，那些用例设了环境变量却**不被任何代码消费**，
+# 名字说在测坍缩、实际把原生跑了两遍 —— 这种"配置被静默忽略"的测试比
+# 没有测试更糟（本项目已因同类问题出过真实缺陷，见项目记忆
+# `defaults_retuned_2026_09_17` 里"固定 CFL 请求被静默丢弃"那条）。
 
 
 @pytest.mark.parametrize("bad", [(-1, 1), (1, -2)])

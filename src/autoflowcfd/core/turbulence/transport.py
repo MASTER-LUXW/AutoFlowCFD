@@ -59,7 +59,8 @@ def _extrapolate_scalar_to_faces(
     """将 SPs 上的标量场外插到所有面的通量点（numba kernel 版本）。
 
     使用 turbulence_transport_kernel.py 的 numba 编译函数替代纯 Python 循环。
-    owner 侧用 boundary_extrap 矩阵，neighbor 侧用 neighbor_sources 矩阵。
+    owner 侧用 `boundary_extrap_native[code-6]` 矩阵，neighbor 侧用
+    neighbor_sources 矩阵。
 
     Args:
         wall_dirichlet_zero_face: (n_faces,) bool，可选。对标记为 True 的
@@ -87,11 +88,10 @@ def _extrapolate_scalar_to_faces(
     if wall_dirichlet_value_face is None:
         wall_dirichlet_value_face = np.zeros((flat.n_faces, flat.n_fp), dtype=np.float64)
     return extrapolate_scalar_to_faces_kernel(
-        scalar_sps, flat.boundary_extrap,
+        scalar_sps,
         flat.neighbor_src0_cell, flat.neighbor_src0_mat,
         flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
-        flat.owner_cell, flat.owner_axis, flat.owner_side,
-        flat.n_prism, flat.n_faces, flat.n_fp, flat.n_sps,
+        flat.owner_cell, flat.n_faces, flat.n_fp, flat.n_sps,
         wall_dirichlet_zero_face,
         flat.mixed_nb_partner, flat.mixed_nb_mask,
         has_wall_dirichlet_value,
@@ -123,9 +123,8 @@ def _extrapolate_owner_only_to_faces(scalar_sps, flat):
         phi_owner_fp: (n_faces, n_fp)
     """
     return _extrap_owner_scalar_to_faces(
-        scalar_sps, flat.boundary_extrap,
-        flat.owner_cell, flat.owner_axis, flat.owner_side,
-        flat.n_prism, flat.n_faces, flat.n_fp, flat.n_sps,
+        scalar_sps,
+        flat.owner_cell, flat.n_faces, flat.n_fp, flat.n_sps,
         flat.owner_cube_face, flat.boundary_extrap_native,
     )
 
@@ -190,12 +189,13 @@ def _distribute_correction_to_cells(raw_jump_fp, flat, ops, mesh, raw_jump_fp_ne
     参数从"已经预乘 |adj_row| 面元幅值因子的 correction_fp"改为
     **未加权**的 `raw_jump_fp`（调用方 `compute_scalar_convection_
     residual`/`compute_scalar_diffusion_residual` 不再自己乘 `adj_mag`），
-    加权方式（collapsed 用 `|adj_row|`、native 用 `true_area_weight`）
-    与分配方式（collapsed 用 1D `_distribute_point`、native 用 DG 提升
-    算子）都下沉到 kernel 内部按 `owner_cube_face`/`neighbor_cube_face`
-    分派——原因：native 面需要的加权量（真实物理面积权重）与 collapsed
-    面（度量张量 adj 行模长）不是同一个量，不能在 Python 层统一预乘
-    后再传给一个"只认 collapsed 分配方式"的 kernel。
+    加权方式（原生用 `true_area_weight`，即真实物理面积权重）与分配方式
+    （DG 提升算子）都在 kernel 内部完成：跳变量在 Python 层保持"物理通量
+    密度差"的原始形态传进去，由 kernel 按 `owner_cube_face`/
+    `neighbor_cube_face` 索引 `lift_native` 完成加权与提升。已删除的坍缩
+    分支当年用的是另一套（`|adj_row|` 加权 + 1D `_distribute_point`
+    分配），两者的最终乘积其实是同一个量，只是 `|adj_row|` 由谁提供不同
+    —— 完整对照见 `transport_kernel.py::_weighted_jump_native` 文档。
 
     Args:
         raw_jump_fp_neighbor: (n_faces, n_fp) 可选，neighbor 侧独立的
@@ -227,11 +227,7 @@ def _distribute_correction_to_cells(raw_jump_fp, flat, ops, mesh, raw_jump_fp_ne
             distribute_corrections_to_cells_kernel_colored(
                 raw_jump_fp,
                 flat.owner_cell, flat.neighbor_cell,
-                flat.owner_axis, flat.owner_side,
-                flat.neighbor_axis, flat.neighbor_side,
                 det_jacs,
-                flat.g_left, flat.g_right,
-                flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
                 n_cells, n_sps,
                 face_indices,
                 correction_sps,
@@ -248,11 +244,7 @@ def _distribute_correction_to_cells(raw_jump_fp, flat, ops, mesh, raw_jump_fp_ne
         return distribute_corrections_to_cells_kernel(
             raw_jump_fp,
             flat.owner_cell, flat.neighbor_cell,
-            flat.owner_axis, flat.owner_side,
-            flat.neighbor_axis, flat.neighbor_side,
             det_jacs,
-            flat.g_left, flat.g_right,
-            flat.dist_fp_of_sp, flat.dist_axis_coord_of_sp,
             n_cells, n_sps, flat.n_faces,
             n_threads,
             flat.owner_cube_face, flat.neighbor_cube_face,

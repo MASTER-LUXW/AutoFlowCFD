@@ -229,7 +229,6 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         self.order = int(getattr(mesh, 'order', 0))
         self.current_order = self.order
         self.order_continuation_enabled = True
-        self.flux_type = 'radau'
 
         self.mu_molecular = mu_molecular
         # mach_ref：与 CPU 版 FRSolver.__init__（fr_solver/solver.py）

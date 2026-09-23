@@ -97,37 +97,26 @@ class GPUFlatFaceGeometry:
             self.mixed_bnd_face = cp.asarray(flat_face.mixed_bnd_face)
             self.mixed_p0_bnd_frac = cp.asarray(flat_face.mixed_p0_bnd_frac)
 
-            # ── 边界外插矩阵 ──
-            self.boundary_extrap = cp.asarray(flat_face.boundary_extrap)
-
-            # ── native 四面体（路径C）字段（2026-09-02 GPU 移植新增）──
-            # `owner_cube_face`/`neighbor_cube_face`（原始 cube face 编码，
-            # >=6 即 native 真实面，excluded_vertex=code-6）用于 GPU 界面
-            # kernel 分派 native/collapsed 分支；`boundary_extrap_native`/
-            # `lift_native`/`true_area_weight` 是 native 分支需要的常量
-            # 算子/求积权重（含义与 CPU 端 inviscid_kernel.py 同名字段
-            # 完全一致，见该文件模块文档）。对纯坍缩坐标网格
-            # （tet_basis_mode="collapsed"），CPU 侧这些字段恒为占位
-            # 零数组/owner_cube_face 恒小于 6，上传到 GPU 后原样保持这个
-            # 不变量，下游 kernel 的 `>=6` 判据自然恒为 False，行为完全
-            # 不变——与 CPU 端"零填充块对角"的既有设计原则一致。
+            # ── 原生基面算子 ──
+            # `owner_cube_face`/`neighbor_cube_face` 是原始 cube face
+            # 编码（四面体真实面 [6,10)、棱柱真实面 [10,15)），GPU 界面
+            # kernel 按 `code - 6` 索引 `boundary_extrap_native`/
+            # `lift_native`（含义与 CPU 端 inviscid_kernel.py 同名字段
+            # 完全一致，见该文件模块文档）。
             self.owner_cube_face = cp.asarray(flat_face.owner_cube_face)
             self.neighbor_cube_face = cp.asarray(flat_face.neighbor_cube_face)
             self.true_area_weight = cp.asarray(flat_face.true_area_weight)
+            # `face_area`/`cell_volume`：IP 罚项的长度尺度
+            # `h_f = cell_volume[cell] / face_area[face]` 需要（见
+            # `face_kernels.FlatFaceGeometry.cell_volume` 文档）。
+            self.face_area = cp.asarray(flat_face.face_area)
+            self.cell_volume = cp.asarray(flat_face.cell_volume)
             # 参考面求积权重（DG 提升算子用的**正确**权重，见
             # `core/fr_operators/face_kernels.py::FlatFaceGeometry.
             # ref_area_weight` 字段文档）。逐面相同，只有 (n_fp,)。
             self.ref_area_weight = cp.asarray(flat_face.ref_area_weight)
             self.boundary_extrap_native = cp.asarray(flat_face.boundary_extrap_native)
             self.lift_native = cp.asarray(flat_face.lift_native)
-
-            # ── 校正函数导数（g_left, g_right）──
-            self.g_left = cp.asarray(flat_face.g_left)
-            self.g_right = cp.asarray(flat_face.g_right)
-
-            # ── SP↔FP 映射 ──
-            self.dist_fp_of_sp = cp.asarray(flat_face.dist_fp_of_sp)
-            self.dist_axis_coord_of_sp = cp.asarray(flat_face.dist_axis_coord_of_sp)
 
             # ── 分布式 local+halo 扩展索引空间逐位置棱柱/四面体类型
             # （#1，2026-08-28 新增）：只有 DistributedFlatFaceGeometry

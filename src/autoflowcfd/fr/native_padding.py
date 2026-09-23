@@ -163,11 +163,9 @@ def real_sps_per_cell(order: int) -> Tuple[int, int]:
     人工粘性尺度、GPU 局部 dt 全都读它，任何一处自己判断都会在切换基的
     时候漏改。
     """
-    from .native_prism.mode import prism_basis_is_native
-
-    n_prism_real = (native_prism_n_real_sps(order) if prism_basis_is_native()
-                    else (order + 1) ** 3)
-    return n_prism_real, native_tet_n_real_sps(order)
+    # 棱柱只有原生基一种实现（坍缩棱柱基已于 2026-09-23 删除，见
+    # `native_prism/mode.py::resolve_prism_basis_mode`），所以这里不再分派。
+    return native_prism_n_real_sps(order), native_tet_n_real_sps(order)
 
 
 def order_from_n_sps(n_sps: int) -> int:

@@ -36,6 +36,54 @@ import os
 NATIVE_OVERINT_SANITY_MAX = 8
 
 
+def resolve_overintegration_order_rule() -> int:
+    """过积分阶数规则的倍率：`AFCFD_OVERINT_ORDER_RULE = 2x | 3x`，默认 `2x`。
+
+    实际 `over_order = min(rule * order, 该基自己的上限)`，见本模块的
+    `resolve_native_overintegration_order`。
+
+    **为什么是可切换的而不是直接改成 3x（2026-09-15）**：`3x` 在 order=1
+    上带来很大的精度收益（细点 27 -> 64）——
+
+        k/omega 对流  prism 1.360e-1 -> 2.124e-3（64x）  tet -> 机器零
+        粘性体积项    prism 4.615e-3 -> 3.617e-6（1276x）tet -> 机器零
+
+    ——而且自由流场保持性没有回归（order=1 相对残差 4.1101e-11 ->
+    4.3839e-11，噪声级）。注意「order>=2 逐位不变」那半句只对已删除的坍缩棱柱基成立：
+    原生基的上限是 6，P2 会被这条规则从 oo=4 抬到 oo=6。
+
+    ## 真实网格实测已补齐（2026-09-17）：`3x` 在 P1 上买不到任何东西
+
+    上面那组精度数字是在**合成场/隔离判据**上量的。真实网格 + SST 的
+    对照（plate_coarse_volume，168,340 单元，P1+SST，同一初场，预热 4 步
+    后计时 8 步，壁面距离场按 CLI 同一路径算好）：
+
+        rule=2x   prism_oo=2 tet_oo=2 n_fine_tet=10   11.996 s/step  res 4.425745e+08
+        rule=3x   prism_oo=3 tet_oo=3 n_fine_tet=20   18.967 s/step  res 4.425745e+08
+
+    **残差 7 位有效数字完全相同，而每步贵 1.58 倍。** 也就是说 `oo = 2*order`
+    对这条真实算例上的全部项——包括 k/omega 输运与含 mu_t 的粘性通量那两个
+    三重乘积——都已经足够。同一结论在平板边界层算例上独立复现过：粘性
+    体积项 `AFCFD_VISC_OVERINT=on` 时 `2x` 与 `3x` 的能量分量**逐位相同**
+    （见 `core/fr_residual/viscous_flux.py::resolve_viscous_overintegration`）。
+
+    （旧的代价估算——微基准 3.47s -> 14.30s、外推每步 ~1.6x——是在**细网格
+    轴还被零填充**的代码上做的，那份填充已于 2026-09-17 去掉（P1 实测整链
+    3.04x 加速），所以那个估算已不适用；现在这个 1.58x 是真实网格直接测的。）
+
+    因此默认保持 `2x`，依据从"代价未量化所以保守"升级为"**收益实测为零、
+    代价实测 1.58 倍**"。`3x` 保留为受控 A/B 的入口（order>=2 上是否仍然
+    为零尚未测，那需要 P2 的真实网格运行）。
+    """
+    v = os.environ.get("AFCFD_OVERINT_ORDER_RULE", "2x").lower()
+    if v not in ("2x", "3x"):
+        raise ValueError(
+            f"AFCFD_OVERINT_ORDER_RULE={v!r} 不是合法取值（2x | 3x）。"
+            f"'2x' 是既有行为（为平均流的二次非线性设计），'3x' 针对标量"
+            f"输运/粘性项里的三重乘积，见 resolve_overintegration_order_rule。")
+    return 2 if v == "2x" else 3
+
+
 def resolve_native_overintegration_max_order(env_name: str, default: int) -> int:
     """读 `env_name` 指定的环境变量，缺省返回 `default`。
 
@@ -66,14 +114,12 @@ def resolve_native_overintegration_order(
 
     两条约束：
       1. 去混叠经验法则 `rule * order`（**与基无关**，见
-         `collapsed_basis.resolve_overintegration_order_rule`）；
+         `resolve_overintegration_order_rule`，本模块）；
       2. 该基自己的上限（`env_name`，默认 `default_max`）。
 
     Returns:
         实际 `over_order`（>= order；等于 order 时过积分退化为恒等）。
     """
-    from .collapsed_basis import resolve_overintegration_order_rule
-
     oo = min(resolve_overintegration_order_rule() * int(order),
              resolve_native_overintegration_max_order(env_name, default_max))
     return max(oo, int(order))
@@ -115,51 +161,43 @@ def resolve_prism_overintegration_max_order() -> int:
 def resolve_prism_overintegration_order(order: int) -> int:
     """棱柱实际使用的 `over_order`，**按当前生效的棱柱基分档**。
 
-    * 坍缩档：`min(rule*order, collapsed_basis.OVERINTEGRATION_MAX_ORDER)`
-      —— 那个上限是坍缩 Vandermonde 的条件数极限（放宽到 4 会让 P2 均匀
-      自由流残差从 1.06e-5 恶化到 5.6e-3，实测记录在该常量处）。
-    * 原生档：`min(rule*order, AFCFD_PRISM_OVERINT_MAX_ORDER)`，默认上限
-      6 = 不额外设限，所以 P1/P2/P3 拿到理想的 2/4/6。
+    `min(rule*order, AFCFD_PRISM_OVERINT_MAX_ORDER)`，默认上限 6 = 不额外
+    设限，所以 P1/P2/P3 拿到理想的 2/4/6。
+
+    **不再有 `OVERINTEGRATION_MAX_ORDER = 3` 那条上限**（坍缩棱柱基已于
+    2026-09-23 删除）：那是坍缩坐标模态 Vandermonde 的条件数极限（放宽到
+    4 会让 P2 均匀自由流残差从 1.06e-5 恶化到 5.6e-3），原生基没有这个
+    问题 —— 实测 oo=8 时 cond(V)=1.86e+03，比坍缩 oo=4 的 4.72e+05 还
+    好 250 倍。
 
     `order == 0` 时返回 0（P0 走独立的有限体积残差路径，没有可去混叠的
     内容）。
     """
-    from .collapsed_basis import (
-        OVERINTEGRATION_MAX_ORDER, resolve_overintegration_order_rule,
-    )
-    from .native_prism.mode import prism_basis_is_native
-
     order = int(order)
     if order <= 0:
         return 0
-    if prism_basis_is_native():
-        return resolve_native_overintegration_order(
-            order, NATIVE_PRISM_OVERINT_MAX_ORDER_ENV,
-            NATIVE_PRISM_OVERINTEGRATION_MAX_ORDER)
-    return max(order, min(resolve_overintegration_order_rule() * order,
-                          OVERINTEGRATION_MAX_ORDER))
+    # 棱柱恒为原生基（坍缩棱柱基已于 2026-09-23 删除），所以不再有
+    # `OVERINTEGRATION_MAX_ORDER = 3` 那条上限 —— 那是**坍缩坐标模态
+    # Vandermonde 的条件数极限**，原生基没有这个问题（实测 oo=8 时
+    # cond(V)=1.86e+03，比坍缩 oo=4 的 4.72e+05 还好 250 倍，见模块文档）。
+    return resolve_native_overintegration_order(
+        order, NATIVE_PRISM_OVERINT_MAX_ORDER_ENV,
+        NATIVE_PRISM_OVERINTEGRATION_MAX_ORDER)
 
 
 def prism_n_fine(over_order: int) -> int:
-    """棱柱在 `over_order` 下的细点数，**按当前生效的棱柱基分档**。
+    """棱柱在 `over_order` 下的细点数 `(oo+1)^2 (oo+2)/2`。
 
     这个值同时是 `mesh.n_sps_per_cell_fine`（`jacobians_fine` 的每单元
-    布局宽度）：
-
-    * 坍缩档 `(oo+1)^3`（张量积立方体点）；
-    * 原生档 `(oo+1)^2 (oo+2)/2`（Warp&Blend 三角形点 x Gauss 挤出点）
-      —— **不填充到立方体宽度**，填充槽位恒为零、零贡献，却让整条过积分
-      链在空点上白算，而 `D_fine` 的收缩是 O(n_fine^2)。
+    布局宽度）。原生棱柱的细点是 Warp&Blend 三角形点 x Gauss 挤出点，
+    **不填充到立方体宽度 `(oo+1)^3`** —— 填充槽位恒为零、零贡献，却让整条
+    过积分链在空点上白算，而 `D_fine` 的收缩是 O(n_fine^2)。
 
     四面体段不受这个宽度约束：它的细点度量是逐单元常数、只取第 0 列广播
     （见 `core/fr_operators/volume_contract.get_overintegration_context`）。
     """
     from .native_prism.basis import native_prism_n_sps
-    from .native_prism.mode import prism_basis_is_native
-
     oo = int(over_order)
     if oo <= 0:
         return 0
-    if prism_basis_is_native():
-        return native_prism_n_sps(oo)
-    return (oo + 1) ** 3
+    return native_prism_n_sps(oo)

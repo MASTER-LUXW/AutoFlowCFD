@@ -33,7 +33,6 @@ from typing import Dict, Tuple
 
 from autoflowcfd.fr.operators import generate_fr_operators
 from .curved_mapping_exact_jacobian import tet_exact_jacobian, prism_exact_jacobian
-from ...fr.native_prism.mode import prism_basis_is_native
 
 
 @njit(cache=True)
@@ -416,7 +415,7 @@ class CurvedMapping:
                     f"Negative or zero Jacobian determinant detected in native tet! det(J)={det_j:.6e}."
                 )
             adj = np.broadcast_to(adj_const, (n_sps, 3, 3))
-        elif cell_type == "prism" and prism_basis_is_native():
+        elif cell_type == "prism":
             # 原生棱柱基（2026-09-20）：与四面体那条同一个理由 ——
             # `D_3d_prism` 在原生档下已被别名成对 `(r,s,t)` 求导的
             # `D_native_prism_padded`，而 `prism_exact_jacobian` 求的是对

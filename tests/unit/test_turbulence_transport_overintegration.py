@@ -2,7 +2,8 @@
 
 ## 修的是什么
 
-`fr/collapsed_basis.py::build_overintegration_operators` 文档完整记录了
+`fr/native_prism/overintegration.py` 与 `fr/native_tet/overintegration.py`
+的模块文档完整记录了
 去混叠的动机，并给出实测数字——对解析残差恒为 0 的线性剪切场，不去混叠
 的 P2 体积项算出的残差是真值的 43~62 倍。但那套机制一直**只接在平均流
 的无粘体积项**上（`fr_residual/inviscid.py` 的
@@ -206,14 +207,14 @@ def _setup(order, seed=0):
     return mesh, ops, phi, rho, vel, exact
 
 
-#: `(棱柱基, order) -> (coarse 误差下界, 去混叠必须达到的改善倍数)`。
+#: `order -> (coarse 误差下界, 去混叠必须达到的改善倍数)`。
 #: 数值来自实测（见 `test_convection_volume_term_vs_analytic` 里的记录
 #: 表），下界都比实测值留了余量：它们是"判据没有空转"的防护，不是目标值。
+#: 2026-09-23 之前这张表的键是 `(棱柱基, order)` —— 坍缩棱柱基删除后只剩
+#: 原生一档，所以退化成按 order 分档。
 _PRISM_EXPECT = {
-    ("collapsed", 1): (0.5, 10.0),
-    ("collapsed", 2): (0.5, 10.0),
-    ("native", 1): (0.1, 10.0),
-    ("native", 2): (1.0e-3, 1.0e6),
+    1: (0.1, 10.0),
+    2: (1.0e-3, 1.0e6),
 }
 
 
@@ -245,23 +246,23 @@ class TestOverintegrationIsMoreAccurate:
                           np.abs(div_oi[sl] - exact[sl]).max() / sc)
 
         # 实测（相对 L-inf）。over_order 由 `AFCFD_OVERINT_ORDER_RULE`
-        # （默认 `2x`）**与棱柱基**共同决定，所以判据按 (基, order) 分档，
-        # 用 `_actual_over_order(oi)` 读实际值：
+        # （默认 `2x`）决定，用 `_actual_over_order(oi)` 读实际值：
         #
-        #   坍缩基（`AFCFD_PRISM_BASIS=collapsed`，过积分上限 3）
-        #     P1 oo=2: prism 4.9816e+00 -> 1.3602e-01   36.6x
-        #     P1 oo=3（3x 档）: prism 4.9816e+00 -> 2.1243e-03  2345x
-        #     P2 oo=3: prism 7.6441e-01 -> 9.5333e-03   80.2x
-        #   原生基（2026-09-20 起是默认，过积分上限 6）
+        #   原生棱柱基（唯一实现，过积分上限 6）
         #     P1 oo=2: prism 4.0552e-01 -> 1.2170e-02   33.3x
         #     P2 oo=4: prism 1.2480e-02 -> 2.8663e-12   **机器零**
         #
+        # 已删除的坍缩棱柱基上同一算例是（**史料，已不可复现**）：
+        #     P1 oo=2: prism 4.9816e+00 -> 1.3602e-01   36.6x
+        #     P1 oo=3（3x 档）: prism 4.9816e+00 -> 2.1243e-03  2345x
+        #     P2 oo=3: prism 7.6441e-01 -> 9.5333e-03   80.2x
+        #
         # 两条基的 coarse 误差**不同量级**（原生 P1 比坍缩小 12 倍、P2 小
-        # 61 倍），所以"coarse 必须 > 0.5"那条防空转的下界也必须分档 ——
+        # 61 倍），所以"coarse 必须 > 0.5"那条防空转的下界当年必须分档 ——
         # 原生 P2 的 coarse 只有 1.2e-2，用 0.5 会把一条正常通过的判据
         # 判成"算例没造出混叠"。
         basis = resolve_prism_basis_mode()
-        coarse_min, gain_min = _PRISM_EXPECT[(basis, order)]
+        coarse_min, gain_min = _PRISM_EXPECT[order]
         err_co, err_oi = errs["prism"]
         assert err_co > coarse_min, (
             f"{basis} P{order} prism: coarse 误差只有 {err_co:.3e}，低于"
@@ -275,15 +276,16 @@ class TestOverintegrationIsMoreAccurate:
         # 四面体（仿射度量）上有一条更强、可完全解释的判据：三重乘积
         # rho*u*phi 由三个一次场相乘、是**三次**，只要 over_order >= 3
         # 且度量仿射，细网格空间 P3 就精确包含它 -> 必须是机器零。
-        #   over_order = min(2*order, OVERINTEGRATION_MAX_ORDER=3)
+        #   over_order = resolve_tet_overintegration_order(order)（上限 6）
         #   order=1 -> 2（不足，残余 5.6e-2）
-        #   order=2 -> 3（足够，9.8e-14）
+        #   order=2 -> 4（足够，机器零）
         # 也就是说 `2*order` 这条经验法则是为平均流的**二次**非线性设计
-        # 的（见 fr/collapsed_basis.py::build_overintegration_operators），
-        # 标量输运的三重乘积严格来说需要 `3*order`。不在这里改那条法则：
-        # 算子与 jacobians_fine 是**全局共享**的（平均流用同一份），
-        # 改动会同时影响已验证的平均流路径，且会把 order=1 的细点数从
-        # 27 抬到 64（P2 OOM 有前科），属于独立一步。
+        # 的（见 `fr/overintegration_order.py::
+        # resolve_overintegration_order_rule`），标量输运的三重乘积严格来说
+        # 需要 `3*order`。不在这里改那条法则：算子与 jacobians_fine 是
+        # **全局共享**的（平均流用同一份），改动会同时影响已验证的平均流
+        # 路径，且会把 order=1 的棱柱细点数从 18 抬到 40（P2 OOM 有前科），
+        # 属于独立一步。
         tet_co, tet_oi = errs["tet"]
         if _actual_over_order(oi) >= 3:
             assert tet_oi < 1e-11, (
@@ -394,8 +396,10 @@ class TestOverintegrationIsMoreAccurate:
 class TestOrderRuleSwitch:
     """`AFCFD_OVERINT_ORDER_RULE` 的语义（2026-09-15）。
 
-    默认 `2x` 必须复现此前已被长期验证的行为；`3x` 只在 order=1 上与它
-    不同（order>=2 两者都被 `OVERINTEGRATION_MAX_ORDER=3` 卡住）。
+    默认 `2x` 必须复现此前已被长期验证的行为。"`3x` 只在 order=1 上与它
+    不同"这句话只对已删除的坍缩棱柱基成立（order>=2 被那条
+    `OVERINTEGRATION_MAX_ORDER=3` 卡住）：原生基的上限是 6，所以 P2 也会
+    被这条规则改变（细点 75 -> 196），见下面的细点数判据。
     """
 
     def _env(self, v):
@@ -413,7 +417,7 @@ class TestOrderRuleSwitch:
             os.environ["AFCFD_OVERINT_ORDER_RULE"] = old
 
     def test_default_is_2x(self):
-        from autoflowcfd.fr.collapsed_basis import (
+        from autoflowcfd.fr.overintegration_order import (
             resolve_overintegration_order_rule,
         )
         old = self._env(None)
@@ -424,7 +428,7 @@ class TestOrderRuleSwitch:
 
     @pytest.mark.parametrize("v,expected", [("2x", 2), ("3x", 3), ("3X", 3)])
     def test_accepted_values(self, v, expected):
-        from autoflowcfd.fr.collapsed_basis import (
+        from autoflowcfd.fr.overintegration_order import (
             resolve_overintegration_order_rule,
         )
         old = self._env(v)
@@ -435,7 +439,7 @@ class TestOrderRuleSwitch:
 
     @pytest.mark.parametrize("v", ["2", "3", "", "two"])
     def test_rejects_unknown(self, v):
-        from autoflowcfd.fr.collapsed_basis import (
+        from autoflowcfd.fr.overintegration_order import (
             resolve_overintegration_order_rule,
         )
         old = self._env(v)
@@ -445,45 +449,21 @@ class TestOrderRuleSwitch:
         finally:
             self._restore(old)
 
-    @pytest.mark.parametrize("order,nf_2x,nf_3x", [(1, 27, 64), (2, 64, 64), (3, 64, 64)])
-    def test_fine_point_counts_per_rule_collapsed(self, order, nf_2x, nf_3x,
-                                                  monkeypatch):
-        """**坍缩档**两档规则实际构造出的细点数——直接读算子，不重算规则。
-
-        order>=2 上两档相同，这是 `OVERINTEGRATION_MAX_ORDER = 3` 的
-        直接后果，也是"这条切换只影响 order=1"这句话的依据。
-
-        显式跑在坍缩档（2026-09-20）：这些数字（27/64）是 `(oo+1)^3` 的
-        取值，只对坍缩棱柱基成立；原生档由下面那条覆盖。
-        """
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")
-        for v, want in (("2x", nf_2x), ("3x", nf_3x)):
-            old = self._env(v)
-            try:
-                ops = generate_fr_operators(order)
-                got = ops.overint_D_fine_prism.shape[0]
-                assert got == want, (
-                    f"rule={v} order={order}: 细点数 {got} != {want}")
-            finally:
-                self._restore(old)
-
     @pytest.mark.parametrize("order,nf_2x,nf_3x", [
         (1, 18, 40), (2, 75, 196), (3, 196, 196)])
-    def test_fine_point_counts_per_rule_native(self, order, nf_2x, nf_3x,
-                                               monkeypatch):
-        """**原生档**（2026-09-20 起的默认）两档规则的细点数。
+    def test_fine_point_counts_per_rule(self, order, nf_2x, nf_3x):
+        """两档规则实际构造出的细点数——直接读算子，不重算规则。
 
-        原生棱柱的细点数是 `(oo+1)^2(oo+2)/2`，上限是 6（不是坍缩那条
-        条件数上限 3），所以：
+        原生棱柱的细点数是 `(oo+1)^2(oo+2)/2`，上限是 6（已删除的坍缩基
+        那条条件数上限是 3），所以：
 
-            rule  P1         P2          P3
-            2x    oo=2 -> 18  oo=4 ->  75  oo=6 -> 196
-            3x    oo=3 -> 40  oo=6 -> 196  oo=6 -> 196（被上限 6 卡住）
+            rule  P1          P2           P3
+            2x    oo=2 -> 18   oo=4 ->  75  oo=6 -> 196
+            3x    oo=3 -> 40   oo=6 -> 196  oo=6 -> 196（被上限 6 卡住）
 
-        也就是说"这条切换只影响 order=1"这句话**只对坍缩档成立**：
-        原生档下 P2 也会被它改变（75 -> 112）。
+        也就是说"这条切换只影响 order=1"这句话**只对已删除的坍缩档成立**：
+        原生档下 P2 也被它改变（75 -> 196）。
         """
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
         for v, want in (("2x", nf_2x), ("3x", nf_3x)):
             old = self._env(v)
             try:
@@ -493,56 +473,6 @@ class TestOrderRuleSwitch:
                     f"rule={v} order={order}: 细点数 {got} != {want}")
             finally:
                 self._restore(old)
-
-
-class TestOverintegrationIsNoOpAtOrder3:
-    """**坍缩档**下 order=3 时去混叠**恰好什么也不做**，这是
-    `OVERINTEGRATION_MAX_ORDER` 的直接后果，必须显式钉住而不是让它看起来
-    "也生效了"。
-
-    **本类显式跑在坍缩档（2026-09-20）**：那条上限 3 是**坍缩基**
-    Vandermonde 条件数的约束，原生棱柱基不受它约束（自己的上限是 6，
-    见 `fr/overintegration_order.py`），P3 在原生档下拿到 oo=6、细点数
-    196，去混叠**是真的在做事**。也就是说"P3 上去混叠是空操作"这条
-    结论只对坍缩档成立，改成默认档跑会把结论反过来。
-
-        over_order = min(2*order, OVERINTEGRATION_MAX_ORDER=3)
-        order=1 -> 2,  order=2 -> 3,  order=3 -> 3,  order>=4 -> 3
-
-    order=3 时 over_order==order，"细"网格就是粗网格本身，插值/微分/限制
-    三件套复合起来等于原路径。实测改善倍数恰好 1.00x。
-
-    这条不是缺陷报告，是**范围说明**：本项目当前跑 P1/P2，P3 另有独立的
-    内存边界（见 P3 face-flux-points OOM 记录）。真要让 P3 也受益必须提高
-    那个上限，而它是平均流与标量输运共享的，属于独立一步。
-    """
-
-    def test_over_order_equals_order_at_3(self, monkeypatch):
-        """从**实际构造出的算子**读 over_order，不重算规则。"""
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")
-        from autoflowcfd.fr.collapsed_basis import OVERINTEGRATION_MAX_ORDER
-        assert OVERINTEGRATION_MAX_ORDER == 3, (
-            "上限被改动了——它有真实回归背景（放宽到 4 会让 P2 均匀自由"
-            "流场残差从 1.06e-5 恶化到 5.6e-3），见该常量处文档")
-        mesh = _build_synthetic_mixed_mesh(3)
-        oi = tp._turb_overint_ops(mesh, generate_fr_operators(3))
-        assert _actual_over_order(oi) == 3
-
-    def test_no_accuracy_change_at_order3(self, monkeypatch):
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")
-        mesh, ops, phi, rho, vel, exact = _setup(3)
-        oi = tp._turb_overint_ops(mesh, ops)
-        det = mesh.jacobians["det_jacs"].reshape(mesh.n_cells, mesh.n_sps_per_cell)
-        d_oi = tp._scalar_convection_volume_overintegrated(
-            phi, rho, vel, oi, mesh.n_sps_per_cell) / det
-        d_co = _coarse_convection_div(phi, rho, vel, mesh, ops) / det
-        m = _real_dof_mask(mesh, 3)
-        sc = np.abs(exact[m]).max()
-        e_oi = np.abs(d_oi[m] - exact[m]).max() / sc
-        e_co = np.abs(d_co[m] - exact[m]).max() / sc
-        assert abs(e_oi / e_co - 1.0) < 1e-6, (
-            f"order=3 的去混叠改善了 {e_co/e_oi:.3f}x——与 over_order==order "
-            f"这个事实矛盾，说明 OVERINTEGRATION_MAX_ORDER 或算子构造被改过")
 
 
 class TestFullConvectionResidualVsAnalytic:
@@ -609,31 +539,8 @@ class TestFullConvectionResidualVsAnalytic:
             errs[name] = np.abs(res[sl] - exact).max() / abs(exact)
         return errs
 
-    def test_order1_collapsed_prism_has_large_error_without_dealiasing(
-            self, monkeypatch):
-        """**坍缩档**的 `off` 在生产阶数 P1 的棱柱上有 O(1) 相对误差
-        ——这正是当初把 `AFCFD_TURB_OVERINT` 默认值改成 `on` 的依据。
-
-        这条刻意断言"off 档确实有这个误差"而不是只断言"on 更好"：它把
-        改默认值的依据本身钉住，任何人想把默认值改回 off 都会先看到这个
-        数字。
-
-        **显式跑在坍缩档（2026-09-20）**：那个 113% 是坍缩棱柱基的
-        `adj(J)` 非平凡多项式导致的；原生棱柱基下同一算例 off 档就已经是
-        2.33e-10（见下面那条），两个量级完全不同。
-        """
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")
-        errs = self._run(1, "off")
-        assert errs["prism"] > 0.5, (
-            f"order=1 坍缩棱柱在 off 档下的相对误差只有 {errs['prism']:.3e}，"
-            f"与实测 1.1294 不符")
-        assert errs["tet"] < 1e-12, (
-            f"order=1 四面体相对误差 {errs['tet']:.3e} 不是机器零——"
-            f"这张网格上四面体是仿射的，adj(J) 常数，不该有混叠")
-
-    def test_order1_native_prism_is_already_accurate_without_dealiasing(
-            self, monkeypatch):
-        """**原生档（2026-09-20 起的默认）**：同一算例 off 档就已经准。
+    def test_order1_prism_is_already_accurate_without_dealiasing(self):
+        """原生棱柱基（唯一实现）：同一算例 off 档就已经准。
 
         实测 `off` 档 P1 棱柱相对误差 **2.33e-10**（坍缩档是 1.1294，
         差 9 个数量级）。原因与坍缩档那 113% 的根因是同一条的反面：
@@ -645,22 +552,18 @@ class TestFullConvectionResidualVsAnalytic:
         依据 —— 体积项对照里原生 P1 仍有 33 倍改善、P2 直接到机器零
         （见 `_PRISM_EXPECT`）—— 但"不开就有 O(1) 误差"这句话不能再用。
         """
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
         errs = self._run(1, "off")
         assert errs["prism"] < 1e-8, (
             f"原生档 P1 棱柱 off 相对误差 {errs['prism']:.3e} 远大于实测的 "
             f"2.33e-10 —— 若这是真实退化，请查原生棱柱的度量/算子")
         assert errs["tet"] < 1e-12
 
-    @pytest.mark.parametrize("basis", ["collapsed", "native"])
-    def test_dealiasing_gives_an_accurate_order1_prism(self, basis,
-                                                       monkeypatch):
-        """打开去混叠后两档都必须准（坍缩实测 4.6e-10、原生 2.3e-10）。"""
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", basis)
+    def test_dealiasing_gives_an_accurate_order1_prism(self):
+        """打开去混叠后必须准（原生实测 2.3e-10；已删除的坍缩档是 4.6e-10）。"""
         errs = self._run(1, "on")
         assert errs["prism"] < 1e-8, (
-            f"{basis}: 打开去混叠后 order=1 棱柱相对误差仍有 "
-            f"{errs['prism']:.3e}（实测应为 ~5e-10）")
+            f"打开去混叠后 order=1 棱柱相对误差仍有 "
+            f"{errs['prism']:.3e}（实测应为 ~2e-10）")
         assert errs["tet"] < 1e-12
 
     def test_order2_is_unaffected_by_the_switch(self):

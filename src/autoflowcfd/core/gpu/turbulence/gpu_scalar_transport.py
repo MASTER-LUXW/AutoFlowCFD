@@ -71,40 +71,34 @@ from autoflowcfd.core.gpu.residual.gpu_volume_contract import (
     gpu_contract_shared_operator_1axis, gpu_contract_shared_operator_2axis,
 )
 from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_gradient_gpu
-from autoflowcfd.core.gpu.residual.gpu_inviscid_volume import distribute_face_correction_to_sps
 from autoflowcfd.core.gpu.residual.gpu_inviscid import _native_self_extrap
 
 
-def _native_or_collapsed_contrib_scalar(
-    cp, is_native, cube_face_code, lift_native, true_area_weight_face, jump, contrib_collapsed,
+def _lift_native_contrib_scalar(
+    cp, cube_face_code, lift_native, true_area_weight_face, jump,
 ):
-    """标量版 `gpu_inviscid.py::_native_or_collapsed_contrib`：native 面用
-    `lift_native[excluded_vertex] @ (true_area_weight ⊙ jump)`，collapsed
-    面用调用方已经算好的 `contrib_collapsed`——与 CPU 版
-    `transport_kernel.py::distribute_corrections_to_cells_kernel` 的
-    native/collapsed 分支逐字对应，仅去掉 5 变量的末轴（标量场没有这一维）。
+    """标量版 `gpu_inviscid.py::_lift_native_contrib`：
+    `lift_native[code-6] @ (true_area_weight ⊙ jump)`——与 CPU 版
+    `transport_kernel.py::distribute_corrections_to_cells_kernel` 逐字
+    对应，仅去掉 5 变量的末轴（标量场没有这一维）。
+
+    **权重是物理面积权重，与无粘/粘性那两路的参考求积权重不同，而且
+    两边都是对的**：本路的 `jump` 是物理通量密度差，那两路的 `jump` 是
+    参考空间的法向通量差 —— 完整对照见 CPU 版
+    `transport_kernel.py::_weighted_jump_native` 文档。
 
     Args:
-        is_native, cube_face_code: (n,)
-        lift_native: (4, n_sps, n_fp)
+        cube_face_code: (n,)
+        lift_native: (9, n_sps, n_fp)
         true_area_weight_face: (n, n_fp)
         jump: (n, n_fp) 未加权原始跳变量
-        contrib_collapsed: (n, n_sps)
 
     Returns:
         contrib: (n, n_sps)
     """
-    # 与 `_native_self_extrap`/`_native_or_collapsed_contrib` 同一处修复：
-    # `tet_basis_mode="collapsed"` 时 `lift_native` 是空数组
-    # `(0, n_sps, n_fp)`，`is_native` 恒为 False，短路直接返回
-    # `contrib_collapsed`，避免对空数组做越界 gather。
-    if lift_native.shape[0] == 0:
-        return contrib_collapsed
-    excluded_vertex = cp.clip(cube_face_code - 6, 0, lift_native.shape[0] - 1)
-    lift = lift_native[excluded_vertex]  # (n, n_sps, n_fp)
-    weighted_jump = true_area_weight_face * jump  # (n, n_fp)
-    contrib_native = cp.einsum('nsf,nf->ns', lift, weighted_jump)  # (n, n_sps)
-    return cp.where(is_native[:, None], contrib_native, contrib_collapsed)
+    lift = lift_native[cube_face_code - 6]              # (n, n_sps, n_fp)
+    weighted_jump = true_area_weight_face * jump        # (n, n_fp)
+    return cp.einsum('nsf,nf->ns', lift, weighted_jump)  # (n, n_sps)
 
 
 def _extrapolate_scalar_to_faces_gpu(
@@ -132,26 +126,9 @@ def _extrapolate_scalar_to_faces_gpu(
     n_faces = ff.n_faces
 
     oc = ff.owner_cell
-    oax = ff.owner_axis
-    oside = ff.owner_side
-    oside_idx = cp.where(oside <= 0, 0, 1)
-    compact_cell_type = getattr(ff, 'compact_cell_type', None)
-    if compact_cell_type is not None:
-        celltype_o = compact_cell_type[oc]
-    else:
-        celltype_o = cp.where(oc < n_prism, 0, 1)
-
-    # native 四面体（路径C）自身外插（2026-09-03 补齐，见模块文档）：
-    # `oax` 对 native 面存的是复用的 excluded_vertex（0~3），不能无条件
-    # gather 只有 3 个轴的 `boundary_extrap`——先 clip 到安全哑值 0，
-    # 再用 `_native_self_extrap` 按 `oc_code_o>=6` 分派到
-    # `boundary_extrap_native[excluded_vertex]`；纯 collapsed 网格下
-    # `boundary_extrap_native` 是空数组，短路直接退化为原有行为。
-    oc_code_o = ff.owner_cube_face
-    is_native_o = oc_code_o >= 6
-    oax_safe = cp.where(is_native_o, 0, oax)
-    E_o_collapsed = ff.boundary_extrap[celltype_o, oax_safe, oside_idx]  # (n_faces, n_fp, n_sps)
-    E_o = _native_self_extrap(cp, is_native_o, oc_code_o, ff.boundary_extrap_native, E_o_collapsed)
+    # 自身外插按 `code - 6` gather 原生表（四面体 [6,10)、棱柱 [10,15)
+    # 同一张表），与 CPU 版 `_extrap_owner_scalar_to_faces` 逐字对应。
+    E_o = _native_self_extrap(cp, ff.owner_cube_face, ff.boundary_extrap_native)
     phi_owner = cp.einsum('fps,fs->fp', E_o, scalar_sps[oc])
 
     c0 = ff.neighbor_src0_cell
@@ -240,22 +217,10 @@ def _distribute_scalar_correction_gpu(cp, ff, raw_jump_fp, det_jacs, n_cells, n_
     sel_o = cp.where(owner_primary)[0]
     if bool(sel_o.shape[0] > 0):
         oc = ff.owner_cell[sel_o]
-        oax = ff.owner_axis[sel_o]
-        oside = ff.owner_side[sel_o]
         raw_o = raw_jump_fp[sel_o]
-
-        oc_code_o = ff.owner_cube_face[sel_o]
-        is_native_o = oc_code_o >= 6
-        oax_safe = cp.where(is_native_o, 0, oax)
-
-        adj_mag_o = cp.linalg.norm(ff.owner_adj_row_exact[sel_o], axis=-1)
-        weighted_o_collapsed = adj_mag_o * raw_o
-        contrib_o_collapsed = distribute_face_correction_to_sps(
-            cp, weighted_o_collapsed, oax_safe, oside, ff.dist_fp_of_sp, ff.dist_axis_coord_of_sp,
-            ff.g_left, ff.g_right,
-        )  # (nO, n_sps)
-        contrib_o = _native_or_collapsed_contrib_scalar(
-            cp, is_native_o, oc_code_o, ff.lift_native, ff.true_area_weight[sel_o], raw_o, contrib_o_collapsed,
+        contrib_o = _lift_native_contrib_scalar(
+            cp, ff.owner_cube_face[sel_o], ff.lift_native,
+            ff.true_area_weight[sel_o], raw_o,
         )
         contrib_o = contrib_o / det_jacs[oc]
         cp.scatter_add(correction, (oc, slice(None)), -contrib_o)
@@ -267,22 +232,10 @@ def _distribute_scalar_correction_gpu(cp, ff, raw_jump_fp, det_jacs, n_cells, n_
     if bool(cp.any(has_neighbor)):
         sel_n = cp.where(has_neighbor)[0]
         nc_sel = nc[sel_n]
-        nax_sel = ff.neighbor_axis[sel_n]
-        nside_sel = ff.neighbor_side[sel_n]
         raw_n = raw_jump_fp_neighbor[sel_n]
-
-        nc_code_n = ff.neighbor_cube_face[sel_n]
-        is_native_n = nc_code_n >= 6
-        nax_safe = cp.where(is_native_n, 0, nax_sel)
-
-        adj_mag_n = cp.linalg.norm(ff.neighbor_adj_row_exact[sel_n], axis=-1)
-        weighted_n_collapsed = adj_mag_n * raw_n
-        contrib_n_collapsed = distribute_face_correction_to_sps(
-            cp, weighted_n_collapsed, nax_safe, nside_sel,
-            ff.dist_fp_of_sp, ff.dist_axis_coord_of_sp, ff.g_left, ff.g_right,
-        )
-        contrib_n = _native_or_collapsed_contrib_scalar(
-            cp, is_native_n, nc_code_n, ff.lift_native, ff.true_area_weight[sel_n], raw_n, contrib_n_collapsed,
+        contrib_n = _lift_native_contrib_scalar(
+            cp, ff.neighbor_cube_face[sel_n], ff.lift_native,
+            ff.true_area_weight[sel_n], raw_n,
         )
         contrib_n = contrib_n / det_jacs[nc_sel]
         cp.scatter_add(correction, (nc_sel, slice(None)), contrib_n)
@@ -509,7 +462,7 @@ def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, m
         (omega_wall_value_face, has_value_face)，与 CPU 版返回语义一致
     """
     n_faces = ff.n_faces
-    n_fp = ff.boundary_extrap.shape[-2]
+    n_fp = ff.boundary_extrap_native.shape[-2]
     omega_wall_value_face = cp.zeros((n_faces, n_fp), dtype=cp.float64)
     wall_idx = cp.where(wall_mask)[0]
     if wall_idx.shape[0] > 0:

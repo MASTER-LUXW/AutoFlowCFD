@@ -37,7 +37,7 @@ def _gpu_sensor_operators(order: int):
 
     Returns:
         dict，键：
-          'prism_V' / 'prism_V_inv' / 'prism_w' / 'prism_top'
+          'prism_V_inv' / 'prism_mass' / 'prism_top' / 'prism_n_native'
           'tet_V_inv' / 'tet_top' / 'tet_n_native'
     """
     if order in _gpu_sensor_cache:
@@ -47,25 +47,28 @@ def _gpu_sensor_operators(order: int):
     # 私有构造函数从它们**真正的**所在子模块导入（人工粘性模块
     # 2026-09-20 拆成子包，包 `__init__` 只 re-export 公开名）。
     from autoflowcfd.core.fr_operators.artificial_viscosity.sensor_operators import (  # noqa: E501
+        _build_native_prism_sensor_operators,
         _build_native_tet_sensor_operators,
-        _build_sensor_operators,
     )
-    from autoflowcfd.fr.quadrature_points import gauss_legendre
 
-    # 与 CPU 侧 compute_troubled_cell_mask / fr/operators.py 生成
-    # D_3d_prism 用的是同一组参考坐标（GL 张量积），不能另起一套。
-    sps_1d, _ = gauss_legendre(order + 1)
-    xx, yy, zz = np.meshgrid(sps_1d, sps_1d, sps_1d, indexing="ij")
-    ref_cube_sps = np.column_stack([xx.ravel(), yy.ravel(), zz.ravel()])
-
-    V, V_inv, quad_w, top_mask = _build_sensor_operators("prism", order, ref_cube_sps)
+    # **2026-09-23 修复的真实缺陷**：这里此前调
+    # `_build_sensor_operators("prism", order, ref_cube_sps)` —— 那是
+    # **坍缩坐标模态族**的算子（`(order+1)^3` 个张量积模态 + 把张量积
+    # Gauss 点当解点）。CPU 侧早在 2026-09-20 就迁到了原生棱柱专属算子
+    # （见 `_build_native_prism_sensor_operators` 文档"与四面体同一类的
+    # 真实缺陷"一节），**GPU 这份拷贝被漏掉了**：对原生基的解等于
+    #   (a) 用一个不是解所在空间的基做模态分解；
+    #   (b) 把冻结在初值的零填充槽位当自由度喂进指标。
+    # 这正是本项目反复出现的"同一语义两份实现、只改了一份"。
+    p_V_inv, p_mass, p_top, p_n_native = (
+        _build_native_prism_sensor_operators(order))
     t_V_inv, t_top, t_n_native = _build_native_tet_sensor_operators(order)
 
     ops = {
-        'prism_V': cp.asarray(np.ascontiguousarray(V)),
-        'prism_V_inv': cp.asarray(np.ascontiguousarray(V_inv)),
-        'prism_w': cp.asarray(np.ascontiguousarray(quad_w)),
-        'prism_top': cp.asarray(np.ascontiguousarray(top_mask)),
+        'prism_V_inv': cp.asarray(np.ascontiguousarray(p_V_inv)),
+        'prism_mass': cp.asarray(np.ascontiguousarray(p_mass)),
+        'prism_top': cp.asarray(np.ascontiguousarray(p_top)),
+        'prism_n_native': int(p_n_native),
         'tet_V_inv': cp.asarray(np.ascontiguousarray(t_V_inv)),
         'tet_top': cp.asarray(np.ascontiguousarray(t_top)),
         'tet_n_native': int(t_n_native),
@@ -75,14 +78,32 @@ def _gpu_sensor_operators(order: int):
 
 
 def _sensor_prism_gpu(field, ops):
-    """棱柱分支：张量积族模态分解 + GL 求积权重内积，返回 `s_e`。"""
+    """原生棱柱分支：PKD(三角形)xLegendre(挤出) 模态能量比，返回 `s_e`。
+
+    与 CPU 侧 `compute_persson_peraire_sensor_native_prism` 逐项对应：
+
+        S_e = sum_{top} M_mm chat_m^2 / sum_all M_mm chat_m^2
+
+    `M_mm` 是**对角质量**——原生棱柱基在参考棱柱上正交但**不归一**
+    （P1 实测对角为 8/2.667/4/1.333/5.333/1.778），所以 L2 能量必须带上
+    它；不能像四面体那样直接 `sum(chat^2)`（PKD 正交归一），也不能像坍缩
+    那样用节点求积权重（那条成立只因为坍缩解点=求积点）。
+
+    只取**前 n_native 列**：其余是冻结在初值的零填充槽位、不是自由度。
+    """
     cp = get_cupy()
-    modal = cp.einsum("ij,cj->ci", ops['prism_V_inv'], field)
-    modal_top = cp.where(ops['prism_top'][cp.newaxis, :], modal, 0.0)
-    diff = cp.einsum("ij,cj->ci", ops['prism_V'], modal_top)
-    num = cp.einsum("cs,s,cs->c", diff, ops['prism_w'], diff)
-    den = cp.einsum("cs,s,cs->c", field, ops['prism_w'], field)
-    S_e = num / cp.maximum(den, 1e-300)
+    n_native = ops['prism_n_native']
+    if field.shape[1] < n_native:
+        raise ValueError(
+            f"field 每单元只有 {field.shape[1]} 个解点，少于 native 棱柱"
+            f"所需的 {n_native} 个真实自由度")
+    real = cp.ascontiguousarray(field[:, :n_native])
+    modal = cp.einsum("ij,cj->ci", ops['prism_V_inv'], real)
+    energy = modal * modal * ops['prism_mass'][cp.newaxis, :]
+    energy_all = cp.sum(energy, axis=1)
+    energy_top = cp.sum(
+        cp.where(ops['prism_top'][cp.newaxis, :], energy, 0.0), axis=1)
+    S_e = energy_top / cp.maximum(energy_all, 1e-300)
     return cp.log10(cp.maximum(S_e, 1e-300))
 
 
