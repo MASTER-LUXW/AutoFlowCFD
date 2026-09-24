@@ -181,8 +181,27 @@ class TestRealDofReductionCallSitesAreWired:
     """
 
     def _src(self, mod):
+        """取模块源码；**若传的是包，则拼接它全部子模块的源码**。
+
+        为什么必须这样（2026-09-24，第 4 次踩到同一个坑）：本项目把超
+        500 行的模块陆续拆成子包，而 `inspect.getsource(package)` 只返回
+        `__init__.py`。于是形如 `assert "xxx" not in src` 的断言会在拆包
+        之后**静默通过** —— 字符串只是搬到了子模块，并不是真的不存在。
+        `assert "xxx" in src` 那半边会直接失败、能被发现；`not in` 那半边
+        不会，比没有测试更糟。
+        """
         import inspect
-        return inspect.getsource(mod)
+        import pkgutil
+        import importlib
+
+        src = inspect.getsource(mod)
+        if getattr(mod, "__path__", None) is None:
+            return src
+        parts = [src]
+        for info in pkgutil.iter_modules(mod.__path__):
+            sub = importlib.import_module(f"{mod.__name__}.{info.name}")
+            parts.append(inspect.getsource(sub))
+        return chr(10).join(parts)
 
     def test_artificial_viscosity_rho_and_vel_scale(self):
         # 读**真正含有调用点**的那个子模块：人工粘性模块 2026-09-20 拆成

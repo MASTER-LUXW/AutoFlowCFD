@@ -377,7 +377,10 @@ class TestAllConsumersUsePerSegmentMetric:
     _FILES = [
         "src/autoflowcfd/core/fr_residual/inviscid.py",
         "src/autoflowcfd/core/fr_residual/viscous_flux.py",
-        "src/autoflowcfd/core/turbulence/transport.py",
+        # transport 2026-09-24 拆成子包，三个含体积项的子模块都要查
+        "src/autoflowcfd/core/turbulence/transport/convection.py",
+        "src/autoflowcfd/core/turbulence/transport/diffusion.py",
+        "src/autoflowcfd/core/turbulence/transport/residual.py",
         "src/autoflowcfd/core/gpu/residual/gpu_inviscid_volume.py",
         "src/autoflowcfd/core/gpu/residual/gpu_viscous.py",
         "src/autoflowcfd/core/gpu/turbulence/gpu_scalar_transport.py",

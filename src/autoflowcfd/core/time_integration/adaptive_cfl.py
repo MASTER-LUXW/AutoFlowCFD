@@ -183,6 +183,81 @@ AutoFlowCFD V2.0 - 稳态求解器自适应 CFL 控制器
          (c) 软上限的 `ceiling_floor` 同样用 `min(..., cfl_max)` 收口，
              否则上限本身可以被顶到 cfl_max 之上。
 
+   13. **启动暂态里残差比值是错的信号**（2026-09-24，179,237 单元真实
+       网格 P1+SST 长程运行直接暴露）。第 9 条只给"放大"加了绝对基准，
+       "轻度收缩"没有对应的一半 —— 于是启动暂态里的残差回升会把 CFL
+       一路压到下限，而解其实一直在改善。
+
+       真实数据（同一次运行，`AFCFD_*` 全默认、cfl_start=0.03）：
+
+           iter 1980..2420   残差 2.5280e8 -> 2.6739e8   **升 5.77%**
+                             Cd    4.7945  ->  4.7183    降 0.0762
+                             Cd 在这 441 条记录里**严格单调不增**
+                             CFL   0.010（已在下限）
+
+           iter 900..3240    Cd 5.5679 -> 4.5310，2340 步**零次反转**
+
+       也就是说：残差（时间导数的范数，对"当前哪些单元在调整"极其敏感）
+       在升，而气动系数这个积分量在单调收敛。控制器只看残差比值，就把
+       "暂态里不同区域先后进入调整"误判成失稳。后果是可量化的：全程
+       3240 步里 CFL=0.010（下限）占 1529 步，0.033（最高到过的值）只占
+       145 步；step 1819 收缩到下限之后，**连续 915 步没有任何调节**
+       （放大要求 20 步累计比值 < 0.995，而在 0.010 上进展太慢、永远攒
+       不出来），直到物理本身好转才逃出来。
+
+       修法与第 9 条 (a) 严格对称：轻度收缩也要过绝对基准 ——
+       `res / res_best > mild_shrink_block_ratio`（默认 1.5）才允许收缩。
+       低于它时，20 步的缓慢回升只是暂态里区域轮换，不构成收缩理由。
+
+       为什么 1.5 是安全的（两侧都有实测支撑）：
+
+         * 本次运行的三次收缩事件，`res/res_best` 分别约 1.00 / 1.00 /
+           1.086 —— 全部远低于 1.5，新闸门可证地把它们全挡掉；
+         * 真实失稳（第 9 条那批日志）20 步内就到 **17.5**，而且那种速度
+           的恶化早已由 `ratio > shrink_threshold=1.1` 的**重度**分支
+           立即响应 —— 重度收缩**不受本闸门约束**，与第 9 条 (a) 不约束
+           重度分支是同一条原则。
+
+       **与第 12 条的相互作用必须摆在明处**：第 12 条的结论是"越界之后
+       收缩救不回来"（plate_demo 实测 0.036 稳定、0.040 越界一次后退回
+       0.036 仍加速发散），处置是把 `cfl_max` 压到验证过的边界以下。本
+       闸门把轻度收缩**推迟**到 `res/res_best > 1.5` 之后，所以原则上
+       存在一种坏情形：慢速漂移在到达 1.5 倍之前就已经越过了不可恢复的
+       边界。三条依据说明这个风险是可接受的，但都要如实标注其边界：
+
+         (a) 真实失稳的**单步**特征是 `ratio > 1.1`，走**重度**分支、
+             不受本闸门约束、立即收缩 —— 慢速 1.5 倍漂移不是失稳的
+             特征形态；
+         (b) `cfl_max` 已按第 12 条压到 0.06，而放大的唯一通道要求 20 步
+             累计 ratio < 0.995（真的在更快收敛），所以本闸门不会把 CFL
+             推到 `cfl_max` 以上；
+         (c) 179,237 单元真实网格的闭环 A/B（同一 checkpoint 起算）是这条
+             的直接检验，数据见 `ProjectFiles/V2.0/30`。
+
+       这三条都**不**构成"1.5 在任何算例上都安全"的证明。若某条算例上
+       出现"闸门挡住收缩之后发散"，正确的处置是压低 `cfl_max`（第 12 条
+       的结论），而不是把 `mild_shrink_block_ratio` 调小 —— 后者只会把
+       暂态误判重新引回来。
+
+       与第 5/6 条修掉的棘轮效应方向相反：那两条是"别因为噪声收缩"，
+       本条是"别因为暂态收缩"，两者都只**阻止**收缩、从不主动放大，所以
+       不可能引入新的单向漂移。
+
+       **这是缓解、不是根治，原因要说清楚**：本控制器的信号是**跨步**
+       残差比值 `res(n)/res(n-1)`，它把"这一步做坏了"与"解正处在暂态"
+       混在一起 —— 两者都会让比值上升。`dual.py` 的内迭代不吃这个问题，
+       因为它做的是**试算/接受**：从同一个状态出发算出试探步，拿
+       `trial_res` 与 `current_res` 比，拒绝就回退重试（`_GROWTH_TOLERANCE`
+       那段）。同一个起点的对比不可能把"底层流场的暂态"算到步长头上。
+       稳态这边做不了同样的事，理由记在本文档末尾"与 dual.py 的关键
+       差异"：单步代价约 8~10s，保存/恢复状态 + 重算残差不划算。
+       真正根治要么是引入试算/接受，要么是换一个在暂态里单调的监控量
+       （本次实测里 Cd 就是这样的量：残差升 5.77% 的同一窗口它严格
+       单调）。两条都超出"给收缩加一道闸门"的范围，**没有实施**，如实
+       记在这里而不是假装已经解决。健康轨迹（残差严格单调下降）上
+       `res/res_best` 恒为 1.00、`ratio > 1.0` 本来就不成立，本闸门永不
+       被求值，行为逐位不变。
+
     3. 与 dual.py 的双时间步自适应逻辑独立——两者面向不同的迭代结构
        （稳态每步一次 RK3 vs 双时间每步多次内迭代），参数和策略不同。
 
@@ -253,6 +328,7 @@ class AdaptiveCFLController:
         ceiling_backoff: float = 0.95,
         ceiling_release_steps: int = 100,
         grow_block_ratio: float = 2.0,
+        mild_shrink_block_ratio: float = 1.5,
     ):
         """初始化自适应 CFL 控制器。
 
@@ -340,6 +416,7 @@ class AdaptiveCFLController:
         self.ceiling_backoff = ceiling_backoff
         self.ceiling_release_steps = ceiling_release_steps
         self.grow_block_ratio = grow_block_ratio
+        self.mild_shrink_block_ratio = mild_shrink_block_ratio
 
         # 环境变量 `AFCFD_CFL_LEGACY=1`：整体退回 2026-09-14 之前的行为
         # （死区里 CFL 完全不动 + 轻度恶化单步立即收缩），供现场排查与
@@ -571,6 +648,10 @@ class AdaptiveCFLController:
                     and r_new / r_old > self.trend_shrink_threshold)
             if severe or self.legacy_mode:
                 confirmed = True
+            elif self._mild_shrink_blocked(current_residual):
+                # 绝对基准闸门（模块文档第 13 条）：离历史最好残差还很近，
+                # 缓慢回升是启动暂态的区域轮换，不是失稳。
+                confirmed = False
             elif window_full:
                 # 与放大同一个时间尺度、同一个窗口量，只是阈值留了迟滞
                 confirmed = (window_worsened
@@ -713,6 +794,30 @@ class AdaptiveCFLController:
         if not math.isfinite(current_residual):
             return True   # 非有限值绝不是放大的时机
         return current_residual / self._res_best > self.grow_block_ratio
+
+    def _mild_shrink_blocked(self, current_residual: float) -> bool:
+        """当前残差离"自己到过的最好成绩"还不到 `mild_shrink_block_ratio`
+        倍时，禁止**轻度**收缩（模块文档第 13 条）。
+
+        这是第 9 条 (a) 的对称一半：那条挡的是"比历史最好差一倍以上还要
+        放大"，这条挡的是"离历史最好还很近就急着收缩"。启动暂态里不同
+        区域先后进入调整，残差（时间导数的范数）会缓慢回升，而解本身在
+        改善 —— 真实数据见第 13 条（残差升 5.77% 的同一段窗口里，Cd 在
+        441 条记录上严格单调收敛）。
+
+        只**阻止**轻度收缩，从不主动放大，所以不可能引入第 5/6 条修掉的
+        那种棘轮效应；**重度**恶化（`ratio > shrink_threshold`，含
+        NaN/inf）不经过本闸门 —— 真实失稳 20 步内就把这个比值推到 17.5，
+        而且那种速度本来就走重度分支立即响应。
+
+        健康轨迹上残差严格单调下降、`ratio > 1.0` 根本不成立，本函数不会
+        被求值，行为逐位不变。
+        """
+        if self._res_best is None or self._res_best <= 0:
+            return False
+        if not math.isfinite(current_residual):
+            return False  # 非有限值是真实失稳，交给重度分支，别在这里拦
+        return current_residual / self._res_best <= self.mild_shrink_block_ratio
 
     def _growth_cap(self) -> float:
         """放大的实际上限：`cfl_max` 与软上限取小。

@@ -203,8 +203,12 @@ class TestTwoDimensionsAreIndependent:
     def test_both_switches_exist_and_are_separate(self):
         import inspect
 
-        from autoflowcfd.core.turbulence import transport
-        src = inspect.getsource(transport)
+        # 必须 inspect **子模块** omega_wall，不是包 `__init__`：
+        # `transport` 2026-09-24 拆成了子包，`inspect.getsource(transport)`
+        # 只会返回 `__init__.py`，那两个字符串都不在里面 —— 一条会直接
+        # 失败、另一条（下面那个 `not in`）会**静默通过**，比没有测试更糟。
+        from autoflowcfd.core.turbulence.transport import omega_wall
+        src = inspect.getsource(omega_wall)
         assert "AFCFD_OMEGA_WALL_D1" in src
         assert "AFCFD_OMEGA_WALL_MODE" in src
 
@@ -236,8 +240,10 @@ class TestGpuMirrorIsWired:
     def test_cpu_hardcoded_60_is_gone(self):
         import inspect
 
-        from autoflowcfd.core.turbulence import transport
-        src = inspect.getsource(transport)
+        # 同上：必须 inspect 子模块，否则这条 `not in` 会静默通过
+        # （字符串只是搬到了 omega_wall.py，并不是真的不存在）。
+        from autoflowcfd.core.turbulence.transport import omega_wall
+        src = inspect.getsource(omega_wall)
         assert "60.0 * nu_owner" not in src
 
 
