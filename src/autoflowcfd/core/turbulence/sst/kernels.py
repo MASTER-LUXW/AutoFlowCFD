@@ -4,9 +4,13 @@
 """
 
 import numpy as np
-from numba import prange
+from numba import njit, prange
 
 
+# 装饰器 2026-09-24 拆包时被拆包工具丢掉过（工具取源码范围从 `def` 行开始，
+# 漏了装饰器行），数值不变但这个核退化成纯 Python 三重循环，长程运行每步
+# 从 10 秒变成 26 秒。守卫见 tests/unit/test_numba_kernels_stay_jitted.py。
+@njit(cache=True, parallel=True)
 def _strain_vorticity_magnitude_kernel(grad_u, s_out, w_out) -> None:
     """一趟算出应变率模 |S| 与涡量模 |Omega|（两者共用同一份 grad_u）。
 
