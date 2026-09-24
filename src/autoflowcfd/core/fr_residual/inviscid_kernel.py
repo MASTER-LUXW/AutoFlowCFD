@@ -1,7 +1,7 @@
 """无粘残差界面项 —— numba 逐点标量 kernel (性能优化，替代
 fr_residual_inviscid.py 里原来的纯 Python `for f in range(fc.n_faces)` 循环)。
 
-逐字复刻原循环体的控制流（owner_is_primary / alignment<0.5 回退真实
+逐字复刻原循环体的控制流（owner_is_primary / 本侧精确度量法向
 法向 / is_boundary 走幽灵态或 sources 求和 / neighbor_is_primary），
 只是把执行方式从"Python 解释器 + 逐次小 numpy 调用"换成 numba 编译的
 逐点标量代码。数学公式与 fr_residual_inviscid.py 的向量化版本必须
@@ -68,7 +68,6 @@ def compute_inviscid_interface_correction_kernel(
     Q: np.ndarray, det_jacs: np.ndarray,
     owner_cell: np.ndarray, neighbor_cell: np.ndarray, is_boundary: np.ndarray,
     owner_is_primary: np.ndarray, neighbor_is_primary: np.ndarray,
-    true_normal: np.ndarray,
     owner_adj_row_exact: np.ndarray, neighbor_adj_row_exact: np.ndarray,
     neighbor_src0_cell: np.ndarray, neighbor_src0_mat: np.ndarray,
     neighbor_src1_idx: np.ndarray, neighbor_src1_cell: np.ndarray, neighbor_src1_mat: np.ndarray,
@@ -120,6 +119,21 @@ def compute_inviscid_interface_correction_kernel(
     内部自己查询（会破坏磁盘缓存）。多线程下累加顺序不再是严格的
     `range(n_faces)` 顺序，验证判据也相应分层，见模块文档。
 
+    **法向一律取自本侧精确度量行**（2026-09-24）：此前两侧各有一个
+    `alignment = dir(adj_row).true_normal < 0.5` 时改用 `true_normal` 的
+    兜底。它是原生基之前的遗留（那时法向由 Lagrange 外插的度量得到，坍缩
+    顶点附近可能是垃圾方向）；原生基下 adj 行是逐 FP 的解析精确值，夹角
+    >60° 说明几何本身就是那样（严重扭曲的棱柱四边形面对两个平面三角形），
+    兜底不再保护任何合法情形，只剩一个效果 —— 破坏自由流保持：换了方向
+    之后拥有侧投影仍用 adj_row，对均匀流
+        jump = |adj| F(Q).(n_ref - dir(adj)) != 0。
+    plate_demo_volume_les（179,237 单元）上它在 11 个面、42 个 FP 触发
+    （全部在板锐边的扭曲棱柱上），在"全边界取远场"的均匀流里产生
+    4~5e6 /s 的残差（其余单元为 1e-7 量级），正是 P1 长程运行在第 4134 步
+    单步爆炸那个单元的源头：它的一个解点密度在恒定源项下按恒定斜率下降，
+    过零后被逐点硬钳，一步放大到 1e53。粘性核本来就没有这个兜底，所以
+    粘性残差在同一测试里处处精确。
+
     真实 bug 修复（2026-08-23，见 fr/face_flux_points/exact_normal.py
     模块文档完整原理）：`owner_adj_row_exact`/`neighbor_adj_row_exact`
     取代了此前这里对 `adj_j`（SP 网格上的度量）用 `E_o`/`E_n` 做
@@ -134,7 +148,7 @@ def compute_inviscid_interface_correction_kernel(
     n_cells = Q.shape[0]
     n_sps = Q.shape[1]
     n_faces = owner_cell.shape[0]
-    n_fp = true_normal.shape[1]
+    n_fp = owner_adj_row_exact.shape[1]
 
     correction_per_thread = np.zeros((n_threads, n_cells, n_sps, 5))
 
@@ -163,11 +177,12 @@ def compute_inviscid_interface_correction_kernel(
                 diry = a1 / adj_mag
                 dirz = a2 / adj_mag
 
-                alignment = dirx * true_normal[f, i, 0] + diry * true_normal[f, i, 1] + dirz * true_normal[f, i, 2]
-                if alignment < 0.5:
-                    dirx = true_normal[f, i, 0]
-                    diry = true_normal[f, i, 1]
-                    dirz = true_normal[f, i, 2]
+
+                # 法向恒用本侧**精确度量行**的方向（2026-09-24 删除了此前的
+                # `alignment < 0.5` 兜底——它在夹角过大时把方向换成
+                # true_normal、但拥有侧投影仍用 adj_row，于是对均匀流
+                # 跳跃量 = |adj| F.(n_ref - dir(adj)) != 0，凭空注入压力
+                # 量级的源项。完整依据见本函数文档"法向一律取自本侧度量"。）
 
                 # --- Q_neighbor 在这个 owner FP 处的取值 ---
                 if is_boundary[f]:
@@ -250,15 +265,12 @@ def compute_inviscid_interface_correction_kernel(
                 diry = a1 / adj_mag
                 dirz = a2 / adj_mag
 
-                # neighbor 视角外法向恒为 -true_normal（平面直边网格）
-                ntnx = -true_normal[f, i, 0]
-                ntny = -true_normal[f, i, 1]
-                ntnz = -true_normal[f, i, 2]
-                alignment_n = dirx * ntnx + diry * ntny + dirz * ntnz
-                if alignment_n < 0.5:
-                    dirx = ntnx
-                    diry = ntny
-                    dirz = ntnz
+
+                # 法向恒用本侧**精确度量行**的方向（2026-09-24 删除了此前的
+                # `alignment < 0.5` 兜底——它在夹角过大时把方向换成
+                # true_normal、但本侧投影仍用 adj_row，于是对均匀流
+                # 跳跃量 = |adj| F.(n_ref - dir(adj)) != 0，凭空注入压力
+                # 量级的源项。完整依据见本函数文档"法向一律取自本侧度量"。）
 
                 Q_o_at_n = np.zeros(5)
                 c0 = owner_src0_cell[f]

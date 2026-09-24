@@ -27,7 +27,7 @@ from .flux import (  # noqa: F401
 )
 from .interface import (  # noqa: F401
     _add_q_src1_to_fp,
-    _ausm_direction_with_fallback,
+    _ausm_direction,
     _compute_interface_correction_gpu,
     _extrap_q_to_fp,
     _lift_native_contrib,

@@ -101,7 +101,6 @@ def _compute_residual_via_new_kernel(U, mesh, ops, boundary_ghost_provider=None,
         Q, det_jacs,
         flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
         flat.owner_is_primary, flat.neighbor_is_primary,
-        flat.true_normal,
         flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
         flat.neighbor_src0_cell, flat.neighbor_src0_mat,
         flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
@@ -167,8 +166,10 @@ def test_new_kernel_matches_old_loop_uniform_flow(order, rel_tol):
 
 @pytest.mark.parametrize("order", [1, 2])
 def test_new_kernel_matches_old_loop_nonuniform_perturbed_flow(order):
-    """非均匀扰动流场：owner_sources/neighbor_sources 求和路径、
-    alignment<0.5 回退路径都更容易被真实触发到，覆盖面比纯均匀流场广。
+    """非均匀扰动流场：owner_sources/neighbor_sources 求和路径更容易被
+    真实触发到，覆盖面比纯均匀流场广。（此前还列了"alignment<0.5 回退路径"
+    —— 那个兜底已于 2026-09-24 删除，理由见 inviscid_kernel.py 函数文档
+    "法向一律取自本侧精确度量行"。）
 
     不含 P=3：诊断已确认——即使把扰动幅度降到 ±0.5 m/s / ±0.5%（比
     P=1/P=2 用的幅度小 10 倍），**旧的、本次完全未改动的参考实现自己**
@@ -196,8 +197,8 @@ def test_new_kernel_matches_old_loop_nonuniform_perturbed_flow(order):
     # 在 P=3 下已知条件数问题（fr/collapsed_basis.py 文档）在非光滑扰动
     # 场下被进一步放大的真实、预先存在的数值脆弱性，不是本次新 kernel
     # 引入的问题，也不是这个交叉验证测试要覆盖的目标——这里只需要一个
-    # 足以触发 owner_sources/neighbor_sources 求和路径和 alignment<0.5
-    # 回退路径、但不把旧实现本身推入病态区间的扰动幅度。
+    # 足以触发 owner_sources/neighbor_sources 求和路径、但不把旧实现本身
+    # 推入病态区间的扰动幅度。
     n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
     vel_pert = 0.5 if order >= 3 else 5.0
     frac_pert = 0.005 if order >= 3 else 0.05

@@ -54,8 +54,9 @@ def test_gpu_matches_cpu_uniform_flow(order, rel_tol):
 
 @pytest.mark.parametrize("order", [1, 2])
 def test_gpu_matches_cpu_nonuniform_perturbed_flow(order):
-    """非均匀扰动流场：覆盖 owner/neighbor 两侧各自独立通量求值、
-    alignment<0.5 回退路径。"""
+    """非均匀扰动流场：覆盖 owner/neighbor 两侧各自独立通量求值。
+    （此前还覆盖"alignment<0.5 回退路径"——那个兜底已于 2026-09-24
+    删除，见 CPU inviscid_kernel.py 函数文档。）"""
     mesh = _build_synthetic_mixed_mesh(order)
     rng = np.random.default_rng(order * 5000 + 17)
 

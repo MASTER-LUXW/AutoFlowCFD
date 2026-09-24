@@ -35,21 +35,21 @@ def _add_q_src1_to_fp(cp, out, src1_idx, src1_cell, src1_mat, Q_gpu):
     return out
 
 
-def _ausm_direction_with_fallback(cp, adjrow, true_normal_ref):
-    """按 CPU 版 inviscid_kernel.py 的"自洽方向 + true_normal 对齐安全阀"
-    逻辑构造 AUSM+up 用的法向：adjrow 精确方向与 true_normal_ref 夹角
-    过大（alignment<0.5）时回退到 true_normal_ref 本身。
+def _ausm_direction(cp, adjrow):
+    """AUSM+up 用的法向：本侧**精确度量行**的单位方向（与 CPU 版
+    `inviscid_kernel.py` 逐字对应）。
+
+    此前名为 `_ausm_direction_with_fallback`，在 `dir(adjrow).n_ref < 0.5`
+    时改用 `n_ref`（owner 侧 true_normal / neighbor 侧 -true_normal）——
+    2026-09-24 删除，理由见 CPU 版函数文档"法向一律取自本侧精确度量行"：
+    换了方向之后拥有侧投影仍用 adjrow，对均匀流跳跃量不为零，凭空注入
+    压力量级的源项。
+
+    **没有 side 参数**：原生面的 `adj_row` 已是 outward 定向（见
+    `fr/face_flux_points/exact_normal.py`），方向系数恒为 +1。
 
     Args:
         adjrow: (n, n_fp, 3) 未归一化 adj(J) 行
-
-    **没有 side 参数**：原生面的 `adj_row` 已是 outward 定向（见
-    `fr/face_flux_points/exact_normal.py`），方向系数恒为 +1；已删除的
-    坍缩坐标面才需要乘 `owner_side`/`neighbor_side` 翻转。
-
-        true_normal_ref: (n, n_fp, 3) 对齐基准（owner 侧用 true_normal，
-            neighbor 侧用 -true_normal，见 CPU kernel"neighbor 视角外
-            法向恒为 -true_normal"）
 
     Returns:
         (direction, adj_mag)：direction (n,n_fp,3)，adj_mag (n,n_fp)
@@ -59,15 +59,8 @@ def _ausm_direction_with_fallback(cp, adjrow, true_normal_ref):
     a2 = adjrow[..., 2]
     adj_mag = cp.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
     adj_mag_safe = cp.maximum(adj_mag, 1e-300)
-    dirx = a0 / adj_mag_safe
-    diry = a1 / adj_mag_safe
-    dirz = a2 / adj_mag_safe
-    alignment = dirx * true_normal_ref[..., 0] + diry * true_normal_ref[..., 1] + dirz * true_normal_ref[..., 2]
-    use_fallback = alignment < 0.5
-    dirx = cp.where(use_fallback, true_normal_ref[..., 0], dirx)
-    diry = cp.where(use_fallback, true_normal_ref[..., 1], diry)
-    dirz = cp.where(use_fallback, true_normal_ref[..., 2], dirz)
-    direction = cp.stack([dirx, diry, dirz], axis=-1)
+    direction = cp.stack([a0 / adj_mag_safe, a1 / adj_mag_safe,
+                          a2 / adj_mag_safe], axis=-1)
     return direction, adj_mag
 
 
@@ -215,9 +208,7 @@ def _compute_interface_correction_gpu(
             # 原生面的 adj 行已是 outward 定向，方向系数恒为 +1（见
             # `_native_self_extrap` 与 CPU 版同一处说明）。
             adjrow_o = ff.owner_adj_row_exact[idx_o]
-            direction_o, adj_mag_o = _ausm_direction_with_fallback(
-                cp, adjrow_o, ff.true_normal[idx_o],
-            )
+            direction_o, adj_mag_o = _ausm_direction(cp, adjrow_o)
 
             nO = Q_o.shape[0]
             flux_o = _ausm_up_flux_batch_gpu(
@@ -277,10 +268,7 @@ def _compute_interface_correction_gpu(
 
             # neighbor 视角外法向恒为 -true_normal（见 CPU kernel 同名注释）
             adjrow_n = ff.neighbor_adj_row_exact[idx_n]
-            tn_neg = -ff.true_normal[idx_n]
-            direction_n, adj_mag_n = _ausm_direction_with_fallback(
-                cp, adjrow_n, tn_neg,
-            )
+            direction_n, adj_mag_n = _ausm_direction(cp, adjrow_n)
 
             flux_n = _ausm_up_flux_batch_gpu(
                 Q_n_native.reshape(nN, n_fp, 5), Q_o_at_n.reshape(nN, n_fp, 5), direction_n, mach_ref,

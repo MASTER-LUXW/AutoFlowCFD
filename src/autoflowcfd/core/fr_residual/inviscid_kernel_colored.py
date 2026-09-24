@@ -30,7 +30,6 @@ def compute_inviscid_interface_correction_kernel_colored(
     Q: np.ndarray, det_jacs: np.ndarray,
     owner_cell: np.ndarray, neighbor_cell: np.ndarray, is_boundary: np.ndarray,
     owner_is_primary: np.ndarray, neighbor_is_primary: np.ndarray,
-    true_normal: np.ndarray,
     owner_adj_row_exact: np.ndarray, neighbor_adj_row_exact: np.ndarray,
     neighbor_src0_cell: np.ndarray, neighbor_src0_mat: np.ndarray,
     neighbor_src1_idx: np.ndarray, neighbor_src1_cell: np.ndarray, neighbor_src1_mat: np.ndarray,
@@ -74,7 +73,7 @@ def compute_inviscid_interface_correction_kernel_colored(
     """
     n_cells = Q.shape[0]
     n_sps = Q.shape[1]
-    n_fp = true_normal.shape[1]
+    n_fp = owner_adj_row_exact.shape[1]
     n_faces_in_color = face_indices.shape[0]
 
     for fi in prange(n_faces_in_color):
@@ -100,11 +99,12 @@ def compute_inviscid_interface_correction_kernel_colored(
                 diry = a1 / adj_mag
                 dirz = a2 / adj_mag
 
-                alignment = dirx * true_normal[f, i, 0] + diry * true_normal[f, i, 1] + dirz * true_normal[f, i, 2]
-                if alignment < 0.5:
-                    dirx = true_normal[f, i, 0]
-                    diry = true_normal[f, i, 1]
-                    dirz = true_normal[f, i, 2]
+
+                # 法向恒用本侧**精确度量行**的方向（2026-09-24 删除了此前的
+                # `alignment < 0.5` 兜底——它在夹角过大时把方向换成
+                # true_normal、但拥有侧投影仍用 adj_row，于是对均匀流
+                # 跳跃量 = |adj| F.(n_ref - dir(adj)) != 0，凭空注入压力
+                # 量级的源项。完整依据见本函数文档"法向一律取自本侧度量"。）
 
                 if is_boundary[f]:
                     Q_n = Q_ghost[f, i]
@@ -181,14 +181,12 @@ def compute_inviscid_interface_correction_kernel_colored(
                 diry = a1 / adj_mag
                 dirz = a2 / adj_mag
 
-                ntnx = -true_normal[f, i, 0]
-                ntny = -true_normal[f, i, 1]
-                ntnz = -true_normal[f, i, 2]
-                alignment_n = dirx * ntnx + diry * ntny + dirz * ntnz
-                if alignment_n < 0.5:
-                    dirx = ntnx
-                    diry = ntny
-                    dirz = ntnz
+
+                # 法向恒用本侧**精确度量行**的方向（2026-09-24 删除了此前的
+                # `alignment < 0.5` 兜底——它在夹角过大时把方向换成
+                # true_normal、但本侧投影仍用 adj_row，于是对均匀流
+                # 跳跃量 = |adj| F.(n_ref - dir(adj)) != 0，凭空注入压力
+                # 量级的源项。完整依据见本函数文档"法向一律取自本侧度量"。）
 
                 Q_o_at_n = np.zeros(5)
                 c0 = owner_src0_cell[f]

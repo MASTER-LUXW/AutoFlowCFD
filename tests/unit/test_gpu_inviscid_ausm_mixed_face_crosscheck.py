@@ -18,7 +18,8 @@ cupy 替身完整构造 `GPUFRSolver` 并真正调用 `step()`，在这份被跳
 `(N,3)`（逐面一个法向，`nx=normal[...,0:1]` 故意保留末尾长度 1 维度
 以便广播到 `(N,n_fp)` 的其余物理量），但两个真实调用点
 （`_compute_interface_correction_gpu` 的 owner/neighbor 分支）传入的
-`direction_o`/`direction_n`（来自 `_ausm_direction_with_fallback`）
+`direction_o`/`direction_n`（来自 `_ausm_direction`，2026-09-24 前名为
+`_ausm_direction_with_fallback`）
 形状恒为 `(N,n_fp,3)`——逐 FP 各自独立的方向，不是逐面共享同一个值。
 `nx=normal[...,0:1]` 对 `(N,n_fp,3)` 输入产出 `(N,n_fp,1)`，与
 `(N,n_fp)` 相乘时若 `N != n_fp`（绝大多数真实网格）会直接
