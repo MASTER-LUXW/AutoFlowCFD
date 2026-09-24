@@ -1,154 +1,25 @@
-"""AutoFlowCFD API（V2.0 纯 FR 架构）。
+"""AutoFlowCFD V2.0 - 求解入口：稳态、瞬态、从 checkpoint 续算
 
-提供 AutoFlowCFD V2.0 的高层接口，支持网格处理、FR求解和后处理。
+从 `src/autoflowcfd/api.py` 的 `AutoFlowCFDAPI` 拆出（2026-09-24，项目「单文件不超
+500 行」规范）。mixin 是本仓库既有惯例（`_SolverGeometryMixin`、
+`_GPUSolverInitMixin` 等），沿用它而不是另发明一套。
+
+**只含方法，没有状态**：全部属性由 `AutoFlowCFDAPI` 的 `__init__` 建立，
+这里通过 `self` 访问。
 """
 
-import os
-import numpy as np
-from pathlib import Path
-from typing import Dict, List, Optional, Union, Any
+from typing import Optional, Any
 from loguru import logger
-
-# V2.0 Core Import
-from autoflowcfd.grid.nas_io.parser import NASParser
-from autoflowcfd.grid.mesh_gen.tetgen.volume_mesh_generator import VolumeMeshGenerator
-from autoflowcfd.grid.structures import GridData, VolumeMeshData
-from autoflowcfd.grid.validation.validator import GridValidator
+from autoflowcfd.grid.structures import VolumeMeshData
 from autoflowcfd.core import FRSolver, TransientSolver  # 从core模块导入TransientSolver
-
 from autoflowcfd.config.solver_config import SteadyConfig, TransientConfig
-
-from autoflowcfd.core.backend import get_available_backends
-
-# 从拆分的模块导入辅助函数（控制单文件行数）
-from autoflowcfd.api_grid_ops import (
-    api_load_grid, api_get_grid_info, api_validate_grid,
-    api_validate_surface_grid, api_generate_volume_mesh,
-    api_get_volume_mesh_info, api_validate_volume_mesh,
-)
-from autoflowcfd.api_config import (
-    api_create_steady_config, api_create_transient_config,
-    api_load_config, api_resume_simulation,
-)
+from autoflowcfd.api_config import api_resume_simulation
+from .helpers import _turbulence_model_str
 
 
-def _turbulence_model_str(turb_config_value) -> str:
-    """把 `config.solver_config.TurbulenceModel` 枚举值映射到求解器/CLI
-    真正使用的字符串取值（none/sst/ddes/wmles/les，见
-    fr_solver/turbulence.py::init_turbulence_models）。
+class _APISolveMixin:
+    """求解入口：稳态、瞬态、从 checkpoint 续算"""
 
-    配套 #6（配置层接入）：`SteadyConfig`/`TransientConfig.turbulence`
-    字段用的是这套独立枚举，命名（sst_kw vs sst）和求解器实际接受的
-    字符串不完全一致，真正把 config 对象喂给 FRSolver 构造之前必须
-    先做这层转换，而不是直接 `.value` 传下去（那样 "sst_kw" 会被当成
-    未知湍流模型字符串处理，构造函数从不认识这个值）。
-    """
-    from autoflowcfd.config.solver_config import TurbulenceModel
-    mapping = {
-        TurbulenceModel.NONE: "none",
-        TurbulenceModel.SST_KW: "sst",
-        TurbulenceModel.DDES: "ddes",
-        TurbulenceModel.IDDES: "iddes",
-        TurbulenceModel.WMLES: "wmles",
-        TurbulenceModel.LES: "les",
-    }
-    if turb_config_value not in mapping:
-        raise ValueError(
-            f"Turbulence model '{turb_config_value.value}' is representable in "
-            f"SteadyConfig/TransientConfig but is not actually implemented by "
-            f"FRSolver/GPUFRSolver — only none/sst_kw/ddes/iddes/wmles/les are real "
-            f"solver options."
-        )
-    return mapping[turb_config_value]
-
-
-class AutoFlowCFDAPI:
-    """AutoFlowCFD V2.0 主 API 类（纯 FR 架构）。
-    
-    提供 AutoFlowCFD V2.0 的高层接口，支持网格处理、FR 求解和后处理。
-    """
-    
-    def __init__(self, verbose: bool = False):
-        self.verbose = verbose
-        from autoflowcfd.config.loader import ConfigLoader
-        self._config_loader = ConfigLoader()  # 初始化config_loader
-        self.grid_data: Optional[GridData] = None
-        self.volume_mesh: Optional[VolumeMeshData] = None
-        self.solver = None
-        self.convergence_history = []  # 收敛历史
-
-    # ========================================================================
-    # Version and Environment
-    # ========================================================================
-    
-    def get_version(self) -> str:
-        """获取软件版本信息。
-        
-        Returns:
-            版本号字符串
-        """
-        from autoflowcfd import __version__
-        return __version__
-    
-    def check_environment(self) -> Dict[str, Any]:
-        """检查运行环境和可用资源。
-        
-        Returns:
-            环境信息字典
-        """
-        import platform
-        from autoflowcfd import __version__
-        
-        backends = get_available_backends()
-        return {
-            'platform': platform.platform(),
-            'backends': backends,
-            'gpu_available': backends.get('gpu', False),
-            'cpu_count': os.cpu_count(),
-            'python_version': os.sys.version,
-            'autoflowcfd_version': __version__,
-        }
-
-    # ========================================================================
-    # Grid Operations
-    # ========================================================================
-    
-    def load_grid(self, grid_file, encoding="UTF-8", validate=True):
-        """Load and parse grid file."""
-        return api_load_grid(self, grid_file, encoding, validate)
-
-    def get_grid_info(self, grid_data):
-        """Get grid information and statistics."""
-        return api_get_grid_info(self, grid_data)
-
-    def validate_grid(self, grid_data):
-        """验证网格质量。"""
-        return api_validate_grid(self, grid_data)
-
-    def _validate_surface_grid(self, grid_data):
-        """验证表面网格质量的内部方法。"""
-        return api_validate_surface_grid(self, grid_data)
-
-    # ========================================================================
-    # Volume Mesh Operations
-    # ========================================================================
-    
-    def generate_volume_mesh(self, grid_data, method="tetrahedral", **kwargs):
-        """Generate volume mesh from grid data."""
-        return api_generate_volume_mesh(self, grid_data, method, **kwargs)
-
-    def get_volume_mesh_info(self, volume_mesh):
-        """Get volume mesh information and statistics."""
-        return api_get_volume_mesh_info(self, volume_mesh)
-
-    def validate_volume_mesh(self, volume_mesh):
-        """Validate volume mesh quality."""
-        return api_validate_volume_mesh(self, volume_mesh)
-
-    # ========================================================================
-    # Solver Operations (V2.0 FR Only)
-    # ========================================================================
-    
     def run_steady(
         self,
         volume_mesh: VolumeMeshData,
@@ -280,7 +151,7 @@ class AutoFlowCFDAPI:
         )
 
         return result
-    
+
     def run_transient(
         self,
         volume_mesh: VolumeMeshData,
@@ -422,196 +293,7 @@ class AutoFlowCFDAPI:
         )
 
         return result
-    
+
     def resume_simulation(self, checkpoint_file: str, **kwargs) -> Any:
         """从检查点恢复仿真。"""
         return api_resume_simulation(self, checkpoint_file, **kwargs)
-    
-    def create_steady_config(self, **kwargs) -> SteadyConfig:
-        """创建稳态配置。"""
-        return api_create_steady_config(self, **kwargs)
-
-    def create_transient_config(self, **kwargs) -> TransientConfig:
-        """创建瞬态配置。"""
-        return api_create_transient_config(self, **kwargs)
-
-    def load_solver_config(self, config_file: str) -> Union[SteadyConfig, TransientConfig]:
-        """从 YAML 文件加载一个真正校验过的 `SteadyConfig`/`TransientConfig`
-        对象（`mode: steady`/`mode: transient` 决定返回哪一个），可直接
-        传给 `run_steady(config=...)`/`run_transient(config=...)`。
-
-        真实修复（V2.0 专家组盲审发现，2026-08-28）：`self._config_loader`
-        此前从构造函数（`__init__`）里初始化后就再也没被读取过——一个
-        纯粹的死属性。这里是它第一个、也是唯一有意义的真实用途，与
-        `load_config()`（返回未经校验的裸字典，供需要原始 YAML 内容的
-        场景用）是两个不同粒度的入口，不是重复实现。
-
-        Args:
-            config_file: YAML 配置文件路径（与 CLI `--config` 选项、
-                `config/loader.py::ConfigLoader` 用的是同一套 schema）
-
-        Returns:
-            SteadyConfig 或 TransientConfig
-        """
-        return self._config_loader.load(config_file)
-
-    def load_config(self, config_file: str) -> Dict[str, Any]:
-        """加载配置文件。"""
-        return api_load_config(self, config_file)
-
-    # ========================================================================
-    # Post-processing
-    # ========================================================================
-    
-    def calculate_coefficients(
-        self,
-        result: Any,
-        reference_area: float = 1.0,
-        reference_length: float = 1.0,
-        density: float = 1.225,
-        velocity: float = 33.33
-    ) -> Dict[str, float]:
-        """计算气动力系数。
-        
-        Args:
-            result: 求解器结果
-            reference_area: 参考面积
-            reference_length: 参考长度
-            density: 流体密度
-            velocity: 参考速度
-            
-        Returns:
-            气动力系数字典（使用大写键名Cd, Cl等）
-        """
-        # FR 原生积分路径（唯一真实积分实现，见 api_postprocess.py 同名委托函数文档）
-        if self.solver is not None and hasattr(self.solver, 'mesh'):
-            from autoflowcfd.postprocess.fr_coefficients import (
-                compute_aerodynamic_coefficients_fr,
-            )
-            coeffs = compute_aerodynamic_coefficients_fr(
-                self.solver,
-                reference_area=reference_area,
-                reference_length=reference_length,
-            )
-            return coeffs.to_dict()
-
-        # 无求解器：返回诚实零值并警告，不回退到伪积分实现（旧版 V1
-        # CoefficientCalculator 依赖不存在的 get_face_data()，已移除）
-        logger.warning(
-            "calculate_coefficients: 没有可用的 FR 求解器（需先调用 run_steady/"
-            "run_transient 或 resume_simulation），返回零系数。"
-        )
-        return {
-            'Cd': 0.0, 'Cl': 0.0, 'Cm': 0.0,
-            'Cs': 0.0, 'Cy': 0.0, 'Cr': 0.0,
-        }
-    
-    def export_vtk(self, result: Any = None, filename: str = None, high_order: bool = False) -> None:
-        """导出 VTK 可视化文件。
-
-        使用 VTKExporter 将流场数据导出为 VTK 格式，支持 legacy .vtk
-        和 XML .vtu 两种格式（根据文件扩展名自动选择）。
-
-        Args:
-            result: 未使用，仅为向后兼容签名保留——真正的解场从
-                self.solver.state.U 读取（见下方说明），不是从
-                SolverResult 对象（它只有 converged/iterations/
-                final_residual 三个字段，从不携带解场，见
-                core/fr_solver/state.py）。
-            filename: 输出文件名（.vtk 或 .vtu）
-            high_order: True 时改走 postprocess/vtk_export_highorder.py
-                （#5，2026-08-28 新增）：按 FR 解真实的分段多项式（而不是
-                `U.mean(axis=1)` 拍扁的单元中心平均值）导出成 VTK
-                VTK_LAGRANGE_TETRAHEDRON/WEDGE 高阶单元，能在 ParaView 里
-                看到单元内部真实的多项式分布。只支持 order<=2（见该模块
-                文档），且只输出 .vtu（VTK legacy 格式不支持任意阶
-                Lagrange 单元）；filename 若没有 .vtu 后缀会被自动改写。
-
-        此前这里用 `result.solution`（SolverResult 根本没有这个字段，
-        `hasattr` 检查恒为 False，必然走进"抛异常"分支）和
-        `self.grid_data`（run_steady/run_transient 从不写入的表面网格，
-        即便写了，单元数也和体网格解场对不上）构造 VTKExporter——两个
-        参数都是错的，从未被真正跑通过（V2.0 专家组评审逐行核实）。
-        改为镜像 CLI `post export-vtk`（cli/post_export_commands.py）
-        真正验证过的用法：VTKExporter 的 `grid_data` 参数只是鸭子类型
-        地读取 `.metadata.node_count`/`.cell_count`，`self.volume_mesh`
-        （generate_volume_mesh 的输出，run_steady/run_transient 求解的
-        就是它）满足这个接口；解场用 `self.solver.state.U.mean(axis=1)`
-        拍扁成单元中心平均值（与 CheckpointManager.save 写 checkpoint
-        时的约定一致）包装成 SolutionVector。
-        """
-        from autoflowcfd.postprocess.vtk_export import VTKExporter
-        from autoflowcfd.core.backend.base import SolutionVector
-
-        if self.solver is None or self.volume_mesh is None:
-            raise ValueError(
-                "export_vtk 需要先成功运行 run_steady/run_transient "
-                "（需要 self.solver 和 self.volume_mesh 均已设置）。"
-            )
-        if filename is None:
-            raise ValueError("export_vtk 需要提供 filename。")
-
-        if high_order:
-            from pathlib import Path
-
-            from autoflowcfd.postprocess.vtk_export_highorder import export_highorder_vtk
-
-            out_path = Path(filename)
-            if out_path.suffix != '.vtu':
-                out_path = out_path.with_suffix('.vtu')
-            export_highorder_vtk(self.solver.mesh, self.solver.state.U, out_path)
-            logger.info(f"High-order VTK exported: {out_path}")
-            return
-
-        U_cell_avg = self.solver.state.U.mean(axis=1)  # (n_cells, n_vars)
-        solution = SolutionVector(
-            data=U_cell_avg, n_cells=U_cell_avg.shape[0], n_variables=U_cell_avg.shape[1],
-        )
-
-        # 湍流涡粘度（用于精确的 nut 导出），有则给，没有就让 VTKExporter
-        # 自己退化成简化估计（它自身文档已说明这个 fallback）。
-        mu_t = None
-        get_mu_t = getattr(self.solver, '_get_turbulent_viscosity_field', None)
-        if callable(get_mu_t):
-            mu_t_field = get_mu_t()
-            if mu_t_field is not None:
-                mu_t = mu_t_field.mean(axis=1)
-
-        exporter = VTKExporter(self.volume_mesh, solution, mu_t=mu_t)
-
-        # 根据扩展名选择格式
-        fmt = 'xml' if filename.endswith('.vtu') else 'legacy'
-        exporter.export(filename, format=fmt)
-        logger.info(f"VTK exported: {filename}")
-    
-    def get_convergence_history(self, result: Any = None) -> Dict[str, list]:
-        """获取收敛历史。
-
-        真实 bug 修复（V2.0 专家组盲审发现，2026-08-27）：此前这里恒为
-        硬编码占位符 `{"iterations": [], "residuals": []}`，不管
-        run_steady/run_transient 是否已经成功跑完、收敛得多好，调用方
-        拿到的永远是两个空列表，且没有任何警告提示这是未实现的占位符。
-        现在读取 `self.solver.residual_history`（CPU FRSolver 与
-        GPUFRSolver/MultiGPUDistributedSolver 都在各自的 solve 循环里
-        逐迭代 append，同一个约定，见 fr_solver/solver.py::solve() 与
-        core/utils/order_continuation.py::run_order_continuation）。
-
-        Args:
-            result: 未使用，保留以兼容旧调用签名
-
-        Returns:
-            包含 iterations（1-based 迭代序号）和 residuals 的字典；
-            尚未运行过 run_steady/run_transient（self.solver 为 None）
-            或求解器本身未记录历史时返回两个空列表。
-        """
-        residuals = getattr(self.solver, "residual_history", None) if self.solver is not None else None
-        if not residuals:
-            return {"iterations": [], "residuals": []}
-        return {
-            "iterations": list(range(1, len(residuals) + 1)),
-            "residuals": list(residuals),
-        }
-
-def create_api(verbose: bool = False) -> AutoFlowCFDAPI:
-    """Factory function to create API instance."""
-    return AutoFlowCFDAPI(verbose=verbose)

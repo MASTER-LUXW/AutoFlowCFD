@@ -158,3 +158,43 @@ def test_no_bare_setattr_on_a_package(path):
         + "；".join(f"第 {ln} 行 {m}.{k}" for ln, m, k in bad)
         + "。改用 tests/unit/_patch_pkg.py::patch_pkg_attr —— 它把包和"
           "全部子模块一起换掉，并用聚合断言保证至少换上了一处")
+
+
+# ---------------------------------------------------------------------------
+# 运行时守卫（tests/unit/conftest.py）本身的判据
+# ---------------------------------------------------------------------------
+
+
+def test_runtime_guard_rejects_getsource_on_a_package():
+    """运行时守卫必须真的咬人 —— 否则它就是个摆设。
+
+    用循环变量取模块，正是静态规则解析不了、2026-09-24 真实漏掉的写法。
+    """
+    import inspect
+
+    import autoflowcfd.core.fr_solver.boundary as pkg
+    for mod in (pkg,):
+        with pytest.raises(AssertionError, match="只返回 __init__.py"):
+            inspect.getsource(mod)
+
+
+def test_runtime_guard_lets_module_source_through():
+    """`module_source` 自己要读包的 __init__.py，不能被拦。"""
+    from tests.unit._module_source import module_source, module_sources
+
+    src = module_source("autoflowcfd.core.fr_solver.boundary")
+    assert "def build_boundary_ghost_provider(" in src
+    names = [n for n, _s in module_sources("autoflowcfd.core.fr_solver.boundary")]
+    assert "autoflowcfd.core.fr_solver.boundary.ghost" in names
+
+
+def test_runtime_guard_leaves_plain_modules_and_functions_alone():
+    """对普通模块、函数、类调用 getsource 是合法的，不能误伤。"""
+    import inspect
+
+    from autoflowcfd.core.fr_solver.boundary import ghost
+    from autoflowcfd.core.fr_solver.boundary.ghost import (
+        build_boundary_ghost_provider,
+    )
+    assert "build_boundary_ghost_provider" in inspect.getsource(ghost)
+    assert inspect.getsource(build_boundary_ghost_provider).startswith("def ")

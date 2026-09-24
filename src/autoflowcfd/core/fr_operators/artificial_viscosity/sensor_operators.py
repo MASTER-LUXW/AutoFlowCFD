@@ -160,7 +160,6 @@ def _build_native_prism_sensor_operators(order: int):
         build_native_prism_nodes, build_native_prism_vandermonde,
         restricted_prism_modes,
     )
-    from autoflowcfd.fr.quadrature_points import gauss_legendre
 
     nodes = build_native_prism_nodes(order)
     V, _, _, _ = build_native_prism_vandermonde(order, nodes)

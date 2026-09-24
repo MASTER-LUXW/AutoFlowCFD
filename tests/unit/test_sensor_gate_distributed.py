@@ -17,6 +17,8 @@ from autoflowcfd.core.fr_solver.residual_diagnostics import (
 )
 import pytest
 
+from tests.unit._patch_pkg import patch_pkg_attr
+
 from autoflowcfd.core.fr_operators.bounds_sensor import (
     compute_bounds_violation_mask,
 )
@@ -454,7 +456,7 @@ class TestDirichletTableReachesTheDistributedPath:
             seen["bd"] = kw.get("bnd_dirichlet")
             return orig(*a, **kw)
 
-        monkeypatch.setattr(bs, "compute_bounds_violation_mask", spy)
+        patch_pkg_attr(monkeypatch, bs, "compute_bounds_violation_mask", spy)
 
         stub, _, n_local = _stub_solver(
             field, owner, neigh, is_bnd, local_ids, n_sps)
@@ -532,7 +534,7 @@ class TestMirrorNormalsReachTheDistributedPath:
             seen["mir"] = kw.get("bnd_mirror_normal")
             return orig(*a, **kw)
 
-        monkeypatch.setattr(bs, "compute_bounds_violation_mask", spy)
+        patch_pkg_attr(monkeypatch, bs, "compute_bounds_violation_mask", spy)
 
         stub, _, n_local = _stub_solver(
             field, owner, neigh, is_bnd, local_ids, n_sps)

@@ -138,11 +138,14 @@ class TestApiForwardsConfigCfl:
 
     @pytest.mark.parametrize("fn_name", ["run_steady", "run_transient"])
     def test_config_cfl_forwarded(self, fn_name):
-        import pathlib
+        from tests.unit._module_source import module_sources
 
-        import autoflowcfd.api as api_mod
-
-        src = pathlib.Path(api_mod.__file__).read_text(encoding="utf-8")
+        # api 2026-09-24 拆成子包，`api_mod.__file__` 只是 __init__.py。
+        # 先定位到真正定义这个方法的子模块，再在它内部截取方法体（截取
+        # 依赖"下一个同缩进 def"，拼接后没有意义）。
+        src = next((s for _n, s in module_sources("autoflowcfd.api")
+                    if f"def {fn_name}(" in s), None)
+        assert src is not None, f"api 包里找不到 def {fn_name}("
         start = src.index(f"def {fn_name}(")
         # 截到下一个同缩进的 def，避免把相邻方法的代码算进来
         nxt = src.find("\n    def ", start + 1)

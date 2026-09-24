@@ -1,170 +1,20 @@
-"""AutoFlowCFD V2.0 - 邻居极值越界（BJ 型）troubled-cell 判据。
+"""AutoFlowCFD V2.0 - BJ 型越界判据：解点值超出顶点邻域极值区间即标记
 
-## 为什么需要第二个判据
-
-项目对"退化单元把残差放大若干个量级"的既定路线是"网格质量门 + 耗散"
-（见 `ProjectFiles` 与项目记忆 `industry_practice_degenerate_cell_gcl`）。
-但耗散这一半在**生产阶数 P1 上目前是空的**：
-
-- **人工粘性 / Persson-Peraire 门控**：实测 A/B 前 51 步残差与 Cd 逐字符
-  相同（精确无操作），代码里已 warn。**根本原因（2026-09-16 在真实
-  checkpoint 上直接量出来，比此前的阈值论证更确切）**：生产门控探的是
-  **守恒密度**（`DEFAULT_SENSOR_VAR_INDEX = 0`），而在
-  plate_demo_volume_les iter 100 的真实解上，order=1 的 Persson 掩码
-  按变量分别是
-
-      rho    0.000%      <- 生产门控实际用的这个，掩码**完全为空**
-      rho_u  3.546%
-      rho_v  98.827%
-      rho_w  98.756%
-      rho_E  0.000%
-
-  也就是说 `AFCFD_FILTER_MODE=sensor` + `persson` 在这个算例上与 `off`
-  等价（一个单元都不标），而真正携带非光滑内容的是**横向动量**——
-  与"P2 的失效模态在能量上而传感器探密度"是同一类缺陷，现在在 P1 上
-  也量到了。
-
-  （一处自我更正：此前把这件事记成"Persson 在 order=1 时门限退化到
-  不可能满足、掩码恒空"。用合成随机场实测，order=1 下它其实会触发
-  190/200；所以"恒空"的说法不对，真实原因是**被探的那个变量恰好光滑**。）
-- **模态滤波**：`legacy` 档把唯一的非常数阶清掉（P1 恒等于 P0），
-  `mild` 档 `sigma_top=0.99` 又因为每个 RK stage 都施加而随步数复合
-  累积（0.99^300 ~ 0.05），不是"轻微"。
-
-于是 P1 在质量门未通过的网格上没有任何抑制机制。
-
-## 判据本身
-
-Barth-Jespersen 型：一个单元"可疑"当且仅当它的解点值**超出了由它自己
-与全部面邻居的单元均值张成的区间**：
-
-    nb_max = max(mean_self, mean_of_each_face_neighbour)
-    nb_min = min(mean_self, mean_of_each_face_neighbour)
-    越界    <=>  max_sp > nb_max + tol   或   min_sp < nb_min - tol
-
-**为什么线性场不会被误判**：一维均匀网格上取线性场，单元 i 的均值等于
-其形心值，解点极值为 `形心 ± h/2 * grad`，而邻居均值为
-`形心 ± h * grad` —— 解点极值严格落在邻居均值区间**内部**。这是 BJ
-判据的经典性质（限制器在线性场上恒不激活），与阶数无关，所以它在 P1
-上**不退化**，正是 Persson-Peraire 缺的那一半。
-
-非均匀/退化网格上 BJ 会有已知的虚假激活（相邻单元尺度差异大时邻居均值
-区间收窄）。标准补丁是 Venkatakrishnan 的 epsilon：容差取
-
-    tol = rel_tol * (nb_max - nb_min) + abs_tol
-
-第一项让"邻域本身变化就很小"的光滑区自动失活（相对判据），第二项是
-绝对地板，防止 `nb_max == nb_min` 的均匀区因浮点噪声触发。
-
-## 标定与"为什么不外科"（数据表见 ProjectFiles）
-
-在 plate_demo_volume_les iter 100 的真实守恒场上做过完整标定，两条结论
-决定了本判据现在的形态，完整数据表见
-`ProjectFiles/V2.0/20_判据标定-BJ型越界判据在真实网格上的定量标定.md`：
-
-1. **绝对地板必须用来流参考量级**，不能用"全场 cell_mean 的 RMS"。后者
-   对 `rho_v`/`rho_w` 这类"大部分域内均值约 0、RMS 被尾迹局部主导"的
-   变量既不是局部量级也不是物理量级，标记比例 11.08%；改用
-   `ref_scales`（与 `fr_solver/residual_diagnostics.py::_reference_scales`
-   同一套构造）后降到 8.43%。
-2. **越界并不集中在退化单元**：要把标记比例压到 3.68%，体积最小 1% 单元
-   的召回就掉到 42.7%；要保住 98.9% 的召回就得标记 8.43% 的计算域，两头
-   不可兼得。这说明"网格质量门 + 耗散"这条既定路线的**耗散那一半在这类
-   网格上做不成外科式的**，瓶颈仍然是网格（与项目记忆
-   `industry_practice_degenerate_cell_gcl` 一致，这是第一份定量数据）。
-
-本判据**不是**稳定性问题的解决方案，不要这样引用。它的定位是：P1 上
-唯一可用的 troubled-cell 判据（Persson-Peraire 在 P1 原理上不适用），
-以及一个可量化的"解的单调性越界"指标。默认值见
-`troubled_sensor_mode.py::resolve_troubled_sensor`（2026-09-17 起是
-`bounds`，真实网格上让 `legacy` 的"iter 112 发散"变成"216 步残差单调
-下降 3.5 倍"）。
-
-## 施加方式与守恒性
-
-本模块只产出布尔掩码，不施加任何操作。消费方是
-`core/fr_solver/filter.py::build_sensor_gated_filter_func_arrays`——它对
-被标记单元施加完整的模态滤波矩阵、其余单元完全不动。在 P1 上这等价于
-**把被标记单元局部降到 P0**（troubled-cell 降阶，标准做法）：常数不可能
-过冲，所以单调；模态滤波对常数模态的 `sigma(0) = 1`，所以单元的模态
-常数分量不变。
-
-**关于守恒性的诚实说明**：模态常数分量等于"守恒均值 ∫u dV / V"的前提是
-`det(J)` 在单元内为常数。直边四面体与直棱柱挤出满足这一点（本项目
-`compute_native_tet_jacobians` 的实现就基于"直边单元 Jacobian 逐单元
-为常数"这一事实），曲边单元不满足。所以在曲边网格上这个门控是"近似
-守恒"，不是精确守恒——这一点必须写清楚，不能因为"legacy 档一直这么
-干"就默认它精确。
-
-同理，本模块算判据用的 `cell_mean` 取解点的**算术**平均而非求积加权
-平均：它只是一个判据（决定"要不要动这个单元"），不参与任何守恒投影，
-算术平均足够且更便宜。
+从 `src/autoflowcfd/core/fr_operators/bounds_sensor.py`(原 506 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
 """
 
-from typing import Optional
 
 import numpy as np
 
 from autoflowcfd.core.utils.array_module import array_module as _array_module
-from .vertex_stencil import accumulate_vertex_envelope
 
-#: `tol = rel_tol * (nb_max - nb_min) + abs_tol` 里的相对项系数。
-#: 0.1 的含义：解点值要超出邻域区间**10% 的邻域跨度**才算越界。
-DEFAULT_BOUNDS_REL_TOL = 0.1
+from ..vertex_stencil import accumulate_vertex_envelope
 
-#: 绝对地板，按该变量自身单元均值的 RMS 缩放。
-#:
-#: 为什么不能取成噪声量级（1e-9 这类）：`nb_max - nb_min` 只度量**邻居
-#: 单元均值之间**的跨度，它在两类区域里会塌成零——真正均匀的区域，以及
-#: **光滑极值附近**（梯度反向处相邻单元均值近似相等，例如驻点、尾迹
-#: 中心线）。后者是物理上完全正常的光滑解，但此时任何亚单元变化都会
-#: 超出那个塌缩掉的区间。这是 BJ 判据在光滑极值处的经典弱点，标准补丁
-#: （Venkatakrishnan）正是给容差加一个**物理量级**的绝对地板，而不是
-#: 机器精度量级的地板。
-#:
-#: 取 1e-3（场 RMS 的 0.1%）的依据：2026-09-16 在 plate_demo_volume_les
-#: iter 100 上实测的真实越界量是 rho 25%、p 66%、u 12 倍场尺度（见本
-#: 模块文档的表），所以 0.1% 的地板对真实坏单元有约 250 倍余量，同时
-#: 足以让"均值相同、仅有亚单元光滑变化"的区域完全失活。
-#: 首版取 1e-9 时被单元测试当场抓到：一个"每个单元内都有 0.05% 光滑
-#: 变化、但单元均值全相同"的场被标记了**全部**单元。
-DEFAULT_BOUNDS_ABS_FRAC = 1e-3
-
-
-def _scatter_minmax(xp, nb_max, nb_min, idx, values):
-    """`nb_max[idx] = max(nb_max[idx], values)` 与 min 的对偶，**索引可重复**。
-
-    为什么要这个分派层：BJ 判据的邻域包络必须对同一个 owner 单元累积它
-    *全部*面邻居的均值，所以是一次索引重复的散射归约。NumPy 用
-    `np.maximum.at`，CuPy 没有 ufunc.at，对应的是 `cupyx.scatter_max`/
-    `cupyx.scatter_min`（语义完全一致：对重复索引做归约而不是后写覆盖）。
-
-    做成分派层而不是给 GPU 另写一份 `compute_bounds_violation_mask`：这个
-    判据要同时服务 CPU 单机 / CPU MPI / 单 GPU / 多 GPU 四条后端，四份
-    人工同步的副本在本项目已经反复出过"只改了一份"的真实缺陷（见项目
-    记忆 `feedback-prefer-deleting-redundant-code`）。除这三行散射之外，
-    整个判据本来就是纯数组运算，NumPy/CuPy 同名同义。
-
-    Raises:
-        RuntimeError: 传入的是 CuPy 数组但该版本 cupyx 没有 scatter_max/
-            scatter_min。不静默退回逐元素循环——那在 GPU 上是灾难性的
-            性能陷阱，而且会让"判据开着"与"判据实际生效"看起来一样。
-    """
-    if xp is np:
-        np.maximum.at(nb_max, idx, values)
-        np.minimum.at(nb_min, idx, values)
-        return
-    import cupyx
-    smax = getattr(cupyx, "scatter_max", None)
-    smin = getattr(cupyx, "scatter_min", None)
-    if smax is None or smin is None:
-        raise RuntimeError(
-            "BJ 越界判据在 GPU 上需要 cupyx.scatter_max/scatter_min（对重复"
-            "索引做归约的散射），当前 CuPy 版本没有提供。请升级 CuPy——"
-            "不退回逐元素循环：那在 GPU 上是灾难性的性能陷阱。"
-        )
-    smax(nb_max, idx, values)
-    smin(nb_min, idx, values)
+# 档位解析（`AFCFD_TROUBLED_SENSOR`）已拆到 `troubled_sensor_mode.py`
+# （2026-09-19，项目"单文件不超 500 行"规范）。这里 re-export，全仓库
+# `from ...bounds_sensor import resolve_troubled_sensor` 不用改。
+from .constants import DEFAULT_BOUNDS_ABS_FRAC, DEFAULT_BOUNDS_REL_TOL
+from .scatter import _scatter_minmax
 
 
 def compute_bounds_violation_mask(
@@ -497,9 +347,3 @@ def compute_bounds_violation_mask(
         mask = hit if mask is None else (mask | hit)
 
     return mask if mask is not None else xp.zeros(n_cells, dtype=bool)
-
-
-# 档位解析（`AFCFD_TROUBLED_SENSOR`）已拆到 `troubled_sensor_mode.py`
-# （2026-09-19，项目"单文件不超 500 行"规范）。这里 re-export，全仓库
-# `from ...bounds_sensor import resolve_troubled_sensor` 不用改。
-from .troubled_sensor_mode import resolve_troubled_sensor  # noqa: E402,F401

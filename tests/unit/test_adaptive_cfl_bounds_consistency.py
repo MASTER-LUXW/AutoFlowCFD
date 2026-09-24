@@ -387,10 +387,11 @@ class TestConfigLayerCflDefaultsAreConsistent:
         assert (c.cfl_min, c.cfl_init, c.cfl_max) == (0.01, 0.03, 0.5)
 
     def test_api_forwards_cfl_min(self):
-        import inspect
+        from tests.unit._module_source import module_source
 
-        from autoflowcfd import api
-        src = inspect.getsource(api)
+        # `api` 2026-09-24 拆成子包；`inspect.getsource(包)` 只返回
+        # `__init__.py`，而 run_steady 的透传在 `api/solve.py` 里。
+        src = module_source("autoflowcfd.api")
         assert 'kwargs.setdefault("cfl_min", config.cfl_min)' in src
 
     def test_docstring_example_is_not_above_the_stability_limit(self):

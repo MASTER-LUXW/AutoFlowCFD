@@ -314,7 +314,7 @@ class TestSingleBackendDeliversBothTables:
             seen["mir"] = kw.get("bnd_mirror_normal")
             return orig(*a, **kw)
 
-        monkeypatch.setattr(bs, "compute_bounds_violation_mask", spy)
+        patch_pkg_attr(monkeypatch, bs, "compute_bounds_violation_mask", spy)
         ff = build_sensor_gated_filter_func(solver)
         f = _base()
         f[:, :, 3] = 0.3 * z + 0.05

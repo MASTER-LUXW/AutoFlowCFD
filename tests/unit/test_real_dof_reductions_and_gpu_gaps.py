@@ -343,11 +343,12 @@ class TestGpuTurbFilterGate:
 
     def test_both_gpu_paths_are_wired(self):
         """两条 GPU 调用路径都必须真的读了这个开关。"""
-        import inspect
         from autoflowcfd.core.gpu.distributed import gpu_distributed_init
         from autoflowcfd.core.gpu.solver import gpu_solver_io
+        # gpu_distributed_init 2026-09-24 拆成子包；inspect.getsource(包)
+        # 只返回 __init__.py。
         for mod in (gpu_solver_io, gpu_distributed_init):
-            s = inspect.getsource(mod)
+            s = module_source(mod)
             assert "resolve_turb_filter_gate()" in s, mod.__name__
             assert "filter_scalar_field_gated_gpu" in s, mod.__name__
             assert "compute_turb_troubled_mask_gpu" in s, mod.__name__
@@ -559,6 +560,7 @@ class TestDeadCodeRemoved:
         assert not hasattr(DistributedFRSolver, "compute_global_min_dt")
 
     def test_unused_import_dropped(self):
-        import inspect
-        from autoflowcfd.core.mpi import distributed_solver
-        assert "allreduce_min" not in inspect.getsource(distributed_solver)
+        # **否定式**断言，必须拼上全部子模块：distributed_solver 一旦拆成
+        # 子包，inspect.getsource(包) 只返回 __init__.py，这条会静默通过。
+        assert "allreduce_min" not in module_source(
+            "autoflowcfd.core.mpi.distributed_solver")

@@ -110,7 +110,7 @@ class TestAutoFlowCFDAPI:
 
     @patch('autoflowcfd.cli.solve_wall_distance.compute_wall_distance_for_solver')
     @patch('autoflowcfd.grid.high_order.high_order_mesh.HighOrderMesh')
-    @patch('autoflowcfd.api.FRSolver')
+    @patch('autoflowcfd.api.solve.FRSolver')
     def test_run_steady(
         self, mock_solver_class: Mock, mock_mesh_class: Mock, mock_wall_distance: Mock
     ) -> None:
@@ -147,7 +147,7 @@ class TestAutoFlowCFDAPI:
 
     @patch('autoflowcfd.cli.solve_wall_distance.compute_wall_distance_for_solver')
     @patch('autoflowcfd.grid.high_order.high_order_mesh.HighOrderMesh')
-    @patch('autoflowcfd.api.TransientSolver')
+    @patch('autoflowcfd.api.solve.TransientSolver')
     def test_run_transient(
         self, mock_solver_class: Mock, mock_mesh_class: Mock, mock_wall_distance: Mock
     ) -> None:
