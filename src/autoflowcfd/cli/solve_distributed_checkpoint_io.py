@@ -101,9 +101,10 @@ def rebuild_distributed_solver_from_checkpoint(
     target_order = int(metadata.get("target_order", order))
     turbulence_model = metadata.get("turbulence_model", "sst")
     resolved_surface_mesh = surface_mesh or metadata.get("surface_mesh")
-    rho_inf = metadata.get("rho_inf", 1.225)
-    vel_inf = metadata.get("vel_inf", 33.33)
-    p_inf = metadata.get("p_inf", 101325.0)
+    # 来流三要素缺失即报错，不猜 —— 与单机重建共用同一个读取函数
+    from autoflowcfd.cli.solve_checkpoint_io import freestream_from_metadata
+    _fs = freestream_from_metadata(metadata)
+    rho_inf, vel_inf, p_inf = _fs["rho_inf"], _fs["vel_inf"], _fs["p_inf"]
     mu_molecular = metadata.get("mu_molecular", 1.8e-5)
     turbulence_intensity = metadata.get("turbulence_intensity", 0.01)
     viscosity_ratio = metadata.get("viscosity_ratio", 5.0)

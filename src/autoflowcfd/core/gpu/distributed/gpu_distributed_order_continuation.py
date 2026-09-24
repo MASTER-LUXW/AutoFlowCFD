@@ -67,9 +67,6 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
         )
 
     n_local = solver.partition.n_local_cells
-    rho_inf = solver.freestream['rho_inf']
-    vel_inf = solver.freestream['vel_inf']
-    p_inf = solver.freestream['p_inf']
 
     # --- 1. local U / 湍流场：CPU 上插值或重置（不依赖几何重建）---
     new_k_np = new_omega_np = new_nu_t_np = None
@@ -101,13 +98,16 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
                 if old_nu_t_np.shape[1] == old_U_np.shape[1]:
                     new_nu_t_np = _lift(old_nu_t_np)
     else:
+        from autoflowcfd.core.utils.flow_direction import (
+            freestream_conservative_state,
+        )
+
         new_n_sps = (target_p + 1) ** 3
-        gamma = 1.4
-        e = p_inf / ((gamma - 1.0) * rho_inf) + 0.5 * vel_inf ** 2
-        new_U_np = np.zeros((n_local, new_n_sps, 5))
-        new_U_np[:, :, 0] = rho_inf
-        new_U_np[:, :, 1] = rho_inf * vel_inf
-        new_U_np[:, :, 4] = rho_inf * e
+        # 速度方向必须取自 aoa/aos（2026-09-24 修复）：此前这里写死 (vel_inf, 0, 0)，
+        # 而边界 Q_free 用的是正确方向，`--aoa` 非零时初场与边界不一致。
+        # 8 处同类写法已统一到 `freestream_conservative_state`（见其文档）。
+        new_U_np = np.empty((n_local, new_n_sps, 5))
+        new_U_np[:] = freestream_conservative_state(solver.freestream, 5)
 
         if solver.turb_model_gpu is not None:
             k_inf, omega_inf = _set_freestream_turbulence(solver)

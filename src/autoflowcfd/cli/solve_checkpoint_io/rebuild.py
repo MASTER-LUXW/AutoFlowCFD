@@ -11,6 +11,28 @@ import click
 from .restore import restore_solver_state_from_fields
 
 
+def freestream_from_metadata(metadata: dict) -> dict:
+    """checkpoint 元数据里的来流三要素 `{rho_inf, vel_inf, p_inf}`。
+
+    **缺任何一个就报错，不猜**（2026-09-24）。此前两条重建路径（单机、
+    分布式）都写的是 `metadata.get("vel_inf", 33.33)` —— 那是与 CLI 默认值
+    并存的第二份事实来源；checkpoint 若真的缺这个键，按 33.33 重建出来的
+    是**另一个物理算例**，续算会在一个错误的来流上静默跑到底。
+
+    `write_checkpoint` 自 V2.0 最早的提交起就无条件写入这三个键（写入端
+    直接 `solver.freestream["vel_inf"]` 取键），所以真实 checkpoint 都有；
+    缺键只可能来自更早的格式，那种文件本就无法忠实续算，明确报错才对。
+    """
+    missing = [k for k in ("rho_inf", "vel_inf", "p_inf") if k not in metadata]
+    if missing:
+        raise click.ClickException(
+            "checkpoint 元数据缺少来流参数 " + ", ".join(missing)
+            + " —— 无法忠实重建求解器（按默认值猜会得到另一个物理算例，"
+            "续算将在错误的来流上静默进行）。这个 checkpoint 来自早于 "
+            "V2.0 的格式，请从头求解。")
+    return {k: float(metadata[k]) for k in ("rho_inf", "vel_inf", "p_inf")}
+
+
 def rebuild_solver_from_checkpoint(
     checkpoint_path: str,
     backend: Optional[str] = None,
@@ -119,9 +141,8 @@ def rebuild_solver_from_checkpoint(
         backend=target_backend,
         order=order,
         turb_model_name=turbulence_model,
-        rho_inf=metadata.get("rho_inf", 1.225),
-        vel_inf=metadata.get("vel_inf", 33.33),
-        p_inf=metadata.get("p_inf", 101325.0),
+        # 来流三要素缺失即报错，不猜（见 freestream_from_metadata）
+        **freestream_from_metadata(metadata),
         # 攻角/侧滑角必须从 checkpoint 恢复（决定物理解，见 write_checkpoint
         # 同一处说明）。旧 checkpoint 缺这两个键时退化为 0/0，与它们产生
         # 时的真实行为一致。

@@ -295,7 +295,10 @@ class TestSingleBackendDeliversBothTables:
                                  n_prism_cells=_N, face_connectivity=fc),
             ops=SimpleNamespace(filter_prism=ident, filter_tet=ident),
             order=1, current_order=1,
-            freestream={"rho": 1.0, "u": 1.0, "v": 0.0, "w": 0.0, "p": 1.0},
+            # 键名此前全错（"rho"/"u"/"p"），被生产代码的 `.get(k, 兜底)`
+            # 静默吞掉、实际用的是 p_inf=101325。2026-09-24 生产代码改为直接
+            # 取键后才暴露。按作者本意给单位量级。
+            freestream={"rho_inf": 1.0, "vel_inf": 1.0, "p_inf": 1.0},
             boundary_ghost_provider=prov), owner, neigh, bnd, z
 
     def test_both_tables_reach_the_kernel(self, monkeypatch):

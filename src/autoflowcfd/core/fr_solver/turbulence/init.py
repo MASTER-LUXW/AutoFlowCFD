@@ -57,8 +57,14 @@ def _set_freestream_turbulence(solver) -> tuple:
     Returns:
         (k_inf, omega_inf): 来流湍动能和比耗散率
     """
-    vel_inf = solver.freestream.get("vel_inf", 33.33)
-    rho_inf = solver.freestream.get("rho_inf", 1.225)
+    # 直接取键，不给兜底（2026-09-24）：`freestream` 对全部求解器类无条件
+    # 设置，兜底永远不会生效；一旦某条路径真的丢了字段，`.get(k, 33.33)`
+    # 会把缺陷伪装成"用了一个合理的来流"。真实例子：
+    # `test_bounds_sensor_mirror` 一直传着键名全错的
+    # `{"rho": 1.0, "u": 1.0, ...}`，作者想要单位量级，实际用的是兜底的
+    # p_inf=101325 —— 没人发现，因为什么都没报错。
+    vel_inf = solver.freestream["vel_inf"]
+    rho_inf = solver.freestream["rho_inf"]
     mu = getattr(solver, 'mu_molecular', 1.8e-5)
     nu = mu / max(rho_inf, 1e-10)
 
@@ -93,7 +99,8 @@ def _set_turbulence_bounds(solver) -> None:
         return
     if not hasattr(solver.turb_model, 'k_max'):
         return  # 不是 SST 模型，无上界属性
-    vel_inf = solver.freestream.get("vel_inf", 33.33)
+    # 直接取键，理由见 `_set_freestream_turbulence` 同名注释
+    vel_inf = solver.freestream["vel_inf"]
     solver.turb_model.k_max = 0.5 * vel_inf ** 2  # 湍动能 ≤ 平均流动能
     solver.turb_model.omega_max = 1e6  # 保守上界
     logger.debug(

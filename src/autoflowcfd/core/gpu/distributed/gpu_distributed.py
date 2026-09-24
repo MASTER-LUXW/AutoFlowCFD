@@ -530,10 +530,16 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         # halo 交换实时获取（见 compute_inviscid_residual_gpu 文档），
         # 不常驻在 self.U_gpu 里。
         with cp.cuda.Device(device_id):
-            self.U_gpu = cp.zeros((n_local, n_sps, 5), dtype=cp.float64)
-            self.U_gpu[:, :, 0] = rho_inf
-            self.U_gpu[:, :, 1] = rho_inf * vel_inf
-            self.U_gpu[:, :, 4] = p_inf / (1.4 - 1.0) + 0.5 * rho_inf * vel_inf**2
+            from autoflowcfd.core.utils.flow_direction import (
+                freestream_conservative_state,
+            )
+
+            # 速度方向必须取自 aoa/aos（2026-09-24 修复）：此前这里写死 (vel_inf, 0, 0)，
+            # 而边界 Q_free 用的是正确方向，`--aoa` 非零时初场与边界不一致。
+            # 8 处同类写法已统一到 `freestream_conservative_state`（见其文档）。
+            self.U_gpu = cp.empty((n_local, n_sps, 5), dtype=cp.float64)
+            self.U_gpu[:] = cp.asarray(
+                freestream_conservative_state(self.freestream, 5))
 
         # boundary_ghost_provider（#3，2026-08-28）：此前完全没有这个
         # 机制——compute_inviscid_residual_gpu/compute_viscous_residual_gpu

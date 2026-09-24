@@ -177,15 +177,21 @@ class TestReplayRealDivergedRun:
         """结构判据：闸门谓词只出现在放大路径上，绝不影响收缩分支——
         这是"不可能引入模块文档第 5/6 条修掉的反向棘轮"的依据。
         """
-        import inspect
+        from tests.unit._module_source import module_sources
 
-        from autoflowcfd.core.time_integration import adaptive_cfl
-        lines = inspect.getsource(adaptive_cfl).splitlines()
-        hits = [i for i, ln in enumerate(lines)
-                if "_growth_blocked(" in ln and "def _growth_blocked" not in ln]
-        assert len(hits) == 3, (
-            f"闸门调用点应为 grow / crawl / grow_trend 三处，实为 {len(hits)}")
-        for i in hits:
+        # adaptive_cfl 2026-09-24 拆成子包（闸门在 gates.py，调用点分布在
+        # update.py / gates.py）。按"调用点前 12 行"取上下文是位置相关的
+        # 断言，必须**逐个子模块**分开找，拼接后窗口可能跨文件边界。
+        found = []
+        for _name, _src in module_sources(
+                "autoflowcfd.core.time_integration.adaptive_cfl"):
+            _lines = _src.splitlines()
+            found += [(_lines, i) for i, ln in enumerate(_lines)
+                      if "_growth_blocked(" in ln
+                      and "def _growth_blocked" not in ln]
+        assert len(found) == 3, (
+            f"闸门调用点应为 grow / crawl / grow_trend 三处，实为 {len(found)}")
+        for lines, i in found:
             ctx = "\n".join(lines[max(0, i - 12):i + 1])
             assert ("growth_confirm_steps" in ctx
                     or "crawl_confirm_steps" in ctx

@@ -116,6 +116,63 @@ def freestream_velocity(vel_inf: float, aoa_deg: float = 0.0,
     return float(vel_inf) * freestream_direction(aoa_deg, aos_deg)
 
 
+def freestream_conservative_state(freestream: dict, n_vars: int = 5) -> np.ndarray:
+    """均匀自由来流的守恒量向量 (n_vars,)，**速度方向取自 aoa/aos**。
+
+    前 5 个分量是 `[rho, rho*u, rho*v, rho*w, rho*E]`（公式见
+    `core/fr_solver/state.py::uniform_conservative`），其余分量为零
+    —— 与此前各处 `np.zeros(...)` 后只填前 5 列的行为一致（湍流量由
+    各湍流模型自己持有，不在这里给初值）。
+
+    ## 这个函数填的洞（2026-09-24）
+
+    "用自由来流填一个均匀守恒场"此前在 9 处各写一遍，**全部把速度写死
+    成 `(vel_inf, 0, 0)`**：
+
+        core/utils/order_continuation.py                  单机 CPU 降到 P0 重建
+        core/mpi/distributed_order_continuation/rebuild.py      CPU MPI 阶数切换
+        core/gpu/solver/gpu_solver/core.py                单机 GPU **初场**
+        core/gpu/solver/gpu_solver_order_continuation.py   单机 GPU 阶数切换
+        core/gpu/distributed/gpu_distributed.py            多 GPU 传统模式**初场**
+        core/gpu/distributed/gpu_distributed_order_continuation.py   多 GPU 阶数切换
+        core/gpu/distributed/gpu_distributed_fully_distributed/build.py      多 GPU 完全分布式**初场**
+        core/gpu/distributed/gpu_distributed_fully_distributed/redistribute.py  同上，阶数切换
+        core/mpi/distributed_mesh_loader/fully_distributed.py   CPU 完全分布式阶数切换重分发
+
+    而边界条件（`Q_free`，经 `direction_from_freestream`）一直用的是正确
+    方向。于是 `--aoa` 非零时初场与边界不一致 —— `FRSolver.__init__` 里
+    那段注释早就写明这会让第一步吸收一个量级为 `vel_inf*sin(aoa)` 的
+    速度跳跃。**每个目标阶数 >= 2 的全新算例都要经过 Order Continuation
+    的降 P0 重建**（`FRSolver.solve` 里 `self.order >= 2` 才进入），所以
+    单机 CPU 也躲不开：它自己的初场是对的，但随即被那次
+    重建覆盖成零攻角。
+
+    另外其中 4 处带着 `get('vel_inf', 33.33)` 这类魔法兜底值（与 CLI
+    默认值是两份事实来源，缺字段时静默用一个可能与求解器实际来流不同
+    的值）。本函数**不给兜底**：缺 `rho_inf/vel_inf/p_inf` 直接 KeyError。
+    攻角缺省为 0（旧 checkpoint 没有这两个字段，理由见
+    `direction_from_freestream`）。
+
+    Args:
+        freestream: 求解器的 `freestream` 字典（至少含 rho_inf/vel_inf/p_inf）。
+        n_vars: 守恒量个数（>=5）。
+
+    Returns:
+        (n_vars,) float64。`aoa=aos=0` 时与此前的 `(vel_inf, 0, 0)` 写法
+        在动量分量上逐位相同。
+    """
+    from autoflowcfd.core.fr_solver.state import uniform_conservative
+
+    if n_vars < 5:
+        raise ValueError(f"n_vars 至少为 5，收到 {n_vars}")
+    vel = float(freestream["vel_inf"]) * direction_from_freestream(freestream)
+    out = np.zeros(n_vars, dtype=np.float64)
+    out[:5] = uniform_conservative(
+        float(freestream["rho_inf"]), float(vel[0]), float(vel[1]),
+        float(vel[2]), float(freestream["p_inf"]))
+    return out
+
+
 def direction_from_freestream(freestream: dict) -> np.ndarray:
     """从 `solver.freestream` 字典取来流方向，缺字段时退化为 +x。
 

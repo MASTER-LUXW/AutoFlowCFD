@@ -68,13 +68,11 @@ class DistributedFRState:
         `.omega_field`），不放在 `self.U`/`self.Q` 里（`n_vars` 恒为
         5，见 `DistributedFRSolver.__init__`），不需要在这里处理。
         """
-        gamma = 1.4
-        e = p / ((gamma - 1.0) * rho) + 0.5 * (u ** 2 + v ** 2 + w ** 2)
-        self.U[:, :, 0] = rho
-        self.U[:, :, 1] = rho * u
-        self.U[:, :, 2] = rho * v
-        self.U[:, :, 3] = rho * w
-        self.U[:, :, 4] = rho * e
+        from autoflowcfd.core.fr_solver.state import uniform_conservative
+
+        # 公式的唯一事实来源是 `uniform_conservative`（此前本方法与单机
+        # `FRState.initialize_uniform` 各抄一份）
+        self.U[:, :, :5] = uniform_conservative(rho, u, v, w, p)
         self.Q[:, :, 0] = rho
         self.Q[:, :, 1] = u
         self.Q[:, :, 2] = v

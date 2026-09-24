@@ -62,9 +62,15 @@ def _reference_scales(freestream: dict, n_vars: int) -> np.ndarray:
     不是动能项，用 p_inf 而不是 rho_inf*vel_inf^2 更贴近其真实量级，
     避免低马赫数工况下参考值过小、把本来正常的能量残差错误放大）。
     """
-    rho_inf = max(freestream.get("rho_inf", 1.225), 1e-10)
-    vel_inf = max(freestream.get("vel_inf", 33.33), 1e-10)
-    p_inf = max(freestream.get("p_inf", 101325.0), 1e-10)
+    # 直接取键，不给兜底（2026-09-24）：`freestream` 对全部求解器类无条件
+    # 设置，兜底永远不会生效；一旦某条路径真的丢了字段，`.get(k, 33.33)`
+    # 会把缺陷伪装成"用了一个合理的来流"。真实例子：
+    # `test_bounds_sensor_mirror` 一直传着键名全错的
+    # `{"rho": 1.0, "u": 1.0, ...}`，作者想要单位量级，实际用的是兜底的
+    # p_inf=101325 —— 没人发现，因为什么都没报错。
+    rho_inf = max(freestream["rho_inf"], 1e-10)
+    vel_inf = max(freestream["vel_inf"], 1e-10)
+    p_inf = max(freestream["p_inf"], 1e-10)
 
     scales = np.array([
         rho_inf,                 # rho
@@ -93,8 +99,7 @@ def compute_scaled_residuals(dU_dt: np.ndarray, freestream: dict) -> "ResidualDi
     Returns:
         ResidualDiagnostics
     """
-    n_cells, n_sps, n_vars = dU_dt.shape
-    n_per_var = n_cells * n_sps
+    n_vars = dU_dt.shape[2]
 
     rms_per_var = np.sqrt(np.mean(dU_dt.reshape(-1, n_vars).astype(np.float64) ** 2, axis=0))
     scales = _reference_scales(freestream, n_vars)

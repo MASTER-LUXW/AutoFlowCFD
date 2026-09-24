@@ -123,9 +123,12 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     self.state = DistributedFRState(self.partition, n_sps, 5)
 
     freestream_pkg = package['freestream']
-    rho_inf = freestream_pkg.get('rho_inf', 1.225)
-    vel_inf = freestream_pkg.get('vel_inf', 33.33)
-    p_inf = freestream_pkg.get('p_inf', 101325.0)
+    # 不给兜底值（2026-09-24）：package 的 freestream 由
+    # `build_fully_distributed_rank_package` 从 CLI 的 freestream 字典原样
+    # 写入，三个键必然存在；此前 `.get('vel_inf', 33.33)` 这类兜底与 CLI
+    # 默认值是两份事实来源，缺字段时会静默用一个错的来流。
+    rho_inf = freestream_pkg['rho_inf']
+    vel_inf = freestream_pkg['vel_inf']
     # `self.freestream`（含 mach_ref）在"传统模式" `__init__` 里是无条件
     # 设置的（AUSM+up Weiss-Smith 预处理在全部 turb_model_name 下都要
     # 读 `self.freestream["mach_ref"]`，不是只有 SST/DDES/IDDES 才需要
@@ -236,10 +239,16 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     self._init_modal_filter_distributed()
 
     with cp.cuda.Device(device_id):
-        self.U_gpu = cp.zeros((n_local, n_sps, 5), dtype=cp.float64)
-        self.U_gpu[:, :, 0] = rho_inf
-        self.U_gpu[:, :, 1] = rho_inf * vel_inf
-        self.U_gpu[:, :, 4] = p_inf / (1.4 - 1.0) + 0.5 * rho_inf * vel_inf ** 2
+        from autoflowcfd.core.utils.flow_direction import (
+            freestream_conservative_state,
+        )
+
+        # 速度方向必须取自 aoa/aos（2026-09-24 修复）：此前这里写死 (vel_inf, 0, 0)，
+        # 而边界 Q_free 用的是正确方向，`--aoa` 非零时初场与边界不一致。
+        # 8 处同类写法已统一到 `freestream_conservative_state`（见其文档）。
+        self.U_gpu = cp.empty((n_local, n_sps, 5), dtype=cp.float64)
+        self.U_gpu[:] = cp.asarray(
+            freestream_conservative_state(self.freestream, 5))
 
     # boundary_ghost_provider：root 已经用完整全局网格构造好并把
     # group_code 重映射到本 rank 的 compact 索引空间（见

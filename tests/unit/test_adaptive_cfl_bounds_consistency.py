@@ -198,10 +198,11 @@ class TestCflMaxIsRespectedOnEveryPath:
 
     def test_shrink_expression_is_two_sided_in_source(self):
         """结构判据：收缩那一行必须同时出现 min 与 max 的双向钳制。"""
-        import inspect
+        from tests.unit._module_source import module_source
 
-        from autoflowcfd.core.time_integration import adaptive_cfl
-        src = inspect.getsource(adaptive_cfl)
+        # 含**否定式**断言：必须拼上全部子模块（adaptive_cfl 2026-09-24
+        # 拆成子包，收缩分支在 update.py 里）。
+        src = module_source("autoflowcfd.core.time_integration.adaptive_cfl")
         assert "max(self.cfl_number * factor, self.cfl_min)), self.cfl_max" not in src
         # 双向钳制的实际形态（跨行）
         flat = " ".join(src.split())

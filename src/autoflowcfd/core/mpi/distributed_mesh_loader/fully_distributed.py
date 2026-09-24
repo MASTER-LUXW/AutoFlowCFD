@@ -262,11 +262,13 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
     # 共同维护的、对全部 turb_model_name 都存在的通用存储点（见
     # `from_fully_distributed_package` 里的同名赋值、以及本函数末尾
     # "应用新包"一节的同名更新）。
-    freestream = getattr(solver, '_package_freestream', None) or getattr(solver, 'freestream', None) \
-        or {'rho_inf': 1.225, 'vel_inf': 33.33, 'p_inf': 101325.0}
-    rho_inf = freestream.get('rho_inf', 1.225)
-    vel_inf = freestream.get('vel_inf', 33.33)
-    p_inf = freestream.get('p_inf', 101325.0)
+    # 不给兜底（2026-09-24）：此前两个来源都取不到时会静默造一个
+    # `{'rho_inf': 1.225, 'vel_inf': 33.33, 'p_inf': 101325.0}` —— 那是与
+    # 构造函数默认值并存的第二份事实来源，而且会让一个真实的"来流丢失"
+    # 缺陷以"用了一个看似合理的来流"的形式静默通过。`solver.freestream`
+    # 自 2026-09-18 起对全部湍流模型无条件设置（见 distributed_solver/
+    # core.py 同名注释），取不到就是真缺陷，应当直接 AttributeError。
+    freestream = getattr(solver, '_package_freestream', None) or solver.freestream
 
     if target_p > old_order:
         # 延拓算子按基分派（2026-09-20，理由见 `fr/order_interp.py`）
@@ -294,13 +296,16 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
         if getattr(solver, 'sgs_model', None) is not None and hasattr(solver.sgs_model, 'nu_t'):
             solver.sgs_model.nu_t = None
     else:
+        from autoflowcfd.core.utils.flow_direction import (
+            freestream_conservative_state,
+        )
+
         new_n_sps = (target_p + 1) ** 3
-        gamma = 1.4
-        e = p_inf / ((gamma - 1.0) * rho_inf) + 0.5 * vel_inf ** 2
-        new_local_U = np.zeros((n_local, new_n_sps, n_vars))
-        new_local_U[:, :, 0] = rho_inf
-        new_local_U[:, :, 1] = rho_inf * vel_inf
-        new_local_U[:, :, 4] = rho_inf * e
+        # 速度方向必须取自 aoa/aos（2026-09-24 修复）：此前写死 (vel_inf, 0, 0)，
+        # 而边界 Q_free 用的是正确方向。9 处同类写法已统一到
+        # `freestream_conservative_state`（见其文档）。
+        new_local_U = np.empty((n_local, new_n_sps, n_vars))
+        new_local_U[:] = freestream_conservative_state(freestream, n_vars)
 
         if solver.turb_model is not None and hasattr(solver.turb_model, 'k_field'):
             k_inf, omega_inf = _set_freestream_turbulence(solver)

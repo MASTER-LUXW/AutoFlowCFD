@@ -9,6 +9,26 @@ import numpy as np
 from dataclasses import dataclass
 
 
+def uniform_conservative(rho: float, u: float, v: float, w: float,
+                         p: float, gamma: float = 1.4) -> np.ndarray:
+    """均匀流场的守恒量 (5,) = `[rho, rho*u, rho*v, rho*w, rho*E]`。
+
+    **全仓库"均匀原始量 -> 守恒量"的唯一公式**（量热完全气体）。
+
+    为什么要单独立出来（2026-09-24）：此前这个公式在 10 处各写一遍，
+    而且写法不止一种 —— `rho * (p/((g-1)*rho) + 0.5*|v|^2)` 与
+    `p/(g-1) + 0.5*rho*|v|^2` 并存（数学相等、浮点舍入不同）。更要紧的是
+    其中 8 处还把速度写死成 `(vel_inf, 0, 0)`，**攻角/侧滑角被静默丢掉**，
+    见 `core/utils/flow_direction.py::freestream_conservative_state` 文档。
+
+    `rho*E` 的写法与原 `FRState.initialize_uniform` 逐字一致，所以单机
+    CPU 路径（两条黄金轨迹）逐位不变。
+    """
+    e = p / ((gamma - 1.0) * rho) + 0.5 * (u ** 2 + v ** 2 + w ** 2)
+    return np.array([rho, rho * u, rho * v, rho * w, rho * e],
+                    dtype=np.float64)
+
+
 @dataclass
 class SolverResult:
     """求解结果数据类。"""
@@ -58,15 +78,9 @@ class FRState:
             k: 湍动能
             omega: 比耗散率
         """
-        gamma = 1.4
-        e = p / ((gamma - 1.0) * rho) + 0.5 * (u**2 + v**2 + w**2)
-        
-        self.U[:, :, 0] = rho
-        self.U[:, :, 1] = rho * u
-        self.U[:, :, 2] = rho * v
-        self.U[:, :, 3] = rho * w
-        self.U[:, :, 4] = rho * e
-        
+        # 公式的唯一事实来源见模块级 `uniform_conservative`
+        self.U[:, :, :5] = uniform_conservative(rho, u, v, w, p)
+
         if self.n_vars > 5:
             self.U[:, :, 5] = rho * k      # rho_k
             self.U[:, :, 6] = rho * omega  # rho_omega

@@ -56,7 +56,6 @@ set_order` 那样只换个缓存条目。三条后端的重建成本各不相同
 
     p0_residual.py       P0 阶的分布式无粘残差（阶数延拓起点需要它单独一条路径）
     rebuild.py           阶数切换时重建 CPU 传统模式的分区与状态、逐 rank 插值
-    turbulence_reset.py  resume 后湍流场爆掉时的钳制/重置安全网
     run.py               顶层编排：按 phase 推进各阶数
 
 本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
@@ -70,7 +69,10 @@ from .rebuild import (  # noqa: F401
     _rebuild_cpu_traditional_partition_and_state,
     cpu_traditional_interpolate_to_new_order,
 )
-from .turbulence_reset import (  # noqa: F401
+# resume 钳制检测是全部后端共用的**唯一实现**，住在后端中立的
+# `core/utils/order_continuation`（2026-09-24 合并：此前单机内联一份、
+# 这里再写一份）。re-export 让既有导入一字不改。
+from autoflowcfd.core.utils.order_continuation import (  # noqa: F401
     _reset_turbulence_if_resumed_field_exploded,
 )
 from .run import (  # noqa: F401

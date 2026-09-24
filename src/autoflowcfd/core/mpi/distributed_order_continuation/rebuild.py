@@ -232,15 +232,19 @@ def cpu_traditional_interpolate_to_new_order(solver, target_p: int) -> None:
         new_local_U = _interp_state_and_turbulence_local(
             solver, old_order, target_p, n_local)
     else:
-        rho_inf = solver.solver_kwargs.get('rho_inf', 1.225)
-        vel_inf = solver.solver_kwargs.get('vel_inf', 33.33)
-        p_inf = solver.solver_kwargs.get('p_inf', 101325.0)
-        gamma = 1.4
-        e = p_inf / ((gamma - 1.0) * rho_inf) + 0.5 * vel_inf ** 2
-        new_local_U = np.zeros((n_local, new_n_sps, solver.state.n_vars))
-        new_local_U[:, :, 0] = rho_inf
-        new_local_U[:, :, 1] = rho_inf * vel_inf
-        new_local_U[:, :, 4] = rho_inf * e
+        from autoflowcfd.core.utils.flow_direction import (
+            freestream_conservative_state,
+        )
+
+        # 速度方向必须取自 aoa/aos（2026-09-24 修复）：此前这里写死 (vel_inf, 0, 0)，
+        # 而边界 Q_free 用的是正确方向，`--aoa` 非零时初场与边界不一致。
+        # 8 处同类写法已统一到 `freestream_conservative_state`（见其文档）。
+        # 另外此前读的是 `solver_kwargs.get('vel_inf', 33.33)` —— 用户若依赖
+        # 构造函数默认值而没显式传，kwargs 里就没有这个键，于是静默用了一个
+        # 与 `solver.freestream`（求解器实际来流）可能不同的魔法值。
+        new_local_U = np.empty((n_local, new_n_sps, solver.state.n_vars))
+        new_local_U[:] = freestream_conservative_state(
+            solver.freestream, solver.state.n_vars)
 
         if solver.turb_model is not None:
             k_inf, omega_inf = _set_freestream_turbulence(solver)

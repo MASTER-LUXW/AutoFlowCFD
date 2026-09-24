@@ -17,6 +17,7 @@ from .write import (  # noqa: F401
     write_checkpoint,
 )
 from .rebuild import (  # noqa: F401
+    freestream_from_metadata,
     rebuild_solver_from_checkpoint,
 )
 from .restore import (  # noqa: F401
@@ -25,6 +26,7 @@ from .restore import (  # noqa: F401
 )
 
 __all__ = [
+    "freestream_from_metadata",
     "rebuild_solver_from_checkpoint",
     "restore_solver_state_from_fields",
     "restore_state_from_checkpoint",

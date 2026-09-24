@@ -10,7 +10,9 @@ from typing import Optional
 from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
 
 from autoflowcfd.core.mpi import is_root
-from .turbulence_reset import _reset_turbulence_if_resumed_field_exploded
+from autoflowcfd.core.utils.order_continuation import (
+    _reset_turbulence_if_resumed_field_exploded,
+)
 
 
 def run_distributed_order_continuation(
