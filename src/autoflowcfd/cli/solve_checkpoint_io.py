@@ -371,6 +371,26 @@ def restore_solver_state_from_fields(solver, fields: dict, metadata: dict) -> No
                 print("   ⚠️  Checkpoint 缺少 nu_t（旧版本 checkpoint）："
                       "涡粘度从零重新开始，粘性残差可能短暂跳升。")
 
+    # `tau_accum` 恢复（2026-09-24，配套 write_checkpoint 的持久化，见
+    # 那边的完整理由）：`_tau_accum_seeded` 这个标记让 `FRSolver.solve()`
+    # 知道"这次的 tau 不是从零开始的"，从而不把它清掉 —— `solve()` 里那句
+    # `self.tau_accum = None` 的原注释写的是"tau_accum 的语义是本次求解
+    # 调用已推进的伪时间"，那个语义对 resume 接力的长程算例是错的：它要
+    # 回答的是"物理场走了多远"，而物理场是跨 resume 延续的。
+    #
+    # 旧版本 checkpoint 没有这个字段时什么都不做：`solve()` 照旧从零起算，
+    # 与改动前行为完全一致（只是那份 checkpoint 的 tau 信息已经丢了，
+    # 无法追回，不假装有）。
+    if "tau_accum" in fields:
+        _tau = fields["tau_accum"]
+        _n_cells = int(getattr(solver.mesh, "n_cells", 0) or 0)
+        if _n_cells and getattr(_tau, "shape", (0,))[0] != _n_cells:
+            print(f"   ⚠️  Checkpoint tau_accum 长度 {_tau.shape} 与网格单元数 "
+                  f"{_n_cells} 不符，跳过恢复（伪时间预算将从零起算）。")
+        else:
+            solver.tau_accum = _tau
+            solver._tau_accum_seeded = True
+
     # Order Continuation 阶段起始残差恢复（配套 write_checkpoint 的
     # phase_initial_residual 持久化，见该函数文档）：checkpoint 里有就
     # 恢复到 solver 属性上，供 run_order_continuation 在 resume 恢复出的
@@ -520,6 +540,23 @@ def write_checkpoint(
         # 发展的湍流结构，resume 后 nu_t=0 导致粘性应力突变、残差跳升。
         if hasattr(turb_model, "nu_t") and turb_model.nu_t is not None:
             extra_fields["nu_t"] = turb_model.nu_t
+
+    # `tau_accum`（逐单元累计伪时间）持久化（2026-09-24）：与上面 k/omega/
+    # nu_t 同一类 —— resume 会精确恢复物理场、却把这个计数打回 0。
+    #
+    # 它不影响物理解，但它是**唯一**能回答"物理场到底走了多远"的量，而
+    # 残差范数完全不回答这个（`pseudotime_budget.py` 模块文档记录过：
+    # plate_demo 上残差单调下降 350 步、物理场只走完绕板特征时间的 1.8%，
+    # 那次误判追了好几天）。长程算例正常就是靠 `solve resume` 接力跑的，
+    # 计数一重置，这个量恰好在最需要它的场景下失效。
+    #
+    # 真实踩到过（2026-09-24 本次）：做自适应 CFL 闭环 A/B 时，两臂一个
+    # 是原运行、一个是 resume，按"相同迭代步"比较 Cd 得出了"高 CFL 在振荡"
+    # 的结论；改按累计伪时间对齐才发现高 CFL 臂只是多走了 5 倍伪时间，
+    # 结论完全反了。tau 不跨 resume 延续正是那次差点写错的直接原因。
+    _tau = getattr(solver, "tau_accum", None)
+    if _tau is not None:
+        extra_fields["tau_accum"] = _tau
 
     metadata = {
         "input_file": input_file,

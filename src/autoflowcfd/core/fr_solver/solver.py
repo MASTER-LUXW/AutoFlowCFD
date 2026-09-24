@@ -904,10 +904,20 @@ class FRSolver(_SolverGeometryMixin):
         Returns:
             SolverResult: 包含收敛状态、最终残差和迭代次数的结果对象
         """
-        # 每次 solve() 重新开始累计伪时间：`tau_accum` 的语义是"本次求解
-        # 调用已推进的伪时间"。resume 会跨调用延续物理场但不延续这个计数，
-        # 所以打印时始终标注步数（见 `pseudotime_budget.py`）。
-        self.tau_accum = None
+        # 累计伪时间的起点（2026-09-24 更正语义）：`tau_accum` 要回答的是
+        # **物理场走了多远**，而物理场是跨 `solve resume` 延续的 —— 所以
+        # 原来那句"每次 solve() 一律清零"对 resume 接力的长程算例是错的
+        # （长程算例正常就是靠 resume 接力跑）。
+        #
+        # `_tau_accum_seeded` 由 `rebuild_solver_from_checkpoint` 在成功
+        # 从 checkpoint 恢复 tau 之后置上；这里**消费掉**这个标记，于是
+        # 同一个 solver 对象上第二次全新 `solve()` 仍然会正常清零。
+        # 旧版本 checkpoint 没有这个字段时标记不会被置上，行为与改动前
+        # 完全一致。打印时始终标注步数（见 `pseudotime_budget.py`）。
+        if getattr(self, "_tau_accum_seeded", False):
+            self._tau_accum_seeded = False
+        else:
+            self.tau_accum = None
 
         logger_msg = f"Starting solve loop with {self.time_integrator.scheme.value}"
         if self.turb_model_name != "NONE":
