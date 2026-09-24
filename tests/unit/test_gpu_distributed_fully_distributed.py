@@ -44,6 +44,7 @@ import autoflowcfd.core.gpu.distributed.gpu_distributed_fully_distributed as gdf
 import autoflowcfd.core.gpu.array_manager as array_manager_mod
 import autoflowcfd.core.gpu.gpu_face_geometry as gpu_face_geometry_mod
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
+from tests.unit._patch_pkg import patch_pkg_attr
 
 
 class _NumpyAsCupy:
@@ -101,7 +102,10 @@ def gpu_shim(monkeypatch):
     见模块文档"方法论"一节。"""
     shim = _NumpyAsCupy()
     patch_module_get_cupy(monkeypatch, gdfd_mod, shim)
-    monkeypatch.setattr(gdfd_mod, "GPUHaloExchange", _FakeHaloExchange)
+    # `GPUHaloExchange` 由 build.py / redistribute.py 在**顶层**导入，所以
+    # 它进的是这两个子模块的全局；对包对象 setattr 不会改变它们内部的
+    # 引用（`gpu_distributed_fully_distributed` 2026-09-24 拆成了子包）。
+    patch_pkg_attr(monkeypatch, gdfd_mod, "GPUHaloExchange", _FakeHaloExchange)
     monkeypatch.setattr(array_manager_mod, "GPUArrayManager", _FakeArrayManager)
     monkeypatch.setattr(gpu_face_geometry_mod, "build_gpu_flat_face", _fake_build_gpu_flat_face)
     return shim
@@ -223,7 +227,7 @@ class TestBuildFromFullyDistributedPackageNoneTurbulence:
                              device_id=device_id, rank=rank, root_context=root_context)
             return "SENTINEL"
 
-        monkeypatch.setattr(gdfd_mod, "build_multi_gpu_solver_from_fully_distributed_package", _fake_builder)
+        patch_pkg_attr(monkeypatch, gdfd_mod, "build_multi_gpu_solver_from_fully_distributed_package", _fake_builder)
 
         mesh, ops = mesh_and_ops
         package = _build_none_package(mesh, ops)
@@ -263,7 +267,7 @@ class TestBuildFromFullyDistributedPackageSstTurbulence:
                 self.omega_max = None
 
         monkeypatch.setattr(sst_mod, "GPUTurbulenceSST", _FakeGPUTurbulenceSST)
-        monkeypatch.setattr(
+        patch_pkg_attr(monkeypatch, 
             scalar_transport_mod, "compute_wall_dirichlet_mask_gpu",
             lambda compact_mesh_stub, provider: np.zeros(compact_mesh_stub.face_connectivity.n_faces, dtype=bool),
         )

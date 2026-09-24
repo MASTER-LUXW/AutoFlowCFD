@@ -23,6 +23,8 @@
 （密度/总能）同理无操作。
 """
 
+from tests.unit._patch_pkg import patch_pkg_attr
+
 import numpy as np
 import pytest
 
@@ -346,8 +348,13 @@ class TestSingleBackendDeliversBothTables:
             calls["n"] += 1
             return orig(*a, **kw)
 
-        monkeypatch.setattr(bnd_mod, "build_boundary_dirichlet_table",
-                            counting)
+        # 必须连子模块一起换：`boundary` 2026-09-24 拆成子包，真正调用
+        # `build_boundary_dirichlet_table` 的是**同一个子模块**
+        # `boundary/tables.py` 里的 `make_bj_boundary_tables`，它走的是
+        # tables.py 自己的全局，不是包属性。对包 setattr 会**成功**（这个
+        # 名字被 __init__ re-export 了）却完全不起作用 —— 计数恒为 0。
+        patch_pkg_attr(monkeypatch, bnd_mod, "build_boundary_dirichlet_table",
+                       counting)
         ff = build_sensor_gated_filter_func(solver)
         f = _base()
         f[:, :, 3] = 0.3 * z + 0.05

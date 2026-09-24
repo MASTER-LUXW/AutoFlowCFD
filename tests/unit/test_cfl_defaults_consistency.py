@@ -161,19 +161,21 @@ class TestDistributedEntriesForwardCfl:
     到 2026-09-17 才补齐。
     """
 
-    _FILES = [
-        "src/autoflowcfd/cli/solve_steady_command.py",
-        "src/autoflowcfd/cli/solve_transient_distributed.py",
-        "src/autoflowcfd/cli/solve_distributed_checkpoint_io.py",
-        "src/autoflowcfd/cli/solve_checkpoint_io.py",
+    #: 按**模块名**而不是文件路径：本项目把超 500 行的模块陆续拆成子包，
+    #: 硬编码 `.py` 路径在拆包后直接 FileNotFoundError。`module_source`
+    #: 会把包的全部子模块拼进来，新增子模块也不用维护清单。
+    _MODULES = [
+        "autoflowcfd.cli.solve_steady_command",
+        "autoflowcfd.cli.solve_transient_distributed",
+        "autoflowcfd.cli.solve_distributed_checkpoint_io",
+        "autoflowcfd.cli.solve_checkpoint_io",
     ]
 
-    @pytest.mark.parametrize("rel", _FILES)
+    @pytest.mark.parametrize("rel", _MODULES)
     def test_file_passes_all_three(self, rel):
-        import pathlib
+        from tests.unit._module_source import module_source
 
-        root = pathlib.Path(__file__).resolve().parents[2]
-        src = (root / rel).read_text(encoding="utf-8")
+        src = module_source(rel)
         for name in ("cfl_start", "cfl_max", "cfl_min"):
             assert f"{name}=" in src, (
                 f"{rel} 里没有出现 `{name}=` —— 该入口的求解器构造点很可能"

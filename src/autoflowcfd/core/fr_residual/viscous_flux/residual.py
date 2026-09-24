@@ -1,263 +1,28 @@
-"""
-AutoFlowCFD V2.0 - FR 粘性物理通量与界面耦合 (Tier-0 重建版, 对应 S-03)
+"""AutoFlowCFD V2.0 - 粘性残差顶层：体积项 + 界面项 + IP 罚项
 
-牛顿流体应力张量 + 傅里叶热传导的物理通量函数，以及基于真实单元-面连接
-关系的界面耦合（BR1 格式：界面处的原始变量与梯度取相邻单元外插值的平均，
-这是规范文档 3_系统实现方式-算法流程.md §2.3 明确允许的做法——
-"在单元界面处，Θ̂ 取左右单元的平均值（或加权平均值）"）。
-
-取代旧版本 fr_residual_viscous.py 中：
-1. 从未被满足的 `hasattr(mesh,'face_connectivity')` 分支（死代码，从未执行）
-2. 唯一实际执行的 fallback——用**单元内部梯度模长**冒充界面跳跃
-   （`jump_estimate = h_local * |grad_u|`），这不是任何邻居信息，纯粹是
-   同一个单元自己的局部量，物理上不构成"界面耦合"
-3. 体积项用 D_3d 直接当物理导数使用（缺少度量项变换，见
-   core/fr_gradients.py 文档），对本代码库的每个曲边/坍缩坐标单元都是
-   错误导数
-
-正确性通过「均匀常数流场（零梯度）粘性残差应严格为零」验证——牛顿粘性
-应力和热传导对常数场恒为零，这是比自由流场保持性更基础但同样严格的
-判据，见 tests/unit/test_fr_residual_viscous.py。
-
-问题单元保护：`compute_physical_gradient` 用 `inv_jac`（近似正比于
-adj(J)/det(J)）把参考空间导数转成物理梯度，坍缩坐标退化 SP 处 det(J)
-极小，`inv_jac` 对应地极大——梯度本身在这类点先被放大一次，随后
-`residual = div_comp/det(J)`（体积项）与 `correction/det(J)`（界面项）
-在同一个退化 det(J) 上再放大一次，是比无粘残差更严重的*双重*放大（真实
-Couette 合成算例复现：粘性残差 3 步内从 4e-2 量级放大到 1.16e7）。
-
-此前曾仿照无粘那边"先用 det(J)/法向失配几何量预判、按整个单元降阶"的
-机制1/2 实现过一版保护，但发现该判据有两个真实缺陷（见
-fr_troubled_cell.py 模块文档"机制3"一节）：(1) 绝对 det(J) 阈值是照一个
-特定网格的绝对尺度标定的，换个尺度就可能失效（真实复现：det(J) 比阈值
-高 828 倍仍被放大到灾难量级）；(2) 按整个单元降阶，会在网格所有单元
-恰好同一绝对尺度、以至于机制1对*每个*单元都命中时（合成验证网格常见），
-把全网格的粘性物理都拍平成零梯度，等于关掉了粘性扩散本身。
-
-此后改用过机制3（按 (cell,SP,变量) 粒度检测残差量级异常并清零），
-**机制3 也已于 2026-09-19 删除** —— 真实网格消融对照证明它触发了但只把
-残差轨迹改变 ~1e-10 相对量、且不改变发散这个结局，完整依据见
-`fr_residual/inviscid.py` 里那段记录。
-
-所以本函数现在**不对残差做任何异常抑制**：退化单元的对策是网格质量门
-（项目记忆 `industry_practice_degenerate_cell_gcl`），不是运行期限制器。
+从 `src/autoflowcfd/core/fr_residual/viscous_flux.py`(原 560 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
 """
 
 import os
+
 import numpy as np
 
 from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient
+
 from autoflowcfd.core.fr_operators.flux_kernels import (
     resolve_viscous_ip_constant,
 )
+
 from autoflowcfd.core.fr_operators.flux_kernels import viscous_physical_flux_batch
+
 from autoflowcfd.core.fr_operators.volume_contract import (
-    contract_shared_operator_1axis, contract_shared_operator_2axis,
-    compute_adj_j, contravariant_flux_from_metric,
-    OVERINT_CHUNK_CELLS, get_overintegration_context,
+    contract_shared_operator_2axis,
+    compute_adj_j,
+    contravariant_flux_from_metric,
+    get_overintegration_context,
 )
-
-GAMMA = 1.4
-R_AIR = 287.0  # 空气比气体常数 J/(kg*K)
-
-
-def compute_temperature(Q: np.ndarray) -> np.ndarray:
-    """T = p/(rho*R)。"""
-    rho = np.maximum(Q[..., 0], 1e-10)
-    return Q[..., 4] / (rho * R_AIR)
-
-
-def viscous_physical_flux(
-    Q: np.ndarray,
-    grad_vel: np.ndarray,
-    grad_T: np.ndarray,
-    mu: float,
-    Pr: float,
-    mu_t=0.0,
-    Pr_t: float = 0.9,
-) -> np.ndarray:
-    """计算粘性物理通量张量 G_i，与 euler_physical_flux 同样的 (...,3,5) 约定。
-
-    Args:
-        Q: (...,5) 原始变量 (rho,u,v,w,p)
-        grad_vel: (...,3,3) 速度梯度，grad_vel[...,i,j] = d(u_i)/d(x_j)
-        grad_T: (...,3) 温度梯度
-        mu: 分子动力粘度（标量）
-        Pr: 分子普朗特数
-        mu_t: 湍流涡粘度（标量或可广播到 Q.shape[:-1] 的数组），默认0
-            （层流/未提供湍流模型时）。应力张量按 Boussinesq 假设用
-            mu_total=mu+mu_t 统一处理；热传导的湍流贡献用湍流普朗特数
-            Pr_t（标准值0.9，非分子普朗特数）单独换算，两者不能共用同一
-            个 Pr——这是本次修复把湍流涡粘度真正耦合进粘性应力张量
-            （T-01/T-04/T-06）的核心：此前调用方从不传湍流粘度，
-            粘性通量永远只用分子粘度。
-        Pr_t: 湍流普朗特数
-
-    Returns:
-        G: (...,3,5)，G[...,i,:] 是方向 i 的粘性通量向量
-           （质量分量恒为0；动量分量 G[...,i,1+j]=tau_ij；能量分量含粘性功+热传导）
-    """
-    mu_total = mu + mu_t
-    mu_total = mu_total * np.ones(Q.shape[:-1]) if np.isscalar(mu_total) else mu_total
-
-    S = 0.5 * (grad_vel + np.swapaxes(grad_vel, -1, -2))  # (...,3,3)
-    div_u = grad_vel[..., 0, 0] + grad_vel[..., 1, 1] + grad_vel[..., 2, 2]
-    lam = -2.0 / 3.0 * mu_total
-
-    eye3 = np.eye(3)
-    tau = 2.0 * mu_total[..., None, None] * S + lam[..., None, None] * div_u[..., None, None] * eye3  # (...,3,3)
-
-    cp = GAMMA * R_AIR / (GAMMA - 1.0)
-    k_cond = mu * cp / Pr + mu_t * cp / Pr_t
-    q = -k_cond * grad_T if np.isscalar(k_cond) else -k_cond[..., None] * grad_T  # (...,3)
-
-    vel = Q[..., 1:4]  # (...,3)
-    work = np.einsum("...i,...ij->...j", vel, tau)  # work[...,j] = sum_i u_i*tau_ij
-
-    shape = Q.shape[:-1]
-    G = np.zeros(shape + (3, 5))
-    G[..., :, 1:4] = np.swapaxes(tau, -1, -2)  # G[...,i,1+j] = tau[...,j,i] = tau[...,i,j] (对称)
-    G[..., :, 4] = work + q
-    return G
-
-
-def resolve_viscous_overintegration() -> str:
-    """粘性体积项是否走过积分（去混叠）：`AFCFD_VISC_OVERINT = off | on`，
-    **默认 on（2026-09-17 从 off 改）**。
-
-    ## 为什么改默认（实测，平板边界层算例 2304 单元，跑到 400 步的真实
-    ## 粘性梯度状态上求一次粘性残差）
-
-    以 `on` + `AFCFD_OVERINT_ORDER_RULE=3x`（更高的过积分阶数）为参照：
-
-        off @ 2x（原默认）   能量分量相对差 0.632442
-        on  @ 2x（新默认）   能量分量相对差 0.000000   <- 逐位相同
-
-    也就是说**过积分的结果在生产过积分阶数上就已经收敛**（提到 3x 逐位
-    不变），而不过积分的结果差 63%。这是去混叠收敛性的标准签名：`on` 是
-    收敛值，`off` 是被混叠污染的值。
-
-    逐分量看更清楚（off vs on）：
-
-        rho / rho_u / rho_v / rho_w   逐位相同（0.0）
-        rho_E                          相对差 0.632442
-
-    动量分量不变是对的：P1 下常粘度的 `tau = mu*(grad u + grad u^T)` 是
-    逐单元 P0（线性场的导数），乘常数 `adj(J)` 仍是 P0，精确可微分、零
-    混叠。而能量通量含 `u·tau` 与 `k_cond*grad_T`，其中 `u = rho_u/rho`、
-    `T = p/(rho*R)` 都是 Q 的**有理**函数——真实非多项式，必然混叠。
-
-    代价：**整步 +21.4%**（同一算例背靠背实测：`off` 119.7 ms/step、
-    `on` 145.3 ms/step，nx=32、2304 单元、P1、预热 30 步后计时 80 步）。
-
-    （**更正**：首次记录写的是"整步约 +5.3%"，那是把"`compute_viscous_
-    residual` 单次调用的增量 6.4 ms"除以整步耗时得到的——漏了粘性残差
-    每步被 RK 调用 **3 次**。正确的数是直接测整步得到的 +21.4%。）
-
-    这个代价仍然值得付：`on@2x` 与 `on@3x` 逐位相同说明它是**收敛值**，
-    而 `off` 的能量分量差 63%——那是错误而不是"另一种取舍"。
-
-    ## 为什么"off 无所谓"这个前提已经不成立
-
-    原文案写过（如实保留在下面）：legacy 模态滤波器下 `grad_vel` 是机器零
-    （实测胞内 |grad u|/(U/h) = 7.7e-16），粘性体积项几乎只剩边界 IP 罚项。
-    **2026-09-17 把 `AFCFD_FILTER_MODE` 默认从 `legacy` 改成 `sensor`
-    之后**（未被传感器标记的单元等于不滤波），`grad_vel` 在绝大部分域里
-    变成 O(0.08) 的真实量——这一项立刻活跃。所以把它打开是那次默认值改动
-    的**一致性要求**，不是可选的附加项。
-
-    `off` 保留为合法档，供回归对照与逐位复现历史结果。
-
-    ## 以下是原有的动机记录（仍然有效）
-
-    **为什么需要它（2026-09-15）**：去混叠机制
-    （`fr/collapsed_basis.py::build_overintegration_operators` 有完整动机
-    与实测数字——不去混叠的 P2 体积项对解析残差恒为 0 的线性剪切场算出
-    的残差是真值的 43~62 倍）一直**只接在平均流的无粘体积项**上。粘性项
-    完全没有（grep 确认本文件 overint/jacobians_fine 零命中）。
-
-    而粘性通量 `G(Q, grad_vel, grad_T, mu_t)` 里有 `tau = mu_eff*(...)`
-    与 `u·tau`、`k_cond*grad_T` 这些乘积，再乘 `adj(J)`，真实多项式次数
-    远高于 order。
-
-    它此前无所谓的原因**已经消失**：legacy 模态滤波器下 `grad_vel` 是
-    机器零（实测胞内 |grad u|/(U/h)=7.7e-16），粘性体积项几乎只剩边界
-    IP 罚项；一旦真正关掉滤波器（零阶数损失），`grad_vel` 变成 O(0.08)
-    的真实量，这一项立刻活跃。
-
-    与 k/omega 那边不同的是**这里没有"Gamma 自身混叠"那种局限**：本函数
-    手上有 Q/grad_vel/grad_T/mu_t，可以像无粘路径那样在 FINE 点**重新
-    求值非线性通量函数本身**，不是只能插值一个已经组装好的乘积。
-
-    仍然存在的一处上游局限（如实写明）：`grad_vel`/`grad_T` 本身是
-    `compute_physical_gradient` 在 coarse SPs 上算出来的，而那个算子
-    **也没有**去混叠（`adj(J)*D*Q/det(J)` 同样是乘积）。这里把它们精确
-    插值到 FINE 点，去掉的是**通量与度量项这一层**的混叠，梯度自身在
-    coarse 上就带进来的混叠还在。补那一层是独立的一步。
-    """
-    v = os.environ.get("AFCFD_VISC_OVERINT", "on").lower()
-    if v not in ("off", "on"):
-        raise ValueError(
-            f"AFCFD_VISC_OVERINT={v!r} 不是合法取值（off | on）。"
-            f"'off' 是既有行为（体积项直接在 coarse SPs 上微分），"
-            f"'on' 把粘性体积项改走 FINE 点去混叠。")
-    return v
-
-
-def _viscous_volume_overintegrated(Q, grad_vel, grad_T, mu_t_field,
-                                   mu, Pr, Pr_t, oi, n_sps):
-    """粘性体积项 `div(adj(J)*G(Q,grad_vel,grad_T,mu_t))` 的去混叠版，
-    返回 (n_cells, n_sps, 5)。
-
-    链路与 `fr_residual/inviscid.py` 的过积分分支逐项对应：
-      ① Q/grad_vel/grad_T/mu_t 各自精确插值到 FINE 点（各自次数 <= order）；
-      ② 在 FINE 点**重新求值** `viscous_physical_flux_batch`（非线性函数
-         本身在细点求值，不是把 coarse 上的乘积插过去——这正是去混叠的
-         全部内容）；
-      ③ 用解析精确的 FINE 点度量算逆变通量；
-      ④ 用 FINE 网格自己的微分矩阵求散度；
-      ⑤ 精确插值限制回 coarse SPs。
-    """
-    n_cells = Q.shape[0]
-    div_comp = np.zeros((n_cells, n_sps, 5))
-    # 每段自带自己的 n_fine 与已切好的细点度量（2026-09-17）：native
-    # 四面体的过积分细网格轴不再填充到棱柱的 (oo+1)^3 宽度，两段的 n_fine
-    # 不同了。度量按**段内局部**索引切（`i0 = c0 - seg_lo`）——用全局 c0
-    # 去切段内数组会静默取到错误的单元。
-    for (seg_lo, seg_hi, n_fine, det_seg, inv_seg,
-         op_c2f, op_D_fine, op_f2c) in oi["segs"]:
-        for c0 in range(seg_lo, seg_hi, OVERINT_CHUNK_CELLS):
-            c1 = min(c0 + OVERINT_CHUNK_CELLS, seg_hi)
-            nb = c1 - c0
-            i0, i1 = c0 - seg_lo, c1 - seg_lo
-            Q_f = contract_shared_operator_1axis(
-                op_c2f, np.ascontiguousarray(Q[c0:c1]))              # (nb,n_fine,5)
-            gv_f = contract_shared_operator_1axis(
-                op_c2f, np.ascontiguousarray(
-                    grad_vel[c0:c1].reshape(nb, n_sps, 9))).reshape(nb, n_fine, 3, 3)
-            gT_f = contract_shared_operator_1axis(
-                op_c2f, np.ascontiguousarray(grad_T[c0:c1]))         # (nb,n_fine,3)
-            mut_f = contract_shared_operator_1axis(
-                op_c2f, np.ascontiguousarray(
-                    mu_t_field[c0:c1][:, :, None]))[..., 0]          # (nb,n_fine)
-            G_phys_f = viscous_physical_flux_batch(
-                np.ascontiguousarray(Q_f.reshape(-1, 5)),
-                np.ascontiguousarray(gv_f.reshape(-1, 3, 3)),
-                np.ascontiguousarray(gT_f.reshape(-1, 3)),
-                mu, Pr,
-                np.ascontiguousarray(mut_f.reshape(-1)),
-                Pr_t,
-            ).reshape(nb, n_fine, 3, 5)
-            del Q_f, gv_f, gT_f, mut_f
-            G_tilde_f = contravariant_flux_from_metric(
-                np.ascontiguousarray(det_seg[i0:i1]),
-                np.ascontiguousarray(inv_seg[i0:i1]), G_phys_f)
-            del G_phys_f
-            div_f = contract_shared_operator_2axis(op_D_fine, G_tilde_f)
-            del G_tilde_f
-            div_comp[c0:c1] = contract_shared_operator_1axis(op_f2c, div_f)
-            del div_f
-    return div_comp
+from .overintegration import _viscous_volume_overintegrated, resolve_viscous_overintegration
+from .pointwise import compute_temperature
 
 
 def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,

@@ -102,20 +102,22 @@ class TestAllSolveLoopsAreGuarded:
     是个结构性事实，文本检查就足够，且能在新增第六条循环时提醒作者。
     """
 
+    #: 按**模块名**而不是文件路径：本项目把超 500 行的模块陆续拆成子包，
+    #: 硬编码 `.py` 路径在拆包后直接 FileNotFoundError（2026-09-24 真实
+    #: 踩到 distributed_order_continuation 这一项）。
     LOOPS = [
-        'src/autoflowcfd/core/fr_solver/solver.py',
-        'src/autoflowcfd/core/utils/order_continuation.py',
-        'src/autoflowcfd/core/mpi/distributed_order_continuation.py',
-        'src/autoflowcfd/core/gpu/solver/gpu_solver.py',
-        'src/autoflowcfd/core/gpu/distributed/gpu_distributed.py',
+        'autoflowcfd.core.fr_solver.solver',
+        'autoflowcfd.core.utils.order_continuation',
+        'autoflowcfd.core.mpi.distributed_order_continuation',
+        'autoflowcfd.core.gpu.solver.gpu_solver',
+        'autoflowcfd.core.gpu.distributed.gpu_distributed',
     ]
 
     @pytest.mark.parametrize('rel', LOOPS)
     def test_loop_calls_guard(self, rel):
-        import pathlib
+        from tests.unit._module_source import module_source
 
-        root = pathlib.Path(__file__).resolve().parents[2]
-        src = (root / rel).read_text(encoding='utf-8')
+        src = module_source(rel)
         assert 'check_residual_finite(' in src, (
             f"{rel} 的求解循环没有接 check_residual_finite —— 残差变 NaN 后"
             f"会继续迭代并把 NaN 写进 checkpoint"
@@ -133,13 +135,19 @@ class TestAllSolveLoopsAreGuarded:
         开头找首次出现会命中文档而不是调用（第一版判据就踩了这个，
         报了一个不存在的顺序错误）。
         """
-        import pathlib
         import re
 
-        root = pathlib.Path(__file__).resolve().parents[2]
-        src = (root / rel).read_text(encoding='utf-8')
+        from tests.unit._module_source import module_sources
 
-        m = re.search(r'res = (?:self|solver)\.step\(', src)
+        # **逐个子模块**看，而不是拼接后再找：顺序类断言在拼接后没有意义
+        # （拼接顺序是 pkgutil 字母序，与代码语义无关）。先定位到真正含有
+        # 求解循环的那个子模块，再在它内部判顺序。
+        src, m = None, None
+        for _name, _s in module_sources(rel):
+            _m = re.search(r'res = (?:self|solver)\.step\(', _s)
+            if _m is not None:
+                src, m = _s, _m
+                break
         assert m is not None, f'{rel} 里找不到求解循环的残差求值语句'
         body = src[m.start():]
 

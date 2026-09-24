@@ -49,3 +49,24 @@ def module_source(mod, *, recursive=True):
             else:
                 parts.append(inspect.getsource(sub))
     return "\n".join(parts)
+
+def module_sources(mod, *, recursive=True):
+    """`[(限定名, 源码), ...]` —— 模块自身与（递归的）全部子模块，逐个分开。
+
+    用在**顺序类**断言上：`module_source` 把子模块拼成一大段，
+    "A 必须出现在 B 之前"这种判据在拼接后就没有意义了（A 和 B 可能落在
+    两个不同的子模块里，拼接顺序是 `pkgutil` 的字母序，与代码语义无关）。
+    这类断言应当先定位到**真正含有那段逻辑的子模块**，再在它内部判顺序。
+    """
+    if isinstance(mod, str):
+        mod = importlib.import_module(mod)
+    out = [(mod.__name__, inspect.getsource(mod))]
+    path = getattr(mod, "__path__", None)
+    if path is not None:
+        for info in pkgutil.iter_modules(path):
+            sub = importlib.import_module(mod.__name__ + "." + info.name)
+            if info.ispkg and recursive:
+                out.extend(module_sources(sub, recursive=True))
+            else:
+                out.append((sub.__name__, inspect.getsource(sub)))
+    return out

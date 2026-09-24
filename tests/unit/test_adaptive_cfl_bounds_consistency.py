@@ -268,12 +268,14 @@ class TestEveryBackendConstructsAController:
 
     def test_multi_gpu_fully_distributed_builds_a_controller(self):
         """这条路径此前完全没有控制器，会以 CFL=1.0 运行。"""
-        import inspect
+        from tests.unit._module_source import module_source
 
         from autoflowcfd.core.gpu.distributed import (
             gpu_distributed_fully_distributed as fd,
         )
-        src = inspect.getsource(fd)
+        # 这个模块 2026-09-24 拆成子包；`inspect.getsource(包)` 只返回
+        # `__init__.py`，控制器构造点在 `build.py` 里。
+        src = module_source(fd)
         assert 'AdaptiveCFLController' in src
         assert '_cfl_controller' in src
         # 且必须 None 感知地从 package 取三个边界值。判据改成查"取值方式"
@@ -293,7 +295,7 @@ class TestEveryBackendConstructsAController:
 
     def test_all_five_controller_sites_pass_cfl_min(self):
         """五处构造点逐一核对，防止将来新增后端时又漏一处。"""
-        import inspect
+        from tests.unit._module_source import module_source
 
         from autoflowcfd.core.fr_solver import solver as cpu_single
         from autoflowcfd.core.gpu.distributed import gpu_distributed as gpu_multi
@@ -303,7 +305,9 @@ class TestEveryBackendConstructsAController:
         from autoflowcfd.core.gpu.solver import gpu_solver as gpu_single
         from autoflowcfd.core.mpi import distributed_solver as cpu_mpi
         for mod in (cpu_single, gpu_single, gpu_multi, gpu_multi_fd, cpu_mpi):
-            src = inspect.getsource(mod)
+            # 用 module_source：这五个里已经有拆成子包的（gpu_multi_fd），
+            # `inspect.getsource(包)` 只返回 `__init__.py`。
+            src = module_source(mod)
             assert 'AdaptiveCFLController(' in src, mod.__name__
             assert 'cfl_min' in src, f"{mod.__name__} 的控制器构造没有接 cfl_min"
 

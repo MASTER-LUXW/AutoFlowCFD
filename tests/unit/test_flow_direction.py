@@ -183,30 +183,32 @@ class TestAllFiveConsumersUseTheDirection:
     在日志里完全看不出来，只会表现为 Cd/Cl 数值不对。
     """
 
+    #: 按**模块名**而不是文件路径：本项目把超 500 行的模块陆续拆成子包，
+    #: 硬编码 `.py` 路径在拆包后直接 FileNotFoundError。`module_source`
+    #: 会把包的全部子模块拼进来，新增子模块也不用维护清单。
     _CASES = [
-        ("src/autoflowcfd/core/fr_solver/boundary.py",
+        ("autoflowcfd.core.fr_solver.boundary",
          ["direction_from_freestream", "_v_free"],
          "Q_free / SEM 入口方向"),
-        ("src/autoflowcfd/core/fr_solver/solver.py",
+        ("autoflowcfd.core.fr_solver.solver",
          ["freestream_velocity", "aoa_deg"],
          "单机初场 + freestream 字典"),
-        ("src/autoflowcfd/postprocess/fr_coefficients.py",
+        ("autoflowcfd.postprocess.fr_coefficients",
          ["wind_axes", "d_hat", "l_hat", "s_hat"],
          "气动力风轴系分解"),
-        ("src/autoflowcfd/cli/solve_aero_coefficients.py",
+        ("autoflowcfd.cli.solve_aero_coefficients",
          ["direction", "d_component"],
          "参考面积沿来流方向投影"),
-        ("src/autoflowcfd/core/mpi/distributed_solver.py",
+        ("autoflowcfd.core.mpi.distributed_solver",
          ["freestream_velocity", "aoa_deg"],
          "CPU MPI 分布式初场 + freestream 字典"),
     ]
 
     @pytest.mark.parametrize("rel,needles,what", _CASES)
     def test_consumer_uses_direction(self, rel, needles, what):
-        import pathlib
+        from tests.unit._module_source import module_source
 
-        root = pathlib.Path(__file__).resolve().parents[2]
-        src = (root / rel).read_text(encoding="utf-8")
+        src = module_source(rel)
         for needle in needles:
             assert needle in src, (
                 f"{rel}（{what}）里找不到 `{needle}` —— 该处很可能仍在用"
@@ -214,15 +216,20 @@ class TestAllFiveConsumersUseTheDirection:
             )
 
     @pytest.mark.parametrize("rel", [
-        "src/autoflowcfd/core/fr_solver/boundary.py",
-        "src/autoflowcfd/postprocess/fr_coefficients.py",
+        "autoflowcfd.core.fr_solver.boundary",
+        "autoflowcfd.postprocess.fr_coefficients",
     ])
     def test_no_hardcoded_plus_x_freestream_left(self, rel):
-        """这两处的硬编码写法必须已经消失。"""
-        import pathlib
+        """这两处的硬编码写法必须已经消失。
 
-        root = pathlib.Path(__file__).resolve().parents[2]
-        src = (root / rel).read_text(encoding="utf-8")
+        注意这是**否定式**断言：若按包的 `__init__`
+        或不存在的文件路径取源码，它会错误地
+        “通过”（字符串只是搬到了子模块），比没有
+        测试更糟。所以用 `module_source` 拼全部子模块。
+        """
+        from tests.unit._module_source import module_source
+
+        src = module_source(rel)
         for banned in ("Q_free = [rho_inf, vel_inf, 0.0, 0.0, p_inf]",
                        "Cd = float(force_total[0] / denom)"):
             assert banned not in src, (

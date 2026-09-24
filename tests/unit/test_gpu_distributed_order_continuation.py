@@ -27,6 +27,8 @@ import types
 
 import numpy as np
 import pytest
+
+from tests.unit._patch_pkg import patch_pkg_attr
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 
 
@@ -136,7 +138,7 @@ class TestGpuInterpolateToNewOrderCoreMath:
             if hasattr(gpu_oc_module, "build_distributed_partition") else None
 
         import autoflowcfd.core.mpi.partition as partition_mod
-        monkeypatch.setattr(partition_mod, "build_distributed_partition", lambda *a, **k: new_partition)
+        patch_pkg_attr(monkeypatch, partition_mod, "build_distributed_partition", lambda *a, **k: new_partition)
 
         def _init_face_geometry(self):
             self.dist_flat_face = types.SimpleNamespace(
@@ -161,7 +163,7 @@ class TestGpuInterpolateToNewOrderCoreMath:
         class _FakeOps:
             D_3d = np.zeros((8, 8))
         import autoflowcfd.fr.operators as ops_mod
-        monkeypatch.setattr(ops_mod, "generate_fr_operators", lambda order, **k: _FakeOps())
+        patch_pkg_attr(monkeypatch, ops_mod, "generate_fr_operators", lambda order, **k: _FakeOps())
 
         class _FakeHalo:
             def __init__(self, *a, **k):
@@ -205,7 +207,7 @@ class TestGpuInterpolateToNewOrderCoreMath:
 
         new_partition = types.SimpleNamespace(n_local_cells=n_local, n_halo=0, n_total_cells=n_local, local_faces=np.array([], dtype=np.int64))
         import autoflowcfd.core.mpi.partition as partition_mod
-        monkeypatch.setattr(partition_mod, "build_distributed_partition", lambda *a, **k: new_partition)
+        patch_pkg_attr(monkeypatch, partition_mod, "build_distributed_partition", lambda *a, **k: new_partition)
 
         def _init_face_geometry(self):
             self.dist_flat_face = types.SimpleNamespace(
@@ -230,7 +232,7 @@ class TestGpuInterpolateToNewOrderCoreMath:
         class _FakeOps:
             D_3d = np.zeros((1, 1))
         import autoflowcfd.fr.operators as ops_mod
-        monkeypatch.setattr(ops_mod, "generate_fr_operators", lambda order, **k: _FakeOps())
+        patch_pkg_attr(monkeypatch, ops_mod, "generate_fr_operators", lambda order, **k: _FakeOps())
 
         class _FakeHalo:
             def __init__(self, *a, **k):

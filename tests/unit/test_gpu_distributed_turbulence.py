@@ -31,6 +31,8 @@ import types
 import numpy as np
 import pytest
 
+from tests.unit._patch_pkg import patch_pkg_attr
+
 from autoflowcfd.fr.operators import generate_fr_operators
 from autoflowcfd.core.mpi.partition import build_distributed_partition
 from autoflowcfd.core.mpi.distributed_flat_face import build_distributed_flat_face
@@ -540,7 +542,7 @@ class TestWmlesDistributedGpu:
 
         # 与本次改动无关的 GPU 粘性通量核返回全零，隔离出 WMLES 修正项
         # 本身（该核函数本次未改动，不是要重新验证的对象）。
-        monkeypatch.setattr(
+        patch_pkg_attr(monkeypatch, 
             gpu_viscous_mod, "compute_viscous_residual_fr_gpu",
             lambda *a, **k: np.zeros((len(compact_global_ids), n_sps, 5)),
         )

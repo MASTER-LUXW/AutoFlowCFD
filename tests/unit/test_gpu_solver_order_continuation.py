@@ -38,6 +38,8 @@ crosscheck 测试恒用 `tet_basis_mode="native"`），修复它需要审计
 
 import numpy as np
 import pytest
+
+from tests.unit._patch_pkg import patch_pkg_attr
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 
 
@@ -126,7 +128,7 @@ def _patch_gpu_modules(monkeypatch):
     patch_module_get_cupy(monkeypatch, [core_gpu_mod] + mods, shim)
     # `gpu_available` 是各类 __init__ 单独检查的模块级标志，与 get_cupy
     # 无关，仍需逐模块 patch。
-    monkeypatch.setattr(core_gpu_mod, "gpu_available", True)
+    patch_pkg_attr(monkeypatch, core_gpu_mod, "gpu_available", True)
     for m in mods:
         if hasattr(m, "gpu_available"):
             monkeypatch.setattr(m, "gpu_available", True)

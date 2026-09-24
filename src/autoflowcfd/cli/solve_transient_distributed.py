@@ -57,6 +57,12 @@ def _solve_transient_distributed(
             n_ranks, gpu_device, surface_mesh, skip_quality_check, checkpoint_interval,
             phase_max_iter, residual_drop_threshold, init_checkpoint,
             fully_distributed,
+            # 真实缺陷（2026-09-24）：这五个此前完全没转发。aoa/aos 在被
+            # 调函数体里就在用（freestream 字典），所以这条 CLI 路径
+            # **100% 必现 NameError**；三个 CFL 边界则是被静默丢弃
+            # （`solve steady` 的四处已于 2026-09-15 补齐，这两条漏了）。
+            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            aoa_deg=aoa_deg, aos_deg=aos_deg,
         )
         return
 
@@ -68,6 +74,9 @@ def _solve_transient_distributed(
             turbulence_intensity, viscosity_ratio, mu_molecular, rho_inf, vel_inf, p_inf,
             n_ranks, checkpoint_interval, phase_max_iter, residual_drop_threshold,
             init_checkpoint,
+            # 同上：此前五个参数全没转发（见 multi_gpu 分支处注释）。
+            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            aoa_deg=aoa_deg, aos_deg=aos_deg,
         )
         return
 
@@ -198,6 +207,8 @@ def _solve_transient_fully_distributed(
     n_ranks, checkpoint_interval,
     phase_max_iter=None, residual_drop_threshold=100.0,
     init_checkpoint=None,
+    cfl_start=None, cfl_max=None, cfl_min=None,
+    aoa_deg=0.0, aos_deg=0.0,
 ):
     """"完全分布式加载"：只有 root rank 加载完整网格（与 `solve steady`
     的 `if fully_distributed:` 分支同一套构造方式）。DUAL_TIME
@@ -230,6 +241,10 @@ def _solve_transient_fully_distributed(
         turb_model_name=turbulence_model.upper(),
         turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
         time_scheme=time_scheme, dual_time_inner_iter=dual_time_inner_iter,
+        # 三个 CFL 边界靠 package 传到各 rank（见
+        # `build_fully_distributed_rank_package`）；不传就静默退回控制器
+        # 默认值，与 `solve steady` 的同名构造点脱节。
+        cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
     )
     solver = DistributedFRSolver.from_fully_distributed_package(
         package, n_ranks=n_ranks, root_context=root_context,
@@ -291,6 +306,8 @@ def _solve_transient_multi_gpu(
     phase_max_iter=None, residual_drop_threshold=100.0,
     init_checkpoint=None,
     fully_distributed=False,
+    cfl_start=None, cfl_max=None, cfl_min=None,
+    aoa_deg=0.0, aos_deg=0.0,
 ):
     """多 GPU + MPI 分布式（与 `solve steady` 的 `--multi-gpu` 分支同一套
     构造方式）。`fully_distributed`（#1，2026-09-02 补齐）：走
@@ -334,6 +351,7 @@ def _solve_transient_multi_gpu(
             turb_model_name=turbulence_model.upper(),
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
             time_scheme=time_scheme, dual_time_inner_iter=dual_time_inner_iter,
+            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
         )
         solver = MultiGPUDistributedSolver.from_fully_distributed_package(
             package, n_ranks=n_ranks, device_id=gpu_device, root_context=root_context,
@@ -352,6 +370,11 @@ def _solve_transient_multi_gpu(
             mu_molecular=mu_molecular, rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
             turb_model=turbulence_model.upper(), time_scheme=time_scheme_str,
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
+            # 与 `solve steady --multi-gpu` 构造点逐项对齐（2026-09-24）：
+            # 攻角/侧滑角与三个 CFL 边界此前在这条瞬态路径上完全没传 ——
+            # 前者让初场恒为零攻角，后者让用户设的 CFL 被静默丢弃。
+            aoa_deg=aoa_deg, aos_deg=aos_deg,
+            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
         )
     solver.time_integrator.dual_time_steps = dual_time_inner_iter
 

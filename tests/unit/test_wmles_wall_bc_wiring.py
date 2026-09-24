@@ -44,8 +44,12 @@ def _build_provider(wmles_model):
     solver = _FakeSolver(wmles_model)
     group_code = np.array([0, 0, -1, -1], dtype=np.int32)
     name_to_code = {"wall_group": 0}
+    # patch 目标必须是**真正持有调用点**的子模块：`boundary` 2026-09-24
+    # 拆成子包，调用点在 `boundary/ghost.py` 里。patch 包属性不会改变子模块
+    # 内部的调用 —— 那样 patch 静默失效而测试照样"通过"
+    # （ProjectFiles/V2.0/29 三·五 (3)）。
     with patch(
-        "autoflowcfd.core.fr_solver.boundary.tag_boundary_groups_for_mesh",
+        "autoflowcfd.core.fr_solver.boundary.ghost.tag_boundary_groups_for_mesh",
         return_value=(group_code, name_to_code),
     ):
         return build_boundary_ghost_provider(solver, bc_overrides={})
