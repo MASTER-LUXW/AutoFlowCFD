@@ -10,8 +10,6 @@
 import os
 
 
-
-
 #: 目前实现了 `sensor` 档的后端。`legacy`/`off`/`mild`/`project` 四档
 #: **不需要**出现在这里——它们是在算子构造期改 `ops.filter_prism`/
 #: `filter_tet` 本身（见 fr/modal_filter.py 的模块级常量），因此对全部

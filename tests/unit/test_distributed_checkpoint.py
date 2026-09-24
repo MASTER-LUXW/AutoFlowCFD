@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 import numpy as np
+from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 
 
 class TestDistributedCheckpointImport:
@@ -152,7 +153,7 @@ class TestGpuDistributedCheckpointRoundtrip:
         from autoflowcfd.core.gpu.distributed.gpu_distributed import MultiGPUDistributedSolver
 
         shim = _NumpyAsCupy()
-        monkeypatch.setattr(gdi_mod, "get_cupy", lambda: shim)
+        patch_module_get_cupy(monkeypatch, gdi_mod, shim)
 
         solver = self._build_fake_solver(tmp_path)
         U_gpu_original = solver.U_gpu.copy()

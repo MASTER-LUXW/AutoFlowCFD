@@ -27,6 +27,7 @@ import types
 
 import numpy as np
 import pytest
+from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 
 
 class _NumpyAsCupy:
@@ -56,7 +57,7 @@ def gpu_oc_module(monkeypatch):
     # `gpu_interpolate_to_new_order` 内部用 `from autoflowcfd.core.gpu
     # import get_cupy`（函数内延迟导入，每次调用都重新从源模块取），
     # patch 源模块的属性即可，本模块自身不持有这个名字。
-    monkeypatch.setattr(core_gpu_mod, "get_cupy", lambda: shim)
+    patch_module_get_cupy(monkeypatch, core_gpu_mod, shim)
     return mod
 
 

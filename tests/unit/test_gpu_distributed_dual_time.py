@@ -24,6 +24,7 @@ import pytest
 import autoflowcfd.core.gpu.distributed.gpu_distributed as gd_mod
 import autoflowcfd.core.gpu.gpu_time_integration_dual as gtid_mod
 import autoflowcfd.core.gpu.gpu_time_integration as gti_mod
+from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 
 
 class _NumpyAsCupy:
@@ -37,9 +38,9 @@ class _NumpyAsCupy:
 @pytest.fixture(autouse=True)
 def _patch_get_cupy(monkeypatch):
     shim = _NumpyAsCupy()
-    monkeypatch.setattr(gd_mod, "get_cupy", lambda: shim)
-    monkeypatch.setattr(gtid_mod, "get_cupy", lambda: shim)
-    monkeypatch.setattr(gti_mod, "get_cupy", lambda: shim)
+    patch_module_get_cupy(monkeypatch, gd_mod, shim)
+    patch_module_get_cupy(monkeypatch, gtid_mod, shim)
+    patch_module_get_cupy(monkeypatch, gti_mod, shim)
 
 
 def _make_target(n_local, n_sps, rng):

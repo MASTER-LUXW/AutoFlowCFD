@@ -16,7 +16,6 @@ from typing import Tuple
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 
 
-
 def _compute_wall_dirichlet_face_mask(solver) -> np.ndarray:
     """算出哪些面是**真实无滑移**WALL 边界面，供 k 场的 Dirichlet-zero
     ghost 及 omega 壁面解析式（Wilcox omega wall function）使用（见

@@ -44,6 +44,7 @@ inviscid_interface_crosscheck.py` 等既有 crosscheck 测试全部
 
 import numpy as np
 import pytest
+from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 
 
 class _NumpyAsCupy:
@@ -59,8 +60,8 @@ def _patch_get_cupy(monkeypatch):
     shim = _NumpyAsCupy()
     import autoflowcfd.core.gpu as core_gpu_mod
     import autoflowcfd.core.gpu.residual.gpu_flux as gpu_flux_mod
-    monkeypatch.setattr(core_gpu_mod, "get_cupy", lambda: shim)
-    monkeypatch.setattr(gpu_flux_mod, "get_cupy", lambda: shim)
+    patch_module_get_cupy(monkeypatch, core_gpu_mod, shim)
+    patch_module_get_cupy(monkeypatch, gpu_flux_mod, shim)
 
 
 def _make_batch(shape_extra, rng):

@@ -28,11 +28,14 @@ GPU 侧的两节用与 `test_gpu_scalar_transport.py` 同一个手法：把
 import numpy as np
 import pytest
 
+from tests.unit._module_source import module_source
+
 from autoflowcfd.fr.native_padding import (
     native_tet_n_real_sps,
     reduce_per_cell_over_real_sps,
     reduce_rows_over_real_sps,
 )
+from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 
 
 class _NumpyAsCupy:
@@ -180,58 +183,35 @@ class TestRealDofReductionCallSitesAreWired:
     由上面 `TestRealDofReductionHelpers` 保证。
     """
 
-    def _src(self, mod):
-        """取模块源码；**若传的是包，则拼接它全部子模块的源码**。
-
-        为什么必须这样（2026-09-24，第 4 次踩到同一个坑）：本项目把超
-        500 行的模块陆续拆成子包，而 `inspect.getsource(package)` 只返回
-        `__init__.py`。于是形如 `assert "xxx" not in src` 的断言会在拆包
-        之后**静默通过** —— 字符串只是搬到了子模块，并不是真的不存在。
-        `assert "xxx" in src` 那半边会直接失败、能被发现；`not in` 那半边
-        不会，比没有测试更糟。
-        """
-        import inspect
-        import pkgutil
-        import importlib
-
-        src = inspect.getsource(mod)
-        if getattr(mod, "__path__", None) is None:
-            return src
-        parts = [src]
-        for info in pkgutil.iter_modules(mod.__path__):
-            sub = importlib.import_module(f"{mod.__name__}.{info.name}")
-            parts.append(inspect.getsource(sub))
-        return chr(10).join(parts)
-
     def test_artificial_viscosity_rho_and_vel_scale(self):
         # 读**真正含有调用点**的那个子模块：人工粘性模块 2026-09-20 拆成
         # 子包，包 `__init__` 只 re-export，源文本里没有调用点。
         from autoflowcfd.core.fr_operators.artificial_viscosity import (
             viscosity as av,
         )
-        s = self._src(av)
+        s = module_source(av)
         assert "reduce_per_cell_over_real_sps(rho, n_prism, order, 'mean')" in s
         assert "reduce_per_cell_over_real_sps(vel_mag, n_prism, order, 'mean')" in s
         assert "rho.mean(axis=1)" not in s
 
     def test_turbulence_transport_rho_owner(self):
         from autoflowcfd.core.turbulence import transport
-        s = self._src(transport)
+        s = module_source(transport)
         assert "reduce_rows_over_real_sps(" in s
         assert "rho[owner_cells].mean(axis=1)" not in s
 
     def test_gpu_scalar_transport_rho_owner(self):
         from autoflowcfd.core.gpu.turbulence import gpu_scalar_transport as gst
-        s = self._src(gst)
+        s = module_source(gst)
         assert "reduce_rows_over_real_sps(" in s
 
     def test_checkpoint_cell_average_both_sites(self):
         from autoflowcfd.cli import solve_checkpoint_io
         from autoflowcfd.core.mpi import distributed_checkpoint
-        s1 = self._src(solve_checkpoint_io)
+        s1 = module_source(solve_checkpoint_io)
         assert "reduce_per_cell_over_real_sps(" in s1
         assert "solver.state.U.mean(axis=1)" not in s1
-        s2 = self._src(distributed_checkpoint)
+        s2 = module_source(distributed_checkpoint)
         assert "reduce_per_cell_over_real_sps(" in s2
         # 完全分布式模式下拿不到全局棱柱数，退回全场平均是**显式记录**的
         # 有界失真，不是静默兜底——判据是那段说明必须在源码里，且必须说明
@@ -251,7 +231,7 @@ class TestRealDofReductionCallSitesAreWired:
         from autoflowcfd.core.gpu.distributed import gpu_distributed
         from autoflowcfd.core.gpu.solver import gpu_solver
         for mod in (gpu_solver, gpu_distributed):
-            s = self._src(mod)
+            s = module_source(mod)
             assert "reduce_per_cell_over_real_sps(" in s, mod.__name__
             assert "cp.min(dt_all_sps, axis=1)" not in s, mod.__name__
             assert "cp.min(dt_all, axis=1)" not in s, mod.__name__
@@ -276,8 +256,8 @@ class TestGpuTurbFilterGate:
         import autoflowcfd.core.gpu.gpu_modal_filter as gmf
         import autoflowcfd.core.gpu.gpu_troubled_cell as gtc
         shim = _NumpyAsCupy()
-        monkeypatch.setattr(gmf, "get_cupy", lambda: shim)
-        monkeypatch.setattr(gtc, "get_cupy", lambda: shim)
+        patch_module_get_cupy(monkeypatch, gmf, shim)
+        patch_module_get_cupy(monkeypatch, gtc, shim)
         gtc._gpu_sensor_cache.clear()
 
     @pytest.fixture
@@ -419,9 +399,9 @@ class TestGpuViscousOverintegration:
         import autoflowcfd.core.gpu.residual.gpu_viscous as gv
         import autoflowcfd.core.gpu.residual.gpu_volume_contract as gvc
         shim = _NumpyAsCupy()
-        monkeypatch.setattr(gv, "get_cupy", lambda: shim)
-        monkeypatch.setattr(gvc, "get_cupy", lambda: shim)
-        monkeypatch.setattr(gpu_flux_mod, "get_cupy", lambda: shim)
+        patch_module_get_cupy(monkeypatch, gv, shim)
+        patch_module_get_cupy(monkeypatch, gvc, shim)
+        patch_module_get_cupy(monkeypatch, gpu_flux_mod, shim)
 
         mesh, ops, oi, Q, grad_vel, grad_T, mu_t = case
         n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
@@ -500,9 +480,8 @@ class TestGpuViscousOverintegration:
         assert not np.allclose(fine, coarse, rtol=1e-6)
 
     def test_switch_is_read_in_gpu_path(self):
-        import inspect
         from autoflowcfd.core.gpu.residual import gpu_viscous
-        s = inspect.getsource(gpu_viscous)
+        s = module_source(gpu_viscous)
         assert "resolve_viscous_overintegration()" in s
         assert "_viscous_volume_overintegrated_gpu(" in s
 

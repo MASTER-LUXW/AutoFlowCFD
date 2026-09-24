@@ -55,6 +55,7 @@ import autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst as gpu_turbulence_sst_
 import autoflowcfd.core.gpu.turbulence.gpu_turbulence_des as gpu_turbulence_des_mod
 import autoflowcfd.core.gpu.turbulence.gpu_sgs as gpu_sgs_mod
 import autoflowcfd.core.gpu.gpu_modal_filter as gpu_modal_filter_mod
+from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 
 
 class _NumpyAsCupy:
@@ -88,10 +89,10 @@ class _NumpyAsCupy:
 @pytest.fixture(autouse=True)
 def _patch_get_cupy(monkeypatch):
     shim = _NumpyAsCupy()
-    for mod in (gdi_mod, gd_mod, gpu_gradients_mod, gpu_volume_contract_mod, gpu_flux_mod,
-                gst_mod, gpu_turbulence_sst_mod, gpu_turbulence_des_mod, gpu_sgs_mod,
-                gpu_modal_filter_mod):
-        monkeypatch.setattr(mod, "get_cupy", lambda: shim)
+    patch_module_get_cupy(monkeypatch, [
+        gdi_mod, gd_mod, gpu_gradients_mod, gpu_volume_contract_mod, gpu_flux_mod,
+        gst_mod, gpu_turbulence_sst_mod, gpu_turbulence_des_mod, gpu_sgs_mod,
+        gpu_modal_filter_mod], shim)
     # `GPUTurbulenceSST.__init__`/`GPUDDESModel.__init__`/`GPUWALEModel.
     # __init__` 单独检查模块级 `gpu_available` 标志（与 `get_cupy()` 是
     # 否被换成替身无关），本机没有真实 CuPy 时恒为 False，需要一并

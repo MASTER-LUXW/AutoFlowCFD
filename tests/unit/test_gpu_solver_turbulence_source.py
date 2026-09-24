@@ -53,6 +53,7 @@ import autoflowcfd.core.gpu.turbulence.gpu_scalar_transport as gst_mod
 import autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst as gpu_turbulence_sst_mod
 import autoflowcfd.core.gpu.turbulence.gpu_turbulence_des as gpu_turbulence_des_mod
 import autoflowcfd.core.gpu.gpu_modal_filter as gpu_modal_filter_mod
+from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 
 
 class _NumpyAsCupy:
@@ -80,10 +81,10 @@ class _NumpyAsCupy:
 @pytest.fixture(autouse=True)
 def _patch_get_cupy(monkeypatch):
     shim = _NumpyAsCupy()
-    for mod in (gpu_solver_io_mod, gpu_solver_mod, gpu_gradients_mod, gpu_volume_contract_mod,
-                gpu_flux_mod, gst_mod, gpu_turbulence_sst_mod, gpu_turbulence_des_mod,
-                gpu_modal_filter_mod):
-        monkeypatch.setattr(mod, "get_cupy", lambda: shim)
+    patch_module_get_cupy(monkeypatch, [
+        gpu_solver_io_mod, gpu_solver_mod, gpu_gradients_mod, gpu_volume_contract_mod,
+        gpu_flux_mod, gst_mod, gpu_turbulence_sst_mod, gpu_turbulence_des_mod,
+        gpu_modal_filter_mod], shim)
     monkeypatch.setattr(gpu_turbulence_sst_mod, "gpu_available", True)
     monkeypatch.setattr(gpu_turbulence_des_mod, "gpu_available", True)
 

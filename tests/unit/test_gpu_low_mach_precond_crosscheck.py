@@ -25,6 +25,7 @@ from autoflowcfd.core.utils.preconditioning import (
     preconditioned_sound_speed,
     _precond_beta2,
 )
+from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 
 GAMMA = 1.4
 
@@ -38,7 +39,7 @@ def _u_from_primitive(rho, u, v, w, p):
 def _gpu_module_with_numpy(monkeypatch):
     """把 GPU 模块的 `get_cupy` 替身成 numpy，返回该模块。"""
     import autoflowcfd.core.gpu.gpu_preconditioning as gm
-    monkeypatch.setattr(gm, "get_cupy", lambda: np)
+    patch_module_get_cupy(monkeypatch, gm, np)
     return gm
 
 

@@ -19,14 +19,15 @@ import autoflowcfd.core.gpu.turbulence.gpu_sgs as gpu_sgs_mod
 import autoflowcfd.core.gpu.turbulence.gpu_turbulence_des as gpu_des_mod
 from autoflowcfd.core.gpu.turbulence.gpu_sgs import GPUWALEModel
 from autoflowcfd.core.gpu.turbulence.gpu_turbulence_des import GPUDDESModel, GPUIDDESModel
+from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 
 
 @pytest.fixture(autouse=True)
 def _patch_get_cupy(monkeypatch):
     monkeypatch.setattr(gpu_sgs_mod, "gpu_available", True)
-    monkeypatch.setattr(gpu_sgs_mod, "get_cupy", lambda: np)
+    patch_module_get_cupy(monkeypatch, gpu_sgs_mod, np)
     monkeypatch.setattr(gpu_des_mod, "gpu_available", True)
-    monkeypatch.setattr(gpu_des_mod, "get_cupy", lambda: np)
+    patch_module_get_cupy(monkeypatch, gpu_des_mod, np)
 
 
 def _random_grad_u(rng, n_cells, n_sps):

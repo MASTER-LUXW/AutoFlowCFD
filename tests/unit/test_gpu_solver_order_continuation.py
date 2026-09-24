@@ -38,6 +38,7 @@ crosscheck 测试恒用 `tet_basis_mode="native"`），修复它需要审计
 
 import numpy as np
 import pytest
+from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 
 
 class _NumpyAsCupy:
@@ -120,11 +121,13 @@ def _patch_gpu_modules(monkeypatch):
         gpu_flux_mod, gst_mod, gpu_turbulence_sst_mod, array_mgr_mod, gti_mod, gfg_mod,
         gpu_inviscid_mod, gpu_viscous_mod, gmf_mod,
     ]
-    monkeypatch.setattr(core_gpu_mod, "get_cupy", lambda: shim)
+    # get_cupy 一次性整批替换（含各包的子模块）；断言是聚合的，所以
+    # `mods` 里含 gpu_inviscid_volume 这类本就没有 get_cupy 的模块无妨。
+    patch_module_get_cupy(monkeypatch, [core_gpu_mod] + mods, shim)
+    # `gpu_available` 是各类 __init__ 单独检查的模块级标志，与 get_cupy
+    # 无关，仍需逐模块 patch。
     monkeypatch.setattr(core_gpu_mod, "gpu_available", True)
     for m in mods:
-        if hasattr(m, "get_cupy"):
-            monkeypatch.setattr(m, "get_cupy", lambda: shim)
         if hasattr(m, "gpu_available"):
             monkeypatch.setattr(m, "gpu_available", True)
 

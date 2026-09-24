@@ -11,7 +11,6 @@ import numpy as np
 from loguru import logger
 
 
-
 def build_distributed_bounds_conn(dist_fc, n_total_cells, get_halo,
                                  get_provider, freestream, to_device=None,
                                  ascontiguous=None):
@@ -155,8 +154,6 @@ def _warn_distributed_face_stencil(sensor: str) -> None:
     if sensor not in ("bounds", "both") or _DIST_FACE_STENCIL_WARNED[0]:
         return
     _DIST_FACE_STENCIL_WARNED[0] = True
-    from loguru import logger
-
     logger.warning(
         "分布式路径的 BJ 越界判据仍用**面邻居**模板：顶点邻域模板需要"
         "按顶点的归约交换（现有 halo 是按单元的 1 层面邻居），尚未实现。"

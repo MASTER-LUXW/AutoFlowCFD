@@ -35,6 +35,7 @@ import autoflowcfd.core.gpu.residual.gpu_gradients as gpu_gradients_mod
 import autoflowcfd.core.gpu.residual.gpu_volume_contract as gpu_volume_contract_mod
 import autoflowcfd.core.gpu.turbulence.gpu_scalar_transport as gst
 import autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst as gpu_turbulence_sst_mod
+from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 
 
 class _NumpyAsCupy:
@@ -54,11 +55,18 @@ class _NumpyAsCupy:
 
 @pytest.fixture(autouse=True)
 def _patch_get_cupy(monkeypatch):
+    """装上 numpy 替身，并把它**返回**出去。
+
+    需要 cp 句柄的测试直接把本 fixture 当参数取用。此前写的是
+    `gst.get_cupy()`：`gpu_scalar_transport` 拆成子包之后 `get_cupy` 不
+    再出现在包命名空间里（它的调用点在子模块），而为了这几处调用把一个
+    基础设施访问器 re-export 到包 `__init__` 只是污染 API 表面。
+    """
     shim = _NumpyAsCupy()
-    monkeypatch.setattr(gst, "get_cupy", lambda: shim)
-    monkeypatch.setattr(gpu_gradients_mod, "get_cupy", lambda: shim)
-    monkeypatch.setattr(gpu_volume_contract_mod, "get_cupy", lambda: shim)
-    monkeypatch.setattr(gpu_turbulence_sst_mod, "get_cupy", lambda: shim)
+    patch_module_get_cupy(monkeypatch, [
+        gst, gpu_gradients_mod, gpu_volume_contract_mod,
+        gpu_turbulence_sst_mod], shim)
+    return shim
 
 
 @pytest.fixture(scope="module")
@@ -410,7 +418,7 @@ class TestOmegaWallRelaxationGpuMatchesCpu:
             _wall_mask_k_gpu=wall_mask,
         )
 
-    def test_enforce_relaxation_matches_cpu_exactly(self, mesh_ops_flat):
+    def test_enforce_relaxation_matches_cpu_exactly(self, mesh_ops_flat, _patch_get_cupy):
         from autoflowcfd.core.turbulence.transport import enforce_omega_wall_relaxation
 
         mesh, ops, flat = mesh_ops_flat
@@ -418,7 +426,7 @@ class TestOmegaWallRelaxationGpuMatchesCpu:
         gpu_solver = self._build_gpu_solver(mesh, flat, cpu_solver)
 
         enforce_omega_wall_relaxation(cpu_solver, dt=1e-3)  # dt 未使用，见函数文档
-        gst.enforce_omega_wall_relaxation_gpu(gst.get_cupy(), gpu_solver)
+        gst.enforce_omega_wall_relaxation_gpu(_patch_get_cupy, gpu_solver)
 
         np.testing.assert_allclose(
             gpu_solver.turb_model_gpu.omega_field, cpu_solver.turb_model.omega_field,
@@ -429,7 +437,7 @@ class TestOmegaWallRelaxationGpuMatchesCpu:
         # 这个测试对上限保护本身就没有区分度）。
         assert not np.allclose(cpu_solver.turb_model.omega_field, cpu_solver.turb_model.omega_max)
 
-    def test_custom_relax_coefficient_matches_cpu(self, mesh_ops_flat):
+    def test_custom_relax_coefficient_matches_cpu(self, mesh_ops_flat, _patch_get_cupy):
         from autoflowcfd.core.turbulence.transport import enforce_omega_wall_relaxation
 
         mesh, ops, flat = mesh_ops_flat
@@ -437,14 +445,14 @@ class TestOmegaWallRelaxationGpuMatchesCpu:
         gpu_solver = self._build_gpu_solver(mesh, flat, cpu_solver)
 
         enforce_omega_wall_relaxation(cpu_solver, dt=1e-3, relax=0.2)
-        gst.enforce_omega_wall_relaxation_gpu(gst.get_cupy(), gpu_solver, relax=0.2)
+        gst.enforce_omega_wall_relaxation_gpu(_patch_get_cupy, gpu_solver, relax=0.2)
 
         np.testing.assert_allclose(
             gpu_solver.turb_model_gpu.omega_field, cpu_solver.turb_model.omega_field,
             rtol=1e-12, atol=1e-12,
         )
 
-    def test_degenerate_tiny_wall_distance_capped_matches_cpu(self, mesh_ops_flat):
+    def test_degenerate_tiny_wall_distance_capped_matches_cpu(self, mesh_ops_flat, _patch_get_cupy):
         """真实网格上确认存在的退化场景（wall_distance 卡在
         `_compute_omega_wall_target`/`compute_omega_wall_target_gpu`
         共同的 1e-8 除零下限）——此前只在 CPU 版修了 `omega_max` 上限，
@@ -457,7 +465,7 @@ class TestOmegaWallRelaxationGpuMatchesCpu:
         gpu_solver = self._build_gpu_solver(mesh, flat, cpu_solver)
 
         enforce_omega_wall_relaxation(cpu_solver, dt=1e-3)
-        gst.enforce_omega_wall_relaxation_gpu(gst.get_cupy(), gpu_solver)
+        gst.enforce_omega_wall_relaxation_gpu(_patch_get_cupy, gpu_solver)
 
         np.testing.assert_allclose(
             gpu_solver.turb_model_gpu.omega_field, cpu_solver.turb_model.omega_field,

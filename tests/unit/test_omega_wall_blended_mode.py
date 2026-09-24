@@ -218,10 +218,10 @@ class TestGpuMirrorIsWired:
     后端意味着不同的东西（本项目 2026-09-15 审计的第 7 类缺陷）。"""
 
     def test_gpu_reads_the_same_switch_and_constants(self):
-        import inspect
+        from tests.unit._module_source import module_source
 
         from autoflowcfd.core.gpu.turbulence import gpu_scalar_transport as gst
-        src = inspect.getsource(gst)
+        src = module_source(gst)
         assert "resolve_omega_wall_mode()" in src
         assert "_OMEGA_WALL_CMU" in src
         assert "_OMEGA_WALL_KAPPA" in src

@@ -13,7 +13,6 @@ import numpy as np
 from numba import njit, prange
 
 
-
 def _matrices_are_identity(*mats) -> bool:
     """给定的滤波矩阵是否都是**机器精度意义上的**单位阵。
 

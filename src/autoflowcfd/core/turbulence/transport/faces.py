@@ -25,7 +25,6 @@ from autoflowcfd.core.turbulence.transport_kernel import (
 )
 
 
-
 def _extrapolate_scalar_to_faces(
     scalar_sps, flat, ops, mesh, wall_dirichlet_zero_face=None,
     wall_dirichlet_value_face=None, has_wall_dirichlet_value=None,

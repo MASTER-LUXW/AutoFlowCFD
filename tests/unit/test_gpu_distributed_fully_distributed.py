@@ -43,6 +43,7 @@ from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 import autoflowcfd.core.gpu.distributed.gpu_distributed_fully_distributed as gdfd_mod
 import autoflowcfd.core.gpu.array_manager as array_manager_mod
 import autoflowcfd.core.gpu.gpu_face_geometry as gpu_face_geometry_mod
+from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 
 
 class _NumpyAsCupy:
@@ -99,7 +100,7 @@ def gpu_shim(monkeypatch):
     """把本次改动新模块 + 其调用的 GPU 硬件相关类全部换成替身，
     见模块文档"方法论"一节。"""
     shim = _NumpyAsCupy()
-    monkeypatch.setattr(gdfd_mod, "get_cupy", lambda: shim)
+    patch_module_get_cupy(monkeypatch, gdfd_mod, shim)
     monkeypatch.setattr(gdfd_mod, "GPUHaloExchange", _FakeHaloExchange)
     monkeypatch.setattr(array_manager_mod, "GPUArrayManager", _FakeArrayManager)
     monkeypatch.setattr(gpu_face_geometry_mod, "build_gpu_flat_face", _fake_build_gpu_flat_face)

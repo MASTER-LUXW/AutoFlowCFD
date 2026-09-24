@@ -34,11 +34,9 @@ TimeIntegrator.step()/step_dual_time()，由它们在*每个* stage 的正定性
 `from autoflowcfd.core.fr_solver.filter import ...` 一个字都不用改。
 """
 
-import os
 from typing import Callable
 
 import numpy as np
-from loguru import logger
 
 from .apply import (  # noqa: F401
     _filter_flat_U,

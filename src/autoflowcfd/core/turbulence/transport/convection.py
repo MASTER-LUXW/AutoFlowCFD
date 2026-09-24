@@ -21,6 +21,7 @@ from autoflowcfd.core.turbulence.transport_kernel import (
 )
 
 from .faces import (
+    ScalarConvectionGeometry,
     _distribute_correction_to_cells,
     _extrapolate_owner_only_to_faces,
     _extrapolate_scalar_to_faces,

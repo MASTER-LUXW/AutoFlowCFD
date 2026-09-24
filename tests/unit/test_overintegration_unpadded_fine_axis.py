@@ -374,24 +374,25 @@ class TestAllConsumersUsePerSegmentMetric:
     更糟的是切出一个"看起来合法"的错误数组。
     """
 
-    _FILES = [
-        "src/autoflowcfd/core/fr_residual/inviscid.py",
-        "src/autoflowcfd/core/fr_residual/viscous_flux.py",
-        # transport 2026-09-24 拆成子包，三个含体积项的子模块都要查
-        "src/autoflowcfd/core/turbulence/transport/convection.py",
-        "src/autoflowcfd/core/turbulence/transport/diffusion.py",
-        "src/autoflowcfd/core/turbulence/transport/residual.py",
-        "src/autoflowcfd/core/gpu/residual/gpu_inviscid_volume.py",
-        "src/autoflowcfd/core/gpu/residual/gpu_viscous.py",
-        "src/autoflowcfd/core/gpu/turbulence/gpu_scalar_transport.py",
+    #: 按**模块名**而不是文件路径列 —— 本项目把超 500 行的模块陆续拆成
+    #: 子包，硬编码 `.py` 路径在拆包后直接 FileNotFoundError（2026-09-24
+    #: 真实踩到：gpu_viscous / gpu_scalar_transport 两项）。模块名跨拆包
+    #: 稳定，且 `module_source` 会自动把新增子模块一起拼进来，不需要再
+    #: 手工展开清单（上一轮就手工展开过 transport 的三个子模块）。
+    _MODULES = [
+        "autoflowcfd.core.fr_residual.inviscid",
+        "autoflowcfd.core.fr_residual.viscous_flux",
+        "autoflowcfd.core.turbulence.transport",
+        "autoflowcfd.core.gpu.residual.gpu_inviscid_volume",
+        "autoflowcfd.core.gpu.residual.gpu_viscous",
+        "autoflowcfd.core.gpu.turbulence.gpu_scalar_transport",
     ]
 
-    @pytest.mark.parametrize("rel", _FILES)
+    @pytest.mark.parametrize("rel", _MODULES)
     def test_no_shared_fine_metric_indexing_left(self, rel):
-        import pathlib
+        from tests.unit._module_source import module_source
 
-        root = pathlib.Path(__file__).resolve().parents[2]
-        src = (root / rel).read_text(encoding="utf-8")
+        src = module_source(rel)
         for banned in ('oi["n_fine"]', 'oi["det_fine"]', 'oi["inv_fine"]',
                        "adj_j_fine[lo:hi]",
                        "det_jacs_fine[c0:c1]", "inv_jacs_fine[c0:c1]"):
