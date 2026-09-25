@@ -9,7 +9,7 @@
     core/fr_solver/solver.py        initialize_uniform(u=vel_inf, v=0, w=0, ...)
     core/fr_solver/boundary.py      SEM 入口 flow_direction = [vel_inf, 0, 0]
     postprocess/fr_coefficients.py  Cd=F[0] / Cl=F[2] / Cs=F[1]（直接取分量）
-    cli/solve_aero_coefficients.py  参考面积按 n_x < 0 做迎风投影
+    cli/solve/aero_coefficients.py  参考面积按 n_x < 0 做迎风投影
 
 也就是**没有任何攻角/侧滑角选项**。而攻角扫掠是最常见的外流气动研究，
 升阻比随攻角的变化基本上是外流计算的第一产出。用"自己旋转网格"替代
@@ -196,7 +196,7 @@ class TestAllFiveConsumersUseTheDirection:
         ("autoflowcfd.postprocess.fr_coefficients",
          ["wind_axes", "d_hat", "l_hat", "s_hat"],
          "气动力风轴系分解"),
-        ("autoflowcfd.cli.solve_aero_coefficients",
+        ("autoflowcfd.cli.solve.aero_coefficients",
          ["direction", "d_component"],
          "参考面积沿来流方向投影"),
         ("autoflowcfd.core.mpi.distributed_solver",
@@ -271,7 +271,7 @@ class TestReferenceAreaProjection:
     """参考面积必须沿来流方向投影：有攻角时按 X 投影会偏大 1/cos(alpha)。"""
 
     def test_projection_direction_is_normalised_and_validated(self):
-        from autoflowcfd.cli.solve_aero_coefficients import (
+        from autoflowcfd.cli.solve.aero_coefficients import (
             _compute_reference_area_auto,
         )
 

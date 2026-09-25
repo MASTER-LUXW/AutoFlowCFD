@@ -8,7 +8,7 @@
     core/fr_solver/solver.py:464    initialize_uniform(u=vel_inf, v=0.0, w=0.0, ...)
     core/fr_solver/boundary.py      SEM 入口 flow_direction = [vel_inf, 0, 0]
     postprocess/fr_coefficients.py  Cd = F[0], Cl = F[2], Cs = F[1]（直接取分量）
-    cli/solve_aero_coefficients.py  参考面积按 n_x < 0 做迎风投影
+    cli/solve/aero_coefficients.py  参考面积按 n_x < 0 做迎风投影
 
 也就是说**没有任何攻角/侧滑角选项**。而攻角扫掠是最常见的 CFD 研究，
 升阻比随攻角的变化基本上是外流气动计算的第一产出——这是一项真实的

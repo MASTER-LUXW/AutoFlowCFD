@@ -134,7 +134,7 @@ def generate_volume(
             # 退让 + 完整重新生成）——按用户要求已移除：实测下来是个不
             # 可靠的净收益（3 组受控 cube_demo 对比里有 2 组反而比原始
             # 参数更差），同时还会让导出的网格静默偏离用户实际要求的
-            # min_cell_size。真正的求解期质量门（cli/solve_commands.py）
+            # min_cell_size。真正的求解期质量门（cli/solve/commands.py）
             # 才是任何迭代开始前真正拦截的地方。
             if quality_report.passed:
                 logger.info(f"\n{quality_report.summary()}")

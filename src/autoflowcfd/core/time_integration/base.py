@@ -86,7 +86,7 @@ class TimeIntegrationScheme(Enum):
 #:
 #: 此前同一个语义有**三套**词汇表、各自一份映射：
 #:   * CLI `--time-method`：`rk3` / `imex` / `dual-time`
-#:     （`cli/solve_transient_command.py` 一份 3 项的表）
+#:     （`cli/solve/transient.py` 一份 3 项的表）
 #:   * `api.run_transient`：上面那些 + 枚举自身的取值
 #:     （`api.py` 一份 8 项的表）
 #:   * YAML/配置层：`backward_euler` / `rk2` / `rk3` / `ab3`

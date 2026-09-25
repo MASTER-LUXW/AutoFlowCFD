@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 import numpy as np
 
 # Load mesh and set up solver
-from autoflowcfd.cli.solve_mesh_loader import load_mesh_for_solver
+from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
 from autoflowcfd.core.fr_solver.solver import FRSolver
 
 volume_nas = r"C:\Users\luxw_\Desktop\AutoFlowCFD\cube_demo\cube_demo_volume.nas"

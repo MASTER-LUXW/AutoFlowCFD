@@ -166,8 +166,8 @@ class SolverConfig:
         # ——用户两次明确要求项目文件夹里不许出现这些目录，根源就在这。
         #
         # 而且它是**冗余**的：真正写输出的两处都自己建目录
-        # （`cli/solve_checkpoint_io.py::save_results` 与
-        # `cli/solve_steady_command.py` 的保存分支都有
+        # （`cli/solve/checkpoint_io.py::save_results` 与
+        # `cli/solve/steady.py` 的保存分支都有
         # `os.makedirs(output_dir, exist_ok=True)`）。要显式预建请调用
         # 下面的 `ensure_output_dir()`。
 

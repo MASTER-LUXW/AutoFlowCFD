@@ -6,7 +6,7 @@
 `@click.command()`（而不是 `@post.command()`）定义——因为定义时这里
 还拿不到 `post` 这个 group 对象——由 post_commands.py 在模块加载末尾
 `post.add_command(...)` 注册，与 cli/main.py 给顶层命令组注册到
-`cli`、cli/grid_commands.py 给 generate-volume/import-volume 注册到
+`cli`、cli/grid/commands.py 给 generate-volume/import-volume 注册到
 `grid` 完全是同一套机制。纯代码搬移，不改变任何行为。
 """
 
@@ -16,7 +16,7 @@ from typing import Optional
 import click
 from loguru import logger
 
-from .post_helpers import _load_case
+from autoflowcfd.cli.post.helpers import _load_case
 
 
 @click.command(name="export-vtk")

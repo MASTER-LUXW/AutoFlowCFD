@@ -4,7 +4,7 @@ import numpy as np
 
 sys.path.insert(0, r"d:\myWorkspace\AutoFlowCFD\src")
 
-from autoflowcfd.cli.solve_checkpoint_io import rebuild_solver_from_checkpoint
+from autoflowcfd.cli.solve.checkpoint_io import rebuild_solver_from_checkpoint
 from autoflowcfd.core.fr_solver.cfl import compute_local_time_step
 
 CKPT = r"C:\Users\luxw_\Desktop\AutoFlowCFD\cube_demo\steady_results\checkpoints\checkpoint_iter_000100.h5"

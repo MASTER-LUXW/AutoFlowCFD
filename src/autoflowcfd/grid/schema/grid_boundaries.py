@@ -183,7 +183,7 @@ class BoundaryMap:
     # `get_node_indices` 已于 2026-09-15 删除。它是 `get_cell_indices` 的
     # 错名"兼容旧接口"别名——返回的恒是**单元**索引（见本类 `groups`
     # 字段文档），但名字让调用方以为是节点索引。这个错名直接造成了一处
-    # 一阶物理错误：`cli/solve_wall_distance.py` 据此用
+    # 一阶物理错误：`cli/solve/wall_distance.py` 据此用
     # `max(indices) >= n_nodes` 去猜索引含义，而该判据恰好只在 WALL 组上
     # 猜错（壁面边界单元是边界层棱柱、索引落在 [0, n_prism)，两张真实
     # 网格都满足 n_prism < n_nodes），使壁面距离场变成"到一堆按编号散布

@@ -69,7 +69,7 @@ def rebuild_distributed_solver_from_checkpoint(
         重建所用的完整 metadata 字典
     """
     from autoflowcfd.core.utils.checkpoint import CheckpointManager
-    from autoflowcfd.cli.solve_mesh_loader import load_mesh_for_solver
+    from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
     from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
 
     _solution, _history, iteration, metadata = CheckpointManager(
@@ -103,7 +103,7 @@ def rebuild_distributed_solver_from_checkpoint(
     resolved_surface_mesh = surface_mesh or metadata.get("surface_mesh")
     # 决定物理解的参数：与单机重建共用同一个读取函数（来流缺失即报错，不猜）。
     # 攻角/侧滑角此前在这里四条构造路径上**全部**没有恢复，续算静默变成零攻角。
-    from autoflowcfd.cli.solve_checkpoint_io import physics_from_metadata
+    from autoflowcfd.cli.solve.checkpoint_io import physics_from_metadata
     physics = physics_from_metadata(metadata)
     rho_inf, vel_inf, p_inf = physics["rho_inf"], physics["vel_inf"], physics["p_inf"]
     aoa_deg, aos_deg = physics["aoa_deg"], physics["aos_deg"]

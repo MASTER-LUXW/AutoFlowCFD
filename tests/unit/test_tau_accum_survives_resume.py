@@ -42,7 +42,7 @@ def test_checkpoint_writer_persists_tau_accum():
 
     # `solve_checkpoint_io` 2026-09-24 拆成子包；`inspect.getsource(包)`
     # 只返回 `__init__.py`，读不到 write.py / restore.py 里的真正实现。
-    src = module_source("autoflowcfd.cli.solve_checkpoint_io")
+    src = module_source("autoflowcfd.cli.solve.checkpoint_io")
     assert 'extra_fields["tau_accum"]' in src, (
         "checkpoint 没有持久化 tau_accum —— 它与 k_field/omega_field/nu_t "
         "是同一类：resume 精确恢复物理场、却把这个计数打回 0")
@@ -54,7 +54,7 @@ def test_checkpoint_reader_restores_and_marks():
 
     # `solve_checkpoint_io` 2026-09-24 拆成子包；`inspect.getsource(包)`
     # 只返回 `__init__.py`，读不到 write.py / restore.py 里的真正实现。
-    src = module_source("autoflowcfd.cli.solve_checkpoint_io")
+    src = module_source("autoflowcfd.cli.solve.checkpoint_io")
     assert '"tau_accum" in fields' in src
     assert "solver.tau_accum = _tau" in src
     assert "solver._tau_accum_seeded = True" in src, (
@@ -117,7 +117,7 @@ def test_reader_guards_shape_mismatch():
 
     # `solve_checkpoint_io` 2026-09-24 拆成子包；`inspect.getsource(包)`
     # 只返回 `__init__.py`，读不到 write.py / restore.py 里的真正实现。
-    src = module_source("autoflowcfd.cli.solve_checkpoint_io")
+    src = module_source("autoflowcfd.cli.solve.checkpoint_io")
     assert "tau_accum 长度" in src and "跳过恢复" in src, (
         "缺少形状校验：长度不符时应当跳过恢复并明确告知，而不是静默"
         "塞进去让 pseudo_time_budget 算出无意义的数")

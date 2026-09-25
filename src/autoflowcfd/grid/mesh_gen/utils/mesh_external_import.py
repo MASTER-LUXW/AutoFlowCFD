@@ -119,7 +119,7 @@ def import_external_volume_mesh(
         有改动则已修复）及其最终质量报告。volume_mesh 是普通
         VolumeMeshData，与每个 solve_commands.py 入口点已接受的
         类型相同（例如通过 pickled 缓存文件——见
-        cli/solve_commands.py 自身的 .pkl 处理）。
+        cli/solve/commands.py 自身的 .pkl 处理）。
     """
     from ...nas_io.nas_parser_volume import parse_volume_mesh_nas
     from ...nas_io.parser_core import NASParser

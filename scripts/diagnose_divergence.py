@@ -9,8 +9,8 @@ import sys
 import numpy as np
 sys.path.insert(0, "src")
 
-from autoflowcfd.cli.solve_mesh_loader import load_mesh_for_solver
-from autoflowcfd.cli.solve_wall_distance import compute_wall_distance_for_solver
+from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
+from autoflowcfd.cli.solve.wall_distance import compute_wall_distance_for_solver
 from autoflowcfd.core import FRSolver
 from autoflowcfd.core.fr_solver.state import FRState
 from autoflowcfd.fr.operators import generate_fr_operators

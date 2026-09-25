@@ -22,13 +22,13 @@ class TestAdaptiveCFLControllerParams:
         """控制器构造默认值必须与 CLI 默认值是同一个数。
 
         2026-09-17 从 (0.1, 0.5) 重定为 (0.03, 0.06)，依据是三类实测（见
-        `cli/solve_steady_command.py` 的 --cfl-max 帮助与
+        `cli/solve/steady.py` 的 --cfl-max 帮助与
         `test_adaptive_cfl_bounds_consistency.py::
         TestConfigLayerCflDefaultsAreConsistent`）。这里不再硬编码那两个
         数字，而是从 click 元数据读——配置层与 CLI 默认值"相差 20 倍"
         那次事故（2026-09-15）的根源正是两处各自硬编码。
         """
-        from autoflowcfd.cli.solve_steady_command import solve_steady
+        from autoflowcfd.cli.solve.steady import solve_steady
 
         want = {}
         for prm in solve_steady.params:
@@ -87,12 +87,12 @@ class TestResumeCflOptionForwarded:
             "backend": "cpu", "surface_mesh": "surface.nas",
         }
         with patch(
-            "autoflowcfd.cli.solve_commands.rebuild_solver_from_checkpoint",
+            "autoflowcfd.cli.solve.commands.rebuild_solver_from_checkpoint",
             return_value=(fake_solver, 2000, fake_meta),
         ) as mock_rebuild, patch(
-            "autoflowcfd.cli.solve_commands.save_results"
+            "autoflowcfd.cli.solve.commands.save_results"
         ), patch(
-            "autoflowcfd.cli.solve_commands.write_checkpoint"
+            "autoflowcfd.cli.solve.commands.write_checkpoint"
         ):
             result = CliRunner().invoke(
                 cli,
@@ -112,19 +112,19 @@ class TestResumeCflOptionForwarded:
             "backend": "cpu", "surface_mesh": "surface.nas",
         }
         with patch(
-            "autoflowcfd.cli.solve_commands.rebuild_solver_from_checkpoint",
+            "autoflowcfd.cli.solve.commands.rebuild_solver_from_checkpoint",
             return_value=(fake_solver, 2000, fake_meta),
         ) as mock_rebuild, patch(
-            "autoflowcfd.cli.solve_commands.save_results"
+            "autoflowcfd.cli.solve.commands.save_results"
         ), patch(
-            "autoflowcfd.cli.solve_commands.write_checkpoint"
+            "autoflowcfd.cli.solve.commands.write_checkpoint"
         ):
             result = CliRunner().invoke(
                 cli, ["solve", "resume", str(ckpt), "--max-iter", "5"],
             )
         assert result.exit_code == 0, result.output
         # 不硬编码默认值：从 click 元数据读，与 CLI 保持单一事实来源
-        from autoflowcfd.cli.solve_commands import resume as _resume_cmd
+        from autoflowcfd.cli.solve.commands import resume as _resume_cmd
 
         _want = {}
         for prm in _resume_cmd.params:

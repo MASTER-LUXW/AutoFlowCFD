@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - 从 checkpoint 重建一个全新 solver（含网格/算子重建）
 
-从 `src/autoflowcfd/cli/solve_checkpoint_io.py`(原 614 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
+从 `src/autoflowcfd/cli/solve/checkpoint_io.py`(原 614 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
 """
 
 
@@ -107,8 +107,8 @@ def rebuild_solver_from_checkpoint(
     from types import SimpleNamespace
     from autoflowcfd.core import FRSolver
     from autoflowcfd.core.utils.checkpoint import CheckpointManager
-    from autoflowcfd.cli.solve_mesh_loader import load_mesh_for_solver
-    from autoflowcfd.cli.solve_wall_distance import compute_wall_distance_for_solver
+    from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
+    from autoflowcfd.cli.solve.wall_distance import compute_wall_distance_for_solver
 
     _solution, _history, iteration, metadata = CheckpointManager(
         config=SimpleNamespace(), output_dir="."
@@ -184,7 +184,7 @@ def rebuild_solver_from_checkpoint(
     # 也能带 Cd/Cl/Cs，不必等到 solve() 整个跑完才看到一次。
     resolved_reference_area = reference_area
     if resolved_reference_area is None:
-        from autoflowcfd.cli.solve_aero_coefficients import _compute_reference_area_auto
+        from autoflowcfd.cli.solve.aero_coefficients import _compute_reference_area_auto
         from autoflowcfd.core.utils.flow_direction import direction_from_freestream
 
         # 参考面积沿**来流方向**投影（有攻角时按 X 投影会偏大

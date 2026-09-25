@@ -52,7 +52,7 @@ def _cli_default(opt_name: str) -> float:
     直接读 click 的元数据而不是复制一份常量：配置层与 CLI 默认值"相差
     20 倍"那次事故（2026-09-15）的根源正是两处各自硬编码。
     """
-    from autoflowcfd.cli.solve_steady_command import solve_steady
+    from autoflowcfd.cli.solve.steady import solve_steady
 
     for p in solve_steady.params:
         if opt_name in getattr(p, "opts", []):
@@ -239,7 +239,7 @@ class TestEveryBackendConstructsAController:
         """resume 低 CFL 工况同样需要它。"""
         import inspect
 
-        from autoflowcfd.cli.solve_checkpoint_io import (
+        from autoflowcfd.cli.solve.checkpoint_io import (
             rebuild_solver_from_checkpoint,
         )
         assert 'cfl_min' in inspect.signature(
@@ -248,7 +248,7 @@ class TestEveryBackendConstructsAController:
     def test_cli_exposes_cfl_min(self):
         from click.testing import CliRunner
 
-        from autoflowcfd.cli.solve_steady_command import solve_steady
+        from autoflowcfd.cli.solve.steady import solve_steady
         out = CliRunner().invoke(solve_steady, ['--help']).output
         assert '--cfl-min' in out
 
@@ -314,7 +314,7 @@ class TestConfigLayerCflDefaultsAreConsistent:
 
     2026-09-15 发现：`SteadyConfig.cfl_max` 的默认值是 **10.0**，而 CLI
     `--cfl-max` 的默认是 0.5——差 20 倍。2026-09-17 两边一起重定为
-    **0.06**，依据是三类实测（见 `cli/solve_steady_command.py` 的
+    **0.06**，依据是三类实测（见 `cli/solve/steady.py` 的
     --cfl-max 帮助）：直接谱测量给出线性极限约 0.117、真实网格
     plate_demo 0.30 第 13 步发散、平板边界层通道 0.10 第 3187 步发散。
 

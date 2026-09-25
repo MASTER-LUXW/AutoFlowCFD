@@ -6,7 +6,7 @@
 错误的来流上静默跑到底）。
 
 **为什么单独成模块（2026-09-25）**：此前只有单机写入端
-（`cli/solve_checkpoint_io/write.py`）写这组键，分布式写入端
+（`cli/solve/checkpoint_io/write.py`）写这组键，分布式写入端
 （`core/mpi/distributed_checkpoint/save.py`，CPU-MPI 与多 GPU 共用）一个都
 不写。分布式 resume 在 2026-09-24 改成"来流缺失即报错"之后，**每一次**分布式
 resume 都会因此失败；改之前则是静默按默认来流（33.33 m/s、零攻角、默认粘度与

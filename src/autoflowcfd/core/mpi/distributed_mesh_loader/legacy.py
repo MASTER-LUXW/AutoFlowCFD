@@ -227,7 +227,7 @@ def distributed_mesh_load(
             local_fc_data: 本 rank 的局部面连接关系数据
             partition_info: 分区信息（cell_partition 等）
     """
-    from autoflowcfd.cli.solve_helpers import load_mesh_for_solver
+    from autoflowcfd.cli.solve.helpers import load_mesh_for_solver
     from autoflowcfd.core.mpi.partition import partition_mesh
     from autoflowcfd.core.mpi.comm import bcast_from_root
 

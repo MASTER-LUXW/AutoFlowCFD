@@ -77,7 +77,7 @@ def distributed_mesh_load_v2(
         字段完全一致），`root_context` 见上方"Order Continuation 支持"
         一节。
     """
-    from autoflowcfd.cli.solve_helpers import load_mesh_for_solver
+    from autoflowcfd.cli.solve.helpers import load_mesh_for_solver
     from autoflowcfd.core.mpi.partition import partition_mesh
     from autoflowcfd.fr.operators import generate_fr_operators
     from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider

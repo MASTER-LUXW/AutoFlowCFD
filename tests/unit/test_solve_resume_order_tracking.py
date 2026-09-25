@@ -64,12 +64,12 @@ class TestResumeWritesLiveOrderNotStaleMetadataOrder:
         }
 
         with patch(
-            "autoflowcfd.cli.solve_commands.rebuild_solver_from_checkpoint",
+            "autoflowcfd.cli.solve.commands.rebuild_solver_from_checkpoint",
             return_value=(fake_solver, 100, fake_metadata),
         ), patch(
-            "autoflowcfd.cli.solve_commands.save_results"
+            "autoflowcfd.cli.solve.commands.save_results"
         ), patch(
-            "autoflowcfd.cli.solve_commands.write_checkpoint"
+            "autoflowcfd.cli.solve.commands.write_checkpoint"
         ) as mock_write_checkpoint:
             runner = CliRunner()
             result = runner.invoke(

@@ -414,7 +414,7 @@ def convert(input_file: str, format: str, output: str, json_output: bool) -> Non
 # grid_volume_commands.py（见本文件顶部拆分说明），这里用与
 # cli/main.py 给 grid/solve/post/... 注册到 cli 完全一致的
 # add_command 机制接回来，注册后 CLI 可见效果与拆分前完全一致。
-from .grid_volume_commands import generate_volume, import_volume  # noqa: E402
+from autoflowcfd.cli.grid.volume_commands import generate_volume, import_volume  # noqa: E402
 
 grid.add_command(generate_volume)
 grid.add_command(import_volume)

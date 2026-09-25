@@ -15,7 +15,7 @@ VTK 兼容查看器可视化使用。
     这些方法在 `VTKExporter` 上仍然保留同名薄委托包装（方法体内部
     lazy import 对应模块的同名函数并转发调用），外部调用方
     （包括直接访问 `exporter._write_points(...)` 这类用法，例如
-    cli/post_helpers.py 里的 `_export_point_fields_vtk`）行为完全不变。
+    cli/post/helpers.py 里的 `_export_point_fields_vtk`）行为完全不变。
 
 保真度说明（为什么这不只是旧的简化版导出器）：
     - 每个场都**同时**写 CELL_DATA（求解器实际产生的、未插值的原始
@@ -284,7 +284,7 @@ class VTKExporter:
     # ------------------------------------------------------------------
     # 边界分区分类 + 场数据计算——已搬到 vtk_export_fields.py，这里只
     # 保留薄委托包装，保证 `exporter._xxx(...)` 这种直接方法调用（类
-    # 内部互相调用，以及 cli/post_helpers.py 等外部调用方）行为不变。
+    # 内部互相调用，以及 cli/post/helpers.py 等外部调用方）行为不变。
     # ------------------------------------------------------------------
 
     def _boundary_zone_ids(self, owner_cells: np.ndarray):

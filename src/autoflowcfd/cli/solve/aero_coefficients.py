@@ -1,9 +1,8 @@
-"""气动系数相关 CLI 辅助函数 —— 从 solve_steady_commands.py 拆出，控制单文件行数。
+"""气动系数相关 CLI 辅助函数。
 
 `solve steady` 和 `solve transient` 两个命令都需要：求解结束后打印 Cd/Cl/Cs，
 以及在用户未显式指定 --reference-area 时从面网格自动估算参考面积。拆到
-独立模块，避免两个命令各自的实现文件相互依赖（见 solve_steady_commands.py
-文档）。
+独立模块，避免两个命令各自的实现文件相互依赖。
 """
 
 from typing import Optional
@@ -11,7 +10,7 @@ from typing import Optional
 import numpy as np
 from loguru import logger
 
-# 真实 bug（已修复，2026-08-21，见 cli/solve_commands.py 同一处修复的
+# 真实 bug（已修复，2026-08-21，见 cli/solve/commands.py 同一处修复的
 # 文档）：此前这里用标准库 logging（从未被本项目 basicConfig 过，
 # root logger 默认无 handler），本文件的 6 处 logger 调用（含
 # "Auto-computed reference area" 这条 INFO 和"Failed to auto-compute

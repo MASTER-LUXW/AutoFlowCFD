@@ -11,7 +11,7 @@
 示例:
     $ autoflowcfd solve steady model_volume.pkl --backend cpu --order 2 --turbulence-model sst
 
-steady/transient 命令本体已拆分到 solve_steady_commands.py，本文件只保留
+steady/transient 命令本体在同目录的 `steady.py`/`transient.py`，本文件只保留
 命令组定义 + resume/status。
 """
 
@@ -21,7 +21,7 @@ from typing import Optional
 import click
 from loguru import logger
 
-from autoflowcfd.cli.solve_helpers import (
+from autoflowcfd.cli.solve.helpers import (
     rebuild_solver_from_checkpoint,
     save_results,
     write_checkpoint,
@@ -48,9 +48,11 @@ def solve():
     pass
 
 
-# 导入子命令模块，触发 @solve.command() 注册
-from autoflowcfd.cli import solve_steady_commands  # noqa: F401
-from autoflowcfd.cli.solve_steady_commands import _report_aerodynamic_coefficients  # noqa: F401
+# 导入子命令模块，触发 @solve.command() 注册（2026-09-25 起直接导入，删掉了
+# 只做转发的 solve_steady_commands.py 中间层）
+from autoflowcfd.cli.solve import steady as _steady_cmd  # noqa: F401,E402
+from autoflowcfd.cli.solve import transient as _transient_cmd  # noqa: F401,E402
+from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coefficients  # noqa: E402
 
 
 
@@ -271,7 +273,7 @@ def _resume_distributed(
     调用它，这里保持同一个范围边界。
     """
     from autoflowcfd.core.mpi import is_root
-    from autoflowcfd.cli.solve_distributed_checkpoint_io import (
+    from autoflowcfd.cli.solve.distributed_checkpoint_io import (
         rebuild_distributed_solver_from_checkpoint,
     )
 

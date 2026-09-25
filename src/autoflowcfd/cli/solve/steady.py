@@ -1,6 +1,6 @@
-"""`solve steady` 命令 —— 从 solve_steady_commands.py 拆出，控制单文件行数。
+"""`solve steady` 命令
 
-见 solve_steady_commands.py 文档说明整体拆分结构。
+命令组定义见同目录 `commands.py`。
 """
 
 import click
@@ -8,7 +8,7 @@ from loguru import logger
 
 from autoflowcfd.core import FRSolver
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
-from autoflowcfd.cli.solve_helpers import (
+from autoflowcfd.cli.solve.helpers import (
     compute_wall_distance_for_solver,
     load_mesh_for_solver,
     save_results,
@@ -17,11 +17,11 @@ from autoflowcfd.cli.solve_helpers import (
     resolve_physical_constants,
     resolve_turbulence_model,
 )
-from autoflowcfd.cli.solve_aero_coefficients import (
+from autoflowcfd.cli.solve.aero_coefficients import (
     _compute_reference_area_auto,
     _report_aerodynamic_coefficients,
 )
-from autoflowcfd.cli.solve_commands import solve
+from autoflowcfd.cli.solve.commands import solve
 
 
 @solve.command(name='steady')

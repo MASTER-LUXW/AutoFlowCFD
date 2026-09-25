@@ -8,7 +8,7 @@ checkpoint"的命令（coefficients/export-vtk/report/convergence）自成
 一组，是清晰的拆分边界。用普通 `@click.command()`（而不是
 `@post.command()`）定义——因为定义时这里还拿不到 `post` 这个 group
 对象——由 post_commands.py 在模块加载末尾 `post.add_command(...)`
-注册，与 cli/grid_commands.py 给 generate-volume/import-volume 注册到
+注册，与 cli/grid/commands.py 给 generate-volume/import-volume 注册到
 `grid` 完全是同一套机制。纯代码搬移，不改变任何行为。
 """
 
@@ -20,7 +20,7 @@ import click
 import numpy as np
 from loguru import logger
 
-from .post_helpers import (
+from autoflowcfd.cli.post.helpers import (
     _cell_centroids,
     _export_point_fields_vtk,
     _list_checkpoints,
@@ -106,7 +106,7 @@ def transient_mean(case: str, grid: Optional[str], output: str,
             if coeff_enabled:
                 try:
                     if coeff_solver is None:
-                        from autoflowcfd.cli.solve_checkpoint_io import (
+                        from autoflowcfd.cli.solve.checkpoint_io import (
                             rebuild_solver_from_checkpoint, restore_solver_state_from_fields,
                         )
                         coeff_solver, _it, _meta = rebuild_solver_from_checkpoint(

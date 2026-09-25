@@ -108,7 +108,7 @@ class TestAutoFlowCFDAPI:
             
             assert report["error_count"] == 0
 
-    @patch('autoflowcfd.cli.solve_wall_distance.compute_wall_distance_for_solver')
+    @patch('autoflowcfd.cli.solve.wall_distance.compute_wall_distance_for_solver')
     @patch('autoflowcfd.grid.high_order.high_order_mesh.HighOrderMesh')
     @patch('autoflowcfd.api.solve.FRSolver')
     def test_run_steady(
@@ -145,7 +145,7 @@ class TestAutoFlowCFDAPI:
         mock_solver_class.assert_called_once()
         assert self.api.solver is mock_solver
 
-    @patch('autoflowcfd.cli.solve_wall_distance.compute_wall_distance_for_solver')
+    @patch('autoflowcfd.cli.solve.wall_distance.compute_wall_distance_for_solver')
     @patch('autoflowcfd.grid.high_order.high_order_mesh.HighOrderMesh')
     @patch('autoflowcfd.api.solve.TransientSolver')
     def test_run_transient(

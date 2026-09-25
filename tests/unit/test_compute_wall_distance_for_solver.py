@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 
-from autoflowcfd.cli.solve_helpers import compute_wall_distance_for_solver
+from autoflowcfd.cli.solve.helpers import compute_wall_distance_for_solver
 from autoflowcfd.grid.structures import (
     BoundaryMap, GridMetadata, NodeArray, TetrahedralCells, VolumeMeshData,
 )
@@ -98,7 +98,7 @@ class TestWallNodesComeFromBoundaryFacesNotIndexGuessing:
     """
 
     def test_wall_nodes_are_boundary_face_nodes(self):
-        from autoflowcfd.cli.solve_wall_distance import wall_nodes_from_boundary_faces
+        from autoflowcfd.cli.solve.wall_distance import wall_nodes_from_boundary_faces
         vd = _volume_mesh_with_wall()
         wn, n_faces = wall_nodes_from_boundary_faces(vd, vd.boundaries)
         # 单元 0 = [0,1,2,3]，与单元 1 共享面 [1,2,3]，故有 3 个边界面，
@@ -120,7 +120,7 @@ class TestWallNodesComeFromBoundaryFacesNotIndexGuessing:
         old_result = sorted(idx[idx < n_nodes].tolist())
         assert old_result == [0], "原判据会把单元索引当节点索引"
 
-        from autoflowcfd.cli.solve_wall_distance import wall_nodes_from_boundary_faces
+        from autoflowcfd.cli.solve.wall_distance import wall_nodes_from_boundary_faces
         new_result = sorted(wall_nodes_from_boundary_faces(vd, vd.boundaries)[0].tolist())
         assert new_result != old_result
         assert new_result == [0, 1, 2, 3]
@@ -135,7 +135,7 @@ class TestWallNodesComeFromBoundaryFacesNotIndexGuessing:
         import click
         import pytest
 
-        from autoflowcfd.cli.solve_wall_distance import wall_nodes_from_boundary_faces
+        from autoflowcfd.cli.solve.wall_distance import wall_nodes_from_boundary_faces
         vd = _volume_mesh_with_wall()
         vd.boundaries.groups['wall'] = np.array([0, 999], dtype=np.int32)
         with pytest.raises(click.ClickException, match='超出体网格单元数'):
@@ -144,7 +144,7 @@ class TestWallNodesComeFromBoundaryFacesNotIndexGuessing:
     def test_non_wall_groups_are_excluded(self):
         """只有 bc_type == 'WALL' 的组参与壁距；SLIP_WALL（外场/风洞壁）
         必须排除——否则外场壁会把全域的壁距压到域半高量级。"""
-        from autoflowcfd.cli.solve_wall_distance import wall_nodes_from_boundary_faces
+        from autoflowcfd.cli.solve.wall_distance import wall_nodes_from_boundary_faces
         vd = _volume_mesh_with_wall()
         vd.boundaries.groups['tunnel'] = np.array([1], dtype=np.int32)
         vd.boundaries.bc_types['tunnel'] = 'SLIP_WALL'
@@ -155,7 +155,7 @@ class TestWallNodesComeFromBoundaryFacesNotIndexGuessing:
 
     def test_no_wall_group_returns_empty(self):
         """没有 WALL 组时返回空集，由调用方决定报错——不在这里兜底。"""
-        from autoflowcfd.cli.solve_wall_distance import wall_nodes_from_boundary_faces
+        from autoflowcfd.cli.solve.wall_distance import wall_nodes_from_boundary_faces
         vd = _volume_mesh_with_wall()
         vd.boundaries.bc_types['wall'] = 'SLIP_WALL'
         wn, n_faces = wall_nodes_from_boundary_faces(vd, vd.boundaries)

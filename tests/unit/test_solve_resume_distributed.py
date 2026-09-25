@@ -59,7 +59,7 @@ class TestResumeDistributedCpuTraditionalMode(object):
         }
 
         with patch(
-            "autoflowcfd.cli.solve_distributed_checkpoint_io.rebuild_distributed_solver_from_checkpoint",
+            "autoflowcfd.cli.solve.distributed_checkpoint_io.rebuild_distributed_solver_from_checkpoint",
             return_value=(fake_solver, 2000, fake_metadata),
         ) as mock_rebuild, patch(
             "autoflowcfd.core.mpi.distributed_checkpoint.distributed_save_results"
@@ -102,7 +102,7 @@ class TestResumeDistributedFullyDistributed(object):
         }
 
         with patch(
-            "autoflowcfd.cli.solve_distributed_checkpoint_io.rebuild_distributed_solver_from_checkpoint",
+            "autoflowcfd.cli.solve.distributed_checkpoint_io.rebuild_distributed_solver_from_checkpoint",
             return_value=(fake_solver, 1000, fake_metadata),
         ) as mock_rebuild, patch(
             "autoflowcfd.core.mpi.distributed_checkpoint.distributed_save_results"
@@ -134,7 +134,7 @@ class TestResumeDistributedMultiGpu(object):
         }
 
         with patch(
-            "autoflowcfd.cli.solve_distributed_checkpoint_io.rebuild_distributed_solver_from_checkpoint",
+            "autoflowcfd.cli.solve.distributed_checkpoint_io.rebuild_distributed_solver_from_checkpoint",
             return_value=(fake_solver, 500, fake_metadata),
         ) as mock_rebuild:
             runner = CliRunner()
@@ -179,7 +179,7 @@ class TestResumeDistributedPhaseMaxIterForwarding(object):
         }
 
         with patch(
-            "autoflowcfd.cli.solve_distributed_checkpoint_io.rebuild_distributed_solver_from_checkpoint",
+            "autoflowcfd.cli.solve.distributed_checkpoint_io.rebuild_distributed_solver_from_checkpoint",
             return_value=(fake_solver, 2000, fake_metadata),
         ), patch(
             "autoflowcfd.core.mpi.distributed_checkpoint.distributed_save_results"
@@ -210,7 +210,7 @@ class TestResumeDistributedPhaseMaxIterForwarding(object):
         }
 
         with patch(
-            "autoflowcfd.cli.solve_distributed_checkpoint_io.rebuild_distributed_solver_from_checkpoint",
+            "autoflowcfd.cli.solve.distributed_checkpoint_io.rebuild_distributed_solver_from_checkpoint",
             return_value=(fake_solver, 500, fake_metadata),
         ):
             runner = CliRunner()
@@ -243,7 +243,7 @@ class TestResumeDistributedPhaseMaxIterForwarding(object):
         }
 
         with patch(
-            "autoflowcfd.cli.solve_distributed_checkpoint_io.rebuild_distributed_solver_from_checkpoint",
+            "autoflowcfd.cli.solve.distributed_checkpoint_io.rebuild_distributed_solver_from_checkpoint",
             return_value=(fake_solver, 2000, fake_metadata),
         ), patch(
             "autoflowcfd.core.mpi.distributed_checkpoint.distributed_save_results"

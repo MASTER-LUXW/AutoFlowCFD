@@ -14,7 +14,7 @@
 拆分说明（本文件原有 974 行，超过 400 行硬性拆分阈值——本仓库全部
 Python 文件里单文件行数最多的一个）：
 1. 案例目录/checkpoint 定位与加载的共用辅助函数（10 个）搬到
-   post_helpers.py，镜像 cli/solve_commands.py + cli/solve_helpers.py
+   post_helpers.py，镜像 cli/solve/commands.py + cli/solve/helpers.py
    已有的拆分方式。
 2. export-vtk（单个命令约 170 行，全文件最重）搬到
    post_export_commands.py。
@@ -22,7 +22,7 @@ Python 文件里单文件行数最多的一个）：
    主题的命令（合计约 260 行）搬到 post_transient_commands.py。
 后两批命令都用普通 `@click.command()` 定义、在本文件末尾通过
 `post.add_command(...)` 注册——与 cli/main.py 给顶层命令组注册到 cli、
-cli/grid_commands.py 给 generate-volume/import-volume 注册到 grid
+cli/grid/commands.py 给 generate-volume/import-volume 注册到 grid
 完全是同一套机制，注册后 `autoflowcfd post --help` 的可见效果、命令名、
 选项、帮助文本都与拆分前完全一致。纯代码搬移，不改变任何行为。
 
@@ -39,8 +39,8 @@ import click
 import numpy as np
 from loguru import logger
 
-from .post_helpers import _load_case, _load_history_only, _locate_checkpoint, _replay_history
-from .solve_helpers import rebuild_solver_from_checkpoint
+from autoflowcfd.cli.post.helpers import _load_case, _load_history_only, _locate_checkpoint, _replay_history
+from autoflowcfd.cli.solve.helpers import rebuild_solver_from_checkpoint
 
 
 @click.group()
@@ -289,10 +289,10 @@ def convergence(case: str, checkpoint: Optional[str], output: str, variables: tu
 
 # export-vtk / transient-mean / transient-rms / transient-psd 已搬到
 # post_export_commands.py / post_transient_commands.py（见本文件顶部
-# 拆分说明），这里用与 cli/grid_commands.py 给 generate-volume/
+# 拆分说明），这里用与 cli/grid/commands.py 给 generate-volume/
 # import-volume 注册到 grid 完全一致的 add_command 机制接回来。
-from .post_export_commands import export_vtk
-from .post_transient_commands import transient_mean, transient_psd, transient_rms
+from autoflowcfd.cli.post.export_commands import export_vtk
+from autoflowcfd.cli.post.transient_commands import transient_mean, transient_psd, transient_rms
 
 post.add_command(export_vtk)
 post.add_command(transient_mean)

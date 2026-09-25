@@ -397,7 +397,7 @@ class TestDistributedCheckpointRoundTrip:
         resume 构造路径上也全部没有恢复。这里用**非缺省**的粘度、攻角、
         侧滑角、Tu/VR 与 turb_model='none'（此前 none/les 连粘度属性都只在
         湍流分支里设置）验证写入端与共用读取端的往返。"""
-        from autoflowcfd.cli.solve_checkpoint_io import physics_from_metadata
+        from autoflowcfd.cli.solve.checkpoint_io import physics_from_metadata
         from autoflowcfd.core.mpi.distributed_checkpoint import (
             distributed_load_checkpoint, distributed_save_checkpoint,
         )
@@ -424,7 +424,7 @@ class TestDistributedCheckpointRoundTrip:
         多 GPU 完全分布式）都必须把攻角与侧滑角交给求解器或来流字典。"""
         import inspect
 
-        from autoflowcfd.cli import solve_distributed_checkpoint_io as mod
+        from autoflowcfd.cli.solve import distributed_checkpoint_io as mod
         src = inspect.getsource(mod.rebuild_distributed_solver_from_checkpoint)
         assert src.count("aoa_deg=aoa_deg, aos_deg=aos_deg") == 2
         assert src.count('"aoa_deg": aoa_deg, "aos_deg": aos_deg') == 2

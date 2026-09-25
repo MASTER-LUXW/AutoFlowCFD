@@ -5,7 +5,7 @@ from loguru import logger
 logger.remove()
 logger.add(sys.stderr, level="WARNING")
 
-from autoflowcfd.cli.solve_mesh_loader import load_mesh_for_solver
+from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
 from autoflowcfd.core.fr_solver.solver import FRSolver
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 

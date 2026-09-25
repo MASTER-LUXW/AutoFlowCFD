@@ -35,9 +35,9 @@ import click
 from loguru import logger
 
 from .. import __version__
-from .grid_commands import grid
-from .solve_commands import solve
-from .post_commands import post
+from autoflowcfd.cli.grid.commands import grid
+from autoflowcfd.cli.solve.commands import solve
+from autoflowcfd.cli.post.commands import post
 from .config_commands import config
 from .utils_commands import utils
 

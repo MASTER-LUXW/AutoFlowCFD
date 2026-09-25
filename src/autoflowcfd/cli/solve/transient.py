@@ -1,6 +1,6 @@
-"""`solve transient` 命令 (DES/LES) —— 从 solve_steady_commands.py 拆出，控制单文件行数。
+"""`solve transient` 命令 (DES/LES)
 
-见 solve_steady_commands.py 文档说明整体拆分结构。
+命令组定义见同目录 `commands.py`。
 """
 
 from typing import Optional
@@ -9,7 +9,7 @@ import click
 from loguru import logger
 
 from autoflowcfd.core import FRSolver
-from autoflowcfd.cli.solve_helpers import (
+from autoflowcfd.cli.solve.helpers import (
     compute_wall_distance_for_solver,
     load_mesh_for_solver,
     restore_state_from_checkpoint,
@@ -19,9 +19,9 @@ from autoflowcfd.cli.solve_helpers import (
     resolve_physical_constants,
     resolve_turbulence_model,
 )
-from autoflowcfd.cli.solve_aero_coefficients import _report_aerodynamic_coefficients
-from autoflowcfd.cli.solve_commands import solve
-from autoflowcfd.cli.solve_transient_distributed import _solve_transient_distributed
+from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coefficients
+from autoflowcfd.cli.solve.commands import solve
+from autoflowcfd.cli.solve.transient_distributed import _solve_transient_distributed
 
 
 @solve.command(name='transient')

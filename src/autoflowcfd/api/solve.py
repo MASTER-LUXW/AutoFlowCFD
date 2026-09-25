@@ -85,7 +85,7 @@ class _APISolveMixin:
         （在 resume_simulation 路径里还多传了 initial_solution/
         start_iteration 两个 FRSolver.solve() 根本不接受的参数）在当前
         V2 FR 架构下必然出错。改为镜像 CLI `solve steady`
-        （cli/solve_steady_command.py）的真实构造流程：先用
+        （cli/solve/steady.py）的真实构造流程：先用
         HighOrderMesh.load_from_volume_mesh 把体网格升格成高阶网格，
         再构造 FRSolver，需要湍流模型时补上壁面距离场
         （V2.0 专家组评审逐行核实：此前的实现从未被真正跑通过）。
@@ -93,7 +93,7 @@ class _APISolveMixin:
         logger.info("Starting steady-state FR simulation")
 
         from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
-        from autoflowcfd.cli.solve_wall_distance import compute_wall_distance_for_solver
+        from autoflowcfd.cli.solve.wall_distance import compute_wall_distance_for_solver
 
         backend = backend if backend is not None else (config.backend.value if config is not None else "cpu")
         order = order if order is not None else (config.order if config is not None else 2)
@@ -219,7 +219,7 @@ class _APISolveMixin:
         logger.info("Starting transient FR simulation")
 
         from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
-        from autoflowcfd.cli.solve_wall_distance import compute_wall_distance_for_solver
+        from autoflowcfd.cli.solve.wall_distance import compute_wall_distance_for_solver
 
         if mode is not None:
             turbulence_model = mode

@@ -68,10 +68,10 @@ class TestSingleMachineResume:
         # final_state.pkl，而 MagicMock 替身不可 pickle（真实报错
         # `PicklingError: Can't pickle MagicMock`）。这与被测的 CLI 转发
         # 逻辑无关，是替身的固有限制。
-        with patch("autoflowcfd.cli.solve_commands.rebuild_solver_from_checkpoint") as reb, \
-             patch("autoflowcfd.cli.solve_commands.save_results"), \
-             patch("autoflowcfd.cli.solve_commands.write_checkpoint"), \
-             patch("autoflowcfd.cli.solve_commands._report_aerodynamic_coefficients"):
+        with patch("autoflowcfd.cli.solve.commands.rebuild_solver_from_checkpoint") as reb, \
+             patch("autoflowcfd.cli.solve.commands.save_results"), \
+             patch("autoflowcfd.cli.solve.commands.write_checkpoint"), \
+             patch("autoflowcfd.cli.solve.commands._report_aerodynamic_coefficients"):
             reb.return_value = (_fake_solver(), 150, dict(_META))
             res = CliRunner().invoke(
                 cli, ["solve", "resume", str(ck), "-n", "10"] + extra_args)
@@ -100,10 +100,8 @@ class TestSingleMachineResume:
         两条命令的默认值不一致，会让"同一组参数 resume 一次"悄悄改变
         数值行为——这正是本缺口造成真实发散的机制。
         """
-        # 从 click 命令树上取，而不是 import 某个模块里的函数：命令本体
-        # 在 `solve_steady_commands.py`（复数），`solve_steady_command.py`
-        # （单数）里那个 `solve_steady` 是被它调用的普通函数、没有 .params
-        # ——第一版按单数模块取 `.steady` 直接 AttributeError。
+        # 从 click 命令树上取，而不是 import 某个模块里的函数：取到的才是
+        # 真正注册过的命令对象（带 .params）。
         steady = cli.commands["solve"].commands["steady"]
         steady_default = None
         for param in steady.params:
@@ -139,7 +137,7 @@ class TestDistributedResume:
     def _run(self, tmp_path, extra_args):
         ck = tmp_path / "checkpoint_iter_000150.h5"
         ck.write_bytes(b"")
-        target = ("autoflowcfd.cli.solve_distributed_checkpoint_io"
+        target = ("autoflowcfd.cli.solve.distributed_checkpoint_io"
                   ".rebuild_distributed_solver_from_checkpoint")
         with patch(target) as reb, \
              patch("autoflowcfd.core.mpi.distributed_checkpoint"
@@ -180,7 +178,7 @@ class TestRebuildSignaturesAcceptCfl:
     def test_single_machine_rebuild(self):
         import inspect
 
-        from autoflowcfd.cli.solve_checkpoint_io import (
+        from autoflowcfd.cli.solve.checkpoint_io import (
             rebuild_solver_from_checkpoint,
         )
 
@@ -191,7 +189,7 @@ class TestRebuildSignaturesAcceptCfl:
     def test_distributed_rebuild(self):
         import inspect
 
-        from autoflowcfd.cli.solve_distributed_checkpoint_io import (
+        from autoflowcfd.cli.solve.distributed_checkpoint_io import (
             rebuild_distributed_solver_from_checkpoint,
         )
 

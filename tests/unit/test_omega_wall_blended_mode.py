@@ -264,7 +264,7 @@ class TestTransientTimeAccuracyWarning:
     def test_warning_source_covers_every_time_resolved_model(self, model, method):
         import inspect
 
-        from autoflowcfd.cli import solve_transient_command as stc
+        from autoflowcfd.cli.solve import transient as stc
         src = inspect.getsource(stc)
         assert '_TIME_RESOLVED_MODELS' in src
         assert model in src
@@ -275,7 +275,7 @@ class TestTransientTimeAccuracyWarning:
         """SST 是 RANS 模型，不在时间解析模型清单里。"""
         import inspect
 
-        from autoflowcfd.cli import solve_transient_command as stc
+        from autoflowcfd.cli.solve import transient as stc
         src = inspect.getsource(stc)
         i = src.index('_TIME_RESOLVED_MODELS = (')
         decl = src[i:src.index(')', i)]
@@ -284,7 +284,7 @@ class TestTransientTimeAccuracyWarning:
     def test_help_text_states_only_dual_time_is_time_accurate(self):
         from click.testing import CliRunner
 
-        from autoflowcfd.cli.solve_transient_command import transient
+        from autoflowcfd.cli.solve.transient import transient
         out = CliRunner().invoke(transient, ['--help']).output
         flat = ' '.join(out.split())
         assert '只有 dual-time 是时间精确的' in flat

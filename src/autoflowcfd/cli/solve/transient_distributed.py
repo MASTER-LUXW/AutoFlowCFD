@@ -17,7 +17,7 @@ core/mpi/distributed_mesh_loader.py 模块文档），此前的拒绝已放开�
 
 import click
 
-from autoflowcfd.cli.solve_aero_coefficients import _report_aerodynamic_coefficients
+from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coefficients
 
 
 def _solve_transient_distributed(
@@ -118,7 +118,7 @@ def _solve_transient_cpu_traditional(
     from autoflowcfd.core.mpi.distributed_checkpoint import (
         distributed_save_results, distributed_save_checkpoint,
     )
-    from autoflowcfd.cli.solve_mesh_loader import load_mesh_for_solver
+    from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
     from autoflowcfd.fr.operators import generate_fr_operators
 
     mesh, volume_data = load_mesh_for_solver(
@@ -349,7 +349,7 @@ def _solve_transient_multi_gpu(
             package, n_ranks=n_ranks, device_id=gpu_device, root_context=root_context,
         )
     else:
-        from autoflowcfd.cli.solve_mesh_loader import load_mesh_for_solver
+        from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
         from autoflowcfd.fr.operators import generate_fr_operators
 
         mesh, volume_data = load_mesh_for_solver(

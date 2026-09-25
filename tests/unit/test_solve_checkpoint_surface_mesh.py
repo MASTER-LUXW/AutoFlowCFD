@@ -19,7 +19,7 @@ from unittest.mock import patch, MagicMock
 import numpy as np
 import pytest
 
-from autoflowcfd.cli.solve_checkpoint_io import write_checkpoint, rebuild_solver_from_checkpoint
+from autoflowcfd.cli.solve.checkpoint_io import write_checkpoint, rebuild_solver_from_checkpoint
 
 
 def _fake_solver(n_cells=2, n_sps=1, n_vars=7):
@@ -73,12 +73,12 @@ class TestRebuildSolverSurfaceMeshFallback:
         fake_solver = _fake_solver()
 
         with patch(
-            "autoflowcfd.cli.solve_mesh_loader.load_mesh_for_solver",
+            "autoflowcfd.cli.solve.mesh_loader.load_mesh_for_solver",
             return_value=(fake_mesh, fake_volume_data),
         ) as mock_load, patch(
             "autoflowcfd.core.FRSolver", return_value=fake_solver
         ), patch(
-            "autoflowcfd.cli.solve_wall_distance.compute_wall_distance_for_solver"
+            "autoflowcfd.cli.solve.wall_distance.compute_wall_distance_for_solver"
         ):
             rebuild_solver_from_checkpoint(str(ckpt), surface_mesh=call_surface_mesh)
 

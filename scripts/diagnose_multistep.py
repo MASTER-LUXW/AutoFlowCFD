@@ -6,8 +6,8 @@ import sys
 import numpy as np
 sys.path.insert(0, "src")
 
-from autoflowcfd.cli.solve_mesh_loader import load_mesh_for_solver
-from autoflowcfd.cli.solve_wall_distance import compute_wall_distance_for_solver
+from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
+from autoflowcfd.cli.solve.wall_distance import compute_wall_distance_for_solver
 from autoflowcfd.core import FRSolver
 
 NAS_VOLUME = r"C:\Users\luxw_\Desktop\AutoFlowCFD\cube_demo\cube_demo_volume.nas"

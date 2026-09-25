@@ -1,6 +1,6 @@
 """Regression tests for the CLI/core logging bugs fixed 2026-08-21:
 
-1. `cli/solve_commands.py` and 6 other files used standard-library
+1. `cli/solve/commands.py` and 6 other files used standard-library
    `logging.getLogger(__name__)` instead of the project-wide `loguru`
    logger configured in `cli/main.py`. The stdlib root logger is never
    configured (no `basicConfig`/handler) anywhere in this project, so
@@ -44,8 +44,8 @@ def test_no_stdlib_logging_getlogger_left_in_solve_or_solver_modules():
     this project must use loguru, not `logging.getLogger`, for its
     module-level logger (the project never configures the stdlib root
     logger, so a stdlib logger there is always silently inert)."""
-    import autoflowcfd.cli.solve_commands as solve_commands
-    import autoflowcfd.cli.solve_aero_coefficients as solve_aero_coefficients
+    import autoflowcfd.cli.solve.commands as solve_commands
+    import autoflowcfd.cli.solve.aero_coefficients as solve_aero_coefficients
     import autoflowcfd.core.fr_solver.solver.threads as solver_module
 
     for module in (solve_commands, solve_aero_coefficients, solver_module):

@@ -29,7 +29,7 @@ from unittest.mock import patch, MagicMock
 import numpy as np
 import pytest
 
-from autoflowcfd.cli.solve_checkpoint_io import write_checkpoint, rebuild_solver_from_checkpoint
+from autoflowcfd.cli.solve.checkpoint_io import write_checkpoint, rebuild_solver_from_checkpoint
 
 
 def _fake_solver(n_cells=2, n_sps=1, n_vars=7, order=0, k=None, omega=None, with_turb_model=True):
@@ -94,12 +94,12 @@ class TestRebuildRestoresTurbulenceFields:
             )
 
         with patch(
-            "autoflowcfd.cli.solve_mesh_loader.load_mesh_for_solver",
+            "autoflowcfd.cli.solve.mesh_loader.load_mesh_for_solver",
             return_value=(MagicMock(), MagicMock()),
         ), patch(
             "autoflowcfd.core.FRSolver", side_effect=_fake_frsolver
         ), patch(
-            "autoflowcfd.cli.solve_wall_distance.compute_wall_distance_for_solver"
+            "autoflowcfd.cli.solve.wall_distance.compute_wall_distance_for_solver"
         ):
             return rebuild_solver_from_checkpoint(str(ckpt_path))
 
@@ -174,12 +174,12 @@ class TestRebuildRestoresTurbulenceFields:
             return s
 
         with patch(
-            "autoflowcfd.cli.solve_mesh_loader.load_mesh_for_solver",
+            "autoflowcfd.cli.solve.mesh_loader.load_mesh_for_solver",
             return_value=(MagicMock(), MagicMock()),
         ), patch(
             "autoflowcfd.core.FRSolver", side_effect=_fake_frsolver
         ), patch(
-            "autoflowcfd.cli.solve_wall_distance.compute_wall_distance_for_solver"
+            "autoflowcfd.cli.solve.wall_distance.compute_wall_distance_for_solver"
         ), pytest.raises(click.ClickException):
             rebuild_solver_from_checkpoint(str(ckpt))
 
@@ -201,12 +201,12 @@ class TestPhaseInitialResidualPersistence:
             return _fake_solver(n_cells=n_cells, n_sps=n_sps, order=kwargs["order"])
 
         with patch(
-            "autoflowcfd.cli.solve_mesh_loader.load_mesh_for_solver",
+            "autoflowcfd.cli.solve.mesh_loader.load_mesh_for_solver",
             return_value=(MagicMock(), MagicMock()),
         ), patch(
             "autoflowcfd.core.FRSolver", side_effect=_fake_frsolver
         ), patch(
-            "autoflowcfd.cli.solve_wall_distance.compute_wall_distance_for_solver"
+            "autoflowcfd.cli.solve.wall_distance.compute_wall_distance_for_solver"
         ):
             return rebuild_solver_from_checkpoint(str(ckpt_path))
 

@@ -5,7 +5,7 @@
 coefficients/export-vtk/report/convergence/transient-mean/
 transient-rms/transient-psd 七个命令共用，与任何单个具体命令都不是
 强绑定关系，独立成一个纯辅助模块最清晰——镜像
-cli/solve_commands.py + cli/solve_helpers.py 已经用过的同一种拆分
+cli/solve/commands.py + cli/solve/helpers.py 已经用过的同一种拆分
 方式（重量级命令主体保留在 *_commands.py，共用辅助函数搬到
 *_helpers.py）。纯代码搬移，不改变任何行为。
 """

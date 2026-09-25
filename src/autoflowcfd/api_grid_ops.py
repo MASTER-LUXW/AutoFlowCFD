@@ -101,7 +101,7 @@ def api_generate_volume_mesh(self, grid_data: GridData, **kwargs) -> VolumeMeshD
     方法（真实方法是 `.generate_from_surface(surface_nodes, surface_faces,
     bounding_box, surface_boundaries=None)`）——任何调用都必然
     TypeError，是从未被真正跑通过的死代码（V2.0 专家组评审逐行核实）。
-    改为镜像 CLI `grid generate-volume` 命令（cli/grid_volume_commands.py）
+    改为镜像 CLI `grid generate-volume` 命令（cli/grid/volume_commands.py）
     的真实调用方式：从 grid_data 取出 nodes/cells/boundaries，自己算
     bounding box，传给 generate_from_surface。
 

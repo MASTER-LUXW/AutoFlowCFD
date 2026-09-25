@@ -10,18 +10,18 @@
 本文件现在只是一个薄的重新导出入口：外部代码（solve_commands.py、
 solve_steady_command.py、solve_transient_command.py、
 core/mpi/distributed_mesh_loader.py 等）一律仍从
-`autoflowcfd.cli.solve_helpers` 导入即可，不需要关心内部是怎么拆的。
+`autoflowcfd.cli.solve.helpers` 导入即可，不需要关心内部是怎么拆的。
 """
 
-from autoflowcfd.cli.solve_mesh_loader import load_mesh_for_solver  # noqa: F401
-from autoflowcfd.cli.solve_wall_distance import compute_wall_distance_for_solver  # noqa: F401
-from autoflowcfd.cli.solve_checkpoint_io import (  # noqa: F401
+from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver  # noqa: F401
+from autoflowcfd.cli.solve.wall_distance import compute_wall_distance_for_solver  # noqa: F401
+from autoflowcfd.cli.solve.checkpoint_io import (  # noqa: F401
     save_results,
     restore_state_from_checkpoint,
     rebuild_solver_from_checkpoint,
     write_checkpoint,
 )
-from autoflowcfd.cli.solve_physical_constants import (  # noqa: F401
+from autoflowcfd.cli.solve.physical_constants import (  # noqa: F401
     load_physical_config_if_given,
     resolve_physical_constants,
     resolve_turbulence_model,

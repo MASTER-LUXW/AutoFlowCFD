@@ -150,8 +150,8 @@ def api_resume_simulation(
     逐行核实）。且 `self.grid_data is None` 分支返回一个只含拍扁体积
     平均解的占位 SolverResult，从不真正恢复求解器。
 
-    改为直接复用 CLI `solve resume`（cli/solve_commands.py）已验证
-    正确的重建逻辑（cli/solve_checkpoint_io.py::rebuild_solver_from_
+    改为直接复用 CLI `solve resume`（cli/solve/commands.py）已验证
+    正确的重建逻辑（cli/solve/checkpoint_io.py::rebuild_solver_from_
     checkpoint）——checkpoint 的 metadata 自带重建 HighOrderMesh +
     FRSolver 所需的全部参数（input_file/order/turbulence_model/backend/
     自由来流条件），不依赖调用方是否设置过 self.grid_data。
@@ -178,7 +178,7 @@ def api_resume_simulation(
 
     logger.info(f"Resuming simulation from checkpoint: {checkpoint_file}")
 
-    from autoflowcfd.cli.solve_checkpoint_io import rebuild_solver_from_checkpoint
+    from autoflowcfd.cli.solve.checkpoint_io import rebuild_solver_from_checkpoint
 
     solver, iteration, metadata = rebuild_solver_from_checkpoint(
         checkpoint_file, backend=backend, surface_mesh=surface_mesh, threads=threads,

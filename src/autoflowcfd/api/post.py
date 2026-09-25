@@ -85,7 +85,7 @@ class _APIPostMixin:
         `self.grid_data`（run_steady/run_transient 从不写入的表面网格，
         即便写了，单元数也和体网格解场对不上）构造 VTKExporter——两个
         参数都是错的，从未被真正跑通过（V2.0 专家组评审逐行核实）。
-        改为镜像 CLI `post export-vtk`（cli/post_export_commands.py）
+        改为镜像 CLI `post export-vtk`（cli/post/export_commands.py）
         真正验证过的用法：VTKExporter 的 `grid_data` 参数只是鸭子类型
         地读取 `.metadata.node_count`/`.cell_count`，`self.volume_mesh`
         （generate_volume_mesh 的输出，run_steady/run_transient 求解的

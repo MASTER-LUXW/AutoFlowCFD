@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - 把 checkpoint 里的场恢复到一个已存在的 solver 上
 
-从 `src/autoflowcfd/cli/solve_checkpoint_io.py`(原 614 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
+从 `src/autoflowcfd/cli/solve/checkpoint_io.py`(原 614 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
 """
 
 

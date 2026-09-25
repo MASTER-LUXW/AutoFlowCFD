@@ -5,8 +5,8 @@
 
 排查中用 `flake8 --select=F821` 扫全仓库时发现：
 
-    src/autoflowcfd/cli/solve_transient_distributed.py:221: F821 undefined name 'aoa_deg'
-    src/autoflowcfd/cli/solve_transient_distributed.py:325: F821 undefined name 'aoa_deg'
+    src/autoflowcfd/cli/solve/transient_distributed.py:221: F821 undefined name 'aoa_deg'
+    src/autoflowcfd/cli/solve/transient_distributed.py:325: F821 undefined name 'aoa_deg'
 
 1. **硬崩溃**：`_solve_transient_fully_distributed` 与
    `_solve_transient_multi_gpu` 的函数体里就在用 `aoa_deg`/`aos_deg`
@@ -37,7 +37,7 @@ import pathlib
 import pytest
 
 _SRC = pathlib.Path(__file__).resolve().parents[2] / (
-    "src/autoflowcfd/cli/solve_transient_distributed.py")
+    "src/autoflowcfd/cli/solve/transient_distributed.py")
 _TREE = ast.parse(io.open(_SRC, encoding="utf-8").read())
 _FUNCS = {n.name: n for n in _TREE.body if isinstance(n, ast.FunctionDef)}
 

@@ -24,7 +24,7 @@ class TestSolveTransientDistributedCliWiring:
         mesh_file.write_bytes(b"")
 
         with patch(
-            "autoflowcfd.cli.solve_transient_command._solve_transient_distributed"
+            "autoflowcfd.cli.solve.transient._solve_transient_distributed"
         ) as mock_distributed:
             runner = CliRunner()
             result = runner.invoke(
@@ -53,7 +53,7 @@ class TestSolveTransientDistributedCliWiring:
         mesh_file.write_bytes(b"")
 
         with patch(
-            "autoflowcfd.cli.solve_transient_command._solve_transient_distributed"
+            "autoflowcfd.cli.solve.transient._solve_transient_distributed"
         ) as mock_distributed:
             runner = CliRunner()
             result = runner.invoke(
@@ -84,7 +84,7 @@ class TestSolveTransientDistributedCliWiring:
         ckpt_file.write_bytes(b"")
 
         with patch(
-            "autoflowcfd.cli.solve_transient_command._solve_transient_distributed"
+            "autoflowcfd.cli.solve.transient._solve_transient_distributed"
         ) as mock_distributed:
             runner = CliRunner()
             result = runner.invoke(
@@ -107,7 +107,7 @@ class TestSolveTransientDistributedCliWiring:
         mesh_file.write_bytes(b"")
 
         with patch(
-            "autoflowcfd.cli.solve_transient_command._solve_transient_distributed"
+            "autoflowcfd.cli.solve.transient._solve_transient_distributed"
         ) as mock_distributed:
             runner = CliRunner()
             result = runner.invoke(

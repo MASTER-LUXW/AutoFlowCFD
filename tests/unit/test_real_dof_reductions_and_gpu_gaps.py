@@ -206,7 +206,7 @@ class TestRealDofReductionCallSitesAreWired:
         assert "reduce_rows_over_real_sps(" in s
 
     def test_checkpoint_cell_average_both_sites(self):
-        from autoflowcfd.cli import solve_checkpoint_io
+        from autoflowcfd.cli.solve import checkpoint_io as solve_checkpoint_io
         from autoflowcfd.core.mpi import distributed_checkpoint
         s1 = module_source(solve_checkpoint_io)
         assert "reduce_per_cell_over_real_sps(" in s1

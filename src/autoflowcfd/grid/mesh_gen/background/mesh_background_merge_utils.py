@@ -129,7 +129,7 @@ def _export_partial_mesh_and_exit(
     """导出局部（仅 BL / 仅过渡层 / 仅核心）调试网格并退出进程。
 
     所有 `--*-only` CLI 标志的早期停止路径共用此函数
-    （参见 cli/grid_commands.py 的 `--bl-only`/`--trans-only`/`--core-only`）。
+    （参见 cli/grid/commands.py 的 `--bl-only`/`--trans-only`/`--core-only`）。
     这些标志用于在网格查看器（ANSA 等）中直接检查管线各阶段的生成结果——
     在调查 BL/过渡层到核心填充界面问题时反复需要此功能，但此前没有可复用的方式，
     每次都要写临时脚本。

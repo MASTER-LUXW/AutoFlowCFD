@@ -280,7 +280,7 @@ def benchmark(
         # 棱柱），这条命令此前对任何输入都会立即报错崩溃，从未真正跑通
         # 过一次基准测试。改成与 `grid generate-volume` 完全相同的管线
         # （parser.generate_volume_mesh_from_surface，见
-        # cli/grid_volume_commands.py::generate_volume 文档）先从面网格
+        # cli/grid/volume_commands.py::generate_volume 文档）先从面网格
         # 生成体网格，再用 HighOrderMesh(order=order).load_from_volume_mesh
         # 加载——这是本项目里唯一真正构造出可用 HighOrderMesh 的路径。
         t_start = _time.perf_counter()
