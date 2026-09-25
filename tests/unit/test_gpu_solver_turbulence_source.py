@@ -181,6 +181,7 @@ def test_compute_turbulence_source_gpu_matches_cpu_single_machine(turb_model_nam
         wall_distance_gpu=d_wall,
         turb_model_name=turb_model_name, flat_face_gpu=flat,
         _wall_mask_k_gpu=np.zeros(flat.n_faces, dtype=bool),
+        _open_mask_gpu=np.zeros(flat.n_faces, dtype=bool),
         time_integrator=types.SimpleNamespace(cfl=0.5),
         order=order,
         # 产项渐变因子已完成状态（两侧 CPU/GPU 必须显式设成同一个值才

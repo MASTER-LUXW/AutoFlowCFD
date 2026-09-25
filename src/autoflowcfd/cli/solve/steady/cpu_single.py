@@ -7,7 +7,7 @@
 import click
 
 from autoflowcfd.core import FRSolver
-from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
+from autoflowcfd.core.time_integration.base import scheme_from_name
 from autoflowcfd.cli.solve.helpers import (
     compute_wall_distance_for_solver,
     load_mesh_for_solver,
@@ -27,7 +27,7 @@ def _run_cpu_single(
     entropy_stable_volume_enabled, input_file, max_iter, mu_molecular, order,
     output_dir, p_inf, phase_max_iter, reference_area, residual_drop_threshold,
     rho_inf, sem_num_eddies, skip_quality_check, surface_mesh, threads,
-    turbulence_intensity, turbulence_model, use_eikonal, vel_inf, viscosity_ratio,
+    time_scheme, turbulence_intensity, turbulence_model, use_eikonal, vel_inf, viscosity_ratio,
 ):
     """`solve steady` 的单机 CPU路径。"""
     # 单机求解器路径：所有 rank 加载完整网格
@@ -40,7 +40,7 @@ def _run_cpu_single(
         backend=backend,
         order=order,
         turb_model_name=turbulence_model,
-        time_scheme=TimeIntegrationScheme.SSP_RK3,
+        time_scheme=scheme_from_name(time_scheme),
         n_threads=threads,
         cfl_start=cfl_start,
         cfl_max=cfl_max,

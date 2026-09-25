@@ -103,11 +103,11 @@ class TestSingleMachineResume:
         # 从 click 命令树上取，而不是 import 某个模块里的函数：取到的才是
         # 真正注册过的命令对象（带 .params）。
         steady = cli.commands["solve"].commands["steady"]
-        steady_default = None
-        for param in steady.params:
-            if param.name == "cfl_min":
-                steady_default = param.default
-        assert steady_default is not None, "solve steady 没有 --cfl-min 了？"
+        found = [p for p in steady.params if p.name == "cfl_min"]
+        assert found, "solve steady 没有 --cfl-min 了？"
+        # 2026-09-25 起两条命令都默认 None（由 build_cfl_policy 按时间格式取
+        # CFL 律的签名默认值），一致性由"同一个来源"保证
+        steady_default = found[0].default
 
         res, reb = self._run(tmp_path, [])
         assert res.exit_code == 0, res.output

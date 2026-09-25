@@ -29,9 +29,9 @@ def rebuild_distributed_solver_from_checkpoint(
     surface_mesh: Optional[str] = None,
     threads: int = -1,
     skip_quality_check: bool = False,
-    cfl_start: float = 0.1,
-    cfl_max: float = 0.5,
-    cfl_min: float = 0.01,
+    cfl_start: Optional[float] = None,
+    cfl_max: Optional[float] = None,
+    cfl_min: Optional[float] = None,
 ):
     """从 checkpoint 完整重建一个分布式求解器（不继续迭代）。
 

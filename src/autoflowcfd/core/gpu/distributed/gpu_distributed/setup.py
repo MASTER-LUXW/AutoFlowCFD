@@ -459,12 +459,14 @@ class _MultiGPUSetupMixin:
         # base_flat.n_faces`（compact 索引空间的面数，与 group_code 长度
         # 一致）。
         self._wall_mask_k_gpu = None
+        self._open_mask_gpu = None
         if self.turb_model_gpu is not None:
             import types
-            from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_wall_dirichlet_mask_gpu
+            from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_turbulence_face_masks_gpu
             compact_mesh_stub = types.SimpleNamespace(
                 face_connectivity=types.SimpleNamespace(n_faces=self.dist_flat_face.base_flat.n_faces)
             )
-            wall_mask_np = compute_wall_dirichlet_mask_gpu(compact_mesh_stub, self.boundary_ghost_provider)
+            wall_mask_np, open_mask_np = compute_turbulence_face_masks_gpu(compact_mesh_stub, self.boundary_ghost_provider)
             with cp.cuda.Device(device_id):
                 self._wall_mask_k_gpu = cp.asarray(wall_mask_np)
+                self._open_mask_gpu = cp.asarray(open_mask_np)

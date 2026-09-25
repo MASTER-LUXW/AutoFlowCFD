@@ -18,32 +18,30 @@ from autoflowcfd.cli.main import cli
 
 
 class TestAdaptiveCFLControllerParams:
-    def test_controller_defaults_match_the_cli(self):
-        """控制器构造默认值必须与 CLI 默认值是同一个数。
+    def test_cli_leaves_cfl_defaults_to_the_control_law(self):
+        """CLI 的三个 CFL 选项默认 `None`，由 `build_cfl_policy` 按时间格式取
+        对应 CFL 律的签名默认值（2026-09-25 起）。
 
-        2026-09-17 从 (0.1, 0.5) 重定为 (0.03, 0.06)，依据是三类实测（见
-        `cli/solve/steady.py` 的 --cfl-max 帮助与
-        `test_adaptive_cfl_bounds_consistency.py::
-        TestConfigLayerCflDefaultsAreConsistent`）。这里不再硬编码那两个
-        数字，而是从 click 元数据读——配置层与 CLI 默认值"相差 20 倍"
-        那次事故（2026-09-15）的根源正是两处各自硬编码。
+        历史：2026-09-17 以前 CLI 与控制器各自硬编码一份，2026-09-15 出过
+        "配置层与 CLI 默认值相差 20 倍"；之后改成"CLI 默认值 == 控制器默认值"
+        的一致性测试。引入隐式格式后同一组选项要服务两个默认值差两个数量级
+        的 CFL 律（显式 0.03 / SER 5），CLI 再写死任何一个都会让另一个格式
+        拿到错值，所以 CLI 不再持有默认值。
         """
+        from autoflowcfd.cli.solve.commands import resume
         from autoflowcfd.cli.solve.steady import solve_steady
+        from autoflowcfd.cli.solve.transient import transient
 
-        want = {}
-        for prm in solve_steady.params:
-            for name, key in (("--cfl-start", "cfl_start"),
-                              ("--cfl-max", "cfl_max"),
-                              ("--cfl-min", "cfl_min")):
-                if name in getattr(prm, "opts", []):
-                    want[key] = float(prm.default)
-        assert set(want) == {"cfl_start", "cfl_max", "cfl_min"}
+        for cmd in (solve_steady, resume, transient):
+            seen = set()
+            for prm in cmd.params:
+                for name in ("--cfl-start", "--cfl-max", "--cfl-min"):
+                    if name in getattr(prm, "opts", []):
+                        assert prm.default is None, (cmd.name, name, prm.default)
+                        seen.add(name)
+            assert seen == {"--cfl-start", "--cfl-max", "--cfl-min"}, cmd.name
 
         c = AdaptiveCFLController()
-        assert c.cfl_start == want["cfl_start"]
-        assert c.cfl_max == want["cfl_max"]
-        assert c.cfl_min == want["cfl_min"]
-        assert c.cfl_number == want["cfl_start"]   # 初始值 = cfl_start
         assert c.cfl_min < c.cfl_start < c.cfl_max, (
             "三者必须严格递增，否则控制器一步也动不了（cfl_start==cfl_max "
             "会被判定为固定 CFL，见 adaptive_cfl.py 构造函数）")
@@ -123,18 +121,10 @@ class TestResumeCflOptionForwarded:
                 cli, ["solve", "resume", str(ckpt), "--max-iter", "5"],
             )
         assert result.exit_code == 0, result.output
-        # 不硬编码默认值：从 click 元数据读，与 CLI 保持单一事实来源
-        from autoflowcfd.cli.solve.commands import resume as _resume_cmd
-
-        _want = {}
-        for prm in _resume_cmd.params:
-            for name, key in (("--cfl-start", "cfl_start"),
-                              ("--cfl-max", "cfl_max"),
-                              ("--cfl-min", "cfl_min")):
-                if name in getattr(prm, "opts", []):
-                    _want[key] = float(prm.default)
-        assert mock_rebuild.call_args.kwargs["cfl_start"] == _want["cfl_start"]
-        assert mock_rebuild.call_args.kwargs["cfl_max"] == _want["cfl_max"]
+        # 未传时原样传 None，由 build_cfl_policy 按续算所用时间格式取默认值
+        for key in ("cfl_start", "cfl_max", "cfl_min"):
+            assert mock_rebuild.call_args.kwargs[key] is None
+        assert mock_rebuild.call_args.kwargs["time_scheme"] is None
         # rebuild_solver_from_checkpoint 内部把收到的 cfl_start/cfl_max
         # 原样传进 FRSolver(...) —— 这一步是源码里直接可见的
         # `cfl_start=cfl_start, cfl_max=cfl_max`（solve_checkpoint_io.py），

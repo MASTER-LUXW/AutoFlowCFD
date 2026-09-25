@@ -73,17 +73,23 @@ from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coeffici
 @click.option('--checkpoint-interval', type=int, default=100,
               help='中间 checkpoint 保存间隔（本次 resume 自己新跑的额外迭代数，'
                    '非绝对迭代数）——与 solve steady 同名参数含义一致')
-@click.option('--cfl-start', type=float, default=0.03,
-              help='自适应 CFL 初始值（默认 0.03，2026-09-17 从 0.1 下调）。'
+@click.option('--time-scheme', type=click.Choice(['rk3', 'newton-krylov']), default=None,
+              help='续算用的稳态格式；默认沿用 checkpoint 记录的格式（早于 2026-09-25 的 '
+                   'checkpoint 没有记录，它们只可能是 rk3）。仅单机 CPU 路径支持 newton-krylov。')
+@click.option('--cfl-start', type=float, default=None,
+              help='自适应 CFL 初始值，默认按续算所用时间格式取其 CFL 律的签名默认值'
+                   '（rk3 为 0.03，newton-krylov 为 5；adaptive_cfl/policy.py 唯一来源）。'
+                   'rk3 默认值历史：（默认 0.03，2026-09-17 从 0.1 下调）。'
                    'CFL 是纯数值加速参数，不影响物理解，每次 resume 可根据上一段'
                    '收敛表现重新调。下调依据见 `solve steady --cfl-max` 的帮助：2026-09-17 按直接谱测量 + 两张真实网格的失效点重定，线性极限约 0.117、实测失效点 plate 0.30 / 平板边界层 0.10，默认值留 1.7 倍以上裕度。')
-@click.option('--cfl-max', type=float, default=0.06,
-              help='自适应 CFL 上限（默认 0.06，2026-09-17 从 0.5 下调）。'
+@click.option('--cfl-max', type=float, default=None,
+              help='自适应 CFL 上限，默认按时间格式取（rk3 为 0.06，newton-krylov 为 1e4）。'
+                   'rk3 默认值历史：（默认 0.06，2026-09-17 从 0.5 下调）。'
                    '仅单机 CPU 路径（非 --n-ranks>1/--multi-gpu）支持。原文案建议的'
                    '"稳定收敛可试 0.8"已删除——0.8 比实测线性极限高近 7 倍，从来'
                    '不是可达值。下调依据见 `solve steady --cfl-max` 的帮助：2026-09-17 按直接谱测量 + 两张真实网格的失效点重定，线性极限约 0.117、实测失效点 plate 0.30 / 平板边界层 0.10，默认值留 1.7 倍以上裕度。')
-@click.option('--cfl-min', type=float, default=0.01,
-              help='自适应 CFL 下限（默认 0.01）。**真实缺口修复（2026-09-17）**：'
+@click.option('--cfl-min', type=float, default=None,
+              help='自适应 CFL 下限，默认按时间格式取（rk3 为 0.01，newton-krylov 为 0.5）。**真实缺口修复（2026-09-17）**：'
                    '`solve steady` 早在 2026-09-15 就有这个选项（控制器默认下限 0.05 '
                    '高于真 P1 在 79 万单元 cube_demo 上实测稳定的 CFL 0.03，也高于 '
                    'plate_demo 实测的稳定边界，等于一个已验证可用的工作点通过 CLI 根本'
@@ -114,7 +120,8 @@ from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coeffici
 def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
            surface_mesh: Optional[str], reference_area: Optional[float], threads: int,
            skip_quality_check: bool, checkpoint_interval: int,
-           cfl_start: float, cfl_max: float, cfl_min: float,
+           time_scheme: Optional[str],
+           cfl_start: Optional[float], cfl_max: Optional[float], cfl_min: Optional[float],
            phase_max_iter: Optional[int], residual_drop_threshold: float,
            n_ranks: int, multi_gpu: bool, fully_distributed: bool,
            gpu_device: Optional[int]) -> None:
@@ -150,6 +157,9 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
     logger.info(f"Resuming simulation from checkpoint: {checkpoint_file}")
 
     if n_ranks > 1 or multi_gpu:
+        if time_scheme == 'newton-krylov':
+            raise click.UsageError(
+                "--time-scheme newton-krylov 目前只在单机 CPU 路径实现，分布式续算请用 rk3。")
         _resume_distributed(
             checkpoint_file, max_iter, n_ranks, multi_gpu, fully_distributed,
             gpu_device, backend, surface_mesh, threads, skip_quality_check,
@@ -163,6 +173,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
         reference_area=reference_area,
         skip_quality_check=skip_quality_check,
         cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+        time_scheme=time_scheme,
     )
     input_file = metadata["input_file"]
     order = metadata["order"]
@@ -241,9 +252,9 @@ def _resume_distributed(
     checkpoint_interval: int,
     phase_max_iter: Optional[int] = None,
     residual_drop_threshold: float = 100.0,
-    cfl_start: float = 0.1,
-    cfl_max: float = 0.5,
-    cfl_min: float = 0.01,
+    cfl_start: Optional[float] = None,
+    cfl_max: Optional[float] = None,
+    cfl_min: Optional[float] = None,
 ) -> None:
     """`resume` 的分布式分支（2026-09-02 补齐，见 `resume` 文档"完成度"
     一节）——CPU MPI"传统模式"/"完全分布式加载"/多GPU 三条路径共用同一个

@@ -11,7 +11,8 @@ AutoFlowCFD V2.0 - FRSolver 湍流模型管理 (从 fr_solver.py 拆分)
 
     init.py           湍流模型构造、自由来流/边界值、生产项 ramp
     wall_distance.py  壁面距离场计算与跨阶数重算（纯几何量，见该文件文档）
-    source.py         每步的湍流源项与输运求值
+    source.py         每步的湍流源项与输运求值（显式更新 + 与隐式共用的求值件）
+    implicit.py       隐式稳态（Newton-Krylov）下 k-omega 的分离式 PTC-Newton 步
     corrections.py    涡粘修正施加与涡粘场取用
 
 本 `__init__.py` re-export 全部既有公开名**以及跨模块在用的私有名**

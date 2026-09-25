@@ -15,6 +15,8 @@ core/mpi/distributed_mesh_loader.py 模块文档），此前的拒绝已放开�
 不再是"设计上不支持"，只是此前没人把这两个参数接上。
 """
 
+from typing import Optional
+
 import click
 
 from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coefficients
@@ -29,9 +31,9 @@ def _solve_transient_distributed(
     n_ranks, multi_gpu, fully_distributed, gpu_device, backend,
     checkpoint_interval, phase_max_iter=None, residual_drop_threshold=100.0,
     init_checkpoint=None,
-    cfl_start: float = 0.05,
-    cfl_max: float = 0.5,
-    cfl_min: float = 0.01,
+    cfl_start: Optional[float] = None,
+    cfl_max: Optional[float] = None,
+    cfl_min: Optional[float] = None,
     aoa_deg: float = 0.0,
     aos_deg: float = 0.0,
 ):
@@ -100,9 +102,9 @@ def _solve_transient_cpu_traditional(
     n_ranks, checkpoint_interval, reference_area,
     phase_max_iter=None, residual_drop_threshold=100.0,
     init_checkpoint=None,
-    cfl_start: float = 0.05,
-    cfl_max: float = 0.5,
-    cfl_min: float = 0.01,
+    cfl_start: Optional[float] = None,
+    cfl_max: Optional[float] = None,
+    cfl_min: Optional[float] = None,
     aoa_deg: float = 0.0,
     aos_deg: float = 0.0,
 ):

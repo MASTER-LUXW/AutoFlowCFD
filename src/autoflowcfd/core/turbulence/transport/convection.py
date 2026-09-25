@@ -160,6 +160,8 @@ def compute_scalar_convection_residual(
     has_wall_dirichlet_value: np.ndarray = None,
     flat_face_override=None,
     conv_geom: "ScalarConvectionGeometry" = None,
+    open_boundary_face: np.ndarray = None,
+    freestream_value: float = None,
 ) -> np.ndarray:
     """计算标量对流 FR 残差（体积项 + 界面上风校正）。
 
@@ -190,6 +192,15 @@ def compute_scalar_convection_residual(
             `FRFaceConnectivity`，用它重新构建一遍会得到错误的面几何。
             调用方需要传入已经按同一套压缩索引空间构造好的
             `dist_fc.base_flat`。单机路径不传，行为完全不变。
+        open_boundary_face, freestream_value: 来流条件（2026-09-25，真实
+            缺陷修复）。开放边界面（流入/流出）上**质量通量指向域内**的
+            通量点，上风值取来流值 `freestream_value`（与平均流远场幽灵态
+            取自由来流是同一个特征意义）；指向域外的通量点保持外插值
+            （零梯度出流）。此前所有非壁面边界一律零梯度，k/omega **没有
+            任何来流条件**，来流湍流只存在于初场里：显式推进只走了一小段
+            伪时间、初场还没被冲刷掉，于是一直被掩盖；隐式推进真正到达
+            稳态后来流湍流在全域衰减殆尽（棱柱通道 + SST：核心区 omega
+            被压到 0.1*omega_inf 的下限、那里集中了 99.7% 的湍流残差）。
 
     Returns:
         residual: (n_cells, n_sps) 对流残差（dphi/dt 量纲，已除以 rho 前的
@@ -316,6 +327,11 @@ def compute_scalar_convection_residual(
         rho_u_owner = rho_owner_fp[..., None] * vel_owner_fp  # (n_faces, n_fp, 3)
         mass_flux = np.sum(rho_u_owner * flat.true_normal, axis=-1)  # (n_faces, n_fp)
         del rho_owner_fp, vel_owner_fp, rho_u_owner  # 同上"真实内存修复"一节，及时释放
+
+    # 来流条件：开放边界上流入的通量点，外部态就是来流值（见参数文档）
+    if open_boundary_face is not None:
+        inflow = open_boundary_face[:, None] & (mass_flux < 0)
+        phi_neighbor_fp = np.where(inflow, freestream_value, phi_neighbor_fp)
 
     # 迎风选择
     phi_upwind = np.where(mass_flux >= 0, phi_owner_fp, phi_neighbor_fp)

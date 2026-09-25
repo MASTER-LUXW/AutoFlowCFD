@@ -243,6 +243,9 @@ class TestNativeScalarTransportMatchesCpu:
             nu_t=np.zeros_like(k_field),
             sigma_k1=0.85, sigma_k2=1.0, sigma_w1=0.5, sigma_w2=0.856,
             beta_star=0.09, beta1=0.075,
+            # 来流值（来流条件用；本测试开放边界掩码全 False，只需存在）：与
+            # CPU 参照 `SSTModelFR` 的构造默认值一致
+            k_inf=1e-6, omega_inf=1.0,
         )
         turb_gpu.compute_blending_F1_gpu = types.MethodType(GPUTurbulenceSST.compute_blending_F1_gpu, turb_gpu)
         gpu_solver = types.SimpleNamespace(
@@ -256,6 +259,7 @@ class TestNativeScalarTransportMatchesCpu:
             wall_distance_gpu=d_wall,
             flat_face_gpu=flat,
             _wall_mask_k_gpu=np.zeros(flat.n_faces, dtype=bool),
+            _open_mask_gpu=np.zeros(flat.n_faces, dtype=bool),
         )
         dk_gpu, domega_gpu = gst.compute_turbulence_transport_residual_gpu(gpu_solver)
 

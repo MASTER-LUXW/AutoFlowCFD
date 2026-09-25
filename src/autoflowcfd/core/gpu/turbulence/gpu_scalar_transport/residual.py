@@ -61,9 +61,13 @@ def _scalar_volume_div_overintegrated_gpu(cp, factors, segs,
 def compute_scalar_convection_residual_gpu(
     scalar_field, rho, velocity, mesh_data, ops_data, ff, n_cells, n_prism, n_sps,
     wall_dirichlet_zero_face=None, wall_dirichlet_value_face=None, has_wall_dirichlet_value=None,
+    open_boundary_face=None, freestream_value=None,
 ):
     """标量对流 FR 残差（体积项 + 界面上风校正），与 CPU 版
-    `compute_scalar_convection_residual` 逐字对应。"""
+    `compute_scalar_convection_residual` 逐字对应（含来流条件
+    `open_boundary_face/freestream_value`，见 CPU 版参数文档）。
+    `open_boundary_face` 是按边界组类型的掩码，这里与面邻居源推出的真
+    边界面求与。"""
     cp = get_cupy()
     det_jacs = mesh_data['det_jacs']
     adj_j = mesh_data['adj_j']
@@ -114,6 +118,10 @@ def compute_scalar_convection_residual_gpu(
     )
 
     mass_flux = cp.sum(rho_o[..., None] * vel_o * ff.true_normal, axis=-1)  # (n_faces,n_fp)
+    if open_boundary_face is not None:
+        is_true_boundary = (ff.neighbor_src0_cell < 0) & (ff.neighbor_src1_idx < 0)
+        inflow = (open_boundary_face & is_true_boundary)[:, None] & (mass_flux < 0)
+        phi_n = cp.where(inflow, freestream_value, phi_n)
     phi_upwind = cp.where(mass_flux >= 0, phi_o, phi_n)
     # 真实 bug 修复（2026-09-12，与 CPU 版 `transport.py::
     # compute_scalar_convection_residual` 同一处修复，完整推导见该函数
@@ -283,10 +291,12 @@ def compute_turbulence_transport_residual_gpu(
     n_prism = solver.mesh_data.get('n_prism', solver.mesh.n_prism_cells)
 
     wall_mask_k = solver._wall_mask_k_gpu  # 见 gpu_solver_io.py 缓存点文档
+    open_mask = solver._open_mask_gpu      # 同上，来流条件（compute_turbulence_face_masks_gpu）
 
     conv_k = compute_scalar_convection_residual_gpu(
         turb.k_field, rho, vel, solver.mesh_data, solver.ops_data, ff, n_cells, n_prism, n_sps,
         wall_dirichlet_zero_face=wall_mask_k,
+        open_boundary_face=open_mask, freestream_value=float(turb.k_inf),
     )
     diff_k = compute_scalar_diffusion_residual_gpu(
         turb.k_field, gamma_k, solver.mesh_data, solver.ops_data, ff, n_cells, n_prism, n_sps,
@@ -302,6 +312,7 @@ def compute_turbulence_transport_residual_gpu(
     conv_w = compute_scalar_convection_residual_gpu(
         turb.omega_field, rho, vel, solver.mesh_data, solver.ops_data, ff, n_cells, n_prism, n_sps,
         wall_dirichlet_value_face=omega_wall_value_face, has_wall_dirichlet_value=has_omega_wall,
+        open_boundary_face=open_mask, freestream_value=float(turb.omega_inf),
     )
     diff_w = compute_scalar_diffusion_residual_gpu(
         turb.omega_field, gamma_w, solver.mesh_data, solver.ops_data, ff, n_cells, n_prism, n_sps,

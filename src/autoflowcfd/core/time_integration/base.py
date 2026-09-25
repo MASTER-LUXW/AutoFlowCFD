@@ -71,10 +71,10 @@ class TimeIntegrationScheme(Enum):
     # **2026-09-19 更新**：真正的隐式稳态求解器已实现，见
     # `NEWTON_KRYLOV` 与 `time_integration/implicit/`（矩阵自由
     # Newton-Krylov + 伪瞬态延拓 + inexact-Newton forcing term）。
-    # 预处理目前是伪瞬态**对角**形式而不是块 Jacobi —— 矩阵自由地构造
-    # 逐单元稠密块需要每单元 `n_sps*n_var` 次残差求值（P2 五方程下 135
-    # 次），成本不可接受；那条路要转向解析 Jacobian，是独立的一项。
-    # 这一点在 `implicit/preconditioner.py` 里如实记录，没有当成已完成。
+    # 预处理是单元块 Jacobi（`implicit/block_jacobi.py`，着色有限差分
+    # 装配、跨 Newton 步复用；2026-09-25 替代了此前的逐 SP 对角形式——
+    # 旧注释"每单元 n_sps*n_var 次残差求值、成本不可接受"漏掉了着色，
+    # 真实次数与单元数无关）。CFL 律是 SER（`adaptive_cfl/ser.py`）。
     #
     # 其余两个仍然**不是**隐式格式：IMEX_EULER 只对粘性/源项做阻尼
     # Picard 子迭代（不是 Newton），DUAL_TIME 的内层仍是显式推进。
@@ -145,9 +145,9 @@ def scheme_from_name(name):
     if scheme is None:
         raise ValueError(
             f"未知的时间积分方案 {name!r}；合法取值：{scheme_names()}。"
-            f"注意本项目**没有隐式时间格式**：`backward_euler`/`ab3` 这类"
-            f"名字曾经出现在配置层枚举里，但核心层从未实现，已删除而不是"
-            f"留成静默映射到显式格式的假选项。"
+            f"唯一的隐式格式是稳态 Newton-Krylov（`newton-krylov`）；"
+            f"`backward_euler`/`ab3` 这类名字曾经出现在配置层枚举里，但核心"
+            f"层从未实现，已删除而不是留成静默映射到显式格式的假选项。"
         )
     return scheme
 

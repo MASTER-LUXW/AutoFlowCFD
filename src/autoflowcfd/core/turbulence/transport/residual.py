@@ -20,6 +20,7 @@ from .convection import compute_scalar_convection_residual
 from .diffusion import compute_scalar_diffusion_residual
 from .omega_wall import (
     _compute_omega_wall_target,
+    _compute_open_boundary_face_mask,
     _compute_wall_dirichlet_face_mask,
 )
 
@@ -159,10 +160,15 @@ def compute_turbulence_transport_residual(
         rho, vel, solver.mesh, solver.ops, _flat_conv,
     )
 
+    # 开放边界（流入/流出）掩码：k/omega 的来流条件（见
+    # compute_scalar_convection_residual 的 open_boundary_face 参数文档）
+    open_mask = _compute_open_boundary_face_mask(solver, _flat_conv)
+
     # 计算 k 的对流 + 扩散残差
     conv_k = compute_scalar_convection_residual(
         turb.k_field, rho, vel, solver.mesh, solver.ops, wall_dirichlet_zero_face=wall_mask_k,
         flat_face_override=flat_face_override, conv_geom=conv_geom,
+        open_boundary_face=open_mask, freestream_value=float(turb.k_inf),
     )
     diff_k = compute_scalar_diffusion_residual(
         turb.k_field, gamma_k, solver.mesh, solver.ops, wall_dirichlet_zero_face=wall_mask_k,
@@ -188,6 +194,7 @@ def compute_turbulence_transport_residual(
         turb.omega_field, rho, vel, solver.mesh, solver.ops,
         wall_dirichlet_value_face=omega_wall_value_face, has_wall_dirichlet_value=has_omega_wall,
         flat_face_override=flat_face_override, conv_geom=conv_geom,
+        open_boundary_face=open_mask, freestream_value=float(turb.omega_inf),
     )
     diff_w = compute_scalar_diffusion_residual(
         turb.omega_field, gamma_w, solver.mesh, solver.ops,

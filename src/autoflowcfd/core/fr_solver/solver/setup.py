@@ -278,13 +278,20 @@ class _SolverSetupMixin:
         #    CFL 给出的天花板），**必须跨步保持**：一步不被接受时它被
         #    缩小，用不完的档数由下一步继续（见
         #    `core/time_integration/implicit/dtau_control.py`）。
-        # 阶数变化后这三个都要失效（见
+        #  * `_newton_block_precond` 是单元块 Jacobi 预处理的缓存
+        #    （`implicit/block_jacobi.py`）：冻结的 `J_cc` 跨步复用，按
+        #    刷新判据重装配；首次 Newton 步时按当前阶数惰性构造。
+        # 阶数变化后这四个都要失效（见
         # `order_continuation.interpolate_to_new_order_checked`）：残差
         # 量级随阶数跳变，沿用旧的 forcing 状态会让升阶后的第一步用一个
         # 按旧量级算出的容差，而 dtau 缩放是按旧阶数的稳定性缩出来的。
         self._newton_forcing = None
         self._newton_last_info: Optional[dict] = None
         self._newton_dtau_scale: float = 1.0
+        self._newton_block_precond = None
+        # 隐式 k-omega 步的跨步状态（`turbulence/implicit.py::_newton_state`
+        # 首次使用时构造），换阶时与上面几项一起失效
+        self._newton_turb_state = None
         
         # 7. 壁面距离场（用于DDES/WMLES）
         self.wall_distance = None

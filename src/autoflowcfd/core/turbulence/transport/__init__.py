@@ -68,6 +68,9 @@ from .omega_wall import (  # noqa: F401
     _compute_wall_dirichlet_face_mask,
     _omega_wall_formula,
     enforce_omega_wall_relaxation,
+    omega_wall_cell_targets,
+    open_boundary_code_mask,
+    wall_dirichlet_face_mask,
     resolve_omega_wall_mode,
 )
 from .residual import compute_turbulence_transport_residual  # noqa: F401
@@ -78,6 +81,9 @@ __all__ = [
     "compute_scalar_diffusion_residual",
     "compute_turbulence_transport_residual",
     "enforce_omega_wall_relaxation",
+    "omega_wall_cell_targets",
+    "open_boundary_code_mask",
+    "wall_dirichlet_face_mask",
     "precompute_scalar_convection_geometry",
     "resolve_omega_wall_mode",
     "resolve_turb_overintegration",

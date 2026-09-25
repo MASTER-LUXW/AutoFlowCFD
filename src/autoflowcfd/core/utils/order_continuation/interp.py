@@ -257,6 +257,11 @@ def interpolate_to_new_order_checked(solver: Any, new_order: int) -> None:
         solver._newton_forcing = None
         solver._newton_last_info = None
         solver._newton_dtau_scale = 1.0
+        # 块尺寸（真实解点数 x 变量数）随阶数变化，冻结的 `J_cc` 属于旧的
+        # 离散空间，必须整体丢弃，由下一步按新阶数重建。
+        solver._newton_block_precond = None
+        # 隐式 k-omega 步的同类状态（forcing / dtau 缩放 / 块 Jacobi）同理
+        solver._newton_turb_state = None
 
     n_points_1d = new_order + 1
     new_n_sps = n_points_1d ** 3

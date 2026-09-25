@@ -31,15 +31,24 @@ from loguru import logger
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme, scheme_from_name
 
 from .controller import AdaptiveCFLController
+from .ser import SERCFLController
 
 #: 替身对象（既无控制器也无 `fixed_cfl_number`）的回退 CFL。只为诊断脚本 /
 #: 测试替身保留，真实求解器走不到（构造时 `build_cfl_policy` 恰好给出二者之一）。
 _STANDIN_FALLBACK_CFL = 0.1
 
 
-def _controller_default(name: str) -> float:
-    """控制器构造参数的默认值 —— 默认值的唯一事实来源是控制器签名本身。"""
-    return inspect.signature(AdaptiveCFLController.__init__).parameters[name].default
+def controller_class_for(time_scheme):
+    """该时间格式用哪一类 CFL 律：Newton-Krylov 用 SER（`ser.py` 模块文档
+    写了为什么显式那套控制器在隐式上是错的），其余用显式控制器。"""
+    if scheme_from_name(time_scheme) == TimeIntegrationScheme.NEWTON_KRYLOV:
+        return SERCFLController
+    return AdaptiveCFLController
+
+
+def controller_default(name: str, time_scheme) -> float:
+    """该格式所用控制器的构造参数默认值 —— 唯一事实来源是控制器签名本身。"""
+    return inspect.signature(controller_class_for(time_scheme).__init__).parameters[name].default
 
 
 def build_cfl_policy(time_scheme, adaptive: bool = True, cfl_start=None,
@@ -50,25 +59,28 @@ def build_cfl_policy(time_scheme, adaptive: bool = True, cfl_start=None,
       调节（`time_integration/dual.py`），外层控制器不启用；伪时间步长用
       固定 CFL；
     * `adaptive=False`：固定 CFL（稳定边界扫描、A/B 对照都靠它）；
-    * 其余（SSP-RK、前向 Euler、IMEX、Newton-Krylov）：自适应控制器。
+    * Newton-Krylov：SER 律（`ser.py`）；
+    * 其余（SSP-RK、前向 Euler、IMEX）：显式自适应控制器。
 
     固定 CFL 取 `cfl_start`（关掉自适应时"初始值"就是全程唯一的值）；未给
-    时取控制器 `cfl_start` 的默认值。`None` 的参数一律不传给控制器，默认值
-    只有控制器签名这一个来源。
+    时取该格式所用控制器 `cfl_start` 的默认值。`None` 的参数一律不传给
+    控制器，默认值只有控制器签名这一个来源——显式与隐式的默认值差两个
+    数量级（0.03 vs 5），所以 CLI 层不能再写死任何一个。
     """
     scheme = scheme_from_name(time_scheme)
     if adaptive and scheme != TimeIntegrationScheme.DUAL_TIME:
         kw = {k: v for k, v in (("cfl_start", cfl_start), ("cfl_max", cfl_max),
                                 ("cfl_min", cfl_min)) if v is not None}
-        return AdaptiveCFLController(**kw), None
-    fixed = cfl_start if cfl_start is not None else _controller_default("cfl_start")
+        return controller_class_for(scheme)(**kw), None
+    fixed = cfl_start if cfl_start is not None else controller_default("cfl_start", scheme)
     return None, float(fixed)
 
 
 def describe_cfl_policy(controller, fixed_cfl_number) -> str:
     """启动日志用的一行描述（影响数值的开关必须在日志里可见）。"""
     if controller is not None:
-        return (f"Adaptive CFL: enabled (start={controller.cfl_start}, "
+        law = "SER" if isinstance(controller, SERCFLController) else "explicit"
+        return (f"Adaptive CFL: enabled [{law}] (start={controller.cfl_start}, "
                 f"max={controller.cfl_max}, min={controller.cfl_min})")
     return f"Adaptive CFL: disabled (fixed CFL = {fixed_cfl_number:g})"
 

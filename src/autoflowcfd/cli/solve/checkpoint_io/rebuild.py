@@ -8,6 +8,7 @@
 from typing import Optional
 
 import click
+from loguru import logger
 from .restore import restore_solver_state_from_fields
 
 
@@ -44,6 +45,38 @@ def physics_from_metadata(metadata: dict) -> dict:
     }
 
 
+#: `solve resume` 是**稳态**续算（`solver.solve(dt=1e-3)`，dt 在稳态格式下
+#: 被忽略）。时间精确的格式（DUAL_TIME）续算要求物理 dt 与历史层，不在
+#: 这条命令的语义里。
+_RESUME_STEADY_SCHEMES = ("ssp_rk3", "newton_krylov")
+
+
+def resolve_resume_time_scheme(requested, metadata):
+    """续算用的时间格式：显式覆盖 > checkpoint 记录 > `ssp_rk3`。
+
+    checkpoint 记录的是非稳态格式（瞬态运行的末态 checkpoint）时不能照搬
+    ——`resume` 按稳态语义推进；此时退回 `ssp_rk3` 并打 WARNING，而不是
+    静默换格式。早于 2026-09-25 的 checkpoint 没有这个键，它们产生时只有
+    `ssp_rk3` 一种稳态格式，取它是精确的而不是猜测。
+    """
+    from autoflowcfd.core.time_integration.base import scheme_from_name
+
+    if requested is not None:
+        scheme = scheme_from_name(requested)
+        if scheme.value not in _RESUME_STEADY_SCHEMES:
+            raise click.BadParameter(
+                f"solve resume 只支持稳态格式 {_RESUME_STEADY_SCHEMES}，收到 {requested!r}",
+                param_hint="--time-scheme")
+        return scheme
+    recorded = metadata.get("time_scheme", "ssp_rk3")
+    if recorded not in _RESUME_STEADY_SCHEMES:
+        logger.warning(
+            f"checkpoint 记录的时间格式是 {recorded!r}（非稳态）；solve resume 按稳态"
+            f"语义续算，改用 ssp_rk3。需要隐式稳态续算请显式传 --time-scheme newton-krylov。")
+        recorded = "ssp_rk3"
+    return scheme_from_name(recorded)
+
+
 def rebuild_solver_from_checkpoint(
     checkpoint_path: str,
     backend: Optional[str] = None,
@@ -51,9 +84,10 @@ def rebuild_solver_from_checkpoint(
     threads: int = -1,
     reference_area: Optional[float] = None,
     skip_quality_check: bool = False,
-    cfl_start: float = 0.1,
-    cfl_max: float = 0.5,
-    cfl_min: float = 0.05,
+    cfl_start: Optional[float] = None,
+    cfl_max: Optional[float] = None,
+    cfl_min: Optional[float] = None,
+    time_scheme: Optional[str] = None,
 ):
     """从 checkpoint 完整重建一个带解场的 FRSolver（不继续迭代）。
 
@@ -93,6 +127,11 @@ def rebuild_solver_from_checkpoint(
             --reference-area 传了，resume 期间的每步日志也永远不会带
             气动力系数，直到 solve() 整个跑完才会通过 resume() 自己那次
             额外的 _report_aerodynamic_coefficients 调用打印一次
+
+        cfl_start/cfl_max/cfl_min: `None` 时取所用时间格式 CFL 律的签名默认值
+            （`adaptive_cfl/policy.py` 唯一来源；显式与隐式差两个数量级）。
+        time_scheme: 续算用的稳态格式覆盖（`rk3`/`newton-krylov`）；`None`
+            时沿用 checkpoint 记录的格式（见 `resolve_resume_time_scheme`）。
 
     Returns:
         (solver, iteration, metadata): 重建好的 FRSolver 实例（状态已从
@@ -147,11 +186,13 @@ def rebuild_solver_from_checkpoint(
         skip_quality_check=skip_quality_check,
     )
 
+    resolved_scheme = resolve_resume_time_scheme(time_scheme, metadata)
     solver = FRSolver(
         mesh=mesh,
         backend=target_backend,
         order=order,
         turb_model_name=turbulence_model,
+        time_scheme=resolved_scheme,
         # 决定物理解的参数一律从 checkpoint 恢复（来流缺失即报错，见
         # physics_from_metadata）；CFL 等纯数值参数由调用方指定。
         **physics_from_metadata(metadata),

@@ -168,34 +168,21 @@ def enforce_omega_wall_relaxation_gpu(cp, solver, relax=None):
     )
 
 
-def compute_wall_dirichlet_mask_gpu(mesh, boundary_ghost_provider):
-    """CuPy 版 `_compute_wall_dirichlet_face_mask`：纯拓扑查询（哪些面是
-    **真实无滑移** WALL 类型边界组），与 wall_distance/流场状态无关，
-    只依赖网格自身，求解过程中不变——调用方（gpu_solver_io.py）应该只在
-    初始化时调用一次并缓存结果，不是每步都重新算（CPU 版每步都重算是
-    因为它本身开销可忽略；这里直接给出 numpy 版本供调用方自行决定何时
-    上传/缓存）。
+def compute_turbulence_face_masks_gpu(mesh, boundary_ghost_provider):
+    """k/omega 输运的两张面拓扑掩码 `(wall_mask, open_code_mask)`（numpy）。
 
-    真实 bug 修复（2026-09-12）：与 CPU 版 `transport.py::_compute_wall_
-    dirichlet_face_mask` 同一处、同一理由——`is_no_slip=False` 的滑移壁
-    （如 cube_demo 的 "tunnel" 远场边界）物理上零剪切、没有真实边界层，
-    不应享受 Wilcox omega 壁面解析式/k 的 Dirichlet-zero 处理，否则会
-    把这些单元的 omega 强行拉向物理上荒谬的近壁目标值（完整推导见 CPU
-    版同名函数文档）。只把 `is_no_slip` 非 False 的 WALL 编码计入。
-
-    Returns:
-        wall_mask: (n_faces,) numpy bool 数组
+    纯拓扑查询、与流场无关，调用方初始化时算一次并上传缓存。判据与 CPU
+    **同一份实现**（`turbulence/transport/omega_wall.py` 的
+    `wall_dirichlet_face_mask` / `open_boundary_code_mask`）——此前这里有
+    一份逐字复制的 WALL 判据，2026-09-12 的滑移壁修复就不得不在两处各改
+    一遍。`open_code_mask` 不含"真边界面"条件，由
+    `compute_scalar_convection_residual_gpu` 与面邻居源推出的真边界求与。
     """
-    import numpy as np
+    from autoflowcfd.core.turbulence.transport import (
+        open_boundary_code_mask,
+        wall_dirichlet_face_mask,
+    )
+
     n_faces = mesh.face_connectivity.n_faces
-    group_code = getattr(boundary_ghost_provider, "group_code", None)
-    code_to_config = getattr(boundary_ghost_provider, "code_to_config", None)
-    if group_code is None or code_to_config is None:
-        return np.zeros(n_faces, dtype=np.bool_)
-    wall_codes = [
-        code for code, cfg in code_to_config.items()
-        if cfg.get("type") == "WALL" and cfg.get("is_no_slip", True)
-    ]
-    if not wall_codes:
-        return np.zeros(n_faces, dtype=np.bool_)
-    return np.isin(group_code, wall_codes)
+    return (wall_dirichlet_face_mask(boundary_ghost_provider, n_faces),
+            open_boundary_code_mask(boundary_ghost_provider, n_faces))

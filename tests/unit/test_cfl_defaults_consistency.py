@@ -59,49 +59,42 @@ class TestCliOptionsExist:
                 f"这三个参数必须在每条入口上都可配，理由见本文件模块文档"
             )
 
-    @pytest.mark.parametrize("cmd,_names", _CLI_COMMANDS_WITH_CFL)
-    def test_cfl_min_default_is_consistent(self, cmd, _names):
-        got = _params(cmd)["cfl_min"].default
-        assert got == EXPECTED_CFL_MIN, (
-            f"`solve {cmd} --cfl-min` 默认值 {got} != {EXPECTED_CFL_MIN}。"
-            f"入口之间默认值不一致会让\"同一组参数换条命令跑\"悄悄改变数值"
-            f"行为——本项目已因此出过真实发散"
-        )
-
-    @pytest.mark.parametrize("cmd,_names", _CLI_COMMANDS_WITH_CFL)
-    def test_min_le_start_le_max_by_default(self, cmd, _names):
+    @pytest.mark.parametrize("cmd,names", _CLI_COMMANDS_WITH_CFL)
+    def test_cli_defaults_defer_to_the_control_law(self, cmd, names):
+        """2026-09-25 起入口一律默认 None，由 `build_cfl_policy` 按时间格式
+        取 CFL 律签名里的默认值——"各入口默认值一致"由**同一个来源**保证，
+        而不是由各入口各写一份相同的数字保证（后者正是本文件模块文档里
+        四次复发的根源）。引入隐式格式后同一组选项要服务两个默认值差两个
+        数量级的 CFL 律，入口再写死任何一个都必然让另一个格式拿到错值。"""
         p = _params(cmd)
-        lo, start, hi = (p["cfl_min"].default, p["cfl_start"].default,
-                         p["cfl_max"].default)
-        assert lo <= start <= hi, (
-            f"`solve {cmd}` 的默认 CFL 三元组不自洽：{lo} / {start} / {hi}。"
-            f"下限高于起始值时控制器会把 CFL 抬上去（adaptive_cfl.py 第 11 条）"
-        )
+        for n in names:
+            assert p[n].default is None, (
+                f"`solve {cmd} --{n.replace('_', '-')}` 默认值 {p[n].default} 不是 None")
 
 
 class TestSolverConstructorDefaults:
-    def test_frsolver_cfl_min_default(self):
-        """`FRSolver.__init__` 的构造默认值也必须是 0.01。
-
-        不传 CFL 的调用方吃的就是它：`solve transient` 的 rk3/imex 路径
-        （在补齐 CLI 选项之前）、不带 config 的 `api.run_steady/
-        run_transient`、以及任何直接构造 FRSolver 的脚本/测试。
-        """
-        from autoflowcfd.core.fr_solver.solver import FRSolver
-
-        params = inspect.signature(FRSolver.__init__).parameters
-        assert params["cfl_min"].default == EXPECTED_CFL_MIN, (
-            f"FRSolver.__init__ 的 cfl_min 默认值 "
-            f"{params['cfl_min'].default} != {EXPECTED_CFL_MIN}"
-        )
-
-    def test_frsolver_defaults_are_self_consistent(self):
+    def test_frsolver_defaults_defer_to_the_control_law(self):
+        """`FRSolver.__init__` 同样默认 None（此前写死显式那一组，隐式格式
+        不传 CFL 时会静默拿到 0.03）。"""
         from autoflowcfd.core.fr_solver.solver import FRSolver
 
         p = inspect.signature(FRSolver.__init__).parameters
-        lo, start, hi = (p["cfl_min"].default, p["cfl_start"].default,
-                         p["cfl_max"].default)
-        assert lo <= start <= hi, f"FRSolver 默认 CFL 三元组不自洽：{lo}/{start}/{hi}"
+        for n in ("cfl_start", "cfl_max", "cfl_min"):
+            assert p[n].default is None, f"FRSolver.__init__ 的 {n} 默认值不是 None"
+
+    def test_explicit_controller_defaults(self):
+        """显式控制器签名是显式格式默认值的唯一来源：下限 0.01、三元组自洽。"""
+        from autoflowcfd.core.time_integration.adaptive_cfl import AdaptiveCFLController
+
+        c = AdaptiveCFLController()
+        assert c.cfl_min == EXPECTED_CFL_MIN
+        assert c.cfl_min <= c.cfl_start <= c.cfl_max
+
+    def test_ser_defaults_are_self_consistent(self):
+        from autoflowcfd.core.time_integration.adaptive_cfl import SERCFLController
+
+        c = SERCFLController()
+        assert c.cfl_min <= c.cfl_start <= c.cfl_max
 
 
 class TestConfigLayer:

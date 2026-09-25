@@ -14,6 +14,8 @@ behave.
 """
 
 from types import SimpleNamespace
+
+from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 from unittest.mock import patch, MagicMock
 
 import numpy as np
@@ -29,6 +31,8 @@ def _fake_solver(n_cells=2, n_sps=1, n_vars=7):
     return SimpleNamespace(
         state=state,
         freestream={"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0},
+        # write_checkpoint 记录时间格式（2026-09-25）：真实求解器恒有 time_integrator
+        time_integrator=SimpleNamespace(scheme=TimeIntegrationScheme.SSP_RK3),
     )
 
 

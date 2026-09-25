@@ -139,10 +139,11 @@ def gpu_solver_interpolate_to_new_order(solver, target_p: int) -> None:
     # 重建改变。iddes_h_max/h_wn（`self._iddes_h_max_gpu`/`_wn_gpu`）
     # 是纯逐单元几何量（与阶数/SPs 无关），不需要重算，不在这里处理。
     if solver.turb_model_gpu is not None:
-        from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_wall_dirichlet_mask_gpu
-        wall_mask_np = compute_wall_dirichlet_mask_gpu(solver.mesh, solver.boundary_ghost_provider)
+        from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_turbulence_face_masks_gpu
+        wall_mask_np, open_mask_np = compute_turbulence_face_masks_gpu(solver.mesh, solver.boundary_ghost_provider)
         with cp.cuda.Device(solver.device_id):
             solver._wall_mask_k_gpu = cp.asarray(wall_mask_np)
+            solver._open_mask_gpu = cp.asarray(open_mask_np)
 
     # 壁面距离（compact/阶数相关，y+/SST 输运需要）——复用 __init__ 同一个
     # 实例方法。

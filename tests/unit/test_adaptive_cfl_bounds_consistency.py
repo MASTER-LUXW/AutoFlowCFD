@@ -46,20 +46,6 @@ def _falling(n, start=1.0e9, rate=0.9):
     return [start * rate ** k for k in range(n)]
 
 
-def _cli_default(opt_name: str) -> float:
-    """从 `solve steady` 的 click 选项里读出某个默认值。
-
-    直接读 click 的元数据而不是复制一份常量：配置层与 CLI 默认值"相差
-    20 倍"那次事故（2026-09-15）的根源正是两处各自硬编码。
-    """
-    from autoflowcfd.cli.solve.steady import solve_steady
-
-    for p in solve_steady.params:
-        if opt_name in getattr(p, "opts", []):
-            return float(p.default)
-    raise AssertionError(f"solve steady 没有选项 {opt_name}")
-
-
 class TestConstructorReconcilesBounds:
     """`cfl_min > cfl_max` 是自相矛盾的配置，以 cfl_max 为准。"""
 
@@ -330,10 +316,14 @@ class TestConfigLayerCflDefaultsAreConsistent:
     #: 真实网格上实测的最低失效点（平板边界层通道 CFL 0.10 第 3187 步发散）。
     MEASURED_LOWEST_FAILURE = 0.10
 
-    def test_cfl_max_default_matches_cli(self):
-        """配置层与 CLI 的默认上限必须是同一个数。"""
+    def test_cfl_max_default_matches_the_explicit_control_law(self):
+        """配置层（只服务显式 RK3 稳态）与显式控制器签名的默认上限必须是同一个数。
+
+        2026-09-25 起 CLI 的 CFL 选项默认 None（按时间格式取对应 CFL 律的
+        签名默认值），所以这里对照的是唯一来源本身，而不是 CLI 默认值。"""
         from autoflowcfd.config.solver_config import SteadyConfig
-        assert SteadyConfig().cfl_max == pytest.approx(_cli_default("--cfl-max"))
+        from autoflowcfd.core.time_integration.adaptive_cfl import AdaptiveCFLController
+        assert SteadyConfig().cfl_max == pytest.approx(AdaptiveCFLController().cfl_max)
 
     def test_cfl_max_default_is_below_every_measured_failure(self):
         from autoflowcfd.config.solver_config import SteadyConfig

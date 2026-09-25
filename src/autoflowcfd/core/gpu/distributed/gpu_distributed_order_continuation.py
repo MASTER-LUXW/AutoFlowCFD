@@ -214,13 +214,14 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
     # BC 用）——与 __init__ 同一套构造，压缩面数已随上面的重建改变。
     if solver.turb_model_gpu is not None:
         import types
-        from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_wall_dirichlet_mask_gpu
+        from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_turbulence_face_masks_gpu
         compact_mesh_stub = types.SimpleNamespace(
             face_connectivity=types.SimpleNamespace(n_faces=solver.dist_flat_face.base_flat.n_faces)
         )
-        wall_mask_np = compute_wall_dirichlet_mask_gpu(compact_mesh_stub, solver.boundary_ghost_provider)
+        wall_mask_np, open_mask_np = compute_turbulence_face_masks_gpu(compact_mesh_stub, solver.boundary_ghost_provider)
         with cp.cuda.Device(solver.device_id):
             solver._wall_mask_k_gpu = cp.asarray(wall_mask_np)
+            solver._open_mask_gpu = cp.asarray(open_mask_np)
 
     # 壁面距离（compact 索引空间，y+/SST 输运需要）——复用 __init__ 同一个
     # 实例方法，内部按 solver.dist_flat_face.compact_global_ids/

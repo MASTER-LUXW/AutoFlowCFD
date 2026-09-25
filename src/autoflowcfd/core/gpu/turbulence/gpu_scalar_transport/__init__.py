@@ -83,7 +83,7 @@ from .faces import (  # noqa: F401
 )
 from .omega_wall import (  # noqa: F401
     compute_omega_wall_target_gpu,
-    compute_wall_dirichlet_mask_gpu,
+    compute_turbulence_face_masks_gpu,
     enforce_omega_wall_relaxation_gpu,
 )
 from .residual import (  # noqa: F401
@@ -98,6 +98,6 @@ __all__ = [
     "compute_scalar_convection_residual_gpu",
     "compute_scalar_diffusion_residual_gpu",
     "compute_turbulence_transport_residual_gpu",
-    "compute_wall_dirichlet_mask_gpu",
+    "compute_turbulence_face_masks_gpu",
     "enforce_omega_wall_relaxation_gpu",
 ]

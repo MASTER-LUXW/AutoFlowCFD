@@ -235,14 +235,16 @@ def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int
 
     solver.boundary_ghost_provider = my_package['boundary_ghost_provider']
     solver._wall_mask_k_gpu = None
+    solver._open_mask_gpu = None
     if solver.turb_model_gpu is not None:
-        from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_wall_dirichlet_mask_gpu
+        from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_turbulence_face_masks_gpu
         compact_mesh_stub = types.SimpleNamespace(
             face_connectivity=types.SimpleNamespace(n_faces=solver.dist_flat_face.base_flat.n_faces)
         )
-        wall_mask_np = compute_wall_dirichlet_mask_gpu(compact_mesh_stub, solver.boundary_ghost_provider)
+        wall_mask_np, open_mask_np = compute_turbulence_face_masks_gpu(compact_mesh_stub, solver.boundary_ghost_provider)
         with cp.cuda.Device(solver.device_id):
             solver._wall_mask_k_gpu = cp.asarray(wall_mask_np)
+            solver._open_mask_gpu = cp.asarray(open_mask_np)
 
     solver.mu_molecular = my_package['mu_molecular']
     solver.freestream = {**my_package['freestream'], "mach_ref": my_package['mach_ref']}

@@ -222,6 +222,7 @@ class _GPUDistributedTurbSourceMixin:
             flat_face_gpu=self.flat_face_gpu,
             wall_distance_gpu=d_wall,
             _wall_mask_k_gpu=self._wall_mask_k_gpu,
+            _open_mask_gpu=self._open_mask_gpu,
         )
         from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import (
             compute_turbulence_transport_residual_gpu,

@@ -332,7 +332,11 @@ from .update import (  # noqa: F401
 from .controller import (  # noqa: F401
     AdaptiveCFLController,
 )
+from .ser import (  # noqa: F401
+    SERCFLController,
+)
 
 __all__ = [
     "AdaptiveCFLController",
+    "SERCFLController",
 ]

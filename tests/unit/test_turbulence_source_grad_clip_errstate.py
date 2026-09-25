@@ -39,7 +39,12 @@ class TestGradClipErrstateWrapping:
         this module's source."""
         import inspect
 
-        src = inspect.getsource(turbulence_module.compute_turbulence_source)
+        # 2026-09-25：梯度裁剪随源项求值一起拆进了 `evaluate_turbulence_rates`
+        # （显式与隐式 k-omega 更新共用的求值件），`compute_turbulence_source`
+        # 现在只是编排。
+        from autoflowcfd.core.fr_solver.turbulence.source import evaluate_turbulence_rates
+
+        src = inspect.getsource(evaluate_turbulence_rates)
         errstate_idx = src.index("with np.errstate(over='ignore', invalid='ignore'):")
         norm_idx = src.index("grad_k_mag = np.linalg.norm(grad_k, axis=-1)")
         assert errstate_idx < norm_idx, (

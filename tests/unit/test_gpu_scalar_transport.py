@@ -290,6 +290,9 @@ class TestTurbulenceTransportResidualGpuMatchesCpu:
             nu_t=np.zeros_like(k_field),
             sigma_k1=0.85, sigma_k2=1.0, sigma_w1=0.5, sigma_w2=0.856,
             beta_star=0.09, beta1=0.075,
+            # 来流值（来流条件用）：与 CPU 参照 `SSTModelFR(n_cells, n_sps)` 的
+            # 构造默认值一致
+            k_inf=1e-6, omega_inf=1.0,
         )
         # 复用真实类里的公式本体（不重新手写一遍），只是不走真正需要
         # CUDA 设备的 __init__。
@@ -306,6 +309,7 @@ class TestTurbulenceTransportResidualGpuMatchesCpu:
             wall_distance_gpu=d_wall,
             flat_face_gpu=flat,
             _wall_mask_k_gpu=np.zeros(flat.n_faces, dtype=bool),
+            _open_mask_gpu=np.zeros(flat.n_faces, dtype=bool),
         )
 
     def _build_cpu_reference_solver(self, mesh, ops, Q, U, k_field, omega_field, d_wall, mu):
@@ -416,6 +420,9 @@ class TestOmegaWallRelaxationGpuMatchesCpu:
             wall_distance_gpu=cpu_solver.wall_distance.copy(),
             flat_face_gpu=flat,
             _wall_mask_k_gpu=wall_mask,
+            # 与 CPU 参照同一份判据（CPU 版在残差内部按 provider 现算）
+            _open_mask_gpu=gst.compute_turbulence_face_masks_gpu(
+                mesh, cpu_solver.boundary_ghost_provider)[1],
         )
 
     def test_enforce_relaxation_matches_cpu_exactly(self, mesh_ops_flat, _patch_get_cupy):
@@ -483,7 +490,7 @@ class TestComputeWallDirichletMaskGpu:
     `test_turbulence_transport.py::TestComputeWallDirichletFaceMask::
     test_slip_wall_excluded_only_no_slip_wall_included` 同一个 bug 的
     GPU 镜像验证）：`is_no_slip=False` 的滑移壁不应被
-    `compute_wall_dirichlet_mask_gpu` 计入需要 Wilcox omega 壁面解析式
+    `compute_turbulence_face_masks_gpu` 计入需要 Wilcox omega 壁面解析式
     处理的壁面集合，只有 `is_no_slip=True`（默认值）的 WALL 编码才应
     计入。函数本身是纯 numpy 实现（无需真实 CuPy 设备）。
     """
@@ -499,9 +506,22 @@ class TestComputeWallDirichletMaskGpu:
             },
         )
 
-        mask = gst.compute_wall_dirichlet_mask_gpu(mesh, provider)
+        mask, open_mask = gst.compute_turbulence_face_masks_gpu(mesh, provider)
 
         np.testing.assert_array_equal(mask, [True, False, False, False])
+        # 开放边界：只有 OUTLET 组；-1（内部面/未匹配）在没有 default_config
+        # 时不算（真边界条件由 GPU 对流里的面邻居源判定再求与）
+        np.testing.assert_array_equal(open_mask, [False, False, True, False])
+
+    def test_unmatched_faces_follow_default_config(self):
+        mesh = types.SimpleNamespace(face_connectivity=types.SimpleNamespace(n_faces=3))
+        provider = types.SimpleNamespace(
+            group_code=np.array([0, -1, -1]),
+            code_to_config={0: {"type": "SYMMETRY"}},
+            default_config={"type": "FARFIELD"},
+        )
+        _, open_mask = gst.compute_turbulence_face_masks_gpu(mesh, provider)
+        np.testing.assert_array_equal(open_mask, [False, True, True])
 
 
 if __name__ == "__main__":

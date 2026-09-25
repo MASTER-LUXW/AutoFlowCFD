@@ -37,12 +37,12 @@ continuation，Kelley & Keyes 1998）：在对角上加一个伪时间项
    相差几百倍（实测 178~790 倍），用单元平均会让那些单元的对角项错得
    很远。
 
-**它不是块 Jacobi**，如实说明：块 Jacobi（逐单元 `n_sps*n_var` 的稠密块
-求逆）在 `dtau` 大的时候收敛性明显更好，但矩阵自由地构造那个块需要每
-单元 `n_sps*n_var` 次残差求值（P2 五方程下 135 次），成本不可接受；要
-它就必须转向解析 Jacobian，那是一个独立的、量级大得多的工作。当前实现
-在 `dtau` 大的时候靠 GMRES 迭代次数上升来承担，由
-`forcing.py` 的 inexact-Newton 容差限制单次求解的迭代数。
+**它不是块 Jacobi**：块 Jacobi 见 `block_jacobi.py`（生产默认，本类是它
+的基类，并在块 Jacobi 超内存上限时单独使用）。本文档旧版写过"矩阵自由地
+构造块需要每单元 `n_sps*n_var` 次残差求值、成本不可接受"——那条论证漏掉
+了**着色**：同色单元可以同时扰动，总次数是 `色数 x 解点数 x 变量数`、与
+单元数无关（plate_demo P1 是 150 次）。实测在 CFL 34 下块 Jacobi 把 GMRES
+从 300 次（仍未收敛）降到 20 次，见 `block_jacobi.py` 模块文档。
 """
 
 import numpy as np

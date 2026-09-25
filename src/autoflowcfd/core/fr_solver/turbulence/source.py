@@ -37,6 +37,23 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
     # 更新湍流产项渐变因子（每步调用，production_factor 从 0 渐增到 1）
     _update_production_ramp(solver)
 
+    Q, grad_vel, d_wall, mu = prepare_turbulence_inputs(solver)
+    Sk, S_omega, dk_dt, domega_dt, transport_k, transport_omega = evaluate_turbulence_rates(
+        solver, Q, grad_vel, d_wall, mu, apply_des=True)
+
+    solver.turb_model.update_fields(dt, dk_dt, domega_dt,
+                                     transport_k=transport_k,
+                                     transport_omega=transport_omega)
+    finalize_turbulence_update(solver, dt)
+    return (Sk, S_omega)
+
+
+def prepare_turbulence_inputs(solver):
+    """一步之内只依赖平均流的输入：`(Q, grad_vel, d_wall, mu)`。
+
+    显式路径每步调用一次；隐式路径（`implicit.py`）在整个湍流 Newton 步内
+    冻结它们（平均流不动），只让 `k/omega` 变化。
+    """
     Q = solver.state.Q
     # 真实 bug 修复（2026-09-03，cube_demo 791,492 单元真实网格 Order
     # Continuation P0->P1 跨阶后延迟发散排查发现）：此前这里对*守恒*变量
@@ -85,7 +102,21 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
 
     mu = getattr(solver, 'mu_molecular', 1.8e-5)  # 分子粘度（k/omega方程自身扩散系数用分子粘度，与平均流粘性应力
     # 张量所用的有效粘度[core/fr_solver.py::_get_turbulent_viscosity_field]是两个不同量）
+    return Q, grad_vel, d_wall, mu
 
+
+def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, apply_des: bool):
+    """在 `turb_model` 当前的 `k_field/omega_field` 上求 `dk/dt`、`domega/dt`。
+
+    返回 `(Sk, S_omega, dk_dt, domega_dt, transport_k, transport_omega)`：
+    `dk_dt/domega_dt` 是**源项部分**（已除以 rho），输运部分单独返回——
+    显式路径的 `update_fields` 只对源项做点隐式阻尼，所以两者必须分开。
+
+    副作用：`compute_source_terms` 会刷新模型上的 `nu_t`、混合 `beta` 与
+    realizability 下限（都是当前场的函数）。`apply_des=True` 时还按刚算出的
+    `nu_t` 刷新 DES 长度尺度（供**下一步**用，见下方原注释）——隐式路径的
+    每次残差求值必须传 `False`，否则 Newton 内部的试探场会改写它。
+    """
     grad_k = None
     grad_omega = None
     if solver.turb_model_name in ["SST", "DDES", "IDDES"]:
@@ -140,7 +171,7 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
     # 而不是在这里颠倒调用顺序。
     Sk, S_omega = solver.turb_model.compute_source_terms(Q, grad_vel, d_wall, mu, grad_k=grad_k, grad_omega=grad_omega)
 
-    if solver.ddes_model is not None:
+    if apply_des and solver.ddes_model is not None:
         rho = Q[:, :, 0]
         nu_field = mu / np.maximum(rho, 1e-10)
         if isinstance(solver.ddes_model, IDDESModel):
@@ -227,10 +258,16 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
             flat_face_override=getattr(solver, "_turbulence_flat_face_override", None),
         )
 
-    solver.turb_model.update_fields(dt, dk_dt, domega_dt,
-                                     transport_k=transport_k,
-                                     transport_omega=transport_omega)
+    return Sk, S_omega, dk_dt, domega_dt, transport_k, transport_omega
 
+
+def finalize_turbulence_update(solver, dt, *, omega_wall_relaxation: bool = True) -> None:
+    """`k/omega` 更新之后的两道后处理：模态滤波（非恒等滤波矩阵时）与
+    omega 壁面松弛。显式与隐式路径共用，顺序不变。
+
+    `omega_wall_relaxation=False`：隐式路径把同一个壁面条件作为残差内的
+    强约束施加（`implicit.py`），不能再做一次步后投影——那会让 Newton 解
+    的方程与实际被执行的更新不一致，残差永远降不下去。"""
     # 真实 bug 修复（2026-09-12，cube_demo 791,492 单元真实网格 P1 直连
     # 长程测试发现）：k/omega 场同样需要与平均流一致的模态滤波，见
     # fr_solver/filter.py::filter_scalar_field 完整推导——此前"湍流走
@@ -292,10 +329,8 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
     # 已完整撤销，见 enforce_omega_wall_relaxation 文档。**当前实现是
     # 固定 relax=0.5，`dt` 只是为了不破坏调用方签名而保留的未使用参数
     # ——不要被这行调用误导，真正的行为以被调用函数的文档为准。**
-    if solver.turb_model_name in ["SST", "DDES", "IDDES"]:
+    if omega_wall_relaxation and solver.turb_model_name in ["SST", "DDES", "IDDES"]:
         from autoflowcfd.core.turbulence.transport import enforce_omega_wall_relaxation
         enforce_omega_wall_relaxation(
             solver, dt, flat_face_override=getattr(solver, "_turbulence_flat_face_override", None),
         )
-
-    return (Sk, S_omega)

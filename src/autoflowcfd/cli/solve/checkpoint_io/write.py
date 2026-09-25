@@ -194,6 +194,9 @@ def write_checkpoint(
         "backend": backend,
         "n_sps_per_cell": solver.state.n_sps,
         "n_vars": solver.state.n_vars,
+        # 时间格式（2026-09-25）：`solve resume` 默认沿用它（隐式稳态续算
+        # 不应被静默换回显式格式）。
+        "time_scheme": solver.time_integrator.scheme.value,
         # 决定物理解的参数（来流、攻角/侧滑角、粘度、Tu/VR）：与分布式写入端
         # 共用唯一的写入函数，见 core/utils/checkpoint_physics.py。
         **physics_metadata(solver),

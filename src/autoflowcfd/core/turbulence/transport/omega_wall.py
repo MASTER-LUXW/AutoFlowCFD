@@ -63,9 +63,13 @@ def _compute_wall_dirichlet_face_mask(solver) -> np.ndarray:
     调用方原有的 Neumann 默认，不是新的静默 bug（这是修复前唯一的行为，
     对这些没有分组信息的场景数值结果不变）。
     """
-    mesh = solver.mesh
-    n_faces = mesh.face_connectivity.n_faces
-    provider = getattr(solver, "boundary_ghost_provider", None)
+    return wall_dirichlet_face_mask(
+        getattr(solver, "boundary_ghost_provider", None), solver.mesh.face_connectivity.n_faces)
+
+
+def wall_dirichlet_face_mask(provider, n_faces: int) -> np.ndarray:
+    """`_compute_wall_dirichlet_face_mask` 的纯函数形式（CPU 与 GPU 共用，
+    判据见该函数文档）。"""
     group_code = getattr(provider, "group_code", None)
     code_to_config = getattr(provider, "code_to_config", None)
     if group_code is None or code_to_config is None:
@@ -78,6 +82,47 @@ def _compute_wall_dirichlet_face_mask(solver) -> np.ndarray:
     if not wall_codes:
         return np.zeros(n_faces, dtype=np.bool_)
     return np.isin(group_code, wall_codes)
+
+
+def _compute_open_boundary_face_mask(solver, flat) -> np.ndarray:
+    """哪些面是**开放边界**（流入/流出：FARFIELD、INLET、OUTLET 等），
+    供 k/omega 对流的来流条件使用（`compute_scalar_convection_residual` 的
+    `open_boundary_face` 参数）。
+
+    分类读的是平均流热边界条件那一份唯一来源
+    `boundary/fr_ghost_state.py::ADIABATIC_THERMAL_BC_TYPES`（WALL/
+    SYMMETRY）：它的文档写明"INLET/OUTLET/FARFIELD 是流入/流出边界"，
+    这里取其补集，不另建一张 BC 类型表。
+
+    与 `_compute_wall_dirichlet_face_mask` 同一个鸭子类型约定：provider 没有
+    `group_code/code_to_config`（测试用的普通 callable）时返回全 False，
+    保持那些场景的既有行为。
+    """
+    is_boundary = np.asarray(flat.is_boundary, dtype=np.bool_)
+    return open_boundary_code_mask(
+        getattr(solver, "boundary_ghost_provider", None), is_boundary.shape[0]) & is_boundary
+
+
+def open_boundary_code_mask(provider, n_faces: int) -> np.ndarray:
+    """按边界组类型逐面标记"开放边界"（未匹配任何组的面按
+    `default_config`）。**不含**"是否真边界面"这一条（内部面的
+    `group_code` 也是 -1）：CPU 与调用方的 `is_boundary` 求与，GPU 与
+    自己从面邻居源推出的真边界掩码求与（`gpu_scalar_transport`）。
+    """
+    from autoflowcfd.boundary.fr_ghost_state import ADIABATIC_THERMAL_BC_TYPES
+
+    mask = np.zeros(n_faces, dtype=np.bool_)
+    group_code = getattr(provider, "group_code", None)
+    code_to_config = getattr(provider, "code_to_config", None)
+    if group_code is None or code_to_config is None:
+        return mask
+    default_config = getattr(provider, "default_config", None)
+    group_code = np.asarray(group_code)
+    for code in np.unique(group_code):
+        cfg = code_to_config.get(int(code), default_config)
+        if cfg is not None and cfg.get("type") not in ADIABATIC_THERMAL_BC_TYPES:
+            mask[group_code == code] = True
+    return mask
 
 
 #: omega 壁面目标值的公式族，由 `AFCFD_OMEGA_WALL_MODE` 选择：
@@ -374,9 +419,27 @@ def enforce_omega_wall_relaxation(solver, dt, relax: float = None,
     """
     if relax is None:
         relax = 0.5
+    hit_cells, avg_target = omega_wall_cell_targets(solver, flat_face_override)
+    if hit_cells.size == 0:
+        return
+    turb = solver.turb_model
+    turb.omega_field[hit_cells, :] = (
+        (1.0 - relax) * turb.omega_field[hit_cells, :] + relax * avg_target[:, None]
+    )
+
+
+def omega_wall_cell_targets(solver, flat_face_override=None):
+    """壁面 owner 单元与各自的 Wilcox omega 目标值 `(hit_cells, avg_target)`。
+
+    显式路径的每步松弛（`enforce_omega_wall_relaxation`）与隐式路径的残差
+    内强约束（`fr_solver/turbulence/implicit.py`）共用这一份——同一个壁面
+    条件只允许一个事实来源。角部单元是多个 WALL 面的 owner，取各面目标值
+    的平均。没有壁面时返回两个空数组。
+    """
+    empty = (np.zeros(0, dtype=np.int64), np.zeros(0))
     wall_mask = _compute_wall_dirichlet_face_mask(solver)
     if not np.any(wall_mask):
-        return
+        return empty
 
     Q = solver.state.Q
     rho = Q[:, :, 0]
@@ -387,11 +450,10 @@ def enforce_omega_wall_relaxation(solver, dt, relax: float = None,
     flat = flat_face_override if flat_face_override is not None else get_flat_face_geometry(solver.mesh, solver.ops)
     wall_face_idx = np.nonzero(has_wall)[0]
     if len(wall_face_idx) == 0:
-        return
+        return empty
     owner_cells = flat.owner_cell[wall_face_idx]
     target = omega_wall_value_face[wall_face_idx, 0]  # 同一面上恒为同一常数，见函数文档
 
-    turb = solver.turb_model
     # 同一个 owner 单元可能是多个 WALL 面的 owner（角部单元）——用
     # np.add.at 累加再除以命中次数取平均目标值，不能直接花式索引赋值
     # 覆盖（后写的面会覆盖先写的面，不是真正的平均）。
@@ -401,7 +463,4 @@ def enforce_omega_wall_relaxation(solver, dt, relax: float = None,
     np.add.at(count, owner_cells, 1.0)
     hit_cells = np.nonzero(count > 0)[0]
     avg_target = sum_target[hit_cells] / count[hit_cells]
-
-    turb.omega_field[hit_cells, :] = (
-        (1.0 - relax) * turb.omega_field[hit_cells, :] + relax * avg_target[:, None]
-    )
+    return hit_cells, avg_target

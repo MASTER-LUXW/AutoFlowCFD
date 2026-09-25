@@ -249,7 +249,7 @@ class TestBuildFromFullyDistributedPackageSstTurbulence:
         """SST：`wall_distance_compact`（root 预先算好）必须原样上传成
         `wall_distance_gpu`；k_inf/omega_inf 必须按 Tu/VR 公式算对；
         turb_halo_gpu 必须构造。真实 `GPUTurbulenceSST`/
-        `compute_wall_dirichlet_mask_gpu` 要求真实 CUDA，这里用最小
+        `compute_turbulence_face_masks_gpu` 要求真实 CUDA，这里用最小
         Fake 隔离（不重新验证它们的数值逻辑，那是其他测试文件的范围）。
         """
         import autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst as sst_mod
@@ -268,8 +268,10 @@ class TestBuildFromFullyDistributedPackageSstTurbulence:
 
         monkeypatch.setattr(sst_mod, "GPUTurbulenceSST", _FakeGPUTurbulenceSST)
         patch_pkg_attr(monkeypatch, 
-            scalar_transport_mod, "compute_wall_dirichlet_mask_gpu",
-            lambda compact_mesh_stub, provider: np.zeros(compact_mesh_stub.face_connectivity.n_faces, dtype=bool),
+            scalar_transport_mod, "compute_turbulence_face_masks_gpu",
+            lambda compact_mesh_stub, provider: (
+                np.zeros(compact_mesh_stub.face_connectivity.n_faces, dtype=bool),
+                np.zeros(compact_mesh_stub.face_connectivity.n_faces, dtype=bool)),
         )
 
         from autoflowcfd.core.gpu.distributed.gpu_distributed import MultiGPUDistributedSolver
@@ -301,6 +303,7 @@ class TestBuildFromFullyDistributedPackageSstTurbulence:
         assert solver.turb_model_gpu.omega_max == pytest.approx(1e6)
 
         assert solver._wall_mask_k_gpu is not None
+        assert solver._open_mask_gpu is not None
 
 
 class TestRedistributeMultiGpuFullyDistributedForNewOrder:

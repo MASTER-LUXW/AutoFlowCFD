@@ -70,18 +70,18 @@ from autoflowcfd.cli.solve.transient_distributed import _solve_transient_distrib
 @click.option('--aos', 'aos_deg', type=float, default=0.0,
               help='侧滑角 beta（度，绕 z 轴，默认 0）。语义与 --aoa 同，见其说明')
 @click.option("--dt", default=1e-5, help="时间步长 (秒)")
-@click.option('--cfl-start', type=float, default=0.03,
-              help='自适应 CFL 初始值（默认 0.03）。**只对 --time-method '
+@click.option('--cfl-start', type=float, default=None,
+              help='自适应 CFL 初始值（默认取显式控制器签名默认值 0.03，adaptive_cfl/policy.py 唯一来源）。**只对 --time-method '
                    'rk3/imex 生效**：那两档下 step() 忽略 --dt、按逐单元'
                    '局部 CFL 步长推进，自适应控制器是激活的；dual-time 档'
                    '不构造这个控制器（内层伪时间有自己的逻辑）。'
                    '**2026-09-17 补齐**：此前 solve transient 一个 CFL 选项'
                    '都没有，rk3/imex 瞬态只能吃 FRSolver 构造默认值，配置'
                    '不出本项目在两张真实网格上实测稳定的 ~0.03。')
-@click.option('--cfl-max', type=float, default=0.06,
+@click.option('--cfl-max', type=float, default=None,
               help='自适应 CFL 上限（默认 0.06，2026-09-17 从 0.5 下调）。'
                    '语义与 --cfl-start 同，只对 rk3/imex 生效。下调依据见 `solve steady --cfl-max` 的帮助：2026-09-17 按直接谱测量 + 两张真实网格的失效点重定，线性极限约 0.117、实测失效点 plate 0.30 / 平板边界层 0.10，默认值留 1.7 倍以上裕度。')
-@click.option('--cfl-min', type=float, default=0.01,
+@click.option('--cfl-min', type=float, default=None,
               help='自适应 CFL 下限（默认 0.01，与 solve steady/resume 对齐）。'
                    '注意下限会把低于它的 --cfl-start 钳上去，做低 CFL 工况'
                    '时三个都要一起调（见 core/time_integration/'
@@ -130,7 +130,7 @@ from autoflowcfd.cli.solve.transient_distributed import _solve_transient_distrib
                    '只在结束后写一次，与 solve steady 的分布式分支同一个约定）')
 def transient(input_file: str, backend: str, order: int, time_method: str,
               turbulence_model: str, max_iter: int, phase_max_iter: Optional[int], residual_drop_threshold: float,
-              dt: float, cfl_start: float, cfl_max: float, cfl_min: float,
+              dt: float, cfl_start: Optional[float], cfl_max: Optional[float], cfl_min: Optional[float],
         aoa_deg: float, aos_deg: float,
         physical_time: float,
               output_dir: str, use_eikonal: bool, surface_mesh: Optional[str],

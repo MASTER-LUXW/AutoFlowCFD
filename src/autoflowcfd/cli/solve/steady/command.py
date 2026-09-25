@@ -32,16 +32,27 @@ from .cpu_single import _run_cpu_single
                    '自动启用 BD-02 合成湍流入口 (SEM)；wmles 不会（WMLES 依赖壁面模型本身正确'
                    '预测近壁应力，不需要额外的入口湍流结构，见 core/fr_solver/boundary.py 文档）')
 @click.option('--max-iter', type=int, default=1000, help='最大迭代次数')
-@click.option('--cfl-start', type=float, default=0.03,
-              help='自适应 CFL 初始值（稳态伪时间迭代，默认 0.03）。残差不下降时 '
+@click.option('--time-scheme', type=click.Choice(['rk3', 'newton-krylov']), default='rk3',
+              help='稳态伪时间推进格式。rk3：显式 SSP-RK3（CFL 受显式稳定极限约束，'
+                   '真实网格上走完一个绕体特征时间要上万步）；newton-krylov：矩阵自由 '
+                   'Newton-Krylov + 伪瞬态延拓（SER CFL 律 + 单元块 Jacobi 预处理，见 '
+                   'core/time_integration/implicit/），收敛步数由非线性程度而不是最小'
+                   '单元决定。newton-krylov 目前只在单机 CPU 后端实现。')
+@click.option('--cfl-start', type=float, default=None,
+              help='自适应 CFL 初始值。**默认按 --time-scheme 取该格式 CFL 律的签名默认值**'
+                   '（rk3 为显式控制器的 0.03；newton-krylov 为 SER 律的 5）——两者差两个'
+                   '数量级，CLI 不再写死任何一个（adaptive_cfl/policy.py）。以下为 rk3 默认值'
+                   '的标定历史：初始值（稳态伪时间迭代，默认 0.03）。残差不下降时 '
                    'CFL 会一直停在这个值——复杂网格上如果起步就发散可调低。下限是'
                    '独立的 --cfl-min。**2026-09-17 从 0.1 下调**：0.1 是 AUSM+up '
                    'P5± 饱和缺陷（提交 837cd95）修复之前定的，而那个缺陷本身让通量'
                    '的谱半径大 5.2 倍；修复后重新定界（见 --cfl-max 帮助）。0.03 是'
                    '唯一在真实网格上跑过 350+ 步单调下降的起步值，控制器从它往 '
                    '--cfl-max 爬。')
-@click.option('--cfl-max', type=float, default=0.06,
-              help='自适应 CFL 上限（稳态，默认 0.06）。**2026-09-17 从 0.5 '
+@click.option('--cfl-max', type=float, default=None,
+              help='自适应 CFL 上限，默认按 --time-scheme 取（rk3 为 0.06；newton-krylov 为 '
+                   'SER 的 1e4——隐式没有线性稳定极限，上限只防止 dtau 失去伪瞬态阻尼）。'
+                   'rk3 默认值标定历史：上限（稳态，默认 0.06）。**2026-09-17 从 0.5 '
                    '下调**，依据是三类实测：(1) 直接谱测量——预处理后算子 '
                    'Gamma^-1 R 在干净通道网格上 max|dt*lambda| = 0.444 @CFL 0.03、'
                    '裕度 3.9 倍，对应线性极限 CFL 约 0.117（同一测量还发现旧的 '
@@ -55,8 +66,10 @@ from .cpu_single import _run_cpu_single
                    '旧文案里那句"SSP-RK3 线性稳定极限 ~1.0"是标量对流的教科书值，'
                    '与本项目 CFL 参数的定义（面基谱半径 + 低马赫预处理波速）不是'
                    '同一个量纲，已删除。')
-@click.option('--cfl-min', type=float, default=0.01,
-              help='自适应 CFL 下限（稳态，默认 0.01）。**2026-09-17 从 0.05 '
+@click.option('--cfl-min', type=float, default=None,
+              help='自适应 CFL 下限，默认按 --time-scheme 取（rk3 为 0.01；newton-krylov 为 '
+                   'SER 的 0.5，更小的伪时间步由 Newton 步自身的 dtau 缩档负责）。'
+                   'rk3 默认值标定历史：下限（稳态，默认 0.01）。**2026-09-17 从 0.05 '
                    '改为 0.01**：0.05 高于真 P1（AFCFD_FILTER_MODE=off，零阶数'
                    '损失）在 79 万单元 cube_demo 与 plate_demo 两张真实网格上'
                    '实测稳定的 ~0.03，等于一个已验证可用的工作点通过 CLI 根本'
@@ -137,7 +150,7 @@ from .cpu_single import _run_cpu_single
                    '8_算法重构-Entropy-Stable_Split-Form通量重构-Part1/2.md）。真实测试确认在'
                    '已启用过积分的基础上再改善约2~4倍，代价是体积项计算量从O(n_fine)升到'
                    'O(n_fine^2)，仅 CPU 后端实现')
-def solve_steady(input_file, backend, order, turbulence_model, max_iter, cfl_start, cfl_max, cfl_min,
+def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_scheme, cfl_start, cfl_max, cfl_min,
                  aoa_deg, aos_deg, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, use_eikonal, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, artificial_viscosity_enabled, artificial_viscosity_alpha, entropy_stable_volume_enabled):
     """执行稳态 FR 求解。
 
@@ -200,7 +213,12 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, cfl_sta
     # core/gpu/solver/gpu_solver_order_continuation.py 模块文档），
     # 不再需要任何"某后端不支持"的拒绝。
     print(f"\nInput Grid : {input_file}")
-    print(f"Backend    : {backend} | Order: P{order} | Method: rk3")
+    print(f"Backend    : {backend} | Order: P{order} | Method: {time_scheme}")
+    if time_scheme == 'newton-krylov' and (backend == 'gpu' or n_ranks > 1):
+        raise click.UsageError(
+            "--time-scheme newton-krylov 目前只在单机 CPU 后端实现（GMRES 用 scipy，"
+            "分布式需要跨 rank 归约内积、GPU 需要设备端 Krylov）；请用 --backend cpu "
+            "且 --n-ranks 1，或改用 --time-scheme rk3。")
     print(f"Turbulence : {turbulence_model} | Max Iter: {max_iter}")
     if n_ranks > 1:
         print(f"MPI Ranks  : {n_ranks} (domain decomposition)")
@@ -315,6 +333,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, cfl_sta
             skip_quality_check=skip_quality_check,
             surface_mesh=surface_mesh,
             threads=threads,
+            time_scheme=time_scheme,
             turbulence_intensity=turbulence_intensity,
             turbulence_model=turbulence_model,
             use_eikonal=use_eikonal,

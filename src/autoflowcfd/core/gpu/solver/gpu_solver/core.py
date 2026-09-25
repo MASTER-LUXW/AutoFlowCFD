@@ -326,14 +326,16 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         # WALL 边界面拓扑掩码（#7，k/omega 输运 Dirichlet BC 用）：纯几何/
         # 边界分组查询，只依赖 mesh + boundary_ghost_provider，与流场状态
         # 无关，一次性算好缓存，不是每步重算（见 gpu_scalar_transport.py::
-        # compute_wall_dirichlet_mask_gpu 文档）。只有 SST/DDES/IDDES 才
+        # compute_turbulence_face_masks_gpu 文档；同时缓存 k/omega 来流条件用的开放边界掩码）。只有 SST/DDES/IDDES 才
         # 会真正用到（k/omega 输运的 Dirichlet 面）。
         self._wall_mask_k_gpu = None
+        self._open_mask_gpu = None
         if self.turb_model_gpu is not None:
-            from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_wall_dirichlet_mask_gpu
-            wall_mask_np = compute_wall_dirichlet_mask_gpu(mesh, self.boundary_ghost_provider)
+            from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_turbulence_face_masks_gpu
+            wall_mask_np, open_mask_np = compute_turbulence_face_masks_gpu(mesh, self.boundary_ghost_provider)
             with cp.cuda.Device(device_id):
                 self._wall_mask_k_gpu = cp.asarray(wall_mask_np)
+                self._open_mask_gpu = cp.asarray(open_mask_np)
 
         # 初始化 GPU 模态滤波（抑制混叠噪声）
         self.filter_func_gpu = None
