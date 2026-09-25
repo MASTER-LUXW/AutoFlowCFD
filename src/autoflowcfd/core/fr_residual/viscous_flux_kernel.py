@@ -51,24 +51,12 @@ scatter-add 处理方式（每线程私有累加缓冲区 `correction_per_thread
 import numpy as np
 from numba import njit, prange, get_thread_id
 
+from autoflowcfd.core.fr_operators.small_dense import extrap_tensor3x3, matmul_small, matvec_small
 from autoflowcfd.core.fr_operators.flux_kernels import (
     CP_AIR, viscous_physical_flux_point,
     viscous_ip_penalty_tilde, mirror_normal_component,
 )
 from autoflowcfd.core.fr_residual.inviscid_kernel import _extrap_matmul
-
-
-
-@njit(cache=True, inline='always')
-def _extrap_matrix3x3(field_cell: np.ndarray, E: np.ndarray) -> np.ndarray:
-    """(n_sps,3,3) 场外插到 (n_fp,3,3)。numba 不支持任意维 reshape，
-    显式按 9 个分量分别做矩阵乘法。"""
-    n_fp = E.shape[0]
-    out = np.zeros((n_fp, 3, 3))
-    for a in range(3):
-        for b in range(3):
-            out[:, a, b] = E @ field_cell[:, a, b]
-    return out
 
 
 @njit(cache=True, parallel=True)
@@ -157,9 +145,9 @@ def compute_viscous_interface_correction_kernel(
             E_o = boundary_extrap_native[oc_code - 6]  # (n_fp,n_sps)
 
             Q_o = _extrap_matmul(Q[oc], E_o)  # (n_fp,5)
-            gv_o = _extrap_matrix3x3(grad_vel[oc], E_o)  # (n_fp,3,3)
+            gv_o = extrap_tensor3x3(grad_vel[oc], E_o)  # (n_fp,3,3)
             gT_o = _extrap_matmul(grad_T[oc], E_o)  # (n_fp,3)
-            mut_o = E_o @ mu_t_field[oc]  # (n_fp,)
+            mut_o = matvec_small(E_o, mu_t_field[oc])  # (n_fp,)
             adjrow_o = owner_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
 
 
@@ -289,7 +277,7 @@ def compute_viscous_interface_correction_kernel(
                 for v in range(5):
                     weighted_jump_o[i, v] = w_area * jump_owner[i, v]
             # (n_sps,5)，注意：粘性项没有负号（见模块文档符号约定）
-            contrib_owner = lift_native[oc_code - 6] @ weighted_jump_o
+            contrib_owner = matmul_small(lift_native[oc_code - 6], weighted_jump_o)
             for s in range(n_sps):
                 dj = det_jacs[oc, s]
                 for v in range(5):
@@ -301,9 +289,9 @@ def compute_viscous_interface_correction_kernel(
             E_n = boundary_extrap_native[nc_code - 6]
 
             Q_n_native = _extrap_matmul(Q[nc], E_n)  # (n_fp,5)
-            gv_n_native = _extrap_matrix3x3(grad_vel[nc], E_n)  # (n_fp,3,3)
+            gv_n_native = extrap_tensor3x3(grad_vel[nc], E_n)  # (n_fp,3,3)
             gT_n_native = _extrap_matmul(grad_T[nc], E_n)  # (n_fp,3)
-            mut_n_native = E_n @ mu_t_field[nc]  # (n_fp,)
+            mut_n_native = matvec_small(E_n, mu_t_field[nc])  # (n_fp,)
             adjrow_n_native = neighbor_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
 
 
@@ -418,7 +406,7 @@ def compute_viscous_interface_correction_kernel(
                 w_area = ref_area_weight[i]
                 for v in range(5):
                     weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
-            contrib_neighbor = lift_native[nc_code - 6] @ weighted_jump_n
+            contrib_neighbor = matmul_small(lift_native[nc_code - 6], weighted_jump_n)
             for s in range(n_sps):
                 dj = det_jacs[nc, s]
                 for v in range(5):

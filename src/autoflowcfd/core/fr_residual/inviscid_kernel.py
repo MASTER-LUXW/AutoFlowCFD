@@ -49,6 +49,7 @@ numba 标量重结合"同一套"相对 p_inf 容差"方法论验证（见
 import numpy as np
 from numba import njit, prange, get_thread_id
 
+from autoflowcfd.core.fr_operators.small_dense import matmul_small
 from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
 from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_point
 
@@ -58,9 +59,10 @@ def _extrap_matmul(field_cell: np.ndarray, E: np.ndarray) -> np.ndarray:
     """外插矩阵乘法：field_cell (n_sps, k), E (n_fp, n_sps) -> (n_fp, k)。
 
     Python 边界幽灵态预处理（本文件外）和这里的主 kernel 共用同一个
-    函数，不允许出现两份需要永远保持一致的独立实现。
+    函数，不允许出现两份需要永远保持一致的独立实现
+    （不调 BLAS：并行核里逐面调用 BLAS 线程越多越慢，见 small_dense.py）
     """
-    return E @ field_cell
+    return matmul_small(E, field_cell)
 
 
 @njit(cache=True, parallel=True)
@@ -239,7 +241,7 @@ def compute_inviscid_interface_correction_kernel(
                 w_area = ref_area_weight[i]
                 for v in range(5):
                     weighted_jump_o[i, v] = w_area * jump_owner[i, v]
-            contrib_owner = lift_native[oc_code - 6] @ weighted_jump_o  # (n_sps, 5)
+            contrib_owner = matmul_small(lift_native[oc_code - 6], weighted_jump_o)  # (n_sps, 5)
             for s in range(n_sps):
                 dj = det_jacs[oc, s]
                 for v in range(5):
@@ -322,7 +324,7 @@ def compute_inviscid_interface_correction_kernel(
                 w_area = ref_area_weight[i]
                 for v in range(5):
                     weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
-            contrib_neighbor = lift_native[nc_code - 6] @ weighted_jump_n
+            contrib_neighbor = matmul_small(lift_native[nc_code - 6], weighted_jump_n)
             for s in range(n_sps):
                 dj = det_jacs[nc, s]
                 for v in range(5):

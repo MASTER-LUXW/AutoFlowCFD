@@ -11,12 +11,12 @@ scatter-add 冲突、直接写入共享 buffer 而不是 per-thread buffer + 归
 import numpy as np
 from numba import njit, prange
 
+from autoflowcfd.core.fr_operators.small_dense import extrap_tensor3x3, matmul_small, matvec_small
 from autoflowcfd.core.fr_operators.flux_kernels import (
     CP_AIR, viscous_physical_flux_point,
     viscous_ip_penalty_tilde, mirror_normal_component,
 )
 from autoflowcfd.core.fr_residual.inviscid_kernel import _extrap_matmul
-from autoflowcfd.core.fr_residual.viscous_flux_kernel import _extrap_matrix3x3
 
 
 @njit(cache=True, parallel=True)
@@ -87,9 +87,9 @@ def compute_viscous_interface_correction_kernel_colored(
             E_o = boundary_extrap_native[oc_code - 6]
 
             Q_o = _extrap_matmul(Q[oc], E_o)
-            gv_o = _extrap_matrix3x3(grad_vel[oc], E_o)
+            gv_o = extrap_tensor3x3(grad_vel[oc], E_o)
             gT_o = _extrap_matmul(grad_T[oc], E_o)
-            mut_o = E_o @ mu_t_field[oc]
+            mut_o = matvec_small(E_o, mu_t_field[oc])
             adjrow_o = owner_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
 
 
@@ -216,7 +216,7 @@ def compute_viscous_interface_correction_kernel_colored(
                 w_area = ref_area_weight[i]
                 for v in range(5):
                     weighted_jump_o[i, v] = w_area * jump_owner[i, v]
-            contrib_owner = lift_native[oc_code - 6] @ weighted_jump_o
+            contrib_owner = matmul_small(lift_native[oc_code - 6], weighted_jump_o)
             for s in range(n_sps):
                 dj = det_jacs[oc, s]
                 for v in range(5):
@@ -228,9 +228,9 @@ def compute_viscous_interface_correction_kernel_colored(
             E_n = boundary_extrap_native[nc_code - 6]
 
             Q_n_native = _extrap_matmul(Q[nc], E_n)
-            gv_n_native = _extrap_matrix3x3(grad_vel[nc], E_n)
+            gv_n_native = extrap_tensor3x3(grad_vel[nc], E_n)
             gT_n_native = _extrap_matmul(grad_T[nc], E_n)
-            mut_n_native = E_n @ mu_t_field[nc]
+            mut_n_native = matvec_small(E_n, mu_t_field[nc])
             adjrow_n_native = neighbor_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
 
 
@@ -343,7 +343,7 @@ def compute_viscous_interface_correction_kernel_colored(
                 w_area = ref_area_weight[i]
                 for v in range(5):
                     weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
-            contrib_neighbor = lift_native[nc_code - 6] @ weighted_jump_n
+            contrib_neighbor = matmul_small(lift_native[nc_code - 6], weighted_jump_n)
             for s in range(n_sps):
                 dj = det_jacs[nc, s]
                 for v in range(5):

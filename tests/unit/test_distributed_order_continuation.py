@@ -106,6 +106,7 @@ class TestDistributedOrderContinuationDispatch:
         步驻点线 Cp_t 3.5、板边 152 m/s，先 P0 再 P1 为 1.1、50 m/s，见
         core/utils/order_continuation/policy.py）；显式关闭时直接迭代。"""
         import autoflowcfd.core.mpi.distributed_order_continuation as doc_mod
+        from tests.unit._patch_pkg import patch_pkg_attr
         from autoflowcfd.core.fr_solver.state import SolverResult
         from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
 
@@ -123,7 +124,7 @@ class TestDistributedOrderContinuationDispatch:
         def _fake_run(s, *args, **kwargs):
             calls.append(s)
             return SolverResult(converged=False, iterations=0, final_residual=1.0)
-        monkeypatch.setattr(doc_mod, "run_distributed_order_continuation", _fake_run)
+        patch_pkg_attr(monkeypatch, doc_mod, "run_distributed_order_continuation", _fake_run)
 
         solver.solve(n_steps=3, dt=1e-6, output_interval=1000)
         assert (len(calls) == 1) == enabled

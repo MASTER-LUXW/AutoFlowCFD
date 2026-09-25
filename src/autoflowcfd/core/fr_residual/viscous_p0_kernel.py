@@ -36,6 +36,7 @@ primary 门控，本 kernel 从一开始就没有这个问题，不需要改动�
 import numpy as np
 from numba import njit, prange, get_thread_id
 
+from autoflowcfd.core.fr_operators.small_dense import matmul_small
 from autoflowcfd.core.fr_operators.flux_kernels import (
     CP_AIR, viscous_physical_flux_point,
     viscous_ip_penalty_tilde, mirror_normal_component,
@@ -304,7 +305,7 @@ def compute_viscous_interface_correction_p0_kernel(
                 w_area = ref_area_weight[i]
                 for v in range(5):
                     weighted_jump_o[i, v] = w_area * jump_owner[i, v]
-            contrib_owner = lift_native[oc_code - 6] @ weighted_jump_o  # (1,5)
+            contrib_owner = matmul_small(lift_native[oc_code - 6], weighted_jump_o)  # (1,5)
             for v in range(5):
                 correction_per_thread[tid, oc, 0, v] += contrib_owner[0, v] / dj
 
@@ -442,7 +443,7 @@ def compute_viscous_interface_correction_p0_kernel(
                 w_area = ref_area_weight[i]
                 for v in range(5):
                     weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
-            contrib_neighbor = lift_native[nc_code - 6] @ weighted_jump_n  # (1,5)
+            contrib_neighbor = matmul_small(lift_native[nc_code - 6], weighted_jump_n)  # (1,5)
             for v in range(5):
                 correction_per_thread[tid, nc, 0, v] += contrib_neighbor[0, v] / dj
 

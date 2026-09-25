@@ -15,14 +15,10 @@
 import numpy as np
 from numba import njit, prange
 
+from autoflowcfd.core.fr_operators.small_dense import matmul_small
 from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
 from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_point
-
-
-@njit(cache=True)
-def _extrap_matmul(field_cell: np.ndarray, E: np.ndarray) -> np.ndarray:
-    """外插矩阵乘法：field_cell (n_sps, k), E (n_fp, n_sps) -> (n_fp, k)。"""
-    return E @ field_cell
+from autoflowcfd.core.fr_residual.inviscid_kernel import _extrap_matmul
 
 
 @njit(cache=True, parallel=True)
@@ -155,7 +151,7 @@ def compute_inviscid_interface_correction_kernel_colored(
                 w_area = ref_area_weight[i]
                 for v in range(5):
                     weighted_jump_o[i, v] = w_area * jump_owner[i, v]
-            contrib_owner = lift_native[oc_code - 6] @ weighted_jump_o
+            contrib_owner = matmul_small(lift_native[oc_code - 6], weighted_jump_o)
             for s in range(n_sps):
                 dj = det_jacs[oc, s]
                 for v in range(5):
@@ -235,7 +231,7 @@ def compute_inviscid_interface_correction_kernel_colored(
                 w_area = ref_area_weight[i]
                 for v in range(5):
                     weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
-            contrib_neighbor = lift_native[nc_code - 6] @ weighted_jump_n
+            contrib_neighbor = matmul_small(lift_native[nc_code - 6], weighted_jump_n)
             for s in range(n_sps):
                 dj = det_jacs[nc, s]
                 for v in range(5):

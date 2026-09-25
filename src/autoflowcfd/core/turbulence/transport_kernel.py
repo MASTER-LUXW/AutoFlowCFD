@@ -21,6 +21,8 @@ AutoFlowCFD V2.0 - 湍流标量输运 numba kernel（阶段一 HPC 优化）
 import numpy as np
 from numba import njit, prange, get_thread_id
 
+from autoflowcfd.core.fr_operators.small_dense import matvec_small
+
 
 @njit(cache=True)
 def _extrap_owner_scalar_to_faces(
@@ -329,7 +331,7 @@ def distribute_corrections_to_cells_kernel(
             oc_code = owner_cube_face[f]
             weighted_o = _weighted_jump_native(
                 raw_jump_fp[f], true_area_weight[f], raw_jump_fp.shape[1])
-            contrib_owner = lift_native[oc_code - 6] @ weighted_o
+            contrib_owner = matvec_small(lift_native[oc_code - 6], weighted_o)
             for s in range(n_sps):
                 dj = det_jacs[oc, s]
                 correction_per_thread[tid, oc, s] -= contrib_owner[s] / dj
@@ -342,7 +344,7 @@ def distribute_corrections_to_cells_kernel(
             nc_code = neighbor_cube_face[f]
             weighted_n = _weighted_jump_native(
                 raw_jump_fp_neighbor[f], true_area_weight[f], raw_jump_fp.shape[1])
-            contrib_neighbor = lift_native[nc_code - 6] @ weighted_n
+            contrib_neighbor = matvec_small(lift_native[nc_code - 6], weighted_n)
             for s in range(n_sps):
                 dj = det_jacs[nc, s]
                 correction_per_thread[tid, nc, s] += contrib_neighbor[s] / dj
@@ -401,7 +403,7 @@ def distribute_corrections_to_cells_kernel_colored(
             oc_code = owner_cube_face[f]
             weighted_o = _weighted_jump_native(
                 raw_jump_fp[f], true_area_weight[f], n_fp)
-            contrib_owner = lift_native[oc_code - 6] @ weighted_o
+            contrib_owner = matvec_small(lift_native[oc_code - 6], weighted_o)
             for s in range(n_sps):
                 dj = det_jacs[oc, s]
                 correction_sps[oc, s] -= contrib_owner[s] / dj
@@ -413,7 +415,7 @@ def distribute_corrections_to_cells_kernel_colored(
             nc_code = neighbor_cube_face[f]
             weighted_n = _weighted_jump_native(
                 raw_jump_fp_neighbor[f], true_area_weight[f], n_fp)
-            contrib_neighbor = lift_native[nc_code - 6] @ weighted_n
+            contrib_neighbor = matvec_small(lift_native[nc_code - 6], weighted_n)
             for s in range(n_sps):
                 dj = det_jacs[nc, s]
                 correction_sps[nc, s] += contrib_neighbor[s] / dj
