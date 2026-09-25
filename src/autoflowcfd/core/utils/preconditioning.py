@@ -280,7 +280,14 @@ def resolve_low_mach_precond(requested, time_scheme) -> bool:
     DUAL_TIME（真正的非稳态物理时间推进）下强制关闭：那条路径的
     dt 是有物理时间精度含义的物理步长，不是伪时间步长，预处理的
     前提（"只要收敛到 R=0，路径无所谓"）不成立。
-    只对 SSP-RK2/RK3 这两个"纯稳态伪时间推进"方案启用：
+    对 SSP-RK2/RK3 与 NEWTON_KRYLOV 这三个"纯稳态伪时间推进"方案启用。
+
+    NEWTON_KRYLOV（2026-09-25 加入）：Newton 解的是 F(U)=Gamma(U)R(U)=0，Gamma
+    可逆，不动点不变；伪瞬态延拓项随之被预处理（标准的"预处理隐式"做法），
+    声学模态不再刚性。不加时的真实表现（plate_demo P0、层流、CFL 20）：残差
+    4.7e8 降到 ~3e6 后停滞，驻点区压力在 Cp=+15 与 −11 之间周期振荡（封闭风洞里
+    被入口/出口/洞壁反射的弱阻尼声学模态）；加上后同样 120 步残差降到 9.5e5 且
+    仍在下降，驻点区 Cp≈0.92（物理值≈1）。其余方案不启用的原因：
     * DUAL_TIME 的 dt 是有物理时间精度含义的物理步长，不是伪时间
     步长，预处理的前提（"只要收敛到 R=0，路径无所谓"）不成立；
     * IMEX 把残差**拆成**对流/扩散两半分别显式/隐式处理
@@ -303,4 +310,5 @@ def resolve_low_mach_precond(requested, time_scheme) -> bool:
     env = os.environ.get("AFCFD_LOW_MACH_PRECOND")
     req = bool(requested) if env is None else (env == "1")
     return req and scheme_from_name(time_scheme) in (
-        TimeIntegrationScheme.SSP_RK2, TimeIntegrationScheme.SSP_RK3)
+        TimeIntegrationScheme.SSP_RK2, TimeIntegrationScheme.SSP_RK3,
+        TimeIntegrationScheme.NEWTON_KRYLOV)

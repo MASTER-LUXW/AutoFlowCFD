@@ -284,7 +284,7 @@ class TestGpuSolverWiring:
                 f"{mod.__name__} 又自己解析了一遍环境变量")
 
     @pytest.mark.parametrize("scheme,expected", [
-        ("ssp_rk3", True), ("ssp_rk2", True),
+        ("ssp_rk3", True), ("ssp_rk2", True), ("newton_krylov", True),
         ("dual_time", False), ("imex_euler", False), ("forward_euler", False),
     ])
     def test_precond_gated_by_time_scheme(self, scheme, expected):
