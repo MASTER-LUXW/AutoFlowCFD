@@ -63,6 +63,7 @@ from loguru import logger
 from numba import njit, prange
 
 from .preconditioner import PseudoTransientDiagonal
+from .reductions import LocalReductions
 
 #: 一份 `J_cc` 最多复用多少个 Newton 步。
 MAX_AGE = 20
@@ -123,16 +124,25 @@ def estimate_block_bytes(n_prism: int, n_tet: int, n_real_prism: int,
 
 
 class CellBlockJacobian:
-    """单元对角块 `J_cc = dR_c/dU_c`（棱柱、四面体各一组，只含真实自由度）。"""
+    """单元对角块 `J_cc = dR_c/dU_c`（棱柱、四面体各一组，只含真实自由度）。
+
+    后端无关：状态/残差/块在 `red.xp`（numpy 或 cupy）上；着色与单元类型
+    划分是主机端 numpy。**分布式约束**：每次残差求值都是集体操作，所有
+    rank 必须调用同样多次——所以"本色本解点有没有要扰动的单元"用
+    `red.max` 取全局结论，而不是本地没有就跳过（那会让各 rank 的调用
+    次数不一致而死锁）。着色必须是全局一致的（同色单元跨 rank 也不相邻）。
+    """
 
     __slots__ = ("n_sps", "n_var", "prism_cells", "tet_cells", "n_real_prism",
-                 "n_real_tet", "blocks_prism", "blocks_tet", "n_residual_evals")
+                 "n_real_tet", "blocks_prism", "blocks_tet", "n_residual_evals", "xp")
 
-    def __init__(self, residual, u0_flat: np.ndarray, r0_flat: np.ndarray,
-                 scales: np.ndarray, *, n_sps: int, cell_is_prism: np.ndarray,
-                 n_real_prism: int, n_real_tet: int, colors: np.ndarray):
-        u0 = np.ascontiguousarray(u0_flat, dtype=np.float64)
-        r0 = np.ascontiguousarray(r0_flat, dtype=np.float64)
+    def __init__(self, residual, u0_flat, r0_flat, scales: np.ndarray, *, n_sps: int,
+                 cell_is_prism: np.ndarray, n_real_prism: int, n_real_tet: int,
+                 colors: np.ndarray, red: LocalReductions = None):
+        red = red if red is not None else LocalReductions()
+        xp = self.xp = red.xp
+        u0 = xp.ascontiguousarray(u0_flat, dtype=xp.float64)
+        r0 = xp.ascontiguousarray(r0_flat, dtype=xp.float64)
         n_var = u0.shape[1]
         cell_is_prism = np.asarray(cell_is_prism, dtype=bool)
         n_cells = cell_is_prism.size
@@ -144,8 +154,8 @@ class CellBlockJacobian:
         self.tet_cells = np.nonzero(~cell_is_prism)[0]
         self.n_real_prism, self.n_real_tet = n_real_prism, n_real_tet
         bp, bt = n_real_prism * n_var, n_real_tet * n_var
-        self.blocks_prism = np.zeros((self.prism_cells.size, bp, bp), dtype=np.float32)
-        self.blocks_tet = np.zeros((self.tet_cells.size, bt, bt), dtype=np.float32)
+        self.blocks_prism = xp.zeros((self.prism_cells.size, bp, bp), dtype=xp.float32)
+        self.blocks_tet = xp.zeros((self.tet_cells.size, bt, bt), dtype=xp.float32)
         # 单元号 -> 在各自块数组里的下标
         slot = np.empty(n_cells, dtype=np.int64)
         slot[self.prism_cells] = np.arange(self.prism_cells.size)
@@ -153,33 +163,35 @@ class CellBlockJacobian:
 
         # 差分步长：与 `MatrixFreeJacobian` 同一取法——在按参考量级无量纲化
         # 的空间里取 `sqrt(eps_mach) * (1 + rms(U~))`，再换回物理量纲。
-        u0_rms_scaled = float(np.sqrt(np.mean((u0 / scales[None, :]) ** 2)))
+        u0_rms_scaled = red.rms(u0 / xp.asarray(scales)[None, :])
         h = _SQRT_EPS * (1.0 + u0_rms_scaled) * scales
 
         colors = np.asarray(colors, dtype=np.int64)
+        n_colors = int(red.max(xp.asarray([colors.max() if colors.size else -1]))) + 1
         n_eval = 0
-        for k in range(int(colors.max()) + 1):
+        for k in range(n_colors):
             in_k = colors == k
             groups = []
             for cells, blocks, n_real in ((np.nonzero(in_k & cell_is_prism)[0], self.blocks_prism, n_real_prism),
                                           (np.nonzero(in_k & ~cell_is_prism)[0], self.blocks_tet, n_real_tet)):
                 if cells.size:
                     rows = cells[:, None] * n_sps + np.arange(n_real)[None, :]
-                    groups.append((cells, blocks, n_real, rows))
-            if not groups:
-                continue
-            for s in range(max(g[2] for g in groups)):
+                    groups.append((xp.asarray(slot[cells]), blocks, n_real,
+                                   xp.asarray(rows), cells.size))
+            local_s = max((g[2] for g in groups), default=0)
+            n_s = int(red.max(xp.asarray([local_s])))       # 全局一致的调用次数
+            for s in range(n_s):
                 for v in range(n_var):
                     up = u0.copy()
-                    for cells, _, n_real, rows in groups:
+                    for _, _, n_real, rows, _ in groups:
                         if s < n_real:
                             up[rows[:, s], v] += h[v]
-                    dr = (np.asarray(residual(up), dtype=np.float64) - r0) / h[v]
+                    dr = (xp.asarray(residual(up), dtype=xp.float64) - r0) / h[v]
                     n_eval += 1
                     col = s * n_var + v
-                    for cells, blocks, n_real, rows in groups:
+                    for slots, blocks, n_real, rows, nc in groups:
                         if s < n_real:
-                            blocks[slot[cells], :, col] = dr[rows.ravel()].reshape(cells.size, n_real * n_var)
+                            blocks[slots, :, col] = dr[rows.ravel()].reshape(nc, n_real * n_var)
         self.n_residual_evals = n_eval
 
 
@@ -193,32 +205,41 @@ class CellBlockJacobiPreconditioner(PseudoTransientDiagonal):
 
     __slots__ = ("_jac", "_inv_prism", "_inv_tet", "_rows_prism", "_rows_tet")
 
-    def __init__(self, jac: CellBlockJacobian, dtau_flat: np.ndarray):
+    def __init__(self, jac: CellBlockJacobian, dtau_flat):
         super().__init__(dtau_flat, jac.n_var)
         self._jac = jac
+        xp = jac.xp
         n_sps, nv = jac.n_sps, jac.n_var
-        self._rows_prism = (jac.prism_cells[:, None] * n_sps + np.arange(jac.n_real_prism)[None, :])
-        self._rows_tet = (jac.tet_cells[:, None] * n_sps + np.arange(jac.n_real_tet)[None, :])
+        self._rows_prism = xp.asarray(jac.prism_cells[:, None] * n_sps + np.arange(jac.n_real_prism)[None, :])
+        self._rows_tet = xp.asarray(jac.tet_cells[:, None] * n_sps + np.arange(jac.n_real_tet)[None, :])
         self._inv_prism = self._invert(jac.blocks_prism, self._rows_prism, nv)
         self._inv_tet = self._invert(jac.blocks_tet, self._rows_tet, nv)
 
-    def _invert(self, blocks: np.ndarray, rows: np.ndarray, nv: int) -> np.ndarray:
-        out = np.empty_like(blocks)
+    def _invert(self, blocks, rows, nv: int):
+        xp = self._jac.xp
         if blocks.shape[0] == 0:
+            return xp.empty_like(blocks)
+        diag = xp.ascontiguousarray(xp.repeat(1.0 / self.dtau[rows], nv, axis=1))  # 与块内 (s,v) 序一致
+        if xp is np:
+            out = np.empty_like(blocks)
+            _invert_blocks_plus_diag(blocks, diag, out)
             return out
-        diag = np.ascontiguousarray(np.repeat(1.0 / self.dtau[rows], nv, axis=1))  # 与块内 (s,v) 序一致
-        _invert_blocks_plus_diag(blocks, diag, out)
-        return out
+        # cupy：一次批量 cuSOLVER 调用（GPU 上没有 CPU LAPACK 逐矩阵调用的开销）
+        a = blocks.astype(xp.float64)
+        idx = xp.arange(blocks.shape[1])
+        a[:, idx, idx] += diag
+        return xp.linalg.inv(a).astype(xp.float32)
 
-    def apply(self, v_flat: np.ndarray) -> np.ndarray:
+    def apply(self, v_flat):
         out = super().apply(v_flat)
+        xp = self._jac.xp
         nv = self._jac.n_var
         for inv, rows in ((self._inv_prism, self._rows_prism), (self._inv_tet, self._rows_tet)):
             if inv.shape[0]:
                 # float32 作用：逆以 float32 存储，把向量也降到 float32 再乘，避免
                 # 混合精度 matmul 每次把整份逆隐式提升成 float64（实测 5 倍慢）
-                x = v_flat[rows].reshape(rows.shape[0], -1, 1).astype(np.float32)
-                out[rows] = np.matmul(inv, x).reshape(rows.shape[0], rows.shape[1], nv)
+                x = v_flat[rows].reshape(rows.shape[0], -1, 1).astype(xp.float32)
+                out[rows] = xp.matmul(inv, x).reshape(rows.shape[0], rows.shape[1], nv)
         return out
 
 
@@ -277,10 +298,14 @@ class BlockJacobiCache:
 
     __slots__ = ("cell_is_prism", "colors", "n_sps", "n_real_prism", "n_real_tet",
                  "jac", "age", "baseline_iters", "last_iters", "last_accepted",
-                 "disabled_reason", "n_builds")
+                 "disabled_reason", "n_builds", "red")
 
     def __init__(self, *, owner_cell, neighbor_cell, cell_is_prism, n_sps: int,
-                 n_real_prism: int, n_real_tet: int, n_var: int):
+                 n_real_prism: int, n_real_tet: int, n_var: int,
+                 red: LocalReductions = None, colors: np.ndarray = None):
+        """`colors` 给出时直接用（分布式：全局着色切出的本 rank 段，保证同色
+        单元跨 rank 也不相邻）；否则按 `owner/neighbor` 面相邻关系现算。"""
+        self.red = red if red is not None else LocalReductions()
         self.cell_is_prism = np.asarray(cell_is_prism, dtype=bool)
         self.n_sps, self.n_real_prism, self.n_real_tet = n_sps, n_real_prism, n_real_tet
         self.jac: Optional[CellBlockJacobian] = None
@@ -300,7 +325,8 @@ class BlockJacobiCache:
             self.colors = None
         else:
             self.disabled_reason = None
-            self.colors = greedy_cell_coloring(owner_cell, neighbor_cell, self.cell_is_prism.size)
+            self.colors = (np.asarray(colors, dtype=np.int64) if colors is not None
+                           else greedy_cell_coloring(owner_cell, neighbor_cell, self.cell_is_prism.size))
 
     def _needs_rebuild(self) -> bool:
         if self.jac is None or self.age >= MAX_AGE or not self.last_accepted:
@@ -323,7 +349,7 @@ class BlockJacobiCache:
         self.jac = CellBlockJacobian(
             residual, u0_flat, r0_flat, scales, n_sps=self.n_sps,
             cell_is_prism=self.cell_is_prism, n_real_prism=self.n_real_prism,
-            n_real_tet=self.n_real_tet, colors=self.colors)
+            n_real_tet=self.n_real_tet, colors=self.colors, red=self.red)
         self.age = 0
         self.baseline_iters = None
         self.last_iters = None

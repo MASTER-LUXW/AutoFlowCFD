@@ -85,6 +85,7 @@ from .omega_wall import (  # noqa: F401
     compute_omega_wall_target_gpu,
     compute_turbulence_face_masks_gpu,
     enforce_omega_wall_relaxation_gpu,
+    omega_wall_cell_targets_gpu,
 )
 from .residual import (  # noqa: F401
     _scalar_volume_div_overintegrated_gpu,
@@ -100,4 +101,5 @@ __all__ = [
     "compute_turbulence_transport_residual_gpu",
     "compute_turbulence_face_masks_gpu",
     "enforce_omega_wall_relaxation_gpu",
+    "omega_wall_cell_targets_gpu",
 ]

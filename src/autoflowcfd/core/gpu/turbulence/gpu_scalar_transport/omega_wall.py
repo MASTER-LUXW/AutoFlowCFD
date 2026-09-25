@@ -130,9 +130,24 @@ def enforce_omega_wall_relaxation_gpu(cp, solver, relax=None):
     """
     if relax is None:
         relax = 0.5
+    hit_cells, avg_target = omega_wall_cell_targets_gpu(cp, solver)
+    if hit_cells.shape[0] == 0:
+        return
+    turb = solver.turb_model_gpu
+    turb.omega_field[hit_cells, :] = (
+        (1.0 - relax) * turb.omega_field[hit_cells, :] + relax * avg_target[:, None]
+    )
+
+
+def omega_wall_cell_targets_gpu(cp, solver):
+    """壁面 owner 单元与各自的 Wilcox omega 目标值 `(hit_cells, avg_target)`
+    （CPU 版 `omega_wall_cell_targets` 的 GPU 对应）。显式路径的每步松弛
+    （`enforce_omega_wall_relaxation_gpu`）与隐式路径的残差内强约束共用这一份。
+    """
+    empty = (cp.zeros(0, dtype=cp.int64), cp.zeros(0, dtype=cp.float64))
     wall_mask = getattr(solver, "_wall_mask_k_gpu", None)
     if wall_mask is None or not cp.any(wall_mask):
-        return
+        return empty
 
     Q = solver.Q_gpu
     turb = solver.turb_model_gpu
@@ -147,7 +162,7 @@ def enforce_omega_wall_relaxation_gpu(cp, solver, relax=None):
 
     wall_face_idx = cp.where(has_wall)[0]
     if wall_face_idx.shape[0] == 0:
-        return
+        return empty
     owner_cells = ff.owner_cell[wall_face_idx]
     target = omega_wall_value_face[wall_face_idx, 0]  # 同一面上恒为同一常数，见函数文档
 
@@ -162,10 +177,7 @@ def enforce_omega_wall_relaxation_gpu(cp, solver, relax=None):
     cp.scatter_add(count, owner_cells, 1.0)
     hit_cells = cp.where(count > 0)[0]
     avg_target = sum_target[hit_cells] / count[hit_cells]
-
-    turb.omega_field[hit_cells, :] = (
-        (1.0 - relax) * turb.omega_field[hit_cells, :] + relax * avg_target[:, None]
-    )
+    return hit_cells, avg_target
 
 
 def compute_turbulence_face_masks_gpu(mesh, boundary_ghost_provider):

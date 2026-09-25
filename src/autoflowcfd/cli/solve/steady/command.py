@@ -37,7 +37,8 @@ from .cpu_single import _run_cpu_single
                    '真实网格上走完一个绕体特征时间要上万步）；newton-krylov：矩阵自由 '
                    'Newton-Krylov + 伪瞬态延拓（SER CFL 律 + 单元块 Jacobi 预处理，见 '
                    'core/time_integration/implicit/），收敛步数由非线性程度而不是最小'
-                   '单元决定。newton-krylov 目前只在单机 CPU 后端实现。')
+                   '单元决定。newton-krylov 支持单机 CPU 与单机 GPU；分布式（--n-ranks>1、'
+                   '--multi-gpu）尚未实现，会明确报错。')
 @click.option('--cfl-start', type=float, default=None,
               help='自适应 CFL 初始值。**默认按 --time-scheme 取该格式 CFL 律的签名默认值**'
                    '（rk3 为显式控制器的 0.03；newton-krylov 为 SER 律的 5）——两者差两个'
@@ -214,11 +215,11 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
     # 不再需要任何"某后端不支持"的拒绝。
     print(f"\nInput Grid : {input_file}")
     print(f"Backend    : {backend} | Order: P{order} | Method: {time_scheme}")
-    if time_scheme == 'newton-krylov' and (backend == 'gpu' or n_ranks > 1):
+    if time_scheme == 'newton-krylov' and n_ranks > 1:
         raise click.UsageError(
-            "--time-scheme newton-krylov 目前只在单机 CPU 后端实现（GMRES 用 scipy，"
-            "分布式需要跨 rank 归约内积、GPU 需要设备端 Krylov）；请用 --backend cpu "
-            "且 --n-ranks 1，或改用 --time-scheme rk3。")
+            "--time-scheme newton-krylov 的分布式版本（--n-ranks>1 / --multi-gpu）尚未"
+            "实现：GMRES 与块 Jacobi 需要跨 rank 的归约与全局着色。请用单机（CPU 或"
+            "单 GPU），或改用 --time-scheme rk3。")
     print(f"Turbulence : {turbulence_model} | Max Iter: {max_iter}")
     if n_ranks > 1:
         print(f"MPI Ranks  : {n_ranks} (domain decomposition)")
@@ -274,6 +275,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
             rho_inf=rho_inf,
             skip_quality_check=skip_quality_check,
             surface_mesh=surface_mesh,
+            time_scheme=time_scheme,
             turbulence_intensity=turbulence_intensity,
             turbulence_model=turbulence_model,
             vel_inf=vel_inf,

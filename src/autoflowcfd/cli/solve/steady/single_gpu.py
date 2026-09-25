@@ -13,7 +13,7 @@ def _run_single_gpu(
     *,
     aoa_deg, aos_deg, cfl_max, cfl_min, cfl_start, gpu_device, input_file, max_iter,
     mu_molecular, order, output_dir, p_inf, phase_max_iter, residual_drop_threshold,
-    rho_inf, skip_quality_check, surface_mesh, turbulence_intensity,
+    rho_inf, skip_quality_check, surface_mesh, time_scheme, turbulence_intensity,
     turbulence_model, vel_inf, viscosity_ratio,
 ):
     """`solve steady` 的单 GPU路径。"""
@@ -34,6 +34,7 @@ def _run_single_gpu(
     solver = GPUFRSolver(
         mesh=mesh, ops=ops, order=order,
         device_id=gpu_device,
+        time_scheme=time_scheme,
         turbulence_intensity=turbulence_intensity,
         viscosity_ratio=viscosity_ratio,
         mu_molecular=mu_molecular,

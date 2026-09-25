@@ -14,6 +14,7 @@ from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 from autoflowcfd.core.fr_solver.filter import build_filter_func
 from autoflowcfd.core.fr_solver.turbulence.implicit import (
     IMPLICIT_TURBULENCE_MODELS,
+    CpuTurbulenceBackend,
     step_turbulence_newton,
 )
 
@@ -148,7 +149,7 @@ def step(solver, dt: float) -> float:
                 and solver.turb_model_name in IMPLICIT_TURBULENCE_MODELS):
             # 隐式稳态：k-omega 也走分离式 PTC-Newton（平均流冻结），显式
             # 输运更新在隐式 CFL 下必然失稳，见 turbulence/implicit.py 文档
-            step_turbulence_newton(solver, turb_dt)
+            step_turbulence_newton(CpuTurbulenceBackend(solver), turb_dt)
         else:
             solver.compute_turbulence_source(turb_dt)
 
@@ -287,81 +288,22 @@ def step(solver, dt: float) -> float:
             )
             solver._dual_time_U_prev = U_flat.copy()
         elif solver.time_integrator.scheme == TimeIntegrationScheme.NEWTON_KRYLOV:
-            # 隐式稳态步（矩阵自由 Newton-Krylov + 伪瞬态延拓）。
-            #
-            # `dt_local_flat` 同时充当 PTC 的 `dtau` 与对角预处理 ——
-            # 于是 `--cfl-start/--cfl-max` 那套自适应控制器原样生效：
-            # CFL 小 -> 对角项主导、接近显式、鲁棒；CFL 大 -> 接近纯
-            # Newton、快。参考量级用残差诊断那一套唯一来源，不另定义。
-            #
-            # **一次 step() 做一个 Newton 步**：外层 `solver.solve()` 已经
-            # 在做残差监控、自适应 CFL、checkpoint、Order Continuation，
-            # Newton 外迭代放在它里面让这些机制原样生效（见
-            # `implicit/jfnk.py` 模块文档）。
-            #
-            # `filter_func` 在这条路径上**不施加**：模态滤波是显式 RK
-            # 逐 stage 的正定性/去噪手段，而 Newton 步里"解"是线性系统
-            # 的解、不存在 stage 的概念；在 Newton 步之后滤一次会改变
-            # 被求解的那个不动点方程本身（`R(U)=0` 变成
-            # `F(U)=0` 的另一个问题），让残差与收敛判据失去意义。默认档
-            # `FILTER_MODE=off` 本来就不构造 filter_func；显式指定了非
-            # off 档时下面会明确报错而不是静默忽略。
-            from autoflowcfd.core.fr_solver.residual_diagnostics import (
-                _reference_scales,
+            # 隐式稳态步（矩阵自由 Newton-Krylov + 伪瞬态延拓），与单机 GPU
+            # 共用同一个实现（`implicit/mean_flow_step.py` 模块文档：一步一个
+            # Newton 步、与模态滤波互斥、只解平均流 5 个变量、跨步状态）。
+            # `dt_local_flat` 是 PTC 的 `dtau` 天花板（CFL 律见 adaptive_cfl/ser.py）。
+            from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
+            from autoflowcfd.core.time_integration.implicit.mean_flow_step import (
+                step_mean_flow_newton,
             )
-            from autoflowcfd.core.time_integration.implicit import (
-                EisenstatWalkerForcing, step_newton_krylov,
-            )
+            from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
 
-            if filter_func is not None:
-                raise ValueError(
-                    "NEWTON_KRYLOV（隐式稳态）与模态滤波不能同时启用："
-                    "滤波会改变被求解的不动点方程本身（R(U)=0 变成另一个"
-                    "问题），使残差与收敛判据失去意义。请用 "
-                    "AFCFD_FILTER_MODE=off（默认值），或改用显式格式。"
-                )
-            if solver._newton_forcing is None:
-                solver._newton_forcing = EisenstatWalkerForcing()
-            # Newton 的未知量只有平均流 5 个守恒变量。湍流模型开启时状态向量
-            # 带两个 k/omega 槽位（`state.U[:,:,5:7]`），它们全仓库无人读取、
-            # 残差恒为零（2026-09-25 实测 inv/visc 残差这两列 max = 0.0），
-            # k/omega 真正的值在 `turb_model` 上、由上面的隐式湍流步更新。
-            # 带着它们解会让 Krylov 向量、块 Jacobi 的块尺寸与装配次数都
-            # 白白多出 7/5 倍（plate_demo P1+SST：196 次 vs 140 次残差求值）。
-            n_mf = min(n_vars, 5)
-            nk_residual = _MeanFlowSlice(mean_flow_residual, U_flat, n_mf)
-            if solver._newton_block_precond is None:
-                solver._newton_block_precond = _build_block_precond_cache(solver, n_sps, n_mf)
-            # `_newton_dtau_scale` 把 PTC 的 dtau 缩放状态跨步带下去：
-            # 一步不被接受时 `step_newton_krylov` 会当场缩小 dtau 重试，
-            # 用不完的档数由下一步继续（见 `implicit/dtau_control.py`
-            # 里那段"固定 CFL 下永久停滞"的真实运行记录）。
-            U_mf_new, _nk_info = step_newton_krylov(
-                nk_residual, U_flat[:, :n_mf], dt_local_flat,
-                _reference_scales(solver.freestream, n_vars)[:n_mf],
-                forcing=solver._newton_forcing,
-                dtau_scale=solver._newton_dtau_scale,
-                block_precond=solver._newton_block_precond,
-            )
-            U_new_flat = U_flat.copy()
-            U_new_flat[:, :n_mf] = U_mf_new
-            solver._newton_last_info = _nk_info
-            solver._newton_dtau_scale = _nk_info["dtau_scale"]
-            if _nk_info["theta"] <= 0.0:
-                logger.warning(
-                    "Newton 步未能前进（theta=0, gmres_info=%s, "
-                    "gmres_iters=%d, dtau_scale=%.3e, 本步已缩 %d 档）"
-                    "——dtau 缩到下限仍拿不到被接受的步，那不再是步长"
-                    "问题（dtau->0 即显式前向 Euler、必然被接受），"
-                    "检查残差求值在当前状态上是否已经非物理"
-                    % (_nk_info["gmres_info"], _nk_info["gmres_iters"],
-                       _nk_info["dtau_scale"], _nk_info["n_dtau_cuts"]))
-            elif _nk_info["n_dtau_cuts"] > 0:
-                logger.info(
-                    "Newton 步缩 %d 档 dtau 后被接受"
-                    "（dtau_scale=%.3e, theta=%.3f）"
-                    % (_nk_info["n_dtau_cuts"], _nk_info["dtau_scale"],
-                       _nk_info["theta"]))
+            U_new_flat, _nk_info = step_mean_flow_newton(
+                solver, mean_flow_residual, U_flat, dt_local_flat,
+                _reference_scales(solver.freestream, n_vars),
+                red=LocalReductions(np), face_adjacency=lambda: _face_adjacency(solver),
+                n_cells=n_cells, n_prism=int(solver.mesh.n_prism_cells),
+                order=_current_order(solver), filter_active=filter_func is not None)
         elif solver.time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
             # 显式处理无粘对流项、隐式处理粘性+湍流扩散项——通用的
             # step(...) 单一残差入口表达不了这个拆分（见该方法里的
@@ -401,9 +343,9 @@ def step(solver, dt: float) -> float:
                 # SER 看 Newton 实际在解的系统的残差 ||Gamma R||（步前、与上面
                 # 物理残差同一时刻），并区分"残差上升但步被完整接受"（物理暂态，
                 # 保持）与"步没被完整接受"（收缩），见 adaptive_cfl/ser.py
-                _cfl_ctrl.update(
-                    _nk_info["res_norm"],
-                    step_ok=(_nk_info["theta"] >= 1.0 and _nk_info["n_dtau_cuts"] == 0))
+                from autoflowcfd.core.time_integration.implicit.mean_flow_step import newton_step_ok
+
+                _cfl_ctrl.update(_nk_info["res_norm"], step_ok=newton_step_ok(_nk_info))
             else:
                 _cfl_ctrl.update(residual_norm)
 
@@ -416,48 +358,15 @@ def step(solver, dt: float) -> float:
         raise
 
 
-def _build_block_precond_cache(solver, n_sps: int, n_vars: int):
-    """按当前阶数构造单元块 Jacobi 缓存（`implicit/block_jacobi.py`）。
 
-    单机 CPU 的单元排列是"棱柱在前、四面体在后"（`mesh.n_prism_cells`），
-    着色用的面相邻关系取自残差本身用的同一份展平面几何（带缓存）。
-    """
-    from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
-    from autoflowcfd.core.time_integration.implicit import BlockJacobiCache
-    from autoflowcfd.fr.native_padding import real_sps_per_cell
-
+def _current_order(solver) -> int:
     order = getattr(solver, "current_order", None)
-    if order is None:
-        order = solver.order
-    n_cells = solver.state.U.shape[0]
-    cell_is_prism = np.arange(n_cells) < int(solver.mesh.n_prism_cells)
-    n_real_prism, n_real_tet = real_sps_per_cell(int(order))
+    return int(order if order is not None else solver.order)
+
+
+def _face_adjacency(solver):
+    """块 Jacobi 着色用的面相邻关系：残差本身用的同一份展平面几何（带缓存）。"""
+    from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+
     ffg = get_flat_face_geometry(solver.mesh, solver.ops)
-    return BlockJacobiCache(
-        owner_cell=ffg.owner_cell, neighbor_cell=ffg.neighbor_cell,
-        cell_is_prism=cell_is_prism, n_sps=n_sps,
-        n_real_prism=n_real_prism, n_real_tet=n_real_tet, n_var=n_vars)
-
-
-class _MeanFlowSlice:
-    """把 `(N, n_vars)` 的残差函数限制到前 `n_mf` 个（平均流）变量上。
-
-    其余列（湍流槽位）固定在步前的值；做成类而不是闭包，理由同
-    `implicit/jacobian_vector.py::MatrixFreeJacobian`（在整个 Krylov 求解
-    期间存活，只持有需要的字段）。
-    """
-
-    __slots__ = ("_residual", "_full", "_n")
-
-    def __init__(self, residual, u_full: np.ndarray, n_mf: int):
-        self._residual = residual
-        self._full = np.array(u_full, dtype=np.float64, copy=True)
-        self._n = n_mf
-
-    def __call__(self, u_mf: np.ndarray) -> np.ndarray:
-        if self._n == self._full.shape[1]:
-            return self._residual(u_mf)
-        u = self._full.copy()
-        u[:, :self._n] = u_mf
-        return self._residual(u)[:, :self._n]
-
+    return np.asarray(ffg.owner_cell), np.asarray(ffg.neighbor_cell)

@@ -144,15 +144,32 @@ class _GPUSolverIOMixin:
                 return None
             return rho * self.sgs_model_gpu.nu_t
 
-        n_cells = self.mesh.n_cells
-        n_sps = self.mesh.n_sps_per_cell
-
         self._update_production_ramp_gpu()
 
-        from autoflowcfd.core.gpu.residual.gpu_gradients import (
-            compute_physical_gradient_gpu,
-            compute_physical_scalar_gradient_gpu,
+        grad_vel, d_wall = self._prepare_turbulence_inputs_gpu()
+        dk_dt, domega_dt, transport_k, transport_omega = self._evaluate_turbulence_rates_gpu(
+            grad_vel, d_wall, apply_des=True)
+
+        # 湍流标量必须用**物理**波速算出的那一份 dt（2026-09-14，低马赫数
+        # 预处理接入 GPU 时同步）：启用预处理后平均流的 dt 按预处理波速
+        # 放大约 7 倍，而 k/omega 的显式更新刻意没有做 point-implicit
+        # 阻尼（见 turbulence/sst.py::update_fields 文档），不能跟着放大。
+        # 与 CPU 侧 step.py 里 `turb_dt = dt_physical` 同一处理。
+        _, dt_physical = self._compute_local_time_step_gpu(return_physical_too=True)
+        dt_mean = cp.mean(dt_physical)
+        self.turb_model_gpu.update_fields_gpu(
+            float(dt_mean), dk_dt, domega_dt,
+            transport_k=transport_k, transport_omega=transport_omega,
         )
+
+        self._finalize_turbulence_update_gpu()
+        return self._turbulent_mu_t_gpu()
+
+    def _prepare_turbulence_inputs_gpu(self):
+        """一步之内只依赖平均流的输入 `(grad_vel, d_wall)`（CPU 版
+        `source.py::prepare_turbulence_inputs` 的 GPU 对应）。隐式路径在整个
+        湍流 Newton 步内冻结它们。"""
+        from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_gradient_gpu
         # 真实 bug 修复（2026-09-03，与下面 296 行附近同一类，CPU 版
         # 见 fr_solver/turbulence.py::compute_turbulence_source 文档）：
         # 此前对*守恒*变量 U_gpu 求梯度再切片动量分量冒充速度梯度——
@@ -180,6 +197,16 @@ class _GPUSolverIOMixin:
                 f"requires accurate wall distance, not simplified estimates."
             )
 
+        return grad_vel, d_wall
+
+    def _evaluate_turbulence_rates_gpu(self, grad_vel, d_wall, *, apply_des: bool):
+        """在 `turb_model_gpu` 当前的 `k_field/omega_field` 上求源项部分与输运部分
+        `(dk_dt, domega_dt, transport_k, transport_omega)`（CPU 版
+        `source.py::evaluate_turbulence_rates` 的 GPU 对应，同一组副作用约定：
+        刷新模型上的 `nu_t` 等缓存；`apply_des=False` 时不改写 DES 长度尺度）。"""
+        cp = get_cupy()
+        rho = self.Q_gpu[:, :, 0]
+        from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_gradient_gpu
         grad_k = compute_physical_scalar_gradient_gpu(
             self.turb_model_gpu.k_field, self.mesh_data, self.ops_data,
         )
@@ -236,7 +263,7 @@ class _GPUSolverIOMixin:
         # 2.2% 相对差异，暴露了这个顺序错误。现改为与 CPU 版逐字一致
         # 的顺序：`compute_source_terms_gpu` 在前，DDES/IDDES 长度尺度
         # 更新在后。
-        if self.ddes_model_gpu is not None:
+        if apply_des and self.ddes_model_gpu is not None:
             nu_field = self.mu_molecular / cp.maximum(rho, 1e-10)
             from autoflowcfd.core.gpu.turbulence.gpu_turbulence_des import GPUIDDESModel
             if isinstance(self.ddes_model_gpu, GPUIDDESModel):
@@ -272,18 +299,13 @@ class _GPUSolverIOMixin:
                 self, grad_vel=grad_vel,
             )
 
-        # 湍流标量必须用**物理**波速算出的那一份 dt（2026-09-14，低马赫数
-        # 预处理接入 GPU 时同步）：启用预处理后平均流的 dt 按预处理波速
-        # 放大约 7 倍，而 k/omega 的显式更新刻意没有做 point-implicit
-        # 阻尼（见 turbulence/sst.py::update_fields 文档），不能跟着放大。
-        # 与 CPU 侧 step.py 里 `turb_dt = dt_physical` 同一处理。
-        _, dt_physical = self._compute_local_time_step_gpu(return_physical_too=True)
-        dt_mean = cp.mean(dt_physical)
-        self.turb_model_gpu.update_fields_gpu(
-            float(dt_mean), dk_dt, domega_dt,
-            transport_k=transport_k, transport_omega=transport_omega,
-        )
+        return dk_dt, domega_dt, transport_k, transport_omega
 
+    def _finalize_turbulence_update_gpu(self, *, omega_wall_relaxation: bool = True):
+        """`k/omega` 更新之后的后处理：模态滤波 + 正性限幅（非恒等滤波时）与
+        omega 壁面松弛。隐式路径传 `omega_wall_relaxation=False`（同一个壁面
+        条件在它的残差里作强约束，理由见 `fr_solver/turbulence/implicit.py`）。"""
+        cp = get_cupy()
         # 真实 bug 修复（2026-09-12，与 CPU 版
         # fr_solver/turbulence.py::compute_turbulence_source 同一处修复，
         # 完整推导见 gpu_modal_filter.py::filter_scalar_field_gpu 文档）：
@@ -335,12 +357,16 @@ class _GPUSolverIOMixin:
         # GPU 版此前完全没有移植这一步——GPU SST/DDES/IDDES 长期运行
         # 会重现与 CPU 版修复前完全相同的中长期发散机制（边界层 omega
         # 衰减到下界 -> nu_t 近零分母奇点 -> 湍流粘性比失控）。
-        if self.turb_model_name.upper() in ("SST", "DDES", "IDDES"):
+        if omega_wall_relaxation and self.turb_model_name.upper() in ("SST", "DDES", "IDDES"):
             from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import (
                 enforce_omega_wall_relaxation_gpu,
             )
             enforce_omega_wall_relaxation_gpu(cp, self)
 
+
+    def _turbulent_mu_t_gpu(self):
+        """当前湍流场对应的动力涡粘 `rho*nu_t`（含 SGS 部分）。"""
+        rho = self.Q_gpu[:, :, 0]
         mu_t = rho * self.turb_model_gpu.nu_t
         if self.sgs_model_gpu is not None and self.sgs_model_gpu.nu_t is not None:
             mu_t = mu_t + rho * self.sgs_model_gpu.nu_t
@@ -359,7 +385,6 @@ class _GPUSolverIOMixin:
         """
         if self.sgs_model_gpu is None:
             return
-        cp = get_cupy()
         from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_gradient_gpu
 
         # 真实 bug 修复（2026-09-03）：同上面 156 行附近 compute_turbulence_

@@ -14,6 +14,16 @@ from typing import Optional, Dict, Any
 from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
 from autoflowcfd.core.gpu import get_cupy
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
+from autoflowcfd.core.time_integration.implicit.mean_flow_step import (
+    newton_step_ok,
+    step_mean_flow_newton,
+)
+from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
+from autoflowcfd.core.fr_solver.turbulence.implicit import (
+    IMPLICIT_TURBULENCE_MODELS,
+    step_turbulence_newton,
+)
+from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import GpuTurbulenceBackend
 
 
 class _GPUSolverStepMixin:
@@ -42,15 +52,31 @@ class _GPUSolverStepMixin:
         n_sps = self.mesh.n_sps_per_cell
 
         self._update_primitives_gpu()
-
-        # 湍流源项在当前状态下求值（算子分裂）
-        mu_t_field = self.compute_turbulence_source_gpu()
+        scheme = self.time_integrator.scheme
 
         # 局部 CFL 步长。启用低马赫数预处理时 dt_local 是**预处理后**的
         # 平均流步长（按 |un|+c_precond 取），dt_physical 是按物理波速那
         # 一份；两者的分工与 CPU 侧 step.py 完全一致。
-        dt_local, dt_physical = self._compute_local_time_step_gpu(
-            return_physical_too=True)
+        if scheme == TimeIntegrationScheme.NEWTON_KRYLOV:
+            # 隐式稳态：与 CPU step.py 同一时序——先取步长，k-omega 做一个
+            # 分离式 PTC-Newton 步（平均流冻结，显式输运更新在隐式 CFL 下
+            # 必然失稳，见 fr_solver/turbulence/implicit.py），平均流再用更新
+            # 后的涡粘做它的 Newton 步。
+            dt_local, dt_physical = self._compute_local_time_step_gpu(
+                return_physical_too=True)
+            if (self.turb_model_gpu is not None
+                    and self.turb_model_name.upper() in IMPLICIT_TURBULENCE_MODELS):
+                step_turbulence_newton(
+                    GpuTurbulenceBackend(self),
+                    cp.broadcast_to(dt_physical[:, None], (n_cells, n_sps)))
+                mu_t_field = self._turbulent_mu_t_gpu()
+            else:
+                mu_t_field = self.compute_turbulence_source_gpu()
+        else:
+            # 湍流源项在当前状态下求值（算子分裂）
+            mu_t_field = self.compute_turbulence_source_gpu()
+            dt_local, dt_physical = self._compute_local_time_step_gpu(
+                return_physical_too=True)
         dt_local_full = cp.broadcast_to(
             dt_local[:, None], (n_cells, n_sps)
         ).reshape(n_cells * n_sps)
@@ -115,12 +141,29 @@ class _GPUSolverStepMixin:
 
         # 守恒的正性保持限制器：与 CPU 同一个（数组模块无关实现），按阶数缓存。
         from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
-        positivity_func = get_positivity_limiter(self, xp=cp)
+        # 隐式步不用它（Newton 步的物理性由 jfnk 的限幅与接受判据保证），不构造。
+        positivity_func = (None if scheme == TimeIntegrationScheme.NEWTON_KRYLOV
+                           else get_positivity_limiter(self, xp=cp))
 
         # 根据时间方案选择推进方式
-        scheme = self.time_integrator.scheme
+        nk_info = None
+        if scheme == TimeIntegrationScheme.NEWTON_KRYLOV:
+            # 平均流隐式步：与 CPU 共用同一个实现（implicit/mean_flow_step.py），
+            # 这里只提供 GPU 的残差、归约（cupy）与面相邻关系。
+            from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
+            ff = self.flat_face_gpu
+            U_new_flat, nk_info = step_mean_flow_newton(
+                self, mean_flow_residual, U_flat, dt_local_full,
+                _reference_scales(self.freestream, self.n_vars),
+                red=LocalReductions(cp),
+                face_adjacency=lambda: (np.asarray(cp.asnumpy(ff.owner_cell)),
+                                        np.asarray(cp.asnumpy(ff.neighbor_cell))),
+                n_cells=n_cells, n_prism=int(self.mesh.n_prism_cells),
+                order=int(self.order if getattr(self, "current_order", None) is None
+                          else self.current_order),
+                filter_active=self.filter_func_gpu is not None)
 
-        if scheme == TimeIntegrationScheme.DUAL_TIME:
+        elif scheme == TimeIntegrationScheme.DUAL_TIME:
             # DUAL_TIME: 真正时间精度的物理时间推进。`solution_prev=None`
             # （第一个物理步）时积分器自己退化为 BDF1，其后 BDF2。
             U_new_flat = self.time_integrator.step_dual_time(
@@ -179,7 +222,12 @@ class _GPUSolverStepMixin:
         # 自适应 CFL：按物理残差更新（与 CPU 侧 step.py 同一时序——在残差
         # 范数算出来之后、返回之前）
         if self._cfl_controller is not None:
-            self._cfl_controller.update(residual_norm)
+            if nk_info is not None:
+                # SER 看 Newton 所解系统的 ||Gamma R||，并区分物理暂态与步失败
+                # （adaptive_cfl/ser.py），与 CPU step.py 同一处理
+                self._cfl_controller.update(nk_info["res_norm"], step_ok=newton_step_ok(nk_info))
+            else:
+                self._cfl_controller.update(residual_norm)
 
         return residual_norm
 

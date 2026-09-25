@@ -53,6 +53,7 @@ import autoflowcfd.core.gpu.turbulence.gpu_scalar_transport as gst_mod
 import autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst as gpu_turbulence_sst_mod
 import autoflowcfd.core.gpu.turbulence.gpu_turbulence_des as gpu_turbulence_des_mod
 import autoflowcfd.core.gpu.gpu_modal_filter as gpu_modal_filter_mod
+import autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence as gpu_implicit_turb_mod
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 
 
@@ -84,7 +85,7 @@ def _patch_get_cupy(monkeypatch):
     patch_module_get_cupy(monkeypatch, [
         gpu_solver_io_mod, gpu_solver_mod, gpu_gradients_mod, gpu_volume_contract_mod,
         gpu_flux_mod, gst_mod, gpu_turbulence_sst_mod, gpu_turbulence_des_mod,
-        gpu_modal_filter_mod], shim)
+        gpu_modal_filter_mod, gpu_implicit_turb_mod], shim)
     monkeypatch.setattr(gpu_turbulence_sst_mod, "gpu_available", True)
     monkeypatch.setattr(gpu_turbulence_des_mod, "gpu_available", True)
 
@@ -146,8 +147,12 @@ def _make_ddes_model_gpu(turb_model_name):
     raise ValueError(turb_model_name)
 
 
-@pytest.mark.parametrize("turb_model_name", ["SST", "DDES", "IDDES"])
-def test_compute_turbulence_source_gpu_matches_cpu_single_machine(turb_model_name):
+def _build_standins(turb_model_name):
+    """同一份非均匀状态上的 GPU（numpy 替身）与 CPU 单机湍流求解器替身。
+
+    两侧用同一个常量 dt、同一个产项渐变状态，保证可以逐位对照（见下方
+    各处注释）。显式源项测试与隐式 k-omega Newton 测试共用。
+    """
     order = 1
     mesh = _build_synthetic_mixed_mesh(order)
     ops = generate_fr_operators(order)
@@ -206,6 +211,11 @@ def test_compute_turbulence_source_gpu_matches_cpu_single_machine(turb_model_nam
     stub._update_production_ramp_gpu = types.MethodType(
         _GPUSolverIOMixin._update_production_ramp_gpu, stub
     )
+    # 2026-09-25：湍流源项拆成 prepare/evaluate/finalize 三个件（显式与隐式
+    # k-omega 更新共用），替身同样绑定真实类里的这几个方法。
+    for _name in ("_prepare_turbulence_inputs_gpu", "_evaluate_turbulence_rates_gpu",
+                  "_finalize_turbulence_update_gpu", "_turbulent_mu_t_gpu"):
+        setattr(stub, _name, types.MethodType(getattr(_GPUSolverIOMixin, _name), stub))
     # 签名随 2026-09-14 低马赫数预处理接入 GPU 而变化：湍流场更新必须
     # 取**物理**波速算出的那一份 dt（`return_physical_too=True` 的第二个
     # 返回值），不能跟着平均流的预处理步长放大约 7 倍——k/omega 的显式
@@ -217,10 +227,7 @@ def test_compute_turbulence_source_gpu_matches_cpu_single_machine(turb_model_nam
 
     stub._compute_local_time_step_gpu = _dt_stub
 
-    mu_t_gpu = _GPUSolverIOMixin.compute_turbulence_source_gpu(stub)
-
     # ---- CPU 单机参照 ----
-    from autoflowcfd.core.fr_solver.turbulence import compute_turbulence_source
 
     turb_cpu = SSTModelFR(n_cells, n_sps)
     turb_cpu.k_field = k_field.copy()
@@ -251,9 +258,21 @@ def test_compute_turbulence_source_gpu_matches_cpu_single_machine(turb_model_nam
         def _get_cell_volumes(self_inner):
             return mesh.cell_volumes
 
-    # dt_local 用同一个常量（见上方 stub._compute_local_time_step_gpu
-    # 替身文档），两侧严格用同一个 dt 才能做逐位对照。
-    compute_turbulence_source(_CpuStub(), np.full((n_cells, n_sps), dt_used))
+    cpu = _CpuStub()
+    cpu.order = order
+    return types.SimpleNamespace(gpu=stub, cpu=cpu, turb_gpu=turb_gpu, turb_cpu=turb_cpu,
+                                 n_cells=n_cells, n_sps=n_sps, dt_used=dt_used)
+
+
+@pytest.mark.parametrize("turb_model_name", ["SST", "DDES", "IDDES"])
+def test_compute_turbulence_source_gpu_matches_cpu_single_machine(turb_model_name):
+    from autoflowcfd.core.fr_solver.turbulence import compute_turbulence_source
+
+    b = _build_standins(turb_model_name)
+    stub, turb_gpu, turb_cpu = b.gpu, b.turb_gpu, b.turb_cpu
+    n_cells, n_sps, dt_used = b.n_cells, b.n_sps, b.dt_used
+    _GPUSolverIOMixin.compute_turbulence_source_gpu(stub)
+    compute_turbulence_source(b.cpu, np.full((n_cells, n_sps), dt_used))
 
     assert np.all(np.isfinite(turb_gpu.k_field)), (
         f"GPU {turb_model_name} 源项计算不应该产生非有限值（回归 grad_U/grad_vel bug 的直接症状）"
@@ -261,6 +280,36 @@ def test_compute_turbulence_source_gpu_matches_cpu_single_machine(turb_model_nam
     np.testing.assert_allclose(turb_gpu.k_field, turb_cpu.k_field, rtol=1e-8, atol=1e-10)
     np.testing.assert_allclose(turb_gpu.omega_field, turb_cpu.omega_field, rtol=1e-8, atol=1e-6)
     np.testing.assert_allclose(turb_gpu.nu_t, turb_cpu.nu_t, rtol=1e-8, atol=1e-12)
+
+
+
+
+@pytest.mark.parametrize("turb_model_name", ["SST", "DDES"])
+def test_implicit_turbulence_newton_gpu_matches_cpu(turb_model_name):
+    """隐式 k-omega Newton 步：GPU 适配器（numpy 替身，走块 Jacobi 的 cupy
+    分支——批量 `xp.linalg.inv`）与 CPU 适配器（numba 分支）在同一状态上
+    给出同一个结果。算法只有一份（`fr_solver/turbulence/implicit.py`），
+    两侧只差求值件与数组模块，所以差异只能来自那里。"""
+    from autoflowcfd.core.fr_solver.turbulence.implicit import (
+        CpuTurbulenceBackend,
+        step_turbulence_newton,
+    )
+    from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import GpuTurbulenceBackend
+
+    b = _build_standins(turb_model_name)
+    b.gpu._newton_turb_state = None
+    b.cpu._newton_turb_state = None
+    dtau = np.full((b.n_cells, b.n_sps), 50.0 * b.dt_used)   # 远超显式极限
+    step_turbulence_newton(GpuTurbulenceBackend(b.gpu), dtau)
+    step_turbulence_newton(CpuTurbulenceBackend(b.cpu), dtau)
+
+    ig = b.gpu._newton_turb_state["last_info"]
+    ic = b.cpu._newton_turb_state["last_info"]
+    assert ig["theta"] > 0.0 and ic["theta"] > 0.0
+    assert ig["gmres_iters"] == ic["gmres_iters"]
+    np.testing.assert_allclose(b.turb_gpu.k_field, b.turb_cpu.k_field, rtol=1e-6, atol=1e-10)
+    np.testing.assert_allclose(b.turb_gpu.omega_field, b.turb_cpu.omega_field, rtol=1e-6)
+    np.testing.assert_allclose(b.turb_gpu.nu_t, b.turb_cpu.nu_t, rtol=1e-6, atol=1e-14)
 
 
 if __name__ == "__main__":

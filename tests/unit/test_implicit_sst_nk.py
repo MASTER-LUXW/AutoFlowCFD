@@ -107,13 +107,16 @@ class TestInflowCondition:
 
 class TestTurbulenceResidual:
     def test_wall_rows_are_strong_constraint_and_state_is_restored(self, nk_solver):
-        from autoflowcfd.core.fr_solver.turbulence.implicit import TurbulenceResidual
-        from autoflowcfd.core.fr_solver.turbulence.source import prepare_turbulence_inputs
+        from autoflowcfd.core.fr_solver.turbulence.implicit import (
+            CpuTurbulenceBackend,
+            TurbulenceResidual,
+        )
 
         t = nk_solver.turb_model
+        backend = CpuTurbulenceBackend(nk_solver)
+        backend.prepare()
         before = {a: np.array(getattr(t, a), copy=True) for a in ("k_field", "omega_field", "nu_t")}
-        Q, gv, dw, mu = prepare_turbulence_inputs(nk_solver)
-        res = TurbulenceResidual(nk_solver, Q, gv, dw, mu)
+        res = TurbulenceResidual(backend)
         rng = np.random.default_rng(0)
         kw = np.stack([t.k_field.ravel(), t.omega_field.ravel()], axis=1)
         kw = kw * (1.0 + 0.1 * rng.standard_normal(kw.shape))
