@@ -24,10 +24,19 @@ from unittest.mock import patch, MagicMock
 
 from click.testing import CliRunner
 
+from autoflowcfd.core.fr_solver.state import SolverResult
+
 from autoflowcfd.cli.main import cli
 
 
-def _fake_distributed_solver(solve_return=None):
+#: 假求解器的 solve() 在第 5、10 步各调一次回调，即跑了 10 步。返回值按真实
+#: 契约：CPU 分布式返回 `SolverResult`，多 GPU 返回带 `iterations` 的 dict
+#: （CLI 用它把实际步数写进最终 checkpoint，而不是 max_iter）。
+_CPU_RESULT = SolverResult(converged=False, iterations=10, final_residual=1e-4)
+_GPU_RESULT = {"final_residual": 1e-4, "converged": True, "iterations": 10}
+
+
+def _fake_distributed_solver(solve_return):
     solver = MagicMock()
 
     def _solve(*args, **kwargs):
@@ -49,7 +58,7 @@ class TestResumeDistributedCpuTraditionalMode(object):
         checkpoint_file = tmp_path / "checkpoint_iter_002000.h5"
         checkpoint_file.write_bytes(b"")
 
-        fake_solver = _fake_distributed_solver(solve_return=None)
+        fake_solver = _fake_distributed_solver(solve_return=_CPU_RESULT)
         fake_metadata = {
             "input_file": "volume.nas",
             "order": 1,
@@ -95,7 +104,7 @@ class TestResumeDistributedFullyDistributed(object):
         checkpoint_file = tmp_path / "checkpoint_iter_001000.h5"
         checkpoint_file.write_bytes(b"")
 
-        fake_solver = _fake_distributed_solver(solve_return=None)
+        fake_solver = _fake_distributed_solver(solve_return=_CPU_RESULT)
         fake_metadata = {
             "input_file": "volume.nas", "order": 2, "turbulence_model": "sst",
             "backend": "cpu", "surface_mesh": "surface.nas",
@@ -126,7 +135,7 @@ class TestResumeDistributedMultiGpu(object):
         checkpoint_file = tmp_path / "checkpoint_iter_000500.h5"
         checkpoint_file.write_bytes(b"")
 
-        fake_solver = _fake_distributed_solver(solve_return={"final_residual": 1e-4, "converged": True})
+        fake_solver = _fake_distributed_solver(solve_return=_GPU_RESULT)
         fake_solver.save_checkpoint_distributed.return_value = "fake_ckpt_path.h5"
         fake_metadata = {
             "input_file": "volume.nas", "order": 1, "turbulence_model": "none",
@@ -154,6 +163,8 @@ class TestResumeDistributedMultiGpu(object):
         written_iterations = [c.args[1] for c in fake_solver.save_checkpoint_distributed.call_args_list]
         assert 505 in written_iterations
         assert 510 in written_iterations
+        # 最终 checkpoint 记录实际跑到的绝对步数（500 + 10）
+        assert written_iterations[-1] == 510
         fake_solver.cleanup.assert_called_once()
 
 
@@ -172,7 +183,7 @@ class TestResumeDistributedPhaseMaxIterForwarding(object):
         checkpoint_file = tmp_path / "checkpoint_iter_002000.h5"
         checkpoint_file.write_bytes(b"")
 
-        fake_solver = _fake_distributed_solver(solve_return=None)
+        fake_solver = _fake_distributed_solver(solve_return=_CPU_RESULT)
         fake_metadata = {
             "input_file": "volume.nas", "order": 2, "turbulence_model": "none",
             "backend": "cpu", "surface_mesh": "surface.nas",
@@ -202,7 +213,7 @@ class TestResumeDistributedPhaseMaxIterForwarding(object):
         checkpoint_file = tmp_path / "checkpoint_iter_000500.h5"
         checkpoint_file.write_bytes(b"")
 
-        fake_solver = _fake_distributed_solver(solve_return={"final_residual": 1e-4, "converged": True})
+        fake_solver = _fake_distributed_solver(solve_return=_GPU_RESULT)
         fake_solver.save_checkpoint_distributed.return_value = "fake_ckpt_path.h5"
         fake_metadata = {
             "input_file": "volume.nas", "order": 2, "turbulence_model": "none",
@@ -236,7 +247,7 @@ class TestResumeDistributedPhaseMaxIterForwarding(object):
         checkpoint_file = tmp_path / "checkpoint_iter_002000.h5"
         checkpoint_file.write_bytes(b"")
 
-        fake_solver = _fake_distributed_solver(solve_return=None)
+        fake_solver = _fake_distributed_solver(solve_return=_CPU_RESULT)
         fake_metadata = {
             "input_file": "volume.nas", "order": 2, "turbulence_model": "none",
             "backend": "cpu", "surface_mesh": "surface.nas",

@@ -36,8 +36,17 @@ def test_cfl_scales_with_residual_ratio():
     assert c.update(8e5) == pytest.approx(5.0 * 1.25)
     # 残差上升但 Newton 步被完整接受：物理暂态，保持
     assert c.update(1e6) == pytest.approx(5.0 * 1.25)
-    # 残差上升且步没被完整接受：按比值收缩
-    assert c.update(1.25e6, step_ok=False) == pytest.approx(5.0 * 1.25 * 0.8)
+    # 残差上升且步没被完整接受：至少减半（比值 0.8 不够）
+    assert c.update(1.25e6, step_ok=False) == pytest.approx(5.0 * 1.25 * 0.5)
+
+
+def test_failed_step_never_grows_cfl():
+    """残差略降但 Newton 步没被完整接受（例如线性求解失败）：不能因为比值
+    > 1 就放大。真实数据：GMRES 用满 200 次只到 0.96 的那一步，旧规则把 CFL
+    从 3351 放大到 3385。"""
+    c = SERCFLController(cfl_start=100.0, cfl_max=1e4, cfl_min=0.5)
+    c.update(4.03e5)
+    assert c.update(3.89e5, step_ok=False) == pytest.approx(50.0)
 
 
 def test_growth_while_holding_does_not_compound():

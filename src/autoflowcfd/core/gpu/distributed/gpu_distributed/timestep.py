@@ -157,13 +157,21 @@ class _MultiGPUTimeStepMixin:
         from autoflowcfd.core.time_integration.adaptive_cfl.policy import current_cfl_number
         return current_cfl_number(self)
 
-    def _update_cfl_controller(self, residual_norm: float) -> None:
+    def _update_cfl_controller(self, residual_norm: float, newton_info=None) -> None:
         """用**全局**残差范数更新自适应 CFL 控制器。
 
         必须用全局值：所有 rank 因此得到同一个 CFL 数，进而得到一致的
         局部步长缩放。按各自的局部残差更新会让 rank 间 CFL 漂移，
-        破坏分布式一致性。
+        破坏分布式一致性。隐式步（`newton_info` 非 None）走 SER 律：看 Newton
+        实际在解的系统的全局残差 `||Gamma R||`，并区分"残差上升但步被完整
+        接受"与"步没被完整接受"（与单机/CPU 分布式同一判据）。
         """
         c = getattr(self, "_cfl_controller", None)
-        if c is not None:
+        if c is None:
+            return
+        if newton_info is None:
             c.update(residual_norm)
+        else:
+            from autoflowcfd.core.time_integration.implicit.mean_flow_step import newton_step_ok
+
+            c.update(newton_info["res_norm"], step_ok=newton_step_ok(newton_info))

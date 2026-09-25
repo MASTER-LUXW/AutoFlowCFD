@@ -75,7 +75,8 @@ from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coeffici
                    '非绝对迭代数）——与 solve steady 同名参数含义一致')
 @click.option('--time-scheme', type=click.Choice(['rk3', 'newton-krylov']), default=None,
               help='续算用的稳态格式；默认沿用 checkpoint 记录的格式（早于 2026-09-25 的 '
-                   'checkpoint 没有记录，它们只可能是 rk3）。仅单机 CPU 路径支持 newton-krylov。')
+                   'checkpoint 没有记录，它们只可能是 rk3）。单机与分布式（--n-ranks/'
+                   '--multi-gpu/--fully-distributed）续算都支持 newton-krylov。')
 @click.option('--cfl-start', type=float, default=None,
               help='自适应 CFL 初始值，默认按续算所用时间格式取其 CFL 律的签名默认值'
                    '（rk3 为 0.03，newton-krylov 为 5；adaptive_cfl/policy.py 唯一来源）。'
@@ -157,14 +158,12 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
     logger.info(f"Resuming simulation from checkpoint: {checkpoint_file}")
 
     if n_ranks > 1 or multi_gpu:
-        if time_scheme == 'newton-krylov':
-            raise click.UsageError(
-                "--time-scheme newton-krylov 目前只在单机 CPU 路径实现，分布式续算请用 rk3。")
         _resume_distributed(
             checkpoint_file, max_iter, n_ranks, multi_gpu, fully_distributed,
             gpu_device, backend, surface_mesh, threads, skip_quality_check,
             checkpoint_interval, phase_max_iter, residual_drop_threshold,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            time_scheme=time_scheme,
         )
         return
 
@@ -255,6 +254,7 @@ def _resume_distributed(
     cfl_start: Optional[float] = None,
     cfl_max: Optional[float] = None,
     cfl_min: Optional[float] = None,
+    time_scheme: Optional[str] = None,
 ) -> None:
     """`resume` 的分布式分支（2026-09-02 补齐，见 `resume` 文档"完成度"
     一节）——CPU MPI"传统模式"/"完全分布式加载"/多GPU 三条路径共用同一个
@@ -293,7 +293,7 @@ def _resume_distributed(
         fully_distributed=fully_distributed, gpu_device=gpu_device,
         backend=backend, surface_mesh=surface_mesh, threads=threads,
         cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
-        skip_quality_check=skip_quality_check,
+        skip_quality_check=skip_quality_check, time_scheme=time_scheme,
     )
     input_file = metadata["input_file"]
     order = metadata["order"]
@@ -333,14 +333,15 @@ def _resume_distributed(
             max_iter=max_iter, dt=1e-3, tol=1e-6, checkpoint_callback=_checkpoint_cb,
             phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold,
         )
+        total_iterations = iteration + result['iterations']
         if is_root():
             print(
                 f"\n✅ Resumed multi-GPU simulation finished: "
-                f"total_iterations~={iteration + max_iter}, "
+                f"total_iterations={total_iterations}, "
                 f"Residual={result['final_residual']:.6e}"
             )
         saved_path = solver.save_checkpoint_distributed(
-            output_dir, iteration + max_iter, input_file,
+            output_dir, total_iterations, input_file,
             solver.current_order, turbulence_model, backend="gpu",
             target_order=solver.order, surface_mesh=resolved_surface_mesh,
         )
@@ -374,16 +375,16 @@ def _resume_distributed(
             if is_root():
                 print(f"   [Checkpoint] Warning: save failed at iter {absolute_iteration}: {e}")
 
-    solver.solve(n_steps=max_iter, dt=1e-3, output_interval=checkpoint_interval,
-                 checkpoint_callback=_checkpoint_cb,
-                 phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold)
+    result = solver.solve(n_steps=max_iter, dt=1e-3, output_interval=checkpoint_interval,
+                          checkpoint_callback=_checkpoint_cb,
+                          phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold)
+    total_iterations = iteration + result.iterations
     if is_root():
-        print(f"\n✅ Resumed distributed simulation finished: "
-              f"total_iterations~={iteration + max_iter}")
+        print(f"\n✅ Resumed distributed simulation finished: total_iterations={total_iterations}")
 
     distributed_save_results(solver, output_dir)
     distributed_save_checkpoint(
-        solver, output_dir, iteration + max_iter, input_file,
+        solver, output_dir, total_iterations, input_file,
         solver.current_order, turbulence_model, target_backend,
         target_order=solver.order, surface_mesh=resolved_surface_mesh,
     )

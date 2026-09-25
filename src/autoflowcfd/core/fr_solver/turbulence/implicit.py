@@ -25,7 +25,7 @@
   evaluate_turbulence_rates`），不另写一份物理；
 * 线性求解、SER、dtau 缩档、块 Jacobi 全部复用平均流那一套
   （`time_integration/implicit/`），物理性限幅换成"k、omega 单步相对下降
-  不超过 50%"（`positive_fields_limited_step`）；
+  不超过 50%"，逐单元松弛（`positive_fields_row_limits`）；
 * 零填充槽位（原生基）不参与：它们的 `R_t` 置零（平均流残差在那里本来
   就恒为零），于是 Newton 不动它们；
 * 更新之后的正性/上界限幅、模态滤波、omega 壁面松弛与显式路径**同一套**
@@ -76,7 +76,7 @@ from autoflowcfd.core.time_integration.implicit import (
     EisenstatWalkerForcing,
     step_newton_krylov,
 )
-from autoflowcfd.core.time_integration.implicit.jfnk import positive_fields_limited_step
+from autoflowcfd.core.time_integration.implicit.jfnk import positive_fields_row_limits
 from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
 from autoflowcfd.core.turbulence.transport import omega_wall_cell_targets
 from autoflowcfd.fr.native_padding import real_sps_per_cell
@@ -233,7 +233,8 @@ def step_turbulence_newton(backend, dtau) -> None:
     kw_new, info = step_newton_krylov(
         residual, kw0, xp.asarray(dtau, dtype=xp.float64).ravel(), scales,
         forcing=st["forcing"], dtau_scale=st["dtau_scale"], block_precond=st["block"],
-        physicality=positive_fields_limited_step, red=backend.red)
+        physicality=positive_fields_row_limits, rows_per_cell=backend.shape[1],
+        red=backend.red)
     st["dtau_scale"] = info["dtau_scale"]
     st["last_info"] = info
 

@@ -169,7 +169,7 @@ class TestPhysicalityLimiter:
     """物理性限幅必须在 Newton 方向指向非物理态时真正收紧步长。"""
 
     def test_theta_shrinks_when_direction_kills_density(self):
-        """构造一个"把密度打到负值"的残差，`theta` 必须 < 1 且
+        """构造一个"把密度打到负值"的残差，逐单元松弛因子必须 < 1 且
         推进后密度仍为正。
 
         这不是假想情形：Newton 方向在远离解时完全可以指向 `rho<0`，
@@ -190,9 +190,10 @@ class TestPhysicalityLimiter:
         u1, info = step_newton_krylov(
             residual, u0, dtau, _SCALES, gmres_max_iter=200,
             gmres_restart=50)
-        assert 0.0 < info["theta"] < 1.0, (
-            f"Newton 方向把密度打到负值，theta 应当被收紧到 (0,1)，"
-            f"实际 {info['theta']}")
+        assert 0.0 < info["theta_physicality"] < 1.0, (
+            f"Newton 方向把密度打到负值，松弛因子应当被收紧到 (0,1)，"
+            f"实际 {info['theta_physicality']}")
+        assert info["limited_fraction"] == 1.0, "每个点的方向都指向负密度，应全部被松弛"
         assert np.all(u1[:, 0] > 0.0), "限幅之后密度仍然出现非正值"
         # 相对变化不超过设定上限（留一点浮点余量）
         rel = np.max(np.abs(u1[:, 0] - u0[:, 0]) / u0[:, 0])
@@ -364,11 +365,9 @@ class TestPtcDtauScaleStateMachine:
         from autoflowcfd.core.time_integration.implicit import dtau_control as DC
 
         ctrl = DC.PtcDtauScale(0.25)
-        ctrl.reward(theta=0.5, theta_physicality=1.0)   # 被回溯过
+        ctrl.reward(theta=0.5)   # 被回溯过
         assert ctrl.scale == pytest.approx(0.25)
-        ctrl.reward(theta=0.5, theta_physicality=0.5)   # 被物理性限幅削过
-        assert ctrl.scale == pytest.approx(0.25)
-        ctrl.reward(theta=1.0, theta_physicality=1.0)   # 完整接受
+        ctrl.reward(theta=1.0)   # 完整接受（逐单元物理性松弛不参与，见 reward 文档）
         assert ctrl.scale == pytest.approx(0.25 * DC.OK_GROW)
 
     def test_scale_never_exceeds_one(self):
@@ -378,7 +377,7 @@ class TestPtcDtauScaleStateMachine:
 
         ctrl = DC.PtcDtauScale(0.5)
         for _ in range(10):
-            ctrl.reward(theta=1.0, theta_physicality=1.0)
+            ctrl.reward(theta=1.0)
         assert ctrl.scale == 1.0
 
     @pytest.mark.parametrize("bad", [0.0, -1.0, np.nan, np.inf])
@@ -464,3 +463,50 @@ class TestDtauCutOnRejectedStep:
         assert info["theta"] == pytest.approx(1.0)
         assert info["n_dtau_cuts"] == 0
         assert info["dtau_scale"] == pytest.approx(0.125)
+
+
+def test_physicality_relaxation_is_cellwise_not_global():
+    """一个单元想把正值场降掉 99%，只有它自己被松弛；其余单元照常走完整的
+    Newton 步。2026-09-25 以前是全场取最小的一个 theta：plate_demo P0+SST 上
+    一个单元让湍流 Newton 的 theta 掉到 7.9e-5，整个湍流场随之冻结。"""
+    from autoflowcfd.core.time_integration.implicit.jfnk import (
+        PHYSICALITY_MAX_RELATIVE_CHANGE as C, positive_fields_row_limits, step_newton_krylov,
+    )
+
+    n_cells, rows_per_cell = 6, 3
+    n = n_cells * rows_per_cell
+    target = np.full((n, 2), 1.2)
+    target[:rows_per_cell] = 0.01            # 单元 0 的目标：下降 99%
+    u0 = np.ones((n, 2))
+
+    def residual(u):                          # 线性、逐点解耦：Newton 一步到位
+        return u - target
+
+    u1, info = step_newton_krylov(
+        residual, u0, np.full(n, 1e12), np.ones(2), physicality=positive_fields_row_limits,
+        rows_per_cell=rows_per_cell, gmres_max_iter=50)
+
+    alpha0 = C / 0.99
+    np.testing.assert_allclose(u1[:rows_per_cell], 1.0 - alpha0 * 0.99, rtol=1e-8)
+    np.testing.assert_allclose(u1[rows_per_cell:], 1.2, rtol=1e-8)
+    assert info["theta"] == 1.0
+    assert info["theta_physicality"] == pytest.approx(alpha0)
+    assert info["limited_fraction"] == pytest.approx(1.0 / n_cells)
+
+
+def test_positive_field_relaxation_bounds_increase_too():
+    """单步变化是双向（对数对称）约束：想把 k 放大 1000 倍的单元只被放大
+    1/(1-c) 倍。"""
+    from autoflowcfd.core.time_integration.implicit.jfnk import (
+        PHYSICALITY_MAX_RELATIVE_CHANGE as C, positive_fields_row_limits, step_newton_krylov,
+    )
+
+    n = 4
+    target = np.ones((n, 2))
+    target[0] = 1000.0
+    u1, info = step_newton_krylov(
+        lambda u: u - target, np.ones((n, 2)), np.full(n, 1e12), np.ones(2),
+        physicality=positive_fields_row_limits, rows_per_cell=1, gmres_max_iter=50)
+    np.testing.assert_allclose(u1[0], 1.0 / (1.0 - C), rtol=1e-10)
+    np.testing.assert_allclose(u1[1:], 1.0, rtol=1e-12)
+    assert info["limited_fraction"] == pytest.approx(0.25)

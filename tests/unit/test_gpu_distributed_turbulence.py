@@ -61,6 +61,18 @@ import autoflowcfd.core.gpu.gpu_modal_filter as gpu_modal_filter_mod
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 
 
+
+def _bind_turb_source(stub):
+    """把 `_GPUDistributedTurbSourceMixin` 的求值件绑定到替身上（被测入口
+    `_compute_turbulence_source_distributed` 通过 `self` 调用它们）。"""
+    from autoflowcfd.core.gpu.distributed.gpu_distributed_init.turb_source import (
+        _GPUDistributedTurbSourceMixin as M,
+    )
+    for name in ("_les_mu_t_compact", "_prepare_turbulence_view_distributed",
+                 "_sync_turbulence_view", "_evaluate_turbulence_rates_distributed",
+                 "_finalize_turbulence_update_distributed", "_write_back_turbulence_distributed"):
+        setattr(stub, name, types.MethodType(getattr(M, name), stub))
+
 class _NumpyAsCupy:
     """把 numpy 伪装成 CuPy 模块接口，供各 gpu_*.py 生产函数在没有真实
     CUDA 设备的机器上直接运行（不是重新实现，是给同一份代码换一个张量
@@ -226,6 +238,9 @@ def test_gpu_distributed_sst_matches_cpu_distributed_sst(rank, turb_model_name):
     mu_t_compact_cpu, _ = distributed_compute_turbulence_source_and_viscosity(
         U_local, partition, fake_halo_5var_cpu, fake_halo_turb_cpu, dist_fc, mesh, ops,
         turb_cpu, mu, d_wall_compact, dt_local_local,
+        # 产生项渐变进行中（第 10/50 步）：两侧必须按同一个计数器渐变（多 GPU
+        # 2026-09-25 以前从不推进渐变，production_factor 恒为 1）
+        turb_ramp_step=10, turb_ramp_steps=50,
         turb_model_name=turb_model_name, ddes_model=_make_ddes_cpu(turb_model_name),
         iddes_h_max_compact=iddes_h_max_compact, iddes_h_wn_compact=iddes_h_wn_compact,
     )
@@ -256,11 +271,14 @@ def test_gpu_distributed_sst_matches_cpu_distributed_sst(rank, turb_model_name):
         ddes_model_gpu=_make_ddes_gpu(turb_model_name),
         iddes_h_max_compact=iddes_h_max_compact, iddes_h_wn_compact=iddes_h_wn_compact,
         des_length_scale_halo_gpu=_FakeHalo(np.zeros((len(native_ids), n_sps, 1))),  # 第一次调用不会被读取
+        _turb_ramp_step=10, _turb_production_ramp_steps=50,
     )
     stub._permute_to_compact = lambda arr: arr[stub._perm_gpu]
     stub._unpermute_from_compact = lambda arr: arr[stub._inv_perm_gpu]
+    _bind_turb_source(stub)
 
     mu_t_compact_gpu = _GPUDistributedInitMixin._compute_turbulence_source_distributed(stub, dt)
+    assert turb_gpu.production_factor == pytest.approx(10 / 50)
 
     np.testing.assert_allclose(turb_gpu.k_field, turb_cpu.k_field, rtol=1e-10, atol=1e-12)
     np.testing.assert_allclose(turb_gpu.omega_field, turb_cpu.omega_field, rtol=1e-10, atol=1e-8)
@@ -349,6 +367,7 @@ def test_gpu_distributed_ddes_two_consecutive_calls_does_not_crash(turb_model_na
     )
     stub._permute_to_compact = lambda arr: arr[stub._perm_gpu]
     stub._unpermute_from_compact = lambda arr: arr[stub._inv_perm_gpu]
+    _bind_turb_source(stub)
 
     # call 1：des_length_scale 还是 None，第一次调用不会触发 halo 交换
     # 分支，随便给个占位 halo（不会被读取）。
@@ -433,6 +452,7 @@ def test_gpu_distributed_les_matches_single_machine_wale(rank):
     )
     stub._permute_to_compact = lambda arr: arr[stub._perm_gpu]
     stub._unpermute_from_compact = lambda arr: arr[stub._inv_perm_gpu]
+    _bind_turb_source(stub)
 
     mu_t_compact_gpu = _GPUDistributedInitMixin._compute_turbulence_source_distributed(stub, dt=1e-5)
 
@@ -568,6 +588,7 @@ class TestWmlesDistributedGpu:
         )
         stub._permute_to_compact = lambda arr: arr[dist_fc.perm]
         stub._unpermute_from_compact = lambda arr: arr[dist_fc.inv_perm]
+        _bind_turb_source(stub)
 
         residual_local = gd_mod.MultiGPUDistributedSolver.compute_viscous_residual_gpu(stub)
 

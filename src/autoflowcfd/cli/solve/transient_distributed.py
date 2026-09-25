@@ -186,7 +186,8 @@ def _solve_transient_cpu_traditional(
                 print(f"   [Checkpoint] Warning: save failed at iter {iteration}: {e}")
 
     try:
-        solver.solve(n_steps=max_iter, dt=dt, output_interval=checkpoint_interval,
+        # 瞬态：步数就是物理时间长度，tol=0 不按残差提前结束（与多 GPU 分支同一约定）
+        solver.solve(n_steps=max_iter, dt=dt, tol=0.0, output_interval=checkpoint_interval,
                      checkpoint_callback=_checkpoint_cb,
                      phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold)
         if is_root():
@@ -282,7 +283,8 @@ def _solve_transient_fully_distributed(
                 print(f"   [Checkpoint] Warning: save failed at iter {iteration}: {e}")
 
     try:
-        solver.solve(n_steps=max_iter, dt=dt, output_interval=checkpoint_interval,
+        # 瞬态：步数就是物理时间长度，tol=0 不按残差提前结束（与多 GPU 分支同一约定）
+        solver.solve(n_steps=max_iter, dt=dt, tol=0.0, output_interval=checkpoint_interval,
                      checkpoint_callback=_checkpoint_cb,
                      phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold)
         if is_root():

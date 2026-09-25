@@ -8,6 +8,8 @@ from pathlib import Path
 
 import pytest
 import numpy as np
+
+from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 
 
@@ -146,6 +148,8 @@ class TestGpuDistributedCheckpointRoundtrip:
         # 真实求解器恒有来流字典；checkpoint 必须记录它（2026-09-25 起分布式
         # 写入端与单机共用 core/utils/checkpoint_physics.py）。
         solver.freestream = {"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0}
+        # 时间格式同样写进元数据（resume 默认沿用它）；多 GPU 的积分器属性名
+        solver.time_integrator = types.SimpleNamespace(scheme=TimeIntegrationScheme.NEWTON_KRYLOV)
         n_local = partition.n_local_cells
         rng = np.random.default_rng(123)
         solver.U_gpu = rng.uniform(-1.0, 1.0, size=(n_local, n_sps, n_vars))
@@ -183,6 +187,7 @@ class TestGpuDistributedCheckpointRoundtrip:
         assert iteration == 42
         # HDF5 往返后是 numpy bool_，不是 Python bool 单例，用 == 而非 is。
         assert metadata.get("distributed") == True  # noqa: E712
+        assert metadata.get("time_scheme") == "newton_krylov", "续算默认沿用的时间格式没有记录"
 
         np.testing.assert_allclose(solver2.U_gpu, U_gpu_original, rtol=1e-10, atol=1e-12)
         np.testing.assert_allclose(

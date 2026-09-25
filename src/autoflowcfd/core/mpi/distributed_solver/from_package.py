@@ -100,6 +100,8 @@ class _DistributedFromPackageMixin:
         self.ops = generate_fr_operators(package['order'])
 
         self.partition = package['partition']
+        # 隐式稳态的块 Jacobi 着色（全局一致，root 随包下发；非隐式时为 None）
+        self._block_jacobi_colors_local = package.get('cell_colors')
         self.dist_flat_face = package['dist_fc']
 
         n_sps = precompacted_mesh.n_sps_per_cell
@@ -260,6 +262,10 @@ class _DistributedFromPackageMixin:
             scheme=time_scheme, dt=1.0, dual_time_steps=dual_time_steps,
         )
         self._dual_time_U_prev = None
+        # NEWTON_KRYLOV 跨步状态（构造时置初值，理由见 reset_newton_state 文档）
+        from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
+
+        reset_newton_state(self)
 
         # 自适应 CFL + 低马赫数伪时间预处理（2026-09-14 补齐）。
         # 这两个机制此前在分布式路径上都不存在，因为它们都以"存在一个由

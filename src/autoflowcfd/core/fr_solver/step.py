@@ -154,6 +154,12 @@ def step(solver, dt: float) -> float:
         else:
             solver.compute_turbulence_source(turb_dt)
 
+        # 本步冻结的湍流涡粘（算子分裂：湍流已更新，本步全部残差求值共用
+        # 同一份，与 GPU/分布式后端同一约定，见 compute_viscous_residual 文档）
+        from autoflowcfd.core.fr_solver.turbulence.corrections import get_turbulent_viscosity_field
+
+        mu_t_step = get_turbulent_viscosity_field(solver)
+
         U_flat = solver.state.U.reshape(n_cells * n_sps, n_vars)
         dt_local_flat = dt_local.reshape(n_cells * n_sps)
 
@@ -170,7 +176,7 @@ def step(solver, dt: float) -> float:
             solver.state.U = U_trial
             try:
                 inv_res = solver.compute_inviscid_residual()
-                visc_res = solver.compute_viscous_residual()
+                visc_res = solver.compute_viscous_residual(mu_t_turb=mu_t_step)
             finally:
                 solver.state.U = saved_U
             # B-12 P2 OOM 修复第⑤级（2026-08-26）：原 `total = inv_res + visc_res`
@@ -223,7 +229,7 @@ def step(solver, dt: float) -> float:
             saved_U = solver.state.U
             solver.state.U = U_trial
             try:
-                visc_res = solver.compute_viscous_residual()
+                visc_res = solver.compute_viscous_residual(mu_t_turb=mu_t_step)
             finally:
                 solver.state.U = saved_U
             visc_res *= -1  # 原地取负，理由同 mean_flow_residual 的 B-12 注释

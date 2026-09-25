@@ -86,6 +86,8 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     self.ops = generate_fr_operators(package['order'])
 
     self.partition = package['partition']
+    # 隐式稳态的块 Jacobi 着色（全局一致，root 随包下发；非隐式时为 None）
+    self._block_jacobi_colors_local = package.get('cell_colors')
     self.dist_flat_face = package['dist_fc']
 
     # GPU 设备选择：与主 __init__ 同一个默认策略（rank % n_gpus）。
@@ -168,6 +170,10 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     # 回退设计一致，见该方法调用点），这里显式设置成 package 携带的值。
     self.time_integrator.dual_time_steps = package.get('dual_time_inner_iter', 20)
     self._dual_time_U_prev = None
+    # NEWTON_KRYLOV 跨步状态（构造时置初值，理由见 reset_newton_state 文档）
+    from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
+
+    reset_newton_state(self)
 
     self.turb_model_name = turb_model_name
     self.turb_model_gpu = None

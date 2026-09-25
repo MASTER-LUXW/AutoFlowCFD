@@ -94,14 +94,15 @@ class PtcDtauScale:
         self.scale = max(MIN_SCALE, self.scale * FAIL_SHRINK)
         return True
 
-    def reward(self, theta: float, theta_physicality: float) -> None:
-        """一步被完整接受时放大一档。
+    def reward(self, theta: float) -> None:
+        """一步被完整接受（残差接受判据没有回溯，`theta >= 1`）时放大一档；
+        被回溯说明当前 `dtau` 已经在边界上，保持不动。
 
-        "完整"的含义：物理性限幅没有削过（`theta_physicality >= 1`）
-        且残差接受判据没有回溯过（`theta >= theta_physicality`）。任何
-        一项被削都说明当前 `dtau` 已经在边界上，保持不动。
+        物理性限幅是逐单元的局部松弛（`jfnk.py::PHYSICALITY_MAX_RELATIVE_CHANGE`），
+        不进入这里：个别单元被松弛不代表全局 `dtau` 过大，让它拖住全场的
+        `dtau` 正是逐单元松弛要消除的"一个单元冻结全场"。
         """
-        if theta_physicality >= 1.0 and theta >= theta_physicality:
+        if theta >= 1.0:
             self.scale = min(1.0, self.scale * OK_GROW)
 
     def __repr__(self) -> str:  # pragma: no cover - 仅用于日志/调试

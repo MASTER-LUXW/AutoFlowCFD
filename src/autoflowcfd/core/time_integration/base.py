@@ -153,17 +153,18 @@ def scheme_from_name(name):
 
 #: 分布式后端（CPU-MPI、多 GPU）实现了的时间积分方案。
 #:
-#: NEWTON_KRYLOV 不在其中：它的 GMRES 内积、Eisenstat–Walker 判据与线搜索
-#: 的残差范数都要跨 rank 归约，分布式版本没有实现；也没有任何入口把它提供
-#: 给分布式后端（CLI 的分布式分支只提供 rk3/imex/dual-time）。由
-#: `require_distributed_scheme` 在构造时拒绝，而不是让 `step()` 走到某个
-#: 回退分支里静默换成别的格式 —— IMEX 此前正是那样在分布式上跑成了前向 Euler。
+#: NEWTON_KRYLOV 的 GMRES 内积、Eisenstat–Walker 判据、线搜索与物理性限幅
+#: 都经跨 rank 的归约对象（`core/mpi/reductions.py`），块 Jacobi 用全局一致
+#: 着色（`core/mpi/distributed_implicit.py`）。表外的方案由
+#: `require_distributed_scheme` 在构造时拒绝，而不是让 `step()` 走到某个回退
+#: 分支里静默换成别的格式 —— IMEX 此前正是那样在分布式上跑成了前向 Euler。
 DISTRIBUTED_SCHEMES = (
     TimeIntegrationScheme.FORWARD_EULER,
     TimeIntegrationScheme.SSP_RK2,
     TimeIntegrationScheme.SSP_RK3,
     TimeIntegrationScheme.IMEX_EULER,
     TimeIntegrationScheme.DUAL_TIME,
+    TimeIntegrationScheme.NEWTON_KRYLOV,
 )
 
 

@@ -6,6 +6,7 @@
 
 import click
 
+from autoflowcfd.core.time_integration.base import scheme_from_name
 from autoflowcfd.cli.solve.wall_distance import wall_distance_source_if_needed
 from autoflowcfd.cli.solve.helpers import load_mesh_for_solver
 
@@ -16,7 +17,7 @@ def _run_multi_gpu(
     aoa_deg, aos_deg, cfl_max, cfl_min, cfl_start, checkpoint_interval,
     fully_distributed, gpu_device, input_file, max_iter, mu_molecular, n_ranks,
     order, output_dir, p_inf, phase_max_iter, residual_drop_threshold, rho_inf,
-    skip_quality_check, surface_mesh, turbulence_intensity, turbulence_model,
+    skip_quality_check, surface_mesh, time_scheme, turbulence_intensity, turbulence_model,
     vel_inf, viscosity_ratio,
 ):
     """`solve steady` 的多 GPU + MPI 分布式（传统模式 / 完全分布式加载）路径。"""
@@ -58,6 +59,7 @@ def _run_multi_gpu(
             use_eikonal=use_eikonal,
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            time_scheme=scheme_from_name(time_scheme),
         )
         solver = MultiGPUDistributedSolver.from_fully_distributed_package(
             package, n_ranks=n_ranks, device_id=gpu_device, root_context=root_context,
@@ -91,6 +93,7 @@ def _run_multi_gpu(
             # 同类。多 GPU 传统模式有自适应控制器（见 gpu_distributed.py
             # 里 _cfl_controller 构造处），必须一并透传。
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            time_scheme=scheme_from_name(time_scheme).value,
         )
 
     # 中间 checkpoint 保存回调（2026-09-02 补齐——此前 output_interval
@@ -124,13 +127,13 @@ def _run_multi_gpu(
             checkpoint_callback=_multi_gpu_checkpoint_cb,
             phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold,
         )
-        print(f"\n✅ Multi-GPU Simulation Finished")
+        print(f"\n✅ Multi-GPU Simulation Finished: Iterations={result['iterations']}")
         # #4（2026-08-28）：此前这里从不保存结果——分布式 checkpoint
         # save/load 依赖的 self.U_gpu 本地尺寸缺陷（#1）修复之前，
         # 保存也没有意义，见 MultiGPUDistributedSolver.
         # save_checkpoint_distributed 文档。
         saved_path = solver.save_checkpoint_distributed(
-            output_dir, max_iter, input_file,
+            output_dir, result['iterations'], input_file,
             solver.current_order, turbulence_model, backend="gpu",
             target_order=solver.order, surface_mesh=surface_mesh,
         )

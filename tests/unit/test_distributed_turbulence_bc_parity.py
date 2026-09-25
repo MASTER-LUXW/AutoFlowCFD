@@ -102,3 +102,20 @@ def test_explicit_sst_with_boundary_conditions_matches_single_machine():
         single.step(1e-6)
         dist.step(1e-6)
         _assert_same(single, dist, f"显式 SST 第 {k + 1} 步")
+
+
+def test_newton_krylov_sst_matches_single_machine():
+    """隐式稳态（平均流 NK + 隐式 k-omega）：分布式与单机同一个算法，只换了
+    归约对象、块 Jacobi 着色来源与湍流求值的 compact 视图。n_ranks=1 下三者
+    都应退化为单机行为，差异只能来自浮点重结合。"""
+    from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
+
+    single, dist = _pair(TimeIntegrationScheme.NEWTON_KRYLOV)
+    for k in range(3):
+        single.step(1e-6)
+        dist.step(1e-6)
+        a, b = dist._newton_last_info, single._newton_last_info
+        assert a["gmres_iters"] == b["gmres_iters"] and a["theta"] == b["theta"], (
+            f"第 {k + 1} 步 Newton 轨迹不同：分布式 {a}，单机 {b}")
+        _assert_same(single, dist, f"NK SST 第 {k + 1} 步")
+    assert dist._cfl_controller.cfl_number == single._cfl_controller.cfl_number

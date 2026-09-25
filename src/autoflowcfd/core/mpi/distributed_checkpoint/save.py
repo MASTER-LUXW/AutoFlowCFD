@@ -133,6 +133,11 @@ def distributed_save_checkpoint(
         "n_cells_global": n_global,
         "n_ranks": n_ranks,
         "distributed": True,
+        # 时间格式（2026-09-25，与单机写入端同一个键）：`solve resume` 默认沿用它
+        # ——隐式稳态续算不应被静默换回显式格式。CPU-MPI 的积分器属性名是
+        # `_time_integrator`，多 GPU 是 `time_integrator`。
+        "time_scheme": (getattr(solver, "time_integrator", None)
+                        or solver._time_integrator).scheme.value,
         # 决定物理解的参数（2026-09-25 补齐）：此前一个都不写，分布式 resume
         # 因此要么按默认来流静默重建另一个算例、要么（09-24 起）直接报错。
         # 与单机写入端共用同一个函数。

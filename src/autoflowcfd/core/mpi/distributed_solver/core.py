@@ -22,11 +22,13 @@ from autoflowcfd.core.time_integration.base import (
     TimeIntegrator, TimeIntegrationScheme, require_distributed_scheme,
 )
 from .from_package import _DistributedFromPackageMixin
+from .solve_loop import _DistributedSolveMixin
 from .step import _DistributedStepMixin
 from .support import _DistributedSupportMixin
 
 
-class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, _DistributedSupportMixin):
+class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, _DistributedSolveMixin,
+                          _DistributedSupportMixin):
     """MPI 域分解分布式 FR 求解器。
 
     组合 FRSolver（单机残差计算）+ MPI 基础设施（分区、halo 交换、
@@ -421,6 +423,10 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, _
         # 尚未跑过一个物理步，退化为 BDF1——与单机
         # `solver._dual_time_U_prev` 同一个约定）。
         self._dual_time_U_prev = None
+        # NEWTON_KRYLOV 跨步状态（构造时置初值，理由见 reset_newton_state 文档）
+        from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
+
+        reset_newton_state(self)
 
         # 自适应 CFL + 低马赫数伪时间预处理（2026-09-14 补齐）。
         # 这两个机制此前在分布式路径上都不存在，因为它们都以"存在一个由

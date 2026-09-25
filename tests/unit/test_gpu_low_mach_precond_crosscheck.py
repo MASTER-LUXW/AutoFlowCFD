@@ -345,9 +345,13 @@ class TestGpuSolverWiring:
         assert ctrl._prev_residual == 0.0, "残差基线没有随复位清掉"
 
     def test_turbulence_uses_physical_dt_in_source(self):
-        """GPU 湍流场更新必须取物理 dt（不能跟着预处理放大 7 倍）。"""
-        from autoflowcfd.core.gpu.solver import gpu_solver_io as gio
-        src = __import__("inspect").getsource(gio)
-        assert "return_physical_too=True" in src, (
-            "GPU 湍流更新仍在用放大后的平均流 dt——k/omega 的显式更新没有"
-            "point-implicit 阻尼，不能跟着放大")
+        """GPU 湍流场更新必须取物理 dt（不能跟着预处理放大 7 倍）。
+
+        2026-09-25 起步长由 `step()` 按与 CPU 同一规则选定后传入
+        `compute_turbulence_source_gpu`（逐点数值由
+        `test_gpu_solver_turbulence_source.py` 的非均匀 dt 对照覆盖）。"""
+        from autoflowcfd.core.gpu.solver.gpu_solver import step as gstep
+        src = __import__("inspect").getsource(gstep)
+        assert "return_physical_too=True" in src and "dt_physical[:, None]" in src, (
+            "GPU 湍流更新没有用物理波速那一份逐点 dt——k/omega 的显式更新没有"
+            "point-implicit 阻尼，不能跟着预处理放大")

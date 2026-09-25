@@ -131,16 +131,21 @@ class TestTurbulenceResidual:
 
 
 def test_nk_sst_channel_converges_coupled():
-    """冲击启动 120 步：平均流与湍流残差都降多个量级，k/omega 不贴任何下限。
+    """冲击启动 140 步：平均流与湍流残差都降多个量级，k/omega 不贴任何下限。
 
     修复前（同一算例）：平均流降 5 个量级之后湍流残差停在 1.3e4、每步
     Newton 被拒绝，核心区 omega 贴在 0.1*omega_inf 的下限上。
+
+    步数预算 120 -> 140（2026-09-25）：物理性限幅改为逐单元、并且对增长也做
+    约束（单步最多加倍，与 SU2 `MAX_UPDATE_SST` 同一量级）之后，湍流发展暂态
+    （k 从来流值长到剪切层值）在本算例上实测从第 78 步推迟到第 96 步收尾，
+    其后平均流每步降一个量级，与此前相同。
     """
     from autoflowcfd.core.time_integration import TimeIntegrationScheme
 
     s = _channel_solver(TimeIntegrationScheme.NEWTON_KRYLOV)
     mean, turb = [], []
-    for _ in range(120):
+    for _ in range(140):
         s.step(2.0e-7)
         mean.append(s._newton_last_info["res_norm"])
         turb.append(s._newton_turb_state["last_info"]["res_norm"])

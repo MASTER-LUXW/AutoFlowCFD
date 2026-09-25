@@ -129,11 +129,8 @@ class _MultiGPUSteppingMixin:
         positivity_func = self._get_positivity_limiter_gpu()
 
         if self.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME:
-            # DUAL_TIME 下预处理不启用，局部 dt 只有一份；湍流仍用它
-            # （物理波速那一份）。
-            _dtm = self._compute_local_time_step_gpu()
-            _dt_turb = float(cp.mean(_dtm[self._inv_perm_gpu][:n_local]))
-            mu_t_field = self._compute_turbulence_source_distributed(_dt_turb)
+            # 湍流与平均流站在同一物理时间上：用物理时间步 dt（与 CPU 同一规则）
+            mu_t_field = self._compute_turbulence_source_distributed(dt)
             U_flat = self.U_gpu.reshape(n_local * n_sps, 5)
 
             # 内层伪时间迭代的局部加速步长：与单机一致用局部 CFL 步长
@@ -160,19 +157,37 @@ class _MultiGPUSteppingMixin:
         dt_mean_c, dt_phys_c = self._compute_local_time_step_gpu(
             return_physical_too=True)
         dt_mean_local = dt_mean_c[self._inv_perm_gpu][:n_local]
-        dt_phys_local = dt_phys_c[self._inv_perm_gpu][:n_local]
         dt_flat = cp.broadcast_to(
             dt_mean_local[:, None], (n_local, n_sps)).reshape(n_local * n_sps)
 
-        # 湍流源项求值（算子分裂，每个 step 开始时计算一次，用当前——
-        # 上一步末尾——的状态，与 CPU 分布式 SST 同一个时序，见
-        # distributed_solver.py::step 文档）。turb_model_gpu 为 None
-        # （turbulence_model='none'）时恒返回 None。
-        # 湍流标量用**物理**波速算出的那一份 dt（见
-        # gpu_distributed_init.py::_compute_turbulence_source_distributed
-        # 第 5 步的说明与单机 step.py 的 `turb_dt = dt_physical`）。
-        mu_t_field = self._compute_turbulence_source_distributed(
-            float(cp.mean(dt_phys_local)))
+        is_newton = self.time_integrator.scheme == TimeIntegrationScheme.NEWTON_KRYLOV
+        if is_newton:
+            # 隐式步的块结构：local 单元（原生排列）的类型掩码与当前阶数
+            from autoflowcfd.core.mpi.distributed_flat_face import native_cell_is_prism
+
+            cell_is_prism = native_cell_is_prism(self.dist_flat_face)[:n_local]
+            order_now = int(getattr(self, "current_order", self.order))
+
+        # 湍流（算子分裂，每个 step 开始时一次，用当前——上一步末尾——的状态，
+        # 与 CPU 分布式同一时序）。湍流标量用**物理**波速算出的那一份 dt。
+        from autoflowcfd.core.fr_solver.turbulence.implicit import IMPLICIT_TURBULENCE_MODELS
+
+        if (is_newton and self.turb_model_gpu is not None
+                and str(self.turb_model_name).upper() in IMPLICIT_TURBULENCE_MODELS):
+            # 隐式稳态：k-omega 走分离式 PTC-Newton（平均流冻结），与单机/CPU
+            # 分布式同一个算法，适配器见 gpu_distributed_implicit.py
+            from autoflowcfd.core.fr_solver.turbulence.implicit import step_turbulence_newton
+            from autoflowcfd.core.gpu.distributed.gpu_distributed_implicit import (
+                MultiGpuTurbulenceBackend,
+            )
+
+            turb_backend = MultiGpuTurbulenceBackend(self, cell_is_prism, order_now)
+            dt_phys_local = dt_phys_c[self._inv_perm_gpu][:n_local]
+            step_turbulence_newton(turb_backend, cp.broadcast_to(dt_phys_local[:, None], (n_local, n_sps)))
+            mu_t_field = turb_backend.mu_t_compact
+        else:
+            # turb_model_gpu 为 None（turbulence_model='none'）时恒返回 None
+            mu_t_field = self._compute_turbulence_source_distributed(dt_phys_c[:, None])
 
         U_flat = self.U_gpu.reshape(n_local * n_sps, 5)
 
@@ -207,7 +222,26 @@ class _MultiGPUSteppingMixin:
         residual0_raw = _spatial_residual(U_flat)
         residual_norm = self._global_residual_norm(residual0_raw)
 
-        if self.time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
+        def _residual(U_flat_trial):
+            return _precond(_spatial_residual(U_flat_trial), U_flat_trial)
+
+        nk_info = None
+        if is_newton:
+            # 隐式稳态步：与单机 CPU/GPU、CPU 分布式同一个实现
+            # （implicit/mean_flow_step.py），归约跨 rank，块 Jacobi 着色全局一致
+            from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
+            from autoflowcfd.core.mpi.distributed_implicit import distributed_block_jacobi_colors
+            from autoflowcfd.core.mpi.reductions import MPIReductions
+            from autoflowcfd.core.time_integration.implicit.mean_flow_step import (
+                step_mean_flow_newton,
+            )
+
+            U_new_flat, nk_info = step_mean_flow_newton(
+                self, _residual, U_flat, dt_flat, _reference_scales(self.freestream, 5),
+                red=MPIReductions(cp), cell_is_prism=cell_is_prism,
+                cell_colors=lambda: distributed_block_jacobi_colors(self),
+                order=order_now, filter_active=self.filter_func_gpu is not None)
+        elif self.time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
             # 显式无粘对流 + 隐式粘性（阻尼 Picard），与单机/CPU 分布式同一个
             # 拆分、同一个积分器（低马赫预处理在 IMEX 下不启用，理由见
             # `FRSolver.__init__`）。**2026-09-25 补齐**：此前这里只查 RK 系数
@@ -221,10 +255,6 @@ class _MultiGPUSteppingMixin:
             )
         else:
             residual0 = _precond(residual0_raw, U_flat)
-
-            def _residual(U_flat_trial):
-                return _precond(_spatial_residual(U_flat_trial), U_flat_trial)
-
             U_new_flat = self.time_integrator.step(
                 U_flat, _residual, dt_flat, residual0=residual0,
                 filter_func=self.filter_func_gpu, positivity_func=positivity_func,
@@ -233,7 +263,7 @@ class _MultiGPUSteppingMixin:
 
         self.residual_history.append(residual_norm)
         self.iteration += 1
-        self._update_cfl_controller(residual_norm)
+        self._update_cfl_controller(residual_norm, newton_info=nk_info)
         return residual_norm
 
     def solve(
@@ -304,9 +334,12 @@ class _MultiGPUSteppingMixin:
 
             if is_root():
                 if i == 0 or (i + 1) % output_interval == 0:
+                    from autoflowcfd.core.time_integration.implicit.mean_flow_step import (
+                        newton_monitor_suffix,
+                    )
                     print(
                         f"Multi-GPU Iter {i+1}: Residual = {res:.6e} | "
-                        f"Time/step: {t_end-t_start:.3f}s"
+                        f"Time/step: {t_end-t_start:.3f}s" + newton_monitor_suffix(self)
                     )
 
             # 发散检查必须在 checkpoint 回调**之前**（2026-09-16 修复）：

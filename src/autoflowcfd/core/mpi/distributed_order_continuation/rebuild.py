@@ -192,6 +192,10 @@ def _rebuild_cpu_traditional_partition_and_state(solver, target_p: int, new_loca
     # 否则下一步 BDF2 会静默用一份形状不匹配的历史层。
     if hasattr(solver, '_dual_time_U_prev'):
         solver._dual_time_U_prev = None
+    # NEWTON_KRYLOV 跨步状态（换阶时置初值，理由见 reset_newton_state 文档）
+    from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
+
+    reset_newton_state(solver)
 
     solver.current_order = target_p
 

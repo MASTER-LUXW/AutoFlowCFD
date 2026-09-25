@@ -72,12 +72,15 @@ class _GPUSolverStepMixin:
                     cp.broadcast_to(dt_physical[:, None], (n_cells, n_sps)))
                 mu_t_field = self._turbulent_mu_t_gpu()
             else:
-                mu_t_field = self.compute_turbulence_source_gpu()
+                mu_t_field = self.compute_turbulence_source_gpu(dt_physical[:, None])
         else:
-            # 湍流源项在当前状态下求值（算子分裂）
-            mu_t_field = self.compute_turbulence_source_gpu()
+            # 先取步长（粘性 CFL 用上一步的涡粘，与 CPU step.py 同一时序），
+            # 再在当前状态下求湍流源项（算子分裂）。湍流步长的规则见
+            # compute_turbulence_source_gpu 文档
             dt_local, dt_physical = self._compute_local_time_step_gpu(
                 return_physical_too=True)
+            turb_dt = dt if scheme == TimeIntegrationScheme.DUAL_TIME else dt_physical[:, None]
+            mu_t_field = self.compute_turbulence_source_gpu(turb_dt)
         dt_local_full = cp.broadcast_to(
             dt_local[:, None], (n_cells, n_sps)
         ).reshape(n_cells * n_sps)

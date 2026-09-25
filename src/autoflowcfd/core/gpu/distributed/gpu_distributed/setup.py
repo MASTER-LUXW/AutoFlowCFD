@@ -254,6 +254,10 @@ class _MultiGPUSetupMixin:
         # 见 step() 里 DUAL_TIME 分支说明）——None 表示尚未跑过一个
         # 物理步，退化为 BDF1，与单机 GPU `gpu_solver.py` 同一个约定。
         self._dual_time_U_prev = None
+        # NEWTON_KRYLOV 跨步状态（构造时置初值，理由见 reset_newton_state 文档）
+        from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
+
+        reset_newton_state(self)
 
     def _setup_turbulence(self, mesh, turb_model, n_sps, mu_molecular, rho_inf, vel_inf,
                           turbulence_intensity, viscosity_ratio):

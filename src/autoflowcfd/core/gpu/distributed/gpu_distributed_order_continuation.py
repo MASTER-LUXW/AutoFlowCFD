@@ -233,5 +233,9 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
     # distributed_order_continuation.py 同一处处理，理由同该文档。
     if hasattr(solver, '_dual_time_U_prev'):
         solver._dual_time_U_prev = None
+    # NEWTON_KRYLOV 跨步状态（换阶时置初值，理由见 reset_newton_state 文档）
+    from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
+
+    reset_newton_state(solver)
 
     solver.current_order = target_p

@@ -144,6 +144,17 @@ def distributed_mesh_load_v2(
                 from autoflowcfd.core.turbulence.des import compute_h_max_and_h_wn
                 h_max_global, h_wn_global = compute_h_max_and_h_wn(mesh)
 
+        # 隐式稳态的块 Jacobi 着色必须全局一致（见 core/mpi/distributed_implicit.py），
+        # 只有 root 持有全局面连接关系，在这里算一次
+        global_cell_colors = None
+        from autoflowcfd.core.time_integration.base import (
+            TimeIntegrationScheme, scheme_from_name,
+        )
+        if (time_scheme is not None
+                and scheme_from_name(time_scheme) == TimeIntegrationScheme.NEWTON_KRYLOV):
+            from autoflowcfd.core.mpi.distributed_implicit import global_cell_colors as _colors
+            global_cell_colors = _colors(fc, len(cell_partition))
+
         packages = [
             build_fully_distributed_rank_package(
                 mesh, ops, fc, cell_partition, r, n_ranks,
@@ -154,6 +165,7 @@ def distributed_mesh_load_v2(
                 turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
                 time_scheme=time_scheme, dual_time_inner_iter=dual_time_inner_iter,
                 cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+                global_cell_colors=global_cell_colors,
             )
             for r in range(n_ranks)
         ]
@@ -182,6 +194,7 @@ def distributed_mesh_load_v2(
             'bc_overrides': bc_overrides or {}, 'n_ranks': n_ranks,
             'time_scheme': time_scheme, 'dual_time_inner_iter': dual_time_inner_iter,
             'cfl_start': cfl_start, 'cfl_max': cfl_max, 'cfl_min': cfl_min,
+            'global_cell_colors': global_cell_colors,
         }
     else:
         import pickle
@@ -227,7 +240,6 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
     from_fully_distributed_package(package, n_ranks, root_context=...)`
     ——root_context 未提供时 fail-fast，不静默产生错误结果）。
     """
-    from autoflowcfd.core.mpi.comm import get_comm
     from autoflowcfd.core.mpi import get_rank
     from autoflowcfd.fr.operators import generate_fr_operators
     from autoflowcfd.core.mpi.distributed_state import DistributedFRState
@@ -320,68 +332,8 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
             solver.sgs_model.nu_t = None
 
     # --- 2. Root 重新计算 + 分发新紧凑包 ---
-    comm = get_comm()
-    n_ranks = solver.n_ranks
-
-    if is_root_rank:
-        from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-        import types
-
-        mesh = root_context['mesh']
-        stale_orders = [o for o in list(mesh._order_geometry_cache) if o != target_p]
-        for o in stale_orders:
-            del mesh._order_geometry_cache[o]
-        mesh.set_order(target_p)
-        ops = generate_fr_operators(target_p)
-        root_context['ops'] = ops
-
-        turb_model_name = root_context['turb_model_name']
-        root_solver_stub = types.SimpleNamespace(
-            mesh=mesh, freestream=root_context['freestream'], turb_model_name=turb_model_name,
-            wmles_model=(object() if turb_model_name == "WMLES" else None),
-        )
-        boundary_ghost_provider_global = build_boundary_ghost_provider(
-            root_solver_stub, bc_overrides=root_context.get('bc_overrides', {}),
-        )
-        root_context['boundary_ghost_provider_global'] = boundary_ghost_provider_global
-
-        packages = [
-            build_fully_distributed_rank_package(
-                mesh, ops, root_context['fc'], root_context['cell_partition'], r, n_ranks,
-                boundary_ghost_provider_global, root_context['freestream'],
-                root_context['mu_molecular'], root_context['mach_ref'],
-                target_p, root_context['enable_viscous'],
-                turb_model_name=turb_model_name,
-                wall_distance_source=root_context['wall_distance_source'],
-                h_max_global=root_context['h_max_global'], h_wn_global=root_context['h_wn_global'],
-                turbulence_intensity=root_context['turbulence_intensity'],
-                viscosity_ratio=root_context['viscosity_ratio'],
-                time_scheme=root_context.get('time_scheme'),
-                dual_time_inner_iter=root_context.get('dual_time_inner_iter', 20),
-                # 阶数切换重分发时同样要带上（2026-09-15）：否则升阶之后
-                # CFL 边界参数会悄悄退回硬编码默认值，是一个只在 Order
-                # Continuation 路径上出现的静默回退。
-                cfl_start=root_context.get('cfl_start'),
-                cfl_max=root_context.get('cfl_max'),
-                cfl_min=root_context.get('cfl_min'),
-            )
-            for r in range(n_ranks)
-        ]
-        my_package = packages[0]
-        if n_ranks > 1:
-            import pickle
-            for r in range(1, n_ranks):
-                buf = pickle.dumps(packages[r])
-                buf_size = np.array([len(buf)], dtype=np.int64)
-                comm.Send(buf_size, dest=r, tag=320)
-                comm.Send(buf, dest=r, tag=321)
-    else:
-        import pickle
-        buf_size = np.empty(1, dtype=np.int64)
-        comm.Recv(buf_size, source=0, tag=320)
-        buf = np.empty(int(buf_size[0]), dtype=np.uint8)
-        comm.Recv(buf, source=0, tag=321)
-        my_package = pickle.loads(buf.tobytes())
+    my_package = exchange_packages_for_new_order(
+        root_context if is_root_rank else None, target_p, solver.n_ranks, tags=(320, 321))
 
     # --- 3. 应用新包：替换 compact 相关属性，保留 turb_model/sgs_model/
     # wmles_model 对象本身（只是上一步已经替换过它们的数组）---
@@ -423,5 +375,78 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
 
     if hasattr(solver, '_dual_time_U_prev'):
         solver._dual_time_U_prev = None
+    # NEWTON_KRYLOV 跨步状态（换阶时置初值，理由见 reset_newton_state 文档）
+    from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
+
+    reset_newton_state(solver)
 
     solver.current_order = target_p
+
+
+def exchange_packages_for_new_order(root_context, target_p: int, n_ranks: int, *, tags) -> dict:
+    """换阶时的紧凑包重算与分发（CPU 与多 GPU 的"完全分布式加载"共用），返回本
+    rank 的包。
+
+    root（`root_context` 非 None）：清掉旧阶数的几何缓存、把全局网格切到新阶数、
+    重建边界幽灵态提供者，按 root_context 里**全部**构造参数重建每个 rank 的包
+    并发送；其余 rank 按 `tags` 接收。2026-09-25 以前 CPU 与 GPU 各抄一份，GPU
+    那份漏了 cfl_start/cfl_max/cfl_min（升阶之后 CFL 边界静默退回默认值——CPU
+    那份 2026-09-15 修过的同一个问题）。
+    """
+    import pickle
+    import types
+
+    from autoflowcfd.fr.operators import generate_fr_operators
+
+    comm = get_comm()
+    if root_context is not None:
+        from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
+
+        mesh = root_context['mesh']
+        for o in [o for o in list(mesh._order_geometry_cache) if o != target_p]:
+            del mesh._order_geometry_cache[o]
+        mesh.set_order(target_p)
+        ops = generate_fr_operators(target_p)
+        root_context['ops'] = ops
+
+        turb_model_name = root_context['turb_model_name']
+        root_solver_stub = types.SimpleNamespace(
+            mesh=mesh, freestream=root_context['freestream'], turb_model_name=turb_model_name,
+            wmles_model=(object() if turb_model_name == "WMLES" else None),
+        )
+        provider = build_boundary_ghost_provider(
+            root_solver_stub, bc_overrides=root_context.get('bc_overrides', {}))
+        root_context['boundary_ghost_provider_global'] = provider
+
+        packages = [
+            build_fully_distributed_rank_package(
+                mesh, ops, root_context['fc'], root_context['cell_partition'], r, n_ranks,
+                provider, root_context['freestream'],
+                root_context['mu_molecular'], root_context['mach_ref'],
+                target_p, root_context['enable_viscous'],
+                turb_model_name=turb_model_name,
+                wall_distance_source=root_context['wall_distance_source'],
+                h_max_global=root_context['h_max_global'], h_wn_global=root_context['h_wn_global'],
+                turbulence_intensity=root_context['turbulence_intensity'],
+                viscosity_ratio=root_context['viscosity_ratio'],
+                time_scheme=root_context.get('time_scheme'),
+                dual_time_inner_iter=root_context.get('dual_time_inner_iter', 20),
+                cfl_start=root_context.get('cfl_start'),
+                cfl_max=root_context.get('cfl_max'),
+                cfl_min=root_context.get('cfl_min'),
+                # 着色只依赖拓扑，换阶沿用同一份
+                global_cell_colors=root_context.get('global_cell_colors'),
+            )
+            for r in range(n_ranks)
+        ]
+        for r in range(1, n_ranks):
+            buf = pickle.dumps(packages[r])
+            comm.Send(np.array([len(buf)], dtype=np.int64), dest=r, tag=tags[0])
+            comm.Send(buf, dest=r, tag=tags[1])
+        return packages[0]
+
+    buf_size = np.empty(1, dtype=np.int64)
+    comm.Recv(buf_size, source=0, tag=tags[0])
+    buf = np.empty(int(buf_size[0]), dtype=np.uint8)
+    comm.Recv(buf, source=0, tag=tags[1])
+    return pickle.loads(buf.tobytes())

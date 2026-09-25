@@ -158,13 +158,9 @@ def gpu_solver_interpolate_to_new_order(solver, target_p: int) -> None:
     # 版本同一处处理，理由同该文档。
     if hasattr(solver, '_dual_time_U_prev'):
         solver._dual_time_U_prev = None
-    # NEWTON_KRYLOV 跨步状态：残差量级、块尺寸随阶数改变，全部失效（与 CPU
-    # `order_continuation/interp.py` 同一组、同一理由）
-    if hasattr(solver, "_newton_forcing"):
-        solver._newton_forcing = None
-        solver._newton_last_info = None
-        solver._newton_dtau_scale = 1.0
-        solver._newton_block_precond = None
-        solver._newton_turb_state = None
+    # NEWTON_KRYLOV 跨步状态随阶数失效（理由见 reset_newton_state 文档）
+    from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
+
+    reset_newton_state(solver)
 
     solver.current_order = target_p

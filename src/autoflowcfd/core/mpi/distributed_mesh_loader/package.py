@@ -121,6 +121,7 @@ def build_fully_distributed_rank_package(
     cfl_start: Optional[float] = None,
     cfl_max: Optional[float] = None,
     cfl_min: Optional[float] = None,
+    global_cell_colors: Optional[np.ndarray] = None,
 ) -> dict:
     """Root rank 专用：为指定 rank 算好它需要的全部紧凑数据（不需要该
     rank 自己持有完整全局网格）。
@@ -172,6 +173,9 @@ def build_fully_distributed_rank_package(
             "边界条件"一节）
         freestream, mu_molecular, mach_ref, order, enable_viscous:
             纯配置量（标量/小 dict），直接透传
+        global_cell_colors: (n_global_cells,) 全局一致的块 Jacobi 着色
+            （`core/mpi/distributed_implicit.py::global_cell_colors`，只有隐式
+            稳态需要；调用方对同一个网格算一次），包里放本 rank local 段
         turb_model_name: "NONE"/"SST"/"DDES"/"IDDES"/"WMLES"/"LES"
             （大写），决定是否需要计算 wall_distance/h_max/h_wn
         wall_distance_source: 壁面距离来源（`core/utils/wall_distance_source.py`），
@@ -330,4 +334,6 @@ def build_fully_distributed_rank_package(
         'cfl_start': cfl_start,
         'cfl_max': cfl_max,
         'cfl_min': cfl_min,
+        'cell_colors': (None if global_cell_colors is None
+                        else np.asarray(global_cell_colors)[partition.local_cells].copy()),
     }

@@ -248,20 +248,10 @@ def interpolate_to_new_order_checked(solver: Any, new_order: int) -> None:
     if hasattr(solver, "_dual_time_U_prev"):
         solver._dual_time_U_prev = None
 
-    # 同理，NEWTON_KRYLOV 的 inexact-Newton forcing term 状态也必须失效：
-    # 它记的是"上一步的残差范数"，而残差量级随阶数跳变（升阶会重新引入
-    # 高阶内容、残差通常抬升一个量级以上）。沿用旧状态会让升阶后的第一步
-    # 用一个按旧量级算出的线性容差 —— 要么过严（白花残差求值）、要么
-    # 过松（Newton 方向不成方向）。干净地退回首步那档保守容差才是对的。
-    if hasattr(solver, "_newton_forcing"):
-        solver._newton_forcing = None
-        solver._newton_last_info = None
-        solver._newton_dtau_scale = 1.0
-        # 块尺寸（真实解点数 x 变量数）随阶数变化，冻结的 `J_cc` 属于旧的
-        # 离散空间，必须整体丢弃，由下一步按新阶数重建。
-        solver._newton_block_precond = None
-        # 隐式 k-omega 步的同类状态（forcing / dtau 缩放 / 块 Jacobi）同理
-        solver._newton_turb_state = None
+    # NEWTON_KRYLOV 跨步状态随阶数失效（理由见 reset_newton_state 文档）
+    from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
+
+    reset_newton_state(solver)
 
     n_points_1d = new_order + 1
     new_n_sps = n_points_1d ** 3

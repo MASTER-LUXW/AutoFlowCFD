@@ -116,9 +116,17 @@ class _SolverResidualMixin:
             return res_full
         return res_euler
 
-    def compute_viscous_residual(self):
+    def compute_viscous_residual(self, mu_t_turb=None):
         """
         计算粘性残差 (S-03)。
+
+        Args:
+            mu_t_turb: 本步冻结的湍流动力涡粘 `rho*nu_t`（`step()` 在湍流更新
+                之后按步前状态求一次，本步全部残差求值共用）。None 时按当前
+                状态求。冻结是全部后端同一个算子分裂约定（单机 GPU、多 GPU、
+                CPU 分布式都整步冻结）；2026-09-25 以前单机 CPU 在每次残差
+                求值里按**试探态**的 rho 重算，与其余后端每步差 O(dt)，隐式步
+                下直接让 Jacobian 不同（分布式 n_ranks=1 对照里块 Jacobi 差 1e-3）。
 
         真实的 BR1 面耦合粘性离散（core/fr_viscous_flux.py），并把湍流模型
         算出的涡粘系数真正耦合进应力张量/热传导（T-01/T-04/T-06 修复：
@@ -133,7 +141,7 @@ class _SolverResidualMixin:
                 施加才能真正影响本步的解，而不是像此前那样在状态更新
                 之后才计算）
         """
-        mu_t_field = self._get_turbulent_viscosity_field()
+        mu_t_field = self._get_turbulent_viscosity_field(mu_t_turb)
         res = compute_viscous_residual_ldg(
             self.state.U, self.state.Q, self.ops, self.mesh,
             mu=self.mu_molecular,
@@ -199,7 +207,7 @@ class _SolverResidualMixin:
         out[..., 0] = d_rho_dt
         return out
 
-    def _get_turbulent_viscosity_field(self) -> Optional[np.ndarray]:
+    def _get_turbulent_viscosity_field(self, mu_t_turb=None) -> Optional[np.ndarray]:
         """汇总当前激活的湍流模型给出的动力涡粘度场 mu_t = rho * nu_t（委托给 fr_solver_turbulence），
         再叠加 Persson-Peraire 人工粘性（若启用）。
 
@@ -217,7 +225,8 @@ class _SolverResidualMixin:
         mismatch/low_mach_cfl_ausm_inconsistency：任何"物理量在多个
         消费点独立计算/获取"的模式都有两处失去同步的风险）。
         """
-        mu_t_field = fr_solver_turbulence.get_turbulent_viscosity_field(self)
+        mu_t_field = (fr_solver_turbulence.get_turbulent_viscosity_field(self)
+                      if mu_t_turb is None else mu_t_turb)
         if getattr(self, "artificial_viscosity_enabled", False):
             from autoflowcfd.core.fr_operators.artificial_viscosity import (
                 compute_persson_peraire_artificial_viscosity,

@@ -5,8 +5,6 @@
 
 import types
 
-import pickle
-
 import numpy as np
 
 
@@ -14,7 +12,6 @@ from autoflowcfd.core.gpu import get_cupy
 
 from autoflowcfd.core.mpi import get_rank
 
-from autoflowcfd.core.mpi.comm import get_comm
 
 from autoflowcfd.core.mpi.distributed_state import DistributedFRState
 
@@ -124,61 +121,13 @@ def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int
     if solver.ddes_model_gpu is not None and hasattr(solver.turb_model_gpu, 'des_length_scale'):
         solver.turb_model_gpu.des_length_scale = None
 
-    # --- 2. Root 重新计算 + 分发新紧凑包 ---
-    comm = get_comm()
-    n_ranks = solver.n_ranks
+    # --- 2. Root 重新计算 + 分发新紧凑包（与 CPU 共用，见该函数文档）---
+    from autoflowcfd.core.mpi.distributed_mesh_loader.fully_distributed import (
+        exchange_packages_for_new_order,
+    )
 
-    if is_root_rank:
-        from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-        from autoflowcfd.core.mpi.distributed_mesh_loader import build_fully_distributed_rank_package
-
-        mesh = root_context['mesh']
-        stale_orders = [o for o in list(mesh._order_geometry_cache) if o != target_p]
-        for o in stale_orders:
-            del mesh._order_geometry_cache[o]
-        mesh.set_order(target_p)
-        ops = generate_fr_operators(target_p)
-        root_context['ops'] = ops
-
-        turb_model_name = root_context['turb_model_name']
-        root_solver_stub = types.SimpleNamespace(
-            mesh=mesh, freestream=root_context['freestream'], turb_model_name=turb_model_name,
-            wmles_model=(object() if turb_model_name == "WMLES" else None),
-        )
-        boundary_ghost_provider_global = build_boundary_ghost_provider(
-            root_solver_stub, bc_overrides=root_context.get('bc_overrides', {}),
-        )
-        root_context['boundary_ghost_provider_global'] = boundary_ghost_provider_global
-
-        packages = [
-            build_fully_distributed_rank_package(
-                mesh, ops, root_context['fc'], root_context['cell_partition'], r, n_ranks,
-                boundary_ghost_provider_global, root_context['freestream'],
-                root_context['mu_molecular'], root_context['mach_ref'],
-                target_p, root_context['enable_viscous'],
-                turb_model_name=turb_model_name,
-                wall_distance_source=root_context['wall_distance_source'],
-                h_max_global=root_context['h_max_global'], h_wn_global=root_context['h_wn_global'],
-                turbulence_intensity=root_context['turbulence_intensity'],
-                viscosity_ratio=root_context['viscosity_ratio'],
-                time_scheme=root_context.get('time_scheme'),
-                dual_time_inner_iter=root_context.get('dual_time_inner_iter', 20),
-            )
-            for r in range(n_ranks)
-        ]
-        my_package = packages[0]
-        if n_ranks > 1:
-            for r in range(1, n_ranks):
-                buf = pickle.dumps(packages[r])
-                buf_size = np.array([len(buf)], dtype=np.int64)
-                comm.Send(buf_size, dest=r, tag=340)
-                comm.Send(buf, dest=r, tag=341)
-    else:
-        buf_size = np.empty(1, dtype=np.int64)
-        comm.Recv(buf_size, source=0, tag=340)
-        buf = np.empty(int(buf_size[0]), dtype=np.uint8)
-        comm.Recv(buf, source=0, tag=341)
-        my_package = pickle.loads(buf.tobytes())
+    my_package = exchange_packages_for_new_order(
+        root_context if is_root_rank else None, target_p, solver.n_ranks, tags=(340, 341))
 
     # --- 3. 应用新包：替换 compact 相关属性，保留 turb_model_gpu/
     # sgs_model_gpu/wmles_model 对象本身（只是上一步已经替换过它们的
@@ -253,5 +202,9 @@ def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int
 
     if hasattr(solver, '_dual_time_U_prev'):
         solver._dual_time_U_prev = None
+    # NEWTON_KRYLOV 跨步状态（换阶时置初值，理由见 reset_newton_state 文档）
+    from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
+
+    reset_newton_state(solver)
 
     solver.current_order = target_p

@@ -113,7 +113,7 @@ def _make_stub(n_local, n_sps, n_vars, target):
     stub.low_mach_precond_enabled = False
     stub._cfl_controller = None
 
-    def _update_cfl_controller(residual_norm):
+    def _update_cfl_controller(residual_norm, newton_info=None):
         return None
     stub._update_cfl_controller = _update_cfl_controller
 

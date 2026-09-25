@@ -108,6 +108,9 @@ def test_distributed_turbulence_matches_single_machine(rank, turb_model_name):
                 U=U, Q=conserved_to_primitive(U[..., :5]), n_cells=n_cells, n_sps=n_sps,
             )
             self._turbulence_flat_face_override = None
+            # 与分布式参照调用的 turb_ramp_steps=0 一致：不做产生项渐变（没有
+            # 计数器时 advance_production_ramp 取真实求解器的 50 步默认）
+            self._turb_production_ramp_steps = 0
 
         def _compute_gradients(self):
             from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient
@@ -294,6 +297,9 @@ def test_distributed_ddes_two_consecutive_steps_matches_single_machine(turb_mode
                 U=U, Q=conserved_to_primitive(U[..., :5]), n_cells=n_cells, n_sps=n_sps,
             )
             self_inner._turbulence_flat_face_override = None
+            # 与分布式参照调用的 turb_ramp_steps=0 一致：不做产生项渐变（没有
+            # 计数器时 advance_production_ramp 取真实求解器的 50 步默认）
+            self_inner._turb_production_ramp_steps = 0
 
         def _compute_gradients(self_inner):
             from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient
@@ -449,6 +455,9 @@ class TestDdesModelDistinctFromSst:
                         U=U, Q=conserved_to_primitive(U[..., :5]), n_cells=n_cells, n_sps=n_sps,
                     )
                     self_inner._turbulence_flat_face_override = None
+                    # 与分布式参照调用的 turb_ramp_steps=0 一致：不做产生项渐变（没有
+                    # 计数器时 advance_production_ramp 取真实求解器的 50 步默认）
+                    self_inner._turb_production_ramp_steps = 0
 
                 def _compute_gradients(self_inner):
                     from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient

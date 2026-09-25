@@ -110,35 +110,45 @@ def _set_turbulence_bounds(solver) -> None:
     )
 
 
-def _update_production_ramp(solver) -> None:
-    """更新湍流产项渐变因子。
+#: 湍流产生项渐变步数：前这么多步内 production_factor 从 0 线性增加到 1。
+#: 工业 RANS 标准做法：防止初始流场未发展时 P_k >> D_k 导致 k/omega 指数爆炸。
+#: 50 步足够：配合物理上界限制（k_max, omega_max），k/omega 在此步数内达到准平衡。
+#: Fluent 默认 ~50 步，OpenFOAM ~100 步；过长的 ramp 浪费收敛机会。
+TURB_PRODUCTION_RAMP_STEPS = 50
 
-    前 N 步内 production_factor 从 0 线性增加到 1，防止初始流场未发展时
-    P_k >> D_k（产生项超过耗散项 8 个量级）导致 k/omega 指数爆炸。
-    工业 RANS 求解器（Fluent、OpenFOAM）的标准做法。
 
-    渐变完成时设置 _turb_production_ramp_complete = True（一次性标记），
-    供 Order Continuation 等上层逻辑检测并重置残差基准值。
+def advance_production_ramp(owner, model) -> None:
+    """推进一步湍流产生项渐变：按 `owner` 上的计数器设置 `model.production_factor`。
+
+    全部后端共用这一份（CPU 单机/分布式视图、单机 GPU、多 GPU）。`owner` 持有
+    `_turb_ramp_step` / `_turb_production_ramp_steps`（没有时取
+    `TURB_PRODUCTION_RAMP_STEPS`）/ `_turb_production_ramp_complete`（渐变完成时
+    一次性置 True，供 Order Continuation 重置残差基准）。2026-09-25 以前 CPU 与
+    单机 GPU 各写一份，多 GPU 分布式则**从未推进过**（`production_factor` 恒为 1，
+    与其余后端前 50 步的物理不同）。
     """
-    if not hasattr(solver, 'turb_model') or solver.turb_model is None:
+    if model is None or not hasattr(model, 'production_factor'):
         return
-    if not hasattr(solver.turb_model, 'production_factor'):
-        return
-    ramp_steps = getattr(solver, '_turb_production_ramp_steps', 0)
-    current_step = getattr(solver, '_turb_ramp_step', 0)
+    ramp_steps = getattr(owner, '_turb_production_ramp_steps', None)
+    if ramp_steps is None:
+        ramp_steps = owner._turb_production_ramp_steps = TURB_PRODUCTION_RAMP_STEPS
+    current_step = getattr(owner, '_turb_ramp_step', 0)
     if ramp_steps <= 0 or current_step >= ramp_steps:
-        solver.turb_model.production_factor = 1.0
-        # 渐变完成：一次性标记（之前未完成且现在已完成）
-        if not getattr(solver, '_turb_production_ramp_complete', False):
-            solver._turb_production_ramp_complete = True
+        model.production_factor = 1.0
+        if not getattr(owner, '_turb_production_ramp_complete', False):
+            owner._turb_production_ramp_complete = True
             logger.info(
                 f"[ProductionRamp] Ramp complete after {ramp_steps} steps, "
                 f"production_factor = 1.0"
             )
     else:
-        solver.turb_model.production_factor = current_step / ramp_steps
-    # 递增计数器（每调用一次代表一个迭代步）
-    solver._turb_ramp_step = current_step + 1
+        model.production_factor = current_step / ramp_steps
+    owner._turb_ramp_step = current_step + 1
+
+
+def _update_production_ramp(solver) -> None:
+    """CPU 求解器（及其分布式视图适配器）的产生项渐变，见 `advance_production_ramp`。"""
+    advance_production_ramp(solver, getattr(solver, 'turb_model', None))
 
 
 def init_turbulence_models(solver, n_cells: int, n_sps: int) -> None:
@@ -147,11 +157,7 @@ def init_turbulence_models(solver, n_cells: int, n_sps: int) -> None:
     solver._turb_ramp_step = 0
     # 渐变完成标记（_update_production_ramp 在渐变完成时设为 True）
     solver._turb_production_ramp_complete = False
-    # 渐变步数：前 turb_production_ramp_steps 步内，产生项从 0 线性增加到全量。
-    # 工业 RANS 标准做法：防止初始流场未发展时 P_k >> D_k 导致 k/omega 指数爆炸。
-    # 50 步足够：配合物理上界限制（k_max, omega_max），k/omega 在此步数内达到准平衡。
-    # Fluent 默认 ~50 步，OpenFOAM ~100 步；过长的 ramp 浪费收敛机会。
-    solver._turb_production_ramp_steps = 50
+    solver._turb_production_ramp_steps = TURB_PRODUCTION_RAMP_STEPS
 
     # 从 Tu/VR 推导物理自洽的 k/omega 初值（工业标准）
     k_inf, omega_inf = _set_freestream_turbulence(solver)

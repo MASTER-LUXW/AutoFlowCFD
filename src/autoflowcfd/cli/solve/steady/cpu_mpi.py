@@ -7,7 +7,7 @@
 import click
 
 from autoflowcfd.cli.solve.wall_distance import wall_distance_source_if_needed
-from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
+from autoflowcfd.core.time_integration.base import scheme_from_name
 from autoflowcfd.cli.solve.helpers import load_mesh_for_solver
 
 
@@ -17,7 +17,7 @@ def _run_cpu_mpi(
     aoa_deg, aos_deg, backend, cfl_max, cfl_min, cfl_start, checkpoint_interval,
     fully_distributed, input_file, max_iter, mu_molecular, n_ranks, order,
     output_dir, p_inf, phase_max_iter, residual_drop_threshold, rho_inf,
-    skip_quality_check, surface_mesh, threads, turbulence_intensity,
+    skip_quality_check, surface_mesh, threads, time_scheme, turbulence_intensity,
     turbulence_model, vel_inf, viscosity_ratio,
 ):
     """`solve steady` 的CPU MPI 分布式（传统模式 / 完全分布式加载）路径。"""
@@ -83,6 +83,7 @@ def _run_cpu_mpi(
             use_eikonal=use_eikonal,
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            time_scheme=scheme_from_name(time_scheme),
         )
         solver = DistributedFRSolver.from_fully_distributed_package(
             package, n_ranks=n_ranks, root_context=root_context,
@@ -112,7 +113,7 @@ def _run_cpu_mpi(
             order=order,
             turb_model_name=turbulence_model,
             wall_distance_source=wall_distance_source_if_needed(turbulence_model, volume_data, use_eikonal),
-            time_scheme=TimeIntegrationScheme.SSP_RK3,
+            time_scheme=scheme_from_name(time_scheme),
             n_threads=threads,
             turbulence_intensity=turbulence_intensity,
             viscosity_ratio=viscosity_ratio,
@@ -168,17 +169,18 @@ def _run_cpu_mpi(
 
     # 执行分布式求解
     try:
-        solver.solve(
+        result = solver.solve(
             n_steps=max_iter, dt=1e-3, output_interval=checkpoint_interval,
             checkpoint_callback=_distributed_checkpoint_cb,
             phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold,
         )
-        print(f"\n✅ Distributed Simulation Finished")
+        print(f"\n✅ Distributed Simulation Finished: Iterations={result.iterations}, "
+              f"Residual={result.final_residual:.6e}")
 
         # 保存结果（分布式版本：root 收集全局数据后保存）
         distributed_save_results(solver, output_dir)
         distributed_save_checkpoint(
-            solver, output_dir, max_iter,
+            solver, output_dir, result.iterations,
             input_file, solver.current_order, turbulence_model, backend,
             target_order=solver.order, surface_mesh=surface_mesh,
         )

@@ -1,4 +1,4 @@
-"""AutoFlowCFD V2.0 - CPU MPI 分布式的单步推进、求解循环与局部时间步长
+"""AutoFlowCFD V2.0 - CPU MPI 分布式的单步推进与局部时间步长（求解循环在 solve_loop.py）
 
 从 `src/autoflowcfd/core/mpi/distributed_solver.py` 的 `DistributedFRSolver` 拆出（2026-09-24，项目「单文件不超
 500 行」规范）。mixin 是本仓库既有惯例（`_SolverGeometryMixin`、
@@ -9,14 +9,12 @@
 """
 
 import numpy as np
-from typing import Optional
-from loguru import logger
-from autoflowcfd.core.mpi import is_root
+
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 
 
 class _DistributedStepMixin:
-    """CPU MPI 分布式的单步推进、求解循环与局部时间步长"""
+    """CPU MPI 分布式的单步推进与局部时间步长"""
 
     def compute_global_residual_norm(self) -> float:
         """全局残差 L2 范数。"""
@@ -152,13 +150,31 @@ class _DistributedStepMixin:
         # 波速放大），`dt_phys_local` 是按物理波速那一份——湍流标量必须
         # 用后者，与单机 `fr_solver/step.py` 里 `turb_dt = dt_physical`
         # 完全一致（k/omega 的显式更新刻意没有 point-implicit 阻尼）。
+        is_newton = self._time_integrator.scheme == TimeIntegrationScheme.NEWTON_KRYLOV
+        dist_fc = self.dist_flat_face
+        from autoflowcfd.core.mpi.distributed_flat_face import native_cell_is_prism
+
+        cell_is_prism = native_cell_is_prism(dist_fc)[:n_local]
+        order_now = int(getattr(self, "current_order", self.order))
         U_local_now = self.state.get_local_U()
         dt_mean_local, dt_phys_local = self._compute_distributed_local_time_step(
             U_local_now, mu_t_local=self._prev_mu_t_local, return_physical_too=True,
         )
 
         mu_t_field_compact = None
-        if self.turb_model is not None:
+        from autoflowcfd.core.fr_solver.turbulence.implicit import IMPLICIT_TURBULENCE_MODELS
+
+        if (is_newton and self.turb_model is not None
+                and str(self.turb_model_name).upper() in IMPLICIT_TURBULENCE_MODELS):
+            # 隐式稳态：k-omega 走分离式 PTC-Newton（平均流冻结），与单机同一个
+            # 算法（fr_solver/turbulence/implicit.py），适配器见 distributed_implicit.py
+            from autoflowcfd.core.fr_solver.turbulence.implicit import step_turbulence_newton
+            from autoflowcfd.core.mpi.distributed_implicit import DistributedTurbulenceBackend
+
+            turb_backend = DistributedTurbulenceBackend(self, cell_is_prism, order_now)
+            step_turbulence_newton(turb_backend, dt_phys_local)
+            mu_t_field_compact = turb_backend.mu_t_compact
+        elif self.turb_model is not None:
             from autoflowcfd.core.mpi.distributed_turbulence import (
                 distributed_compute_turbulence_source_and_viscosity,
             )
@@ -264,10 +280,6 @@ class _DistributedStepMixin:
         # local 排列里棱柱/四面体交错，所以用按单元类型掩码分派的变体；
         # 单元类型取自 `dist_fc.compact_cell_type`（0=棱柱/1=四面体，
         # 紧凑排列），换回原生排列后切 local 段。
-        dist_fc = self.dist_flat_face
-        from autoflowcfd.core.mpi.distributed_flat_face import native_cell_is_prism
-
-        cell_is_prism = native_cell_is_prism(dist_fc)[:n_local]
         filter_func = None
         if n_sps > 1:
             from autoflowcfd.core.fr_solver.filter import (
@@ -329,6 +341,23 @@ class _DistributedStepMixin:
                 filter_func=filter_func, positivity_func=positivity_func,
             )
             self._dual_time_U_prev = U_flat.copy()
+        elif is_newton:
+            # 隐式稳态步：与单机 CPU/GPU 同一个实现（implicit/mean_flow_step.py），
+            # 归约换成跨 rank 的 MPIReductions，块 Jacobi 着色是全局一致着色里
+            # 本 rank 那一段（见 core/mpi/distributed_implicit.py 模块文档）
+            from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
+            from autoflowcfd.core.mpi.distributed_implicit import distributed_block_jacobi_colors
+            from autoflowcfd.core.mpi.reductions import MPIReductions
+            from autoflowcfd.core.time_integration.implicit.mean_flow_step import (
+                step_mean_flow_newton,
+            )
+
+            U_new_flat, nk_info = step_mean_flow_newton(
+                self, residual_func, U_flat, dt_local_flat,
+                _reference_scales(self.local_solver.freestream, n_vars),
+                red=MPIReductions(np), cell_is_prism=cell_is_prism,
+                cell_colors=lambda: distributed_block_jacobi_colors(self),
+                order=order_now, filter_active=filter_func is not None)
         elif self._time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
             # 显式无粘对流 + 隐式粘性（阻尼 Picard），与单机
             # `fr_solver/step.py` 同一个拆分、同一个积分器。**2026-09-25 补齐**：
@@ -350,8 +379,8 @@ class _DistributedStepMixin:
                 positivity_func=positivity_func,
             )
         else:
-            # `step()` 对 IMEX/DUAL_TIME/NEWTON_KRYLOV 显式报错（不静默退化成
-            # 前向 Euler）；前两者上面已分派，NEWTON_KRYLOV 在构造时即拒绝。
+            # `TimeIntegrator.step()` 对 IMEX/DUAL_TIME/NEWTON_KRYLOV 显式报错（不静默
+            # 退化成前向 Euler）；三者上面都已分派。
             U_new_flat = self._time_integrator.step(
                 U_flat, residual_func, dt_local_flat, residual0=residual0,
                 filter_func=filter_func, positivity_func=positivity_func,
@@ -374,83 +403,12 @@ class _DistributedStepMixin:
         # 自适应 CFL 按**全局**残差范数更新：所有 rank 喂同一个值，因此
         # 得到同一个 CFL 数（按各自局部残差更新会让 rank 间 CFL 漂移）。
         if self._cfl_controller is not None:
-            self._cfl_controller.update(residual_norm)
+            if is_newton:
+                # SER 看 Newton 实际在解的系统的全局残差 ||Gamma R||，并区分
+                # "残差上升但步被完整接受"与"步没被完整接受"（adaptive_cfl/ser.py）
+                from autoflowcfd.core.time_integration.implicit.mean_flow_step import newton_step_ok
+
+                self._cfl_controller.update(nk_info["res_norm"], step_ok=newton_step_ok(nk_info))
+            else:
+                self._cfl_controller.update(residual_norm)
         return residual_norm
-
-    def solve(self, n_steps: int, dt: float, output_interval: int = 100, checkpoint_callback=None,
-              tol: float = 1e-6, phase_max_iter: Optional[int] = None,
-              residual_drop_threshold: float = 1e2):
-        """运行分布式求解循环。
-
-        真实 bug 修复（2026-09-02，用户明确要求"不允许出现完成度不是
-        100%的功能点"后排查发现）：此前 `output_interval` 只控制
-        `logger.info` 进度打印的频率，从未触发任何中间 checkpoint
-        保存——分布式路径此前只在 CLI 里 `solve()` 返回*之后*保存一次
-        最终 checkpoint（见 `solve_steady_command.py`），跑到一半被
-        杀掉/崩溃会丢失全部进度，且没有任何"从分布式 checkpoint 继续
-        跑"的机制（`solve resume` 命令对 `--n-ranks`/`--multi-gpu`
-        完全没有感知）。与单机路径 `FRSolver.solve(...,
-        checkpoint_callback=...)` 同一个设计补上回调机制：调用方
-        （CLI）传入的 `checkpoint_callback(solver, iteration)` 在每步
-        结束后被调用，由回调自己决定何时/如何保存（通常内部判断
-        `iteration % checkpoint_interval`），不在这里耦合具体的保存
-        格式——与单机路径的分工完全一致。
-
-        Order Continuation 自动分派（2026-09-02，见 core/mpi/
-        distributed_order_continuation.py 模块文档）：与单机
-        `FRSolver.solve()`（`self.order_continuation_enabled and
-        self.order >= 2` 时自动改用逐阶爬坡）同一个判据——`self.order`
-        （目标阶数）>= 2 时自动委托给 `run_distributed_order_
-        continuation`，不需要 CLI/调用方显式请求。P0/P1 直接求解
-        （真实数值复核见 order_continuation.py 文档"曾经在这里跳过
-        P=1"一节，两条阶数下均匀自由流场残差都很好，不需要爬坡）。
-
-        Args:
-            n_steps: 最大时间步数
-            dt: 时间步长
-            output_interval: 输出间隔
-            checkpoint_callback: 可选，`callback(solver, iteration)`，
-                每步结束后调用一次（与单机 `FRSolver.solve` 同名参数
-                同一个约定）
-            tol, phase_max_iter, residual_drop_threshold: 仅在触发
-                Order Continuation（`self.order >= 2`）时生效，与单机
-                `run_order_continuation` 同名参数同一含义。
-        """
-        if getattr(self, 'order_continuation_enabled', True) and self.order >= 2:
-            from autoflowcfd.core.mpi.distributed_order_continuation import (
-                run_distributed_order_continuation,
-            )
-            return run_distributed_order_continuation(
-                self, n_steps, dt, tol,
-                checkpoint_callback=checkpoint_callback,
-                phase_max_iter=phase_max_iter,
-                residual_drop_threshold=residual_drop_threshold,
-            )
-
-        if is_root():
-            logger.info(f"Starting distributed solve: {n_steps} steps, dt={dt}")
-
-        for step_idx in range(n_steps):
-            # 执行一步
-            residual_norm = self.step(dt)
-
-            # 输出进度
-            if step_idx % output_interval == 0 and is_root():
-                logger.info(
-                    f"Step {step_idx}/{n_steps}, "
-                    f"residual_norm={residual_norm:.6e}"
-                )
-
-            if checkpoint_callback is not None:
-                # 全部 rank 都要调用（checkpoint_callback 内部的
-                # distributed_save_checkpoint 本身就是集体操作——需要
-                # 每个 rank 各自贡献 local cells 数据才能在 root 组装
-                # 出正确的全局状态，只在 root 调用会在非 root rank 的
-                # gather 那一侧永久阻塞）。
-                checkpoint_callback(self, step_idx + 1)
-
-            # 同步（可选，用于调试）
-            # barrier()
-
-        if is_root():
-            logger.info("Distributed solve completed.")

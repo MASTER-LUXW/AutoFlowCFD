@@ -32,19 +32,24 @@ from .reductions import LocalReductions
 
 def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
                 restart: int, max_iter: int, red: LocalReductions = None
-                ) -> Tuple[object, int, int]:
-    """解 `A x = b`，返回 `(x, iterations, info)`。
+                ) -> Tuple[object, int, int, float]:
+    """解 `A x = b`，返回 `(x, iterations, info, rel_residual)`。
 
     `info == 0` 表示达到 `||b - A x|| <= rtol * ||b||`；`info > 0` 表示
     用满 `max_iter` 仍未达到（`x` 是当时的最好解）；`info < 0` 表示出现
     非有限值（`x` 不可用，调用方不得静默使用它）。
+
+    `rel_residual` 是返回的 `x` 实际达到的 `||b - A x|| / ||b||`（Givens 递推
+    给出的值，精确算术下即真实残差；重启处是重算的真实残差）。用满迭代数
+    时它说明方向还有多少可信度——自适应 CFL 据此判断线性求解是否失败
+    （`adaptive_cfl/ser.py`）。
     """
     red = red if red is not None else LocalReductions()
     xp = red.xp
     x = xp.zeros_like(b)
     bnorm = red.norm(b)
     if bnorm == 0.0:
-        return x, 0, 0
+        return x, 0, 0, 0.0
     target = rtol * bnorm
     r = b.copy()
     beta = bnorm
@@ -69,7 +74,7 @@ def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
             h_next = red.norm(w)
             H[j + 1, j] = h_next
             if not (np.isfinite(h_next) and np.all(np.isfinite(H[: j + 2, j]))):
-                return x, total, -1
+                return x, total, -1, float("nan")
             # 之前的 Givens 旋转作用到新列上
             for i in range(j):
                 t = cs[i] * H[i, j] + sn[i] * H[i + 1, j]
@@ -98,13 +103,14 @@ def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
         for i in range(1, k_used):
             upd = upd + y[i] * V[i]
         x = x + apply_Minv(upd)
+        rel = abs(g[k_used]) / bnorm
         if converged:
-            return x, total, 0
+            return x, total, 0, rel
         if total >= max_iter:
-            return x, total, total
+            return x, total, total, rel
         r = b - apply_A(x)
         beta = red.norm(r)
         if not np.isfinite(beta):
-            return x, total, -1
+            return x, total, -1, float("nan")
         if beta <= target:
-            return x, total, 0
+            return x, total, 0, beta / bnorm

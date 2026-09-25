@@ -58,8 +58,12 @@ Newton 都被完整接受（`theta = 1`、没有缩 dtau）。纯 SER 在这段�
 * 残差下降 -> 放大（SER 本义）；
 * 残差上升、但 Newton 步被**完整**接受 -> **保持**：Newton 在这个
   `dtau` 下正确地跟踪着一个物理暂态，收缩只会让它走得更慢；
-* 残差上升、且 Newton 步**没有**被完整接受（回溯或缩了 dtau）-> 按
-  比值收缩：当前天花板已经在方向不可信的区间里，下一步不应再从这里起跳。
+* Newton 步**没有**被完整接受（回溯、缩了 dtau、或线性求解没能把线性残差
+  减半，见 `mean_flow_step.py::newton_step_ok`）-> 收缩，倍率取
+  `min(比值, NOT_OK_SHRINK)`：当前天花板已经在方向不可信的区间里，下一步
+  不应再从这里起跳。**不论残差比值如何都不放大**——2026-09-25 以前按比值
+  处理，残差略降（比值 > 1）时失败步反而把 CFL 放大：plate_demo P0+SST 上
+  GMRES 用满 200 次只到 0.96 的那一步，CFL 从 3351 涨到 3385。
 
 步内的紧急处置（当场缩 dtau 重试）仍然由 `dtau_control.PtcDtauScale`
 负责，本控制器只调天花板，两层不重叠。
@@ -76,6 +80,11 @@ from __future__ import annotations
 import math
 
 from loguru import logger
+
+
+#: Newton 步未被完整接受时的最小收缩倍率（每步至少减半；SU2 自适应 CFL 在线性
+#: 求解失败时同样按固定倍率收缩）。
+NOT_OK_SHRINK = 0.5
 
 
 class SERCFLController:
@@ -122,8 +131,9 @@ class SERCFLController:
 
         Args:
             current_residual: Newton 所解系统的残差范数 `||F||`（见模块文档）。
-            step_ok: 本步 Newton 是否被**完整**接受（`theta == 1` 且没有缩
-                dtau）。残差上升时只有它为 False 才收缩。
+            step_ok: 本步 Newton 是否被**完整**接受（`mean_flow_step.py::
+                newton_step_ok`）。为 False 时至少按 `NOT_OK_SHRINK` 收缩；为
+                True 时残差下降放大、上升保持（见模块文档）。
         """
         r = float(current_residual)
         if not (math.isfinite(r) and r > 0.0):
@@ -135,6 +145,8 @@ class SERCFLController:
             return self.cfl_number
         if self._prev_residual is not None:
             factor = (self._prev_residual / r) ** self.exponent
+            if not step_ok:
+                factor = min(factor, NOT_OK_SHRINK)
             factor = min(self.growth_limit, max(self.shrink_limit, factor))
             if factor >= 1.0 or not step_ok:
                 self.cfl_number = self._clamp(self.cfl_number * factor)

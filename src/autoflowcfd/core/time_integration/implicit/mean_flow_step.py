@@ -72,21 +72,53 @@ class ResidualVariableSlice:
         return self._residual(u)[:, :self._n]
 
 
+#: 线性求解至少要把线性残差降到这个比例以下，Newton 方向才算可信（SU2 自适应
+#: CFL 的同一判据：线性求解没能把残差减半就缩 CFL）。
+LINEAR_SOLVE_MAX_REL_RESIDUAL = 0.5
+
+
 def newton_step_ok(info: dict) -> bool:
-    """本步 Newton 是否被**完整**接受（SER 律据此区分物理暂态与方向不可信）。"""
-    return info["theta"] >= 1.0 and info["n_dtau_cuts"] == 0
+    """本步 Newton 是否被**完整**接受（SER 律据此区分物理暂态与方向不可信）。
+
+    三个条件：残差接受判据没有回溯（`theta >= 1`）、没有缩 dtau 档、线性求解
+    至少把线性残差降到 `LINEAR_SOLVE_MAX_REL_RESIDUAL` 以下。第三条缺失时的真实
+    停滞（plate_demo P0+SST，17.9 万单元）：CFL 3419 下块 Jacobi 预处理的 GMRES
+    用满 200 次仍达不到容差，方向几乎无效，`R_new/R = 1.0000`；步照样"完整
+    接受"、残差不动，SER 于是保持 CFL，永远停在预处理够不着的 CFL 上。
+    """
+    return (info["theta"] >= 1.0 and info["n_dtau_cuts"] == 0
+            and info["linear_rel_residual"] <= LINEAR_SOLVE_MAX_REL_RESIDUAL)
+
+
+def reset_newton_state(solver) -> None:
+    """把隐式步的全部跨步状态置初值（模块文档"跨步状态"那几项 + 隐式 k-omega
+    的 `_newton_turb_state`）。全部后端在构造时与换阶后调用这一个函数。
+
+    换阶必须失效：forcing term 记的是上一步的残差量级（升阶后残差通常抬升
+    一个量级以上，沿用会让第一步的线性容差要么过严要么过松）；dtau 缩放是
+    按旧阶数的稳定性缩出来的；块 Jacobi 的块尺寸（真实解点数 x 变量数）随
+    阶数变化，冻结的 `J_cc` 属于旧的离散空间。
+    """
+    solver._newton_forcing = None
+    solver._newton_last_info = None
+    solver._newton_dtau_scale = 1.0
+    solver._newton_block_precond = None
+    solver._newton_turb_state = None
 
 
 def _format_newton_info(tag: str, info) -> str:
     """一个 Newton 步诊断的紧凑文本：Krylov 迭代数与是否达到 forcing 容差、
-    接受比例（物理性限幅 theta_phys 与最终 theta）、缩档数，以及本步前后
-    `||R||` 之比——"步被完整接受但残差不动"这类停滞只有最后一项看得出来。"""
+    残差接受判据的回溯比例 theta、逐单元物理性松弛（最小因子/被松弛单元
+    占比）、缩档数，以及本步前后 `||R||` 之比——"步被完整接受但残差不动"
+    这类停滞只有最后一项看得出来。"""
     if not info:
         return ""
-    gm = "ok" if info["gmres_info"] == 0 else ("fail" if info["gmres_info"] < 0 else "maxit")
+    gm = ("ok" if info["gmres_info"] == 0 else "fail" if info["gmres_info"] < 0
+          else f"maxit {info['linear_rel_residual']:.2g}")
     ratio = info["res_norm_new"] / info["res_norm"] if info["res_norm"] > 0 else 0.0
-    txt = (f"{tag}: gmres={info['gmres_iters']}({gm}) theta={info['theta']:.3g}"
-           f"/phys={info['theta_physicality']:.3g} R_new/R={ratio:.4f}")
+    txt = (f"{tag}: gmres={info['gmres_iters']}({gm}) theta={info['theta']:.3g} "
+           f"relax={info['theta_physicality']:.3g}@{100 * info['limited_fraction']:.2g}% "
+           f"R_new/R={ratio:.4f}")
     if info["n_dtau_cuts"]:
         txt += f" cuts={info['n_dtau_cuts']}"
     return txt
@@ -154,7 +186,8 @@ def step_mean_flow_newton(
         ResidualVariableSlice(residual, u_flat, n_mf), u_flat[:, :n_mf], dtau_flat,
         np.asarray(scales)[:n_mf],
         forcing=solver._newton_forcing, dtau_scale=solver._newton_dtau_scale,
-        block_precond=solver._newton_block_precond, red=red)
+        block_precond=solver._newton_block_precond,
+        rows_per_cell=u_flat.shape[0] // np.asarray(cell_is_prism).size, red=red)
     u_new = u_flat.copy()
     u_new[:, :n_mf] = u_new_mf
     solver._newton_last_info = info

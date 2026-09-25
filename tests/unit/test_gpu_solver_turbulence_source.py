@@ -271,8 +271,11 @@ def test_compute_turbulence_source_gpu_matches_cpu_single_machine(turb_model_nam
     b = _build_standins(turb_model_name)
     stub, turb_gpu, turb_cpu = b.gpu, b.turb_gpu, b.turb_cpu
     n_cells, n_sps, dt_used = b.n_cells, b.n_sps, b.dt_used
-    _GPUSolverIOMixin.compute_turbulence_source_gpu(stub)
-    compute_turbulence_source(b.cpu, np.full((n_cells, n_sps), dt_used))
+    # 逐单元不同的局部步长：GPU 与 CPU 必须逐点用同一个 dt（2026-09-25 以前
+    # GPU 取全场均值，在非均匀 dt 上与 CPU 不一致）
+    dt_cells = dt_used * (1.0 + np.arange(n_cells) / n_cells)
+    _GPUSolverIOMixin.compute_turbulence_source_gpu(stub, dt_cells[:, None])
+    compute_turbulence_source(b.cpu, np.repeat(dt_cells[:, None], n_sps, axis=1))
 
     assert np.all(np.isfinite(turb_gpu.k_field)), (
         f"GPU {turb_model_name} 源项计算不应该产生非有限值（回归 grad_U/grad_vel bug 的直接症状）"

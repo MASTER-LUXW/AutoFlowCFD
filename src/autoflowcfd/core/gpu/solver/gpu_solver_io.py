@@ -84,37 +84,23 @@ class _GPUSolverIOMixin:
         logger.info(f"GPU checkpoint loaded from {path}, iteration={self.iteration}")
 
     def _update_production_ramp_gpu(self) -> None:
-        """更新湍流产项渐变因子（GPU 版，与 CPU 侧
-        fr_solver/turbulence.py::_update_production_ramp 同一机制）。
+        """湍流产生项渐变（全部后端同一份，见
+        `fr_solver/turbulence/init.py::advance_production_ramp`）。"""
+        from autoflowcfd.core.fr_solver.turbulence.init import advance_production_ramp
 
-        第四次评审发现：GPU 路径的 `turb_model_gpu.production_factor`
-        自身文档已承认"未接入渐变逻辑，恒为 1.0"——只靠 k_max/omega_max
-        硬上限兜底，初始瞬态存在重新触发 CPU 侧已修复过的数值爆炸风险
-        （CPU 侧修复正是本轮上一次提交"湍流强度产生项加渐变因子"）。
-        前 N 步内 production_factor 从 0 线性增加到 1，防止初始流场
-        未发展时 P_k >> D_k 导致 k/omega 指数爆炸。
-        """
-        if self.turb_model_gpu is None or not hasattr(self.turb_model_gpu, 'production_factor'):
-            return
-        ramp_steps = getattr(self, '_turb_production_ramp_steps', None)
-        if ramp_steps is None:
-            ramp_steps = 50  # 与 CPU 侧 init_turbulence_models 同一默认值
-            self._turb_production_ramp_steps = ramp_steps
-        current_step = getattr(self, '_turb_ramp_step', 0)
-        if ramp_steps <= 0 or current_step >= ramp_steps:
-            self.turb_model_gpu.production_factor = 1.0
-            if not getattr(self, '_turb_production_ramp_complete', False):
-                self._turb_production_ramp_complete = True
-                logger.info(
-                    f"[ProductionRamp][GPU] Ramp complete after {ramp_steps} steps, "
-                    f"production_factor = 1.0"
-                )
-        else:
-            self.turb_model_gpu.production_factor = current_step / ramp_steps
-        self._turb_ramp_step = current_step + 1
+        advance_production_ramp(self, self.turb_model_gpu)
 
-    def compute_turbulence_source_gpu(self):
+    def compute_turbulence_source_gpu(self, turb_dt):
         """GPU 计算湍流模型源项。
+
+        Args:
+            turb_dt: k/omega 显式更新的步长，由 `step()` 按与 CPU
+                `fr_solver/step.py` 同一规则给出：DUAL_TIME 下是物理时间步
+                （标量，湍流必须与平均流站在同一物理时间上），其余是按**物理**
+                波速算出的逐单元局部步长 `(n_cells, 1)`（不跟低马赫预处理放大）。
+                2026-09-25 以前这里自己取 `cp.mean(dt_physical)`：全场一个平均
+                步长——小单元拿到超过自身稳定限的步长、大单元走得慢，且
+                DUAL_TIME 下湍流用的是伪时间步均值、物理时间不同步。
 
         完整流程：
         1. 计算速度梯度（GPU）
@@ -150,15 +136,8 @@ class _GPUSolverIOMixin:
         dk_dt, domega_dt, transport_k, transport_omega = self._evaluate_turbulence_rates_gpu(
             grad_vel, d_wall, apply_des=True)
 
-        # 湍流标量必须用**物理**波速算出的那一份 dt（2026-09-14，低马赫数
-        # 预处理接入 GPU 时同步）：启用预处理后平均流的 dt 按预处理波速
-        # 放大约 7 倍，而 k/omega 的显式更新刻意没有做 point-implicit
-        # 阻尼（见 turbulence/sst.py::update_fields 文档），不能跟着放大。
-        # 与 CPU 侧 step.py 里 `turb_dt = dt_physical` 同一处理。
-        _, dt_physical = self._compute_local_time_step_gpu(return_physical_too=True)
-        dt_mean = cp.mean(dt_physical)
         self.turb_model_gpu.update_fields_gpu(
-            float(dt_mean), dk_dt, domega_dt,
+            turb_dt, dk_dt, domega_dt,
             transport_k=transport_k, transport_omega=transport_omega,
         )
 

@@ -366,7 +366,7 @@ class GPUTurbulenceSST:
 
     def update_fields_gpu(
         self,
-        dt: float,
+        dt,
         Sk: 'cp.ndarray',
         S_omega: 'cp.ndarray',
         transport_k: Optional['cp.ndarray'] = None,
@@ -380,7 +380,9 @@ class GPUTurbulenceSST:
         遗漏同一处修复。
 
         Args:
-            dt: 时间步长
+            dt: 时间步长：标量（DUAL_TIME 的物理时间步），或可广播到
+                `(n_cells, n_sps)` 的逐点局部步长（稳态加速，与 CPU
+                `SSTModelFR.update_fields` 同一个量）
             Sk: k 方程源项
             S_omega: omega 方程源项
             transport_k: k 输运残差（可选）

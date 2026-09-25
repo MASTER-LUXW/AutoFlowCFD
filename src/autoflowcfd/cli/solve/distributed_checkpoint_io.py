@@ -34,6 +34,7 @@ def rebuild_distributed_solver_from_checkpoint(
     cfl_start: Optional[float] = None,
     cfl_max: Optional[float] = None,
     cfl_min: Optional[float] = None,
+    time_scheme: Optional[str] = None,
 ):
     """从 checkpoint 完整重建一个分布式求解器（不继续迭代）。
 
@@ -64,6 +65,9 @@ def rebuild_distributed_solver_from_checkpoint(
         surface_mesh: 面网格路径覆盖，None 时回退到 checkpoint metadata
         threads: CPU 后端线程数
         skip_quality_check: 跳过重建时的网格质量门检查
+        time_scheme: 续算用的稳态格式覆盖（`rk3`/`newton-krylov`）；`None` 时沿用
+            checkpoint 记录的格式——与单机续算同一个解析函数
+            （`checkpoint_io/rebuild.py::resolve_resume_time_scheme`）。
 
     Returns:
         (solver, iteration, metadata): 重建好的分布式求解器实例
@@ -112,6 +116,8 @@ def rebuild_distributed_solver_from_checkpoint(
     mu_molecular = physics["mu_molecular"]
     turbulence_intensity = physics["turbulence_intensity"]
     viscosity_ratio = physics["viscosity_ratio"]
+    from autoflowcfd.cli.solve.checkpoint_io.rebuild import resolve_resume_time_scheme
+    scheme = resolve_resume_time_scheme(time_scheme, metadata)
 
     if multi_gpu and fully_distributed:
         # 多 GPU"完全分布式加载"（#1，2026-09-02 实现——此前这个组合被
@@ -132,6 +138,7 @@ def rebuild_distributed_solver_from_checkpoint(
             use_eikonal=False,
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            time_scheme=scheme,
         )
         solver = MultiGPUDistributedSolver.from_fully_distributed_package(
             package, n_ranks=n_ranks, device_id=gpu_device, root_context=root_context,
@@ -157,6 +164,7 @@ def rebuild_distributed_solver_from_checkpoint(
             wall_distance_source=wall_distance_source_if_needed(turbulence_model, _volume_data, False),
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            time_scheme=scheme.value,
         )
         # GPU 版 checkpoint 加载是求解器自身方法（见
         # gpu_distributed_init.py::load_checkpoint_distributed），内部
@@ -182,6 +190,7 @@ def rebuild_distributed_solver_from_checkpoint(
             use_eikonal=False,
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            time_scheme=scheme,
         )
         solver = DistributedFRSolver.from_fully_distributed_package(
             package, n_ranks=n_ranks, root_context=root_context,
@@ -199,7 +208,6 @@ def rebuild_distributed_solver_from_checkpoint(
         # `solve steady --n-ranks` 的对应分支完全一致的构造方式。
         from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
         from autoflowcfd.core.mpi.distributed_checkpoint import distributed_load_checkpoint
-        from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
         from autoflowcfd.fr.operators import generate_fr_operators
 
         mesh, _volume_data = load_mesh_for_solver(
@@ -210,7 +218,7 @@ def rebuild_distributed_solver_from_checkpoint(
         solver = DistributedFRSolver(
             mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
             n_ranks=n_ranks, backend=backend or "cpu", order=order,
-            turb_model_name=turbulence_model, time_scheme=TimeIntegrationScheme.SSP_RK3,
+            turb_model_name=turbulence_model, time_scheme=scheme,
             wall_distance_source=wall_distance_source_if_needed(turbulence_model, _volume_data, False),
             n_threads=threads, turbulence_intensity=turbulence_intensity,
             viscosity_ratio=viscosity_ratio, mu_molecular=mu_molecular,
