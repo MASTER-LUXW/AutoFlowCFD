@@ -29,6 +29,7 @@ turbulence.py::distributed_compute_turbulence_source_and_viscosity`，
 import types
 
 import numpy as np
+from tests.unit._wall_source import synthetic_wall_source
 import pytest
 
 from tests.unit._patch_pkg import patch_pkg_attr
@@ -442,14 +443,13 @@ def test_gpu_distributed_les_matches_single_machine_wale(rank):
 
 
 class TestWallDistanceDistributedGpu:
-    """`_init_wall_distance_distributed` 修复验证：真实 bug 是对全局
-    sps_coords reshape 后按 n_local 切，n_ranks>1 时元素总数根本对不上
-    （表现为 reshape ValueError，不是"结果凑巧算错"这种更隐蔽的情形）。
-    这里直接验证特征长度回退分支（合成网格没有真实 WALL 边界组，走这
-    条分支）在 compact 索引空间下产出正确形状与数值。"""
+    """`_init_wall_distance_distributed`：compact 索引空间（local + halo）解点上
+    按壁面距离来源查询。2026-09-02 修过的缺陷是对全局 sps_coords reshape 后按
+    n_local 切（n_ranks>1 时元素总数对不上）；2026-09-25 起它与 CPU 分布式共用
+    同一个函数，且删除了"没有壁面就退回单元特征长度"的兜底。"""
 
     @pytest.mark.parametrize("rank", [0, 1])
-    def test_fallback_branch_produces_compact_shaped_result(self, rank):
+    def test_compact_shaped_query_from_the_source(self, rank):
         order = 1
         mesh = _build_synthetic_mixed_mesh(order)
         ops = generate_fr_operators(order)
@@ -458,22 +458,27 @@ class TestWallDistanceDistributedGpu:
         partition = build_distributed_partition(fc, cell_partition, rank=rank, n_ranks=2)
         dist_fc = build_distributed_flat_face(mesh, ops, partition, cell_partition=cell_partition)
         compact_global_ids = dist_fc.compact_global_ids
-        n_compact = len(compact_global_ids)
-        n_sps = mesh.n_sps_per_cell
-
-        mesh_data = _prepare_compact_mesh_data(mesh, ops, compact_global_ids)
-        mesh_data['n_prism'] = dist_fc.base_flat.n_prism
-        mesh_data['cell_volumes'] = mesh.cell_volumes[compact_global_ids]
+        source = synthetic_wall_source(mesh)
 
         stub = types.SimpleNamespace(
-            rank=rank, mesh=mesh, dist_flat_face=dist_fc, mesh_data=mesh_data,
-            turb_model_name="SST",
+            rank=rank, mesh=mesh, dist_flat_face=dist_fc, turb_model_name="SST",
+            _wall_distance_source=source,
         )
         _GPUDistributedInitMixin._init_wall_distance_distributed(stub)
 
-        assert stub.wall_distance_gpu.shape == (n_compact, n_sps)
-        expected = mesh.cell_volumes[compact_global_ids] ** (1.0 / 3.0)
-        np.testing.assert_allclose(stub.wall_distance_gpu, np.broadcast_to(expected[:, None], (n_compact, n_sps)))
+        assert stub.wall_distance_gpu.shape == (len(compact_global_ids), mesh.n_sps_per_cell)
+        np.testing.assert_allclose(stub.wall_distance_gpu,
+                                   source.query(mesh.sps_coords[compact_global_ids]))
+
+    def test_missing_source_is_an_error_not_an_estimate(self):
+        mesh = _build_synthetic_mixed_mesh(1)
+        ops = generate_fr_operators(1)
+        cell_partition = np.zeros(mesh.n_cells, dtype=np.int32)
+        partition = build_distributed_partition(mesh.face_connectivity, cell_partition, rank=0, n_ranks=1)
+        dist_fc = build_distributed_flat_face(mesh, ops, partition, cell_partition=cell_partition)
+        stub = types.SimpleNamespace(rank=0, mesh=mesh, dist_flat_face=dist_fc, turb_model_name="SST")
+        with pytest.raises(RuntimeError):
+            _GPUDistributedInitMixin._init_wall_distance_distributed(stub)
 
 
 class TestWmlesDistributedGpu:

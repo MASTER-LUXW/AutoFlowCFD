@@ -9,6 +9,7 @@ import time as _time
 from typing import Any, Optional
 
 
+from autoflowcfd.core.time_integration.implicit.mean_flow_step import newton_monitor_suffix
 from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
 
 from .p0_reset import _reset_state_to_p0
@@ -348,6 +349,7 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
                     _cfl_ctrl = getattr(solver, '_cfl_controller', None)
                     if _cfl_ctrl is not None:
                         msg += f" | CFL={_cfl_ctrl.cfl_number:.3f}"
+                    msg += newton_monitor_suffix(solver)
                     # 每步输出气动力系数（轻量级压力积分，不含粘性力梯度）
                     ref_area = getattr(solver, '_reference_area', None)
                     if ref_area is not None and ref_area > 0:

@@ -24,7 +24,7 @@ def _volume_mesh_with_wall():
     `BoundaryMap.groups` 契约（存**单元**索引，见该类 `groups` 字段文档）
     被误读的体现，而这个误读在生产代码里造成了一处一阶物理错误（壁面
     距离场算到一堆按编号散布在全域的任意节点上，见
-    `solve_wall_distance.wall_nodes_from_boundary_faces` 的完整推导）。
+    `core/utils/wall_distance_source.py::wall_nodes_from_boundary_faces` 的完整推导）。
     现在 fixture 按契约给单元索引，并且单元数 > 1 以便 WALL 组有真实的
     边界面可取。
     """
@@ -46,37 +46,45 @@ def _volume_mesh_with_wall():
 
 
 class TestComputeWallDistanceForSolverEikonalWiring:
+    """CLI 入口的接线（2026-09-25 起 CLI 构造 `WallDistanceSource` 并施加，
+    分布式/GPU 后端用同一个来源）。"""
+
+    _APPLY = "autoflowcfd.core.fr_solver.turbulence.apply_wall_distance_source"
+
     def test_non_turbulent_model_skips_everything(self):
         solver = MagicMock()
         solver.turb_model_name = 'NONE'
-        compute_wall_distance_for_solver(solver, _volume_mesh_with_wall(), use_eikonal=True)
-        solver.compute_wall_distance_field.assert_not_called()
+        with patch(self._APPLY) as mock_apply:
+            compute_wall_distance_for_solver(solver, _volume_mesh_with_wall(), use_eikonal=True)
+        mock_apply.assert_not_called()
 
     def test_use_eikonal_false_does_not_build_connectivity(self):
-        """The adjacency graph has a real construction cost - it must only
-        be built when actually needed."""
+        """邻接图有实打实的构造成本，只在真的要用 Eikonal 时才建。"""
         solver = MagicMock()
         solver.turb_model_name = 'SST'
-        with patch("autoflowcfd.grid.connectivity.node_connectivity.build_node_adjacency") as mock_build:
+        with patch("autoflowcfd.grid.connectivity.node_connectivity.build_node_adjacency") as mock_build,                 patch(self._APPLY) as mock_apply:
             compute_wall_distance_for_solver(solver, _volume_mesh_with_wall(), use_eikonal=False)
         mock_build.assert_not_called()
-        solver.compute_wall_distance_field.assert_called_once()
-        _, kwargs = solver.compute_wall_distance_field.call_args
-        assert kwargs == {}  # positional-only call, no connectivity/use_eikonal kwargs on this path
+        (_, source), _ = mock_apply.call_args
+        assert source.kind == "kdtree"
 
     def test_use_eikonal_true_builds_and_forwards_connectivity(self):
         solver = MagicMock()
         solver.turb_model_name = 'DDES'
-        compute_wall_distance_for_solver(solver, _volume_mesh_with_wall(), use_eikonal=True)
+        from autoflowcfd.grid.connectivity.node_connectivity import build_node_adjacency as real_build
+        seen = {}
 
-        solver.compute_wall_distance_field.assert_called_once()
-        args, kwargs = solver.compute_wall_distance_field.call_args
-        assert kwargs["use_eikonal"] is True
-        connectivity = kwargs["connectivity"]
-        assert connectivity.shape[0] == 5  # one row per node
+        def _spy(*a, **k):
+            seen["conn"] = real_build(*a, **k)
+            return seen["conn"]
+        with patch("autoflowcfd.grid.connectivity.node_connectivity.build_node_adjacency", side_effect=_spy),                 patch(self._APPLY) as mock_apply:
+            compute_wall_distance_for_solver(solver, _volume_mesh_with_wall(), use_eikonal=True)
+        (_, source), _ = mock_apply.call_args
+        assert source.kind == "eikonal"
+        conn = seen["conn"]
+        assert conn.shape[0] == 5  # one row per node
         # node 0 and node 1 share the single tet - must be neighbors.
-        assert 1 in connectivity[0]
-        assert 0 in connectivity[1]
+        assert 1 in conn[0] and 0 in conn[1]
 
 
 class TestWallNodesComeFromBoundaryFacesNotIndexGuessing:
@@ -98,7 +106,7 @@ class TestWallNodesComeFromBoundaryFacesNotIndexGuessing:
     """
 
     def test_wall_nodes_are_boundary_face_nodes(self):
-        from autoflowcfd.cli.solve.wall_distance import wall_nodes_from_boundary_faces
+        from autoflowcfd.core.utils.wall_distance_source import wall_nodes_from_boundary_faces
         vd = _volume_mesh_with_wall()
         wn, n_faces = wall_nodes_from_boundary_faces(vd, vd.boundaries)
         # 单元 0 = [0,1,2,3]，与单元 1 共享面 [1,2,3]，故有 3 个边界面，
@@ -120,7 +128,7 @@ class TestWallNodesComeFromBoundaryFacesNotIndexGuessing:
         old_result = sorted(idx[idx < n_nodes].tolist())
         assert old_result == [0], "原判据会把单元索引当节点索引"
 
-        from autoflowcfd.cli.solve.wall_distance import wall_nodes_from_boundary_faces
+        from autoflowcfd.core.utils.wall_distance_source import wall_nodes_from_boundary_faces
         new_result = sorted(wall_nodes_from_boundary_faces(vd, vd.boundaries)[0].tolist())
         assert new_result != old_result
         assert new_result == [0, 1, 2, 3]
@@ -135,16 +143,21 @@ class TestWallNodesComeFromBoundaryFacesNotIndexGuessing:
         import click
         import pytest
 
-        from autoflowcfd.cli.solve.wall_distance import wall_nodes_from_boundary_faces
+        from autoflowcfd.core.utils.wall_distance_source import wall_nodes_from_boundary_faces
         vd = _volume_mesh_with_wall()
         vd.boundaries.groups['wall'] = np.array([0, 999], dtype=np.int32)
-        with pytest.raises(click.ClickException, match='超出体网格单元数'):
+        # 核心层报 ValueError，CLI 入口转成可读的命令行错误
+        with pytest.raises(ValueError, match='超出体网格单元数'):
             wall_nodes_from_boundary_faces(vd, vd.boundaries)
+        solver = MagicMock()
+        solver.turb_model_name = 'SST'
+        with pytest.raises(click.ClickException, match='超出体网格单元数'):
+            compute_wall_distance_for_solver(solver, vd, use_eikonal=False)
 
     def test_non_wall_groups_are_excluded(self):
         """只有 bc_type == 'WALL' 的组参与壁距；SLIP_WALL（外场/风洞壁）
         必须排除——否则外场壁会把全域的壁距压到域半高量级。"""
-        from autoflowcfd.cli.solve.wall_distance import wall_nodes_from_boundary_faces
+        from autoflowcfd.core.utils.wall_distance_source import wall_nodes_from_boundary_faces
         vd = _volume_mesh_with_wall()
         vd.boundaries.groups['tunnel'] = np.array([1], dtype=np.int32)
         vd.boundaries.bc_types['tunnel'] = 'SLIP_WALL'
@@ -155,7 +168,7 @@ class TestWallNodesComeFromBoundaryFacesNotIndexGuessing:
 
     def test_no_wall_group_returns_empty(self):
         """没有 WALL 组时返回空集，由调用方决定报错——不在这里兜底。"""
-        from autoflowcfd.cli.solve.wall_distance import wall_nodes_from_boundary_faces
+        from autoflowcfd.core.utils.wall_distance_source import wall_nodes_from_boundary_faces
         vd = _volume_mesh_with_wall()
         vd.boundaries.bc_types['wall'] = 'SLIP_WALL'
         wn, n_faces = wall_nodes_from_boundary_faces(vd, vd.boundaries)
@@ -173,14 +186,15 @@ class TestWallNodesComeFromBoundaryFacesNotIndexGuessing:
         assert hasattr(BM, 'get_cell_indices')
 
     def test_solver_receives_the_face_derived_set(self):
-        """端到端：`compute_wall_distance_for_solver` 传给求解器的必须是
-        面导出的节点集。"""
+        """端到端：`compute_wall_distance_for_solver` 施加到求解器上的来源必须
+        由面导出的节点集构造（节点 0~3 在壁面上，节点 4 不在）。"""
         solver = MagicMock()
         solver.turb_model_name = 'SST'
         vd = _volume_mesh_with_wall()
-        compute_wall_distance_for_solver(solver, vd, use_eikonal=False)
-        solver.compute_wall_distance_field.assert_called_once()
-        args, _ = solver.compute_wall_distance_field.call_args
-        mesh_nodes, wall_indices = args[0], args[1]
-        assert mesh_nodes.shape == (5, 3)
-        assert sorted(np.asarray(wall_indices).tolist()) == [0, 1, 2, 3]
+        with patch("autoflowcfd.core.fr_solver.turbulence.apply_wall_distance_source") as mock_apply:
+            compute_wall_distance_for_solver(solver, vd, use_eikonal=False)
+        (_, source), _ = mock_apply.call_args
+        assert source.n_wall_nodes == 4
+        nodes = vd.nodes.get_coordinates()
+        np.testing.assert_allclose(source.query(nodes[:4]), 0.0, atol=1e-14)
+        assert source.query(nodes[4:5])[0] > 0.0

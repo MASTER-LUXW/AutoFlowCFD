@@ -18,6 +18,8 @@ from typing import Optional
 
 import click
 
+from autoflowcfd.cli.solve.wall_distance import wall_distance_source_if_needed
+
 
 def rebuild_distributed_solver_from_checkpoint(
     checkpoint_path: str,
@@ -127,6 +129,7 @@ def rebuild_distributed_solver_from_checkpoint(
             freestream=freestream, mu_molecular=mu_molecular, mach_ref=mach_ref,
             enable_viscous=True, skip_quality_check=skip_quality_check,
             turb_model_name=turbulence_model.upper(),
+            use_eikonal=False,
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
         )
@@ -151,6 +154,7 @@ def rebuild_distributed_solver_from_checkpoint(
             mu_molecular=mu_molecular, rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
             aoa_deg=aoa_deg, aos_deg=aos_deg,
             turb_model=turbulence_model.upper(),
+            wall_distance_source=wall_distance_source_if_needed(turbulence_model, _volume_data, False),
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
         )
@@ -175,6 +179,7 @@ def rebuild_distributed_solver_from_checkpoint(
             freestream=freestream, mu_molecular=mu_molecular, mach_ref=mach_ref,
             enable_viscous=True, skip_quality_check=skip_quality_check,
             turb_model_name=turbulence_model.upper(),
+            use_eikonal=False,
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
         )
@@ -206,6 +211,7 @@ def rebuild_distributed_solver_from_checkpoint(
             mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
             n_ranks=n_ranks, backend=backend or "cpu", order=order,
             turb_model_name=turbulence_model, time_scheme=TimeIntegrationScheme.SSP_RK3,
+            wall_distance_source=wall_distance_source_if_needed(turbulence_model, _volume_data, False),
             n_threads=threads, turbulence_intensity=turbulence_intensity,
             viscosity_ratio=viscosity_ratio, mu_molecular=mu_molecular,
             rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,

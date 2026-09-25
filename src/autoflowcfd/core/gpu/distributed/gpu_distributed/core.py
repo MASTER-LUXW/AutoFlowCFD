@@ -75,6 +75,7 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
         cfl_start: Optional[float] = None,
         cfl_max: Optional[float] = None,
         cfl_min: Optional[float] = None,
+        wall_distance_source=None,
     ):
         """初始化多 GPU 分布式求解器。
 
@@ -93,6 +94,9 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
             mu_molecular: 分子动力粘度
             rho_inf, vel_inf, p_inf: 自由来流条件
         """
+        # 壁面距离来源（core/utils/wall_distance_source.py）：与单机 CPU 同一个，
+        # CLI 由体网格 WALL 边界面构造后传入；湍流模型需要壁距时必须提供
+        self._wall_distance_source = wall_distance_source
         self._setup_identity_and_device(
             mesh, ops, n_ranks, rank, device_id, mu_molecular,
             rho_inf, vel_inf, p_inf, aoa_deg, aos_deg, turb_model)

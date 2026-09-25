@@ -21,6 +21,7 @@ order` 的 Send/Recv 分支天然不会被触发（`range(1, 1)` 为空，root �
 """
 
 import numpy as np
+from tests.unit._wall_source import synthetic_wall_source
 import pytest
 
 from autoflowcfd.fr.operators import generate_fr_operators
@@ -50,21 +51,21 @@ def _build_initial_package_and_root_context(order, turb_model_name="NONE"):
     )
     boundary_ghost_provider_global = build_boundary_ghost_provider(root_solver_stub, bc_overrides={})
 
-    wall_node_indices = None
+    wall_distance_source = synthetic_wall_source(mesh)
     h_max_global = h_wn_global = None
 
     package = build_fully_distributed_rank_package(
         mesh, ops, fc, cell_partition, 0, n_ranks,
         boundary_ghost_provider_global, freestream, mu_molecular, mach_ref,
         order, enable_viscous, turb_model_name=turb_model_name,
-        wall_node_indices=wall_node_indices, h_max_global=h_max_global, h_wn_global=h_wn_global,
+        wall_distance_source=wall_distance_source, h_max_global=h_max_global, h_wn_global=h_wn_global,
     )
     root_context = {
         'mesh': mesh, 'ops': ops, 'fc': fc, 'cell_partition': cell_partition,
         'boundary_ghost_provider_global': boundary_ghost_provider_global,
         'freestream': freestream, 'mu_molecular': mu_molecular, 'mach_ref': mach_ref,
         'enable_viscous': enable_viscous, 'turb_model_name': turb_model_name,
-        'wall_node_indices': wall_node_indices,
+        'wall_distance_source': wall_distance_source,
         'h_max_global': h_max_global, 'h_wn_global': h_wn_global,
         'turbulence_intensity': 0.01, 'viscosity_ratio': 5.0,
         'bc_overrides': {}, 'n_ranks': n_ranks,

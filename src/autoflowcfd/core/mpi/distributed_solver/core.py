@@ -50,6 +50,7 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, _
         face_connectivity_data=None,
         partition_info=None,
         rank: Optional[int] = None,
+        wall_distance_source=None,
         **solver_kwargs,
     ):
         """初始化分布式求解器。
@@ -344,22 +345,13 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, _
                 from autoflowcfd.core.turbulence.wmles import WMLESModel
                 self.wmles_model = WMLESModel(nu=self.mu_molecular / max(self.rho_inf, 1e-10))
 
-            wall_node_indices = None
-            # 真实 bug 修复（2026-09-02，排查多GPU分布式SST时发现同一处
-            # 拷贝粘贴的 bug，本文件同样中招）：`hasattr(mesh,
-            # 'boundary_groups')` 对"属性存在但值是 None"恒为 True，
-            # `.items()` 会真实 AttributeError——用 `getattr(...) is not
-            # None` 才是正确的存在性判据。
-            boundary_groups = getattr(mesh, 'boundary_groups', None)
-            if boundary_groups is not None:
-                for bg_name, bg in boundary_groups.items():
-                    if 'WALL' in bg_name.upper() or bg.get('type', '').upper() == 'WALL':
-                        wall_node_indices = bg.get('node_indices')
-                        break
+            # 壁面距离：与单机同一个来源（CLI 由体网格 WALL 边界面构造后以
+            # `wall_distance_source=` 传入），在本 rank compact 解点上查询；
+            # 换阶重建时用同一个来源重查（distributed_order_continuation）
             from autoflowcfd.core.mpi.distributed_turbulence import compute_distributed_wall_distance
+            self._wall_distance_source = wall_distance_source
             self.wall_distance_compact = compute_distributed_wall_distance(
-                self.partition, self.dist_flat_face, mesh, wall_node_indices,
-            )
+                self.dist_flat_face, mesh, wall_distance_source)
 
             # DDES/IDDES（2026-09-02）：`init_turbulence_models` 的 DDES/
             # IDDES 分支已经把 `self.ddes_model` 设成真实的 DDESModel/

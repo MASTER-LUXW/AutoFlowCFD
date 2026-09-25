@@ -24,6 +24,7 @@ state_from_checkpoint` 必须按这个真实数据模型处理，而不是照搬
 """
 
 import numpy as np
+from tests.unit._wall_source import synthetic_wall_source
 import pytest
 
 from autoflowcfd.fr.operators import generate_fr_operators
@@ -38,6 +39,7 @@ def _make_solver(mesh, ops, turb_model_name):
         n_ranks=1, backend="cpu", order=mesh.order, turb_model_name=turb_model_name,
         time_scheme=TimeIntegrationScheme.SSP_RK3,
         mu_molecular=1.8e-5, rho_inf=1.225, vel_inf=33.33, p_inf=101325.0,
+        wall_distance_source=synthetic_wall_source(mesh),
     )
 
 

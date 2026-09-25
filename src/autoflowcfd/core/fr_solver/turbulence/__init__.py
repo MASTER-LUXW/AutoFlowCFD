@@ -29,8 +29,7 @@ from .init import (  # noqa: F401
     init_turbulence_models,
 )
 from .wall_distance import (  # noqa: F401
-    _map_node_distances_to_points,
-    _map_wall_distance_fallback,
+    apply_wall_distance_source,
     compute_wall_distance_field,
     recompute_wall_distance_for_current_order,
 )
@@ -43,6 +42,7 @@ from .corrections import (  # noqa: F401
 __all__ = [
     "apply_turbulence_corrections",
     "compute_turbulence_source",
+    "apply_wall_distance_source",
     "compute_wall_distance_field",
     "get_turbulent_viscosity_field",
     "init_turbulence_models",

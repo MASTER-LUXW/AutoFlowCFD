@@ -111,7 +111,7 @@ def build_fully_distributed_rank_package(
     freestream: dict, mu_molecular: float, mach_ref: float,
     order: int, enable_viscous: bool,
     turb_model_name: str = "NONE",
-    wall_node_indices: Optional[np.ndarray] = None,
+    wall_distance_source=None,
     h_max_global: Optional[np.ndarray] = None,
     h_wn_global: Optional[np.ndarray] = None,
     turbulence_intensity: float = 0.01,
@@ -174,9 +174,8 @@ def build_fully_distributed_rank_package(
             纯配置量（标量/小 dict），直接透传
         turb_model_name: "NONE"/"SST"/"DDES"/"IDDES"/"WMLES"/"LES"
             （大写），决定是否需要计算 wall_distance/h_max/h_wn
-        wall_node_indices: WALL 边界节点索引（全局节点编号），root 只
-            需要算一次（不依赖 rank），由调用方（`distributed_mesh_
-            load_v2`）传入
+        wall_distance_source: 壁面距离来源（`core/utils/wall_distance_source.py`），
+            root 由体网格构造一次、对每个 rank 的 compact 解点查询
         h_max_global, h_wn_global: (n_global_cells,) IDDES 专用，root
             只需要对同一个 mesh 算一次（`compute_h_max_and_h_wn` 纯
             几何、与 rank 无关），由调用方缓存后传入，避免每个 rank
@@ -284,7 +283,7 @@ def build_fully_distributed_rank_package(
     iddes_h_wn_compact = None
     if turb_model_name in ("SST", "DDES", "IDDES", "WMLES"):
         wall_distance_compact = compute_distributed_wall_distance(
-            partition, dist_fc, mesh, wall_node_indices,
+            dist_fc, mesh, wall_distance_source,
         )
         if turb_model_name == "IDDES":
             if h_max_global is None or h_wn_global is None:

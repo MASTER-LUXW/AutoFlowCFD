@@ -173,6 +173,9 @@ class _DistributedStepMixin:
                 iddes_h_max_compact=self.iddes_h_max_compact,
                 iddes_h_wn_compact=self.iddes_h_wn_compact,
                 des_length_scale_halo_exchange=self.des_length_scale_halo_exchange,
+                # compact 面空间的 provider（group_code 已重切），湍流输运的
+                # 壁面/来流条件靠它按边界组取类型
+                boundary_ghost_provider=boundary_ghost_provider,
             )
         elif self.sgs_model is not None:
             # LES（2026-09-02）：WALE 纯代数模型，用当前状态现算，见

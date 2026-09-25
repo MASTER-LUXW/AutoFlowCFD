@@ -6,11 +6,13 @@
 
 import click
 
+from autoflowcfd.cli.solve.wall_distance import wall_distance_source_if_needed
 from autoflowcfd.cli.solve.helpers import load_mesh_for_solver
 
 
 def _run_single_gpu(
     *,
+    use_eikonal,
     aoa_deg, aos_deg, cfl_max, cfl_min, cfl_start, gpu_device, input_file, max_iter,
     mu_molecular, order, output_dir, p_inf, phase_max_iter, residual_drop_threshold,
     rho_inf, skip_quality_check, surface_mesh, time_scheme, turbulence_intensity,
@@ -44,6 +46,7 @@ def _run_single_gpu(
         # --turbulence-model 无论填什么都被静默丢弃、恒定跑层流，
         # 终端打印的 Turbulence 行却仍显示用户输入的模型名。
         turb_model=turbulence_model.upper(),
+        wall_distance_source=wall_distance_source_if_needed(turbulence_model, volume_data, use_eikonal),
         # 真实缺口修复（2026-09-14）：`--cfl-start/--cfl-max` 此前只
         # 到得了 CPU 的 FRSolver，GPU 路径连自适应 CFL 控制器都没有、
         # 恒用固定 CFL。GPUFRSolver 现在有了控制器（见

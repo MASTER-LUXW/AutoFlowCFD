@@ -32,6 +32,7 @@ def distributed_mesh_load_v2(
     cfl_start: Optional[float] = None,
     cfl_max: Optional[float] = None,
     cfl_min: Optional[float] = None,
+    use_eikonal: bool = False,
 ):
     """真正的完全分布式网格加载（2026-09-02）——只有 root rank 加载
     完整网格并对每个 rank 分别调用 `build_fully_distributed_rank_
@@ -49,7 +50,7 @@ def distributed_mesh_load_v2(
     组——`root_context` 只有 root rank 非 None（其余 rank 恒为
     None，它们从未持有、也不需要持有完整全局网格），持有本函数内部
     算好的 `mesh`/`ops`/`fc`/`cell_partition`/`boundary_ghost_provider_
-    global`/`wall_node_indices`/`h_max_global`/`h_wn_global` 等，供
+    global`/`wall_distance_source`/`h_max_global`/`h_wn_global` 等，供
     `redistribute_fully_distributed_for_new_order` 在阶数切换时复用
     （重新构造完整网格/重新分区都是不必要的重复开销——这些量本身除了
     `boundary_ghost_provider_global`（阶数相关的 FP 几何）之外全部与
@@ -124,18 +125,18 @@ def distributed_mesh_load_v2(
             root_solver_stub, bc_overrides=bc_overrides or {},
         )
 
-        # SST/DDES/IDDES/WMLES：wall_node_indices/h_max/h_wn 只依赖完整
+        # SST/DDES/IDDES/WMLES：wall_distance_source/h_max/h_wn 只依赖完整
         # 全局网格，只需要算一次（不随 rank 变化），见
         # build_fully_distributed_rank_package 文档对应参数说明。
-        wall_node_indices = None
+        wall_distance_source = None
         h_max_global = h_wn_global = None
         if turb_model_name in ("SST", "DDES", "IDDES", "WMLES"):
-            boundary_groups = getattr(mesh, 'boundary_groups', None)
-            if boundary_groups is not None:
-                for bg_name, bg in boundary_groups.items():
-                    if 'WALL' in bg_name.upper() or bg.get('type', '').upper() == 'WALL':
-                        wall_node_indices = bg.get('node_indices')
-                        break
+            # 壁面距离来源与单机同一个构造（WALL 组边界面上的节点，见
+            # core/utils/wall_distance_source.py；此前这里把 BoundaryMap 的
+            # 数组当字典读，真实网格上直接崩溃）
+            from autoflowcfd.core.utils.wall_distance_source import WallDistanceSource
+            wall_distance_source = WallDistanceSource.from_volume_data(
+                _volume_data, use_eikonal=use_eikonal)
             if turb_model_name in ("DDES", "IDDES"):
                 # DDES（2026-09-02 补齐）：apply_to_sst_model 现在优先用
                 # h_max（max_edge 网格尺度）而不是 cube_root(V)，见
@@ -148,7 +149,7 @@ def distributed_mesh_load_v2(
                 mesh, ops, fc, cell_partition, r, n_ranks,
                 boundary_ghost_provider_global, freestream, mu_molecular, mach_ref,
                 order, enable_viscous,
-                turb_model_name=turb_model_name, wall_node_indices=wall_node_indices,
+                turb_model_name=turb_model_name, wall_distance_source=wall_distance_source,
                 h_max_global=h_max_global, h_wn_global=h_wn_global,
                 turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
                 time_scheme=time_scheme, dual_time_inner_iter=dual_time_inner_iter,
@@ -175,7 +176,7 @@ def distributed_mesh_load_v2(
             'boundary_ghost_provider_global': boundary_ghost_provider_global,
             'freestream': freestream, 'mu_molecular': mu_molecular, 'mach_ref': mach_ref,
             'enable_viscous': enable_viscous, 'turb_model_name': turb_model_name,
-            'wall_node_indices': wall_node_indices,
+            'wall_distance_source': wall_distance_source,
             'h_max_global': h_max_global, 'h_wn_global': h_wn_global,
             'turbulence_intensity': turbulence_intensity, 'viscosity_ratio': viscosity_ratio,
             'bc_overrides': bc_overrides or {}, 'n_ranks': n_ranks,
@@ -350,7 +351,8 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
                 boundary_ghost_provider_global, root_context['freestream'],
                 root_context['mu_molecular'], root_context['mach_ref'],
                 target_p, root_context['enable_viscous'],
-                turb_model_name=turb_model_name, wall_node_indices=root_context['wall_node_indices'],
+                turb_model_name=turb_model_name,
+                wall_distance_source=root_context['wall_distance_source'],
                 h_max_global=root_context['h_max_global'], h_wn_global=root_context['h_wn_global'],
                 turbulence_intensity=root_context['turbulence_intensity'],
                 viscosity_ratio=root_context['viscosity_ratio'],

@@ -33,6 +33,7 @@ points`，且 `DistributedMeshAdapter` 假设 `local_mesh` 是完整全局网格
 import pickle
 
 import numpy as np
+from tests.unit._wall_source import synthetic_wall_source
 import pytest
 
 from autoflowcfd.core.mpi.partition import build_distributed_partition
@@ -103,6 +104,7 @@ def _build_all_packages(mesh, ops, n_ranks=2):
             mesh, ops, fc, cell_partition, r, n_ranks,
             boundary_ghost_provider_global, freestream, mu_molecular=1.8e-5, mach_ref=0.2,
             order=mesh.order, enable_viscous=True,
+            wall_distance_source=synthetic_wall_source(mesh),
         )
         for r in range(n_ranks)
     ]
@@ -288,8 +290,9 @@ class TestFullyDistributedSstTurbulence:
             boundary_ghost_provider_global=boundary_ghost_provider,
             freestream=freestream, mu_molecular=mu, mach_ref=0.2,
             order=mesh.order, enable_viscous=True,
-            turb_model_name="SST", wall_node_indices=None,
+            turb_model_name="SST",
             turbulence_intensity=0.02, viscosity_ratio=8.0,
+            wall_distance_source=synthetic_wall_source(mesh),
         )
 
         assert package['turb_model_name'] == "SST"
@@ -301,7 +304,8 @@ class TestFullyDistributedSstTurbulence:
         from autoflowcfd.core.mpi.distributed_turbulence import compute_distributed_wall_distance
         partition_ref = build_distributed_partition(mesh.face_connectivity, cell_partition, rank=rank, n_ranks=n_ranks)
         dist_fc_ref = build_distributed_flat_face(mesh, ops, partition_ref, cell_partition=cell_partition)
-        expected_wall_distance = compute_distributed_wall_distance(partition_ref, dist_fc_ref, mesh, None)
+        expected_wall_distance = compute_distributed_wall_distance(
+            dist_fc_ref, mesh, synthetic_wall_source(mesh))
         np.testing.assert_allclose(package['wall_distance_compact'], expected_wall_distance)
 
         # ---- 构造真正的 DistributedFRSolver ----
@@ -349,6 +353,7 @@ class TestFullyDistributedSstTurbulence:
             boundary_ghost_provider_global=boundary_ghost_provider,
             freestream=freestream, mu_molecular=mu, mach_ref=0.2,
             order=mesh.order, enable_viscous=True, turb_model_name="SST",
+            wall_distance_source=synthetic_wall_source(mesh),
         )
 
         from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
@@ -400,6 +405,7 @@ class TestFullyDistributedSstTurbulence:
                 boundary_ghost_provider_global=boundary_ghost_provider,
                 freestream=freestream, mu_molecular=mu, mach_ref=0.2,
                 order=mesh.order, enable_viscous=True, turb_model_name="DDES",
+                wall_distance_source=synthetic_wall_source(mesh),
             )
 
         h_max_global, _h_wn_global = compute_h_max_and_h_wn(mesh)
@@ -409,6 +415,7 @@ class TestFullyDistributedSstTurbulence:
             freestream=freestream, mu_molecular=mu, mach_ref=0.2,
             order=mesh.order, enable_viscous=True, turb_model_name="DDES",
             h_max_global=h_max_global,
+            wall_distance_source=synthetic_wall_source(mesh),
         )
 
         assert package['iddes_h_max_compact'] is not None
@@ -467,6 +474,7 @@ class TestFullyDistributedSstTurbulence:
             freestream=freestream, mu_molecular=mu, mach_ref=0.2,
             order=mesh.order, enable_viscous=True, turb_model_name="IDDES",
             h_max_global=h_max_global, h_wn_global=h_wn_global,
+            wall_distance_source=synthetic_wall_source(mesh),
         )
 
         assert package['iddes_h_max_compact'] is not None
@@ -532,6 +540,7 @@ class TestFullyDistributedSstTurbulence:
             boundary_ghost_provider_global=boundary_ghost_provider,
             freestream=freestream, mu_molecular=mu, mach_ref=0.2,
             order=mesh.order, enable_viscous=True, turb_model_name="WMLES",
+            wall_distance_source=synthetic_wall_source(mesh),
         )
 
         assert package['wall_distance_compact'] is not None
@@ -576,6 +585,7 @@ class TestFullyDistributedSstTurbulence:
             boundary_ghost_provider_global=boundary_ghost_provider,
             freestream=freestream, mu_molecular=mu, mach_ref=0.2,
             order=mesh.order, enable_viscous=True, turb_model_name="LES",
+            wall_distance_source=synthetic_wall_source(mesh),
         )
 
         assert package['wall_distance_compact'] is None  # LES 不需要壁面距离
@@ -637,6 +647,7 @@ class TestDistributedFRSolverFromFullyDistributedPackage:
             boundary_ghost_provider_global=boundary_ghost_provider,
             freestream=freestream, mu_molecular=mu, mach_ref=mach_ref,
             order=mesh.order, enable_viscous=True,
+            wall_distance_source=synthetic_wall_source(mesh),
         )
 
         solver = DistributedFRSolver.from_fully_distributed_package(package, n_ranks=1, rank=0)
@@ -706,6 +717,7 @@ class TestFullyDistributedDualTimeSupport:
             freestream=freestream, mu_molecular=1.8e-5, mach_ref=0.2,
             order=mesh.order, enable_viscous=True,
             time_scheme=TimeIntegrationScheme.DUAL_TIME, dual_time_inner_iter=7,
+            wall_distance_source=synthetic_wall_source(mesh),
         )
         assert package['time_scheme'] == TimeIntegrationScheme.DUAL_TIME
         assert package['dual_time_inner_iter'] == 7
@@ -734,6 +746,7 @@ class TestFullyDistributedDualTimeSupport:
             boundary_ghost_provider_global=boundary_ghost_provider,
             freestream=freestream, mu_molecular=1.8e-5, mach_ref=0.2,
             order=mesh.order, enable_viscous=True,
+            wall_distance_source=synthetic_wall_source(mesh),
         )
         assert package['time_scheme'] == TimeIntegrationScheme.SSP_RK3
         assert package['dual_time_inner_iter'] == 20
@@ -766,6 +779,7 @@ class TestFullyDistributedDualTimeSupport:
             freestream=freestream, mu_molecular=1.8e-5, mach_ref=0.2,
             order=mesh.order, enable_viscous=True,
             time_scheme=TimeIntegrationScheme.DUAL_TIME, dual_time_inner_iter=3,
+            wall_distance_source=synthetic_wall_source(mesh),
         )
         solver = DistributedFRSolver.from_fully_distributed_package(package, n_ranks=1, rank=0)
         assert solver._time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME

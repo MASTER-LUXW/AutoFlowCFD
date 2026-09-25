@@ -29,6 +29,7 @@
 import types
 
 import numpy as np
+from tests.unit._wall_source import synthetic_wall_source
 import pytest
 
 from autoflowcfd.core.mpi.distributed_mesh_loader import (
@@ -135,6 +136,7 @@ def _build_none_package(mesh, ops, rank=0, n_ranks=1):
         mesh, ops, fc, cell_partition, rank, n_ranks,
         boundary_ghost_provider, freestream, mu_molecular=1.8e-5, mach_ref=0.2,
         order=mesh.order, enable_viscous=True, turb_model_name="NONE",
+        wall_distance_source=synthetic_wall_source(mesh),
     )
 
 
@@ -154,6 +156,7 @@ def _build_sst_package(mesh, ops, rank=0, n_ranks=1):
         boundary_ghost_provider, freestream, mu_molecular=1.8e-5, mach_ref=0.2,
         order=mesh.order, enable_viscous=True, turb_model_name="SST",
         turbulence_intensity=0.02, viscosity_ratio=8.0,
+        wall_distance_source=synthetic_wall_source(mesh),
     )
 
 
@@ -327,7 +330,7 @@ class TestRedistributeMultiGpuFullyDistributedForNewOrder:
             'boundary_ghost_provider_global': boundary_ghost_provider_global,
             'freestream': freestream, 'mu_molecular': 1.8e-5, 'mach_ref': 0.2,
             'enable_viscous': True, 'turb_model_name': 'NONE',
-            'wall_node_indices': None, 'h_max_global': None, 'h_wn_global': None,
+            'wall_distance_source': synthetic_wall_source(mesh), 'h_max_global': None, 'h_wn_global': None,
             'turbulence_intensity': 0.01, 'viscosity_ratio': 5.0,
             'bc_overrides': {}, 'n_ranks': 1,
             'time_scheme': None, 'dual_time_inner_iter': 20,

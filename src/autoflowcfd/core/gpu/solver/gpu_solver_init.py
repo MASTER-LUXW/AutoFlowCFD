@@ -176,70 +176,26 @@ class _GPUSolverInitMixin:
                 sensor=sensor, vertex_stencil=vstencil, **conn)
 
     def _init_wall_distance_gpu(self):
-        """预计算壁面距离场并上传到 GPU。
+        """在当前阶数的解点上查询壁面距离并上传 GPU。
 
-        使用 KD-Tree 欧氏距离（与 CPU 版一致），在初始化时一次性计算。
+        来源与单机 CPU 同一个（`core/utils/wall_distance_source.py`，CLI 由体网格
+        WALL 边界面构造后以构造参数 `wall_distance_source` 传入）；换阶时
+        `gpu_solver_order_continuation` 再调一次，用同一个来源重查。
+
+        **2026-09-25 修复**：此前这里自己遍历 `mesh.boundary_groups` 并把
+        `BoundaryMap.groups` 的数组当字典读（真实网格上构造即崩溃），找不到壁面
+        时静默退回"单元特征长度"。现在没有来源或没有解点坐标都直接报错
+        （此前"坐标缺失时回退 0.01 m 常量"那次修复的同一原则）。
         """
         cp = get_cupy()
-        n_cells = self.mesh.n_cells
-        n_sps = self.mesh.n_sps_per_cell
-
-        # 真实 bug 修复（V2.0 专家组盲审发现，2026-08-27）：此前坐标缺失
-        # /计算异常时都静默回退到硬编码常量 0.01m——与 CPU 版
-        # fr_solver/turbulence.py 的既定原则矛盾（该文件对同样情形显式
-        # raise，理由"Industrial-grade calculation requires accurate
-        # wall distance, not simplified estimates"）。本方法只在
-        # `self.turb_model_gpu is not None`（真的需要壁面距离的湍流
-        # 模型，#7 起还包括 sgs_model_gpu 即 WMLES/LES）时才被调用（见
-        # gpu_solver.py 调用点），任何几何尺度不是
-        # 恰好在 0.01m 量级的真实网格上，这个假常量会系统性带偏 F1/F2
-        # 混合函数与 DDES 长度尺度——直接失败，不静默凑一个和网格无关
-        # 的常数。
-        if hasattr(self.mesh, 'sps_coords') and self.mesh.sps_coords is not None:
-            sps_coords = self.mesh.sps_coords.reshape(-1, 3)
-        elif hasattr(self.mesh, 'cell_centers') and self.mesh.cell_centers is not None:
-            sps_coords = np.tile(self.mesh.cell_centers, (1, n_sps)).reshape(-1, 3)
-        else:
+        source = getattr(self, "_wall_distance_source", None)
+        if source is None:
             raise RuntimeError(
-                f"Wall distance field not computed for turbulence model "
-                f"'{self.turb_model_name}': mesh has neither sps_coords nor "
-                f"cell_centers. Industrial-grade calculation requires accurate "
-                f"wall distance, not simplified estimates."
-            )
-
-        wall_indices = None
-        # 真实 bug 修复（2026-09-02，排查多GPU分布式SST时发现，与分布式
-        # 本身无关，单机路径同样中招）：`hasattr(mesh, 'boundary_groups')`
-        # 对"属性存在但值是 None"（没有边界组元数据的网格）恒为 True，
-        # `.items()` 会真实 AttributeError——用 `getattr(...) is not None`
-        # 才是正确的存在性判据。
-        boundary_groups = getattr(self.mesh, 'boundary_groups', None)
-        if boundary_groups is not None:
-            for bg_name, bg in boundary_groups.items():
-                if 'WALL' in bg_name.upper() or bg.get('type', '').upper() == 'WALL':
-                    wall_indices = bg.get('node_indices')
-                    break
-        if wall_indices is None and hasattr(self.mesh, 'nodes'):
-            wall_indices = np.array([], dtype=np.int64)
-
-        if wall_indices is not None and len(wall_indices) > 0:
-            from scipy.spatial import cKDTree
-            wall_coords = self.mesh.nodes[wall_indices]
-            tree = cKDTree(wall_coords)
-            dist_flat, _ = tree.query(sps_coords, k=1)
-            self.wall_distance_gpu = cp.asarray(
-                dist_flat.reshape(n_cells, n_sps)
-            )
-            logger.info(f"Wall distance computed: min={dist_flat.min():.6e}, max={dist_flat.max():.6e}")
-        else:
-            # 找不到 WALL 边界组时退回特征长度估计——这是物理上合理的
-            # 近似（不是任意常数），仍打印 WARNING 提示精度下降，不属于
-            # 本次修复目标（"假常量" 0.01m）范畴，保留原行为。
-            volumes = self.mesh_data.get('cell_volumes')
-            if volumes is None:
-                volumes = cp.asarray(self.mesh.get_all_cell_volumes())
-            h_char = volumes ** (1.0 / 3.0)
-            self.wall_distance_gpu = cp.broadcast_to(
-                h_char[:, None], (n_cells, n_sps)
-            ).copy()
-            logger.warning("Wall distance: using characteristic length as estimate")
+                f"湍流模型 '{self.turb_model_name}' 需要壁面距离，但 GPUFRSolver 没有收到"
+                f"壁面距离来源（wall_distance_source）——不退化为特征长度估计。")
+        sps = getattr(self.mesh, "sps_coords", None)
+        if sps is None:
+            raise RuntimeError("网格没有 sps_coords，无法在解点上查询壁面距离")
+        dist = source.query(np.asarray(sps).reshape(self.mesh.n_cells, self.mesh.n_sps_per_cell, 3))
+        self.wall_distance_gpu = cp.asarray(dist)
+        logger.info(f"Wall distance ({source.kind}) computed: min={dist.min():.6e}, max={dist.max():.6e}")

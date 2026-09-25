@@ -155,16 +155,9 @@ def _rebuild_cpu_traditional_partition_and_state(solver, target_p: int, new_loca
         # 对同一个完整全局 mesh 重算一次的开销与初次构造时相同量级，
         # 阶数切换本身就是低频事件（每次 Order Continuation 只发生
         # len(orders)-1 次），可以接受。
-        wall_node_indices = None
-        boundary_groups = getattr(solver.mesh, 'boundary_groups', None)
-        if boundary_groups is not None:
-            for bg_name, bg in boundary_groups.items():
-                if 'WALL' in bg_name.upper() or bg.get('type', '').upper() == 'WALL':
-                    wall_node_indices = bg.get('node_indices')
-                    break
+        # 与构造时同一个来源在新阶数的解点上重查（壁距是纯几何量，不插值）
         solver.wall_distance_compact = compute_distributed_wall_distance(
-            new_partition, new_dist_fc, solver.mesh, wall_node_indices,
-        )
+            new_dist_fc, solver.mesh, getattr(solver, "_wall_distance_source", None))
 
         if solver.ddes_model is not None:
             solver.des_length_scale_halo_exchange = HaloExchange(new_partition, new_n_sps, 1)

@@ -19,6 +19,7 @@
 import types
 
 import numpy as np
+from tests.unit._wall_source import synthetic_wall_source
 import pytest
 
 from autoflowcfd.fr.operators import generate_fr_operators
@@ -59,6 +60,7 @@ def _make_p2_solver(mesh, ops, turb_model_name="none"):
         n_ranks=1, backend="cpu", order=2, turb_model_name=turb_model_name,
         time_scheme=TimeIntegrationScheme.SSP_RK3,
         mu_molecular=1.8e-5, rho_inf=1.225, vel_inf=33.33, p_inf=101325.0,
+        wall_distance_source=synthetic_wall_source(mesh),
     )
     return DistributedFRSolver(mesh=mesh, ops=ops, **{k: v for k, v in kwargs.items() if k not in ("mesh", "ops")})
 
@@ -145,6 +147,7 @@ class TestResumeCeilingFractionResetHeuristicDistributed:
             n_ranks=1, backend="cpu", order=1, turb_model_name="sst",
             time_scheme=TimeIntegrationScheme.SSP_RK3,
             mu_molecular=1.8e-5, rho_inf=1.225, vel_inf=33.33, p_inf=101325.0,
+            wall_distance_source=synthetic_wall_source(mesh),
         )
         solver.turb_model.k_field[:] = k_value
         solver.turb_model.omega_field[:] = omega_value

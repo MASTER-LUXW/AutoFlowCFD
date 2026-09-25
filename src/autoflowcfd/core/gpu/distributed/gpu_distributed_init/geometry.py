@@ -17,78 +17,23 @@ class _GPUDistributedInitMixin(_GPUDistributedTurbSourceMixin, _GPUDistributedCh
         return partition_info
 
     def _init_wall_distance_distributed(self):
-        """分布式壁面距离计算（compact 索引空间，2026-09-02 修复）。
+        """分布式壁面距离（compact 索引空间：local + halo，"棱柱在前"）。
 
-        真实 bug 修复：此前这里对**全局** `self.mesh.sps_coords`（"传统
-        模式"下 `self.mesh` 是完整网格）整体 `reshape(-1, 3)` 后对全部
-        SPs 做 KDTree 查询，产出长度为 `n_global_cells*n_sps` 的
-        `dist_flat`，再 `.reshape(n_local, n_sps)`——这是一个真实的
-        reshape bug：只有 `n_global_cells == n_local`（即单 rank）时
-        总长度才恰好对得上，n_ranks>1 时这行 `reshape` 必然因元素总数
-        不匹配而崩溃（若恰好凑巧不崩溃，也是读到与本 rank 完全无关的
-        单元的距离值）。且即便修掉这个 reshape，"n_local 大小、
-        partition.local_cells 自身顺序"这个目标形状本身也是错的——
-        `_compute_turbulence_source_distributed` 消费 `wall_distance_
-        gpu` 时是和 `self.mesh_data`（compact 索引空间，"棱柱在前"
-        local+halo 排列）一起用的，两者索引空间必须一致，否则会读到
-        错位的壁面距离。
+        与 CPU 分布式**同一个函数**（`core/mpi/distributed_turbulence.py::
+        compute_distributed_wall_distance`：同一个来源在本 rank compact 解点上
+        查询），算完上传 GPU。换阶时 `gpu_distributed_order_continuation` 再调
+        一次，用同一个来源重查。
 
-        与 CPU 分布式版 `core/mpi/distributed_turbulence.py::compute_
-        distributed_wall_distance` 同一个设计（KDTree 本身是 CPU 计算，
-        算完再上传 GPU，不需要在 GPU 上重新实现）：按
-        `dist_flat_face.compact_global_ids` 从全局 `sps_coords` 切出
-        compact 索引空间的坐标子集，查询结果直接是 (n_compact, n_sps)
-        形状，不需要 reshape 到任何 n_local 相关的尺寸。
+        **2026-09-25 修复**：此前这里是一份独立拷贝——遍历 `mesh.boundary_groups`
+        时把数组当字典读（真实网格上构造即崩溃），找不到壁面时退回"单元特征
+        长度"。（2026-09-02 那次修掉的"全局 sps_coords 整体 reshape 成 n_local"
+        缺陷，在共用函数里天然不存在：它按 compact_global_ids 切片。）
         """
         cp = get_cupy()
-        compact_global_ids = self.dist_flat_face.compact_global_ids
-        n_compact = len(compact_global_ids)
-        n_sps = self.mesh.n_sps_per_cell
+        from autoflowcfd.core.mpi.distributed_turbulence import compute_distributed_wall_distance
 
-        wall_indices = None
-        boundary_groups = getattr(self.mesh, 'boundary_groups', None)
-        # `hasattr` 本身对 `boundary_groups=None`（合成测试网格/无边界组
-        # 元数据的网格）恒为 True——属性存在但值是 None，`.items()` 会
-        # 真实 AttributeError（本次新增测试直接测出这个真实 bug，不是
-        # 假设性的）；用 `getattr(...) is not None` 才是正确的存在性
-        # 判据。
-        if boundary_groups is not None:
-            for bg_name, bg in boundary_groups.items():
-                if 'WALL' in bg_name.upper() or bg.get('type', '').upper() == 'WALL':
-                    wall_indices = bg.get('node_indices')
-                    break
-
-        if wall_indices is not None and len(wall_indices) > 0:
-            # 真实 bug 修复（V2.0 专家组盲审发现，2026-08-27）：坐标缺失
-            # 时静默回退到硬编码常量 0.01m 是被禁止的简化——直接失败。
-            if not (hasattr(self.mesh, 'sps_coords') and self.mesh.sps_coords is not None):
-                raise RuntimeError(
-                    f"Rank {self.rank}: wall distance field not computed for turbulence "
-                    f"model '{getattr(self, 'turb_model_name', '?')}': mesh has no "
-                    f"sps_coords. Industrial-grade calculation requires accurate wall "
-                    f"distance, not simplified estimates."
-                )
-            sps_coords_compact = self.mesh.sps_coords[compact_global_ids]  # (n_compact,n_sps,3)
-            from scipy.spatial import cKDTree
-            wall_coords = self.mesh.nodes[wall_indices]
-            tree = cKDTree(wall_coords)
-            dist_flat, _ = tree.query(sps_coords_compact.reshape(-1, 3), k=1)
-            self.wall_distance_gpu = cp.asarray(dist_flat.reshape(n_compact, n_sps))
-        else:
-            # 找不到 WALL 边界组时退回特征长度估计——物理上合理的近似，
-            # 不属于本次修复目标（"假常量" 0.01m）范畴，保留原行为。
-            # `cell_volumes` 已经是 compact 索引空间（见 __init__ 里
-            # `_CompactMeshDataView` 构造处），直接用，不需要再切片。
-            volumes = self.mesh_data.get('cell_volumes')
-            if volumes is None:
-                raise RuntimeError(
-                    f"Rank {self.rank}: 既没有 WALL 边界节点也没有 cell_volumes，"
-                    f"无法提供任何壁面距离估计。"
-                )
-            h_char = volumes ** (1.0 / 3.0)
-            self.wall_distance_gpu = cp.broadcast_to(
-                h_char[:, None], (n_compact, n_sps)
-            ).copy()
+        self.wall_distance_gpu = cp.asarray(compute_distributed_wall_distance(
+            self.dist_flat_face, self.mesh, getattr(self, "_wall_distance_source", None)))
 
     def _init_modal_filter_distributed(self):
         """分布式（多 GPU）模态滤波初始化。

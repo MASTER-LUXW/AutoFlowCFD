@@ -55,58 +55,30 @@ from autoflowcfd.core.mpi.distributed_flat_face import DistributedFlatFaceGeomet
 from autoflowcfd.core.mpi.distributed_compute import DistributedMeshAdapter
 
 
-def compute_distributed_wall_distance(
-    partition: DistributedPartition,
-    dist_fc: DistributedFlatFaceGeometry,
-    local_mesh,
-    wall_node_indices: Optional[np.ndarray],
-) -> np.ndarray:
-    """分布式壁面距离（compact 索引空间：local+halo，"棱柱在前"排列）。
+def compute_distributed_wall_distance(dist_fc, global_mesh, source) -> np.ndarray:
+    """compact 索引空间（local + halo，"棱柱在前"）解点上的壁面距离。
 
-    与 gpu_distributed_init.py::_init_wall_distance_distributed 同一个
-    KDTree 最近邻查询方法，唯一区别是这里按 compact 索引空间（含 halo）
-    算，供 halo 侧 SST 涡粘/blending function 求值使用（mu_t_field 在
-    halo cells 上也要有意义的值，供平均流粘性残差 BR1 界面项读取）。
+    与单机/GPU 同一个来源（`core/utils/wall_distance_source.py`）在本 rank
+    compact 单元的解点坐标上查询——halo 单元也要有真实壁距，SST 涡粘与混合
+    函数在 halo 上的值要供平均流粘性残差的 BR1 界面项读取。
+
+    **2026-09-25 修复**：此前这里自己从 `mesh.boundary_groups` 找壁面节点，
+    把 `BoundaryMap.groups` 的数组当字典读（真实网格上构造即 AttributeError），
+    且找不到壁面时静默退回"单元特征长度"。现在来源由 CLI 从体网格的 WALL
+    边界面构造、一路传进来，没有来源就报错。
 
     Args:
-        wall_node_indices: WALL 边界节点索引（全局节点编号），None 或
-            空时退回特征长度估计（与单机/多GPU路径同一个已接受的降级，
-            见 fr_solver/turbulence.py::compute_turbulence_source 对应
-            分支、gpu_distributed_init.py::_init_wall_distance_distributed
-            "找不到 WALL 边界组时退回特征长度估计"注释——不是"假常量"
-            那类被禁止的降级，是有明确物理意义的备用方案）。
-
-    Returns:
-        (n_compact, n_sps) 壁面距离
+        global_mesh: 完整全局网格（传统模式每个 rank 都有；完全分布式加载时
+            只有 root 有，root 算好按 compact 切片放进各 rank 的包里）。
     """
-    compact_global_ids = dist_fc.compact_global_ids
-    n_sps = local_mesh.n_sps_per_cell
-
-    if wall_node_indices is not None and len(wall_node_indices) > 0:
-        if local_mesh.sps_coords is None:
-            raise RuntimeError(
-                "compute_distributed_wall_distance: local_mesh.sps_coords 不可用，"
-                "无法计算精确壁面距离。工业级计算要求真实壁面距离，不接受省略。"
-            )
-        sps_coords_compact = local_mesh.sps_coords[compact_global_ids]  # (n_compact,n_sps,3)
-        from scipy.spatial import cKDTree
-        wall_coords = local_mesh.nodes[wall_node_indices]
-        tree = cKDTree(wall_coords)
-        n_compact = len(compact_global_ids)
-        dist_flat, _ = tree.query(sps_coords_compact.reshape(-1, 3), k=1)
-        return dist_flat.reshape(n_compact, n_sps)
-
-    # 找不到 WALL 边界组：退回特征长度估计（cell_volumes 已经是 compact
-    # 索引空间，见 DistributedMeshAdapter.cell_volumes）。
-    adapter = DistributedMeshAdapter(partition, dist_fc, local_mesh, None)
-    volumes = adapter.cell_volumes
-    if volumes is None:
+    if source is None:
         raise RuntimeError(
-            "compute_distributed_wall_distance: 既没有 WALL 边界节点也没有 "
-            "cell_volumes，无法提供任何壁面距离估计。"
-        )
-    h_char = np.power(np.abs(volumes), 1.0 / 3.0)
-    return np.tile(h_char[:, None], (1, n_sps))
+            "分布式湍流求解需要壁面距离来源（WallDistanceSource），调用方没有提供"
+            "——不退化为特征长度估计。CLI 各分布式分支都应由体网格构造并传入。")
+    sps = getattr(global_mesh, "sps_coords", None)
+    if sps is None:
+        raise RuntimeError("全局网格没有 sps_coords，无法在解点上查询壁面距离")
+    return source.query(np.asarray(sps)[dist_fc.compact_global_ids])
 
 
 class DistributedTurbulenceSolverAdapter:
@@ -138,8 +110,19 @@ class DistributedTurbulenceSolverAdapter:
         self, mesh_adapter, ops, turb_model, wall_distance, mu_molecular, flat_face_override,
         turb_ramp_step=10 ** 9, turb_ramp_steps=0,
         turb_model_name="SST", ddes_model=None, iddes_h_max=None, iddes_h_wn=None,
+        boundary_ghost_provider=None,
     ):
+        """`boundary_ghost_provider` 必须是 `group_code` 已重切到 compact 面空间
+        的那一份（`DistributedFRSolver.local_solver.boundary_ghost_provider`）。
+
+        **真实缺陷（2026-09-25）**：此前适配器没有这个属性，于是湍流输运里
+        一切按边界组类型取的条件——壁面 k=0、omega 的 Wilcox 壁面值（对流
+        ghost + 显式壁面松弛）、以及来流条件——在 CPU 分布式路径上全部按
+        "没有边界分组"退化成零梯度，静默地与单机不一致。单机与分布式的对照
+        测试此前只覆盖层流，所以一直没有暴露。
+        """
         self.mesh = mesh_adapter
+        self.boundary_ghost_provider = boundary_ghost_provider
         self.ops = ops
         self.turb_model = turb_model
         self.turb_model_name = turb_model_name
@@ -171,70 +154,19 @@ class DistributedTurbulenceSolverAdapter:
         return self.mesh.cell_volumes
 
 
-def distributed_compute_turbulence_source_and_viscosity(
-    U_local: np.ndarray,
-    partition: DistributedPartition,
-    halo_exchange: HaloExchange,
-    turb_halo_exchange: HaloExchange,
-    dist_fc: DistributedFlatFaceGeometry,
-    local_mesh,
-    ops,
-    turb_model,
-    mu: float,
-    wall_distance_compact: np.ndarray,
-    dt_local: np.ndarray,
-    turb_ramp_step: int = 10 ** 9,
-    turb_ramp_steps: int = 0,
-    turb_model_name: str = "SST",
-    ddes_model=None,
-    iddes_h_max_compact: Optional[np.ndarray] = None,
-    iddes_h_wn_compact: Optional[np.ndarray] = None,
-    des_length_scale_halo_exchange: Optional[HaloExchange] = None,
-) -> "tuple[np.ndarray, int]":
-    """分布式 SST/DDES/IDDES 源项+输运计算，就地更新 `turb_model`
-    （local cells），返回 compact 索引空间的 `mu_t_field`（供平均流
-    粘性残差消费）。
+def build_distributed_turbulence_view(
+    U_local, partition, halo_exchange, turb_halo_exchange, dist_fc, local_mesh, ops,
+    turb_model, mu, wall_distance_compact, *, turb_ramp_step, turb_ramp_steps,
+    turb_model_name, ddes_model, iddes_h_max_compact, iddes_h_wn_compact,
+    des_length_scale_halo_exchange, boundary_ghost_provider,
+):
+    """compact 索引空间（local + halo）上的湍流求值"视图"，返回 `(adapter, turb_view)`。
 
-    Args:
-        U_local: (n_local, n_sps, 5) 本 rank 的平均流守恒变量（用于算
-            grad_vel 与 rho/velocity，不需要湍流分量）
-        halo_exchange: 5-var halo 交换器（与平均流残差共用同一个）
-        turb_halo_exchange: 2-var halo 交换器（k, omega），独立于平均流
-            的 halo 交换——k/omega 是 turb_model 自己的状态，不在 U 里
-        turb_model: 本 rank 的 SSTModelFR 实例（n_local 大小），本函数
-            会就地更新它的 k_field/omega_field/nu_t
-        dt_local: (n_local, n_sps) 湍流场显式更新用的局部时间步长（与
-            平均流共用同一套 cfl.py 逻辑算出的值，调用方负责提供——
-            单机路径的对应设计见 step.py 模块文档"关键修复"一节，分布式
-            路径目前用全局固定 dt 广播成 (n_local,n_sps)，与
-            DistributedFRSolver.step() 现有的"分布式路径目前用全局固定
-            步长"简化一致，不是本次新引入的简化）
-        turb_model_name: "SST"/"DDES"/"IDDES"（2026-09-02 新增）——三者
-            在 `compute_turbulence_source` 内部走的是完全相同的 k/omega
-            梯度/输运代码路径，只有 DES 长度尺度替换那一段单独按
-            `ddes_model is not None` 触发，这个参数本身对计算结果没有
-            直接影响，只是如实传给 adapter（保持鸭子类型属性语义正确，
-            不是死参数）。
-        ddes_model: `DDESModel`/`IDDESModel` 实例（None 时退化为纯 SST，
-            与此前行为一致）——调用方（`DistributedFRSolver`）持有的
-            真实对象，本函数只是每步复用它，不重新构造。
-        iddes_h_max_compact, iddes_h_wn_compact: (n_compact,) IDDES
-            专用的逐单元网格边长几何量（`des.py::compute_h_max_and_h_wn`
-            的输出按 `dist_fc.compact_global_ids` 切片），`ddes_model`
-            是 `IDDESModel` 实例时必须提供，否则 `compute_turbulence_
-            source` 内部 `isinstance(solver.ddes_model, IDDESModel)`
-            分支会读到 `None` 直接崩溃（有意不做静默兜底，缺几何数据
-            不该悄悄退化成别的行为）。
-
-    Returns:
-        (mu_t_field_compact, next_turb_ramp_step)：`mu_t_field_compact`
-        是 (n_compact, n_sps) 供 distributed_compute_viscous_residual
-        的 mu_t_field 参数使用；`next_turb_ramp_step` 是调用方需要写回
-        `self._turb_ramp_step`（供下一步调用）的递增计数（见
-        `_update_production_ramp` 文档"递增计数器"一节——本函数内部的
-        adapter 对象每步都重新构造，不会自动持久化这个计数）。
+    `adapter` 满足单机 `fr_solver/turbulence/source.py` 求值件的鸭子类型接口，
+    `turb_view` 是 n_compact 大小的临时 `SSTModelFR`（k/omega 经 halo 交换填好）。
+    显式更新（`distributed_compute_turbulence_source_and_viscosity`）与隐式
+    k-omega Newton（`distributed_implicit_turbulence.py`）共用这一份构造。
     """
-    n_local = partition.n_local_cells
     n_sps = local_mesh.n_sps_per_cell
 
     # 1. 平均流 halo 交换（与 distributed_compute_inviscid_residual 同一
@@ -255,9 +187,11 @@ def distributed_compute_turbulence_source_and_viscosity(
     # n_compact 的临时对象供 compute_source_terms/update_fields 读写，
     # 用完只把 local 部分写回真正的 turb_model。
     from autoflowcfd.core.turbulence.sst import SSTModelFR
-    turb_view = SSTModelFR(n_compact, n_sps)
-    # 复制真正模型当前的可调常数/状态标记（初值 k_inf/omega_inf 无关，
-    # 下面立刻整体覆盖 k_field/omega_field）。
+    # k_inf/omega_inf 不只是初值：开边界来流 ghost 取它们作为来流值
+    # （`transport/residual.py`），必须与真正的模型一致——2026-09-25 前视图
+    # 用构造默认值 1e-6/1.0，分布式来流面上的 k/omega 被当成近乎零的来流。
+    turb_view = SSTModelFR(n_compact, n_sps, k_inf=turb_model.k_inf, omega_inf=turb_model.omega_inf)
+    # 复制真正模型当前的可调常数/状态标记（k_field/omega_field 下面整体覆盖）。
     for attr in (
         "sigma_k1", "sigma_k2", "sigma_w1", "sigma_w2", "beta1", "beta2",
         "a1", "kappa", "beta_star", "k_max", "omega_max", "production_factor",
@@ -309,8 +243,94 @@ def distributed_compute_turbulence_source_and_viscosity(
         turb_ramp_step=turb_ramp_step, turb_ramp_steps=turb_ramp_steps,
         turb_model_name=turb_model_name, ddes_model=ddes_model,
         iddes_h_max=iddes_h_max_compact, iddes_h_wn=iddes_h_wn_compact,
+        boundary_ghost_provider=boundary_ghost_provider,
     )
     adapter.set_state(U_compact)
+    return adapter, turb_view
+
+
+def set_view_k_omega(turb_view, turb_halo_exchange, dist_fc, k_local, omega_local) -> None:
+    """把 local 的 k/omega（native 排列）经 halo 交换写进 compact 视图。"""
+    k_omega_local = np.stack([k_local, omega_local], axis=-1)
+    k_omega_compact = turb_halo_exchange.exchange(k_omega_local)[dist_fc.perm]
+    turb_view.k_field = k_omega_compact[..., 0].copy()
+    turb_view.omega_field = k_omega_compact[..., 1].copy()
+
+
+def distributed_compute_turbulence_source_and_viscosity(
+    U_local: np.ndarray,
+    partition: DistributedPartition,
+    halo_exchange: HaloExchange,
+    turb_halo_exchange: HaloExchange,
+    dist_fc: DistributedFlatFaceGeometry,
+    local_mesh,
+    ops,
+    turb_model,
+    mu: float,
+    wall_distance_compact: np.ndarray,
+    dt_local: np.ndarray,
+    turb_ramp_step: int = 10 ** 9,
+    turb_ramp_steps: int = 0,
+    turb_model_name: str = "SST",
+    ddes_model=None,
+    iddes_h_max_compact: Optional[np.ndarray] = None,
+    iddes_h_wn_compact: Optional[np.ndarray] = None,
+    des_length_scale_halo_exchange: Optional[HaloExchange] = None,
+    boundary_ghost_provider=None,
+) -> "tuple[np.ndarray, int]":
+    """分布式 SST/DDES/IDDES 源项+输运计算，就地更新 `turb_model`
+    （local cells），返回 compact 索引空间的 `mu_t_field`（供平均流
+    粘性残差消费）。
+
+    Args:
+        U_local: (n_local, n_sps, 5) 本 rank 的平均流守恒变量（用于算
+            grad_vel 与 rho/velocity，不需要湍流分量）
+        halo_exchange: 5-var halo 交换器（与平均流残差共用同一个）
+        turb_halo_exchange: 2-var halo 交换器（k, omega），独立于平均流
+            的 halo 交换——k/omega 是 turb_model 自己的状态，不在 U 里
+        turb_model: 本 rank 的 SSTModelFR 实例（n_local 大小），本函数
+            会就地更新它的 k_field/omega_field/nu_t
+        dt_local: (n_local, n_sps) 湍流场显式更新用的局部时间步长（与
+            平均流共用同一套 cfl.py 逻辑算出的值，调用方负责提供——
+            单机路径的对应设计见 step.py 模块文档"关键修复"一节，分布式
+            路径目前用全局固定 dt 广播成 (n_local,n_sps)，与
+            DistributedFRSolver.step() 现有的"分布式路径目前用全局固定
+            步长"简化一致，不是本次新引入的简化）
+        turb_model_name: "SST"/"DDES"/"IDDES"（2026-09-02 新增）——三者
+            在 `compute_turbulence_source` 内部走的是完全相同的 k/omega
+            梯度/输运代码路径，只有 DES 长度尺度替换那一段单独按
+            `ddes_model is not None` 触发，这个参数本身对计算结果没有
+            直接影响，只是如实传给 adapter（保持鸭子类型属性语义正确，
+            不是死参数）。
+        ddes_model: `DDESModel`/`IDDESModel` 实例（None 时退化为纯 SST，
+            与此前行为一致）——调用方（`DistributedFRSolver`）持有的
+            真实对象，本函数只是每步复用它，不重新构造。
+        iddes_h_max_compact, iddes_h_wn_compact: (n_compact,) IDDES
+            专用的逐单元网格边长几何量（`des.py::compute_h_max_and_h_wn`
+            的输出按 `dist_fc.compact_global_ids` 切片），`ddes_model`
+            是 `IDDESModel` 实例时必须提供，否则 `compute_turbulence_
+            source` 内部 `isinstance(solver.ddes_model, IDDESModel)`
+            分支会读到 `None` 直接崩溃（有意不做静默兜底，缺几何数据
+            不该悄悄退化成别的行为）。
+
+    Returns:
+        (mu_t_field_compact, next_turb_ramp_step)：`mu_t_field_compact`
+        是 (n_compact, n_sps) 供 distributed_compute_viscous_residual
+        的 mu_t_field 参数使用；`next_turb_ramp_step` 是调用方需要写回
+        `self._turb_ramp_step`（供下一步调用）的递增计数（见
+        `_update_production_ramp` 文档"递增计数器"一节——本函数内部的
+        adapter 对象每步都重新构造，不会自动持久化这个计数）。
+    """
+    n_local = partition.n_local_cells
+    n_sps = local_mesh.n_sps_per_cell
+    adapter, turb_view = build_distributed_turbulence_view(
+        U_local, partition, halo_exchange, turb_halo_exchange, dist_fc, local_mesh, ops,
+        turb_model, mu, wall_distance_compact, turb_ramp_step=turb_ramp_step,
+        turb_ramp_steps=turb_ramp_steps, turb_model_name=turb_model_name, ddes_model=ddes_model,
+        iddes_h_max_compact=iddes_h_max_compact, iddes_h_wn_compact=iddes_h_wn_compact,
+        des_length_scale_halo_exchange=des_length_scale_halo_exchange,
+        boundary_ghost_provider=boundary_ghost_provider,
+    )
 
     # dt_local 是 local cells 的局部步长；compact 索引空间里 halo cells
     # 的"更新"结果本来就会被丢弃（只写回 local 部分），halo 位置的 dt

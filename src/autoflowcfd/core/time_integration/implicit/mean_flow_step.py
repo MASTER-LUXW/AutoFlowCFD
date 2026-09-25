@@ -77,6 +77,32 @@ def newton_step_ok(info: dict) -> bool:
     return info["theta"] >= 1.0 and info["n_dtau_cuts"] == 0
 
 
+def _format_newton_info(tag: str, info) -> str:
+    """一个 Newton 步诊断的紧凑文本：Krylov 迭代数与是否达到 forcing 容差、
+    接受比例（物理性限幅 theta_phys 与最终 theta）、缩档数，以及本步前后
+    `||R||` 之比——"步被完整接受但残差不动"这类停滞只有最后一项看得出来。"""
+    if not info:
+        return ""
+    gm = "ok" if info["gmres_info"] == 0 else ("fail" if info["gmres_info"] < 0 else "maxit")
+    ratio = info["res_norm_new"] / info["res_norm"] if info["res_norm"] > 0 else 0.0
+    txt = (f"{tag}: gmres={info['gmres_iters']}({gm}) theta={info['theta']:.3g}"
+           f"/phys={info['theta_physicality']:.3g} R_new/R={ratio:.4f}")
+    if info["n_dtau_cuts"]:
+        txt += f" cuts={info['n_dtau_cuts']}"
+    return txt
+
+
+def newton_monitor_suffix(solver) -> str:
+    """迭代监控行的 Newton 诊断后缀（平均流 + 隐式湍流），显式格式返回空串。
+    常规求解循环与 Order Continuation 的监控行共用这一份格式。"""
+    parts = [_format_newton_info("NK", getattr(solver, "_newton_last_info", None))]
+    turb_state = getattr(solver, "_newton_turb_state", None)
+    if turb_state:
+        parts.append(_format_newton_info("k-omega", turb_state.get("last_info")))
+    parts = [x for x in parts if x]
+    return (" | " + " | ".join(parts)) if parts else ""
+
+
 def step_mean_flow_newton(
     solver, residual: Callable, u_flat, dtau_flat, scales: np.ndarray, *,
     red: LocalReductions, cell_is_prism: np.ndarray, cell_colors: Callable[[], np.ndarray],

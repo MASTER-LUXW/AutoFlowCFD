@@ -6,12 +6,14 @@
 
 import click
 
+from autoflowcfd.cli.solve.wall_distance import wall_distance_source_if_needed
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 from autoflowcfd.cli.solve.helpers import load_mesh_for_solver
 
 
 def _run_cpu_mpi(
     *,
+    use_eikonal,
     aoa_deg, aos_deg, backend, cfl_max, cfl_min, cfl_start, checkpoint_interval,
     fully_distributed, input_file, max_iter, mu_molecular, n_ranks, order,
     output_dir, p_inf, phase_max_iter, residual_drop_threshold, rho_inf,
@@ -78,6 +80,7 @@ def _run_cpu_mpi(
             mach_ref=mach_ref,
             enable_viscous=True, skip_quality_check=skip_quality_check,
             turb_model_name=turbulence_model.upper(),
+            use_eikonal=use_eikonal,
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
         )
@@ -108,6 +111,7 @@ def _run_cpu_mpi(
             backend=backend,
             order=order,
             turb_model_name=turbulence_model,
+            wall_distance_source=wall_distance_source_if_needed(turbulence_model, volume_data, use_eikonal),
             time_scheme=TimeIntegrationScheme.SSP_RK3,
             n_threads=threads,
             turbulence_intensity=turbulence_intensity,

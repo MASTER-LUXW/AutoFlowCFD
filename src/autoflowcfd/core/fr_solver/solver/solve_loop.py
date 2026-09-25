@@ -7,6 +7,7 @@ from typing import Optional
 
 import numpy as np
 
+from autoflowcfd.core.time_integration.implicit.mean_flow_step import newton_monitor_suffix
 from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
 from autoflowcfd.core.fr_solver.state import SolverResult
 from autoflowcfd.core.utils import order_continuation
@@ -172,6 +173,7 @@ class _SolverSolveMixin:
                 msg = f"P{self.order} Iter {i+1}: Residual = {res:.6e} | Drop: {drop:.1f}x | Time: {t_end - t_start:.2f}s"
                 if self._cfl_controller is not None:
                     msg += f" | CFL={self._cfl_controller.cfl_number:.3f}"
+                msg += newton_monitor_suffix(self)
                 ref_area = getattr(self, '_reference_area', None)
                 if ref_area is not None and ref_area > 0:
                     from autoflowcfd.postprocess.fr_coefficients import compute_forces_pressure_only

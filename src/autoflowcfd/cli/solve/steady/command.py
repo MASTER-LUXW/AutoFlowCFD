@@ -231,6 +231,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
     # 1. 按后端分派（各分支的参数由 AST 分析得出，逐名传入）
     if backend == 'gpu' and multi_gpu and (n_ranks > 1):
         _run_multi_gpu(
+            use_eikonal=use_eikonal,
             aoa_deg=aoa_deg,
             aos_deg=aos_deg,
             cfl_max=cfl_max,
@@ -258,6 +259,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
         )
     elif backend == 'gpu' and (not multi_gpu):
         _run_single_gpu(
+            use_eikonal=use_eikonal,
             aoa_deg=aoa_deg,
             aos_deg=aos_deg,
             cfl_max=cfl_max,
@@ -283,6 +285,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
         )
     elif n_ranks > 1:
         _run_cpu_mpi(
+            use_eikonal=use_eikonal,
             aoa_deg=aoa_deg,
             aos_deg=aos_deg,
             backend=backend,

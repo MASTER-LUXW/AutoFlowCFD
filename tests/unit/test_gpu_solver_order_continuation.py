@@ -37,6 +37,7 @@ crosscheck 测试恒用 `tet_basis_mode="native"`），修复它需要审计
 """
 
 import numpy as np
+from tests.unit._wall_source import synthetic_wall_source
 import pytest
 
 from tests.unit._patch_pkg import patch_pkg_attr
@@ -146,6 +147,7 @@ def _make_solver(order, turb_model="none", turbulence_intensity=0.01, viscosity_
         mu_molecular=1.8e-5, rho_inf=1.225, vel_inf=33.33, p_inf=101325.0,
         turb_model=turb_model,
         turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
+        wall_distance_source=synthetic_wall_source(mesh),
     )
 
 

@@ -15,6 +15,7 @@ from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finit
 from autoflowcfd.core.gpu import get_cupy
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 from autoflowcfd.core.time_integration.implicit.mean_flow_step import (
+    newton_monitor_suffix,
     newton_step_ok,
     step_mean_flow_newton,
 )
@@ -295,6 +296,7 @@ class _GPUSolverStepMixin:
                     f"GPU Iter {i+1}: Residual = {res:.6e} | "
                     f"Time/step: {t_end-t_start:.3f}s | "
                     f"GPU mem: {mem['used_mb']:.0f}/{mem['total_mb']:.0f} MB"
+                    + newton_monitor_suffix(self)
                 )
 
             # 发散即中止（2026-09-16 统一）：此前这里只是 break，于是
