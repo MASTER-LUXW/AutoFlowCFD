@@ -64,11 +64,14 @@ class PseudoTransientDiagonal:
                 `dt_local`，已按阶数/粘性/几何收紧）。
             n_var: 守恒变量数，只用来校验广播形状意图明确。
         """
-        dtau = np.ascontiguousarray(dtau_flat, dtype=np.float64).ravel()
+        from autoflowcfd.core.utils.array_module import array_module
+
+        xp = array_module(dtau_flat)
+        dtau = xp.ascontiguousarray(dtau_flat, dtype=xp.float64).ravel()
         if dtau.ndim != 1:
             raise ValueError(f"dtau 必须是一维逐 SP 数组，收到 {dtau.shape}")
-        if not np.all(dtau > 0.0):
-            bad = int(np.count_nonzero(dtau <= 0.0))
+        if not bool(xp.all(dtau > 0.0)):
+            bad = int(xp.count_nonzero(dtau <= 0.0))
             raise ValueError(
                 f"dtau 里有 {bad} 个非正值 —— 伪瞬态项 `I/dtau` 要求它严格"
                 f"为正，非正值只可能来自局部步长计算本身出了问题，"

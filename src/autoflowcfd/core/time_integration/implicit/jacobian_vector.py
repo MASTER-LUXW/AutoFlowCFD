@@ -68,6 +68,8 @@ from typing import Callable
 
 import numpy as np
 
+from .reductions import LocalReductions
+
 #: `sqrt(eps_mach)`，一阶 Fréchet 差分的最优步长量级（截断误差
 #: `O(eps)` 与舍入误差 `O(eps_mach/eps)` 在此处平衡）。
 _SQRT_EPS = float(np.sqrt(np.finfo(np.float64).eps))
@@ -86,11 +88,10 @@ class MatrixFreeJacobian:
     """
 
     __slots__ = ("_residual", "_u0", "_r0", "_scales_flat", "_inv_scales_flat",
-                 "_u0_rms_scaled", "n_matvec")
+                 "_u0_rms_scaled", "_red", "n_matvec")
 
-    def __init__(self, residual: Callable[[np.ndarray], np.ndarray],
-                 u0_flat: np.ndarray, r0_flat: np.ndarray,
-                 scales: np.ndarray):
+    def __init__(self, residual: Callable, u0_flat, r0_flat, scales: np.ndarray,
+                 red: LocalReductions = None):
         """
         Args:
             residual: `R(U_flat) -> (N, n_var)`，与 `step.py` 里
@@ -99,8 +100,13 @@ class MatrixFreeJacobian:
             r0_flat: `(N, n_var)` 基态残差 `R(U0)`，由调用方算好传入
                 （整个 Krylov 求解期间复用，不重算）。
             scales: `(n_var,)` 每个守恒变量的参考量级。
+            red: 全局归约（`reductions.py`）；`None` 时为单进程 numpy。
+                RMS 必须是全局的，否则分布式下各 rank 取不同的差分步长、
+                算出的 `J v` 不是同一个线性算子。
         """
-        u0_flat = np.ascontiguousarray(u0_flat, dtype=np.float64)
+        red = red if red is not None else LocalReductions()
+        xp = red.xp
+        u0_flat = xp.ascontiguousarray(u0_flat, dtype=xp.float64)
         scales = np.asarray(scales, dtype=np.float64).ravel()
         if scales.shape[0] != u0_flat.shape[1]:
             raise ValueError(
@@ -111,13 +117,13 @@ class MatrixFreeJacobian:
             raise ValueError(f"参考量级必须全为正，收到 {scales}")
 
         self._residual = residual
+        self._red = red
         self._u0 = u0_flat
-        self._r0 = np.ascontiguousarray(r0_flat, dtype=np.float64)
-        self._scales_flat = scales[None, :]
-        self._inv_scales_flat = (1.0 / scales)[None, :]
+        self._r0 = xp.ascontiguousarray(r0_flat, dtype=xp.float64)
+        self._scales_flat = xp.asarray(scales)[None, :]
+        self._inv_scales_flat = xp.asarray(1.0 / scales)[None, :]
         # ||U~||_rms，只依赖基态，整个 Krylov 求解期间是常数
-        self._u0_rms_scaled = float(
-            np.sqrt(np.mean((u0_flat * self._inv_scales_flat) ** 2)))
+        self._u0_rms_scaled = red.rms(u0_flat * self._inv_scales_flat)
         self.n_matvec = 0
 
     def matvec(self, v_flat: np.ndarray) -> np.ndarray:
@@ -127,13 +133,13 @@ class MatrixFreeJacobian:
         `v` 为零向量时直接返回零（GMRES 的初始/退化情形），不去做一次
         无意义的残差求值。
         """
-        v_flat = np.ascontiguousarray(v_flat, dtype=np.float64)
-        v_scaled = v_flat * self._inv_scales_flat
-        v_rms = float(np.sqrt(np.mean(v_scaled ** 2)))
+        xp = self._red.xp
+        v_flat = xp.ascontiguousarray(v_flat, dtype=xp.float64)
+        v_rms = self._red.rms(v_flat * self._inv_scales_flat)
         if v_rms == 0.0:
-            return np.zeros_like(v_flat)
+            return xp.zeros_like(v_flat)
 
         eps = _SQRT_EPS * (1.0 + self._u0_rms_scaled) / v_rms
         r_pert = self._residual(self._u0 + eps * v_flat)
         self.n_matvec += 1
-        return (np.asarray(r_pert, dtype=np.float64) - self._r0) / eps
+        return (xp.asarray(r_pert, dtype=xp.float64) - self._r0) / eps

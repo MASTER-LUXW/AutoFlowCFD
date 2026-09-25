@@ -53,7 +53,9 @@ from .dtau_control import MIN_SCALE as DTAU_MIN_SCALE, PtcDtauScale
 from .forcing import EisenstatWalkerForcing
 from .jacobian_vector import MatrixFreeJacobian
 from .block_jacobi import BlockJacobiCache
+from .gmres import gmres_right
 from .preconditioner import PseudoTransientDiagonal
+from .reductions import LocalReductions
 
 #: GMRES 重启长度。Krylov 基向量按 `(N, n_var)` 存，重启长度直接决定
 #: 峰值内存：P2 下 79 万单元一个基向量 1.2 GB，所以这个值必须小。
@@ -122,8 +124,7 @@ def _pressure(u_flat: np.ndarray) -> np.ndarray:
         return 0.4 * (u_flat[:, 4] - 0.5 * m2 / rho)
 
 
-def _physicality_limited_step(u0_flat: np.ndarray, du_flat: np.ndarray
-                              ) -> float:
+def _physicality_limited_step(u0_flat, du_flat, red: LocalReductions) -> float:
     """返回 `theta in [0, 1]`，使 `U0 + theta*dU` 处处保持物理。
 
     只约束两个真正会破坏残差求值的量：
@@ -142,15 +143,10 @@ def _physicality_limited_step(u0_flat: np.ndarray, du_flat: np.ndarray
     Krylov 基。限制**相对变化**才是有效的护栏。
     """
     c = PHYSICALITY_MAX_RELATIVE_CHANGE
-    theta = 1.0
+    xp = red.xp
 
-    rho0 = u0_flat[:, 0]
-    drho = du_flat[:, 0]
-    down = drho < 0.0
-    if np.any(down):
-        # rho0 + theta*drho >= (1-c)*rho0  ->  theta <= c*rho0 / (-drho)
-        limit = c * rho0[down] / (-drho[down])
-        theta = min(theta, float(np.min(limit)))
+    # rho0 + theta*drho >= (1-c)*rho0  ->  theta <= c*rho0 / (-drho)（只对下降点）
+    theta = min(1.0, red.min(_decrease_limits(xp, u0_flat[:, 0], du_flat[:, 0], c)))
     theta = max(theta, 0.0)
     if theta <= 0.0:
         return 0.0
@@ -158,14 +154,22 @@ def _physicality_limited_step(u0_flat: np.ndarray, du_flat: np.ndarray
     p0 = _pressure(u0_flat)
     p1 = _pressure(u0_flat + theta * du_flat)
     with np.errstate(divide="ignore", invalid="ignore"):
-        rel = np.abs(p1 - p0) / np.maximum(np.abs(p0), 1e-300)
-    rel_max = float(np.nanmax(rel)) if rel.size else 0.0
+        rel = xp.abs(p1 - p0) / xp.maximum(xp.abs(p0), 1e-300)
+    # NaN（非物理试探点上 rho->0）按原语义忽略：只看有定义的相对变化
+    rel_max = red.max(xp.where(xp.isnan(rel), -xp.inf, rel))
     if rel_max > c:
         theta *= c / rel_max
     return float(theta)
 
 
-def positive_fields_limited_step(u0_flat: np.ndarray, du_flat: np.ndarray) -> float:
+def _decrease_limits(xp, u0, du, c):
+    """逐点 `c*u0/(-du)`（`du < 0` 处）、其余 `+inf`——全局最小值即 theta 上界。"""
+    down = du < 0.0
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return xp.where(down, c * u0 / xp.where(down, -du, 1.0), xp.inf)
+
+
+def positive_fields_limited_step(u0_flat, du_flat, red: LocalReductions) -> float:
     """标量正值场（湍流 `k`/`omega`）的物理性限幅：每一列都满足
     `u + theta*du >= (1-c)*u`，`c = PHYSICALITY_MAX_RELATIVE_CHANGE`。
 
@@ -173,18 +177,12 @@ def positive_fields_limited_step(u0_flat: np.ndarray, du_flat: np.ndarray) -> fl
     `c`——`omega` 掉到原值的 1e-6 仍是正数，但涡粘 `nu_t = k/omega` 会被放大
     六个数量级、下一次残差求值毫无意义。
     """
-    c = PHYSICALITY_MAX_RELATIVE_CHANGE
-    down = du_flat < 0.0
-    if not np.any(down):
-        return 1.0
-    limit = c * u0_flat[down] / (-du_flat[down])
-    return float(max(0.0, min(1.0, float(np.min(limit)))))
+    lim = red.min(_decrease_limits(red.xp, u0_flat, du_flat, PHYSICALITY_MAX_RELATIVE_CHANGE))
+    return float(max(0.0, min(1.0, lim)))
 
 
-def _accept_step(residual: Callable[[np.ndarray], np.ndarray],
-                 u0_flat: np.ndarray, du_flat: np.ndarray,
-                 theta0: float, res_norm0: float
-                 ) -> Tuple[np.ndarray, float, float, int]:
+def _accept_step(residual: Callable, u0_flat, du_flat, theta0: float, res_norm0: float,
+                 red: LocalReductions) -> Tuple[object, float, float, int]:
     """按残差接受判据回溯 `theta`，返回
     `(U_new, theta, res_norm_new, n_extra_residual_eval)`。
 
@@ -212,23 +210,25 @@ def _accept_step(residual: Callable[[np.ndarray], np.ndarray],
         if theta <= 0.0:
             break
         u_try = u0_flat + theta * du_flat
-        r_try = np.asarray(residual(u_try), dtype=np.float64)
+        r_try = residual(u_try)
         n_eval += 1
-        if np.all(np.isfinite(r_try)):
-            rn = float(np.linalg.norm(r_try) / np.sqrt(max(r_try.size, 1)))
+        if red.all_finite(r_try):
+            rn = red.rms(r_try)
             if rn <= RESIDUAL_ACCEPT_GROWTH * res_norm0:
                 return u_try, theta, rn, n_eval
         theta *= 0.5
     return u0_flat, 0.0, res_norm0, n_eval
 
 
-def _solve_direction(jac: MatrixFreeJacobian, prec,
-                     r0: np.ndarray, n_var: int, eta: float,
-                     gmres_restart: int, gmres_max_iter: int):
+def _solve_direction(jac: MatrixFreeJacobian, prec, r0, n_var: int, eta: float,
+                     gmres_restart: int, gmres_max_iter: int, red: LocalReductions):
     """解 `(I/dtau + J) dU = -R`，返回 `(du, gmres_iters, gmres_info)`。
 
     `prec` 同时提供 PTC 对角项（`add_ptc_term`）与预处理作用（`apply`），
     即 `PseudoTransientDiagonal` 或其子类 `CellBlockJacobiPreconditioner`。
+    线性求解用后端无关的 `gmres.py::gmres_right`（右预处理：它的收敛判据
+    就是真实线性残差 `||R + (I/dtau+J) dU|| <= eta ||R||`，正是 inexact
+    Newton 要求的量）。
 
     `du` 为 `None` 表示线性求解产出了非有限方向（调用方据此缩小 `dtau`
     重试或放弃这一步，**不**静默用一个截断后的方向凑一步）。
@@ -237,8 +237,6 @@ def _solve_direction(jac: MatrixFreeJacobian, prec,
     与 `dtau` 无关，所以缩小 `dtau` 重试时不需要重算基残差、也不需要
     重建 Krylov 算子的基态部分（`n_matvec` 在它内部累计）。
     """
-    from scipy.sparse.linalg import LinearOperator, gmres
-
     n_dof = r0.shape[0]
 
     def _apply_A(x_1d):
@@ -246,30 +244,15 @@ def _solve_direction(jac: MatrixFreeJacobian, prec,
         jv = jac.matvec(v)
         return prec.add_ptc_term(jv, v).reshape(-1)
 
-    def _apply_M(x_1d):
+    def _apply_Minv(x_1d):
         return prec.apply(x_1d.reshape(n_dof, n_var)).reshape(-1)
 
-    size = n_dof * n_var
-    a_op = LinearOperator((size, size), matvec=_apply_A, dtype=np.float64)
-    m_op = LinearOperator((size, size), matvec=_apply_M, dtype=np.float64)
-
-    # GMRES 迭代计数：scipy 不返回它，`callback_type="pr_norm"` 下
-    # callback 每次迭代调用一次，正好用来数。
-    iters = [0]
-
-    def _count(_pr_norm):
-        iters[0] += 1
-
-    n_cycles = max(1, int(np.ceil(gmres_max_iter / max(1, gmres_restart))))
-    du_1d, gmres_info = gmres(
-        a_op, (-r0).reshape(-1), rtol=eta, atol=0.0, restart=gmres_restart,
-        maxiter=n_cycles, M=m_op, callback=_count,
-        callback_type="pr_norm",
-    )
-    du = du_1d.reshape(n_dof, n_var)
-    if not np.all(np.isfinite(du)):
-        return None, iters[0], -1
-    return du, iters[0], int(gmres_info)
+    du_1d, iters, info = gmres_right(
+        _apply_A, (-r0).reshape(-1), _apply_Minv, rtol=eta,
+        restart=gmres_restart, max_iter=gmres_max_iter, red=red)
+    if info < 0 or not red.all_finite(du_1d):
+        return None, iters, -1
+    return du_1d.reshape(n_dof, n_var), iters, int(info)
 
 
 def step_newton_krylov(
@@ -284,8 +267,9 @@ def step_newton_krylov(
     gmres_max_iter: int = GMRES_MAX_ITER,
     dtau_scale: float = 1.0,
     block_precond: Optional[BlockJacobiCache] = None,
-    physicality: Callable[[np.ndarray, np.ndarray], float] = _physicality_limited_step,
-) -> Tuple[np.ndarray, dict]:
+    physicality: Callable = _physicality_limited_step,
+    red: Optional[LocalReductions] = None,
+) -> Tuple[object, dict]:
     """做**一个** PTC-Newton-Krylov 步，返回 `(U_new_flat, info)`。
 
     Args:
@@ -306,9 +290,12 @@ def step_newton_krylov(
             持久化它即可，不需要知道缩放策略。
         block_precond: 跨 Newton 步持有单元块 Jacobian 的缓存
             （`block_jacobi.py`）；`None` 时用逐 SP 对角预处理。
-        physicality: `(U0, dU) -> theta` 物理性限幅。默认按守恒变量
+        physicality: `(U0, dU, red) -> theta` 物理性限幅。默认按守恒变量
             `(rho, rho*u, rho*E)` 约束密度与压力；湍流标量方程传
             `positive_fields_limited_step`。
+        red: 全局归约（`reductions.py`）。`None` 时为单进程 numpy；GPU 传
+            `LocalReductions(cupy)`、分布式传跨 rank 归约的子类——本函数
+            里一切"对整个解向量取标量"的操作都经过它。
 
     Returns:
         `(U_new_flat, info)`。`info` 含 `res_norm`（步前的 `||R||` RMS）、
@@ -329,25 +316,27 @@ def step_newton_krylov(
             **不静默原地打转**：那正是本次修复要消灭的停滞形态，只是
             换了个位置（每步照样烧掉一次完整的 GMRES 求解）。
     """
-    u0_flat = np.ascontiguousarray(u0_flat, dtype=np.float64)
+    red = red if red is not None else LocalReductions()
+    xp = red.xp
+    u0_flat = xp.ascontiguousarray(u0_flat, dtype=xp.float64)
     n_var = u0_flat.shape[1]
     ctrl = PtcDtauScale(dtau_scale)
 
-    r0 = np.ascontiguousarray(residual(u0_flat), dtype=np.float64)
+    r0 = xp.ascontiguousarray(residual(u0_flat), dtype=xp.float64)
     if r0.shape != u0_flat.shape:
         raise ValueError(
             f"残差形状 {r0.shape} 与状态形状 {u0_flat.shape} 不符")
-    res_norm = float(np.linalg.norm(r0) / np.sqrt(max(r0.size, 1)))
+    res_norm = red.rms(r0)
     if res_norm == 0.0:
         return u0_flat, dict(res_norm=0.0, res_norm_new=0.0, eta=0.0,
                              gmres_iters=0, n_matvec=0, n_residual_extra=0,
                              theta=0.0, theta_physicality=0.0, gmres_info=0,
                              dtau_scale=ctrl.scale, n_dtau_cuts=0)
 
-    jac = MatrixFreeJacobian(residual, u0_flat, r0, scales)
+    jac = MatrixFreeJacobian(residual, u0_flat, r0, scales, red=red)
     if block_precond is not None:
         block_precond.begin_step(residual, u0_flat, r0, scales)
-    dtau_base = np.ascontiguousarray(dtau_flat, dtype=np.float64).ravel()
+    dtau_base = xp.ascontiguousarray(dtau_flat, dtype=xp.float64).ravel()
     eta = (forcing.next_eta(res_norm, tol_nonlinear)
            if forcing is not None else 0.1)
 
@@ -370,13 +359,13 @@ def step_newton_krylov(
         prec = (block_precond.preconditioner(dtau_try, n_var) if block_precond is not None
                 else PseudoTransientDiagonal(dtau_try, n_var))
         du, iters, ginfo = _solve_direction(
-            jac, prec, r0, n_var, eta, gmres_restart, gmres_max_iter)
+            jac, prec, r0, n_var, eta, gmres_restart, gmres_max_iter, red)
         iters_total += iters
         gmres_info = ginfo
         if du is not None:
-            theta_phys = physicality(u0_flat, du)
+            theta_phys = physicality(u0_flat, du, red)
             u_try, theta, res_norm_new, n_extra = _accept_step(
-                residual, u0_flat, du, theta_phys, res_norm)
+                residual, u0_flat, du, theta_phys, res_norm, red)
             n_extra_total += n_extra
             if theta > 0.0:
                 u_new = u_try
@@ -392,7 +381,7 @@ def step_newton_krylov(
                 "附近不连续。"
                 "诊断：||R||=%.6e，R 全有限=%s，GMRES info=%s，"
                 "物理性限幅 theta=%.3e。"
-                % (ctrl.scale, res_norm, bool(np.all(np.isfinite(r0))),
+                % (ctrl.scale, res_norm, red.all_finite(r0),
                    gmres_info, theta_phys))
         if n_cuts >= DTAU_MAX_CUTS_PER_STEP or not ctrl.cut():
             # 本次调用的档数用完：如实返回 `theta=0`，`dtau_scale` 带着
