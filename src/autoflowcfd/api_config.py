@@ -167,8 +167,8 @@ def api_resume_simulation(
         threads: CPU 后端 numba 并行线程数
         phase_max_iter, residual_drop_threshold: 见 run_steady 同名参数
             文档，续算同样共用 `FRSolver.solve()`/
-            `run_order_continuation` 这一套机制（仅目标阶数`order>=2`
-            时生效）。
+            `run_order_continuation` 这一套机制（目标阶数 >= 1
+            时生效，见 order_continuation/policy.py）。
 
     Returns:
         SolverResult

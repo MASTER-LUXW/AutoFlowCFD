@@ -213,7 +213,7 @@ def rebuild_solver_from_checkpoint(
     # 和 self.order（ramp 目标）——上面为了让 mesh/初始状态形状匹配
     # checkpoint，传的是 checkpoint 时的 current_order，这里把
     # self.order 单独纠正回真正的目标阶数，否则 solve() 里
-    # `self.order_continuation_enabled and self.order >= 2` 这个门槛
+    # `uses_order_continuation`（order_continuation/policy.py）这个门槛
     # 会被错误地拿 current_order 去判断，P0 checkpoint resume 出来的
     # 求解器会误判目标阶数已经是 0、直接跳过 Order Continuation 的
     # 继续爬升。

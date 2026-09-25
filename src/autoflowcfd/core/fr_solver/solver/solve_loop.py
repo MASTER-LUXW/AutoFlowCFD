@@ -7,6 +7,7 @@ from typing import Optional
 
 import numpy as np
 
+from autoflowcfd.core.utils.order_continuation.policy import uses_order_continuation
 from autoflowcfd.core.time_integration.implicit.mean_flow_step import newton_monitor_suffix
 from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
 from autoflowcfd.core.fr_solver.state import SolverResult
@@ -86,7 +87,7 @@ class _SolverSolveMixin:
             checkpoint_callback: 可选的中间 checkpoint 回调函数，
                 签名为 callback(solver, iteration_number)，每步迭代后调用。
                 用于在求解过程中定期保存状态到磁盘。
-            phase_max_iter: 仅 Order Continuation（`self.order>=2` 时）生效，
+            phase_max_iter: 仅 Order Continuation（`uses_order_continuation` 为真时）生效，
                 非最终阶段（P0/P1/...）各自的最大迭代步数上限，None 时保留
                 旧行为（`max_iter // len(orders)` 按阶段数均分）——见
                 `order_continuation.run_order_continuation` 同名参数文档。
@@ -118,7 +119,7 @@ class _SolverSolveMixin:
         print(logger_msg)
 
         # Order Continuation: 从低阶开始逐步提升精度
-        if self.order_continuation_enabled and self.order >= 2:
+        if uses_order_continuation(self):
             # Order Continuation 路径在 `core/utils/order_continuation.py`
             # 里自己套 `blas_threads_limited`（求解循环在那边）。
             return self._solve_with_order_continuation(

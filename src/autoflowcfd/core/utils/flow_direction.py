@@ -142,8 +142,8 @@ def freestream_conservative_state(freestream: dict, n_vars: int = 5) -> np.ndarr
     而边界条件（`Q_free`，经 `direction_from_freestream`）一直用的是正确
     方向。于是 `--aoa` 非零时初场与边界不一致 —— `FRSolver.__init__` 里
     那段注释早就写明这会让第一步吸收一个量级为 `vel_inf*sin(aoa)` 的
-    速度跳跃。**每个目标阶数 >= 2 的全新算例都要经过 Order Continuation
-    的降 P0 重建**（`FRSolver.solve` 里 `self.order >= 2` 才进入），所以
+    速度跳跃。**每个目标阶数 >= 1 的全新算例都要经过 Order Continuation
+    的降 P0 重建**（`uses_order_continuation` 为真才进入），所以
     单机 CPU 也躲不开：它自己的初场是对的，但随即被那次
     重建覆盖成零攻角。
 

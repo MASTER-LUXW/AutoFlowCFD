@@ -83,7 +83,7 @@ from .cpu_single import _run_cpu_single
                    '收缩得更多，绝不会抬高 CFL，因此不可能把原本稳定的运行变'
                    '成不稳定。')
 @click.option('--phase-max-iter', type=int, default=None,
-              help='Order Continuation（--order>=2 时触发）非最终阶段(P0/P1/...，不含目标'
+              help='Order Continuation（--order>=1 时触发）非最终阶段(P0/P1/...，不含目标'
                    '阶数)各自的最大迭代步数上限。默认(不传)时保留旧行为——总步数按阶段数'
                    '机械均分(max_iter // 阶段数)，目标阶数与非最终阶段拿到同一份额。传具体值'
                    '后非最终阶段各自最多跑这么多步(提前满足--residual-drop-threshold仍可'
@@ -210,7 +210,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
     # --phase-max-iter/--residual-drop-threshold（2026-09-02 续接）：
     # 全部四种后端（单机 CPU/单 GPU/多GPU/MPI 分布式，含"传统模式"与
     # "完全分布式加载"）现在都真正接入了 Order Continuation（`solve()`
-    # 在 `self.order>=2` 时自动分派到 `run_distributed_order_
+    # 在 `uses_order_continuation` 为真时自动分派到 `run_distributed_order_
     # continuation`，见 core/mpi/distributed_order_continuation.py/
     # core/gpu/solver/gpu_solver_order_continuation.py 模块文档），
     # 不再需要任何"某后端不支持"的拒绝。

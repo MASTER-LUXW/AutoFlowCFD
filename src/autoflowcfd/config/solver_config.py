@@ -94,7 +94,7 @@ class SolverConfig:
             （历史教训见该参数在 FRSolver 里的文档）。CLI `solve steady`/
             `solve transient` 的 `--mu-molecular` 选项、或本 YAML 配置的
             `mu_molecular` 键，都改这一个字段。
-        phase_max_iter: Order Continuation（`order>=2` 时触发）非最终
+        phase_max_iter: Order Continuation（`order>=1` 时触发）非最终
             阶段（P0/P1/...，不含目标阶数）各自的最大迭代步数上限。
             None（默认）时保留旧行为——`max_iter // len(orders)` 按阶段
             数机械均分，目标阶数与非最终阶段拿到同一份额，与目标阶数

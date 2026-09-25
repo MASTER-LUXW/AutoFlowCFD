@@ -36,12 +36,10 @@ class _DistributedSolveMixin:
 
         Order Continuation 自动分派（2026-09-02，见 core/mpi/
         distributed_order_continuation.py 模块文档）：与单机
-        `FRSolver.solve()`（`self.order_continuation_enabled and
-        self.order >= 2` 时自动改用逐阶爬坡）同一个判据——`self.order`
-        （目标阶数）>= 2 时自动委托给 `run_distributed_order_
-        continuation`，不需要 CLI/调用方显式请求。P0/P1 直接求解
-        （真实数值复核见 order_continuation.py 文档"曾经在这里跳过
-        P=1"一节，两条阶数下均匀自由流场残差都很好，不需要爬坡）。
+        `FRSolver.solve()` 同一个判据（`core/utils/order_continuation/policy.py::
+        uses_order_continuation`：目标阶数 >= 1 时委托给 `run_distributed_order_
+        continuation`，不需要 CLI/调用方显式请求；为什么 P1 也要从 P0 起步见该
+        模块文档的 A/B 数据）。
 
         Args:
             n_steps: 最大时间步数
@@ -51,10 +49,12 @@ class _DistributedSolveMixin:
                 每步结束后调用一次（与单机 `FRSolver.solve` 同名参数
                 同一个约定）
             tol, phase_max_iter, residual_drop_threshold: 仅在触发
-                Order Continuation（`self.order >= 2`）时生效，与单机
+                Order Continuation（`uses_order_continuation`）时生效，与单机
                 `run_order_continuation` 同名参数同一含义。
         """
-        if getattr(self, 'order_continuation_enabled', True) and self.order >= 2:
+        from autoflowcfd.core.utils.order_continuation.policy import uses_order_continuation
+
+        if uses_order_continuation(self):
             from autoflowcfd.core.mpi.distributed_order_continuation import (
                 run_distributed_order_continuation,
             )

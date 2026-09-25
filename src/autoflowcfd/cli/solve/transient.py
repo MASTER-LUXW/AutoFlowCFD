@@ -52,7 +52,7 @@ from autoflowcfd.cli.solve.transient_distributed import _solve_transient_distrib
                    "core/fr_solver/boundary.py 文档）")
 @click.option("--max-iter", "-n", default=100, help="最大迭代次数")
 @click.option('--phase-max-iter', type=int, default=None,
-              help='Order Continuation（--order>=2 时触发）非最终阶段(P0/P1/...，不含目标'
+              help='Order Continuation（--order>=1 时触发）非最终阶段(P0/P1/...，不含目标'
                    '阶数)各自的最大迭代步数上限。默认(不传)时保留旧行为——总步数按阶段数'
                    '机械均分。传具体值后目标阶数改为吃掉这次求解剩余的全部步数，不再随'
                    '阶段数被稀释，见 core/utils/order_continuation.py 文档。仅 CPU 后端支持')
@@ -152,7 +152,7 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
         time_method: 时间推进方法
         turbulence_model: 湍流模型 (推荐 DDES 或 LES)
         max_iter: 最大迭代次数
-        phase_max_iter: Order Continuation(--order>=2 时触发)非最终阶段各自的
+        phase_max_iter: Order Continuation(--order>=1 时触发)非最终阶段各自的
             最大迭代步数上限，None(默认)时保留旧行为(按阶段数均分)；仅 CPU 后端支持
         residual_drop_threshold: Order Continuation 单阶段提前升阶所需的残差
             下降倍数，默认100

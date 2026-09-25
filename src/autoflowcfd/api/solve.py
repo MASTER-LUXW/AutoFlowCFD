@@ -200,8 +200,8 @@ class _APISolveMixin:
                 `config` 补入 `kwargs`）。
             phase_max_iter, residual_drop_threshold: 见 run_steady 同名
                 参数文档，瞬态同样共用 `FRSolver.solve()`/
-                `run_order_continuation` 这一套机制（`order>=2` 时才
-                生效）。
+                `run_order_continuation` 这一套机制（目标阶数 >= 1 时
+                生效，见 order_continuation/policy.py）。
             **kwargs: 其余参数透传给 FRSolver 构造函数
 
         Returns:

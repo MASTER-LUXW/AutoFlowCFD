@@ -100,25 +100,33 @@ class TestDistributedOrderContinuationDispatch:
         assert solver.state.U.shape[1] == ops.D_3d.shape[0] == 27
         assert np.all(np.isfinite(solver.state.U[:solver.partition.n_local_cells]))
 
-    def test_order_1_does_not_trigger_order_continuation(self, mesh_p2_and_ops):
-        """P1 不应该触发 Order Continuation（与单机 `self.order >= 2`
-        同一个阈值），构造时的 current_order 应该保持不变，直接迭代。"""
-        mesh_p2, ops_p2 = mesh_p2_and_ops
-        order = 1
-        mesh = _build_synthetic_mixed_mesh(order)
-        ops = generate_fr_operators(order)
+    @pytest.mark.parametrize("enabled", [True, False])
+    def test_order_1_dispatch_follows_the_shared_policy(self, monkeypatch, enabled):
+        """目标 P1 也走逐阶爬坡（2026-09-25，同一版代码的 A/B：直接 P1 起步第 20
+        步驻点线 Cp_t 3.5、板边 152 m/s，先 P0 再 P1 为 1.1、50 m/s，见
+        core/utils/order_continuation/policy.py）；显式关闭时直接迭代。"""
+        import autoflowcfd.core.mpi.distributed_order_continuation as doc_mod
+        from autoflowcfd.core.fr_solver.state import SolverResult
         from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
 
+        mesh = _build_synthetic_mixed_mesh(1)
+        ops = generate_fr_operators(1)
         solver = DistributedFRSolver(
             mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
             n_ranks=1, backend="cpu", order=1, turb_model_name="none",
             time_scheme=TimeIntegrationScheme.SSP_RK3,
             mu_molecular=1.8e-5, rho_inf=1.225, vel_inf=33.33, p_inf=101325.0,
         )
-        assert solver.current_order == 1
-        solver.solve(n_steps=5, dt=1e-6, output_interval=1000)
-        # 没有触发 Order Continuation：current_order 应该原地不变。
-        assert solver.current_order == 1
+        solver.order_continuation_enabled = enabled
+        calls = []
+
+        def _fake_run(s, *args, **kwargs):
+            calls.append(s)
+            return SolverResult(converged=False, iterations=0, final_residual=1.0)
+        monkeypatch.setattr(doc_mod, "run_distributed_order_continuation", _fake_run)
+
+        solver.solve(n_steps=3, dt=1e-6, output_interval=1000)
+        assert (len(calls) == 1) == enabled
         assert np.all(np.isfinite(solver.state.U[:solver.partition.n_local_cells]))
 
 

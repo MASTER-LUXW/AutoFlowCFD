@@ -72,7 +72,7 @@ class _DistributedFromPackageMixin:
                 供后续阶数切换时重新计算+重新分发紧凑包。非 root rank
                 永远传 None（它们从未持有、也不需要这份数据）。不提供
                 时（None）意味着这个 solver 实例无法执行 Order
-                Continuation（`order>=2` 时 `solve()` 会 fail-fast
+                Continuation（目标阶数 >= 1 时 `solve()` 会 fail-fast
                 拒绝而不是静默跳过升阶爬坡）。
 
         Returns:

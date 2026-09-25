@@ -34,8 +34,8 @@ def _reset_state_to_p0(solver, expected_p0_n_sps: int = 1) -> None:
     # 速度方向必须取自 aoa/aos（2026-09-24 修复）：此前这里写死 (vel_inf, 0, 0)，
     # 而边界 Q_free 用的是正确方向，`--aoa` 非零时初场与边界不一致。
     # 8 处同类写法已统一到 `freestream_conservative_state`（见其文档）。
-    # 这一处是**每个目标阶数 >= 2 的全新算例都必经**的（FRSolver.solve
-    # 里 `self.order >= 2` 才进 Order Continuation）：FRSolver.__init__
+    # 这一处是**每个目标阶数 >= 1 的全新算例都必经**的（`uses_order_continuation`
+    # 为真才进 Order Continuation）：FRSolver.__init__
     # 的初场本来是对的，随即被这次重建覆盖成零攻角。
     _v0 = float(solver.freestream["vel_inf"]) * direction_from_freestream(solver.freestream)
     p0_state.initialize_uniform(

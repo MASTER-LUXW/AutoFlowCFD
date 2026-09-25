@@ -186,7 +186,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
     # 这条非分布式 resume 路径构造的是单机 `FRSolver(backend='gpu',
     # ...)`（`core/fr_solver/solver.py` 的 GPU 加速内核分支），不是
     # `solve steady` 单 GPU 分支专用的独立 `GPUFRSolver` 类——`FRSolver.
-    # solve()` 的 Order Continuation 分派（`self.order>=2` 时自动
+    # solve()` 的 Order Continuation 分派（`uses_order_continuation` 为真时自动
     # 逐阶爬坡）与 `backend_type` 无关，这个拒绝从一开始就是错的、
     # 不必要地拒绝了本来就能工作的组合，不是"待补齐"的功能缺口。
     # （2026-09-02 同一批还真正给了 `GPUFRSolver` 本身独立的 Order

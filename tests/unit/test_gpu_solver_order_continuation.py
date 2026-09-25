@@ -158,23 +158,16 @@ class TestGpuSolverOrderContinuationDispatch:
         assert solver.current_order == 2
         assert solver.order_continuation_enabled is True
 
-    def test_solve_at_order_1_does_not_trigger_order_continuation(self, monkeypatch):
-        """P1 不触发 Order Continuation（与单机/分布式同一个 self.order
-        >= 2 阈值）——不调用 _interpolate_to_new_order。"""
+    def test_order_1_target_uses_order_continuation(self):
+        """目标 P1 也从 P0 起步（2026-09-25，A/B 数据见
+        core/utils/order_continuation/policy.py）；显式关闭时直接迭代。判据只有
+        一份，GPU `solve()` 调用的就是它。"""
+        from autoflowcfd.core.utils.order_continuation.policy import uses_order_continuation
+
         solver = _make_solver(1)
-        called = {"count": 0}
-        orig = solver._interpolate_to_new_order
-
-        def _spy(target_p):
-            called["count"] += 1
-            return orig(target_p)
-        monkeypatch.setattr(solver, "_interpolate_to_new_order", _spy)
-
-        # 不调用真正的 step()（既有的、与 Order Continuation 无关的 GPU
-        # 无粘 kernel 形状缺口会在这里崩溃，见模块文档），只验证阶数
-        # 阈值判据本身：直接检查 solve() 是否会尝试进入爬坡分支。
-        assert not (solver.order_continuation_enabled and solver.order >= 2)
-        assert called["count"] == 0
+        assert uses_order_continuation(solver)
+        solver.order_continuation_enabled = False
+        assert not uses_order_continuation(solver)
 
 
 class TestGpuSolverInterpolateToNewOrder:

@@ -261,13 +261,15 @@ class _GPUSolverStepMixin:
             tol: 收敛容差
             output_interval: 输出间隔
             phase_max_iter, residual_drop_threshold: 仅在触发 Order
-                Continuation（`self.order >= 2`）时生效，与单机 CPU
+                Continuation（`uses_order_continuation`）时生效，与单机 CPU
                 `run_order_continuation` 同名参数同一含义。
 
         Returns:
             结果字典
         """
-        if getattr(self, 'order_continuation_enabled', True) and self.order >= 2:
+        from autoflowcfd.core.utils.order_continuation.policy import uses_order_continuation
+
+        if uses_order_continuation(self):
             from autoflowcfd.core.mpi.distributed_order_continuation import (
                 run_distributed_order_continuation,
             )
