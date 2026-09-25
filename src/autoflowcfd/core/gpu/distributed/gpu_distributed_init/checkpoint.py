@@ -23,6 +23,7 @@ class _GPUDistributedCheckpointMixin:
         self, output_dir: str, iteration: int, input_file: str,
         order: int, turbulence_model: str, backend: str = "gpu",
         history: dict = None, target_order: int = None,
+        surface_mesh: str = None,
     ):
         """分布式 checkpoint 保存（#4，V2.0 专家组盲审第4轮，2026-08-28）。
 
@@ -74,7 +75,7 @@ class _GPUDistributedCheckpointMixin:
 
         return distributed_save_checkpoint(
             self, output_dir, iteration, input_file, order, turbulence_model, backend,
-            history=history, target_order=target_order,
+            history=history, target_order=target_order, surface_mesh=surface_mesh,
         )
 
     def load_checkpoint_distributed(self, path: str):

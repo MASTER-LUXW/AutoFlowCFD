@@ -317,11 +317,13 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, _
             "aoa_deg": float(solver_kwargs.get("aoa_deg", 0.0) or 0.0),
             "aos_deg": float(solver_kwargs.get("aos_deg", 0.0) or 0.0),
         }
+        # 决定物理解的参数同样**无条件**设置（2026-09-25）：此前只在
+        # SST/DDES/IDDES/WMLES 分支里设，于是 none/les 运行的分布式 checkpoint
+        # 按替身缺省值写粘度与 Tu/VR（见 core/utils/checkpoint_physics.py）。
+        self.mu_molecular = solver_kwargs.get('mu_molecular', 1.8e-5)
+        self._turbulence_intensity = solver_kwargs.get('turbulence_intensity', 0.01)
+        self._viscosity_ratio = solver_kwargs.get('viscosity_ratio', 5.0)
         if turb_model_upper in ('SST', 'DDES', 'IDDES', 'WMLES'):
-            self.mu_molecular = solver_kwargs.get('mu_molecular', 1.8e-5)
-            self._turbulence_intensity = solver_kwargs.get('turbulence_intensity', 0.01)
-            self._viscosity_ratio = solver_kwargs.get('viscosity_ratio', 5.0)
-
             if turb_model_upper in ('SST', 'DDES', 'IDDES'):
                 from autoflowcfd.core.fr_solver.turbulence import init_turbulence_models
                 init_turbulence_models(self, n_local, n_sps)  # 设置 self.turb_model,

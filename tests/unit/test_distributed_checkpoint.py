@@ -143,6 +143,9 @@ class TestGpuDistributedCheckpointRoundtrip:
         solver.state = DistributedFRState(partition, n_sps, n_vars)
         solver.mesh = mesh
         solver.device_id = 0
+        # 真实求解器恒有来流字典；checkpoint 必须记录它（2026-09-25 起分布式
+        # 写入端与单机共用 core/utils/checkpoint_physics.py）。
+        solver.freestream = {"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0}
         n_local = partition.n_local_cells
         rng = np.random.default_rng(123)
         solver.U_gpu = rng.uniform(-1.0, 1.0, size=(n_local, n_sps, n_vars))

@@ -304,7 +304,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, cfl_sta
                 saved_path = solver_ref.save_checkpoint_distributed(
                     output_dir, iteration, input_file,
                     solver_ref.current_order, turbulence_model, backend="gpu",
-                    target_order=solver_ref.order,
+                    target_order=solver_ref.order, surface_mesh=surface_mesh,
                 )
                 if saved_path and is_root():
                     print(f"   [Checkpoint] iter {iteration} saved: {saved_path}")
@@ -326,7 +326,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, cfl_sta
             saved_path = solver.save_checkpoint_distributed(
                 output_dir, max_iter, input_file,
                 solver.current_order, turbulence_model, backend="gpu",
-                target_order=solver.order,
+                target_order=solver.order, surface_mesh=surface_mesh,
             )
             if saved_path and is_root():
                 print(f"   Checkpoint saved: {saved_path}")
@@ -526,7 +526,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, cfl_sta
                 saved_path = distributed_save_checkpoint(
                     solver_ref, output_dir, iteration,
                     input_file, solver_ref.current_order, turbulence_model, backend,
-                    target_order=solver_ref.order,
+                    target_order=solver_ref.order, surface_mesh=surface_mesh,
                 )
                 if saved_path and is_root():
                     print(f"   [Checkpoint] iter {iteration} saved: {saved_path}")
@@ -548,7 +548,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, cfl_sta
             distributed_save_checkpoint(
                 solver, output_dir, max_iter,
                 input_file, solver.current_order, turbulence_model, backend,
-                target_order=solver.order,
+                target_order=solver.order, surface_mesh=surface_mesh,
             )
 
         except Exception as e:

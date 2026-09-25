@@ -11,26 +11,37 @@ import click
 from .restore import restore_solver_state_from_fields
 
 
-def freestream_from_metadata(metadata: dict) -> dict:
-    """checkpoint 元数据里的来流三要素 `{rho_inf, vel_inf, p_inf}`。
+def physics_from_metadata(metadata: dict) -> dict:
+    """checkpoint 元数据里决定物理解的参数（单机与分布式 resume 共用的读取端；
+    写入端是 `core/utils/checkpoint_physics.py::physics_metadata`）。
 
-    **缺任何一个就报错，不猜**（2026-09-24）。此前两条重建路径（单机、
-    分布式）都写的是 `metadata.get("vel_inf", 33.33)` —— 那是与 CLI 默认值
-    并存的第二份事实来源；checkpoint 若真的缺这个键，按 33.33 重建出来的
-    是**另一个物理算例**，续算会在一个错误的来流上静默跑到底。
-
-    `write_checkpoint` 自 V2.0 最早的提交起就无条件写入这三个键（写入端
-    直接 `solver.freestream["vel_inf"]` 取键），所以真实 checkpoint 都有；
-    缺键只可能来自更早的格式，那种文件本就无法忠实续算，明确报错才对。
+    * 来流三要素 `rho_inf/vel_inf/p_inf`：**缺任何一个就报错，不猜**
+      （2026-09-24）。此前两条重建路径都写 `metadata.get("vel_inf", 33.33)`
+      —— 那是与 CLI 默认值并存的第二份事实来源，按它重建出来的是**另一个
+      物理算例**，续算会在错误的来流上静默跑到底。
+    * 攻角/侧滑角、分子粘度、Tu/VR：早于各自持久化日期（2026-09-17 /
+      08-27 / 08-25）的单机 checkpoint 没有这些键，它们产生时的真实值就是
+      那时的内置值，所以缺省按那时的值恢复。分布式 checkpoint 在
+      2026-09-25 之前连来流三要素都没写，因此一律在上一条就报错。
     """
     missing = [k for k in ("rho_inf", "vel_inf", "p_inf") if k not in metadata]
     if missing:
         raise click.ClickException(
             "checkpoint 元数据缺少来流参数 " + ", ".join(missing)
             + " —— 无法忠实重建求解器（按默认值猜会得到另一个物理算例，"
-            "续算将在错误的来流上静默进行）。这个 checkpoint 来自早于 "
-            "V2.0 的格式，请从头求解。")
-    return {k: float(metadata[k]) for k in ("rho_inf", "vel_inf", "p_inf")}
+            "续算将在错误的来流上静默进行）。单机 checkpoint 缺它们说明来自"
+            "早于 V2.0 的格式；分布式 checkpoint 在 2026-09-25 之前从未写入"
+            "这组参数。请从头求解。")
+    return {
+        "rho_inf": float(metadata["rho_inf"]),
+        "vel_inf": float(metadata["vel_inf"]),
+        "p_inf": float(metadata["p_inf"]),
+        "aoa_deg": float(metadata.get("aoa_deg", 0.0)),
+        "aos_deg": float(metadata.get("aos_deg", 0.0)),
+        "mu_molecular": float(metadata.get("mu_molecular", 1.8e-5)),
+        "turbulence_intensity": float(metadata.get("turbulence_intensity", 0.01)),
+        "viscosity_ratio": float(metadata.get("viscosity_ratio", 5.0)),
+    }
 
 
 def rebuild_solver_from_checkpoint(
@@ -141,13 +152,9 @@ def rebuild_solver_from_checkpoint(
         backend=target_backend,
         order=order,
         turb_model_name=turbulence_model,
-        # 来流三要素缺失即报错，不猜（见 freestream_from_metadata）
-        **freestream_from_metadata(metadata),
-        # 攻角/侧滑角必须从 checkpoint 恢复（决定物理解，见 write_checkpoint
-        # 同一处说明）。旧 checkpoint 缺这两个键时退化为 0/0，与它们产生
-        # 时的真实行为一致。
-        aoa_deg=metadata.get("aoa_deg", 0.0),
-        aos_deg=metadata.get("aos_deg", 0.0),
+        # 决定物理解的参数一律从 checkpoint 恢复（来流缺失即报错，见
+        # physics_from_metadata）；CFL 等纯数值参数由调用方指定。
+        **physics_from_metadata(metadata),
         n_threads=threads,
         # CFL（2026-09-07）：resume 时的自适应 CFL 参数由调用方（CLI
         # `--cfl-start`/`--cfl-max`）显式指定，不从 checkpoint 恢复——
@@ -160,16 +167,6 @@ def rebuild_solver_from_checkpoint(
         # 在 79 万单元 cube_demo 上实测稳定的 0.03，resume 低 CFL 工况时
         # 不传它会被钳回 0.05（见 adaptive_cfl.py 模块文档第 11 条）。
         cfl_min=cfl_min,
-        # Tu/VR 从 checkpoint metadata 恢复（2026-08-25 添加）：
-        # 保证 Resume 时湍流场重置用的参数与原始计算一致。
-        # 旧 checkpoint 没有这两个字段，回退到默认值（Tu=0.01, VR=5.0）。
-        turbulence_intensity=metadata.get("turbulence_intensity", 0.01),
-        viscosity_ratio=metadata.get("viscosity_ratio", 5.0),
-        # mu_molecular 从 checkpoint metadata 恢复（2026-08-27 补齐）：与
-        # 上面 Tu/VR 同一批需要持久化的物理量，此前遗漏——非标准空气工况
-        # （--mu-molecular 显式设置过的算例）resume 后会悄悄换回标准海平面
-        # 空气粘度 1.8e-5，粘性残差/壁面剪切力全部用错误粘度重新计算。
-        mu_molecular=metadata.get("mu_molecular", 1.8e-5),
     )
     # FRSolver.__init__ 用同一个 order 参数同时设置 self.current_order
     # 和 self.order（ramp 目标）——上面为了让 mesh/初始状态形状匹配

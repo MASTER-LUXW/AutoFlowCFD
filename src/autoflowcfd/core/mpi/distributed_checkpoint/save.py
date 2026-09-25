@@ -15,6 +15,8 @@ from typing import Optional
 from autoflowcfd.core.mpi import is_root, get_rank, get_size
 
 from autoflowcfd.core.mpi.comm import barrier
+from autoflowcfd.core.utils.checkpoint_physics import physics_metadata
+
 from .state import gather_global_state
 
 
@@ -28,6 +30,7 @@ def distributed_save_checkpoint(
     backend: str,
     history: Optional[dict] = None,
     target_order: Optional[int] = None,
+    surface_mesh: Optional[str] = None,
 ) -> Optional[str]:
     """分布式 checkpoint 保存。
 
@@ -130,7 +133,15 @@ def distributed_save_checkpoint(
         "n_cells_global": n_global,
         "n_ranks": n_ranks,
         "distributed": True,
+        # 决定物理解的参数（2026-09-25 补齐）：此前一个都不写，分布式 resume
+        # 因此要么按默认来流静默重建另一个算例、要么（09-24 起）直接报错。
+        # 与单机写入端共用同一个函数。
+        **physics_metadata(solver),
     }
+    if surface_mesh:
+        # resume 按它重新做边界归属；缺了就退回"无面网格"的几何匹配，
+        # 边界组可能与原运行不同（单机写入端一直写这个键）。
+        metadata["surface_mesh"] = surface_mesh
 
     path = manager.save(
         solution_cell_avg,

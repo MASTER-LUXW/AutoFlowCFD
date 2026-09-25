@@ -101,13 +101,15 @@ def rebuild_distributed_solver_from_checkpoint(
     target_order = int(metadata.get("target_order", order))
     turbulence_model = metadata.get("turbulence_model", "sst")
     resolved_surface_mesh = surface_mesh or metadata.get("surface_mesh")
-    # 来流三要素缺失即报错，不猜 —— 与单机重建共用同一个读取函数
-    from autoflowcfd.cli.solve_checkpoint_io import freestream_from_metadata
-    _fs = freestream_from_metadata(metadata)
-    rho_inf, vel_inf, p_inf = _fs["rho_inf"], _fs["vel_inf"], _fs["p_inf"]
-    mu_molecular = metadata.get("mu_molecular", 1.8e-5)
-    turbulence_intensity = metadata.get("turbulence_intensity", 0.01)
-    viscosity_ratio = metadata.get("viscosity_ratio", 5.0)
+    # 决定物理解的参数：与单机重建共用同一个读取函数（来流缺失即报错，不猜）。
+    # 攻角/侧滑角此前在这里四条构造路径上**全部**没有恢复，续算静默变成零攻角。
+    from autoflowcfd.cli.solve_checkpoint_io import physics_from_metadata
+    physics = physics_from_metadata(metadata)
+    rho_inf, vel_inf, p_inf = physics["rho_inf"], physics["vel_inf"], physics["p_inf"]
+    aoa_deg, aos_deg = physics["aoa_deg"], physics["aos_deg"]
+    mu_molecular = physics["mu_molecular"]
+    turbulence_intensity = physics["turbulence_intensity"]
+    viscosity_ratio = physics["viscosity_ratio"]
 
     if multi_gpu and fully_distributed:
         # 多 GPU"完全分布式加载"（#1，2026-09-02 实现——此前这个组合被
@@ -117,7 +119,8 @@ def rebuild_distributed_solver_from_checkpoint(
         from autoflowcfd.core.mpi.distributed_mesh_loader import distributed_mesh_load_v2
         from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
 
-        freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf}
+        freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf,
+                      "aoa_deg": aoa_deg, "aos_deg": aos_deg}
         mach_ref = resolve_mach_ref(rho_inf, vel_inf, p_inf)
         package, root_context = distributed_mesh_load_v2(
             input_file, order, resolved_surface_mesh, n_ranks,
@@ -146,6 +149,7 @@ def rebuild_distributed_solver_from_checkpoint(
         solver = MultiGPUDistributedSolver(
             mesh=mesh, ops=ops, n_ranks=n_ranks, device_id=gpu_device,
             mu_molecular=mu_molecular, rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
+            aoa_deg=aoa_deg, aos_deg=aos_deg,
             turb_model=turbulence_model.upper(),
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
@@ -162,7 +166,8 @@ def rebuild_distributed_solver_from_checkpoint(
         from autoflowcfd.core.mpi.distributed_mesh_loader import distributed_mesh_load_v2
         from autoflowcfd.core.mpi.distributed_checkpoint import distributed_load_checkpoint
 
-        freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf}
+        freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf,
+                      "aoa_deg": aoa_deg, "aos_deg": aos_deg}
         from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
         mach_ref = resolve_mach_ref(rho_inf, vel_inf, p_inf)
         package, root_context = distributed_mesh_load_v2(
@@ -204,6 +209,7 @@ def rebuild_distributed_solver_from_checkpoint(
             n_threads=threads, turbulence_intensity=turbulence_intensity,
             viscosity_ratio=viscosity_ratio, mu_molecular=mu_molecular,
             rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
+            aoa_deg=aoa_deg, aos_deg=aos_deg,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
         )
 

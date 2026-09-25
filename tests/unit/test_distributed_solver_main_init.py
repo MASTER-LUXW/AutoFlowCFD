@@ -389,6 +389,47 @@ class TestDistributedCheckpointRoundTrip:
         assert iteration == 42
         np.testing.assert_allclose(U_local, U0, rtol=1e-12, atol=1e-14)
 
+    def test_checkpoint_carries_the_physics_and_resume_reads_it_back(self, mesh_and_ops, tmp_path):
+        """分布式 checkpoint 必须持久化决定物理解的参数（2026-09-25）。
+
+        此前分布式写入端一个都不写：resume 要么按默认来流静默重建另一个
+        算例，要么（09-24 起）因"来流缺失"直接报错；攻角/侧滑角在四条分布式
+        resume 构造路径上也全部没有恢复。这里用**非缺省**的粘度、攻角、
+        侧滑角、Tu/VR 与 turb_model='none'（此前 none/les 连粘度属性都只在
+        湍流分支里设置）验证写入端与共用读取端的往返。"""
+        from autoflowcfd.cli.solve_checkpoint_io import physics_from_metadata
+        from autoflowcfd.core.mpi.distributed_checkpoint import (
+            distributed_load_checkpoint, distributed_save_checkpoint,
+        )
+        from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
+
+        mesh, ops = mesh_and_ops
+        want = dict(rho_inf=1.1, vel_inf=21.0, p_inf=95000.0, aoa_deg=4.5, aos_deg=-1.25,
+                    mu_molecular=2.3e-5, turbulence_intensity=0.037, viscosity_ratio=8.0)
+        solver = DistributedFRSolver(
+            mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
+            n_ranks=1, backend="cpu", order=mesh.order, turb_model_name="none",
+            time_scheme=TimeIntegrationScheme.SSP_RK3, **want)
+        path = distributed_save_checkpoint(
+            solver, str(tmp_path), 7, "dummy_input.nas", mesh.order, "none", "cpu",
+            surface_mesh="dummy_surface.nas")
+        _U, metadata, _it = distributed_load_checkpoint(path, solver)
+        got = physics_from_metadata(metadata)
+        for k, v in want.items():
+            assert got[k] == pytest.approx(v), f"{k}: 写入 {v}、读回 {got[k]}"
+        assert metadata.get("surface_mesh") == "dummy_surface.nas"
+
+    def test_every_distributed_resume_path_restores_the_flow_angles(self):
+        """四条分布式 resume 构造路径（CPU 传统 / CPU 完全分布式 / 多 GPU 传统 /
+        多 GPU 完全分布式）都必须把攻角与侧滑角交给求解器或来流字典。"""
+        import inspect
+
+        from autoflowcfd.cli import solve_distributed_checkpoint_io as mod
+        src = inspect.getsource(mod.rebuild_distributed_solver_from_checkpoint)
+        assert src.count("aoa_deg=aoa_deg, aos_deg=aos_deg") == 2
+        assert src.count('"aoa_deg": aoa_deg, "aos_deg": aos_deg') == 2
+        assert "physics_from_metadata(metadata)" in src
+
     def test_solve_checkpoint_callback_invoked_at_right_iterations(self, mesh_and_ops):
         """真实 bug 回归测试：此前 `DistributedFRSolver.solve()` 的
         `output_interval` 只控制进度打印，没有任何中间 checkpoint 保存

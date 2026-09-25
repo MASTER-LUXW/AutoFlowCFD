@@ -150,10 +150,13 @@ class _DistributedFromPackageMixin:
         # 拿到自由来流条件（重置 P0 均匀流场需要），这里存一份通用的、
         # 不依赖 turb_model_name 分支的副本。
         self._package_freestream = package['freestream']
-        # 与传统模式同一条（见那边说明）：无条件设置 `self.freestream`。
-        # 这里不带 mach_ref（下面 SST 分支会覆写成含 mach_ref 的版本），
-        # 消费方只依赖 rho_inf/vel_inf/p_inf。
-        self.freestream = dict(package['freestream'])
+        # 与传统模式同一条（见那边说明）：`self.freestream` 与决定物理解的
+        # 参数**无条件**设置（2026-09-25：粘度与 Tu/VR 此前只在 SST/DDES/IDDES
+        # 分支里设，none/les/wmles 运行的 checkpoint 因此写的是替身缺省值）。
+        self.freestream = {**package['freestream'], "mach_ref": package['mach_ref']}
+        self.mu_molecular = package['mu_molecular']
+        self._turbulence_intensity = package.get('turbulence_intensity', 0.01)
+        self._viscosity_ratio = package.get('viscosity_ratio', 5.0)
         self.turb_model = None
         self.turb_halo_exchange = None
         self.wall_distance_compact = package.get('wall_distance_compact')
@@ -186,11 +189,6 @@ class _DistributedFromPackageMixin:
             self.wmles_model = WMLESModel(nu=mu_molecular / max(rho_inf, 1e-10))
 
         if turb_model_name in ('SST', 'DDES', 'IDDES'):
-            self.mu_molecular = package['mu_molecular']
-            self.freestream = {**package['freestream'], "mach_ref": package['mach_ref']}
-            self._turbulence_intensity = package.get('turbulence_intensity', 0.01)
-            self._viscosity_ratio = package.get('viscosity_ratio', 5.0)
-
             n_local = self.partition.n_local_cells
             # 直接复用单机路径同一套 Tu/VR 推导 k_inf/omega_inf +
             # k_max/omega_max 物理上界公式（`_set_freestream_

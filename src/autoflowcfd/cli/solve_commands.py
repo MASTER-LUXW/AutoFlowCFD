@@ -308,7 +308,7 @@ def _resume_distributed(
                 saved_path = solver_ref.save_checkpoint_distributed(
                     output_dir, absolute_iteration, input_file,
                     solver_ref.current_order, turbulence_model, backend="gpu",
-                    target_order=solver_ref.order,
+                    target_order=solver_ref.order, surface_mesh=resolved_surface_mesh,
                 )
                 if saved_path and is_root():
                     print(f"   [Checkpoint] iter {absolute_iteration} saved: {saved_path}")
@@ -329,7 +329,7 @@ def _resume_distributed(
         saved_path = solver.save_checkpoint_distributed(
             output_dir, iteration + max_iter, input_file,
             solver.current_order, turbulence_model, backend="gpu",
-            target_order=solver.order,
+            target_order=solver.order, surface_mesh=resolved_surface_mesh,
         )
         if saved_path and is_root():
             print(f"   Checkpoint saved: {saved_path}")
@@ -353,7 +353,7 @@ def _resume_distributed(
             saved_path = distributed_save_checkpoint(
                 solver_ref, output_dir, absolute_iteration, input_file,
                 solver_ref.current_order, turbulence_model, target_backend,
-                target_order=solver_ref.order,
+                target_order=solver_ref.order, surface_mesh=resolved_surface_mesh,
             )
             if saved_path and is_root():
                 print(f"   [Checkpoint] iter {absolute_iteration} saved: {saved_path}")
@@ -372,7 +372,7 @@ def _resume_distributed(
     distributed_save_checkpoint(
         solver, output_dir, iteration + max_iter, input_file,
         solver.current_order, turbulence_model, target_backend,
-        target_order=solver.order,
+        target_order=solver.order, surface_mesh=resolved_surface_mesh,
     )
 
 

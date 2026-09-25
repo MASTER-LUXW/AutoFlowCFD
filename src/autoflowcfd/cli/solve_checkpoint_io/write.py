@@ -9,6 +9,8 @@ import pickle
 
 from typing import Optional
 
+from autoflowcfd.core.utils.checkpoint_physics import physics_metadata
+
 
 
 def save_results(solver, output_dir: str, quiet: bool = False):
@@ -192,27 +194,9 @@ def write_checkpoint(
         "backend": backend,
         "n_sps_per_cell": solver.state.n_sps,
         "n_vars": solver.state.n_vars,
-        "rho_inf": solver.freestream["rho_inf"],
-        "vel_inf": solver.freestream["vel_inf"],
-        "p_inf": solver.freestream["p_inf"],
-        # 攻角/侧滑角持久化（2026-09-17）：与 Tu/VR、mu_molecular 同一类
-        # ——它们决定**物理解本身**，必须从 checkpoint 恢复，不能像 CFL
-        # 那样让用户每次 resume 重新指定。漏掉它会让续算悄悄变成零攻角
-        # 工况，而日志里只能看到 Cd/Cl 突然跳变。旧 checkpoint 没有这两个
-        # 键，`rebuild` 侧用 metadata.get(..., 0.0) 退化为零攻角，与它们
-        # 产生时的真实行为一致。
-        "aoa_deg": float(solver.freestream.get("aoa_deg", 0.0) or 0.0),
-        "aos_deg": float(solver.freestream.get("aos_deg", 0.0) or 0.0),
-        # Tu/VR 持久化（2026-08-25 添加）：Resume 时必须用原始 Tu/VR 值，
-        # 否则会用默认值（Tu=0.01, VR=5.0）覆盖用户设置的值，导致湍流场
-        # 重置时用的参数与原始计算不一致。
-        "turbulence_intensity": getattr(solver, '_turbulence_intensity', 0.01),
-        "viscosity_ratio": getattr(solver, '_viscosity_ratio', 5.0),
-        # mu_molecular 持久化（2026-08-27 补齐，与上面 Tu/VR 同一类遗漏）：
-        # 见 rebuild_solver_from_checkpoint 里对应恢复处的说明。getattr
-        # 兜底与 Tu/VR 同一个理由：轻量 fake/mock solver（单元测试）不一定
-        # 设置这个属性，真实 FRSolver/GPUFRSolver 恒会设置。
-        "mu_molecular": getattr(solver, 'mu_molecular', 1.8e-5),
+        # 决定物理解的参数（来流、攻角/侧滑角、粘度、Tu/VR）：与分布式写入端
+        # 共用唯一的写入函数，见 core/utils/checkpoint_physics.py。
+        **physics_metadata(solver),
     }
     if surface_mesh:
         metadata["surface_mesh"] = surface_mesh
