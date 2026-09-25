@@ -52,7 +52,7 @@ from autoflowcfd.core.fr_operators.kernels import (
     PRECOND_PHYSICAL,
     PRECOND_PRESSURE_PHYSICAL,
 )
-from autoflowcfd.core.fr_solver.solver import (
+from autoflowcfd.core.fr_solver.mach_ref import (
     _MACH_REF_FLOOR_LEGACY,
     _MACH_REF_FLOOR_PHYSICAL,
     _mach_ref_floor_for_mode,

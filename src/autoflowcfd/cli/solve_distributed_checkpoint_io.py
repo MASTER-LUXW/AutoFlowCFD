@@ -113,16 +113,12 @@ def rebuild_distributed_solver_from_checkpoint(
         # 多 GPU"完全分布式加载"（#1，2026-09-02 实现——此前这个组合被
         # 直接拒绝，见 MultiGPUDistributedSolver.from_fully_distributed_
         # package/gpu_distributed_fully_distributed.py 模块文档）。
-        import math
         from autoflowcfd.core.gpu.distributed.gpu_distributed import MultiGPUDistributedSolver
         from autoflowcfd.core.mpi.distributed_mesh_loader import distributed_mesh_load_v2
-        from autoflowcfd.core.fr_solver.solver import _MACH_REF_FLOOR
+        from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
 
         freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf}
-        mach_ref = max(
-            vel_inf / math.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10)),
-            _MACH_REF_FLOOR,
-        )
+        mach_ref = resolve_mach_ref(rho_inf, vel_inf, p_inf)
         package, root_context = distributed_mesh_load_v2(
             input_file, order, resolved_surface_mesh, n_ranks,
             freestream=freestream, mu_molecular=mu_molecular, mach_ref=mach_ref,
@@ -167,12 +163,8 @@ def rebuild_distributed_solver_from_checkpoint(
         from autoflowcfd.core.mpi.distributed_checkpoint import distributed_load_checkpoint
 
         freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf}
-        import math
-        from autoflowcfd.core.fr_solver.solver import _MACH_REF_FLOOR
-        mach_ref = max(
-            vel_inf / math.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10)),
-            _MACH_REF_FLOOR,
-        )
+        from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
+        mach_ref = resolve_mach_ref(rho_inf, vel_inf, p_inf)
         package, root_context = distributed_mesh_load_v2(
             input_file, order, resolved_surface_mesh, n_ranks,
             freestream=freestream, mu_molecular=mu_molecular, mach_ref=mach_ref,

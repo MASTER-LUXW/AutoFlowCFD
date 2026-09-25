@@ -4,7 +4,6 @@
 这里只留构造与对外接口。
 """
 
-import os
 import numpy as np
 from typing import Optional
 from loguru import logger
@@ -133,13 +132,11 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         self.n_vars = n_vars
         self.device_id = device_id
         self.mu_molecular = mu_molecular
-        # mach_ref：与 CPU 版 FRSolver.__init__（fr_solver/solver.py）
-        # 同一套计算方式/同一个用途，见该文件对应注释。物理下限钳制同样与
-        # CPU 版镜像同步（2026-08-26，P2 发散专项）：低于 0.1 的参考马赫数会让
-        # AUSM+up Mp 压差扩散项的 1/mach_ref² 放大压倒显式推进稳定性，
-        # 完整推导/实证标定记录见 fr_solver/solver.py::_MACH_REF_FLOOR。
-        mach_ref = vel_inf / np.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10))
-        mach_ref = max(mach_ref, 0.1)
+        # mach_ref 的唯一来源（按 AUSM+up 预处理档钳下限）。此前这里手写一份、
+        # 下限硬编码 0.1，而 CPU 自 2026-09-17 起在默认档用 0.05 —— 同一算例
+        # 在 GPU 与 CPU 上拿到不同的 mach_ref（plate_demo：0.1 vs 0.0882）。
+        from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
+        mach_ref = resolve_mach_ref(rho_inf, vel_inf, p_inf)
         # aoa_deg/aos_deg（2026-09-17）：下游的 Q_free / SEM 入口方向 /
         # 气动力风轴系分解都从 freestream 字典读，GPU 这条路径同样要带上，
         # 否则同一组 CLI 参数在 --backend gpu 上会静默退回零攻角。
@@ -156,9 +153,8 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         # 只在 SSP-RK2/RK3 下启用：DUAL_TIME 的物理时间导数项与 IMEX 的
         # 残差拆分都需要单独推导 Gamma 的分配方式，不套未经验证的近似
         # （与 CPU 侧同一判据）。
-        _env = os.environ.get("AFCFD_LOW_MACH_PRECOND")
-        _req = bool(low_mach_precond) if _env is None else (_env == "1")
-        self.low_mach_precond_enabled = _req and time_scheme in ("ssp_rk2", "ssp_rk3")
+        from autoflowcfd.core.utils.preconditioning import resolve_low_mach_precond
+        self.low_mach_precond_enabled = resolve_low_mach_precond(low_mach_precond, time_scheme)
         # 真实 bug 修复（2026-09-05，代码复审发现）：CPU 版
         # `DistributedFRSolver`/`MultiGPUDistributedSolver` 都把构造期
         # 传入的 `turbulence_intensity`/`viscosity_ratio` 存成

@@ -10,11 +10,10 @@
    never actually appeared (only `traceback.print_exc()` right after it
    did, easy to mistake for the same message).
 
-2. `core/fr_solver/step.py::mean_flow_residual` does a lazy
-   `from autoflowcfd.core.fr_solver.solver import logger` (to avoid a
-   circular import) - removing `solver.py`'s logger without checking for
-   this cross-module import broke that import path entirely (caught by
-   tests/validation/test_couette.py failing with ImportError).
+2. `core/fr_solver/step.py::mean_flow_residual` used to import `logger`
+   lazily from `core.fr_solver.solver`; since 2026-09-25 (solver.py split
+   into a package) it imports loguru's `logger` directly, so that
+   cross-module coupling no longer exists.
 """
 
 from click.testing import CliRunner
@@ -40,13 +39,6 @@ def test_solve_status_backend_prints_content():
     assert "cpu" in result.output.lower()
 
 
-def test_solver_module_exposes_logger_for_step_pys_lazy_import():
-    """`core/fr_solver/step.py::mean_flow_residual` imports `logger` from
-    `core.fr_solver.solver` lazily (documented as avoiding a circular
-    import) - this must keep working."""
-    from autoflowcfd.core.fr_solver.solver import logger  # noqa: F401
-
-
 def test_no_stdlib_logging_getlogger_left_in_solve_or_solver_modules():
     """Guards against the same mistake creeping back in: every file in
     this project must use loguru, not `logging.getLogger`, for its
@@ -54,7 +46,7 @@ def test_no_stdlib_logging_getlogger_left_in_solve_or_solver_modules():
     logger, so a stdlib logger there is always silently inert)."""
     import autoflowcfd.cli.solve_commands as solve_commands
     import autoflowcfd.cli.solve_aero_coefficients as solve_aero_coefficients
-    import autoflowcfd.core.fr_solver.solver as solver_module
+    import autoflowcfd.core.fr_solver.solver.threads as solver_module
 
     for module in (solve_commands, solve_aero_coefficients, solver_module):
         assert hasattr(module, "logger")

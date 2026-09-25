@@ -254,3 +254,53 @@ def apply_low_mach_preconditioner(residual: np.ndarray, Q: np.ndarray,
         out = residual.copy()
     out[:, :, :5] = tgt
     return out
+
+
+def resolve_low_mach_precond(requested, time_scheme) -> bool:
+    """低马赫数伪时间预处理是否启用 —— 全部后端的唯一判据（2026-09-25 收拢）。
+
+    此前 CPU 单机、CPU-MPI 两种加载模式、单机 GPU、多 GPU 各写一份（枚举比较 /
+    字符串比较 / 两者兼容三种写法），多 GPU "完全分布式加载"那条路径**根本没有
+    设置**这个属性，而它的 `step()` 直接读取 —— 那条路径的每个 RK 步都会
+    `AttributeError`。
+
+    低马赫数伪时间预处理（2026-09-14 新增，用户提出"收敛需要数万步"
+    后的根本性优化）。完整推导/正确性论证见
+    `core/utils/preconditioning.py` 模块末尾"伪时间预处理矩阵 Gamma"
+    一节；接入点见 `step.py::mean_flow_residual`（残差侧）与
+    `cfl.py::compute_local_time_step`（步长侧）——两者**必须成对启用**。
+    
+    为什么默认开：本项目的目标工况是汽车外流场，M~0.09（33m/s vs
+    声速 340m/s）。不做预处理时显式格式的 dt 被声速限制，比对流
+    时间尺度小约 11 倍，收敛步数因此白付约一个数量级——这正是
+    用户观察到"需要数万步"的主因之一。预处理后 dt 由预处理波速
+    (|un|+c_precond) 决定，M=0.1 下放大约 5 倍。
+    不动点不变（det(Gamma)=beta^2>0），收敛解与关闭时是同一个解。
+    
+    DUAL_TIME（真正的非稳态物理时间推进）下强制关闭：那条路径的
+    dt 是有物理时间精度含义的物理步长，不是伪时间步长，预处理的
+    前提（"只要收敛到 R=0，路径无所谓"）不成立。
+    只对 SSP-RK2/RK3 这两个"纯稳态伪时间推进"方案启用：
+    * DUAL_TIME 的 dt 是有物理时间精度含义的物理步长，不是伪时间
+    步长，预处理的前提（"只要收敛到 R=0，路径无所谓"）不成立；
+    * IMEX 把残差**拆成**对流/扩散两半分别显式/隐式处理
+    （见 step.py 的 convective_residual_only/diffusive_residual_only），
+    Gamma 作用在拆分后的任一半上都不等价于作用在整体残差上，
+    需要专门推导如何在两半之间分配预处理——不在本次范围内，
+    所以这里直接不启用，而不是套一个未经验证的近似。
+    环境变量 `AFCFD_LOW_MACH_PRECOND=0/1` 可强制关闭/开启，优先于
+    构造参数——供 A/B 对照实验与现场排查用（"把这个新机制单独关掉
+    再跑一遍"必须是一条随时可用的路径，不需要改代码）。
+
+    Args:
+        requested: 构造参数/包里请求的值。
+        time_scheme: 时间积分方案（枚举或用户侧字符串）。
+    """
+    import os
+
+    from autoflowcfd.core.time_integration.base import TimeIntegrationScheme, scheme_from_name
+
+    env = os.environ.get("AFCFD_LOW_MACH_PRECOND")
+    req = bool(requested) if env is None else (env == "1")
+    return req and scheme_from_name(time_scheme) in (
+        TimeIntegrationScheme.SSP_RK2, TimeIntegrationScheme.SSP_RK3)

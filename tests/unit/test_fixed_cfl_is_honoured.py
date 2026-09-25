@@ -167,10 +167,11 @@ class TestSourceLevelGuard:
         的"不该变成事后考古，同一原则见 solver.py 里那段启动日志说明）。"""
         import inspect
 
-        from autoflowcfd.core.fr_solver.solver import FRSolver
+        from autoflowcfd.core.fr_solver.solver.setup import _SolverSetupMixin
         from autoflowcfd.core.time_integration.adaptive_cfl.policy import (
             describe_cfl_policy,
         )
-        src = inspect.getsource(FRSolver.__init__)
+        # 2026-09-25 起 CFL 策略在 `FRSolver.__init__` 的装配阶段里建立
+        src = inspect.getsource(_SolverSetupMixin._setup_turbulence_time_and_runtime)
         assert "fixed_cfl_number" in src and "describe_cfl_policy(" in src
         assert "fixed CFL = 0.037" in describe_cfl_policy(None, 0.037)

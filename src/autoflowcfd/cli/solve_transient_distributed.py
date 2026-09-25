@@ -214,7 +214,6 @@ def _solve_transient_fully_distributed(
     的 `if fully_distributed:` 分支同一套构造方式）。DUAL_TIME
     （2026-09-02 续接）：`time_scheme`/`dual_time_inner_iter` 随
     `distributed_mesh_load_v2` 一起塞进 package，见该函数模块文档。"""
-    import math
     from autoflowcfd.core.mpi import mpi_available, is_root
     if not mpi_available:
         print("\n❌ MPI not available. Please install mpi4py and run with mpirun.")
@@ -225,15 +224,12 @@ def _solve_transient_fully_distributed(
     from autoflowcfd.core.mpi.distributed_checkpoint import (
         distributed_save_results, distributed_save_checkpoint,
     )
-    from autoflowcfd.core.fr_solver.solver import _MACH_REF_FLOOR
+    from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
 
     freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf,
                   "p_inf": p_inf,
                   "aoa_deg": aoa_deg, "aos_deg": aos_deg}
-    mach_ref = max(
-        vel_inf / math.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10)),
-        _MACH_REF_FLOOR,
-    )
+    mach_ref = resolve_mach_ref(rho_inf, vel_inf, p_inf)
     package, root_context = distributed_mesh_load_v2(
         input_file, order, surface_mesh, n_ranks,
         freestream=freestream, mu_molecular=mu_molecular, mach_ref=mach_ref,
@@ -333,17 +329,13 @@ def _solve_transient_multi_gpu(
     time_scheme_str = time_scheme.value
 
     if fully_distributed:
-        import math
         from autoflowcfd.core.mpi.distributed_mesh_loader import distributed_mesh_load_v2
-        from autoflowcfd.core.fr_solver.solver import _MACH_REF_FLOOR
+        from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
 
         freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf,
                       "p_inf": p_inf,
                       "aoa_deg": aoa_deg, "aos_deg": aos_deg}
-        mach_ref = max(
-            vel_inf / math.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10)),
-            _MACH_REF_FLOOR,
-        )
+        mach_ref = resolve_mach_ref(rho_inf, vel_inf, p_inf)
         package, root_context = distributed_mesh_load_v2(
             input_file, order, surface_mesh, n_ranks,
             freestream=freestream, mu_molecular=mu_molecular, mach_ref=mach_ref,

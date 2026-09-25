@@ -239,36 +239,49 @@ class TestGpuSolverWiring:
 
     @staticmethod
     def _fake_solver(time_scheme="ssp_rk3", env=None, monkeypatch=None,
-                     cfl=1.0, cfl_start=None, cfl_max=None):
-        """不构造真实 GPUFRSolver（需要 CuPy + 网格），只跑构造函数里那段
-        与 GPU 无关的开关/控制器初始化逻辑，避免把接线测试和设备可用性
-        绑在一起。"""
+                     cfl_start=None, cfl_max=None):
+        """不构造真实 GPUFRSolver（需要 CuPy + 网格），只跑构造函数调用的那两个
+        与 GPU 无关的**共享**函数（2026-09-25 起全部后端都经它们构造，此前本替身
+        自己抄了一份开关/控制器逻辑，连带抄了已删除的 `cfl` 硬编码兜底）。"""
         import os as _os
-        from autoflowcfd.core.time_integration.adaptive_cfl import AdaptiveCFLController
+
+        from autoflowcfd.core.time_integration.adaptive_cfl.policy import build_cfl_policy
+        from autoflowcfd.core.utils.preconditioning import resolve_low_mach_precond
 
         class _S:
             pass
 
         s = _S()
-        _env = (env if env is not None else _os.environ.get("AFCFD_LOW_MACH_PRECOND"))
-        _req = True if _env is None else (_env == "1")
-        s.low_mach_precond_enabled = _req and time_scheme in ("ssp_rk2", "ssp_rk3")
-        s._cfl_controller = None
-        if time_scheme in ("ssp_rk2", "ssp_rk3", "forward_euler"):
-            s._cfl_controller = AdaptiveCFLController(
-                cfl_start=cfl_start if cfl_start is not None else cfl,
-                cfl_max=cfl_max if cfl_max is not None else max(cfl, 0.5),
-            )
+        old = _os.environ.get("AFCFD_LOW_MACH_PRECOND")
+        try:
+            if env is not None:
+                _os.environ["AFCFD_LOW_MACH_PRECOND"] = env
+            s.low_mach_precond_enabled = resolve_low_mach_precond(True, time_scheme)
+        finally:
+            if env is not None:
+                if old is None:
+                    _os.environ.pop("AFCFD_LOW_MACH_PRECOND", None)
+                else:
+                    _os.environ["AFCFD_LOW_MACH_PRECOND"] = old
+        s._cfl_controller, s.fixed_cfl_number = build_cfl_policy(
+            time_scheme, cfl_start=cfl_start, cfl_max=cfl_max)
         return s
 
     def test_switch_semantics_match_cpu(self):
-        from autoflowcfd.core.gpu.solver import gpu_solver as gs
-        src = __import__("inspect").getsource(gs.GPUFRSolver.__init__)
-        # 开关语义（环境变量优先 + 时间方案门控）必须在源码里真的存在，
-        # 不是靠本测试里的替身"假装"实现的
-        assert 'os.environ.get("AFCFD_LOW_MACH_PRECOND")' in src
-        assert 'time_scheme in ("ssp_rk2", "ssp_rk3")' in src
-        assert "self.low_mach_precond_enabled" in src
+        """全部后端必须经同一个 `resolve_low_mach_precond` 决定开关（此前五份
+        写法，多 GPU 完全分布式加载那条路径根本没设这个属性）。"""
+        from tests.unit._module_source import module_source
+
+        import autoflowcfd.core.fr_solver.solver as cpu_single
+        import autoflowcfd.core.gpu.distributed.gpu_distributed as gpu_multi
+        import autoflowcfd.core.gpu.distributed.gpu_distributed_fully_distributed as gpu_multi_fd
+        import autoflowcfd.core.gpu.solver.gpu_solver as gpu_single
+        import autoflowcfd.core.mpi.distributed_solver as cpu_mpi
+        for mod in (cpu_single, gpu_single, gpu_multi, gpu_multi_fd, cpu_mpi):
+            src = module_source(mod)
+            assert "resolve_low_mach_precond(" in src, mod.__name__
+            assert 'os.environ.get("AFCFD_LOW_MACH_PRECOND")' not in src, (
+                f"{mod.__name__} 又自己解析了一遍环境变量")
 
     @pytest.mark.parametrize("scheme,expected", [
         ("ssp_rk3", True), ("ssp_rk2", True),
@@ -289,12 +302,15 @@ class TestGpuSolverWiring:
         assert s._cfl_controller.cfl_start == 0.2
         assert s._cfl_controller.cfl_max == 0.9
 
-    def test_controller_defaults_preserve_legacy_cfl(self):
-        """不传 cfl_start/cfl_max 的既有调用方：起始 CFL 必须仍是它们传的
-        `cfl`，不能被悄悄改成 0.1。"""
-        s = self._fake_solver(cfl=0.3)
-        assert s._cfl_controller.cfl_start == 0.3
-        assert s._cfl_controller.cfl_max == 0.5
+    def test_controller_defaults_come_from_controller_signature(self):
+        """不传 cfl_start/cfl_max：取控制器签名的默认值（唯一事实来源），不再
+        有"缺省退回构造参数 cfl"的兜底（那个 cfl 默认 1.0，远超 P>=1 稳定极限）。"""
+        from autoflowcfd.core.time_integration.adaptive_cfl import AdaptiveCFLController
+
+        s = self._fake_solver()
+        ref = AdaptiveCFLController()
+        assert (s._cfl_controller.cfl_start, s._cfl_controller.cfl_max) == (
+            ref.cfl_start, ref.cfl_max)
 
     def test_order_change_resets_controller(self, monkeypatch):
         """阶数切换必须复位控制器——**行为**测试，不是源码字符串匹配。

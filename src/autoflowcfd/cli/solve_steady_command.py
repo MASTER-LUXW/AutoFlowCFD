@@ -239,17 +239,13 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, cfl_sta
             # `--fully-distributed`（不加 --multi-gpu）同一套
             # `distributed_mesh_load_v2`/`build_fully_distributed_rank_
             # package`，只是构造出的是 GPU 常驻状态的求解器。
-            import math
             from autoflowcfd.core.mpi.distributed_mesh_loader import distributed_mesh_load_v2
-            from autoflowcfd.core.fr_solver.solver import _MACH_REF_FLOOR
+            from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
 
             freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf,
                           "p_inf": p_inf,
                           "aoa_deg": aoa_deg, "aos_deg": aos_deg}
-            mach_ref = max(
-                vel_inf / math.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10)),
-                _MACH_REF_FLOOR,
-            )
+            mach_ref = resolve_mach_ref(rho_inf, vel_inf, p_inf)
             package, root_context = distributed_mesh_load_v2(
                 input_file, order, surface_mesh, n_ranks,
                 freestream=freestream, mu_molecular=mu_molecular, mach_ref=mach_ref,
@@ -434,9 +430,8 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, cfl_sta
             # 支持的全部湍流模型，也从未把 `turbulence_model` 传给
             # `distributed_mesh_load_v2`（该函数签名里 `turb_model_name`
             # 参数一直被忽略，恒用默认值 'NONE'）。
-            import math
             from autoflowcfd.core.mpi.distributed_mesh_loader import distributed_mesh_load_v2
-            from autoflowcfd.core.fr_solver.solver import _MACH_REF_FLOOR
+            from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
 
             freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf,
                           "p_inf": p_inf,
@@ -444,10 +439,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, cfl_sta
             # 与 FRSolver.__init__ 同一个公式（见该文件 mach_ref 计算处），
             # 不是本处新发明的近似——AUSM+up Weiss-Smith 预处理要求分区
             # 两侧用同一个真实值，公式本身也必须与单机路径逐字一致。
-            mach_ref = max(
-                vel_inf / math.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10)),
-                _MACH_REF_FLOOR,
-            )
+            mach_ref = resolve_mach_ref(rho_inf, vel_inf, p_inf)
             # root_context（2026-09-02，Order Continuation 支持）：只有
             # root rank 非 None，持有完整全局网格供后续阶数切换重新
             # 分发用，见 distributed_mesh_load_v2/redistribute_fully_

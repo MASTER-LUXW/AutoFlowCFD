@@ -328,7 +328,8 @@ class TestArtificialViscosityIsInertAtP1:
         import inspect
 
         from autoflowcfd.core.fr_solver import solver as solver_mod
-        src = inspect.getsource(solver_mod)
+        from tests.unit._module_source import module_source
+        src = module_source(solver_mod)
         assert "artificial_viscosity_enabled and order <= 1" in src
         assert "warnings.warn" in src
         i = src.index("artificial_viscosity_enabled and order <= 1")
@@ -342,6 +343,7 @@ class TestArtificialViscosityIsInertAtP1:
         import inspect
 
         from autoflowcfd.core.fr_solver import solver as solver_mod
-        src = inspect.getsource(solver_mod)
+        from tests.unit._module_source import module_source
+        src = module_source(solver_mod)
         assert "Artificial viscosity:" in src
         assert "Modal filter mode:" in src

@@ -158,6 +158,11 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     self._cfl_controller, self.fixed_cfl_number = build_cfl_policy(
         time_scheme_str, cfl_start=package.get('cfl_start'),
         cfl_max=package.get('cfl_max'), cfl_min=package.get('cfl_min'))
+    # 低马赫预处理开关（2026-09-25 补齐）：此前这条路径**从未设置**它，而
+    # `step()` 直接读取 —— 每个 RK 步都会 AttributeError。与其余后端同一判据。
+    from autoflowcfd.core.utils.preconditioning import resolve_low_mach_precond
+    self.low_mach_precond_enabled = resolve_low_mach_precond(
+        package.get('low_mach_precond', True), time_scheme_str)
     # `dual_time_steps`：GPUTimeIntegrator 构造函数本身不接受这个参数
     # （与 gpu_distributed.py::step() 的 `getattr(...,'dual_time_steps',5)`
     # 回退设计一致，见该方法调用点），这里显式设置成 package 携带的值。

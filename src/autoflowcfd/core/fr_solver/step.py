@@ -67,7 +67,7 @@ def step(solver, dt: float) -> float:
     Returns:
         residual_norm: 残差范数
     """
-    from autoflowcfd.core.fr_solver.solver import logger  # 延迟导入避免循环依赖
+    from loguru import logger
 
     try:
         solver.state._update_primitives()

@@ -8,7 +8,6 @@
 这里通过 `self` 访问。
 """
 
-import os
 from typing import Optional
 from autoflowcfd.core.mpi import get_rank
 from autoflowcfd.core.mpi.halo import HaloExchange
@@ -286,11 +285,9 @@ class _DistributedFromPackageMixin:
         self._cfl_controller, self.fixed_cfl_number = build_cfl_policy(
             time_scheme, cfl_start=package.get('cfl_start'),
             cfl_max=package.get('cfl_max'), cfl_min=package.get('cfl_min'))
-        _env_pc = os.environ.get("AFCFD_LOW_MACH_PRECOND")
-        _req_pc = (bool(package.get('low_mach_precond', True))
-                   if _env_pc is None else (_env_pc == "1"))
-        self.low_mach_precond_enabled = _req_pc and time_scheme in (
-            TimeIntegrationScheme.SSP_RK2, TimeIntegrationScheme.SSP_RK3)
+        from autoflowcfd.core.utils.preconditioning import resolve_low_mach_precond
+        self.low_mach_precond_enabled = resolve_low_mach_precond(
+            package.get('low_mach_precond', True), time_scheme)
         # 上一步的涡粘场（local 排列），供下一步的粘性 CFL 限制使用——
         # 与单机 `_get_turbulent_viscosity_field` 读取湍流模型已存字段
         # （即上一步的结果）是同一个时序。

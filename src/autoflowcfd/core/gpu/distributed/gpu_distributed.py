@@ -17,7 +17,6 @@ AutoFlowCFD V2.0 - 多 GPU + MPI 分布式求解器
     mpirun -np 4 autoflowcfd solve steady <grid> --backend gpu --multi-gpu
 """
 
-import os
 import time
 import numpy as np
 from typing import Optional, Dict, Any
@@ -227,13 +226,11 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         self.order_continuation_enabled = True
 
         self.mu_molecular = mu_molecular
-        # mach_ref：与 CPU 版 FRSolver.__init__（fr_solver/solver.py）
-        # 同一套计算方式/同一个用途，见该文件对应注释。物理下限钳制同样与
-        # CPU 版镜像同步（2026-08-26，P2 发散专项）：低于 0.1 的参考马赫数会让
-        # AUSM+up Mp 压差扩散项的 1/mach_ref² 放大压倒显式推进稳定性，
-        # 完整推导/实证标定记录见 fr_solver/solver.py::_MACH_REF_FLOOR。
-        mach_ref = vel_inf / np.sqrt(max(1.4 * p_inf / max(rho_inf, 1e-10), 1e-10))
-        mach_ref = max(mach_ref, 0.1)
+        # mach_ref 的唯一来源（按 AUSM+up 预处理档钳下限）。此前这里手写一份、
+        # 下限硬编码 0.1，而 CPU 自 2026-09-17 起在默认档用 0.05 —— 同一算例
+        # 在 GPU 与 CPU 上拿到不同的 mach_ref（plate_demo：0.1 vs 0.0882）。
+        from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
+        mach_ref = resolve_mach_ref(rho_inf, vel_inf, p_inf)
         # 见 gpu_solver.py 同一处说明（2026-09-17）
         self.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf,
                            "mach_ref": mach_ref,
@@ -380,11 +377,8 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         from autoflowcfd.core.time_integration.adaptive_cfl.policy import build_cfl_policy
         self._cfl_controller, self.fixed_cfl_number = build_cfl_policy(
             time_scheme, cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min)
-        _env_pc = os.environ.get("AFCFD_LOW_MACH_PRECOND")
-        _req_pc = True if _env_pc is None else (_env_pc == "1")
-        self.low_mach_precond_enabled = _req_pc and (
-            str(time_scheme) in ("ssp_rk2", "ssp_rk3")
-            or getattr(time_scheme, "value", None) in ("ssp_rk2", "ssp_rk3"))
+        from autoflowcfd.core.utils.preconditioning import resolve_low_mach_precond
+        self.low_mach_precond_enabled = resolve_low_mach_precond(True, time_scheme)
 
         # DUAL_TIME 模式下 BDF2 需要的上一物理时间层状态（2026-09-02，
         # 见 step() 里 DUAL_TIME 分支说明）——None 表示尚未跑过一个
