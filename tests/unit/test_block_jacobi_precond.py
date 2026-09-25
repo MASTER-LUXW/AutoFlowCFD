@@ -207,3 +207,41 @@ def test_jfnk_block_precond_needs_fewer_gmres_iterations():
     assert info_b["theta"] > 0.0 and info_d["theta"] > 0.0
     assert info_b["gmres_iters"] * 5 <= info_d["gmres_iters"], (info_b["gmres_iters"], info_d["gmres_iters"])
     assert cache.n_builds == 1 and cache.age == 1
+
+
+def test_stale_blocks_are_refreshed_within_the_step():
+    """复用的 J_cc 在本步的过时预算（2x基线+10）内解不到容差时，当场重装配再解，
+    而不是把整步的 GMRES 预算烧完、等下一步才刷新。"""
+    from autoflowcfd.core.time_integration.implicit.block_jacobi import (
+        BlockJacobiCache, REFRESH_FACTOR, REFRESH_SLACK,
+    )
+    from autoflowcfd.core.time_integration.implicit.jfnk import (
+        positive_fields_row_limits, step_newton_krylov,
+    )
+
+    rng = np.random.default_rng(5)
+    n = 60
+
+    def make(seed):
+        g = np.random.default_rng(seed)
+        A = 5.0 * np.eye(2)[None] + 3.0 * g.standard_normal((n, 2, 2))
+        t = 1.0 + 0.1 * g.standard_normal((n, 2))
+        return lambda u: np.einsum("nij,nj->ni", A, u - t), t
+
+    cache = BlockJacobiCache(cell_is_prism=np.ones(n, dtype=bool), colors=np.zeros(n, dtype=np.int64),
+                             n_sps=1, n_real_prism=1, n_real_tet=1, n_var=2)
+    dtau = np.full(n, 1e8)
+    u = 1.0 + 0.1 * rng.standard_normal((n, 2))
+    res1, _ = make(1)
+    u, info1 = step_newton_krylov(res1, u, dtau, np.ones(2), block_precond=cache, gmres_max_iter=200,
+                                  physicality=positive_fields_row_limits)
+    assert cache.n_builds == 1 and info1["gmres_iters"] <= 2
+
+    res2, t2 = make(2)                 # 块整体换掉：复用的预处理对它几乎无效
+    budget = int(REFRESH_FACTOR * cache.baseline_iters + REFRESH_SLACK)
+    u, info2 = step_newton_krylov(res2, u, dtau, np.ones(2), block_precond=cache, gmres_max_iter=200,
+                                  physicality=positive_fields_row_limits)
+    assert cache.n_builds == 2, "本步没有当场重装配"
+    assert info2["gmres_iters"] <= budget + 2, info2["gmres_iters"]
+    assert info2["gmres_info"] == 0 and info2["theta"] == 1.0
+    np.testing.assert_allclose(u, t2, rtol=1e-5, atol=1e-6)

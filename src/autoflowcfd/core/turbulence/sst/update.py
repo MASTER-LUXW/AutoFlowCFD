@@ -10,11 +10,13 @@
 
 import numpy as np
 
+from .bounds import clip_to_bounds
+
 
 class _SSTUpdateMixin:
     """正性限幅与场更新"""
 
-    def apply_positivity_limiter(self, min_k: float = 1e-12, min_omega: float = 1e-12):
+    def apply_positivity_limiter(self):
         """
         正性保持限制器 (T-02)：强制 k 和 omega 在物理合理范围内。
 
@@ -29,66 +31,10 @@ class _SSTUpdateMixin:
         即达到此量级），而平均流完全不受影响（nu_t 被 SST a1 限幅保持
         合理），形成"平均流正常但湍流场完全发散"的隐蔽失效模式。
 
-        Args:
-            min_k: k 的最小允许值
-            min_omega: omega 的最小允许值
+        区间的唯一定义（含 k 的来流下限、omega 的逐点 realizability 下限）见
+        `bounds.py`；GPU 版与隐式 k-omega 的界约束读同一份。
         """
-        # NaN/Inf 恢复：np.maximum(NaN, x) 仍返回 NaN，必须先替换
-        bad_k = ~np.isfinite(self.k_field)
-        bad_w = ~np.isfinite(self.omega_field)
-        if np.any(bad_k):
-            self.k_field[bad_k] = min_k
-        if np.any(bad_w):
-            self.omega_field[bad_w] = min_omega
-
-        # 下界：正性约束（T-02 规范要求的 k,omega >= 0）
-        self.k_field = np.maximum(self.k_field, min_k)
-        self.omega_field = np.maximum(self.omega_field, min_omega)
-
-        # k 的来流下限（真实 bug 修复，2026-09-11，cube_demo 791,492 单元
-        # 真实网格 P0 阶段长程续算发现）：P0（阶数延续热身阶段，1 SP/cell）
-        # 架构上速度梯度恒为零（见 fr_residual/viscous_flux.py 的 1x1 零
-        # 微分矩阵——这是本项目多处已确认的既有事实，不是本次新发现），
-        # 意味着 P_k（湍动能产生项）在整个 P0 阶段对*所有*单元恒为零，k
-        # 只能靠 D_k=rho*beta_star*k*omega（耗散，point-implicit 阻尼，
-        # 无条件稳定但仍单调衰减）和对流/扩散输运维持。只要 P0 停留时间
-        # 足够长，任何单元（不限于回流区——真实复现里撞到裸下限 1e-12 的
-        # 62 个单元中有相当一部分局部速度接近自由来流 27~30 m/s，与"对流
-        # 补给弱"的回流区假设不符，真正共同点只是"停留在 P0 里足够久"）
-        # 都会被这个纯衰减过程压到裸正性下限 1e-12，且数量随迭代持续扩散
-        # （真实观测：iter 1600→2000→2300→2500 撞底单元数 2→9→39→62，
-        # 非孤立个例、非收敛，是真实、在扩大的失稳，此前一次诊断误判为
-        # "2个孤立单元、良性"是错误结论，已撤销）。
-        #
-        # 与 omega realizability 下限（本文件另一处、2026-09-05 真实
-        # bug 修复）同源同构，但下限量级刻意选得更保守：omega=0 在 SST
-        # 公式里是真正的数学奇点（涡粘公式/混合函数均除以 omega），
-        # 0.1*omega_inf 这个量级有 Fluent turbulence time scale limiter
-        # 的标准依据；k=0 本身是合法物理状态（层流区 k 确实应该趋于 0），
-        # 不是奇点，没有对应的"标准建议值"可以照抄——这里的下限纯粹是为了
-        # 防止 P0 这个人为零产生项阶段把 k numerically 拖到裸下限这一种
-        # 具体失效模式，不是要把 k 强行钉在接近来流的量级（那样会在真正
-        # 层流的区域人为注入湍流粘性，扭曲解）。选取 1e-3*k_inf（比
-        # k_inf 小 3 个量级，比裸下限 1e-12 大 9 个量级）：足以在 P0 期间
-        # 拦住这个衰减轨迹，量级又远小于任何有意义的物理湍流强度，对
-        # 最终收敛解的失真可忽略。
-        k_inf = getattr(self, 'k_inf', None)
-        if k_inf is not None and k_inf > 0:
-            self.k_field = np.maximum(self.k_field, 1e-3 * k_inf)
-
-        # 上界：物理约束——防止 k/omega 输运方程数值爆炸
-        self.k_field = np.minimum(self.k_field, self.k_max)
-        self.omega_field = np.minimum(self.omega_field, self.omega_max)
-
-        # 时间尺度 realization（工业 RANS 标配）：限制湍流时间尺度
-        # τ = 1/(β*ω) 不超过基于应变率的最小时间尺度的倒数。
-        # 防止远场 ω 衰减到过小值导致 τ 过大、k 有时间大幅增长。
-        # 动态下限由 compute_source_terms 计算，**逐点**：
-        # ω_min[c,s] = max(0.1*S_mag[c,s], 0.1*omega_inf)，与 Fluent 的
-        # turbulence time scale limit 一致（那个也是逐点的）。2026-09-15
-        # 之前这里是全域标量 0.1*max(S_mag)，见该处 bug 修复说明。
-        if hasattr(self, '_omega_realizability_min'):
-            self.omega_field = np.maximum(self.omega_field, self._omega_realizability_min)
+        clip_to_bounds(self, np)
 
     def update_fields(self, dt: float, Sk: np.ndarray, S_omega: np.ndarray,
                      diff_k: np.ndarray = None, diff_omega: np.ndarray = None,

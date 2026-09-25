@@ -330,39 +330,16 @@ class GPUTurbulenceSST:
 
         return Sk, S_omega
 
-    def apply_positivity_limiter_gpu(
-        self, min_k: float = 1e-12, min_omega: float = 1e-12
-    ):
-        """GPU 正性保持限制器（含物理上界）。
+    def apply_positivity_limiter_gpu(self):
+        """GPU 正性保持限制器（含物理上界）：与 CPU 版同一个区间定义与实现
+        （`core/turbulence/sst/bounds.py::clip_to_bounds`，数组模块换成 cupy）。
 
-        真实 bug 修复（V2.0 专家组盲审发现，2026-08-27）：此前这里没有
-        NaN/Inf 恢复步骤——`cp.maximum(NaN, x)` 按 IEEE754 语义仍返回
-        NaN（与 `np.maximum` 完全一样），一旦退化网格（棱柱侧面法向
-        失配等，见 cube_demo 相关记录）在 GPU SST 源项计算里产生 NaN，
-        会直接穿透这个限制器永久污染 k_field/omega_field，且限制器
-        本身给不出任何提示——与 CPU 版 `sst.py::apply_positivity_limiter`
-        的 NaN/Inf 恢复逻辑逐字对应，消除这个此前更彻底的失效模式。
+        非有限值恢复（V2.0 专家组盲审，2026-08-27）同样在那里：`cp.maximum(NaN, x)`
+        仍返回 NaN，不先恢复会穿透限制器永久污染 k/omega。
         """
-        cp = get_cupy()
-        bad_k = ~cp.isfinite(self.k_field)
-        bad_w = ~cp.isfinite(self.omega_field)
-        self.k_field = cp.where(bad_k, min_k, self.k_field)
-        self.omega_field = cp.where(bad_w, min_omega, self.omega_field)
+        from autoflowcfd.core.turbulence.sst.bounds import clip_to_bounds
 
-        self.k_field = cp.maximum(self.k_field, min_k)
-        self.omega_field = cp.maximum(self.omega_field, min_omega)
-        self.k_field = cp.minimum(self.k_field, self.k_max)
-        self.omega_field = cp.minimum(self.omega_field, self.omega_max)
-
-        # k 的来流下限（与 CPU 版 sst.py::apply_positivity_limiter 同一处
-        # 真实 bug 修复，2026-09-11，理由/量级选取见该处完整文档）。
-        k_inf = getattr(self, 'k_inf', None)
-        if k_inf is not None and k_inf > 0:
-            self.k_field = cp.maximum(self.k_field, 1e-3 * k_inf)
-
-        # 时间尺度 realization（与 CPU 版一致）
-        if hasattr(self, '_omega_realizability_min'):
-            self.omega_field = cp.maximum(self.omega_field, self._omega_realizability_min)
+        clip_to_bounds(self, get_cupy())
 
     def update_fields_gpu(
         self,

@@ -42,7 +42,12 @@ P1 层流（17.9 万单元，预处理 NK，CFL 34，同一状态、同一 `rtol
 * 已经复用了 `MAX_AGE` 个 Newton 步；或
 * 上一步的 GMRES 迭代数超过"刚装配完那一步"的 `2 倍 + 10`（线性化
   已经明显过时）；或
-* 上一步没有被接受（`theta == 0`）。
+* 上一步没有被接受（`theta == 0`）；或
+* **本步**的 GMRES 在上一条的迭代预算内没有达到容差（`stale_budget` /
+  `refresh`，由 `jfnk.py` 当场调用）。此前只按上一步的迭代数决定下一步是否
+  重装配：plate_demo P1+SST 上湍流块在一步里从 10 次跳到 200 次（用满、只到
+  0.29），平均流同一步也用满 200 次，那一步耗时 1173 s——过时的预处理把整步
+  的迭代预算烧完，重装配要等下一步才发生。
 
 冻结 Jacobian 的预处理是隐式 CFD 的标准做法；过时的预处理子仍然是合法
 的预处理子，只是迭代数上升，由上面的刷新判据兜住。
@@ -334,6 +339,20 @@ class BlockJacobiCache:
             return self.last_iters > REFRESH_FACTOR * self.baseline_iters + REFRESH_SLACK
         return False
 
+    def stale_budget(self) -> Optional[int]:
+        """复用中的 `J_cc`（`age > 0`）在本步的 GMRES 迭代预算：超过它就说明
+        线性化已明显过时（与跨步刷新判据同一个阈值）。刚装配的块、或没有
+        基线时返回 None（用满全部预算）。"""
+        if self.disabled_reason is not None or self.jac is None or self.age == 0:
+            return None
+        if self.baseline_iters is None:
+            return None
+        return int(REFRESH_FACTOR * self.baseline_iters + REFRESH_SLACK)
+
+    def refresh(self, residual, u0_flat, r0_flat, scales) -> None:
+        """当场按本步基态重装配（本步 GMRES 超出 `stale_budget` 时调用）。"""
+        self._build(residual, u0_flat, r0_flat, scales, reason="本步 GMRES 超出过时预算")
+
     def begin_step(self, residual, u0_flat, r0_flat, scales) -> None:
         """每个 Newton 步开始时调用一次：按刷新判据决定是否重装配 `J_cc`。
 
@@ -342,6 +361,9 @@ class BlockJacobiCache:
         """
         if self.disabled_reason is not None or not self._needs_rebuild():
             return
+        self._build(residual, u0_flat, r0_flat, scales, reason="刷新判据")
+
+    def _build(self, residual, u0_flat, r0_flat, scales, *, reason: str) -> None:
         import time
 
         t0 = time.time()
@@ -354,7 +376,7 @@ class BlockJacobiCache:
         self.last_iters = None
         self.last_accepted = True
         self.n_builds += 1
-        logger.info(f"[NK] 单元块 Jacobian 重装配（第 {self.n_builds} 次，"
+        logger.info(f"[NK] 单元块 Jacobian 重装配（第 {self.n_builds} 次，{reason}，"
                     f"{self.jac.n_residual_evals} 次残差求值，{time.time() - t0:.1f}s）")
 
     def preconditioner(self, dtau_flat: np.ndarray, n_var: int):

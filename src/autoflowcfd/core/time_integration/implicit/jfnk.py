@@ -384,6 +384,7 @@ def step_newton_krylov(
     gmres_info = 0
     linear_rel = float("nan")
     iters_total = 0
+    iters_since_build = 0
     n_extra_total = 0
     n_cuts = 0
 
@@ -396,9 +397,21 @@ def step_newton_krylov(
         dtau_try = dtau_base * ctrl.scale
         prec = (block_precond.preconditioner(dtau_try, n_var) if block_precond is not None
                 else PseudoTransientDiagonal(dtau_try, n_var))
+        budget = block_precond.stale_budget() if block_precond is not None else None
         du, iters, ginfo, linear_rel = _solve_direction(
-            jac, prec, r0, n_var, eta, gmres_restart, gmres_max_iter, red)
+            jac, prec, r0, n_var, eta, gmres_restart,
+            gmres_max_iter if budget is None else min(budget, gmres_max_iter), red)
         iters_total += iters
+        if ginfo > 0 and budget is not None and budget < gmres_max_iter:
+            # 复用的 J_cc 在过时预算内解不到容差：当场按本步基态重装配再解
+            # （见 block_jacobi.py 模块文档"复用与刷新"）。ginfo 是全局量，各 rank
+            # 在这里的分支一致。
+            block_precond.refresh(residual, u0_flat, r0, scales)
+            prec = block_precond.preconditioner(dtau_try, n_var)
+            du, iters, ginfo, linear_rel = _solve_direction(
+                jac, prec, r0, n_var, eta, gmres_restart, gmres_max_iter, red)
+            iters_total += iters
+        iters_since_build = iters
         gmres_info = ginfo
         if du is not None:
             alpha, theta_phys, limited_frac = _cellwise_relaxation(
@@ -429,7 +442,8 @@ def step_newton_krylov(
         n_cuts += 1
 
     if block_precond is not None:
-        block_precond.record(iters_total, accepted=theta > 0.0)
+        # 刷新判据的基线用最后一次求解（刚装配时即新块的迭代数），不含过时那一次
+        block_precond.record(iters_since_build, accepted=theta > 0.0)
     return u_new, dict(res_norm=res_norm, res_norm_new=res_norm_new,
                        eta=eta, gmres_iters=iters_total,
                        n_matvec=jac.n_matvec,
