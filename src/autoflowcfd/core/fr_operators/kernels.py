@@ -320,19 +320,32 @@ def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray,
     mass_flux = 0.5 * (rhoL * aL_m + rhoR * aR_m) * (M_half + Mp)
 
     # === 5. AUSM+up 压力通量分裂 ===
+    # P5±（Liou 2006, AUSM+up 式 (24)）：
+    #     P5±(M) = M2±(M)·[(±2 − M) ∓ 16·α·M·M2∓(M)],  M2±(M) = ±(M±1)²/4
+    #   展开：P5+ = (M+1)²(2−M)/4 + α·M·(M²−1)²（α 项**没有** 1/4；SU2
+    #   `pLP = 0.25*(mL+1)^2*(2-mL) + alpha*mL*(mL^2-1)^2` 同）。
+    #
+    # **2026-09-25 修正的真实缺陷**：此前四份实现（本函数、GPU CuPy 版、GPU
+    # CUDA P0 源串、backend/fr_gpu_p0.py）都写成 `0.25*((M+1)²(2−M) + α·M·(M²−1)²)`，
+    # α 项被多乘了 1/4。P5 分裂在 M=0 处的斜率本应是 0.75+α，低马赫下
+    # α → −3/4 使斜率 = O(fa²)、压力扰动 O(M²)；缩小 4 倍后斜率 ≈ 0.57，压力
+    # 分裂退化成声阻抗响应 p*−p ≈ ρ·a·u_n（O(M)，Guillard–Viozat 型低马赫失效）。
+    # 后果：驻点区出现 Cp ~ 2/M 量级的虚假超压（plate_demo，M=0.098：P0 稳态
+    # 驻点平台 Cp≈21.5；P1 长程运行驻点线总压 Cp_t≈2 并持续向上游推进，
+    # Cd≈4.2 而实验值≈1.2）。2026-08-28 #12 对照 SU2 核对 α/β 时漏看了这个系数。
     def P_plus(M):
         """P+ 函数"""
         if abs(M) >= 1:
             return 0.5 * (1 + np.sign(M))
         else:
-            return 0.25 * ((M + 1)**2 * (2 - M) + alpha_pressure * M * (M**2 - 1)**2)
+            return 0.25 * (M + 1)**2 * (2 - M) + alpha_pressure * M * (M**2 - 1)**2
 
     def P_minus(M):
         """P- 函数"""
         if abs(M) >= 1:
             return 0.5 * (1 - np.sign(M))
         else:
-            return 0.25 * ((M - 1)**2 * (2 + M) - alpha_pressure * M * (M**2 - 1)**2)
+            return 0.25 * (M - 1)**2 * (2 + M) - alpha_pressure * M * (M**2 - 1)**2
 
     # 速度扩散项 pu (Liou 2006, AUSM+up 式18)：与 Mp 项配套的压力项低马赫
     # 稳定化。(unR-unL) 在 (L,R,n)->(R,L,-n) 变换下不变（法向翻转与 L/R 互换

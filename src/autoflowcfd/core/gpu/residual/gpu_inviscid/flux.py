@@ -96,6 +96,8 @@ def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref, precond_mode):
     # 2026-08-28，#12），与 kernels.py::compute_ausm_up_flux 逐字对应，
     # 完整推导/文献交叉核实见该文件同名注释，这里不重复。
     beta_mass = 1.0 / 8.0
+    # P5± 的 α 项不乘 1/4（Liou 2006 式 (24)；2026-09-25 修正，见
+    # core/fr_operators/kernels.py::compute_ausm_up_flux 的 P5 注释）。
     alpha_pressure = 3.0 / 16.0 * (-4.0 + 5.0 * fa * fa)
 
     # Weiss-Smith 预处理声速（与 kernels.py::compute_ausm_up_flux 的
@@ -156,14 +158,14 @@ def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref, precond_mode):
     Pp_L = cp.where(
         abs_ML_pr >= 1.0,
         0.5 * (1.0 + cp.sign(M_L_pr)),
-        0.25 * ((M_L_pr + 1.0)**2 * (2.0 - M_L_pr)
-                + alpha_pressure * M_L_pr * (M_L_pr**2 - 1.0)**2),
+        0.25 * (M_L_pr + 1.0)**2 * (2.0 - M_L_pr)
+        + alpha_pressure * M_L_pr * (M_L_pr**2 - 1.0)**2,
     )
     Pm_R = cp.where(
         abs_MR_pr >= 1.0,
         0.5 * (1.0 - cp.sign(M_R_pr)),
-        0.25 * ((M_R_pr - 1.0)**2 * (2.0 + M_R_pr)
-                - alpha_pressure * M_R_pr * (M_R_pr**2 - 1.0)**2),
+        0.25 * (M_R_pr - 1.0)**2 * (2.0 + M_R_pr)
+        - alpha_pressure * M_R_pr * (M_R_pr**2 - 1.0)**2,
     )
 
     # pu 速度扩散

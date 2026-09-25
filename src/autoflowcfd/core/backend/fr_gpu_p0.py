@@ -98,6 +98,8 @@ if _CUDA_IMPORT_OK:
         # 2026-08-28，#12），与 core/fr_kernels.py::compute_ausm_up_flux
         # 逐字对应，完整推导/文献交叉核实见该文件同名注释。
         beta_mass = 1.0 / 8.0
+        # P5± 的 α 项不乘 1/4（Liou 2006 式 (24)；2026-09-25 修正，见
+        # core/fr_operators/kernels.py::compute_ausm_up_flux 的 P5 注释）。
         alpha_pressure = 3.0 / 16.0 * (-4.0 + 5.0 * fa * fa)
 
         # Weiss-Smith 预处理声速（与 kernels.py::compute_ausm_up_flux 的
@@ -154,15 +156,15 @@ if _CUDA_IMPORT_OK:
             sign_ML = 1.0 if M_L_pr > 0.0 else (-1.0 if M_L_pr < 0.0 else 0.0)
             Pp_L = 0.5 * (1.0 + sign_ML)
         else:
-            Pp_L = 0.25 * ((M_L_pr + 1.0) ** 2 * (2.0 - M_L_pr)
-                           + alpha_pressure * M_L_pr * (M_L_pr**2 - 1.0) ** 2)
+            Pp_L = (0.25 * (M_L_pr + 1.0) ** 2 * (2.0 - M_L_pr)
+                    + alpha_pressure * M_L_pr * (M_L_pr**2 - 1.0) ** 2)
 
         if abs(M_R_pr) >= 1.0:
             sign_MR = 1.0 if M_R_pr > 0.0 else (-1.0 if M_R_pr < 0.0 else 0.0)
             Pm_R = 0.5 * (1.0 - sign_MR)
         else:
-            Pm_R = 0.25 * ((M_R_pr - 1.0) ** 2 * (2.0 + M_R_pr)
-                           - alpha_pressure * M_R_pr * (M_R_pr**2 - 1.0) ** 2)
+            Pm_R = (0.25 * (M_R_pr - 1.0) ** 2 * (2.0 + M_R_pr)
+                    - alpha_pressure * M_R_pr * (M_R_pr**2 - 1.0) ** 2)
 
         # pu 速度扩散项 (Liou 2006 AUSM+up 式18)，与 Mp 项配套。
         Ku = 0.75

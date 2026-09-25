@@ -204,47 +204,118 @@ class TestPrecondModeFluxIdentities:
         )
 
 
-class TestAusmUpWallPressureVsExactRiemann:
-    """**本文件的核心**：固壁镜像面上的界面压力与精确声学解的定量对照。
+def _liou_reference_flux(qL, qR, n, mach_ref, mode):
+    """Liou (2006) AUSM+up 的独立转写（逐项对照 SU2 `CUpwAUSMPLUSUP_Flow::
+    ComputeMassAndPressureFluxes`），加上本项目的预处理声速作用域 `mode`。
 
-    判据来源：镜像状态 (rho, u_n, p) | (rho, -u_n, p) 的精确黎曼解是两道
-    对称压缩波，声学（线性化）近似下中间压力
+    刻意与生产实现分开写：两者只有同时出错才会一起通过。P5± 的 α 项
+    **不**乘 1/4（Liou 式 (24) 展开、SU2 `pLP = 0.25*(mL+1)^2*(2-mL) +
+    alpha*mL*(mL^2-1)^2`）—— 生产实现 2026-09-25 之前在这里多乘了 1/4。
+    """
+    g = GAMMA
+    rL, rR = qL[0], qR[0]
+    pL, pR = qL[4], qR[4]
+    unL, unR = float(qL[1:4] @ n), float(qR[1:4] @ n)
+    aL, aR = np.sqrt(g * pL / rL), np.sqrt(g * pR / rR)
+    ah = 0.5 * (aL + aR)
+    rh = 0.5 * (rL + rR)
+    Mbar2 = (unL ** 2 + unR ** 2) / (2 * ah ** 2)
+    M0 = np.sqrt(min(1.0, max(Mbar2, mach_ref ** 2)))
+    fa = max(M0 * (2 - M0), 1e-6)
+    beta, alpha = 1 / 8, 3 / 16 * (-4 + 5 * fa * fa)
+    b2 = min(1.0, max(max(Mbar2, 1.1 * mach_ref ** 2), 1e-10))
+    sm, sp = {PRECOND_PHYSICAL: (1.0, 1.0),
+              PRECOND_PRESSURE_PHYSICAL: (np.sqrt(b2), 1.0),
+              PRECOND_LEGACY: (np.sqrt(b2), np.sqrt(b2))}[mode]
+    ML, MR = unL / (sm * aL), unR / (sm * aR)
+    MLp, MRp = unL / (sp * aL), unR / (sp * aR)
 
-        p* - p = rho * a * u_n
+    def m4(M, s):
+        if abs(M) >= 1:
+            return 0.5 * (M + s * abs(M))
+        return s * 0.25 * (M + s) ** 2 + s * beta * (M * M - 1) ** 2
 
-    这是"用镜像黎曼解做固壁"这一标准做法的固有压力升高，不是缺陷；
-    但它必须是 `rho*a*u_n` 这个量级，而不是 `p` 本身的量级。
+    def p5(M, s):
+        if abs(M) >= 1:
+            return 0.5 * (1 + s * np.sign(M))
+        return 0.25 * (M + s) ** 2 * (2 - s * M) + s * alpha * M * (M * M - 1) ** 2
+
+    Mp = -(0.25 / fa) * max(1 - Mbar2, 0.0) * (pR - pL) / (rh * (sm * ah) ** 2)
+    mdot = 0.5 * (rL * sm * aL + rR * sm * aR) * (m4(ML, 1) + m4(MR, -1) + Mp)
+    PL, PR = p5(MLp, 1), p5(MRp, -1)
+    ph = PL * pL + PR * pR - 0.75 * PL * PR * (rL + rR) * fa * (sp * ah) * (unR - unL)
+    up = qL if mdot >= 0 else qR
+    H = g / (g - 1) * up[4] / up[0] + 0.5 * float(up[1:4] @ up[1:4])
+    return np.array([mdot, mdot * up[1] + ph * n[0], mdot * up[2] + ph * n[1],
+                     mdot * up[3] + ph * n[2], mdot * H])
+
+
+class TestAusmUpMatchesLiouReference:
+    """生产通量与 Liou/SU2 参考转写逐位（到舍入）一致，三个预处理档都要。"""
+
+    @pytest.mark.parametrize('mode', ALL_MODES)
+    def test_random_states(self, mode):
+        rng = np.random.default_rng(20260925)
+        worst = 0.0
+        for _ in range(400):
+            qL = np.array([RHO_INF * (0.5 + rng.random()), *((rng.random(3) - 0.5) * 2 * U_INF),
+                           P_INF * (0.9 + 0.2 * rng.random())])
+            qR = np.array([RHO_INF * (0.5 + rng.random()), *((rng.random(3) - 0.5) * 2 * U_INF),
+                           P_INF * (0.9 + 0.2 * rng.random())])
+            n = rng.normal(size=3)
+            n /= np.linalg.norm(n)
+            F = _flux(qL, qR, n, MACH_REF, mode)
+            R = _liou_reference_flux(qL, qR, n, MACH_REF, mode)
+            worst = max(worst, float(np.max(np.abs(F - R) / (np.abs(R) + 1e-9 * P_INF))))
+        assert worst < 1e-10, f"mode={ausm_precond_mode_label(mode)} 与 Liou/SU2 参考最大相对差 {worst:.3e}"
+
+
+class TestAusmUpLowMachWallScaling:
+    """**本文件的核心**：固壁镜像面上界面压力的低马赫标度。
+
+    镜像状态 (rho, u_n, p) | (rho, -u_n, p) 的**可压缩精确**黎曼解给出声学
+    超压 `p* - p = rho*a*u_n`（O(M) 标度）。那正是 Godunov 型格式在低马赫下
+    失效的机制（Guillard & Viozat 1999）：稳态驻点附近 u_n ~ U 时 Cp ~ 2/M。
+    AUSM+up 引入 fa 缩放的目的就是在低马赫下**偏离**这个声学响应，使压力
+    扰动回到 O(M^2)。2026-09-25 之前本类以"与 rho*a*u_n 吻合到 10%"为判据
+    —— 那条判据与 P5± 的 α 项多乘 1/4 的实现缺陷互相掩护：plate_demo
+    （M=0.098）P0 稳态驻点平台 Cp≈21.5 ≈ 2/M，Cd≈4.2（实验≈1.2）。
     """
 
-    @pytest.mark.parametrize('frac', [1.0, 0.5, 0.2, 0.05])
-    def test_physical_mode_matches_acoustic_exact(self, frac):
-        """physical 档的壁面超压必须与 rho*a*u_n 吻合到 10% 以内。"""
-        u_n = frac * U_INF
+    def _dp(self, u_n, mach_ref, mode, p=P_INF):
         q_int, q_gho, n = _wall_pair(u_n)
-        F = _flux(q_int, q_gho, n, MACH_REF, PRECOND_PHYSICAL)
-        # 壁面上质量通量恒为零，故 F[1] = p_half * n_x
+        q_int[4] = q_gho[4] = p
+        F = _flux(q_int, q_gho, n, mach_ref, mode)
         assert abs(F[0]) < 1e-10 * RHO_INF * A_INF, '壁面质量通量必须为零'
-        dp = F[1] / n[0] - P_INF
-        dp_exact = RHO_INF * A_INF * u_n
-        assert abs(dp - dp_exact) < 0.10 * dp_exact, (
-            f"u_n/U_inf={frac}: physical 档超压 {dp:.1f} Pa 与精确声学解 "
-            f"{dp_exact:.1f} Pa 偏差 {100*abs(dp-dp_exact)/dp_exact:.1f}% > 10%"
-        )
+        return F[1] / n[0] - p
 
-    def test_legacy_mode_overpredicts_by_more_than_5x(self):
-        """legacy 档的回归钉：它必须仍然表现出那个 >5 倍的过预测。
+    @pytest.mark.parametrize('frac', [1.0, 0.5, 0.2, 0.05])
+    def test_physical_mode_is_far_below_acoustic_response(self, frac):
+        """physical 档的壁面超压必须远小于声学响应 rho*a*u_n（M=0.098 下 < 25%）。"""
+        u_n = frac * U_INF
+        ratio = self._dp(u_n, MACH_REF, PRECOND_PHYSICAL) / (RHO_INF * A_INF * u_n)
+        assert 0.0 < ratio < 0.25, f"u_n/U={frac}: 超压/声学响应 = {ratio:.3f}"
 
-        这条断言的方向是刻意的——它不是"期望 legacy 正确"，而是把
-        已确认的缺陷量级钉住，以免有人"顺手修一下 legacy" 后
-        legacy/physical 的 A/B 基线悄悄失效、历史对照数据无法复现。
+    def test_physical_mode_scales_like_mach(self):
+        """超压/声学响应 ∝ M：来流马赫数减半（u_n 按同一 u_n/U 取）时比值约减半。
+
+        这是低马赫相容性的直接判据；α 项多乘 1/4 时该比值 ≈0.95 且与 M 无关。
         """
-        q_int, q_gho, n = _wall_pair(U_INF)
-        dp_legacy = _flux(q_int, q_gho, n, MACH_REF, PRECOND_LEGACY)[1] / n[0] - P_INF
-        dp_exact = RHO_INF * A_INF * U_INF
-        assert dp_legacy / dp_exact > 5.0, (
-            f"legacy 档过预测倍数 {dp_legacy/dp_exact:.2f} <= 5，"
-            f"与 2026-09-16 实测的 7.3 倍不符，基线已变，请重新标定 A/B 对照"
-        )
+        r1 = self._dp(0.5 * U_INF, MACH_REF, PRECOND_PHYSICAL) / (RHO_INF * A_INF * 0.5 * U_INF)
+        r2 = self._dp(0.25 * U_INF, 0.5 * MACH_REF, PRECOND_PHYSICAL) / (RHO_INF * A_INF * 0.25 * U_INF)
+        assert 0.35 < r2 / r1 < 0.65, f"M 减半后比值之比 {r2 / r1:.3f}（应≈0.5）"
+
+    def test_p5_split_slope_at_zero_is_order_fa_squared(self):
+        """P5+(M)+P5-(-M) 在 M=0 处的斜率 = 2(0.75+α)，低马赫下 = O(fa^2)。"""
+        eps = 1e-6
+        slope = self._dp(eps * A_INF, MACH_REF, PRECOND_PHYSICAL) / (eps * P_INF)
+        # 只取 P5 那一半：减去 Pu 项在同一 u_n 上的贡献（线性于 u_n）
+        m0 = MACH_REF
+        fa = m0 * (2 - m0)
+        pu = 0.75 * 0.25 * 2 * RHO_INF * fa * A_INF * 2 * eps * A_INF / (eps * P_INF)
+        alpha = 3 / 16 * (-4 + 5 * fa * fa)
+        assert abs((slope - pu) - 2 * (0.75 + alpha)) < 1e-4, (slope - pu, 2 * (0.75 + alpha))
+        assert abs(2 * (0.75 + alpha)) < 2.0 * fa * fa
 
     def test_zero_normal_velocity_gives_exactly_p(self):
         """u_n = 0 时（收敛态的壁面）三档都必须给出 p_half 精确等于 p。"""
@@ -269,10 +340,13 @@ class TestAusmUpWallPressureVsExactRiemann:
             q_int, q_gho, _ = _wall_pair(u_n)
             dp.append(_flux(q_int, q_gho, n, MACH_REF, PRECOND_PHYSICAL)[1] - P_INF)
         slopes = np.diff(dp) / np.diff(u_list)
-        assert np.all(slopes > 0.5 * RHO_INF * A_INF), (
-            f"physical 档恢复梯度出现饱和/反向：min slope={slopes.min():.1f}，"
-            f"应处处 > 0.5*rho*a={0.5*RHO_INF*A_INF:.1f}"
+        # 低马赫相容的量级是 rho*U（不是声阻抗 rho*a —— 那是 O(M) 标度，
+        # 见本类文档）；恢复梯度必须处处为正、不塌陷、且不低于 rho*U。
+        assert np.all(slopes > RHO_INF * U_INF), (
+            f"physical 档恢复梯度出现饱和/反向或过软：min slope={slopes.min():.1f}，"
+            f"应处处 > rho*U={RHO_INF*U_INF:.1f}"
         )
+        assert np.all(np.diff(slopes) > 0), "physical 档恢复梯度应随 u_n 单调增强（不饱和）"
 
     def test_legacy_restoring_gradient_saturates(self):
         """反向对照：legacy 档在同一区间内必须出现恢复梯度塌陷。
@@ -350,3 +424,51 @@ class TestPrecondModeScopeIsolation:
                 f"physical 档下 mach_ref={mach_ref} 改变了通量，"
                 f"说明 beta2 仍在通量内部生效"
             )
+
+
+class TestEveryImplementationUsesTheSameP5:
+    """AUSM+up 有四份实现（CPU numba 核、GPU CuPy 向量化版、GPU CUDA P0 源串、
+    backend/fr_gpu_p0.py）。2026-09-25 修正的 α 项系数缺陷在四份里同时存在，
+    这里把"四份一致"钉成判据。"""
+
+    @pytest.mark.parametrize('mode', ALL_MODES)
+    def test_cupy_batch_version_matches_cpu_kernel(self, monkeypatch, mode):
+        import autoflowcfd.core.gpu.residual.gpu_inviscid.flux as gflux
+        from tests.unit._gpu_cupy_shim import patch_module_get_cupy
+
+        class _NumpyAsCupy:
+            def __getattr__(self, name):
+                return getattr(np, name)
+
+        patch_module_get_cupy(monkeypatch, gflux, _NumpyAsCupy())
+        rng = np.random.default_rng(99)
+        m = 300
+        QL = np.column_stack([RHO_INF * (0.5 + rng.random(m)), (rng.random((m, 3)) - 0.5) * 2 * U_INF,
+                              P_INF * (0.9 + 0.2 * rng.random(m))])
+        QR = np.column_stack([RHO_INF * (0.5 + rng.random(m)), (rng.random((m, 3)) - 0.5) * 2 * U_INF,
+                              P_INF * (0.9 + 0.2 * rng.random(m))])
+        N = rng.normal(size=(m, 3))
+        N /= np.linalg.norm(N, axis=1, keepdims=True)
+        Fg = np.asarray(gflux._ausm_up_flux_batch_gpu(QL, QR, N, MACH_REF, mode))
+        Fc = np.array([_flux(QL[i], QR[i], N[i], MACH_REF, mode) for i in range(m)])
+        rel = np.abs(Fg - Fc) / (np.abs(Fc) + 1e-9 * P_INF)
+        assert rel.max() < 1e-10, f"GPU 批量版与 CPU 核最大相对差 {rel.max():.3e}"
+
+    @pytest.mark.parametrize('module', [
+        'autoflowcfd.core.gpu.residual.gpu_p0_inviscid',
+        'autoflowcfd.core.backend.fr_gpu_p0',
+        'autoflowcfd.core.gpu.residual.gpu_inviscid.flux',
+        'autoflowcfd.core.fr_operators.kernels',
+    ])
+    def test_alpha_term_is_not_wrapped_in_the_quarter(self, module):
+        """本机无法执行的 CUDA 实现只能做结构判据：P5 表达式里 α 项不得被
+        包进 `0.25 * ((...` 的同一对括号里。"""
+        import importlib
+        import inspect
+        import re
+
+        src = inspect.getsource(importlib.import_module(module))
+        code = "\n".join(ln.split("#", 1)[0].split("//", 1)[0] for ln in src.splitlines())
+        bad = re.findall(r"0\.25\s*\*\s*\(\s*\(\s*M\w*\s*[+-]\s*1(?:\.0)?\s*\)[^;]*?alpha_pressure",
+                         code, flags=re.S)
+        assert not bad, f"{module} 仍把 α 项包进了 0.25*(...)：{bad[:1]}"

@@ -53,6 +53,12 @@ AutoFlowCFD 是一款开源计算流体力学（CFD）软件，
 import os
 import multiprocessing
 
+# numba 磁盘缓存按核源码版本隔离——必须先于任何 @njit(cache=True) 模块导入，
+# 理由见 _numba_cache.py（被内联的核函数改了、缓存不失效的真实事故）。
+from ._numba_cache import configure_numba_cache_dir
+
+configure_numba_cache_dir()
+
 _cpu_count = multiprocessing.cpu_count()
 os.environ.setdefault('MKL_NUM_THREADS', str(_cpu_count))
 os.environ.setdefault('OPENBLAS_NUM_THREADS', str(_cpu_count))
