@@ -27,6 +27,7 @@ AutoFlowCFD V2.0 - 分布式面几何
 from .types import (  # noqa: F401
     DistributedFlatFaceGeometry,
     _expand_compact_src1,
+    native_cell_is_prism,
 )
 from .build import (  # noqa: F401
     build_distributed_flat_face,
@@ -35,4 +36,5 @@ from .build import (  # noqa: F401
 __all__ = [
     "DistributedFlatFaceGeometry",
     "build_distributed_flat_face",
+    "native_cell_is_prism",
 ]

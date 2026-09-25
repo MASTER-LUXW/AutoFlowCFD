@@ -60,6 +60,7 @@ class _DistributedStepMixin:
             mu_molecular=self.local_solver.mu_molecular,
             freestream=self.local_solver.freestream,
             cfl_controller=self._cfl_controller,
+            fixed_cfl_number=self.fixed_cfl_number,
             current_order=getattr(self, "current_order", self.order),
             low_mach_precond_enabled=getattr(
                 self, "low_mach_precond_enabled", False),
@@ -184,12 +185,8 @@ class _DistributedStepMixin:
                 self.dist_flat_face, self.mesh, self.ops, self.sgs_model,
             )
 
-        def residual_func_raw(U_flat_trial: np.ndarray) -> np.ndarray:
-            """未经预处理的物理残差（TimeIntegrator 约定 dU/dt = -R）。RK3 每个
-            stage 都会调用一次：对该 stage 的中间解重新做 halo 交换 +
-            残差求值（halo 数据在每个 stage 之间会变化，不能复用上一个
-            stage 交换到的邻居数据）。"""
-            U_stage_local = U_flat_trial.reshape(n_local, n_sps, n_vars)
+        def _inviscid_dudt(U_stage_local: np.ndarray) -> np.ndarray:
+            """无粘 dU/dt（含本 stage 的 halo 交换）。"""
             if n_sps == 1:
                 # P0（Order Continuation 最低阶）：单机无粘残差在这个
                 # 阶数完全绕开 flat-face 压缩抽象（见 core/fr_residual/
@@ -201,27 +198,33 @@ class _DistributedStepMixin:
                 from autoflowcfd.core.mpi.distributed_order_continuation import (
                     compute_distributed_p0_inviscid_residual,
                 )
-                inviscid_residual = compute_distributed_p0_inviscid_residual(
-                    self, U_stage_local,
-                )
-            else:
-                inviscid_residual = distributed_compute_inviscid_residual(
-                    U_stage_local, self.partition, self.halo_exchange,
-                    self.dist_flat_face, self.mesh, self.ops,
-                    boundary_ghost_provider, mach_ref=mach_ref,
-                )
+                return compute_distributed_p0_inviscid_residual(self, U_stage_local)
+            return distributed_compute_inviscid_residual(
+                U_stage_local, self.partition, self.halo_exchange,
+                self.dist_flat_face, self.mesh, self.ops,
+                boundary_ghost_provider, mach_ref=mach_ref,
+            )
+
+        def _viscous_dudt(U_stage_local: np.ndarray) -> np.ndarray:
+            """粘性（含湍流涡粘耦合）dU/dt（含本 stage 的 halo 交换）。"""
+            return distributed_compute_viscous_residual(
+                U_stage_local, self.partition, self.halo_exchange,
+                self.dist_flat_face, self.mesh, self.ops,
+                mu, boundary_ghost_provider,
+                mu_t_field_compact=mu_t_field_compact,
+                wmles_model=self.wmles_model,
+                wall_distance_compact=self.wall_distance_compact,
+            )
+
+        def residual_func_raw(U_flat_trial: np.ndarray) -> np.ndarray:
+            """未经预处理的物理残差（TimeIntegrator 约定 dU/dt = -R）。RK3 每个
+            stage 都会调用一次：对该 stage 的中间解重新做 halo 交换 +
+            残差求值（halo 数据在每个 stage 之间会变化，不能复用上一个
+            stage 交换到的邻居数据）。"""
+            U_stage_local = U_flat_trial.reshape(n_local, n_sps, n_vars)
+            total_dudt = _inviscid_dudt(U_stage_local)
             if enable_viscous:
-                viscous_residual = distributed_compute_viscous_residual(
-                    U_stage_local, self.partition, self.halo_exchange,
-                    self.dist_flat_face, self.mesh, self.ops,
-                    mu, boundary_ghost_provider,
-                    mu_t_field_compact=mu_t_field_compact,
-                    wmles_model=self.wmles_model,
-                    wall_distance_compact=self.wall_distance_compact,
-                )
-                total_dudt = inviscid_residual + viscous_residual
-            else:
-                total_dudt = inviscid_residual
+                total_dudt = total_dudt + _viscous_dudt(U_stage_local)
             return -total_dudt
 
         def residual_func(U_flat_trial: np.ndarray) -> np.ndarray:
@@ -258,20 +261,35 @@ class _DistributedStepMixin:
         # local 排列里棱柱/四面体交错，所以用按单元类型掩码分派的变体；
         # 单元类型取自 `dist_fc.compact_cell_type`（0=棱柱/1=四面体，
         # 紧凑排列），换回原生排列后切 local 段。
+        dist_fc = self.dist_flat_face
+        from autoflowcfd.core.mpi.distributed_flat_face import native_cell_is_prism
+
+        cell_is_prism = native_cell_is_prism(dist_fc)[:n_local]
         filter_func = None
         if n_sps > 1:
             from autoflowcfd.core.fr_solver.filter import (
                 build_filter_func_by_cell_type, resolve_filter_mode,
             )
             mode = resolve_filter_mode("cpu-mpi")
-            cct = self.dist_flat_face.compact_cell_type
-            cell_is_prism = (cct[self.dist_flat_face.inv_perm][:n_local] == 0)
             if mode == "sensor":
                 filter_func = self._build_sensor_gated_filter_func_distributed(
                     n_local, n_sps, cell_is_prism)
             else:
                 filter_func = build_filter_func_by_cell_type(
                     self.ops, n_local, n_sps, cell_is_prism)
+
+        # 正性保持（与单机同一个限制器、同一个核）：几何取 local 段、原生
+        # 排列 —— adapter 的 jacobians 在紧凑排列，经 inv_perm 换回后切片，
+        # 与上面的 cell_is_prism 同一换序。只在缓存失效（阶数切换）时构建。
+        from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
+
+        def _local_geometry():
+            from autoflowcfd.core.mpi.distributed_compute import DistributedMeshAdapter
+            adapter = DistributedMeshAdapter(self.partition, dist_fc, self.mesh, self.ops)
+            det_compact = np.asarray(adapter.jacobians["det_jacs"]).reshape(-1, n_sps)
+            return det_compact[dist_fc.inv_perm][:n_local], cell_is_prism
+
+        positivity_func = get_positivity_limiter(self, geometry=_local_geometry)
 
         # Stage 0 残差单独算一次：既用于收敛监控（与旧实现报告口径一致），
         # 也通过 residual0= 传给 _ssp_rk_stage_step 复用，避免它内部再重复
@@ -305,13 +323,35 @@ class _DistributedStepMixin:
                 U_flat, residual_func, dt_local_flat, dt_physical=dt,
                 solution_prev=self._dual_time_U_prev,
                 max_inner_iter=self._time_integrator.dual_time_steps,
-                filter_func=filter_func,
+                filter_func=filter_func, positivity_func=positivity_func,
             )
             self._dual_time_U_prev = U_flat.copy()
+        elif self._time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
+            # 显式无粘对流 + 隐式粘性（阻尼 Picard），与单机
+            # `fr_solver/step.py` 同一个拆分、同一个积分器。**2026-09-25 补齐**：
+            # 此前这里无条件走 `_ssp_rk_stage_step`，而 IMEX_EULER 在系数表里
+            # 没有条目、回退成 1 级的前向 Euler 表 —— `--time-method imex
+            # --n-ranks N` 静默跑成了前向 Euler（假选项）。
+            def _explicit_R(U_flat_trial):
+                U3 = U_flat_trial.reshape(n_local, n_sps, n_vars)
+                return (-_inviscid_dudt(U3)).reshape(n_local * n_sps, n_vars)
+
+            def _implicit_R(U_flat_trial):
+                if not enable_viscous:
+                    return np.zeros_like(U_flat_trial)
+                U3 = U_flat_trial.reshape(n_local, n_sps, n_vars)
+                return (-_viscous_dudt(U3)).reshape(n_local * n_sps, n_vars)
+
+            U_new_flat = self._time_integrator.step_imex(
+                U_flat, _explicit_R, _implicit_R, dt_local_flat,
+                positivity_func=positivity_func,
+            )
         else:
-            U_new_flat = self._time_integrator._ssp_rk_stage_step(
-                U_flat, residual_func, dt_local_flat, p_floor=1.0, residual0=residual0,
-                filter_func=filter_func,
+            # `step()` 对 IMEX/DUAL_TIME/NEWTON_KRYLOV 显式报错（不静默退化成
+            # 前向 Euler）；前两者上面已分派，NEWTON_KRYLOV 在构造时即拒绝。
+            U_new_flat = self._time_integrator.step(
+                U_flat, residual_func, dt_local_flat, residual0=residual0,
+                filter_func=filter_func, positivity_func=positivity_func,
             )
 
         U_new_local = U_new_flat.reshape(n_local, n_sps, n_vars)

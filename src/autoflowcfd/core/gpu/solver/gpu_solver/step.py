@@ -13,6 +13,7 @@ import numpy as np
 from typing import Optional, Dict, Any
 from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
 from autoflowcfd.core.gpu import get_cupy
+from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 
 
 class _GPUSolverStepMixin:
@@ -112,33 +113,27 @@ class _GPUSolverStepMixin:
         else:
             residual0 = residual0_raw.reshape(n_cells * n_sps, self.n_vars)
 
+        # 守恒的正性保持限制器：与 CPU 同一个（数组模块无关实现），按阶数缓存。
+        from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
+        positivity_func = get_positivity_limiter(self, xp=cp)
+
         # 根据时间方案选择推进方式
         scheme = self.time_integrator.scheme
 
-        if scheme == "dual_time":
-            # DUAL_TIME: 真正时间精度的物理时间推进
-            if self._dual_time_U_prev is None:
-                # 第一个物理步：BDF1
-                U_new_flat = self.time_integrator.step_dual_time(
-                    U_flat, mean_flow_residual, dt_local_full,
-                    dt_physical=dt,
-                    solution_prev=None,
-                    max_inner_iter=self.time_integrator.dual_time_steps if hasattr(self.time_integrator, 'dual_time_steps') else 5,
-                    filter_func=self.filter_func_gpu,
-                )
-            else:
-                # 后续物理步：BDF2
-                U_new_flat = self.time_integrator.step_dual_time(
-                    U_flat, mean_flow_residual, dt_local_full,
-                    dt_physical=dt,
-                    solution_prev=self._dual_time_U_prev,
-                    max_inner_iter=self.time_integrator.dual_time_steps if hasattr(self.time_integrator, 'dual_time_steps') else 5,
-                    filter_func=self.filter_func_gpu,
-                )
+        if scheme == TimeIntegrationScheme.DUAL_TIME:
+            # DUAL_TIME: 真正时间精度的物理时间推进。`solution_prev=None`
+            # （第一个物理步）时积分器自己退化为 BDF1，其后 BDF2。
+            U_new_flat = self.time_integrator.step_dual_time(
+                U_flat, mean_flow_residual, dt_local_full,
+                dt_physical=dt,
+                solution_prev=self._dual_time_U_prev,
+                max_inner_iter=self.time_integrator.dual_time_steps,
+                filter_func=self.filter_func_gpu, positivity_func=positivity_func,
+            )
             # 保存当前解作为下一步的 prev
             self._dual_time_U_prev = U_flat.copy()
 
-        elif scheme == "imex_euler":
+        elif scheme == TimeIntegrationScheme.IMEX_EULER:
             # IMEX: 显式处理对流，隐式处理粘性
             def convective_residual_only(U_flat_trial):
                 U_trial = U_flat_trial.reshape(n_cells, n_sps, self.n_vars)
@@ -152,15 +147,15 @@ class _GPUSolverStepMixin:
 
             U_new_flat = self.time_integrator.step_imex(
                 U_flat, convective_residual_only, diffusive_residual_only,
-                dt_local_full, p_floor=1.0,
+                dt_local_full, positivity_func=positivity_func,
             )
 
         else:
             # SSP-RK2/RK3 or Forward Euler
             U_new_flat = self.time_integrator.step(
                 U_flat, mean_flow_residual, dt_local_full,
-                p_floor=1.0, residual0=residual0,
-                filter_func=self.filter_func_gpu,
+                residual0=residual0,
+                filter_func=self.filter_func_gpu, positivity_func=positivity_func,
             )
 
         self.U_gpu = U_new_flat.reshape(n_cells, n_sps, self.n_vars)

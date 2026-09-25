@@ -175,7 +175,7 @@ class DistributedCFLView:
     def __init__(self, U_compact, Q_compact, dist_fc, local_mesh, *,
                  mu_molecular, freestream, cfl_controller, current_order,
                  low_mach_precond_enabled, mu_t_local=None, n_local_cells=None,
-                 jacobians=None, cell_volumes=None):
+                 jacobians=None, cell_volumes=None, fixed_cfl_number=None):
         n_compact, n_sps = U_compact.shape[0], U_compact.shape[1]
         face_area, face_normal = extract_local_face_area_normal(dist_fc, local_mesh)
         fc_view = _DistributedFaceConnectivityView(dist_fc, face_area, face_normal)
@@ -193,6 +193,7 @@ class DistributedCFLView:
         self.mu_molecular = mu_molecular
         self.freestream = freestream
         self._cfl_controller = cfl_controller
+        self.fixed_cfl_number = fixed_cfl_number
         self.current_order = current_order
         self.low_mach_precond_enabled = low_mach_precond_enabled
         self._n_local_cells = (n_compact if n_local_cells is None else n_local_cells)
@@ -265,6 +266,7 @@ def compute_distributed_local_time_step(
     mu_molecular: float,
     freestream: dict,
     cfl_controller=None,
+    fixed_cfl_number=None,
     current_order: int = 0,
     low_mach_precond_enabled: bool = False,
     mu_t_local: Optional[np.ndarray] = None,
@@ -282,8 +284,9 @@ def compute_distributed_local_time_step(
             {'det_jacs','inv_jacs'}（与 DistributedMeshAdapter 同一来源）。
         cell_volumes: 同上，(n_local+n_halo,)。
         n_local_cells: 本 rank 的 local cell 数（切片长度）。
-        mu_molecular, freestream, cfl_controller, current_order,
-        low_mach_precond_enabled: 与单机 solver 上的同名量语义完全一致。
+        mu_molecular, freestream, cfl_controller, fixed_cfl_number,
+        current_order, low_mach_precond_enabled: 与单机 solver 上的同名量语义
+            完全一致（CFL 取值规则见 adaptive_cfl/policy.py）。
         mu_t_local: (n_local, n_sps) 本地涡粘场，可选。
         return_physical_too: True 时返回 (dt_mean_flow, dt_physical)，
             前者可能是按预处理波速放大过的（湍流标量用后者）。
@@ -296,7 +299,8 @@ def compute_distributed_local_time_step(
     view = DistributedCFLView(
         U_compact, Q_compact, dist_fc, local_mesh,
         mu_molecular=mu_molecular, freestream=freestream,
-        cfl_controller=cfl_controller, current_order=current_order,
+        cfl_controller=cfl_controller, fixed_cfl_number=fixed_cfl_number,
+        current_order=current_order,
         low_mach_precond_enabled=low_mach_precond_enabled,
         mu_t_local=mu_t_local, n_local_cells=n_local_cells,
         jacobians=jacobians, cell_volumes=cell_volumes,

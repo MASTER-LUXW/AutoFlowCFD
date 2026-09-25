@@ -23,8 +23,8 @@ fr_residual/、turbulence/、mpi/——不对称，随文件数增长愈发难�
 - array_manager.py: GPU 数组管理与设备管理
 - gpu_face_geometry.py: GPU 版面几何缓存
 - gpu_modal_filter.py: GPU 模态滤波
-- gpu_time_integration.py / gpu_time_integration_imex.py /
-  gpu_time_integration_dual.py: GPU 时间积分（含 IMEX/双时间步）
+- gpu_time_integration.py: GPU 局部 CFL 步长；积分器本体继承 CPU 的
+  `TimeIntegrator`（RK/双时间步/IMEX 同一份实现，不另写 GPU 拷贝）
 
 设计原则:
 1. 统一 CuPy 框架：所有 GPU 计算走 CuPy（RawKernel/ElementwiseKernel + 向量化 API）

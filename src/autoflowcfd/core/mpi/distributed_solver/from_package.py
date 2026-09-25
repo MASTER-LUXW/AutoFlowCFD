@@ -14,7 +14,9 @@ from autoflowcfd.core.mpi import get_rank
 from autoflowcfd.core.mpi.halo import HaloExchange
 from autoflowcfd.core.mpi.distributed_state import DistributedFRState
 from autoflowcfd.core.mpi.comm import barrier
-from autoflowcfd.core.time_integration.base import TimeIntegrator, TimeIntegrationScheme
+from autoflowcfd.core.time_integration.base import (
+    TimeIntegrator, TimeIntegrationScheme, require_distributed_scheme,
+)
 
 
 class _DistributedFromPackageMixin:
@@ -254,7 +256,8 @@ class _DistributedFromPackageMixin:
         # 2026-09-02 已接入这两个字段（见 distributed_mesh_loader.py
         # 模块文档"DUAL_TIME 支持"一节），`.get(...)` 默认值只是兼容
         # 没有这两个字段的旧 checkpoint/package。
-        time_scheme = package.get('time_scheme', TimeIntegrationScheme.SSP_RK3)
+        time_scheme = require_distributed_scheme(
+            package.get('time_scheme', TimeIntegrationScheme.SSP_RK3))
         dual_time_steps = package.get('dual_time_inner_iter', 20)
         self._time_integrator = TimeIntegrator(
             scheme=time_scheme, dt=1.0, dual_time_steps=dual_time_steps,
@@ -274,26 +277,15 @@ class _DistributedFromPackageMixin:
         #   * 预处理只在 SSP-RK2/RK3 下启用（DUAL_TIME 的物理时间导数项
         #     与 IMEX 的残差拆分都需要单独推导 Gamma 的分配方式）；
         #   * 环境变量 AFCFD_LOW_MACH_PRECOND / AFCFD_CFL_LEGACY 同样生效。
-        self._cfl_controller = None
-        if time_scheme in (TimeIntegrationScheme.SSP_RK2,
-                           TimeIntegrationScheme.SSP_RK3):
-            from autoflowcfd.core.time_integration.adaptive_cfl import (
-                AdaptiveCFLController,
-            )
-            # None 感知（2026-09-15）：package 现在**总是**带 cfl_* 三个键
-            # （CLI 未指定时值为 None），所以不能用 `.get(k, default)`
-            # ——那会拿到显式的 None 而不是 default。
-            # **不再硬编码兜底默认值**（2026-09-17）：此前这里写死
-            # `cfl_start=0.1, cfl_max=0.5`，于是控制器默认值一改（同日按
-            # 直接谱测量与真实网格失效点重定为 0.03/0.06）分布式路径就与
-            # 单机路径脱节——`test_distributed_solver_main_init.py::
-            # TestDistributedStepMatchesSingleMachine` 当场测出 dt 相差
-            # 2.33 倍。现在只传**非 None** 的键，默认值的单一事实来源是
-            # `AdaptiveCFLController.__init__` 的签名。
-            _cfl_kw = {k: package[k]
-                       for k in ('cfl_start', 'cfl_max', 'cfl_min')
-                       if package.get(k) is not None}
-            self._cfl_controller = AdaptiveCFLController(**_cfl_kw)
+        # CFL 策略（控制器 or 固定 CFL）的唯一事实来源：
+        # `time_integration/adaptive_cfl/policy.py::build_cfl_policy`（六个后端
+        # 构造点此前各写一份且已分叉，见该模块文档）。
+        # 此前这里只对 SSP-RK2/RK3 建控制器，其余方案（IMEX、DUAL_TIME 的伪
+        # 时间步）走 cfl.py 的替身回退 0.1，与单机的 cfl_start 不一致。
+        from autoflowcfd.core.time_integration.adaptive_cfl.policy import build_cfl_policy
+        self._cfl_controller, self.fixed_cfl_number = build_cfl_policy(
+            time_scheme, cfl_start=package.get('cfl_start'),
+            cfl_max=package.get('cfl_max'), cfl_min=package.get('cfl_min'))
         _env_pc = os.environ.get("AFCFD_LOW_MACH_PRECOND")
         _req_pc = (bool(package.get('low_mach_precond', True))
                    if _env_pc is None else (_env_pc == "1"))

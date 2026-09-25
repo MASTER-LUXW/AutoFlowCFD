@@ -138,23 +138,6 @@ class TestGPUVolumeContract:
 class TestGPUTimeIntegration:
     """GPU 时间积分测试。"""
 
-    def test_enforce_positivity(self):
-        from autoflowcfd.core.gpu.gpu_time_integration import enforce_positivity_gpu
-        # 负密度和压力
-        U = cupy.array([[
-            -0.1,  # 负密度 → 应被修正
-            1.0, 0.0, 0.0,
-            -100.0,  # 负压力 → 应被修正
-        ]])
-        enforce_positivity_gpu(U, p_floor=1.0)
-        U_np = cupy.asnumpy(U)
-        assert U_np[0, 0] >= 1e-6  # 密度被修正
-        # 压力应 >= p_floor
-        rho = U_np[0, 0]
-        ke = 0.5 * (U_np[0, 1]**2) / rho
-        p = (GAMMA - 1.0) * (U_np[0, 4] - ke)
-        assert p >= 1.0
-
     def test_time_integrator_euler(self):
         from autoflowcfd.core.gpu.gpu_time_integration import GPUTimeIntegrator
         integrator = GPUTimeIntegrator(scheme="forward_euler", cfl=1.0)

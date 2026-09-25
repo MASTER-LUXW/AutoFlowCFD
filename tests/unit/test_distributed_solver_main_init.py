@@ -212,6 +212,29 @@ class TestDistributedStepMatchesSingleMachine:
             f"，precond={precond}")
 
 
+    def test_imex_step_matches_single_machine(self, mesh_and_ops):
+        """IMEX（2026-09-25 补齐）：此前分布式 `step()` 对 IMEX_EULER 无条件走
+        `_ssp_rk_stage_step`，系数表里没有 IMEX 条目、回退成 1 级前向 Euler
+        —— `--time-method imex --n-ranks N` 静默跑成前向 Euler。现在必须与
+        单机 IMEX 推进出同一个状态（同一积分器、同一对流/粘性拆分、同一
+        CFL 策略）。"""
+        mesh, ops = mesh_and_ops
+        rng = np.random.default_rng(777)
+        U0 = _nonuniform_U(mesh, rng)
+        single, dist = self._build(mesh, ops, U0, TimeIntegrationScheme.IMEX_EULER)
+
+        single.step(1e-6)
+        dist.step(1e-6)
+
+        n = mesh.n_cells
+        got = dist.state.U[:n]
+        exp = single.state.U
+        assert np.all(np.isfinite(got))
+        assert not np.array_equal(exp, U0), "单机 IMEX 一步没有推进，本用例失去判别力"
+        scale = np.maximum(np.abs(exp).max(axis=(0, 1)), 1e-300)
+        rel = (np.abs(got - exp) / scale).max()
+        assert rel <= 1e-10, f"分布式 IMEX 一步后的状态与单机不一致（相对 {rel:.3e}）"
+
 class TestDistributedDualTimeStepping:
     """DUAL_TIME（真正时间精度的瞬态仿真模式）分布式支持验证（2026-09-02，
     真实bug修复——见 __init__/step() 里 `self._time_integrator` 构造处的

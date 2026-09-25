@@ -277,25 +277,21 @@ class TestEveryBackendConstructsAController:
         # 这个模块 2026-09-24 拆成子包；`inspect.getsource(包)` 只返回
         # `__init__.py`，控制器构造点在 `build.py` 里。
         src = module_source(fd)
-        assert 'AdaptiveCFLController' in src
+        # 2026-09-25：控制器统一经 `adaptive_cfl/policy.py::build_cfl_policy`
+        # 构造（六个构造点此前各写一份且已分叉）。这里查这条路径确实调用
+        # 它、并 None 感知地从 package 取三个边界值；兜底默认值只能来自
+        # 控制器签名（结构守卫见 test_cfl_policy_single_source.py）。
+        assert 'build_cfl_policy(' in src
         assert '_cfl_controller' in src
-        # 且必须 None 感知地从 package 取三个边界值。判据改成查"取值方式"
-        # 而不是查那一行的字面量（2026-09-17）：原判据把兜底默认值
-        # `('cfl_start', 0.1), ('cfl_max', 0.5)` 写进断言，于是它反过来
-        # **锁死**了硬编码——而硬编码兜底正是问题所在（控制器默认值同日
-        # 重定为 0.03/0.06 后，这条路径会与单机脱节；CPU 分布式那份同样的
-        # 硬编码已被 `test_distributed_solver_main_init.py` 测出 dt 相差
-        # 2.33 倍）。现在三处都只传**非 None** 的键，默认值的单一事实
-        # 来源是 `AdaptiveCFLController.__init__` 的签名。
         for key in ('cfl_start', 'cfl_max', 'cfl_min'):
-            assert key in src, f"{key} 没有从 package 里取"
-        assert 'is not None' in src, "必须是 None 感知的取值"
+            assert f"package.get('{key}')" in src, f"{key} 没有从 package 里取"
         assert "('cfl_start', 0.1)" not in src, (
             "又把兜底默认值硬编码回去了——默认值只能有一个事实来源"
             "（AdaptiveCFLController 的签名）")
 
     def test_all_five_controller_sites_pass_cfl_min(self):
-        """五处构造点逐一核对，防止将来新增后端时又漏一处。"""
+        """构造点逐一核对，防止将来新增后端时又漏一处（2026-09-25 起统一
+        经 `build_cfl_policy`，这里查每处都调用它且接了 cfl_min）。"""
         from tests.unit._module_source import module_source
 
         from autoflowcfd.core.fr_solver import solver as cpu_single
@@ -309,7 +305,7 @@ class TestEveryBackendConstructsAController:
             # 用 module_source：这五个里已经有拆成子包的（gpu_multi_fd），
             # `inspect.getsource(包)` 只返回 `__init__.py`。
             src = module_source(mod)
-            assert 'AdaptiveCFLController(' in src, mod.__name__
+            assert 'build_cfl_policy(' in src, mod.__name__
             assert 'cfl_min' in src, f"{mod.__name__} 的控制器构造没有接 cfl_min"
 
 

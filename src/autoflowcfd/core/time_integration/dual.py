@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-import numpy as np
+import numpy as np  # noqa: F401  (类型标注)
 from loguru import logger
 
 
@@ -26,6 +26,7 @@ def step_dual_time(
     max_inner_iter: int = 5,
     tol: float = 1e-4,
     filter_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+    positivity_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
 ) -> np.ndarray:
     """执行一步 Dual-Time Stepping (S-05)：真正时间精度的物理时间推进。
 
@@ -57,7 +58,20 @@ def step_dual_time(
             保守 CFL 起点下明显不够，已提高默认值并通过 CLI/构造参数
             暴露给调用方调整）
     """
-    from .base import _SSP_RK3, enforce_positivity
+    from autoflowcfd.core.fr_solver.residual_diagnostics import SolverDivergedError
+    from autoflowcfd.core.utils.array_module import array_module
+
+    from .base import _SSP_RK3
+
+    # CPU 与 GPU（`GPUTimeIntegrator` 继承本类的同一个方法）共用这一份实现：
+    # 数组运算按数组模块分派，范数统一取成 Python float。GPU 此前有一份独立
+    # 拷贝（`gpu_time_integration_dual.py`），2026-08-23 这里修掉的四处 CFL
+    # 缺陷（硬下限卡死、外层分支把 retry 砍下的步长拉回、零容忍拒绝、判据
+    # 不一致）在那一份里**一处都没修**，2026-09-25 删除该拷贝。
+    xp = array_module(solution)
+
+    def _norm(a) -> float:
+        return float(xp.linalg.norm(a))
 
     U_n = solution  # 物理时间步 n 的状态
     U_tau = U_n.copy()  # 伪时间初始猜测
@@ -73,7 +87,7 @@ def step_dual_time(
 
     # 初始伪残差
     R_phys_initial = dual_residual(U_tau)
-    initial_res_norm = np.linalg.norm(R_phys_initial)
+    initial_res_norm = _norm(R_phys_initial)
 
     logger.debug(f"Dual-Time Stepping: initial pseudo-residual norm = {initial_res_norm:.6e}")
 
@@ -123,7 +137,7 @@ def step_dual_time(
     while k < max_inner_iter:
         # 计算增广伪残差（含物理时间导数项）
         R_phys = dual_residual(U_tau)
-        current_res_norm = np.linalg.norm(R_phys)
+        current_res_norm = _norm(R_phys)
 
         # 检查伪残差收敛。绝对阈值 tol 的判据必须要求 k>=1（至少真正
         # 做过一次伪时间迭代）才允许触发——这是一个真实复现过的 bug：
@@ -183,14 +197,27 @@ def step_dual_time(
             # 的 CFL 步长，前向欧拉稳定性域小得多，直接复用会失稳）。
             # R_phys 已经是 U_tau 处的 dual_residual，作为 residual0
             # 传入避免重复计算。
-            U_trial = integrator._ssp_rk_stage_step(
-                U_tau, dual_residual, adjusted_pseudo_dt, residual0=R_phys, table=_SSP_RK3, filter_func=filter_func
-            )
-            U_trial = enforce_positivity(U_trial)
-            if filter_func is not None:
-                U_trial = filter_func(U_trial)
+            # 每个 stage 的滤波与正性保持已在 `_ssp_rk_stage_step` 内部完成
+            # （`base._finish_stage`）。此前这里出来后又**再做一遍**正性钳制与
+            # 滤波 —— 对非幂等的滤波档（sensor 的 0.99 有界衰减）等于每次伪时间
+            # 迭代多衰减一次（2026-09-24 删除）。
+            try:
+                U_trial = integrator._ssp_rk_stage_step(
+                    U_tau, dual_residual, adjusted_pseudo_dt, residual0=R_phys, table=_SSP_RK3,
+                    filter_func=filter_func, positivity_func=positivity_func,
+                )
+            except SolverDivergedError:
+                # 伪时间试探步本来就允许失败：冲出可容许集与"残差恶化"是同一类
+                # 失败，按拒绝处理、缩小伪时间步重试。已经砍到硬下限仍不可容许，
+                # 才是真正的发散，原样抛出（不接受一个不可容许的状态）。
+                # 此前逐点硬钳把这类试探步"修"回可容许集（不守恒）再交给下面
+                # 的残差判据，所以这条路径从来没有显式处理过。
+                if cfl_current <= _CFL_HARD_FLOOR:
+                    raise
+                cfl_current = max(cfl_current * 0.5, _CFL_HARD_FLOOR)
+                continue
 
-            trial_res_norm = np.linalg.norm(dual_residual(U_trial))
+            trial_res_norm = _norm(dual_residual(U_trial))
             if trial_res_norm <= current_res_norm * _GROWTH_TOLERANCE or cfl_current <= _CFL_HARD_FLOOR:
                 # 接受：残差没有恶化超过容忍幅度（暂态期间的有限恶化是
                 # 正常现象，不是失稳），或者已经砍到硬下限——再砍下去
@@ -209,11 +236,11 @@ def step_dual_time(
             logger.warning(
                 f"Dual-Time inner iteration {k+1}: step rejected {_MAX_REJECT_RETRIES} times "
                 f"down to cfl={cfl_current:.3e}, still could not reduce residual "
-                f"({current_res_norm:.6e} -> {np.linalg.norm(dual_residual(U_next)):.6e})"
+                f"({current_res_norm:.6e} -> {_norm(dual_residual(U_next)):.6e})"
             )
 
         # 检查更新幅度
-        update_norm = np.linalg.norm(U_next - U_tau)
+        update_norm = _norm(U_next - U_tau)
         if update_norm < 1e-10:
             logger.debug(f"Dual-Time update too small at iteration {k+1}")
             U_tau = U_next

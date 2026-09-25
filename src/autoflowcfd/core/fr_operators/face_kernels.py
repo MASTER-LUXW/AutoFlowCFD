@@ -49,7 +49,6 @@ np.dot`（形状对不上直接崩溃，运气好被抓住了）；同样的两�
 """
 
 from dataclasses import dataclass
-from typing import Dict
 
 import numpy as np
 
@@ -216,6 +215,38 @@ class FlatFaceGeometry:
     n_colors: int
 
 
+def native_face_extrap_stack(ops, n_sps: int, n_native_rows: int = None) -> np.ndarray:
+    """全部原生面编码的"解点 -> 面通量点"外插矩阵，形状 `(n_rows, n_fp, n_sps)`。
+
+    行 `code - 6`：0~3 是四面体 4 个面（编码 6~9），4~8 是原生棱柱 5 个面
+    （编码 10~14）；列补零到全局 `n_sps` 宽度。**唯一的组装处** —— 平面面
+    几何（`build_flat_face_geometry`）与正性保持限制器
+    （`time_integration/positivity/limiter.py`，要在全部通量点上检查可容许性）
+    都用它，不各写一份。
+
+    Args:
+        n_native_rows: 行数；缺省按算子里是否有原生棱柱算子自动决定。
+    """
+    from autoflowcfd.fr.native_padding import pad_native_matrix_to_global
+    from autoflowcfd.grid.connectivity.face_connectivity import (
+        CUBE_FACE_CODES,
+        NATIVE_FACE_CODE_BASE,
+        NATIVE_PRISM_FACE_CODE_RANGE,
+    )
+
+    if n_native_rows is None:
+        _lo, _hi = NATIVE_PRISM_FACE_CODE_RANGE
+        n_native_rows = (_hi - NATIVE_FACE_CODE_BASE
+                         if ops.boundary_extrap_native_prism is not None
+                         else CUBE_FACE_CODES["prism_native_f0"] - NATIVE_FACE_CODE_BASE)
+    first = ops.native_face_extrap(NATIVE_FACE_CODE_BASE)
+    out = np.zeros((n_native_rows, first.shape[0], n_sps), dtype=np.float64)
+    for code in range(NATIVE_FACE_CODE_BASE, NATIVE_FACE_CODE_BASE + n_native_rows):
+        out[code - NATIVE_FACE_CODE_BASE] = pad_native_matrix_to_global(
+            ops.native_face_extrap(code), n_sps, pad_axes=(1,))
+    return out
+
+
 def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     """把 `mesh.face_flux_points` + `mesh.face_connectivity` 展平成
     `FlatFaceGeometry`。不缓存（缓存由 `get_flat_face_geometry` 负责），
@@ -302,28 +333,14 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     # `side_factor = 1.0 if code >= 6` 那类判据对两类原生面同样正确：
     # `*_adj_row_exact` 已经给出 outward 定向。
     if ops.boundary_extrap_native_tet is not None:
-        from autoflowcfd.fr.native_padding import pad_native_matrix_to_global
-        from autoflowcfd.grid.connectivity.face_connectivity import (
-            CUBE_FACE_CODES,
-            NATIVE_FACE_CODE_BASE,
-            NATIVE_PRISM_FACE_CODE_RANGE,
-        )
+        from autoflowcfd.grid.connectivity.face_connectivity import NATIVE_FACE_CODE_BASE
 
-        _prism_lo, _prism_hi = NATIVE_PRISM_FACE_CODE_RANGE
-        n_native_rows = (_prism_hi - NATIVE_FACE_CODE_BASE
-                         if ops.boundary_extrap_native_prism is not None
-                         else CUBE_FACE_CODES["prism_native_f0"]
-                         - NATIVE_FACE_CODE_BASE)
-        boundary_extrap_native = np.zeros((n_native_rows, n_fp, n_sps),
-                                          dtype=np.float64)
+        boundary_extrap_native = native_face_extrap_stack(ops, n_sps)
+        n_native_rows = boundary_extrap_native.shape[0]
         lift_native = np.zeros((n_native_rows, n_sps, n_fp), dtype=np.float64)
         for code in range(NATIVE_FACE_CODE_BASE,
                           NATIVE_FACE_CODE_BASE + n_native_rows):
-            row = code - NATIVE_FACE_CODE_BASE
-            boundary_extrap_native[row] = pad_native_matrix_to_global(
-                ops.native_face_extrap(code), n_sps, pad_axes=(1,)
-            )
-            lift_native[row] = ops.native_face_lift_padded(code)
+            lift_native[code - NATIVE_FACE_CODE_BASE] = ops.native_face_lift_padded(code)
     else:
         boundary_extrap_native = np.zeros((0, n_fp, n_sps), dtype=np.float64)
         lift_native = np.zeros((0, n_sps, n_fp), dtype=np.float64)

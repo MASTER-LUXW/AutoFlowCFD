@@ -4,7 +4,6 @@
 这里只留构造与对外接口。
 """
 
-import numpy as np
 from autoflowcfd.core.gpu import get_cupy
 from .turb_source import _GPUDistributedTurbSourceMixin
 from .checkpoint import _GPUDistributedCheckpointMixin
@@ -140,12 +139,10 @@ class _GPUDistributedInitMixin(_GPUDistributedTurbSourceMixin, _GPUDistributedCh
         if filter_prism is None and filter_tet is None:
             return
 
-        dist_fc = self.dist_flat_face
-        cct = np.asarray(dist_fc.compact_cell_type)
-        inv_perm = np.asarray(dist_fc.inv_perm)
-        # compact_cell_type 处在"棱柱在前"紧凑排列，用 inv_perm 换回
-        # 原生排列再切 local 段——`self.U_gpu` 所在的空间。
-        cell_is_prism = (cct[inv_perm][:n_local] == 0)
+        # 原生排列的 local 段——`self.U_gpu` 所在的空间。
+        from autoflowcfd.core.mpi.distributed_flat_face import native_cell_is_prism
+
+        cell_is_prism = native_cell_is_prism(self.dist_flat_face)[:n_local]
 
         if mode == "sensor":
             self.filter_func_gpu = (

@@ -155,7 +155,12 @@ class TestSourceLevelGuard:
             ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
         assert "if _cfl_controller is not None else 0.1" not in code, (
             "裸的 `else 0.1` 回来了——它会把调用方请求的固定 CFL 静默丢弃")
-        assert "fixed_cfl_number" in code
+        # 2026-09-25 起取值规则统一在 adaptive_cfl/policy.py::current_cfl_number
+        # （全部后端共用），这里必须调用它而不是另写一份。
+        assert "current_cfl_number(solver)" in code
+        from autoflowcfd.core.time_integration.adaptive_cfl import policy
+        psrc = inspect.getsource(policy.current_cfl_number)
+        assert "fixed_cfl_number" in psrc
 
     def test_constructor_prints_the_fixed_cfl(self):
         """启动日志必须能看出这次跑的是哪个 CFL（"这份日志是哪个配置跑出来
@@ -163,7 +168,9 @@ class TestSourceLevelGuard:
         import inspect
 
         from autoflowcfd.core.fr_solver.solver import FRSolver
+        from autoflowcfd.core.time_integration.adaptive_cfl.policy import (
+            describe_cfl_policy,
+        )
         src = inspect.getsource(FRSolver.__init__)
-        assert "fixed_cfl_number" in src
-        i = src.index("Adaptive CFL: disabled")
-        assert "fixed" in src[i:i + 200].lower()
+        assert "fixed_cfl_number" in src and "describe_cfl_policy(" in src
+        assert "fixed CFL = 0.037" in describe_cfl_policy(None, 0.037)

@@ -13,6 +13,21 @@ from autoflowcfd.core.fr_operators.face_kernels import FlatFaceGeometry
 from autoflowcfd.core.mpi.partition import DistributedPartition
 
 
+def native_cell_is_prism(dist_fc) -> np.ndarray:
+    """`(n_local+n_halo,)` bool：按 halo 交换**原生**排列（`[0, n_local)` 即
+    本 rank 的 local 单元、与状态数组 `U_local` 同序）逐单元是否棱柱。
+
+    `compact_cell_type` 处在"棱柱在前"紧凑排列；`array_native[perm] ==
+    array_permuted`，所以 `native[perm[k]] = permuted[k]`。**唯一的换序处**：
+    滤波（CPU/GPU）、正性限制器、BJ 包络都要这个掩码，此前各自手写一遍。
+    只读 `perm` 与 `compact_cell_type` 两个字段（鸭子类型友好）。
+    """
+    perm = np.asarray(dist_fc.perm)
+    out = np.empty(perm.size, dtype=bool)
+    out[perm] = np.asarray(dist_fc.compact_cell_type) == 0
+    return out
+
+
 @dataclass
 class DistributedFlatFaceGeometry:
     """分布式面几何。

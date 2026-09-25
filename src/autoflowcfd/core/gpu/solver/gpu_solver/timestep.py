@@ -141,5 +141,5 @@ class _GPUSolverTimeStepMixin:
         与 CPU 侧 cfl.py 里同一段逻辑对应（那里是
         `_cfl_controller.cfl_number if ... else 0.1`）。
         """
-        c = getattr(self, "_cfl_controller", None)
-        return c.cfl_number if c is not None else self.time_integrator.cfl
+        from autoflowcfd.core.time_integration.adaptive_cfl.policy import current_cfl_number
+        return current_cfl_number(self)

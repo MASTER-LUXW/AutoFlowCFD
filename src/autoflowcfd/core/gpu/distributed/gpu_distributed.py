@@ -28,19 +28,18 @@ from autoflowcfd.core.gpu import gpu_available, get_cupy
 from autoflowcfd.core.gpu.array_manager import GPUArrayManager
 from autoflowcfd.core.gpu.gpu_time_integration import (
     GPUTimeIntegrator,
-    enforce_positivity_gpu,
     compute_local_cfl_step_gpu,
 )
-from autoflowcfd.core.mpi import get_rank, get_size, is_root, mpi_available
+from autoflowcfd.core.time_integration.base import (
+    TimeIntegrationScheme, require_distributed_scheme,
+)
+from autoflowcfd.core.mpi import get_rank, is_root, mpi_available
 from autoflowcfd.core.mpi.partition import (
-    partition_mesh, build_distributed_partition, DistributedPartition
+    partition_mesh, build_distributed_partition
 )
 from autoflowcfd.core.gpu.distributed.gpu_halo_exchange import GPUHaloExchange
 from autoflowcfd.core.mpi.distributed_state import DistributedFRState
-from autoflowcfd.core.mpi.distributed_flat_face import (
-    DistributedFlatFaceGeometry, build_distributed_flat_face
-)
-from autoflowcfd.core.mpi.comm import allreduce_sum, allreduce_min, barrier
+from autoflowcfd.core.mpi.comm import allreduce_sum, barrier
 from autoflowcfd.core.gpu.distributed.gpu_distributed_init import _GPUDistributedInitMixin
 
 
@@ -137,7 +136,6 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         rank: Optional[int] = None,
         device_id: Optional[int] = None,
         time_scheme: str = "ssp_rk3",
-        cfl: float = 1.0,
         mu_molecular: float = 1.8e-5,
         rho_inf: float = 1.225,
         vel_inf: float = 33.33,
@@ -164,11 +162,9 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
             rank: 当前 rank（默认从 MPI 获取）
             device_id: GPU 设备 ID（默认 rank % n_gpus）
             time_scheme: 时间积分方案
-            cfl: CFL 数
-            cfl_start, cfl_max: 自适应 CFL 的初始值/上限（与单机
-                FRSolver/GPUFRSolver 同名参数同一语义）。None 时
-                cfl_start 退回 `cfl`、cfl_max 退回 max(cfl, 0.5)，
-                这样不传这两个参数的既有调用方行为不变。
+            cfl_start, cfl_max, cfl_min: 自适应 CFL 参数（与单机 FRSolver/
+                GPUFRSolver 同名参数同一语义；None 取控制器默认值，规则见
+                `adaptive_cfl/policy.py::build_cfl_policy`）。
             mu_molecular: 分子动力粘度
             rho_inf, vel_inf, p_inf: 自由来流条件
         """
@@ -370,24 +366,20 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         self.state = DistributedFRState(self.partition, n_sps, 5)
 
         # 时间积分器
-        self.time_integrator = GPUTimeIntegrator(scheme=time_scheme, cfl=cfl)
+        self.time_integrator = GPUTimeIntegrator(
+            scheme=require_distributed_scheme(time_scheme))
         # 自适应 CFL + 低马赫数伪时间预处理（2026-09-14 补齐）：与 CPU
         # 分布式同一批改动、同一套语义。两者都以"存在由 CFL 数决定的
         # 逐单元局部步长"为前提，而这条路径此前用全局固定 dt（被记作
         # "已接受的简化"）。局部步长已补齐（见
         # `_compute_local_time_step_gpu` 的重写说明）。
         # 控制器按**全局**残差范数更新，所有 rank 得到同一个 CFL 数。
-        self._cfl_controller = None
-        if str(time_scheme) in ("ssp_rk2", "ssp_rk3") or getattr(
-                time_scheme, "value", None) in ("ssp_rk2", "ssp_rk3"):
-            from autoflowcfd.core.time_integration.adaptive_cfl import (
-                AdaptiveCFLController,
-            )
-            self._cfl_controller = AdaptiveCFLController(
-                cfl_start=cfl_start if cfl_start is not None else cfl,
-                cfl_max=cfl_max if cfl_max is not None else max(cfl, 0.5),
-                **({} if cfl_min is None else {'cfl_min': cfl_min}),
-            )
+        # CFL 策略（控制器 or 固定 CFL）的唯一事实来源：
+        # `time_integration/adaptive_cfl/policy.py::build_cfl_policy`（六个后端
+        # 构造点此前各写一份且已分叉，见该模块文档）。
+        from autoflowcfd.core.time_integration.adaptive_cfl.policy import build_cfl_policy
+        self._cfl_controller, self.fixed_cfl_number = build_cfl_policy(
+            time_scheme, cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min)
         _env_pc = os.environ.get("AFCFD_LOW_MACH_PRECOND")
         _req_pc = True if _env_pc is None else (_env_pc == "1")
         self.low_mach_precond_enabled = _req_pc and (
@@ -914,19 +906,31 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         控制器按**全局**残差范数更新（见 `step()` 末尾），所有 rank 因此
         得到同一个 CFL 数。
         """
-        c = getattr(self, "_cfl_controller", None)
-        return c.cfl_number if c is not None else self.time_integrator.cfl
+        from autoflowcfd.core.time_integration.adaptive_cfl.policy import current_cfl_number
+        return current_cfl_number(self)
 
-    def _compute_total_residual_gpu(self, mu_t_field=None):
-        """计算总残差（无粘 + 粘性），先执行 halo 交换。
+    def _compute_total_residual_gpu(self, mu_t_field=None, inviscid=True, viscous=True):
+        """计算总的 **dU/dt**（无粘 + 粘性），先执行 halo 交换。
+
+        符号约定与 `compute_*_residual_fr_gpu`（以及 CPU 的
+        `compute_*_residual_fr`）一致：返回的是 dU/dt 本身，**不是**积分器
+        约定里的 R（dU/dt = -R）。唯一的消费方 `step()` 里的
+        `_spatial_residual` 负责取负。此前多 GPU 的手工 RK 分支把它当成 R
+        （`L = -res`），在真实残差上逆时间积分（2026-09-25 修复）。
 
         Args:
             mu_t_field: 动力涡粘度 (n_cells, n_sps) CuPy 数组（可选）
+            inviscid, viscous: 取哪几部分（IMEX 分别要显式/隐式两半；
+                至少一个为 True）。
         """
+        if not (inviscid or viscous):
+            raise ValueError("inviscid 与 viscous 至少要取一个")
         self._halo_exchange_gpu()
-        inv_res = self.compute_inviscid_residual_gpu()
-        visc_res = self.compute_viscous_residual_gpu(mu_t_field=mu_t_field)
-        return inv_res + visc_res
+        res = self.compute_inviscid_residual_gpu() if inviscid else None
+        if viscous:
+            visc_res = self.compute_viscous_residual_gpu(mu_t_field=mu_t_field)
+            res = visc_res if res is None else res + visc_res
+        return res
 
     def _interpolate_to_new_order(self, target_p: int) -> None:
         """阶数切换（2026-09-02，见 core/gpu/distributed/
@@ -941,15 +945,12 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         gpu_interpolate_to_new_order(self, target_p)
 
     def step(self, dt: float = 0.0) -> float:
-        """执行一个分布式时间步（SSP-RK 多 stage）。
+        """执行一个分布式时间步。
 
-        流程（SSP-RK3 为例，每个 stage 都重新计算残差+halo 交换）：
-        Stage 0: 计算初始残差 R(U^n)
-        Stage 1: U^(1) = U^n + dt*L(U^n); halo 交换; 计算 R(U^(1))
-        Stage 2: U^(2) = 3/4*U^n + 1/4*(U^(1) + dt*L(U^(1))); halo; R(U^(2))
-        Stage 3: U^(n+1) = 1/3*U^n + 2/3*(U^(2) + dt*L(U^(2)))
-
-        对于 SSP-RK2 和 Forward Euler 类似处理。
+        时间推进走与 CPU/单机 GPU **同一个**积分器（`TimeIntegrator`：SSP-RK
+        stage 推进 / 双时间步），每个 stage 的残差求值都重新做 halo 交换
+        （`_spatial_residual` -> `_compute_total_residual_gpu`），每个 stage
+        收尾先滤波、再施加守恒的正性限制器（`_get_positivity_limiter_gpu`）。
 
         Args:
             dt: 时间步长
@@ -983,7 +984,29 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         # 分布式路径调用过）：构造一个把 trial U 临时写入 `self.U_gpu`
         # 再调用既有 `_compute_total_residual_gpu`（自带 halo 交换）的
         # 残差闭包，直接复用，不需要另起一套残差组装逻辑。
-        if self.time_integrator.scheme == "dual_time":
+        mu_t_field = None
+
+        def _spatial_residual(U_flat_trial, inviscid=True, viscous=True):
+            """物理残差 R（约定 dU/dt = -R）。残差组装与 halo 交换都读
+            `self.U_gpu`，所以试探态临时写进去、算完恢复。`mu_t_field` 在
+            下面各分支里、第一次调用之前求好（本步内固定，算子分裂）。
+            `inviscid`/`viscous` 供 IMEX 分别取显式/隐式两半。"""
+            U_trial = U_flat_trial.reshape(n_local, n_sps, 5)
+            saved_U = self.U_gpu
+            self.U_gpu = U_trial
+            try:
+                if inviscid and viscous:
+                    res = self._compute_total_residual_gpu(mu_t_field=mu_t_field)
+                else:
+                    res = self._compute_total_residual_gpu(
+                        mu_t_field=mu_t_field, inviscid=inviscid, viscous=viscous)
+            finally:
+                self.U_gpu = saved_U
+            return (-res).reshape(n_local * n_sps, 5)
+
+        positivity_func = self._get_positivity_limiter_gpu()
+
+        if self.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME:
             # DUAL_TIME 下预处理不启用，局部 dt 只有一份；湍流仍用它
             # （物理波速那一份）。
             _dtm = self._compute_local_time_step_gpu()
@@ -991,27 +1014,17 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
             mu_t_field = self._compute_turbulence_source_distributed(_dt_turb)
             U_flat = self.U_gpu.reshape(n_local * n_sps, 5)
 
-            def _spatial_residual(U_flat_trial):
-                U_trial = U_flat_trial.reshape(n_local, n_sps, 5)
-                saved_U = self.U_gpu
-                self.U_gpu = U_trial
-                try:
-                    res = self._compute_total_residual_gpu(mu_t_field=mu_t_field)
-                finally:
-                    self.U_gpu = saved_U
-                return (-res).reshape(n_local * n_sps, 5)
-
             # 内层伪时间迭代的局部加速步长：与单机一致用局部 CFL 步长
             # （`dt` 仍然是真正的物理时间步长，通过 dt_physical= 传入）。
             dt_mean_c = self._compute_local_time_step_gpu()
             dt_mean_local = dt_mean_c[self._inv_perm_gpu][:n_local]
             pseudo_dt = cp.broadcast_to(
                 dt_mean_local[:, None], (n_local, n_sps)).reshape(n_local * n_sps)
-            max_inner_iter = getattr(self.time_integrator, 'dual_time_steps', 5)
             U_new_flat = self.time_integrator.step_dual_time(
                 U_flat, _spatial_residual, pseudo_dt, dt_physical=dt,
-                solution_prev=self._dual_time_U_prev, max_inner_iter=max_inner_iter,
-                filter_func=self.filter_func_gpu,
+                solution_prev=self._dual_time_U_prev,
+                max_inner_iter=self.time_integrator.dual_time_steps,
+                filter_func=self.filter_func_gpu, positivity_func=positivity_func,
             )
             self._dual_time_U_prev = U_flat.copy()
             self.U_gpu = U_new_flat.reshape(n_local, n_sps, 5)
@@ -1027,14 +1040,7 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
         dt_mean_local = dt_mean_c[self._inv_perm_gpu][:n_local]
         dt_phys_local = dt_phys_c[self._inv_perm_gpu][:n_local]
         dt_flat = cp.broadcast_to(
-            dt_mean_local[:, None], (n_local, n_sps)).reshape(n_local * n_sps, 1)
-
-        # RK 系数表
-        scheme = self.time_integrator.scheme
-        table = self.time_integrator._table
-        alpha = table["alpha"]
-        beta = table["beta"]
-        n_stages = table["stages"]
+            dt_mean_local[:, None], (n_local, n_sps)).reshape(n_local * n_sps)
 
         # 湍流源项求值（算子分裂，每个 step 开始时计算一次，用当前——
         # 上一步末尾——的状态，与 CPU 分布式 SST 同一个时序，见
@@ -1047,82 +1053,88 @@ class MultiGPUDistributedSolver(_GPUDistributedInitMixin):
             float(cp.mean(dt_phys_local)))
 
         U_flat = self.U_gpu.reshape(n_local * n_sps, 5)
-        U0 = U_flat.copy()
 
-        def _precond(dudt_flat, U_state_flat):
-            """施加低马赫数预处理：L = Gamma * (-R) = Gamma * dU/dt。
+        def _precond(res_flat, U_state_flat):
+            """施加低马赫数预处理 `Gamma R`（就地）。
 
-            Gamma 线性、逐点，作用在 dU/dt 上与作用在残差上等价（见
+            Gamma 线性、逐点，作用在残差上与作用在 dU/dt 上等价（见
             core/utils/preconditioning.py 模块末尾）。它**必须**与上面
             按预处理波速取的 `dt_flat` 成对出现——只改步长不改方程就是
             2026-08-24 那次失稳。未启用时原样返回。
-            残差范数用的仍是**未预处理**的 `resN_flat`（物理残差），与
-            单机/CPU 分布式同一分工。
             """
             if not self.low_mach_precond_enabled:
-                return dudt_flat
+                return res_flat
             from autoflowcfd.core.gpu.gpu_preconditioning import (
                 apply_low_mach_preconditioner_gpu,
             )
-            L3 = dudt_flat.reshape(n_local, n_sps, 5)
+            R3 = res_flat.reshape(n_local, n_sps, 5)
             out = apply_low_mach_preconditioner_gpu(
-                L3, U_state_flat.reshape(n_local, n_sps, 5),
-                self.freestream["mach_ref"], out=L3)
+                R3, U_state_flat.reshape(n_local, n_sps, 5),
+                self.freestream["mach_ref"], out=R3)
             return out.reshape(n_local * n_sps, 5)
 
-        # === Stage 0: 初始残差 ===
-        res0 = self._compute_total_residual_gpu(mu_t_field=mu_t_field)
-        res0_flat = res0.reshape(n_local * n_sps, 5)
-        L0 = _precond(-res0_flat, U0)
+        # 时间推进走与 CPU/单机 GPU **同一个**积分器（`TimeIntegrator` 的
+        # stage 推进，含每个 stage 的滤波与守恒正性限制）。此前这里手工展开
+        # 了一份 RK stage：正性用逐点硬钳、且顺序是"先钳后滤"，与 CPU 那份
+        # 已经不一致（2026-09-25 删除）。
+        #
+        # 残差范数取 **stage 0 的物理残差** `R(U^n)`，与 CPU 单机/CPU 分布式/
+        # 单机 GPU 同一口径。此前这里报的是**最后一个 stage** 的残差
+        # （RK3 下是 `R(U^(2))`），同一个算例在不同后端上打印的残差因此不是
+        # 同一个量，自适应 CFL 控制器也吃到不同的信号。
+        residual0_raw = _spatial_residual(U_flat)
+        residual_norm = self._global_residual_norm(residual0_raw)
 
-        # === Stage 1 ===
-        U_stage1 = U0 + dt_flat * L0
-        enforce_positivity_gpu(U_stage1)
-        # 模态滤波
-        if self.filter_func_gpu is not None:
-            U_stage1 = self.filter_func_gpu(U_stage1)
-        self.U_gpu = U_stage1.reshape(n_local, n_sps, 5)
+        if self.time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
+            # 显式无粘对流 + 隐式粘性（阻尼 Picard），与单机/CPU 分布式同一个
+            # 拆分、同一个积分器（低马赫预处理在 IMEX 下不启用，理由见
+            # `FRSolver.__init__`）。**2026-09-25 补齐**：此前这里只查 RK 系数
+            # 表，IMEX_EULER 没有条目、回退成 1 级前向 Euler —— `--time-method
+            # imex --multi-gpu` 静默跑成前向 Euler（假选项）。
+            U_new_flat = self.time_integrator.step_imex(
+                U_flat,
+                lambda U: _spatial_residual(U, viscous=False),
+                lambda U: _spatial_residual(U, inviscid=False),
+                dt_flat, positivity_func=positivity_func,
+            )
+        else:
+            residual0 = _precond(residual0_raw, U_flat)
 
-        if n_stages == 1:
-            residual_norm = self._global_residual_norm(res0_flat)
-            self.residual_history.append(residual_norm)
-            self.iteration += 1
-            self._update_cfl_controller(residual_norm)
-            return residual_norm
+            def _residual(U_flat_trial):
+                return _precond(_spatial_residual(U_flat_trial), U_flat_trial)
 
-        # === Stage 2 ===
-        res1 = self._compute_total_residual_gpu(mu_t_field=mu_t_field)
-        res1_flat = res1.reshape(n_local * n_sps, 5)
-        L1 = _precond(-res1_flat, U_stage1)
-        U_stage2 = (alpha[1][0] * U0 + alpha[1][1] * U_stage1 + beta[1] * dt_flat * L1)
-        enforce_positivity_gpu(U_stage2)
-        if self.filter_func_gpu is not None:
-            U_stage2 = self.filter_func_gpu(U_stage2)
-        self.U_gpu = U_stage2.reshape(n_local, n_sps, 5)
+            U_new_flat = self.time_integrator.step(
+                U_flat, _residual, dt_flat, residual0=residual0,
+                filter_func=self.filter_func_gpu, positivity_func=positivity_func,
+            )
+        self.U_gpu = U_new_flat.reshape(n_local, n_sps, 5)
 
-        if n_stages == 2:
-            residual_norm = self._global_residual_norm(res1_flat)
-            self.residual_history.append(residual_norm)
-            self.iteration += 1
-            self._update_cfl_controller(residual_norm)
-            return residual_norm
-
-        # === Stage 3 (RK3) ===
-        res2 = self._compute_total_residual_gpu(mu_t_field=mu_t_field)
-        res2_flat = res2.reshape(n_local * n_sps, 5)
-        L2 = _precond(-res2_flat, U_stage2)
-        U_stage3 = (alpha[2][0] * U0 + alpha[2][1] * U_stage1 +
-                    alpha[2][2] * U_stage2 + beta[2] * dt_flat * L2)
-        enforce_positivity_gpu(U_stage3)
-        if self.filter_func_gpu is not None:
-            U_stage3 = self.filter_func_gpu(U_stage3)
-        self.U_gpu = U_stage3.reshape(n_local, n_sps, 5)
-
-        residual_norm = self._global_residual_norm(res2_flat)
         self.residual_history.append(residual_norm)
         self.iteration += 1
         self._update_cfl_controller(residual_norm)
         return residual_norm
+
+    def _get_positivity_limiter_gpu(self):
+        """守恒的正性保持限制器（与 CPU 同一个，GPU 上走数组模块无关实现）。
+
+        几何取 local 段、**原生**排列（`self.U_gpu` 所在的空间）：
+        `mesh_data['det_jacs']` 在"棱柱在前"紧凑排列，经 `inv_perm` 换回。
+        按阶数缓存，只在缓存失效（阶数切换）时下载一次 det(J)。
+        """
+        from autoflowcfd.core.mpi.distributed_flat_face import native_cell_is_prism
+        from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
+
+        cp = get_cupy()
+        n_local = self.partition.n_local_cells
+        dist_fc = self.dist_flat_face
+
+        def _local_geometry():
+            det_c = cp.asnumpy(self.mesh_data['det_jacs'])
+            det_c = det_c.reshape(det_c.shape[0], -1)
+            return (det_c[np.asarray(dist_fc.inv_perm)][:n_local],
+                    native_cell_is_prism(dist_fc)[:n_local])
+
+        return get_positivity_limiter(self, xp=cp, geometry=_local_geometry)
 
     def _update_cfl_controller(self, residual_norm: float) -> None:
         """用**全局**残差范数更新自适应 CFL 控制器。

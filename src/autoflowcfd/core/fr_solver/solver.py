@@ -679,49 +679,18 @@ class FRSolver(_SolverGeometryMixin):
         # 6b. 自适应 CFL 控制器（2026-08-24）：
         # 稳态伪时间迭代中根据残差历史自动调节 CFL 数，替代此前硬编码 0.1。
         # 仅对稳态路径（SSP-RK2/RK3）生效；DUAL_TIME 有自己的内层自适应逻辑。
-        self._cfl_controller = None
-        if adaptive_cfl and time_scheme != TimeIntegrationScheme.DUAL_TIME:
-            from autoflowcfd.core.time_integration.adaptive_cfl import AdaptiveCFLController
-            # cfl_start/cfl_max 现在是构造参数（2026-09-07）：此前
-            # `AdaptiveCFLController()` 恒用硬编码默认值（0.1/0.3），
-            # `SteadyConfig.cfl_init`/`cfl_max` 这两个 config 字段从未
-            # 真正接到控制器上——CLI `--cfl-start`/`--cfl-max` 现在直接
-            # 透传到这里。cfl_max 默认值同步从 0.3 上调到 0.5（SSP-RK3
-            # 线性稳定极限 ~1.0，0.3 对本项目多数网格过于保守；AUSM+up
-            # 低马赫预处理激活的算例真实可用上限更低，需要时用
-            # `--cfl-max` 显式回调）。
-            # cfl_min 同样是构造参数（2026-09-15）：此前五处控制器构造点
-            # 全都没有传它，于是恒用控制器默认 0.05。那个值**高于**真 P1
-            # （模态滤波器关闭、零阶数损失）在 79 万单元 cube_demo 上实测
-            # 稳定的 CFL 0.03——也就是说一个已验证可用的工作点通过 CLI
-            # 根本到不了：`--cfl-start 0.03` 会被 cfl_min 钳回 0.05
-            # （修复前是第一次收缩时静默跳到 0.05，见 adaptive_cfl.py
-            # 模块文档第 11 条），必然发散。下限必须可配。
-            self._cfl_controller = AdaptiveCFLController(
-                cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
-            )
-            print(f"   Adaptive CFL: enabled (start={self._cfl_controller.cfl_start}, "
-                  f"max={self._cfl_controller.cfl_max}, "
-                  f"min={self._cfl_controller.cfl_min})")
-        else:
-            # ===== 真实缺陷修复（2026-09-17）=====
-            #
-            # `cfl.py::compute_local_time_step` 此前是
-            #     CFL = ctrl.cfl_number if ctrl is not None else 0.1
-            # 也就是**没有控制器时静默用硬编码 0.1**，把调用方传进来的
-            # `cfl_start/cfl_max/cfl_min` 全部丢掉。后果是
-            # `adaptive_cfl=False` 的每一次运行都跑在 0.1 上，不管请求的
-            # 是多少：本次排查里两条"CFL 0.10"与"CFL 0.05"的平板边界层
-            # 运行给出**逐位相同**的残差轨迹、在同一步（3187）发散，就是
-            # 这个 bug；`tests/validation/test_couette.py` 等全部
-            # `adaptive_cfl=False` 的用法同样一直静默跑在 0.1。
-            #
-            # 固定 CFL 是一条一等需求（稳定边界扫描、A/B 对照都靠它），
-            # 所以这里把请求值显式记下来给 cfl.py 用。取 `cfl_start` 而
-            # 不是 `cfl_max`：关掉自适应时"初始值"就是全程唯一的值。
-            self.fixed_cfl_number = float(cfl_start)
-            print(f"   Adaptive CFL: disabled (fixed CFL = "
-                  f"{self.fixed_cfl_number:g})")
+        # CFL 策略（控制器 or 固定 CFL）的唯一事实来源：
+        # `time_integration/adaptive_cfl/policy.py::build_cfl_policy`（六个后端
+        # 构造点此前各写一份且已分叉，见该模块文档）。
+        # 固定 CFL（`adaptive_cfl=False` 或 DUAL_TIME）时记下请求值给 cfl.py 用
+        # —— 2026-09-17 修过的"固定 CFL 请求被静默换成 0.1"缺陷就出在这里。
+        from autoflowcfd.core.time_integration.adaptive_cfl.policy import (
+            build_cfl_policy, describe_cfl_policy,
+        )
+        self._cfl_controller, self.fixed_cfl_number = build_cfl_policy(
+            time_scheme, adaptive=adaptive_cfl,
+            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min)
+        print("   " + describe_cfl_policy(self._cfl_controller, self.fixed_cfl_number))
 
         # 影响物理/数值的开关必须在启动日志里可见（2026-09-15 引入）：做
         # 人工粘性 A/B 对照时发现，`--artificial-viscosity` 生效与否在

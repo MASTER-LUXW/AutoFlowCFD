@@ -20,7 +20,7 @@ def step_imex(
     residual_explicit: Callable[[np.ndarray], np.ndarray],
     residual_implicit: Callable[[np.ndarray], np.ndarray],
     dt_local: np.ndarray,
-    p_floor: float = 1.0,
+    positivity_func=None,
 ) -> np.ndarray:
     """执行一步 IMEX Euler 推进 (S-05)。
 
@@ -43,7 +43,16 @@ def step_imex(
     2. 最大迭代次数限制，防止无限循环
     3. 收敛性监控与日志输出
     """
-    from .base import enforce_positivity
+    from autoflowcfd.core.utils.array_module import array_module
+
+    from .base import _finish_stage
+
+    # CPU 与 GPU 共用（`GPUTimeIntegrator` 继承本方法；GPU 此前的独立拷贝
+    # 已删除），范数统一取成 Python float。
+    xp = array_module(solution)
+
+    def _norm(a) -> float:
+        return float(xp.linalg.norm(a))
 
     R_exp = residual_explicit(solution)  # 显式项，固定在 U^n 处求值
 
@@ -51,7 +60,7 @@ def step_imex(
     dt_vec = dt_local[:, None]
 
     # 初始残差范数
-    initial_res_norm = np.linalg.norm(R_exp + residual_implicit(solution))
+    initial_res_norm = _norm(R_exp + residual_implicit(solution))
 
     # 用阻尼 Picard 子迭代逼近隐式方程的解
     max_iter = 5
@@ -60,7 +69,7 @@ def step_imex(
 
         # 计算残差总和
         total_res = R_exp + R_imp_curr
-        current_res_norm = np.linalg.norm(total_res)
+        current_res_norm = _norm(total_res)
 
         # 自适应阻尼因子：基于残差变化率
         if iteration > 0:
@@ -81,10 +90,11 @@ def step_imex(
         # 已修复，见上方文档）。
         U_next = U_new - dt_vec * total_res * damping_factor
 
-        U_next = enforce_positivity(U_next, p_floor)
+        # 正性：有网格时守恒限制，否则只检查（见 base._finish_stage）
+        U_next = _finish_stage(U_next, None, positivity_func)
 
         # 检查收敛性
-        update_norm = np.linalg.norm(U_next - U_new)
+        update_norm = _norm(U_next - U_new)
         if update_norm < 1e-8 or current_res_norm < initial_res_norm * 1e-6:
             logger.debug(f"IMEX converged at iteration {iteration+1}, res_norm={current_res_norm:.6e}")
             break

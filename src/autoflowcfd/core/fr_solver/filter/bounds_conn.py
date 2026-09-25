@@ -123,9 +123,9 @@ def build_distributed_bounds_conn(dist_fc, n_total_cells, get_halo,
             "sensor+bounds 需要 dist_flat_face.compact_cell_type 才能知道"
             "扩展场每一行有多少真实自由度槽位（原生基的零填充槽位冻结在"
             "初值，不排除它们就是在馊值上统计单元极值）")
-    cct = np.asarray(cct)
-    row_is_prism_native = np.empty(n_total, dtype=bool)
-    row_is_prism_native[perm] = (cct == 0)
+    from autoflowcfd.core.mpi.distributed_flat_face import native_cell_is_prism
+
+    row_is_prism_native = native_cell_is_prism(dist_fc)
 
     # `true_normal` 是单位外法向、与 dist_fc 同一（local 面）索引空间，
     # 逐通量点形状由 `make_bj_boundary_tables` 归约成逐面。

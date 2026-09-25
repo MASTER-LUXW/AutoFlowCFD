@@ -48,8 +48,8 @@ class _GPUSolverIOMixin:
             f.attrs['n_cells'] = self.mesh.n_cells
             f.attrs['n_sps'] = self.mesh.n_sps_per_cell
             f.attrs['order'] = self.order
-            f.attrs['time_scheme'] = self.time_integrator.scheme
-            f.attrs['cfl'] = self.time_integrator.cfl
+            f.attrs['time_scheme'] = self.time_integrator.scheme.value
+            f.attrs['cfl'] = self._current_cfl()
 
             if self.residual_history:
                 f.create_dataset('residual_history', data=np.array(self.residual_history))

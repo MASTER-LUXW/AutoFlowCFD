@@ -255,6 +255,11 @@ def step(solver, dt: float) -> float:
         else:
             filter_func = build_filter_func(solver)
 
+        # 守恒的正性保持限制器（Zhang–Shu 型，取代逐点硬钳；缘由见
+        # time_integration/positivity/__init__.py）。按阶数缓存。
+        from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
+        positivity_func = get_positivity_limiter(solver)
+
         if solver.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME:
             # 真正时间精度的物理时间推进：dt 是物理时间步长（不再被
             # 忽略），dt_local 只用作内层伪时间迭代的局部加速步长，
@@ -267,6 +272,7 @@ def step(solver, dt: float) -> float:
                 solution_prev=solver._dual_time_U_prev,
                 max_inner_iter=solver.time_integrator.dual_time_steps,
                 filter_func=filter_func,
+                positivity_func=positivity_func,
             )
             solver._dual_time_U_prev = U_flat.copy()
         elif solver.time_integrator.scheme == TimeIntegrationScheme.NEWTON_KRYLOV:
@@ -339,12 +345,12 @@ def step(solver, dt: float) -> float:
             # 闭包。
             U_new_flat = solver.time_integrator.step_imex(
                 U_flat, convective_residual_only, diffusive_residual_only,
-                dt_local_flat, p_floor=1.0,
+                dt_local_flat, positivity_func=positivity_func,
             )
         else:
             U_new_flat = solver.time_integrator.step(
-                U_flat, mean_flow_residual, dt_local_flat, p_floor=1.0, residual0=residual0,
-                filter_func=filter_func,
+                U_flat, mean_flow_residual, dt_local_flat, residual0=residual0,
+                filter_func=filter_func, positivity_func=positivity_func,
             )
         solver.state.U = U_new_flat.reshape(n_cells, n_sps, n_vars)
 

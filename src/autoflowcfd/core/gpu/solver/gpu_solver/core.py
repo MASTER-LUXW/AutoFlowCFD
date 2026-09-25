@@ -41,7 +41,6 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         n_vars: int = 5,
         device_id: int = 0,
         time_scheme: str = "ssp_rk3",
-        cfl: float = 1.0,
         rho_inf: float = 1.225,
         vel_inf: float = 33.33,
         p_inf: float = 101325.0,
@@ -69,16 +68,14 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
             n_vars: 守恒变量数
             device_id: GPU 设备 ID
             time_scheme: 时间积分方案
-            cfl: CFL 数
             rho_inf, vel_inf, p_inf: 自由来流条件
             mu_molecular: 分子动力粘度
             low_mach_precond: 是否启用低马赫数伪时间预处理（默认 True，
                 与 CPU 版一致）。环境变量 AFCFD_LOW_MACH_PRECOND=0/1
                 优先于本参数。
-            cfl_start, cfl_max: 自适应 CFL 的初始值/上限（与 CPU 版
-                FRSolver 同名参数、同一语义）。None 时 cfl_start 退回
-                `cfl`、cfl_max 退回 max(cfl, 0.5)——这样不传这两个参数的
-                既有调用方行为不变（起始 CFL 仍是它们传的 cfl）。
+            cfl_start, cfl_max, cfl_min: 自适应 CFL 参数（与 CPU 版 FRSolver
+                同名参数、同一语义；None 取控制器默认值，规则见
+                `adaptive_cfl/policy.py::build_cfl_policy`）。
             boundary_ghost_provider: 边界幽灵态提供者。None 时按
                 CPU 版 FRSolver 同一套逻辑（fr_solver/boundary.py::
                 build_boundary_ghost_provider）自行构建——真实 bug
@@ -214,28 +211,17 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         self._init_face_geometry()
 
         # 时间积分器
-        self.time_integrator = GPUTimeIntegrator(scheme=time_scheme, cfl=cfl)
+        self.time_integrator = GPUTimeIntegrator(scheme=time_scheme)
 
-        # 自适应 CFL 控制器（2026-09-14 补齐）：GPU 路径此前**完全没有**
-        # 接入它，`compute_local_cfl_step_gpu` 一直用构造时传入的固定
-        # `time_integrator.cfl`——CPU 侧 2026-08-24 就有 AdaptiveCFLController
-        # 并且 CLI 的 `--cfl-start/--cfl-max` 只对 CPU 生效，这是一处先于
-        # 本轮存在的后端不对等缺口（不是本轮引入的）。稳态收敛步数强依赖
-        # 这个机制（见 core/time_integration/adaptive_cfl.py 模块文档第
-        # 4~7 条记录的四处真实缺陷与实测收益），GPU 不能只拿固定 CFL。
-        # 与 CPU 同一原则：只在稳态收敛加速模式下启用；DUAL_TIME 的内层
-        # 伪时间迭代有自己独立的自适应逻辑（time_integration/dual.py），
-        # 两者面向不同的迭代结构、不能互相套用。
-        self._cfl_controller = None
-        if time_scheme in ("ssp_rk2", "ssp_rk3", "forward_euler"):
-            from autoflowcfd.core.time_integration.adaptive_cfl import (
-                AdaptiveCFLController,
-            )
-            self._cfl_controller = AdaptiveCFLController(
-                cfl_start=cfl_start if cfl_start is not None else cfl,
-                cfl_max=cfl_max if cfl_max is not None else max(cfl, 0.5),
-                **({} if cfl_min is None else {'cfl_min': cfl_min}),
-            )
+        # CFL 策略（控制器 or 固定 CFL）的唯一事实来源：
+        # `time_integration/adaptive_cfl/policy.py::build_cfl_policy`（六个后端
+        # 构造点此前各写一份且已分叉，见该模块文档）。
+        # 此前这里对 IMEX/DUAL_TIME 不建控制器、退回构造参数 `cfl`（默认 1.0，
+        # 远超 P>=1 显式稳定极限），并对 cfl_start/cfl_max 留着"缺省退回 cfl"
+        # 的硬编码兜底。
+        from autoflowcfd.core.time_integration.adaptive_cfl.policy import build_cfl_policy
+        self._cfl_controller, self.fixed_cfl_number = build_cfl_policy(
+            time_scheme, cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min)
 
         # 初始化求解状态
         n_cells = mesh.n_cells
@@ -366,12 +352,14 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
 
         logger.info(
             f"GPUFRSolver initialized: {n_cells} cells, P{order}, "
-            f"device {device_id}, scheme={time_scheme}, CFL={cfl}"
+            f"device {device_id}, scheme={time_scheme}, CFL={self._current_cfl():g}"
         )
         print(f"✅ GPUFRSolver Ready:")
         print(f"   Cells: {n_cells}, Order: P{order}")
         print(f"   Device: {device_id} ({self.array_mgr._device_name})")
-        print(f"   Time Scheme: {time_scheme}, CFL: {cfl}")
+        print(f"   Time Scheme: {time_scheme}")
+        from autoflowcfd.core.time_integration.adaptive_cfl.policy import describe_cfl_policy
+        print("   " + describe_cfl_policy(self._cfl_controller, self.fixed_cfl_number))
         # 与 CPU 版 FRSolver 的启动日志对等（2026-09-16）：影响物理/数值
         # 的开关必须在日志里留痕，否则"这份日志是哪个配置跑出来的"只能
         # 靠翻进程命令行考古。GPU 侧此前完全没有这几行，而 CPU/GPU 交叉

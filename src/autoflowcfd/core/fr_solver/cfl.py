@@ -136,30 +136,8 @@ def compute_local_time_step(solver, return_physical_too: bool = False):
     # 现在按优先级取：控制器（自适应开启）> `solver.fixed_cfl_number`
     # （自适应关闭时由构造函数记下的请求值）> 0.1（两者都没有的**替身
     # 对象**，例如诊断脚本/测试 stub；这一档会打一次警告，不再静默）。
-    _cfl_controller = getattr(solver, '_cfl_controller', None)
-    if _cfl_controller is not None:
-        CFL = _cfl_controller.cfl_number
-    else:
-        _fixed = getattr(solver, 'fixed_cfl_number', None)
-        if _fixed is not None:
-            CFL = float(_fixed)
-        else:
-            CFL = 0.1
-            if not getattr(solver, '_afcfd_cfl_fallback_warned', False):
-                from loguru import logger
-
-                logger.warning(
-                    "[CFL] 求解器既没有自适应控制器也没有 "
-                    "fixed_cfl_number，回退到 0.1。真实求解器不会走到这一"
-                    "档（构造函数两条分支都会设其中之一），走到这里说明"
-                    "调用方是个替身对象——若它本意是固定 CFL，请显式设 "
-                    "`solver.fixed_cfl_number`，否则这个 0.1 与你请求的值"
-                    "无关。"
-                )
-                try:
-                    solver._afcfd_cfl_fallback_warned = True
-                except Exception:
-                    pass
+    from autoflowcfd.core.time_integration.adaptive_cfl.policy import current_cfl_number
+    CFL = current_cfl_number(solver)
 
     # 阶数相关的 CFL 收紧：基于面的谱半径已经考虑了单元几何，
     # 但显式 FR/DG 格式的稳定性极限仍随阶数增长（微分矩阵谱半径随 p 增大），

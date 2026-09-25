@@ -16,14 +16,31 @@ from __future__ import annotations
 
 import numpy as np
 from enum import Enum
-from typing import Callable, Optional, Tuple
-from loguru import logger
+from typing import Callable, Optional
 
-from autoflowcfd.core.utils.preconditioning import preconditioned_acoustic_eigs
-from autoflowcfd.core.time_integration.positivity import enforce_positivity  # noqa: F401
+from autoflowcfd.core.time_integration.positivity import assert_admissible
 
-GAMMA = 1.4
 
+
+
+def _finish_stage(U, filter_func, positivity_func):
+    """每个 RK stage 的收尾：先滤波、再正性保持。
+
+    顺序是刻意的：正性保持必须**最后**动手，离开 stage 的状态才一定可容许
+    （滤波是线性的模态衰减，可能把刚被限制好的单元重新推出可容许集）。
+
+    `positivity_func` 由求解器按网格构建（守恒的 Zhang–Shu 限制器，见
+    `time_integration/positivity/`）；积分器被脱离网格单独使用时为 None，
+    此时只检查、不修改 —— 此前的逐点硬钳不守恒，且正是真实网格上一步爆炸
+    的放大器，不再使用。
+    """
+    if filter_func is not None:
+        U = filter_func(U)
+    if positivity_func is not None:
+        positivity_func(U)
+    else:
+        assert_admissible(U)
+    return U
 
 class TimeIntegrationScheme(Enum):
     """时间积分格式枚举。"""
@@ -134,6 +151,33 @@ def scheme_from_name(name):
         )
     return scheme
 
+#: 分布式后端（CPU-MPI、多 GPU）实现了的时间积分方案。
+#:
+#: NEWTON_KRYLOV 不在其中：它的 GMRES 内积、Eisenstat–Walker 判据与线搜索
+#: 的残差范数都要跨 rank 归约，分布式版本没有实现；也没有任何入口把它提供
+#: 给分布式后端（CLI 的分布式分支只提供 rk3/imex/dual-time）。由
+#: `require_distributed_scheme` 在构造时拒绝，而不是让 `step()` 走到某个
+#: 回退分支里静默换成别的格式 —— IMEX 此前正是那样在分布式上跑成了前向 Euler。
+DISTRIBUTED_SCHEMES = (
+    TimeIntegrationScheme.FORWARD_EULER,
+    TimeIntegrationScheme.SSP_RK2,
+    TimeIntegrationScheme.SSP_RK3,
+    TimeIntegrationScheme.IMEX_EULER,
+    TimeIntegrationScheme.DUAL_TIME,
+)
+
+
+def require_distributed_scheme(name):
+    """解析时间积分方案并确认分布式后端支持它；返回枚举成员。"""
+    scheme = scheme_from_name(name)
+    if scheme not in DISTRIBUTED_SCHEMES:
+        raise ValueError(
+            f"分布式后端不支持时间积分方案 {scheme.value!r}；支持："
+            f"{[s.value for s in DISTRIBUTED_SCHEMES]}（原因见 "
+            f"`time_integration/base.py::DISTRIBUTED_SCHEMES` 的说明）。")
+    return scheme
+
+
 # SSP-RK Shu-Osher 系数：各阶段形如
 #   u^(i) = sum_k alpha[i,k] u^(k) + beta[i] dt L(u^(i-1))
 # 其中 L(u) = -R(u)。这里按格式分别存储各自的阶段系数表。
@@ -195,9 +239,9 @@ class TimeIntegrator:
         solution: np.ndarray,
         residual_func: Callable[[np.ndarray], np.ndarray],
         dt_local: np.ndarray,
-        p_floor: float = 1.0,
         residual0: Optional[np.ndarray] = None,
         filter_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+        positivity_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
     ) -> np.ndarray:
         """根据配置的方案，推进一个时间步。
         
@@ -208,7 +252,9 @@ class TimeIntegrator:
             solution: 当前解 U^n
             residual_func: 残差计算函数 R(U)
             dt_local: 局部时间步长数组
-            p_floor: 压力下限
+            positivity_func: 可选的正性保持回调（求解器按网格构建的守恒
+                Zhang–Shu 限制器，见 time_integration/positivity/）；None 时
+                每个 stage 只检查可容许性、不修改（见 `_finish_stage`）
             residual0: 预计算的初始残差（可选优化）
             filter_func: 可选的模态滤波回调（见 core/fr_solver_filter.py），
                 每个 RK stage 的正定性投影之后立即施加一次——不能只在最终
@@ -259,7 +305,8 @@ class TimeIntegrator:
 
         else:
             U_new = self._ssp_rk_stage_step(
-                solution, residual_func, dt_local, p_floor, residual0, filter_func=filter_func
+                solution, residual_func, dt_local, residual0, filter_func=filter_func,
+                positivity_func=positivity_func,
             )
             self.n_steps += 1
             return U_new
@@ -269,10 +316,10 @@ class TimeIntegrator:
         solution: np.ndarray,
         residual_func: Callable[[np.ndarray], np.ndarray],
         dt_local: np.ndarray,
-        p_floor: float = 1.0,
         residual0: Optional[np.ndarray] = None,
         table: Optional[dict] = None,
         filter_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+        positivity_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
     ) -> np.ndarray:
         """SSP-RK2/RK3 的 Shu-Osher stage 推进本体，不含 scheme 分发/计步——
         从 step() 拆出来，供 step_dual_time 的内层伪时间迭代复用（见该方法
@@ -313,9 +360,7 @@ class TimeIntegrator:
         # 体积项分块后峰值已大降，但 Stage 2 粘性残差求值时 U0/L0/U_stage1/L1/
         # U_stage2 五份共存（~6GB）仍把剩余 commit 压到临界，连 815MiB 的
         # correction 缓冲都分配失败。纯引用管理，不改变任何数值。
-        enforce_positivity(U_stage1, p_floor)
-        if filter_func is not None:
-            U_stage1 = filter_func(U_stage1)
+        U_stage1 = _finish_stage(U_stage1, filter_func, positivity_func)
 
         # FORWARD_EULER 只有 1 个 stage：_EULER 表里 alpha 只有 alpha[0]，
         # 下面 Stage 2/3 无条件访问 alpha[1] 会越界 IndexError（已实测复现）。
@@ -333,9 +378,7 @@ class TimeIntegrator:
                    beta[1] * dt * L1)
         del L1  # 同 Stage 1 处 del L0 的 B-12 注释：L1 只参与 Stage 2 组合，
         # 组合完成立即释放，避免与 Stage 2 残差求值的瞬态数组共存。
-        enforce_positivity(U_stage2, p_floor)
-        if filter_func is not None:
-            U_stage2 = filter_func(U_stage2)
+        U_stage2 = _finish_stage(U_stage2, filter_func, positivity_func)
 
         # 重新计算Stage 2的残差（关键：不能省略）
         L2 = -residual_func(U_stage2)
@@ -347,9 +390,7 @@ class TimeIntegrator:
                        alpha[2][1] * U_stage1 +
                        alpha[2][2] * U_stage2 +
                        beta[2] * dt * L2)
-            enforce_positivity(U_stage3, p_floor)
-            if filter_func is not None:
-                U_stage3 = filter_func(U_stage3)
+            U_stage3 = _finish_stage(U_stage3, filter_func, positivity_func)
 
             # 对于RK3，最终解就是U^(3)
             U_new = U_stage3
@@ -365,14 +406,15 @@ class TimeIntegrator:
         residual_explicit: Callable[[np.ndarray], np.ndarray],
         residual_implicit: Callable[[np.ndarray], np.ndarray],
         dt_local: np.ndarray,
-        p_floor: float = 1.0,
+        positivity_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
     ) -> np.ndarray:
         """执行一步 IMEX Euler 推进 (S-05)。实现见
         time_integration/imex.py::step_imex（从本文件拆出，控制单文件
         行数），文档字符串也在那里。"""
         from .imex import step_imex as _step_imex
 
-        return _step_imex(self, solution, residual_explicit, residual_implicit, dt_local, p_floor=p_floor)
+        return _step_imex(self, solution, residual_explicit, residual_implicit, dt_local,
+                          positivity_func=positivity_func)
 
     def step_dual_time(
         self,
@@ -384,6 +426,7 @@ class TimeIntegrator:
         max_inner_iter: int = 5,
         tol: float = 1e-4,
         filter_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
+        positivity_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
     ) -> np.ndarray:
         """执行一步 Dual-Time Stepping (S-05)。实现见
         time_integration/dual.py::step_dual_time（从本文件拆出，控制
@@ -393,6 +436,7 @@ class TimeIntegrator:
         return _step_dual_time(
             self, solution, spatial_residual, pseudo_dt, dt_physical,
             solution_prev=solution_prev, max_inner_iter=max_inner_iter, tol=tol, filter_func=filter_func,
+            positivity_func=positivity_func,
         )
 
     def reset(self) -> None:
