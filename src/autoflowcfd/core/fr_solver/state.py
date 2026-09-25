@@ -6,6 +6,7 @@ AutoFlowCFD V2.0 - FR 求解器状态数据结构 (S-01)
 """
 
 import numpy as np
+from numba import njit, prange
 from dataclasses import dataclass
 
 
@@ -88,27 +89,13 @@ class FRState:
         self._update_primitives()
 
     def _update_primitives(self):
-        """从守恒变量 U 更新原始变量 Q (含湍流量)。"""
-        rho = self.U[:, :, 0]
-        rho = np.maximum(rho, 1e-10)
-        
-        u = self.U[:, :, 1] / rho
-        v = self.U[:, :, 2] / rho
-        w = self.U[:, :, 3] / rho
-        
-        energy = self.U[:, :, 4]
-        ke = 0.5 * (u**2 + v**2 + w**2)
-        p = np.maximum((energy - rho * ke) * 0.4, 1.0)  # gamma = 1.4
-        
-        self.Q[:, :, 0] = rho
-        self.Q[:, :, 1] = u
-        self.Q[:, :, 2] = v
-        self.Q[:, :, 3] = w
-        self.Q[:, :, 4] = p
-        
-        if self.n_vars > 5:
-            self.Q[:, :, 5] = np.maximum(self.U[:, :, 5] / rho, 1e-12)  # k
-            self.Q[:, :, 6] = np.maximum(self.U[:, :, 6] / rho, 1e-12)  # omega
+        """从守恒变量 U 更新原始变量 Q (含湍流量)。
+
+        numba 并行实现（2026-09-25，算式与此前的 numpy 版本逐项相同：密度下限
+        1e-10、压力下限 1 Pa、k/omega 下限 1e-12，下限都用比较实现以保证 NaN
+        照样传播）。此前每次约 85 ms、单线程，每次残差求值前都要调一次。
+        """
+        _update_primitives_kernel(self.U, self.Q, self.n_vars > 5)
 
     def get_residual_norm(self) -> float:
         """计算残差的 RMS 范数（按单元数归一化），用于收敛性判断。
@@ -120,3 +107,33 @@ class FRState:
         if n_total == 0:
             return 0.0
         return np.linalg.norm(self.dU_dt) / np.sqrt(n_total)
+
+
+@njit(cache=True, parallel=True)
+def _update_primitives_kernel(U, Q, with_turbulence):
+    for c in prange(U.shape[0]):
+        for s in range(U.shape[1]):
+            rho = U[c, s, 0]
+            if rho < 1e-10:
+                rho = 1e-10
+            u = U[c, s, 1] / rho
+            v = U[c, s, 2] / rho
+            w = U[c, s, 3] / rho
+            ke = 0.5 * (u * u + v * v + w * w)
+            p = (U[c, s, 4] - rho * ke) * 0.4  # gamma = 1.4
+            if p < 1.0:
+                p = 1.0
+            Q[c, s, 0] = rho
+            Q[c, s, 1] = u
+            Q[c, s, 2] = v
+            Q[c, s, 3] = w
+            Q[c, s, 4] = p
+            if with_turbulence:
+                k = U[c, s, 5] / rho
+                if k < 1e-12:
+                    k = 1e-12
+                om = U[c, s, 6] / rho
+                if om < 1e-12:
+                    om = 1e-12
+                Q[c, s, 5] = k
+                Q[c, s, 6] = om

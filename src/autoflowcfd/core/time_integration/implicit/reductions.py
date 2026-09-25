@@ -17,6 +17,8 @@ import math
 
 import numpy as np
 
+from . import vector_ops
+
 
 class LocalReductions:
     """单进程归约。所有返回值都是 Python 标量（跨后端可比）。"""
@@ -56,7 +58,7 @@ class LocalReductions:
         return self._allreduce_min(local) > 0.0
 
     def dot(self, a, b) -> float:
-        return self._allreduce_sum(float(self.xp.vdot(a.ravel(), b.ravel())))
+        return self._allreduce_sum(vector_ops.dot(self.xp, a, b))
 
     def norm(self, x) -> float:
         return math.sqrt(max(self.dot(x, x), 0.0))

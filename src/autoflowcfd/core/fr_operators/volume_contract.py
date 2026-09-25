@@ -128,11 +128,12 @@ def contravariant_flux_from_metric(det_jacs: np.ndarray, inv_jacs: np.ndarray,
     precompute_scalar_convection_geometry`）。等价性回归测试见
     tests/unit/test_perf_fusion_kernels.py。
     """
-    det_c = np.ascontiguousarray(det_jacs)
-    inv_c = np.ascontiguousarray(inv_jacs)
+    # 度量量**不**转连续：核逐元素读取，接受任意步长——过积分四面体段传进来的
+    # 是"逐单元常数广播到全部细点"的零拷贝视图（步长 0），此前每次残差求值都
+    # 把它逐块物化一遍（plate_demo P1+SST 每个隐式步约 2 s 拷贝，2026-09-25 去掉）。
     F_c = np.ascontiguousarray(F_phys)
     out = np.empty_like(F_c)
-    _contravariant_flux_kernel(det_c, inv_c, F_c, out)
+    _contravariant_flux_kernel(det_jacs, inv_jacs, F_c, out)
     return out
 
 

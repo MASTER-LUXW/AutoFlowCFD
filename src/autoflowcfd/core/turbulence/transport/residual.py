@@ -25,12 +25,22 @@ from .omega_wall import (
 )
 
 
+def prepare_convection_geometry(solver, flat_face_override=None):
+    """标量对流的共享几何（只依赖平均流），见 `compute_turbulence_transport_residual`
+    的 `conv_geom` 参数。"""
+    Q = solver.state.Q
+    flat = (flat_face_override if flat_face_override is not None
+            else get_flat_face_geometry(solver.mesh, solver.ops))
+    return precompute_scalar_convection_geometry(Q[:, :, 0], Q[:, :, 1:4], solver.mesh, solver.ops, flat)
+
+
 def compute_turbulence_transport_residual(
     solver,
     grad_vel: np.ndarray = None,
     grad_k: np.ndarray = None,
     grad_omega: np.ndarray = None,
     flat_face_override=None,
+    conv_geom=None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """计算 k/omega 的完整输运残差（对流 + 扩散）。
 
@@ -59,6 +69,10 @@ def compute_turbulence_transport_residual(
             `DistributedMeshAdapter`），必须传入 `dist_fc.base_flat`，
             否则会尝试从压缩索引空间的适配器重新构建全局面几何。
 
+        conv_geom: 可选，`prepare_convection_geometry` 的结果。它只依赖平均流
+            （rho、速度），隐式 k-omega 在一个 Newton 步内平均流冻结，由调用方
+            在步起点算一次、每次求值传入（每次省约 0.18 s，plate_demo P1）；
+            None 时在这里现算（显式路径每步只求值一次）。
     Returns:
         (dk_dt_transport, domega_dt_transport): 各自 (n_cells, n_sps)，
         输运项对 dk/dt 和 domega/dt 的贡献
@@ -156,9 +170,8 @@ def compute_turbulence_transport_residual(
     # 和面上 mass_flux，这里统一算一次传给两者。
     _flat_conv = (flat_face_override if flat_face_override is not None
                   else get_flat_face_geometry(solver.mesh, solver.ops))
-    conv_geom = precompute_scalar_convection_geometry(
-        rho, vel, solver.mesh, solver.ops, _flat_conv,
-    )
+    if conv_geom is None:
+        conv_geom = prepare_convection_geometry(solver, flat_face_override)
 
     # 开放边界（流入/流出）掩码：k/omega 的来流条件（见
     # compute_scalar_convection_residual 的 open_boundary_face 参数文档）

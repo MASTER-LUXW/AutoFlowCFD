@@ -78,7 +78,7 @@ from autoflowcfd.core.time_integration.implicit import (
 )
 from autoflowcfd.core.time_integration.implicit.jfnk import positive_fields_row_limits
 from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
-from autoflowcfd.core.turbulence.transport import omega_wall_cell_targets
+from autoflowcfd.core.turbulence.transport import omega_wall_cell_targets, prepare_convection_geometry
 from autoflowcfd.fr.native_padding import real_sps_per_cell
 
 from .init import _update_production_ramp
@@ -114,7 +114,8 @@ def single_machine_cell_colors(solver) -> np.ndarray:
 class CpuTurbulenceBackend:
     """单机 CPU 适配器：`fr_solver/turbulence/source.py` 的三个求值件。"""
 
-    __slots__ = ("solver", "model", "xp", "red", "shape", "cell_is_prism", "order", "_inputs")
+    __slots__ = ("solver", "model", "xp", "red", "shape", "cell_is_prism", "order", "_inputs",
+                 "_conv_geom")
 
     def __init__(self, solver):
         self.solver = solver
@@ -125,13 +126,18 @@ class CpuTurbulenceBackend:
         self.cell_is_prism = np.arange(self.shape[0]) < int(solver.mesh.n_prism_cells)
         self.order = _current_order(solver)
         self._inputs = None
+        self._conv_geom = None
 
     def prepare(self) -> None:
         _update_production_ramp(self.solver)
         self._inputs = prepare_turbulence_inputs(self.solver)
+        # 平均流在整个 Newton 步内冻结：标量对流几何算一次，各次求值复用
+        self._conv_geom = prepare_convection_geometry(
+            self.solver, getattr(self.solver, "_turbulence_flat_face_override", None))
 
     def rates(self, apply_des: bool):
-        _, _, dk, dw, tk, tw = evaluate_turbulence_rates(self.solver, *self._inputs, apply_des=apply_des)
+        _, _, dk, dw, tk, tw = evaluate_turbulence_rates(
+            self.solver, *self._inputs, apply_des=apply_des, conv_geom=self._conv_geom)
         return (dk if tk is None else dk + tk), (dw if tw is None else dw + tw)
 
     def wall_targets(self):

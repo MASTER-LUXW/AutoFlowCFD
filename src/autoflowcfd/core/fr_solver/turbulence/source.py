@@ -105,7 +105,7 @@ def prepare_turbulence_inputs(solver):
     return Q, grad_vel, d_wall, mu
 
 
-def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, apply_des: bool):
+def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, apply_des: bool, conv_geom=None):
     """在 `turb_model` 当前的 `k_field/omega_field` 上求 `dk/dt`、`domega/dt`。
 
     返回 `(Sk, S_omega, dk_dt, domega_dt, transport_k, transport_omega)`：
@@ -116,6 +116,9 @@ def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, apply_des: boo
     realizability 下限（都是当前场的函数）。`apply_des=True` 时还按刚算出的
     `nu_t` 刷新 DES 长度尺度（供**下一步**用，见下方原注释）——隐式路径的
     每次残差求值必须传 `False`，否则 Newton 内部的试探场会改写它。
+
+    `conv_geom`：标量对流的共享几何（只依赖平均流），隐式路径在 Newton 步起点
+    算一次传入（`transport/residual.py::prepare_convection_geometry`）。
     """
     grad_k = None
     grad_omega = None
@@ -256,6 +259,7 @@ def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, apply_des: boo
         transport_k, transport_omega = compute_turbulence_transport_residual(
             solver, grad_vel=grad_vel, grad_k=grad_k, grad_omega=grad_omega,
             flat_face_override=getattr(solver, "_turbulence_flat_face_override", None),
+            conv_geom=conv_geom,
         )
 
     return Sk, S_omega, dk_dt, domega_dt, transport_k, transport_omega

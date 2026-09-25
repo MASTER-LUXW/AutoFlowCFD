@@ -92,8 +92,7 @@ def _scalar_diffusion_volume_overintegrated(gamma_field, grad_phi, oi, n_sps):
             G_phys_f = (gam_f * grad_f)[..., None]                    # (n,n_fine,3,1)
             del gam_f, grad_f
             G_tilde_f = contravariant_flux_from_metric(
-                np.ascontiguousarray(det_seg[i0:i1]),
-                np.ascontiguousarray(inv_seg[i0:i1]), G_phys_f)
+                det_seg[i0:i1], inv_seg[i0:i1], G_phys_f)  # 度量视图直接传（见 contravariant_flux_from_metric）
             del G_phys_f
             div_f = contract_shared_operator_2axis(op_D_fine, G_tilde_f)
             del G_tilde_f

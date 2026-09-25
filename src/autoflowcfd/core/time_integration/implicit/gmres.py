@@ -27,6 +27,7 @@ from typing import Callable, Tuple
 
 import numpy as np
 
+from . import vector_ops
 from .reductions import LocalReductions
 
 
@@ -54,9 +55,12 @@ def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
     r = b.copy()
     beta = bnorm
     total = 0
+    # Krylov 基预先整块分配（重启之间复用）：修正 Gram-Schmidt 的 `w -= h*V[i]`
+    # 原地做，不再每次新分配一个整长向量（见 vector_ops.py）
+    V = xp.empty((restart + 1,) + b.shape, dtype=b.dtype)
     while True:
         m = restart
-        V = [r / beta]
+        V[0] = r / beta
         H = np.zeros((m + 1, m))
         cs = np.zeros(m)
         sn = np.zeros(m)
@@ -67,10 +71,11 @@ def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
         for j in range(m):
             w = apply_A(apply_Minv(V[j]))
             total += 1
+            w = xp.ascontiguousarray(w)
             for i in range(j + 1):
                 h = red.dot(w, V[i])
                 H[i, j] = h
-                w = w - h * V[i]
+                vector_ops.axpy_(xp, w, -h, V[i])
             h_next = red.norm(w)
             H[j + 1, j] = h_next
             if not (np.isfinite(h_next) and np.all(np.isfinite(H[: j + 2, j]))):
@@ -96,12 +101,12 @@ def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
             if total >= max_iter or h_next == 0.0:     # 用满 / 幸运击穿
                 converged = h_next == 0.0
                 break
-            V.append(w / h_next)
+            V[j + 1] = w / h_next
         # 回代 y，更新 x = x + M^{-1} (V y)
         y = np.linalg.solve(np.triu(H[:k_used, :k_used]), g[:k_used]) if k_used else np.zeros(0)
         upd = y[0] * V[0]
         for i in range(1, k_used):
-            upd = upd + y[i] * V[i]
+            vector_ops.axpy_(xp, upd, y[i], V[i])
         x = x + apply_Minv(upd)
         rel = abs(g[k_used]) / bnorm
         if converged:

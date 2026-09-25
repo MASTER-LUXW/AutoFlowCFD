@@ -26,6 +26,7 @@ from typing import Callable, Optional
 import os
 
 import numpy as np
+from numba import njit, prange
 
 from autoflowcfd.core.fr_operators.kernels import (
     compute_ausm_up_flux,
@@ -41,15 +42,38 @@ GAMMA = 1.4
 
 
 def conserved_to_primitive(U: np.ndarray) -> np.ndarray:
-    """U=(rho,rho*u,rho*v,rho*w,rho*E) -> Q=(rho,u,v,w,p)，沿最后一维前5个分量。"""
-    rho = np.maximum(U[..., 0], 1e-10)
-    u = U[..., 1] / rho
-    v = U[..., 2] / rho
-    w = U[..., 3] / rho
-    E = U[..., 4] / rho
-    ke = 0.5 * (u**2 + v**2 + w**2)
-    p = (GAMMA - 1.0) * rho * (E - ke)
-    return np.stack([rho, u, v, w, p], axis=-1)
+    """U=(rho,rho*u,rho*v,rho*w,rho*E) -> Q=(rho,u,v,w,p)，沿最后一维前5个分量。
+
+    numba 并行实现（2026-09-25）：此前的 numpy 版本（5 个中间数组 + `np.stack`）
+    在 plate_demo P1 上每次约 45 ms、单线程，一次残差求值要做两次，是 16 线程下
+    残差里最大的串行项之一。算式与运算顺序和原版逐项相同（`rho` 下限用比较而不是
+    `max`，保证 NaN 照样传播——`np.maximum(NaN, x)` 是 NaN，发散检测依赖它）。
+    """
+    U = np.asarray(U)
+    lead = U.shape[:-1]
+    U2 = U.reshape(-1, U.shape[-1])
+    Q = np.empty((U2.shape[0], 5))
+    _conserved_to_primitive_rows(U2, Q)
+    return Q.reshape(lead + (5,))
+
+
+@njit(cache=True, parallel=True)
+def _conserved_to_primitive_rows(U, Q):
+    gm1 = GAMMA - 1.0
+    for i in prange(U.shape[0]):
+        rho = U[i, 0]
+        if rho < 1e-10:
+            rho = 1e-10
+        u = U[i, 1] / rho
+        v = U[i, 2] / rho
+        w = U[i, 3] / rho
+        E = U[i, 4] / rho
+        ke = 0.5 * (u * u + v * v + w * w)
+        Q[i, 0] = rho
+        Q[i, 1] = u
+        Q[i, 2] = v
+        Q[i, 3] = w
+        Q[i, 4] = gm1 * rho * (E - ke)
 
 
 def primitive_to_conserved(Q: np.ndarray) -> np.ndarray:
@@ -285,8 +309,9 @@ def compute_inviscid_residual_fr(
                 c1 = min(c0 + _OVERINT_CHUNK_CELLS, seg_hi)
                 i0, i1 = c0 - seg_lo, c1 - seg_lo
                 # 段内度量是带偏移的非连续视图，numba kernel 要连续输入
-                det_chunk = np.ascontiguousarray(det_seg[i0:i1])
-                inv_chunk = np.ascontiguousarray(inv_seg[i0:i1])
+                # 度量视图直接传给逐元素读取的核（四面体段是步长 0 的广播，不物化）
+                det_chunk = det_seg[i0:i1]
+                inv_chunk = inv_seg[i0:i1]
                 Q_fine = contract_shared_operator_1axis(op_c2f, Q[c0:c1])
                 if entropy_stable_volume:
                     # adj(J) 只有 entropy-stable 分支需要显式物化（该 kernel

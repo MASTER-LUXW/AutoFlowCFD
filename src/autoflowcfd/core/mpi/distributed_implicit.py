@@ -50,7 +50,7 @@ from autoflowcfd.core.mpi.distributed_turbulence import (
 )
 from autoflowcfd.core.mpi.reductions import MPIReductions
 from autoflowcfd.core.time_integration.implicit.block_jacobi import greedy_cell_coloring
-from autoflowcfd.core.turbulence.transport import omega_wall_cell_targets
+from autoflowcfd.core.turbulence.transport import omega_wall_cell_targets, prepare_convection_geometry
 
 
 def global_cell_colors(face_connectivity, n_global_cells: int) -> np.ndarray:
@@ -84,7 +84,7 @@ class DistributedTurbulenceBackend:
     """
 
     __slots__ = ("solver", "model", "xp", "red", "shape", "cell_is_prism", "order",
-                 "_adapter", "_view", "_inputs", "mu_t_compact")
+                 "_adapter", "_view", "_inputs", "_conv_geom", "mu_t_compact")
 
     def __init__(self, solver, cell_is_prism: np.ndarray, order: int):
         self.solver = solver
@@ -94,7 +94,7 @@ class DistributedTurbulenceBackend:
         self.shape = self.model.k_field.shape
         self.cell_is_prism = cell_is_prism
         self.order = int(order)
-        self._adapter = self._view = self._inputs = None
+        self._adapter = self._view = self._inputs = self._conv_geom = None
         self.mu_t_compact = None
 
     def _to_local(self, a_compact: np.ndarray) -> np.ndarray:
@@ -119,11 +119,15 @@ class DistributedTurbulenceBackend:
         _update_production_ramp(self._adapter)
         s._turb_ramp_step = self._adapter._turb_ramp_step
         self._inputs = prepare_turbulence_inputs(self._adapter)
+        # 平均流在整个 Newton 步内冻结：标量对流几何算一次，各次求值复用
+        self._conv_geom = prepare_convection_geometry(
+            self._adapter, self._adapter._turbulence_flat_face_override)
 
     def rates(self, apply_des: bool):
         self._sync_view()
         _, _, dk, dw, tk, tw = evaluate_turbulence_rates(self._adapter, *self._inputs,
-                                                         apply_des=apply_des)
+                                                         apply_des=apply_des,
+                                                         conv_geom=self._conv_geom)
         rate_k = dk if tk is None else dk + tk
         rate_w = dw if tw is None else dw + tw
         if apply_des:

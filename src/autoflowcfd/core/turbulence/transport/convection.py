@@ -139,8 +139,7 @@ def _scalar_convection_volume_overintegrated(
             # ascontiguousarray：段内度量是带偏移的非连续视图
             # （`det_all[n_prism:, :n_fine_tet]`），numba kernel 要连续输入
             F_tilde_f = contravariant_flux_from_metric(
-                np.ascontiguousarray(det_seg[i0:i1]),
-                np.ascontiguousarray(inv_seg[i0:i1]), F_phys_f)
+                det_seg[i0:i1], inv_seg[i0:i1], F_phys_f)  # 度量视图直接传（见 contravariant_flux_from_metric）
             del F_phys_f
             div_f = contract_shared_operator_2axis(op_D_fine, F_tilde_f)  # (n,n_fine,1)
             del F_tilde_f

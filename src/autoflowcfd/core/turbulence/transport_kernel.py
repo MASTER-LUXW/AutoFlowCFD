@@ -24,7 +24,7 @@ from numba import njit, prange, get_thread_id
 from autoflowcfd.core.fr_operators.small_dense import matvec_small
 
 
-@njit(cache=True)
+@njit(cache=True, parallel=True)
 def _extrap_owner_scalar_to_faces(
     scalar_sps,
     owner_cell, n_faces, n_fp, n_sps,
@@ -57,7 +57,7 @@ def _extrap_owner_scalar_to_faces(
         phi_owner_fp: (n_faces, n_fp)
     """
     phi_owner_fp = np.zeros((n_faces, n_fp))
-    for f in range(n_faces):
+    for f in prange(n_faces):  # 逐面独立（只写本面那一行）
         oc = owner_cell[f]
         oc_code = owner_cube_face[f]
         if oc_code >= 6:
@@ -71,7 +71,7 @@ def _extrap_owner_scalar_to_faces(
     return phi_owner_fp
 
 
-@njit(cache=True)
+@njit(cache=True, parallel=True)
 def _extrap_neighbor_scalar_to_faces(
     scalar_sps,
     neighbor_src0_cell, neighbor_src0_mat,
@@ -87,7 +87,7 @@ def _extrap_neighbor_scalar_to_faces(
         phi_neighbor_fp: (n_faces, n_fp)
     """
     phi_neighbor_fp = np.zeros((n_faces, n_fp))
-    for f in range(n_faces):
+    for f in prange(n_faces):  # 逐面独立（只写本面那一行）
         c0 = neighbor_src0_cell[f]
         if c0 >= 0:
             mat0 = neighbor_src0_mat[f]  # (n_fp, n_sps)
@@ -109,7 +109,7 @@ def _extrap_neighbor_scalar_to_faces(
     return phi_neighbor_fp
 
 
-@njit(cache=True)
+@njit(cache=True, parallel=True)
 def extrapolate_scalar_to_faces_kernel(
     scalar_sps,
     neighbor_src0_cell, neighbor_src0_mat,
@@ -192,7 +192,7 @@ def extrapolate_scalar_to_faces_kernel(
         neighbor_src1_idx, neighbor_src1_cell, neighbor_src1_mat,
         n_faces, n_fp, n_sps,
     )
-    for f in range(n_faces):
+    for f in prange(n_faces):  # 逐面独立（只写本面那一行）
         if neighbor_src0_cell[f] < 0 and neighbor_src1_idx[f] < 0:
             if wall_dirichlet_zero_face[f]:
                 for i in range(n_fp):
@@ -213,7 +213,7 @@ def extrapolate_scalar_to_faces_kernel(
     # 没有真实邻居单元，neighbor 侧值按配对边界面自身获得的同一规则逐 FP 覆盖——
     # Dirichlet-zero 壁面用镜像（-phi_owner），非零 Dirichlet 用配对面自己的
     # target 值镜像，其余用零梯度（phi_owner）；内部半区保持上方多源插值结果不动。
-    for f in range(n_faces):
+    for f in prange(n_faces):  # 逐面独立（只写本面那一行）
         mp = mixed_nb_partner[f]
         if mp >= 0:
             dirichlet = wall_dirichlet_zero_face[mp]

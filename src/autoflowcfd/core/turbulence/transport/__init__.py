@@ -73,7 +73,7 @@ from .omega_wall import (  # noqa: F401
     wall_dirichlet_face_mask,
     resolve_omega_wall_mode,
 )
-from .residual import compute_turbulence_transport_residual  # noqa: F401
+from .residual import compute_turbulence_transport_residual, prepare_convection_geometry  # noqa: F401
 
 __all__ = [
     "ScalarConvectionGeometry",

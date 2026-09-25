@@ -148,8 +148,7 @@ def _viscous_volume_overintegrated(Q, grad_vel, grad_T, mu_t_field,
             ).reshape(nb, n_fine, 3, 5)
             del Q_f, gv_f, gT_f, mut_f
             G_tilde_f = contravariant_flux_from_metric(
-                np.ascontiguousarray(det_seg[i0:i1]),
-                np.ascontiguousarray(inv_seg[i0:i1]), G_phys_f)
+                det_seg[i0:i1], inv_seg[i0:i1], G_phys_f)  # 度量视图直接传（见 contravariant_flux_from_metric）
             del G_phys_f
             div_f = contract_shared_operator_2axis(op_D_fine, G_tilde_f)
             del G_tilde_f
