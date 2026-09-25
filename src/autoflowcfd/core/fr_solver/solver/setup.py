@@ -119,7 +119,7 @@ class _SolverSetupMixin:
 
         self.ops = generate_fr_operators(order)
 
-        # BLAS 线程数压到 1（性能优化 2026-09-13，见 `_limit_blas_threads`
+        # BLAS 线程数压到 1（性能优化 2026-09-13，见 `blas_threads_limited`
         # 与 `autoflowcfd/__init__.py` 顶部的完整实测记录）。**位置很关键**：
         # 必须在网格几何（mesh.jacobians，调用方在构造 solver 之前就算好）
         # 与上面这行 FR 算子构造**之后**才限制——这两处的 LAPACK 结果会随
@@ -127,7 +127,7 @@ class _SolverSetupMixin:
         # 近乎精确的抵消（把限制提前会让棱柱 P2 保持性判据从 8.07e-7 退化到
         # 3.35e-6、真实测试失败）。在这之后限制：残差与全程多线程逐位相同，
         # 同时求解循环拿到 9~11% 的收益。
-        # 注意：**不要**在这里调 `_limit_blas_threads()`——那样是进程级、
+        # 注意：**不要**在这里做进程级的永久限制——那样是进程级、
         # 粘性的，会污染同一进程里后续求解器的几何/算子构造（真实 bug，
         # 见 `blas_threads_limited` 文档记录的 Couette 连跑失败）。
         # 限制只在求解循环内生效，见 `solve()` 里的 `blas_threads_limited`。

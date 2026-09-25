@@ -25,7 +25,7 @@ AutoFlowCFD 是一款开源计算流体力学（CFD）软件，
 # 关键：在导入 NumPy 之前设置 BLAS/线性代数线程数
 #
 # 这里保持 `cpu_count()`（**不要**改成 1），但求解循环开始前会被
-# `core/fr_solver/solver.py::_limit_blas_threads` 在运行时压到 1——
+# `core/fr_solver/solver/threads.py::blas_threads_limited` 在运行时压到 1——
 # 两段式是 2026-09-13 性能优化实测后**刻意**的安排，改动前请读完：
 #
 # 为什么求解阶段要把 BLAS 压到 1：本项目的计算热点（无粘/粘性残差的

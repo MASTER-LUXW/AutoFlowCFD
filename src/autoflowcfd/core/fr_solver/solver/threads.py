@@ -3,136 +3,145 @@
 从 `core/fr_solver/solver.py` 拆出（2026-09-25，项目「单文件不超 500 行」规范）。
 """
 
+import ctypes
+import functools
+import glob
+import importlib.util
 import os
 
 import numba
 from loguru import logger
 
+# 进程里可能同时存在的 BLAS 实例：numpy 与 SciPy 的 wheel 各自带一份
+# OpenBLAS（numba 在 nopython 里的 `np.dot`/`@` 走 SciPy 那份的 cython_blas）。
+# 两份导出符号的前缀不同——numpy 的是 `openblas_*`（64 位整型接口带 `64_`
+# 后缀），SciPy 1.13+ 的 `libscipy_openblas` 是 `scipy_openblas_*`。
+_BLAS_PACKAGES = ("numpy", "scipy")
+_OPENBLAS_SYMBOL_PREFIXES = ("scipy_openblas", "openblas")
+_OPENBLAS_SYMBOL_SUFFIXES = ("64_", "")
 
-def _limit_blas_threads(n: int = 1) -> bool:
-    """把已加载的 OpenBLAS/MKL 线程数在**运行时**限制为 `n`（默认 1）。
 
-    为什么需要运行时这一道（`autoflowcfd/__init__.py` 已经在 import numpy
-    之前设过 `OPENBLAS_NUM_THREADS=1` 等环境变量）：那条路径只在
-    "先 import autoflowcfd、再由它间接 import numpy" 时生效。如果调用方
-    （交互式会话、第三方脚本、pytest 插件等）在导入本包之前就已经
-    import 过 numpy，OpenBLAS 早已按 cpu_count 建好线程池，环境变量
-    不再有任何作用——那正是与 numba 线程池 2 倍超额订阅、实测慢 9~11%
-    的情形（数据见 `autoflowcfd/__init__.py` 顶部注释）。
+def _package_lib_dirs(package: str) -> list:
+    """`package` 的 wheel 可能放 OpenBLAS 动态库的目录（不 import 该包）。
 
-    实现用 ctypes 直接调 OpenBLAS 导出的 `openblas_set_num_threads`
-    （numpy 的 wheel 里是 64 位整型变体 `openblas_set_num_threads64_`）。
-    找不到符号/不是 OpenBLAS 后端时静默跳过——这是纯性能调优，任何
-    失败都不应影响求解本身。用户显式设过 `OPENBLAS_NUM_THREADS` 时
-    同样跳过，尊重显式配置。
-
-    Returns:
-        True 表示确实调到了某个后端的 set_num_threads；False 表示没找到
-        可用入口（静默跳过，不影响求解）。返回值供
-        `tests/unit/test_blas_thread_limit.py` 断言"这条路径在当前环境里
-        真的有效"——不要把它改成 `None`，否则那个自检就失去意义。
+    三种真实布局：`<site-packages>/<pkg>.libs/`（numpy 2.x / SciPy 的
+    Windows 与 manylinux wheel）、`<pkg>/.libs/`、`<pkg>/libs/`（旧布局）。
+    按**包名**拼目录而不是 glob `*.libs`：site-packages 里可能躺着 pip
+    中断升级留下的 `~umpy.libs` 之类的残留副本，glob 会把这份没人用的
+    DLL 加载进进程（2026-09-25 实测本机就有）。
     """
-    if os.environ.get("AFCFD_NO_BLAS_THREAD_LIMIT") == "1":
-        return False
-    try:
-        import ctypes
-        import glob
-        import numpy as _np
+    spec = importlib.util.find_spec(package)
+    if spec is None or not spec.submodule_search_locations:
+        return []
+    pkg_dir = list(spec.submodule_search_locations)[0]
+    site_dir = os.path.dirname(pkg_dir)
+    return [os.path.join(site_dir, package + ".libs"),
+            os.path.join(pkg_dir, ".libs"), os.path.join(pkg_dir, "libs")]
 
-        # numpy 自带的 BLAS 动态库已经在进程里（numpy import 时加载），
-        # 重新 `CDLL` 同一个路径拿到的是同一个已加载模块的句柄，因此
-        # 调用它导出的 set_num_threads 会作用在**正在用的那个实例**上。
-        #
-        # 搜索路径要覆盖三种真实的 wheel 布局（2026-09-13 真实踩坑：
-        # 第一版只找了包内的 `.libs`/`libs`，而本机 numpy 2.x Windows
-        # wheel 把 dll 放在 **site-packages/numpy.libs/**——numpy 包的
-        # *同级*目录，于是 ctypes 路径静默失效、9~11% 的收益并没有真正
-        # 拿到。用一个"限制前后测同一个大 gemm 耗时"的探针才发现，光看
-        # 代码不会发现——详见本函数末尾的自检说明）：
-        #   1) <site-packages>/numpy.libs/          （Windows wheel）
-        #   2) <numpy>/.libs/、<numpy>/libs/        （旧布局/部分 Linux wheel）
-        #   3) 系统安装的 libopenblas（Linux 发行版包管理器装的）
-        np_dir = os.path.dirname(_np.__file__)
-        site_dir = os.path.dirname(np_dir)
-        patterns = [
-            os.path.join(site_dir, "*.libs", "*openblas*"),
-            os.path.join(np_dir, ".libs", "*openblas*"),
-            os.path.join(np_dir, "libs", "*openblas*"),
-        ]
-        candidates = []
-        for pat in patterns:
-            candidates += [f for f in glob.glob(pat)
-                           if f.endswith((".dll", ".so", ".dylib")) or ".so." in f]
-        for lib_path in candidates:
+
+def _openblas_entry(lib):
+    """库导出的 `(get_num_threads, set_num_threads)`；不是 OpenBLAS 时返回 None。"""
+    for prefix in _OPENBLAS_SYMBOL_PREFIXES:
+        for suffix in _OPENBLAS_SYMBOL_SUFFIXES:
             try:
-                lib = ctypes.CDLL(lib_path)
-            except OSError:
+                get = getattr(lib, f"{prefix}_get_num_threads{suffix}")
+                set_ = getattr(lib, f"{prefix}_set_num_threads{suffix}")
+            except AttributeError:
                 continue
-            # 64 位整型接口的 OpenBLAS（numpy 用的就是 openblas64）导出的是
-            # 带 `64_` 后缀的符号名；两个都试，取到哪个用哪个。
-            for sym in ("openblas_set_num_threads64_", "openblas_set_num_threads"):
-                try:
-                    fn = getattr(lib, sym)
-                except AttributeError:
+            get.argtypes, get.restype = [], ctypes.c_int
+            set_.argtypes, set_.restype = [ctypes.c_int], None
+            return get, set_
+    return None
+
+
+@functools.lru_cache(maxsize=1)
+def _blas_thread_controls() -> tuple:
+    """本项目用到的每个 BLAS 实例的 `(路径, get, set)`，进程内只探测一次。
+
+    `CDLL` 一个已加载的路径拿到的是同一个模块句柄，所以 set 作用在
+    **正在用的那个实例**上。只认 numpy/SciPy 自带的 OpenBLAS；两者都没有
+    时再试 MKL（Intel 发行版 numpy）。一个都找不到返回空元组——此时限线程
+    无从谈起、求解照常，`tests/unit/test_blas_thread_limit.py` 钉住本项目
+    标准环境下必须找得到。
+    """
+    controls, seen = [], set()
+    for package in _BLAS_PACKAGES:
+        for lib_dir in _package_lib_dirs(package):
+            for path in sorted(glob.glob(os.path.join(lib_dir, "*openblas*"))):
+                if not (path.endswith((".dll", ".so", ".dylib")) or ".so." in path):
                     continue
-                fn.argtypes = [ctypes.c_int]
-                fn.restype = None
-                fn(int(n))
-                return True
-        # MKL 后端（Intel 发行版 numpy）走另一个入口
+                key = os.path.normcase(os.path.realpath(path))
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    entry = _openblas_entry(ctypes.CDLL(path))
+                except OSError:
+                    continue
+                if entry is not None:
+                    controls.append((path,) + entry)
+    if not controls:
         try:
             mkl = ctypes.CDLL("mkl_rt")
-            mkl.MKL_Set_Num_Threads(ctypes.c_int(int(n)))
-            return True
         except OSError:
-            pass
-        return False
-    except Exception:
-        # 纯性能调优，任何异常都不应影响求解
-        return False
+            return ()
+        get, set_ = mkl.MKL_Get_Max_Threads, mkl.MKL_Set_Num_Threads
+        get.argtypes, get.restype = [], ctypes.c_int
+        set_.argtypes, set_.restype = [ctypes.c_int], None
+        controls.append(("mkl_rt", get, set_))
+    return tuple(controls)
 
 
 class blas_threads_limited:
-    """把 BLAS 线程数限制在 `n`（默认 1）的上下文管理器，退出时恢复。
+    """把进程里**每个** BLAS 实例的线程数限制在 `n`（默认 1），退出时逐个
+    恢复到进入前的值。
 
-    **为什么必须是"有作用域"的，而不是构造时设一次就不管**（2026-09-14
-    真实 bug 修复）：`_limit_blas_threads` 改的是**进程级**状态。第一版把
-    它放在 `FRSolver.__init__` 里，于是一个进程里构造第二个求解器时，
-    它的网格几何（LAPACK 求逆得到的 `inv_jacs`）与 FR 算子构造就落在
-    "BLAS 只剩 1 线程"的环境下——而这两者的结果会随 BLAS/LAPACK 线程数
-    在最后一位上变化，离散 GCL / 自由流场保持性依赖这些度量量之间的
-    精确抵消（完整记录见 `autoflowcfd/__init__.py` 顶部）。真实后果：
-    `tests/validation/test_couette.py` 单独跑每个用例都过，整文件连跑时
-    第三个用例 `test_couette_prism_residual_trend` 必然失败（残差到最后
-    一步仍在上升、从未回落）——因为它构造求解器时 BLAS 已被前面的用例
-    永久限制成了 1。用 `AFCFD_NO_BLAS_THREAD_LIMIT=1` 关掉限制后整文件
-    3 项全过，是这个因果链的决定性验证。
+    **为什么求解阶段要限**：计算热点全是 numba `prange` kernel，由 numba
+    自己的线程池管；OpenBLAS 同时开 cpu_count 个线程就是 2 倍超额订阅
+    （实测数据见 `autoflowcfd/__init__.py` 顶部）。那里在 import numpy
+    之前设的 `OPENBLAS_NUM_THREADS` 只在"先 import 本包"时生效，调用方
+    先 import 过 numpy 时线程池早已建好，所以需要运行时这一道。
 
-    现在只在**求解循环**（`FRSolver.solve` / `run_order_continuation`）
-    期间限制：求解阶段 9~11% 的收益完整保留（那本来就是收益的来源），
-    而任何构造/几何/算子生成阶段都仍然拿到多线程 BLAS，进程内前后
-    构造的求解器因此得到逐位一致的度量量。
+    **为什么必须是"有作用域"的**（2026-09-14 真实 bug）：线程数是进程级
+    状态。网格几何（LAPACK 求逆得到的 `inv_jacs`）与 FR 算子构造的结果会随
+    BLAS 线程数在最后一位上变化，离散 GCL / 自由流场保持性依赖这些度量量
+    之间的精确抵消。第一版在 `FRSolver.__init__` 里永久限制，同进程构造的
+    第二个求解器就落在 1 线程下——`tests/validation/test_couette.py` 整文件
+    连跑时第三个用例必然失败。所以只在求解循环（`FRSolver.solve` /
+    `run_order_continuation`）期间限制。
+
+    **为什么恢复到"进入前的值"而不是 cpu_count**：进入前的值才是构造阶段
+    实际用的那个；猜一个默认值会在用户显式设过线程数时把它改掉。
+
+    **为什么每个实例都要限**（2026-09-25）：第一版找到第一个 OpenBLAS 就
+    返回，SciPy 那份（`libscipy_openblas`，符号前缀不同）从未被限制——
+    实测限制后 numpy 的 gemm 1.7 s（1 线程）、SciPy 的 dgemm 仍是 0.17 s
+    （16 线程）。
+
+    `AFCFD_NO_BLAS_THREAD_LIMIT=1` 时完全不动 BLAS（给自己管线程的用户/CI
+    留的逃生门）。`n_applied` 是实际限制了的实例数。
     """
 
     def __init__(self, n: int = 1):
-        self._n = n
-        self._applied = False
+        self._n = int(n)
+        self._saved = []
+
+    @property
+    def n_applied(self) -> int:
+        return len(self._saved)
 
     def __enter__(self):
-        self._applied = _limit_blas_threads(self._n)
+        self._saved = []
+        if os.environ.get("AFCFD_NO_BLAS_THREAD_LIMIT") != "1":
+            for _path, get, set_ in _blas_thread_controls():
+                self._saved.append((set_, get()))
+                set_(self._n)
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        if self._applied:
-            # 恢复到包默认值（`autoflowcfd/__init__.py` 把 BLAS 环境变量
-            # 设为 cpu_count）；用户显式设过 OPENBLAS_NUM_THREADS 时以它为准。
-            import multiprocessing
-            try:
-                restore = int(os.environ.get("OPENBLAS_NUM_THREADS",
-                                             multiprocessing.cpu_count()))
-            except ValueError:
-                restore = multiprocessing.cpu_count()
-            _limit_blas_threads(max(1, restore))
+        for set_, previous in reversed(self._saved):
+            set_(previous)
+        self._saved = []
         return False
 
 
@@ -152,7 +161,7 @@ def configure_numba_threads(n_threads: int, mesh) -> int:
     # 来的甜点——那时增加线程只会加剧内存带宽争用而没有任何可并行的
     # 新工作，所以 4 以上净倒退。这些链路改成 numba prange kernel 后
     # 重新在同一台 16 核机器、同一份 79 万单元真实网格 P1 状态上实测
-    # （BLAS 线程已按下方 `_limit_blas_threads` 限制为 1）：
+    # （BLAS 线程已按上方 `blas_threads_limited` 限制为 1）：
     #   nt=4  inviscid 5.61s viscous 5.35s turb 9.88s -> 约 45.5s/步
     #   nt=8  inviscid 5.28s viscous 5.21s turb 9.59s -> 约 43.8s/步（最优）
     #   nt=12 inviscid 6.09s viscous 7.02s turb 9.40s -> 约 51.4s/步

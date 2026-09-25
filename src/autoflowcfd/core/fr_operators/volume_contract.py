@@ -205,7 +205,7 @@ def _contract_shared_kernel(D_flat: np.ndarray, X_flat: np.ndarray, out: np.ndar
     是当时把 BLAS 线程数在**进程级**压到了 1，改变了网格几何（inv_jacs
     由 LAPACK 求逆）与 FR 算子构造的最后一位，而保持性依赖这些度量量
     之间的精确抵消（完整记录见 `autoflowcfd/__init__.py` 顶部与
-    `core/fr_solver/solver.py::_limit_blas_threads`）。4 路累加器本身对
+    `core/fr_solver/solver/threads.py::blas_threads_limited`）。4 路累加器本身对
     该判据几乎没有影响（3.3470e-6 -> 3.3394e-6），保留是因为上面 (a)(b)
     两条理由本身成立，**不是**那次失败的修复手段。
     """

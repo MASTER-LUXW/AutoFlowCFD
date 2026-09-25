@@ -7,6 +7,6 @@
 """
 
 from .core import FRSolver  # noqa: F401
-from .threads import _limit_blas_threads, blas_threads_limited, configure_numba_threads  # noqa: F401
+from .threads import blas_threads_limited, configure_numba_threads  # noqa: F401
 
 __all__ = ["FRSolver", "blas_threads_limited", "configure_numba_threads"]
