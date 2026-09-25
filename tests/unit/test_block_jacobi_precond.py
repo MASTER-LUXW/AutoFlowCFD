@@ -126,7 +126,7 @@ def test_preconditioner_is_exact_block_inverse_and_diagonal_on_padding():
 
 def _cache(n_cells=6, n_prism=3):
     owner, nb, is_prism = _chain_mesh(n_cells, n_prism)
-    return BlockJacobiCache(owner_cell=owner, neighbor_cell=nb, cell_is_prism=is_prism,
+    return BlockJacobiCache(colors=greedy_cell_coloring(owner, nb, is_prism.size), cell_is_prism=is_prism,
                             n_sps=N_SPS, n_real_prism=N_REAL_P, n_real_tet=N_REAL_T, n_var=NV)
 
 
@@ -201,7 +201,7 @@ def test_jfnk_block_precond_needs_fewer_gmres_iterations():
         return (A @ u_flat.reshape(-1) - b).reshape(-1, NV)
     dtau = np.full(n_cells * N_SPS, 1e6)
     _, info_d = step_newton_krylov(R, u0, dtau, np.ones(NV))
-    cache = BlockJacobiCache(owner_cell=owner, neighbor_cell=nb, cell_is_prism=is_prism,
+    cache = BlockJacobiCache(colors=greedy_cell_coloring(owner, nb, is_prism.size), cell_is_prism=is_prism,
                              n_sps=N_SPS, n_real_prism=N_REAL_P, n_real_tet=N_REAL_T, n_var=NV)
     _, info_b = step_newton_krylov(R, u0, dtau, np.ones(NV), block_precond=cache)
     assert info_b["theta"] > 0.0 and info_d["theta"] > 0.0

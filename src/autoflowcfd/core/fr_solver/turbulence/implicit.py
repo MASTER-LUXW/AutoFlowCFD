@@ -62,9 +62,11 @@ dtau；大 dtau 下一个 Newton 步就落到目标值上。目标值与单元�
     GpuTurbulenceBackend   `core/gpu/turbulence/gpu_implicit_turbulence.py`，
                            调 `GPUFRSolver` 上同名的三个 `_..._gpu` 方法
 
-适配器接口：`model / xp / red / shape / n_prism / order / solver`（跨步状态
-挂在 `solver._newton_turb_state` 上）、`prepare()`、`rates(apply_des)`、
-`wall_targets()`、`positivity()`、`finalize(dtau)`、`face_adjacency()`。
+适配器接口：`model / xp / red / shape / cell_is_prism / order / solver`（跨步
+状态挂在 `solver._newton_turb_state` 上）、`prepare()`、`rates(apply_des)`、
+`wall_targets()`（单元号在适配器自己的排列里）、`positivity()`、
+`finalize(dtau)`、`cell_colors()`（块 Jacobi 着色，见
+`implicit/mean_flow_step.py` 的同名参数）。
 """
 
 import numpy as np
@@ -100,10 +102,19 @@ def _current_order(solver) -> int:
     return int(order if order is not None else solver.order)
 
 
+def single_machine_cell_colors(solver) -> np.ndarray:
+    """单机块 Jacobi 着色：残差本身用的同一份展平面几何上的贪心距离 1 着色。"""
+    from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+    from autoflowcfd.core.time_integration.implicit.block_jacobi import greedy_cell_coloring
+
+    ffg = get_flat_face_geometry(solver.mesh, solver.ops)
+    return greedy_cell_coloring(ffg.owner_cell, ffg.neighbor_cell, int(solver.mesh.n_cells))
+
+
 class CpuTurbulenceBackend:
     """单机 CPU 适配器：`fr_solver/turbulence/source.py` 的三个求值件。"""
 
-    __slots__ = ("solver", "model", "xp", "red", "shape", "n_prism", "order", "_inputs")
+    __slots__ = ("solver", "model", "xp", "red", "shape", "cell_is_prism", "order", "_inputs")
 
     def __init__(self, solver):
         self.solver = solver
@@ -111,7 +122,7 @@ class CpuTurbulenceBackend:
         self.xp = np
         self.red = LocalReductions(np)
         self.shape = self.model.k_field.shape
-        self.n_prism = int(solver.mesh.n_prism_cells)
+        self.cell_is_prism = np.arange(self.shape[0]) < int(solver.mesh.n_prism_cells)
         self.order = _current_order(solver)
         self._inputs = None
 
@@ -133,11 +144,8 @@ class CpuTurbulenceBackend:
     def finalize(self, dtau) -> None:
         finalize_turbulence_update(self.solver, dtau, omega_wall_relaxation=False)
 
-    def face_adjacency(self):
-        from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
-
-        ffg = get_flat_face_geometry(self.solver.mesh, self.solver.ops)
-        return np.asarray(ffg.owner_cell), np.asarray(ffg.neighbor_cell)
+    def cell_colors(self):
+        return single_machine_cell_colors(self.solver)
 
 
 class TurbulenceResidual:
@@ -154,8 +162,7 @@ class TurbulenceResidual:
         xp = backend.xp
         n_cells, n_sps = backend.shape
         n_real_prism, n_real_tet = real_sps_per_cell(backend.order)
-        is_prism = np.arange(n_cells) < backend.n_prism
-        n_real = np.where(is_prism, n_real_prism, n_real_tet)
+        n_real = np.where(backend.cell_is_prism, n_real_prism, n_real_tet)
         real_rows = (np.arange(n_sps)[None, :] < n_real[:, None]).ravel()
         self._real_rows = xp.asarray(real_rows)
 
@@ -193,17 +200,14 @@ def _newton_state(backend):
     solver = backend.solver
     st = getattr(solver, "_newton_turb_state", None)
     if st is None:
-        n_cells, n_sps = backend.shape
         n_real_prism, n_real_tet = real_sps_per_cell(backend.order)
-        owner, neighbor = backend.face_adjacency()
         st = {
             "forcing": EisenstatWalkerForcing(),
             "dtau_scale": 1.0,
             "block": BlockJacobiCache(
-                owner_cell=owner, neighbor_cell=neighbor,
-                cell_is_prism=np.arange(n_cells) < backend.n_prism,
-                n_sps=n_sps, n_real_prism=n_real_prism, n_real_tet=n_real_tet, n_var=2,
-                red=backend.red),
+                cell_is_prism=backend.cell_is_prism, colors=backend.cell_colors(),
+                n_sps=backend.shape[1], n_real_prism=n_real_prism, n_real_tet=n_real_tet,
+                n_var=2, red=backend.red),
             "last_info": None,
         }
         solver._newton_turb_state = st

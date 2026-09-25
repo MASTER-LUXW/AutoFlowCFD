@@ -15,6 +15,7 @@ from autoflowcfd.core.fr_solver.filter import build_filter_func
 from autoflowcfd.core.fr_solver.turbulence.implicit import (
     IMPLICIT_TURBULENCE_MODELS,
     CpuTurbulenceBackend,
+    single_machine_cell_colors,
     step_turbulence_newton,
 )
 
@@ -301,8 +302,9 @@ def step(solver, dt: float) -> float:
             U_new_flat, _nk_info = step_mean_flow_newton(
                 solver, mean_flow_residual, U_flat, dt_local_flat,
                 _reference_scales(solver.freestream, n_vars),
-                red=LocalReductions(np), face_adjacency=lambda: _face_adjacency(solver),
-                n_cells=n_cells, n_prism=int(solver.mesh.n_prism_cells),
+                red=LocalReductions(np),
+                cell_is_prism=np.arange(n_cells) < int(solver.mesh.n_prism_cells),
+                cell_colors=lambda: single_machine_cell_colors(solver),
                 order=_current_order(solver), filter_active=filter_func is not None)
         elif solver.time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
             # 显式处理无粘对流项、隐式处理粘性+湍流扩散项——通用的
@@ -363,10 +365,3 @@ def _current_order(solver) -> int:
     order = getattr(solver, "current_order", None)
     return int(order if order is not None else solver.order)
 
-
-def _face_adjacency(solver):
-    """块 Jacobi 着色用的面相邻关系：残差本身用的同一份展平面几何（带缓存）。"""
-    from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
-
-    ffg = get_flat_face_geometry(solver.mesh, solver.ops)
-    return np.asarray(ffg.owner_cell), np.asarray(ffg.neighbor_cell)

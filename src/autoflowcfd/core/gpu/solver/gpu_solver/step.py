@@ -152,13 +152,13 @@ class _GPUSolverStepMixin:
             # 这里只提供 GPU 的残差、归约（cupy）与面相邻关系。
             from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
             ff = self.flat_face_gpu
+            from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import gpu_cell_colors
             U_new_flat, nk_info = step_mean_flow_newton(
                 self, mean_flow_residual, U_flat, dt_local_full,
                 _reference_scales(self.freestream, self.n_vars),
                 red=LocalReductions(cp),
-                face_adjacency=lambda: (np.asarray(cp.asnumpy(ff.owner_cell)),
-                                        np.asarray(cp.asnumpy(ff.neighbor_cell))),
-                n_cells=n_cells, n_prism=int(self.mesh.n_prism_cells),
+                cell_is_prism=np.arange(n_cells) < int(self.mesh.n_prism_cells),
+                cell_colors=lambda: gpu_cell_colors(cp, ff, n_cells),
                 order=int(self.order if getattr(self, "current_order", None) is None
                           else self.current_order),
                 filter_active=self.filter_func_gpu is not None)

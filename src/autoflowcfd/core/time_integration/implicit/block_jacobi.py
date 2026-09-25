@@ -300,11 +300,11 @@ class BlockJacobiCache:
                  "jac", "age", "baseline_iters", "last_iters", "last_accepted",
                  "disabled_reason", "n_builds", "red")
 
-    def __init__(self, *, owner_cell, neighbor_cell, cell_is_prism, n_sps: int,
+    def __init__(self, *, cell_is_prism, colors: np.ndarray, n_sps: int,
                  n_real_prism: int, n_real_tet: int, n_var: int,
-                 red: LocalReductions = None, colors: np.ndarray = None):
-        """`colors` 给出时直接用（分布式：全局着色切出的本 rank 段，保证同色
-        单元跨 rank 也不相邻）；否则按 `owner/neighbor` 面相邻关系现算。"""
+                 red: LocalReductions = None):
+        """`colors`：块装配用的单元着色（单机 `greedy_cell_coloring`；分布式是
+        全局一致着色里本 rank 那一段，保证同色单元跨 rank 也不相邻）。"""
         self.red = red if red is not None else LocalReductions()
         self.cell_is_prism = np.asarray(cell_is_prism, dtype=bool)
         self.n_sps, self.n_real_prism, self.n_real_tet = n_sps, n_real_prism, n_real_tet
@@ -325,8 +325,7 @@ class BlockJacobiCache:
             self.colors = None
         else:
             self.disabled_reason = None
-            self.colors = (np.asarray(colors, dtype=np.int64) if colors is not None
-                           else greedy_cell_coloring(owner_cell, neighbor_cell, self.cell_is_prism.size))
+            self.colors = np.asarray(colors, dtype=np.int64)
 
     def _needs_rebuild(self) -> bool:
         if self.jac is None or self.age >= MAX_AGE or not self.last_accepted:

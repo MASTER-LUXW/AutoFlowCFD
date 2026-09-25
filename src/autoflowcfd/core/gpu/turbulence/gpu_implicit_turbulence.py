@@ -18,7 +18,7 @@ from autoflowcfd.core.time_integration.implicit.reductions import LocalReduction
 class GpuTurbulenceBackend:
     """`GPUFRSolver`（单机）的隐式湍流适配器。"""
 
-    __slots__ = ("solver", "model", "xp", "red", "shape", "n_prism", "order", "_inputs")
+    __slots__ = ("solver", "model", "xp", "red", "shape", "cell_is_prism", "order", "_inputs")
 
     def __init__(self, solver):
         cp = get_cupy()
@@ -27,7 +27,7 @@ class GpuTurbulenceBackend:
         self.xp = cp
         self.red = LocalReductions(cp)
         self.shape = tuple(self.model.k_field.shape)
-        self.n_prism = int(solver.mesh.n_prism_cells)
+        self.cell_is_prism = np.arange(self.shape[0]) < int(solver.mesh.n_prism_cells)
         order = getattr(solver, "current_order", None)
         self.order = int(order if order is not None else solver.order)
         self._inputs = None
@@ -51,7 +51,13 @@ class GpuTurbulenceBackend:
     def finalize(self, dtau) -> None:
         self.solver._finalize_turbulence_update_gpu(omega_wall_relaxation=False)
 
-    def face_adjacency(self):
-        ff = self.solver.flat_face_gpu
-        cp = self.xp
-        return (np.asarray(cp.asnumpy(ff.owner_cell)), np.asarray(cp.asnumpy(ff.neighbor_cell)))
+    def cell_colors(self):
+        return gpu_cell_colors(self.xp, self.solver.flat_face_gpu, self.shape[0])
+
+
+def gpu_cell_colors(cp, flat_face_gpu, n_cells: int) -> np.ndarray:
+    """单机 GPU 的块 Jacobi 着色：设备端面相邻关系拷回主机做贪心着色（一次性）。"""
+    from autoflowcfd.core.time_integration.implicit.block_jacobi import greedy_cell_coloring
+
+    return greedy_cell_coloring(np.asarray(cp.asnumpy(flat_face_gpu.owner_cell)),
+                                np.asarray(cp.asnumpy(flat_face_gpu.neighbor_cell)), int(n_cells))

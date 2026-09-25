@@ -36,7 +36,7 @@ Jacobi 的块尺寸与装配次数都白白多出 7/5 倍（plate_demo P1+SST：
     _newton_last_info       上一步的诊断
 """
 
-from typing import Callable, Tuple
+from typing import Callable
 
 import numpy as np
 from loguru import logger
@@ -79,8 +79,8 @@ def newton_step_ok(info: dict) -> bool:
 
 def step_mean_flow_newton(
     solver, residual: Callable, u_flat, dtau_flat, scales: np.ndarray, *,
-    red: LocalReductions, face_adjacency: Callable[[], Tuple[np.ndarray, np.ndarray]],
-    n_cells: int, n_prism: int, order: int, filter_active: bool,
+    red: LocalReductions, cell_is_prism: np.ndarray, cell_colors: Callable[[], np.ndarray],
+    order: int, filter_active: bool,
 ):
     """平均流的一个 PTC-Newton-Krylov 步，返回 `(U_new_flat, info)`。
 
@@ -91,10 +91,12 @@ def step_mean_flow_newton(
         dtau_flat: `(N,)` 逐 SP 伪时间步长（天花板，见 `jfnk.py`）。
         scales: `(n_vars,)` 守恒变量参考量级（`residual_diagnostics._reference_scales`）。
         red: 全局归约（单进程 numpy / cupy，或分布式子类）。
-        face_adjacency: 返回 `(owner_cell, neighbor_cell)`（主机端 numpy），
-            只在首次构造块 Jacobi 缓存时调用。
-        n_cells: 单元数（状态行数 = n_cells * n_sps）。
-        n_prism: 单元排列里棱柱的个数（棱柱在前）。
+        cell_is_prism: `(n_cells,)` 主机端布尔掩码（单机"棱柱在前"，分布式
+            local 排列里棱柱/四面体交错，所以不能用"前 n_prism 个"表达）。
+        cell_colors: 返回 `(n_cells,)` 块 Jacobi 着色（主机端 numpy），只在
+            首次构造缓存时调用。单机：按面相邻关系贪心着色；分布式：全局
+            一致着色里本 rank 那一段（同色单元跨 rank 也不相邻，见
+            `block_jacobi.py::CellBlockJacobian` 文档）。
         order: 当前阶数（决定每类单元的真实解点数）。
         filter_active: 是否构造了模态滤波回调（为真时报错，见模块文档）。
     """
@@ -112,13 +114,13 @@ def step_mean_flow_newton(
     if solver._newton_forcing is None:
         solver._newton_forcing = EisenstatWalkerForcing()
     if solver._newton_block_precond is None:
-        owner, neighbor = face_adjacency()
+        cell_is_prism = np.asarray(cell_is_prism, dtype=bool)
+        n_cells = cell_is_prism.size
         n_real_prism, n_real_tet = real_sps_per_cell(int(order))
         if u_flat.shape[0] % n_cells:
             raise ValueError(f"状态行数 {u_flat.shape[0]} 不是单元数 {n_cells} 的整数倍")
         solver._newton_block_precond = BlockJacobiCache(
-            owner_cell=owner, neighbor_cell=neighbor,
-            cell_is_prism=np.arange(n_cells) < int(n_prism),
+            cell_is_prism=cell_is_prism, colors=cell_colors(),
             n_sps=u_flat.shape[0] // n_cells, n_real_prism=n_real_prism,
             n_real_tet=n_real_tet, n_var=n_mf, red=red)
 
