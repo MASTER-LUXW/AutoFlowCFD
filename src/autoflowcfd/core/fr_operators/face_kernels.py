@@ -140,28 +140,21 @@ class FlatFaceGeometry:
     # （规整四面体）到 0.000003（细长四面体）。
     ref_area_weight: np.ndarray     # float64 (n_fp,)
 
-    # 逐面**物理面积**，float64 (n_faces,) —— `true_area_weight` 沿 FP 轴
-    # 求和。该和恒等于物理面积这一点已独立验证：平板算例六个边界平面的
-    # `sum(true_area_weight)` 与解析平面面积之比全部是 1.000000（含原生
-    # 棱柱的两个三角形封盖，它们的通量点是 Duffy collapse 像、Duffy 因子
-    # `(1-s)/2` 已经乘在 `native_prism_face_adj_rows` 返回的行里）。
-    face_area: np.ndarray           # float64 (n_faces,)
-    # 逐单元**精确体积**，float64 (n_cells,) —— `mesh.get_all_cell_volumes()`
-    # 的那一份（Gauss-Legendre 加权积分，原生四面体段走常数 Jacobian ×
-    # 参考体积）。
+    # 逐面**内罚项长度尺度** `h_f = min(V_owner, V_neighbor) / A_face`（边界面取
+    # `V_owner / A_face`），float64 (n_faces,)。平均流粘性与湍流扩散的 IP 罚项都读它
+    # （唯一定义）。
     #
-    # ## 为什么必须是它、不能是 `mean(det_jacs)`（2026-09-23）
-    #
-    # 粘性 IP 罚项的长度尺度此前是 `mean(det_jacs) ** (1/3)`。`mean(det_jacs)`
-    # 不是体积，是"体积 ÷ **参考单元**体积"，而参考体积**基相关**：坍缩张量积
-    # 立方体 8、原生棱柱 4、原生四面体 4/3。同一个物理单元在两条基下因此拿到
-    # 相差 2 倍（四面体 6 倍）的"体积"，罚项强度差 21%（四面体 45%）。
-    # `get_all_cell_volumes()` 的文档里早就写明"det(J)均值*8 是错的、已为
-    # CFL/网格尺度那条路径改成正确的加权积分"——罚项这个消费点被漏掉了。
-    #
-    # 与 `face_area` 配对给出 IP 罚项的正确长度尺度：`h_f = cell_volume /
-    # face_area`，即**面法向的单元厚度**（直棱柱贴壁单元上恰好等于 dy）。
-    cell_volume: np.ndarray         # float64 (n_cells,)
+    # * `A_face` = `true_area_weight` 沿 FP 轴求和（与解析面积之比在平板算例六个
+    #   边界平面上全部 1.000000，含原生棱柱的两个三角形封盖）；
+    # * `V` = `mesh.get_all_cell_volumes()` 的精确体积。**不能**用 `mean(det_jacs)`
+    #   （2026-09-23）：那是"体积 ÷ 参考单元体积"，参考体积基相关（坍缩 8、原生棱柱 4、
+    #   原生四面体 4/3），罚项强度因此差 21%（四面体 45%）；也不能用几何平均
+    #   `V**(1/3)`：各向异性贴壁单元上比壁法向厚度大 2.48 倍（实测平板）。
+    #   `V/A` 是面法向的单元厚度（直棱柱贴壁单元上恰好等于 dy）；
+    # * **两侧单值**（2026-09-26）：罚项是公共通量的一部分，两侧若各用自己的
+    #   `V/A`，相邻体积不等时同一个面上两侧收到的罚通量不等，离散扩散不守恒。
+    #   取较薄的一侧：对两侧都满足迹不等式的下界（强制性）。
+    ip_length: np.ndarray           # float64 (n_faces,)
 
     # --- neighbor_sources（owner 侧用来组装 Q_neighbor 的来源）---
     neighbor_src0_cell: np.ndarray   # int64 (n_faces,)，-1 表示无来源
@@ -354,17 +347,18 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     _w1, _w2 = np.meshgrid(_w_1d, _w_1d, indexing="ij")
     ref_area_weight = np.ascontiguousarray((_w1 * _w2).ravel())
 
-    # 逐面物理面积 / 逐单元精确体积（见同名字段文档）。两者都只依赖几何，
-    # 与流场无关，随 flat 几何一次性构造并缓存。
-    face_area = np.ascontiguousarray(
-        np.asarray(true_area_weight, dtype=np.float64).sum(axis=1))
-    cell_volume = np.ascontiguousarray(
-        np.asarray(mesh.get_all_cell_volumes(), dtype=np.float64))
+    # 内罚项长度尺度（见同名字段文档）：只依赖几何，随 flat 几何一次性构造并缓存。
+    face_area = np.asarray(true_area_weight, dtype=np.float64).sum(axis=1)
+    cell_volume = np.asarray(mesh.get_all_cell_volumes(), dtype=np.float64)
     if cell_volume.shape[0] != int(mesh.n_cells):
         raise ValueError(
             f"cell_volume 长度 {cell_volume.shape[0]} 与网格单元数 "
-            f"{int(mesh.n_cells)} 不一致 —— IP 罚项按 owner/neighbor 单元"
-            f"下标直接索引它，长度不对会静默取到错误的单元")
+            f"{int(mesh.n_cells)} 不一致 —— 按 owner/neighbor 单元下标索引它，"
+            f"长度不对会静默取到错误的单元")
+    _nb = np.asarray(fc.neighbor_cell, dtype=np.int64)
+    _v = cell_volume[np.asarray(fc.owner_cell, dtype=np.int64)]
+    _v = np.where(_nb >= 0, np.minimum(_v, cell_volume[np.maximum(_nb, 0)]), _v)
+    ip_length = np.ascontiguousarray(_v / np.maximum(face_area, 1e-300))
 
     # 面图着色：一次性计算，后续残差求值直接复用（不再重复着色）。
     # 贪心着色覆盖 owner_cell 与非边界面 neighbor_cell 两侧的写冲突——
@@ -395,7 +389,7 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
         owner_cube_face=owner_cube_face, neighbor_cube_face=neighbor_cube_face,
         true_area_weight=true_area_weight,
         ref_area_weight=ref_area_weight,
-        face_area=face_area, cell_volume=cell_volume,
+        ip_length=ip_length,
         owner_adj_row_exact=owner_adj_row_exact, neighbor_adj_row_exact=neighbor_adj_row_exact,
         neighbor_src0_cell=neighbor_src0_cell, neighbor_src0_mat=neighbor_src0_mat,
         neighbor_src1_idx=neighbor_src1_idx, neighbor_src1_cell=neighbor_src1_cell,

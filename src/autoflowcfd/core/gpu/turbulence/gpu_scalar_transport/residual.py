@@ -17,7 +17,7 @@ from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_
 
 from autoflowcfd.core.turbulence.transport import resolve_turb_overintegration
 from autoflowcfd.core.turbulence.sst.bounds import model_evaluation_fields, omega_realizability_floor
-from autoflowcfd.core.turbulence.transport.faces import boundary_diffusion_targets, penalty_length
+from autoflowcfd.core.turbulence.transport.faces import boundary_diffusion_targets
 
 # 过积分上下文提取到 `core/gpu/gpu_overintegration.py`（2026-09-15，粘性
 # 体积项 GPU 侧补齐时共用同一份，避免 residual 模块反向依赖 turbulence
@@ -173,7 +173,7 @@ def compute_scalar_diffusion_residual_gpu(
 
     # 界面项：IIPG + 内罚项，两侧各自坐标系；边界点壁面内罚 Dirichlet、其余齐次
     # Neumann（公式与边界分类见 CPU 版同名函数，分类规则共用 `boundary_diffusion_targets`）
-    h_face = penalty_length(cp, ff)[:, None]
+    h_face = ff.ip_length[:, None]
     masks = (wall_dirichlet_zero_face, wall_dirichlet_value_face, has_wall_dirichlet_value)
     jumps = []
     for frame, adj_row in (("owner", ff.owner_adj_row_exact), ("neighbor", ff.neighbor_adj_row_exact)):

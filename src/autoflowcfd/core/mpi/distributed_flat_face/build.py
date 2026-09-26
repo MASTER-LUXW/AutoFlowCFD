@@ -300,14 +300,9 @@ def build_distributed_flat_face(
         # `ref_area_weight` 是**逐面相同**的参考求积权重（(n_fp,)），
         # 所以不按 local_face_indices 切、整块复用。
         ref_area_weight=global_flat.ref_area_weight,
-        # `face_area` 是**逐面**物理面积 -> 按面轴切片。
-        face_area=global_flat.face_area[local_face_indices],
-        # `cell_volume` 存的是*单元*量，必须按 `compact_global_ids`
-        # （扩展索引 -> 全局单元编号）重排到"棱柱在前"的 local+halo 索引
-        # 空间，与 owner/neighbor cell 索引所在的空间一致 —— 与
-        # `_remap_cell_indices` 处理 src0/src1 cell 字段同一个理由（那处
-        # 漏做重映射曾是"P>=1 阶数分区边界读错邻居数据"的直接原因）。
-        cell_volume=global_flat.cell_volume[compact_global_ids],
+        # `ip_length` 是**逐面**量（全局上按两侧单元体积算好的单值长度尺度），
+        # 按面轴切片即可，不涉及单元索引空间的重映射。
+        ip_length=global_flat.ip_length[local_face_indices],
         boundary_extrap_native=global_flat.boundary_extrap_native,
         lift_native=global_flat.lift_native,
         # src0/src1 cell 字段存的是*单元*索引（不是面索引），必须重映射到

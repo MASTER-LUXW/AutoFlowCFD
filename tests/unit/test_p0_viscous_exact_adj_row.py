@@ -189,7 +189,7 @@ def test_old_metric_source_changes_the_residual():
             flat.owner_cube_face, flat.neighbor_cube_face,
             flat.ref_area_weight,
             flat.boundary_extrap_native, flat.lift_native,
-            flat.face_area, flat.cell_volume, c_ip,
+            flat.ip_length, c_ip,
         )
 
     def old_style(cell_idx, axis_slots):

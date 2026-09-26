@@ -126,7 +126,7 @@ def _compute_residual_via_new_kernel(U, mesh, ops, mu_t_field=None, boundary_gho
         # `resolve_viscous_ip_constant`）——必须与生产调用方
         # `fr_residual/viscous_flux.py` 传的完全一致，否则这条交叉验证
         # 比的就不是同一个格式了。
-        flat.face_area, flat.cell_volume,
+        flat.ip_length,
         resolve_viscous_ip_constant(int(mesh.order)),
     )
     residual = residual + correction

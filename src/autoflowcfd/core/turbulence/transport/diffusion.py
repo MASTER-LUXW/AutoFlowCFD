@@ -30,7 +30,6 @@ from .face_frames import diffusion_face_jumps_kernel
 from .faces import (
     _lift_side_jumps,
     boundary_diffusion_targets,
-    penalty_length,
     unit_normals,
 )
 from .convection import (
@@ -216,14 +215,14 @@ def compute_scalar_diffusion_residual(
     # 文档"为什么内部面也必须加"）：`grad_phi` 是纯单元内局部梯度（没有 BR1 的
     # 提升项），界面耦合若只有"通量取两侧平均"就不控制跨面跳跃——不满足强制性，
     # P0 下内部面扩散恒为零。罚项常数与长度尺度取同一处定义：
-    #     G*.n = {G}.n - eta [[phi]],  eta = c_ip * {Gamma} / h_face（见 `faces.penalty_length`）
+    #     G*.n = {G}.n - eta [[phi]],  eta = c_ip * {Gamma} / h_face（`FlatFaceGeometry.ip_length`，与平均流粘性项同一个）
     #     J_side = (G* - G_side).n_side = 1/2 (G_other - G_side).n_side - eta_side (phi_side - phi_other)
     # 边界点（真边界面、混合拆分面的边界半区）：壁面为内罚 Dirichlet
     # `G*.n = G_self.n - eta (phi_self - g)`，其余为齐次 Neumann `G*.n = 0`，见本函数
     # 文档"边界条件"。
     flat = flat_face_override if flat_face_override is not None else get_flat_face_geometry(mesh, ops)
     c_ip = resolve_viscous_ip_constant(int(mesh.order))
-    h_face = np.ascontiguousarray(penalty_length(np, flat), dtype=np.float64)
+    h_face = np.ascontiguousarray(flat.ip_length, dtype=np.float64)
     masks = (wall_dirichlet_zero_face, wall_dirichlet_value_face, has_wall_dirichlet_value)
     grad_c = np.ascontiguousarray(grad_phi)
     phi_c = np.ascontiguousarray(scalar_field)

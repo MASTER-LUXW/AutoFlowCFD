@@ -79,22 +79,6 @@ def _extrapolate_scalar_to_faces_neighbor_frame(
     )
 
 
-def penalty_length(xp, flat):
-    """IP 罚项的面长度尺度 `h_face = min(V_owner, V_neighbor) / A_face`（边界面取 owner）。
-    `xp` 为数组模块（CPU numpy / GPU cupy 共用）。
-
-    **必须两侧单值**：罚项是公共通量 `G*` 的一部分。两侧若各用自己的
-    `V_cell / A_face`（平均流粘性 kernel 目前的写法），相邻单元体积不等时同一个面上
-    owner 与 neighbor 收到的罚通量不等，离散扩散不守恒。取两侧中较薄的一侧：对两侧
-    都满足迹不等式的下界（强制性），且单值。（等体积的结构网格上两种写法逐位相同，
-    所以小通道网格上的谱测试探不到这一条；它是守恒性的要求，不是那次实测的来源。）
-    """
-    nei = flat.neighbor_cell
-    v = flat.cell_volume[flat.owner_cell]
-    v = xp.where(nei >= 0, xp.minimum(v, flat.cell_volume[xp.maximum(nei, 0)]), v)
-    return v / xp.maximum(flat.face_area, 1e-300)
-
-
 def boundary_diffusion_targets(xp, flat, frame, wall_dirichlet_zero_face=None,
                                wall_dirichlet_value_face=None, has_wall_dirichlet_value=None):
     """某一侧坐标系下扩散界面项的边界点分类，返回 `(is_boundary, is_dirichlet, target)`，

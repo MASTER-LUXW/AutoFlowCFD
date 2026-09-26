@@ -69,13 +69,13 @@ def compute_viscous_interface_correction_p0_kernel(
     owner_cube_face: np.ndarray, neighbor_cube_face: np.ndarray,
     ref_area_weight: np.ndarray,
     boundary_extrap_native: np.ndarray, lift_native: np.ndarray,
-    # IP 罚项的长度尺度 `h_f = cell_volume[cell] / face_area[face]`
-    # （面法向的单元厚度）。见 `flux_kernels.viscous_ip_penalty_tilde`
+    # IP 罚项的长度尺度 `h_f`（`FlatFaceGeometry.ip_length`：面法向的单元
+    # 厚度，两侧单值取较薄一侧，湍流扩散读同一个）。见 `flux_kernels.viscous_ip_penalty_tilde`
     # 的"长度尺度"一节：此前用 `mean(det_jacs)**(1/3)`，两处都错 ——
     # `mean(det_jacs)` 不是体积而是体积/参考体积（参考体积基相关：
     # 坍缩 8 / 原生棱柱 4 / 原生四面体 4/3），且几何平均在各向异性
     # 贴壁单元上比壁法向厚度大 2.48 倍（实测平板算例）。
-    face_area: np.ndarray, cell_volume: np.ndarray,
+    ip_length: np.ndarray,
     # IP 罚项常数，按阶数解析（见 `flux_kernels.resolve_viscous_ip_constant`）。
     # 做成形参而不是模块全局：njit 把全局当编译期常量、且
     # `cache=True` 的磁盘缓存**不因全局值变化而失效**，那样
@@ -268,12 +268,12 @@ def compute_viscous_interface_correction_p0_kernel(
 
                 # `adj_mag_o` 与罚项长度尺度两条分支都要用，提到 if 之外。
                 adj_mag_o = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
-                h_ip_o = cell_volume[oc] / face_area[f]
+                h_ip_o = ip_length[f]
                 if is_bnd_i:
                     # 边界 IP 罚项，见 viscous_flux_kernel.py::
                     # compute_viscous_interface_correction_kernel 同名分支
                     # 文档。（原注释写"P0 特化：vol_o 直接是 det_jacs[oc,0]"，
-                    # 2026-09-23 起罚项长度尺度改用 `cell_volume/face_area`，
+                    # 2026-09-23 起罚项长度尺度改用面法向单元厚度（现为 `ip_length`），
                     # 与阶数无关，那条特化说明已不适用。）
                     pen = viscous_ip_penalty_tilde(
                         Q_o_i, Q_n, mu + mut_o_i, 0.0, h_ip_o, adj_mag_o,
@@ -413,7 +413,7 @@ def compute_viscous_interface_correction_p0_kernel(
 
                 # 混合拆分面边界半区（B-8）：neighbor 侧边界 IP 罚项，规则同通用 kernel。
                 adj_mag_n = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
-                h_ip_n = cell_volume[nc] / face_area[f]
+                h_ip_n = ip_length[f]
                 if mp_o >= 0 and mixed_ow_mask[f, i]:
                     pen_n = viscous_ip_penalty_tilde(
                         Q_n_i, Q_o_at_n, mu + mut_n_i, 0.0, h_ip_n, adj_mag_n,

@@ -199,10 +199,11 @@ def viscous_ip_penalty_tilde(
        倍**，且该偏差随壁面层加密越来越严重（`dy` 减半时 `vol/A` 减半，
        而 `vol**(1/3)` 只降 1.26 倍）。
 
-    现在由调用方传 `h = cell_volume[cell] / face_area[face]`，其中
-    `cell_volume` 取 `get_all_cell_volumes()` 那份正确实现、`face_area` 取
-    `true_area_weight` 逐面求和（该和等于物理面积这一点已独立验证：平板
-    算例六个边界平面与解析面积之比全部 1.000000）。
+    现在由调用方传 `h = FlatFaceGeometry.ip_length[face]`：`min(V_owner,
+    V_neighbor) / A_face`（边界面取 owner），`V` 取 `get_all_cell_volumes()` 那份
+    正确实现、`A_face` 取 `true_area_weight` 逐面求和（与解析面积之比在平板算例
+    六个边界平面上全部 1.000000）。**两侧单值**（2026-09-26）：此前两侧各用自己
+    的 `V/A`，相邻体积不等时同一个面上两侧收到的罚通量不等、不守恒。
 
     ## 为什么内部面也必须加（2026-09-23，真实缺陷修复）
 
@@ -309,7 +310,7 @@ def viscous_ip_penalty_tilde(
         k_total: 热传导率 `mu*cp/Pr + mu_t*cp/Pr_t`。**边界面传 0.0**
             （理由见下面"为什么只有动量分量"一节：绝热壁是 Neumann 型、
             已由 ∇T 法向镜像精确施加，加 Dirichlet 型罚项反而是错的）
-        h: 面法向的单元厚度 `cell_volume / face_area`（见上面"长度尺度"
+        h: 面法向的单元厚度 `ip_length`（见上面"长度尺度"
             一节；**不要再传 `mean(det_jacs)` 或任何 `vol**(1/3)`**）
         adj_mag: 该 FP 处本侧逆变行范数（与本文件其余处一致的度量量）
         side: side 因子。**坍缩面传 `owner_side`/`neighbor_side`，原生面

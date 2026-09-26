@@ -95,3 +95,24 @@ def test_scalar_diffusion_operator_is_stable(kind, order):
     assert lam.real.max() <= 1e-9 * np.abs(lam).max(), (
         f"{kind} P{order}: 扩散算子有增长模态 max Re(lambda) = {lam.real.max():.3e}"
         f"（谱半径 {np.abs(lam).max():.3e}）")
+
+
+def test_scalar_diffusion_is_conservative_across_unequal_cells():
+    """全边界齐次 Neumann 时扩散残差的守恒加权和恒为零（守恒量是
+    `sum_s W_cs U_cs`，W 与正性限制器同一份）。内罚项长度尺度必须两侧单值
+    （`FlatFaceGeometry.ip_length`）：两侧各用自己的 `V/A` 时，相邻体积不等的面上
+    两侧罚通量不等。混合网格棱柱/四面体相邻体积比为 2。"""
+    from autoflowcfd.core.time_integration.positivity import build_positivity_limiter
+    from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
+
+    mesh = _build_synthetic_mixed_mesh(1)
+    ops = generate_fr_operators(1)
+    flat = get_flat_face_geometry(mesh, ops)
+    v = np.asarray(mesh.get_all_cell_volumes()).ravel()
+    own, nei = np.asarray(flat.owner_cell), np.asarray(flat.neighbor_cell)
+    inner = nei >= 0
+    assert (np.maximum(v[own[inner]], v[nei[inner]]) / np.minimum(v[own[inner]], v[nei[inner]])).max() > 1.5
+    W = build_positivity_limiter(mesh, ops).W
+    phi = np.random.default_rng(0).standard_normal(W.shape)
+    R = compute_scalar_diffusion_residual(phi, np.full(W.shape, 1e-3), mesh, ops)
+    assert abs((W * R).sum()) <= 1e-13 * np.abs(W * R).sum()

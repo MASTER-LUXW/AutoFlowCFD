@@ -150,7 +150,7 @@ def _compute_viscous_interface_correction_gpu(
             a1 = adjrow_o[..., 1]
             a2 = adjrow_o[..., 2]
             adj_mag_o = cp.sqrt(a0 * a0 + a1 * a1 + a2 * a2)  # (nO,n_fp)
-            h_ip_o = cp.maximum(ff.cell_volume[oc] / ff.face_area[idx_o], 1e-300)
+            h_ip_o = ff.ip_length[idx_o]
             # 罚项 side 因子恒为 +1（原生面的 adj 行已 outward 定向）：
             # 见 CPU 侧 `viscous_flux_kernel.py` 同一处的完整说明
             # （2026-09-22 修复的真实缺陷，此前误乘 `owner_side`）。
@@ -232,7 +232,7 @@ def _compute_viscous_interface_correction_gpu(
             a1n = adjrow_n[..., 1]
             a2n = adjrow_n[..., 2]
             adj_mag_n = cp.sqrt(a0n * a0n + a1n * a1n + a2n * a2n)
-            h_ip_n = cp.maximum(ff.cell_volume[nc] / ff.face_area[idx_n], 1e-300)
+            h_ip_n = ff.ip_length[idx_n]
             base_n = c_ip_visc * adj_mag_n / h_ip_n[:, None]
             mut_avg_n = 0.5 * (mut_n_native + mut_o_at_n)
             eta_v_n = base_n * cp.where(

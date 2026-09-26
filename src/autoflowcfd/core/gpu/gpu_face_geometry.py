@@ -106,11 +106,8 @@ class GPUFlatFaceGeometry:
             self.owner_cube_face = cp.asarray(flat_face.owner_cube_face)
             self.neighbor_cube_face = cp.asarray(flat_face.neighbor_cube_face)
             self.true_area_weight = cp.asarray(flat_face.true_area_weight)
-            # `face_area`/`cell_volume`：IP 罚项的长度尺度
-            # `h_f = cell_volume[cell] / face_area[face]` 需要（见
-            # `face_kernels.FlatFaceGeometry.cell_volume` 文档）。
-            self.face_area = cp.asarray(flat_face.face_area)
-            self.cell_volume = cp.asarray(flat_face.cell_volume)
+            # IP 罚项的长度尺度（见 `face_kernels.FlatFaceGeometry.ip_length` 文档）。
+            self.ip_length = cp.asarray(flat_face.ip_length)
             # 参考面求积权重（DG 提升算子用的**正确**权重，见
             # `core/fr_operators/face_kernels.py::FlatFaceGeometry.
             # ref_area_weight` 字段文档）。逐面相同，只有 (n_fp,)。

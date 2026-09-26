@@ -250,7 +250,7 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
             flat.owner_cube_face, flat.neighbor_cube_face,
             flat.ref_area_weight,
             flat.boundary_extrap_native, flat.lift_native,
-            flat.face_area, flat.cell_volume,
+            flat.ip_length,
             _c_ip,
         )
     else:
@@ -290,7 +290,7 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
                     flat.owner_cube_face, flat.neighbor_cube_face,
                     flat.ref_area_weight,
                     flat.boundary_extrap_native, flat.lift_native,
-                    flat.face_area, flat.cell_volume,
+                    flat.ip_length,
                     _c_ip,
                 )
         else:
@@ -314,7 +314,7 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
                 flat.owner_cube_face, flat.neighbor_cube_face,
                 flat.ref_area_weight,
                 flat.boundary_extrap_native, flat.lift_native,
-                flat.face_area, flat.cell_volume,
+                flat.ip_length,
                 _c_ip,
             )
     residual = residual + correction
