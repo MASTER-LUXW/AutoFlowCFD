@@ -46,16 +46,16 @@ def _uniform_U(n_cells, n_sps, n_vars):
     return U
 
 
-def _pair(scheme):
+def _pair(scheme, order=1):
     from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
     from autoflowcfd.core.fr_solver.solver import FRSolver
     from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
     from autoflowcfd.fr.operators import generate_fr_operators
 
-    mesh = build_channel_mesh_prism(1, nx=3, ny=4, nz=2, Lx=LX, H=H, Lz=LZ)
-    ops = generate_fr_operators(1)
+    mesh = build_channel_mesh_prism(order, nx=3, ny=4, nz=2, Lx=LX, H=H, Lz=LZ)
+    ops = generate_fr_operators(order)
     kw = dict(mu_molecular=1.8e-5, rho_inf=RHO, vel_inf=U_INF, p_inf=P, bc_overrides=_bc())
-    single = FRSolver(mesh, order=1, turb_model_name="SST", n_vars=7, time_scheme=scheme, **kw)
+    single = FRSolver(mesh, order=order, turb_model_name="SST", n_vars=7, time_scheme=scheme, **kw)
     single.order_continuation_enabled = False
     n_cells, n_sps, n_vars = single.state.U.shape
     U0 = _uniform_U(n_cells, n_sps, n_vars)
@@ -65,7 +65,7 @@ def _pair(scheme):
     # 构造需要一个壁面距离来源（没有就报错）；随后两侧都换成同一个解析壁距
     dist = DistributedFRSolver(
         mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity, n_ranks=1,
-        backend="cpu", order=1, turb_model_name="SST", n_vars=5, time_scheme=scheme,
+        backend="cpu", order=order, turb_model_name="SST", n_vars=5, time_scheme=scheme,
         wall_distance_source=synthetic_wall_source(mesh), **kw)
     # 分布式状态只存平均流 5 变量（k/omega 由湍流模型持有，见 DistributedFRState）
     dist.state.U[:n_cells] = U0[..., :5]
@@ -104,13 +104,15 @@ def test_explicit_sst_with_boundary_conditions_matches_single_machine():
         _assert_same(single, dist, f"显式 SST 第 {k + 1} 步")
 
 
-def test_newton_krylov_sst_matches_single_machine():
+@pytest.mark.parametrize("order", [0, 1])
+def test_newton_krylov_sst_matches_single_machine(order):
     """隐式稳态（平均流 NK + 隐式 k-omega）：分布式与单机同一个算法，只换了
     归约对象、块 Jacobi 着色来源与湍流求值的 compact 视图。n_ranks=1 下三者
-    都应退化为单机行为，差异只能来自浮点重结合。"""
+    都应退化为单机行为，差异只能来自浮点重结合。P0 另外覆盖差分装配截取耦合块
+    的块 ILU（分布式耦合图 `distributed_coupling_graph` 与单机同一结构）。"""
     from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 
-    single, dist = _pair(TimeIntegrationScheme.NEWTON_KRYLOV)
+    single, dist = _pair(TimeIntegrationScheme.NEWTON_KRYLOV, order)
     for k in range(3):
         single.step(1e-6)
         dist.step(1e-6)
@@ -118,4 +120,9 @@ def test_newton_krylov_sst_matches_single_machine():
         assert a["gmres_iters"] == b["gmres_iters"] and a["theta"] == b["theta"], (
             f"第 {k + 1} 步 Newton 轨迹不同：分布式 {a}，单机 {b}")
         _assert_same(single, dist, f"NK SST 第 {k + 1} 步")
-    assert dist._cfl_controller.cfl_number == single._cfl_controller.cfl_number
+    # CFL 由残差范数之比推出，两侧残差的求和顺序不同（分布式经紧凑换序）：残差范数
+    # 继承状态的重结合差异，与状态用同一容差（P0 实测相对 2e-10）
+    assert dist._cfl_controller.cfl_number == pytest.approx(single._cfl_controller.cfl_number, rel=1e-9)
+    if order == 0:
+        assert single._newton_block_precond.coupling is not None
+        assert dist._newton_block_precond.coupling is not None

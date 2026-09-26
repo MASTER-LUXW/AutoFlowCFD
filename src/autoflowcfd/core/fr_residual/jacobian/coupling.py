@@ -38,12 +38,14 @@ class CouplingBlocks:
         return int(sum(g.rows.size for g in self.groups))
 
 
-def cross_layout(flat, n_prism, n_real_prism, n_real_tet):
+def cross_layout(flat, n_prism, n_real_prism, n_real_tet, n_var: int = 5, include_partner: bool = True):
     """槽位布局：返回 `(offset, expected_col, total_size, slots)`。
 
     `offset[f, side, src]`（`(n_faces,2,3)` int64，-1 表示该槽位不存在）是槽位在
     扁平数组里的起点，`expected_col` 是该槽位的列单元（界面核写回的列单元必须
     与它一致）；`slots` 是按分组排好序的 `(row_cell, col_cell, offset)` 与分组边界。
+    `n_var` 为每个解点的未知量个数（平均流 5、k-omega 2）；`include_partner` 为假时
+    不给混合拆分面配对边界面的 owner 留槽位（k-omega 的配对幽灵态只依赖本侧迹）。
     """
     own = np.asarray(flat.owner_cell, dtype=np.int64)
     nei = np.asarray(flat.neighbor_cell, dtype=np.int64)
@@ -68,9 +70,10 @@ def cross_layout(flat, n_prism, n_real_prism, n_real_tet):
         c1_all = np.asarray(getattr(flat, pref + "_src1_cell"), dtype=np.int64)
         s1 = np.where(i1 >= 0, c1_all[np.maximum(i1, 0)] if c1_all.size else -1, -1)
         add(interior & (s1 >= 0), row_cell, s1, side, 1)
-        has_mixed = interior & (mixed_partner >= 0) & mixed_mask.any(axis=1)
-        partner_owner = np.where(mixed_partner >= 0, own[np.maximum(mixed_partner, 0)], -1)
-        add(has_mixed & (partner_owner != row_cell), row_cell, partner_owner, side, 2)
+        if include_partner:
+            has_mixed = interior & (mixed_partner >= 0) & mixed_mask.any(axis=1)
+            partner_owner = np.where(mixed_partner >= 0, own[np.maximum(mixed_partner, 0)], -1)
+            add(has_mixed & (partner_owner != row_cell), row_cell, partner_owner, side, 2)
 
     rows = np.concatenate(rows)
     cols = np.concatenate(cols)
@@ -80,7 +83,7 @@ def cross_layout(flat, n_prism, n_real_prism, n_real_tet):
     group = 2 * (rows >= n_prism) + (cols >= n_prism)          # 0: P-P, 1: P-T, 2: T-P, 3: T-T
     order = np.lexsort((cols, rows, group))
     rows, cols, keys, group = rows[order], cols[order], keys[order], group[order]
-    sizes = 25 * n_row[order] * n_col[order]
+    sizes = n_var * n_var * n_row[order] * n_col[order]
     offs = np.concatenate([[0], np.cumsum(sizes)[:-1]]).astype(np.int64)
     offset = -np.ones((flat.n_faces, 2, N_CROSS_SOURCES), dtype=np.int64)
     offset[keys[:, 0], keys[:, 1], keys[:, 2]] = offs

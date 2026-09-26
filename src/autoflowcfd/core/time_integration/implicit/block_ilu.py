@@ -17,20 +17,31 @@ plate_demo P0 阶段 CFL 升到约 500 以后块 Jacobi 下 GMRES 用满 200 次
 
 ## 做法
 
-矩阵 `A = blockdiag(J_cc + I/dtau) + {J_cy}`（面邻居耦合块来自解析 Jacobian，
-`fr_residual/jacobian/coupling.py`）。按距离 1 着色排序单元（同色单元互不
-相邻，与块 Jacobi 装配同一份着色），做对角修正型不完全分解（D-ILU，
-Pommerell 1992）：
+矩阵 `A = blockdiag(J_cc + I/dtau) + {J_cy}`（面邻居耦合块来自解析 Jacobian
+`fr_residual/jacobian/coupling.py`，P0 来自距离 2 着色差分 `cell_blocks.py`）。
+按单元排序名次 `rank` 做对角修正型不完全分解（D-ILU，Pommerell 1992）：
 
-    D~_c = D_c - sum_{y 邻 c, color(y) < color(c)} J_cy D~_y^{-1} J_yc
+    D~_c = D_c - sum_{y 邻 c, rank(y) < rank(c)} J_cy D~_y^{-1} J_yc
     M    = (D~ + L) D~^{-1} (D~ + U)
 
-`L`/`U` 就是原耦合块（颜色低/高的邻居）。只修正对角块、不引入填充：多色序下
-同色单元互不耦合，前代/回代与分解都按颜色分批、批内逐单元并行。
+`L`/`U` 就是原耦合块（名次低/高的邻居）。只修正对角块、不引入填充——面邻接图上
+一个单元的两个面邻居几乎从不互为面邻居，ILU(0) 在这张图上本来就只修正对角块。
 
 作用：
-    前代  y_c = D~_c^{-1} (r_c - sum_{low} J_cy y_y)          颜色由低到高
-    回代  z_c = y_c - D~_c^{-1} sum_{high} J_cz z_z             颜色由高到低
+    前代  y_c = D~_c^{-1} (r_c - sum_{low} J_cy y_y)          名次由低到高
+    回代  z_c = y_c - D~_c^{-1} sum_{high} J_cz z_z             名次由高到低
+
+## 排序：RCM，不是多色（2026-09-26）
+
+此前按距离 1 着色排序（同色单元互不相邻、批内并行）。多色序是 ILU 最差的排序
+之一：每个单元的"已消去"邻居只是颜色更低的那几个，对流的上下游链被颜色切碎。
+plate_demo P0（17.9 万单元）CFL 640 下 GMRES 152 次、CFL 1000 以上用满 200 次，
+P0 阶段因此收敛不深。改为 CFD Newton-Krylov 的标准排序 Reverse Cuthill-McKee
+（Pueyo & Zingg 1998 对 ILU 排序的比较），在耦合图本身上算（`scipy.sparse.csgraph`）。
+
+并行靠**波前分层**：`level(c) = 1 + max{level(y) : y 邻 c, rank(y) < rank(c)}`，
+同层单元之间没有依赖，分解与前代/回代按层分批、层内并行（回代反序）。核函数只
+比较名次，对任意排序都成立。
 
 零填充槽位（原生基的填充解点）不在任何块里，它们的残差行恒为零，`A` 在那里
 就是 `I/dtau`，预处理保持对角形式 `dtau * v`（与块 Jacobi 相同）。
@@ -45,10 +56,11 @@ from .preconditioner import PseudoTransientDiagonal
 class BlockCouplingStructure:
     """按单元的耦合块 CSR（行单元 -> 列单元、块在扁平数组中的偏移）。"""
 
-    __slots__ = ("indptr", "cols", "offset", "data", "n_real", "row_dof")
+    __slots__ = ("indptr", "cols", "offset", "data", "n_real", "row_dof", "n_var", "rank", "levels")
 
-    def __init__(self, coupling, n_cells, n_real):
-        """`coupling`：`CouplingBlocks`；`n_real`：`(n_cells,)` 每单元真实解点数。"""
+    def __init__(self, coupling, n_cells, n_real, n_var: int = 5):
+        """`coupling`：耦合块组（`groups` 里每组有 `rows/cols/blocks`）；`n_real`：
+        `(n_cells,)` 每单元真实解点数；`n_var`：每个解点的未知量个数。"""
         rows = np.concatenate([g.rows for g in coupling.groups]) if coupling.groups else np.zeros(0, np.int64)
         cols = np.concatenate([g.cols for g in coupling.groups]) if coupling.groups else np.zeros(0, np.int64)
         sizes = np.concatenate([np.full(g.rows.size, g.blocks.shape[1] * g.blocks.shape[2], dtype=np.int64)
@@ -67,7 +79,38 @@ class BlockCouplingStructure:
         self.indptr = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
         self.data = data
         self.n_real = np.ascontiguousarray(n_real, dtype=np.int64)
-        self.row_dof = 5 * self.n_real
+        self.n_var = int(n_var)
+        self.row_dof = self.n_var * self.n_real
+        self.rank, self.levels = rcm_wavefronts(self.indptr, self.cols, int(n_cells))
+
+
+def rcm_wavefronts(indptr, cols, n_cells: int):
+    """耦合图上的 RCM 名次 `rank`（`(n_cells,)`）与波前层（按层的单元数组列表，
+    层内互不依赖），见模块文档"排序"。"""
+    import scipy.sparse as sp
+    from scipy.sparse.csgraph import reverse_cuthill_mckee
+
+    graph = sp.csr_matrix((np.ones(cols.size, dtype=np.int8), cols, indptr), shape=(n_cells, n_cells))
+    perm = np.asarray(reverse_cuthill_mckee(graph, symmetric_mode=True), dtype=np.int64)
+    rank = np.empty(n_cells, dtype=np.int64)
+    rank[perm] = np.arange(n_cells)
+    level = _wavefront_levels(perm, rank, indptr, cols)
+    order = np.argsort(level, kind="stable")
+    bounds = np.searchsorted(level[order], np.arange(int(level.max()) + 2 if n_cells else 1))
+    return rank, [order[bounds[k]:bounds[k + 1]] for k in range(bounds.size - 1)]
+
+
+@njit(cache=True)
+def _wavefront_levels(perm, rank, indptr, cols):
+    level = np.zeros(perm.size, dtype=np.int64)
+    for c in perm:
+        lv = 0
+        for k in range(indptr[c], indptr[c + 1]):
+            y = cols[k]
+            if rank[y] < rank[c] and level[y] + 1 > lv:
+                lv = level[y] + 1
+        level[c] = lv
+    return level
 
 
 @njit(cache=True)
@@ -108,9 +151,9 @@ def _invert_small(a):
 
 
 @njit(cache=True, parallel=True)
-def _factor_color(cells, color, diag_data, diag_off, inv_data, indptr, cols, offset, data, row_dof, inv_dtau,
-                  n_sps):
-    """一个颜色批次的 `D~_c^{-1}`（写入 `inv_data`，float32）。"""
+def _factor_level(cells, rank, diag_data, diag_off, inv_data, indptr, cols, offset, data, row_dof, inv_dtau,
+                  n_sps, n_var):
+    """一个波前层的 `D~_c^{-1}`（写入 `inv_data`，float32）。"""
     for ci in prange(cells.shape[0]):
         c = cells[ci]
         m = row_dof[c]
@@ -120,10 +163,10 @@ def _factor_color(cells, color, diag_data, diag_off, inv_data, indptr, cols, off
             for j in range(m):
                 a[i, j] = diag_data[base + i * m + j]
         for i in range(m):
-            a[i, i] += inv_dtau[c * n_sps + i // 5]
+            a[i, i] += inv_dtau[c * n_sps + i // n_var]
         for k in range(indptr[c], indptr[c + 1]):
             y = cols[k]
-            if color[y] >= color[c]:
+            if rank[y] >= rank[c]:
                 continue
             my = row_dof[y]
             # 找 J_yc
@@ -156,55 +199,55 @@ def _factor_color(cells, color, diag_data, diag_off, inv_data, indptr, cols, off
 
 
 @njit(cache=True, parallel=True)
-def _forward_color(cells, color, x, y, inv_data, diag_off, indptr, cols, offset, data, row_dof, n_sps):
+def _forward_level(cells, rank, x, y, inv_data, diag_off, indptr, cols, offset, data, row_dof, n_sps, n_var):
     for ci in prange(cells.shape[0]):
         c = cells[ci]
         m = row_dof[c]
         rhs = np.empty(m)
         for i in range(m):
-            rhs[i] = x[c * n_sps * 5 + i]
+            rhs[i] = x[c * n_sps * n_var + i]
         for k in range(indptr[c], indptr[c + 1]):
             yc = cols[k]
-            if color[yc] >= color[c]:
+            if rank[yc] >= rank[c]:
                 continue
             my = row_dof[yc]
             o = offset[k]
             for i in range(m):
                 acc = 0.0
                 for j in range(my):
-                    acc += data[o + i * my + j] * y[yc * n_sps * 5 + j]
+                    acc += data[o + i * my + j] * y[yc * n_sps * n_var + j]
                 rhs[i] -= acc
         b = diag_off[c]
         for i in range(m):
             acc = 0.0
             for j in range(m):
                 acc += inv_data[b + i * m + j] * rhs[j]
-            y[c * n_sps * 5 + i] = acc
+            y[c * n_sps * n_var + i] = acc
 
 
 @njit(cache=True, parallel=True)
-def _backward_color(cells, color, z, inv_data, diag_off, indptr, cols, offset, data, row_dof, n_sps):
+def _backward_level(cells, rank, z, inv_data, diag_off, indptr, cols, offset, data, row_dof, n_sps, n_var):
     for ci in prange(cells.shape[0]):
         c = cells[ci]
         m = row_dof[c]
         s = np.zeros(m)
         for k in range(indptr[c], indptr[c + 1]):
             yc = cols[k]
-            if color[yc] <= color[c]:
+            if rank[yc] <= rank[c]:
                 continue
             my = row_dof[yc]
             o = offset[k]
             for i in range(m):
                 acc = 0.0
                 for j in range(my):
-                    acc += data[o + i * my + j] * z[yc * n_sps * 5 + j]
+                    acc += data[o + i * my + j] * z[yc * n_sps * n_var + j]
                 s[i] += acc
         b = diag_off[c]
         for i in range(m):
             acc = 0.0
             for j in range(m):
                 acc += inv_data[b + i * m + j] * s[j]
-            z[c * n_sps * 5 + i] -= acc
+            z[c * n_sps * n_var + i] -= acc
 
 
 class BlockILUPreconditioner(PseudoTransientDiagonal):
@@ -214,10 +257,10 @@ class BlockILUPreconditioner(PseudoTransientDiagonal):
     各做一次主机-设备传输（整场一个向量，plate_demo P1 约 43 MB）。
     """
 
-    __slots__ = ("_struct", "_color_batches", "_color", "_inv", "_diag_off", "_n_sps", "_xp")
+    __slots__ = ("_struct", "_inv", "_diag_off", "_n_sps", "_xp")
 
     @classmethod
-    def from_cell_blocks(cls, jac, struct: BlockCouplingStructure, colors, dtau_flat):
+    def from_cell_blocks(cls, jac, struct: BlockCouplingStructure, dtau_flat):
         """由 `CellBlockJacobian`（对角块）与耦合结构构造。"""
         def host(a):
             return a.get() if hasattr(a, "get") else np.asarray(a)
@@ -228,27 +271,23 @@ class BlockILUPreconditioner(PseudoTransientDiagonal):
         diag_off[jac.prism_cells] = np.arange(jac.prism_cells.size) * sp
         diag_off[jac.tet_cells] = jac.prism_cells.size * sp + np.arange(jac.tet_cells.size) * st
         diag = np.concatenate([bp.reshape(-1), bt.reshape(-1)]).astype(np.float32)
-        return cls(diag, diag_off, struct, colors, dtau_flat, jac.n_sps)
+        return cls(diag, diag_off, struct, dtau_flat, jac.n_sps)
 
-    def __init__(self, diag_data, diag_off, struct: BlockCouplingStructure, colors, dtau_flat, n_sps: int):
+    def __init__(self, diag_data, diag_off, struct: BlockCouplingStructure, dtau_flat, n_sps: int):
         from autoflowcfd.core.utils.array_module import array_module
 
         self._xp = array_module(dtau_flat)
-        super().__init__(dtau_flat, 5)
+        super().__init__(dtau_flat, struct.n_var)
         self._struct = struct
         self._n_sps = int(n_sps)
-        self._color = np.ascontiguousarray(colors, dtype=np.int64)
-        n_colors = int(self._color.max()) + 1 if self._color.size else 0
-        self._color_batches = [np.nonzero(self._color == k)[0].astype(np.int64) for k in range(n_colors)]
         self._diag_off = diag_off
         self._inv = np.empty_like(diag_data)
         dtau_host = self.dtau.get() if hasattr(self.dtau, "get") else self.dtau
         inv_dtau = 1.0 / np.asarray(dtau_host, dtype=np.float64)
         s = struct
-        for cells in self._color_batches:
-            if cells.size:
-                _factor_color(cells, self._color, diag_data, diag_off, self._inv, s.indptr, s.cols, s.offset,
-                              s.data, s.row_dof, inv_dtau, self._n_sps)
+        for cells in s.levels:
+            _factor_level(cells, s.rank, diag_data, diag_off, self._inv, s.indptr, s.cols, s.offset,
+                          s.data, s.row_dof, inv_dtau, self._n_sps, s.n_var)
 
     def apply(self, v_flat):
         out = super().apply(v_flat)              # 零填充槽位：dtau * v
@@ -257,13 +296,11 @@ class BlockILUPreconditioner(PseudoTransientDiagonal):
         s = self._struct
         x = np.ascontiguousarray(v_flat, dtype=np.float64).reshape(-1)
         y = np.ascontiguousarray(out, dtype=np.float64).reshape(-1).copy()
-        for cells in self._color_batches:
-            if cells.size:
-                _forward_color(cells, self._color, x, y, self._inv, self._diag_off, s.indptr, s.cols, s.offset,
-                               s.data, s.row_dof, self._n_sps)
-        for cells in reversed(self._color_batches):
-            if cells.size:
-                _backward_color(cells, self._color, y, self._inv, self._diag_off, s.indptr, s.cols, s.offset,
-                                s.data, s.row_dof, self._n_sps)
+        for cells in s.levels:
+            _forward_level(cells, s.rank, x, y, self._inv, self._diag_off, s.indptr, s.cols, s.offset,
+                           s.data, s.row_dof, self._n_sps, s.n_var)
+        for cells in reversed(s.levels):
+            _backward_level(cells, s.rank, y, self._inv, self._diag_off, s.indptr, s.cols, s.offset,
+                            s.data, s.row_dof, self._n_sps, s.n_var)
         y = y.reshape(out.shape)
         return y if self._xp is np else self._xp.asarray(y)

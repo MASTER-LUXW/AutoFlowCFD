@@ -166,6 +166,27 @@ def face_mass_flux_kernel(
     return m_o, m_n
 
 
+@njit(cache=True, inline='always')
+def diffusion_jump_point(ps, gs, dns, po, go, dno, h, c_ip, is_bnd, is_dir, target):
+    """一个通量点上的扩散跳变量 `J = (G* - G_self) . n_self`（公式见
+    `diffusion_face_jumps_kernel`）。残差核与湍流解析 Jacobian 共用这一份。"""
+    if is_bnd:
+        if is_dir:
+            return -(c_ip * gs / h) * (ps - target)
+        return -gs * dns
+    eta = c_ip * 0.5 * (gs + go) / h
+    return 0.5 * (go * dno - gs * dns) - eta * (ps - po)
+
+
+@njit(cache=True, inline='always')
+def convection_jump_point(m, ps, po):
+    """一个通量点上的对流跳变量 `J = m (phi_upwind - phi_self)`，`m` 为本侧外法向
+    质量通量（见 `convection.py::compute_scalar_convection_residual`）。"""
+    if m >= 0.0:
+        return 0.0
+    return m * (po - ps)
+
+
 @njit(cache=True, parallel=True)
 def diffusion_face_jumps_kernel(
     phi, gamma, grad_phi,
@@ -210,10 +231,8 @@ def diffusion_face_jumps_kernel(
                 gs += w * gamma[sc, s]
                 dns += w * (grad_phi[sc, s, 0] * n0 + grad_phi[sc, s, 1] * n1 + grad_phi[sc, s, 2] * n2)
             if is_boundary[f, i]:
-                if is_dirichlet[f, i]:
-                    J[f, i] = -(c_ip * gs / h) * (ps - target[f, i])
-                else:
-                    J[f, i] = -gs * dns
+                J[f, i] = diffusion_jump_point(ps, gs, dns, 0.0, 0.0, 0.0, h, c_ip, True,
+                                               is_dirichlet[f, i], target[f, i])
                 continue
             po = 0.0
             go = 0.0
@@ -231,8 +250,7 @@ def diffusion_face_jumps_kernel(
                     po += w * phi[c1, s]
                     go += w * gamma[c1, s]
                     dno += w * (grad_phi[c1, s, 0] * n0 + grad_phi[c1, s, 1] * n1 + grad_phi[c1, s, 2] * n2)
-            eta = c_ip * 0.5 * (gs + go) / h
-            J[f, i] = 0.5 * (go * dno - gs * dns) - eta * (ps - po)
+            J[f, i] = diffusion_jump_point(ps, gs, dns, po, go, dno, h, c_ip, False, False, 0.0)
     return J
 
 

@@ -2,7 +2,7 @@
 
 `R(U) = Gamma(U) * [-(无粘 + 粘性)](U)`（启用低马赫预处理时带 `Gamma`，否则
 `Gamma = I`）对单元自身真实自由度的导数块 `J_cc = dR_c/dU_c`，布局与
-`time_integration/implicit/block_jacobi.py::CellBlockJacobian` 完全相同
+`time_integration/implicit/cell_blocks.py::CellBlockJacobian` 完全相同
 （逐单元 `(n_real*5, n_real*5)`，行列下标 `s*5 + v`，float32）。
 
 ## 为什么要解析装配

@@ -4,6 +4,7 @@
 """
 
 import time
+from functools import partial
 from typing import Any, Dict, Optional
 
 from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
@@ -169,7 +170,8 @@ class _MultiGPUSteppingMixin:
             order_now = int(getattr(self, "current_order", self.order))
 
         # 湍流（算子分裂，每个 step 开始时一次，用当前——上一步末尾——的状态，
-        # 与 CPU 分布式同一时序）。湍流标量用**物理**波速算出的那一份 dt。
+        # 与 CPU 分布式同一时序）。显式更新用**物理**波速算出的那一份 dt，隐式
+        # Newton 用平均流那一份（见 step_turbulence_newton 的 dtau 参数文档）。
         from autoflowcfd.core.fr_solver.turbulence.implicit import IMPLICIT_TURBULENCE_MODELS
 
         if (is_newton and self.turb_model_gpu is not None
@@ -182,8 +184,7 @@ class _MultiGPUSteppingMixin:
             )
 
             turb_backend = MultiGpuTurbulenceBackend(self, cell_is_prism, order_now)
-            dt_phys_local = dt_phys_c[self._inv_perm_gpu][:n_local]
-            step_turbulence_newton(turb_backend, cp.broadcast_to(dt_phys_local[:, None], (n_local, n_sps)))
+            step_turbulence_newton(turb_backend, cp.broadcast_to(dt_mean_local[:, None], (n_local, n_sps)))
             mu_t_field = turb_backend.mu_t_compact
         else:
             # turb_model_gpu 为 None（turbulence_model='none'）时恒返回 None
@@ -231,7 +232,7 @@ class _MultiGPUSteppingMixin:
             # （implicit/mean_flow_step.py），归约跨 rank，块 Jacobi 着色全局一致
             from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
             from autoflowcfd.core.mpi.distributed_implicit import (
-                distributed_block_jacobi_colors, distributed_mean_flow_assembler,
+                distributed_block_jacobi_colors, distributed_coupling_graph, distributed_mean_flow_assembler,
             )
             from autoflowcfd.core.mpi.reductions import MPIReductions
             from autoflowcfd.core.time_integration.implicit.mean_flow_step import (
@@ -242,6 +243,7 @@ class _MultiGPUSteppingMixin:
                 self, _residual, U_flat, dt_flat, _reference_scales(self.freestream, 5),
                 red=MPIReductions(cp), cell_is_prism=cell_is_prism,
                 cell_colors=lambda: distributed_block_jacobi_colors(self),
+                coupling_graph=partial(distributed_coupling_graph, self),
                 order=order_now, filter_active=self.filter_func_gpu is not None,
                 positivity=positivity_func,
                 block_assembler=distributed_mean_flow_assembler(

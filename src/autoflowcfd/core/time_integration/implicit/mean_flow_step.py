@@ -36,7 +36,7 @@ Jacobi 的块尺寸与装配次数都白白多出 7/5 倍（plate_demo P1+SST：
     _newton_last_info       上一步的诊断
 """
 
-from typing import Callable
+from typing import Callable, Optional
 
 import numpy as np
 from loguru import logger
@@ -139,6 +139,7 @@ def step_mean_flow_newton(
     solver, residual: Callable, u_flat, dtau_flat, scales: np.ndarray, *,
     red: LocalReductions, cell_is_prism: np.ndarray, cell_colors: Callable[[], np.ndarray],
     order: int, filter_active: bool, positivity, block_assembler=None,
+    coupling_graph: Optional[Callable] = None,
 ):
     """平均流的一个 PTC-Newton-Krylov 步，返回 `(U_new_flat, info)`。
 
@@ -154,7 +155,7 @@ def step_mean_flow_newton(
         cell_colors: 返回 `(n_cells,)` 块 Jacobi 着色（主机端 numpy），只在
             首次构造缓存时调用。单机：按面相邻关系贪心着色；分布式：全局
             一致着色里本 rank 那一段（同色单元跨 rank 也不相邻，见
-            `block_jacobi.py::CellBlockJacobian` 文档）。
+            `cell_blocks.py::CellBlockJacobian` 文档）。
         order: 当前阶数（决定每类单元的真实解点数）。
         filter_active: 是否构造了模态滤波回调（为真时报错，见模块文档）。
         positivity: 该后端的 `PositivityLimiter`（`time_integration/positivity`）；
@@ -164,6 +165,10 @@ def step_mean_flow_newton(
             (blocks_prism, blocks_tet)`（`fr_residual/jacobian`，P>=1）；None 时块
             Jacobi 用着色差分装配（P0、熵稳定体积项等解析装配不覆盖的离散）。
             每步重新传入：它持有本步冻结的涡粘。
+        coupling_graph: `() -> coloring.CouplingGraph`（距离 2 着色 + 本地模板单元对），
+            只在首次构造缓存时保存、首次需要时调用。P0 没有解析装配器，差分装配按它
+            同时截取面邻居耦合块、预处理用块 ILU（`cell_blocks.py` 模块文档）；
+            None 时 P0 只有块 Jacobi。
     """
     from autoflowcfd.fr.native_padding import real_sps_per_cell
 
@@ -187,7 +192,7 @@ def step_mean_flow_newton(
         solver._newton_block_precond = BlockJacobiCache(
             cell_is_prism=cell_is_prism, colors=cell_colors(),
             n_sps=u_flat.shape[0] // n_cells, n_real_prism=n_real_prism,
-            n_real_tet=n_real_tet, n_var=n_mf, red=red)
+            n_real_tet=n_real_tet, n_var=n_mf, red=red, coupling_graph=coupling_graph)
 
     solver._newton_block_precond.assembler = block_assembler
     u_new_mf, info = step_newton_krylov(

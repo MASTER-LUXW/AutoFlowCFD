@@ -58,11 +58,22 @@ from .gmres import gmres_right
 from .preconditioner import PseudoTransientDiagonal
 from .reductions import LocalReductions
 
-#: GMRES 重启长度。Krylov 基向量按 `(N, n_var)` 存，重启长度直接决定
-#: 峰值内存：P2 下 79 万单元一个基向量 1.2 GB，所以这个值必须小。
-#: 30 是 GMRES(m) 的常用取值；配上对角预处理与 inexact-Newton 容差，
-#: 实测在 PTC 的鲁棒档（dtau 小）下通常几步就满足容差、根本不到重启。
+#: GMRES 重启长度的**下限**。Krylov 基向量按 `(N, n_var)` 存，重启长度直接决定
+#: 峰值内存：P2 下 79 万单元一个基向量 1.2 GB，大问题只能取小值。
 GMRES_RESTART = 30
+
+#: 重启长度的上限（正交化代价随 m 线性增长，m=200 时每次迭代约 200 次向量更新）。
+GMRES_RESTART_MAX = 200
+
+#: Krylov 基允许的内存（每个 rank / 每块设备）。重启长度按它自适应
+#: （`krylov_restart`），夹在 `[GMRES_RESTART, GMRES_RESTART_MAX]` 之间。
+#:
+#: **为什么不是固定 30**（2026-09-26）：大 CFL 下迭代数上百时 GMRES(30) 反复
+#: 重启、丢掉 Krylov 子空间，会停滞。plate_demo P0（17.9 万单元，一个基向量
+#: 7 MB）CFL 1000 的同一线性系统、同一块 ILU、`rtol=0.1`：GMRES(30) 600 次仍停在
+#: 0.136，GMRES(100) 181 次、GMRES(200) 121 次达到。固定 30 是按 P2 大网格的内存
+#: 定的，小问题完全没必要受它限制。
+KRYLOV_BASIS_BYTES = 2 * 2 ** 30
 
 #: 单个 Newton 步允许的最大 Krylov 迭代数（= 最大残差求值次数）。
 #:
@@ -265,6 +276,16 @@ def _accept_step(residual: Callable, u0_flat, du_flat, theta0: float, res_norm0:
     return u0_flat, 0.0, res_norm0, n_eval
 
 
+def krylov_restart(n_local_entries: int, red: LocalReductions) -> int:
+    """按 Krylov 基内存预算给出的重启长度（见 `KRYLOV_BASIS_BYTES`）。
+
+    分布式下各 rank 的 GMRES 必须走同样多步（内积是集体操作），所以取全局最小。
+    """
+    m_local = KRYLOV_BASIS_BYTES // (8 * max(int(n_local_entries), 1)) - 1
+    m = int(red.min(red.xp.asarray([float(m_local)])))
+    return int(min(GMRES_RESTART_MAX, max(GMRES_RESTART, m)))
+
+
 def _solve_direction(jac: MatrixFreeJacobian, prec, r0, n_var: int, eta: float,
                      gmres_restart: int, gmres_max_iter: int, red: LocalReductions):
     """解 `(I/dtau + J) dU = -R`，返回 `(du, gmres_iters, gmres_info, linear_rel_residual)`。
@@ -308,7 +329,7 @@ def step_newton_krylov(
     *,
     forcing: Optional[EisenstatWalkerForcing] = None,
     tol_nonlinear: float = 1e-10,
-    gmres_restart: int = GMRES_RESTART,
+    gmres_restart: Optional[int] = None,
     gmres_max_iter: int = GMRES_MAX_ITER,
     dtau_scale: float = 1.0,
     block_precond: Optional[BlockJacobiCache] = None,
@@ -330,7 +351,8 @@ def step_newton_krylov(
             固定的保守容差。
         tol_nonlinear: 外迭代目标绝对容差，只用来给 forcing term 定
             安全下限。
-        gmres_restart / gmres_max_iter: 见模块级常量。
+        gmres_restart: 重启长度；None 时按内存预算自适应（`krylov_restart`）。
+        gmres_max_iter: 见模块级常量。
         dtau_scale: 上一次调用返回的 `info["dtau_scale"]`，把 PTC 的
             `dtau` 缩放状态跨步带过来（见 `dtau_control.py`）。调用方
             持久化它即可，不需要知道缩放策略。
@@ -385,6 +407,8 @@ def step_newton_krylov(
                              dtau_scale=ctrl.scale, n_dtau_cuts=0)
 
     jac = MatrixFreeJacobian(residual, u0_flat, r0, scales, red=red)
+    if gmres_restart is None:
+        gmres_restart = krylov_restart(u0_flat.size, red)
     if block_precond is not None:
         block_precond.begin_step(residual, u0_flat, r0, scales)
     dtau_base = xp.ascontiguousarray(dtau_flat, dtype=xp.float64).ravel()

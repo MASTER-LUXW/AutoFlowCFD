@@ -16,7 +16,7 @@ from autoflowcfd.core.fr_operators.gradients import (
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 
 from .faces import precompute_scalar_convection_geometry
-from ..sst.bounds import model_evaluation_fields, omega_realizability_floor
+from ..sst.bounds import clip_gradient_magnitude, model_evaluation_fields, omega_realizability_floor
 from .convection import compute_scalar_convection_residual
 from .diffusion import compute_scalar_diffusion_residual
 from .omega_wall import (
@@ -24,6 +24,25 @@ from .omega_wall import (
     _compute_open_boundary_face_mask,
     _compute_wall_dirichlet_face_mask,
 )
+
+
+def turbulence_diffusivities(turb, k, omega, grad_k, grad_omega, rho, rho_nu_t, nu, mu, S_mag, wall_distance):
+    """k / omega 方程的有效扩散系数 `(Gamma_k, Gamma_w) = mu + sigma(F1) * rho * nu_t`。
+
+    `rho_nu_t` 是源项求值在同一组 `(k, omega)` 上刷新的动力涡粘；`F1` 用模型项的
+    有效值（`sst/bounds.py`）与裁剪后的梯度算交叉扩散 `CD_kw`。输运残差与湍流
+    解析 Jacobian（逐点差分）共用这一份，逐点函数，与单元无关。
+    """
+    grad_k = clip_gradient_magnitude(grad_k, np)
+    grad_omega = clip_gradient_magnitude(grad_omega, np)
+    with np.errstate(over='ignore', invalid='ignore'):
+        grad_dot = np.sum(grad_k * grad_omega, axis=-1)
+        k_eff, omega_safe = model_evaluation_fields(k, omega, omega_realizability_floor(turb, S_mag, np), np)
+        CD_kw = np.maximum(2.0 * rho * turb.sigma_w2 / omega_safe * grad_dot, 1e-10)
+    F1 = turb.compute_blending_function_F1(k_eff, omega_safe, wall_distance, nu, S_mag, rho, CD_kw)
+    sigma_k = F1 * turb.sigma_k1 + (1.0 - F1) * turb.sigma_k2
+    sigma_w = F1 * turb.sigma_w1 + (1.0 - F1) * turb.sigma_w2
+    return mu + sigma_k * rho_nu_t, mu + sigma_w * rho_nu_t
 
 
 def prepare_convection_geometry(solver, flat_face_override=None):
@@ -108,57 +127,9 @@ def compute_turbulence_transport_residual(
     if grad_omega is None:
         grad_omega = compute_physical_scalar_gradient(turb.omega_field, solver.mesh, solver.ops)
 
-    # 梯度幅值裁剪（真实 bug，已修复，2026-08-21）：这里的 grad_k/grad_omega
-    # 此前完全没有上限保护——`fr_solver/turbulence.py::compute_turbulence_
-    # source` 里给 compute_source_terms 用的那一份 grad_k/grad_omega 早就有
-    # 同样的 max_grad_mag=1e6 裁剪（见该文件"正性保持检查"注释），但本函数
-    # 参数文档明确说明这里*刻意*不复用那份裁剪后的值、自己独立重新计算，
-    # 于是这份独立计算的副本一直没有对应的裁剪。真实复现（cube_demo 生产
-    # 网格，P1 阶数，DDES）：mesh 在坍缩坐标+度量退化单元（troubled_cell.py
-    # 诊断此网格 P1 阶段 95.15% 单元面法向失配>1度）上，对*理论上处处为
-    # 常数*的初始 k/omega 场求梯度，参考空间导数本应恰好为 0，但浮点舍入
-    # 误差量级的非零值被 adj(J)/det(J) 这个在退化单元上可以任意大的度量
-    # 比值放大到 >1e150（np.linalg.norm 内部计算 x*x 时溢出到 inf，py-spy
-    # 采样证实的真实复现）——多数为普通浮点噪声，但间或有值落入次正规数
-    # （denormal/subnormal）区间，x86 硬件处理这类数值要走慢得多的微码
-    # 路径：单次 `np.sum(grad_k*grad_omega, axis=-1)`（下面这一行）在
-    # ~19M 元素规模上因此实测卡住数分钟，而不是正常的毫秒级——是一次
-    # "看起来像死锁、实际是每个浮点算子被拖慢几十~上百倍"的真实性能故障，
-    # py-spy 对卡住进程的调用栈采样直接定位到本行。与 fr_solver/
-    # turbulence.py 用完全相同的裁剪公式（不是发明新阈值，是把已经在
-    # 别处验证过、这里唯一遗漏的同一道安全网补齐）。
-    # np.linalg.norm 内部对每个分量求平方——在同一类退化单元上分量本身
-    # 就已经是溢出级别的量，平方会先于这里的裁剪逻辑触发一次 inf；
-    # errstate 只是抑制这一步的警告噪音，紧接着的 np.maximum(...,1e-10)/
-    # np.clip(...,0,1) 已经能正确处理 inf 输入（inf>max_grad_mag 恒真，
-    # scale=max_grad_mag/inf=0，裁剪结果趋于 0，不是 nan），不依赖这个
-    # errstate 才能得到正确结果。
-    with np.errstate(over='ignore', invalid='ignore'):
-        max_grad_mag = 1e6
-        grad_k_mag = np.linalg.norm(grad_k, axis=-1)
-        grad_omega_mag = np.linalg.norm(grad_omega, axis=-1)
-        if np.any(grad_k_mag > max_grad_mag):
-            scale_k = max_grad_mag / np.maximum(grad_k_mag, 1e-10)
-            grad_k = grad_k * np.clip(scale_k, 0, 1)[..., None]
-        if np.any(grad_omega_mag > max_grad_mag):
-            scale_omega = max_grad_mag / np.maximum(grad_omega_mag, 1e-10)
-            grad_omega = grad_omega * np.clip(scale_omega, 0, 1)[..., None]
-
-        grad_dot = np.sum(grad_k * grad_omega, axis=-1)
-        # 模型项求值用有效值（`sst/bounds.py`，与源项求值同一个定义）
-        k_eff, omega_safe = model_evaluation_fields(
-            turb.k_field, turb.omega_field, omega_realizability_floor(turb, S_mag, np), np)
-        CD_kw = np.maximum(2.0 * rho * turb.sigma_w2 / omega_safe * grad_dot, 1e-10)
-
-    F1 = turb.compute_blending_function_F1(
-        k_eff, omega_safe, solver.wall_distance, nu, S_mag, rho, CD_kw
-    )
-
-    sigma_k = F1 * turb.sigma_k1 + (1.0 - F1) * turb.sigma_k2
-    sigma_w = F1 * turb.sigma_w1 + (1.0 - F1) * turb.sigma_w2
-
-    gamma_k = mu + sigma_k * rho_nu_t    # (n_cells, n_sps)
-    gamma_w = mu + sigma_w * rho_nu_t    # (n_cells, n_sps)
+    gamma_k, gamma_w = turbulence_diffusivities(
+        turb, turb.k_field, turb.omega_field, grad_k, grad_omega, rho, rho_nu_t, nu, mu, S_mag,
+        solver.wall_distance)
 
     # WALL 上 k=0 的 Dirichlet 掩码（真实修复，2026-08-21，见
     # transport_kernel.py::extrapolate_scalar_to_faces_kernel 文档）。

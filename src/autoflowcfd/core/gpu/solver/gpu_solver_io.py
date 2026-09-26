@@ -193,15 +193,9 @@ class _GPUSolverIOMixin:
             self.turb_model_gpu.omega_field, self.mesh_data, self.ops_data,
         )
 
-        max_grad_mag = 1e6
-        grad_k_mag = cp.linalg.norm(grad_k, axis=-1)
-        grad_omega_mag = cp.linalg.norm(grad_omega, axis=-1)
-        if cp.any(grad_k_mag > max_grad_mag):
-            scale_k = max_grad_mag / cp.maximum(grad_k_mag, 1e-10)
-            grad_k *= cp.clip(scale_k, 0, 1)[..., None]
-        if cp.any(grad_omega_mag > max_grad_mag):
-            scale_omega = max_grad_mag / cp.maximum(grad_omega_mag, 1e-10)
-            grad_omega *= cp.clip(scale_omega, 0, 1)[..., None]
+        from autoflowcfd.core.turbulence.sst.bounds import clip_gradient_magnitude
+        grad_k = clip_gradient_magnitude(grad_k, cp)
+        grad_omega = clip_gradient_magnitude(grad_omega, cp)
 
         # 真实 bug 修复（2026-09-02，排查多GPU分布式SST时对照发现，与
         # 分布式本身无关，单机 GPU 路径同样中招，此前从未被端到端验证

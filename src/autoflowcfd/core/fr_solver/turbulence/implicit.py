@@ -107,10 +107,19 @@ def _current_order(solver) -> int:
 def single_machine_cell_colors(solver) -> np.ndarray:
     """单机块 Jacobi 着色：残差本身用的同一份展平面几何上的贪心距离 1 着色。"""
     from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
-    from autoflowcfd.core.time_integration.implicit.block_jacobi import greedy_cell_coloring
+    from autoflowcfd.core.time_integration.implicit.coloring import greedy_cell_coloring
 
     ffg = get_flat_face_geometry(solver.mesh, solver.ops)
     return greedy_cell_coloring(ffg.owner_cell, ffg.neighbor_cell, int(solver.mesh.n_cells))
+
+
+def single_machine_coupling_graph(solver):
+    """单机 P0 差分耦合图（距离 2 着色 + 模板单元对），同一份展平面几何。"""
+    from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+    from autoflowcfd.core.time_integration.implicit.coloring import coupling_graph_from_faces
+
+    ffg = get_flat_face_geometry(solver.mesh, solver.ops)
+    return coupling_graph_from_faces(ffg.owner_cell, ffg.neighbor_cell, int(solver.mesh.n_cells))
 
 
 class CpuTurbulenceBackend:
@@ -154,6 +163,17 @@ class CpuTurbulenceBackend:
 
     def cell_colors(self):
         return single_machine_cell_colors(self.solver)
+
+    def block_assembler(self):
+        """本步的解析单元块装配器（`core/turbulence/jacobian`）；输入与残差同一份冻结量。"""
+        from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+        from autoflowcfd.core.turbulence.jacobian import TurbulenceBlockAssembler, turbulence_linearization
+
+        s = self.solver
+        flat = getattr(s, "_turbulence_flat_face_override", None) or get_flat_face_geometry(s.mesh, s.ops)
+        hit, target = self.wall_targets()
+        ctx = turbulence_linearization(s, self.model, self._inputs, self._conv_geom, flat, hit, target)
+        return TurbulenceBlockAssembler(ctx, self.shape[1])
 
 
 class TurbulenceResidual:
@@ -228,13 +248,28 @@ def step_turbulence_newton(backend, dtau) -> None:
     Args:
         backend: `CpuTurbulenceBackend` / `GpuTurbulenceBackend`（湍流模型
             在 `IMPLICIT_TURBULENCE_MODELS` 内）。
-        dtau: 逐 SP 伪时间步长 `(n_cells, n_sps)`（在 `backend.xp` 上），与
-            显式路径传给 `update_fields` 的是同一个量（物理波速下的局部步长）。
+        dtau: 逐 SP 伪时间步长 `(n_cells, n_sps)`（在 `backend.xp` 上）：**平均流的**
+            局部伪时间步长（启用低马赫预处理时按预处理波速取的 `dt_local`）。
+
+            **为什么不是物理波速那一份**（2026-09-26）：显式路径给湍流用 `dt_physical`
+            （按 |u|+a 取），理由是 k/omega 的显式更新没有点隐式阻尼、不能跟着放大步长。
+            这条理由对隐式 Newton 不成立，而沿用它的代价是湍流每步只走平均流约 1/5 的
+            伪时间（M~0.1 下 |u|+a 约为 |u|+c_precond 的 5 倍）、对它自己的输运尺度 |u|
+            更是小十几倍：线性系统被 I/dtau 主导（GMRES 1~2 次），湍流残差每步只降
+            1~5%，平均流每步内部降到 10%、下一步开头又被湍流更新拉回（plate_demo P0，
+            块 ILU，CFL 1000~1500 实测：平均流步间只降约 2%）。改用平均流的步长后同一
+            算例湍流每步降到 0.21~0.34，45 步后湍流残差低 5 倍——两个子系统在同一条
+            伪时间线上推进，才是分离式 PTC 对耦合系统的一致近似。
     """
     xp, m = backend.xp, backend.model
     backend.prepare()
     residual = TurbulenceResidual(backend)
     st = _newton_state(backend)
+
+    # 解析单元块：后端提供装配器时用它（每步新建，持有本步冻结的平均流输入），
+    # 否则块 Jacobi 用着色差分装配
+    make_assembler = getattr(backend, "block_assembler", None)
+    st["block"].assembler = make_assembler() if make_assembler is not None else None
 
     kw0 = xp.stack([m.k_field.ravel(), m.omega_field.ravel()], axis=1)
     scales = np.array([max(float(m.k_inf), 1e-30), max(float(m.omega_inf), 1e-30)])

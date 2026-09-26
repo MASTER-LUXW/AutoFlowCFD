@@ -88,6 +88,7 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     self.partition = package['partition']
     # 隐式稳态的块 Jacobi 着色（全局一致，root 随包下发；非隐式时为 None）
     self._block_jacobi_colors_local = package.get('cell_colors')
+    self._coupling_colors_local = package.get('cell_colors_d2')
     self.dist_flat_face = package['dist_fc']
 
     # GPU 设备选择：与主 __init__ 同一个默认策略（rank % n_gpus）。

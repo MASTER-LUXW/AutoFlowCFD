@@ -11,9 +11,9 @@ from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from autoflowcfd.core.fr_operators.kernels import resolve_ausm_precond_mode
 from autoflowcfd.core.fr_residual.jacobian import MeanFlowLinearization, assemble_mean_flow_blocks
 from autoflowcfd.core.time_integration.implicit.block_ilu import BlockCouplingStructure, BlockILUPreconditioner
-from autoflowcfd.core.time_integration.implicit.block_jacobi import (
-    CellBlockJacobian, CellBlockJacobiPreconditioner, greedy_cell_coloring,
-)
+from autoflowcfd.core.time_integration.implicit.block_jacobi import CellBlockJacobiPreconditioner
+from autoflowcfd.core.time_integration.implicit.cell_blocks import CellBlockJacobian
+from autoflowcfd.core.time_integration.implicit.coloring import greedy_cell_coloring
 from autoflowcfd.core.time_integration.implicit.gmres import gmres_right
 from autoflowcfd.core.time_integration.implicit.jacobian_vector import MatrixFreeJacobian
 from autoflowcfd.fr.native_padding import real_sps_per_cell
@@ -59,12 +59,27 @@ def _setup(kind, order, smooth=False):
     return mesh, res, U, r0, bp, bt, cp, n_real, colors, diag, off
 
 
+def test_wavefront_levels_respect_rank_dependencies():
+    """波前层内单元互不依赖：同层任意两个单元不相邻，且每个单元名次更低的邻居都在更低的层。"""
+    mesh, res, U, r0, bp, bt, cp, n_real, colors, diag, off = _setup("tet", 1)
+    struct = BlockCouplingStructure(cp, mesh.n_cells, n_real)
+    level = np.empty(mesh.n_cells, dtype=np.int64)
+    for k, cells in enumerate(struct.levels):
+        level[cells] = k
+    assert sorted(np.concatenate(struct.levels).tolist()) == list(range(mesh.n_cells))
+    for c in range(mesh.n_cells):
+        for y in struct.cols[struct.indptr[c]:struct.indptr[c + 1]]:
+            assert level[y] != level[c]
+            assert (level[y] < level[c]) == (struct.rank[y] < struct.rank[c])
+
+
 def test_apply_matches_dense_definition():
     mesh, res, U, r0, bp, bt, cp, n_real, colors, diag, off = _setup("tet", 1)
     nc, ns = mesh.n_cells, mesh.n_sps_per_cell
     dtau = np.full(nc * ns, 2e-5) * (1.0 + np.random.default_rng(0).random(nc * ns))
     struct = BlockCouplingStructure(cp, nc, n_real)
-    prec = BlockILUPreconditioner(diag, off, struct, colors, dtau, ns)
+    prec = BlockILUPreconditioner(diag, off, struct, dtau, ns)
+    rank = struct.rank
     # 稠密构造（只含真实自由度）
     dofs = [np.arange(5 * n_real[c]) + c * ns * 5 for c in range(nc)]
     idx = np.concatenate(dofs)
@@ -78,18 +93,18 @@ def test_apply_matches_dense_definition():
         for k in range(g.rows.size):
             blocks[(int(g.rows[k]), int(g.cols[k]))] = g.blocks[k].astype(np.float64)
     Dt = {}
-    order = np.argsort(colors, kind="stable")
+    order = np.argsort(rank)
     for c in order:
         m = 5 * n_real[c]
         a = diag[off[c]:off[c] + m * m].astype(np.float64).reshape(m, m)
         a = a + np.diag(np.repeat(1.0 / dtau[c * ns:c * ns + n_real[c]], 5))
         for (r, y), B in blocks.items():
-            if r == c and colors[y] < colors[c]:
+            if r == c and rank[y] < rank[c]:
                 a = a - B @ np.linalg.inv(Dt[y]).astype(np.float32).astype(np.float64) @ blocks[(y, c)]
         Dt[c] = a
         D[np.ix_(pos[c], pos[c])] = a
     for (r, y), B in blocks.items():
-        (L if colors[y] < colors[r] else Uu)[np.ix_(pos[r], pos[y])] = B
+        (L if rank[y] < rank[r] else Uu)[np.ix_(pos[r], pos[y])] = B
     Dinv = np.zeros_like(D)
     for c in range(nc):
         Dinv[np.ix_(pos[c], pos[c])] = np.linalg.inv(Dt[c])
@@ -119,7 +134,7 @@ def test_fewer_gmres_iterations_than_block_jacobi_at_large_cfl():
 
     iters = {}
     for tag, prec in (("bj", CellBlockJacobiPreconditioner(jac, dtau)),
-                      ("ilu", BlockILUPreconditioner(diag, off, struct, colors, dtau, ns))):
+                      ("ilu", BlockILUPreconditioner(diag, off, struct, dtau, ns))):
         _, it, info, _ = gmres_right(A, -r0.reshape(-1), lambda x: prec.apply(x.reshape(-1, 5)).reshape(-1),
                                      rtol=1e-2, restart=30, max_iter=400)
         assert info == 0, (tag, it)

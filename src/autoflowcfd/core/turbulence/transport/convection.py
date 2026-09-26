@@ -238,6 +238,7 @@ def compute_scalar_convection_residual(
     if open_boundary_face is not None:
         inflow = open_boundary_face[:, None] & (m_o < 0)
         phi_o_other = np.where(inflow, freestream_value, phi_o_other)
+    # 与 face_frames.convection_jump_point 同一规则（湍流解析 Jacobian 用那个点函数）
     jump_o = m_o * (np.where(m_o >= 0, phi_o, phi_o_other) - phi_o)
     del phi_o, phi_o_other
 

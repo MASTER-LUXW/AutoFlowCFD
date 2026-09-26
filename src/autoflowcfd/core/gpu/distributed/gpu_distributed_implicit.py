@@ -85,3 +85,49 @@ class MultiGpuTurbulenceBackend:
 
     def cell_colors(self):
         return distributed_block_jacobi_colors(self.solver)
+
+    def block_assembler(self):
+        """本步的解析单元块装配器：在与残差同一个紧凑视图上装配（线性算子部分在主机，
+        逐点量用 GPU 模型的求值件），按 `inv_perm` 取回本 rank 的行。"""
+        from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import GpuTurbulencePointwise, _host
+        from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import (
+            compute_omega_wall_target_gpu, omega_wall_cell_targets_gpu,
+        )
+        from autoflowcfd.core.mpi.distributed_compute import DistributedMeshAdapter
+        from autoflowcfd.core.turbulence.jacobian import TurbulenceBlockAssembler, TurbulenceLinearization
+        from autoflowcfd.core.turbulence.transport import precompute_scalar_convection_geometry
+
+        s, ctx, cp = self.solver, self._ctx, self.xp
+        view, tr = ctx.view, ctx.transport
+        dist_fc = s.dist_flat_face
+        mesh = DistributedMeshAdapter(s.partition, dist_fc, s.mesh, s.ops)
+        flat = dist_fc.base_flat
+        Q_h = _host(ctx.Q)
+        omega_wall, has_wall = compute_omega_wall_target_gpu(
+            cp, s.flat_face_gpu, tr._wall_mask_k_gpu, ctx.d_wall, ctx.Q, s.mu_molecular,
+            getattr(view, "beta1", 0.075), omega_max=getattr(view, "omega_max", 1e6),
+            turb_k_field=getattr(view, "k_field", None))
+        hit, target = omega_wall_cell_targets_gpu(cp, tr)
+        lin = TurbulenceLinearization(
+            mesh=mesh, ops=s.ops, flat=flat, turb=view, Q=Q_h, grad_vel=_host(ctx.grad_vel),
+            d_wall=_host(ctx.d_wall), mu=float(s.mu_molecular),
+            conv_geom=precompute_scalar_convection_geometry(Q_h[..., 0], Q_h[..., 1:4], mesh, s.ops, flat),
+            wall_zero_face=_host(tr._wall_mask_k_gpu), omega_wall_face=_host(omega_wall),
+            has_omega_wall=_host(has_wall), open_face=_host(tr._open_mask_gpu),
+            wall_cells=_host(hit), wall_targets=_host(target),
+            pointwise=GpuTurbulencePointwise(cp, view, ctx.Q, ctx.grad_vel, ctx.d_wall, float(s.mu_molecular)))
+        return TurbulenceBlockAssembler(lin, self.shape[1], compact_state=_MultiGpuTurbulenceCompactState(s),
+                                        row_compact=np.asarray(dist_fc.inv_perm)[:self.shape[0]])
+
+
+class _MultiGpuTurbulenceCompactState:
+    """local `(k, omega)`（设备数组）-> 紧凑空间（与 `_sync_turbulence_view` 同一次交换与换序）。"""
+
+    __slots__ = ("solver",)
+
+    def __init__(self, solver):
+        self.solver = solver
+
+    def __call__(self, kw_local):
+        s = self.solver
+        return s._permute_to_compact(s.turb_halo_gpu.exchange(kw_local))

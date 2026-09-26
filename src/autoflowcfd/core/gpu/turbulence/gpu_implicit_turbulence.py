@@ -54,10 +54,86 @@ class GpuTurbulenceBackend:
     def cell_colors(self):
         return gpu_cell_colors(self.xp, self.solver.flat_face_gpu, self.shape[0])
 
+    def block_assembler(self):
+        """本步的解析单元块装配器：线性算子部分在主机上装配（与 CPU 同一份，
+        `core/turbulence/jacobian`），逐点量 `(S, Gamma)` 用 GPU 模型自己的求值件
+        （`GpuTurbulencePointwise`），冻结的平均流输入与残差同一份。"""
+        from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+        from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_omega_wall_target_gpu
+        from autoflowcfd.core.turbulence.jacobian import TurbulenceBlockAssembler, TurbulenceLinearization
+        from autoflowcfd.core.turbulence.transport import precompute_scalar_convection_geometry
+
+        s, cp, m = self.solver, self.xp, self.model
+        grad_vel, d_wall = self._inputs
+        Q_h = _host(s.Q_gpu)
+        flat = get_flat_face_geometry(s.mesh, s.ops)
+        omega_wall, has_wall = compute_omega_wall_target_gpu(
+            cp, s.flat_face_gpu, s._wall_mask_k_gpu, d_wall, s.Q_gpu, s.mu_molecular,
+            getattr(m, "beta1", 0.075), omega_max=getattr(m, "omega_max", 1e6),
+            turb_k_field=getattr(m, "k_field", None))
+        hit, target = self.wall_targets()
+        ctx = TurbulenceLinearization(
+            mesh=s.mesh, ops=s.ops, flat=flat, turb=m, Q=Q_h, grad_vel=_host(grad_vel), d_wall=_host(d_wall),
+            mu=float(s.mu_molecular),
+            conv_geom=precompute_scalar_convection_geometry(Q_h[..., 0], Q_h[..., 1:4], s.mesh, s.ops, flat),
+            wall_zero_face=_host(s._wall_mask_k_gpu), omega_wall_face=_host(omega_wall),
+            has_omega_wall=_host(has_wall), open_face=_host(s._open_mask_gpu),
+            wall_cells=_host(hit), wall_targets=_host(target),
+            pointwise=GpuTurbulencePointwise(cp, m, s.Q_gpu, grad_vel, d_wall, float(s.mu_molecular)))
+        return TurbulenceBlockAssembler(ctx, self.shape[1])
+
+
+def _host(a):
+    return a.get() if hasattr(a, "get") else np.asarray(a)
+
+
+class GpuTurbulencePointwise:
+    """GPU 模型上的逐点 `(S, Gamma)` 求值器（`core/turbulence/jacobian/pointwise.py` 的
+    `evaluate` 接口）：输入输出是主机数组，求值在设备上用 GPU 模型的源项与扩散系数
+    （`compute_source_terms_gpu`、`turbulence_diffusivities_gpu`，与 GPU 残差同一份）。"""
+
+    __slots__ = ("cp", "turb", "Q", "grad_vel", "d_wall", "mu", "S_mag")
+
+    _CACHED = ("nu_t", "_last_beta_blend", "_omega_realizability_min")
+
+    def __init__(self, cp, turb, Q, grad_vel, d_wall, mu):
+        self.cp, self.turb, self.Q, self.grad_vel, self.d_wall, self.mu = cp, turb, Q, grad_vel, d_wall, mu
+        self.S_mag = turb.compute_strain_rate_magnitude_gpu(grad_vel)
+
+    def __call__(self, k, omega, grad_k, grad_omega):
+        from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import turbulence_diffusivities_gpu
+        from autoflowcfd.core.turbulence.sst.bounds import clip_gradient_magnitude
+
+        cp, turb = self.cp, self.turb
+        saved = (turb.k_field, turb.omega_field)
+        saved_cache = {a: getattr(turb, a) for a in self._CACHED if hasattr(turb, a)}
+        turb.k_field, turb.omega_field = cp.asarray(k), cp.asarray(omega)
+        try:
+            gk = clip_gradient_magnitude(cp.asarray(grad_k), cp)
+            gw = clip_gradient_magnitude(cp.asarray(grad_omega), cp)
+            Sk, Sw = turb.compute_source_terms_gpu(self.Q, self.grad_vel, self.d_wall, self.mu, gk, gw)
+            rho = self.Q[:, :, 0]
+            nu = self.mu / cp.maximum(rho, 1e-10)
+            Gk, Gw = turbulence_diffusivities_gpu(cp, turb, turb.k_field, turb.omega_field, gk, gw, rho,
+                                                  rho * turb.nu_t, nu, self.mu, self.S_mag, self.d_wall)
+        finally:
+            turb.k_field, turb.omega_field = saved
+            for a, v in saved_cache.items():
+                setattr(turb, a, v)
+        return _host(cp.stack([Sk, Sw], axis=-1)), _host(cp.stack([Gk, Gw], axis=-1))
+
+
+def gpu_coupling_graph(cp, flat_face_gpu, n_cells: int):
+    """单机 GPU 的 P0 差分耦合图：设备端面相邻关系拷回主机（一次性）。"""
+    from autoflowcfd.core.time_integration.implicit.coloring import coupling_graph_from_faces
+
+    return coupling_graph_from_faces(np.asarray(cp.asnumpy(flat_face_gpu.owner_cell)),
+                                     np.asarray(cp.asnumpy(flat_face_gpu.neighbor_cell)), int(n_cells))
+
 
 def gpu_cell_colors(cp, flat_face_gpu, n_cells: int) -> np.ndarray:
     """单机 GPU 的块 Jacobi 着色：设备端面相邻关系拷回主机做贪心着色（一次性）。"""
-    from autoflowcfd.core.time_integration.implicit.block_jacobi import greedy_cell_coloring
+    from autoflowcfd.core.time_integration.implicit.coloring import greedy_cell_coloring
 
     return greedy_cell_coloring(np.asarray(cp.asnumpy(flat_face_gpu.owner_cell)),
                                 np.asarray(cp.asnumpy(flat_face_gpu.neighbor_cell)), int(n_cells))

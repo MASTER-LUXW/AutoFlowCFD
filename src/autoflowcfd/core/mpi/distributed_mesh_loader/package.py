@@ -122,6 +122,7 @@ def build_fully_distributed_rank_package(
     cfl_max: Optional[float] = None,
     cfl_min: Optional[float] = None,
     global_cell_colors: Optional[np.ndarray] = None,
+    global_cell_colors_d2: Optional[np.ndarray] = None,
 ) -> dict:
     """Root rank 专用：为指定 rank 算好它需要的全部紧凑数据（不需要该
     rank 自己持有完整全局网格）。
@@ -176,6 +177,8 @@ def build_fully_distributed_rank_package(
         global_cell_colors: (n_global_cells,) 全局一致的块 Jacobi 着色
             （`core/mpi/distributed_implicit.py::global_cell_colors`，只有隐式
             稳态需要；调用方对同一个网格算一次），包里放本 rank local 段
+        global_cell_colors_d2: (n_global_cells,) 全局一致的距离 2 着色（P0 差分装配
+            面邻居耦合块用，`distributed_implicit.py::global_cell_colors_d2`），同上
         turb_model_name: "NONE"/"SST"/"DDES"/"IDDES"/"WMLES"/"LES"
             （大写），决定是否需要计算 wall_distance/h_max/h_wn
         wall_distance_source: 壁面距离来源（`core/utils/wall_distance_source.py`），
@@ -336,4 +339,6 @@ def build_fully_distributed_rank_package(
         'cfl_min': cfl_min,
         'cell_colors': (None if global_cell_colors is None
                         else np.asarray(global_cell_colors)[partition.local_cells].copy()),
+        'cell_colors_d2': (None if global_cell_colors_d2 is None
+                           else np.asarray(global_cell_colors_d2)[partition.local_cells].copy()),
     }

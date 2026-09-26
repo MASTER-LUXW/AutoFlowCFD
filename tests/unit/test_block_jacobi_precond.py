@@ -19,10 +19,10 @@ import pytest
 from autoflowcfd.core.time_integration.implicit import block_jacobi as bj
 from autoflowcfd.core.time_integration.implicit.block_jacobi import (
     BlockJacobiCache,
-    CellBlockJacobian,
     CellBlockJacobiPreconditioner,
-    greedy_cell_coloring,
 )
+from autoflowcfd.core.time_integration.implicit.cell_blocks import CellBlockJacobian
+from autoflowcfd.core.time_integration.implicit.coloring import greedy_cell_coloring
 from autoflowcfd.core.time_integration.implicit.jfnk import step_newton_krylov
 from autoflowcfd.core.time_integration.implicit.preconditioner import PseudoTransientDiagonal
 

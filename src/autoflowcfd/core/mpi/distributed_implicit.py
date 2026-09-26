@@ -8,7 +8,8 @@
 * 隐式 k-omega：`fr_solver/turbulence/implicit.py` 的 `TurbulenceResidual`
   / `step_turbulence_newton`，本文件提供它要的适配器
   `DistributedTurbulenceBackend`；
-* 块 Jacobi 着色：`global_cell_colors`。
+* 块 Jacobi 着色：`global_cell_colors`；P0 差分装配耦合块用的距离 2 着色与本地
+  模板单元对：`global_cell_colors_d2` / `distributed_coupling_graph`。
 
 ## 着色必须全局一致
 
@@ -23,6 +24,11 @@
   各 rank 结果逐位相同）；
 * 完全分布式加载：只有 root 持有全局网格，root 算一次、随紧凑包下发
   （`distributed_mesh_loader/package.py` 的 `cell_colors`）。
+
+P0 的差分装配同时截取面邻居耦合块（`implicit/cell_blocks.py`），要的是距离 2
+着色（同色单元既不相邻、也不共享面邻居），同一个理由也必须对全局邻接成立，来源
+与上面相同（完全分布式加载随包下发 `cell_colors_d2`）。块 ILU 只用两端都在本
+rank 的耦合块（rank 间按块 Jacobi 式分解，与解析装配 `select_rows` 同一个近似）。
 
 单元着色只依赖拓扑，与阶数无关，换阶后沿用。
 
@@ -49,7 +55,9 @@ from autoflowcfd.core.mpi.distributed_turbulence import (
     set_view_k_omega,
 )
 from autoflowcfd.core.mpi.reductions import MPIReductions
-from autoflowcfd.core.time_integration.implicit.block_jacobi import greedy_cell_coloring
+from autoflowcfd.core.time_integration.implicit.coloring import (
+    CouplingGraph, distance2_cell_coloring, greedy_cell_coloring, stencil_pairs,
+)
 from autoflowcfd.core.turbulence.transport import omega_wall_cell_targets, prepare_convection_geometry
 
 
@@ -114,6 +122,60 @@ def distributed_block_jacobi_colors(solver) -> np.ndarray:
         colors = global_cell_colors(fc, part.n_global_cells)[part.local_cells]
         solver._block_jacobi_colors_local = colors
     return colors
+
+
+def global_cell_colors_d2(face_connectivity, n_global_cells: int) -> np.ndarray:
+    """全局面连接关系上的贪心距离 2 着色，返回 `(n_global_cells,)`（见模块文档）。"""
+    return distance2_cell_coloring(face_connectivity.owner_cell, face_connectivity.neighbor_cell,
+                                   int(n_global_cells))
+
+
+def distributed_coupling_graph(solver) -> CouplingGraph:
+    """本 rank 的 P0 差分耦合图：local 单元（原生排列）的距离 2 着色与两端都在本
+    rank 的模板单元对。单元对取自残差本身用的紧凑面几何（`dist_flat_face.base_flat`，
+    local+halo 紧凑编号），经 `inv_perm` 换回 local 编号。"""
+    colors = getattr(solver, "_coupling_colors_local", None)
+    if colors is None:
+        fc = getattr(solver.mesh, "face_connectivity", None)
+        if fc is None:
+            raise RuntimeError(
+                "分布式 P0 块 ILU 需要全局一致的距离 2 着色：传统模式由全局网格的面连接关系"
+                "计算，完全分布式加载由 root 随紧凑包下发（cell_colors_d2）——这里两者都没有。")
+        part = solver.partition
+        colors = global_cell_colors_d2(fc, part.n_global_cells)[part.local_cells]
+        solver._coupling_colors_local = colors
+    dist_fc = solver.dist_flat_face
+    n_local = int(solver.partition.n_local_cells)
+    flat = dist_fc.base_flat
+    own = np.asarray(flat.owner_cell, dtype=np.int64)
+    nb = np.asarray(flat.neighbor_cell, dtype=np.int64)
+    local = -np.ones(max(int(own.max()), int(nb.max())) + 1, dtype=np.int64)
+    local[np.asarray(dist_fc.inv_perm)[:n_local]] = np.arange(n_local)
+    lo, ln = local[own], np.where(nb >= 0, local[np.maximum(nb, 0)], -1)
+    keep = (lo >= 0) & (ln >= 0)
+    rows, cols = stencil_pairs(lo[keep], ln[keep], n_local)
+    return CouplingGraph(rows=rows, cols=cols, colors=np.asarray(colors, dtype=np.int64))
+
+
+class _TurbulenceCompactState:
+    """local `(k, omega)` -> 紧凑空间（与湍流残差 `_sync_view` 同一次 halo 交换与换序）。"""
+
+    __slots__ = ("backend",)
+
+    def __init__(self, backend):
+        self.backend = backend
+
+    def __call__(self, kw_local):
+        be = self.backend
+        s = be.solver
+        view = be._view
+        saved = (view.k_field, view.omega_field)
+        try:
+            set_view_k_omega(view, s.turb_halo_exchange, s.dist_flat_face,
+                             np.ascontiguousarray(kw_local[..., 0]), np.ascontiguousarray(kw_local[..., 1]))
+            return np.stack([view.k_field, view.omega_field], axis=-1)
+        finally:
+            view.k_field, view.omega_field = saved
 
 
 class DistributedTurbulenceBackend:
@@ -200,3 +262,16 @@ class DistributedTurbulenceBackend:
 
     def cell_colors(self):
         return distributed_block_jacobi_colors(self.solver)
+
+    def block_assembler(self):
+        """本步的解析单元块装配器：在与残差同一个紧凑空间视图上装配，按 `inv_perm` 取本 rank 行。"""
+        from autoflowcfd.core.turbulence.jacobian import TurbulenceBlockAssembler, turbulence_linearization
+
+        adapter = self._adapter
+        flat = adapter._turbulence_flat_face_override
+        hit, target = omega_wall_cell_targets(adapter, flat)
+        ctx = turbulence_linearization(adapter, self._view, self._inputs, self._conv_geom, flat, hit, target)
+        dist_fc = self.solver.dist_flat_face
+        return TurbulenceBlockAssembler(
+            ctx, self.shape[1], compact_state=_TurbulenceCompactState(self),
+            row_compact=np.asarray(dist_fc.inv_perm)[:self.shape[0]])

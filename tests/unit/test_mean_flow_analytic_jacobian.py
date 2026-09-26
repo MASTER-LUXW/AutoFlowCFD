@@ -21,7 +21,8 @@ from autoflowcfd.core.fr_operators.kernels import resolve_ausm_precond_mode
 from autoflowcfd.core.fr_residual.inviscid import compute_inviscid_residual_fr, conserved_to_primitive
 from autoflowcfd.core.fr_residual.jacobian import MeanFlowLinearization, assemble_mean_flow_blocks
 from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
-from autoflowcfd.core.time_integration.implicit.block_jacobi import CellBlockJacobian, greedy_cell_coloring
+from autoflowcfd.core.time_integration.implicit.cell_blocks import CellBlockJacobian
+from autoflowcfd.core.time_integration.implicit.coloring import greedy_cell_coloring
 from autoflowcfd.core.utils.preconditioning import apply_low_mach_preconditioner
 from autoflowcfd.fr.native_padding import real_sps_per_cell
 from autoflowcfd.fr.operators import generate_fr_operators

@@ -16,7 +16,9 @@ from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_
 
 
 from autoflowcfd.core.turbulence.transport import resolve_turb_overintegration
-from autoflowcfd.core.turbulence.sst.bounds import model_evaluation_fields, omega_realizability_floor
+from autoflowcfd.core.turbulence.sst.bounds import (
+    clip_gradient_magnitude, model_evaluation_fields, omega_realizability_floor,
+)
 from autoflowcfd.core.turbulence.transport.faces import boundary_diffusion_targets
 
 # 过积分上下文提取到 `core/gpu/gpu_overintegration.py`（2026-09-15，粘性
@@ -194,6 +196,22 @@ def compute_scalar_diffusion_residual_gpu(
     return residual + _lift_side_jumps_gpu(cp, ff, jumps[0], jumps[1], +1.0, det_jacs, n_cells, n_sps)
 
 
+def turbulence_diffusivities_gpu(cp, turb, k, omega, grad_k, grad_omega, rho, rho_nu_t, nu, mu, S_mag, d_wall):
+    """GPU 版 k / omega 有效扩散系数 `mu + sigma(F1) rho nu_t`（CPU 版
+    `transport/residual.py::turbulence_diffusivities` 的对应），输运残差与湍流解析
+    Jacobian 的 GPU 逐点求值器共用。"""
+    grad_k = clip_gradient_magnitude(grad_k, cp)
+    grad_omega = clip_gradient_magnitude(grad_omega, cp)
+    grad_dot = cp.sum(grad_k * grad_omega, axis=-1)
+    # 模型项求值用有效值（与 CPU 版同一处，定义在 `sst/bounds.py`）
+    k_eff, omega_safe = model_evaluation_fields(k, omega, omega_realizability_floor(turb, S_mag, cp), cp)
+    CD_kw = cp.maximum(2.0 * rho * turb.sigma_w2 / omega_safe * grad_dot, 1e-10)
+    F1 = turb.compute_blending_F1_gpu(k_eff, omega_safe, d_wall, nu, rho, CD_kw)
+    sigma_k = F1 * turb.sigma_k1 + (1.0 - F1) * turb.sigma_k2
+    sigma_w = F1 * turb.sigma_w1 + (1.0 - F1) * turb.sigma_w2
+    return mu + sigma_k * rho_nu_t, mu + sigma_w * rho_nu_t
+
+
 def compute_turbulence_transport_residual_gpu(
     solver, grad_vel=None,
 ) -> Tuple:
@@ -246,30 +264,10 @@ def compute_turbulence_transport_residual_gpu(
     grad_k = compute_physical_scalar_gradient_gpu(turb.k_field, solver.mesh_data, solver.ops_data)
     grad_omega = compute_physical_scalar_gradient_gpu(turb.omega_field, solver.mesh_data, solver.ops_data)
 
-    max_grad_mag = 1e6
-    grad_k_mag = cp.linalg.norm(grad_k, axis=-1)
-    grad_omega_mag = cp.linalg.norm(grad_omega, axis=-1)
-    scale_k = cp.clip(max_grad_mag / cp.maximum(grad_k_mag, 1e-10), 0, 1)
-    grad_k = cp.where((grad_k_mag > max_grad_mag)[..., None], grad_k * scale_k[..., None], grad_k)
-    scale_omega = cp.clip(max_grad_mag / cp.maximum(grad_omega_mag, 1e-10), 0, 1)
-    grad_omega = cp.where(
-        (grad_omega_mag > max_grad_mag)[..., None], grad_omega * scale_omega[..., None], grad_omega
-    )
-
-    grad_dot = cp.sum(grad_k * grad_omega, axis=-1)
-    # 模型项求值用有效值（与 CPU 版同一处，定义在 `sst/bounds.py`）
     S_mag = turb.compute_strain_rate_magnitude_gpu(grad_vel)
-    k_eff, omega_safe = model_evaluation_fields(turb.k_field, turb.omega_field,
-                                                omega_realizability_floor(turb, S_mag, cp), cp)
-    CD_kw = cp.maximum(2.0 * rho * turb.sigma_w2 / omega_safe * grad_dot, 1e-10)
-
     d_wall = solver.wall_distance_gpu
-    F1 = turb.compute_blending_F1_gpu(k_eff, omega_safe, d_wall, nu, rho, CD_kw)
-
-    sigma_k = F1 * turb.sigma_k1 + (1.0 - F1) * turb.sigma_k2
-    sigma_w = F1 * turb.sigma_w1 + (1.0 - F1) * turb.sigma_w2
-    gamma_k = mu + sigma_k * rho_nu_t
-    gamma_w = mu + sigma_w * rho_nu_t
+    gamma_k, gamma_w = turbulence_diffusivities_gpu(
+        cp, turb, turb.k_field, turb.omega_field, grad_k, grad_omega, rho, rho_nu_t, nu, mu, S_mag, d_wall)
 
     ff = solver.flat_face_gpu
     n_prism = solver.mesh_data.get('n_prism', solver.mesh.n_prism_cells)

@@ -162,13 +162,9 @@ class _GPUDistributedTurbSourceMixin:
 
         grad_k = compute_physical_scalar_gradient_gpu(view.k_field, self.mesh_data, self.ops_data)
         grad_omega = compute_physical_scalar_gradient_gpu(view.omega_field, self.mesh_data, self.ops_data)
-        max_grad_mag = 1e6
-        grad_k_mag = cp.linalg.norm(grad_k, axis=-1)
-        grad_omega_mag = cp.linalg.norm(grad_omega, axis=-1)
-        if cp.any(grad_k_mag > max_grad_mag):
-            grad_k *= cp.clip(max_grad_mag / cp.maximum(grad_k_mag, 1e-10), 0, 1)[..., None]
-        if cp.any(grad_omega_mag > max_grad_mag):
-            grad_omega *= cp.clip(max_grad_mag / cp.maximum(grad_omega_mag, 1e-10), 0, 1)[..., None]
+        from autoflowcfd.core.turbulence.sst.bounds import clip_gradient_magnitude
+        grad_k = clip_gradient_magnitude(grad_k, cp)
+        grad_omega = clip_gradient_magnitude(grad_omega, cp)
 
         Sk, S_omega = view.compute_source_terms_gpu(
             ctx.Q, ctx.grad_vel, ctx.d_wall, self.mu_molecular, grad_k, grad_omega)

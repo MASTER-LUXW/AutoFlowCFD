@@ -80,19 +80,29 @@ class MeanFlowBlockAssembler:
         return self._rows_only(out, int(self.ctx.mesh.n_prism_cells))
 
     def _rows_only(self, out, n_prism_compact):
-        rc = self.row_compact
-        is_p = rc < n_prism_compact
-        bp_c, bt_c = out[0], out[1]
-        blocks = (np.ascontiguousarray(bp_c[rc[is_p]]), np.ascontiguousarray(bt_c[rc[~is_p] - n_prism_compact]))
-        if not self.want_coupling:
-            return blocks
-        local = -np.ones(bp_c.shape[0] + bt_c.shape[0], dtype=np.int64)
-        local[rc] = np.arange(rc.size)
-        groups = []
-        for g in out[2].groups:
-            lr, lc = local[g.rows], local[g.cols]
-            keep = (lr >= 0) & (lc >= 0)
-            if keep.any():
-                groups.append(CouplingGroup(row_is_prism=g.row_is_prism, col_is_prism=g.col_is_prism,
-                                            rows=lr[keep], cols=lc[keep], blocks=g.blocks[keep]))
-        return blocks + (CouplingBlocks(groups=groups),)
+        return select_rows(out, self.row_compact, n_prism_compact, self.want_coupling)
+
+
+def select_rows(out, row_compact, n_prism_compact: int, want_coupling: bool):
+    """紧凑空间（local+halo）装配结果 -> 只含 Newton 行单元（local）的块。
+
+    对角块按 `row_compact` 取出（棱柱/四面体各自按行单元的原生顺序）；耦合块只保留
+    两端都是本 rank 单元的那些（与 rank 间块 Jacobi 式分解同一个近似），单元号换成
+    行单元下标。平均流与 k-omega 装配器共用。
+    """
+    rc = row_compact
+    is_p = rc < n_prism_compact
+    bp_c, bt_c = out[0], out[1]
+    blocks = (np.ascontiguousarray(bp_c[rc[is_p]]), np.ascontiguousarray(bt_c[rc[~is_p] - n_prism_compact]))
+    if not want_coupling:
+        return blocks
+    local = -np.ones(bp_c.shape[0] + bt_c.shape[0], dtype=np.int64)
+    local[rc] = np.arange(rc.size)
+    groups = []
+    for g in out[2].groups:
+        lr, lc = local[g.rows], local[g.cols]
+        keep = (lr >= 0) & (lc >= 0)
+        if keep.any():
+            groups.append(CouplingGroup(row_is_prism=g.row_is_prism, col_is_prism=g.col_is_prism,
+                                        rows=lr[keep], cols=lc[keep], blocks=g.blocks[keep]))
+    return blocks + (CouplingBlocks(groups=groups),)

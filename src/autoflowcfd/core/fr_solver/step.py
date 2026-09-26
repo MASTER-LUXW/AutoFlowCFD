@@ -7,6 +7,7 @@ AutoFlowCFD V2.0 - FRSolver 单时间步推进 (从 fr_solver.py 拆分)
 """
 
 import os
+from functools import partial
 
 import numpy as np
 
@@ -16,6 +17,7 @@ from autoflowcfd.core.fr_solver.turbulence.implicit import (
     IMPLICIT_TURBULENCE_MODELS,
     CpuTurbulenceBackend,
     single_machine_cell_colors,
+    single_machine_coupling_graph,
     step_turbulence_newton,
 )
 
@@ -149,8 +151,9 @@ def step(solver, dt: float) -> float:
                 and solver.turb_model is not None
                 and solver.turb_model_name in IMPLICIT_TURBULENCE_MODELS):
             # 隐式稳态：k-omega 也走分离式 PTC-Newton（平均流冻结），显式
-            # 输运更新在隐式 CFL 下必然失稳，见 turbulence/implicit.py 文档
-            step_turbulence_newton(CpuTurbulenceBackend(solver), turb_dt)
+            # 输运更新在隐式 CFL 下必然失稳，见 turbulence/implicit.py 文档；
+            # 伪时间步长用平均流那一份（见 step_turbulence_newton 的 dtau 参数文档）
+            step_turbulence_newton(CpuTurbulenceBackend(solver), dt_local)
         else:
             solver.compute_turbulence_source(turb_dt)
 
@@ -314,6 +317,7 @@ def step(solver, dt: float) -> float:
                 red=LocalReductions(np),
                 cell_is_prism=np.arange(n_cells) < int(solver.mesh.n_prism_cells),
                 cell_colors=lambda: single_machine_cell_colors(solver),
+                coupling_graph=partial(single_machine_coupling_graph, solver),
                 order=_current_order(solver), filter_active=filter_func is not None,
                 positivity=positivity_func,
                 block_assembler=None if unsupported_reason(

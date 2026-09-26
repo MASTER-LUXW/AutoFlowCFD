@@ -28,49 +28,43 @@ import warnings
 
 import numpy as np
 
-import autoflowcfd.core.fr_solver.turbulence as turbulence_module
 
 
 class TestGradClipErrstateWrapping:
     def test_source_file_wraps_grad_clip_in_errstate(self):
         """Guards against the wrapping being silently removed by a future
-        edit: the exact code block that computes grad_k_mag/grad_omega_mag
-        via np.linalg.norm must sit inside a `with np.errstate(...)` in
-        this module's source."""
+        edit. 2026-09-26: the clipping lives in one shared helper
+        (`sst/bounds.py::clip_gradient_magnitude`, used by the CPU source,
+        CPU transport, single-GPU and multi-GPU paths); the norm must sit
+        inside `np.errstate` there, and the source evaluation must call it."""
         import inspect
 
-        # 2026-09-25：梯度裁剪随源项求值一起拆进了 `evaluate_turbulence_rates`
-        # （显式与隐式 k-omega 更新共用的求值件），`compute_turbulence_source`
-        # 现在只是编排。
         from autoflowcfd.core.fr_solver.turbulence.source import evaluate_turbulence_rates
+        from autoflowcfd.core.turbulence.sst.bounds import clip_gradient_magnitude
 
-        src = inspect.getsource(evaluate_turbulence_rates)
-        errstate_idx = src.index("with np.errstate(over='ignore', invalid='ignore'):")
-        norm_idx = src.index("grad_k_mag = np.linalg.norm(grad_k, axis=-1)")
+        src = inspect.getsource(clip_gradient_magnitude)
+        errstate_idx = src.index('with np.errstate(over="ignore", invalid="ignore"):')
+        norm_idx = src.index("mag = np.linalg.norm(grad, axis=-1)")
         assert errstate_idx < norm_idx, (
-            "np.errstate wrapping must appear before the grad_k_mag norm "
-            "computation it's meant to protect"
-        )
+            "np.errstate wrapping must appear before the norm computation it's meant to protect")
+        assert "clip_gradient_magnitude(grad_k, np)" in inspect.getsource(evaluate_turbulence_rates)
 
     def test_overflow_prone_norm_and_clip_is_warning_free_under_errstate(self):
         """Reproduces the actual numeric failure mode in isolation: a
         gradient component large enough that squaring it overflows
-        float64 (>~1.34e154), run through the identical
-        norm-then-clip-to-1e6 logic this file uses, inside the same
-        errstate context - must produce zero warnings and a correctly
-        clipped (not NaN) result."""
+        float64 (>~1.34e154), run through the shared clipping helper -
+        must produce zero warnings and a correctly clipped (not NaN) result."""
+        from autoflowcfd.core.turbulence.sst.bounds import clip_gradient_magnitude
+
         grad_k = np.zeros((2, 1, 3))
         grad_k[0, 0, 0] = 1e200  # squaring this overflows float64
+        grad_k[1, 0, 1] = 3.0
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            with np.errstate(over='ignore', invalid='ignore'):
-                max_grad_mag = 1e6
-                grad_k_mag = np.linalg.norm(grad_k, axis=-1)
-                if np.any(grad_k_mag > max_grad_mag):
-                    scale_k = max_grad_mag / np.maximum(grad_k_mag, 1e-10)
-                    grad_k = grad_k * np.clip(scale_k[..., np.newaxis], 0, 1)
+            out = clip_gradient_magnitude(grad_k, np)
 
         assert len(caught) == 0, f"expected no warnings, got: {[str(w.message) for w in caught]}"
-        assert np.isfinite(grad_k).all()
-        assert grad_k[0, 0, 0] == 0.0  # inf-magnitude component clipped to exactly 0, not NaN
+        assert np.isfinite(out).all()
+        assert out[0, 0, 0] == 0.0     # 模长溢出成 inf -> 缩放 0（不是 NaN），与此前行为一致
+        np.testing.assert_array_equal(out[1], grad_k[1])          # 未超限的点逐位不变

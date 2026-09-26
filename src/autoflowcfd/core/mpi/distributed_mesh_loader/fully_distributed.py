@@ -146,14 +146,17 @@ def distributed_mesh_load_v2(
 
         # 隐式稳态的块 Jacobi 着色必须全局一致（见 core/mpi/distributed_implicit.py），
         # 只有 root 持有全局面连接关系，在这里算一次
-        global_cell_colors = None
+        global_cell_colors = global_cell_colors_d2 = None
         from autoflowcfd.core.time_integration.base import (
             TimeIntegrationScheme, scheme_from_name,
         )
         if (time_scheme is not None
                 and scheme_from_name(time_scheme) == TimeIntegrationScheme.NEWTON_KRYLOV):
-            from autoflowcfd.core.mpi.distributed_implicit import global_cell_colors as _colors
+            from autoflowcfd.core.mpi.distributed_implicit import (
+                global_cell_colors as _colors, global_cell_colors_d2 as _colors_d2,
+            )
             global_cell_colors = _colors(fc, len(cell_partition))
+            global_cell_colors_d2 = _colors_d2(fc, len(cell_partition))
 
         packages = [
             build_fully_distributed_rank_package(
@@ -166,6 +169,7 @@ def distributed_mesh_load_v2(
                 time_scheme=time_scheme, dual_time_inner_iter=dual_time_inner_iter,
                 cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
                 global_cell_colors=global_cell_colors,
+                global_cell_colors_d2=global_cell_colors_d2,
             )
             for r in range(n_ranks)
         ]
@@ -195,6 +199,7 @@ def distributed_mesh_load_v2(
             'time_scheme': time_scheme, 'dual_time_inner_iter': dual_time_inner_iter,
             'cfl_start': cfl_start, 'cfl_max': cfl_max, 'cfl_min': cfl_min,
             'global_cell_colors': global_cell_colors,
+            'global_cell_colors_d2': global_cell_colors_d2,
         }
     else:
         import pickle
@@ -436,6 +441,7 @@ def exchange_packages_for_new_order(root_context, target_p: int, n_ranks: int, *
                 cfl_min=root_context.get('cfl_min'),
                 # 着色只依赖拓扑，换阶沿用同一份
                 global_cell_colors=root_context.get('global_cell_colors'),
+                global_cell_colors_d2=root_context.get('global_cell_colors_d2'),
             )
             for r in range(n_ranks)
         ]

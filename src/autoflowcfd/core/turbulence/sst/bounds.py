@@ -24,6 +24,8 @@ realizability 只在**模型项求值**时施加——
 防止 1e260 量级的正反馈爆炸，见 `update.py`）。
 """
 
+import numpy as np
+
 #: 防止 0/负值进入 sqrt 与除法的绝对下限。
 ABS_FLOOR = 1e-12
 
@@ -32,6 +34,10 @@ K_FLOOR_FRACTION = 1e-3
 
 #: omega 的环境安全网相对来流值的比例（`omega_r` 的第二项）。
 OMEGA_FLOOR_FRACTION = 0.1
+
+#: k/omega 梯度模长上限。退化单元上理论为常数的场求梯度，度量比值 adj(J)/det(J)
+#: 把浮点噪声放大到 >1e150（2026-08-22 真实网格），模长超过上限的点等比缩到上限。
+MAX_GRADIENT_MAGNITUDE = 1e6
 
 
 def omega_realizability_floor(model, S_mag, xp):
@@ -42,6 +48,20 @@ def omega_realizability_floor(model, S_mag, xp):
 def model_evaluation_fields(k, omega, omega_r, xp):
     """模型项求值用的 `(k_bar, omega_eff)`（见模块文档）。"""
     return xp.maximum(k, 0.0), xp.maximum(omega, xp.maximum(omega_r, ABS_FLOOR))
+
+
+def clip_gradient_magnitude(grad, xp):
+    """`grad (..., 3)` 模长超过 `MAX_GRADIENT_MAGNITUDE` 的点等比缩到上限，返回新数组。
+
+    源项与输运（CPU、单机 GPU、多 GPU）共用这一份。分量平方溢出时模长为 inf、缩放为
+    0（该点梯度置零，不是 NaN；有限输入不会产生 NaN）。
+    """
+    if xp is np:
+        with np.errstate(over="ignore", invalid="ignore"):
+            mag = np.linalg.norm(grad, axis=-1)
+            return grad * np.clip(MAX_GRADIENT_MAGNITUDE / np.maximum(mag, 1e-10), 0.0, 1.0)[..., None]
+    mag = xp.linalg.norm(grad, axis=-1)
+    return grad * xp.clip(MAX_GRADIENT_MAGNITUDE / xp.maximum(mag, 1e-10), 0.0, 1.0)[..., None]
 
 
 def turbulence_scales(model):

@@ -9,6 +9,7 @@
 """
 
 import time
+from functools import partial
 import numpy as np
 from typing import Optional, Dict, Any
 from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
@@ -67,9 +68,10 @@ class _GPUSolverStepMixin:
                 return_physical_too=True)
             if (self.turb_model_gpu is not None
                     and self.turb_model_name.upper() in IMPLICIT_TURBULENCE_MODELS):
+                # 伪时间步长用平均流那一份（见 step_turbulence_newton 的 dtau 参数文档）
                 step_turbulence_newton(
                     GpuTurbulenceBackend(self),
-                    cp.broadcast_to(dt_physical[:, None], (n_cells, n_sps)))
+                    cp.broadcast_to(dt_local[:, None], (n_cells, n_sps)))
                 mu_t_field = self._turbulent_mu_t_gpu()
             else:
                 mu_t_field = self.compute_turbulence_source_gpu(dt_physical[:, None])
@@ -155,7 +157,7 @@ class _GPUSolverStepMixin:
             # 这里只提供 GPU 的残差、归约（cupy）与面相邻关系。
             from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
             ff = self.flat_face_gpu
-            from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import gpu_cell_colors
+            from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import gpu_cell_colors, gpu_coupling_graph
             from autoflowcfd.core.fr_residual.jacobian.backend import (
                 MeanFlowBlockAssembler, unsupported_reason,
             )
@@ -174,6 +176,7 @@ class _GPUSolverStepMixin:
                 red=LocalReductions(cp),
                 cell_is_prism=np.arange(n_cells) < int(self.mesh.n_prism_cells),
                 cell_colors=lambda: gpu_cell_colors(cp, ff, n_cells),
+                coupling_graph=partial(gpu_coupling_graph, cp, ff, n_cells),
                 order=order_nk,
                 filter_active=self.filter_func_gpu is not None,
                 positivity=positivity_func, block_assembler=block_assembler)

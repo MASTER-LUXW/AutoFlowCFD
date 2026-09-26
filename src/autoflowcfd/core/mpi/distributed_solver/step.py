@@ -8,6 +8,8 @@
 这里通过 `self` 访问。
 """
 
+from functools import partial
+
 import numpy as np
 
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
@@ -147,9 +149,10 @@ class _DistributedStepMixin:
         # `_compute_distributed_local_time_step` 与
         # core/mpi/distributed_cfl.py 模块文档）。
         # `dt_mean_local` 是平均流用的（启用低马赫数预处理时按预处理
-        # 波速放大），`dt_phys_local` 是按物理波速那一份——湍流标量必须
-        # 用后者，与单机 `fr_solver/step.py` 里 `turb_dt = dt_physical`
-        # 完全一致（k/omega 的显式更新刻意没有 point-implicit 阻尼）。
+        # 波速放大），`dt_phys_local` 是按物理波速那一份——湍流标量的**显式**
+        # 更新用后者（k/omega 的显式更新刻意没有 point-implicit 阻尼），隐式
+        # Newton 用前者，与单机 `fr_solver/step.py` 一致（见 step_turbulence_newton
+        # 的 dtau 参数文档）。
         is_newton = self._time_integrator.scheme == TimeIntegrationScheme.NEWTON_KRYLOV
         dist_fc = self.dist_flat_face
         from autoflowcfd.core.mpi.distributed_flat_face import native_cell_is_prism
@@ -172,7 +175,7 @@ class _DistributedStepMixin:
             from autoflowcfd.core.mpi.distributed_implicit import DistributedTurbulenceBackend
 
             turb_backend = DistributedTurbulenceBackend(self, cell_is_prism, order_now)
-            step_turbulence_newton(turb_backend, dt_phys_local)
+            step_turbulence_newton(turb_backend, dt_mean_local)
             mu_t_field_compact = turb_backend.mu_t_compact
         elif self.turb_model is not None:
             from autoflowcfd.core.mpi.distributed_turbulence import (
@@ -347,7 +350,7 @@ class _DistributedStepMixin:
             # 本 rank 那一段（见 core/mpi/distributed_implicit.py 模块文档）
             from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
             from autoflowcfd.core.mpi.distributed_implicit import (
-                distributed_block_jacobi_colors, distributed_mean_flow_assembler,
+                distributed_block_jacobi_colors, distributed_coupling_graph, distributed_mean_flow_assembler,
             )
             from autoflowcfd.core.mpi.reductions import MPIReductions
             from autoflowcfd.core.time_integration.implicit.mean_flow_step import (
@@ -359,6 +362,7 @@ class _DistributedStepMixin:
                 _reference_scales(self.local_solver.freestream, n_vars),
                 red=MPIReductions(np), cell_is_prism=cell_is_prism,
                 cell_colors=lambda: distributed_block_jacobi_colors(self),
+                coupling_graph=partial(distributed_coupling_graph, self),
                 order=order_now, filter_active=filter_func is not None,
                 positivity=positivity_func,
                 block_assembler=distributed_mean_flow_assembler(
