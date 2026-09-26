@@ -1,10 +1,11 @@
 """AutoFlowCFD V2.0 - 对流/扩散残差与顶层编排(GPU)
 
-从 `src/autoflowcfd/core/gpu/turbulence/gpu_scalar_transport.py`(原 743 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
+从 `src/autoflowcfd/core/gpu/turbulence/gpu_scalar_transport.py`(原 743 行)拆出(2026-09-24)；界面项 2026-09-26 改为两侧各自坐标系、扩散改为 IIPG 内罚（与 CPU 版同一结构）。
 """
 
 from typing import Tuple
 
+from autoflowcfd.core.fr_operators.flux_kernels import resolve_viscous_ip_constant
 from autoflowcfd.core.gpu import get_cupy
 
 from autoflowcfd.core.gpu.residual.gpu_volume_contract import (
@@ -15,6 +16,7 @@ from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_
 
 
 from autoflowcfd.core.turbulence.transport import resolve_turb_overintegration
+from autoflowcfd.core.turbulence.transport.faces import boundary_diffusion_targets, penalty_length
 
 # 过积分上下文提取到 `core/gpu/gpu_overintegration.py`（2026-09-15，粘性
 # 体积项 GPU 侧补齐时共用同一份，避免 residual 模块反向依赖 turbulence
@@ -23,7 +25,12 @@ from autoflowcfd.core.turbulence.transport import resolve_turb_overintegration
 from autoflowcfd.core.gpu.gpu_overintegration import (
     get_overintegration_segs_gpu,
 )
-from .faces import _distribute_scalar_correction_gpu, _extrapolate_scalar_to_faces_gpu
+from .faces import (
+    _extrapolate_scalar_pair_gpu,
+    _face_mass_flux_gpu,
+    _lift_side_jumps_gpu,
+    _unit_normals,
+)
 from .omega_wall import compute_omega_wall_target_gpu
 
 
@@ -106,55 +113,27 @@ def compute_scalar_convection_residual_gpu(
 
     residual = -div_F / det_jacs
 
-    rho_o, rho_n = _extrapolate_scalar_to_faces_gpu(cp, ff, n_prism, rho)
-    n_fp = rho_o.shape[1]
-    vel_o = cp.zeros((ff.n_faces, n_fp, 3), dtype=cp.float64)
-    for d in range(3):
-        vo, _ = _extrapolate_scalar_to_faces_gpu(cp, ff, n_prism, velocity[..., d])
-        vel_o[..., d] = vo
-    phi_o, phi_n = _extrapolate_scalar_to_faces_gpu(
-        cp, ff, n_prism, scalar_field,
-        wall_dirichlet_zero_face, wall_dirichlet_value_face, has_wall_dirichlet_value,
-    )
-
-    mass_flux = cp.sum(rho_o[..., None] * vel_o * ff.true_normal, axis=-1)  # (n_faces,n_fp)
+    # 界面项：两侧各自坐标系（CPU 版 `compute_scalar_convection_residual` 同一结构）
+    masks = (wall_dirichlet_zero_face, wall_dirichlet_value_face, has_wall_dirichlet_value)
+    m_o, m_n = _face_mass_flux_gpu(cp, ff, rho[..., None] * velocity)
+    phi_o, phi_o_other = _extrapolate_scalar_pair_gpu(cp, ff, scalar_field, "owner", *masks)
     if open_boundary_face is not None:
         is_true_boundary = (ff.neighbor_src0_cell < 0) & (ff.neighbor_src1_idx < 0)
-        inflow = (open_boundary_face & is_true_boundary)[:, None] & (mass_flux < 0)
-        phi_n = cp.where(inflow, freestream_value, phi_n)
-    phi_upwind = cp.where(mass_flux >= 0, phi_o, phi_n)
-    # 真实 bug 修复（2026-09-12，与 CPU 版 `transport.py::
-    # compute_scalar_convection_residual` 同一处修复，完整推导见该函数
-    # 模块文档"owner/neighbor 跳变量不对称"一节）：owner/neighbor 两侧
-    # 的正确校正必须分别相对各自的面值计算——owner 侧沿用
-    # `phi_upwind-phi_o`；neighbor 侧此前错误地复用了同一个 owner 参照
-    # 的跳变量，在 owner 恰好是上风侧（mass_flux>=0，phi_upwind==phi_o）
-    # 时该跳变量恒为 0，等价于 neighbor（真实网格中占全部内部面一半）
-    # 完全收不到这个面本该有的对流稀释/浓缩效果。
-    delta_phi_owner = phi_upwind - phi_o
-    delta_phi_neighbor = phi_upwind - phi_n
-
-    # 未加权原始跳变量（2026-09-03 修复，见 `_distribute_scalar_correction_
-    # gpu` 文档）：不再在这里提前乘 |owner_adj_row_exact|——加权方式（
-    # collapsed 用 |adj_row|，native 用 true_area_weight）延后到分配阶段
-    # 按面类型分派，与 CPU 版 `raw_jump_fp = mass_flux * delta_phi_owner`
-    # 逐字对应。
-    raw_jump_fp = mass_flux * delta_phi_owner
-    raw_jump_fp_neighbor = mass_flux * delta_phi_neighbor
-
-    interface_correction = _distribute_scalar_correction_gpu(
-        cp, ff, raw_jump_fp, det_jacs, n_cells, n_sps,
-        raw_jump_fp_neighbor=raw_jump_fp_neighbor,
-    )
-    return residual + interface_correction
+        inflow = (open_boundary_face & is_true_boundary)[:, None] & (m_o < 0)
+        phi_o_other = cp.where(inflow, freestream_value, phi_o_other)
+    jump_o = m_o * (cp.where(m_o >= 0, phi_o, phi_o_other) - phi_o)
+    phi_n, phi_n_other = _extrapolate_scalar_pair_gpu(cp, ff, scalar_field, "neighbor", *masks)
+    jump_n = m_n * (cp.where(m_n >= 0, phi_n, phi_n_other) - phi_n)
+    return residual + _lift_side_jumps_gpu(cp, ff, jump_o, jump_n, -1.0, det_jacs, n_cells, n_sps)
 
 
 def compute_scalar_diffusion_residual_gpu(
-    scalar_field, gamma_field, mesh_data, ops_data, ff, n_cells, n_prism, n_sps,
+    scalar_field, gamma_field, mesh_data, ops_data, ff, n_cells, n_prism, n_sps, *, c_ip,
+    wall_dirichlet_zero_face=None, wall_dirichlet_value_face=None, has_wall_dirichlet_value=None,
 ):
-    """标量扩散 FR 残差（体积项 + BR1 梯度差界面校正），与 CPU 版
-    `compute_scalar_diffusion_residual` 逐字对应（2026-08-25 梯度差
-    符号约定修复后的版本，见该函数文档）。"""
+    """标量扩散 FR 残差（体积项 + IIPG 内罚界面项），与 CPU 版
+    `compute_scalar_diffusion_residual` 逐项对应。`c_ip` 由调用方按阶数取
+    `flux_kernels.resolve_viscous_ip_constant`（与平均流粘性项同一处定义）。"""
     cp = get_cupy()
     det_jacs = mesh_data['det_jacs']
     adj_j = mesh_data['adj_j']
@@ -191,26 +170,27 @@ def compute_scalar_diffusion_residual_gpu(
 
     residual = div_G / det_jacs
 
-    gamma_o, gamma_n = _extrapolate_scalar_to_faces_gpu(cp, ff, n_prism, gamma_field)
-    n_fp = gamma_o.shape[1]
-    grad_o = cp.zeros((ff.n_faces, n_fp, 3), dtype=cp.float64)
-    grad_n = cp.zeros((ff.n_faces, n_fp, 3), dtype=cp.float64)
-    for d in range(3):
-        go, gn = _extrapolate_scalar_to_faces_gpu(cp, ff, n_prism, grad_phi[..., d])
-        grad_o[..., d] = go
-        grad_n[..., d] = gn
-
-    gamma_face = 0.5 * (gamma_o + gamma_n)
-    delta_grad = 0.5 * (grad_n - grad_o)
-    flux_jump_phys = gamma_face * cp.sum(delta_grad * ff.true_normal, axis=-1)
-
-    # 未加权原始跳变量（2026-09-03 修复，同 convection 侧，见
-    # `_distribute_scalar_correction_gpu` 文档），与 CPU 版
-    # `raw_jump_fp = flux_jump_phys` 逐字对应。
-    raw_jump_fp = flux_jump_phys
-
-    interface_correction = _distribute_scalar_correction_gpu(cp, ff, raw_jump_fp, det_jacs, n_cells, n_sps)
-    return residual - interface_correction
+    # 界面项：IIPG + 内罚项，两侧各自坐标系；边界点壁面内罚 Dirichlet、其余齐次
+    # Neumann（公式与边界分类见 CPU 版同名函数，分类规则共用 `boundary_diffusion_targets`）
+    h_face = penalty_length(cp, ff)[:, None]
+    masks = (wall_dirichlet_zero_face, wall_dirichlet_value_face, has_wall_dirichlet_value)
+    jumps = []
+    for frame, adj_row in (("owner", ff.owner_adj_row_exact), ("neighbor", ff.neighbor_adj_row_exact)):
+        normal = _unit_normals(cp, adj_row)
+        g_self, g_other = _extrapolate_scalar_pair_gpu(cp, ff, gamma_field, frame)
+        p_self, p_other = _extrapolate_scalar_pair_gpu(cp, ff, scalar_field, frame)
+        gn_self = 0.0
+        gn_other = 0.0
+        for d in range(3):
+            a, b = _extrapolate_scalar_pair_gpu(cp, ff, cp.ascontiguousarray(grad_phi[..., d]), frame)
+            gn_self = gn_self + a * normal[..., d]
+            gn_other = gn_other + b * normal[..., d]
+        eta = c_ip * 0.5 * (g_self + g_other) / h_face
+        is_bnd, is_dir, target = boundary_diffusion_targets(cp, ff, frame, *masks)
+        j_int = 0.5 * (g_other * gn_other - g_self * gn_self) - eta * (p_self - p_other)
+        j_bnd = cp.where(is_dir, -(c_ip * g_self / h_face) * (p_self - target), -g_self * gn_self)
+        jumps.append(cp.where(is_bnd, j_bnd, j_int))
+    return residual + _lift_side_jumps_gpu(cp, ff, jumps[0], jumps[1], +1.0, det_jacs, n_cells, n_sps)
 
 
 def compute_turbulence_transport_residual_gpu(
@@ -298,8 +278,10 @@ def compute_turbulence_transport_residual_gpu(
         wall_dirichlet_zero_face=wall_mask_k,
         open_boundary_face=open_mask, freestream_value=float(turb.k_inf),
     )
+    c_ip = resolve_viscous_ip_constant(int(solver.mesh.order))
     diff_k = compute_scalar_diffusion_residual_gpu(
         turb.k_field, gamma_k, solver.mesh_data, solver.ops_data, ff, n_cells, n_prism, n_sps,
+        c_ip=c_ip, wall_dirichlet_zero_face=wall_mask_k,
     )
     dk_dt_transport = (conv_k + diff_k) / cp.maximum(rho, 1e-10)
 
@@ -316,6 +298,7 @@ def compute_turbulence_transport_residual_gpu(
     )
     diff_w = compute_scalar_diffusion_residual_gpu(
         turb.omega_field, gamma_w, solver.mesh_data, solver.ops_data, ff, n_cells, n_prism, n_sps,
+        c_ip=c_ip, wall_dirichlet_value_face=omega_wall_value_face, has_wall_dirichlet_value=has_omega_wall,
     )
     domega_dt_transport = (conv_w + diff_w) / cp.maximum(rho, 1e-10)
 

@@ -12,15 +12,17 @@ ODE 源项弛豫，而是通过 FR 高阶离散真正参与空间输运。
 
 离散方法:
     - 对流项：FR 体积项（逆变标量通量散度）+ 界面上风通量校正
-    - 扩散项：FR 体积项（逆变扩散通量散度）+ BR1 界面平均通量校正
-    - 界面校正分配与 fr_residual_inviscid.py 使用相同的 g'/dist 映射
+    - 扩散项：FR 体积项（逆变扩散通量散度）+ IIPG 内罚界面项（罚项常数与
+      长度尺度与平均流粘性项同一处定义）
+    - 界面项两侧各在自己的通量点顺序里构造跳变量、按统一符号 DG 提升，
+      与平均流 kernel 的 neighbor-primary 分支同一结构（`face_frames.py`）
 
 符号约定:
     残差 = 对流残差 + 扩散残差，返回值直接作为 dphi/dt 被调用方相加
     （fr_solver/turbulence.py::update_fields: k += dt*(Sk + transport_k)），
     与平均流残差的 RHS 约定一致（step.py: dU/dt = inv_res + visc_res）:
     - 对流残差 = -div(rho*U*phi)/det(J)（含界面上风校正）
-    - 扩散残差 = +div(Gamma*grad(phi))/det(J)（含 BR1 界面校正）——
+    - 扩散残差 = +div(Gamma*grad(phi))/det(J)（含 IIPG 内罚界面项）——
       与 viscous_flux.py 的"粘性项是 +div(G)"完全同一约定。此前这里误写为
       -div(Gamma*grad(phi))（反扩散），指数放大 2Δx 棋盘模态，把 k/omega 场
       两极分化到正性限制器的上下界（真实复现：cube_demo 全新计算 100 步内
@@ -30,7 +32,8 @@ ODE 源项弛豫，而是通过 FR 高阶离散真正参与空间输运。
 
 ## 文件分工（2026-09-24 拆包，原 1476 行）
 
-    faces.py        标量场的面外插与面校正分配（对流/扩散共用）
+    face_frames.py  两侧坐标系的面外插、质量通量与 DG 提升（numba kernel）
+    faces.py        上面几个 kernel 的调用层与共享对流几何（对流/扩散共用）
     convection.py   对流残差（含去混叠体积项）与 `AFCFD_TURB_OVERINT` 解析
     diffusion.py    扩散残差（含去混叠体积项）
     omega_wall.py   omega 壁面 Dirichlet 掩码、解析目标值、每步松弛
@@ -44,9 +47,9 @@ ODE 源项弛豫，而是通过 FR 高阶离散真正参与空间输运。
 
 from .faces import (  # noqa: F401
     ScalarConvectionGeometry,
-    _distribute_correction_to_cells,
-    _extrapolate_owner_only_to_faces,
     _extrapolate_scalar_to_faces,
+    _extrapolate_scalar_to_faces_neighbor_frame,
+    _lift_side_jumps,
     precompute_scalar_convection_geometry,
 )
 from .convection import (  # noqa: F401

@@ -131,7 +131,7 @@ class TestTurbulenceResidual:
 
 
 def test_nk_sst_channel_converges_coupled():
-    """冲击启动 140 步：平均流与湍流残差都降多个量级，k/omega 不贴任何下限。
+    """冲击启动 200 步：平均流与湍流残差都降多个量级，k/omega 不贴任何下限、不触发松弛。
 
     修复前（同一算例）：平均流降 5 个量级之后湍流残差停在 1.3e4、每步
     Newton 被拒绝，核心区 omega 贴在 0.1*omega_inf 的下限上。
@@ -140,16 +140,27 @@ def test_nk_sst_channel_converges_coupled():
     约束（单步最多加倍，与 SU2 `MAX_UPDATE_SST` 同一量级）之后，湍流发展暂态
     （k 从来流值长到剪切层值）在本算例上实测从第 78 步推迟到第 96 步收尾，
     其后平均流每步降一个量级，与此前相同。
+
+    步数预算 140 -> 200（2026-09-26）：湍流标量输运的两处离散缺陷修掉之后
+    （`turbulence/transport/face_frames.py`：neighbor 侧用错通量点顺序、扩散在
+    neighbor 侧反扩散），全程逐单元松弛**一次都不触发**（此前第 60~100 步最多
+    75% 的单元被松弛），湍流发展暂态平滑单调地走完、第 ~160 步收尾，其后平均流
+    与湍流每步降一个量级（第 180 步 4.3e-6 / 1.9e-5）。暂态期平均流残差停在
+    50~70、SER 律把 CFL 保持在 130~200，步数由这段物理暂态决定。
+    omega 最小值 0.229 omega_inf 是壁面单元的目标值，0.1 omega_inf 的安全网在
+    收敛解上处处不激活——下面最后一条断言钉住这一点。
     """
     from autoflowcfd.core.time_integration import TimeIntegrationScheme
 
     s = _channel_solver(TimeIntegrationScheme.NEWTON_KRYLOV)
-    mean, turb = [], []
-    for _ in range(140):
+    mean, turb, limited = [], [], []
+    for _ in range(200):
         s.step(2.0e-7)
         mean.append(s._newton_last_info["res_norm"])
         turb.append(s._newton_turb_state["last_info"]["res_norm"])
+        limited.append(s._newton_turb_state["last_info"]["limited_fraction"])
     assert mean[-1] < 1e-6 * max(mean), (max(mean), mean[-1])
+    assert max(limited) == 0.0, f"湍流 Newton 步触发了逐单元松弛（最多 {100 * max(limited):.1f}% 单元）"
     assert turb[-1] < 1e-6 * max(turb), (max(turb), turb[-1])
     t = s.turb_model
     assert t.k_field.min() > 10.0 * 1e-3 * t.k_inf, "k 贴在正性下限上"

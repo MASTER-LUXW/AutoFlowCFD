@@ -1,21 +1,19 @@
 """AutoFlowCFD V2.0 - SST 湍流量 k/omega 的可容许区间（唯一定义）。
 
-两处消费者共用这一份（2026-09-25 收拢，此前 CPU `update.py` 与 GPU
-`gpu_turbulence_sst.py` 各写一份限制器）：
-
-* 正性限制器（`clip_to_bounds`）：显式路径每步、隐式路径 Newton 步之后把场
-  夹回区间；
-* 隐式 k-omega 的界约束（`fr_solver/turbulence/implicit.py`）：贴住界、且残差
-  仍要把它推出界的解点，方程换成"等于界值"——否则离散稳态在那些点上
-  无解，Newton 永远顶着界走不动。
+CPU `update.py` 与 GPU `gpu_turbulence_sst.py` 的正性限制器（`clip_to_bounds`）
+共用这一份（2026-09-25 收拢，此前各写一份）：显式路径每步、隐式路径 Newton
+步之后把场夹回区间。隐式 k-omega 在 Newton 步**内**不用这些界，而是按单步
+相对变化做逐单元松弛（`implicit/jfnk.py::positive_fields_row_limits`）——
+所以区间里的下界必须是纯粹的安全网、在物理稳态解上不被触及：一个高于
+物理解的下界会让离散稳态在那些点上无解，Newton 往下推、限制器往上夹
+（真实教训见 `ambient.py` 模块文档）。
 
 区间：
 
-* k：下界 `max(ABS_FLOOR, K_FLOOR_FRACTION * k_inf)`（来流下限，2026-09-11
-  引入，理由见 `update.py::apply_positivity_limiter`），上界 `k_max`；
-* omega：下界 `max(ABS_FLOOR, 逐点 realizability 下限 0.1*max(S, omega_inf))`
-  （`source.py` 在源项求值时刷新），上界 `omega_max`。下界优先于上界
-  （realizability 下限高于 omega_max 时取下限，与历来的限制器顺序一致）。
+* k：下界 `max(ABS_FLOOR, K_FLOOR_FRACTION * k_inf)`，上界 `k_max`；
+* omega：下界 `max(ABS_FLOOR, 0.1 S, 0.1 omega_inf)`（逐点，`source.py` 在
+  源项求值时刷新；两项各自的理由见那里），上界 `omega_max`。下界优先于上界（realizability 下限
+  高于 omega_max 时取下限，与历来的限制器顺序一致）。
 """
 
 #: 防止 0/负值进入 sqrt 与除法的绝对下限。

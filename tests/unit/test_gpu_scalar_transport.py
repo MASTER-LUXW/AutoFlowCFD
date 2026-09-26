@@ -15,6 +15,8 @@ scatter_add 方法）"的 monkeypatch，直接跑*生产函数本身*（不是�
 import types
 
 import numpy as np
+
+from autoflowcfd.core.fr_operators.flux_kernels import resolve_viscous_ip_constant
 import pytest
 
 from autoflowcfd.fr.operators import generate_fr_operators
@@ -194,6 +196,7 @@ class TestScalarResidualsMatchCpu:
         expected = _cpu_compute_scalar_diffusion_residual(scalar, gamma, mesh, ops)
         actual = gst.compute_scalar_diffusion_residual_gpu(
             scalar, gamma, mesh_data, ops_data, flat, n_cells, mesh.n_prism_cells, n_sps,
+            c_ip=resolve_viscous_ip_constant(int(mesh.order)),
         )
         np.testing.assert_allclose(actual, expected, rtol=1e-10, atol=1e-10)
 

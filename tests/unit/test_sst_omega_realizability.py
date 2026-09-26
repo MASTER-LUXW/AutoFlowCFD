@@ -1,25 +1,19 @@
-"""真实 bug 回归测试（2026-09-07）：SST 模型 omega realizability 下限
-（`_omega_realizability_min`）此前只依赖 `0.1*max(S_mag)`，P0 阶段
-`grad_vel`/`S_mag` 恒为零（P0 是分片常数场，多项式导数恒为零，见
-`fr_solver/turbulence.py` 模块文档"为什么P0阶段摩擦阻力算不出来"一节
-同一个事实），这条本该防止 omega 衰减过度的 realizability 下限在整个
-P0 阶段因此完全失效（恒为 0），一旦某个 SP 的显式积分把 omega 打到
-`apply_positivity_limiter` 的裸正性下限 1e-12（只防负值，不是物理意义
-上的下限），P0 阶段没有任何机制能让它恢复——是 cube_demo 791,492 单元
-真实网格 Order Continuation P0->P1 升阶后 k_mean 持续增长这次排查的
-真正根因（用历史 checkpoint 数据 iter_001900~002300 直接定位到具体
-单元 omega 塌陷到 1e-12 而 k 未同步跌落，升阶后巨大的 k/omega 比值被
-nu_t 湍流粘性比上限钳到 ~1.47——不是零——形成异常畅通的扩散通道持续
-从周围抽取 k，最终把这些单元顶到 k_max 安全上限）。
+"""SST 的环境维持项与 omega 下限。
 
-修复：`_omega_realizability_min = max(0.1*max(S_mag), 0.1*omega_inf)`，
-S_mag 恒零时（P0）由来流 omega_inf 的保守比例兜底，不再塌陷到 0。
+历史：2026-09-07 为堵 P0 阶段 omega 塌陷（S 恒为零、无产生项，omega=1e-12 是
+稳定不动点，cube_demo 真实网格升阶后 k 撞 k_max 的根因）加了 `0.1*omega_inf`
+下限。2026-09-26 发现标准 SST 的来流衰减让外流算例的物理 omega 低于这条下限
+（plate_demo P1 隐式稳态上 10% 以上的单元贴住它、Newton 与限制器拉锯），于是
+加 Spalart–Rumsey 环境维持项（`core/turbulence/sst/ambient.py`）：来流是无剪切区
+的精确不动点，下限回到"只在非物理暂态里起作用"的安全网角色。
 """
 
 import numpy as np
 import pytest
 
 from autoflowcfd.core.turbulence.sst import SSTModelFR
+
+K_INF, OMEGA_INF = 0.1666, 2268.1  # 与 cube_demo / plate_demo 真实来流同量级
 
 
 def _build_source_term_inputs(n_cells, n_sps, grad_U_value=0.0):
@@ -35,95 +29,92 @@ def _build_source_term_inputs(n_cells, n_sps, grad_U_value=0.0):
     return Q, grad_U, d_wall, grad_k, grad_omega
 
 
-class TestOmegaRealizabilityMinAtP0:
-    """P0 阶段（grad_U 恒零，S_mag 恒零）：realizability 下限不应该
-    塌陷到 0，必须由 omega_inf 的保守比例兜底。"""
+def _sources(model, grad_U_value=0.0):
+    n_cells, n_sps = model.k_field.shape
+    Q, grad_U, d_wall, grad_k, grad_omega = _build_source_term_inputs(n_cells, n_sps, grad_U_value)
+    return model.compute_source_terms(Q, grad_U, d_wall, mu=1.8e-5, grad_k=grad_k, grad_omega=grad_omega)
 
-    def test_realizability_min_nonzero_when_strain_rate_is_zero(self):
-        n_cells, n_sps = 2, 1
-        omega_inf = 2268.1  # 与 cube_demo 真实来流条件同量级
-        model = SSTModelFR(n_cells, n_sps, k_inf=0.1666, omega_inf=omega_inf)
-        Q, grad_U, d_wall, grad_k, grad_omega = _build_source_term_inputs(
-            n_cells, n_sps, grad_U_value=0.0,
-        )
 
-        model.compute_source_terms(Q, grad_U, d_wall, mu=1.8e-5,
-                                    grad_k=grad_k, grad_omega=grad_omega)
+class TestAmbientSustainingTerms:
+    def test_freestream_is_exact_equilibrium(self):
+        """无剪切来流上 (k_inf, omega_inf) 的源项恰为零——标准 SST 在这里是
+        `-beta* k omega` / `-beta omega^2` 的纯衰减。"""
+        model = SSTModelFR(3, 2, k_inf=K_INF, omega_inf=OMEGA_INF)
+        model.k_field[:] = K_INF
+        model.omega_field[:] = OMEGA_INF
+        Sk, Sw = _sources(model)
+        rho = 1.225
+        # 与单项量级（D_k ~ rho beta* k omega、D_omega ~ rho beta omega^2）相比为舍入级
+        assert np.max(np.abs(Sk)) <= 1e-12 * rho * model.beta_star * K_INF * OMEGA_INF
+        assert np.max(np.abs(Sw)) <= 1e-12 * rho * model.beta2 * OMEGA_INF ** 2
 
-        # 修复前这里恒为 0（0.1*max(S_mag)=0.1*0=0）——真实 bug 的直接
-        # 数值证据。
-        # 2026-09-15 起下限是**逐点**数组（见 sst.py 该处第二次 bug 修复），
-        # 但 P0 下 S_mag 恒为钳位值 1e-10，0.1*S_mag=1e-11 远小于
-        # 0.1*omega_inf，所以每一点都恰好等于 0.1*omega_inf——与修复前的
-        # 标量取值逐位相同，这正是那次改动的安全保证。
-        rmin = np.asarray(model._omega_realizability_min)
-        assert rmin.shape == (n_cells, n_sps)
-        np.testing.assert_allclose(rmin, 0.1 * omega_inf, rtol=1e-12)
-        assert np.all(rmin > 0)
+    def test_freestream_is_exact_equilibrium_under_des(self):
+        """DES 分支（D_k = rho k^1.5 / l_eff）下同一个不动点同样精确成立。"""
+        model = SSTModelFR(2, 1, k_inf=K_INF, omega_inf=OMEGA_INF)
+        model.k_field[:] = K_INF
+        model.omega_field[:] = OMEGA_INF
+        model.des_length_scale = np.full((2, 1), 0.02)
+        Sk, _ = _sources(model)
+        assert np.max(np.abs(Sk)) <= 1e-12 * 1.225 * K_INF ** 1.5 / 0.02
 
-    def test_positivity_limiter_recovers_collapsed_omega_at_p0(self):
-        """真实复现场景：某个 SP 的 omega 被(模拟的)显式积分打到裸正性
-        下限附近（1e-12 量级），P0 阶段（S_mag=0）调用
-        apply_positivity_limiter 后必须被 omega_inf 兜底的 realizability
-        下限拉回物理合理范围，而不是继续停留在 1e-12。"""
-        n_cells, n_sps = 2, 1
-        omega_inf = 2268.1
-        model = SSTModelFR(n_cells, n_sps, k_inf=0.1666, omega_inf=omega_inf)
-        Q, grad_U, d_wall, grad_k, grad_omega = _build_source_term_inputs(
-            n_cells, n_sps, grad_U_value=0.0,
-        )
-        model.compute_source_terms(Q, grad_U, d_wall, mu=1.8e-5,
-                                    grad_k=grad_k, grad_omega=grad_omega)
+    def test_decay_below_ambient_is_restored(self):
+        """k、omega 低于环境值时源项为正（向环境值回复），高于时为负。"""
+        model = SSTModelFR(2, 1, k_inf=K_INF, omega_inf=OMEGA_INF)
+        model.k_field[:] = [[0.1 * K_INF], [10.0 * K_INF]]
+        model.omega_field[:] = [[0.1 * OMEGA_INF], [10.0 * OMEGA_INF]]
+        Sk, Sw = _sources(model)
+        assert Sk[0, 0] > 0 and Sw[0, 0] > 0
+        assert Sk[1, 0] < 0 and Sw[1, 0] < 0
 
-        # 模拟真实复现：某个单元的 k 保持正常、omega 塌陷到裸正性下限附近
-        # （真实历史数据：cell=81600 在 iter~2000 时 k=0.0514, omega=1e-12）。
-        model.k_field[0, 0] = 0.0514
-        model.omega_field[0, 0] = 1e-12
-        model.k_field[1, 0] = 0.1666  # 另一个单元保持正常（对照组）
-        model.omega_field[1, 0] = omega_inf
+    def test_collapsed_omega_is_not_a_fixed_point_at_p0(self):
+        """P0（S=0、无产生项）下 omega=1e-12 不再是不动点：源项约为
+        `rho beta omega_inf^2 > 0`，把它拉回来（2026-09-07 那次撞 k_max 的起点）。"""
+        model = SSTModelFR(1, 1, k_inf=K_INF, omega_inf=OMEGA_INF)
+        model.k_field[:] = 0.0514
+        model.omega_field[:] = 1e-12
+        _, Sw = _sources(model)
+        assert Sw[0, 0] > 0.5 * 1.225 * model.beta2 * OMEGA_INF ** 2
 
-        model.apply_positivity_limiter()
 
-        # 塌陷单元必须被拉回到 realizability 下限（0.1*omega_inf），
-        # 不能继续停留在裸正性下限 1e-12——否则 k/omega 比值依然是
-        # 天文数字，nu_t 湍流粘性比钳制器依然会被触发。
-        assert model.omega_field[0, 0] == pytest.approx(0.1 * omega_inf)
-        assert model.omega_field[0, 0] > 1e-6  # 明确排除"还停留在裸正性下限附近"
-        # 正常单元不受影响。
-        assert model.omega_field[1, 0] == pytest.approx(omega_inf)
-
-    def test_p1_with_real_strain_rate_still_uses_larger_bound(self):
-        """S_mag 非零且其对应的下限比 0.1*omega_inf 更大时（典型 P1+
-        近壁高剪切场景），不应该被 omega_inf 这个新增下限"拉低"——两者
-        取更大值，不能是新增下限意外覆盖掉本该更严格的 S_mag 下限。
-
-        2026-09-15 起同时验证**局部性**：只有高应变的那一点下限被抬高，
-        其余点保持 0.1*omega_inf。修复前 `0.1*max(S_mag)` 是全域标量，
-        一个尖峰会把整场 omega 一起抬起来——真实网格上那正是发散的起点。
-        所以这里用 4 个单元而不是 1 个，否则局部性无从检验。
-        """
+class TestOmegaRealizabilityMin:
+    def test_floor_is_pointwise_max_of_strain_and_ambient(self):
+        """下限是逐点的 `max(0.1 S, 0.1 omega_inf)`，不被别处的应变尖峰抬高
+        （2026-09-15 全域 max(S) 缺陷的回归）。"""
         n_cells, n_sps = 4, 1
-        omega_inf = 100.0  # 故意设小，让 S_mag 下限更大
+        omega_inf = 100.0  # 故意设小，让强应变点的 0.1 S 更大
         model = SSTModelFR(n_cells, n_sps, k_inf=0.1, omega_inf=omega_inf)
-        # grad_U 对角项非零 -> S_mag 非零且较大
-        Q, grad_U, d_wall, grad_k, grad_omega = _build_source_term_inputs(
-            n_cells, n_sps, grad_U_value=0.0,
-        )
-        grad_U[0, 0, 0, 0] = 1e5  # du/dx 很大 -> S_mag 很大
-
-        model.compute_source_terms(Q, grad_U, d_wall, mu=1.8e-5,
-                                    grad_k=grad_k, grad_omega=grad_omega)
-
+        Q, grad_U, d_wall, grad_k, grad_omega = _build_source_term_inputs(n_cells, n_sps)
+        grad_U[0, 0, 0, 0] = 1e5  # 只有这一点有强应变
+        model.compute_source_terms(Q, grad_U, d_wall, mu=1.8e-5, grad_k=grad_k, grad_omega=grad_omega)
         rmin = np.asarray(model._omega_realizability_min)
-        # 高应变的那一点下限被抬高
+        S = np.asarray(model.compute_strain_rate_magnitude(grad_U))
+        np.testing.assert_allclose(rmin, np.maximum(0.1 * S, 0.1 * omega_inf), rtol=1e-14)
         assert rmin[0, 0] > 0.1 * omega_inf
-        # **其余点不受影响**——这是 2026-09-15 修复的核心：下限是逐点的
-        # realizability 约束，不是"全场耦合到单个最差点"。修复前
-        # `0.1*max(S_mag)` 是标量，这里每一个点都会被抬到同一个值。
-        assert n_cells * n_sps > 1, "本判据需要至少两个点才有意义"
         others = np.ones(rmin.shape, dtype=bool)
         others[0, 0] = False
-        np.testing.assert_allclose(rmin[others], 0.1 * omega_inf, rtol=1e-12)
+        np.testing.assert_allclose(rmin[others], 0.1 * omega_inf, rtol=1e-14)
+
+    def test_ambient_equilibrium_is_strictly_above_floor(self):
+        """安全网的前提：来流不动点 (k_inf, omega_inf) 严格高于下限，限制器在
+        那里不激活。"""
+        model = SSTModelFR(2, 1, k_inf=K_INF, omega_inf=OMEGA_INF)
+        model.k_field[:] = K_INF
+        model.omega_field[:] = OMEGA_INF
+        _sources(model)
+        before = model.omega_field.copy()
+        model.apply_positivity_limiter()
+        np.testing.assert_array_equal(model.omega_field, before)
+        assert np.all(before > 5.0 * np.asarray(model._omega_realizability_min))
+
+    def test_positivity_limiter_recovers_collapsed_omega_at_p0(self):
+        """P0（S=0）下被打到 1e-12 的 omega 由限制器拉回 0.1 omega_inf。"""
+        model = SSTModelFR(2, 1, k_inf=K_INF, omega_inf=OMEGA_INF)
+        model.k_field[:] = [[0.0514], [K_INF]]
+        model.omega_field[:] = [[1e-12], [OMEGA_INF]]
+        _sources(model)
+        model.apply_positivity_limiter()
+        assert model.omega_field[0, 0] == pytest.approx(0.1 * OMEGA_INF)
+        assert model.omega_field[1, 0] == pytest.approx(OMEGA_INF)
 
 
 class TestKFloorAtP0:

@@ -1,8 +1,8 @@
 """AutoFlowCFD V2.0 - 湍流标量的**扩散**残差（含去混叠体积项）。
 
-从 `core/turbulence/transport.py` 拆出（2026-09-24）。纯搬家，逻辑未改。
+从 `core/turbulence/transport.py` 拆出（2026-09-24）；界面项 2026-09-26 改为 IIPG 内罚、两侧各自坐标系。
 
-残差约定：`+div(Gamma*grad(phi))/det(J)`（含 BR1 界面校正），与
+残差约定：`+div(Gamma*grad(phi))/det(J)`（含 IIPG 内罚界面项），与
 `viscous_flux.py` 的"粘性项是 +div(G)"完全同一约定 —— 这个符号曾经写错成
 反扩散、把 k/omega 场两极分化到正性限制器的上下界，见包 `__init__.py`
 "符号约定"一节记录的那次修复。
@@ -24,9 +24,14 @@ from autoflowcfd.core.turbulence.transport_kernel import (
     scalar_volume_divergence_kernel,
 )
 
+from autoflowcfd.core.fr_operators.flux_kernels import resolve_viscous_ip_constant
+
+from .face_frames import diffusion_face_jumps_kernel
 from .faces import (
-    _distribute_correction_to_cells,
-    _extrapolate_scalar_to_faces,
+    _lift_side_jumps,
+    boundary_diffusion_targets,
+    penalty_length,
+    unit_normals,
 )
 from .convection import (
     _TURB_OVERINT_CHUNK_CELLS,
@@ -111,66 +116,43 @@ def compute_scalar_diffusion_residual(
     has_wall_dirichlet_value: np.ndarray = None,
     flat_face_override=None,
 ) -> np.ndarray:
-    """计算标量扩散 FR 残差（体积项 + BR1 界面校正），返回值为 dphi/dt。
+    """标量扩散 FR 残差 `+div(Gamma*grad(phi))/det(J)`（体积项 + IIPG 内罚界面项），
+    返回 `d(rho*phi)/dt` 的扩散部分（调用方再除以 rho）。
 
-    扩散方程: d(rho*phi)/dt = div(Gamma * grad(phi))
+    ## 符号
 
-    符号约定（2026-08-25 修复）：本函数返回值被调用方直接作为 dphi/dt
-    相加（见模块文档"符号约定"），与平均流粘性残差 viscous_flux.py 的
-    "粘性项是 +div(G)"同一约定——物理扩散使峰值摊平、谷值抬升，
-    dphi/dt = +div(Gamma*grad(phi))/det(J)。此前误写成 -div(...)（反扩散），
-    指数放大棋盘模态导致 k/omega 场双峰触限、求解停滞（见模块文档）。
-    界面校正对应地用 `residual - interface_correction`：分配 kernel 对 owner
-    侧是 -=（见 transport_kernel.py::distribute_corrections_to_cells_kernel），
-    因此这里减去它等于对 dphi/dt 施加 +lift(G_common - G_internal)——
-    与对流 `residual + interface_correction` 的表面差异全部来自体积项符号，
-    不是扩散物理要求相反符号（此前注释"扩散是反梯度通量，校正应减小残差"
-    的物理表述有误，一并更正）。
+    `dphi/dt = +div(Gamma*grad(phi))`（与平均流粘性残差同一约定；曾误写成
+    `-div(...)` 反扩散，指数放大棋盘模态）。界面项按 `face_frames.py` 的统一
+    约定以 `sign=+1` 提升。**2026-09-26**：此前界面跳变量在 owner 顺序里算好
+    后按"owner -= / neighbor +="分配，而扩散跳变量两侧对称，neighbor 侧因此是
+    **反扩散**，且用错了通量点顺序——均匀 Gamma 下显式推进 100 步扰动放大 1e9
+    倍；修正后扰动单调衰减。
+
+    ## 边界条件（2026-09-26）
+
+    此前真边界面上 ghost 取零梯度、扩散跳变量为零，等于边界通量取单元内梯度的
+    单侧值——**没有施加任何边界条件**：无滑移壁上质量通量为零、对流上风 ghost
+    不起作用，k=0 实际上无处施加；其余边界也不是零扩散通量。纯 Neumann 小网格上
+    这表现为算子零特征值成了 3 阶 Jordan 块（`z^2/2` 一类场的拉普拉斯是常数、
+    边界通量却原样流出）。现在：
+
+    * 壁面（`wall_dirichlet_zero_face` 为 k=0、`has_wall_dirichlet_value` 为 omega
+      解析值）：内罚 Dirichlet `G*.n = G_self.n - eta (phi_self - g)`；
+    * 其余边界（对称、出口、远场、入口）：齐次 Neumann `G*.n = 0`（来流值由对流
+      上风 ghost 给出，扩散通量在这些边界上不需要另一条 Dirichlet 条件）。
+
+    罚项与内部面同一个常数与长度尺度（边界面 `h = V_owner / A_face`）。
+    2026-09-05 曾加过一次显式壁面罚项（系数用 `C/d1`，d1 为壁面到第一个解点的
+    距离，比 `V/A` 小一半以上），显式推进 20 步内全域 omega_mean 2.8e4 -> 5.4e11；
+    隐式路径的 omega 壁面单元已是强约束，显式路径的时间步含粘性稳定性限制（与
+    平均流内罚项同一刚性量级）。
 
     Args:
         scalar_field: (n_cells, n_sps) 标量场
-        gamma_field: (n_cells, n_sps) 有效扩散系数 Gamma
-        mesh: HighOrderMesh
-        ops: FROperators
-        wall_dirichlet_zero_face: (n_faces,) bool，可选。保留参数以兼容调用方：
-            2026-08-25 校正改用梯度差形式后，WALL Dirichlet-zero 的奇镜像
-            ghost（ghost=-owner，见 extrapolate_scalar_to_faces_kernel 文档）
-            对梯度场是对称的（奇函数的导数是偶函数），边界面上梯度跳跃自然为
-            零，不需要单独处理；此前用状态跳跃校正时这个掩码决定 phi 的 ghost
-            取值，校正改梯度差后不再有数值作用，留作后续补壁面扩散通量的接口。
-        wall_dirichlet_value_face, has_wall_dirichlet_value: 同理保留以兼容
-            调用方（omega 壁面解析式），出于与上面 wall_dirichlet_zero_face
-            完全相同的理由（本函数不再外插 scalar_field 自身，只外插
-            gamma_field/grad_phi），当前同样对本函数的数值结果没有影响——
-            壁面 Dirichlet 值目前只通过 `compute_scalar_convection_residual`
-            的上风 ghost 生效，diffusion 侧的解析壁面通量是更大的独立工作
-            （与 k=0 情形是同一个已有的架构限制，不是本次新引入的差异）。
-
-            2026-09-05 曾尝试补上这里的 SIPG（对称内罚 Galerkin）风格
-            Dirichlet 罚通量（`penalty = gamma_face*(C_pen/d1)*(target-
-            phi_owner)`，显式加进 flux_jump_phys），真实网格验证（从
-            cube_demo 791,492 单元真实 checkpoint 续算 20 步）**决定性
-            证伪**：C_pen/d1 这个有效"弹簧系数"在细网格近壁单元上
-            （y+~1 设计意味着 d1 可以小到 1e-5~1e-4 量级）过大，用和
-            其余残差项相同的显式时间积分（没有做成 point-implicit，
-            对比 sst.py::update_fields 里 destruction 项那样的处理）
-            必然刚性超调——20 步内把全域 omega_mean 从 2.8e4 打到
-            5.4e11（远超 1e6 的安全上限，且是全域均值，不是局部
-            异常），k_mean 被连带压垮到 0.16，是真实的数值失稳而不是
-            "改善"。已完整撤销（Git 历史可查这次尝试+撤销的完整过程），
-            扩散侧解析壁面通量这个架构缺口依然存在，如需真正补上，
-            必须先把罚项做成 point-implicit（或大幅限制 dt/加严格的
-            CFL 缩放），不能像这次一样直接显式代入——留给后续需要
-            专门处理数值刚性的独立工作，不要重复这次已经证伪的显式
-            实现方式。当前生产代码依赖 `enforce_omega_wall_relaxation`
-            （事后松弛，已用真实 900+ 步续算验证是稳定的）作为这个
-            架构缺口的安全缓解措施。
-
-        flat_face_override: 见 `compute_scalar_convection_residual` 同名
-            参数文档，分布式路径复用同一个约定。
-
-    Returns:
-        residual: (n_cells, n_sps) 扩散残差
+        gamma_field: (n_cells, n_sps) 有效扩散系数 Gamma（动力量纲）
+        wall_dirichlet_zero_face, wall_dirichlet_value_face, has_wall_dirichlet_value:
+            壁面 Dirichlet 掩码与目标值，与对流残差同一组参数（见上文"边界条件"）。
+        flat_face_override: 见 `compute_scalar_convection_residual` 同名参数。
     """
     n_cells = mesh.n_cells
     n_sps = mesh.n_sps_per_cell
@@ -229,63 +211,39 @@ def compute_scalar_diffusion_residual(
     del div_G
 
     # === 界面项（BR1 平均通量校正）===
+    # === 界面项：IIPG + 内罚项，两侧各自坐标系 ===
+    # 与平均流粘性 kernel 同一个格式（`flux_kernels/viscous.py::viscous_ip_penalty_tilde`
+    # 文档"为什么内部面也必须加"）：`grad_phi` 是纯单元内局部梯度（没有 BR1 的
+    # 提升项），界面耦合若只有"通量取两侧平均"就不控制跨面跳跃——不满足强制性，
+    # P0 下内部面扩散恒为零。罚项常数与长度尺度取同一处定义：
+    #     G*.n = {G}.n - eta [[phi]],  eta = c_ip * {Gamma} / h_face（见 `faces.penalty_length`）
+    #     J_side = (G* - G_side).n_side = 1/2 (G_other - G_side).n_side - eta_side (phi_side - phi_other)
+    # 边界点（真边界面、混合拆分面的边界半区）：壁面为内罚 Dirichlet
+    # `G*.n = G_self.n - eta (phi_self - g)`，其余为齐次 Neumann `G*.n = 0`，见本函数
+    # 文档"边界条件"。
     flat = flat_face_override if flat_face_override is not None else get_flat_face_geometry(mesh, ops)
-    n_fp = flat.n_fp
+    c_ip = resolve_viscous_ip_constant(int(mesh.order))
+    h_face = np.ascontiguousarray(penalty_length(np, flat), dtype=np.float64)
+    masks = (wall_dirichlet_zero_face, wall_dirichlet_value_face, has_wall_dirichlet_value)
+    grad_c = np.ascontiguousarray(grad_phi)
+    phi_c = np.ascontiguousarray(scalar_field)
+    gamma_c = np.ascontiguousarray(gamma_field)
+    jumps = []
+    for frame, self_cell, self_code, src, adj_row in (
+            ("owner", flat.owner_cell, flat.owner_cube_face,
+             (flat.neighbor_src0_cell, flat.neighbor_src0_mat, flat.neighbor_src1_idx,
+              flat.neighbor_src1_cell, flat.neighbor_src1_mat), flat.owner_adj_row_exact),
+            ("neighbor", flat.neighbor_cell, flat.neighbor_cube_face,
+             (flat.owner_src0_cell, flat.owner_src0_mat, flat.owner_src1_idx,
+              flat.owner_src1_cell, flat.owner_src1_mat), flat.neighbor_adj_row_exact)):
+        is_bnd, is_dir, target = boundary_diffusion_targets(np, flat, frame, *masks)
+        with np.errstate(over='ignore', invalid='ignore'):
+            jumps.append(diffusion_face_jumps_kernel(
+                phi_c, gamma_c, grad_c, self_cell, self_code, flat.boundary_extrap_native, *src,
+                np.ascontiguousarray(unit_normals(adj_row)), h_face, float(c_ip),
+                np.ascontiguousarray(is_bnd), np.ascontiguousarray(is_dir),
+                np.ascontiguousarray(target, dtype=np.float64)))
+    del grad_phi
 
-    # 外插 Gamma 和标量梯度到面通量点。标量场本身不再外插：2026-08-25 校正改
-    # 用梯度差形式后，phi 的界面取值（原 BR1 phi_avg）不再进入校正项；
-    # gamma_field 用 Neumann 默认（扩散系数与是否 Dirichlet 无关），
-    # grad_phi 逐分量双侧外插——BR1 公共通量需要平均梯度，两侧缺一不可。
-    gamma_owner_fp, gamma_neighbor_fp = _extrapolate_scalar_to_faces(gamma_field, flat, ops, mesh)
-
-    grad_owner_fp = np.zeros((flat.n_faces, n_fp, 3))
-    grad_neighbor_fp = np.zeros((flat.n_faces, n_fp, 3))
-    for d in range(3):
-        go, gn = _extrapolate_scalar_to_faces(grad_phi[:, :, d], flat, ops, mesh)
-        grad_owner_fp[:, :, d] = go
-        grad_neighbor_fp[:, :, d] = gn
-    del grad_phi  # 体积项+这里的逐分量外插都用完了，终于可以释放
-
-    # BR1 平均：gamma_face = 0.5*(gamma_o + gamma_n)
-    gamma_face = 0.5 * (gamma_owner_fp + gamma_neighbor_fp)
-    del gamma_owner_fp, gamma_neighbor_fp
-
-    # 通量差（真实修复，2026-08-25）：G_common - G_internal =
-    # gamma_face*(grad_avg - grad_owner) = gamma_face*0.5*(grad_n - grad_o)
-    # （phi_avg 的梯度即两侧外插梯度的平均）。此前实现因"grad_phi_neighbor
-    # 不能直接外推到面 FPs"而放弃梯度差、改用状态跳跃 gamma_face*0.5*(phi_n
-    # - phi_o) 冒充通量差——外插算子对任何标量场（包括梯度分量）本来就同样
-    # 适用，这个前提不成立；且状态跳跃缺一个 1/长度因子，量纲与通量密度差
-    # ~h 倍，与反扩散体积项叠加后成为 k/omega 场双峰触限失稳的放大器。
-    delta_grad = 0.5 * (grad_neighbor_fp - grad_owner_fp)  # (n_faces, n_fp, 3)
     with np.errstate(over='ignore', invalid='ignore'):
-        # 取法向分量：扩散通量差是矢量差的法向投影，坐标不变；简单三分量
-        # 求和会随坐标系旋转变号/变幅值，不是标量不变量。
-        flux_jump_phys = gamma_face * np.sum(delta_grad * flat.true_normal, axis=-1)
-    del grad_owner_fp, grad_neighbor_fp, delta_grad, gamma_face
-
-    # 面元幅值因子（真实修复，2026-08-25 代码审查）：上面用单位法向点积算出的是物理
-    # 通量密度差，而平均流无粘/粘性界面项送进同一套分配链路的跳越量都是协变
-    # 通量（物理通量 × |adj_row|，含面元幅值）：inviscid_kernel.py L197
-    # `F_common_n * adj_mag`（归一化只用于方向对齐检查，幅值随后乘回）、
-    # viscous_flux_kernel.py L182 `adjrow_o · G`。缺这个 ~O(h²) 因子会把校正放大
-    # ~1/h²（细网格 10²~10³ 倍），破坏体积项与界面项的量级平衡——实测：
-    # 修复前抛物线场内部残差均值被界面项主导（+143 界面 / -21 体积），
-    # 补 |adj_row| 后界面项回到与体积项同量级。true_normal 是单位向量，必须补回。
-    #
-    # native 四面体（路径C）真实 bug 修复（2026-08-30，理由同
-    # compute_scalar_convection_residual 同名注释）：不在这里统一预乘
-    # |adj_row|，改为传未加权的 flux_jump_phys，加权方式按面类型分派
-    # 下沉到 _distribute_correction_to_cells/kernel 内部。
-    raw_jump_fp = flux_jump_phys
-
-    # 分配回 SPs（kernel 对 owner 侧 -=、neighbor 侧 +=）
-    interface_correction = _distribute_correction_to_cells(raw_jump_fp, flat, ops, mesh)
-    # 扩散校正合成符号（见本函数文档符号约定）：kernel 返回的 owner 侧贡献是
-    # -lift(correction_fp)，这里 residual - interface_correction =
-    # +lift(G_common - G_internal)，即对 dphi/dt 施加标准 +lift 校正：
-    # 邻居值/梯度更高时 owner 获得正的扩散增量，方向与物理一致。
-    with np.errstate(over='ignore', invalid='ignore'):
-        residual = residual - interface_correction
-
-    return residual
+        return residual + _lift_side_jumps(jumps[0], jumps[1], +1.0, flat, mesh)

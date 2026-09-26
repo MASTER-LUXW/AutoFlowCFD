@@ -135,12 +135,12 @@ class TestColoringKernelEquivalence:
 
     def test_turbulence_transport_kernel_equivalence(self):
         """湍流输运 kernel：图着色版本存在。"""
-        from autoflowcfd.core.turbulence.transport_kernel import (
-            distribute_corrections_to_cells_kernel,
-            distribute_corrections_to_cells_kernel_colored,
+        from autoflowcfd.core.turbulence.transport.face_frames import (
+            lift_side_jumps_kernel,
+            lift_side_jumps_kernel_colored,
         )
-        assert callable(distribute_corrections_to_cells_kernel)
-        assert callable(distribute_corrections_to_cells_kernel_colored)
+        assert callable(lift_side_jumps_kernel)
+        assert callable(lift_side_jumps_kernel_colored)
 
 
 class TestFlatFaceColoringCache:

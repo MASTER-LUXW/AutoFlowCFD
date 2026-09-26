@@ -24,6 +24,7 @@ import numpy as np
 from typing import Optional, Tuple
 
 from autoflowcfd.core.gpu import gpu_available, get_cupy
+from autoflowcfd.core.turbulence.sst.ambient import ambient_sustaining_terms
 
 
 class GPUTurbulenceSST:
@@ -254,14 +255,9 @@ class GPUTurbulenceSST:
         Omega_mag = self.compute_vorticity_magnitude_gpu(grad_U)
         S_omega_prod = S_mag * Omega_mag
 
-        # 时间尺度 realization：动态 ω 下限。真实 bug 修复（2026-09-07，
-        # 与 CPU 版 sst.py 同一处同一个真实bug——完整推导见该文件文档）：
-        # P0 阶段 grad_vel/S_mag 恒为零，只用 S_mag 会让这个下限完全
-        # 失效，加一个与阶数无关的物理量纲下限（来流 omega_inf 的保守
-        # 比例），两者取更大值。
-        # 逐点 realizability 下限，与 CPU 端 core/turbulence/sst.py 同一处
-        # 2026-09-15 真实 bug 修复逐字对应（此前是全域标量 cp.max(S_mag)，
-        # 会把整个 omega 场耦合到单个最差点上，真实网格实测导致发散）。
+        # omega 下限 max(逐点 0.1 S, 0.1 omega_inf)，与 CPU 版
+        # `core/turbulence/sst/source.py` 同一处逐字对应（两项各自的理由、以及
+        # 它与环境维持项的关系见那里）。
         self._omega_realizability_min = cp.maximum(0.1 * S_mag, 0.1 * self.omega_inf)
 
         # 交叉扩散项
@@ -318,6 +314,11 @@ class GPUTurbulenceSST:
         CD_omega = 2.0 * rho * (1.0 - F1) * self.sigma_w2 / omega_safe * grad_dot
 
         S_omega = P_omega - D_omega + CD_omega
+
+        # 环境维持项（SST-sust），与 CPU 版同一份定义（`sst/ambient.py`）
+        Sk_amb, S_omega_amb = ambient_sustaining_terms(self, rho, beta, cp)
+        Sk = Sk + Sk_amb
+        S_omega = S_omega + S_omega_amb
 
         # 最终 isfinite 归零（与 CPU 版 sst.py:402-403 逐字对应，V2.0
         # 专家组盲审发现 GPU 版此前缺这一步）：F1/F2 的 overflow 保护

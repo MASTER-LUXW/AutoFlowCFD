@@ -1,6 +1,6 @@
 """Unit tests for core/turbulence/transport.py's WALL k=0 Dirichlet fix.
 
-`extrapolate_scalar_to_faces_kernel` previously always used a Neumann
+`extrapolate_scalar_pair_kernel` (owner frame; formerly `extrapolate_scalar_to_faces_kernel`) previously always used a Neumann
 (ghost=owner) default at every boundary face, including WALL, for k and
 omega alike - a known, documented approximation (see the kernel's own
 docstring history). k is exactly zero at a no-slip wall (a standard SST/
@@ -21,7 +21,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from autoflowcfd.core.turbulence.transport_kernel import extrapolate_scalar_to_faces_kernel
+from autoflowcfd.core.turbulence.transport.face_frames import extrapolate_scalar_pair_kernel
 from autoflowcfd.core.turbulence.transport import _compute_wall_dirichlet_face_mask
 
 
@@ -57,15 +57,12 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
         wall_dirichlet_value_face = np.zeros((n_faces, n_fp), dtype=np.float64)
         owner_cube_face = np.full(n_faces, 6, dtype=np.int64)
 
-        phi_owner, phi_neighbor = extrapolate_scalar_to_faces_kernel(
-            scalar_sps,
+        phi_owner, phi_neighbor = extrapolate_scalar_pair_kernel(
+            scalar_sps, owner_cell, owner_cube_face, boundary_extrap_native,
             neighbor_src0_cell, neighbor_src0_mat,
             neighbor_src1_idx, neighbor_src1_cell, neighbor_src1_mat,
-            owner_cell, n_faces, n_fp, n_sps,
-            wall_dirichlet_zero_face,
+            True, wall_dirichlet_zero_face, has_wall_dirichlet_value, wall_dirichlet_value_face,
             mixed_nb_partner, mixed_nb_mask,
-            has_wall_dirichlet_value, wall_dirichlet_value_face,
-            owner_cube_face, boundary_extrap_native,
         )
 
         np.testing.assert_allclose(phi_owner, [[5.0], [5.0]])
@@ -95,15 +92,12 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
         wall_dirichlet_value_face = np.zeros((n_faces, n_fp), dtype=np.float64)
         owner_cube_face = np.full(n_faces, 6, dtype=np.int64)
 
-        _, phi_neighbor = extrapolate_scalar_to_faces_kernel(
-            scalar_sps,
+        _, phi_neighbor = extrapolate_scalar_pair_kernel(
+            scalar_sps, owner_cell, owner_cube_face, boundary_extrap_native,
             neighbor_src0_cell, neighbor_src0_mat,
             neighbor_src1_idx, neighbor_src1_cell, neighbor_src1_mat,
-            owner_cell, n_faces, n_fp, n_sps,
-            wall_dirichlet_zero_face,
+            True, wall_dirichlet_zero_face, has_wall_dirichlet_value, wall_dirichlet_value_face,
             mixed_nb_partner, mixed_nb_mask,
-            has_wall_dirichlet_value, wall_dirichlet_value_face,
-            owner_cube_face, boundary_extrap_native,
         )
         np.testing.assert_allclose(phi_neighbor, [[3.0]])
 
@@ -130,15 +124,12 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
         wall_dirichlet_value_face = np.array([[12.0]])
         owner_cube_face = np.full(n_faces, 6, dtype=np.int64)
 
-        phi_owner, phi_neighbor = extrapolate_scalar_to_faces_kernel(
-            scalar_sps,
+        phi_owner, phi_neighbor = extrapolate_scalar_pair_kernel(
+            scalar_sps, owner_cell, owner_cube_face, boundary_extrap_native,
             neighbor_src0_cell, neighbor_src0_mat,
             neighbor_src1_idx, neighbor_src1_cell, neighbor_src1_mat,
-            owner_cell, n_faces, n_fp, n_sps,
-            wall_dirichlet_zero_face,
+            True, wall_dirichlet_zero_face, has_wall_dirichlet_value, wall_dirichlet_value_face,
             mixed_nb_partner, mixed_nb_mask,
-            has_wall_dirichlet_value, wall_dirichlet_value_face,
-            owner_cube_face, boundary_extrap_native,
         )
 
         np.testing.assert_allclose(phi_owner, [[5.0]])

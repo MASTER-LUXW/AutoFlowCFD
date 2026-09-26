@@ -34,6 +34,8 @@
 """
 
 import numpy as np
+
+from autoflowcfd.core.fr_operators.flux_kernels import resolve_viscous_ip_constant
 import pytest
 
 from tests.unit._patch_pkg import patch_pkg_attr
@@ -190,6 +192,7 @@ class TestNativeScalarTransportMatchesCpu:
         expected = _cpu_diffusion(scalar, gamma, mesh, ops)
         actual = np.asarray(gst.compute_scalar_diffusion_residual_gpu(
             scalar, gamma, mesh_data, ops_data, flat, n_cells, mesh.n_prism_cells, n_sps,
+            c_ip=resolve_viscous_ip_constant(int(mesh.order)),
         ))
 
         max_diff = np.max(np.abs(actual - expected))

@@ -122,13 +122,15 @@ class _GPUDistributedTurbSourceMixin:
                 f"壁面距离，但 _init_wall_distance_distributed() 没有算出——不退化为估计值。")
 
         # 输运残差与壁面函数读取的最小鸭子类型（mesh 只需要 n_cells/
-        # n_sps_per_cell/n_prism_cells；`dict.get(key, default)` 的默认值表达式
-        # 会被无条件求值，所以 n_prism_cells 必须给）
+        # n_sps_per_cell/n_prism_cells/order；`dict.get(key, default)` 的默认值表达式
+        # 会被无条件求值，所以 n_prism_cells 必须给；order 是扩散内罚常数的阶数，
+        # 与平均流粘性残差 `compute_viscous_residual_gpu` 取同一处 `self.mesh.order`）
         transport = types.SimpleNamespace(
             turb_model_gpu=view,
             mesh=types.SimpleNamespace(
                 n_cells=n_compact, n_sps_per_cell=n_sps,
-                n_prism_cells=self.dist_flat_face.base_flat.n_prism),
+                n_prism_cells=self.dist_flat_face.base_flat.n_prism,
+                order=int(self.mesh.order)),
             Q_gpu=Q_compact, U_gpu=U_compact, mu_molecular=self.mu_molecular,
             mesh_data=self.mesh_data, ops_data=self.ops_data,
             flat_face_gpu=self.flat_face_gpu, wall_distance_gpu=d_wall,

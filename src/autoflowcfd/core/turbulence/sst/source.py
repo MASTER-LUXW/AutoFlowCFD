@@ -1,4 +1,4 @@
-"""AutoFlowCFD V2.0 - k/omega 源项（产生、耗散、交叉扩散、realizability 下限）
+"""AutoFlowCFD V2.0 - k/omega 源项（产生、耗散、交叉扩散、环境维持项、realizability 下限）
 
 从 `src/autoflowcfd/core/turbulence/sst.py` 的 `SSTModelFR` 拆出（2026-09-24，项目「单文件不超
 500 行」规范）。mixin 是本仓库既有惯例（`_SolverGeometryMixin`、
@@ -11,9 +11,11 @@
 import numpy as np
 from typing import Tuple
 
+from .ambient import ambient_sustaining_terms
+
 
 class _SSTSourceMixin:
-    """k/omega 源项（产生、耗散、交叉扩散、realizability 下限）"""
+    """k/omega 源项（产生、耗散、交叉扩散、环境维持项、realizability 下限）"""
 
     def compute_source_terms(self, Q: np.ndarray, grad_U: np.ndarray,
                             d_wall: np.ndarray, mu: float,
@@ -60,75 +62,22 @@ class _SSTSourceMixin:
         Omega_mag = self.compute_vorticity_magnitude(grad_U)
         S_omega_prod = S_mag * Omega_mag  # Kato-Launder 有效应变率
 
-        # 时间尺度 realization：动态计算 ω 下限（供 apply_positivity_limiter 使用）。
-        # 约束 ω ≥ C * S，防止远场 ω 衰减到过小值导致 τ = 1/(β*ω) 过大。
-        # C=0.1 是保守值（Fluent 默认时间尺度限制等价于 C≈0.1-0.3）。
+        # omega 下限（供正性限制器使用）= max(逐点 0.1 S, 0.1 omega_inf)：
         #
-        # 真实 bug 修复（2026-09-07，cube_demo 791,492 单元真实网格
-        # Order Continuation P0->P1 升阶后长程续算 k_mean 持续增长排查
-        # 发现，是本次排查的真正根因——此前 grad_vel/omega 壁面松弛/
-        # resume 误重置/wall_distance 阶数切换污染 4 个真实bug均已修复
-        # 但问题依旧，逐一排除 P_k 上限失控、网格局部退化(ANSA 高质量
-        # 网格，真实交叉体积比 1.27~2.28，完全正常)后，用历史 checkpoint
-        # 数据（iter_001900~002300，早于本次排查所有事件、纯 P0 阶段）
-        # 直接定位到：cell=81600/81552/81546 等一小撮单元的 omega_field
-        # 在 P0 阶段极早期（iter~2000左右）就已经塌陷到 1e-12（`apply_
-        # positivity_limiter` 的裸正性下限——只防负值，不是物理意义上的
-        # 下限），k 未同步跌落，形成天文数字级的 k/omega 比值。
+        # * 逐点 `0.1 S`：时间尺度 realizability，防止剪切区 omega 过小导致
+        #   tau = 1/(beta* omega) 过大。必须逐点（2026-09-15 真实缺陷：曾用
+        #   全域 max(S)，整场 omega 被耦合到单个最差点上，79 万单元网格发散）；
+        # * `0.1 omega_inf`：暂态安全网（2026-09-07 引入）。P0 阶段 S 恒为零、
+        #   没有产生项，omega=1e-12 是稳定不动点（cube_demo 升阶后 k 撞 k_max
+        #   的根因）。（2026-09-26 一度以为 P1 暂态里还有把解点 omega 推向零的
+        #   模态需要它挡住——那是湍流输运两处离散缺陷造成的，修掉之后棱柱通道
+        #   上有无这一项逐位相同，见 `ambient.py`。）
         #
-        # 根因：**P0 阶段 grad_vel 恒为零（P0 是分片常数场，多项式导数
-        # 恒为零，见 fr_solver/turbulence.py 模块文档"为什么P0阶段摩擦
-        # 阻力算不出来"一节同一个事实）**，本行原公式 `0.1*max(S_mag)`
-        # 在 P0 阶段因此恒为 0——这个本该防止 ω 衰减过度的 realizability
-        # 下限在整个 P0 阶段是完全失效的空话，一旦某个 SP 的显式积分把
-        # ω 打到裸正性下限 1e-12，P0 阶段内没有任何机制能让它恢复（此时
-        # 产生项 P_omega~S*Ω=0、耗散项 D_omega=beta*rho*omega²≈0，是这套
-        # ODE 系统在 P0 阶段的一个稳定不动点，会原样冻结直到阶数真正
-        # 切换）。冻结在 ω≈1e-12 的这些单元升阶到 P1 后，S_mag 变为非零，
-        # 巨大的 k/omega 比值被 nu_t 湍流粘性比上限(TURBULENT_VISCOSITY_
-        # RATIO_MAX=1e5)钳到 ~1.47（不是零！），这个虽被钳制但依然很大
-        # 的 nu_t 撑起一条异常畅通的扩散通道（Gamma_k=mu+sigma_k*rho*
-        # nu_t），持续从周围真正有产生项的区域把 k 抽/扩散进来，最终把
-        # 这些单元（以及被扩散波及的邻居）顶到 k_max 安全上限——这正是
-        # 之前排查看到的"局部单元 k_max/nu_t_max 双双撞墙"现象的真正
-        # 成因，跟 wall_distance/omega 壁面边界条件精度都无关（这两者
-        # 已用真实数据决定性证伪：omega 实际值/Wilcox 目标值比值全程
-        # 稳定在 0.947，未衰减；30/100 步 A/B 对照两版 wall_distance
-        # 处理方式下 k_mean 轨迹几乎完全一致）。
-        #
-        # 修复：realizability 下限不能只依赖 S_mag（P0 下恒零、形同虚设），
-        # 加一个与阶数/S_mag 无关、恒定有效的物理量纲下限——来流 omega_inf
-        # 的一个保守比例（沿用同一个 C=0.1 系数，物理意义："本地湍流
-        # 时间尺度不应该比来流环境值大 10 倍以上"这个 realizability 的
-        # 精神在 S_mag 不可用时同样适用于来流尺度）。两者取更大值，S_mag
-        # 非零时（P1+）这条新增下限通常远小于 0.1*max(S_mag)、不改变
-        # 既有行为；S_mag 恒零时（P0）它是唯一起作用的下限，防止 ω 塌陷
-        # 到物理上毫无意义的 1e-12。
-        # **真实 bug 修复（2026-09-15）：这条下限此前用的是全域最大值
-        # `np.max(S_mag)`，是一个标量，被施加到每一个单元的 omega 上。**
-        # 那让"局部 realizability 约束"退化成"全场耦合到单个最差点"：
-        # 79 万单元 cube_demo 真实网格 250 步对照里，一旦模态滤波器不再
-        # 把 P1 内容清零（grad_vel 真正非零），max(S_mag) 由全场最差的
-        # 那一个点决定，整个 omega 场被抬到同一个值上 -> nu_t = rho*k/omega
-        # 全场被同比压低 -> 湍流扩散崩塌 -> 局部应变更大 -> 下限更高，
-        # 正反馈。实测 om_min 10 步内从 1.28e2 跳到 1.85e4（176 倍），
-        # 最终 om_min≈om_max≈1e6（整个场被钉在下限上）并发散
-        # （AFCFD_FILTER_MODE=off step 103、sensor step 157）。
-        #
-        # 它此前一直没有暴露，恰恰是因为 P0 阶段 grad_vel 恒为零（见下方
-        # 2026-09-05 那段）、而 P1/P2 阶段模态滤波器每个 RK stage 把非常数
-        # 模态清零（见 fr/modal_filter.py：order=1 保留秩 1/8，P1 实际是
-        # P0），两者都让 S_mag 恒等于钳位值 1e-10——也就是说这个 bug 被
-        # 另外两个缺陷共同掩盖了。
-        #
-        # Durbin 的 realizability / Wilcox 的时间尺度约束、以及本行注释
-        # 原本声称等价的 Fluent turbulence time scale limiter，**都是逐点
-        # 的**，没有任何一个是"取全域最大"。改为逐点后：
-        #   - P0 阶段 S_mag 恒为钳位值 1e-10 => 0.1*S_mag = 1e-11 远小于
-        #     0.1*omega_inf，逐点下限**逐位等于**此前的标量下限，P0 行为
-        #     完全不变（这是这次改动的安全保证，有对应回归测试）；
-        #   - P1+ 阶段每个单元按**自己的**应变率定下限，不再被别处的
-        #     尖峰绑架。
+        # 安全网的前提是它**低于物理稳态解**。标准 SST 下这一条不成立——来流
+        # 湍流沿流向衰减，外流算例下游的物理 omega 远低于 0.1 omega_inf，贴住
+        # 下限的单元里离散稳态无解（plate_demo P1 隐式稳态，数据见
+        # `ambient.py`）。环境维持项让来流不再衰减，物理 omega 在来流区不低于
+        # ~omega_inf、近壁远高于它，这一项于是只在非物理暂态里起作用。
         self._omega_realizability_min = np.maximum(0.1 * S_mag, 0.1 * self.omega_inf)
 
         # 交叉扩散项 CD_kw（F1 与 S_omega 的 CD_omega 项共用同一个量，
@@ -199,6 +148,11 @@ class _SSTSourceMixin:
 
         # ω 方程总源项
         S_omega = P_omega - D_omega + CD_omega
+
+        # 环境维持项（SST-sust）：来流 (k_inf, omega_inf) 是无剪切区的精确不动点
+        Sk_amb, S_omega_amb = ambient_sustaining_terms(self, rho, beta, np)
+        Sk = Sk + Sk_amb
+        S_omega = S_omega + S_omega_amb
 
         # 源项 NaN/Inf 隔离：退化网格上 grad_k·grad_omega 等可能为 inf，
         # 导致 inf-inf=NaN 传播。将非有限源项归零。
