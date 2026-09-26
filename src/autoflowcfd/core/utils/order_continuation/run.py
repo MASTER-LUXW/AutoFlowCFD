@@ -13,6 +13,7 @@ from autoflowcfd.core.time_integration.implicit.mean_flow_step import newton_mon
 from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
 
 from .p0_reset import _reset_state_to_p0
+from .policy import PhaseGate
 from .turbulence_reset import _reset_turbulence_if_resumed_field_exploded
 
 
@@ -264,6 +265,7 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
             # 规范要求"残差降 2 个数量级后提升阶数"，而非固定迭代预算
             # 记录本阶数初始残差，用于判断相对下降量
             initial_residual_this_order = None
+            phase_gate = PhaseGate()   # 湍流一起到位才升阶/判收敛，见 policy.py 模块文档
             min_iter_before_transition = 20  # 最少迭代次数，避免过早提升
 
             # resume 状态持久化修复（2026-08-23，真实 bug）：
@@ -424,7 +426,7 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
                 # 对 Mach 0.1~0.3 流动初始残差 ~1e8 需下降 12~14 个量级，永远不可达）。
                 drop_for_convergence = initial_residual_this_order / max(res, 1e-30)
                 required_drop = 1.0 / max(phase_tol, 1e-30)
-                if i >= 1 and drop_for_convergence >= required_drop:
+                if i >= 1 and phase_gate.reached(solver, drop_for_convergence, required_drop):
                     converged = True
                     print(f"[OK] P{target_p} converged at iter {i+1} "
                           f"(residual dropped {drop_for_convergence:.1e}x >= {required_drop:.1e}x)")
@@ -435,7 +437,8 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
                 if (target_p < original_order
                         and i >= min_iter_before_transition
                         and initial_residual_this_order > 0
-                        and initial_residual_this_order / max(res, 1e-30) >= residual_drop_threshold):
+                        and phase_gate.reached(solver, initial_residual_this_order / max(res, 1e-30),
+                                               residual_drop_threshold)):
                     print(f"[OK] P{target_p} residual dropped {initial_residual_this_order/res:.1f}x "
                           f"(>= {residual_drop_threshold:.0e}x), advancing to next order at iter {i+1}")
                     break

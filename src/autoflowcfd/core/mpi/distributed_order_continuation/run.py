@@ -13,6 +13,7 @@ from autoflowcfd.core.mpi import is_root
 from autoflowcfd.core.utils.order_continuation import (
     _reset_turbulence_if_resumed_field_exploded,
 )
+from autoflowcfd.core.utils.order_continuation.policy import PhaseGate
 
 
 def run_distributed_order_continuation(
@@ -112,6 +113,7 @@ def run_distributed_order_continuation(
         phase_tol = tol * (10 ** (original_order - target_p))
 
         initial_residual_this_order = None
+        phase_gate = PhaseGate()   # 湍流一起到位才升阶/判收敛，见 order_continuation/policy.py 模块文档
         min_iter_before_transition = 20
         converged = False
         _last_finite = None
@@ -153,7 +155,7 @@ def run_distributed_order_continuation(
 
             drop_for_convergence = initial_residual_this_order / max(res, 1e-30)
             required_drop = 1.0 / max(phase_tol, 1e-30)
-            if i >= 1 and drop_for_convergence >= required_drop:
+            if i >= 1 and phase_gate.reached(solver, drop_for_convergence, required_drop):
                 converged = True
                 if is_root():
                     print(f"[OK] P{target_p} converged at iter {i + 1} "
@@ -163,7 +165,8 @@ def run_distributed_order_continuation(
             if (target_p < original_order
                     and i >= min_iter_before_transition
                     and initial_residual_this_order > 0
-                    and initial_residual_this_order / max(res, 1e-30) >= residual_drop_threshold):
+                    and phase_gate.reached(solver, initial_residual_this_order / max(res, 1e-30),
+                                           residual_drop_threshold)):
                 if is_root():
                     print(f"[OK] P{target_p} residual dropped "
                           f"{initial_residual_this_order / res:.1f}x "
