@@ -27,12 +27,21 @@ P1 层流（17.9 万单元，预处理 NK，CFL 34，同一状态、同一 `rtol
 （plate_demo P1：5 色 x 6 x 5 = 150 次）。旧文档里"每单元 `n_sps*n_var`
 次残差求值、成本不可接受"的论证漏掉了着色，已同步更正。
 
-**近似之处（如实说明）**：BR1 粘性项的梯度提升让单元 `c` 的残差还依赖
-**距离 2** 的单元（邻居的梯度用到邻居的邻居）；距离 1 着色下，同色的
-距离 2 单元的扰动会以粘性耦合的量级混入 `J_cc` 的列。预处理子不需要
-精确——GMRES 对 `A` 本身仍是精确求解，预处理只影响迭代数——上面的实测
-就是在这个近似下得到的。距离 2 着色色数约是距离 1 的 3~4 倍，装配成本
-同比上升，不划算。
+**模板是距离 1**（2026-09-26 更正）：旧文档写过"BR1 梯度提升让残差依赖
+距离 2 的单元、同色距离 2 单元会混入 `J_cc`"。实际上梯度是纯单元内局部梯度
+（`fr_operators/gradients.py`，签名里没有面数据），残差只经本单元与面邻居，
+距离 1 着色下差分装配出的 `J_cc` 是精确的（稠密逐列差分 Jacobian 对照：面邻居
+之外的块全部为零）。
+
+## 解析装配（P>=1 的默认）
+
+差分装配要 `色数 x 真实解点数 x 5` 次整场残差求值，P2 起不可承受（plate_demo
+P2 450 次、单次 5.5 s）。P>=1 由各后端传入解析装配器
+（`fr_residual/jacobian`，逐点导数与参考算子的收缩，同一个矩阵、代价约十几次
+残差求值），它同时给出面邻居耦合块，内存放得下（`MAX_BYTES_ILU`）时预处理
+换成块 ILU（`block_ilu.py`，大 CFL 下 GMRES 迭代数约为块 Jacobi 的 0.4 倍）。
+P0 与解析装配不覆盖的离散（见 `fr_residual/jacobian/backend.py::unsupported_reason`）
+仍用差分装配。
 
 ## 复用与刷新
 
@@ -41,7 +50,7 @@ P1 层流（17.9 万单元，预处理 NK，CFL 34，同一状态、同一 `rtol
 
 * 已经复用了 `MAX_AGE` 个 Newton 步；或
 * 上一步的 GMRES 迭代数超过"刚装配完那一步"的 `2 倍 + 10`（线性化
-  已经明显过时）；或
+  已经明显过时；解析装配便宜得多，阈值收紧到 `1.5 倍 + 3`）；或
 * 上一步没有被接受（`theta == 0`）；或
 * **本步**的 GMRES 在上一条的迭代预算内没有达到容差（`stale_budget` /
   `refresh`，由 `jfnk.py` 当场调用）。此前只按上一步的迭代数决定下一步是否
@@ -77,10 +86,23 @@ MAX_AGE = 20
 REFRESH_FACTOR = 2.0
 REFRESH_SLACK = 10
 
+#: 解析装配（`fr_residual/jacobian`）的刷新判据更紧：装配只相当于十几次残差求值
+#: （差分装配是 色数 x 解点数 x 5 次），过时块多花的 GMRES 迭代更早就划不来。
+REFRESH_FACTOR_ANALYTIC = 1.5
+REFRESH_SLACK_ANALYTIC = 3
+
 #: 块 `J_cc` + 逆两份（float32）允许的总字节数。8 GiB：本项目开发机与常见
 #: 工作站上与求解器本身（P1 79 万单元状态约 0.2 GB/份 x 数十份工作数组）
 #: 共存的上限。
 MAX_BYTES = 8 * 2 ** 30
+
+#: 块 ILU（对角块 + 分解后的对角逆 + 面邻居耦合块，float32）允许的总字节数。
+#: 超过时解析装配只给对角块、用块 Jacobi。plate_demo（17.9 万单元）P1 约
+#: 1.8 GB、P2 约 11 GB（与求解器本身约 10 GB 共存于 31.5 GB 开发机）。
+MAX_BYTES_ILU = 12 * 2 ** 30
+
+#: 估计耦合块数用的每单元平均面邻居数（四面体 4、棱柱 5，内部单元为主）。
+_MEAN_FACE_NEIGHBORS = 4.2
 
 _SQRT_EPS = float(np.sqrt(np.finfo(np.float64).eps))
 
@@ -126,6 +148,17 @@ def estimate_block_bytes(n_prism: int, n_tet: int, n_real_prism: int,
     """`J_cc` + 逆两份（float32）的总字节数。"""
     bp, bt = n_real_prism * n_var, n_real_tet * n_var
     return 2 * 4 * (n_prism * bp * bp + n_tet * bt * bt)
+
+
+def estimate_ilu_bytes(n_prism: int, n_tet: int, n_real_prism: int,
+                       n_real_tet: int, n_var: int) -> int:
+    """块 ILU 的总字节数（对角块、对角逆、面邻居耦合块，float32）。"""
+    n = n_prism + n_tet
+    if n == 0:
+        return 0
+    mean_dof = (n_prism * n_real_prism + n_tet * n_real_tet) * n_var / n
+    coupling = int(_MEAN_FACE_NEIGHBORS * n * mean_dof * mean_dof * 4)
+    return estimate_block_bytes(n_prism, n_tet, n_real_prism, n_real_tet, n_var) + coupling
 
 
 class CellBlockJacobian:
@@ -198,6 +231,27 @@ class CellBlockJacobian:
                         if s < n_real:
                             blocks[slots, :, col] = dr[rows.ravel()].reshape(nc, n_real * n_var)
         self.n_residual_evals = n_eval
+
+
+    @classmethod
+    def from_blocks(cls, blocks_prism, blocks_tet, *, n_sps: int, n_var: int, cell_is_prism,
+                    n_real_prism: int, n_real_tet: int, xp=np):
+        """由外部装配好的块构造（解析装配，见 `fr_residual/jacobian`）；布局与差分装配相同。"""
+        obj = cls.__new__(cls)
+        cell_is_prism = np.asarray(cell_is_prism, dtype=bool)
+        obj.xp = xp
+        obj.n_sps, obj.n_var = int(n_sps), int(n_var)
+        obj.prism_cells = np.nonzero(cell_is_prism)[0]
+        obj.tet_cells = np.nonzero(~cell_is_prism)[0]
+        obj.n_real_prism, obj.n_real_tet = int(n_real_prism), int(n_real_tet)
+        for name, blocks, cells, n_real in (("blocks_prism", blocks_prism, obj.prism_cells, n_real_prism),
+                                            ("blocks_tet", blocks_tet, obj.tet_cells, n_real_tet)):
+            expect = (cells.size, n_real * n_var, n_real * n_var)
+            if tuple(blocks.shape) != expect:
+                raise ValueError(f"{name} 形状 {tuple(blocks.shape)} 与期望 {expect} 不符")
+            setattr(obj, name, xp.asarray(blocks, dtype=xp.float32))
+        obj.n_residual_evals = 0
+        return obj
 
 
 class CellBlockJacobiPreconditioner(PseudoTransientDiagonal):
@@ -303,14 +357,21 @@ class BlockJacobiCache:
 
     __slots__ = ("cell_is_prism", "colors", "n_sps", "n_real_prism", "n_real_tet",
                  "jac", "age", "baseline_iters", "last_iters", "last_accepted",
-                 "disabled_reason", "n_builds", "red")
+                 "disabled_reason", "n_builds", "red", "n_var", "assembler", "use_ilu", "coupling")
 
     def __init__(self, *, cell_is_prism, colors: np.ndarray, n_sps: int,
                  n_real_prism: int, n_real_tet: int, n_var: int,
                  red: LocalReductions = None):
         """`colors`：块装配用的单元着色（单机 `greedy_cell_coloring`；分布式是
-        全局一致着色里本 rank 那一段，保证同色单元跨 rank 也不相邻）。"""
+        全局一致着色里本 rank 那一段，保证同色单元跨 rank 也不相邻）。
+
+        `assembler`（每个 Newton 步由调用方设置，见 `begin_step`）：解析装配器
+        `(u0_flat, r0_flat) -> (blocks_prism, blocks_tet)`；为 None 时用着色差分装配。
+        """
         self.red = red if red is not None else LocalReductions()
+        self.n_var = int(n_var)
+        self.assembler = None
+        self.coupling = None
         self.cell_is_prism = np.asarray(cell_is_prism, dtype=bool)
         self.n_sps, self.n_real_prism, self.n_real_tet = n_sps, n_real_prism, n_real_tet
         self.jac: Optional[CellBlockJacobian] = None
@@ -322,7 +383,11 @@ class BlockJacobiCache:
         n_prism = int(self.cell_is_prism.sum())
         need = estimate_block_bytes(n_prism, self.cell_is_prism.size - n_prism,
                                     n_real_prism, n_real_tet, n_var)
+        # 块 ILU 要解析装配给出的面邻居耦合块；内存放得下才用（否则块 Jacobi）
+        self.use_ilu = estimate_ilu_bytes(n_prism, self.cell_is_prism.size - n_prism,
+                                          n_real_prism, n_real_tet, n_var) <= MAX_BYTES_ILU
         if need > MAX_BYTES:
+            self.use_ilu = False
             self.disabled_reason = (
                 f"单元块 Jacobi 需要 {need / 2 ** 30:.1f} GiB（上限 {MAX_BYTES / 2 ** 30:.0f} GiB），"
                 f"改用逐 SP 对角预处理——大 CFL 下 GMRES 迭代数会显著上升")
@@ -332,11 +397,16 @@ class BlockJacobiCache:
             self.disabled_reason = None
             self.colors = np.asarray(colors, dtype=np.int64)
 
+    def _refresh_threshold(self, baseline: int) -> int:
+        if self.assembler is not None:
+            return int(REFRESH_FACTOR_ANALYTIC * baseline + REFRESH_SLACK_ANALYTIC)
+        return int(REFRESH_FACTOR * baseline + REFRESH_SLACK)
+
     def _needs_rebuild(self) -> bool:
         if self.jac is None or self.age >= MAX_AGE or not self.last_accepted:
             return True
         if self.baseline_iters is not None and self.last_iters is not None:
-            return self.last_iters > REFRESH_FACTOR * self.baseline_iters + REFRESH_SLACK
+            return self.last_iters > self._refresh_threshold(self.baseline_iters)
         return False
 
     def stale_budget(self) -> Optional[int]:
@@ -347,7 +417,7 @@ class BlockJacobiCache:
             return None
         if self.baseline_iters is None:
             return None
-        return int(REFRESH_FACTOR * self.baseline_iters + REFRESH_SLACK)
+        return self._refresh_threshold(self.baseline_iters)
 
     def refresh(self, residual, u0_flat, r0_flat, scales) -> None:
         """当场按本步基态重装配（本步 GMRES 超出 `stale_budget` 时调用）。"""
@@ -367,22 +437,42 @@ class BlockJacobiCache:
         import time
 
         t0 = time.time()
-        self.jac = CellBlockJacobian(
-            residual, u0_flat, r0_flat, scales, n_sps=self.n_sps,
-            cell_is_prism=self.cell_is_prism, n_real_prism=self.n_real_prism,
-            n_real_tet=self.n_real_tet, colors=self.colors, red=self.red)
+        self.coupling = None
+        if self.assembler is not None:
+            self.assembler.want_coupling = self.use_ilu
+            out = self.assembler(u0_flat, r0_flat)
+            blocks_prism, blocks_tet = out[0], out[1]
+            if self.use_ilu:
+                from .block_ilu import BlockCouplingStructure
+                n_real = np.where(self.cell_is_prism, self.n_real_prism, self.n_real_tet)
+                self.coupling = BlockCouplingStructure(out[2], self.cell_is_prism.size, n_real)
+            self.jac = CellBlockJacobian.from_blocks(
+                blocks_prism, blocks_tet, n_sps=self.n_sps, n_var=self.n_var,
+                cell_is_prism=self.cell_is_prism, n_real_prism=self.n_real_prism,
+                n_real_tet=self.n_real_tet, xp=self.red.xp)
+        else:
+            self.jac = CellBlockJacobian(
+                residual, u0_flat, r0_flat, scales, n_sps=self.n_sps,
+                cell_is_prism=self.cell_is_prism, n_real_prism=self.n_real_prism,
+                n_real_tet=self.n_real_tet, colors=self.colors, red=self.red)
         self.age = 0
         self.baseline_iters = None
         self.last_iters = None
         self.last_accepted = True
         self.n_builds += 1
         logger.info(f"[NK] 单元块 Jacobian 重装配（第 {self.n_builds} 次，{reason}，"
-                    f"{self.jac.n_residual_evals} 次残差求值，{time.time() - t0:.1f}s）")
+                    f"{'块 ILU' if self.coupling is not None else '块 Jacobi'}，"
+                    + ("解析装配" if self.assembler is not None
+                       else f"差分装配 {self.jac.n_residual_evals} 次残差求值")
+                    + f"，{time.time() - t0:.1f}s）")
 
     def preconditioner(self, dtau_flat: np.ndarray, n_var: int):
         """给定 `dtau` 下的预处理子（`begin_step` 之后调用，可多次）。"""
         if self.disabled_reason is not None:
             return PseudoTransientDiagonal(dtau_flat, n_var)
+        if self.coupling is not None:
+            from .block_ilu import BlockILUPreconditioner
+            return BlockILUPreconditioner.from_cell_blocks(self.jac, self.coupling, self.colors, dtau_flat)
         return CellBlockJacobiPreconditioner(self.jac, dtau_flat)
 
     def record(self, gmres_iters: int, accepted: bool) -> None:

@@ -156,16 +156,27 @@ class _GPUSolverStepMixin:
             from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
             ff = self.flat_face_gpu
             from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import gpu_cell_colors
+            from autoflowcfd.core.fr_residual.jacobian.backend import (
+                MeanFlowBlockAssembler, unsupported_reason,
+            )
+            order_nk = int(self.order if getattr(self, "current_order", None) is None
+                           else self.current_order)
+            # 解析单元块在主机上装配（与 CPU 同一份实现），块由缓存上传
+            block_assembler = None if unsupported_reason(
+                order=order_nk, wmles=getattr(self, "wmles_model", None) is not None
+            ) else MeanFlowBlockAssembler(
+                mesh=self.mesh, ops=self.ops, ghost_provider=self.boundary_ghost_provider,
+                mu=self.mu_molecular, mach_ref=self.freestream["mach_ref"],
+                low_mach=self.low_mach_precond_enabled, mu_t=mu_t_field, n_sps=n_sps)
             U_new_flat, nk_info = step_mean_flow_newton(
                 self, mean_flow_residual, U_flat, dt_local_full,
                 _reference_scales(self.freestream, self.n_vars),
                 red=LocalReductions(cp),
                 cell_is_prism=np.arange(n_cells) < int(self.mesh.n_prism_cells),
                 cell_colors=lambda: gpu_cell_colors(cp, ff, n_cells),
-                order=int(self.order if getattr(self, "current_order", None) is None
-                          else self.current_order),
+                order=order_nk,
                 filter_active=self.filter_func_gpu is not None,
-                positivity=positivity_func)
+                positivity=positivity_func, block_assembler=block_assembler)
 
         elif scheme == TimeIntegrationScheme.DUAL_TIME:
             # DUAL_TIME: 真正时间精度的物理时间推进。`solution_prev=None`

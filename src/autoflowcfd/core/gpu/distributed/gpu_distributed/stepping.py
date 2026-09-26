@@ -230,7 +230,9 @@ class _MultiGPUSteppingMixin:
             # 隐式稳态步：与单机 CPU/GPU、CPU 分布式同一个实现
             # （implicit/mean_flow_step.py），归约跨 rank，块 Jacobi 着色全局一致
             from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
-            from autoflowcfd.core.mpi.distributed_implicit import distributed_block_jacobi_colors
+            from autoflowcfd.core.mpi.distributed_implicit import (
+                distributed_block_jacobi_colors, distributed_mean_flow_assembler,
+            )
             from autoflowcfd.core.mpi.reductions import MPIReductions
             from autoflowcfd.core.time_integration.implicit.mean_flow_step import (
                 step_mean_flow_newton,
@@ -241,7 +243,10 @@ class _MultiGPUSteppingMixin:
                 red=MPIReductions(cp), cell_is_prism=cell_is_prism,
                 cell_colors=lambda: distributed_block_jacobi_colors(self),
                 order=order_now, filter_active=self.filter_func_gpu is not None,
-                positivity=positivity_func)
+                positivity=positivity_func,
+                block_assembler=distributed_mean_flow_assembler(
+                    self, self, order=order_now, mu_t_compact=mu_t_field,
+                    exchange=self.gpu_halo.exchange, perm=self._perm_gpu, n_sps=n_sps))
         elif self.time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
             # 显式无粘对流 + 隐式粘性（阻尼 Picard），与单机/CPU 分布式同一个
             # 拆分、同一个积分器（低马赫预处理在 IMEX 下不启用，理由见

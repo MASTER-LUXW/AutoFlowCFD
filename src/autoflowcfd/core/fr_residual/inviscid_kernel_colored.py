@@ -16,8 +16,7 @@ import numpy as np
 from numba import njit, prange
 
 from autoflowcfd.core.fr_operators.small_dense import matmul_small
-from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
-from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_point
+from autoflowcfd.core.fr_residual.face_point_jumps import inviscid_jump_point
 from autoflowcfd.core.fr_residual.inviscid_kernel import _extrap_matmul
 
 
@@ -83,25 +82,9 @@ def compute_inviscid_interface_correction_kernel_colored(
             Q_o = _extrap_matmul(Q[oc], E_o)
             adjrow_o = owner_adj_row_exact[f]  # (n_fp, 3)，逐 FP 精确值，见函数文档
 
-            jump_owner = np.zeros((n_fp, 5))
+            jump_owner = np.empty((n_fp, 5))
             for i in range(n_fp):
-                a0 = adjrow_o[i, 0]
-                a1 = adjrow_o[i, 1]
-                a2 = adjrow_o[i, 2]
-                adj_mag = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
-                if adj_mag < 1e-300:
-                    adj_mag = 1e-300
-                dirx = a0 / adj_mag
-                diry = a1 / adj_mag
-                dirz = a2 / adj_mag
-
-
-                # 法向恒用本侧**精确度量行**的方向（2026-09-24 删除了此前的
-                # `alignment < 0.5` 兜底——它在夹角过大时把方向换成
-                # true_normal、但拥有侧投影仍用 adj_row，于是对均匀流
-                # 跳跃量 = |adj| F.(n_ref - dir(adj)) != 0，凭空注入压力
-                # 量级的源项。完整依据见本函数文档"法向一律取自本侧度量"。）
-
+                # 另一侧状态（幽灵态 / sources 插值 / 混合拆分面配对幽灵态）
                 if is_boundary[f]:
                     Q_n = Q_ghost[f, i]
                 else:
@@ -127,24 +110,7 @@ def compute_inviscid_interface_correction_kernel_colored(
                     mp = mixed_nb_partner[f]
                     if mp >= 0 and mixed_nb_mask[f, i]:
                         Q_n = Q_ghost[mp, i]
-
-                normal = np.empty(3)
-                normal[0] = dirx
-                normal[1] = diry
-                normal[2] = dirz
-                F_common_n = compute_ausm_up_flux(Q_o[i], Q_n, normal, mach_ref, precond_mode)
-
-                F_tilde_common = np.empty(5)
-                for v in range(5):
-                    F_tilde_common[v] = F_common_n[v] * adj_mag
-
-                F_phys_o = euler_physical_flux_point(Q_o[i])
-                F_tilde_own = np.zeros(5)
-                for v in range(5):
-                    F_tilde_own[v] = a0 * F_phys_o[0, v] + a1 * F_phys_o[1, v] + a2 * F_phys_o[2, v]
-
-                for v in range(5):
-                    jump_owner[i, v] = F_tilde_common[v] - F_tilde_own[v]
+                jump_owner[i] = inviscid_jump_point(Q_o[i], Q_n, adjrow_o[i], mach_ref, precond_mode)
 
             weighted_jump_o = np.empty((n_fp, 5))
             for i in range(n_fp):
@@ -165,25 +131,9 @@ def compute_inviscid_interface_correction_kernel_colored(
             Q_n_native = _extrap_matmul(Q[nc], E_n)
             adjrow_n_native = neighbor_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
 
-            jump_neighbor = np.zeros((n_fp, 5))
+            jump_neighbor = np.empty((n_fp, 5))
             for i in range(n_fp):
-                a0 = adjrow_n_native[i, 0]
-                a1 = adjrow_n_native[i, 1]
-                a2 = adjrow_n_native[i, 2]
-                adj_mag = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
-                if adj_mag < 1e-300:
-                    adj_mag = 1e-300
-                dirx = a0 / adj_mag
-                diry = a1 / adj_mag
-                dirz = a2 / adj_mag
-
-
-                # 法向恒用本侧**精确度量行**的方向（2026-09-24 删除了此前的
-                # `alignment < 0.5` 兜底——它在夹角过大时把方向换成
-                # true_normal、但本侧投影仍用 adj_row，于是对均匀流
-                # 跳跃量 = |adj| F.(n_ref - dir(adj)) != 0，凭空注入压力
-                # 量级的源项。完整依据见本函数文档"法向一律取自本侧度量"。）
-
+                # 另一侧状态（幽灵态 / sources 插值 / 混合拆分面配对幽灵态）
                 Q_o_at_n = np.zeros(5)
                 c0 = owner_src0_cell[f]
                 if c0 >= 0:
@@ -207,24 +157,7 @@ def compute_inviscid_interface_correction_kernel_colored(
                 if mp_o >= 0 and mixed_ow_mask[f, i]:
                     for v in range(5):
                         Q_o_at_n[v] = Q_ghost[mp_o, i, v]
-
-                normal = np.empty(3)
-                normal[0] = dirx
-                normal[1] = diry
-                normal[2] = dirz
-                F_common_n_native = compute_ausm_up_flux(Q_n_native[i], Q_o_at_n, normal, mach_ref, precond_mode)
-
-                F_tilde_common_n = np.empty(5)
-                for v in range(5):
-                    F_tilde_common_n[v] = F_common_n_native[v] * adj_mag
-
-                F_phys_n = euler_physical_flux_point(Q_n_native[i])
-                F_tilde_own_n = np.zeros(5)
-                for v in range(5):
-                    F_tilde_own_n[v] = a0 * F_phys_n[0, v] + a1 * F_phys_n[1, v] + a2 * F_phys_n[2, v]
-
-                for v in range(5):
-                    jump_neighbor[i, v] = F_tilde_common_n[v] - F_tilde_own_n[v]
+                jump_neighbor[i] = inviscid_jump_point(Q_n_native[i], Q_o_at_n, adjrow_n_native[i], mach_ref, precond_mode)
 
             weighted_jump_n = np.empty((n_fp, 5))
             for i in range(n_fp):

@@ -12,6 +12,7 @@ AutoFlowCFD V2.0 - GPU 版物理通量计算（欧拉 + 粘性）
 """
 
 import numpy as np
+from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL_TURBULENT
 from autoflowcfd.core.gpu import get_cupy
 
 GAMMA = 1.4
@@ -113,7 +114,7 @@ def euler_physical_flux_gpu(Q):
     return F
 
 
-def viscous_physical_flux_gpu(Q, grad_vel, grad_T, mu, Pr, mu_t=None, Pr_t=0.9):
+def viscous_physical_flux_gpu(Q, grad_vel, grad_T, mu, Pr, mu_t=None, Pr_t=PRANDTL_TURBULENT):
     """GPU 版粘性物理通量张量 G_i(Q, grad_vel, grad_T)。
 
     与 core/fr_flux_kernels_pointwise.py::viscous_physical_flux_batch 公式一致。
@@ -207,37 +208,29 @@ def viscous_physical_flux_gpu(Q, grad_vel, grad_T, mu, Pr, mu_t=None, Pr_t=0.9):
 
     G = cp.zeros(batch_shape + (3, 5), dtype=cp.float64)
 
-    # 真实 bug 修复（第二个独立发现，2026-09-03，用真实网格 CPU/GPU
-    # 界面项交叉验证时发现——均匀流场/纯前面的 shape 修复无法捕捉这个
-    # bug：均匀流场下 grad_T 恒为 0，`+k_eff*dTdx`/`-k_eff*dTdx` 结果
-    # 无差别；本次改动前的"3D 批量 vs 手动展平 2D"不变量测试也无法
-    # 捕捉，因为那只验证同一个（错误）公式在不同批量维数下自洽，不
-    # 对照 CPU 参考实现）：热传导项符号搞反了。Fourier 定律
-    # `q = -k*grad(T)`（热流方向与温度梯度相反——热量从高温流向
-    # 低温），与 CPU 版 `flux_kernels.py::viscous_physical_flux_point`
-    # 的 `qx=-k_cond*grad_T[0]`（及 qy/qz）逐字对应；此前这里写成
-    # `+k_eff*dTdx`，方向反了，任何有非零温度梯度的真实流动（几乎
-    # 全部流动，除非等温）粘性残差的能量分量都会算错——动量分量
-    # （tau 相关项）本身不受影响，公式恰好一致，这也是此前"零梯度
-    # 单元测试"能通过但真实非均匀流场交叉验证会暴露问题的原因。
+    # 能量分量 `G_E = tau.u - q = tau.u + k grad(T)`（Fourier 定律 q = -k grad T，
+    # 残差里粘性项取 +div G）。2026-09-03 曾把这里的 `+k_eff*dTdx` 改成 `-`，理由是
+    # 与 CPU 逐字对应——那次对照只验证了两边一致，而 CPU 版本身符号反了（热传导
+    # 成了反扩散）；2026-09-26 两边一起改正，完整依据见
+    # `flux_kernels.viscous_physical_flux_point` 文档"能量分量的符号"。
     G[..., 0, 0] = 0.0
     G[..., 0, 1] = tau_xx
     G[..., 0, 2] = tau_xy
     G[..., 0, 3] = tau_xz
-    G[..., 0, 4] = (u * tau_xx + v * tau_xy + w * tau_xz) - k_eff * dTdx
+    G[..., 0, 4] = (u * tau_xx + v * tau_xy + w * tau_xz) + k_eff * dTdx
 
     # y-direction: G_1
     G[..., 1, 0] = 0.0
     G[..., 1, 1] = tau_xy
     G[..., 1, 2] = tau_yy
     G[..., 1, 3] = tau_yz
-    G[..., 1, 4] = (u * tau_xy + v * tau_yy + w * tau_yz) - k_eff * dTdy
+    G[..., 1, 4] = (u * tau_xy + v * tau_yy + w * tau_yz) + k_eff * dTdy
 
     # z-direction: G_2
     G[..., 2, 0] = 0.0
     G[..., 2, 1] = tau_xz
     G[..., 2, 2] = tau_yz
     G[..., 2, 3] = tau_zz
-    G[..., 2, 4] = (u * tau_xz + v * tau_yz + w * tau_zz) - k_eff * dTdz
+    G[..., 2, 4] = (u * tau_xz + v * tau_yz + w * tau_zz) + k_eff * dTdz
 
     return G

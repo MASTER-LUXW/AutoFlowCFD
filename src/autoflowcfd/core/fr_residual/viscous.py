@@ -13,6 +13,7 @@ import numpy as np
 
 from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient, compute_physical_scalar_gradient
 from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
+from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL, PRANDTL_TURBULENT
 
 
 def compute_viscous_residual(
@@ -21,10 +22,10 @@ def compute_viscous_residual(
     ops,
     mesh,
     mu: float = 1.8e-5,
-    Pr: float = 0.72,
+    Pr: float = PRANDTL,
     gamma: float = 1.4,
     mu_t_field: np.ndarray = None,
-    Pr_t: float = 0.9,
+    Pr_t: float = PRANDTL_TURBULENT,
     boundary_ghost_provider=None,
     flat_face_override=None,
 ) -> np.ndarray:

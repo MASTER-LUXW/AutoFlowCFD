@@ -9,7 +9,7 @@ import numpy as np
 
 
 
-from .constants import GAMMA, R_AIR
+from .constants import GAMMA, PRANDTL_TURBULENT, R_AIR
 
 
 def compute_temperature(Q: np.ndarray) -> np.ndarray:
@@ -25,7 +25,7 @@ def viscous_physical_flux(
     mu: float,
     Pr: float,
     mu_t=0.0,
-    Pr_t: float = 0.9,
+    Pr_t: float = PRANDTL_TURBULENT,
 ) -> np.ndarray:
     """计算粘性物理通量张量 G_i，与 euler_physical_flux 同样的 (...,3,5) 约定。
 
@@ -46,7 +46,7 @@ def viscous_physical_flux(
 
     Returns:
         G: (...,3,5)，G[...,i,:] 是方向 i 的粘性通量向量
-           （质量分量恒为0；动量分量 G[...,i,1+j]=tau_ij；能量分量含粘性功+热传导）
+           （质量分量恒为0；动量分量 G[...,i,1+j]=tau_ij；能量分量 tau.u - q，q=-k grad T）
     """
     mu_total = mu + mu_t
     mu_total = mu_total * np.ones(Q.shape[:-1]) if np.isscalar(mu_total) else mu_total
@@ -68,5 +68,5 @@ def viscous_physical_flux(
     shape = Q.shape[:-1]
     G = np.zeros(shape + (3, 5))
     G[..., :, 1:4] = np.swapaxes(tau, -1, -2)  # G[...,i,1+j] = tau[...,j,i] = tau[...,i,j] (对称)
-    G[..., :, 4] = work + q
+    G[..., :, 4] = work - q   # G_E = tau.u - q，符号依据见 flux_kernels.viscous_physical_flux_point
     return G

@@ -304,6 +304,9 @@ def step(solver, dt: float) -> float:
                 step_mean_flow_newton,
             )
             from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
+            from autoflowcfd.core.fr_residual.jacobian.backend import (
+                MeanFlowBlockAssembler, unsupported_reason,
+            )
 
             U_new_flat, _nk_info = step_mean_flow_newton(
                 solver, mean_flow_residual, U_flat, dt_local_flat,
@@ -312,7 +315,16 @@ def step(solver, dt: float) -> float:
                 cell_is_prism=np.arange(n_cells) < int(solver.mesh.n_prism_cells),
                 cell_colors=lambda: single_machine_cell_colors(solver),
                 order=_current_order(solver), filter_active=filter_func is not None,
-                positivity=positivity_func)
+                positivity=positivity_func,
+                block_assembler=None if unsupported_reason(
+                    order=_current_order(solver),
+                    entropy_stable_volume=solver.entropy_stable_volume_enabled,
+                    artificial_viscosity=getattr(solver, "artificial_viscosity_enabled", False),
+                    wmles=solver.wmles_model is not None) else MeanFlowBlockAssembler(
+                    mesh=solver.mesh, ops=solver.ops, ghost_provider=solver.boundary_ghost_provider,
+                    mu=solver.mu_molecular, mach_ref=solver.freestream["mach_ref"],
+                    low_mach=solver.low_mach_precond_enabled,
+                    mu_t=solver._get_turbulent_viscosity_field(mu_t_step), n_sps=n_sps))
         elif solver.time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
             # 显式处理无粘对流项、隐式处理粘性+湍流扩散项——通用的
             # step(...) 单一残差入口表达不了这个拆分（见该方法里的

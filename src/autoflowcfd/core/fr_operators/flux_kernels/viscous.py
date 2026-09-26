@@ -77,7 +77,21 @@ def viscous_physical_flux_point(
     Returns:
         G: (3,5)，与 fr_viscous_flux.py::viscous_physical_flux 的公式
         逐一对应（质量分量恒为0；G[i,1+j]=tau[i,j]（对称）；
-        G[i,4]=work[i]+q[i]）。
+        G[i,4]=work[i]-q[i]）。
+
+    ## 能量分量的符号（2026-09-26 修复的一阶物理缺陷）
+
+    能量方程 `d(rho E)/dt + div((rho E + p) u) = div(tau.u) - div(q)`，Fourier
+    定律 `q = -k grad(T)`。残差按 `dU/dt = -div F + div G` 组装（粘性项取正号），
+    所以 `G_E = tau.u - q = tau.u + k grad(T)`。此前写成 `work + q`（即
+    `tau.u - k grad(T)`），热传导整体反号、成了**反扩散**：均匀静止基态上纯粘性
+    算子的线性化谱有 64 个正实部特征值、特征向量全部落在能量分量上，且加大 IP
+    罚项 16 倍几乎不变（罚项本身符号正确，只能在跨面跳跃上部分抵消）；热斑上
+    `d(rho E)/dt > 0`。plate_demo P1+SST 上它在锐边分离区（对流弱、湍流热传导
+    `mu_t cp/Pr_t` 大）表现为等压下的密度/温度噪声持续放大（温度到 3.8e3 K、
+    密度到 0.01），平均流 Newton 步在这些单元被物理性限幅冻住、全局残差回升。
+    CPU 两份实现与 GPU 版同一次改正（GPU 版 2026-09-03 曾被"对齐"到这个错误
+    符号，那次对照只验证了两边一致，没有对照物理方向）。
     """
     mu_total = mu + mu_t
 
@@ -114,17 +128,17 @@ def viscous_physical_flux_point(
     G[0, 1] = tau00
     G[0, 2] = tau01
     G[0, 3] = tau02
-    G[0, 4] = work_x + qx
+    G[0, 4] = work_x - qx
 
     G[1, 1] = tau01
     G[1, 2] = tau11
     G[1, 3] = tau12
-    G[1, 4] = work_y + qy
+    G[1, 4] = work_y - qy
 
     G[2, 1] = tau02
     G[2, 2] = tau12
     G[2, 3] = tau22
-    G[2, 4] = work_z + qz
+    G[2, 4] = work_z - qz
     return G
 
 

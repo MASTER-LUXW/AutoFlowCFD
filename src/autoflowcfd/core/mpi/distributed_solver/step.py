@@ -346,7 +346,9 @@ class _DistributedStepMixin:
             # 归约换成跨 rank 的 MPIReductions，块 Jacobi 着色是全局一致着色里
             # 本 rank 那一段（见 core/mpi/distributed_implicit.py 模块文档）
             from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
-            from autoflowcfd.core.mpi.distributed_implicit import distributed_block_jacobi_colors
+            from autoflowcfd.core.mpi.distributed_implicit import (
+                distributed_block_jacobi_colors, distributed_mean_flow_assembler,
+            )
             from autoflowcfd.core.mpi.reductions import MPIReductions
             from autoflowcfd.core.time_integration.implicit.mean_flow_step import (
                 step_mean_flow_newton,
@@ -358,7 +360,10 @@ class _DistributedStepMixin:
                 red=MPIReductions(np), cell_is_prism=cell_is_prism,
                 cell_colors=lambda: distributed_block_jacobi_colors(self),
                 order=order_now, filter_active=filter_func is not None,
-                positivity=positivity_func)
+                positivity=positivity_func,
+                block_assembler=distributed_mean_flow_assembler(
+                    self, self.local_solver, order=order_now, mu_t_compact=mu_t_field_compact,
+                    exchange=self.halo_exchange.exchange, perm=self.dist_flat_face.perm, n_sps=n_sps))
         elif self._time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
             # 显式无粘对流 + 隐式粘性（阻尼 Picard），与单机
             # `fr_solver/step.py` 同一个拆分、同一个积分器。**2026-09-25 补齐**：

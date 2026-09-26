@@ -138,7 +138,7 @@ def newton_monitor_suffix(solver) -> str:
 def step_mean_flow_newton(
     solver, residual: Callable, u_flat, dtau_flat, scales: np.ndarray, *,
     red: LocalReductions, cell_is_prism: np.ndarray, cell_colors: Callable[[], np.ndarray],
-    order: int, filter_active: bool, positivity,
+    order: int, filter_active: bool, positivity, block_assembler=None,
 ):
     """平均流的一个 PTC-Newton-Krylov 步，返回 `(U_new_flat, info)`。
 
@@ -160,6 +160,10 @@ def step_mean_flow_newton(
         positivity: 该后端的 `PositivityLimiter`（`time_integration/positivity`）；
             物理性限幅在它的点集上求值（解点 + 面通量点 + 过积分细点，见
             `PositivityLimiter.density_pressure_limits`）。
+        block_assembler: 本步的解析单元块装配器 `(u0_flat, r0_flat) ->
+            (blocks_prism, blocks_tet)`（`fr_residual/jacobian`，P>=1）；None 时块
+            Jacobi 用着色差分装配（P0、熵稳定体积项等解析装配不覆盖的离散）。
+            每步重新传入：它持有本步冻结的涡粘。
     """
     from autoflowcfd.fr.native_padding import real_sps_per_cell
 
@@ -185,6 +189,7 @@ def step_mean_flow_newton(
             n_sps=u_flat.shape[0] // n_cells, n_real_prism=n_real_prism,
             n_real_tet=n_real_tet, n_var=n_mf, red=red)
 
+    solver._newton_block_precond.assembler = block_assembler
     u_new_mf, info = step_newton_krylov(
         ResidualVariableSlice(residual, u_flat, n_mf), u_flat[:, :n_mf], dtau_flat,
         np.asarray(scales)[:n_mf],

@@ -59,6 +59,47 @@ def global_cell_colors(face_connectivity, n_global_cells: int) -> np.ndarray:
                                 int(n_global_cells))
 
 
+class HaloCompactState:
+    """local 单元状态 -> 残差用的"棱柱在前"local+halo 紧凑排列（halo 交换 + perm）。
+
+    解析单元块装配器（`fr_residual/jacobian/backend.py`）用它把 Newton 行上的
+    状态扩展到分布式残差的单元空间，与 `distributed_compute.py` 的残差同一个
+    交换与换序。做成类而不是闭包（项目规范）。交换是集体操作：块缓存在每个
+    rank 上同步地装配（与差分装配同一约束）。
+    """
+
+    __slots__ = ("exchange", "perm")
+
+    def __init__(self, exchange, perm):
+        self.exchange = exchange
+        self.perm = perm
+
+    def __call__(self, U_local):
+        return self.exchange(U_local)[self.perm]
+
+
+def distributed_mean_flow_assembler(solver, physics, *, order: int, mu_t_compact, exchange, perm, n_sps: int):
+    """分布式后端（CPU-MPI 与多 GPU 共用）本步的解析单元块装配器；不覆盖时返回 None。
+
+    `physics` 提供残差用的物理参数（`mu_molecular`、`boundary_ghost_provider`、
+    `freestream`）：CPU-MPI 是其内部的 `local_solver`，多 GPU 是求解器本身。
+    """
+    from autoflowcfd.core.fr_residual.jacobian.backend import MeanFlowBlockAssembler, unsupported_reason
+    from autoflowcfd.core.mpi.distributed_compute import DistributedMeshAdapter
+
+    if unsupported_reason(order=order, wmles=getattr(solver, "wmles_model", None) is not None):
+        return None
+    dist_fc = solver.dist_flat_face
+    n_local = int(solver.partition.n_local_cells)
+    return MeanFlowBlockAssembler(
+        mesh=DistributedMeshAdapter(solver.partition, dist_fc, solver.mesh, solver.ops), ops=solver.ops,
+        ghost_provider=physics.boundary_ghost_provider, mu=physics.mu_molecular,
+        mach_ref=physics.freestream["mach_ref"],
+        low_mach=solver.low_mach_precond_enabled, mu_t=mu_t_compact, n_sps=n_sps,
+        flat=dist_fc.base_flat, compact_state=HaloCompactState(exchange, perm),
+        row_compact=np.asarray(dist_fc.inv_perm)[:n_local])
+
+
 def distributed_block_jacobi_colors(solver) -> np.ndarray:
     """本 rank local 单元（原生排列）的块 Jacobi 着色。"""
     colors = getattr(solver, "_block_jacobi_colors_local", None)

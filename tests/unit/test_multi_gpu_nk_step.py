@@ -30,6 +30,10 @@ class _NumpyAsCupy:
 @pytest.fixture(autouse=True)
 def _patch_get_cupy(monkeypatch):
     patch_module_get_cupy(monkeypatch, gd_mod, _NumpyAsCupy())
+    # 残差是合成的线性算子、不是 FR 离散：解析单元块（对 FR 残差求导）不适用，
+    # 块 Jacobi 用着色差分装配（对任意残差精确）
+    import autoflowcfd.core.mpi.distributed_implicit as di
+    monkeypatch.setattr(di, "distributed_mean_flow_assembler", lambda *a, **k: None)
 
 
 def _conservative(n, n_sps, rng):
@@ -65,6 +69,7 @@ def _stub(n_local, n_sps, target):
     s.dist_flat_face = types.SimpleNamespace(perm=np.arange(n_local),
                                              compact_cell_type=np.zeros(n_local, dtype=int))
     s._inv_perm_gpu = s._perm_gpu = np.arange(n_local)
+    s.gpu_halo = types.SimpleNamespace(exchange=None)   # 单 rank、无 halo（解析装配器已被 fixture 关掉）
     s._block_jacobi_colors_local = np.arange(n_local) % 2
     # 合成状态没有面/细点几何：点集只有解点（额外求值点为空），物理性限幅仍按解点生效
     from autoflowcfd.core.time_integration.positivity import PositivityLimiter

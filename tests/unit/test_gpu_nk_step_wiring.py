@@ -103,6 +103,8 @@ def _gpu_standin(cpu, dt_cell, dt_phys_cell):
         turb_model_name="NONE", residual_history=[], iteration=0,
         _newton_forcing=None, _newton_last_info=None, _newton_dtau_scale=1.0,
         _newton_block_precond=None, _newton_turb_state=None,
+        boundary_ghost_provider=cpu.boundary_ghost_provider, mu_molecular=cpu.mu_molecular,
+        wmles_model=None,
     )
     g._cfl_controller, g.fixed_cfl_number = build_cfl_policy(S.NEWTON_KRYLOV)
     g._update_primitives_gpu = lambda: setattr(g, "Q_gpu", conserved_to_primitive(g.U_gpu[..., :5]))
@@ -127,12 +129,16 @@ def test_gpu_nk_step_matches_cpu_nk_step(patched):
         (full(dt_cell), full(dt_phys_cell)) if return_physical_too else full(dt_cell))
     gpu = _gpu_standin(cpu, dt_cell, dt_phys_cell)
 
+    # 两侧的状态只差 GPU/CPU 各自施加低马赫 Gamma 的舍入（约 1e-16，GPU 从试探态
+    # 自己推原始变量、CPU 复用 state.Q），经 inexact-Newton 的线性容差与 SER 律放大
+    # 到轨迹上约 1e-10 量级（块 ILU 下实测 1.6e-10）；接线若错，差的是量级。
     for _ in range(3):
         cpu.step(1e-3)
         _GPUSolverStepMixin.step(gpu, 1e-3)
         ic, ig = cpu._newton_last_info, gpu._newton_last_info
         assert ig["gmres_iters"] == ic["gmres_iters"]
-        assert ig["res_norm"] == pytest.approx(ic["res_norm"], rel=1e-10)
-        assert gpu._cfl_controller.cfl_number == pytest.approx(cpu._cfl_controller.cfl_number, rel=1e-10)
-        np.testing.assert_allclose(gpu.U_gpu, cpu.state.U, rtol=1e-10, atol=1e-8)
+        assert ig["res_norm"] == pytest.approx(ic["res_norm"], rel=1e-9)
+        assert gpu._cfl_controller.cfl_number == pytest.approx(cpu._cfl_controller.cfl_number, rel=1e-9)
+        np.testing.assert_allclose(gpu.U_gpu, cpu.state.U, rtol=1e-9, atol=1e-8)
+    # 解析单元块（P>=1，两侧同一份装配器）在第 1 步装配，之后按刷新判据复用
     assert gpu._newton_block_precond is not None and gpu._newton_block_precond.n_builds == 1

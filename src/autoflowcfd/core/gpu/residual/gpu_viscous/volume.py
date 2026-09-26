@@ -6,6 +6,7 @@
 import numpy as np
 
 
+from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL, PRANDTL_TURBULENT
 from autoflowcfd.core.gpu import get_cupy
 
 from autoflowcfd.core.gpu.residual.gpu_volume_contract import (
@@ -99,9 +100,9 @@ def compute_viscous_residual_fr_gpu(
     mesh,
     ops,
     mu=1.8e-5,
-    Pr=0.72,
+    Pr=PRANDTL,
     mu_t_field=None,
-    Pr_t=0.9,
+    Pr_t=PRANDTL_TURBULENT,
     boundary_ghost_provider=None,
     mesh_data=None,
     ops_data=None,
