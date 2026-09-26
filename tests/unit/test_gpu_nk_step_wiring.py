@@ -95,7 +95,7 @@ def _gpu_standin(cpu, dt_cell, dt_phys_cell):
         return run
 
     g = types.SimpleNamespace(
-        mesh=cpu.mesh, n_vars=cpu.state.n_vars, U_gpu=cpu.state.U.copy(),
+        mesh=cpu.mesh, ops=cpu.ops, n_vars=cpu.state.n_vars, U_gpu=cpu.state.U.copy(),
         time_integrator=types.SimpleNamespace(scheme=S.NEWTON_KRYLOV),
         filter_func_gpu=None, low_mach_precond_enabled=cpu.low_mach_precond_enabled,
         freestream=cpu.freestream, flat_face_gpu=get_flat_face_geometry(cpu.mesh, cpu.ops),

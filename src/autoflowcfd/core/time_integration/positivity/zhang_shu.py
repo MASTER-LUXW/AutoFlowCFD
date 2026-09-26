@@ -5,9 +5,10 @@
 1. 用守恒权重 `W_cs = w_s * det(J)_cs` 求单元均值 Ū（权重的来历见
    `fr/native_tet/quadrature.py` 模块文档：本格式守恒的离散量就是
    `Σ_s W_cs U_cs`）。补零槽位权重为 0，天然不参与；
-2. 点集 = 全部**真实解点** + 全部**面通量点**（`E @ U`，E 的行和为 1）。
-   通量点必须在内：Riemann 求解器用的是它们，而 P1 的极值落在顶点、解点未必
-   覆盖（原生棱柱 P1 的挤出方向解点是 Gauss 点、不含端面）；
+2. 点集 = 全部**真实解点** + 格式求值通量的全部点（`E @ U`，E 的行和为 1）：
+   面通量点（Riemann 求解器用它们，而 P1 的极值落在顶点、解点未必覆盖——原生
+   棱柱 P1 的挤出方向解点是 Gauss 点、不含端面）与过积分细点（体积通量在那里
+   求值，2026-09-26 补入，见 `limiter.py`）；
 3. 密度：`ρ_min < ε_ρ` 时 `θ1 = (ρ̄ - ε_ρ)/(ρ̄ - ρ_min)`，
    `ρ_s ← ρ̄ + θ1 (ρ_s - ρ̄)`（E 是线性的且行和为 1，通量点值同比收缩）；
 4. 压力：对每个 `p_q < ε_p` 的点，在线段 `Ū + t (U_q - Ū)` 上解 `p = ε_p`。
@@ -89,8 +90,8 @@ def zhang_shu_numba(U, W, E_prism, E_tet, cell_is_prism, n_real_prism, n_real_te
         W: `(n_cells, n_sps)` 守恒权重 `w_s * det(J)_cs`（补零槽位为 0）。
         cell_is_prism: `(n_cells,)` 布尔，逐单元类型。**不假设"棱柱在前"**：
             单机网格是棱柱在前，但分布式本地编号里两类单元交错。
-        E_prism / E_tet: `(m, n_sps)` 该类单元全部面的通量点外插行，按面
-            堆叠（棱柱 5 面、四面体 4 面）。
+        E_prism / E_tet: `(m, n_sps)` 该类单元解点之外全部求值点的插值行：各面
+            通量点（按面堆叠，棱柱 5 面、四面体 4 面）+ 过积分细点。
         theta_out: `(n_cells,)` 输出，每单元实际用的 θ（未动的单元为 1）。
         bad_mean_out: `(n_cells,)` 输出，单元均值不可容许的标记。
     """
@@ -231,7 +232,7 @@ def zhang_shu_xp(xp, U, W, E_prism, E_tet, cell_is_prism, n_real_prism, n_real_t
                            Uc[:, :, 0])
         Uc[:, :, 0] = rho_new          # 花式索引取出的本来就是副本
 
-        # ---- 压力：点集 = 解点 + 通量点
+        # ---- 压力：点集 = 解点 + 其余求值点（通量点、细点）
         U_fp = xp.einsum("qs,csv->cqv", Ec, Uc)
         P = xp.concatenate([Uc, U_fp], axis=1)                     # (c, n_pts, 5)
         r = P[..., 0]

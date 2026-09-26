@@ -138,7 +138,7 @@ def newton_monitor_suffix(solver) -> str:
 def step_mean_flow_newton(
     solver, residual: Callable, u_flat, dtau_flat, scales: np.ndarray, *,
     red: LocalReductions, cell_is_prism: np.ndarray, cell_colors: Callable[[], np.ndarray],
-    order: int, filter_active: bool,
+    order: int, filter_active: bool, positivity,
 ):
     """平均流的一个 PTC-Newton-Krylov 步，返回 `(U_new_flat, info)`。
 
@@ -157,6 +157,9 @@ def step_mean_flow_newton(
             `block_jacobi.py::CellBlockJacobian` 文档）。
         order: 当前阶数（决定每类单元的真实解点数）。
         filter_active: 是否构造了模态滤波回调（为真时报错，见模块文档）。
+        positivity: 该后端的 `PositivityLimiter`（`time_integration/positivity`）；
+            物理性限幅在它的点集上求值（解点 + 面通量点 + 过积分细点，见
+            `PositivityLimiter.density_pressure_limits`）。
     """
     from autoflowcfd.fr.native_padding import real_sps_per_cell
 
@@ -186,7 +189,7 @@ def step_mean_flow_newton(
         ResidualVariableSlice(residual, u_flat, n_mf), u_flat[:, :n_mf], dtau_flat,
         np.asarray(scales)[:n_mf],
         forcing=solver._newton_forcing, dtau_scale=solver._newton_dtau_scale,
-        block_precond=solver._newton_block_precond,
+        block_precond=solver._newton_block_precond, physicality=positivity.density_pressure_limits,
         rows_per_cell=u_flat.shape[0] // np.asarray(cell_is_prism).size, red=red)
     u_new = u_flat.copy()
     u_new[:, :n_mf] = u_new_mf

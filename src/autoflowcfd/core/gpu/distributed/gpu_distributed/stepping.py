@@ -240,7 +240,8 @@ class _MultiGPUSteppingMixin:
                 self, _residual, U_flat, dt_flat, _reference_scales(self.freestream, 5),
                 red=MPIReductions(cp), cell_is_prism=cell_is_prism,
                 cell_colors=lambda: distributed_block_jacobi_colors(self),
-                order=order_now, filter_active=self.filter_func_gpu is not None)
+                order=order_now, filter_active=self.filter_func_gpu is not None,
+                positivity=positivity_func)
         elif self.time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
             # 显式无粘对流 + 隐式粘性（阻尼 Picard），与单机/CPU 分布式同一个
             # 拆分、同一个积分器（低马赫预处理在 IMEX 下不启用，理由见

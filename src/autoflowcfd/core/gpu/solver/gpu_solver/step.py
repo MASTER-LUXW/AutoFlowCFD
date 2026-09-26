@@ -144,10 +144,9 @@ class _GPUSolverStepMixin:
             residual0 = residual0_raw.reshape(n_cells * n_sps, self.n_vars)
 
         # 守恒的正性保持限制器：与 CPU 同一个（数组模块无关实现），按阶数缓存。
+        # 隐式步用它的点集做物理性限幅（`PositivityLimiter.density_pressure_limits`）。
         from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
-        # 隐式步不用它（Newton 步的物理性由 jfnk 的限幅与接受判据保证），不构造。
-        positivity_func = (None if scheme == TimeIntegrationScheme.NEWTON_KRYLOV
-                           else get_positivity_limiter(self, xp=cp))
+        positivity_func = get_positivity_limiter(self, xp=cp)
 
         # 根据时间方案选择推进方式
         nk_info = None
@@ -165,7 +164,8 @@ class _GPUSolverStepMixin:
                 cell_colors=lambda: gpu_cell_colors(cp, ff, n_cells),
                 order=int(self.order if getattr(self, "current_order", None) is None
                           else self.current_order),
-                filter_active=self.filter_func_gpu is not None)
+                filter_active=self.filter_func_gpu is not None,
+                positivity=positivity_func)
 
         elif scheme == TimeIntegrationScheme.DUAL_TIME:
             # DUAL_TIME: 真正时间精度的物理时间推进。`solution_prev=None`

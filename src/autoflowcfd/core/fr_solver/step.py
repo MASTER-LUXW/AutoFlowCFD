@@ -311,7 +311,8 @@ def step(solver, dt: float) -> float:
                 red=LocalReductions(np),
                 cell_is_prism=np.arange(n_cells) < int(solver.mesh.n_prism_cells),
                 cell_colors=lambda: single_machine_cell_colors(solver),
-                order=_current_order(solver), filter_active=filter_func is not None)
+                order=_current_order(solver), filter_active=filter_func is not None,
+                positivity=positivity_func)
         elif solver.time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
             # 显式处理无粘对流项、隐式处理粘性+湍流扩散项——通用的
             # step(...) 单一残差入口表达不了这个拆分（见该方法里的

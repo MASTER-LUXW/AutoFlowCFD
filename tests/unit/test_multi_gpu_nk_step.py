@@ -66,7 +66,11 @@ def _stub(n_local, n_sps, target):
                                              compact_cell_type=np.zeros(n_local, dtype=int))
     s._inv_perm_gpu = s._perm_gpu = np.arange(n_local)
     s._block_jacobi_colors_local = np.arange(n_local) % 2
-    s._get_positivity_limiter_gpu = lambda: None
+    # 合成状态没有面/细点几何：点集只有解点（额外求值点为空），物理性限幅仍按解点生效
+    from autoflowcfd.core.time_integration.positivity import PositivityLimiter
+    _lim = PositivityLimiter(np.ones((n_local, n_sps)), np.zeros((0, n_sps)), np.zeros((0, n_sps)),
+                             np.ones(n_local, dtype=bool), n_sps, n_sps)
+    s._get_positivity_limiter_gpu = lambda: _lim
     s._compute_turbulence_source_distributed = lambda dt: None
     s._global_residual_norm = lambda r: float(np.linalg.norm(r))
     big = np.full(n_local, 1e3)          # dtau 远大于 1/5：接近纯 Newton

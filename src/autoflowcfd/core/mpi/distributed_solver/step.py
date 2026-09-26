@@ -357,7 +357,8 @@ class _DistributedStepMixin:
                 _reference_scales(self.local_solver.freestream, n_vars),
                 red=MPIReductions(np), cell_is_prism=cell_is_prism,
                 cell_colors=lambda: distributed_block_jacobi_colors(self),
-                order=order_now, filter_active=filter_func is not None)
+                order=order_now, filter_active=filter_func is not None,
+                positivity=positivity_func)
         elif self._time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
             # 显式无粘对流 + 隐式粘性（阻尼 Picard），与单机
             # `fr_solver/step.py` 同一个拆分、同一个积分器。**2026-09-25 补齐**：
