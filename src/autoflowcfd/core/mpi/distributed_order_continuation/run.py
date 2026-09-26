@@ -134,6 +134,7 @@ def run_distributed_order_continuation(
             )
             _last_finite = res
 
+            phase_gate.observe(solver, res)
             if initial_residual_this_order is None:
                 initial_residual_this_order = res
 
@@ -155,7 +156,7 @@ def run_distributed_order_continuation(
 
             drop_for_convergence = initial_residual_this_order / max(res, 1e-30)
             required_drop = 1.0 / max(phase_tol, 1e-30)
-            if i >= 1 and phase_gate.reached(solver, drop_for_convergence, required_drop):
+            if i >= 1 and phase_gate.reached(solver, res, initial_residual_this_order, required_drop):
                 converged = True
                 if is_root():
                     print(f"[OK] P{target_p} converged at iter {i + 1} "
@@ -165,8 +166,8 @@ def run_distributed_order_continuation(
             if (target_p < original_order
                     and i >= min_iter_before_transition
                     and initial_residual_this_order > 0
-                    and phase_gate.reached(solver, initial_residual_this_order / max(res, 1e-30),
-                                           residual_drop_threshold)):
+                    and phase_gate.reached(solver, res, initial_residual_this_order,
+                                               residual_drop_threshold)):
                 if is_root():
                     print(f"[OK] P{target_p} residual dropped "
                           f"{initial_residual_this_order / res:.1f}x "

@@ -34,7 +34,16 @@
 * 有产生项斜坡的湍流模型时，斜坡未完成不升阶、不判收敛；
 * 隐式湍流（NK）的残差也要相对本阶段基准（斜坡完成后的第一个值）下降到同样
   倍数；显式格式不跟踪湍流残差，只检查斜坡。
+
+**已收敛到舍入误差也算到位**：残差相对本阶段**第一步**已下降 `ROUNDOFF_DROP`
+倍时，不再要求相对斜坡完成后的基准下降。plate_demo P0 在斜坡完成（第 50 步）前
+就已收敛，斜坡完成时重置的基准只有 2.2e-3，平均流此后停在 4.2e-6（相对初值
+1e-14，机器精度），相对新基准最多"下降 520 倍"，P0 在机器精度上空转约 70 步、
+直到用完阶段预算。
 """
+
+#: 相对本阶段第一步的下降倍数达到这个值即视为已收敛到舍入误差（见模块文档）。
+ROUNDOFF_DROP = 1e10
 
 #: 走 Order Continuation 的最低目标阶数（目标 P0 没有可爬的阶）。
 MIN_TARGET_ORDER = 1
@@ -64,27 +73,40 @@ def production_ramp_complete(solver) -> bool:
 
 
 class PhaseGate:
-    """一个 Order Continuation 阶段内的升阶 / 收敛判据（见模块文档）。每个阶段新建一个。"""
+    """一个 Order Continuation 阶段内的升阶 / 收敛判据（见模块文档）。每个阶段新建一个，
+    每步先 `observe`，再按需 `reached`。"""
 
-    __slots__ = ("turb_baseline",)
+    __slots__ = ("mean_first", "turb_first", "turb_baseline")
 
     def __init__(self):
+        self.mean_first = None
+        self.turb_first = None
         self.turb_baseline = None
 
-    def turbulence_drop(self, solver):
-        """隐式湍流残差相对本阶段基准的下降倍数；没有隐式湍流时 None，斜坡未完成时 0。"""
+    def observe(self, solver, res: float) -> None:
+        """记录本阶段平均流与湍流的首个残差，以及斜坡完成后的湍流基准。"""
+        if self.mean_first is None:
+            self.mean_first = res
         r = turbulence_residual_norm(solver)
         if r is None:
-            return None
-        if not production_ramp_complete(solver):
-            return 0.0
-        if self.turb_baseline is None:
+            return
+        if self.turb_first is None:
+            self.turb_first = r
+        if self.turb_baseline is None and production_ramp_complete(solver):
             self.turb_baseline = r
-        return self.turb_baseline / max(r, 1e-300)
 
-    def reached(self, solver, mean_drop: float, required: float) -> bool:
-        """平均流与湍流是否都已达到 `required` 倍下降（且斜坡已完成）。"""
+    @staticmethod
+    def _enough(baseline, first, current, required) -> bool:
+        current = max(current, 1e-300)
+        return ((baseline is not None and baseline / current >= required)
+                or (first is not None and first / current >= ROUNDOFF_DROP))
+
+    def reached(self, solver, res: float, baseline: float, required: float) -> bool:
+        """平均流（相对 `baseline`）与隐式湍流（相对斜坡完成后的基准）是否都已下降
+        `required` 倍或已收敛到舍入误差，且产生项斜坡已完成。"""
         if not production_ramp_complete(solver):
             return False
-        turb = self.turbulence_drop(solver)
-        return mean_drop >= required and (turb is None or turb >= required)
+        if not self._enough(baseline, self.mean_first, res, required):
+            return False
+        r = turbulence_residual_norm(solver)
+        return r is None or self._enough(self.turb_baseline, self.turb_first, r, required)
