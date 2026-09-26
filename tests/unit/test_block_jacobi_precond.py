@@ -216,7 +216,7 @@ def test_stale_blocks_are_refreshed_within_the_step():
         BlockJacobiCache, REFRESH_FACTOR, REFRESH_SLACK,
     )
     from autoflowcfd.core.time_integration.implicit.jfnk import (
-        positive_fields_row_limits, step_newton_krylov,
+        ScaledFieldRowLimits, step_newton_krylov,
     )
 
     rng = np.random.default_rng(5)
@@ -234,13 +234,13 @@ def test_stale_blocks_are_refreshed_within_the_step():
     u = 1.0 + 0.1 * rng.standard_normal((n, 2))
     res1, _ = make(1)
     u, info1 = step_newton_krylov(res1, u, dtau, np.ones(2), block_precond=cache, gmres_max_iter=200,
-                                  physicality=positive_fields_row_limits)
+                                  physicality=ScaledFieldRowLimits([1e-12, 1e-12]))
     assert cache.n_builds == 1 and info1["gmres_iters"] <= 2
 
     res2, t2 = make(2)                 # 块整体换掉：复用的预处理对它几乎无效
     budget = int(REFRESH_FACTOR * cache.baseline_iters + REFRESH_SLACK)
     u, info2 = step_newton_krylov(res2, u, dtau, np.ones(2), block_precond=cache, gmres_max_iter=200,
-                                  physicality=positive_fields_row_limits)
+                                  physicality=ScaledFieldRowLimits([1e-12, 1e-12]))
     assert cache.n_builds == 2, "本步没有当场重装配"
     assert info2["gmres_iters"] <= budget + 2, info2["gmres_iters"]
     assert info2["gmres_info"] == 0 and info2["theta"] == 1.0

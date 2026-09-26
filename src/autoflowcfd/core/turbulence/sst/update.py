@@ -18,21 +18,15 @@ class _SSTUpdateMixin:
 
     def apply_positivity_limiter(self):
         """
-        正性保持限制器 (T-02)：强制 k 和 omega 在物理合理范围内。
+        k/omega 的非有限值恢复与上界（`bounds.py::clip_to_bounds`）。
 
-        下界：k, omega >= min（防止负值导致后续计算崩溃）
-        上界：k <= k_max, omega <= omega_max（防止输运方程数值爆炸）
+        **不裁剪下界**（2026-09-26）：被输运的 k/omega 可以越过下限甚至为负，
+        realizability 只作用于模型项求值，理由见 `bounds.py` 模块文档。
 
-        上界的物理依据：
-        - k_max = 0.5 * vel_inf^2：湍动能不可能超过平均流动能
-        - omega_max：远大于任何工程壁面 omega 值的保守上界
-        不设上界时，SST 源项+输运项的正反馈（P_k ∝ k，transport ∝ ∇k）
-        会导致 k/omega 指数增长到 1e260+ 量级（实测 cube_demo 100 步内
-        即达到此量级），而平均流完全不受影响（nu_t 被 SST a1 限幅保持
-        合理），形成"平均流正常但湍流场完全发散"的隐蔽失效模式。
-
-        区间的唯一定义（含 k 的来流下限、omega 的逐点 realizability 下限）见
-        `bounds.py`；GPU 版与隐式 k-omega 的界约束读同一份。
+        上界的物理依据：k_max = 0.5 vel_inf^2（湍动能不超过平均流动能）、omega_max
+        为远大于工程壁面值的保守上界。不设上界时 SST 源项与输运的正反馈（P_k ∝ k，
+        transport ∝ ∇k）会让 k/omega 指数增长到 1e260 量级（cube_demo 100 步内实测），
+        而平均流因 nu_t 被 a1 限幅保持正常——"平均流正常但湍流场完全发散"。
         """
         clip_to_bounds(self, np)
 

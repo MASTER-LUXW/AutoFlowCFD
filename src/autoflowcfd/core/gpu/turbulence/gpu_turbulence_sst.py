@@ -25,6 +25,7 @@ from typing import Optional, Tuple
 
 from autoflowcfd.core.gpu import gpu_available, get_cupy
 from autoflowcfd.core.turbulence.sst.ambient import ambient_sustaining_terms
+from autoflowcfd.core.turbulence.sst.bounds import model_evaluation_fields, omega_realizability_floor
 
 
 class GPUTurbulenceSST:
@@ -255,24 +256,25 @@ class GPUTurbulenceSST:
         Omega_mag = self.compute_vorticity_magnitude_gpu(grad_U)
         S_omega_prod = S_mag * Omega_mag
 
-        # omega 下限 max(逐点 0.1 S, 0.1 omega_inf)，与 CPU 版
-        # `core/turbulence/sst/source.py` 同一处逐字对应（两项各自的理由、以及
-        # 它与环境维持项的关系见那里）。
-        self._omega_realizability_min = cp.maximum(0.1 * S_mag, 0.1 * self.omega_inf)
+        # realizability 只作用于模型项求值、不裁剪被输运的 k/omega，与 CPU 版
+        # `core/turbulence/sst/source.py` 同一处逐项对应（定义在 `sst/bounds.py`）
+        k_raw = cp.clip(self.k_field, -1e40, 1e40)
+        omega_raw = cp.clip(self.omega_field, -1e40, 1e40)
+        self._omega_realizability_min = omega_realizability_floor(self, S_mag, cp)
+        k_safe, omega_safe = model_evaluation_fields(k_raw, omega_raw, self._omega_realizability_min, cp)
 
         # 交叉扩散项
         grad_dot = cp.sum(grad_k * grad_omega, axis=2)
-        omega_safe = cp.maximum(self.omega_field, 1e-10)
         CD_kw = cp.maximum(
             2.0 * rho * self.sigma_w2 / omega_safe * grad_dot, 1e-10
         )
 
         # Blending functions
         F1 = self.compute_blending_F1_gpu(
-            self.k_field, self.omega_field, d_wall, nu, rho, CD_kw
+            k_safe, omega_safe, d_wall, nu, rho, CD_kw
         )
         F2 = self.compute_blending_F2_gpu(
-            self.k_field, self.omega_field, d_wall, nu
+            k_safe, omega_safe, d_wall, nu
         )
 
         # Blending 常数
@@ -288,18 +290,18 @@ class GPUTurbulenceSST:
         # 涡粘系数（传入 mu 以施加物理粘性比上限，见 compute_eddy_
         # viscosity_gpu 文档）
         self.nu_t = self.compute_eddy_viscosity_gpu(
-            self.k_field, self.omega_field, rho, S_mag, F2, mu
+            k_safe, omega_safe, rho, S_mag, F2, mu
         )
 
         # === k 方程源项 ===
         # 产生项: P_k = μ_t * S * Ω（Kato-Launder 修正）
         P_k = self.production_factor * self.nu_t * rho * S_omega_prod
-        P_k = cp.minimum(P_k, 10.0 * self.beta_star * rho * self.k_field * omega_safe)
+        P_k = cp.minimum(P_k, 10.0 * self.beta_star * rho * k_safe * omega_safe)
 
         if self.des_length_scale is not None:
-            D_k = rho * self.k_field**1.5 / cp.maximum(self.des_length_scale, 1e-10)
+            D_k = rho * k_raw * cp.sqrt(cp.abs(k_raw)) / cp.maximum(self.des_length_scale, 1e-10)
         else:
-            D_k = rho * self.beta_star * self.k_field * self.omega_field
+            D_k = rho * self.beta_star * k_raw * omega_safe
 
         Sk = P_k - D_k
 
@@ -310,7 +312,7 @@ class GPUTurbulenceSST:
 
         # 产生项: P_ω = ρ * γ * S * Ω（Kato-Launder 修正）
         P_omega = self.production_factor * rho * gamma * S_omega_prod
-        D_omega = rho * beta * self.omega_field**2
+        D_omega = rho * beta * omega_safe * omega_raw
         CD_omega = 2.0 * rho * (1.0 - F1) * self.sigma_w2 / omega_safe * grad_dot
 
         S_omega = P_omega - D_omega + CD_omega

@@ -300,6 +300,8 @@ class TestTurbulenceTransportResidualGpuMatchesCpu:
         # 复用真实类里的公式本体（不重新手写一遍），只是不走真正需要
         # CUDA 设备的 __init__。
         turb.compute_blending_F1_gpu = types.MethodType(GPUTurbulenceSST.compute_blending_F1_gpu, turb)
+        turb.compute_strain_rate_magnitude_gpu = types.MethodType(
+            GPUTurbulenceSST.compute_strain_rate_magnitude_gpu, turb)
 
         return types.SimpleNamespace(
             turb_model_gpu=turb,

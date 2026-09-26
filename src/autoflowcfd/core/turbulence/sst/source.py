@@ -12,6 +12,7 @@ import numpy as np
 from typing import Tuple
 
 from .ambient import ambient_sustaining_terms
+from .bounds import model_evaluation_fields, omega_realizability_floor
 
 
 class _SSTSourceMixin:
@@ -46,12 +47,10 @@ class _SSTSourceMixin:
         # 运动粘度
         nu = mu / np.maximum(rho, 1e-10)
 
-        # 钳制湍流变量防 overflow：k*omega 在 k,omega~1e155 时超 float64
-        # 上限。物理上 k<1e6, omega<1e8 已远超任何工程工况，保守取 1e40
-        # 确保 k*omega=1e80 后乘 rho*beta_star 仍安全
-        k_safe = np.minimum(self.k_field, 1e40)
-        omega_safe_raw = np.minimum(self.omega_field, 1e40)
-        omega_safe = np.maximum(omega_safe_raw, 1e-10)
+        # 被输运的原值（可以越过下限甚至为负，见 `bounds.py` 模块文档）；
+        # 钳到 ±1e40 只防 k*omega 在 float64 上溢出
+        k_raw = np.clip(self.k_field, -1e40, 1e40)
+        omega_raw = np.clip(self.omega_field, -1e40, 1e40)
 
         # 计算应变率模
         S_mag = self.compute_strain_rate_magnitude(grad_U)
@@ -62,23 +61,18 @@ class _SSTSourceMixin:
         Omega_mag = self.compute_vorticity_magnitude(grad_U)
         S_omega_prod = S_mag * Omega_mag  # Kato-Launder 有效应变率
 
-        # omega 下限（供正性限制器使用）= max(逐点 0.1 S, 0.1 omega_inf)：
+        # omega 的 realizability 下限 omega_r = max(逐点 0.1 S, 0.1 omega_inf)，只用于
+        # **模型项求值**（`bounds.model_evaluation_fields`），不裁剪被输运的 omega：
         #
         # * 逐点 `0.1 S`：时间尺度 realizability，防止剪切区 omega 过小导致
         #   tau = 1/(beta* omega) 过大。必须逐点（2026-09-15 真实缺陷：曾用
         #   全域 max(S)，整场 omega 被耦合到单个最差点上，79 万单元网格发散）；
-        # * `0.1 omega_inf`：暂态安全网（2026-09-07 引入）。P0 阶段 S 恒为零、
-        #   没有产生项，omega=1e-12 是稳定不动点（cube_demo 升阶后 k 撞 k_max
-        #   的根因）。（2026-09-26 一度以为 P1 暂态里还有把解点 omega 推向零的
-        #   模态需要它挡住——那是湍流输运两处离散缺陷造成的，修掉之后棱柱通道
-        #   上有无这一项逐位相同，见 `ambient.py`。）
-        #
-        # 安全网的前提是它**低于物理稳态解**。标准 SST 下这一条不成立——来流
-        # 湍流沿流向衰减，外流算例下游的物理 omega 远低于 0.1 omega_inf，贴住
-        # 下限的单元里离散稳态无解（plate_demo P1 隐式稳态，数据见
-        # `ambient.py`）。环境维持项让来流不再衰减，物理 omega 在来流区不低于
-        # ~omega_inf、近壁远高于它，这一项于是只在非物理暂态里起作用。
-        self._omega_realizability_min = np.maximum(0.1 * S_mag, 0.1 * self.omega_inf)
+        # * `0.1 omega_inf`：P0 阶段 S 恒为零、没有产生项时（2026-09-07：omega=1e-12
+        #   曾是稳定不动点，cube_demo 升阶后 k 撞 k_max 的根因）给模型项一个有意义
+        #   的时间尺度。环境维持项之后 omega 本身也不会塌陷到零（`ambient.py`）。
+        self._omega_realizability_min = omega_realizability_floor(self, S_mag, np)
+        # 模型项求值用的有效值（realizability 只在这里施加，不裁剪被输运的量）
+        k_safe, omega_safe = model_evaluation_fields(k_raw, omega_raw, self._omega_realizability_min, np)
 
         # 交叉扩散项 CD_kw（F1 与 S_omega 的 CD_omega 项共用同一个量，
         # 标准做法是先算这个再算两处，避免重复计算且保证一致）
@@ -120,10 +114,12 @@ class _SSTSourceMixin:
         # 耗散项：标准 RANS 为 D_k = ρ*β**k*ω；DES/DDES 激活时（T-04）
         # 替换为 D_k = ρ*k^1.5/l_eff，用 DDES 的混合长度尺度直接替代
         # SST 隐含的 RANS 耗散长度尺度，而不是用启发式系数缩放 β*。
+        # 耗散写成"k 的原值 × 有效 omega"：k 越过零时耗散变号、把它推回来
+        # （DES 分支同理取 k*sqrt(|k|)，k>=0 时即 k^1.5）。
         if self.des_length_scale is not None:
-            D_k = rho * k_safe**1.5 / np.maximum(self.des_length_scale, 1e-10)
+            D_k = rho * k_raw * np.sqrt(np.abs(k_raw)) / np.maximum(self.des_length_scale, 1e-10)
         else:
-            D_k = rho * self.beta_star * k_safe * omega_safe
+            D_k = rho * self.beta_star * k_raw * omega_safe
 
         # k 方程总源项
         Sk = P_k - D_k
@@ -136,9 +132,9 @@ class _SSTSourceMixin:
 
         P_omega = self.production_factor * rho * gamma * S_omega_prod
 
-        # 耗散项: D_ω = ρ * β * ω^2
-        # omega_safe 已钳制到 [1e-10, 1e100]，平方后 1e200 仍在 float64 范围内
-        D_omega = rho * beta * omega_safe**2
+        # 耗散项: D_ω = ρ β ω²，写成"有效 omega × omega 原值"：omega 越过下限时
+        # 随原值线性下降、低于零时变号，与环境维持项一起把它推回来
+        D_omega = rho * beta * omega_safe * omega_raw
 
         # 交叉扩散项: CD_ω = 2 * ρ * (1-F1) * σ_w2 / ω * ∇k · ∇ω（与上面
         # 算 CD_kw 用的是同一个 grad_dot_product，(1-F1) 权重是标准 SST

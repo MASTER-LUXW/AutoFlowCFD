@@ -251,6 +251,8 @@ class TestNativeScalarTransportMatchesCpu:
             k_inf=1e-6, omega_inf=1.0,
         )
         turb_gpu.compute_blending_F1_gpu = types.MethodType(GPUTurbulenceSST.compute_blending_F1_gpu, turb_gpu)
+        turb_gpu.compute_strain_rate_magnitude_gpu = types.MethodType(
+            GPUTurbulenceSST.compute_strain_rate_magnitude_gpu, turb_gpu)
         gpu_solver = types.SimpleNamespace(
             turb_model_gpu=turb_gpu,
             mesh=mesh,

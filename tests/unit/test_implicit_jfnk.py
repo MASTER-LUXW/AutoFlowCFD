@@ -470,7 +470,7 @@ def test_physicality_relaxation_is_cellwise_not_global():
     Newton 步。2026-09-25 以前是全场取最小的一个 theta：plate_demo P0+SST 上
     一个单元让湍流 Newton 的 theta 掉到 7.9e-5，整个湍流场随之冻结。"""
     from autoflowcfd.core.time_integration.implicit.jfnk import (
-        PHYSICALITY_MAX_RELATIVE_CHANGE as C, positive_fields_row_limits, step_newton_krylov,
+        PHYSICALITY_MAX_RELATIVE_CHANGE as C, ScaledFieldRowLimits, step_newton_krylov,
     )
 
     n_cells, rows_per_cell = 6, 3
@@ -483,7 +483,7 @@ def test_physicality_relaxation_is_cellwise_not_global():
         return u - target
 
     u1, info = step_newton_krylov(
-        residual, u0, np.full(n, 1e12), np.ones(2), physicality=positive_fields_row_limits,
+        residual, u0, np.full(n, 1e12), np.ones(2), physicality=ScaledFieldRowLimits([1e-12, 1e-12]),
         rows_per_cell=rows_per_cell, gmres_max_iter=50)
 
     alpha0 = C / 0.99
@@ -498,7 +498,7 @@ def test_positive_field_relaxation_bounds_increase_too():
     """单步变化是双向（对数对称）约束：想把 k 放大 1000 倍的单元只被放大
     1/(1-c) 倍。"""
     from autoflowcfd.core.time_integration.implicit.jfnk import (
-        PHYSICALITY_MAX_RELATIVE_CHANGE as C, positive_fields_row_limits, step_newton_krylov,
+        PHYSICALITY_MAX_RELATIVE_CHANGE as C, ScaledFieldRowLimits, step_newton_krylov,
     )
 
     n = 4
@@ -506,7 +506,26 @@ def test_positive_field_relaxation_bounds_increase_too():
     target[0] = 1000.0
     u1, info = step_newton_krylov(
         lambda u: u - target, np.ones((n, 2)), np.full(n, 1e12), np.ones(2),
-        physicality=positive_fields_row_limits, rows_per_cell=1, gmres_max_iter=50)
+        physicality=ScaledFieldRowLimits([1e-12, 1e-12]), rows_per_cell=1, gmres_max_iter=50)
     np.testing.assert_allclose(u1[0], 1.0 / (1.0 - C), rtol=1e-10)
     np.testing.assert_allclose(u1[1:], 1.0, rtol=1e-12)
     assert info["limited_fraction"] == pytest.approx(0.25)
+
+
+def test_scaled_field_limits_cross_the_floor_gradually():
+    """尺度下限附近变成绝对限幅：值远小于尺度下限的解点每步可以移动 c*scale，
+    可以越过零（被输运的 k/omega 不裁剪，见 `turbulence/sst/bounds.py`）——纯相对
+    限幅在这里会冻结整个单元。"""
+    from autoflowcfd.core.time_integration.implicit.jfnk import (
+        PHYSICALITY_MAX_RELATIVE_CHANGE as C, ScaledFieldRowLimits, step_newton_krylov,
+    )
+
+    scale = 1e-3
+    target = np.array([[-1e-2, 1.0], [1.0, 1.0]])
+    u0 = np.array([[1e-6, 1.0], [1.0, 1.0]])
+    u1, info = step_newton_krylov(
+        lambda u: u - target, u0, np.full(2, 1e12), np.ones(2),
+        physicality=ScaledFieldRowLimits([scale, scale]), rows_per_cell=1, gmres_max_iter=50)
+    np.testing.assert_allclose(u1[0, 0], 1e-6 - C * scale, rtol=1e-10)
+    assert u1[0, 0] < 0.0
+    np.testing.assert_allclose(u1[1], 1.0, rtol=1e-12)

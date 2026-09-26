@@ -189,16 +189,31 @@ def _relative_change_limits(xp, u0, du, c):
     return xp.where(up, lim_up, xp.where(down, lim_down, xp.inf))
 
 
-def positive_fields_row_limits(u0_flat, du_flat, red: LocalReductions):
-    """标量正值场（湍流 `k`/`omega`）的逐行限值：每一列都满足
-    `u_new/u in [1-c, 1/(1-c)]`，`c = PHYSICALITY_MAX_RELATIVE_CHANGE`。
+class ScaledFieldRowLimits:
+    """标量场（湍流 `k`/`omega`）的逐行限值：每列单步变化以
+    `s = max(|u|, scale_j)` 为基准，下降不超过 `c*s`、增长不超过 `(1/(1-c)-1)*s`，
+    `c = PHYSICALITY_MAX_RELATIVE_CHANGE`。
 
-    与守恒变量那一版同一个理由：不是"不变负就行"，而是单步相对变化不超过
-    `c`——`omega` 掉到原值的 1e-6 仍是正数，但涡粘 `nu_t = k/omega` 会被放大
-    六个数量级、下一次残差求值毫无意义；反方向同理（见 `_relative_change_limits`）。
+    `u` 远大于尺度下限时就是对数对称的相对变化限幅（与守恒变量那一版同一理由：
+    omega 掉到原值的 1e-6 仍是正数，但涡粘会被放大六个数量级、下一次残差求值
+    毫无意义；反方向同理，见 `_relative_change_limits`）。在尺度下限附近变成绝对
+    限幅：被输运的 k/omega 按 `turbulence/sst/bounds.py` 的约定可以越过下限甚至
+    为负（realizability 只作用于模型项求值），纯相对限幅在那里退化成冻结——
+    2026-09-26 之前正是贴下限的解点把整个单元的松弛因子压到 1e-4。
+
+    做成类而不是闭包：在整个 Newton 步存活（项目规范）。
     """
-    lim = _relative_change_limits(red.xp, u0_flat, du_flat, PHYSICALITY_MAX_RELATIVE_CHANGE).min(axis=1)
-    return red.xp.clip(lim, 0.0, 1.0)
+
+    __slots__ = ("_scales",)
+
+    def __init__(self, scales):
+        self._scales = np.asarray(scales, dtype=np.float64)
+
+    def __call__(self, u0_flat, du_flat, red: LocalReductions):
+        xp = red.xp
+        base = xp.maximum(xp.abs(u0_flat), xp.asarray(self._scales)[None, :])
+        lim = _relative_change_limits(xp, base, du_flat, PHYSICALITY_MAX_RELATIVE_CHANGE).min(axis=1)
+        return xp.clip(lim, 0.0, 1.0)
 
 
 def _cellwise_relaxation(alpha_rows, rows_per_cell: int, red: LocalReductions):
@@ -322,7 +337,7 @@ def step_newton_krylov(
         block_precond: 跨 Newton 步持有单元块 Jacobian 的缓存
             （`block_jacobi.py`）；`None` 时用逐 SP 对角预处理。
         physicality: `(U0, dU, red) -> alpha_rows` 逐行物理性限值。默认按
-            守恒变量约束密度与压力；湍流标量方程传 `positive_fields_row_limits`。
+            守恒变量约束密度与压力；湍流标量方程传 `ScaledFieldRowLimits`。
         rows_per_cell: 每个单元占几行（解点数）：逐行限值在单元内取最小，
             作为该单元更新的松弛因子（见 `PHYSICALITY_MAX_RELATIVE_CHANGE`）。
         red: 全局归约（`reductions.py`）。`None` 时为单进程 numpy；GPU 传

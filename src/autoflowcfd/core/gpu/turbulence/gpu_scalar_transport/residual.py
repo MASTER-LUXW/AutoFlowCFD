@@ -16,6 +16,7 @@ from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_
 
 
 from autoflowcfd.core.turbulence.transport import resolve_turb_overintegration
+from autoflowcfd.core.turbulence.sst.bounds import model_evaluation_fields, omega_realizability_floor
 from autoflowcfd.core.turbulence.transport.faces import boundary_diffusion_targets, penalty_length
 
 # 过积分上下文提取到 `core/gpu/gpu_overintegration.py`（2026-09-15，粘性
@@ -256,11 +257,14 @@ def compute_turbulence_transport_residual_gpu(
     )
 
     grad_dot = cp.sum(grad_k * grad_omega, axis=-1)
-    omega_safe = cp.maximum(turb.omega_field, 1e-10)
+    # 模型项求值用有效值（与 CPU 版同一处，定义在 `sst/bounds.py`）
+    S_mag = turb.compute_strain_rate_magnitude_gpu(grad_vel)
+    k_eff, omega_safe = model_evaluation_fields(turb.k_field, turb.omega_field,
+                                                omega_realizability_floor(turb, S_mag, cp), cp)
     CD_kw = cp.maximum(2.0 * rho * turb.sigma_w2 / omega_safe * grad_dot, 1e-10)
 
     d_wall = solver.wall_distance_gpu
-    F1 = turb.compute_blending_F1_gpu(turb.k_field, turb.omega_field, d_wall, nu, rho, CD_kw)
+    F1 = turb.compute_blending_F1_gpu(k_eff, omega_safe, d_wall, nu, rho, CD_kw)
 
     sigma_k = F1 * turb.sigma_k1 + (1.0 - F1) * turb.sigma_k2
     sigma_w = F1 * turb.sigma_w1 + (1.0 - F1) * turb.sigma_w2

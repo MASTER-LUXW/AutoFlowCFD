@@ -16,6 +16,7 @@ from autoflowcfd.core.fr_operators.gradients import (
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 
 from .faces import precompute_scalar_convection_geometry
+from ..sst.bounds import model_evaluation_fields, omega_realizability_floor
 from .convection import compute_scalar_convection_residual
 from .diffusion import compute_scalar_diffusion_residual
 from .omega_wall import (
@@ -144,11 +145,13 @@ def compute_turbulence_transport_residual(
             grad_omega = grad_omega * np.clip(scale_omega, 0, 1)[..., None]
 
         grad_dot = np.sum(grad_k * grad_omega, axis=-1)
-        omega_safe = np.maximum(turb.omega_field, 1e-10)
+        # 模型项求值用有效值（`sst/bounds.py`，与源项求值同一个定义）
+        k_eff, omega_safe = model_evaluation_fields(
+            turb.k_field, turb.omega_field, omega_realizability_floor(turb, S_mag, np), np)
         CD_kw = np.maximum(2.0 * rho * turb.sigma_w2 / omega_safe * grad_dot, 1e-10)
 
     F1 = turb.compute_blending_function_F1(
-        turb.k_field, turb.omega_field, solver.wall_distance, nu, S_mag, rho, CD_kw
+        k_eff, omega_safe, solver.wall_distance, nu, S_mag, rho, CD_kw
     )
 
     sigma_k = F1 * turb.sigma_k1 + (1.0 - F1) * turb.sigma_k2

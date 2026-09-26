@@ -106,67 +106,39 @@ class TestOmegaRealizabilityMin:
         np.testing.assert_array_equal(model.omega_field, before)
         assert np.all(before > 5.0 * np.asarray(model._omega_realizability_min))
 
-    def test_positivity_limiter_recovers_collapsed_omega_at_p0(self):
-        """P0（S=0）下被打到 1e-12 的 omega 由限制器拉回 0.1 omega_inf。"""
+    def test_collapsed_omega_uses_effective_value_and_is_restored(self):
+        """P0（S=0）下被打到 1e-12 的 omega：限制器不再把它夹回去（不裁剪被输运的
+        量，`bounds.py` 模块文档），模型项用 omega_eff = 0.1 omega_inf（涡粘有限），
+        源项为正、把它推回来。"""
         model = SSTModelFR(2, 1, k_inf=K_INF, omega_inf=OMEGA_INF)
         model.k_field[:] = [[0.0514], [K_INF]]
         model.omega_field[:] = [[1e-12], [OMEGA_INF]]
-        _sources(model)
+        _, Sw = _sources(model)
         model.apply_positivity_limiter()
-        assert model.omega_field[0, 0] == pytest.approx(0.1 * OMEGA_INF)
-        assert model.omega_field[1, 0] == pytest.approx(OMEGA_INF)
+        assert model.omega_field[0, 0] == 1e-12
+        assert Sw[0, 0] > 0.0
+        nu_t_expected = 0.0514 / (0.1 * OMEGA_INF)
+        assert model.nu_t[0, 0] == pytest.approx(nu_t_expected, rel=1e-12)
 
 
-class TestKFloorAtP0:
-    """真实 bug 回归测试（2026-09-11）：cube_demo 791,492 单元真实网格
-    P0 阶段长程续算（iter 1600→2500）里，撞到裸正性下限 1e-12 的单元数
-    2→9→39→62 持续扩散——P0 架构上生成项 P_k 恒为零（同一个 grad_vel
-    恒零的事实，见 omega realizability 下限文档），k 只能靠 point-implicit
-    阻尼过的耗散项+输运衰减，足够长的 P0 停留时间下任何单元都可能被
-    压到裸下限，且不限于对流补给弱的回流区（真实撞底单元里有局部速度
-    接近自由来流 27~30 m/s 的、非回流区单元）。
+class TestTransportedFieldsAreNotClipped:
+    """被输运的 k/omega 不裁剪下界，realizability 只作用于模型项求值
+    （`core/turbulence/sst/bounds.py`，2026-09-26）。"""
 
-    修复：apply_positivity_limiter 新增 k 的来流下限 `max(1e-12,
-    1e-3*k_inf)`，与 omega realizability 下限同源同构但取更保守的比例
-    （k=0 本身合法，不像 omega=0 是数学奇点，故不能照抄 0.1 这个量级）。
-    """
-
-    def test_k_floor_recovers_collapsed_cell(self):
-        n_cells, n_sps = 2, 1
-        k_inf = 0.1666
-        model = SSTModelFR(n_cells, n_sps, k_inf=k_inf, omega_inf=2268.1)
-
-        # 模拟真实复现：某单元 k 被打到裸正性下限附近。
-        model.k_field[0, 0] = 1e-12
-        model.k_field[1, 0] = 0.15  # 对照单元，正常值
-
+    def test_negative_k_is_kept_and_restored(self):
+        model = SSTModelFR(2, 1, k_inf=K_INF, omega_inf=OMEGA_INF)
+        model.k_field[:] = [[-0.01], [K_INF]]
+        model.omega_field[:] = OMEGA_INF
+        Sk, _ = _sources(model)
         model.apply_positivity_limiter()
+        assert model.k_field[0, 0] == -0.01
+        assert model.nu_t[0, 0] == pytest.approx(1e-10 / OMEGA_INF, rel=1e-6), "涡粘用 k_bar = max(k, 0)"
+        assert Sk[0, 0] > 0.0, "k 的原值为负时耗散变号、源项把它推回来"
 
-        assert model.k_field[0, 0] == pytest.approx(1e-3 * k_inf)
-        assert model.k_field[0, 0] > 1e-6  # 明确排除"还停留在裸下限附近"
-        # 正常单元不受影响（远高于新下限，不应被下限"拉低"或改变）。
-        assert model.k_field[1, 0] == pytest.approx(0.15)
-
-    def test_k_floor_does_not_override_higher_values(self):
-        """新下限只在 k 已经跌破时兜底，不能把高于下限的正常值意外
-        拉到下限本身。"""
-        n_cells, n_sps = 1, 1
-        k_inf = 0.1666
-        model = SSTModelFR(n_cells, n_sps, k_inf=k_inf, omega_inf=2268.1)
-        model.k_field[0, 0] = 0.05  # 远高于 1e-3*k_inf
-
+    def test_limiter_only_recovers_non_finite_and_caps_upper(self):
+        model = SSTModelFR(3, 1, k_inf=K_INF, omega_inf=OMEGA_INF)
+        model.k_field[:] = [[np.nan], [2.0 * model.k_max], [-1.0]]
+        model.omega_field[:] = [[np.inf], [2.0 * model.omega_max], [-5.0]]
         model.apply_positivity_limiter()
-
-        assert model.k_field[0, 0] == pytest.approx(0.05)
-
-    def test_k_floor_absent_when_k_inf_not_set(self):
-        """防御性：k_inf 属性缺失（旧版本/异常构造路径）时不应该报错，
-        应静默跳过新下限，只保留原有裸正性下限行为。"""
-        n_cells, n_sps = 1, 1
-        model = SSTModelFR(n_cells, n_sps, k_inf=0.1666, omega_inf=2268.1)
-        del model.k_inf
-        model.k_field[0, 0] = 1e-13
-
-        model.apply_positivity_limiter()
-
-        assert model.k_field[0, 0] == pytest.approx(1e-12)
+        np.testing.assert_array_equal(model.k_field[:, 0], [0.0, model.k_max, -1.0])
+        np.testing.assert_array_equal(model.omega_field[:, 0], [OMEGA_INF, model.omega_max, -5.0])
