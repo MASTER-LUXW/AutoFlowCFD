@@ -18,9 +18,9 @@ from .jfnk import (  # noqa: F401
     DTAU_MAX_CUTS_PER_STEP,
     GMRES_MAX_ITER,
     GMRES_RESTART,
-    PHYSICALITY_MAX_RELATIVE_CHANGE,
     step_newton_krylov,
 )
+from .physicality import PHYSICALITY_MAX_RELATIVE_CHANGE  # noqa: F401
 
 __all__ = [
     "BlockJacobiCache",

@@ -469,8 +469,9 @@ def test_physicality_relaxation_is_cellwise_not_global():
     """一个单元想把正值场降掉 99%，只有它自己被松弛；其余单元照常走完整的
     Newton 步。2026-09-25 以前是全场取最小的一个 theta：plate_demo P0+SST 上
     一个单元让湍流 Newton 的 theta 掉到 7.9e-5，整个湍流场随之冻结。"""
-    from autoflowcfd.core.time_integration.implicit.jfnk import (
-        PHYSICALITY_MAX_RELATIVE_CHANGE as C, ScaledFieldRowLimits, step_newton_krylov,
+    from autoflowcfd.core.time_integration.implicit.jfnk import step_newton_krylov
+    from autoflowcfd.core.time_integration.implicit.physicality import (
+        PHYSICALITY_MAX_RELATIVE_CHANGE as C, ScaledFieldRowLimits,
     )
 
     n_cells, rows_per_cell = 6, 3
@@ -497,8 +498,9 @@ def test_physicality_relaxation_is_cellwise_not_global():
 def test_positive_field_relaxation_bounds_increase_too():
     """单步变化是双向（对数对称）约束：想把 k 放大 1000 倍的单元只被放大
     1/(1-c) 倍。"""
-    from autoflowcfd.core.time_integration.implicit.jfnk import (
-        PHYSICALITY_MAX_RELATIVE_CHANGE as C, ScaledFieldRowLimits, step_newton_krylov,
+    from autoflowcfd.core.time_integration.implicit.jfnk import step_newton_krylov
+    from autoflowcfd.core.time_integration.implicit.physicality import (
+        PHYSICALITY_MAX_RELATIVE_CHANGE as C, ScaledFieldRowLimits,
     )
 
     n = 4
@@ -516,8 +518,9 @@ def test_scaled_field_limits_cross_the_floor_gradually():
     """尺度下限附近变成绝对限幅：值远小于尺度下限的解点每步可以移动 c*scale，
     可以越过零（被输运的 k/omega 不裁剪，见 `turbulence/sst/bounds.py`）——纯相对
     限幅在这里会冻结整个单元。"""
-    from autoflowcfd.core.time_integration.implicit.jfnk import (
-        PHYSICALITY_MAX_RELATIVE_CHANGE as C, ScaledFieldRowLimits, step_newton_krylov,
+    from autoflowcfd.core.time_integration.implicit.jfnk import step_newton_krylov
+    from autoflowcfd.core.time_integration.implicit.physicality import (
+        PHYSICALITY_MAX_RELATIVE_CHANGE as C, ScaledFieldRowLimits,
     )
 
     scale = 1e-3
@@ -529,3 +532,38 @@ def test_scaled_field_limits_cross_the_floor_gradually():
     np.testing.assert_allclose(u1[0, 0], 1e-6 - C * scale, rtol=1e-10)
     assert u1[0, 0] < 0.0
     np.testing.assert_allclose(u1[1], 1.0, rtol=1e-12)
+
+
+def test_local_dtau_scale_cuts_relaxed_rows_and_recovers_the_rest():
+    """被物理性松弛的行下一步降局部 dtau（乘以 max(alpha, 下限)），未松弛的行按固定
+    倍数恢复到 1（见 physicality.py 的 LOCAL_DTAU_* 说明）。"""
+    from autoflowcfd.core.time_integration.implicit.physicality import (
+        LOCAL_DTAU_CUT_MIN, LOCAL_DTAU_FLOOR, LOCAL_DTAU_GROW, update_local_dtau_scale,
+    )
+
+    scale = np.array([1.0, 1.0, 0.5, 0.01, 1e-8])
+    alpha = np.array([1.0, 0.3, 1.0, 1e-6, 1e-3])
+    new = update_local_dtau_scale(scale, alpha, np)
+    np.testing.assert_allclose(new, [1.0, 0.3, min(0.5 * LOCAL_DTAU_GROW, 1.0),
+                                     0.01 * LOCAL_DTAU_CUT_MIN, LOCAL_DTAU_FLOOR])
+
+
+def test_newton_step_returns_and_applies_local_dtau_scale():
+    """局部缩放随 info 返回，下一次调用传回时逐行作用在 dtau 上：缩放为 0 附近的行
+    几乎不动（显式极限），其余行照常收敛。"""
+    from autoflowcfd.core.time_integration.implicit.jfnk import step_newton_krylov
+
+    n = 40
+    target = np.tile([1.2, 0.3, 0.0, 0.0, 2.6], (n, 1))
+
+    def R(u):
+        return u - target
+
+    u0 = np.tile([1.0, 0.0, 0.0, 0.0, 2.5], (n, 1))
+    scale = np.ones(n)
+    scale[:5] = 1e-8
+    u1, info = step_newton_krylov(R, u0, np.full(n, 1e6), np.ones(5), local_dtau_scale=scale)
+    assert info["local_dtau_scale"].shape == (n,)
+    assert np.abs(u1[:5] - u0[:5]).max() < 1e-1 * np.abs(target[:5] - u0[:5]).max()
+    # 线性求解按 inexact Newton 的默认容差（eta=0.1）停止：其余行一步收缩到初差的 1/10 以内
+    assert np.abs(u1[5:] - target[5:]).max() <= 0.1 * np.abs(u0[5:] - target[5:]).max()

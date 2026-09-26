@@ -48,6 +48,8 @@ Jacobian 每单元一个 `(27*5)^2` 的块加上面耦合块，在同一网格�
 
 from typing import Callable, Optional, Tuple
 
+import time
+
 import numpy as np
 
 from .dtau_control import MIN_SCALE as DTAU_MIN_SCALE, PtcDtauScale
@@ -55,6 +57,10 @@ from .forcing import EisenstatWalkerForcing
 from .jacobian_vector import MatrixFreeJacobian
 from .block_jacobi import BlockJacobiCache
 from .gmres import gmres_right
+from .physicality import (
+    PHYSICALITY_MAX_RELATIVE_CHANGE, _cellwise_relaxation, density_pressure_row_limits,
+    update_local_dtau_scale,
+)
 from .preconditioner import PseudoTransientDiagonal
 from .reductions import LocalReductions
 
@@ -115,130 +121,35 @@ MAX_BACKTRACK = 4
 #: 不受这个值限制、单步成本却受它限制。
 DTAU_MAX_CUTS_PER_STEP = 3
 
-#: 物理性限幅允许的单步最大相对**下降**（对 `rho` 与 `p`，湍流的 `k`/`omega`）；
-#: 增长按对数对称给出：单步 `u_new/u in [1-c, 1/(1-c)]`，c=0.5 即"最多减半、
-#: 最多加倍"。这些量都是跨多个量级的正值量，对数对称才是同一个"变化幅度"。
-#: 这是 SU2/FUN3D 那类"非物理点上收紧步长"的标准做法 —— Newton 方向在
-#: 远离解时可以指向 `rho<0`，直接走过去会让下一次残差求值算在非物理态
-#: 上、整个迭代失去意义。
-#:
-#: **逐单元松弛，不是全局取最小**（2026-09-25）：每个单元按自己全部解点
-#: 的限值取一个因子 `alpha_c in [0,1]`，只缩放该单元的更新（单元内各解点
-#: 共用一个因子，保持单元内更新的多项式形状）。此前是全场取最小的一个
-#: 标量 `theta`：plate_demo P0+SST（17.9 万单元，NK）第 14 步湍流 Newton
-#: 的 `theta_phys = 7.9e-5`——一个单元想把 omega 降一半以上，整个湍流场
-#: 就只能走万分之一步；湍流冻住后平均流 `R_new/R = 0.9995`，残差此后
-#: 逐位不动。SU2 的 `ComputeUnderRelaxationFactor` 同样是逐点的。
-PHYSICALITY_MAX_RELATIVE_CHANGE = 0.5
+class ResidualNorm:
+    """Newton 全局化用的残差范数：逐行权重 `w`（守恒权重 = 求积权重 x det J，
+    补零槽位为 0）下的体积加权 RMS `sqrt(sum w r^2 / (sum w * n_var))`；`w` 为 None
+    时是逐点 RMS。
 
-
-def _pressure(u_flat: np.ndarray) -> np.ndarray:
-    """`p = (gamma-1)(rho_E - |m|^2 / (2 rho))`，形状 `(N,)`。
-
-    这里刻意**不**做 `state._update_primitives()` 里那套 `rho>=1e-10` /
-    `p>=1.0` 的钳制：本函数的用途正是**检测**非物理，钳制会把要检测的
-    东西抹掉。
-    """
-    rho = u_flat[:, 0]
-    m2 = u_flat[:, 1] ** 2 + u_flat[:, 2] ** 2 + u_flat[:, 3] ** 2
-    with np.errstate(divide="ignore", invalid="ignore"):
-        return 0.4 * (u_flat[:, 4] - 0.5 * m2 / rho)
-
-
-def density_pressure_row_limits(u0_flat, du_flat, red: LocalReductions):
-    """逐行（逐解点）`alpha_i in [0, 1]`，使 `U0_i + alpha_i*dU_i` 保持物理。
-
-    只约束两个真正会破坏残差求值的量：
-
-    * **密度**：解析给出 `rho_new/rho in [1-c, 1/(1-c)]`；
-    * **压力**：`p` 是 `U` 的非线性函数
-      （`p = (gamma-1)(rho_E - |m|^2/(2 rho))`），所以不解那个二次
-      不等式，而是先按密度定 `alpha`、再对 `p` 做一次**保守回缩**：
-      若 `U0 + alpha*dU` 处的 `p` 越出同一个比例区间，按实际超出比例把
-      `alpha` 再缩一次。只往"缩小"方向走。
-
-    `c = PHYSICALITY_MAX_RELATIVE_CHANGE`。逐单元取最小由调用方
-    （`step_newton_krylov`）统一做。
-
-    **为什么不是"只要不变负就行"**：`rho` 掉到原值的 1e-6 虽然还是正数，
-    但那一点的温度/声速会离谱到让下一次残差求值毫无意义、并污染整个
-    Krylov 基。限制**相对变化**才是有效的护栏。
-    """
-    c = PHYSICALITY_MAX_RELATIVE_CHANGE
-    xp = red.xp
-    alpha = xp.clip(_relative_change_limits(xp, u0_flat[:, 0], du_flat[:, 0], c), 0.0, 1.0)
-
-    p0 = _pressure(u0_flat)
-    p1 = _pressure(u0_flat + alpha[:, None] * du_flat)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        rel = (p1 - p0) / xp.maximum(xp.abs(p0), 1e-300)
-        # 超出比例区间时按线性化回缩（NaN 即非物理试探点上 rho->0：不参与，
-        # 那一点的 alpha 已由密度约束）
-        shrink = xp.where(rel < -c, c / -rel, xp.where(rel > _up(c), _up(c) / rel, 1.0))
-    return alpha * xp.where(xp.isnan(shrink), 1.0, shrink)
-
-
-def _up(c):
-    """与最大相对下降 `c` 对数对称的最大相对增长 `1/(1-c) - 1`。"""
-    return c / (1.0 - c)
-
-
-def _relative_change_limits(xp, u0, du, c):
-    """逐点允许的最大步长比例，使 `(u0 + alpha*du)/u0 in [1-c, 1/(1-c)]`
-    （正值量；`du == 0` 处 `+inf`）。
-
-    **增长也要约束**（2026-09-25）：此前只约束下降。全局取最小 theta 的年代
-    这一点被掩盖了——一个单元的下降限值把全场都冻住，增长也跟着被冻住；
-    改成逐单元松弛后，plate_demo P0+SST 第 15 步 k 的最大值一步从 0.13 跳到
-    114（未被约束的单元里 Newton 方向把 k 放大近千倍）。取对数对称而不是
-    `|du|/u <= c`：后者把增长也压在 +50%，棱柱通道 NK+SST 算例上湍流发展期
-    50~75% 的单元被松弛、120 步内收敛不了（对数对称下正常收敛）。"""
-    up, down = du > 0.0, du < 0.0
-    with np.errstate(divide="ignore", invalid="ignore"):
-        lim_up = _up(c) * u0 / xp.where(up, du, 1.0)
-        lim_down = c * u0 / xp.where(down, -du, 1.0)
-    return xp.where(up, lim_up, xp.where(down, lim_down, xp.inf))
-
-
-class ScaledFieldRowLimits:
-    """标量场（湍流 `k`/`omega`）的逐行限值：每列单步变化以
-    `s = max(|u|, scale_j)` 为基准，下降不超过 `c*s`、增长不超过 `(1/(1-c)-1)*s`，
-    `c = PHYSICALITY_MAX_RELATIVE_CHANGE`。
-
-    `u` 远大于尺度下限时就是对数对称的相对变化限幅（与守恒变量那一版同一理由：
-    omega 掉到原值的 1e-6 仍是正数，但涡粘会被放大六个数量级、下一次残差求值
-    毫无意义；反方向同理，见 `_relative_change_limits`）。在尺度下限附近变成绝对
-    限幅：被输运的 k/omega 按 `turbulence/sst/bounds.py` 的约定可以越过下限甚至
-    为负（realizability 只作用于模型项求值），纯相对限幅在那里退化成冻结——
-    2026-09-26 之前正是贴下限的解点把整个单元的松弛因子压到 1e-4。
-
-    做成类而不是闭包：在整个 Newton 步存活（项目规范）。
+    **为什么要体积加权**（2026-09-26）：残差按 `dU/dt = 残差/体积` 存，逐点 RMS 把
+    体积相差 1e6 倍的单元等权相加，被最小的单元主导。plate_demo P1：平板锐边一带
+    6.57% 的单元占 `||Gamma R||^2` 的 78.6%，接受判据与 SER 自适应 CFL 被这几百个
+    欠分辨角点单元的不规则行为牵着走，CFL 卡在 20~60。体积加权的积分范数就是
+    有限体积代码的通量不平衡量（SU2/FUN3D 的残差），是物理上有意义的全域度量。
     """
 
-    __slots__ = ("_scales",)
+    __slots__ = ("weights", "red")
 
-    def __init__(self, scales):
-        self._scales = np.asarray(scales, dtype=np.float64)
+    def __init__(self, weights, red: LocalReductions):
+        self.red = red
+        self.weights = None if weights is None else red.xp.asarray(weights, dtype=red.xp.float64).ravel()
 
-    def __call__(self, u0_flat, du_flat, red: LocalReductions):
-        xp = red.xp
-        base = xp.maximum(xp.abs(u0_flat), xp.asarray(self._scales)[None, :])
-        lim = _relative_change_limits(xp, base, du_flat, PHYSICALITY_MAX_RELATIVE_CHANGE).min(axis=1)
-        return xp.clip(lim, 0.0, 1.0)
-
-
-def _cellwise_relaxation(alpha_rows, rows_per_cell: int, red: LocalReductions):
-    """逐行限值 -> 逐单元因子（单元内取最小）按行展开，返回
-    `(alpha_rows_cellwise, alpha_min, limited_cell_fraction)`（后两个是全局量）。"""
-    xp = red.xp
-    alpha_cell = alpha_rows.reshape(-1, rows_per_cell).min(axis=1)
-    alpha_min = red.min(alpha_cell)
-    limited = red.sum(alpha_cell < 1.0) / max(red.count(alpha_cell), 1.0)
-    return xp.repeat(alpha_cell, rows_per_cell), float(alpha_min), float(limited)
+    def __call__(self, r) -> float:
+        if self.weights is None:
+            return self.red.rms(r)
+        s = self.red.sum(self.weights)
+        if s <= 0.0:
+            return 0.0
+        return float(np.sqrt(self.red.sum(self.weights[:, None] * r * r) / (s * r.shape[1])))
 
 
 def _accept_step(residual: Callable, u0_flat, du_flat, theta0: float, res_norm0: float,
-                 red: LocalReductions) -> Tuple[object, float, float, int]:
+                 red: LocalReductions, norm: "ResidualNorm") -> Tuple[object, float, float, int]:
     """按残差接受判据回溯 `theta`，返回
     `(U_new, theta, res_norm_new, n_extra_residual_eval)`。
 
@@ -269,7 +180,7 @@ def _accept_step(residual: Callable, u0_flat, du_flat, theta0: float, res_norm0:
         r_try = residual(u_try)
         n_eval += 1
         if red.all_finite(r_try):
-            rn = red.rms(r_try)
+            rn = norm(r_try)
             if rn <= RESIDUAL_ACCEPT_GROWTH * res_norm0:
                 return u_try, theta, rn, n_eval
         theta *= 0.5
@@ -336,6 +247,8 @@ def step_newton_krylov(
     physicality: Callable = density_pressure_row_limits,
     rows_per_cell: int = 1,
     red: Optional[LocalReductions] = None,
+    local_dtau_scale=None,
+    norm_weights=None,
 ) -> Tuple[object, dict]:
     """做**一个** PTC-Newton-Krylov 步，返回 `(U_new_flat, info)`。
 
@@ -362,6 +275,10 @@ def step_newton_krylov(
             守恒变量约束密度与压力；湍流标量方程传 `ScaledFieldRowLimits`。
         rows_per_cell: 每个单元占几行（解点数）：逐行限值在单元内取最小，
             作为该单元更新的松弛因子（见 `PHYSICALITY_MAX_RELATIVE_CHANGE`）。
+        norm_weights: `(N,)` 残差范数的逐行权重（见 `ResidualNorm`）；None 时逐点 RMS。
+            返回的 `res_norm`/`res_norm_new` 与接受判据都用这一个范数。
+        local_dtau_scale: `(N,)` 上一次调用返回的 `info["local_dtau_scale"]`（逐行
+            局部伪时间步长缩放，见 `LOCAL_DTAU_CUT_MIN`）；None 时全为 1。调用方持久化。
         red: 全局归约（`reductions.py`）。`None` 时为单进程 numpy；GPU 传
             `LocalReductions(cupy)`、分布式传跨 rank 归约的子类——本函数
             里一切"对整个解向量取标量"的操作都经过它。
@@ -393,25 +310,29 @@ def step_newton_krylov(
     u0_flat = xp.ascontiguousarray(u0_flat, dtype=xp.float64)
     n_var = u0_flat.shape[1]
     ctrl = PtcDtauScale(dtau_scale)
+    local_scale = (xp.ones(u0_flat.shape[0]) if local_dtau_scale is None
+                   else xp.asarray(local_dtau_scale, dtype=xp.float64).ravel())
 
     r0 = xp.ascontiguousarray(residual(u0_flat), dtype=xp.float64)
     if r0.shape != u0_flat.shape:
         raise ValueError(
             f"残差形状 {r0.shape} 与状态形状 {u0_flat.shape} 不符")
-    res_norm = red.rms(r0)
+    norm = ResidualNorm(norm_weights, red)
+    res_norm = norm(r0)
     if res_norm == 0.0:
         return u0_flat, dict(res_norm=0.0, res_norm_new=0.0, eta=0.0,
                              gmres_iters=0, n_matvec=0, n_residual_extra=0,
                              theta=0.0, theta_physicality=0.0, limited_fraction=0.0,
                              gmres_info=0, linear_rel_residual=0.0,
-                             dtau_scale=ctrl.scale, n_dtau_cuts=0)
+                             dtau_scale=ctrl.scale, n_dtau_cuts=0,
+                             local_dtau_scale=local_scale, local_dtau_min=red.min(local_scale))
 
     jac = MatrixFreeJacobian(residual, u0_flat, r0, scales, red=red)
     if gmres_restart is None:
         gmres_restart = krylov_restart(u0_flat.size, red)
     if block_precond is not None:
         block_precond.begin_step(residual, u0_flat, r0, scales)
-    dtau_base = xp.ascontiguousarray(dtau_flat, dtype=xp.float64).ravel()
+    dtau_base = xp.ascontiguousarray(dtau_flat, dtype=xp.float64).ravel() * local_scale
     eta = (forcing.next_eta(res_norm, tol_nonlinear)
            if forcing is not None else 0.1)
 
@@ -437,9 +358,11 @@ def step_newton_krylov(
         prec = (block_precond.preconditioner(dtau_try, n_var) if block_precond is not None
                 else PseudoTransientDiagonal(dtau_try, n_var))
         budget = block_precond.stale_budget() if block_precond is not None else None
+        t_solve = time.perf_counter()
         du, iters, ginfo, linear_rel = _solve_direction(
             jac, prec, r0, n_var, eta, gmres_restart,
             gmres_max_iter if budget is None else min(budget, gmres_max_iter), red)
+        t_solve = time.perf_counter() - t_solve
         iters_total += iters
         if ginfo > 0 and budget is not None and budget < gmres_max_iter:
             # 复用的 J_cc 在过时预算内解不到容差：当场按本步基态重装配再解
@@ -447,8 +370,10 @@ def step_newton_krylov(
             # 在这里的分支一致。
             block_precond.refresh(residual, u0_flat, r0, scales)
             prec = block_precond.preconditioner(dtau_try, n_var)
+            t_solve = time.perf_counter()
             du, iters, ginfo, linear_rel = _solve_direction(
                 jac, prec, r0, n_var, eta, gmres_restart, gmres_max_iter, red)
+            t_solve = time.perf_counter() - t_solve
             iters_total += iters
         iters_since_build = iters
         gmres_info = ginfo
@@ -456,11 +381,12 @@ def step_newton_krylov(
             alpha, theta_phys, limited_frac = _cellwise_relaxation(
                 physicality(u0_flat, du, red), rows_per_cell, red)
             u_try, theta, res_norm_new, n_extra = _accept_step(
-                residual, u0_flat, du * alpha[:, None], 1.0, res_norm, red)
+                residual, u0_flat, du * alpha[:, None], 1.0, res_norm, red, norm)
             n_extra_total += n_extra
             if theta > 0.0:
                 u_new = u_try
                 ctrl.reward(theta)
+                local_scale = update_local_dtau_scale(local_scale, alpha, xp)
                 break
         if ctrl.scale <= DTAU_MIN_SCALE:
             raise RuntimeError(
@@ -482,7 +408,7 @@ def step_newton_krylov(
 
     if block_precond is not None:
         # 刷新判据的基线用最后一次求解（刚装配时即新块的迭代数），不含过时那一次
-        block_precond.record(iters_since_build, accepted=theta > 0.0)
+        block_precond.record(iters_since_build, accepted=theta > 0.0, gmres_seconds=t_solve)
     return u_new, dict(res_norm=res_norm, res_norm_new=res_norm_new,
                        eta=eta, gmres_iters=iters_total,
                        n_matvec=jac.n_matvec,
@@ -490,4 +416,6 @@ def step_newton_krylov(
                        theta=theta, theta_physicality=theta_phys,
                        limited_fraction=limited_frac,
                        gmres_info=gmres_info, linear_rel_residual=linear_rel,
-                       dtau_scale=ctrl.scale, n_dtau_cuts=n_cuts)
+                       dtau_scale=ctrl.scale, n_dtau_cuts=n_cuts,
+                       local_dtau_scale=local_scale,
+                       local_dtau_min=red.min(local_scale))

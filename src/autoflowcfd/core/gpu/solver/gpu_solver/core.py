@@ -394,6 +394,23 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         from autoflowcfd.core.fr_solver import boundary as fr_solver_boundary
         return fr_solver_boundary.build_boundary_ghost_provider(self, bc_overrides)
 
+    def _limit_prolongated_state(self) -> None:
+        """升阶延拓之后在**新阶数**的点集（解点 + 面通量点 + 过积分细点）上施加守恒的
+        正性限制器（`time_integration/positivity`，向单元均值收缩、均值不变）。
+
+        低阶多项式只在低阶那组点上被保证可容许；新阶数的点落在别处，延拓后的状态
+        可能在那里 rho 或 p 非正——隐式 Newton 的物理性限幅假定出发态处处可容许，
+        于是第一步残差就算在非物理态上（plate_demo P1->P2 实测：P2 第 1 步残差
+        2.6e27、dtau 缩到下限仍拿不到被接受的步）。必须在新阶数几何就位之后调用。
+        """
+        from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
+
+        cp = get_cupy()
+        U = cp.ascontiguousarray(self.U_gpu)
+        get_positivity_limiter(self, xp=cp)(U.reshape(-1, U.shape[-1]))
+        self.U_gpu = U
+        self._update_primitives_gpu()
+
     def _interpolate_to_new_order(self, target_p: int) -> None:
         """阶数切换（2026-09-02，见 core/gpu/solver/gpu_solver_order_
         continuation.py 模块文档）——与 CPU/GPU 分布式版本同一个命名/

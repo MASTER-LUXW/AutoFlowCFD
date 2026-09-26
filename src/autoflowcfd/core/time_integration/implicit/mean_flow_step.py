@@ -102,6 +102,7 @@ def reset_newton_state(solver) -> None:
     solver._newton_forcing = None
     solver._newton_last_info = None
     solver._newton_dtau_scale = 1.0
+    solver._newton_local_dtau = None
     solver._newton_block_precond = None
     solver._newton_turb_state = None
 
@@ -121,6 +122,9 @@ def _format_newton_info(tag: str, info) -> str:
            f"R_new/R={ratio:.4f}")
     if info["n_dtau_cuts"]:
         txt += f" cuts={info['n_dtau_cuts']}"
+    if info.get("local_dtau_min", 1.0) < 1.0:
+        # 逐行局部伪时间步长缩放的最小值（被物理性松弛的行降过局部 dtau，见 physicality.py）
+        txt += f" ldtau={info['local_dtau_min']:.2g}"
     return txt
 
 
@@ -200,11 +204,14 @@ def step_mean_flow_newton(
         np.asarray(scales)[:n_mf],
         forcing=solver._newton_forcing, dtau_scale=solver._newton_dtau_scale,
         block_precond=solver._newton_block_precond, physicality=positivity.density_pressure_limits,
-        rows_per_cell=u_flat.shape[0] // np.asarray(cell_is_prism).size, red=red)
+        rows_per_cell=u_flat.shape[0] // np.asarray(cell_is_prism).size, red=red,
+        local_dtau_scale=getattr(solver, "_newton_local_dtau", None),
+        norm_weights=positivity.W)
     u_new = u_flat.copy()
     u_new[:, :n_mf] = u_new_mf
     solver._newton_last_info = info
     solver._newton_dtau_scale = info["dtau_scale"]
+    solver._newton_local_dtau = info["local_dtau_scale"]
     if info["theta"] <= 0.0:
         logger.warning(
             "Newton 步未能前进（theta=0, gmres_info=%s, gmres_iters=%d, dtau_scale=%.3e, "

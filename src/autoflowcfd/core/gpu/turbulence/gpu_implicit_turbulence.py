@@ -48,6 +48,12 @@ class GpuTurbulenceBackend:
     def positivity(self) -> None:
         self.model.apply_positivity_limiter_gpu()
 
+    def norm_weights(self):
+        """残差范数的逐行守恒权重（与平均流 Newton 步同一份，见 `jfnk.ResidualNorm`）。"""
+        from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
+
+        return get_positivity_limiter(self.solver, xp=self.xp).W
+
     def finalize(self, dtau) -> None:
         self.solver._finalize_turbulence_update_gpu(omega_wall_relaxation=False)
 

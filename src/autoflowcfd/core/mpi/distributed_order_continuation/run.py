@@ -93,6 +93,8 @@ def run_distributed_order_continuation(
 
         if target_p > 0 and target_p != solver.current_order:
             solver._interpolate_to_new_order(target_p)
+            # 各后端的 `_interpolate_to_new_order` 已含新阶数几何重建
+            solver._limit_prolongated_state()
         solver.current_order = target_p
 
         # 真实 bug 修复（2026-09-05，用户指出，与单机 `run_order_

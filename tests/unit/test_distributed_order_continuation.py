@@ -273,6 +273,8 @@ class TestPhaseMaxIterDefaultGivesFinalStageRemainingBudgetDistributed:
             _resumed_from_checkpoint=False,
         )
         solver._interpolate_to_new_order = _fake_interpolate
+        # 延拓后的正性限制钩子：替身没有状态场，无事可做
+        solver._limit_prolongated_state = lambda: None
         return solver
 
     def test_final_stage_gets_leftover_budget_without_explicit_phase_max_iter(self):

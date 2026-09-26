@@ -158,7 +158,8 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
         for target_p in orders:
             print(f"\n--- Phase: P{target_p} ---")
 
-            if target_p > 0 and target_p != solver.current_order:
+            prolonged = target_p > 0 and target_p != solver.current_order
+            if prolonged:
                 solver._interpolate_to_new_order(target_p)
 
             solver.current_order = target_p
@@ -233,6 +234,9 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
                     f"Order Continuation dimension mismatch after interpolation to P{target_p}: "
                     f"State has {actual_n_sps} SPs but operators expect {expected_n_sps} SPs"
                 )
+            # 新阶数几何（set_order）就位之后才能在新点集上做正性限制
+            if prolonged:
+                solver._limit_prolongated_state()
 
             # 自适应 CFL 重置（2026-08-24）：阶数切换导致残差跳变（插值误差），
             # 不应触发 CFL 缩小。重置后重新开始爬升阶段。

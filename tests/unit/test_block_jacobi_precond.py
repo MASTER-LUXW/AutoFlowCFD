@@ -210,14 +210,11 @@ def test_jfnk_block_precond_needs_fewer_gmres_iterations():
 
 
 def test_stale_blocks_are_refreshed_within_the_step():
-    """复用的 J_cc 在本步的过时预算（2x基线+10）内解不到容差时，当场重装配再解，
-    而不是把整步的 GMRES 预算烧完、等下一步才刷新。"""
-    from autoflowcfd.core.time_integration.implicit.block_jacobi import (
-        BlockJacobiCache, REFRESH_FACTOR, REFRESH_SLACK,
-    )
-    from autoflowcfd.core.time_integration.implicit.jfnk import (
-        ScaledFieldRowLimits, step_newton_krylov,
-    )
+    """复用的 J_cc 在本步的过时预算（基线 + 一次装配折合的迭代数）内解不到容差时，
+    当场重装配再解，而不是把整步的 GMRES 预算烧完、等下一步才刷新。"""
+    from autoflowcfd.core.time_integration.implicit.block_jacobi import BlockJacobiCache
+    from autoflowcfd.core.time_integration.implicit.jfnk import step_newton_krylov
+    from autoflowcfd.core.time_integration.implicit.physicality import ScaledFieldRowLimits
 
     rng = np.random.default_rng(5)
     n = 60
@@ -238,10 +235,26 @@ def test_stale_blocks_are_refreshed_within_the_step():
     assert cache.n_builds == 1 and info1["gmres_iters"] <= 2
 
     res2, t2 = make(2)                 # 块整体换掉：复用的预处理对它几乎无效
-    budget = int(REFRESH_FACTOR * cache.baseline_iters + REFRESH_SLACK)
+    budget = cache.stale_budget()
+    assert budget is not None and budget < 200
     u, info2 = step_newton_krylov(res2, u, dtau, np.ones(2), block_precond=cache, gmres_max_iter=200,
                                   physicality=ScaledFieldRowLimits([1e-12, 1e-12]))
     assert cache.n_builds == 2, "本步没有当场重装配"
     assert info2["gmres_iters"] <= budget + 2, info2["gmres_iters"]
     assert info2["gmres_info"] == 0 and info2["theta"] == 1.0
     np.testing.assert_allclose(u, t2, rtol=1e-5, atol=1e-6)
+
+
+def test_refresh_threshold_balances_rebuild_cost_against_extra_iterations():
+    """刷新阈值 = 基线 + max(下限, 装配耗时 / 单次迭代耗时)：多出来的迭代比重装配
+    一次还贵时才重装配（见 block_jacobi.py 模块文档"复用与刷新"）。"""
+    from autoflowcfd.core.time_integration.implicit.block_jacobi import REFRESH_SLACK_MIN, BlockJacobiCache
+
+    cache = BlockJacobiCache(cell_is_prism=np.ones(4, dtype=bool), colors=np.zeros(4, dtype=np.int64),
+                             n_sps=1, n_real_prism=1, n_real_tet=1, n_var=2)
+    assert cache._refresh_threshold(3) == 3 + REFRESH_SLACK_MIN          # 还没有耗时数据
+    cache.build_seconds = 10.0
+    cache.record(4, True, gmres_seconds=4.0)                            # 1 s / 次
+    assert cache._refresh_threshold(3) == 13
+    cache.build_seconds = 0.5                                           # 装配很便宜：取下限
+    assert cache._refresh_threshold(3) == 3 + REFRESH_SLACK_MIN

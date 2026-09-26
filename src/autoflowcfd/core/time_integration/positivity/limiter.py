@@ -91,7 +91,7 @@ class PositivityLimiter:
         rho、p 非正的状态。此前只看解点，plate_demo 锐边贴壁单元解点都正常而一个
         细点 rho 被逐步推到 7e-10、p<0，体积通量在那里奇异，平均流从此每步被拒。
         """
-        from autoflowcfd.core.time_integration.implicit.jfnk import density_pressure_row_limits
+        from autoflowcfd.core.time_integration.implicit.physicality import density_pressure_row_limits
 
         xp = self.xp
         n_var = u0_flat.shape[1]

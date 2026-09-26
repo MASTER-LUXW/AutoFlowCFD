@@ -79,6 +79,8 @@ def _fake_solver(current_order, target_order, resumed):
         solver.state.U = np.full((2, _n_sps(new_order), 7), 42.0)
 
     solver._interpolate_to_new_order = _fake_interpolate
+    # 延拓后的正性限制：替身状态是常数 42，本来就可容许，钩子无事可做
+    solver._limit_prolongated_state = lambda: None
     return solver
 
 

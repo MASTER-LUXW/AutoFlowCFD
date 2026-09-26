@@ -25,7 +25,7 @@
   evaluate_turbulence_rates`），不另写一份物理；
 * 线性求解、SER、dtau 缩档、块 Jacobi 全部复用平均流那一套
   （`time_integration/implicit/`），物理性限幅换成"k、omega 单步变化不超过
-  `max(|值|, 尺度下限)` 的 50%"，逐**解点**松弛（`jfnk.ScaledFieldRowLimits`；被
+  `max(|值|, 尺度下限)` 的 50%"，逐**解点**松弛（`physicality.ScaledFieldRowLimits`；被
   输运的 k/omega 不裁剪、可越过下限，见 `turbulence/sst/bounds.py`）；
 * 零填充槽位（原生基）不参与：它们的 `R_t` 置零（平均流残差在那里本来
   就恒为零），于是 Newton 不动它们；
@@ -77,7 +77,7 @@ from autoflowcfd.core.time_integration.implicit import (
     EisenstatWalkerForcing,
     step_newton_krylov,
 )
-from autoflowcfd.core.time_integration.implicit.jfnk import ScaledFieldRowLimits
+from autoflowcfd.core.time_integration.implicit.physicality import ScaledFieldRowLimits
 from autoflowcfd.core.turbulence.sst.bounds import turbulence_scales
 from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
 from autoflowcfd.core.turbulence.transport import omega_wall_cell_targets, prepare_convection_geometry
@@ -158,6 +158,12 @@ class CpuTurbulenceBackend:
     def positivity(self) -> None:
         self.model.apply_positivity_limiter()
 
+    def norm_weights(self):
+        """残差范数的逐行守恒权重（与平均流 Newton 步同一份，见 `jfnk.ResidualNorm`）。"""
+        from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
+
+        return get_positivity_limiter(self.solver).W
+
     def finalize(self, dtau) -> None:
         finalize_turbulence_update(self.solver, dtau, omega_wall_relaxation=False)
 
@@ -237,6 +243,7 @@ def _newton_state(backend):
                 n_sps=backend.shape[1], n_real_prism=n_real_prism, n_real_tet=n_real_tet,
                 n_var=2, red=backend.red),
             "last_info": None,
+            "local_dtau": None,
         }
         solver._newton_turb_state = st
     return st
@@ -281,8 +288,9 @@ def step_turbulence_newton(backend, dtau) -> None:
         # 松弛只剩"单步变化别太大"这一个作用。逐单元取最小会让一个需要大幅欠冲的
         # 解点（锐边剪切层 P1 的 Gibbs 欠冲约为跳跃的 9%）把整个单元冻在 1e-4。
         physicality=ScaledFieldRowLimits(turbulence_scales(m)), rows_per_cell=1,
-        red=backend.red)
+        red=backend.red, local_dtau_scale=st["local_dtau"], norm_weights=backend.norm_weights())
     st["dtau_scale"] = info["dtau_scale"]
+    st["local_dtau"] = info["local_dtau_scale"]
     st["last_info"] = info
 
     m.k_field = xp.ascontiguousarray(kw_new[:, 0]).reshape(backend.shape)

@@ -75,6 +75,10 @@ class MultiGpuTurbulenceBackend:
     def positivity(self) -> None:
         self.model.apply_positivity_limiter_gpu()
 
+    def norm_weights(self):
+        """残差范数的逐行守恒权重（与平均流 Newton 步同一份，见 `jfnk.ResidualNorm`）。"""
+        return self.solver._get_positivity_limiter_gpu().W
+
     def finalize(self, dtau) -> None:
         # 模态滤波在 compact 视图上做（按"棱柱在前"分块），再写回 local
         s, ctx = self.solver, self._ctx

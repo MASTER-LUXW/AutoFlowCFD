@@ -15,6 +15,41 @@ from autoflowcfd.core.mpi.comm import allreduce_sum
 class _DistributedSupportMixin:
     """halo 交换、阶数切换、传感器门控滤波、负载均衡报告"""
 
+    def _distributed_positivity_limiter(self):
+        """正性保持限制器（与单机同一个、同一个核）：几何取 local 段、原生排列——
+        adapter 的 jacobians 在紧凑排列，经 inv_perm 换回后切片。按阶数缓存。"""
+        from autoflowcfd.core.mpi.distributed_compute import DistributedMeshAdapter
+        from autoflowcfd.core.mpi.distributed_flat_face import native_cell_is_prism
+        from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
+
+        dist_fc = self.dist_flat_face
+        n_local = int(self.partition.n_local_cells)
+
+        def _local_geometry():
+            adapter = DistributedMeshAdapter(self.partition, dist_fc, self.mesh, self.ops)
+            n_sps = self.state.U.shape[1]
+            det_compact = np.asarray(adapter.jacobians["det_jacs"]).reshape(-1, n_sps)
+            return det_compact[dist_fc.inv_perm][:n_local], native_cell_is_prism(dist_fc)[:n_local]
+
+        return get_positivity_limiter(self, geometry=_local_geometry)
+
+    def _limit_prolongated_state(self) -> None:
+        """升阶延拓之后在**新阶数**的点集（解点 + 面通量点 + 过积分细点）上施加守恒的
+        正性限制器（`time_integration/positivity`，向单元均值收缩、均值不变）。
+
+        低阶多项式只在低阶那组点上被保证可容许；新阶数的点落在别处，延拓后的状态
+        可能在那里 rho 或 p 非正——隐式 Newton 的物理性限幅假定出发态处处可容许，
+        于是第一步残差就算在非物理态上（plate_demo P1->P2 实测：P2 第 1 步残差
+        2.6e27、dtau 缩到下限仍拿不到被接受的步）。必须在新阶数几何就位之后调用。
+        """
+        from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
+
+        n_local = int(self.partition.n_local_cells)
+        U = np.ascontiguousarray(self.state.U[:n_local])
+        self._distributed_positivity_limiter()(U.reshape(-1, U.shape[-1]))
+        self.state.U[:n_local] = U
+        self.state.Q[:n_local] = conserved_to_primitive(U[..., :5])
+
     def _interpolate_to_new_order(self, target_p: int) -> None:
         """将解从当前阶数插值到新的阶数（分布式 Order Continuation
         核心逻辑，2026-09-02，见 core/mpi/distributed_order_

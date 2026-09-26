@@ -49,7 +49,7 @@ def test_limiter_covers_overintegration_points(order):
 @pytest.mark.parametrize("order", [1, 2, 3])
 def test_newton_physicality_covers_overintegration_points(order):
     """逐单元 alpha 恰为"解点 + 面通量点 + 细点"上逐点限值的最小值，且点集含细点。"""
-    from autoflowcfd.core.time_integration.implicit.jfnk import density_pressure_row_limits
+    from autoflowcfd.core.time_integration.implicit.physicality import density_pressure_row_limits
 
     ops = generate_fr_operators(order)
     n_sps = ops.overint_interp_c2f_prism.shape[1]

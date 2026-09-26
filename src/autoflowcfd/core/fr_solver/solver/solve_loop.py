@@ -268,6 +268,23 @@ class _SolverSolveMixin:
         """将解从当前阶数插值到新的阶数（委托给 order_continuation）。"""
         order_continuation.interpolate_to_new_order_checked(self, new_order)
 
+    def _limit_prolongated_state(self) -> None:
+        """升阶延拓之后在**新阶数**的点集（解点 + 面通量点 + 过积分细点）上施加守恒的
+        正性限制器（`time_integration/positivity`，向单元均值收缩、均值不变）。
+
+        低阶多项式只在低阶那组点上被保证可容许；新阶数的点落在别处，延拓后的状态
+        可能在那里 rho 或 p 非正——隐式 Newton 的物理性限幅假定出发态处处可容许，
+        于是第一步残差就算在非物理态上（plate_demo P1->P2 实测：P2 第 1 步残差
+        2.6e27、dtau 缩到下限仍拿不到被接受的步）。必须在新阶数几何就位之后调用。
+        """
+        from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
+
+        n_cells, n_sps, n_vars = self.state.U.shape
+        U = np.ascontiguousarray(self.state.U)
+        get_positivity_limiter(self)(U.reshape(n_cells * n_sps, n_vars))
+        self.state.U = U
+        self.state._update_primitives()
+
     def step(self, dt: float) -> float:
         """执行一个时间步长 (S-05)。见 fr_solver_step.py::step 文档。"""
         return fr_solver_step.step(self, dt)

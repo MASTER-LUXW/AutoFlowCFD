@@ -34,8 +34,13 @@ P0 与解析装配不覆盖的离散（见 `fr_residual/jacobian/backend.py::uns
 求逆（逐块 `J_cc + diag(1/dtau)`，廉价），`J_cc` 本身跨步复用，直到
 
 * 已经复用了 `MAX_AGE` 个 Newton 步；或
-* 上一步的 GMRES 迭代数超过"刚装配完那一步"的 `2 倍 + 10`（线性化
-  已经明显过时；解析装配便宜得多，阈值收紧到 `1.5 倍 + 3`）；或
+* 上一步的 GMRES 迭代数超过"刚装配完那一步"的基线加上**一次装配折合的迭代数**
+  （`装配耗时 / 单次 GMRES 迭代耗时`，两者都是实测值，下限 `REFRESH_SLACK_MIN`）：
+  多出来的迭代比重装配一次还贵时才重装配。此前是固定的 `2 倍 + 10`（差分）/
+  `1.5 倍 + 3`（解析）：plate_demo P1 基线 3 次时阈值只有 7 次，GMRES 8 次就触发
+  一次 9~11 s 的装配，而多一次迭代只要约 1 s，单步耗时从约 20 s 涨到 40~63 s；
+  反过来 P0 差分装配（15 s）对 0.1 s 的迭代又刷新得太勤。分布式下两个耗时取全局
+  最大值（阈值决定 GMRES 迭代上限，各 rank 必须一致）；或
 * 上一步没有被接受（`theta == 0`）；或
 * **本步**的 GMRES 在上一条的迭代预算内没有达到容差（`stale_budget` /
   `refresh`，由 `jfnk.py` 当场调用）。此前只按上一步的迭代数决定下一步是否
@@ -68,14 +73,12 @@ from .reductions import LocalReductions
 #: 一份 `J_cc` 最多复用多少个 Newton 步。
 MAX_AGE = 20
 
-#: 迭代数刷新判据：`iters > REFRESH_FACTOR * 基线 + REFRESH_SLACK`。
-REFRESH_FACTOR = 2.0
-REFRESH_SLACK = 10
+#: 迭代数刷新判据的下限松弛：`iters > 基线 + max(REFRESH_SLACK_MIN, 装配耗时/单次迭代耗时)`
+#: （见模块文档"复用与刷新"）。
+REFRESH_SLACK_MIN = 3
 
-#: 解析装配（`fr_residual/jacobian`）的刷新判据更紧：装配只相当于十几次残差求值
-#: （差分装配是 色数 x 解点数 x 5 次），过时块多花的 GMRES 迭代更早就划不来。
-REFRESH_FACTOR_ANALYTIC = 1.5
-REFRESH_SLACK_ANALYTIC = 3
+#: 单次 GMRES 迭代耗时的指数滑动平均权重（新值占比）。
+_ITER_SECONDS_EMA = 0.5
 
 #: 块 `J_cc` + 逆两份（float32）允许的总字节数。8 GiB：本项目开发机与常见
 #: 工作站上与求解器本身（P1 79 万单元状态约 0.2 GB/份 x 数十份工作数组）
@@ -212,7 +215,7 @@ class BlockJacobiCache:
     __slots__ = ("cell_is_prism", "colors", "n_sps", "n_real_prism", "n_real_tet",
                  "jac", "age", "baseline_iters", "last_iters", "last_accepted",
                  "disabled_reason", "n_builds", "red", "n_var", "assembler", "use_ilu", "coupling",
-                 "_coupling_graph_fn", "_coupling_graph")
+                 "_coupling_graph_fn", "_coupling_graph", "build_seconds", "iter_seconds")
 
     def __init__(self, *, cell_is_prism, colors: np.ndarray, n_sps: int,
                  n_real_prism: int, n_real_tet: int, n_var: int,
@@ -233,6 +236,8 @@ class BlockJacobiCache:
         self.coupling = None
         self._coupling_graph_fn = coupling_graph
         self._coupling_graph = None
+        self.build_seconds = None
+        self.iter_seconds = None
         self.cell_is_prism = np.asarray(cell_is_prism, dtype=bool)
         self.n_sps, self.n_real_prism, self.n_real_tet = n_sps, n_real_prism, n_real_tet
         self.jac: Optional[CellBlockJacobian] = None
@@ -259,9 +264,10 @@ class BlockJacobiCache:
             self.colors = np.asarray(colors, dtype=np.int64)
 
     def _refresh_threshold(self, baseline: int) -> int:
-        if self.assembler is not None:
-            return int(REFRESH_FACTOR_ANALYTIC * baseline + REFRESH_SLACK_ANALYTIC)
-        return int(REFRESH_FACTOR * baseline + REFRESH_SLACK)
+        slack = REFRESH_SLACK_MIN
+        if self.build_seconds is not None and self.iter_seconds:
+            slack = max(slack, self.build_seconds / self.iter_seconds)
+        return int(baseline + slack)
 
     def _needs_rebuild(self) -> bool:
         if self.jac is None or self.age >= MAX_AGE or not self.last_accepted:
@@ -327,6 +333,7 @@ class BlockJacobiCache:
         self.last_iters = None
         self.last_accepted = True
         self.n_builds += 1
+        self.build_seconds = self.red.max(self.red.xp.asarray([time.time() - t0]))
         logger.info(f"[NK] 单元块 Jacobian 重装配（第 {self.n_builds} 次，{reason}，"
                     f"{'块 ILU' if self.coupling is not None else '块 Jacobi'}，"
                     + ("解析装配" if self.assembler is not None
@@ -351,10 +358,18 @@ class BlockJacobiCache:
             return BlockILUPreconditioner.from_cell_blocks(self.jac, self.coupling, dtau_flat)
         return CellBlockJacobiPreconditioner(self.jac, dtau_flat)
 
-    def record(self, gmres_iters: int, accepted: bool) -> None:
-        """一个 Newton 步结束后调用：更新刷新判据的依据。"""
+    def record(self, gmres_iters: int, accepted: bool, gmres_seconds: Optional[float] = None) -> None:
+        """一个 Newton 步结束后调用：更新刷新判据的依据。
+
+        `gmres_seconds`：得到 `gmres_iters` 的那次 GMRES 求解的墙钟耗时（本 rank），
+        用来估计单次迭代耗时（全局取最大，见模块文档"复用与刷新"）。
+        """
         if self.disabled_reason is not None:
             return
+        if gmres_seconds is not None and gmres_iters > 0:
+            per_iter = self.red.max(self.red.xp.asarray([gmres_seconds / gmres_iters]))
+            self.iter_seconds = (per_iter if self.iter_seconds is None
+                                 else _ITER_SECONDS_EMA * per_iter + (1.0 - _ITER_SECONDS_EMA) * self.iter_seconds)
         if self.baseline_iters is None:
             self.baseline_iters = gmres_iters
         self.last_iters = gmres_iters

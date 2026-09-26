@@ -299,15 +299,7 @@ class _DistributedStepMixin:
         # 正性保持（与单机同一个限制器、同一个核）：几何取 local 段、原生
         # 排列 —— adapter 的 jacobians 在紧凑排列，经 inv_perm 换回后切片，
         # 与上面的 cell_is_prism 同一换序。只在缓存失效（阶数切换）时构建。
-        from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
-
-        def _local_geometry():
-            from autoflowcfd.core.mpi.distributed_compute import DistributedMeshAdapter
-            adapter = DistributedMeshAdapter(self.partition, dist_fc, self.mesh, self.ops)
-            det_compact = np.asarray(adapter.jacobians["det_jacs"]).reshape(-1, n_sps)
-            return det_compact[dist_fc.inv_perm][:n_local], cell_is_prism
-
-        positivity_func = get_positivity_limiter(self, geometry=_local_geometry)
+        positivity_func = self._distributed_positivity_limiter()
 
         # Stage 0 残差单独算一次：既用于收敛监控（与旧实现报告口径一致），
         # 也通过 residual0= 传给 _ssp_rk_stage_step 复用，避免它内部再重复
