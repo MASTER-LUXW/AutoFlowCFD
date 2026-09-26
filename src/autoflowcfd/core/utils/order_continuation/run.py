@@ -425,12 +425,11 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
                 #   P2: 下降 6 个量级 (1/(tol*1)   = 1e6)
                 # 替代此前的绝对判据 res < phase_tol（要求 RMS 残差低于 1e-4~1e-6，
                 # 对 Mach 0.1~0.3 流动初始残差 ~1e8 需下降 12~14 个量级，永远不可达）。
-                drop_for_convergence = initial_residual_this_order / max(res, 1e-30)
                 required_drop = 1.0 / max(phase_tol, 1e-30)
                 if i >= 1 and phase_gate.reached(solver, res, initial_residual_this_order, required_drop):
                     converged = True
-                    print(f"[OK] P{target_p} converged at iter {i+1} "
-                          f"(residual dropped {drop_for_convergence:.1e}x >= {required_drop:.1e}x)")
+                    print(f"[OK] P{target_p} converged at iter {i+1}（要求 {required_drop:.1e}x 或舍入误差："
+                          f"{phase_gate.describe(solver, res, initial_residual_this_order)}）")
                     break
 
                 # 阶数提升判据（CL-02）：残差相对初始值下降足够多
@@ -440,8 +439,8 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
                         and initial_residual_this_order > 0
                         and phase_gate.reached(solver, res, initial_residual_this_order,
                                                residual_drop_threshold)):
-                    print(f"[OK] P{target_p} residual dropped {initial_residual_this_order/res:.1f}x "
-                          f"(>= {residual_drop_threshold:.0e}x), advancing to next order at iter {i+1}")
+                    print(f"[OK] P{target_p} advancing to next order at iter {i+1}（要求 {residual_drop_threshold:.0e}x "
+                          f"或舍入误差：{phase_gate.describe(solver, res, initial_residual_this_order)}）")
                     break
 
             if target_p == original_order and converged:

@@ -110,3 +110,16 @@ class PhaseGate:
             return False
         r = turbulence_residual_norm(solver)
         return r is None or self._enough(self.turb_baseline, self.turb_first, r, required)
+
+    def describe(self, solver, res: float, baseline: float) -> str:
+        """日志用：平均流与隐式湍流各自相对基准 / 相对本阶段首值的下降倍数。"""
+        def drops(base, first, cur):
+            cur = max(cur, 1e-300)
+            b = f"{base / cur:.1e}x" if base else "-"
+            f = f"{first / cur:.1e}x" if first else "-"
+            return f"相对基准 {b}、相对本阶段首值 {f}"
+        txt = "平均流 " + drops(baseline, self.mean_first, res)
+        r = turbulence_residual_norm(solver)
+        if r is not None:
+            txt += "；湍流 " + drops(self.turb_baseline, self.turb_first, r)
+        return txt

@@ -154,13 +154,12 @@ def run_distributed_order_continuation(
             if checkpoint_callback is not None:
                 checkpoint_callback(solver, total_iter)
 
-            drop_for_convergence = initial_residual_this_order / max(res, 1e-30)
             required_drop = 1.0 / max(phase_tol, 1e-30)
             if i >= 1 and phase_gate.reached(solver, res, initial_residual_this_order, required_drop):
                 converged = True
                 if is_root():
-                    print(f"[OK] P{target_p} converged at iter {i + 1} "
-                          f"(residual dropped {drop_for_convergence:.1e}x >= {required_drop:.1e}x)")
+                    print(f"[OK] P{target_p} converged at iter {i + 1}（要求 {required_drop:.1e}x 或舍入误差："
+                          f"{phase_gate.describe(solver, res, initial_residual_this_order)}）")
                 break
 
             if (target_p < original_order
@@ -169,10 +168,9 @@ def run_distributed_order_continuation(
                     and phase_gate.reached(solver, res, initial_residual_this_order,
                                                residual_drop_threshold)):
                 if is_root():
-                    print(f"[OK] P{target_p} residual dropped "
-                          f"{initial_residual_this_order / res:.1f}x "
-                          f"(>= {residual_drop_threshold:.0e}x), advancing to next order "
-                          f"at iter {i + 1}")
+                    print(f"[OK] P{target_p} advancing to next order at iter {i + 1}（要求 "
+                          f"{residual_drop_threshold:.0e}x 或舍入误差："
+                          f"{phase_gate.describe(solver, res, initial_residual_this_order)}）")
                 break
 
         if target_p == original_order and converged:
