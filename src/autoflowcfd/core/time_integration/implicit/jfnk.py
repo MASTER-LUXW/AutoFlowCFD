@@ -404,6 +404,7 @@ def step_newton_krylov(
     # 真实停滞记录（残差逐位不变 -> 按残差历史工作的控制器看不到它）。
     while True:
         dtau_try = dtau_base * ctrl.scale
+        prec = None          # 上一档的逆先释放，再按本档 dtau 构造（不同时持有两份）
         prec = (block_precond.preconditioner(dtau_try, n_var) if block_precond is not None
                 else PseudoTransientDiagonal(dtau_try, n_var))
         budget = block_precond.stale_budget() if block_precond is not None else None
@@ -417,6 +418,7 @@ def step_newton_krylov(
             # 复用的 J_cc 在过时预算内解不到容差：当场按本步基态重装配再解
             # （见 block_jacobi.py 模块文档"复用与刷新"）。ginfo 是全局量，各 rank
             # 在这里的分支一致。
+            prec = None          # 释放持有旧块的预处理对象，重装配期间不留两份（见 block_jacobi._build）
             block_precond.refresh(residual, u0_flat, r0, scales, dtau_try)
             prec = block_precond.preconditioner(dtau_try, n_var)
             t_solve = time.perf_counter()

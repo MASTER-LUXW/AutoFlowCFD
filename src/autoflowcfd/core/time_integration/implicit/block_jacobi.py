@@ -408,6 +408,9 @@ class BlockJacobiCache:
         import time
 
         t0 = time.time()
+        # 先释放旧块再装配：新旧两份同时存在时 P3 单份模式要 2 x 8.9 GiB（plate_demo 实测
+        # 步内 refresh 时 OOM）；调用方同样先丢掉持有旧块的预处理对象（jfnk.py）
+        self.jac = None
         self.coupling = None
         if self.assembler is not None:
             self.assembler.want_coupling = self.use_ilu
