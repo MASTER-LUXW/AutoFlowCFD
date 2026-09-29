@@ -178,7 +178,8 @@ def _compute_interface_correction_gpu(
             E_o = _native_self_extrap(cp, oc_code_o, ff.boundary_extrap_native)
             Q_o = cp.matmul(E_o, Q_gpu[oc])  # (nO,n_fp,5)
 
-            Q_n = _extrap_q_to_fp(cp, ff.neighbor_src0_mat[idx_o], ff.neighbor_src0_cell[idx_o], Q_gpu)
+            Q_n = _extrap_q_to_fp(cp, ff.neighbor_src0_tpl[ff.neighbor_src0_tid[idx_o]],
+                                  ff.neighbor_src0_cell[idx_o], Q_gpu)
             Q_n = _add_q_src1_to_fp(
                 cp, Q_n, ff.neighbor_src1_idx[idx_o], ff.neighbor_src1_cell, ff.neighbor_src1_mat, Q_gpu,
             )
@@ -247,7 +248,8 @@ def _compute_interface_correction_gpu(
             E_n = _native_self_extrap(cp, nc_code_n, ff.boundary_extrap_native)
             Q_n_native = cp.matmul(E_n, Q_gpu[nc])  # (nN,n_fp,5)
 
-            Q_o_at_n = _extrap_q_to_fp(cp, ff.owner_src0_mat[idx_n], ff.owner_src0_cell[idx_n], Q_gpu)
+            Q_o_at_n = _extrap_q_to_fp(cp, ff.owner_src0_tpl[ff.owner_src0_tid[idx_n]],
+                                       ff.owner_src0_cell[idx_n], Q_gpu)
             Q_o_at_n = _add_q_src1_to_fp(
                 cp, Q_o_at_n, ff.owner_src1_idx[idx_n], ff.owner_src1_cell, ff.owner_src1_mat, Q_gpu,
             )

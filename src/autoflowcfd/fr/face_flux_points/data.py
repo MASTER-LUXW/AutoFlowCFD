@@ -105,8 +105,8 @@ class _KernelFaceData:
         'owner_is_primary', 'neighbor_is_primary',
         'true_normal', 'true_area_weight',
         'owner_adj_row_exact', 'neighbor_adj_row_exact',
-        'nb_src0_cell', 'nb_src0_mat', 'nb_src1_idx',
-        'ow_src0_cell', 'ow_src0_mat', 'ow_src1_idx',
+        'nb_src0_cell', 'nb_src0_tpl', 'nb_src0_tid', 'nb_src1_idx',
+        'ow_src0_cell', 'ow_src0_tpl', 'ow_src0_tid', 'ow_src1_idx',
         'nb_extra_cell', 'nb_extra_mat', 'ow_extra_cell', 'ow_extra_mat',
         'mixed_nb_partner', 'mixed_nb_mask', 'mixed_ow_partner', 'mixed_ow_mask',
         'mixed_bnd_face', 'mixed_p0_bnd_frac',
@@ -165,7 +165,7 @@ class _KernelFaceData:
         nb_sources = []
         c0 = int(self.nb_src0_cell[f])
         if c0 >= 0:
-            nb_sources.append((c0, self.nb_src0_mat[f]))
+            nb_sources.append((c0, self.nb_src0_tpl[self.nb_src0_tid[f]]))
         idx1 = int(self.nb_src1_idx[f])
         if idx1 >= 0:
             nb_sources.append((int(self.nb_extra_cell[idx1]), self.nb_extra_mat[idx1]))
@@ -173,7 +173,7 @@ class _KernelFaceData:
         ow_sources = []
         c0 = int(self.ow_src0_cell[f])
         if c0 >= 0:
-            ow_sources.append((c0, self.ow_src0_mat[f]))
+            ow_sources.append((c0, self.ow_src0_tpl[self.ow_src0_tid[f]]))
         idx1 = int(self.ow_src1_idx[f])
         if idx1 >= 0:
             ow_sources.append((int(self.ow_extra_cell[idx1]), self.ow_extra_mat[idx1]))

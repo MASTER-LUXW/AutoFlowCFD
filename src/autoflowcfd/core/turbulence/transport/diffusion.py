@@ -230,10 +230,10 @@ def compute_scalar_diffusion_residual(
     jumps = []
     for frame, self_cell, self_code, src, adj_row in (
             ("owner", flat.owner_cell, flat.owner_cube_face,
-             (flat.neighbor_src0_cell, flat.neighbor_src0_mat, flat.neighbor_src1_idx,
+             (flat.neighbor_src0_cell, flat.neighbor_src0_tpl, flat.neighbor_src0_tid, flat.neighbor_src1_idx,
               flat.neighbor_src1_cell, flat.neighbor_src1_mat), flat.owner_adj_row_exact),
             ("neighbor", flat.neighbor_cell, flat.neighbor_cube_face,
-             (flat.owner_src0_cell, flat.owner_src0_mat, flat.owner_src1_idx,
+             (flat.owner_src0_cell, flat.owner_src0_tpl, flat.owner_src0_tid, flat.owner_src1_idx,
               flat.owner_src1_cell, flat.owner_src1_mat), flat.neighbor_adj_row_exact)):
         is_bnd, is_dir, target = boundary_diffusion_targets(np, flat, frame, *masks)
         with np.errstate(over='ignore', invalid='ignore'):

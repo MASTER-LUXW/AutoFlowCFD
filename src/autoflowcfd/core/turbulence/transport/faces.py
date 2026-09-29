@@ -52,7 +52,7 @@ def _extrapolate_scalar_to_faces(
                              has_wall_dirichlet_value)
     return extrapolate_scalar_pair_kernel(
         scalar_sps, flat.owner_cell, flat.owner_cube_face, flat.boundary_extrap_native,
-        flat.neighbor_src0_cell, flat.neighbor_src0_mat,
+        flat.neighbor_src0_cell, flat.neighbor_src0_tpl, flat.neighbor_src0_tid,
         flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
         True, wz, hv, wv, flat.mixed_nb_partner, flat.mixed_nb_mask,
     )
@@ -73,7 +73,7 @@ def _extrapolate_scalar_to_faces_neighbor_frame(
                              has_wall_dirichlet_value)
     return extrapolate_scalar_pair_kernel(
         scalar_sps, flat.neighbor_cell, flat.neighbor_cube_face, flat.boundary_extrap_native,
-        flat.owner_src0_cell, flat.owner_src0_mat,
+        flat.owner_src0_cell, flat.owner_src0_tpl, flat.owner_src0_tid,
         flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
         False, wz, hv, wv, flat.mixed_ow_partner, flat.mixed_ow_mask,
     )
@@ -144,7 +144,7 @@ def precompute_scalar_convection_geometry(rho, velocity, mesh, ops, flat):
     mass_flux, mass_flux_neighbor = face_mass_flux_kernel(
         rho_u, flat.owner_cell, flat.owner_cube_face, flat.neighbor_cell, flat.neighbor_cube_face,
         flat.boundary_extrap_native,
-        flat.owner_src0_cell, flat.owner_src0_mat,
+        flat.owner_src0_cell, flat.owner_src0_tpl, flat.owner_src0_tid,
         flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
         flat.mixed_ow_partner, flat.mixed_ow_mask,
         np.ascontiguousarray(unit_normals(flat.owner_adj_row_exact)),

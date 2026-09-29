@@ -46,12 +46,12 @@ def _add_src1_to_fp(cp, out, src1_idx, src1_cell, src1_mat, field):
     return out
 
 
-def _extrap_side(cp, idx, src0_cell_all, src0_mat_all, src1_idx_all, src1_cell_all, src1_mat_all,
+def _extrap_side(cp, idx, src0_cell_all, src0_tpl_all, src0_tid_all, src1_idx_all, src1_cell_all, src1_mat_all,
                   Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu):
     """按 src0(+src1) 机制把某一侧（owner 或 neighbor）的 Q/grad_vel/
     grad_T/mu_t 外插到面 idx 对应的 FP 网格。"""
     E_cell = src0_cell_all[idx]
-    E_mat = src0_mat_all[idx]
+    E_mat = src0_tpl_all[src0_tid_all[idx]]
     s1_idx = src1_idx_all[idx]
 
     Q_fp = _extrap_to_fp(cp, E_mat, E_cell, Q_gpu)

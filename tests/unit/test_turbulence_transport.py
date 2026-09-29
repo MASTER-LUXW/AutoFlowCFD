@@ -43,7 +43,9 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
 
         # Both faces are boundary faces: no real neighbor source.
         neighbor_src0_cell = np.array([-1, -1], dtype=np.int64)
-        neighbor_src0_mat = np.zeros((n_faces, n_fp, n_sps))
+        # 插值矩阵是模板表 + 逐面编号（fr/face_flux_points/templates.py）
+        neighbor_src0_tpl = np.zeros((1, n_fp, n_sps))
+        neighbor_src0_tid = np.zeros(n_faces, dtype=np.int32)
         neighbor_src1_idx = np.array([-1, -1], dtype=np.int64)
         neighbor_src1_cell = np.empty((0,), dtype=np.int64)
         neighbor_src1_mat = np.empty((0, n_fp, n_sps))
@@ -59,7 +61,7 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
 
         phi_owner, phi_neighbor = extrapolate_scalar_pair_kernel(
             scalar_sps, owner_cell, owner_cube_face, boundary_extrap_native,
-            neighbor_src0_cell, neighbor_src0_mat,
+            neighbor_src0_cell, neighbor_src0_tpl, neighbor_src0_tid,
             neighbor_src1_idx, neighbor_src1_cell, neighbor_src1_mat,
             True, wall_dirichlet_zero_face, has_wall_dirichlet_value, wall_dirichlet_value_face,
             mixed_nb_partner, mixed_nb_mask,
@@ -81,7 +83,9 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
         boundary_extrap_native[0] = np.array([[1.0]])
         owner_cell = np.array([0], dtype=np.int64)
         neighbor_src0_cell = np.array([-1], dtype=np.int64)
-        neighbor_src0_mat = np.zeros((n_faces, n_fp, n_sps))
+        # 插值矩阵是模板表 + 逐面编号（fr/face_flux_points/templates.py）
+        neighbor_src0_tpl = np.zeros((1, n_fp, n_sps))
+        neighbor_src0_tid = np.zeros(n_faces, dtype=np.int32)
         neighbor_src1_idx = np.array([-1], dtype=np.int64)
         neighbor_src1_cell = np.empty((0,), dtype=np.int64)
         neighbor_src1_mat = np.empty((0, n_fp, n_sps))
@@ -94,7 +98,7 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
 
         _, phi_neighbor = extrapolate_scalar_pair_kernel(
             scalar_sps, owner_cell, owner_cube_face, boundary_extrap_native,
-            neighbor_src0_cell, neighbor_src0_mat,
+            neighbor_src0_cell, neighbor_src0_tpl, neighbor_src0_tid,
             neighbor_src1_idx, neighbor_src1_cell, neighbor_src1_mat,
             True, wall_dirichlet_zero_face, has_wall_dirichlet_value, wall_dirichlet_value_face,
             mixed_nb_partner, mixed_nb_mask,
@@ -113,7 +117,9 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
         boundary_extrap_native[0] = np.array([[1.0]])
         owner_cell = np.array([0], dtype=np.int64)
         neighbor_src0_cell = np.array([-1], dtype=np.int64)
-        neighbor_src0_mat = np.zeros((n_faces, n_fp, n_sps))
+        # 插值矩阵是模板表 + 逐面编号（fr/face_flux_points/templates.py）
+        neighbor_src0_tpl = np.zeros((1, n_fp, n_sps))
+        neighbor_src0_tid = np.zeros(n_faces, dtype=np.int32)
         neighbor_src1_idx = np.array([-1], dtype=np.int64)
         neighbor_src1_cell = np.empty((0,), dtype=np.int64)
         neighbor_src1_mat = np.empty((0, n_fp, n_sps))
@@ -126,7 +132,7 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
 
         phi_owner, phi_neighbor = extrapolate_scalar_pair_kernel(
             scalar_sps, owner_cell, owner_cube_face, boundary_extrap_native,
-            neighbor_src0_cell, neighbor_src0_mat,
+            neighbor_src0_cell, neighbor_src0_tpl, neighbor_src0_tid,
             neighbor_src1_idx, neighbor_src1_cell, neighbor_src1_mat,
             True, wall_dirichlet_zero_face, has_wall_dirichlet_value, wall_dirichlet_value_face,
             mixed_nb_partner, mixed_nb_mask,

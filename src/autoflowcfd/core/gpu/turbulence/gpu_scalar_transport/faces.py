@@ -6,10 +6,11 @@
 """
 
 
-def _src_gather(cp, field, src0_cell, src0_mat, src1_idx, src1_cell, src1_mat):
-    """`src0_mat @ field[src0] (+ src1_mat @ field[src1])`，返回 `(values, has_source)`。"""
+def _src_gather(cp, field, src0_cell, src0_tpl, src0_tid, src1_idx, src1_cell, src1_mat):
+    """`src0 @ field[src0] (+ src1_mat @ field[src1])`，返回 `(values, has_source)`；第 f 个面的
+    src0 矩阵是 `src0_tpl[src0_tid[f]]`（模板表，`fr/face_flux_points/templates.py`）。"""
     valid0 = src0_cell >= 0
-    out = cp.einsum('fps,fs->fp', src0_mat, field[cp.maximum(src0_cell, 0)]) * valid0[:, None]
+    out = cp.einsum('fps,fs->fp', src0_tpl[src0_tid], field[cp.maximum(src0_cell, 0)]) * valid0[:, None]
     valid1 = src1_idx >= 0
     if bool(cp.any(valid1)):
         sel = cp.where(valid1)[0]
@@ -27,10 +28,10 @@ def _self_extrap(cp, ff, field, self_cell, self_cube_face):
 
 def _frame_args(ff, frame):
     if frame == "owner":
-        return (ff.owner_cell, ff.owner_cube_face, ff.neighbor_src0_cell, ff.neighbor_src0_mat,
+        return (ff.owner_cell, ff.owner_cube_face, ff.neighbor_src0_cell, ff.neighbor_src0_tpl, ff.neighbor_src0_tid,
                 ff.neighbor_src1_idx, ff.neighbor_src1_cell, ff.neighbor_src1_mat,
                 ff.mixed_nb_partner, ff.mixed_nb_mask)
-    return (ff.neighbor_cell, ff.neighbor_cube_face, ff.owner_src0_cell, ff.owner_src0_mat,
+    return (ff.neighbor_cell, ff.neighbor_cube_face, ff.owner_src0_cell, ff.owner_src0_tpl, ff.owner_src0_tid,
             ff.owner_src1_idx, ff.owner_src1_cell, ff.owner_src1_mat,
             ff.mixed_ow_partner, ff.mixed_ow_mask)
 
@@ -49,9 +50,9 @@ def _extrapolate_scalar_pair_gpu(cp, ff, scalar_sps, frame,
         has_wall_dirichlet_value = cp.zeros(n_faces, dtype=cp.bool_)
     if wall_dirichlet_value_face is None:
         wall_dirichlet_value_face = cp.zeros((n_faces, n_fp), dtype=cp.float64)
-    self_cell, self_code, s0c, s0m, s1i, s1c, s1m, mixed_partner, mixed_mask = _frame_args(ff, frame)
+    self_cell, self_code, s0c, s0t, s0i, s1i, s1c, s1m, mixed_partner, mixed_mask = _frame_args(ff, frame)
     phi_self = _self_extrap(cp, ff, scalar_sps, self_cell, self_code)
-    phi_other, has_src = _src_gather(cp, scalar_sps, s0c, s0m, s1i, s1c, s1m)
+    phi_other, has_src = _src_gather(cp, scalar_sps, s0c, s0t, s0i, s1i, s1c, s1m)
     phi_other = phi_other * (self_cell >= 0)[:, None]
 
     def _ghost(zero, has_value, value):
@@ -98,7 +99,7 @@ def _face_mass_flux_gpu(cp, ff, rho_u):
     for d in range(3):
         comp = cp.ascontiguousarray(rho_u[..., d])
         m_o = m_o + _self_extrap(cp, ff, comp, ff.owner_cell, ff.owner_cube_face) * n_o[..., d]
-        at_n, _ = _src_gather(cp, comp, ff.owner_src0_cell, ff.owner_src0_mat,
+        at_n, _ = _src_gather(cp, comp, ff.owner_src0_cell, ff.owner_src0_tpl, ff.owner_src0_tid,
                               ff.owner_src1_idx, ff.owner_src1_cell, ff.owner_src1_mat)
         own_n = _self_extrap(cp, ff, comp, ff.neighbor_cell, ff.neighbor_cube_face)
         m_n = m_n + cp.where(mixed, own_n, at_n) * n_n[..., d]

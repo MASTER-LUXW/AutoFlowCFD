@@ -185,8 +185,8 @@ def assemble_turbulence_blocks(ctx: TurbulenceLinearization, kw_flat, want_coupl
             flat.neighbor_is_primary, flat.owner_cube_face, flat.neighbor_cube_face, n_own, n_nei,
             flat.owner_adj_row_exact, flat.neighbor_adj_row_exact, flat.ref_area_weight,
             flat.boundary_extrap_native, flat.lift_native, flat.ip_length, float(c_ip),
-            flat.neighbor_src0_cell, flat.neighbor_src0_mat, flat.neighbor_src1_idx,
-            flat.neighbor_src1_cell, flat.neighbor_src1_mat, flat.owner_src0_cell, flat.owner_src0_mat,
+            flat.neighbor_src0_cell, flat.neighbor_src0_tpl, flat.neighbor_src0_tid, flat.neighbor_src1_idx,
+            flat.neighbor_src1_cell, flat.neighbor_src1_mat, flat.owner_src0_cell, flat.owner_src0_tpl, flat.owner_src0_tid,
             flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
             m_o, m_n, ghost_o, np.ascontiguousarray(a_o), ghost_n, np.ascontiguousarray(a_n),
             *diff["owner"], *diff["neighbor"], cross_offset, cross_data, cross_col)

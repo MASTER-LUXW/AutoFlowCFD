@@ -65,9 +65,9 @@ def compute_viscous_interface_correction_kernel(
     owner_cell: np.ndarray, neighbor_cell: np.ndarray, is_boundary: np.ndarray,
     owner_is_primary: np.ndarray, neighbor_is_primary: np.ndarray,
     owner_adj_row_exact: np.ndarray, neighbor_adj_row_exact: np.ndarray,
-    neighbor_src0_cell: np.ndarray, neighbor_src0_mat: np.ndarray,
+    neighbor_src0_cell: np.ndarray, neighbor_src0_tpl: np.ndarray, neighbor_src0_tid: np.ndarray,
     neighbor_src1_idx: np.ndarray, neighbor_src1_cell: np.ndarray, neighbor_src1_mat: np.ndarray,
-    owner_src0_cell: np.ndarray, owner_src0_mat: np.ndarray,
+    owner_src0_cell: np.ndarray, owner_src0_tpl: np.ndarray, owner_src0_tid: np.ndarray,
     owner_src1_idx: np.ndarray, owner_src1_cell: np.ndarray, owner_src1_mat: np.ndarray,
     mixed_nb_partner: np.ndarray, mixed_nb_mask: np.ndarray,
     mixed_ow_partner: np.ndarray, mixed_ow_mask: np.ndarray,
@@ -169,7 +169,7 @@ def compute_viscous_interface_correction_kernel(
                     mut_n = 0.0
                     c0 = neighbor_src0_cell[f]
                     if c0 >= 0:
-                        mat0 = neighbor_src0_mat[f]
+                        mat0 = neighbor_src0_tpl[neighbor_src0_tid[f]]
                         for s in range(n_sps):
                             w = mat0[i, s]
                             if w != 0.0:
@@ -243,7 +243,7 @@ def compute_viscous_interface_correction_kernel(
                 mut_o_at_n = 0.0
                 c0 = owner_src0_cell[f]
                 if c0 >= 0:
-                    mat0 = owner_src0_mat[f]
+                    mat0 = owner_src0_tpl[owner_src0_tid[f]]
                     for s in range(n_sps):
                         w = mat0[i, s]
                         if w != 0.0:

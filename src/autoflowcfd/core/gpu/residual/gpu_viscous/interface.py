@@ -88,7 +88,7 @@ def _compute_viscous_interface_correction_gpu(
                 Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu,
             )
             Q_n, gv_n, gT_n, mut_n = _extrap_side(
-                cp, idx_o, ff.neighbor_src0_cell, ff.neighbor_src0_mat,
+                cp, idx_o, ff.neighbor_src0_cell, ff.neighbor_src0_tpl, ff.neighbor_src0_tid,
                 ff.neighbor_src1_idx, ff.neighbor_src1_cell, ff.neighbor_src1_mat,
                 Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu,
             )
@@ -194,7 +194,7 @@ def _compute_viscous_interface_correction_gpu(
                 Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu,
             )
             Q_o_at_n, gv_o_at_n, gT_o_at_n, mut_o_at_n = _extrap_side(
-                cp, idx_n, ff.owner_src0_cell, ff.owner_src0_mat,
+                cp, idx_n, ff.owner_src0_cell, ff.owner_src0_tpl, ff.owner_src0_tid,
                 ff.owner_src1_idx, ff.owner_src1_cell, ff.owner_src1_mat,
                 Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu,
             )

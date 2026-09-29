@@ -315,8 +315,8 @@ def add_face_blocks_color(face_indices, K_prism, K_tet, slot, n_prism, n_real_pr
                           Q, gv_sp, gT_sp, mut, dTdQ, inv_sp, D_prism, D_tet,
                           owner_cell, neighbor_cell, is_boundary, owner_is_primary, neighbor_is_primary,
                           owner_adj_row_exact, neighbor_adj_row_exact,
-                          neighbor_src0_cell, neighbor_src0_mat, neighbor_src1_idx, neighbor_src1_cell,
-                          neighbor_src1_mat, owner_src0_cell, owner_src0_mat, owner_src1_idx,
+                          neighbor_src0_cell, neighbor_src0_tpl, neighbor_src0_tid, neighbor_src1_idx, neighbor_src1_cell,
+                          neighbor_src1_mat, owner_src0_cell, owner_src0_tpl, owner_src0_tid, owner_src1_idx,
                           owner_src1_cell, owner_src1_mat, mixed_nb_partner, mixed_nb_mask,
                           mixed_ow_partner, mixed_ow_mask, Qg0, QgP, ghost_row, HG, adiabatic,
                           owner_cube_face, neighbor_cube_face, ref_area_weight, E_nat, lift_nat,
@@ -341,7 +341,7 @@ def add_face_blocks_color(face_indices, K_prism, K_tet, slot, n_prism, n_real_pr
                 mp = mixed_nb_partner[f]
                 masked_row = mixed_nb_mask[f]
                 src_cells[0] = neighbor_src0_cell[f]
-                m0 = neighbor_src0_mat[f]
+                m0 = neighbor_src0_tpl[neighbor_src0_tid[f]]
                 i1 = neighbor_src1_idx[f]
                 if i1 >= 0:
                     src_cells[1] = neighbor_src1_cell[i1]
@@ -358,7 +358,7 @@ def add_face_blocks_color(face_indices, K_prism, K_tet, slot, n_prism, n_real_pr
                 mp = mixed_ow_partner[f]
                 masked_row = mixed_ow_mask[f]
                 src_cells[0] = owner_src0_cell[f]
-                m0 = owner_src0_mat[f]
+                m0 = owner_src0_tpl[owner_src0_tid[f]]
                 i1 = owner_src1_idx[f]
                 if i1 >= 0:
                     src_cells[1] = owner_src1_cell[i1]

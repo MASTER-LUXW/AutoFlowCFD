@@ -312,7 +312,9 @@ def build_distributed_flat_face(
         neighbor_src0_cell=_remap_cell_indices(
             global_flat.neighbor_src0_cell[local_face_indices], "neighbor_src0_cell"
         ),
-        neighbor_src0_mat=global_flat.neighbor_src0_mat[local_face_indices],
+        # 插值矩阵是模板表（fr/face_flux_points/templates.py）：只切逐面编号，表共享
+        neighbor_src0_tpl=global_flat.neighbor_src0_tpl,
+        neighbor_src0_tid=global_flat.neighbor_src0_tid[local_face_indices],
         neighbor_src1_idx=global_flat.neighbor_src1_idx[local_face_indices],
         # 紧凑数组本身不按 local_face_indices 切片（由 neighbor_src1_idx
         # 索引，语义不变），但其中本 rank 实际会用到的 cell 值必须重映射
@@ -324,7 +326,8 @@ def build_distributed_flat_face(
         owner_src0_cell=_remap_cell_indices(
             global_flat.owner_src0_cell[local_face_indices], "owner_src0_cell"
         ),
-        owner_src0_mat=global_flat.owner_src0_mat[local_face_indices],
+        owner_src0_tpl=global_flat.owner_src0_tpl,
+        owner_src0_tid=global_flat.owner_src0_tid[local_face_indices],
         owner_src1_idx=global_flat.owner_src1_idx[local_face_indices],
         owner_src1_cell=_remap_cell_indices(
             global_flat.owner_src1_cell, "owner_src1_cell", used_mask=owner_src1_used_mask

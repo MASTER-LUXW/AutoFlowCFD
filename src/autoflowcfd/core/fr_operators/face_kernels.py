@@ -158,14 +158,18 @@ class FlatFaceGeometry:
 
     # --- neighbor_sources（owner 侧用来组装 Q_neighbor 的来源）---
     neighbor_src0_cell: np.ndarray   # int64 (n_faces,)，-1 表示无来源
-    neighbor_src0_mat: np.ndarray    # float64 (n_faces, n_fp, n_sps)
+    # 第 f 个面的矩阵是 neighbor_src0_tpl[neighbor_src0_tid[f]]（模板表，见
+    # fr/face_flux_points/templates.py）
+    neighbor_src0_tpl: np.ndarray    # float64 (n_tpl, n_fp, n_sps)
+    neighbor_src0_tid: np.ndarray    # int32 (n_faces,)
     neighbor_src1_idx: np.ndarray    # int64 (n_faces,)，-1 表示没有第2个来源
     neighbor_src1_cell: np.ndarray   # int64 (n_extra,) 紧凑数组
     neighbor_src1_mat: np.ndarray    # float64 (n_extra, n_fp, n_sps) 紧凑数组
 
     # --- owner_sources（neighbor 侧用来组装 Q_owner_at_n 的来源）---
     owner_src0_cell: np.ndarray
-    owner_src0_mat: np.ndarray
+    owner_src0_tpl: np.ndarray
+    owner_src0_tid: np.ndarray
     owner_src1_idx: np.ndarray
     owner_src1_cell: np.ndarray
     owner_src1_mat: np.ndarray
@@ -285,10 +289,10 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     neighbor_is_primary = ffp_data.neighbor_is_primary
     true_normal = ffp_data.true_normal
     neighbor_src0_cell = ffp_data.nb_src0_cell
-    neighbor_src0_mat = ffp_data.nb_src0_mat
+    neighbor_src0_tpl, neighbor_src0_tid = ffp_data.nb_src0_tpl, ffp_data.nb_src0_tid
     neighbor_src1_idx = ffp_data.nb_src1_idx
     owner_src0_cell = ffp_data.ow_src0_cell
-    owner_src0_mat = ffp_data.ow_src0_mat
+    owner_src0_tpl, owner_src0_tid = ffp_data.ow_src0_tpl, ffp_data.ow_src0_tid
     owner_src1_idx = ffp_data.ow_src1_idx
     # extra sources → src1（紧凑数组，通过 src1_idx 索引）
     neighbor_src1_cell = ffp_data.nb_extra_cell
@@ -391,10 +395,11 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
         ref_area_weight=ref_area_weight,
         ip_length=ip_length,
         owner_adj_row_exact=owner_adj_row_exact, neighbor_adj_row_exact=neighbor_adj_row_exact,
-        neighbor_src0_cell=neighbor_src0_cell, neighbor_src0_mat=neighbor_src0_mat,
+        neighbor_src0_cell=neighbor_src0_cell, neighbor_src0_tpl=neighbor_src0_tpl,
+        neighbor_src0_tid=neighbor_src0_tid,
         neighbor_src1_idx=neighbor_src1_idx, neighbor_src1_cell=neighbor_src1_cell,
         neighbor_src1_mat=neighbor_src1_mat,
-        owner_src0_cell=owner_src0_cell, owner_src0_mat=owner_src0_mat,
+        owner_src0_cell=owner_src0_cell, owner_src0_tpl=owner_src0_tpl, owner_src0_tid=owner_src0_tid,
         owner_src1_idx=owner_src1_idx, owner_src1_cell=owner_src1_cell,
         owner_src1_mat=owner_src1_mat,
         mixed_nb_partner=mixed_nb_partner, mixed_nb_mask=mixed_nb_mask,

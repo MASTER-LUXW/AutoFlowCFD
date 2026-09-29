@@ -152,8 +152,12 @@ class DistributedFlatFaceGeometry:
         return self.base_flat.neighbor_src0_cell
 
     @property
-    def neighbor_src0_mat(self) -> np.ndarray:
-        return self.base_flat.neighbor_src0_mat
+    def neighbor_src0_tpl(self) -> np.ndarray:
+        return self.base_flat.neighbor_src0_tpl
+
+    @property
+    def neighbor_src0_tid(self) -> np.ndarray:
+        return self.base_flat.neighbor_src0_tid
 
     @property
     def neighbor_src1_idx(self) -> np.ndarray:
@@ -172,8 +176,12 @@ class DistributedFlatFaceGeometry:
         return self.base_flat.owner_src0_cell
 
     @property
-    def owner_src0_mat(self) -> np.ndarray:
-        return self.base_flat.owner_src0_mat
+    def owner_src0_tpl(self) -> np.ndarray:
+        return self.base_flat.owner_src0_tpl
+
+    @property
+    def owner_src0_tid(self) -> np.ndarray:
+        return self.base_flat.owner_src0_tid
 
     @property
     def owner_src1_idx(self) -> np.ndarray:

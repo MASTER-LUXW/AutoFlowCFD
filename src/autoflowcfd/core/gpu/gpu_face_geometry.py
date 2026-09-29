@@ -76,15 +76,19 @@ class GPUFlatFaceGeometry:
             self.neighbor_adj_row_exact = cp.asarray(flat_face.neighbor_adj_row_exact)
 
             # ── 邻居源数据（src0 = 主要来源矩阵，src1 = 稀疏第二来源）──
+            # src0 矩阵是模板表 + 逐面编号（fr/face_flux_points/templates.py）：第 f 个面
+            # 的矩阵是 tpl[tid[f]]
             self.neighbor_src0_cell = cp.asarray(flat_face.neighbor_src0_cell)
-            self.neighbor_src0_mat = cp.asarray(flat_face.neighbor_src0_mat)
+            self.neighbor_src0_tpl = cp.asarray(flat_face.neighbor_src0_tpl)
+            self.neighbor_src0_tid = cp.asarray(flat_face.neighbor_src0_tid)
             self.neighbor_src1_idx = cp.asarray(flat_face.neighbor_src1_idx)
             self.neighbor_src1_cell = cp.asarray(flat_face.neighbor_src1_cell)
             self.neighbor_src1_mat = cp.asarray(flat_face.neighbor_src1_mat)
 
             # ── Owner 源数据 ──
             self.owner_src0_cell = cp.asarray(flat_face.owner_src0_cell)
-            self.owner_src0_mat = cp.asarray(flat_face.owner_src0_mat)
+            self.owner_src0_tpl = cp.asarray(flat_face.owner_src0_tpl)
+            self.owner_src0_tid = cp.asarray(flat_face.owner_src0_tid)
             self.owner_src1_idx = cp.asarray(flat_face.owner_src1_idx)
             self.owner_src1_cell = cp.asarray(flat_face.owner_src1_cell)
             self.owner_src1_mat = cp.asarray(flat_face.owner_src1_mat)

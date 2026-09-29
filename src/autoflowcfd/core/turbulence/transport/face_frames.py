@@ -39,7 +39,7 @@ from autoflowcfd.core.fr_operators.small_dense import matvec_small
 def extrapolate_scalar_pair_kernel(
     scalar_sps,
     self_cell, self_cube_face, boundary_extrap_native,
-    other_src0_cell, other_src0_mat,
+    other_src0_cell, other_src0_tpl, other_src0_tid,
     other_src1_idx, other_src1_cell, other_src1_mat,
     apply_boundary_ghost,
     wall_dirichlet_zero_face, has_wall_dirichlet_value, wall_dirichlet_value_face,
@@ -74,7 +74,7 @@ def extrapolate_scalar_pair_kernel(
         c0 = other_src0_cell[f]
         idx1 = other_src1_idx[f]
         if c0 >= 0:
-            m0 = other_src0_mat[f]
+            m0 = other_src0_tpl[other_src0_tid[f]]
             for i in range(n_fp):
                 v = 0.0
                 for s in range(n_sps):
@@ -112,7 +112,7 @@ def extrapolate_scalar_pair_kernel(
 @njit(cache=True, parallel=True)
 def face_mass_flux_kernel(
     rho_u, owner_cell, owner_cube_face, neighbor_cell, neighbor_cube_face, boundary_extrap_native,
-    owner_src0_cell, owner_src0_mat, owner_src1_idx, owner_src1_cell, owner_src1_mat,
+    owner_src0_cell, owner_src0_tpl, owner_src0_tid, owner_src1_idx, owner_src1_cell, owner_src1_mat,
     mixed_ow_partner, mixed_ow_mask, normal_owner, normal_neighbor,
 ):
     """两侧坐标系下通量点上的质量通量 `(m_owner, m_neighbor)`，各 `(n_faces, n_fp)`。
@@ -156,7 +156,7 @@ def face_mass_flux_kernel(
                 else:
                     if c0 >= 0:
                         for s in range(n_sps):
-                            t += owner_src0_mat[f, i, s] * rho_u[c0, s, d]
+                            t += owner_src0_tpl[owner_src0_tid[f], i, s] * rho_u[c0, s, d]
                     if idx1 >= 0:
                         c1 = owner_src1_cell[idx1]
                         for s in range(n_sps):
@@ -191,7 +191,7 @@ def convection_jump_point(m, ps, po):
 def diffusion_face_jumps_kernel(
     phi, gamma, grad_phi,
     self_cell, self_cube_face, boundary_extrap_native,
-    other_src0_cell, other_src0_mat, other_src1_idx, other_src1_cell, other_src1_mat,
+    other_src0_cell, other_src0_tpl, other_src0_tid, other_src1_idx, other_src1_cell, other_src1_mat,
     normal, h_face, c_ip, is_boundary, is_dirichlet, target,
 ):
     """某一侧坐标系下扩散界面项的跳变量 `J = (G* - G_self) . n_self`，`(n_faces, n_fp)`。
@@ -239,7 +239,7 @@ def diffusion_face_jumps_kernel(
             dno = 0.0
             if c0 >= 0:
                 for s in range(n_sps):
-                    w = other_src0_mat[f, i, s]
+                    w = other_src0_tpl[other_src0_tid[f], i, s]
                     po += w * phi[c0, s]
                     go += w * gamma[c0, s]
                     dno += w * (grad_phi[c0, s, 0] * n0 + grad_phi[c0, s, 1] * n1 + grad_phi[c0, s, 2] * n2)

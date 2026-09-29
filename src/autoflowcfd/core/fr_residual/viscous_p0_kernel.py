@@ -57,9 +57,9 @@ def compute_viscous_interface_correction_p0_kernel(
     # 逐 FP 精确度量伴随行（与 P>=1 kernel 同一个来源，见函数文档
     # "2026-09-23 修复的真实缺陷"）。
     owner_adj_row_exact: np.ndarray, neighbor_adj_row_exact: np.ndarray,
-    neighbor_src0_cell: np.ndarray, neighbor_src0_mat: np.ndarray,
+    neighbor_src0_cell: np.ndarray, neighbor_src0_tpl: np.ndarray, neighbor_src0_tid: np.ndarray,
     neighbor_src1_idx: np.ndarray, neighbor_src1_cell: np.ndarray, neighbor_src1_mat: np.ndarray,
-    owner_src0_cell: np.ndarray, owner_src0_mat: np.ndarray,
+    owner_src0_cell: np.ndarray, owner_src0_tpl: np.ndarray, owner_src0_tid: np.ndarray,
     owner_src1_idx: np.ndarray, owner_src1_cell: np.ndarray, owner_src1_mat: np.ndarray,
     mixed_nb_partner: np.ndarray, mixed_nb_mask: np.ndarray,
     mixed_ow_partner: np.ndarray, mixed_ow_mask: np.ndarray,
@@ -199,7 +199,7 @@ def compute_viscous_interface_correction_p0_kernel(
                     mut_n = 0.0
                     c0 = neighbor_src0_cell[f]
                     if c0 >= 0:
-                        mat0 = neighbor_src0_mat[f]
+                        mat0 = neighbor_src0_tpl[neighbor_src0_tid[f]]
                         w = mat0[i, 0]  # n_sps=1，只有 s=0
                         if w != 0.0:
                             for v in range(5):
@@ -345,7 +345,7 @@ def compute_viscous_interface_correction_p0_kernel(
                 mut_o_at_n = 0.0
                 c0 = owner_src0_cell[f]
                 if c0 >= 0:
-                    mat0 = owner_src0_mat[f]
+                    mat0 = owner_src0_tpl[owner_src0_tid[f]]
                     w = mat0[i, 0]
                     if w != 0.0:
                         for v in range(5):

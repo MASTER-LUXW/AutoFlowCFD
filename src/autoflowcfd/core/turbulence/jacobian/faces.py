@@ -182,8 +182,8 @@ def add_turbulence_face_blocks_color(face_indices, acc_prism, acc_tet, slot, n_p
                                      owner_cell, neighbor_cell, is_boundary, owner_is_primary, neighbor_is_primary,
                                      owner_cube_face, neighbor_cube_face, normal_owner, normal_neighbor,
                                      adj_owner, adj_neighbor, ref_area_weight, E_nat, lift_nat, ip_length, c_ip,
-                                     neighbor_src0_cell, neighbor_src0_mat, neighbor_src1_idx, neighbor_src1_cell,
-                                     neighbor_src1_mat, owner_src0_cell, owner_src0_mat, owner_src1_idx,
+                                     neighbor_src0_cell, neighbor_src0_tpl, neighbor_src0_tid, neighbor_src1_idx, neighbor_src1_cell,
+                                     neighbor_src1_mat, owner_src0_cell, owner_src0_tpl, owner_src0_tid, owner_src1_idx,
                                      owner_src1_cell, owner_src1_mat,
                                      m_owner, m_neighbor, ghost_o, a_o, ghost_n, a_n,
                                      bnd_o, dir_o, tgt_o, bnd_n, dir_n, tgt_n,
@@ -214,7 +214,7 @@ def add_turbulence_face_blocks_color(face_indices, acc_prism, acc_tet, slot, n_p
                 if not is_boundary[f]:
                     src_cells[0] = neighbor_src0_cell[f]
                 i1 = neighbor_src1_idx[f]
-                m0 = neighbor_src0_mat[f]
+                m0 = neighbor_src0_tpl[neighbor_src0_tid[f]]
                 if i1 >= 0:
                     src_cells[1] = neighbor_src1_cell[i1]
                     m1 = neighbor_src1_mat[i1]
@@ -232,7 +232,7 @@ def add_turbulence_face_blocks_color(face_indices, acc_prism, acc_tet, slot, n_p
                 bnd_row, dir_row, tgt_row = bnd_n[f], dir_n[:, f], tgt_n[:, f]
                 src_cells[0] = owner_src0_cell[f]
                 i1 = owner_src1_idx[f]
-                m0 = owner_src0_mat[f]
+                m0 = owner_src0_tpl[owner_src0_tid[f]]
                 if i1 >= 0:
                     src_cells[1] = owner_src1_cell[i1]
                     m1 = owner_src1_mat[i1]

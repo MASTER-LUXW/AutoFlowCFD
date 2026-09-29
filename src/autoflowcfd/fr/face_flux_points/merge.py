@@ -29,6 +29,7 @@ from .exact_normal import (
     compute_exact_face_normals_and_weights,
 )
 from .validation import validate_face_flux_point_residuals
+from .templates import deduplicate_face_matrices
 from autoflowcfd.grid.curved_mapping.curved_mapping import PRISM_CUBE_FACES
 from autoflowcfd.grid.connectivity.face_connectivity import (
     CUBE_FACE_NAMES,
@@ -380,14 +381,13 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         _nb_sec_resid_arr = np.zeros((1, n_fp), dtype=np.float64)
         _ow_sec_resid_arr = np.zeros((1, n_fp), dtype=np.float64)
 
-    # nb_src0_mat/ow_src0_mat：零拷贝别名到 kernel 输出的 _nb_interp/
-    # _ow_interp——此时两者已经历完主 kernel 的向量化赋值范围与
-    # multi-source kernel 的原地写入，逐位等于旧实现里 nb_src0_mat/
-    # ow_src0_mat 该有的值（详见本函数开头"内存说明"），不再重新分配、
-    # 不再逐元素拷贝，避免 P3 阶数下这两个 ~14.3GiB 矩阵各自双份同时
-    # 存活导致的 OOM。
-    nb_src0_mat = _nb_interp
-    ow_src0_mat = _ow_interp
+    # kernel 输出的 _nb_interp/_ow_interp 此时已经历完主 kernel 的向量化赋值范围与
+    # multi-source kernel 的原地写入，就是逐面的 src0 矩阵（详见本函数开头"内存说明"）；
+    # 再归并成模板表 + 逐面编号（`templates.py`：同一模板内逐元素差 < 1e-13，
+    # P3 两份从 6.15 GiB 降到约 0.35 GiB），全尺寸数组随即释放
+    nb_src0_tpl, nb_src0_tid = deduplicate_face_matrices(_nb_interp)
+    ow_src0_tpl, ow_src0_tid = deduplicate_face_matrices(_ow_interp)
+    del _nb_interp, _ow_interp
 
     nb_extra_cell = _nb_extra_cells
     nb_extra_mat = _nb_extra_mats_arr
@@ -424,10 +424,10 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         neighbor_adj_row_exact=_neighbor_adj_row_exact,
         true_area_weight=_all_area_w,
         nb_src0_cell=nb_src0_cell,
-        nb_src0_mat=nb_src0_mat,
+        nb_src0_tpl=nb_src0_tpl, nb_src0_tid=nb_src0_tid,
         nb_src1_idx=nb_src1_idx,
         ow_src0_cell=ow_src0_cell,
-        ow_src0_mat=ow_src0_mat,
+        ow_src0_tpl=ow_src0_tpl, ow_src0_tid=ow_src0_tid,
         ow_src1_idx=ow_src1_idx,
         nb_extra_cell=nb_extra_cell,
         nb_extra_mat=nb_extra_mat,
