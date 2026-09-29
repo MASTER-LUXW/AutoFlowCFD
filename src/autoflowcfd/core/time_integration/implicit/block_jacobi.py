@@ -56,8 +56,18 @@ P0 与解析装配不覆盖的离散（见 `fr_residual/jacobian/backend.py::uns
 逐单元只存**真实**自由度（原生基的零填充槽位不进块，见
 `fr/native_padding.py::real_sps_per_cell`）。`J_cc` 与逆各一份，float32
 存储（逐块求逆在 float64 下做）：预处理子的精度只影响迭代数，不影响
-GMRES 解的精度。超过 `MAX_BYTES` 时不装配、退回对角预处理并打 WARNING
-（例如 P3 棱柱一块 200x200，79 万单元就要上百 GB）。
+GMRES 解的精度。
+
+两份超过 `MAX_BYTES`、一份不超过 `MAX_BYTES_SINGLE` 时用**单份**（冻结 dtau）：
+装配后立即按当时的 `dtau` 原地求逆、不再保留 `J_cc`；之后每步直接用这份逆，
+当前 `dtau` 与求逆时的 `dtau`（几何平均比值）相差超过 `DTAU_REBUILD_RATIO` 倍才
+重装配。预处理子里的 `dtau` 略微过时只影响迭代数（它仍是合法的预处理子），迭代
+数上升由上面的刷新判据兜住。plate_demo P3（1.99 万棱柱块 200x200 + 15.9 万四面体块
+100x100）两份 19.1 GiB、一份 9.5 GiB：与求解器本身（残差峰值约 11.8 GiB）和紧凑
+Krylov 基（约 4.8 GiB）共存于 31.5 GB 开发机只能是一份。
+
+一份也放不下时不装配、退回对角预处理并打 WARNING（例如 P3 棱柱一块 200x200，
+79 万单元就要上百 GB）。
 """
 
 from typing import Optional
@@ -90,6 +100,12 @@ MAX_BYTES = 8 * 2 ** 30
 #: 1.8 GB、P2 约 11 GB（与求解器本身约 10 GB 共存于 31.5 GB 开发机）。
 MAX_BYTES_ILU = 12 * 2 ** 30
 
+#: 单份（冻结 dtau）模式下块逆一份（float32）允许的字节数，见模块文档"内存"。
+MAX_BYTES_SINGLE = 12 * 2 ** 30
+
+#: 单份模式：当前 dtau 与求逆时 dtau 的几何平均比值超过这个倍数（任一方向）就重装配。
+DTAU_REBUILD_RATIO = 2.0
+
 #: 估计耦合块数用的每单元平均面邻居数（四面体 4、棱柱 5，内部单元为主）。
 _MEAN_FACE_NEIGHBORS = 4.2
 
@@ -121,30 +137,17 @@ class CellBlockJacobiPreconditioner(PseudoTransientDiagonal):
 
     __slots__ = ("_jac", "_inv_prism", "_inv_tet", "_rows_prism", "_rows_tet")
 
-    def __init__(self, jac: CellBlockJacobian, dtau_flat):
+    def __init__(self, jac: CellBlockJacobian, dtau_flat, inverted: bool = False):
+        """`inverted=True`：`jac` 的块已经是 `inv(J_cc + diag(1/dtau_build))`（单份模式，
+        `invert_blocks_in_place`），直接使用；`dtau_flat` 只用于零填充行的对角部分。"""
         super().__init__(dtau_flat, jac.n_var)
         self._jac = jac
-        xp = jac.xp
-        n_sps, nv = jac.n_sps, jac.n_var
-        self._rows_prism = xp.asarray(jac.prism_cells[:, None] * n_sps + np.arange(jac.n_real_prism)[None, :])
-        self._rows_tet = xp.asarray(jac.tet_cells[:, None] * n_sps + np.arange(jac.n_real_tet)[None, :])
-        self._inv_prism = self._invert(jac.blocks_prism, self._rows_prism, nv)
-        self._inv_tet = self._invert(jac.blocks_tet, self._rows_tet, nv)
-
-    def _invert(self, blocks, rows, nv: int):
-        xp = self._jac.xp
-        if blocks.shape[0] == 0:
-            return xp.empty_like(blocks)
-        diag = xp.ascontiguousarray(xp.repeat(1.0 / self.dtau[rows], nv, axis=1))  # 与块内 (s,v) 序一致
-        if xp is np:
-            out = np.empty_like(blocks)
-            _invert_blocks_plus_diag(blocks, diag, out)
-            return out
-        # cupy：一次批量 cuSOLVER 调用（GPU 上没有 CPU LAPACK 逐矩阵调用的开销）
-        a = blocks.astype(xp.float64)
-        idx = xp.arange(blocks.shape[1])
-        a[:, idx, idx] += diag
-        return xp.linalg.inv(a).astype(xp.float32)
+        self._rows_prism, self._rows_tet = _block_rows(jac)
+        if inverted:
+            self._inv_prism, self._inv_tet = jac.blocks_prism, jac.blocks_tet
+        else:
+            self._inv_prism = _inverted_blocks(jac, jac.blocks_prism, self._rows_prism, self.dtau, out=None)
+            self._inv_tet = _inverted_blocks(jac, jac.blocks_tet, self._rows_tet, self.dtau, out=None)
 
     def apply(self, v_flat):
         out = super().apply(v_flat)
@@ -159,6 +162,42 @@ class CellBlockJacobiPreconditioner(PseudoTransientDiagonal):
         return out
 
 
+def _block_rows(jac: CellBlockJacobian):
+    """棱柱块、四面体块各自覆盖的状态行（真实解点）。"""
+    xp, n_sps = jac.xp, jac.n_sps
+    return (xp.asarray(jac.prism_cells[:, None] * n_sps + np.arange(jac.n_real_prism)[None, :]),
+            xp.asarray(jac.tet_cells[:, None] * n_sps + np.arange(jac.n_real_tet)[None, :]))
+
+
+def _inverted_blocks(jac: CellBlockJacobian, blocks, rows, dtau, out):
+    """逐块 `inv(blocks + diag(1/dtau))`（float32）；`out is blocks` 时原地。"""
+    xp, nv = jac.xp, jac.n_var
+    if blocks.shape[0] == 0:
+        return blocks if out is not None else xp.empty_like(blocks)
+    diag = xp.ascontiguousarray(xp.repeat(1.0 / dtau[rows], nv, axis=1))  # 与块内 (s,v) 序一致
+    if xp is np:
+        res = np.empty_like(blocks) if out is None else out
+        _invert_blocks_plus_diag(blocks, diag, res)
+        return res
+    # cupy：一次批量 cuSOLVER 调用（GPU 上没有 CPU LAPACK 逐矩阵调用的开销）
+    a = blocks.astype(xp.float64)
+    idx = xp.arange(blocks.shape[1])
+    a[:, idx, idx] += diag
+    inv = xp.linalg.inv(a).astype(xp.float32)
+    if out is None:
+        return inv
+    out[...] = inv
+    return out
+
+
+def invert_blocks_in_place(jac: CellBlockJacobian, dtau_flat) -> None:
+    """单份模式：把 `jac` 的块原地换成 `inv(J_cc + diag(1/dtau))`（见模块文档"内存"）。"""
+    dtau = jac.xp.asarray(dtau_flat, dtype=jac.xp.float64).ravel()
+    rows_prism, rows_tet = _block_rows(jac)
+    _inverted_blocks(jac, jac.blocks_prism, rows_prism, dtau, out=jac.blocks_prism)
+    _inverted_blocks(jac, jac.blocks_tet, rows_tet, dtau, out=jac.blocks_tet)
+
+
 @njit(parallel=True, cache=True)
 def _invert_blocks_plus_diag(blocks, diag, out):
     """逐块 `inv(blocks[b] + diag(diag[b]))`：float64 Gauss-Jordan、部分选主元，
@@ -168,6 +207,8 @@ def _invert_blocks_plus_diag(blocks, diag, out):
     LAPACK，调用开销与 BLAS 线程调度远大于 30x30 本身的计算量——实测
     10.7 万个 30x30 块要 107 s（本核并行版不到 1 s），在每个 Newton 步都要
     按新 `dtau` 重新求逆的前提下不可接受。
+
+    `out` 可以就是 `blocks`（原地）：每块先整块读入局部数组再写回。
     """
     n_blk, m, _ = blocks.shape
     for b in prange(n_blk):
@@ -215,7 +256,8 @@ class BlockJacobiCache:
     __slots__ = ("cell_is_prism", "colors", "n_sps", "n_real_prism", "n_real_tet",
                  "jac", "age", "baseline_iters", "last_iters", "last_accepted",
                  "disabled_reason", "n_builds", "red", "n_var", "assembler", "use_ilu", "coupling",
-                 "_coupling_graph_fn", "_coupling_graph", "build_seconds", "iter_seconds")
+                 "_coupling_graph_fn", "_coupling_graph", "build_seconds", "iter_seconds",
+                 "single_copy", "_inverted_dtau")
 
     def __init__(self, *, cell_is_prism, colors: np.ndarray, n_sps: int,
                  n_real_prism: int, n_real_tet: int, n_var: int,
@@ -238,6 +280,8 @@ class BlockJacobiCache:
         self._coupling_graph = None
         self.build_seconds = None
         self.iter_seconds = None
+        self.single_copy = False
+        self._inverted_dtau = None
         self.cell_is_prism = np.asarray(cell_is_prism, dtype=bool)
         self.n_sps, self.n_real_prism, self.n_real_tet = n_sps, n_real_prism, n_real_tet
         self.jac: Optional[CellBlockJacobian] = None
@@ -252,16 +296,23 @@ class BlockJacobiCache:
         # 块 ILU 要解析装配给出的面邻居耦合块；内存放得下才用（否则块 Jacobi）
         self.use_ilu = estimate_ilu_bytes(n_prism, self.cell_is_prism.size - n_prism,
                                           n_real_prism, n_real_tet, n_var) <= MAX_BYTES_ILU
+        self.disabled_reason = None
+        self.colors = np.asarray(colors, dtype=np.int64)
         if need > MAX_BYTES:
             self.use_ilu = False
-            self.disabled_reason = (
-                f"单元块 Jacobi 需要 {need / 2 ** 30:.1f} GiB（上限 {MAX_BYTES / 2 ** 30:.0f} GiB），"
-                f"改用逐 SP 对角预处理——大 CFL 下 GMRES 迭代数会显著上升")
-            logger.warning("[NK] " + self.disabled_reason)
-            self.colors = None
-        else:
-            self.disabled_reason = None
-            self.colors = np.asarray(colors, dtype=np.int64)
+            if need // 2 <= MAX_BYTES_SINGLE:
+                # 单份（冻结 dtau）模式，见模块文档"内存"
+                self.single_copy = True
+                logger.info(f"[NK] 单元块 Jacobi 两份需要 {need / 2 ** 30:.1f} GiB（上限 "
+                            f"{MAX_BYTES / 2 ** 30:.0f} GiB），改为单份（冻结 dtau）"
+                            f"{need / 2 ** 31:.1f} GiB")
+            else:
+                self.disabled_reason = (
+                    f"单元块 Jacobi 一份也需要 {need / 2 ** 31:.1f} GiB（上限 "
+                    f"{MAX_BYTES_SINGLE / 2 ** 30:.0f} GiB），改用逐 SP 对角预处理——大 CFL 下 "
+                    f"GMRES 迭代数会显著上升")
+                logger.warning("[NK] " + self.disabled_reason)
+                self.colors = None
 
     def _refresh_threshold(self, baseline: int) -> int:
         slack = REFRESH_SLACK_MIN
@@ -269,12 +320,22 @@ class BlockJacobiCache:
             slack = max(slack, self.build_seconds / self.iter_seconds)
         return int(baseline + slack)
 
-    def _needs_rebuild(self) -> bool:
+    def _needs_rebuild(self, dtau_flat) -> bool:
         if self.jac is None or self.age >= MAX_AGE or not self.last_accepted:
+            return True
+        if self.single_copy and self._dtau_drifted(dtau_flat):
             return True
         if self.baseline_iters is not None and self.last_iters is not None:
             return self.last_iters > self._refresh_threshold(self.baseline_iters)
         return False
+
+    def _dtau_drifted(self, dtau_flat) -> bool:
+        """单份模式：当前 dtau 相对求逆时 dtau 的几何平均比值是否超过 `DTAU_REBUILD_RATIO`
+        （几何平均不让少数被局部缩小 dtau 的行触发整场重装配）。分布式下取全局平均。"""
+        xp = self.red.xp
+        log_ratio = xp.log(xp.asarray(dtau_flat, dtype=xp.float64).ravel() / self._inverted_dtau)
+        mean = self.red.sum(log_ratio) / max(self.red.count(log_ratio), 1.0)
+        return abs(mean) > np.log(DTAU_REBUILD_RATIO)
 
     def stale_budget(self) -> Optional[int]:
         """复用中的 `J_cc`（`age > 0`）在本步的 GMRES 迭代预算：超过它就说明
@@ -286,21 +347,24 @@ class BlockJacobiCache:
             return None
         return self._refresh_threshold(self.baseline_iters)
 
-    def refresh(self, residual, u0_flat, r0_flat, scales) -> None:
+    def refresh(self, residual, u0_flat, r0_flat, scales, dtau_flat) -> None:
         """当场按本步基态重装配（本步 GMRES 超出 `stale_budget` 时调用）。"""
-        self._build(residual, u0_flat, r0_flat, scales, reason="本步 GMRES 超出过时预算")
+        self._build(residual, u0_flat, r0_flat, scales, dtau_flat, reason="本步 GMRES 超出过时预算")
 
-    def begin_step(self, residual, u0_flat, r0_flat, scales) -> None:
+    def begin_step(self, residual, u0_flat, r0_flat, scales, dtau_flat) -> None:
         """每个 Newton 步开始时调用一次：按刷新判据决定是否重装配 `J_cc`。
 
         必须与 `preconditioner()` 分开：一个 Newton 步内 `dtau` 逐档缩小
         重试时每档都要重新求逆，但 `J_cc` 只依赖基态，不能每档重装配。
-        """
-        if self.disabled_reason is not None or not self._needs_rebuild():
-            return
-        self._build(residual, u0_flat, r0_flat, scales, reason="刷新判据")
 
-    def _build(self, residual, u0_flat, r0_flat, scales, *, reason: str) -> None:
+        `dtau_flat`：本步的伪时间步长（缩档之前）。单份模式据它判断存下的逆是否已经
+        过时（`_dtau_drifted`），重装配时也按它求逆。
+        """
+        if self.disabled_reason is not None or not self._needs_rebuild(dtau_flat):
+            return
+        self._build(residual, u0_flat, r0_flat, scales, dtau_flat, reason="刷新判据")
+
+    def _build(self, residual, u0_flat, r0_flat, scales, dtau_flat, *, reason: str) -> None:
         import time
 
         t0 = time.time()
@@ -328,6 +392,9 @@ class BlockJacobiCache:
                 self.coupling = BlockCouplingStructure(
                     self.jac.coupling, self.cell_is_prism.size, np.ones(self.cell_is_prism.size, np.int64),
                     self.n_var)
+        if self.single_copy:
+            invert_blocks_in_place(self.jac, dtau_flat)
+            self._inverted_dtau = self.red.xp.asarray(dtau_flat, dtype=self.red.xp.float64).ravel().copy()
         self.age = 0
         self.baseline_iters = None
         self.last_iters = None
@@ -335,7 +402,8 @@ class BlockJacobiCache:
         self.n_builds += 1
         self.build_seconds = self.red.max(self.red.xp.asarray([time.time() - t0]))
         logger.info(f"[NK] 单元块 Jacobian 重装配（第 {self.n_builds} 次，{reason}，"
-                    f"{'块 ILU' if self.coupling is not None else '块 Jacobi'}，"
+                    f"{'块 ILU' if self.coupling is not None else '块 Jacobi'}"
+                    f"{'（单份，冻结 dtau）' if self.single_copy else ''}，"
                     + ("解析装配" if self.assembler is not None
                        else f"差分装配 {self.jac.n_residual_evals} 次残差求值")
                     + f"，{time.time() - t0:.1f}s）")
@@ -356,7 +424,7 @@ class BlockJacobiCache:
         if self.coupling is not None:
             from .block_ilu import BlockILUPreconditioner
             return BlockILUPreconditioner.from_cell_blocks(self.jac, self.coupling, dtau_flat)
-        return CellBlockJacobiPreconditioner(self.jac, dtau_flat)
+        return CellBlockJacobiPreconditioner(self.jac, dtau_flat, inverted=self.single_copy)
 
     def record(self, gmres_iters: int, accepted: bool, gmres_seconds: Optional[float] = None) -> None:
         """一个 Newton 步结束后调用：更新刷新判据的依据。

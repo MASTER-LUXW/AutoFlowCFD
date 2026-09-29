@@ -379,9 +379,9 @@ def step_newton_krylov(
     jac = MatrixFreeJacobian(residual, u0_flat, r0, scales, red=red)
     if gmres_restart is None:
         gmres_restart = krylov_restart(u0_flat.size if rows is None else rows.idx.size * n_var, red)
-    if block_precond is not None:
-        block_precond.begin_step(residual, u0_flat, r0, scales)
     dtau_base = xp.ascontiguousarray(dtau_flat, dtype=xp.float64).ravel() * local_scale
+    if block_precond is not None:
+        block_precond.begin_step(residual, u0_flat, r0, scales, dtau_base * ctrl.scale)
     eta = (forcing.next_eta(res_norm, tol_nonlinear)
            if forcing is not None else 0.1)
 
@@ -417,7 +417,7 @@ def step_newton_krylov(
             # 复用的 J_cc 在过时预算内解不到容差：当场按本步基态重装配再解
             # （见 block_jacobi.py 模块文档"复用与刷新"）。ginfo 是全局量，各 rank
             # 在这里的分支一致。
-            block_precond.refresh(residual, u0_flat, r0, scales)
+            block_precond.refresh(residual, u0_flat, r0, scales, dtau_try)
             prec = block_precond.preconditioner(dtau_try, n_var)
             t_solve = time.perf_counter()
             du, iters, ginfo, linear_rel = _solve_direction(

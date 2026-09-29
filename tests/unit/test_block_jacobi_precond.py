@@ -135,7 +135,7 @@ def _begin(cache, rng):
     A, _ = _linear_system(n_cells, cache.cell_is_prism, rng)
     u0 = rng.normal(size=(n_cells * N_SPS, NV))
     R = _residual(A)
-    cache.begin_step(R, u0, R(u0), np.ones(NV))
+    cache.begin_step(R, u0, R(u0), np.ones(NV), np.full(u0.shape[0], 1e-2))
 
 
 def test_refresh_policy():
@@ -163,12 +163,50 @@ def test_refresh_policy():
 
 def test_over_memory_budget_falls_back_to_diagonal(monkeypatch):
     monkeypatch.setattr(bj, "MAX_BYTES", 1)
+    monkeypatch.setattr(bj, "MAX_BYTES_SINGLE", 1)
     c = _cache()
     assert c.disabled_reason is not None
     _begin(c, np.random.default_rng(4))
     p = c.preconditioner(np.ones(c.cell_is_prism.size * N_SPS), NV)
     assert type(p) is PseudoTransientDiagonal
     assert c.n_builds == 0
+
+
+def test_single_copy_mode_freezes_dtau_and_rebuilds_on_drift(monkeypatch):
+    """两份放不下、一份放得下：装配后按当时 dtau 原地求逆、不留 J_cc；预处理用这份逆
+    （与传入的 dtau 无关）；dtau 几何平均漂移超过 DTAU_REBUILD_RATIO 才重装配。"""
+    monkeypatch.setattr(bj, "MAX_BYTES", 1)
+    rng = np.random.default_rng(6)
+    c = _cache()
+    assert c.single_copy and c.disabled_reason is None and not c.use_ilu
+    n_cells = c.cell_is_prism.size
+    A, _ = _linear_system(n_cells, c.cell_is_prism, rng)
+    u0 = rng.normal(size=(n_cells * N_SPS, NV))
+    R = _residual(A)
+    d0 = np.full(n_cells * N_SPS, 0.3)
+    c.begin_step(R, u0, R(u0), np.ones(NV), d0)
+    v = rng.normal(size=(n_cells * N_SPS, NV))
+
+    def check(dtau_inverted, dtau_passed):
+        out = c.preconditioner(dtau_passed, NV).apply(v)
+        for cell in range(n_cells):
+            n_real = N_REAL_P if c.cell_is_prism[cell] else N_REAL_T
+            rows = cell * N_SPS + np.arange(n_real)
+            dof = (rows[:, None] * NV + np.arange(NV)[None, :]).ravel()
+            blk = A[np.ix_(dof, dof)] + np.diag(np.repeat(1.0 / dtau_inverted[rows], NV))
+            np.testing.assert_allclose(out[rows].ravel(), np.linalg.solve(blk, v[rows].ravel()),
+                                       rtol=1e-4, atol=1e-6)
+            pad = cell * N_SPS + np.arange(n_real, N_SPS)
+            np.testing.assert_allclose(out[pad], v[pad] * dtau_passed[pad, None])
+
+    check(d0, 0.5 * d0)                        # 冻结：用的是求逆时的 d0
+    c.record(10, accepted=True)
+    c.begin_step(R, u0, R(u0), np.ones(NV), 1.5 * d0)
+    assert c.n_builds == 1                     # 漂移 1.5 倍 < 2：复用
+    c.record(10, accepted=True)
+    c.begin_step(R, u0, R(u0), np.ones(NV), 3.0 * d0)
+    assert c.n_builds == 2                     # 漂移 3 倍：重装配并按新 dtau 求逆
+    check(3.0 * d0, 3.0 * d0)
 
 
 def test_jfnk_block_precond_needs_fewer_gmres_iterations():

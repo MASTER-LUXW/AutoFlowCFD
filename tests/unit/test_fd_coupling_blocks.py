@@ -106,7 +106,7 @@ def test_p0_cache_switches_to_block_ilu_and_beats_block_jacobi():
     graph = coupling_graph_from_faces(fl.owner_cell, fl.neighbor_cell, n)
     cache = BlockJacobiCache(cell_is_prism=cip, colors=colors, n_sps=1, n_real_prism=1, n_real_tet=1, n_var=5,
                              coupling_graph=lambda: graph)
-    cache.begin_step(res, u0, r0, SCALES)
+    cache.begin_step(res, u0, r0, SCALES, np.full(u0.shape[0], 1e-2))
     assert cache.coupling is not None
     mf = MatrixFreeJacobian(res, u0, r0, SCALES)
     dtau = np.full(n, 1e-2)          # 大 CFL：I/dtau 远小于 J
