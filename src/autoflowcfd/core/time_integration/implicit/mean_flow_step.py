@@ -174,7 +174,7 @@ def step_mean_flow_newton(
             同时截取面邻居耦合块、预处理用块 ILU（`cell_blocks.py` 模块文档）；
             None 时 P0 只有块 Jacobi。
     """
-    from autoflowcfd.fr.native_padding import real_sps_per_cell
+    from autoflowcfd.fr.native_padding import real_row_mask, real_sps_per_cell
 
     if filter_active:
         raise ValueError(
@@ -206,7 +206,9 @@ def step_mean_flow_newton(
         block_precond=solver._newton_block_precond, physicality=positivity.density_pressure_limits,
         rows_per_cell=u_flat.shape[0] // np.asarray(cell_is_prism).size, red=red,
         local_dtau_scale=getattr(solver, "_newton_local_dtau", None),
-        norm_weights=positivity.W)
+        norm_weights=positivity.W,
+        real_rows=red.xp.asarray(real_row_mask(cell_is_prism, u_flat.shape[0] // np.asarray(cell_is_prism).size,
+                                               order)))
     u_new = u_flat.copy()
     u_new[:, :n_mf] = u_new_mf
     solver._newton_last_info = info

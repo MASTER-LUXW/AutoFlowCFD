@@ -168,6 +168,13 @@ def real_sps_per_cell(order: int) -> Tuple[int, int]:
     return native_prism_n_real_sps(order), native_tet_n_real_sps(order)
 
 
+def real_row_mask(cell_is_prism, n_sps: int, order: int) -> np.ndarray:
+    """逐行（`cell * n_sps + sp` 排列）布尔掩码：该行是否是真实自由度（`real_sps_per_cell`）。"""
+    n_real_prism, n_real_tet = real_sps_per_cell(int(order))
+    n_real = np.where(np.asarray(cell_is_prism, dtype=bool), n_real_prism, n_real_tet)
+    return (np.arange(int(n_sps))[None, :] < n_real[:, None]).ravel()
+
+
 def order_from_n_sps(n_sps: int) -> int:
     """从每单元解点数反解多项式阶数：`n_sps = (p+1)^3` => `p`。
 

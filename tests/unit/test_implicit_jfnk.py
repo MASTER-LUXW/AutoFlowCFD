@@ -534,6 +534,36 @@ def test_scaled_field_limits_cross_the_floor_gradually():
     np.testing.assert_allclose(u1[1], 1.0, rtol=1e-12)
 
 
+def test_krylov_on_real_rows_matches_full_system():
+    """Krylov 向量只存真实行（`real_rows`）与全尺寸求解给出同一个 Newton 步；
+    零填充行残差不为零时拒绝（紧凑化的等价前提）。"""
+    from autoflowcfd.core.time_integration.implicit.jfnk import step_newton_krylov
+
+    rng = np.random.default_rng(11)
+    n_cells, n_sps, n_var = 30, 4, 2
+    real = np.tile([True, True, True, False], n_cells)          # 每单元 1 个零填充槽位
+    n = n_cells * n_sps
+    A = np.eye(n) * 4.0 + 0.3 * rng.standard_normal((n, n))
+    A[~real, :] = 0.0
+    A[:, ~real] = 0.0                                           # 零填充行列 Jacobian 为零
+    t = rng.standard_normal((n, n_var))
+
+    def residual(u):
+        return np.einsum("ij,jv->iv", A, u - t)
+
+    u0 = np.zeros((n, n_var))
+    kw = dict(gmres_max_iter=200, rows_per_cell=1, physicality=lambda u, du, red: np.ones(u.shape[0]))
+    u_full, info_full = step_newton_krylov(residual, u0, np.full(n, 1e3), np.ones(n_var), **kw)
+    u_real, info_real = step_newton_krylov(residual, u0, np.full(n, 1e3), np.ones(n_var), real_rows=real, **kw)
+    np.testing.assert_allclose(u_real, u_full, rtol=1e-10, atol=1e-12)
+    assert np.all(u_real[~real] == 0.0)
+    assert info_real["gmres_iters"] == info_full["gmres_iters"]
+
+    with pytest.raises(ValueError, match="零填充"):
+        step_newton_krylov(lambda u: residual(u) + 1.0, u0, np.full(n, 1e3), np.ones(n_var),
+                           real_rows=real, **kw)
+
+
 def test_scaled_field_limits_use_cell_magnitude():
     """限幅基准与单元真实解点的 |u| 均值取大：落在单元多项式振荡低谷的解点（值近零）
     按单元量级移动，不被自己的点值冻结；零填充槽位不计入均值。"""

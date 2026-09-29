@@ -197,8 +197,34 @@ def krylov_restart(n_local_entries: int, red: LocalReductions) -> int:
     return int(min(GMRES_RESTART_MAX, max(GMRES_RESTART, m)))
 
 
+class _RealRows:
+    """Krylov 向量只存真实解点行（原生基的零填充槽位不进基向量）。
+
+    零填充行的残差恒为零（调用方保证、`step_newton_krylov` 入口核查）、Jacobian
+    行列也为零，`A` 在那里就是 `I/dtau`、右端项为零，解在那里恒为零——在真实行
+    上求解与全尺寸求解数学上等价。P3 原生基真实行只占约 42%（棱柱 40/64、四面体
+    20/64），plate_demo P3 一个全尺寸基向量 0.46 GB、紧凑后 0.16 GB。
+    做成类而不是闭包：在整个 Newton 步存活（项目规范）。
+    """
+
+    __slots__ = ("idx", "n_dof", "n_var")
+
+    def __init__(self, real_rows, n_dof: int, n_var: int, xp):
+        self.idx = xp.nonzero(xp.asarray(real_rows, dtype=bool))[0]
+        self.n_dof, self.n_var = int(n_dof), int(n_var)
+
+    def expand(self, x_1d, xp):
+        full = xp.zeros((self.n_dof, self.n_var), dtype=x_1d.dtype)
+        full[self.idx] = x_1d.reshape(-1, self.n_var)
+        return full
+
+    def compact(self, y):
+        return y[self.idx].reshape(-1)
+
+
 def _solve_direction(jac: MatrixFreeJacobian, prec, r0, n_var: int, eta: float,
-                     gmres_restart: int, gmres_max_iter: int, red: LocalReductions):
+                     gmres_restart: int, gmres_max_iter: int, red: LocalReductions,
+                     rows: Optional[_RealRows] = None):
     """解 `(I/dtau + J) dU = -R`，返回 `(du, gmres_iters, gmres_info, linear_rel_residual)`。
 
     `prec` 同时提供 PTC 对角项（`add_ptc_term`）与预处理作用（`apply`），
@@ -215,21 +241,35 @@ def _solve_direction(jac: MatrixFreeJacobian, prec, r0, n_var: int, eta: float,
     重建 Krylov 算子的基态部分（`n_matvec` 在它内部累计）。
     """
     n_dof = r0.shape[0]
+    xp = red.xp
 
-    def _apply_A(x_1d):
-        v = x_1d.reshape(n_dof, n_var)
-        jv = jac.matvec(v)
-        return prec.add_ptc_term(jv, v).reshape(-1)
+    if rows is None:
+        def _apply_A(x_1d):
+            v = x_1d.reshape(n_dof, n_var)
+            jv = jac.matvec(v)
+            return prec.add_ptc_term(jv, v).reshape(-1)
 
-    def _apply_Minv(x_1d):
-        return prec.apply(x_1d.reshape(n_dof, n_var)).reshape(-1)
+        def _apply_Minv(x_1d):
+            return prec.apply(x_1d.reshape(n_dof, n_var)).reshape(-1)
+
+        b = (-r0).reshape(-1)
+    else:
+        def _apply_A(x_1d):
+            v = rows.expand(x_1d, xp)
+            return rows.compact(prec.add_ptc_term(jac.matvec(v), v))
+
+        def _apply_Minv(x_1d):
+            return rows.compact(prec.apply(rows.expand(x_1d, xp)))
+
+        b = rows.compact(-r0)
 
     du_1d, iters, info, rel = gmres_right(
-        _apply_A, (-r0).reshape(-1), _apply_Minv, rtol=eta,
+        _apply_A, b, _apply_Minv, rtol=eta,
         restart=gmres_restart, max_iter=gmres_max_iter, red=red)
     if info < 0 or not red.all_finite(du_1d):
         return None, iters, -1, float("nan")
-    return du_1d.reshape(n_dof, n_var), iters, int(info), float(rel)
+    du = du_1d.reshape(n_dof, n_var) if rows is None else rows.expand(du_1d, xp)
+    return du, iters, int(info), float(rel)
 
 
 def step_newton_krylov(
@@ -249,6 +289,7 @@ def step_newton_krylov(
     red: Optional[LocalReductions] = None,
     local_dtau_scale=None,
     norm_weights=None,
+    real_rows=None,
 ) -> Tuple[object, dict]:
     """做**一个** PTC-Newton-Krylov 步，返回 `(U_new_flat, info)`。
 
@@ -279,6 +320,8 @@ def step_newton_krylov(
             返回的 `res_norm`/`res_norm_new` 与接受判据都用这一个范数。
         local_dtau_scale: `(N,)` 上一次调用返回的 `info["local_dtau_scale"]`（逐行
             局部伪时间步长缩放，见 `LOCAL_DTAU_CUT_MIN`）；None 时全为 1。调用方持久化。
+        real_rows: `(N,)` 布尔，真实解点行（原生基零填充槽位为 False）。给出时 Krylov
+            向量只存真实行（`_RealRows`）；零填充行的残差必须恒为零，否则报错。
         red: 全局归约（`reductions.py`）。`None` 时为单进程 numpy；GPU 传
             `LocalReductions(cupy)`、分布式传跨 rank 归约的子类——本函数
             里一切"对整个解向量取标量"的操作都经过它。
@@ -327,9 +370,15 @@ def step_newton_krylov(
                              dtau_scale=ctrl.scale, n_dtau_cuts=0,
                              local_dtau_scale=local_scale, local_dtau_min=red.min(local_scale))
 
+    rows = None
+    if real_rows is not None:
+        rows = _RealRows(real_rows, u0_flat.shape[0], n_var, xp)
+        pad = ~xp.asarray(real_rows, dtype=bool)
+        if red.sum(xp.abs(r0[pad])) != 0.0:
+            raise ValueError("零填充槽位的残差不为零：Krylov 向量不能只存真实行（见 _RealRows）")
     jac = MatrixFreeJacobian(residual, u0_flat, r0, scales, red=red)
     if gmres_restart is None:
-        gmres_restart = krylov_restart(u0_flat.size, red)
+        gmres_restart = krylov_restart(u0_flat.size if rows is None else rows.idx.size * n_var, red)
     if block_precond is not None:
         block_precond.begin_step(residual, u0_flat, r0, scales)
     dtau_base = xp.ascontiguousarray(dtau_flat, dtype=xp.float64).ravel() * local_scale
@@ -361,7 +410,7 @@ def step_newton_krylov(
         t_solve = time.perf_counter()
         du, iters, ginfo, linear_rel = _solve_direction(
             jac, prec, r0, n_var, eta, gmres_restart,
-            gmres_max_iter if budget is None else min(budget, gmres_max_iter), red)
+            gmres_max_iter if budget is None else min(budget, gmres_max_iter), red, rows)
         t_solve = time.perf_counter() - t_solve
         iters_total += iters
         if ginfo > 0 and budget is not None and budget < gmres_max_iter:
@@ -372,7 +421,7 @@ def step_newton_krylov(
             prec = block_precond.preconditioner(dtau_try, n_var)
             t_solve = time.perf_counter()
             du, iters, ginfo, linear_rel = _solve_direction(
-                jac, prec, r0, n_var, eta, gmres_restart, gmres_max_iter, red)
+                jac, prec, r0, n_var, eta, gmres_restart, gmres_max_iter, red, rows)
             t_solve = time.perf_counter() - t_solve
             iters_total += iters
         iters_since_build = iters

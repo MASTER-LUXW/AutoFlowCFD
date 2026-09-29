@@ -85,7 +85,7 @@ from autoflowcfd.core.turbulence.sst.bounds import turbulence_scales
 from autoflowcfd.core.turbulence.sst.log_omega import log_omega, omega_from_log
 from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
 from autoflowcfd.core.turbulence.transport import omega_wall_cell_targets, prepare_convection_geometry
-from autoflowcfd.fr.native_padding import real_sps_per_cell
+from autoflowcfd.fr.native_padding import real_row_mask, real_sps_per_cell
 
 from .init import _update_production_ramp
 from .source import (
@@ -199,10 +199,7 @@ class TurbulenceResidual:
         self._be = backend
         xp = backend.xp
         n_cells, n_sps = backend.shape
-        n_real_prism, n_real_tet = real_sps_per_cell(backend.order)
-        n_real = np.where(backend.cell_is_prism, n_real_prism, n_real_tet)
-        real_rows = (np.arange(n_sps)[None, :] < n_real[:, None]).ravel()
-        self._real_rows = xp.asarray(real_rows)
+        self._real_rows = xp.asarray(real_row_mask(backend.cell_is_prism, n_sps, backend.order))
 
         # omega 壁面强约束（见模块文档）：壁面 owner 单元的全部真实解点
         hit_cells, target = backend.wall_targets()
@@ -297,7 +294,7 @@ def step_turbulence_newton(backend, dtau) -> None:
         # 限幅基准取单元量级（解点值是同一个单元多项式的分量，见 ScaledFieldRowLimits）
         physicality=ScaledFieldRowLimits(turbulence_scales(m), log_columns=(1,),
                                          rows_per_cell=backend.shape[1], real_rows=residual._real_rows),
-        rows_per_cell=1,
+        rows_per_cell=1, real_rows=residual._real_rows,
         red=backend.red, local_dtau_scale=st["local_dtau"], norm_weights=backend.norm_weights())
     st["dtau_scale"] = info["dtau_scale"]
     st["local_dtau"] = info["local_dtau_scale"]
