@@ -294,7 +294,10 @@ def step_turbulence_newton(backend, dtau) -> None:
         # 求值之后，越过下限甚至为负的 k/omega 不再能让下一次残差求值失去意义，
         # 松弛只剩"单步变化别太大"这一个作用。逐单元取最小会让一个需要大幅欠冲的
         # 解点（锐边剪切层 P1 的 Gibbs 欠冲约为跳跃的 9%）把整个单元冻在 1e-4。
-        physicality=ScaledFieldRowLimits(turbulence_scales(m), log_columns=(1,)), rows_per_cell=1,
+        # 限幅基准取单元量级（解点值是同一个单元多项式的分量，见 ScaledFieldRowLimits）
+        physicality=ScaledFieldRowLimits(turbulence_scales(m), log_columns=(1,),
+                                         rows_per_cell=backend.shape[1], real_rows=residual._real_rows),
+        rows_per_cell=1,
         red=backend.red, local_dtau_scale=st["local_dtau"], norm_weights=backend.norm_weights())
     st["dtau_scale"] = info["dtau_scale"]
     st["local_dtau"] = info["local_dtau_scale"]

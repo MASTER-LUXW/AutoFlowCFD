@@ -133,18 +133,36 @@ class ScaledFieldRowLimits:
     `|du| <= ln(1/(1-c))`，即原量最多减半/加倍——与上面的对数对称规则是同一个约束，
     只是换到对数变量上表达（对数量本身没有"相对变化"可言）。
 
+    **单元量级**（`rows_per_cell > 1`，2026-09-29）：基准再与该行所在单元真实解点的
+    `|u|` 均值取大。解点值是同一个单元多项式的分量，"变化是否过大"要相对多项式的
+    量级衡量；只看点值时，欠分辨前沿上恰好落在振荡低谷的解点（值近零）被冻结。
+    plate_demo P1 湍流发展暂态实测：单元内 k 跨 6 个量级（如 [~0, 494]），约 0.5% 的
+    k 行（~7500 行）每步被压到 alpha~1e-4、局部 dtau 钉在 ~5e-6，而多项式整体需要
+    O(1~100) 的变化；P0 下的同一个限幅正是按单元量级算的。
+
     做成类而不是闭包：在整个 Newton 步存活（项目规范）。
     """
 
-    __slots__ = ("_scales", "_log_columns")
+    __slots__ = ("_scales", "_log_columns", "_rows_per_cell", "_real_weight")
 
-    def __init__(self, scales, log_columns=()):
+    def __init__(self, scales, log_columns=(), rows_per_cell: int = 1, real_rows=None):
+        """`rows_per_cell`/`real_rows`：状态按单元连续排列时每单元的行数，与标记真实解点
+        （非零填充槽位）的逐行布尔掩码（在状态所在的数组模块上）；默认不取单元量级。"""
         self._scales = np.asarray(scales, dtype=np.float64)
         self._log_columns = tuple(int(c) for c in log_columns)
+        self._rows_per_cell = int(rows_per_cell)
+        self._real_weight = None if real_rows is None else real_rows.astype(np.float64)
 
     def __call__(self, u0_flat, du_flat, red: LocalReductions):
         xp = red.xp
-        base = xp.maximum(xp.abs(u0_flat), xp.asarray(self._scales)[None, :])
+        mag = xp.abs(u0_flat)
+        base = xp.maximum(mag, xp.asarray(self._scales)[None, :])
+        if self._rows_per_cell > 1:
+            n_col = u0_flat.shape[1]
+            w = (xp.ones(u0_flat.shape[0]) if self._real_weight is None else self._real_weight)
+            w = w.reshape(-1, self._rows_per_cell, 1)
+            cell_mag = (mag.reshape(-1, self._rows_per_cell, n_col) * w).sum(axis=1) / w.sum(axis=1)
+            base = xp.maximum(base, xp.repeat(cell_mag, self._rows_per_cell, axis=0))
         lim = _relative_change_limits(xp, base, du_flat, PHYSICALITY_MAX_RELATIVE_CHANGE)
         if self._log_columns:
             step = -np.log(1.0 - PHYSICALITY_MAX_RELATIVE_CHANGE)

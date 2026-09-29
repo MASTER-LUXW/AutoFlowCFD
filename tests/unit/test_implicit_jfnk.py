@@ -534,6 +534,28 @@ def test_scaled_field_limits_cross_the_floor_gradually():
     np.testing.assert_allclose(u1[1], 1.0, rtol=1e-12)
 
 
+def test_scaled_field_limits_use_cell_magnitude():
+    """限幅基准与单元真实解点的 |u| 均值取大：落在单元多项式振荡低谷的解点（值近零）
+    按单元量级移动，不被自己的点值冻结；零填充槽位不计入均值。"""
+    from autoflowcfd.core.time_integration.implicit.physicality import (
+        PHYSICALITY_MAX_RELATIVE_CHANGE as C, ScaledFieldRowLimits,
+    )
+    from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
+
+    # 单元 0：解点 [1e-4, 10, 20]，槽位 3 为零填充（值 1e6 不得计入）；单元 1：[1, 1, 1, pad]
+    u0 = np.array([[1e-4], [10.0], [20.0], [1e6], [1.0], [1.0], [1.0], [0.0]])
+    real = np.array([True, True, True, False] * 2)
+    du = np.full((8, 1), -10.0)
+    lim = ScaledFieldRowLimits([1e-3], rows_per_cell=4, real_rows=real)(u0, du, LocalReductions(np))
+    cell0 = (1e-4 + 10.0 + 20.0) / 3.0
+    # 解点 0、1 按单元均值（均大于点值），解点 2 按自身 20 不受限
+    np.testing.assert_allclose(lim[:3], [C * cell0 / 10.0, C * cell0 / 10.0, 1.0], rtol=1e-12)
+    np.testing.assert_allclose(lim[4:7], C * 1.0 / 10.0, rtol=1e-12)
+    # 不给单元结构时退回逐点基准
+    lim_pt = ScaledFieldRowLimits([1e-3])(u0, du, LocalReductions(np))
+    np.testing.assert_allclose(lim_pt[0], C * 1e-3 / 10.0, rtol=1e-12)
+
+
 def test_local_dtau_scale_cuts_relaxed_rows_and_recovers_the_rest():
     """被物理性松弛的行下一步降局部 dtau（乘以 max(alpha, 下限)），未松弛的行按固定
     倍数恢复到 1（见 physicality.py 的 LOCAL_DTAU_* 说明）。"""
