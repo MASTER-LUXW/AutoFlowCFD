@@ -196,7 +196,9 @@ def step_mean_flow_newton(
         solver._newton_block_precond = BlockJacobiCache(
             cell_is_prism=cell_is_prism, colors=cell_colors(),
             n_sps=u_flat.shape[0] // n_cells, n_real_prism=n_real_prism,
-            n_real_tet=n_real_tet, n_var=n_mf, red=red, coupling_graph=coupling_graph)
+            n_real_tet=n_real_tet, n_var=n_mf, red=red, coupling_graph=coupling_graph,
+            # 隐式湍流在同一步里先于平均流运行、已建好它的状态：两者共享预处理内存预算
+            with_turbulence=getattr(solver, "_newton_turb_state", None) is not None)
 
     solver._newton_block_precond.assembler = block_assembler
     u_new_mf, info = step_newton_krylov(

@@ -213,24 +213,45 @@ def assemble_mean_flow_blocks(ctx: MeanFlowLinearization, U, residual=None, want
             raise RuntimeError("耦合块槽位布局与界面核实际来源不一致（槽位缺写或列单元不同）")
 
     # ---- 除 det、取负、右乘 dQ/dU、左乘 Gamma ----
-    TQ = primitive_jacobian(U5.reshape(-1, 5)).reshape(n_cells, n_sps, 5, 5)
-    if ctx.low_mach:
-        if residual is None:
-            raise ValueError("低马赫预处理启用时必须传入 residual（d(Gamma R)/dU 需要 R）")
-        gamma, dgamma = _gamma_matrices(Q, np.asarray(residual, dtype=np.float64)[:n_cells, :, :5],
-                                        TQ, ctx.mach_ref)
-    else:
-        gamma = dgamma = np.zeros((1, n_sps, 5, 5))
+    # 对角块逐单元收尾，按单元分块、只在真实解点上构造 TQ/Gamma/dGamma（逐解点 (5,5)
+    # float64）：全场一次性构造时 P3 每份 2.1 GiB、四份加临时量约 10 GiB，与块本身
+    # （P3 单份 8.9 GiB）叠加放不下（plate_demo P3 实测 OOM）。
+    if ctx.low_mach and residual is None:
+        raise ValueError("低马赫预处理启用时必须传入 residual（d(Gamma R)/dU 需要 R）")
+    gamma_R = None if residual is None else np.asarray(residual, dtype=np.float64)[:n_cells, :, :5]
     det_c = np.ascontiguousarray(det, dtype=np.float64)
     for K, lo, n in ((K_prism, 0, npr), (K_tet, n_prism, nte)):
-        if K.shape[0]:
-            finalize_diag_kernel(K, np.arange(lo, lo + K.shape[0], dtype=np.int64), n, det_c, TQ,
-                                 gamma, dgamma, bool(ctx.low_mach))
+        for k0 in range(0, K.shape[0], _FINALIZE_CHUNK_CELLS):
+            k1 = min(k0 + _FINALIZE_CHUNK_CELLS, K.shape[0])
+            c0, c1 = lo + k0, lo + k1
+            TQ, gamma, dgamma = _transform_arrays(U5[c0:c1, :n], Q[c0:c1, :n],
+                                                  None if gamma_R is None else gamma_R[c0:c1, :n], ctx)
+            finalize_diag_kernel(K[k0:k1], np.arange(k1 - k0, dtype=np.int64), n,
+                                 np.ascontiguousarray(det_c[c0:c1]), TQ, gamma, dgamma, bool(ctx.low_mach))
     blocks = (K_prism.reshape(n_prism, npr * 5, npr * 5), K_tet.reshape(n_cells - n_prism, nte * 5, nte * 5))
     if not want_coupling:
         return blocks
+    # 耦合块只在块 ILU（预处理合计预算放得下，见 block_jacobi.py::plan_block_mode）时装配，行、列单元任意，
+    # 用全场的 TQ/Gamma
+    TQ, gamma, _ = _transform_arrays(U5, Q, gamma_R, ctx)
     coupling = finalize_coupling(cross_data, slots, det_c, TQ, gamma, bool(ctx.low_mach), npr, nte)
     return blocks + (coupling,)
+
+
+#: 对角块收尾的单元分块大小（每块 TQ/Gamma/dGamma 各约 `块 x 解点 x 25 x 8` 字节）。
+_FINALIZE_CHUNK_CELLS = 16384
+
+
+def _transform_arrays(U5, Q, gamma_R, ctx):
+    """`(TQ, Gamma, dGamma)`：`dQ/dU` 与低马赫预处理的 `Gamma`、`d(Gamma R_raw)/dU`
+    （后两者在未启用预处理时是 `(1, 1, 5, 5)` 的零占位，收尾核只取第 0 个）。"""
+    shape = U5.shape[:2]
+    TQ = primitive_jacobian(np.ascontiguousarray(U5).reshape(-1, 5)).reshape(shape + (5, 5))
+    if ctx.low_mach:
+        gamma, dgamma = _gamma_matrices(Q, gamma_R, TQ, ctx.mach_ref)
+    else:
+        gamma = dgamma = np.zeros((1, shape[1], 5, 5))
+    return TQ, gamma, dgamma
 
 
 def _gamma_matrices(Q, gamma_R, TQ, mach_ref):

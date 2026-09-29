@@ -162,8 +162,7 @@ def test_refresh_policy():
 
 
 def test_over_memory_budget_falls_back_to_diagonal(monkeypatch):
-    monkeypatch.setattr(bj, "MAX_BYTES", 1)
-    monkeypatch.setattr(bj, "MAX_BYTES_SINGLE", 1)
+    monkeypatch.setattr(bj, "PRECOND_TOTAL_BYTES", 1)
     c = _cache()
     assert c.disabled_reason is not None
     _begin(c, np.random.default_rng(4))
@@ -175,7 +174,8 @@ def test_over_memory_budget_falls_back_to_diagonal(monkeypatch):
 def test_single_copy_mode_freezes_dtau_and_rebuilds_on_drift(monkeypatch):
     """两份放不下、一份放得下：装配后按当时 dtau 原地求逆、不留 J_cc；预处理用这份逆
     （与传入的 dtau 无关）；dtau 几何平均漂移超过 DTAU_REBUILD_RATIO 才重装配。"""
-    monkeypatch.setattr(bj, "MAX_BYTES", 1)
+    # 预算恰好放得下一份、放不下两份
+    monkeypatch.setattr(bj, "PRECOND_TOTAL_BYTES", bj.block_mode_bytes("single", 3, 3, N_REAL_P, N_REAL_T, NV))
     rng = np.random.default_rng(6)
     c = _cache()
     assert c.single_copy and c.disabled_reason is None and not c.use_ilu
@@ -296,3 +296,23 @@ def test_refresh_threshold_balances_rebuild_cost_against_extra_iterations():
     assert cache._refresh_threshold(3) == 13
     cache.build_seconds = 0.5                                           # 装配很便宜：取下限
     assert cache._refresh_threshold(3) == 3 + REFRESH_SLACK_MIN
+
+
+def test_block_modes_share_one_budget_with_mean_flow_first(monkeypatch):
+    """平均流与湍流两个缓存共享 `PRECOND_TOTAL_BYTES`，平均流优先（plate_demo P3 实测：各自按
+    自己的上限选档时湍流 ILU 8.38 GiB + 平均流单份 8.9 GiB 叠加 OOM）。"""
+    sizes = (19872, 159365, 40, 20)                    # plate_demo P3
+    single_mean = bj.block_mode_bytes("single", *sizes, 5)
+    single_turb = bj.block_mode_bytes("single", *sizes, 2)
+    monkeypatch.setattr(bj, "PRECOND_TOTAL_BYTES", single_mean + single_turb)
+    assert bj.plan_block_mode(5, *sizes, with_turbulence=True) == "single"
+    assert bj.plan_block_mode(2, *sizes, with_turbulence=True) == "single"
+    # 预算不够两者都放单份：平均流仍然拿到单份，湍流退回对角预处理
+    monkeypatch.setattr(bj, "PRECOND_TOTAL_BYTES", single_mean + single_turb - 1)
+    assert bj.plan_block_mode(5, *sizes, with_turbulence=True) == "single"
+    assert bj.plan_block_mode(2, *sizes, with_turbulence=True) is None
+    # 合计不超预算
+    monkeypatch.setattr(bj, "PRECOND_TOTAL_BYTES", 12 * 2 ** 30)
+    m = bj.plan_block_mode(5, *sizes, with_turbulence=True)
+    t = bj.plan_block_mode(2, *sizes, with_turbulence=True)
+    assert bj.block_mode_bytes(m, *sizes, 5) + bj.block_mode_bytes(t, *sizes, 2) <= bj.PRECOND_TOTAL_BYTES

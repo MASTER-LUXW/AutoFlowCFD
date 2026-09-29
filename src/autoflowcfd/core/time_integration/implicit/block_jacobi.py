@@ -23,7 +23,7 @@ P0 顺带给出面邻居耦合块）或解析装配（下一节）。
 差分装配要 `色数 x 真实解点数 x 5` 次整场残差求值，P2 起不可承受（plate_demo
 P2 450 次、单次 5.5 s）。P>=1 由各后端传入解析装配器
 （`fr_residual/jacobian`，逐点导数与参考算子的收缩，同一个矩阵、代价约十几次
-残差求值），它同时给出面邻居耦合块，内存放得下（`MAX_BYTES_ILU`）时预处理
+残差求值），它同时给出面邻居耦合块，合计预算放得下（`plan_block_mode`）时预处理
 换成块 ILU（`block_ilu.py`，大 CFL 下 GMRES 迭代数约为块 Jacobi 的 0.4 倍）。
 P0 与解析装配不覆盖的离散（见 `fr_residual/jacobian/backend.py::unsupported_reason`）
 仍用差分装配。
@@ -58,7 +58,7 @@ P0 与解析装配不覆盖的离散（见 `fr_residual/jacobian/backend.py::uns
 存储（逐块求逆在 float64 下做）：预处理子的精度只影响迭代数，不影响
 GMRES 解的精度。
 
-两份超过 `MAX_BYTES`、一份不超过 `MAX_BYTES_SINGLE` 时用**单份**（冻结 dtau）：
+合计预算（`PRECOND_TOTAL_BYTES`，平均流与湍流共享，见 `plan_block_mode`）放不下两份、放得下一份时用**单份**（冻结 dtau）：
 装配后立即按当时的 `dtau` 原地求逆、不再保留 `J_cc`；之后每步直接用这份逆，
 当前 `dtau` 与求逆时的 `dtau`（几何平均比值）相差超过 `DTAU_REBUILD_RATIO` 倍才
 重装配。预处理子里的 `dtau` 略微过时只影响迭代数（它仍是合法的预处理子），迭代
@@ -90,18 +90,21 @@ REFRESH_SLACK_MIN = 3
 #: 单次 GMRES 迭代耗时的指数滑动平均权重（新值占比）。
 _ITER_SECONDS_EMA = 0.5
 
-#: 块 `J_cc` + 逆两份（float32）允许的总字节数。8 GiB：本项目开发机与常见
-#: 工作站上与求解器本身（P1 79 万单元状态约 0.2 GB/份 x 数十份工作数组）
-#: 共存的上限。
-MAX_BYTES = 8 * 2 ** 30
+#: 全部单元块预处理（平均流 + 湍流两个缓存**合计**，float32）允许的字节数。
+#:
+#: **为什么是一个合计预算**（2026-09-29）：此前平均流与湍流的缓存各自按自己的上限
+#: （ILU 12 GiB、两份 8 GiB）选档，互相看不见。plate_demo P3（17.9 万单元）湍流只有
+#: 2 个变量，耦合块却随自由度平方增长，块 ILU 要 8.38 GiB；加上平均流单份 8.9 GiB、
+#: 求解器常驻 7.7 GiB、残差求值峰值约 4.5 GiB、Krylov 基 4.6 GiB，合计约 34 GiB，
+#: GMRES 的矩阵向量乘在 31.5 GB 开发机上 OOM。11 GiB：放得下 P3 平均流单份（8.9 GiB）+
+#: 湍流单份（1.4 GiB），与上述其余部分合计约 27 GiB。分档见 `plan_block_mode`（平均流优先）。
+PRECOND_TOTAL_BYTES = 11 * 2 ** 30
 
-#: 块 ILU（对角块 + 分解后的对角逆 + 面邻居耦合块，float32）允许的总字节数。
-#: 超过时解析装配只给对角块、用块 Jacobi。plate_demo（17.9 万单元）P1 约
-#: 1.8 GB、P2 约 11 GB（与求解器本身约 10 GB 共存于 31.5 GB 开发机）。
-MAX_BYTES_ILU = 12 * 2 ** 30
+#: 档位偏好顺序：块 ILU > 块 Jacobi 两份 > 单份（冻结 dtau）> 不装配（对角预处理）。
+BLOCK_MODES = ("ilu", "two", "single")
 
-#: 单份（冻结 dtau）模式下块逆一份（float32）允许的字节数，见模块文档"内存"。
-MAX_BYTES_SINGLE = 12 * 2 ** 30
+_MEAN_FLOW_VARS = 5
+_TURBULENCE_VARS = 2
 
 #: 单份模式：当前 dtau 与求逆时 dtau 的几何平均比值超过这个倍数（任一方向）就重装配。
 DTAU_REBUILD_RATIO = 2.0
@@ -114,6 +117,45 @@ def estimate_block_bytes(n_prism: int, n_tet: int, n_real_prism: int,
     """`J_cc` + 逆两份（float32）的总字节数。"""
     bp, bt = n_real_prism * n_var, n_real_tet * n_var
     return 2 * 4 * (n_prism * bp * bp + n_tet * bt * bt)
+
+
+def block_mode_bytes(mode: str, n_prism: int, n_tet: int, n_real_prism: int, n_real_tet: int,
+                     n_var: int) -> int:
+    """某一档（`BLOCK_MODES`）的字节数。"""
+    if mode == "ilu":
+        return estimate_ilu_bytes(n_prism, n_tet, n_real_prism, n_real_tet, n_var)
+    two = estimate_block_bytes(n_prism, n_tet, n_real_prism, n_real_tet, n_var)
+    return two if mode == "two" else two // 2
+
+
+def _best_mode(budget: int, sizes, n_var: int) -> Optional[str]:
+    for mode in BLOCK_MODES:
+        if block_mode_bytes(mode, *sizes, n_var) <= budget:
+            return mode
+    return None
+
+
+def plan_block_mode(n_var: int, n_prism: int, n_tet: int, n_real_prism: int, n_real_tet: int,
+                    with_turbulence: bool) -> Optional[str]:
+    """在合计预算 `PRECOND_TOTAL_BYTES` 内为平均流（`n_var=5`）或湍流（`n_var=2`）选档；
+    None 表示一档也放不下（对角预处理）。
+
+    平均流优先：它在"给湍流留出单份"之后的预算里取最好的一档；湍流在平均流选定之后
+    的剩余里取最好的一档。两个缓存各自调用、结果一致（同一个函数、同一组尺寸）。
+    `with_turbulence=False`（层流）时平均流独占预算。
+    """
+    sizes = (n_prism, n_tet, n_real_prism, n_real_tet)
+    if n_var not in (_MEAN_FLOW_VARS, _TURBULENCE_VARS):
+        return _best_mode(PRECOND_TOTAL_BYTES, sizes, n_var)
+    turbulence = with_turbulence or n_var == _TURBULENCE_VARS
+    reserve = block_mode_bytes("single", *sizes, _TURBULENCE_VARS) if turbulence else 0
+    # 平均流优先：留出湍流单份后放不下时不再预留（湍流在剩余里取档，最坏退回对角预处理）
+    mean_mode = (_best_mode(PRECOND_TOTAL_BYTES - reserve, sizes, _MEAN_FLOW_VARS)
+                 or _best_mode(PRECOND_TOTAL_BYTES, sizes, _MEAN_FLOW_VARS))
+    if n_var == _MEAN_FLOW_VARS:
+        return mean_mode
+    used = 0 if mean_mode is None else block_mode_bytes(mean_mode, *sizes, _MEAN_FLOW_VARS)
+    return _best_mode(PRECOND_TOTAL_BYTES - used, sizes, _TURBULENCE_VARS)
 
 
 def estimate_ilu_bytes(n_prism: int, n_tet: int, n_real_prism: int,
@@ -261,7 +303,7 @@ class BlockJacobiCache:
 
     def __init__(self, *, cell_is_prism, colors: np.ndarray, n_sps: int,
                  n_real_prism: int, n_real_tet: int, n_var: int,
-                 red: LocalReductions = None, coupling_graph=None):
+                 red: LocalReductions = None, coupling_graph=None, with_turbulence: bool = False):
         """`colors`：块装配用的单元着色（单机 `coloring.greedy_cell_coloring`；分布式
         是全局一致着色里本 rank 那一段，保证同色单元跨 rank 也不相邻）。
 
@@ -271,6 +313,8 @@ class BlockJacobiCache:
         `coupling_graph`：可选回调 `() -> coloring.CouplingGraph`，只在首次需要时调用。
         每单元一个真实解点（P0）且没有解析装配器时，差分装配按它的距离 2 着色同时给出
         面邻居耦合块，预处理用块 ILU（见 `cell_blocks.py` 模块文档）。
+
+        `with_turbulence`：平均流缓存是否与隐式湍流缓存共享预算（`plan_block_mode`）。
         """
         self.red = red if red is not None else LocalReductions()
         self.n_var = int(n_var)
@@ -290,29 +334,25 @@ class BlockJacobiCache:
         self.last_iters = None
         self.last_accepted = True
         self.n_builds = 0
-        n_prism = int(self.cell_is_prism.sum())
-        need = estimate_block_bytes(n_prism, self.cell_is_prism.size - n_prism,
-                                    n_real_prism, n_real_tet, n_var)
-        # 块 ILU 要解析装配给出的面邻居耦合块；内存放得下才用（否则块 Jacobi）
-        self.use_ilu = estimate_ilu_bytes(n_prism, self.cell_is_prism.size - n_prism,
-                                          n_real_prism, n_real_tet, n_var) <= MAX_BYTES_ILU
+        sizes = (int(self.cell_is_prism.sum()), int((~self.cell_is_prism).sum()), n_real_prism, n_real_tet)
+        mode = plan_block_mode(self.n_var, *sizes, with_turbulence=with_turbulence)
+        # 块 ILU 要面邻居耦合块（解析装配或 P0 差分装配给出）
+        self.use_ilu = mode == "ilu"
+        self.single_copy = mode == "single"
         self.disabled_reason = None
         self.colors = np.asarray(colors, dtype=np.int64)
-        if need > MAX_BYTES:
-            self.use_ilu = False
-            if need // 2 <= MAX_BYTES_SINGLE:
-                # 单份（冻结 dtau）模式，见模块文档"内存"
-                self.single_copy = True
-                logger.info(f"[NK] 单元块 Jacobi 两份需要 {need / 2 ** 30:.1f} GiB（上限 "
-                            f"{MAX_BYTES / 2 ** 30:.0f} GiB），改为单份（冻结 dtau）"
-                            f"{need / 2 ** 31:.1f} GiB")
-            else:
-                self.disabled_reason = (
-                    f"单元块 Jacobi 一份也需要 {need / 2 ** 31:.1f} GiB（上限 "
-                    f"{MAX_BYTES_SINGLE / 2 ** 30:.0f} GiB），改用逐 SP 对角预处理——大 CFL 下 "
-                    f"GMRES 迭代数会显著上升")
-                logger.warning("[NK] " + self.disabled_reason)
-                self.colors = None
+        if mode is None:
+            self.disabled_reason = (
+                f"单元块 Jacobi（n_var={self.n_var}）一份也需要 "
+                f"{block_mode_bytes('single', *sizes, self.n_var) / 2 ** 30:.1f} GiB，超出预处理合计预算 "
+                f"{PRECOND_TOTAL_BYTES / 2 ** 30:.0f} GiB，改用逐 SP 对角预处理——大 CFL 下 GMRES "
+                f"迭代数会显著上升")
+            logger.warning("[NK] " + self.disabled_reason)
+            self.colors = None
+        else:
+            logger.info(f"[NK] 单元块预处理（n_var={self.n_var}）：{mode}，"
+                        f"{block_mode_bytes(mode, *sizes, self.n_var) / 2 ** 30:.2f} GiB"
+                        f"（合计预算 {PRECOND_TOTAL_BYTES / 2 ** 30:.0f} GiB）")
 
     def _refresh_threshold(self, baseline: int) -> int:
         slack = REFRESH_SLACK_MIN
