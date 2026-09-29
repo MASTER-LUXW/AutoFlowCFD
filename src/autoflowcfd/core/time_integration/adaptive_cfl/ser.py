@@ -65,6 +65,22 @@ Newton 都被完整接受（`theta = 1`、没有缩 dtau）。纯 SER 在这段�
   处理，残差略降（比值 > 1）时失败步反而把 CFL 放大：plate_demo P0+SST 上
   GMRES 用满 200 次只到 0.96 的那一步，CFL 从 3351 涨到 3385。
 
+### 完整接受的步至少按 `MIN_GROWTH` 放大（2026-09-29）
+
+纯 SER 在"每步进展很小"时自锁：CFL 小时 PTC 每步只把残差降约 1%，CFL 于是也只涨
+约 1%；残差略有起伏就保持。plate_demo P1+SST（湍流在剪切层里发展的暂态）实测：第
+35~53 步 CFL 22.1 -> 25.1，之后 50 多步基本不动（25.1~25.2），期间 192 步里只有 3 步
+没被完整接受——控制器停在一个与稳定性无关的值上，每步只推进约 0.02 个绕流特征时间。
+
+所以对**完整接受**的步：
+
+* 残差下降 -> 放大 `max(比值, MIN_GROWTH)`；
+* 残差小幅上升（单步不超过 `RISE_HOLD` 倍，平台期的起伏）-> 放大 `MIN_GROWTH`；
+* 残差大幅上升（冲击启动的物理暂态）-> 保持（上一节）。
+
+与 PETSc `TSPSEUDO` 的默认增量 1.1 同一量级。放大过头由没被完整接受的步收回（至少
+减半），控制器因此试探到接受边界附近，而不是停在进展本身的量级上。
+
 步内的紧急处置（当场缩 dtau 重试）仍然由 `dtau_control.PtcDtauScale`
 负责，本控制器只调天花板，两层不重叠。
 
@@ -85,6 +101,12 @@ from loguru import logger
 #: Newton 步未被完整接受时的最小收缩倍率（每步至少减半；SU2 自适应 CFL 在线性
 #: 求解失败时同样按固定倍率收缩）。
 NOT_OK_SHRINK = 0.5
+
+#: 完整接受的步的最小放大倍率（见模块文档"完整接受的步至少按 MIN_GROWTH 放大"）。
+MIN_GROWTH = 1.1
+
+#: 完整接受的步里，残差单步上升超过这个倍数视为物理暂态（冲击启动），保持不放大。
+RISE_HOLD = 1.1
 
 
 class SERCFLController:
@@ -133,7 +155,8 @@ class SERCFLController:
             current_residual: Newton 所解系统的残差范数 `||F||`（见模块文档）。
             step_ok: 本步 Newton 是否被**完整**接受（`mean_flow_step.py::
                 newton_step_ok`）。为 False 时至少按 `NOT_OK_SHRINK` 收缩；为
-                True 时残差下降放大、上升保持（见模块文档）。
+                True 时至少按 `MIN_GROWTH` 放大，残差单步上升超过 `RISE_HOLD` 倍时保持
+                （见模块文档）。
         """
         r = float(current_residual)
         if not (math.isfinite(r) and r > 0.0):
@@ -144,9 +167,12 @@ class SERCFLController:
                 f"{self.cfl_number:.3g}")
             return self.cfl_number
         if self._prev_residual is not None:
-            factor = (self._prev_residual / r) ** self.exponent
+            ratio = self._prev_residual / r
+            factor = ratio ** self.exponent
             if not step_ok:
                 factor = min(factor, NOT_OK_SHRINK)
+            elif ratio >= 1.0 / RISE_HOLD:
+                factor = max(factor, MIN_GROWTH)
             factor = min(self.growth_limit, max(self.shrink_limit, factor))
             if factor >= 1.0 or not step_ok:
                 self.cfl_number = self._clamp(self.cfl_number * factor)

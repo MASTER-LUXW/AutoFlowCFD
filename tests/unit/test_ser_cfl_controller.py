@@ -49,6 +49,21 @@ def test_failed_step_never_grows_cfl():
     assert c.update(3.89e5, step_ok=False) == pytest.approx(50.0)
 
 
+def test_accepted_steps_grow_at_least_min_growth_on_a_plateau():
+    """残差在平台上小幅起伏、每步都被完整接受：CFL 每步至少乘 MIN_GROWTH，不自锁在
+    进展本身的量级上（plate_demo P1+SST 暂态里纯 SER 停在 25 附近 50 多步）。"""
+    from autoflowcfd.core.time_integration.adaptive_cfl.ser import MIN_GROWTH, RISE_HOLD
+
+    c = SERCFLController(cfl_start=25.0, cfl_max=1e4, cfl_min=0.5)
+    c.update(2.0e6)
+    for r in (1.99e6, 2.03e6, 2.01e6, 2.05e6):        # 下降 0.5% / 上升 2% / 下降 / 上升
+        c.update(r)
+    assert c.cfl_number == pytest.approx(25.0 * MIN_GROWTH ** 4)
+    # 上升超过 RISE_HOLD：保持
+    before = c.cfl_number
+    assert c.update(2.05e6 * RISE_HOLD * 1.01) == pytest.approx(before)
+
+
 def test_growth_while_holding_does_not_compound():
     """冲击启动：残差连续上升、每步都被完整接受 -> CFL 一直保持在起点。"""
     c = SERCFLController(cfl_start=5.0, cfl_max=1e4, cfl_min=0.5)
