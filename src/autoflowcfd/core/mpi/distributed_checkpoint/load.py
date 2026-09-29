@@ -219,6 +219,10 @@ def restore_distributed_state_from_checkpoint(checkpoint_path: str, solver) -> i
         k_global, omega_global = k_omega_global
         k_local = scatter_local_state(k_global[:, :, None], local_cells)[:, :, 0]
         omega_local = scatter_local_state(omega_global[:, :, None], local_cells)[:, :, 0]
+        from autoflowcfd.core.turbulence.sst.log_omega import admissible_omega
+
+        turb_for_inf = solver.turb_model_gpu if is_gpu_turb_model else solver.turb_model
+        omega_local = admissible_omega(omega_local, turb_for_inf.omega_inf, source='分布式 checkpoint')
         if is_gpu_turb_model:
             # GPU 分布式求解器（"传统模式"/"完全分布式加载"皆可）：
             # `turb_model_gpu.k_field`/`.omega_field` 是 CuPy 数组，写入

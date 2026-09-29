@@ -43,6 +43,7 @@ def _fake_solver(n_cells=2, n_sps=1, n_vars=7, order=0, k=None, omega=None, with
         turb_model = SimpleNamespace(
             k_field=np.full((n_cells, n_sps), 1e-6) if k is None else k,
             omega_field=np.full((n_cells, n_sps), 1.0) if omega is None else omega,
+            omega_inf=1.0,  # 恢复时的可容许性投影读它（sst/log_omega.py::admissible_omega）
         )
     return SimpleNamespace(
         state=state,

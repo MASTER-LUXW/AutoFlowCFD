@@ -1,4 +1,4 @@
-"""k-omega 解析单元块 Jacobian（`core/turbulence/jacobian`）对照着色有限差分装配。
+"""k-ln(omega) 解析单元块 Jacobian（`core/turbulence/jacobian`）对照着色有限差分装配。
 
 参考是隐式湍流步实际求解的残差 `TurbulenceResidual`（冻结平均流、omega 壁面强约束行、
 零填充行置零）。湍流残差对单元自身自由度只经本单元与面邻居（梯度是单元内局部梯度），
@@ -55,11 +55,12 @@ def _blocks(s):
     be.prepare()
     res = TurbulenceResidual(be)
     m = s.turb_model
-    kw0 = np.stack([m.k_field.ravel(), m.omega_field.ravel()], axis=1)
+    # 未知量 (k, w = ln omega)，见 core/turbulence/sst/log_omega.py
+    kw0 = np.stack([m.k_field.ravel(), np.log(m.omega_field).ravel()], axis=1)
     r0 = res(kw0)
     order = int(s.mesh.order)
     npr, nte = real_sps_per_cell(order)
-    fd = CellBlockJacobian(res, kw0, r0, np.array([m.k_inf, m.omega_inf]), n_sps=s.mesh.n_sps_per_cell,
+    fd = CellBlockJacobian(res, kw0, r0, np.array([m.k_inf, 1.0]), n_sps=s.mesh.n_sps_per_cell,
                            cell_is_prism=np.arange(s.mesh.n_cells) < s.mesh.n_prism_cells,
                            n_real_prism=npr, n_real_tet=nte, colors=single_machine_cell_colors(s))
     asm = be.block_assembler()
@@ -104,7 +105,7 @@ def test_coupling_blocks_match_dense_finite_difference():
         flat_idx.append((c * ns + sp) * 2 + v)
     flat_idx = np.array(flat_idx)
     u0, rr0 = kw0.reshape(-1), r0.reshape(-1)
-    scale = np.array([s.turb_model.k_inf, s.turb_model.omega_inf])
+    scale = np.array([s.turb_model.k_inf, 1.0])
     J = np.zeros((len(cols), len(cols)))
     for k in range(len(cols)):
         up = u0.copy()

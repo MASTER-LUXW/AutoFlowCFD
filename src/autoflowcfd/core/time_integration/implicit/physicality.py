@@ -129,19 +129,29 @@ class ScaledFieldRowLimits:
     为负（realizability 只作用于模型项求值），纯相对限幅在那里退化成冻结——
     2026-09-26 之前正是贴下限的解点把整个单元的松弛因子压到 1e-4。
 
+    `log_columns` 里的列是对数量（`ln omega`，见 `turbulence/sst/log_omega.py`）：单步
+    `|du| <= ln(1/(1-c))`，即原量最多减半/加倍——与上面的对数对称规则是同一个约束，
+    只是换到对数变量上表达（对数量本身没有"相对变化"可言）。
+
     做成类而不是闭包：在整个 Newton 步存活（项目规范）。
     """
 
-    __slots__ = ("_scales",)
+    __slots__ = ("_scales", "_log_columns")
 
-    def __init__(self, scales):
+    def __init__(self, scales, log_columns=()):
         self._scales = np.asarray(scales, dtype=np.float64)
+        self._log_columns = tuple(int(c) for c in log_columns)
 
     def __call__(self, u0_flat, du_flat, red: LocalReductions):
         xp = red.xp
         base = xp.maximum(xp.abs(u0_flat), xp.asarray(self._scales)[None, :])
-        lim = _relative_change_limits(xp, base, du_flat, PHYSICALITY_MAX_RELATIVE_CHANGE).min(axis=1)
-        return xp.clip(lim, 0.0, 1.0)
+        lim = _relative_change_limits(xp, base, du_flat, PHYSICALITY_MAX_RELATIVE_CHANGE)
+        if self._log_columns:
+            step = -np.log(1.0 - PHYSICALITY_MAX_RELATIVE_CHANGE)
+            for c in self._log_columns:
+                with np.errstate(divide="ignore"):
+                    lim[:, c] = step / xp.abs(du_flat[:, c])
+        return xp.clip(lim.min(axis=1), 0.0, 1.0)
 
 
 def _cellwise_relaxation(alpha_rows, rows_per_cell: int, red: LocalReductions):

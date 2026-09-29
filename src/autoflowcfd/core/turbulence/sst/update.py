@@ -11,6 +11,7 @@
 import numpy as np
 
 from .bounds import clip_to_bounds
+from .log_omega import log_omega, omega_from_log
 
 
 class _SSTUpdateMixin:
@@ -30,101 +31,50 @@ class _SSTUpdateMixin:
         """
         clip_to_bounds(self, np)
 
-    def update_fields(self, dt: float, Sk: np.ndarray, S_omega: np.ndarray,
-                     diff_k: np.ndarray = None, diff_omega: np.ndarray = None,
-                     transport_k: np.ndarray = None,
-                     transport_omega: np.ndarray = None):
-        """
-        执行一个时间步长的湍流场更新。
-
-        Args:
-            dt: 时间步长（标量或逐 SP 数组，与 Sk/S_omega 广播兼容——见
-                fr_solver/step.py 文档：稳态加速模式传逐 SP 的局部 CFL
-                步长 dt_local，DUAL_TIME 模式传标量物理 dt）
-            Sk: 湍动能源项（dk/dt 量纲，已除以 rho，P_k-D_k 合并后的净值）
-            S_omega: 比耗散率源项（domega/dt 量纲，已除以 rho，
-                P_omega-D_omega+CD_omega 合并后的净值）
-            diff_k: k 的扩散项（可选，已弃用——现在由 transport_k 替代）
-            diff_omega: omega 的扩散项（可选，已弃用）
-            transport_k: k 的完整输运残差（对流+扩散，dk/dt 量纲），
-                由 core/turbulence_transport.py 计算。非 None 时替代
-                diff_k 并加入更新。
-            transport_omega: omega 的完整输运残差（对流+扩散），同上。
-        """
-        # 源项半隐式阻尼（point-implicit destruction）：真实复现
-        # （合成 Couette+SST 小算例、order continuation 到 P2）：即使
-        # dt 已经是 cfl.py 正确按阶数/粘性/几何刚性收紧过的局部步长，
-        # 纯显式积分 D_omega=rho*beta*omega^2 这类关于场量自身的二次
-        # destruction 项仍会失稳——这是逐点 ODE 反应项刚性，
-        # cfl.py::compute_local_time_step 的对流/粘性 CFL 估计的是
-        # *空间*算子（对流通量/扩散通量）的谱半径，从未覆盖、也不该
-        # 覆盖这种*逐点*反应项刚性（两者是独立的稳定性机制）。本方法
-        # 及调用方 fr_solver/turbulence.py 的注释此前一直声称这里是
-        # "半隐式阻尼更新"，但实际代码是纯前向欧拉
-        # `k_field += dt*dk_total`，没有任何阻尼——文档与实现不符，
-        # 现在改正为文档一直声称的做法。
-        #
-        # 标准 point-implicit 处理（Blazek《CFD Principles and
-        # Applications》、Wilcox《Turbulence Modeling for CFD》等对
-        # k-omega 类模型刚性 destruction 项的标准做法）：把 destruction
-        # 项在 phi_new 上线性化、用 phi_old 处的系数隐式求解：
-        #   D_k/rho   = beta_star*omega*k   （对 k 线性，系数 beta_star*omega）
-        #   D_omega/rho = beta*omega^2      （对 omega 自身非线性，冻结一个
-        #                                     omega 因子做隐式，另一个仍用旧值）
-        # 设 S = P/rho - D/rho（Sk/S_omega 已经是这个合并后的净值，用
-        # phi_old 求出），隐式方程：
-        #   phi_new = phi_old + dt*(S + c*phi_old - c*phi_new)
-        # （即把 S 里已经用 phi_old 算出的 destruction 部分换成对 phi_new
-        # 隐式求解，c 是上面两个线性化系数）整理得：
-        #   phi_new = phi_old + dt*S / (1 + dt*c)
-        # 这就是"阻尼系数 1/(1+dt*c)"——c 越大（omega 越高、destruction
-        # 越刚性）阻尼越强，无条件稳定，不依赖 dt 取多小；c 很小时
-        # （omega 接近 0）阻尼趋于 1，退化回普通显式欧拉，物理正确。
-        # 只阻尼 Sk/S_omega（逐点反应项刚性），不阻尼 transport_k/
-        # transport_omega（对流+扩散的空间算子刚性已经由 dt_local 本身
-        # 的粘性 CFL 项覆盖，是不同机制，重复阻尼没有理论依据）。
-        beta_star = self.beta_star
-        beta_blend = getattr(self, "_last_beta_blend", None)
-        if beta_blend is None:
-            # 防御性回退（正常路径下 compute_source_terms 总在
-            # update_fields 之前被调用，_last_beta_blend 应已存在）：
-            # 用 beta2（> beta1，阻尼更强而非更弱，不会引入新的失稳）。
-            beta_blend = self.beta2
-
-        omega_old_safe = np.maximum(self.omega_field, 1e-10)
-        c_k = beta_star * omega_old_safe
-        c_omega = beta_blend * omega_old_safe
-
-        with np.errstate(over='ignore', invalid='ignore'):
-            Sk_damped = Sk / (1.0 + dt * c_k)
-            S_omega_damped = S_omega / (1.0 + dt * c_omega)
-        Sk_damped = np.where(np.isfinite(Sk_damped), Sk_damped, 0.0)
-        S_omega_damped = np.where(np.isfinite(S_omega_damped), S_omega_damped, 0.0)
-
-        # 源项 + 输运项联合更新
-        dk_total = Sk_damped
-        domega_total = S_omega_damped
-
-        # 向后兼容：旧的 diff_k/diff_omega 参数仍支持
-        if diff_k is not None and transport_k is None:
-            dk_total = dk_total + diff_k
-        if diff_omega is not None and transport_omega is None:
-            domega_total = domega_total + diff_omega
-
-        # 新的完整输运项（对流+扩散）
-        if transport_k is not None:
-            dk_total = dk_total + transport_k
-        if transport_omega is not None:
-            domega_total = domega_total + transport_omega
-
-        # NaN/Inf 隔离：退化网格上源项/输运项可能产生 NaN（inf-inf），
-        # 直接加到场量上会污染全场。将非有限增量归零，依赖后续的
-        # positivity limiter 钳制场量本身。
-        dk_total = np.where(np.isfinite(dk_total), dk_total, 0.0)
-        domega_total = np.where(np.isfinite(domega_total), domega_total, 0.0)
-
-        self.k_field += dt * dk_total
-        self.omega_field += dt * domega_total
-
-        # 应用正性限制器（含 NaN/Inf 恢复）
+    def update_fields(self, dt, Sk: np.ndarray, S_log_omega: np.ndarray,
+                      transport_k: np.ndarray = None, transport_log_omega: np.ndarray = None):
+        """执行一个时间步长的湍流场更新（`advance_k_log_omega`），再过正性/上界限制器。"""
+        advance_k_log_omega(self, dt, Sk, S_log_omega, transport_k, transport_log_omega, np)
         self.apply_positivity_limiter()
+
+
+def advance_k_log_omega(model, dt, Sk, S_log_omega, transport_k, transport_log_omega, xp):
+    """k 与 `w = ln(omega)` 的一步显式更新（见 `log_omega.py`），CPU 与 GPU 模型共用
+    （`xp` 为模型数组所在的模块）。不含正性限制器，调用方随后施加。
+
+    Args:
+        model: 湍流模型（`SSTModelFR` 或 `GPUTurbulenceSST`），就地更新 `k_field/omega_field`
+        dt: 时间步长（标量或可与 Sk 广播的逐点数组——稳态加速模式为局部 CFL 步长
+            dt_local，DUAL_TIME 模式为标量物理 dt）
+        Sk: 湍动能源项（dk/dt 量纲，已除以 rho，P_k-D_k 合并后的净值）
+        S_log_omega: w 方程源项 `S_omega / (rho omega)`（P_omega-D_omega+CD_omega）
+        transport_k / transport_log_omega: k 与 w 的完整输运（对流+扩散，
+            w 另含 `Gamma_w |grad w|^2`），可为 None
+    """
+    # 源项点隐式阻尼（point-implicit destruction，Blazek / Wilcox 对 k-omega 刚性耗散
+    # 项的标准做法）：耗散项在新值上线性化、系数用旧值，
+    #   phi_new = phi_old + dt*S / (1 + dt*c)
+    #   k:  D_k/rho = beta* omega k      -> c = beta* omega
+    #   w:  D_omega/(rho omega) = beta omega，对 w 线性化 d(beta omega)/dw = beta omega
+    #       -> c = beta omega
+    # cfl.py 的对流/粘性 CFL 覆盖的是空间算子的谱半径，不覆盖这种逐点反应项刚性
+    # （合成 Couette+SST 升阶到 P2 时纯前向欧拉失稳）。只阻尼源项，不阻尼输运。
+    beta_blend = getattr(model, "_last_beta_blend", None)
+    if beta_blend is None:
+        # 防御性回退（正常路径下源项求值总在更新之前，已刷新混合 beta）：用 beta2
+        # （> beta1，阻尼更强而非更弱）
+        beta_blend = model.beta2
+    omega_old = model.omega_field
+    with np.errstate(over='ignore', invalid='ignore'):
+        dk = Sk / (1.0 + dt * model.beta_star * omega_old)
+        dw = S_log_omega / (1.0 + dt * beta_blend * omega_old)
+    if transport_k is not None:
+        dk = dk + transport_k
+    if transport_log_omega is not None:
+        dw = dw + transport_log_omega
+    # 非有限增量归零：退化网格上源项/输运可能出现 inf-inf
+    dk = xp.where(xp.isfinite(dk), dk, 0.0)
+    dw = xp.where(xp.isfinite(dw), dw, 0.0)
+
+    model.k_field = model.k_field + dt * dk
+    model.omega_field = omega_from_log(log_omega(omega_old, xp) + dt * dw, model.omega_max, xp)

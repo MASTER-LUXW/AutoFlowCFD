@@ -1,9 +1,8 @@
 """AutoFlowCFD V2.0 - 湍流输运残差的顶层编排。
 
-从 `core/turbulence/transport.py` 拆出（2026-09-24）。纯搬家，逻辑未改。
-
-只做一件事：把对流（`convection.py`）与扩散（`diffusion.py`）两条残差
-按包 `__init__.py` 记录的符号约定相加。
+把对流（`convection.py`）与扩散（`diffusion.py`）两条残差按包 `__init__.py`
+记录的符号约定相加。第二个方程输运的是 `w = ln(omega)`（`sst/log_omega.py`）：
+对 `w` 做对流与扩散（边界取 `ln` 值），再加变换带出的 `Gamma_w |grad w|^2`。
 """
 
 import numpy as np
@@ -17,6 +16,7 @@ from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 
 from .faces import precompute_scalar_convection_geometry
 from ..sst.bounds import clip_gradient_magnitude, model_evaluation_fields, omega_realizability_floor
+from ..sst.log_omega import log_omega, log_omega_gradient_source
 from .convection import compute_scalar_convection_residual
 from .diffusion import compute_scalar_diffusion_residual
 from .omega_wall import (
@@ -26,17 +26,19 @@ from .omega_wall import (
 )
 
 
-def turbulence_diffusivities(turb, k, omega, grad_k, grad_omega, rho, rho_nu_t, nu, mu, S_mag, wall_distance):
-    """k / omega 方程的有效扩散系数 `(Gamma_k, Gamma_w) = mu + sigma(F1) * rho * nu_t`。
+def turbulence_diffusivities(turb, k, omega, grad_k, grad_log_omega, rho, rho_nu_t, nu, mu, S_mag, wall_distance):
+    """k / ln(omega) 方程的有效扩散系数 `(Gamma_k, Gamma_w) = mu + sigma(F1) * rho * nu_t`。
 
     `rho_nu_t` 是源项求值在同一组 `(k, omega)` 上刷新的动力涡粘；`F1` 用模型项的
-    有效值（`sst/bounds.py`）与裁剪后的梯度算交叉扩散 `CD_kw`。输运残差与湍流
-    解析 Jacobian（逐点差分）共用这一份，逐点函数，与单元无关。
+    有效值（`sst/bounds.py`）与物理梯度 `grad(omega) = omega grad(ln omega)` 算交叉扩散
+    `CD_kw`。梯度模长上限只作用在 `grad k` 与 `grad ln(omega)` 上（近壁物理
+    `grad omega` 可达 1e8，钳在 1e6 会改掉合法值）。输运残差与湍流解析 Jacobian
+    （逐点差分）共用这一份，逐点函数，与单元无关。
     """
     grad_k = clip_gradient_magnitude(grad_k, np)
-    grad_omega = clip_gradient_magnitude(grad_omega, np)
+    grad_log_omega = clip_gradient_magnitude(grad_log_omega, np)
     with np.errstate(over='ignore', invalid='ignore'):
-        grad_dot = np.sum(grad_k * grad_omega, axis=-1)
+        grad_dot = omega * np.sum(grad_k * grad_log_omega, axis=-1)
         k_eff, omega_safe = model_evaluation_fields(k, omega, omega_realizability_floor(turb, S_mag, np), np)
         CD_kw = np.maximum(2.0 * rho * turb.sigma_w2 / omega_safe * grad_dot, 1e-10)
     F1 = turb.compute_blending_function_F1(k_eff, omega_safe, wall_distance, nu, S_mag, rho, CD_kw)
@@ -58,18 +60,18 @@ def compute_turbulence_transport_residual(
     solver,
     grad_vel: np.ndarray = None,
     grad_k: np.ndarray = None,
-    grad_omega: np.ndarray = None,
+    grad_log_omega: np.ndarray = None,
     flat_face_override=None,
     conv_geom=None,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """计算 k/omega 的完整输运残差（对流 + 扩散）。
+    """计算 k 与 `w = ln(omega)` 的完整输运残差（对流 + 扩散）。
 
-    入口函数：从 solver 获取流场和湍流场信息，分别计算 k 和 omega 的
-    对流+扩散残差，返回 dk/dt 和 domega/dt 的输运贡献（已除以密度）。
+    入口函数：从 solver 获取流场和湍流场信息，分别计算 k 和 w 的对流+扩散残差
+    （w 另加 `Gamma_w |grad w|^2`），返回 dk/dt 和 dw/dt 的输运贡献（已除以密度）。
 
     Args:
         solver: FRSolver 实例（需要已初始化 SST/DDES 湍流模型）
-        grad_vel, grad_k, grad_omega: 可选，调用方（`fr_solver_
+        grad_vel, grad_k, grad_log_omega: 可选，调用方（`fr_solver_
             turbulence.compute_turbulence_source`）如果已经算过这三个量，
             直接传进来复用，跳过内部重新计算——性能优化：唯一真实调用方
             `compute_turbulence_source` 在调用本函数*之前*就已经为
@@ -94,8 +96,8 @@ def compute_turbulence_transport_residual(
             在步起点算一次、每次求值传入（每次省约 0.18 s，plate_demo P1）；
             None 时在这里现算（显式路径每步只求值一次）。
     Returns:
-        (dk_dt_transport, domega_dt_transport): 各自 (n_cells, n_sps)，
-        输运项对 dk/dt 和 domega/dt 的贡献
+        (dk_dt_transport, dw_dt_transport): 各自 (n_cells, n_sps)，
+        输运项对 dk/dt 和 d(ln omega)/dt 的贡献
     """
     if solver.turb_model is None or not hasattr(solver.turb_model, 'k_field'):
         n_cells, n_sps = solver.state.U.shape[:2]
@@ -122,13 +124,15 @@ def compute_turbulence_transport_residual(
     nu = mu / np.maximum(rho, 1e-10)
 
     # 交叉扩散项（F1 计算需要）
+    w_log = log_omega(turb.omega_field, np)
     if grad_k is None:
         grad_k = compute_physical_scalar_gradient(turb.k_field, solver.mesh, solver.ops)
-    if grad_omega is None:
-        grad_omega = compute_physical_scalar_gradient(turb.omega_field, solver.mesh, solver.ops)
+    if grad_log_omega is None:
+        grad_log_omega = compute_physical_scalar_gradient(w_log, solver.mesh, solver.ops)
+    grad_log_omega = clip_gradient_magnitude(grad_log_omega, np)
 
     gamma_k, gamma_w = turbulence_diffusivities(
-        turb, turb.k_field, turb.omega_field, grad_k, grad_omega, rho, rho_nu_t, nu, mu, S_mag,
+        turb, turb.k_field, turb.omega_field, grad_k, grad_log_omega, rho, rho_nu_t, nu, mu, S_mag,
         solver.wall_distance)
 
     # WALL 上 k=0 的 Dirichlet 掩码（真实修复，2026-08-21，见
@@ -175,21 +179,24 @@ def compute_turbulence_transport_residual(
     omega_wall_value_face, has_omega_wall = _compute_omega_wall_target(
         solver, wall_mask_k, mu, rho, flat_face_override=flat_face_override,
     )
+    # w = ln(omega) 的边界值：壁面目标取对数（没有目标的面该值不被读取），来流取 ln(omega_inf）
+    log_wall_value_face = log_omega(omega_wall_value_face, np)
 
-    # 计算 omega 的对流 + 扩散残差
+    # 计算 w 的对流 + 扩散残差，另加变换带出的 Gamma_w |grad w|^2（sst/log_omega.py）
     conv_w = compute_scalar_convection_residual(
-        turb.omega_field, rho, vel, solver.mesh, solver.ops,
-        wall_dirichlet_value_face=omega_wall_value_face, has_wall_dirichlet_value=has_omega_wall,
+        w_log, rho, vel, solver.mesh, solver.ops,
+        wall_dirichlet_value_face=log_wall_value_face, has_wall_dirichlet_value=has_omega_wall,
         flat_face_override=flat_face_override, conv_geom=conv_geom,
-        open_boundary_face=open_mask, freestream_value=float(turb.omega_inf),
+        open_boundary_face=open_mask, freestream_value=float(np.log(turb.omega_inf)),
     )
     diff_w = compute_scalar_diffusion_residual(
-        turb.omega_field, gamma_w, solver.mesh, solver.ops,
-        wall_dirichlet_value_face=omega_wall_value_face, has_wall_dirichlet_value=has_omega_wall,
+        w_log, gamma_w, solver.mesh, solver.ops,
+        wall_dirichlet_value_face=log_wall_value_face, has_wall_dirichlet_value=has_omega_wall,
         flat_face_override=flat_face_override,
     )
     with np.errstate(over='ignore', invalid='ignore'):
-        domega_dt_transport = (conv_w + diff_w) / np.maximum(rho, 1e-10)
+        dw_dt_transport = (conv_w + diff_w + log_omega_gradient_source(gamma_w, grad_log_omega, np)) \
+            / np.maximum(rho, 1e-10)
 
     # 机制3（按 (cell,SP,变量) 粒度检测残差量级异常并清零）**已于
     # 2026-09-19 整体删除**，本函数曾经在这里调用它。删除依据是真实网格
@@ -206,6 +213,6 @@ def compute_turbulence_transport_residual(
     # 有限值，归零后由 SST.update_fields 的二次防护和 positivity
     # limiter 接管
     dk_dt_transport = np.where(np.isfinite(dk_dt_transport), dk_dt_transport, 0.0)
-    domega_dt_transport = np.where(np.isfinite(domega_dt_transport), domega_dt_transport, 0.0)
+    dw_dt_transport = np.where(np.isfinite(dw_dt_transport), dw_dt_transport, 0.0)
 
-    return dk_dt_transport, domega_dt_transport
+    return dk_dt_transport, dw_dt_transport

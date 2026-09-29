@@ -119,8 +119,8 @@ def enforce_omega_wall_relaxation_gpu(cp, solver, relax=None):
     实现逐字对应 CPU 版（同样的固定 relax=0.5 事后松弛，不是 CPU 版
     2026-09-05 那次被真实数据证伪撤销的"点隐式"动态松弛——不要重复
     那次已经证伪的尝试，见 CPU 版文档完整失败记录）：`update_fields_gpu`
-    之后，对 WALL 面 owner 单元的 `omega_field` 做一次向解析壁面目标值
-    的固定比例松弛。`np.add.at`（CPU 版处理"同一 owner 单元是多个 WALL
+    之后，对 WALL 面 owner 单元的 `w = ln(omega)` 做一次向解析壁面目标值
+    （取对数）的固定比例松弛。`np.add.at`（CPU 版处理"同一 owner 单元是多个 WALL
     面的 owner（角部单元）"）在这里换成 GPU 原生的 `cp.scatter_add`
     （本模块模块文档已说明：正确处理重复索引累加，不需要图着色）。
 
@@ -133,10 +133,13 @@ def enforce_omega_wall_relaxation_gpu(cp, solver, relax=None):
     hit_cells, avg_target = omega_wall_cell_targets_gpu(cp, solver)
     if hit_cells.shape[0] == 0:
         return
+    from autoflowcfd.core.turbulence.sst.log_omega import log_omega, omega_from_log
+
     turb = solver.turb_model_gpu
-    turb.omega_field[hit_cells, :] = (
-        (1.0 - relax) * turb.omega_field[hit_cells, :] + relax * avg_target[:, None]
-    )
+    # 在被求解的 w = ln(omega) 上松弛（与 CPU 版同一处，见 sst/log_omega.py）
+    w = log_omega(turb.omega_field[hit_cells, :], cp)
+    turb.omega_field[hit_cells, :] = omega_from_log(
+        (1.0 - relax) * w + relax * log_omega(avg_target, cp)[:, None], turb.omega_max, cp)
 
 
 def omega_wall_cell_targets_gpu(cp, solver):

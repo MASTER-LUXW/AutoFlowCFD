@@ -1,25 +1,28 @@
-"""AutoFlowCFD V2.0 - k-omega 方程逐点量对 `(k, omega, grad k, grad omega)` 的导数。
+"""AutoFlowCFD V2.0 - k-ln(omega) 方程逐点量对 `(k, w, grad k, grad w)` 的导数（`w = ln omega`）。
 
 冻结平均流下，湍流残差里的非线性全部落在两个逐点函数上：
 
-* 源项 `S = (S_k, S_omega)`（`sst/source.py::compute_source_terms`：产生、耗散、
-  交叉扩散、环境维持项，模型项取 realizability 有效值）；
-* 有效扩散系数 `Gamma = (Gamma_k, Gamma_omega)`（`transport/residual.py::
+* 源项 `S = (S_k, S_w)`：`S_k` 与 `S_omega` 来自 `sst/source.py::compute_source_terms`
+  （产生、耗散、交叉扩散、环境维持项，模型项取 realizability 有效值，求值用物理
+  `omega = exp(w)` 与 `grad omega = omega grad w`），`S_w = S_omega / omega + Gamma_w |grad w|^2`
+  （后一项是 `sst/log_omega.py` 的变换带出的，逐点、依赖 `grad w`）；
+* 有效扩散系数 `Gamma = (Gamma_k, Gamma_w)`（`transport/residual.py::
   turbulence_diffusivities`，`mu + sigma(F1) rho nu_t`，`nu_t` 由源项求值在同一组
   `(k, omega)` 上刷新）。
 
-两者在每个解点上只依赖该点的 `(k, omega, grad k, grad omega)`（梯度按
+两者在每个解点上只依赖该点的 `(k, w, grad k, grad w)`（梯度按
 `sst/bounds.py::clip_gradient_magnitude` 裁剪之后使用，与残差同一顺序）。
 这里对**残差用的那两个函数**逐输入做前向差分：逐点函数对全场同时平移一个
 输入分量，每个解点得到的就是它自己的偏导（8 个输入、共 9 次整场求值），不写
 解析式，模型函数日后修改导数自动跟随。
 
-输入排布：`k | omega | grad k (3) | grad omega (3)`。
+输入排布：`k | w | grad k (3) | grad w (3)`。
 """
 
 import numpy as np
 
 from autoflowcfd.core.turbulence.sst.bounds import clip_gradient_magnitude
+from autoflowcfd.core.turbulence.sst.log_omega import log_omega_gradient_source, omega_from_log
 from autoflowcfd.core.turbulence.transport.residual import turbulence_diffusivities
 
 #: 逐点输入个数。
@@ -31,47 +34,60 @@ _SQRT_EPS = float(np.sqrt(np.finfo(np.float64).eps))
 _CACHED_ATTRS = ("nu_t", "_last_beta_blend", "_omega_realizability_min")
 
 
-class CpuTurbulencePointwise:
-    """单机 / CPU 分布式：在模型对象上求逐点 `(S, Gamma)`，`(n_cells, n_sps, 2)` 两份。
+class TurbulencePointwise:
+    """在模型对象上求逐点 `(S, Gamma)`（主机数组，`(n_cells, n_sps, 2)` 两份），全部后端
+    共用；后端只注入它自己的源项与扩散系数求值（与该后端残差同一份）：
 
-    求值时临时把 `k/omega` 场换成试探值，结束后恢复场与源项刷新的缓存。做成类
-    而不是闭包（项目规范）。
+    * `source(Q, grad_vel, d_wall, mu, grad_k, grad_omega) -> (S_k, S_omega)`；
+    * `diffusivities(turb, k, omega, grad_k, grad_w, rho, rho_nu_t, nu, mu, S_mag, d_wall)
+      -> (Gamma_k, Gamma_w)`。
+
+    求值时临时把 `k/omega` 场换成试探值（`omega = exp(w)`），结束后恢复场与源项刷新
+    的缓存。做成类而不是闭包（项目规范）。CPU 用 `cpu_turbulence_pointwise` 构造。
     """
 
-    __slots__ = ("turb", "Q", "grad_vel", "d_wall", "mu", "S_mag")
+    __slots__ = ("xp", "turb", "Q", "grad_vel", "d_wall", "mu", "S_mag", "source", "diffusivities")
 
-    def __init__(self, turb, Q, grad_vel, d_wall, mu):
-        self.turb, self.Q, self.grad_vel, self.d_wall, self.mu = turb, Q, grad_vel, d_wall, float(mu)
-        self.S_mag = turb.compute_strain_rate_magnitude(grad_vel)
+    def __init__(self, xp, turb, Q, grad_vel, d_wall, mu, S_mag, source, diffusivities):
+        self.xp, self.turb, self.Q, self.grad_vel, self.d_wall = xp, turb, Q, grad_vel, d_wall
+        self.mu, self.S_mag, self.source, self.diffusivities = float(mu), S_mag, source, diffusivities
 
-    def __call__(self, k, omega, grad_k, grad_omega):
-        turb = self.turb
+    def __call__(self, k, w, grad_k, grad_w):
+        xp, turb = self.xp, self.turb
         saved = (turb.k_field, turb.omega_field)
         saved_cache = {a: getattr(turb, a) for a in _CACHED_ATTRS if hasattr(turb, a)}
-        turb.k_field, turb.omega_field = k, omega
+        omega = omega_from_log(xp.asarray(w), turb.omega_max, xp)
+        turb.k_field, turb.omega_field = xp.asarray(k), omega
         try:
-            gk = clip_gradient_magnitude(grad_k, np)
-            gw = clip_gradient_magnitude(grad_omega, np)
-            Sk, Sw = turb.compute_source_terms(self.Q, self.grad_vel, self.d_wall, self.mu,
-                                               grad_k=gk, grad_omega=gw)
+            gk = clip_gradient_magnitude(xp.asarray(grad_k), xp)
+            gw = clip_gradient_magnitude(xp.asarray(grad_w), xp)
+            Sk, Sw = self.source(self.Q, self.grad_vel, self.d_wall, self.mu, gk, omega[..., None] * gw)
             rho = self.Q[:, :, 0]
-            nu = self.mu / np.maximum(rho, 1e-10)
-            Gk, Gw = turbulence_diffusivities(turb, k, omega, gk, gw, rho, rho * turb.nu_t, nu, self.mu,
-                                              self.S_mag, self.d_wall)
+            nu = self.mu / xp.maximum(rho, 1e-10)
+            Gk, Gw = self.diffusivities(turb, turb.k_field, omega, gk, gw, rho, rho * turb.nu_t, nu, self.mu,
+                                        self.S_mag, self.d_wall)
         finally:
             turb.k_field, turb.omega_field = saved
             for a, v in saved_cache.items():
                 setattr(turb, a, v)
-        return np.stack([Sk, Sw], axis=-1), np.stack([Gk, Gw], axis=-1)
+        S_w = Sw / omega + log_omega_gradient_source(Gw, gw, xp)
+        return _host(xp.stack([Sk, S_w], axis=-1)), _host(xp.stack([Gk, Gw], axis=-1))
+
+
+def cpu_turbulence_pointwise(turb, Q, grad_vel, d_wall, mu) -> TurbulencePointwise:
+    """单机 / CPU 分布式的逐点求值器（`SSTModelFR` 的源项与 `turbulence_diffusivities`）。"""
+    return TurbulencePointwise(np, turb, Q, grad_vel, d_wall, mu, turb.compute_strain_rate_magnitude(grad_vel),
+                               turb.compute_source_terms, turbulence_diffusivities)
 
 
 def turbulence_pointwise_partials(evaluate, k, omega, grad_k, grad_omega, scales):
     """返回 `(S, Gamma, dS, dGamma)`（主机 numpy）：`S/Gamma (n_cells, n_sps, 2)`，
     `dS/dGamma (n_cells, n_sps, 2, 8)`（最后一维是输入，排布见模块文档）。
 
-    `evaluate(k, omega, grad_k, grad_omega) -> (S, Gamma)` 是后端给出的逐点求值
-    （`CpuTurbulencePointwise` 等），输入与输出可以在该后端的数组模块上；`scales`
-    是 `(k_scale, omega_scale)`（`sst/bounds.py::turbulence_scales`）。
+    `evaluate(k, w, grad_k, grad_w) -> (S, Gamma)` 是后端给出的逐点求值
+    （`TurbulencePointwise`），输入与输出可以在该后端的数组模块上；参数名
+    `omega/grad_omega` 在这里就是第二个未知量 `w = ln omega` 及其梯度；`scales`
+    是 `(k_scale, 1)`（`sst/bounds.py::turbulence_scales`）。
     """
     xp = _array_module(k)
     S0, G0 = evaluate(k, omega, grad_k, grad_omega)

@@ -5,6 +5,8 @@
 
 from typing import Tuple
 
+import numpy as np
+
 from autoflowcfd.core.fr_operators.flux_kernels import resolve_viscous_ip_constant
 from autoflowcfd.core.gpu import get_cupy
 
@@ -20,6 +22,7 @@ from autoflowcfd.core.turbulence.sst.bounds import (
     clip_gradient_magnitude, model_evaluation_fields, omega_realizability_floor,
 )
 from autoflowcfd.core.turbulence.transport.faces import boundary_diffusion_targets
+from autoflowcfd.core.turbulence.sst.log_omega import log_omega, log_omega_gradient_source
 
 # 过积分上下文提取到 `core/gpu/gpu_overintegration.py`（2026-09-15，粘性
 # 体积项 GPU 侧补齐时共用同一份，避免 residual 模块反向依赖 turbulence
@@ -196,13 +199,14 @@ def compute_scalar_diffusion_residual_gpu(
     return residual + _lift_side_jumps_gpu(cp, ff, jumps[0], jumps[1], +1.0, det_jacs, n_cells, n_sps)
 
 
-def turbulence_diffusivities_gpu(cp, turb, k, omega, grad_k, grad_omega, rho, rho_nu_t, nu, mu, S_mag, d_wall):
-    """GPU 版 k / omega 有效扩散系数 `mu + sigma(F1) rho nu_t`（CPU 版
-    `transport/residual.py::turbulence_diffusivities` 的对应），输运残差与湍流解析
-    Jacobian 的 GPU 逐点求值器共用。"""
+def turbulence_diffusivities_gpu(cp, turb, k, omega, grad_k, grad_log_omega, rho, rho_nu_t, nu, mu, S_mag, d_wall):
+    """GPU 版 k / ln(omega) 有效扩散系数 `mu + sigma(F1) rho nu_t`（CPU 版
+    `transport/residual.py::turbulence_diffusivities` 的对应：梯度模长上限只作用在
+    `grad k` 与 `grad ln(omega)` 上，交叉扩散用物理梯度 `omega grad ln(omega)`），输运
+    残差与湍流解析 Jacobian 的 GPU 逐点求值器共用。"""
     grad_k = clip_gradient_magnitude(grad_k, cp)
-    grad_omega = clip_gradient_magnitude(grad_omega, cp)
-    grad_dot = cp.sum(grad_k * grad_omega, axis=-1)
+    grad_log_omega = clip_gradient_magnitude(grad_log_omega, cp)
+    grad_dot = omega * cp.sum(grad_k * grad_log_omega, axis=-1)
     # 模型项求值用有效值（与 CPU 版同一处，定义在 `sst/bounds.py`）
     k_eff, omega_safe = model_evaluation_fields(k, omega, omega_realizability_floor(turb, S_mag, cp), cp)
     CD_kw = cp.maximum(2.0 * rho * turb.sigma_w2 / omega_safe * grad_dot, 1e-10)
@@ -213,9 +217,10 @@ def turbulence_diffusivities_gpu(cp, turb, k, omega, grad_k, grad_omega, rho, rh
 
 
 def compute_turbulence_transport_residual_gpu(
-    solver, grad_vel=None,
+    solver, grad_vel=None, grad_k=None, grad_log_omega=None,
 ) -> Tuple:
-    """GPU 版 k/omega 完整输运残差入口（对流+扩散），与 CPU 版
+    """GPU 版 k 与 `w = ln(omega)` 的完整输运残差入口（对流+扩散，w 另加
+    `Gamma_w |grad w|^2`，见 `core/turbulence/sst/log_omega.py`），与 CPU 版
     `compute_turbulence_transport_residual` 逐字对应。
 
     2026-09-02 补齐：此前这里不做 CPU 版末尾的 `suppress_residual_
@@ -230,12 +235,12 @@ def compute_turbulence_transport_residual_gpu(
     Args:
         solver: GPUFRSolver 实例，需要 turb_model_gpu 已初始化
             （SST/DDES/IDDES 均可，都是 GPUTurbulenceSST 实例）
-        grad_vel: 可选，调用方已经算好的速度梯度（CuPy (n_cells,n_sps,3,3)），
-            复用避免重复计算物理梯度这个真实热点，与 CPU 版同名参数
-            同一个性能考量。
+        grad_vel, grad_k, grad_log_omega: 可选，调用方已经算好的速度梯度
+            （CuPy (n_cells,n_sps,3,3)）与 k、ln(omega) 的物理梯度，复用避免重复
+            计算物理梯度这个真实热点，与 CPU 版同名参数同一个性能考量。
 
     Returns:
-        (dk_dt_transport, domega_dt_transport)，各自 (n_cells, n_sps)
+        (dk_dt_transport, dw_dt_transport)，各自 (n_cells, n_sps)
     """
     cp = get_cupy()
     turb = solver.turb_model_gpu
@@ -261,13 +266,18 @@ def compute_turbulence_transport_residual_gpu(
 
     nu = mu / cp.maximum(rho, 1e-10)
 
-    grad_k = compute_physical_scalar_gradient_gpu(turb.k_field, solver.mesh_data, solver.ops_data)
-    grad_omega = compute_physical_scalar_gradient_gpu(turb.omega_field, solver.mesh_data, solver.ops_data)
+    w_log = log_omega(turb.omega_field, cp)
+    if grad_k is None:
+        grad_k = compute_physical_scalar_gradient_gpu(turb.k_field, solver.mesh_data, solver.ops_data)
+    if grad_log_omega is None:
+        grad_log_omega = compute_physical_scalar_gradient_gpu(w_log, solver.mesh_data, solver.ops_data)
+    grad_log_omega = clip_gradient_magnitude(grad_log_omega, cp)
 
     S_mag = turb.compute_strain_rate_magnitude_gpu(grad_vel)
     d_wall = solver.wall_distance_gpu
     gamma_k, gamma_w = turbulence_diffusivities_gpu(
-        cp, turb, turb.k_field, turb.omega_field, grad_k, grad_omega, rho, rho_nu_t, nu, mu, S_mag, d_wall)
+        cp, turb, turb.k_field, turb.omega_field, grad_k, grad_log_omega, rho, rho_nu_t, nu, mu, S_mag,
+        d_wall)
 
     ff = solver.flat_face_gpu
     n_prism = solver.mesh_data.get('n_prism', solver.mesh.n_prism_cells)
@@ -293,22 +303,25 @@ def compute_turbulence_transport_residual_gpu(
         turb_k_field=getattr(turb, "k_field", None),
     )
 
+    # w = ln(omega) 的边界值：壁面目标取对数（没有目标的面该值不被读取），来流取 ln(omega_inf)
+    log_wall_value_face = log_omega(omega_wall_value_face, cp)
     conv_w = compute_scalar_convection_residual_gpu(
-        turb.omega_field, rho, vel, solver.mesh_data, solver.ops_data, ff, n_cells, n_prism, n_sps,
-        wall_dirichlet_value_face=omega_wall_value_face, has_wall_dirichlet_value=has_omega_wall,
-        open_boundary_face=open_mask, freestream_value=float(turb.omega_inf),
+        w_log, rho, vel, solver.mesh_data, solver.ops_data, ff, n_cells, n_prism, n_sps,
+        wall_dirichlet_value_face=log_wall_value_face, has_wall_dirichlet_value=has_omega_wall,
+        open_boundary_face=open_mask, freestream_value=float(np.log(turb.omega_inf)),
     )
     diff_w = compute_scalar_diffusion_residual_gpu(
-        turb.omega_field, gamma_w, solver.mesh_data, solver.ops_data, ff, n_cells, n_prism, n_sps,
-        c_ip=c_ip, wall_dirichlet_value_face=omega_wall_value_face, has_wall_dirichlet_value=has_omega_wall,
+        w_log, gamma_w, solver.mesh_data, solver.ops_data, ff, n_cells, n_prism, n_sps,
+        c_ip=c_ip, wall_dirichlet_value_face=log_wall_value_face, has_wall_dirichlet_value=has_omega_wall,
     )
-    domega_dt_transport = (conv_w + diff_w) / cp.maximum(rho, 1e-10)
+    dw_dt_transport = ((conv_w + diff_w + log_omega_gradient_source(gamma_w, grad_log_omega, cp))
+                       / cp.maximum(rho, 1e-10))
 
     # 机制3 已于 2026-09-19 删除（依据见 `fr_residual/inviscid.py`
     # 同一处）。这里同时去掉了那次为复用 CPU numba 实现而做的
     # `GPU -> CPU -> GPU` 往返（k/omega 的残差场与场值各拷一轮）。
 
     dk_dt_transport = cp.where(cp.isfinite(dk_dt_transport), dk_dt_transport, 0.0)
-    domega_dt_transport = cp.where(cp.isfinite(domega_dt_transport), domega_dt_transport, 0.0)
+    dw_dt_transport = cp.where(cp.isfinite(dw_dt_transport), dw_dt_transport, 0.0)
 
-    return dk_dt_transport, domega_dt_transport
+    return dk_dt_transport, dw_dt_transport

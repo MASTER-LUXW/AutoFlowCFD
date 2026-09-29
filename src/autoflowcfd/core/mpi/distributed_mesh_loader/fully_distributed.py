@@ -11,6 +11,7 @@ from loguru import logger
 
 from autoflowcfd.core.mpi import get_comm, get_rank
 from .package import build_fully_distributed_rank_package
+from autoflowcfd.core.turbulence.sst.log_omega import lift_log_omega
 
 
 def distributed_mesh_load_v2(
@@ -304,8 +305,8 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
         if solver.turb_model is not None and hasattr(solver.turb_model, 'k_field'):
             solver.turb_model.k_field = _lift(
                 solver.turb_model.k_field[:n_local])
-            solver.turb_model.omega_field = _lift(
-                solver.turb_model.omega_field[:n_local])
+            solver.turb_model.omega_field = lift_log_omega(
+                solver.turb_model.omega_field[:n_local], _lift, solver.turb_model.omega_max)
             old_nu_t = getattr(solver.turb_model, 'nu_t', None)
             if old_nu_t is not None and old_nu_t.shape[1] == old_local_U.shape[1]:
                 solver.turb_model.nu_t = _lift(old_nu_t[:n_local])

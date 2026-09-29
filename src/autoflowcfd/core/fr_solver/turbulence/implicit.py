@@ -16,17 +16,19 @@
 
 ## 做法：分离式 PTC-Newton（工业 RANS 求解器的标准做法）
 
-每个隐式步先在**冻结的平均流**上对 `(k, omega)` 做一个 PTC-Newton 步，
-再对平均流做一个（用更新后的涡粘）：
+每个隐式步先在**冻结的平均流**上对 `(k, w)`（`w = ln omega`，见
+`core/turbulence/sst/log_omega.py`）做一个 PTC-Newton 步，再对平均流做一个
+（用更新后的涡粘）：
 
     ( I/dtau + dR_t/d(k,w) ) d(k,w) = -R_t(k,w),   R_t = -(dk/dt, dw/dt)
 
 * `R_t` 与显式路径**同一套**源项与输运求值（`source.py::
   evaluate_turbulence_rates`），不另写一份物理；
 * 线性求解、SER、dtau 缩档、块 Jacobi 全部复用平均流那一套
-  （`time_integration/implicit/`），物理性限幅换成"k、omega 单步变化不超过
-  `max(|值|, 尺度下限)` 的 50%"，逐**解点**松弛（`physicality.ScaledFieldRowLimits`；被
-  输运的 k/omega 不裁剪、可越过下限，见 `turbulence/sst/bounds.py`）；
+  （`time_integration/implicit/`），物理性限幅换成"k 单步变化不超过
+  `max(|k|, 尺度下限)` 的 50%、`|dw| <= ln 2`（omega 单步最多减半/加倍）"，逐**解点**
+  松弛（`physicality.ScaledFieldRowLimits` 的 `log_columns`；被输运的 k 不裁剪、可越过
+  下限，见 `turbulence/sst/bounds.py`；omega = exp(w) 恒为正）；
 * 零填充槽位（原生基）不参与：它们的 `R_t` 置零（平均流残差在那里本来
   就恒为零），于是 Newton 不动它们；
 * 更新之后的正性/上界限幅、模态滤波、omega 壁面松弛与显式路径**同一套**
@@ -45,11 +47,12 @@ Newton 不相容，真实数据（棱柱通道 + SST，NK）：平均流残差 5
 该投影自己的文档说它等价于 OpenFOAM `omegaWallFunction` 对近壁单元值的
 直接设定。那在 OpenFOAM 里正是线性系统里的**强约束**（把近壁单元的
 omega 方程换成"等于目标值"），隐式路径就这样做：壁面 owner 单元全部
-真实解点的 omega 行换成
+真实解点的 w 行换成
 
-    R_omega = beta1 * omega_t * (omega - omega_t)
+    R_w = beta1 * omega_t * (w - ln omega_t)
 
-量纲与量级与该处的耗散项 `D_omega / rho = beta * omega^2` 一致，不依赖
+即 `beta1 omega_t (omega - omega_t) / omega` 在目标值处的线性化（w 方程是 omega 方程
+除以 omega），量纲 1/s、与该处耗散项 `D_omega / (rho omega) = beta omega` 同量级，不依赖
 dtau；大 dtau 下一个 Newton 步就落到目标值上。目标值与单元集合读的是
 显式路径同一个函数（`transport/omega_wall.py::omega_wall_cell_targets`）。
 
@@ -79,6 +82,7 @@ from autoflowcfd.core.time_integration.implicit import (
 )
 from autoflowcfd.core.time_integration.implicit.physicality import ScaledFieldRowLimits
 from autoflowcfd.core.turbulence.sst.bounds import turbulence_scales
+from autoflowcfd.core.turbulence.sst.log_omega import log_omega, omega_from_log
 from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
 from autoflowcfd.core.turbulence.transport import omega_wall_cell_targets, prepare_convection_geometry
 from autoflowcfd.fr.native_padding import real_sps_per_cell
@@ -183,7 +187,7 @@ class CpuTurbulenceBackend:
 
 
 class TurbulenceResidual:
-    """冻结平均流下的 `R_t(k, omega) = -(dk/dt, domega/dt)`，形状 `(N, 2)`。
+    """冻结平均流下的 `R_t(k, w) = -(dk/dt, dw/dt)`（`w = ln omega`），形状 `(N, 2)`。
 
     做成类而不是闭包：它在整个 Krylov 求解期间存活（项目规范）。调用前
     适配器必须已经 `prepare()`（平均流输入在整个 Newton 步内冻结）。
@@ -206,8 +210,10 @@ class TurbulenceResidual:
         rows = (hit_cells[:, None] * n_sps + xp.arange(n_sps)[None, :]).ravel()
         keep = self._real_rows[rows]
         self._wall_rows = rows[keep]
-        self._wall_target = xp.repeat(xp.asarray(target), n_sps)[keep]
-        self._wall_rate = float(backend.model.beta1) * self._wall_target
+        target_rows = xp.repeat(xp.asarray(target), n_sps)[keep]
+        # 未知量是 w = ln(omega)：约束行 beta1 omega_t (w - ln omega_t)，量纲与其余 w 行相同（1/s）
+        self._wall_target = log_omega(target_rows, xp)
+        self._wall_rate = float(backend.model.beta1) * target_rows
 
     def __call__(self, kw_flat):
         be = self._be
@@ -215,7 +221,7 @@ class TurbulenceResidual:
         saved_fields = (m.k_field, m.omega_field)
         saved_cache = {a: getattr(m, a) for a in _CACHED_ATTRS if hasattr(m, a)}
         m.k_field = xp.ascontiguousarray(kw_flat[:, 0]).reshape(be.shape)
-        m.omega_field = xp.ascontiguousarray(kw_flat[:, 1]).reshape(be.shape)
+        m.omega_field = omega_from_log(xp.ascontiguousarray(kw_flat[:, 1]), m.omega_max, xp).reshape(be.shape)
         try:
             rate_k, rate_w = be.rates(apply_des=False)
         finally:
@@ -278,8 +284,9 @@ def step_turbulence_newton(backend, dtau) -> None:
     make_assembler = getattr(backend, "block_assembler", None)
     st["block"].assembler = make_assembler() if make_assembler is not None else None
 
-    kw0 = xp.stack([m.k_field.ravel(), m.omega_field.ravel()], axis=1)
-    scales = np.array([max(float(m.k_inf), 1e-30), max(float(m.omega_inf), 1e-30)])
+    # 未知量 (k, w = ln omega)，见 core/turbulence/sst/log_omega.py
+    kw0 = xp.stack([m.k_field.ravel(), log_omega(m.omega_field, xp).ravel()], axis=1)
+    scales = np.array([max(float(m.k_inf), 1e-30), 1.0])
     kw_new, info = step_newton_krylov(
         residual, kw0, xp.asarray(dtau, dtype=xp.float64).ravel(), scales,
         forcing=st["forcing"], dtau_scale=st["dtau_scale"], block_precond=st["block"],
@@ -287,14 +294,14 @@ def step_turbulence_newton(backend, dtau) -> None:
         # 求值之后，越过下限甚至为负的 k/omega 不再能让下一次残差求值失去意义，
         # 松弛只剩"单步变化别太大"这一个作用。逐单元取最小会让一个需要大幅欠冲的
         # 解点（锐边剪切层 P1 的 Gibbs 欠冲约为跳跃的 9%）把整个单元冻在 1e-4。
-        physicality=ScaledFieldRowLimits(turbulence_scales(m)), rows_per_cell=1,
+        physicality=ScaledFieldRowLimits(turbulence_scales(m), log_columns=(1,)), rows_per_cell=1,
         red=backend.red, local_dtau_scale=st["local_dtau"], norm_weights=backend.norm_weights())
     st["dtau_scale"] = info["dtau_scale"]
     st["local_dtau"] = info["local_dtau_scale"]
     st["last_info"] = info
 
     m.k_field = xp.ascontiguousarray(kw_new[:, 0]).reshape(backend.shape)
-    m.omega_field = xp.ascontiguousarray(kw_new[:, 1]).reshape(backend.shape)
+    m.omega_field = omega_from_log(xp.ascontiguousarray(kw_new[:, 1]), m.omega_max, xp).reshape(backend.shape)
     backend.positivity()
     backend.finalize(dtau)
     # 在最终场上刷新 nu_t / 混合系数 / DES 长度尺度，供平均流这一步使用

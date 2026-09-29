@@ -2,13 +2,13 @@
 
 冻结平均流下的湍流残差（`fr_solver/turbulence/implicit.py::TurbulenceResidual`）
 
-    R_t,v = -[S_v + conv_v + diff_v] / rho          v = k, omega
-    壁面 owner 单元的 omega 行换成强约束  beta1 omega_t (omega - omega_t)
+    R_t,v = -[S_v + conv_v + diff_v] / rho          v = k, w = ln omega
+    壁面 owner 单元的 w 行换成强约束  beta1 omega_t (w - ln omega_t)
 
 对单元自身真实自由度的导数块（布局与 `CellBlockJacobian` 相同：逐单元
 `(n_real*2, n_real*2)`，下标 `s*2 + v`）与面邻居耦合块。组成：
 
-    pointwise.py    S、Gamma 对 (k, omega, grad k, grad omega) 的逐点导数（对模型函数差分）
+    pointwise.py    S、Gamma 对 (k, w, grad k, grad w) 的逐点导数（对模型函数差分）
     cell_blocks.py  源项 + 对流/扩散体积项（含过积分）
     faces.py        对流/扩散界面项（逐点跳变量与残差核共用 `face_frames.py` 的点函数）
 
@@ -31,8 +31,9 @@ from autoflowcfd.fr.native_padding import real_sps_per_cell
 
 from .cell_blocks import turbulence_cell_blocks
 from .faces import add_turbulence_face_blocks_color
-from .pointwise import CpuTurbulencePointwise, turbulence_pointwise_partials
+from .pointwise import cpu_turbulence_pointwise, turbulence_pointwise_partials
 from autoflowcfd.core.turbulence.sst.bounds import turbulence_scales
+from autoflowcfd.core.turbulence.sst.log_omega import log_omega
 
 #: 体积项分块的单元数。
 _CHUNK = 4096
@@ -51,12 +52,12 @@ class TurbulenceLinearization:
     mu: float
     conv_geom: object             # transport/faces.py::ScalarConvectionGeometry
     wall_zero_face: np.ndarray    # (n_faces,) k 的壁面 Dirichlet 0
-    omega_wall_face: np.ndarray   # (n_faces, n_fp) omega 壁面目标值
+    omega_wall_face: np.ndarray   # (n_faces, n_fp) omega 壁面目标值（物理量，装配时取 ln）
     has_omega_wall: np.ndarray    # (n_faces,)
     open_face: np.ndarray         # (n_faces,) 开放边界（来流条件）
     wall_cells: np.ndarray        # omega 强约束的单元
     wall_targets: np.ndarray      # 各单元的 omega 目标值
-    pointwise: object = None      # 逐点 (S, Gamma) 求值器；None -> CpuTurbulencePointwise
+    pointwise: object = None      # 逐点 (S, Gamma) 求值器；None -> cpu_turbulence_pointwise
 
 
 def _convection_ghost_affine(flat, frame, m_side, wall_zero, has_value, open_face):
@@ -111,7 +112,7 @@ def assemble_turbulence_blocks(ctx: TurbulenceLinearization, kw_flat, want_coupl
     w = np.ascontiguousarray(kw[..., 1])
     grad_k = compute_physical_scalar_gradient(k, mesh, ctx.ops)
     grad_w = compute_physical_scalar_gradient(w, mesh, ctx.ops)
-    evaluate = ctx.pointwise if ctx.pointwise is not None else CpuTurbulencePointwise(
+    evaluate = ctx.pointwise if ctx.pointwise is not None else cpu_turbulence_pointwise(
         turb, ctx.Q, ctx.grad_vel, ctx.d_wall, ctx.mu)
     _, gam, dS, dG = turbulence_pointwise_partials(evaluate, k, w, grad_k, grad_w, turbulence_scales(turb))
     gam = np.ascontiguousarray(gam)
@@ -153,9 +154,11 @@ def assemble_turbulence_blocks(ctx: TurbulenceLinearization, kw_flat, want_coupl
     ghost_o, a_o = _convection_ghost_affine(flat, "owner", m_o, wz, hv, np.asarray(ctx.open_face, dtype=bool))
     ghost_n, a_n = _convection_ghost_affine(flat, "neighbor", m_n, wz, hv, np.asarray(ctx.open_face, dtype=bool))
     diff = {}
+    # w = ln(omega) 的壁面 Dirichlet 值（与残差 transport/residual.py 同一换算）
+    log_wall_face = log_omega(np.asarray(ctx.omega_wall_face, dtype=np.float64), np)
     for frame in ("owner", "neighbor"):
         bk, dk, tk = boundary_diffusion_targets(np, flat, frame, wz, None, None)
-        bw, dw, tw = boundary_diffusion_targets(np, flat, frame, None, ctx.omega_wall_face, hv)
+        bw, dw, tw = boundary_diffusion_targets(np, flat, frame, None, log_wall_face, hv)
         diff[frame] = (np.ascontiguousarray(bk | bw), np.ascontiguousarray(np.stack([dk, dw])),
                        np.ascontiguousarray(np.stack([tk, tw])))
     if want_coupling:

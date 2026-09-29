@@ -47,7 +47,8 @@ class TestGradClipErrstateWrapping:
         norm_idx = src.index("mag = np.linalg.norm(grad, axis=-1)")
         assert errstate_idx < norm_idx, (
             "np.errstate wrapping must appear before the norm computation it's meant to protect")
-        assert "clip_gradient_magnitude(grad_k, np)" in inspect.getsource(evaluate_turbulence_rates)
+        # k 与 w = ln(omega) 两个梯度都经过同一个裁剪（2026-09-27 起梯度对 ln(omega) 求）
+        assert inspect.getsource(evaluate_turbulence_rates).count("clip_gradient_magnitude(") >= 2
 
     def test_overflow_prone_norm_and_clip_is_warning_free_under_errstate(self):
         """Reproduces the actual numeric failure mode in isolation: a

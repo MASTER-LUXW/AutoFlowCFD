@@ -21,6 +21,7 @@ P0 架构缺口完全不适用于这里。
 
 import numpy as np
 from typing import Optional
+from autoflowcfd.core.turbulence.sst.log_omega import lift_log_omega
 
 
 
@@ -65,7 +66,8 @@ def gpu_solver_interpolate_to_new_order(solver, target_p: int) -> None:
 
         if solver.turb_model_gpu is not None:
             new_k_np = _lift(cp.asnumpy(solver.turb_model_gpu.k_field))
-            new_omega_np = _lift(cp.asnumpy(solver.turb_model_gpu.omega_field))
+            new_omega_np = lift_log_omega(cp.asnumpy(solver.turb_model_gpu.omega_field), _lift,
+                                          solver.turb_model_gpu.omega_max)
             old_nu_t = getattr(solver.turb_model_gpu, 'nu_t', None)
             if old_nu_t is not None:
                 old_nu_t_np = cp.asnumpy(old_nu_t)

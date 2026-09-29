@@ -9,6 +9,7 @@ import numpy as np
 from typing import Any
 
 from loguru import logger
+from autoflowcfd.core.turbulence.sst.log_omega import lift_log_omega
 
 
 
@@ -177,7 +178,8 @@ def interpolate_to_new_order(solver: Any, new_order: int):
     # 更新湍流场（如果有）——(n_cells, old_n_sps) -> (n_cells, new_n_sps)
     if hasattr(solver.turb_model, 'k_field'):
         solver.turb_model.k_field = _lift(solver.turb_model.k_field)
-        solver.turb_model.omega_field = _lift(solver.turb_model.omega_field)
+        solver.turb_model.omega_field = lift_log_omega(solver.turb_model.omega_field, _lift,
+                                                       solver.turb_model.omega_max)
 
     # nu_t（湍流涡粘系数）同样按每单元 SPs 存储，但不会随 k_field/
     # omega_field 自动变形——它只在 compute_turbulence_source 被调用时

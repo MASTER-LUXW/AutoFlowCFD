@@ -38,12 +38,10 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
     _update_production_ramp(solver)
 
     Q, grad_vel, d_wall, mu = prepare_turbulence_inputs(solver)
-    Sk, S_omega, dk_dt, domega_dt, transport_k, transport_omega = evaluate_turbulence_rates(
+    Sk, S_omega, dk_dt, dw_dt, transport_k, transport_w = evaluate_turbulence_rates(
         solver, Q, grad_vel, d_wall, mu, apply_des=True)
 
-    solver.turb_model.update_fields(dt, dk_dt, domega_dt,
-                                     transport_k=transport_k,
-                                     transport_omega=transport_omega)
+    solver.turb_model.update_fields(dt, dk_dt, dw_dt, transport_k=transport_k, transport_log_omega=transport_w)
     finalize_turbulence_update(solver, dt)
     return (Sk, S_omega)
 
@@ -106,11 +104,12 @@ def prepare_turbulence_inputs(solver):
 
 
 def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, apply_des: bool, conv_geom=None):
-    """在 `turb_model` 当前的 `k_field/omega_field` 上求 `dk/dt`、`domega/dt`。
+    """在 `turb_model` 当前的 `k_field/omega_field` 上求 `dk/dt` 与 `dw/dt`（`w = ln omega`，
+    见 `core/turbulence/sst/log_omega.py`）。
 
-    返回 `(Sk, S_omega, dk_dt, domega_dt, transport_k, transport_omega)`：
-    `dk_dt/domega_dt` 是**源项部分**（已除以 rho），输运部分单独返回——
-    显式路径的 `update_fields` 只对源项做点隐式阻尼，所以两者必须分开。
+    返回 `(Sk, S_omega, dk_dt, dw_dt, transport_k, transport_w)`：`Sk/S_omega` 是模型源项
+    （带 rho），`dk_dt = Sk/rho`、`dw_dt = S_omega/(rho omega)` 是**源项部分**，输运部分
+    单独返回——显式路径的 `update_fields` 只对源项做点隐式阻尼，所以两者必须分开。
 
     副作用：`compute_source_terms` 会刷新模型上的 `nu_t`、混合 `beta` 与
     realizability 下限（都是当前场的函数）。`apply_des=True` 时还按刚算出的
@@ -121,21 +120,22 @@ def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, apply_des: boo
     算一次传入（`transport/residual.py::prepare_convection_geometry`）。
     """
     grad_k = None
+    grad_w = None
     grad_omega = None
+    omega = solver.turb_model.omega_field
     if solver.turb_model_name in ["SST", "DDES", "IDDES"]:
-        k_expanded = solver.turb_model.k_field[:, :, np.newaxis]
-        omega_expanded = solver.turb_model.omega_field[:, :, np.newaxis]
-
         from autoflowcfd.core.fr_residual.viscous import compute_scalar_gradient
-
-        grad_k = compute_scalar_gradient(k_expanded, solver.ops, solver.mesh)
-        grad_omega = compute_scalar_gradient(omega_expanded, solver.ops, solver.mesh)
-
-        # 梯度模长上限（退化单元上的度量噪声放大，见 `sst/bounds.py::MAX_GRADIENT_MAGNITUDE`）
         from autoflowcfd.core.turbulence.sst.bounds import clip_gradient_magnitude
+        from autoflowcfd.core.turbulence.sst.log_omega import log_omega
 
-        grad_k = clip_gradient_magnitude(grad_k, np)
-        grad_omega = clip_gradient_magnitude(grad_omega, np)
+        # 梯度对 k 与 w = ln(omega) 求（被输运的量），模长上限只作用在这两者上（退化单元上
+        # 的度量噪声放大，见 `sst/bounds.py::MAX_GRADIENT_MAGNITUDE`）；模型项用物理梯度
+        # grad(omega) = omega grad(w)
+        grad_k = clip_gradient_magnitude(
+            compute_scalar_gradient(solver.turb_model.k_field[:, :, np.newaxis], solver.ops, solver.mesh), np)
+        grad_w = clip_gradient_magnitude(
+            compute_scalar_gradient(log_omega(omega, np)[:, :, np.newaxis], solver.ops, solver.mesh), np)
+        grad_omega = omega[:, :, np.newaxis] * grad_w
 
     # DDES 的有效长度尺度 (sst_model.des_length_scale) 依赖涡粘 nu_t，而
     # nu_t 只在 compute_source_terms 内部才会被重新计算（sst_model.nu_t 是
@@ -189,13 +189,14 @@ def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, apply_des: boo
     # update_fields。
     rho = Q[:, :, 0]
     dk_dt = Sk / np.maximum(rho, 1e-10)
-    domega_dt = S_omega / np.maximum(rho, 1e-10)
+    # w = ln(omega) 方程的源项部分（omega 由 exp(w) 产生、恒为正）
+    dw_dt = S_omega / (np.maximum(rho, 1e-10) * omega)
 
     # 完整输运项（对流+扩散）：对 SST/DDES 模型计算 k/omega 的 FR 空间输运
     # 残差，使 k/omega 不再仅是逐点 ODE 源项弛豫，而是真正随流场对流、
     # 跨单元扩散。见 core/turbulence_transport.py 模块文档。
     transport_k = None
-    transport_omega = None
+    transport_w = None
     if solver.turb_model_name in ["SST", "DDES", "IDDES"]:
         from autoflowcfd.core.turbulence.transport import compute_turbulence_transport_residual
         # grad_vel 复用上面已经为 compute_source_terms 算过的同一份值
@@ -235,13 +236,13 @@ def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, apply_des: boo
         # 严格等价：本函数上面的裁剪是原地 `grad_k *= clip(...)`，
         # compute_turbulence_transport_residual 内部对已经满足裁剪阈值
         # 的输入重新检查同一个阈值必然是 no-op，不会改变数值结果。
-        transport_k, transport_omega = compute_turbulence_transport_residual(
-            solver, grad_vel=grad_vel, grad_k=grad_k, grad_omega=grad_omega,
+        transport_k, transport_w = compute_turbulence_transport_residual(
+            solver, grad_vel=grad_vel, grad_k=grad_k, grad_log_omega=grad_w,
             flat_face_override=getattr(solver, "_turbulence_flat_face_override", None),
             conv_geom=conv_geom,
         )
 
-    return Sk, S_omega, dk_dt, domega_dt, transport_k, transport_omega
+    return Sk, S_omega, dk_dt, dw_dt, transport_k, transport_w
 
 
 def finalize_turbulence_update(solver, dt, *, omega_wall_relaxation: bool = True) -> None:
@@ -264,6 +265,7 @@ def finalize_turbulence_update(solver, dt, *, omega_wall_relaxation: bool = True
             compute_turb_troubled_mask, filter_scalar_field,
             filter_scalar_field_gated, resolve_turb_filter_gate,
         )
+        from autoflowcfd.core.turbulence.sst.log_omega import log_omega, omega_from_log
         n_prism = solver.mesh.n_prism_cells
         # 门控维度与平均流的 `AFCFD_FILTER_MODE` **独立**（2026-09-15）：
         # 真实网格 250 步对照决定性证明两维的效果可以完全分离——off 与
@@ -274,25 +276,28 @@ def finalize_turbulence_update(solver, dt, *, omega_wall_relaxation: bool = True
             order = getattr(solver, "current_order", None)
             if order is None:
                 order = solver.order
+            # 传感器量的是多项式表示的光滑度，被表示的是 w = ln(omega)
             troubled = compute_turb_troubled_mask(
-                solver.turb_model.k_field, solver.turb_model.omega_field,
+                solver.turb_model.k_field, log_omega(solver.turb_model.omega_field, np),
                 int(order), n_prism=n_prism)
             solver._turb_filter_troubled_frac = float(np.mean(troubled))
             solver.turb_model.k_field = filter_scalar_field_gated(
                 solver.turb_model.k_field, solver.ops.filter_prism,
                 solver.ops.filter_tet, troubled, n_prism=n_prism,
             )
-            solver.turb_model.omega_field = filter_scalar_field_gated(
-                solver.turb_model.omega_field, solver.ops.filter_prism,
+            # 滤波作用在被求解/被输运的 w = ln(omega) 上（sst/log_omega.py）
+            solver.turb_model.omega_field = omega_from_log(filter_scalar_field_gated(
+                log_omega(solver.turb_model.omega_field, np), solver.ops.filter_prism,
                 solver.ops.filter_tet, troubled, n_prism=n_prism,
-            )
+            ), solver.turb_model.omega_max, np)
         else:
             solver.turb_model.k_field = filter_scalar_field(
                 solver.turb_model.k_field, n_prism, solver.ops.filter_prism, solver.ops.filter_tet,
             )
-            solver.turb_model.omega_field = filter_scalar_field(
-                solver.turb_model.omega_field, n_prism, solver.ops.filter_prism, solver.ops.filter_tet,
-            )
+            solver.turb_model.omega_field = omega_from_log(filter_scalar_field(
+                log_omega(solver.turb_model.omega_field, np), n_prism, solver.ops.filter_prism,
+                solver.ops.filter_tet,
+            ), solver.turb_model.omega_max, np)
         # 滤波可能把场值推到正性下限以下（滤波器系数含负权重，理论上
         # 可能），滤波后必须重新过一遍正性/上界限制器，不能假设滤波
         # 输出天然满足这些约束。

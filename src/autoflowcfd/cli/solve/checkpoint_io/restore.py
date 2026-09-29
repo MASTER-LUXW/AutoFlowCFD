@@ -7,6 +7,7 @@
 
 
 import click
+import numpy as np
 
 
 def restore_state_from_checkpoint(
@@ -131,7 +132,9 @@ def restore_solver_state_from_fields(solver, fields: dict, metadata: dict) -> No
                     f"不匹配（网格或阶数可能已变化），拒绝恢复。"
                 )
             turb_model.k_field = k_restored
-            turb_model.omega_field = omega_restored
+            from autoflowcfd.core.turbulence.sst.log_omega import admissible_omega
+
+            turb_model.omega_field = admissible_omega(np.asarray(omega_restored), turb_model.omega_inf)
             # 跳过 production ramp（2026-08-25 代码审查）：k/omega 场已精确恢复，
             # 说明湍流已充分发展，再重新压制产生项 50 步会把已收敛的湍流场
             # 往回压。order_continuation.py 的 resume 分支已有同样的跳过逻辑，

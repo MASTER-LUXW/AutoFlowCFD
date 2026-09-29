@@ -158,7 +158,8 @@ def distributed_coupling_graph(solver) -> CouplingGraph:
 
 
 class _TurbulenceCompactState:
-    """local `(k, omega)` -> 紧凑空间（与湍流残差 `_sync_view` 同一次 halo 交换与换序）。"""
+    """local `(k, w)`（未知量，`w = ln omega`）-> 紧凑空间（与湍流残差 `_sync_view` 同一次
+    halo 交换与换序；两者都是线性的，对 w 与对 omega 同样适用）。"""
 
     __slots__ = ("backend",)
 

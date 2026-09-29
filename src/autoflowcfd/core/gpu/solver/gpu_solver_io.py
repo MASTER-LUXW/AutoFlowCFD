@@ -77,7 +77,10 @@ class _GPUSolverIOMixin:
                 self.residual_history = f['residual_history'][:].tolist()
             if 'k' in f and 'omega' in f and self.turb_model_gpu is not None:
                 self.turb_model_gpu.k_field = cp.asarray(f['k'][:])
-                self.turb_model_gpu.omega_field = cp.asarray(f['omega'][:])
+                from autoflowcfd.core.turbulence.sst.log_omega import admissible_omega
+
+                self.turb_model_gpu.omega_field = cp.asarray(
+                    admissible_omega(f['omega'][:], self.turb_model_gpu.omega_inf, source='GPU checkpoint'))
             if 'U_prev' in f:
                 self._dual_time_U_prev = cp.asarray(f['U_prev'][:])
 
@@ -133,13 +136,11 @@ class _GPUSolverIOMixin:
         self._update_production_ramp_gpu()
 
         grad_vel, d_wall = self._prepare_turbulence_inputs_gpu()
-        dk_dt, domega_dt, transport_k, transport_omega = self._evaluate_turbulence_rates_gpu(
+        dk_dt, dw_dt, transport_k, transport_w = self._evaluate_turbulence_rates_gpu(
             grad_vel, d_wall, apply_des=True)
 
         self.turb_model_gpu.update_fields_gpu(
-            turb_dt, dk_dt, domega_dt,
-            transport_k=transport_k, transport_omega=transport_omega,
-        )
+            turb_dt, dk_dt, dw_dt, transport_k=transport_k, transport_log_omega=transport_w)
 
         self._finalize_turbulence_update_gpu()
         return self._turbulent_mu_t_gpu()
@@ -179,23 +180,24 @@ class _GPUSolverIOMixin:
         return grad_vel, d_wall
 
     def _evaluate_turbulence_rates_gpu(self, grad_vel, d_wall, *, apply_des: bool):
-        """在 `turb_model_gpu` 当前的 `k_field/omega_field` 上求源项部分与输运部分
-        `(dk_dt, domega_dt, transport_k, transport_omega)`（CPU 版
+        """在 `turb_model_gpu` 当前的 `k_field/omega_field` 上求 k 与 `w = ln(omega)` 的
+        源项部分与输运部分 `(dk_dt, dw_dt, transport_k, transport_w)`（CPU 版
         `source.py::evaluate_turbulence_rates` 的 GPU 对应，同一组副作用约定：
         刷新模型上的 `nu_t` 等缓存；`apply_des=False` 时不改写 DES 长度尺度）。"""
         cp = get_cupy()
         rho = self.Q_gpu[:, :, 0]
         from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_gradient_gpu
-        grad_k = compute_physical_scalar_gradient_gpu(
-            self.turb_model_gpu.k_field, self.mesh_data, self.ops_data,
-        )
-        grad_omega = compute_physical_scalar_gradient_gpu(
-            self.turb_model_gpu.omega_field, self.mesh_data, self.ops_data,
-        )
-
         from autoflowcfd.core.turbulence.sst.bounds import clip_gradient_magnitude
-        grad_k = clip_gradient_magnitude(grad_k, cp)
-        grad_omega = clip_gradient_magnitude(grad_omega, cp)
+        from autoflowcfd.core.turbulence.sst.log_omega import log_omega
+
+        # 梯度对 k 与 w = ln(omega) 求（被输运的量），模长上限只作用在这两者上；模型项
+        # 用物理梯度 grad(omega) = omega grad(w)（与 CPU 版同一处）
+        omega = self.turb_model_gpu.omega_field
+        grad_k = clip_gradient_magnitude(compute_physical_scalar_gradient_gpu(
+            self.turb_model_gpu.k_field, self.mesh_data, self.ops_data), cp)
+        grad_w = clip_gradient_magnitude(compute_physical_scalar_gradient_gpu(
+            log_omega(omega, cp), self.mesh_data, self.ops_data), cp)
+        grad_omega = omega[:, :, None] * grad_w
 
         # 真实 bug 修复（2026-09-02，排查多GPU分布式SST时对照发现，与
         # 分布式本身无关，单机 GPU 路径同样中招，此前从未被端到端验证
@@ -254,7 +256,8 @@ class _GPUSolverIOMixin:
                 )
 
         dk_dt = Sk / cp.maximum(rho, 1e-10)
-        domega_dt = S_omega / cp.maximum(rho, 1e-10)
+        # w = ln(omega) 方程的源项部分（omega 由 exp(w) 产生、恒为正）
+        dw_dt = S_omega / (cp.maximum(rho, 1e-10) * omega)
 
         # k/omega 完整输运（对流+扩散，#7 新增）：真正补齐 GPU SST 长期
         # 缺失的输运项——此前 update_fields_gpu 的 transport_k/
@@ -263,16 +266,16 @@ class _GPUSolverIOMixin:
         # 扩散。与 CPU 版 fr_solver_turbulence.py::compute_turbulence_source
         # 同一个触发条件（SST/DDES/IDDES 都需要）。
         transport_k = None
-        transport_omega = None
+        transport_w = None
         if self.turb_model_name.upper() in ("SST", "DDES", "IDDES"):
             from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import (
                 compute_turbulence_transport_residual_gpu,
             )
-            transport_k, transport_omega = compute_turbulence_transport_residual_gpu(
-                self, grad_vel=grad_vel,
+            transport_k, transport_w = compute_turbulence_transport_residual_gpu(
+                self, grad_vel=grad_vel, grad_k=grad_k, grad_log_omega=grad_w,
             )
 
-        return dk_dt, domega_dt, transport_k, transport_omega
+        return dk_dt, dw_dt, transport_k, transport_w
 
     def _finalize_turbulence_update_gpu(self, *, omega_wall_relaxation: bool = True):
         """`k/omega` 更新之后的后处理：模态滤波 + 正性限幅（非恒等滤波时）与
@@ -284,44 +287,12 @@ class _GPUSolverIOMixin:
         # 完整推导见 gpu_modal_filter.py::filter_scalar_field_gpu 文档）：
         # k/omega 场同样需要模态滤波，理由/CPU-GPU一致性要求同上。
         if self.mesh.n_sps_per_cell > 1:
-            from autoflowcfd.core.fr_solver.filter import resolve_turb_filter_gate
-            from autoflowcfd.core.gpu.gpu_modal_filter import (
-                filter_scalar_field_gated_gpu, filter_scalar_field_gpu,
-            )
-            n_prism = self.mesh.n_prism_cells
-        # 门控维度 `AFCFD_FILTER_TURB_GATE`（2026-09-15 系统性审计的 A 类
-        # 发现）：这一维此前只在 CPU 路径接线过，GPU 这边无条件全场滤波
-        # ——同一个环境变量在不同后端意味着不同的数值方案且无任何提示。
-        # 现已用 GPU 版同一套传感器补齐（gpu_troubled_cell.py），默认
-        # "all" 与此前行为逐位一致。
-            if resolve_turb_filter_gate() == "sensor":
-                from autoflowcfd.core.gpu.gpu_troubled_cell import (
-                    compute_turb_troubled_mask_gpu,
-                )
-                _order = int(getattr(self, "current_order", None)
-                             or getattr(self, "order", 0))
-                troubled = compute_turb_troubled_mask_gpu(
-                    self.turb_model_gpu.k_field, self.turb_model_gpu.omega_field,
-                    n_prism, _order)
-                self._turb_filter_troubled_frac = float(cp.mean(troubled))
-                self.turb_model_gpu.k_field = filter_scalar_field_gated_gpu(
-                    self.turb_model_gpu.k_field, n_prism,
-                    self.ops.filter_prism, self.ops.filter_tet, troubled,
-                )
-                self.turb_model_gpu.omega_field = filter_scalar_field_gated_gpu(
-                    self.turb_model_gpu.omega_field, n_prism,
-                    self.ops.filter_prism, self.ops.filter_tet, troubled,
-                )
-            else:
-                self.turb_model_gpu.k_field = filter_scalar_field_gpu(
-                    self.turb_model_gpu.k_field, n_prism,
-                    self.ops.filter_prism, self.ops.filter_tet,
-                )
-                self.turb_model_gpu.omega_field = filter_scalar_field_gpu(
-                    self.turb_model_gpu.omega_field, n_prism,
-                    self.ops.filter_prism, self.ops.filter_tet,
-                )
-            self.turb_model_gpu.apply_positivity_limiter_gpu()
+            # 门控维度 `AFCFD_FILTER_TURB_GATE` 与 CPU 同一套传感器（2026-09-15 补齐，
+            # 此前 GPU 无条件全场滤波）；滤波作用在 k 与 w = ln(omega) 上
+            _order = int(getattr(self, "current_order", None) or getattr(self, "order", 0))
+            frac = self.turb_model_gpu.filter_fields_gpu(self.mesh.n_prism_cells, self.ops, _order)
+            if frac is not None:
+                self._turb_filter_troubled_frac = frac
 
         # 真实缺口修复（2026-09-05，代码复审发现）：CPU 版
         # fr_solver/turbulence.py::compute_turbulence_source 在

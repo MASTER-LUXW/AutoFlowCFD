@@ -10,10 +10,13 @@
 
 import os
 import numpy as np
+
 from typing import Tuple
 
 
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+
+from ..sst.log_omega import log_omega, omega_from_log
 
 
 def _compute_wall_dirichlet_face_mask(solver) -> np.ndarray:
@@ -412,8 +415,9 @@ def enforce_omega_wall_relaxation(solver, dt, relax: float = None,
     Args:
         solver: FRSolver 实例
         dt: 未使用（保留参数位置以兼容调用方签名，见上面"教训"一节）。
-        relax: 松弛系数，每步 omega_field[wall_owner] 更新为
-            `(1-relax)*old + relax*omega_wall_target`
+        relax: 松弛系数，每步壁面 owner 单元的 `w = ln(omega)` 更新为
+            `(1-relax)*w + relax*ln(omega_wall_target)`（被求解的量是 w，
+            见 `sst/log_omega.py`；在 omega 上即几何平均）
         flat_face_override: 分布式路径复用同一约定，见
             `compute_turbulence_transport_residual` 同名参数文档
     """
@@ -423,9 +427,9 @@ def enforce_omega_wall_relaxation(solver, dt, relax: float = None,
     if hit_cells.size == 0:
         return
     turb = solver.turb_model
-    turb.omega_field[hit_cells, :] = (
-        (1.0 - relax) * turb.omega_field[hit_cells, :] + relax * avg_target[:, None]
-    )
+    w = log_omega(turb.omega_field[hit_cells, :], np)
+    turb.omega_field[hit_cells, :] = omega_from_log(
+        (1.0 - relax) * w + relax * log_omega(avg_target, np)[:, None], turb.omega_max, np)
 
 
 def omega_wall_cell_targets(solver, flat_face_override=None):

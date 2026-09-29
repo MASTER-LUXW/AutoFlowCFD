@@ -348,55 +348,57 @@ class GPUTurbulenceSST:
         self,
         dt,
         Sk: 'cp.ndarray',
-        S_omega: 'cp.ndarray',
+        S_log_omega: 'cp.ndarray',
         transport_k: Optional['cp.ndarray'] = None,
-        transport_omega: Optional['cp.ndarray'] = None,
+        transport_log_omega: Optional['cp.ndarray'] = None,
     ):
-        """GPU 湍流场时间更新，含源项半隐式阻尼（point-implicit
-        destruction）——与 CPU 版 SSTModelFR.update_fields 完全一致
-        （见该方法文档的推导）：纯显式更新 destruction 项
-        D_omega=rho*beta*omega^2 这类逐点二次反应项在真实网格上会失稳，
-        这是 CPU 版已确认、已修复的 P2 SST 发散根因之一，此 GPU 版此前
-        遗漏同一处修复。
+        """GPU 湍流场时间更新：k 与 `w = ln(omega)` 的点隐式阻尼 + 输运，与 CPU
+        `SSTModelFR.update_fields` 同一份实现（`sst/update.py::advance_k_log_omega`），
+        再过正性/上界限制器。参数含义见该函数。"""
+        from autoflowcfd.core.turbulence.sst.update import advance_k_log_omega
 
-        Args:
-            dt: 时间步长：标量（DUAL_TIME 的物理时间步），或可广播到
-                `(n_cells, n_sps)` 的逐点局部步长（稳态加速，与 CPU
-                `SSTModelFR.update_fields` 同一个量）
-            Sk: k 方程源项
-            S_omega: omega 方程源项
-            transport_k: k 输运残差（可选）
-            transport_omega: omega 输运残差（可选）
-        """
-        cp = get_cupy()
-
-        beta_blend = getattr(self, "_last_beta_blend", None)
-        if beta_blend is None:
-            # 防御性回退，理由同 CPU 版：正常路径下 compute_source_terms_gpu
-            # 总在 update_fields_gpu 之前被调用。
-            beta_blend = self.beta2
-
-        omega_old_safe = cp.maximum(self.omega_field, 1e-10)
-        c_k = self.beta_star * omega_old_safe
-        c_omega = beta_blend * omega_old_safe
-
-        Sk_damped = Sk / (1.0 + dt * c_k)
-        S_omega_damped = S_omega / (1.0 + dt * c_omega)
-        Sk_damped = cp.where(cp.isfinite(Sk_damped), Sk_damped, 0.0)
-        S_omega_damped = cp.where(cp.isfinite(S_omega_damped), S_omega_damped, 0.0)
-
-        dk_total = Sk_damped
-        domega_total = S_omega_damped
-
-        if transport_k is not None:
-            dk_total = dk_total + transport_k
-        if transport_omega is not None:
-            domega_total = domega_total + transport_omega
-
-        self.k_field += dt * dk_total
-        self.omega_field += dt * domega_total
-
+        advance_k_log_omega(self, dt, Sk, S_log_omega, transport_k, transport_log_omega, get_cupy())
         self.apply_positivity_limiter_gpu()
+
+    def filter_fields_gpu(self, n_prism: int, ops, order: int):
+        """k 与 `w = ln(omega)` 的模态滤波 + 正性/上界限制器（CPU 版
+        `fr_solver/turbulence/source.py::finalize_turbulence_update` 的滤波段），单机
+        GPU 与多 GPU（compact 视图，"棱柱在前"）共用。门控档 `AFCFD_FILTER_TURB_GATE=
+        sensor` 时传感器同样看 w（被多项式表示的量）。
+
+        滤波矩阵为单位阵（`AFCFD_FILTER_MODE=off`）时整段跳过，与 CPU 同一判据
+        （`fr_solver/turbulence/init.py::_filter_matrices_are_identity`）。
+
+        Returns:
+            门控档下被标记单元的比例；全场滤波档或跳过时为 None
+        """
+        from autoflowcfd.core.fr_solver.filter import resolve_turb_filter_gate
+        from autoflowcfd.core.fr_solver.turbulence.init import _filter_matrices_are_identity
+
+        if _filter_matrices_are_identity(ops):
+            return None
+        from autoflowcfd.core.gpu.gpu_modal_filter import (
+            filter_scalar_field_gated_gpu, filter_scalar_field_gpu,
+        )
+        from autoflowcfd.core.turbulence.sst.log_omega import log_omega, omega_from_log
+
+        cp = get_cupy()
+        w = log_omega(self.omega_field, cp)
+        frac = None
+        if resolve_turb_filter_gate() == "sensor":
+            from autoflowcfd.core.gpu.gpu_troubled_cell import compute_turb_troubled_mask_gpu
+
+            troubled = compute_turb_troubled_mask_gpu(self.k_field, w, n_prism, int(order))
+            frac = float(cp.mean(troubled))
+            self.k_field = filter_scalar_field_gated_gpu(
+                self.k_field, n_prism, ops.filter_prism, ops.filter_tet, troubled)
+            w = filter_scalar_field_gated_gpu(w, n_prism, ops.filter_prism, ops.filter_tet, troubled)
+        else:
+            self.k_field = filter_scalar_field_gpu(self.k_field, n_prism, ops.filter_prism, ops.filter_tet)
+            w = filter_scalar_field_gpu(w, n_prism, ops.filter_prism, ops.filter_tet)
+        self.omega_field = omega_from_log(w, self.omega_max, cp)
+        self.apply_positivity_limiter_gpu()
+        return frac
 
     def get_nu_t_cpu(self) -> np.ndarray:
         """获取涡粘系数（下载到 CPU）。"""

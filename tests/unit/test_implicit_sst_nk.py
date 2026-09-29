@@ -118,12 +118,16 @@ class TestTurbulenceResidual:
         before = {a: np.array(getattr(t, a), copy=True) for a in ("k_field", "omega_field", "nu_t")}
         res = TurbulenceResidual(backend)
         rng = np.random.default_rng(0)
-        kw = np.stack([t.k_field.ravel(), t.omega_field.ravel()], axis=1)
-        kw = kw * (1.0 + 0.1 * rng.standard_normal(kw.shape))
+        # 未知量是 (k, w = ln omega)（core/turbulence/sst/log_omega.py）
+        kw = np.stack([t.k_field.ravel(), np.log(t.omega_field.ravel())], axis=1)
+        kw[:, 0] *= 1.0 + 0.1 * rng.standard_normal(kw.shape[0])
+        kw[:, 1] += 0.1 * rng.standard_normal(kw.shape[0])
         r = res(kw)
 
         assert res._wall_rows.size > 0
-        want = t.beta1 * res._wall_target * (kw[res._wall_rows, 1] - res._wall_target)
+        # 约束行 beta1 omega_t (w - ln omega_t)
+        omega_t = np.exp(res._wall_target)
+        want = t.beta1 * omega_t * (kw[res._wall_rows, 1] - res._wall_target)
         np.testing.assert_allclose(r[res._wall_rows, 1], want, rtol=1e-14)
         assert np.all(r[~res._real_rows] == 0.0), "零填充槽位不参与 Newton"
         for a, v in before.items():

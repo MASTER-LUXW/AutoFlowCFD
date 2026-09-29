@@ -4,6 +4,7 @@
 """
 
 import numpy as np
+from autoflowcfd.core.turbulence.sst.log_omega import lift_log_omega
 
 
 
@@ -44,7 +45,7 @@ def _interp_state_and_turbulence_local(solver, old_order: int,
     turb_model = getattr(solver, 'turb_model', None)
     if turb_model is not None and hasattr(turb_model, 'k_field'):
         turb_model.k_field = _lift(turb_model.k_field[:n_local])
-        turb_model.omega_field = _lift(turb_model.omega_field[:n_local])
+        turb_model.omega_field = lift_log_omega(turb_model.omega_field[:n_local], _lift, turb_model.omega_max)
         # nu_t：同 order_continuation.py 文档说明，只有形状匹配旧阶数时
         # 才插值（可能在 compute_source 刷新前已经是别的形状/尚未构造）。
         if getattr(turb_model, 'nu_t', None) is not None and turb_model.nu_t.shape[1] == old_local_U.shape[1]:

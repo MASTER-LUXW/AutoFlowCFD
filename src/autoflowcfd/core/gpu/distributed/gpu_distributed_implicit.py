@@ -6,7 +6,7 @@ prepare / evaluate / finalize / write-back，归约用跨 rank 的
 `MPIReductions(cupy)`，块 Jacobi 着色与 CPU 分布式同一个全局一致着色
 （`core/mpi/distributed_implicit.py`，那里的模块文档说明了为什么必须全局一致）。
 
-未知量是本 rank local 单元的 `(k, omega)`（原生排列，即 `turb_model_gpu`）；
+未知量是本 rank local 单元的 `(k, w = ln omega)`（原生排列，模型上存物理 omega）；
 每次求值经 2 变量 halo 交换写进 compact 视图，结果按 `inv_perm` 换回原生
 排列、切 local 段。
 """
@@ -93,7 +93,7 @@ class MultiGpuTurbulenceBackend:
     def block_assembler(self):
         """本步的解析单元块装配器：在与残差同一个紧凑视图上装配（线性算子部分在主机，
         逐点量用 GPU 模型的求值件），按 `inv_perm` 取回本 rank 的行。"""
-        from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import GpuTurbulencePointwise, _host
+        from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import _host, gpu_turbulence_pointwise
         from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import (
             compute_omega_wall_target_gpu, omega_wall_cell_targets_gpu,
         )
@@ -119,13 +119,14 @@ class MultiGpuTurbulenceBackend:
             wall_zero_face=_host(tr._wall_mask_k_gpu), omega_wall_face=_host(omega_wall),
             has_omega_wall=_host(has_wall), open_face=_host(tr._open_mask_gpu),
             wall_cells=_host(hit), wall_targets=_host(target),
-            pointwise=GpuTurbulencePointwise(cp, view, ctx.Q, ctx.grad_vel, ctx.d_wall, float(s.mu_molecular)))
+            pointwise=gpu_turbulence_pointwise(cp, view, ctx.Q, ctx.grad_vel, ctx.d_wall, float(s.mu_molecular)))
         return TurbulenceBlockAssembler(lin, self.shape[1], compact_state=_MultiGpuTurbulenceCompactState(s),
                                         row_compact=np.asarray(dist_fc.inv_perm)[:self.shape[0]])
 
 
 class _MultiGpuTurbulenceCompactState:
-    """local `(k, omega)`（设备数组）-> 紧凑空间（与 `_sync_turbulence_view` 同一次交换与换序）。"""
+    """local `(k, w)`（设备数组，未知量；交换与换序是线性的，对 w 与对 omega 同样适用）
+    -> 紧凑空间（与 `_sync_turbulence_view` 同一次交换与换序）。"""
 
     __slots__ = ("solver",)
 

@@ -378,6 +378,11 @@ class TestComputeOmegaWallTarget:
         np.testing.assert_array_equal(omega_wall_value_face, 0.0)
 
 
+def _log_blend(old, target, relax):
+    """`w = ln(omega)` 上的固定比例松弛（`enforce_omega_wall_relaxation`）。"""
+    return np.exp((1.0 - relax) * np.log(old) + relax * np.log(target))
+
+
 class TestEnforceOmegaWallRelaxation:
     """真实 bug 回归测试：omega 壁面 Wilcox 解析值只在对流项生效、扩散侧
     没有闭合这个已知架构缺口的缓解措施。
@@ -429,7 +434,7 @@ class TestEnforceOmegaWallRelaxation:
         nu_t = np.full((n_cells, n_sps), nu_t_value)
         turb_model = SimpleNamespace(
             k_field=k_field, omega_field=omega_field, nu_t=nu_t,
-            beta1=0.075, sigma_w2=0.856,
+            beta1=0.075, sigma_w2=0.856, omega_max=1e6,
         )
 
         solver = SimpleNamespace(
@@ -470,7 +475,8 @@ class TestEnforceOmegaWallRelaxation:
 
         for oc, targets in target_by_cell.items():
             target_avg = np.mean(targets)
-            expected = 0.5 * omega_before[oc, 0] + 0.5 * target_avg  # 默认 relax=0.5
+            # 默认 relax=0.5，松弛作用在 w = ln(omega) 上（omega 上即几何平均）
+            expected = _log_blend(omega_before[oc, 0], target_avg, 0.5)
             np.testing.assert_allclose(omega_after[oc, 0], expected, rtol=1e-10)
             lo, hi = sorted([omega_before[oc, 0], target_avg])
             assert lo - 1e-6 <= omega_after[oc, 0] <= hi + 1e-6, (
@@ -507,7 +513,7 @@ class TestEnforceOmegaWallRelaxation:
                 continue
             seen_cells.add(oc)
             target = omega_wall_value_face[f, 0]
-            expected = (1.0 - relax) * omega_before[oc, 0] + relax * target
+            expected = _log_blend(omega_before[oc, 0], target, relax)
             np.testing.assert_allclose(omega_after[oc, 0], expected, rtol=1e-10)
 
     def test_extreme_wall_distance_stays_bounded_and_gentle_not_full_target(self):
@@ -547,7 +553,7 @@ class TestEnforceOmegaWallRelaxation:
             target = omega_wall_value_face[f, 0]
             # target 本身必须已经被 omega_max（默认 1e6）保护，不是失控的 1e14+。
             assert target <= 1e6 + 1e-6
-            expected = 0.5 * omega_before[oc, 0] + 0.5 * target
+            expected = _log_blend(omega_before[oc, 0], target, 0.5)
             np.testing.assert_allclose(omega_after[oc, 0], expected, rtol=1e-10)
             # 关键判据：即使这是"最刚性"的极端场景，固定 relax 也只走半程，
             # 绝不应该等于（或极接近）target 本身。

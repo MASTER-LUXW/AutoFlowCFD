@@ -65,10 +65,10 @@ def clip_gradient_magnitude(grad, xp):
 
 
 def turbulence_scales(model):
-    """隐式物理性限幅用的逐列尺度下限 `(k_scale, omega_scale)`。"""
-    k_scale = max(ABS_FLOOR, K_FLOOR_FRACTION * float(model.k_inf))
-    omega_scale = max(ABS_FLOOR, OMEGA_FLOOR_FRACTION * float(model.omega_inf))
-    return k_scale, omega_scale
+    """隐式 k-omega 未知量 `(k, ln omega)` 的逐列尺度：k 为尺度下限（物理性限幅与差分
+    步长），`ln omega` 是 O(1) 的对数量、取 1（它的限幅是绝对的，见
+    `time_integration/implicit/physicality.py::ScaledFieldRowLimits` 的 `log_columns`）。"""
+    return max(ABS_FLOOR, K_FLOOR_FRACTION * float(model.k_inf)), 1.0
 
 
 def clip_to_bounds(model, xp) -> None:

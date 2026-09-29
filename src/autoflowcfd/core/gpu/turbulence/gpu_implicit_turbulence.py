@@ -63,7 +63,7 @@ class GpuTurbulenceBackend:
     def block_assembler(self):
         """本步的解析单元块装配器：线性算子部分在主机上装配（与 CPU 同一份，
         `core/turbulence/jacobian`），逐点量 `(S, Gamma)` 用 GPU 模型自己的求值件
-        （`GpuTurbulencePointwise`），冻结的平均流输入与残差同一份。"""
+        （`gpu_turbulence_pointwise`），冻结的平均流输入与残差同一份。"""
         from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
         from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_omega_wall_target_gpu
         from autoflowcfd.core.turbulence.jacobian import TurbulenceBlockAssembler, TurbulenceLinearization
@@ -85,7 +85,7 @@ class GpuTurbulenceBackend:
             wall_zero_face=_host(s._wall_mask_k_gpu), omega_wall_face=_host(omega_wall),
             has_omega_wall=_host(has_wall), open_face=_host(s._open_mask_gpu),
             wall_cells=_host(hit), wall_targets=_host(target),
-            pointwise=GpuTurbulencePointwise(cp, m, s.Q_gpu, grad_vel, d_wall, float(s.mu_molecular)))
+            pointwise=gpu_turbulence_pointwise(cp, m, s.Q_gpu, grad_vel, d_wall, float(s.mu_molecular)))
         return TurbulenceBlockAssembler(ctx, self.shape[1])
 
 
@@ -93,40 +93,17 @@ def _host(a):
     return a.get() if hasattr(a, "get") else np.asarray(a)
 
 
-class GpuTurbulencePointwise:
-    """GPU 模型上的逐点 `(S, Gamma)` 求值器（`core/turbulence/jacobian/pointwise.py` 的
-    `evaluate` 接口）：输入输出是主机数组，求值在设备上用 GPU 模型的源项与扩散系数
-    （`compute_source_terms_gpu`、`turbulence_diffusivities_gpu`，与 GPU 残差同一份）。"""
+def gpu_turbulence_pointwise(cp, turb, Q, grad_vel, d_wall, mu):
+    """GPU 模型上的逐点 `(S, Gamma)` 求值器（`core/turbulence/jacobian/pointwise.py::
+    TurbulencePointwise`，注入 `compute_source_terms_gpu` 与 `turbulence_diffusivities_gpu`，
+    与 GPU 残差同一份）；单机与多 GPU（compact 视图）共用。"""
+    from functools import partial
 
-    __slots__ = ("cp", "turb", "Q", "grad_vel", "d_wall", "mu", "S_mag")
+    from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import turbulence_diffusivities_gpu
+    from autoflowcfd.core.turbulence.jacobian.pointwise import TurbulencePointwise
 
-    _CACHED = ("nu_t", "_last_beta_blend", "_omega_realizability_min")
-
-    def __init__(self, cp, turb, Q, grad_vel, d_wall, mu):
-        self.cp, self.turb, self.Q, self.grad_vel, self.d_wall, self.mu = cp, turb, Q, grad_vel, d_wall, mu
-        self.S_mag = turb.compute_strain_rate_magnitude_gpu(grad_vel)
-
-    def __call__(self, k, omega, grad_k, grad_omega):
-        from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import turbulence_diffusivities_gpu
-        from autoflowcfd.core.turbulence.sst.bounds import clip_gradient_magnitude
-
-        cp, turb = self.cp, self.turb
-        saved = (turb.k_field, turb.omega_field)
-        saved_cache = {a: getattr(turb, a) for a in self._CACHED if hasattr(turb, a)}
-        turb.k_field, turb.omega_field = cp.asarray(k), cp.asarray(omega)
-        try:
-            gk = clip_gradient_magnitude(cp.asarray(grad_k), cp)
-            gw = clip_gradient_magnitude(cp.asarray(grad_omega), cp)
-            Sk, Sw = turb.compute_source_terms_gpu(self.Q, self.grad_vel, self.d_wall, self.mu, gk, gw)
-            rho = self.Q[:, :, 0]
-            nu = self.mu / cp.maximum(rho, 1e-10)
-            Gk, Gw = turbulence_diffusivities_gpu(cp, turb, turb.k_field, turb.omega_field, gk, gw, rho,
-                                                  rho * turb.nu_t, nu, self.mu, self.S_mag, self.d_wall)
-        finally:
-            turb.k_field, turb.omega_field = saved
-            for a, v in saved_cache.items():
-                setattr(turb, a, v)
-        return _host(cp.stack([Sk, Sw], axis=-1)), _host(cp.stack([Gk, Gw], axis=-1))
+    return TurbulencePointwise(cp, turb, Q, grad_vel, d_wall, mu, turb.compute_strain_rate_magnitude_gpu(grad_vel),
+                               turb.compute_source_terms_gpu, partial(turbulence_diffusivities_gpu, cp))
 
 
 def gpu_coupling_graph(cp, flat_face_gpu, n_cells: int):

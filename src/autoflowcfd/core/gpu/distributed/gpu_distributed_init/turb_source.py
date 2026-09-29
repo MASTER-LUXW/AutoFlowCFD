@@ -50,11 +50,10 @@ class _GPUDistributedTurbSourceMixin:
         advance_production_ramp(self, self.turb_model_gpu)
         ctx = self._prepare_turbulence_view_distributed()
         self._sync_turbulence_view(ctx)
-        dk_dt, domega_dt, transport_k, transport_omega = self._evaluate_turbulence_rates_distributed(
+        dk_dt, dw_dt, transport_k, transport_w = self._evaluate_turbulence_rates_distributed(
             ctx, apply_des=True)
-        # 场更新（点隐式阻尼 + 输运，见 update_fields_gpu 文档）
-        ctx.view.update_fields_gpu(dt, dk_dt, domega_dt,
-                                   transport_k=transport_k, transport_omega=transport_omega)
+        # 场更新（k 与 w = ln omega 的点隐式阻尼 + 输运，见 sst/update.py::advance_k_log_omega）
+        ctx.view.update_fields_gpu(dt, dk_dt, dw_dt, transport_k=transport_k, transport_log_omega=transport_w)
         self._finalize_turbulence_update_distributed(ctx, omega_wall_relaxation=True)
         self._write_back_turbulence_distributed(ctx, fields=True)
         return ctx.rho * ctx.view.nu_t
@@ -150,8 +149,9 @@ class _GPUDistributedTurbSourceMixin:
         ctx.view.omega_field = k_omega_compact[..., 1].copy()
 
     def _evaluate_turbulence_rates_distributed(self, ctx, *, apply_des: bool):
-        """在 compact 视图当前的 k/omega 上求 `(dk/dt, domega/dt, transport_k,
-        transport_omega)`（compact 排列；源项部分已除以 rho）。
+        """在 compact 视图当前的 k/omega 上求 k 与 `w = ln(omega)` 的 `(dk/dt, dw/dt,
+        transport_k, transport_w)`（compact 排列；源项部分已除以 rho，与单机
+        `gpu_solver_io.py::_evaluate_turbulence_rates_gpu` 同一套变换）。
 
         副作用同单机：刷新视图上的 nu_t / 混合 beta；`apply_des=True` 时按刚算出
         的 nu_t 刷新 DES 长度尺度（供下一步用）——隐式路径的试探求值必须传 False。
@@ -160,11 +160,16 @@ class _GPUDistributedTurbSourceMixin:
         view = ctx.view
         from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_gradient_gpu
 
-        grad_k = compute_physical_scalar_gradient_gpu(view.k_field, self.mesh_data, self.ops_data)
-        grad_omega = compute_physical_scalar_gradient_gpu(view.omega_field, self.mesh_data, self.ops_data)
         from autoflowcfd.core.turbulence.sst.bounds import clip_gradient_magnitude
-        grad_k = clip_gradient_magnitude(grad_k, cp)
-        grad_omega = clip_gradient_magnitude(grad_omega, cp)
+        from autoflowcfd.core.turbulence.sst.log_omega import log_omega
+
+        # 梯度对被输运的 k 与 w = ln(omega) 求；模型项用 grad(omega) = omega grad(w)
+        omega = view.omega_field
+        grad_k = clip_gradient_magnitude(
+            compute_physical_scalar_gradient_gpu(view.k_field, self.mesh_data, self.ops_data), cp)
+        grad_w = clip_gradient_magnitude(
+            compute_physical_scalar_gradient_gpu(log_omega(omega, cp), self.mesh_data, self.ops_data), cp)
+        grad_omega = omega[:, :, None] * grad_w
 
         Sk, S_omega = view.compute_source_terms_gpu(
             ctx.Q, ctx.grad_vel, ctx.d_wall, self.mu_molecular, grad_k, grad_omega)
@@ -184,14 +189,14 @@ class _GPUDistributedTurbSourceMixin:
                     h_max=getattr(self, 'iddes_h_max_compact', None))
 
         dk_dt = Sk / cp.maximum(ctx.rho, 1e-10)
-        domega_dt = S_omega / cp.maximum(ctx.rho, 1e-10)
+        dw_dt = S_omega / (cp.maximum(ctx.rho, 1e-10) * omega)
 
         from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import (
             compute_turbulence_transport_residual_gpu,
         )
-        transport_k, transport_omega = compute_turbulence_transport_residual_gpu(
-            ctx.transport, grad_vel=ctx.grad_vel)
-        return dk_dt, domega_dt, transport_k, transport_omega
+        transport_k, transport_w = compute_turbulence_transport_residual_gpu(
+            ctx.transport, grad_vel=ctx.grad_vel, grad_k=grad_k, grad_log_omega=grad_w)
+        return dk_dt, dw_dt, transport_k, transport_w
 
     def _finalize_turbulence_update_distributed(self, ctx, *, omega_wall_relaxation: bool) -> None:
         """k/omega 更新之后的后处理（compact 视图上）：模态滤波 + 正性限幅，
@@ -201,30 +206,12 @@ class _GPUDistributedTurbSourceMixin:
         view = ctx.view
         n_sps = self.mesh.n_sps_per_cell
         if n_sps > 1:
-            # k/omega 与平均流同一套模态滤波（2026-09-12）；compact 排列"棱柱在前"
-            from autoflowcfd.core.fr_solver.filter import resolve_turb_filter_gate
-            from autoflowcfd.core.gpu.gpu_modal_filter import (
-                filter_scalar_field_gated_gpu, filter_scalar_field_gpu,
-            )
-            n_prism_compact = self.flat_face_gpu.n_prism
-            if resolve_turb_filter_gate() == "sensor":
-                from autoflowcfd.core.gpu.gpu_troubled_cell import compute_turb_troubled_mask_gpu
-
-                order = int(getattr(self, "current_order", getattr(self, "order", 0)))
-                troubled = compute_turb_troubled_mask_gpu(
-                    view.k_field, view.omega_field, n_prism_compact, order)
-                self._turb_filter_troubled_frac = float(cp.mean(troubled))
-                view.k_field = filter_scalar_field_gated_gpu(
-                    view.k_field, n_prism_compact, self.ops.filter_prism, self.ops.filter_tet, troubled)
-                view.omega_field = filter_scalar_field_gated_gpu(
-                    view.omega_field, n_prism_compact, self.ops.filter_prism, self.ops.filter_tet,
-                    troubled)
-            else:
-                view.k_field = filter_scalar_field_gpu(
-                    view.k_field, n_prism_compact, self.ops.filter_prism, self.ops.filter_tet)
-                view.omega_field = filter_scalar_field_gpu(
-                    view.omega_field, n_prism_compact, self.ops.filter_prism, self.ops.filter_tet)
-            view.apply_positivity_limiter_gpu()
+            # k 与 w = ln(omega) 的模态滤波（与单机同一份，`GPUTurbulenceSST.filter_fields_gpu`）；
+            # compact 排列"棱柱在前"
+            order = int(getattr(self, "current_order", getattr(self, "order", 0)))
+            frac = view.filter_fields_gpu(self.flat_face_gpu.n_prism, self.ops, order)
+            if frac is not None:
+                self._turb_filter_troubled_frac = frac
 
         # omega 壁面 Wilcox 解析值的扩散侧闭合（2026-09-05），显式路径专用
         if omega_wall_relaxation and getattr(self, "turb_model_name", "").upper() in ("SST", "DDES", "IDDES"):

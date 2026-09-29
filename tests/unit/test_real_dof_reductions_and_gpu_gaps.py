@@ -342,16 +342,54 @@ class TestGpuTurbFilterGate:
         np.testing.assert_array_equal(np.asarray(out), k)
 
     def test_both_gpu_paths_are_wired(self):
-        """两条 GPU 调用路径都必须真的读了这个开关。"""
+        """两条 GPU 调用路径都走同一个滤波入口 `GPUTurbulenceSST.filter_fields_gpu`
+        （2026-09-27 起单机与多 GPU 共用，开关在它里面读）。"""
+        import inspect
+
         from autoflowcfd.core.gpu.distributed import gpu_distributed_init
         from autoflowcfd.core.gpu.solver import gpu_solver_io
+        from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
         # gpu_distributed_init 2026-09-24 拆成子包；inspect.getsource(包)
         # 只返回 __init__.py。
         for mod in (gpu_solver_io, gpu_distributed_init):
-            s = module_source(mod)
-            assert "resolve_turb_filter_gate()" in s, mod.__name__
-            assert "filter_scalar_field_gated_gpu" in s, mod.__name__
-            assert "compute_turb_troubled_mask_gpu" in s, mod.__name__
+            assert ".filter_fields_gpu(" in module_source(mod), mod.__name__
+        s = inspect.getsource(GPUTurbulenceSST.filter_fields_gpu)
+        for name in ("resolve_turb_filter_gate()", "filter_scalar_field_gated_gpu",
+                     "compute_turb_troubled_mask_gpu"):
+            assert name in s, name
+
+    def test_filter_fields_gpu_matches_cpu_in_log_space(self, fields, monkeypatch):
+        """sensor 门控下 `filter_fields_gpu` 与 CPU `finalize_turbulence_update` 的滤波段
+        一致：传感器看 (k, ln omega)，滤波作用在 k 与 ln omega 上（k-ln(omega)）。"""
+        from types import SimpleNamespace
+
+        import autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst as gts
+        from autoflowcfd.core.fr_solver.filter import (
+            compute_turb_troubled_mask, filter_scalar_field_gated,
+        )
+        patch_module_get_cupy(monkeypatch, gts, _NumpyAsCupy())
+        monkeypatch.setenv("AFCFD_FILTER_TURB_GATE", "sensor")
+        order, n_prism, n_cells, k, om = fields
+        # 滤波档在导入时定（默认 off 即单位阵、整段跳过）：直接给一对非单位矩阵，
+        # 对照只要求两侧用同一对矩阵
+        n_sps = k.shape[1]
+        rng = np.random.default_rng(3)
+        ops = SimpleNamespace(filter_prism=np.eye(n_sps) - 0.05 * rng.random((n_sps, n_sps)),
+                              filter_tet=np.eye(n_sps) - 0.05 * rng.random((n_sps, n_sps)))
+        model = SimpleNamespace(k_field=k.copy(), omega_field=om.copy(), omega_max=1e8,
+                                apply_positivity_limiter_gpu=lambda: None)
+        frac = gts.GPUTurbulenceSST.filter_fields_gpu(model, n_prism, ops, order)
+
+        w = np.log(om)
+        troubled = compute_turb_troubled_mask(k, w, order, n_prism=n_prism)
+        assert 0 < troubled.sum() < n_cells
+        assert frac == pytest.approx(troubled.mean())
+        np.testing.assert_allclose(
+            model.k_field, filter_scalar_field_gated(k, ops.filter_prism, ops.filter_tet, troubled,
+                                                     n_prism=n_prism), rtol=1e-13, atol=1e-300)
+        np.testing.assert_allclose(
+            model.omega_field, np.exp(filter_scalar_field_gated(w, ops.filter_prism, ops.filter_tet,
+                                                                troubled, n_prism=n_prism)), rtol=1e-12)
 
     def test_default_gate_keeps_ungated_path(self):
         """默认 "all" 必须仍走无门控分支（既有行为逐位不变）。"""
