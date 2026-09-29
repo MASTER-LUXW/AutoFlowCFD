@@ -55,12 +55,21 @@ def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
     r = b.copy()
     beta = bnorm
     total = 0
-    # Krylov 基预先整块分配（重启之间复用）：修正 Gram-Schmidt 的 `w -= h*V[i]`
-    # 原地做，不再每次新分配一个整长向量（见 vector_ops.py）
-    V = xp.empty((restart + 1,) + b.shape, dtype=b.dtype)
+    # Krylov 基**按需**逐个分配、重启之间复用：修正 Gram-Schmidt 的 `w -= h*V[i]`
+    # 原地做，不再每次新分配一个整长向量（见 vector_ops.py）。不按重启长度整块预分配
+    # （2026-09-29）：Windows 上 `empty` 立即计入提交量，plate_demo P3 一个向量 0.16 GB、
+    # 重启 30 就是 4.8 GB，而块 Jacobi 下实际只迭代 13 次——未用到的一半多把第 2 个
+    # Newton 步挤到 OOM。
+    V = []
+
+    def basis(j):
+        if j == len(V):
+            V.append(xp.empty_like(b))
+        return V[j]
+
     while True:
         m = restart
-        V[0] = r / beta
+        xp.divide(r, beta, out=basis(0))
         H = np.zeros((m + 1, m))
         cs = np.zeros(m)
         sn = np.zeros(m)
@@ -101,7 +110,7 @@ def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
             if total >= max_iter or h_next == 0.0:     # 用满 / 幸运击穿
                 converged = h_next == 0.0
                 break
-            V[j + 1] = w / h_next
+            xp.divide(w, h_next, out=basis(j + 1))
         # 回代 y，更新 x = x + M^{-1} (V y)
         y = np.linalg.solve(np.triu(H[:k_used, :k_used]), g[:k_used]) if k_used else np.zeros(0)
         upd = y[0] * V[0]
