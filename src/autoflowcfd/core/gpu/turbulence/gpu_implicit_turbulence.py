@@ -1,12 +1,9 @@
 """AutoFlowCFD V2.0 - 单机 GPU 的隐式 k-omega 更新适配器。
 
-隐式 k-omega 的算法（分离式 PTC-Newton、残差内的 omega 壁面强约束、零填充
-槽位与试探场保护）只有一份：`core/fr_solver/turbulence/implicit.py`。本文件
+隐式 k-omega 的算法（分离式 PTC-Newton、零填充槽位与试探场保护）只有一份：`core/fr_solver/turbulence/implicit.py`。本文件
 只回答"GPU 上用哪一套求值件"——`GPUFRSolver` 上与 CPU `source.py` 三个
 求值件一一对应的 `_prepare_turbulence_inputs_gpu` /
-`_evaluate_turbulence_rates_gpu` / `_finalize_turbulence_update_gpu`，壁面
-目标值读 `gpu_scalar_transport.omega_wall_cell_targets_gpu`（与显式路径的
-壁面松弛同一个来源）。接口见 `implicit.py` 模块文档"后端"一节。
+`_evaluate_turbulence_rates_gpu` / `_finalize_turbulence_update_gpu`。接口见 `implicit.py` 模块文档"后端"一节。
 """
 
 import numpy as np
@@ -40,11 +37,6 @@ class GpuTurbulenceBackend:
         dk, dw, tk, tw = self.solver._evaluate_turbulence_rates_gpu(*self._inputs, apply_des=apply_des)
         return (dk if tk is None else dk + tk), (dw if tw is None else dw + tw)
 
-    def wall_targets(self):
-        from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import omega_wall_cell_targets_gpu
-
-        return omega_wall_cell_targets_gpu(self.xp, self.solver)
-
     def positivity(self) -> None:
         self.model.apply_positivity_limiter_gpu()
 
@@ -77,14 +69,12 @@ class GpuTurbulenceBackend:
             cp, s.flat_face_gpu, s._wall_mask_k_gpu, d_wall, s.Q_gpu, s.mu_molecular,
             getattr(m, "beta1", 0.075), omega_max=getattr(m, "omega_max", 1e6),
             turb_k_field=getattr(m, "k_field", None))
-        hit, target = self.wall_targets()
         ctx = TurbulenceLinearization(
             mesh=s.mesh, ops=s.ops, flat=flat, turb=m, Q=Q_h, grad_vel=_host(grad_vel), d_wall=_host(d_wall),
             mu=float(s.mu_molecular),
             conv_geom=precompute_scalar_convection_geometry(Q_h[..., 0], Q_h[..., 1:4], s.mesh, s.ops, flat),
             wall_zero_face=_host(s._wall_mask_k_gpu), omega_wall_face=_host(omega_wall),
             has_omega_wall=_host(has_wall), open_face=_host(s._open_mask_gpu),
-            wall_cells=_host(hit), wall_targets=_host(target),
             pointwise=gpu_turbulence_pointwise(cp, m, s.Q_gpu, grad_vel, d_wall, float(s.mu_molecular)))
         return TurbulenceBlockAssembler(ctx, self.shape[1])
 

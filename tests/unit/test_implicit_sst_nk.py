@@ -8,8 +8,9 @@
    于初场。判据：均匀流、全场 `k = 0.5*k_inf` 时，来流边界单元必须收到
    正的 `dk/dt`（被来流值补给），且 `k = k_inf` 时来流单元的输运残差为零。
 2. **隐式湍流残差**（`fr_solver/turbulence/implicit.py::TurbulenceResidual`）：
-   壁面单元 omega 行是强约束 `beta1*omega_t*(omega - omega_t)`；求值不得
-   把试探场泄漏进模型状态。
+   真实行上就是输运方程本身（壁面 omega 只由扩散残差的面 Dirichlet 施加，
+   2026-09-30 删除了壁面单元全部解点的强约束行，见该模块"omega 壁面条件"）；
+   求值不得把试探场泄漏进模型状态。
 3. **耦合收敛**：棱柱通道冲击启动，NK + SER + 块 Jacobi + 隐式 k-omega，
    平均流与湍流残差都必须降多个量级（修复前湍流残差停在 1.3e4）。
 """
@@ -26,16 +27,16 @@ RHO, U, P, GAMMA = 1.225, 30.0, 101325.0, 1.4
 LX, H, LZ = 0.4, 0.1, 0.08
 
 
-def _channel_solver(scheme):
+def _channel_solver(scheme, order=1):
     from autoflowcfd.core.fr_solver import FRSolver
 
-    mesh = build_channel_mesh_prism(1, nx=3, ny=4, nz=2, Lx=LX, H=H, Lz=LZ)
+    mesh = build_channel_mesh_prism(order, nx=3, ny=4, nz=2, Lx=LX, H=H, Lz=LZ)
     bc = {n: {"type": "SYMMETRY"} for n in ("z_min", "z_max")}
     bc["wall_bottom"] = {"type": "WALL", "is_no_slip": True, "wall_velocity": [0.0, 0.0, 0.0]}
     bc["wall_top"] = {"type": "WALL", "is_no_slip": True, "wall_velocity": [0.0, 0.0, 0.0]}
     for n in ("x_min", "x_max"):
         bc[n] = {"type": "FARFIELD", "Q_free": [RHO, U, 0.0, 0.0, P]}
-    solver = FRSolver(mesh=mesh, order=1, turb_model_name="SST", n_vars=7,
+    solver = FRSolver(mesh=mesh, order=order, turb_model_name="SST", n_vars=7,
                       time_scheme=scheme, rho_inf=RHO, vel_inf=U, p_inf=P,
                       mu_molecular=1.8e-5, bc_overrides=bc)
     solver.order_continuation_enabled = False
@@ -106,11 +107,14 @@ class TestInflowCondition:
 
 
 class TestTurbulenceResidual:
-    def test_wall_rows_are_strong_constraint_and_state_is_restored(self, nk_solver):
+    def test_residual_is_the_transport_equation_and_state_is_restored(self, nk_solver):
+        """真实行上 `R_t = -(dk/dt, dw/dt)`，含壁面单元（没有被改写的行）；零填充槽位为零；
+        试探求值不泄漏进模型状态。"""
         from autoflowcfd.core.fr_solver.turbulence.implicit import (
             CpuTurbulenceBackend,
             TurbulenceResidual,
         )
+        from autoflowcfd.core.turbulence.transport import omega_wall_cell_targets
 
         t = nk_solver.turb_model
         backend = CpuTurbulenceBackend(nk_solver)
@@ -123,15 +127,22 @@ class TestTurbulenceResidual:
         kw[:, 0] *= 1.0 + 0.1 * rng.standard_normal(kw.shape[0])
         kw[:, 1] += 0.1 * rng.standard_normal(kw.shape[0])
         r = res(kw)
-
-        assert res._wall_rows.size > 0
-        # 约束行 beta1 omega_t (w - ln omega_t)
-        omega_t = np.exp(res._wall_target)
-        want = t.beta1 * omega_t * (kw[res._wall_rows, 1] - res._wall_target)
-        np.testing.assert_allclose(r[res._wall_rows, 1], want, rtol=1e-14)
-        assert np.all(r[~res._real_rows] == 0.0), "零填充槽位不参与 Newton"
         for a, v in before.items():
             np.testing.assert_array_equal(getattr(t, a), v, err_msg=f"试探求值泄漏进了 {a}")
+
+        # 参考：同一试探场上直接求输运速率
+        t.k_field = kw[:, 0].reshape(t.k_field.shape).copy()
+        t.omega_field = np.exp(kw[:, 1]).reshape(t.omega_field.shape).copy()
+        try:
+            rate_k, rate_w = backend.rates(apply_des=False)
+        finally:
+            t.k_field, t.omega_field = before["k_field"].copy(), before["omega_field"].copy()
+        real = res._real_rows
+        np.testing.assert_allclose(r[real, 0], -rate_k.ravel()[real], rtol=1e-13, atol=0)
+        np.testing.assert_allclose(r[real, 1], -rate_w.ravel()[real], rtol=1e-13, atol=0)
+        assert np.all(r[~real] == 0.0), "零填充槽位不参与 Newton"
+        wall_cells, _ = omega_wall_cell_targets(nk_solver)
+        assert wall_cells.size > 0, "算例里应当有壁面单元（否则上面的判据对壁面行是空的）"
 
 
 def test_nk_sst_channel_converges_coupled():
@@ -151,8 +162,9 @@ def test_nk_sst_channel_converges_coupled():
     75% 的单元被松弛），湍流发展暂态平滑单调地走完、第 ~160 步收尾，其后平均流
     与湍流每步降一个量级（第 180 步 4.3e-6 / 1.9e-5）。暂态期平均流残差停在
     50~70、SER 律把 CFL 保持在 130~200，步数由这段物理暂态决定。
-    omega 最小值 0.229 omega_inf 是壁面单元的目标值，0.1 omega_inf 的安全网在
-    收敛解上处处不激活——下面最后一条断言钉住这一点。
+    0.1 omega_inf 的安全网在收敛解上处处不激活——下面最后一条断言钉住这一点。
+    （2026-09-30 删除壁面单元强约束后收敛更快：55 步，omega 最小 0.88 omega_inf；
+    此前 0.229 omega_inf 是强约束钉住的壁面单元目标值。）
     """
     from autoflowcfd.core.time_integration import TimeIntegrationScheme
 
@@ -169,3 +181,26 @@ def test_nk_sst_channel_converges_coupled():
     t = s.turb_model
     assert t.k_field.min() > 10.0 * 1e-3 * t.k_inf, "k 贴在正性下限上"
     assert t.omega_field.min() > 1.5 * 0.1 * t.omega_inf, "omega 贴在 realizability 下限上"
+
+
+def test_nk_sst_channel_converges_coupled_p3():
+    """同一算例 P3：平均流与湍流残差都降多个量级、k 全场为正。
+
+    2026-09-30 之前壁面 owner 单元全部解点的 w 行被强约束到壁面目标值：P3 贴壁
+    单元的第一排解点 omega 被钉在 ~3900、生成/耗散比 1.9，k 在第一排长成尖峰并与
+    平均流正反馈，在任何 CFL（固定 20 亦然）下都发散（200 步残差降不到 1 个量级、
+    k 最小 -139 k_inf）。删除强约束后实测 92 步收敛、残差降 1.7e10。
+    """
+    from autoflowcfd.core.time_integration import TimeIntegrationScheme
+
+    s = _channel_solver(TimeIntegrationScheme.NEWTON_KRYLOV, order=3)
+    mean, turb = [], []
+    for _ in range(140):
+        s.step(2.0e-7)
+        mean.append(s._newton_last_info["res_norm"])
+        turb.append(s._newton_turb_state["last_info"]["res_norm"])
+        if mean[-1] < 1e-8 * max(mean) and turb[-1] < 1e-8 * max(turb):
+            break
+    assert mean[-1] < 1e-6 * max(mean), (max(mean), mean[-1])
+    assert turb[-1] < 1e-6 * max(turb), (max(turb), turb[-1])
+    assert s.turb_model.k_field[:, :40].min() > 0.0, "P3 下 k 出现负值"

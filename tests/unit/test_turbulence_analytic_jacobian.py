@@ -1,6 +1,6 @@
 """k-ln(omega) 解析单元块 Jacobian（`core/turbulence/jacobian`）对照着色有限差分装配。
 
-参考是隐式湍流步实际求解的残差 `TurbulenceResidual`（冻结平均流、omega 壁面强约束行、
+参考是隐式湍流步实际求解的残差 `TurbulenceResidual`（冻结平均流、
 零填充行置零）。湍流残差对单元自身自由度只经本单元与面邻居（梯度是单元内局部梯度），
 距离 1 着色下差分装配的 `J_cc` 是精确的；耦合块对照稠密逐列差分 Jacobian，并检查
 面邻居之外没有非零块。k/omega 场加 20% 随机扰动，让源项、F1 混合、realizability、

@@ -58,7 +58,7 @@ from autoflowcfd.core.mpi.reductions import MPIReductions
 from autoflowcfd.core.time_integration.implicit.coloring import (
     CouplingGraph, distance2_cell_coloring, greedy_cell_coloring, stencil_pairs,
 )
-from autoflowcfd.core.turbulence.transport import omega_wall_cell_targets, prepare_convection_geometry
+from autoflowcfd.core.turbulence.transport import prepare_convection_geometry
 
 
 def global_cell_colors(face_connectivity, n_global_cells: int) -> np.ndarray:
@@ -244,13 +244,6 @@ class DistributedTurbulenceBackend:
             self.mu_t_compact = self._adapter.state.Q[..., 0] * view.nu_t
         return self._to_local(rate_k), self._to_local(rate_w)
 
-    def wall_targets(self):
-        adapter = self._adapter
-        hit, target = omega_wall_cell_targets(adapter, adapter._turbulence_flat_face_override)
-        native = self.solver.dist_flat_face.perm[hit]
-        keep = native < self.shape[0]
-        return native[keep], target[keep]
-
     def positivity(self) -> None:
         self.model.apply_positivity_limiter()
 
@@ -274,8 +267,7 @@ class DistributedTurbulenceBackend:
 
         adapter = self._adapter
         flat = adapter._turbulence_flat_face_override
-        hit, target = omega_wall_cell_targets(adapter, flat)
-        ctx = turbulence_linearization(adapter, self._view, self._inputs, self._conv_geom, flat, hit, target)
+        ctx = turbulence_linearization(adapter, self._view, self._inputs, self._conv_geom, flat)
         dist_fc = self.solver.dist_flat_face
         return TurbulenceBlockAssembler(
             ctx, self.shape[1], compact_state=_TurbulenceCompactState(self),

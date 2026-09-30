@@ -143,8 +143,9 @@ def compute_scalar_diffusion_residual(
     罚项与内部面同一个常数与长度尺度（边界面 `h = V_owner / A_face`）。
     2026-09-05 曾加过一次显式壁面罚项（系数用 `C/d1`，d1 为壁面到第一个解点的
     距离，比 `V/A` 小一半以上），显式推进 20 步内全域 omega_mean 2.8e4 -> 5.4e11；
-    隐式路径的 omega 壁面单元已是强约束，显式路径的时间步含粘性稳定性限制（与
-    平均流内罚项同一刚性量级）。
+    现在的罚项长度尺度是 `V/A`（与平均流粘性罚项同一个）。隐式路径不再对壁面单元
+    额外施加强约束（2026-09-30 删除，理由见 `fr_solver/turbulence/implicit.py`
+    "omega 壁面条件"一节）：壁面 omega 只由这里的面 Dirichlet 施加。
 
     Args:
         scalar_field: (n_cells, n_sps) 标量场

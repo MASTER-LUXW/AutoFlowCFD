@@ -3,7 +3,6 @@
 冻结平均流下的湍流残差（`fr_solver/turbulence/implicit.py::TurbulenceResidual`）
 
     R_t,v = -[S_v + conv_v + diff_v] / rho          v = k, w = ln omega
-    壁面 owner 单元的 w 行换成强约束  beta1 omega_t (w - ln omega_t)
 
 对单元自身真实自由度的导数块（布局与 `CellBlockJacobian` 相同：逐单元
 `(n_real*2, n_real*2)`，下标 `s*2 + v`）与面邻居耦合块。组成：
@@ -55,8 +54,6 @@ class TurbulenceLinearization:
     omega_wall_face: np.ndarray   # (n_faces, n_fp) omega 壁面目标值（物理量，装配时取 ln）
     has_omega_wall: np.ndarray    # (n_faces,)
     open_face: np.ndarray         # (n_faces,) 开放边界（来流条件）
-    wall_cells: np.ndarray        # omega 强约束的单元
-    wall_targets: np.ndarray      # 各单元的 omega 目标值
     pointwise: object = None      # 逐点 (S, Gamma) 求值器；None -> cpu_turbulence_pointwise
 
 
@@ -193,42 +190,32 @@ def assemble_turbulence_blocks(ctx: TurbulenceLinearization, kw_flat, want_coupl
     if want_coupling and not np.array_equal(cross_col, expected_col):
         raise RuntimeError("湍流耦合块槽位布局与界面核实际来源不一致")
 
-    # ---- 合并、取负、除 rho、壁面强约束行 ----
+    # ---- 合并、取负、除 rho ----
     inv_rho = 1.0 / np.maximum(rho, 1e-10)
-    wall_rate = np.zeros(n_cells)
-    is_wall = np.zeros(n_cells, dtype=bool)
-    wc = np.asarray(ctx.wall_cells, dtype=np.int64)
-    is_wall[wc] = True
-    wall_rate[wc] = float(turb.beta1) * np.asarray(ctx.wall_targets, dtype=np.float64)
     for kind, lo, n in ((0, 0, npr), (1, n_prism, nte)):
         if acc[kind].shape[0]:
-            _finalize_diag(acc[kind], src[kind], lo, n, np.ascontiguousarray(det), np.ascontiguousarray(inv_rho),
-                           is_wall, wall_rate)
+            _finalize_diag(acc[kind], src[kind], lo, n, np.ascontiguousarray(det), np.ascontiguousarray(inv_rho))
     blocks = (acc[0].reshape(n_prism, npr * 2, npr * 2), acc[1].reshape(n_cells - n_prism, nte * 2, nte * 2))
     if not want_coupling:
         return blocks
     return blocks + (_finalize_coupling(cross_data, slots, np.ascontiguousarray(det),
-                                        np.ascontiguousarray(inv_rho), is_wall, npr, nte),)
+                                        np.ascontiguousarray(inv_rho), npr, nte),)
 
 
 @njit(cache=True, parallel=True)
-def _finalize_diag(acc, src, lo, n, det, inv_rho, is_wall, wall_rate):
+def _finalize_diag(acc, src, lo, n, det, inv_rho):
     for k in prange(acc.shape[0]):
         c = lo + k
         for s in range(n):
             scale = -inv_rho[c, s]
             inv_det = 1.0 / det[c, s]
             for v in range(2):
-                wall_row = is_wall[c] and v == 1
                 for t in range(n):
                     for u in range(2):
-                        if wall_row:
-                            acc[k, s, v, t, u] = wall_rate[c] if (t == s and u == 1) else 0.0
-                        else:
-                            acc[k, s, v, t, u] = scale * (acc[k, s, v, t, u] * inv_det + src[k, s, v, t, u])
+                        acc[k, s, v, t, u] = scale * (acc[k, s, v, t, u] * inv_det + src[k, s, v, t, u])
 
 
-def _finalize_coupling(data, slots, det, inv_rho, is_wall, npr, nte):
+def _finalize_coupling(data, slots, det, inv_rho, npr, nte):
     rows, cols, offs, bounds = slots
     groups = []
     for g in range(4):
@@ -243,14 +230,14 @@ def _finalize_coupling(data, slots, det, inv_rho, is_wall, npr, nte):
         new_pair[1:] = (r[1:] != r[:-1]) | (c[1:] != c[:-1])
         first = np.nonzero(new_pair)[0].astype(np.int64)
         out = np.empty((first.size, nr, 2, ny, 2), dtype=np.float32)
-        _finalize_pairs(data, int(offs[lo]), nr, ny, first, hi - lo, r, det, inv_rho, is_wall, out)
+        _finalize_pairs(data, int(offs[lo]), nr, ny, first, hi - lo, r, det, inv_rho, out)
         groups.append(CouplingGroup(row_is_prism=row_p, col_is_prism=col_p, rows=r[first], cols=c[first],
                                     blocks=out.reshape(first.size, nr * 2, ny * 2)))
     return CouplingBlocks(groups=groups)
 
 
 @njit(cache=True, parallel=True)
-def _finalize_pairs(data, base, nr, ny, first, n_slots, rows, det, inv_rho, is_wall, out):
+def _finalize_pairs(data, base, nr, ny, first, n_slots, rows, det, inv_rho, out):
     blk = 4 * nr * ny
     n_u = first.shape[0]
     for u_ in prange(n_u):
@@ -269,7 +256,6 @@ def _finalize_pairs(data, base, nr, ny, first, n_slots, rows, det, inv_rho, is_w
         for s in range(nr):
             scale = -inv_rho[r, s] / det[r, s]
             for v in range(2):
-                wall_row = is_wall[r] and v == 1
                 for t in range(ny):
                     for u in range(2):
-                        out[u_, s, v, t, u] = 0.0 if wall_row else scale * X[s, v, t, u]
+                        out[u_, s, v, t, u] = scale * X[s, v, t, u]

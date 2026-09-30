@@ -43,7 +43,7 @@ def _host(a):
     return np.ascontiguousarray(a.get() if hasattr(a, "get") else a, dtype=np.float64)
 
 
-def turbulence_linearization(solver_like, turb, inputs, conv_geom, flat, wall_cells, wall_targets):
+def turbulence_linearization(solver_like, turb, inputs, conv_geom, flat):
     """由残差用的同一组冻结输入构造 `TurbulenceLinearization`（单机与分布式共用）。
 
     `solver_like` 是湍流残差实际求值的那个对象（单机为求解器，分布式为紧凑空间适配器），
@@ -61,5 +61,4 @@ def turbulence_linearization(solver_like, turb, inputs, conv_geom, flat, wall_ce
         mesh=solver_like.mesh, ops=solver_like.ops, flat=flat, turb=turb, Q=Q, grad_vel=grad_vel,
         d_wall=d_wall, mu=float(mu), conv_geom=conv_geom, wall_zero_face=wall_zero,
         omega_wall_face=omega_wall, has_omega_wall=has_wall,
-        open_face=_compute_open_boundary_face_mask(solver_like, flat),
-        wall_cells=np.asarray(wall_cells, dtype=np.int64), wall_targets=np.asarray(wall_targets))
+        open_face=_compute_open_boundary_face_mask(solver_like, flat))

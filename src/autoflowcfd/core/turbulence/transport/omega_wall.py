@@ -435,10 +435,10 @@ def enforce_omega_wall_relaxation(solver, dt, relax: float = None,
 def omega_wall_cell_targets(solver, flat_face_override=None):
     """壁面 owner 单元与各自的 Wilcox omega 目标值 `(hit_cells, avg_target)`。
 
-    显式路径的每步松弛（`enforce_omega_wall_relaxation`）与隐式路径的残差
-    内强约束（`fr_solver/turbulence/implicit.py`）共用这一份——同一个壁面
-    条件只允许一个事实来源。角部单元是多个 WALL 面的 owner，取各面目标值
-    的平均。没有壁面时返回两个空数组。
+    显式路径的每步松弛（`enforce_omega_wall_relaxation`）用它。隐式路径曾用它
+    对壁面单元全部解点施加强约束，2026-09-30 已删除（高阶下把离壁很远的解点
+    也钉在壁面值上，见 `fr_solver/turbulence/implicit.py`"omega 壁面条件"一节）。
+    角部单元是多个 WALL 面的 owner，取各面目标值的平均。没有壁面时返回两个空数组。
     """
     empty = (np.zeros(0, dtype=np.int64), np.zeros(0))
     wall_mask = _compute_wall_dirichlet_face_mask(solver)

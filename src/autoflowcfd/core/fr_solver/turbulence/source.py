@@ -249,9 +249,9 @@ def finalize_turbulence_update(solver, dt, *, omega_wall_relaxation: bool = True
     """`k/omega` 更新之后的两道后处理：模态滤波（非恒等滤波矩阵时）与
     omega 壁面松弛。显式与隐式路径共用，顺序不变。
 
-    `omega_wall_relaxation=False`：隐式路径把同一个壁面条件作为残差内的
-    强约束施加（`implicit.py`），不能再做一次步后投影——那会让 Newton 解
-    的方程与实际被执行的更新不一致，残差永远降不下去。"""
+    `omega_wall_relaxation=False`：隐式路径的壁面 omega 只由残差里的面
+    Dirichlet 施加，不能再做步后投影——那会让 Newton 解的方程与实际被执行
+    的更新不一致，残差永远降不下去（`implicit.py`"omega 壁面条件"一节）。"""
     # 真实 bug 修复（2026-09-12，cube_demo 791,492 单元真实网格 P1 直连
     # 长程测试发现）：k/omega 场同样需要与平均流一致的模态滤波，见
     # fr_solver/filter.py::filter_scalar_field 完整推导——此前"湍流走

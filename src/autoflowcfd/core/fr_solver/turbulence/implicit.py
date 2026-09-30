@@ -35,26 +35,19 @@
   后处理（`finalize_turbulence_update`），最后在新场上求一次源项，让
   平均流这一步用到的 `nu_t` 是更新后的而不是滞后一步的。
 
-## omega 壁面条件：残差内的强约束
+## omega 壁面条件：只在残差里弱施加
 
-显式路径每步做一次 `enforce_omega_wall_relaxation`：把壁面 owner 单元的
-omega 拉向 Wilcox 解析值的一半，是**步后投影**、不在残差里。这条投影与
-Newton 不相容，真实数据（棱柱通道 + SST，NK）：平均流残差 5 个量级
-下降、CFL 到 1e4 之后，湍流残差停在 1.3e4、每个 Newton 步都被拒绝
-（`theta = 0`）——残差全部集中在壁面单元，那里 omega 被投影钉在目标值，
-而 `R_omega` 在那一点不为零，Newton 往根走、投影往回拉，永远在拉锯。
+壁面上的 omega 由扩散残差的面 Dirichlet 罚项施加（`turbulence/transport/diffusion.py`
+"边界条件"一节：目标值 `transport/omega_wall.py::_compute_omega_wall_target`），与
+显式路径是同一个残差、同一个事实来源。隐式路径不再额外改写方程。
 
-该投影自己的文档说它等价于 OpenFOAM `omegaWallFunction` 对近壁单元值的
-直接设定。那在 OpenFOAM 里正是线性系统里的**强约束**（把近壁单元的
-omega 方程换成"等于目标值"），隐式路径就这样做：壁面 owner 单元全部
-真实解点的 w 行换成
-
-    R_w = beta1 * omega_t * (w - ln omega_t)
-
-即 `beta1 omega_t (omega - omega_t) / omega` 在目标值处的线性化（w 方程是 omega 方程
-除以 omega），量纲 1/s、与该处耗散项 `D_omega / (rho omega) = beta omega` 同量级，不依赖
-dtau；大 dtau 下一个 Newton 步就落到目标值上。目标值与单元集合读的是
-显式路径同一个函数（`transport/omega_wall.py::omega_wall_cell_targets`）。
+**2026-09-30 删除的整单元强约束**：此前壁面 owner 单元**全部**真实解点的 w 行被换成
+`beta1 omega_t (w - ln omega_t)`（09-25 加入，当时扩散残差里还没有面 Dirichlet，
+是为了替代与 Newton 不相容的显式步后投影）。高阶下它把离壁很远的解点也钉在壁面
+值上：P3 贴壁单元在法向覆盖 4 排解点（直到约 0.23 倍单元外的位置），第一排解点
+的 omega 被钉在 ~3900、生成/耗散比 1.9，k 在第一排长成尖峰并与平均流形成正反馈——
+槽道 SST P3 在任何 CFL（固定 20 亦然）下都发散，冻结任一子系统则各自收敛。去掉
+强约束后同一算例 P1/P2/P3 分别 55/59/70 步收敛（残差降 2.5e10），k 全场为正。
 
 ## 后端
 
@@ -68,7 +61,7 @@ dtau；大 dtau 下一个 Newton 步就落到目标值上。目标值与单元�
 
 适配器接口：`model / xp / red / shape / cell_is_prism / order / solver`（跨步
 状态挂在 `solver._newton_turb_state` 上）、`prepare()`、`rates(apply_des)`、
-`wall_targets()`（单元号在适配器自己的排列里）、`positivity()`、
+`positivity()`、
 `finalize(dtau)`、`cell_colors()`（块 Jacobi 着色，见
 `implicit/mean_flow_step.py` 的同名参数）。
 """
@@ -84,7 +77,7 @@ from autoflowcfd.core.time_integration.implicit.physicality import ScaledFieldRo
 from autoflowcfd.core.turbulence.sst.bounds import turbulence_scales
 from autoflowcfd.core.turbulence.sst.log_omega import log_omega, omega_from_log
 from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
-from autoflowcfd.core.turbulence.transport import omega_wall_cell_targets, prepare_convection_geometry
+from autoflowcfd.core.turbulence.transport import prepare_convection_geometry
 from autoflowcfd.fr.native_padding import real_row_mask, real_sps_per_cell
 
 from .init import _update_production_ramp
@@ -155,10 +148,6 @@ class CpuTurbulenceBackend:
             self.solver, *self._inputs, apply_des=apply_des, conv_geom=self._conv_geom)
         return (dk if tk is None else dk + tk), (dw if tw is None else dw + tw)
 
-    def wall_targets(self):
-        return omega_wall_cell_targets(
-            self.solver, getattr(self.solver, "_turbulence_flat_face_override", None))
-
     def positivity(self) -> None:
         self.model.apply_positivity_limiter()
 
@@ -181,8 +170,7 @@ class CpuTurbulenceBackend:
 
         s = self.solver
         flat = getattr(s, "_turbulence_flat_face_override", None) or get_flat_face_geometry(s.mesh, s.ops)
-        hit, target = self.wall_targets()
-        ctx = turbulence_linearization(s, self.model, self._inputs, self._conv_geom, flat, hit, target)
+        ctx = turbulence_linearization(s, self.model, self._inputs, self._conv_geom, flat)
         return TurbulenceBlockAssembler(ctx, self.shape[1])
 
 
@@ -193,24 +181,13 @@ class TurbulenceResidual:
     适配器必须已经 `prepare()`（平均流输入在整个 Newton 步内冻结）。
     """
 
-    __slots__ = ("_be", "_real_rows", "_wall_rows", "_wall_target", "_wall_rate")
+    __slots__ = ("_be", "_real_rows")
 
     def __init__(self, backend):
         self._be = backend
         xp = backend.xp
         n_cells, n_sps = backend.shape
         self._real_rows = xp.asarray(real_row_mask(backend.cell_is_prism, n_sps, backend.order))
-
-        # omega 壁面强约束（见模块文档）：壁面 owner 单元的全部真实解点
-        hit_cells, target = backend.wall_targets()
-        hit_cells = xp.asarray(hit_cells)
-        rows = (hit_cells[:, None] * n_sps + xp.arange(n_sps)[None, :]).ravel()
-        keep = self._real_rows[rows]
-        self._wall_rows = rows[keep]
-        target_rows = xp.repeat(xp.asarray(target), n_sps)[keep]
-        # 未知量是 w = ln(omega)：约束行 beta1 omega_t (w - ln omega_t)，量纲与其余 w 行相同（1/s）
-        self._wall_target = log_omega(target_rows, xp)
-        self._wall_rate = float(backend.model.beta1) * target_rows
 
     def __call__(self, kw_flat):
         be = self._be
@@ -227,7 +204,6 @@ class TurbulenceResidual:
                 setattr(m, a, v)
         r = -xp.stack([rate_k.ravel(), rate_w.ravel()], axis=1)
         r[~self._real_rows] = 0.0
-        r[self._wall_rows, 1] = self._wall_rate * (kw_flat[self._wall_rows, 1] - self._wall_target)
         return r
 
 

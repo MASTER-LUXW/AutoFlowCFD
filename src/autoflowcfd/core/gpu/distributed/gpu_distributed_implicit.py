@@ -63,15 +63,6 @@ class MultiGpuTurbulenceBackend:
             self.mu_t_compact = ctx.rho * ctx.view.nu_t
         return self._to_local(rate_k), self._to_local(rate_w)
 
-    def wall_targets(self):
-        from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import omega_wall_cell_targets_gpu
-
-        xp = self.xp
-        hit, target = omega_wall_cell_targets_gpu(xp, self._ctx.transport)
-        native = xp.asarray(self.solver.dist_flat_face.perm)[hit]
-        keep = native < self.shape[0]
-        return native[keep], target[keep]
-
     def positivity(self) -> None:
         self.model.apply_positivity_limiter_gpu()
 
@@ -94,9 +85,7 @@ class MultiGpuTurbulenceBackend:
         """本步的解析单元块装配器：在与残差同一个紧凑视图上装配（线性算子部分在主机，
         逐点量用 GPU 模型的求值件），按 `inv_perm` 取回本 rank 的行。"""
         from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import _host, gpu_turbulence_pointwise
-        from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import (
-            compute_omega_wall_target_gpu, omega_wall_cell_targets_gpu,
-        )
+        from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_omega_wall_target_gpu
         from autoflowcfd.core.mpi.distributed_compute import DistributedMeshAdapter
         from autoflowcfd.core.turbulence.jacobian import TurbulenceBlockAssembler, TurbulenceLinearization
         from autoflowcfd.core.turbulence.transport import precompute_scalar_convection_geometry
@@ -111,14 +100,12 @@ class MultiGpuTurbulenceBackend:
             cp, s.flat_face_gpu, tr._wall_mask_k_gpu, ctx.d_wall, ctx.Q, s.mu_molecular,
             getattr(view, "beta1", 0.075), omega_max=getattr(view, "omega_max", 1e6),
             turb_k_field=getattr(view, "k_field", None))
-        hit, target = omega_wall_cell_targets_gpu(cp, tr)
         lin = TurbulenceLinearization(
             mesh=mesh, ops=s.ops, flat=flat, turb=view, Q=Q_h, grad_vel=_host(ctx.grad_vel),
             d_wall=_host(ctx.d_wall), mu=float(s.mu_molecular),
             conv_geom=precompute_scalar_convection_geometry(Q_h[..., 0], Q_h[..., 1:4], mesh, s.ops, flat),
             wall_zero_face=_host(tr._wall_mask_k_gpu), omega_wall_face=_host(omega_wall),
             has_omega_wall=_host(has_wall), open_face=_host(tr._open_mask_gpu),
-            wall_cells=_host(hit), wall_targets=_host(target),
             pointwise=gpu_turbulence_pointwise(cp, view, ctx.Q, ctx.grad_vel, ctx.d_wall, float(s.mu_molecular)))
         return TurbulenceBlockAssembler(lin, self.shape[1], compact_state=_MultiGpuTurbulenceCompactState(s),
                                         row_compact=np.asarray(dist_fc.inv_perm)[:self.shape[0]])
