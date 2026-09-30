@@ -55,6 +55,9 @@ x=0 取 INLET（均匀来流），x=L 取 OUTLET（固定静压）；z 两面取
 
 from typing import Dict, Tuple
 
+import functools
+import math
+
 import numpy as np
 
 #: 算例参数（见模块文档"算例参数"一节）
@@ -136,6 +139,7 @@ def blasius_thicknesses(x: float, nu: float = None) -> Dict[str, float]:
     }
 
 
+@functools.lru_cache(maxsize=16)
 def _blasius_shoot(eta_max: float, n: int = 20000):
     """打靶积分 Blasius 方程，返回 `(grid, eta_grid)`。
 
@@ -190,7 +194,12 @@ def blasius_f_and_fp(eta: np.ndarray):
     """
     eta = np.asarray(eta, dtype=float)
     eta_max = max(float(eta.max()) if eta.size else 0.0, 10.0)
-    grid, gx = _blasius_shoot(eta_max)
+    # 打靶结果按积分上限缓存（上限取整）：Blasius 解与位置无关，而入口 / 上边界的解析剖面
+    # 作为幽灵态回调在**每次残差求值**里都会调用这里——不缓存时每次调用做一遍纯 Python
+    # 打靶（二分 80 次 x 2 万步 RK4），隐式 NK 的每个 GMRES 迭代都要求值一次残差，
+    # 1152 单元的 P1 第一步跑 10 分钟以上。eta <= 10 与此前逐位相同；eta > 10 时 f'
+    # 早已饱和到 1，上限取整带来的差别在 1e-8 以下。
+    grid, gx = _blasius_shoot(float(math.ceil(eta_max)))
     return np.interp(eta, gx, grid[:, 0]), np.interp(eta, gx, grid[:, 1])
 
 
@@ -258,6 +267,7 @@ def build_blasius_solver(
     lz_over_h: float = 0.25,
     le_offset: float = 0.0,
     exact_top_bc: bool = False,
+    implicit: bool = False,
 ):
     """构造平板边界层求解器；返回 `(solver, meta)`。
 
@@ -288,6 +298,8 @@ def build_blasius_solver(
             这个开放问题的下一个待验证方向就是"流向强梯度通过坍缩三角形
             基耦合出 w"，而判别它需要扫这个长宽比——写死的常数扫不了。
         turb_model: 湍流模型名（层流验证用 "NONE"）
+        implicit: True 时用隐式稳态 NK（默认 SER 自适应 CFL，`cfl` 不用），用于各阶稳态
+            收敛验证（需 `le_offset > 0`，否则域内含前缘奇点、不存在真正的稳态）
         exact_top_bc: 上边界（`y=H`）是否改用 **FARFIELD + 逐通量点解析
             Blasius 态**（只在 `le_offset > 0` 时生效，因为需要解析解）。
 
@@ -404,12 +416,13 @@ def build_blasius_solver(
                   "Q_inlet": [RHO_INF, U_INF, 0.0, 0.0, P_INF]},
         "x_max": {"type": "OUTLET", "p_outlet": P_INF},
     }
+    # implicit=True：隐式稳态 NK + 默认 SER 自适应 CFL（`cfl` 不用）；否则显式 SSP-RK3、固定 CFL
+    cfl_kw = {} if implicit else dict(adaptive_cfl=False, cfl_start=cfl, cfl_max=cfl, cfl_min=cfl)
     solver = FRSolver(
         mesh=mesh, order=order, turb_model_name=turb_model, n_vars=5,
-        time_scheme=TimeIntegrationScheme.SSP_RK3,
+        time_scheme=(TimeIntegrationScheme.NEWTON_KRYLOV if implicit else TimeIntegrationScheme.SSP_RK3),
         rho_inf=RHO_INF, vel_inf=U_INF, p_inf=P_INF,
-        mu_molecular=mu, bc_overrides=bc_overrides,
-        adaptive_cfl=False, cfl_start=cfl, cfl_max=cfl, cfl_min=cfl,
+        mu_molecular=mu, bc_overrides=bc_overrides, **cfl_kw,
     )
     solver.order_continuation_enabled = False
     # **必须**用逐面精确的幽灵态 provider：默认的 owner-cell 分组在
