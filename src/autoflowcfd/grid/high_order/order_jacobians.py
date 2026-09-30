@@ -127,41 +127,70 @@ def compute_native_tet_jacobians(
     return result
 
 
-def _verify_tet_fine_metric_is_cellwise_constant(
-    tet_part: Optional[Dict[str, np.ndarray]], n_sps_per_cell_fine: int
-) -> None:
-    """校验四面体细点度量在单元内逐槽位完全相同。
+def build_fine_metrics(
+    prism_part: Optional[Dict[str, np.ndarray]], tet_part: Optional[Dict[str, np.ndarray]],
+    n_fine_prism: int, n_prisms: int, n_tets: int,
+) -> Dict[str, np.ndarray]:
+    """过积分细点度量（`mesh.jacobians_fine`），按单元类型分段存储：
 
-    `get_overintegration_context` 的四面体段只取第 0 列再广播到该段自己的
-    `n_fine_tet` 宽度——这让四面体的过积分阶数不再受棱柱布局宽度约束
-    （P3 因此能取到理想的 over_order=6，去混叠误差 3.37e-3 -> 4.80e-6）。
-    这个等价性依赖"直边单元 Jacobian 不依赖参考点位置"，也就是
-    `compute_native_tet_jacobians` 的常数广播。
+        prism_det (n_prism, n_fine)       prism_inv (n_prism, n_fine, 3, 3)
+        tet_det   (n_tet,)                tet_inv   (n_tet, 3, 3)
 
-    判据用**逐位相同**而不是容差：那些值本来就是同一次赋值广播出来的，
-    任何差异都说明构造方式变了（例如引入曲边四面体后改成逐点求值），
-    那时必须显式改掉广播路径，而不是让它悄悄给出"第 0 个细点的度量"。
+    棱柱的度量随细点变化（只有顶面是底面纯平移的右棱柱才恒定），必须逐点存；
+    直边四面体的 Jacobian 逐单元为常数（`compute_native_tet_jacobian` 与参考点
+    无关），只存一份，消费方（`volume_contract.get_overintegration_context`、
+    GPU `gpu_overintegration`）广播到自己的细点数。
+
+    此前两段共用一个按棱柱细点数展开的 `(n_cells*n_fine,)` 数组：四面体段把同一
+    个常数写满 n_fine 个槽位。plate_demo（15.9 万四面体）P3、原生棱柱 oo=6
+    （n_fine=196）下这一段约 2.5 GB，实际只需要 12.7 MB；GPU 端再按
+    det/inv/adj 各上传一份，显存里约 4.7 GB。
+
+    `tet_part` 须按每单元 1 个点求值（`compute_native_tet_jacobians(mesh, ..., 1)`）。
     """
-    if tet_part is None:
-        return
-    for key in ("det_jacs", "inv_jacs"):
-        arr = tet_part.get(key)
-        if arr is None:
-            continue
-        per_cell = arr.reshape((-1, n_sps_per_cell_fine) + arr.shape[1:])
-        if per_cell.shape[0] == 0:
-            continue
-        ref_col = per_cell[:, :1]
-        if not np.array_equal(per_cell, np.broadcast_to(ref_col, per_cell.shape)):
-            bad = int((per_cell != np.broadcast_to(ref_col, per_cell.shape)).any(
-                axis=tuple(range(1, per_cell.ndim))).sum())
+    def _prism(key, tail):
+        if prism_part is None:
+            return np.zeros((0, n_fine_prism) + tail)
+        return np.ascontiguousarray(prism_part[key].reshape((n_prisms, n_fine_prism) + tail))
+
+    def _tet(key, tail):
+        if tet_part is None:
+            return np.zeros((0,) + tail)
+        arr = tet_part[key]
+        if arr.shape[0] != n_tets:
             raise ValueError(
-                f"四面体细点度量 '{key}' 在 {bad} 个单元内部不是逐槽位常数"
-                f"——`get_overintegration_context` 的四面体段取第 0 列广播的"
-                f"前提不再成立（典型原因：引入了曲边四面体、Jacobian 改成"
-                f"逐点求值）。必须改掉那条广播，不能让它静默只用第 0 个"
-                f"细点的度量。"
-            )
+                f"四面体细点度量 '{key}' 行数 {arr.shape[0]} 不等于四面体数 {n_tets}"
+                f"——须按每单元 1 个点求值")
+        return np.ascontiguousarray(arr.reshape((n_tets,) + tail))
+
+    return {
+        "prism_det": _prism("det_jacs", ()),
+        "prism_inv": _prism("inv_jacs", (3, 3)),
+        "tet_det": _tet("det_jacs", ()),
+        "tet_inv": _tet("inv_jacs", (3, 3)),
+    }
+
+
+def select_fine_metrics(fine: Dict[str, np.ndarray], cell_ids: np.ndarray,
+                        n_prism_global: int) -> Dict[str, np.ndarray]:
+    """按单元编号（全局空间）选出一份分段细点度量（分布式紧凑空间、分区网格用）。
+
+    本项目的单元存储顺序是"棱柱在前、四面体在后"，过积分按本地 `n_prism` 分两段
+    （`get_overintegration_context`），所以 `cell_ids` 也必须满足棱柱全部在前；
+    不满足直接报错，不静默错位。
+    """
+    ids = np.asarray(cell_ids, dtype=np.int64)
+    is_prism = ids < int(n_prism_global)
+    n_p = int(is_prism.sum())
+    if not (is_prism[:n_p].all() and not is_prism[n_p:].any()):
+        raise ValueError("cell_ids 不满足\"棱柱在前、四面体在后\"——过积分分段会错位")
+    tet_ids = ids[n_p:] - int(n_prism_global)
+    return {
+        "prism_det": np.ascontiguousarray(fine["prism_det"][ids[:n_p]]),
+        "prism_inv": np.ascontiguousarray(fine["prism_inv"][ids[:n_p]]),
+        "tet_det": np.ascontiguousarray(fine["tet_det"][tet_ids]),
+        "tet_inv": np.ascontiguousarray(fine["tet_inv"][tet_ids]),
+    }
 
 
 def _combine_prism_and_tet_jacobians(

@@ -62,7 +62,7 @@ class PrecompactedMeshData:
     _FACE_FLUX_POINTS_SENTINEL = "PrecompactedMeshData: no real face_flux_points, see class docstring"
 
     def __init__(
-        self, det_jacs, inv_jacs, det_jacs_fine, inv_jacs_fine,
+        self, det_jacs, inv_jacs, jacobians_fine,
         cell_volumes, sps_coords, cell_types,
         n_prism_cells, n_points_1d, n_sps_per_cell, n_sps_per_cell_fine,
         order, face_area=None, face_normal=None,
@@ -79,10 +79,9 @@ class PrecompactedMeshData:
         self.n_sps_per_cell_fine = n_sps_per_cell_fine
 
         self.jacobians = {'det_jacs': det_jacs, 'inv_jacs': inv_jacs}
-        self.jacobians_fine = (
-            {'det_jacs': det_jacs_fine, 'inv_jacs': inv_jacs_fine}
-            if det_jacs_fine is not None else None
-        )
+        # 分段细点度量（`grid/high_order/order_jacobians.build_fine_metrics` 的布局），
+        # 已按 compact 顺序选好；order==0 时为 None。
+        self.jacobians_fine = jacobians_fine
         self.cell_volumes = cell_volumes
         self.sps_coords = sps_coords
         self.cell_types = cell_types
@@ -222,11 +221,12 @@ def build_fully_distributed_rank_package(
     det_jacs = mesh.jacobians['det_jacs'].reshape(mesh.n_cells, n_sps)[compact_ids].copy()
     inv_jacs = mesh.jacobians['inv_jacs'].reshape(mesh.n_cells, n_sps, 3, 3)[compact_ids].copy()
 
-    det_jacs_fine = inv_jacs_fine = None
+    jacobians_fine = None
     n_sps_fine = getattr(mesh, 'n_sps_per_cell_fine', None)
     if getattr(mesh, 'jacobians_fine', None) is not None:
-        det_jacs_fine = mesh.jacobians_fine['det_jacs'].reshape(mesh.n_cells, n_sps_fine)[compact_ids].copy()
-        inv_jacs_fine = mesh.jacobians_fine['inv_jacs'].reshape(mesh.n_cells, n_sps_fine, 3, 3)[compact_ids].copy()
+        from autoflowcfd.grid.high_order.order_jacobians import select_fine_metrics
+
+        jacobians_fine = select_fine_metrics(mesh.jacobians_fine, compact_ids, mesh.n_prism_cells)
 
     cell_volumes = mesh.cell_volumes[compact_ids].copy() if getattr(mesh, 'cell_volumes', None) is not None else None
     sps_coords = mesh.sps_coords[compact_ids].copy() if getattr(mesh, 'sps_coords', None) is not None else None
@@ -252,7 +252,7 @@ def build_fully_distributed_rank_package(
 
     precompacted_mesh = PrecompactedMeshData(
         det_jacs=det_jacs, inv_jacs=inv_jacs,
-        det_jacs_fine=det_jacs_fine, inv_jacs_fine=inv_jacs_fine,
+        jacobians_fine=jacobians_fine,
         cell_volumes=cell_volumes, sps_coords=sps_coords, cell_types=cell_types,
         n_prism_cells=dist_fc.base_flat.n_prism,
         n_points_1d=mesh.n_points_1d, n_sps_per_cell=n_sps, n_sps_per_cell_fine=n_sps_fine,

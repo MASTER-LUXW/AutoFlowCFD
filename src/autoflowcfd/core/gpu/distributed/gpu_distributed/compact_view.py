@@ -60,13 +60,10 @@ class _CompactMeshDataView:
         self.n_sps_per_cell_fine = getattr(mesh, 'n_sps_per_cell_fine', None)
         self.jacobians_fine = None
         if getattr(mesh, 'jacobians_fine', None) is not None:
-            n_fine = mesh.n_sps_per_cell_fine
-            det_jacs_fine = mesh.jacobians_fine['det_jacs'].reshape(mesh.n_cells, n_fine)
-            inv_jacs_fine = mesh.jacobians_fine['inv_jacs'].reshape(mesh.n_cells, n_fine, 3, 3)
-            self.jacobians_fine = {
-                'det_jacs': det_jacs_fine[compact_global_ids],
-                'inv_jacs': inv_jacs_fine[compact_global_ids],
-            }
+            from autoflowcfd.grid.high_order.order_jacobians import select_fine_metrics
+
+            self.jacobians_fine = select_fine_metrics(
+                mesh.jacobians_fine, compact_global_ids, mesh.n_prism_cells)
 
         self.cell_volumes = None
         if getattr(mesh, 'cell_volumes', None) is not None:

@@ -324,31 +324,15 @@ def get_overintegration_context(mesh, ops):
     `KeyError`，而不是静默用棱柱的 `n_fine` 去切四面体段的度量——后者
     会产生形状不匹配或（更糟）安静的错误答案。
 
-    ## 四面体段的细点度量从**第 0 列广播**（2026-09-17 第二次改动）
+    ## 四面体段的细点度量从逐单元值广播
 
-    直边四面体的 Jacobian **逐单元为常数**（`compute_native_tet_jacobian`
-    不依赖参考点位置），`compute_native_tet_jacobians` 把同一个常数写满
-    该单元的全部细点槽位。所以这一段的度量只有 `n_tet` 个真实数值，
-    取第 0 列再广播到 `n_fine_tet` 列与"在 native 真实细点上求值"恒等。
-
-    第一版是"切前 `n_fine_tet` 列"，那等价但带来一条**多余的约束**
-    `n_fine_tet <= n_fine_prism`——四面体的过积分阶数因此被棱柱的布局宽度
-    夹住。实测代价在 P3 上很大：去混叠误差在 `oo = 2*order` 处断崖式下降
-    （P3 oo=3 6.26e-2 / oo=4 2.66e-2 / oo=5 3.37e-3 / **oo=6 4.80e-6**），
-    被夹到 5 只拿到 18.6 倍中的 13000 倍。改成广播后这条约束彻底消失，
-    P3 可以直接取理想的 oo=6。
-
-    **这条广播依赖的不变量在网格构造时被显式校验**（
-    `high_order_mesh_order.build_order_geometry` 里的
-    `_verify_tet_fine_metric_is_cellwise_constant`），不是默默假设——
-    将来若引入曲边四面体，那条校验会当场失败而不是静默给出错误度量。
-
-    顺带的事实（如实记录，不是本函数的问题）：`jacobians_fine` 里属于
-    四面体的那 `n_tet * n_fine_prism * 10` 个浮点数现在对过积分路径完全
-    冗余，只需要每单元 10 个。plate_demo（363,392 单元）P2 下这是约
-    1.5 GB vs 24 MB。把那块压缩掉是一项独立的**内存**优化，要改
-    `jacobians_fine` 的全局形状与 GPU/MPI/分布式加载共 9 处消费点，
-    与本函数要解决的精度问题无关。
+    直边四面体的 Jacobian **逐单元为常数**，`mesh.jacobians_fine` 的四面体段只存
+    每单元一份（`tet_det (n_tet,)`、`tet_inv (n_tet,3,3)`，见
+    `grid/high_order/order_jacobians.build_fine_metrics`），这里零拷贝广播到该段
+    自己的 `n_fine_tet` 列。四面体的过积分阶数因此不受棱柱细点数约束（P3 可以
+    取理想的 oo=6：去混叠误差在 oo=2*order 处断崖，oo=5 3.37e-3、oo=6 4.80e-6）。
+    2026-09-30 之前四面体段按棱柱细点数展开存储、这里取第 0 列广播，数值相同，
+    但 plate_demo P3 上那一段白占约 2.5 GB。
     """
     if getattr(mesh, "jacobians_fine", None) is None:
         return None
@@ -357,33 +341,22 @@ def get_overintegration_context(mesh, ops):
                  "overint_D_fine_tet", "overint_restrict_f2c_tet"):
         if getattr(ops, name, None) is None:
             return None
-    # `n_fine_layout` 是 `jacobians_fine` 的**每单元布局宽度**（由棱柱
-    # 的过积分阶数与基档决定，见 `fr/overintegration_order.prism_n_fine`）。
-    n_fine_layout = mesh.n_sps_per_cell_fine
+    fine = mesh.jacobians_fine
     n_cells = mesh.n_cells
     n_prism = mesh.n_prism_cells
-    det_all = mesh.jacobians_fine["det_jacs"].reshape(n_cells, n_fine_layout)
-    inv_all = mesh.jacobians_fine["inv_jacs"].reshape(n_cells, n_fine_layout, 3, 3)
+    det_prism, inv_prism = fine["prism_det"], fine["prism_inv"]
 
-    # 棱柱段的 n_fine 与四面体段一样从**矩阵自身的形状**推导（矩阵才是
-    # 单一事实来源），再与布局宽度对账。坍缩档两者恒等（都是 `(oo+1)^3`）；
-    # 原生档两者也恒等（`prism_n_fine` 在原生下就返回真实细点数、不填充）
-    # —— 所以这条在两档下都是恒等式，不一致就是算子与网格几何的
-    # over_order 脱节（本项目此前靠两处注释维持一致，现在已合并到
-    # `fr/overintegration_order.py` 唯一入口，这里是运行期的第二道闸）。
+    # 两段的 n_fine 都从**矩阵自身的形状**推导（矩阵是单一事实来源），棱柱段再与
+    # 网格几何的细点数对账：不一致即算子与网格几何用了不同的 over_order 或不同的
+    # 棱柱基档（`fr/overintegration_order.py` 是唯一入口，这里是运行期第二道闸）。
     n_fine_prism = int(ops.overint_D_fine_prism.shape[0])
-    if n_fine_prism != n_fine_layout:
+    if det_prism.shape != (n_prism, n_fine_prism):
         raise ValueError(
             f"棱柱过积分细点数不一致：算子 overint_D_fine_prism 是 "
-            f"{ops.overint_D_fine_prism.shape}（n_fine={n_fine_prism}），"
-            f"而 mesh.n_sps_per_cell_fine={n_fine_layout}——两者必须相同，"
-            f"说明算子与网格几何用了不同的 over_order 或不同的棱柱基档"
+            f"{ops.overint_D_fine_prism.shape}（n_fine={n_fine_prism}），而网格的棱柱"
+            f"细点度量是 {det_prism.shape}——算子与网格几何用了不同的 over_order "
+            f"或不同的棱柱基档"
         )
-
-    # n_fine_tet 从**矩阵自身的形状**推导（`overint_D_fine_tet` 现在是
-    # (n_fine_tet, n_fine_tet, 3)），不读 `ops.overint_n_fine_tet` 那个
-    # 字段——矩阵才是单一事实来源，从形状推导在结构上不可能与它不同步。
-    # （那个字段仍然保留，供启动日志/诊断使用。）
     n_fine_tet = int(ops.overint_D_fine_tet.shape[0])
     _declared = int(getattr(ops, "overint_n_fine_tet", 0) or 0)
     if _declared and _declared != n_fine_tet:
@@ -392,18 +365,16 @@ def get_overintegration_context(mesh, ops):
             f"形状 {ops.overint_D_fine_tet.shape} 不一致——算子构造有 bug，"
             f"不静默采用其中一个"
         )
-    # 四面体段：逐单元常数 -> 取第 0 列广播到 n_fine_tet 宽。
-    # `np.broadcast_to` 是零拷贝视图；消费方在分块时自己
+    # 四面体段：逐单元常数 -> 零拷贝广播到 n_fine_tet 宽；消费方分块时自己
     # `np.ascontiguousarray` 物化当前块（numba kernel 需要连续输入）。
     n_tet = n_cells - n_prism
-    det_tet = np.broadcast_to(det_all[n_prism:, :1], (n_tet, n_fine_tet))
-    inv_tet = np.broadcast_to(
-        inv_all[n_prism:, :1], (n_tet, n_fine_tet, 3, 3))
+    det_tet = np.broadcast_to(fine["tet_det"][:, None], (n_tet, n_fine_tet))
+    inv_tet = np.broadcast_to(fine["tet_inv"][:, None], (n_tet, n_fine_tet, 3, 3))
 
     return dict(
         segs=(
             (0, n_prism, n_fine_prism,
-             det_all[:n_prism], inv_all[:n_prism],
+             det_prism, inv_prism,
              ops.overint_interp_c2f_prism, ops.overint_D_fine_prism,
              ops.overint_restrict_f2c_prism),
             (n_prism, n_cells, n_fine_tet,

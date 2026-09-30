@@ -43,24 +43,11 @@ def prepare_mesh_data(cp, mesh, device_id):
             'n_prism': mesh.n_prism_cells,
         }
 
-        # Fine Jacobian（over-integration）
+        # 过积分细点度量（分段，见 `gpu_overintegration.upload_fine_metrics_gpu`）
         if mesh.jacobians_fine is not None:
-            n_fine = mesh.n_sps_per_cell_fine
-            det_jacs_fine = cp.asarray(
-                np.ascontiguousarray(
-                    mesh.jacobians_fine['det_jacs'].reshape(n_cells, n_fine), dtype=np.float64
-                )
-            )
-            inv_jacs_fine = cp.asarray(
-                np.ascontiguousarray(
-                    mesh.jacobians_fine['inv_jacs'].reshape(n_cells, n_fine, 3, 3), dtype=np.float64
-                )
-            )
-            adj_j_fine = det_jacs_fine[..., None, None] * inv_jacs_fine
-            data['det_jacs_fine'] = det_jacs_fine
-            data['inv_jacs_fine'] = inv_jacs_fine
-            data['adj_j_fine'] = adj_j_fine
-            data['n_fine'] = n_fine
+            from autoflowcfd.core.gpu.gpu_overintegration import upload_fine_metrics_gpu
+
+            data.update(upload_fine_metrics_gpu(cp, mesh.jacobians_fine))
 
         return data
 

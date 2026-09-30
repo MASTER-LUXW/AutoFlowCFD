@@ -52,14 +52,14 @@ def extract_local_mesh_data(
                 jacobians_local[key] = arr.copy()
 
     # 3. 提取 fine Jacobian（如果有）
+    # 分段细点度量按本地单元选取（棱柱在前）。此前按"首维等于 n_cells 才切片"的
+    # 通用规则处理，而细点度量首维是 n_cells*n_fine，于是整份全局数组被原样拷进
+    # 本地网格——与本地单元数对不上。
     jacobians_fine_local = None
     if mesh.jacobians_fine is not None:
-        jacobians_fine_local = {}
-        for key, arr in mesh.jacobians_fine.items():
-            if arr.shape[0] == mesh.n_cells:
-                jacobians_fine_local[key] = arr[local_cells].copy()
-            else:
-                jacobians_fine_local[key] = arr.copy()
+        from autoflowcfd.grid.high_order.order_jacobians import select_fine_metrics
+
+        jacobians_fine_local = select_fine_metrics(mesh.jacobians_fine, local_cells, mesh.n_prism_cells)
 
     # 4. 提取 cell volumes
     cell_volumes_local = None

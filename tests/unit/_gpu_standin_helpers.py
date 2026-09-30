@@ -56,13 +56,13 @@ def complete_gpu_standin(mesh, ops, ops_data, mesh_data=None, compact_ids=None):
             ops_data[k] = getattr(ops, k)
 
     if getattr(mesh, 'jacobians_fine', None) is not None:
-        n_fine = mesh.n_sps_per_cell_fine
-        det_f = mesh.jacobians_fine['det_jacs'].reshape(mesh.n_cells, n_fine)
-        inv_f = mesh.jacobians_fine['inv_jacs'].reshape(
-            mesh.n_cells, n_fine, 3, 3)
+        # 与生产上传路径同一个函数（numpy 充当数组模块）
+        from autoflowcfd.core.gpu.gpu_overintegration import upload_fine_metrics_gpu
+        from autoflowcfd.grid.high_order.order_jacobians import select_fine_metrics
+
+        fine = mesh.jacobians_fine
         if compact_ids is not None:
-            det_f = det_f[compact_ids]
-            inv_f = inv_f[compact_ids]
-        mesh_data['adj_j_fine'] = det_f[..., None, None] * inv_f
+            fine = select_fine_metrics(fine, compact_ids, mesh.n_prism_cells)
+        mesh_data.update(upload_fine_metrics_gpu(np, fine))
 
     return ops_data, mesh_data

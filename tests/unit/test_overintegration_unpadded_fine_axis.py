@@ -67,6 +67,14 @@ def _over_order(order):
     return resolve_prism_overintegration_order(order)
 
 
+def _segmented(det, inv, n_prism):
+    """逐细点展开的 (n_cells, n_fine) 度量 -> 网格的分段存储
+    （`grid/high_order/order_jacobians.build_fine_metrics` 的布局）：
+    四面体段逐单元只存一份（这里取第 0 列，调用方已把它们填成逐单元常数）。"""
+    return {"prism_det": det[:n_prism], "prism_inv": inv[:n_prism],
+            "tet_det": det[n_prism:, 0].copy(), "tet_inv": inv[n_prism:, 0].copy()}
+
+
 def _n_fine_prism(order):
     """棱柱过积分的细点数（= `jacobians_fine` 的每单元布局宽度）。
 
@@ -221,8 +229,7 @@ class TestContextContract:
         mesh = SimpleNamespace(
             n_cells=n_cells, n_prism_cells=n_prism,
             n_sps_per_cell_fine=n_fine_prism,
-            jacobians_fine={"det_jacs": det.ravel(),
-                            "inv_jacs": inv.reshape(-1, 3, 3)},
+            jacobians_fine=_segmented(det, inv, n_prism),
         )
         return mesh, ops, det, inv
 
@@ -318,8 +325,7 @@ class TestContextContract:
         mesh = SimpleNamespace(
             n_cells=n_cells, n_prism_cells=n_prism,
             n_sps_per_cell_fine=n_fine_prism,
-            jacobians_fine={"det_jacs": det.ravel(),
-                            "inv_jacs": inv.reshape(-1, 3, 3)},
+            jacobians_fine=_segmented(det, inv, n_prism),
         )
         oi = get_overintegration_context(mesh, ops)
         assert oi is not None
@@ -360,8 +366,7 @@ class TestContextContract:
         mesh = SimpleNamespace(
             n_cells=n_cells, n_prism_cells=2,
             n_sps_per_cell_fine=wrong,
-            jacobians_fine={"det_jacs": det.ravel(),
-                            "inv_jacs": inv.reshape(-1, 3, 3)},
+            jacobians_fine=_segmented(det, inv, 2),
         )
         with pytest.raises(ValueError, match="棱柱过积分细点数不一致"):
             get_overintegration_context(mesh, ops)

@@ -137,10 +137,10 @@ def build_native_tet_overintegration_operators(
 #: 取 6 的含义是"不再额外设限"——实际阶数由 `rule*order` 的经验法则决定
 #: （默认 rule=2，所以 P1 取 2、P2 取 4、P3 取 6）。
 #:
-#: **不再有布局约束**（2026-09-17 第二次改动）：四面体段的细点度量现在从
-#: `jacobians_fine` 的**第 0 列广播**而不是切前 n_fine_tet 列（直边四面体
-#: 逐单元常数，第 0 列就是那个常数，见 `core/fr_operators/volume_contract.
-#: get_overintegration_context`）。第一版的"切列"要求 `n_fine_tet <=
+#: **不再有布局约束**（2026-09-17 第二次改动；2026-09-30 起逐单元存储）：
+#: 四面体段的细点度量逐单元一份、使用时广播，而不是切前 n_fine_tet 列（直边
+#: 四面体逐单元常数，见 `grid/high_order/order_jacobians.build_fine_metrics`
+#: 与 `core/fr_operators/volume_contract.get_overintegration_context`）。第一版的"切列"要求 `n_fine_tet <=
 #: (oo_prism+1)^3`，把 P3 夹到 5；而去混叠误差在 `oo = 2*order` 处断崖式
 #: 下降，P3 被夹住只拿到 18.6 倍中的 13000 倍：
 #:

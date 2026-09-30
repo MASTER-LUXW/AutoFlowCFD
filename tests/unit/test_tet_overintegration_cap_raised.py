@@ -272,9 +272,12 @@ class TestLayoutInvariantHolds:
         mesh.n_cells = n_cells
         mesh.n_prism_cells = n_prism
         mesh.n_sps_per_cell_fine = n_fine_prism
-        mesh.jacobians_fine = {
-            "det_jacs": np.ones(n_cells * n_fine_prism),
-            "inv_jacs": np.tile(np.eye(3), (n_cells * n_fine_prism, 1, 1)),
+        n_tet = n_cells - n_prism
+        mesh.jacobians_fine = {  # 分段存储：四面体段逐单元一份
+            "prism_det": np.ones((n_prism, n_fine_prism)),
+            "prism_inv": np.tile(np.eye(3), (n_prism, n_fine_prism, 1, 1)),
+            "tet_det": np.ones(n_tet),
+            "tet_inv": np.tile(np.eye(3), (n_tet, 1, 1)),
         }
         oi = get_overintegration_context(mesh, ops)
         assert oi is not None

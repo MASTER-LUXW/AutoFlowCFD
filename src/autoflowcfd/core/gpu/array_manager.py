@@ -199,22 +199,11 @@ class GPUArrayManager:
                     np.ascontiguousarray(adj_j, dtype=np.float64)
                 )
 
-            # ── Fine Jacobian（over-integration 去混叠）──
+            # ── 过积分细点度量（分段，见 `gpu_overintegration.upload_fine_metrics_gpu`）──
             if mesh.jacobians_fine is not None:
-                n_fine = mesh.n_sps_per_cell_fine
-                det_jacs_fine = mesh.jacobians_fine['det_jacs'].reshape(n_cells, n_fine)
-                inv_jacs_fine = mesh.jacobians_fine['inv_jacs'].reshape(n_cells, n_fine, 3, 3)
-                adj_j_fine = det_jacs_fine[..., None, None] * inv_jacs_fine
-                self.mesh_data['det_jacs_fine'] = self._cp.asarray(
-                    np.ascontiguousarray(det_jacs_fine, dtype=np.float64)
-                )
-                self.mesh_data['inv_jacs_fine'] = self._cp.asarray(
-                    np.ascontiguousarray(inv_jacs_fine, dtype=np.float64)
-                )
-                self.mesh_data['adj_j_fine'] = self._cp.asarray(
-                    np.ascontiguousarray(adj_j_fine, dtype=np.float64)
-                )
-                self.mesh_data['n_fine'] = n_fine
+                from autoflowcfd.core.gpu.gpu_overintegration import upload_fine_metrics_gpu
+
+                self.mesh_data.update(upload_fine_metrics_gpu(self._cp, mesh.jacobians_fine))
 
             # ── FR 算子（不依赖 cell，上传一次）──
             if ops is not None:

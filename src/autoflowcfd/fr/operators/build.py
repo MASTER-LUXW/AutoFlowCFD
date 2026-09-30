@@ -237,9 +237,9 @@ def generate_fr_operators(order: int) -> FROperators:
         #     P3  oo=3 -> oo=6    9.17e-2 -> 4.92e-6     18600 倍
         #                （P3 的 oo=3 == order，过积分完全无操作）
         #
-        # 四面体段的细点度量取自 `mesh.jacobians_fine` 的**第 0 列广播**
-        # （直边四面体的 Jacobian 逐单元为常数、被原样广播填满全部槽位，
-        # 见 `high_order_mesh_order.compute_native_tet_jacobians` 与
+        # 四面体段的细点度量在 `mesh.jacobians_fine` 里逐单元只存一份、使用时
+        # 广播（直边四面体的 Jacobian 逐单元为常数，见
+        # `grid/high_order/order_jacobians.build_fine_metrics` 与
         # `core/fr_operators/volume_contract.get_overintegration_context`），
         # 所以 `n_fine_tet` **不受**棱柱布局宽度 `(oo_prism+1)^3` 约束——
         # P3 的 84 个细点可以超过棱柱的 64 列。实际取到的阶数：

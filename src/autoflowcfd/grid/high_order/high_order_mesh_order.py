@@ -27,8 +27,8 @@ if TYPE_CHECKING:
 # （`high_order_mesh.py` 的薄委托方法、测试）不用改。
 from .order_jacobians import (  # noqa: F401
     _combine_prism_and_tet_jacobians,
+    build_fine_metrics,
     _compute_prism_only_jacobians,
-    _verify_tet_fine_metric_is_cellwise_constant,
     compute_jacobians_at_ref_points,
     compute_native_prism_jacobians,
     compute_native_tet_jacobians,
@@ -160,13 +160,11 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
     # 一致在本项目已经出过真实缺陷（滤波档双解析器、CFL 三处硬编码兜底），
     # 而原生/坍缩分档又要再叠一层，所以合并成唯一入口。
     #
-    # `n_sps_per_cell_fine` 是 `jacobians_fine` 的**每单元布局宽度**，由
-    # 棱柱决定（坍缩档 `(oo+1)^3`、原生档 `(oo+1)^2(oo+2)/2`）。四面体段
-    # **不受它约束**：直边四面体的 Jacobian 逐单元常数，
-    # `compute_native_tet_jacobians` 把同一个常数写满全部槽位，而过积分
-    # 只取第 0 列广播（见 `core/fr_operators/volume_contract.
-    # get_overintegration_context`），所以四面体可以用更高的 over_order
-    # 而不需要把这个共用数组加宽。
+    # `n_sps_per_cell_fine` 是**棱柱**段细点度量的每单元宽度（坍缩档 `(oo+1)^3`、
+    # 原生档 `(oo+1)^2(oo+2)/2`）。四面体段逐单元只存一份（直边四面体的 Jacobian
+    # 逐单元常数），过积分按各自的 n_fine 广播（见 `order_jacobians.build_fine_metrics`
+    # 与 `core/fr_operators/volume_contract.get_overintegration_context`），所以
+    # 四面体可以用更高的 over_order、也不占按棱柱细点数展开的内存。
     #
     # 棱柱的细点度量**必须逐点求值**（两档都是）：棱柱即便直边也一般随点
     # 变化，只有顶面是底面纯平移的右棱柱才恒定，不能像四面体那样广播。
@@ -205,16 +203,11 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
             prism_jacobians_fine = _compute_prism_only_jacobians(
                 mesh, mapper, ref_cube_sps_fine, want_scaled_quality=False)
 
-        tet_jacobians_fine = compute_native_tet_jacobians(
-            mesh, order, n_sps_per_cell_fine, want_scaled_quality=False
-        )
-        # 过积分的四面体段直接取第 0 列广播（见 `core/fr_operators/
-        # volume_contract.get_overintegration_context`），前提是"该单元
-        # 全部细点槽位的度量完全相同"。这里显式校验，不默默假设——将来
-        # 若引入曲边四面体，这条会当场失败而不是静默给出错误度量。
-        _verify_tet_fine_metric_is_cellwise_constant(
-            tet_jacobians_fine, n_sps_per_cell_fine)
-        jacobians_fine = _combine_prism_and_tet_jacobians(prism_jacobians_fine, tet_jacobians_fine)
+        # 直边四面体的 Jacobian 逐单元常数：每单元只算一份（见 `build_fine_metrics`）
+        tet_jacobians_fine = compute_native_tet_jacobians(mesh, order, 1, want_scaled_quality=False)
+        n_tets = len(mesh._fixed_tet_conn) if mesh._fixed_tet_conn is not None else 0
+        jacobians_fine = build_fine_metrics(
+            prism_jacobians_fine, tet_jacobians_fine, n_sps_per_cell_fine, n_prisms, n_tets)
 
     return {
         "sps_coords": sps_coords,

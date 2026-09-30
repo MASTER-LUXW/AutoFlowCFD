@@ -132,13 +132,10 @@ class DistributedMeshAdapter:
             if is_precompacted:
                 self._jacobians_fine = local_mesh.jacobians_fine
             else:
-                n_fine = local_mesh.n_sps_per_cell_fine
-                det_jacs_fine = local_mesh.jacobians_fine['det_jacs'].reshape(local_mesh.n_cells, n_fine)
-                inv_jacs_fine = local_mesh.jacobians_fine['inv_jacs'].reshape(local_mesh.n_cells, n_fine, 3, 3)
-                self._jacobians_fine = {
-                    'det_jacs': det_jacs_fine[compact_global_ids],
-                    'inv_jacs': inv_jacs_fine[compact_global_ids],
-                }
+                from autoflowcfd.grid.high_order.order_jacobians import select_fine_metrics
+
+                self._jacobians_fine = select_fine_metrics(
+                    local_mesh.jacobians_fine, compact_global_ids, local_mesh.n_prism_cells)
 
         self._cell_volumes = None
         if getattr(local_mesh, 'cell_volumes', None) is not None:

@@ -552,12 +552,13 @@ class TestGpuViscousOverintegration:
         ops = generate_fr_operators(order)
         cpu = get_overintegration_context(mesh, ops)
         ops_data = {k: getattr(ops, k) for k in OVERINT_OPS_KEYS}
-        # GPU helper 现在要从 `adj_j_fine` 的形状读棱柱段的细点宽度、并按段
-        # 切度量，所以替身必须有真实形状（2026-09-17）。
+        # GPU helper 从上传的棱柱细点度量形状对账细点宽度，所以替身必须有真实形状。
         n_fine_prism = cpu["segs"][0][2]
+        n_prism = mesh.n_prism_cells
         gpu = get_overintegration_segs_gpu(
-            {'adj_j_fine': np.zeros((mesh.n_cells, n_fine_prism, 3, 3))},
-            ops_data, mesh.n_cells, mesh.n_prism_cells)
+            {'adj_j_fine_prism': np.zeros((n_prism, n_fine_prism, 3, 3)),
+             'adj_j_fine_tet': np.zeros((mesh.n_cells - n_prism, 3, 3))},
+            ops_data, mesh.n_cells, n_prism)
         assert gpu is not None
         assert [(lo, hi) for lo, hi, *_ in gpu] == \
                [(lo, hi) for lo, hi, *_ in cpu["segs"]]
@@ -578,7 +579,7 @@ class TestGpuViscousOverintegration:
             partial = dict(full)
             del partial[k]
             assert get_overintegration_segs_gpu(
-                {'adj_j_fine': np.zeros((4, 64, 3, 3))},
+                {'adj_j_fine_prism': np.zeros((2, 64, 3, 3)), 'adj_j_fine_tet': np.zeros((2, 3, 3))},
                 partial, 4, 2) is None, k
 
 
