@@ -134,15 +134,40 @@ def _make_mesh(order):
     return _build_synthetic_mixed_mesh(order)
 
 
-def _cross_check(U, mesh, ops, mu_t_field=None):
+def _cross_check(U, mesh, ops, mu_t_field=None, provider=None):
     from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
     from autoflowcfd.core.fr_residual.viscous import compute_viscous_residual
     from autoflowcfd.core.gpu.residual.gpu_viscous import compute_viscous_residual_fr_gpu
 
     Q = conserved_to_primitive(U)
-    r_cpu = compute_viscous_residual(U, Q, ops, mesh, mu=1.8e-5, mu_t_field=mu_t_field)
-    r_gpu = compute_viscous_residual_fr_gpu(U, mesh, ops, mu=1.8e-5, mu_t_field=mu_t_field)
+    r_cpu = compute_viscous_residual(U, Q, ops, mesh, mu=1.8e-5, mu_t_field=mu_t_field,
+                                     boundary_ghost_provider=provider)
+    r_gpu = compute_viscous_residual_fr_gpu(U, mesh, ops, mu=1.8e-5, mu_t_field=mu_t_field,
+                                            boundary_ghost_provider=provider)
     return r_cpu, np.asarray(r_gpu)
+
+
+def _all_kinds_provider(mesh, ops):
+    """把边界面轮流分给全部六种粘性边界种类（无滑移壁、滑移壁、对称面、远场、
+    入口、出口），CPU 与 GPU 各自的分派逻辑都被逐类走到。入口给一个法向分量
+    有正有负的来流，让同一组面上既有流入点（Dirichlet）也有回流点（Neumann）。"""
+    from autoflowcfd.boundary.fr_ghost_state import BoundaryGhostStateProvider
+    from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+
+    flat = get_flat_face_geometry(mesh, ops)
+    bnd = np.nonzero(flat.is_boundary)[0]
+    group_code = np.full(flat.n_faces, -1, dtype=np.int64)
+    group_code[bnd] = np.arange(bnd.size) % 6
+    q_free = [1.2, 25.0, -4.0, 2.0, 101000.0]
+    configs = {
+        0: {"type": "WALL", "is_no_slip": True},
+        1: {"type": "WALL", "is_no_slip": False},
+        2: {"type": "SYMMETRY"},
+        3: {"type": "FARFIELD", "Q_free": q_free},
+        4: {"type": "INLET", "Q_inlet": q_free},
+        5: {"type": "OUTLET", "p_outlet": 100800.0},
+    }
+    return BoundaryGhostStateProvider(group_code, configs, configs[3])
 
 
 class TestGpuViscousResidualMatchesCpu:
@@ -207,6 +232,35 @@ class TestGpuViscousResidualMatchesCpu:
         scale = max(np.max(np.abs(r_cpu)), 1.0)
         rel = max_diff / scale
         assert rel < 1e-6, f"P={order}: max|cpu-gpu|={max_diff:.3e}, scale={scale:.3e}, rel={rel:.3e}"
+        assert np.all(np.isfinite(r_gpu))
+
+    @pytest.mark.parametrize("order", [1, 2])
+    def test_all_viscous_boundary_kinds_match_cpu(self, order):
+        """六种粘性边界种类混合分布（`flux_kernels/viscous_bc.py`，2026-09-30）：
+        GPU 的向量化分派（入口逐点落到 Dirichlet/Neumann、镜像类取镜像场梯度、
+        Neumann 零法向通量、Dirichlet 温度罚项）必须与 CPU 逐点函数一致。"""
+        from autoflowcfd.core.fr_residual.inviscid import (
+            primitive_to_conserved, conserved_to_primitive,
+        )
+
+        mesh = _make_mesh(order)
+        ops = mesh.operators
+        rng = np.random.default_rng(order * 4100 + 3)
+        U_inf = primitive_to_conserved(np.array([1.225, 30.0, 5.0, -3.0, 101325.0]))
+        n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
+        Q = conserved_to_primitive(np.tile(U_inf, (n_cells, n_sps, 1)))
+        Q[..., 0] *= 1.0 + rng.uniform(-0.05, 0.05, size=(n_cells, n_sps))
+        Q[..., 1:4] += rng.uniform(-8.0, 8.0, size=(n_cells, n_sps, 3))
+        Q[..., 4] *= 1.0 + rng.uniform(-0.05, 0.05, size=(n_cells, n_sps))
+        U = primitive_to_conserved(Q)
+        mu_t_field = rng.uniform(0.0, 5e-5, size=(n_cells, n_sps))
+
+        r_cpu, r_gpu = _cross_check(U, mesh, ops, mu_t_field=mu_t_field,
+                                    provider=_all_kinds_provider(mesh, ops))
+
+        scale = max(np.max(np.abs(r_cpu)), 1.0)
+        rel = np.max(np.abs(r_gpu - r_cpu)) / scale
+        assert rel < 1e-12, f"P={order}: 相对差 {rel:.3e}"
         assert np.all(np.isfinite(r_gpu))
 
     def test_laminar_no_turbulent_viscosity_matches(self):

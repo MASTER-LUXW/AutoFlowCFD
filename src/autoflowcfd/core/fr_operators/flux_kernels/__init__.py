@@ -21,7 +21,8 @@ nopython 模式不支持 `einsum`/`swapaxes`，所以不能直接复用，必须
 ## 文件分工(2026-09-24 拆包, 原 615 行)
 
     euler.py             欧拉物理通量与熵稳定体积散度
-    viscous.py           粘性物理通量、边界梯度镜像与 IP 罚项
+    viscous.py           粘性物理通量与 IP 罚项
+    viscous_bc.py        粘性边界种类与边界"另一侧"梯度镜像
 
 本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
 """
@@ -40,23 +41,43 @@ from .euler import (  # noqa: F401
     euler_physical_flux_point,
 )
 from .viscous import (  # noqa: F401
-    mirror_normal_component,
     resolve_viscous_ip_constant,
     viscous_ip_penalty_tilde,
     viscous_physical_flux_batch,
     viscous_physical_flux_point,
+)
+from .viscous_bc import (  # noqa: F401
+    VBC_DIRICHLET,
+    VBC_INLET,
+    VBC_INTERIOR,
+    VBC_MIRROR,
+    VBC_NEUMANN,
+    VBC_NOSLIP_WALL,
+    boundary_other_gradients,
+    mirror_normal_component,
+    mirror_velocity_gradient,
+    resolve_point_kind,
 )
 
 __all__ = [
     "CP_AIR",
     "GAMMA",
     "R_AIR",
+    "VBC_DIRICHLET",
+    "VBC_INLET",
+    "VBC_INTERIOR",
+    "VBC_MIRROR",
+    "VBC_NEUMANN",
+    "VBC_NOSLIP_WALL",
     "VISCOUS_IP_C_BASE",
+    "boundary_other_gradients",
     "chandrashekar_flux_point",
     "entropy_stable_volume_divergence_batch",
     "euler_physical_flux_batch",
     "euler_physical_flux_point",
     "mirror_normal_component",
+    "mirror_velocity_gradient",
+    "resolve_point_kind",
     "resolve_viscous_ip_constant",
     "viscous_ip_penalty_tilde",
     "viscous_physical_flux_batch",

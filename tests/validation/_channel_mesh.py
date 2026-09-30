@@ -116,10 +116,11 @@ class ProfileInletGhostProvider:
             int(f): np.ascontiguousarray(profile_fn(pos), dtype=np.float64)
             for f, pos in positions_by_face.items()
         }
-        # 与被包装对象共享这两个属性：下游（绝热壁掩码构造、批量化路径）
-        # 会直接读它们，缺了会静默走回逐面慢路径或错标绝热壁。
+        # 与被包装对象共享 BC 语义：下游（粘性边界种类分类、批量化路径）按鸭子
+        # 类型直接读它们（`fr_ghost_state.build_viscous_boundary_kind`）。
         self.group_code = inner.group_code
         self.code_to_config = inner.code_to_config
+        self.default_config = inner.default_config
 
     def __call__(self, face_idx, Q_owner_fp, true_normal):
         from autoflowcfd.boundary.fr_ghost_state import inlet_ghost_state

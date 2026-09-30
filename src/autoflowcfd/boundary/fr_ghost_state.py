@@ -61,6 +61,12 @@ def wall_ghost_state(
     两者是"同一个精确构造被两个不同物理条件同时要求"，不是用一个近似
     去凑合两种情形。复用它没有引入任何误差。
 
+    **2026-09-30 更正**：幽灵态切向无跳跃只让罚项为零；粘性公共通量里的
+    切向牵引还取决于"另一侧"梯度。此前梯度一律取本侧，公共切向牵引就是
+    解析梯度算出的那一份、与 `tau_w` 叠加 —— 上面"梯度贡献为零"并不成立。
+    现在滑移分支落到镜像类粘性边界（`viscous_boundary_kind_for_config`），
+    镜像场梯度使公共切向牵引恰为零，这句话才真正成立。
+
     **热边界条件（此前只隐含在代码里，2026-09-14 显式写出）**：本函数
     以 `Q_ghost = Q_int.copy()` 起手、只改速度分量，因此 rho 与 p（进而
     温度）都直接复制内部值——**两个分支都是零温度跳跃，即绝热壁**。
@@ -224,72 +230,97 @@ class BoundaryGhostStateProvider:
 
 
 # ---------------------------------------------------------------------------
-# 边界面热条件分类（BR1 边界温度梯度处理用，2026-09-15）
+# 粘性通量的逐面边界种类（2026-09-30，取代 2026-09-15 的"绝热面掩码"）
 # ---------------------------------------------------------------------------
 
-#: 法向温度梯度必须为零的边界类型。
-#:
-#: - ``WALL``：本项目的壁面 ghost 态一律复制 rho/p（见 wall_ghost_state 的
-#:   "热边界条件"一节），温度无跳跃 ⇒ 语义上就是**绝热壁**；无滑移与滑移
-#:   （含 WMLES 激活时的壁面）两个分支都一样，因为项目里既没有等温壁 BC，
-#:   也没有壁面热通量模型。绝热的精确表述是 q_n = -k dT/dn = 0。
-#: - ``SYMMETRY``：对称面上一切通量的法向分量为零，热通量也不例外。
-#:
-#: ``INLET``/``OUTLET``/``FARFIELD`` **不在**此列：它们是流入/流出边界，
-#: 法向热通量本就应该非零（对流/扩散都在穿越），沿用"梯度取内部值"的透射
-#: 处理才是自洽的。
+#: 封闭边界（壁面/对称面）：没有质量穿越，法向热通量为零（本项目没有等温壁，
+#: 见 `wall_ghost_state` 的"热边界条件"一节）。湍流 k/omega 的"开放边界"判据
+#: 取它的补集（`core/turbulence/transport/omega_wall.py`）。
 ADIABATIC_THERMAL_BC_TYPES = frozenset({"WALL", "SYMMETRY"})
 
 
-def build_boundary_adiabatic_mask(n_faces: int, is_boundary: np.ndarray,
-                                  ghost_provider) -> np.ndarray:
-    """逐面标记"该边界面要求法向温度梯度为零"。
+def viscous_boundary_kind_for_config(cfg: dict) -> int:
+    """一组边界配置对应的粘性边界种类（`core/fr_operators/flux_kernels/viscous_bc.py`）。
 
-    粘性 kernel 用它在边界面上把 ∇T 的法向分量镜像掉
-    （``∇T_ghost = ∇T_int - 2(∇T_int·n)n``），使 BR1 的面平均梯度
-    ``∇T_avg = ∇T_int - (∇T_int·n)n`` 法向分量**精确为零**，于是投影到面
-    法向的离散传导热通量恒等于零——这正是绝热/对称的精确离散表述。
-    未标记的面保持原有的透射处理（``∇T_ghost = ∇T_int``）。
+    与 `BoundaryGhostStateProvider.__call__` 读同一套配置键：幽灵态**给定**
+    的分量按 Dirichlet 施加，**延拓**内部值的分量取零法向粘性通量，镜像构造
+    的边界（对称面、滑移壁含 WMLES 壁面）取镜像场的梯度。逐类理由见
+    `viscous_bc.py` 模块文档。
 
-    Args:
-        n_faces: 面总数（返回数组长度）
-        is_boundary: (n_faces,) 物理边界面掩码
-        ghost_provider: 幽灵态提供者。只有 ``BoundaryGhostStateProvider``
-            带有逐面的 BC 分类信息（``group_code``/``code_to_config``）；
-            其它满足最小鸭子类型接口的实现（``DefaultGhostProvider``、
-            测试 stub）没有 BC 语义可言——``DefaultGhostProvider`` 的
-            ``Q_ghost = Q_owner`` 本身就是纯透射，因此一律返回全 False，
-            **保持它们的既有行为逐位不变**。
-
-    Returns:
-        (n_faces,) bool 数组。
-
-    结果按 provider 实例缓存（``group_code``/``code_to_config`` 在构造后
-    不再变化），避免每次残差求值重复扫描边界面。
+    WMLES 壁面（`is_no_slip=False`）落到镜像类：切向牵引恰为零，壁面模型给的
+    `tau_w` 才是该面切向应力的唯一来源。此前"切向无跳跃 ⇒ 梯度贡献为零"的
+    说法（见 `wall_ghost_state` 文档）并不成立 —— 梯度取本侧时公共切向牵引
+    就是解析梯度算出的那一份，与 `tau_w` 叠加。
     """
-    cached = getattr(ghost_provider, "_afcfd_adiabatic_mask", None)
+    from autoflowcfd.core.fr_operators.flux_kernels import (
+        VBC_DIRICHLET, VBC_INLET, VBC_MIRROR, VBC_NEUMANN, VBC_NOSLIP_WALL,
+    )
+
+    bc_type = cfg["type"]
+    if bc_type == "WALL":
+        return VBC_NOSLIP_WALL if cfg.get("is_no_slip", True) else VBC_MIRROR
+    if bc_type == "SYMMETRY":
+        return VBC_MIRROR
+    if bc_type == "FARFIELD":
+        return VBC_DIRICHLET
+    if bc_type == "INLET":
+        return VBC_INLET
+    if bc_type == "OUTLET":
+        return VBC_NEUMANN
+    raise ValueError(f"Unknown boundary condition type '{bc_type}'")
+
+
+def build_viscous_boundary_kind(n_faces: int, is_boundary: np.ndarray, ghost_provider) -> np.ndarray:
+    """逐面粘性边界种类，`(n_faces,)` int8；内部面为 `VBC_INTERIOR`。
+
+    BC 语义按**鸭子类型**读取：provider 只要带 ``group_code``/``code_to_config``
+    （``BoundaryGhostStateProvider`` 以及委托给它的包装层，如验证算例的逐点剖面
+    入口）就逐组分类，未匹配任何组的面取 ``default_config``。
+    ``DefaultGhostProvider`` 的幽灵态是本侧延拓，按延拓分量的规则取
+    ``VBC_NEUMANN``（零法向粘性通量）。其余 provider 没有可读的 BC 语义，
+    **直接报错**。
+
+    为什么不能按 ``isinstance`` 判、也不能对未知 provider 兜底：2026-09-30 实测，
+    Blasius 算例的 provider 被逐点剖面入口包了一层，``isinstance`` 判不中，全部
+    边界面（含无滑移壁）落进兜底分支 —— 兜底取 Neumann 时壁面剪应力整个消失，
+    P1/P2 都收敛到 cf 只有精确值 12%~19% 的错解；此前的"绝热面掩码"用同一个
+    ``isinstance``，兜底是"全部透射"，于是那个算例的壁面热条件从未真正被施加过，
+    只是没有暴露。边界分类错了是静默的物理错误，必须在构造期失败。
+
+    结果按 provider 实例缓存（配置在构造后不再变化），避免每次残差求值重复
+    扫描边界面。
+    """
+    from autoflowcfd.core.fr_operators.flux_kernels import VBC_INTERIOR, VBC_NEUMANN
+    from autoflowcfd.core.fr_residual.inviscid import DefaultGhostProvider
+
+    cached = getattr(ghost_provider, "_afcfd_vbc_kind", None)
     if cached is not None and cached.shape[0] == n_faces:
         return cached
 
-    mask = np.zeros(n_faces, dtype=np.bool_)
-    if isinstance(ghost_provider, BoundaryGhostStateProvider):
-        bnd = np.where(is_boundary)[0]
-        if bnd.size > 0:
-            codes = ghost_provider.group_code[bnd]
-            default_adiabatic = (
-                ghost_provider.default_config["type"] in ADIABATIC_THERMAL_BC_TYPES
-            )
-            for code in np.unique(codes):
-                cfg = ghost_provider.code_to_config.get(int(code))
-                if cfg is None:
-                    hit = default_adiabatic
-                else:
-                    hit = cfg["type"] in ADIABATIC_THERMAL_BC_TYPES
-                if hit:
-                    mask[bnd[codes == code]] = True
+    kind = np.full(n_faces, VBC_INTERIOR, dtype=np.int8)
+    bnd = np.where(is_boundary)[0]
+    group_code = getattr(ghost_provider, "group_code", None)
+    code_to_config = getattr(ghost_provider, "code_to_config", None)
+    if group_code is not None and code_to_config is not None:
+        default_config = getattr(ghost_provider, "default_config", None)
+        codes = np.asarray(group_code)[bnd]
+        for code in np.unique(codes):
+            cfg = code_to_config.get(int(code), default_config)
+            if cfg is None:
+                raise ValueError(
+                    f"边界组 {int(code)} 既不在 code_to_config 里、provider 也没有 "
+                    f"default_config —— 无法确定该组面的粘性边界条件")
+            kind[bnd[codes == code]] = viscous_boundary_kind_for_config(cfg)
+    elif isinstance(ghost_provider, DefaultGhostProvider):
+        kind[bnd] = VBC_NEUMANN
+    elif bnd.size > 0:
+        raise TypeError(
+            f"{type(ghost_provider).__name__} 没有可读的边界条件语义"
+            f"（group_code / code_to_config），无法确定粘性通量的边界处理；"
+            f"请提供 BoundaryGhostStateProvider 或委托给它、并共享这两个属性的包装层")
 
     try:
-        ghost_provider._afcfd_adiabatic_mask = mask
+        ghost_provider._afcfd_vbc_kind = kind
     except AttributeError:  # 只读/带 __slots__ 的 provider，放弃缓存即可
         pass
-    return mask
+    return kind

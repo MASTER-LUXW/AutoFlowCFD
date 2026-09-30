@@ -9,14 +9,92 @@ from autoflowcfd.core.gpu import get_cupy
 
 from autoflowcfd.core.gpu.residual.gpu_inviscid import _lift_native_contrib
 
-from autoflowcfd.core.fr_operators.flux_kernels import CP_AIR, R_AIR
+from autoflowcfd.core.fr_operators.flux_kernels import (
+    CP_AIR, R_AIR, VBC_DIRICHLET, VBC_INLET, VBC_INTERIOR, VBC_MIRROR, VBC_NEUMANN, VBC_NOSLIP_WALL,
+)
 from .extrap import _extrap_side, _self_extrap_side, _viscous_tilde_flux_pair
+
+
+def _mirror_normal_gpu(cp, g, adjrow):
+    """`flux_kernels.mirror_normal_component` 的向量化版：`g - 2 (g·a)/|a|^2 a`，
+    `|a| = 0` 的退化面原样返回。"""
+    a2 = cp.sum(adjrow * adjrow, axis=-1, keepdims=True)
+    d = cp.sum(g * adjrow, axis=-1, keepdims=True) / cp.where(a2 > 0.0, a2, 1.0)
+    return cp.where(a2 > 0.0, g - 2.0 * d * adjrow, g)
+
+
+def _mirror_velocity_gradient_gpu(cp, gv, adjrow):
+    """`flux_kernels.mirror_velocity_gradient` 的向量化版：`R gv R`，`R = I - 2nn^T`。"""
+    a2 = cp.sum(adjrow * adjrow, axis=-1, keepdims=True)
+    n = adjrow / cp.sqrt(cp.where(a2 > 0.0, a2, 1.0))
+    nTg = cp.einsum("...a,...ab->...b", n, gv)
+    gn = cp.einsum("...ab,...b->...a", gv, n)
+    ngn = cp.sum(n * gn, axis=-1)
+    out = (gv - 2.0 * n[..., :, None] * nTg[..., None, :] - 2.0 * gn[..., :, None] * n[..., None, :]
+           + 4.0 * ngn[..., None, None] * n[..., :, None] * n[..., None, :])
+    return cp.where(a2[..., None] > 0.0, out, gv)
+
+
+def _boundary_other_side_gpu(cp, K, Q_s, gv_s, gT_s, mut_s, Q_x, gv_x, gT_x, mut_x, adjrow):
+    """边界点（`K != VBC_INTERIOR`）的"另一侧"梯度与涡粘，并把入口落到 Dirichlet/Neumann。
+
+    逐点对应 CPU `flux_kernels/viscous_bc.py::boundary_other_gradients` 与
+    `resolve_point_kind`：无滑移壁速度梯度取本侧、∇T 法向镜像；镜像类两者都取
+    镜像场梯度；其余取本侧。`Q_x` 在边界点上已经是幽灵态。返回解析后的 `K`。
+    """
+    inflow = cp.sum(Q_s[..., 1:4] * adjrow, axis=-1) < 0.0
+    K = cp.where(K == VBC_INLET, cp.where(inflow, VBC_DIRICHLET, VBC_NEUMANN), K)
+    bnd = K != VBC_INTERIOR
+    mirror = K == VBC_MIRROR
+    gv_b = cp.where(mirror[..., None, None], _mirror_velocity_gradient_gpu(cp, gv_s, adjrow), gv_s)
+    gT_b = cp.where((mirror | (K == VBC_NOSLIP_WALL))[..., None], _mirror_normal_gpu(cp, gT_s, adjrow), gT_s)
+    gv_x = cp.where(bnd[..., None, None], gv_b, gv_x)
+    gT_x = cp.where(bnd[..., None], gT_b, gT_x)
+    mut_x = cp.where(bnd, mut_s, mut_x)
+    return K, gv_x, gT_x, mut_x
+
+
+def _viscous_jump_gpu(cp, K, Q_s, gv_s, gT_s, mut_s, Q_x, gv_x, gT_x, mut_x, adjrow, h_ip,
+                      mu, Pr, Pr_t, c_ip_visc):
+    """逐点对应 CPU `face_point_jumps.viscous_jump_point`（`K` 已解析）。
+
+    Neumann 点公共法向粘性通量为零、不加罚项；其余点 `a·G(平均态) - a·G(本侧)`
+    加罚项：内部点涡粘与热传导率取面平均，边界点取本侧，热传导率只在
+    Dirichlet 点给（无滑移壁/镜像类为 0）。罚项做功项内部与边界同一形式。
+    """
+    Q_avg = 0.5 * (Q_s + Q_x)
+    gv_avg = 0.5 * (gv_s + gv_x)
+    gT_avg = 0.5 * (gT_s + gT_x)
+    mut_avg = 0.5 * (mut_s + mut_x)
+    G_common, G_own = _viscous_tilde_flux_pair(
+        Q_avg, gv_avg, gT_avg, mut_avg, Q_s, gv_s, gT_s, mut_s, adjrow, mu, Pr, Pr_t)
+    neumann = K == VBC_NEUMANN
+    interior = K == VBC_INTERIOR
+    jump = cp.where(neumann[..., None], 0.0, G_common) - G_own
+
+    adj_mag = cp.sqrt(cp.sum(adjrow * adjrow, axis=-1))
+    # 罚项 side 因子恒为 +1（原生面的 adj 行已 outward 定向，见 CPU 侧
+    # `viscous_flux_kernel.py` 同一处说明，2026-09-22 修复的真实缺陷）。
+    base = cp.where(neumann, 0.0, c_ip_visc * adj_mag / h_ip[:, None])
+    eta_v = base * cp.where(interior, mu + mut_avg, mu + mut_s)
+    k_avg = mu * CP_AIR / Pr + mut_avg * CP_AIR / Pr_t
+    k_self = mu * CP_AIR / Pr + mut_s * CP_AIR / Pr_t
+    eta_T = base * cp.where(interior, k_avg, cp.where(K == VBC_DIRICHLET, k_self, 0.0))
+    du = Q_s[..., 1:4] - Q_x[..., 1:4]
+    um = 0.5 * (Q_s[..., 1:4] + Q_x[..., 1:4])
+    work = cp.sum(um * du, axis=-1)
+    T_s = Q_s[..., 4] / (Q_s[..., 0] * R_AIR)
+    T_x = Q_x[..., 4] / (Q_x[..., 0] * R_AIR)
+    pen = cp.zeros_like(jump)
+    pen[..., 1:4] = -eta_v[..., None] * du
+    pen[..., 4] = -eta_v * work - eta_T * (T_s - T_x)
+    return jump + pen
 
 
 def _compute_viscous_interface_correction_gpu(
     Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu,
     det_jacs, mu, Pr, Pr_t,
-    flat_face_gpu, Q_ghost_gpu, bnd_adiabatic_gpu,
+    flat_face_gpu, Q_ghost_gpu, vbc_kind_gpu,
     n_cells, n_sps, n_prism, device_id, c_ip_visc,
 ):
     """GPU 粘性界面校正（BR1 平均 + 边界/内部面 IP 罚项），按图着色逐色处理。
@@ -94,79 +172,19 @@ def _compute_viscous_interface_correction_gpu(
             )
             adjrow_o = ff.owner_adj_row_exact[idx_o]
 
-            # 边界面：状态用幽灵态，速度梯度/涡粘镜像内部值本身（不能改成
-            # 用 sources/幽灵态梯度，见 viscous_flux_kernel.py 模块文档
-            # "边界面梯度处理"一节）；温度梯度按热边界类型分派（同文档
-            # "边界温度梯度"一节）。
-            bmask3 = is_bnd_o[:, None, None]
-            Q_ghost_sub = Q_ghost_gpu[idx_o]
-            Q_n = cp.where(bmask3, Q_ghost_sub, Q_n)
-            gv_n = cp.where(is_bnd_o[:, None, None, None], gv_o, gv_n)
-            # ∇T 法向分量镜像：gT - 2*((gT·a)/|a|^2)*a（|a|=0 的退化面原样返回，
-            # 那种面的通量投影本来就是零）。用逆变行 adjrow_o 而非
-            # true_normal，理由见 flux_kernels.py::mirror_normal_component。
-            a2_o = cp.sum(adjrow_o * adjrow_o, axis=-1, keepdims=True)
-            d_o = cp.sum(gT_o * adjrow_o, axis=-1, keepdims=True) / cp.where(a2_o > 0.0, a2_o, 1.0)
-            gT_mirror_o = cp.where(a2_o > 0.0, gT_o - 2.0 * d_o * adjrow_o, gT_o)
-            adiab_o = bnd_adiabatic_gpu[idx_o][:, None, None]
-            gT_n = cp.where(bmask3, cp.where(adiab_o, gT_mirror_o, gT_o), gT_n)
-            mut_n = cp.where(is_bnd_o[:, None], mut_o, mut_n)
-
-            # 混合拆分面（B-8，镜像 CPU viscous_flux_kernel.py 同名分支）：边界半区用配对面幽灵态，
-            # 梯度镜像内部值——与真边界面同规则，逐 FP 生效。
+            # 边界面与混合拆分面边界半区（B-8）：状态取幽灵态（混合面取配对面的），
+            # "另一侧"梯度与罚项按粘性边界种类（CPU `flux_kernels/viscous_bc.py`）。
             mp_o = ff.mixed_nb_partner[idx_o]
             mixed_sel_o = (mp_o[:, None] >= 0) & ff.mixed_nb_mask[idx_o]  # (nO, n_fp)
-            mixed3_o = mixed_sel_o[..., None]
-            # Q_ghost_gpu 形状 (n_faces, n_fp, 5)，与 Q_n 形状一致，逐 FP 直接替换。
-            Q_ghost_partner_o = Q_ghost_gpu[cp.maximum(mp_o, 0)]  # (nO, n_fp, 5)
-            Q_n = cp.where(mixed3_o, Q_ghost_partner_o, Q_n)
-            gv_n = cp.where(mixed_sel_o[:, :, None, None], gv_o, gv_n)
-            adiab_mp_o = bnd_adiabatic_gpu[cp.maximum(mp_o, 0)][:, None, None]
-            gT_n = cp.where(mixed3_o, cp.where(adiab_mp_o, gT_mirror_o, gT_o), gT_n)
-            mut_n = cp.where(mixed_sel_o, mut_o, mut_n)
-            # 逐 FP 的"边界半区"标记（真边界面全 FP 生效 + 混合面仅掩码 FP 生效），下方 IP 罚项共用。
-            is_bnd_i_o = is_bnd_o[:, None] | mixed_sel_o
-
-            Q_avg = 0.5 * (Q_o + Q_n)
-            gv_avg = 0.5 * (gv_o + gv_n)
-            gT_avg = 0.5 * (gT_o + gT_n)
-            mut_avg = 0.5 * (mut_o + mut_n)
-
-            G_tilde_common, G_tilde_own = _viscous_tilde_flux_pair(
-                Q_avg, gv_avg, gT_avg, mut_avg, Q_o, gv_o, gT_o, mut_o,
-                adjrow_o, mu, Pr, Pr_t,
-            )
-            jump_owner = G_tilde_common - G_tilde_own
-
-            # IP 罚项：**边界面与内部面都要加**（2026-09-23）。逐字对应 CPU 侧
-            # `viscous_flux_kernel.py` 的两条分支，只是这里向量化、用
-            # `cp.where(is_bnd_i_o, 边界档, 内部档)` 逐 FP 选系数：
-            #   边界档：mu 取本侧、`k_total = 0`、不含做功项；
-            #   内部档：mu/k 取面平均、含动量罚项做的功。
-            # 内部面为什么必须加、以及长度尺度为什么是 `cell_volume/face_area`
-            # 而不是 `mean(det_jacs)**(1/3)`，见
-            # `flux_kernels.viscous_ip_penalty_tilde` 的两节文档。
-            a0 = adjrow_o[..., 0]
-            a1 = adjrow_o[..., 1]
-            a2 = adjrow_o[..., 2]
-            adj_mag_o = cp.sqrt(a0 * a0 + a1 * a1 + a2 * a2)  # (nO,n_fp)
-            h_ip_o = ff.ip_length[idx_o]
-            # 罚项 side 因子恒为 +1（原生面的 adj 行已 outward 定向）：
-            # 见 CPU 侧 `viscous_flux_kernel.py` 同一处的完整说明
-            # （2026-09-22 修复的真实缺陷，此前误乘 `owner_side`）。
-            base_o = c_ip_visc * adj_mag_o / h_ip_o[:, None]  # (nO,n_fp)
-            eta_v_o = base_o * cp.where(is_bnd_i_o, mu + mut_o, mu + mut_avg)
-            eta_T_o = base_o * cp.where(
-                is_bnd_i_o, 0.0, mu * CP_AIR / Pr + mut_avg * CP_AIR / Pr_t)
-            du_o = Q_o[..., 1:4] - Q_n[..., 1:4]             # (nO,n_fp,3)
-            um_o = 0.5 * (Q_o[..., 1:4] + Q_n[..., 1:4])
-            work_o = cp.where(is_bnd_i_o, 0.0, cp.sum(um_o * du_o, axis=-1))
-            T_o_p = Q_o[..., 4] / (Q_o[..., 0] * R_AIR)
-            T_n_p = Q_n[..., 4] / (Q_n[..., 0] * R_AIR)
-            pen_full = cp.zeros_like(jump_owner)
-            pen_full[..., 1:4] = -eta_v_o[..., None] * du_o
-            pen_full[..., 4] = -eta_v_o * work_o - eta_T_o * (T_o_p - T_n_p)
-            jump_owner = jump_owner + pen_full
+            Q_n = cp.where(is_bnd_o[:, None, None], Q_ghost_gpu[idx_o], Q_n)
+            Q_n = cp.where(mixed_sel_o[..., None], Q_ghost_gpu[cp.maximum(mp_o, 0)], Q_n)
+            K_o = cp.where(is_bnd_o[:, None], vbc_kind_gpu[idx_o][:, None],
+                           cp.where(mixed_sel_o, vbc_kind_gpu[cp.maximum(mp_o, 0)][:, None], VBC_INTERIOR))
+            K_o, gv_n, gT_n, mut_n = _boundary_other_side_gpu(
+                cp, K_o, Q_o, gv_o, gT_o, mut_o, Q_n, gv_n, gT_n, mut_n, adjrow_o)
+            jump_owner = _viscous_jump_gpu(
+                cp, K_o, Q_o, gv_o, gT_o, mut_o, Q_n, gv_n, gT_n, mut_n, adjrow_o,
+                ff.ip_length[idx_o], mu, Pr, Pr_t, c_ip_visc)
 
             # 面校正分配：DG 提升算子
             # `lift_native[code-6] @ (ref_area_weight ⊙ jump)`，与 CPU 版
@@ -200,54 +218,19 @@ def _compute_viscous_interface_correction_gpu(
             )
             adjrow_n = ff.neighbor_adj_row_exact[idx_n]
 
-            # 混合拆分面（B-8）：neighbor 侧对称处理——边界半区对侧状态取配对面幽灵态，梯度镜像。
+            # 混合拆分面（B-8）：neighbor 侧对称处理——边界半区对侧状态取配对面幽灵态，
+            # 梯度与罚项按该配对面的粘性边界种类。
             mp_n = ff.mixed_ow_partner[idx_n]
             mixed_sel_n = (mp_n[:, None] >= 0) & ff.mixed_ow_mask[idx_n]  # (nN, n_fp)
-            mixed3_n = mixed_sel_n[..., None]
-            Q_ghost_partner_n = Q_ghost_gpu[cp.maximum(mp_n, 0)]  # (nN, n_fp, 5)
-            Q_o_at_n = cp.where(mixed3_n, Q_ghost_partner_n, Q_o_at_n)
-            gv_o_at_n = cp.where(mixed_sel_n[:, :, None, None], gv_n_native, gv_o_at_n)
-            a2_n = cp.sum(adjrow_n * adjrow_n, axis=-1, keepdims=True)
-            d_n = cp.sum(gT_n_native * adjrow_n, axis=-1, keepdims=True) / cp.where(a2_n > 0.0, a2_n, 1.0)
-            gT_mirror_n = cp.where(a2_n > 0.0, gT_n_native - 2.0 * d_n * adjrow_n, gT_n_native)
-            adiab_mp_n = bnd_adiabatic_gpu[cp.maximum(mp_n, 0)][:, None, None]
-            gT_o_at_n = cp.where(mixed3_n, cp.where(adiab_mp_n, gT_mirror_n, gT_n_native), gT_o_at_n)
-            mut_o_at_n = cp.where(mixed_sel_n, mut_n_native, mut_o_at_n)
-
-            Q_avg_n = 0.5 * (Q_n_native + Q_o_at_n)
-            gv_avg_n = 0.5 * (gv_n_native + gv_o_at_n)
-            gT_avg_n = 0.5 * (gT_n_native + gT_o_at_n)
-            mut_avg_n = 0.5 * (mut_n_native + mut_o_at_n)
-
-            G_tilde_common_n, G_tilde_own_n = _viscous_tilde_flux_pair(
-                Q_avg_n, gv_avg_n, gT_avg_n, mut_avg_n,
-                Q_n_native, gv_n_native, gT_n_native, mut_n_native,
-                adjrow_n, mu, Pr, Pr_t,
-            )
-            jump_neighbor = G_tilde_common_n - G_tilde_own_n
-
-            # neighbor 侧 IP 罚项：与 owner 侧同一套（边界档 = 混合拆分面的
-            # 边界半区 `mixed_sel_n`，其余 FP 走内部档）。
-            a0n = adjrow_n[..., 0]
-            a1n = adjrow_n[..., 1]
-            a2n = adjrow_n[..., 2]
-            adj_mag_n = cp.sqrt(a0n * a0n + a1n * a1n + a2n * a2n)
-            h_ip_n = ff.ip_length[idx_n]
-            base_n = c_ip_visc * adj_mag_n / h_ip_n[:, None]
-            mut_avg_n = 0.5 * (mut_n_native + mut_o_at_n)
-            eta_v_n = base_n * cp.where(
-                mixed_sel_n, mu + mut_n_native, mu + mut_avg_n)
-            eta_T_n = base_n * cp.where(
-                mixed_sel_n, 0.0, mu * CP_AIR / Pr + mut_avg_n * CP_AIR / Pr_t)
-            du_n = Q_n_native[..., 1:4] - Q_o_at_n[..., 1:4]
-            um_n = 0.5 * (Q_n_native[..., 1:4] + Q_o_at_n[..., 1:4])
-            work_n = cp.where(mixed_sel_n, 0.0, cp.sum(um_n * du_n, axis=-1))
-            T_n_p2 = Q_n_native[..., 4] / (Q_n_native[..., 0] * R_AIR)
-            T_o_p2 = Q_o_at_n[..., 4] / (Q_o_at_n[..., 0] * R_AIR)
-            pen_full_n = cp.zeros_like(jump_neighbor)
-            pen_full_n[..., 1:4] = -eta_v_n[..., None] * du_n
-            pen_full_n[..., 4] = -eta_v_n * work_n - eta_T_n * (T_n_p2 - T_o_p2)
-            jump_neighbor = jump_neighbor + pen_full_n
+            Q_o_at_n = cp.where(mixed_sel_n[..., None], Q_ghost_gpu[cp.maximum(mp_n, 0)], Q_o_at_n)
+            K_n = cp.where(mixed_sel_n, vbc_kind_gpu[cp.maximum(mp_n, 0)][:, None], VBC_INTERIOR)
+            K_n, gv_o_at_n, gT_o_at_n, mut_o_at_n = _boundary_other_side_gpu(
+                cp, K_n, Q_n_native, gv_n_native, gT_n_native, mut_n_native,
+                Q_o_at_n, gv_o_at_n, gT_o_at_n, mut_o_at_n, adjrow_n)
+            jump_neighbor = _viscous_jump_gpu(
+                cp, K_n, Q_n_native, gv_n_native, gT_n_native, mut_n_native,
+                Q_o_at_n, gv_o_at_n, gT_o_at_n, mut_o_at_n, adjrow_n,
+                ff.ip_length[idx_n], mu, Pr, Pr_t, c_ip_visc)
 
             contrib_n = _lift_native_contrib(
                 cp, nc_code_n, ff.lift_native, ff.ref_area_weight,

@@ -23,7 +23,7 @@ x 幽灵态导数"分开差分再用链式法则拼起来，在拐点上与真�
 本侧原始变量平移 `HG[v]`、幽灵态取同一平移下预先算好的 `QgP[v, ghost_row[f]]`
 （见 `assemble.py`：整场均匀平移后调用残差用的同一个幽灵态函数；外插保常数，
 迹也恰好平移 `HG[v]`）；梯度输入平移时另一侧梯度按
-`viscous_boundary_other_gradients` 重新构造。
+`boundary_other_gradients`（同一粘性边界种类）重新构造。
 
 混合拆分面的边界半区（`mixed_*_mask`）同样按边界规则取另一侧梯度；另一侧状态
 是配对边界面 `mp` 的幽灵态，它随 `mp` 的 owner 单元 `p` 变化，经
@@ -37,9 +37,8 @@ x 幽灵态导数"分开差分再用链式法则拼起来，在拐点上与真�
 import numpy as np
 from numba import njit, prange
 
-from autoflowcfd.core.fr_residual.face_point_jumps import (
-    inviscid_jump_point, viscous_boundary_other_gradients, viscous_jump_point,
-)
+from autoflowcfd.core.fr_operators.flux_kernels import VBC_INTERIOR, boundary_other_gradients
+from autoflowcfd.core.fr_residual.face_point_jumps import inviscid_jump_point, viscous_jump_point
 from .pointwise import N_VISC_INPUTS, _SQRT_EPS, primitive_step
 
 #: 每个面侧的耦合块来源：src0 单元、src1 单元、混合拆分面配对边界面的 owner。
@@ -47,10 +46,10 @@ N_CROSS_SOURCES = 3
 
 
 @njit(cache=True, inline='always')
-def _total_jump(Qs, gvs, gTs, mus, Qx, gvx, gTx, mux, adjrow, h_ip, bnd_pen, mu, Pr, Pr_t, c_ip,
+def _total_jump(Qs, gvs, gTs, mus, Qx, gvx, gTx, mux, adjrow, h_ip, bkind, mu, Pr, Pr_t, c_ip,
                 mach_ref, precond_mode):
     J = inviscid_jump_point(Qs, Qx, adjrow, mach_ref, precond_mode)
-    Jv = viscous_jump_point(Qs, gvs, gTs, mus, Qx, gvx, gTx, mux, adjrow, h_ip, bnd_pen,
+    Jv = viscous_jump_point(Qs, gvs, gTs, mus, Qx, gvx, gTx, mux, adjrow, h_ip, bkind,
                             mu, Pr, Pr_t, c_ip)
     for v in range(5):
         J[v] = Jv[v] - J[v]
@@ -138,7 +137,7 @@ def _trace(M, field, c, n):
 @njit(cache=True)
 def _side_blocks(c, n, E, L, w, adjrow, f, is_bnd_face, masked_row, mp, src_cells, src_mats,
                  Q, gv_sp, gT_sp, mut, dTdQ, inv_sp, D_prism, D_tet, n_prism, n_real_prism, n_real_tet,
-                 Qg0, QgP, ghost_row, HG, adiabatic, owner_cell, owner_cube_face, E_nat,
+                 Qg0, QgP, ghost_row, HG, vbc_kind, owner_cell, owner_cube_face, E_nat,
                  h_ip, mu, Pr, Pr_t, c_ip, mach_ref, precond_mode, want_cross):
     """一个 primary 面侧的块贡献（未除 det，原始变量空间）。
 
@@ -163,7 +162,7 @@ def _side_blocks(c, n, E, L, w, adjrow, f, is_bnd_face, masked_row, mp, src_cell
     for i in range(n_fp):
         masked = masked_row[i] if mp >= 0 else False
         bnd_i = is_bnd_face or masked
-        adi = False
+        bk = VBC_INTERIOR
         if is_bnd_face:
             Qx = Qg0[f, i].copy()
         elif masked:
@@ -174,8 +173,8 @@ def _side_blocks(c, n, E, L, w, adjrow, f, is_bnd_face, masked_row, mp, src_cell
         gTx = np.zeros(3)
         mux = 0.0
         if bnd_i:
-            adi = adiabatic[f] if is_bnd_face else adiabatic[mp]
-            gvx, gTx = viscous_boundary_other_gradients(gvs[i], gTs[i], adjrow[i], adi)
+            bk = vbc_kind[f] if is_bnd_face else vbc_kind[mp]
+            gvx, gTx = boundary_other_gradients(gvs[i], gTs[i], adjrow[i], bk)
             mux = mus[i]
         else:
             for k in range(2):
@@ -190,10 +189,10 @@ def _side_blocks(c, n, E, L, w, adjrow, f, is_bnd_face, masked_row, mp, src_cell
                         gvx += wgt * gv_sp[cc, t]
                         gTx += wgt * gT_sp[cc, t]
                         mux += wgt * mut[cc, t]
-        J0 = _total_jump(Qs[i], gvs[i], gTs[i], mus[i], Qx, gvx, gTx, mux, adjrow[i], h_ip, bnd_i,
+        J0 = _total_jump(Qs[i], gvs[i], gTs[i], mus[i], Qx, gvx, gTx, mux, adjrow[i], h_ip, bk,
                          mu, Pr, Pr_t, c_ip, mach_ref, precond_mode)
         # 梯度输入只进粘性跳变量：对它们差分时不必重算 AUSM+up
-        Jv0 = viscous_jump_point(Qs[i], gvs[i], gTs[i], mus[i], Qx, gvx, gTx, mux, adjrow[i], h_ip, bnd_i,
+        Jv0 = viscous_jump_point(Qs[i], gvs[i], gTs[i], mus[i], Qx, gvx, gTx, mux, adjrow[i], h_ip, bk,
                                  mu, Pr, Pr_t, c_ip)
         # ---- 本侧原始变量（边界面：复合差分）----
         for v in range(5):
@@ -206,7 +205,7 @@ def _side_blocks(c, n, E, L, w, adjrow, f, is_bnd_face, masked_row, mp, src_cell
                 h = primitive_step(Qs[i], v)
                 q[v] += h
                 qx = Qx
-            J1 = _total_jump(q, gvs[i], gTs[i], mus[i], qx, gvx, gTx, mux, adjrow[i], h_ip, bnd_i,
+            J1 = _total_jump(q, gvs[i], gTs[i], mus[i], qx, gvx, gTx, mux, adjrow[i], h_ip, bk,
                              mu, Pr, Pr_t, c_ip, mach_ref, precond_mode)
             for o in range(5):
                 dS[i, o, v] = (J1[o] - J0[o]) / h
@@ -225,11 +224,11 @@ def _side_blocks(c, n, E, L, w, adjrow, f, is_bnd_face, masked_row, mp, src_cell
                 h = _gradient_step(tt[j - 14], st)
                 tt[j - 14] += h
             if bnd_i:
-                g_x, t_x = viscous_boundary_other_gradients(g, tt, adjrow[i], adi)
+                g_x, t_x = boundary_other_gradients(g, tt, adjrow[i], bk)
             else:
                 g_x = gvx
                 t_x = gTx
-            J1 = viscous_jump_point(Qs[i], g, tt, mus[i], Qx, g_x, t_x, mux, adjrow[i], h_ip, bnd_i,
+            J1 = viscous_jump_point(Qs[i], g, tt, mus[i], Qx, g_x, t_x, mux, adjrow[i], h_ip, bk,
                                     mu, Pr, Pr_t, c_ip)
             for o in range(5):
                 dS[i, o, j] = (J1[o] - Jv0[o]) / h
@@ -242,7 +241,7 @@ def _side_blocks(c, n, E, L, w, adjrow, f, is_bnd_face, masked_row, mp, src_cell
                 qx = Qx.copy()
                 qx[v] += h
                 J1 = _total_jump(Qs[i], gvs[i], gTs[i], mus[i], qx, gvx, gTx, mux, adjrow[i], h_ip,
-                                 bnd_i, mu, Pr, Pr_t, c_ip, mach_ref, precond_mode)
+                                 bk, mu, Pr, Pr_t, c_ip, mach_ref, precond_mode)
                 for o in range(5):
                     dX[o, v] = (J1[o] - J0[o]) / h
             r = ghost_row[mp]
@@ -271,13 +270,13 @@ def _side_blocks(c, n, E, L, w, adjrow, f, is_bnd_face, masked_row, mp, src_cell
                     h = _gradient_step(tt[j - 14], sgt)
                     tt[j - 14] += h
                 if j < 5:
-                    J1 = _total_jump(Qs[i], gvs[i], gTs[i], mus[i], qx, g, tt, mux, adjrow[i], h_ip, False,
+                    J1 = _total_jump(Qs[i], gvs[i], gTs[i], mus[i], qx, g, tt, mux, adjrow[i], h_ip, VBC_INTERIOR,
                                      mu, Pr, Pr_t, c_ip, mach_ref, precond_mode)
                     for o in range(5):
                         dO[i, o, j] = (J1[o] - J0[o]) / h
                 else:
                     J1 = viscous_jump_point(Qs[i], gvs[i], gTs[i], mus[i], qx, g, tt, mux, adjrow[i], h_ip,
-                                            False, mu, Pr, Pr_t, c_ip)
+                                            VBC_INTERIOR, mu, Pr, Pr_t, c_ip)
                     for o in range(5):
                         dO[i, o, j] = (J1[o] - Jv0[o]) / h
 
@@ -318,7 +317,7 @@ def add_face_blocks_color(face_indices, K_prism, K_tet, slot, n_prism, n_real_pr
                           neighbor_src0_cell, neighbor_src0_tpl, neighbor_src0_tid, neighbor_src1_idx, neighbor_src1_cell,
                           neighbor_src1_mat, owner_src0_cell, owner_src0_tpl, owner_src0_tid, owner_src1_idx,
                           owner_src1_cell, owner_src1_mat, mixed_nb_partner, mixed_nb_mask,
-                          mixed_ow_partner, mixed_ow_mask, Qg0, QgP, ghost_row, HG, adiabatic,
+                          mixed_ow_partner, mixed_ow_mask, Qg0, QgP, ghost_row, HG, vbc_kind,
                           owner_cube_face, neighbor_cube_face, ref_area_weight, E_nat, lift_nat,
                           ip_length, mu, Pr, Pr_t, c_ip, mach_ref, precond_mode,
                           cross_offset, cross_data, cross_col):
@@ -375,7 +374,7 @@ def add_face_blocks_color(face_indices, K_prism, K_tet, slot, n_prism, n_real_pr
             blk, cross, cross_cells = _side_blocks(
                 c, n, E, L, ref_area_weight, adjrow, f, is_bnd_face, masked_row, mp, src_cells, src_mats,
                 Q, gv_sp, gT_sp, mut, dTdQ, inv_sp, D_prism, D_tet, n_prism, n_real_prism, n_real_tet,
-                Qg0, QgP, ghost_row, HG, adiabatic, owner_cell, owner_cube_face, E_nat,
+                Qg0, QgP, ghost_row, HG, vbc_kind, owner_cell, owner_cube_face, E_nat,
                 ip_length[f], mu, Pr, Pr_t, c_ip, mach_ref, precond_mode, want_cross)
             k = slot[c]
             K = K_prism if is_p else K_tet

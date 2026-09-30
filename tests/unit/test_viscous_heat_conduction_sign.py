@@ -86,3 +86,89 @@ def test_viscous_operator_has_no_growing_mode(kind):
     lam = np.linalg.eigvals(A)
     assert lam.real.max() <= 1e-8 * np.abs(lam).max(), (
         f"{kind}: 纯粘性算子有增长模态 max Re = {lam.real.max():.3e}（谱半径 {np.abs(lam).max():.3e}）")
+
+
+def _dg_mass_matrix(mesh, order, ncomp):
+    """原生棱柱单元的 DG 质量矩阵（`vol/4 · V^-T diag(模方) V^-1`，逐单元块对角，
+    每个解点 `ncomp` 个分量）。强制性要在这个内积下判：FR(c=0) 与 DG 等价，
+    `<u, L u>_M = -a(u, u)`。"""
+    import scipy.linalg as sla
+    from autoflowcfd.fr.native_prism.basis import (
+        build_native_prism_nodes, build_native_prism_vandermonde, restricted_prism_modes,
+    )
+    from autoflowcfd.fr.native_prism.face import native_prism_mode_norm_squared
+
+    Vi = np.linalg.inv(build_native_prism_vandermonde(order, build_native_prism_nodes(order))[0])
+    nrm = np.array([native_prism_mode_norm_squared(*m) for m in restricted_prism_modes(order)])
+    M_loc = Vi.T @ np.diag(nrm) @ Vi
+    vol = np.asarray(mesh.get_all_cell_volumes())
+    return sla.block_diag(*[np.kron(v / 4.0 * M_loc, np.eye(ncomp)) for v in vol])
+
+
+@pytest.mark.parametrize("order,var,bcs", [
+    (1, "T", "blasius"), (2, "T", "blasius"), (1, "mom", "blasius"), (2, "mom", "blasius"),
+    (1, "mom", "symmetry"), (2, "mom", "symmetry"),
+])
+def test_viscous_operators_are_coercive_with_mixed_boundaries(order, var, bcs):
+    """纯热传导（静止、等压温度扰动）与纯动量扩散（静止、速度扰动）算子在质量
+    矩阵内积下强制：对称部分的最大广义特征值 <= 0。
+
+    网格与边界照 Blasius 算例：单元流向/法向长宽比 8、nz=1、下壁无滑移、上边界
+    远场、x 两端入口/出口、z 两面对称。2026-09-30 之前的边界处理（入口/出口/
+    远场"本侧梯度、不罚温度"，对称面切向应力原样穿过边界）下：温度 P2 最大
+    广义特征值 +0.58、27 个正方向，算子本身 3 个正实部特征值；动量全对称边界
+    下也有 34 个正方向（`bcs="symmetry"` 一档：六面全对称，对称面切向应力原样
+    穿过边界）。完整论证见 `flux_kernels/viscous_bc.py` 模块文档。
+    """
+    import scipy.linalg as sla
+
+    nx, ny, nz = 3, 3, 1
+    lx, lz = 0.4, 0.3
+    hy = lx / nx * ny / 8.0
+    mesh = build_channel_mesh_prism(order, nx, ny, nz, lx, hy, lz)
+    bc = {"z_min": {"type": "SYMMETRY"}, "z_max": {"type": "SYMMETRY"},
+          "wall_bottom": {"type": "WALL", "is_no_slip": True, "wall_velocity": [0.0, 0.0, 0.0]},
+          "wall_top": {"type": "FARFIELD", "Q_free": [RHO, 0.0, 0.0, 0.0, P_INF]},
+          "x_min": {"type": "INLET", "Q_inlet": [RHO, 0.0, 0.0, 0.0, P_INF]},
+          "x_max": {"type": "OUTLET", "p_outlet": P_INF}}
+    if bcs == "symmetry":
+        bc = {name: {"type": "SYMMETRY"} for name in bc}
+    prov = build_face_exact_ghost_provider(mesh, lx, hy, lz, bc)
+    ops = generate_fr_operators(order)
+    nc, ns = mesh.n_cells, mesh.n_sps_per_cell
+    nr, _ = real_sps_per_cell(order)
+    ncomp = 3 if var == "mom" else 1
+    T0 = 288.0
+
+    def rate(x):
+        """扰动 -> 该扰动量自身的时间导数（温度：等压下的 dT/dt；动量：du/dt）。"""
+        U = np.zeros((nc, ns, 5))
+        U[..., 0] = RHO
+        U[..., 4] = P_INF / 0.4
+        if var == "mom":
+            u = x.reshape(nc, nr, 3)
+            U[:, :nr, 1:4] = RHO * u
+            U[:, :nr, 4] += 0.5 * RHO * (u ** 2).sum(-1)
+            f = compute_viscous_residual_fr(U, mesh, ops, MU, PR, boundary_ghost_provider=prov)
+            return (f[:, :nr, 1:4] / RHO).ravel()
+        U[:, :nr, 0] = P_INF / (287.0 * (T0 + x.reshape(nc, nr)))
+        f = compute_viscous_residual_fr(U, mesh, ops, MU, PR, boundary_ghost_provider=prov)
+        rho = U[..., 0]
+        dT = 0.4 * f[..., 4] / (287.0 * rho) - P_INF / (287.0 * rho ** 2) * f[..., 0]
+        return dT[:, :nr].ravel()
+
+    n = nc * nr * ncomp
+    x0 = np.zeros(n)
+    f0 = rate(x0)
+    L = np.empty((n, n))
+    h = 1e-3
+    for j in range(n):
+        x = x0.copy()
+        x[j] = h
+        L[:, j] = (rate(x) - f0) / h
+    M = _dg_mass_matrix(mesh, order, ncomp)
+    ML = M @ L
+    ev = sla.eigh(0.5 * (ML + ML.T), M, eigvals_only=True)
+    assert ev[-1] <= 1e-8 * abs(ev[0]), (
+        f"P{order} {var} {bcs}: 质量矩阵内积下对称部分最大广义特征值 {ev[-1]:+.3e}"
+        f"（最小 {ev[0]:+.3e}），{int((ev > 1e-8 * abs(ev[0])).sum())} 个正方向 —— 扩散算子不强制")

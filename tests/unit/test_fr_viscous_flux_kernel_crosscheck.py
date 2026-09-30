@@ -25,7 +25,7 @@ from autoflowcfd.core.fr_operators.flux_kernels import (
 )
 from autoflowcfd.core.fr_residual.inviscid_kernel import compute_boundary_ghost_states
 from autoflowcfd.core.fr_residual.viscous_flux_kernel import compute_viscous_interface_correction_kernel
-from autoflowcfd.boundary.fr_ghost_state import build_boundary_adiabatic_mask
+from autoflowcfd.boundary.fr_ghost_state import build_viscous_boundary_kind
 from autoflowcfd.core.fr_operators.flux_kernels import viscous_physical_flux_batch
 from autoflowcfd.core.fr_operators.volume_contract import contract_shared_operator_2axis
 
@@ -102,7 +102,7 @@ def _compute_residual_via_new_kernel(U, mesh, ops, mu_t_field=None, boundary_gho
     # --- 界面项：新 kernel ---
     flat = get_flat_face_geometry(mesh, ops)
     Q_ghost = compute_boundary_ghost_states(flat, Q, adj_j, ghost_provider)
-    bnd_adiabatic = build_boundary_adiabatic_mask(flat.n_faces, flat.is_boundary, ghost_provider)
+    vbc_kind = build_viscous_boundary_kind(flat.n_faces, flat.is_boundary, ghost_provider)
     n_threads = numba.get_num_threads()
     correction = compute_viscous_interface_correction_kernel(
         Q, grad_vel, grad_T, mu_t_field,
@@ -116,7 +116,7 @@ def _compute_residual_via_new_kernel(U, mesh, ops, mu_t_field=None, boundary_gho
         flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
         flat.mixed_nb_partner, flat.mixed_nb_mask,
         flat.mixed_ow_partner, flat.mixed_ow_mask,
-        Q_ghost, bnd_adiabatic,
+        Q_ghost, vbc_kind,
         n_threads,
         flat.owner_cube_face, flat.neighbor_cube_face,
         flat.ref_area_weight,

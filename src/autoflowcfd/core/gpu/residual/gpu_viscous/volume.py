@@ -275,15 +275,13 @@ def compute_viscous_residual_fr_gpu(
     )
     Q_cpu = cp.asnumpy(Q)
     Q_ghost_np = compute_boundary_ghost_states(flat_face, Q_cpu, None, ghost_provider)
-    # 边界温度梯度按热边界类型分派（WALL/SYMMETRY 法向镜像 ⇒ 离散壁面热
-    # 通量精确为零；INLET/OUTLET/FARFIELD 透射），与 CPU
-    # viscous_flux_kernel.py 模块文档"边界温度梯度"一节逐字对应。
-    from autoflowcfd.boundary.fr_ghost_state import build_boundary_adiabatic_mask
-    bnd_adiabatic_np = build_boundary_adiabatic_mask(
-        flat_face.n_faces, flat_face.is_boundary, ghost_provider)
+    # 边界面公共粘性通量按粘性边界种类分派，与 CPU
+    # core/fr_operators/flux_kernels/viscous_bc.py 同一份分类。
+    from autoflowcfd.boundary.fr_ghost_state import build_viscous_boundary_kind
+    vbc_kind_np = build_viscous_boundary_kind(flat_face.n_faces, flat_face.is_boundary, ghost_provider)
     with cp.cuda.Device(device_id):
         Q_ghost_gpu = cp.asarray(Q_ghost_np)
-        bnd_adiabatic_gpu = cp.asarray(bnd_adiabatic_np)
+        vbc_kind_gpu = cp.asarray(vbc_kind_np)
 
     if mu_t_field is None:
         mu_t_gpu = cp.zeros((n_cells, n_sps, 1), dtype=cp.float64)
@@ -293,7 +291,7 @@ def compute_viscous_residual_fr_gpu(
     interface_correction = _compute_viscous_interface_correction_gpu(
         Q, grad_vel, grad_T, mu_t_gpu,
         det_jacs, mu, Pr, Pr_t,
-        flat_face_gpu, Q_ghost_gpu, bnd_adiabatic_gpu,
+        flat_face_gpu, Q_ghost_gpu, vbc_kind_gpu,
         n_cells, n_sps, n_prism, device_id,
         resolve_viscous_ip_constant(int(mesh.order)),
     )

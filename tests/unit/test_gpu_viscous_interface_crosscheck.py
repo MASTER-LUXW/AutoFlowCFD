@@ -90,21 +90,23 @@ def test_gpu_wall_boundary_uses_real_ghost_state():
     WALL 无滑移边界的剪应力/IP 罚项不存在。用一个自定义 ghost_provider
     模拟 WALL 无滑移镜像（速度取反），验证 GPU 残差里动量分量确实
     对这个自定义边界条件有响应（不是恒等于自由流残差）。"""
-    from autoflowcfd.core.fr_residual.inviscid import DefaultGhostProvider
-
-    class WallMirrorGhostProvider:
-        def __call__(self, face_idx, Q_owner, normal):
-            Q_g = Q_owner.copy()
-            Q_g[..., 1:4] = -Q_g[..., 1:4]
-            return Q_g
+    from autoflowcfd.boundary.fr_ghost_state import BoundaryGhostStateProvider
+    from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 
     mesh = _build_synthetic_mixed_mesh(1)
+    # 全部边界面取静止无滑移壁（幽灵态速度取反）。必须是带 BC 语义的 provider：
+    # 粘性通量的边界处理按逐面种类分派，没有语义的 provider 会被拒绝
+    # （`fr_ghost_state.build_viscous_boundary_kind`）。
+    flat = get_flat_face_geometry(mesh, mesh.operators)
+    group_code = np.full(flat.n_faces, -1, dtype=np.int64)
+    group_code[flat.is_boundary] = 0
+    wall = {"type": "WALL", "is_no_slip": True}
     rho_inf, u_inf, v_inf, w_inf, p_inf = 1.225, 30.0, 5.0, -3.0, 101325.0
     Q_inf = np.array([rho_inf, u_inf, v_inf, w_inf, p_inf])
     U_inf = primitive_to_conserved(Q_inf)
     U = np.tile(U_inf, (mesh.n_cells, mesh.n_sps_per_cell, 1))
 
-    wall_provider = WallMirrorGhostProvider()
+    wall_provider = BoundaryGhostStateProvider(group_code, {0: wall}, wall)
     cpu_residual = compute_viscous_residual_fr(
         U, mesh, mesh.operators, MU, PR, boundary_ghost_provider=wall_provider,
     )

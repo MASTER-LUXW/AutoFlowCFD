@@ -173,9 +173,8 @@ def assemble_mean_flow_blocks(ctx: MeanFlowLinearization, U, residual=None, want
     flat = ctx.flat_geometry()
     adj_j = compute_adj_j(det, inv_sp)
     Qg0, QgP, HG, row = _ghost_perturbations(flat, Q, adj_j, ctx.ghost_provider)
-    from autoflowcfd.boundary.fr_ghost_state import build_boundary_adiabatic_mask
-    adiabatic = np.asarray(build_boundary_adiabatic_mask(flat.n_faces, flat.is_boundary, ctx.ghost_provider),
-                           dtype=np.bool_)
+    from autoflowcfd.boundary.fr_ghost_state import build_viscous_boundary_kind
+    vbc_kind = build_viscous_boundary_kind(flat.n_faces, flat.is_boundary, ctx.ghost_provider)
     c_ip = resolve_viscous_ip_constant(int(mesh.order))
     if want_coupling:
         cross_offset, expected_col, cross_size, slots = cross_layout(flat, n_prism, npr, nte)
@@ -202,7 +201,7 @@ def assemble_mean_flow_blocks(ctx: MeanFlowLinearization, U, residual=None, want
             flat.owner_src0_cell, flat.owner_src0_tpl, flat.owner_src0_tid, flat.owner_src1_idx,
             flat.owner_src1_cell, flat.owner_src1_mat,
             flat.mixed_nb_partner, flat.mixed_nb_mask, flat.mixed_ow_partner, flat.mixed_ow_mask,
-            Qg0, QgP, row, HG, adiabatic,
+            Qg0, QgP, row, HG, vbc_kind,
             flat.owner_cube_face, flat.neighbor_cube_face, flat.ref_area_weight,
             flat.boundary_extrap_native, flat.lift_native, flat.ip_length,
             float(ctx.mu), float(ctx.Pr), float(ctx.Pr_t), float(c_ip),

@@ -38,9 +38,9 @@ from numba import njit, prange, get_thread_id
 
 from autoflowcfd.core.fr_operators.small_dense import matmul_small
 from autoflowcfd.core.fr_operators.flux_kernels import (
-    CP_AIR, viscous_physical_flux_point,
-    viscous_ip_penalty_tilde, mirror_normal_component,
+    VBC_INTERIOR, boundary_other_gradients,
 )
+from autoflowcfd.core.fr_residual.face_point_jumps import viscous_jump_point
 
 
 
@@ -64,7 +64,7 @@ def compute_viscous_interface_correction_p0_kernel(
     mixed_nb_partner: np.ndarray, mixed_nb_mask: np.ndarray,
     mixed_ow_partner: np.ndarray, mixed_ow_mask: np.ndarray,
     Q_ghost: np.ndarray,          # (n_boundary_faces, n_fp, 5)
-    bnd_adiabatic: np.ndarray,    # (n_faces,) 该边界面要求法向 dT/dn=0
+    vbc_kind: np.ndarray,         # (n_faces,) 粘性边界种类，见 flux_kernels/viscous_bc.py
     n_threads: int,
     owner_cube_face: np.ndarray, neighbor_cube_face: np.ndarray,
     ref_area_weight: np.ndarray,
@@ -162,7 +162,6 @@ def compute_viscous_interface_correction_p0_kernel(
             for i in range(n_fp):
                 # 混合拆分面（B-8，与通用 kernel 同步，见 viscous_flux_kernel.py 同名注释）。
                 mp = mixed_nb_partner[f]
-                is_bnd_i = is_boundary[f] or (mp >= 0 and mixed_nb_mask[f, i])
                 e_i = E_o[i, 0]  # 标量
                 adj_o_i = adjrow_o[i]  # (3,)，本 FP 的精确度量伴随行
 
@@ -181,16 +180,13 @@ def compute_viscous_interface_correction_p0_kernel(
                 mut_o_i = e_i * mut_o_s0
 
                 # 邻居状态（源矩阵插值；n_sps=1 时同样是标量乘 == 矩阵乘
-                # 的恒等式，不是简化）
+                # 的恒等式，不是简化）。边界面按粘性边界种类构造"另一侧"梯度，
+                # 规则与通用 kernel 同一份（`flux_kernels/viscous_bc.py`）。
+                bk = VBC_INTERIOR
                 if is_boundary[f]:
-                    # 边界温度梯度按热边界类型分派，见 viscous_flux_kernel.py
-                    # 模块文档"边界温度梯度"一节（三处 kernel 必须同步）。
                     Q_n = Q_ghost[f, i]
-                    gv_n = gv_o_i.copy()
-                    if bnd_adiabatic[f]:
-                        gT_n = mirror_normal_component(gT_o_i, adj_o_i)
-                    else:
-                        gT_n = gT_o_i.copy()
+                    bk = vbc_kind[f]
+                    gv_n, gT_n = boundary_other_gradients(gv_o_i, gT_o_i, adj_o_i, bk)
                     mut_n = mut_o_i
                 else:
                     Q_n = np.zeros(5)
@@ -222,80 +218,21 @@ def compute_viscous_interface_correction_p0_kernel(
                                     gv_n[a, b] += w * grad_vel[c1, 0, a, b]
                                 gT_n[a] += w * grad_T[c1, 0, a]
                             mut_n += w * mu_t_field[c1, 0]
-                    # 混合拆分面边界半区（B-8）：状态取配对面幽灵态，梯度镜像内部值。
+                    # 混合拆分面边界半区（B-8）：状态取配对面幽灵态，梯度按该边界种类构造。
                     if mp >= 0 and mixed_nb_mask[f, i]:
                         for v in range(5):
                             Q_n[v] = Q_ghost[mp, i, v]
-                        if bnd_adiabatic[mp]:
-                            gT_bnd = mirror_normal_component(gT_o_i, adj_o_i)
-                        else:
-                            gT_bnd = gT_o_i
+                        bk = vbc_kind[mp]
+                        gv_bnd, gT_bnd = boundary_other_gradients(gv_o_i, gT_o_i, adj_o_i, bk)
                         for a in range(3):
                             for b in range(3):
-                                gv_n[a, b] = gv_o_i[a, b]
+                                gv_n[a, b] = gv_bnd[a, b]
                             gT_n[a] = gT_bnd[a]
                         mut_n = mut_o_i
 
-                # 算术平均
-                Q_avg = np.empty(5)
-                for v in range(5):
-                    Q_avg[v] = 0.5 * (Q_o_i[v] + Q_n[v])
-                gv_avg = np.empty((3, 3))
-                for a in range(3):
-                    for b in range(3):
-                        gv_avg[a, b] = 0.5 * (gv_o_i[a, b] + gv_n[a, b])
-                gT_avg = np.empty(3)
-                for a in range(3):
-                    gT_avg[a] = 0.5 * (gT_o_i[a] + gT_n[a])
-                mut_avg = 0.5 * (mut_o_i + mut_n)
-
-                # 粘性通量
-                G_common = viscous_physical_flux_point(Q_avg, gv_avg, gT_avg, mu, Pr, mut_avg, Pr_t)
-                a0 = adj_o_i[0]
-                a1 = adj_o_i[1]
-                a2 = adj_o_i[2]
-                G_tilde_common = np.empty(5)
-                for v in range(5):
-                    G_tilde_common[v] = a0 * G_common[0, v] + a1 * G_common[1, v] + a2 * G_common[2, v]
-
-                G_phys_o = viscous_physical_flux_point(Q_o_i, gv_o_i, gT_o_i, mu, Pr, mut_o_i, Pr_t)
-                G_tilde_own = np.empty(5)
-                for v in range(5):
-                    G_tilde_own[v] = a0 * G_phys_o[0, v] + a1 * G_phys_o[1, v] + a2 * G_phys_o[2, v]
-
-                for v in range(5):
-                    jump_owner[i, v] = G_tilde_common[v] - G_tilde_own[v]
-
-                # `adj_mag_o` 与罚项长度尺度两条分支都要用，提到 if 之外。
-                adj_mag_o = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
-                h_ip_o = ip_length[f]
-                if is_bnd_i:
-                    # 边界 IP 罚项，见 viscous_flux_kernel.py::
-                    # compute_viscous_interface_correction_kernel 同名分支
-                    # 文档。（原注释写"P0 特化：vol_o 直接是 det_jacs[oc,0]"，
-                    # 2026-09-23 起罚项长度尺度改用面法向单元厚度（现为 `ip_length`），
-                    # 与阶数无关，那条特化说明已不适用。）
-                    pen = viscous_ip_penalty_tilde(
-                        Q_o_i, Q_n, mu + mut_o_i, 0.0, h_ip_o, adj_mag_o,
-                        1.0, c_ip, False,
-                    )
-                else:
-                    # **内部面 IP 罚项**（2026-09-23 修复真实缺陷，完整依据见
-                    # `viscous_ip_penalty_tilde` 的"为什么内部面也必须加"）：
-                    # `sigma = grad(u)` 是纯单元内局部梯度
-                    # （`compute_physical_gradient(field, mesh, ops)` 的签名里
-                    # 没有任何面数据），没有 BR1 要求的提升项；界面耦合只有
-                    # "粘性通量取两侧算术平均"这一层，内部面此前**零罚项** ——
-                    # 正是 ABCM(2002) 框架里"提升项与罚项都为零"的那一档，
-                    # 不满足强制性（实测均匀基态纯粘性算子谱正实部 328/2160）。
-                    # 涡粘与热传导率都取**面平均**，与 `G_common` 一致。
-                    k_tot_o = mu * CP_AIR / Pr + mut_avg * CP_AIR / Pr_t
-                    pen = viscous_ip_penalty_tilde(
-                        Q_o_i, Q_n, mu + mut_avg, k_tot_o, h_ip_o, adj_mag_o,
-                        1.0, c_ip, True,
-                    )
-                for v in range(1, 5):
-                    jump_owner[i, v] += pen[v]
+                jump_owner[i] = viscous_jump_point(
+                    Q_o_i, gv_o_i, gT_o_i, mut_o_i, Q_n, gv_n, gT_n, mut_n,
+                    adj_o_i, ip_length[f], bk, mu, Pr, Pr_t, c_ip)
 
             dj = det_jacs[oc, 0]
             # DG 提升算子：`lift_native[code-6]` 形状 (1,n_fp)，@ 之后直接
@@ -370,72 +307,21 @@ def compute_viscous_interface_correction_p0_kernel(
                         mut_o_at_n += w * mu_t_field[c1, 0]
                 # 混合拆分面边界半区（B-8）：neighbor 侧对称处理，规则同通用 kernel。
                 mp_o = mixed_ow_partner[f]
+                bk_n = VBC_INTERIOR
                 if mp_o >= 0 and mixed_ow_mask[f, i]:
                     for v in range(5):
                         Q_o_at_n[v] = Q_ghost[mp_o, i, v]
-                    if bnd_adiabatic[mp_o]:
-                        gT_bnd_n = mirror_normal_component(gT_n_i, adj_n_i)
-                    else:
-                        gT_bnd_n = gT_n_i
+                    bk_n = vbc_kind[mp_o]
+                    gv_bnd_n, gT_bnd_n = boundary_other_gradients(gv_n_i, gT_n_i, adj_n_i, bk_n)
                     for a in range(3):
                         for b in range(3):
-                            gv_o_at_n[a, b] = gv_n_i[a, b]
+                            gv_o_at_n[a, b] = gv_bnd_n[a, b]
                         gT_o_at_n[a] = gT_bnd_n[a]
                     mut_o_at_n = mut_n_i
 
-                Q_avg_n = np.empty(5)
-                for v in range(5):
-                    Q_avg_n[v] = 0.5 * (Q_n_i[v] + Q_o_at_n[v])
-                gv_avg_n = np.empty((3, 3))
-                for a in range(3):
-                    for b in range(3):
-                        gv_avg_n[a, b] = 0.5 * (gv_n_i[a, b] + gv_o_at_n[a, b])
-                gT_avg_n = np.empty(3)
-                for a in range(3):
-                    gT_avg_n[a] = 0.5 * (gT_n_i[a] + gT_o_at_n[a])
-                mut_avg_n = 0.5 * (mut_n_i + mut_o_at_n)
-
-                G_common_native = viscous_physical_flux_point(Q_avg_n, gv_avg_n, gT_avg_n, mu, Pr, mut_avg_n, Pr_t)
-                a0 = adj_n_i[0]
-                a1 = adj_n_i[1]
-                a2 = adj_n_i[2]
-                G_tilde_common_n = np.empty(5)
-                for v in range(5):
-                    G_tilde_common_n[v] = a0 * G_common_native[0, v] + a1 * G_common_native[1, v] + a2 * G_common_native[2, v]
-
-                G_phys_n = viscous_physical_flux_point(Q_n_i, gv_n_i, gT_n_i, mu, Pr, mut_n_i, Pr_t)
-                G_tilde_own_n = np.empty(5)
-                for v in range(5):
-                    G_tilde_own_n[v] = a0 * G_phys_n[0, v] + a1 * G_phys_n[1, v] + a2 * G_phys_n[2, v]
-
-                for v in range(5):
-                    jump_neighbor[i, v] = G_tilde_common_n[v] - G_tilde_own_n[v]
-
-                # 混合拆分面边界半区（B-8）：neighbor 侧边界 IP 罚项，规则同通用 kernel。
-                adj_mag_n = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
-                h_ip_n = ip_length[f]
-                if mp_o >= 0 and mixed_ow_mask[f, i]:
-                    pen_n = viscous_ip_penalty_tilde(
-                        Q_n_i, Q_o_at_n, mu + mut_n_i, 0.0, h_ip_n, adj_mag_n,
-                        1.0, c_ip, False,
-                    )
-                else:
-                    # **内部面 IP 罚项**（2026-09-23 修复真实缺陷，完整依据见
-                    # `viscous_ip_penalty_tilde` 的"为什么内部面也必须加"）：
-                    # `sigma = grad(u)` 是纯单元内局部梯度
-                    # （`compute_physical_gradient(field, mesh, ops)` 的签名里
-                    # 没有任何面数据），没有 BR1 要求的提升项；界面耦合只有
-                    # "粘性通量取两侧算术平均"这一层，内部面此前**零罚项** ——
-                    # 正是 ABCM(2002) 框架里"提升项与罚项都为零"的那一档，
-                    # 不满足强制性（实测均匀基态纯粘性算子谱正实部 328/2160）。
-                    # 涡粘与热传导率都取**面平均**，与 `G_common` 一致。
-                    k_tot_n = mu * CP_AIR / Pr + mut_avg_n * CP_AIR / Pr_t
-                    pen_n = viscous_ip_penalty_tilde(
-                        Q_n_i, Q_o_at_n, mu + mut_avg_n, k_tot_n, h_ip_n, adj_mag_n,
-                        1.0, c_ip, True,
-                    )
-                for v in range(1, 5):
-                    jump_neighbor[i, v] += pen_n[v]
+                jump_neighbor[i] = viscous_jump_point(
+                    Q_n_i, gv_n_i, gT_n_i, mut_n_i, Q_o_at_n, gv_o_at_n, gT_o_at_n, mut_o_at_n,
+                    adj_n_i, ip_length[f], bk_n, mu, Pr, Pr_t, c_ip)
 
             dj = det_jacs[nc, 0]
             weighted_jump_n = np.empty((n_fp, 5))

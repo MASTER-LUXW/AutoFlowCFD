@@ -1,4 +1,4 @@
-"""AutoFlowCFD V2.0 - 粘性物理通量、边界梯度镜像与 IP 罚项
+"""AutoFlowCFD V2.0 - 粘性物理通量与 IP 罚项（边界梯度镜像见 `viscous_bc.py`）
 
 从 `src/autoflowcfd/core/fr_operators/flux_kernels.py`(原 615 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
 """
@@ -143,56 +143,21 @@ def viscous_physical_flux_point(
 
 
 @njit(cache=True, inline='always')
-def mirror_normal_component(g: np.ndarray, adj_row: np.ndarray) -> np.ndarray:
-    """把向量 g 关于面（法向由 `adj_row` 给出方向）做**法向分量镜像**：
-
-        g_mirror = g - 2 (g·n) n,    n = adj_row / |adj_row|
-
-    用于 BR1 边界面的温度梯度（见 boundary/fr_ghost_state.py::
-    ADIABATIC_THERMAL_BC_TYPES）。取 BR1 面平均后
-
-        g_avg = 0.5 (g + g_mirror) = g - (g·n) n
-
-    其法向分量**精确为零**，于是投影到该面的离散传导热通量
-    `a·q_avg = -k (adj_row·∇T_avg)` 恒等于零——这是绝热/对称壁的精确
-    离散表述，不是"近似到某个容差"。
-
-    方向说明：这里用的是 `adj_row`（逆变行，即 det(J)∇ξ，与面法向平行），
-    **不是** `true_normal`。两者平行，但用 `adj_row` 才能保证"恒等于零"
-    的是真正进入残差的那个投影量 `a0*q_x+a1*q_y+a2*q_z` 本身，而不是
-    一个与之只差截断误差的替代量。镜像对 n 取反不变，因此内/外法向
-    朝向约定无关紧要。
-
-    退化保护：`|adj_row|` 为零（退化面）时原样返回 g——此时该面的通量
-    投影本来就是零，镜不镜像都不影响结果。
-    """
-    m2 = adj_row[0] * adj_row[0] + adj_row[1] * adj_row[1] + adj_row[2] * adj_row[2]
-    out = np.empty(3)
-    if m2 <= 0.0:
-        for a in range(3):
-            out[a] = g[a]
-        return out
-    # 不必显式开方归一化：(g·a)/|a|^2 * a 就是 (g·n)n
-    d = (g[0] * adj_row[0] + g[1] * adj_row[1] + g[2] * adj_row[2]) / m2
-    for a in range(3):
-        out[a] = g[a] - 2.0 * d * adj_row[a]
-    return out
-
-
-@njit(cache=True, inline='always')
 def viscous_ip_penalty_tilde(
     Q_o: np.ndarray, Q_other: np.ndarray, mu_total: float, k_total: float,
     h: float, adj_mag: float, side: float, c_ip: float,
-    include_work: bool,
 ) -> np.ndarray:
     """粘性 Interior Penalty (IP) 罚项，已转成 tilde（逆变）单位。
 
-    ## 两种调用方式，同一个公式（一个事实来源）
+    ## 调用方式：内部面与边界面同一个公式（一个事实来源）
 
-    * **边界面**：`k_total=0.0`、`include_work=False`，`Q_other` 是幽灵态。
-      能量分量恒为 `0.0`，退化成 2026-09-15 起的既有行为。
-    * **内部面**：`k_total` 传**面平均**热传导率、`include_work=True`，
-      `Q_other` 是邻居侧外插值。见下面"为什么内部面也必须加"。
+    * **内部面**：`k_total` 传**面平均**热传导率，`Q_other` 是邻居侧外插值。
+      见下面"为什么内部面也必须加"。
+    * **边界面**：`Q_other` 是幽灵态，`k_total` 按粘性边界种类给
+      （`flux_kernels/viscous_bc.py`）：Dirichlet（远场、入口流入点）传本侧
+      热传导率，温度被弱施加到幽灵态温度；无滑移壁与镜像类（对称面/滑移壁）
+      传 0.0（绝热由 ∇T 法向镜像精确施加）；Neumann（出口、入口回流点）
+      **不调用**本函数（公共法向粘性通量整体取零）。
 
     ## 长度尺度 `h`：由调用方给出，**不再是 `vol**(1/3)`**（2026-09-23 修复）
 
@@ -258,9 +223,9 @@ def viscous_ip_penalty_tilde(
       `tau_pen = eta_v*[[u]]`，它对能量方程的贡献就是 `{u}.tau_pen` ——
       与物理通量里 `u.tau` 那一项同构。不加它，动量罚项做的功在能量方程
       里没有对应，总能量不闭合。
-    * **静止无滑移壁上这一项恒为零**（`{u} = 0`），所以既有边界实现
-      "只有动量分量"在静止壁上本来就是一致的；`include_work=False` 保留
-      那个行为，避免改动已验证的 FARFIELD/INLET/OUTLET 边界。
+    * 边界面同样叠加这一项（2026-09-30 起不再区分）：静止无滑移壁
+      `{u}=0`、镜像类 `{u}` 纯切向而 `[[u]]` 纯法向，两处都恒为零；只有
+      远场/入口流入点与运动壁上它非零，而那里罚项牵引确实在做功。
 
     根因：`viscous_physical_flux_point` 算出的应力张量 tau 只依赖速度梯度
     `grad_vel`，不依赖状态 `Q` 本身；而边界面的梯度按本代码库既定策略镜像
@@ -292,28 +257,17 @@ def viscous_ip_penalty_tilde(
     充分**，结论是错的：BR1 的病不是"内部面耦合为零"，而是**不控制跨面
     跳跃**（缺强制性）。实测均匀基态纯粘性算子谱有正实部 328/2160，纯扩散
     算子本应全部 <= 0。现在内部面也加罚项（`k_total` 传面平均热传导率、
-    `include_work=True`），完整依据见本函数开头"为什么内部面也必须加"。
+    含罚项做功），完整依据见本函数开头"为什么内部面也必须加"。
 
-    **为什么"边界面"这一档只有动量分量（2026-09-15 结论，2026-09-23
-    复核仍然成立，仅适用范围收窄到边界面）**：IP 罚项在边界面存在的理由是
-    "梯度被镜像 ⇒ 该分量的跳跃恒为零 ⇒ Dirichlet 型边界条件在扩散算子里
-    完全没被施加"。对能量方程，这个理由按热边界类型逐类检查后都不成立
-    （所以边界面传 `k_total=0.0`）——**但这条论证只覆盖边界面**，内部面
-    的能量跳跃既非镜像也非零，强制性要求它必须被罚，见上面那段更正：
-
-    - **绝热类（WALL/SYMMETRY）**：正确的边界条件是 q_n = 0，是
-      Neumann 型而不是 Dirichlet 型——它已经由 ∇T 的法向分量镜像**精确**
-      施加（见 `mirror_normal_component` 与 boundary/fr_ghost_state.py::
-      ADIABATIC_THERMAL_BC_TYPES），罚项在这里无事可做，加了反而是往
-      "零热通量"这个恒等式上叠加一个非零项。
-    - **透射类（INLET/OUTLET/FARFIELD）**：∇T 不镜像、取内部值，能量
-      跳跃项本来就非零，不存在"约束没被施加"的问题。这些边界位于远场、
-      对流主导（Pe>>1），温度由无粘特征通量携带的 ghost 态施加。
-    - **等温壁**：这才是真正需要能量罚项（η_T=c·k_eff/h 乘以 [[T]]，注意
-      系数是热传导率 k=μ·cp/Pr 而不是 μ）的情形——而**本项目没有等温壁
-      BC，也没有壁面热通量模型**（见 fr_ghost_state.py::wall_ghost_state
-      的"热边界条件"一节）。将来若新增带传热的壁面类型，必须在这里同时
-      补上对应的能量罚项，否则壁面温度条件在扩散算子里不会被施加。
+    **2026-09-30 更正（边界面的能量罚项）**：此前的结论是"边界面只罚动量"，
+    理由里对透射类（INLET/OUTLET/FARFIELD）写的是"∇T 取内部值，能量跳跃项
+    本来就非零，不存在约束没被施加的问题"。这是错的：∇T 取内部值时公共法向
+    热通量**就等于本单元自己的热通量**，FR 修正为零，那个面上**根本没有热边界
+    条件**，弱形式留下不定号的 `-∮ T k∂T/∂n`，热传导算子失去强制性（实测与
+    完整处理见 `flux_kernels/viscous_bc.py` 模块文档）。现在温度给定的边界
+    （远场、入口流入点）按 Dirichlet 加温度罚项；延拓内部值的边界（出口、
+    入口回流点）取零法向粘性通量。绝热类的结论不变：q_n = 0 由 ∇T 法向镜像
+    精确施加，不加温度罚项。等温壁若将来新增，按 Dirichlet 处理即可。
 
     Args:
         Q_o: (5,) 面上本侧原始变量外插值 (rho,u,v,w,p)
@@ -321,9 +275,8 @@ def viscous_ip_penalty_tilde(
             无滑移镜像），内部面是邻居侧在同一批 FP 上的外插值
         mu_total: 分子+湍流动力粘度之和（边界面取本侧值、内部面取面平均，
             与 `G_common` 用的 `mut_avg` 保持一致）
-        k_total: 热传导率 `mu*cp/Pr + mu_t*cp/Pr_t`。**边界面传 0.0**
-            （理由见下面"为什么只有动量分量"一节：绝热壁是 Neumann 型、
-            已由 ∇T 法向镜像精确施加，加 Dirichlet 型罚项反而是错的）
+        k_total: 热传导率 `mu*cp/Pr + mu_t*cp/Pr_t`；绝热类边界面传 0.0
+            （见上面"调用方式"）
         h: 面法向的单元厚度 `ip_length`（见上面"长度尺度"
             一节；**不要再传 `mean(det_jacs)` 或任何 `vol**(1/3)`**）
         adj_mag: 该 FP 处本侧逆变行范数（与本文件其余处一致的度量量）
@@ -332,16 +285,13 @@ def viscous_ip_penalty_tilde(
             outward 定向，再乘一次 side 会让 `side = -1` 的面上罚项反号、
             从耗散变成往单元注入动量（2026-09-22 修复的真实缺陷，见
             `viscous_flux_kernel.py` 里 `pen_side_o` 那段注释）
-        include_work: 是否叠加动量罚项做的功到能量分量（内部面 True、
-            边界面 False，理由见上面"能量分量的两项"）
         c_ip: 罚项常数（标准 DG 惯例取 O(1)~O(10)，本实现固定用 4.0，
             未做多项式阶数相关的最优 trace-inequality 常数标定——这是
             稳定性调优参数，不影响"罚项存在与否/符号是否耗散"这一
             正确性核心，若未来观测到边界层数值振荡可调大）
 
     Returns:
-        pen: (5,)。`[1:4]` 是动量分量，`[4]` 是能量分量（`k_total=0.0` 且
-        `include_work=False` 时恒为 `0.0`）。可直接
+        pen: (5,)。`[1:4]` 是动量分量，`[4]` 是能量分量。可直接
         `G_tilde_common[v] += pen[v]` for v in range(1, 5)
     """
     pen = np.zeros(5)
@@ -353,9 +303,8 @@ def viscous_ip_penalty_tilde(
     for v in range(1, 4):
         pen[v] = -scale * (Q_o[v] - Q_other[v])
     work = 0.0
-    if include_work:
-        for v in range(1, 4):
-            work += 0.5 * (Q_o[v] + Q_other[v]) * (Q_o[v] - Q_other[v])
+    for v in range(1, 4):
+        work += 0.5 * (Q_o[v] + Q_other[v]) * (Q_o[v] - Q_other[v])
     eta_T = c_ip * k_total / h_safe
     scale_T = eta_T * adj_mag * side
     T_o = Q_o[4] / (Q_o[0] * R_AIR)

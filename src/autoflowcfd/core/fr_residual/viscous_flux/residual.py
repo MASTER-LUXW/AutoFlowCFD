@@ -58,32 +58,16 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
             调用 boundary_ghost_provider 取得反映边界条件的幽灵原始变量
             （例如 WALL 用速度镜像取反构造 Q_avg 速度=0，真正的无滑移）。
 
-            **速度梯度 gv_n / mut_n 仍取内部值镜像**——标准 BR1/LDG 做法：
-            它们没有独立的边界"真值"，边界约束通过状态跳跃在通量里体现
-            （动量方向另有 IP 罚项，见 fr_operators/flux_kernels.py::
-            viscous_boundary_penalty_tilde）。特别**不能**"顺手"把无滑移壁
-            的 gv 也做法向镜像：壁面切向速度的法向导数**就是**壁面剪应力
-            本身，镜像掉等于把它抹成零。
-
-            **温度梯度 gT_n 已按热边界类型分派（2026-09-15 修复）**：
-            此前 gT_n 也一律取内部值，对能量方程留下一处真实的不自洽——
-            壁面 ghost 态复制 rho/p（温度无跳跃，见 fr_ghost_state.py::
-            wall_ghost_state 的"热边界条件"一节，语义上是绝热壁），而
-            IP 罚项只覆盖动量分量（`for v in range(1,4)`），于是面上平均
-            法向温度梯度等于内部值、一般非零：实现出来的壁面热条件既不是
-            绝热（q_w=0）也不是等温，而是"按内部梯度透射"。
-
-            现在 WALL/SYMMETRY（见 fr_ghost_state.py::
-            ADIABATIC_THERMAL_BC_TYPES）改为法向分量镜像
-            `∇T_ghost = ∇T_int − 2(∇T_int·n)n`，于是 BR1 面平均
-            `∇T_avg = ∇T_int − (∇T_int·n)n` 的法向分量**精确为零**，投影到
-            该面的离散传导热通量 `a·q_avg` 恒等于零——是恒等式，不是
-            "收敛到某个容差"。镜像用的 n 取自逆变行 `adj_row`（与面法向
-            平行），这样"恒为零"的正是真正进入残差的那个投影量本身，而
-            不是一个与之差一个截断误差的替代量。INLET/OUTLET/FARFIELD
-            保持透射（流入/流出边界上法向热通量本就应该非零）。非
+            **边界"另一侧"梯度与罚项按粘性边界种类分派（2026-09-30）**：
+            无滑移壁速度梯度取本侧（壁面切向速度的法向导数就是壁面剪应力，
+            **不能**镜像掉）、∇T 法向镜像（绝热）；对称面/滑移壁取镜像场的
+            梯度（切向牵引与法向热通量恰为零）；远场与入口流入点按 Dirichlet
+            加速度与温度罚项；出口与入口回流点取零法向粘性通量。此前除绝热类
+            镜像 ∇T 外一律"本侧梯度、只罚速度"，延拓分量上扩散算子没有任何
+            边界条件、失去强制性，完整论证与实测见
+            core/fr_operators/flux_kernels/viscous_bc.py 模块文档。非
             `BoundaryGhostStateProvider` 的 provider（DefaultGhostProvider、
-            测试 stub）没有 BC 语义，一律按透射处理，既有行为逐位不变。
+            测试 stub）没有 BC 语义、幽灵态即本侧延拓，按零法向粘性通量处理。
 
             **修复前的实测量级，以及为什么那个数字不能再被引用**：
             79 万单元 cube_demo P1 iter=300 检查点上，温度场全域变化
@@ -216,11 +200,10 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
     # 这里对 DistributedMeshAdapter 重新调用 get_flat_face_geometry。
     flat = flat_face_override if flat_face_override is not None else get_flat_face_geometry(mesh, ops)
     Q_ghost = compute_boundary_ghost_states(flat, Q, adj_j, ghost_provider)
-    # 边界温度梯度按热边界类型分派（WALL/SYMMETRY 法向镜像 ⇒ 离散壁面热通量
-    # 精确为零；INLET/OUTLET/FARFIELD 保持透射），见
-    # boundary/fr_ghost_state.py::build_boundary_adiabatic_mask。
-    from autoflowcfd.boundary.fr_ghost_state import build_boundary_adiabatic_mask
-    bnd_adiabatic = build_boundary_adiabatic_mask(flat.n_faces, flat.is_boundary, ghost_provider)
+    # 边界面的公共粘性通量按粘性边界种类分派（Dirichlet / 无滑移壁 / 镜像 /
+    # Neumann / 入口逐点判定），见 core/fr_operators/flux_kernels/viscous_bc.py。
+    from autoflowcfd.boundary.fr_ghost_state import build_viscous_boundary_kind
+    vbc_kind = build_viscous_boundary_kind(flat.n_faces, flat.is_boundary, ghost_provider)
 
     if n_sps == 1:
         # P0 专用路径：使用 n_sps=1 特化 kernel（消除 SP 循环，外插写成
@@ -246,7 +229,7 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
             flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
             flat.mixed_nb_partner, flat.mixed_nb_mask,
             flat.mixed_ow_partner, flat.mixed_ow_mask,
-            Q_ghost, bnd_adiabatic,
+            Q_ghost, vbc_kind,
             n_threads,
             flat.owner_cube_face, flat.neighbor_cube_face,
             flat.ref_area_weight,
@@ -286,7 +269,7 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
                     flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
                     flat.mixed_nb_partner, flat.mixed_nb_mask,
                     flat.mixed_ow_partner, flat.mixed_ow_mask,
-                    Q_ghost, bnd_adiabatic,
+                    Q_ghost, vbc_kind,
                     face_indices, correction,
                     flat.owner_cube_face, flat.neighbor_cube_face,
                     flat.ref_area_weight,
@@ -310,7 +293,7 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
                 flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
                 flat.mixed_nb_partner, flat.mixed_nb_mask,
                 flat.mixed_ow_partner, flat.mixed_ow_mask,
-                Q_ghost, bnd_adiabatic,
+                Q_ghost, vbc_kind,
                 n_threads,
                 flat.owner_cube_face, flat.neighbor_cube_face,
                 flat.ref_area_weight,

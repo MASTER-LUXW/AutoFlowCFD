@@ -12,9 +12,10 @@ import numpy as np
 from numba import njit, prange
 
 from autoflowcfd.core.fr_operators.small_dense import extrap_tensor3x3, matmul_small, matvec_small
-from autoflowcfd.core.fr_residual.face_point_jumps import (
-    viscous_boundary_other_gradients, viscous_jump_point,
+from autoflowcfd.core.fr_operators.flux_kernels import (
+    VBC_INTERIOR, boundary_other_gradients,
 )
+from autoflowcfd.core.fr_residual.face_point_jumps import viscous_jump_point
 from autoflowcfd.core.fr_residual.inviscid_kernel import _extrap_matmul
 
 
@@ -31,7 +32,7 @@ def compute_viscous_interface_correction_kernel_colored(
     owner_src1_idx: np.ndarray, owner_src1_cell: np.ndarray, owner_src1_mat: np.ndarray,
     mixed_nb_partner: np.ndarray, mixed_nb_mask: np.ndarray,
     mixed_ow_partner: np.ndarray, mixed_ow_mask: np.ndarray,
-    Q_ghost: np.ndarray, bnd_adiabatic: np.ndarray,
+    Q_ghost: np.ndarray, vbc_kind: np.ndarray,
     face_indices: np.ndarray,  # 当前颜色组的面索引
     correction: np.ndarray,    # 共享输出 buffer（同色面无冲突，直接写入）
     owner_cube_face: np.ndarray, neighbor_cube_face: np.ndarray,
@@ -96,12 +97,13 @@ def compute_viscous_interface_correction_kernel_colored(
             for i in range(n_fp):
                 # 混合拆分面（B-8，与非着色版同步，见 compute_viscous_interface_correction_kernel 同名注释）。
                 mp = mixed_nb_partner[f]
-                is_bnd_i = is_boundary[f] or (mp >= 0 and mixed_nb_mask[f, i])
+                bk = VBC_INTERIOR
                 if is_boundary[f]:
                     # 边界温度梯度按热边界类型分派，见非着色版模块文档
                     # "边界温度梯度"一节（两处必须同步）。
                     Q_n = Q_ghost[f, i]
-                    gv_n, gT_n = viscous_boundary_other_gradients(gv_o[i], gT_o[i], adjrow_o[i], bnd_adiabatic[f])
+                    bk = vbc_kind[f]
+                    gv_n, gT_n = boundary_other_gradients(gv_o[i], gT_o[i], adjrow_o[i], bk)
                     mut_n = mut_o[i]
                 else:
                     Q_n = np.zeros(5)
@@ -140,8 +142,8 @@ def compute_viscous_interface_correction_kernel_colored(
                     if mp >= 0 and mixed_nb_mask[f, i]:
                         for v in range(5):
                             Q_n[v] = Q_ghost[mp, i, v]
-                        gv_bnd, gT_bnd = viscous_boundary_other_gradients(
-                            gv_o[i], gT_o[i], adjrow_o[i], bnd_adiabatic[mp])
+                        bk = vbc_kind[mp]
+                        gv_bnd, gT_bnd = boundary_other_gradients(gv_o[i], gT_o[i], adjrow_o[i], bk)
                         for a in range(3):
                             for b in range(3):
                                 gv_n[a, b] = gv_bnd[a, b]
@@ -150,7 +152,7 @@ def compute_viscous_interface_correction_kernel_colored(
 
                 jump_owner[i] = viscous_jump_point(
                     Q_o[i], gv_o[i], gT_o[i], mut_o[i], Q_n, gv_n, gT_n, mut_n,
-                    adjrow_o[i], ip_length[f], is_bnd_i, mu, Pr, Pr_t, c_ip)
+                    adjrow_o[i], ip_length[f], bk, mu, Pr, Pr_t, c_ip)
 
             weighted_jump_o = np.empty((n_fp, 5))
             for i in range(n_fp):
@@ -211,11 +213,13 @@ def compute_viscous_interface_correction_kernel_colored(
                 # 混合拆分面边界半区（B-8）：neighbor 侧对称处理——对侧状态取配对面幽灵态（逐元素拷贝），
                 # 梯度镜像本单元内部值，与边界面同规则。
                 mp_o = mixed_ow_partner[f]
+                bk_n = VBC_INTERIOR
                 if mp_o >= 0 and mixed_ow_mask[f, i]:
                     for v in range(5):
                         Q_o_at_n[v] = Q_ghost[mp_o, i, v]
-                    gv_bnd_n, gT_bnd_n = viscous_boundary_other_gradients(
-                        gv_n_native[i], gT_n_native[i], adjrow_n_native[i], bnd_adiabatic[mp_o])
+                    bk_n = vbc_kind[mp_o]
+                    gv_bnd_n, gT_bnd_n = boundary_other_gradients(
+                        gv_n_native[i], gT_n_native[i], adjrow_n_native[i], bk_n)
                     for a in range(3):
                         for b in range(3):
                             gv_o_at_n[a, b] = gv_bnd_n[a, b]
@@ -225,7 +229,7 @@ def compute_viscous_interface_correction_kernel_colored(
                 jump_neighbor[i] = viscous_jump_point(
                     Q_n_native[i], gv_n_native[i], gT_n_native[i], mut_n_native[i],
                     Q_o_at_n, gv_o_at_n, gT_o_at_n, mut_o_at_n, adjrow_n_native[i], ip_length[f],
-                    mp_o >= 0 and mixed_ow_mask[f, i], mu, Pr, Pr_t, c_ip)
+                    bk_n, mu, Pr, Pr_t, c_ip)
 
             weighted_jump_n = np.empty((n_fp, 5))
             for i in range(n_fp):

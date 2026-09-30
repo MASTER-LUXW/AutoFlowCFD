@@ -162,7 +162,9 @@ def test_old_metric_source_changes_the_residual():
     det_jacs = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
     Q_ghost = np.ascontiguousarray(
         np.repeat(Q[np.asarray(flat.owner_cell), :1, :], n_fp, axis=1))
-    bnd_adiabatic = np.zeros(flat.n_faces, dtype=np.bool_)
+    # 幽灵态就是 owner 延拓 —— 与 DefaultGhostProvider 同一语义，边界面取零法向粘性通量
+    from autoflowcfd.core.fr_operators.flux_kernels import VBC_INTERIOR, VBC_NEUMANN
+    vbc_kind = np.where(flat.is_boundary, VBC_NEUMANN, VBC_INTERIOR).astype(np.int8)
     c_ip = resolve_viscous_ip_constant(0)
     # `n_threads` 必须是紧邻调用前取的 `numba.get_num_threads()`：kernel
     # 用 `get_thread_id()` 索引 `(n_threads, ...)` 的 per-thread buffer，
@@ -185,7 +187,7 @@ def test_old_metric_source_changes_the_residual():
             flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
             flat.mixed_nb_partner, flat.mixed_nb_mask,
             flat.mixed_ow_partner, flat.mixed_ow_mask,
-            Q_ghost, bnd_adiabatic, n_threads,
+            Q_ghost, vbc_kind, n_threads,
             flat.owner_cube_face, flat.neighbor_cube_face,
             flat.ref_area_weight,
             flat.boundary_extrap_native, flat.lift_native,
