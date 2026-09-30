@@ -3,6 +3,8 @@
 
 from types import SimpleNamespace
 
+import numpy as np
+
 from autoflowcfd.core.utils.order_continuation.policy import (
     ROUNDOFF_DROP, PhaseGate, production_ramp_complete,
 )
@@ -63,3 +65,43 @@ def test_without_implicit_turbulence_only_mean_flow_and_ramp_count():
     assert not PhaseGate().reached(s2, res=1.0, baseline=2e3, required=1e3)
     laminar = SimpleNamespace(turb_model=None)
     assert PhaseGate().reached(laminar, res=1.0, baseline=2e3, required=1e3)
+
+
+def test_nk_stall_at_roundoff_counts_as_reached():
+    """NK：CFL 在上限、每步完整接受、残差在窗口内不再下降 -> 舍入平台，判到位。
+    从已收敛 checkpoint 恢复时首值只有 1.13，相对首值 1e10 的出口到不了（plate_demo
+    P0 在 4.2e-6 平台上空转 240 步）。"""
+    from autoflowcfd.core.time_integration.adaptive_cfl.ser import SERCFLController
+    from autoflowcfd.core.utils.order_continuation.policy import STALL_WINDOW
+
+    s = _solver(turb_res=3e-3, ramp_done=True)
+    s._cfl_controller = SERCFLController(cfl_start=1e4, cfl_max=1e4)
+    s._newton_last_info = {"theta": 1.0}
+    g = PhaseGate()
+    rng = np.random.default_rng(0)
+    for i in range(STALL_WINDOW + 1):
+        _turb(s, 3e-3 * (1 + 0.01 * rng.standard_normal()))
+        r = 4.2e-6 * (1 + 0.01 * rng.standard_normal())
+        g.observe(s, r)
+        if i < STALL_WINDOW:
+            assert not g.reached(s, r, 2.2e-3, 1000.0)
+    assert g.stalled_at_roundoff() and g.reached(s, r, 2.2e-3, 1000.0)
+
+    # CFL 不在上限（仍是伪时间推进）：不是舍入平台
+    s._cfl_controller.cfl_number = 5e3
+    g.observe(s, r)
+    assert not g.stalled_at_roundoff()
+
+
+def test_nk_still_decreasing_is_not_a_stall():
+    from autoflowcfd.core.time_integration.adaptive_cfl.ser import SERCFLController
+    from autoflowcfd.core.utils.order_continuation.policy import STALL_WINDOW
+
+    s = _solver(turb_res=3e-3, ramp_done=True)
+    s._cfl_controller = SERCFLController(cfl_start=1e4, cfl_max=1e4)
+    s._newton_last_info = {"theta": 1.0}
+    g = PhaseGate()
+    for i in range(STALL_WINDOW + 1):
+        _turb(s, 3e-3 * 0.9 ** i)
+        g.observe(s, 1e-3 * 0.8 ** i)          # 窗口内下降 ~9 倍
+    assert not g.stalled_at_roundoff()
