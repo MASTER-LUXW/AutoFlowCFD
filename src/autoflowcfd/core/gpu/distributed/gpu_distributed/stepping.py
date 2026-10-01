@@ -246,6 +246,7 @@ class _MultiGPUSteppingMixin:
             # 隐式稳态步：与单机 CPU/GPU、CPU 分布式同一个实现
             # （implicit/mean_flow_step.py），归约跨 rank，块 Jacobi 着色全局一致
             from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
+            from autoflowcfd.core.mpi.distributed_coarse import GpuCompactCellValues, coarse_comm_context
             from autoflowcfd.core.mpi.distributed_implicit import (
                 distributed_block_jacobi_colors, distributed_coupling_graph, distributed_mean_flow_assembler,
             )
@@ -254,11 +255,13 @@ class _MultiGPUSteppingMixin:
                 step_mean_flow_newton,
             )
 
+            coarse_ctx = coarse_comm_context(
+                self.partition, GpuCompactCellValues(self.gpu_halo, self._perm_gpu, n_sps, cp))
             U_new_flat, nk_info = step_mean_flow_newton(
                 self, _residual, U_flat, dt_flat, _reference_scales(self.freestream, 5),
                 red=MPIReductions(cp), cell_is_prism=cell_is_prism,
                 cell_colors=lambda: distributed_block_jacobi_colors(self),
-                coupling_graph=partial(distributed_coupling_graph, self),
+                coupling_graph=partial(distributed_coupling_graph, self, coarse_ctx), global_coarse=coarse_ctx,
                 order=order_now, filter_active=self.filter_func_gpu is not None,
                 positivity=positivity_func,
                 block_assembler=distributed_mean_flow_assembler(

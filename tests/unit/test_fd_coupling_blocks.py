@@ -124,3 +124,31 @@ def test_p0_cache_switches_to_block_ilu_and_beats_block_jacobi():
         assert info == 0, (name, it)
         iters[name] = it
     assert iters["ilu"] * 1.5 <= iters["bj"], iters
+
+
+def test_halo_pairs_capture_same_blocks_as_local_pairs():
+    """跨 rank 单元对（分布式）的截取与 rank 内单元对同一机制：单机上把一半单元对改列为
+    "halo"（列号就是单元号、颜色照抄全局着色），截到的块与按 rank 内单元对截到的逐位相同。"""
+    from autoflowcfd.core.time_integration.implicit.coloring import CouplingGraph
+
+    mesh, res, u0, r0, fl = _p0_problem("prism")
+    n = mesh.n_cells
+    full = coupling_graph_from_faces(fl.owner_cell, fl.neighbor_cell, n)
+    cip = np.arange(n) < mesh.n_prism_cells
+    halo = np.arange(full.rows.size) % 2 == 1
+    split = CouplingGraph(rows=full.rows[~halo], cols=full.cols[~halo], colors=full.colors,
+                          halo_rows=full.rows[halo], halo_cols=full.cols[halo],
+                          halo_colors=full.colors[full.cols[halo]], halo_col_is_prism=cip[full.cols[halo]])
+    kw = dict(n_sps=1, cell_is_prism=cip, n_real_prism=1, n_real_tet=1, colors=None)
+    ref = CellBlockJacobian(res, u0, r0, SCALES, coupling_graph=full, **kw)
+    got = CellBlockJacobian(res, u0, r0, SCALES, coupling_graph=split, **kw)
+
+    def as_dict(cb):
+        return {(int(r), int(c)): b for g in cb.groups for r, c, b in zip(g.rows, g.cols, g.blocks)}
+
+    want = as_dict(ref.coupling)
+    inner, cross = as_dict(got.coupling), as_dict(got.cross_coupling)
+    assert len(cross) == int(halo.sum()) and len(inner) == int((~halo).sum())
+    for key, blk in {**inner, **cross}.items():
+        np.testing.assert_array_equal(blk, want[key])
+    assert ref.cross_coupling.groups == []

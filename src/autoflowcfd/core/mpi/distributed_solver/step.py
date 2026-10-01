@@ -363,6 +363,7 @@ class _DistributedStepMixin:
             # 归约换成跨 rank 的 MPIReductions，块 Jacobi 着色是全局一致着色里
             # 本 rank 那一段（见 core/mpi/distributed_implicit.py 模块文档）
             from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
+            from autoflowcfd.core.mpi.distributed_coarse import CpuCompactCellValues, coarse_comm_context
             from autoflowcfd.core.mpi.distributed_implicit import (
                 distributed_block_jacobi_colors, distributed_coupling_graph, distributed_mean_flow_assembler,
             )
@@ -371,12 +372,14 @@ class _DistributedStepMixin:
                 step_mean_flow_newton,
             )
 
+            coarse_ctx = coarse_comm_context(
+                self.partition, CpuCompactCellValues(self.halo_exchange, self.dist_flat_face.perm, n_sps))
             U_new_flat, nk_info = step_mean_flow_newton(
                 self, residual_func, U_flat, dt_local_flat,
                 _reference_scales(self.local_solver.freestream, n_vars),
                 red=MPIReductions(np), cell_is_prism=cell_is_prism,
                 cell_colors=lambda: distributed_block_jacobi_colors(self),
-                coupling_graph=partial(distributed_coupling_graph, self),
+                coupling_graph=partial(distributed_coupling_graph, self, coarse_ctx), global_coarse=coarse_ctx,
                 order=order_now, filter_active=filter_func is not None,
                 positivity=positivity_func,
                 block_assembler=distributed_mean_flow_assembler(

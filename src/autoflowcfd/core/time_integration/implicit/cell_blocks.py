@@ -46,7 +46,8 @@ class CellBlockJacobian:
     """
 
     __slots__ = ("n_sps", "n_var", "prism_cells", "tet_cells", "n_real_prism",
-                 "n_real_tet", "blocks_prism", "blocks_tet", "n_residual_evals", "xp", "coupling")
+                 "n_real_tet", "blocks_prism", "blocks_tet", "n_residual_evals", "xp", "coupling",
+                 "cross_coupling")
 
     def __init__(self, residual, u0_flat, r0_flat, scales: np.ndarray, *, n_sps: int,
                  cell_is_prism: np.ndarray, n_real_prism: int, n_real_tet: int,
@@ -54,7 +55,8 @@ class CellBlockJacobian:
         """`coupling_graph`（`coloring.CouplingGraph`）给出时按它的**距离 2 着色**
         扰动，同一批残差差分同时截取面邻居耦合块 `J_cy`（`self.coupling`，块 ILU 用）：
         同色单元互不相邻、也不共享面邻居，未被扰动的单元 `c` 至多有一个被扰动的
-        面邻居 `y`，`c` 行上的差分就是 `J_cy` 的一列。此时忽略 `colors`。"""
+        面邻居 `y`，`c` 行上的差分就是 `J_cy` 的一列。此时忽略 `colors`。分布式下同时截取
+        图里给出的跨 rank 耦合块（`self.cross_coupling`，列为 halo 单元的紧凑空间编号）。"""
         red = red if red is not None else LocalReductions()
         xp = self.xp = red.xp
         u0 = xp.ascontiguousarray(u0_flat, dtype=xp.float64)
@@ -91,7 +93,7 @@ class CellBlockJacobian:
         n_eval = 0
         for k in range(n_colors):
             if cross is not None:
-                cross.select_color(colors == k)
+                cross.select_color(k)
             in_k = colors == k
             groups = []
             for cells, blocks, n_real in ((np.nonzero(in_k & cell_is_prism)[0], self.blocks_prism, n_real_prism),
@@ -117,7 +119,7 @@ class CellBlockJacobian:
                     if cross is not None:
                         cross.store(dr, s, col)
         self.n_residual_evals = n_eval
-        self.coupling = None if cross is None else cross.result()
+        self.coupling, self.cross_coupling = (None, None) if cross is None else cross.result()
 
 
     @classmethod
@@ -138,7 +140,7 @@ class CellBlockJacobian:
                 raise ValueError(f"{name} 形状 {tuple(blocks.shape)} 与期望 {expect} 不符")
             setattr(obj, name, xp.asarray(blocks, dtype=xp.float32))
         obj.n_residual_evals = 0
-        obj.coupling = None
+        obj.coupling = obj.cross_coupling = None
         return obj
 
 
@@ -147,31 +149,43 @@ class _CouplingCapture:
 
     耦合块按 (行单元类型, 列单元类型) 分四组存放，布局与解析装配的
     `fr_residual/jacobian/coupling.py::CouplingBlocks` 相同（块内 `(解点, 变量)`
-    行主序），块 ILU 直接消费。
+    行主序），块 ILU 直接消费。跨 rank 耦合块（列是 halo 单元，分布式）另存一组，
+    同样分四组；每组记下列单元的颜色，本色扰动时取出列单元同色的那些块。
     """
 
-    __slots__ = ("groups", "xp", "n_sps", "n_var", "_active")
+    __slots__ = ("inner", "halo", "xp", "n_sps", "n_var", "_active")
 
     def __init__(self, graph, cell_is_prism, n_sps, n_real_prism, n_real_tet, n_var, xp):
-        rows = np.asarray(graph.rows, dtype=np.int64)
-        cols = np.asarray(graph.cols, dtype=np.int64)
         self.xp, self.n_sps, self.n_var = xp, int(n_sps), int(n_var)
-        self.groups = []
-        for row_p in (True, False):
-            for col_p in (True, False):
-                sel = (cell_is_prism[rows] == row_p) & (cell_is_prism[cols] == col_p)
-                nr = n_real_prism if row_p else n_real_tet
-                ny = n_real_prism if col_p else n_real_tet
-                r, c = rows[sel], cols[sel]
-                self.groups.append(dict(row_p=row_p, col_p=col_p, rows=r, cols=c, nr=nr, ny=ny,
-                                        blocks=xp.zeros((r.size, nr * n_var, ny * n_var), dtype=xp.float32)))
+        colors = np.asarray(graph.colors, dtype=np.int64)
+        rows, cols = np.asarray(graph.rows, dtype=np.int64), np.asarray(graph.cols, dtype=np.int64)
+        h_rows, h_cols = np.asarray(graph.halo_rows, dtype=np.int64), np.asarray(graph.halo_cols, dtype=np.int64)
+        self.inner = self._groups(rows, cols, cell_is_prism[rows], cell_is_prism[cols], colors[cols],
+                                  cell_is_prism, n_real_prism, n_real_tet)
+        self.halo = self._groups(h_rows, h_cols, cell_is_prism[h_rows], np.asarray(graph.halo_col_is_prism, bool),
+                                 np.asarray(graph.halo_colors, dtype=np.int64), cell_is_prism, n_real_prism,
+                                 n_real_tet)
         self._active = []
 
-    def select_color(self, in_color):
+    def _groups(self, rows, cols, row_p_of, col_p_of, col_color, cell_is_prism, n_real_prism, n_real_tet):
+        groups = []
+        for row_p in (True, False):
+            for col_p in (True, False):
+                sel = (row_p_of == row_p) & (col_p_of == col_p)
+                nr = n_real_prism if row_p else n_real_tet
+                ny = n_real_prism if col_p else n_real_tet
+                r = rows[sel]
+                groups.append(dict(row_p=row_p, col_p=col_p, rows=r, cols=cols[sel], color=col_color[sel],
+                                   nr=nr, ny=ny,
+                                   blocks=self.xp.zeros((r.size, nr * self.n_var, ny * self.n_var),
+                                                        dtype=self.xp.float32)))
+        return groups
+
+    def select_color(self, k: int):
         """本色被扰动的列单元对应的耦合块：`(组, 块下标, 行单元的真实解点行)`。"""
         self._active = []
-        for g in self.groups:
-            idx = np.nonzero(in_color[g["cols"]])[0]
+        for g in self.inner + self.halo:
+            idx = np.nonzero(g["color"] == k)[0]
             if idx.size:
                 rsp = g["rows"][idx][:, None] * self.n_sps + np.arange(g["nr"])[None, :]
                 self._active.append((g, self.xp.asarray(idx), self.xp.asarray(rsp.ravel()), idx.size))
@@ -182,10 +196,11 @@ class _CouplingCapture:
                 g["blocks"][idx, :, col] = dr[rsp].reshape(n, g["nr"] * self.n_var)
 
     def result(self):
+        """`(rank 内耦合块, 跨 rank 耦合块)`，均为 `CouplingBlocks`。"""
         from autoflowcfd.core.fr_residual.jacobian.coupling import CouplingBlocks, CouplingGroup
 
         host = (lambda a: a) if self.xp is np else (lambda a: a.get())
-        return CouplingBlocks(groups=[
+        return tuple(CouplingBlocks(groups=[
             CouplingGroup(row_is_prism=g["row_p"], col_is_prism=g["col_p"], rows=g["rows"], cols=g["cols"],
                           blocks=host(g["blocks"]))
-            for g in self.groups if g["rows"].size])
+            for g in groups if g["rows"].size]) for groups in (self.inner, self.halo))

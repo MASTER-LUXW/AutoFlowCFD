@@ -61,27 +61,46 @@ class BlockCouplingStructure:
     def __init__(self, coupling, n_cells, n_real, n_var: int = 5):
         """`coupling`：耦合块组（`groups` 里每组有 `rows/cols/blocks`）；`n_real`：
         `(n_cells,)` 每单元真实解点数；`n_var`：每个解点的未知量个数。"""
-        rows = np.concatenate([g.rows for g in coupling.groups]) if coupling.groups else np.zeros(0, np.int64)
-        cols = np.concatenate([g.cols for g in coupling.groups]) if coupling.groups else np.zeros(0, np.int64)
-        sizes = np.concatenate([np.full(g.rows.size, g.blocks.shape[1] * g.blocks.shape[2], dtype=np.int64)
-                                for g in coupling.groups]) if coupling.groups else np.zeros(0, np.int64)
-        src_off = np.concatenate([[0], np.cumsum(sizes)[:-1]]).astype(np.int64)
-        data = np.empty(int(sizes.sum()), dtype=np.float32)
-        pos = 0
-        for g in coupling.groups:
-            flat = g.blocks.reshape(-1)
-            data[pos:pos + flat.size] = flat
-            pos += flat.size
-        order = np.lexsort((cols, rows))
-        self.cols = np.ascontiguousarray(cols[order])
-        self.offset = np.ascontiguousarray(src_off[order])
-        counts = np.bincount(rows, minlength=n_cells)
-        self.indptr = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
-        self.data = data
+        self.indptr, self.cols, self.offset, self.data = coupling_csr(coupling, n_cells)
+        self._set_rows(n_real, n_var)
+
+    def _set_rows(self, n_real, n_var: int):
+        """逐行单元的真实自由度数与 RCM 名次 / 波前层（两个构造入口共用）。"""
         self.n_real = np.ascontiguousarray(n_real, dtype=np.int64)
         self.n_var = int(n_var)
         self.row_dof = self.n_var * self.n_real
-        self.rank, self.levels = rcm_wavefronts(self.indptr, self.cols, int(n_cells))
+        self.rank, self.levels = rcm_wavefronts(self.indptr, self.cols, int(self.n_real.size))
+
+    @classmethod
+    def from_csr(cls, indptr, cols, offset, data, n_real, n_var: int):
+        """由现成的块 CSR（行内列已排序、不含对角块）构造；多层预处理的粗层用它。"""
+        obj = cls.__new__(cls)
+        obj.indptr = np.ascontiguousarray(indptr, dtype=np.int64)
+        obj.cols = np.ascontiguousarray(cols, dtype=np.int64)
+        obj.offset = np.ascontiguousarray(offset, dtype=np.int64)
+        obj.data = np.ascontiguousarray(data, dtype=np.float32)
+        obj._set_rows(n_real, n_var)
+        return obj
+
+
+def coupling_csr(coupling, n_rows: int):
+    """耦合块组（`groups` 里每组有 `rows/cols/blocks`）-> 块 CSR `(indptr, cols, offset, data)`：
+    行内按列排序，`offset` 是块在扁平 float32 `data` 里的起点（块内行主序）。"""
+    groups = coupling.groups
+    rows = np.concatenate([g.rows for g in groups]) if groups else np.zeros(0, np.int64)
+    cols = np.concatenate([g.cols for g in groups]) if groups else np.zeros(0, np.int64)
+    sizes = np.concatenate([np.full(g.rows.size, g.blocks.shape[1] * g.blocks.shape[2], dtype=np.int64)
+                            for g in groups]) if groups else np.zeros(0, np.int64)
+    src_off = np.concatenate([[0], np.cumsum(sizes)[:-1]]).astype(np.int64)
+    data = np.empty(int(sizes.sum()), dtype=np.float32)
+    pos = 0
+    for g in groups:
+        flat = g.blocks.reshape(-1)
+        data[pos:pos + flat.size] = flat
+        pos += flat.size
+    order = np.lexsort((cols, rows))
+    indptr = np.concatenate([[0], np.cumsum(np.bincount(rows, minlength=int(n_rows)))]).astype(np.int64)
+    return indptr, np.ascontiguousarray(cols[order], dtype=np.int64), np.ascontiguousarray(src_off[order]), data
 
 
 def rcm_wavefronts(indptr, cols, n_cells: int):
@@ -250,6 +269,44 @@ def _backward_level(cells, rank, z, inv_data, diag_off, indptr, cols, offset, da
             z[c * n_sps * n_var + i] -= acc
 
 
+def factor_block_ilu(diag_data, diag_off, struct: BlockCouplingStructure, inv_dtau, n_sps: int):
+    """D-ILU 分解：返回各单元 `D~_c^{-1}`（与 `diag_data` 同布局，float32）。
+
+    `inv_dtau`：逐（单元, 解点）的 `1/dtau`，加到对角块对角线上；多层预处理的粗层
+    已把 PTC 项并进对角块，传全零。"""
+    inv = np.empty_like(diag_data)
+    for cells in struct.levels:
+        _factor_level(cells, struct.rank, diag_data, diag_off, inv, struct.indptr, struct.cols,
+                      struct.offset, struct.data, struct.row_dof, inv_dtau, int(n_sps), struct.n_var)
+    return inv
+
+
+def solve_block_ilu(inv, diag_off, struct: BlockCouplingStructure, x, y, n_sps: int):
+    """`y <- M^{-1} x` 的前代 + 回代（`y` 进入时须已含零填充槽位的值，真实行被覆盖）。"""
+    for cells in struct.levels:
+        _forward_level(cells, struct.rank, x, y, inv, diag_off, struct.indptr, struct.cols, struct.offset,
+                       struct.data, struct.row_dof, int(n_sps), struct.n_var)
+    for cells in reversed(struct.levels):
+        _backward_level(cells, struct.rank, y, inv, diag_off, struct.indptr, struct.cols, struct.offset,
+                        struct.data, struct.row_dof, int(n_sps), struct.n_var)
+    return y
+
+
+def flatten_cell_blocks(jac):
+    """`CellBlockJacobian` 的对角块 -> 主机上的扁平 float32 数组与逐单元偏移
+    `(diag_data, diag_off)`（块内行主序；块 ILU 与多层预处理共用）。"""
+    def host(a):
+        return a.get() if hasattr(a, "get") else np.asarray(a)
+    n_cells = jac.prism_cells.size + jac.tet_cells.size
+    bp, bt = host(jac.blocks_prism), host(jac.blocks_tet)
+    sp, st = bp.shape[1] * bp.shape[2], bt.shape[1] * bt.shape[2]
+    diag_off = np.empty(n_cells, dtype=np.int64)
+    diag_off[jac.prism_cells] = np.arange(jac.prism_cells.size) * sp
+    diag_off[jac.tet_cells] = jac.prism_cells.size * sp + np.arange(jac.tet_cells.size) * st
+    diag = np.concatenate([bp.reshape(-1), bt.reshape(-1)]).astype(np.float32)
+    return diag, diag_off
+
+
 class BlockILUPreconditioner(PseudoTransientDiagonal):
     """`M = (D~ + L) D~^{-1} (D~ + U)` 的逆作用；接口与对角预处理相同。
 
@@ -259,20 +316,6 @@ class BlockILUPreconditioner(PseudoTransientDiagonal):
 
     __slots__ = ("_struct", "_inv", "_diag_off", "_n_sps", "_xp")
 
-    @classmethod
-    def from_cell_blocks(cls, jac, struct: BlockCouplingStructure, dtau_flat):
-        """由 `CellBlockJacobian`（对角块）与耦合结构构造。"""
-        def host(a):
-            return a.get() if hasattr(a, "get") else np.asarray(a)
-        n_cells = jac.prism_cells.size + jac.tet_cells.size
-        bp, bt = host(jac.blocks_prism), host(jac.blocks_tet)
-        sp, st = bp.shape[1] * bp.shape[2], bt.shape[1] * bt.shape[2]
-        diag_off = np.empty(n_cells, dtype=np.int64)
-        diag_off[jac.prism_cells] = np.arange(jac.prism_cells.size) * sp
-        diag_off[jac.tet_cells] = jac.prism_cells.size * sp + np.arange(jac.tet_cells.size) * st
-        diag = np.concatenate([bp.reshape(-1), bt.reshape(-1)]).astype(np.float32)
-        return cls(diag, diag_off, struct, dtau_flat, jac.n_sps)
-
     def __init__(self, diag_data, diag_off, struct: BlockCouplingStructure, dtau_flat, n_sps: int):
         from autoflowcfd.core.utils.array_module import array_module
 
@@ -281,26 +324,16 @@ class BlockILUPreconditioner(PseudoTransientDiagonal):
         self._struct = struct
         self._n_sps = int(n_sps)
         self._diag_off = diag_off
-        self._inv = np.empty_like(diag_data)
         dtau_host = self.dtau.get() if hasattr(self.dtau, "get") else self.dtau
-        inv_dtau = 1.0 / np.asarray(dtau_host, dtype=np.float64)
-        s = struct
-        for cells in s.levels:
-            _factor_level(cells, s.rank, diag_data, diag_off, self._inv, s.indptr, s.cols, s.offset,
-                          s.data, s.row_dof, inv_dtau, self._n_sps, s.n_var)
+        self._inv = factor_block_ilu(diag_data, diag_off, struct, 1.0 / np.asarray(dtau_host, dtype=np.float64),
+                                     self._n_sps)
 
     def apply(self, v_flat):
         out = super().apply(v_flat)              # 零填充槽位：dtau * v
         if self._xp is not np:
             v_flat, out = v_flat.get(), out.get()
-        s = self._struct
         x = np.ascontiguousarray(v_flat, dtype=np.float64).reshape(-1)
         y = np.ascontiguousarray(out, dtype=np.float64).reshape(-1).copy()
-        for cells in s.levels:
-            _forward_level(cells, s.rank, x, y, self._inv, self._diag_off, s.indptr, s.cols, s.offset,
-                           s.data, s.row_dof, self._n_sps, s.n_var)
-        for cells in reversed(s.levels):
-            _backward_level(cells, s.rank, y, self._inv, self._diag_off, s.indptr, s.cols, s.offset,
-                            s.data, s.row_dof, self._n_sps, s.n_var)
+        solve_block_ilu(self._inv, self._diag_off, self._struct, x, y, self._n_sps)
         y = y.reshape(out.shape)
         return y if self._xp is np else self._xp.asarray(y)

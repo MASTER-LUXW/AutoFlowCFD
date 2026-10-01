@@ -143,7 +143,7 @@ def step_mean_flow_newton(
     solver, residual: Callable, u_flat, dtau_flat, scales: np.ndarray, *,
     red: LocalReductions, cell_is_prism: np.ndarray, cell_colors: Callable[[], np.ndarray],
     order: int, filter_active: bool, positivity, block_assembler=None,
-    coupling_graph: Optional[Callable] = None,
+    coupling_graph: Optional[Callable] = None, global_coarse=None,
 ):
     """平均流的一个 PTC-Newton-Krylov 步，返回 `(U_new_flat, info)`。
 
@@ -173,6 +173,8 @@ def step_mean_flow_newton(
             只在首次构造缓存时保存、首次需要时调用。P0 没有解析装配器，差分装配按它
             同时截取面邻居耦合块、预处理用块 ILU（`cell_blocks.py` 模块文档）；
             None 时 P0 只有块 Jacobi。
+        global_coarse: 分布式后端的 `coarse.CoarseCommContext`（块 ILU 档叠全局粗校正，
+            `implicit/coarse/global_coarse.py`），只在首次构造缓存时使用；单机为 None。
     """
     from autoflowcfd.fr.native_padding import real_row_mask, real_sps_per_cell
 
@@ -198,7 +200,8 @@ def step_mean_flow_newton(
             n_sps=u_flat.shape[0] // n_cells, n_real_prism=n_real_prism,
             n_real_tet=n_real_tet, n_var=n_mf, red=red, coupling_graph=coupling_graph,
             # 隐式湍流在同一步里先于平均流运行、已建好它的状态：两者共享预处理内存预算
-            with_turbulence=getattr(solver, "_newton_turb_state", None) is not None)
+            with_turbulence=getattr(solver, "_newton_turb_state", None) is not None,
+            global_coarse=global_coarse)
 
     solver._newton_block_precond.assembler = block_assembler
     u_new_mf, info = step_newton_krylov(

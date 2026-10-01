@@ -131,10 +131,12 @@ def global_cell_colors_d2(face_connectivity, n_global_cells: int) -> np.ndarray:
                                    int(n_global_cells))
 
 
-def distributed_coupling_graph(solver) -> CouplingGraph:
-    """本 rank 的 P0 差分耦合图：local 单元（原生排列）的距离 2 着色与两端都在本
-    rank 的模板单元对。单元对取自残差本身用的紧凑面几何（`dist_flat_face.base_flat`，
-    local+halo 紧凑编号），经 `inv_perm` 换回 local 编号。"""
+def distributed_coupling_graph(solver, coarse_ctx) -> CouplingGraph:
+    """本 rank 的 P0 差分耦合图：local 单元（原生排列）的距离 2 着色、两端都在本 rank 的
+    模板单元对，以及一端在本 rank、另一端是 halo 的跨 rank 单元对（全局粗校正的粗矩阵用，
+    见 `cell_blocks.py`）。单元对取自残差本身用的紧凑面几何（`dist_flat_face.base_flat`，
+    local+halo 紧凑编号），本 rank 单元经 `inv_perm` 换回 local 编号、halo 单元保持紧凑编号；
+    halo 单元的颜色经 `coarse_ctx.compact_cell_values`（与残差同一次 halo 交换）取得。"""
     colors = getattr(solver, "_coupling_colors_local", None)
     if colors is None:
         fc = getattr(solver.mesh, "face_connectivity", None)
@@ -145,6 +147,7 @@ def distributed_coupling_graph(solver) -> CouplingGraph:
         part = solver.partition
         colors = global_cell_colors_d2(fc, part.n_global_cells)[part.local_cells]
         solver._coupling_colors_local = colors
+    colors = np.asarray(colors, dtype=np.int64)
     dist_fc = solver.dist_flat_face
     n_local = int(solver.partition.n_local_cells)
     flat = dist_fc.base_flat
@@ -155,7 +158,15 @@ def distributed_coupling_graph(solver) -> CouplingGraph:
     lo, ln = local[own], np.where(nb >= 0, local[np.maximum(nb, 0)], -1)
     keep = (lo >= 0) & (ln >= 0)
     rows, cols = stencil_pairs(lo[keep], ln[keep], n_local)
-    return CouplingGraph(rows=rows, cols=cols, colors=np.asarray(colors, dtype=np.int64))
+    a = (lo >= 0) & (nb >= 0) & (ln < 0)          # owner 在本 rank、neighbor 是 halo
+    b = (ln >= 0) & (lo < 0)                       # neighbor 在本 rank、owner 是 halo
+    pairs = np.unique(np.stack([np.concatenate([lo[a], ln[b]]), np.concatenate([nb[a], own[b]])], axis=1), axis=0)
+    halo_rows, halo_cols = pairs[:, 0], pairs[:, 1]
+    colors_compact = np.asarray(coarse_ctx.compact_cell_values(colors.astype(np.float64)))
+    return CouplingGraph(rows=rows, cols=cols, colors=colors,
+                         halo_rows=halo_rows, halo_cols=halo_cols,
+                         halo_colors=np.rint(colors_compact[halo_cols]).astype(np.int64),
+                         halo_col_is_prism=halo_cols < int(flat.n_prism))
 
 
 class _TurbulenceCompactState:
@@ -261,6 +272,13 @@ class DistributedTurbulenceBackend:
 
     def cell_colors(self):
         return distributed_block_jacobi_colors(self.solver)
+
+    def coarse_context(self):
+        from autoflowcfd.core.mpi.distributed_coarse import CpuCompactCellValues, coarse_comm_context
+
+        s = self.solver
+        return coarse_comm_context(s.partition, CpuCompactCellValues(s.halo_exchange, s.dist_flat_face.perm,
+                                                                     self.shape[1]))
 
     def block_assembler(self):
         """本步的解析单元块装配器：在与残差同一个紧凑空间视图上装配，按 `inv_perm` 取本 rank 行。"""

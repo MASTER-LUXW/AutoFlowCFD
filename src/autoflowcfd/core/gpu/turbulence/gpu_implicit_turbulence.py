@@ -52,6 +52,9 @@ class GpuTurbulenceBackend:
     def cell_colors(self):
         return gpu_cell_colors(self.xp, self.solver.flat_face_gpu, self.shape[0])
 
+    def coarse_context(self):
+        return None             # 单机：本地多层预处理的最粗层就是全局的
+
     def block_assembler(self):
         """本步的解析单元块装配器：线性算子部分在主机上装配（与 CPU 同一份，
         `core/turbulence/jacobian`），逐点量 `(S, Gamma)` 用 GPU 模型自己的求值件

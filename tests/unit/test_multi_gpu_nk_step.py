@@ -56,7 +56,7 @@ def _stub(n_local, n_sps, target):
     from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
 
     s = types.SimpleNamespace()
-    s.partition = types.SimpleNamespace(n_local_cells=n_local)
+    s.partition = types.SimpleNamespace(n_local_cells=n_local, rank=0, n_ranks=1)
     s.mesh = types.SimpleNamespace(n_sps_per_cell=n_sps)
     s.time_integrator = types.SimpleNamespace(scheme=TimeIntegrationScheme.NEWTON_KRYLOV)
     s.order = s.current_order = 1
@@ -69,7 +69,7 @@ def _stub(n_local, n_sps, target):
     s.dist_flat_face = types.SimpleNamespace(perm=np.arange(n_local),
                                              compact_cell_type=np.zeros(n_local, dtype=int))
     s._inv_perm_gpu = s._perm_gpu = np.arange(n_local)
-    s.gpu_halo = types.SimpleNamespace(exchange=None)   # 单 rank、无 halo（解析装配器已被 fixture 关掉）
+    s.gpu_halo = types.SimpleNamespace(exchange=None, n_vars=5)   # 单 rank、无 halo（解析装配器已被 fixture 关掉）
     s._block_jacobi_colors_local = np.arange(n_local) % 2
     # 合成状态没有面/细点几何：点集只有解点（额外求值点为空），物理性限幅仍按解点生效
     from autoflowcfd.core.time_integration.positivity import PositivityLimiter

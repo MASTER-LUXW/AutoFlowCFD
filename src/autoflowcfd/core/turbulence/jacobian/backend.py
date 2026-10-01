@@ -17,7 +17,8 @@ from .assemble import TurbulenceLinearization, assemble_turbulence_blocks
 
 
 class TurbulenceBlockAssembler:
-    """`(u0_flat, r0_flat) -> (blocks_prism, blocks_tet[, coupling])`（主机 float32，`n_var=2`）。"""
+    """`(u0_flat, r0_flat) -> (blocks_prism, blocks_tet[, coupling[, cross_rank_coupling]])`（主机 float32，
+    `n_var=2`；跨 rank 耦合块只在分布式给出，见 `select_rows`）。"""
 
     __slots__ = ("ctx", "n_sps", "compact_state", "row_compact", "want_coupling")
 

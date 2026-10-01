@@ -82,3 +82,42 @@ def test_reduction_object_is_the_only_source_of_scalars():
                              red=Doubling())
     assert it1 == it2
     np.testing.assert_array_equal(x1, x2)
+
+
+class _VaryingPreconditioner:
+    """每次作用都不同的预处理（第 k 次用 `(1 + 0.3 sin k) D^{-1}` 的近似逆加一个随调用变化的
+    低秩扰动）——K 循环那类非线性预处理的最小模型。"""
+
+    def __init__(self, A, seed):
+        self.d = np.diag(A).copy()
+        self.rng = np.random.default_rng(seed)
+        self.k = 0
+
+    def __call__(self, v):
+        self.k += 1
+        u = self.rng.standard_normal(v.size)
+        return (1.0 + 0.3 * np.sin(self.k)) * v / self.d + 0.2 * u * (u @ v) / v.size
+
+
+@pytest.mark.parametrize("restart", [200, 12])
+def test_flexible_mode_reaches_true_residual_with_varying_preconditioner(restart):
+    """灵活模式下返回的 x 真实满足容差；同一预处理走非灵活模式时 `x = M^{-1}(V y)` 用的是
+    又一次不同的作用，Givens 递推报告的残差与真实残差脱节。"""
+    A, b, _ = _system(80, 7, spread=3.0)
+    x, it, info, rel = gmres_right(lambda v: A @ v, b, _VaryingPreconditioner(A, 0), rtol=1e-9,
+                                   restart=restart, max_iter=2000, flexible=True)
+    assert info == 0
+    assert np.linalg.norm(b - A @ x) <= 1.0001e-9 * np.linalg.norm(b)
+    x2, _, info2, rel2 = gmres_right(lambda v: A @ v, b, _VaryingPreconditioner(A, 0), rtol=1e-9,
+                                     restart=200, max_iter=200, flexible=False)
+    assert np.linalg.norm(b - A @ x2) > 1e3 * max(rel2, 1e-9) * np.linalg.norm(b)
+
+
+def test_flexible_mode_matches_standard_mode_for_linear_preconditioner():
+    A, b, _ = _system(60, 8, spread=2.0)
+    d = np.diag(A).copy()
+    out_std = gmres_right(lambda v: A @ v, b, lambda v: v / d, rtol=1e-10, restart=15, max_iter=500)
+    out_flex = gmres_right(lambda v: A @ v, b, lambda v: v / d, rtol=1e-10, restart=15, max_iter=500,
+                           flexible=True)
+    assert out_std[1] == out_flex[1]
+    np.testing.assert_allclose(out_flex[0], out_std[0], rtol=1e-9, atol=1e-12)

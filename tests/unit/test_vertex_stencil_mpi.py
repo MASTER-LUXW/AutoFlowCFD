@@ -1,6 +1,6 @@
 """分布式顶点邻域模板（`core/mpi/vertex_stencil_mpi.py`）的多 rank 判据。
 
-本机没有 MPI，集合通信用线程 + `threading.Barrier` 模拟（注入
+本机没有 MPI，集合通信用线程模拟（`tests/unit/_thread_comm.py`，注入
 `allgather/allreduce_max/allreduce_min`），每个线程就是一个 rank，同时执行同一段
 代码 —— 与真实 MPI 的集合语义相同（全部 rank 进入、全部 rank 得到同一结果）。
 
@@ -9,8 +9,6 @@ local 单元的 BJ 越界比与单机全局结果**逐位相同**（max/min 与�
 数无关。反例：不做共享顶点归约时结果不同 —— 证明"跨面跳的顶点邻居"确实存在、
 测试有区分力。
 """
-
-import threading
 
 import numpy as np
 import pytest
@@ -21,32 +19,19 @@ from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
 from autoflowcfd.core.mpi.vertex_stencil_mpi import (
     build_distributed_vertex_stencil, local_vertex_pairs, vertex_pairs_of_cells,
 )
+from tests.unit._thread_comm import ThreadComm
 from tests.unit.test_sensor_gate_distributed import _build_global_case, _rank_view
 
 _REF = _reference_scales({"rho_inf": 1.225, "vel_inf": 30.0, "p_inf": 101325.0}, 5)
 
 
-class ThreadComm:
-    """n 个线程之间的集合通信（rank 顺序拼接 / 逐元素 MAX、MIN）。"""
-
-    def __init__(self, n):
-        self.n = n
-        self.barrier = threading.Barrier(n)
-        self.slots = [None] * n
-
-    def _collective(self, rank, value, combine):
-        self.slots[rank] = value
-        self.barrier.wait()
-        out = combine(list(self.slots))
-        self.barrier.wait()
-        return out
-
-    def for_rank(self, rank):
-        return dict(
-            allgather=lambda a: self._collective(rank, np.asarray(a), np.concatenate),
-            allreduce_max=lambda a: self._collective(rank, np.asarray(a), lambda v: np.maximum.reduce(v)),
-            allreduce_min=lambda a: self._collective(rank, np.asarray(a), lambda v: np.minimum.reduce(v)),
-            n_ranks=self.n)
+def _for_rank(comm, rank):
+    """顶点模板构造要的集合通信：按 rank 顺序拼接 / 逐元素 MAX、MIN。"""
+    return dict(
+        allgather=lambda a: comm.allgather(rank, a),
+        allreduce_max=lambda a: comm.collective(rank, np.asarray(a), lambda v: np.maximum.reduce(v)),
+        allreduce_min=lambda a: comm.collective(rank, np.asarray(a), lambda v: np.minimum.reduce(v)),
+        n_ranks=comm.n)
 
 
 def _vertex_pairs(n_cells, seed=5, n_hubs=12):
@@ -59,34 +44,22 @@ def _vertex_pairs(n_cells, seed=5, n_hubs=12):
 
 
 def _run_ranks(field, owner, neigh, is_bnd, node_g, cell_g, assign, reduce=True):
-    n_ranks = int(assign.max()) + 1
-    comm = ThreadComm(n_ranks)
-    out, errors = {}, []
+    """各 rank 的 `(local 单元全局号, 越界比)`，按 rank 排列。"""
+    comm = ThreadComm(int(assign.max()) + 1)
 
     def work(r):
-        try:
-            local_ids = np.flatnonzero(assign == r)
-            native_ids, n_local, o_r, n_r, b_r = _rank_view(owner, neigh, is_bnd, local_ids)
-            pos = {int(g): i for i, g in enumerate(local_ids)}
-            keep = np.isin(cell_g, local_ids)
-            cell_nat = np.array([pos[int(c)] for c in cell_g[keep]], dtype=np.int64)
-            kw = comm.for_rank(r) if reduce else dict(n_ranks=1)
-            st = build_distributed_vertex_stencil(node_g[keep], cell_nat, **kw)
-            ratio = compute_bounds_violation_ratio(
-                field[native_ids], o_r, n_r, b_r, ref_scales=_REF, vertex_stencil=st)
-            out[r] = (local_ids, ratio[:n_local])
-        except Exception as e:  # 线程里的异常要带回主线程
-            errors.append(e)
-            comm.barrier.abort()
+        local_ids = np.flatnonzero(assign == r)
+        native_ids, n_local, o_r, n_r, b_r = _rank_view(owner, neigh, is_bnd, local_ids)
+        pos = {int(g): i for i, g in enumerate(local_ids)}
+        keep = np.isin(cell_g, local_ids)
+        cell_nat = np.array([pos[int(c)] for c in cell_g[keep]], dtype=np.int64)
+        kw = _for_rank(comm, r) if reduce else dict(n_ranks=1)
+        st = build_distributed_vertex_stencil(node_g[keep], cell_nat, **kw)
+        ratio = compute_bounds_violation_ratio(
+            field[native_ids], o_r, n_r, b_r, ref_scales=_REF, vertex_stencil=st)
+        return local_ids, ratio[:n_local]
 
-    threads = [threading.Thread(target=work, args=(r,)) for r in range(n_ranks)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    if errors:
-        raise errors[0]
-    return out
+    return comm.run(work)
 
 
 @pytest.mark.parametrize("n_ranks", [2, 3, 5])
@@ -99,7 +72,7 @@ def test_distributed_ratio_equals_single_machine_bitwise(n_ranks):
         field, owner, neigh, is_bnd, ref_scales=_REF,
         vertex_stencil=VertexStencil(node_local.astype(np.int64), cell_g, int(nodes_u.size)))
     assign = np.random.default_rng(n_ranks).integers(0, n_ranks, n_cells)
-    for local_ids, ratio in _run_ranks(field, owner, neigh, is_bnd, node_g, cell_g, assign).values():
+    for local_ids, ratio in _run_ranks(field, owner, neigh, is_bnd, node_g, cell_g, assign):
         np.testing.assert_array_equal(ratio, global_ratio[local_ids])
 
 
@@ -114,7 +87,7 @@ def test_without_shared_node_reduction_the_result_differs():
     assign = np.random.default_rng(3).integers(0, 3, n_cells)
     n_diff = sum(int(np.count_nonzero(ratio != global_ratio[ids]))
                  for ids, ratio in _run_ranks(field, owner, neigh, is_bnd, node_g, cell_g,
-                                              assign, reduce=False).values())
+                                              assign, reduce=False))
     assert n_diff > 0, "不做共享顶点归约也逐位相同 —— 用例没有跨 rank 的顶点邻居，失去区分力"
 
 

@@ -15,7 +15,7 @@
 也不相邻 / 不共享邻居），见 `mpi/distributed_implicit.py`。
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from numba import njit
@@ -102,6 +102,10 @@ def stencil_pairs(owner_cell: np.ndarray, neighbor_cell: np.ndarray, n_cells: in
     return rows, indices
 
 
+def _empty_int():
+    return np.zeros(0, dtype=np.int64)
+
+
 @dataclass
 class CouplingGraph:
     """差分装配耦合块所需的全部结构（Newton 行单元编号）。
@@ -109,10 +113,19 @@ class CouplingGraph:
     Attributes:
         rows, cols: 耦合块 `J_{rows[k], cols[k]}` 的有向单元对（本 rank 两端都在的）。
         colors: 距离 2 着色（全局一致着色的本地一段）。
+        halo_rows, halo_cols: 跨 rank 耦合块的单元对（分布式）：行是本 rank 单元，列是 halo
+            单元在紧凑空间（local+halo）里的编号。halo 单元由它所在的 rank 在同一色里扰动，
+            经残差求值里的 halo 交换影响本 rank 的行（全局一致的距离 2 着色保证一行至多
+            一个被扰动的列）。单机为空。
+        halo_colors, halo_col_is_prism: 这些 halo 列单元的颜色与单元类型。
     """
     rows: np.ndarray
     cols: np.ndarray
     colors: np.ndarray
+    halo_rows: np.ndarray = field(default_factory=_empty_int)
+    halo_cols: np.ndarray = field(default_factory=_empty_int)
+    halo_colors: np.ndarray = field(default_factory=_empty_int)
+    halo_col_is_prism: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=bool))
 
 
 def coupling_graph_from_faces(owner_cell, neighbor_cell, n_cells: int) -> CouplingGraph:

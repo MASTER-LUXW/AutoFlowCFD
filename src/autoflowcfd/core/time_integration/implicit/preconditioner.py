@@ -57,6 +57,9 @@ class PseudoTransientDiagonal:
 
     __slots__ = ("_dtau", "_dtau_col")
 
+    #: 作用是否随调用变化（非线性预处理）。为真时 GMRES 走灵活模式（`gmres.py`）。
+    flexible = False
+
     def __init__(self, dtau_flat: np.ndarray, n_var: int):
         """
         Args:

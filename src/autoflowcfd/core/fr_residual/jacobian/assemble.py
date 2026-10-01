@@ -230,7 +230,7 @@ def assemble_mean_flow_blocks(ctx: MeanFlowLinearization, U, residual=None, want
     blocks = (K_prism.reshape(n_prism, npr * 5, npr * 5), K_tet.reshape(n_cells - n_prism, nte * 5, nte * 5))
     if not want_coupling:
         return blocks
-    # 耦合块只在块 ILU（预处理合计预算放得下，见 block_jacobi.py::plan_block_mode）时装配，行、列单元任意，
+    # 耦合块只在块 ILU（预处理合计预算放得下，见 block_budget.py::plan_block_mode）时装配，行、列单元任意，
     # 用全场的 TQ/Gamma
     TQ, gamma, _ = _transform_arrays(U5, Q, gamma_R, ctx)
     coupling = finalize_coupling(cross_data, slots, det_c, TQ, gamma, bool(ctx.low_mach), npr, nte)

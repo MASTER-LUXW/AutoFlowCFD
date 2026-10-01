@@ -21,6 +21,15 @@
 
 `A`、`M^{-1}` 都只以作用的形式给出（矩阵自由）。返回的迭代数是 `A` 的
 作用次数（不含重启时那一次重算残差）。
+
+## 灵活模式（FGMRES，Saad 1993）
+
+`M^{-1}` 每次作用不是同一个线性算子时（多层预处理的 K 循环在粗层上做固定
+步数的内层 Krylov，`coarse/multilevel.py`），`x = M^{-1}(V y)` 不再成立。
+灵活模式存下每个 `z_j = M^{-1} v_j`，用 `x = x + Z y` 更新——最小化的仍是
+真实残差，代价是多存一组与 Krylov 基同样多的向量。预处理对象带
+`flexible = True` 时由调用方打开（`jfnk.py::_solve_direction`）；线性预处理
+不打开，不白占这份内存。
 """
 
 from typing import Callable, Tuple
@@ -32,8 +41,8 @@ from .reductions import LocalReductions
 
 
 def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
-                restart: int, max_iter: int, red: LocalReductions = None
-                ) -> Tuple[object, int, int, float]:
+                restart: int, max_iter: int, red: LocalReductions = None,
+                flexible: bool = False) -> Tuple[object, int, int, float]:
     """解 `A x = b`，返回 `(x, iterations, info, rel_residual)`。
 
     `info == 0` 表示达到 `||b - A x|| <= rtol * ||b||`；`info > 0` 表示
@@ -44,6 +53,8 @@ def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
     给出的值，精确算术下即真实残差；重启处是重算的真实残差）。用满迭代数
     时它说明方向还有多少可信度——自适应 CFL 据此判断线性求解是否失败
     （`adaptive_cfl/ser.py`）。
+
+    `flexible`：灵活模式（见模块文档），`M^{-1}` 可以每次作用都不同。
     """
     red = red if red is not None else LocalReductions()
     xp = red.xp
@@ -61,11 +72,22 @@ def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
     # 重启 30 就是 4.8 GB，而块 Jacobi 下实际只迭代 13 次——未用到的一半多把第 2 个
     # Newton 步挤到 OOM。
     V = []
+    Z = []          # 灵活模式下的 M^{-1} v_j（预处理作用本来就返回新数组，直接持有它）
 
     def basis(j):
         if j == len(V):
             V.append(xp.empty_like(b))
         return V[j]
+
+    def precond(j):
+        z = apply_Minv(V[j])
+        if not flexible:
+            return z
+        if j == len(Z):
+            Z.append(z)
+        else:
+            Z[j] = z
+        return z
 
     while True:
         m = restart
@@ -78,7 +100,7 @@ def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
         k_used = 0
         converged = False
         for j in range(m):
-            w = apply_A(apply_Minv(V[j]))
+            w = apply_A(precond(j))
             total += 1
             w = xp.ascontiguousarray(w)
             for i in range(j + 1):
@@ -111,12 +133,13 @@ def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
                 converged = h_next == 0.0
                 break
             xp.divide(w, h_next, out=basis(j + 1))
-        # 回代 y，更新 x = x + M^{-1} (V y)
+        # 回代 y，更新 x = x + M^{-1} (V y)（灵活模式：x = x + Z y）
         y = np.linalg.solve(np.triu(H[:k_used, :k_used]), g[:k_used]) if k_used else np.zeros(0)
-        upd = y[0] * V[0]
+        W = Z if flexible else V
+        upd = y[0] * W[0]
         for i in range(1, k_used):
-            vector_ops.axpy_(xp, upd, y[i], V[i])
-        x = x + apply_Minv(upd)
+            vector_ops.axpy_(xp, upd, y[i], W[i])
+        x = x + (upd if flexible else apply_Minv(upd))
         rel = abs(g[k_used]) / bnorm
         if converged:
             return x, total, 0, rel

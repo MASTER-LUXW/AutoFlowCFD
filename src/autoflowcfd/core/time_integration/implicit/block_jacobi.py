@@ -58,7 +58,7 @@ P0 与解析装配不覆盖的离散（见 `fr_residual/jacobian/backend.py::uns
 存储（逐块求逆在 float64 下做）：预处理子的精度只影响迭代数，不影响
 GMRES 解的精度。
 
-合计预算（`PRECOND_TOTAL_BYTES`，平均流与湍流共享，见 `plan_block_mode`）放不下两份、放得下一份时用**单份**（冻结 dtau）：
+合计预算（`block_budget.py`，平均流与湍流共享）放不下两份、放得下一份时用**单份**（冻结 dtau）：
 装配后立即按当时的 `dtau` 原地求逆、不再保留 `J_cc`；之后每步直接用这份逆，
 当前 `dtau` 与求逆时的 `dtau`（几何平均比值）相差超过 `DTAU_REBUILD_RATIO` 倍才
 重装配。预处理子里的 `dtau` 略微过时只影响迭代数（它仍是合法的预处理子），迭代
@@ -76,6 +76,8 @@ import numpy as np
 from loguru import logger
 from numba import njit, prange
 
+from . import block_budget
+from .block_budget import block_mode_bytes, plan_block_mode
 from .cell_blocks import CellBlockJacobian
 from .preconditioner import PseudoTransientDiagonal
 from .reductions import LocalReductions
@@ -90,84 +92,8 @@ REFRESH_SLACK_MIN = 3
 #: 单次 GMRES 迭代耗时的指数滑动平均权重（新值占比）。
 _ITER_SECONDS_EMA = 0.5
 
-#: 全部单元块预处理（平均流 + 湍流两个缓存**合计**，float32）允许的字节数。
-#:
-#: **为什么是一个合计预算**（2026-09-29）：此前平均流与湍流的缓存各自按自己的上限
-#: （ILU 12 GiB、两份 8 GiB）选档，互相看不见。plate_demo P3（17.9 万单元）湍流只有
-#: 2 个变量，耦合块却随自由度平方增长，块 ILU 要 8.38 GiB；加上平均流单份 8.9 GiB、
-#: 求解器常驻 7.7 GiB、残差求值峰值约 4.5 GiB、Krylov 基 4.6 GiB，合计约 34 GiB，
-#: GMRES 的矩阵向量乘在 31.5 GB 开发机上 OOM。11 GiB：放得下 P3 平均流单份（8.9 GiB）+
-#: 湍流单份（1.4 GiB），与上述其余部分合计约 27 GiB。分档见 `plan_block_mode`（平均流优先）。
-PRECOND_TOTAL_BYTES = 11 * 2 ** 30
-
-#: 档位偏好顺序：块 ILU > 块 Jacobi 两份 > 单份（冻结 dtau）> 不装配（对角预处理）。
-BLOCK_MODES = ("ilu", "two", "single")
-
-_MEAN_FLOW_VARS = 5
-_TURBULENCE_VARS = 2
-
 #: 单份模式：当前 dtau 与求逆时 dtau 的几何平均比值超过这个倍数（任一方向）就重装配。
 DTAU_REBUILD_RATIO = 2.0
-
-#: 估计耦合块数用的每单元平均面邻居数（四面体 4、棱柱 5，内部单元为主）。
-_MEAN_FACE_NEIGHBORS = 4.2
-
-def estimate_block_bytes(n_prism: int, n_tet: int, n_real_prism: int,
-                         n_real_tet: int, n_var: int) -> int:
-    """`J_cc` + 逆两份（float32）的总字节数。"""
-    bp, bt = n_real_prism * n_var, n_real_tet * n_var
-    return 2 * 4 * (n_prism * bp * bp + n_tet * bt * bt)
-
-
-def block_mode_bytes(mode: str, n_prism: int, n_tet: int, n_real_prism: int, n_real_tet: int,
-                     n_var: int) -> int:
-    """某一档（`BLOCK_MODES`）的字节数。"""
-    if mode == "ilu":
-        return estimate_ilu_bytes(n_prism, n_tet, n_real_prism, n_real_tet, n_var)
-    two = estimate_block_bytes(n_prism, n_tet, n_real_prism, n_real_tet, n_var)
-    return two if mode == "two" else two // 2
-
-
-def _best_mode(budget: int, sizes, n_var: int) -> Optional[str]:
-    for mode in BLOCK_MODES:
-        if block_mode_bytes(mode, *sizes, n_var) <= budget:
-            return mode
-    return None
-
-
-def plan_block_mode(n_var: int, n_prism: int, n_tet: int, n_real_prism: int, n_real_tet: int,
-                    with_turbulence: bool) -> Optional[str]:
-    """在合计预算 `PRECOND_TOTAL_BYTES` 内为平均流（`n_var=5`）或湍流（`n_var=2`）选档；
-    None 表示一档也放不下（对角预处理）。
-
-    平均流优先：它在"给湍流留出单份"之后的预算里取最好的一档；湍流在平均流选定之后
-    的剩余里取最好的一档。两个缓存各自调用、结果一致（同一个函数、同一组尺寸）。
-    `with_turbulence=False`（层流）时平均流独占预算。
-    """
-    sizes = (n_prism, n_tet, n_real_prism, n_real_tet)
-    if n_var not in (_MEAN_FLOW_VARS, _TURBULENCE_VARS):
-        return _best_mode(PRECOND_TOTAL_BYTES, sizes, n_var)
-    turbulence = with_turbulence or n_var == _TURBULENCE_VARS
-    reserve = block_mode_bytes("single", *sizes, _TURBULENCE_VARS) if turbulence else 0
-    # 平均流优先：留出湍流单份后放不下时不再预留（湍流在剩余里取档，最坏退回对角预处理）
-    mean_mode = (_best_mode(PRECOND_TOTAL_BYTES - reserve, sizes, _MEAN_FLOW_VARS)
-                 or _best_mode(PRECOND_TOTAL_BYTES, sizes, _MEAN_FLOW_VARS))
-    if n_var == _MEAN_FLOW_VARS:
-        return mean_mode
-    used = 0 if mean_mode is None else block_mode_bytes(mean_mode, *sizes, _MEAN_FLOW_VARS)
-    return _best_mode(PRECOND_TOTAL_BYTES - used, sizes, _TURBULENCE_VARS)
-
-
-def estimate_ilu_bytes(n_prism: int, n_tet: int, n_real_prism: int,
-                       n_real_tet: int, n_var: int) -> int:
-    """块 ILU 的总字节数（对角块、对角逆、面邻居耦合块，float32）。"""
-    n = n_prism + n_tet
-    if n == 0:
-        return 0
-    mean_dof = (n_prism * n_real_prism + n_tet * n_real_tet) * n_var / n
-    coupling = int(_MEAN_FACE_NEIGHBORS * n * mean_dof * mean_dof * 4)
-    return estimate_block_bytes(n_prism, n_tet, n_real_prism, n_real_tet, n_var) + coupling
-
 
 class CellBlockJacobiPreconditioner(PseudoTransientDiagonal):
     """`M = blockdiag(J_cc + I/dtau)` 的逆作用；接口与对角预处理相同。
@@ -299,11 +225,12 @@ class BlockJacobiCache:
                  "jac", "age", "baseline_iters", "last_iters", "last_accepted",
                  "disabled_reason", "n_builds", "red", "n_var", "assembler", "use_ilu", "coupling",
                  "_coupling_graph_fn", "_coupling_graph", "build_seconds", "iter_seconds",
-                 "single_copy", "_inverted_dtau")
+                 "single_copy", "_inverted_dtau", "_coarse", "cross")
 
     def __init__(self, *, cell_is_prism, colors: np.ndarray, n_sps: int,
                  n_real_prism: int, n_real_tet: int, n_var: int,
-                 red: LocalReductions = None, coupling_graph=None, with_turbulence: bool = False):
+                 red: LocalReductions = None, coupling_graph=None, with_turbulence: bool = False,
+                 global_coarse=None):
         """`colors`：块装配用的单元着色（单机 `coloring.greedy_cell_coloring`；分布式
         是全局一致着色里本 rank 那一段，保证同色单元跨 rank 也不相邻）。
 
@@ -315,6 +242,9 @@ class BlockJacobiCache:
         面邻居耦合块，预处理用块 ILU（见 `cell_blocks.py` 模块文档）。
 
         `with_turbulence`：平均流缓存是否与隐式湍流缓存共享预算（`plan_block_mode`）。
+
+        `global_coarse`（`coarse.CoarseCommContext`，分布式后端给出）：块 ILU 档在本 rank 的
+        预处理之外再叠全局粗校正（`coarse/global_coarse.py`），装配器须同时给出跨 rank 耦合块。
         """
         self.red = red if red is not None else LocalReductions()
         self.n_var = int(n_var)
@@ -326,6 +256,7 @@ class BlockJacobiCache:
         self.iter_seconds = None
         self.single_copy = False
         self._inverted_dtau = None
+        self.cross = None
         self.cell_is_prism = np.asarray(cell_is_prism, dtype=bool)
         self.n_sps, self.n_real_prism, self.n_real_tet = n_sps, n_real_prism, n_real_tet
         self.jac: Optional[CellBlockJacobian] = None
@@ -340,19 +271,21 @@ class BlockJacobiCache:
         self.use_ilu = mode == "ilu"
         self.single_copy = mode == "single"
         self.disabled_reason = None
+        from .coarse import CoarsePreconditionerFactory
+        self._coarse = CoarsePreconditionerFactory(max(n_real_prism, n_real_tet) > 1, global_coarse)
         self.colors = np.asarray(colors, dtype=np.int64)
         if mode is None:
             self.disabled_reason = (
                 f"单元块 Jacobi（n_var={self.n_var}）一份也需要 "
                 f"{block_mode_bytes('single', *sizes, self.n_var) / 2 ** 30:.1f} GiB，超出预处理合计预算 "
-                f"{PRECOND_TOTAL_BYTES / 2 ** 30:.0f} GiB，改用逐 SP 对角预处理——大 CFL 下 GMRES "
+                f"{block_budget.PRECOND_TOTAL_BYTES / 2 ** 30:.0f} GiB，改用逐 SP 对角预处理——大 CFL 下 GMRES "
                 f"迭代数会显著上升")
             logger.warning("[NK] " + self.disabled_reason)
             self.colors = None
         else:
             logger.info(f"[NK] 单元块预处理（n_var={self.n_var}）：{mode}，"
                         f"{block_mode_bytes(mode, *sizes, self.n_var) / 2 ** 30:.2f} GiB"
-                        f"（合计预算 {PRECOND_TOTAL_BYTES / 2 ** 30:.0f} GiB）")
+                        f"（合计预算 {block_budget.PRECOND_TOTAL_BYTES / 2 ** 30:.0f} GiB）")
 
     def _refresh_threshold(self, baseline: int) -> int:
         slack = REFRESH_SLACK_MIN
@@ -412,6 +345,7 @@ class BlockJacobiCache:
         # 步内 refresh 时 OOM）；调用方同样先丢掉持有旧块的预处理对象（jfnk.py）
         self.jac = None
         self.coupling = None
+        self.cross = None
         if self.assembler is not None:
             self.assembler.want_coupling = self.use_ilu
             out = self.assembler(u0_flat, r0_flat)
@@ -420,6 +354,7 @@ class BlockJacobiCache:
                 from .block_ilu import BlockCouplingStructure
                 n_real = np.where(self.cell_is_prism, self.n_real_prism, self.n_real_tet)
                 self.coupling = BlockCouplingStructure(out[2], self.cell_is_prism.size, n_real, self.n_var)
+                self.cross = self._coarse.cross_coupling(out[3] if len(out) > 3 else None, self.coupling)
             self.jac = CellBlockJacobian.from_blocks(
                 blocks_prism, blocks_tet, n_sps=self.n_sps, n_var=self.n_var,
                 cell_is_prism=self.cell_is_prism, n_real_prism=self.n_real_prism,
@@ -435,6 +370,7 @@ class BlockJacobiCache:
                 self.coupling = BlockCouplingStructure(
                     self.jac.coupling, self.cell_is_prism.size, np.ones(self.cell_is_prism.size, np.int64),
                     self.n_var)
+                self.cross = self._coarse.cross_coupling(self.jac.cross_coupling, self.coupling)
         if self.single_copy:
             invert_blocks_in_place(self.jac, dtau_flat)
             self._inverted_dtau = self.red.xp.asarray(dtau_flat, dtype=self.red.xp.float64).ravel().copy()
@@ -460,13 +396,19 @@ class BlockJacobiCache:
             self._coupling_graph = self._coupling_graph_fn()
         return self._coupling_graph
 
+    @property
+    def flexible(self) -> bool:
+        """`preconditioner()` 给出的是否是非线性预处理（多层 K 循环），GMRES 据此走灵活模式。
+        `begin_step` 之后才有定论（耦合结构由首次装配给出）。"""
+        return self.disabled_reason is None and self.coupling is not None and self._coarse.flexible(self.coupling)
+
     def preconditioner(self, dtau_flat: np.ndarray, n_var: int):
-        """给定 `dtau` 下的预处理子（`begin_step` 之后调用，可多次）。"""
+        """给定 `dtau` 下的预处理子（`begin_step` 之后调用，可多次）。块 ILU 档交给
+        `coarse/selection.py`（本地多层或块 ILU，分布式再叠全局粗校正）。"""
         if self.disabled_reason is not None:
             return PseudoTransientDiagonal(dtau_flat, n_var)
         if self.coupling is not None:
-            from .block_ilu import BlockILUPreconditioner
-            return BlockILUPreconditioner.from_cell_blocks(self.jac, self.coupling, dtau_flat)
+            return self._coarse.make(self.jac, self.coupling, self.cross, dtau_flat)
         return CellBlockJacobiPreconditioner(self.jac, dtau_flat, inverted=self.single_copy)
 
     def record(self, gmres_iters: int, accepted: bool, gmres_seconds: Optional[float] = None) -> None:

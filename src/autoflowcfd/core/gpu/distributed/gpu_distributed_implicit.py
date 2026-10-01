@@ -81,6 +81,12 @@ class MultiGpuTurbulenceBackend:
     def cell_colors(self):
         return distributed_block_jacobi_colors(self.solver)
 
+    def coarse_context(self):
+        from autoflowcfd.core.mpi.distributed_coarse import GpuCompactCellValues, coarse_comm_context
+
+        s = self.solver
+        return coarse_comm_context(s.partition, GpuCompactCellValues(s.gpu_halo, s._perm_gpu, self.shape[1], self.xp))
+
     def block_assembler(self):
         """本步的解析单元块装配器：在与残差同一个紧凑视图上装配（线性算子部分在主机，
         逐点量用 GPU 模型的求值件），按 `inv_perm` 取回本 rank 的行。"""

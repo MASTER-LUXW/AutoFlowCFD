@@ -12,8 +12,9 @@
   再换到"棱柱在前"的 local+halo 紧凑排列（与分布式残差
   `distributed_compute.py` 同一套 `perm`），`compact_state` 给出这一步；
 * **块的行单元在紧凑空间里的下标** `row_compact`（分布式是 `inv_perm[:n_local]`），
-  对角块按它取出、耦合块只保留两端都是本 rank 单元的那些（halo 耦合由 rank 间
-  的块 Jacobi 式分解忽略，与块 Jacobi 同一个近似）。
+  对角块按它取出；耦合块分成两端都是本 rank 单元的（本 rank 的块 ILU / 多层预处理用，
+  rank 间按块 Jacobi 式分解）与列单元是 halo 的（跨 rank 耦合，全局粗校正的粗矩阵用，
+  `time_integration/implicit/coarse/global_coarse.py`）。
 
 装配器持有本步冻结的涡粘，所以每个 Newton 步新建（做成类而不是闭包，项目规范）。
 """
@@ -50,7 +51,8 @@ def unsupported_reason(*, order: int, entropy_stable_volume: bool = False,
 
 
 class MeanFlowBlockAssembler:
-    """`(u0_flat, r0_flat) -> (blocks_prism, blocks_tet[, coupling])`（主机 float32）。"""
+    """`(u0_flat, r0_flat) -> (blocks_prism, blocks_tet[, coupling[, cross_rank_coupling]])`（主机 float32；
+    跨 rank 耦合块只在分布式给出，见 `select_rows`）。"""
 
     __slots__ = ("ctx", "n_sps", "compact_state", "row_compact", "want_coupling")
 
@@ -77,18 +79,16 @@ class MeanFlowBlockAssembler:
         R = np.zeros(U.shape[:2] + (r.shape[-1],))
         R[self.row_compact] = r
         out = assemble_mean_flow_blocks(self.ctx, U, residual=R, want_coupling=self.want_coupling)
-        return self._rows_only(out, int(self.ctx.mesh.n_prism_cells))
-
-    def _rows_only(self, out, n_prism_compact):
-        return select_rows(out, self.row_compact, n_prism_compact, self.want_coupling)
+        return select_rows(out, self.row_compact, int(self.ctx.mesh.n_prism_cells), self.want_coupling)
 
 
 def select_rows(out, row_compact, n_prism_compact: int, want_coupling: bool):
     """紧凑空间（local+halo）装配结果 -> 只含 Newton 行单元（local）的块。
 
-    对角块按 `row_compact` 取出（棱柱/四面体各自按行单元的原生顺序）；耦合块只保留
-    两端都是本 rank 单元的那些（与 rank 间块 Jacobi 式分解同一个近似），单元号换成
-    行单元下标。平均流与 k-omega 装配器共用。
+    对角块按 `row_compact` 取出（棱柱/四面体各自按行单元的原生顺序）。`want_coupling` 时
+    再给出两组耦合块：两端都是本 rank 单元的（单元号换成行单元下标），与行单元在本 rank、
+    列单元是 halo 的跨 rank 耦合块（行换成行单元下标，列保持紧凑空间编号）。平均流与
+    k-omega 装配器共用。
     """
     rc = row_compact
     is_p = rc < n_prism_compact
@@ -98,11 +98,11 @@ def select_rows(out, row_compact, n_prism_compact: int, want_coupling: bool):
         return blocks
     local = -np.ones(bp_c.shape[0] + bt_c.shape[0], dtype=np.int64)
     local[rc] = np.arange(rc.size)
-    groups = []
+    inner, cross = [], []
     for g in out[2].groups:
         lr, lc = local[g.rows], local[g.cols]
-        keep = (lr >= 0) & (lc >= 0)
-        if keep.any():
-            groups.append(CouplingGroup(row_is_prism=g.row_is_prism, col_is_prism=g.col_is_prism,
-                                        rows=lr[keep], cols=lc[keep], blocks=g.blocks[keep]))
-    return blocks + (CouplingBlocks(groups=groups),)
+        for dest, keep, cols in ((inner, (lr >= 0) & (lc >= 0), lc), (cross, (lr >= 0) & (lc < 0), g.cols)):
+            if keep.any():
+                dest.append(CouplingGroup(row_is_prism=g.row_is_prism, col_is_prism=g.col_is_prism,
+                                          rows=lr[keep], cols=np.asarray(cols)[keep], blocks=g.blocks[keep]))
+    return blocks + (CouplingBlocks(groups=inner), CouplingBlocks(groups=cross))

@@ -187,12 +187,14 @@ def _accept_step(residual: Callable, u0_flat, du_flat, theta0: float, res_norm0:
     return u0_flat, 0.0, res_norm0, n_eval
 
 
-def krylov_restart(n_local_entries: int, red: LocalReductions) -> int:
+def krylov_restart(n_local_entries: int, red: LocalReductions, flexible: bool = False) -> int:
     """按 Krylov 基内存预算给出的重启长度（见 `KRYLOV_BASIS_BYTES`）。
 
     分布式下各 rank 的 GMRES 必须走同样多步（内积是集体操作），所以取全局最小。
+    灵活模式每步多存一个 `M^{-1} v_j`（`gmres.py`），同一预算下重启长度减半。
     """
-    m_local = KRYLOV_BASIS_BYTES // (8 * max(int(n_local_entries), 1)) - 1
+    per_step = 8 * max(int(n_local_entries), 1) * (2 if flexible else 1)
+    m_local = KRYLOV_BASIS_BYTES // per_step - 1
     m = int(red.min(red.xp.asarray([float(m_local)])))
     return int(min(GMRES_RESTART_MAX, max(GMRES_RESTART, m)))
 
@@ -265,7 +267,7 @@ def _solve_direction(jac: MatrixFreeJacobian, prec, r0, n_var: int, eta: float,
 
     du_1d, iters, info, rel = gmres_right(
         _apply_A, b, _apply_Minv, rtol=eta,
-        restart=gmres_restart, max_iter=gmres_max_iter, red=red)
+        restart=gmres_restart, max_iter=gmres_max_iter, red=red, flexible=prec.flexible)
     if info < 0 or not red.all_finite(du_1d):
         return None, iters, -1, float("nan")
     du = du_1d.reshape(n_dof, n_var) if rows is None else rows.expand(du_1d, xp)
@@ -377,11 +379,12 @@ def step_newton_krylov(
         if red.sum(xp.abs(r0[pad])) != 0.0:
             raise ValueError("零填充槽位的残差不为零：Krylov 向量不能只存真实行（见 _RealRows）")
     jac = MatrixFreeJacobian(residual, u0_flat, r0, scales, red=red)
-    if gmres_restart is None:
-        gmres_restart = krylov_restart(u0_flat.size if rows is None else rows.idx.size * n_var, red)
     dtau_base = xp.ascontiguousarray(dtau_flat, dtype=xp.float64).ravel() * local_scale
     if block_precond is not None:
         block_precond.begin_step(residual, u0_flat, r0, scales, dtau_base * ctrl.scale)
+    if gmres_restart is None:
+        gmres_restart = krylov_restart(u0_flat.size if rows is None else rows.idx.size * n_var, red,
+                                       flexible=block_precond is not None and block_precond.flexible)
     eta = (forcing.next_eta(res_norm, tol_nonlinear)
            if forcing is not None else 0.1)
 

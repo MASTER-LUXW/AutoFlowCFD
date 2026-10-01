@@ -63,7 +63,9 @@
 状态挂在 `solver._newton_turb_state` 上）、`prepare()`、`rates(apply_des)`、
 `positivity()`、
 `finalize(dtau)`、`cell_colors()`（块 Jacobi 着色，见
-`implicit/mean_flow_step.py` 的同名参数）。
+`implicit/mean_flow_step.py` 的同名参数）、`block_assembler()`、`coarse_context()`
+（分布式块 ILU 档的全局粗校正通信上下文，见 `mean_flow_step.py` 的 `global_coarse`；
+单机返回 None）。
 """
 
 import numpy as np
@@ -163,6 +165,9 @@ class CpuTurbulenceBackend:
     def cell_colors(self):
         return single_machine_cell_colors(self.solver)
 
+    def coarse_context(self):
+        return None             # 单机：本地多层预处理的最粗层就是全局的
+
     def block_assembler(self):
         """本步的解析单元块装配器（`core/turbulence/jacobian`）；输入与残差同一份冻结量。"""
         from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
@@ -220,7 +225,7 @@ def _newton_state(backend):
             "block": BlockJacobiCache(
                 cell_is_prism=backend.cell_is_prism, colors=backend.cell_colors(),
                 n_sps=backend.shape[1], n_real_prism=n_real_prism, n_real_tet=n_real_tet,
-                n_var=2, red=backend.red),
+                n_var=2, red=backend.red, global_coarse=backend.coarse_context()),
             "last_info": None,
             "local_dtau": None,
         }
