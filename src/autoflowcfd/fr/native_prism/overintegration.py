@@ -18,8 +18,9 @@ get_overintegration_context` 要求六个 `overint_*` 算子全部非 None，缺
    `build_native_prism_operators(over_order)`，不是新公式；含
    `enforce_constant_annihilation`，自由流保持性依赖它）。
 3. `restrict_f2c`：**FINE 阶数**模态基在 COARSE 点上取值 —— 把微分后
-   的场从细网格精确插值回 coarse SPs。**不是**模态截断投影：过积分的
-   目的正是要保留非线性通量的高阶内容，不能在算完导数后又截断掉。
+   的场从细网格插值回 coarse SPs（湍流 k-omega 输运用；平均流用下面的 L2
+   投影 `build_native_prism_l2_projection`，两者的分工见
+   `native_tet/overintegration.py` 模块文档"限制：平均流投影、湍流插值"一节）。
 
 ## 与坍缩棱柱的两个关键差异
 
@@ -56,6 +57,7 @@ from typing import Tuple
 
 import numpy as np
 
+from ..quadrature_points import gauss_legendre
 from .basis import (
     build_native_prism_operators,
     build_native_prism_vandermonde,
@@ -102,14 +104,42 @@ def build_native_prism_overintegration_operators(
     V_coarse_at_coarse = build_native_prism_vandermonde(order, ref_coarse)[0]
     V_coarse_at_fine = build_native_prism_vandermonde(order, ref_fine)[0]
     V_fine_at_fine = build_native_prism_vandermonde(over_order, ref_fine)[0]
-    V_fine_at_coarse = build_native_prism_vandermonde(over_order, ref_coarse)[0]
 
     # `interp = V_at_target @ V_at_source^{-1}`，用 `lu_factor(V.T)` 后
     # 转置求解（`lu_solve(lu, B.T).T` 等价于 `B @ V^{-1}`，避免显式求逆）。
     lu_coarse = lu_factor(V_coarse_at_coarse.T)
     interp_c2f = lu_solve(lu_coarse, V_coarse_at_fine.T).T
 
-    lu_fine = lu_factor(V_fine_at_fine.T)
-    restrict_f2c = lu_solve(lu_fine, V_fine_at_coarse.T).T
+    restrict_f2c = lu_solve(lu_factor(V_fine_at_fine.T),
+                            build_native_prism_vandermonde(over_order, ref_coarse)[0].T).T
 
     return ref_fine, interp_c2f, D_fine, restrict_f2c
+
+
+def build_native_prism_l2_projection(order: int, over_order: int) -> np.ndarray:
+    """细层（over_order 次）节点值 -> 求解空间（order 次）节点值的参考单元 L2 投影
+    `M_c^{-1} ∫ φ_i g`，`(n_coarse, n_fine)`（平均流体积项用，见模块文档第 3 条）。
+
+    两套节点 Lagrange 基在 Duffy 求积点上取值。被积函数（粗 x 细）在三角形与挤出方向
+    各至多 order+over_order 次，Duffy 因子再加 1 次，一维 n 点 Gauss 精确到 2n-1 次，
+    n = order+over_order+2 有富余。
+    """
+    from scipy.linalg import lu_factor, lu_solve
+
+    ref_coarse, _ = build_native_prism_operators(order)
+    ref_fine, _ = build_native_prism_operators(over_order)
+    xq, wq = _prism_duffy_rule(order + over_order + 2)
+    L_coarse = lu_solve(lu_factor(build_native_prism_vandermonde(order, ref_coarse)[0].T),
+                        build_native_prism_vandermonde(order, xq)[0].T).T
+    L_fine = lu_solve(lu_factor(build_native_prism_vandermonde(over_order, ref_fine)[0].T),
+                      build_native_prism_vandermonde(over_order, xq)[0].T).T
+    return np.linalg.solve(L_coarse.T @ (wq[:, None] * L_coarse), L_coarse.T @ (wq[:, None] * L_fine))
+
+
+def _prism_duffy_rule(n: int):
+    """参考棱柱上的 Duffy 张量 Gauss 求积 `(点 (n^3,3), 权重 (n^3,))`。"""
+    a_1d, w_1d = gauss_legendre(n)
+    a, b, t = (x.ravel() for x in np.meshgrid(a_1d, a_1d, a_1d, indexing="ij"))
+    wa, wb, wt = (x.ravel() for x in np.meshgrid(w_1d, w_1d, w_1d, indexing="ij"))
+    pts = np.stack([(1.0 + a) * (1.0 - b) / 2.0 - 1.0, b, t], axis=1)
+    return pts, wa * wb * wt * (1.0 - b) / 2.0

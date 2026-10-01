@@ -8,7 +8,6 @@ from autoflowcfd.core.fr_operators.kernels import resolve_ausm_precond_mode
 
 from autoflowcfd.core.gpu import get_cupy
 
-from autoflowcfd.core.gpu.residual.gpu_flux import euler_physical_flux_gpu
 
 from .flux import _ausm_up_flux_batch_gpu
 
@@ -86,8 +85,9 @@ def _lift_native_contrib(cp, cube_face_code, lift_native, ref_area_weight, jump)
 
     **权重是参考求积权重、不是物理面积权重**（2026-09-18 修掉的真实缺陷，
     完整记录见 `core/fr_operators/face_kernels.py::FlatFaceGeometry.
-    ref_area_weight` 字段文档）：这一路的 `jump` 是 `adj_row . (F*-F_own)`，
-    已经是参考空间的法向通量差，再乘物理面积权重会多乘一个 `|adj_row|
+    ref_area_weight` 字段文档）：这一路的 `jump` 是公共通量 `|a| F*`（本侧通量迹在体积算子
+    K 里，`fr/face_flux_trace.py`），
+    已经是参考空间的法向通量，再乘物理面积权重会多乘一个 `|adj_row|
     ~ h^2`，界面项从 `~1/h` 变成 `~h`。
     （注意 `gpu_scalar_transport.py` 里同一位置**用物理面积权重是对的**
     —— 它的 `jump` 是物理通量密度差，两路的 `jump` 不在同一个空间。）
@@ -216,22 +216,11 @@ def _compute_interface_correction_gpu(
                 Q_o.reshape(nO, n_fp, 5), Q_n.reshape(nO, n_fp, 5), direction_o, mach_ref,
                 precond_mode,
             )
+            # 只施加公共通量：本侧通量迹已并进体积算子 K（fr/face_flux_trace.py）
             F_tilde_common_o = flux_o * adj_mag_o[..., None]
 
-            a0 = adjrow_o[..., 0]
-            a1 = adjrow_o[..., 1]
-            a2 = adjrow_o[..., 2]
-            F_phys_o = euler_physical_flux_gpu(Q_o.reshape(nO * n_fp, 5)).reshape(nO, n_fp, 3, 5)
-            F_tilde_own_o = (
-                a0[..., None] * F_phys_o[..., 0, :]
-                + a1[..., None] * F_phys_o[..., 1, :]
-                + a2[..., None] * F_phys_o[..., 2, :]
-            )
-
-            jump_owner = F_tilde_common_o - F_tilde_own_o
-
             contrib_o = _lift_native_contrib(
-                cp, oc_code_o, ff.lift_native, ff.ref_area_weight, jump_owner,
+                cp, oc_code_o, ff.lift_native, ff.ref_area_weight, F_tilde_common_o,
             )
             contrib_o = contrib_o / det_jacs[oc][..., None]
             _scatter_add_to_correction(correction, -contrib_o, oc, n_cells, n_sps)
@@ -278,20 +267,8 @@ def _compute_interface_correction_gpu(
             )
             F_tilde_common_n = flux_n * adj_mag_n[..., None]
 
-            a0n = adjrow_n[..., 0]
-            a1n = adjrow_n[..., 1]
-            a2n = adjrow_n[..., 2]
-            F_phys_n = euler_physical_flux_gpu(Q_n_native.reshape(nN * n_fp, 5)).reshape(nN, n_fp, 3, 5)
-            F_tilde_own_n = (
-                a0n[..., None] * F_phys_n[..., 0, :]
-                + a1n[..., None] * F_phys_n[..., 1, :]
-                + a2n[..., None] * F_phys_n[..., 2, :]
-            )
-
-            jump_neighbor = F_tilde_common_n - F_tilde_own_n
-
             contrib_n = _lift_native_contrib(
-                cp, nc_code_n, ff.lift_native, ff.ref_area_weight, jump_neighbor,
+                cp, nc_code_n, ff.lift_native, ff.ref_area_weight, F_tilde_common_n,
             )
             contrib_n = contrib_n / det_jacs[nc][..., None]
             _scatter_add_to_correction(correction, -contrib_n, nc, n_cells, n_sps)

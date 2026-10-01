@@ -26,32 +26,12 @@ from autoflowcfd.core.fr_operators.flux_kernels import (
 from autoflowcfd.core.fr_residual.inviscid_kernel import compute_boundary_ghost_states
 from autoflowcfd.core.fr_residual.viscous_flux_kernel import compute_viscous_interface_correction_kernel
 from autoflowcfd.boundary.fr_ghost_state import build_viscous_boundary_kind
-from autoflowcfd.core.fr_operators.flux_kernels import viscous_physical_flux_batch
-from autoflowcfd.core.fr_operators.volume_contract import contract_shared_operator_2axis
 
 from .test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 
 MU = 1.8e-5
 PR = 0.72
 PR_T = 0.9
-
-
-@pytest.fixture(autouse=True)
-def _coarse_volume_term(monkeypatch):
-    """本文件全部用例固定 `AFCFD_VISC_OVERINT=off`。
-
-    为什么必须固定（2026-09-17）：本文件测的是**界面项** kernel（新实现
-    vs 旧逐面循环），`_compute_residual_via_new_kernel` 里的体积项只是把
-    生产代码的**粗网格**版本抄了一遍来凑出完整残差。粘性体积项的默认
-    2026-09-17 改成了过积分（`AFCFD_VISC_OVERINT=on`，实测不过积分的能量
-    分量有 63.2% 的混叠误差，见 `viscous_flux.py::
-    resolve_viscous_overintegration`），于是两边比的成了两种不同的**体积
-    项离散**——差值 7.2e3（P1）/ 2.2e5（P2）是真实的物理差异，不是 kernel
-    不一致。固定成 off 把界面项重新隔离出来，这才是本文件的判据。
-
-    体积项那一档的正确性由 `test_viscous_volume_overintegration.py` 覆盖。
-    """
-    monkeypatch.setenv("AFCFD_VISC_OVERINT", "off")
 
 
 def _compute_temperature(Q):
@@ -66,7 +46,6 @@ def _compute_residual_via_new_kernel(U, mesh, ops, mu_t_field=None, boundary_gho
     ghost_provider = boundary_ghost_provider if boundary_ghost_provider is not None else DefaultGhostProvider()
     n_cells = mesh.n_cells
     n_sps = mesh.n_sps_per_cell
-    n_prism = mesh.n_prism_cells
     mu_t_field = np.zeros((n_cells, n_sps)) if mu_t_field is None else mu_t_field
 
     Q = conserved_to_primitive(U[..., :5])
@@ -80,24 +59,12 @@ def _compute_residual_via_new_kernel(U, mesh, ops, mu_t_field=None, boundary_gho
     inv_jacs = mesh.jacobians["inv_jacs"].reshape(n_cells, n_sps, 3, 3)
     adj_j = det_jacs[..., None, None] * inv_jacs
 
-    # --- 体积项（与 fr_viscous_flux.py 当前实现逐字一致，性能优化后已改用
-    # viscous_physical_flux_batch/matmul/tensordot，理由见该文件与
-    # fr_volume_contract.py 模块文档；同步更新原因见
-    # test_fr_residual_inviscid_kernel_crosscheck.py 同类改动的注释）---
-    Q_flat = np.ascontiguousarray(Q.reshape(-1, 5))
-    grad_vel_flat = np.ascontiguousarray(grad_vel.reshape(-1, 3, 3))
-    grad_T_flat = np.ascontiguousarray(grad_T.reshape(-1, 3))
-    mu_t_flat = np.ascontiguousarray(mu_t_field.reshape(-1))
-    G_phys = viscous_physical_flux_batch(
-        Q_flat, grad_vel_flat, grad_T_flat, MU, PR, mu_t_flat, PR_T
-    ).reshape(n_cells, n_sps, 3, 5)
-    G_tilde = np.matmul(adj_j, G_phys)
-    div_comp = np.zeros((n_cells, n_sps, 5))
-    if n_prism > 0:
-        div_comp[:n_prism] = contract_shared_operator_2axis(ops.D_3d_prism, G_tilde[:n_prism])
-    if n_cells > n_prism:
-        div_comp[n_prism:] = contract_shared_operator_2axis(ops.D_3d_tet, G_tilde[n_prism:])
-    residual = div_comp / det_jacs[..., None]
+    # --- 体积项：与生产同一个函数（细点上重新求值、体积算子 K 已含修正项的本侧通量迹，
+    # fr/face_flux_trace.py）。本文件只比界面核，体积项不复制第二份实现 ---
+    from autoflowcfd.core.fr_operators.volume_contract import get_overintegration_context
+    from autoflowcfd.core.fr_residual.viscous_flux import viscous_volume_term
+    residual = viscous_volume_term(Q, grad_vel, grad_T, mu_t_field, MU, PR, PR_T,
+                                   get_overintegration_context(mesh, ops), n_sps) / det_jacs[..., None]
 
     # --- 界面项：新 kernel ---
     flat = get_flat_face_geometry(mesh, ops)

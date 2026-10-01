@@ -16,7 +16,7 @@ import numpy as np
 from numba import njit, prange
 
 from autoflowcfd.core.fr_operators.small_dense import matmul_small
-from autoflowcfd.core.fr_residual.face_point_jumps import inviscid_jump_point
+from autoflowcfd.core.fr_residual.face_point_jumps import inviscid_common_flux_point
 from autoflowcfd.core.fr_residual.inviscid_kernel import _extrap_matmul
 
 
@@ -66,7 +66,6 @@ def compute_inviscid_interface_correction_kernel_colored(
     因子固定 +1、DG 提升算子 `lift_native`）。坍缩坐标那条并行路径已于
     2026-09-23 在两处同步删除（生产不可达，见该函数文档）。
     """
-    n_cells = Q.shape[0]
     n_sps = Q.shape[1]
     n_fp = owner_adj_row_exact.shape[1]
     n_faces_in_color = face_indices.shape[0]
@@ -82,7 +81,7 @@ def compute_inviscid_interface_correction_kernel_colored(
             Q_o = _extrap_matmul(Q[oc], E_o)
             adjrow_o = owner_adj_row_exact[f]  # (n_fp, 3)，逐 FP 精确值，见函数文档
 
-            jump_owner = np.empty((n_fp, 5))
+            flux_owner = np.empty((n_fp, 5))
             for i in range(n_fp):
                 # 另一侧状态（幽灵态 / sources 插值 / 混合拆分面配对幽灵态）
                 if is_boundary[f]:
@@ -110,14 +109,14 @@ def compute_inviscid_interface_correction_kernel_colored(
                     mp = mixed_nb_partner[f]
                     if mp >= 0 and mixed_nb_mask[f, i]:
                         Q_n = Q_ghost[mp, i]
-                jump_owner[i] = inviscid_jump_point(Q_o[i], Q_n, adjrow_o[i], mach_ref, precond_mode)
+                flux_owner[i] = inviscid_common_flux_point(Q_o[i], Q_n, adjrow_o[i], mach_ref, precond_mode)
 
-            weighted_jump_o = np.empty((n_fp, 5))
+            weighted_flux_o = np.empty((n_fp, 5))
             for i in range(n_fp):
                 w_area = ref_area_weight[i]
                 for v in range(5):
-                    weighted_jump_o[i, v] = w_area * jump_owner[i, v]
-            contrib_owner = matmul_small(lift_native[oc_code - 6], weighted_jump_o)
+                    weighted_flux_o[i, v] = w_area * flux_owner[i, v]
+            contrib_owner = matmul_small(lift_native[oc_code - 6], weighted_flux_o)
             for s in range(n_sps):
                 dj = det_jacs[oc, s]
                 for v in range(5):
@@ -131,7 +130,7 @@ def compute_inviscid_interface_correction_kernel_colored(
             Q_n_native = _extrap_matmul(Q[nc], E_n)
             adjrow_n_native = neighbor_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
 
-            jump_neighbor = np.empty((n_fp, 5))
+            flux_neighbor = np.empty((n_fp, 5))
             for i in range(n_fp):
                 # 另一侧状态（幽灵态 / sources 插值 / 混合拆分面配对幽灵态）
                 Q_o_at_n = np.zeros(5)
@@ -157,14 +156,14 @@ def compute_inviscid_interface_correction_kernel_colored(
                 if mp_o >= 0 and mixed_ow_mask[f, i]:
                     for v in range(5):
                         Q_o_at_n[v] = Q_ghost[mp_o, i, v]
-                jump_neighbor[i] = inviscid_jump_point(Q_n_native[i], Q_o_at_n, adjrow_n_native[i], mach_ref, precond_mode)
+                flux_neighbor[i] = inviscid_common_flux_point(Q_n_native[i], Q_o_at_n, adjrow_n_native[i], mach_ref, precond_mode)
 
-            weighted_jump_n = np.empty((n_fp, 5))
+            weighted_flux_n = np.empty((n_fp, 5))
             for i in range(n_fp):
                 w_area = ref_area_weight[i]
                 for v in range(5):
-                    weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
-            contrib_neighbor = matmul_small(lift_native[nc_code - 6], weighted_jump_n)
+                    weighted_flux_n[i, v] = w_area * flux_neighbor[i, v]
+            contrib_neighbor = matmul_small(lift_native[nc_code - 6], weighted_flux_n)
             for s in range(n_sps):
                 dj = det_jacs[nc, s]
                 for v in range(5):

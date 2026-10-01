@@ -213,7 +213,11 @@ def compute_inviscid_residual_fr(
             从 O(n_fine) 升到 O(n_fine^2)（两点通量需要遍历 SP 对，是
             entropy-stable 方案的固有代价），默认关闭以避免无条件拖慢
             现有全部生产用例；无过积分分支（P0）或用户显式设为 False
-            时行为完全不变。
+            时行为完全不变。**该档不精确守恒**（封闭对称盒子 P1 质量相对
+            2.5e-8）：两点通量的通量差分恒等式 `Q + Q^T = E` 要求面求积对
+            2*over_order 次精确，p 阶面通量点达不到；要精确守恒须改成杂交 SBP
+            的体积-面耦合（Chan 2018），是另一套离散。默认档（强形式）精确守恒，
+            见 `fr/face_flux_trace.py`。
 
     Returns:
         residual: 形状 (n_cells, n_sps, 5)
@@ -239,18 +243,11 @@ def compute_inviscid_residual_fr(
 
     n_cells = mesh.n_cells
     n_sps = mesh.n_sps_per_cell
-    n1d = mesh.n_points_1d
-
     Q = conserved_to_primitive(U[..., :5])  # (n_cells, n_sps, 5)
 
     det_jacs = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
     inv_jacs = mesh.jacobians["inv_jacs"].reshape(n_cells, n_sps, 3, 3)
-    adj_j = compute_adj_j(det_jacs, inv_jacs)  # (n_cells,n_sps,3,3), adj_j[...,m,i]
-    # adj_j（coarse）在下面界面/校正项里仍要用（side_contravariant_flux 等
-    # 闭包捕获），体积项散度改走 over-integration（去混叠）路径，两者不
-    # 是同一段计算，coarse adj_j 不能删。
-
-    n_prism = mesh.n_prism_cells
+    adj_j = compute_adj_j(det_jacs, inv_jacs)  # (n_cells,n_sps,3,3)，边界幽灵态构造要用
 
     # 过积分上下文改用共享 helper（2026-09-17）：此前本函数自己直读
     # `mesh.jacobians_fine` / `mesh.n_sps_per_cell_fine` 并硬编码两段
@@ -304,7 +301,8 @@ def compute_inviscid_residual_fr(
         # 度量按**段内局部**索引切（`i0 = c0 - seg_lo`）——用全局 c0 去切
         # 段内数组会静默取到错误的单元。
         for (seg_lo, seg_hi, n_fine, det_seg, inv_seg,
-             op_c2f, op_D_fine, op_f2c) in _oi["segs"]:
+             op_c2f, op_D_fine, _f2c_interp), op_K, op_proj in zip(_oi["segs"], _oi["lifted_div"],
+                                                                     _oi["projection"]):
             for c0 in range(seg_lo, seg_hi, _OVERINT_CHUNK_CELLS):
                 c1 = min(c0 + _OVERINT_CHUNK_CELLS, seg_hi)
                 i0, i1 = c0 - seg_lo, c1 - seg_lo
@@ -328,44 +326,35 @@ def compute_inviscid_residual_fr(
                     # `residual = -div_comp/det_jacs` 不需要再乘 2。
                     div_fine_chunk = entropy_stable_volume_divergence_batch(Q_fine, adj_j_fine, op_D_fine)
                     del adj_j_fine
-                else:
-                    F_phys_fine = euler_physical_flux_batch(
-                        Q_fine.reshape(-1, 5)
-                    ).reshape(c1 - c0, n_fine, 3, 5)
-                    # 度量×通量融合 kernel（性能优化 2026-09-13，见
-                    # volume_contract.py::contravariant_flux_from_metric
-                    # 文档：原 `np.matmul(adj_j_fine, F_phys_fine)` 是逐点
-                    # 3x3@3x5 批量微型 gemm，不随核数并行）。逐位等价。
-                    F_tilde_fine = contravariant_flux_from_metric(
-                        det_chunk, inv_chunk, F_phys_fine
-                    )
-                    del F_phys_fine
-                    div_fine_chunk = contract_shared_operator_2axis(op_D_fine, F_tilde_fine)
-                    del F_tilde_fine
+                F_phys_fine = euler_physical_flux_batch(
+                    Q_fine.reshape(-1, 5)
+                ).reshape(c1 - c0, n_fine, 3, 5)
                 del Q_fine  # 块内用完即弃，下一轮迭代变量重新绑定
-                # 细->粗限制在块内立刻做（见上方内存优化说明），块内细点
-                # 数组随即释放，不再需要全场 (n_cells,n_fine,5) 那一份。
-                div_comp[c0:c1] = contract_shared_operator_1axis(op_f2c, div_fine_chunk)
-                del div_fine_chunk
+                # 度量×通量融合 kernel（性能优化 2026-09-13，见
+                # volume_contract.py::contravariant_flux_from_metric
+                # 文档：原 `np.matmul(adj_j_fine, F_phys_fine)` 是逐点
+                # 3x3@3x5 批量微型 gemm，不随核数并行）。逐位等价。
+                F_tilde_fine = contravariant_flux_from_metric(det_chunk, inv_chunk, F_phys_fine)
+                del F_phys_fine
+                # 强形式：`K = f2c·D_fine - Σ_面 lift·W·Tn` 一次收缩——体积散度的 L2 投影
+                # 减去修正项的本侧通量（细层通量多项式在面通量点上的法向迹），界面核
+                # 只施加公共通量（离散守恒，见 fr/face_flux_trace.py）。块内收缩、块内
+                # 释放，不再需要全场 (n_cells,n_fine,5) 的细点数组。
+                div_comp[c0:c1] = contract_shared_operator_2axis(op_K, F_tilde_fine)
+                if entropy_stable_volume:
+                    # 熵稳定两点通量散度替换体积散度那一半；本侧迹仍取细层标准通量
+                    # 多项式（K - 投影·D_fine 部分）。该档不精确守恒，见参数文档。
+                    div_comp[c0:c1] += contract_shared_operator_1axis(
+                        op_proj, div_fine_chunk - contract_shared_operator_2axis(op_D_fine, F_tilde_fine))
+                    del div_fine_chunk
+                del F_tilde_fine
     else:
-        # 没有 fine 几何——只在 order==0 时发生，但 P0 在函数入口就已经
-        # 短路到 _compute_inviscid_residual_fv_p0，不会走到这里；order>=1
-        # 时 `build_order_geometry` 恒构造 native 单纯形基过积分算子
-        # + jacobians_fine（见该函数文档），这条朴素（无去混叠）分支
-        # 理论上不会被真实触发，保留只是防御性兜底，不静默得到错误
-        # 答案。四面体段用 `ops.D_3d_tet`（现别名到 `D_native_tet_
-        # padded`，见 fr/operators.py 模块文档），棱柱段仍是坍缩坐标
-        # `D_3d_prism`（棱柱没有 native 概念）。
-        Q_flat = np.ascontiguousarray(Q.reshape(-1, 5))
-        F_phys = euler_physical_flux_batch(Q_flat).reshape(n_cells, n_sps, 3, 5)
-        # 同上融合 kernel（逐位等价，见 contravariant_flux_from_metric 文档）
-        F_tilde = contravariant_flux_from_metric(det_jacs, inv_jacs, F_phys)
-        div_comp = np.zeros((n_cells, n_sps, 5))
-        if n_prism > 0:
-            div_comp[:n_prism] = contract_shared_operator_2axis(ops.D_3d_prism, F_tilde[:n_prism])
-        if n_cells > n_prism:
-            div_comp[n_prism:] = contract_shared_operator_2axis(ops.D_3d_tet, F_tilde[n_prism:])
-
+        # order>=1 时 `build_order_geometry` 恒构造细点度量与过积分算子；没有它们说明
+        # 网格/算子构造不完整。旧版这里有一条"直接在解点上微分"的兜底分支，它的
+        # 修正项本侧通量与体积项不一致（不守恒），且生产上不可达——不保留第二套离散。
+        raise RuntimeError(
+            "P>=1 无粘残差需要过积分细点度量（mesh.jacobians_fine）与 ops.overint_* 算子，"
+            "这里缺失：网格或算子是按不完整的阶数几何构造的")
     residual = -div_comp / det_jacs[..., None]  # 物理空间残差（体积项部分）
     # div_comp（~854MiB）用完即弃，理由同上（over-integration 分支/朴素
     # 分支的 div_comp 是同一个局部变量名，del 同样安全，之后不再被引用）。

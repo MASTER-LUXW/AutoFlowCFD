@@ -4,7 +4,6 @@
 """
 
 
-from autoflowcfd.core.gpu import get_cupy
 
 
 from autoflowcfd.core.gpu.residual.gpu_flux import viscous_physical_flux_gpu
@@ -118,28 +117,14 @@ def _self_extrap_side(cp, cell_idx, cube_face_code, boundary_extrap_native,
     return Q, gv, gT, mut
 
 
-def _viscous_tilde_flux_pair(Q_common, gv_common, gT_common, mut_common,
-                              Q_own, gv_own, gT_own, mut_own,
-                              adjrow, mu, Pr, Pr_t):
-    """算 (G_tilde_common, G_tilde_own) 一对张量，两者之差就是 jump。
-    对应 CPU 端每个 FP 上 `viscous_physical_flux_point` 调用两次
-    （一次给 BR1 平均态，一次给自身原始态）再各自投影到 tilde 方向的
-    那一段——这里把它向量化到 (n_faces*n_fp,) 展平批量。"""
-    cp = get_cupy()
-    n, n_fp = Q_common.shape[0], Q_common.shape[1]
-
-    G_common = viscous_physical_flux_gpu(
-        Q_common.reshape(n * n_fp, 5), gv_common.reshape(n * n_fp, 3, 3),
-        gT_common.reshape(n * n_fp, 3), mu, Pr, mu_t=mut_common.reshape(n * n_fp), Pr_t=Pr_t,
+def _viscous_tilde_flux(Q, gv, gT, mut, adjrow, mu, Pr, Pr_t):
+    """`a·G(Q, grad u, grad T, mu_t)`（参考空间法向粘性通量），`(n, n_fp, 5)`——对应 CPU 端
+    每个通量点上 `viscous_physical_flux_point` 再投影到 adj 行的那一段，向量化到
+    `(n*n_fp,)` 展平批量。"""
+    n, n_fp = Q.shape[0], Q.shape[1]
+    G = viscous_physical_flux_gpu(
+        Q.reshape(n * n_fp, 5), gv.reshape(n * n_fp, 3, 3),
+        gT.reshape(n * n_fp, 3), mu, Pr, mu_t=mut.reshape(n * n_fp), Pr_t=Pr_t,
     ).reshape(n, n_fp, 3, 5)
-    G_own = viscous_physical_flux_gpu(
-        Q_own.reshape(n * n_fp, 5), gv_own.reshape(n * n_fp, 3, 3),
-        gT_own.reshape(n * n_fp, 3), mu, Pr, mu_t=mut_own.reshape(n * n_fp), Pr_t=Pr_t,
-    ).reshape(n, n_fp, 3, 5)
-
-    a0 = adjrow[..., 0:1]
-    a1 = adjrow[..., 1:2]
-    a2 = adjrow[..., 2:3]
-    G_tilde_common = a0 * G_common[..., 0, :] + a1 * G_common[..., 1, :] + a2 * G_common[..., 2, :]
-    G_tilde_own = a0 * G_own[..., 0, :] + a1 * G_own[..., 1, :] + a2 * G_own[..., 2, :]
-    return G_tilde_common, G_tilde_own
+    return (adjrow[..., 0:1] * G[..., 0, :] + adjrow[..., 1:2] * G[..., 1, :]
+            + adjrow[..., 2:3] * G[..., 2, :])

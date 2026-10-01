@@ -58,8 +58,7 @@ def test_native_overintegration_runs_end_to_end_without_blowing_up(order):
     """端到端接入的健全性检查（不是本文件的决定性正确性判据——见下方
     模块文档补充说明）：真实 `compute_inviscid_residual_fr` 在
     native+过积分默认启用的情况下必须正常算出有限残差，不崩溃、不
-    NaN，且与关闭过积分（`jacobians_fine=None`）相比结果处于同一个
-    量级（不会因为过积分接错而暴涨到无关量级）。
+    NaN；缺细层几何（`jacobians_fine=None`）时明确报错。
 
     **判据校准的真实教训**（如实记录，不是理论假设）：最初在这个具体
     的小合成网格（`_build_synthetic_mixed_mesh`，只有 2 个四面体、
@@ -83,19 +82,11 @@ def test_native_overintegration_runs_end_to_end_without_blowing_up(order):
     assert np.all(np.isfinite(residual_with_overint))
     tet_res_with = np.max(np.abs(residual_with_overint[n_prisms:]))
 
+    assert tet_res_with > 0.0
+
+    # 缺细层几何时必须明确报错，不能静默换成"解点上微分"的第二套离散（2026-10-01
+    # 删除了那条兜底：它的修正项本侧通量与体积项不一致、不守恒，且生产上不可达）
     mesh_no_overint = copy.copy(mesh)
     mesh_no_overint.jacobians_fine = None
-    residual_without_overint = compute_inviscid_residual_fr(
-        U, mesh_no_overint, mesh.operators, mach_ref=U_WALL / 340.0
-    )
-    assert np.all(np.isfinite(residual_without_overint))
-    tet_res_without = np.max(np.abs(residual_without_overint[n_prisms:]))
-
-    # 量级健全性（不是决定性判据）：不应该相差几个数量级以上，那种情况
-    # 才真正说明接线出了问题（矩阵形状/索引错位一般会导致这种级别的
-    # 崩坏，不会是"改善或轻微变差"这种正常量级的差异）。
-    ratio = max(tet_res_with, 1e-300) / max(tet_res_without, 1e-300)
-    assert 1e-3 < ratio < 1e3, (
-        f"order={order}: 有/无过积分残差比值 {ratio:.3e} 相差过于悬殊，"
-        f"可能是接线错误（有过积分={tet_res_with:.3e}，无过积分={tet_res_without:.3e}）"
-    )
+    with pytest.raises(RuntimeError, match="jacobians_fine"):
+        compute_inviscid_residual_fr(U, mesh_no_overint, mesh.operators, mach_ref=U_WALL / 340.0)

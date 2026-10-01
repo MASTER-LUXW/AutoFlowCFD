@@ -25,13 +25,17 @@ from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
 from autoflowcfd.core.fr_operators.flux_kernels import (
     CP_AIR, VBC_DIRICHLET, VBC_INTERIOR, VBC_NEUMANN, mirror_normal_component,
     mirror_normal_derivative, resolve_point_kind,
-    euler_physical_flux_point, viscous_physical_flux_point, viscous_ip_penalty_tilde,
+    viscous_physical_flux_point, viscous_ip_penalty_tilde,
 )
 
 
 @njit(cache=True, inline='always')
-def inviscid_jump_point(Q_s, Q_x, adjrow, mach_ref, precond_mode):
-    """无粘跳变量 `|a| F_AUSM(Q_s, Q_x, a/|a|) - a . F(Q_s)`，形状 (5,)。
+def inviscid_common_flux_point(Q_s, Q_x, adjrow, mach_ref, precond_mode):
+    """无粘公共通量 `|a| F_AUSM(Q_s, Q_x, a/|a|)`，形状 (5,)。
+
+    修正项的另一半——本侧通量——不在这里：它是细层体积通量多项式在本通量点上
+    的法向迹，已并进体积算子（`fr/face_flux_trace.py`；离散守恒依赖这一点，若在
+    这里用外插状态重算 `a·F(Q_s)`，守恒只到混叠量级）。
 
     `Q_s`/`Q_x`：本侧/另一侧原始变量 (rho,u,v,w,p)；`adjrow`：本侧逐 FP 精确
     逆变度量行（已 outward 定向，法向一律取自本侧，理由见
@@ -48,17 +52,19 @@ def inviscid_jump_point(Q_s, Q_x, adjrow, mach_ref, precond_mode):
     normal[1] = a1 / adj_mag
     normal[2] = a2 / adj_mag
     F_common = compute_ausm_up_flux(Q_s, Q_x, normal, mach_ref, precond_mode)
-    F_phys = euler_physical_flux_point(Q_s)
-    jump = np.empty(5)
     for v in range(5):
-        jump[v] = F_common[v] * adj_mag - (a0 * F_phys[0, v] + a1 * F_phys[1, v] + a2 * F_phys[2, v])
-    return jump
+        F_common[v] *= adj_mag
+    return F_common
 
 
 @njit(cache=True, inline='always')
-def viscous_jump_point(Q_s, gv_s, gT_s, mut_s, Q_x, gv_x, gT_x, mut_x, adjrow, h_ip,
-                       bkind, mu, Pr, Pr_t, c_ip):
-    """粘性跳变量（面平均通量减本侧通量，加 IP 罚项），形状 (5,)。
+def viscous_common_flux_point(Q_s, gv_s, gT_s, mut_s, Q_x, gv_x, gT_x, mut_x, adjrow, h_ip,
+                              bkind, mu, Pr, Pr_t, c_ip):
+    """粘性公共通量（面平均态上的通量，加 IP 罚项）`a·G(平均态) + 罚项`，形状 (5,)。
+
+    P>=1 修正项的本侧通量（`a·G(本侧)`）是细层体积通量多项式的迹，已并进体积算子 K
+    （`fr/face_flux_trace.py`）；P0 没有体积算子，P0 核另减
+    `viscous_self_normal_flux_point`。
 
     `bkind`：该面（混合拆分面的边界半区取配对面）的粘性边界种类
     （`flux_kernels/viscous_bc.py`），内部面传 `VBC_INTERIOR`；入口在这里按本点
@@ -68,7 +74,7 @@ def viscous_jump_point(Q_s, gv_s, gT_s, mut_s, Q_x, gv_x, gT_x, mut_x, adjrow, h
     * `VBC_NEUMANN`（出口、入口回流点）：另一侧梯度取 `gv_s·R` 与 `R gT_s`
       （充分发展条件 du_i/dn = dT/dn = 0，见 `viscous_bc.py`），其余同下；幽灵态
       速度就是本侧速度，罚项只剩零；
-    * 其余：`a·G(平均态) - a·G(本侧)` 加罚项。内部面罚项用面平均涡粘与热传导率；
+    * 其余：`a·G(平均态)` 加罚项。内部面罚项用面平均涡粘与热传导率；
       边界面用本侧涡粘，热传导率只在 `VBC_DIRICHLET` 时给（温度被弱施加到
       幽灵态温度），无滑移壁/镜像类传 0（绝热由 ∇T 镜像精确施加）。
     """
@@ -77,7 +83,6 @@ def viscous_jump_point(Q_s, gv_s, gT_s, mut_s, Q_x, gv_x, gT_x, mut_x, adjrow, h
     a1 = adjrow[1]
     a2 = adjrow[2]
     jump = np.empty(5)
-    G_self = viscous_physical_flux_point(Q_s, gv_s, gT_s, mu, Pr, mut_s, Pr_t)
     if bkind == VBC_NEUMANN:
         gv_x = mirror_normal_derivative(gv_s, adjrow)
         gT_x = mirror_normal_component(gT_s, adjrow)
@@ -96,8 +101,7 @@ def viscous_jump_point(Q_s, gv_s, gT_s, mut_s, Q_x, gv_x, gT_x, mut_x, adjrow, h
 
     G_common = viscous_physical_flux_point(Q_avg, gv_avg, gT_avg, mu, Pr, mut_avg, Pr_t)
     for v in range(5):
-        jump[v] = ((a0 * G_common[0, v] + a1 * G_common[1, v] + a2 * G_common[2, v])
-                   - (a0 * G_self[0, v] + a1 * G_self[1, v] + a2 * G_self[2, v]))
+        jump[v] = a0 * G_common[0, v] + a1 * G_common[1, v] + a2 * G_common[2, v]
 
     adj_mag = np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
     if bkind == VBC_INTERIOR:
@@ -111,3 +115,13 @@ def viscous_jump_point(Q_s, gv_s, gT_s, mut_s, Q_x, gv_x, gT_x, mut_x, adjrow, h
     for v in range(1, 5):
         jump[v] += pen[v]
     return jump
+
+
+@njit(cache=True, inline='always')
+def viscous_self_normal_flux_point(Q_s, gv_s, gT_s, mut_s, adjrow, mu, Pr, Pr_t):
+    """本侧粘性法向通量 `a·G(Q_s, grad_s)`，形状 (5,)——只给 P0 核用（P>=1 已并进 K）。"""
+    G = viscous_physical_flux_point(Q_s, gv_s, gT_s, mu, Pr, mut_s, Pr_t)
+    out = np.empty(5)
+    for v in range(5):
+        out[v] = adjrow[0] * G[0, v] + adjrow[1] * G[1, v] + adjrow[2] * G[2, v]
+    return out

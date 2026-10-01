@@ -35,14 +35,14 @@ from autoflowcfd.core.fr_operators.volume_contract import contract_shared_operat
 from .test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 
 
-def _compute_residual_via_new_kernel(U, mesh, ops, boundary_ghost_provider=None, mach_ref=0.1):
+def _compute_residual_via_new_kernel(U, mesh, ops, boundary_ghost_provider=None, mach_ref=0.1,
+                                    return_correction=False):
     """与 fr_residual_inviscid.py::compute_inviscid_residual_fr 完全对应
     的"新版"：体积项逐字复制（未改动），界面项换成新 kernel。"""
     ghost_provider = boundary_ghost_provider if boundary_ghost_provider is not None else DefaultGhostProvider()
 
     n_cells = mesh.n_cells
     n_sps = mesh.n_sps_per_cell
-    n_prism = mesh.n_prism_cells
 
     Q = conserved_to_primitive(U[..., :5])
     det_jacs = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
@@ -65,31 +65,20 @@ def _compute_residual_via_new_kernel(U, mesh, ops, boundary_ghost_provider=None,
     )
 
     _oi = get_overintegration_context(mesh, ops)
-    if _oi is not None:
-        div_comp = np.zeros((n_cells, n_sps, 5))
-        for (seg_lo, seg_hi, n_fine, det_seg, inv_seg,
-             op_c2f, op_D_fine, op_f2c) in _oi["segs"]:
-            if seg_hi <= seg_lo:
-                continue
-            nb = seg_hi - seg_lo
-            adj_seg = np.ascontiguousarray(det_seg)[..., None, None]                 * np.ascontiguousarray(inv_seg)
-            Q_fine = contract_shared_operator_1axis(op_c2f, Q[seg_lo:seg_hi])
-            F_phys_fine = euler_physical_flux_batch(
-                np.ascontiguousarray(Q_fine.reshape(-1, 5))
-            ).reshape(nb, n_fine, 3, 5)
-            F_tilde_fine = np.matmul(adj_seg, F_phys_fine)
-            div_fine = contract_shared_operator_2axis(op_D_fine, F_tilde_fine)
-            div_comp[seg_lo:seg_hi] = contract_shared_operator_1axis(
-                op_f2c, div_fine)
-    else:
-        Q_flat = np.ascontiguousarray(Q.reshape(-1, 5))
-        F_phys = euler_physical_flux_batch(Q_flat).reshape(n_cells, n_sps, 3, 5)
-        F_tilde = np.matmul(adj_j, F_phys)
-        div_comp = np.zeros((n_cells, n_sps, 5))
-        if n_prism > 0:
-            div_comp[:n_prism] = contract_shared_operator_2axis(ops.D_3d_prism, F_tilde[:n_prism])
-        if n_cells > n_prism:
-            div_comp[n_prism:] = contract_shared_operator_2axis(ops.D_3d_tet, F_tilde[n_prism:])
+    div_comp = np.zeros((n_cells, n_sps, 5))
+    # 体积算子 K 已含修正项的本侧通量迹（与生产同一个算子，fr/face_flux_trace.py）
+    for (seg_lo, seg_hi, n_fine, det_seg, inv_seg,
+         op_c2f, op_D_fine, op_f2c), op_K in zip(_oi["segs"], _oi["lifted_div"]):
+        if seg_hi <= seg_lo:
+            continue
+        nb = seg_hi - seg_lo
+        adj_seg = np.ascontiguousarray(det_seg)[..., None, None] * np.ascontiguousarray(inv_seg)
+        Q_fine = contract_shared_operator_1axis(op_c2f, Q[seg_lo:seg_hi])
+        F_phys_fine = euler_physical_flux_batch(
+            np.ascontiguousarray(Q_fine.reshape(-1, 5))
+        ).reshape(nb, n_fine, 3, 5)
+        F_tilde_fine = np.matmul(adj_seg, F_phys_fine)
+        div_comp[seg_lo:seg_hi] = contract_shared_operator_2axis(op_K, F_tilde_fine)
 
     residual = -div_comp / det_jacs[..., None]
 
@@ -123,7 +112,7 @@ def _compute_residual_via_new_kernel(U, mesh, ops, boundary_ghost_provider=None,
     residual = residual + correction
     # 机制3（残差量级离群清零）已于 2026-09-19 从生产实现里删除，
     # 依据见 `core/fr_residual/inviscid.py`；本"新版"复制品同步去掉。
-    return residual
+    return (residual, correction) if return_correction else residual
 
 
 @pytest.mark.parametrize("order,rel_tol", [(1, 1e-9), (2, 1e-7), (3, 1e-3)])
@@ -316,12 +305,15 @@ def test_parallel_degenerate_cell_no_blowup():
     U = np.tile(U_inf, (mesh.n_cells, mesh.n_sps_per_cell, 1))
 
     numba.set_num_threads(1)
-    r1 = _compute_residual_via_new_kernel(U, mesh, mesh.operators)
+    r1, corr1 = _compute_residual_via_new_kernel(U, mesh, mesh.operators, return_correction=True)
     numba.set_num_threads(16)
     r16 = _compute_residual_via_new_kernel(U, mesh, mesh.operators)
 
     assert np.all(np.isfinite(r1)) and np.all(np.isfinite(r16)), "退化单元场景不应产生 NaN/Inf"
+    # 均匀流的残差是体积项（本侧通量迹已并入，fr/face_flux_trace.py）与界面公共通量
+    # 两个 ~p/det 量级的项相减（退化单元 det~1e-6）：判据相对被抵消项的量级，
+    # 不是相对残差本身（真值为零）
     max_diff = np.max(np.abs(r1 - r16))
-    max_val = max(np.max(np.abs(r1)), 1.0)
-    rel_diff = max_diff / max_val
-    assert rel_diff < 1e-10, f"退化单元场景 nt1 vs nt16 相对差异异常放大: rel={rel_diff:.3e}, max_val={max_val:.3e}"
+    scale = np.max(np.abs(corr1))
+    rel_diff = max_diff / scale
+    assert rel_diff < 1e-12, f"退化单元场景 nt1 vs nt16 相对差异异常放大: rel={rel_diff:.3e}, scale={scale:.3e}"

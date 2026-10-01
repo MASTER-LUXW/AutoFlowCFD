@@ -304,11 +304,13 @@ def get_overintegration_context(mesh, ops):
     零，没有可去混叠的内容，`jacobians_fine` 与 overint 算子都不构造。
 
     Returns:
-        dict 或 None。dict 只含 `segs`——
+        dict 或 None。`segs`——
         `[(lo, hi, n_fine, det_fine, inv_fine, c2f, D_fine, f2c), ...]`
         两段（棱柱在前、四面体在后），与"棱柱在前"的单元存储顺序一致。
         每段自带**自己的** `n_fine` 与已按 `(seg_len, n_fine, ...)` 切好的
-        细点度量。
+        细点度量；其中 `f2c` 是解点插值（湍流 k-omega 输运用）。`lifted_div`——与
+        `segs` 逐段对应的平均流体积算子 `K`（本侧通量迹已并入，`fr/face_flux_trace.py`）；
+        `projection`——逐段的平均流细->粗 L2 投影（熵稳定分支用，与 K 的体积部分一致）。
 
     ## 为什么每段各自带 n_fine（2026-09-17 改动）
 
@@ -338,7 +340,9 @@ def get_overintegration_context(mesh, ops):
         return None
     for name in ("overint_interp_c2f_prism", "overint_D_fine_prism",
                  "overint_restrict_f2c_prism", "overint_interp_c2f_tet",
-                 "overint_D_fine_tet", "overint_restrict_f2c_tet"):
+                 "overint_D_fine_tet", "overint_restrict_f2c_tet",
+                 "overint_lifted_div_prism", "overint_lifted_div_tet",
+                 "overint_project_f2c_prism", "overint_project_f2c_tet"):
         if getattr(ops, name, None) is None:
             return None
     fine = mesh.jacobians_fine
@@ -382,4 +386,6 @@ def get_overintegration_context(mesh, ops):
              ops.overint_interp_c2f_tet, ops.overint_D_fine_tet,
              ops.overint_restrict_f2c_tet),
         ),
+        lifted_div=(ops.overint_lifted_div_prism, ops.overint_lifted_div_tet),
+        projection=(ops.overint_project_f2c_prism, ops.overint_project_f2c_tet),
     )

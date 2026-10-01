@@ -16,11 +16,27 @@ Warp&Blend 节点），数学结构完全一致：
    <=order，这一步是精确插值，不引入混叠。
 2. `D_fine`：**FINE 阶数**原生单纯形微分矩阵（直接复用
    `build_native_tet_operators(over_order)`，不是新公式）。
-3. `restrict_f2c`：**FINE 阶数**模态基在 COARSE 点上取值——把微分后
-   的场从细网格精确插值（不是模态截断投影：过积分的目的正是要保留
-   非线性通量的高阶内容,不能在算完导数后又把它截断掉,这一步只是把
-   已经算好的、真实值得信赖的细网格结果在 COARSE 点上原样取值）回
-   coarse SPs。
+3. `restrict_f2c`：**FINE 阶数**模态基在 COARSE 点上取值——把微分后的场从细网格
+   插值回 coarse SPs（湍流 k-omega 输运用）；平均流用 L2 投影
+   `build_native_tet_l2_projection`，见下节。
+
+## 限制：平均流投影、湍流插值（2026-10-01）
+
+旧文档写的理由是"过积分要保留非线性通量的高阶内容，不能截断"。这条理由不成立：残差
+只存在于解点上，取值本身就把细层散度压成了 p 次插值——只是用插值而不是投影来压。两者
+对精度同阶，但**离散守恒只有投影满足**：全域积分 `Σ_s w_s J_s R_s` 等于解点求积作用在
+限制结果上，投影保持参考单元积分（常数在求解空间内），插值对高于 p 次的散度不精确。
+封闭对称盒子（光滑非均匀场，P1/P2/P3）的全域质量残差相对量：
+
+    插值  -3.0e-6 / 4.8e-9 / -4.6e-8      投影  -2.8e-13 / 1.4e-13 / 2.4e-13
+
+（密度取常数时插值也到 1e-13：ρu 只有 p 次，散度在求解空间内，两者重合——误差确实来自
+2p 次的 ρ·u。）能量还要求修正项用细层通量插值的迹，见 `fr/face_flux_trace.py`。
+
+**湍流 k-omega 输运保留插值**：它按非守恒的标量形式离散（未知量 k 与 ln omega，
+修正项本侧通量取点上值），守恒对它无意义；而把它的体积限制也换成投影、修正项仍取点上值
+这个组合会失稳——两端远场的槽道 SST P3（`tests/unit/test_implicit_sst_nk.py`）实测 140 步
+k 最小 -469 k_inf、残差不降；湍流单独换回插值后 106 步收敛（全部插值 91 步）。
 
 与坍缩坐标版本的关键差异：native 单纯形基节点数随阶数增长的方式不同
 （`(order+1)(order+2)(order+3)/6` vs `(order+1)^3`），**过积分阶数也已于
@@ -109,15 +125,47 @@ def build_native_tet_overintegration_operators(
     V_coarse_sps = _native_modal_vandermonde(ref_coarse, modes_coarse)
     V_coarse_at_fine = _native_modal_vandermonde(ref_fine, modes_coarse)
     V_fine_at_fine = _native_modal_vandermonde(ref_fine, modes_fine)
-    V_fine_at_coarse = _native_modal_vandermonde(ref_coarse, modes_fine)
 
     lu_coarse = lu_factor(V_coarse_sps.T)
     interp_c2f = lu_solve(lu_coarse, V_coarse_at_fine.T).T
 
-    lu_fine = lu_factor(V_fine_at_fine.T)
-    restrict_f2c = lu_solve(lu_fine, V_fine_at_coarse.T).T
+    restrict_f2c = lu_solve(lu_factor(V_fine_at_fine.T),
+                            _native_modal_vandermonde(ref_coarse, modes_fine).T).T
 
     return ref_fine, interp_c2f, D_fine, restrict_f2c
+
+
+def build_native_tet_l2_projection(order: int, over_order: int) -> np.ndarray:
+    """细层（over_order 次）节点值 -> 求解空间（order 次）节点值的参考单元 L2 投影
+    `M_c^{-1} ∫ φ_i g`，`(n_coarse, n_fine)`（平均流体积项用，见模块文档）。
+
+    两套节点 Lagrange 基在 Duffy 求积点上取值，模态直接在坍缩坐标 (a,b,c) 上求值。
+    被积函数（粗 x 细）至多 order+over_order 次，Duffy 因子再加 3 次，
+    n = order+over_order+3 点精确到 2n-1 次，有富余。
+    """
+    from scipy.linalg import lu_factor, lu_solve
+
+    ref_coarse, _ = build_native_tet_operators(order)
+    ref_fine, _ = build_native_tet_operators(over_order)
+    modes_coarse, modes_fine = restricted_tet_modes(order), restricted_tet_modes(over_order)
+    abc, wq = _tet_duffy_rule(order + over_order + 3)
+
+    def modal(modes):
+        return np.column_stack([simplex3d_value(abc[0], abc[1], abc[2], i, j, k) for (i, j, k) in modes])
+
+    L_coarse = lu_solve(lu_factor(_native_modal_vandermonde(ref_coarse, modes_coarse).T), modal(modes_coarse).T).T
+    L_fine = lu_solve(lu_factor(_native_modal_vandermonde(ref_fine, modes_fine).T), modal(modes_fine).T).T
+    return np.linalg.solve(L_coarse.T @ (wq[:, None] * L_coarse), L_coarse.T @ (wq[:, None] * L_fine))
+
+
+def _tet_duffy_rule(n: int):
+    """参考四面体上的 Duffy 张量 Gauss 求积 `((a,b,c) 坍缩坐标, 权重)`，各 `(n^3,)`。"""
+    from ..quadrature_points import gauss_legendre
+
+    x, w = gauss_legendre(n)
+    a, b, c = (q.ravel() for q in np.meshgrid(x, x, x, indexing="ij"))
+    wa, wb, wc = (q.ravel() for q in np.meshgrid(w, w, w, indexing="ij"))
+    return (a, b, c), wa * wb * wc * (1.0 - b) / 2.0 * ((1.0 - c) / 2.0) ** 2
 
 #: native 四面体过积分阶数的**独立**上限（2026-09-17）。
 #:

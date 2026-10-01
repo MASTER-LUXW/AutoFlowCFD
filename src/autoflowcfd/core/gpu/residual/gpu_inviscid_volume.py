@@ -65,14 +65,8 @@ def prepare_ops_data(cp, ops, device_id):
             if D is not None:
                 data[attr_name] = cp.asarray(np.ascontiguousarray(D, dtype=np.float64))
 
-        for attr_name in [
-            'overint_interp_c2f_tet', 'overint_interp_c2f_prism',
-            'overint_D_fine_tet', 'overint_D_fine_prism',
-            'overint_restrict_f2c_tet', 'overint_restrict_f2c_prism',
-        ]:
-            op = getattr(ops, attr_name, None)
-            if op is not None:
-                data[attr_name] = cp.asarray(np.ascontiguousarray(op, dtype=np.float64))
+        from autoflowcfd.core.gpu.gpu_overintegration import upload_overintegration_ops_gpu
+        upload_overintegration_ops_gpu(cp, ops, data)
         return data
 
 
@@ -96,42 +90,31 @@ def compute_volume_term_gpu(cp, U, mesh_data, ops_data, n_cells, n_sps, n_prism)
     # 1.4e-16 / 0.0）。两段 n_fine 不同，所以不能再共用一份
     # `(n_cells, n_fine, ...)` 的整场细点数组，必须逐段各自分配。
     from autoflowcfd.core.gpu.gpu_overintegration import (
-        get_overintegration_segs_gpu,
+        get_overintegration_segs_gpu, lifted_divergence_gpu,
     )
 
     _segs = get_overintegration_segs_gpu(mesh_data, ops_data, n_cells, n_prism)
-    if _segs is not None:
-        div_comp = cp.zeros((n_cells, n_sps, 5), dtype=cp.float64)
-        for lo, hi, n_fine_seg, adj_seg, c2f, D_fine, f2c in _segs:
-            if hi <= lo:
-                continue
-            Q_fine = gpu_contract_shared_operator_1axis(c2f, Q[lo:hi])
-            F_phys_fine = euler_physical_flux_gpu(
-                cp.ascontiguousarray(Q_fine.reshape(-1, 5))
-            ).reshape(hi - lo, n_fine_seg, 3, 5)
-            del Q_fine
-            # `adj_seg` 已按段切好（整段处理，正好对应 [lo:hi]）
-            F_tilde_fine = cp.matmul(adj_seg, F_phys_fine)
-            del F_phys_fine
-            div_fine = gpu_contract_shared_operator_2axis(D_fine, F_tilde_fine)
-            del F_tilde_fine
-            div_comp[lo:hi] = gpu_contract_shared_operator_1axis(f2c, div_fine)
-            del div_fine
-    else:
-        # 无 fine 几何：朴素路径
-        adj_j = mesh_data['adj_j']
-        Q_flat = cp.ascontiguousarray(Q.reshape(-1, 5))
-        F_phys = euler_physical_flux_gpu(Q_flat).reshape(n_cells, n_sps, 3, 5)
-        F_tilde = cp.matmul(adj_j, F_phys)
-        div_comp = cp.zeros((n_cells, n_sps, 5), dtype=cp.float64)
-        if n_prism > 0:
-            div_comp[:n_prism] = gpu_contract_shared_operator_2axis(
-                ops_data['D_3d_prism'], F_tilde[:n_prism]
-            )
-        if n_cells > n_prism:
-            div_comp[n_prism:] = gpu_contract_shared_operator_2axis(
-                ops_data['D_3d_tet'], F_tilde[n_prism:]
-            )
+    if _segs is None:
+        # 与 CPU 端同一条约束（fr_residual/inviscid.py）：P>=1 必有过积分几何与算子
+        raise RuntimeError(
+            "P>=1 GPU 无粘残差需要过积分细点度量与 overint_* 算子，这里缺失：网格或算子是按"
+            "不完整的阶数几何构造/上传的")
+    div_comp = cp.zeros((n_cells, n_sps, 5), dtype=cp.float64)
+    for (lo, hi, n_fine_seg, adj_seg, c2f, D_fine, f2c), K in zip(_segs, lifted_divergence_gpu(ops_data)):
+        if hi <= lo:
+            continue
+        Q_fine = gpu_contract_shared_operator_1axis(c2f, Q[lo:hi])
+        F_phys_fine = euler_physical_flux_gpu(
+            cp.ascontiguousarray(Q_fine.reshape(-1, 5))
+        ).reshape(hi - lo, n_fine_seg, 3, 5)
+        del Q_fine
+        # `adj_seg` 已按段切好（整段处理，正好对应 [lo:hi]）
+        F_tilde_fine = cp.matmul(adj_seg, F_phys_fine)
+        del F_phys_fine
+        # K = f2c·D_fine - Σ_面 lift·W·Tn：体积散度的 L2 投影减去修正项的本侧通量迹，
+        # 界面只施加公共通量（与 CPU 同一个算子，fr/face_flux_trace.py）
+        div_comp[lo:hi] = gpu_contract_shared_operator_2axis(K, F_tilde_fine)
+        del F_tilde_fine
 
     residual = -div_comp / det_jacs[..., None]
     return residual

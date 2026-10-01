@@ -3,8 +3,9 @@
 体积项只依赖单元自身的解点，所以只进对角块。记 `Q_t` 为解点 `t` 的原始变量，
 一段同类单元（棱柱或四面体）共用参考算子：
 
-    c2f (nf, n)      解点 -> 通量求值点插值（过积分细点；粘性不过积分时为单位阵）
-    W   (n, nf, 3)   W[s,r,m] = sum_q f2c[s,q] D_f[q,r,m]（散度再限制回解点）
+    c2f (nf, n)      解点 -> 细点插值（无粘与粘性都过积分）
+    W   (n, nf, 3)   `K = f2c·D_f - Σ_面 lift·diag(w)·Tn`（体积散度的 L2 投影减去修正项的本侧
+                     通量迹，`fr/face_flux_trace.py`），无粘与粘性共用
     adj (C, nf, 3, 3) 通量点上的 adj(J)[m,i] = det * inv_jac[m,i]
 
 无粘 `dU/dt = -(1/det_s) sum_{r,m} W[s,r,m] sum_i adj[r,m,i] F_i(c2f Q)`、粘性同式
@@ -31,21 +32,20 @@ CHUNK_BYTES = 256 * 2 ** 20
 
 
 class VolumeSegment:
-    """一段同类单元的体积项参考算子（只含真实解点）。"""
+    """一段同类单元的体积项参考算子（只含真实解点）。无粘与粘性共用同一组细点插值
+    `c2f` 与体积算子 `W = K`（两者都过积分，修正项本侧通量迹已并入 K）。"""
 
-    __slots__ = ("lo", "hi", "n", "c2f_inv", "W_inv", "c2f_visc", "W_visc", "D_sp")
+    __slots__ = ("lo", "hi", "n", "c2f", "W", "D_sp")
 
-    def __init__(self, lo, hi, n, c2f_inv, W_inv, c2f_visc, W_visc, D_sp):
+    def __init__(self, lo, hi, n, c2f, W, D_sp):
         self.lo, self.hi, self.n = lo, hi, n
-        self.c2f_inv = np.ascontiguousarray(c2f_inv)
-        self.W_inv = np.ascontiguousarray(W_inv)
-        self.c2f_visc = np.ascontiguousarray(c2f_visc)
-        self.W_visc = np.ascontiguousarray(W_visc)
+        self.c2f = np.ascontiguousarray(c2f)
+        self.W = np.ascontiguousarray(W)
         self.D_sp = np.ascontiguousarray(D_sp)    # (n, n, 3) 解点微分算子 D[s,t,m]
 
     def chunk_cells(self) -> int:
-        nf, nfv = self.c2f_inv.shape[0], self.c2f_visc.shape[0]
-        per_cell = 8 * (nf * 3 * 25 + nfv * 3 * 5 * N_VISC_INPUTS + (nf + nfv) * 9)
+        nf = self.c2f.shape[0]
+        per_cell = 8 * (nf * 3 * 25 + nf * 3 * 5 * N_VISC_INPUTS + 2 * nf * 9)
         return max(64, int(CHUNK_BYTES // max(per_cell, 1)))
 
 
@@ -136,20 +136,20 @@ def _volume_kernel(K, slot0, A, adj_i, W_i, c2f_i, PJ, adj_v, W_v, c2f_v, inv_sp
                         K[k0, s, a, t, b] += out[s, a, t, b]
 
 
-def add_volume_blocks(K, slot0, seg, Q, dTdQ, inv_sp, adj_inv, adj_visc, mu_t_visc_pts, mu, Pr, Pr_t,
-                      gv_visc_pts, gT_visc_pts):
-    """把一块单元（与 `Q` 等同长）的体积项导数加到 `K[slot0:slot0+len]`（乘 det 之后的量）。"""
+def add_volume_blocks(K, slot0, seg, Q, dTdQ, inv_sp, adj_f, mu_t_f, mu, Pr, Pr_t, gv_f, gT_f):
+    """把一块单元（与 `Q` 等同长）的体积项导数加到 `K[slot0:slot0+len]`（乘 det 之后的量）。
+    `adj_f`/`mu_t_f`/`gv_f`/`gT_f` 是细点上的度量、涡粘与梯度。"""
     nb = Q.shape[0]
-    nf, nfv = seg.c2f_inv.shape[0], seg.c2f_visc.shape[0]
-    Qf = np.einsum("rt,ctv->crv", seg.c2f_inv, Q, optimize=True)
-    A = euler_flux_jacobian(np.ascontiguousarray(Qf.reshape(-1, 5))).reshape(nb, nf, 3, 5, 5)
-    Qv = np.einsum("rt,ctv->crv", seg.c2f_visc, Q, optimize=True)
+    nf = seg.c2f.shape[0]
+    Qf = np.einsum("rt,ctv->crv", seg.c2f, Q, optimize=True)
+    Qf_flat = np.ascontiguousarray(Qf.reshape(-1, 5))
+    A = euler_flux_jacobian(Qf_flat).reshape(nb, nf, 3, 5, 5)
     PJ = viscous_flux_jacobian(
-        np.ascontiguousarray(Qv.reshape(-1, 5)),
-        np.ascontiguousarray(gv_visc_pts.reshape(-1, 3, 3)),
-        np.ascontiguousarray(gT_visc_pts.reshape(-1, 3)),
-        np.ascontiguousarray(mu_t_visc_pts.reshape(-1)), mu, Pr, Pr_t,
-    ).reshape(nb, nfv, 3, 5, N_VISC_INPUTS)
-    _volume_kernel(K, int(slot0), A, np.ascontiguousarray(adj_inv), seg.W_inv, seg.c2f_inv, PJ,
-                   np.ascontiguousarray(adj_visc), seg.W_visc, seg.c2f_visc,
+        Qf_flat,
+        np.ascontiguousarray(gv_f.reshape(-1, 3, 3)),
+        np.ascontiguousarray(gT_f.reshape(-1, 3)),
+        np.ascontiguousarray(mu_t_f.reshape(-1)), mu, Pr, Pr_t,
+    ).reshape(nb, nf, 3, 5, N_VISC_INPUTS)
+    adj_f = np.ascontiguousarray(adj_f)
+    _volume_kernel(K, int(slot0), A, adj_f, seg.W, seg.c2f, PJ, adj_f, seg.W, seg.c2f,
                    np.ascontiguousarray(inv_sp), seg.D_sp, np.ascontiguousarray(dTdQ))

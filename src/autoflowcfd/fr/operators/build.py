@@ -4,8 +4,6 @@
 500 行"规范）：容器定义在 `container.py`。纯搬家，未改任何逻辑。
 """
 
-import numpy as np
-
 from ..quadrature_points import gauss_legendre
 from ..matrix_operators import (
     compute_diff_matrix_1d,
@@ -16,7 +14,6 @@ from ..overintegration_order import (
     resolve_overintegration_order_rule,
     resolve_prism_overintegration_order,
 )
-from ..modal_filter import build_prism_modal_filter
 from .container import FROperators
 
 
@@ -99,6 +96,8 @@ def generate_fr_operators(order: int) -> FROperators:
     overint_interp_c2f_tet = overint_interp_c2f_prism = None
     overint_D_fine_tet = overint_D_fine_prism = None
     overint_restrict_f2c_tet = overint_restrict_f2c_prism = None
+    overint_lifted_div_tet = overint_lifted_div_prism = None
+    overint_project_f2c_tet = overint_project_f2c_prism = None
     if order >= 1:
         overint_order_prism = resolve_prism_overintegration_order(order)
         n_fine_prism = prism_n_fine(overint_order_prism)
@@ -115,7 +114,7 @@ def generate_fr_operators(order: int) -> FROperators:
         # 的同一套做法，理由见 `native_prism/overintegration.py`
         # 模块文档差异（三）。
         from ..native_prism.overintegration import (
-            build_native_prism_overintegration_operators,
+            build_native_prism_l2_projection, build_native_prism_overintegration_operators,
         )
         from ..native_padding import pad_native_matrix_to_global
 
@@ -133,6 +132,10 @@ def generate_fr_operators(order: int) -> FROperators:
             _c2f_np, n_sps_global, pad_axes=(1,))
         overint_restrict_f2c_prism = pad_native_matrix_to_global(
             _f2c_np, n_sps_global, pad_axes=(0,))
+        # 平均流体积项的细->粗限制是 L2 投影（离散守恒；湍流输运仍用上面的插值，分工见
+        # native_tet/overintegration.py 模块文档）
+        overint_project_f2c_prism = pad_native_matrix_to_global(
+            build_native_prism_l2_projection(order, overint_order_prism), n_sps_global, pad_axes=(0,))
 
     # 3e. 四面体 native 单纯形基（路径C）——2026-09-03 起唯一实现，
     # 恒无条件构造（不再有 collapsed 分支可选，见模块文档）。
@@ -220,6 +223,7 @@ def generate_fr_operators(order: int) -> FROperators:
     if order >= 1:
         from ..native_tet.overintegration import (
             NATIVE_TET_OVERINTEGRATION_MAX_ORDER,
+            build_native_tet_l2_projection,
             build_native_tet_overintegration_operators,
             resolve_tet_overintegration_order,
         )
@@ -315,6 +319,21 @@ def generate_fr_operators(order: int) -> FROperators:
         overint_restrict_f2c_tet = pad_native_matrix_to_global(
             restrict_f2c_native, n_sps_global, pad_axes=(0,)
         )
+        overint_project_f2c_tet = pad_native_matrix_to_global(
+            build_native_tet_l2_projection(order, overint_order_tet), n_sps_global, pad_axes=(0,))
+        # 修正项本侧通量 = 细层通量多项式的法向迹，并进体积算子（离散守恒，见
+        # fr/face_flux_trace.py）；棱柱段的提升矩阵在上方 3f 已构造好
+        from ..face_flux_trace import (
+            build_lifted_divergence, build_prism_face_flux_trace, build_tet_face_flux_trace,
+        )
+        overint_lifted_div_tet = build_lifted_divergence(
+            overint_project_f2c_tet, overint_D_fine_tet,
+            [lift_native_tet_padded[v] for v in range(4)],
+            build_tet_face_flux_trace(order, overint_order_tet), order)
+        overint_lifted_div_prism = build_lifted_divergence(
+            overint_project_f2c_prism, overint_D_fine_prism,
+            [lift_native_prism_padded[f] for f in range(5)],
+            build_prism_face_flux_trace(order, overint_order_prism), order)
 
     return FROperators(
         D_1d=D_1d,
@@ -333,6 +352,10 @@ def generate_fr_operators(order: int) -> FROperators:
         overint_D_fine_prism=overint_D_fine_prism,
         overint_restrict_f2c_tet=overint_restrict_f2c_tet,
         overint_restrict_f2c_prism=overint_restrict_f2c_prism,
+        overint_lifted_div_tet=overint_lifted_div_tet,
+        overint_lifted_div_prism=overint_lifted_div_prism,
+        overint_project_f2c_tet=overint_project_f2c_tet,
+        overint_project_f2c_prism=overint_project_f2c_prism,
         D_native_tet=D_native_tet,
         ref_native_tet=ref_native_tet,
         n_native_sps_tet=n_native_sps_tet,

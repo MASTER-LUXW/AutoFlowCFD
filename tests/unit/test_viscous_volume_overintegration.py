@@ -29,9 +29,12 @@
 分单元类型统计：棱柱映射非仿射（实测同一单元内 det(J) 跨度 0.0722），
 native 四面体仿射（跨度恰好 0），两类可达精度不同；四面体那一片只取
 真实自由度（`D_native_tet_padded` 的填充行是零行）。
-"""
 
-import os
+2026-10-01：生产体积项（`viscous_volume_term`）用的体积算子 K 同时减去了修正项的
+本侧通量迹（`fr/face_flux_trace.py`），不再是单纯的散度；去混叠精度这一条因此对照
+测试自己按 `c2f -> 细点通量 -> D_fine -> f2c` 拼出的过积分散度（与 K 的体积部分同一组
+算子）。"解点上微分"那一档（`AFCFD_VISC_OVERINT=off`）同日删除，开关语义的用例一并删。
+"""
 
 import numpy as np
 import pytest
@@ -162,6 +165,26 @@ def _coarse_viscous_div(Q, gv, gT, mut, mesh, ops):
     return div
 
 
+def _overint_viscous_div(Q, gv, gT, mut, mesh, ops):
+    """过积分散度 `f2c·D_fine·G~(细点)`（K 的体积部分），参考空间。"""
+    nc, ns = mesh.n_cells, mesh.n_sps_per_cell
+    div = np.zeros((nc, ns, 5))
+    for lo, hi, nf, det_f, inv_f, c2f, D_f, f2c in get_overintegration_context(mesh, ops)["segs"]:
+        if hi <= lo:
+            continue
+        nb = hi - lo
+        interp = lambda a: np.einsum("qs,cs...->cq...", c2f, a)
+        G_phys = viscous_physical_flux_batch(
+            np.ascontiguousarray(interp(Q[lo:hi]).reshape(-1, 5)),
+            np.ascontiguousarray(interp(gv[lo:hi]).reshape(-1, 3, 3)),
+            np.ascontiguousarray(interp(gT[lo:hi]).reshape(-1, 3)),
+            MU, PR, np.ascontiguousarray(interp(mut[lo:hi]).reshape(-1)), PR_T,
+        ).reshape(nb, nf, 3, 5)
+        G_tilde = contravariant_flux_from_metric(np.ascontiguousarray(det_f), np.ascontiguousarray(inv_f), G_phys)
+        div[lo:hi] = np.einsum("sq,cqv->csv", f2c, contract_shared_operator_2axis(D_f, G_tilde))
+    return div
+
+
 class TestOverintegrationIsMoreAccurate:
     @pytest.mark.parametrize("order", [1, 2])
     def test_viscous_volume_term_vs_analytic(self, order):
@@ -172,8 +195,7 @@ class TestOverintegrationIsMoreAccurate:
             f"应当无条件构造好")
         det = mesh.jacobians["det_jacs"].reshape(mesh.n_cells, mesh.n_sps_per_cell)
 
-        div_oi = vf._viscous_volume_overintegrated(
-            Q, gv, gT, mut, MU, PR, PR_T, oi, mesh.n_sps_per_cell) / det[..., None]
+        div_oi = _overint_viscous_div(Q, gv, gT, mut, mesh, ops) / det[..., None]
         div_co = _coarse_viscous_div(Q, gv, gT, mut, mesh, ops) / det[..., None]
 
         # 只看能量分量与动量分量（质量分量的粘性通量恒为零，见
@@ -214,8 +236,7 @@ class TestOverintegrationIsMoreAccurate:
         """
         mesh, ops, Q, gv, gT, mut, _ = _setup(order)
         oi = get_overintegration_context(mesh, ops)
-        div_oi = vf._viscous_volume_overintegrated(
-            Q, gv, gT, mut, MU, PR, PR_T, oi, mesh.n_sps_per_cell)
+        div_oi = vf.viscous_volume_term(Q, gv, gT, mut, MU, PR, PR_T, oi, mesh.n_sps_per_cell)
         np.testing.assert_allclose(div_oi[..., 0], 0.0, rtol=0, atol=0)
 
 
@@ -231,130 +252,7 @@ class TestFreestreamPreservation:
         Q[..., 1] = 30.0
         Q[..., 4] = 101325.0
         oi = get_overintegration_context(mesh, ops)
-        div = vf._viscous_volume_overintegrated(
+        div = vf.viscous_volume_term(
             Q, np.zeros((nc, ns, 3, 3)), np.zeros((nc, ns, 3)),
             np.zeros((nc, ns)), MU, PR, PR_T, oi, ns)
         np.testing.assert_allclose(div, 0.0, rtol=0, atol=0)
-
-
-class TestSwitchSemantics:
-    def _env(self, v):
-        old = os.environ.get("AFCFD_VISC_OVERINT")
-        if v is None:
-            os.environ.pop("AFCFD_VISC_OVERINT", None)
-        else:
-            os.environ["AFCFD_VISC_OVERINT"] = v
-        return old
-
-    def _restore(self, old):
-        if old is None:
-            os.environ.pop("AFCFD_VISC_OVERINT", None)
-        else:
-            os.environ["AFCFD_VISC_OVERINT"] = old
-
-    def test_default_is_on(self):
-        """默认 `on`（2026-09-17 从 `off` 改）。
-
-        依据（平板边界层算例 2304 单元，跑到 400 步的真实粘性梯度状态上求
-        一次粘性残差，以 `on` + `AFCFD_OVERINT_ORDER_RULE=3x` 为参照）：
-
-            off @ 2x（原默认）   能量分量相对差 0.632442
-            on  @ 2x（新默认）   能量分量相对差 0.000000   <- 逐位相同
-
-        即过积分的结果在生产过积分阶数上**已经收敛**（提到 3x 逐位不变），
-        不过积分的差 63%。动量分量两档逐位相同（P1 下常粘度的 tau 是逐单元
-        P0、精确可微分），差的只有能量分量——它含 `u = rho_u/rho` 与
-        `T = p/(rho*R)` 这些**有理**函数，真实非多项式。
-
-        代价：粘性项 +25%，整步约 +5.3%。
-
-        同时这是 `AFCFD_FILTER_MODE` 默认从 `legacy` 改成 `sensor` 的**一致性
-        要求**：legacy 滤波下 `grad_vel` 是机器零（7.7e-16）、粘性体积项几乎
-        只剩边界罚项，那个"off 无所谓"的前提随之消失。
-        """
-        old = self._env(None)
-        try:
-            assert vf.resolve_viscous_overintegration() == "on"
-        finally:
-            self._restore(old)
-
-    def test_off_stays_available_for_regression(self):
-        """`off` 保留为合法档：逐位复现历史结果、以及隔离界面项的交叉
-        对比测试（`test_fr_viscous_flux_kernel_crosscheck.py`）都要用它。"""
-        old = self._env("off")
-        try:
-            assert vf.resolve_viscous_overintegration() == "off"
-        finally:
-            self._restore(old)
-
-    @pytest.mark.parametrize("v,expected", [
-        ("off", "off"), ("on", "on"), ("OFF", "off"), ("On", "on"),
-    ])
-    def test_accepted_values(self, v, expected):
-        old = self._env(v)
-        try:
-            assert vf.resolve_viscous_overintegration() == expected
-        finally:
-            self._restore(old)
-
-    @pytest.mark.parametrize("v", ["yes", "1", "true", "", "sensor"])
-    def test_rejects_unknown(self, v):
-        old = self._env(v)
-        try:
-            with pytest.raises(ValueError, match="AFCFD_VISC_OVERINT"):
-                vf.resolve_viscous_overintegration()
-        finally:
-            self._restore(old)
-
-    @pytest.mark.parametrize("order", [1, 2])
-    def test_public_api_differs_exactly_by_the_two_volume_terms(self, order):
-        """默认关闭 vs 打开，公开接口的差值必须**恰好等于**两种体积项之差。
-
-        任何把去混叠误接进默认路径、或在链路上多改了别的东西（界面项、
-        troubled-cell 抑制）的改动都会在这里失败。
-        """
-        from autoflowcfd.core.fr_residual.inviscid import primitive_to_conserved
-        mesh = _build_synthetic_mixed_mesh(order)
-        ops = generate_fr_operators(order)
-        nc, ns = mesh.n_cells, mesh.n_sps_per_cell
-        X = mesh.sps_coords.reshape(-1, 3)
-        rng = np.random.default_rng(order)
-        Qp = np.zeros((nc, ns, 5))
-        Qp[..., 0] = 1.225
-        Qp[..., 1] = (30.0 + 2.0 * X[:, 1]).reshape(nc, ns)
-        Qp[..., 2] = (1.5 * X[:, 2]).reshape(nc, ns)
-        Qp[..., 3] = (-0.8 * X[:, 0]).reshape(nc, ns)
-        Qp[..., 4] = (101325.0 * (1.0 + 0.05 * X[:, 0])).reshape(nc, ns)
-        U = primitive_to_conserved(Qp)
-
-        old = self._env("off")
-        try:
-            res_off = vf.compute_viscous_residual_fr(U, mesh, ops, MU, PR)
-        finally:
-            self._restore(old)
-        old = self._env("on")
-        try:
-            res_on = vf.compute_viscous_residual_fr(U, mesh, ops, MU, PR)
-        finally:
-            self._restore(old)
-
-        # 两者确实不同（否则下面那条是平凡真）
-        assert np.abs(res_on - res_off).max() > 0.0, "开关没有产生任何差异"
-
-        # 差值应等于两种体积项之差——用生产代码同一套输入重算
-        from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
-        from autoflowcfd.core.fr_residual.viscous_flux import compute_temperature
-        Q = conserved_to_primitive(U[..., :5])
-        T = compute_temperature(Q)
-        from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient
-        gQ = compute_physical_gradient(Q, mesh, ops)
-        gv = gQ[:, :, 1:4, :]
-        gT = compute_physical_gradient(T[:, :, None], mesh, ops)[:, :, 0, :]
-        mut = np.zeros((nc, ns))
-        det = mesh.jacobians["det_jacs"].reshape(nc, ns)
-        oi = get_overintegration_context(mesh, ops)
-        vol_oi = vf._viscous_volume_overintegrated(
-            Q, gv, gT, mut, MU, PR, PR_T, oi, ns) / det[..., None]
-        vol_co = _coarse_viscous_div(Q, gv, gT, mut, mesh, ops) / det[..., None]
-        np.testing.assert_allclose(res_on - res_off, vol_oi - vol_co,
-                                   rtol=1e-9, atol=1e-9)

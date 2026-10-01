@@ -43,7 +43,7 @@ extrap` 文档"二·五"节记录的那条必要修正）。这里不需要任�
 `native_triangle_basis.py` 与 `native_prism_basis.py` 的模块文档。
 """
 
-from typing import Dict, List, Tuple
+from typing import Dict, Tuple
 
 import numpy as np
 
@@ -422,8 +422,14 @@ def native_prism_face_adj_rows(order: int, face_id: int,
     jac = native_prism_exact_jacobian(fp, cell_nodes)          # (n_fp,3,3)
     det = np.linalg.det(jac)
     adj = det[:, None, None] * np.linalg.inv(jac)              # (n_fp,3,3)
+    return np.einsum("pmd,pm->pd", adj, reference_face_area_vectors(order, face_id))
+
+
+def reference_face_area_vectors(order: int, face_id: int) -> np.ndarray:
+    """参考棱柱上该面每个通量点的面积矢量 `(n1d^2, 3)`：外向余向量，封盖再乘 Duffy
+    因子 `(1-s)/2`（见本节顶部说明）。物理 adj 行就是 `adj(J)^T` 作用在它上面
+    （Nanson 公式）；体积通量迹（`fr/face_flux_trace.py`）用同一组量。"""
     cov, is_cap = _FACE_REF_COVECTOR[face_id]
-    rows = np.einsum("pmd,m->pd", adj, cov)
-    if is_cap:
-        rows = rows * ((1.0 - fp[:, 1]) / 2.0)[:, None]
-    return rows
+    fp = native_prism_face_points(order, face_id)
+    scale = (1.0 - fp[:, 1]) / 2.0 if is_cap else np.ones(fp.shape[0])
+    return scale[:, None] * cov[None, :]

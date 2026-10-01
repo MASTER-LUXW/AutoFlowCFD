@@ -64,8 +64,8 @@ def resolve_overintegration_order_rule() -> int:
     **残差 7 位有效数字完全相同，而每步贵 1.58 倍。** 也就是说 `oo = 2*order`
     对这条真实算例上的全部项——包括 k/omega 输运与含 mu_t 的粘性通量那两个
     三重乘积——都已经足够。同一结论在平板边界层算例上独立复现过：粘性
-    体积项 `AFCFD_VISC_OVERINT=on` 时 `2x` 与 `3x` 的能量分量**逐位相同**
-    （见 `core/fr_residual/viscous_flux.py::resolve_viscous_overintegration`）。
+    体积项过积分时 `2x` 与 `3x` 的能量分量**逐位相同**
+    （见 `core/fr_residual/viscous_flux/overintegration.py` 模块文档）。
 
     （旧的代价估算——微基准 3.47s -> 14.30s、外推每步 ~1.6x——是在**细网格
     轴还被零填充**的代码上做的，那份填充已于 2026-09-17 去掉（P1 实测整链

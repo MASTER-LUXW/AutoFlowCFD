@@ -15,7 +15,7 @@ from autoflowcfd.core.fr_operators.small_dense import extrap_tensor3x3, matmul_s
 from autoflowcfd.core.fr_operators.flux_kernels import (
     VBC_INTERIOR, boundary_other_gradients,
 )
-from autoflowcfd.core.fr_residual.face_point_jumps import viscous_jump_point
+from autoflowcfd.core.fr_residual.face_point_jumps import viscous_common_flux_point
 from autoflowcfd.core.fr_residual.inviscid_kernel import _extrap_matmul
 
 
@@ -70,7 +70,6 @@ def compute_viscous_interface_correction_kernel_colored(
     （viscous_flux_kernel.py）同一套 native 分支，两处必须同步修改，
     见该文件模块文档。
     """
-    n_cells = Q.shape[0]
     n_sps = Q.shape[1]
     n_fp = Q_ghost.shape[1]
     n_faces_in_color = face_indices.shape[0]
@@ -150,7 +149,7 @@ def compute_viscous_interface_correction_kernel_colored(
                             gT_n[a] = gT_bnd[a]
                         mut_n = mut_o[i]
 
-                jump_owner[i] = viscous_jump_point(
+                jump_owner[i] = viscous_common_flux_point(
                     Q_o[i], gv_o[i], gT_o[i], mut_o[i], Q_n, gv_n, gT_n, mut_n,
                     adjrow_o[i], ip_length[f], bk, mu, Pr, Pr_t, c_ip)
 
@@ -226,7 +225,7 @@ def compute_viscous_interface_correction_kernel_colored(
                         gT_o_at_n[a] = gT_bnd_n[a]
                     mut_o_at_n = mut_n_native[i]
 
-                jump_neighbor[i] = viscous_jump_point(
+                jump_neighbor[i] = viscous_common_flux_point(
                     Q_n_native[i], gv_n_native[i], gT_n_native[i], mut_n_native[i],
                     Q_o_at_n, gv_o_at_n, gT_o_at_n, mut_o_at_n, adjrow_n_native[i], ip_length[f],
                     bk_n, mu, Pr, Pr_t, c_ip)

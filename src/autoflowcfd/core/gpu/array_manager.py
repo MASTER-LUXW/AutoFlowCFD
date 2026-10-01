@@ -222,17 +222,9 @@ class GPUArrayManager:
                             np.ascontiguousarray(D, dtype=np.float64)
                         )
 
-                # Over-integration 算子
-                for attr_name in [
-                    'overint_interp_c2f_tet', 'overint_interp_c2f_prism',
-                    'overint_D_fine_tet', 'overint_D_fine_prism',
-                    'overint_restrict_f2c_tet', 'overint_restrict_f2c_prism',
-                ]:
-                    op = getattr(ops, attr_name, None)
-                    if op is not None:
-                        self.mesh_data[attr_name] = self._cp.asarray(
-                            np.ascontiguousarray(op, dtype=np.float64)
-                        )
+                # Over-integration 算子（名单与另一条上传路径共用，gpu_overintegration.py）
+                from autoflowcfd.core.gpu.gpu_overintegration import upload_overintegration_ops_gpu
+                upload_overintegration_ops_gpu(self._cp, ops, self.mesh_data)
 
             # ── Cell volumes（P0 路径需要）──
             if hasattr(mesh, 'cell_volumes') and mesh.cell_volumes is not None:

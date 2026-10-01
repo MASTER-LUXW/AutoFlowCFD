@@ -29,8 +29,13 @@
 ## 判据
 
 在合成混合网格上人为把某个面的一侧度量行**旋转 70°**（cos70 = 0.34，
-正好落在旧兜底的触发区间），模拟板锐边那种扭曲面。均匀流下界面修正必须
-仍是舍入量级 —— 因为每一侧的 Riemann 通量与本侧投影用的是同一个法向。
+正好落在旧兜底的触发区间），模拟板锐边那种扭曲面。界面核对均匀流给出的公共
+通量必须恰好是 `a·F(Q)`（`a` 就是传进去的那一行，方向与模长都不许换）——
+于是界面修正逐位等于按定义写出的 `-Σ lift (w ⊙ a·F(Q)) / det`。
+
+（2026-10-01 起修正项的本侧通量是细层体积通量多项式的法向迹、并进了体积算子
+（`fr/face_flux_trace.py`），界面核只剩公共通量，所以均匀流下界面修正**单独**
+不再为零——零的是总残差。这里改为对照定义，钉住的仍是"不许偷换法向"这一条。）
 """
 
 import numba
@@ -128,13 +133,34 @@ def _tail(c):
             fl.boundary_extrap_native, fl.lift_native)
 
 
+def _expected(c):
+    """均匀流下按定义的界面修正：每个 primary 面侧 `-lift (w ⊙ a·F(Q)) / det`。"""
+    from autoflowcfd.core.fr_residual.inviscid import euler_physical_flux
+
+    fl, Q, det = c["flat"], c["Q"], c["det"]
+    F = euler_physical_flux(Q[0, 0])                       # (3, 5)，全场同一个状态
+    out = np.zeros_like(Q)
+    for f in range(fl.n_faces):
+        sides = []
+        if fl.owner_is_primary[f]:
+            sides.append((fl.owner_cell[f], fl.owner_cube_face[f], c["adj_o"][f]))
+        if (not fl.is_boundary[f]) and fl.neighbor_is_primary[f]:
+            sides.append((fl.neighbor_cell[f], fl.neighbor_cube_face[f], c["adj_n"][f]))
+        for cell, code, adj in sides:
+            flux = (adj @ F) * fl.ref_area_weight[:, None]   # (n_fp, 5)
+            out[cell] -= (fl.lift_native[code - 6] @ flux) / det[cell][:, None]
+    return out
+
+
 def _assert_zero(corr, c):
+    """界面修正与按定义的公共通量逐点一致（相对守恒变量量级）。"""
     scale = np.array([1.225, 1.225 * 30, 1.225 * 30, 1.225 * 30, 101325.0 / 0.4])
-    rel = np.abs(corr[..., :5]) / scale
+    exp = _expected(c)
+    rel = np.abs(corr[..., :5] - exp[..., :5]) / scale / max(1.0, float(np.abs(exp / scale).max()))
     worst = float(rel.max())
-    assert worst < 1e-9, (
-        f"均匀流下界面修正不为零（max 相对 {worst:.3e}）—— 两侧法向夹角 "
-        f"{_ROT_DEG}° 时 Riemann 通量与本侧投影用了不同的法向，凭空注入源项")
+    assert worst < 1e-12, (
+        f"均匀流下界面公共通量与 a·F(Q) 不符（max 相对 {worst:.3e}）—— 两侧法向夹角 "
+        f"{_ROT_DEG}° 时界面核用了与传入度量行不同的法向")
 
 
 def test_uncolored_kernel_preserves_freestream_under_rotated_metric(case):

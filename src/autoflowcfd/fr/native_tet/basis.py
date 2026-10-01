@@ -305,6 +305,27 @@ def match_face_nodes_by_physical_position(phys_a: np.ndarray, phys_b: np.ndarray
     return perm
 
 
+def native_tet_face_points(order: int, excluded_vertex: int) -> np.ndarray:
+    """排除顶点 `excluded_vertex` 的那个面上 `(order+1)^2` 个通量点的**参考**坐标
+    `(r,s,t)`：坍缩三角形采样（`cube_to_tri_rs` 作用在张量积 Gauss-Legendre 方格上，
+    与棱柱三角形封盖同一套）经面上三个顶点的重心坐标放到参考四面体上。"""
+    from ..quadrature_points import gauss_legendre
+    from ...grid.curved_mapping.curved_mapping import cube_to_tri_rs, tri_barycentric
+
+    n1d = order + 1
+    sps_1d, _ = gauss_legendre(n1d)
+    g1, g2 = np.meshgrid(sps_1d, sps_1d, indexing="ij")
+    r_tri, s_tri = cube_to_tri_rs(g1.ravel(), g2.ravel())
+    l1, l2, l3 = tri_barycentric(r_tri, s_tri)
+
+    face_vertex_idx = tuple(v for v in range(4) if v != excluded_vertex)
+    L = np.zeros((len(l1), 4))
+    L[:, face_vertex_idx[0]] = l1
+    L[:, face_vertex_idx[1]] = l2
+    L[:, face_vertex_idx[2]] = l3
+    return np.column_stack([2.0 * L[:, 1] - 1.0, 2.0 * L[:, 2] - 1.0, 2.0 * L[:, 3] - 1.0])
+
+
 def _native_face_value_vandermondes(order: int, excluded_vertex: int):
     """`build_native_tet_boundary_extrap`/`build_native_tet_lift` 共用的
     准备步骤：体积节点、面 Flux Points 各自在参考坐标处的模态取值
@@ -316,28 +337,10 @@ def _native_face_value_vandermondes(order: int, excluded_vertex: int):
         (V_sps, V_fp, modes)：V_sps (n_native_sps,n_modes)，
         V_fp (n1d*n1d,n_modes)，modes 列表（与两个矩阵的列顺序一致）。
     """
-    from ..quadrature_points import gauss_legendre
-    from ...grid.curved_mapping.curved_mapping import cube_to_tri_rs, tri_barycentric
-
-    n1d = order + 1
-    sps_1d, _ = gauss_legendre(n1d)
-    g1, g2 = np.meshgrid(sps_1d, sps_1d, indexing="ij")
-    r_tri, s_tri = cube_to_tri_rs(g1.ravel(), g2.ravel())
-    l1, l2, l3 = tri_barycentric(r_tri, s_tri)
-
-    face_vertex_idx = tuple(v for v in range(4) if v != excluded_vertex)
-    n_pts = len(l1)
-    L = np.zeros((n_pts, 4))
-    L[:, face_vertex_idx[0]] = l1
-    L[:, face_vertex_idx[1]] = l2
-    L[:, face_vertex_idx[2]] = l3
-    r = 2.0 * L[:, 1] - 1.0
-    s = 2.0 * L[:, 2] - 1.0
-    t = 2.0 * L[:, 3] - 1.0
-
+    fp = native_tet_face_points(order, excluded_vertex)
     ref_rst_sps, _ = build_native_tet_operators(order)
     a_sps, b_sps, c_sps = rst_to_abc(ref_rst_sps[:, 0], ref_rst_sps[:, 1], ref_rst_sps[:, 2])
-    a_fp, b_fp, c_fp = rst_to_abc(r, s, t)
+    a_fp, b_fp, c_fp = rst_to_abc(fp[:, 0], fp[:, 1], fp[:, 2])
     modes = restricted_tet_modes(order)
 
     V_sps = np.column_stack([simplex3d_value(a_sps, b_sps, c_sps, i, j, k) for (i, j, k) in modes])

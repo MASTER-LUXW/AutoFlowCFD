@@ -12,7 +12,7 @@ from autoflowcfd.core.gpu.residual.gpu_inviscid import _lift_native_contrib
 from autoflowcfd.core.fr_operators.flux_kernels import (
     CP_AIR, R_AIR, VBC_DIRICHLET, VBC_INLET, VBC_INTERIOR, VBC_MIRROR, VBC_NEUMANN, VBC_NOSLIP_WALL,
 )
-from .extrap import _extrap_side, _self_extrap_side, _viscous_tilde_flux_pair
+from .extrap import _extrap_side, _self_extrap_side, _viscous_tilde_flux
 
 
 def _mirror_normal_gpu(cp, g, adjrow):
@@ -61,21 +61,25 @@ def _boundary_other_side_gpu(cp, K, Q_s, gv_s, gT_s, mut_s, Q_x, gv_x, gT_x, mut
 
 
 def _viscous_jump_gpu(cp, K, Q_s, gv_s, gT_s, mut_s, Q_x, gv_x, gT_x, mut_x, adjrow, h_ip,
-                      mu, Pr, Pr_t, c_ip_visc):
-    """逐点对应 CPU `face_point_jumps.viscous_jump_point`（`K` 已解析）。
+                      mu, Pr, Pr_t, c_ip_visc, subtract_self: bool):
+    """逐点对应 CPU `face_point_jumps.viscous_common_flux_point`（`K` 已解析）。
 
-    `a·G(平均态) - a·G(本侧)` 加罚项：内部点涡粘与热传导率取面平均，边界点取
-    本侧，热传导率只在 Dirichlet 点给（无滑移壁/镜像类/Neumann 为 0；Neumann 点
-    幽灵态速度即本侧速度，速度罚项为零）。罚项做功项内部与边界同一形式。
+    `a·G(平均态)` 加罚项：内部点涡粘与热传导率取面平均，边界点取本侧，热传导率只在
+    Dirichlet 点给（无滑移壁/镜像类/Neumann 为 0；Neumann 点幽灵态速度即本侧速度，
+    速度罚项为零）。罚项做功项内部与边界同一形式。
+
+    `subtract_self`：P0 再减本侧 `a·G(本侧)`（P0 没有体积算子可并入，对应 CPU 的
+    `viscous_self_normal_flux_point`）；P>=1 的本侧通量迹在体积算子 K 里
+    （`fr/face_flux_trace.py`）。
     """
     Q_avg = 0.5 * (Q_s + Q_x)
     gv_avg = 0.5 * (gv_s + gv_x)
     gT_avg = 0.5 * (gT_s + gT_x)
     mut_avg = 0.5 * (mut_s + mut_x)
-    G_common, G_own = _viscous_tilde_flux_pair(
-        Q_avg, gv_avg, gT_avg, mut_avg, Q_s, gv_s, gT_s, mut_s, adjrow, mu, Pr, Pr_t)
+    jump = _viscous_tilde_flux(Q_avg, gv_avg, gT_avg, mut_avg, adjrow, mu, Pr, Pr_t)
+    if subtract_self:
+        jump = jump - _viscous_tilde_flux(Q_s, gv_s, gT_s, mut_s, adjrow, mu, Pr, Pr_t)
     interior = K == VBC_INTERIOR
-    jump = G_common - G_own
 
     adj_mag = cp.sqrt(cp.sum(adjrow * adjrow, axis=-1))
     # 罚项 side 因子恒为 +1（原生面的 adj 行已 outward 定向，见 CPU 侧
@@ -189,7 +193,7 @@ def _compute_viscous_interface_correction_gpu(
                 cp, K_o, Q_o, gv_o, gT_o, mut_o, Q_n, gv_n, gT_n, mut_n, adjrow_o)
             jump_owner = _viscous_jump_gpu(
                 cp, K_o, Q_o, gv_o, gT_o, mut_o, Q_n, gv_n, gT_n, mut_n, adjrow_o,
-                ff.ip_length[idx_o], mu, Pr, Pr_t, c_ip_visc)
+                ff.ip_length[idx_o], mu, Pr, Pr_t, c_ip_visc, n_sps == 1)
 
             # 面校正分配：DG 提升算子
             # `lift_native[code-6] @ (ref_area_weight ⊙ jump)`，与 CPU 版
@@ -235,7 +239,7 @@ def _compute_viscous_interface_correction_gpu(
             jump_neighbor = _viscous_jump_gpu(
                 cp, K_n, Q_n_native, gv_n_native, gT_n_native, mut_n_native,
                 Q_o_at_n, gv_o_at_n, gT_o_at_n, mut_o_at_n, adjrow_n,
-                ff.ip_length[idx_n], mu, Pr, Pr_t, c_ip_visc)
+                ff.ip_length[idx_n], mu, Pr, Pr_t, c_ip_visc, n_sps == 1)
 
             contrib_n = _lift_native_contrib(
                 cp, nc_code_n, ff.lift_native, ff.ref_area_weight,

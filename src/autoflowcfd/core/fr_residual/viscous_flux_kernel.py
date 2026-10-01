@@ -23,7 +23,7 @@ boundary_other_gradients`），入口在逐点跳变函数里按本通量点实�
 的温度、出口与对称面切向的速度在扩散算子里没有任何边界条件，离散扩散算子
 失去强制性（Blasius P2 隐式发散的根因），完整论证与实测见 `viscous_bc.py`
 模块文档。三份 kernel（本文件、着色版、P0 版）与解析 Jacobian 都走
-`face_point_jumps.viscous_jump_point` 这一份逐点函数。
+`face_point_jumps.viscous_common_flux_point` 这一份逐点函数。
 
 **多核并行（阶段二）**：与 `fr_residual_inviscid_kernel.py` 同一套
 scatter-add 处理方式（每线程私有累加缓冲区 `correction_per_thread[tid,
@@ -45,7 +45,7 @@ from autoflowcfd.core.fr_operators.small_dense import extrap_tensor3x3, matmul_s
 from autoflowcfd.core.fr_operators.flux_kernels import (
     VBC_INTERIOR, boundary_other_gradients,
 )
-from autoflowcfd.core.fr_residual.face_point_jumps import viscous_jump_point
+from autoflowcfd.core.fr_residual.face_point_jumps import viscous_common_flux_point
 from autoflowcfd.core.fr_residual.inviscid_kernel import _extrap_matmul
 
 
@@ -199,7 +199,7 @@ def compute_viscous_interface_correction_kernel(
                             gT_n[a] = gT_bnd[a]
                         mut_n = mut_o[i]
 
-                jump_owner[i] = viscous_jump_point(
+                jump_owner[i] = viscous_common_flux_point(
                     Q_o[i], gv_o[i], gT_o[i], mut_o[i], Q_n, gv_n, gT_n, mut_n,
                     adjrow_o[i], ip_length[f], bk, mu, Pr, Pr_t, c_ip)
 
@@ -276,7 +276,7 @@ def compute_viscous_interface_correction_kernel(
                         gT_o_at_n[a] = gT_bnd_n[a]
                     mut_o_at_n = mut_n_native[i]
 
-                jump_neighbor[i] = viscous_jump_point(
+                jump_neighbor[i] = viscous_common_flux_point(
                     Q_n_native[i], gv_n_native[i], gT_n_native[i], mut_n_native[i],
                     Q_o_at_n, gv_o_at_n, gT_o_at_n, mut_o_at_n, adjrow_n_native[i], ip_length[f],
                     bk_n, mu, Pr, Pr_t, c_ip)

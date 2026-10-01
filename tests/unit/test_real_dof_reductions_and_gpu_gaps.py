@@ -12,8 +12,9 @@
   3.4%，order=1 下占一半槽位）。对 SP 轴直接 `.mean(axis=1)` /
   `.min(axis=1)` 就把这些冻结值算进了结果。
 - **第 7 类，"同一个开关在不同后端意味着不同的东西"**（A/B）：
-  `AFCFD_FILTER_TURB_GATE` 此前只在 CPU 路径接线，`AFCFD_VISC_OVERINT`
-  此前只有 CPU 实现——GPU 后端读不到就按默认路径跑，没有任何提示。
+  `AFCFD_FILTER_TURB_GATE` 此前只在 CPU 路径接线，粘性体积项去混叠此前只有
+  CPU 实现——GPU 后端读不到就按默认路径跑，没有任何提示。（`AFCFD_VISC_OVERINT`
+  开关本身 2026-10-01 删除，粘性体积项恒过积分。）
 - **第 11 类，"留着但已无作用的代码/参数"**（D）：`compute_global_min_dt`
   零调用方。
 
@@ -399,16 +400,15 @@ class TestGpuTurbFilterGate:
 
 
 # ===========================================================================
-# B 类：AFCFD_VISC_OVERINT 在 GPU 后端上生效
+# B 类：粘性体积项去混叠在 GPU 后端上与 CPU 同一个离散
 # ===========================================================================
 
 class TestGpuViscousOverintegration:
-    """GPU 版粘性体积项去混叠必须与已验证的 CPU 版一致。
+    """GPU 版粘性体积项必须与已验证的 CPU 版一致。
 
-    对照的是 CPU 的 `_viscous_volume_overintegrated`——同一条五步链路
-    （插值到细点 / 在细点重新求值非线性通量 / 细点度量 / 细网格微分 /
-    限制回 coarse），GPU 版只把张量库换掉，所以要求的是到浮点重排误差
-    的相等，不是"接近"。
+    对照的是 CPU 的 `viscous_volume_term`——同一条链路（插值到细点 / 在细点重新
+    求值非线性通量 / 细点度量 / 与体积算子 K 收缩），GPU 版只把张量库换掉，所以
+    要求的是到浮点重排误差的相等，不是"接近"。
     """
 
     @pytest.fixture(scope="class")
@@ -457,16 +457,14 @@ class TestGpuViscousOverintegration:
             for (lo, hi, n_fine, det_seg, inv_seg,
                  c2f, D_fine, f2c) in oi["segs"]
         )
-        return gv._viscous_volume_overintegrated_gpu(
+        return gv._viscous_volume_term_gpu(
             shim, Q, grad_vel, grad_T, mu_t_arg, 1.8e-5, 0.72, 0.9,
-            gpu_segs, n_cells, n_sps)
+            gpu_segs, oi["lifted_div"], n_cells, n_sps)
 
     def test_matches_cpu_with_turbulent_viscosity(self, monkeypatch, case):
-        from autoflowcfd.core.fr_residual.viscous_flux import (
-            _viscous_volume_overintegrated,
-        )
+        from autoflowcfd.core.fr_residual.viscous_flux import viscous_volume_term
         mesh, ops, oi, Q, grad_vel, grad_T, mu_t = case
-        cpu = _viscous_volume_overintegrated(
+        cpu = viscous_volume_term(
             Q, grad_vel, grad_T, mu_t, 1.8e-5, 0.72, 0.9, oi,
             mesh.n_sps_per_cell)
         gpu = self._gpu_div(monkeypatch, case, mu_t)
@@ -475,12 +473,10 @@ class TestGpuViscousOverintegration:
 
     def test_matches_cpu_laminar_zero_mu_t(self, monkeypatch, case):
         """层流（mu_t 全零数组）与"标量 0.0"两种传参必须给同一个结果。"""
-        from autoflowcfd.core.fr_residual.viscous_flux import (
-            _viscous_volume_overintegrated,
-        )
+        from autoflowcfd.core.fr_residual.viscous_flux import viscous_volume_term
         mesh, ops, oi, Q, grad_vel, grad_T, mu_t = case
         zero = np.zeros_like(mu_t)
-        cpu = _viscous_volume_overintegrated(
+        cpu = viscous_volume_term(
             Q, grad_vel, grad_T, zero, 1.8e-5, 0.72, 0.9, oi,
             mesh.n_sps_per_cell)
         tol = 1e-11 * np.abs(cpu).max()
@@ -488,55 +484,6 @@ class TestGpuViscousOverintegration:
         g_scalar = self._gpu_div(monkeypatch, case, 0.0)
         np.testing.assert_allclose(np.asarray(g_arr), cpu, rtol=1e-11, atol=tol)
         np.testing.assert_allclose(np.asarray(g_scalar), cpu, rtol=1e-11, atol=tol)
-
-    def test_differs_from_coarse_path(self, monkeypatch, case):
-        """去混叠必须真的改变结果，否则这个开关是无操作。"""
-        from autoflowcfd.core.fr_operators.volume_contract import (
-            contract_shared_operator_2axis, contravariant_flux_from_metric,
-        )
-        from autoflowcfd.core.fr_operators.flux_kernels import (
-            viscous_physical_flux_batch,
-        )
-        mesh, ops, oi, Q, grad_vel, grad_T, mu_t = case
-        n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
-        det = mesh.jacobians['det_jacs'].reshape(n_cells, n_sps)
-        inv = mesh.jacobians['inv_jacs'].reshape(n_cells, n_sps, 3, 3)
-        G = viscous_physical_flux_batch(
-            np.ascontiguousarray(Q.reshape(-1, 5)),
-            np.ascontiguousarray(grad_vel.reshape(-1, 3, 3)),
-            np.ascontiguousarray(grad_T.reshape(-1, 3)),
-            1.8e-5, 0.72, np.ascontiguousarray(mu_t.reshape(-1)), 0.9,
-        ).reshape(n_cells, n_sps, 3, 5)
-        G_tilde = contravariant_flux_from_metric(det, inv, G)
-        coarse = np.zeros((n_cells, n_sps, 5))
-        _tet_D = (ops.D_native_tet_padded
-                  if getattr(ops, "D_native_tet_padded", None) is not None
-                  else ops.D_3d_tet)
-        coarse[:mesh.n_prism_cells] = contract_shared_operator_2axis(
-            ops.D_3d_prism, G_tilde[:mesh.n_prism_cells])
-        coarse[mesh.n_prism_cells:] = contract_shared_operator_2axis(
-            _tet_D, G_tilde[mesh.n_prism_cells:])
-        fine = np.asarray(self._gpu_div(monkeypatch, case, mu_t))
-        assert not np.allclose(fine, coarse, rtol=1e-6)
-
-    def test_switch_is_read_in_gpu_path(self):
-        from autoflowcfd.core.gpu.residual import gpu_viscous
-        s = module_source(gpu_viscous)
-        assert "resolve_viscous_overintegration()" in s
-        assert "_viscous_volume_overintegrated_gpu(" in s
-
-    def test_default_is_on_so_gpu_must_mirror_the_fine_path(self):
-        """默认 2026-09-17 从 `off` 改成 `on`（依据见
-        `viscous_flux.py::resolve_viscous_overintegration`）。
-
-        对 GPU 侧的含义变了：过积分分支从"默认不走、只需存在"变成
-        **默认路径**，所以 GPU 的分段必须与 CPU 的
-        `get_overintegration_context` 同构（下一条测试查这个）。
-        """
-        from autoflowcfd.core.fr_residual.viscous_flux import (
-            resolve_viscous_overintegration,
-        )
-        assert resolve_viscous_overintegration() == "on"
 
     def test_shared_overint_context_is_backend_consistent(self):
         """GPU 的分段必须与 CPU 的 `get_overintegration_context` 同构。"""

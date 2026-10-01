@@ -40,7 +40,9 @@ from autoflowcfd.core.fr_operators.small_dense import matmul_small
 from autoflowcfd.core.fr_operators.flux_kernels import (
     VBC_INTERIOR, boundary_other_gradients,
 )
-from autoflowcfd.core.fr_residual.face_point_jumps import viscous_jump_point
+from autoflowcfd.core.fr_residual.face_point_jumps import (
+    viscous_common_flux_point, viscous_self_normal_flux_point,
+)
 
 
 
@@ -230,9 +232,11 @@ def compute_viscous_interface_correction_p0_kernel(
                             gT_n[a] = gT_bnd[a]
                         mut_n = mut_o_i
 
-                jump_owner[i] = viscous_jump_point(
+                # P0 没有体积算子可以并入本侧通量（P>=1 见 fr/face_flux_trace.py），这里直接减
+                jump_owner[i] = viscous_common_flux_point(
                     Q_o_i, gv_o_i, gT_o_i, mut_o_i, Q_n, gv_n, gT_n, mut_n,
-                    adj_o_i, ip_length[f], bk, mu, Pr, Pr_t, c_ip)
+                    adj_o_i, ip_length[f], bk, mu, Pr, Pr_t, c_ip) - viscous_self_normal_flux_point(
+                    Q_o_i, gv_o_i, gT_o_i, mut_o_i, adj_o_i, mu, Pr, Pr_t)
 
             dj = det_jacs[oc, 0]
             # DG 提升算子：`lift_native[code-6]` 形状 (1,n_fp)，@ 之后直接
@@ -319,9 +323,10 @@ def compute_viscous_interface_correction_p0_kernel(
                         gT_o_at_n[a] = gT_bnd_n[a]
                     mut_o_at_n = mut_n_i
 
-                jump_neighbor[i] = viscous_jump_point(
+                jump_neighbor[i] = viscous_common_flux_point(
                     Q_n_i, gv_n_i, gT_n_i, mut_n_i, Q_o_at_n, gv_o_at_n, gT_o_at_n, mut_o_at_n,
-                    adj_n_i, ip_length[f], bk_n, mu, Pr, Pr_t, c_ip)
+                    adj_n_i, ip_length[f], bk_n, mu, Pr, Pr_t, c_ip) - viscous_self_normal_flux_point(
+                    Q_n_i, gv_n_i, gT_n_i, mut_n_i, adj_n_i, mu, Pr, Pr_t)
 
             dj = det_jacs[nc, 0]
             weighted_jump_n = np.empty((n_fp, 5))

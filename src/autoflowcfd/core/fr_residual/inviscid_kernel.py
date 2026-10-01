@@ -50,7 +50,7 @@ import numpy as np
 from numba import njit, prange, get_thread_id
 
 from autoflowcfd.core.fr_operators.small_dense import matmul_small
-from autoflowcfd.core.fr_residual.face_point_jumps import inviscid_jump_point
+from autoflowcfd.core.fr_residual.face_point_jumps import inviscid_common_flux_point
 
 
 @njit(cache=True, inline='always')
@@ -102,7 +102,7 @@ def compute_inviscid_interface_correction_kernel(
     （`fr/face_flux_points/exact_normal.py` 已经给出正确 outward 定向的
     adj 行，不需要像坍缩坐标那样再乘 side 翻转——Part7 文档记录过的坑，
     2026-09-18 无滑移壁 IP 罚项又在同一处踩了一次）；(c) 面修正项用
-    DG 提升算子 `lift_native[code-6] @ (ref_area_weight ⊙ jump)`
+    DG 提升算子 `lift_native[code-6] @ (ref_area_weight ⊙ |a| F_common)`（本侧通量迹已并进体积算子，见 `fr/face_flux_trace.py`）
     （`native_tet/basis.py::build_native_tet_lift` "弱形式提升定义"）。
 
     **2026-09-23**：坍缩坐标那条并行路径（`boundary_extrap[celltype,
@@ -166,7 +166,7 @@ def compute_inviscid_interface_correction_kernel(
             Q_o = _extrap_matmul(Q[oc], E_o)  # (n_fp, 5)
             adjrow_o = owner_adj_row_exact[f]  # (n_fp, 3)，逐 FP 精确值，见函数文档
 
-            jump_owner = np.empty((n_fp, 5))
+            flux_owner = np.empty((n_fp, 5))
             for i in range(n_fp):
                 # 另一侧状态（幽灵态 / sources 插值 / 混合拆分面配对幽灵态）
                 if is_boundary[f]:
@@ -196,17 +196,17 @@ def compute_inviscid_interface_correction_kernel(
                     mp = mixed_nb_partner[f]
                     if mp >= 0 and mixed_nb_mask[f, i]:
                         Q_n = Q_ghost[mp, i]
-                jump_owner[i] = inviscid_jump_point(Q_o[i], Q_n, adjrow_o[i], mach_ref, precond_mode)
+                flux_owner[i] = inviscid_common_flux_point(Q_o[i], Q_n, adjrow_o[i], mach_ref, precond_mode)
 
             # DG 提升算子（见函数文档）：物理面积权重逐 FP 加权跳跃量，
             # 再用提升算子映射回体积节点，见
             # native_tet/basis.py::build_native_tet_lift "弱形式提升定义"。
-            weighted_jump_o = np.empty((n_fp, 5))
+            weighted_flux_o = np.empty((n_fp, 5))
             for i in range(n_fp):
                 w_area = ref_area_weight[i]
                 for v in range(5):
-                    weighted_jump_o[i, v] = w_area * jump_owner[i, v]
-            contrib_owner = matmul_small(lift_native[oc_code - 6], weighted_jump_o)  # (n_sps, 5)
+                    weighted_flux_o[i, v] = w_area * flux_owner[i, v]
+            contrib_owner = matmul_small(lift_native[oc_code - 6], weighted_flux_o)  # (n_sps, 5)
             for s in range(n_sps):
                 dj = det_jacs[oc, s]
                 for v in range(5):
@@ -220,7 +220,7 @@ def compute_inviscid_interface_correction_kernel(
             Q_n_native = _extrap_matmul(Q[nc], E_n)  # (n_fp,5)
             adjrow_n_native = neighbor_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
 
-            jump_neighbor = np.empty((n_fp, 5))
+            flux_neighbor = np.empty((n_fp, 5))
             for i in range(n_fp):
                 # 另一侧状态（幽灵态 / sources 插值 / 混合拆分面配对幽灵态）
                 Q_o_at_n = np.zeros(5)
@@ -249,14 +249,14 @@ def compute_inviscid_interface_correction_kernel(
                 if mp_o >= 0 and mixed_ow_mask[f, i]:
                     for v in range(5):
                         Q_o_at_n[v] = Q_ghost[mp_o, i, v]
-                jump_neighbor[i] = inviscid_jump_point(Q_n_native[i], Q_o_at_n, adjrow_n_native[i], mach_ref, precond_mode)
+                flux_neighbor[i] = inviscid_common_flux_point(Q_n_native[i], Q_o_at_n, adjrow_n_native[i], mach_ref, precond_mode)
 
-            weighted_jump_n = np.empty((n_fp, 5))
+            weighted_flux_n = np.empty((n_fp, 5))
             for i in range(n_fp):
                 w_area = ref_area_weight[i]
                 for v in range(5):
-                    weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
-            contrib_neighbor = matmul_small(lift_native[nc_code - 6], weighted_jump_n)
+                    weighted_flux_n[i, v] = w_area * flux_neighbor[i, v]
+            contrib_neighbor = matmul_small(lift_native[nc_code - 6], weighted_flux_n)
             for s in range(n_sps):
                 dj = det_jacs[nc, s]
                 for v in range(5):

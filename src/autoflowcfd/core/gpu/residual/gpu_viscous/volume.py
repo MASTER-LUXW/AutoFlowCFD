@@ -33,42 +33,18 @@ def compute_temperature_gpu(Q):
     return Q[..., 4] / (rho * R_AIR)
 
 
-def _viscous_volume_overintegrated_gpu(cp, Q, grad_vel, grad_T, mu_t_field,
-                                       mu, Pr, Pr_t, segs,
-                                       n_cells, n_sps):
-    """粘性体积项 `div(adj(J)*G(Q,grad_vel,grad_T,mu_t))` 的去混叠版（GPU），
-    返回 (n_cells, n_sps, 5)。
+def _viscous_volume_term_gpu(cp, Q, grad_vel, grad_T, mu_t_field, mu, Pr, Pr_t, segs, lifted_div,
+                             n_cells, n_sps):
+    """粘性体积项 `K G~`（GPU，参考空间，调用方再除以 det J），返回 (n_cells, n_sps, 5)。
 
-    与 CPU 端 `core/fr_residual/viscous_flux.py::
-    _viscous_volume_overintegrated` 逐项对应：
-
-      ① Q/grad_vel/grad_T/mu_t 各自**精确插值**到 FINE 点（各自次数 <= order，
-         所以插值本身无误差）；
-      ② 在 FINE 点**重新求值** `viscous_physical_flux_gpu`——非线性函数本身
-         在细点求值，而不是把 coarse 上算好的乘积插过去。这正是去混叠的
-         全部内容；
-      ③ 用细点度量（`segs` 里每段自带的 `adj_seg`，= det_fine*inv_fine
-         已预乘）算逆变通量；
-      ④ 用 FINE 网格自己的微分矩阵求散度；
-      ⑤ 精确插值限制回 coarse SPs。
-
-    为什么粘性项需要这个（与 CPU 端 `resolve_viscous_overintegration` 同一
-    条理由）：粘性通量是 `tau ~ mu*grad_u`、`u·tau`、`k_cond*grad_T` 这些
-    **乘积**，再乘 adj(J)，直接在 coarse SPs 上微分等价于"先混叠再求导"。
-    只有"乘积被微分"的地方过积分才有意义。
-
-    上游局限与 CPU 端完全相同、这里不重复：`grad_vel`/`grad_T` 本身是在
-    coarse SPs 上用 coarse 微分矩阵算出的（见
-    `core/fr_residual/gradients.py`），把它们插到细点只是**精确重构同一个
-    多项式**，不会凭空恢复梯度算子自身的截断内容。
+    与 CPU 端 `core/fr_residual/viscous_flux/overintegration.py::viscous_volume_term`
+    逐项对应（为什么必须过积分、体积算子 K 的含义都见那里）：Q / grad_vel / grad_T / mu_t
+    精确插值到细点，在细点上重新求值粘性通量，乘细点度量（`segs` 每段自带的
+    `adj_seg = det*inv`），与 K 一次收缩。
     """
     div_comp = cp.zeros((n_cells, n_sps, 5), dtype=cp.float64)
     mut_is_array = mu_t_field is not None and hasattr(mu_t_field, 'shape')
-    # 每段自带自己的 n_fine 与**已切好**的细点度量（2026-09-17，与 CPU 端
-    # 同一次改动）：四面体过积分的细网格轴不再填充到棱柱宽度，两段的
-    # n_fine 不同，所以不能再用一份共享的 adj_j_fine 按全局 [lo:hi] 切。
-    # 本循环一次处理整段，`adj_seg` 正好就对应 [lo:hi]，直接用即可。
-    for lo, hi, _n_fine_seg, adj_seg, c2f, D_fine, f2c in segs:
+    for (lo, hi, _n_fine_seg, adj_seg, c2f, _D_fine, _f2c), K in zip(segs, lifted_div):
         if hi <= lo:
             continue
         Q_f = gpu_contract_shared_operator_1axis(c2f, Q[lo:hi])
@@ -88,10 +64,8 @@ def _viscous_volume_overintegrated_gpu(cp, Q, grad_vel, grad_T, mu_t_field,
         del Q_f, gv_f, gT_f
         G_tilde_f = cp.matmul(adj_seg, G_phys_f)
         del G_phys_f
-        div_f = gpu_contract_shared_operator_2axis(D_fine, G_tilde_f)
+        div_comp[lo:hi] = gpu_contract_shared_operator_2axis(K, G_tilde_f)
         del G_tilde_f
-        div_comp[lo:hi] = gpu_contract_shared_operator_1axis(f2c, div_f)
-        del div_f
     return div_comp
 
 
@@ -203,47 +177,23 @@ def compute_viscous_residual_fr_gpu(
     # mu_t_field（湍流涡粘度数组，层流为 0）分别传入。
     mu_t_arg = 0.0 if mu_t_field is None else mu_t_field
 
-    # 去混叠（`AFCFD_VISC_OVERINT=on`）：2026-09-15 补齐——此前 CPU 端
-    # `viscous_flux.py::_viscous_volume_overintegrated` 已实现这条分支，
-    # GPU 端完全没有，于是同一个环境变量在两个后端意味着**不同的数值
-    # 方案**，CPU-GPU 交叉校验会在开关打开后无声地对不上（与 2026-09-15
-    # 同一轮审计在 k/omega 输运上发现的 GPU 替身缺口是同一类问题）。
-    # 默认 off，关闭时下面的 coarse 路径逐位不变。
-    from autoflowcfd.core.fr_residual.viscous_flux import (
-        resolve_viscous_overintegration,
-    )
-    from autoflowcfd.core.gpu.gpu_overintegration import (
-        get_overintegration_segs_gpu,
-    )
-    _oi_segs = (get_overintegration_segs_gpu(mesh_data, ops_data, n_cells, n_prism)
-                if resolve_viscous_overintegration() == "on" else None)
-    if _oi_segs is not None:
-        div_G = _viscous_volume_overintegrated_gpu(
-            cp, Q, grad_vel, grad_T, mu_t_arg, mu, Pr, Pr_t,
-            _oi_segs, n_cells, n_sps)
-        # `adj_j` 仍需物化：下方界面项 kernel 要用。
-        adj_j = mesh_data['adj_j']
+    if n_sps == 1:
+        # P0：分片常数场的体积散度恒为零；本侧通量由界面核减去（见 interface.py）
+        div_G = cp.zeros((n_cells, n_sps, 5), dtype=cp.float64)
     else:
-      G_phys = viscous_physical_flux_gpu(
-          Q, grad_vel, grad_T, mu, Pr, mu_t=mu_t_arg, Pr_t=Pr_t,
-      )  # (n_cells, n_sps, 3, 5)
-      # 逆变通量
-      adj_j = mesh_data['adj_j']
-      G_tilde = cp.matmul(adj_j, G_phys)  # (n_cells, n_sps, 3, 5)
-
-      # 散度
-      div_G = cp.zeros((n_cells, n_sps, 5), dtype=cp.float64)
-      if n_prism > 0:
-        div_G[:n_prism] = gpu_contract_shared_operator_2axis(
-            ops_data['D_3d_prism'], G_tilde[:n_prism]
+        # 与 CPU 同一个离散（core/fr_residual/viscous_flux/overintegration.py）：细点上重新
+        # 求值粘性通量，体积算子 K 同时减去修正项的本侧通量迹
+        from autoflowcfd.core.gpu.gpu_overintegration import (
+            get_overintegration_segs_gpu, lifted_divergence_gpu,
         )
-      if n_cells > n_prism:
-        # 四面体坍缩坐标基已删除（2026-09-03，见 fr/operators.py 模块
-        # 文档）：`ops_data['D_3d_tet']` 现在恒别名到 `D_native_tet_
-        # padded`，不再需要按 tet_basis_mode 分派。
-        div_G[n_prism:] = gpu_contract_shared_operator_2axis(
-            ops_data['D_3d_tet'], G_tilde[n_prism:]
-        )
+        _oi_segs = get_overintegration_segs_gpu(mesh_data, ops_data, n_cells, n_prism)
+        if _oi_segs is None:
+            raise RuntimeError(
+                "P>=1 GPU 粘性残差需要过积分细点度量与 overint_* 算子，这里缺失：网格或算子是按"
+                "不完整的阶数几何构造/上传的")
+        div_G = _viscous_volume_term_gpu(
+            cp, Q, grad_vel, grad_T, mu_t_arg, mu, Pr, Pr_t,
+            _oi_segs, lifted_divergence_gpu(ops_data), n_cells, n_sps)
 
     # 粘性残差体积项 = +div(G) / det(J)（注意：粘性项是正号，与无粘的负号相反）
     viscous_residual = div_G / det_jacs[..., None]

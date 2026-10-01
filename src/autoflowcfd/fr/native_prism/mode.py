@@ -41,7 +41,7 @@ native 解决、然后删除坍缩实现并去掉参数，见项目记忆
 归约/填充相关的消费点里有一些**只拿得到数组**，拿不到 `ops` 或 `solver`
 （GPU 侧只有数组与 flat face、分布式 checkpoint 只有 gather 出来的全局
 数组）。本项目对这类跨切面的数值选择已有既成模式（`AFCFD_FILTER_MODE`、
-`AFCFD_TROUBLED_SENSOR`、`AFCFD_VISC_OVERINT`），沿用它而不是再造一种。
+`AFCFD_TROUBLED_SENSOR`），沿用它而不是再造一种。
 
 ## 两条基的自由度数（决定填充布局）
 

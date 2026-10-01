@@ -119,8 +119,9 @@ class FlatFaceGeometry:
     #
     # DG 提升算子的正确权重是**参考**求积权重，不是 `true_area_weight`
     # （物理面积权重 = `|adj_row| * w_ref`，实测 `sum_p taw_p` 恰好等于物理
-    # 面积）。原因：kernel 里 `jump = adj_row . (F* - F_own)` 已经是**参考
-    # 空间**的法向通量差（Nanson 关系 `n_hat dA_phys = adj_row dA_ref`
+    # 面积）。原因：无粘核施加的 `|adj_row| F*`（本侧通量迹已并进体积算子，
+    # `fr/face_flux_trace.py`）已经是**参考空间**的法向通量（Nanson 关系
+    # `n_hat dA_phys = adj_row dA_ref`
     # 把物理面积因子吃进去了），坍缩分支的 `g'` 分布也正是按这个约定消费
     # 它的。再乘一次 `true_area_weight` 等于多乘一个 `|adj_row|`。
     #
@@ -134,7 +135,8 @@ class FlatFaceGeometry:
     #     四面体（native DG 提升）   0.500x   即 ~h     错，正好差 h^2
     # 修复后两者都是 2.000x。
     #
-    # 守恒律侧的独立验证：人为构造常数跳跃 `F* = F_own + delta*n_hat`，
+    # 守恒律侧的独立验证（当时的界面核还减本侧通量）：人为构造常数跳跃
+    # `F* = F_own + delta*n_hat`，
     # 界面项对单元总量的贡献必须是 `-delta * 总表面积`。用参考权重得到的
     # 比值恰好 1.000000（全部面、全部阶数）；用物理面积权重是 0.211
     # （规整四面体）到 0.000003（细长四面体）。
@@ -244,6 +246,29 @@ def native_face_extrap_stack(ops, n_sps: int, n_native_rows: int = None) -> np.n
     return out
 
 
+def _check_one_primary_side_per_cell_face(owner, neighbor, is_boundary, owner_primary, neighbor_primary,
+                                          owner_code, neighbor_code, n_cells: int, n_prism: int) -> None:
+    """每个单元的每个几何面恰有一条"本单元为 primary 侧"的面记录（四面体 4 个、棱柱
+    5 个面编码各一次）。无粘修正项的本侧通量迹并进了体积算子
+    （`fr/face_flux_trace.py`），按单元的全部面一次性减去——这条不成立时残差会
+    静默多减或漏减一个面，所以在构造期核查。"""
+    owner, neighbor = np.asarray(owner, np.int64), np.asarray(neighbor, np.int64)
+    nb_side = (~np.asarray(is_boundary, bool)) & np.asarray(neighbor_primary, bool)
+    ow_side = np.asarray(owner_primary, bool)
+    cells = np.concatenate([owner[ow_side], neighbor[nb_side]])
+    codes = np.concatenate([np.asarray(owner_code, np.int64)[ow_side], np.asarray(neighbor_code, np.int64)[nb_side]])
+    key = cells * 16 + codes
+    uniq, counts = np.unique(key, return_counts=True)
+    per_cell = np.bincount(uniq // 16, minlength=n_cells)
+    expected = np.where(np.arange(n_cells) < n_prism, 5, 4)
+    if counts.max(initial=1) > 1 or np.any(per_cell != expected):
+        bad = np.nonzero(per_cell != expected)[0]
+        raise ValueError(
+            f"面记录不满足'每个单元每个面恰一条 primary 侧'：重复 {int((counts > 1).sum())} 处，"
+            f"面数不符的单元 {bad.size} 个（例如 {bad[:5].tolist()}）。无粘体积算子按单元全部面"
+            f"减去修正项的本侧通量迹，这条不成立时残差会静默错误")
+
+
 def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     """把 `mesh.face_flux_points` + `mesh.face_connectivity` 展平成
     `FlatFaceGeometry`。不缓存（缓存由 `get_flat_face_geometry` 负责），
@@ -344,12 +369,14 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
 
     # 参考面求积权重（见 `ref_area_weight` 字段文档）：所有面共用同一套
     # `[-1,1]^2` 张量积 Gauss-Legendre 网格，与 `fr/face_flux_points/merge.py`
-    # 里生成面通量点用的是**同一个** `gauss_legendre(n1d)`，必须一致。
-    from autoflowcfd.fr.operators import gauss_legendre
+    # 里生成面通量点用的是**同一个** `gauss_legendre(n1d)`；无粘体积算子 `K` 构造
+    # 时用的也是同一个函数（`fr/face_flux_trace.py`）。
+    from autoflowcfd.fr.face_flux_trace import face_reference_weights
 
-    _sps_1d, _w_1d = gauss_legendre(n1d)
-    _w1, _w2 = np.meshgrid(_w_1d, _w_1d, indexing="ij")
-    ref_area_weight = np.ascontiguousarray((_w1 * _w2).ravel())
+    ref_area_weight = face_reference_weights(n1d - 1)
+    _check_one_primary_side_per_cell_face(
+        fc.owner_cell, fc.neighbor_cell, fc.is_boundary, owner_is_primary, neighbor_is_primary,
+        owner_cube_face, neighbor_cube_face, int(mesh.n_cells), n_prism)
 
     # 内罚项长度尺度（见同名字段文档）：只依赖几何，随 flat 几何一次性构造并缓存。
     face_area = np.asarray(true_area_weight, dtype=np.float64).sum(axis=1)

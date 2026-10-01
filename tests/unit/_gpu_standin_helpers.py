@@ -21,13 +21,9 @@
 
 import numpy as np
 
-#: 过积分（去混叠）算子键，与 `core/gpu/array_manager.py::upload_mesh_data`
-#: 实际上传的集合一致。
-OVERINT_KEYS = (
-    'overint_interp_c2f_prism', 'overint_D_fine_prism',
-    'overint_restrict_f2c_prism', 'overint_interp_c2f_tet',
-    'overint_D_fine_tet', 'overint_restrict_f2c_tet',
-)
+#: 过积分（去混叠）算子键：直接用生产上传路径的同一份名单（不再抄第二份——
+#: 2026-10-01 新增体积算子 K 的键时，抄的那份就漏了）。
+from autoflowcfd.core.gpu.gpu_overintegration import OVERINT_OPS_KEYS as OVERINT_KEYS  # noqa: E402
 
 
 def complete_gpu_standin(mesh, ops, ops_data, mesh_data=None, compact_ids=None):

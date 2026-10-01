@@ -12,11 +12,29 @@ get_overintegration_context`，这里是同一份算子/细点度量在 GPU 上�
 
 from autoflowcfd.core.utils.array_module import array_module as _array_module
 
-#: 六个过积分算子键；缺任何一个就退回 coarse 路径。
+#: 过积分算子键（两条上传路径 `array_manager.py` / `gpu_inviscid_volume.prepare_ops_data`
+#: 共用这一份名单）；缺任何一个就退回 coarse 路径。`overint_lifted_div_*` 是无粘体积
+#: 算子 K（修正项本侧通量迹已并入，`fr/face_flux_trace.py`）。
 OVERINT_OPS_KEYS = (
     'overint_interp_c2f_prism', 'overint_D_fine_prism', 'overint_restrict_f2c_prism',
     'overint_interp_c2f_tet', 'overint_D_fine_tet', 'overint_restrict_f2c_tet',
+    'overint_lifted_div_prism', 'overint_lifted_div_tet',
 )
+
+
+def upload_overintegration_ops_gpu(cp, ops, out: dict) -> None:
+    """把 `OVERINT_OPS_KEYS` 里非 None 的算子上传进 `out`（两条上传路径共用）。"""
+    import numpy as np
+
+    for name in OVERINT_OPS_KEYS:
+        op = getattr(ops, name, None)
+        if op is not None:
+            out[name] = cp.asarray(np.ascontiguousarray(op, dtype=np.float64))
+
+
+def lifted_divergence_gpu(ops_data):
+    """与 `get_overintegration_segs_gpu` 两段对应的无粘体积算子 `(K_prism, K_tet)`。"""
+    return ops_data['overint_lifted_div_prism'], ops_data['overint_lifted_div_tet']
 
 
 def upload_fine_metrics_gpu(cp, jacobians_fine):

@@ -61,8 +61,7 @@ from .pointwise import (  # noqa: F401
     viscous_physical_flux,
 )
 from .overintegration import (  # noqa: F401
-    _viscous_volume_overintegrated,
-    resolve_viscous_overintegration,
+    viscous_volume_term,
 )
 from .residual import (  # noqa: F401
     compute_viscous_residual_fr,
@@ -73,6 +72,6 @@ __all__ = [
     "R_AIR",
     "compute_temperature",
     "compute_viscous_residual_fr",
-    "resolve_viscous_overintegration",
+    "viscous_volume_term",
     "viscous_physical_flux",
 ]

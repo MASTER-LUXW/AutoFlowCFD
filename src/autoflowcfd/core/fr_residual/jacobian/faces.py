@@ -4,9 +4,11 @@
 对应：每个 primary 面侧、每个通量点算跳变量 `J_i`（`face_point_jumps.py` 的同一
 个函数），`dU/dt` 增量是 `(1/det_s) sum_i lift[s,i] w_i J_i`，其中
 
-    J_i = viscous_jump_point(...) - inviscid_jump_point(...)
+    J_i = viscous_common_flux_point(...) - inviscid_common_flux_point(...)
 
-（无粘项在残差里带负号，粘性项带正号，见两个核的符号约定）。`J_i` 依赖两侧的
+（无粘项在残差里带负号，粘性项带正号，见两个核的符号约定）。无粘与粘性修正项的
+本侧通量（细层通量多项式的法向迹）都已并进体积算子 `K`（`fr/face_flux_trace.py`），
+它们对单元块的贡献在 `volume.py` 里随体积项一起装配，这里只有公共通量与内罚项。`J_i` 依赖两侧的
 迹：状态迹 `Q = M Q_cell`、梯度迹 `grad = M Gop Q_cell`（速度分量与温度，温度再
 乘 `dT/dQ`），`M` 是本侧的外插矩阵或另一侧的 sources 插值矩阵。逐点导数
 `dJ_i/d(迹)` 对跳变量函数做前向差分，再经上述线性链落到单元解点上：
@@ -38,7 +40,7 @@ import numpy as np
 from numba import njit, prange
 
 from autoflowcfd.core.fr_operators.flux_kernels import VBC_INTERIOR, boundary_other_gradients
-from autoflowcfd.core.fr_residual.face_point_jumps import inviscid_jump_point, viscous_jump_point
+from autoflowcfd.core.fr_residual.face_point_jumps import inviscid_common_flux_point, viscous_common_flux_point
 from .pointwise import N_VISC_INPUTS, _SQRT_EPS, primitive_step
 
 #: 每个面侧的耦合块来源：src0 单元、src1 单元、混合拆分面配对边界面的 owner。
@@ -48,8 +50,8 @@ N_CROSS_SOURCES = 3
 @njit(cache=True, inline='always')
 def _total_jump(Qs, gvs, gTs, mus, Qx, gvx, gTx, mux, adjrow, h_ip, bkind, mu, Pr, Pr_t, c_ip,
                 mach_ref, precond_mode):
-    J = inviscid_jump_point(Qs, Qx, adjrow, mach_ref, precond_mode)
-    Jv = viscous_jump_point(Qs, gvs, gTs, mus, Qx, gvx, gTx, mux, adjrow, h_ip, bkind,
+    J = inviscid_common_flux_point(Qs, Qx, adjrow, mach_ref, precond_mode)
+    Jv = viscous_common_flux_point(Qs, gvs, gTs, mus, Qx, gvx, gTx, mux, adjrow, h_ip, bkind,
                             mu, Pr, Pr_t, c_ip)
     for v in range(5):
         J[v] = Jv[v] - J[v]
@@ -192,7 +194,7 @@ def _side_blocks(c, n, E, L, w, adjrow, f, is_bnd_face, masked_row, mp, src_cell
         J0 = _total_jump(Qs[i], gvs[i], gTs[i], mus[i], Qx, gvx, gTx, mux, adjrow[i], h_ip, bk,
                          mu, Pr, Pr_t, c_ip, mach_ref, precond_mode)
         # 梯度输入只进粘性跳变量：对它们差分时不必重算 AUSM+up
-        Jv0 = viscous_jump_point(Qs[i], gvs[i], gTs[i], mus[i], Qx, gvx, gTx, mux, adjrow[i], h_ip, bk,
+        Jv0 = viscous_common_flux_point(Qs[i], gvs[i], gTs[i], mus[i], Qx, gvx, gTx, mux, adjrow[i], h_ip, bk,
                                  mu, Pr, Pr_t, c_ip)
         # ---- 本侧原始变量（边界面：复合差分）----
         for v in range(5):
@@ -228,7 +230,7 @@ def _side_blocks(c, n, E, L, w, adjrow, f, is_bnd_face, masked_row, mp, src_cell
             else:
                 g_x = gvx
                 t_x = gTx
-            J1 = viscous_jump_point(Qs[i], g, tt, mus[i], Qx, g_x, t_x, mux, adjrow[i], h_ip, bk,
+            J1 = viscous_common_flux_point(Qs[i], g, tt, mus[i], Qx, g_x, t_x, mux, adjrow[i], h_ip, bk,
                                     mu, Pr, Pr_t, c_ip)
             for o in range(5):
                 dS[i, o, j] = (J1[o] - Jv0[o]) / h
@@ -275,7 +277,7 @@ def _side_blocks(c, n, E, L, w, adjrow, f, is_bnd_face, masked_row, mp, src_cell
                     for o in range(5):
                         dO[i, o, j] = (J1[o] - J0[o]) / h
                 else:
-                    J1 = viscous_jump_point(Qs[i], gvs[i], gTs[i], mus[i], qx, g, tt, mux, adjrow[i], h_ip,
+                    J1 = viscous_common_flux_point(Qs[i], gvs[i], gTs[i], mus[i], qx, g, tt, mux, adjrow[i], h_ip,
                                             VBC_INTERIOR, mu, Pr, Pr_t, c_ip)
                     for o in range(5):
                         dO[i, o, j] = (J1[o] - Jv0[o]) / h

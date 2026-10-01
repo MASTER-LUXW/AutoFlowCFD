@@ -39,10 +39,10 @@ from .extrap import (  # noqa: F401
     _extrap_side,
     _extrap_to_fp,
     _self_extrap_side,
-    _viscous_tilde_flux_pair,
+    _viscous_tilde_flux,
 )
 from .volume import (  # noqa: F401
-    _viscous_volume_overintegrated_gpu,
+    _viscous_volume_term_gpu,
     compute_temperature_gpu,
     compute_viscous_residual_fr_gpu,
 )

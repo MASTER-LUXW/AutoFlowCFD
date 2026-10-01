@@ -40,7 +40,7 @@ from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient
 from autoflowcfd.core.fr_operators.volume_contract import compute_adj_j, get_overintegration_context
 from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
 from autoflowcfd.core.fr_residual.inviscid_kernel import compute_boundary_ghost_states
-from autoflowcfd.core.fr_residual.viscous_flux import compute_temperature, resolve_viscous_overintegration
+from autoflowcfd.core.fr_residual.viscous_flux import compute_temperature
 from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL, PRANDTL_TURBULENT
 from autoflowcfd.fr.native_padding import real_sps_per_cell
 
@@ -75,19 +75,16 @@ def _segments(ctx, n_real_prism, n_real_tet):
     oi = get_overintegration_context(mesh, ops)
     if oi is None:
         raise ValueError("解析 Jacobian 只用于 P>=1（P0 没有过积分几何，走差分装配）")
-    visc_overint = resolve_viscous_overintegration() == "on"
     D_sp = {0: np.asarray(ops.D_3d_prism), 1: np.asarray(ops.D_native_tet_padded)}
     out = []
-    for kind, (lo, hi, nf, det_f, inv_f, c2f, D_f, f2c) in enumerate(oi["segs"]):
+    for kind, ((lo, hi, nf, det_f, inv_f, c2f, D_f, f2c), K) in enumerate(zip(oi["segs"], oi["lifted_div"])):
         n = n_real_prism if kind == 0 else n_real_tet
         c2f_r = np.ascontiguousarray(np.asarray(c2f)[:, :n])
-        W = np.einsum("sq,qrm->srm", np.asarray(f2c)[:n], np.asarray(D_f), optimize=True)
+        # 无粘与粘性同一个体积算子 K（修正项本侧通量迹已并入，fr/face_flux_trace.py），
+        # 与残差逐项一致；两者都在细点上求值
+        W = np.ascontiguousarray(np.asarray(K)[:n])
         Dn = np.ascontiguousarray(D_sp[kind][:n, :n])
-        if visc_overint:
-            c2f_v, W_v = c2f_r, W
-        else:
-            c2f_v, W_v = np.eye(n), Dn
-        out.append((kind, VolumeSegment(lo, hi, n, c2f_r, W, c2f_v, W_v, Dn), det_f, inv_f, visc_overint))
+        out.append((kind, VolumeSegment(lo, hi, n, c2f_r, W, Dn), det_f, inv_f))
     return out
 
 
@@ -147,7 +144,7 @@ def assemble_mean_flow_blocks(ctx: MeanFlowLinearization, U, residual=None, want
     slot = np.concatenate([np.arange(n_prism), np.arange(n_cells - n_prism)]).astype(np.int64)
 
     # ---- 体积项 ----
-    for kind, seg, det_f, inv_f, visc_overint in _segments(ctx, npr, nte):
+    for kind, seg, det_f, inv_f in _segments(ctx, npr, nte):
         if seg.hi <= seg.lo:
             continue
         K = K_prism if kind == 0 else K_tet
@@ -157,17 +154,11 @@ def assemble_mean_flow_blocks(ctx: MeanFlowLinearization, U, residual=None, want
             c1 = min(c0 + chunk, seg.hi)
             i0, i1 = c0 - seg.lo, c1 - seg.lo
             adj_f = np.asarray(det_f[i0:i1])[..., None, None] * np.asarray(inv_f[i0:i1])
-            if visc_overint:
-                adj_v = adj_f
-                gv_v = np.einsum("rt,ctab->crab", seg.c2f_visc, gv_sp[c0:c1, :n], optimize=True)
-                gT_v = np.einsum("rt,ctb->crb", seg.c2f_visc, gT_sp[c0:c1, :n], optimize=True)
-                mut_v = mut[c0:c1, :n] @ seg.c2f_visc.T
-            else:
-                adj_v = det[c0:c1, :n, None, None] * inv_sp[c0:c1, :n]
-                gv_v, gT_v, mut_v = gv_sp[c0:c1, :n], gT_sp[c0:c1, :n], mut[c0:c1, :n]
+            gv_f = np.einsum("rt,ctab->crab", seg.c2f, gv_sp[c0:c1, :n], optimize=True)
+            gT_f = np.einsum("rt,ctb->crb", seg.c2f, gT_sp[c0:c1, :n], optimize=True)
             add_volume_blocks(K, slot[c0], seg, np.ascontiguousarray(Q[c0:c1, :n]),
-                              dTdQ[c0:c1, :n], inv_sp[c0:c1, :n], adj_f, adj_v,
-                              mut_v, ctx.mu, ctx.Pr, ctx.Pr_t, gv_v, gT_v)
+                              dTdQ[c0:c1, :n], inv_sp[c0:c1, :n], adj_f,
+                              mut[c0:c1, :n] @ seg.c2f.T, ctx.mu, ctx.Pr, ctx.Pr_t, gv_f, gT_f)
 
     # ---- 界面项 ----
     flat = ctx.flat_geometry()
