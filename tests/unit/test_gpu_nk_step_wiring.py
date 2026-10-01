@@ -104,14 +104,15 @@ def _gpu_standin(cpu, dt_cell, dt_phys_cell):
         _newton_forcing=None, _newton_last_info=None, _newton_dtau_scale=1.0,
         _newton_block_precond=None, _newton_turb_state=None,
         boundary_ghost_provider=cpu.boundary_ghost_provider, mu_molecular=cpu.mu_molecular,
-        wmles_model=None,
+        wmles_model=None, artificial_viscosity_enabled=False,
     )
     g._cfl_controller, g.fixed_cfl_number = build_cfl_policy(S.NEWTON_KRYLOV)
     g._update_primitives_gpu = lambda: setattr(g, "Q_gpu", conserved_to_primitive(g.U_gpu[..., :5]))
     g.compute_inviscid_residual_gpu = lambda U_trial: _with_state(cpu.compute_inviscid_residual)(U_trial)
     g.compute_viscous_residual_gpu = (
-        lambda U_trial, mu_t_field=None: _with_state(cpu.compute_viscous_residual)(U_trial))
-    g._compute_local_time_step_gpu = lambda return_physical_too=False: (
+        lambda U_trial, mu_t_field=None, nu_av=None: _with_state(cpu.compute_viscous_residual)(U_trial))
+    g.compute_artificial_diffusivity_field_gpu = lambda: None   # 人工粘性未启用
+    g._compute_local_time_step_gpu = lambda return_physical_too=False, nu_av=None: (
         (dt_cell, dt_phys_cell) if return_physical_too else dt_cell)
     for name in ("compute_turbulence_source_gpu", "_apply_turbulence_corrections_gpu"):
         setattr(g, name, types.MethodType(getattr(_GPUSolverIOMixin, name), g))

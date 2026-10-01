@@ -20,8 +20,8 @@ def physics_from_metadata(metadata: dict) -> dict:
       （2026-09-24）。此前两条重建路径都写 `metadata.get("vel_inf", 33.33)`
       —— 那是与 CLI 默认值并存的第二份事实来源，按它重建出来的是**另一个
       物理算例**，续算会在错误的来流上静默跑到底。
-    * 攻角/侧滑角、分子粘度、Tu/VR：早于各自持久化日期（2026-09-17 /
-      08-27 / 08-25）的单机 checkpoint 没有这些键，它们产生时的真实值就是
+    * 攻角/侧滑角、分子粘度、Tu/VR、人工粘性开关：早于各自持久化日期
+      （2026-09-17 / 08-27 / 08-25 / 10-01）的单机 checkpoint 没有这些键，它们产生时的真实值就是
       那时的内置值，所以缺省按那时的值恢复。分布式 checkpoint 在
       2026-09-25 之前连来流三要素都没写，因此一律在上一条就报错。
     """
@@ -42,6 +42,10 @@ def physics_from_metadata(metadata: dict) -> dict:
         "mu_molecular": float(metadata.get("mu_molecular", 1.8e-5)),
         "turbulence_intensity": float(metadata.get("turbulence_intensity", 0.01)),
         "viscosity_ratio": float(metadata.get("viscosity_ratio", 5.0)),
+        # 早于 2026-10-01 的 checkpoint 没有这两个键：那时人工粘性只能在单机
+        # CPU 以 CLI 开关启用、且不持久化，缺省按关闭恢复（与绝大多数运行一致）。
+        "artificial_viscosity_enabled": bool(metadata.get("artificial_viscosity_enabled", False)),
+        "artificial_viscosity_alpha": float(metadata.get("artificial_viscosity_alpha", 1.0)),
     }
 
 

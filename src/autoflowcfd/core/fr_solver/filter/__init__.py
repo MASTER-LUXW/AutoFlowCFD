@@ -25,7 +25,7 @@ TimeIntegrator.step()/step_dual_time()，由它们在*每个* stage 的正定性
     apply.py         滤波矩阵的实际施加（numba kernel）+ 恒等阵短路判据
     mode.py          `AFCFD_FILTER_MODE` 档位解析与后端支持矩阵
     scalar.py        k/omega 标量场滤波与 `AFCFD_FILTER_TURB_GATE` 门控
-    bounds_conn.py   BJ 型邻居极值判据所需的分布式面邻接构造
+    bounds_conn.py   BJ 型邻居极值判据的连接参数（单机/分布式）
     sensor_gate.py   传感器门控滤波回调（数组版 + 对象版）
     __init__.py      顶层入口 `build_filter_func` + 全量 re-export
 
@@ -57,9 +57,8 @@ from .scalar import (  # noqa: F401
     resolve_turb_filter_gate,
 )
 from .bounds_conn import (  # noqa: F401
-    _DIST_FACE_STENCIL_WARNED,
-    _warn_distributed_face_stencil,
     build_distributed_bounds_conn,
+    build_single_machine_bounds_conn,
 )
 from .sensor_gate import (  # noqa: F401
     build_sensor_gated_filter_func,
@@ -116,6 +115,7 @@ def build_filter_func(solver) -> Callable[[np.ndarray], np.ndarray]:
 
 __all__ = [
     "build_distributed_bounds_conn",
+    "build_single_machine_bounds_conn",
     "build_filter_func",
     "build_filter_func_by_cell_type",
     "build_sensor_gated_filter_func",

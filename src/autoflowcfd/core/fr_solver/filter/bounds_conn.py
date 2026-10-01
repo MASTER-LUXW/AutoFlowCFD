@@ -1,9 +1,10 @@
-"""AutoFlowCFD V2.0 - BJ 型邻居极值判据所需的分布式连接关系。
+"""AutoFlowCFD V2.0 - BJ 型邻居极值判据所需的连接关系（单机与分布式）。
 
-从 `core/fr_solver/filter.py` 拆出（2026-09-24）。纯搬家，逻辑未改。
+从 `core/fr_solver/filter.py` 拆出（2026-09-24）。
 
-`bounds` 传感器要拿"邻居单元的极值包络"，在分布式下这需要跨 rank 的面
-邻接信息；这份构造是那条路径专属的，与滤波本身正交。
+`bounds` 传感器要拿"邻居单元的极值包络"：面邻接、两张边界表（Dirichlet 值与
+镜像法向）、顶点邻域模板。这些与判据的消费方（模态滤波门控）正交，构造集中
+在这里。
 """
 
 
@@ -11,9 +12,51 @@ import numpy as np
 from loguru import logger
 
 
+def build_single_machine_bounds_conn(solver) -> dict:
+    """单机（"棱柱在前"排列）上 BJ 判据的全部连接参数，可直接展开给
+    `compute_bounds_violation_ratio`/`build_sensor_gated_filter_func_arrays`。
+
+    含 `owner_cell/neighbor_cell/is_boundary/freestream/bnd_tables/vertex_stencil`。
+    按 (网格, 边界 provider) 缓存在求解器上：面连接与顶点模板与阶数无关；两张
+    边界表在闭包里首次取用时算一次（`fr_solver/boundary.make_bj_boundary_tables`），
+    所以 provider 换了（Order Continuation 换阶会重建）就必须重建，不能沿用旧表。
+    """
+    mesh = solver.mesh
+    provider = getattr(solver, "boundary_ghost_provider", None)
+    cached = getattr(solver, "_bounds_conn_single", None)
+    if cached is not None and cached[0] is mesh and cached[1] is provider:
+        return cached[2]
+    fc = mesh.face_connectivity
+    if fc is None:
+        raise RuntimeError(
+            "AFCFD_TROUBLED_SENSOR=bounds/both 需要 mesh.face_connectivity"
+            "（BJ 判据要面邻居均值），当前网格没有构建面连接")
+    from autoflowcfd.core.fr_operators.vertex_stencil import build_vertex_stencil
+    from autoflowcfd.core.fr_solver.boundary import make_bj_boundary_tables
+
+    n_faces = int(np.asarray(fc.owner_cell).size)
+    # `fc.normal` 是单位外法向，与 owner_cell 同一索引空间 —— 对称面与滑移壁的
+    # 镜像包络贡献要用它，见 make_bj_boundary_tables。
+    nrm = getattr(fc, "normal", None)
+    conn = dict(
+        owner_cell=np.asarray(fc.owner_cell),
+        neighbor_cell=np.asarray(fc.neighbor_cell),
+        is_boundary=np.asarray(fc.is_boundary, dtype=bool),
+        freestream=solver.freestream,
+        bnd_tables=make_bj_boundary_tables(
+            lambda: getattr(solver, "boundary_ghost_provider", None),
+            n_faces, None if nrm is None else np.asarray(nrm)),
+        # 顶点邻域模板：面邻居在三维四面体上不能把本单元夹住，实测在欠解析
+        # 光滑场上标记 100%，见 `fr_operators/vertex_stencil.py` 模块文档。
+        vertex_stencil=build_vertex_stencil(mesh),
+    )
+    solver._bounds_conn_single = (mesh, provider, conn)
+    return conn
+
+
 def build_distributed_bounds_conn(dist_fc, n_total_cells, get_halo,
-                                 get_provider, freestream, to_device=None,
-                                 ascontiguous=None):
+                                 get_provider, freestream, vertex_pairs,
+                                 to_device=None, ascontiguous=None):
     """构造 BJ 越界判据在**分布式**后端上的连接参数（CPU MPI 与多 GPU 共用）。
 
     两条分布式后端此前各有一份逐字相同的实现。它们唯一的差别是数组模块
@@ -49,6 +92,10 @@ def build_distributed_bounds_conn(dist_fc, n_total_cells, get_halo,
         get_provider: 零参可调用，返回 `boundary_ghost_provider`（惰性：
             多 GPU 的滤波初始化在 provider 构造之前）
         freestream: `solver.freestream`
+        vertex_pairs: 本 rank local 单元的 `(顶点全局编号, 原生 local 下标)`
+            对（`core/mpi/vertex_stencil_mpi.local_vertex_pairs`）。顶点模板
+            在这里构造，构造与每次求值都是**集合调用**（共享顶点的跨 rank
+            MAX/MIN 归约），全部 rank 同时进入
         to_device: 可选，把 numpy 数组搬到计算设备的可调用
         ascontiguous: 可选，按数组自身模块分派的 `ascontiguousarray`
             （GPU 后端传 `core/gpu/device_context.py::ascontiguous_like`）；
@@ -130,6 +177,8 @@ def build_distributed_bounds_conn(dist_fc, n_total_cells, get_halo,
     # `true_normal` 是单位外法向、与 dist_fc 同一（local 面）索引空间，
     # 逐通量点形状由 `make_bj_boundary_tables` 归约成逐面。
     nrm = getattr(dist_fc, "true_normal", None)
+    from autoflowcfd.core.mpi.vertex_stencil_mpi import build_distributed_vertex_stencil
+
     return dict(owner_cell=to_device(owner_native),
                 neighbor_cell=to_device(neigh_native),
                 is_boundary=to_device(bnd),
@@ -139,26 +188,9 @@ def build_distributed_bounds_conn(dist_fc, n_total_cells, get_halo,
                 bnd_tables=make_bj_boundary_tables(
                     get_provider, int(bnd.size),
                     None if nrm is None else np.asarray(nrm),
-                    to_device=to_device))
+                    to_device=to_device),
+                # 顶点邻域模板：与单机同一判据（面邻居在三维四面体上夹不住
+                # 本单元，见 `fr_operators/vertex_stencil.py`）
+                vertex_stencil=build_distributed_vertex_stencil(
+                    *vertex_pairs, to_device=to_device))
 
-
-_DIST_FACE_STENCIL_WARNED = [False]
-
-
-def _warn_distributed_face_stencil(sensor: str) -> None:
-    """分布式路径用 BJ 判据时提示"顶点模板尚不可用"，只提示一次。
-
-    一次性：这个函数在每次构造滤波回调时被调用（Order Continuation
-    换阶数会重建），逐次刷屏会把真正的日志淹掉。
-    """
-    if sensor not in ("bounds", "both") or _DIST_FACE_STENCIL_WARNED[0]:
-        return
-    _DIST_FACE_STENCIL_WARNED[0] = True
-    logger.warning(
-        "分布式路径的 BJ 越界判据仍用**面邻居**模板：顶点邻域模板需要"
-        "按顶点的归约交换（现有 halo 是按单元的 1 层面邻居），尚未实现。"
-        "面模板在欠解析光滑场上过度标记（实测标记比例在三档网格加密上"
-        "恒为 100%、不收敛；顶点模板是 100%->25%->6.18%），所以分布式上"
-        "这个门控会比单机保守得多。需要精确门控请用单机路径，或用 "
-        "AFCFD_TROUBLED_SENSOR=persson / AFCFD_FILTER_MODE=off（默认值）。"
-        "详见 core/fr_operators/vertex_stencil.py 模块文档。")

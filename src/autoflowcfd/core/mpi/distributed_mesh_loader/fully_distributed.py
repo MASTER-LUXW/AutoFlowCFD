@@ -34,6 +34,8 @@ def distributed_mesh_load_v2(
     cfl_max: Optional[float] = None,
     cfl_min: Optional[float] = None,
     use_eikonal: bool = False,
+    artificial_viscosity_enabled: bool = False,
+    artificial_viscosity_alpha: float = 1.0,
 ):
     """真正的完全分布式网格加载（2026-09-02）——只有 root rank 加载
     完整网格并对每个 rank 分别调用 `build_fully_distributed_rank_
@@ -171,6 +173,8 @@ def distributed_mesh_load_v2(
                 cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
                 global_cell_colors=global_cell_colors,
                 global_cell_colors_d2=global_cell_colors_d2,
+                artificial_viscosity_enabled=artificial_viscosity_enabled,
+                artificial_viscosity_alpha=artificial_viscosity_alpha,
             )
             for r in range(n_ranks)
         ]
@@ -199,6 +203,8 @@ def distributed_mesh_load_v2(
             'bc_overrides': bc_overrides or {}, 'n_ranks': n_ranks,
             'time_scheme': time_scheme, 'dual_time_inner_iter': dual_time_inner_iter,
             'cfl_start': cfl_start, 'cfl_max': cfl_max, 'cfl_min': cfl_min,
+            'artificial_viscosity_enabled': artificial_viscosity_enabled,
+            'artificial_viscosity_alpha': artificial_viscosity_alpha,
             'global_cell_colors': global_cell_colors,
             'global_cell_colors_d2': global_cell_colors_d2,
         }
@@ -443,6 +449,8 @@ def exchange_packages_for_new_order(root_context, target_p: int, n_ranks: int, *
                 # 着色只依赖拓扑，换阶沿用同一份
                 global_cell_colors=root_context.get('global_cell_colors'),
                 global_cell_colors_d2=root_context.get('global_cell_colors_d2'),
+                artificial_viscosity_enabled=root_context['artificial_viscosity_enabled'],
+                artificial_viscosity_alpha=root_context['artificial_viscosity_alpha'],
             )
             for r in range(n_ranks)
         ]

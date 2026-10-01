@@ -116,7 +116,7 @@ class _SolverResidualMixin:
             return res_full
         return res_euler
 
-    def compute_viscous_residual(self, mu_t_turb=None):
+    def compute_viscous_residual(self, mu_t_turb=None, nu_av=None):
         """
         计算粘性残差 (S-03)。
 
@@ -127,6 +127,11 @@ class _SolverResidualMixin:
                 CPU 分布式都整步冻结）；2026-09-25 以前单机 CPU 在每次残差
                 求值里按**试探态**的 rho 重算，与其余后端每步差 O(dt)，隐式步
                 下直接让 Jacobian 不同（分布式 n_ranks=1 对照里块 Jacobi 差 1e-3）。
+            nu_av: 本步冻结的问题单元人工扩散系数（运动粘度，
+                `compute_artificial_diffusivity_field` 在步前状态上的结果）。None
+                且启用人工粘性时按当前状态求。冻结的理由与 mu_t_turb 相同：系数
+                是"本步参数"，隐式步的残差与 Jacobian 看到同一个系数，判据里的
+                max 不进入 Newton 线性化。
 
         真实的 BR1 面耦合粘性离散（core/fr_viscous_flux.py），并把湍流模型
         算出的涡粘系数真正耦合进应力张量/热传导（T-01/T-04/T-06 修复：
@@ -139,13 +144,12 @@ class _SolverResidualMixin:
                 见 solver_helpers.compute_wmles_wall_stress_correction
                 文档 T-05 修复说明——必须在这里（残差组装、时间积分之前）
                 施加才能真正影响本步的解，而不是像此前那样在状态更新
-                之后才计算）
+                之后才计算）；启用人工粘性时已叠加 `div(nu grad U)`
         """
-        mu_t_field = self._get_turbulent_viscosity_field(mu_t_turb)
         res = compute_viscous_residual_ldg(
             self.state.U, self.state.Q, self.ops, self.mesh,
             mu=self.mu_molecular,
-            mu_t_field=mu_t_field,
+            mu_t_field=self._get_turbulent_viscosity_field(mu_t_turb),
             boundary_ghost_provider=self.boundary_ghost_provider,
         )
 
@@ -154,89 +158,71 @@ class _SolverResidualMixin:
             if wall_stress_correction is not None:
                 res = res + wall_stress_correction[..., : res.shape[-1]]
 
-        # 人工粘性的**质量扩散通道**（2026-09-14 补齐）。
-        #
-        # 此前 `artificial_viscosity.py` 模块文档里如实记录了一条范围
-        # 限制、并把它称作"许多实际 DG/FR 实现采用的简化"：Persson &
-        # Peraire (2006) 原方法对**全部**守恒变量（含连续性方程）叠加
-        # 人工扩散，而本实现只把 epsilon 叠进 `mu_t_field`，于是它只能
-        # 通过动量/能量方程既有的粘性应力/热传导通道起作用，密度本身
-        # 完全不被扩散（`viscous_physical_flux` 的质量分量 G[...,0]
-        # 恒为 0）。用户明确指出本项目不接受简化，这里补上缺的那一项。
-        #
-        # 实现方式：不改粘性热路径。AV 默认关闭，没有理由为它给所有
-        # 运行的 `viscous_physical_flux_batch` 增加参数与分支；而
-        # `div(eps*grad(rho))` 正是一个标量扩散算子，直接复用湍流输运
-        # 已经验证过的 BR1 面耦合标量扩散装配
-        # （`turbulence/transport.py::compute_scalar_diffusion_residual`，
-        # 它返回的就是 +div(Gamma*grad(phi))，与这里 dU/dt 的符号约定
-        # 一致）。AV 关闭时这段完全不执行，零开销。
-        #
-        # 守恒性与自由流场保持性：`div(eps*grad(rho))` 是散度形式，
-        # 因此严格守恒；均匀流场下 grad(rho)=0，这一项恒为 0，不破坏
-        # 自由流场保持性（已用测试钉住，见
-        # tests/unit/test_artificial_viscosity_mass_diffusion.py）。
-        if getattr(self, "artificial_viscosity_enabled", False):
-            res = res + self._artificial_mass_diffusion_residual()
+        # 问题单元人工粘性：全部守恒变量的拉普拉斯（施加形式与判据见
+        # `fr_operators/artificial_viscosity/entropy_viscosity.py`）。不走 mu_t
+        # 通道 —— 那样动量走速度梯度应力、能量走温度传导，再配一个单独的质量
+        # 扩散，三者不自洽（实测造出冷点并扩散）。复用湍流输运已验证的标量扩散
+        # 装配（边界齐次 Neumann，五个守恒量都严格守恒）。
+        if nu_av is None:
+            nu_av = self.compute_artificial_diffusivity_field()
+        if nu_av is not None:
+            res = res + self._artificial_diffusion_residual(nu_av)[..., : res.shape[-1]]
 
         return res
 
-    def _artificial_mass_diffusion_residual(self) -> np.ndarray:
-        """Persson-Peraire 人工粘性作用在连续性方程上的那一项。
-
-        返回形状与粘性残差相同的数组，只有质量分量（索引 0）非零，
-        其值为 `+div(epsilon * grad(rho))`（dU/dt 约定）。
-        完整动机见 `compute_viscous_residual` 里的调用点注释。
-        """
+    def compute_artificial_diffusivity_field(self) -> Optional[np.ndarray]:
+        """当前状态上的问题单元人工扩散系数 nu (n_cells, n_sps)（运动粘度）；未启用返回 None。"""
+        if not getattr(self, "artificial_viscosity_enabled", False):
+            return None
         from autoflowcfd.core.fr_operators.artificial_viscosity import (
-            compute_persson_peraire_artificial_viscosity,
+            compute_artificial_diffusivity,
+        )
+        from autoflowcfd.core.fr_residual.viscous import compute_scalar_gradient
+
+        return compute_artificial_diffusivity(
+            self.state.U, int(getattr(self, "current_order", self.order)),
+            self.mesh.cell_volumes,
+            np.arange(self.mesh.n_cells) < int(self.mesh.n_prism_cells),
+            lambda phi: compute_scalar_gradient(phi, self.ops, self.mesh),
+            alpha_av=self.artificial_viscosity_alpha)
+
+    def _artificial_diffusion_residual(self, nu_av: np.ndarray) -> np.ndarray:
+        """`div(nu grad U_k)`，k = 0..4（dU/dt 约定），形状同 `state.U`。"""
+        from autoflowcfd.core.fr_operators.artificial_viscosity import (
+            artificial_diffusion_residual,
         )
         from autoflowcfd.core.turbulence.transport import (
             compute_scalar_diffusion_residual,
         )
 
-        epsilon_av = compute_persson_peraire_artificial_viscosity(
-            self, alpha_av=self.artificial_viscosity_alpha
-        )
-        rho = self.state.U[..., 0]
-        d_rho_dt = compute_scalar_diffusion_residual(
-            np.ascontiguousarray(rho), np.ascontiguousarray(epsilon_av),
-            self.mesh, self.ops,
-        )
-        out = np.zeros_like(self.state.U[..., : self.state.U.shape[-1]])
-        out[..., 0] = d_rho_dt
-        return out
+        return artificial_diffusion_residual(
+            self.state.U, nu_av,
+            lambda phi, gamma: compute_scalar_diffusion_residual(phi, gamma, self.mesh, self.ops))
 
     def _get_turbulent_viscosity_field(self, mu_t_turb=None) -> Optional[np.ndarray]:
-        """汇总当前激活的湍流模型给出的动力涡粘度场 mu_t = rho * nu_t（委托给 fr_solver_turbulence），
-        再叠加 Persson-Peraire 人工粘性（若启用）。
+        """当前激活的湍流模型给出的动力涡粘度场 mu_t = rho * nu_t（委托给
+        fr_solver_turbulence）；`mu_t_turb` 给定时原样返回（本步冻结值）。
 
-        真实 bug 修复（2026-08-29，TGV 真实复现）：人工粘性最初被直接
-        加进 `compute_viscous_residual` 里临时拼出的 `mu_t_field`，
-        `_compute_local_time_step`（cfl.py）单独调用这个方法算粘性
-        CFL 步长时完全看不到这份额外粘度——时间步长仍按"只有分子
-        粘度+湍流涡粘"来估算，而实际粘性残差里已经叠加了一份可能
-        大出物理粘度一个数量级的人工扩散，显式格式的粘性稳定性条件
-        `dt<=C*h^2/mu_eff` 被违反，真实复现：TGV（P2，Re=20 低雷诺数
-        算例，物理 mu 已经刻意调得比空气分子粘度大三个数量级）3 步内
-        发散。必须让 CFL 计算与粘性残差看到*同一个* `mu_t_field`——
-        统一在这个唯一的读取入口叠加，而不是分别在两个消费点各自
-        处理（同一类问题见项目记忆 hardcoded_molecular_viscosity_
-        mismatch/low_mach_cfl_ausm_inconsistency：任何"物理量在多个
-        消费点独立计算/获取"的模式都有两处失去同步的风险）。
+        人工粘性**不**在这里：它不走应力/传导通道（见 `compute_viscous_residual`），
+        壁面摩擦系数等后处理读这个方法时也不该把它算进去。粘性步长限制读的是
+        `_get_cfl_viscosity_field`。
         """
-        mu_t_field = (fr_solver_turbulence.get_turbulent_viscosity_field(self)
-                      if mu_t_turb is None else mu_t_turb)
-        if getattr(self, "artificial_viscosity_enabled", False):
-            from autoflowcfd.core.fr_operators.artificial_viscosity import (
-                compute_persson_peraire_artificial_viscosity,
-            )
+        return (fr_solver_turbulence.get_turbulent_viscosity_field(self)
+                if mu_t_turb is None else mu_t_turb)
 
-            epsilon_av = compute_persson_peraire_artificial_viscosity(
-                self, alpha_av=self.artificial_viscosity_alpha
-            )
-            mu_t_field = epsilon_av if mu_t_field is None else mu_t_field + epsilon_av
-        return mu_t_field
+    def _get_cfl_viscosity_field(self) -> Optional[np.ndarray]:
+        """粘性步长限制用的附加动力粘度：湍流涡粘 + `rho * nu_av`（人工粘性）。
+
+        TGV 教训（2026-08-29）：额外的扩散必须让步长控制看见，否则显式推进的
+        粘性稳定条件被违反（P2 TGV 3 步发散）。人工扩散 `div(nu grad U)` 的谱半径
+        与动力粘度 `rho*nu` 的粘性项同阶，所以按 `rho*nu` 计入。
+        """
+        mu_t = self._get_turbulent_viscosity_field()
+        nu_av = self.compute_artificial_diffusivity_field()
+        if nu_av is None:
+            return mu_t
+        mu_av = self.state.U[..., 0] * nu_av
+        return mu_av if mu_t is None else mu_t + mu_av
 
     def _compute_gradients(self) -> np.ndarray:
         """

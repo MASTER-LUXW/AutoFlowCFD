@@ -326,6 +326,10 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, _
         self.mu_molecular = solver_kwargs.get('mu_molecular', 1.8e-5)
         self._turbulence_intensity = solver_kwargs.get('turbulence_intensity', 0.01)
         self._viscosity_ratio = solver_kwargs.get('viscosity_ratio', 5.0)
+        # 问题单元人工粘性（与单机 FRSolver 同名参数、同一实现；见
+        # core/mpi/distributed_artificial_viscosity.py）
+        self.artificial_viscosity_enabled = bool(solver_kwargs.get('artificial_viscosity_enabled', False))
+        self.artificial_viscosity_alpha = float(solver_kwargs.get('artificial_viscosity_alpha', 1.0))
         if turb_model_upper in ('SST', 'DDES', 'IDDES', 'WMLES'):
             if turb_model_upper in ('SST', 'DDES', 'IDDES'):
                 from autoflowcfd.core.fr_solver.turbulence import init_turbulence_models

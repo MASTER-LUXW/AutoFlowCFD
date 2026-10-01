@@ -126,7 +126,7 @@ class _SingleMachineView:
         self._cache = np.sum(np.linalg.norm(adj, axis=-1), axis=-1)
         return self._cache
 
-    def _get_turbulent_viscosity_field(self):
+    def _get_cfl_viscosity_field(self):
         return None
 
 
@@ -230,7 +230,7 @@ class TestDistributedDtMatchesSingleMachine:
         mu_t_global = 1e-3 * (1.0 + rng.random((mesh.n_cells, n_sps)))
 
         class _ViewWithMut(_SingleMachineView):
-            def _get_turbulent_viscosity_field(self_inner):
+            def _get_cfl_viscosity_field(self_inner):
                 return mu_t_global
 
         ref = compute_local_time_step(_ViewWithMut(mesh, U, order))

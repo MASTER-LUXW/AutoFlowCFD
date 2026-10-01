@@ -110,7 +110,8 @@ class _APISolveMixin:
         phase_max_iter = phase_max_iter if phase_max_iter is not None else (config.phase_max_iter if config is not None else None)
         residual_drop_threshold = residual_drop_threshold if residual_drop_threshold is not None else (config.residual_drop_threshold if config is not None else 1e2)
         if config is not None:
-            for field in ("mu_molecular", "turbulence_intensity", "viscosity_ratio"):
+            for field in ("mu_molecular", "turbulence_intensity", "viscosity_ratio",
+                          "artificial_viscosity_enabled", "artificial_viscosity_alpha"):
                 kwargs.setdefault(field, getattr(config, field))
             # SteadyConfig.cfl_init/cfl_max -> FRSolver.cfl_start/cfl_max
             # （2026-09-07：此前这两个 config 字段从未真正接到求解器上）。
@@ -241,7 +242,8 @@ class _APISolveMixin:
         phase_max_iter = phase_max_iter if phase_max_iter is not None else (config.phase_max_iter if config is not None else None)
         residual_drop_threshold = residual_drop_threshold if residual_drop_threshold is not None else (config.residual_drop_threshold if config is not None else 1e2)
         if config is not None:
-            for field in ("mu_molecular", "turbulence_intensity", "viscosity_ratio"):
+            for field in ("mu_molecular", "turbulence_intensity", "viscosity_ratio",
+                          "artificial_viscosity_enabled", "artificial_viscosity_alpha"):
                 kwargs.setdefault(field, getattr(config, field))
             # 自适应 CFL 三元组（2026-09-17 补齐）。`TransientConfig` 此前
             # 根本没有这三个字段，所以 YAML/config 用户配置不出瞬态的 CFL

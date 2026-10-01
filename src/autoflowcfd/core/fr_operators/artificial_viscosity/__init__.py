@@ -1,5 +1,10 @@
 """
-AutoFlowCFD V2.0 - Persson-Peraire 模态传感器 + 局部人工粘性（可选能力）
+AutoFlowCFD V2.0 - 问题单元局部人工粘性（可选能力）+ Persson-Peraire 判据
+
+2026-10-01：人工粘性系数改由**熵残差判据**给出（`entropy_viscosity.py`，单元
+局部、P1 起可用；为什么不是 Persson-Peraire 或 BJ 越界比见那边模块文档的实测
+表）。Persson-Peraire 判据保留给模态滤波的 `persson` 门控。下面"背景"一节是最初
+引入 Persson-Peraire 人工粘性的缘由，作为历史保留。
 
 背景（见 ProjectFiles/V2.0/7_重大问题修复-求解稳定性.md 五、节）：本项目
 现有的两层稳定性机制——模态滤波器（fr/modal_filter.py）与残差量级异常
@@ -61,7 +66,8 @@ Galerkin Methods") 传感器的局部人工粘性——这个传感器看的不�
     sensor.py             两个 `compute_persson_peraire_sensor_native_*`
                           求值函数（坍缩族那个第三个已于 2026-09-23 随
                           坍缩棱柱基一起删除）
-    viscosity.py          斜坡映射 / troubled-cell 掩码 / 完整流水线
+    viscosity.py          Persson-Peraire 斜坡映射 / troubled-cell 掩码（滤波门控用）
+    entropy_viscosity.py  熵残差判据、人工扩散系数与守恒变量拉普拉斯残差
 
 这里只 re-export 公开名，全仓库既有的
 `from ...artificial_viscosity import X` 不用改。
@@ -75,17 +81,29 @@ from .sensor_operators import (  # noqa: F401
     DEFAULT_SENSOR_VAR_INDEX,
     SENSOR_KAPPA,
 )
+from .entropy_viscosity import (  # noqa: F401
+    ENTROPY_SENSOR_FULL,
+    ENTROPY_SENSOR_LOW,
+    artificial_diffusion_residual,
+    compute_artificial_diffusivity,
+    compute_entropy_sensor,
+    entropy_sensor_ramp,
+)
 from .viscosity import (  # noqa: F401
     compute_artificial_viscosity_ramp,
-    compute_persson_peraire_artificial_viscosity,
     compute_troubled_cell_mask,
 )
 
 __all__ = [
     "DEFAULT_SENSOR_VAR_INDEX",
     "SENSOR_KAPPA",
+    "ENTROPY_SENSOR_FULL",
+    "ENTROPY_SENSOR_LOW",
+    "artificial_diffusion_residual",
+    "compute_artificial_diffusivity",
+    "compute_entropy_sensor",
+    "entropy_sensor_ramp",
     "compute_artificial_viscosity_ramp",
-    "compute_persson_peraire_artificial_viscosity",
     "compute_persson_peraire_sensor_native_prism",
     "compute_persson_peraire_sensor_native_tet",
     "compute_troubled_cell_mask",

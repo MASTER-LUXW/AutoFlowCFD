@@ -116,6 +116,8 @@ def rebuild_distributed_solver_from_checkpoint(
     mu_molecular = physics["mu_molecular"]
     turbulence_intensity = physics["turbulence_intensity"]
     viscosity_ratio = physics["viscosity_ratio"]
+    av_kwargs = dict(artificial_viscosity_enabled=physics["artificial_viscosity_enabled"],
+                     artificial_viscosity_alpha=physics["artificial_viscosity_alpha"])
     from autoflowcfd.cli.solve.checkpoint_io.rebuild import resolve_resume_time_scheme
     scheme = resolve_resume_time_scheme(time_scheme, metadata)
 
@@ -138,6 +140,7 @@ def rebuild_distributed_solver_from_checkpoint(
             use_eikonal=False,
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            **av_kwargs,
             time_scheme=scheme,
         )
         solver = MultiGPUDistributedSolver.from_fully_distributed_package(
@@ -164,6 +167,7 @@ def rebuild_distributed_solver_from_checkpoint(
             wall_distance_source=wall_distance_source_if_needed(turbulence_model, _volume_data, False),
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            **av_kwargs,
             time_scheme=scheme.value,
         )
         # GPU 版 checkpoint 加载是求解器自身方法（见
@@ -190,6 +194,7 @@ def rebuild_distributed_solver_from_checkpoint(
             use_eikonal=False,
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            **av_kwargs,
             time_scheme=scheme,
         )
         solver = DistributedFRSolver.from_fully_distributed_package(
@@ -225,6 +230,7 @@ def rebuild_distributed_solver_from_checkpoint(
             rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
             aoa_deg=aoa_deg, aos_deg=aos_deg,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            **av_kwargs,
         )
 
         U_local, loaded_metadata, loaded_iteration = distributed_load_checkpoint(checkpoint_path, solver)

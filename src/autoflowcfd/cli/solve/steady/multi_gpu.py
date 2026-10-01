@@ -14,7 +14,8 @@ from autoflowcfd.cli.solve.helpers import load_mesh_for_solver
 def _run_multi_gpu(
     *,
     use_eikonal,
-    aoa_deg, aos_deg, cfl_max, cfl_min, cfl_start, checkpoint_interval,
+    aoa_deg, aos_deg, artificial_viscosity_alpha, artificial_viscosity_enabled,
+    cfl_max, cfl_min, cfl_start, checkpoint_interval,
     fully_distributed, gpu_device, input_file, max_iter, mu_molecular, n_ranks,
     order, output_dir, p_inf, phase_max_iter, residual_drop_threshold, rho_inf,
     skip_quality_check, surface_mesh, time_scheme, turbulence_intensity, turbulence_model,
@@ -59,6 +60,8 @@ def _run_multi_gpu(
             use_eikonal=use_eikonal,
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            artificial_viscosity_enabled=artificial_viscosity_enabled,
+            artificial_viscosity_alpha=artificial_viscosity_alpha,
             time_scheme=scheme_from_name(time_scheme),
         )
         solver = MultiGPUDistributedSolver.from_fully_distributed_package(
@@ -93,6 +96,8 @@ def _run_multi_gpu(
             # 同类。多 GPU 传统模式有自适应控制器（见 gpu_distributed.py
             # 里 _cfl_controller 构造处），必须一并透传。
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            artificial_viscosity_enabled=artificial_viscosity_enabled,
+            artificial_viscosity_alpha=artificial_viscosity_alpha,
             time_scheme=scheme_from_name(time_scheme).value,
         )
 

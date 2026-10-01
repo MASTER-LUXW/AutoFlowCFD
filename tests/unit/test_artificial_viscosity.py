@@ -19,7 +19,6 @@ from autoflowcfd.core.fr_operators.artificial_viscosity.sensor_operators import 
 )
 from autoflowcfd.core.fr_operators.artificial_viscosity import (
     compute_artificial_viscosity_ramp,
-    compute_persson_peraire_artificial_viscosity,
     compute_persson_peraire_sensor_native_prism,
     compute_persson_peraire_sensor_native_tet,
 )
@@ -189,52 +188,3 @@ class TestRampPiecewiseFormula:
         s_e = np.array([s0])
         ramp = compute_artificial_viscosity_ramp(s_e, order)
         assert abs(ramp[0] - 0.5) < 1e-12
-
-
-class TestFullPipelineWithSyntheticSolver:
-    """`compute_persson_peraire_artificial_viscosity` 端到端测试，用一个
-    最小的假 solver（namespace 模拟真实 FRSolver 接口）验证：健康
-    （常数）流场输出全零人工粘性，output 形状/量纲正确。
-    """
-
-    def test_uniform_flow_produces_zero_artificial_viscosity(self):
-        from types import SimpleNamespace
-
-        order = 2
-        # 端到端流水线拿到的是**带零填充的全局宽度** `(order+1)^3`
-        # （原生基每单元只有 `(p+1)^2(p+2)/2` 个真实自由度，其余槽位冻结
-        # 在初值），所以这里不能用"真实自由度数"。
-        n_sps = (order + 1) ** 3
-        n_cells = 6
-        Q = np.zeros((n_cells, n_sps, 5))
-        Q[:, :, 0] = 1.225  # rho
-        Q[:, :, 1] = 30.0  # u
-        Q[:, :, 4] = 101325.0  # p
-
-        mesh = SimpleNamespace(
-            n_prism_cells=3,
-            cell_volumes=np.full(n_cells, 1e-4),
-        )
-        solver = SimpleNamespace(
-            mesh=mesh,
-            state=SimpleNamespace(Q=Q),
-            current_order=order,
-            order=order,
-        )
-
-        eps = compute_persson_peraire_artificial_viscosity(solver)
-        assert eps.shape == (n_cells, n_sps)
-        assert np.all(eps == 0.0)
-
-    def test_order_0_solver_returns_zero(self):
-        from types import SimpleNamespace
-
-        n_cells, n_sps = 4, 1
-        Q = np.zeros((n_cells, n_sps, 5))
-        Q[:, :, 0] = 1.225
-        mesh = SimpleNamespace(n_prism_cells=2, cell_volumes=np.full(n_cells, 1e-4))
-        solver = SimpleNamespace(mesh=mesh, state=SimpleNamespace(Q=Q), current_order=0, order=0)
-
-        eps = compute_persson_peraire_artificial_viscosity(solver)
-        assert eps.shape == (n_cells, n_sps)
-        assert np.all(eps == 0.0)

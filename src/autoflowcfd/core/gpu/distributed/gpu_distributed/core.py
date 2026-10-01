@@ -76,6 +76,8 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
         cfl_max: Optional[float] = None,
         cfl_min: Optional[float] = None,
         wall_distance_source=None,
+        artificial_viscosity_enabled: bool = False,
+        artificial_viscosity_alpha: float = 1.0,
     ):
         """初始化多 GPU 分布式求解器。
 
@@ -93,10 +95,14 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
                 `adaptive_cfl/policy.py::build_cfl_policy`）。
             mu_molecular: 分子动力粘度
             rho_inf, vel_inf, p_inf: 自由来流条件
+            artificial_viscosity_enabled, artificial_viscosity_alpha: 问题单元人工
+                粘性（与单机 FRSolver 同名参数、同一实现）
         """
         # 壁面距离来源（core/utils/wall_distance_source.py）：与单机 CPU 同一个，
         # CLI 由体网格 WALL 边界面构造后传入；湍流模型需要壁距时必须提供
         self._wall_distance_source = wall_distance_source
+        self.artificial_viscosity_enabled = bool(artificial_viscosity_enabled)
+        self.artificial_viscosity_alpha = float(artificial_viscosity_alpha)
         self._setup_identity_and_device(
             mesh, ops, n_ranks, rank, device_id, mu_molecular,
             rho_inf, vel_inf, p_inf, aoa_deg, aos_deg, turb_model)

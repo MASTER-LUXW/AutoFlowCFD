@@ -19,7 +19,7 @@ def physics_metadata(solver) -> dict:
 
     `solver.freestream` 必须带 `rho_inf/vel_inf/p_inf`（缺失即 KeyError，
     不猜）。攻角/侧滑角缺省为 0（早于 2026-09-17 的求解器对象没有这两个键，
-    它们产生时的真实行为就是零攻角）。粘度与 Tu/VR 的缺省只为轻量替身对象
+    它们产生时的真实行为就是零攻角）。粘度、Tu/VR 与人工粘性开关的缺省只为轻量替身对象
     （单元测试）保留：全部真实求解器（单机 CPU/GPU、CPU-MPI 两种加载模式、
     多 GPU 两种加载模式）都无条件设置这三个属性。
     """
@@ -33,4 +33,8 @@ def physics_metadata(solver) -> dict:
         "mu_molecular": float(getattr(solver, "mu_molecular", 1.8e-5)),
         "turbulence_intensity": float(getattr(solver, "_turbulence_intensity", 0.01)),
         "viscosity_ratio": float(getattr(solver, "_viscosity_ratio", 5.0)),
+        # 问题单元人工粘性（2026-10-01）：启用时它是离散格式的一部分（定常解里
+        # 的 div(nu grad U) 不为零），续算必须沿用，否则会静默换成另一个离散问题。
+        "artificial_viscosity_enabled": bool(getattr(solver, "artificial_viscosity_enabled", False)),
+        "artificial_viscosity_alpha": float(getattr(solver, "artificial_viscosity_alpha", 1.0)),
     }

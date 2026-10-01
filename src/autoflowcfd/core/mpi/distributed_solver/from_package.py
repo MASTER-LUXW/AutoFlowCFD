@@ -159,6 +159,8 @@ class _DistributedFromPackageMixin:
         self.freestream = {**package['freestream'], "mach_ref": package['mach_ref']}
         self.mu_molecular = package['mu_molecular']
         self._turbulence_intensity = package.get('turbulence_intensity', 0.01)
+        self.artificial_viscosity_enabled = bool(package.get('artificial_viscosity_enabled', False))
+        self.artificial_viscosity_alpha = float(package.get('artificial_viscosity_alpha', 1.0))
         self._viscosity_ratio = package.get('viscosity_ratio', 5.0)
         self.turb_model = None
         self.turb_halo_exchange = None

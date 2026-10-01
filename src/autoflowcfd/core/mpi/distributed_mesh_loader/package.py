@@ -65,7 +65,7 @@ class PrecompactedMeshData:
         self, det_jacs, inv_jacs, jacobians_fine,
         cell_volumes, sps_coords, cell_types,
         n_prism_cells, n_points_1d, n_sps_per_cell, n_sps_per_cell_fine,
-        order, face_area=None, face_normal=None,
+        order, face_area=None, face_normal=None, local_vertex_pairs=None,
     ):
         self.n_cells = det_jacs.shape[0]  # compact（local+halo）大小
         self.n_prism_cells = n_prism_cells
@@ -101,6 +101,11 @@ class PrecompactedMeshData:
         # _DistributedFaceConnectivityView 文档。
         self.face_area = face_area
         self.face_normal = face_normal
+        # 本 rank local 单元的 `(顶点全局编号, 原生 local 下标)` 对（BJ 判据的
+        # 分布式顶点模板，见 `core/mpi/vertex_stencil_mpi.py`）。本对象不持有
+        # 单元-顶点连接，所以由 root 按 `partition.local_cells` 切好随包下发；
+        # 大小约 6 x n_local 个 int64。
+        self.local_vertex_pairs = local_vertex_pairs
 
 
 def build_fully_distributed_rank_package(
@@ -122,6 +127,8 @@ def build_fully_distributed_rank_package(
     cfl_min: Optional[float] = None,
     global_cell_colors: Optional[np.ndarray] = None,
     global_cell_colors_d2: Optional[np.ndarray] = None,
+    artificial_viscosity_enabled: bool = False,
+    artificial_viscosity_alpha: float = 1.0,
 ) -> dict:
     """Root rank 专用：为指定 rank 算好它需要的全部紧凑数据（不需要该
     rank 自己持有完整全局网格）。
@@ -212,6 +219,7 @@ def build_fully_distributed_rank_package(
     from autoflowcfd.core.mpi.partition import build_distributed_partition
     from autoflowcfd.core.mpi.distributed_flat_face import build_distributed_flat_face
     from autoflowcfd.core.mpi.distributed_turbulence import compute_distributed_wall_distance
+    from autoflowcfd.core.mpi.vertex_stencil_mpi import vertex_pairs_of_cells
 
     partition = build_distributed_partition(face_connectivity, cell_partition, rank=rank, n_ranks=n_ranks)
     dist_fc = build_distributed_flat_face(mesh, ops, partition, cell_partition=cell_partition)
@@ -258,6 +266,7 @@ def build_fully_distributed_rank_package(
         n_points_1d=mesh.n_points_1d, n_sps_per_cell=n_sps, n_sps_per_cell_fine=n_sps_fine,
         order=mesh.order,
         face_area=face_area_local, face_normal=face_normal_local,
+        local_vertex_pairs=vertex_pairs_of_cells(mesh, partition.local_cells),
     )
 
     # 边界条件：`boundary_ghost_provider_global` 只需要构建一次（root
@@ -336,6 +345,9 @@ def build_fully_distributed_rank_package(
         # 使 CLI 的 --cfl-start/--cfl-max 在完全分布式路径上被静默丢弃。
         'cfl_start': cfl_start,
         'cfl_max': cfl_max,
+        # 问题单元人工粘性开关（与单机 FRSolver 同名参数）
+        'artificial_viscosity_enabled': bool(artificial_viscosity_enabled),
+        'artificial_viscosity_alpha': float(artificial_viscosity_alpha),
         'cfl_min': cfl_min,
         'cell_colors': (None if global_cell_colors is None
                         else np.asarray(global_cell_colors)[partition.local_cells].copy()),

@@ -121,20 +121,12 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
                 `numba.get_num_threads()`，如果这个全局状态在其他地方
                 被并发修改，会破坏该约束（见两个 kernel 模块文档"多核
                 并行"一节的坑E）。
-            artificial_viscosity_enabled: 是否启用 Persson-Peraire 模态
-                传感器 + 局部人工粘性（见 core/fr_operators/
-                artificial_viscosity.py 模块文档，ProjectFiles/V2.0/
-                7_重大问题修复-求解稳定性.md 五、六节）。默认 False——
-                这是 2026-08-29 调查引入的全新、独立的可选能力，不改变
-                任何未显式启用它的现有求解路径/测试的行为。启用后在
-                `compute_viscous_residual` 里，对模态谱衰减速率超出
-                光滑函数理论预期（`1/N^4`）的单元，叠加一个局部人工
-                粘性到既有的 `mu_t_field` 通道（复用已验证的 BR1 面
-                耦合粘性通量组装，不新建独立扩散残差路径）。
-            artificial_viscosity_alpha: 人工粘性强度标定常数（无量纲，
-                默认 1.0），只在 artificial_viscosity_enabled=True 时
-                有意义，见 compute_persson_peraire_artificial_viscosity
-                文档。
+            artificial_viscosity_enabled: 是否启用问题单元人工粘性（默认 False，
+                可选能力）：熵残差判据 `(h/p) max|u_hat.grad s|` 定位数值熵产生
+                的单元，对它们叠加全部守恒变量的拉普拉斯 `div(nu grad U)`，
+                见 `core/fr_operators/artificial_viscosity/entropy_viscosity.py`。
+            artificial_viscosity_alpha: 人工粘性强度标定常数（无量纲，默认
+                1.0），`nu = ramp * alpha * |u| * h / p`。
             entropy_stable_volume_enabled: 是否在体积项过积分（over-
                 integration）分支启用 Chandrashekar (2013) 熵守恒两点
                 通量替代逐点通量代入（见 core/fr_residual/inviscid.py::

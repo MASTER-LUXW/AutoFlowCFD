@@ -58,6 +58,8 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         cfl_max: Optional[float] = None,
         cfl_min: Optional[float] = None,
         wall_distance_source=None,
+        artificial_viscosity_enabled: bool = False,
+        artificial_viscosity_alpha: float = 1.0,
     ):
         """初始化 GPU FRSolver。
 
@@ -87,6 +89,10 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
             bc_overrides: 按边界组名称覆盖 BC 类型/参数，透传给
                 build_boundary_ghost_provider（与 CPU 版 FRSolver
                 同名参数语义一致，见 fr_solver/solver.py 文档）
+            artificial_viscosity_enabled, artificial_viscosity_alpha: 问题单元
+                人工粘性（熵残差判据 + 守恒变量拉普拉斯），与 CPU 版 FRSolver
+                同名参数、同一实现（`core/fr_operators/artificial_viscosity/
+                entropy_viscosity.py`，数组模块无关）
             turb_model: 湍流模型名称，支持 NONE/SST/DDES/IDDES/WMLES/LES
                 （#7，V2.0 专家组盲审第四轮，2026-08-28，见本方法顶部
                 文档"GPU 湍流模型支持范围"一节）。请求集合之外的值时
@@ -136,6 +142,8 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         self.n_vars = n_vars
         self.device_id = device_id
         self.mu_molecular = mu_molecular
+        self.artificial_viscosity_enabled = bool(artificial_viscosity_enabled)
+        self.artificial_viscosity_alpha = float(artificial_viscosity_alpha)
         # mach_ref 的唯一来源（按 AUSM+up 预处理档钳下限）。此前这里手写一份、
         # 下限硬编码 0.1，而 CPU 自 2026-09-17 起在默认档用 0.05 —— 同一算例
         # 在 GPU 与 CPU 上拿到不同的 mach_ref（plate_demo：0.1 vs 0.0882）。

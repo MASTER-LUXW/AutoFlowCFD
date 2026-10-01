@@ -150,7 +150,7 @@ class DistributedCFLView:
     刻意只实现那 11 个被真正读取的属性（`solver.state.U.shape`/
     `solver.state.Q`/`solver.mesh.{face_connectivity,get_all_cell_volumes,
     jacobians,n_sps_per_cell}`/`solver.{mu_molecular,freestream}`/
-    `solver.{_get_metric_flux_scale,_get_turbulent_viscosity_field}`，
+    `solver.{_get_metric_flux_scale,_get_cfl_viscosity_field}`，
     以及 getattr 读取的 `_cfl_controller`/`current_order`/
     `low_mach_precond_enabled`），不做"通用 solver 替身"——属性面越小，
     上游改动时越容易被测试发现而不是静默走错分支。
@@ -228,8 +228,9 @@ class DistributedCFLView:
         self._metric_flux_scale_cache = scale
         return scale
 
-    def _get_turbulent_viscosity_field(self) -> Optional[np.ndarray]:
-        """涡粘场，按紧凑索引空间给出；halo 段用 0 填充。
+    def _get_cfl_viscosity_field(self) -> Optional[np.ndarray]:
+        """粘性步长限制用的附加动力粘度（湍流涡粘 + 人工粘性 rho*nu，由调用方
+        合成在 `mu_t_local` 里），按紧凑索引空间给出；halo 段用 0 填充。
 
         为什么 halo 段填 0 是正确的（而不是"少做了一次 halo 交换"）：
         涡粘只通过 `dt_visc = 0.25*CFL*rho*V^(2/3)/mu_eff` 进入，而那是

@@ -13,7 +13,7 @@ from autoflowcfd.cli.solve.helpers import load_mesh_for_solver
 def _run_single_gpu(
     *,
     use_eikonal,
-    aoa_deg, aos_deg, cfl_max, cfl_min, cfl_start, gpu_device, input_file, max_iter,
+    aoa_deg, aos_deg, artificial_viscosity_alpha, artificial_viscosity_enabled, cfl_max, cfl_min, cfl_start, gpu_device, input_file, max_iter,
     mu_molecular, order, output_dir, p_inf, phase_max_iter, residual_drop_threshold,
     rho_inf, skip_quality_check, surface_mesh, time_scheme, turbulence_intensity,
     turbulence_model, vel_inf, viscosity_ratio,
@@ -54,6 +54,8 @@ def _run_single_gpu(
         # 这两个 CLI 选项必须一并透传，否则又是一个"选项在 GPU 下被
         # 静默丢弃"的陷阱（与上面 turb_model 那处同类）。
         cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+        artificial_viscosity_enabled=artificial_viscosity_enabled,
+        artificial_viscosity_alpha=artificial_viscosity_alpha,
     )
 
     try:

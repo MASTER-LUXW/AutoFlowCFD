@@ -79,13 +79,15 @@ def _stub(n_local, n_sps, target):
     s._compute_turbulence_source_distributed = lambda dt: None
     s._global_residual_norm = lambda r: float(np.linalg.norm(r))
     big = np.full(n_local, 1e3)          # dtau 远大于 1/5：接近纯 Newton
-    s._compute_local_time_step_gpu = lambda return_physical_too=False: (big, big)
+    s._compute_local_time_step_gpu = lambda return_physical_too=False, nu_av_compact=None: (big, big)
+    s.compute_artificial_diffusivity_compact_gpu = lambda: None   # 人工粘性未启用
+    s.artificial_viscosity_enabled = False
     s._cfl_controller = SERCFLController()
     s._update_cfl_controller = types.MethodType(_MultiGPUTimeStepMixin._update_cfl_controller, s)
     reset_newton_state(s)
     s.U_gpu = _conservative(n_local, n_sps, np.random.default_rng(3))
 
-    def _compute_total_residual_gpu(mu_t_field=None, inviscid=True, viscous=True):
+    def _compute_total_residual_gpu(mu_t_field=None, inviscid=True, viscous=True, nu_av_compact=None):
         return -5.0 * (s.U_gpu - target)          # dU/dt（生产约定）
     s._compute_total_residual_gpu = _compute_total_residual_gpu
     return s

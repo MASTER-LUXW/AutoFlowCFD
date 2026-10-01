@@ -310,14 +310,14 @@ class TestSingleBackendDeliversBothTables:
 
         solver, owner, _neigh, _bnd, z = self._solver()
         seen = {}
-        orig = bs.compute_bounds_violation_mask
+        orig = bs.compute_bounds_violation_ratio
 
         def spy(*a, **kw):
             seen["bd"] = kw.get("bnd_dirichlet")
             seen["mir"] = kw.get("bnd_mirror_normal")
             return orig(*a, **kw)
 
-        patch_pkg_attr(monkeypatch, bs, "compute_bounds_violation_mask", spy)
+        patch_pkg_attr(monkeypatch, bs, "compute_bounds_violation_ratio", spy)
         ff = build_sensor_gated_filter_func(solver)
         f = _base()
         f[:, :, 3] = 0.3 * z + 0.05

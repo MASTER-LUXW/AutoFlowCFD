@@ -17,7 +17,14 @@ from .constants import DEFAULT_BOUNDS_ABS_FRAC, DEFAULT_BOUNDS_REL_TOL
 from .scatter import _scatter_minmax
 
 
-def compute_bounds_violation_mask(
+def compute_bounds_violation_mask(field_nodal: np.ndarray, owner_cell: np.ndarray,
+                                  neighbor_cell: np.ndarray, is_boundary: np.ndarray, **kwargs) -> np.ndarray:
+    """逐单元布尔掩码：越界比 `compute_bounds_violation_ratio(...) > 1`（同一份判据，
+    参数与语义全部见那边）。模态滤波门控用它；人工粘性用连续的越界比本身。"""
+    return compute_bounds_violation_ratio(field_nodal, owner_cell, neighbor_cell, is_boundary, **kwargs) > 1.0
+
+
+def compute_bounds_violation_ratio(
     field_nodal: np.ndarray,
     owner_cell: np.ndarray,
     neighbor_cell: np.ndarray,
@@ -33,7 +40,14 @@ def compute_bounds_violation_mask(
     n_real_tet=None,
     vertex_stencil=None,
 ) -> np.ndarray:
-    """逐单元判定"解点值越出了面邻居均值区间" —— **纯数组接口**。
+    """逐单元**越界比**：解点值越出邻域均值区间的量 / 容差 —— **纯数组接口**。
+
+        phi = max_v max( (max_sp - nb_max) / tol,  (nb_min - min_sp) / tol,  0 )
+
+    `phi > 1` 即经典判据"越出 `nb_max + tol` 或 `nb_min - tol`"（布尔掩码
+    `compute_bounds_violation_mask`）；连续值同时给出"越界多少倍容差"，供标定
+    与诊断量化（例如 2026-10-01 证实它区分不开 plate_demo 锐边热斑，见
+    `fr_operators/artificial_viscosity/entropy_viscosity.py` 模块文档）。
 
     与 `artificial_viscosity.compute_troubled_cell_mask`（Persson-Peraire）
     平行的第二个判据，接口风格刻意保持一致（纯数组、不需要 solver / ops），
@@ -166,7 +180,7 @@ def compute_bounds_violation_mask(
             "第一版用全场 RMS 做尺度为什么不行"一节。
 
     Returns:
-        (n_cells,) 布尔掩码，True = 该单元越界。
+        (n_cells,) 越界比（>= 0；> 1 即越界）。
 
     Raises:
         ValueError: 形状不自洽（不静默广播——静默广播会让一个形状 bug
@@ -310,7 +324,7 @@ def compute_bounds_violation_mask(
         dot = (m * nrm).sum(axis=1, keepdims=True)
         mir_mom = m - 2.0 * dot * nrm        # (n_mir, 3)
 
-    mask = None
+    ratio = xp.zeros(n_cells, dtype=xp.float64)
     for v in range(n_var):
         cell_mean = cell_means[:, v]
         # 邻域区间：自身均值 + 全部面邻居的均值。两个方向都要做——
@@ -343,7 +357,11 @@ def compute_bounds_violation_mask(
         else:
             scale = float(xp.sqrt(xp.mean(cell_mean.astype(xp.float64) ** 2)))
         tol = rel_tol * (nb_max - nb_min) + abs_frac * max(scale, 1e-300)
-        hit = (cell_maxs[:, v] > nb_max + tol) | (cell_mins[:, v] < nb_min - tol)
-        mask = hit if mask is None else (mask | hit)
-
-    return mask if mask is not None else xp.zeros(n_cells, dtype=bool)
+        excess = xp.maximum(cell_maxs[:, v] - nb_max, nb_min - cell_mins[:, v])
+        # 容差为零（rel_tol=abs_frac=0 的严格判据、且邻域包络塌缩）时：越界即
+        # 无穷大，未越界即 0 —— 与"越界 <=> excess > tol"的布尔定义一致。
+        pos = tol > 0.0
+        ratio = xp.maximum(ratio, xp.where(
+            pos, excess / xp.where(pos, tol, 1.0),
+            xp.where(excess > 0.0, xp.inf, 0.0)))
+    return ratio

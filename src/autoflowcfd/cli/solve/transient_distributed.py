@@ -37,6 +37,8 @@ def _solve_transient_distributed(
     cfl_min: Optional[float] = None,
     aoa_deg: float = 0.0,
     aos_deg: float = 0.0,
+    artificial_viscosity_enabled: bool = False,
+    artificial_viscosity_alpha: float = 1.0,
 ):
     """`solve transient` 的分布式分支实现。
 
@@ -65,6 +67,8 @@ def _solve_transient_distributed(
             # **100% 必现 NameError**；三个 CFL 边界则是被静默丢弃
             # （`solve steady` 的四处已于 2026-09-15 补齐，这两条漏了）。
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            artificial_viscosity_enabled=artificial_viscosity_enabled,
+            artificial_viscosity_alpha=artificial_viscosity_alpha,
             aoa_deg=aoa_deg, aos_deg=aos_deg,
         )
         return
@@ -79,6 +83,8 @@ def _solve_transient_distributed(
             init_checkpoint,
             # 同上：此前五个参数全没转发（见 multi_gpu 分支处注释）。
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            artificial_viscosity_enabled=artificial_viscosity_enabled,
+            artificial_viscosity_alpha=artificial_viscosity_alpha,
             aoa_deg=aoa_deg, aos_deg=aos_deg,
         )
         return
@@ -91,6 +97,8 @@ def _solve_transient_distributed(
         n_ranks, checkpoint_interval, reference_area, phase_max_iter, residual_drop_threshold,
         init_checkpoint,
         cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+        artificial_viscosity_enabled=artificial_viscosity_enabled,
+        artificial_viscosity_alpha=artificial_viscosity_alpha,
         aoa_deg=aoa_deg, aos_deg=aos_deg,
     )
 
@@ -108,6 +116,8 @@ def _solve_transient_cpu_traditional(
     cfl_min: Optional[float] = None,
     aoa_deg: float = 0.0,
     aos_deg: float = 0.0,
+    artificial_viscosity_enabled: bool = False,
+    artificial_viscosity_alpha: float = 1.0,
 ):
     """CPU MPI"传统模式"：每个 rank 独立加载完整网格（与 `solve steady`
     的对应分支同一套构造方式，见该文件 `elif n_ranks > 1:` 分支文档）。"""
@@ -147,6 +157,8 @@ def _solve_transient_cpu_traditional(
         # 默认值。与 `solve steady --n-ranks` 在 2026-09-15 补齐的那四处
         # 同类，瞬态这条被漏掉了。
         cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+        artificial_viscosity_enabled=artificial_viscosity_enabled,
+        artificial_viscosity_alpha=artificial_viscosity_alpha,
         aoa_deg=aoa_deg, aos_deg=aos_deg,
     )
 
@@ -214,6 +226,7 @@ def _solve_transient_fully_distributed(
     init_checkpoint=None,
     cfl_start=None, cfl_max=None, cfl_min=None,
     aoa_deg=0.0, aos_deg=0.0,
+    artificial_viscosity_enabled=False, artificial_viscosity_alpha=1.0,
 ):
     """"完全分布式加载"：只有 root rank 加载完整网格（与 `solve steady`
     的 `if fully_distributed:` 分支同一套构造方式）。DUAL_TIME
@@ -247,6 +260,8 @@ def _solve_transient_fully_distributed(
         # `build_fully_distributed_rank_package`）；不传就静默退回控制器
         # 默认值，与 `solve steady` 的同名构造点脱节。
         cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+        artificial_viscosity_enabled=artificial_viscosity_enabled,
+        artificial_viscosity_alpha=artificial_viscosity_alpha,
     )
     solver = DistributedFRSolver.from_fully_distributed_package(
         package, n_ranks=n_ranks, root_context=root_context,
@@ -311,6 +326,7 @@ def _solve_transient_multi_gpu(
     fully_distributed=False,
     cfl_start=None, cfl_max=None, cfl_min=None,
     aoa_deg=0.0, aos_deg=0.0,
+    artificial_viscosity_enabled=False, artificial_viscosity_alpha=1.0,
 ):
     """多 GPU + MPI 分布式（与 `solve steady` 的 `--multi-gpu` 分支同一套
     构造方式）。`fully_distributed`（#1，2026-09-02 补齐）：走
@@ -352,6 +368,8 @@ def _solve_transient_multi_gpu(
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
             time_scheme=time_scheme, dual_time_inner_iter=dual_time_inner_iter,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            artificial_viscosity_enabled=artificial_viscosity_enabled,
+            artificial_viscosity_alpha=artificial_viscosity_alpha,
         )
         solver = MultiGPUDistributedSolver.from_fully_distributed_package(
             package, n_ranks=n_ranks, device_id=gpu_device, root_context=root_context,
@@ -376,6 +394,8 @@ def _solve_transient_multi_gpu(
             # 前者让初场恒为零攻角，后者让用户设的 CFL 被静默丢弃。
             aoa_deg=aoa_deg, aos_deg=aos_deg,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            artificial_viscosity_enabled=artificial_viscosity_enabled,
+            artificial_viscosity_alpha=artificial_viscosity_alpha,
         )
     solver.time_integrator.dual_time_steps = dual_time_inner_iter
 

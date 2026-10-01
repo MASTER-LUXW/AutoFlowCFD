@@ -122,6 +122,9 @@ class _MultiGPUSteppingMixin:
         # 再调用既有 `_compute_total_residual_gpu`（自带 halo 交换）的
         # 残差闭包，直接复用，不需要另起一套残差组装逻辑。
         mu_t_field = None
+        # 本步冻结的问题单元人工扩散系数（compact 排列；未启用时 None），同时
+        # 进入粘性步长限制与全部粘性残差求值（与单机/CPU 分布式同一约定）
+        nu_av_compact = self.compute_artificial_diffusivity_compact_gpu()
 
         def _spatial_residual(U_flat_trial, inviscid=True, viscous=True):
             """物理残差 R（约定 dU/dt = -R）。残差组装与 halo 交换都读
@@ -132,11 +135,9 @@ class _MultiGPUSteppingMixin:
             saved_U = self.U_gpu
             self.U_gpu = U_trial
             try:
-                if inviscid and viscous:
-                    res = self._compute_total_residual_gpu(mu_t_field=mu_t_field)
-                else:
-                    res = self._compute_total_residual_gpu(
-                        mu_t_field=mu_t_field, inviscid=inviscid, viscous=viscous)
+                res = self._compute_total_residual_gpu(
+                    mu_t_field=mu_t_field, inviscid=inviscid, viscous=viscous,
+                    nu_av_compact=nu_av_compact)
             finally:
                 self.U_gpu = saved_U
             return (-res).reshape(n_local * n_sps, 5)
@@ -150,7 +151,7 @@ class _MultiGPUSteppingMixin:
 
             # 内层伪时间迭代的局部加速步长：与单机一致用局部 CFL 步长
             # （`dt` 仍然是真正的物理时间步长，通过 dt_physical= 传入）。
-            dt_mean_c = self._compute_local_time_step_gpu()
+            dt_mean_c = self._compute_local_time_step_gpu(nu_av_compact=nu_av_compact)
             dt_mean_local = dt_mean_c[self._inv_perm_gpu][:n_local]
             pseudo_dt = cp.broadcast_to(
                 dt_mean_local[:, None], (n_local, n_sps)).reshape(n_local * n_sps)
@@ -170,7 +171,7 @@ class _MultiGPUSteppingMixin:
             return residual_norm
 
         dt_mean_c, dt_phys_c = self._compute_local_time_step_gpu(
-            return_physical_too=True)
+            return_physical_too=True, nu_av_compact=nu_av_compact)
         dt_mean_local = dt_mean_c[self._inv_perm_gpu][:n_local]
         dt_flat = cp.broadcast_to(
             dt_mean_local[:, None], (n_local, n_sps)).reshape(n_local * n_sps)

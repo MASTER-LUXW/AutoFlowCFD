@@ -143,8 +143,7 @@ def compute_local_time_step(solver, return_physical_too: bool = False):
     # 但显式 FR/DG 格式的稳定性极限仍随阶数增长（微分矩阵谱半径随 p 增大），
     # 标准结果：对流项 CFL ~ 1/(2p+1)，粘性项 CFL ~ 1/(2p+1)^2。
     poly_order = getattr(solver, "current_order", 0)
-    order_factor_advective = 1.0 / (2 * poly_order + 1)
-    order_factor_viscous = 1.0 / (2 * poly_order + 1) ** 2
+    order_factor_advective = 1.0 / (2 * poly_order + 1)   # 粘性那一份在 cfl_viscous.py
 
     volumes = solver.mesh.get_all_cell_volumes()
 
@@ -200,7 +199,8 @@ def compute_local_time_step(solver, return_physical_too: bool = False):
     # 涡粘（若有）
     # dt_visc = 0.25*CFL*rho*Lc2/mu_eff，Lc2 见下方（各向异性正确的
     # `6*V^2/sum_f A_f^2`，立方体上等于 V^(2/3)）。
-    mu_t_field = solver._get_turbulent_viscosity_field()  # None 或 (n_cells,n_sps)/(n_cells,mesh_n_sps)
+    # 湍流涡粘 + 人工粘性（rho*nu_av），见 `_get_cfl_viscosity_field` 文档
+    mu_t_field = solver._get_cfl_viscosity_field()  # None 或 (n_cells,n_sps)/(n_cells,mesh_n_sps)
     mu_molecular = solver.mu_molecular
     if mu_t_field is not None:
         if mu_t_field.shape[1] != n_sps:
@@ -246,14 +246,10 @@ def compute_local_time_step(solver, return_physical_too: bool = False):
     # `sum_f A_f^2` 被两个封盖主导、趋于常数，于是新值 ~ 3*dy^2 而旧值
     # ~ (A_cap*dy)^(2/3)，比值按 `dy^(-4/3)` 增长 —— dy=1e-6 量级时高估
     # 三个数量级以上。这就是"本算例不咬人、真实网格会咬"的根据。
-    sum_face_area_sq = np.zeros(n_cells, dtype=np.float64)
-    np.add.at(sum_face_area_sq, owner_cells, face_areas * face_areas)
-    if np.any(internal):
-        np.add.at(sum_face_area_sq, neighbor_cells[internal],
-                  face_areas[internal] * face_areas[internal])
-    Lc2 = (6.0 * volumes * volumes
-           / np.maximum(sum_face_area_sq, 1e-300))
-    Lc2_expanded = np.tile(Lc2[:, np.newaxis], (1, n_sps))
+    # 公式本身在 `cfl_viscous.py`（CPU 与 GPU 后端共用一份）。
+    from .cfl_viscous import viscous_length_scale_sq, viscous_time_step_limit
+
+    Lc2 = viscous_length_scale_sq(volumes, owner_cells, neighbor_cells, is_bnd, face_areas)
     # **IP 罚项的刚性必须折进来**（2026-09-23，与内部面罚项同批）：
     # 罚项对粘性算子谱半径的贡献是 `c_ip*mu/h * A_f/V ~ c_ip*mu*A_f^2/V^2`，
     # 与基础扩散项 `mu/h^2` 同阶、只差一个 `c_ip` 量级的因子。实测拟合
@@ -272,12 +268,7 @@ def compute_local_time_step(solver, return_physical_too: bool = False):
     # 在折进罚项刚性之后仍然**一个单元都不是约束方**（最坏单元 dt_visc
     # 1.466e-07 vs 最坏 dt_adv 1.612e-09，余量 91 倍），全场 dt 由声学
     # 对流限制定在 4.9e-08。折进去是纯安全margin，不牺牲收敛速度。
-    from autoflowcfd.core.fr_operators.flux_kernels import (
-        resolve_viscous_ip_constant,
-    )
-    _ip_stiffness = 1.0 + 3.0 * resolve_viscous_ip_constant(poly_order)
-    dt_visc = (0.25 * CFL * order_factor_viscous * rho * Lc2_expanded
-               / np.maximum(mu_eff * _ip_stiffness, 1e-30))
+    dt_visc = viscous_time_step_limit(rho, Lc2[:, np.newaxis], mu_eff, CFL, poly_order)
 
     metric_flux_scale = solver._get_metric_flux_scale()  # (n_cells,n_sps)
     det_jacs = solver.mesh.jacobians["det_jacs"].reshape(n_cells, solver.mesh.n_sps_per_cell)

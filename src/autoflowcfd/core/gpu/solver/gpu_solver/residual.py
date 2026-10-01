@@ -113,12 +113,14 @@ class _GPUSolverResidualMixin:
                 mach_ref=self.freestream["mach_ref"],
             )
 
-    def compute_viscous_residual_gpu(self, U_trial=None, mu_t_field=None):
+    def compute_viscous_residual_gpu(self, U_trial=None, mu_t_field=None, nu_av=None):
         """GPU 计算粘性残差。
 
         Args:
             U_trial: CuPy 数组（可选）
             mu_t_field: 湍流涡粘度 rho*nu_t (n_cells, n_sps) CuPy 数组（可选）
+            nu_av: 本步冻结的问题单元人工扩散系数（运动粘度，可选）；给出时叠加
+                `div(nu grad U)`，与 CPU `FRSolver.compute_viscous_residual` 同一项
 
         Returns:
             viscous_residual: CuPy 数组 (n_cells, n_sps, 5)
@@ -148,4 +150,49 @@ class _GPUSolverResidualMixin:
             if wall_stress_correction is not None:
                 res = res + wall_stress_correction[..., : res.shape[-1]]
 
+        if nu_av is not None:
+            res = res + self._artificial_diffusion_residual_gpu(U, nu_av)[..., : res.shape[-1]]
+
         return res
+
+    def compute_artificial_diffusivity_field_gpu(self, U=None):
+        """问题单元人工扩散系数 nu (n_cells, n_sps)（运动粘度）；未启用返回 None。
+
+        与 CPU `FRSolver.compute_artificial_diffusivity_field` 同一个函数，梯度用
+        GPU 的单元内物理梯度。
+        """
+        if not self.artificial_viscosity_enabled:
+            return None
+        from autoflowcfd.core.fr_operators.artificial_viscosity import (
+            compute_artificial_diffusivity,
+        )
+        from autoflowcfd.core.gpu.residual.gpu_gradients import (
+            compute_physical_scalar_gradient_gpu,
+        )
+
+        cp = get_cupy()
+        U = self.U_gpu if U is None else U
+        n_cells = U.shape[0]
+        return compute_artificial_diffusivity(
+            U, int(self.current_order), self._cell_volumes_gpu(),
+            cp.arange(n_cells) < int(self.mesh.n_prism_cells),
+            lambda phi: compute_physical_scalar_gradient_gpu(phi, self.mesh_data, self.ops_data),
+            alpha_av=self.artificial_viscosity_alpha)
+
+    def _artificial_diffusion_residual_gpu(self, U, nu_av):
+        """`div(nu grad U_k)`，k = 0..4（GPU 标量扩散装配，与 CPU 逐项对应）。"""
+        from autoflowcfd.core.fr_operators.artificial_viscosity import (
+            artificial_diffusion_residual,
+        )
+        from autoflowcfd.core.fr_operators.flux_kernels import resolve_viscous_ip_constant
+        from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport.residual import (
+            compute_scalar_diffusion_residual_gpu,
+        )
+
+        n_cells, n_sps = U.shape[0], U.shape[1]
+        c_ip = resolve_viscous_ip_constant(int(self.current_order))
+        return artificial_diffusion_residual(
+            U, nu_av,
+            lambda phi, gamma: compute_scalar_diffusion_residual_gpu(
+                phi, gamma, self.mesh_data, self.ops_data, self.flat_face_gpu,
+                n_cells, int(self.mesh.n_prism_cells), n_sps, c_ip=c_ip))

@@ -82,7 +82,7 @@ Barth-Jespersen 型：一个单元"可疑"当且仅当它的解点值**超出了
 
 ## 施加方式与守恒性
 
-本模块只产出布尔掩码，不施加任何操作。消费方是
+本模块只产出判据（连续越界比与布尔掩码），不施加任何操作。消费方是
 `core/fr_solver/filter.py::build_sensor_gated_filter_func_arrays`——它对
 被标记单元施加完整的模态滤波矩阵、其余单元完全不动。在 P1 上这等价于
 **把被标记单元局部降到 P0**（troubled-cell 降阶，标准做法）：常数不可能
@@ -105,6 +105,7 @@ Barth-Jespersen 型：一个单元"可疑"当且仅当它的解点值**超出了
 
     scatter.py           按面把邻居极值散射累加到单元（BJ 包络的底层归约）
     mask.py              BJ 型越界判据：解点值超出顶点邻域极值区间即标记
+    evaluator.py         后端无关求值器（真实槽位/行类型/边界表/halo）
 
 本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
 """
@@ -118,6 +119,10 @@ from .scatter import (  # noqa: F401
 )
 from .mask import (  # noqa: F401
     compute_bounds_violation_mask,
+    compute_bounds_violation_ratio,
+)
+from .evaluator import (  # noqa: F401
+    make_bounds_ratio_evaluator,
 )
 
 
@@ -131,4 +136,6 @@ __all__ = [
     "DEFAULT_BOUNDS_ABS_FRAC",
     "DEFAULT_BOUNDS_REL_TOL",
     "compute_bounds_violation_mask",
+    "compute_bounds_violation_ratio",
+    "make_bounds_ratio_evaluator",
 ]

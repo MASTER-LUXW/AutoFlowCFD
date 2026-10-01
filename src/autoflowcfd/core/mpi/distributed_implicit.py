@@ -95,7 +95,8 @@ def distributed_mean_flow_assembler(solver, physics, *, order: int, mu_t_compact
     from autoflowcfd.core.fr_residual.jacobian.backend import MeanFlowBlockAssembler, unsupported_reason
     from autoflowcfd.core.mpi.distributed_compute import DistributedMeshAdapter
 
-    if unsupported_reason(order=order, wmles=getattr(solver, "wmles_model", None) is not None):
+    if unsupported_reason(order=order, wmles=getattr(solver, "wmles_model", None) is not None,
+                          artificial_viscosity=solver.artificial_viscosity_enabled):
         return None
     dist_fc = solver.dist_flat_face
     n_local = int(solver.partition.n_local_cells)

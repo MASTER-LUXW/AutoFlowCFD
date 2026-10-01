@@ -12,7 +12,7 @@ from autoflowcfd.core.gpu.gpu_time_integration import compute_local_cfl_step_gpu
 class _MultiGPUTimeStepMixin:
     """局部时间步长、当前 CFL 与自适应控制器的全局更新。"""
 
-    def _compute_local_time_step_gpu(self, return_physical_too: bool = False):
+    def _compute_local_time_step_gpu(self, return_physical_too: bool = False, nu_av_compact=None):
         """逐单元局部 CFL 步长（2026-09-14 重写）。
 
         **这个方法此前是坏的，而且坏在两处**，只是从未被 `step()` 调用过
@@ -90,6 +90,15 @@ class _MultiGPUTimeStepMixin:
         n_compact = self.U_gpu.shape[0]
         n_sps = self.U_gpu.shape[1]
         precond = getattr(self, "low_mach_precond_enabled", False)
+
+        # 粘性限制：有效粘度（compact 排列）与各向异性长度尺度，公式与 CPU 同一个
+        # 函数（`core/fr_solver/cfl_viscous.py`）。2026-10-01 以前这里不传 mu_eff，
+        # 粘性限制整段不生效；阶数也误读了 `self.order` 而非当前阶数。
+        from autoflowcfd.core.fr_solver.cfl_viscous import viscous_length_scale_sq
+        visc_Lc2 = viscous_length_scale_sq(cell_volumes, owner_cell, neighbor_cell,
+                                           is_boundary, areas_gpu)
+        mu_eff = self._effective_viscosity_compact_gpu(nu_av_compact)
+        poly_order = int(getattr(self, "current_order", self.order))
         dt_all = cp.zeros((n_compact, n_sps), dtype=cp.float64)
         dt_phys_all = cp.zeros((n_compact, n_sps), dtype=cp.float64) if precond else None
 
@@ -104,7 +113,8 @@ class _MultiGPUTimeStepMixin:
                 normals_gpu, areas_gpu,
                 None, None,
                 cfl=self._current_cfl(),
-                poly_order=getattr(self, "order", 0),
+                mu_eff=mu_eff[:, sp], visc_Lc2=visc_Lc2,
+                poly_order=poly_order,
                 det_jacs_sp=det_sp,
                 metric_flux_scale_sp=mfs_sp,
                 mach_ref=(self.freestream["mach_ref"] if precond else None),
@@ -146,6 +156,28 @@ class _MultiGPUTimeStepMixin:
         dt_phys = (reduce_per_cell_over_real_sps(
             dt_phys_all, _np_cells, _p, 'min', xp=cp) if precond else dt_mean)
         return dt_mean, dt_phys
+
+    def _effective_viscosity_compact_gpu(self, nu_av_compact=None):
+        """有效动力粘度，compact 排列 (n_compact, n_sps)：分子 + 当前湍流/SGS 涡粘
+        + 人工粘性 `rho*nu_av`。
+
+        湍流取模型上当前（上一步写回）的 nu_t、密度取当前状态，与 CPU `cfl.py`
+        同一时序；湍流的 local 段经 halo 交换后重排到 compact（与 DES 长度尺度
+        同一处理）。
+        """
+        cp = get_cupy()
+        mu_local = cp.full(self.U_gpu.shape[:2], float(self.mu_molecular))
+        model = getattr(self, "turb_model_gpu", None)
+        if model is not None:
+            mu_local = mu_local + self.U_gpu[:, :, 0] * model.nu_t
+        mu_c = self._permute_to_compact(
+            self.gpu_halo.exchange(cp.ascontiguousarray(mu_local[:, :, None])))[:, :, 0]
+        if model is None and getattr(self, "sgs_model_gpu", None) is not None:
+            mu_c = mu_c + self._les_mu_t_compact()
+        if nu_av_compact is not None:
+            rho_c = self._permute_to_compact(self.gpu_halo.exchange(self.U_gpu))[:, :, 0]
+            mu_c = mu_c + rho_c * nu_av_compact
+        return mu_c
 
     def _current_cfl(self) -> float:
         """当前 CFL 数：有自适应控制器时用它，否则退回固定值。

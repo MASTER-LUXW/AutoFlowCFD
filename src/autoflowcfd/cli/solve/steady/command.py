@@ -139,12 +139,13 @@ from .cpu_single import _run_cpu_single
               help='从 YAML 文件读取物理常量默认值（mu_molecular/rho_inf/vel_inf/p_inf/'
                    'turbulence_intensity/viscosity_ratio）；显式传入的同名 --xxx 选项优先于此文件')
 @click.option('--artificial-viscosity', 'artificial_viscosity_enabled', is_flag=True,
-              help='启用 Persson-Peraire 模态传感器 + 局部人工粘性（2026-08-29 新增，默认关闭，'
-                   '见 core/fr_operators/artificial_viscosity.py 与 ProjectFiles/V2.0/'
-                   '7_重大问题修复-求解稳定性.md）。用解本身的模态谱衰减速率（而非残差量级）'
-                   '判断单元是否欠分辨率，只对触发传感器的单元叠加局部人工粘性')
+              help='启用问题单元人工粘性（默认关闭，全部后端可用）：熵残差判据 '
+                   '(h/p)·max|û·∇s| 定位数值熵产生的单元（P1 起有效），只对它们叠加全部'
+                   '守恒变量的拉普拉斯 div(ν∇U)，见 core/fr_operators/artificial_viscosity/'
+                   'entropy_viscosity.py。设置写入 checkpoint，续算沿用')
 @click.option('--av-alpha', 'artificial_viscosity_alpha', type=float, default=1.0,
-              help='人工粘性强度标定常数（无量纲，默认1.0），只在 --artificial-viscosity 时有意义')
+              help='人工粘性强度标定常数（无量纲，默认1.0，ν = 斜坡·alpha·|u|·h/p），'
+                   '只在 --artificial-viscosity 时有意义')
 @click.option('--entropy-stable-volume', 'entropy_stable_volume_enabled', is_flag=True,
               help='体积项过积分分支启用 Chandrashekar (2013) 熵守恒两点通量替代逐点通量代入'
                    '（2026-08-30 新增，默认关闭，见 core/fr_operators/flux_kernels.py::'
@@ -229,6 +230,8 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
         _run_multi_gpu(
             use_eikonal=use_eikonal,
             aoa_deg=aoa_deg,
+            artificial_viscosity_alpha=artificial_viscosity_alpha,
+            artificial_viscosity_enabled=artificial_viscosity_enabled,
             aos_deg=aos_deg,
             cfl_max=cfl_max,
             cfl_min=cfl_min,
@@ -258,6 +261,8 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
         _run_single_gpu(
             use_eikonal=use_eikonal,
             aoa_deg=aoa_deg,
+            artificial_viscosity_alpha=artificial_viscosity_alpha,
+            artificial_viscosity_enabled=artificial_viscosity_enabled,
             aos_deg=aos_deg,
             cfl_max=cfl_max,
             cfl_min=cfl_min,
@@ -284,6 +289,8 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
         _run_cpu_mpi(
             use_eikonal=use_eikonal,
             aoa_deg=aoa_deg,
+            artificial_viscosity_alpha=artificial_viscosity_alpha,
+            artificial_viscosity_enabled=artificial_viscosity_enabled,
             aos_deg=aos_deg,
             backend=backend,
             cfl_max=cfl_max,

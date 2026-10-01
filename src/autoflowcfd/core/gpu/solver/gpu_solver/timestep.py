@@ -18,8 +18,11 @@ from autoflowcfd.core.gpu.gpu_time_integration import (
 class _GPUSolverTimeStepMixin:
     """单机 GPU 的局部时间步长与当前 CFL"""
 
-    def _compute_local_time_step_gpu(self, return_physical_too: bool = False):
+    def _compute_local_time_step_gpu(self, return_physical_too: bool = False, nu_av=None):
         """GPU 计算局部 CFL 时间步长（使用所有 SP 的谱半径）。
+
+        `nu_av`：本步冻结的人工扩散系数（运动粘度，未启用时 None），按 `rho*nu`
+        计入粘性限制的有效粘度（与 CPU `_get_cfl_viscosity_field` 同一口径）。
 
         `return_physical_too=True` 时额外返回"用物理波速算出的"那一份：
         启用低马赫数预处理时平均流的 dt 按预处理波速放大，而湍流标量
@@ -48,9 +51,7 @@ class _GPUSolverTimeStepMixin:
         normals_gpu = cp.asarray(normal)
         areas_gpu = cp.asarray(area_w)
 
-        cell_volumes = self.mesh_data.get('cell_volumes')
-        if cell_volumes is None:
-            cell_volumes = cp.asarray(self.mesh.get_all_cell_volumes())
+        cell_volumes = self._cell_volumes_gpu()
 
         # 几何/度量 CFL 限制所需数据（与 CPU 侧 cfl.py 的 dt_geometric
         # 同一机制，见 compute_local_cfl_step_gpu 参数文档）：det_jacs 已
@@ -75,6 +76,17 @@ class _GPUSolverTimeStepMixin:
             metric_flux_scale_gpu = cp.sum(adj_row_norms, axis=-1)  # (n_cells,n_sps)
             self._metric_flux_scale_gpu_cache = metric_flux_scale_gpu
 
+        # 粘性限制：有效粘度（分子 + 湍流涡粘 + 人工粘性）与各向异性长度尺度，
+        # 公式与 CPU 同一个函数（`core/fr_solver/cfl_viscous.py`）。2026-10-01
+        # 以前这里不传 mu_eff，粘性限制整段不生效。
+        from autoflowcfd.core.fr_solver.cfl_viscous import viscous_length_scale_sq
+        visc_Lc2 = viscous_length_scale_sq(cell_volumes, owner_cell, neighbor_cell,
+                                           is_boundary, cp.asarray(fc.area))
+        mu_eff = self._effective_viscosity_gpu(nu_av)
+        # 当前阶数（Order Continuation 期间与目标阶数不同；此前误读 `self.order`）
+        _co = getattr(self, "current_order", None)
+        poly_order = int(self.order if _co is None else _co)
+
         # 使用所有 SP 计算谱半径（取最大值），而非仅 SP0
         # 对每个 SP 独立计算 CFL 步长，然后取 cell 内最小值
         dt_all_sps = cp.zeros((n_cells, n_sps), dtype=cp.float64)
@@ -93,7 +105,8 @@ class _GPUSolverTimeStepMixin:
                 normals_gpu, areas_gpu,
                 None, None,
                 cfl=self._current_cfl(),
-                poly_order=getattr(self, "order", 0),
+                mu_eff=mu_eff[:, sp], visc_Lc2=visc_Lc2,
+                poly_order=poly_order,
                 det_jacs_sp=det_jacs_sp,
                 metric_flux_scale_sp=metric_flux_scale_sp,
                 mach_ref=(self.freestream["mach_ref"] if precond else None),
@@ -134,6 +147,26 @@ class _GPUSolverTimeStepMixin:
         dt_phys = (reduce_per_cell_over_real_sps(
             dt_phys_all_sps, _np_cells, _p, 'min', xp=cp) if precond else dt_mean)
         return dt_mean, dt_phys
+
+    def _cell_volumes_gpu(self):
+        """单元体积（显存常驻的那份；网格数据没上传它时现传一份）。"""
+        vol = self.mesh_data.get('cell_volumes')
+        return vol if vol is not None else get_cupy().asarray(self.mesh.get_all_cell_volumes())
+
+    def _effective_viscosity_gpu(self, nu_av=None):
+        """有效动力粘度 (n_cells, n_sps)：分子 + 当前湍流/SGS 涡粘 + 人工粘性 `rho*nu_av`。
+
+        与 CPU `cfl.py` 同一时序：湍流取当前（上一步更新后）的场、密度取当前状态。
+        """
+        cp = get_cupy()
+        mu = cp.full(self.Q_gpu.shape[:2], float(self.mu_molecular))
+        if getattr(self, "turb_model_gpu", None) is not None:
+            mu = mu + self._turbulent_mu_t_gpu()
+        elif getattr(self, "sgs_model_gpu", None) is not None and self.sgs_model_gpu.nu_t is not None:
+            mu = mu + self.Q_gpu[:, :, 0] * self.sgs_model_gpu.nu_t
+        if nu_av is not None:
+            mu = mu + self.U_gpu[:, :, 0] * nu_av
+        return mu
 
     def _current_cfl(self) -> float:
         """当前 CFL 数：有自适应控制器时用它，否则退回固定值。

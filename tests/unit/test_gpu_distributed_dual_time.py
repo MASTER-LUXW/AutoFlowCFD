@@ -102,10 +102,12 @@ def _make_stub(n_local, n_sps, n_vars, target):
     # （只要 DUAL_TIME 收敛，U_gpu 必须收敛到 target，是纯不动点性质）。
     _PSEUDO_DT = 1.0e-3
 
-    def _compute_local_time_step_gpu(return_physical_too: bool = False):
+    def _compute_local_time_step_gpu(return_physical_too: bool = False, nu_av_compact=None):
         arr = np.full(n_local, _PSEUDO_DT)
         return (arr, arr) if return_physical_too else arr
     stub._compute_local_time_step_gpu = _compute_local_time_step_gpu
+    # 人工粘性未启用（step() 每步开头求一次冻结系数）
+    stub.compute_artificial_diffusivity_compact_gpu = lambda: None
     # 紧凑<->原生排列置换：本 stub 只有 local（无 halo）、且不做"棱柱在前"
     # 重排，所以是恒等置换。
     stub._inv_perm_gpu = np.arange(n_local)
@@ -123,7 +125,7 @@ def _make_stub(n_local, n_sps, n_vars, target):
         return None
     stub._compute_turbulence_source_distributed = _compute_turbulence_source_distributed
 
-    def _compute_total_residual_gpu(mu_t_field=None):
+    def _compute_total_residual_gpu(mu_t_field=None, inviscid=True, viscous=True, nu_av_compact=None):
         calls["count"] += 1
         # 与生产同一约定：`compute_*_residual_fr_gpu` 返回的是 **dU/dt**
         # （CPU/GPU 交叉验证测试直接把它与 CPU `compute_inviscid_residual_fr`

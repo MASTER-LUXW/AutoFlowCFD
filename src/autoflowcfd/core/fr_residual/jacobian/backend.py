@@ -43,7 +43,7 @@ def unsupported_reason(*, order: int, entropy_stable_volume: bool = False,
     if entropy_stable_volume:
         return "熵稳定两点通量体积项"
     if artificial_viscosity:
-        return "Persson-Peraire 人工粘性（粘度随状态变化、带质量扩散通道）"
+        return "问题单元人工粘性的质量扩散通道（系数按步冻结，mu_t 通道已覆盖，质量扩散未线性化）"
     if wmles:
         return "WMLES 壁面应力修正"
     return None

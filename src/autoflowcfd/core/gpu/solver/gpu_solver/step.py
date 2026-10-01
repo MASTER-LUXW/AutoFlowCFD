@@ -55,6 +55,9 @@ class _GPUSolverStepMixin:
 
         self._update_primitives_gpu()
         scheme = self.time_integrator.scheme
+        # 本步冻结的问题单元人工扩散系数（与 CPU step.py 同一算子分裂约定；
+        # 未启用时 None），同时进入粘性步长限制与全部粘性残差求值
+        nu_av = self.compute_artificial_diffusivity_field_gpu()
 
         # 局部 CFL 步长。启用低马赫数预处理时 dt_local 是**预处理后**的
         # 平均流步长（按 |un|+c_precond 取），dt_physical 是按物理波速那
@@ -65,7 +68,7 @@ class _GPUSolverStepMixin:
             # 必然失稳，见 fr_solver/turbulence/implicit.py），平均流再用更新
             # 后的涡粘做它的 Newton 步。
             dt_local, dt_physical = self._compute_local_time_step_gpu(
-                return_physical_too=True)
+                return_physical_too=True, nu_av=nu_av)
             if (self.turb_model_gpu is not None
                     and self.turb_model_name.upper() in IMPLICIT_TURBULENCE_MODELS):
                 # 伪时间步长用平均流那一份（见 step_turbulence_newton 的 dtau 参数文档）
@@ -80,7 +83,7 @@ class _GPUSolverStepMixin:
             # 再在当前状态下求湍流源项（算子分裂）。湍流步长的规则见
             # compute_turbulence_source_gpu 文档
             dt_local, dt_physical = self._compute_local_time_step_gpu(
-                return_physical_too=True)
+                return_physical_too=True, nu_av=nu_av)
             turb_dt = dt if scheme == TimeIntegrationScheme.DUAL_TIME else dt_physical[:, None]
             mu_t_field = self.compute_turbulence_source_gpu(turb_dt)
         dt_local_full = cp.broadcast_to(
@@ -101,7 +104,7 @@ class _GPUSolverStepMixin:
             """
             U_trial = U_flat_trial.reshape(n_cells, n_sps, self.n_vars)
             inv_res = self.compute_inviscid_residual_gpu(U_trial)
-            visc_res = self.compute_viscous_residual_gpu(U_trial, mu_t_field=mu_t_field)
+            visc_res = self.compute_viscous_residual_gpu(U_trial, mu_t_field=mu_t_field, nu_av=nu_av)
             total = inv_res + visc_res
             return -total
 
@@ -165,7 +168,8 @@ class _GPUSolverStepMixin:
                            else self.current_order)
             # 解析单元块在主机上装配（与 CPU 同一份实现），块由缓存上传
             block_assembler = None if unsupported_reason(
-                order=order_nk, wmles=getattr(self, "wmles_model", None) is not None
+                order=order_nk, wmles=getattr(self, "wmles_model", None) is not None,
+                artificial_viscosity=self.artificial_viscosity_enabled,
             ) else MeanFlowBlockAssembler(
                 mesh=self.mesh, ops=self.ops, ghost_provider=self.boundary_ghost_provider,
                 mu=self.mu_molecular, mach_ref=self.freestream["mach_ref"],
@@ -203,7 +207,7 @@ class _GPUSolverStepMixin:
 
             def diffusive_residual_only(U_flat_trial):
                 U_trial = U_flat_trial.reshape(n_cells, n_sps, self.n_vars)
-                visc_res = self.compute_viscous_residual_gpu(U_trial, mu_t_field=mu_t_field)
+                visc_res = self.compute_viscous_residual_gpu(U_trial, mu_t_field=mu_t_field, nu_av=nu_av)
                 return -visc_res.reshape(n_cells * n_sps, self.n_vars)
 
             U_new_flat = self.time_integrator.step_imex(

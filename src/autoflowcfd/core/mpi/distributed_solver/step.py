@@ -160,8 +160,22 @@ class _DistributedStepMixin:
         cell_is_prism = native_cell_is_prism(dist_fc)[:n_local]
         order_now = int(getattr(self, "current_order", self.order))
         U_local_now = self.state.get_local_U()
+        # 本步冻结的问题单元人工扩散系数（compact 排列，与单机 step.py 同一算子
+        # 分裂约定；未启用时 None）。粘性步长限制按 rho*nu 计入（单机
+        # `_get_cfl_viscosity_field` 同一口径）。
+        nu_av_compact = None
+        mu_cfl_local = self._prev_mu_t_local
+        if self.artificial_viscosity_enabled:
+            from autoflowcfd.core.mpi.distributed_artificial_viscosity import (
+                distributed_artificial_diffusivity, local_from_compact,
+            )
+            nu_av_compact = distributed_artificial_diffusivity(
+                U_local_now[..., :5], self.partition, self.halo_exchange, dist_fc, self.mesh, self.ops,
+                order=order_now, alpha_av=self.artificial_viscosity_alpha)
+            mu_av_local = U_local_now[..., 0] * local_from_compact(nu_av_compact, dist_fc, n_local)
+            mu_cfl_local = mu_av_local if mu_cfl_local is None else mu_cfl_local + mu_av_local
         dt_mean_local, dt_phys_local = self._compute_distributed_local_time_step(
-            U_local_now, mu_t_local=self._prev_mu_t_local, return_physical_too=True,
+            U_local_now, mu_t_local=mu_cfl_local, return_physical_too=True,
         )
 
         mu_t_field_compact = None
@@ -228,8 +242,8 @@ class _DistributedStepMixin:
             )
 
         def _viscous_dudt(U_stage_local: np.ndarray) -> np.ndarray:
-            """粘性（含湍流涡粘耦合）dU/dt（含本 stage 的 halo 交换）。"""
-            return distributed_compute_viscous_residual(
+            """粘性（含湍流涡粘耦合与问题单元人工扩散）dU/dt（含本 stage 的 halo 交换）。"""
+            dudt = distributed_compute_viscous_residual(
                 U_stage_local, self.partition, self.halo_exchange,
                 self.dist_flat_face, self.mesh, self.ops,
                 mu, boundary_ghost_provider,
@@ -237,6 +251,14 @@ class _DistributedStepMixin:
                 wmles_model=self.wmles_model,
                 wall_distance_compact=self.wall_distance_compact,
             )
+            if nu_av_compact is not None:
+                from autoflowcfd.core.mpi.distributed_artificial_viscosity import (
+                    distributed_artificial_diffusion_dudt,
+                )
+                dudt = dudt + distributed_artificial_diffusion_dudt(
+                    U_stage_local, nu_av_compact, self.partition, self.halo_exchange,
+                    self.dist_flat_face, self.mesh, self.ops)
+            return dudt
 
         def residual_func_raw(U_flat_trial: np.ndarray) -> np.ndarray:
             """未经预处理的物理残差（TimeIntegrator 约定 dU/dt = -R）。RK3 每个

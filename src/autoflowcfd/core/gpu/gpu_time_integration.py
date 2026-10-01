@@ -27,7 +27,7 @@ from autoflowcfd.core.time_integration.base import TimeIntegrator, scheme_from_n
 def compute_local_cfl_step_gpu(
     U, cell_volumes, owner_cell, neighbor_cell, is_boundary,
     normals, areas, cell_owner, cell_areas,
-    cfl: float = 1.0, mu_eff=None, poly_order: int = 0,
+    cfl: float = 1.0, mu_eff=None, visc_Lc2=None, poly_order: int = 0,
     det_jacs_sp=None, metric_flux_scale_sp=None,
     mach_ref=None, return_physical_too: bool = False,
 ):
@@ -54,7 +54,11 @@ def compute_local_cfl_step_gpu(
         cell_owner: 边界面 → cell 映射
         cell_areas: 边界面面积
         cfl: CFL 数
-        mu_eff: 有效粘度（可选）
+        mu_eff: 本 SP 的有效动力粘度 (n_cells,)（分子 + 湍流涡粘 + 人工粘性）；
+            给出时必须同时给 `visc_Lc2`，粘性限制与 CPU 同一公式
+            （`core/fr_solver/cfl_viscous.py`）
+        visc_Lc2: 逐单元粘性长度尺度平方 `6V^2/sum_f A_f^2` (n_cells,)
+            （`cfl_viscous.viscous_length_scale_sq`，每步算一次、各 SP 共用）
         poly_order: 当前多项式阶数，用于 1/(2p+1) 的阶数相关收紧，
             与 CPU 侧 cfl.py::compute_local_time_step 的
             order_factor_advective/order_factor_viscous 同一公式。
@@ -119,7 +123,9 @@ def compute_local_cfl_step_gpu(
     # 阶数相关收紧（与 CPU 侧 cfl.py 同一公式）：显式 FR 格式的对流/
     # 粘性稳定极限随阶数衰减，对流 ~1/(2p+1)、粘性 ~1/(2p+1)^2。
     order_factor_advective = 1.0 / (2 * poly_order + 1)
-    order_factor_viscous = order_factor_advective ** 2
+    if (mu_eff is None) != (visc_Lc2 is None):
+        raise ValueError("mu_eff 与 visc_Lc2 必须同时给出（粘性限制需要两者）")
+    from autoflowcfd.core.fr_solver.cfl_viscous import viscous_time_step_limit
 
     # 谱半径累加
     spectral = cp.zeros(n_cells, dtype=cp.float64)
@@ -149,10 +155,10 @@ def compute_local_cfl_step_gpu(
     spectral = cp.maximum(spectral, 1e-30)
     dt = cfl * order_factor_advective * cell_volumes / spectral
 
-    # 粘性限制（阶数收紧与 CPU 侧 cfl.py 同一公式）
-    if mu_eff is not None:
-        Lc2 = cell_volumes ** (2.0 / 3.0)
-        dt_visc = 0.25 * cfl * order_factor_viscous * rho * Lc2 / cp.maximum(mu_eff, 1e-30)
+    # 粘性限制：与 CPU 同一个函数（各向异性长度尺度 + IP 罚项刚性 + 阶数收紧）
+    dt_visc = (viscous_time_step_limit(rho, visc_Lc2, mu_eff, cfl, poly_order)
+               if mu_eff is not None else None)
+    if dt_visc is not None:
         dt = cp.minimum(dt, dt_visc)
 
     # 几何/度量 CFL 限制（与 CPU 侧 cfl.py::compute_local_time_step 的
@@ -184,12 +190,8 @@ def compute_local_cfl_step_gpu(
     spectral_p = cp.maximum(spectral_p, 1e-30)
     dt_mean = cfl * order_factor_advective * cell_volumes / spectral_p
 
-    if mu_eff is not None:
-        Lc2 = cell_volumes ** (2.0 / 3.0)
-        dt_mean = cp.minimum(
-            dt_mean,
-            0.25 * cfl * order_factor_viscous * rho * Lc2 / cp.maximum(mu_eff, 1e-30),
-        )
+    if dt_visc is not None:
+        dt_mean = cp.minimum(dt_mean, dt_visc)
     if det_jacs_sp is not None and metric_flux_scale_sp is not None:
         wave_speed_p = cp.maximum(vel_mag + c_pre, 1e-10)
         dt_mean = cp.minimum(

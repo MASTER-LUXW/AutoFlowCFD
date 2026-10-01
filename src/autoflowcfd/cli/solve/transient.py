@@ -125,6 +125,11 @@ from autoflowcfd.cli.solve.transient_distributed import _solve_transient_distrib
                    '与 --multi-gpu 互斥；已支持 --time-method dual-time（2026-09-02 起，'
                    'package 已接入 time_scheme 字段）')
 @click.option('--gpu-device', type=int, default=None, help='--multi-gpu 时的 GPU 设备号')
+@click.option('--artificial-viscosity', 'artificial_viscosity_enabled', is_flag=True,
+              help='启用问题单元人工粘性（默认关闭，全部后端可用），与 solve steady 同名选项'
+                   '同一实现：熵残差判据定位数值熵产生的单元，只对它们叠加 div(ν∇U)')
+@click.option('--av-alpha', 'artificial_viscosity_alpha', type=float, default=1.0,
+              help='人工粘性强度标定常数（无量纲，默认1.0），只在 --artificial-viscosity 时有意义')
 @click.option('--checkpoint-interval', type=int, default=100,
               help='分布式路径中间 checkpoint 保存间隔（单机路径瞬态求解不做中间保存，'
                    '只在结束后写一次，与 solve steady 的分布式分支同一个约定）')
@@ -140,6 +145,7 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
               mu_molecular: float, rho_inf: float, vel_inf: float, p_inf: float,
               config_path: Optional[str], n_ranks: int, multi_gpu: bool,
               fully_distributed: bool, gpu_device: Optional[int],
+              artificial_viscosity_enabled: bool, artificial_viscosity_alpha: float,
               checkpoint_interval: int) -> None:
     """运行瞬态 FR 仿真 (DES/LES)。
 
@@ -258,6 +264,8 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
             checkpoint_interval, phase_max_iter, residual_drop_threshold,
             init_checkpoint,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            artificial_viscosity_enabled=artificial_viscosity_enabled,
+            artificial_viscosity_alpha=artificial_viscosity_alpha,
             aoa_deg=aoa_deg, aos_deg=aos_deg,
         )
         return
@@ -321,6 +329,8 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
         # CFL 三元组（2026-09-17 补齐）：rk3/imex 档走逐单元局部 CFL
         # 推进、自适应控制器是激活的，此前这里一个都不传。
         cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+        artificial_viscosity_enabled=artificial_viscosity_enabled,
+        artificial_viscosity_alpha=artificial_viscosity_alpha,
     )
 
     # 4. 计算壁面距离场（DES/LES/WMLES 必须）

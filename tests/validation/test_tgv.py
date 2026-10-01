@@ -61,10 +61,16 @@ def _build_tgv_solver():
     solver.order_continuation_enabled = False
 
     # 见模块文档第 2 条：两处硬编码 mu 必须同步 monkeypatch。
-    def _visc_res_with_mu():
-        mu_t_field = solver._get_turbulent_viscosity_field()
-        return _compute_visc_res(solver.state.U, solver.state.Q, solver.ops, solver.mesh,
-                                  mu=MU, mu_t_field=mu_t_field)
+    def _visc_res_with_mu(mu_t_turb=None, nu_av=None):
+        # 与生产 `compute_viscous_residual` 同签名（`step()` 传本步冻结的两个系数）；
+        # 只把分子粘度换成本算例的 MU，人工扩散项照生产路径叠加。
+        res = _compute_visc_res(solver.state.U, solver.state.Q, solver.ops, solver.mesh,
+                                mu=MU, mu_t_field=solver._get_turbulent_viscosity_field(mu_t_turb))
+        if nu_av is None:
+            nu_av = solver.compute_artificial_diffusivity_field()
+        if nu_av is not None:
+            res = res + solver._artificial_diffusion_residual(nu_av)
+        return res
     solver.compute_viscous_residual = _visc_res_with_mu
 
     orig_local_dt = solver._compute_local_time_step

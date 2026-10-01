@@ -298,7 +298,13 @@ def _stub_solver(field, owner, neigh, is_bnd, local_ids, n_sps):
         code_to_config={},
         default_config={"type": "FARFIELD"},
     )
+    # 合成算例只有面图、没有真实顶点：每个单元给一个私有顶点（编号 = 全局
+    # 单元号），顶点包络退化为本单元自身，于是这里的判据仍与面模板全局掩码
+    # 逐位可比。真正的跨 rank 顶点归约见 `test_vertex_stencil_mpi.py`。
     stub = SimpleNamespace(
+        mesh=SimpleNamespace(local_vertex_pairs=(
+            np.asarray(local_ids, dtype=np.int64),
+            np.arange(n_local, dtype=np.int64))),
         local_solver=SimpleNamespace(boundary_ghost_provider=prov),
         dist_flat_face=dist_fc,
         partition=SimpleNamespace(n_total_cells=n_total,
@@ -450,13 +456,13 @@ class TestDirichletTableReachesTheDistributedPath:
             default_config={"type": "FARFIELD"})
 
         seen = {}
-        orig = bs.compute_bounds_violation_mask
+        orig = bs.compute_bounds_violation_ratio
 
         def spy(*a, **kw):
             seen["bd"] = kw.get("bnd_dirichlet")
             return orig(*a, **kw)
 
-        patch_pkg_attr(monkeypatch, bs, "compute_bounds_violation_mask", spy)
+        patch_pkg_attr(monkeypatch, bs, "compute_bounds_violation_ratio", spy)
 
         stub, _, n_local = _stub_solver(
             field, owner, neigh, is_bnd, local_ids, n_sps)
@@ -528,13 +534,13 @@ class TestMirrorNormalsReachTheDistributedPath:
             default_config={"type": "FARFIELD"})
 
         seen = {}
-        orig = bs.compute_bounds_violation_mask
+        orig = bs.compute_bounds_violation_ratio
 
         def spy(*a, **kw):
             seen["mir"] = kw.get("bnd_mirror_normal")
             return orig(*a, **kw)
 
-        patch_pkg_attr(monkeypatch, bs, "compute_bounds_violation_mask", spy)
+        patch_pkg_attr(monkeypatch, bs, "compute_bounds_violation_ratio", spy)
 
         stub, _, n_local = _stub_solver(
             field, owner, neigh, is_bnd, local_ids, n_sps)

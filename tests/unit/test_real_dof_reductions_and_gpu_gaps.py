@@ -184,15 +184,16 @@ class TestRealDofReductionCallSitesAreWired:
     """
 
     def test_artificial_viscosity_rho_and_vel_scale(self):
-        # 读**真正含有调用点**的那个子模块：人工粘性模块 2026-09-20 拆成
-        # 子包，包 `__init__` 只 re-export，源文本里没有调用点。
+        # 读**真正含有调用点**的那个子模块（包 `__init__` 只 re-export）。人工
+        # 粘性 2026-10-01 改为熵残差判据，单元类型可交错（分布式），所以用逐行
+        # 掩码版的归约。
         from autoflowcfd.core.fr_operators.artificial_viscosity import (
-            viscosity as av,
+            entropy_viscosity as av,
         )
         s = module_source(av)
-        assert "reduce_per_cell_over_real_sps(rho, n_prism, order, 'mean')" in s
-        assert "reduce_per_cell_over_real_sps(vel_mag, n_prism, order, 'mean')" in s
-        assert "rho.mean(axis=1)" not in s
+        assert "reduce_rows_over_real_sps(speed, cip, order, 'mean', xp=xp)" in s
+        assert "reduce_rows_over_real_sps(proj, cip, order, 'max', xp=xp)" in s
+        assert ".mean(axis=1)" not in s and ".max(axis=1)" not in s
 
     def test_turbulence_transport_rho_owner(self):
         from autoflowcfd.core.turbulence import transport

@@ -123,7 +123,7 @@ def build_sensor_gated_filter_func_arrays(
         compute_troubled_cell_mask,
     )
     from autoflowcfd.core.fr_operators.bounds_sensor import (
-        compute_bounds_violation_mask,
+        make_bounds_ratio_evaluator,
     )
     from autoflowcfd.core.fr_solver.residual_diagnostics import (
         _reference_scales,
@@ -180,42 +180,14 @@ def build_sensor_gated_filter_func_arrays(
     prism_idx_all = xp.flatnonzero(cip)
     tet_idx_all = xp.flatnonzero(~cip)
 
-    # 真实自由度槽位（见 `row_is_prism_extended` 文档）。两类单元各自的
-    # 真实槽位数来自 `real_sps_per_cell` —— "哪些槽位是真的"的唯一判据
-    # 来源，不在这里重算公式。
-    from autoflowcfd.fr.native_padding import real_sps_per_cell
-
-    # 零填充布局**只在** SP 轴等于全局统一宽度 `(order+1)^3` 时存在 ——
-    # 这是构造上的事实，不是兜底：宽度不等于它的数组（例如只关心门控
-    # 逻辑的合成布局）根本没有填充槽位可言。
-    if n_sps == (order + 1) ** 3:
-        _n_real_prism, _n_real_tet = real_sps_per_cell(order)
-    else:
-        _n_real_prism = _n_real_tet = n_sps
-
-    if _n_real_prism == _n_real_tet:
-        # 两类单元真实槽位数相同 -> 行类型与统计无关，不需要行掩码
-        # （纯坍缩棱柱网格、或上面那种合成布局）。
-        _row_is_prism = None
-    elif row_is_prism_extended is not None:
-        _row_is_prism = xp.asarray(row_is_prism_extended, dtype=bool)
-    elif halo_extend is None:
-        # 单机：掩码场的行数就是 n_cells，`cip` 正好覆盖
-        _row_is_prism = cip
-    else:
-        # 分布式且调用方没给扩展版 -> 硬失败。静默退回"全槽位统计"会让
-        # halo 行在冻结的填充值上参与包络，而那在日志里完全看不出来。
-        raise ValueError(
-            "给了 halo_extend（分布式掩码在扩展场上算）却没给 "
-            "row_is_prism_extended —— 扩展场的 halo 行也要知道自己有多少"
-            "真实槽位，否则 BJ 包络会读到冻结的零填充值。"
-            "见 `core/fr_solver/filter.py::build_distributed_bounds_conn`。")
-
-    # 惰性求值与缓存都在 `make_bj_boundary_tables` 里（见那边文档）；
-    # 这里只在"直接传了二元组"时补一个同形状的取值器，让下游只有一条
-    # 取值路径。
-    _resolve_bnd_tables = (bnd_tables if callable(bnd_tables)
-                           else (lambda: bnd_tables or (None, None)))
+    # 真实槽位、行类型、边界表与 halo 扩展的处理在求值器里，见
+    # `bounds_sensor/evaluator.py`。
+    bounds_ratio = (make_bounds_ratio_evaluator(
+        xp, n_cells, n_sps, int(order), cip,
+        owner_cell=owner_cell, neighbor_cell=neighbor_cell, is_boundary=is_boundary,
+        ref_scales=_reference_scales(freestream, 5), bnd_tables=bnd_tables,
+        vertex_stencil=vertex_stencil, halo_extend=halo_extend,
+        row_is_prism_extended=row_is_prism_extended) if need_conn else None)
 
     def filter_func(U_flat: np.ndarray) -> np.ndarray:
         U = U_flat.reshape(n_cells, n_sps, -1)
@@ -231,21 +203,7 @@ def build_sensor_gated_filter_func_arrays(
                 xp.ascontiguousarray(U[:, :, 0]), order,
                 n_prism=n_prism, cell_is_prism=cell_is_prism)
         if sensor in ("bounds", "both"):
-            # 分区边界上的 BJ 包络要读 halo 单元的均值，所以掩码在
-            # **扩展场**上算（见 halo_extend 文档）；扩展场多出来的
-            # halo 行邻域不完整，算出的掩码丢弃，只取前 n_cells 项。
-            field = U if halo_extend is None else halo_extend(U)
-            bd, bmn = _resolve_bnd_tables()
-            troubled |= compute_bounds_violation_mask(
-                xp.ascontiguousarray(field[:, :, :5]),
-                owner_cell, neighbor_cell, is_boundary,
-                ref_scales=_reference_scales(freestream, 5),
-                bnd_dirichlet=bd, bnd_mirror_normal=bmn,
-                row_is_prism=_row_is_prism,
-                n_real_prism=_n_real_prism if _row_is_prism is not None else None,
-                n_real_tet=_n_real_tet if _row_is_prism is not None else None,
-                vertex_stencil=vertex_stencil,
-                )[:n_cells]
+            troubled |= bounds_ratio(U) > 1.0
         if not bool(xp.any(troubled)):
             return U_flat
         if xp is np:
@@ -313,40 +271,10 @@ def build_sensor_gated_filter_func(solver) -> Callable[[np.ndarray], np.ndarray]
     sensor = resolve_troubled_sensor()
     conn = {}
     if sensor in ("bounds", "both"):
-        fc = mesh.face_connectivity
-        if fc is None:
-            raise RuntimeError(
-                "AFCFD_TROUBLED_SENSOR=bounds/both 需要 mesh.face_connectivity"
-                "（BJ 判据要面邻居均值），当前网格没有构建面连接"
-            )
-        from autoflowcfd.core.fr_solver.boundary import (
-            make_bj_boundary_tables,
-        )
-        _n_faces = int(np.asarray(fc.owner_cell).size)
-        # `fc.normal` 是单位外法向，与 owner_cell 同一索引空间 —— 对称面
-        # 与滑移壁的镜像包络贡献要用它，见 make_bj_boundary_tables。
-        nrm = getattr(fc, "normal", None)
-        conn = dict(owner_cell=np.asarray(fc.owner_cell),
-                    neighbor_cell=np.asarray(fc.neighbor_cell),
-                    is_boundary=np.asarray(fc.is_boundary, dtype=bool),
-                    freestream=solver.freestream,
-                    bnd_tables=make_bj_boundary_tables(
-                        lambda: getattr(solver, "boundary_ghost_provider",
-                                        None),
-                        _n_faces,
-                        None if nrm is None else np.asarray(nrm)))
-    # 顶点邻域模板（BJ 判据用；面邻居在三维四面体上不能把本单元夹住，
-    # 实测在欠解析光滑场上标记 100%，见
-    # `fr_operators/vertex_stencil.py` 模块文档）。只在真的要用 bounds
-    # 判据时才建 —— 它要遍历一遍单元-顶点连接，persson 档不需要。
-    vstencil = None
-    if sensor in ("bounds", "both"):
-        from autoflowcfd.core.fr_operators.vertex_stencil import (
-            build_vertex_stencil,
-        )
+        from .bounds_conn import build_single_machine_bounds_conn
 
-        vstencil = build_vertex_stencil(mesh)
+        conn = build_single_machine_bounds_conn(solver)
     return build_sensor_gated_filter_func_arrays(
         mesh.n_cells, mesh.n_sps_per_cell, int(order),
         ops.filter_prism, ops.filter_tet, n_prism=mesh.n_prism_cells,
-        sensor=sensor, vertex_stencil=vstencil, **conn)
+        sensor=sensor, **conn)

@@ -1,4 +1,4 @@
-"""AutoFlowCFD V2.0 - Persson-Peraire 人工粘性（opt-in）稳定性回归测试。
+"""AutoFlowCFD V2.0 - 问题单元人工粘性（opt-in）稳定性回归测试。
 
 见 core/fr_operators/artificial_viscosity.py 模块文档、ProjectFiles/V2.0/
 7_重大问题修复-求解稳定性.md。这个新增能力默认关闭，本文件复用项目已有
@@ -69,8 +69,8 @@ def test_tgv_stable_and_still_dissipative_with_artificial_viscosity():
 
     原判据是 `0.05 < KE/KE0 < 0.75`，一个**校准值**，而它的前提是
     "启用人工粘性后会额外耗散、比值应当更小"。这个前提在**光滑**场上是
-    错的：人工粘性的传感器（Persson-Peraire 探守恒密度）在光滑解上掩码
-    为空，所以它**正确地什么都不做** —— 实测启用 `alpha=1.0` 之后
+    错的：人工粘性的传感器在光滑解上不触发（2026-10-01 起是熵残差判据，TGV
+    初场等熵、熵处处相同，判据恒为零），所以它**正确地什么都不做** —— 实测启用 `alpha=1.0` 之后
     `K/K0 = 0.98919717`，与基线**逐位相同**（差 0.000e+00）。
 
     那个区间此前能通过，是因为基线本身当时是 0.678，而那个 0.678 来自

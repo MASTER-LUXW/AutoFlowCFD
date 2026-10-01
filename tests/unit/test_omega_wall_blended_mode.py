@@ -290,8 +290,9 @@ class TestTransientTimeAccuracyWarning:
         assert '只有 dual-time 是时间精确的' in flat
 
 
-class TestArtificialViscosityIsInertAtP1:
-    """`--artificial-viscosity` 在 order=1（生产阶数）上是精确的无操作。
+class TestPerssonThresholdAndP1ArtificialViscosity:
+    """Persson-Peraire 在 order=1 上原理性退化；人工粘性因此（2026-10-01）改用
+    熵残差判据，P1 上可用。
 
     Persson-Peraire 的 ramp 判据是 `s0 = -4*log10(order)`，order=1 时 s0=0，
     触发门限成了"顶模态能量占全胞 >= 10%"（`S_e >= 10^(s0-kappa) = 0.1`）。
@@ -302,7 +303,8 @@ class TestArtificialViscosityIsInertAtP1:
     完全相同**。
 
     这一点要紧，因为项目对退化单元残差放大的既定修复路线是"网格质量门
-    + 耗散"，而耗散那一半在生产阶数上不可用。
+    + 耗散"，而耗散那一半当时在生产阶数上不可用。Persson 判据现在只服务于
+    模态滤波的 `persson` 门控。
     """
 
     @pytest.mark.parametrize("order,expect_threshold", [
@@ -323,19 +325,15 @@ class TestArtificialViscosityIsInertAtP1:
         assert s0_p1 == 0.0
         assert 10 ** (s0_p1 - SENSOR_KAPPA) == pytest.approx(0.1)
 
-    def test_enabling_at_p1_warns_explicitly(self):
-        """不接受静默无操作：用户以为打开了一层保护，实际什么都没发生。"""
-        import inspect
-
+    def test_artificial_viscosity_is_active_at_p1(self):
+        """P1 上人工粘性不再是无操作（熵残差判据与阶数无关），旧的"P1 无操作"
+        警告随之删除 —— 留着它就是在启用一个有效功能时谎报无效。"""
         from autoflowcfd.core.fr_solver import solver as solver_mod
+        from autoflowcfd.core.fr_operators.artificial_viscosity import entropy_viscosity
         from tests.unit._module_source import module_source
-        src = module_source(solver_mod)
-        assert "artificial_viscosity_enabled and order <= 1" in src
-        assert "warnings.warn" in src
-        i = src.index("artificial_viscosity_enabled and order <= 1")
-        ctx = src[i:i + 1200]
-        assert "无操作" in ctx
-        assert "order>=2" in ctx
+        assert "artificial_viscosity_enabled and order <= 1" not in module_source(solver_mod)
+        src = module_source(entropy_viscosity)
+        assert "Persson" in src and "order == 0" in src
 
     def test_startup_log_shows_both_switches(self):
         """启动日志必须显示人工粘性与滤波档——否则"这份日志是哪个配置跑

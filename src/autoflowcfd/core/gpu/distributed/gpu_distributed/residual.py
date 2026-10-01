@@ -68,8 +68,12 @@ class _MultiGPUResidualMixin:
         residual_native = self._unpermute_from_compact(residual_compact)
         return residual_native[: self.partition.n_local_cells]
 
-    def compute_viscous_residual_gpu(self, mu_t_field=None):
+    def compute_viscous_residual_gpu(self, mu_t_field=None, nu_av_compact=None):
         """GPU 计算分布式粘性残差。
+
+        nu_av_compact: 本步冻结的问题单元人工扩散系数（compact 排列，可选），
+        给出时叠加 `div(nu grad U)`（与单机同一项，见
+        `compute_artificial_diffusivity_compact_gpu`）。
 
         mu_t_field: 湍流涡粘度场（可选）——此前本方法签名只有 self，
         但调用方 step() 以 mu_t_field=mu_t_field 关键字调用它，签名/
@@ -125,10 +129,52 @@ class _MultiGPUResidualMixin:
                 correction_compact = cp.asarray(correction_cpu)
                 residual_compact = residual_compact + correction_compact[..., :residual_compact.shape[-1]]
 
+        if nu_av_compact is not None:
+            residual_compact = residual_compact + self._artificial_diffusion_compact_gpu(
+                U_compact, nu_av_compact)[..., :residual_compact.shape[-1]]
+
         residual_native = self._unpermute_from_compact(residual_compact)
         return residual_native[: self.partition.n_local_cells]
 
-    def _compute_total_residual_gpu(self, mu_t_field=None, inviscid=True, viscous=True):
+    def compute_artificial_diffusivity_compact_gpu(self):
+        """compact 排列的问题单元人工扩散系数 nu (n_compact, n_sps)；未启用返回 None。
+
+        系数只依赖单元自身的解，halo 单元用 halo 数据算出的值与拥有方逐位相同
+        （与 CPU MPI `distributed_artificial_viscosity.py` 同一约定）。
+        """
+        if not self.artificial_viscosity_enabled:
+            return None
+        from autoflowcfd.core.fr_operators.artificial_viscosity import compute_artificial_diffusivity
+        from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_gradient_gpu
+
+        cp = get_cupy()
+        U_compact = self._permute_to_compact(self.gpu_halo.exchange(self.U_gpu))
+        n_compact = U_compact.shape[0]
+        return compute_artificial_diffusivity(
+            U_compact[..., :5], int(self.current_order), self.mesh_data['cell_volumes'],
+            cp.arange(n_compact) < int(self.dist_flat_face.base_flat.n_prism),
+            lambda phi: compute_physical_scalar_gradient_gpu(phi, self.mesh_data, self.mesh_data),
+            alpha_av=self.artificial_viscosity_alpha)
+
+    def _artificial_diffusion_compact_gpu(self, U_compact, nu_compact):
+        """compact 空间的 `div(nu grad U_k)`，k = 0..4（GPU 标量扩散装配）。"""
+        from autoflowcfd.core.fr_operators.artificial_viscosity import artificial_diffusion_residual
+        from autoflowcfd.core.fr_operators.flux_kernels import resolve_viscous_ip_constant
+        from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport.residual import (
+            compute_scalar_diffusion_residual_gpu,
+        )
+
+        n_compact, n_sps = U_compact.shape[0], U_compact.shape[1]
+        n_prism = int(self.dist_flat_face.base_flat.n_prism)
+        c_ip = resolve_viscous_ip_constant(int(self.current_order))
+        return artificial_diffusion_residual(
+            U_compact[..., :5], nu_compact,
+            lambda phi, gamma: compute_scalar_diffusion_residual_gpu(
+                phi, gamma, self.mesh_data, self.mesh_data, self.flat_face_gpu,
+                n_compact, n_prism, n_sps, c_ip=c_ip))
+
+    def _compute_total_residual_gpu(self, mu_t_field=None, inviscid=True, viscous=True,
+                                    nu_av_compact=None):
         """计算总的 **dU/dt**（无粘 + 粘性），先执行 halo 交换。
 
         符号约定与 `compute_*_residual_fr_gpu`（以及 CPU 的
@@ -139,6 +185,7 @@ class _MultiGPUResidualMixin:
 
         Args:
             mu_t_field: 动力涡粘度 (n_cells, n_sps) CuPy 数组（可选）
+            nu_av_compact: 问题单元人工扩散系数（compact 排列，可选）
             inviscid, viscous: 取哪几部分（IMEX 分别要显式/隐式两半；
                 至少一个为 True）。
         """
@@ -147,7 +194,8 @@ class _MultiGPUResidualMixin:
         self._halo_exchange_gpu()
         res = self.compute_inviscid_residual_gpu() if inviscid else None
         if viscous:
-            visc_res = self.compute_viscous_residual_gpu(mu_t_field=mu_t_field)
+            visc_res = self.compute_viscous_residual_gpu(
+                mu_t_field=mu_t_field, nu_av_compact=nu_av_compact)
             res = visc_res if res is None else res + visc_res
         return res
 

@@ -42,10 +42,20 @@
 两趟都复用 `bounds_sensor._scatter_minmax`（那一层已经把 NumPy 的
 `ufunc.at` 与 CuPy 的 `cupyx.scatter_max/min` 统一了），所以 CPU 单机 /
 CPU MPI / 单 GPU / 多 GPU 四条后端共用同一个内核。
+
+## 分布式（2026-10-01）
+
+共享同一顶点的两个单元通过面邻接可能相隔 2 个以上面跳，而 halo 是 1 层
+面邻居，所以分布式不能靠 halo 拼出完整顶点邻域。改为在**逐顶点归约之后**
+对跨 rank 共享的顶点做一次 MAX/MIN 全局归约（`VertexStencil.reduce_nodes`，
+构造见 `core/mpi/vertex_stencil_mpi.py`）：每个 rank 只用自己的 local 单元
+建模板，共享顶点的极值合并后就是全局极值。max/min 与顺序无关，结果与单机
+逐位相同、与分区数无关。此前的 `remap_to_compact`（试图把全局模板映射进
+local+halo 空间，halo 不够时硬失败）从未被调用，随之删除。
 """
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 import numpy as np
 
@@ -59,11 +69,16 @@ class VertexStencil:
         cell_of_pair: `(n_pairs,)` int64，每一对的单元索引。
         n_nodes: 顶点总数（`node_of_pair` 的取值上界 + 1），决定逐顶点
             归约数组的长度。
+        reduce_nodes: 分布式下把**跨 rank 共享顶点**的逐顶点极值合并成全局
+            极值的可调用 `reduce_nodes(node_max, node_min)`（原地、集合通信，
+            全部 rank 必须同时调用）；单机为 None。见
+            `core/mpi/vertex_stencil_mpi.py`。
     """
 
     node_of_pair: np.ndarray
     cell_of_pair: np.ndarray
     n_nodes: int
+    reduce_nodes: Optional[Callable] = None
 
 
 def build_vertex_stencil(mesh) -> Optional[VertexStencil]:
@@ -132,81 +147,11 @@ def accumulate_vertex_envelope(xp, scatter_minmax, nb_max, nb_min,
     node_max = xp.full(stencil.n_nodes, -xp.inf, dtype=nb_max.dtype)
     node_min = xp.full(stencil.n_nodes, xp.inf, dtype=nb_min.dtype)
     scatter_minmax(xp, node_max, node_min, node, cell_mean[cell])
+    if stencil.reduce_nodes is not None:
+        # 分布式：共享顶点上还有别的 rank 的单元，合并成全局极值后再散射回
+        # 本 rank 单元 —— max/min 与求值顺序无关，所以结果与单机逐位相同。
+        stencil.reduce_nodes(node_max, node_min)
     # 第二趟：把每个顶点的极值散射回共享它的全部单元
     scatter_minmax(xp, nb_max, nb_min, cell, node_max[node])
     scatter_minmax(xp, nb_max, nb_min, cell, node_min[node])
 
-
-def remap_to_compact(stencil: VertexStencil, global_to_compact: dict,
-                     n_local: int, n_compact: int) -> VertexStencil:
-    """把**全局**顶点模板重映射到分布式的 local+halo 紧凑索引空间。
-
-    Args:
-        stencil: 用全局单元索引建好的模板。
-        global_to_compact: `全局单元 id -> 紧凑索引`。紧凑空间是
-            `[0, n_local)` 为本 rank 单元、`[n_local, n_compact)` 为 halo
-            （见 `core/mpi/distributed_compute.DistributedMeshAdapter`
-            类文档）。
-        n_local: 本 rank 的单元数。
-        n_compact: 紧凑空间大小（local + halo）。
-
-    Returns:
-        重映射后的模板，只含两端都落在紧凑空间里的对。
-
-    Raises:
-        ValueError: **halo 不足以覆盖某个 local 单元的完整顶点邻域**。
-
-            为什么必须硬失败：共享同一顶点的两个单元在共形网格里通过
-            面邻接是连通的，但可能相隔 **2 个以上**面跳，而本项目的 halo
-            是 1 层面邻居。缺一部分顶点邻居会让包络在分区边界上变窄，
-            于是**同一个算例换 rank 数得到不同的掩码** —— 结果依赖分区，
-            这是求解器不可接受的（与 `fr_solver/filter.py` 里
-            `halo_extend` 那段说明同一条理由）。
-
-            静默退回"只用面邻居"也不行：那正是本模块要修的那个缺陷
-            （欠解析光滑场上标记 100%），而且会让单机与分布式两条后端
-            的判据不一致 —— 本项目反复出过"两份实现只改一份"的缺陷。
-    """
-    n_global = int(stencil.cell_of_pair.max()) + 1 if stencil.cell_of_pair.size else 0
-    lut = np.full(n_global, -1, dtype=np.int64)
-    for g, c in global_to_compact.items():
-        if 0 <= int(g) < n_global:
-            lut[int(g)] = int(c)
-    mapped = lut[stencil.cell_of_pair]
-    keep = mapped >= 0
-
-    # 完整性校验：每个 local 单元在紧凑空间里保留的对数，必须等于它在
-    # 全局模板里的对数 —— 也就是"它的顶点邻域一个都没丢"。
-    # 逐对计数而不是逐顶点：同一个 (node, cell) 对被保留 <=> 该 cell 在
-    # 紧凑空间里；而我们要保证的是该 cell 的**每个顶点的每个共享单元**
-    # 都在，所以要按顶点检查。
-    node_kept = np.zeros(stencil.n_nodes, dtype=np.int64)
-    node_total = np.zeros(stencil.n_nodes, dtype=np.int64)
-    np.add.at(node_total, stencil.node_of_pair, 1)
-    np.add.at(node_kept, stencil.node_of_pair[keep], 1)
-    incomplete_node = node_kept != node_total
-    if np.any(incomplete_node):
-        # 只有"某个 local 单元用到了不完整的顶点"才是真问题：halo 单元
-        # 的掩码本来就被丢弃。
-        local_pairs = keep & (mapped < n_local)
-        touched = np.unique(stencil.node_of_pair[local_pairs])
-        bad = touched[incomplete_node[touched]]
-        if bad.size:
-            n_bad_cells = int(np.unique(
-                mapped[local_pairs & np.isin(stencil.node_of_pair, bad)]).size)
-            raise ValueError(
-                f"顶点邻域在分区边界上不完整：{bad.size} 个顶点、涉及 "
-                f"{n_bad_cells} 个 local 单元的顶点邻居落在 halo 之外。"
-                f"本项目的 halo 是 1 层面邻居，而共享顶点的单元可能相隔 "
-                f"2 个以上面跳。继续下去会让同一算例换 rank 数得到不同的"
-                f"掩码（结果依赖分区）。当前分布式路径请用 "
-                f"AFCFD_TROUBLED_SENSOR=persson 或 AFCFD_FILTER_MODE=off；"
-                f"要在分布式上用 bounds 判据，需要先把 halo 扩到 2 层"
-                f"（那是一项独立改动，不能靠退回面邻居模板绕过 —— 面模板"
-                f"正是本模块要修的那个缺陷）。")
-
-    return VertexStencil(
-        node_of_pair=np.ascontiguousarray(stencil.node_of_pair[keep]),
-        cell_of_pair=np.ascontiguousarray(mapped[keep]),
-        n_nodes=stencil.n_nodes,
-    )
