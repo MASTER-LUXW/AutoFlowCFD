@@ -33,11 +33,20 @@ x1.23），把热传导整个关掉后同一模态每步衰减（x0.79~0.99）�
                      （法向速度由罚项弱施加为零）——正是对称/滑移的精确条件
     VBC_DIRICHLET    远场：幽灵态整份给定（自由来流），速度与温度都按 Dirichlet
                      施加（本侧梯度 + 速度罚项 + 以热传导率为系数的温度罚项）
-    VBC_NEUMANN      出口：粘性上一切延拓分量取零法向通量（无牵引、绝热），
-                     即公共法向粘性通量为零、不加罚项
+    VBC_NEUMANN      出口：充分发展条件 du_i/dn = 0、dT/dn = 0（另一侧梯度取
+                     `grad u · R` 与 `R grad T`，只镜像法向导数、不镜像速度矢量），
+                     平均后法向导数恰为零，切向导数保留；幽灵态速度即本侧速度，
+                     速度罚项为零，不罚温度
     VBC_INLET        入口：逐通量点按本侧法向速度判定（与 `inlet_ghost_state` 同一
                      条件）—— 流入（给定入口状态）按 VBC_DIRICHLET，回流（幽灵态
                      延拓内部）按 VBC_NEUMANN
+
+**出口为什么不是零牵引（2026-10-01 更正）**：09-30 首版把出口取成"公共法向粘性
+通量为零"（零牵引 + 绝热）。零牵引与充分发展的内流不相容——Couette 精确解在
+x 端面上的牵引 tau_xy = mu U/H != 0，于是精确线性剪切解不再是离散定常解，
+1600 步偏离 1.0e-6 U（此前 2e-9，`test_couette.py`）。充分发展条件
+（OpenFOAM zeroGradient、Fluent outflow 的同一假设）对 Couette/Poiseuille 精确，
+热通量照样闭合（dT/dn = 0）。
 
 `VBC_INTERIOR`（0）表示内部面，罚项取内部形式（见 `viscous_ip_penalty_tilde`）。
 逐面种类由 `boundary/fr_ghost_state.py::build_viscous_boundary_kind` 按边界组
@@ -83,6 +92,22 @@ def mirror_normal_component(g: np.ndarray, adj_row: np.ndarray) -> np.ndarray:
     d = (g[0] * adj_row[0] + g[1] * adj_row[1] + g[2] * adj_row[2]) / m2
     for a in range(3):
         out[a] = g[a] - 2.0 * d * adj_row[a]
+    return out
+
+
+@njit(cache=True, inline='always')
+def mirror_normal_derivative(gv: np.ndarray, adj_row: np.ndarray) -> np.ndarray:
+    """偶延拓场的梯度 `gv · R`（每个速度分量的梯度各自做法向镜像，速度矢量本身不镜像）。
+
+    出口幽灵场 `u_g(x) = u(Rx)` 的梯度恰为 `gv R`；与本侧取平均后每个分量的法向
+    导数 `d u_i/dn` 为零、切向导数保留 —— 充分发展出口条件的精确离散表述。
+    退化面原样返回。
+    """
+    out = np.empty((3, 3))
+    for a in range(3):
+        row = mirror_normal_component(gv[a], adj_row)
+        for b in range(3):
+            out[a, b] = row[b]
     return out
 
 
@@ -145,10 +170,11 @@ def resolve_point_kind(kind: int, Q_s: np.ndarray, adj_row: np.ndarray) -> int:
 def boundary_other_gradients(gv_s: np.ndarray, gT_s: np.ndarray, adj_row: np.ndarray, kind: int):
     """边界（含混合拆分面的边界半区）上"另一侧"的梯度 `(gv_x, gT_x)`。
 
-    入口不必先落到 Dirichlet / Neumann：两者都取本侧梯度。无滑移壁：速度梯度取本侧（壁面切向
+    入口与出口（Neumann）在这里都取本侧梯度：Neumann 点的法向镜像梯度由
+    `viscous_jump_point` 在把入口落到流入/回流之后统一构造（同一个点在两种情形下
+    梯度不同，必须先判流向）。无滑移壁：速度梯度取本侧（壁面切向
     速度的法向导数就是壁面剪应力本身），温度梯度法向镜像（绝热）；对称面 /
-    滑移壁：两者都取镜像场的梯度；Dirichlet / Neumann：取本侧（Neumann 的
-    零法向通量由 `viscous_jump_point` 直接给出，不经梯度）。
+    滑移壁：两者都取镜像场的梯度；Dirichlet：取本侧。
     """
     gv_x = np.empty((3, 3))
     gT_x = np.empty(3)

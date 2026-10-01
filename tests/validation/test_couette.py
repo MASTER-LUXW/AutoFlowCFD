@@ -125,24 +125,14 @@ def test_couette_prism_stable_from_wrong_ic():
 #: 行为"的判据（不是目标值）：坍缩那两档一旦变好说明坍缩侧也被改动了，
 #: 应当来更新这里而不是放宽。（"默认档仍是坍缩"这句已于 2026-09-20 作废，
 #: 默认改为 native，见 `fr/native_prism/mode.py`。）
-_SHEAR_TOL = {
-    ("collapsed", 1): 1e-7,
-    ("collapsed", 2): 6e-2,     # 记录：实测 1.78e-2，不是目标值
-    ("native", 1): 1e-8,
-    ("native", 2): 3e-8,
-    ("native", 3): 1.5e-7,
-}
+#:
+#: 坍缩棱柱基 2026-09-23 已删除（原生基是唯一实现），坍缩档的两条记录判据
+#: （P1 1e-7、P2 实测 1.78e-2）随之移出参数表，数据保留在这里作为史料。
+_SHEAR_TOL = {1: 1e-8, 2: 3e-8, 3: 1.5e-7}
 
 
-@pytest.mark.parametrize("basis,order", [
-    ("collapsed", 1),
-    ("collapsed", 2),
-    ("native", 1),
-    ("native", 2),
-    ("native", 3),
-])
-def test_couette_prism_preserves_the_exactly_representable_shear(
-        basis, order, monkeypatch):
+@pytest.mark.parametrize("order", [1, 2, 3])
+def test_couette_prism_preserves_the_exactly_representable_shear(order):
     """**精确可表示的线性剪切解必须被保持** —— 本文件最硬的物理判据。
 
     Couette 的精确解 `u = U_wall * y / H` 是 `y` 的**线性**函数，在 P1/P2/P3
@@ -163,8 +153,7 @@ def test_couette_prism_preserves_the_exactly_representable_shear(
     这个前提都不成立，写成一条会 NaN 的用例没有信息量；那一档的现状由
     上面 `_SHEAR_TOL` 的注释如实记录。
     """
-    monkeypatch.setenv("AFCFD_PRISM_BASIS", basis)
-    tol = _SHEAR_TOL[(basis, order)]
+    tol = _SHEAR_TOL[order]
     solver, mesh, H, U_wall, Lx, rho_inf, p_inf = _build_couette_solver(
         order=order)
 
@@ -182,7 +171,7 @@ def test_couette_prism_preserves_the_exactly_representable_shear(
 
     err = float(np.max(np.abs(solver.state.Q[:, :, 1] - u0))) / U_wall
     assert err < tol, (
-        f"{basis} P{order}: 精确可表示的线性剪切解没有被保持，"
+        f"P{order}: 精确可表示的线性剪切解没有被保持，"
         f"|u-u_exact|/U_wall = {err:.4e} > {tol:.1e}")
 
 
@@ -197,17 +186,10 @@ def test_couette_prism_preserves_the_exactly_representable_shear(
 #:     坍缩 P1          0.99
 #:     坍缩 P2         34.7      <- 指数失稳
 _LINEAR_GROWTH_MAX = 2.0
-_SUPERLINEAR_MIN = 10.0
 
 
-@pytest.mark.parametrize("basis,order", [
-    ("collapsed", 1),
-    ("native", 1),
-    ("native", 2),
-    ("native", 3),
-])
-def test_couette_prism_residual_growth_is_at_most_linear(basis, order,
-                                                         monkeypatch):
+@pytest.mark.parametrize("order", [1, 2, 3])
+def test_couette_prism_residual_growth_is_at_most_linear(order):
     """从**精确解**出发推进时，残差的增长必须最多是**线性**的。
 
     ## 这条判据取代了什么，以及为什么原来那条是判据本身错了
@@ -249,47 +231,14 @@ def test_couette_prism_residual_growth_is_at_most_linear(basis, order,
     远大于 1（坍缩 P2 实测 34.7）。阈值与实测值见 `_LINEAR_GROWTH_MAX`
     上方那节。
 
-    **坍缩 P2/P3 不在参数表里**，它们由下面那条**负控制**覆盖 —— 那条
-    断言它们必须**超线性**，也就是把"原生基修好了什么"明确写成可执行的
-    判据，而不是靠 xfail 记一笔。
+    坍缩棱柱基（P2 斜率比 34.7、指数失稳）2026-09-23 已删除，原先那条要求它
+    超线性的负控制随之删除，实测数据保留在 `_LINEAR_GROWTH_MAX` 上方。
     """
-    monkeypatch.setenv("AFCFD_PRISM_BASIS", basis)
     ratio, hist = _residual_slope_ratio(order)
     assert ratio < _LINEAR_GROWTH_MAX, (
-        f"{basis} P{order}: 残差增长超线性，后/前半段斜率比 = {ratio:.2f}"
+        f"P{order}: 残差增长超线性，后/前半段斜率比 = {ratio:.2f}"
         f"（首 {hist[0]:.3e}、中 {hist[len(hist) // 2]:.3e}、"
         f"末 {hist[-1]:.3e}）—— 线性漂移应当约为 1")
-
-
-def test_couette_collapsed_p2_residual_growth_is_superlinear(monkeypatch):
-    """**负控制**：坍缩棱柱基在 P2 上必须是超线性增长。
-
-    这条把"原生棱柱基修好了什么"写成可执行判据，取代原先那条
-    `xfail(strict)`：
-
-        档       |u-u_exact|/U_wall (1600 步)   残差增长      斜率比
-        坍缩 P2   1.78e-02                      5.3e7 倍      34.7
-        原生 P2   8.40e-09                      23 倍          0.93
-
-    Couette 的精确解是 `y` 的**线性**函数、在 P2 空间里精确可表示，所以
-    坍缩档那 1.78e-02 的偏离**不是分辨率问题**，是坍缩坐标基在被三角化的
-    两个参考轴上的病理（`max|D_3d_prism|` P1 2.05 -> P3 560.1，每阶约
-    x25；项目记忆 `blasius_spanwise_w_open`）。
-
-    **这条测试一旦失败就意味着坍缩档被改动了**，应当来更新这里的记录值，
-    而不是放宽阈值。
-
-    坍缩档**自 2026-09-20 起不再是默认**（`AFCFD_PRISM_BASIS` 默认值改为
-    `native`，三份证据见 `fr/native_prism/mode.py`），所以这里必须显式
-    设置环境变量 —— 否则这条负控制会跑在原生档上、断言"原生也超线性"，
-    正好把结论反过来。
-    """
-    monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")
-    ratio, hist = _residual_slope_ratio(2)
-    assert ratio > _SUPERLINEAR_MIN, (
-        f"坍缩 P2 的残差增长不再超线性（斜率比 {ratio:.2f}）—— 若这是"
-        f"真实修复，请把它挪到上面那条正向参数表里并更新文档记录值"
-    )
 
 
 def _residual_slope_ratio(order: int):

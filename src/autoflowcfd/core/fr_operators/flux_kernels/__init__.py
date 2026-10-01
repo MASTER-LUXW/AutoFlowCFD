@@ -55,6 +55,7 @@ from .viscous_bc import (  # noqa: F401
     VBC_NOSLIP_WALL,
     boundary_other_gradients,
     mirror_normal_component,
+    mirror_normal_derivative,
     mirror_velocity_gradient,
     resolve_point_kind,
 )
@@ -76,6 +77,7 @@ __all__ = [
     "euler_physical_flux_batch",
     "euler_physical_flux_point",
     "mirror_normal_component",
+    "mirror_normal_derivative",
     "mirror_velocity_gradient",
     "resolve_point_kind",
     "resolve_viscous_ip_constant",

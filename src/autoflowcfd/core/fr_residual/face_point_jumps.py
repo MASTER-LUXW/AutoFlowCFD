@@ -23,7 +23,8 @@ from numba import njit
 
 from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
 from autoflowcfd.core.fr_operators.flux_kernels import (
-    CP_AIR, VBC_DIRICHLET, VBC_INTERIOR, VBC_NEUMANN, resolve_point_kind,
+    CP_AIR, VBC_DIRICHLET, VBC_INTERIOR, VBC_NEUMANN, mirror_normal_component,
+    mirror_normal_derivative, resolve_point_kind,
     euler_physical_flux_point, viscous_physical_flux_point, viscous_ip_penalty_tilde,
 )
 
@@ -64,8 +65,9 @@ def viscous_jump_point(Q_s, gv_s, gT_s, mut_s, Q_x, gv_x, gT_x, mut_x, adjrow, h
     状态落到 Dirichlet / Neumann（`resolve_point_kind`）。边界面上 `Q_x` 是幽灵态、
     `(gv_x, gT_x)` 由 `boundary_other_gradients` 按同一个种类构造。
 
-    * `VBC_NEUMANN`：公共法向粘性通量为零（无牵引、绝热），跳变量就是
-      `-a·G(本侧)`，不加罚项；
+    * `VBC_NEUMANN`（出口、入口回流点）：另一侧梯度取 `gv_s·R` 与 `R gT_s`
+      （充分发展条件 du_i/dn = dT/dn = 0，见 `viscous_bc.py`），其余同下；幽灵态
+      速度就是本侧速度，罚项只剩零；
     * 其余：`a·G(平均态) - a·G(本侧)` 加罚项。内部面罚项用面平均涡粘与热传导率；
       边界面用本侧涡粘，热传导率只在 `VBC_DIRICHLET` 时给（温度被弱施加到
       幽灵态温度），无滑移壁/镜像类传 0（绝热由 ∇T 镜像精确施加）。
@@ -77,9 +79,8 @@ def viscous_jump_point(Q_s, gv_s, gT_s, mut_s, Q_x, gv_x, gT_x, mut_x, adjrow, h
     jump = np.empty(5)
     G_self = viscous_physical_flux_point(Q_s, gv_s, gT_s, mu, Pr, mut_s, Pr_t)
     if bkind == VBC_NEUMANN:
-        for v in range(5):
-            jump[v] = -(a0 * G_self[0, v] + a1 * G_self[1, v] + a2 * G_self[2, v])
-        return jump
+        gv_x = mirror_normal_derivative(gv_s, adjrow)
+        gT_x = mirror_normal_component(gT_s, adjrow)
 
     Q_avg = np.empty(5)
     for v in range(5):

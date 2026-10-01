@@ -242,10 +242,8 @@ class TestTriangulatedAxisShowsSpuriousCrossflow:
 # P2 发散的**最小复现**
 # ----------------------------------------------------------------------
 
-#: **坍缩档**下 P2 在本算例上发散的步数（CFL 0.1 实测第 82 步出现非有限
-#: 值；2026-09-18 首次记录的是第 75 步，当时的默认滤波档与现在不同）。
-#: 留余量到 150：只要在 150 步内发散，坍缩档那条负控制就仍然成立。
-_P2_DIVERGES_WITHIN = 150
+#: 史料：坍缩棱柱基（2026-09-23 已删除）下 P2 在本算例上第 82 步出现非有限值
+#: （2026-09-18 首次记录第 75 步），原先那条要求它发散的负控制随基一起删除。
 #: **默认档（原生棱柱基）**下 P2 必须干净跑过的步数。取 400：坍缩档在
 #: 82 步就死了，400 步是它的近 5 倍，足以排除"只是推迟"。
 _P2_MUST_SURVIVE = 400
@@ -326,19 +324,6 @@ class TestP2OnACleanPrismMesh:
         assert worst < _P2_W_MAX, (
             f"默认档下 P2 的 max|w|/U = {worst:.3e} 超过 {_P2_W_MAX}"
             f"（实测 400 步 5.25e-02）——伪横流虽未归零但必须有界。")
-
-    def test_collapsed_p2_still_diverges(self, monkeypatch):
-        """**负控制**：坍缩棱柱基上同一算例必须仍然发散（实测第 82 步）。
-
-        它把"原生基修好了什么"写成可执行的对照。一旦这条也不再发散，
-        说明坍缩档被改动了，应当来更新记录值而不是删掉本条。
-        """
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "collapsed")
-        step, _ = _run_until_nonfinite(2, _NX, 0.1, _P2_DIVERGES_WITHIN)
-        assert step is not None, (
-            f"坍缩档 P2 在 {_P2_DIVERGES_WITHIN} 步内**没有**发散 —— "
-            f"若这是真实改动，请更新本条的记录值（实测第 82 步）。")
-        assert step <= _P2_DIVERGES_WITHIN
 
     def test_p1_on_the_same_mesh_stays_bounded(self):
         """同一张网格上 P1 必须稳定且 |w| 有界 —— 这是正向要求。

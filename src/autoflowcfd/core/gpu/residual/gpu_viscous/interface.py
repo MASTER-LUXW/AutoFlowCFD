@@ -40,14 +40,20 @@ def _boundary_other_side_gpu(cp, K, Q_s, gv_s, gT_s, mut_s, Q_x, gv_x, gT_x, mut
 
     逐点对应 CPU `flux_kernels/viscous_bc.py::boundary_other_gradients` 与
     `resolve_point_kind`：无滑移壁速度梯度取本侧、∇T 法向镜像；镜像类两者都取
-    镜像场梯度；其余取本侧。`Q_x` 在边界点上已经是幽灵态。返回解析后的 `K`。
+    镜像场梯度；Neumann 点（出口、入口回流点）速度梯度取 `gv·R`、∇T 法向镜像
+    （充分发展条件，与 CPU `viscous_jump_point` 同一处理）；Dirichlet 取本侧。
+    `Q_x` 在边界点上已经是幽灵态。返回解析后的 `K`。
     """
     inflow = cp.sum(Q_s[..., 1:4] * adjrow, axis=-1) < 0.0
     K = cp.where(K == VBC_INLET, cp.where(inflow, VBC_DIRICHLET, VBC_NEUMANN), K)
     bnd = K != VBC_INTERIOR
     mirror = K == VBC_MIRROR
-    gv_b = cp.where(mirror[..., None, None], _mirror_velocity_gradient_gpu(cp, gv_s, adjrow), gv_s)
-    gT_b = cp.where((mirror | (K == VBC_NOSLIP_WALL))[..., None], _mirror_normal_gpu(cp, gT_s, adjrow), gT_s)
+    neumann = K == VBC_NEUMANN
+    gv_b = cp.where(mirror[..., None, None], _mirror_velocity_gradient_gpu(cp, gv_s, adjrow),
+                    cp.where(neumann[..., None, None],
+                             _mirror_normal_gpu(cp, gv_s, adjrow[..., None, :]), gv_s))
+    gT_b = cp.where((mirror | neumann | (K == VBC_NOSLIP_WALL))[..., None],
+                    _mirror_normal_gpu(cp, gT_s, adjrow), gT_s)
     gv_x = cp.where(bnd[..., None, None], gv_b, gv_x)
     gT_x = cp.where(bnd[..., None], gT_b, gT_x)
     mut_x = cp.where(bnd, mut_s, mut_x)
@@ -58,9 +64,9 @@ def _viscous_jump_gpu(cp, K, Q_s, gv_s, gT_s, mut_s, Q_x, gv_x, gT_x, mut_x, adj
                       mu, Pr, Pr_t, c_ip_visc):
     """逐点对应 CPU `face_point_jumps.viscous_jump_point`（`K` 已解析）。
 
-    Neumann 点公共法向粘性通量为零、不加罚项；其余点 `a·G(平均态) - a·G(本侧)`
-    加罚项：内部点涡粘与热传导率取面平均，边界点取本侧，热传导率只在
-    Dirichlet 点给（无滑移壁/镜像类为 0）。罚项做功项内部与边界同一形式。
+    `a·G(平均态) - a·G(本侧)` 加罚项：内部点涡粘与热传导率取面平均，边界点取
+    本侧，热传导率只在 Dirichlet 点给（无滑移壁/镜像类/Neumann 为 0；Neumann 点
+    幽灵态速度即本侧速度，速度罚项为零）。罚项做功项内部与边界同一形式。
     """
     Q_avg = 0.5 * (Q_s + Q_x)
     gv_avg = 0.5 * (gv_s + gv_x)
@@ -68,14 +74,13 @@ def _viscous_jump_gpu(cp, K, Q_s, gv_s, gT_s, mut_s, Q_x, gv_x, gT_x, mut_x, adj
     mut_avg = 0.5 * (mut_s + mut_x)
     G_common, G_own = _viscous_tilde_flux_pair(
         Q_avg, gv_avg, gT_avg, mut_avg, Q_s, gv_s, gT_s, mut_s, adjrow, mu, Pr, Pr_t)
-    neumann = K == VBC_NEUMANN
     interior = K == VBC_INTERIOR
-    jump = cp.where(neumann[..., None], 0.0, G_common) - G_own
+    jump = G_common - G_own
 
     adj_mag = cp.sqrt(cp.sum(adjrow * adjrow, axis=-1))
     # 罚项 side 因子恒为 +1（原生面的 adj 行已 outward 定向，见 CPU 侧
     # `viscous_flux_kernel.py` 同一处说明，2026-09-22 修复的真实缺陷）。
-    base = cp.where(neumann, 0.0, c_ip_visc * adj_mag / h_ip[:, None])
+    base = c_ip_visc * adj_mag / h_ip[:, None]
     eta_v = base * cp.where(interior, mu + mut_avg, mu + mut_s)
     k_avg = mu * CP_AIR / Pr + mut_avg * CP_AIR / Pr_t
     k_self = mu * CP_AIR / Pr + mut_s * CP_AIR / Pr_t

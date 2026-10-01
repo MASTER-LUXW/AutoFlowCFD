@@ -420,3 +420,31 @@ def test_mixed_split_half_dispatches_by_partner_kind(order, side, monkeypatch):
         f"side={side} order={order}: 单元 {target_cell} 的能量残差没变 —— B-8 {side} 半区"
         f"没有按配对面的种类分派")
     np.testing.assert_allclose(r_dir[target_cell, :, :4], r_neu[target_cell, :, :4], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("order", [1, 2])
+def test_outlet_is_consistent_with_fully_developed_shear(order):
+    """Couette 线性剪切 `u = U y / H`（下壁静止、上壁以 U 运动、x 两端出口、z 对称）
+    是粘性算子的精确零点：出口取充分发展条件 du/dn = dT/dn = 0（x 端面上 du/dx = 0
+    本就成立），x 端面的切向牵引 tau_xy = mu U/H 原样保留。
+
+    2026-09-30 首版出口取零牵引（公共法向粘性通量为零），把 tau_xy 也强行置零，
+    出口单元的残差为 O(mu U/H^2)——Couette 精确解 1600 步偏离 1.0e-6 U（此前 2e-9）、
+    Blasius 解析初场 cf 最差点偏离 44%（`tests/validation`）。"""
+    mesh, ops, _ = _channel(order)
+    X = np.asarray(mesh.sps_coords)
+    U_top = 3.0
+    Q = np.zeros(X.shape[:2] + (5,))
+    Q[..., 0] = 1.225
+    Q[..., 4] = 101325.0
+    Q[..., 1] = U_top * X[..., 1] / HY
+    bc = {"z_min": {"type": "SYMMETRY"}, "z_max": {"type": "SYMMETRY"},
+          "wall_bottom": {"type": "WALL", "is_no_slip": True, "wall_velocity": [0.0, 0.0, 0.0]},
+          "wall_top": {"type": "WALL", "is_no_slip": True, "wall_velocity": [U_top, 0.0, 0.0]},
+          "x_min": {"type": "OUTLET", "p_outlet": 101325.0},
+          "x_max": {"type": "OUTLET", "p_outlet": 101325.0}}
+    r = _run(mesh, ops, Q, bc)
+    h = min(LX / 3, HY / 3, LZ / 2)
+    scale = MU * U_top / (HY * h)     # 出口单元上零牵引会留下的量级 tau_xy / h
+    assert np.abs(r[..., 1:4]).max() <= 1e-9 * scale, (
+        f"线性剪切不是粘性算子的零点：max|dU/dt| = {np.abs(r[..., 1:4]).max():.3e}（尺度 {scale:.3e}）")
