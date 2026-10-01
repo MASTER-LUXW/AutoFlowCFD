@@ -54,7 +54,7 @@ class _GPUDistributedTurbSourceMixin:
             ctx, apply_des=True)
         # 场更新（k 与 w = ln omega 的点隐式阻尼 + 输运，见 sst/update.py::advance_k_log_omega）
         ctx.view.update_fields_gpu(dt, dk_dt, dw_dt, transport_k=transport_k, transport_log_omega=transport_w)
-        self._finalize_turbulence_update_distributed(ctx, omega_wall_relaxation=True)
+        self._finalize_turbulence_update_distributed(ctx)
         self._write_back_turbulence_distributed(ctx, fields=True)
         return ctx.rho * ctx.view.nu_t
 
@@ -198,11 +198,10 @@ class _GPUDistributedTurbSourceMixin:
             ctx.transport, grad_vel=ctx.grad_vel, grad_k=grad_k, grad_log_omega=grad_w)
         return dk_dt, dw_dt, transport_k, transport_w
 
-    def _finalize_turbulence_update_distributed(self, ctx, *, omega_wall_relaxation: bool) -> None:
-        """k/omega 更新之后的后处理（compact 视图上）：模态滤波 + 正性限幅，
-        以及（显式路径）omega 壁面松弛。与单机 `finalize_turbulence_update`
-        同一顺序、同一开关语义（隐式路径把壁面条件放进残差，不能再投影）。"""
-        cp = ctx.cp
+    def _finalize_turbulence_update_distributed(self, ctx) -> None:
+        """k/omega 更新之后的后处理（compact 视图上）：模态滤波 + 正性限幅。与单机
+        `finalize_turbulence_update` 同一份；壁面 omega 只由扩散残差的面 Dirichlet
+        施加，不做步后松弛（2026-10-01 删除，理由见单机同名函数文档）。"""
         view = ctx.view
         n_sps = self.mesh.n_sps_per_cell
         if n_sps > 1:
@@ -213,12 +212,6 @@ class _GPUDistributedTurbSourceMixin:
             if frac is not None:
                 self._turb_filter_troubled_frac = frac
 
-        # omega 壁面 Wilcox 解析值的扩散侧闭合（2026-09-05），显式路径专用
-        if omega_wall_relaxation and getattr(self, "turb_model_name", "").upper() in ("SST", "DDES", "IDDES"):
-            from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import (
-                enforce_omega_wall_relaxation_gpu,
-            )
-            enforce_omega_wall_relaxation_gpu(cp, ctx.transport)
 
     def _write_back_turbulence_distributed(self, ctx, *, fields: bool) -> None:
         """compact 视图的结果换回原生排列、切 local 段写回真正的模型：nu_t 与

@@ -36,7 +36,7 @@ ODE 源项弛豫，而是通过 FR 高阶离散真正参与空间输运。
     faces.py        上面几个 kernel 的调用层与共享对流几何（对流/扩散共用）
     convection.py   对流残差（含去混叠体积项）与 `AFCFD_TURB_OVERINT` 解析
     diffusion.py    扩散残差（含去混叠体积项）
-    omega_wall.py   omega 壁面 Dirichlet 掩码、解析目标值、每步松弛
+    omega_wall.py   omega 壁面 Dirichlet 掩码、解析目标值
     residual.py     顶层编排：对流 + 扩散
 
 本 `__init__.py` re-export 全部既有公开名**以及测试在用的几个私有名**，
@@ -70,8 +70,6 @@ from .omega_wall import (  # noqa: F401
     _compute_omega_wall_target,
     _compute_wall_dirichlet_face_mask,
     _omega_wall_formula,
-    enforce_omega_wall_relaxation,
-    omega_wall_cell_targets,
     open_boundary_code_mask,
     wall_dirichlet_face_mask,
     resolve_omega_wall_mode,
@@ -83,8 +81,6 @@ __all__ = [
     "compute_scalar_convection_residual",
     "compute_scalar_diffusion_residual",
     "compute_turbulence_transport_residual",
-    "enforce_omega_wall_relaxation",
-    "omega_wall_cell_targets",
     "open_boundary_code_mask",
     "wall_dirichlet_face_mask",
     "precompute_scalar_convection_geometry",

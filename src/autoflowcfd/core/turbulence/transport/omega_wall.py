@@ -1,11 +1,12 @@
-"""AutoFlowCFD V2.0 - omega 壁面边界处理（Dirichlet 掩码、目标值、松弛）。
+"""AutoFlowCFD V2.0 - omega 壁面边界处理（Dirichlet 掩码、目标值）。
 
 从 `core/turbulence/transport.py` 拆出（2026-09-24）。纯搬家，逻辑未改。
 
-这一层与对流/扩散残差是**并列**的第三件事：SST 的 omega 在壁面上有解析
-值（Wilcox `omega_wall = 60*nu/(beta1*d1^2)`），它既要进面外插的 ghost
-规则（`_compute_wall_dirichlet_face_mask`），也要在每步之后单独施加一次
-松弛（`enforce_omega_wall_relaxation`）。
+SST 的 omega 在壁面上有解析值（Wilcox `omega_wall = 60*nu/(beta1*d1^2)`），
+它进对流的面外插 ghost 规则与扩散残差的面 Dirichlet（显式与隐式同一离散）。
+此前显式路径还在每步之后对壁面单元全部解点做一次松弛，2026-10-01 删除（正确的
+离散定常解不是它的不动点，见 `fr_solver/turbulence/source.py::
+finalize_turbulence_update` 文档）。
 """
 
 import os
@@ -16,7 +17,6 @@ from typing import Tuple
 
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 
-from ..sst.log_omega import log_omega, omega_from_log
 
 
 def _compute_wall_dirichlet_face_mask(solver) -> np.ndarray:
@@ -34,7 +34,7 @@ def _compute_wall_dirichlet_face_mask(solver) -> np.ndarray:
 
     真实 bug 修复（2026-09-12，cube_demo 791,492 单元真实网格 P1 阶段
     omega 独立于历史、确定性地在特定单元收敛到同一个数值~984312 的排查
-    发现，完整推导见 `enforce_omega_wall_relaxation` 文档）：此前这里把
+    发现）：此前这里把
     `cfg.get("type")=="WALL"` 的编码**不加区分**全部当作需要 Wilcox 近壁
     omega 解析式（`omega_wall=60*nu/(beta1*d1^2)`，专为*真实粘性无滑移*
     边界层设计）处理的壁面——但本项目的 WALL 类型边界组同时覆盖两种物理
@@ -47,7 +47,7 @@ def _compute_wall_dirichlet_face_mask(solver) -> np.ndarray:
     `is_no_slip=False`，其 owner 单元因为不属于任何 BL 棱柱加密区、`d1`
     （该单元到最近 body 表面的距离）经常很小，代入公式得到远超合理量级
     的值，被 `_compute_omega_wall_target` 内部的 `omega_max` 安全上限
-    钳成 1,000,000，随后 `enforce_omega_wall_relaxation` 每步把这些
+    钳成 1,000,000，随后当时的显式步后松弛（2026-10-01 已删除）每步把这些
     "滑移壁"owner 单元的 omega 强行按固定 relax=0.5 拉向这个物理上荒谬
     的目标（0.5*2267.82+0.5*1e6=501133.91，与真实观测的单步跳变值精确
     吻合，决定性验证：手术式重置 omega 场后单步复现同一批单元同一数值），
@@ -155,7 +155,7 @@ def open_boundary_code_mask(provider, n_faces: int) -> np.ndarray:
 #:
 #: **默认值没有改**：这是湍流模型的物理改动。本项目在 omega 壁面处理上
 #: 已经有两次"数学上更对但被真实数据证伪"的先例（显式 SIPG 罚项、点隐式
-#: 动态松弛系数，均见 `enforce_omega_wall_relaxation` 文档），所以这里
+#: 动态松弛系数；后者所在的显式步后松弛已于 2026-10-01 整体删除），所以这里
 #: 只提供开关与判据，改默认值必须有真实长程数据。
 #:
 #: 另注：本档与 `AFCFD_OMEGA_WALL_D1`（长度尺度口径 min|mean）是**两个
@@ -285,11 +285,10 @@ def _compute_omega_wall_target(
     此前唯一的消费者（`compute_scalar_convection_residual` 的上风
     ghost）碰巧没有暴露这个问题——无滑移壁面上对流通量本身趋于零，
     ghost 值再大也乘的是接近零的质量通量，天然被掩盖；2026-09-04/05
-    新增的两个消费者（`enforce_omega_wall_relaxation` 直接把这个值
-    混合进 omega_field 本身、以及当天当场被证伪撤销的 SIPG 罚项）
+    新增的两个消费者（当时的显式步后松弛直接把这个值混合进 omega_field
+    本身——已于 2026-10-01 删除，以及当天当场被证伪撤销的 SIPG 罚项）
     都没有这层"乘以近零对流通量"的天然保护，完全暴露了这个此前从未
-    触发过的缺口——真实复现：`enforce_omega_wall_relaxation` 点隐式
-    公式本身完全正确（bounded in [0,1) 已有专门单元测试钉住），但
+    触发过的缺口——真实复现：当时的点隐式松弛公式本身正确，但
     "正确地"把 omega 松弛向一个物理上荒谬的 1e14 目标值，5 步内就把
     全域 omega_mean 打到 1.08e12。修复：在这里、也就是唯一的真值来源，
     把 `omega_wall` 夹到 `solver.turb_model.omega_max`（没有该属性时
@@ -320,10 +319,9 @@ def _compute_omega_wall_target(
         #   order=3: 最近解点 0.0694*h -> (0.5/0.0694)^2 = 51.86x 高估
         #
         # 一个经过标定的壁面函数绝不该有这种阶数依赖。这也解释了为什么
-        # 本函数的目标值会顶到 `omega_max`、被下游文档称作"1e6 量级的
-        # 应急上限"而不是"日常合理松弛目标"（见
-        # `enforce_omega_wall_relaxation` 里两次被真实数据证伪的尝试
-        # 记录）——它被喂了一个小 2.4~7.2 倍的长度尺度。
+        # 本函数的目标值会顶到 `omega_max`、被当时的显式步后松弛（2026-10-01
+        # 已删除）文档称作"1e6 量级的应急上限"——它被喂了一个小 2.4~7.2 倍的
+        # 长度尺度。
         #
         # `mean`（单元内解点壁距的均值，≈ 形心壁距）与 Menter 的口径
         # 一致，且对阶数是一阶无关的。**默认仍为 `min`**：这是湍流模型
@@ -359,112 +357,3 @@ def _compute_omega_wall_target(
         omega_wall_value_face[wall_face_idx, :] = omega_wall[:, None]
 
     return omega_wall_value_face, wall_mask
-
-
-def enforce_omega_wall_relaxation(solver, dt, relax: float = None,
-                                   flat_face_override=None) -> None:
-    """真实 bug 修复（2026-09-04，cube_demo 791,492 单元真实网格 Order
-    Continuation P0->P1 跨阶后长程发散排查发现，grad_vel 修复之后仍持续
-    发散的第二个独立根因）：`_compute_omega_wall_target` 按 Wilcox 解析式
-    算出的壁面 omega 目标值（`omega_wall=60*nu/(beta1*d1^2)`，量级可达
-    1e5~1e6）**只通过 `compute_scalar_convection_residual` 的上风 ghost
-    生效**——`compute_scalar_diffusion_residual`（近壁 omega 动力学的
-    主导机制，因为壁面无滑移使对流通量本身趋于零）文档明确写明这个
-    解析值"当前对本函数的数值结果没有影响"，是已知、有意搁置的架构
-    缺口（"diffusion 侧的解析壁面通量是更大的独立工作"）。
-
-    真实后果（决定性验证，见 verify_gradfix_500steps.py 长程复现）：
-    没有扩散侧的强约束，纯靠耗散项 D_omega=rho*beta*omega^2 的显式
-    积分，边界层棱柱单元的 omega 会在数十~上百步内被压向下界
-    （真实测得：166,980个边界层单元里 90,416 个、66%在150步内至少有
-    一个解点 omega<1e-6，且这个比例逐步增长而非趋于稳定）——omega
-    塌陷经 nu_t=a1*k/max(a1*omega,...) 的近零分母奇点反过来把湍流
-    粘性比推到安全上限（真实测得 nu_t/nu_molecular~1e5，触及
-    TURBULENT_VISCOSITY_RATIO_MAX），持续向平均流注入过量粘性应力，
-    是 grad_vel 修复后仍能观测到的中长期（~100步后）持续增长的直接
-    驱动源（而不是 grad_vel bug 本身遗留的影响——那个 bug 修复后已
-    验证首个~90步完全无发散迹象，本机制独立起效于其后）。
-
-    本函数用最低数值风险的方式补上这个缺口：不改动扩散残差/DG通量
-    的稳定性特征，而是在 update_fields+positivity limiter 之后，
-    直接对 WALL 面 owner 单元的 omega_field 做一次向解析壁面目标值的
-    松弛（标准壁面函数做法，等价于 OpenFOAM omegaWallFunction 对
-    近壁单元值的直接赋值/松弛处理，不是发明新方案）。`relax` 是
-    固定松弛系数（每步只走向目标值的这个比例，不是硬性 hard-set，
-    避免单步冲击过大引入新的震荡）。
-
-    2026-09-05 曾尝试把这里改成"点隐式"推导的动态松弛系数
-    （`relax_eff = dt*c_wall/(1+dt*c_wall)`，c_wall 正比于 1/d1^2）
-    ——数学上确实排除了显式罚项的刚性超调（另一次已撤销的 SIPG
-    尝试），但真实网格验证**再次证伪**：动态 relax_eff 对细网格近壁
-    单元（d1 小）天然趋近 1（几乎每步都把 omega 直接怼到 target），
-    而 target 本身（哪怕已经被下面 `_compute_omega_wall_target` 的
-    `omega_max` 上限保护，不再是失控的 1e14）仍然是 1e6 这个量级的
-    "应急上限"，不是"日常合理松弛目标"——把大量边界层单元在几步内
-    强行拉到这个量级，会让 D_k=rho*beta_star*k*omega 这个耗散项跟着
-    暴涨，2 步内就把全域 k_mean 从 38 打到 0.17（真实数值，不是
-    NaN/Inf，但同样是不可接受的物理扰动）。而固定的 `relax=0.5`
-    对*所有*单元一视同仁地只走一半路程，天然更温和、给耦合系统留出
-    调整时间——这版已用真实生产续算验证 900+ 步保持平均流场零漂移
-    （见项目记忆），比"数学上更精确"但经验证更具破坏性的点隐式版本
-    更适合作为当前的工程选择。教训：这类近壁松弛的"正确性"不能只看
-    单个 ODE 是否无条件稳定，还要看它对耦合场（k 反过来依赖 omega）
-    造成的扰动幅度是否温和——本函数改回固定 relax，`dt` 参数保留
-    只是为了不破坏调用方签名，不再参与计算。
-
-    Args:
-        solver: FRSolver 实例
-        dt: 未使用（保留参数位置以兼容调用方签名，见上面"教训"一节）。
-        relax: 松弛系数，每步壁面 owner 单元的 `w = ln(omega)` 更新为
-            `(1-relax)*w + relax*ln(omega_wall_target)`（被求解的量是 w，
-            见 `sst/log_omega.py`；在 omega 上即几何平均）
-        flat_face_override: 分布式路径复用同一约定，见
-            `compute_turbulence_transport_residual` 同名参数文档
-    """
-    if relax is None:
-        relax = 0.5
-    hit_cells, avg_target = omega_wall_cell_targets(solver, flat_face_override)
-    if hit_cells.size == 0:
-        return
-    turb = solver.turb_model
-    w = log_omega(turb.omega_field[hit_cells, :], np)
-    turb.omega_field[hit_cells, :] = omega_from_log(
-        (1.0 - relax) * w + relax * log_omega(avg_target, np)[:, None], turb.omega_max, np)
-
-
-def omega_wall_cell_targets(solver, flat_face_override=None):
-    """壁面 owner 单元与各自的 Wilcox omega 目标值 `(hit_cells, avg_target)`。
-
-    显式路径的每步松弛（`enforce_omega_wall_relaxation`）用它。隐式路径曾用它
-    对壁面单元全部解点施加强约束，2026-09-30 已删除（高阶下把离壁很远的解点
-    也钉在壁面值上，见 `fr_solver/turbulence/implicit.py`"omega 壁面条件"一节）。
-    角部单元是多个 WALL 面的 owner，取各面目标值的平均。没有壁面时返回两个空数组。
-    """
-    empty = (np.zeros(0, dtype=np.int64), np.zeros(0))
-    wall_mask = _compute_wall_dirichlet_face_mask(solver)
-    if not np.any(wall_mask):
-        return empty
-
-    Q = solver.state.Q
-    rho = Q[:, :, 0]
-    omega_wall_value_face, has_wall = _compute_omega_wall_target(
-        solver, wall_mask, solver.mu_molecular, rho, flat_face_override=flat_face_override,
-    )
-
-    flat = flat_face_override if flat_face_override is not None else get_flat_face_geometry(solver.mesh, solver.ops)
-    wall_face_idx = np.nonzero(has_wall)[0]
-    if len(wall_face_idx) == 0:
-        return empty
-    owner_cells = flat.owner_cell[wall_face_idx]
-    target = omega_wall_value_face[wall_face_idx, 0]  # 同一面上恒为同一常数，见函数文档
-
-    # 同一个 owner 单元可能是多个 WALL 面的 owner（角部单元）——用
-    # np.add.at 累加再除以命中次数取平均目标值，不能直接花式索引赋值
-    # 覆盖（后写的面会覆盖先写的面，不是真正的平均）。
-    sum_target = np.zeros(solver.state.n_cells)
-    count = np.zeros(solver.state.n_cells)
-    np.add.at(sum_target, owner_cells, target)
-    np.add.at(count, owner_cells, 1.0)
-    hit_cells = np.nonzero(count > 0)[0]
-    avg_target = sum_target[hit_cells] / count[hit_cells]
-    return hit_cells, avg_target

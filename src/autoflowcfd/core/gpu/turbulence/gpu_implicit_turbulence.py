@@ -47,7 +47,7 @@ class GpuTurbulenceBackend:
         return get_positivity_limiter(self.solver, xp=self.xp).W
 
     def finalize(self, dtau) -> None:
-        self.solver._finalize_turbulence_update_gpu(omega_wall_relaxation=False)
+        self.solver._finalize_turbulence_update_gpu()
 
     def cell_colors(self):
         return gpu_cell_colors(self.xp, self.solver.flat_face_gpu, self.shape[0])

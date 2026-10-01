@@ -114,7 +114,8 @@ class TestTurbulenceResidual:
             CpuTurbulenceBackend,
             TurbulenceResidual,
         )
-        from autoflowcfd.core.turbulence.transport import omega_wall_cell_targets
+        from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+        from autoflowcfd.core.turbulence.transport import _compute_wall_dirichlet_face_mask
 
         t = nk_solver.turb_model
         backend = CpuTurbulenceBackend(nk_solver)
@@ -141,7 +142,8 @@ class TestTurbulenceResidual:
         np.testing.assert_allclose(r[real, 0], -rate_k.ravel()[real], rtol=1e-13, atol=0)
         np.testing.assert_allclose(r[real, 1], -rate_w.ravel()[real], rtol=1e-13, atol=0)
         assert np.all(r[~real] == 0.0), "零填充槽位不参与 Newton"
-        wall_cells, _ = omega_wall_cell_targets(nk_solver)
+        flat = get_flat_face_geometry(nk_solver.mesh, nk_solver.ops)
+        wall_cells = np.unique(flat.owner_cell[_compute_wall_dirichlet_face_mask(nk_solver)])
         assert wall_cells.size > 0, "算例里应当有壁面单元（否则上面的判据对壁面行是空的）"
 
 
@@ -204,3 +206,38 @@ def test_nk_sst_channel_converges_coupled_p3():
     assert mean[-1] < 1e-6 * max(mean), (max(mean), mean[-1])
     assert turb[-1] < 1e-6 * max(turb), (max(turb), turb[-1])
     assert s.turb_model.k_field[:, :40].min() > 0.0, "P3 下 k 出现负值"
+
+
+def test_explicit_steps_keep_the_converged_steady_state():
+    """隐式 NK 收敛的定常解，拿到显式 SSP-RK3 上推进几步应保持不变（它满足同一个离散方程）。
+
+    2026-10-01 之前显式路径每步把壁面 owner 单元全部解点的 ln(omega) 往壁面目标值
+    拉一半：同一个收敛解只做一次就把壁面单元 omega 改动 2.13 倍（P1），即正确的
+    离散定常解不是显式路径的不动点（显式槽道 40000 步残差停在 1e4）。删除后壁面
+    omega 只由扩散残差的面 Dirichlet 施加，显式与隐式是同一个离散问题。
+    """
+    from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+    from autoflowcfd.core.time_integration import TimeIntegrationScheme
+    from autoflowcfd.core.turbulence.transport import _compute_wall_dirichlet_face_mask
+
+    nk = _channel_solver(TimeIntegrationScheme.NEWTON_KRYLOV)
+    mean = []
+    for _ in range(120):
+        nk.step(2.0e-7)
+        mean.append(nk._newton_last_info["res_norm"])
+        if mean[-1] < 1e-9 * max(mean) and nk._newton_turb_state["last_info"]["res_norm"] < 1e-9:
+            break
+    assert mean[-1] < 1e-8 * max(mean)
+
+    ex = _channel_solver(TimeIntegrationScheme.SSP_RK3)
+    ex.state.U = np.array(nk.state.U, copy=True)
+    ex.state._update_primitives()
+    ex.turb_model.k_field = np.array(nk.turb_model.k_field, copy=True)
+    ex.turb_model.omega_field = np.array(nk.turb_model.omega_field, copy=True)
+    flat = get_flat_face_geometry(ex.mesh, ex.ops)
+    wall_cells = np.unique(flat.owner_cell[_compute_wall_dirichlet_face_mask(ex)])
+    om0 = ex.turb_model.omega_field[wall_cells].copy()
+    for _ in range(5):
+        ex.step(1e-6)
+    change = np.abs(np.log(ex.turb_model.omega_field[wall_cells] / om0)).max()
+    assert change < 1e-3, f"显式推进把收敛解的壁面单元 omega 改动了 {np.exp(change):.3f} 倍"

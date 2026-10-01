@@ -255,7 +255,7 @@ class DistributedTurbulenceBackend:
     def finalize(self, dtau) -> None:
         # 模态滤波在 compact 视图上做（它按"棱柱在前"分块），再写回 local
         self._sync_view()
-        finalize_turbulence_update(self._adapter, dtau, omega_wall_relaxation=False)
+        finalize_turbulence_update(self._adapter)
         self.model.k_field = self._to_local(self._view.k_field).copy()
         self.model.omega_field = self._to_local(self._view.omega_field).copy()
 

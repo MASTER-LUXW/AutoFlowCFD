@@ -42,7 +42,7 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
         solver, Q, grad_vel, d_wall, mu, apply_des=True)
 
     solver.turb_model.update_fields(dt, dk_dt, dw_dt, transport_k=transport_k, transport_log_omega=transport_w)
-    finalize_turbulence_update(solver, dt)
+    finalize_turbulence_update(solver)
     return (Sk, S_omega)
 
 
@@ -245,13 +245,16 @@ def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, apply_des: boo
     return Sk, S_omega, dk_dt, dw_dt, transport_k, transport_w
 
 
-def finalize_turbulence_update(solver, dt, *, omega_wall_relaxation: bool = True) -> None:
-    """`k/omega` 更新之后的两道后处理：模态滤波（非恒等滤波矩阵时）与
-    omega 壁面松弛。显式与隐式路径共用，顺序不变。
+def finalize_turbulence_update(solver) -> None:
+    """`k/omega` 更新之后的后处理：模态滤波（非恒等滤波矩阵时）。显式与隐式路径共用。
 
-    `omega_wall_relaxation=False`：隐式路径的壁面 omega 只由残差里的面
-    Dirichlet 施加，不能再做步后投影——那会让 Newton 解的方程与实际被执行
-    的更新不一致，残差永远降不下去（`implicit.py`"omega 壁面条件"一节）。"""
+    **壁面 omega 不在这里做步后松弛**（2026-10-01 删除）：壁面条件只由扩散残差里
+    的面 Dirichlet 施加（显式与隐式同一离散）。此前显式路径每步把壁面 owner 单元
+    **全部**解点的 ln(omega) 往壁面目标值拉一半——隐式 NK 收敛到 R≈1e-8 的槽道定常
+    解只做一次就被改动 2.13 倍（P1）/1.58 倍（P3），即正确的离散定常解不是显式
+    路径的不动点（不动点随伪时间步变化），显式槽道 40000 步残差停在 1e4；它的存在
+    理由（扩散残差缺 omega 壁面条件）09-26 起已不成立。隐式路径的同类整单元强约束
+    09-30 已因同一原因删除。"""
     # 真实 bug 修复（2026-09-12，cube_demo 791,492 单元真实网格 P1 直连
     # 长程测试发现）：k/omega 场同样需要与平均流一致的模态滤波，见
     # fr_solver/filter.py::filter_scalar_field 完整推导——此前"湍流走
@@ -302,23 +305,3 @@ def finalize_turbulence_update(solver, dt, *, omega_wall_relaxation: bool = True
         # 可能），滤波后必须重新过一遍正性/上界限制器，不能假设滤波
         # 输出天然满足这些约束。
         solver.turb_model.apply_positivity_limiter()
-
-    # 真实 bug 修复（2026-09-04）：omega 壁面 Wilcox 解析值只在对流项
-    # （近壁趋于零，因为无滑移）生效，扩散项（近壁 omega 动力学的主导
-    # 机制）此前完全没有把这个约束传递进去——见 transport.py::
-    # enforce_omega_wall_relaxation 文档，这是 grad_vel 修复后长程复现
-    # 里仍持续发散的第二个独立根因（边界层单元 omega 长期不受约束地
-    # 衰减到下界，经 nu_t 近零分母奇点放大湍流粘性比，持续向平均流
-    # 注入过量粘性应力）。
-    #
-    # 2026-09-05 曾尝试把下面这个松弛改成按 dt/d1/扩散系数物理推导的
-    # "点隐式"动态系数（数学上无条件稳定），真实网格验证证伪（细网格
-    # 近壁单元动态系数天然趋近 1，几步内把 k_mean 从 38 打到 0.17）
-    # 已完整撤销，见 enforce_omega_wall_relaxation 文档。**当前实现是
-    # 固定 relax=0.5，`dt` 只是为了不破坏调用方签名而保留的未使用参数
-    # ——不要被这行调用误导，真正的行为以被调用函数的文档为准。**
-    if omega_wall_relaxation and solver.turb_model_name in ["SST", "DDES", "IDDES"]:
-        from autoflowcfd.core.turbulence.transport import enforce_omega_wall_relaxation
-        enforce_omega_wall_relaxation(
-            solver, dt, flat_face_override=getattr(solver, "_turbulence_flat_face_override", None),
-        )

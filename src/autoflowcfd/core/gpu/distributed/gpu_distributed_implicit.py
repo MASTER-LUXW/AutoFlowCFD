@@ -74,7 +74,7 @@ class MultiGpuTurbulenceBackend:
         # 模态滤波在 compact 视图上做（按"棱柱在前"分块），再写回 local
         s, ctx = self.solver, self._ctx
         s._sync_turbulence_view(ctx)
-        s._finalize_turbulence_update_distributed(ctx, omega_wall_relaxation=False)
+        s._finalize_turbulence_update_distributed(ctx)
         self.model.k_field = self._to_local(ctx.view.k_field).copy()
         self.model.omega_field = self._to_local(ctx.view.omega_field).copy()
 

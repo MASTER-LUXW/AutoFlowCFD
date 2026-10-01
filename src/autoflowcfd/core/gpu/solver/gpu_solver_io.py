@@ -277,11 +277,11 @@ class _GPUSolverIOMixin:
 
         return dk_dt, dw_dt, transport_k, transport_w
 
-    def _finalize_turbulence_update_gpu(self, *, omega_wall_relaxation: bool = True):
-        """`k/omega` 更新之后的后处理：模态滤波 + 正性限幅（非恒等滤波时）与
-        omega 壁面松弛。隐式路径传 `omega_wall_relaxation=False`（同一个壁面
-        条件在它的残差里作强约束，理由见 `fr_solver/turbulence/implicit.py`）。"""
-        cp = get_cupy()
+    def _finalize_turbulence_update_gpu(self):
+        """`k/omega` 更新之后的后处理：模态滤波 + 正性限幅（非恒等滤波时）。显式与
+        隐式路径共用。壁面 omega 只由扩散残差的面 Dirichlet 施加，不做步后松弛
+        （2026-10-01 删除，理由见 CPU `fr_solver/turbulence/source.py::
+        finalize_turbulence_update` 文档）。"""
         # 真实 bug 修复（2026-09-12，与 CPU 版
         # fr_solver/turbulence.py::compute_turbulence_source 同一处修复，
         # 完整推导见 gpu_modal_filter.py::filter_scalar_field_gpu 文档）：
@@ -293,20 +293,6 @@ class _GPUSolverIOMixin:
             frac = self.turb_model_gpu.filter_fields_gpu(self.mesh.n_prism_cells, self.ops, _order)
             if frac is not None:
                 self._turb_filter_troubled_frac = frac
-
-        # 真实缺口修复（2026-09-05，代码复审发现）：CPU 版
-        # fr_solver/turbulence.py::compute_turbulence_source 在
-        # update_fields 之后调用 enforce_omega_wall_relaxation 修补
-        # omega 壁面扩散侧未闭合的架构缺口（见该处文档完整推导），
-        # GPU 版此前完全没有移植这一步——GPU SST/DDES/IDDES 长期运行
-        # 会重现与 CPU 版修复前完全相同的中长期发散机制（边界层 omega
-        # 衰减到下界 -> nu_t 近零分母奇点 -> 湍流粘性比失控）。
-        if omega_wall_relaxation and self.turb_model_name.upper() in ("SST", "DDES", "IDDES"):
-            from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import (
-                enforce_omega_wall_relaxation_gpu,
-            )
-            enforce_omega_wall_relaxation_gpu(cp, self)
-
 
     def _turbulent_mu_t_gpu(self):
         """当前湍流场对应的动力涡粘 `rho*nu_t`（含 SGS 部分）。"""

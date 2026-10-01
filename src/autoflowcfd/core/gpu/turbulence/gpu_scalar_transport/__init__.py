@@ -25,7 +25,7 @@ omega_wall / residual), 便于两侧对照 -- 本项目反复出过"同一语义
 ## 文件分工(2026-09-24 拆包, 原 743 行)
 
     faces.py             两侧坐标系的面外插、质量通量与 DG 提升(GPU，对应 CPU 版 face_frames.py)
-    omega_wall.py        omega 壁面目标值/松弛/Dirichlet 掩码(GPU)
+    omega_wall.py        omega 壁面目标值/Dirichlet 掩码(GPU)
     residual.py          对流/扩散残差与顶层编排(GPU)
 
 本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
@@ -40,8 +40,6 @@ from .faces import (  # noqa: F401
 from .omega_wall import (  # noqa: F401
     compute_omega_wall_target_gpu,
     compute_turbulence_face_masks_gpu,
-    enforce_omega_wall_relaxation_gpu,
-    omega_wall_cell_targets_gpu,
 )
 from .residual import (  # noqa: F401
     _scalar_volume_div_overintegrated_gpu,
@@ -58,6 +56,4 @@ __all__ = [
     "compute_scalar_diffusion_residual_gpu",
     "compute_turbulence_transport_residual_gpu",
     "compute_turbulence_face_masks_gpu",
-    "enforce_omega_wall_relaxation_gpu",
-    "omega_wall_cell_targets_gpu",
 ]

@@ -158,7 +158,7 @@ class CpuTurbulenceBackend:
         return get_positivity_limiter(self.solver).W
 
     def finalize(self, dtau) -> None:
-        finalize_turbulence_update(self.solver, dtau, omega_wall_relaxation=False)
+        finalize_turbulence_update(self.solver)
 
     def cell_colors(self):
         return single_machine_cell_colors(self.solver)
