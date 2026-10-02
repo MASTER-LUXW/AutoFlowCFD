@@ -9,7 +9,6 @@
 """
 
 import numpy as np
-from typing import Dict
 from dataclasses import dataclass
 
 
@@ -81,7 +80,7 @@ class FROperators:
     overint_D_fine_prism: np.ndarray = None
     overint_restrict_f2c_tet: np.ndarray = None
     overint_restrict_f2c_prism: np.ndarray = None
-    #: 无粘体积算子 `K = f2c·D_fine - Σ_面 lift·diag(w)·Tn` `(n_sps, n_fine, 3)`：修正项
+    #: 无粘体积算子 `K = f2c·D_fine - Σ_面 C_面` `(n_sps, n_fine, 3)`：修正项
     #: 的本侧通量取细层通量多项式的法向迹并并进体积项（离散守恒，见
     #: `fr/face_flux_trace.py`）。
     overint_lifted_div_tet: np.ndarray = None
@@ -102,32 +101,16 @@ class FROperators:
     D_native_tet: np.ndarray = None
     ref_native_tet: np.ndarray = None
     n_native_sps_tet: int = None
-    # native 四面体体积->自身面外插矩阵（Part7 阶段2设计文档"二·五"节+
-    # `native_tet/basis.py::build_native_tet_boundary_extrap`），
-    # 键是被排除的局部顶点 0~3。
-    boundary_extrap_native_tet: Dict[int, np.ndarray] = None
-    # native 四面体 DG 提升算子（`native_tet/basis.py::
-    # build_native_tet_lift` 文档），把面通量跳跃提升成体积节点修正
-    # 贡献——是坍缩坐标方案"1D Radau/VCJH 修正函数 + _distribute_point"
-    # 对非张量积单纯形基的唯一正确推广（native 基没有"坍缩计算方向"，
-    # 1D 修正函数沿某一轴分布这个概念不适用）。键同样是被排除的局部
-    # 顶点 0~3。
-    lift_native_tet: Dict[int, np.ndarray] = None
-    # `D_native_tet`/`lift_native_tet` 零填充到全局统一 SPs 宽度 `n_sps`
-    # 之后的版本（`fr/native_padding.py::pad_native_matrix_to_
-    # global`，见 Part8 文档"一、核心不变量：零填充块对角"）——生产
-    # 残差 kernel（`inviscid.py`/`inviscid_kernel.py` 等）要消费的是
-    # 这两个已经填充好的版本，不是上面两个原始（n_native 宽）版本；
-    # 保留原始版本是因为部分测试/诊断代码可能只关心真实自由度本身，
-    # 不需要每次都从填充版本反推。`D_3d_tet`/`filter_tet` 字段（上方
-    # dataclass 开头）现在就是这两者的别名，见模块文档。
+    # `D_native_tet` 零填充到全局统一 SPs 宽度 `n_sps` 之后的版本
+    # （`fr/native_padding.py::pad_native_matrix_to_global`，见 Part8 文档"一、核心
+    # 不变量：零填充块对角"）。`D_3d_tet` 字段（上方 dataclass 开头）就是它的别名。
+    # 面外插 / DG 提升见下方 `face_extrap_by_op`/`face_lift_by_op`。
     D_native_tet_padded: np.ndarray = None
-    lift_native_tet_padded: Dict[int, np.ndarray] = None
     # native 四面体指数模态滤波器（`native_tet_filter.py::build_native_
     # tet_modal_filter`，抑制混叠失稳，见该模块与 fr/modal_filter.py
     # 文档），填充到全局 n_sps 宽度（`native_padding.py::pad_native_
     # tet_filter_matrix_to_global`——填充块是单位矩阵，不是零，与
-    # D_native_tet_padded/lift_native_tet_padded 的"零填充"约定不同，
+    # D_native_tet_padded 的"零填充"约定不同，
     # 见该函数文档）。
     filter_native_tet_padded: np.ndarray = None
 
@@ -135,9 +118,8 @@ class FROperators:
     #
     # `AFCFD_PRISM_BASIS=native` 时构造并**别名到** `D_3d_prism`/
     # `filter_prism`（与四面体那套完全同一个做法），所以任何无条件读这两个
-    # 旧字段名的消费点自动拿到原生结果。面算子（外插/提升）键是 0~4 的
-    # `face_id`，与坍缩棱柱的 `(axis, side)` 之间的换算**只允许**走
-    # `native_prism_face.cube_face_to_native_prism_face`。
+    # 旧字段名的消费点自动拿到原生结果。面算子（外插/提升）在下方整表里按面算子
+    # 索引取（棱柱 face_id 0~4 即面编码 10~14）。
     #
     # 坍缩棱柱基已于 2026-09-23 删除，所以这一整组**恒为非 None**；原先
     # 记录档位的那个字段随之删除（只有一条基，再记"当前是哪条"就是冗余）。
@@ -145,90 +127,49 @@ class FROperators:
     D_native_prism: np.ndarray = None
     ref_native_prism: np.ndarray = None
     n_native_sps_prism: int = None
-    #: `face_id (0~4)` -> `(n_fp, n_native_sps_prism)` 体积->面外插。
-    boundary_extrap_native_prism: Dict[int, np.ndarray] = None
-    #: `face_id (0~4)` -> `(n_native_sps_prism, n_fp)` DG 提升。
-    lift_native_prism: Dict[int, np.ndarray] = None
-    #: 上面两个零填充到全局统一宽度 `(order+1)^3` 之后的版本 —— 生产残差
-    #: kernel 要消费的是这些，不是原始 `n_native` 宽的版本。
+    #: 零填充到全局统一宽度 `(order+1)^3` 之后的体积微分算子。
     D_native_prism_padded: np.ndarray = None
-    lift_native_prism_padded: Dict[int, np.ndarray] = None
     filter_native_prism_padded: np.ndarray = None
+    #: 全部原生面（含三角形面的 3 个坍缩顶点槽位）按面算子索引排好的外插 / 提升整表，
+    #: 填充到全局 `n_sps` 宽度：`(N_FACE_OPS, n_fp, n_sps)` / `(N_FACE_OPS, n_sps, n_fp)`
+    #: （`fr/operators/face_ops.py`）。逐面取用走 `native_face_extrap` 或平面面几何里的
+    #: 逐面面算子索引。
+    face_extrap_by_op: np.ndarray = None
+    face_lift_by_op: np.ndarray = None
 
-    # ---- 原生面算子的唯一分派入口（2026-09-18）----
+    # ---- 原生面算子的逐面分派入口 ----
     #
     # 两类单元的原生面算子键不同（四面体是 excluded_vertex 0~3，棱柱是
-    # face_id 0~4），而消费点拿到的是统一的 `cube_face_code`：
+    # face_id 0~4），三角形面还要按坍缩顶点槽位分 3 份，而消费点拿到的是统一的
+    # `cube_face_code` 与该侧槽位（`mesh.face_flux_points.owner_tri_slot`）：
     #
     #     [6, 10)  -> native 四面体面，excluded_vertex = code - 6
     #     [10, 15) -> native 棱柱面，  face_id        = code - 10
     #
-    # **必须走这两个方法**，不要在消费点自己判断：面 id 配错不会报错，
-    # 只会静默地对某个面用错矩阵（与当年多 GPU"四面体拿到棱柱矩阵"完全
-    # 同一类缺陷）。numba kernel 不能调方法，它们读的是
-    # `face_kernels.build_flat_face_geometry` 按同一套规则**叠好**的
-    # flat 数组（0~3 四面体、4~8 棱柱，按 `code - 6` 连续索引，于是那边
-    # 所有 `code >= 6` / `code - 6` 的既有写法原样成立）。
+    # **必须走这个方法**，不要在消费点自己判断：面 id 配错不会报错，只会静默地对
+    # 某个面用错矩阵。numba kernel 不能调方法，它们读平面面几何里的整表与逐面
+    # 面算子索引（`face_kernels.build_flat_face_geometry`，`fr/operators/face_ops.py`）。
 
-    def native_face_extrap(self, cube_face_code: int) -> np.ndarray:
-        """按 cube face code 取原生面的体积->面外插矩阵（**未填充**，
+    def native_face_extrap(self, cube_face_code: int, slot: int = 0) -> np.ndarray:
+        """按 cube face code 与坍缩顶点槽位取原生面的体积->面外插矩阵（**未填充**，
         形状 `(n_fp, n_native)`，`n_native` 随单元类型不同）。
 
         Raises:
-            ValueError: 不是原生面编码，或对应的基没有启用。
+            ValueError: 不是原生面编码，或给四边形面传了非零槽位。
         """
-        return self._native_face_op(cube_face_code, lift=False)
+        from .face_ops import face_op_index, is_triangle_face_code
 
-    def native_face_lift(self, cube_face_code: int) -> np.ndarray:
-        """按 cube face code 取原生面的 DG 提升矩阵（**未填充**，
-        形状 `(n_native, n_fp)`）。"""
-        return self._native_face_op(cube_face_code, lift=True)
-
-    def native_face_lift_padded(self, cube_face_code: int) -> np.ndarray:
-        """按 cube face code 取**已填充到全局 `n_sps` 宽度**的 DG 提升矩阵，
-        形状 `(n_sps, n_fp)`。
-
-        生产残差路径消费的是填充版本（见 `lift_native_tet_padded` /
-        `lift_native_prism_padded` 字段说明）。
-        """
         code = int(cube_face_code)
         if 6 <= code < 10:
-            if self.lift_native_tet_padded is None:
-                raise ValueError(
-                    f"cube_face_code={code} 是 native 四面体面，但算子集里"
-                    f"没有填充好的提升算子")
-            return self.lift_native_tet_padded[code - 6]
-        if 10 <= code < 15:
-            if self.lift_native_prism_padded is None:
-                raise ValueError(
-                    f"cube_face_code={code} 是 native 棱柱面，但算子集里"
-                    f"没有填充好的提升算子 —— 棱柱只有原生基一种实现"
-                    f"（2026-09-23 起），出现这个说明算子构造本身失败了")
-            return self.lift_native_prism_padded[code - 10]
-        raise ValueError(
-            f"cube_face_code={code} 不是原生面编码（四面体 [6,10)、"
-            f"棱柱 [10,15)）")
-
-    def _native_face_op(self, cube_face_code: int, lift: bool) -> np.ndarray:
-        code = int(cube_face_code)
-        if 6 <= code < 10:
-            table = (self.lift_native_tet if lift
-                     else self.boundary_extrap_native_tet)
-            if table is None:
-                raise ValueError(
-                    f"cube_face_code={code} 是 native 四面体面，但算子集里"
-                    f"没有对应的表 —— native 是四面体唯一实现，这说明算子"
-                    f"构造被跳过了")
-            return table[code - 6]
-        if 10 <= code < 15:
-            table = (self.lift_native_prism if lift
-                     else self.boundary_extrap_native_prism)
-            if table is None:
-                raise ValueError(
-                    f"cube_face_code={code} 是 native 棱柱面，但算子集里"
-                    f"没有原生棱柱面算子 —— 棱柱只有原生基一种实现"
-                    f"（2026-09-23 起），出现这个说明算子构造本身失败了")
-            return table[code - 10]
-        raise ValueError(
-            f"cube_face_code={code} 不是原生面编码（四面体 [6,10)、"
-            f"棱柱 [10,15)）——原生是唯一实现，没有第二个入口")
+            n_native = self.n_native_sps_tet
+        elif 10 <= code < 15:
+            n_native = self.n_native_sps_prism
+        else:
+            raise ValueError(
+                f"cube_face_code={code} 不是原生面编码（四面体 [6,10)、"
+                f"棱柱 [10,15)）——原生是唯一实现，没有第二个入口")
+        if slot != 0 and not bool(is_triangle_face_code(code)):
+            raise ValueError(f"四边形面（cube_face_code={code}）没有坍缩顶点，槽位只能是 0，收到 {slot}")
+        if self.face_extrap_by_op is None:
+            raise ValueError("算子集里没有原生面算子整表 —— 算子构造本身失败了")
+        return self.face_extrap_by_op[int(face_op_index(code, slot))][:, :int(n_native)]

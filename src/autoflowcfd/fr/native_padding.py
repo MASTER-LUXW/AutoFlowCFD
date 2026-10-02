@@ -37,15 +37,14 @@ def pad_native_matrix_to_global(matrix: np.ndarray, n_sps: int, pad_axes: tuple)
       只有 `[:n_native,:n_native,:]` 块非零——"列填零"确保填充行里任何
       有限数值都不贡献真实输出，"行填零"确保填充槽位残差恒为零、不会
       被时间推进意外改写。
-    - 对体积->面算子（如 `lift_native_tet`，形状 `(n_native,n_fp)`，
-      只有输出（体积）轴需要填充）：`pad_axes=(0,)`，产出 `(n_sps,n_fp)`。
-    - 对面->体积算子（如 `boundary_extrap_native_tet`，形状
-      `(n_fp,n_native)`，只有输入（体积）轴需要填充）：`pad_axes=(1,)`，
-      产出 `(n_fp,n_sps)`——**本函数目前未在 `FROperators` 里为
-      `boundary_extrap_native_tet` 主动调用**：它的消费点
-      （`build_cross_interp`/`_native_interp_matrix_nb`）已经各自按需
-      现场填充到 `n_sps` 宽度（Part6/7 既有设计），这里仍然支持这个用法
-      是为了让本函数覆盖三种矩阵形状的调用方保持同一个实现来源，供未来
+    - 对面提升算子（形状 `(n_native,n_fp)`，只有输出（体积）轴需要填充）：
+      `pad_axes=(0,)`，产出 `(n_sps,n_fp)`。
+    - 对体积->面外插算子（形状 `(n_fp,n_native)`，只有输入（体积）轴需要
+      填充）：`pad_axes=(1,)`，产出 `(n_fp,n_sps)`——两者都由
+      `fr/operators/face_ops.py::build_face_op_tables` 调用；跨单元插值
+      （`build_cross_interp`/`_native_interp_matrix_nb`）各自按需
+      现场填充到 `n_sps` 宽度（Part6/7 既有设计），这里保持三种矩阵形状
+      的调用方同一个实现来源，供未来
       需要"预先"（而非现场）填充时直接复用，不需要再写一份。
 
     Args:

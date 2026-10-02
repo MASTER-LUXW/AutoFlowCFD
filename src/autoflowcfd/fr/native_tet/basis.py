@@ -305,10 +305,11 @@ def match_face_nodes_by_physical_position(phys_a: np.ndarray, phys_b: np.ndarray
     return perm
 
 
-def native_tet_face_points(order: int, excluded_vertex: int) -> np.ndarray:
+def native_tet_face_points(order: int, excluded_vertex: int, slot: int = 0) -> np.ndarray:
     """排除顶点 `excluded_vertex` 的那个面上 `(order+1)^2` 个通量点的**参考**坐标
     `(r,s,t)`：坍缩三角形采样（`cube_to_tri_rs` 作用在张量积 Gauss-Legendre 方格上，
-    与棱柱三角形封盖同一套）经面上三个顶点的重心坐标放到参考四面体上。"""
+    与棱柱三角形封盖同一套）经面上三个顶点的重心坐标放到参考四面体上。`slot` 选坍缩
+    顶点（`fr/triangle_apex.py`）。"""
     from ..quadrature_points import gauss_legendre
     from ...grid.curved_mapping.curved_mapping import cube_to_tri_rs, tri_barycentric
 
@@ -318,15 +319,17 @@ def native_tet_face_points(order: int, excluded_vertex: int) -> np.ndarray:
     r_tri, s_tri = cube_to_tri_rs(g1.ravel(), g2.ravel())
     l1, l2, l3 = tri_barycentric(r_tri, s_tri)
 
-    face_vertex_idx = tuple(v for v in range(4) if v != excluded_vertex)
+    from ..triangle_apex import rotate_triangle
+
+    va, vb, vapex = rotate_triangle(tuple(v for v in range(4) if v != excluded_vertex), slot)
     L = np.zeros((len(l1), 4))
-    L[:, face_vertex_idx[0]] = l1
-    L[:, face_vertex_idx[1]] = l2
-    L[:, face_vertex_idx[2]] = l3
+    L[:, va] = l1
+    L[:, vb] = l2
+    L[:, vapex] = l3
     return np.column_stack([2.0 * L[:, 1] - 1.0, 2.0 * L[:, 2] - 1.0, 2.0 * L[:, 3] - 1.0])
 
 
-def _native_face_value_vandermondes(order: int, excluded_vertex: int):
+def _native_face_value_vandermondes(order: int, excluded_vertex: int, slot: int = 0):
     """`build_native_tet_boundary_extrap`/`build_native_tet_lift` 共用的
     准备步骤：体积节点、面 Flux Points 各自在参考坐标处的模态取值
     Vandermonde 矩阵，二者用同一组几何量、只是矩阵组合方式不同
@@ -337,7 +340,7 @@ def _native_face_value_vandermondes(order: int, excluded_vertex: int):
         (V_sps, V_fp, modes)：V_sps (n_native_sps,n_modes)，
         V_fp (n1d*n1d,n_modes)，modes 列表（与两个矩阵的列顺序一致）。
     """
-    fp = native_tet_face_points(order, excluded_vertex)
+    fp = native_tet_face_points(order, excluded_vertex, slot)
     ref_rst_sps, _ = build_native_tet_operators(order)
     a_sps, b_sps, c_sps = rst_to_abc(ref_rst_sps[:, 0], ref_rst_sps[:, 1], ref_rst_sps[:, 2])
     a_fp, b_fp, c_fp = rst_to_abc(fp[:, 0], fp[:, 1], fp[:, 2])
@@ -377,7 +380,7 @@ def _native_mode_norm_squared(i: int, j: int, k: int) -> float:
     return 2.0 ** (4 * i + 2 * j + 5) / ((2 * i + 1) * (i + j + 1) * (2 * i + 2 * j + 2 * k + 3))
 
 
-def build_native_tet_boundary_extrap(order: int, excluded_vertex: int) -> np.ndarray:
+def build_native_tet_boundary_extrap(order: int, excluded_vertex: int, slot: int = 0) -> np.ndarray:
     """native 四面体（路径C）体积->自身面外插矩阵，与
     `collapsed_basis.py::build_collapsed_boundary_extrap` 同样的用途和
     消费方式（`E @ Q_volume_nodal` 给出该面 Flux Points 上的取值），
@@ -398,10 +401,12 @@ def build_native_tet_boundary_extrap(order: int, excluded_vertex: int) -> np.nda
     native_tet_face_points_physical` 的物理版本，这里是它的参考坐标
     版本，直接给出 (r,s,t) 不需要另外反解）。
 
+    `slot`：该面的坍缩顶点槽位（`fr/triangle_apex.py`），决定通量点集与顺序。
+
     Returns:
         E: (n1d*n1d, n_native_sps)
     """
-    V_sps, V_fp, _ = _native_face_value_vandermondes(order, excluded_vertex)
+    V_sps, V_fp, _ = _native_face_value_vandermondes(order, excluded_vertex, slot)
 
     from scipy.linalg import lu_factor, lu_solve
 
@@ -410,7 +415,7 @@ def build_native_tet_boundary_extrap(order: int, excluded_vertex: int) -> np.nda
     return E
 
 
-def build_native_tet_lift(order: int, excluded_vertex: int) -> np.ndarray:
+def build_native_tet_lift(order: int, excluded_vertex: int, slot: int = 0) -> np.ndarray:
     """native 四面体（路径C）DG 提升算子（"lift"/"LIFT matrix"）——把
     某个真实面上逐 Flux Point 的通量跳跃（`F_common - F_own`，与坍缩
     坐标方案 `_distribute_point` 消费的 `jump` 同一物理含义）提升成对
@@ -461,10 +466,13 @@ def build_native_tet_lift(order: int, excluded_vertex: int) -> np.ndarray:
     直边四面体处处相同）逐项对应，可以复用外层同一次 `/dj` 除法，不需要
     在这里预先乘 `1/det_j`（详见调用处）。
 
+    `slot`：坍缩顶点槽位（`fr/triangle_apex.py`），与 `build_native_tet_boundary_extrap`
+    同一组通量点。
+
     Returns:
         Lift_ref: (n_native_sps, n1d*n1d)
     """
-    V_sps, V_fp, modes = _native_face_value_vandermondes(order, excluded_vertex)
+    V_sps, V_fp, modes = _native_face_value_vandermondes(order, excluded_vertex, slot)
     inv_norms = np.array([1.0 / _native_mode_norm_squared(i, j, k) for (i, j, k) in modes])
     return V_sps @ (inv_norms[:, None] * V_fp.T)
 

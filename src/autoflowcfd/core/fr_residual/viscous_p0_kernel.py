@@ -68,7 +68,7 @@ def compute_viscous_interface_correction_p0_kernel(
     Q_ghost: np.ndarray,          # (n_boundary_faces, n_fp, 5)
     vbc_kind: np.ndarray,         # (n_faces,) 粘性边界种类，见 flux_kernels/viscous_bc.py
     n_threads: int,
-    owner_cube_face: np.ndarray, neighbor_cube_face: np.ndarray,
+    owner_face_op: np.ndarray, neighbor_face_op: np.ndarray,
     ref_area_weight: np.ndarray,
     boundary_extrap_native: np.ndarray, lift_native: np.ndarray,
     # IP 罚项的长度尺度 `h_f`（`FlatFaceGeometry.ip_length`：面法向的单元
@@ -93,12 +93,12 @@ def compute_viscous_interface_correction_p0_kernel(
     - correction 形状 (n_cells, 1, 5)
 
     原生基（四面体 + 棱柱）：与通用 kernel（viscous_flux_kernel.py）
-    同一套做法 —— `owner_cube_face`/`neighbor_cube_face` 减 6 索引原生
+    同一套做法 —— `owner_face_op`/`neighbor_face_op` 索引原生
     算子表（四面体 [6,10)、棱柱 [10,15) 在同一张表里），自身面外插用
-    `boundary_extrap_native[code-6]`，面修正项用
-    `lift_native[code-6] @ (ref_area_weight⊙jump)`。order=0 时原生真实
+    `boundary_extrap_native[op]`，面修正项用
+    `lift_native[op] @ (ref_area_weight⊙jump)`。order=0 时原生真实
     自由度数恰好也是 1（受限 PKD 模态数 `(0+1)(0+2)(0+3)/6 = 1`），
-    `lift_native[code-6]` 形状 `(1, n_fp)`，矩阵乘本身就是这里 P0 特化
+    `lift_native[op]` 形状 `(1, n_fp)`，矩阵乘本身就是这里 P0 特化
     要的标量化形式。
 
     **2026-09-23 修复的真实缺陷（度量伴随行用错了量）**：这里此前用
@@ -134,7 +134,7 @@ def compute_viscous_interface_correction_p0_kernel(
     for f in prange(n_faces):
         tid = get_thread_id()
         oc = owner_cell[f]
-        oc_code = owner_cube_face[f]
+        oc_op = owner_face_op[f]
         # **原生面的罚项 side 因子必须是 +1**（2026-09-22 修复真实缺陷）：
         # 原生面的 `owner_adj_row_exact` 已按 outward 定向（见
         # `native_prism/face.py::native_prism_face_adj_rows` 与
@@ -145,14 +145,14 @@ def compute_viscous_interface_correction_p0_kernel(
         # 四面体全部 4 个面）罚项符号反了 —— 从耗散变成往壁面单元注入动量。
 
         if owner_is_primary[f]:
-            E_o = boundary_extrap_native[oc_code - 6]  # (n_fp, 1)
+            E_o = boundary_extrap_native[oc_op]  # (n_fp, 1)
 
             # P0 外插：n_sps=1 时 E (n_fp,1) @ field (1,k) 与
             # E[i,0]*field[0,...] 是**同一个矩阵乘**，不是近似——原注释
             # 写成「P0 简化外插」不准确（2026-09-14 更正）。
             # 而且 P0 的唯一基函数是常数 1，正确的插值算子在这里恒有
-            # E[i,0]=1（已实测核实：order=0 下 boundary_extrap_prism 与
-            # boundary_extrap_native_tet 全为 1.0），所以外插结果就等于
+            # E[i,0]=1（order=0 下全部面算子整表 `face_extrap_by_op` 的有效行
+            # 全为 1.0），所以外插结果就等于
             # 单元自身的值——这正是 P0 常数重构应有的行为。
             Q_o_s0 = Q[oc, 0]  # (5,)
             gv_o_s0 = grad_vel[oc, 0]  # (3,3)
@@ -239,22 +239,22 @@ def compute_viscous_interface_correction_p0_kernel(
                     Q_o_i, gv_o_i, gT_o_i, mut_o_i, adj_o_i, mu, Pr, Pr_t)
 
             dj = det_jacs[oc, 0]
-            # DG 提升算子：`lift_native[code-6]` 形状 (1,n_fp)，@ 之后直接
+            # DG 提升算子：`lift_native[op]` 形状 (1,n_fp)，@ 之后直接
             # 得到 (1,5)——本身已经是 P0 需要的标量化形式。
             weighted_jump_o = np.empty((n_fp, 5))
             for i in range(n_fp):
                 w_area = ref_area_weight[i]
                 for v in range(5):
                     weighted_jump_o[i, v] = w_area * jump_owner[i, v]
-            contrib_owner = matmul_small(lift_native[oc_code - 6], weighted_jump_o)  # (1,5)
+            contrib_owner = matmul_small(lift_native[oc_op], weighted_jump_o)  # (1,5)
             for v in range(5):
                 correction_per_thread[tid, oc, 0, v] += contrib_owner[0, v] / dj
 
         # Neighbor 侧（与通用 kernel 相同逻辑，n_sps=1 特化）
         if (not is_boundary[f]) and neighbor_is_primary[f]:
             nc = neighbor_cell[f]
-            nc_code = neighbor_cube_face[f]
-            E_n = boundary_extrap_native[nc_code - 6]
+            nc_op = neighbor_face_op[f]
+            E_n = boundary_extrap_native[nc_op]
 
             Q_n_s0 = Q[nc, 0]
             gv_n_s0 = grad_vel[nc, 0]
@@ -334,7 +334,7 @@ def compute_viscous_interface_correction_p0_kernel(
                 w_area = ref_area_weight[i]
                 for v in range(5):
                     weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
-            contrib_neighbor = matmul_small(lift_native[nc_code - 6], weighted_jump_n)  # (1,5)
+            contrib_neighbor = matmul_small(lift_native[nc_op], weighted_jump_n)  # (1,5)
             for v in range(5):
                 correction_per_thread[tid, nc, 0, v] += contrib_neighbor[0, v] / dj
 

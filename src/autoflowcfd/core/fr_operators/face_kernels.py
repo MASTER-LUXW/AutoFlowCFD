@@ -39,7 +39,7 @@ np.dot`（形状对不上直接崩溃，运气好被抓住了）；同样的两�
 
 内存设计：`owner_sources`/`neighbor_sources` 长度恒为 1 或 2（网格生成器
 把棱柱四边形侧面恒定拆分成 2 个三角子面，不会更多，见
-`fr/face_flux_points/merge.py::_resolve_multi_source` 文档），但绝大多数
+`fr/face_flux_points/merge.py` 模块文档），但绝大多数
 面（普通四面体-四面体内部面、未拆分的棱柱面）只有 1 个来源。如果统一按
 2 槽稠密填充，多出来的一半矩阵纯粹是浪费——在 P2、n_fp=9、n_sps=27 下，
 1.3M 面 × 2 角色(owner/neighbor) × 2 槽 × (9×27×8字节) 约 10GB，这在真实
@@ -193,15 +193,20 @@ class FlatFaceGeometry:
     # P0 专用：混合面中边界子面的面积占比（面积加权混合通量用），非混合面为 0。
     mixed_p0_bnd_frac: np.ndarray  # float64 (n_faces,)
 
-    # --- 原生基面算子，按 `cube_face_code - 6` 索引（四面体真实面
-    #     [6,10) -> 0~3、棱柱真实面 [10,15) -> 4~8 都在同一张表里）---
-    # 体积->自身面外插矩阵，(9, n_fp, n_sps)（列已填充到全局 n_sps 宽度：
-    # 消费方式恒为 `E @ Q_volume_nodal`）。
+    # --- 原生基面算子：按面算子索引 `op = (code - 6) + 9 * slot` 排好的整表
+    #     （`fr/operators/face_ops.py`；四面体面 6~9、棱柱面 10~14，三角形面再按坍缩
+    #     顶点槽位 `fr/triangle_apex.py` 分 3 份）。逐面取 `[owner_face_op[f]]` /
+    #     `[neighbor_face_op[f]]`。
+    # 体积->自身面外插矩阵，(27, n_fp, n_sps)（列已填充到全局 n_sps 宽度：
+    # 消费方式恒为 `E @ Q_volume_nodal`；四边形面不存在的槽位行是 NaN）。
     boundary_extrap_native: np.ndarray
-    # DG 提升算子，(9, n_sps, n_fp)（行已填充到 n_sps，见
+    # DG 提升算子，(27, n_sps, n_fp)（行已填充到 n_sps，见
     # native_padding.py::pad_native_matrix_to_global 与
     # native_tet/basis.py::build_native_tet_lift 文档）。
     lift_native: np.ndarray
+    # 两侧的面算子索引，int64 (n_faces,)；边界面的 neighbor 侧为 0（不被读取）。
+    owner_face_op: np.ndarray
+    neighbor_face_op: np.ndarray
 
     n1d: int
 
@@ -212,38 +217,6 @@ class FlatFaceGeometry:
     # prange + 写入共享 buffer。
     color_face_indices: list  # list of np.ndarray (int64), length = n_colors
     n_colors: int
-
-
-def native_face_extrap_stack(ops, n_sps: int, n_native_rows: int = None) -> np.ndarray:
-    """全部原生面编码的"解点 -> 面通量点"外插矩阵，形状 `(n_rows, n_fp, n_sps)`。
-
-    行 `code - 6`：0~3 是四面体 4 个面（编码 6~9），4~8 是原生棱柱 5 个面
-    （编码 10~14）；列补零到全局 `n_sps` 宽度。**唯一的组装处** —— 平面面
-    几何（`build_flat_face_geometry`）与正性保持限制器
-    （`time_integration/positivity/limiter.py`，要在全部通量点上检查可容许性）
-    都用它，不各写一份。
-
-    Args:
-        n_native_rows: 行数；缺省按算子里是否有原生棱柱算子自动决定。
-    """
-    from autoflowcfd.fr.native_padding import pad_native_matrix_to_global
-    from autoflowcfd.grid.connectivity.face_connectivity import (
-        CUBE_FACE_CODES,
-        NATIVE_FACE_CODE_BASE,
-        NATIVE_PRISM_FACE_CODE_RANGE,
-    )
-
-    if n_native_rows is None:
-        _lo, _hi = NATIVE_PRISM_FACE_CODE_RANGE
-        n_native_rows = (_hi - NATIVE_FACE_CODE_BASE
-                         if ops.boundary_extrap_native_prism is not None
-                         else CUBE_FACE_CODES["prism_native_f0"] - NATIVE_FACE_CODE_BASE)
-    first = ops.native_face_extrap(NATIVE_FACE_CODE_BASE)
-    out = np.zeros((n_native_rows, first.shape[0], n_sps), dtype=np.float64)
-    for code in range(NATIVE_FACE_CODE_BASE, NATIVE_FACE_CODE_BASE + n_native_rows):
-        out[code - NATIVE_FACE_CODE_BASE] = pad_native_matrix_to_global(
-            ops.native_face_extrap(code), n_sps, pad_axes=(1,))
-    return out
 
 
 def _check_one_primary_side_per_cell_face(owner, neighbor, is_boundary, owner_primary, neighbor_primary,
@@ -335,37 +308,18 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     mixed_bnd_face = ffp_data.mixed_bnd_face
     mixed_p0_bnd_frac = ffp_data.mixed_p0_bnd_frac
 
-    # native 四面体（路径C）专属算子（Part8 文档）：`ops.boundary_extrap_
-    # native_tet`/`ops.lift_native_tet_padded` 只在 `tet_basis_mode==
-    # "native"` 时非 None——不含 native 四面体的既有网格传零长度占位
-    # 数组，下游 kernel 对应分支（判据同样是 code>=6）永远不会被执行，
-    # 不改变任何现有行为（与 face_flux_points/merge.py 里同一个"自动
-    # 探测/零占位"原则一致）。boundary_extrap_native 的列同样需要填充
-    # 到全局 n_sps 宽度（native_tet_boundary_extrap 原始形状是
-    # (n_fp,n_native)，不像 D_native_tet_padded/lift_native_tet_padded
-    # 那样已经在 fr/operators.py 里填充过）。
-    #
-    # **两类原生单元叠进同一个数组**（2026-09-18）：行 0~3 是四面体的 4 个
-    # 面（编码 6~9），行 4~8 是原生棱柱的 5 个面（编码 10~14），于是
-    # 索引恒为 `code - 6`、连续。这样下游 kernel 里所有既有的
-    # `code >= 6` / `native[code - 6]` 写法**原样成立**，不需要为棱柱再加
-    # 一套平行分支 —— 平行分支正是本项目反复出过"两份实现只改一份"缺陷
-    # 的地方（面 id 配错不报错、只静默用错矩阵）。
-    #
-    # `side_factor = 1.0 if code >= 6` 那类判据对两类原生面同样正确：
-    # `*_adj_row_exact` 已经给出 outward 定向。
-    if ops.boundary_extrap_native_tet is not None:
-        from autoflowcfd.grid.connectivity.face_connectivity import NATIVE_FACE_CODE_BASE
+    # 原生面外插 / 提升整表与逐面算子索引（见 `FlatFaceGeometry.boundary_extrap_native`
+    # 字段文档）。槽位由单元连接关系唯一决定（`fr/face_flux_points/merge.py`）。
+    from autoflowcfd.fr.operators.face_ops import face_op_index
 
-        boundary_extrap_native = native_face_extrap_stack(ops, n_sps)
-        n_native_rows = boundary_extrap_native.shape[0]
-        lift_native = np.zeros((n_native_rows, n_sps, n_fp), dtype=np.float64)
-        for code in range(NATIVE_FACE_CODE_BASE,
-                          NATIVE_FACE_CODE_BASE + n_native_rows):
-            lift_native[code - NATIVE_FACE_CODE_BASE] = ops.native_face_lift_padded(code)
-    else:
-        boundary_extrap_native = np.zeros((0, n_fp, n_sps), dtype=np.float64)
-        lift_native = np.zeros((0, n_sps, n_fp), dtype=np.float64)
+    if ops.face_extrap_by_op is None:
+        raise ValueError("算子集里没有原生面算子整表 —— 算子构造本身失败了")
+    boundary_extrap_native = ops.face_extrap_by_op
+    lift_native = ops.face_lift_by_op
+    is_bnd = np.asarray(fc.is_boundary, dtype=bool)
+    owner_face_op = np.ascontiguousarray(face_op_index(owner_cube_face, ffp_data.owner_tri_slot), dtype=np.int64)
+    neighbor_face_op = np.ascontiguousarray(
+        np.where(is_bnd, 0, face_op_index(neighbor_cube_face, ffp_data.neighbor_tri_slot)), dtype=np.int64)
 
     # 参考面求积权重（见 `ref_area_weight` 字段文档）：所有面共用同一套
     # `[-1,1]^2` 张量积 Gauss-Legendre 网格，与 `fr/face_flux_points/merge.py`
@@ -434,6 +388,8 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
         mixed_bnd_face=mixed_bnd_face, mixed_p0_bnd_frac=mixed_p0_bnd_frac,
         boundary_extrap_native=boundary_extrap_native,
         lift_native=lift_native,
+        owner_face_op=owner_face_op,
+        neighbor_face_op=neighbor_face_op,
         n1d=n1d,
         color_face_indices=color_face_indices,
         n_colors=n_colors,

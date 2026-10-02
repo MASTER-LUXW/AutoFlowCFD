@@ -92,18 +92,12 @@ def _map_native_tet_to_physical_nb(rst, cell_nodes):
 
 
 @njit(cache=True)
-def _native_tet_face_points_nb(n1d, excluded_vertex, cell_nodes, sps_1d):
-    """`face_flux_points/geometry.py::native_tet_face_points_physical` 逐行移植：
-    在 native 四面体某个真实面上，用与棱柱三角形封盖相同的坍缩三角形
-    采样（`_cube_to_tri_rs_nb`/`_tri_barycentric_nb`，本文件已有）生成
-    `n1d*n1d` 个物理点——只用于选取物理点位置，与用哪套基函数表示体积场
-    无关，是安全复用（见 Python 参考实现文档）。"""
-    vi = _NATIVE_FACE_VI[excluded_vertex]
-    vj = _NATIVE_FACE_VJ[excluded_vertex]
-    vk = _NATIVE_FACE_VK[excluded_vertex]
-    Pi = cell_nodes[vi]
-    Pj = cell_nodes[vj]
-    Pk = cell_nodes[vk]
+def triangle_face_points_nb(n1d, Pa, Pb, Papex, sps_1d):
+    """三角形面上 `n1d*n1d` 个通量点的物理坐标：坍缩三角形采样
+    （`_cube_to_tri_rs_nb`/`_tri_barycentric_nb`）的重心坐标依次乘 `(Pa, Pb, Papex)`，
+    `b -> 1` 坍缩到 `Papex`。四面体的面与原生棱柱的封盖共用这一份（直边单元在三角面
+    上的映射是仿射的，重心组合即精确的物理点）；三个顶点按坍缩顶点槽位轮换
+    （`fr/triangle_apex.py`）由调用方给出。"""
     n_fp = n1d * n1d
     result = np.empty((n_fp, 3))
     for i in range(n1d):
@@ -112,8 +106,26 @@ def _native_tet_face_points_nb(n1d, excluded_vertex, cell_nodes, sps_1d):
             r_tri, s_tri = _cube_to_tri_rs_nb(sps_1d[i], sps_1d[j])
             l1, l2, l3 = _tri_barycentric_nb(r_tri, s_tri)
             for d in range(3):
-                result[flat, d] = l1 * Pi[d] + l2 * Pj[d] + l3 * Pk[d]
+                result[flat, d] = l1 * Pa[d] + l2 * Pb[d] + l3 * Papex[d]
     return result
+
+
+@njit(cache=True)
+def _native_tet_face_points_nb(n1d, excluded_vertex, slot, cell_nodes, sps_1d):
+    """原生四面体某个面（排除 `excluded_vertex`）在槽位 `slot` 下的物理通量点：
+    `face_flux_points/geometry.py::native_tet_face_points_physical` 的 numba 版。"""
+    fv = (_NATIVE_FACE_VI[excluded_vertex], _NATIVE_FACE_VJ[excluded_vertex],
+          _NATIVE_FACE_VK[excluded_vertex])
+    return triangle_face_points_nb(n1d, cell_nodes[fv[slot % 3]], cell_nodes[fv[(slot + 1) % 3]],
+                                   cell_nodes[fv[(slot + 2) % 3]], sps_1d)
+
+
+@njit(cache=True)
+def native_prism_cap_points_nb(n1d, cap, slot, cell_nodes, sps_1d):
+    """原生棱柱封盖 `cap`（0 底 `(0,1,2)` / 1 顶 `(3,4,5)`）在槽位 `slot` 下的物理通量点。"""
+    o = 3 * cap
+    return triangle_face_points_nb(n1d, cell_nodes[o + slot % 3], cell_nodes[o + (slot + 1) % 3],
+                                   cell_nodes[o + (slot + 2) % 3], sps_1d)
 
 
 @njit(cache=True)

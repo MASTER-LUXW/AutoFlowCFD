@@ -98,7 +98,7 @@ class HighOrderMesh:
         # ——坍缩坐标四面体基已删除（见 fr/operators.py 模块文档）。
         # `_build_order_geometry`/`set_order` 恒用 native 直边常数
         # Jacobian 构造四面体几何，`self.operators` 恒携带
-        # `D_native_tet_padded`/`lift_native_tet_padded` 等 native 字段。
+        # `D_native_tet_padded`/`face_lift_by_op` 等 native 字段。
         self.tet_basis_mode = "native"
 
         self.operators = generate_fr_operators(order)
@@ -240,11 +240,9 @@ class HighOrderMesh:
             prism_native = True
             # 原生棱柱面（编码 [10,15)）的硬护栏已移除（2026-09-19）：
             # 它当时挡住的四项已全部完成 ——
-            #   1. 残差 kernel 的面分派：原生算子改为**堆叠**成一个数组
-            #      （行 0~3 四面体、行 4~8 棱柱，索引恒为 `code - 6`），
-            #      于是全部既有的 `code >= 6` / `native[code-6]` 写法对两类
-            #      原生面原样成立，没有新增平行分支（见
-            #      `core/fr_operators/face_kernels.py` 那段说明）；
+            #   1. 残差 kernel 的面分派：原生算子**堆叠**成一张整表，按面算子
+            #      索引（面编码 + 三角形面坍缩顶点槽位，`fr/operators/face_ops.py`）
+            #      取，两类原生面同一条路径，没有平行分支；
             #   2. 面通量点几何：邻居插值矩阵走
             #      `interp_matrix_from_cube_coords_nb` 共用入口；adj 行与
             #      面积权重两条实现（numpy 与生产用的 numba）都补齐并交叉

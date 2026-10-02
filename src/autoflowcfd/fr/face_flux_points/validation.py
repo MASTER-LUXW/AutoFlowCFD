@@ -65,8 +65,7 @@ def validate_face_flux_point_residuals(
     说明这里的按半区掩码逻辑有问题，需要回去核对慢速路径判据，而不是
     简单放宽阈值掩盖）。因此多源面必须按 primary/secondary 半区掩码
     （nb_mask/ow_mask）分别取 max，且各自按自己实际所属子面的面积做
-    char_length 归一化（与旧慢速路径 _resolve_multi_source 逐半区各自
-    用 build_cross_interp 完全一致）。
+    char_length 归一化。
 
     Raises:
         RuntimeError: 存在面-侧残差相对局部面尺度超过 _ACCEPT_WARN_REL

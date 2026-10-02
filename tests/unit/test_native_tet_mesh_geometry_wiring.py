@@ -78,7 +78,7 @@ def test_native_mesh_loads_without_crashing_and_operators_are_native(order):
     assert mesh.tet_basis_mode == "native"
     assert mesh.operators.tet_basis_mode == "native"
     assert mesh.operators.D_native_tet_padded is not None
-    assert mesh.operators.lift_native_tet_padded is not None
+    assert mesh.operators.face_lift_by_op is not None
 
 
 @pytest.mark.parametrize("order", [1, 2, 3])

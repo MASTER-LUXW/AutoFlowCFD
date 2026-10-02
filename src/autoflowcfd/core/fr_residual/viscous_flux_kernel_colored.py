@@ -35,7 +35,7 @@ def compute_viscous_interface_correction_kernel_colored(
     Q_ghost: np.ndarray, vbc_kind: np.ndarray,
     face_indices: np.ndarray,  # 当前颜色组的面索引
     correction: np.ndarray,    # 共享输出 buffer（同色面无冲突，直接写入）
-    owner_cube_face: np.ndarray, neighbor_cube_face: np.ndarray,
+    owner_face_op: np.ndarray, neighbor_face_op: np.ndarray,
     ref_area_weight: np.ndarray,
     boundary_extrap_native: np.ndarray, lift_native: np.ndarray,
     # IP 罚项的长度尺度 `h_f`（`FlatFaceGeometry.ip_length`：面法向的单元
@@ -77,13 +77,13 @@ def compute_viscous_interface_correction_kernel_colored(
     for fi in prange(n_faces_in_color):
         f = face_indices[fi]
         oc = owner_cell[f]
-        oc_code = owner_cube_face[f]
+        oc_op = owner_face_op[f]
         # 罚项 side 因子恒为 +1（与非 colored 版本同一条，见那边的完整
         # 说明：原生面的 adj_row 已 outward 定向，此前误乘 `owner_side`
         # 让一半的面把耗散变成注入）。
 
         if owner_is_primary[f]:
-            E_o = boundary_extrap_native[oc_code - 6]
+            E_o = boundary_extrap_native[oc_op]
 
             Q_o = _extrap_matmul(Q[oc], E_o)
             gv_o = extrap_tensor3x3(grad_vel[oc], E_o)
@@ -158,7 +158,7 @@ def compute_viscous_interface_correction_kernel_colored(
                 w_area = ref_area_weight[i]
                 for v in range(5):
                     weighted_jump_o[i, v] = w_area * jump_owner[i, v]
-            contrib_owner = matmul_small(lift_native[oc_code - 6], weighted_jump_o)
+            contrib_owner = matmul_small(lift_native[oc_op], weighted_jump_o)
             for s in range(n_sps):
                 dj = det_jacs[oc, s]
                 for v in range(5):
@@ -166,8 +166,8 @@ def compute_viscous_interface_correction_kernel_colored(
 
         if (not is_boundary[f]) and neighbor_is_primary[f]:
             nc = neighbor_cell[f]
-            nc_code = neighbor_cube_face[f]
-            E_n = boundary_extrap_native[nc_code - 6]
+            nc_op = neighbor_face_op[f]
+            E_n = boundary_extrap_native[nc_op]
 
             Q_n_native = _extrap_matmul(Q[nc], E_n)
             gv_n_native = extrap_tensor3x3(grad_vel[nc], E_n)
@@ -235,7 +235,7 @@ def compute_viscous_interface_correction_kernel_colored(
                 w_area = ref_area_weight[i]
                 for v in range(5):
                     weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
-            contrib_neighbor = matmul_small(lift_native[nc_code - 6], weighted_jump_n)
+            contrib_neighbor = matmul_small(lift_native[nc_op], weighted_jump_n)
             for s in range(n_sps):
                 dj = det_jacs[nc, s]
                 for v in range(5):

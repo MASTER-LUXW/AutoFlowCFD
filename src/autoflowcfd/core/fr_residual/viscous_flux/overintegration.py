@@ -22,8 +22,8 @@
 
 ## 体积算子 K
 
-与无粘同一个 `K = f2c·D_fine - Σ_面 lift·diag(w)·Tn`（`fr/face_flux_trace.py`）：体积散度的
-L2 投影减去修正项的本侧通量迹，界面核只施加公共通量与内罚项——离散守恒。
+与无粘同一个 `K = f2c·D_fine - Σ_面 C_面`（`fr/face_flux_trace.py`）：体积散度的
+L2 投影减去修正项本侧通量迹的精确面积分 `C_面`，界面核只施加公共通量与内罚项——离散守恒。
 """
 
 import numpy as np
@@ -31,8 +31,8 @@ import numpy as np
 from autoflowcfd.core.fr_operators.flux_kernels import viscous_physical_flux_batch
 from autoflowcfd.core.fr_operators.volume_contract import (
     OVERINT_CHUNK_CELLS,
+    contract_lifted_divergence,
     contract_shared_operator_1axis,
-    contract_shared_operator_2axis,
     contravariant_flux_from_metric,
 )
 
@@ -50,8 +50,8 @@ def viscous_volume_term(Q, grad_vel, grad_T, mu_t_field, mu, Pr, Pr_t, oi, n_sps
     div_comp = np.zeros((n_cells, n_sps, 5))
     # 每段自带自己的 n_fine 与已切好的细点度量；度量按**段内局部**索引切
     # （`i0 = c0 - seg_lo`）——用全局 c0 去切段内数组会静默取到错误的单元。
-    for (seg_lo, seg_hi, n_fine, det_seg, inv_seg, op_c2f, _D_fine, _f2c), op_K in zip(oi["segs"],
-                                                                                       oi["lifted_div"]):
+    for (seg_lo, seg_hi, n_fine, det_seg, inv_seg, op_c2f, _D_fine, _f2c), (K_all, combo_seg) in zip(
+            oi["segs"], oi["lifted_div"]):
         for c0 in range(seg_lo, seg_hi, OVERINT_CHUNK_CELLS):
             c1 = min(c0 + OVERINT_CHUNK_CELLS, seg_hi)
             nb = c1 - c0
@@ -73,6 +73,6 @@ def viscous_volume_term(Q, grad_vel, grad_T, mu_t_field, mu, Pr, Pr_t, oi, n_sps
             del Q_f, gv_f, gT_f, mut_f
             G_tilde_f = contravariant_flux_from_metric(det_seg[i0:i1], inv_seg[i0:i1], G_phys_f)
             del G_phys_f
-            div_comp[c0:c1] = contract_shared_operator_2axis(op_K, G_tilde_f)
+            div_comp[c0:c1] = contract_lifted_divergence(K_all, combo_seg[i0:i1], G_tilde_f)
             del G_tilde_f
     return div_comp

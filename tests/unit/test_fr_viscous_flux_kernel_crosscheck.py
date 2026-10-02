@@ -85,7 +85,7 @@ def _compute_residual_via_new_kernel(U, mesh, ops, mu_t_field=None, boundary_gho
         flat.mixed_ow_partner, flat.mixed_ow_mask,
         Q_ghost, vbc_kind,
         n_threads,
-        flat.owner_cube_face, flat.neighbor_cube_face,
+        flat.owner_face_op, flat.neighbor_face_op,
         flat.ref_area_weight,
         flat.boundary_extrap_native, flat.lift_native,
         # IP 罚项的几何量与按阶数解析的常数（2026-09-23 新增形参，

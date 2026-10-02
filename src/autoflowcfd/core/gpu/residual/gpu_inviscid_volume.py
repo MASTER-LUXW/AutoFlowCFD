@@ -8,10 +8,7 @@ AutoFlowCFD V2.0 - P>=1 高阶 FR 无粘残差 GPU 体积项 (从 gpu_inviscid.p
 
 import numpy as np
 
-from autoflowcfd.core.gpu.residual.gpu_volume_contract import (
-    gpu_contract_shared_operator_1axis,
-    gpu_contract_shared_operator_2axis,
-)
+from autoflowcfd.core.gpu.residual.gpu_volume_contract import gpu_contract_shared_operator_1axis
 from autoflowcfd.core.gpu.residual.gpu_flux import (
     euler_physical_flux_gpu,
     conserved_to_primitive_gpu,
@@ -90,7 +87,7 @@ def compute_volume_term_gpu(cp, U, mesh_data, ops_data, n_cells, n_sps, n_prism)
     # 1.4e-16 / 0.0）。两段 n_fine 不同，所以不能再共用一份
     # `(n_cells, n_fine, ...)` 的整场细点数组，必须逐段各自分配。
     from autoflowcfd.core.gpu.gpu_overintegration import (
-        get_overintegration_segs_gpu, lifted_divergence_gpu,
+        contract_lifted_divergence_gpu, get_overintegration_segs_gpu, lifted_divergence_gpu,
     )
 
     _segs = get_overintegration_segs_gpu(mesh_data, ops_data, n_cells, n_prism)
@@ -100,7 +97,8 @@ def compute_volume_term_gpu(cp, U, mesh_data, ops_data, n_cells, n_sps, n_prism)
             "P>=1 GPU 无粘残差需要过积分细点度量与 overint_* 算子，这里缺失：网格或算子是按"
             "不完整的阶数几何构造/上传的")
     div_comp = cp.zeros((n_cells, n_sps, 5), dtype=cp.float64)
-    for (lo, hi, n_fine_seg, adj_seg, c2f, D_fine, f2c), K in zip(_segs, lifted_divergence_gpu(ops_data)):
+    for (lo, hi, n_fine_seg, adj_seg, c2f, D_fine, f2c), (K_all, combo) in zip(
+            _segs, lifted_divergence_gpu(mesh_data, ops_data)):
         if hi <= lo:
             continue
         Q_fine = gpu_contract_shared_operator_1axis(c2f, Q[lo:hi])
@@ -112,8 +110,8 @@ def compute_volume_term_gpu(cp, U, mesh_data, ops_data, n_cells, n_sps, n_prism)
         F_tilde_fine = cp.matmul(adj_seg, F_phys_fine)
         del F_phys_fine
         # K = f2c·D_fine - Σ_面 lift·W·Tn：体积散度的 L2 投影减去修正项的本侧通量迹，
-        # 界面只施加公共通量（与 CPU 同一个算子，fr/face_flux_trace.py）
-        div_comp[lo:hi] = gpu_contract_shared_operator_2axis(K, F_tilde_fine)
+        # 界面只施加公共通量（与 CPU 同一个算子，fr/face_flux_trace.py）；K 按单元槽位组合取
+        div_comp[lo:hi] = contract_lifted_divergence_gpu(cp, K_all, combo, F_tilde_fine)
         del F_tilde_fine
 
     residual = -div_comp / det_jacs[..., None]

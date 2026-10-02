@@ -39,7 +39,7 @@ def compute_inviscid_interface_correction_kernel_colored(
     precond_mode: int,   # AUSM+up 预处理声速作用域，见 kernels.py::
                          # compute_ausm_up_flux 文档；必须由纯 Python 层
                          # 用 resolve_ausm_precond_mode() 解析后传入
-    owner_cube_face: np.ndarray, neighbor_cube_face: np.ndarray,
+    owner_face_op: np.ndarray, neighbor_face_op: np.ndarray,
     ref_area_weight: np.ndarray,
     boundary_extrap_native: np.ndarray, lift_native: np.ndarray,
 ) -> None:
@@ -62,7 +62,7 @@ def compute_inviscid_interface_correction_kernel_colored(
 原生基（四面体 + 棱柱）：与
     `compute_inviscid_interface_correction_kernel`（非 colored 版本）
     完全相同的做法，两处必须同步修改——见该函数文档完整说明
-    （`owner_cube_face`/`neighbor_cube_face` 减 6 索引原生算子表、side
+    （`owner_face_op`/`neighbor_face_op` 索引原生面算子整表、side
     因子固定 +1、DG 提升算子 `lift_native`）。坍缩坐标那条并行路径已于
     2026-09-23 在两处同步删除（生产不可达，见该函数文档）。
     """
@@ -73,10 +73,10 @@ def compute_inviscid_interface_correction_kernel_colored(
     for fi in prange(n_faces_in_color):
         f = face_indices[fi]
         oc = owner_cell[f]
-        oc_code = owner_cube_face[f]
+        oc_op = owner_face_op[f]
 
         if owner_is_primary[f]:
-            E_o = boundary_extrap_native[oc_code - 6]
+            E_o = boundary_extrap_native[oc_op]
 
             Q_o = _extrap_matmul(Q[oc], E_o)
             adjrow_o = owner_adj_row_exact[f]  # (n_fp, 3)，逐 FP 精确值，见函数文档
@@ -116,7 +116,7 @@ def compute_inviscid_interface_correction_kernel_colored(
                 w_area = ref_area_weight[i]
                 for v in range(5):
                     weighted_flux_o[i, v] = w_area * flux_owner[i, v]
-            contrib_owner = matmul_small(lift_native[oc_code - 6], weighted_flux_o)
+            contrib_owner = matmul_small(lift_native[oc_op], weighted_flux_o)
             for s in range(n_sps):
                 dj = det_jacs[oc, s]
                 for v in range(5):
@@ -124,8 +124,8 @@ def compute_inviscid_interface_correction_kernel_colored(
 
         if (not is_boundary[f]) and neighbor_is_primary[f]:
             nc = neighbor_cell[f]
-            nc_code = neighbor_cube_face[f]
-            E_n = boundary_extrap_native[nc_code - 6]
+            nc_op = neighbor_face_op[f]
+            E_n = boundary_extrap_native[nc_op]
 
             Q_n_native = _extrap_matmul(Q[nc], E_n)
             adjrow_n_native = neighbor_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
@@ -163,7 +163,7 @@ def compute_inviscid_interface_correction_kernel_colored(
                 w_area = ref_area_weight[i]
                 for v in range(5):
                     weighted_flux_n[i, v] = w_area * flux_neighbor[i, v]
-            contrib_neighbor = matmul_small(lift_native[nc_code - 6], weighted_flux_n)
+            contrib_neighbor = matmul_small(lift_native[nc_op], weighted_flux_n)
             for s in range(n_sps):
                 dj = det_jacs[nc, s]
                 for v in range(5):

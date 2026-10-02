@@ -66,7 +66,7 @@ def test_wrapper_object_missing_gpu_required_attributes(dist_fc_native):
     missing = [
         name for name in (
             "owner_cell", "neighbor_cell", "owner_adj_row_exact",
-            "neighbor_adj_row_exact", "owner_cube_face", "neighbor_cube_face",
+            "neighbor_adj_row_exact", "owner_face_op", "neighbor_face_op",
             "true_area_weight", "ref_area_weight", "boundary_extrap_native", "lift_native",
             "color_face_indices", "n_colors", "mixed_nb_partner",
         )
@@ -91,12 +91,12 @@ def test_base_flat_is_gpu_compatible_native(dist_fc_native):
 
     assert gpu_flat.n_faces == dist_fc_native.base_flat.n_faces
     assert np.array_equal(gpu_flat.owner_cell, dist_fc_native.base_flat.owner_cell)
-    assert np.array_equal(gpu_flat.owner_cube_face, dist_fc_native.base_flat.owner_cube_face)
+    assert np.array_equal(gpu_flat.owner_face_op, dist_fc_native.base_flat.owner_face_op)
     assert np.any(dist_fc_native.base_flat.owner_cube_face >= 6), (
         "native 网格的合成测试网格应该包含至少一个 native 四面体面，"
         "否则本测试没有真正覆盖 native 字段透传"
     )
-    assert np.array_equal(gpu_flat.lift_native, dist_fc_native.base_flat.lift_native)
+    assert np.array_equal(gpu_flat.lift_native, dist_fc_native.base_flat.lift_native, equal_nan=True)
 
 
 def test_wrapper_object_rejected_by_gpu_flat_face_constructor(dist_fc_native):

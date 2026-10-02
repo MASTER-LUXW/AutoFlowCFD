@@ -278,6 +278,8 @@ class TestLayoutInvariantHolds:
             "prism_inv": np.tile(np.eye(3), (n_prism, n_fine_prism, 1, 1)),
             "tet_det": np.ones(n_tet),
             "tet_inv": np.tile(np.eye(3), (n_tet, 1, 1)),
+            "prism_k_combo": np.zeros(n_prism, dtype=np.int64),
+            "tet_k_combo": np.zeros(n_tet, dtype=np.int64),
         }
         oi = get_overintegration_context(mesh, ops)
         assert oi is not None

@@ -84,7 +84,7 @@ def _segments(mesh, ops, npr, nte):
     oi = get_overintegration_context(mesh, ops)
     overint = oi is not None and resolve_turb_overintegration() == "on"
     D_sp = {0: np.asarray(ops.D_3d_prism), 1: np.asarray(ops.D_native_tet_padded)}
-    n_cells, n_sps = int(mesh.n_cells), int(mesh.n_sps_per_cell)
+    n_cells = int(mesh.n_cells)
     n_prism = int(mesh.n_prism_cells)
     for kind, (lo, hi) in enumerate(((0, n_prism), (n_prism, n_cells))):
         n = npr if kind == 0 else nte
@@ -179,7 +179,7 @@ def assemble_turbulence_blocks(ctx: TurbulenceLinearization, kw_flat, want_coupl
         add_turbulence_face_blocks_color(
             faces, acc[0], acc[1], slot, n_prism, npr, nte, kw, gam, dG, inv_sp, D_prism, D_tet,
             flat.owner_cell, flat.neighbor_cell, flat.is_boundary, flat.owner_is_primary,
-            flat.neighbor_is_primary, flat.owner_cube_face, flat.neighbor_cube_face, n_own, n_nei,
+            flat.neighbor_is_primary, flat.owner_face_op, flat.neighbor_face_op, n_own, n_nei,
             flat.owner_adj_row_exact, flat.neighbor_adj_row_exact, flat.ref_area_weight,
             flat.boundary_extrap_native, flat.lift_native, flat.ip_length, float(c_ip),
             flat.neighbor_src0_cell, flat.neighbor_src0_tpl, flat.neighbor_src0_tid, flat.neighbor_src1_idx,

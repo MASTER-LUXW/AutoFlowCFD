@@ -4,7 +4,7 @@
 
 同一个物理面上，owner 与 neighbor 各自的面局部参数化给出的通量点**顺序
 不同**（plate_demo 真实网格：53.3% 的内部面两侧顺序不一致——三角面的
-点可以旋转/镜像）。DG 提升算子 `lift_native[code-6]` 按**该侧自己的**顺序
+点可以旋转/镜像）。DG 提升算子 `lift_native[op]` 按**该侧自己的**顺序
 消费跳变量，所以两侧的跳变量必须分别在各自的顺序里构造：
 
     owner 侧      self  = E_owner    @ phi[owner]             （owner 顺序）
@@ -38,7 +38,7 @@ from autoflowcfd.core.fr_operators.small_dense import matvec_small
 @njit(cache=True, parallel=True)
 def extrapolate_scalar_pair_kernel(
     scalar_sps,
-    self_cell, self_cube_face, boundary_extrap_native,
+    self_cell, self_face_op, boundary_extrap_native,
     other_src0_cell, other_src0_tpl, other_src0_tid,
     other_src1_idx, other_src1_cell, other_src1_mat,
     apply_boundary_ghost,
@@ -65,7 +65,7 @@ def extrapolate_scalar_pair_kernel(
         sc = self_cell[f]
         if sc < 0:
             continue
-        E = boundary_extrap_native[self_cube_face[f] - 6]
+        E = boundary_extrap_native[self_face_op[f]]
         for i in range(n_fp):
             v = 0.0
             for s in range(n_sps):
@@ -111,7 +111,7 @@ def extrapolate_scalar_pair_kernel(
 
 @njit(cache=True, parallel=True)
 def face_mass_flux_kernel(
-    rho_u, owner_cell, owner_cube_face, neighbor_cell, neighbor_cube_face, boundary_extrap_native,
+    rho_u, owner_cell, owner_face_op, neighbor_cell, neighbor_face_op, boundary_extrap_native,
     owner_src0_cell, owner_src0_tpl, owner_src0_tid, owner_src1_idx, owner_src1_cell, owner_src1_mat,
     mixed_ow_partner, mixed_ow_mask, normal_owner, normal_neighbor,
 ):
@@ -130,7 +130,7 @@ def face_mass_flux_kernel(
     m_n = np.zeros((n_faces, n_fp))
     for f in prange(n_faces):
         oc = owner_cell[f]
-        E = boundary_extrap_native[owner_cube_face[f] - 6]
+        E = boundary_extrap_native[owner_face_op[f]]
         for i in range(n_fp):
             acc = 0.0
             for d in range(3):
@@ -145,7 +145,7 @@ def face_mass_flux_kernel(
         c0 = owner_src0_cell[f]
         idx1 = owner_src1_idx[f]
         mp = mixed_ow_partner[f]
-        En = boundary_extrap_native[neighbor_cube_face[f] - 6]
+        En = boundary_extrap_native[neighbor_face_op[f]]
         for i in range(n_fp):
             acc = 0.0
             for d in range(3):
@@ -190,7 +190,7 @@ def convection_jump_point(m, ps, po):
 @njit(cache=True, parallel=True)
 def diffusion_face_jumps_kernel(
     phi, gamma, grad_phi,
-    self_cell, self_cube_face, boundary_extrap_native,
+    self_cell, self_face_op, boundary_extrap_native,
     other_src0_cell, other_src0_tpl, other_src0_tid, other_src1_idx, other_src1_cell, other_src1_mat,
     normal, h_face, c_ip, is_boundary, is_dirichlet, target,
 ):
@@ -214,7 +214,7 @@ def diffusion_face_jumps_kernel(
         sc = self_cell[f]
         if sc < 0:
             continue
-        E = boundary_extrap_native[self_cube_face[f] - 6]
+        E = boundary_extrap_native[self_face_op[f]]
         c0 = other_src0_cell[f]
         idx1 = other_src1_idx[f]
         h = h_face[f]
@@ -269,7 +269,7 @@ def _lift_one_side(jump_f, adj_row_f, ref_area_weight, lift, n_fp):
 @njit(cache=True, parallel=True)
 def lift_side_jumps_kernel_colored(
     jump_owner, jump_neighbor, sign,
-    owner_cell, neighbor_cell, owner_cube_face, neighbor_cube_face,
+    owner_cell, neighbor_cell, owner_face_op, neighbor_face_op,
     owner_adj_row_exact, neighbor_adj_row_exact, ref_area_weight, lift_native,
     owner_is_primary, neighbor_is_primary, det_jacs,
     face_indices, out,
@@ -282,13 +282,13 @@ def lift_side_jumps_kernel_colored(
         if owner_is_primary[f]:
             oc = owner_cell[f]
             c = _lift_one_side(jump_owner[f], owner_adj_row_exact[f], ref_area_weight,
-                               lift_native[owner_cube_face[f] - 6], n_fp)
+                               lift_native[owner_face_op[f]], n_fp)
             for s in range(n_sps):
                 out[oc, s] += sign * c[s] / det_jacs[oc, s]
         nc = neighbor_cell[f]
         if nc >= 0 and neighbor_is_primary[f]:
             c = _lift_one_side(jump_neighbor[f], neighbor_adj_row_exact[f], ref_area_weight,
-                               lift_native[neighbor_cube_face[f] - 6], n_fp)
+                               lift_native[neighbor_face_op[f]], n_fp)
             for s in range(n_sps):
                 out[nc, s] += sign * c[s] / det_jacs[nc, s]
 
@@ -296,7 +296,7 @@ def lift_side_jumps_kernel_colored(
 @njit(cache=True, parallel=True)
 def lift_side_jumps_kernel(
     jump_owner, jump_neighbor, sign,
-    owner_cell, neighbor_cell, owner_cube_face, neighbor_cube_face,
+    owner_cell, neighbor_cell, owner_face_op, neighbor_face_op,
     owner_adj_row_exact, neighbor_adj_row_exact, ref_area_weight, lift_native,
     owner_is_primary, neighbor_is_primary, det_jacs, n_threads,
 ):
@@ -309,13 +309,13 @@ def lift_side_jumps_kernel(
         if owner_is_primary[f]:
             oc = owner_cell[f]
             c = _lift_one_side(jump_owner[f], owner_adj_row_exact[f], ref_area_weight,
-                               lift_native[owner_cube_face[f] - 6], n_fp)
+                               lift_native[owner_face_op[f]], n_fp)
             for s in range(n_sps):
                 buf[tid, oc, s] += sign * c[s] / det_jacs[oc, s]
         nc = neighbor_cell[f]
         if nc >= 0 and neighbor_is_primary[f]:
             c = _lift_one_side(jump_neighbor[f], neighbor_adj_row_exact[f], ref_area_weight,
-                               lift_native[neighbor_cube_face[f] - 6], n_fp)
+                               lift_native[neighbor_face_op[f]], n_fp)
             for s in range(n_sps):
                 buf[tid, nc, s] += sign * c[s] / det_jacs[nc, s]
     return buf.sum(axis=0)

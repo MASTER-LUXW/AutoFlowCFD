@@ -57,10 +57,10 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
         # 无非零 Dirichlet 目标值（本测试只覆盖 k 的 Dirichlet-zero 分支）。
         has_wall_dirichlet_value = np.zeros(n_faces, dtype=np.bool_)
         wall_dirichlet_value_face = np.zeros((n_faces, n_fp), dtype=np.float64)
-        owner_cube_face = np.full(n_faces, 6, dtype=np.int64)
+        owner_face_op = np.zeros(n_faces, dtype=np.int64)     # 四面体面 v=0、槽位 0
 
         phi_owner, phi_neighbor = extrapolate_scalar_pair_kernel(
-            scalar_sps, owner_cell, owner_cube_face, boundary_extrap_native,
+            scalar_sps, owner_cell, owner_face_op, boundary_extrap_native,
             neighbor_src0_cell, neighbor_src0_tpl, neighbor_src0_tid,
             neighbor_src1_idx, neighbor_src1_cell, neighbor_src1_mat,
             True, wall_dirichlet_zero_face, has_wall_dirichlet_value, wall_dirichlet_value_face,
@@ -94,10 +94,10 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
         mixed_nb_mask = np.zeros((n_faces, n_fp), dtype=np.bool_)
         has_wall_dirichlet_value = np.zeros(n_faces, dtype=np.bool_)
         wall_dirichlet_value_face = np.zeros((n_faces, n_fp), dtype=np.float64)
-        owner_cube_face = np.full(n_faces, 6, dtype=np.int64)
+        owner_face_op = np.zeros(n_faces, dtype=np.int64)     # 四面体面 v=0、槽位 0
 
         _, phi_neighbor = extrapolate_scalar_pair_kernel(
-            scalar_sps, owner_cell, owner_cube_face, boundary_extrap_native,
+            scalar_sps, owner_cell, owner_face_op, boundary_extrap_native,
             neighbor_src0_cell, neighbor_src0_tpl, neighbor_src0_tid,
             neighbor_src1_idx, neighbor_src1_cell, neighbor_src1_mat,
             True, wall_dirichlet_zero_face, has_wall_dirichlet_value, wall_dirichlet_value_face,
@@ -128,10 +128,10 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
         mixed_nb_mask = np.zeros((n_faces, n_fp), dtype=np.bool_)
         has_wall_dirichlet_value = np.array([True])
         wall_dirichlet_value_face = np.array([[12.0]])
-        owner_cube_face = np.full(n_faces, 6, dtype=np.int64)
+        owner_face_op = np.zeros(n_faces, dtype=np.int64)     # 四面体面 v=0、槽位 0
 
         phi_owner, phi_neighbor = extrapolate_scalar_pair_kernel(
-            scalar_sps, owner_cell, owner_cube_face, boundary_extrap_native,
+            scalar_sps, owner_cell, owner_face_op, boundary_extrap_native,
             neighbor_src0_cell, neighbor_src0_tpl, neighbor_src0_tid,
             neighbor_src1_idx, neighbor_src1_cell, neighbor_src1_mat,
             True, wall_dirichlet_zero_face, has_wall_dirichlet_value, wall_dirichlet_value_face,

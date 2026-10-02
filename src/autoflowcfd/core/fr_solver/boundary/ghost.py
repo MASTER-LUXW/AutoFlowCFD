@@ -35,12 +35,12 @@ def _compute_inlet_fp_positions(solver, face_conn, is_target_face: np.ndarray) -
         owner_cell = int(face_conn.owner_cell[f])
         oc_code = int(face_conn.owner_cube_face[f])
         # 原生面（四面体 [6,10) / 棱柱 [10,15)）统一走
-        # `ops.native_face_extrap`，不在这里自己按 code-6 取表 ——
+        # `ops.native_face_extrap(编码, 坍缩顶点槽位)`，不在这里自己取表 ——
         # 两类单元的键与 n_native 都不同，配错不会报错、只会静默用错
         # 矩阵（见 FROperators 里那段说明）。只对 `mesh.sps_coords` 的
         # 真实自由度切片 `[:n_native]` 求值。这条路径只在 LES/DDES 的
         # INLET SEM 合成湍流入口用到。
-        E = ops.native_face_extrap(oc_code)  # (n_fp, n_native)
+        E = ops.native_face_extrap(oc_code, int(mesh.face_flux_points.owner_tri_slot[f]))  # (n_fp, n_native)
         positions[f] = E @ mesh.sps_coords[owner_cell][:E.shape[1]]
 
     return positions
@@ -69,7 +69,6 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
     _v_free = vel_inf * _dir
     Q_free = [rho_inf, float(_v_free[0]), float(_v_free[1]), float(_v_free[2]), p_inf]
 
-    boundary_groups = solver.mesh.boundary_groups or {}
     bc_types = solver.mesh.boundary_bc_types or {}
 
     face_conn = solver.mesh.face_connectivity

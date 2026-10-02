@@ -25,7 +25,9 @@ from autoflowcfd.fr.native_padding import real_sps_per_cell
 from autoflowcfd.fr.operators import generate_fr_operators
 from tests.validation._channel_mesh import build_channel_mesh, build_channel_mesh_prism
 
-_BUILDERS = {"tet": build_channel_mesh, "prism": build_channel_mesh_prism}
+# 四面体网格做保持定向的顶点轮换：三角形面通量点按全局节点号规范朝向
+# （`fr/triangle_apex.py`）之后，结构化拆分的相邻四面体两侧顺序天然一致
+_BUILDERS = {"tet": lambda *a: build_channel_mesh(*a, rotate_odd_tets=True), "prism": build_channel_mesh_prism}
 
 
 def _setup(kind, order):
@@ -43,8 +45,8 @@ def _mismatched_faces(mesh, flat):
     E = np.asarray(flat.boundary_extrap_native)
     own, nei = np.asarray(flat.owner_cell), np.asarray(flat.neighbor_cell)
     f = np.nonzero((nei >= 0) & np.asarray(flat.neighbor_is_primary).astype(bool))[0]
-    xo = np.einsum("fis,fsd->fid", E[np.asarray(flat.owner_cube_face)[f] - 6], X[own[f]])
-    xn = np.einsum("fis,fsd->fid", E[np.asarray(flat.neighbor_cube_face)[f] - 6], X[nei[f]])
+    xo = np.einsum("fis,fsd->fid", E[np.asarray(flat.owner_face_op)[f]], X[own[f]])
+    xn = np.einsum("fis,fsd->fid", E[np.asarray(flat.neighbor_face_op)[f]], X[nei[f]])
     return int((np.linalg.norm(xo - xn, axis=-1).max(axis=1) > 1e-9).sum())
 
 

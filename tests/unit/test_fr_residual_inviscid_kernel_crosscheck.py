@@ -30,7 +30,7 @@ from autoflowcfd.core.fr_residual.inviscid_kernel import (
     compute_boundary_ghost_states,
 )
 from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_batch
-from autoflowcfd.core.fr_operators.volume_contract import contract_shared_operator_1axis, contract_shared_operator_2axis
+from autoflowcfd.core.fr_operators.volume_contract import contract_shared_operator_1axis
 
 from .test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 
@@ -66,9 +66,10 @@ def _compute_residual_via_new_kernel(U, mesh, ops, boundary_ghost_provider=None,
 
     _oi = get_overintegration_context(mesh, ops)
     div_comp = np.zeros((n_cells, n_sps, 5))
-    # 体积算子 K 已含修正项的本侧通量迹（与生产同一个算子，fr/face_flux_trace.py）
+    # 体积算子 K 已含修正项的本侧通量迹（与生产同一个算子，fr/face_flux_trace.py），按单元
+    # 三角形面槽位组合取；这里逐单元直接 einsum，与生产的分组收缩互为独立实现
     for (seg_lo, seg_hi, n_fine, det_seg, inv_seg,
-         op_c2f, op_D_fine, op_f2c), op_K in zip(_oi["segs"], _oi["lifted_div"]):
+         op_c2f, op_D_fine, op_f2c), (K_all, combo) in zip(_oi["segs"], _oi["lifted_div"]):
         if seg_hi <= seg_lo:
             continue
         nb = seg_hi - seg_lo
@@ -78,7 +79,7 @@ def _compute_residual_via_new_kernel(U, mesh, ops, boundary_ghost_provider=None,
             np.ascontiguousarray(Q_fine.reshape(-1, 5))
         ).reshape(nb, n_fine, 3, 5)
         F_tilde_fine = np.matmul(adj_seg, F_phys_fine)
-        div_comp[seg_lo:seg_hi] = contract_shared_operator_2axis(op_K, F_tilde_fine)
+        div_comp[seg_lo:seg_hi] = np.einsum("csqm,cqmv->csv", K_all[combo], F_tilde_fine)
 
     residual = -div_comp / det_jacs[..., None]
 
@@ -105,7 +106,7 @@ def _compute_residual_via_new_kernel(U, mesh, ops, boundary_ghost_provider=None,
         # 比的是当前默认行为，不会在默认档变更后悄悄比一个已经不再
         # 使用的档。
         resolve_ausm_precond_mode(),
-        flat.owner_cube_face, flat.neighbor_cube_face,
+        flat.owner_face_op, flat.neighbor_face_op,
         flat.ref_area_weight,
         flat.boundary_extrap_native, flat.lift_native,
     )

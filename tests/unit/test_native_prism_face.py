@@ -249,12 +249,13 @@ class TestBulkBuilder:
     @pytest.mark.parametrize("order", _ORDERS)
     def test_matches_individual_builders(self, order):
         extrap, lift = build_all_native_prism_face_operators(order)
-        assert set(extrap) == set(PRISM_FACE_IDS)
-        assert set(lift) == set(PRISM_FACE_IDS)
-        for f in PRISM_FACE_IDS:
+        # 封盖 3 个坍缩顶点槽位、侧四边形只有槽位 0（fr/triangle_apex.py）
+        keys = {(f, s) for f in PRISM_FACE_IDS for s in (range(3) if f < 2 else (0,))}
+        assert set(extrap) == keys and set(lift) == keys
+        for f, s in keys:
             assert np.array_equal(
-                extrap[f], build_native_prism_boundary_extrap(order, f))
-            assert np.array_equal(lift[f], build_native_prism_lift(order, f))
+                extrap[(f, s)], build_native_prism_boundary_extrap(order, f, s))
+            assert np.array_equal(lift[(f, s)], build_native_prism_lift(order, f, s))
 
 
 class TestGeometryJacobian:
@@ -494,13 +495,11 @@ class TestOperatorsAndGeometrySwitchTogether:
         原来这条测的是反面（"坍缩档下它们全是 None"）。坍缩棱柱基已于
         2026-09-23 删除，判据翻成正面：只剩一条基，那组字段必须永远建好
         —— 任何一个是 None 都意味着算子构造静默失败了，而下游
-        `FROperators._native_face_op` 只会在真正取用时才抛错。
+        `FROperators.native_face_extrap` 只会在真正取用时才抛错。
         """
         ops = self._ops(2)
         for name in ("D_native_prism", "ref_native_prism",
-                     "n_native_sps_prism", "boundary_extrap_native_prism",
-                     "lift_native_prism", "D_native_prism_padded",
-                     "lift_native_prism_padded",
+                     "n_native_sps_prism", "D_native_prism_padded",
                      "filter_native_prism_padded"):
             assert getattr(ops, name) is not None, f"{name} 不该是 None"
         # 原来这里顺手自检"坍缩档 max|D| 应当很大（>20）"，作为改善倍数
@@ -538,8 +537,8 @@ class TestOperatorsAndGeometrySwitchTogether:
         D = ops.D_native_prism_padded
         assert np.all(D[nr:, :, :] == 0.0)
         assert np.all(D[:, nr:, :] == 0.0)
-        for mat in ops.lift_native_prism_padded.values():
-            assert np.all(mat[nr:, :] == 0.0)
+        for code in range(10, 15):
+            assert np.all(ops.face_lift_by_op[code - 6][nr:, :] == 0.0)
 
     @pytest.mark.parametrize("order", [1, 2, 3])
     def test_native_operator_magnitude_stays_small(self, order):
@@ -580,8 +579,7 @@ class TestOperatorsAndGeometrySwitchTogether:
                 if (axis, side) == (1, 1.0):
                     continue
                 fid = cube_face_to_native_prism_face(axis, side)
-                assert fid in ops.boundary_extrap_native_prism
-                assert fid in ops.lift_native_prism_padded
+                assert ops.native_face_extrap(10 + fid).shape == (9, ops.n_native_sps_prism)
 
 
 class TestNativePrismGeometry:

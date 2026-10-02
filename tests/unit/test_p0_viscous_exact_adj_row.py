@@ -188,7 +188,7 @@ def test_old_metric_source_changes_the_residual():
             flat.mixed_nb_partner, flat.mixed_nb_mask,
             flat.mixed_ow_partner, flat.mixed_ow_mask,
             Q_ghost, vbc_kind, n_threads,
-            flat.owner_cube_face, flat.neighbor_cube_face,
+            flat.owner_face_op, flat.neighbor_face_op,
             flat.ref_area_weight,
             flat.boundary_extrap_native, flat.lift_native,
             flat.ip_length, c_ip,

@@ -285,9 +285,10 @@ def build_distributed_flat_face(
         # TestDistributedResidualMatchesSingleMachineNative，分布式与
         # 单机路径残差逐位一致（rel_diff<6e-11）。原样透传本来就是
         # 正确、完整的处理方式，不需要额外分派：`owner_cube_face`/
-        # `neighbor_cube_face` 按面索引正确切片（每个面各自的原始
-        # cube face 编码，与是否 MPI 分区无关）；`boundary_extrap_native`/
-        # `lift_native` 是只依赖 `(order, excluded_vertex)` 的全局共享
+        # `neighbor_cube_face` 与面算子索引 `owner_face_op`/`neighbor_face_op`
+        # 按面索引正确切片（槽位在全局网格上按全局节点号定好，与是否 MPI
+        # 分区无关）；`boundary_extrap_native`/
+        # `lift_native` 是只依赖 `(order, 面, 槽位)` 的全局共享
         # 常量算子（与其余面算子同一个"可预计算一次、全网格
         # 同阶数单元共享"的性质，见 native_tet.basis.py 模块文档），
         # 不是逐面数据，原样透传（不切片）本来就是唯一正确的做法。CPU
@@ -296,6 +297,8 @@ def build_distributed_flat_face(
         # 场景无关，两者天然独立。
         owner_cube_face=global_flat.owner_cube_face[local_face_indices],
         neighbor_cube_face=global_flat.neighbor_cube_face[local_face_indices],
+        owner_face_op=global_flat.owner_face_op[local_face_indices],
+        neighbor_face_op=global_flat.neighbor_face_op[local_face_indices],
         true_area_weight=global_flat.true_area_weight[local_face_indices],
         # `ref_area_weight` 是**逐面相同**的参考求积权重（(n_fp,)），
         # 所以不按 local_face_indices 切、整块复用。

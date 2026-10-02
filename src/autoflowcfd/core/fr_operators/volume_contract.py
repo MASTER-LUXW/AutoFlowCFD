@@ -209,27 +209,42 @@ def _contract_shared_kernel(D_flat: np.ndarray, X_flat: np.ndarray, out: np.ndar
     该判据几乎没有影响（3.3470e-6 -> 3.3394e-6），保留是因为上面 (a)(b)
     两条理由本身成立，**不是**那次失败的修复手段。
     """
-    C = X_flat.shape[0]
+    for c in prange(X_flat.shape[0]):
+        _contract_one_cell(D_flat, X_flat, out, c)
+
+
+@njit(cache=True, parallel=True)
+def _contract_per_cell_operator_kernel(D_all: np.ndarray, combo: np.ndarray, X_flat: np.ndarray,
+                                       out: np.ndarray) -> None:
+    """`out[c,f,v] = sum_k D_all[combo[c],f,k] * X_flat[c,k,v]`：逐单元从一组算子里取自己的
+    那份（无粘体积算子按三角形面槽位组合各一份，`fr/face_flux_trace.py`）。与共享算子核
+    同一个单元内累加（逐位相同的求和顺序），不做任何 gather。"""
+    for c in prange(X_flat.shape[0]):
+        _contract_one_cell(D_all[combo[c]], X_flat, out, c)
+
+
+@njit(cache=True, inline="always")
+def _contract_one_cell(D_flat, X_flat, out, c) -> None:
+    """单元 `c` 的 `out[c,f,v] = sum_k D_flat[f,k] * X_flat[c,k,v]`（4 路累加器，见
+    `_contract_shared_kernel` 文档）。"""
     K = X_flat.shape[1]
     V = X_flat.shape[2]
-    F = D_flat.shape[0]
     K4 = (K // 4) * 4
-    for c in prange(C):
-        for f in range(F):
-            for v in range(V):
-                s0 = 0.0
-                s1 = 0.0
-                s2 = 0.0
-                s3 = 0.0
-                for k in range(0, K4, 4):
-                    s0 += D_flat[f, k] * X_flat[c, k, v]
-                    s1 += D_flat[f, k + 1] * X_flat[c, k + 1, v]
-                    s2 += D_flat[f, k + 2] * X_flat[c, k + 2, v]
-                    s3 += D_flat[f, k + 3] * X_flat[c, k + 3, v]
-                tail = 0.0
-                for k in range(K4, K):
-                    tail += D_flat[f, k] * X_flat[c, k, v]
-                out[c, f, v] = (s0 + s1) + (s2 + s3) + tail
+    for f in range(D_flat.shape[0]):
+        for v in range(V):
+            s0 = 0.0
+            s1 = 0.0
+            s2 = 0.0
+            s3 = 0.0
+            for k in range(0, K4, 4):
+                s0 += D_flat[f, k] * X_flat[c, k, v]
+                s1 += D_flat[f, k + 1] * X_flat[c, k + 1, v]
+                s2 += D_flat[f, k + 2] * X_flat[c, k + 2, v]
+                s3 += D_flat[f, k + 3] * X_flat[c, k + 3, v]
+            tail = 0.0
+            for k in range(K4, K):
+                tail += D_flat[f, k] * X_flat[c, k, v]
+            out[c, f, v] = (s0 + s1) + (s2 + s3) + tail
 
 
 def _contract_shared(D_flat: np.ndarray, X_flat: np.ndarray) -> np.ndarray:
@@ -287,6 +302,30 @@ def contract_shared_operator_2axis(D: np.ndarray, X: np.ndarray) -> np.ndarray:
     # J,M 相邻，合并成 K 轴是 no-copy view（小算子 D 同理）。
     return _contract_shared(D.reshape(F, J * M), X.reshape(C, J * M, V))
 
+def contract_lifted_divergence(K_all: np.ndarray, combo: np.ndarray, X: np.ndarray) -> np.ndarray:
+    """逐单元按槽位组合取无粘体积算子的收缩：`out[c] = K_all[combo[c]] : X[c]`。
+
+    `K` 按三角形面坍缩顶点槽位组合各存一份（`fr/face_flux_trace.py`）。按组合分组再做共享
+    收缩要 gather/scatter 细点通量，plate_demo P1 上无粘残差因此慢 32%；这里在共享收缩的
+    同一个按单元并行核里直接取 `K_all[combo[c]]`，开销与单个共享算子相同。
+
+    Args:
+        K_all: `(n_combo, F, J, M)`
+        combo: `(C,)` 逐单元组合编号
+        X: `(C, J, M, V)`
+
+    Returns:
+        `(C, F, V)`
+    """
+    n_combo, F, J, M = K_all.shape
+    C, _, _, V = X.shape
+    X_c = np.ascontiguousarray(X).reshape(C, J * M, V)
+    out = np.empty((C, F, V))
+    _contract_per_cell_operator_kernel(np.ascontiguousarray(K_all).reshape(n_combo, F, J * M),
+                                       np.ascontiguousarray(combo, dtype=np.int64), X_c, out)
+    return out
+
+
 #: 过积分（去混叠）分块大小，与 `fr_residual/inviscid.py` 的强形式分支
 #: 同一取值，理由见该处 P2 OOM 修复说明。
 OVERINT_CHUNK_CELLS = 32768
@@ -309,7 +348,9 @@ def get_overintegration_context(mesh, ops):
         两段（棱柱在前、四面体在后），与"棱柱在前"的单元存储顺序一致。
         每段自带**自己的** `n_fine` 与已按 `(seg_len, n_fine, ...)` 切好的
         细点度量；其中 `f2c` 是解点插值（湍流 k-omega 输运用）。`lifted_div`——与
-        `segs` 逐段对应的平均流体积算子 `K`（本侧通量迹已并入，`fr/face_flux_trace.py`）；
+        `segs` 逐段对应的 `(K_all, combo)`：平均流体积算子 `K` 按三角形面槽位组合各一份
+        `(n_combo, n_sps, n_fine, 3)`（本侧通量迹已并入，`fr/face_flux_trace.py`）与该段
+        逐单元组合编号，收缩走 `contract_lifted_divergence`；
         `projection`——逐段的平均流细->粗 L2 投影（熵稳定分支用，与 K 的体积部分一致）。
 
     ## 为什么每段各自带 n_fine（2026-09-17 改动）
@@ -386,6 +427,7 @@ def get_overintegration_context(mesh, ops):
              ops.overint_interp_c2f_tet, ops.overint_D_fine_tet,
              ops.overint_restrict_f2c_tet),
         ),
-        lifted_div=(ops.overint_lifted_div_prism, ops.overint_lifted_div_tet),
+        lifted_div=((ops.overint_lifted_div_prism, fine["prism_k_combo"]),
+                    (ops.overint_lifted_div_tet, fine["tet_k_combo"])),
         projection=(ops.overint_project_f2c_prism, ops.overint_project_f2c_tet),
     )

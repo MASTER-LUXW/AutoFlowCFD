@@ -5,10 +5,9 @@
 * 守恒权重 `W_cs = w_s * det(J)_cs`：棱柱 `w` 来自
   `fr/native_prism/quadrature.build_native_prism_sp_weights`，四面体来自
   `fr/native_tet/quadrature.build_native_tet_sp_weights`（两者同一构造）；
-* 每类单元解点之外全部通量求值点的插值行：各面通量点（`fr_operators/
-  face_kernels.native_face_extrap_stack`，与平面面几何同一个组装处；棱柱面
-  编码 10~14、四面体 6~9，按 `code - 6` 取）与过积分细点（`ops.overint_
-  interp_c2f_*`）——同一点集也供隐式 Newton 步的物理性限幅使用
+* 每类单元解点之外全部通量求值点的插值行：各面通量点（`ops.face_extrap_by_op`，
+  与平面面几何同一张整表；棱柱面编码 10~14、四面体 6~9，三角形面取全部 3 个坍缩
+  顶点槽位的点集并集）与过积分细点（`ops.overint_interp_c2f_*`）——同一点集也供隐式 Newton 步的物理性限幅使用
   （`PositivityLimiter.density_pressure_limits`）；
 * 真实解点数（`fr/native_padding.real_sps_per_cell`，补零槽位不参与）；
 * 逐单元类型掩码 `cell_is_prism` —— **不假设单元顺序**：单机网格棱柱在前，
@@ -126,7 +125,8 @@ def build_positivity_limiter_from_arrays(det_jacs, cell_is_prism, ops, order, xp
         order: 当前阶数。
         xp: 数组模块（numpy 或 cupy）。cupy 时静态数组搬上设备、走向量化版。
     """
-    from autoflowcfd.core.fr_operators.face_kernels import native_face_extrap_stack
+    from autoflowcfd.fr.operators.face_ops import face_op_index
+    from autoflowcfd.fr.triangle_apex import N_TRI_SLOTS
     from autoflowcfd.fr.native_padding import real_sps_per_cell
     from autoflowcfd.fr.native_prism.quadrature import build_native_prism_sp_weights
     from autoflowcfd.fr.native_tet.quadrature import build_native_tet_sp_weights
@@ -144,9 +144,16 @@ def build_positivity_limiter_from_arrays(det_jacs, cell_is_prism, ops, order, xp
     w[~is_prism, :n_real_tet] = build_native_tet_sp_weights(order)[None, :]
     W = np.ascontiguousarray(w * det)
 
-    Ebn = native_face_extrap_stack(ops, n_sps)
-    E_tet = [Ebn[0:4].reshape(-1, n_sps)]       # 面编码 6..9
-    E_prism = [Ebn[4:9].reshape(-1, n_sps)]     # 面编码 10..14
+    # 面通量点：每类单元全部面、全部坍缩顶点槽位的点集并集（一个单元的面实际用哪个
+    # 槽位由全局节点号决定，这里取全部，限制器与网格编号无关；四边形面不存在的槽位
+    # 行是 NaN，跳过）
+    def face_rows(codes):
+        E = ops.face_extrap_by_op[[int(face_op_index(c, sl)) for c in codes for sl in range(N_TRI_SLOTS)]]
+        E = E[~np.isnan(E).any(axis=(1, 2))]
+        return E[:, :, :n_sps].reshape(-1, n_sps)
+
+    E_tet = [face_rows(range(6, 10))]
+    E_prism = [face_rows(range(10, 15))]
     # 过积分细点：无粘（与湍流输运）体积通量就在这些点上求值，必须同样可容许
     # （2026-09-26：plate_demo 锐边贴壁单元一个细点 rho=7e-10、p<0，解点与通量点
     # 都正常，体积通量在那里按 1/rho 奇异，残差对 1e-5 的扰动跳 13 个数量级）

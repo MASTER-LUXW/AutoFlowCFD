@@ -34,7 +34,7 @@ from autoflowcfd.core.fr_operators.kernels import (
 )
 from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_batch, entropy_stable_volume_divergence_batch
 from autoflowcfd.core.fr_operators.volume_contract import (
-    contract_shared_operator_1axis, contract_shared_operator_2axis, compute_adj_j,
+    contract_lifted_divergence, contract_shared_operator_1axis, contract_shared_operator_2axis, compute_adj_j,
     contravariant_flux_from_metric, get_overintegration_context,
 )
 
@@ -301,7 +301,7 @@ def compute_inviscid_residual_fr(
         # 度量按**段内局部**索引切（`i0 = c0 - seg_lo`）——用全局 c0 去切
         # 段内数组会静默取到错误的单元。
         for (seg_lo, seg_hi, n_fine, det_seg, inv_seg,
-             op_c2f, op_D_fine, _f2c_interp), op_K, op_proj in zip(_oi["segs"], _oi["lifted_div"],
+             op_c2f, op_D_fine, _f2c_interp), (K_all, combo_seg), op_proj in zip(_oi["segs"], _oi["lifted_div"],
                                                                      _oi["projection"]):
             for c0 in range(seg_lo, seg_hi, _OVERINT_CHUNK_CELLS):
                 c1 = min(c0 + _OVERINT_CHUNK_CELLS, seg_hi)
@@ -338,9 +338,10 @@ def compute_inviscid_residual_fr(
                 del F_phys_fine
                 # 强形式：`K = f2c·D_fine - Σ_面 lift·W·Tn` 一次收缩——体积散度的 L2 投影
                 # 减去修正项的本侧通量（细层通量多项式在面通量点上的法向迹），界面核
-                # 只施加公共通量（离散守恒，见 fr/face_flux_trace.py）。块内收缩、块内
+                # 只施加公共通量（离散守恒，见 fr/face_flux_trace.py）。K 按单元三角形面的
+                # 坍缩顶点槽位组合取（与界面核同一组通量点）。块内收缩、块内
                 # 释放，不再需要全场 (n_cells,n_fine,5) 的细点数组。
-                div_comp[c0:c1] = contract_shared_operator_2axis(op_K, F_tilde_fine)
+                div_comp[c0:c1] = contract_lifted_divergence(K_all, combo_seg[i0:i1], F_tilde_fine)
                 if entropy_stable_volume:
                     # 熵稳定两点通量散度替换体积散度那一半；本侧迹仍取细层标准通量
                     # 多项式（K - 投影·D_fine 部分）。该档不精确守恒，见参数文档。
@@ -421,7 +422,7 @@ def compute_inviscid_residual_fr(
                 flat.mixed_ow_partner, flat.mixed_ow_mask,
                 Q_ghost,
                 face_indices, correction, mach_ref, precond_mode,
-                flat.owner_cube_face, flat.neighbor_cube_face,
+                flat.owner_face_op, flat.neighbor_face_op,
                 flat.ref_area_weight,
                 flat.boundary_extrap_native, flat.lift_native,
             )
@@ -442,7 +443,7 @@ def compute_inviscid_residual_fr(
             flat.mixed_ow_partner, flat.mixed_ow_mask,
             Q_ghost,
             n_threads, mach_ref, precond_mode,
-            flat.owner_cube_face, flat.neighbor_cube_face,
+            flat.owner_face_op, flat.neighbor_face_op,
             flat.ref_area_weight,
             flat.boundary_extrap_native, flat.lift_native,
         )

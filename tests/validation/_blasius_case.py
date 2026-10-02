@@ -667,16 +667,10 @@ def inlet_outlet_mass_flux(solver, mesh, Lx: float, H: float, Lz: float):
                 continue
             owner = int(fc.owner_cell[f])
             oc = int(fc.owner_cube_face[f])
-            if oc >= 6:
-                # 统一访问器（2026-09-20）：原生面编码是四面体 [6,10)、
-                # **棱柱 [10,15)**，此前这里写死 `..._native_tet[oc-6]`，
-                # 原生棱柱基下 oc=10~14 会 KeyError。生产路径本来就用
-                # 这个按编码分派的访问器，测试也走同一份。
-                E = ops.native_face_extrap(oc)
-                sl = slice(0, E.shape[1])
-            else:
-                E = ops.boundary_extrap_prism[(ffp.owner_axis, ffp.owner_side)]
-                sl = slice(None)
+            # 统一访问器：原生面编码（四面体 [6,10)、棱柱 [10,15)）+ 三角形面的坍缩
+            # 顶点槽位，生产路径与测试走同一份。
+            E = ops.native_face_extrap(oc, int(mesh.face_flux_points.owner_tri_slot[f]))
+            sl = slice(0, E.shape[1])
             rho = E @ Q[owner, sl, 0]
             vel = np.column_stack([E @ Q[owner, sl, c] for c in (1, 2, 3)])
             n = ffp.true_normal

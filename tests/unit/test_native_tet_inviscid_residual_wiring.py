@@ -5,7 +5,7 @@
 相同（`test_fr_residual_inviscid.py`），对均匀自由流场，无粘残差必须
 在机器精度量级为零，包括 native 四面体单元。这是比单独检查每个子
 步骤更可靠的整体验证：体积项（`D_native_tet_padded`）、修正项（DG
-提升算子 `lift_native_tet_padded`、`boundary_extrap_native`）、方向
+提升算子 `lift_native`、`boundary_extrap_native` 整表）、方向
 定向（side 因子固定 +1）、原始 cube face 编码分派，任何一处符号/
 矩阵选错，均匀流场残差都不会精确为零。
 
@@ -97,7 +97,7 @@ def test_native_padding_rows_stay_frozen_after_real_residual_evaluation(order):
     残差必须精确为 0——不是只验证矩阵本身填了零行（那是
     test_native_tet_padded_operators.py 已经做过的），是验证接入真实
     kernel 之后确实观察到这个效果（体积项 D_native_tet_padded + 修正项
-    lift_native_tet_padded 两处填零共同作用的结果）。
+    面提升整表两处填零共同作用的结果）。
     """
     mesh = _build_synthetic_mixed_mesh(order, "native")
     n_prisms = mesh.n_prism_cells

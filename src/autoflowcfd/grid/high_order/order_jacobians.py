@@ -129,7 +129,7 @@ def compute_native_tet_jacobians(
 
 def build_fine_metrics(
     prism_part: Optional[Dict[str, np.ndarray]], tet_part: Optional[Dict[str, np.ndarray]],
-    n_fine_prism: int, n_prisms: int, n_tets: int,
+    n_fine_prism: int, n_prisms: int, n_tets: int, cell_slots: np.ndarray,
 ) -> Dict[str, np.ndarray]:
     """过积分细点度量（`mesh.jacobians_fine`），按单元类型分段存储：
 
@@ -147,6 +147,10 @@ def build_fine_metrics(
     det/inv/adj 各上传一份，显存里约 4.7 GB。
 
     `tet_part` 须按每单元 1 个点求值（`compute_native_tet_jacobians(mesh, ..., 1)`）。
+
+    另存逐单元的无粘体积算子组合编号 `prism_k_combo (n_prism,)` / `tet_k_combo (n_tet,)`
+    （由三角形面坍缩顶点槽位 `cell_slots` 折叠，`fr/triangle_apex.k_combo_ids`）：它与
+    细点度量一样是逐单元几何量，随同一份字典在单机、分布式各路径里切片与分发。
     """
     def _prism(key, tail):
         if prism_part is None:
@@ -163,11 +167,18 @@ def build_fine_metrics(
                 f"——须按每单元 1 个点求值")
         return np.ascontiguousarray(arr.reshape((n_tets,) + tail))
 
+    from autoflowcfd.fr.triangle_apex import k_combo_ids
+
+    prism_combo, tet_combo = k_combo_ids(cell_slots, n_prisms)
+    if prism_combo.shape[0] != n_prisms or tet_combo.shape[0] != n_tets:
+        raise ValueError(f"cell_slots 行数 {np.shape(cell_slots)[0]} 与单元数 {n_prisms}+{n_tets} 不符")
     return {
         "prism_det": _prism("det_jacs", ()),
         "prism_inv": _prism("inv_jacs", (3, 3)),
         "tet_det": _tet("det_jacs", ()),
         "tet_inv": _tet("inv_jacs", (3, 3)),
+        "prism_k_combo": prism_combo,
+        "tet_k_combo": tet_combo,
     }
 
 
@@ -190,6 +201,8 @@ def select_fine_metrics(fine: Dict[str, np.ndarray], cell_ids: np.ndarray,
         "prism_inv": np.ascontiguousarray(fine["prism_inv"][ids[:n_p]]),
         "tet_det": np.ascontiguousarray(fine["tet_det"][tet_ids]),
         "tet_inv": np.ascontiguousarray(fine["tet_inv"][tet_ids]),
+        "prism_k_combo": np.ascontiguousarray(fine["prism_k_combo"][ids[:n_p]]),
+        "tet_k_combo": np.ascontiguousarray(fine["tet_k_combo"][tet_ids]),
     }
 
 

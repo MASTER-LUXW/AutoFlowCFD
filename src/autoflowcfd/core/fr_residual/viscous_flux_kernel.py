@@ -64,7 +64,7 @@ def compute_viscous_interface_correction_kernel(
     mixed_ow_partner: np.ndarray, mixed_ow_mask: np.ndarray,
     Q_ghost: np.ndarray, vbc_kind: np.ndarray,
     n_threads: int,
-    owner_cube_face: np.ndarray, neighbor_cube_face: np.ndarray,
+    owner_face_op: np.ndarray, neighbor_face_op: np.ndarray,
     ref_area_weight: np.ndarray,
     boundary_extrap_native: np.ndarray, lift_native: np.ndarray,
     # IP 罚项的长度尺度 `h_f`（`FlatFaceGeometry.ip_length`：面法向的单元
@@ -96,14 +96,14 @@ def compute_viscous_interface_correction_kernel(
     外插截断误差此前没有任何兜底，本次修复对粘性残差的精度改善因此
     更直接。`adj_j` 参数已从签名中移除。
 
-    原生基（四面体 + 棱柱）：`owner_cube_face`/`neighbor_cube_face`
-    减 6 索引原生算子表（四面体 [6,10)、棱柱 [10,15) 在同一张表里）。
+    原生基（四面体 + 棱柱）：`owner_face_op`/`neighbor_face_op`
+    索引原生面算子整表（`fr/operators/face_ops.py`）。
     与无粘 kernel 不同，这里**不需要** side_factor/`true_normal` 对齐
     （见上方"真实 bug 修复"一节：`owner_adj_row_exact` 是唯一来源，
     owner/neighbor 两侧各自读同一份精确 adj row，本就衔接，不需要额外
     定向）。只涉及两件事：(a) 自身面外插矩阵用
-    `boundary_extrap_native[code-6]`；(b) 面修正项用 DG 提升算子
-    `lift_native[code-6] @ (ref_area_weight⊙jump)`，理由同
+    `boundary_extrap_native[op]`；(b) 面修正项用 DG 提升算子
+    `lift_native[op] @ (ref_area_weight⊙jump)`，理由同
     inviscid_kernel.py / native_tet/basis.py::build_native_tet_lift 文档。
 
     **2026-09-23**：坍缩坐标那条并行路径（`boundary_extrap[celltype,
@@ -121,7 +121,7 @@ def compute_viscous_interface_correction_kernel(
     for f in prange(n_faces):
         tid = get_thread_id()
         oc = owner_cell[f]
-        oc_code = owner_cube_face[f]
+        oc_op = owner_face_op[f]
         # **罚项 side 因子恒为 +1**（2026-09-22 修复的真实缺陷）：原生面的
         # `owner_adj_row_exact` 已按 outward 定向（见
         # `native_prism/face.py::native_prism_face_adj_rows` 与
@@ -132,7 +132,7 @@ def compute_viscous_interface_correction_kernel(
         # 变成 -3.24）。坍缩路径已于 2026-09-23 删除，因子不再需要分派。
 
         if owner_is_primary[f]:
-            E_o = boundary_extrap_native[oc_code - 6]  # (n_fp,n_sps)
+            E_o = boundary_extrap_native[oc_op]  # (n_fp,n_sps)
 
             Q_o = _extrap_matmul(Q[oc], E_o)  # (n_fp,5)
             gv_o = extrap_tensor3x3(grad_vel[oc], E_o)  # (n_fp,3,3)
@@ -209,7 +209,7 @@ def compute_viscous_interface_correction_kernel(
                 for v in range(5):
                     weighted_jump_o[i, v] = w_area * jump_owner[i, v]
             # (n_sps,5)，注意：粘性项没有负号（见模块文档符号约定）
-            contrib_owner = matmul_small(lift_native[oc_code - 6], weighted_jump_o)
+            contrib_owner = matmul_small(lift_native[oc_op], weighted_jump_o)
             for s in range(n_sps):
                 dj = det_jacs[oc, s]
                 for v in range(5):
@@ -217,8 +217,8 @@ def compute_viscous_interface_correction_kernel(
 
         if (not is_boundary[f]) and neighbor_is_primary[f]:
             nc = neighbor_cell[f]
-            nc_code = neighbor_cube_face[f]
-            E_n = boundary_extrap_native[nc_code - 6]
+            nc_op = neighbor_face_op[f]
+            E_n = boundary_extrap_native[nc_op]
 
             Q_n_native = _extrap_matmul(Q[nc], E_n)  # (n_fp,5)
             gv_n_native = extrap_tensor3x3(grad_vel[nc], E_n)  # (n_fp,3,3)
@@ -286,7 +286,7 @@ def compute_viscous_interface_correction_kernel(
                 w_area = ref_area_weight[i]
                 for v in range(5):
                     weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
-            contrib_neighbor = matmul_small(lift_native[nc_code - 6], weighted_jump_n)
+            contrib_neighbor = matmul_small(lift_native[nc_op], weighted_jump_n)
             for s in range(n_sps):
                 dj = det_jacs[nc, s]
                 for v in range(5):

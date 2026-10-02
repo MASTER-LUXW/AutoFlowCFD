@@ -29,10 +29,9 @@ def test_generate_fr_operators_default_unaffected_by_tet_basis_mode_field():
     assert ops.D_native_tet is not None
     assert ops.ref_native_tet is not None
     assert ops.n_native_sps_tet is not None
-    assert ops.boundary_extrap_native_tet is not None
-    assert ops.lift_native_tet is not None
+    assert ops.face_extrap_by_op is not None
+    assert ops.face_lift_by_op is not None
     assert ops.D_native_tet_padded is not None
-    assert ops.lift_native_tet_padded is not None
     assert ops.filter_native_tet_padded is not None
     # D_3d_tet 别名到 D_native_tet_padded（不再是独立的坍缩坐标矩阵）
     assert ops.D_3d_tet is ops.D_native_tet_padded
@@ -53,12 +52,8 @@ def test_generate_fr_operators_native_mode_populates_expected_fields():
     assert ops.n_native_sps_tet == expected_n
     assert ops.D_3d_tet is ops.D_native_tet_padded  # 别名，不再是独立坍缩坐标算子
     n1d = order + 1
-    assert set(ops.boundary_extrap_native_tet.keys()) == {0, 1, 2, 3}
-    for excluded_vertex in range(4):
-        assert ops.boundary_extrap_native_tet[excluded_vertex].shape == (n1d * n1d, expected_n)
-    assert set(ops.lift_native_tet.keys()) == {0, 1, 2, 3}
-    for excluded_vertex in range(4):
-        assert ops.lift_native_tet[excluded_vertex].shape == (expected_n, n1d * n1d)
+    for code in range(6, 10):
+        assert ops.native_face_extrap(code).shape == (n1d * n1d, expected_n)
 
     n_sps_global = n1d ** 3
     assert ops.D_native_tet_padded.shape == (n_sps_global, n_sps_global, 3)
@@ -67,11 +62,9 @@ def test_generate_fr_operators_native_mode_populates_expected_fields():
     )
     assert np.all(ops.D_native_tet_padded[expected_n:, :, :] == 0.0)
     assert np.all(ops.D_native_tet_padded[:, expected_n:, :] == 0.0)
-    assert set(ops.lift_native_tet_padded.keys()) == {0, 1, 2, 3}
-    for excluded_vertex in range(4):
-        padded = ops.lift_native_tet_padded[excluded_vertex]
+    for op in range(4):         # 四面体面 6~9 的槽位 0（全部槽位见 test_face_op_tables.py）
+        padded = ops.face_lift_by_op[op]
         assert padded.shape == (n_sps_global, n1d * n1d)
-        np.testing.assert_array_equal(padded[:expected_n, :], ops.lift_native_tet[excluded_vertex])
         assert np.all(padded[expected_n:, :] == 0.0)
 
     assert ops.filter_native_tet_padded.shape == (n_sps_global, n_sps_global)

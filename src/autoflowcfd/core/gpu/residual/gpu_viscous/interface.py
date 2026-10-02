@@ -166,12 +166,12 @@ def _compute_viscous_interface_correction_gpu(
             oc = ff.owner_cell[idx_o]
             is_bnd_o = ff.is_boundary[idx_o]
 
-            # 自身原始态：与 CPU 版 `E_o=boundary_extrap_native[code-6]`
+            # 自身原始态：与 CPU 版 `E_o=boundary_extrap_native[oc_op]`
             # 对应，不能用 `_extrap_side`（那是"对侧交叉引用"机制，见
             # `_self_extrap_side` 文档"真实 bug 修复"一节）。
-            oc_code_o = ff.owner_cube_face[idx_o]
+            oc_op_o = ff.owner_face_op[idx_o]
             Q_o, gv_o, gT_o, mut_o = _self_extrap_side(
-                cp, oc, oc_code_o, ff.boundary_extrap_native,
+                cp, oc, oc_op_o, ff.boundary_extrap_native,
                 Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu,
             )
             Q_n, gv_n, gT_n, mut_n = _extrap_side(
@@ -196,12 +196,12 @@ def _compute_viscous_interface_correction_gpu(
                 ff.ip_length[idx_o], mu, Pr, Pr_t, c_ip_visc, n_sps == 1)
 
             # 面校正分配：DG 提升算子
-            # `lift_native[code-6] @ (ref_area_weight ⊙ jump)`，与 CPU 版
+            # `lift_native[op] @ (ref_area_weight ⊙ jump)`，与 CPU 版
             # viscous_flux_kernel.py 逐字对应 —— 粘性 kernel 不需要像无粘
             # 那样处理 true_normal 对齐安全阀（viscous_flux_kernel.py 模块
             # 文档：只用 owner/neighbor_adj_row_exact 就足够做线性收缩）。
             contrib_o = _lift_native_contrib(
-                cp, oc_code_o, ff.lift_native, ff.ref_area_weight, jump_owner,
+                cp, oc_op_o, ff.lift_native, ff.ref_area_weight, jump_owner,
             )
             contrib_o = contrib_o / det_jacs[oc][..., None]
             _scatter_add_to_correction(correction, contrib_o, oc, n_cells, n_sps)
@@ -215,9 +215,9 @@ def _compute_viscous_interface_correction_gpu(
             # 自身原始态：同上方 owner-primary 块同名注释，同一处修复
             # （`_extrap_side`+`neighbor_src0_*` 是"对侧交叉引用"机制，
             # 不是"自身外插"）。
-            nc_code_n = ff.neighbor_cube_face[idx_n]
+            nc_op_n = ff.neighbor_face_op[idx_n]
             Q_n_native, gv_n_native, gT_n_native, mut_n_native = _self_extrap_side(
-                cp, nc, nc_code_n, ff.boundary_extrap_native,
+                cp, nc, nc_op_n, ff.boundary_extrap_native,
                 Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu,
             )
             Q_o_at_n, gv_o_at_n, gT_o_at_n, mut_o_at_n = _extrap_side(
@@ -242,7 +242,7 @@ def _compute_viscous_interface_correction_gpu(
                 ff.ip_length[idx_n], mu, Pr, Pr_t, c_ip_visc, n_sps == 1)
 
             contrib_n = _lift_native_contrib(
-                cp, nc_code_n, ff.lift_native, ff.ref_area_weight,
+                cp, nc_op_n, ff.lift_native, ff.ref_area_weight,
                 jump_neighbor,
             )
             contrib_n = contrib_n / det_jacs[nc][..., None]

@@ -11,8 +11,8 @@ AutoFlowCFD V2.0 - GPU 版湍流标量（k/omega）输运残差 (#7 第四次评
 
 与 CPU 版保持的几条约定（每一条都曾因"只改了一份"出过真实缺陷）：
 
-* 面上只用原生算子：自身外插 `boundary_extrap_native[code-6]`、提升
-  `lift_native[code-6]`，四面体体积项用 `D_native_tet_padded`；
+* 面上只用原生算子：自身外插 `boundary_extrap_native[op]`、提升
+  `lift_native[op]`（按面算子索引），四面体体积项用 `D_native_tet_padded`；
 * 只有 `owner_is_primary` / `neighbor_is_primary` 的记录贡献对应一侧（B-8
   混合拆分面同一物理面有两条记录）；
 * **两侧各在自己的通量点顺序里构造跳变量**、按统一符号约定提升，扩散为

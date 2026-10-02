@@ -19,19 +19,19 @@ def _src_gather(cp, field, src0_cell, src0_tpl, src0_tid, src1_idx, src1_cell, s
     return out, valid0 | valid1
 
 
-def _self_extrap(cp, ff, field, self_cell, self_cube_face):
-    """自身外插 `boundary_extrap_native[code-6] @ field[self]`；`self_cell<0` 的面为 0。"""
+def _self_extrap(cp, ff, field, self_cell, self_face_op):
+    """自身外插 `boundary_extrap_native[op] @ field[self]`；`self_cell<0` 的面为 0。"""
     valid = self_cell >= 0
-    E = ff.boundary_extrap_native[cp.where(valid, self_cube_face, 6) - 6]
+    E = ff.boundary_extrap_native[cp.where(valid, self_face_op, 0)]
     return cp.einsum('fps,fs->fp', E, field[cp.maximum(self_cell, 0)]) * valid[:, None]
 
 
 def _frame_args(ff, frame):
     if frame == "owner":
-        return (ff.owner_cell, ff.owner_cube_face, ff.neighbor_src0_cell, ff.neighbor_src0_tpl, ff.neighbor_src0_tid,
+        return (ff.owner_cell, ff.owner_face_op, ff.neighbor_src0_cell, ff.neighbor_src0_tpl, ff.neighbor_src0_tid,
                 ff.neighbor_src1_idx, ff.neighbor_src1_cell, ff.neighbor_src1_mat,
                 ff.mixed_nb_partner, ff.mixed_nb_mask)
-    return (ff.neighbor_cell, ff.neighbor_cube_face, ff.owner_src0_cell, ff.owner_src0_tpl, ff.owner_src0_tid,
+    return (ff.neighbor_cell, ff.neighbor_face_op, ff.owner_src0_cell, ff.owner_src0_tpl, ff.owner_src0_tid,
             ff.owner_src1_idx, ff.owner_src1_cell, ff.owner_src1_mat,
             ff.mixed_ow_partner, ff.mixed_ow_mask)
 
@@ -98,27 +98,27 @@ def _face_mass_flux_gpu(cp, ff, rho_u):
     m_n = 0.0
     for d in range(3):
         comp = cp.ascontiguousarray(rho_u[..., d])
-        m_o = m_o + _self_extrap(cp, ff, comp, ff.owner_cell, ff.owner_cube_face) * n_o[..., d]
+        m_o = m_o + _self_extrap(cp, ff, comp, ff.owner_cell, ff.owner_face_op) * n_o[..., d]
         at_n, _ = _src_gather(cp, comp, ff.owner_src0_cell, ff.owner_src0_tpl, ff.owner_src0_tid,
                               ff.owner_src1_idx, ff.owner_src1_cell, ff.owner_src1_mat)
-        own_n = _self_extrap(cp, ff, comp, ff.neighbor_cell, ff.neighbor_cube_face)
+        own_n = _self_extrap(cp, ff, comp, ff.neighbor_cell, ff.neighbor_face_op)
         m_n = m_n + cp.where(mixed, own_n, at_n) * n_n[..., d]
     return m_o, m_n * has_nb[:, None]
 
 
 def _lift_side_jumps_gpu(cp, ff, jump_owner, jump_neighbor, sign, det_jacs, n_cells, n_sps):
     """两侧物理跳变量提升回解点（CPU 版 `faces._lift_side_jumps`）：
-    `corr[cell] += sign * lift_native[code-6] @ (ref_area_weight*|adj_row|*J) / det`。"""
+    `corr[cell] += sign * lift_native[op] @ (ref_area_weight*|adj_row|*J) / det`。"""
     out = cp.zeros((n_cells, n_sps), dtype=cp.float64)
-    for cells, codes, adj, jump, keep in (
-            (ff.owner_cell, ff.owner_cube_face, ff.owner_adj_row_exact, jump_owner, ff.owner_is_primary),
-            (ff.neighbor_cell, ff.neighbor_cube_face, ff.neighbor_adj_row_exact, jump_neighbor,
+    for cells, ops_, adj, jump, keep in (
+            (ff.owner_cell, ff.owner_face_op, ff.owner_adj_row_exact, jump_owner, ff.owner_is_primary),
+            (ff.neighbor_cell, ff.neighbor_face_op, ff.neighbor_adj_row_exact, jump_neighbor,
              (ff.neighbor_cell >= 0) & ff.neighbor_is_primary)):
         sel = cp.where(keep)[0]
         if not bool(sel.shape[0] > 0):
             continue
         c = cells[sel]
         w = ff.ref_area_weight[None, :] * cp.sqrt(cp.sum(adj[sel] * adj[sel], axis=-1))
-        contrib = cp.einsum('nsf,nf->ns', ff.lift_native[codes[sel] - 6], w * jump[sel]) / det_jacs[c]
+        contrib = cp.einsum('nsf,nf->ns', ff.lift_native[ops_[sel]], w * jump[sel]) / det_jacs[c]
         cp.scatter_add(out, (c, slice(None)), sign * contrib)
     return out

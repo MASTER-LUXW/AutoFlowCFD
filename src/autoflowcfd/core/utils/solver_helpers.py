@@ -11,11 +11,8 @@ ProjectFiles/V2.0/19_重大问题修复-湍流模型跨后端逐项排查与完�
 修正函数导数（`_distribute_from_face`），未区分`tet_basis_mode`。
 native 面的`owner_axis`/`owner_side`存的是复用的 excluded_vertex/
 哑值（见 face_kernels.py::FlatFaceGeometry 字段文档），拿去查坍缩
-坐标专用的矩阵字典在语义上是错的。现在改用`owner_cube_face`
-（>=6 即 native，与 inviscid_kernel.py 界面项分派同一个判据）分派
-到 native 专属算子：自身面外插改用`boundary_extrap_native_tet`
-（按需 pad 到全局 n_sps 宽度），面修正项改用 DG 提升算子
-`lift_native_tet_padded`替代`_distribute_from_face`。
+坐标专用的矩阵字典在语义上是错的。现在自身面外插与 DG 提升直接取平面面几何按面算子索引
+（`owner_face_op`，含三角形面坍缩顶点槽位）排好的整表，与界面项 kernel 同一份。
 
 V2.0 二次评审修复记录（T-05，三个独立 bug 叠加，见
 ProjectFiles/V2.0/6_整体专家组二次评审.md）：
@@ -54,7 +51,7 @@ Kang et al. 2024 arXiv:2405.15899 在 DG 类弱式框架下的对应公式与"�
 的唯一来源，不再与一个虚假的解析梯度剪应力共存。
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 import numpy as np
 from loguru import logger
@@ -151,35 +148,19 @@ def compute_wmles_wall_stress_correction(
     Q = solver.state.Q
     det_jacs = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
 
-    # 原生基（四面体 [6,10) / 棱柱 [10,15)）：自身面外插用
-    # `ops.native_face_extrap(cube_face)`（按需 pad 到全局 n_sps 宽度，
-    # 与 face_kernels.py 界面项 kernel 同一个 pad 约定），面修正项用 DG
-    # 提升算子 `ops.native_face_lift_padded(cube_face)`（见
-    # native_tet/basis.py::build_native_tet_lift "弱形式提升定义"）。
+    # 原生面（四面体 [6,10) / 棱柱 [10,15)，三角形面再分坍缩顶点槽位）：自身面外插与
+    # DG 提升直接取平面面几何里按面算子索引排好、已填充到全局 n_sps 宽度的整表
+    # （`FlatFaceGeometry.boundary_extrap_native`/`lift_native`，与界面项 kernel 同一份）。
     #
     # **历史（真实 bug 修复，2026-09-02）**：此前这里对四面体单元恒用
     # 坍缩坐标专属算子（`ops.boundary_extrap_tet[(axis,side)]` + 1D
     # Radau/VCJH 修正函数导数 `_distribute_from_face`），而原生面的
     # `owner_axis`/`owner_side` 存的是复用的 excluded_vertex/哑值，拿去
-    # 查坍缩坐标专用的矩阵字典在语义上是错的（要么查到无意义的值，要么
-    # 伪键不在 6 个合法 (axis,side) 组合里直接 KeyError）。坍缩分支已于
+    # 查坍缩坐标专用的矩阵字典在语义上是错的。坍缩分支已于
     # 2026-09-23 整体删除（生产不可达，见 `fr_residual/inviscid_kernel.py
     # ::compute_inviscid_interface_correction_kernel` 文档）。
-    #
-    # 缓存按 **cube_face_code** 键（不是 excluded_vertex）：两类单元的键
-    # 与 n_native 都不同，统一由 `ops.native_face_extrap` 分派。
-    _padded_extrap_native_cache: Dict[int, np.ndarray] = {}
-
-    def _get_padded_extrap_native(cube_face_code: int) -> np.ndarray:
-        if cube_face_code not in _padded_extrap_native_cache:
-            from autoflowcfd.fr.native_padding import pad_native_matrix_to_global
-            _padded_extrap_native_cache[cube_face_code] = pad_native_matrix_to_global(
-                ops.native_face_extrap(cube_face_code), n_sps, pad_axes=(1,)
-            )
-        return _padded_extrap_native_cache[cube_face_code]
-
-    def extrap_to_face(field: np.ndarray, cube_face: int) -> np.ndarray:
-        E = _get_padded_extrap_native(cube_face)
+    def extrap_to_face(field: np.ndarray, face_op: int) -> np.ndarray:
+        E = flat.boundary_extrap_native[face_op]
         trailing = field.shape[1:]
         flat_field = E @ field.reshape(field.shape[0], -1)
         return flat_field.reshape((E.shape[0],) + trailing)
@@ -192,11 +173,11 @@ def compute_wmles_wall_stress_correction(
         if not flat.owner_is_primary[f]:
             continue
         owner_cell = int(flat.owner_cell[f])
-        cube_face = int(flat.owner_cube_face[f])
+        face_op = int(flat.owner_face_op[f])
 
-        Q_fp = extrap_to_face(Q[owner_cell], cube_face)  # (n_fp,5)
+        Q_fp = extrap_to_face(Q[owner_cell], face_op)  # (n_fp,5)
         wd_fp = extrap_to_face(
-            solver.wall_distance[owner_cell][:, None], cube_face)[:, 0]
+            solver.wall_distance[owner_cell][:, None], face_op)[:, 0]
         wd_fp = np.maximum(wd_fp, 1e-8)
 
         rho_fp = Q_fp[:, 0]
@@ -215,7 +196,7 @@ def compute_wmles_wall_stress_correction(
         # 用与其余面校正项完全一致的 DG 提升算子/除以 det_jacs 组装方式
         # （见上方 extrap_to_face 同一处说明）。
         momentum_fp = -tau_w * flat.true_area_weight[f][:, None]
-        contrib = ops.native_face_lift_padded(cube_face) @ momentum_fp  # (n_sps,3)
+        contrib = flat.lift_native[face_op] @ momentum_fp  # (n_sps,3)
         correction[owner_cell, :, 1:4] += contrib / det_jacs[owner_cell][:, None]
         n_wall_faces_applied += 1
 

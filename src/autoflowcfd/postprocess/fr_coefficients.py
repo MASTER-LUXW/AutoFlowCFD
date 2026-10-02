@@ -81,13 +81,12 @@ def compute_aerodynamic_coefficients_fr(
     if n_wall_faces == 0:
         raise RuntimeError("WALL boundary group(s) matched but zero faces tagged - check mesh boundary groups.")
 
-    n_prism = mesh.n_prism_cells
     ops = solver.ops
     Q = solver.state.Q
     mu = solver.mu_molecular
     mu_t_field = solver._get_turbulent_viscosity_field()
 
-    def extrap_to_face(field: np.ndarray, oc_code: int) -> np.ndarray:
+    def extrap_to_face(field: np.ndarray, oc_code: int, oc_slot: int) -> np.ndarray:
         """体积场外插到某个 WALL 面的 Flux Points。
 
         真实 bug 修复（2026-09-03，"delete collapsed"后用真实 cube_demo
@@ -99,15 +98,15 @@ def compute_aerodynamic_coefficients_fr(
         的 excluded_vertex（可达 3），不在这个占位字典任何合法键里，会
         直接 `KeyError: (3, -1.0)`（真实复现）。改用 `oc_code`（
         `fc.owner_cube_face[f]`，>=6 即 native 真实面，与本项目其余
-        所有消费点同一个判据）分派到 `ops.boundary_extrap_native_tet
-        [excluded_vertex]`——这个矩阵形状是 (n_fp,n_native)，不是 padded
+        所有消费点同一个判据）与该侧坍缩顶点槽位分派到
+        `ops.native_face_extrap`——这个矩阵形状是 (n_fp,n_native)，不是 padded
         到全局 n_sps 宽度的版本，必须先把 `field` 按 `[:n_native]` 切片
         （填充槽位不携带真实自由度，见 native_padding.py 文档），
         再做矩阵乘法，不能直接对全宽度 `field` 求值。
         """
         # 原生面统一走 `ops.native_face_extrap`（四面体 [6,10)、
-        # 棱柱 [10,15)，两类的 n_native 不同）。
-        E = ops.native_face_extrap(oc_code)  # (n_fp, n_native)
+        # 棱柱 [10,15)，两类的 n_native 不同；三角形面再按坍缩顶点槽位）。
+        E = ops.native_face_extrap(oc_code, oc_slot)  # (n_fp, n_native)
         n_native = E.shape[1]
         trailing = field.shape[1:]
         flat = E @ field[:n_native].reshape(n_native, -1)
@@ -126,8 +125,6 @@ def compute_aerodynamic_coefficients_fr(
 
     if include_viscous:
         from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient
-        from autoflowcfd.core.fr_residual.viscous_flux import compute_temperature
-
         grad_Q = compute_physical_gradient(Q, mesh, ops)  # (n_cells,n_sps,5,3)
         grad_vel_full = grad_Q[:, :, 1:4, :]  # (n_cells,n_sps,3,3)
 
@@ -137,22 +134,23 @@ def compute_aerodynamic_coefficients_fr(
             continue
         owner_cell = int(fc.owner_cell[f])
         oc_code = int(fc.owner_cube_face[f])
+        oc_slot = int(mesh.face_flux_points.owner_tri_slot[f])
 
-        Q_fp = extrap_to_face(Q[owner_cell], oc_code)  # (n_fp,5)
+        Q_fp = extrap_to_face(Q[owner_cell], oc_code, oc_slot)  # (n_fp,5)
         p_fp = Q_fp[:, 4]
         normal = ffp.true_normal  # (n_fp,3)
         area_w = ffp.true_area_weight  # (n_fp,)
         # 本面各 Flux Point 的物理坐标（外插 SPs 坐标场），减去力矩参考点得臂向量
-        r_arm = extrap_to_face(mesh.sps_coords[owner_cell], oc_code) - mc  # (n_fp,3)
+        r_arm = extrap_to_face(mesh.sps_coords[owner_cell], oc_code, oc_slot) - mc  # (n_fp,3)
 
         d_force_p = p_fp[:, None] * normal * area_w[:, None]
         force_pressure += np.sum(d_force_p, axis=0)
         moment_pressure += np.sum(np.cross(r_arm, d_force_p), axis=0)
 
         if include_viscous:
-            gv_fp = extrap_to_face(grad_vel_full[owner_cell], oc_code)  # (n_fp,3,3)
+            gv_fp = extrap_to_face(grad_vel_full[owner_cell], oc_code, oc_slot)  # (n_fp,3,3)
             mu_t_fp = (
-                extrap_to_face(mu_t_field[owner_cell][:, None], oc_code)[:, 0]
+                extrap_to_face(mu_t_field[owner_cell][:, None], oc_code, oc_slot)[:, 0]
                 if mu_t_field is not None
                 else np.zeros(gv_fp.shape[0])
             )
@@ -256,10 +254,10 @@ def compute_forces_pressure_only(solver, reference_area: float) -> dict:
             # 复用槽位的 excluded_vertex（可达 3），不能无条件拿去索引
             # 占位全零的 `ops.boundary_extrap_tet` 字典（只有 axis∈{0,1,2}
             # 的键，越界会直接 KeyError）——按 `oc_code>=6`（native 真实
-            # 面）分派到 `ops.boundary_extrap_native_tet[excluded_vertex]`
+            # 面）与坍缩顶点槽位分派到 `ops.native_face_extrap`
             # （形状 (n_fp,n_native)，只对 `Q[...,4][:n_native]` 这部分
             # 真实自由度求值，填充槽位不携带真实场值）。
-            E = ops.native_face_extrap(oc_code)  # (n_fp, n_native)
+            E = ops.native_face_extrap(oc_code, int(mesh.face_flux_points.owner_tri_slot[f]))  # (n_fp, n_native)
             Q_fp = E @ Q[owner_cell, :E.shape[1], 4]  # pressure only, (n_fp,)
             normal = ffp.true_normal
             area_w = ffp.true_area_weight

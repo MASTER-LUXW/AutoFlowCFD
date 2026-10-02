@@ -225,7 +225,7 @@ class _GPUDistributedInitMixin(_GPUDistributedTurbSourceMixin, _GPUDistributedCh
         # 字段提供了 `@property` 转发到 `base_flat`（`owner_axis`/
         # `true_normal`/`boundary_extrap`等），但**没有**为 `owner_cell`/
         # `neighbor_cell`/`owner_adj_row_exact`/`neighbor_adj_row_exact`/
-        # `owner_cube_face`/`neighbor_cube_face`/`true_area_weight`/
+        # `owner_face_op`/`neighbor_face_op`/`true_area_weight`/
         # `boundary_extrap_native`/`lift_native`/`mixed_*`/
         # `color_face_indices`/`n_colors` 提供转发（该类真正持有的对应
         # 字段名是 `owner_cell_local`/`neighbor_cell_local`，与

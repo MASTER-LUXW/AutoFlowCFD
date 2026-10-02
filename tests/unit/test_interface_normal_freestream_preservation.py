@@ -129,7 +129,7 @@ def _args_common(c):
 
 def _tail(c):
     fl = c["flat"]
-    return (fl.owner_cube_face, fl.neighbor_cube_face, fl.ref_area_weight,
+    return (fl.owner_face_op, fl.neighbor_face_op, fl.ref_area_weight,
             fl.boundary_extrap_native, fl.lift_native)
 
 
@@ -143,12 +143,12 @@ def _expected(c):
     for f in range(fl.n_faces):
         sides = []
         if fl.owner_is_primary[f]:
-            sides.append((fl.owner_cell[f], fl.owner_cube_face[f], c["adj_o"][f]))
+            sides.append((fl.owner_cell[f], fl.owner_face_op[f], c["adj_o"][f]))
         if (not fl.is_boundary[f]) and fl.neighbor_is_primary[f]:
-            sides.append((fl.neighbor_cell[f], fl.neighbor_cube_face[f], c["adj_n"][f]))
-        for cell, code, adj in sides:
+            sides.append((fl.neighbor_cell[f], fl.neighbor_face_op[f], c["adj_n"][f]))
+        for cell, op, adj in sides:
             flux = (adj @ F) * fl.ref_area_weight[:, None]   # (n_fp, 5)
-            out[cell] -= (fl.lift_native[code - 6] @ flux) / det[cell][:, None]
+            out[cell] -= (fl.lift_native[op] @ flux) / det[cell][:, None]
     return out
 
 

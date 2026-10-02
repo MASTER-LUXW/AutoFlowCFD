@@ -197,7 +197,14 @@ class _MockBoundaries:
         self.bc_types = bc_types
 
 
-def build_channel_mesh(order, nx, ny, nz, Lx, H, Lz):
+def build_channel_mesh(order, nx, ny, nz, Lx, H, Lz, rotate_odd_tets=False):
+    """结构化通道四面体网格（每个六面体拆 6 个四面体）。
+
+    `rotate_odd_tets`：对奇数号四面体的前三个局部顶点做一次 3-轮换（偶置换，定向
+    不变）。结构化拆分下相邻单元的局部编号相容，三角形面通量点两侧顺序天然一致；
+    轮换后出现两侧顺序互为镜像的面（真实非结构网格的常态），供依赖"两侧顺序不一致"
+    的测试使用。
+    """
     nx1, ny1, nz1 = nx + 1, ny + 1, nz + 1
     ii, jj, kk = np.meshgrid(np.arange(nx1), np.arange(ny1), np.arange(nz1), indexing="ij")
     node_id = (ii + nx1 * jj + nx1 * ny1 * kk).ravel()
@@ -233,6 +240,8 @@ def build_channel_mesh(order, nx, ny, nz, Lx, H, Lz):
                 tets.extend(sub_tets)
 
     tet_conn = np.array(tets, dtype=np.int32)
+    if rotate_odd_tets:
+        tet_conn[1::2] = tet_conn[1::2][:, [1, 2, 0, 3]]
     n_tets = len(tet_conn)
 
     # 边界分组：按每个 tet 的 4 个节点是否有 >=3 个落在目标边界平面上

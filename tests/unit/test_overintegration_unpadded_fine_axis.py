@@ -71,8 +71,11 @@ def _segmented(det, inv, n_prism):
     """逐细点展开的 (n_cells, n_fine) 度量 -> 网格的分段存储
     （`grid/high_order/order_jacobians.build_fine_metrics` 的布局）：
     四面体段逐单元只存一份（这里取第 0 列，调用方已把它们填成逐单元常数）。"""
+    n_tet = det.shape[0] - n_prism
     return {"prism_det": det[:n_prism], "prism_inv": inv[:n_prism],
-            "tet_det": det[n_prism:, 0].copy(), "tet_inv": inv[n_prism:, 0].copy()}
+            "tet_det": det[n_prism:, 0].copy(), "tet_inv": inv[n_prism:, 0].copy(),
+            # 无粘体积算子的逐单元槽位组合编号（这里全取组合 0）
+            "prism_k_combo": np.zeros(n_prism, dtype=np.int64), "tet_k_combo": np.zeros(n_tet, dtype=np.int64)}
 
 
 def _n_fine_prism(order):

@@ -206,8 +206,11 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
         # 直边四面体的 Jacobian 逐单元常数：每单元只算一份（见 `build_fine_metrics`）
         tet_jacobians_fine = compute_native_tet_jacobians(mesh, order, 1, want_scaled_quality=False)
         n_tets = len(mesh._fixed_tet_conn) if mesh._fixed_tet_conn is not None else 0
+        from autoflowcfd.fr.triangle_apex import cell_triangle_slots
+
         jacobians_fine = build_fine_metrics(
-            prism_jacobians_fine, tet_jacobians_fine, n_sps_per_cell_fine, n_prisms, n_tets)
+            prism_jacobians_fine, tet_jacobians_fine, n_sps_per_cell_fine, n_prisms, n_tets,
+            cell_triangle_slots(mesh._fixed_tet_conn, mesh._fixed_prism_conn))
 
     return {
         "sps_coords": sps_coords,

@@ -5,27 +5,17 @@ AutoFlowCFD - FP 几何组装辅助类和函数
 棱柱四边形面对角线分类、multi-source 解析等辅助函数。
 """
 
-from typing import List, Tuple
+from typing import Tuple
 
 import numpy as np
 
-from .geometry import (
-    ACCEPT_STRICT_REL,
-    CUBE_FACE_AXIS_SIDE,
-    FaceFluxPointGeometry,
-    build_cross_interp,
-    cell_info,
-    face_ref_grid,
-    map_ref_points,
-    native_tet_face_points_physical,
-)
+from .geometry import CUBE_FACE_AXIS_SIDE, FaceFluxPointGeometry
 from autoflowcfd.grid.curved_mapping.curved_mapping import PRISM_CUBE_FACES
 from autoflowcfd.grid.connectivity.face_connectivity import (
     CUBE_FACE_CODES,
     CUBE_FACE_NAMES,
     NATIVE_PRISM_FACE_CODE_RANGE,
     NATIVE_TET_FACE_CODE_RANGE,
-    FRFaceConnectivity,
 )
 
 
@@ -73,18 +63,6 @@ _AXIS_SIDE_TO_COLLAPSED_NAME = {
 }
 
 
-def _is_native_tet_code(code: int) -> bool:
-    """该 cube face 编码是否是 **native 四面体**真实面（区间 [6,10)）。
-
-    单独一个函数而不是在两个调用点各写一遍区间判据：原生棱柱面用
-    [10,15)，写成 `code >= 6` 会把它们一并命中，而这两处的语义明确只针对
-    四面体（`build_cross_interp` 的四面体分支拒绝预算自由坐标）。
-    """
-    lo, hi = NATIVE_TET_FACE_CODE_RANGE
-    return lo <= int(code) < hi
-
-
-
 class _KernelFaceData:
     """numba kernel 输出的 flat 数组容器，替代 180 万个 FaceFluxPointGeometry 对象。
 
@@ -98,6 +76,10 @@ class _KernelFaceData:
     (n_faces, n_fp) bool，True 的 FP 落在边界半区（残差 kernel 逐 FP 取幽灵态）；
     mixed_bnd_face：(n_faces,) bool，边界子面记录标志（不参与累加但需算幽灵态）；
     mixed_p0_bnd_frac：(n_faces,) float64，P0 面积占比混合用。
+
+    owner_tri_slot/neighbor_tri_slot：(n_faces,) int64，两侧三角形面的坍缩顶点槽位
+    （`fr/triangle_apex.py`；四边形面与边界面 neighbor 侧为 0）。该侧通量点集与顺序、
+    面外插/提升算子都按它取；由单元连接关系唯一决定，共享面两侧的点因此物理重合。
     """
     __slots__ = (
         'n_faces', 'n_fp', 'n_sps', 'n1d',
@@ -110,6 +92,7 @@ class _KernelFaceData:
         'nb_extra_cell', 'nb_extra_mat', 'ow_extra_cell', 'ow_extra_mat',
         'mixed_nb_partner', 'mixed_nb_mask', 'mixed_ow_partner', 'mixed_ow_mask',
         'mixed_bnd_face', 'mixed_p0_bnd_frac',
+        'owner_tri_slot', 'neighbor_tri_slot',
         '_mesh', '_face_conn', '_sps_1d',
         '_nb_fc', '_nb_resid', '_ow_fc', '_ow_resid',
         '_nb_cell_id', '_ow_cell_id',
@@ -139,8 +122,6 @@ class _KernelFaceData:
 
     def _build_ffp(self, f):
         """为第 f 个面构建 FaceFluxPointGeometry（按需，仅后处理使用）。"""
-        n1d = self.n1d
-        n_fp = self.n_fp
         fc = self._face_conn
 
         oa = int(self.owner_axis[f])
@@ -273,122 +254,3 @@ def _classify_half(
         f"({set(lower_global)} / {set(upper_global)}) of quad corners "
         f"{[int(cell_node_ids[i]) for i in quad_local_idx]} - unexpected prism quad-face triangulation."
     )
-
-
-def _resolve_multi_source(
-    face_conn: FRFaceConnectivity,
-    mesh,
-    n1d: int,
-    sps_1d: np.ndarray,
-    n_fp: int,
-    is_lower_fp_standard: np.ndarray,
-    is_lower_fp_flipped: np.ndarray,
-    cell_id: int,
-    code: int,
-    group_faces: List[int],
-    role: str,
-    precomputed_free_coords: np.ndarray = None,
-    precomputed_resid: float = None,
-) -> Tuple[List[tuple], float, float]:
-    """cell_id 在 group_faces 这组里始终扮演 role 角色。返回该 cell 一侧完整
-    原生 Flux Points 网格对应的 sources 列表。group_faces 长度恒为 1 或 2。
-
-    Args:
-        precomputed_free_coords: (n_fp, 2) 或 None。numba kernel 预计算的
-            Newton 自由坐标。提供时跳过 Newton 迭代。
-        precomputed_resid: float 或 None。配套的预计算残差。
-
-    Returns:
-        (sources, worst_resid, char_length)
-    """
-    is_prism_c, nodes_c = cell_info(mesh, cell_id)
-    if NATIVE_TET_FACE_CODE_RANGE[0] <= code < NATIVE_TET_FACE_CODE_RANGE[1]:
-        # native 四面体（路径C）自身面——不存在 (axis,side) 概念，用
-        # face_flux_points.py::native_tet_face_points_physical 直接生成
-        # 与其余面数量一致（n1d*n1d）的物理点，见该函数与 Part7 文档
-        # "二·五"节。四面体不会触发下面的 multi-source（len==2）分支
-        # （那只发生在棱柱四边形侧面，见模块文档），所以这里的分支只
-        # 需要覆盖 len(group_faces)==1 这一条路径实际会用到的取值。
-        #
-        # **判据必须是区间、不能是 `code >= 6`**（2026-09-19）：原生棱柱面
-        # 用 [10,15) 编码，`code >= 6` 会把它们也送进来、按 `code - 6` 取到
-        # excluded_vertex 4~8，而四面体只有 4 个面。原生棱柱面走下面那条
-        # 坍缩分支 —— 两者的通量点已验证是同一批物理点、同一顺序
-        # （见 fr/native_prism/__init__.py 模块文档）。
-        phys_fp_full = native_tet_face_points_physical(
-            n1d, code - NATIVE_TET_FACE_CODE_RANGE[0], nodes_c, sps_1d)
-    else:
-        axis, side = CUBE_FACE_AXIS_SIDE[CUBE_FACE_NAMES[code]]
-        ref_grid_full = face_ref_grid(n1d, axis, side, sps_1d)
-        phys_fp_full = map_ref_points(is_prism_c, ref_grid_full, nodes_c)
-
-    def other_side(gf: int) -> tuple:
-        if role == "owner":
-            return int(face_conn.neighbor_cell[gf]), int(face_conn.neighbor_cube_face[gf])
-        return int(face_conn.owner_cell[gf]), int(face_conn.owner_cube_face[gf])
-
-    def cross_translation(gf: int):
-        t = face_conn.face_translation[gf]
-        if not np.any(t):
-            return None
-        return -t if role == "owner" else t
-
-    if len(group_faces) == 1:
-        gf = group_faces[0]
-        other_cell, other_code = other_side(gf)
-        char_length = float(np.sqrt(max(face_conn.area[gf], 1e-300)))
-        # 对面是 **native 四面体**真实面时强制丢弃 numba kernel 预算的
-        # (owner/neighbor axis,side) 语义自由坐标——`build_cross_interp`
-        # 的 native 四面体分支明确拒绝 precomputed_free_coords（见其文档），
-        # 让它用自己的解析闭式解重新定位（本身足够快，不是性能瓶颈）。
-        #
-        # **判据必须是 native 四面体区间，不能是 `other_code < 6`**
-        # （2026-09-19）：原生棱柱面用 [10,15) 编码，`< 6` 会把它们也当成
-        # "要丢弃"。那样虽然不出错（原生棱柱分支走的是与坍缩逐位相同的
-        # Newton 定位、只在最后换 Vandermonde，见 `build_cross_interp`），
-        # 但会白丢一次已经算好的定位结果。
-        _keep = not _is_native_tet_code(other_code)
-        interp, resid = build_cross_interp(
-            mesh, n1d, sps_1d, other_cell, other_code, phys_fp_full,
-            char_length=char_length, translation=cross_translation(gf),
-            precomputed_free_coords=precomputed_free_coords if _keep else None,
-            precomputed_resid=precomputed_resid if _keep else None,
-        )
-        return [(other_cell, interp)], resid, char_length
-
-    cell_node_ids = mesh._fixed_prism_conn[cell_id]
-    quad_local_idx = prism_quad_local_idx(code)
-
-    sources = []
-    worst_resid = 0.0
-    worst_char_length = 1.0
-    for gi, gf in enumerate(group_faces):
-        other_cell, other_code = other_side(gf)
-        half, is_standard = _classify_half(cell_node_ids, quad_local_idx, face_conn.face_node_ids[gf])
-        is_lower_fp = is_lower_fp_standard if is_standard else is_lower_fp_flipped
-        mask = is_lower_fp if half == "lower" else ~is_lower_fp
-        sub_pts = phys_fp_full[mask]
-        full_matrix = np.zeros((n_fp, n1d**3))
-        if sub_pts.shape[0] > 0:
-            sub_fc = None
-            sub_resid = None
-            # 同上：对面是 native 四面体时不转发预算自由坐标，见上方
-            # len(group_faces)==1 分支的详细说明——这里 other_cell/
-            # other_code 是棱柱四边形每条子面各自的真实相邻单元，两条
-            # 子面完全可能对应两个不同的 native 四面体。
-            if (gi == 0 and precomputed_free_coords is not None
-                    and not _is_native_tet_code(other_code)):
-                sub_fc = precomputed_free_coords[mask]
-                sub_resid = precomputed_resid
-            char_length = float(np.sqrt(max(face_conn.area[gf], 1e-300)))
-            sub_interp, resid = build_cross_interp(
-                mesh, n1d, sps_1d, other_cell, other_code, sub_pts,
-                char_length=char_length, translation=cross_translation(gf),
-                precomputed_free_coords=sub_fc,
-                precomputed_resid=sub_resid,
-            )
-            full_matrix[mask] = sub_interp
-            if resid / max(char_length, 1e-300) > worst_resid / max(worst_char_length, 1e-300):
-                worst_resid, worst_char_length = resid, char_length
-        sources.append((other_cell, full_matrix))
-    return sources, worst_resid, worst_char_length

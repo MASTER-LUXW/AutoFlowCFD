@@ -37,7 +37,7 @@ def _extrapolate_scalar_to_faces(
 ):
     """owner 坐标系下的 `(phi_owner_fp, phi_neighbor_fp)`，各 `(n_faces, n_fp)`。
 
-    owner 侧用自身外插 `boundary_extrap_native[code-6]`，neighbor 侧用
+    owner 侧用自身外插 `boundary_extrap_native[op]`，neighbor 侧用
     `neighbor_src`（邻居解点 -> owner 的通量点），都在 **owner 的通量点顺序**里。
     真边界面的 ghost 规则见 `face_frames.extrapolate_scalar_pair_kernel`：
 
@@ -51,7 +51,7 @@ def _extrapolate_scalar_to_faces(
     wz, wv, hv = _wall_masks(flat, wall_dirichlet_zero_face, wall_dirichlet_value_face,
                              has_wall_dirichlet_value)
     return extrapolate_scalar_pair_kernel(
-        scalar_sps, flat.owner_cell, flat.owner_cube_face, flat.boundary_extrap_native,
+        scalar_sps, flat.owner_cell, flat.owner_face_op, flat.boundary_extrap_native,
         flat.neighbor_src0_cell, flat.neighbor_src0_tpl, flat.neighbor_src0_tid,
         flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
         True, wz, hv, wv, flat.mixed_nb_partner, flat.mixed_nb_mask,
@@ -72,7 +72,7 @@ def _extrapolate_scalar_to_faces_neighbor_frame(
     wz, wv, hv = _wall_masks(flat, wall_dirichlet_zero_face, wall_dirichlet_value_face,
                              has_wall_dirichlet_value)
     return extrapolate_scalar_pair_kernel(
-        scalar_sps, flat.neighbor_cell, flat.neighbor_cube_face, flat.boundary_extrap_native,
+        scalar_sps, flat.neighbor_cell, flat.neighbor_face_op, flat.boundary_extrap_native,
         flat.owner_src0_cell, flat.owner_src0_tpl, flat.owner_src0_tid,
         flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
         False, wz, hv, wv, flat.mixed_ow_partner, flat.mixed_ow_mask,
@@ -142,7 +142,7 @@ def precompute_scalar_convection_geometry(rho, velocity, mesh, ops, flat):
     rho_u = np.ascontiguousarray(rho[:, :, None] * velocity)          # (n_cells,n_sps,3)
     rho_u_tilde = contravariant_flux_from_metric(det_jacs, inv_jacs, rho_u[..., None])[..., 0]
     mass_flux, mass_flux_neighbor = face_mass_flux_kernel(
-        rho_u, flat.owner_cell, flat.owner_cube_face, flat.neighbor_cell, flat.neighbor_cube_face,
+        rho_u, flat.owner_cell, flat.owner_face_op, flat.neighbor_cell, flat.neighbor_face_op,
         flat.boundary_extrap_native,
         flat.owner_src0_cell, flat.owner_src0_tpl, flat.owner_src0_tid,
         flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
@@ -166,7 +166,7 @@ def _lift_side_jumps(jump_owner, jump_neighbor, sign, flat, mesh):
     det_jacs = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
     jump_owner = np.ascontiguousarray(jump_owner)
     jump_neighbor = np.ascontiguousarray(jump_neighbor)
-    args = (flat.owner_cell, flat.neighbor_cell, flat.owner_cube_face, flat.neighbor_cube_face,
+    args = (flat.owner_cell, flat.neighbor_cell, flat.owner_face_op, flat.neighbor_face_op,
             flat.owner_adj_row_exact, flat.neighbor_adj_row_exact, flat.ref_area_weight,
             flat.lift_native, flat.owner_is_primary, flat.neighbor_is_primary, det_jacs)
     if os.environ.get("AFCFD_USE_COLORING", "1") == "1":

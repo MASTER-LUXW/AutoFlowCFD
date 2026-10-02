@@ -149,19 +149,14 @@ def generate_fr_operators(order: int) -> FROperators:
 
     ref_native_tet, D_native_tet = build_native_tet_operators(order)
     n_native_sps_tet = ref_native_tet.shape[0]
-    boundary_extrap_native_tet = {
-        excluded_vertex: build_native_tet_boundary_extrap(order, excluded_vertex)
-        for excluded_vertex in range(4)
-    }
-    lift_native_tet = {
-        excluded_vertex: build_native_tet_lift(order, excluded_vertex)
-        for excluded_vertex in range(4)
-    }
+    # 面外插 / 提升按（面, 坍缩顶点槽位）全部构造（fr/triangle_apex.py），组装成按面算子
+    # 索引排好的整表（face_ops.py，见下方 face_extrap_by_op）
+    from ..triangle_apex import N_TRI_SLOTS
+    tet_extrap_slots = {(v, sl): build_native_tet_boundary_extrap(order, v, sl)
+                        for v in range(4) for sl in range(N_TRI_SLOTS)}
+    tet_lift_slots = {(v, sl): build_native_tet_lift(order, v, sl)
+                      for v in range(4) for sl in range(N_TRI_SLOTS)}
     D_native_tet_padded = pad_native_matrix_to_global(D_native_tet, n_sps_global, pad_axes=(0, 1))
-    lift_native_tet_padded = {
-        excluded_vertex: pad_native_matrix_to_global(lift_native_tet[excluded_vertex], n_sps_global, pad_axes=(0,))
-        for excluded_vertex in range(4)
-    }
     filter_native_tet = build_native_tet_modal_filter(order)
     filter_native_tet_padded = pad_native_filter_matrix_to_global(filter_native_tet, n_sps_global)
 
@@ -181,10 +176,7 @@ def generate_fr_operators(order: int) -> FROperators:
     D_native_prism = None
     ref_native_prism = None
     n_native_sps_prism = None
-    boundary_extrap_native_prism = None
-    lift_native_prism = None
     D_native_prism_padded = None
-    lift_native_prism_padded = None
     filter_native_prism_padded = None
     if True:  # 棱柱恒为原生基（坍缩档 2026-09-23 删除）
         from ..native_prism.basis import (
@@ -195,14 +187,9 @@ def generate_fr_operators(order: int) -> FROperators:
 
         ref_native_prism, D_native_prism = build_native_prism_operators(order)
         n_native_sps_prism = ref_native_prism.shape[0]
-        boundary_extrap_native_prism, lift_native_prism = (
-            build_all_native_prism_face_operators(order))
+        prism_extrap_slots, prism_lift_slots = build_all_native_prism_face_operators(order)
         D_native_prism_padded = pad_native_matrix_to_global(
             D_native_prism, n_sps_global, pad_axes=(0, 1))
-        lift_native_prism_padded = {
-            f: pad_native_matrix_to_global(mat, n_sps_global, pad_axes=(0,))
-            for f, mat in lift_native_prism.items()
-        }
         filter_native_prism_padded = pad_native_filter_matrix_to_global(
             build_native_prism_modal_filter(order), n_sps_global)
         # 与四面体同一个别名做法：无条件读 `D_3d_prism`/`filter_prism` 的
@@ -321,19 +308,25 @@ def generate_fr_operators(order: int) -> FROperators:
         )
         overint_project_f2c_tet = pad_native_matrix_to_global(
             build_native_tet_l2_projection(order, overint_order_tet), n_sps_global, pad_axes=(0,))
-        # 修正项本侧通量 = 细层通量多项式的法向迹，并进体积算子（离散守恒，见
-        # fr/face_flux_trace.py）；棱柱段的提升矩阵在上方 3f 已构造好
+        # 修正项本侧通量 = 细层通量多项式在面通量点上的法向迹，并进体积算子（离散守恒、
+        # 按三角形面坍缩顶点槽位组合各一份，见 fr/face_flux_trace.py）
         from ..face_flux_trace import (
             build_lifted_divergence, build_prism_face_flux_trace, build_tet_face_flux_trace,
         )
+
+        def _padded_lift(table):
+            return lambda f, s: pad_native_matrix_to_global(table[(f, s)], n_sps_global, pad_axes=(0,))
+
         overint_lifted_div_tet = build_lifted_divergence(
-            overint_project_f2c_tet, overint_D_fine_tet,
-            [lift_native_tet_padded[v] for v in range(4)],
-            build_tet_face_flux_trace(order, overint_order_tet), order)
+            overint_project_f2c_tet, overint_D_fine_tet, _padded_lift(tet_lift_slots),
+            build_tet_face_flux_trace(order, overint_order_tet), order, "tet")
         overint_lifted_div_prism = build_lifted_divergence(
-            overint_project_f2c_prism, overint_D_fine_prism,
-            [lift_native_prism_padded[f] for f in range(5)],
-            build_prism_face_flux_trace(order, overint_order_prism), order)
+            overint_project_f2c_prism, overint_D_fine_prism, _padded_lift(prism_lift_slots),
+            build_prism_face_flux_trace(order, overint_order_prism), order, "prism")
+
+    from .face_ops import build_face_op_tables
+    face_extrap_by_op, face_lift_by_op = build_face_op_tables(
+        tet_extrap_slots, tet_lift_slots, prism_extrap_slots, prism_lift_slots, n_sps_global)
 
     return FROperators(
         D_1d=D_1d,
@@ -359,18 +352,14 @@ def generate_fr_operators(order: int) -> FROperators:
         D_native_tet=D_native_tet,
         ref_native_tet=ref_native_tet,
         n_native_sps_tet=n_native_sps_tet,
-        boundary_extrap_native_tet=boundary_extrap_native_tet,
-        lift_native_tet=lift_native_tet,
         D_native_tet_padded=D_native_tet_padded,
-        lift_native_tet_padded=lift_native_tet_padded,
         filter_native_tet_padded=filter_native_tet_padded,
         D_native_prism=D_native_prism,
         ref_native_prism=ref_native_prism,
         n_native_sps_prism=n_native_sps_prism,
-        boundary_extrap_native_prism=boundary_extrap_native_prism,
-        lift_native_prism=lift_native_prism,
         D_native_prism_padded=D_native_prism_padded,
-        lift_native_prism_padded=lift_native_prism_padded,
+        face_extrap_by_op=face_extrap_by_op,
+        face_lift_by_op=face_lift_by_op,
         filter_native_prism_padded=filter_native_prism_padded,
     )
 

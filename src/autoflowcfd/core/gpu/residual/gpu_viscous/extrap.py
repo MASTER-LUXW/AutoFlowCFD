@@ -64,14 +64,14 @@ def _extrap_side(cp, idx, src0_cell_all, src0_tpl_all, src0_tid_all, src1_idx_al
     return Q_fp, gv_fp, gT_fp, mut_fp[..., 0]
 
 
-def _self_extrap_side(cp, cell_idx, cube_face_code, boundary_extrap_native,
+def _self_extrap_side(cp, cell_idx, face_op, boundary_extrap_native,
                        Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu):
     """自身面外插——某一侧单元用自己的场值按自身面几何外插到 FP
     （owner-primary 块的 `Q_o`/`gv_o`/`gT_o`/`mut_o`，或 neighbor-primary
     块的 `Q_n_native`/`gv_n_native`/`gT_n_native`/`mut_n_native`）。
 
     与 CPU 版 `viscous_flux_kernel.py` 的
-    `E_o = boundary_extrap_native[oc_code - 6]` /
+    `E_o = boundary_extrap_native[oc_op]` /
     `Q_o = _extrap_matmul(Q[oc], E_o)` 逐字对应，复用与
     `gpu_inviscid.py::_compute_interface_correction_gpu` 完全同一个
     `_native_self_extrap` helper。
@@ -98,9 +98,9 @@ def _self_extrap_side(cp, cell_idx, cube_face_code, boundary_extrap_native,
     Args:
         cell_idx: (n,) 本侧单元全局索引（owner 块传 `oc`，neighbor 块
             传 `nc`）
-        cube_face_code: (n,) 本侧 owner_cube_face/neighbor_cube_face
-        boundary_extrap_native: (9,n_fp,n_sps) 原生自身外插表
-            （四面体 [6,10)、棱柱 [10,15) 同一张表，按 `code-6` 索引）
+        face_op: (n,) 本侧面算子索引 owner_face_op/neighbor_face_op
+        boundary_extrap_native: (27,n_fp,n_sps) 原生自身外插整表
+            （`fr/operators/face_ops.py`，按面算子索引）
 
     Returns:
         (Q, gv, gT, mut)：形状分别为 (n,n_fp,5)/(n,n_fp,3,3)/(n,n_fp,3)/
@@ -108,7 +108,7 @@ def _self_extrap_side(cp, cell_idx, cube_face_code, boundary_extrap_native,
     """
     from autoflowcfd.core.gpu.residual.gpu_inviscid import _native_self_extrap
 
-    E = _native_self_extrap(cp, cube_face_code, boundary_extrap_native)
+    E = _native_self_extrap(cp, face_op, boundary_extrap_native)
 
     Q = _extrap_to_fp(cp, E, cell_idx, Q_gpu)
     gv = _extrap_to_fp(cp, E, cell_idx, grad_vel_gpu)

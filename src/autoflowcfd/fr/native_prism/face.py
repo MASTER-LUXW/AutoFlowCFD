@@ -73,36 +73,42 @@ _TRI_VERTS = np.array([[-1.0, -1.0], [1.0, -1.0], [-1.0, 1.0]])
 _SIDE_EXCLUDED = {2: 0, 3: 1, 4: 2}
 
 
-def native_prism_face_points(order: int, face_id: int) -> np.ndarray:
+def native_prism_face_points(order: int, face_id: int, slot: int = 0) -> np.ndarray:
     """某个面上 `(order+1)^2` 个通量点的**参考棱柱坐标** `(r,s,t)`。
 
     Args:
         order: 多项式阶数
         face_id: 0~4，见模块文档的表
+        slot: 三角形封盖的坍缩顶点槽位（`fr/triangle_apex.py`）；侧四边形恒为 0。
 
     Returns:
         `(n1d*n1d, 3)`，列为 `(r, s, t)`。
 
     Raises:
-        ValueError: `face_id` 不在 0~4。
+        ValueError: `face_id` 不在 0~4，或给侧四边形传了非零槽位。
     """
     if face_id not in PRISM_FACE_IDS:
         raise ValueError(
             f"face_id={face_id} 不合法：参考棱柱只有 5 个面（0/1 是两个"
             f"三角形封盖，2/3/4 是三个侧四边形），见模块文档的表")
+    if face_id not in (0, 1) and slot != 0:
+        raise ValueError(f"侧四边形面（face_id={face_id}）没有坍缩顶点，槽位只能是 0，收到 {slot}")
 
     n1d = order + 1
     g_1d, _ = gauss_legendre(n1d)
 
     if face_id in (0, 1):
         # 三角形封盖：与 native 四面体的三角形面**同一套**坍缩三角形
-        # 采样（一份实现、一个事实来源）。
-        from ...grid.curved_mapping.curved_mapping import cube_to_tri_rs
+        # 采样（一份实现、一个事实来源），按槽位轮换坍缩顶点。
+        from ...grid.curved_mapping.curved_mapping import cube_to_tri_rs, tri_barycentric
+        from ..triangle_apex import rotate_triangle
 
         g1, g2 = np.meshgrid(g_1d, g_1d, indexing="ij")
-        r, s = cube_to_tri_rs(g1.ravel(), g2.ravel())
-        t = np.full(r.shape, -1.0 if face_id == 0 else 1.0)
-        return np.column_stack([r, s, t])
+        l1, l2, l3 = tri_barycentric(*cube_to_tri_rs(g1.ravel(), g2.ravel()))
+        va, vb, vapex = (_TRI_VERTS[i] for i in rotate_triangle((0, 1, 2), slot))
+        rs = l1[:, None] * va + l2[:, None] * vb + l3[:, None] * vapex
+        t = np.full(l1.shape, -1.0 if face_id == 0 else 1.0)
+        return np.column_stack([rs[:, 0], rs[:, 1], t])
 
     # 侧四边形：三角形的一条边 x 挤出方向，张量积。
     excluded = _SIDE_EXCLUDED[face_id]
@@ -119,7 +125,7 @@ def native_prism_face_points(order: int, face_id: int) -> np.ndarray:
 
 
 def native_prism_face_points_physical(order: int, face_id: int,
-                                      cell_nodes: np.ndarray) -> np.ndarray:
+                                      cell_nodes: np.ndarray, slot: int = 0) -> np.ndarray:
     """某个面上通量点的**物理**坐标。
 
     只是 `native_prism_face_points` 与
@@ -130,10 +136,10 @@ def native_prism_face_points_physical(order: int, face_id: int,
     from .basis import map_native_prism_to_physical
 
     return map_native_prism_to_physical(
-        native_prism_face_points(order, face_id), cell_nodes)
+        native_prism_face_points(order, face_id, slot), cell_nodes)
 
 
-def _face_vandermondes(order: int, face_id: int):
+def _face_vandermondes(order: int, face_id: int, slot: int = 0):
     """`build_native_prism_boundary_extrap`/`build_native_prism_lift` 共用的
     准备步骤：体积节点与该面通量点各自的模态取值 Vandermonde。
 
@@ -147,13 +153,12 @@ def _face_vandermondes(order: int, face_id: int):
     """
     ref_sps = build_native_prism_nodes(order)
     V_sps, _, _, _ = build_native_prism_vandermonde(order, ref_sps)
-    fp = native_prism_face_points(order, face_id)
+    fp = native_prism_face_points(order, face_id, slot)
     V_fp, _, _, _ = build_native_prism_vandermonde(order, fp)
     return V_sps, V_fp, restricted_prism_modes(order)
 
 
-def build_native_prism_boundary_extrap(order: int,
-                                       face_id: int) -> np.ndarray:
+def build_native_prism_boundary_extrap(order: int, face_id: int, slot: int = 0) -> np.ndarray:
     """体积 -> 自身某个面的外插矩阵，`E @ Q_volume_nodal` 给出该面通量点
     上的取值。
 
@@ -168,7 +173,7 @@ def build_native_prism_boundary_extrap(order: int,
     """
     from scipy.linalg import lu_factor, lu_solve
 
-    V_sps, V_fp, _ = _face_vandermondes(order, face_id)
+    V_sps, V_fp, _ = _face_vandermondes(order, face_id, slot)
     lu = lu_factor(V_sps.T)
     return lu_solve(lu, V_fp.T).T
 
@@ -204,7 +209,7 @@ def native_prism_mode_norm_squared(i: int, j: int, k: int) -> float:
     return 2.0 ** (2 * i + 3) / ((2 * i + 1) * (i + j + 1) * (2 * k + 1))
 
 
-def build_native_prism_lift(order: int, face_id: int) -> np.ndarray:
+def build_native_prism_lift(order: int, face_id: int, slot: int = 0) -> np.ndarray:
     """某个面的 DG 提升算子（"lift"）：把该面逐通量点的通量跳跃
     （`F_common - F_own`）提升成对体积节点自由度的修正贡献。
 
@@ -256,22 +261,25 @@ def build_native_prism_lift(order: int, face_id: int) -> np.ndarray:
     Returns:
         `Lift_ref`：`(n_sps, n1d^2)`。
     """
-    V_sps, V_fp, modes = _face_vandermondes(order, face_id)
+    V_sps, V_fp, modes = _face_vandermondes(order, face_id, slot)
     inv_norms = np.array(
         [1.0 / native_prism_mode_norm_squared(i, j, k) for (i, j, k) in modes])
     return V_sps @ (inv_norms[:, None] * V_fp.T)
 
 
 def build_all_native_prism_face_operators(
-        order: int) -> Tuple[Dict[int, np.ndarray], Dict[int, np.ndarray]]:
-    """一次构造全部 5 个面的 `(外插, 提升)` 两组算子。
+        order: int) -> Tuple[Dict[Tuple[int, int], np.ndarray], Dict[Tuple[int, int], np.ndarray]]:
+    """一次构造全部面的 `(外插, 提升)` 两组算子：两个三角形封盖各 3 个槽位、三个侧
+    四边形各槽位 0（`fr/triangle_apex.py`）。
 
     Returns:
-        `(extrap, lift)`，两个以 `face_id` 为键的字典。
+        `(extrap, lift)`，两个以 `(face_id, slot)` 为键的字典。
     """
-    extrap = {f: build_native_prism_boundary_extrap(order, f)
-              for f in PRISM_FACE_IDS}
-    lift = {f: build_native_prism_lift(order, f) for f in PRISM_FACE_IDS}
+    from ..triangle_apex import N_TRI_SLOTS
+
+    keys = [(f, sl) for f in PRISM_FACE_IDS for sl in (range(N_TRI_SLOTS) if f in (0, 1) else (0,))]
+    extrap = {k: build_native_prism_boundary_extrap(order, *k) for k in keys}
+    lift = {k: build_native_prism_lift(order, *k) for k in keys}
     return extrap, lift
 
 
@@ -399,7 +407,7 @@ _FACE_REF_COVECTOR: Dict[int, Tuple[np.ndarray, bool]] = {
 
 
 def native_prism_face_adj_rows(order: int, face_id: int,
-                               cell_nodes: np.ndarray) -> np.ndarray:
+                               cell_nodes: np.ndarray, slot: int = 0) -> np.ndarray:
     """某个面每个通量点的 `adj_row`，形状 `(n1d^2, 3)`。
 
     与坍缩路径 `fr/face_flux_points/exact_normal.py::compute_exact_adj_rows`
@@ -418,7 +426,7 @@ def native_prism_face_adj_rows(order: int, face_id: int,
     """
     from .basis import native_prism_exact_jacobian
 
-    fp = native_prism_face_points(order, face_id)
+    fp = native_prism_face_points(order, face_id, slot)
     jac = native_prism_exact_jacobian(fp, cell_nodes)          # (n_fp,3,3)
     det = np.linalg.det(jac)
     adj = det[:, None, None] * np.linalg.inv(jac)              # (n_fp,3,3)
@@ -427,9 +435,12 @@ def native_prism_face_adj_rows(order: int, face_id: int,
 
 def reference_face_area_vectors(order: int, face_id: int) -> np.ndarray:
     """参考棱柱上该面每个通量点的面积矢量 `(n1d^2, 3)`：外向余向量，封盖再乘 Duffy
-    因子 `(1-s)/2`（见本节顶部说明）。物理 adj 行就是 `adj(J)^T` 作用在它上面
-    （Nanson 公式）；体积通量迹（`fr/face_flux_trace.py`）用同一组量。"""
+    因子 `(1-b)/2`（`b` 是该通量点的第二个坍缩坐标，见本节顶部说明）。物理 adj 行就是
+    `adj(J)^T` 作用在它上面（Nanson 公式）；体积通量迹（`fr/face_flux_trace.py`）用
+    同一组量。与坍缩顶点槽位无关：循环轮换不改变 `(a,b) -> (r,s)` 映射的面积元。"""
     cov, is_cap = _FACE_REF_COVECTOR[face_id]
-    fp = native_prism_face_points(order, face_id)
-    scale = (1.0 - fp[:, 1]) / 2.0 if is_cap else np.ones(fp.shape[0])
+    n1d = order + 1
+    g_1d, _ = gauss_legendre(n1d)
+    b = np.meshgrid(g_1d, g_1d, indexing="ij")[1].ravel()
+    scale = (1.0 - b) / 2.0 if is_cap else np.ones(n1d * n1d)
     return scale[:, None] * cov[None, :]

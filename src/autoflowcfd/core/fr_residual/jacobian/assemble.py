@@ -77,14 +77,15 @@ def _segments(ctx, n_real_prism, n_real_tet):
         raise ValueError("解析 Jacobian 只用于 P>=1（P0 没有过积分几何，走差分装配）")
     D_sp = {0: np.asarray(ops.D_3d_prism), 1: np.asarray(ops.D_native_tet_padded)}
     out = []
-    for kind, ((lo, hi, nf, det_f, inv_f, c2f, D_f, f2c), K) in enumerate(zip(oi["segs"], oi["lifted_div"])):
+    for kind, ((lo, hi, nf, det_f, inv_f, c2f, D_f, f2c), (K_all, combo)) in enumerate(
+            zip(oi["segs"], oi["lifted_div"])):
         n = n_real_prism if kind == 0 else n_real_tet
         c2f_r = np.ascontiguousarray(np.asarray(c2f)[:, :n])
         # 无粘与粘性同一个体积算子 K（修正项本侧通量迹已并入，fr/face_flux_trace.py），
-        # 与残差逐项一致；两者都在细点上求值
-        W = np.ascontiguousarray(np.asarray(K)[:n])
+        # 与残差逐项一致；两者都在细点上求值。K 按槽位组合各一份、逐单元按 combo 取
+        W = np.ascontiguousarray(np.asarray(K_all)[:, :n])
         Dn = np.ascontiguousarray(D_sp[kind][:n, :n])
-        out.append((kind, VolumeSegment(lo, hi, n, c2f_r, W, Dn), det_f, inv_f))
+        out.append((kind, VolumeSegment(lo, hi, n, c2f_r, W, combo, Dn), det_f, inv_f))
     return out
 
 
@@ -156,7 +157,7 @@ def assemble_mean_flow_blocks(ctx: MeanFlowLinearization, U, residual=None, want
             adj_f = np.asarray(det_f[i0:i1])[..., None, None] * np.asarray(inv_f[i0:i1])
             gv_f = np.einsum("rt,ctab->crab", seg.c2f, gv_sp[c0:c1, :n], optimize=True)
             gT_f = np.einsum("rt,ctb->crb", seg.c2f, gT_sp[c0:c1, :n], optimize=True)
-            add_volume_blocks(K, slot[c0], seg, np.ascontiguousarray(Q[c0:c1, :n]),
+            add_volume_blocks(K, slot[c0], seg, seg.combo[i0:i1], np.ascontiguousarray(Q[c0:c1, :n]),
                               dTdQ[c0:c1, :n], inv_sp[c0:c1, :n], adj_f,
                               mut[c0:c1, :n] @ seg.c2f.T, ctx.mu, ctx.Pr, ctx.Pr_t, gv_f, gT_f)
 
@@ -193,7 +194,7 @@ def assemble_mean_flow_blocks(ctx: MeanFlowLinearization, U, residual=None, want
             flat.owner_src1_cell, flat.owner_src1_mat,
             flat.mixed_nb_partner, flat.mixed_nb_mask, flat.mixed_ow_partner, flat.mixed_ow_mask,
             Qg0, QgP, row, HG, vbc_kind,
-            flat.owner_cube_face, flat.neighbor_cube_face, flat.ref_area_weight,
+            flat.owner_face_op, flat.neighbor_face_op, flat.ref_area_weight,
             flat.boundary_extrap_native, flat.lift_native, flat.ip_length,
             float(ctx.mu), float(ctx.Pr), float(ctx.Pr_t), float(c_ip),
             float(ctx.mach_ref), int(ctx.precond_mode), cross_offset, cross_data, cross_col)

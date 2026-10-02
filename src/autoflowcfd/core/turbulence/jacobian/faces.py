@@ -180,7 +180,7 @@ def _side_blocks(c, n, E, L, w, nrm, m_side, h, c_ip, ghost_row, conv_a, is_bnd_
 def add_turbulence_face_blocks_color(face_indices, acc_prism, acc_tet, slot, n_prism, n_real_prism, n_real_tet,
                                      phi, gam, dG, inv_sp, D_prism, D_tet,
                                      owner_cell, neighbor_cell, is_boundary, owner_is_primary, neighbor_is_primary,
-                                     owner_cube_face, neighbor_cube_face, normal_owner, normal_neighbor,
+                                     owner_face_op, neighbor_face_op, normal_owner, normal_neighbor,
                                      adj_owner, adj_neighbor, ref_area_weight, E_nat, lift_nat, ip_length, c_ip,
                                      neighbor_src0_cell, neighbor_src0_tpl, neighbor_src0_tid, neighbor_src1_idx, neighbor_src1_cell,
                                      neighbor_src1_mat, owner_src0_cell, owner_src0_tpl, owner_src0_tid, owner_src1_idx,
@@ -205,7 +205,7 @@ def add_turbulence_face_blocks_color(face_indices, acc_prism, acc_tet, slot, n_p
                 if not owner_is_primary[f]:
                     continue
                 c = owner_cell[f]
-                code = owner_cube_face[f]
+                fop = owner_face_op[f]
                 nrm = normal_owner[f]
                 adj = adj_owner[f]
                 m_side = m_owner[f]
@@ -224,7 +224,7 @@ def add_turbulence_face_blocks_color(face_indices, acc_prism, acc_tet, slot, n_p
                 if is_boundary[f] or not neighbor_is_primary[f]:
                     continue
                 c = neighbor_cell[f]
-                code = neighbor_cube_face[f]
+                fop = neighbor_face_op[f]
                 nrm = normal_neighbor[f]
                 adj = adj_neighbor[f]
                 m_side = m_neighbor[f]
@@ -240,8 +240,8 @@ def add_turbulence_face_blocks_color(face_indices, acc_prism, acc_tet, slot, n_p
                     m1 = m0
             is_p = c < n_prism
             n = n_real_prism if is_p else n_real_tet
-            E = E_nat[code - 6][:, :n]
-            L = lift_nat[code - 6][:n, :]
+            E = E_nat[fop][:, :n]
+            L = lift_nat[fop][:n, :]
             w = np.empty(n_fp)
             for i in range(n_fp):
                 w[i] = ref_area_weight[i] * np.sqrt(adj[i, 0] ** 2 + adj[i, 1] ** 2 + adj[i, 2] ** 2)

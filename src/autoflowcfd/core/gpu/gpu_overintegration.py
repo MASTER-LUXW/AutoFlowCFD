@@ -32,15 +32,41 @@ def upload_overintegration_ops_gpu(cp, ops, out: dict) -> None:
             out[name] = cp.asarray(np.ascontiguousarray(op, dtype=np.float64))
 
 
-def lifted_divergence_gpu(ops_data):
-    """与 `get_overintegration_segs_gpu` 两段对应的无粘体积算子 `(K_prism, K_tet)`。"""
-    return ops_data['overint_lifted_div_prism'], ops_data['overint_lifted_div_tet']
+def lifted_divergence_gpu(mesh_data, ops_data):
+    """与 `get_overintegration_segs_gpu` 两段对应的 `(K_all, combo)`：按槽位组合各一份的无粘
+    体积算子与该段逐单元组合编号（CPU 端 `get_overintegration_context` 的 `lifted_div`）。"""
+    return ((ops_data['overint_lifted_div_prism'], mesh_data['k_combo_prism']),
+            (ops_data['overint_lifted_div_tet'], mesh_data['k_combo_tet']))
+
+
+def contract_lifted_divergence_gpu(cp, K_all, combo, X):
+    """GPU 版 `volume_contract.contract_lifted_divergence`：`out[c] = K_all[combo[c]] : X[c]`。
+
+    GPU 上按组合分组、每组一次批量收缩（组合数四面体 81、棱柱 9，组内是连续 gemm）；只有
+    一组时不做 gather。
+    """
+    from autoflowcfd.core.gpu.residual.gpu_volume_contract import gpu_contract_shared_operator_2axis
+
+    n = int(combo.shape[0])
+    if n == 0:
+        return cp.zeros((0, K_all.shape[1], X.shape[-1]))
+    lo, hi = int(combo.min()), int(combo.max())
+    if lo == hi:
+        return gpu_contract_shared_operator_2axis(K_all[lo], X)
+    order = cp.argsort(combo)
+    sorted_c = combo[order]
+    cuts = [0] + (cp.flatnonzero(sorted_c[1:] != sorted_c[:-1]) + 1).tolist() + [n]
+    out = cp.empty((n, K_all.shape[1], X.shape[-1]))
+    for a, b in zip(cuts[:-1], cuts[1:]):
+        idx = order[a:b]
+        out[idx] = gpu_contract_shared_operator_2axis(K_all[int(sorted_c[a])], X[idx])
+    return out
 
 
 def upload_fine_metrics_gpu(cp, jacobians_fine):
     """把网格的分段细点度量上传为 GPU 过积分要用的两个键（单机与多 GPU 的上传路径共用）。
 
-    只上传预乘好的 `adj = det * inv`：`adj_j_fine_prism (n_prism, n_fine, 3, 3)`
+    上传预乘好的 `adj = det * inv` 与无粘体积算子的逐单元组合编号：`adj_j_fine_prism (n_prism, n_fine, 3, 3)`
     逐细点、`adj_j_fine_tet (n_tet, 3, 3)` 逐单元（直边四面体 Jacobian 逐单元
     常数，见 `grid/high_order/order_jacobians.build_fine_metrics`）。此前两条上传
     路径各按 `(n_cells, n_fine)` 全场上传 det/inv/adj 三份，而 GPU 过积分只读
@@ -54,6 +80,9 @@ def upload_fine_metrics_gpu(cp, jacobians_fine):
     return {
         'adj_j_fine_prism': _adj(jacobians_fine['prism_det'], jacobians_fine['prism_inv']),
         'adj_j_fine_tet': _adj(jacobians_fine['tet_det'], jacobians_fine['tet_inv']),
+        # 无粘体积算子的逐单元槽位组合编号（与细点度量同一份逐单元几何，见 build_fine_metrics）
+        'k_combo_prism': cp.asarray(np.ascontiguousarray(jacobians_fine['prism_k_combo'], dtype=np.int64)),
+        'k_combo_tet': cp.asarray(np.ascontiguousarray(jacobians_fine['tet_k_combo'], dtype=np.int64)),
     }
 
 

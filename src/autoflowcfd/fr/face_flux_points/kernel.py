@@ -13,7 +13,7 @@ from numba import njit, prange
 
 from .face_code_tables import (
     _FACE_AXIS, _FACE_SIDE, _PQ_CODES,
-    _NATIVE_PRISM_LO, _NATIVE_TET_HI, _NATIVE_TET_LO,
+    _NATIVE_PRISM_CAP_HI, _NATIVE_PRISM_LO, _NATIVE_TET_HI, _NATIVE_TET_LO,
 )
 from .ref_geometry_nb import (
     _face_ref_grid_nb, _map_ref_nb, _newton_locate_nb,
@@ -21,7 +21,20 @@ from .ref_geometry_nb import (
 from .native_geometry_nb import (
     _native_tet_face_points_nb, _tet_native_locate_nb,
     _native_interp_matrix_nb, interp_matrix_from_cube_coords_nb,
+    native_prism_cap_points_nb,
 )
+
+
+@njit(cache=True)
+def _own_face_points_nb(n1d, code, slot, is_prism, axis, side, nodes, sps_1d):
+    """本侧面通量点的物理坐标。三角形面（四面体面、原生棱柱封盖）按坍缩顶点槽位
+    （`fr/triangle_apex.py`）用重心坐标采样，共享面两侧因此是同一批物理点；四边形侧面
+    走参考立方体面网格映射。"""
+    if _NATIVE_TET_LO <= code < _NATIVE_TET_HI:
+        return _native_tet_face_points_nb(n1d, code - _NATIVE_TET_LO, slot, nodes, sps_1d)
+    if _NATIVE_PRISM_LO <= code < _NATIVE_PRISM_CAP_HI:
+        return native_prism_cap_points_nb(n1d, code - _NATIVE_PRISM_LO, slot, nodes, sps_1d)
+    return _map_ref_nb(is_prism, _face_ref_grid_nb(n1d, axis, side, sps_1d), nodes)
 
 
 # ============================================================================
@@ -40,6 +53,7 @@ def build_fp_newton_parallel(
     v_sps_inv_tet, v_sps_inv_prism,
     v_sps_inv_native, native_mode_i, native_mode_j, native_mode_k,
     v_sps_inv_np, np_mode_i, np_mode_j, np_mode_k,
+    owner_slot, neighbor_slot,
 ):
     """并行计算所有面的 Newton 自由坐标 + 插值矩阵。
 
@@ -69,6 +83,9 @@ def build_fp_newton_parallel(
     `native_mode_{i,j,k}` 在整个网格不含任何 native 四面体时（既有
     默认坍缩坐标路径）传入零长度占位数组即可，对应分支永远不会被执行，
     不改变任何现有行为——见 face_flux_points/merge.py 调用处说明。
+
+    `owner_slot`/`neighbor_slot`：两侧三角形面的坍缩顶点槽位（`fr/triangle_apex.py`），
+    决定各侧自己的通量点集与顺序（`_own_face_points_nb`）。
     """
     n_sps = n1d * n1d * n1d
     nb_fc = np.zeros((n_faces, n_fp, 2))
@@ -198,16 +215,7 @@ def build_fp_newton_parallel(
                 n_nd[ni, 1] = node_coords[nid, 1]
                 n_nd[ni, 2] = node_coords[nid, 2]
 
-        # Owner 物理 FP —— native 四面体没有 (axis,side) 概念，面点物理
-        # 位置改用与棱柱三角形封盖相同的坍缩三角形采样（见
-        # _native_tet_face_points_nb 文档），不是 _face_ref_grid_nb 的
-        # 张量积网格。
-        if o_is_nat_tet:
-            phys_o = _native_tet_face_points_nb(n1d, oc_code - _NATIVE_TET_LO,
-                                                o_nd, sps_1d)
-        else:
-            ref_o = _face_ref_grid_nb(n1d, o_axis, o_side, sps_1d)
-            phys_o = _map_ref_nb(o_is_prism, ref_o, o_nd)
+        phys_o = _own_face_points_nb(n1d, oc_code, owner_slot[f], o_is_prism, o_axis, o_side, o_nd, sps_1d)
 
         # ---- Neighbor 侧 Newton (owner_primary 才需要) ----
         if owner_primary[f]:
@@ -300,12 +308,8 @@ def build_fp_newton_parallel(
 
         # ---- Owner 侧 Newton (neighbor_primary 才需要) ----
         if neighbor_primary[f]:
-            if n_is_nat_tet:
-                phys_n = _native_tet_face_points_nb(
-                    n1d, nc_code - _NATIVE_TET_LO, n_nd, sps_1d)
-            else:
-                ref_n = _face_ref_grid_nb(n1d, n_axis, n_side, sps_1d)
-                phys_n = _map_ref_nb(n_is_prism, ref_n, n_nd)
+            phys_n = _own_face_points_nb(n1d, nc_code, neighbor_slot[f], n_is_prism, n_axis, n_side,
+                                         n_nd, sps_1d)
             cl_o = np.sqrt(max(a_val, 1e-300))
             t = face_translation[f]
             ht = abs(t[0]) > 1e-300 or abs(t[1]) > 1e-300 or abs(t[2]) > 1e-300

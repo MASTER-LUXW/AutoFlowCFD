@@ -83,6 +83,8 @@ def _run_kernel_single_face(
         # `face_flux_points/merge.py` 的 `has_native_prism=False` 同一路径）
         np.zeros((0, 0)), np.zeros(0, dtype=np.int32),
         np.zeros(0, dtype=np.int32), np.zeros(0, dtype=np.int32),
+        # 两侧坍缩顶点槽位 0：Python 参考实现按槽位 0 生成通量点
+        np.zeros(1, dtype=np.int64), np.zeros(1, dtype=np.int64),
     )
     return result, n1d, sps_1d
 

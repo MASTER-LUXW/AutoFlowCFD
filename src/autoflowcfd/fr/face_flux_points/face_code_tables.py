@@ -62,3 +62,5 @@ _NATIVE_TET_LO = 6
 _NATIVE_TET_HI = 10
 _NATIVE_PRISM_LO = 10
 _NATIVE_PRISM_HI = 15
+#: 原生棱柱的两个三角形封盖是 [10, 12)（坍缩顶点槽位只对它们与四面体面有意义）。
+_NATIVE_PRISM_CAP_HI = 12

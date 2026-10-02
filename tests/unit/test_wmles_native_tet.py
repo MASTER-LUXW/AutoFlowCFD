@@ -15,7 +15,7 @@ face_kernels.py::FlatFaceGeometry 字段文档），拿去查坍缩坐标专用�
 坍缩坐标矩阵。
 
 本文件验证修复后的行为：native 四面体 WALL 面能正确走
-`boundary_extrap_native_tet`/`lift_native_tet_padded`分支，产出
+原生面外插/提升分支，产出
 有限、非零、只作用在正确 owner 单元上的动量修正。
 """
 

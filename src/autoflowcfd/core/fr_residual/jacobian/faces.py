@@ -139,7 +139,7 @@ def _trace(M, field, c, n):
 @njit(cache=True)
 def _side_blocks(c, n, E, L, w, adjrow, f, is_bnd_face, masked_row, mp, src_cells, src_mats,
                  Q, gv_sp, gT_sp, mut, dTdQ, inv_sp, D_prism, D_tet, n_prism, n_real_prism, n_real_tet,
-                 Qg0, QgP, ghost_row, HG, vbc_kind, owner_cell, owner_cube_face, E_nat,
+                 Qg0, QgP, ghost_row, HG, vbc_kind, owner_cell, owner_face_op, E_nat,
                  h_ip, mu, Pr, Pr_t, c_ip, mach_ref, precond_mode, want_cross):
     """一个 primary 面侧的块贡献（未除 det，原始变量空间）。
 
@@ -290,7 +290,7 @@ def _side_blocks(c, n, E, L, w, adjrow, f, is_bnd_face, masked_row, mp, src_cell
     if any_masked:
         p = owner_cell[mp]
         n_p = n_real_prism if p < n_prism else n_real_tet
-        Ep = E_nat[owner_cube_face[mp] - 6][:, :n_p]
+        Ep = E_nat[owner_face_op[mp]][:, :n_p]
         blk = _chain(dP, Ep, empty_grad, dTdQ[p], L, w, n, n_p, False)
         if p == c:
             self_block += blk
@@ -320,7 +320,7 @@ def add_face_blocks_color(face_indices, K_prism, K_tet, slot, n_prism, n_real_pr
                           neighbor_src1_mat, owner_src0_cell, owner_src0_tpl, owner_src0_tid, owner_src1_idx,
                           owner_src1_cell, owner_src1_mat, mixed_nb_partner, mixed_nb_mask,
                           mixed_ow_partner, mixed_ow_mask, Qg0, QgP, ghost_row, HG, vbc_kind,
-                          owner_cube_face, neighbor_cube_face, ref_area_weight, E_nat, lift_nat,
+                          owner_face_op, neighbor_face_op, ref_area_weight, E_nat, lift_nat,
                           ip_length, mu, Pr, Pr_t, c_ip, mach_ref, precond_mode,
                           cross_offset, cross_data, cross_col):
     """一个颜色组内全部面的块贡献：对角部分累加到 `K_prism` / `K_tet`（float32）；
@@ -336,7 +336,7 @@ def add_face_blocks_color(face_indices, K_prism, K_tet, slot, n_prism, n_real_pr
                 if not owner_is_primary[f]:
                     continue
                 c = owner_cell[f]
-                code = owner_cube_face[f]
+                fop = owner_face_op[f]
                 adjrow = owner_adj_row_exact[f]
                 is_bnd_face = is_boundary[f]
                 mp = mixed_nb_partner[f]
@@ -353,7 +353,7 @@ def add_face_blocks_color(face_indices, K_prism, K_tet, slot, n_prism, n_real_pr
                 if is_boundary[f] or not neighbor_is_primary[f]:
                     continue
                 c = neighbor_cell[f]
-                code = neighbor_cube_face[f]
+                fop = neighbor_face_op[f]
                 adjrow = neighbor_adj_row_exact[f]
                 is_bnd_face = False
                 mp = mixed_ow_partner[f]
@@ -371,12 +371,12 @@ def add_face_blocks_color(face_indices, K_prism, K_tet, slot, n_prism, n_real_pr
             src_mats = (m0, m1)
             is_p = c < n_prism
             n = n_real_prism if is_p else n_real_tet
-            E = E_nat[code - 6][:, :n]
-            L = lift_nat[code - 6][:n, :]
+            E = E_nat[fop][:, :n]
+            L = lift_nat[fop][:n, :]
             blk, cross, cross_cells = _side_blocks(
                 c, n, E, L, ref_area_weight, adjrow, f, is_bnd_face, masked_row, mp, src_cells, src_mats,
                 Q, gv_sp, gT_sp, mut, dTdQ, inv_sp, D_prism, D_tet, n_prism, n_real_prism, n_real_tet,
-                Qg0, QgP, ghost_row, HG, vbc_kind, owner_cell, owner_cube_face, E_nat,
+                Qg0, QgP, ghost_row, HG, vbc_kind, owner_cell, owner_face_op, E_nat,
                 ip_length[f], mu, Pr, Pr_t, c_ip, mach_ref, precond_mode, want_cross)
             k = slot[c]
             K = K_prism if is_p else K_tet

@@ -102,13 +102,12 @@ class GPUFlatFaceGeometry:
             self.mixed_p0_bnd_frac = cp.asarray(flat_face.mixed_p0_bnd_frac)
 
             # ── 原生基面算子 ──
-            # `owner_cube_face`/`neighbor_cube_face` 是原始 cube face
-            # 编码（四面体真实面 [6,10)、棱柱真实面 [10,15)），GPU 界面
-            # kernel 按 `code - 6` 索引 `boundary_extrap_native`/
-            # `lift_native`（含义与 CPU 端 inviscid_kernel.py 同名字段
-            # 完全一致，见该文件模块文档）。
-            self.owner_cube_face = cp.asarray(flat_face.owner_cube_face)
-            self.neighbor_cube_face = cp.asarray(flat_face.neighbor_cube_face)
+            # `owner_face_op`/`neighbor_face_op` 是两侧的面算子索引（面编码 + 三角形面
+            # 坍缩顶点槽位，`fr/operators/face_ops.py`），GPU 界面 kernel 按它索引
+            # `boundary_extrap_native`/`lift_native` 两张整表（含义与 CPU 端
+            # `FlatFaceGeometry` 同名字段完全一致）。
+            self.owner_face_op = cp.asarray(flat_face.owner_face_op)
+            self.neighbor_face_op = cp.asarray(flat_face.neighbor_face_op)
             self.true_area_weight = cp.asarray(flat_face.true_area_weight)
             # IP 罚项的长度尺度（见 `face_kernels.FlatFaceGeometry.ip_length` 文档）。
             self.ip_length = cp.asarray(flat_face.ip_length)

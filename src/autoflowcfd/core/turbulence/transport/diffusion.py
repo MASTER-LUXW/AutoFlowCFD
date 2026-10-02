@@ -229,17 +229,17 @@ def compute_scalar_diffusion_residual(
     phi_c = np.ascontiguousarray(scalar_field)
     gamma_c = np.ascontiguousarray(gamma_field)
     jumps = []
-    for frame, self_cell, self_code, src, adj_row in (
-            ("owner", flat.owner_cell, flat.owner_cube_face,
+    for frame, self_cell, self_op, src, adj_row in (
+            ("owner", flat.owner_cell, flat.owner_face_op,
              (flat.neighbor_src0_cell, flat.neighbor_src0_tpl, flat.neighbor_src0_tid, flat.neighbor_src1_idx,
               flat.neighbor_src1_cell, flat.neighbor_src1_mat), flat.owner_adj_row_exact),
-            ("neighbor", flat.neighbor_cell, flat.neighbor_cube_face,
+            ("neighbor", flat.neighbor_cell, flat.neighbor_face_op,
              (flat.owner_src0_cell, flat.owner_src0_tpl, flat.owner_src0_tid, flat.owner_src1_idx,
               flat.owner_src1_cell, flat.owner_src1_mat), flat.neighbor_adj_row_exact)):
         is_bnd, is_dir, target = boundary_diffusion_targets(np, flat, frame, *masks)
         with np.errstate(over='ignore', invalid='ignore'):
             jumps.append(diffusion_face_jumps_kernel(
-                phi_c, gamma_c, grad_c, self_cell, self_code, flat.boundary_extrap_native, *src,
+                phi_c, gamma_c, grad_c, self_cell, self_op, flat.boundary_extrap_native, *src,
                 np.ascontiguousarray(unit_normals(adj_row)), h_face, float(c_ip),
                 np.ascontiguousarray(is_bnd), np.ascontiguousarray(is_dir),
                 np.ascontiguousarray(target, dtype=np.float64)))

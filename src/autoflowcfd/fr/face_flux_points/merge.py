@@ -76,7 +76,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
     # u=v）或"翻转"情形（连接第1、3个角点，参考坐标线 u=-v）之一，取决于
     # 该棱柱局部存储顺序是否与按全局节点编号排序后的顺序一致（见
     # `_prism_quad_diagonal_local` 文档）——两种情形都要预先算好对应的
-    # FP 掩码，供 `_resolve_multi_source` 按每个四边形的实际对角线选用。
+    # FP 掩码，供下面多源面按每个四边形的实际对角线选用。
     g1, g2 = np.meshgrid(sps_1d, sps_1d, indexing="ij")
     is_lower_fp_standard = g1.ravel() >= g2.ravel()
     is_lower_fp_flipped = (g1.ravel() + g2.ravel()) <= 0.0
@@ -126,6 +126,14 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
     np_mode_i = binv.np_mode_i
     np_mode_j = binv.np_mode_j
     np_mode_k = binv.np_mode_k
+    # 三角形面的坍缩顶点槽位（`fr/triangle_apex.py`）：只由单元连接关系决定，
+    # 共享面两侧因此取同一批物理通量点
+    from ..triangle_apex import cell_triangle_slots, face_record_slots
+
+    cell_slots = cell_triangle_slots(mesh._fixed_tet_conn, mesh._fixed_prism_conn)
+    owner_tri_slot = face_record_slots(cell_slots, face_conn.owner_cell, face_conn.owner_cube_face)
+    neighbor_tri_slot = face_record_slots(
+        cell_slots, np.where(face_conn.is_boundary, -1, face_conn.neighbor_cell), face_conn.neighbor_cube_face)
     (
         _nb_fc, _nb_resid, _ow_fc, _ow_resid,
         _nb_interp, _ow_interp, _nb_cell_id, _ow_cell_id,
@@ -152,6 +160,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         v_sps_inv_native,
         native_mode_i, native_mode_j, native_mode_k,
         v_sps_inv_np, np_mode_i, np_mode_j, np_mode_k,
+        owner_tri_slot, neighbor_tri_slot,
     )
     logger.info("Numba parallel kernel completed.")
 
@@ -224,9 +233,9 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         _ms_nb_sec_cf = np.empty(len(_multi_nb_faces), dtype=np.int32)
         _ms_nb_mixed = np.zeros(len(_multi_nb_faces), dtype=np.bool_)
         # secondary 子面自身的 face_conn 索引（不是 cell/code，是面记录本身）——
-        # 供残差校验按 secondary 子面*自己的*面积算特征尺度，与旧慢速路径
-        # `_resolve_multi_source` 逐半区各自用 `face_conn.area[gf]` 完全一致
-        # （不能借用 primary 子面 f 的面积，两个三角子面面积一般不相等）。
+        # 供残差校验按 secondary 子面*自己的*面积算特征尺度（逐半区各自用
+        # `face_conn.area[gf]`；不能借用 primary 子面 f 的面积，两个三角子面
+        # 面积一般不相等）。
         _ms_nb_other_face = np.full(len(_multi_nb_faces), -1, dtype=np.int64)
         for i, f in enumerate(_multi_nb_faces):
             if mixed_nb_partner[f] >= 0:
@@ -439,6 +448,8 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         mixed_ow_mask=mixed_ow_mask,
         mixed_bnd_face=mixed_bnd_face,
         mixed_p0_bnd_frac=mixed_p0_bnd_frac,
+        owner_tri_slot=owner_tri_slot,
+        neighbor_tri_slot=neighbor_tri_slot,
         _mesh=mesh,
         _face_conn=face_conn,
         _sps_1d=sps_1d,

@@ -9,10 +9,7 @@ import numpy as np
 from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL, PRANDTL_TURBULENT
 from autoflowcfd.core.gpu import get_cupy
 
-from autoflowcfd.core.gpu.residual.gpu_volume_contract import (
-    gpu_contract_shared_operator_1axis,
-    gpu_contract_shared_operator_2axis,
-)
+from autoflowcfd.core.gpu.residual.gpu_volume_contract import gpu_contract_shared_operator_1axis
 
 from autoflowcfd.core.gpu.residual.gpu_flux import viscous_physical_flux_gpu, conserved_to_primitive_gpu
 
@@ -44,7 +41,9 @@ def _viscous_volume_term_gpu(cp, Q, grad_vel, grad_T, mu_t_field, mu, Pr, Pr_t, 
     """
     div_comp = cp.zeros((n_cells, n_sps, 5), dtype=cp.float64)
     mut_is_array = mu_t_field is not None and hasattr(mu_t_field, 'shape')
-    for (lo, hi, _n_fine_seg, adj_seg, c2f, _D_fine, _f2c), K in zip(segs, lifted_div):
+    from autoflowcfd.core.gpu.gpu_overintegration import contract_lifted_divergence_gpu
+
+    for (lo, hi, _n_fine_seg, adj_seg, c2f, _D_fine, _f2c), (K_all, combo) in zip(segs, lifted_div):
         if hi <= lo:
             continue
         Q_f = gpu_contract_shared_operator_1axis(c2f, Q[lo:hi])
@@ -64,7 +63,7 @@ def _viscous_volume_term_gpu(cp, Q, grad_vel, grad_T, mu_t_field, mu, Pr, Pr_t, 
         del Q_f, gv_f, gT_f
         G_tilde_f = cp.matmul(adj_seg, G_phys_f)
         del G_phys_f
-        div_comp[lo:hi] = gpu_contract_shared_operator_2axis(K, G_tilde_f)
+        div_comp[lo:hi] = contract_lifted_divergence_gpu(cp, K_all, combo, G_tilde_f)
         del G_tilde_f
     return div_comp
 
@@ -193,7 +192,7 @@ def compute_viscous_residual_fr_gpu(
                 "不完整的阶数几何构造/上传的")
         div_G = _viscous_volume_term_gpu(
             cp, Q, grad_vel, grad_T, mu_t_arg, mu, Pr, Pr_t,
-            _oi_segs, lifted_divergence_gpu(ops_data), n_cells, n_sps)
+            _oi_segs, lifted_divergence_gpu(mesh_data, ops_data), n_cells, n_sps)
 
     # 粘性残差体积项 = +div(G) / det(J)（注意：粘性项是正号，与无粘的负号相反）
     viscous_residual = div_G / det_jacs[..., None]

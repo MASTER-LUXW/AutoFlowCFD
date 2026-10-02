@@ -63,25 +63,24 @@ def _ausm_direction(cp, adjrow):
     return direction, adj_mag
 
 
-def _native_self_extrap(cp, cube_face_code, boundary_extrap_native):
-    """自身面外插矩阵：按 `code - 6` 逐面 gather 原生表（四面体 [6,10)、
-    棱柱 [10,15) 在同一张表里）——与 CPU 版
-    `E_o = boundary_extrap_native[oc_code - 6]` 逐字对应。
+def _native_self_extrap(cp, face_op, boundary_extrap_native):
+    """自身面外插矩阵：按面算子索引逐面 gather 原生整表（`fr/operators/face_ops.py`）
+    ——与 CPU 版 `E_o = boundary_extrap_native[oc_op]` 逐字对应。
 
     Args:
-        cube_face_code: (n,) 原始 cube face 编码
-        boundary_extrap_native: (9, n_fp, n_sps)
+        face_op: (n,) 本侧面算子索引（`owner_face_op`/`neighbor_face_op`）
+        boundary_extrap_native: (27, n_fp, n_sps)
 
     Returns:
         E: (n, n_fp, n_sps)
     """
-    return boundary_extrap_native[cube_face_code - 6]
+    return boundary_extrap_native[face_op]
 
 
-def _lift_native_contrib(cp, cube_face_code, lift_native, ref_area_weight, jump):
+def _lift_native_contrib(cp, face_op, lift_native, ref_area_weight, jump):
     """面校正分配到体积节点：DG 提升算子
-    `lift_native[code-6] @ (ref_area_weight ⊙ jump)`——与 CPU 版
-    `contrib_owner = lift_native[oc_code-6] @ weighted_jump_o` 逐字对应。
+    `lift_native[op] @ (ref_area_weight ⊙ jump)`——与 CPU 版
+    `contrib_owner = lift_native[oc_op] @ weighted_jump_o` 逐字对应。
 
     **权重是参考求积权重、不是物理面积权重**（2026-09-18 修掉的真实缺陷，
     完整记录见 `core/fr_operators/face_kernels.py::FlatFaceGeometry.
@@ -93,15 +92,15 @@ def _lift_native_contrib(cp, cube_face_code, lift_native, ref_area_weight, jump)
     —— 它的 `jump` 是物理通量密度差，两路的 `jump` 不在同一个空间。）
 
     Args:
-        cube_face_code: (n,)
-        lift_native: (9, n_sps, n_fp)
+        face_op: (n,) 本侧面算子索引
+        lift_native: (27, n_sps, n_fp)
         ref_area_weight: (n_fp,) 参考面求积权重（逐面相同）
         jump: (n, n_fp, 5)
 
     Returns:
         contrib: (n, n_sps, 5)
     """
-    lift = lift_native[cube_face_code - 6]              # (n, n_sps, n_fp)
+    lift = lift_native[face_op]              # (n, n_sps, n_fp)
     weighted_jump = ref_area_weight[None, :, None] * jump   # (n, n_fp, 5)
     return cp.matmul(lift, weighted_jump)               # (n, n_sps, 5)
 
@@ -171,11 +170,10 @@ def _compute_interface_correction_gpu(
             oc = ff.owner_cell[idx_o]
             is_bnd_o = ff.is_boundary[idx_o]
 
-            # 自身面外插按 `code - 6` gather 原生表（四面体 [6,10)、
-            # 棱柱 [10,15)），与 CPU 版 inviscid_kernel.py 逐字对应。
-            oc_code_o = ff.owner_cube_face[idx_o]
+            # 自身面外插按面算子索引 gather 原生整表，与 CPU 版 inviscid_kernel.py 逐字对应。
+            oc_op_o = ff.owner_face_op[idx_o]
 
-            E_o = _native_self_extrap(cp, oc_code_o, ff.boundary_extrap_native)
+            E_o = _native_self_extrap(cp, oc_op_o, ff.boundary_extrap_native)
             Q_o = cp.matmul(E_o, Q_gpu[oc])  # (nO,n_fp,5)
 
             Q_n = _extrap_q_to_fp(cp, ff.neighbor_src0_tpl[ff.neighbor_src0_tid[idx_o]],
@@ -220,7 +218,7 @@ def _compute_interface_correction_gpu(
             F_tilde_common_o = flux_o * adj_mag_o[..., None]
 
             contrib_o = _lift_native_contrib(
-                cp, oc_code_o, ff.lift_native, ff.ref_area_weight, F_tilde_common_o,
+                cp, oc_op_o, ff.lift_native, ff.ref_area_weight, F_tilde_common_o,
             )
             contrib_o = contrib_o / det_jacs[oc][..., None]
             _scatter_add_to_correction(correction, -contrib_o, oc, n_cells, n_sps)
@@ -233,8 +231,8 @@ def _compute_interface_correction_gpu(
 
             # native 四面体（路径C）GPU 移植（2026-09-02）：见上方
             # owner-primary 块同名注释，同一处修复。
-            nc_code_n = ff.neighbor_cube_face[idx_n]
-            E_n = _native_self_extrap(cp, nc_code_n, ff.boundary_extrap_native)
+            nc_op_n = ff.neighbor_face_op[idx_n]
+            E_n = _native_self_extrap(cp, nc_op_n, ff.boundary_extrap_native)
             Q_n_native = cp.matmul(E_n, Q_gpu[nc])  # (nN,n_fp,5)
 
             Q_o_at_n = _extrap_q_to_fp(cp, ff.owner_src0_tpl[ff.owner_src0_tid[idx_n]],
@@ -268,7 +266,7 @@ def _compute_interface_correction_gpu(
             F_tilde_common_n = flux_n * adj_mag_n[..., None]
 
             contrib_n = _lift_native_contrib(
-                cp, nc_code_n, ff.lift_native, ff.ref_area_weight, F_tilde_common_n,
+                cp, nc_op_n, ff.lift_native, ff.ref_area_weight, F_tilde_common_n,
             )
             contrib_n = contrib_n / det_jacs[nc][..., None]
             _scatter_add_to_correction(correction, -contrib_n, nc, n_cells, n_sps)

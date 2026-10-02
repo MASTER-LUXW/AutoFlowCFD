@@ -82,7 +82,7 @@ def compute_inviscid_interface_correction_kernel(
     precond_mode: int,   # AUSM+up 预处理声速作用域，见 kernels.py::
                          # compute_ausm_up_flux 文档；必须由纯 Python 层
                          # 用 resolve_ausm_precond_mode() 解析后传入
-    owner_cube_face: np.ndarray, neighbor_cube_face: np.ndarray,
+    owner_face_op: np.ndarray, neighbor_face_op: np.ndarray,
     ref_area_weight: np.ndarray,
     boundary_extrap_native: np.ndarray, lift_native: np.ndarray,
 ) -> np.ndarray:
@@ -91,18 +91,17 @@ def compute_inviscid_interface_correction_kernel(
     ---"那一段算出的 correction 逐位对应。
 
     native 四面体（路径C）支持（Part8 文档"三、本次会话实现范围"）：
-    `owner_cube_face`/`neighbor_cube_face` 是原始 cube face 编码：四面体
-    真实面 `[6,10)`、棱柱真实面 `[10,15)`，`excluded_vertex = code - 6`
-    统一索引 `boundary_extrap_native`/`lift_native`（棱柱那 5 个键在同一张
-    表里，见 `fr/operators/container.py`）。`owner_axis`/`owner_side` 对
+    `owner_face_op`/`neighbor_face_op` 是两侧的面算子索引（面编码 + 三角形面的
+    坍缩顶点槽位，`fr/operators/face_ops.py`），统一索引
+    `boundary_extrap_native`/`lift_native` 两张整表。`owner_axis`/`owner_side` 对
     原生面存的是复用槽位，**不是** axis/side 语义，本函数不读它们。
 
     三条原生基专属做法：(a) 自身面外插矩阵用
-    `boundary_extrap_native[code-6]`；(b) 方向定向系数固定为 +1
+    `boundary_extrap_native[op]`；(b) 方向定向系数固定为 +1
     （`fr/face_flux_points/exact_normal.py` 已经给出正确 outward 定向的
     adj 行，不需要像坍缩坐标那样再乘 side 翻转——Part7 文档记录过的坑，
     2026-09-18 无滑移壁 IP 罚项又在同一处踩了一次）；(c) 面修正项用
-    DG 提升算子 `lift_native[code-6] @ (ref_area_weight ⊙ |a| F_common)`（本侧通量迹已并进体积算子，见 `fr/face_flux_trace.py`）
+    DG 提升算子 `lift_native[op] @ (ref_area_weight ⊙ |a| F_common)`（本侧通量迹已并进体积算子，见 `fr/face_flux_trace.py`）
     （`native_tet/basis.py::build_native_tet_lift` "弱形式提升定义"）。
 
     **2026-09-23**：坍缩坐标那条并行路径（`boundary_extrap[celltype,
@@ -156,12 +155,12 @@ def compute_inviscid_interface_correction_kernel(
     for f in prange(n_faces):
         tid = get_thread_id()
         oc = owner_cell[f]
-        oc_code = owner_cube_face[f]
+        oc_op = owner_face_op[f]
         # 原生面的 adj 行已是正确 outward 定向（见函数文档），所以不再有
         # side 翻转因子——`owner_axis`/`owner_side` 是复用槽位，不读。
 
         if owner_is_primary[f]:
-            E_o = boundary_extrap_native[oc_code - 6]  # (n_fp, n_sps)
+            E_o = boundary_extrap_native[oc_op]  # (n_fp, n_sps)
 
             Q_o = _extrap_matmul(Q[oc], E_o)  # (n_fp, 5)
             adjrow_o = owner_adj_row_exact[f]  # (n_fp, 3)，逐 FP 精确值，见函数文档
@@ -206,7 +205,7 @@ def compute_inviscid_interface_correction_kernel(
                 w_area = ref_area_weight[i]
                 for v in range(5):
                     weighted_flux_o[i, v] = w_area * flux_owner[i, v]
-            contrib_owner = matmul_small(lift_native[oc_code - 6], weighted_flux_o)  # (n_sps, 5)
+            contrib_owner = matmul_small(lift_native[oc_op], weighted_flux_o)  # (n_sps, 5)
             for s in range(n_sps):
                 dj = det_jacs[oc, s]
                 for v in range(5):
@@ -214,8 +213,8 @@ def compute_inviscid_interface_correction_kernel(
 
         if (not is_boundary[f]) and neighbor_is_primary[f]:
             nc = neighbor_cell[f]
-            nc_code = neighbor_cube_face[f]
-            E_n = boundary_extrap_native[nc_code - 6]
+            nc_op = neighbor_face_op[f]
+            E_n = boundary_extrap_native[nc_op]
 
             Q_n_native = _extrap_matmul(Q[nc], E_n)  # (n_fp,5)
             adjrow_n_native = neighbor_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
@@ -256,7 +255,7 @@ def compute_inviscid_interface_correction_kernel(
                 w_area = ref_area_weight[i]
                 for v in range(5):
                     weighted_flux_n[i, v] = w_area * flux_neighbor[i, v]
-            contrib_neighbor = matmul_small(lift_native[nc_code - 6], weighted_flux_n)
+            contrib_neighbor = matmul_small(lift_native[nc_op], weighted_flux_n)
             for s in range(n_sps):
                 dj = det_jacs[nc, s]
                 for v in range(5):
@@ -282,10 +281,10 @@ def _compute_boundary_ghost_states_per_face(flat, Q: np.ndarray, ghost_provider)
         if not flat.owner_is_primary[f] and not flat.mixed_bnd_face[f]:
             continue
         oc = flat.owner_cell[f]
-        # 自身面外插用 `boundary_extrap_native[code-6]`（四面体 [6,10)、
+        # 自身面外插用 `boundary_extrap_native[owner_face_op]`（四面体 [6,10)、
         # 棱柱 [10,15) 同一张表），与 compute_inviscid_interface_correction_
         # kernel 同一个分派原则。
-        E_o = flat.boundary_extrap_native[flat.owner_cube_face[f] - 6]
+        E_o = flat.boundary_extrap_native[flat.owner_face_op[f]]
         Q_o = _extrap_matmul(Q[oc], E_o)
         Q_ghost[f] = ghost_provider(f, Q_o, flat.true_normal[f])
     return Q_ghost
@@ -323,10 +322,10 @@ def _compute_boundary_ghost_states_batched(flat, Q: np.ndarray, ghost_provider) 
     if active_faces.size == 0:
         return Q_ghost
 
-    # --- 向量化 Q_o 外插（与逐面版本同一套 E_o 选择：原生面编码减 6
+    # --- 向量化 Q_o 外插（与逐面版本同一套 E_o 选择：按面算子索引
     # 直接索引 `boundary_extrap_native`）---
     oc = flat.owner_cell[active_faces]
-    E_o = flat.boundary_extrap_native[flat.owner_cube_face[active_faces] - 6]
+    E_o = flat.boundary_extrap_native[flat.owner_face_op[active_faces]]
 
     Q_o_all = np.einsum('fps,fsv->fpv', E_o, Q[oc])  # (n_active,n_fp,5)
     normal_all = flat.true_normal[active_faces]  # (n_active,n_fp,3)
