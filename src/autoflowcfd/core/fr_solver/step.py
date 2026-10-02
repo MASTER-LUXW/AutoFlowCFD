@@ -325,12 +325,11 @@ def step(solver, dt: float) -> float:
                 block_assembler=None if unsupported_reason(
                     order=_current_order(solver),
                     entropy_stable_volume=solver.entropy_stable_volume_enabled,
-                    artificial_viscosity=getattr(solver, "artificial_viscosity_enabled", False),
                     wmles=solver.wmles_model is not None) else MeanFlowBlockAssembler(
                     mesh=solver.mesh, ops=solver.ops, ghost_provider=solver.boundary_ghost_provider,
                     mu=solver.mu_molecular, mach_ref=solver.freestream["mach_ref"],
                     low_mach=solver.low_mach_precond_enabled,
-                    mu_t=solver._get_turbulent_viscosity_field(mu_t_step), n_sps=n_sps))
+                    mu_t=solver._get_turbulent_viscosity_field(mu_t_step), nu_av=nu_av_step, n_sps=n_sps))
         elif solver.time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
             # 显式处理无粘对流项、隐式处理粘性+湍流扩散项——通用的
             # step(...) 单一残差入口表达不了这个拆分（见该方法里的

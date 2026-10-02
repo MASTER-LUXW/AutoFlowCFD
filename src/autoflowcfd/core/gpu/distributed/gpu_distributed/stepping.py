@@ -266,7 +266,8 @@ class _MultiGPUSteppingMixin:
                 positivity=positivity_func,
                 block_assembler=distributed_mean_flow_assembler(
                     self, self, order=order_now, mu_t_compact=mu_t_field,
-                    exchange=self.gpu_halo.exchange, perm=self._perm_gpu, n_sps=n_sps))
+                    exchange=self.gpu_halo.exchange, perm=self._perm_gpu, n_sps=n_sps,
+                    nu_av_compact=nu_av_compact))
         elif self.time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
             # 显式无粘对流 + 隐式粘性（阻尼 Picard），与单机/CPU 分布式同一个
             # 拆分、同一个积分器（低马赫预处理在 IMEX 下不启用，理由见

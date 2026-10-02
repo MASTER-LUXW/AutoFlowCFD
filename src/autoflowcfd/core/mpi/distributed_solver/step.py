@@ -384,7 +384,8 @@ class _DistributedStepMixin:
                 positivity=positivity_func,
                 block_assembler=distributed_mean_flow_assembler(
                     self, self.local_solver, order=order_now, mu_t_compact=mu_t_field_compact,
-                    exchange=self.halo_exchange.exchange, perm=self.dist_flat_face.perm, n_sps=n_sps))
+                    exchange=self.halo_exchange.exchange, perm=self.dist_flat_face.perm, n_sps=n_sps,
+                    nu_av_compact=nu_av_compact))
         elif self._time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
             # 显式无粘对流 + 隐式粘性（阻尼 Picard），与单机
             # `fr_solver/step.py` 同一个拆分、同一个积分器。**2026-09-25 补齐**：

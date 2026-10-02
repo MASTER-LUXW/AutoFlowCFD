@@ -24,9 +24,10 @@
 最后逐单元除 `det_s`、取负号（`R = -dU/dt`）、右乘 `dQ/dU`、左乘 `Gamma`，并加上
 `Gamma` 自身随状态变化的那一项 `d(Gamma R)/dU |_{R 固定}`（逐解点、只进对角）。
 
-`mu_t` 按平均流残差的约定整步冻结，不对它求导。人工粘性质量扩散通道与 WMLES
-壁面应力修正不在稳态隐式路径里（前者默认关闭，后者只用于瞬态），熵稳定两点
-通量体积项由调用方改用差分装配（见 `supports`）。
+`mu_t` 与问题单元人工扩散系数 `nu_av` 按平均流残差的约定整步冻结，不对它们求导；人工
+粘性的 `div(nu grad U_k)` 在 Newton 空间直接加 `Gamma_s (-L_nu)[s,t]`（`artificial_viscosity.py`）。
+WMLES 壁面应力修正不在稳态隐式路径里（只用于瞬态），熵稳定两点通量体积项由调用方改用差分
+装配（见 `backend.unsupported_reason`）。
 """
 
 from dataclasses import dataclass
@@ -44,6 +45,7 @@ from autoflowcfd.core.fr_residual.viscous_flux import compute_temperature
 from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL, PRANDTL_TURBULENT
 from autoflowcfd.fr.native_padding import real_sps_per_cell
 
+from .artificial_viscosity import add_scalar_coupling_kron_gamma, add_scalar_kron_gamma, artificial_diffusion_blocks
 from .coupling import cross_layout, finalize_coupling
 from .faces import add_face_blocks_color
 from .pointwise import _SQRT_EPS, primitive_jacobian, temperature_gradient_row
@@ -62,6 +64,7 @@ class MeanFlowLinearization:
     precond_mode: int
     low_mach: bool
     mu_t: Optional[np.ndarray] = None        # (n_cells, n_sps) 冻结的动力涡粘
+    nu_av: Optional[np.ndarray] = None       # (n_cells, n_sps) 冻结的问题单元人工扩散系数（运动粘度）
     flat: object = None                      # None -> get_flat_face_geometry(mesh, ops)
     Pr: float = PRANDTL
     Pr_t: float = PRANDTL_TURBULENT
@@ -211,7 +214,10 @@ def assemble_mean_flow_blocks(ctx: MeanFlowLinearization, U, residual=None, want
         raise ValueError("低马赫预处理启用时必须传入 residual（d(Gamma R)/dU 需要 R）")
     gamma_R = None if residual is None else np.asarray(residual, dtype=np.float64)[:n_cells, :, :5]
     det_c = np.ascontiguousarray(det, dtype=np.float64)
-    for K, lo, n in ((K_prism, 0, npr), (K_tet, n_prism, nte)):
+    # 人工粘性 `dU_k/dt += L_nu U_k`（nu 按步冻结）：Newton 块里直接加 `Gamma_s (-L_nu)[s,t]`，
+    # 不经过 dQ/dU（见 artificial_viscosity.py）
+    av = None if ctx.nu_av is None else artificial_diffusion_blocks(mesh, ctx.ops, flat, ctx.nu_av, want_coupling)
+    for kind, (K, lo, n) in enumerate(((K_prism, 0, npr), (K_tet, n_prism, nte))):
         for k0 in range(0, K.shape[0], _FINALIZE_CHUNK_CELLS):
             k1 = min(k0 + _FINALIZE_CHUNK_CELLS, K.shape[0])
             c0, c1 = lo + k0, lo + k1
@@ -219,6 +225,8 @@ def assemble_mean_flow_blocks(ctx: MeanFlowLinearization, U, residual=None, want
                                                   None if gamma_R is None else gamma_R[c0:c1, :n], ctx)
             finalize_diag_kernel(K[k0:k1], np.arange(k1 - k0, dtype=np.int64), n,
                                  np.ascontiguousarray(det_c[c0:c1]), TQ, gamma, dgamma, bool(ctx.low_mach))
+            if av is not None:
+                add_scalar_kron_gamma(K[k0:k1], av[kind][k0:k1], gamma, bool(ctx.low_mach))
     blocks = (K_prism.reshape(n_prism, npr * 5, npr * 5), K_tet.reshape(n_cells - n_prism, nte * 5, nte * 5))
     if not want_coupling:
         return blocks
@@ -226,6 +234,8 @@ def assemble_mean_flow_blocks(ctx: MeanFlowLinearization, U, residual=None, want
     # 用全场的 TQ/Gamma
     TQ, gamma, _ = _transform_arrays(U5, Q, gamma_R, ctx)
     coupling = finalize_coupling(cross_data, slots, det_c, TQ, gamma, bool(ctx.low_mach), npr, nte)
+    if av is not None:
+        add_scalar_coupling_kron_gamma(coupling, av[2], gamma, bool(ctx.low_mach))
     return blocks + (coupling,)
 
 

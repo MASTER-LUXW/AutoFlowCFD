@@ -169,11 +169,10 @@ class _GPUSolverStepMixin:
             # 解析单元块在主机上装配（与 CPU 同一份实现），块由缓存上传
             block_assembler = None if unsupported_reason(
                 order=order_nk, wmles=getattr(self, "wmles_model", None) is not None,
-                artificial_viscosity=self.artificial_viscosity_enabled,
             ) else MeanFlowBlockAssembler(
                 mesh=self.mesh, ops=self.ops, ghost_provider=self.boundary_ghost_provider,
                 mu=self.mu_molecular, mach_ref=self.freestream["mach_ref"],
-                low_mach=self.low_mach_precond_enabled, mu_t=mu_t_field, n_sps=n_sps)
+                low_mach=self.low_mach_precond_enabled, mu_t=mu_t_field, nu_av=nu_av, n_sps=n_sps)
             U_new_flat, nk_info = step_mean_flow_newton(
                 self, mean_flow_residual, U_flat, dt_local_full,
                 _reference_scales(self.freestream, self.n_vars),

@@ -17,7 +17,7 @@
 
 边界与混合拆分面边界半区上，另一侧状态是本侧迹的仿射函数 `po = a ps + b`
 （壁面 k=0 镜像 `a=-1`、omega 壁面解析值 `a=-1`、零梯度 `a=1`、来流 `a=0`），由调用方按
-残差同一套规则给出（`assemble.py::_convection_ghost_affine`）；扩散在这些点上是内罚
+残差同一套规则给出（`scalar_blocks.py::convection_ghost_affine`）；扩散在这些点上是内罚
 Dirichlet 或齐次 Neumann，只依赖本侧迹。混合面配对边界面的 owner 就是本侧单元
 （`face_frames.extrapolate_scalar_pair_kernel` 文档），不产生额外耦合。
 """
