@@ -32,7 +32,6 @@ neighbor "+=" 的非对称约定只对反对称跳变量成立，扩散（BR1 �
 import numpy as np
 from numba import get_thread_id, njit, prange
 
-from autoflowcfd.core.fr_operators.small_dense import matvec_small
 
 
 @njit(cache=True, parallel=True)
@@ -256,14 +255,27 @@ def diffusion_face_jumps_kernel(
 
 @njit(cache=True, inline='always')
 def _lift_one_side(jump_f, adj_row_f, ref_area_weight, lift, n_fp):
-    """`lift @ (ref_area_weight * |adj_row| * jump)`，返回 `(n_sps,)`。"""
-    weighted = np.empty(n_fp)
+    """`lift @ (ref_area_weight * |adj_row| * jump)`：`jump_f (n_fp, n_comp)` -> `(n_sps, n_comp)`。
+
+    多个分量共用同一侧的权重与提升矩阵（P0 速度梯度一次提升 9 个分量）；单分量时逐位
+    等于此前的标量版本（同一乘法次序、同一通量点累加顺序）。
+    """
+    n_sps = lift.shape[0]
+    n_comp = jump_f.shape[1]
+    w = np.empty(n_fp)
     for i in range(n_fp):
         a0 = adj_row_f[i, 0]
         a1 = adj_row_f[i, 1]
         a2 = adj_row_f[i, 2]
-        weighted[i] = ref_area_weight[i] * np.sqrt(a0 * a0 + a1 * a1 + a2 * a2) * jump_f[i]
-    return matvec_small(lift, weighted)
+        w[i] = ref_area_weight[i] * np.sqrt(a0 * a0 + a1 * a1 + a2 * a2)
+    out = np.empty((n_sps, n_comp))
+    for s in range(n_sps):
+        for m in range(n_comp):
+            acc = 0.0
+            for i in range(n_fp):
+                acc += lift[s, i] * (w[i] * jump_f[i, m])
+            out[s, m] = acc
+    return out
 
 
 @njit(cache=True, parallel=True)
@@ -274,9 +286,11 @@ def lift_side_jumps_kernel_colored(
     owner_is_primary, neighbor_is_primary, det_jacs,
     face_indices, out,
 ):
-    """两侧跳变量提升回解点（图着色版：同色面不共享单元，直接写 `out`）。"""
+    """两侧跳变量 `(n_faces, n_fp, n_comp)` 提升回解点 `out (n_cells, n_sps, n_comp)`
+    （图着色版：同色面不共享单元，直接写 `out`）。"""
     n_fp = jump_owner.shape[1]
     n_sps = out.shape[1]
+    n_comp = out.shape[2]
     for fi in prange(face_indices.shape[0]):
         f = face_indices[fi]
         if owner_is_primary[f]:
@@ -284,13 +298,15 @@ def lift_side_jumps_kernel_colored(
             c = _lift_one_side(jump_owner[f], owner_adj_row_exact[f], ref_area_weight,
                                lift_native[owner_face_op[f]], n_fp)
             for s in range(n_sps):
-                out[oc, s] += sign * c[s] / det_jacs[oc, s]
+                for m in range(n_comp):
+                    out[oc, s, m] += sign * c[s, m] / det_jacs[oc, s]
         nc = neighbor_cell[f]
         if nc >= 0 and neighbor_is_primary[f]:
             c = _lift_one_side(jump_neighbor[f], neighbor_adj_row_exact[f], ref_area_weight,
                                lift_native[neighbor_face_op[f]], n_fp)
             for s in range(n_sps):
-                out[nc, s] += sign * c[s] / det_jacs[nc, s]
+                for m in range(n_comp):
+                    out[nc, s, m] += sign * c[s, m] / det_jacs[nc, s]
 
 
 @njit(cache=True, parallel=True)
@@ -301,9 +317,9 @@ def lift_side_jumps_kernel(
     owner_is_primary, neighbor_is_primary, det_jacs, n_threads,
 ):
     """同 `lift_side_jumps_kernel_colored`，逐线程私有缓冲版（`AFCFD_USE_COLORING=0`）。"""
-    n_faces, n_fp = jump_owner.shape
+    n_faces, n_fp, n_comp = jump_owner.shape
     n_cells, n_sps = det_jacs.shape
-    buf = np.zeros((n_threads, n_cells, n_sps))
+    buf = np.zeros((n_threads, n_cells, n_sps, n_comp))
     for f in prange(n_faces):
         tid = get_thread_id()
         if owner_is_primary[f]:
@@ -311,11 +327,13 @@ def lift_side_jumps_kernel(
             c = _lift_one_side(jump_owner[f], owner_adj_row_exact[f], ref_area_weight,
                                lift_native[owner_face_op[f]], n_fp)
             for s in range(n_sps):
-                buf[tid, oc, s] += sign * c[s] / det_jacs[oc, s]
+                for m in range(n_comp):
+                    buf[tid, oc, s, m] += sign * c[s, m] / det_jacs[oc, s]
         nc = neighbor_cell[f]
         if nc >= 0 and neighbor_is_primary[f]:
             c = _lift_one_side(jump_neighbor[f], neighbor_adj_row_exact[f], ref_area_weight,
                                lift_native[neighbor_face_op[f]], n_fp)
             for s in range(n_sps):
-                buf[tid, nc, s] += sign * c[s] / det_jacs[nc, s]
+                for m in range(n_comp):
+                    buf[tid, nc, s, m] += sign * c[s, m] / det_jacs[nc, s]
     return buf.sum(axis=0)

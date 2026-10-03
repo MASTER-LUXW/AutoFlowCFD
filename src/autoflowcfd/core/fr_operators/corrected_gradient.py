@@ -43,7 +43,7 @@ from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient
 
 
 def _with_boundary_values(xp, flat, other, ghost, frame):
-    """把物理边界通量点上的"另一侧"换成幽灵态。
+    """把物理边界通量点上的"另一侧"换成幽灵态（`other`/`ghost` 为 `(n_faces, n_fp, V)`）。
 
     owner 坐标系：没有任何邻居来源的真边界面整面替换；混合拆分面（B-8）的边界
     半区按配对边界面的幽灵态逐通量点替换（两个坐标系都有，配对边界面的 owner 就是
@@ -52,43 +52,41 @@ def _with_boundary_values(xp, flat, other, ghost, frame):
     """
     if frame == "owner":
         true_bnd = (flat.neighbor_src0_cell < 0) & (flat.neighbor_src1_idx < 0)
-        other = xp.where(true_bnd[:, None], ghost, other)
+        other = xp.where(true_bnd[:, None, None], ghost, other)
         partner, mask = flat.mixed_nb_partner, flat.mixed_nb_mask
     else:
         partner, mask = flat.mixed_ow_partner, flat.mixed_ow_mask
-    in_mixed = (partner >= 0)[:, None] & mask
+    in_mixed = ((partner >= 0)[:, None] & mask)[..., None]
     return xp.where(in_mixed, ghost[xp.maximum(partner, 0)], other)
 
 
 def corrected_gradient(xp, phi, grad_broken, ghost, flat, extrapolate_pair, lift):
     """提升修正梯度，`(n_cells, n_sps, V, 3)`（定义见模块文档）。
 
+    V 个分量一起做边界替换与平均，`V x 3` 个（分量, 方向）跳变量堆叠后一次提升。
+
     Args:
         xp: 数组模块（numpy / cupy）。
         phi: `(n_cells, n_sps, V)` 解点值。
         grad_broken: `(n_cells, n_sps, V, 3)` 单元内物理梯度（与 `phi` 同一份）。
-        ghost: `(n_faces, n_fp, V)` 物理边界通量点上的幽灵态分量（只读边界行）。
+        ghost: `(n_faces, n_fp, V)` 物理边界通量点上的幽灵态（只读边界行）。
         flat: 面几何（CPU `FlatFaceGeometry` / GPU 面几何，字段同名）。
         extrapolate_pair: `(phi_component, frame) -> (phi_self, phi_other)`，`frame` 为
             `"owner"`/`"neighbor"`，两侧都在该坐标系的通量点顺序里；物理边界上的
             `phi_other` 会被这里覆盖，后端原语的边界规则不影响结果。
-        lift: `(jump_owner, jump_neighbor) -> (n_cells, n_sps)`，按扩散符号（+1）
-            提升两侧各自坐标系下的跳变量并除以 det。
+        lift: `(jump_owner, jump_neighbor) -> (n_cells, n_sps, M)`，跳变量
+            `(n_faces, n_fp, M)`，按扩散符号（+1）提升两侧各自坐标系下的跳变量并除以 det。
     """
-    out = xp.array(grad_broken, dtype=xp.float64, copy=True)
-    normals = (("owner", flat.owner_unit_normal), ("neighbor", flat.neighbor_unit_normal))
-    for v in range(phi.shape[-1]):
-        comp = xp.ascontiguousarray(phi[..., v])
-        g = ghost[..., v]
-        half_jump = {}
-        for frame, _ in normals:
-            phi_self, phi_other = extrapolate_pair(comp, frame)
-            phi_other = _with_boundary_values(xp, flat, phi_other, g, frame)
-            half_jump[frame] = 0.5 * (phi_other - phi_self)      # phi* - phi_self
-        for d in range(3):
-            out[..., v, d] += lift(half_jump["owner"] * normals[0][1][..., d],
-                                   half_jump["neighbor"] * normals[1][1][..., d])
-    return out
+    n_cells, n_sps, n_var = phi.shape
+    jumps = []
+    for frame, normal in (("owner", flat.owner_unit_normal), ("neighbor", flat.neighbor_unit_normal)):
+        pairs = [extrapolate_pair(xp.ascontiguousarray(phi[..., v]), frame) for v in range(n_var)]
+        phi_self = xp.stack([p[0] for p in pairs], axis=-1)                       # (n_faces, n_fp, V)
+        phi_other = _with_boundary_values(xp, flat, xp.stack([p[1] for p in pairs], axis=-1), ghost, frame)
+        half = 0.5 * (phi_other - phi_self)                                        # phi* - phi_self
+        jumps.append((half[..., :, None] * normal[:, :, None, :]).reshape(half.shape[:2] + (n_var * 3,)))
+    corr = lift(xp.ascontiguousarray(jumps[0]), xp.ascontiguousarray(jumps[1]))
+    return grad_broken + corr.reshape(n_cells, n_sps, n_var, 3)
 
 
 def needs_lifting(n_sps: int) -> bool:

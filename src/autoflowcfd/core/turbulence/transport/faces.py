@@ -157,28 +157,32 @@ def precompute_scalar_convection_geometry(rho, velocity, mesh, ops, flat):
 
 
 def _lift_side_jumps(jump_owner, jump_neighbor, sign, flat, mesh):
-    """两侧（各自坐标系下的）物理跳变量提升回解点，返回 `(n_cells, n_sps)`。
+    """两侧（各自坐标系下的）物理跳变量提升回解点：跳变 `(n_faces, n_fp)` 返回
+    `(n_cells, n_sps)`，多分量跳变 `(n_faces, n_fp, n_comp)` 返回 `(n_cells, n_sps, n_comp)`
+    （同一个核，单分量是 n_comp = 1）。
 
-    `sign`：对流 -1（`dphi/dt = -div F`）、扩散 +1（`dphi/dt = +div G`），见
+    `sign`：对流 -1（`dphi/dt = -div F`）、扩散与梯度 +1（`dphi/dt = +div G`），见
     `face_frames.py` 模块文档"提升的符号约定只有一个"。默认图着色（同色面不共享
     单元，直接写共享缓冲）；`AFCFD_USE_COLORING=0` 退回逐线程私有缓冲。
     """
     n_cells = mesh.n_cells
     n_sps = flat.n_sps
     det_jacs = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
-    jump_owner = np.ascontiguousarray(jump_owner)
-    jump_neighbor = np.ascontiguousarray(jump_neighbor)
+    scalar = jump_owner.ndim == 2
+    jump_owner = np.ascontiguousarray(jump_owner[..., None] if scalar else jump_owner)
+    jump_neighbor = np.ascontiguousarray(jump_neighbor[..., None] if scalar else jump_neighbor)
     args = (flat.owner_cell, flat.neighbor_cell, flat.owner_face_op, flat.neighbor_face_op,
             flat.owner_adj_row_exact, flat.neighbor_adj_row_exact, flat.ref_area_weight,
             flat.lift_native, flat.owner_is_primary, flat.neighbor_is_primary, det_jacs)
     if os.environ.get("AFCFD_USE_COLORING", "1") == "1":
-        out = np.zeros((n_cells, n_sps))
+        out = np.zeros((n_cells, n_sps, jump_owner.shape[2]))
         for c in range(flat.n_colors):
             face_indices = flat.color_face_indices[c]
             if len(face_indices) == 0:
                 continue
             lift_side_jumps_kernel_colored(jump_owner, jump_neighbor, float(sign), *args,
                                            face_indices, out)
-        return out
-    return lift_side_jumps_kernel(jump_owner, jump_neighbor, float(sign), *args,
-                                  numba.get_num_threads())
+    else:
+        out = lift_side_jumps_kernel(jump_owner, jump_neighbor, float(sign), *args,
+                                     numba.get_num_threads())
+    return out[..., 0] if scalar else out

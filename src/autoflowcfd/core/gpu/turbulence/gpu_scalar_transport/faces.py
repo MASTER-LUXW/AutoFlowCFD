@@ -102,8 +102,13 @@ def _face_mass_flux_gpu(cp, ff, rho_u):
 
 def _lift_side_jumps_gpu(cp, ff, jump_owner, jump_neighbor, sign, det_jacs, n_cells, n_sps):
     """两侧物理跳变量提升回解点（CPU 版 `faces._lift_side_jumps`）：
-    `corr[cell] += sign * lift_native[op] @ (ref_area_weight*|adj_row|*J) / det`。"""
-    out = cp.zeros((n_cells, n_sps), dtype=cp.float64)
+    `corr[cell] += sign * lift_native[op] @ (ref_area_weight*|adj_row|*J) / det`。跳变
+    `(n_faces, n_fp)` 返回 `(n_cells, n_sps)`，多分量 `(n_faces, n_fp, n_comp)` 返回
+    `(n_cells, n_sps, n_comp)`（同一条路径，单分量是 n_comp = 1）。"""
+    scalar = jump_owner.ndim == 2
+    if scalar:
+        jump_owner, jump_neighbor = jump_owner[..., None], jump_neighbor[..., None]
+    out = cp.zeros((n_cells, n_sps, jump_owner.shape[2]), dtype=cp.float64)
     for cells, ops_, adj, jump, keep in (
             (ff.owner_cell, ff.owner_face_op, ff.owner_adj_row_exact, jump_owner, ff.owner_is_primary),
             (ff.neighbor_cell, ff.neighbor_face_op, ff.neighbor_adj_row_exact, jump_neighbor,
@@ -113,6 +118,7 @@ def _lift_side_jumps_gpu(cp, ff, jump_owner, jump_neighbor, sign, det_jacs, n_ce
             continue
         c = cells[sel]
         w = ff.ref_area_weight[None, :] * cp.sqrt(cp.sum(adj[sel] * adj[sel], axis=-1))
-        contrib = cp.einsum('nsf,nf->ns', ff.lift_native[ops_[sel]], w * jump[sel]) / det_jacs[c]
+        contrib = cp.einsum('nsf,nfm->nsm', ff.lift_native[ops_[sel]], w[..., None] * jump[sel])
+        contrib = contrib / det_jacs[c][..., None]
         cp.scatter_add(out, (c, slice(None)), sign * contrib)
-    return out
+    return out[..., 0] if scalar else out
