@@ -49,6 +49,7 @@ np.dot`（形状对不上直接崩溃，运气好被抓住了）；同样的两�
 """
 
 from dataclasses import dataclass
+from functools import cached_property
 
 import numpy as np
 
@@ -217,6 +218,25 @@ class FlatFaceGeometry:
     # prange + 写入共享 buffer。
     color_face_indices: list  # list of np.ndarray (int64), length = n_colors
     n_colors: int
+
+    # 逐通量点的单位外法向（adj 行归一化，与 `true_normal` 那个面平面法向不是一回事：扭曲面上
+    # 两者最多差 37°，见 `troubled_cell.py`）。只依赖几何，每个几何对象算一次（湍流对流/扩散
+    # 残差与其解析 Jacobian 每次求值都要用；此前每次现算，plate P1 每次湍流速率约 0.2 s）。
+    @cached_property
+    def owner_unit_normal(self) -> np.ndarray:
+        return unit_normals(self.owner_adj_row_exact)
+
+    @cached_property
+    def neighbor_unit_normal(self) -> np.ndarray:
+        return unit_normals(self.neighbor_adj_row_exact)
+
+
+def unit_normals(adj_row: np.ndarray) -> np.ndarray:
+    """`(n_faces, n_fp, 3)` 的 adj 行归一化成该侧的单位外法向（GPU 上传这份结果，见
+    `gpu/gpu_face_geometry.py`）。"""
+    adj_row = np.asarray(adj_row)
+    mag = np.sqrt(np.sum(adj_row * adj_row, axis=-1))
+    return np.ascontiguousarray(adj_row / np.maximum(mag, 1e-300)[..., None])
 
 
 def _check_one_primary_side_per_cell_face(owner, neighbor, is_boundary, owner_primary, neighbor_primary,

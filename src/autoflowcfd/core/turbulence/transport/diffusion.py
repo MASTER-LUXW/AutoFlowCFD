@@ -30,7 +30,6 @@ from .face_frames import diffusion_face_jumps_kernel
 from .faces import (
     _lift_side_jumps,
     boundary_diffusion_targets,
-    unit_normals,
 )
 from .convection import (
     _TURB_OVERINT_CHUNK_CELLS,
@@ -229,18 +228,18 @@ def compute_scalar_diffusion_residual(
     phi_c = np.ascontiguousarray(scalar_field)
     gamma_c = np.ascontiguousarray(gamma_field)
     jumps = []
-    for frame, self_cell, self_op, src, adj_row in (
+    for frame, self_cell, self_op, src, normal in (
             ("owner", flat.owner_cell, flat.owner_face_op,
              (flat.neighbor_src0_cell, flat.neighbor_src0_tpl, flat.neighbor_src0_tid, flat.neighbor_src1_idx,
-              flat.neighbor_src1_cell, flat.neighbor_src1_mat), flat.owner_adj_row_exact),
+              flat.neighbor_src1_cell, flat.neighbor_src1_mat), flat.owner_unit_normal),
             ("neighbor", flat.neighbor_cell, flat.neighbor_face_op,
              (flat.owner_src0_cell, flat.owner_src0_tpl, flat.owner_src0_tid, flat.owner_src1_idx,
-              flat.owner_src1_cell, flat.owner_src1_mat), flat.neighbor_adj_row_exact)):
+              flat.owner_src1_cell, flat.owner_src1_mat), flat.neighbor_unit_normal)):
         is_bnd, is_dir, target = boundary_diffusion_targets(np, flat, frame, *masks)
         with np.errstate(over='ignore', invalid='ignore'):
             jumps.append(diffusion_face_jumps_kernel(
                 phi_c, gamma_c, grad_c, self_cell, self_op, flat.boundary_extrap_native, *src,
-                np.ascontiguousarray(unit_normals(adj_row)), h_face, float(c_ip),
+                normal, h_face, float(c_ip),
                 np.ascontiguousarray(is_bnd), np.ascontiguousarray(is_dir),
                 np.ascontiguousarray(target, dtype=np.float64)))
     del grad_phi

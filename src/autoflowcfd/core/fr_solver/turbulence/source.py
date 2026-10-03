@@ -204,17 +204,6 @@ def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, apply_des: boo
         # compute_physical_gradient 这个已知热点被重复调用——见
         # compute_turbulence_transport_residual 参数文档的性能说明。
         #
-        # grad_k/grad_omega 刻意不复用、仍让本函数内部重新计算：上面
-        # 那两份在传给 compute_source_terms 之前经过了一次条件触发的
-        # 梯度幅值裁剪（grad_k_mag/grad_omega_mag > 1e6 时 *= 缩放，
-        # 见上方"正性保持检查"），而 transport 内部的 CD_kw/F1
-        # 计算历来用的是未裁剪的原始梯度——两者在裁剪实际触发的
-        # （罕见）情形下不是同一个数值，复用会在那个边界情形下悄悄
-        # 改变 transport 的 F1/CD_kw 取值，不是纯粹的性能优化。这里
-        # 没有把握判断"两处都用裁剪后的值"在物理上是否更对，宁可
-        # 保持这部分原有行为不变，只拿 grad_vel 这个确定安全（两处
-        # 之间毫无改动、任何情形下都是同一个数值）的部分。
-        #
         # 之前这里 `try/except Exception` 把任何失败（包括真正的编程
         # 错误——形状不匹配、numba 编译失败等）都静默降级为"仅源项
         # 更新"，只打一条 warning，不中断求解——与本项目在别处反复强调

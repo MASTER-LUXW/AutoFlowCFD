@@ -35,7 +35,6 @@ from .faces import (
     _extrapolate_scalar_pair_gpu,
     _face_mass_flux_gpu,
     _lift_side_jumps_gpu,
-    _unit_normals,
 )
 from .omega_wall import compute_omega_wall_target_gpu
 
@@ -180,8 +179,7 @@ def compute_scalar_diffusion_residual_gpu(
     h_face = ff.ip_length[:, None]
     masks = (wall_dirichlet_zero_face, wall_dirichlet_value_face, has_wall_dirichlet_value)
     jumps = []
-    for frame, adj_row in (("owner", ff.owner_adj_row_exact), ("neighbor", ff.neighbor_adj_row_exact)):
-        normal = _unit_normals(cp, adj_row)
+    for frame, normal in (("owner", ff.owner_unit_normal), ("neighbor", ff.neighbor_unit_normal)):
         g_self, g_other = _extrapolate_scalar_pair_gpu(cp, ff, gamma_field, frame)
         p_self, p_other = _extrapolate_scalar_pair_gpu(cp, ff, scalar_field, frame)
         gn_self = 0.0
@@ -202,9 +200,7 @@ def turbulence_diffusivities_gpu(cp, turb, k, omega, grad_k, grad_log_omega, rho
     """GPU 版 k / ln(omega) 有效扩散系数 `mu + sigma(F1) rho nu_t`（CPU 版
     `transport/residual.py::turbulence_diffusivities` 的对应：梯度模长上限只作用在
     `grad k` 与 `grad ln(omega)` 上，交叉扩散用物理梯度 `omega grad ln(omega)`），输运
-    残差与湍流解析 Jacobian 的 GPU 逐点求值器共用。"""
-    grad_k = clip_gradient_magnitude(grad_k, cp)
-    grad_log_omega = clip_gradient_magnitude(grad_log_omega, cp)
+    残差与湍流解析 Jacobian 的 GPU 逐点求值器共用；两个梯度须已裁剪，同 CPU 版约定）。"""
     grad_dot = omega * cp.sum(grad_k * grad_log_omega, axis=-1)
     # 模型项求值用有效值（与 CPU 版同一处，定义在 `sst/bounds.py`）
     k_eff, omega_safe = model_evaluation_fields(k, omega, omega_realizability_floor(turb, S_mag, cp), cp)
@@ -266,11 +262,13 @@ def compute_turbulence_transport_residual_gpu(
     nu = mu / cp.maximum(rho, 1e-10)
 
     w_log = log_omega(turb.omega_field, cp)
+    # 梯度模长上限在求梯度处施加一次（调用方传入的梯度已裁剪，同 CPU 版约定）
     if grad_k is None:
-        grad_k = compute_physical_scalar_gradient_gpu(turb.k_field, solver.mesh_data, solver.ops_data)
+        grad_k = clip_gradient_magnitude(
+            compute_physical_scalar_gradient_gpu(turb.k_field, solver.mesh_data, solver.ops_data), cp)
     if grad_log_omega is None:
-        grad_log_omega = compute_physical_scalar_gradient_gpu(w_log, solver.mesh_data, solver.ops_data)
-    grad_log_omega = clip_gradient_magnitude(grad_log_omega, cp)
+        grad_log_omega = clip_gradient_magnitude(
+            compute_physical_scalar_gradient_gpu(w_log, solver.mesh_data, solver.ops_data), cp)
 
     S_mag = turb.compute_strain_rate_magnitude_gpu(grad_vel)
     d_wall = solver.wall_distance_gpu

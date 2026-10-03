@@ -21,7 +21,6 @@ from autoflowcfd.core.fr_operators.flux_kernels import resolve_viscous_ip_consta
 from autoflowcfd.core.fr_operators.volume_contract import get_overintegration_context
 from autoflowcfd.core.fr_residual.jacobian.coupling import CouplingBlocks, CouplingGroup, cross_layout
 from autoflowcfd.core.turbulence.transport.convection import resolve_turb_overintegration
-from autoflowcfd.core.turbulence.transport.faces import unit_normals
 from autoflowcfd.fr.native_padding import real_sps_per_cell
 
 from .cell_blocks import turbulence_cell_blocks
@@ -128,8 +127,7 @@ def assemble_scalar_pair_blocks(mesh, ops, flat, kw, gam, dS, dG, rho, vel, rho_
     c_ip = resolve_viscous_ip_constant(int(mesh.order))
     D_prism = np.ascontiguousarray(np.asarray(ops.D_3d_prism)[:npr, :npr])
     D_tet = np.ascontiguousarray(np.asarray(ops.D_native_tet_padded)[:nte, :nte])
-    n_own = np.ascontiguousarray(unit_normals(np.asarray(flat.owner_adj_row_exact)))
-    n_nei = np.ascontiguousarray(unit_normals(np.asarray(flat.neighbor_adj_row_exact)))
+    n_own, n_nei = flat.owner_unit_normal, flat.neighbor_unit_normal
     for color in range(flat.n_colors):
         faces = flat.color_face_indices[color]
         if len(faces) == 0:

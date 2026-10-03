@@ -81,16 +81,10 @@ def _extrapolate_scalar_to_faces_gpu(cp, ff, n_prism, scalar_sps,
                                         wall_dirichlet_value_face, has_wall_dirichlet_value)
 
 
-def _unit_normals(cp, adj_row):
-    mag = cp.sqrt(cp.sum(adj_row * adj_row, axis=-1))
-    return adj_row / cp.maximum(mag, 1e-300)[..., None]
-
-
 def _face_mass_flux_gpu(cp, ff, rho_u):
     """两侧坐标系下的质量通量 `(m_owner, m_neighbor)`，都取 owner 的迹（CPU 版
     `face_frames.face_mass_flux_kernel`）。"""
-    n_o = _unit_normals(cp, ff.owner_adj_row_exact)
-    n_n = _unit_normals(cp, ff.neighbor_adj_row_exact)
+    n_o, n_n = ff.owner_unit_normal, ff.neighbor_unit_normal
     has_nb = ff.neighbor_cell >= 0
     mp = ff.mixed_ow_partner
     mixed = (mp >= 0)[:, None] & ff.mixed_ow_mask

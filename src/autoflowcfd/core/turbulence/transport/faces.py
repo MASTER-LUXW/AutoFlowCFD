@@ -112,12 +112,6 @@ def boundary_diffusion_targets(xp, flat, frame, wall_dirichlet_zero_face=None,
     return is_bnd, is_bnd & (zero | value), target
 
 
-def unit_normals(adj_row):
-    """`(n_faces, n_fp, 3)` 的 adj 行归一化成该侧的单位外法向。"""
-    mag = np.sqrt(np.sum(adj_row * adj_row, axis=-1))
-    return adj_row / np.maximum(mag, 1e-300)[..., None]
-
-
 class ScalarConvectionGeometry(NamedTuple):
     """k/omega 两次标量对流调用共享的、**与标量本身无关**的几何/流场量
     （2026-09-13 性能优化：两次调用的 `rho`/`velocity` 相同，只算一次）。
@@ -156,8 +150,7 @@ def precompute_scalar_convection_geometry(rho, velocity, mesh, ops, flat):
         flat.owner_src0_cell, flat.owner_src0_tpl, flat.owner_src0_tid,
         flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
         flat.mixed_ow_partner, flat.mixed_ow_mask,
-        np.ascontiguousarray(unit_normals(flat.owner_adj_row_exact)),
-        np.ascontiguousarray(unit_normals(flat.neighbor_adj_row_exact)),
+        flat.owner_unit_normal, flat.neighbor_unit_normal,
     )
     return ScalarConvectionGeometry(rho_u_tilde=rho_u_tilde, mass_flux=mass_flux,
                                     mass_flux_neighbor=mass_flux_neighbor, mass_divergence=mass_divergence)

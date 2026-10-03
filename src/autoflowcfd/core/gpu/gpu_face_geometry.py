@@ -74,6 +74,10 @@ class GPUFlatFaceGeometry:
 
             self.owner_adj_row_exact = cp.asarray(flat_face.owner_adj_row_exact)
             self.neighbor_adj_row_exact = cp.asarray(flat_face.neighbor_adj_row_exact)
+            # 逐通量点单位外法向：CPU 几何上算一次再上传（`FlatFaceGeometry.owner_unit_normal`，
+            # 湍流标量输运每次求值都要用）
+            self.owner_unit_normal = cp.asarray(flat_face.owner_unit_normal)
+            self.neighbor_unit_normal = cp.asarray(flat_face.neighbor_unit_normal)
 
             # ── 邻居源数据（src0 = 主要来源矩阵，src1 = 稀疏第二来源）──
             # src0 矩阵是模板表 + 逐面编号（fr/face_flux_points/templates.py）：第 f 个面

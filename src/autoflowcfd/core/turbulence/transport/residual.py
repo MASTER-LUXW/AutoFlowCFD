@@ -31,12 +31,10 @@ def turbulence_diffusivities(turb, k, omega, grad_k, grad_log_omega, rho, rho_nu
 
     `rho_nu_t` 是源项求值在同一组 `(k, omega)` 上刷新的动力涡粘；`F1` 用模型项的
     有效值（`sst/bounds.py`）与物理梯度 `grad(omega) = omega grad(ln omega)` 算交叉扩散
-    `CD_kw`。梯度模长上限只作用在 `grad k` 与 `grad ln(omega)` 上（近壁物理
-    `grad omega` 可达 1e8，钳在 1e6 会改掉合法值）。输运残差与湍流解析 Jacobian
-    （逐点差分）共用这一份，逐点函数，与单元无关。
+    `CD_kw`。`grad k` 与 `grad ln(omega)` 须已按 `sst/bounds.py::clip_gradient_magnitude`
+    裁剪（在求梯度处施加一次；近壁物理 `grad omega` 可达 1e8，所以上限只作用在这两者上）。
+    输运残差与湍流解析 Jacobian（逐点差分）共用这一份，逐点函数，与单元无关。
     """
-    grad_k = clip_gradient_magnitude(grad_k, np)
-    grad_log_omega = clip_gradient_magnitude(grad_log_omega, np)
     with np.errstate(over='ignore', invalid='ignore'):
         grad_dot = omega * np.sum(grad_k * grad_log_omega, axis=-1)
         k_eff, omega_safe = model_evaluation_fields(k, omega, omega_realizability_floor(turb, S_mag, np), np)
@@ -82,7 +80,8 @@ def compute_turbulence_transport_residual(
             profile 过的真实热点（79万单元 P1 阶段单步 7.5s 累计），这里
             的重复调用是三次里的一次，真实测得省下约 1.6s/步。三者任一
             为 None 时退回原来的内部计算（保持本函数可独立调用的公开
-            API 行为不变，不依赖调用方一定会传）。
+            API 行为不变，不依赖调用方一定会传）。传入的 `grad_k` /
+            `grad_log_omega` 须已按 `clip_gradient_magnitude` 裁剪。
         flat_face_override: 显式传入时优先使用，透传给内部四次
             `compute_scalar_convection_residual`/`compute_scalar_
             diffusion_residual` 调用（2026-09-02 分布式湍流移植新增，
@@ -125,11 +124,11 @@ def compute_turbulence_transport_residual(
 
     # 交叉扩散项（F1 计算需要）
     w_log = log_omega(turb.omega_field, np)
+    # 梯度模长上限在求梯度处施加一次（调用方传入的梯度已裁剪，见参数文档）
     if grad_k is None:
-        grad_k = compute_physical_scalar_gradient(turb.k_field, solver.mesh, solver.ops)
+        grad_k = clip_gradient_magnitude(compute_physical_scalar_gradient(turb.k_field, solver.mesh, solver.ops), np)
     if grad_log_omega is None:
-        grad_log_omega = compute_physical_scalar_gradient(w_log, solver.mesh, solver.ops)
-    grad_log_omega = clip_gradient_magnitude(grad_log_omega, np)
+        grad_log_omega = clip_gradient_magnitude(compute_physical_scalar_gradient(w_log, solver.mesh, solver.ops), np)
 
     gamma_k, gamma_w = turbulence_diffusivities(
         turb, turb.k_field, turb.omega_field, grad_k, grad_log_omega, rho, rho_nu_t, nu, mu, S_mag,
