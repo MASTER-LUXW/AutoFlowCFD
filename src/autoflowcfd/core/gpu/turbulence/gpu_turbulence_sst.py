@@ -25,7 +25,9 @@ from typing import Optional, Tuple
 
 from autoflowcfd.core.gpu import gpu_available, get_cupy
 from autoflowcfd.core.turbulence.sst.ambient import ambient_sustaining_terms
-from autoflowcfd.core.turbulence.sst.bounds import model_evaluation_fields, omega_realizability_floor
+from autoflowcfd.core.turbulence.sst.bounds import (
+    OMEGA_MAX_FLOOR, model_evaluation_fields, omega_realizability_floor,
+)
 
 
 class GPUTurbulenceSST:
@@ -98,7 +100,7 @@ class GPUTurbulenceSST:
         # _set_turbulence_bounds 一致；2026-08-25 代码审查前此处恒为 1e6，
         # 与 CPU 惯例不一致且注释误称"与 CPU 版一致"）。
         self.k_max: float = 1e6
-        self.omega_max: float = 1e6
+        self.omega_max: float = OMEGA_MAX_FLOOR      # 按壁距重定，见 `sst/bounds.py`
 
         # 湍流产项渐变因子 [0, 1]，初值 1.0，每步由
         # gpu_solver_io.py::_update_production_ramp_gpu 更新（第四次评审

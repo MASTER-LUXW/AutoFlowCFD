@@ -16,6 +16,7 @@
 import numpy as np
 from loguru import logger
 
+from autoflowcfd.core.turbulence.sst.bounds import apply_omega_upper_bound
 from autoflowcfd.core.utils.wall_distance_source import WallDistanceSource
 
 #: 需要壁面距离场的湍流模型
@@ -32,10 +33,20 @@ def apply_wall_distance_source(solver, source: WallDistanceSource) -> None:
     n_cells, n_sps = solver.state.U.shape[:2]
     solver.wall_distance = source.query(np.asarray(sps).reshape(n_cells, n_sps, 3))
     solver._wall_distance_source = source
+    apply_wall_distance_omega_bound(solver)
     logger.info(
         f"Wall distance ({source.kind}) mapped to SPs for P{getattr(solver, 'current_order', '?')}: "
         f"shape={solver.wall_distance.shape}, min={solver.wall_distance.min():.6e}, "
         f"max={solver.wall_distance.max():.6e}")
+
+
+def apply_wall_distance_omega_bound(solver) -> None:
+    """按当前壁距设定 SST 的 omega 上界（`turbulence/sst/bounds.py` 模块文档"omega 上界随
+    最近壁面解点给定"）；没有 SST 类模型时不做事。壁距每次设定/重算后调用。"""
+    model = getattr(solver, "turb_model", None)
+    if model is None or not hasattr(model, "omega_max") or solver.wall_distance is None:
+        return
+    apply_omega_upper_bound(model, solver.wall_distance, solver.mu_molecular / solver.freestream["rho_inf"])
 
 
 def compute_wall_distance_field(solver, mesh_nodes: np.ndarray, wall_indices: np.ndarray,

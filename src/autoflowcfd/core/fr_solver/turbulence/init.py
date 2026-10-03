@@ -13,6 +13,9 @@ from autoflowcfd.core.turbulence.sst import SSTModelFR
 from autoflowcfd.core.turbulence.des import DDESModel, IDDESModel, compute_h_max_and_h_wn
 from autoflowcfd.core.turbulence.wmles import WMLESModel
 from autoflowcfd.core.turbulence.sgs import WALEModel
+from autoflowcfd.core.turbulence.sst.bounds import OMEGA_MAX_FLOOR
+
+from .wall_distance import apply_wall_distance_omega_bound
 
 
 def _filter_matrices_are_identity(ops) -> bool:
@@ -88,8 +91,8 @@ def _set_turbulence_bounds(solver) -> None:
     """根据来流条件设置 k/omega 物理上界。
 
     k_max = 0.5 * vel_inf^2：湍动能不可能超过平均流动能（湍流强度 100% 的极限）。
-    omega_max = 1e6：远大于任何工程壁面 omega 值（壁面 omega ~ U_tau^2/nu ~ 1e4
-    量级，1e6 留 100 倍裕度）。
+    omega_max：随最近壁面解点给定（`turbulence/sst/bounds.py` 模块文档"omega 上界随最近
+    壁面解点给定"）；壁距尚未设定时取 `OMEGA_MAX_FLOOR`，设定壁距时再按它重定。
 
     不设上界时，SST 输运方程的源项+输运项正反馈会导致 k/omega 指数增长到
     1e260+ 量级（实测 cube_demo 100 步内即达到），而平均流完全不受影响
@@ -102,7 +105,9 @@ def _set_turbulence_bounds(solver) -> None:
     # 直接取键，理由见 `_set_freestream_turbulence` 同名注释
     vel_inf = solver.freestream["vel_inf"]
     solver.turb_model.k_max = 0.5 * vel_inf ** 2  # 湍动能 ≤ 平均流动能
-    solver.turb_model.omega_max = 1e6  # 保守上界
+    solver.turb_model.omega_max = OMEGA_MAX_FLOOR
+    if getattr(solver, "wall_distance", None) is not None:
+        apply_wall_distance_omega_bound(solver)
     logger.debug(
         f"Turbulence bounds set: k_max={solver.turb_model.k_max:.2f}, "
         f"omega_max={solver.turb_model.omega_max:.0e} "
@@ -213,14 +218,14 @@ def init_turbulence_models(solver, n_cells: int, n_sps: int) -> None:
             rho_inf = solver.freestream.get("rho_inf", 1.225)
             solver.wmles_model = WMLESModel(nu=solver.mu_molecular / max(rho_inf, 1e-10))
         solver.sgs_model = WALEModel()
-        print(f"   [OK] WMLES model initialized")
+        print("   [OK] WMLES model initialized")
 
     elif solver.turb_model_name == "LES":
         solver.sgs_model = WALEModel()
-        print(f"   [OK] LES with WALE SGS model initialized")
+        print("   [OK] LES with WALE SGS model initialized")
 
     elif solver.turb_model_name == "NONE":
-        print(f"   [OK] Laminar flow (no turbulence model)")
+        print("   [OK] Laminar flow (no turbulence model)")
 
     else:
         raise ValueError(f"Unknown turbulence model: {solver.turb_model_name}")

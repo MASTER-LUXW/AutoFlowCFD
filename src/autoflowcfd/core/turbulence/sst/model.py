@@ -7,6 +7,7 @@
 import numpy as np
 from typing import Optional
 from .blending import _SSTBlendingMixin
+from .bounds import OMEGA_MAX_FLOOR
 from .source import _SSTSourceMixin
 from .update import _SSTUpdateMixin
 
@@ -57,12 +58,11 @@ class SSTModelFR(_SSTBlendingMixin, _SSTSourceMixin, _SSTUpdateMixin):
         self.omega_inf = omega_inf
         self.k_inf = k_inf
 
-        # k/omega 物理上界（防止输运方程数值爆炸）。
-        # 默认值保守（1e6），应在求解器初始化时根据来流条件设置：
+        # k/omega 物理上界（防止输运方程数值爆炸），求解器初始化时按来流与壁距重定：
         #   k_max = 0.5 * vel_inf^2（湍动能不超过平均流动能）
-        #   omega_max = 1e6（远大于任何工程壁面 omega 值）
+        #   omega_max 随最近壁面解点给定（`bounds.py` 模块文档），壁距未知时取 OMEGA_MAX_FLOOR
         self.k_max: float = 1e6
-        self.omega_max: float = 1e6
+        self.omega_max: float = OMEGA_MAX_FLOOR
 
         # 湍流产项渐变因子 [0, 1]（工业 RANS 标准做法）。
         # 初始为 0（抑制产生项），逐步增加到 1（全量产生）。

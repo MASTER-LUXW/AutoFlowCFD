@@ -210,6 +210,9 @@ class _DistributedFromPackageMixin:
             k_inf, omega_inf = _set_freestream_turbulence(self)
             self.turb_model = SSTModelFR(n_local, n_sps, k_inf=k_inf, omega_inf=omega_inf)
             _set_turbulence_bounds(self)
+            # omega 上界按 root 算好的壁距（全局最小）重定，与传统模式同一函数
+            from autoflowcfd.core.mpi.distributed_turbulence import apply_distributed_omega_bound
+            apply_distributed_omega_bound(self.turb_model, self.wall_distance_compact, self)
             self._turb_ramp_step = 0
             self._turb_production_ramp_steps = 50
             self._turb_production_ramp_complete = False

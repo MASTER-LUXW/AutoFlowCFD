@@ -10,6 +10,7 @@ import types
 from loguru import logger
 
 from autoflowcfd.core.gpu import get_cupy
+from autoflowcfd.core.turbulence.sst.bounds import OMEGA_MAX_FLOOR
 
 from autoflowcfd.core.mpi import get_rank
 
@@ -198,7 +199,7 @@ def build_multi_gpu_solver_from_fully_distributed_package(
             n_local, n_sps, device_id, k_inf=k_inf, omega_inf=omega_inf
         )
         self.turb_model_gpu.k_max = 0.5 * vel_inf ** 2
-        self.turb_model_gpu.omega_max = 1e6
+        self.turb_model_gpu.omega_max = OMEGA_MAX_FLOOR   # 算出壁距后按它重定（sst/bounds.py）
         logger.info(f"Rank {self.rank}: GPU SST model initialized (fully-distributed mode, "
                     f"k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
 

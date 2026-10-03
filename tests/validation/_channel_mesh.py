@@ -32,12 +32,7 @@ def build_face_exact_ghost_provider(mesh, Lx, H, Lz, bc_by_plane, tol_scale=1e-6
     per-face 的 group_code 数组，不要求这个数组必须来自
     tag_boundary_groups。
     """
-    fc = mesh.face_connectivity
     tol = tol_scale * max(Lx, H, Lz, 1.0)
-    group_code = np.full(fc.n_faces, -1, dtype=np.int32)
-    code_to_config = {}
-    bidx = fc.get_boundary_face_indices()
-    centers = fc.center[bidx]
 
     def classify(c):
         if abs(c[1] - 0.0) < tol:
@@ -54,12 +49,23 @@ def build_face_exact_ghost_provider(mesh, Lx, H, Lz, bc_by_plane, tol_scale=1e-6
             return "x_max"
         raise ValueError(f"boundary face center {c} not on any known domain plane")
 
+    return build_ghost_provider_by_classifier(mesh, classify, bc_by_plane)
+
+
+def build_ghost_provider_by_classifier(mesh, classify, bc_by_name):
+    """按每个边界面中心坐标分类的 `BoundaryGhostStateProvider`：`classify(center) -> name`，
+    `bc_by_name[name]` 为该组的边界配置（理由见 `build_face_exact_ghost_provider` 文档）。
+    同一个平面上可以分成几组（平板前方的对称面与平板本身，`_flat_plate_case.py`）。"""
+    fc = mesh.face_connectivity
+    group_code = np.full(fc.n_faces, -1, dtype=np.int32)
+    code_to_config = {}
+    bidx = fc.get_boundary_face_indices()
     name_to_code = {}
-    for f, c in zip(bidx, centers):
+    for f, c in zip(bidx, fc.center[bidx]):
         name = classify(c)
         if name not in name_to_code:
             name_to_code[name] = len(name_to_code)
-            code_to_config[name_to_code[name]] = bc_by_plane[name]
+            code_to_config[name_to_code[name]] = bc_by_name[name]
         group_code[f] = name_to_code[name]
 
     default_config = {"type": "FARFIELD", "Q_free": [1.225, 0.0, 0.0, 0.0, 101325.0]}
@@ -348,6 +354,22 @@ def build_channel_mesh_prism(order, nx, ny, nz, Lx, H, Lz):
             f"偶数 nz。",
             RuntimeWarning, stacklevel=2,
         )
+    # 与此前逐点 `i / n * L` 同一公式（`np.linspace` 是 `i * (L / n)`，可差 1 ulp，网格逐位不变）
+    return build_prism_mesh_from_lines(order, np.arange(nx + 1) / nx * Lx, np.arange(ny + 1) / ny * H,
+                                       np.arange(nz + 1) / nz * Lz)
+
+
+def build_prism_mesh_from_lines(order, x_lines, y_lines, z_lines):
+    """张量积坐标线上的棱柱网格：(x,z) 平面每个矩形拆 2 个三角形（上半区用反对角线，对 z 中面
+    精确镜像对称，见 `build_channel_mesh_prism` 文档），沿 y（壁面法向）整层挤出。
+
+    坐标线可以非均匀（壁面法向几何拉伸、前缘处流向加密，`_flat_plate_case.py`）；
+    `build_channel_mesh_prism` 是均匀坐标线的特例。边界分组按六个坐标极值平面
+    （`x_min/x_max/wall_bottom/wall_top/z_min/z_max`），真正的边界类型由调用方的逐面
+    幽灵态提供者按面中心位置分派。
+    """
+    x_lines, y_lines, z_lines = (np.asarray(a, dtype=float) for a in (x_lines, y_lines, z_lines))
+    nx, ny, nz = len(x_lines) - 1, len(y_lines) - 1, len(z_lines) - 1
     nx1, ny1, nz1 = nx + 1, ny + 1, nz + 1
 
     def gid(i, j, k):
@@ -356,9 +378,9 @@ def build_channel_mesh_prism(order, nx, ny, nz, Lx, H, Lz):
     ii, jj, kk = np.meshgrid(np.arange(nx1), np.arange(ny1), np.arange(nz1), indexing="ij")
     node_id = (ii + nx1 * jj + nx1 * ny1 * kk).ravel()
     order_idx = np.argsort(node_id)
-    xs = (ii.ravel() / nx * Lx)[order_idx]
-    ys = (jj.ravel() / ny * H)[order_idx]
-    zs = (kk.ravel() / nz * Lz)[order_idx]
+    xs = x_lines[ii.ravel()][order_idx]
+    ys = y_lines[jj.ravel()][order_idx]
+    zs = z_lines[kk.ravel()][order_idx]
     nodes = np.column_stack([xs, ys, zs])
 
     prisms = []
@@ -391,7 +413,8 @@ def build_channel_mesh_prism(order, nx, ny, nz, Lx, H, Lz):
     prism_conn = np.array(prisms, dtype=np.int32)
     n_prisms = len(prism_conn)
 
-    tol = 1e-9 * max(Lx, H, Lz, 1.0)
+    extent = [float(a[-1] - a[0]) for a in (x_lines, y_lines, z_lines)]
+    tol = 1e-9 * max(extent + [1.0])
 
     def face_on_plane(coord_vals, target):
         on_plane = np.abs(coord_vals - target) < tol
@@ -399,12 +422,12 @@ def build_channel_mesh_prism(order, nx, ny, nz, Lx, H, Lz):
 
     prism_coords = nodes[prism_conn]  # (n_prisms,6,3)
     groups = {
-        "wall_bottom": np.flatnonzero(face_on_plane(prism_coords[:, :, 1], 0.0)),
-        "wall_top": np.flatnonzero(face_on_plane(prism_coords[:, :, 1], H)),
-        "z_min": np.flatnonzero(face_on_plane(prism_coords[:, :, 2], 0.0)),
-        "z_max": np.flatnonzero(face_on_plane(prism_coords[:, :, 2], Lz)),
-        "x_min": np.flatnonzero(face_on_plane(prism_coords[:, :, 0], 0.0)),
-        "x_max": np.flatnonzero(face_on_plane(prism_coords[:, :, 0], Lx)),
+        "wall_bottom": np.flatnonzero(face_on_plane(prism_coords[:, :, 1], y_lines[0])),
+        "wall_top": np.flatnonzero(face_on_plane(prism_coords[:, :, 1], y_lines[-1])),
+        "z_min": np.flatnonzero(face_on_plane(prism_coords[:, :, 2], z_lines[0])),
+        "z_max": np.flatnonzero(face_on_plane(prism_coords[:, :, 2], z_lines[-1])),
+        "x_min": np.flatnonzero(face_on_plane(prism_coords[:, :, 0], x_lines[0])),
+        "x_max": np.flatnonzero(face_on_plane(prism_coords[:, :, 0], x_lines[-1])),
     }
     bc_types = {name: "WALL" for name in groups}
 

@@ -271,9 +271,9 @@ def compute_turbulence_transport_residual_gpu(
     dk_dt_transport = (conv_k + diff_k) / cp.maximum(rho, 1e-10)
 
     omega_wall_value_face, has_omega_wall = compute_omega_wall_target_gpu(
-        cp, ff, wall_mask_k, d_wall, Q, mu, getattr(turb, "beta1", 0.075),
-        omega_max=getattr(turb, "omega_max", 1e6),
-        turb_k_field=getattr(turb, "k_field", None),
+        cp, ff, wall_mask_k, d_wall, Q, mu, turb.beta1,
+        omega_max=turb.omega_max,
+        turb_k_field=turb.k_field,
     )
 
     # w = ln(omega) 的边界值：壁面目标取对数（没有目标的面该值不被读取），来流取 ln(omega_inf)

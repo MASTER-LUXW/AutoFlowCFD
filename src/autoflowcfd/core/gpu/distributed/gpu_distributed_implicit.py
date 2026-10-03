@@ -113,8 +113,8 @@ class MultiGpuTurbulenceBackend:
         Q_h = _host(ctx.Q)
         omega_wall, has_wall = compute_omega_wall_target_gpu(
             cp, s.flat_face_gpu, tr._wall_mask_k_gpu, ctx.d_wall, ctx.Q, s.mu_molecular,
-            getattr(view, "beta1", 0.075), omega_max=getattr(view, "omega_max", 1e6),
-            turb_k_field=getattr(view, "k_field", None))
+            view.beta1, omega_max=view.omega_max,
+            turb_k_field=view.k_field)
         lin = TurbulenceLinearization(
             mesh=mesh, ops=s.ops, flat=flat, turb=view, Q=Q_h, grad_vel=_host(ctx.grad_vel),
             d_wall=_host(ctx.d_wall), mu=float(s.mu_molecular),

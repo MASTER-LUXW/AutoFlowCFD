@@ -16,6 +16,7 @@ from typing import Tuple
 
 
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+from autoflowcfd.core.turbulence.sst.bounds import OMEGA_WALL_AMPLIFICATION, OMEGA_WALL_VISCOUS_COEFF
 
 
 
@@ -196,10 +197,9 @@ def _omega_wall_formula(solver, owner_cells, nu_owner, d1, beta1):
         d1: (n_wall_faces,) 近壁特征长度（口径由 AFCFD_OMEGA_WALL_D1 决定）
         beta1: SST 内层 beta 系数
     """
-    omega_vis = 6.0 * nu_owner / (beta1 * d1 ** 2)
+    omega_vis = OMEGA_WALL_VISCOUS_COEFF * nu_owner / (beta1 * d1 ** 2)
     if resolve_omega_wall_mode() == "amplified":
-        # 10 * 6nu/(beta1*d1^2)——与改动前逐位一致
-        return 10.0 * omega_vis
+        return OMEGA_WALL_AMPLIFICATION * omega_vis
     # blended：需要 owner 单元的 k。取该单元**真实自由度**上的均值，
     # 与本文件 rho_owner 同一处理（native 四面体的零填充槽位冻结在初值，
     # 混进来会带偏；见 fr/native_padding.py）。
@@ -291,15 +291,16 @@ def _compute_omega_wall_target(
     触发过的缺口——真实复现：当时的点隐式松弛公式本身正确，但
     "正确地"把 omega 松弛向一个物理上荒谬的 1e14 目标值，5 步内就把
     全域 omega_mean 打到 1.08e12。修复：在这里、也就是唯一的真值来源，
-    把 `omega_wall` 夹到 `solver.turb_model.omega_max`（没有该属性时
-    退回 1e6 保守默认），让所有消费者（现在的和未来任何新增的）都
-    自动受益，不需要各自重复防御。
+    把 `omega_wall` 夹到 `solver.turb_model.omega_max`，让所有消费者（现在的和
+    未来任何新增的）都自动受益，不需要各自重复防御。上界随最近壁面解点给定
+    （`turbulence/sst/bounds.py` 模块文档，2026-10-03：此前写死 1e6，壁面解析网格上
+    比物理壁面值低两个量级，壁面条件被压小、钳位处残差不可微）。
     """
     flat = flat_face_override if flat_face_override is not None else get_flat_face_geometry(solver.mesh, solver.ops)
     n_faces = flat.n_faces
     n_fp = flat.n_fp
-    beta1 = getattr(solver.turb_model, "beta1", 0.075)
-    omega_max = getattr(solver.turb_model, "omega_max", 1e6)
+    beta1 = solver.turb_model.beta1
+    omega_max = solver.turb_model.omega_max
 
     omega_wall_value_face = np.zeros((n_faces, n_fp), dtype=np.float64)
     wall_face_idx = np.nonzero(wall_mask)[0]

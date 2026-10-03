@@ -348,10 +348,13 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, _
             # 壁面距离：与单机同一个来源（CLI 由体网格 WALL 边界面构造后以
             # `wall_distance_source=` 传入），在本 rank compact 解点上查询；
             # 换阶重建时用同一个来源重查（distributed_order_continuation）
-            from autoflowcfd.core.mpi.distributed_turbulence import compute_distributed_wall_distance
+            from autoflowcfd.core.mpi.distributed_turbulence import (
+                apply_distributed_omega_bound, compute_distributed_wall_distance,
+            )
             self._wall_distance_source = wall_distance_source
             self.wall_distance_compact = compute_distributed_wall_distance(
                 self.dist_flat_face, mesh, wall_distance_source)
+            apply_distributed_omega_bound(self.turb_model, self.wall_distance_compact, self)
 
             # DDES/IDDES（2026-09-02）：`init_turbulence_models` 的 DDES/
             # IDDES 分支已经把 `self.ddes_model` 设成真实的 DDESModel/

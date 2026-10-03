@@ -295,7 +295,7 @@ class TestComputeOmegaWallTarget:
         mu = 1.8e-5
         rho = np.full((n_cells, n_sps), 1.2)
         beta1 = 0.075
-        turb_model = SimpleNamespace(beta1=beta1)
+        turb_model = SimpleNamespace(beta1=beta1, omega_max=1e6)
         solver = SimpleNamespace(
             mesh=mesh, ops=ops, wall_distance=wall_distance, turb_model=turb_model,
         )
@@ -373,7 +373,7 @@ class TestComputeOmegaWallTarget:
         solver = SimpleNamespace(
             mesh=mesh, ops=mesh.operators,
             wall_distance=np.full((n_cells, n_sps), 0.01),
-            turb_model=SimpleNamespace(beta1=0.075),
+            turb_model=SimpleNamespace(beta1=0.075, omega_max=1e6),
         )
 
         omega_wall_value_face, has_value = _compute_omega_wall_target(

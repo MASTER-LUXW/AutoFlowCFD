@@ -9,6 +9,7 @@
 from loguru import logger
 
 from autoflowcfd.core.gpu import get_cupy, gpu_available
+from autoflowcfd.core.turbulence.sst.bounds import OMEGA_MAX_FLOOR
 from autoflowcfd.core.gpu.array_manager import GPUArrayManager
 from autoflowcfd.core.gpu.distributed.gpu_halo_exchange import GPUHaloExchange
 from autoflowcfd.core.gpu.gpu_time_integration import GPUTimeIntegrator
@@ -287,7 +288,7 @@ class _MultiGPUSetupMixin:
                 n_local_cells, n_sps, device_id, k_inf=k_inf, omega_inf=omega_inf
             )
             self.turb_model_gpu.k_max = 0.5 * vel_inf ** 2
-            self.turb_model_gpu.omega_max = 1e6
+            self.turb_model_gpu.omega_max = OMEGA_MAX_FLOOR   # 算出壁距后按它重定（sst/bounds.py）
             logger.info(f"Rank {self.rank}: GPU SST model initialized "
                         f"(k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
 

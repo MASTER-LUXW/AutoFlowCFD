@@ -22,6 +22,19 @@ realizability 只在**模型项求值**时施加——
 
 `clip_to_bounds` 因此只剩两件事：非有限值恢复，以及上界（`k_max`/`omega_max`，
 防止 1e260 量级的正反馈爆炸，见 `update.py`）。
+
+## omega 上界随最近壁面解点给定，不能写死（2026-10-03）
+
+omega 的最大物理值在壁面：Wilcox/Menter 壁面值 `60 nu / (beta1 d1^2)`（`d1` 是贴壁第一层
+解点到壁面的距离，`transport/omega_wall.py`）。此前上界写死 1e6，理由是"工程壁面 omega
+~1e4"——那只对粗壁面网格成立：壁面解析网格（第一层 y+ ~ 1）上 `omega_wall ~ 800 u_tau^2 /
+nu`，工程雷诺数下是 5e7 ~ 2e8。湍流平板（`tests/validation/_flat_plate_case.py`，第一层解点
+4.2e-6 m）实测：壁面目标值 2.7e8 被夹到 1e6（壁面条件小 270 倍），前缘角点单元 omega 顶到
+上界、钳位处残差不可微，P1 隐式 400 步停在降 3e4 倍（残差 99.9% 在前缘单元）；上界改为
+`max(OMEGA_MAX_FLOOR, OMEGA_MAX_WALL_FACTOR * 60 nu / (beta1 d_min^2))` 后 187 步收敛到 1e-8、
+无一解点顶到上界。粗壁面网格（plate_demo 壁面目标值最大 7.6e4、槽道 ~1e3）上界仍是 1e6，
+行为不变。`apply_omega_upper_bound` 在每个后端设定/重算壁距处调用（换阶时贴壁解点更靠近
+壁面），分布式取全局最小壁距，各 rank 与单机同一个上界。
 """
 
 import numpy as np
@@ -34,6 +47,20 @@ K_FLOOR_FRACTION = 1e-3
 
 #: omega 的环境安全网相对来流值的比例（`omega_r` 的第二项）。
 OMEGA_FLOOR_FRACTION = 0.1
+
+#: omega 上界的下限：没有壁面距离时的初值；粗壁面网格上壁面解析值远小于它（模块文档）。
+OMEGA_MAX_FLOOR = 1.0e6
+
+#: omega 上界相对最近壁面解点处壁面解析值的倍数（模块文档）。
+OMEGA_MAX_WALL_FACTOR = 10.0
+
+#: 壁面 omega 粘性底层解析式 `omega_vis = OMEGA_WALL_VISCOUS_COEFF * nu / (beta1 d1^2)`
+#: 的系数（Wilcox）；CPU/GPU 壁面目标值（`transport/omega_wall.py`、
+#: `gpu_scalar_transport/omega_wall.py`）与上界共用这一份。
+OMEGA_WALL_VISCOUS_COEFF = 6.0
+
+#: Menter 放大式 `omega_wall = OMEGA_WALL_AMPLIFICATION * omega_vis`（壁面目标值默认档）。
+OMEGA_WALL_AMPLIFICATION = 10.0
 
 #: k/omega 梯度模长上限。退化单元上理论为常数的场求梯度，度量比值 adj(J)/det(J)
 #: 把浮点噪声放大到 >1e150（2026-08-22 真实网格），模长超过上限的点等比缩到上限。
@@ -69,6 +96,26 @@ def turbulence_scales(model):
     步长），`ln omega` 是 O(1) 的对数量、取 1（它的限幅是绝对的，见
     `time_integration/implicit/physicality.py::ScaledFieldRowLimits` 的 `log_columns`）。"""
     return max(ABS_FLOOR, K_FLOOR_FRACTION * float(model.k_inf)), 1.0
+
+
+def omega_upper_bound(d_min: float, nu: float, beta1: float) -> float:
+    """omega 上界：最近壁面解点处壁面解析值的 `OMEGA_MAX_WALL_FACTOR` 倍，不低于
+    `OMEGA_MAX_FLOOR`；没有正的壁距（无壁面）时取下限。"""
+    if not (np.isfinite(d_min) and d_min > 0.0):
+        return OMEGA_MAX_FLOOR
+    omega_wall = OMEGA_WALL_AMPLIFICATION * OMEGA_WALL_VISCOUS_COEFF * nu / (beta1 * d_min ** 2)
+    return max(OMEGA_MAX_FLOOR, OMEGA_MAX_WALL_FACTOR * omega_wall)
+
+
+def apply_omega_upper_bound(model, wall_distance, nu: float, global_min=None) -> None:
+    """按壁距场（numpy/cupy）设定 `model.omega_max`（模块文档）。`global_min`：分布式下把
+    本 rank 的最小正壁距归约成全局最小（`mpi/comm.py::allreduce_min`）；本 rank 没有正壁距
+    时贡献 inf。"""
+    d = wall_distance[wall_distance > 0.0]
+    d_min = float(d.min()) if int(d.size) > 0 else float("inf")
+    if global_min is not None:
+        d_min = float(global_min(d_min))
+    model.omega_max = omega_upper_bound(d_min, nu, float(model.beta1))
 
 
 def clip_to_bounds(model, xp) -> None:

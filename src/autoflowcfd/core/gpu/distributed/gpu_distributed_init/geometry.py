@@ -30,10 +30,14 @@ class _GPUDistributedInitMixin(_GPUDistributedTurbSourceMixin, _GPUDistributedCh
         缺陷，在共用函数里天然不存在：它按 compact_global_ids 切片。）
         """
         cp = get_cupy()
-        from autoflowcfd.core.mpi.distributed_turbulence import compute_distributed_wall_distance
+        from autoflowcfd.core.mpi.distributed_turbulence import (
+            apply_distributed_omega_bound, compute_distributed_wall_distance,
+        )
 
         self.wall_distance_gpu = cp.asarray(compute_distributed_wall_distance(
             self.dist_flat_face, self.mesh, getattr(self, "_wall_distance_source", None)))
+        # omega 上界按全局最小壁距重定（与 CPU 分布式同一函数）
+        apply_distributed_omega_bound(getattr(self, "turb_model_gpu", None), self.wall_distance_gpu, self)
 
     def _init_modal_filter_distributed(self):
         """分布式（多 GPU）模态滤波初始化。

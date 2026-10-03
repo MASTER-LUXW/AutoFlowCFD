@@ -362,6 +362,9 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
     solver.halo_exchange = HaloExchange(solver.partition, new_n_sps, n_vars)
 
     solver.wall_distance_compact = my_package.get('wall_distance_compact')
+    # 换阶后贴壁解点更靠近壁面：omega 上界随之重定（与传统模式同一函数）
+    from autoflowcfd.core.mpi.distributed_turbulence import apply_distributed_omega_bound
+    apply_distributed_omega_bound(solver.turb_model, solver.wall_distance_compact, solver)
     solver.iddes_h_max_compact = my_package.get('iddes_h_max_compact')
     solver.iddes_h_wn_compact = my_package.get('iddes_h_wn_compact')
 

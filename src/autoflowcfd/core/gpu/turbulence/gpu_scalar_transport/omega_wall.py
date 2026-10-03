@@ -5,7 +5,7 @@
 
 
 def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, mu, beta1,
-                                 omega_max=1e6, turb_k_field=None):
+                                 omega_max, turb_k_field=None):
     """CuPy 版 `_compute_omega_wall_target`：omega_wall = 60*nu/(beta1*d1^2)
     （Wilcox 解析式），逐字对应 CPU 版同名函数——全程 GPU 原生实现（不像
     边界幽灵态那样需要 CPU round-trip：wall_distance_gpu/Q_gpu/owner_cell
@@ -77,12 +77,13 @@ def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, m
         # omega 壁面公式族可切换（2026-09-15，B-6），与 CPU 端
         # transport.py::_omega_wall_formula 同一套判据与常数（文献依据见
         # 那里的 _OMEGA_WALL_MODES 一节）。默认 amplified，逐位不变。
+        from autoflowcfd.core.turbulence.sst.bounds import OMEGA_WALL_AMPLIFICATION, OMEGA_WALL_VISCOUS_COEFF
         from autoflowcfd.core.turbulence.transport import (
             _OMEGA_WALL_CMU, _OMEGA_WALL_KAPPA, resolve_omega_wall_mode,
         )
-        omega_vis = 6.0 * nu_owner / (beta1 * d1 ** 2)
+        omega_vis = OMEGA_WALL_VISCOUS_COEFF * nu_owner / (beta1 * d1 ** 2)
         if resolve_omega_wall_mode() == "amplified":
-            omega_wall = 10.0 * omega_vis
+            omega_wall = OMEGA_WALL_AMPLIFICATION * omega_vis
         else:
             if turb_k_field is None:
                 raise RuntimeError(

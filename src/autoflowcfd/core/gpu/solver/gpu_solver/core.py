@@ -8,6 +8,7 @@ import numpy as np
 from typing import Optional
 from loguru import logger
 from autoflowcfd.core.gpu import gpu_available, get_cupy
+from autoflowcfd.core.turbulence.sst.bounds import OMEGA_MAX_FLOOR
 from autoflowcfd.core.gpu.array_manager import GPUArrayManager
 from autoflowcfd.core.gpu.gpu_time_integration import GPUTimeIntegrator
 from autoflowcfd.core.gpu.solver.gpu_solver_init import _GPUSolverInitMixin
@@ -267,11 +268,11 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
             self.turb_model_gpu = GPUTurbulenceSST(
                 n_cells, n_sps, device_id, k_inf=k_inf, omega_inf=omega_inf
             )
-            # 物理上界与 CPU 同一公式（fr_solver/turbulence.py::_set_turbulence_bounds）：
-            # k_max = 0.5·vel_inf²（湍动能 ≤ 平均流动能）、omega_max = 1e6。
-            # 2026-08-25 代码审查前 GPU 侧恒为 1e6，与 CPU 不一致。
+            # 物理上界与 CPU 同一公式（fr_solver/turbulence/init.py::_set_turbulence_bounds）：
+            # k_max = 0.5·vel_inf²（湍动能 ≤ 平均流动能）；omega_max 先取下限，算出壁距后
+            # 按最近壁面解点重定（`_init_wall_distance_gpu`，`turbulence/sst/bounds.py`）。
             self.turb_model_gpu.k_max = 0.5 * vel_inf ** 2
-            self.turb_model_gpu.omega_max = 1e6
+            self.turb_model_gpu.omega_max = OMEGA_MAX_FLOOR
             logger.info(f"GPU SST k-omega model initialized on device {device_id} "
                        f"(k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
             print(f"   [OK] GPU SST k-omega model initialized "

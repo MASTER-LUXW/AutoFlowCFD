@@ -67,8 +67,8 @@ class GpuTurbulenceBackend:
         flat = get_flat_face_geometry(s.mesh, s.ops)
         omega_wall, has_wall = compute_omega_wall_target_gpu(
             cp, s.flat_face_gpu, s._wall_mask_k_gpu, d_wall, s.Q_gpu, s.mu_molecular,
-            getattr(m, "beta1", 0.075), omega_max=getattr(m, "omega_max", 1e6),
-            turb_k_field=getattr(m, "k_field", None))
+            m.beta1, omega_max=m.omega_max,
+            turb_k_field=m.k_field)
         ctx = TurbulenceLinearization(
             mesh=s.mesh, ops=s.ops, flat=flat, turb=m, Q=Q_h, grad_vel=_host(grad_vel), d_wall=_host(d_wall),
             mu=float(s.mu_molecular),

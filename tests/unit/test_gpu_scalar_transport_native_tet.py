@@ -251,7 +251,7 @@ class TestNativeScalarTransportMatchesCpu:
             k_field=k_field.copy(), omega_field=omega_field.copy(),
             nu_t=nu_t.copy(), _last_F1=F1.copy(),
             sigma_k1=0.85, sigma_k2=1.0, sigma_w1=0.5, sigma_w2=0.856,
-            beta_star=0.09, beta1=0.075,
+            beta_star=0.09, beta1=0.075, omega_max=1e6,
             # 来流值（来流条件用；本测试开放边界掩码全 False，只需存在）：与
             # CPU 参照 `SSTModelFR` 的构造默认值一致
             k_inf=1e-6, omega_inf=1.0,

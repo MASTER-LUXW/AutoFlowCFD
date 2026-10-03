@@ -199,3 +199,7 @@ class _GPUSolverInitMixin:
         dist = source.query(np.asarray(sps).reshape(self.mesh.n_cells, self.mesh.n_sps_per_cell, 3))
         self.wall_distance_gpu = cp.asarray(dist)
         logger.info(f"Wall distance ({source.kind}) computed: min={dist.min():.6e}, max={dist.max():.6e}")
+        if getattr(self, "turb_model_gpu", None) is not None:
+            # omega 上界随最近壁面解点给定（`turbulence/sst/bounds.py` 模块文档）
+            from autoflowcfd.core.turbulence.sst.bounds import apply_omega_upper_bound
+            apply_omega_upper_bound(self.turb_model_gpu, dist, self.mu_molecular / self.freestream["rho_inf"])

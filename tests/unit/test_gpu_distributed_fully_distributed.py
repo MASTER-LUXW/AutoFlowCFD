@@ -268,6 +268,7 @@ class TestBuildFromFullyDistributedPackageSstTurbulence:
                 self.omega_field = np.full((n_cells, n_sps), omega_inf)
                 self.k_max = None
                 self.omega_max = None
+                self.beta1 = 0.075
 
         monkeypatch.setattr(sst_mod, "GPUTurbulenceSST", _FakeGPUTurbulenceSST)
         patch_pkg_attr(monkeypatch, 
