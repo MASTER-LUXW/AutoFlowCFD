@@ -7,11 +7,11 @@
    `open_boundary_face`）：此前所有非壁面边界一律零梯度，来流湍流只存在
    于初场。判据：均匀流、全场 `k = 0.5*k_inf` 时，来流边界单元必须收到
    正的 `dk/dt`（被来流值补给），且 `k = k_inf` 时来流单元的输运残差为零。
-2. **隐式湍流残差**（`fr_solver/turbulence/implicit.py::TurbulenceResidual`）：
-   真实行上就是输运方程本身（壁面 omega 只由扩散残差的面 Dirichlet 施加，
-   2026-09-30 删除了壁面单元全部解点的强约束行，见该模块"omega 壁面条件"）；
-   求值不得把试探场泄漏进模型状态。
-3. **耦合收敛**：棱柱通道冲击启动，NK + SER + 块 Jacobi + 隐式 k-omega，
+2. **耦合残差**（`time_integration/implicit/coupled_step.py::CoupledResidual`）：
+   湍流列在真实行上就是输运方程本身（壁面 omega 只由扩散残差的面 Dirichlet 施加，
+   2026-09-30 删除了壁面单元全部解点的强约束行，见 `fr_solver/turbulence/implicit.py`
+   "omega 壁面条件"），平均流列就是 `Gamma R`；求值不得把试探场泄漏进求解器状态。
+3. **耦合收敛**：棱柱通道冲击启动，NK + SER + 块预处理 + 平均流与 k-omega 紧耦合，
    平均流与湍流残差都必须降多个量级（修复前湍流残差停在 1.3e4）。
 """
 
@@ -106,44 +106,47 @@ class TestInflowCondition:
         assert np.abs(dk_ref[inflow]).max() < 1e-6 * np.abs(dk_low[inflow]).max()
 
 
-class TestTurbulenceResidual:
-    def test_residual_is_the_transport_equation_and_state_is_restored(self, nk_solver):
-        """真实行上 `R_t = -(dk/dt, dw/dt)`，含壁面单元（没有被改写的行）；零填充槽位为零；
-        试探求值不泄漏进模型状态。"""
-        from autoflowcfd.core.fr_solver.turbulence.implicit import (
-            CpuTurbulenceBackend,
-            TurbulenceResidual,
-        )
+class TestCoupledResidual:
+    def test_residual_is_both_equations_and_state_is_restored(self, nk_solver):
+        """真实行上湍流列 `= -(dk/dt, dw/dt)`（含壁面单元，没有被改写的行）、平均流列 `= Gamma R`；
+        零填充槽位的湍流列为零；试探求值不泄漏进求解器状态。"""
         from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+        from autoflowcfd.core.fr_solver.turbulence.implicit import CpuCoupledBackend
+        from autoflowcfd.core.time_integration.implicit.coupled_step import CoupledResidual
         from autoflowcfd.core.turbulence.transport import _compute_wall_dirichlet_face_mask
+        from autoflowcfd.fr.native_padding import real_row_mask
 
-        t = nk_solver.turb_model
-        backend = CpuTurbulenceBackend(nk_solver)
-        backend.prepare()
-        before = {a: np.array(getattr(t, a), copy=True) for a in ("k_field", "omega_field", "nu_t")}
-        res = TurbulenceResidual(backend)
+        s, t = nk_solver, nk_solver.turb_model
+        be = CpuCoupledBackend(s)
+        before = {"U": np.array(s.state.U, copy=True)}
+        before.update({a: np.array(getattr(t, a), copy=True) for a in ("k_field", "omega_field", "nu_t")})
+        real = real_row_mask(be.cell_is_prism, be.n_sps, be.order)
+        x0 = be.state()
         rng = np.random.default_rng(0)
-        # 未知量是 (k, w = ln omega)（core/turbulence/sst/log_omega.py）
-        kw = np.stack([t.k_field.ravel(), np.log(t.omega_field.ravel())], axis=1)
-        kw[:, 0] *= 1.0 + 0.1 * rng.standard_normal(kw.shape[0])
-        kw[:, 1] += 0.1 * rng.standard_normal(kw.shape[0])
-        r = res(kw)
-        for a, v in before.items():
+        x = x0.copy()
+        x[:, 0] *= 1.0 + 1e-3 * rng.standard_normal(x.shape[0])
+        x[:, 5] *= 1.0 + 0.1 * rng.standard_normal(x.shape[0])
+        x[:, 6] += 0.1 * rng.standard_normal(x.shape[0])
+        r = CoupledResidual(be, real, x0)(x)
+        np.testing.assert_array_equal(s.state.U, before["U"], err_msg="试探求值泄漏进了平均流状态")
+        for a, v in ((a, before[a]) for a in ("k_field", "omega_field", "nu_t")):
             np.testing.assert_array_equal(getattr(t, a), v, err_msg=f"试探求值泄漏进了 {a}")
 
-        # 参考：同一试探场上直接求输运速率
-        t.k_field = kw[:, 0].reshape(t.k_field.shape).copy()
-        t.omega_field = np.exp(kw[:, 1]).reshape(t.omega_field.shape).copy()
+        # 参考：同一试探状态上直接求两个子系统
+        snap = be.snapshot()
         try:
-            rate_k, rate_w = backend.rates(apply_des=False)
+            be.set_trial(x)
+            be.turb.prepare_inputs()
+            rate_k, rate_w = be.turb.rates(apply_des=False)
+            r_mean = be.mean_residual(be.trial_mu_t())
         finally:
-            t.k_field, t.omega_field = before["k_field"].copy(), before["omega_field"].copy()
-        real = res._real_rows
-        np.testing.assert_allclose(r[real, 0], -rate_k.ravel()[real], rtol=1e-13, atol=0)
-        np.testing.assert_allclose(r[real, 1], -rate_w.ravel()[real], rtol=1e-13, atol=0)
-        assert np.all(r[~real] == 0.0), "零填充槽位不参与 Newton"
-        flat = get_flat_face_geometry(nk_solver.mesh, nk_solver.ops)
-        wall_cells = np.unique(flat.owner_cell[_compute_wall_dirichlet_face_mask(nk_solver)])
+            be.restore(snap)
+        np.testing.assert_allclose(r[real, 5], -rate_k.ravel()[real], rtol=1e-13, atol=0)
+        np.testing.assert_allclose(r[real, 6], -rate_w.ravel()[real], rtol=1e-13, atol=0)
+        np.testing.assert_allclose(r[:, :5], r_mean, rtol=1e-13, atol=0)
+        assert np.all(r[~real, 5:] == 0.0), "零填充槽位不参与 Newton"
+        flat = get_flat_face_geometry(s.mesh, s.ops)
+        wall_cells = np.unique(flat.owner_cell[_compute_wall_dirichlet_face_mask(s)])
         assert wall_cells.size > 0, "算例里应当有壁面单元（否则上面的判据对壁面行是空的）"
 
 
@@ -174,11 +177,12 @@ def test_nk_sst_channel_converges_coupled():
     mean, turb, limited = [], [], []
     for _ in range(200):
         s.step(2.0e-7)
-        mean.append(s._newton_last_info["res_norm"])
-        turb.append(s._newton_turb_state["last_info"]["res_norm"])
-        limited.append(s._newton_turb_state["last_info"]["limited_fraction"])
+        info = s._newton_last_info
+        mean.append(info["res_norm_mean"])
+        turb.append(info["res_norm_turbulence"])
+        limited.append(info["limited_fraction"])
     assert mean[-1] < 1e-6 * max(mean), (max(mean), mean[-1])
-    assert max(limited) == 0.0, f"湍流 Newton 步触发了逐单元松弛（最多 {100 * max(limited):.1f}% 单元）"
+    assert max(limited) == 0.0, f"耦合 Newton 步触发了物理性松弛（最多 {100 * max(limited):.1f}% 的行）"
     assert turb[-1] < 1e-6 * max(turb), (max(turb), turb[-1])
     t = s.turb_model
     assert t.k_field.min() > 10.0 * 1e-3 * t.k_inf, "k 贴在正性下限上"
@@ -186,12 +190,21 @@ def test_nk_sst_channel_converges_coupled():
 
 
 def test_nk_sst_channel_converges_coupled_p3():
-    """同一算例 P3：平均流与湍流残差都降多个量级、k 全场为正。
+    """同一算例 P3：平均流与湍流残差都降多个量级、k 没有失控的负欠冲、涡粘处处非负。
 
     2026-09-30 之前壁面 owner 单元全部解点的 w 行被强约束到壁面目标值：P3 贴壁
     单元的第一排解点 omega 被钉在 ~3900、生成/耗散比 1.9，k 在第一排长成尖峰并与
     平均流正反馈，在任何 CFL（固定 20 亦然）下都发散（200 步残差降不到 1 个量级、
     k 最小 -139 k_inf）。删除强约束后实测 92 步收敛、残差降 1.7e10。
+
+    2026-10-02：湍流对流体积项改成一致的对流形式后，分离式在这里进入 4 步一周期的
+    极限环（块 Gauss-Seidel 外迭代失稳），改为平均流与湍流紧耦合 Newton
+    （`time_integration/implicit/coupled_step.py`）。收敛解在出口与壁面交界的贴壁解点上
+    有 k 的负欠冲（实测最小 -0.27 = -2 k_inf，约为场内峰值 7.1 的 3.8%）：远场出口的
+    幽灵态是均匀来流剖面，与无滑移壁面在角点处不相容。此前 k 全场为正只是因为守恒形式
+    的伪源 `-k div_vol(rho u)` 恰好在那里为正。按约定被输运的 k 可以欠冲、realizability
+    只作用于模型项求值（`turbulence/sst/bounds.py`），所以这里断言的是"没有失控"（欠冲
+    不超过峰值的 5%，-139 k_inf 那类失控远超于此）与"涡粘处处非负"。
     """
     from autoflowcfd.core.time_integration import TimeIntegrationScheme
 
@@ -199,13 +212,15 @@ def test_nk_sst_channel_converges_coupled_p3():
     mean, turb = [], []
     for _ in range(140):
         s.step(2.0e-7)
-        mean.append(s._newton_last_info["res_norm"])
-        turb.append(s._newton_turb_state["last_info"]["res_norm"])
+        mean.append(s._newton_last_info["res_norm_mean"])
+        turb.append(s._newton_last_info["res_norm_turbulence"])
         if mean[-1] < 1e-8 * max(mean) and turb[-1] < 1e-8 * max(turb):
             break
     assert mean[-1] < 1e-6 * max(mean), (max(mean), mean[-1])
     assert turb[-1] < 1e-6 * max(turb), (max(turb), turb[-1])
-    assert s.turb_model.k_field[:, :40].min() > 0.0, "P3 下 k 出现负值"
+    k = s.turb_model.k_field
+    assert k.min() > -0.05 * k.max(), f"P3 下 k 负欠冲失控：最小 {k.min():.3e}、峰值 {k.max():.3e}"
+    assert np.asarray(s.turb_model.nu_t).min() >= 0.0, "涡粘出现负值（realizability 未生效）"
 
 
 def test_explicit_steps_keep_the_converged_steady_state():
@@ -224,8 +239,8 @@ def test_explicit_steps_keep_the_converged_steady_state():
     mean = []
     for _ in range(120):
         nk.step(2.0e-7)
-        mean.append(nk._newton_last_info["res_norm"])
-        if mean[-1] < 1e-9 * max(mean) and nk._newton_turb_state["last_info"]["res_norm"] < 1e-9:
+        mean.append(nk._newton_last_info["res_norm_mean"])
+        if mean[-1] < 1e-9 * max(mean) and nk._newton_last_info["res_norm_turbulence"] < 1e-9:
             break
     assert mean[-1] < 1e-8 * max(mean)
 

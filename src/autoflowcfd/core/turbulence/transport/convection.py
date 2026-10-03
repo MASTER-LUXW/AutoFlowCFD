@@ -2,8 +2,26 @@
 
 从 `core/turbulence/transport.py` 拆出（2026-09-24）；界面项 2026-09-26 改为两侧各自坐标系（见 `face_frames.py`）。
 
-残差约定：`-div(rho*U*phi)/det(J)`（含界面上风校正），见包 `__init__.py`
-的"符号约定"一节。
+残差约定：`-rho U . grad(phi)` 的 FR 离散（体积项 + 界面上风校正），返回
+`rho dphi/dt` 的对流部分，见包 `__init__.py` 的"符号约定"一节。
+
+## 体积项取对流形式（2026-10-02）
+
+被求解的方程是 `rho dphi/dt + rho U . grad(phi) = ...`（未知量是 k 与 `w = ln omega`
+本身），界面项是对流形式的跳变量 `m (phi_up - phi_side)`（均匀场恒为零）。体积项
+此前是守恒形式 `-div_vol(rho U phi)`，与对流形式只差 `-phi div_vol(rho U)`——离散体积
+散度逐点为零时才消失，而高阶 FR 的平均流只在"体积散度 + 界面修正"整体上满足连续性。
+所以体积项取
+
+    div_vol(rho U phi) - phi div_vol(rho U)
+
+（同一个体积算子分别作用在 `phi` 与 `1` 上，后者只依赖冻结平均流，见
+`ScalarConvectionGeometry.mass_divergence`）：均匀场与常数平移逐位保持。
+
+实测（plate_demo P1，b283352 第 120 步检查点）：守恒形式下均匀 `phi = c` 的对流残差
+`/rho` 在平板前缘锐边棱柱上是 `+8020 c` 1/s（严格正比于 c）；`w = ln omega` 约 13.8，伪源
++1.1e5 1/s 压过 omega 耗散（-8.3e4），123 个解点被推到 `omega_max` 钳位，钳位处残差
+不可微，JFNK 湍流 GMRES 每步跑满 200 次。全场 99 分位也有 1.7e4 1/s。
 """
 
 import os
@@ -149,6 +167,32 @@ def _scalar_convection_volume_overintegrated(
     return div_F
 
 
+def scalar_convection_volume_divergence(scalar_field, rho, velocity, rho_u_tilde, mesh, ops):
+    """对流体积算子 `div_vol(adj(J) rho u phi)`（参考空间、除 det 之前），`(n_cells, n_sps)`。
+
+    残差（`phi`）与 `ScalarConvectionGeometry.mass_divergence`（`phi = 1`）共用这一个函数，
+    保证对流形式里相减的两项是同一个离散算子。native 四面体用零填充到全局宽度的
+    `D_native_tet_padded`；去混叠见 `resolve_turb_overintegration`。
+    """
+    n_cells = mesh.n_cells
+    n_sps = mesh.n_sps_per_cell
+    n_prism = mesh.n_prism_cells
+    oi = _turb_overint_ops(mesh, ops) if resolve_turb_overintegration() == "on" else None
+    if oi is not None:
+        return _scalar_convection_volume_overintegrated(scalar_field, rho, velocity, oi, n_sps)
+    tet_op_D = ops.D_native_tet_padded if getattr(ops, "D_native_tet_padded", None) is not None else ops.D_3d_tet
+    div_F = np.empty((n_cells, n_sps))
+    if n_prism > 0:
+        scalar_convection_volume_kernel(
+            np.ascontiguousarray(scalar_field[:n_prism]), np.ascontiguousarray(rho_u_tilde[:n_prism]),
+            np.ascontiguousarray(ops.D_3d_prism), div_F[:n_prism])
+    if n_cells > n_prism:
+        scalar_convection_volume_kernel(
+            np.ascontiguousarray(scalar_field[n_prism:]), np.ascontiguousarray(rho_u_tilde[n_prism:]),
+            np.ascontiguousarray(tet_op_D), div_F[n_prism:])
+    return div_F
+
+
 def compute_scalar_convection_residual(
     scalar_field: np.ndarray,
     rho: np.ndarray,
@@ -163,8 +207,8 @@ def compute_scalar_convection_residual(
     open_boundary_face: np.ndarray = None,
     freestream_value: float = None,
 ) -> np.ndarray:
-    """标量对流 FR 残差 `-div(rho*U*phi)/det(J)`（体积项 + 界面上风校正），
-    返回 `d(rho*phi)/dt` 的对流部分（调用方再除以 rho）。
+    """标量对流 FR 残差 `-rho U . grad(phi)`（对流形式体积项 + 界面上风校正，见模块
+    文档），返回 `rho dphi/dt` 的对流部分（调用方再除以 rho）。
 
     ## 界面项
 
@@ -196,35 +240,14 @@ def compute_scalar_convection_residual(
     """
     n_cells = mesh.n_cells
     n_sps = mesh.n_sps_per_cell
-    n_prism = mesh.n_prism_cells
     det_jacs = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
     flat = flat_face_override if flat_face_override is not None else get_flat_face_geometry(mesh, ops)
     if conv_geom is None:
         conv_geom = precompute_scalar_convection_geometry(rho, velocity, mesh, ops, flat)
 
-    # === 体积项 ===
-    # native 四面体用零填充到全局宽度的 D_native_tet_padded（坍缩坐标 D_3d_tet
-    # 对单纯形基节点没有意义）；棱柱用 D_3d_prism。去混叠见
-    # `resolve_turb_overintegration`。
-    _tet_op_D = ops.D_native_tet_padded if getattr(ops, "D_native_tet_padded", None) is not None else ops.D_3d_tet
-    _oi = _turb_overint_ops(mesh, ops) if resolve_turb_overintegration() == "on" else None
-    if _oi is not None:
-        div_F = _scalar_convection_volume_overintegrated(scalar_field, rho, velocity, _oi, n_sps)
-    else:
-        rho_u_tilde = conv_geom.rho_u_tilde
-        div_F = np.empty((n_cells, n_sps))
-        if n_prism > 0:
-            scalar_convection_volume_kernel(
-                np.ascontiguousarray(scalar_field[:n_prism]),
-                np.ascontiguousarray(rho_u_tilde[:n_prism]),
-                np.ascontiguousarray(ops.D_3d_prism), div_F[:n_prism],
-            )
-        if n_cells > n_prism:
-            scalar_convection_volume_kernel(
-                np.ascontiguousarray(scalar_field[n_prism:]),
-                np.ascontiguousarray(rho_u_tilde[n_prism:]),
-                np.ascontiguousarray(_tet_op_D), div_F[n_prism:],
-            )
+    # === 体积项（对流形式，见模块文档）===
+    div_F = scalar_convection_volume_divergence(scalar_field, rho, velocity, conv_geom.rho_u_tilde, mesh, ops)
+    div_F -= scalar_field * conv_geom.mass_divergence
     # 退化单元上 1/det(J) 可以溢出；非有限值由 `compute_turbulence_transport_residual`
     # 末尾统一清零，这里只抑制警告噪音。
     with np.errstate(over='ignore', invalid='ignore'):

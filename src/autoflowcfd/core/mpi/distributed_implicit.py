@@ -2,12 +2,12 @@
 
 隐式步的算法本身只有一份，这里只回答"分布式上用哪一套求值件"：
 
-* 平均流 Newton 步：`time_integration/implicit/mean_flow_step.py::
+* 平均流 Newton 步（层流）：`time_integration/implicit/mean_flow_step.py::
   step_mean_flow_newton`，归约对象换成 `core/mpi/reductions.py::
   MPIReductions`（GMRES 内积、残差 RMS、线搜索与物理性限幅都是全局量）；
-* 隐式 k-omega：`fr_solver/turbulence/implicit.py` 的 `TurbulenceResidual`
-  / `step_turbulence_newton`，本文件提供它要的适配器
-  `DistributedTurbulenceBackend`；
+* 平均流 + k-omega 紧耦合：`time_integration/implicit/coupled_step.py::step_coupled_newton`，
+  本文件提供湍流求值件适配器 `DistributedTurbulenceBackend` 与耦合适配器
+  `DistributedCoupledBackend`；
 * 块 Jacobi 着色：`global_cell_colors`；P0 差分装配耦合块用的距离 2 着色与本地
   模板单元对：`global_cell_colors_d2` / `distributed_coupling_graph`。
 
@@ -32,10 +32,10 @@ rank 的耦合块（rank 间按块 Jacobi 式分解，与解析装配 `select_ro
 
 单元着色只依赖拓扑，与阶数无关，换阶后沿用。
 
-## 隐式 k-omega 的未知量与求值
+## k-omega 的未知量与求值
 
-未知量是本 rank local 单元的 `(k, omega)`（原生排列，与 `turb_model` 一致）。
-每次残差求值：local 场经 2 变量 halo 交换写进 compact 视图
+湍流未知量是本 rank local 单元的 `(k, ln omega)`（原生排列，与 `turb_model` 一致）。
+每次残差求值：按当前 local 平均流重建 compact 视图，local 湍流场经 2 变量 halo 交换写进视图
 （`distributed_turbulence.py::set_view_k_omega`），在视图上调用单机的
 `evaluate_turbulence_rates`，结果按 `inv_perm` 换回原生排列、切 local 段。
 halo 交换是集体调用：Newton/GMRES/线搜索里一切决定"再求值一次"的判据都
@@ -44,7 +44,7 @@ halo 交换是集体调用：Newton/GMRES/线搜索里一切决定"再求值一�
 
 import numpy as np
 
-from autoflowcfd.core.fr_solver.turbulence.init import _update_production_ramp
+from autoflowcfd.core.fr_solver.turbulence.init import advance_production_ramp
 from autoflowcfd.core.fr_solver.turbulence.source import (
     evaluate_turbulence_rates,
     finalize_turbulence_update,
@@ -222,7 +222,13 @@ class DistributedTurbulenceBackend:
         set_view_k_omega(self._view, s.turb_halo_exchange, s.dist_flat_face,
                          self.model.k_field, self.model.omega_field)
 
-    def prepare(self) -> None:
+    def advance_ramp(self) -> None:
+        """产生项斜坡推进一步：计数器在求解器上、产生项因子写在真实模型上，之后每次
+        `prepare_inputs` 重建的视图都从真实模型复制它（视图上推进会在下一次重建时丢失）。"""
+        advance_production_ramp(self.solver, self.model)
+
+    def prepare_inputs(self) -> None:
+        """按**当前** local 平均流重建紧凑视图（halo 交换）、冻结输入与标量对流几何。"""
         s = self.solver
         self._adapter, self._view = build_distributed_turbulence_view(
             s.state.get_local_U()[..., :5], s.partition, s.halo_exchange, s.turb_halo_exchange,
@@ -233,10 +239,7 @@ class DistributedTurbulenceBackend:
             iddes_h_wn_compact=s.iddes_h_wn_compact,
             des_length_scale_halo_exchange=s.des_length_scale_halo_exchange,
             boundary_ghost_provider=s.local_solver.boundary_ghost_provider)
-        _update_production_ramp(self._adapter)
-        s._turb_ramp_step = self._adapter._turb_ramp_step
         self._inputs = prepare_turbulence_inputs(self._adapter)
-        # 平均流在整个 Newton 步内冻结：标量对流几何算一次，各次求值复用
         self._conv_geom = prepare_convection_geometry(
             self._adapter, self._adapter._turbulence_flat_face_override)
 
@@ -260,9 +263,9 @@ class DistributedTurbulenceBackend:
     def positivity(self) -> None:
         self.model.apply_positivity_limiter()
 
-    def norm_weights(self):
-        """残差范数的逐行守恒权重（与平均流 Newton 步同一份，见 `jfnk.ResidualNorm`）。"""
-        return self.solver._distributed_positivity_limiter().W
+    def trial_mu_t_compact(self):
+        """最近一次 `rates` 之后的紧凑空间涡粘（试探求值用，不写回模型）。"""
+        return self._adapter.state.Q[..., 0] * self._view.nu_t
 
     def finalize(self, dtau) -> None:
         # 模态滤波在 compact 视图上做（它按"棱柱在前"分块），再写回 local
@@ -292,3 +295,105 @@ class DistributedTurbulenceBackend:
         return TurbulenceBlockAssembler(
             ctx, self.shape[1], compact_state=_TurbulenceCompactState(self),
             row_compact=np.asarray(dist_fc.inv_perm)[:self.shape[0]])
+
+
+class DistributedCoupledBackend:
+    """`DistributedFRSolver`（CPU-MPI）的耦合 Newton 适配器（`time_integration/implicit/
+    coupled_step.py` 模块文档"后端适配器"）。未知量是本 rank local 单元（原生排列）的
+    `(U[:5], k, ln omega)`；平均流残差与湍流求值各自做 halo 交换（集体调用：Newton/GMRES/
+    线搜索里一切决定"再求值一次"的判据都经过全局归约，各 rank 求值次数一致）。
+    `nu_av_compact`：本步冻结的人工扩散系数（compact 排列，未启用时 None）；`coarse_ctx`：
+    块 ILU 档的全局粗校正通信上下文（平均流与湍流两套块共用）。"""
+
+    __slots__ = ("solver", "turb", "red", "cell_is_prism", "order", "n_sps", "scales_mean", "positivity",
+                 "coupling_graph", "_nu_av", "_coarse", "_n_local")
+
+    def __init__(self, solver, cell_is_prism: np.ndarray, order: int, nu_av_compact, coarse_ctx):
+        from functools import partial
+
+        from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
+
+        self.solver = solver
+        self.turb = DistributedTurbulenceBackend(solver, cell_is_prism, order)
+        self.red = self.turb.red
+        self.cell_is_prism = cell_is_prism
+        self.order = int(order)
+        self._n_local, self.n_sps = self.turb.shape
+        self.scales_mean = _reference_scales(solver.local_solver.freestream, 5)
+        self.positivity = solver._distributed_positivity_limiter()
+        self.coupling_graph = partial(distributed_coupling_graph, solver, coarse_ctx)
+        self._nu_av = nu_av_compact
+        self._coarse = coarse_ctx
+
+    def state(self):
+        from autoflowcfd.core.turbulence.sst.log_omega import log_omega
+
+        n, m = self._n_local, self.turb.model
+        x = np.empty((n * self.n_sps, 7))
+        x[:, :5] = self.solver.state.U[:n, :, :5].reshape(-1, 5)
+        x[:, 5] = m.k_field.ravel()
+        x[:, 6] = log_omega(m.omega_field, np).ravel()
+        return x
+
+    def snapshot(self):
+        from autoflowcfd.core.turbulence.jacobian.pointwise import CACHED_MODEL_ATTRS
+
+        n, st, m = self._n_local, self.solver.state, self.turb.model
+        return (st.U[:n].copy(), st.Q[:n].copy(), m.k_field, m.omega_field,
+                {a: getattr(m, a) for a in CACHED_MODEL_ATTRS if hasattr(m, a)})
+
+    def restore(self, snap) -> None:
+        n, st, m = self._n_local, self.solver.state, self.turb.model
+        st.U[:n], st.Q[:n] = snap[0], snap[1]
+        m.k_field, m.omega_field = snap[2], snap[3]
+        for a, v in snap[4].items():
+            setattr(m, a, v)
+
+    def set_trial(self, x) -> None:
+        from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
+        from autoflowcfd.core.turbulence.sst.log_omega import omega_from_log
+
+        n, st, m = self._n_local, self.solver.state, self.turb.model
+        st.U[:n, :, :5] = x[:, :5].reshape(n, self.n_sps, 5)
+        st.Q[:n] = conserved_to_primitive(st.U[:n, :, :5])
+        m.k_field = np.ascontiguousarray(x[:, 5]).reshape(self.turb.shape)
+        m.omega_field = omega_from_log(np.ascontiguousarray(x[:, 6]), m.omega_max, np).reshape(self.turb.shape)
+
+    def trial_mu_t(self):
+        return self.turb.trial_mu_t_compact()
+
+    def mean_residual(self, mu_t):
+        """平均流 `Gamma R`（`distributed_solver/step.py::residual_func` 同一约定，`dU/dt = -R`）。"""
+        from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
+
+        s = self.solver
+        U_local = s.state.get_local_U()
+        res = -s._mean_flow_dudt_local(U_local, mu_t, self._nu_av)
+        if s.low_mach_precond_enabled:
+            from autoflowcfd.core.utils.preconditioning import apply_low_mach_preconditioner
+
+            res = apply_low_mach_preconditioner(res, conserved_to_primitive(U_local[..., :5]),
+                                                s.local_solver.freestream["mach_ref"], out=res)
+        return res.reshape(self._n_local * self.n_sps, -1)[:, :5]
+
+    def mean_assembler(self, mu_t):
+        s = self.solver
+        return distributed_mean_flow_assembler(
+            s, s.local_solver, order=self.order, mu_t_compact=mu_t, exchange=s.halo_exchange.exchange,
+            perm=s.dist_flat_face.perm, n_sps=self.n_sps, nu_av_compact=self._nu_av)
+
+    def cell_colors(self):
+        return distributed_block_jacobi_colors(self.solver)
+
+    def coarse_context(self):
+        return self._coarse
+
+    def install(self, x, dtau) -> None:
+        """写入新状态，做湍流步后收尾，并在新状态上刷新涡粘（写回模型并留下 compact 一份
+        `turb.mu_t_compact` 供下一步粘性步长）与 DES 长度尺度。"""
+        self.set_trial(x)
+        turb = self.turb
+        turb.positivity()
+        turb.finalize(dtau.reshape(turb.shape))
+        turb.prepare_inputs()
+        turb.rates(apply_des=True)

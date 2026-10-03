@@ -103,6 +103,17 @@ def turbulence_cell_blocks(acc, src, slot0, phi, gam, dS, dG, inv_sp, D, c2f, W,
                         acc_g += GF[r, b, t] * phi[c, t, v]
                     grad_f[r, v, b] = acc_g
         DGc = _pointwise_chain(dG[c], Gop, n)       # dGamma_v(s')/dphi_u(t)
+        # 对流体积项取对流形式 div(rho u phi) - phi div(rho u)（transport/convection.py 模块
+        # 文档）：后一项对 phi_s 的导数是对角的 div_vol(rho u)_s = sum_r conv[s,r] (c2f 1)_r
+        for s in range(n):
+            d1 = 0.0
+            for r in range(nf):
+                csum = 0.0
+                for t in range(n):
+                    csum += c2f[r, t]
+                d1 += conv[s, r] * csum
+            for v in range(2):
+                out[s, v, s, v] += d1
         for s in range(n):
             for r in range(nf):
                 cv = conv[s, r]

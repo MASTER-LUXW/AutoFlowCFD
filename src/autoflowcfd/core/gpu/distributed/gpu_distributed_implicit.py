@@ -1,19 +1,25 @@
-"""AutoFlowCFD V2.0 - 多 GPU 分布式的隐式 k-omega 适配器。
+"""AutoFlowCFD V2.0 - 多 GPU 分布式的隐式稳态（NK）湍流适配器与紧耦合 Newton 适配器。
 
-隐式 k-omega 的算法只有一份（`fr_solver/turbulence/implicit.py`）；本文件只回答
+紧耦合 Newton 的算法只有一份（`time_integration/implicit/coupled_step.py`）；本文件只回答
 "多 GPU 上用哪一套求值件"——`gpu_distributed_init/turb_source.py` 的
-prepare / evaluate / finalize / write-back，归约用跨 rank 的
-`MPIReductions(cupy)`，块 Jacobi 着色与 CPU 分布式同一个全局一致着色
+prepare / evaluate / finalize / write-back 与平均流的 `_compute_total_residual_gpu`，归约用跨
+rank 的 `MPIReductions(cupy)`，块 Jacobi 着色与 CPU 分布式同一个全局一致着色
 （`core/mpi/distributed_implicit.py`，那里的模块文档说明了为什么必须全局一致）。
 
-未知量是本 rank local 单元的 `(k, w = ln omega)`（原生排列，模型上存物理 omega）；
-每次求值经 2 变量 halo 交换写进 compact 视图，结果按 `inv_perm` 换回原生
-排列、切 local 段。
+湍流未知量是本 rank local 单元的 `(k, w = ln omega)`（原生排列，模型上存物理 omega）；
+每次求值按当前 local 平均流重建 compact 视图，湍流场经 2 变量 halo 交换写进视图，结果按
+`inv_perm` 换回原生排列、切 local 段。
 """
+
+from functools import partial
+
+import numpy as np
 
 from autoflowcfd.core.fr_solver.turbulence.init import advance_production_ramp
 from autoflowcfd.core.gpu import get_cupy
-from autoflowcfd.core.mpi.distributed_implicit import distributed_block_jacobi_colors
+from autoflowcfd.core.mpi.distributed_implicit import (
+    distributed_block_jacobi_colors, distributed_coupling_graph, distributed_mean_flow_assembler,
+)
 from autoflowcfd.core.mpi.reductions import MPIReductions
 
 
@@ -43,12 +49,19 @@ class MultiGpuTurbulenceBackend:
     def _to_local(self, a_compact):
         return self.solver._unpermute_from_compact(a_compact)[:self.shape[0]]
 
-    def prepare(self) -> None:
+    def advance_ramp(self) -> None:
+        advance_production_ramp(self.solver, self.model)
+
+    def prepare_inputs(self) -> None:
+        """按**当前** local 平均流重建 compact 视图上下文。"""
         s = self.solver
-        advance_production_ramp(s, self.model)
         self._ctx = s._prepare_turbulence_view_distributed()
         # 视图先与当前场同步：壁面目标值（blended 档读 k）在构造残差时就要用
         s._sync_turbulence_view(self._ctx)
+
+    def trial_mu_t_compact(self):
+        """最近一次 `rates` 之后的紧凑空间动力涡粘（试探求值用，不写回模型）。"""
+        return self._ctx.rho * self._ctx.view.nu_t
 
     def rates(self, apply_des: bool):
         s, ctx = self.solver, self._ctx
@@ -65,10 +78,6 @@ class MultiGpuTurbulenceBackend:
 
     def positivity(self) -> None:
         self.model.apply_positivity_limiter_gpu()
-
-    def norm_weights(self):
-        """残差范数的逐行守恒权重（与平均流 Newton 步同一份，见 `jfnk.ResidualNorm`）。"""
-        return self.solver._get_positivity_limiter_gpu().W
 
     def finalize(self, dtau) -> None:
         # 模态滤波在 compact 视图上做（按"棱柱在前"分块），再写回 local
@@ -88,7 +97,7 @@ class MultiGpuTurbulenceBackend:
         return coarse_comm_context(s.partition, GpuCompactCellValues(s.gpu_halo, s._perm_gpu, self.shape[1], self.xp))
 
     def block_assembler(self):
-        """本步的解析单元块装配器：在与残差同一个紧凑视图上装配（线性算子部分在主机，
+        """解析单元块装配器（最近一次 `prepare_inputs` 的视图）：在与残差同一个紧凑视图上装配（线性算子部分在主机，
         逐点量用 GPU 模型的求值件），按 `inv_perm` 取回本 rank 的行。"""
         from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import _host, gpu_turbulence_pointwise
         from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_omega_wall_target_gpu
@@ -129,3 +138,95 @@ class _MultiGpuTurbulenceCompactState:
     def __call__(self, kw_local):
         s = self.solver
         return s._permute_to_compact(s.turb_halo_gpu.exchange(kw_local))
+
+
+class MultiGpuCoupledBackend:
+    """`MultiGPUDistributedSolver` 的耦合 Newton 适配器（`time_integration/implicit/coupled_step.py`
+    模块文档"后端适配器"）。平均流残差与湍流视图都读 `U_gpu`（local、5 个变量），试探状态写进去；
+    halo 交换是集体调用，各 rank 求值次数一致（全局归约决定）。`nu_av_compact`：本步冻结的人工
+    扩散系数（compact 排列，未启用时 None）；`coarse_ctx`：两套块共用的全局粗校正通信上下文。"""
+
+    __slots__ = ("solver", "turb", "red", "cell_is_prism", "order", "n_sps", "scales_mean", "positivity",
+                 "coupling_graph", "_nu_av", "_coarse", "_n_local")
+
+    def __init__(self, solver, cell_is_prism, order: int, nu_av_compact, coarse_ctx):
+        from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
+
+        self.solver = solver
+        self.turb = MultiGpuTurbulenceBackend(solver, cell_is_prism, order)
+        self.red = self.turb.red
+        self.cell_is_prism = cell_is_prism
+        self.order = int(order)
+        self._n_local, self.n_sps = self.turb.shape
+        self.scales_mean = _reference_scales(solver.freestream, 5)
+        self.positivity = solver._get_positivity_limiter_gpu()
+        self.coupling_graph = partial(distributed_coupling_graph, solver, coarse_ctx)
+        self._nu_av = nu_av_compact
+        self._coarse = coarse_ctx
+
+    def state(self):
+        from autoflowcfd.core.turbulence.sst.log_omega import log_omega
+
+        cp, m = self.turb.xp, self.turb.model
+        x = cp.empty((self._n_local * self.n_sps, 7), dtype=cp.float64)
+        x[:, :5] = self.solver.U_gpu.reshape(-1, 5)
+        x[:, 5] = m.k_field.ravel()
+        x[:, 6] = log_omega(m.omega_field, cp).ravel()
+        return x
+
+    def snapshot(self):
+        from autoflowcfd.core.turbulence.jacobian.pointwise import CACHED_MODEL_ATTRS
+
+        m = self.turb.model
+        return (self.solver.U_gpu, m.k_field, m.omega_field,
+                {a: getattr(m, a) for a in CACHED_MODEL_ATTRS if hasattr(m, a)})
+
+    def restore(self, snap) -> None:
+        m = self.turb.model
+        self.solver.U_gpu, m.k_field, m.omega_field = snap[0], snap[1], snap[2]
+        for a, v in snap[3].items():
+            setattr(m, a, v)
+
+    def set_trial(self, x) -> None:
+        from autoflowcfd.core.turbulence.sst.log_omega import omega_from_log
+
+        cp, m = self.turb.xp, self.turb.model
+        self.solver.U_gpu = cp.ascontiguousarray(x[:, :5]).reshape(self._n_local, self.n_sps, 5)
+        m.k_field = cp.ascontiguousarray(x[:, 5]).reshape(self.turb.shape)
+        m.omega_field = omega_from_log(cp.ascontiguousarray(x[:, 6]), m.omega_max, cp).reshape(self.turb.shape)
+
+    def trial_mu_t(self):
+        return self.turb.trial_mu_t_compact()
+
+    def mean_residual(self, mu_t):
+        """平均流 `Gamma R`（`gpu_distributed/stepping.py::_residual` 同一约定，`dU/dt = -R`）。"""
+        s = self.solver
+        res = -s._compute_total_residual_gpu(mu_t_field=mu_t, inviscid=True, viscous=True,
+                                             nu_av_compact=self._nu_av)
+        if s.low_mach_precond_enabled:
+            from autoflowcfd.core.gpu.gpu_preconditioning import apply_low_mach_preconditioner_gpu
+
+            res = apply_low_mach_preconditioner_gpu(res, s.U_gpu, s.freestream["mach_ref"], out=res)
+        return res.reshape(self._n_local * self.n_sps, 5)
+
+    def mean_assembler(self, mu_t):
+        s = self.solver
+        return distributed_mean_flow_assembler(
+            s, s, order=self.order, mu_t_compact=mu_t, exchange=s.gpu_halo.exchange, perm=s._perm_gpu,
+            n_sps=self.n_sps, nu_av_compact=self._nu_av)
+
+    def cell_colors(self):
+        return distributed_block_jacobi_colors(self.solver)
+
+    def coarse_context(self):
+        return self._coarse
+
+    def install(self, x, dtau) -> None:
+        """写入新状态，做湍流步后收尾，并在新状态上刷新涡粘（写回模型并留下 compact 一份
+        `turb.mu_t_compact`）与 DES 长度尺度。"""
+        self.set_trial(x)
+        turb = self.turb
+        turb.positivity()
+        turb.finalize(dtau.reshape(turb.shape))
+        turb.prepare_inputs()
+        turb.rates(apply_des=True)

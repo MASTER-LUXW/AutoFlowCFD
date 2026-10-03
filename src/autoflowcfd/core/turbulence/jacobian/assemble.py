@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - k-omega 隐式步的解析单元块 Jacobian。
 
-冻结平均流下的湍流残差（`fr_solver/turbulence/implicit.py::TurbulenceResidual`）
+冻结平均流下的湍流残差（紧耦合 Newton 残差的湍流子系统，`time_integration/implicit/coupled_step.py`）
 
     R_t,v = -[S_v + conv_v + diff_v] / rho          v = k, w = ln omega
 

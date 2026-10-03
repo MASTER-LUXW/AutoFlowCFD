@@ -30,8 +30,9 @@ N_TURB_INPUTS = 8
 
 _SQRT_EPS = float(np.sqrt(np.finfo(np.float64).eps))
 
-#: 模型上被源项求值刷新的缓存属性（与 `fr_solver/turbulence/implicit.py` 同一组）。
-_CACHED_ATTRS = ("nu_t", "_last_beta_blend", "_omega_realizability_min")
+#: 模型上被源项求值刷新的缓存属性：试探求值之后必须恢复，否则试探场会泄漏进平均流用的
+#: `nu_t`（CPU 与 GPU 的 SST 模型同名；耦合 Newton 的快照还原与这里共用这一份）。
+CACHED_MODEL_ATTRS = ("nu_t", "_last_beta_blend", "_omega_realizability_min")
 
 
 class TurbulencePointwise:
@@ -55,7 +56,7 @@ class TurbulencePointwise:
     def __call__(self, k, w, grad_k, grad_w):
         xp, turb = self.xp, self.turb
         saved = (turb.k_field, turb.omega_field)
-        saved_cache = {a: getattr(turb, a) for a in _CACHED_ATTRS if hasattr(turb, a)}
+        saved_cache = {a: getattr(turb, a) for a in CACHED_MODEL_ATTRS if hasattr(turb, a)}
         omega = omega_from_log(xp.asarray(w), turb.omega_max, xp)
         turb.k_field, turb.omega_field = xp.asarray(k), omega
         try:

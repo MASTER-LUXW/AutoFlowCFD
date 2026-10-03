@@ -90,9 +90,20 @@ def newton_step_ok(info: dict) -> bool:
             and info["linear_rel_residual"] <= LINEAR_SOLVE_MAX_REL_RESIDUAL)
 
 
+def require_no_modal_filter(filter_active: bool) -> None:
+    """隐式步（平均流 / 紧耦合）不能与模态滤波同时启用（模块文档同名一节）。"""
+    if filter_active:
+        raise ValueError(
+            "NEWTON_KRYLOV（隐式稳态）与模态滤波不能同时启用："
+            "滤波会改变被求解的不动点方程本身（R(U)=0 变成另一个"
+            "问题），使残差与收敛判据失去意义。请用 "
+            "AFCFD_FILTER_MODE=off（默认值），或改用显式格式。"
+        )
+
+
 def reset_newton_state(solver) -> None:
-    """把隐式步的全部跨步状态置初值（模块文档"跨步状态"那几项 + 隐式 k-omega
-    的 `_newton_turb_state`）。全部后端在构造时与换阶后调用这一个函数。
+    """把隐式步的全部跨步状态置初值（模块文档"跨步状态"那几项 + 紧耦合步的湍流块缓存
+    `_newton_turb_state`，见 `coupled_step.py`）。全部后端在构造时与换阶后调用这一个函数。
 
     换阶必须失效：forcing term 记的是上一步的残差量级（升阶后残差通常抬升
     一个量级以上，沿用会让第一步的线性容差要么过严要么过松）；dtau 缩放是
@@ -129,12 +140,13 @@ def _format_newton_info(tag: str, info) -> str:
 
 
 def newton_monitor_suffix(solver) -> str:
-    """迭代监控行的 Newton 诊断后缀（平均流 + 隐式湍流），显式格式返回空串。
+    """迭代监控行的 Newton 诊断后缀（紧耦合步另附两个子系统的残差范数），显式格式返回空串。
     常规求解循环与 Order Continuation 的监控行共用这一份格式。"""
-    parts = [_format_newton_info("NK", getattr(solver, "_newton_last_info", None))]
-    turb_state = getattr(solver, "_newton_turb_state", None)
-    if turb_state:
-        parts.append(_format_newton_info("k-omega", turb_state.get("last_info")))
+    info = getattr(solver, "_newton_last_info", None)
+    parts = [_format_newton_info("NK", info)]
+    if info and "res_norm_turbulence" in info:
+        # 紧耦合步（coupled_step.py）：两个子系统各自的步前残差范数
+        parts.append(f"|R_mean|={info['res_norm_mean']:.3e} |R_turb|={info['res_norm_turbulence']:.3e}")
     parts = [x for x in parts if x]
     return (" | " + " | ".join(parts)) if parts else ""
 
@@ -178,13 +190,7 @@ def step_mean_flow_newton(
     """
     from autoflowcfd.fr.native_padding import real_row_mask, real_sps_per_cell
 
-    if filter_active:
-        raise ValueError(
-            "NEWTON_KRYLOV（隐式稳态）与模态滤波不能同时启用："
-            "滤波会改变被求解的不动点方程本身（R(U)=0 变成另一个"
-            "问题），使残差与收敛判据失去意义。请用 "
-            "AFCFD_FILTER_MODE=off（默认值），或改用显式格式。"
-        )
+    require_no_modal_filter(filter_active)
     n_vars = u_flat.shape[1]
     n_mf = min(n_vars, N_MEAN_FLOW_VARS)
     if solver._newton_forcing is None:

@@ -14,26 +14,20 @@
 10 步内板边单元 `k_max` 7.9 -> 15、坏单元 45 -> 129，而同一网格同一 CFL
 的层流 NK 干净——这是分离求解里"一个方程隐式、另一个显式"的典型症状。
 
-## 做法：分离式 PTC-Newton（工业 RANS 求解器的标准做法）
+## 做法：与平均流紧耦合的 PTC-Newton
 
-每个隐式步先在**冻结的平均流**上对 `(k, w)`（`w = ln omega`，见
-`core/turbulence/sst/log_omega.py`）做一个 PTC-Newton 步，再对平均流做一个
-（用更新后的涡粘）：
+`(k, w)`（`w = ln omega`，见 `core/turbulence/sst/log_omega.py`）与平均流 5 个守恒变量
+进同一个 Newton 系统（`time_integration/implicit/coupled_step.py` 模块文档：为什么分离式
+不行、残差与预处理如何组合）。湍流这一半：
 
-    ( I/dtau + dR_t/d(k,w) ) d(k,w) = -R_t(k,w),   R_t = -(dk/dt, dw/dt)
-
-* `R_t` 与显式路径**同一套**源项与输运求值（`source.py::
+* `R_t = -(dk/dt, dw/dt)` 与显式路径**同一套**源项与输运求值（`source.py::
   evaluate_turbulence_rates`），不另写一份物理；
-* 线性求解、SER、dtau 缩档、块 Jacobi 全部复用平均流那一套
-  （`time_integration/implicit/`），物理性限幅换成"k 单步变化不超过
-  `max(|k|, 尺度下限)` 的 50%、`|dw| <= ln 2`（omega 单步最多减半/加倍）"，逐**解点**
-  松弛（`physicality.ScaledFieldRowLimits` 的 `log_columns`；被输运的 k 不裁剪、可越过
-  下限，见 `turbulence/sst/bounds.py`；omega = exp(w) 恒为正）；
-* 零填充槽位（原生基）不参与：它们的 `R_t` 置零（平均流残差在那里本来
-  就恒为零），于是 Newton 不动它们；
-* 更新之后的正性/上界限幅、模态滤波、omega 壁面松弛与显式路径**同一套**
-  后处理（`finalize_turbulence_update`），最后在新场上求一次源项，让
-  平均流这一步用到的 `nu_t` 是更新后的而不是滞后一步的。
+* 物理性限幅"k 单步变化不超过 `max(|k|, 尺度下限)` 的 50%、`|dw| <= ln 2`（omega 单步
+  最多减半/加倍）"，逐**解点**（`physicality.ScaledFieldRowLimits` 的 `log_columns`；被输运的
+  k 不裁剪、可越过下限，见 `turbulence/sst/bounds.py`；omega = exp(w) 恒为正）；
+* 零填充槽位（原生基）的 `R_t` 置零，Newton 不动它们；
+* 更新之后的上界限幅与显式路径同一套后处理（`finalize_turbulence_update`），最后在新场
+  上刷新一次涡粘与 DES 长度尺度。
 
 ## omega 壁面条件：只在残差里弱施加
 
@@ -51,36 +45,27 @@
 
 ## 后端
 
-算法（本文件的 `TurbulenceResidual` / `step_turbulence_newton`）只有一份；
-单机 CPU 与单机 GPU 各提供一个**适配器**，只回答"用哪一套求值件、在哪个
-数组模块上"：
+湍流求值件的适配器（每个后端一个，只回答"用哪一套求值件、在哪个数组模块上"）：
 
     CpuTurbulenceBackend   本文件，调 `source.py` 的 prepare/evaluate/finalize
-    GpuTurbulenceBackend   `core/gpu/turbulence/gpu_implicit_turbulence.py`，
-                           调 `GPUFRSolver` 上同名的三个 `_..._gpu` 方法
+    GpuTurbulenceBackend   `core/gpu/turbulence/gpu_implicit_turbulence.py`
+    分布式 / 多 GPU        `core/mpi/distributed_implicit.py`、`core/gpu/distributed/gpu_distributed_implicit.py`
 
-适配器接口：`model / xp / red / shape / cell_is_prism / order / solver`（跨步
-状态挂在 `solver._newton_turb_state` 上）、`prepare()`、`rates(apply_des)`、
-`positivity()`、
-`finalize(dtau)`、`cell_colors()`（块 Jacobi 着色，见
-`implicit/mean_flow_step.py` 的同名参数）、`block_assembler()`、`coarse_context()`
-（分布式块 ILU 档的全局粗校正通信上下文，见 `mean_flow_step.py` 的 `global_coarse`；
-单机返回 None）。
+适配器接口：`model / xp / red / shape / cell_is_prism / order / solver`、`advance_ramp()`
+（产生项斜坡，每个 Newton 步一次）、`prepare_inputs()`（按**当前**平均流准备冻结输入与标量
+对流几何，耦合残差每次求值都调）、`rates(apply_des)`、`positivity()`、`finalize(dtau)`、
+`cell_colors()`、`block_assembler()`、`coarse_context()`。耦合 Newton 步再要一个包住它的
+耦合适配器（`coupled_step.py` 模块文档"后端适配器"；单机 CPU 是本文件的 `CpuCoupledBackend`）。
 """
+
+from functools import partial
 
 import numpy as np
 
-from autoflowcfd.core.time_integration.implicit import (
-    BlockJacobiCache,
-    EisenstatWalkerForcing,
-    step_newton_krylov,
-)
-from autoflowcfd.core.time_integration.implicit.physicality import ScaledFieldRowLimits
-from autoflowcfd.core.turbulence.sst.bounds import turbulence_scales
-from autoflowcfd.core.turbulence.sst.log_omega import log_omega, omega_from_log
 from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
+from autoflowcfd.core.turbulence.jacobian.pointwise import CACHED_MODEL_ATTRS
+from autoflowcfd.core.turbulence.sst.log_omega import log_omega, omega_from_log
 from autoflowcfd.core.turbulence.transport import prepare_convection_geometry
-from autoflowcfd.fr.native_padding import real_row_mask, real_sps_per_cell
 
 from .init import _update_production_ramp
 from .source import (
@@ -93,9 +78,6 @@ from .source import (
 #: 的亚格子粘性是代数的，没有输运方程，继续走原有更新。
 IMPLICIT_TURBULENCE_MODELS = ("SST", "DDES", "IDDES")
 
-#: 模型上被源项求值刷新的缓存属性：Newton 内部每次试探求值之后都要恢复，
-#: 否则试探场会泄漏进平均流用的 `nu_t`（CPU 与 GPU 的 SST 模型同名）。
-_CACHED_ATTRS = ("nu_t", "_last_beta_blend", "_omega_realizability_min")
 
 
 def _current_order(solver) -> int:
@@ -138,10 +120,11 @@ class CpuTurbulenceBackend:
         self._inputs = None
         self._conv_geom = None
 
-    def prepare(self) -> None:
+    def advance_ramp(self) -> None:
         _update_production_ramp(self.solver)
+
+    def prepare_inputs(self) -> None:
         self._inputs = prepare_turbulence_inputs(self.solver)
-        # 平均流在整个 Newton 步内冻结：标量对流几何算一次，各次求值复用
         self._conv_geom = prepare_convection_geometry(
             self.solver, getattr(self.solver, "_turbulence_flat_face_override", None))
 
@@ -153,12 +136,6 @@ class CpuTurbulenceBackend:
     def positivity(self) -> None:
         self.model.apply_positivity_limiter()
 
-    def norm_weights(self):
-        """残差范数的逐行守恒权重（与平均流 Newton 步同一份，见 `jfnk.ResidualNorm`）。"""
-        from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
-
-        return get_positivity_limiter(self.solver).W
-
     def finalize(self, dtau) -> None:
         finalize_turbulence_update(self.solver)
 
@@ -169,7 +146,8 @@ class CpuTurbulenceBackend:
         return None             # 单机：本地多层预处理的最粗层就是全局的
 
     def block_assembler(self):
-        """本步的解析单元块装配器（`core/turbulence/jacobian`）；输入与残差同一份冻结量。"""
+        """解析单元块装配器（`core/turbulence/jacobian`）；输入与残差同一份冻结量（最近一次
+        `prepare_inputs`）。"""
         from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
         from autoflowcfd.core.turbulence.jacobian import TurbulenceBlockAssembler, turbulence_linearization
 
@@ -179,111 +157,99 @@ class CpuTurbulenceBackend:
         return TurbulenceBlockAssembler(ctx, self.shape[1])
 
 
-class TurbulenceResidual:
-    """冻结平均流下的 `R_t(k, w) = -(dk/dt, dw/dt)`（`w = ln omega`），形状 `(N, 2)`。
+class CpuCoupledBackend:
+    """单机 CPU 的耦合 Newton 适配器（`time_integration/implicit/coupled_step.py` 模块文档
+    "后端适配器"）。`nu_av`：本步冻结的人工扩散系数（未启用时 None）。"""
 
-    做成类而不是闭包：它在整个 Krylov 求解期间存活（项目规范）。调用前
-    适配器必须已经 `prepare()`（平均流输入在整个 Newton 步内冻结）。
-    """
+    __slots__ = ("solver", "turb", "red", "cell_is_prism", "order", "n_sps", "scales_mean", "positivity",
+                 "coupling_graph", "_nu_av", "_n_rows")
 
-    __slots__ = ("_be", "_real_rows")
+    def __init__(self, solver, nu_av=None):
+        from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
+        from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
 
-    def __init__(self, backend):
-        self._be = backend
-        xp = backend.xp
-        n_cells, n_sps = backend.shape
-        self._real_rows = xp.asarray(real_row_mask(backend.cell_is_prism, n_sps, backend.order))
+        self.solver = solver
+        self.turb = CpuTurbulenceBackend(solver)
+        self.red = self.turb.red
+        self.cell_is_prism = self.turb.cell_is_prism
+        self.order = self.turb.order
+        n_cells, self.n_sps = self.turb.shape
+        self._n_rows = n_cells * self.n_sps
+        self.scales_mean = _reference_scales(solver.freestream, 5)
+        self.positivity = get_positivity_limiter(solver)
+        self.coupling_graph = partial(single_machine_coupling_graph, solver)
+        self._nu_av = nu_av
 
-    def __call__(self, kw_flat):
-        be = self._be
-        xp, m = be.xp, be.model
-        saved_fields = (m.k_field, m.omega_field)
-        saved_cache = {a: getattr(m, a) for a in _CACHED_ATTRS if hasattr(m, a)}
-        m.k_field = xp.ascontiguousarray(kw_flat[:, 0]).reshape(be.shape)
-        m.omega_field = omega_from_log(xp.ascontiguousarray(kw_flat[:, 1]), m.omega_max, xp).reshape(be.shape)
-        try:
-            rate_k, rate_w = be.rates(apply_des=False)
-        finally:
-            m.k_field, m.omega_field = saved_fields
-            for a, v in saved_cache.items():
-                setattr(m, a, v)
-        r = -xp.stack([rate_k.ravel(), rate_w.ravel()], axis=1)
-        r[~self._real_rows] = 0.0
-        return r
+    def state(self):
+        s, m = self.solver, self.turb.model
+        x = np.empty((self._n_rows, 7))
+        x[:, :5] = np.asarray(s.state.U).reshape(self._n_rows, -1)[:, :5]
+        x[:, 5] = m.k_field.ravel()
+        x[:, 6] = log_omega(m.omega_field, np).ravel()
+        return x
 
+    def snapshot(self):
+        m = self.turb.model
+        return (self.solver.state.U, m.k_field, m.omega_field,
+                {a: getattr(m, a) for a in CACHED_MODEL_ATTRS if hasattr(m, a)})
 
-def _newton_state(backend):
-    """隐式湍流步跨 Newton 步保持的状态，挂在 `solver._newton_turb_state`
-    （阶数变化时由 Order Continuation 清空）。"""
-    solver = backend.solver
-    st = getattr(solver, "_newton_turb_state", None)
-    if st is None:
-        n_real_prism, n_real_tet = real_sps_per_cell(backend.order)
-        st = {
-            "forcing": EisenstatWalkerForcing(),
-            "dtau_scale": 1.0,
-            "block": BlockJacobiCache(
-                cell_is_prism=backend.cell_is_prism, colors=backend.cell_colors(),
-                n_sps=backend.shape[1], n_real_prism=n_real_prism, n_real_tet=n_real_tet,
-                n_var=2, red=backend.red, global_coarse=backend.coarse_context()),
-            "last_info": None,
-            "local_dtau": None,
-        }
-        solver._newton_turb_state = st
-    return st
+    def restore(self, snap) -> None:
+        m = self.turb.model
+        self.solver.state.U, m.k_field, m.omega_field = snap[0], snap[1], snap[2]
+        for a, v in snap[3].items():
+            setattr(m, a, v)
+        self.solver.state._update_primitives()
 
+    def set_trial(self, x) -> None:
+        s, m = self.solver, self.turb.model
+        U = np.array(s.state.U, copy=True)
+        U.reshape(self._n_rows, -1)[:, :5] = x[:, :5]
+        s.state.U = U
+        s.state._update_primitives()
+        m.k_field = np.ascontiguousarray(x[:, 5]).reshape(self.turb.shape)
+        m.omega_field = omega_from_log(np.ascontiguousarray(x[:, 6]), m.omega_max, np).reshape(self.turb.shape)
 
-def step_turbulence_newton(backend, dtau) -> None:
-    """对 `(k, omega)` 做一个分离式 PTC-Newton 步（平均流冻结）。
+    def trial_mu_t(self):
+        from .corrections import get_turbulent_viscosity_field
 
-    Args:
-        backend: `CpuTurbulenceBackend` / `GpuTurbulenceBackend`（湍流模型
-            在 `IMPLICIT_TURBULENCE_MODELS` 内）。
-        dtau: 逐 SP 伪时间步长 `(n_cells, n_sps)`（在 `backend.xp` 上）：**平均流的**
-            局部伪时间步长（启用低马赫预处理时按预处理波速取的 `dt_local`）。
+        return get_turbulent_viscosity_field(self.solver)
 
-            **为什么不是物理波速那一份**（2026-09-26）：显式路径给湍流用 `dt_physical`
-            （按 |u|+a 取），理由是 k/omega 的显式更新没有点隐式阻尼、不能跟着放大步长。
-            这条理由对隐式 Newton 不成立，而沿用它的代价是湍流每步只走平均流约 1/5 的
-            伪时间（M~0.1 下 |u|+a 约为 |u|+c_precond 的 5 倍）、对它自己的输运尺度 |u|
-            更是小十几倍：线性系统被 I/dtau 主导（GMRES 1~2 次），湍流残差每步只降
-            1~5%，平均流每步内部降到 10%、下一步开头又被湍流更新拉回（plate_demo P0，
-            块 ILU，CFL 1000~1500 实测：平均流步间只降约 2%）。改用平均流的步长后同一
-            算例湍流每步降到 0.21~0.34，45 步后湍流残差低 5 倍——两个子系统在同一条
-            伪时间线上推进，才是分离式 PTC 对耦合系统的一致近似。
-    """
-    xp, m = backend.xp, backend.model
-    backend.prepare()
-    residual = TurbulenceResidual(backend)
-    st = _newton_state(backend)
+    def mean_residual(self, mu_t):
+        """平均流 `Gamma R`（`fr_solver/step.py::mean_flow_residual` 同一约定，`dU/dt = -R`）。"""
+        s = self.solver
+        res = s.compute_viscous_residual(mu_t_turb=mu_t, nu_av=self._nu_av)
+        res += s.compute_inviscid_residual()
+        res *= -1
+        if s.low_mach_precond_enabled:
+            from autoflowcfd.core.utils.preconditioning import apply_low_mach_preconditioner
 
-    # 解析单元块：后端提供装配器时用它（每步新建，持有本步冻结的平均流输入），
-    # 否则块 Jacobi 用着色差分装配
-    make_assembler = getattr(backend, "block_assembler", None)
-    st["block"].assembler = make_assembler() if make_assembler is not None else None
+            res = apply_low_mach_preconditioner(res, s.state.Q, s.freestream["mach_ref"], out=res)
+        return res.reshape(self._n_rows, -1)[:, :5]
 
-    # 未知量 (k, w = ln omega)，见 core/turbulence/sst/log_omega.py
-    kw0 = xp.stack([m.k_field.ravel(), log_omega(m.omega_field, xp).ravel()], axis=1)
-    scales = np.array([max(float(m.k_inf), 1e-30), 1.0])
-    kw_new, info = step_newton_krylov(
-        residual, kw0, xp.asarray(dtau, dtype=xp.float64).ravel(), scales,
-        forcing=st["forcing"], dtau_scale=st["dtau_scale"], block_precond=st["block"],
-        # 逐解点松弛（rows_per_cell=1），不是逐单元：realizability 只作用于模型项
-        # 求值之后，越过下限甚至为负的 k/omega 不再能让下一次残差求值失去意义，
-        # 松弛只剩"单步变化别太大"这一个作用。逐单元取最小会让一个需要大幅欠冲的
-        # 解点（锐边剪切层 P1 的 Gibbs 欠冲约为跳跃的 9%）把整个单元冻在 1e-4。
-        # 限幅基准取单元量级（解点值是同一个单元多项式的分量，见 ScaledFieldRowLimits）
-        physicality=ScaledFieldRowLimits(turbulence_scales(m), log_columns=(1,),
-                                         rows_per_cell=backend.shape[1], real_rows=residual._real_rows),
-        rows_per_cell=1, real_rows=residual._real_rows,
-        red=backend.red, local_dtau_scale=st["local_dtau"], norm_weights=backend.norm_weights())
-    st["dtau_scale"] = info["dtau_scale"]
-    st["local_dtau"] = info["local_dtau_scale"]
-    st["last_info"] = info
+    def mean_assembler(self, mu_t):
+        from autoflowcfd.core.fr_residual.jacobian.backend import MeanFlowBlockAssembler, unsupported_reason
 
-    m.k_field = xp.ascontiguousarray(kw_new[:, 0]).reshape(backend.shape)
-    m.omega_field = omega_from_log(xp.ascontiguousarray(kw_new[:, 1]), m.omega_max, xp).reshape(backend.shape)
-    backend.positivity()
-    backend.finalize(dtau)
-    # 在最终场上刷新 nu_t / 混合系数 / DES 长度尺度，供平均流这一步使用
-    backend.rates(apply_des=True)
+        s = self.solver
+        if unsupported_reason(order=self.order, entropy_stable_volume=s.entropy_stable_volume_enabled,
+                              wmles=s.wmles_model is not None):
+            return None
+        return MeanFlowBlockAssembler(
+            mesh=s.mesh, ops=s.ops, ghost_provider=s.boundary_ghost_provider, mu=s.mu_molecular,
+            mach_ref=s.freestream["mach_ref"], low_mach=s.low_mach_precond_enabled, mu_t=mu_t,
+            nu_av=self._nu_av, n_sps=self.n_sps)
+
+    def cell_colors(self):
+        return self.turb.cell_colors()
+
+    def coarse_context(self):
+        return None
+
+    def install(self, x, dtau) -> None:
+        """写入 Newton 步的新状态，再做湍流步后收尾（上界、finalize），并在新的平均流与
+        湍流场上刷新涡粘与 DES 长度尺度（供本步之后的一切消费方使用）。"""
+        self.set_trial(x)
+        turb = self.turb
+        turb.positivity()
+        turb.finalize(dtau.reshape(turb.shape))
+        turb.prepare_inputs()
+        turb.rates(apply_des=True)

@@ -71,52 +71,51 @@ def _scalar_volume_div_overintegrated_gpu(cp, factors, segs,
     return div
 
 
+def scalar_convection_volume_divergence_gpu(cp, scalar_field, rho, velocity, mesh_data, ops_data,
+                                            n_cells, n_prism, n_sps):
+    """对流体积算子 `div_vol(adj(J) rho u phi)`（除 det 之前），与 CPU 版
+    `scalar_convection_volume_divergence` 逐字对应；残差（`phi`）与质量通量体积散度
+    （`phi = 1`）共用这一个函数。
+
+    去混叠（AFCFD_TURB_OVERINT，默认 on）与 CPU 端同一个开关、同一条链路——同一个
+    环境变量在两个后端不允许意味着不同的数值方案（同一原则见
+    fr_solver/filter.py::resolve_filter_mode）。
+    """
+    segs = (get_overintegration_segs_gpu(mesh_data, ops_data, n_cells, n_prism)
+            if resolve_turb_overintegration() == "on" else None)
+    if segs is not None:
+        return _scalar_volume_div_overintegrated_gpu(
+            cp, (rho[..., None], scalar_field[..., None], velocity), segs, n_cells, n_sps)
+    rho_u_phi = rho[..., None] * velocity * scalar_field[..., None]  # (n_cells,n_sps,3)
+    F_tilde = cp.matmul(mesh_data['adj_j'], rho_u_phi[..., None]).squeeze(-1)  # (n_cells,n_sps,3)
+    div_F = cp.zeros((n_cells, n_sps), dtype=cp.float64)
+    if n_prism > 0:
+        div_F[:n_prism] = gpu_contract_shared_operator_2axis(
+            ops_data['D_3d_prism'], F_tilde[:n_prism, :, :, None])[..., 0]
+    if n_cells > n_prism:
+        # native 四面体 D 矩阵分派（gpu_gradients.py::compute_physical_gradient_gpu 同一处判据）
+        D_tet_op = ops_data['D_native_tet_padded'] if 'D_native_tet_padded' in ops_data else ops_data['D_3d_tet']
+        div_F[n_prism:] = gpu_contract_shared_operator_2axis(D_tet_op, F_tilde[n_prism:, :, :, None])[..., 0]
+    return div_F
+
+
 def compute_scalar_convection_residual_gpu(
-    scalar_field, rho, velocity, mesh_data, ops_data, ff, n_cells, n_prism, n_sps,
+    scalar_field, rho, velocity, mesh_data, ops_data, ff, n_cells, n_prism, n_sps, mass_divergence,
     wall_dirichlet_zero_face=None, wall_dirichlet_value_face=None, has_wall_dirichlet_value=None,
     open_boundary_face=None, freestream_value=None,
 ):
-    """标量对流 FR 残差（体积项 + 界面上风校正），与 CPU 版
+    """标量对流 FR 残差（对流形式体积项 + 界面上风校正），与 CPU 版
     `compute_scalar_convection_residual` 逐字对应（含来流条件
     `open_boundary_face/freestream_value`，见 CPU 版参数文档）。
     `open_boundary_face` 是按边界组类型的掩码，这里与面邻居源推出的真
-    边界面求与。"""
+    边界面求与。`mass_divergence`：`scalar_convection_volume_divergence_gpu` 在
+    `phi = 1` 上的值（只依赖冻结平均流，k 与 omega 两次调用共用，CPU 版对应
+    `ScalarConvectionGeometry.mass_divergence`）。"""
     cp = get_cupy()
     det_jacs = mesh_data['det_jacs']
-    adj_j = mesh_data['adj_j']
-
-    # 去混叠（AFCFD_TURB_OVERINT，默认 on）：与 CPU 端
-    # `compute_scalar_convection_residual` 同一个开关、同一条链路。
-    # 此前 GPU 侧完全没有这一层，导致同一个环境变量在两个后端意味着
-    # 不同的数值方案——本项目不接受这种静默不一致（同一原则见
-    # fr_solver/filter.py::resolve_filter_mode）。
-    _segs = (get_overintegration_segs_gpu(mesh_data, ops_data, n_cells, n_prism)
-             if resolve_turb_overintegration() == "on" else None)
-    if _segs is not None:
-        div_F = _scalar_volume_div_overintegrated_gpu(
-            cp, (rho[..., None], scalar_field[..., None], velocity),
-            _segs, n_cells, n_sps)
-    else:
-        rho_u_phi = rho[..., None] * velocity * scalar_field[..., None]  # (n_cells,n_sps,3)
-        F_tilde = cp.matmul(adj_j, rho_u_phi[..., None]).squeeze(-1)  # (n_cells,n_sps,3)
-
-        div_F = cp.zeros((n_cells, n_sps), dtype=cp.float64)
-        if n_prism > 0:
-            div_F[:n_prism] = gpu_contract_shared_operator_2axis(
-                ops_data['D_3d_prism'], F_tilde[:n_prism, :, :, None]
-            )[..., 0]
-        if n_cells > n_prism:
-            # native 四面体 D 矩阵分派（2026-09-03 补齐，见模块文档 /
-            # gpu_gradients.py::compute_physical_gradient_gpu 同一处判据）。
-            D_tet_op = (
-                ops_data['D_native_tet_padded']
-                if 'D_native_tet_padded' in ops_data
-                else ops_data['D_3d_tet']
-            )
-            div_F[n_prism:] = gpu_contract_shared_operator_2axis(
-                D_tet_op, F_tilde[n_prism:, :, :, None]
-            )[..., 0]
-
+    div_F = scalar_convection_volume_divergence_gpu(
+        cp, scalar_field, rho, velocity, mesh_data, ops_data, n_cells, n_prism, n_sps)
+    div_F -= scalar_field * mass_divergence
     residual = -div_F / det_jacs
 
     # 界面项：两侧各自坐标系（CPU 版 `compute_scalar_convection_residual` 同一结构）
@@ -285,8 +284,13 @@ def compute_turbulence_transport_residual_gpu(
     wall_mask_k = solver._wall_mask_k_gpu  # 见 gpu_solver_io.py 缓存点文档
     open_mask = solver._open_mask_gpu      # 同上，来流条件（compute_turbulence_face_masks_gpu）
 
+    # 对流形式体积项要减去的质量通量体积散度（k 与 omega 共用，CPU 版对应
+    # `ScalarConvectionGeometry.mass_divergence`）
+    mass_div = scalar_convection_volume_divergence_gpu(
+        cp, cp.ones((n_cells, n_sps), dtype=cp.float64), rho, vel, solver.mesh_data, solver.ops_data,
+        n_cells, n_prism, n_sps)
     conv_k = compute_scalar_convection_residual_gpu(
-        turb.k_field, rho, vel, solver.mesh_data, solver.ops_data, ff, n_cells, n_prism, n_sps,
+        turb.k_field, rho, vel, solver.mesh_data, solver.ops_data, ff, n_cells, n_prism, n_sps, mass_div,
         wall_dirichlet_zero_face=wall_mask_k,
         open_boundary_face=open_mask, freestream_value=float(turb.k_inf),
     )
@@ -306,7 +310,7 @@ def compute_turbulence_transport_residual_gpu(
     # w = ln(omega) 的边界值：壁面目标取对数（没有目标的面该值不被读取），来流取 ln(omega_inf)
     log_wall_value_face = log_omega(omega_wall_value_face, cp)
     conv_w = compute_scalar_convection_residual_gpu(
-        w_log, rho, vel, solver.mesh_data, solver.ops_data, ff, n_cells, n_prism, n_sps,
+        w_log, rho, vel, solver.mesh_data, solver.ops_data, ff, n_cells, n_prism, n_sps, mass_div,
         wall_dirichlet_value_face=log_wall_value_face, has_wall_dirichlet_value=has_omega_wall,
         open_boundary_face=open_mask, freestream_value=float(np.log(turb.omega_inf)),
     )

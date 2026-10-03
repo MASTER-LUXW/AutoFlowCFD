@@ -68,6 +68,55 @@ class _DistributedStepMixin:
             return_physical_too=return_physical_too,
         )
 
+    def _viscous_enabled(self) -> bool:
+        """粘性残差是否计算：完全分布式加载的替身显式给出，真实 `FRSolver`（传统模式）恒为真
+        （它没有 `.config`，见 `step` 里 2026-09-02 的修复记录）。"""
+        cfg = getattr(self.local_solver, "config", None)
+        return cfg.physics.enable_viscous if cfg is not None else True
+
+    def _inviscid_dudt_local(self, U_local: np.ndarray) -> np.ndarray:
+        """无粘 dU/dt（含本次求值的 halo 交换），`(n_local, n_sps, n_vars)`。"""
+        if self.state.n_sps == 1:
+            # P0（Order Continuation 最低阶）：单机无粘残差在这个阶数完全绕开 flat-face
+            # 压缩抽象（core/fr_residual/inviscid.py::compute_inviscid_residual_fr 的
+            # `mesh.n_points_1d==1` 分支），P1+ 的 compact/halo 机制在这里不适用，见
+            # distributed_order_continuation.py::compute_distributed_p0_inviscid_residual。
+            from autoflowcfd.core.mpi.distributed_order_continuation import (
+                compute_distributed_p0_inviscid_residual,
+            )
+            return compute_distributed_p0_inviscid_residual(self, U_local)
+        from autoflowcfd.core.mpi.distributed_compute import distributed_compute_inviscid_residual
+
+        ls = self.local_solver
+        return distributed_compute_inviscid_residual(
+            U_local, self.partition, self.halo_exchange, self.dist_flat_face, self.mesh, self.ops,
+            ls.boundary_ghost_provider, mach_ref=ls.freestream["mach_ref"])
+
+    def _viscous_dudt_local(self, U_local: np.ndarray, mu_t_compact, nu_av_compact) -> np.ndarray:
+        """粘性（含湍流涡粘耦合与问题单元人工扩散）dU/dt（含本次求值的 halo 交换）。"""
+        from autoflowcfd.core.mpi.distributed_compute import distributed_compute_viscous_residual
+
+        ls = self.local_solver
+        dudt = distributed_compute_viscous_residual(
+            U_local, self.partition, self.halo_exchange, self.dist_flat_face, self.mesh, self.ops,
+            ls.mu_molecular, ls.boundary_ghost_provider, mu_t_field_compact=mu_t_compact,
+            wmles_model=self.wmles_model, wall_distance_compact=self.wall_distance_compact)
+        if nu_av_compact is not None:
+            from autoflowcfd.core.mpi.distributed_artificial_viscosity import (
+                distributed_artificial_diffusion_dudt,
+            )
+            dudt = dudt + distributed_artificial_diffusion_dudt(
+                U_local, nu_av_compact, self.partition, self.halo_exchange, self.dist_flat_face, self.mesh,
+                self.ops)
+        return dudt
+
+    def _mean_flow_dudt_local(self, U_local: np.ndarray, mu_t_compact, nu_av_compact) -> np.ndarray:
+        """平均流 dU/dt（无粘 + 粘性），`(n_local, n_sps, n_vars)`。"""
+        dudt = self._inviscid_dudt_local(U_local)
+        if self._viscous_enabled():
+            dudt = dudt + self._viscous_dudt_local(U_local, mu_t_compact, nu_av_compact)
+        return dudt
+
     def step(self, dt: float) -> float:
         """执行一步时间推进（分布式版本）。
 
@@ -109,32 +158,8 @@ class _DistributedStepMixin:
             residual_norm: 全局残差 L2 范数（RK3 第 0 阶段的 dU/dt 范数，
                 与旧实现的报告口径一致，用于跨迭代收敛监控）
         """
-        from autoflowcfd.core.mpi.distributed_compute import (
-            distributed_compute_inviscid_residual,
-            distributed_compute_viscous_residual,
-        )
         from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
 
-        # 真实 bug 修复（2026-09-02，"传统模式"主 __init__ + 真正 step()
-        # 端到端测试此前从未存在，用户明确要求补齐测试覆盖后才发现）：
-        # `self.local_solver.config.physics.enable_viscous` 假设
-        # `local_solver` 是"完全分布式加载"专用的 `types.SimpleNamespace`
-        # 鸭子类型替身（见 `from_fully_distributed_package` 里
-        # `config=types.SimpleNamespace(physics=types.SimpleNamespace(
-        # enable_viscous=...))` 的构造），但"传统模式"下 `local_solver`
-        # 是 `local_solver` 这个 @property 真正构造出的、货真价实的
-        # `FRSolver` 实例——`FRSolver` 类本身完全没有 `.config` 属性
-        # （单机路径的粘性残差本来就无条件计算，从未有过开关），这里
-        # 无条件访问 `.config` 必然 `AttributeError`——"传统模式"这条
-        # CLI 生产路径（`solve steady --n-ranks>1`，不加 `--fully-
-        # distributed`）因此 100% 必现崩溃，此前从未被任何测试捕捉到。
-        # 修复：`local_solver` 没有 `.config` 时（真实 FRSolver 场景）
-        # 退回 `True`，与单机 `FRSolver` 的真实行为（粘性残差恒计算）
-        # 一致；"完全分布式加载"的替身仍按其显式提供的值。
-        _local_config = getattr(self.local_solver, 'config', None)
-        enable_viscous = (
-            _local_config.physics.enable_viscous if _local_config is not None else True
-        )
         mu = self.local_solver.mu_molecular
         boundary_ghost_provider = self.local_solver.boundary_ghost_provider
         mach_ref = self.local_solver.freestream["mach_ref"]
@@ -150,9 +175,8 @@ class _DistributedStepMixin:
         # core/mpi/distributed_cfl.py 模块文档）。
         # `dt_mean_local` 是平均流用的（启用低马赫数预处理时按预处理
         # 波速放大），`dt_phys_local` 是按物理波速那一份——湍流标量的**显式**
-        # 更新用后者（k/omega 的显式更新刻意没有 point-implicit 阻尼），隐式
-        # Newton 用前者，与单机 `fr_solver/step.py` 一致（见 step_turbulence_newton
-        # 的 dtau 参数文档）。
+        # 更新用后者（k/omega 的显式更新刻意没有 point-implicit 阻尼），隐式紧耦合
+        # Newton 用前者，与单机 `fr_solver/step.py` 一致（见 coupled_step.py 模块文档）。
         is_newton = self._time_integrator.scheme == TimeIntegrationScheme.NEWTON_KRYLOV
         dist_fc = self.dist_flat_face
         from autoflowcfd.core.mpi.distributed_flat_face import native_cell_is_prism
@@ -181,16 +205,18 @@ class _DistributedStepMixin:
         mu_t_field_compact = None
         from autoflowcfd.core.fr_solver.turbulence.implicit import IMPLICIT_TURBULENCE_MODELS
 
-        if (is_newton and self.turb_model is not None
-                and str(self.turb_model_name).upper() in IMPLICIT_TURBULENCE_MODELS):
-            # 隐式稳态：k-omega 走分离式 PTC-Newton（平均流冻结），与单机同一个
-            # 算法（fr_solver/turbulence/implicit.py），适配器见 distributed_implicit.py
-            from autoflowcfd.core.fr_solver.turbulence.implicit import step_turbulence_newton
+        coupled_nk = (is_newton and self.turb_model is not None
+                      and str(self.turb_model_name).upper() in IMPLICIT_TURBULENCE_MODELS)
+        if coupled_nk:
+            # 隐式稳态 + k-omega：湍流与平均流在下面紧耦合求解（单机同一个算法，
+            # time_integration/implicit/coupled_step.py；适配器见 distributed_implicit.py）。
+            # 这里只取当前状态的涡粘供残差监控
             from autoflowcfd.core.mpi.distributed_implicit import DistributedTurbulenceBackend
 
             turb_backend = DistributedTurbulenceBackend(self, cell_is_prism, order_now)
-            step_turbulence_newton(turb_backend, dt_mean_local)
-            mu_t_field_compact = turb_backend.mu_t_compact
+            turb_backend.prepare_inputs()
+            turb_backend.rates(apply_des=False)
+            mu_t_field_compact = turb_backend.trial_mu_t_compact()
         elif self.turb_model is not None:
             from autoflowcfd.core.mpi.distributed_turbulence import (
                 distributed_compute_turbulence_source_and_viscosity,
@@ -221,55 +247,13 @@ class _DistributedStepMixin:
                 self.dist_flat_face, self.mesh, self.ops, self.sgs_model,
             )
 
-        def _inviscid_dudt(U_stage_local: np.ndarray) -> np.ndarray:
-            """无粘 dU/dt（含本 stage 的 halo 交换）。"""
-            if n_sps == 1:
-                # P0（Order Continuation 最低阶）：单机无粘残差在这个
-                # 阶数完全绕开 flat-face 压缩抽象（见 core/fr_residual/
-                # inviscid.py::compute_inviscid_residual_fr 的
-                # `mesh.n_points_1d==1` 分支文档），P1+ 路径共用的
-                # compact/halo 机制在这里不适用，见
-                # distributed_order_continuation.py::compute_
-                # distributed_p0_inviscid_residual 文档。
-                from autoflowcfd.core.mpi.distributed_order_continuation import (
-                    compute_distributed_p0_inviscid_residual,
-                )
-                return compute_distributed_p0_inviscid_residual(self, U_stage_local)
-            return distributed_compute_inviscid_residual(
-                U_stage_local, self.partition, self.halo_exchange,
-                self.dist_flat_face, self.mesh, self.ops,
-                boundary_ghost_provider, mach_ref=mach_ref,
-            )
-
-        def _viscous_dudt(U_stage_local: np.ndarray) -> np.ndarray:
-            """粘性（含湍流涡粘耦合与问题单元人工扩散）dU/dt（含本 stage 的 halo 交换）。"""
-            dudt = distributed_compute_viscous_residual(
-                U_stage_local, self.partition, self.halo_exchange,
-                self.dist_flat_face, self.mesh, self.ops,
-                mu, boundary_ghost_provider,
-                mu_t_field_compact=mu_t_field_compact,
-                wmles_model=self.wmles_model,
-                wall_distance_compact=self.wall_distance_compact,
-            )
-            if nu_av_compact is not None:
-                from autoflowcfd.core.mpi.distributed_artificial_viscosity import (
-                    distributed_artificial_diffusion_dudt,
-                )
-                dudt = dudt + distributed_artificial_diffusion_dudt(
-                    U_stage_local, nu_av_compact, self.partition, self.halo_exchange,
-                    self.dist_flat_face, self.mesh, self.ops)
-            return dudt
-
         def residual_func_raw(U_flat_trial: np.ndarray) -> np.ndarray:
             """未经预处理的物理残差（TimeIntegrator 约定 dU/dt = -R）。RK3 每个
             stage 都会调用一次：对该 stage 的中间解重新做 halo 交换 +
             残差求值（halo 数据在每个 stage 之间会变化，不能复用上一个
             stage 交换到的邻居数据）。"""
             U_stage_local = U_flat_trial.reshape(n_local, n_sps, n_vars)
-            total_dudt = _inviscid_dudt(U_stage_local)
-            if enable_viscous:
-                total_dudt = total_dudt + _viscous_dudt(U_stage_local)
-            return -total_dudt
+            return -self._mean_flow_dudt_local(U_stage_local, mu_t_field_compact, nu_av_compact)
 
         def residual_func(U_flat_trial: np.ndarray) -> np.ndarray:
             """供时间积分器推进用：启用低马赫数预处理时返回 `Gamma R`。
@@ -374,18 +358,27 @@ class _DistributedStepMixin:
 
             coarse_ctx = coarse_comm_context(
                 self.partition, CpuCompactCellValues(self.halo_exchange, self.dist_flat_face.perm, n_sps))
-            U_new_flat, nk_info = step_mean_flow_newton(
-                self, residual_func, U_flat, dt_local_flat,
-                _reference_scales(self.local_solver.freestream, n_vars),
-                red=MPIReductions(np), cell_is_prism=cell_is_prism,
-                cell_colors=lambda: distributed_block_jacobi_colors(self),
-                coupling_graph=partial(distributed_coupling_graph, self, coarse_ctx), global_coarse=coarse_ctx,
-                order=order_now, filter_active=filter_func is not None,
-                positivity=positivity_func,
-                block_assembler=distributed_mean_flow_assembler(
-                    self, self.local_solver, order=order_now, mu_t_compact=mu_t_field_compact,
-                    exchange=self.halo_exchange.exchange, perm=self.dist_flat_face.perm, n_sps=n_sps,
-                    nu_av_compact=nu_av_compact))
+            if coupled_nk:
+                from autoflowcfd.core.mpi.distributed_implicit import DistributedCoupledBackend
+                from autoflowcfd.core.time_integration.implicit.coupled_step import step_coupled_newton
+
+                coupled = DistributedCoupledBackend(self, cell_is_prism, order_now, nu_av_compact, coarse_ctx)
+                nk_info = step_coupled_newton(self, coupled, dt_local_flat, filter_active=filter_func is not None)
+                U_new_flat = self.state.get_local_U().reshape(n_local * n_sps, n_vars)
+                mu_t_field_compact = coupled.turb.mu_t_compact
+            else:
+                U_new_flat, nk_info = step_mean_flow_newton(
+                    self, residual_func, U_flat, dt_local_flat,
+                    _reference_scales(self.local_solver.freestream, n_vars),
+                    red=MPIReductions(np), cell_is_prism=cell_is_prism,
+                    cell_colors=lambda: distributed_block_jacobi_colors(self),
+                    coupling_graph=partial(distributed_coupling_graph, self, coarse_ctx), global_coarse=coarse_ctx,
+                    order=order_now, filter_active=filter_func is not None,
+                    positivity=positivity_func,
+                    block_assembler=distributed_mean_flow_assembler(
+                        self, self.local_solver, order=order_now, mu_t_compact=mu_t_field_compact,
+                        exchange=self.halo_exchange.exchange, perm=self.dist_flat_face.perm, n_sps=n_sps,
+                        nu_av_compact=nu_av_compact))
         elif self._time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
             # 显式无粘对流 + 隐式粘性（阻尼 Picard），与单机
             # `fr_solver/step.py` 同一个拆分、同一个积分器。**2026-09-25 补齐**：
@@ -394,13 +387,14 @@ class _DistributedStepMixin:
             # --n-ranks N` 静默跑成了前向 Euler（假选项）。
             def _explicit_R(U_flat_trial):
                 U3 = U_flat_trial.reshape(n_local, n_sps, n_vars)
-                return (-_inviscid_dudt(U3)).reshape(n_local * n_sps, n_vars)
+                return (-self._inviscid_dudt_local(U3)).reshape(n_local * n_sps, n_vars)
 
             def _implicit_R(U_flat_trial):
-                if not enable_viscous:
+                if not self._viscous_enabled():
                     return np.zeros_like(U_flat_trial)
                 U3 = U_flat_trial.reshape(n_local, n_sps, n_vars)
-                return (-_viscous_dudt(U3)).reshape(n_local * n_sps, n_vars)
+                return (-self._viscous_dudt_local(U3, mu_t_field_compact, nu_av_compact)).reshape(
+                    n_local * n_sps, n_vars)
 
             U_new_flat = self._time_integrator.step_imex(
                 U_flat, _explicit_R, _implicit_R, dt_local_flat,

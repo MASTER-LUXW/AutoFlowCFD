@@ -158,6 +158,8 @@ class TestNativeScalarTransportMatchesCpu:
         expected = _cpu_convection(scalar, rho, velocity, mesh, ops)
         actual = np.asarray(gst.compute_scalar_convection_residual_gpu(
             scalar, rho, velocity, mesh_data, ops_data, flat, n_cells, mesh.n_prism_cells, n_sps,
+            gst.scalar_convection_volume_divergence_gpu(np, np.ones((n_cells, n_sps)), rho, velocity,
+                                                        mesh_data, ops_data, n_cells, mesh.n_prism_cells, n_sps),
         ))
 
         max_diff = np.max(np.abs(actual - expected))
@@ -168,6 +170,8 @@ class TestNativeScalarTransportMatchesCpu:
         # 反向对照：确认真的在检验对流物理（速度清零应显著改变残差）。
         zero_vel = np.asarray(gst.compute_scalar_convection_residual_gpu(
             scalar, rho, np.zeros_like(velocity), mesh_data, ops_data, flat, n_cells, mesh.n_prism_cells, n_sps,
+            gst.scalar_convection_volume_divergence_gpu(np, np.ones((n_cells, n_sps)), rho, np.zeros_like(velocity),
+                                                        mesh_data, ops_data, n_cells, mesh.n_prism_cells, n_sps),
         ))
         assert not np.allclose(actual, zero_vel)
         np.testing.assert_allclose(zero_vel, 0.0, atol=1e-9)

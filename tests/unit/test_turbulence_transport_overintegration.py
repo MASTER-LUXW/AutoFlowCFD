@@ -673,7 +673,11 @@ class TestSwitchSemantics:
         finally:
             self._restore(old)
         det = mesh.jacobians["det_jacs"].reshape(mesh.n_cells, mesh.n_sps_per_cell)
-        vol_ref = -_coarse_convection_div(phi, rho, vel, mesh, ops) / det
+        ones = np.ones_like(phi)
+        # 体积项取对流形式 div(rho u phi) - phi div(rho u)（convection.py 模块文档），
+        # 两档各自用同一个体积算子作用在 phi 与 1 上
+        vol_ref = -(_coarse_convection_div(phi, rho, vel, mesh, ops)
+                    - phi * _coarse_convection_div(ones, rho, vel, mesh, ops)) / det
         # 残差 = 体积项 + 界面项；这里只能断言"体积项那一半与 coarse 一致"，
         # 做法是再跑一次 on 档，两者之差必须恰好等于两种体积项之差。
         old = self._env("on")
@@ -682,9 +686,10 @@ class TestSwitchSemantics:
                 phi, rho, vel, mesh, ops)
         finally:
             self._restore(old)
-        vol_oi = -tp._scalar_convection_volume_overintegrated(
-            phi, rho, vel, tp._turb_overint_ops(mesh, ops),
-            mesh.n_sps_per_cell) / det
+        oi = tp._turb_overint_ops(mesh, ops)
+        n_sps = mesh.n_sps_per_cell
+        vol_oi = -(tp._scalar_convection_volume_overintegrated(phi, rho, vel, oi, n_sps)
+                   - phi * tp._scalar_convection_volume_overintegrated(ones, rho, vel, oi, n_sps)) / det
         np.testing.assert_allclose(res_on - res_off, vol_oi - vol_ref,
                                    rtol=1e-10, atol=1e-10)
         # 而且两者确实不同（否则上面那条是平凡真）

@@ -12,12 +12,12 @@ from autoflowcfd.core.utils.order_continuation.policy import (
 
 def _solver(turb_res=None, ramp_done=True, with_ramp=True):
     model = SimpleNamespace(production_factor=1.0) if with_ramp else SimpleNamespace()
-    st = None if turb_res is None else {"last_info": {"res_norm": turb_res}}
-    return SimpleNamespace(turb_model=model, _turb_production_ramp_complete=ramp_done, _newton_turb_state=st)
+    info = None if turb_res is None else {"res_norm_turbulence": turb_res}
+    return SimpleNamespace(turb_model=model, _turb_production_ramp_complete=ramp_done, _newton_last_info=info)
 
 
 def _turb(s, r):
-    s._newton_turb_state["last_info"]["res_norm"] = r
+    s._newton_last_info["res_norm_turbulence"] = r
 
 
 def test_ramp_incomplete_blocks_advance_even_with_large_mean_drop():

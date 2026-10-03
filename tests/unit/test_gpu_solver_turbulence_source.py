@@ -287,33 +287,5 @@ def test_compute_turbulence_source_gpu_matches_cpu_single_machine(turb_model_nam
 
 
 
-@pytest.mark.parametrize("turb_model_name", ["SST", "DDES"])
-def test_implicit_turbulence_newton_gpu_matches_cpu(turb_model_name):
-    """隐式 k-omega Newton 步：GPU 适配器（numpy 替身，走块 Jacobi 的 cupy
-    分支——批量 `xp.linalg.inv`）与 CPU 适配器（numba 分支）在同一状态上
-    给出同一个结果。算法只有一份（`fr_solver/turbulence/implicit.py`），
-    两侧只差求值件与数组模块，所以差异只能来自那里。"""
-    from autoflowcfd.core.fr_solver.turbulence.implicit import (
-        CpuTurbulenceBackend,
-        step_turbulence_newton,
-    )
-    from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import GpuTurbulenceBackend
-
-    b = _build_standins(turb_model_name)
-    b.gpu._newton_turb_state = None
-    b.cpu._newton_turb_state = None
-    dtau = np.full((b.n_cells, b.n_sps), 50.0 * b.dt_used)   # 远超显式极限
-    step_turbulence_newton(GpuTurbulenceBackend(b.gpu), dtau)
-    step_turbulence_newton(CpuTurbulenceBackend(b.cpu), dtau)
-
-    ig = b.gpu._newton_turb_state["last_info"]
-    ic = b.cpu._newton_turb_state["last_info"]
-    assert ig["theta"] > 0.0 and ic["theta"] > 0.0
-    assert ig["gmres_iters"] == ic["gmres_iters"]
-    np.testing.assert_allclose(b.turb_gpu.k_field, b.turb_cpu.k_field, rtol=1e-6, atol=1e-10)
-    np.testing.assert_allclose(b.turb_gpu.omega_field, b.turb_cpu.omega_field, rtol=1e-6)
-    np.testing.assert_allclose(b.turb_gpu.nu_t, b.turb_cpu.nu_t, rtol=1e-6, atol=1e-14)
-
-
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -185,22 +185,20 @@ class _MultiGPUSteppingMixin:
             order_now = int(getattr(self, "current_order", self.order))
 
         # 湍流（算子分裂，每个 step 开始时一次，用当前——上一步末尾——的状态，
-        # 与 CPU 分布式同一时序）。显式更新用**物理**波速算出的那一份 dt，隐式
-        # Newton 用平均流那一份（见 step_turbulence_newton 的 dtau 参数文档）。
+        # 与 CPU 分布式同一时序）。显式更新用**物理**波速算出的那一份 dt。隐式稳态 +
+        # k-omega 时湍流与平均流在下面紧耦合求解（time_integration/implicit/coupled_step.py，
+        # 适配器见 gpu_distributed_implicit.py），这里只取当前状态的涡粘供残差监控。
         from autoflowcfd.core.fr_solver.turbulence.implicit import IMPLICIT_TURBULENCE_MODELS
 
-        if (is_newton and self.turb_model_gpu is not None
-                and str(self.turb_model_name).upper() in IMPLICIT_TURBULENCE_MODELS):
-            # 隐式稳态：k-omega 走分离式 PTC-Newton（平均流冻结），与单机/CPU
-            # 分布式同一个算法，适配器见 gpu_distributed_implicit.py
-            from autoflowcfd.core.fr_solver.turbulence.implicit import step_turbulence_newton
-            from autoflowcfd.core.gpu.distributed.gpu_distributed_implicit import (
-                MultiGpuTurbulenceBackend,
-            )
+        coupled_nk = (is_newton and self.turb_model_gpu is not None
+                      and str(self.turb_model_name).upper() in IMPLICIT_TURBULENCE_MODELS)
+        if coupled_nk:
+            from autoflowcfd.core.gpu.distributed.gpu_distributed_implicit import MultiGpuTurbulenceBackend
 
             turb_backend = MultiGpuTurbulenceBackend(self, cell_is_prism, order_now)
-            step_turbulence_newton(turb_backend, cp.broadcast_to(dt_mean_local[:, None], (n_local, n_sps)))
-            mu_t_field = turb_backend.mu_t_compact
+            turb_backend.prepare_inputs()
+            turb_backend.rates(apply_des=False)
+            mu_t_field = turb_backend.trial_mu_t_compact()
         else:
             # turb_model_gpu 为 None（turbulence_model='none'）时恒返回 None
             mu_t_field = self._compute_turbulence_source_distributed(dt_phys_c[:, None])
@@ -243,8 +241,9 @@ class _MultiGPUSteppingMixin:
 
         nk_info = None
         if is_newton:
-            # 隐式稳态步：与单机 CPU/GPU、CPU 分布式同一个实现
-            # （implicit/mean_flow_step.py），归约跨 rank，块 Jacobi 着色全局一致
+            # 隐式稳态步：与单机 CPU/GPU、CPU 分布式同一个实现（带 k-omega 时紧耦合
+            # implicit/coupled_step.py，否则 implicit/mean_flow_step.py），归约跨 rank，块
+            # Jacobi 着色全局一致
             from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
             from autoflowcfd.core.mpi.distributed_coarse import GpuCompactCellValues, coarse_comm_context
             from autoflowcfd.core.mpi.distributed_implicit import (
@@ -257,17 +256,25 @@ class _MultiGPUSteppingMixin:
 
             coarse_ctx = coarse_comm_context(
                 self.partition, GpuCompactCellValues(self.gpu_halo, self._perm_gpu, n_sps, cp))
-            U_new_flat, nk_info = step_mean_flow_newton(
-                self, _residual, U_flat, dt_flat, _reference_scales(self.freestream, 5),
-                red=MPIReductions(cp), cell_is_prism=cell_is_prism,
-                cell_colors=lambda: distributed_block_jacobi_colors(self),
-                coupling_graph=partial(distributed_coupling_graph, self, coarse_ctx), global_coarse=coarse_ctx,
-                order=order_now, filter_active=self.filter_func_gpu is not None,
-                positivity=positivity_func,
-                block_assembler=distributed_mean_flow_assembler(
-                    self, self, order=order_now, mu_t_compact=mu_t_field,
-                    exchange=self.gpu_halo.exchange, perm=self._perm_gpu, n_sps=n_sps,
-                    nu_av_compact=nu_av_compact))
+            if coupled_nk:
+                from autoflowcfd.core.gpu.distributed.gpu_distributed_implicit import MultiGpuCoupledBackend
+                from autoflowcfd.core.time_integration.implicit.coupled_step import step_coupled_newton
+
+                coupled = MultiGpuCoupledBackend(self, cell_is_prism, order_now, nu_av_compact, coarse_ctx)
+                nk_info = step_coupled_newton(self, coupled, dt_flat, filter_active=self.filter_func_gpu is not None)
+                U_new_flat = self.U_gpu.reshape(n_local * n_sps, 5)
+            else:
+                U_new_flat, nk_info = step_mean_flow_newton(
+                    self, _residual, U_flat, dt_flat, _reference_scales(self.freestream, 5),
+                    red=MPIReductions(cp), cell_is_prism=cell_is_prism,
+                    cell_colors=lambda: distributed_block_jacobi_colors(self),
+                    coupling_graph=partial(distributed_coupling_graph, self, coarse_ctx), global_coarse=coarse_ctx,
+                    order=order_now, filter_active=self.filter_func_gpu is not None,
+                    positivity=positivity_func,
+                    block_assembler=distributed_mean_flow_assembler(
+                        self, self, order=order_now, mu_t_compact=mu_t_field,
+                        exchange=self.gpu_halo.exchange, perm=self._perm_gpu, n_sps=n_sps,
+                        nu_av_compact=nu_av_compact))
         elif self.time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
             # 显式无粘对流 + 隐式粘性（阻尼 Picard），与单机/CPU 分布式同一个
             # 拆分、同一个积分器（低马赫预处理在 IMEX 下不启用，理由见

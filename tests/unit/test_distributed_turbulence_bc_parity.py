@@ -106,7 +106,7 @@ def test_explicit_sst_with_boundary_conditions_matches_single_machine():
 
 @pytest.mark.parametrize("order", [0, 1])
 def test_newton_krylov_sst_matches_single_machine(order):
-    """隐式稳态（平均流 NK + 隐式 k-omega）：分布式与单机同一个算法，只换了
+    """隐式稳态（平均流与 k-omega 紧耦合 NK）：分布式与单机同一个算法，只换了
     归约对象、块 Jacobi 着色来源与湍流求值的 compact 视图。n_ranks=1 下三者
     都应退化为单机行为，差异只能来自浮点重结合。P0 另外覆盖差分装配截取耦合块
     的块 ILU（分布式耦合图 `distributed_coupling_graph` 与单机同一结构）。"""

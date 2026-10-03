@@ -21,11 +21,9 @@ from autoflowcfd.core.time_integration.implicit.mean_flow_step import (
     step_mean_flow_newton,
 )
 from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
-from autoflowcfd.core.fr_solver.turbulence.implicit import (
-    IMPLICIT_TURBULENCE_MODELS,
-    step_turbulence_newton,
-)
-from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import GpuTurbulenceBackend
+from autoflowcfd.core.fr_solver.turbulence.implicit import IMPLICIT_TURBULENCE_MODELS
+from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import GpuCoupledBackend
+from autoflowcfd.core.time_integration.implicit.coupled_step import step_coupled_newton
 
 
 class _GPUSolverStepMixin:
@@ -62,19 +60,15 @@ class _GPUSolverStepMixin:
         # 局部 CFL 步长。启用低马赫数预处理时 dt_local 是**预处理后**的
         # 平均流步长（按 |un|+c_precond 取），dt_physical 是按物理波速那
         # 一份；两者的分工与 CPU 侧 step.py 完全一致。
+        coupled_nk = (scheme == TimeIntegrationScheme.NEWTON_KRYLOV and self.turb_model_gpu is not None
+                      and self.turb_model_name.upper() in IMPLICIT_TURBULENCE_MODELS)
         if scheme == TimeIntegrationScheme.NEWTON_KRYLOV:
-            # 隐式稳态：与 CPU step.py 同一时序——先取步长，k-omega 做一个
-            # 分离式 PTC-Newton 步（平均流冻结，显式输运更新在隐式 CFL 下
-            # 必然失稳，见 fr_solver/turbulence/implicit.py），平均流再用更新
-            # 后的涡粘做它的 Newton 步。
+            # 隐式稳态：与 CPU step.py 同一时序。带 k-omega 时湍流与平均流在下面紧耦合
+            # 求解（time_integration/implicit/coupled_step.py），这里只取当前状态的涡粘
+            # 供残差监控；否则湍流（代数模型）照原有更新。
             dt_local, dt_physical = self._compute_local_time_step_gpu(
                 return_physical_too=True, nu_av=nu_av)
-            if (self.turb_model_gpu is not None
-                    and self.turb_model_name.upper() in IMPLICIT_TURBULENCE_MODELS):
-                # 伪时间步长用平均流那一份（见 step_turbulence_newton 的 dtau 参数文档）
-                step_turbulence_newton(
-                    GpuTurbulenceBackend(self),
-                    cp.broadcast_to(dt_local[:, None], (n_cells, n_sps)))
+            if coupled_nk:
                 mu_t_field = self._turbulent_mu_t_gpu()
             else:
                 mu_t_field = self.compute_turbulence_source_gpu(dt_physical[:, None])
@@ -155,7 +149,13 @@ class _GPUSolverStepMixin:
 
         # 根据时间方案选择推进方式
         nk_info = None
-        if scheme == TimeIntegrationScheme.NEWTON_KRYLOV:
+        if coupled_nk:
+            # 平均流 + k-omega 紧耦合隐式步：与 CPU 共用同一个实现（implicit/coupled_step.py），
+            # 新状态由适配器写回 U_gpu 与湍流模型
+            nk_info = step_coupled_newton(self, GpuCoupledBackend(self, nu_av), dt_local_full,
+                                          filter_active=self.filter_func_gpu is not None)
+            U_new_flat = self.U_gpu.reshape(n_cells * n_sps, self.n_vars)
+        elif scheme == TimeIntegrationScheme.NEWTON_KRYLOV:
             # 平均流隐式步：与 CPU 共用同一个实现（implicit/mean_flow_step.py），
             # 这里只提供 GPU 的残差、归约（cupy）与面相邻关系。
             from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales

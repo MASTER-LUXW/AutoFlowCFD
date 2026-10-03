@@ -15,10 +15,9 @@ from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 from autoflowcfd.core.fr_solver.filter import build_filter_func
 from autoflowcfd.core.fr_solver.turbulence.implicit import (
     IMPLICIT_TURBULENCE_MODELS,
-    CpuTurbulenceBackend,
+    CpuCoupledBackend,
     single_machine_cell_colors,
     single_machine_coupling_graph,
-    step_turbulence_newton,
 )
 
 
@@ -147,14 +146,13 @@ def step(solver, dt: float) -> float:
         # 用 dt_local 才是这里的一致行为。
         turb_dt = (dt if solver.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME
                    else dt_physical)
-        if (solver.time_integrator.scheme == TimeIntegrationScheme.NEWTON_KRYLOV
-                and solver.turb_model is not None
-                and solver.turb_model_name in IMPLICIT_TURBULENCE_MODELS):
-            # 隐式稳态：k-omega 也走分离式 PTC-Newton（平均流冻结），显式
-            # 输运更新在隐式 CFL 下必然失稳，见 turbulence/implicit.py 文档；
-            # 伪时间步长用平均流那一份（见 step_turbulence_newton 的 dtau 参数文档）
-            step_turbulence_newton(CpuTurbulenceBackend(solver), dt_local)
-        else:
+        # 隐式稳态 + k-omega：湍流与平均流在下面的 NEWTON_KRYLOV 分支里紧耦合求解
+        # （time_integration/implicit/coupled_step.py 模块文档：分离式在大 CFL 下的块
+        # Gauss-Seidel 外迭代会振荡），这里不再单独推进湍流
+        coupled_nk = (solver.time_integrator.scheme == TimeIntegrationScheme.NEWTON_KRYLOV
+                      and solver.turb_model is not None
+                      and solver.turb_model_name in IMPLICIT_TURBULENCE_MODELS)
+        if not coupled_nk:
             solver.compute_turbulence_source(turb_dt)
 
         # 本步冻结的湍流涡粘（算子分裂：湍流已更新，本步全部残差求值共用
@@ -300,9 +298,10 @@ def step(solver, dt: float) -> float:
             )
             solver._dual_time_U_prev = U_flat.copy()
         elif solver.time_integrator.scheme == TimeIntegrationScheme.NEWTON_KRYLOV:
-            # 隐式稳态步（矩阵自由 Newton-Krylov + 伪瞬态延拓），与单机 GPU
-            # 共用同一个实现（`implicit/mean_flow_step.py` 模块文档：一步一个
-            # Newton 步、与模态滤波互斥、只解平均流 5 个变量、跨步状态）。
+            # 隐式稳态步（矩阵自由 Newton-Krylov + 伪瞬态延拓），与其它后端共用同一个
+            # 实现：带 k-omega 时平均流与湍流紧耦合（`implicit/coupled_step.py`），否则
+            # 只解平均流 5 个变量（`implicit/mean_flow_step.py`，一步一个 Newton 步、
+            # 与模态滤波互斥、跨步状态）。
             # `dt_local_flat` 是 PTC 的 `dtau` 天花板（CFL 律见 adaptive_cfl/ser.py）。
             from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
             from autoflowcfd.core.time_integration.implicit.mean_flow_step import (
@@ -313,23 +312,30 @@ def step(solver, dt: float) -> float:
                 MeanFlowBlockAssembler, unsupported_reason,
             )
 
-            U_new_flat, _nk_info = step_mean_flow_newton(
-                solver, mean_flow_residual, U_flat, dt_local_flat,
-                _reference_scales(solver.freestream, n_vars),
-                red=LocalReductions(np),
-                cell_is_prism=np.arange(n_cells) < int(solver.mesh.n_prism_cells),
-                cell_colors=lambda: single_machine_cell_colors(solver),
-                coupling_graph=partial(single_machine_coupling_graph, solver),
-                order=_current_order(solver), filter_active=filter_func is not None,
-                positivity=positivity_func,
-                block_assembler=None if unsupported_reason(
-                    order=_current_order(solver),
-                    entropy_stable_volume=solver.entropy_stable_volume_enabled,
-                    wmles=solver.wmles_model is not None) else MeanFlowBlockAssembler(
-                    mesh=solver.mesh, ops=solver.ops, ghost_provider=solver.boundary_ghost_provider,
-                    mu=solver.mu_molecular, mach_ref=solver.freestream["mach_ref"],
-                    low_mach=solver.low_mach_precond_enabled,
-                    mu_t=solver._get_turbulent_viscosity_field(mu_t_step), nu_av=nu_av_step, n_sps=n_sps))
+            if coupled_nk:
+                from autoflowcfd.core.time_integration.implicit.coupled_step import step_coupled_newton
+
+                _nk_info = step_coupled_newton(solver, CpuCoupledBackend(solver, nu_av_step), dt_local_flat,
+                                               filter_active=filter_func is not None)
+                U_new_flat = solver.state.U.reshape(n_cells * n_sps, n_vars)
+            else:
+                U_new_flat, _nk_info = step_mean_flow_newton(
+                    solver, mean_flow_residual, U_flat, dt_local_flat,
+                    _reference_scales(solver.freestream, n_vars),
+                    red=LocalReductions(np),
+                    cell_is_prism=np.arange(n_cells) < int(solver.mesh.n_prism_cells),
+                    cell_colors=lambda: single_machine_cell_colors(solver),
+                    coupling_graph=partial(single_machine_coupling_graph, solver),
+                    order=_current_order(solver), filter_active=filter_func is not None,
+                    positivity=positivity_func,
+                    block_assembler=None if unsupported_reason(
+                        order=_current_order(solver),
+                        entropy_stable_volume=solver.entropy_stable_volume_enabled,
+                        wmles=solver.wmles_model is not None) else MeanFlowBlockAssembler(
+                        mesh=solver.mesh, ops=solver.ops, ghost_provider=solver.boundary_ghost_provider,
+                        mu=solver.mu_molecular, mach_ref=solver.freestream["mach_ref"],
+                        low_mach=solver.low_mach_precond_enabled,
+                        mu_t=solver._get_turbulent_viscosity_field(mu_t_step), nu_av=nu_av_step, n_sps=n_sps))
         elif solver.time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
             # 显式处理无粘对流项、隐式处理粘性+湍流扩散项——通用的
             # step(...) 单一残差入口表达不了这个拆分（见该方法里的

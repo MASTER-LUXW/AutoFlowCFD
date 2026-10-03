@@ -126,21 +126,30 @@ class ScalarConvectionGeometry(NamedTuple):
       乘法里提出来：`adj_j@(rho*u*phi) == phi*(adj_j@(rho*u))`）；
     - `mass_flux` / `mass_flux_neighbor`：两侧坐标系下通量点上的质量通量，见
       `face_frames.face_mass_flux_kernel`。两者都取 **owner 的迹**，于是同一个
-      物理点上 `mass_flux_neighbor = -mass_flux`，公共通量单值、上风选择两侧一致。
+      物理点上 `mass_flux_neighbor = -mass_flux`，公共通量单值、上风选择两侧一致；
+    - `mass_divergence`：对流体积算子作用在 `phi = 1` 上的值（参考空间、除 det 之前），
+      即离散体积散度 `div_vol(rho u)`。对流体积项取对流形式
+      `div_vol(rho u phi) - phi div_vol(rho u)` 时减去它（`convection.py` 模块文档）。
     """
     rho_u_tilde: np.ndarray          # (n_cells, n_sps, 3)
     mass_flux: np.ndarray            # (n_faces, n_fp)，owner 顺序、owner 外法向
     mass_flux_neighbor: np.ndarray   # (n_faces, n_fp)，neighbor 顺序、neighbor 外法向
+    mass_divergence: np.ndarray      # (n_cells, n_sps)
 
 
 def precompute_scalar_convection_geometry(rho, velocity, mesh, ops, flat):
     """算出 k/omega 共享的 `ScalarConvectionGeometry`（见该类文档）。"""
+    # 局部导入：convection.py 在模块层导入本模块
+    from .convection import scalar_convection_volume_divergence
+
     n_cells = mesh.n_cells
     n_sps = mesh.n_sps_per_cell
     det_jacs = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
     inv_jacs = mesh.jacobians["inv_jacs"].reshape(n_cells, n_sps, 3, 3)
     rho_u = np.ascontiguousarray(rho[:, :, None] * velocity)          # (n_cells,n_sps,3)
     rho_u_tilde = contravariant_flux_from_metric(det_jacs, inv_jacs, rho_u[..., None])[..., 0]
+    mass_divergence = scalar_convection_volume_divergence(
+        np.ones((n_cells, n_sps)), rho, velocity, rho_u_tilde, mesh, ops)
     mass_flux, mass_flux_neighbor = face_mass_flux_kernel(
         rho_u, flat.owner_cell, flat.owner_face_op, flat.neighbor_cell, flat.neighbor_face_op,
         flat.boundary_extrap_native,
@@ -151,7 +160,7 @@ def precompute_scalar_convection_geometry(rho, velocity, mesh, ops, flat):
         np.ascontiguousarray(unit_normals(flat.neighbor_adj_row_exact)),
     )
     return ScalarConvectionGeometry(rho_u_tilde=rho_u_tilde, mass_flux=mass_flux,
-                                    mass_flux_neighbor=mass_flux_neighbor)
+                                    mass_flux_neighbor=mass_flux_neighbor, mass_divergence=mass_divergence)
 
 
 def _lift_side_jumps(jump_owner, jump_neighbor, sign, flat, mesh):

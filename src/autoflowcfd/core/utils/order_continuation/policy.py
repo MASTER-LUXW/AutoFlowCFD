@@ -68,10 +68,9 @@ def uses_order_continuation(solver) -> bool:
 
 
 def turbulence_residual_norm(solver):
-    """隐式湍流（NK）最近一步的残差范数；没有隐式湍流时 None。"""
-    st = getattr(solver, "_newton_turb_state", None)
-    info = st.get("last_info") if st else None
-    return None if not info else float(info["res_norm"])
+    """隐式湍流（NK 紧耦合步）最近一步湍流子系统的残差范数；没有隐式湍流时 None。"""
+    info = getattr(solver, "_newton_last_info", None)
+    return None if not info or "res_norm_turbulence" not in info else float(info["res_norm_turbulence"])
 
 
 def production_ramp_complete(solver) -> bool:
