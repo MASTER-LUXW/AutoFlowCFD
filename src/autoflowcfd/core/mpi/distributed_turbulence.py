@@ -53,6 +53,7 @@ from autoflowcfd.core.mpi.partition import DistributedPartition
 from autoflowcfd.core.mpi.halo import HaloExchange
 from autoflowcfd.core.mpi.distributed_flat_face import DistributedFlatFaceGeometry
 from autoflowcfd.core.mpi.distributed_compute import DistributedMeshAdapter
+from autoflowcfd.core.mpi.compact_halo import CompactHaloRefresh
 
 
 def compute_distributed_wall_distance(dist_fc, global_mesh, source) -> np.ndarray:
@@ -110,9 +111,12 @@ class DistributedTurbulenceSolverAdapter:
         self, mesh_adapter, ops, turb_model, wall_distance, mu_molecular, flat_face_override,
         turb_ramp_step=10 ** 9, turb_ramp_steps=0,
         turb_model_name="SST", ddes_model=None, iddes_h_max=None, iddes_h_wn=None,
-        boundary_ghost_provider=None,
+        boundary_ghost_provider=None, halo_refresh=None,
     ):
-        """`boundary_ghost_provider` 必须是 `group_code` 已重切到 compact 面空间
+        """`halo_refresh`（`mpi/compact_halo.py::CompactHaloRefresh`）：依赖面邻居的量
+        （P0 湍流源项的提升修正速度梯度）在 halo 行上不完整，算完后经它取所属 rank 的值。
+
+        `boundary_ghost_provider` 必须是 `group_code` 已重切到 compact 面空间
         的那一份（`DistributedFRSolver.local_solver.boundary_ghost_provider`）。
 
         **真实缺陷（2026-09-25）**：此前适配器没有这个属性，于是湍流输运里
@@ -123,6 +127,7 @@ class DistributedTurbulenceSolverAdapter:
         """
         self.mesh = mesh_adapter
         self.boundary_ghost_provider = boundary_ghost_provider
+        self.halo_refresh = halo_refresh
         self.ops = ops
         self.turb_model = turb_model
         self.turb_model_name = turb_model_name
@@ -244,6 +249,7 @@ def build_distributed_turbulence_view(
         turb_model_name=turb_model_name, ddes_model=ddes_model,
         iddes_h_max=iddes_h_max_compact, iddes_h_wn=iddes_h_wn_compact,
         boundary_ghost_provider=boundary_ghost_provider,
+        halo_refresh=CompactHaloRefresh(halo_exchange, dist_fc.perm, dist_fc.inv_perm, partition.n_local_cells),
     )
     adapter.set_state(U_compact)
     return adapter, turb_view
@@ -395,6 +401,7 @@ def distributed_compute_les_viscosity(
     local_mesh,
     ops,
     sgs_model,
+    boundary_ghost_provider,
 ) -> np.ndarray:
     """分布式 LES（WALE）涡粘度计算（2026-09-02，CPU MPI 路径补齐——
     此前只有多GPU分布式接入了 LES，见本文件模块文档"范围更新"一节）。
@@ -413,12 +420,14 @@ def distributed_compute_les_viscosity(
         sgs_model: `WALEModel`（或其他 SGS 模型）实例，调用方持有的
             真实对象——本函数只调用它的 `compute_eddy_viscosity`，不
             修改它的状态（WALE 本身也没有需要持久化的状态）。
+        boundary_ghost_provider: compact 面空间的幽灵态提供者（修正速度梯度的
+            边界公共值，与 SST 路径同一份）。
 
     Returns:
         mu_t_field_compact: (n_compact, n_sps)，供 `distributed_compute_
         viscous_residual` 的 `mu_t_field_compact` 参数直接使用。
     """
-    from autoflowcfd.core.fr_residual.viscous import compute_gradients
+    from autoflowcfd.core.fr_operators.corrected_gradient import source_velocity_gradient
     from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
 
     U_extended = halo_exchange.exchange(U_local)
@@ -427,13 +436,11 @@ def distributed_compute_les_viscosity(
     mesh_adapter = DistributedMeshAdapter(partition, dist_fc, local_mesh, ops)
     n_sps = local_mesh.n_sps_per_cell
 
-    # 真实 bug 修复（2026-09-03，同 fr_solver/turbulence.py::
-    # compute_turbulence_source 文档同一处）：此前对*守恒*变量 U_compact
-    # 求梯度再切片动量分量冒充速度梯度——grad(rho*u) != rho*grad(u)，
-    # 除非密度梯度处处为零。改为先转成原始变量 Q_compact 再对速度分量
-    # 求梯度（提前到这里，供下面 rho_compact 复用同一份）。
+    # 与单机同一份速度梯度（`fr_solver/turbulence/source.py::turbulence_velocity_gradient`）
     Q_compact = conserved_to_primitive(U_compact[..., :5])
-    grad_vel = compute_gradients(Q_compact[..., 1:4], ops, mesh_adapter)
+    grad_vel = source_velocity_gradient(
+        Q_compact, mesh_adapter, ops, dist_fc.base_flat, boundary_ghost_provider,
+        halo_refresh=CompactHaloRefresh(halo_exchange, dist_fc.perm, dist_fc.inv_perm, partition.n_local_cells))
 
     cell_volumes = mesh_adapter.cell_volumes
     delta = np.power(np.abs(cell_volumes), 1.0 / 3.0)

@@ -15,7 +15,7 @@ from autoflowcfd.core.fr_operators.flux_kernels import (
     resolve_viscous_ip_constant,
 )
 
-from autoflowcfd.core.fr_operators.volume_contract import compute_adj_j, get_overintegration_context
+from autoflowcfd.core.fr_operators.volume_contract import get_overintegration_context
 from .overintegration import viscous_volume_term
 from .pointwise import compute_temperature
 from .constants import PRANDTL_TURBULENT
@@ -98,8 +98,6 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
     grad_T = compute_physical_gradient(T[:, :, None], mesh, ops)[:, :, 0, :]  # (n_cells,n_sps,3)
 
     det_jacs = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
-    inv_jacs = mesh.jacobians["inv_jacs"].reshape(n_cells, n_sps, 3, 3)
-    adj_j = compute_adj_j(det_jacs, inv_jacs)
 
     # IP 罚项常数按阶数解析一次（trace 不等式常数 ~ (p+1)(p+3)/3，
     # 见 `flux_kernels.resolve_viscous_ip_constant`）。
@@ -134,7 +132,7 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
     # 预先按 local+halo 压缩索引空间构造好的 flat_face_override，不能让
     # 这里对 DistributedMeshAdapter 重新调用 get_flat_face_geometry。
     flat = flat_face_override if flat_face_override is not None else get_flat_face_geometry(mesh, ops)
-    Q_ghost = compute_boundary_ghost_states(flat, Q, adj_j, ghost_provider)
+    Q_ghost = compute_boundary_ghost_states(flat, Q, ghost_provider)
     # 边界面的公共粘性通量按粘性边界种类分派（Dirichlet / 无滑移壁 / 镜像 /
     # Neumann / 入口逐点判定），见 core/fr_operators/flux_kernels/viscous_bc.py。
     from autoflowcfd.boundary.fr_ghost_state import build_viscous_boundary_kind

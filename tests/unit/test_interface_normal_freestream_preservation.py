@@ -107,8 +107,7 @@ def case():
     from autoflowcfd.core.fr_residual.inviscid import DefaultGhostProvider
     # 均匀流 + 零梯度幽灵态 = 精确解
     ghost = DefaultGhostProvider()          # 零梯度外插：对均匀流正好是精确解
-    adj_j = None
-    Q_ghost = compute_boundary_ghost_states(flat, Q, adj_j, ghost)
+    Q_ghost = compute_boundary_ghost_states(flat, Q, ghost)
     return dict(mesh=mesh, flat=flat, Q=Q, det=det, adj_o=adj_o, adj_n=adj_n,
                 Q_ghost=Q_ghost, face=f)
 

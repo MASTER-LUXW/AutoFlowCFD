@@ -84,7 +84,7 @@ def _multi_gpu_standin(single, dist):
         _turb_production_ramp_complete=single._turb_production_ramp_complete,
         _block_jacobi_colors_local=None,
     )
-    for name in ("_prepare_turbulence_view_distributed", "_sync_turbulence_view",
+    for name in ("_prepare_turbulence_view_distributed", "_turbulence_velocity_gradient_compact", "_sync_turbulence_view",
                  "_evaluate_turbulence_rates_distributed", "_finalize_turbulence_update_distributed",
                  "_write_back_turbulence_distributed"):
         setattr(g, name, types.MethodType(getattr(_GPUDistributedTurbSourceMixin, name), g))

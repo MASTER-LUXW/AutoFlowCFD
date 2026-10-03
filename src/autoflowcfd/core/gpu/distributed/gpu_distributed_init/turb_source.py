@@ -58,17 +58,28 @@ class _GPUDistributedTurbSourceMixin:
         self._write_back_turbulence_distributed(ctx, fields=True)
         return ctx.rho * ctx.view.nu_t
 
+    def _turbulence_velocity_gradient_compact(self, Q_compact):
+        """紧凑空间的湍流模型速度梯度（单机 `_turbulence_velocity_gradient_gpu` 的多 GPU
+        对应，同一份算法）。P0 的提升修正梯度在 halo 行上不完整（halo 单元外侧的面不在
+        本 rank），经 `mpi/compact_halo.py`（与 CPU 分布式同一个类）取所属 rank 的值。"""
+        from autoflowcfd.core.gpu.residual.gpu_corrected_gradient import source_velocity_gradient_gpu
+        from autoflowcfd.core.mpi.compact_halo import CompactHaloRefresh
+
+        return source_velocity_gradient_gpu(
+            get_cupy(), Q_compact, self.mesh_data, self.ops_data, self.flat_face_gpu,
+            self.dist_flat_face.base_flat, self.boundary_ghost_provider, self.device_id,
+            halo_refresh=CompactHaloRefresh(self.gpu_halo, self._perm_gpu, self._inv_perm_gpu,
+                                            self.partition.n_local_cells))
+
     def _les_mu_t_compact(self):
         """纯 LES（WALE）：代数模型、没有跨步状态，直接用当前（halo 交换后的
         compact）速度场现算 mu_t。与单机版在 step() 末尾缓存、供下一步使用
         在数学上是同一个值（WALE 不依赖历史状态）。"""
         from autoflowcfd.core.gpu.residual.gpu_flux import conserved_to_primitive_gpu
-        from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_gradient_gpu
 
         U_compact = self._permute_to_compact(self.gpu_halo.exchange(self.U_gpu))
         Q_compact = conserved_to_primitive_gpu(U_compact[..., :5])
-        # 速度梯度对原始变量求（不是动量梯度，2026-09-03 修复）
-        grad_vel = compute_physical_gradient_gpu(Q_compact[..., 1:4], self.mesh_data, self.ops_data)
+        grad_vel = self._turbulence_velocity_gradient_compact(Q_compact)
         nu_t_compact = self.sgs_model_gpu.compute_eddy_viscosity_gpu(grad_vel, self._grid_scale_compact)
         return Q_compact[:, :, 0] * nu_t_compact
 
@@ -107,12 +118,9 @@ class _GPUDistributedTurbSourceMixin:
             view.des_length_scale = self._permute_to_compact(des_len_extended)
 
         from autoflowcfd.core.gpu.residual.gpu_flux import conserved_to_primitive_gpu
-        from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_gradient_gpu
 
         Q_compact = conserved_to_primitive_gpu(U_compact[..., :5])
-        # `compute_source_terms_gpu` 要的是速度梯度 (n,n_sps,3,3)，对原始变量的
-        # 速度分量求（对守恒变量求梯度再切动量冒充速度梯度是 2026-09-03 修过的缺陷）
-        grad_vel = compute_physical_gradient_gpu(Q_compact[..., 1:4], self.mesh_data, self.ops_data)
+        grad_vel = self._turbulence_velocity_gradient_compact(Q_compact)
 
         d_wall = self.wall_distance_gpu
         if d_wall is None:

@@ -24,7 +24,9 @@ from tests.unit.test_gpu_solver_turbulence_source import _NumpyAsCupy, _prepare_
 from tests.unit.test_implicit_sst_nk import _channel_solver
 
 import autoflowcfd.core.gpu.gpu_preconditioning as gpu_pre_mod
+import autoflowcfd.core.gpu.residual.gpu_corrected_gradient as gpu_corrected_gradient_mod
 import autoflowcfd.core.gpu.residual.gpu_gradients as gpu_gradients_mod
+import autoflowcfd.core.gpu.residual.gpu_inviscid as gpu_inviscid_mod
 import autoflowcfd.core.gpu.residual.gpu_volume_contract as gpu_volume_contract_mod
 import autoflowcfd.core.gpu.solver.gpu_solver as gpu_solver_mod
 import autoflowcfd.core.gpu.solver.gpu_solver_io as gpu_solver_io_mod
@@ -37,7 +39,8 @@ import autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst as gpu_turbulence_sst_
 def _patch_get_cupy(monkeypatch):
     patch_module_get_cupy(monkeypatch, [
         gpu_solver_io_mod, gpu_solver_mod, gpu_gradients_mod, gpu_volume_contract_mod, gst_mod,
-        gpu_turbulence_sst_mod, gpu_implicit_turb_mod, gpu_pre_mod], _NumpyAsCupy())
+        gpu_turbulence_sst_mod, gpu_implicit_turb_mod, gpu_pre_mod, gpu_inviscid_mod,
+        gpu_corrected_gradient_mod], _NumpyAsCupy())
     monkeypatch.setattr(gpu_turbulence_sst_mod, "gpu_available", True)
 
 
@@ -80,6 +83,7 @@ def _gpu_standin(cpu, dt_cell, dt_phys_cell):
     md = _prepare_mesh_ops_data(cpu.mesh, cpu.ops)
     g = types.SimpleNamespace(
         mesh=cpu.mesh, ops=cpu.ops, mesh_data=md, ops_data=md, n_vars=cpu.state.n_vars, U_gpu=cpu.state.U.copy(),
+        device_id=0,
         time_integrator=types.SimpleNamespace(scheme=S.NEWTON_KRYLOV),
         filter_func_gpu=None, low_mach_precond_enabled=cpu.low_mach_precond_enabled,
         freestream=cpu.freestream, flat_face_gpu=flat, order=1, current_order=None,
@@ -105,7 +109,7 @@ def _gpu_standin(cpu, dt_cell, dt_phys_cell):
     g._compute_local_time_step_gpu = lambda return_physical_too=False, nu_av=None: (
         (dt_cell, dt_phys_cell) if return_physical_too else dt_cell)
     for name in ("compute_turbulence_source_gpu", "_apply_turbulence_corrections_gpu", "_update_production_ramp_gpu",
-                 "_prepare_turbulence_inputs_gpu", "_evaluate_turbulence_rates_gpu",
+                 "_prepare_turbulence_inputs_gpu", "_turbulence_velocity_gradient_gpu", "_evaluate_turbulence_rates_gpu",
                  "_finalize_turbulence_update_gpu", "_turbulent_mu_t_gpu"):
         setattr(g, name, types.MethodType(getattr(_GPUSolverIOMixin, name), g))
     return g

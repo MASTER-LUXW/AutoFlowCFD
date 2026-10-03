@@ -375,7 +375,7 @@ def _compute_boundary_ghost_states_batched(flat, Q: np.ndarray, ghost_provider) 
     return Q_ghost
 
 
-def compute_boundary_ghost_states(flat, Q: np.ndarray, adj_j: np.ndarray, ghost_provider) -> np.ndarray:
+def compute_boundary_ghost_states(flat, Q: np.ndarray, ghost_provider) -> np.ndarray:
     """边界面幽灵态预处理（纯 Python，只跑边界面这一小部分——约占全部
     面的 3%，`boundary_ghost_provider` 是任意 Python 可调用对象，numba
     调不了）。

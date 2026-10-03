@@ -223,7 +223,7 @@ def compute_viscous_residual_fr_gpu(
         boundary_ghost_provider if boundary_ghost_provider is not None else DefaultGhostProvider()
     )
     Q_cpu = cp.asnumpy(Q)
-    Q_ghost_np = compute_boundary_ghost_states(flat_face, Q_cpu, None, ghost_provider)
+    Q_ghost_np = compute_boundary_ghost_states(flat_face, Q_cpu, ghost_provider)
     # 边界面公共粘性通量按粘性边界种类分派，与 CPU
     # core/fr_operators/flux_kernels/viscous_bc.py 同一份分类。
     from autoflowcfd.boundary.fr_ghost_state import build_viscous_boundary_kind

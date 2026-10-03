@@ -46,8 +46,6 @@ def _compute_residual_via_new_kernel(U, mesh, ops, boundary_ghost_provider=None,
 
     Q = conserved_to_primitive(U[..., :5])
     det_jacs = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
-    inv_jacs = mesh.jacobians["inv_jacs"].reshape(n_cells, n_sps, 3, 3)
-    adj_j = det_jacs[..., None, None] * inv_jacs
 
     # --- 体积项（与 fr_residual_inviscid.py 当前实现逐字一致，性能优化后
     # 已改用 euler_physical_flux_batch/matmul/tensordot，理由见该文件与
@@ -85,7 +83,7 @@ def _compute_residual_via_new_kernel(U, mesh, ops, boundary_ghost_provider=None,
 
     # --- 界面项：新 kernel ---
     flat = get_flat_face_geometry(mesh, ops)
-    Q_ghost = compute_boundary_ghost_states(flat, Q, adj_j, ghost_provider)
+    Q_ghost = compute_boundary_ghost_states(flat, Q, ghost_provider)
     n_threads = numba.get_num_threads()
     correction = compute_inviscid_interface_correction_kernel(
         Q, det_jacs,

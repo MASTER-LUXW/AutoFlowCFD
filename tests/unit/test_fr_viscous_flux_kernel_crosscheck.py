@@ -56,8 +56,6 @@ def _compute_residual_via_new_kernel(U, mesh, ops, mu_t_field=None, boundary_gho
     grad_T = compute_physical_gradient(T[:, :, None], mesh, ops)[:, :, 0, :]
 
     det_jacs = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
-    inv_jacs = mesh.jacobians["inv_jacs"].reshape(n_cells, n_sps, 3, 3)
-    adj_j = det_jacs[..., None, None] * inv_jacs
 
     # --- 体积项：与生产同一个函数（细点上重新求值、体积算子 K 已含修正项的本侧通量迹，
     # fr/face_flux_trace.py）。本文件只比界面核，体积项不复制第二份实现 ---
@@ -68,7 +66,7 @@ def _compute_residual_via_new_kernel(U, mesh, ops, mu_t_field=None, boundary_gho
 
     # --- 界面项：新 kernel ---
     flat = get_flat_face_geometry(mesh, ops)
-    Q_ghost = compute_boundary_ghost_states(flat, Q, adj_j, ghost_provider)
+    Q_ghost = compute_boundary_ghost_states(flat, Q, ghost_provider)
     vbc_kind = build_viscous_boundary_kind(flat.n_faces, flat.is_boundary, ghost_provider)
     n_threads = numba.get_num_threads()
     correction = compute_viscous_interface_correction_kernel(

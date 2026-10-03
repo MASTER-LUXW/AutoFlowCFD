@@ -108,6 +108,7 @@ def test_distributed_turbulence_matches_single_machine(rank, turb_model_name):
                 U=U, Q=conserved_to_primitive(U[..., :5]), n_cells=n_cells, n_sps=n_sps,
             )
             self._turbulence_flat_face_override = None
+            self.boundary_ghost_provider = None
             # 与分布式参照调用的 turb_ramp_steps=0 一致：不做产生项渐变（没有
             # 计数器时 advance_production_ramp 取真实求解器的 50 步默认）
             self._turb_production_ramp_steps = 0
@@ -233,7 +234,7 @@ def test_distributed_les_viscosity_matches_single_machine(rank):
 
     sgs_model = WALEModel()
     mu_t_compact = distributed_compute_les_viscosity(
-        U_local, partition, fake_halo, dist_fc, mesh, ops, sgs_model,
+        U_local, partition, fake_halo, dist_fc, mesh, ops, sgs_model, None,
     )
 
     mu_t_native = mu_t_compact[dist_fc.inv_perm]
@@ -297,6 +298,7 @@ def test_distributed_ddes_two_consecutive_steps_matches_single_machine(turb_mode
                 U=U, Q=conserved_to_primitive(U[..., :5]), n_cells=n_cells, n_sps=n_sps,
             )
             self_inner._turbulence_flat_face_override = None
+            self_inner.boundary_ghost_provider = None
             # 与分布式参照调用的 turb_ramp_steps=0 一致：不做产生项渐变（没有
             # 计数器时 advance_production_ramp 取真实求解器的 50 步默认）
             self_inner._turb_production_ramp_steps = 0
@@ -455,6 +457,7 @@ class TestDdesModelDistinctFromSst:
                         U=U, Q=conserved_to_primitive(U[..., :5]), n_cells=n_cells, n_sps=n_sps,
                     )
                     self_inner._turbulence_flat_face_override = None
+                    self_inner.boundary_ghost_provider = None
                     # 与分布式参照调用的 turb_ramp_steps=0 一致：不做产生项渐变（没有
                     # 计数器时 advance_production_ramp 取真实求解器的 50 步默认）
                     self_inner._turb_production_ramp_steps = 0

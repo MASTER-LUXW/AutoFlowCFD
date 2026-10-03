@@ -8,7 +8,7 @@ from typing import Optional
 import numpy as np
 from loguru import logger
 
-from autoflowcfd.core.fr_residual.viscous import compute_gradients as _compute_gradients_generic
+from .source import turbulence_velocity_gradient
 
 
 def apply_turbulence_corrections(solver) -> None:
@@ -20,10 +20,8 @@ def apply_turbulence_corrections(solver) -> None:
     更新之后，为时已晚）。
     """
     if solver.sgs_model is not None:
-        # 真实 bug 修复（2026-09-03）：同 compute_turbulence_source 里的
-        # grad_vel 修复，理由见该函数文档——LES/WMLES 的 SGS 涡粘同样
-        # 不能用动量梯度冒充速度梯度。
-        grad_u = _compute_gradients_generic(solver.state.Q[:, :, 1:4], solver.ops, solver.mesh)
+        # 与 SST 源项同一份速度梯度（原始变量速度 + 提升修正，见该函数文档）
+        grad_u = turbulence_velocity_gradient(solver, solver.state.Q)
         delta = solver._get_grid_scale()
         nu_t = solver.sgs_model.compute_eddy_viscosity(grad_u, delta)
 

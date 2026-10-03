@@ -244,7 +244,7 @@ class _DistributedStepMixin:
             )
             mu_t_field_compact = distributed_compute_les_viscosity(
                 self.state.get_local_U()[..., :5], self.partition, self.halo_exchange,
-                self.dist_flat_face, self.mesh, self.ops, self.sgs_model,
+                self.dist_flat_face, self.mesh, self.ops, self.sgs_model, boundary_ghost_provider,
             )
 
         def residual_func_raw(U_flat_trial: np.ndarray) -> np.ndarray:

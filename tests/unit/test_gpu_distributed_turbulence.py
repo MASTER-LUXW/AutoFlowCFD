@@ -68,7 +68,7 @@ def _bind_turb_source(stub):
     from autoflowcfd.core.gpu.distributed.gpu_distributed_init.turb_source import (
         _GPUDistributedTurbSourceMixin as M,
     )
-    for name in ("_les_mu_t_compact", "_prepare_turbulence_view_distributed",
+    for name in ("_les_mu_t_compact", "_prepare_turbulence_view_distributed", "_turbulence_velocity_gradient_compact",
                  "_sync_turbulence_view", "_evaluate_turbulence_rates_distributed",
                  "_finalize_turbulence_update_distributed", "_write_back_turbulence_distributed"):
         setattr(stub, name, types.MethodType(getattr(M, name), stub))
@@ -258,7 +258,7 @@ def test_gpu_distributed_sst_matches_cpu_distributed_sst(rank, turb_model_name):
     fake_halo_turb_gpu = _FakeHalo(k_omega_extended)
 
     stub = types.SimpleNamespace(
-        rank=rank, device_id=0, mu_molecular=mu,
+        rank=rank, device_id=0, mu_molecular=mu, boundary_ghost_provider=None,
         partition=partition, mesh=mesh, dist_flat_face=dist_fc,
         mesh_data=mesh_data, ops_data=mesh_data, ops=ops,
         flat_face_gpu=dist_fc.base_flat,
@@ -352,7 +352,7 @@ def test_gpu_distributed_ddes_two_consecutive_calls_does_not_crash(turb_model_na
     fake_halo_turb_gpu = _FakeHalo(k_omega_extended)
 
     stub = types.SimpleNamespace(
-        rank=rank, device_id=0, mu_molecular=mu,
+        rank=rank, device_id=0, mu_molecular=mu, boundary_ghost_provider=None,
         partition=partition, mesh=mesh, dist_flat_face=dist_fc,
         mesh_data=mesh_data, ops_data=mesh_data, ops=ops,
         flat_face_gpu=dist_fc.base_flat,
@@ -443,7 +443,8 @@ def test_gpu_distributed_les_matches_single_machine_wale(rank):
     fake_halo_5var_gpu = _FakeHalo(U[native_ids])
 
     stub = types.SimpleNamespace(
-        rank=rank, device_id=0, mesh=mesh,
+        rank=rank, device_id=0, mesh=mesh, boundary_ghost_provider=None,
+        partition=partition, dist_flat_face=dist_fc, flat_face_gpu=dist_fc.base_flat,
         mesh_data=mesh_data, ops_data=mesh_data,
         turb_model_gpu=None, sgs_model_gpu=GPUWALEModel(),
         gpu_halo=fake_halo_5var_gpu,

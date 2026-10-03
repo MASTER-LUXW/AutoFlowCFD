@@ -246,8 +246,6 @@ def compute_inviscid_residual_fr(
     Q = conserved_to_primitive(U[..., :5])  # (n_cells, n_sps, 5)
 
     det_jacs = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
-    inv_jacs = mesh.jacobians["inv_jacs"].reshape(n_cells, n_sps, 3, 3)
-    adj_j = compute_adj_j(det_jacs, inv_jacs)  # (n_cells,n_sps,3,3)，边界幽灵态构造要用
 
     # 过积分上下文改用共享 helper（2026-09-17）：此前本函数自己直读
     # `mesh.jacobians_fine` / `mesh.n_sps_per_cell_fine` 并硬编码两段
@@ -393,7 +391,7 @@ def compute_inviscid_residual_fr(
     # gpu_inviscid.py::compute_inviscid_residual_fr_gpu 的 flat_face_cpu
     # 参数同一个道理）。单机路径不传，行为完全不变。
     flat = flat_face_override if flat_face_override is not None else get_flat_face_geometry(mesh, ops)
-    Q_ghost = compute_boundary_ghost_states(flat, Q, adj_j, ghost_provider)
+    Q_ghost = compute_boundary_ghost_states(flat, Q, ghost_provider)
 
     # 图着色方案：同色面无 owner_cell 冲突，直接写入共享 buffer
     # 内存从 O(n_threads * n_cells * n_sps * 5) 降至 O(n_cells * n_sps * 5)

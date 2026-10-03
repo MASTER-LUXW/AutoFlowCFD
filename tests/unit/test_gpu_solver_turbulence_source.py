@@ -178,7 +178,7 @@ def _build_standins(turb_model_name):
     dt_used = 1e-3  # 见 TestDdesModelDistinctFromSst 同一处 dt 放大注释
 
     stub = types.SimpleNamespace(
-        mesh=mesh, mesh_data=mesh_data, ops_data=mesh_data, ops=ops,
+        mesh=mesh, mesh_data=mesh_data, ops_data=mesh_data, ops=ops, device_id=0, boundary_ghost_provider=None,
         U_gpu=U, Q_gpu=conserved_to_primitive(U[..., :5]),
         mu_molecular=mu, turb_model_gpu=turb_gpu, sgs_model_gpu=None,
         ddes_model_gpu=_make_ddes_model_gpu(turb_model_name),
@@ -213,7 +213,8 @@ def _build_standins(turb_model_name):
     )
     # 2026-09-25：湍流源项拆成 prepare/evaluate/finalize 三个件（显式与隐式
     # k-omega 更新共用），替身同样绑定真实类里的这几个方法。
-    for _name in ("_prepare_turbulence_inputs_gpu", "_evaluate_turbulence_rates_gpu",
+    for _name in ("_prepare_turbulence_inputs_gpu", "_turbulence_velocity_gradient_gpu",
+                  "_evaluate_turbulence_rates_gpu",
                   "_finalize_turbulence_update_gpu", "_turbulent_mu_t_gpu"):
         setattr(stub, _name, types.MethodType(getattr(_GPUSolverIOMixin, _name), stub))
     # 签名随 2026-09-14 低马赫数预处理接入 GPU 而变化：湍流场更新必须
@@ -248,6 +249,7 @@ def _build_standins(turb_model_name):
                 U=U, Q=conserved_to_primitive(U[..., :5]), n_cells=n_cells, n_sps=n_sps,
             )
             self_inner._turbulence_flat_face_override = None
+            self_inner.boundary_ghost_provider = None
             self_inner._turb_ramp_step = 10 ** 9
             self_inner._turb_production_ramp_steps = 0
 

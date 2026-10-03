@@ -9,7 +9,8 @@ import numpy as np
 from loguru import logger
 
 from autoflowcfd.core.turbulence.des import IDDESModel
-from autoflowcfd.core.fr_residual.viscous import compute_gradients as _compute_gradients_generic
+from autoflowcfd.core.fr_operators.corrected_gradient import source_velocity_gradient
+from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from .init import (
     _filter_matrices_are_identity,
     _update_production_ramp,
@@ -46,6 +47,21 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
     return (Sk, S_omega)
 
 
+def turbulence_velocity_gradient(solver, Q):
+    """湍流模型（SST/DDES/IDDES 源项、LES 亚格子涡粘）用的速度梯度 `(n_cells, n_sps, 3, 3)`。
+
+    取原始变量的速度（不是守恒变量动量的梯度：grad(rho u) != rho grad(u)，2026-09-03
+    cube_demo 跨阶发散的真因）。P0 带上界面跳变的提升修正（单元内梯度恒为零，SST
+    产生项随之为零、整个 P0 阶段湍流惰性），P>=1 用单元内多项式导数——理由与实测见
+    `fr_operators/corrected_gradient.py` 模块文档。CPU 分布式的紧凑空间适配器带
+    `halo_refresh`（`mpi/compact_halo.py`），单机求解器没有这个属性。
+    """
+    flat = (getattr(solver, "_turbulence_flat_face_override", None)
+            or get_flat_face_geometry(solver.mesh, solver.ops))
+    return source_velocity_gradient(Q, solver.mesh, solver.ops, flat, solver.boundary_ghost_provider,
+                                    halo_refresh=getattr(solver, "halo_refresh", None))
+
+
 def prepare_turbulence_inputs(solver):
     """一步之内只依赖平均流的输入：`(Q, grad_vel, d_wall, mu)`。
 
@@ -53,20 +69,7 @@ def prepare_turbulence_inputs(solver):
     冻结它们（平均流不动），只让 `k/omega` 变化。
     """
     Q = solver.state.Q
-    # 真实 bug 修复（2026-09-03，cube_demo 791,492 单元真实网格 Order
-    # Continuation P0->P1 跨阶后延迟发散排查发现）：此前这里对*守恒*变量
-    # U 求梯度、直接切片 [1:4] 当速度梯度用——U[...,1:4] 是动量
-    # (rho*u,rho*v,rho*w)，grad(rho*u) != rho*grad(u)，除非密度梯度处处
-    # 为零。低马赫数流场里密度接近均匀，这个误差通常小到不可见，一旦
-    # 出现哪怕很小的局部密度扰动（真实复现：Order Continuation 插值截断
-    # 误差），这里算出的"应变率"就会混入一个虚假的 u_i*grad(rho)/rho
-    # 分量，經 SST 产生项(P_k~nu_t*S^2)反馈进涡粘系数，涡粘再反馈进动量
-    # 残差放大速度/密度扰动——形成真实的正反馈失稳（真实网格上表现为
-    # P1 阶段前~20步几乎不动、随后 100 步内速度峰值从 50 m/s 涨到 600+
-    # m/s，k/omega 双双撞上安全上限）。同一代码库里
-    # `fr_residual/viscous_flux.py` 的主残差路径一直是对的（先
-    # conserved_to_primitive 转 Q 再求梯度、再切片），这里改成同一模式。
-    grad_vel = _compute_gradients_generic(Q[:, :, 1:4], solver.ops, solver.mesh)
+    grad_vel = turbulence_velocity_gradient(solver, Q)
 
     d_wall = solver.wall_distance
     if d_wall is not None:
@@ -96,7 +99,7 @@ def prepare_turbulence_inputs(solver):
             volumes = solver._get_cell_volumes()
             h_char = np.power(np.abs(volumes), 1.0 / 3.0)
             d_wall = np.tile(h_char[:, np.newaxis], (1, n_sps))
-            logger.warning(f"Using characteristic length scale as wall distance estimate")
+            logger.warning("Using characteristic length scale as wall distance estimate")
 
     mu = getattr(solver, 'mu_molecular', 1.8e-5)  # 分子粘度（k/omega方程自身扩散系数用分子粘度，与平均流粘性应力
     # 张量所用的有效粘度[core/fr_solver.py::_get_turbulent_viscosity_field]是两个不同量）

@@ -125,7 +125,6 @@ class _GPUSolverIOMixin:
             mu_t: 动力涡粘度 rho*nu_t (n_cells, n_sps) CuPy 数组，湍流模型
                 与 SGS 模型都未激活时返回 None
         """
-        cp = get_cupy()
         rho = self.Q_gpu[:, :, 0]
 
         if self.turb_model_gpu is None:
@@ -145,19 +144,20 @@ class _GPUSolverIOMixin:
         self._finalize_turbulence_update_gpu()
         return self._turbulent_mu_t_gpu()
 
+    def _turbulence_velocity_gradient_gpu(self):
+        """湍流模型（SST/DDES/IDDES 源项、LES 亚格子涡粘）用的速度梯度（CPU 版
+        `fr_solver/turbulence/source.py::turbulence_velocity_gradient` 的 GPU 对应：
+        P0 提升修正、P>=1 单元内导数，见 `gpu/residual/gpu_corrected_gradient.py`）。"""
+        from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+        from autoflowcfd.core.gpu.residual.gpu_corrected_gradient import source_velocity_gradient_gpu
+        return source_velocity_gradient_gpu(
+            get_cupy(), self.Q_gpu, self.mesh_data, self.ops_data, self.flat_face_gpu,
+            get_flat_face_geometry(self.mesh, self.ops), self.boundary_ghost_provider, self.device_id)
+
     def _prepare_turbulence_inputs_gpu(self):
         """一步之内只依赖平均流的输入 `(grad_vel, d_wall)`（CPU 版
-        `source.py::prepare_turbulence_inputs` 的 GPU 对应）。隐式路径在整个
-        湍流 Newton 步内冻结它们。"""
-        from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_gradient_gpu
-        # 真实 bug 修复（2026-09-03，与下面 296 行附近同一类，CPU 版
-        # 见 fr_solver/turbulence.py::compute_turbulence_source 文档）：
-        # 此前对*守恒*变量 U_gpu 求梯度再切片动量分量冒充速度梯度——
-        # grad(rho*u) != rho*grad(u)，除非密度梯度处处为零。直接对
-        # Q_gpu（原始变量，已经是真正的速度）求梯度。
-        grad_vel = compute_physical_gradient_gpu(
-            self.Q_gpu[..., 1:4], self.mesh_data, self.ops_data,
-        )
+        `source.py::prepare_turbulence_inputs` 的 GPU 对应）。"""
+        grad_vel = self._turbulence_velocity_gradient_gpu()
 
         d_wall = self.wall_distance_gpu
         if d_wall is None:
@@ -315,15 +315,9 @@ class _GPUSolverIOMixin:
         """
         if self.sgs_model_gpu is None:
             return
-        from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_gradient_gpu
-
-        # 真实 bug 修复（2026-09-03）：同上面 156 行附近 compute_turbulence_
-        # source_gpu 里的 grad_vel 修复，理由见该处文档——LES/WMLES 的
-        # SGS 涡粘同样不能用动量梯度冒充速度梯度。
-        grad_vel = compute_physical_gradient_gpu(
-            self.Q_gpu[..., 1:4], self.mesh_data, self.ops_data,
-        )
-        nu_t = self.sgs_model_gpu.compute_eddy_viscosity_gpu(grad_vel, self._grid_scale_gpu)
+        # 与 SST 源项同一份速度梯度（原始变量速度 + 提升修正）
+        nu_t = self.sgs_model_gpu.compute_eddy_viscosity_gpu(self._turbulence_velocity_gradient_gpu(),
+                                                             self._grid_scale_gpu)
 
         if self.turb_model_gpu is not None and hasattr(self.turb_model_gpu, "nu_t"):
             self.turb_model_gpu.nu_t = self.turb_model_gpu.nu_t + nu_t

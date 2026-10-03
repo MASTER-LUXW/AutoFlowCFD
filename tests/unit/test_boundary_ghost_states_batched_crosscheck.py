@@ -115,7 +115,7 @@ def test_dispatch_wrapper_uses_batched_path_for_real_provider(order):
     )
 
     provider = _build_multi_bc_provider(flat, rng)
-    via_dispatch = compute_boundary_ghost_states(flat, U, None, provider)
+    via_dispatch = compute_boundary_ghost_states(flat, U, provider)
     via_batched = _compute_boundary_ghost_states_batched(flat, U, provider)
     np.testing.assert_array_equal(via_dispatch, via_batched)
 
@@ -140,7 +140,7 @@ def test_dispatch_wrapper_falls_back_to_per_face_for_generic_provider():
     provider = DefaultGhostProvider()
     # 不应该抛错（DefaultGhostProvider 没有 group_code/code_to_config，
     # 若分派函数误判为批量路径会在这里 AttributeError）。
-    result = compute_boundary_ghost_states(flat, U, None, provider)
+    result = compute_boundary_ghost_states(flat, U, provider)
     expected = _compute_boundary_ghost_states_per_face(flat, U, provider)
     np.testing.assert_array_equal(result, expected)
 

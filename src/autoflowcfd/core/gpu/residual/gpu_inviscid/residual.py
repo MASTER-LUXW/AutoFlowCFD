@@ -197,6 +197,6 @@ def _compute_boundary_ghost_states_gpu(
 
     provider = ghost_provider if ghost_provider is not None else DefaultGhostProvider()
     Q_cpu = cp.asnumpy(Q_gpu)
-    Q_ghost_np = compute_boundary_ghost_states(flat_face, Q_cpu, None, provider)
+    Q_ghost_np = compute_boundary_ghost_states(flat_face, Q_cpu, provider)
     with cp.cuda.Device(device_id):
         return cp.asarray(Q_ghost_np)

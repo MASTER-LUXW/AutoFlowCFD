@@ -23,7 +23,7 @@ FR 求解中需要交换的是 SPs 上的场值 (n_cells, n_sps, n_vars)。
 """
 
 import numpy as np
-from typing import Dict, Optional
+from typing import Dict
 
 from loguru import logger
 
@@ -40,8 +40,7 @@ class HaloExchange:
         partition: 分区信息
         n_sps: 每单元解点数
         n_vars: 变量数
-        send_buffers: dict[rank] → 预分配的发送 buffer
-        recv_buffers: dict[rank] → 预分配的接收 buffer
+        _buffers_by_tail: 每解点尾部形状 → (send, recv) buffer（按邻居 rank 的字典）
     """
 
     def __init__(self, partition: DistributedPartition, n_sps: int, n_vars: int):
@@ -56,9 +55,10 @@ class HaloExchange:
         self.n_sps = n_sps
         self.n_vars = n_vars
 
-        # 预分配 send/recv buffer
-        self.send_buffers: Dict[int, np.ndarray] = {}
-        self.recv_buffers: Dict[int, np.ndarray] = {}
+        # 按"每解点尾部形状"缓存的 send/recv buffer：构造时预分配主形状 `(n_vars,)`，
+        # 其它形状（湍流源项的速度梯度 `(3, 3)` 等）首次交换时分配、之后复用
+        self._buffers_by_tail: Dict[tuple, tuple] = {}
+        main_send, main_recv = self._buffers((n_vars,))
         # 标量场（k/omega 等，形状 (n_sps,) 无 n_vars 维）专用的预分配
         # buffer——此前 exchange_scalar() 每次调用都用 fancy-indexing/
         # np.empty 现分配新数组，与本类"预分配固定 buffer"的既定设计
@@ -67,22 +67,26 @@ class HaloExchange:
         self.recv_buffers_scalar: Dict[int, np.ndarray] = {}
 
         for r, cells in partition.send_lists.items():
-            self.send_buffers[r] = np.empty(
-                (len(cells), n_sps, n_vars), dtype=np.float64
-            )
             self.send_buffers_scalar[r] = np.empty((len(cells), n_sps), dtype=np.float64)
         for r, cells in partition.recv_lists.items():
-            self.recv_buffers[r] = np.empty(
-                (len(cells), n_sps, n_vars), dtype=np.float64
-            )
             self.recv_buffers_scalar[r] = np.empty((len(cells), n_sps), dtype=np.float64)
 
         logger.debug(
             f"Rank {partition.rank}: Halo exchange initialized - "
             f"{partition.n_halo} halo cells, {len(partition.neighbor_ranks)} neighbors, "
-            f"send bufs: {sum(b.size for b in self.send_buffers.values()) * 8 / 1e6:.1f} MB, "
-            f"recv bufs: {sum(b.size for b in self.recv_buffers.values()) * 8 / 1e6:.1f} MB"
+            f"send bufs: {sum(b.size for b in main_send.values()) * 8 / 1e6:.1f} MB, "
+            f"recv bufs: {sum(b.size for b in main_recv.values()) * 8 / 1e6:.1f} MB"
         )
+
+    def _buffers(self, tail: tuple) -> tuple:
+        """尾部形状 `tail` 的 `(send, recv)` buffer（按邻居 rank 的字典），首次使用时分配。"""
+        bufs = self._buffers_by_tail.get(tail)
+        if bufs is None:
+            part = self.partition
+            bufs = ({r: np.empty((len(c), self.n_sps) + tail) for r, c in part.send_lists.items()},
+                    {r: np.empty((len(c), self.n_sps) + tail) for r, c in part.recv_lists.items()})
+            self._buffers_by_tail[tail] = bufs
+        return bufs
 
     def exchange(self, local_data: np.ndarray) -> np.ndarray:
         """执行一次 halo 交换。
@@ -91,19 +95,21 @@ class HaloExchange:
         接收 halo cell 数据并返回扩展数组。
 
         Args:
-            local_data: (n_local_cells, n_sps, n_vars) 本 rank 的 local cell 数据
+            local_data: (n_local_cells, n_sps, ...) 本 rank 的 local cell 数据，每解点的
+                尾部形状任意（主形状 `(n_vars,)`；速度梯度 `(3, 3)` 等同一个实例交换）
 
         Returns:
-            extended_data: (n_total_cells, n_sps, n_vars) 扩展数组
+            extended_data: (n_total_cells, n_sps, ...) 扩展数组
                 [0:n_local_cells] = local_data 的拷贝
                 [n_local_cells:n_total] = 从邻居接收的 halo 数据
         """
         part = self.partition
         n_local = part.n_local_cells
         n_total = part.n_total_cells
+        tail = tuple(local_data.shape[2:])
 
         # 构建扩展数组
-        extended_data = np.empty((n_total, self.n_sps, self.n_vars), dtype=np.float64)
+        extended_data = np.empty((n_total, self.n_sps) + tail, dtype=np.float64)
         extended_data[:n_local] = local_data
 
         if not mpi_available or not part.neighbor_ranks:
@@ -111,23 +117,24 @@ class HaloExchange:
 
         comm = get_comm()
         MPI = get_mpi()
+        send_buffers, recv_buffers = self._buffers(tail)
 
         # 1. 打包发送数据
         for r, local_indices in part.send_lists.items():
-            self.send_buffers[r][:] = local_data[local_indices]
+            send_buffers[r][:] = local_data[local_indices]
 
         # 2. 发起非阻塞接收
         recv_requests = []
         for r in part.neighbor_ranks:
-            if r in self.recv_buffers:
-                req = comm.Irecv(self.recv_buffers[r], source=r, tag=0)
+            if r in recv_buffers:
+                req = comm.Irecv(recv_buffers[r], source=r, tag=0)
                 recv_requests.append(req)
 
         # 3. 发起非阻塞发送
         send_requests = []
         for r in part.neighbor_ranks:
-            if r in self.send_buffers:
-                req = comm.Isend(self.send_buffers[r], dest=r, tag=0)
+            if r in send_buffers:
+                req = comm.Isend(send_buffers[r], dest=r, tag=0)
                 send_requests.append(req)
 
         # 4. 等待所有通信完成
@@ -138,14 +145,14 @@ class HaloExchange:
 
         # 5. 将接收到的数据填入 halo 位置
         for r, global_cells in part.recv_lists.items():
-            if r in self.recv_buffers:
+            if r in recv_buffers:
                 # 将全局索引转为 halo 数组中的局部偏移
                 halo_offset = part.n_local_cells
                 for i, gc in enumerate(global_cells):
                     # 在 halo_cells 中找到 gc 的位置
                     halo_idx = np.searchsorted(part.halo_cells, gc)
                     if halo_idx < len(part.halo_cells) and part.halo_cells[halo_idx] == gc:
-                        extended_data[halo_offset + halo_idx] = self.recv_buffers[r][i]
+                        extended_data[halo_offset + halo_idx] = recv_buffers[r][i]
 
         return extended_data
 

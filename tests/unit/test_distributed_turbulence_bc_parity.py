@@ -46,52 +46,71 @@ def _uniform_U(n_cells, n_sps, n_vars):
     return U
 
 
+_KW = dict(mu_molecular=1.8e-5, rho_inf=RHO, vel_inf=U_INF, p_inf=P)
+
+
+def _wall_distance(mesh):
+    y = np.asarray(mesh.sps_coords)[..., 1]
+    return np.ascontiguousarray(np.maximum(np.minimum(y, H - y), 1e-12))
+
+
+def _single(scheme, order, mesh=None):
+    """单机求解器（均匀来流初场、解析壁面距离）。"""
+    from autoflowcfd.core.fr_solver.solver import FRSolver
+
+    mesh = mesh or build_channel_mesh_prism(order, nx=3, ny=4, nz=2, Lx=LX, H=H, Lz=LZ)
+    single = FRSolver(mesh, order=order, turb_model_name="SST", n_vars=7, time_scheme=scheme,
+                      bc_overrides=_bc(), **_KW)
+    single.order_continuation_enabled = False
+    single.state.U[...] = _uniform_U(*single.state.U.shape)
+    single.state._update_primitives()
+    single.wall_distance = _wall_distance(mesh)
+    return single
+
+
 def _pair(scheme, order=1):
     from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
-    from autoflowcfd.core.fr_solver.solver import FRSolver
     from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
     from autoflowcfd.fr.operators import generate_fr_operators
 
     mesh = build_channel_mesh_prism(order, nx=3, ny=4, nz=2, Lx=LX, H=H, Lz=LZ)
     ops = generate_fr_operators(order)
-    kw = dict(mu_molecular=1.8e-5, rho_inf=RHO, vel_inf=U_INF, p_inf=P, bc_overrides=_bc())
-    single = FRSolver(mesh, order=order, turb_model_name="SST", n_vars=7, time_scheme=scheme, **kw)
-    single.order_continuation_enabled = False
-    n_cells, n_sps, n_vars = single.state.U.shape
-    U0 = _uniform_U(n_cells, n_sps, n_vars)
-    single.state.U[...] = U0
-    single.state._update_primitives()
+    single = _single(scheme, order, mesh)
+    n_cells = single.state.U.shape[0]
+    U0 = single.state.U
 
     # 构造需要一个壁面距离来源（没有就报错）；随后两侧都换成同一个解析壁距
     dist = DistributedFRSolver(
         mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity, n_ranks=1,
         backend="cpu", order=order, turb_model_name="SST", n_vars=5, time_scheme=scheme,
-        wall_distance_source=synthetic_wall_source(mesh), **kw)
+        wall_distance_source=synthetic_wall_source(mesh), bc_overrides=_bc(), **_KW)
     # 分布式状态只存平均流 5 变量（k/omega 由湍流模型持有，见 DistributedFRState）
     dist.state.U[:n_cells] = U0[..., :5]
     dist.state.Q[:n_cells] = conserved_to_primitive(U0[..., :5])
 
-    y = np.asarray(mesh.sps_coords)[..., 1]
-    d = np.ascontiguousarray(np.maximum(np.minimum(y, H - y), 1e-12))
-    single.wall_distance = d
-    dist.wall_distance_compact = d[dist.dist_flat_face.compact_global_ids]
+    dist.wall_distance_compact = single.wall_distance[dist.dist_flat_face.compact_global_ids]
     return single, dist
 
 
-def _assert_same(single, dist, what):
-    n = single.state.U.shape[0]
-    got, exp = dist.state.U[:n, :, :5], single.state.U[..., :5]
+def _rel_diffs(ref, other):
+    """`other` 相对单机 `ref` 的逐量最大相对差：`{"平均流", "k_field", "omega_field", "nu_t"}`。"""
+    n = ref.state.U.shape[0]
+    got, exp = other.state.U[:n, :, :5], ref.state.U[..., :5]
     # 动量三分量共用动量模的尺度：均匀来流里 rho_v/rho_w 本身只有舍入量级，
     # 按各自最大值归一会把 1e-14 的重结合噪声放大成 1e-6
     scale = np.abs(exp).max(axis=(0, 1))
     scale[1:4] = np.abs(exp[..., 1:4]).max()
-    rel = (np.abs(got - exp) / scale).max()
-    assert rel <= 1e-9, f"{what}：平均流与单机不一致（相对 {rel:.3e}）"
+    out = {"平均流": float((np.abs(got - exp) / scale).max())}
     for name in ("k_field", "omega_field", "nu_t"):
-        a = np.asarray(getattr(dist.turb_model, name))
-        b = np.asarray(getattr(single.turb_model, name))
-        r = np.abs(a - b).max() / max(np.abs(b).max(), 1e-300)
-        assert r <= 1e-9, f"{what}：{name} 与单机不一致（相对 {r:.3e}）"
+        a = np.asarray(getattr(other.turb_model, name))
+        b = np.asarray(getattr(ref.turb_model, name))
+        out[name] = float(np.abs(a - b).max() / max(np.abs(b).max(), 1e-300))
+    return out
+
+
+def _assert_same(single, dist, what, tol=1e-9):
+    for name, r in _rel_diffs(single, dist).items():
+        assert r <= tol, f"{what}：{name} 与单机不一致（相对 {r:.3e}，容差 {tol:.1e}）"
 
 
 def test_explicit_sst_with_boundary_conditions_matches_single_machine():
@@ -113,16 +132,30 @@ def test_newton_krylov_sst_matches_single_machine(order):
     from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 
     single, dist = _pair(TimeIntegrationScheme.NEWTON_KRYLOV, order)
+    # 容差按单机**自身**对舍入量级扰动的敏感度定：初场乘 (1 + 1e-15 xi) 的孪生单机。
+    # P0 的湍流有了产生项之后（`fr_operators/corrected_gradient.py`），差分装配的块
+    # 预处理把残差的舍入差异按 1/h 放大、GMRES 只走 1 次时直接进入 Newton 更新：孪生
+    # 单机第 1/2/3 步 k 相对差 8.7e-9 / 2.6e-8 / 1.2e-7（此前 P0 产生项恒为零、k 恒为
+    # 来流值，同一量只有 1e-13）。分布式与单机的差异只来自重结合时，必然落在这个
+    # 敏感度的同一量级；判据取其 10 倍、下限 1e-9。
+    twin = _single(TimeIntegrationScheme.NEWTON_KRYLOV, order)
+    rng = np.random.default_rng(0)
+    twin.state.U[...] *= 1.0 + 1e-15 * rng.standard_normal(twin.state.U.shape)
+    twin.state._update_primitives()
     for k in range(3):
         single.step(1e-6)
         dist.step(1e-6)
+        twin.step(1e-6)
         a, b = dist._newton_last_info, single._newton_last_info
         assert a["gmres_iters"] == b["gmres_iters"] and a["theta"] == b["theta"], (
             f"第 {k + 1} 步 Newton 轨迹不同：分布式 {a}，单机 {b}")
-        _assert_same(single, dist, f"NK SST 第 {k + 1} 步")
+        tol = max(1e-9, 10.0 * max(_rel_diffs(single, twin).values()))
+        _assert_same(single, dist, f"NK SST 第 {k + 1} 步", tol)
     # CFL 由残差范数之比推出，两侧残差的求和顺序不同（分布式经紧凑换序）：残差范数
-    # 继承状态的重结合差异，与状态用同一容差（P0 实测相对 2e-10）
-    assert dist._cfl_controller.cfl_number == pytest.approx(single._cfl_controller.cfl_number, rel=1e-9)
+    # 继承状态的重结合差异，与状态用同一判据（孪生单机的 CFL 偏差的 10 倍、下限 1e-9）
+    cfl = single._cfl_controller.cfl_number
+    cfl_tol = max(1e-9, 10.0 * abs(twin._cfl_controller.cfl_number - cfl) / cfl)
+    assert dist._cfl_controller.cfl_number == pytest.approx(cfl, rel=cfl_tol)
     if order == 0:
         assert single._newton_block_precond.coupling is not None
         assert dist._newton_block_precond.coupling is not None

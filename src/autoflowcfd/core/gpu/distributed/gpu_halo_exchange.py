@@ -143,34 +143,13 @@ class GPUHaloExchange:
         self.device_id = device_id
         self.cuda_aware = is_cuda_aware_mpi()
 
+        # 按"每解点尾部形状"缓存的 buffer（GPU send/recv；非 CUDA-aware MPI 时另有主机
+        # staging send/recv）：构造时预分配主形状 `(n_vars,)`，其它形状（湍流源项的
+        # 速度梯度 `(3, 3)` 等）首次交换时分配、之后复用
+        self._buffers_by_tail: Dict[tuple, tuple] = {}
+        self._buffers((n_vars,))
+
         with cp.cuda.Device(device_id):
-            # 预分配 GPU send/recv buffer
-            self.send_buffers_gpu: Dict[int, cp.ndarray] = {}
-            self.recv_buffers_gpu: Dict[int, cp.ndarray] = {}
-
-            for r, cells in partition.send_lists.items():
-                self.send_buffers_gpu[r] = cp.zeros(
-                    (len(cells), n_sps, n_vars), dtype=cp.float64
-                )
-            for r, cells in partition.recv_lists.items():
-                self.recv_buffers_gpu[r] = cp.zeros(
-                    (len(cells), n_sps, n_vars), dtype=cp.float64
-                )
-
-            # 预分配 CPU pinned staging buffer（用于非 CUDA-aware MPI）
-            self.send_buffers_cpu: Dict[int, np.ndarray] = {}
-            self.recv_buffers_cpu: Dict[int, np.ndarray] = {}
-
-            if not self.cuda_aware:
-                for r, cells in partition.send_lists.items():
-                    self.send_buffers_cpu[r] = np.empty(
-                        (len(cells), n_sps, n_vars), dtype=np.float64
-                    )
-                for r, cells in partition.recv_lists.items():
-                    self.recv_buffers_cpu[r] = np.empty(
-                        (len(cells), n_sps, n_vars), dtype=np.float64
-                    )
-
             # 预计算 halo 索引映射（避免每次交换重复计算）
             self._halo_index_map: Dict[int, list] = {}
             for r, global_cells in partition.recv_lists.items():
@@ -192,68 +171,80 @@ class GPUHaloExchange:
             f"{partition.n_halo} halo cells, cuda_aware={self.cuda_aware}"
         )
 
+    def _buffers(self, tail: tuple) -> tuple:
+        """尾部形状 `tail` 的 `(send_gpu, recv_gpu, send_cpu, recv_cpu)`（按邻居 rank 的字典；
+        CUDA-aware MPI 下主机 staging 两个为空），首次使用时分配。"""
+        bufs = self._buffers_by_tail.get(tail)
+        if bufs is None:
+            cp = get_cupy()
+            part = self.partition
+            with cp.cuda.Device(self.device_id):
+                send_gpu = {r: cp.zeros((len(c), self.n_sps) + tail) for r, c in part.send_lists.items()}
+                recv_gpu = {r: cp.zeros((len(c), self.n_sps) + tail) for r, c in part.recv_lists.items()}
+            send_cpu, recv_cpu = {}, {}
+            if not self.cuda_aware:
+                send_cpu = {r: np.empty((len(c), self.n_sps) + tail) for r, c in part.send_lists.items()}
+                recv_cpu = {r: np.empty((len(c), self.n_sps) + tail) for r, c in part.recv_lists.items()}
+            bufs = (send_gpu, recv_gpu, send_cpu, recv_cpu)
+            self._buffers_by_tail[tail] = bufs
+        return bufs
+
     def exchange(self, U_gpu) -> 'cp.ndarray':
         """执行 GPU halo 交换。
 
         Args:
-            U_gpu: CuPy 数组 (n_local_cells, n_sps, n_vars) 本 rank 的 local cell 数据
+            U_gpu: CuPy 数组 (n_local_cells, n_sps, ...) 本 rank 的 local cell 数据，每解点的
+                尾部形状任意（主形状 `(n_vars,)`；速度梯度 `(3, 3)` 等同一个实例交换）
 
         Returns:
-            extended_data: CuPy 数组 (n_total_cells, n_sps, n_vars)
+            extended_data: CuPy 数组 (n_total_cells, n_sps, ...)
         """
         cp = get_cupy()
         part = self.partition
         n_local = part.n_local_cells
         n_total = part.n_total_cells
+        tail = tuple(U_gpu.shape[2:])
 
         with cp.cuda.Device(self.device_id):
             # 构建扩展数组
-            extended = cp.empty((n_total, self.n_sps, self.n_vars), dtype=cp.float64)
+            extended = cp.empty((n_total, self.n_sps) + tail, dtype=cp.float64)
             extended[:n_local] = U_gpu
 
             if not part.neighbor_ranks:
                 return extended
 
+            bufs = self._buffers(tail)
             if self.cuda_aware:
-                self._exchange_cuda_aware(U_gpu, extended)
+                self._exchange_cuda_aware(U_gpu, extended, bufs)
             else:
-                self._exchange_staging(U_gpu, extended)
+                self._exchange_staging(U_gpu, extended, bufs)
 
         return extended
 
-    def _exchange_cuda_aware(self, U_gpu, extended):
+    def _exchange_cuda_aware(self, U_gpu, extended, bufs):
         """CUDA-aware MPI 直接 GPU buffer 通信（零拷贝）。"""
         cp = get_cupy()
         comm = get_comm()
         MPI = get_mpi()
         part = self.partition
+        send_gpu, recv_gpu = bufs[0], bufs[1]
 
         # 打包发送数据（GPU 上直接操作）
         for r, local_indices in part.send_lists.items():
-            self.send_buffers_gpu[r][:] = U_gpu[local_indices]
+            send_gpu[r][:] = U_gpu[local_indices]
 
         # 非阻塞接收
         recv_reqs = []
         for r in part.neighbor_ranks:
-            if r in self.recv_buffers_gpu:
-                req = comm.Irecv(
-                    cp.cuda.MemoryPointer.from_device(
-                        self.recv_buffers_gpu[r].data
-                    ),
-                    source=r, tag=0,
-                )
+            if r in recv_gpu:
+                req = comm.Irecv(cp.cuda.MemoryPointer.from_device(recv_gpu[r].data), source=r, tag=0)
                 recv_reqs.append(req)
 
         # 非阻塞发送
         send_reqs = []
         for r in part.neighbor_ranks:
-            if r in self.send_buffers_gpu:
-                req = comm.Isend(
-                    cp.cuda.MemoryPointer.from_device(
-                        self.send_buffers_gpu[r].data
-                    ),
-                    dest=r, tag=0,
-                )
+            if r in send_gpu:
+                req = comm.Isend(cp.cuda.MemoryPointer.from_device(send_gpu[r].data), dest=r, tag=0)
                 send_reqs.append(req)
 
         if recv_reqs:
@@ -262,9 +253,9 @@ class GPUHaloExchange:
             MPI.Request.Waitall(send_reqs)
 
         # 填入 halo 位置
-        self._fill_halo_gpu(extended)
+        self._fill_halo_gpu(extended, recv_gpu)
 
-    def _exchange_staging(self, U_gpu, extended):
+    def _exchange_staging(self, U_gpu, extended, bufs):
         """Staging buffer 模式：GPU→CPU→MPI→CPU→GPU。
 
         优化点：
@@ -276,27 +267,28 @@ class GPUHaloExchange:
         comm = get_comm()
         MPI = get_mpi()
         part = self.partition
+        send_gpu, recv_gpu, send_cpu, recv_cpu = bufs
 
-        # 1. GPU 上打包到 send_buffers_gpu
+        # 1. GPU 上打包到 GPU 发送 buffer
         for r, local_indices in part.send_lists.items():
-            self.send_buffers_gpu[r][:] = U_gpu[local_indices]
+            send_gpu[r][:] = U_gpu[local_indices]
 
         # 2. GPU→CPU 异步拷贝
         cp.cuda.Stream.null.synchronize()
         for r in part.send_lists:
-            cp.asnumpy(self.send_buffers_gpu[r], out=self.send_buffers_cpu[r])
+            cp.asnumpy(send_gpu[r], out=send_cpu[r])
 
         # 3. MPI 通信（CPU buffer）
         recv_reqs = []
         for r in part.neighbor_ranks:
-            if r in self.recv_buffers_cpu:
-                req = comm.Irecv(self.recv_buffers_cpu[r], source=r, tag=0)
+            if r in recv_cpu:
+                req = comm.Irecv(recv_cpu[r], source=r, tag=0)
                 recv_reqs.append(req)
 
         send_reqs = []
         for r in part.neighbor_ranks:
-            if r in self.send_buffers_cpu:
-                req = comm.Isend(self.send_buffers_cpu[r], dest=r, tag=0)
+            if r in send_cpu:
+                req = comm.Isend(send_cpu[r], dest=r, tag=0)
                 send_reqs.append(req)
 
         if recv_reqs:
@@ -306,21 +298,20 @@ class GPUHaloExchange:
 
         # 4. CPU→GPU 异步拷贝
         for r in part.recv_lists:
-            if r in self.recv_buffers_cpu:
-                self.recv_buffers_gpu[r][:] = cp.asarray(self.recv_buffers_cpu[r])
+            if r in recv_cpu:
+                recv_gpu[r][:] = cp.asarray(recv_cpu[r])
 
         # 5. 填入 halo 位置
-        self._fill_halo_gpu(extended)
+        self._fill_halo_gpu(extended, recv_gpu)
 
-    def _fill_halo_gpu(self, extended):
+    def _fill_halo_gpu(self, extended, recv_gpu):
         """将接收到的数据填入 GPU 扩展数组的 halo 位置。"""
-        cp = get_cupy()
         part = self.partition
         n_local = part.n_local_cells
 
         for r, global_cells in part.recv_lists.items():
-            if r in self.recv_buffers_gpu:
+            if r in recv_gpu:
                 offsets = self._halo_index_map[r]
                 for i, halo_idx in enumerate(offsets):
                     if halo_idx >= 0:
-                        extended[n_local + halo_idx] = self.recv_buffers_gpu[r][i]
+                        extended[n_local + halo_idx] = recv_gpu[r][i]

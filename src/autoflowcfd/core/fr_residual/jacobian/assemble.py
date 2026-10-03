@@ -38,7 +38,7 @@ import numpy as np
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from autoflowcfd.core.fr_operators.flux_kernels import resolve_viscous_ip_constant
 from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient
-from autoflowcfd.core.fr_operators.volume_contract import compute_adj_j, get_overintegration_context
+from autoflowcfd.core.fr_operators.volume_contract import get_overintegration_context
 from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
 from autoflowcfd.core.fr_residual.inviscid_kernel import compute_boundary_ghost_states
 from autoflowcfd.core.fr_residual.viscous_flux import compute_temperature
@@ -92,13 +92,13 @@ def _segments(ctx, n_real_prism, n_real_tet):
     return out
 
 
-def _ghost_perturbations(flat, Q, adj_j, provider):
+def _ghost_perturbations(flat, Q, provider):
     """边界幽灵态及其在"整场原始变量逐分量均匀平移"下的值（faces.py 复合差分用）。
 
     返回 `(Qg0, QgP, HG, row)`：`Qg0` 与残差同形 `(n_faces, n_fp, 5)`；`QgP[v]` 只存
     活跃边界面（紧凑行，`row[f]` 为其下标，非活跃面为 -1）。
     """
-    Qg0 = compute_boundary_ghost_states(flat, Q, adj_j, provider)
+    Qg0 = compute_boundary_ghost_states(flat, Q, provider)
     active = np.asarray(flat.is_boundary) & (np.asarray(flat.owner_is_primary) | np.asarray(flat.mixed_bnd_face))
     faces = np.nonzero(active)[0]
     row = -np.ones(flat.n_faces, dtype=np.int64)
@@ -111,7 +111,7 @@ def _ghost_perturbations(flat, Q, adj_j, provider):
     for v in range(5):
         Qp = Q.copy()
         Qp[..., v] += HG[v]
-        QgP[v, :faces.size] = compute_boundary_ghost_states(flat, Qp, adj_j, provider)[faces]
+        QgP[v, :faces.size] = compute_boundary_ghost_states(flat, Qp, provider)[faces]
     return Qg0, QgP, HG, row
 
 
@@ -166,8 +166,7 @@ def assemble_mean_flow_blocks(ctx: MeanFlowLinearization, U, residual=None, want
 
     # ---- 界面项 ----
     flat = ctx.flat_geometry()
-    adj_j = compute_adj_j(det, inv_sp)
-    Qg0, QgP, HG, row = _ghost_perturbations(flat, Q, adj_j, ctx.ghost_provider)
+    Qg0, QgP, HG, row = _ghost_perturbations(flat, Q, ctx.ghost_provider)
     from autoflowcfd.boundary.fr_ghost_state import build_viscous_boundary_kind
     vbc_kind = build_viscous_boundary_kind(flat.n_faces, flat.is_boundary, ctx.ghost_provider)
     c_ip = resolve_viscous_ip_constant(int(mesh.order))
