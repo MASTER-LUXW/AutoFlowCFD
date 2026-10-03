@@ -57,10 +57,7 @@ from .forcing import EisenstatWalkerForcing
 from .jacobian_vector import MatrixFreeJacobian
 from .block_jacobi import BlockJacobiCache
 from .gmres import gmres_right
-from .physicality import (
-    PHYSICALITY_MAX_RELATIVE_CHANGE, _cellwise_relaxation, density_pressure_row_limits,
-    update_local_dtau_scale,
-)
+from .physicality import _cellwise_relaxation, density_pressure_row_limits, update_local_dtau_scale
 from .preconditioner import PseudoTransientDiagonal
 from .reductions import LocalReductions
 

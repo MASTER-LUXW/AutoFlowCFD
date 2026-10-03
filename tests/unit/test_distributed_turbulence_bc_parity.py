@@ -151,10 +151,12 @@ def test_newton_krylov_sst_matches_single_machine(order):
             f"第 {k + 1} 步 Newton 轨迹不同：分布式 {a}，单机 {b}")
         tol = max(1e-9, 10.0 * max(_rel_diffs(single, twin).values()))
         _assert_same(single, dist, f"NK SST 第 {k + 1} 步", tol)
-    # CFL 由残差范数之比推出，两侧残差的求和顺序不同（分布式经紧凑换序）：残差范数
-    # 继承状态的重结合差异，与状态用同一判据（孪生单机的 CFL 偏差的 10 倍、下限 1e-9）
+    # CFL 由残差范数之比推出，继承状态的重结合差异：参照取孪生单机的状态偏差与 CFL 偏差中
+    # 较大者的 10 倍（下限 1e-9）。只拿孪生的 CFL 偏差作参照会随线程数（并行归约顺序）偶然
+    # 偏小：4 线程时孪生 CFL 只差 1.6e-8，而孪生状态差 1.2e-7、分布式 CFL 差 2.5e-7
     cfl = single._cfl_controller.cfl_number
-    cfl_tol = max(1e-9, 10.0 * abs(twin._cfl_controller.cfl_number - cfl) / cfl)
+    twin_dev = max(abs(twin._cfl_controller.cfl_number - cfl) / cfl, max(_rel_diffs(single, twin).values()))
+    cfl_tol = max(1e-9, 10.0 * twin_dev)
     assert dist._cfl_controller.cfl_number == pytest.approx(cfl, rel=cfl_tol)
     if order == 0:
         assert single._newton_block_precond.coupling is not None
