@@ -35,8 +35,6 @@ term 基本不起作用；它真正省时间是在 `dtau` 放大、系统接近�
 后期 —— 那时一次线性求解可能要几十次残差求值。
 """
 
-import numpy as np
-
 #: Eisenstat-Walker "choice 2" 的标准参数。
 _EW_GAMMA = 0.9
 _EW_ALPHA = 2.0
@@ -62,7 +60,7 @@ _EW_ALPHA = 2.0
 #: 而 PTC 的全部价值就在于"用显式不可能的大 dtau"。所以上界必须压到
 #: "解出来的方向真的还是隐式方向"那一档。0.1 的含义是"至少解一位有效
 #: 数字"，配合下方 `forcing.py` 之外的**残差接受判据**（见
-#: `jfnk.py::_accept_step`）构成安全的 PTC。
+#: `globalization.py::accept_step`）构成安全的 PTC。
 _ETA_MAX = 0.1
 
 #: `eta` 的硬下限。低于它的线性求解精度对外迭代没有可观测收益，只是

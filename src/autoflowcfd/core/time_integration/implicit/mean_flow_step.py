@@ -217,7 +217,7 @@ def step_mean_flow_newton(
         block_precond=solver._newton_block_precond, physicality=positivity.density_pressure_limits,
         rows_per_cell=u_flat.shape[0] // np.asarray(cell_is_prism).size, red=red,
         local_dtau_scale=getattr(solver, "_newton_local_dtau", None),
-        norm_weights=positivity.W,
+        norm_weights=positivity.norm_weights,
         real_rows=red.xp.asarray(real_row_mask(cell_is_prism, u_flat.shape[0] // np.asarray(cell_is_prism).size,
                                                order)))
     u_new = u_flat.copy()

@@ -60,7 +60,8 @@ from autoflowcfd.fr.native_padding import real_row_mask, real_sps_per_cell
 
 from .block_jacobi import BlockJacobiCache
 from .forcing import EisenstatWalkerForcing
-from .jfnk import ResidualNorm, step_newton_krylov
+from .globalization import ResidualNorm
+from .jfnk import step_newton_krylov
 from .mean_flow_step import N_MEAN_FLOW_VARS, require_no_modal_filter
 from .physicality import ScaledFieldRowLimits
 
@@ -282,11 +283,11 @@ def step_coupled_newton(solver, backend, dtau_flat, *, filter_active: bool = Fal
         forcing=solver._newton_forcing, dtau_scale=solver._newton_dtau_scale,
         block_precond=CoupledBlockPreconditioner(backend, mean_cache, turb_cache, residual),
         physicality=physicality, rows_per_cell=1, red=red,
-        local_dtau_scale=solver._newton_local_dtau, norm_weights=backend.positivity.W, real_rows=real)
+        local_dtau_scale=solver._newton_local_dtau, norm_weights=backend.positivity.norm_weights, real_rows=real)
     solver._newton_dtau_scale = info["dtau_scale"]
     solver._newton_local_dtau = info["local_dtau_scale"]
     backend.install(x_new, dtau_flat)
-    info.update(_subsystem_norms(residual.r0, backend.positivity.W, red))
+    info.update(_subsystem_norms(residual.r0, backend.positivity.norm_weights, red))
     solver._newton_last_info = info
     if info["theta"] <= 0.0:
         logger.warning(

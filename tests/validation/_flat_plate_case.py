@@ -137,7 +137,7 @@ def build_flat_plate_solver(order: int, *, nx_up: int = 8, nx_plate: int = 24, n
     # 网格自带的分组只是占位（构造需要），真正的边界类型由逐面分类的提供者给出
     placeholder = {name: {"type": "SYMMETRY"} for name in
                    ("x_min", "x_max", "wall_bottom", "wall_top", "z_min", "z_max")}
-    solver = FRSolver(mesh=mesh, order=order, turb_model_name=turb_model, n_vars=7,
+    solver = FRSolver(mesh=mesh, order=order, turb_model_name=turb_model, n_vars=5 if turb_model == "NONE" else 7,
                       time_scheme=TimeIntegrationScheme.NEWTON_KRYLOV, rho_inf=RHO_INF, vel_inf=U_INF,
                       p_inf=P_INF, mu_molecular=MU, bc_overrides=placeholder,
                       turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio)

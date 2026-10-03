@@ -27,7 +27,7 @@
 * 线性求解容差由 inexact-Newton 的 forcing term 自适应给出
   （`forcing.py`），不把线性系统解到机器精度；
 * 物理性限幅是逐单元松弛（`PHYSICALITY_MAX_RELATIVE_CHANGE` 的说明），
-  `theta` 是其后残差接受判据的回溯比例（`_accept_step`）；
+  `theta` 是其后残差接受判据的回溯比例（`globalization.py::accept_step`）；
 * 一步不被接受（`theta = 0`）时**当场缩小 `dtau` 重试**，而不是原地
   不动等外层控制器 —— 那条交接被真实运行证明从来没有发生过（残差逐位
   不变让按残差历史工作的控制器看不到停滞），完整证据与修法见
@@ -59,6 +59,7 @@ from .block_jacobi import BlockJacobiCache
 from .gmres import gmres_right
 from .physicality import _cellwise_relaxation, density_pressure_row_limits, update_local_dtau_scale
 from .preconditioner import PseudoTransientDiagonal
+from .globalization import ResidualNorm, accept_step
 from .reductions import LocalReductions
 
 #: GMRES 重启长度的**下限**。Krylov 基向量按 `(N, n_var)` 存，重启长度直接决定
@@ -89,24 +90,9 @@ KRYLOV_BASIS_BYTES = 2 * 2 ** 30
 #: 放开到 200 的同时加了两道闸，所以"成本失控"这件事由它们承担而不是
 #: 由这个上限承担：
 #:   * `gmres_info > 0`（未达容差）会被记录并交给残差接受判据；
-#:   * 残差接受判据（`_accept_step`）不接受让残差恶化的步，回溯到接受
+#:   * 残差接受判据（`globalization.py::accept_step`）不接受让残差恶化的步，回溯到接受
 #:     或者放弃这一步（`theta=0`，外层自适应 CFL 随之缩小 dtau）。
 GMRES_MAX_ITER = 200
-
-#: 残差接受判据：允许一步之后 `||R||` 相对恶化的上限。
-#:
-#: 伪瞬态延拓不是对某个 merit function 做线搜索，所以**不能**要求残差
-#: 严格单调下降 —— 真实瞬态本身会让它先升后降（Blasius 从均匀初场起步
-#: 就是这样）。但也不能什么都接受：那正是"CFL 10 跑到 6.5e19"的来源。
-#:
-#: 取 1.5 的含义：一步之内残差恶化超过 50% 就认为这一步的方向不可信，
-#: 回溯 `theta`。它足够松以容纳真实瞬态的上升（实测显式路径上单步的
-#: 残差增幅远小于此），又足够紧以立刻拦住发散。
-RESIDUAL_ACCEPT_GROWTH = 1.5
-
-#: 回溯次数上限。每次回溯把 `theta` 减半并重算一次残差，所以代价是
-#: 最多这么多次额外残差求值。4 次即 `theta` 最小到 1/16。
-MAX_BACKTRACK = 4
 
 #: 单次 `step_newton_krylov` 调用里允许缩小 `dtau` 重试的档数
 #: （每档 `dtau_control.FAIL_SHRINK`，即 4 倍）。
@@ -117,72 +103,6 @@ MAX_BACKTRACK = 4
 #: **下一次调用**继续（`dtau_scale` 跨步持久化），于是极端情形下总档数
 #: 不受这个值限制、单步成本却受它限制。
 DTAU_MAX_CUTS_PER_STEP = 3
-
-class ResidualNorm:
-    """Newton 全局化用的残差范数：逐行权重 `w`（守恒权重 = 求积权重 x det J，
-    补零槽位为 0）下的体积加权 RMS `sqrt(sum w r^2 / (sum w * n_var))`；`w` 为 None
-    时是逐点 RMS。
-
-    **为什么要体积加权**（2026-09-26）：残差按 `dU/dt = 残差/体积` 存，逐点 RMS 把
-    体积相差 1e6 倍的单元等权相加，被最小的单元主导。plate_demo P1：平板锐边一带
-    6.57% 的单元占 `||Gamma R||^2` 的 78.6%，接受判据与 SER 自适应 CFL 被这几百个
-    欠分辨角点单元的不规则行为牵着走，CFL 卡在 20~60。体积加权的积分范数就是
-    有限体积代码的通量不平衡量（SU2/FUN3D 的残差），是物理上有意义的全域度量。
-    """
-
-    __slots__ = ("weights", "red")
-
-    def __init__(self, weights, red: LocalReductions):
-        self.red = red
-        self.weights = None if weights is None else red.xp.asarray(weights, dtype=red.xp.float64).ravel()
-
-    def __call__(self, r) -> float:
-        if self.weights is None:
-            return self.red.rms(r)
-        s = self.red.sum(self.weights)
-        if s <= 0.0:
-            return 0.0
-        return float(np.sqrt(self.red.sum(self.weights[:, None] * r * r) / (s * r.shape[1])))
-
-
-def _accept_step(residual: Callable, u0_flat, du_flat, theta0: float, res_norm0: float,
-                 red: LocalReductions, norm: "ResidualNorm") -> Tuple[object, float, float, int]:
-    """按残差接受判据回溯 `theta`，返回
-    `(U_new, theta, res_norm_new, n_extra_residual_eval)`。
-
-    从 `theta0`（物理性限幅给出的上界）开始，每次不被接受就减半，最多
-    `MAX_BACKTRACK` 次。接受条件是
-
-        ||R(U0 + theta*dU)||  <=  RESIDUAL_ACCEPT_GROWTH * ||R(U0)||
-
-    全部回溯都不被接受时返回 `theta = 0`（**这一步不前进**）。调用方
-    `step_newton_krylov` 据此**当场缩小 `dtau` 重解一次**（见
-    `dtau_control.py`），而不是把状态原样交出去 —— 后者被真实运行证明
-    会永久停滞。不"硬着头皮走一步"是刻意的：本项目已经吃过一次"越界
-    之后收缩救不回来"的亏（项目记忆
-    `adaptive_cfl_four_defects_and_soft_ceiling` 第 12 条）。
-
-    为什么不用标准线搜索（Armijo）：那需要一个 merit function
-    （通常 `0.5||R||^2`）与它的方向导数，而伪瞬态解的不是
-    `min ||R||^2` 而是 `(I/dtau + J) dU = -R`；在 `dtau` 小的时候
-    `dU` 根本不是 `||R||^2` 的下降方向（它是时间推进方向）。所以这里用的
-    是"不允许显著恶化"这个更弱、但与 PTC 语义相容的判据。
-    """
-    theta = float(theta0)
-    n_eval = 0
-    for _ in range(MAX_BACKTRACK + 1):
-        if theta <= 0.0:
-            break
-        u_try = u0_flat + theta * du_flat
-        r_try = residual(u_try)
-        n_eval += 1
-        if red.all_finite(r_try):
-            rn = norm(r_try)
-            if rn <= RESIDUAL_ACCEPT_GROWTH * res_norm0:
-                return u_try, theta, rn, n_eval
-        theta *= 0.5
-    return u0_flat, 0.0, res_norm0, n_eval
-
 
 def krylov_restart(n_local_entries: int, red: LocalReductions, flexible: bool = False) -> int:
     """按 Krylov 基内存预算给出的重启长度（见 `KRYLOV_BASIS_BYTES`）。
@@ -223,7 +143,7 @@ class _RealRows:
 
 def _solve_direction(jac: MatrixFreeJacobian, prec, r0, n_var: int, eta: float,
                      gmres_restart: int, gmres_max_iter: int, red: LocalReductions,
-                     rows: Optional[_RealRows] = None):
+                     rows: Optional[_RealRows] = None, norm: Optional[ResidualNorm] = None):
     """解 `(I/dtau + J) dU = -R`，返回 `(du, gmres_iters, gmres_info, linear_rel_residual)`。
 
     `prec` 同时提供 PTC 对角项（`add_ptc_term`）与预处理作用（`apply`），
@@ -231,6 +151,16 @@ def _solve_direction(jac: MatrixFreeJacobian, prec, r0, n_var: int, eta: float,
     线性求解用后端无关的 `gmres.py::gmres_right`（右预处理：它的收敛判据
     就是真实线性残差 `||R + (I/dtau+J) dU|| <= eta ||R||`，正是 inexact
     Newton 要求的量）。
+
+    **线性残差在全局化的同一个范数里最小化**（2026-10-03）：`norm` 带逐行权重 `w`
+    时（`ResidualNorm`），对 `D A M^{-1} D^{-1}`（`D = diag(sqrt(w))`）做 GMRES，解
+    `x = M^{-1} D^{-1} y`。它的残差就是 `D (b - A x)`，即接受判据与 SER 所用的加权范数；
+    `D A M^{-1} D^{-1}` 与 `A M^{-1}` 相似，预处理后算子的谱不变。此前 GMRES 在未加权
+    2 范数里最小化：残差被体积小 1e6 倍的单元主导，GMRES 在那里把线性残差压到
+    `eta` 以下，在占全域体积的大单元上却让它变大——湍流平板层流 P2（`tests/validation/
+    _flat_plate_case.py`）被回溯的步上未加权线性残差 0.03~0.10、体积加权 1.1~2.5 倍
+    （非线性误差只有 0.001~0.003），线性模型本身就让全局度量恶化，接受判据回溯、SER
+    收缩，CFL 卡在 ~60 近 200 步。
 
     `du` 为 `None` 表示线性求解产出了非有限方向（调用方据此缩小 `dtau`
     重试或放弃这一步，**不**静默用一个截断后的方向凑一步）。
@@ -261,6 +191,21 @@ def _solve_direction(jac: MatrixFreeJacobian, prec, r0, n_var: int, eta: float,
             return rows.compact(prec.apply(rows.expand(x_1d, xp)))
 
         b = rows.compact(-r0)
+
+    if norm is not None and norm.weights is not None:
+        d_full = xp.broadcast_to(xp.sqrt(norm.weights)[:, None], (n_dof, n_var))
+        d = xp.ascontiguousarray(d_full).reshape(-1) if rows is None else rows.compact(d_full)
+        if not bool(red.all_finite(d)) or red.min(d) <= 0.0:
+            raise ValueError("残差范数权重在真实行上必须为正有限值（加权线性求解需要 D 可逆）")
+        unscaled_A, unscaled_Minv = _apply_A, _apply_Minv
+
+        def _apply_A(x_1d):
+            return d * unscaled_A(x_1d)
+
+        def _apply_Minv(y_1d):
+            return unscaled_Minv(y_1d / d)
+
+        b = d * b
 
     du_1d, iters, info, rel = gmres_right(
         _apply_A, b, _apply_Minv, rtol=eta,
@@ -411,7 +356,7 @@ def step_newton_krylov(
         t_solve = time.perf_counter()
         du, iters, ginfo, linear_rel = _solve_direction(
             jac, prec, r0, n_var, eta, gmres_restart,
-            gmres_max_iter if budget is None else min(budget, gmres_max_iter), red, rows)
+            gmres_max_iter if budget is None else min(budget, gmres_max_iter), red, rows, norm)
         t_solve = time.perf_counter() - t_solve
         iters_total += iters
         if ginfo > 0 and budget is not None and budget < gmres_max_iter:
@@ -423,7 +368,7 @@ def step_newton_krylov(
             prec = block_precond.preconditioner(dtau_try, n_var)
             t_solve = time.perf_counter()
             du, iters, ginfo, linear_rel = _solve_direction(
-                jac, prec, r0, n_var, eta, gmres_restart, gmres_max_iter, red, rows)
+                jac, prec, r0, n_var, eta, gmres_restart, gmres_max_iter, red, rows, norm)
             t_solve = time.perf_counter() - t_solve
             iters_total += iters
         iters_since_build = iters
@@ -431,7 +376,7 @@ def step_newton_krylov(
         if du is not None:
             alpha, theta_phys, limited_frac = _cellwise_relaxation(
                 physicality(u0_flat, du, red), rows_per_cell, red)
-            u_try, theta, res_norm_new, n_extra = _accept_step(
+            u_try, theta, res_norm_new, n_extra = accept_step(
                 residual, u0_flat, du * alpha[:, None], 1.0, res_norm, red, norm)
             n_extra_total += n_extra
             if theta > 0.0:

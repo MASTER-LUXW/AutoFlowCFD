@@ -28,6 +28,13 @@ class PositivityLimiter:
     """就地限制扁平守恒量 `U_flat` `(n_cells*n_sps, n_vars)` 的可调用对象。
 
     Attributes:
+        W: `(n_cells, n_sps)` 守恒权重（解点插值型求积权重 x det J，补零槽位为 0），
+            单元均值的精确求积。
+        norm_weights: `(n_cells, n_sps)` Newton 全局化残差范数的逐行权重：单元体积
+            （`W` 的单元内和）在真实解点上均分，补零槽位为 0（`implicit/globalization.py::ResidualNorm`）。
+            不能直接用 `W`：原生基 P2/P3 的插值型权重有零与负值（P2 棱柱 18 个解点中
+            9 个为 0，P2 四面体 4 个为 -1/15，P3 四面体 20 个中 12 个为 0），加权平方和
+            只是半范数——那些解点上的残差对接受判据与 SER 不可见，负权重还能让它变小。
         n_calls / n_limited_total / min_theta: 累计统计（诊断用）。
     """
 
@@ -42,6 +49,9 @@ class PositivityLimiter:
         self.n_real_tet = int(n_real_tet)
         self.gamma = float(gamma)
         self.n_cells, self.n_sps = W.shape
+        n_real = xp.where(xp.asarray(cell_is_prism), self.n_real_prism, self.n_real_tet)
+        real = xp.arange(self.n_sps)[None, :] < n_real[:, None]
+        self.norm_weights = xp.where(real, (W.sum(axis=1) / n_real)[:, None], 0.0)
         self.n_calls = 0
         self.n_limited_total = 0
         self.min_theta = 1.0
