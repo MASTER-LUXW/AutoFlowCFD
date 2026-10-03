@@ -7,8 +7,8 @@
   `omega = exp(w)` 与 `grad omega = omega grad w`），`S_w = S_omega / omega + Gamma_w |grad w|^2`
   （后一项是 `sst/log_omega.py` 的变换带出的，逐点、依赖 `grad w`）；
 * 有效扩散系数 `Gamma = (Gamma_k, Gamma_w)`（`transport/residual.py::
-  turbulence_diffusivities`，`mu + sigma(F1) rho nu_t`，`nu_t` 由源项求值在同一组
-  `(k, omega)` 上刷新）。
+  turbulence_diffusivities`，`mu + sigma(F1) rho nu_t`，`F1` 与 `nu_t` 都由源项求值在
+  同一组 `(k, omega)` 上刷新，所以随源项一起对输入求导）。
 
 两者在每个解点上只依赖该点的 `(k, w, grad k, grad w)`（梯度按
 `sst/bounds.py::clip_gradient_magnitude` 裁剪之后使用，与残差同一顺序）。
@@ -32,26 +32,24 @@ _SQRT_EPS = float(np.sqrt(np.finfo(np.float64).eps))
 
 #: 模型上被源项求值刷新的缓存属性：试探求值之后必须恢复，否则试探场会泄漏进平均流用的
 #: `nu_t`（CPU 与 GPU 的 SST 模型同名；耦合 Newton 的快照还原与这里共用这一份）。
-CACHED_MODEL_ATTRS = ("nu_t", "_last_beta_blend", "_omega_realizability_min")
+CACHED_MODEL_ATTRS = ("nu_t", "_last_F1", "_last_beta_blend", "_omega_realizability_min")
 
 
 class TurbulencePointwise:
     """在模型对象上求逐点 `(S, Gamma)`（主机数组，`(n_cells, n_sps, 2)` 两份），全部后端
-    共用；后端只注入它自己的源项与扩散系数求值（与该后端残差同一份）：
-
-    * `source(Q, grad_vel, d_wall, mu, grad_k, grad_omega) -> (S_k, S_omega)`；
-    * `diffusivities(turb, k, omega, grad_k, grad_w, rho, rho_nu_t, nu, mu, S_mag, d_wall)
-      -> (Gamma_k, Gamma_w)`。
+    共用；后端只注入它自己的源项求值（与该后端残差同一份）
+    `source(Q, grad_vel, d_wall, mu, grad_k, grad_omega) -> (S_k, S_omega)`，扩散系数
+    读源项刷新的模型缓存（`turbulence_diffusivities`，numpy / cupy 同一份）。
 
     求值时临时把 `k/omega` 场换成试探值（`omega = exp(w)`），结束后恢复场与源项刷新
     的缓存。做成类而不是闭包（项目规范）。CPU 用 `cpu_turbulence_pointwise` 构造。
     """
 
-    __slots__ = ("xp", "turb", "Q", "grad_vel", "d_wall", "mu", "S_mag", "source", "diffusivities")
+    __slots__ = ("xp", "turb", "Q", "grad_vel", "d_wall", "mu", "source")
 
-    def __init__(self, xp, turb, Q, grad_vel, d_wall, mu, S_mag, source, diffusivities):
+    def __init__(self, xp, turb, Q, grad_vel, d_wall, mu, source):
         self.xp, self.turb, self.Q, self.grad_vel, self.d_wall = xp, turb, Q, grad_vel, d_wall
-        self.mu, self.S_mag, self.source, self.diffusivities = float(mu), S_mag, source, diffusivities
+        self.mu, self.source = float(mu), source
 
     def __call__(self, k, w, grad_k, grad_w):
         xp, turb = self.xp, self.turb
@@ -63,10 +61,7 @@ class TurbulencePointwise:
             gk = clip_gradient_magnitude(xp.asarray(grad_k), xp)
             gw = clip_gradient_magnitude(xp.asarray(grad_w), xp)
             Sk, Sw = self.source(self.Q, self.grad_vel, self.d_wall, self.mu, gk, omega[..., None] * gw)
-            rho = self.Q[:, :, 0]
-            nu = self.mu / xp.maximum(rho, 1e-10)
-            Gk, Gw = self.diffusivities(turb, turb.k_field, omega, gk, gw, rho, rho * turb.nu_t, nu, self.mu,
-                                        self.S_mag, self.d_wall)
+            Gk, Gw = turbulence_diffusivities(turb, self.Q[:, :, 0] * turb.nu_t, self.mu)
         finally:
             turb.k_field, turb.omega_field = saved
             for a, v in saved_cache.items():
@@ -76,9 +71,8 @@ class TurbulencePointwise:
 
 
 def cpu_turbulence_pointwise(turb, Q, grad_vel, d_wall, mu) -> TurbulencePointwise:
-    """单机 / CPU 分布式的逐点求值器（`SSTModelFR` 的源项与 `turbulence_diffusivities`）。"""
-    return TurbulencePointwise(np, turb, Q, grad_vel, d_wall, mu, turb.compute_strain_rate_magnitude(grad_vel),
-                               turb.compute_source_terms, turbulence_diffusivities)
+    """单机 / CPU 分布式的逐点求值器（`SSTModelFR` 的源项）。"""
+    return TurbulencePointwise(np, turb, Q, grad_vel, d_wall, mu, turb.compute_source_terms)
 
 
 def turbulence_pointwise_partials(evaluate, k, omega, grad_k, grad_omega, scales):

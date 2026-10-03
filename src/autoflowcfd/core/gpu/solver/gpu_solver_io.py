@@ -272,7 +272,7 @@ class _GPUSolverIOMixin:
                 compute_turbulence_transport_residual_gpu,
             )
             transport_k, transport_w = compute_turbulence_transport_residual_gpu(
-                self, grad_vel=grad_vel, grad_k=grad_k, grad_log_omega=grad_w,
+                self, grad_k=grad_k, grad_log_omega=grad_w,
             )
 
         return dk_dt, dw_dt, transport_k, transport_w

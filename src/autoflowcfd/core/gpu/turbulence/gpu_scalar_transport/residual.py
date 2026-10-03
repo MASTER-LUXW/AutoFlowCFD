@@ -18,9 +18,8 @@ from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_
 
 
 from autoflowcfd.core.turbulence.transport import resolve_turb_overintegration
-from autoflowcfd.core.turbulence.sst.bounds import (
-    clip_gradient_magnitude, model_evaluation_fields, omega_realizability_floor,
-)
+from autoflowcfd.core.turbulence.sst.bounds import clip_gradient_magnitude
+from autoflowcfd.core.turbulence.transport.residual import turbulence_diffusivities
 from autoflowcfd.core.turbulence.transport.faces import boundary_diffusion_targets
 from autoflowcfd.core.turbulence.sst.log_omega import log_omega, log_omega_gradient_source
 
@@ -196,23 +195,8 @@ def compute_scalar_diffusion_residual_gpu(
     return residual + _lift_side_jumps_gpu(cp, ff, jumps[0], jumps[1], +1.0, det_jacs, n_cells, n_sps)
 
 
-def turbulence_diffusivities_gpu(cp, turb, k, omega, grad_k, grad_log_omega, rho, rho_nu_t, nu, mu, S_mag, d_wall):
-    """GPU 版 k / ln(omega) 有效扩散系数 `mu + sigma(F1) rho nu_t`（CPU 版
-    `transport/residual.py::turbulence_diffusivities` 的对应：梯度模长上限只作用在
-    `grad k` 与 `grad ln(omega)` 上，交叉扩散用物理梯度 `omega grad ln(omega)`），输运
-    残差与湍流解析 Jacobian 的 GPU 逐点求值器共用；两个梯度须已裁剪，同 CPU 版约定）。"""
-    grad_dot = omega * cp.sum(grad_k * grad_log_omega, axis=-1)
-    # 模型项求值用有效值（与 CPU 版同一处，定义在 `sst/bounds.py`）
-    k_eff, omega_safe = model_evaluation_fields(k, omega, omega_realizability_floor(turb, S_mag, cp), cp)
-    CD_kw = cp.maximum(2.0 * rho * turb.sigma_w2 / omega_safe * grad_dot, 1e-10)
-    F1 = turb.compute_blending_F1_gpu(k_eff, omega_safe, d_wall, nu, rho, CD_kw)
-    sigma_k = F1 * turb.sigma_k1 + (1.0 - F1) * turb.sigma_k2
-    sigma_w = F1 * turb.sigma_w1 + (1.0 - F1) * turb.sigma_w2
-    return mu + sigma_k * rho_nu_t, mu + sigma_w * rho_nu_t
-
-
 def compute_turbulence_transport_residual_gpu(
-    solver, grad_vel=None, grad_k=None, grad_log_omega=None,
+    solver, grad_k=None, grad_log_omega=None,
 ) -> Tuple:
     """GPU 版 k 与 `w = ln(omega)` 的完整输运残差入口（对流+扩散，w 另加
     `Gamma_w |grad w|^2`，见 `core/turbulence/sst/log_omega.py`），与 CPU 版
@@ -230,9 +214,10 @@ def compute_turbulence_transport_residual_gpu(
     Args:
         solver: GPUFRSolver 实例，需要 turb_model_gpu 已初始化
             （SST/DDES/IDDES 均可，都是 GPUTurbulenceSST 实例）
-        grad_vel, grad_k, grad_log_omega: 可选，调用方已经算好的速度梯度
-            （CuPy (n_cells,n_sps,3,3)）与 k、ln(omega) 的物理梯度，复用避免重复
-            计算物理梯度这个真实热点，与 CPU 版同名参数同一个性能考量。
+        grad_k, grad_log_omega: 可选，调用方为源项算好、已裁剪的 k、ln(omega)
+            物理梯度（CuPy），复用避免重复计算物理梯度这个真实热点，与 CPU 版
+            同名参数同一个考量。有效扩散系数读模型上源项刷新的 `nu_t` 与 `F1`，
+            调用方须先在同一组 `(k, omega)` 上求源项（同 CPU 版）。
 
     Returns:
         (dk_dt_transport, dw_dt_transport)，各自 (n_cells, n_sps)
@@ -249,17 +234,6 @@ def compute_turbulence_transport_residual_gpu(
     rho = Q[:, :, 0]
     vel = Q[:, :, 1:4]
     mu = solver.mu_molecular
-    rho_nu_t = rho * turb.nu_t
-
-    if grad_vel is None:
-        # 真实 bug 修复（2026-09-03，同 fr_solver/turbulence.py::
-        # compute_turbulence_source 文档同一处）：不能对*守恒*变量 U_gpu
-        # 求梯度再切片动量分量冒充速度梯度——`vel`（上面已从 Q 取出）
-        # 本来就是真正的速度，直接对它求梯度。
-        from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_gradient_gpu
-        grad_vel = compute_physical_gradient_gpu(vel, solver.mesh_data, solver.ops_data)
-
-    nu = mu / cp.maximum(rho, 1e-10)
 
     w_log = log_omega(turb.omega_field, cp)
     # 梯度模长上限在求梯度处施加一次（调用方传入的梯度已裁剪，同 CPU 版约定）
@@ -270,11 +244,8 @@ def compute_turbulence_transport_residual_gpu(
         grad_log_omega = clip_gradient_magnitude(
             compute_physical_scalar_gradient_gpu(w_log, solver.mesh_data, solver.ops_data), cp)
 
-    S_mag = turb.compute_strain_rate_magnitude_gpu(grad_vel)
+    gamma_k, gamma_w = turbulence_diffusivities(turb, rho * turb.nu_t, mu)
     d_wall = solver.wall_distance_gpu
-    gamma_k, gamma_w = turbulence_diffusivities_gpu(
-        cp, turb, turb.k_field, turb.omega_field, grad_k, grad_log_omega, rho, rho_nu_t, nu, mu, S_mag,
-        d_wall)
 
     ff = solver.flat_face_gpu
     n_prism = solver.mesh_data.get('n_prism', solver.mesh.n_prism_cells)

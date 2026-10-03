@@ -190,15 +190,11 @@ def _host(a):
 
 def gpu_turbulence_pointwise(cp, turb, Q, grad_vel, d_wall, mu):
     """GPU 模型上的逐点 `(S, Gamma)` 求值器（`core/turbulence/jacobian/pointwise.py::
-    TurbulencePointwise`，注入 `compute_source_terms_gpu` 与 `turbulence_diffusivities_gpu`，
-    与 GPU 残差同一份）；单机与多 GPU（compact 视图）共用。"""
-    from functools import partial
-
-    from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import turbulence_diffusivities_gpu
+    TurbulencePointwise`，注入 `compute_source_terms_gpu`，与 GPU 残差同一份）；单机与
+    多 GPU（compact 视图）共用。"""
     from autoflowcfd.core.turbulence.jacobian.pointwise import TurbulencePointwise
 
-    return TurbulencePointwise(cp, turb, Q, grad_vel, d_wall, mu, turb.compute_strain_rate_magnitude_gpu(grad_vel),
-                               turb.compute_source_terms_gpu, partial(turbulence_diffusivities_gpu, cp))
+    return TurbulencePointwise(cp, turb, Q, grad_vel, d_wall, mu, turb.compute_source_terms_gpu)
 
 
 def gpu_coupling_graph(cp, flat_face_gpu, n_cells: int):

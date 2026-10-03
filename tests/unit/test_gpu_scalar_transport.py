@@ -29,7 +29,6 @@ from autoflowcfd.core.turbulence.transport import (
 )
 from autoflowcfd.core.fr_operators.gradients import compute_physical_scalar_gradient as _cpu_compute_physical_scalar_gradient
 from autoflowcfd.core.turbulence.sst import SSTModelFR
-from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
 from autoflowcfd.core.fr_residual.inviscid import primitive_to_conserved
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 
@@ -106,6 +105,16 @@ def _prepare_mesh_ops_data(mesh, ops):
     complete_gpu_standin(mesh, ops, ops_data, mesh_data)
 
     return mesh_data, ops_data
+
+
+def _source_nu_t(k_field, omega_field):
+    """源项求值刷新的涡粘（输运的扩散系数读它）：两侧同一份非平凡场。"""
+    return 1e-3 * k_field / omega_field
+
+
+def _source_F1(k_field):
+    """源项求值刷新的混合函数 F1，取值在 (0, 1]，让扩散系数的混合真正被锻炼。"""
+    return k_field / k_field.max()
 
 
 def _synthetic_scalar_field(mesh):
@@ -296,19 +305,13 @@ class TestTurbulenceTransportResidualGpuMatchesCpu:
     def _build_gpu_solver_stub(self, mesh, mesh_data, ops_data, flat, Q, U, k_field, omega_field, d_wall, mu):
         turb = types.SimpleNamespace(
             k_field=k_field.copy(), omega_field=omega_field.copy(),
-            nu_t=np.zeros_like(k_field),
+            nu_t=_source_nu_t(k_field, omega_field), _last_F1=_source_F1(k_field),
             sigma_k1=0.85, sigma_k2=1.0, sigma_w1=0.5, sigma_w2=0.856,
             beta_star=0.09, beta1=0.075,
             # 来流值（来流条件用）：与 CPU 参照 `SSTModelFR(n_cells, n_sps)` 的
             # 构造默认值一致
             k_inf=1e-6, omega_inf=1.0,
         )
-        # 复用真实类里的公式本体（不重新手写一遍），只是不走真正需要
-        # CUDA 设备的 __init__。
-        turb.compute_blending_F1_gpu = types.MethodType(GPUTurbulenceSST.compute_blending_F1_gpu, turb)
-        turb.compute_strain_rate_magnitude_gpu = types.MethodType(
-            GPUTurbulenceSST.compute_strain_rate_magnitude_gpu, turb)
-
         return types.SimpleNamespace(
             turb_model_gpu=turb,
             mesh=mesh,
@@ -327,6 +330,7 @@ class TestTurbulenceTransportResidualGpuMatchesCpu:
         turb_ref = SSTModelFR(mesh.n_cells, mesh.n_sps_per_cell)
         turb_ref.k_field = k_field.copy()
         turb_ref.omega_field = omega_field.copy()
+        turb_ref.nu_t, turb_ref._last_F1 = _source_nu_t(k_field, omega_field), _source_F1(k_field)
 
         class _CpuSolverStub:
             def _compute_gradients(self_inner):

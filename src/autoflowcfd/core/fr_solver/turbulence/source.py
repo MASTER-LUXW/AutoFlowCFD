@@ -199,34 +199,11 @@ def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, apply_des: boo
     transport_w = None
     if solver.turb_model_name in ["SST", "DDES", "IDDES"]:
         from autoflowcfd.core.turbulence.transport import compute_turbulence_transport_residual
-        # grad_vel 复用上面已经为 compute_source_terms 算过的同一份值
-        # （同一个 solver.state.U，两处之间没有任何修改），避免
-        # compute_physical_gradient 这个已知热点被重复调用——见
-        # compute_turbulence_transport_residual 参数文档的性能说明。
-        #
-        # 之前这里 `try/except Exception` 把任何失败（包括真正的编程
-        # 错误——形状不匹配、numba 编译失败等）都静默降级为"仅源项
-        # 更新"，只打一条 warning，不中断求解——与本项目在别处反复强调
-        # 的"不允许静默地什么都不做"（见 boundary/fr_ghost_state.py::
-        # BoundaryGhostStateProvider 文档）、"必须先查清原因，不能静默
-        # 截断/忽略"（见 face_flux_points/merge.py 文档）等原则相悖：
-        # 真实 bug 会被这个 except 吞掉，求解器带着一个悄悄退化、外部
-        # 毫无察觉的湍流模型继续跑完整个仿真。真实复现过的输运计算失败
-        # 目前没有已知的"预期内、可安全忽略"的情形，故不再兜底捕获，
-        # 让真正的错误照常抛出、中断求解。
-        # grad_k/grad_omega 同样复用（#7 内存修复，2026-08-28，
-        # cube_demo 79万单元 P2+DDES 首次真实 CLI 冒烟测试触发 OOM
-        # 崩溃后追查发现）：本函数上面几行刚为 compute_source_terms
-        # 算好、裁剪过的同一份 grad_k/grad_omega，此前这里只传了
-        # grad_vel、没有一并传 grad_k/grad_omega——
-        # compute_turbulence_transport_residual 本身早就支持接收这两者
-        # （见该函数文档），调用方一直没有真正利用，导致内部又重新算
-        # 一遍完全相同的梯度（~1GB 冗余数组，79万单元 P2 阶段）。数学上
-        # 严格等价：本函数上面的裁剪是原地 `grad_k *= clip(...)`，
-        # compute_turbulence_transport_residual 内部对已经满足裁剪阈值
-        # 的输入重新检查同一个阈值必然是 no-op，不会改变数值结果。
+        # 扩散系数读 compute_source_terms 刚在同一组 (k, omega) 上刷新的 nu_t 与 F1；
+        # grad_k / grad_w 复用上面为源项算好、裁剪过的同一份（79 万单元 P2 冗余梯度
+        # 约 1 GB，2026-08-28 OOM 追查）。输运失败直接抛出，不降级为"仅源项更新"。
         transport_k, transport_w = compute_turbulence_transport_residual(
-            solver, grad_vel=grad_vel, grad_k=grad_k, grad_log_omega=grad_w,
+            solver, grad_k=grad_k, grad_log_omega=grad_w,
             flat_face_override=getattr(solver, "_turbulence_flat_face_override", None),
             conv_geom=conv_geom,
         )

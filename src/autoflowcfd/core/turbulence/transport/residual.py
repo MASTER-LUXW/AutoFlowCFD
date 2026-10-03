@@ -9,13 +9,11 @@ import numpy as np
 from typing import Tuple
 
 
-from autoflowcfd.core.fr_operators.gradients import (
-    compute_physical_scalar_gradient, compute_physical_gradient,
-)
+from autoflowcfd.core.fr_operators.gradients import compute_physical_scalar_gradient
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 
 from .faces import precompute_scalar_convection_geometry
-from ..sst.bounds import clip_gradient_magnitude, model_evaluation_fields, omega_realizability_floor
+from ..sst.bounds import clip_gradient_magnitude
 from ..sst.log_omega import log_omega, log_omega_gradient_source
 from .convection import compute_scalar_convection_residual
 from .diffusion import compute_scalar_diffusion_residual
@@ -26,20 +24,19 @@ from .omega_wall import (
 )
 
 
-def turbulence_diffusivities(turb, k, omega, grad_k, grad_log_omega, rho, rho_nu_t, nu, mu, S_mag, wall_distance):
+def turbulence_diffusivities(turb, rho_nu_t, mu):
     """k / ln(omega) 方程的有效扩散系数 `(Gamma_k, Gamma_w) = mu + sigma(F1) * rho * nu_t`。
 
-    `rho_nu_t` 是源项求值在同一组 `(k, omega)` 上刷新的动力涡粘；`F1` 用模型项的
-    有效值（`sst/bounds.py`）与物理梯度 `grad(omega) = omega grad(ln omega)` 算交叉扩散
-    `CD_kw`。`grad k` 与 `grad ln(omega)` 须已按 `sst/bounds.py::clip_gradient_magnitude`
-    裁剪（在求梯度处施加一次；近壁物理 `grad omega` 可达 1e8，所以上限只作用在这两者上）。
-    输运残差与湍流解析 Jacobian（逐点差分）共用这一份，逐点函数，与单元无关。
+    `F1` 与 `rho_nu_t = rho * nu_t` 都取源项求值（CPU `compute_source_terms` / GPU
+    `compute_source_terms_gpu`）在同一组 `(k, omega)` 上刷新的模型缓存，不在这里重算
+    （此前另算一遍 F1，交叉扩散的乘法顺序不同、两份 F1 只在舍入上一致）。调用方须先
+    求源项，输运残差（`fr_solver/turbulence/source.py` 等四个后端入口）与湍流解析
+    Jacobian 的逐点求值器（`jacobian/pointwise.py`）都是这个顺序。逐点运算，numpy /
+    cupy 共用。
     """
-    with np.errstate(over='ignore', invalid='ignore'):
-        grad_dot = omega * np.sum(grad_k * grad_log_omega, axis=-1)
-        k_eff, omega_safe = model_evaluation_fields(k, omega, omega_realizability_floor(turb, S_mag, np), np)
-        CD_kw = np.maximum(2.0 * rho * turb.sigma_w2 / omega_safe * grad_dot, 1e-10)
-    F1 = turb.compute_blending_function_F1(k_eff, omega_safe, wall_distance, nu, S_mag, rho, CD_kw)
+    F1 = turb._last_F1
+    if F1 is None:
+        raise RuntimeError("有效扩散系数需要源项求值缓存的 F1：须先在同一组 (k, omega) 上求源项")
     sigma_k = F1 * turb.sigma_k1 + (1.0 - F1) * turb.sigma_k2
     sigma_w = F1 * turb.sigma_w1 + (1.0 - F1) * turb.sigma_w2
     return mu + sigma_k * rho_nu_t, mu + sigma_w * rho_nu_t
@@ -56,7 +53,6 @@ def prepare_convection_geometry(solver, flat_face_override=None):
 
 def compute_turbulence_transport_residual(
     solver,
-    grad_vel: np.ndarray = None,
     grad_k: np.ndarray = None,
     grad_log_omega: np.ndarray = None,
     flat_face_override=None,
@@ -66,22 +62,15 @@ def compute_turbulence_transport_residual(
 
     入口函数：从 solver 获取流场和湍流场信息，分别计算 k 和 w 的对流+扩散残差
     （w 另加 `Gamma_w |grad w|^2`），返回 dk/dt 和 dw/dt 的输运贡献（已除以密度）。
+    有效扩散系数读模型上源项求值刷新的 `nu_t` 与 `F1`（`turbulence_diffusivities`），
+    调用方须先在同一组 `(k, omega)` 上求源项。
 
     Args:
         solver: FRSolver 实例（需要已初始化 SST/DDES 湍流模型）
-        grad_vel, grad_k, grad_log_omega: 可选，调用方（`fr_solver_
-            turbulence.compute_turbulence_source`）如果已经算过这三个量，
-            直接传进来复用，跳过内部重新计算——性能优化：唯一真实调用方
-            `compute_turbulence_source` 在调用本函数*之前*就已经为
-            `compute_source_terms` 算过完全相同的 grad_vel/grad_k/
-            grad_omega（同一个 solver.state.U/turb_model.k_field/
-            omega_field，同一套 mesh/ops，数学上是同一个量），此前这里
-            总是无条件重新算一遍——`compute_physical_gradient` 是本项目
-            profile 过的真实热点（79万单元 P1 阶段单步 7.5s 累计），这里
-            的重复调用是三次里的一次，真实测得省下约 1.6s/步。三者任一
-            为 None 时退回原来的内部计算（保持本函数可独立调用的公开
-            API 行为不变，不依赖调用方一定会传）。传入的 `grad_k` /
-            `grad_log_omega` 须已按 `clip_gradient_magnitude` 裁剪。
+        grad_k, grad_log_omega: 可选，调用方（`fr_solver/turbulence/source.py::
+            compute_turbulence_source`）为源项算过的同一份 k、ln(omega) 物理梯度，
+            传进来复用（`compute_physical_scalar_gradient` 是 profile 过的热点）；
+            须已按 `clip_gradient_magnitude` 裁剪。None 时在这里现算并裁剪。
         flat_face_override: 显式传入时优先使用，透传给内部四次
             `compute_scalar_convection_residual`/`compute_scalar_
             diffusion_residual` 调用（2026-09-02 分布式湍流移植新增，
@@ -108,21 +97,7 @@ def compute_turbulence_transport_residual(
     vel = Q[:, :, 1:4]  # (n_cells, n_sps, 3)
 
     mu = solver.mu_molecular
-    rho_nu_t = rho * turb.nu_t  # 动力涡粘度 mu_t = rho * nu_t
 
-    # 计算有效扩散系数 Gamma_k, Gamma_omega
-    # 需要 F1 blending 来确定 sigma_k, sigma_omega
-    if grad_vel is None:
-        # 真实 bug 修复（2026-09-03）：同 fr_solver/turbulence.py::
-        # compute_turbulence_source 里的 grad_vel 修复——不能对*守恒*
-        # 变量 U 求梯度再切片动量分量冒充速度梯度，见该处文档。这里
-        # `Q`/`vel`（上面已经从 solver.state.Q 取出的原始变量）本来就是
-        # 正确的速度，直接对它求梯度。
-        grad_vel = compute_physical_gradient(vel, solver.mesh, solver.ops)
-    S_mag = turb.compute_strain_rate_magnitude(grad_vel)
-    nu = mu / np.maximum(rho, 1e-10)
-
-    # 交叉扩散项（F1 计算需要）
     w_log = log_omega(turb.omega_field, np)
     # 梯度模长上限在求梯度处施加一次（调用方传入的梯度已裁剪，见参数文档）
     if grad_k is None:
@@ -130,9 +105,7 @@ def compute_turbulence_transport_residual(
     if grad_log_omega is None:
         grad_log_omega = clip_gradient_magnitude(compute_physical_scalar_gradient(w_log, solver.mesh, solver.ops), np)
 
-    gamma_k, gamma_w = turbulence_diffusivities(
-        turb, turb.k_field, turb.omega_field, grad_k, grad_log_omega, rho, rho_nu_t, nu, mu, S_mag,
-        solver.wall_distance)
+    gamma_k, gamma_w = turbulence_diffusivities(turb, rho * turb.nu_t, mu)
 
     # WALL 上 k=0 的 Dirichlet 掩码（真实修复，2026-08-21，见
     # transport_kernel.py::extrapolate_scalar_to_faces_kernel 文档）。

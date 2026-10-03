@@ -47,6 +47,8 @@ class SSTModelFR(_SSTBlendingMixin, _SSTSourceMixin, _SSTUpdateMixin):
         self.k_field = np.ones((n_cells, n_sps)) * k_inf
         self.omega_field = np.ones((n_cells, n_sps)) * omega_inf
         self.nu_t = np.zeros((n_cells, n_sps))
+        # 源项求值刷新的混合函数 F1（`compute_source_terms`），有效扩散系数读它
+        self._last_F1 = None
 
         # 来流 omega/k（保留为持久属性）。omega_inf 供 compute_source_terms
         # 里 omega realizability 下限在 S_mag 恒零时使用（见该处真实 bug

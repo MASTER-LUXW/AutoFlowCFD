@@ -195,7 +195,7 @@ class _GPUDistributedTurbSourceMixin:
             compute_turbulence_transport_residual_gpu,
         )
         transport_k, transport_w = compute_turbulence_transport_residual_gpu(
-            ctx.transport, grad_vel=ctx.grad_vel, grad_k=grad_k, grad_log_omega=grad_w)
+            ctx.transport, grad_k=grad_k, grad_log_omega=grad_w)
         return dk_dt, dw_dt, transport_k, transport_w
 
     def _finalize_turbulence_update_distributed(self, ctx) -> None:

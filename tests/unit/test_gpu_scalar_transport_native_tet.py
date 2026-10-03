@@ -219,7 +219,6 @@ class TestNativeScalarTransportMatchesCpu:
             compute_turbulence_transport_residual as _cpu_transport_residual,
         )
         from autoflowcfd.core.turbulence.sst import SSTModelFR
-        from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
         from autoflowcfd.core.fr_residual.inviscid import primitive_to_conserved
         import autoflowcfd.core.gpu.turbulence.gpu_scalar_transport as gst
 
@@ -245,18 +244,18 @@ class TestNativeScalarTransportMatchesCpu:
         omega_field = 500.0 * (1.0 + rng.uniform(-0.3, 0.3, size=(n_cells, n_sps)))
         d_wall = np.full((n_cells, n_sps), 0.05)
 
+        # 源项求值刷新的 nu_t / F1（扩散系数读它们）：两侧同一份非平凡场
+        nu_t = 1e-3 * k_field / omega_field
+        F1 = k_field / k_field.max()
         turb_gpu = types.SimpleNamespace(
             k_field=k_field.copy(), omega_field=omega_field.copy(),
-            nu_t=np.zeros_like(k_field),
+            nu_t=nu_t.copy(), _last_F1=F1.copy(),
             sigma_k1=0.85, sigma_k2=1.0, sigma_w1=0.5, sigma_w2=0.856,
             beta_star=0.09, beta1=0.075,
             # 来流值（来流条件用；本测试开放边界掩码全 False，只需存在）：与
             # CPU 参照 `SSTModelFR` 的构造默认值一致
             k_inf=1e-6, omega_inf=1.0,
         )
-        turb_gpu.compute_blending_F1_gpu = types.MethodType(GPUTurbulenceSST.compute_blending_F1_gpu, turb_gpu)
-        turb_gpu.compute_strain_rate_magnitude_gpu = types.MethodType(
-            GPUTurbulenceSST.compute_strain_rate_magnitude_gpu, turb_gpu)
         gpu_solver = types.SimpleNamespace(
             turb_model_gpu=turb_gpu,
             mesh=mesh,
@@ -275,6 +274,7 @@ class TestNativeScalarTransportMatchesCpu:
         turb_ref = SSTModelFR(n_cells, n_sps)
         turb_ref.k_field = k_field.copy()
         turb_ref.omega_field = omega_field.copy()
+        turb_ref.nu_t, turb_ref._last_F1 = nu_t.copy(), F1.copy()
 
         class _CpuSolverStub:
             def _compute_gradients(self_inner):

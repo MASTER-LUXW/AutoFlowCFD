@@ -74,31 +74,45 @@ def _inflow_cells(solver):
     return cells[core]
 
 
+def _transport(solver):
+    """生产入口（先在当前 k/omega 上求源项、再求输运）给出的输运部分 `(dk, dw)`；
+    源项刷新的模型缓存事后恢复，不影响共用夹具的其它测试。"""
+    from autoflowcfd.core.fr_solver.turbulence.source import (
+        evaluate_turbulence_rates, prepare_turbulence_inputs,
+    )
+    from autoflowcfd.core.turbulence.jacobian.pointwise import CACHED_MODEL_ATTRS
+
+    t = solver.turb_model
+    saved = {a: getattr(t, a) for a in CACHED_MODEL_ATTRS if hasattr(t, a)}
+    try:
+        *_, tk, tw = evaluate_turbulence_rates(solver, *prepare_turbulence_inputs(solver), apply_des=False)
+    finally:
+        for a, v in saved.items():
+            setattr(t, a, v)
+    return tk, tw
+
+
 class TestInflowCondition:
     def test_depleted_inflow_cells_are_replenished(self, nk_solver):
-        from autoflowcfd.core.turbulence.transport import compute_turbulence_transport_residual
-
         t = nk_solver.turb_model
         saved = t.k_field.copy()
         try:
             t.k_field = np.full_like(saved, 0.5 * t.k_inf)
-            dk, _ = compute_turbulence_transport_residual(nk_solver)
+            dk, _ = _transport(nk_solver)
         finally:
             t.k_field = saved
         inflow = _inflow_cells(nk_solver)
         assert np.all(dk[inflow].mean(axis=1) > 0.0), "来流单元必须被来流值补给（此前零梯度下恒为 0）"
 
     def test_freestream_state_is_preserved_at_inflow(self, nk_solver):
-        from autoflowcfd.core.turbulence.transport import compute_turbulence_transport_residual
-
         t = nk_solver.turb_model
         saved = (t.k_field.copy(), t.omega_field.copy())
         try:
             t.k_field = np.full_like(saved[0], t.k_inf)
             t.omega_field = np.full_like(saved[1], t.omega_inf)
-            dk_ref, dw_ref = compute_turbulence_transport_residual(nk_solver)
+            dk_ref, dw_ref = _transport(nk_solver)
             t.k_field = np.full_like(saved[0], 0.5 * t.k_inf)
-            dk_low, _ = compute_turbulence_transport_residual(nk_solver)
+            dk_low, _ = _transport(nk_solver)
         finally:
             t.k_field, t.omega_field = saved
         inflow = _inflow_cells(nk_solver)

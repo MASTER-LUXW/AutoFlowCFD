@@ -89,9 +89,10 @@ class _SSTSourceMixin:
             k_safe, omega_safe, d_wall, S_mag, nu
         )
 
-        # Blending 常数
-        sigma_k = F1 * self.sigma_k1 + (1.0 - F1) * self.sigma_k2
-        sigma_w = F1 * self.sigma_w1 + (1.0 - F1) * self.sigma_w2
+        # 暂存 F1：k / ln(omega) 的有效扩散系数在同一组 (k, omega) 上读它
+        # （`transport/residual.py::turbulence_diffusivities`，与 nu_t 同一约定，不重算）
+        self._last_F1 = F1
+
         beta = F1 * self.beta1 + (1.0 - F1) * self.beta2
 
         # 暂存本次求值用的混合 beta（用于 update_fields 的半隐式阻尼——

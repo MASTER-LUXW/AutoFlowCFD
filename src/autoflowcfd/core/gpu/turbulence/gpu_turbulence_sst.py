@@ -66,6 +66,8 @@ class GPUTurbulenceSST:
             self.k_field = cp.ones((n_cells, n_sps), dtype=cp.float64) * k_inf
             self.omega_field = cp.ones((n_cells, n_sps), dtype=cp.float64) * omega_inf
             self.nu_t = cp.zeros((n_cells, n_sps), dtype=cp.float64)
+        # 源项求值刷新的混合函数 F1，同 CPU 版
+        self._last_F1 = None
 
         # 来流 omega/k（持久属性）：与 CPU 版 sst.py 同一处真实 bug 修复
         # 同一个理由——P0 阶段 grad_vel 恒为零导致 S_mag 恒零，omega
@@ -277,9 +279,9 @@ class GPUTurbulenceSST:
             k_safe, omega_safe, d_wall, nu
         )
 
-        # Blending 常数
-        sigma_k = F1 * self.sigma_k1 + (1.0 - F1) * self.sigma_k2
-        sigma_w = F1 * self.sigma_w1 + (1.0 - F1) * self.sigma_w2
+        # 暂存 F1，同 CPU 版（`transport/residual.py::turbulence_diffusivities`）
+        self._last_F1 = F1
+
         beta = F1 * self.beta1 + (1.0 - F1) * self.beta2
 
         # 暂存本次求值用的混合 beta（供 update_fields_gpu 的半隐式阻尼

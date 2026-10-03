@@ -47,11 +47,9 @@ from .residual import (  # noqa: F401
     compute_scalar_diffusion_residual_gpu,
     compute_turbulence_transport_residual_gpu,
     scalar_convection_volume_divergence_gpu,
-    turbulence_diffusivities_gpu,
 )
 
 __all__ = [
-    "turbulence_diffusivities_gpu",
     "compute_omega_wall_target_gpu",
     "compute_scalar_convection_residual_gpu",
     "scalar_convection_volume_divergence_gpu",
