@@ -143,11 +143,12 @@ class GPUHaloExchange:
         self.device_id = device_id
         self.cuda_aware = is_cuda_aware_mpi()
 
-        # 按"每解点尾部形状"缓存的 buffer（GPU send/recv；非 CUDA-aware MPI 时另有主机
-        # staging send/recv）：构造时预分配主形状 `(n_vars,)`，其它形状（湍流源项的
-        # 速度梯度 `(3, 3)` 等）首次交换时分配、之后复用
-        self._buffers_by_tail: Dict[tuple, tuple] = {}
-        self._buffers((n_vars,))
+        # 按逐单元形状缓存的 buffer（GPU send/recv；非 CUDA-aware MPI 时另有主机 staging
+        # send/recv），与 CPU `mpi/halo.py::HaloExchange` 同一约定：构造时预分配平均流主形状
+        # `(n_sps, n_vars)`，k/omega、DES 长度尺度、P0 速度梯度、逐单元标量等其它形状首次
+        # 交换时分配、之后复用
+        self._buffers_by_shape: Dict[tuple, tuple] = {}
+        self._buffers((n_sps, n_vars))
 
         with cp.cuda.Device(device_id):
             # 预计算 halo 索引映射（避免每次交换重复计算）
@@ -171,49 +172,48 @@ class GPUHaloExchange:
             f"{partition.n_halo} halo cells, cuda_aware={self.cuda_aware}"
         )
 
-    def _buffers(self, tail: tuple) -> tuple:
-        """尾部形状 `tail` 的 `(send_gpu, recv_gpu, send_cpu, recv_cpu)`（按邻居 rank 的字典；
-        CUDA-aware MPI 下主机 staging 两个为空），首次使用时分配。"""
-        bufs = self._buffers_by_tail.get(tail)
+    def _buffers(self, cell_shape: tuple) -> tuple:
+        """逐单元形状 `cell_shape` 的 `(send_gpu, recv_gpu, send_cpu, recv_cpu)`（按邻居 rank 的
+        字典；CUDA-aware MPI 下主机 staging 两个为空），首次使用时分配。"""
+        bufs = self._buffers_by_shape.get(cell_shape)
         if bufs is None:
             cp = get_cupy()
             part = self.partition
             with cp.cuda.Device(self.device_id):
-                send_gpu = {r: cp.zeros((len(c), self.n_sps) + tail) for r, c in part.send_lists.items()}
-                recv_gpu = {r: cp.zeros((len(c), self.n_sps) + tail) for r, c in part.recv_lists.items()}
+                send_gpu = {r: cp.zeros((len(c),) + cell_shape) for r, c in part.send_lists.items()}
+                recv_gpu = {r: cp.zeros((len(c),) + cell_shape) for r, c in part.recv_lists.items()}
             send_cpu, recv_cpu = {}, {}
             if not self.cuda_aware:
-                send_cpu = {r: np.empty((len(c), self.n_sps) + tail) for r, c in part.send_lists.items()}
-                recv_cpu = {r: np.empty((len(c), self.n_sps) + tail) for r, c in part.recv_lists.items()}
+                send_cpu = {r: np.empty((len(c),) + cell_shape) for r, c in part.send_lists.items()}
+                recv_cpu = {r: np.empty((len(c),) + cell_shape) for r, c in part.recv_lists.items()}
             bufs = (send_gpu, recv_gpu, send_cpu, recv_cpu)
-            self._buffers_by_tail[tail] = bufs
+            self._buffers_by_shape[cell_shape] = bufs
         return bufs
 
     def exchange(self, U_gpu) -> 'cp.ndarray':
         """执行 GPU halo 交换。
 
         Args:
-            U_gpu: CuPy 数组 (n_local_cells, n_sps, ...) 本 rank 的 local cell 数据，每解点的
-                尾部形状任意（主形状 `(n_vars,)`；速度梯度 `(3, 3)` 等同一个实例交换）
+            U_gpu: CuPy 数组 `(n_local_cells, ...)` 本 rank 的 local cell 数据，逐单元形状任意
 
         Returns:
-            extended_data: CuPy 数组 (n_total_cells, n_sps, ...)
+            extended_data: CuPy 数组 `(n_total_cells, ...)`
         """
         cp = get_cupy()
         part = self.partition
         n_local = part.n_local_cells
         n_total = part.n_total_cells
-        tail = tuple(U_gpu.shape[2:])
+        cell_shape = tuple(U_gpu.shape[1:])
 
         with cp.cuda.Device(self.device_id):
             # 构建扩展数组
-            extended = cp.empty((n_total, self.n_sps) + tail, dtype=cp.float64)
+            extended = cp.empty((n_total,) + cell_shape, dtype=cp.float64)
             extended[:n_local] = U_gpu
 
             if not part.neighbor_ranks:
                 return extended
 
-            bufs = self._buffers(tail)
+            bufs = self._buffers(cell_shape)
             if self.cuda_aware:
                 self._exchange_cuda_aware(U_gpu, extended, bufs)
             else:

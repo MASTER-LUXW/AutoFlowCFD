@@ -375,8 +375,8 @@ class TestFullyDistributedSstTurbulence:
 
     def test_step_with_ddes_runs_and_stays_finite(self, mesh_and_ops):
         """同上 SST 收尾集成测试，换成 DDES——与 IDDES 共用
-        `from_fully_distributed_package` 里同一个 `ddes_model`/
-        `des_length_scale_halo_exchange` 构造分支，唯一区别是 DDES 不
+        `from_fully_distributed_package` 里同一个 `ddes_model` 构造分支，
+        唯一区别是 DDES 不
         需要 h_wn（只有 IDDES 需要近壁法向间距）。2026-09-02 起 DDES
         也需要 h_max（`apply_to_sst_model` 改用各向异性感知的 max_edge
         网格尺度，见 des.py::DDESModel.compute_grid_scale 文档"Note"
@@ -427,7 +427,6 @@ class TestFullyDistributedSstTurbulence:
 
         assert solver.turb_model_name == "DDES"
         assert solver.ddes_model is not None
-        assert solver.des_length_scale_halo_exchange is not None
 
         rng = np.random.default_rng(13)
         U0 = _nonuniform_U(mesh, rng)
@@ -486,7 +485,6 @@ class TestFullyDistributedSstTurbulence:
 
         assert solver.turb_model_name == "IDDES"
         assert solver.ddes_model is not None
-        assert solver.des_length_scale_halo_exchange is not None
 
         rng = np.random.default_rng(11)
         U0 = _nonuniform_U(mesh, rng)
@@ -496,7 +494,7 @@ class TestFullyDistributedSstTurbulence:
         # 两步（与 CPU 分布式 DDES/IDDES 的既有回归测试一致），因为
         # des_length_scale 第二步才真正走 halo-exchange 读回路径（第一
         # 步是 None，跳过读入分支——见 distributed_turbulence.py 里
-        # des_length_scale_halo_exchange 的文档）。
+        # build_distributed_turbulence_view 的 des_length_scale 一段）。
         solver.step(1e-6)
         solver.step(1e-6)
 

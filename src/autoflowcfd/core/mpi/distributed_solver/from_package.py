@@ -163,12 +163,10 @@ class _DistributedFromPackageMixin:
         self.artificial_viscosity_alpha = float(package.get('artificial_viscosity_alpha', 1.0))
         self._viscosity_ratio = package.get('viscosity_ratio', 5.0)
         self.turb_model = None
-        self.turb_halo_exchange = None
         self.wall_distance_compact = package.get('wall_distance_compact')
         self.ddes_model = None
         self.iddes_h_max_compact = package.get('iddes_h_max_compact')
         self.iddes_h_wn_compact = package.get('iddes_h_wn_compact')
-        self.des_length_scale_halo_exchange = None
         # `step()` 的 `residual_func` 无条件读取 `self.wmles_model`/
         # `self.sgs_model`（与主 `__init__` 同一个属性名约定），必须
         # 存在这两个属性，否则任何 turb_model_name 都会在 step() 里
@@ -184,7 +182,7 @@ class _DistributedFromPackageMixin:
             self.sgs_model = WALEModel()
         elif turb_model_name == 'WMLES':
             # WMLES（2026-09-02）：没有 k/omega ODE 状态，不需要
-            # SSTModelFR/turb_halo_exchange——只需要真实的 WMLESModel
+            # SSTModelFR——只需要真实的 WMLESModel
             # 实例 + package 里 root 已经算好的 wall_distance_compact
             # （y+ 计算需要，上面 `self.wall_distance_compact = package.
             # get('wall_distance_compact')` 已经取到）。
@@ -216,17 +214,12 @@ class _DistributedFromPackageMixin:
             self._turb_production_ramp_steps = 50
             self._turb_production_ramp_complete = False
 
-            self.turb_halo_exchange = HaloExchange(self.partition, n_sps, 2)
-
             if turb_model_name == 'DDES':
                 from autoflowcfd.core.turbulence.des import DDESModel
                 self.ddes_model = DDESModel()
             elif turb_model_name == 'IDDES':
                 from autoflowcfd.core.turbulence.des import IDDESModel
                 self.ddes_model = IDDESModel()
-
-            if self.ddes_model is not None:
-                self.des_length_scale_halo_exchange = HaloExchange(self.partition, n_sps, 1)
 
         # 轻量级鸭子类型"local_solver"替身（不构造真正的 FRSolver——那
         # 需要完整全局网格重新生成 sps 几何/差分算子，在这条路径下既

@@ -2,8 +2,8 @@
 
 本机没有 MPI，halo 交换器用假的（local 段原样、halo 段给定值），判据是映射的约定本身：
 
-1. 逐单元值 -> 紧凑空间：CPU（`exchange_scalar`）与多 GPU（`(n_local, n_sps, 5)` 交换）两种
-   交换器给出同一个结果 `[local; halo][perm]`；
+1. 逐单元值 -> 紧凑空间：同一个 `CompactCellValues` 在 numpy（CPU-MPI）与 cupy（多 GPU，这里
+   用 numpy 冒充）两种数组模块下给出同一个结果 `[local; halo][perm]`；
 2. P0 差分耦合图的跨 rank 单元对：一端本 rank、另一端 halo 的每个面给出一对（行为 local
    编号、列为紧凑编号），halo 列的颜色与单元类型取自紧凑空间。
 """
@@ -12,25 +12,19 @@ import types
 
 import numpy as np
 
-from autoflowcfd.core.mpi.distributed_coarse import CpuCompactCellValues, GpuCompactCellValues
+from autoflowcfd.core.mpi.distributed_coarse import CompactCellValues
 from autoflowcfd.core.mpi.distributed_implicit import distributed_coupling_graph
 
-N_SPS = 3
 
 
 class _FakeHalo:
-    """local 段原样，halo 段取给定值（每单元一个值铺满解点/变量）。"""
+    """local 段原样，halo 段取给定的逐单元值（真实交换器接受任意逐单元形状，这里是标量）。"""
 
-    def __init__(self, halo_values, n_vars=5):
+    def __init__(self, halo_values):
         self.halo = np.asarray(halo_values, dtype=np.float64)
-        self.n_vars = n_vars
-
-    def exchange_scalar(self, local):
-        return np.concatenate([local, np.repeat(self.halo[:, None], local.shape[1], 1)])
 
     def exchange(self, local):
-        halo = np.broadcast_to(self.halo[:, None, None], (self.halo.size,) + local.shape[1:])
-        return np.concatenate([local, halo])
+        return np.concatenate([local, self.halo])
 
 
 class _NumpyAsCupy:
@@ -46,8 +40,8 @@ def test_cpu_and_gpu_compact_values_agree_with_definition():
     halo = _FakeHalo([20.0, 21.0])
     perm = np.array([4, 0, 2, 5, 1, 3])
     expected = np.concatenate([local, halo.halo])[perm]
-    np.testing.assert_array_equal(CpuCompactCellValues(halo, perm, N_SPS)(local), expected)
-    np.testing.assert_array_equal(GpuCompactCellValues(halo, perm, N_SPS, _NumpyAsCupy())(local), expected)
+    np.testing.assert_array_equal(CompactCellValues(halo, perm, np)(local), expected)
+    np.testing.assert_array_equal(CompactCellValues(halo, perm, _NumpyAsCupy())(local), expected)
 
 
 def test_coupling_graph_lists_cross_rank_pairs_with_halo_colors():

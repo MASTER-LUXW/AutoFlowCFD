@@ -59,6 +59,7 @@ import autoflowcfd.core.gpu.turbulence.gpu_turbulence_des as gpu_turbulence_des_
 import autoflowcfd.core.gpu.turbulence.gpu_sgs as gpu_sgs_mod
 import autoflowcfd.core.gpu.gpu_modal_filter as gpu_modal_filter_mod
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
+from tests.unit._fake_halo import ShapeKeyedFakeHalo
 
 
 
@@ -115,14 +116,6 @@ def _patch_get_cupy(monkeypatch):
     monkeypatch.setattr(gpu_turbulence_sst_mod, "gpu_available", True)
     monkeypatch.setattr(gpu_turbulence_des_mod, "gpu_available", True)
     monkeypatch.setattr(gpu_sgs_mod, "gpu_available", True)
-
-
-class _FakeHalo:
-    def __init__(self, extended):
-        self._extended = extended
-
-    def exchange(self, _local):
-        return self._extended
 
 
 def _prepare_compact_mesh_data(mesh, ops, compact_global_ids):
@@ -228,15 +221,13 @@ def test_gpu_distributed_sst_matches_cpu_distributed_sst(rank, turb_model_name):
     turb_cpu.k_field = k_field[partition.local_cells].copy()
     turb_cpu.omega_field = omega_field[partition.local_cells].copy()
     U_local = U[partition.local_cells]
-    fake_halo_5var_cpu = _FakeHalo(U[native_ids][..., :5])
-    k_omega_local = np.stack([k_field[partition.local_cells], omega_field[partition.local_cells]], axis=-1)
     k_omega_extended = np.stack([k_field[native_ids], omega_field[native_ids]], axis=-1)
-    fake_halo_turb_cpu = _FakeHalo(k_omega_extended)
+    fake_halo_cpu = ShapeKeyedFakeHalo(U[native_ids][..., :5], k_omega_extended)
     d_wall_compact = d_wall[compact_global_ids]
     dt_local_local = np.full((n_local, n_sps), dt)
 
     mu_t_compact_cpu, _ = distributed_compute_turbulence_source_and_viscosity(
-        U_local, partition, fake_halo_5var_cpu, fake_halo_turb_cpu, dist_fc, mesh, ops,
+        U_local, partition, fake_halo_cpu, dist_fc, mesh, ops,
         turb_cpu, mu, d_wall_compact, dt_local_local,
         # 产生项渐变进行中（第 10/50 步）：两侧必须按同一个计数器渐变（多 GPU
         # 2026-09-25 以前从不推进渐变，production_factor 恒为 1）
@@ -254,15 +245,14 @@ def test_gpu_distributed_sst_matches_cpu_distributed_sst(rank, turb_model_name):
     turb_gpu.k_field = k_field[partition.local_cells].copy()
     turb_gpu.omega_field = omega_field[partition.local_cells].copy()
 
-    fake_halo_5var_gpu = _FakeHalo(U[native_ids])  # gpu_halo.exchange(U_gpu) 吃 5 变量全量
-    fake_halo_turb_gpu = _FakeHalo(k_omega_extended)
+    fake_halo_gpu = ShapeKeyedFakeHalo(U[native_ids], k_omega_extended)  # 平均流 5 变量 + k/omega
 
     stub = types.SimpleNamespace(
         rank=rank, device_id=0, mu_molecular=mu, boundary_ghost_provider=None,
         partition=partition, mesh=mesh, dist_flat_face=dist_fc,
         mesh_data=mesh_data, ops_data=mesh_data, ops=ops,
         flat_face_gpu=dist_fc.base_flat,
-        turb_model_gpu=turb_gpu, turb_halo_gpu=fake_halo_turb_gpu, gpu_halo=fake_halo_5var_gpu,
+        turb_model_gpu=turb_gpu, gpu_halo=fake_halo_gpu,
         _perm_gpu=dist_fc.perm, _inv_perm_gpu=dist_fc.inv_perm, n_compact=n_compact,
         wall_distance_gpu=d_wall_compact,
         _wall_mask_k_gpu=np.zeros(dist_fc.base_flat.n_faces, dtype=bool),
@@ -270,7 +260,6 @@ def test_gpu_distributed_sst_matches_cpu_distributed_sst(rank, turb_model_name):
         U_gpu=U_local,
         ddes_model_gpu=_make_ddes_gpu(turb_model_name),
         iddes_h_max_compact=iddes_h_max_compact, iddes_h_wn_compact=iddes_h_wn_compact,
-        des_length_scale_halo_gpu=_FakeHalo(np.zeros((len(native_ids), n_sps, 1))),  # 第一次调用不会被读取
         _turb_ramp_step=10, _turb_production_ramp_steps=50,
     )
     stub._permute_to_compact = lambda arr: arr[stub._perm_gpu]
@@ -347,16 +336,15 @@ def test_gpu_distributed_ddes_two_consecutive_calls_does_not_crash(turb_model_na
 
     d_wall_compact = d_wall[compact_global_ids]
     U_local = U[partition.local_cells]
-    fake_halo_5var_gpu = _FakeHalo(U[native_ids])
     k_omega_extended = np.stack([k_field[native_ids], omega_field[native_ids]], axis=-1)
-    fake_halo_turb_gpu = _FakeHalo(k_omega_extended)
+    fake_halo_gpu = ShapeKeyedFakeHalo(U[native_ids], k_omega_extended)
 
     stub = types.SimpleNamespace(
         rank=rank, device_id=0, mu_molecular=mu, boundary_ghost_provider=None,
         partition=partition, mesh=mesh, dist_flat_face=dist_fc,
         mesh_data=mesh_data, ops_data=mesh_data, ops=ops,
         flat_face_gpu=dist_fc.base_flat,
-        turb_model_gpu=turb_gpu, turb_halo_gpu=fake_halo_turb_gpu, gpu_halo=fake_halo_5var_gpu,
+        turb_model_gpu=turb_gpu, gpu_halo=fake_halo_gpu,
         _perm_gpu=dist_fc.perm, _inv_perm_gpu=dist_fc.inv_perm, n_compact=n_compact,
         wall_distance_gpu=d_wall_compact,
         _wall_mask_k_gpu=np.zeros(dist_fc.base_flat.n_faces, dtype=bool),
@@ -369,9 +357,7 @@ def test_gpu_distributed_ddes_two_consecutive_calls_does_not_crash(turb_model_na
     stub._unpermute_from_compact = lambda arr: arr[stub._inv_perm_gpu]
     _bind_turb_source(stub)
 
-    # call 1：des_length_scale 还是 None，第一次调用不会触发 halo 交换
-    # 分支，随便给个占位 halo（不会被读取）。
-    stub.des_length_scale_halo_gpu = _FakeHalo(np.zeros((len(native_ids), n_sps, 1)))
+    # call 1：des_length_scale 还是 None，第一次调用不会触发它的 halo 交换
     _GPUDistributedInitMixin._compute_turbulence_source_distributed(stub, dt)
     assert turb_gpu.des_length_scale is not None
     assert turb_gpu.des_length_scale.shape == (n_local, n_sps)
@@ -381,9 +367,9 @@ def test_gpu_distributed_ddes_two_consecutive_calls_does_not_crash(turb_model_na
     # halo（不追求跨 rank 数值真实性，只验证 shape 路径不崩溃、结果
     # 形状始终正确——数值正确性已经由 CPU 侧同构代码路径的两步测试
     # 决定性验证过）。
-    des_ext = np.zeros((len(native_ids), n_sps, 1))
-    des_ext[:n_local, :, 0] = turb_gpu.des_length_scale
-    stub.des_length_scale_halo_gpu = _FakeHalo(des_ext)
+    des_ext = np.zeros((len(native_ids), n_sps))
+    des_ext[:n_local] = turb_gpu.des_length_scale
+    fake_halo_gpu.set(des_ext)
     _GPUDistributedInitMixin._compute_turbulence_source_distributed(stub, dt)
     assert turb_gpu.des_length_scale.shape == (n_local, n_sps)
     assert np.all(np.isfinite(turb_gpu.k_field))
@@ -403,7 +389,7 @@ def test_gpu_distributed_les_matches_single_machine_wale(rank):
     order = 1
     mesh = _build_synthetic_mixed_mesh(order)
     ops = generate_fr_operators(order)
-    n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
+    n_sps = mesh.n_sps_per_cell
     rng = np.random.default_rng(4242)
     U, _, _ = _nonuniform_state(mesh, rng)
 
@@ -440,14 +426,14 @@ def test_gpu_distributed_les_matches_single_machine_wale(rank):
     grid_scale_compact = np.tile(delta_compact[:, None], (1, n_sps_val))
 
     U_local = U[partition.local_cells]
-    fake_halo_5var_gpu = _FakeHalo(U[native_ids])
+    fake_halo_gpu = ShapeKeyedFakeHalo(U[native_ids])
 
     stub = types.SimpleNamespace(
         rank=rank, device_id=0, mesh=mesh, boundary_ghost_provider=None,
         partition=partition, dist_flat_face=dist_fc, flat_face_gpu=dist_fc.base_flat,
         mesh_data=mesh_data, ops_data=mesh_data,
         turb_model_gpu=None, sgs_model_gpu=GPUWALEModel(),
-        gpu_halo=fake_halo_5var_gpu,
+        gpu_halo=fake_halo_gpu,
         _perm_gpu=dist_fc.perm, _inv_perm_gpu=dist_fc.inv_perm,
         U_gpu=U_local, _grid_scale_compact=grid_scale_compact,
     )

@@ -361,13 +361,9 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
     solver.state = new_state
     solver.halo_exchange = HaloExchange(solver.partition, new_n_sps, n_vars)
 
-    if solver.turb_model is not None:
-        solver.turb_halo_exchange = HaloExchange(solver.partition, new_n_sps, 2)
     solver.wall_distance_compact = my_package.get('wall_distance_compact')
     solver.iddes_h_max_compact = my_package.get('iddes_h_max_compact')
     solver.iddes_h_wn_compact = my_package.get('iddes_h_wn_compact')
-    if solver.ddes_model is not None:
-        solver.des_length_scale_halo_exchange = HaloExchange(solver.partition, new_n_sps, 1)
 
     # `_local_solver` 在"完全分布式加载"模式下从构造起就是这个
     # `types.SimpleNamespace` 替身（不是"传统模式"的懒加载真实

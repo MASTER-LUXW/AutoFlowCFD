@@ -132,7 +132,6 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, _
         # 分布式模式：使用传入的分区信息
         if partition_info is not None:
             cell_partition = partition_info['cell_partition']
-            n_global_cells = partition_info['n_global_cells']
         elif face_connectivity is not None:
             # 兼容旧接口：所有 rank 独立执行分区
             if self.rank == 0:
@@ -143,7 +142,6 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, _
             if n_ranks > 1:
                 from autoflowcfd.core.mpi.comm import bcast_from_root
                 cell_partition = bcast_from_root(cell_partition)
-            n_global_cells = face_connectivity.owner_cell.max() + 1
         else:
             raise ValueError("Either face_connectivity or partition_info must be provided")
 
@@ -289,12 +287,10 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, _
         # `self` 已经或即将全部满足）。
         n_local = self.partition.n_local_cells
         self.turb_model = None
-        self.turb_halo_exchange = None
         self.wall_distance_compact = None
         self.ddes_model = None
         self.iddes_h_max_compact = None
         self.iddes_h_wn_compact = None
-        self.des_length_scale_halo_exchange = None
         self.wmles_model = None
         # LES（2026-09-02）：WALE 是纯代数 SGS 模型，没有 k/omega 那样的
         # 跨步 ODE 状态，也不需要 wall_distance（不像 WMLES 的 y+ 计算）
@@ -340,11 +336,9 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, _
                 # 的临时 adapter 对象，_turb_ramp_step 的递增不会自动持久化，
                 # step() 显式在每次调用后把结果写回 self._turb_ramp_step
                 # （见该方法对应注释）。
-
-                self.turb_halo_exchange = HaloExchange(self.partition, n_sps, 2)
             else:
                 # WMLES（2026-09-02）：没有 k/omega ODE 状态，不需要
-                # init_turbulence_models/turb_halo_exchange——只需要真实
+                # init_turbulence_models——只需要真实
                 # 的 CPU 版 WMLESModel 实例（与单机 `gpu_solver.py`/CPU
                 # `FRSolver.__init__` 构造 wmles_model 同一个模式）+
                 # 下面统一计算的 wall_distance_compact（y+ 计算需要）。
@@ -392,15 +386,6 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, _
                 compact_global_ids = self.dist_flat_face.compact_global_ids
                 self.iddes_h_max_compact = self._iddes_h_max[compact_global_ids]
 
-            if turb_model_upper in ('DDES', 'IDDES'):
-                # 真实 bug 修复（2026-09-02，两次连续调用才测出来）：
-                # `des_length_scale` 是跨步持久状态，需要与 k_field/
-                # omega_field 同一套 halo 交换+compact 重排才能在
-                # 第二次及以后的调用里正确使用，见 distributed_
-                # turbulence.py::distributed_compute_turbulence_source_
-                # and_viscosity 对应修复文档。只有 1 个分量，不能复用
-                # 2-var 的 turb_halo_exchange。
-                self.des_length_scale_halo_exchange = HaloExchange(self.partition, n_sps, 1)
 
         # 7. 时间推进器：与单机 FRSolver 同一套 Shu-Osher SSP-RK3 stage
         # 实现（core/time_integration/base.py），保证分布式与单机路径

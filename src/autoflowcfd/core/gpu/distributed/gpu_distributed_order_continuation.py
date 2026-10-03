@@ -25,7 +25,6 @@ multi_gpu_fully_distributed_for_new_order`（root 用持续持有的
 """
 
 import numpy as np
-from typing import Optional
 from autoflowcfd.core.turbulence.sst.log_omega import lift_log_omega
 
 
@@ -170,13 +169,7 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
             solver.turb_model_gpu.omega_field = cp.asarray(new_omega_np)
             if new_nu_t_np is not None:
                 solver.turb_model_gpu.nu_t = cp.asarray(new_nu_t_np)
-        solver.turb_halo_gpu = GPUHaloExchange(
-            solver.partition, n_sps=n_sps, n_vars=2, device_id=solver.device_id
-        )
         if solver.ddes_model_gpu is not None:
-            solver.des_length_scale_halo_gpu = GPUHaloExchange(
-                solver.partition, n_sps=n_sps, n_vars=1, device_id=solver.device_id
-            )
             # 真实 bug 修复（2026-09-02，DDES 补齐 max_edge 网格尺度时
             # 发现——与本次 Order Continuation 改动无关）：此前这里
             # 只要 `_iddes_h_max_global` 存在就无条件读

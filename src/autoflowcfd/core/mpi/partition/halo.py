@@ -99,7 +99,7 @@ def extend_halo_for_flux_point_cross_references(
     )
     n_new_halo = len(new_halo_cells_arr)
 
-    # 关键正确性约束：halo.py::HaloExchange.exchange()/exchange_scalar() 和
+    # 关键正确性约束：halo.py::HaloExchange.exchange() 和
     # gpu_halo_exchange.py 在填入接收到的 halo 数据时，都用
     # `np.searchsorted(partition.halo_cells, gc)` 定位某个全局单元 id 在
     # halo_cells 中的位置——np.searchsorted 要求数组*已排序*，否则是未定义

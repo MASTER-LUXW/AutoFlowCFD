@@ -68,13 +68,11 @@ def _multi_gpu_standin(single, dist):
     wall, open_ = compute_turbulence_face_masks_gpu(
         types.SimpleNamespace(face_connectivity=types.SimpleNamespace(n_faces=fc.base_flat.n_faces)), provider)
     md = _prepare_mesh_ops_data(single.mesh, single.ops)
-    identity = types.SimpleNamespace(exchange=lambda a: a)
     g = types.SimpleNamespace(
         partition=dist.partition, dist_flat_face=fc, mesh=single.mesh, ops=single.ops, mesh_data=md, ops_data=md,
         n_compact=n, device_id=0, rank=0, order=1, current_order=1,
         _perm_gpu=np.asarray(fc.perm), _inv_perm_gpu=np.asarray(fc.inv_perm),
-        gpu_halo=types.SimpleNamespace(exchange=dist.halo_exchange.exchange), turb_halo_gpu=identity,
-        des_length_scale_halo_gpu=identity, flat_face_gpu=fc.base_flat,
+        gpu_halo=types.SimpleNamespace(exchange=dist.halo_exchange.exchange), flat_face_gpu=fc.base_flat,
         wall_distance_gpu=np.asarray(dist.wall_distance_compact), _wall_mask_k_gpu=wall, _open_mask_gpu=open_,
         turb_model_gpu=tg, ddes_model_gpu=None, iddes_h_max_compact=None, iddes_h_wn_compact=None,
         turb_model_name="SST", mu_molecular=single.mu_molecular, freestream=dist.local_solver.freestream,

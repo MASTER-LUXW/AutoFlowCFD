@@ -180,11 +180,9 @@ def build_multi_gpu_solver_from_fully_distributed_package(
 
     self.turb_model_name = turb_model_name
     self.turb_model_gpu = None
-    self.turb_halo_gpu = None
     self.ddes_model_gpu = None
     self.iddes_h_max_compact = None
     self.iddes_h_wn_compact = None
-    self.des_length_scale_halo_gpu = None
     self.sgs_model_gpu = None
     self._grid_scale_compact = None
     self.wmles_model = None
@@ -201,7 +199,6 @@ def build_multi_gpu_solver_from_fully_distributed_package(
         )
         self.turb_model_gpu.k_max = 0.5 * vel_inf ** 2
         self.turb_model_gpu.omega_max = 1e6
-        self.turb_halo_gpu = GPUHaloExchange(self.partition, n_sps=n_sps, n_vars=2, device_id=device_id)
         logger.info(f"Rank {self.rank}: GPU SST model initialized (fully-distributed mode, "
                     f"k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
 
@@ -213,11 +210,6 @@ def build_multi_gpu_solver_from_fully_distributed_package(
         elif turb_model_name == 'IDDES':
             from autoflowcfd.core.gpu.turbulence.gpu_turbulence_des import GPUIDDESModel
             self.ddes_model_gpu = GPUIDDESModel()
-
-        if self.ddes_model_gpu is not None:
-            self.des_length_scale_halo_gpu = GPUHaloExchange(
-                self.partition, n_sps=n_sps, n_vars=1, device_id=device_id
-            )
 
     elif turb_model_name == 'LES':
         from autoflowcfd.core.gpu.turbulence.gpu_sgs import GPUWALEModel
@@ -277,8 +269,8 @@ def build_multi_gpu_solver_from_fully_distributed_package(
             f"MultiGPUDistributedSolver (fully-distributed) initialized: {n_ranks} ranks, "
             f"{n_local} local cells/rank (+{self.partition.n_halo} halo)"
         )
-        print(f"✅ MultiGPUDistributedSolver Ready (fully-distributed mode: "
-              f"only root rank loaded the full mesh):")
+        print("✅ MultiGPUDistributedSolver Ready (fully-distributed mode: "
+              "only root rank loaded the full mesh):")
         print(f"   Ranks: {n_ranks}, Cells/rank: {n_local} (+{self.partition.n_halo} halo)")
         print(f"   GPU device: {device_id} per rank")
 

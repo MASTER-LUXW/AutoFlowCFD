@@ -185,7 +185,7 @@ class _TurbulenceCompactState:
         view = be._view
         saved = (view.k_field, view.omega_field)
         try:
-            set_view_k_omega(view, s.turb_halo_exchange, s.dist_flat_face,
+            set_view_k_omega(view, s.halo_exchange, s.dist_flat_face,
                              np.ascontiguousarray(kw_local[..., 0]), np.ascontiguousarray(kw_local[..., 1]))
             return np.stack([view.k_field, view.omega_field], axis=-1)
         finally:
@@ -219,7 +219,7 @@ class DistributedTurbulenceBackend:
 
     def _sync_view(self) -> None:
         s = self.solver
-        set_view_k_omega(self._view, s.turb_halo_exchange, s.dist_flat_face,
+        set_view_k_omega(self._view, s.halo_exchange, s.dist_flat_face,
                          self.model.k_field, self.model.omega_field)
 
     def advance_ramp(self) -> None:
@@ -231,13 +231,12 @@ class DistributedTurbulenceBackend:
         """按**当前** local 平均流重建紧凑视图（halo 交换）、冻结输入与标量对流几何。"""
         s = self.solver
         self._adapter, self._view = build_distributed_turbulence_view(
-            s.state.get_local_U()[..., :5], s.partition, s.halo_exchange, s.turb_halo_exchange,
+            s.state.get_local_U()[..., :5], s.partition, s.halo_exchange,
             s.dist_flat_face, s.mesh, s.ops, self.model, s.local_solver.mu_molecular,
             s.wall_distance_compact, turb_ramp_step=s._turb_ramp_step,
             turb_ramp_steps=s._turb_production_ramp_steps, turb_model_name=s.turb_model_name,
             ddes_model=s.ddes_model, iddes_h_max_compact=s.iddes_h_max_compact,
             iddes_h_wn_compact=s.iddes_h_wn_compact,
-            des_length_scale_halo_exchange=s.des_length_scale_halo_exchange,
             boundary_ghost_provider=s.local_solver.boundary_ghost_provider)
         self._inputs = prepare_turbulence_inputs(self._adapter)
         self._conv_geom = prepare_convection_geometry(
@@ -278,11 +277,10 @@ class DistributedTurbulenceBackend:
         return distributed_block_jacobi_colors(self.solver)
 
     def coarse_context(self):
-        from autoflowcfd.core.mpi.distributed_coarse import CpuCompactCellValues, coarse_comm_context
+        from autoflowcfd.core.mpi.distributed_coarse import CompactCellValues, coarse_comm_context
 
         s = self.solver
-        return coarse_comm_context(s.partition, CpuCompactCellValues(s.halo_exchange, s.dist_flat_face.perm,
-                                                                     self.shape[1]))
+        return coarse_comm_context(s.partition, CompactCellValues(s.halo_exchange, s.dist_flat_face.perm, np))
 
     def block_assembler(self):
         """本步的解析单元块装配器：在与残差同一个紧凑空间视图上装配，按 `inv_perm` 取本 rank 行。"""

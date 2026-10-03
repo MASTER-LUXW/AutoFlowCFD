@@ -91,10 +91,10 @@ class MultiGpuTurbulenceBackend:
         return distributed_block_jacobi_colors(self.solver)
 
     def coarse_context(self):
-        from autoflowcfd.core.mpi.distributed_coarse import GpuCompactCellValues, coarse_comm_context
+        from autoflowcfd.core.mpi.distributed_coarse import CompactCellValues, coarse_comm_context
 
         s = self.solver
-        return coarse_comm_context(s.partition, GpuCompactCellValues(s.gpu_halo, s._perm_gpu, self.shape[1], self.xp))
+        return coarse_comm_context(s.partition, CompactCellValues(s.gpu_halo, s._perm_gpu, self.xp))
 
     def block_assembler(self):
         """解析单元块装配器（最近一次 `prepare_inputs` 的视图）：在与残差同一个紧凑视图上装配（线性算子部分在主机，
@@ -137,7 +137,7 @@ class _MultiGpuTurbulenceCompactState:
 
     def __call__(self, kw_local):
         s = self.solver
-        return s._permute_to_compact(s.turb_halo_gpu.exchange(kw_local))
+        return s._permute_to_compact(s.gpu_halo.exchange(kw_local))
 
 
 class MultiGpuCoupledBackend:

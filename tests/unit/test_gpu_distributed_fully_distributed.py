@@ -250,8 +250,8 @@ class TestBuildFromFullyDistributedPackageNoneTurbulence:
 class TestBuildFromFullyDistributedPackageSstTurbulence:
     def test_wires_sst_turbulence_from_package(self, mesh_and_ops, gpu_shim, monkeypatch):
         """SST：`wall_distance_compact`（root 预先算好）必须原样上传成
-        `wall_distance_gpu`；k_inf/omega_inf 必须按 Tu/VR 公式算对；
-        turb_halo_gpu 必须构造。真实 `GPUTurbulenceSST`/
+        `wall_distance_gpu`；k_inf/omega_inf 必须按 Tu/VR 公式算对（k/omega 与平均流
+        共用 `gpu_halo` 交换，不再另建交换器）。真实 `GPUTurbulenceSST`/
         `compute_turbulence_face_masks_gpu` 要求真实 CUDA，这里用最小
         Fake 隔离（不重新验证它们的数值逻辑，那是其他测试文件的范围）。
         """
@@ -291,7 +291,6 @@ class TestBuildFromFullyDistributedPackageSstTurbulence:
         )
 
         assert solver.turb_model_gpu is not None
-        assert solver.turb_halo_gpu is not None
         assert solver.wall_distance_gpu is not None
         np.testing.assert_allclose(solver.wall_distance_gpu, package['wall_distance_compact'])
 

@@ -245,7 +245,7 @@ class _MultiGPUSteppingMixin:
             # implicit/coupled_step.py，否则 implicit/mean_flow_step.py），归约跨 rank，块
             # Jacobi 着色全局一致
             from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
-            from autoflowcfd.core.mpi.distributed_coarse import GpuCompactCellValues, coarse_comm_context
+            from autoflowcfd.core.mpi.distributed_coarse import CompactCellValues, coarse_comm_context
             from autoflowcfd.core.mpi.distributed_implicit import (
                 distributed_block_jacobi_colors, distributed_coupling_graph, distributed_mean_flow_assembler,
             )
@@ -255,7 +255,7 @@ class _MultiGPUSteppingMixin:
             )
 
             coarse_ctx = coarse_comm_context(
-                self.partition, GpuCompactCellValues(self.gpu_halo, self._perm_gpu, n_sps, cp))
+                self.partition, CompactCellValues(self.gpu_halo, self._perm_gpu, cp))
             if coupled_nk:
                 from autoflowcfd.core.gpu.distributed.gpu_distributed_implicit import MultiGpuCoupledBackend
                 from autoflowcfd.core.time_integration.implicit.coupled_step import step_coupled_newton

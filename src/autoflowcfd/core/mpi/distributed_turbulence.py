@@ -160,10 +160,10 @@ class DistributedTurbulenceSolverAdapter:
 
 
 def build_distributed_turbulence_view(
-    U_local, partition, halo_exchange, turb_halo_exchange, dist_fc, local_mesh, ops,
+    U_local, partition, halo_exchange, dist_fc, local_mesh, ops,
     turb_model, mu, wall_distance_compact, *, turb_ramp_step, turb_ramp_steps,
     turb_model_name, ddes_model, iddes_h_max_compact, iddes_h_wn_compact,
-    des_length_scale_halo_exchange, boundary_ghost_provider,
+    boundary_ghost_provider,
 ):
     """compact 索引空间（local + halo）上的湍流求值"视图"，返回 `(adapter, turb_view)`。
 
@@ -179,10 +179,9 @@ def build_distributed_turbulence_view(
     U_extended = halo_exchange.exchange(U_local)
     U_compact = U_extended[dist_fc.perm]
 
-    # 2. k/omega halo 交换（独立于平均流的 2-var 交换）。
+    # 2. k/omega halo 交换（同一个交换器，逐单元形状 (n_sps, 2)）。
     k_omega_local = np.stack([turb_model.k_field, turb_model.omega_field], axis=-1)  # (n_local,n_sps,2)
-    k_omega_extended = turb_halo_exchange.exchange(k_omega_local)
-    k_omega_compact = k_omega_extended[dist_fc.perm]
+    k_omega_compact = halo_exchange.exchange(k_omega_local)[dist_fc.perm]
 
     mesh_adapter = DistributedMeshAdapter(partition, dist_fc, local_mesh, ops)
     n_compact = mesh_adapter.n_cells
@@ -204,28 +203,12 @@ def build_distributed_turbulence_view(
         if hasattr(turb_model, attr):
             setattr(turb_view, attr, getattr(turb_model, attr))
 
-    # 真实 bug 修复（2026-09-02，续查"完全分布式加载模式下的DDES/IDDES"
-    # 时，用两次连续调用才测出来——第一次调用之前从未被本模块任何测试
-    # 覆盖过）：`des_length_scale` 是跨步持久状态（本步 apply_to_sst_
-    # model[_iddes] 用本步 nu_t 算出、写回 turb_model.des_length_scale
-    # 供*下一步*读取，见下方"写回"一节），此前这里直接把它（n_local
-    # 大小）原样 setattr 到 turb_view（n_compact 大小）——第一次调用时
-    # `des_length_scale` 还是 None，`setattr` 不会出错，掩盖了这个问题；
-    # 从第二次调用开始，`compute_source_terms` 内部 `rho*k_safe**1.5/
-    # des_length_scale` 这类逐元素运算会因 (n_local,n_sps) 与
-    # (n_compact,n_sps) 形状不匹配直接 ValueError（真实复现：2-rank
-    # 合成网格上第二次调用必现）。修复为与 k_field/omega_field 完全
-    # 同一套"先 native 顺序、halo 交换、再 permute 到 compact"处理——
-    # `des_length_scale` 本身只有 1 个分量，不能直接复用 2-var 的
-    # `turb_halo_exchange`，调用方（`distributed_solver.py`）需要额外
-    # 提供一个 1-var 的 halo 交换器（None 时表示尚未配置，退化为
-    # "没有跨步长度尺度记忆"，与 CPU 单机路径首次调用的行为一致，不是
-    # 新的简化）。
-    if getattr(turb_model, "des_length_scale", None) is not None and des_length_scale_halo_exchange is not None:
-        des_length_scale_extended = des_length_scale_halo_exchange.exchange(
-            turb_model.des_length_scale[:, :, None]
-        )[:, :, 0]
-        turb_view.des_length_scale = des_length_scale_extended[dist_fc.perm]
+    # `des_length_scale` 是跨步持久状态（本步 apply_to_sst_model[_iddes] 用本步 nu_t 算出、
+    # 写回 turb_model.des_length_scale 供下一步读取），n_local 大小，与 k/omega 同一套
+    # "halo 交换、再换到 compact"（2026-09-02 修复：此前原样挂到 n_compact 的视图上，第二次
+    # 调用必现形状不匹配）。首次调用时为 None，与单机首次调用一致。
+    if getattr(turb_model, "des_length_scale", None) is not None:
+        turb_view.des_length_scale = halo_exchange.exchange(turb_model.des_length_scale)[dist_fc.perm]
     else:
         turb_view.des_length_scale = None
 
@@ -255,10 +238,10 @@ def build_distributed_turbulence_view(
     return adapter, turb_view
 
 
-def set_view_k_omega(turb_view, turb_halo_exchange, dist_fc, k_local, omega_local) -> None:
+def set_view_k_omega(turb_view, halo_exchange, dist_fc, k_local, omega_local) -> None:
     """把 local 的 k/omega（native 排列）经 halo 交换写进 compact 视图。"""
     k_omega_local = np.stack([k_local, omega_local], axis=-1)
-    k_omega_compact = turb_halo_exchange.exchange(k_omega_local)[dist_fc.perm]
+    k_omega_compact = halo_exchange.exchange(k_omega_local)[dist_fc.perm]
     turb_view.k_field = k_omega_compact[..., 0].copy()
     turb_view.omega_field = k_omega_compact[..., 1].copy()
 
@@ -267,7 +250,6 @@ def distributed_compute_turbulence_source_and_viscosity(
     U_local: np.ndarray,
     partition: DistributedPartition,
     halo_exchange: HaloExchange,
-    turb_halo_exchange: HaloExchange,
     dist_fc: DistributedFlatFaceGeometry,
     local_mesh,
     ops,
@@ -281,7 +263,6 @@ def distributed_compute_turbulence_source_and_viscosity(
     ddes_model=None,
     iddes_h_max_compact: Optional[np.ndarray] = None,
     iddes_h_wn_compact: Optional[np.ndarray] = None,
-    des_length_scale_halo_exchange: Optional[HaloExchange] = None,
     boundary_ghost_provider=None,
 ) -> "tuple[np.ndarray, int]":
     """分布式 SST/DDES/IDDES 源项+输运计算，就地更新 `turb_model`
@@ -291,9 +272,8 @@ def distributed_compute_turbulence_source_and_viscosity(
     Args:
         U_local: (n_local, n_sps, 5) 本 rank 的平均流守恒变量（用于算
             grad_vel 与 rho/velocity，不需要湍流分量）
-        halo_exchange: 5-var halo 交换器（与平均流残差共用同一个）
-        turb_halo_exchange: 2-var halo 交换器（k, omega），独立于平均流
-            的 halo 交换——k/omega 是 turb_model 自己的状态，不在 U 里
+        halo_exchange: halo 交换器（与平均流残差共用同一个；k/omega、DES 长度尺度、
+            P0 速度梯度按各自的逐单元形状经它交换）
         turb_model: 本 rank 的 SSTModelFR 实例（n_local 大小），本函数
             会就地更新它的 k_field/omega_field/nu_t
         dt_local: (n_local, n_sps) 湍流场显式更新用的局部时间步长（与
@@ -330,11 +310,10 @@ def distributed_compute_turbulence_source_and_viscosity(
     n_local = partition.n_local_cells
     n_sps = local_mesh.n_sps_per_cell
     adapter, turb_view = build_distributed_turbulence_view(
-        U_local, partition, halo_exchange, turb_halo_exchange, dist_fc, local_mesh, ops,
+        U_local, partition, halo_exchange, dist_fc, local_mesh, ops,
         turb_model, mu, wall_distance_compact, turb_ramp_step=turb_ramp_step,
         turb_ramp_steps=turb_ramp_steps, turb_model_name=turb_model_name, ddes_model=ddes_model,
         iddes_h_max_compact=iddes_h_max_compact, iddes_h_wn_compact=iddes_h_wn_compact,
-        des_length_scale_halo_exchange=des_length_scale_halo_exchange,
         boundary_ghost_provider=boundary_ghost_provider,
     )
 

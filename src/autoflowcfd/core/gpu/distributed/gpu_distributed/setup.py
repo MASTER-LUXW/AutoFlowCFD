@@ -269,15 +269,13 @@ class _MultiGPUSetupMixin:
         # 补齐——此前这里只构造了默认初值的 GPUTurbulenceSST，没有做
         # 单机版早就有的这层初始化）。`self.turb_model_gpu` 只按
         # `n_local_cells` 分配（与 `self.state`/`self.U_gpu` 一致，
-        # local+halo 的 k/omega 通过独立的 2-var halo 交换器实时获取，
+        # local+halo 的 k/omega 经平均流同一个 halo 交换器实时获取，
         # 不常驻）——与 CPU 分布式 SST（`distributed_turbulence.py`）
         # 同一个设计。
         self.turb_model_gpu = None
-        self.turb_halo_gpu = None
         self.ddes_model_gpu = None
         self.iddes_h_max_compact = None
         self.iddes_h_wn_compact = None
-        self.des_length_scale_halo_gpu = None
         if turb_model in ("SST", "DDES", "IDDES"):
             from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
             n_local_cells = self.partition.n_local_cells
@@ -290,7 +288,6 @@ class _MultiGPUSetupMixin:
             )
             self.turb_model_gpu.k_max = 0.5 * vel_inf ** 2
             self.turb_model_gpu.omega_max = 1e6
-            self.turb_halo_gpu = GPUHaloExchange(self.partition, n_sps=n_sps, n_vars=2, device_id=device_id)
             logger.info(f"Rank {self.rank}: GPU SST model initialized "
                         f"(k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
 
@@ -335,11 +332,6 @@ class _MultiGPUSetupMixin:
                     self.iddes_h_wn_compact = cp.asarray(h_wn_cpu[compact_global_ids])
                 logger.info(f"Rank {self.rank}: GPU IDDES model initialized (based on SST)")
 
-            if self.ddes_model_gpu is not None:
-                self.des_length_scale_halo_gpu = GPUHaloExchange(
-                    self.partition, n_sps=n_sps, n_vars=1, device_id=device_id
-                )
-
         # LES（2026-09-02）：WALE 是纯代数模型（不像 SST 的 k/omega 有
         # 跨步 ODE 积分状态），`_compute_turbulence_source_distributed`
         # 用当前状态现算 mu_t，不需要任何跨步持久 halo 交换基础设施。
@@ -354,7 +346,7 @@ class _MultiGPUSetupMixin:
         self._viscosity_ratio = viscosity_ratio
 
         # WMLES（2026-09-02）：没有 k/omega ODE 状态，不需要
-        # turb_model_gpu/turb_halo_gpu——只需要真实的 CPU 版 WMLESModel
+        # turb_model_gpu——只需要真实的 CPU 版 WMLESModel
         # 实例（与单机 gpu_solver.py/CPU FRSolver.__init__ 构造
         # wmles_model 同一个模式：必须在下面 build_boundary_ghost_
         # provider 之前构造，该函数用 getattr(self,"wmles_model",None)

@@ -161,13 +161,6 @@ def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int
             solver.turb_model_gpu.omega_field = cp.asarray(new_omega_np)
             if new_nu_t_np is not None:
                 solver.turb_model_gpu.nu_t = cp.asarray(new_nu_t_np)
-        solver.turb_halo_gpu = GPUHaloExchange(
-            solver.partition, n_sps=new_n_sps, n_vars=2, device_id=solver.device_id
-        )
-        if solver.ddes_model_gpu is not None:
-            solver.des_length_scale_halo_gpu = GPUHaloExchange(
-                solver.partition, n_sps=new_n_sps, n_vars=1, device_id=solver.device_id
-            )
         _upload_wall_geometry_compact(solver, my_package, cp, solver.device_id)
 
     if solver.sgs_model_gpu is not None:

@@ -113,9 +113,7 @@ class _GPUDistributedTurbSourceMixin:
         # n_local 大小的数组直接挂到 compact 视图上（2026-09-02 修复）
         view.des_length_scale = None
         if self.ddes_model_gpu is not None and getattr(model, "des_length_scale", None) is not None:
-            des_len_extended = self.des_length_scale_halo_gpu.exchange(
-                model.des_length_scale[:, :, None])[:, :, 0]
-            view.des_length_scale = self._permute_to_compact(des_len_extended)
+            view.des_length_scale = self._permute_to_compact(self.gpu_halo.exchange(model.des_length_scale))
 
         from autoflowcfd.core.gpu.residual.gpu_flux import conserved_to_primitive_gpu
 
@@ -152,7 +150,7 @@ class _GPUDistributedTurbSourceMixin:
         cp = ctx.cp
         k_omega_local = cp.stack([self.turb_model_gpu.k_field, self.turb_model_gpu.omega_field],
                                  axis=-1)
-        k_omega_compact = self._permute_to_compact(self.turb_halo_gpu.exchange(k_omega_local))
+        k_omega_compact = self._permute_to_compact(self.gpu_halo.exchange(k_omega_local))
         ctx.view.k_field = k_omega_compact[..., 0].copy()
         ctx.view.omega_field = k_omega_compact[..., 1].copy()
 

@@ -148,8 +148,6 @@ def _rebuild_cpu_traditional_partition_and_state(solver, target_p: int, new_loca
     solver.halo_exchange = HaloExchange(new_partition, new_n_sps, n_vars)
 
     if solver.turb_model is not None:
-        solver.turb_halo_exchange = HaloExchange(new_partition, new_n_sps, 2)
-
         # wall_distance_compact：compact 索引空间随 dist_flat_face 重建
         # 而变化，与其尝试插值一个"索引空间都不一样"的旧数组，直接用
         # 与 __init__ 同一套函数重新算——这是纯几何量（KDTree 最近邻），
@@ -161,7 +159,6 @@ def _rebuild_cpu_traditional_partition_and_state(solver, target_p: int, new_loca
             new_dist_fc, solver.mesh, getattr(solver, "_wall_distance_source", None))
 
         if solver.ddes_model is not None:
-            solver.des_length_scale_halo_exchange = HaloExchange(new_partition, new_n_sps, 1)
             # 真实 bug 修复（2026-09-02，DDES 补齐 max_edge 网格尺度时
             # 发现，与本次 Order Continuation 改动无关）：此前这里只要
             # `_iddes_h_max` 存在就无条件读 `solver._iddes_h_wn`，隐含

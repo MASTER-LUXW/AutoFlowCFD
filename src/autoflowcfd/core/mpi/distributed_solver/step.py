@@ -224,14 +224,13 @@ class _DistributedStepMixin:
             dt_local = dt_phys_local
             mu_t_field_compact, self._turb_ramp_step = distributed_compute_turbulence_source_and_viscosity(
                 self.state.get_local_U()[..., :5], self.partition, self.halo_exchange,
-                self.turb_halo_exchange, self.dist_flat_face, self.mesh, self.ops,
+                self.dist_flat_face, self.mesh, self.ops,
                 self.turb_model, mu, self.wall_distance_compact, dt_local,
                 turb_ramp_step=self._turb_ramp_step,
                 turb_ramp_steps=self._turb_production_ramp_steps,
                 turb_model_name=self.turb_model_name, ddes_model=self.ddes_model,
                 iddes_h_max_compact=self.iddes_h_max_compact,
                 iddes_h_wn_compact=self.iddes_h_wn_compact,
-                des_length_scale_halo_exchange=self.des_length_scale_halo_exchange,
                 # compact 面空间的 provider（group_code 已重切），湍流输运的
                 # 壁面/来流条件靠它按边界组取类型
                 boundary_ghost_provider=boundary_ghost_provider,
@@ -347,7 +346,7 @@ class _DistributedStepMixin:
             # 归约换成跨 rank 的 MPIReductions，块 Jacobi 着色是全局一致着色里
             # 本 rank 那一段（见 core/mpi/distributed_implicit.py 模块文档）
             from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
-            from autoflowcfd.core.mpi.distributed_coarse import CpuCompactCellValues, coarse_comm_context
+            from autoflowcfd.core.mpi.distributed_coarse import CompactCellValues, coarse_comm_context
             from autoflowcfd.core.mpi.distributed_implicit import (
                 distributed_block_jacobi_colors, distributed_coupling_graph, distributed_mean_flow_assembler,
             )
@@ -357,7 +356,7 @@ class _DistributedStepMixin:
             )
 
             coarse_ctx = coarse_comm_context(
-                self.partition, CpuCompactCellValues(self.halo_exchange, self.dist_flat_face.perm, n_sps))
+                self.partition, CompactCellValues(self.halo_exchange, self.dist_flat_face.perm, np))
             if coupled_nk:
                 from autoflowcfd.core.mpi.distributed_implicit import DistributedCoupledBackend
                 from autoflowcfd.core.time_integration.implicit.coupled_step import step_coupled_newton

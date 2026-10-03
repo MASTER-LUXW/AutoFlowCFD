@@ -23,21 +23,13 @@ from autoflowcfd.core.mpi.partition import build_distributed_partition
 from autoflowcfd.core.mpi.distributed_flat_face import build_distributed_flat_face
 from autoflowcfd.core.mpi.distributed_turbulence import (
     distributed_compute_turbulence_source_and_viscosity,
-    compute_distributed_wall_distance,
 )
 from autoflowcfd.core.fr_residual.inviscid import primitive_to_conserved
 from autoflowcfd.core.turbulence.sst import SSTModelFR
 from autoflowcfd.core.turbulence.des import DDESModel, IDDESModel, compute_h_max_and_h_wn
 from autoflowcfd.fr.operators import generate_fr_operators
+from tests.unit._fake_halo import ShapeKeyedFakeHalo
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
-
-
-class _FakeHaloExchange:
-    def __init__(self, U_extended: np.ndarray):
-        self._U_extended = U_extended
-
-    def exchange(self, U_local: np.ndarray) -> np.ndarray:
-        return self._U_extended
 
 
 def _nonuniform_state(mesh, rng):
@@ -140,11 +132,8 @@ def test_distributed_turbulence_matches_single_machine(rank, turb_model_name):
         if n_halo > 0 else partition.local_cells
     )
     U_local = U[partition.local_cells]
-    fake_halo_5var = _FakeHaloExchange(U[native_ids][..., :5])
-
-    k_omega_local = np.stack([k_field[partition.local_cells], omega_field[partition.local_cells]], axis=-1)
     k_omega_extended = np.stack([k_field[native_ids], omega_field[native_ids]], axis=-1)
-    fake_halo_turb = _FakeHaloExchange(k_omega_extended)
+    fake_halo = ShapeKeyedFakeHalo(U[native_ids][..., :5], k_omega_extended)
 
     turb_local = SSTModelFR(partition.n_local_cells, n_sps)
     turb_local.k_field = k_field[partition.local_cells].copy()
@@ -165,7 +154,7 @@ def test_distributed_turbulence_matches_single_machine(rank, turb_model_name):
         iddes_h_wn_compact = h_wn_global[dist_fc.compact_global_ids]
 
     mu_t_compact, _next_ramp = distributed_compute_turbulence_source_and_viscosity(
-        U_local, partition, fake_halo_5var, fake_halo_turb, dist_fc, mesh, ops,
+        U_local, partition, fake_halo, dist_fc, mesh, ops,
         turb_local, mu, d_wall_compact, dt_local_local,
         turb_model_name=turb_model_name, ddes_model=ddes_model_distributed,
         iddes_h_max_compact=iddes_h_max_compact, iddes_h_wn_compact=iddes_h_wn_compact,
@@ -203,7 +192,7 @@ def test_distributed_les_viscosity_matches_single_machine(rank):
     order = 1
     mesh = _build_synthetic_mixed_mesh(order)
     ops = generate_fr_operators(order)
-    n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
+    n_sps = mesh.n_sps_per_cell
     rng = np.random.default_rng(2024)
     U, _k, _omega = _nonuniform_state(mesh, rng)
 
@@ -229,7 +218,7 @@ def test_distributed_les_viscosity_matches_single_machine(rank):
         np.concatenate([partition.local_cells, partition.halo_cells])
         if n_halo > 0 else partition.local_cells
     )
-    fake_halo = _FakeHaloExchange(U[native_ids])
+    fake_halo = ShapeKeyedFakeHalo(U[native_ids])
     U_local = U[partition.local_cells]
 
     sgs_model = WALEModel()
@@ -357,19 +346,14 @@ def test_distributed_ddes_two_consecutive_steps_matches_single_machine(turb_mode
                 if n_halo > 0 else partition.local_cells
             )
             U_local = U[partition.local_cells]
-            fake_halo_5var = _FakeHaloExchange(U[native_ids][..., :5])
-
             turb = turb_locals[r]
-            k_omega_extended = k_omega_global[native_ids]
-            fake_halo_turb = _FakeHaloExchange(k_omega_extended)
+            fake_halo = ShapeKeyedFakeHalo(U[native_ids][..., :5], k_omega_global[native_ids])
 
             d_wall_compact = d_wall[dist_fc.compact_global_ids]
             dt_local_local = dt_local_global[partition.local_cells]
 
-            des_halo = None
             if des_length_scale_global is not None:
-                des_ext = des_length_scale_global[native_ids][:, :, None]
-                des_halo = _FakeHaloExchange(des_ext)
+                fake_halo.set(des_length_scale_global[native_ids])
 
             ddes_model = _make_ddes_model(turb_model_name)
             iddes_h_max_compact = iddes_h_wn_compact = None
@@ -378,11 +362,10 @@ def test_distributed_ddes_two_consecutive_steps_matches_single_machine(turb_mode
                 iddes_h_wn_compact = h_wn_global[dist_fc.compact_global_ids]
 
             distributed_compute_turbulence_source_and_viscosity(
-                U_local, partition, fake_halo_5var, fake_halo_turb, dist_fc, mesh, ops,
+                U_local, partition, fake_halo, dist_fc, mesh, ops,
                 turb, mu, d_wall_compact, dt_local_local,
                 turb_model_name=turb_model_name, ddes_model=ddes_model,
                 iddes_h_max_compact=iddes_h_max_compact, iddes_h_wn_compact=iddes_h_wn_compact,
-                des_length_scale_halo_exchange=des_halo,
             )
             results[r] = turb
 
