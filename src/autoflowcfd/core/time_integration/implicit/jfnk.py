@@ -48,7 +48,6 @@ Jacobian 每单元一个 `(27*5)^2` 的块加上面耦合块，在同一网格�
 
 from typing import Callable, Optional, Tuple
 
-import time
 
 import numpy as np
 
@@ -353,11 +352,9 @@ def step_newton_krylov(
         prec = (block_precond.preconditioner(dtau_try, n_var) if block_precond is not None
                 else PseudoTransientDiagonal(dtau_try, n_var))
         budget = block_precond.stale_budget() if block_precond is not None else None
-        t_solve = time.perf_counter()
         du, iters, ginfo, linear_rel = _solve_direction(
             jac, prec, r0, n_var, eta, gmres_restart,
             gmres_max_iter if budget is None else min(budget, gmres_max_iter), red, rows, norm)
-        t_solve = time.perf_counter() - t_solve
         iters_total += iters
         if ginfo > 0 and budget is not None and budget < gmres_max_iter:
             # 复用的 J_cc 在过时预算内解不到容差：当场按本步基态重装配再解
@@ -366,10 +363,8 @@ def step_newton_krylov(
             prec = None          # 释放持有旧块的预处理对象，重装配期间不留两份（见 block_jacobi._build）
             block_precond.refresh(residual, u0_flat, r0, scales, dtau_try)
             prec = block_precond.preconditioner(dtau_try, n_var)
-            t_solve = time.perf_counter()
             du, iters, ginfo, linear_rel = _solve_direction(
                 jac, prec, r0, n_var, eta, gmres_restart, gmres_max_iter, red, rows, norm)
-            t_solve = time.perf_counter() - t_solve
             iters_total += iters
         iters_since_build = iters
         gmres_info = ginfo
@@ -404,7 +399,7 @@ def step_newton_krylov(
 
     if block_precond is not None:
         # 刷新判据的基线用最后一次求解（刚装配时即新块的迭代数），不含过时那一次
-        block_precond.record(iters_since_build, accepted=theta > 0.0, gmres_seconds=t_solve)
+        block_precond.record(iters_since_build, accepted=theta > 0.0)
     return u_new, dict(res_norm=res_norm, res_norm_new=res_norm_new,
                        eta=eta, gmres_iters=iters_total,
                        n_matvec=jac.n_matvec,

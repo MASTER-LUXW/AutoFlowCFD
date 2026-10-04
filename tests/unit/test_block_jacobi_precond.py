@@ -150,7 +150,12 @@ def test_refresh_policy():
     c.record(20, accepted=True)
     _begin(c, rng)
     assert c.n_builds == 1                     # 正常复用
-    c.record(20 * 2 + 10 + 1, accepted=True)   # 迭代数劣化超过 2x+10
+    # 迭代数劣化超过"基线 + 一次装配折合的迭代数"（差分装配按残差求值次数折算，refresh_cost.py）
+    assert c.refresh_slack == max(3, round(0.73 * c.jac.n_residual_evals))
+    c.record(20 + c.refresh_slack, accepted=True)       # 恰在阈值上：不重装配
+    _begin(c, rng)
+    assert c.n_builds == 1
+    c.record(20 + c.refresh_slack + 1, accepted=True)
     _begin(c, rng)
     assert c.n_builds == 2
     c.record(15, accepted=False)               # 步未被接受
@@ -282,21 +287,6 @@ def test_stale_blocks_are_refreshed_within_the_step():
     assert info2["gmres_iters"] <= budget + 2, info2["gmres_iters"]
     assert info2["gmres_info"] == 0 and info2["theta"] == 1.0
     np.testing.assert_allclose(u, t2, rtol=1e-5, atol=1e-6)
-
-
-def test_refresh_threshold_balances_rebuild_cost_against_extra_iterations():
-    """刷新阈值 = 基线 + max(下限, 装配耗时 / 单次迭代耗时)：多出来的迭代比重装配
-    一次还贵时才重装配（见 block_jacobi.py 模块文档"复用与刷新"）。"""
-    from autoflowcfd.core.time_integration.implicit.block_jacobi import REFRESH_SLACK_MIN, BlockJacobiCache
-
-    cache = BlockJacobiCache(cell_is_prism=np.ones(4, dtype=bool), colors=np.zeros(4, dtype=np.int64),
-                             n_sps=1, n_real_prism=1, n_real_tet=1, n_var=2)
-    assert cache._refresh_threshold(3) == 3 + REFRESH_SLACK_MIN          # 还没有耗时数据
-    cache.build_seconds = 10.0
-    cache.record(4, True, gmres_seconds=4.0)                            # 1 s / 次
-    assert cache._refresh_threshold(3) == 13
-    cache.build_seconds = 0.5                                           # 装配很便宜：取下限
-    assert cache._refresh_threshold(3) == 3 + REFRESH_SLACK_MIN
 
 
 def test_block_modes_share_one_budget_with_mean_flow_first(monkeypatch):

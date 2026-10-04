@@ -209,9 +209,9 @@ class CoupledBlockPreconditioner:
         budgets = [b for b in (self.mean.stale_budget(), self.turb.stale_budget()) if b is not None]
         return min(budgets) if budgets else None
 
-    def record(self, gmres_iters: int, accepted: bool, gmres_seconds: Optional[float] = None) -> None:
-        self.mean.record(gmres_iters, accepted, gmres_seconds)
-        self.turb.record(gmres_iters, accepted, gmres_seconds)
+    def record(self, gmres_iters: int, accepted: bool) -> None:
+        self.mean.record(gmres_iters, accepted)
+        self.turb.record(gmres_iters, accepted)
 
 
 class CoupledPhysicality:
