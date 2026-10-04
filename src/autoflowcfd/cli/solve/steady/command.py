@@ -14,9 +14,8 @@ from autoflowcfd.cli.solve.helpers import (
 from autoflowcfd.cli.solve.commands import solve
 
 from .multi_gpu import _run_multi_gpu
-from .single_gpu import _run_single_gpu
 from .cpu_mpi import _run_cpu_mpi
-from .cpu_single import _run_cpu_single
+from .single_node import _run_single_node
 
 
 @solve.command(name='steady')
@@ -103,7 +102,7 @@ from .cpu_single import _run_cpu_single
               help='原始面网格路径 - input_file 是 .nas 体网格时必填，用于反推边界分组；input_file 是 .pkl 时不需要')
 @click.option('--skip-quality-check', is_flag=True, help='跳过求解前的网格质量门检查（不建议，仅用于临时诊断）')
 @click.option('--reference-area', type=float, default=None, help='气动系数参考面积 (m^2)，提供时求解结束后打印 Cd/Cl')
-@click.option('--threads', '-j', type=int, default=-1, help='CPU 后端 numba 并行 kernel 使用的线程数，默认 -1 = 4（本机真实网格实测扩展性甜点，不是核数）')
+@click.option('--threads', '-j', type=int, default=-1, help='numba 并行 kernel 使用的线程数（CPU 残差；GPU 后端的主机侧 Jacobian 装配），默认 -1 = 4（本机真实网格实测扩展性甜点，不是核数）')
 @click.option('--n-ranks', '--np', type=int, default=1, help='MPI 并行 rank 数（域分解并行，需配合 mpirun 使用。默认 1 = 单机模式）')
 @click.option('--fully-distributed', is_flag=True,
               help='真正的完全分布式网格加载（2026-09-02 新增，同日/次日续接补齐 SST/DDES/'
@@ -225,8 +224,15 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
         print(f"MPI Ranks  : {n_ranks} (domain decomposition)")
     print("Wall Dist : exact point-to-wall-surface distance (AABB tree)\n")
 
-    # 1. 按后端分派（各分支的参数由 AST 分析得出，逐名传入）
-    if backend == 'gpu' and multi_gpu and (n_ranks > 1):
+    # 1. 按后端分派（各分支的参数由 AST 分析得出，逐名传入）。单机（n_ranks == 1）的 CPU 与单 GPU 同一个
+    # 分支；多 rank 的 GPU 必须显式 --multi-gpu（此前 --backend gpu --n-ranks N 不加 --multi-gpu 时静默只用
+    # 单 GPU、忽略 N，--multi-gpu --n-ranks 1 则落到 CPU 求解器的 GPU 分支）
+    if multi_gpu and (backend != 'gpu' or n_ranks <= 1):
+        raise click.BadParameter("--multi-gpu 需要 --backend gpu 且 --n-ranks > 1（单 GPU 直接用 --backend gpu）",
+                                 param_hint="--multi-gpu")
+    if backend == 'gpu' and n_ranks > 1 and not multi_gpu:
+        raise click.BadParameter("多 rank 的 GPU 计算需要 --multi-gpu", param_hint="--n-ranks")
+    if backend == 'gpu' and multi_gpu:
         _run_multi_gpu(
             aoa_deg=aoa_deg,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
@@ -257,41 +263,12 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
             viscosity_ratio=viscosity_ratio,
             sem_num_eddies=sem_num_eddies,
         )
-    elif backend == 'gpu' and (not multi_gpu):
-        _run_single_gpu(
-            aoa_deg=aoa_deg,
-            artificial_viscosity_alpha=artificial_viscosity_alpha,
-            artificial_viscosity_enabled=artificial_viscosity_enabled,
-            aos_deg=aos_deg,
-            cfl_max=cfl_max,
-            cfl_min=cfl_min,
-            cfl_start=cfl_start,
-            gpu_device=gpu_device,
-            input_file=input_file,
-            max_iter=max_iter,
-            mu_molecular=mu_molecular,
-            order=order,
-            output_dir=output_dir,
-            p_inf=p_inf,
-            phase_max_iter=phase_max_iter,
-            residual_drop_threshold=residual_drop_threshold,
-            rho_inf=rho_inf,
-            skip_quality_check=skip_quality_check,
-            surface_mesh=surface_mesh,
-            time_scheme=time_scheme,
-            turbulence_intensity=turbulence_intensity,
-            turbulence_model=turbulence_model,
-            vel_inf=vel_inf,
-            viscosity_ratio=viscosity_ratio,
-            sem_num_eddies=sem_num_eddies,
-        )
     elif n_ranks > 1:
         _run_cpu_mpi(
             aoa_deg=aoa_deg,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             aos_deg=aos_deg,
-            backend=backend,
             cfl_max=cfl_max,
             cfl_min=cfl_min,
             cfl_start=cfl_start,
@@ -318,7 +295,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
             sem_num_eddies=sem_num_eddies,
         )
     else:
-        _run_cpu_single(
+        _run_single_node(
             aoa_deg=aoa_deg,
             aos_deg=aos_deg,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
@@ -329,6 +306,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
             cfl_start=cfl_start,
             checkpoint_interval=checkpoint_interval,
             entropy_stable_volume_enabled=entropy_stable_volume_enabled,
+            gpu_device=gpu_device,
             input_file=input_file,
             max_iter=max_iter,
             mu_molecular=mu_molecular,

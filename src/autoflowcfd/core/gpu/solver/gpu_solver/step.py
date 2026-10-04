@@ -1,4 +1,4 @@
-"""AutoFlowCFD V2.0 - 单机 GPU 的单步推进与求解循环
+"""AutoFlowCFD V2.0 - 单机 GPU 的单步推进
 
 从 `src/autoflowcfd/core/gpu/solver/gpu_solver.py` 的 `GPUFRSolver` 拆出（2026-09-24，项目「单文件不超
 500 行」规范）。mixin 是本仓库既有惯例（`_SolverGeometryMixin`、
@@ -8,15 +8,11 @@
 这里通过 `self` 访问。
 """
 
-import time
 from functools import partial
 import numpy as np
-from typing import Optional, Dict, Any
-from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
 from autoflowcfd.core.gpu import get_cupy
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 from autoflowcfd.core.time_integration.implicit.mean_flow_step import (
-    newton_monitor_suffix,
     newton_step_ok,
     step_mean_flow_newton,
 )
@@ -27,7 +23,7 @@ from autoflowcfd.core.time_integration.implicit.coupled_step import step_coupled
 
 
 class _GPUSolverStepMixin:
-    """单机 GPU 的单步推进与求解循环"""
+    """单机 GPU 的单步推进（求解循环与 CPU 共用 `SolveLoopMixin`）"""
 
     def step(self, dt: float = 0.0) -> float:
         """执行一个时间步。
@@ -86,6 +82,9 @@ class _GPUSolverStepMixin:
         dt_local_full = cp.broadcast_to(
             dt_local[:, None], (n_cells, n_sps)
         ).reshape(n_cells * n_sps)
+        # 累计伪时间（与 CPU step.py 同一个函数；n_cells 个数拷回主机）
+        from autoflowcfd.core.fr_solver.pseudotime_budget import accumulate_pseudo_time
+        accumulate_pseudo_time(self, cp.asnumpy(dt_local))
 
         # 展平 U 用于时间积分器
         U_flat = self.U_gpu.reshape(n_cells * n_sps, self.n_vars)
@@ -254,91 +253,3 @@ class _GPUSolverStepMixin:
                 self._cfl_controller.update(residual_norm)
 
         return residual_norm
-
-    def solve(
-        self,
-        max_iter: int = 1000,
-        dt: float = 1e-4,
-        tol: float = 1e-6,
-        output_interval: int = 10,
-        phase_max_iter: Optional[int] = None,
-        residual_drop_threshold: float = 1e2,
-    ) -> Dict[str, Any]:
-        """执行稳态求解循环。
-
-        Order Continuation 自动分派（2026-09-02，见 core/gpu/solver/
-        gpu_solver_order_continuation.py 模块文档）：与 CPU `FRSolver.
-        solve()`/GPU 分布式版本同一个判据——`self.order`（目标阶数）
-        >= 2 时自动改用逐阶爬坡（`run_distributed_order_continuation`，
-        尽管函数名带"distributed"，逻辑本身对 solver 只要求
-        `step()`/`order`/`current_order`/`_interpolate_to_new_order`
-        这几个鸭子类型接口，不依赖任何分布式概念，单机 GPU 复用同一份
-        实现，不需要另写一份等价的迭代循环）。
-
-        Args:
-            max_iter: 最大迭代次数
-            dt: 时间步长（稳态模式下被 CFL 覆盖）
-            tol: 收敛容差
-            output_interval: 输出间隔
-            phase_max_iter, residual_drop_threshold: 仅在触发 Order
-                Continuation（`uses_order_continuation`）时生效，与单机 CPU
-                `run_order_continuation` 同名参数同一含义。
-
-        Returns:
-            结果字典
-        """
-        from autoflowcfd.core.utils.order_continuation.policy import uses_order_continuation
-
-        if uses_order_continuation(self):
-            from autoflowcfd.core.mpi.distributed_order_continuation import (
-                run_distributed_order_continuation,
-            )
-            result = run_distributed_order_continuation(
-                self, max_iter, dt, tol,
-                phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold,
-            )
-            return {
-                'converged': result.converged,
-                'iterations': result.iterations,
-                'final_residual': result.final_residual,
-                'residual_history': self.residual_history,
-            }
-
-        print(f"Starting GPU solve: max_iter={max_iter}, tol={tol}")
-        converged = False
-        final_residual = 1e10
-        _last_finite = None
-
-        for i in range(max_iter):
-            t_start = time.time()
-            res = self.step(dt)
-            t_end = time.time()
-            final_residual = res
-
-            if i == 0 or (i + 1) % output_interval == 0:
-                mem = self.array_mgr.get_memory_usage()
-                print(
-                    f"GPU Iter {i+1}: Residual = {res:.6e} | "
-                    f"Time/step: {t_end-t_start:.3f}s | "
-                    f"GPU mem: {mem['used_mb']:.0f}/{mem['total_mb']:.0f} MB"
-                    + newton_monitor_suffix(self)
-                )
-
-            # 发散即中止（2026-09-16 统一）：此前这里只是 break，于是
-            # 调用方拿到的是 converged=False，与"跑满预算仍未收敛"完全
-            # 无法区分，收尾还会把 NaN 状态写成结果文件。改用与另外四条
-            # 求解循环共享的 SolverDivergedError，让 CLI 非零退出。
-            check_residual_finite(res, i + 1, last_finite=_last_finite)
-            _last_finite = res
-
-            if res < tol:
-                converged = True
-                print(f"✅ GPU Converged at iteration {i+1} with residual {res:.6e}")
-                break
-
-        return {
-            'converged': converged,
-            'iterations': self.iteration,
-            'final_residual': final_residual,
-            'residual_history': self.residual_history,
-        }

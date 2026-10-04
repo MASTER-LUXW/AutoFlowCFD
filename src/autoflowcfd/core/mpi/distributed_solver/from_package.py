@@ -8,6 +8,7 @@
 这里通过 `self` 访问。
 """
 
+from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 from typing import Optional
 from autoflowcfd.core.mpi import get_rank
 from autoflowcfd.core.mpi.halo import HaloExchange
@@ -261,7 +262,7 @@ class _DistributedFromPackageMixin:
         # 没有这两个字段的旧 checkpoint/package。
         time_scheme = require_distributed_scheme(
             package.get('time_scheme', TimeIntegrationScheme.SSP_RK3))
-        dual_time_steps = package.get('dual_time_inner_iter', 20)
+        dual_time_steps = package.get('dual_time_inner_iter', DEFAULT_DUAL_TIME_STEPS)
         self._time_integrator = TimeIntegrator(
             scheme=time_scheme, dt=1.0, dual_time_steps=dual_time_steps,
         )

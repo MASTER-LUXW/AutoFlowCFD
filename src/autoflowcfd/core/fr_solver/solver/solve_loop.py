@@ -1,8 +1,12 @@
-"""AutoFlowCFD V2.0 - `FRSolver` 的求解循环（mixin，只含方法）。
+"""AutoFlowCFD V2.0 - 单机求解循环（mixin，只含方法）。
 
-从 `core/fr_solver/solver.py` 拆出（2026-09-25）。
+从 `core/fr_solver/solver.py` 拆出（2026-09-25）。`SolveLoopMixin` 与后端无关，CPU `FRSolver` 与单 GPU
+`GPUFRSolver` 共用（2026-10-04 起；此前 GPU 另有一份只打印残差、不调 checkpoint 回调、返回字典的
+循环）。后端差异只通过这几个接口进入：`step()`、`_solve_with_order_continuation()`、`host_view()`
+（每步气动力系数读主机上的状态）与 `_loop_monitor_suffix()`（每步日志末尾的后端信息）。
 """
 
+from contextlib import contextmanager
 from typing import Optional
 
 import numpy as np
@@ -17,8 +21,12 @@ from .. import step as fr_solver_step
 from .threads import blas_threads_limited
 
 
-class _SolverSolveMixin:
-    """求解循环、Order Continuation 委托与单步推进。"""
+class SolveLoopMixin:
+    """与后端无关的求解循环（见模块文档）。"""
+
+    def _loop_monitor_suffix(self) -> str:
+        """每步日志末尾的后端信息（CPU 无；GPU 打印显存占用）。"""
+        return ""
 
     def _pseudo_time_budget(self, n_steps: int):
         """本次求解已推进的伪时间与各层物理时标之比；拿不到就返回 None。
@@ -143,7 +151,6 @@ class _SolverSolveMixin:
                 res = self.step(dt)
                 t_end = time.time()
                 final_residual = res
-                self.residual_history.append(res)
 
                 # 发散即中止（2026-09-16，真实事故驱动）：此前这条循环
                 # 完全没有有限性检查，残差变成 inf/nan 之后照常继续迭代、
@@ -174,11 +181,11 @@ class _SolverSolveMixin:
                 msg = f"P{self.order} Iter {i+1}: Residual = {res:.6e} | Drop: {drop:.1f}x | Time: {t_end - t_start:.2f}s"
                 if self._cfl_controller is not None:
                     msg += f" | CFL={self._cfl_controller.cfl_number:.3f}"
-                msg += newton_monitor_suffix(self)
+                msg += newton_monitor_suffix(self) + self._loop_monitor_suffix()
                 ref_area = getattr(self, '_reference_area', None)
                 if ref_area is not None and ref_area > 0:
                     from autoflowcfd.postprocess.fr_coefficients import compute_forces_pressure_only
-                    aero = compute_forces_pressure_only(self, ref_area)
+                    aero = compute_forces_pressure_only(self.host_view(), ref_area)
                     msg += f" | Cd={aero['Cd']:.4f} Cl={aero['Cl']:.4f} Cs={aero['Cs']:.4f}"
                 # 按方程分别归一化残差 + 最大残差定位（与 order_continuation.py
                 # 同一处新增，参照 Fluent scaled residuals / STAR-CCM+ Max
@@ -189,7 +196,7 @@ class _SolverSolveMixin:
                 # 同一处、同一理由）：只在第 1 步和其后每 10 步打印一次，避免
                 # 正常运行时每步都刷出这行长诊断信息。
                 freestream = getattr(self, 'freestream', None)
-                if freestream is not None and hasattr(self.state, 'dU_dt') and (i == 0 or (i + 1) % 10 == 0):
+                if freestream is not None and hasattr(getattr(self, "state", None), 'dU_dt') and (i == 0 or (i + 1) % 10 == 0):
                     from autoflowcfd.core.fr_solver.residual_diagnostics import (
                         compute_scaled_residuals, format_scaled_residual_line,
                     )
@@ -252,7 +259,20 @@ class _SolverSolveMixin:
             print(format_pseudo_time_budget(_ptb))
 
         return SolverResult(converged=converged, iterations=i+1, final_residual=final_residual)
-    
+
+
+class _SolverSolveMixin(SolveLoopMixin):
+    """CPU `FRSolver`：主机视图、Order Continuation 委托、阶数切换与单步推进。"""
+
+    def host_view(self):
+        """主机视图：CPU 求解器的状态本来就在主机上，返回自身（单 GPU 的见 `core/gpu/solver/host_view.py`）。"""
+        return self
+
+    @contextmanager
+    def edit_host_state(self):
+        """在主机上修改状态（恢复 checkpoint、`--init-from`）：CPU 直接改自身。"""
+        yield self
+
     def _solve_with_order_continuation(self, max_iter: int, dt: float, tol: float,
                                         checkpoint_callback=None,
                                         phase_max_iter: Optional[int] = None,

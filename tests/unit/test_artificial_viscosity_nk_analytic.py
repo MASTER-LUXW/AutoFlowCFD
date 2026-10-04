@@ -88,7 +88,7 @@ def test_distributed_artificial_viscosity_nk_matches_single_machine():
         bc[n] = {"type": "FARFIELD", "Q_free": [RHO, U_INF, 0.0, 0.0, P]}
     dist = DistributedFRSolver(
         mesh=mesh, ops=generate_fr_operators(1), face_connectivity=mesh.face_connectivity, n_ranks=1,
-        backend="cpu", order=1, turb_model_name="NONE", n_vars=5,
+        order=1, turb_model_name="NONE", n_vars=5,
         time_scheme=TimeIntegrationScheme.NEWTON_KRYLOV, mu_molecular=1.8e-5, rho_inf=RHO, vel_inf=U_INF,
         p_inf=P, bc_overrides=bc, artificial_viscosity_enabled=True)
     dist.local_solver.boundary_ghost_provider = build_face_exact_ghost_provider(mesh, LX, H, LZ, bc)

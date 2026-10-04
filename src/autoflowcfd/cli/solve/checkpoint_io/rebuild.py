@@ -92,8 +92,9 @@ def rebuild_solver_from_checkpoint(
     cfl_max: Optional[float] = None,
     cfl_min: Optional[float] = None,
     time_scheme: Optional[str] = None,
+    gpu_device: int = 0,
 ):
-    """从 checkpoint 完整重建一个带解场的 FRSolver（不继续迭代）。
+    """从 checkpoint 完整重建一个带解场的单机求解器（不继续迭代）。
 
     从 `solve resume` 里提炼出的公共重建逻辑：checkpoint 的 metadata 记录了
     重建 FRSolver 所需的全部构造参数（input_file/order/turbulence_model/
@@ -112,7 +113,9 @@ def rebuild_solver_from_checkpoint(
 
     Args:
         checkpoint_path: checkpoint 文件路径（solve steady/transient 产出）
-        backend: 后端覆盖，None 时沿用 checkpoint 记录的原始后端
+        backend: 后端覆盖，None 时沿用 checkpoint 记录的原始后端（gpu 重建为 `GPUFRSolver`，
+            经 `cli/solve/solver_factory.py`；状态经主机视图恢复后写回设备）
+        gpu_device: GPU 设备号（只用于 gpu）
         surface_mesh: 面网格路径覆盖。None 时回退到 checkpoint metadata
             里存的 surface_mesh（write_checkpoint 若拿到了就会存下，见
             该函数文档）；两者都没有、且 input_file 是 .nas 体网格时，
@@ -148,10 +151,10 @@ def rebuild_solver_from_checkpoint(
             或状态形状与重建求解器不匹配
     """
     from types import SimpleNamespace
-    from autoflowcfd.core import FRSolver
     from autoflowcfd.core.utils.checkpoint import CheckpointManager
+    from autoflowcfd.cli.solve.aero_coefficients import resolve_reference_area
     from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
-    from autoflowcfd.cli.solve.wall_distance import compute_wall_distance_for_solver
+    from autoflowcfd.cli.solve.solver_factory import build_single_node_solver
 
     _solution, _history, iteration, metadata = CheckpointManager(
         config=SimpleNamespace(), output_dir="."
@@ -191,9 +194,9 @@ def rebuild_solver_from_checkpoint(
     )
 
     resolved_scheme = resolve_resume_time_scheme(time_scheme, metadata)
-    solver = FRSolver(
-        mesh=mesh,
-        backend=target_backend,
+    solver = build_single_node_solver(
+        target_backend, mesh, volume_data,
+        gpu_device=gpu_device,
         order=order,
         turb_model_name=turbulence_model,
         time_scheme=resolved_scheme,
@@ -213,7 +216,7 @@ def rebuild_solver_from_checkpoint(
         # 不传它会被钳回 0.05（见 adaptive_cfl.py 模块文档第 11 条）。
         cfl_min=cfl_min,
     )
-    # FRSolver.__init__ 用同一个 order 参数同时设置 self.current_order
+    # 构造函数用同一个 order 参数同时设置 self.current_order
     # 和 self.order（ramp 目标）——上面为了让 mesh/初始状态形状匹配
     # checkpoint，传的是 checkpoint 时的 current_order，这里把
     # self.order 单独纠正回真正的目标阶数，否则 solve() 里
@@ -222,23 +225,13 @@ def rebuild_solver_from_checkpoint(
     # 求解器会误判目标阶数已经是 0、直接跳过 Order Continuation 的
     # 继续爬升。
     solver.order = target_order
-    compute_wall_distance_for_solver(solver, volume_data)
 
-    # 与 solve_steady_command.py 同一段逻辑保持一致（见上面 reference_area
-    # 参数文档）：未显式传参数时尝试自动估算，让 resume 期间的每步日志
+    # 与 `solve steady` 同一个函数：未显式传参数时自动估算，让 resume 期间的每步日志
     # 也能带 Cd/Cl/Cs，不必等到 solve() 整个跑完才看到一次。
-    resolved_reference_area = reference_area
-    if resolved_reference_area is None:
-        from autoflowcfd.cli.solve.aero_coefficients import _compute_reference_area_auto
-        from autoflowcfd.core.utils.flow_direction import direction_from_freestream
+    resolve_reference_area(solver, volume_data, reference_area)
 
-        # 参考面积沿**来流方向**投影（有攻角时按 X 投影会偏大
-        # 1/cos(alpha)，15 度就是 3.5%，直接进 Cd 的分母）
-        resolved_reference_area = _compute_reference_area_auto(
-            volume_data, direction=direction_from_freestream(solver.freestream))
-    solver._reference_area = resolved_reference_area
-
-    restore_solver_state_from_fields(solver, fields, metadata)
+    with solver.edit_host_state() as host:
+        restore_solver_state_from_fields(host, fields, metadata)
 
     metadata["order"] = order
     metadata["target_order"] = target_order

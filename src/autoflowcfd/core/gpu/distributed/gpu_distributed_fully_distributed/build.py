@@ -3,6 +3,7 @@
 从 `src/autoflowcfd/core/gpu/distributed/gpu_distributed_fully_distributed.py`(原 557 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
 """
 
+from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 import types
 
 
@@ -168,10 +169,8 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     from autoflowcfd.core.utils.preconditioning import resolve_low_mach_precond
     self.low_mach_precond_enabled = resolve_low_mach_precond(
         package.get('low_mach_precond', True), time_scheme_str)
-    # `dual_time_steps`：GPUTimeIntegrator 构造函数本身不接受这个参数
-    # （与 gpu_distributed.py::step() 的 `getattr(...,'dual_time_steps',5)`
-    # 回退设计一致，见该方法调用点），这里显式设置成 package 携带的值。
-    self.time_integrator.dual_time_steps = package.get('dual_time_inner_iter', 20)
+    # 双时间步内迭代次数取 package 携带的值（时间积分器在上面按格式构造）
+    self.time_integrator.dual_time_steps = package.get('dual_time_inner_iter', DEFAULT_DUAL_TIME_STEPS)
     self._dual_time_U_prev = None
     # NEWTON_KRYLOV 跨步状态（构造时置初值，理由见 reset_newton_state 文档）
     from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state

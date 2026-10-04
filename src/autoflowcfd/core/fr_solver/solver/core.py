@@ -14,6 +14,7 @@
 构造签名、参数文档与装配顺序。
 """
 
+from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 from typing import Any, Dict, Optional
 
 from autoflowcfd.core.fr_solver.state import FRState
@@ -45,7 +46,6 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
                  turb_model_name: str = "SST", n_vars: int = 5,
                  time_scheme: TimeIntegrationScheme = TimeIntegrationScheme.SSP_RK3,
                  initial_state: Optional[FRState] = None,
-                 backend: str = "cpu",
                  rho_inf: float = 1.225, vel_inf: float = 33.33, p_inf: float = 101325.0,
                  # 攻角/侧滑角（度）。0/0 时来流严格沿 +x，与此前把方向
                  # 硬编码成 +x 的行为**逐位相同**，默认路径数值不变。
@@ -53,7 +53,7 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
                  aoa_deg: float = 0.0, aos_deg: float = 0.0,
                  bc_overrides: Optional[Dict[str, Dict[str, Any]]] = None,
                  mu_molecular: float = 1.8e-5,
-                 dual_time_inner_iter: int = 20,
+                 dual_time_inner_iter: int = DEFAULT_DUAL_TIME_STEPS,
                  n_threads: int = -1,
                  adaptive_cfl: bool = True,
                  # 三个 CFL 参数默认 None（2026-09-25）：由
@@ -88,7 +88,6 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
             n_vars: 守恒变量数量（默认5：rho, rho_u, rho_v, rho_w, rho_e）
             time_scheme: 时间推进方案
             initial_state: 初始状态（用于 Order Continuation）
-            backend: 计算后端 ("cpu" 或 "gpu")
             aoa_deg, aos_deg: 攻角/侧滑角（度）。此前来流方向在全代码库被
                 硬编码成 +x、没有任何攻角选项；现在 `Q_free`（边界自由来流
                 态）、初场、SEM 入口方向、气动力的风轴系分解、参考面积的
@@ -153,7 +152,7 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
         """
         resolved_n_threads = configure_numba_threads(n_threads, mesh)
 
-        self._setup_options(mesh, order, backend, artificial_viscosity_enabled,
+        self._setup_options(mesh, order, artificial_viscosity_enabled,
                             artificial_viscosity_alpha, entropy_stable_volume_enabled)
         # 安全地获取网格信息
         n_cells = getattr(mesh, 'n_cells', 0)
@@ -171,6 +170,5 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
         print("[OK] FRSolver Ready:")
         print(f"   Cells: {n_cells}, Order: P{order}")
         print(f"   Turbulence: {turb_model_name}")
-        print(f"   Backend: {self.backend_type.upper()}")
         print(f"   Time Scheme: {time_scheme.value}")
         print(f"   Threads: {resolved_n_threads}")

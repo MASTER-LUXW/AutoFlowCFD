@@ -175,7 +175,7 @@ class TestSingleGpuInitialFieldKeepsTheDirection:
         solver = GPUFRSolver(
             mesh=mesh, ops=generate_fr_operators(order), order=order,
             device_id=0, mu_molecular=1.8e-5,
-            rho_inf=_RHO, vel_inf=_VEL, p_inf=_P, turb_model="none",
+            rho_inf=_RHO, vel_inf=_VEL, p_inf=_P, turb_model_name="none",
             aoa_deg=10.0, aos_deg=0.0,
         )
         U = np.asarray(solver.U_gpu)

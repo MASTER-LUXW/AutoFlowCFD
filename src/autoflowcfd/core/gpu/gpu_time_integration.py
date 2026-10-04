@@ -21,7 +21,7 @@ AutoFlowCFD V2.0 - GPU 版时间积分
 
 from autoflowcfd.core.fr_operators.flux_kernels import GAMMA
 from autoflowcfd.core.gpu import get_cupy
-from autoflowcfd.core.time_integration.base import TimeIntegrator, scheme_from_name
+from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS, TimeIntegrator, scheme_from_name
 
 
 def compute_local_cfl_step_gpu(
@@ -217,5 +217,5 @@ class GPUTimeIntegrator(TimeIntegrator):
     少 4 倍。
     """
 
-    def __init__(self, scheme="ssp_rk3", dual_time_steps: int = 20):
+    def __init__(self, scheme="ssp_rk3", dual_time_steps: int = DEFAULT_DUAL_TIME_STEPS):
         super().__init__(scheme=scheme_from_name(scheme), dual_time_steps=dual_time_steps)

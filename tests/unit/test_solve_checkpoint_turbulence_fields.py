@@ -25,6 +25,7 @@ uniform guess, print a warning) for checkpoints written before this fix.
 
 from types import SimpleNamespace
 
+from tests.unit._host_state import with_host_state
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 from unittest.mock import patch, MagicMock
 
@@ -49,7 +50,7 @@ def _fake_solver(n_cells=2, n_sps=1, n_vars=7, order=0, k=None, omega=None, with
             turb_model.k_field = k
         if omega is not None:
             turb_model.omega_field = omega
-    return SimpleNamespace(
+    return with_host_state(SimpleNamespace(
         state=state,
         order=order,
         current_order=order,
@@ -60,7 +61,7 @@ def _fake_solver(n_cells=2, n_sps=1, n_vars=7, order=0, k=None, omega=None, with
         freestream={"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0},
         # write_checkpoint 记录时间格式（2026-09-25）：真实求解器恒有 time_integrator
         time_integrator=SimpleNamespace(scheme=TimeIntegrationScheme.SSP_RK3),
-    )
+    ))
 
 
 class TestWriteCheckpointStoresTurbulenceFields:

@@ -305,11 +305,6 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
                 t_end = _time.time()
                 final_residual = res
                 total_iter += 1
-                # 收敛历史记录（V2.0 专家组盲审发现，2026-08-27，与
-                # solver.py::solve() 的普通循环同一约定）：api.py::
-                # get_convergence_history 读这个列表。
-                if hasattr(solver, 'residual_history'):
-                    solver.residual_history.append(res)
 
                 phase_gate.observe(solver, res)
                 if initial_residual_this_order is None:

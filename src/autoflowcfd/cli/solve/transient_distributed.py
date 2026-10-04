@@ -29,7 +29,7 @@ def _solve_transient_distributed(
     turbulence_model, max_iter, dt, output_dir,
     reference_area, threads, turbulence_intensity, viscosity_ratio, sem_num_eddies,
     mu_molecular, rho_inf, vel_inf, p_inf,
-    n_ranks, multi_gpu, fully_distributed, gpu_device, backend,
+    n_ranks, multi_gpu, fully_distributed, gpu_device,
     checkpoint_interval, phase_max_iter=None, residual_drop_threshold=100.0,
     init_checkpoint=None,
     cfl_start: Optional[float] = None,
@@ -77,7 +77,7 @@ def _solve_transient_distributed(
         _solve_transient_fully_distributed(
             input_file, order, surface_mesh, skip_quality_check,
             time_scheme, dual_time_inner_iter,
-            turbulence_model, max_iter, dt, output_dir, backend,
+            turbulence_model, max_iter, dt, output_dir,
             turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf,
             n_ranks, checkpoint_interval, phase_max_iter, residual_drop_threshold,
             init_checkpoint,
@@ -92,7 +92,7 @@ def _solve_transient_distributed(
     _solve_transient_cpu_traditional(
         input_file, order, surface_mesh, skip_quality_check,
         time_scheme, dual_time_inner_iter,
-        turbulence_model, max_iter, dt, output_dir, backend, threads,
+        turbulence_model, max_iter, dt, output_dir, threads,
         turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf,
         n_ranks, checkpoint_interval, reference_area, phase_max_iter, residual_drop_threshold,
         init_checkpoint,
@@ -106,7 +106,7 @@ def _solve_transient_distributed(
 def _solve_transient_cpu_traditional(
     input_file, order, surface_mesh, skip_quality_check,
     time_scheme, dual_time_inner_iter,
-    turbulence_model, max_iter, dt, output_dir, backend, threads,
+    turbulence_model, max_iter, dt, output_dir, threads,
     turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf,
     n_ranks, checkpoint_interval, reference_area,
     phase_max_iter=None, residual_drop_threshold=100.0,
@@ -146,7 +146,7 @@ def _solve_transient_cpu_traditional(
     # "传统模式"分支同一个既定分工（该分支同样不调用这个函数）。
     solver = DistributedFRSolver(
         mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
-        n_ranks=n_ranks, backend=backend, order=order,
+        n_ranks=n_ranks, order=order,
         turb_model_name=turbulence_model, time_scheme=time_scheme,
         wall_distance_source=wall_distance_source_if_needed(turbulence_model, volume_data),
         dual_time_inner_iter=dual_time_inner_iter, n_threads=threads,
@@ -189,7 +189,7 @@ def _solve_transient_cpu_traditional(
             # 固定的目标 order。
             saved_path = distributed_save_checkpoint(
                 solver_ref, output_dir, iteration, input_file,
-                solver_ref.current_order, turbulence_model, backend,
+                solver_ref.current_order, turbulence_model, "cpu",
                 target_order=solver_ref.order, surface_mesh=surface_mesh,
             )
             if saved_path and is_root():
@@ -209,7 +209,7 @@ def _solve_transient_cpu_traditional(
         distributed_save_results(solver, output_dir)
         distributed_save_checkpoint(
             solver, output_dir, max_iter, input_file,
-            solver.current_order, turbulence_model, backend,
+            solver.current_order, turbulence_model, "cpu",
             target_order=solver.order, surface_mesh=surface_mesh,
         )
     except Exception as e:
@@ -220,7 +220,7 @@ def _solve_transient_cpu_traditional(
 def _solve_transient_fully_distributed(
     input_file, order, surface_mesh, skip_quality_check,
     time_scheme, dual_time_inner_iter,
-    turbulence_model, max_iter, dt, output_dir, backend,
+    turbulence_model, max_iter, dt, output_dir,
     turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf,
     n_ranks, checkpoint_interval,
     phase_max_iter=None, residual_drop_threshold=100.0,
@@ -289,7 +289,7 @@ def _solve_transient_fully_distributed(
         try:
             saved_path = distributed_save_checkpoint(
                 solver_ref, output_dir, iteration, input_file,
-                solver_ref.current_order, turbulence_model, backend,
+                solver_ref.current_order, turbulence_model, "cpu",
                 target_order=solver_ref.order, surface_mesh=surface_mesh,
             )
             if saved_path and is_root():
@@ -309,7 +309,7 @@ def _solve_transient_fully_distributed(
         distributed_save_results(solver, output_dir)
         distributed_save_checkpoint(
             solver, output_dir, max_iter, input_file,
-            solver.current_order, turbulence_model, backend,
+            solver.current_order, turbulence_model, "cpu",
             target_order=solver.order, surface_mesh=surface_mesh,
         )
     except Exception as e:

@@ -57,7 +57,7 @@ def _make_p2_solver(mesh, ops, turb_model_name="none"):
 
     kwargs = dict(
         mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
-        n_ranks=1, backend="cpu", order=2, turb_model_name=turb_model_name,
+        n_ranks=1, order=2, turb_model_name=turb_model_name,
         time_scheme=TimeIntegrationScheme.SSP_RK3,
         mu_molecular=1.8e-5, rho_inf=1.225, vel_inf=33.33, p_inf=101325.0,
         wall_distance_source=synthetic_wall_source(mesh),
@@ -114,7 +114,7 @@ class TestDistributedOrderContinuationDispatch:
         ops = generate_fr_operators(1)
         solver = DistributedFRSolver(
             mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
-            n_ranks=1, backend="cpu", order=1, turb_model_name="none",
+            n_ranks=1, order=1, turb_model_name="none",
             time_scheme=TimeIntegrationScheme.SSP_RK3,
             mu_molecular=1.8e-5, rho_inf=1.225, vel_inf=33.33, p_inf=101325.0,
         )
@@ -153,7 +153,7 @@ class TestResumeCeilingFractionResetHeuristicDistributed:
 
         solver = DistributedFRSolver(
             mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
-            n_ranks=1, backend="cpu", order=1, turb_model_name="sst",
+            n_ranks=1, order=1, turb_model_name="sst",
             time_scheme=TimeIntegrationScheme.SSP_RK3,
             mu_molecular=1.8e-5, rho_inf=1.225, vel_inf=33.33, p_inf=101325.0,
             wall_distance_source=synthetic_wall_source(mesh),

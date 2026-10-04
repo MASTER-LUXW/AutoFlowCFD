@@ -69,8 +69,8 @@ class TestSingleMachineResume:
         # `PicklingError: Can't pickle MagicMock`）。这与被测的 CLI 转发
         # 逻辑无关，是替身的固有限制。
         with patch("autoflowcfd.cli.solve.commands.rebuild_solver_from_checkpoint") as reb, \
-             patch("autoflowcfd.cli.solve.commands.save_results"), \
-             patch("autoflowcfd.cli.solve.commands.write_checkpoint"), \
+             patch("autoflowcfd.cli.solve.checkpoint_io.write.save_results"), \
+             patch("autoflowcfd.cli.solve.checkpoint_io.write.write_checkpoint"), \
              patch("autoflowcfd.cli.solve.commands._report_aerodynamic_coefficients"):
             reb.return_value = (_fake_solver(), 150, dict(_META))
             res = CliRunner().invoke(

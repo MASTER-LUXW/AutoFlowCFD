@@ -52,7 +52,23 @@ from typing import Dict, Optional
 
 import numpy as np
 
-__all__ = ["pseudo_time_budget", "format_pseudo_time_budget"]
+__all__ = ["accumulate_pseudo_time", "pseudo_time_budget", "format_pseudo_time_budget"]
+
+
+def accumulate_pseudo_time(solver, dt_cell) -> None:
+    """把本步逐单元伪时间步长累加到 `solver.tau_accum`，并另存一份 `solver.dt_cell_last`（全部单机后端共用）。
+
+    局部时间步进下不存在单一的"当前时间"，所以按单元累加（O(n_cells) 一次加法）。本步的 dt
+    要单独留一份：预算里"到 tau/T = 1 还需要多少步"是 `T / dt_median`，用累计量代替会把这个数
+    按步数成比例低估（第一版真犯过：12 步后报"需要 105 步"，真实是 1250 步）。
+
+    Args:
+        dt_cell: (n_cells,) 主机数组（GPU 求解器先拷回主机：n_cells 个数，相对一步残差求值可忽略）
+    """
+    dt_cell = np.array(dt_cell, dtype=float)
+    tau = getattr(solver, "tau_accum", None)
+    solver.tau_accum = dt_cell.copy() if tau is None or np.shape(tau) != dt_cell.shape else tau + dt_cell
+    solver.dt_cell_last = dt_cell
 
 
 def _extent(mesh) -> Optional[float]:

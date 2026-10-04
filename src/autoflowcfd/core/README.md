@@ -1,78 +1,52 @@
 # core 求解器模块
 
-## 概述
+通量重构（FR）高阶求解器：原生棱柱/四面体基，稳态（显式 SSP-RK、伪瞬态 Newton-Krylov）与瞬态（双时间步、
+IMEX），RANS（SA-neg、SST 族）与 DES/LES/WMLES。四个后端：CPU 单机、单 GPU、CPU MPI 分布式、多 GPU 分布式。
 
-本模块实现 AutoFlowCFD 的核心计算组件：基于有限体积法（FVM）的稳态 RANS
-求解器与瞬态 DES/LES 求解器。
+> 本文档此前描述的是一套基于有限体积法的旧实现（`fvm_*.py`、`backend/cpu_backend.py`、
+> `TransientSolver(grid_data, config)` 等），这些文件早已删除；2026-10-04 按当前代码重写。
 
-> 本文档此前描述的是一套独立的、按类拆分的实现（FRScheme/SSTKOmegaModel/
-> WallFunctionModel/ConvergenceMonitor 等），但那套实现从未真正接入求解器
-> 主流程，已作为无用代码整体删除。下面描述的是实际在跑的live实现。
+## 子包
 
-## 主要模块
+| 子包 | 内容 |
+|---|---|
+| `fr_operators/` | FR 算子、AUSM+up 等通量核、人工粘性与问题单元判据 |
+| `fr_residual/` | CPU 无粘/粘性残差与解析单元块 Jacobian |
+| `fr_solver/` | CPU 单机求解器 `FRSolver`：装配、单步推进、边界幽灵态、湍流接入；`solver/solve_loop.py` 的 `SolveLoopMixin` 是 CPU 与单 GPU 共用的求解循环 |
+| `gpu/` | 单 GPU 求解器 `GPUFRSolver`（`gpu/solver/`，主机视图见 `host_view.py`）与多 GPU 分布式（`gpu/distributed/`） |
+| `mpi/` | CPU MPI 分布式求解器、分区、halo、完全分布式网格加载、分布式 checkpoint 与 Order Continuation |
+| `time_integration/` | 显式/双时间步/IMEX 积分器、自适应 CFL、隐式 Newton-Krylov（块预处理、多层校正）、正性限制器 |
+| `turbulence/` | 湍流模型（`sa/`、`sst/`、`des/`、`sgs.py`、`wmles.py`）与统一的输运模型接口 `transported.py` |
+| `utils/` | Order Continuation、壁面距离、checkpoint、来流方向等共用工具 |
+| `backend/` | 后端可用性检测（`get_available_backends`，与 `--backend gpu` 同一判据）与 `SolutionVector` |
 
-### 1. 稳态求解器（`solver_steady.py`：`FRSolver`）
-- SSP-RK3 时间推进
-- AUSM+up（低马赫数预条件）与 HLLC 两种无粘通量格式，二选一
-- 内嵌 SST k-ω 湍流模型、标准/增强壁面函数
-- 自适应 CFL、残差收敛监控
+## 构造求解器
 
-### 2. 瞬态求解器（`transient_solver_loop.py`：`TransientSolver`）
-- 支持 DES/DDES/LES 时间推进
-- 时均场、RMS 脉动统计
-- checkpoint 保存/续算
-
-### 3. 数值核心
-- `fvm_viscous_residual.py`（`ViscousRANSResidual`）：无粘通量（AUSM+up/HLLC）
-  + 粘性通量 + SST 湍流源项 + 壁面函数，稳态/瞬态共用
-- `fvm_gradients.py`：Green-Gauss 梯度重构、Barth-Jespersen 限制器
-- `fvm_faces.py`（`FVMFaceExtractor`）：面几何数据的共享持有者，实际面提取
-  统一走 `grid.mesh_gen.face_extractor.FaceExtractor`
-- `bc_handler.py`（`BoundaryConditionHandler`）：向量化边界条件应用
-- `aero_coeffs.py`（`AeroCoefficientCalculator`）：Cd/Cl 等气动系数积分
-- `time_integration.py`（`TimeIntegrator`）：Backward Euler / RK2 / AB3 时间格式
-
-### 4. 计算后端（`backend/`）
-- `backend/cpu_backend.py`（Numba）、`backend/gpu_backend.py`（CUDA/CuPy）
-- **尚未接入求解器主流程**：目前 `FRSolver`/`TransientSolver` 里的
-  `self.backend` 建好之后没有被调用——真正的数值计算在
-  `fvm_viscous_residual.py` 里用 numpy 直接实现。把完整 RANS-SST 物理移植
-  成 Numba/CUDA kernel 并接入主流程是一项独立的、工作量较大的后续任务。
-
-## 快速上手
+单机求解器（CPU / 单 GPU）由 `autoflowcfd.cli.solve.solver_factory.build_single_node_solver` 按后端构造，
+两个求解器构造参数同名；CLI 的 `solve steady/transient/resume`、checkpoint 重建与 Python API 都经过它：
 
 ```python
-from autoflowcfd.core import FRSolver
-from autoflowcfd.config import SteadyConfig
+from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
+from autoflowcfd.cli.solve.solver_factory import build_single_node_solver
 
-config = SteadyConfig(order=2, max_iter=3000)
-solver = FRSolver(grid_data, config)
-result = solver.solve()
-
-print(f"Converged: {result.converged}, iterations: {result.iterations}")
+mesh, volume_data = load_mesh_for_solver("model_volume.pkl", order=2)
+solver = build_single_node_solver("cpu", mesh, volume_data, order=2, turb_model_name="sa")  # 或 "gpu"
+result = solver.solve(max_iter=1000, dt=1e-3, tol=1e-6)
+print(result.converged, result.iterations, result.final_residual)
 ```
 
-瞬态：
-
-```python
-from autoflowcfd.core import TransientSolver
-from autoflowcfd.config import TransientConfig
-
-config = TransientConfig(dt=1e-4, total_time=0.2)
-solver = TransientSolver(grid_data, config)
-result = solver.solve()
-```
+分布式求解器由 `solve steady/transient --n-ranks N`（多 GPU 加 `--backend gpu --multi-gpu`）构造，见
+`cli/solve/steady/` 与 `cli/solve/transient_distributed.py`。
 
 ## 测试
 
 ```bash
-python -m pytest tests/unit/test_fvm_core_v2.py -v
-python -m pytest tests/unit/test_backends.py -v
-python -m pytest tests/integration/test_end_to_end_steady.py -v
+python -m pytest tests/unit -q
 ```
 
 ## 参考文献
 
+- Huynh, H. T. (2007). "A flux reconstruction approach to high-order schemes including discontinuous Galerkin methods"
+- Allmaras, S. R., Johnson, F. T., Spalart, P. R. (2012). "Modifications and clarifications for the implementation of the Spalart-Allmaras turbulence model"（SA-neg）
 - Menter, F. R. (1994). "Two-Equation Eddy-Viscosity Turbulence Models"
 - Liou, M.-S. (2006). "A sequel to AUSM, Part II: AUSM+-up"
-- Toro, E. F. (2009). "Riemann Solvers and Numerical Methods for Fluid Dynamics"

@@ -97,17 +97,10 @@ def step(solver, dt: float) -> float:
         # 里看不出"残差在降但物理场只走了 1.8% 个特征时间"——那次误判的
         # 完整记录见 `pseudotime_budget.py` 模块文档。累加 O(n_cells) 一次
         # 加法，相对一步残差求值可忽略。
-        _tau = getattr(solver, "tau_accum", None)
-        _dt_cell = dt_local.reshape(n_cells, n_sps)[:, 0] if dt_local.ndim > 1             else dt_local[::max(n_sps, 1)]
-        if _tau is None or np.shape(_tau) != np.shape(_dt_cell):
-            solver.tau_accum = np.array(_dt_cell, dtype=float)
-        else:
-            solver.tau_accum = _tau + _dt_cell
-        # **本步**的逐单元 dt 也要单独留一份：伪时间预算里"到 tau/T = 1
-        # 还需要多少步"是 `T / dt_median`，用累计量代替 dt 会把这个数按
-        # 步数成比例低估（第一版真犯过：12 步后报"需要 105 步"，真实是
-        # 1250 步）。
-        solver.dt_cell_last = np.array(_dt_cell, dtype=float)
+        from autoflowcfd.core.fr_solver.pseudotime_budget import accumulate_pseudo_time
+
+        accumulate_pseudo_time(solver, dt_local.reshape(n_cells, n_sps)[:, 0] if dt_local.ndim > 1
+                               else dt_local[::max(n_sps, 1)])
 
         # 湍流源项在当前状态下求值一次（沿用旧有的单步显式-半隐式
         # 阻尼更新，见 turbulence_sst.py::update_fields）。
@@ -361,6 +354,9 @@ def step(solver, dt: float) -> float:
         solver.state._update_primitives()
 
         residual_norm = solver.state.get_residual_norm()
+        # 收敛历史每步一条，记在单步里（单 GPU 同一位置）：求解循环与 Order Continuation 两条路径
+        # 此前各自追加，GPU 共用求解循环后会记两遍
+        solver.residual_history.append(residual_norm)
 
         # 自适应 CFL 更新（2026-08-24）：根据本步残差调节下一步的 CFL 数。
         # 放在 step() 末尾（不是 solve() 循环里），这样 solve() 和

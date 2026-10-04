@@ -4,6 +4,7 @@
 这里只留构造与对外接口。
 """
 
+from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 import numpy as np
 from typing import Optional
 from loguru import logger
@@ -405,7 +406,7 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, _
         # 相应按 scheme 分派（与单机 `fr_solver/step.py` 同一个设计）。
         time_scheme = require_distributed_scheme(
             solver_kwargs.get('time_scheme', TimeIntegrationScheme.SSP_RK3))
-        dual_time_steps = solver_kwargs.get('dual_time_inner_iter', 20)
+        dual_time_steps = solver_kwargs.get('dual_time_inner_iter', DEFAULT_DUAL_TIME_STEPS)
         self._time_integrator = TimeIntegrator(
             scheme=time_scheme, dt=1.0, dual_time_steps=dual_time_steps,
         )

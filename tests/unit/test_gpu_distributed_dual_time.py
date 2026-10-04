@@ -74,6 +74,9 @@ def _make_stub(n_local, n_sps, n_vars, target):
     stub = types.SimpleNamespace()
     stub.partition = types.SimpleNamespace(n_local_cells=n_local)
     stub.mesh = types.SimpleNamespace(n_sps_per_cell=n_sps)
+    # 每物理步推进合成湍流入口（此替身没有 SEM 入口）需要的两个属性
+    stub.boundary_ghost_provider = types.SimpleNamespace(code_to_config={})
+    stub.freestream = {"rho_inf": 1.225, "vel_inf": 30.0, "p_inf": 101325.0}
     stub.time_integrator = GPUTimeIntegrator(scheme="dual_time")
     # GPUTimeIntegrator 本身没有 dual_time_steps 属性（step() 的
     # DUAL_TIME 分支用 getattr(...,5) 兜底，与单机 GPU gpu_solver.py

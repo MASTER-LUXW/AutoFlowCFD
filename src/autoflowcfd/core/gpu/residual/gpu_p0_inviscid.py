@@ -1,25 +1,18 @@
 """
-AutoFlowCFD V2.0 - P0 无粘残差的 CuPy CUDA 实现
+AutoFlowCFD V2.0 - P0 无粘残差的 CuPy CUDA 实现（`GPUFRSolver` 的 P0 阶段，数据常驻 GPU）
 
-从 core/backend/fr_gpu_p0.py（numba.cuda 版本）迁移而来，统一使用 CuPy 框架。
-算法完全一致：经典分片常数有限体积格式，每个面独立取真实几何法向/面积，
-调用 AUSM+up 黎曼求解器，原子累加到 owner/neighbor 单元残差。
+经典分片常数有限体积格式，每个面独立取真实几何法向/面积，调用 AUSM+up 黎曼求解器，原子累加到
+owner/neighbor 单元残差（与 CPU 版 `_compute_inviscid_residual_fv_p0` 同一算法）。
 
-与 numba.cuda 版本的对应关系：
-- @cuda.jit → cp.RawKernel（CUDA C 代码嵌入）
-- cuda.atomic.add → atomicAdd（CUDA C 内置）
-- cuda.to_device → cp.asarray
-- d_residual.copy_to_host() → cp.asnumpy
-
-正确性验证：与 CPU 版 _compute_inviscid_residual_fv_p0 数值对比，
-见 tests/unit/test_gpu_p0_inviscid.py。
+2026-10-04 删除了两个旧入口：带主机<->设备传输的 `compute_inviscid_residual_p0_cupy`（只有
+`FRSolver(backend='gpu')` 在用，该分支已随单 GPU 统一到 `GPUFRSolver` 删除）与它的前身
+`core/backend/fr_gpu_p0.py`（numba.cuda 版，生产代码零调用）。
 """
 
 import numpy as np
-from typing import Callable, Optional
-from loguru import logger
+from typing import Optional
 
-from autoflowcfd.core.gpu import gpu_available, get_cupy
+from autoflowcfd.core.gpu import get_cupy
 
 GAMMA = 1.4
 
@@ -278,136 +271,11 @@ def _get_cached_p0_kernel():
 def _pm(precond_mode):
     """把 None 解析成实际的 precond_mode（与 CPU 端同一个解析器）。
 
-    单独抽成函数是因为本文件有两个入口（带传输版 / GPU 常驻版），两处
-    都必须用同一套解析规则，否则同一次运行的 P0/P1 阶段可能取到不同档。
+    与 CPU 端同一个解析器，否则同一次运行的 CPU/GPU 可能取到不同档。
     """
     from autoflowcfd.core.fr_operators.kernels import resolve_ausm_precond_mode
 
     return int(resolve_ausm_precond_mode() if precond_mode is None else precond_mode)
-
-
-def compute_inviscid_residual_p0_cupy(
-    U: np.ndarray,
-    mesh,
-    boundary_ghost_provider: Optional[Callable] = None,
-    device_id: int = 0,
-    mach_ref: float = 0.1,
-    precond_mode: Optional[int] = None,
-) -> np.ndarray:
-    """P0 无粘残差的 CuPy CUDA 实现。
-
-    函数签名/返回值与 core/fr_residual_inviscid.py::_compute_inviscid_residual_fv_p0
-    完全一致，可以互相替换。
-
-    Args:
-        U: 守恒变量 (n_cells, n_sps, n_vars)
-        mesh: HighOrderMesh（n_points_1d == 1）
-        boundary_ghost_provider: 边界幽灵态提供者
-        device_id: GPU 设备 ID
-        mach_ref: AUSM+up Weiss-Smith 预处理参考马赫数（见
-            kernels.py::compute_ausm_up_flux 文档）。默认值 0.1 只是
-            保留旧硬编码值，真正的求解器路径必须显式传入
-            `solver.freestream["mach_ref"]`。
-
-    Returns:
-        residual: (n_cells, 1, 5) 残差数组
-
-    Raises:
-        RuntimeError: CuPy 不可用或非 P0 网格
-    """
-    cp = get_cupy()
-    if cp is None:
-        raise RuntimeError("CuPy is not available")
-
-    if mesh.n_points_1d != 1:
-        raise RuntimeError(
-            f"compute_inviscid_residual_p0_cupy only supports P0 meshes "
-            f"(n_points_1d=1), got n_points_1d={mesh.n_points_1d}"
-        )
-    if mesh.cell_volumes is None:
-        raise RuntimeError(
-            "mesh.cell_volumes not available - required for P0 finite-volume residual"
-        )
-
-    from autoflowcfd.core.fr_residual.inviscid import (
-        conserved_to_primitive, DefaultGhostProvider
-    )
-
-    n_cells = mesh.n_cells
-    Q_all = conserved_to_primitive(U[..., :5])[:, 0, :].astype(np.float64)
-
-    fc = mesh.face_connectivity
-    ffp_list = mesh.face_flux_points
-    n_faces = fc.n_faces
-    ghost_provider = (
-        boundary_ghost_provider
-        if boundary_ghost_provider is not None
-        else DefaultGhostProvider()
-    )
-
-    # ── 准备面几何数据（CPU 侧）──
-    owner_cell = fc.owner_cell.astype(np.int32)
-    neighbor_cell = np.where(fc.is_boundary, 0, fc.neighbor_cell).astype(np.int32)
-    is_boundary = fc.is_boundary.astype(np.bool_)
-    Q_ghost = np.zeros((n_faces, 5), dtype=np.float64)
-
-    # 面法向/面积：性能修复，理由同 gpu_solver.py::compute_inviscid_
-    # residual_gpu（同一次真实复现、同一处遗漏，见该方法文档）——原来
-    # 这里连同下面的边界 ghost 态一起塞进同一个 `for f in range(n_faces)`
-    # 逐面对象构造循环；改用已测试的快速路径提取 normal/area_w，边界
-    # ghost 态单独只在边界面（~4万个，远小于总面数）上循环，不再对全部
-    # 187 万面重复付出对象构造代价。
-    from autoflowcfd.core.fr_residual.inviscid_p0 import _extract_p0_face_geometry
-    normal, area_w = _extract_p0_face_geometry(ffp_list, fc, n_faces)
-
-    # 幽灵态预计算范围（B-8）：真边界面之外，混合拆分面的边界子面记录也读
-    # Q_ghost[f]（kernel 混合分支），与 inviscid_p0.py::_precompute_ghost_states
-    # 的 CPU 语义对齐——幽灵态一律按 owner 单元状态 + 整面法向计算。
-    mixed_bnd_face = getattr(ffp_list, "mixed_bnd_face", None)
-    if mixed_bnd_face is None:
-        mixed_bnd_face = np.zeros(n_faces, dtype=np.bool_)
-    ghost_faces = np.nonzero(is_boundary | mixed_bnd_face)[0]
-    for f in ghost_faces:
-        Q_owner_fp = Q_all[owner_cell[f]: owner_cell[f] + 1]
-        Q_ghost[f, :] = ghost_provider(f, Q_owner_fp, normal[f:f + 1])[0]
-
-    # 混合拆分面（B-8）边界子面面积占比，非混合面恒 0；慢速路径无混合面概念，补零占位。
-    mixed_bnd_frac = getattr(ffp_list, "mixed_p0_bnd_frac", None)
-    if mixed_bnd_frac is None:
-        mixed_bnd_frac = np.zeros(n_faces, dtype=np.float64)
-
-    cell_volumes = mesh.cell_volumes.astype(np.float64)
-
-    # ── 传输到 GPU ──
-    with cp.cuda.Device(device_id):
-        d_owner = cp.asarray(owner_cell)
-        d_neighbor = cp.asarray(neighbor_cell)
-        d_is_boundary = cp.asarray(is_boundary)
-        d_normal = cp.asarray(normal)
-        d_area_w = cp.asarray(area_w)
-        d_Q = cp.asarray(Q_all)
-        d_Q_ghost = cp.asarray(Q_ghost)
-        d_volumes = cp.asarray(cell_volumes)
-        d_mixed_frac = cp.asarray(mixed_bnd_frac)
-        d_residual = cp.zeros((n_cells, 5), dtype=np.float64)
-
-        # ── 启动 CUDA kernel ──
-        threads_per_block = 128
-        blocks_per_grid = (n_faces + threads_per_block - 1) // threads_per_block
-
-        kernel = _get_cached_p0_kernel()
-        kernel(
-            (blocks_per_grid,), (threads_per_block,),
-            (d_owner, d_neighbor, d_is_boundary, d_normal, d_area_w,
-             d_Q, d_Q_ghost, d_volumes, d_mixed_frac, d_residual,
-             np.int32(n_faces), np.int32(_pm(precond_mode)), np.float64(mach_ref))
-        )
-        cp.cuda.Stream.null.synchronize()
-
-        # ── 取回结果 ──
-        residual5 = cp.asnumpy(d_residual)
-
-    return residual5[:, None, :]
 
 
 def compute_inviscid_residual_p0_cupy_gpu_resident(

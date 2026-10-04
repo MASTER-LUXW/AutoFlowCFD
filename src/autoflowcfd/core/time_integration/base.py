@@ -205,6 +205,11 @@ _SCHEME_TABLE = {
 
 
 
+#: 双时间步每个物理步的伪时间内迭代次数默认值（全部后端与 CLI 的唯一来源；取值理由见
+#: `TimeIntegrator.__init__` 的 `dual_time_steps` 注释）
+DEFAULT_DUAL_TIME_STEPS = 20
+
+
 class TimeIntegrator:
     """带局部时间步长的显式 SSP Runge-Kutta 积分器。"""
 
@@ -213,7 +218,7 @@ class TimeIntegrator:
         scheme: TimeIntegrationScheme = TimeIntegrationScheme.SSP_RK3,
         dt: float = 1e-5,
         cfl_target: float = 1.0,
-        dual_time_steps: int = 20,  # 每个物理步内的伪时间迭代次数
+        dual_time_steps: int = DEFAULT_DUAL_TIME_STEPS,  # 每个物理步内的伪时间迭代次数
         # 默认值从 3 提高到 20：真实测得 BDF1 单物理步（受控衰减算例，
         # dt_physical=0.05）在默认 cfl 起点=下限=0.1 的保守步长策略下，
         # 3 次内迭代只完成 28% 的目标收敛量，需要约 60 次才能收敛到

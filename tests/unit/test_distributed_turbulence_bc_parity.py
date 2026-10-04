@@ -81,7 +81,7 @@ def _pair(scheme, order=1, model="SST"):
 
     dist = DistributedFRSolver(
         mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity, n_ranks=1,
-        backend="cpu", order=order, turb_model_name=model, n_vars=5, time_scheme=scheme,
+        order=order, turb_model_name=model, n_vars=5, time_scheme=scheme,
         wall_distance_source=channel_wall_source(LX, H, LZ), bc_overrides=_bc(), **_KW)
     # 分布式状态只存平均流 5 变量（湍流场由湍流模型持有，见 DistributedFRState）
     dist.state.U[:n_cells] = U0[..., :5]

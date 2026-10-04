@@ -220,7 +220,7 @@ def rebuild_distributed_solver_from_checkpoint(
         ops = generate_fr_operators(order)
         solver = DistributedFRSolver(
             mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
-            n_ranks=n_ranks, backend=backend or "cpu", order=order,
+            n_ranks=n_ranks, order=order,
             turb_model_name=turbulence_model, time_scheme=scheme,
             wall_distance_source=wall_distance_source_if_needed(turbulence_model, _volume_data),
             n_threads=threads, turbulence_intensity=turbulence_intensity,

@@ -13,7 +13,6 @@ import numpy as np
 from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
 from autoflowcfd.core.fr_solver.state import FRState
 from autoflowcfd.core.time_integration.base import TimeIntegrator
-from autoflowcfd.core.utils import solver_helpers
 from autoflowcfd.core.utils.preconditioning import resolve_low_mach_precond
 from autoflowcfd.fr.operators import generate_fr_operators
 
@@ -21,26 +20,14 @@ from autoflowcfd.fr.operators import generate_fr_operators
 class _SolverSetupMixin:
     """`FRSolver.__init__` 按依赖顺序调用的装配阶段。"""
 
-    def _setup_options(self, mesh, order, backend, artificial_viscosity_enabled,
+    def _setup_options(self, mesh, order, artificial_viscosity_enabled,
                        artificial_viscosity_alpha, entropy_stable_volume_enabled):
-        """网格/阶数/后端与两个可选数值开关（含"无操作/未移植"的显式警告）。"""
+        """网格/阶数与两个可选数值开关。"""
         self.mesh = mesh
         self.order = order
         self.artificial_viscosity_enabled = artificial_viscosity_enabled
         self.artificial_viscosity_alpha = artificial_viscosity_alpha
         self.entropy_stable_volume_enabled = entropy_stable_volume_enabled
-        if entropy_stable_volume_enabled and backend.lower() == "gpu":
-            import warnings
-            warnings.warn(
-                "entropy_stable_volume_enabled=True 目前只在 CPU 路径实现"
-                "（core/fr_residual/inviscid.py::compute_inviscid_residual_fr），"
-                "GPU 路径（core/gpu/residual/gpu_inviscid.py）尚未移植，"
-                "backend='gpu' 时这个开关不生效，体积项仍走 GPU 原有的"
-                "逐点通量代入实现——不是被静默忽略导致错误结果，只是"
-                "拿不到这个优化。",
-                stacklevel=2,
-            )
-        self.backend_type = backend.lower()
         
 
     def _setup_initial_state(self, initial_state, n_cells, n_sps, turb_model_name,
@@ -166,11 +153,7 @@ class _SolverSetupMixin:
     def _setup_turbulence_time_and_runtime(self, n_cells, n_sps, order, time_scheme,
                                            dual_time_inner_iter, adaptive_cfl,
                                            cfl_start, cfl_max, cfl_min):
-        """后端、湍流模型、时间积分器、CFL 策略、启动日志开关与运行期状态。"""
-        # 4. 初始化计算后端 (B-01)——见 solver_helpers.py::resolve_backend_type 文档。
-        self.backend = None
-        self.backend_type = solver_helpers.resolve_backend_type(self.backend_type)
-
+        """湍流模型、时间积分器、CFL 策略、启动日志开关与运行期状态。"""
         # 5. 初始化湍流模型（self.turb_model_name 已在第 3 步设置；
         # self.wmles_model 若适用也已在第 3 步提前构造好，供
         # boundary_ghost_provider 正确读取，这里不再重置，见第 3 步

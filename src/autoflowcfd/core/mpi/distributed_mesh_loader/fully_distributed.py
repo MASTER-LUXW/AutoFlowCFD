@@ -4,6 +4,7 @@
 逻辑未改。
 """
 
+from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 import numpy as np
 from typing import Optional
 
@@ -30,7 +31,7 @@ def distributed_mesh_load_v2(
     turbulence_intensity: float = 0.01,
     viscosity_ratio: float = 5.0,
     time_scheme=None,
-    dual_time_inner_iter: int = 20,
+    dual_time_inner_iter: int = DEFAULT_DUAL_TIME_STEPS,
     cfl_start: Optional[float] = None,
     cfl_max: Optional[float] = None,
     cfl_min: Optional[float] = None,
@@ -442,7 +443,7 @@ def exchange_packages_for_new_order(root_context, target_p: int, n_ranks: int, *
                 turbulence_intensity=root_context['turbulence_intensity'],
                 viscosity_ratio=root_context['viscosity_ratio'],
                 time_scheme=root_context.get('time_scheme'),
-                dual_time_inner_iter=root_context.get('dual_time_inner_iter', 20),
+                dual_time_inner_iter=root_context.get('dual_time_inner_iter', DEFAULT_DUAL_TIME_STEPS),
                 cfl_start=root_context.get('cfl_start'),
                 cfl_max=root_context.get('cfl_max'),
                 cfl_min=root_context.get('cfl_min'),

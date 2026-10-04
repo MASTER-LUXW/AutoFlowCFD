@@ -21,10 +21,10 @@ from typing import Optional
 import click
 from loguru import logger
 
-from autoflowcfd.cli.solve.helpers import (
+from autoflowcfd.cli.solve.checkpoint_io import (
+    periodic_checkpoint_callback,
     rebuild_solver_from_checkpoint,
-    save_results,
-    write_checkpoint,
+    write_single_node_outputs,
 )
 
 # 真实 bug（已修复，2026-08-21）：此前这里 `import logging` +
@@ -117,7 +117,8 @@ from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coeffici
 @click.option('--fully-distributed', is_flag=True,
               help='走"完全分布式加载"重建（只有 root rank 加载完整网格，需要 --n-ranks>1，'
                    '与 --multi-gpu 互斥）')
-@click.option('--gpu-device', type=int, default=None, help='--multi-gpu 时的 GPU 设备号')
+@click.option('--gpu-device', type=int, default=None,
+              help='GPU 设备号（单 GPU 续算默认 0；--multi-gpu 时按 rank 分配）')
 def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
            surface_mesh: Optional[str], reference_area: Optional[float], threads: int,
            skip_quality_check: bool, checkpoint_interval: int,
@@ -157,7 +158,14 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
     """
     logger.info(f"Resuming simulation from checkpoint: {checkpoint_file}")
 
-    if n_ranks > 1 or multi_gpu:
+    # 后端组合校验（与 `solve steady/transient` 同一规则）
+    if multi_gpu and n_ranks <= 1:
+        raise click.BadParameter("--multi-gpu 需要 --n-ranks > 1（单 GPU 续算用 --backend gpu）",
+                                 param_hint="--multi-gpu")
+    if backend == 'gpu' and n_ranks > 1 and not multi_gpu:
+        raise click.BadParameter("多 rank 的 GPU 续算需要 --multi-gpu", param_hint="--n-ranks")
+
+    if n_ranks > 1:
         _resume_distributed(
             checkpoint_file, max_iter, n_ranks, multi_gpu, fully_distributed,
             gpu_device, backend, surface_mesh, threads, skip_quality_check,
@@ -167,81 +175,39 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
         )
         return
 
+    # 单机（CPU / 单 GPU，按 checkpoint 记录的后端或 --backend 覆盖重建，见 solver_factory.py）
     solver, iteration, metadata = rebuild_solver_from_checkpoint(
         checkpoint_file, backend=backend, surface_mesh=surface_mesh, threads=threads,
         reference_area=reference_area,
         skip_quality_check=skip_quality_check,
         cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
         time_scheme=time_scheme,
+        gpu_device=0 if gpu_device is None else gpu_device,
     )
     input_file = metadata["input_file"]
-    order = metadata["order"]
     turbulence_model = metadata["turbulence_model"]
     target_backend = metadata["backend"]
     resolved_surface_mesh = metadata.get("surface_mesh")
     output_dir = str(Path(checkpoint_file).parent.parent)
 
-    # 真实 bug 更正（2026-09-02）：上面这两个参数此前被无条件拒绝
-    # `target_backend == 'gpu'`——但 `rebuild_solver_from_checkpoint`
-    # 这条非分布式 resume 路径构造的是单机 `FRSolver(backend='gpu',
-    # ...)`（`core/fr_solver/solver.py` 的 GPU 加速内核分支），不是
-    # `solve steady` 单 GPU 分支专用的独立 `GPUFRSolver` 类——`FRSolver.
-    # solve()` 的 Order Continuation 分派（`uses_order_continuation` 为真时自动
-    # 逐阶爬坡）与 `backend_type` 无关，这个拒绝从一开始就是错的、
-    # 不必要地拒绝了本来就能工作的组合，不是"待补齐"的功能缺口。
-    # （2026-09-02 同一批还真正给了 `GPUFRSolver` 本身独立的 Order
-    # Continuation 机制，见 core/gpu/solver/gpu_solver_order_
-    # continuation.py，所以即便按原先的假设也不再需要这个拒绝。）
-
-    # 真实 bug（已修复，2026-08-22，用户直接问"多少步存一个ckpt"发现）：
-    # 此前 resume() 从不把 checkpoint_callback 传给 solver.solve()，只在
-    # 整个 max_iter 全部跑完后才写一次 checkpoint——solve_steady_command.py
-    # 有 --checkpoint-interval 支持中途定期保存，resume 却没有，跑一次
-    # 长程 resume（真实网格上单步 7s 量级，几千步就是数小时）中途崩溃/
-    # 中断会丢光这段时间的全部进度，退回到 resume 之前那个 checkpoint。
-    # iteration（resume 起点的绝对迭代数）必须加到 callback 收到的本地
-    # 计数上，否则文件名会用小迭代数覆盖掉 resume 之前就存在的同名
-    # checkpoint（例如 checkpoint_iter_000500.h5 撞上原始运行 P0 阶段
-    # 已经存过的那个）。
-    def _checkpoint_cb(solver_ref, local_iteration):
-        if local_iteration % checkpoint_interval != 0:
-            return
-        absolute_iteration = iteration + local_iteration
-        try:
-            save_results(solver_ref, output_dir, quiet=True)
-            write_checkpoint(
-                solver_ref, output_dir, absolute_iteration, input_file,
-                solver_ref.current_order, turbulence_model, target_backend,
-                quiet=True, surface_mesh=resolved_surface_mesh, target_order=solver_ref.order,
-            )
-            print(f"   [Checkpoint] iter {absolute_iteration} saved")
-        except Exception as e:
-            print(f"   [Checkpoint] Warning: save failed at iter {absolute_iteration}: {e}")
-
+    # 中间 checkpoint（2026-08-22 修复：此前 resume 只在全部跑完后写一次）：resume 起点的绝对迭代数
+    # 作为偏移，否则文件名会用小迭代数覆盖 resume 之前就存在的同名 checkpoint
     logger.info(f"State restored from checkpoint (iter={iteration}), "
                 f"continuing for {max_iter} more iterations...")
-    result = solver.solve(max_iter=max_iter, dt=1e-3, tol=1e-6,
-                           checkpoint_callback=_checkpoint_cb,
-                           phase_max_iter=phase_max_iter,
-                           residual_drop_threshold=residual_drop_threshold)
+    result = solver.solve(
+        max_iter=max_iter, dt=1e-3, tol=1e-6,
+        checkpoint_callback=periodic_checkpoint_callback(
+            checkpoint_interval, output_dir, input_file, turbulence_model, target_backend,
+            surface_mesh=resolved_surface_mesh, iteration_offset=iteration),
+        phase_max_iter=phase_max_iter,
+        residual_drop_threshold=residual_drop_threshold)
     print(f"\n✅ Resumed simulation finished: total_iterations~={iteration + result.iterations}, "
           f"Residual={result.final_residual:.6e}")
 
-    save_results(solver, output_dir)
-    # solver.current_order 而非上面读出的 order：resume 期间 solver.solve()
-    # 自己也可能触发 Order Continuation 爬升（例如这次 resume 正好从 P0
-    # 跑过 P0->P1 转换），order 是 solve() 调用*之前*从 metadata 读出的
-    # 快照，跑完可能已经过期——同一类 bug，见 solve_steady_command.py 里
-    # write_checkpoint 调用点的说明。
-    write_checkpoint(solver, output_dir, iteration + result.iterations, input_file,
-                      solver.current_order, turbulence_model, target_backend,
-                      surface_mesh=resolved_surface_mesh, target_order=solver.order)
-    # solver._reference_area 而非上面的 CLI 参数 reference_area：
-    # rebuild_solver_from_checkpoint 在两者都是 None 时会尝试自动估算并
-    # 存到这个属性上（见该函数 reference_area 参数文档）；用回原始 CLI
-    # 参数会导致明明整个 resume 过程都在用自动估算出的参考面积算 Cd/Cl，
-    # 这里却因为用户没显式传 --reference-area 而误报"未提供，跳过"。
-    _report_aerodynamic_coefficients(solver, getattr(solver, "_reference_area", None))
+    write_single_node_outputs(solver, output_dir, iteration + result.iterations, input_file,
+                              turbulence_model, target_backend, surface_mesh=resolved_surface_mesh)
+    # solver._reference_area 而非 CLI 参数：重建时两者都是 None 会自动估算并存到这个属性上
+    _report_aerodynamic_coefficients(solver.host_view(), getattr(solver, "_reference_area", None))
 
 
 def _resume_distributed(

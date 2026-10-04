@@ -26,6 +26,7 @@
    `current_order`/mesh/partition 更新。
 """
 
+from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
 import types
 
 import numpy as np
@@ -332,6 +333,7 @@ class TestRedistributeMultiGpuFullyDistributedForNewOrder:
             'enable_viscous': True, 'turb_model_name': 'NONE',
             'wall_distance_source': synthetic_wall_source(mesh), 'h_max_global': None, 'h_wn_global': None,
             'turbulence_intensity': 0.01, 'viscosity_ratio': 5.0,
+            'sem_num_eddies': _SEM_DEFAULT_NUM_EDDIES,
             'bc_overrides': {}, 'n_ranks': 1,
             'time_scheme': None, 'dual_time_inner_iter': 20,
             'artificial_viscosity_enabled': False, 'artificial_viscosity_alpha': 1.0,

@@ -145,7 +145,7 @@ def _make_solver(order, turb_model="none", turbulence_intensity=0.01, viscosity_
     return GPUFRSolver(
         mesh=mesh, ops=ops, order=order, device_id=0,
         mu_molecular=1.8e-5, rho_inf=1.225, vel_inf=33.33, p_inf=101325.0,
-        turb_model=turb_model,
+        turb_model_name=turb_model,
         turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
         wall_distance_source=synthetic_wall_source(mesh),
     )

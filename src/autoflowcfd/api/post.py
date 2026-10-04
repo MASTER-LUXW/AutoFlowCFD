@@ -42,7 +42,7 @@ class _APIPostMixin:
                 compute_aerodynamic_coefficients_fr,
             )
             coeffs = compute_aerodynamic_coefficients_fr(
-                self.solver,
+                self.solver.host_view(),   # 单 GPU 求解器经主机视图读状态
                 reference_area=reference_area,
                 reference_length=reference_length,
             )

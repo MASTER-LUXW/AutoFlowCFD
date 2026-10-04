@@ -36,7 +36,7 @@ def _make_solver(mesh, ops, turb_model_name):
     from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
     return DistributedFRSolver(
         mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
-        n_ranks=1, backend="cpu", order=mesh.order, turb_model_name=turb_model_name,
+        n_ranks=1, order=mesh.order, turb_model_name=turb_model_name,
         time_scheme=TimeIntegrationScheme.SSP_RK3,
         mu_molecular=1.8e-5, rho_inf=1.225, vel_inf=33.33, p_inf=101325.0,
         wall_distance_source=synthetic_wall_source(mesh),

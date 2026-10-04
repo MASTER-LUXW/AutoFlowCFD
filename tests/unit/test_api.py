@@ -108,18 +108,15 @@ class TestAutoFlowCFDAPI:
             
             assert report["error_count"] == 0
 
-    @patch('autoflowcfd.cli.solve.wall_distance.compute_wall_distance_for_solver')
     @patch('autoflowcfd.grid.high_order.high_order_mesh.HighOrderMesh')
-    @patch('autoflowcfd.api.solve.FRSolver')
-    def test_run_steady(
-        self, mock_solver_class: Mock, mock_mesh_class: Mock, mock_wall_distance: Mock
-    ) -> None:
+    @patch('autoflowcfd.api.solve.build_single_node_solver')
+    def test_run_steady(self, mock_solver_class: Mock, mock_mesh_class: Mock) -> None:
         """Test steady simulation.
 
         run_steady 需要先把 volume_mesh 升格成 HighOrderMesh 再构造
-        FRSolver（见 api.py::run_steady 文档字符串——此前这里直接把
+        求解器（见 api.py::run_steady 文档字符串——此前这里直接把
         表面网格传给 FRSolver 是那个从未跑通过的 bug 本身），所以这里
-        同时 mock 掉 HighOrderMesh 构造/wall distance 计算这两步，
+        同时 mock 掉 HighOrderMesh 构造与按后端分派的求解器构造（含壁距），
         不依赖真实网格数据。
         """
         mock_volume_mesh = MagicMock()
@@ -143,14 +140,12 @@ class TestAutoFlowCFDAPI:
         assert result.converged is True
         assert result.iterations == 1000
         mock_solver_class.assert_called_once()
+        assert mock_solver_class.call_args.args[0] == "cpu"
         assert self.api.solver is mock_solver
 
-    @patch('autoflowcfd.cli.solve.wall_distance.compute_wall_distance_for_solver')
     @patch('autoflowcfd.grid.high_order.high_order_mesh.HighOrderMesh')
-    @patch('autoflowcfd.api.solve.TransientSolver')
-    def test_run_transient(
-        self, mock_solver_class: Mock, mock_mesh_class: Mock, mock_wall_distance: Mock
-    ) -> None:
+    @patch('autoflowcfd.api.solve.build_single_node_solver')
+    def test_run_transient(self, mock_solver_class: Mock, mock_mesh_class: Mock) -> None:
         """Test transient simulation."""
         mock_volume_mesh = MagicMock()
         mock_mesh_class.return_value.load_from_volume_mesh.return_value = None

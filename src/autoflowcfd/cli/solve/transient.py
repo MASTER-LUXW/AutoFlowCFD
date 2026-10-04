@@ -8,19 +8,17 @@ from typing import Optional
 import click
 from loguru import logger
 
-from autoflowcfd.core import FRSolver
+from autoflowcfd.cli.solve.checkpoint_io import periodic_checkpoint_callback, write_single_node_outputs
 from autoflowcfd.cli.solve.helpers import (
-    compute_wall_distance_for_solver,
     load_mesh_for_solver,
     restore_state_from_checkpoint,
-    save_results,
-    write_checkpoint,
     load_physical_config_if_given,
     resolve_physical_constants,
     resolve_turbulence_model,
 )
-from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coefficients
+from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coefficients, resolve_reference_area
 from autoflowcfd.cli.solve.commands import solve
+from autoflowcfd.cli.solve.solver_factory import build_single_node_solver
 from autoflowcfd.cli.solve.transient_distributed import _solve_transient_distributed
 
 
@@ -235,7 +233,15 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
     # 词汇->枚举唯一事实来源（见 core/time_integration/base.py）。
     from autoflowcfd.core.time_integration.base import scheme_from_name
 
-    if n_ranks > 1 or multi_gpu:
+    # 后端组合校验（与 `solve steady` 同一规则）：此前 --backend gpu --n-ranks N 不加 --multi-gpu 时，
+    # 每个 rank 构造的是 CPU 求解器的 GPU 分支（只有 P0 无粘项在 GPU 上）
+    if multi_gpu and (backend != 'gpu' or n_ranks <= 1):
+        raise click.BadParameter("--multi-gpu 需要 --backend gpu 且 --n-ranks > 1（单 GPU 直接用 --backend gpu）",
+                                 param_hint="--multi-gpu")
+    if backend == 'gpu' and n_ranks > 1 and not multi_gpu:
+        raise click.BadParameter("多 rank 的 GPU 计算需要 --multi-gpu", param_hint="--n-ranks")
+
+    if n_ranks > 1:
         # 分布式瞬态求解路径（2026-09-02 补齐——此前本命令完全没有
         # 分布式支持，DUAL_TIME/DES/LES 瞬态仿真只能单机跑，与
         # solve_steady_command.py 已有的分布式覆盖不一致；同一批还
@@ -258,7 +264,7 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
             turbulence_model, max_iter, dt, output_dir,
             reference_area, threads, turbulence_intensity, viscosity_ratio, sem_num_eddies,
             mu_molecular, rho_inf, vel_inf, p_inf,
-            n_ranks, multi_gpu, fully_distributed, gpu_device, backend,
+            n_ranks, multi_gpu, fully_distributed, gpu_device,
             checkpoint_interval, phase_max_iter, residual_drop_threshold,
             init_checkpoint,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
@@ -309,10 +315,10 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
             "（配合 --dt 与 --dual-time-inner-iter）。\n",
             fg="yellow")
 
-    # 3. 初始化求解器
-    solver = FRSolver(
-        mesh=mesh,
-        backend=backend,
+    # 3. 初始化求解器（CPU / 单 GPU；湍流模型需要时带上壁距，DES/LES/WMLES 必须）
+    solver = build_single_node_solver(
+        backend, mesh, volume_data,
+        gpu_device=gpu_device,
         order=order,
         turb_model_name=turbulence_model.upper(),
         time_scheme=time_scheme,
@@ -331,9 +337,6 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
         artificial_viscosity_alpha=artificial_viscosity_alpha,
     )
 
-    # 4. 计算壁面距离场（DES/LES/WMLES 必须）
-    compute_wall_distance_for_solver(solver, volume_data)
-
     # 4.5. 从 checkpoint 初始化（可选：以稳态结果为初场启动瞬态计算）
     if init_checkpoint:
         from types import SimpleNamespace
@@ -344,34 +347,28 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
             config=SimpleNamespace(), output_dir="."
         ).load(init_checkpoint)
 
-        restore_state_from_checkpoint(init_checkpoint, solver, ckpt_meta)
+        with solver.edit_host_state() as host:
+            restore_state_from_checkpoint(init_checkpoint, host, ckpt_meta)
         print(f"   源 checkpoint 迭代数: {ckpt_iter}\n")
 
-    # 5. 执行瞬态求解
+    # 参考面积（未给时沿来流方向自动估算，与 solve steady 同一个函数）
+    reference_area = resolve_reference_area(solver, volume_data, reference_area)
+
+    # 5. 执行瞬态求解（瞬态不用收敛判据 tol，跑满指定步数；--checkpoint-interval 定期落盘）
     try:
-        # 瞬态求解通常不需要 tol，而是跑满指定的时间步
-        result = solver.solve(max_iter=max_iter, dt=dt, tol=0.0,
-                               phase_max_iter=phase_max_iter,
-                               residual_drop_threshold=residual_drop_threshold)
+        result = solver.solve(
+            max_iter=max_iter, dt=dt, tol=0.0,
+            checkpoint_callback=periodic_checkpoint_callback(
+                checkpoint_interval, output_dir, input_file, turbulence_model, backend,
+                surface_mesh=surface_mesh, transient=True),
+            phase_max_iter=phase_max_iter,
+            residual_drop_threshold=residual_drop_threshold)
         print(f"\n✅ Transient Simulation Finished: Steps={result.iterations}, Final Residual={result.final_residual:.6e}")
 
-        # 6. 保存结果（.pkl 全量状态 + HDF5 checkpoint，后者供 solve resume 使用）
-        save_results(solver, output_dir)
-        # solver.current_order 而非 order：瞬态求解本身不做 Order
-        # Continuation 爬升，但 input_file 若是从 steady 阶段的 checkpoint
-        # resume 而来，order 这个闭包变量可能仍是 steady 侧的目标阶数，
-        # 与 resume 时实际重建出的 solver.current_order 不一定相等——见
-        # solve_steady_command.py 里同名参数的说明，避免同一类 checkpoint
-        # 形状不匹配 bug。
-        write_checkpoint(
-            solver, output_dir, result.iterations, input_file, solver.current_order,
-            turbulence_model, backend,
-            history={"iterations": [result.iterations]}, surface_mesh=surface_mesh,
-            target_order=solver.order,
-        )
-
-        # 7. 气动系数（提供 --reference-area 时）
-        _report_aerodynamic_coefficients(solver, reference_area)
+        # 6. 结果（.pkl 全量状态 + HDF5 checkpoint，后者供 solve resume 使用）与气动系数
+        write_single_node_outputs(solver, output_dir, result.iterations, input_file, turbulence_model, backend,
+                                  surface_mesh=surface_mesh, transient=True)
+        _report_aerodynamic_coefficients(solver.host_view(), reference_area)
 
     except Exception as e:
         print(f"\n❌ Transient Simulation Failed: {str(e)}")

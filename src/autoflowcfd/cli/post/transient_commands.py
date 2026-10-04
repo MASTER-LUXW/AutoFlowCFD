@@ -109,8 +109,9 @@ def transient_mean(case: str, grid: Optional[str], output: str,
                         from autoflowcfd.cli.solve.checkpoint_io import (
                             rebuild_solver_from_checkpoint, restore_solver_state_from_fields,
                         )
+                        # 后处理只读状态，一律在 CPU 上重建（与 post coefficients 同一约定）
                         coeff_solver, _it, _meta = rebuild_solver_from_checkpoint(
-                            str(ckpt_file), reference_area=reference_area,
+                            str(ckpt_file), backend="cpu", reference_area=reference_area,
                         )
                         coeff_reference_area = coeff_solver._reference_area
                         if not coeff_reference_area or coeff_reference_area <= 0:

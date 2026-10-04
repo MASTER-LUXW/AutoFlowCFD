@@ -62,33 +62,12 @@ class _SolverResidualMixin:
         if not self.state.U.flags['C_CONTIGUOUS']:
             self.state.U = np.ascontiguousarray(self.state.U)
 
-        # GPU 分发 (B-01)：请求 GPU 后端时走 CuPy 加速路径。
-        # P0（阶数延续热身阶段）使用 CuPy RawKernel（core/gpu/residual/gpu_p0_inviscid.py）；
-        # P>=1 高阶 FR 使用 CuPy 向量化实现（core/gpu/residual/gpu_inviscid.py）。
-        # GPU 不可用时自动回退 CPU。
-        if self.backend_type == "gpu":
-            if self.mesh.n_points_1d == 1:
-                from ..gpu.residual.gpu_p0_inviscid import compute_inviscid_residual_p0_cupy
-                res_euler = compute_inviscid_residual_p0_cupy(
-                    self.state.U, self.mesh,
-                    boundary_ghost_provider=self.boundary_ghost_provider,
-                    mach_ref=self.freestream["mach_ref"],
-                )
-            else:
-                # P>=1 高阶 FR GPU 路径
-                from ..gpu.residual.gpu_inviscid import compute_inviscid_residual_fr_gpu
-                res_euler = compute_inviscid_residual_fr_gpu(
-                    self.state.U, self.mesh, self.ops,
-                    boundary_ghost_provider=self.boundary_ghost_provider,
-                    mach_ref=self.freestream["mach_ref"],
-                )
-        else:
-            res_euler = compute_inviscid_residual_fr(
-                self.state.U, self.mesh, self.ops,
-                boundary_ghost_provider=self.boundary_ghost_provider,
-                mach_ref=self.freestream["mach_ref"],
-                entropy_stable_volume=self.entropy_stable_volume_enabled,
-            )
+        res_euler = compute_inviscid_residual_fr(
+            self.state.U, self.mesh, self.ops,
+            boundary_ghost_provider=self.boundary_ghost_provider,
+            mach_ref=self.freestream["mach_ref"],
+            entropy_stable_volume=self.entropy_stable_volume_enabled,
+        )
 
         if self.state.n_vars > 5:
             # 湍流量 (k, omega) 的对流输运项当前仍由 compute_turbulence_source

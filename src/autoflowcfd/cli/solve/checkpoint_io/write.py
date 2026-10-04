@@ -231,3 +231,47 @@ def write_checkpoint(
     if path and not quiet:
         print(f"   - Checkpoint: {path}")
     return path
+
+
+def write_single_node_outputs(solver, output_dir: str, iteration: int, input_file: str, turbulence_model: str,
+                              backend: str, *, surface_mesh: Optional[str] = None, transient: bool = False,
+                              quiet: bool = False) -> Optional[str]:
+    """单机求解器（CPU `FRSolver` / 单 GPU `GPUFRSolver`）的结果落盘：`final_state.pkl` + checkpoint。
+
+    经 `solver.host_view()` 读状态（GPU 拷回主机）。阶数取 `solver.current_order`、目标阶数取
+    `solver.order`（Order Continuation 爬到目标阶数之前两者不等，理由见 `write_checkpoint` 的
+    `target_order` 文档）。`transient=True` 时 checkpoint 记为瞬态模式。
+
+    Returns:
+        checkpoint 路径（h5py 不可用时 None）
+    """
+    host = solver.host_view()
+    save_results(host, output_dir, quiet=quiet)
+    return write_checkpoint(
+        host, output_dir, iteration, input_file, solver.current_order, turbulence_model, backend,
+        history={"iterations": [iteration]} if transient else None, quiet=quiet,
+        surface_mesh=surface_mesh, target_order=solver.order)
+
+
+def periodic_checkpoint_callback(interval: int, output_dir: str, input_file: str, turbulence_model: str,
+                                 backend: str, *, surface_mesh: Optional[str] = None, transient: bool = False,
+                                 iteration_offset: int = 0):
+    """单机 `solve()` 的中间 checkpoint 回调：每 `interval` 步落盘一次（`solve steady/transient` 与
+    `solve resume` 共用；此前三处各写一份，`solve transient` 单机分支则完全没有——`--checkpoint-interval`
+    被静默忽略，长程瞬态中途中断会丢光全部进度）。
+
+    `iteration_offset`：resume 起点的绝对迭代数，加到回调收到的本地计数上，否则文件名会用小迭代数覆盖
+    resume 之前就存在的同名 checkpoint。落盘失败只警告、不中止求解。
+    """
+    def callback(solver, local_iteration):
+        if local_iteration % interval != 0:
+            return
+        iteration = iteration_offset + local_iteration
+        try:
+            write_single_node_outputs(solver, output_dir, iteration, input_file, turbulence_model, backend,
+                                      surface_mesh=surface_mesh, transient=transient, quiet=True)
+            print(f"   [Checkpoint] iter {iteration} saved")
+        except Exception as e:
+            print(f"   [Checkpoint] Warning: save failed at iter {iteration}: {e}")
+
+    return callback

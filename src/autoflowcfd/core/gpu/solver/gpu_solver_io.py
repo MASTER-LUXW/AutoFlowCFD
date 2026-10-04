@@ -1,10 +1,8 @@
 """GPUFRSolver I/O 和湍流源项混入类。
 
-从 gpu_solver.py 拆出，控制单文件行数。包含 checkpoint 保存/加载、
-CPU↔GPU 状态传输、资源释放和湍流源项计算。
+从 gpu_solver.py 拆出，控制单文件行数。包含资源释放和湍流源项计算（主机<->设备的状态读写见
+`host_view.py`）。
 """
-
-import numpy as np
 
 from autoflowcfd.core.gpu import get_cupy
 
@@ -15,18 +13,6 @@ class _GPUSolverIOMixin:
     子类需要提供：U_gpu, Q_gpu, array_mgr, mesh, iteration,
     residual_history, turb_model_gpu, _dual_time_U_prev 等属性。
     """
-
-    def get_state_cpu(self):
-        """将 GPU 状态下载回 CPU。"""
-        return {
-            'U': self.array_mgr.to_cpu(self.U_gpu),
-            'Q': self.array_mgr.to_cpu(self.Q_gpu),
-        }
-
-    def set_state_from_cpu(self, U_np: np.ndarray):
-        """从 CPU 设置求解器状态。"""
-        self.U_gpu = self.array_mgr.to_gpu(U_np)
-        self._update_primitives_gpu()
 
     def cleanup(self):
         """释放 GPU 资源。"""

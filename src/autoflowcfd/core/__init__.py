@@ -39,8 +39,6 @@ from .turbulence.sgs import WALEModel, SmagorinskyModel
 # 结论的判据。）
 from .backend import get_available_backends, list_available_backends, SolutionVector
 
-# TransientSolver 是 FRSolver 的别名，用于瞬态仿真
-TransientSolver = FRSolver
 
 
 __all__ = [
@@ -58,7 +56,6 @@ __all__ = [
     'SmagorinskyModel',
     'SolutionVector',
     'FRSolver',
-    'TransientSolver',
     'get_available_backends',
     'list_available_backends',
 ]

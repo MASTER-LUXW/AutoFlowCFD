@@ -107,7 +107,7 @@ class TestSolveTransientDistributedCliWiring:
             result = runner.invoke(
                 cli,
                 ["solve", "transient", str(mesh_file), "--n-ranks", "2",
-                 "--multi-gpu", "--max-iter", "3"],
+                 "--backend", "gpu", "--multi-gpu", "--max-iter", "3"],
             )
 
         assert result.exit_code == 0, result.output

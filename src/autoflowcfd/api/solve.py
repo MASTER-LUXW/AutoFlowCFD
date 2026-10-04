@@ -11,7 +11,7 @@
 from typing import Optional, Any
 from loguru import logger
 from autoflowcfd.grid.structures import VolumeMeshData
-from autoflowcfd.core import FRSolver, TransientSolver  # 从core模块导入TransientSolver
+from autoflowcfd.cli.solve.solver_factory import build_single_node_solver
 from autoflowcfd.config.solver_config import SteadyConfig, TransientConfig
 from autoflowcfd.config.turbulence_names import turbulence_solver_name
 from autoflowcfd.api_config import api_resume_simulation
@@ -93,7 +93,6 @@ class _APISolveMixin:
         logger.info("Starting steady-state FR simulation")
 
         from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
-        from autoflowcfd.cli.solve.wall_distance import compute_wall_distance_for_solver
 
         backend = backend if backend is not None else (config.backend.value if config is not None else "cpu")
         order = order if order is not None else (config.order if config is not None else 2)
@@ -128,16 +127,15 @@ class _APISolveMixin:
         mesh = HighOrderMesh(order=order)
         mesh.load_from_volume_mesh(volume_mesh)
 
-        solver = FRSolver(
-            mesh=mesh,
-            backend=backend,
+        # CPU / 单 GPU 由 backend 分派（与 CLI 同一个入口；湍流模型需要时带上壁距）
+        solver = build_single_node_solver(
+            backend, mesh, volume_mesh,
             order=order,
             turb_model_name=turbulence_model,
             rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
             n_threads=threads,
             **kwargs,
         )
-        compute_wall_distance_for_solver(solver, volume_mesh)
 
         result = solver.solve(
             max_iter=max_iter, dt=dt, tol=tol,
@@ -220,7 +218,6 @@ class _APISolveMixin:
         logger.info("Starting transient FR simulation")
 
         from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
-        from autoflowcfd.cli.solve.wall_distance import compute_wall_distance_for_solver
 
         if mode is not None:
             turbulence_model = mode
@@ -270,9 +267,8 @@ class _APISolveMixin:
         mesh = HighOrderMesh(order=order)
         mesh.load_from_volume_mesh(volume_mesh)
 
-        solver = TransientSolver(
-            mesh=mesh,
-            backend=backend,
+        solver = build_single_node_solver(
+            backend, mesh, volume_mesh,
             order=order,
             turb_model_name=turbulence_model,
             time_scheme=core_time_scheme,
@@ -280,7 +276,6 @@ class _APISolveMixin:
             n_threads=threads,
             **kwargs,
         )
-        compute_wall_distance_for_solver(solver, volume_mesh)
 
         result = solver.solve(
             max_iter=max_iter, dt=dt, tol=tol,

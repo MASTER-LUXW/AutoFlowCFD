@@ -7,6 +7,7 @@
 紧凑包再发送，取代此前"发全局网格、各 rank 自己切"的做法。
 """
 
+from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 import copy
 import numpy as np
 from typing import Optional
@@ -121,7 +122,7 @@ def build_fully_distributed_rank_package(
     turbulence_intensity: float = 0.01,
     viscosity_ratio: float = 5.0,
     time_scheme=None,
-    dual_time_inner_iter: int = 20,
+    dual_time_inner_iter: int = DEFAULT_DUAL_TIME_STEPS,
     cfl_start: Optional[float] = None,
     cfl_max: Optional[float] = None,
     cfl_min: Optional[float] = None,

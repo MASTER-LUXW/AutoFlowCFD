@@ -4,6 +4,8 @@
 这里只留构造与对外接口。
 """
 
+from contextlib import contextmanager
+
 import numpy as np
 from typing import Optional
 from loguru import logger
@@ -16,15 +18,18 @@ from autoflowcfd.core.gpu.solver.gpu_solver_io import _GPUSolverIOMixin
 from .residual import _GPUSolverResidualMixin
 from .timestep import _GPUSolverTimeStepMixin
 from .step import _GPUSolverStepMixin
-
-
 from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
+from autoflowcfd.core.fr_solver.solver.solve_loop import SolveLoopMixin
+from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 
-class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverStepMixin, _GPUSolverInitMixin, _GPUSolverIOMixin):
-    """GPU 版 FR 求解器。
 
-    与 CPU 版 FRSolver 接口一致，内部全程使用 CuPy 数组。
-    网格数据和求解状态常驻 GPU 显存。
+class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverStepMixin, _GPUSolverInitMixin,
+                  _GPUSolverIOMixin, SolveLoopMixin):
+    """GPU 版 FR 求解器（单 GPU 的唯一实现：`solve steady/transient --backend gpu`、续算与 Python API）。
+
+    与 CPU 版 FRSolver 构造参数同名、求解循环同一份（`SolveLoopMixin`），内部全程使用 CuPy 数组。
+    网格数据和求解状态常驻 GPU 显存；checkpoint 读写、结果保存与气动力系数经主机视图
+    （`host_view()` / `edit_host_state()`，见 `core/gpu/solver/host_view.py`）。
 
     Attributes:
         mesh: HighOrderMesh（CPU 侧引用，用于几何查询）
@@ -38,7 +43,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
     def __init__(
         self,
         mesh,
-        ops,
+        ops=None,
         order: int = 2,
         n_vars: int = 5,
         device_id: int = 0,
@@ -53,7 +58,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         mu_molecular: float = 1.8e-5,
         boundary_ghost_provider=None,
         bc_overrides=None,
-        turb_model: str = "NONE",
+        turb_model_name: str = "NONE",
         turbulence_intensity: float = 0.01,
         viscosity_ratio: float = 5.0,
         low_mach_precond: bool = True,
@@ -64,16 +69,22 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         sem_num_eddies: int = _SEM_DEFAULT_NUM_EDDIES,
         artificial_viscosity_enabled: bool = False,
         artificial_viscosity_alpha: float = 1.0,
+        dual_time_inner_iter: int = DEFAULT_DUAL_TIME_STEPS,
+        n_threads: int = -1,
     ):
         """初始化 GPU FRSolver。
 
         Args:
             mesh: HighOrderMesh 实例
-            ops: FROperators 实例
+            ops: FROperators 实例；None 时按 `order` 生成（与 CPU 版 FRSolver 一致）
             order: 多项式阶数
             n_vars: 守恒变量数
             device_id: GPU 设备 ID
-            time_scheme: 时间积分方案
+            time_scheme: 时间积分方案（字符串或 `TimeIntegrationScheme`）
+            dual_time_inner_iter: 双时间步每个物理步的伪时间内迭代次数（与 CPU 版同名同义；此前单 GPU
+                不接收，`solve transient --backend gpu` 走的是 CPU 求解器的 GPU 分支）
+            n_threads: 主机侧 numba 并行 kernel（隐式稳态的 Jacobian 块装配、壁距等）的线程数，与 CPU 版
+                同一个取值规则（`fr_solver/solver/threads.py::configure_numba_threads`）；此前单 GPU 从不设置
             rho_inf, vel_inf, p_inf: 自由来流条件
             mu_molecular: 分子动力粘度
             low_mach_precond: 是否启用低马赫数伪时间预处理（默认 True，
@@ -97,13 +108,13 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
                 人工粘性（熵残差判据 + 守恒变量拉普拉斯），与 CPU 版 FRSolver
                 同名参数、同一实现（`core/fr_operators/artificial_viscosity/
                 entropy_viscosity.py`，数组模块无关）
-            turb_model: 湍流模型名称，支持 NONE/SST/DDES/IDDES/WMLES/LES
+            turb_model_name: 湍流模型名称（与 CPU 版同名），支持 NONE/SA/SST/DDES/IDDES/WMLES/LES
                 （#7，V2.0 专家组盲审第四轮，2026-08-28，见本方法顶部
                 文档"GPU 湍流模型支持范围"一节）。请求集合之外的值时
                 显式拒绝，不会像此前那样静默退化成层流。
 
         Raises:
-            NotImplementedError: turb_model 是本方法支持集合之外的值
+            NotImplementedError: turb_model_name 是本方法支持集合之外的值
 
         GPU 湍流模型支持范围（#7，V2.0 专家组盲审第四轮，2026-08-28）：
         NONE/SST/DDES/IDDES/WMLES/LES 均已实现（core/gpu/turbulence/
@@ -131,7 +142,12 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         # 合法模型名的唯一来源（`core/turbulence/registry.py`），GPU 与 CPU 支持同一组模型
         from autoflowcfd.core.turbulence.registry import require_supported
         from autoflowcfd.core.turbulence.registry import is_sst_family
-        turb_model_upper = require_supported(turb_model)
+        turb_model_upper = require_supported(turb_model_name)
+        from autoflowcfd.core.fr_solver.solver.threads import configure_numba_threads
+        configure_numba_threads(n_threads, mesh)
+        if ops is None:
+            from autoflowcfd.fr.operators import generate_fr_operators
+            ops = generate_fr_operators(order)
 
         self.mesh = mesh
         self.ops = ops
@@ -188,7 +204,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         # 场景会重置成错误的来流湍流值而不报错。
         self._turbulence_intensity = turbulence_intensity
         self._viscosity_ratio = viscosity_ratio
-        self.turb_model_name = turb_model
+        self.turb_model_name = turb_model_upper   # 与 CPU 版同一约定（大写）
         self.turb_model_gpu = None  # GPU 输运湍流模型（SST/DDES/IDDES 共用 GPUTurbulenceSST；SA-neg 为 SAModel）
         self.ddes_model_gpu = None  # GPU DDES/IDDES 长度尺度计算器（可选）
         self.sgs_model_gpu = None  # GPU WALE 亚格子模型（WMLES/LES 共用，可选）
@@ -222,7 +238,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         self._init_face_geometry()
 
         # 时间积分器
-        self.time_integrator = GPUTimeIntegrator(scheme=time_scheme)
+        self.time_integrator = GPUTimeIntegrator(scheme=time_scheme, dual_time_steps=dual_time_inner_iter)
 
         # CFL 策略（控制器 or 固定 CFL）的唯一事实来源：
         # `time_integration/adaptive_cfl/policy.py::build_cfl_policy`（六个后端
@@ -372,6 +388,11 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         # 残差范数历史
         self.residual_history = []
         self.iteration = 0
+        # 湍流产生项渐变计数器（与 CPU `init_turbulence_models` 同一组属性；checkpoint 恢复湍流场后
+        # 把它推到终点，见 `cli/solve/checkpoint_io/restore.py`）
+        from autoflowcfd.core.fr_solver.turbulence.init import TURB_PRODUCTION_RAMP_STEPS
+        self._turb_ramp_step = 0
+        self._turb_production_ramp_steps = TURB_PRODUCTION_RAMP_STEPS
 
         logger.info(
             f"GPUFRSolver initialized: {n_cells} cells, P{order}, "
@@ -401,6 +422,33 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
             resolve_troubled_sensor as _ts_resolve,
         )
         print(f"   Troubled-cell sensor: {_ts_resolve()}")
+
+    def host_view(self):
+        """主机视图（只读快照）：checkpoint 写出、结果保存、气动力系数用（见 `host_view.py`）。"""
+        from autoflowcfd.core.gpu.solver.host_view import GPUHostView
+
+        return GPUHostView(self)
+
+    @contextmanager
+    def edit_host_state(self):
+        """在主机上修改状态（恢复 checkpoint、`--init-from`），退出时写回设备（见 `host_view.py`）。"""
+        view = self.host_view()
+        yield view
+        view.push()
+
+    def _loop_monitor_suffix(self) -> str:
+        mem = self.array_mgr.get_memory_usage()
+        return f" | GPU mem: {mem['used_mb']:.0f}/{mem['total_mb']:.0f} MB"
+
+    def _solve_with_order_continuation(self, max_iter, dt, tol, checkpoint_callback=None,
+                                       phase_max_iter=None, residual_drop_threshold=1e2):
+        """Order Continuation（`run_distributed_order_continuation`：逻辑只依赖 `step()`/`order`/
+        `current_order`/`_interpolate_to_new_order` 这几个接口，单 GPU 与分布式后端共用）。"""
+        from autoflowcfd.core.mpi.distributed_order_continuation import run_distributed_order_continuation
+
+        return run_distributed_order_continuation(
+            self, max_iter, dt, tol, checkpoint_callback,
+            phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold)
 
     def _build_boundary_ghost_provider(self, bc_overrides):
         """构建边界幽灵态提供者 (BD-01)，与 CPU 版 FRSolver 复用同一套

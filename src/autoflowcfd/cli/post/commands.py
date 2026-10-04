@@ -70,8 +70,6 @@ def post() -> None:
 @click.option("--reference-area", type=float, required=True,
               help="参考面积 A_ref (m^2)，通常是车辆正面投影面积——没有默认值，"
                    "错的参考面积会给出误导性的 Cd/Cl，宁可强制用户显式指定")
-@click.option("--backend", "-b", type=click.Choice(["cpu", "gpu"]), default=None,
-              help="后端覆盖，默认沿用 checkpoint 记录的原始后端")
 @click.option("--threads", type=int, default=-1, help="CPU 后端 numba 并行线程数")
 @click.option("--skip-quality-check", is_flag=True,
               help="跳过重建时的网格质量门检查（B-11：原求解靠该选项才跑得起来的"
@@ -84,7 +82,6 @@ def coefficients(
     checkpoint: Optional[str],
     surface_mesh: Optional[str],
     reference_area: float,
-    backend: Optional[str],
     threads: int,
     skip_quality_check: bool,
     output: str,
@@ -109,7 +106,8 @@ def coefficients(
 
         ckpt_file = str(_locate_checkpoint(Path(case), checkpoint))
         solver, iteration, _metadata = rebuild_solver_from_checkpoint(
-            ckpt_file, backend=backend, surface_mesh=surface_mesh, threads=threads,
+            # 后处理只读状态、不迭代，一律在 CPU 上重建（GPU 写出的 checkpoint 状态与 CPU 同一格式）
+            ckpt_file, backend="cpu", surface_mesh=surface_mesh, threads=threads,
             skip_quality_check=skip_quality_check,
         )
         coeffs = compute_aerodynamic_coefficients_fr(solver, reference_area=reference_area)

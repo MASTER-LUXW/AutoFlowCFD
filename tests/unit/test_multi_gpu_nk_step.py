@@ -61,6 +61,7 @@ def _stub(n_local, n_sps, target):
     s.time_integrator = types.SimpleNamespace(scheme=TimeIntegrationScheme.NEWTON_KRYLOV)
     s.order = s.current_order = 1
     s.freestream = {"rho_inf": 1.225, "vel_inf": 30.0, "p_inf": 101325.0}
+    s.boundary_ghost_provider = types.SimpleNamespace(code_to_config={})   # 无 SEM 入口
     s.turb_model_gpu = None
     s.turb_model_name = "NONE"
     s.filter_func_gpu = None

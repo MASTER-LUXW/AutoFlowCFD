@@ -88,9 +88,9 @@ class TestResumeCflOptionForwarded:
             "autoflowcfd.cli.solve.commands.rebuild_solver_from_checkpoint",
             return_value=(fake_solver, 2000, fake_meta),
         ) as mock_rebuild, patch(
-            "autoflowcfd.cli.solve.commands.save_results"
+            "autoflowcfd.cli.solve.checkpoint_io.write.save_results"
         ), patch(
-            "autoflowcfd.cli.solve.commands.write_checkpoint"
+            "autoflowcfd.cli.solve.checkpoint_io.write.write_checkpoint"
         ):
             result = CliRunner().invoke(
                 cli,
@@ -113,9 +113,9 @@ class TestResumeCflOptionForwarded:
             "autoflowcfd.cli.solve.commands.rebuild_solver_from_checkpoint",
             return_value=(fake_solver, 2000, fake_meta),
         ) as mock_rebuild, patch(
-            "autoflowcfd.cli.solve.commands.save_results"
+            "autoflowcfd.cli.solve.checkpoint_io.write.save_results"
         ), patch(
-            "autoflowcfd.cli.solve.commands.write_checkpoint"
+            "autoflowcfd.cli.solve.checkpoint_io.write.write_checkpoint"
         ):
             result = CliRunner().invoke(
                 cli, ["solve", "resume", str(ckpt), "--max-iter", "5"],

@@ -427,9 +427,9 @@ class TestPrecondModeScopeIsolation:
 
 
 class TestEveryImplementationUsesTheSameP5:
-    """AUSM+up 有四份实现（CPU numba 核、GPU CuPy 向量化版、GPU CUDA P0 源串、
-    backend/fr_gpu_p0.py）。2026-09-25 修正的 α 项系数缺陷在四份里同时存在，
-    这里把"四份一致"钉成判据。"""
+    """AUSM+up 有三份实现（CPU numba 核、GPU CuPy 向量化版、GPU CUDA P0 源串）。2026-09-25 修正的
+    α 项系数缺陷在当时的四份里同时存在（第四份 numba.cuda 版 `backend/fr_gpu_p0.py` 生产零调用，
+    2026-10-04 删除），这里把"各份一致"钉成判据。"""
 
     @pytest.mark.parametrize('mode', ALL_MODES)
     def test_cupy_batch_version_matches_cpu_kernel(self, monkeypatch, mode):
@@ -456,7 +456,6 @@ class TestEveryImplementationUsesTheSameP5:
 
     @pytest.mark.parametrize('module', [
         'autoflowcfd.core.gpu.residual.gpu_p0_inviscid',
-        'autoflowcfd.core.backend.fr_gpu_p0',
         'autoflowcfd.core.gpu.residual.gpu_inviscid.flux',
         'autoflowcfd.core.fr_operators.kernels',
     ])

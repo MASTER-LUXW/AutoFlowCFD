@@ -28,6 +28,9 @@ from autoflowcfd.fr.operators import generate_fr_operators
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 
 
+from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES  # noqa: E402
+
+
 def _build_initial_package_and_root_context(order, turb_model_name="NONE"):
     from autoflowcfd.core.mpi.partition import partition_mesh
     from autoflowcfd.core.mpi.distributed_mesh_loader import build_fully_distributed_rank_package
@@ -68,6 +71,7 @@ def _build_initial_package_and_root_context(order, turb_model_name="NONE"):
         'wall_distance_source': wall_distance_source,
         'h_max_global': h_max_global, 'h_wn_global': h_wn_global,
         'turbulence_intensity': 0.01, 'viscosity_ratio': 5.0,
+        'sem_num_eddies': _SEM_DEFAULT_NUM_EDDIES,
         'bc_overrides': {}, 'n_ranks': n_ranks,
         'artificial_viscosity_enabled': False, 'artificial_viscosity_alpha': 1.0,
     }

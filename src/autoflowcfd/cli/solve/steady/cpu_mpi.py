@@ -13,7 +13,7 @@ from autoflowcfd.cli.solve.helpers import load_mesh_for_solver
 
 def _run_cpu_mpi(
     *,
-    aoa_deg, aos_deg, artificial_viscosity_alpha, artificial_viscosity_enabled, backend, cfl_max, cfl_min, cfl_start, checkpoint_interval,
+    aoa_deg, aos_deg, artificial_viscosity_alpha, artificial_viscosity_enabled, cfl_max, cfl_min, cfl_start, checkpoint_interval,
     fully_distributed, input_file, max_iter, mu_molecular, n_ranks, order,
     output_dir, p_inf, phase_max_iter, residual_drop_threshold, rho_inf,
     skip_quality_check, surface_mesh, threads, time_scheme, turbulence_intensity,
@@ -109,7 +109,6 @@ def _run_cpu_mpi(
             ops=ops,
             face_connectivity=mesh.face_connectivity,
             n_ranks=n_ranks,
-            backend=backend,
             order=order,
             turb_model_name=turbulence_model,
             wall_distance_source=wall_distance_source_if_needed(turbulence_model, volume_data),
@@ -160,7 +159,7 @@ def _run_cpu_mpi(
             # 爬坡。
             saved_path = distributed_save_checkpoint(
                 solver_ref, output_dir, iteration,
-                input_file, solver_ref.current_order, turbulence_model, backend,
+                input_file, solver_ref.current_order, turbulence_model, "cpu",
                 target_order=solver_ref.order, surface_mesh=surface_mesh,
             )
             if saved_path and is_root():
@@ -183,7 +182,7 @@ def _run_cpu_mpi(
         distributed_save_results(solver, output_dir)
         distributed_save_checkpoint(
             solver, output_dir, result.iterations,
-            input_file, solver.current_order, turbulence_model, backend,
+            input_file, solver.current_order, turbulence_model, "cpu",
             target_order=solver.order, surface_mesh=surface_mesh,
         )
 

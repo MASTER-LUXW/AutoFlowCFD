@@ -125,6 +125,22 @@ def _compute_reference_area_auto(volume_data, direction=None) -> Optional[float]
         return None
 
 
+def resolve_reference_area(solver, volume_data, reference_area: Optional[float]) -> Optional[float]:
+    """`--reference-area` 未给时沿来流方向自动估算，写到 `solver._reference_area`（每步日志的 Cd/Cl/Cs
+    读它）并返回。单机 `solve steady/transient` 与 checkpoint 重建共用（此前三处各写一份，`solve transient`
+    单机分支没有这一步：不传 --reference-area 时既无逐步系数也无收尾系数）。
+
+    参考面积必须沿**来流方向**投影（有攻角时按 X 投影会偏大 1/cos(alpha)，15 度就是 3.5%，直接进 Cd 分母）。
+    """
+    if reference_area is None:
+        from autoflowcfd.core.utils.flow_direction import direction_from_freestream
+
+        reference_area = _compute_reference_area_auto(
+            volume_data, direction=direction_from_freestream(solver.freestream))
+    solver._reference_area = reference_area
+    return reference_area
+
+
 def _report_aerodynamic_coefficients(solver, reference_area: Optional[float]) -> None:
     """求解结束后直接在当前 FRSolver 状态上积分并打印 Cd/Cl。
 

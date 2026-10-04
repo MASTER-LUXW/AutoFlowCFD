@@ -81,7 +81,7 @@ class TestDistributedFRSolverMainInitStep:
 
         dist_solver = DistributedFRSolver(
             mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
-            n_ranks=1, backend="cpu", order=mesh.order, turb_model_name="none",
+            n_ranks=1, order=mesh.order, turb_model_name="none",
             time_scheme=TimeIntegrationScheme.SSP_RK3, **freestream_kwargs,
         )
 
@@ -112,7 +112,7 @@ class TestDistributedFRSolverMainInitStep:
 
         dist_solver = DistributedFRSolver(
             mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
-            n_ranks=1, backend="cpu", order=mesh.order, turb_model_name="none",
+            n_ranks=1, order=mesh.order, turb_model_name="none",
             time_scheme=TimeIntegrationScheme.SSP_RK3,
             mu_molecular=1.8e-5, rho_inf=1.225, vel_inf=33.33, p_inf=101325.0,
         )
@@ -160,7 +160,7 @@ class TestDistributedStepMatchesSingleMachine:
 
         dist = DistributedFRSolver(
             mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
-            n_ranks=1, backend="cpu", order=mesh.order, turb_model_name="none",
+            n_ranks=1, order=mesh.order, turb_model_name="none",
             time_scheme=scheme, **kw)
         n = mesh.n_cells
         dist.state.U[:n] = U0
@@ -295,7 +295,7 @@ class TestDistributedDualTimeStepping:
 
         dist_solver = DistributedFRSolver(
             mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
-            n_ranks=1, backend="cpu", order=mesh.order, turb_model_name="none",
+            n_ranks=1, order=mesh.order, turb_model_name="none",
             time_scheme=TimeIntegrationScheme.DUAL_TIME, **freestream_kwargs,
         )
         dist_solver.state.U[:n_cells] = U0
@@ -329,7 +329,7 @@ class TestDistributedDualTimeStepping:
 
         dist_solver = DistributedFRSolver(
             mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
-            n_ranks=1, backend="cpu", order=mesh.order, turb_model_name="none",
+            n_ranks=1, order=mesh.order, turb_model_name="none",
             time_scheme=TimeIntegrationScheme.DUAL_TIME,
             mu_molecular=1.8e-5, rho_inf=1.225, vel_inf=33.33, p_inf=101325.0,
         )
@@ -357,7 +357,7 @@ class TestDistributedCheckpointRoundTrip:
         from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
         return DistributedFRSolver(
             mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
-            n_ranks=1, backend="cpu", order=mesh.order, turb_model_name="none",
+            n_ranks=1, order=mesh.order, turb_model_name="none",
             time_scheme=TimeIntegrationScheme.SSP_RK3,
             mu_molecular=1.8e-5, rho_inf=1.225, vel_inf=33.33, p_inf=101325.0,
         )
@@ -408,7 +408,7 @@ class TestDistributedCheckpointRoundTrip:
                     mu_molecular=2.3e-5, turbulence_intensity=0.037, viscosity_ratio=8.0)
         solver = DistributedFRSolver(
             mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
-            n_ranks=1, backend="cpu", order=mesh.order, turb_model_name="none",
+            n_ranks=1, order=mesh.order, turb_model_name="none",
             time_scheme=TimeIntegrationScheme.SSP_RK3, **want)
         path = distributed_save_checkpoint(
             solver, str(tmp_path), 7, "dummy_input.nas", mesh.order, "none", "cpu",
