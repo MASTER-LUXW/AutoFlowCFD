@@ -40,16 +40,21 @@ def _fake_solver(n_cells=2, n_sps=1, n_vars=7, order=0, k=None, omega=None, with
     state._update_primitives = lambda: None
     turb_model = None
     if with_turb_model:
-        turb_model = SimpleNamespace(
-            k_field=np.full((n_cells, n_sps), 1e-6) if k is None else k,
-            omega_field=np.full((n_cells, n_sps), 1.0) if omega is None else omega,
-            omega_inf=1.0,  # 恢复时的可容许性投影读它（sst/log_omega.py::admissible_omega）
-        )
+        # 真实 SST 模型（checkpoint 读写按 `TransportedTurbulence.TRANSPORTED_FIELDS`）；omega_inf=1.0
+        # 是恢复时可容许性投影读的来流值（sst/log_omega.py::admissible_omega）
+        from autoflowcfd.core.turbulence.sst import SSTModelFR
+
+        turb_model = SSTModelFR(n_cells, n_sps, k_inf=1e-6, omega_inf=1.0)
+        if k is not None:
+            turb_model.k_field = k
+        if omega is not None:
+            turb_model.omega_field = omega
     return SimpleNamespace(
         state=state,
         order=order,
         current_order=order,
         turb_model=turb_model,
+        mesh=SimpleNamespace(n_prism_cells=n_cells),
         freestream={"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0},
         # write_checkpoint 记录时间格式（2026-09-25）：真实求解器恒有 time_integrator
         time_integrator=SimpleNamespace(scheme=TimeIntegrationScheme.SSP_RK3),
@@ -172,10 +177,10 @@ class TestRebuildRestoresTurbulenceFields:
         # mismatched turb_model shape (n_cells=5) - simulates a turb_model
         # whose field shape drifted independently of the mean-flow state.
         def _fake_frsolver(**kwargs):
+            from autoflowcfd.core.turbulence.sst import SSTModelFR
+
             s = _fake_solver(n_cells=2, n_sps=1, order=kwargs["order"])
-            s.turb_model = SimpleNamespace(
-                k_field=np.zeros((5, 1)), omega_field=np.ones((5, 1)),
-            )
+            s.turb_model = SSTModelFR(5, 1, k_inf=0.0, omega_inf=1.0)
             return s
 
         with patch(

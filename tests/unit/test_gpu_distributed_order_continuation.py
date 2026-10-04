@@ -277,19 +277,24 @@ class TestResumeCeilingFractionResetHeuristicGpu:
 
     def _make_solver_stub(self, k_value, omega_value, n_cells=8, n_sps=8,
                            k_max=555.44, omega_max=1e6):
-        turb = types.SimpleNamespace(
-            k_field=np.full((n_cells, n_sps), k_value, dtype=np.float64),
-            omega_field=np.full((n_cells, n_sps), omega_value, dtype=np.float64),
-            nu_t=np.full((n_cells, n_sps), 0.5, dtype=np.float64),
-            k_max=k_max, omega_max=omega_max,
-        )
-        return types.SimpleNamespace(
-            turb_model_gpu=turb,
+        from autoflowcfd.core.fr_solver.turbulence import _set_freestream_turbulence
+        from autoflowcfd.core.turbulence.sst import SSTModelFR
+
+        solver = types.SimpleNamespace(
             freestream={"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0},
             mu_molecular=1.8e-5,
             _turbulence_intensity=0.01,
             _viscosity_ratio=5.0,
         )
+        # 真实的 SST 模型类（与 GPUTurbulenceSST 同一个 TransportedTurbulence 接口），数组用 numpy
+        k_inf, omega_inf = _set_freestream_turbulence(solver)
+        turb = SSTModelFR(n_cells, n_sps, k_inf=k_inf, omega_inf=omega_inf)
+        turb.k_field = np.full((n_cells, n_sps), k_value, dtype=np.float64)
+        turb.omega_field = np.full((n_cells, n_sps), omega_value, dtype=np.float64)
+        turb.nu_t = np.full((n_cells, n_sps), 0.5, dtype=np.float64)
+        turb.k_max, turb.omega_max = k_max, omega_max
+        solver.turb_model_gpu = turb
+        return solver
 
     def test_healthy_high_turbulence_field_is_not_falsely_reset(self):
         from autoflowcfd.core.mpi.distributed_order_continuation import (

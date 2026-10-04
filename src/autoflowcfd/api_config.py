@@ -9,8 +9,9 @@ from pathlib import Path
 from loguru import logger
 
 from autoflowcfd.config.solver_config import (
-    SteadyConfig, TransientConfig, BackendType, TurbulenceModel,
+    SteadyConfig, TransientConfig, BackendType,
 )
+from autoflowcfd.config.turbulence_names import turbulence_from_name
 
 
 def api_create_steady_config(
@@ -22,16 +23,8 @@ def api_create_steady_config(
     **kwargs
 ) -> SteadyConfig:
     """创建稳态仿真配置（委托函数）。"""
-    turb_model_map = {
-        'none': TurbulenceModel.NONE,
-        'sst': TurbulenceModel.SST_KW,
-        'sst_kw': TurbulenceModel.SST_KW,
-        'ddes': TurbulenceModel.DDES,
-        'iddes': TurbulenceModel.IDDES,
-        'wmles': TurbulenceModel.WMLES,
-        'les': TurbulenceModel.LES,
-    }
-    turb_model = turb_model_map.get(turbulence.lower(), TurbulenceModel.SST_KW)
+    # 未知名字报错（此前 `.get(..., SST_KW)` 把写错的模型名静默换成 SST）
+    turb_model = turbulence_from_name(turbulence)
 
     return SteadyConfig(
         backend=BackendType(backend),
@@ -74,22 +67,8 @@ def api_create_transient_config(
     # 默认值/常见取值 "sst" 从来都不是这个枚举的合法值（枚举值是
     # "sst_kw"，见 solver_config.py）——`api.create_transient_config()`
     # 不传 turbulence_model 参数（最常见的调用方式）恒定 ValueError 崩溃。
-    # 改用与 api_create_steady_config 同一套 CLI 词汇->枚举映射表。
-    turb_model_map = {
-        'none': TurbulenceModel.NONE,
-        'sst': TurbulenceModel.SST_KW,
-        'sst_kw': TurbulenceModel.SST_KW,
-        'ddes': TurbulenceModel.DDES,
-        'iddes': TurbulenceModel.IDDES,
-        'wmles': TurbulenceModel.WMLES,
-        'les': TurbulenceModel.LES,
-    }
-    if turbulence_model.lower() not in turb_model_map:
-        raise ValueError(
-            f"Unknown turbulence_model '{turbulence_model}', expected one of "
-            f"{sorted(turb_model_map)}"
-        )
-    turb_model = turb_model_map[turbulence_model.lower()]
+    # 改用与 api_create_steady_config 同一个名字->枚举映射（config/turbulence_names.py）。
+    turb_model = turbulence_from_name(turbulence_model)
 
     return TransientConfig(
         backend=BackendType(backend),

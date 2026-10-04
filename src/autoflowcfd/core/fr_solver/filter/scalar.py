@@ -145,11 +145,10 @@ def resolve_turb_filter_gate() -> str:
     return gate
 
 
-def compute_turb_troubled_mask(k_field: np.ndarray, omega_field: np.ndarray,
-                               order: int, *, n_prism=None,
+def compute_turb_troubled_mask(fields, order: int, *, n_prism=None,
                                cell_is_prism=None) -> np.ndarray:
-    """k/omega 门控用的欠分辨掩码：对 k 与 omega **分别**求
-    Persson-Peraire 指示器后取并集。
+    """湍流场门控用的欠分辨掩码：对每个被输运的湍流未知量（SST 为 k 与 `ln omega`、SA-neg 为
+    `nu_tilde`）**分别**求 Persson-Peraire 指示器后取并集。
 
     为什么取并集而不是只看一个：2026-09-12 记录的真实发散发生在 omega
     （单元内部相邻解点间数量级跳变），而更早一轮攻关里失控的是 k（局部
@@ -164,6 +163,8 @@ def compute_turb_troubled_mask(k_field: np.ndarray, omega_field: np.ndarray,
         compute_troubled_cell_mask,
     )
     kw = dict(n_prism=n_prism, cell_is_prism=cell_is_prism)
-    mask_k = compute_troubled_cell_mask(np.ascontiguousarray(k_field), order, **kw)
-    mask_om = compute_troubled_cell_mask(np.ascontiguousarray(omega_field), order, **kw)
-    return mask_k | mask_om
+    mask = None
+    for field in fields:
+        m = compute_troubled_cell_mask(np.ascontiguousarray(field), order, **kw)
+        mask = m if mask is None else mask | m
+    return mask

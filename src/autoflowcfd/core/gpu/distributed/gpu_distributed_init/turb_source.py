@@ -165,7 +165,7 @@ class _GPUDistributedTurbSourceMixin:
         view = ctx.view
         from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_gradient_gpu
 
-        from autoflowcfd.core.turbulence.sst.bounds import clip_gradient_magnitude
+        from autoflowcfd.core.turbulence.limits import clip_gradient_magnitude
         from autoflowcfd.core.turbulence.sst.log_omega import log_omega
 
         # 梯度对被输运的 k 与 w = ln(omega) 求；模型项用 grad(omega) = omega grad(w)

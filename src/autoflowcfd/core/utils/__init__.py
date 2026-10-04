@@ -10,7 +10,7 @@ from autoflowcfd.core.utils.order_continuation import (
     run_order_continuation,
 )
 from autoflowcfd.core.utils.face_coloring import greedy_face_coloring
-from autoflowcfd.core.utils.wall_distance import compute_wall_distance
+from autoflowcfd.core.utils.wall_distance import WallDistanceSource
 from autoflowcfd.core.utils.aero_coeffs import ReferenceAreaMixin
 from autoflowcfd.core.utils.solver_helpers import resolve_backend_type
 
@@ -19,7 +19,7 @@ __all__ = [
     'interpolate_to_new_order',
     'run_order_continuation',
     'greedy_face_coloring',
-    'compute_wall_distance',
+    'WallDistanceSource',
     'ReferenceAreaMixin',
     'resolve_backend_type',
 ]

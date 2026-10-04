@@ -13,8 +13,8 @@ from loguru import logger
 from autoflowcfd.grid.structures import VolumeMeshData
 from autoflowcfd.core import FRSolver, TransientSolver  # 从core模块导入TransientSolver
 from autoflowcfd.config.solver_config import SteadyConfig, TransientConfig
+from autoflowcfd.config.turbulence_names import turbulence_solver_name
 from autoflowcfd.api_config import api_resume_simulation
-from .helpers import _turbulence_model_str
 
 
 class _APISolveMixin:
@@ -56,8 +56,8 @@ class _APISolveMixin:
                 `load_solver_config()` 的返回值）。提供时，上面几个显式
                 形参未被调用方传值（即仍是 None）的，改用它的同名字段
                 （`turbulence_model` 对应 `config.turbulence`，需要按
-                `TurbulenceModel` 枚举做取值映射，见模块内
-                `_turbulence_model_str`；其余字段名完全一致）；
+                `TurbulenceModel` 枚举做取值映射，见
+                `config/turbulence_names.py::turbulence_solver_name`；其余字段名完全一致）；
                 `mu_molecular`/`turbulence_intensity`/`viscosity_ratio`
                 这三个 `SolverConfig` 基类字段同理，未显式经由 `**kwargs`
                 传入时会从 `config` 补上，再透传给 FRSolver 构造函数。
@@ -100,7 +100,7 @@ class _APISolveMixin:
         if turbulence_model is not None:
             pass
         elif config is not None:
-            turbulence_model = _turbulence_model_str(config.turbulence)
+            turbulence_model = turbulence_solver_name(config.turbulence)
         else:
             turbulence_model = "sst"
         max_iter = max_iter if max_iter is not None else (config.max_iter if config is not None else 1000)
@@ -230,7 +230,7 @@ class _APISolveMixin:
         if turbulence_model is not None:
             pass
         elif config is not None:
-            turbulence_model = _turbulence_model_str(config.turbulence)
+            turbulence_model = turbulence_solver_name(config.turbulence)
         else:
             turbulence_model = "sst"
         dt = dt if dt is not None else (config.dt if config is not None else 1e-4)

@@ -39,19 +39,12 @@ def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, m
     wall_idx = cp.where(wall_mask)[0]
     if wall_idx.shape[0] > 0:
         owner_cells = ff.owner_cell[wall_idx]
-        # 长度尺度口径可切换，与 CPU 端 core/turbulence/transport.py::
-        # _compute_omega_wall_target 同一处 2026-09-15 发现逐字对应
-        # （`min` 既不是单元中心也不是单元高度，会让这个经标定的壁面
-        # 函数产生随阶数变化的系统性高估：order=1/2/3 分别 5.60x /
-        # 19.68x / 51.86x）。**默认仍为 `min`**，理由见 CPU 端注释。
-        import os as _os
-        _d1_mode = _os.environ.get("AFCFD_OMEGA_WALL_D1", "min").lower()
-        if _d1_mode not in ("min", "mean"):
-            raise ValueError(
-                f"AFCFD_OMEGA_WALL_D1={_d1_mode!r} 不是合法取值（min | mean）")
-        _wd = wall_distance_gpu[owner_cells]
-        d1 = _wd.min(axis=1) if _d1_mode == "min" else _wd.mean(axis=1)
-        d1 = cp.maximum(d1, 1e-8)
+        # d1 口径与 CPU 端共用一个函数（`sst/bounds.py::omega_wall_length_scale`）
+        from autoflowcfd.core.turbulence.sst.bounds import omega_wall_length_scale
+
+        _np_prism = getattr(ff, 'n_prism', None)
+        d1 = omega_wall_length_scale(wall_distance_gpu[owner_cells],
+                                     None if _np_prism is None else owner_cells < _np_prism, cp)
         # 只统计真实自由度，与 CPU 端 transport.py::
         # _compute_omega_wall_target 同一处 2026-09-15 审计逐字对应。
         # 阶数从 SP 数反解（棱柱是张量积 n_sps=(order+1)^3），棱柱数从
@@ -62,7 +55,6 @@ def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, m
         from autoflowcfd.fr.native_padding import (
             order_from_n_sps, reduce_rows_over_real_sps,
         )
-        _np_prism = getattr(ff, 'n_prism', None)
         _rows = Q_gpu[owner_cells, :, 0]
         _order = order_from_n_sps(_rows.shape[1])
         if _np_prism is None:

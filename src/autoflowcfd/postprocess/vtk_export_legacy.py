@@ -174,16 +174,13 @@ def write_cells_from(exporter, f, conn: np.ndarray, binary: bool) -> None:
 
 
 def write_field_block(exporter, f, fields: List[str], values: Dict[str, np.ndarray], binary: bool) -> None:
-    if 'velocity' in fields and 'velocity' in values:
-        exporter._write_vector(f, "Velocity", values['velocity'], binary)
-    if 'pressure' in fields and 'pressure' in values:
-        exporter._write_scalar(f, "Pressure", values['pressure'], binary)
-    if 'k' in fields and 'k' in values:
-        exporter._write_scalar(f, "TurbulentKineticEnergy", values['k'], binary)
-    if 'omega' in fields and 'omega' in values:
-        exporter._write_scalar(f, "SpecificDissipationRate", values['omega'], binary)
-    if 'nut' in fields and 'nut' in values:
-        exporter._write_scalar(f, "TurbulentViscosity", values['nut'], binary)
+    for key in fields:
+        if key not in values:
+            continue
+        if key == 'velocity':
+            exporter._write_vector(f, exporter._FIELD_LABELS[key], values[key], binary)
+        else:
+            exporter._write_scalar(f, exporter._FIELD_LABELS[key], values[key], binary)
 
 
 def write_scalar(exporter, f, name: str, values: np.ndarray, binary: bool, int_type: bool = False) -> None:

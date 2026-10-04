@@ -18,7 +18,7 @@ from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_
 
 
 from autoflowcfd.core.turbulence.transport import resolve_turb_overintegration
-from autoflowcfd.core.turbulence.sst.bounds import clip_gradient_magnitude
+from autoflowcfd.core.turbulence.limits import clip_gradient_magnitude
 from autoflowcfd.core.turbulence.transport.residual import turbulence_diffusivities
 from autoflowcfd.core.turbulence.transport.faces import boundary_diffusion_targets
 from autoflowcfd.core.turbulence.sst.log_omega import log_omega, log_omega_gradient_source

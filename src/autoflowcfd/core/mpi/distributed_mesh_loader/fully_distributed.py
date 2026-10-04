@@ -11,7 +11,6 @@ from loguru import logger
 
 from autoflowcfd.core.mpi import get_comm, get_rank
 from .package import build_fully_distributed_rank_package
-from autoflowcfd.core.turbulence.sst.log_omega import lift_log_omega
 
 
 def distributed_mesh_load_v2(
@@ -33,7 +32,6 @@ def distributed_mesh_load_v2(
     cfl_start: Optional[float] = None,
     cfl_max: Optional[float] = None,
     cfl_min: Optional[float] = None,
-    use_eikonal: bool = False,
     artificial_viscosity_enabled: bool = False,
     artificial_viscosity_alpha: float = 1.0,
 ):
@@ -134,12 +132,10 @@ def distributed_mesh_load_v2(
         wall_distance_source = None
         h_max_global = h_wn_global = None
         if turb_model_name in ("SST", "DDES", "IDDES", "WMLES"):
-            # 壁面距离来源与单机同一个构造（WALL 组边界面上的节点，见
-            # core/utils/wall_distance_source.py；此前这里把 BoundaryMap 的
-            # 数组当字典读，真实网格上直接崩溃）
-            from autoflowcfd.core.utils.wall_distance_source import WallDistanceSource
-            wall_distance_source = WallDistanceSource.from_volume_data(
-                _volume_data, use_eikonal=use_eikonal)
+            # 壁面距离来源与单机同一个构造（WALL 组边界面，见 core/utils/wall_distance；
+            # 此前这里把 BoundaryMap 的数组当字典读，真实网格上直接崩溃）
+            from autoflowcfd.core.utils.wall_distance import WallDistanceSource
+            wall_distance_source = WallDistanceSource.from_volume_data(_volume_data)
             if turb_model_name in ("DDES", "IDDES"):
                 # DDES（2026-09-02 补齐）：apply_to_sst_model 现在优先用
                 # h_max（max_edge 网格尺度）而不是 cube_root(V)，见
@@ -257,7 +253,6 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
     from autoflowcfd.core.mpi.distributed_state import DistributedFRState
     from autoflowcfd.core.mpi.halo import HaloExchange
     from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
-    from autoflowcfd.core.fr_solver.turbulence import _set_freestream_turbulence
 
     old_order = solver.current_order
     if old_order == target_p:
@@ -308,11 +303,10 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
         old_local_U = solver.state.get_local_U()[:n_local]
         new_local_U = _lift(old_local_U)
 
-        if solver.turb_model is not None and hasattr(solver.turb_model, 'k_field'):
-            solver.turb_model.k_field = _lift(
-                solver.turb_model.k_field[:n_local])
-            solver.turb_model.omega_field = lift_log_omega(
-                solver.turb_model.omega_field[:n_local], _lift, solver.turb_model.omega_max)
+        if solver.turb_model is not None and hasattr(solver.turb_model, 'transported_fields'):
+            # 输运场在未知量空间延拓（`TransportedTurbulence.mapped_fields`）
+            solver.turb_model.set_transported_fields(solver.turb_model.mapped_fields(
+                _lift, np, fields=[f[:n_local] for f in solver.turb_model.transported_fields()]))
             old_nu_t = getattr(solver.turb_model, 'nu_t', None)
             if old_nu_t is not None and old_nu_t.shape[1] == old_local_U.shape[1]:
                 solver.turb_model.nu_t = _lift(old_nu_t[:n_local])
@@ -332,10 +326,8 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
         new_local_U = np.empty((n_local, new_n_sps, n_vars))
         new_local_U[:] = freestream_conservative_state(freestream, n_vars)
 
-        if solver.turb_model is not None and hasattr(solver.turb_model, 'k_field'):
-            k_inf, omega_inf = _set_freestream_turbulence(solver)
-            solver.turb_model.k_field = np.ones((n_local, new_n_sps)) * k_inf
-            solver.turb_model.omega_field = np.ones((n_local, new_n_sps)) * omega_inf
+        if solver.turb_model is not None and hasattr(solver.turb_model, 'transported_fields'):
+            solver.turb_model.set_transported_fields(solver.turb_model.freestream_fields((n_local, new_n_sps), np))
             if hasattr(solver.turb_model, 'nu_t'):
                 solver.turb_model.nu_t = np.zeros((n_local, new_n_sps))
             if hasattr(solver.turb_model, 'des_length_scale'):
@@ -363,8 +355,8 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
 
     solver.wall_distance_compact = my_package.get('wall_distance_compact')
     # 换阶后贴壁解点更靠近壁面：omega 上界随之重定（与传统模式同一函数）
-    from autoflowcfd.core.mpi.distributed_turbulence import apply_distributed_omega_bound
-    apply_distributed_omega_bound(solver.turb_model, solver.wall_distance_compact, solver)
+    from autoflowcfd.core.mpi.distributed_turbulence import apply_distributed_wall_distance
+    apply_distributed_wall_distance(solver.turb_model, solver.wall_distance_compact, solver)
     solver.iddes_h_max_compact = my_package.get('iddes_h_max_compact')
     solver.iddes_h_wn_compact = my_package.get('iddes_h_wn_compact')
 

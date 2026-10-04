@@ -56,24 +56,23 @@ from autoflowcfd.core.mpi.distributed_compute import DistributedMeshAdapter
 from autoflowcfd.core.mpi.compact_halo import CompactHaloRefresh
 
 
-def apply_distributed_omega_bound(model, wall_distance, solver) -> None:
-    """按**全局**最小壁距设定 SST 的 omega 上界（`turbulence/sst/bounds.py` 模块文档"omega
-    上界随最近壁面解点给定"）：各 rank 与单机同一个值。CPU 分布式（`turb_model` /
-    `wall_distance_compact`）与多 GPU（`turb_model_gpu` / `wall_distance_gpu`，cupy）共用；
-    壁距每次设定/重算后调用，没有 SST 类模型或没有壁距时不做事。"""
+def apply_distributed_wall_distance(model, wall_distance, solver) -> None:
+    """把壁距交给输运湍流模型（`TransportedTurbulence.apply_wall_distance`），全局量按全部 rank
+    归约（SST 的 omega 上界取**全局**最小壁距，各 rank 与单机同一个值）。CPU 分布式
+    （`turb_model` / `wall_distance_compact`）与多 GPU（`turb_model_gpu` / `wall_distance_gpu`，
+    cupy）共用；壁距每次设定/重算后调用，没有输运模型或没有壁距时不做事。"""
     from autoflowcfd.core.mpi.comm import allreduce_min
-    from autoflowcfd.core.turbulence.sst.bounds import apply_omega_upper_bound
 
-    if model is None or not hasattr(model, "omega_max") or wall_distance is None:
+    if not hasattr(model, "apply_wall_distance") or wall_distance is None:
         return
-    apply_omega_upper_bound(model, wall_distance, solver.mu_molecular / solver.freestream["rho_inf"],
-                            global_min=allreduce_min)
+    model.apply_wall_distance(wall_distance, solver.mu_molecular / solver.freestream["rho_inf"],
+                              global_min=allreduce_min)
 
 
 def compute_distributed_wall_distance(dist_fc, global_mesh, source) -> np.ndarray:
     """compact 索引空间（local + halo，"棱柱在前"）解点上的壁面距离。
 
-    与单机/GPU 同一个来源（`core/utils/wall_distance_source.py`）在本 rank
+    与单机/GPU 同一个来源（`core/utils/wall_distance`）在本 rank
     compact 单元的解点坐标上查询——halo 单元也要有真实壁距，SST 涡粘与混合
     函数在 halo 上的值要供平均流粘性残差的 BR1 界面项读取。
 

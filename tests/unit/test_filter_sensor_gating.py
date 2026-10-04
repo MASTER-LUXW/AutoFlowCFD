@@ -304,21 +304,21 @@ class TestTurbTroubledMaskIsUnionOfKAndOmega:
         rng = np.random.default_rng(21)
         k = _spiky(8, 8, [2], rng)
         om = 1.0 + 0.05 * np.arange(8, dtype=float)[:, None] * np.ones(8)
-        mask = compute_turb_troubled_mask(k, om, 1, n_prism=4)
+        mask = compute_turb_troubled_mask((k, om), 1, n_prism=4)
         np.testing.assert_array_equal(np.flatnonzero(mask), np.array([2]))
 
     def test_spike_only_in_omega_is_flagged(self):
         rng = np.random.default_rng(22)
         k = 1.0 + 0.05 * np.arange(8, dtype=float)[:, None] * np.ones(8)
         om = _spiky(8, 8, [5], rng)
-        mask = compute_turb_troubled_mask(k, om, 1, n_prism=4)
+        mask = compute_turb_troubled_mask((k, om), 1, n_prism=4)
         np.testing.assert_array_equal(np.flatnonzero(mask), np.array([5]))
 
     def test_union_not_intersection(self):
         rng = np.random.default_rng(23)
         k = _spiky(8, 8, [1], rng)
         om = _spiky(8, 8, [6], rng)
-        mask = compute_turb_troubled_mask(k, om, 1, n_prism=4)
+        mask = compute_turb_troubled_mask((k, om), 1, n_prism=4)
         np.testing.assert_array_equal(np.flatnonzero(mask), np.array([1, 6]))
 
 

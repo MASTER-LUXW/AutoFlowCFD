@@ -114,21 +114,21 @@ class _APIPostMixin:
             logger.info(f"High-order VTK exported: {out_path}")
             return
 
-        U_cell_avg = self.solver.state.U.mean(axis=1)  # (n_cells, n_vars)
+        from autoflowcfd.core.turbulence.output import turbulence_cell_means
+        from autoflowcfd.fr.native_padding import order_from_n_sps, reduce_per_cell_over_real_sps
+
+        # 单元平均只统计真实自由度（原生基的零填充槽位冻结在初值，见 `fr/native_padding.py`），
+        # 与 checkpoint 写出的守恒解单元平均同一个归约
+        U = self.solver.state.U
+        order = order_from_n_sps(U.shape[1])
+        n_prism = self.solver.mesh.n_prism_cells
+        U_cell_avg = reduce_per_cell_over_real_sps(U, n_prism, order, 'mean')  # (n_cells, n_vars)
         solution = SolutionVector(
             data=U_cell_avg, n_cells=U_cell_avg.shape[0], n_variables=U_cell_avg.shape[1],
         )
-
-        # 湍流涡粘度（用于精确的 nut 导出），有则给，没有就让 VTKExporter
-        # 自己退化成简化估计（它自身文档已说明这个 fallback）。
-        mu_t = None
-        get_mu_t = getattr(self.solver, '_get_turbulent_viscosity_field', None)
-        if callable(get_mu_t):
-            mu_t_field = get_mu_t()
-            if mu_t_field is not None:
-                mu_t = mu_t_field.mean(axis=1)
-
-        exporter = VTKExporter(self.volume_mesh, solution, mu_t=mu_t)
+        exporter = VTKExporter(self.volume_mesh, solution,
+                               turbulence=turbulence_cell_means(getattr(self.solver, 'turb_model', None),
+                                                                n_prism, order))
 
         # 根据扩展名选择格式
         fmt = 'xml' if filename.endswith('.vtu') else 'legacy'

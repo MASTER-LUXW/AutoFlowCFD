@@ -407,5 +407,5 @@ def status(backend: bool) -> None:
         logger.info("Supported features:")
         logger.info("  - Orders: P1, P2, P3")
         logger.info("  - Time methods: RK3, IMEX, Dual-Time")
-        logger.info("  - Turbulence models: SST, DDES, WMLES, LES")
+        logger.info("  - Turbulence models: SST, SA-neg, DDES, IDDES, WMLES, LES")
         logger.info("  - Order continuation: P0 → P2/P3 smooth transition")

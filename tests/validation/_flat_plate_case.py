@@ -21,9 +21,10 @@
     展向两面 SYMMETRY，nz = 2（(x,z) 三角剖分对 z 中面精确镜像对称，见 `_channel_mesh.py`）
 
 网格：张量积坐标线（`_channel_mesh.build_prism_mesh_from_lines`），流向在前缘两侧几何加密，
-壁面法向几何拉伸，棱柱沿壁面法向挤出（与真实边界层网格同一拓扑）。壁面距离用解析式
-（平板上为 y，引入段为到前缘的距离），经生产入口 `apply_wall_distance_source` 施加
-（omega 上界随之按最小壁距给定，换阶时按同一来源重查）。
+壁面法向几何拉伸，棱柱沿壁面法向挤出（与真实边界层网格同一拓扑）。壁面距离用生产来源
+（`core/utils/wall_distance`：平板矩形的两个三角形上的精确最近距离，平板上即 y、引入段即到
+前缘的距离），经生产入口 `apply_wall_distance_source` 施加（omega 上界随之按最小壁距给定，
+换阶时按同一来源重查）。
 
 边界类型按边界面中心逐面分派（平板与它前方的对称面在同一个平面上，按单元记录的网格
 分组在角点单元上有歧义）。Order Continuation 换阶时按 `bc_overrides` 重建幽灵态提供者，
@@ -79,19 +80,12 @@ def plate_lines(nx_up: int, nx_plate: int, ny: int, dx_le: float, dy_wall: float
     return x_lines, y_lines
 
 
-def analytic_wall_distance(xyz: np.ndarray) -> np.ndarray:
-    """平板上为 y，引入段（x < 0）为到前缘 (0, 0) 的距离。"""
-    x, y = xyz[..., 0], xyz[..., 1]
-    return np.ascontiguousarray(np.where(x >= 0.0, y, np.hypot(x, y)))
+def plate_wall_source(lz: float):
+    """平板 `[0, L] x {0} x [0, lz]` 的生产壁距来源。"""
+    from autoflowcfd.core.utils.wall_distance import WallDistanceSource, triangles_from_faces
 
-
-class AnalyticWallDistance:
-    """解析壁距来源（`analytic_wall_distance`），与生产来源同样的 `kind` / `query` 接口。"""
-
-    kind = "analytic"
-
-    def query(self, points):
-        return analytic_wall_distance(np.asarray(points))
+    corners = np.array([[0.0, 0.0, 0.0], [L_PLATE, 0.0, 0.0], [L_PLATE, 0.0, lz], [0.0, 0.0, lz]])
+    return WallDistanceSource(triangles_from_faces(corners, np.array([[0, 1, 2], [0, 2, 3]])))
 
 
 def build_flat_plate_solver(order: int, *, nx_up: int = 8, nx_plate: int = 24, ny: int = 24,
@@ -106,6 +100,7 @@ def build_flat_plate_solver(order: int, *, nx_up: int = 8, nx_plate: int = 24, n
     """
     from autoflowcfd.core.fr_solver import FRSolver
     from autoflowcfd.core.fr_solver.turbulence.wall_distance import apply_wall_distance_source
+    from autoflowcfd.core.turbulence.registry import n_state_vars
     from autoflowcfd.core.time_integration import TimeIntegrationScheme
     from tests.validation._channel_mesh import build_ghost_provider_by_classifier, build_prism_mesh_from_lines
 
@@ -138,7 +133,7 @@ def build_flat_plate_solver(order: int, *, nx_up: int = 8, nx_plate: int = 24, n
     # 网格自带的分组只是占位（构造需要），真正的边界类型由逐面分类的提供者给出
     placeholder = {name: {"type": "SYMMETRY"} for name in
                    ("x_min", "x_max", "wall_bottom", "wall_top", "z_min", "z_max")}
-    solver = FRSolver(mesh=mesh, order=order, turb_model_name=turb_model, n_vars=5 if turb_model == "NONE" else 7,
+    solver = FRSolver(mesh=mesh, order=order, turb_model_name=turb_model, n_vars=n_state_vars(turb_model),
                       time_scheme=time_scheme if time_scheme is not None else TimeIntegrationScheme.NEWTON_KRYLOV,
                       rho_inf=RHO_INF, vel_inf=U_INF,
                       p_inf=P_INF, mu_molecular=MU, bc_overrides=placeholder,
@@ -147,7 +142,7 @@ def build_flat_plate_solver(order: int, *, nx_up: int = 8, nx_plate: int = 24, n
     provider = build_ghost_provider_by_classifier(mesh, classify, bc)
     solver.boundary_ghost_provider = provider
     solver._build_boundary_ghost_provider = lambda _bc_overrides: provider
-    apply_wall_distance_source(solver, AnalyticWallDistance())
+    apply_wall_distance_source(solver, plate_wall_source(lz))
     solver._reference_area = L_PLATE * lz
     meta = dict(order=order, n_cells=int(mesh.n_cells), nx_up=nx_up, nx_plate=nx_plate, ny=ny,
                 dx_le=dx_le, dy_wall=dy_wall, lz=lz, y_lines=y_lines, x_lines=x_lines)

@@ -116,7 +116,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         无 CuPy），已用 numpy 替身对照 CPU 版逐位数值核对过所有新增
         公式，但真正的端到端 GPU 冒烟测试需要用户在有 GPU 的环境上补做。
         """
-        # 壁面距离来源（core/utils/wall_distance_source.py）：与单机 CPU 同一个，
+        # 壁面距离来源（core/utils/wall_distance）：与单机 CPU 同一个，
         # CLI 由体网格 WALL 边界面构造后传入；湍流模型需要壁距时必须提供
         self._wall_distance_source = wall_distance_source
         if not gpu_available:

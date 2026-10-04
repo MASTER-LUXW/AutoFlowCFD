@@ -18,7 +18,9 @@
 import numpy as np
 import pytest
 
+from autoflowcfd.core.fr_solver.turbulence import apply_wall_distance_source
 from tests.validation._channel_mesh import (
+    channel_wall_source,
     build_channel_mesh_prism,
     build_face_exact_ghost_provider,
 )
@@ -48,8 +50,7 @@ def _channel_solver(scheme, order=1):
     Ua[..., 4] = P / (GAMMA - 1.0) + 0.5 * RHO * U ** 2
     solver.state.U = np.ascontiguousarray(Ua)
     solver.state._update_primitives()
-    y = np.asarray(mesh.sps_coords)[..., 1]
-    solver.wall_distance = np.ascontiguousarray(np.maximum(np.minimum(y, H - y), 1e-12))
+    apply_wall_distance_source(solver, channel_wall_source(LX, H, LZ))
     return solver
 
 

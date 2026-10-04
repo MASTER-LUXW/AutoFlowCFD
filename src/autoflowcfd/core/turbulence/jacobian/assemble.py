@@ -32,7 +32,9 @@ class TurbulenceLinearization:
     """冻结的平均流输入与边界数据（与湍流残差同一份，见模块文档）。
 
     壁面 Dirichlet 条件逐个 Newton 未知量给出（`dirichlet_faces[v]` 为面掩码，
-    `dirichlet_values[v]` 为未知量空间的逐通量点目标值，None 表示目标 0）。
+    `dirichlet_values[v]` 为未知量空间的逐通量点目标值，None 表示目标 0）。`strong_rows`
+    是解点上的强 Dirichlet 行（`(n_cells, n_sps, nv)` 布尔，残差在那里恒为零，块的对应行
+    置零；SA-neg 的壁面解点，见 `sa/model.py` 模块文档），None 表示没有。
     """
     mesh: object
     ops: object
@@ -47,6 +49,7 @@ class TurbulenceLinearization:
     dirichlet_values: tuple       # 逐未知量 (n_faces, n_fp) 目标值或 None（目标 0）
     open_face: np.ndarray         # (n_faces,) 开放边界（来流条件）
     pointwise: object = None      # 逐点 (S, Gamma) 求值器；None -> cpu_turbulence_pointwise（SST）
+    strong_rows: np.ndarray = None  # (n_cells, n_sps, nv) 强 Dirichlet 行
 
 
 def assemble_turbulence_blocks(ctx: TurbulenceLinearization, u_flat, want_coupling: bool = False):
@@ -81,7 +84,28 @@ def assemble_turbulence_blocks(ctx: TurbulenceLinearization, u_flat, want_coupli
             target.append(t)
         diff[frame] = (np.ascontiguousarray(is_bnd), np.ascontiguousarray(np.stack(is_dir)),
                        np.ascontiguousarray(np.stack(target)))
-    return assemble_scalar_blocks(
+    out = assemble_scalar_blocks(
         mesh, ctx.ops, flat, np.ascontiguousarray(u), gam, dS, dG, rho, ctx.Q[:, :, 1:4],
         ctx.conv_geom.rho_u_tilde, m_o, m_n,
         (ghost_o, np.ascontiguousarray(a_o), ghost_n, np.ascontiguousarray(a_n)), diff, want_coupling)
+    if ctx.strong_rows is not None:
+        zero_strong_rows(out, np.asarray(ctx.strong_rows, dtype=bool), int(mesh.n_prism_cells), nv)
+    return out
+
+
+def zero_strong_rows(out, strong, n_prism: int, nv: int) -> None:
+    """把强 Dirichlet 行（`strong (n_cells, n_sps, nv)`）在单元块与面耦合块里置零（原地）。
+    块的行下标是 `s*nv + v`（`s` 为真实解点序号），与 `CellBlockJacobian` 布局一致。"""
+    blocks_prism, blocks_tet = out[0], out[1]
+    for blocks, cells in ((blocks_prism, np.arange(n_prism)),
+                          (blocks_tet, np.arange(n_prism, n_prism + blocks_tet.shape[0]))):
+        if blocks.shape[0] == 0:
+            continue
+        n_rows = blocks.shape[1]
+        rows = strong[cells, : n_rows // nv, :].reshape(cells.size, n_rows)
+        blocks[rows] = 0.0
+    if len(out) > 2 and out[2] is not None:
+        for g in out[2].groups:
+            n_rows = g.blocks.shape[1]
+            rows = strong[g.rows, : n_rows // nv, :].reshape(g.rows.size, n_rows)
+            g.blocks[rows] = 0.0

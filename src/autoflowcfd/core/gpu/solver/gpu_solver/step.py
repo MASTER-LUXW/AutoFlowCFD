@@ -21,7 +21,7 @@ from autoflowcfd.core.time_integration.implicit.mean_flow_step import (
     step_mean_flow_newton,
 )
 from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
-from autoflowcfd.core.fr_solver.turbulence.implicit import IMPLICIT_TURBULENCE_MODELS
+from autoflowcfd.core.turbulence.registry import has_transport_equations
 from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import GpuCoupledBackend
 from autoflowcfd.core.time_integration.implicit.coupled_step import step_coupled_newton
 
@@ -61,7 +61,7 @@ class _GPUSolverStepMixin:
         # 平均流步长（按 |un|+c_precond 取），dt_physical 是按物理波速那
         # 一份；两者的分工与 CPU 侧 step.py 完全一致。
         coupled_nk = (scheme == TimeIntegrationScheme.NEWTON_KRYLOV and self.turb_model_gpu is not None
-                      and self.turb_model_name.upper() in IMPLICIT_TURBULENCE_MODELS)
+                      and has_transport_equations(self.turb_model_name))
         if scheme == TimeIntegrationScheme.NEWTON_KRYLOV:
             # 隐式稳态：与 CPU step.py 同一时序。带 k-omega 时湍流与平均流在下面紧耦合
             # 求解（time_integration/implicit/coupled_step.py），这里只取当前状态的涡粘

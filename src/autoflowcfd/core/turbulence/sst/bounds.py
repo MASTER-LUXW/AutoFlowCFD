@@ -39,9 +39,6 @@ nu`，工程雷诺数下是 5e7 ~ 2e8。湍流平板（`tests/validation/_flat_p
 
 import numpy as np
 
-# 梯度模长裁剪的唯一定义在 `turbulence/limits.py`（各湍流模型共用），这里导入供既有调用方使用
-from autoflowcfd.core.turbulence.limits import MAX_GRADIENT_MAGNITUDE, clip_gradient_magnitude  # noqa: F401
-
 #: 防止 0/负值进入 sqrt 与除法的绝对下限。
 ABS_FLOOR = 1e-12
 
@@ -64,6 +61,40 @@ OMEGA_WALL_VISCOUS_COEFF = 6.0
 
 #: Menter 放大式 `omega_wall = OMEGA_WALL_AMPLIFICATION * omega_vis`（壁面目标值默认档）。
 OMEGA_WALL_AMPLIFICATION = 10.0
+
+#: 壁面目标值长度尺度 d1 的下限（防除零；结果另由 `omega_max` 夹住，见 `transport/omega_wall.py`）。
+OMEGA_WALL_D1_FLOOR = 1e-8
+
+
+def omega_wall_length_scale(wd_owner, row_is_prism, xp):
+    """壁面目标值公式里的 `d1`：壁面 owner 单元的逐行壁距 `wd_owner (n_rows, n_sps)` -> `(n_rows,)`。
+
+    口径由 `AFCFD_OMEGA_WALL_D1` 决定（`min` 默认 / `mean`，两者的含义与为什么默认仍是 `min`
+    见 `transport/omega_wall.py::_compute_omega_wall_target`）。两条约束（2026-10-04，CPU 与
+    GPU 此前各写一份、都没有）：
+
+    * 只统计真实解点：原生四面体的零填充槽位坐标没有意义，查出的壁距是任意值，`min` 会
+      取到它；
+    * `min` 排除壁面上的解点（`d == 0`，原生四面体的解点含顶点、棱点与面点）：Wilcox 的 d1
+      是"第一个离壁点"的距离，取到 0 会让目标值落到 `OMEGA_WALL_D1_FLOOR`、直接顶到上界。
+
+    `row_is_prism` 为 None 时整行都按真实解点处理（只有不带棱柱数的测试替身走这里）。
+    """
+    import os
+
+    from autoflowcfd.fr.native_padding import order_from_n_sps, reduce_rows_over_real_sps
+
+    mode = os.environ.get("AFCFD_OMEGA_WALL_D1", "min").lower()
+    if mode not in ("min", "mean"):
+        raise ValueError(
+            f"AFCFD_OMEGA_WALL_D1={mode!r} 不是合法取值（min | mean）。'min' 是既有行为（单元内离壁"
+            f"解点壁距最小值），'mean' 是与 Menter 标定口径一致的形心壁距。")
+    rows = xp.where(wd_owner > 0.0, wd_owner, xp.inf) if mode == "min" else wd_owner
+    if row_is_prism is None:
+        d1 = getattr(xp, mode)(rows, axis=1)
+    else:
+        d1 = reduce_rows_over_real_sps(rows, row_is_prism, order_from_n_sps(rows.shape[1]), mode, xp=xp)
+    return xp.maximum(d1, OMEGA_WALL_D1_FLOOR)
 
 
 

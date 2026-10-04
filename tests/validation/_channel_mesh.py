@@ -16,6 +16,18 @@ from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
 from autoflowcfd.boundary.fr_ghost_state import BoundaryGhostStateProvider
 
 
+def channel_wall_source(Lx, H, Lz):
+    """两面壁 `y = 0`、`y = H`（`[0, Lx] x [0, Lz]`）的生产壁距来源（`core/utils/wall_distance`）：
+    壁面上的解点精确为 0（原生四面体的顶点/棱点/面点），其余为到最近壁面的精确距离。"""
+    from autoflowcfd.core.utils.wall_distance import WallDistanceSource, triangles_from_faces
+
+    corners = np.array([[0.0, y, 0.0] for y in (0.0, H)] + [[Lx, y, 0.0] for y in (0.0, H)]
+                       + [[Lx, y, Lz] for y in (0.0, H)] + [[0.0, y, Lz] for y in (0.0, H)])
+    # 角点编号：y=0 面 0,2,4,6；y=H 面 1,3,5,7
+    faces = np.array([[0, 2, 4], [0, 4, 6], [1, 3, 5], [1, 5, 7]])
+    return WallDistanceSource(triangles_from_faces(corners, faces))
+
+
 def build_face_exact_ghost_provider(mesh, Lx, H, Lz, bc_by_plane, tol_scale=1e-6):
     """绕开 mesh.boundaries.groups（按 owner 单元索引分组）在角/棱单元上的
     固有歧义——真实发现：owner-cell 分组机制下，同一个单元只要同时拥有

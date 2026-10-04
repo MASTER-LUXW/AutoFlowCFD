@@ -288,8 +288,8 @@ class TestGpuTurbFilterGate:
             compute_turb_troubled_mask_gpu,
         )
         order, n_prism, n_cells, k, om = fields
-        cpu = compute_turb_troubled_mask(k, om, order, n_prism=n_prism)
-        gpu = compute_turb_troubled_mask_gpu(k, om, n_prism, order)
+        cpu = compute_turb_troubled_mask((k, om), order, n_prism=n_prism)
+        gpu = compute_turb_troubled_mask_gpu((k, om), n_prism, order)
         np.testing.assert_array_equal(np.asarray(gpu), cpu)
         # 判据必须非平凡，否则这个测试什么都没测
         assert 0 < cpu.sum() < n_cells
@@ -383,7 +383,7 @@ class TestGpuTurbFilterGate:
         frac = gts.GPUTurbulenceSST.filter_fields_gpu(model, n_prism, ops, order)
 
         w = np.log(om)
-        troubled = compute_turb_troubled_mask(k, w, order, n_prism=n_prism)
+        troubled = compute_turb_troubled_mask((k, w), order, n_prism=n_prism)
         assert 0 < troubled.sum() < n_cells
         assert frac == pytest.approx(troubled.mean())
         np.testing.assert_allclose(

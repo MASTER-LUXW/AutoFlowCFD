@@ -62,25 +62,15 @@ def resolve_physical_constants(ctx, values: Dict[str, Any], config_obj) -> Dict[
 # `order`/`max_iter` 用与 SteadyConfig/TransientConfig 完全相同的字段名，
 # resolve_physical_constants 的通用 getattr 匹配对它们同样适用——可以直接
 # 把这两个名字加进调用方传的 values 字典里复用同一个函数，不需要专门的
-# 解析器。`turbulence_model` 例外：CLI/求解器用的字符串词汇
-# （none/sst/ddes/iddes/wmles/les）与 SteadyConfig.turbulence 字段的
-# TurbulenceModel 枚举（none/sst_kw/ddes/iddes/wmles/les）命名不完全
-# 一致（仅 sst_kw vs sst 一处），必须显式映射，不能靠同名 getattr。
-_TURBULENCE_ENUM_TO_CLI_STR = {
-    "none": "none",
-    "sst_kw": "sst",
-    "ddes": "ddes",
-    "iddes": "iddes",
-    "wmles": "wmles",
-    "les": "les",
-}
+# 解析器。`turbulence_model` 例外：CLI/求解器用的字符串词汇与 SteadyConfig.turbulence
+# 字段的 TurbulenceModel 枚举命名不完全一致（sst_kw vs sst），映射的唯一定义在
+# config/turbulence_names.py::turbulence_solver_name。
 
 
 def resolve_turbulence_model(ctx, turbulence_model: str, config_obj) -> str:
     """按"显式 --turbulence-model > --config YAML 的 turbulence 字段 >
     click 声明的默认值"解析湍流模型字符串（配套 resolve_physical_constants，
-    但需要额外的枚举值->CLI字符串映射，见模块内 _TURBULENCE_ENUM_TO_CLI_STR
-    文档）。
+    但需要额外的枚举值->CLI字符串映射，见 config/turbulence_names.py::turbulence_solver_name）。
 
     Args:
         ctx: click.Context
@@ -98,11 +88,6 @@ def resolve_turbulence_model(ctx, turbulence_model: str, config_obj) -> str:
     if ctx.get_parameter_source("turbulence_model") != ParameterSource.DEFAULT:
         return turbulence_model
 
-    config_value = config_obj.turbulence.value
-    if config_value not in _TURBULENCE_ENUM_TO_CLI_STR:
-        raise ValueError(
-            f"--config YAML 里的 turbulence: {config_value} 在配置层可以表示，"
-            f"但求解器从未真正实现——只支持 "
-            f"{sorted(_TURBULENCE_ENUM_TO_CLI_STR.values())}。"
-        )
-    return _TURBULENCE_ENUM_TO_CLI_STR[config_value]
+    from autoflowcfd.config.turbulence_names import turbulence_solver_name
+
+    return turbulence_solver_name(config_obj.turbulence)

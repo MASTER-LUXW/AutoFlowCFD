@@ -84,7 +84,7 @@ def cell_fields(exporter, fields: List[str]) -> Dict[str, np.ndarray]:
     与旧的纯节点写入器相同的兜底常数。
 
     Returns:
-        场名（'velocity'、'pressure'、'k'、'omega'、'nut'）到其原始
+        场名（'velocity'、'pressure'、湍流键、'q_criterion'）到其原始
         逐单元数组的字典——正是 CELL_DATA 写入的内容，也是
         POINT_DATA 插值的数据源。
     """
@@ -107,38 +107,18 @@ def cell_fields(exporter, fields: List[str]) -> Dict[str, np.ndarray]:
             logger.warning("Solution data not available. Using uniform pressure.")
             out['pressure'] = np.full(n_cells, 101325.0)
 
-    need_turb = 'k' in fields or 'omega' in fields or 'nut' in fields
-    if need_turb:
-        k = omega = np.array([])
-        if has_data:
-            k, omega = exporter.solution.get_turbulence()
-            if len(k) == 0:
-                logger.warning(
-                    "Solution has no turbulence columns (need >=7 variables); "
-                    "writing zero for k/omega/nut"
-                )
-        k_out = k if len(k) == n_cells else np.full(n_cells, 0.0)
-        omega_out = omega if len(omega) == n_cells else np.full(n_cells, 0.0)
-
-        if 'k' in fields:
-            out['k'] = k_out
-        if 'omega' in fields:
-            out['omega'] = omega_out
-        if 'nut' in fields:
-            if exporter.mu_t is not None and len(exporter.mu_t) == n_cells and has_data:
-                rho = np.maximum(exporter.solution.get_density(), 1e-10)
-                out['nut'] = exporter.mu_t / rho
-            elif len(k_out) > 0 and np.any(omega_out > 0):
-                logger.warning(
-                    "Exact solver mu_t not available (checkpoint predates "
-                    "extra_fields support, or turbulence disabled); "
-                    "'nut' is the simplified nu_t = k/omega estimate, "
-                    "not the actual SST-blended, a1-limited eddy "
-                    "viscosity the solver used."
-                )
-                out['nut'] = k_out / np.maximum(omega_out, 1e-10)
-            else:
-                out['nut'] = np.zeros(n_cells)
+    # 湍流量：取自湍流模型的输运场与涡粘的单元平均（`core/turbulence/output.py`），不再从守恒解
+    # 的第 6、7 列推算（那是 SST 状态数组里从未更新的历史槽位）
+    for key in ('k', 'omega', 'nu_tilde', 'nut'):
+        if key not in fields:
+            continue
+        value = exporter.turbulence.get(key)
+        if value is not None and len(value) == n_cells:
+            out[key] = value
+        else:
+            logger.warning(f"Turbulence field '{key}' not available (laminar case, model without it, or "
+                           f"checkpoint predates turb_cell_* fields); writing zeros")
+            out[key] = np.zeros(n_cells)
 
     # Q-Criterion 涡识别准则 (P-02)
     if 'q_criterion' in fields:

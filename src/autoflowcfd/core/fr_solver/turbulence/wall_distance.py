@@ -1,8 +1,8 @@
 """AutoFlowCFD V2.0 - 单机求解器的壁面距离场（施加与跨阶数重算）。
 
 壁距是**纯几何量**，不是解多项式场。它只由一个与阶数、分区、后端都无关的
-来源决定（`core/utils/wall_distance_source.py::WallDistanceSource`：壁面节点
-坐标的 KD-Tree，或节点级 Eikonal 距离），每个阶数都在当时的 SP 坐标上重新
+来源决定（`core/utils/wall_distance::WallDistanceSource`：到壁面三角形的精确最近
+距离），每个阶数都在当时的 SP 坐标上重新
 查询一次——2026-09-05 的一个真实缺陷正是把它当解场在阶数切换时插值/广播
 （见 `recompute_wall_distance_for_current_order`）。
 
@@ -16,11 +16,7 @@
 import numpy as np
 from loguru import logger
 
-from autoflowcfd.core.turbulence.sst.bounds import apply_omega_upper_bound
-from autoflowcfd.core.utils.wall_distance_source import WallDistanceSource
-
-#: 需要壁面距离场的湍流模型
-WALL_DISTANCE_MODELS = ("SST", "DDES", "IDDES", "WMLES", "LES")
+from autoflowcfd.core.utils.wall_distance import WallDistanceSource
 
 
 def apply_wall_distance_source(solver, source: WallDistanceSource) -> None:
@@ -33,38 +29,20 @@ def apply_wall_distance_source(solver, source: WallDistanceSource) -> None:
     n_cells, n_sps = solver.state.U.shape[:2]
     solver.wall_distance = source.query(np.asarray(sps).reshape(n_cells, n_sps, 3))
     solver._wall_distance_source = source
-    apply_wall_distance_omega_bound(solver)
+    apply_wall_distance_to_model(solver)
     logger.info(
-        f"Wall distance ({source.kind}) mapped to SPs for P{getattr(solver, 'current_order', '?')}: "
+        f"Wall distance ({source.n_wall_faces} wall triangles, exact) mapped to SPs for P{getattr(solver, 'current_order', '?')}: "
         f"shape={solver.wall_distance.shape}, min={solver.wall_distance.min():.6e}, "
         f"max={solver.wall_distance.max():.6e}")
 
 
-def apply_wall_distance_omega_bound(solver) -> None:
-    """按当前壁距设定 SST 的 omega 上界（`turbulence/sst/bounds.py` 模块文档"omega 上界随
-    最近壁面解点给定"）；没有 SST 类模型时不做事。壁距每次设定/重算后调用。"""
+def apply_wall_distance_to_model(solver) -> None:
+    """把当前壁距交给输运湍流模型（`TransportedTurbulence.apply_wall_distance`：SST 设 omega
+    上界、SA-neg 识别壁面解点）；没有输运模型或没有壁距时不做事。壁距每次设定/重算后调用。"""
     model = getattr(solver, "turb_model", None)
-    if model is None or not hasattr(model, "omega_max") or solver.wall_distance is None:
+    if not hasattr(model, "apply_wall_distance") or solver.wall_distance is None:
         return
-    apply_omega_upper_bound(model, solver.wall_distance, solver.mu_molecular / solver.freestream["rho_inf"])
-
-
-def compute_wall_distance_field(solver, mesh_nodes: np.ndarray, wall_indices: np.ndarray,
-                                connectivity=None, use_eikonal: bool = False) -> None:
-    """由网格节点与壁面节点索引构造来源并施加（`FRSolver.compute_wall_distance_field`）。
-
-    Args:
-        mesh_nodes: 全部网格节点坐标 `(n_nodes, 3)`
-        wall_indices: WALL 边界面上的节点索引
-        connectivity: 节点邻接表（`build_node_adjacency`），`use_eikonal=True` 时必需
-        use_eikonal: True 用 Eikonal（沿网格拓扑传播，凹形/通道几何里比直线距离
-            更符合"沿流场路径"的距离），False 用欧氏 KD-Tree
-    """
-    if solver.turb_model_name not in WALL_DISTANCE_MODELS:
-        logger.warning(f"Turbulence model {solver.turb_model_name} does not require wall distance")
-        return
-    apply_wall_distance_source(solver, WallDistanceSource.from_nodes(
-        mesh_nodes, wall_indices, connectivity=connectivity, use_eikonal=use_eikonal))
+    model.apply_wall_distance(solver.wall_distance, solver.mu_molecular / solver.freestream["rho_inf"])
 
 
 def recompute_wall_distance_for_current_order(solver) -> bool:
@@ -84,11 +62,18 @@ def recompute_wall_distance_for_current_order(solver) -> bool:
     那时才反映新阶数）。
 
     Returns:
-        True：已按来源重新查询；False：求解器从未施加过壁距（例如层流），
-        调用方不需要壁距。
+        True：已按来源重新查询；False：求解器没有壁距（层流等不需要壁距的模型）。
+
+    Raises:
+        RuntimeError: 求解器有壁距场但没有来源（壁距是直接赋值的）——换阶后无法得到新解点上的
+            正确值，不保留旧阶数的值或插值/平均结果。
     """
-    source = getattr(solver, "_wall_distance_source", None)
-    if source is None or getattr(solver, "wall_distance", None) is None:
+    if getattr(solver, "wall_distance", None) is None:
         return False
+    source = getattr(solver, "_wall_distance_source", None)
+    if source is None:
+        raise RuntimeError(
+            "求解器的壁面距离场不是经 apply_wall_distance_source 施加的（没有来源），换阶后无法在新"
+            "解点上重新查询——壁距是纯几何量，不能沿用旧阶数的值或插值/平均。")
     apply_wall_distance_source(solver, source)
     return True

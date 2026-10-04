@@ -188,10 +188,10 @@ class _MultiGPUSteppingMixin:
         # 与 CPU 分布式同一时序）。显式更新用**物理**波速算出的那一份 dt。隐式稳态 +
         # k-omega 时湍流与平均流在下面紧耦合求解（time_integration/implicit/coupled_step.py，
         # 适配器见 gpu_distributed_implicit.py），这里只取当前状态的涡粘供残差监控。
-        from autoflowcfd.core.fr_solver.turbulence.implicit import IMPLICIT_TURBULENCE_MODELS
+        from autoflowcfd.core.turbulence.registry import has_transport_equations
 
         coupled_nk = (is_newton and self.turb_model_gpu is not None
-                      and str(self.turb_model_name).upper() in IMPLICIT_TURBULENCE_MODELS)
+                      and has_transport_equations(self.turb_model_name))
         if coupled_nk:
             from autoflowcfd.core.gpu.distributed.gpu_distributed_implicit import MultiGpuTurbulenceBackend
 

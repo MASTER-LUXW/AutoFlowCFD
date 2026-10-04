@@ -109,7 +109,7 @@ def export_vtk(
             logger.info(f"Exporting variables: {var_list}")
 
         # 校验变量名
-        valid_vars = {'velocity', 'pressure', 'k', 'omega', 'nut', 'q_criterion'}
+        valid_vars = {'velocity', 'pressure', 'k', 'omega', 'nu_tilde', 'nut', 'turbulence', 'q_criterion'}
         invalid_vars = set(var_list) - valid_vars
         if invalid_vars:
             raise ValueError(
@@ -117,17 +117,15 @@ def export_vtk(
                 f"Valid options: {valid_vars}"
             )
 
-        # 创建 VTK 导出器并导出。
-        # mu_t（求解器算出的精确涡粘），如果 checkpoint 里有的话——见
-        # CheckpointManager.save 的 extra_fields / VTKExporter 的 mu_t
-        # 参数。在这个字段加入之前写的 checkpoint 没有它，此时 'nut'
-        # 会退回一个标记为近似估计的值。
-        mu_t = metadata.get('fields', {}).get('mu_t')
+        # 创建 VTK 导出器并导出。湍流量取 checkpoint 里湍流模型输运场与涡粘的单元平均
+        # （`core/turbulence/output.py` 的 `turb_cell_*` 字段）。
+        from autoflowcfd.core.turbulence.output import turbulence_fields_from_checkpoint
+
         logger.info("Creating VTK exporter...")
         exporter = VTKExporter(
             grid_data=grid_data,
             solution=solution,
-            mu_t=mu_t,
+            turbulence=turbulence_fields_from_checkpoint(metadata.get('fields', {})),
         )
 
         # 根据扩展名确定输出格式

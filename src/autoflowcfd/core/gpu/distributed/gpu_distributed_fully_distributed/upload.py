@@ -30,8 +30,8 @@ def _upload_wall_geometry_compact(solver, package, cp, device_id):
     with cp.cuda.Device(device_id):
         solver.wall_distance_gpu = cp.asarray(wall_distance_compact)
     # omega 上界按全局最小壁距重定（构造与换阶重建都经这里，与 CPU 分布式同一函数）
-    from autoflowcfd.core.mpi.distributed_turbulence import apply_distributed_omega_bound
-    apply_distributed_omega_bound(getattr(solver, "turb_model_gpu", None), solver.wall_distance_gpu, solver)
+    from autoflowcfd.core.mpi.distributed_turbulence import apply_distributed_wall_distance
+    apply_distributed_wall_distance(getattr(solver, "turb_model_gpu", None), solver.wall_distance_gpu, solver)
 
     h_max_compact = package.get('iddes_h_max_compact')
     h_wn_compact = package.get('iddes_h_wn_compact')

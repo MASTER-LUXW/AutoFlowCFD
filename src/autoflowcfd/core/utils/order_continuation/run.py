@@ -202,18 +202,9 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
             # 否则梯度/残差计算会用错误维度的几何量崩溃。
             solver.mesh.set_order(target_p)
 
-            # 真实 bug 修复（2026-09-06，cube_demo 真实网格 P0->P1 升阶后
-            # k_mean 持续增长排查发现，见 fr_solver/turbulence.py::
-            # recompute_wall_distance_for_current_order 文档完整推导）：
-            # `interpolate_to_new_order`（上面 `solver._interpolate_to_new_
-            # order(target_p)` 调用，发生在 `set_order` 之前）对 wall_distance
-            # 做的是和 U/k_field 同一套 Lagrange 插值——但壁面距离不是解
-            # 多项式场，P0 单 SP 的常数基函数会把"单元里离墙最近的 SP"这个
-            # 空间分辨率信息广播抹平。`set_order(target_p)` 之后
-            # `solver.mesh.sps_coords` 才反映新阶数真实的 SP 坐标，这里
-            # 用缓存的纯几何量（WALL 节点坐标/Eikonal 节点距离场，与阶数
-            # 无关）重新做一次精确查询，覆盖掉那个被插值污染的近似值；没有
-            # 缓存时保留插值结果作为退化但形状正确的后备。
+            # 壁面距离是纯几何量（2026-09-06 真实缺陷：此前与 U/k 同一套插值，P0 单解点把
+            # 单元内近壁分辨率广播抹平）：`set_order(target_p)` 之后 `sps_coords` 才是新阶数
+            # 的解点，由与阶数无关的来源重新查询（见该函数文档）。
             from autoflowcfd.core.fr_solver.turbulence import recompute_wall_distance_for_current_order
             recompute_wall_distance_for_current_order(solver)
 

@@ -98,7 +98,7 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
             artificial_viscosity_enabled, artificial_viscosity_alpha: 问题单元人工
                 粘性（与单机 FRSolver 同名参数、同一实现）
         """
-        # 壁面距离来源（core/utils/wall_distance_source.py）：与单机 CPU 同一个，
+        # 壁面距离来源（core/utils/wall_distance）：与单机 CPU 同一个，
         # CLI 由体网格 WALL 边界面构造后传入；湍流模型需要壁距时必须提供
         self._wall_distance_source = wall_distance_source
         self.artificial_viscosity_enabled = bool(artificial_viscosity_enabled)

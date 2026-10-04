@@ -6,32 +6,31 @@
 import click
 
 
-def build_wall_distance_source(volume_data, use_eikonal=False):
+def build_wall_distance_source(volume_data):
     """CLI 各后端分支共用：由体网格构造壁面距离来源（单机、分布式、GPU 同一份）。
 
-    WALL 组边界面取壁面节点的判据与为什么这么取，见
-    `core/utils/wall_distance_source.py`。没有壁面时的 `ValueError` 转成
-    可读的命令行错误，不退化成估计值继续求解。
+    取 WALL 组边界面、按壁面三角形求精确最近距离，见 `core/utils/wall_distance`。没有壁面时的
+    `ValueError` 转成可读的命令行错误，不退化成估计值继续求解。
     """
-    from autoflowcfd.core.utils.wall_distance_source import WallDistanceSource
+    from autoflowcfd.core.utils.wall_distance import WallDistanceSource
 
     try:
-        return WallDistanceSource.from_volume_data(volume_data, use_eikonal=use_eikonal)
+        return WallDistanceSource.from_volume_data(volume_data)
     except ValueError as e:
         raise click.ClickException(str(e)) from e
 
 
-def wall_distance_source_if_needed(turbulence_model, volume_data, use_eikonal=False):
+def wall_distance_source_if_needed(turbulence_model, volume_data):
     """湍流模型需要壁距时构造来源，否则 None。CLI 的分布式 / GPU 分支用它把
     同一个来源交给求解器（单机分支经 `compute_wall_distance_for_solver`）。"""
-    from autoflowcfd.core.fr_solver.turbulence.wall_distance import WALL_DISTANCE_MODELS
+    from autoflowcfd.core.turbulence.registry import needs_wall_distance
 
-    if str(turbulence_model).upper() not in WALL_DISTANCE_MODELS:
+    if not needs_wall_distance(turbulence_model):
         return None
-    return build_wall_distance_source(volume_data, use_eikonal=use_eikonal)
+    return build_wall_distance_source(volume_data)
 
 
-def compute_wall_distance_for_solver(solver, volume_data, use_eikonal=False):
+def compute_wall_distance_for_solver(solver, volume_data):
     """
     为求解器计算壁面距离场。
 
@@ -43,10 +42,12 @@ def compute_wall_distance_for_solver(solver, volume_data, use_eikonal=False):
             计算、静默退化成"简化估计" - 现在 load_mesh_for_solver 两条路径
             都已经把 volume_data 解析好，直接传进来即可，同时对 .pkl/.nas
             两种输入路径都正确）
-        use_eikonal: 是否使用 Eikonal 方程求解
     """
+    from autoflowcfd.core.turbulence.registry import needs_wall_distance
+
     turb_model = getattr(solver, 'turb_model_name', '').lower()
-    if turb_model not in ['sst', 'ddes', 'iddes', 'wmles', 'les']:
+    # 判据取唯一的模型分类（此前这里写死 sst/ddes/iddes/wmles/les 一份列表，新模型漏掉即静默跳过壁距）
+    if not needs_wall_distance(turb_model):
         print(f"   ℹ️  Turbulence model '{turb_model}' does not require wall distance")
         return
 
@@ -56,17 +57,15 @@ def compute_wall_distance_for_solver(solver, volume_data, use_eikonal=False):
             f"无法为湍流模型 '{turb_model}' 计算壁面距离场。")
     try:
         print("\n🔍 Computing wall distance field...")
-        source = build_wall_distance_source(volume_data, use_eikonal=use_eikonal)
+        source = build_wall_distance_source(volume_data)
         from autoflowcfd.core.fr_solver.turbulence import apply_wall_distance_source
 
         apply_wall_distance_source(solver, source)
-        print(f"   ✅ Wall distance field computed ({source.kind}, "
-              f"{source.n_wall_nodes} wall nodes)\n")
+        print(f"   ✅ Wall distance field computed ({source.n_wall_faces} wall triangles)\n")
     except click.ClickException:
         raise
     except Exception as e:
-        # 此前这里是裸 except Exception：任何失败（含 Eikonal 求解器内部
-        # bug）都打印一行 warning 后静默降级为"simplified estimate"继续
+        # 此前这里是裸 except Exception：任何失败都打印一行 warning 后静默降级为"simplified estimate"继续
         # 求解——但 solver.wall_distance 实际仍是 None，SST/DDES 下游会在
         # fr_solver_turbulence.py 里因 wall_distance is None 抛
         # RuntimeError（等于这里的"降级"从未真正发生），LES/WMLES 下游则

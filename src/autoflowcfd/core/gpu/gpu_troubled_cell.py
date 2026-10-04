@@ -164,9 +164,9 @@ def compute_troubled_cell_mask_gpu(field, n_prism: int, order: int,
     return mask
 
 
-def compute_turb_troubled_mask_gpu(k_field, omega_field, n_prism: int,
-                                   order: int):
-    """k/omega 门控掩码：对两个场**分别**求指标后取**并集**。
+def compute_turb_troubled_mask_gpu(fields, n_prism: int, order: int):
+    """湍流场门控掩码：对每个被输运的湍流未知量（SST 为 k 与 `ln omega`、SA-neg 为 `nu_tilde`）
+    **分别**求指标后取**并集**（与 CPU 版同一个接口）。
 
     取并集而不是交集、以及不复用平均流掩码的理由，完整记录在 CPU 版
     `fr_solver/filter.py::compute_turb_troubled_mask` 的文档里（简述：
@@ -175,6 +175,8 @@ def compute_turb_troubled_mask_gpu(k_field, omega_field, n_prism: int,
     尖峰——实测 off/sensor 两档平均流轨迹几乎逐位相同、om_max 却差一个
     量级，正是这件事的直接证据）。
     """
-    mk = compute_troubled_cell_mask_gpu(k_field, n_prism, order)
-    mo = compute_troubled_cell_mask_gpu(omega_field, n_prism, order)
-    return mk | mo
+    mask = None
+    for field in fields:
+        m = compute_troubled_cell_mask_gpu(field, n_prism, order)
+        mask = m if mask is None else mask | m
+    return mask

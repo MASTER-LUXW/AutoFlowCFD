@@ -7,9 +7,6 @@
 # 下面 re-export 全部公开名与测试在用的私有名，所以全仓库
 # `from autoflowcfd.api import ...` 一个字都不用改。
 
-from .helpers import (  # noqa: F401
-    _turbulence_model_str,
-)
 from .solve import (  # noqa: F401
     _APISolveMixin,
 )

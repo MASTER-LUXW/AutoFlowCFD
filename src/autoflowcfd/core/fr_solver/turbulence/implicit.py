@@ -72,11 +72,6 @@ from .source import (
     prepare_turbulence_inputs,
 )
 
-#: 走隐式 k-omega 更新的湍流模型（带 k/omega 输运方程的那几个）。LES/WMLES
-#: 的亚格子粘性是代数的，没有输运方程，继续走原有更新。
-IMPLICIT_TURBULENCE_MODELS = ("SST", "DDES", "IDDES")
-
-
 
 def _current_order(solver) -> int:
     order = getattr(solver, "current_order", None)

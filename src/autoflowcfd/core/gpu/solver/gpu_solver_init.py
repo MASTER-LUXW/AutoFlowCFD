@@ -178,7 +178,7 @@ class _GPUSolverInitMixin:
     def _init_wall_distance_gpu(self):
         """在当前阶数的解点上查询壁面距离并上传 GPU。
 
-        来源与单机 CPU 同一个（`core/utils/wall_distance_source.py`，CLI 由体网格
+        来源与单机 CPU 同一个（`core/utils/wall_distance`，CLI 由体网格
         WALL 边界面构造后以构造参数 `wall_distance_source` 传入）；换阶时
         `gpu_solver_order_continuation` 再调一次，用同一个来源重查。
 
@@ -198,8 +198,8 @@ class _GPUSolverInitMixin:
             raise RuntimeError("网格没有 sps_coords，无法在解点上查询壁面距离")
         dist = source.query(np.asarray(sps).reshape(self.mesh.n_cells, self.mesh.n_sps_per_cell, 3))
         self.wall_distance_gpu = cp.asarray(dist)
-        logger.info(f"Wall distance ({source.kind}) computed: min={dist.min():.6e}, max={dist.max():.6e}")
-        if getattr(self, "turb_model_gpu", None) is not None:
-            # omega 上界随最近壁面解点给定（`turbulence/sst/bounds.py` 模块文档）
-            from autoflowcfd.core.turbulence.sst.bounds import apply_omega_upper_bound
-            apply_omega_upper_bound(self.turb_model_gpu, dist, self.mu_molecular / self.freestream["rho_inf"])
+        logger.info(f"Wall distance ({source.n_wall_faces} wall triangles, exact) computed: min={dist.min():.6e}, max={dist.max():.6e}")
+        model = getattr(self, "turb_model_gpu", None)
+        if hasattr(model, "apply_wall_distance"):
+            # SST 设 omega 上界、SA-neg 识别壁面解点（`TransportedTurbulence.apply_wall_distance`）
+            model.apply_wall_distance(self.wall_distance_gpu, self.mu_molecular / self.freestream["rho_inf"])

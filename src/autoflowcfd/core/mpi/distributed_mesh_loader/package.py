@@ -187,7 +187,7 @@ def build_fully_distributed_rank_package(
             面邻居耦合块用，`distributed_implicit.py::global_cell_colors_d2`），同上
         turb_model_name: "NONE"/"SST"/"DDES"/"IDDES"/"WMLES"/"LES"
             （大写），决定是否需要计算 wall_distance/h_max/h_wn
-        wall_distance_source: 壁面距离来源（`core/utils/wall_distance_source.py`），
+        wall_distance_source: 壁面距离来源（`core/utils/wall_distance`），
             root 由体网格构造一次、对每个 rank 的 compact 解点查询
         h_max_global, h_wn_global: (n_global_cells,) IDDES 专用，root
             只需要对同一个 mesh 算一次（`compute_h_max_and_h_wn` 纯

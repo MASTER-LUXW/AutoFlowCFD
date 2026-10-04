@@ -21,7 +21,7 @@
 
 import numpy as np
 
-from autoflowcfd.core.turbulence.sst.bounds import clip_gradient_magnitude
+from autoflowcfd.core.turbulence.limits import clip_gradient_magnitude
 from autoflowcfd.core.turbulence.sst.log_omega import log_omega_gradient_source, omega_from_log
 from autoflowcfd.core.turbulence.transport.residual import turbulence_diffusivities
 

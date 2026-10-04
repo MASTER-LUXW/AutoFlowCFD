@@ -26,7 +26,7 @@ from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coeffici
 def _solve_transient_distributed(
     input_file, order, surface_mesh, skip_quality_check,
     time_scheme, dual_time_inner_iter,
-    turbulence_model, max_iter, dt, use_eikonal, output_dir,
+    turbulence_model, max_iter, dt, output_dir,
     reference_area, threads, turbulence_intensity, viscosity_ratio,
     mu_molecular, rho_inf, vel_inf, p_inf,
     n_ranks, multi_gpu, fully_distributed, gpu_device, backend,
@@ -57,7 +57,7 @@ def _solve_transient_distributed(
     if multi_gpu:
         _solve_transient_multi_gpu(
             input_file, order, time_scheme, dual_time_inner_iter,
-            turbulence_model, max_iter, dt, use_eikonal, output_dir, threads,
+            turbulence_model, max_iter, dt, output_dir, threads,
             turbulence_intensity, viscosity_ratio, mu_molecular, rho_inf, vel_inf, p_inf,
             n_ranks, gpu_device, surface_mesh, skip_quality_check, checkpoint_interval,
             phase_max_iter, residual_drop_threshold, init_checkpoint,
@@ -77,7 +77,7 @@ def _solve_transient_distributed(
         _solve_transient_fully_distributed(
             input_file, order, surface_mesh, skip_quality_check,
             time_scheme, dual_time_inner_iter,
-            turbulence_model, max_iter, dt, use_eikonal, output_dir, backend,
+            turbulence_model, max_iter, dt, output_dir, backend,
             turbulence_intensity, viscosity_ratio, mu_molecular, rho_inf, vel_inf, p_inf,
             n_ranks, checkpoint_interval, phase_max_iter, residual_drop_threshold,
             init_checkpoint,
@@ -92,7 +92,7 @@ def _solve_transient_distributed(
     _solve_transient_cpu_traditional(
         input_file, order, surface_mesh, skip_quality_check,
         time_scheme, dual_time_inner_iter,
-        turbulence_model, max_iter, dt, use_eikonal, output_dir, backend, threads,
+        turbulence_model, max_iter, dt, output_dir, backend, threads,
         turbulence_intensity, viscosity_ratio, mu_molecular, rho_inf, vel_inf, p_inf,
         n_ranks, checkpoint_interval, reference_area, phase_max_iter, residual_drop_threshold,
         init_checkpoint,
@@ -106,7 +106,7 @@ def _solve_transient_distributed(
 def _solve_transient_cpu_traditional(
     input_file, order, surface_mesh, skip_quality_check,
     time_scheme, dual_time_inner_iter,
-    turbulence_model, max_iter, dt, use_eikonal, output_dir, backend, threads,
+    turbulence_model, max_iter, dt, output_dir, backend, threads,
     turbulence_intensity, viscosity_ratio, mu_molecular, rho_inf, vel_inf, p_inf,
     n_ranks, checkpoint_interval, reference_area,
     phase_max_iter=None, residual_drop_threshold=100.0,
@@ -148,7 +148,7 @@ def _solve_transient_cpu_traditional(
         mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
         n_ranks=n_ranks, backend=backend, order=order,
         turb_model_name=turbulence_model, time_scheme=time_scheme,
-        wall_distance_source=wall_distance_source_if_needed(turbulence_model, volume_data, use_eikonal),
+        wall_distance_source=wall_distance_source_if_needed(turbulence_model, volume_data),
         dual_time_inner_iter=dual_time_inner_iter, n_threads=threads,
         turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
         mu_molecular=mu_molecular, rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
@@ -219,7 +219,7 @@ def _solve_transient_cpu_traditional(
 def _solve_transient_fully_distributed(
     input_file, order, surface_mesh, skip_quality_check,
     time_scheme, dual_time_inner_iter,
-    turbulence_model, max_iter, dt, use_eikonal, output_dir, backend,
+    turbulence_model, max_iter, dt, output_dir, backend,
     turbulence_intensity, viscosity_ratio, mu_molecular, rho_inf, vel_inf, p_inf,
     n_ranks, checkpoint_interval,
     phase_max_iter=None, residual_drop_threshold=100.0,
@@ -253,7 +253,6 @@ def _solve_transient_fully_distributed(
         freestream=freestream, mu_molecular=mu_molecular, mach_ref=mach_ref,
         enable_viscous=True, skip_quality_check=skip_quality_check,
         turb_model_name=turbulence_model.upper(),
-        use_eikonal=use_eikonal,
         turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
         time_scheme=time_scheme, dual_time_inner_iter=dual_time_inner_iter,
         # 三个 CFL 边界靠 package 传到各 rank（见
@@ -318,7 +317,7 @@ def _solve_transient_fully_distributed(
 
 def _solve_transient_multi_gpu(
     input_file, order, time_scheme, dual_time_inner_iter,
-    turbulence_model, max_iter, dt, use_eikonal, output_dir, threads,
+    turbulence_model, max_iter, dt, output_dir, threads,
     turbulence_intensity, viscosity_ratio, mu_molecular, rho_inf, vel_inf, p_inf,
     n_ranks, gpu_device, surface_mesh, skip_quality_check, checkpoint_interval,
     phase_max_iter=None, residual_drop_threshold=100.0,
@@ -364,7 +363,6 @@ def _solve_transient_multi_gpu(
             freestream=freestream, mu_molecular=mu_molecular, mach_ref=mach_ref,
             enable_viscous=True, skip_quality_check=skip_quality_check,
             turb_model_name=turbulence_model.upper(),
-            use_eikonal=use_eikonal,
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
             time_scheme=time_scheme, dual_time_inner_iter=dual_time_inner_iter,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
@@ -387,7 +385,7 @@ def _solve_transient_multi_gpu(
             mesh=mesh, ops=ops, n_ranks=n_ranks, device_id=gpu_device,
             mu_molecular=mu_molecular, rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
             turb_model=turbulence_model.upper(), time_scheme=time_scheme_str,
-            wall_distance_source=wall_distance_source_if_needed(turbulence_model, volume_data, use_eikonal),
+            wall_distance_source=wall_distance_source_if_needed(turbulence_model, volume_data),
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
             # 与 `solve steady --multi-gpu` 构造点逐项对齐（2026-09-24）：
             # 攻角/侧滑角与三个 CFL 边界此前在这条瞬态路径上完全没传 ——

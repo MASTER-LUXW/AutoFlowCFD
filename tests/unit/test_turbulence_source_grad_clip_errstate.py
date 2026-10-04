@@ -40,7 +40,7 @@ class TestGradClipErrstateWrapping:
         import inspect
 
         from autoflowcfd.core.fr_solver.turbulence.source import evaluate_turbulence_rates
-        from autoflowcfd.core.turbulence.sst.bounds import clip_gradient_magnitude
+        from autoflowcfd.core.turbulence.limits import clip_gradient_magnitude
 
         src = inspect.getsource(clip_gradient_magnitude)
         errstate_idx = src.index('with np.errstate(over="ignore", invalid="ignore"):')
@@ -55,7 +55,7 @@ class TestGradClipErrstateWrapping:
         gradient component large enough that squaring it overflows
         float64 (>~1.34e154), run through the shared clipping helper -
         must produce zero warnings and a correctly clipped (not NaN) result."""
-        from autoflowcfd.core.turbulence.sst.bounds import clip_gradient_magnitude
+        from autoflowcfd.core.turbulence.limits import clip_gradient_magnitude
 
         grad_k = np.zeros((2, 1, 3))
         grad_k[0, 0, 0] = 1e200  # squaring this overflows float64

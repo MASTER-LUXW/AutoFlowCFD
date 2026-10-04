@@ -9,13 +9,14 @@
 import numpy as np
 from loguru import logger
 
+from autoflowcfd.core.turbulence.sa import SAModel
 from autoflowcfd.core.turbulence.sst import SSTModelFR
 from autoflowcfd.core.turbulence.des import DDESModel, IDDESModel, compute_h_max_and_h_wn
 from autoflowcfd.core.turbulence.wmles import WMLESModel
 from autoflowcfd.core.turbulence.sgs import WALEModel
 from autoflowcfd.core.turbulence.sst.bounds import OMEGA_MAX_FLOOR
 
-from .wall_distance import apply_wall_distance_omega_bound
+from .wall_distance import apply_wall_distance_to_model
 
 
 def _filter_matrices_are_identity(ops) -> bool:
@@ -45,6 +46,13 @@ def _filter_matrices_are_identity(ops) -> bool:
     return True
 
 
+def _freestream_turbulence_parameters(solver) -> tuple:
+    """来流湍流参数 `(Tu, VR)`：湍流强度与涡粘比 `mu_t/mu`（SST 由两者定 k/omega，SA-neg 由 VR
+    定 nu_tilde，两种模型按同一组物理量给定来流）。外部气动默认值参考 Fluent 手册
+    （Tu <= 1%，VR = 2~10）。"""
+    return getattr(solver, '_turbulence_intensity', 0.01), getattr(solver, '_viscosity_ratio', 5.0)
+
+
 def _set_freestream_turbulence(solver) -> tuple:
     """根据来流条件从 Tu/VR 推导物理自洽的 k/omega 初值。
 
@@ -71,9 +79,7 @@ def _set_freestream_turbulence(solver) -> tuple:
     mu = getattr(solver, 'mu_molecular', 1.8e-5)
     nu = mu / max(rho_inf, 1e-10)
 
-    # 外部气动默认值（参考 Fluent 手册：Tu ≤ 1%, VR = 2-10）
-    Tu = getattr(solver, '_turbulence_intensity', 0.01)
-    VR = getattr(solver, '_viscosity_ratio', 5.0)
+    Tu, VR = _freestream_turbulence_parameters(solver)
 
     k_inf = 1.5 * (vel_inf * Tu) ** 2
     nu_t_inf = VR * nu
@@ -107,7 +113,7 @@ def _set_turbulence_bounds(solver) -> None:
     solver.turb_model.k_max = 0.5 * vel_inf ** 2  # 湍动能 ≤ 平均流动能
     solver.turb_model.omega_max = OMEGA_MAX_FLOOR
     if getattr(solver, "wall_distance", None) is not None:
-        apply_wall_distance_omega_bound(solver)
+        apply_wall_distance_to_model(solver)
     logger.debug(
         f"Turbulence bounds set: k_max={solver.turb_model.k_max:.2f}, "
         f"omega_max={solver.turb_model.omega_max:.0e} "
@@ -205,6 +211,16 @@ def init_turbulence_models(solver, n_cells: int, n_sps: int) -> None:
         solver._iddes_h_max, solver._iddes_h_wn = compute_h_max_and_h_wn(solver.mesh)
         print(f"   [OK] IDDES model initialized (based on SST, "
               f"k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e}, "
+              f"production ramp: {solver._turb_production_ramp_steps} steps)")
+
+    elif solver.turb_model_name == "SA":
+        _, VR = _freestream_turbulence_parameters(solver)
+        solver.turb_model = SAModel(n_cells, n_sps, nu_ref=solver.mu_molecular / solver.freestream["rho_inf"],
+                                    viscosity_ratio=VR)
+        _update_production_ramp(solver)
+        m = solver.turb_model
+        print(f"   [OK] SA-neg model initialized (nu_tilde_inf={m.nu_tilde_inf:.4e}, "
+              f"chi_inf={m.nu_tilde_inf / m.nu_ref:.4g}, viscosity ratio={VR:g}, "
               f"production ramp: {solver._turb_production_ramp_steps} steps)")
 
     elif solver.turb_model_name == "WMLES":

@@ -12,8 +12,8 @@ import numpy as np
 
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 from autoflowcfd.core.fr_solver.filter import build_filter_func
+from autoflowcfd.core.turbulence.registry import has_transport_equations
 from autoflowcfd.core.fr_solver.turbulence.implicit import (
-    IMPLICIT_TURBULENCE_MODELS,
     CpuCoupledBackend,
     single_machine_cell_colors,
     single_machine_coupling_graph,
@@ -150,7 +150,7 @@ def step(solver, dt: float) -> float:
         # Gauss-Seidel 外迭代会振荡），这里不再单独推进湍流
         coupled_nk = (solver.time_integrator.scheme == TimeIntegrationScheme.NEWTON_KRYLOV
                       and solver.turb_model is not None
-                      and solver.turb_model_name in IMPLICIT_TURBULENCE_MODELS)
+                      and has_transport_equations(solver.turb_model_name))
         if not coupled_nk:
             solver.compute_turbulence_source(turb_dt)
 

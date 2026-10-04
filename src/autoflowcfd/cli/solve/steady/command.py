@@ -23,8 +23,11 @@ from .cpu_single import _run_cpu_single
 @click.argument('input_file', type=click.Path(exists=True))
 @click.option('--backend', type=click.Choice(['cpu', 'gpu']), default='cpu', help='计算后端 (CPU/GPU)')
 @click.option('--order', type=int, default=2, help='FR 多项式阶数 (P1/P2/P3)')
-@click.option('--turbulence-model', type=click.Choice(['none', 'sst', 'ddes', 'iddes', 'wmles', 'les']), default='sst',
-              help='湍流模型。真实bug修复（2026-09-02，排查多GPU分布式DDES/IDDES时发现）：此前这里的'
+@click.option('--turbulence-model', type=click.Choice(['none', 'sst', 'sa', 'ddes', 'iddes', 'wmles', 'les']),
+              default='sst',
+              help='湍流模型。sa 为 SA-neg（Allmaras, Johnson & Spalart 2012，为高阶离散设计的负值鲁棒 '
+                   'Spalart-Allmaras；高阶 P2/P3 隐式稳态推荐，SST 的 C0 折点使其在高阶下收敛缓慢，见 '
+                   'core/turbulence/sa 模块文档）。真实bug修复（2026-09-02，排查多GPU分布式DDES/IDDES时发现）：此前这里的'
                    'Choice列表缺 iddes/les 两项——底层单机/CPU MPI/多GPU分布式路径均已支持这两个模型'
                    '（solve transient命令的Choice列表本来就包含它们），steady命令这里一直没有同步，'
                    '导致 --turbulence-model iddes/les 在steady命令下无法使用（会被click直接拒绝），'
@@ -95,7 +98,6 @@ from .cpu_single import _run_cpu_single
                    'GPU/多GPU/MPI 分布式路径传非默认值会报错')
 @click.option('--output', '-o', 'output_dir', type=click.Path(), default='./results', help='结果输出目录')
 @click.option('--checkpoint-interval', type=int, default=100, help='检查点保存间隔')
-@click.option('--use-eikonal', is_flag=True, help='使用 Eikonal 方程求解壁面距离（更精确但较慢）')
 @click.option('--surface-mesh', '-s', type=click.Path(exists=True), default=None,
               help='原始面网格路径 - input_file 是 .nas 体网格时必填，用于反推边界分组；input_file 是 .pkl 时不需要')
 @click.option('--skip-quality-check', is_flag=True, help='跳过求解前的网格质量门检查（不建议，仅用于临时诊断）')
@@ -154,7 +156,7 @@ from .cpu_single import _run_cpu_single
                    '已启用过积分的基础上再改善约2~4倍，代价是体积项计算量从O(n_fine)升到'
                    'O(n_fine^2)，仅 CPU 后端实现')
 def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_scheme, cfl_start, cfl_max, cfl_min,
-                 aoa_deg, aos_deg, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, use_eikonal, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, artificial_viscosity_enabled, artificial_viscosity_alpha, entropy_stable_volume_enabled):
+                 aoa_deg, aos_deg, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, artificial_viscosity_enabled, artificial_viscosity_alpha, entropy_stable_volume_enabled):
     """执行稳态 FR 求解。
 
     支持高阶精度 (P1-P4) 和多种湍流模型 (SST, DDES, WMLES)。
@@ -220,15 +222,11 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
     print(f"Turbulence : {turbulence_model} | Max Iter: {max_iter}")
     if n_ranks > 1:
         print(f"MPI Ranks  : {n_ranks} (domain decomposition)")
-    if use_eikonal:
-        print(f"Wall Dist : Eikonal (graph-Dijkstra approx)\n")
-    else:
-        print(f"Wall Dist : KD-Tree (Geometric)\n")
+    print("Wall Dist : exact point-to-wall-surface distance (AABB tree)\n")
 
     # 1. 按后端分派（各分支的参数由 AST 分析得出，逐名传入）
     if backend == 'gpu' and multi_gpu and (n_ranks > 1):
         _run_multi_gpu(
-            use_eikonal=use_eikonal,
             aoa_deg=aoa_deg,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
@@ -259,7 +257,6 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
         )
     elif backend == 'gpu' and (not multi_gpu):
         _run_single_gpu(
-            use_eikonal=use_eikonal,
             aoa_deg=aoa_deg,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
@@ -287,7 +284,6 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
         )
     elif n_ranks > 1:
         _run_cpu_mpi(
-            use_eikonal=use_eikonal,
             aoa_deg=aoa_deg,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
@@ -346,7 +342,6 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
             time_scheme=time_scheme,
             turbulence_intensity=turbulence_intensity,
             turbulence_model=turbulence_model,
-            use_eikonal=use_eikonal,
             vel_inf=vel_inf,
             viscosity_ratio=viscosity_ratio,
         )

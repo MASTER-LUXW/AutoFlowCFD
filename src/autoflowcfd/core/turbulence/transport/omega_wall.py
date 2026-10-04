@@ -16,7 +16,9 @@ from typing import Tuple
 
 
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
-from autoflowcfd.core.turbulence.sst.bounds import OMEGA_WALL_AMPLIFICATION, OMEGA_WALL_VISCOUS_COEFF
+from autoflowcfd.core.turbulence.sst.bounds import (
+    OMEGA_WALL_AMPLIFICATION, OMEGA_WALL_VISCOUS_COEFF, omega_wall_length_scale,
+)
 
 
 
@@ -329,15 +331,10 @@ def _compute_omega_wall_target(
         # 的物理改动，降低近壁 omega 会抬高 nu_t，必须用真实长程数据
         # 验证过才能改默认值——本项目在 omega 壁面处理上已经有两次
         # "数学上更对但真实数据证伪"的先例。
-        _d1_mode = os.environ.get("AFCFD_OMEGA_WALL_D1", "min").lower()
-        if _d1_mode not in ("min", "mean"):
-            raise ValueError(
-                f"AFCFD_OMEGA_WALL_D1={_d1_mode!r} 不是合法取值（min | mean）。"
-                f"'min' 是既有行为（单元内解点壁距最小值），'mean' 是与 "
-                f"Menter 标定口径一致的形心壁距。")
-        wd_owner = solver.wall_distance[owner_cells]
-        d1 = wd_owner.min(axis=1) if _d1_mode == "min" else wd_owner.mean(axis=1)
-        d1 = np.maximum(d1, 1e-8)
+        # 口径判据、真实解点与壁面解点的处理见 `sst/bounds.py::omega_wall_length_scale`
+        # （CPU/GPU 共用）。
+        d1 = omega_wall_length_scale(solver.wall_distance[owner_cells],
+                                     owner_cells < solver.mesh.n_prism_cells, np)
         # 只统计真实自由度（2026-09-15 审计）：`rho[owner_cells]` 的行
         # 单元类型任意混合，所以用逐行掩码版。native 四面体的零填充槽位
         # 冻结在初值、会变馊，混进 nu = mu/rho 会带进几个百分点的偏差。

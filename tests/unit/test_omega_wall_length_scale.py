@@ -96,48 +96,55 @@ class TestSolutionPointClusteringQuantified:
 
 
 class TestSwitchSemantics:
-    def _env(self, v):
-        old = os.environ.get("AFCFD_OMEGA_WALL_D1")
-        if v is None:
-            os.environ.pop("AFCFD_OMEGA_WALL_D1", None)
-        else:
-            os.environ["AFCFD_OMEGA_WALL_D1"] = v
-        return old
+    """生产函数 `turbulence/sst/bounds.py::omega_wall_length_scale`（CPU/GPU 壁面目标值共用）。"""
 
-    def _restore(self, old):
-        if old is None:
-            os.environ.pop("AFCFD_OMEGA_WALL_D1", None)
-        else:
-            os.environ["AFCFD_OMEGA_WALL_D1"] = old
+    @pytest.mark.parametrize("mode,expected", [("min", 1.0e-5), ("mean", 4.0e-5)])
+    def test_d1_selection_follows_the_switch(self, monkeypatch, mode, expected):
+        from autoflowcfd.core.turbulence.sst.bounds import omega_wall_length_scale
 
-    @pytest.mark.parametrize("mode,expect_min", [("min", True), ("mean", False)])
-    def test_d1_selection_follows_the_switch(self, mode, expect_min):
-        """直接验证选择逻辑：构造一个壁距明显不均匀的单元，两种口径必须
-        分别给出 min 与 mean。"""
+        monkeypatch.setenv("AFCFD_OMEGA_WALL_D1", mode)
         wd = np.array([[1.0e-5, 3.0e-5, 5.0e-5, 7.0e-5]])
-        old = self._env(mode)
-        try:
-            m = os.environ.get("AFCFD_OMEGA_WALL_D1", "min").lower()
-            d1 = wd.min(axis=1) if m == "min" else wd.mean(axis=1)
-        finally:
-            self._restore(old)
-        expected = wd.min() if expect_min else wd.mean()
-        assert d1[0] == pytest.approx(expected)
+        assert omega_wall_length_scale(wd, None, np)[0] == pytest.approx(expected, rel=1e-14)
 
-    def test_default_is_min(self):
-        """默认必须是既有行为——本轮只加开关，不改默认值。"""
-        old = self._env(None)
-        try:
-            assert os.environ.get("AFCFD_OMEGA_WALL_D1", "min").lower() == "min"
-        finally:
-            self._restore(old)
+    def test_default_is_min(self, monkeypatch):
+        """默认是既有行为 `min`（不改默认值，理由见模块文档）。"""
+        from autoflowcfd.core.turbulence.sst.bounds import omega_wall_length_scale
+
+        monkeypatch.delenv("AFCFD_OMEGA_WALL_D1", raising=False)
+        assert omega_wall_length_scale(np.array([[2e-5, 9e-5]]), None, np)[0] == 2e-5
 
     @pytest.mark.parametrize("bad", ["center", "cell", "", "MINIMUM"])
-    def test_rejects_unknown_values(self, bad):
+    def test_rejects_unknown_values(self, monkeypatch, bad):
         """不能静默退回默认——与本项目其余开关同一条约定。"""
-        from autoflowcfd.core.turbulence.transport import _compute_omega_wall_target
-        import inspect
-        src = inspect.getsource(_compute_omega_wall_target)
-        assert 'AFCFD_OMEGA_WALL_D1' in src
-        assert '不是合法取值' in src, (
-            "非法取值必须显式报错，不能静默退回默认")
+        from autoflowcfd.core.turbulence.sst.bounds import omega_wall_length_scale
+
+        monkeypatch.setenv("AFCFD_OMEGA_WALL_D1", bad)
+        with pytest.raises(ValueError, match="不是合法取值"):
+            omega_wall_length_scale(np.array([[1e-5, 2e-5]]), None, np)
+
+
+class TestRealOffWallPoints:
+    """2026-10-04：`min` 只在真实解点里取，且排除壁面上的解点（`d == 0`）。此前对整行取 min：
+    原生四面体的零填充槽位坐标没有意义（壁距是任意值），壁面上的解点（顶点/棱点/面点）
+    d = 0 会把 d1 压到 1e-8 下限、目标值直接顶到上界。"""
+
+    def test_wall_points_and_padding_are_excluded(self, monkeypatch):
+        from autoflowcfd.core.turbulence.sst.bounds import omega_wall_length_scale
+        from autoflowcfd.fr.native_padding import real_sps_per_cell
+
+        monkeypatch.delenv("AFCFD_OMEGA_WALL_D1", raising=False)
+        n_sps = 8                                    # P1：棱柱 8 槽位，四面体 4 个真实解点
+        n_tet = real_sps_per_cell(1)[1]
+        wd = np.full((1, n_sps), 1e-9)               # 填充槽位：任意小的垃圾值
+        wd[0, :n_tet] = [0.0, 0.0, 3e-4, 5e-4]       # 两个解点在壁面上
+        d1 = omega_wall_length_scale(wd, np.array([False]), np)
+        assert d1[0] == 3e-4
+        # 旧做法（整行 min）给出 1e-8 下限
+        assert max(wd.min(axis=1)[0], 1e-8) == 1e-8
+
+    def test_prism_rows_use_all_their_points(self, monkeypatch):
+        from autoflowcfd.core.turbulence.sst.bounds import omega_wall_length_scale
+
+        monkeypatch.delenv("AFCFD_OMEGA_WALL_D1", raising=False)
+        wd = np.linspace(1e-5, 8e-5, 8)[None, :]
+        assert omega_wall_length_scale(wd, np.array([True]), np)[0] == 1e-5

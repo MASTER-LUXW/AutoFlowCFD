@@ -26,23 +26,6 @@ class _SolverResidualMixin:
         """构建边界幽灵态提供者 (BD-01)，委托给 fr_solver_boundary。"""
         return fr_solver_boundary.build_boundary_ghost_provider(self, bc_overrides)
 
-    def compute_wall_distance_field(self, mesh_nodes: np.ndarray,
-                                   wall_indices: np.ndarray,
-                                   connectivity: Optional[np.ndarray] = None,
-                                   use_eikonal: bool = False):
-        """计算壁面距离场（用于 DDES/WMLES/SST），委托给 fr_solver_turbulence。
-
-        Args:
-            mesh_nodes: 全部网格节点坐标
-            wall_indices: WALL 边界节点索引
-            connectivity: 节点邻接表，use_eikonal=True 时必须提供 - 见
-                fr_solver_turbulence.compute_wall_distance_field 自己的文档
-            use_eikonal: 是否用 Eikonal 方程（而不是纯欧氏 KD-Tree）求解
-        """
-        fr_solver_turbulence.compute_wall_distance_field(
-            self, mesh_nodes, wall_indices, connectivity=connectivity, use_eikonal=use_eikonal
-        )
-
     def compute_turbulence_source(self, dt) -> Optional[tuple]:
         """计算湍流模型源项（委托给 fr_solver_turbulence）。dt 可以是标量
         （DUAL_TIME 物理步长）或逐 SP 数组（稳态加速模式的局部 CFL

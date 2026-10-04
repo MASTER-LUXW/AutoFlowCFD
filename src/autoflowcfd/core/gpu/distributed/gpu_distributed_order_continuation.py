@@ -25,7 +25,6 @@ multi_gpu_fully_distributed_for_new_order`（root 用持续持有的
 """
 
 import numpy as np
-from autoflowcfd.core.turbulence.sst.log_omega import lift_log_omega
 
 
 
@@ -41,7 +40,6 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
     from autoflowcfd.core.mpi.distributed_state import DistributedFRState
     from autoflowcfd.core.gpu.distributed.gpu_halo_exchange import GPUHaloExchange
     from autoflowcfd.core.gpu.distributed.gpu_distributed import _CompactMeshDataView
-    from autoflowcfd.core.fr_solver.turbulence import _set_freestream_turbulence
     from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
 
     cp = get_cupy()
@@ -69,7 +67,7 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
     n_local = solver.partition.n_local_cells
 
     # --- 1. local U / 湍流场：CPU 上插值或重置（不依赖几何重建）---
-    new_k_np = new_omega_np = new_nu_t_np = None
+    new_fields_np = new_nu_t_np = None
     if target_p > old_order:
         # 延拓算子**按基分派**（2026-09-20 修复的真实缺陷）：一维 Gauss
         # 张量积 Lagrange 只对坍缩棱柱基的解点成立；native 四面体
@@ -90,9 +88,9 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
         new_U_np = _lift(old_U_np)
 
         if solver.turb_model_gpu is not None:
-            new_k_np = _lift(cp.asnumpy(solver.turb_model_gpu.k_field))
-            new_omega_np = lift_log_omega(cp.asnumpy(solver.turb_model_gpu.omega_field), _lift,
-                                          solver.turb_model_gpu.omega_max)
+            # 输运场在未知量空间延拓（主机副本，`TransportedTurbulence.mapped_fields`）
+            new_fields_np = solver.turb_model_gpu.mapped_fields(
+                _lift, np, fields=[cp.asnumpy(f) for f in solver.turb_model_gpu.transported_fields()])
             old_nu_t = getattr(solver.turb_model_gpu, 'nu_t', None)
             if old_nu_t is not None:
                 old_nu_t_np = cp.asnumpy(old_nu_t)
@@ -111,9 +109,7 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
         new_U_np[:] = freestream_conservative_state(solver.freestream, 5)
 
         if solver.turb_model_gpu is not None:
-            k_inf, omega_inf = _set_freestream_turbulence(solver)
-            new_k_np = np.ones((n_local, new_n_sps)) * k_inf
-            new_omega_np = np.ones((n_local, new_n_sps)) * omega_inf
+            new_fields_np = solver.turb_model_gpu.freestream_fields((n_local, new_n_sps), np)
             new_nu_t_np = np.zeros((n_local, new_n_sps))
 
     if solver.ddes_model_gpu is not None:
@@ -165,8 +161,7 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
     # GPUWALEModel 实例——不含任何阶数相关内部状态，不需要重新构造）---
     if solver.turb_model_gpu is not None:
         with cp.cuda.Device(solver.device_id):
-            solver.turb_model_gpu.k_field = cp.asarray(new_k_np)
-            solver.turb_model_gpu.omega_field = cp.asarray(new_omega_np)
+            solver.turb_model_gpu.set_transported_fields([cp.asarray(f) for f in new_fields_np])
             if new_nu_t_np is not None:
                 solver.turb_model_gpu.nu_t = cp.asarray(new_nu_t_np)
         if solver.ddes_model_gpu is not None:

@@ -27,7 +27,7 @@ def _run_cpu_single(
     entropy_stable_volume_enabled, input_file, max_iter, mu_molecular, order,
     output_dir, p_inf, phase_max_iter, reference_area, residual_drop_threshold,
     rho_inf, sem_num_eddies, skip_quality_check, surface_mesh, threads,
-    time_scheme, turbulence_intensity, turbulence_model, use_eikonal, vel_inf, viscosity_ratio,
+    time_scheme, turbulence_intensity, turbulence_model, vel_inf, viscosity_ratio,
 ):
     """`solve steady` 的单机 CPU路径。"""
     # 单机求解器路径：所有 rank 加载完整网格
@@ -57,7 +57,7 @@ def _run_cpu_single(
     )
 
     # 2.5. 计算壁面距离场（如果湍流模型需要）
-    compute_wall_distance_for_solver(solver, volume_data, use_eikonal=use_eikonal)
+    compute_wall_distance_for_solver(solver, volume_data)
 
     # 传递参考面积到求解器，供迭代中输出气动力系数
     # 如果未指定 --reference-area，尝试从面网格自动计算投影面积

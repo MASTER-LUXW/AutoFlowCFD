@@ -8,7 +8,6 @@
 
 
 
-from autoflowcfd.core.fr_solver.turbulence import _set_freestream_turbulence
 
 
 def _reset_turbulence_if_resumed_field_exploded(solver) -> None:
@@ -82,42 +81,27 @@ def _reset_turbulence_if_resumed_field_exploded(solver) -> None:
     from autoflowcfd.core.mpi.comm import allreduce_sum
 
     turb = getattr(solver, 'turb_model', None) or getattr(solver, 'turb_model_gpu', None)
-    if turb is None or not hasattr(turb, 'k_max') or not hasattr(turb, 'k_field'):
+    if turb is None or not hasattr(turb, 'transported_fields'):
         return
-
-    k = turb.k_field
-    omega = getattr(turb, 'omega_field', None)
-    k_max_limit = turb.k_max
-    omega_max_limit = getattr(turb, 'omega_max', None)
-
+    fields = turb.transported_fields()
+    bounds = turb.upper_bounds()
     # `.sum()`/`.size`/`float(...)` 对 numpy 和 CuPy 数组语义完全一致
     # （CuPy 0-d 数组 `float()` 会做一次隐式 device->host 拷贝，是
     # 已有的既定用法，见 gpu_solver_io.py 的 `float(dt_mean)`），不需要
-    # 区分后端。
-    k_hit_local = float((k >= 0.9 * k_max_limit).sum())
-    n_local_total = float(k.size)
-    omega_hit_local = 0.0
-    if omega is not None and omega_max_limit is not None:
-        omega_hit_local = float((omega >= 0.9 * omega_max_limit).sum())
-
-    k_hit_global = allreduce_sum(k_hit_local)
-    omega_hit_global = allreduce_sum(omega_hit_local)
-    n_total_global = allreduce_sum(n_local_total)
-
-    k_near_ceiling_frac = k_hit_global / max(n_total_global, 1.0)
-    omega_near_ceiling_frac = omega_hit_global / max(n_total_global, 1.0)
+    # 区分后端。各输运场按自己的上界统计（SST: k_max/omega_max，SA-neg: nu_tilde_max）。
+    n_total_global = allreduce_sum(float(fields[0].size))
+    fracs = [allreduce_sum(float((f >= 0.9 * b).sum())) / max(n_total_global, 1.0)
+             for f, b in zip(fields, bounds)]
     ceiling_frac_threshold = 0.10
-
-    if k_near_ceiling_frac > ceiling_frac_threshold or omega_near_ceiling_frac > ceiling_frac_threshold:
-        k_inf, omega_inf = _set_freestream_turbulence(solver)
+    if max(fracs) > ceiling_frac_threshold:
         if is_root():
-            print(f"[WARN] Resume: {100*k_near_ceiling_frac:.2f}% of k / "
-                  f"{100*omega_near_ceiling_frac:.2f}% of omega values (global, "
-                  f"summed across all ranks/devices) are clamped near their ceiling "
-                  f"(k_max={k_max_limit:.2f}, omega_max={omega_max_limit}) — exceeds "
-                  f"{100*ceiling_frac_threshold:.0f}% threshold, turbulence field not "
-                  f"recovered from previous explosion. Resetting to freestream values.")
-        turb.k_field[:] = k_inf
-        turb.omega_field[:] = omega_inf
+            detail = ", ".join(f"{name} {100 * fr:.2f}% (bound {b:.4g})"
+                               for name, fr, b in zip(turb.TRANSPORTED_FIELDS, fracs, bounds))
+            print(f"[WARN] Resume: turbulence values clamped near their ceiling (global, summed "
+                  f"across all ranks/devices): {detail} — exceeds {100*ceiling_frac_threshold:.0f}% "
+                  f"threshold, turbulence field not recovered from previous explosion. "
+                  f"Resetting to freestream values.")
+        for f, v in zip(fields, turb.freestream_values()):
+            f[:] = v
         if hasattr(turb, 'nu_t'):
             turb.nu_t[:] = 0.0

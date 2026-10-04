@@ -23,7 +23,7 @@ from .time_integration.base import TimeIntegrator, TimeIntegrationScheme
 from .fr_operators.kernels import compute_ausm_up_flux
 
 # Utils 模块
-from .utils.wall_distance import compute_wall_distance
+from .utils.wall_distance import WallDistanceSource
 
 # Turbulence 模块
 from .turbulence.sst import SSTModelFR
@@ -49,7 +49,7 @@ __all__ = [
     'TimeIntegrator',
     'TimeIntegrationScheme',
     'compute_ausm_up_flux',
-    'compute_wall_distance',
+    'WallDistanceSource',
     'SSTModelFR',
     'DDESModel',
     'IDDESModel',

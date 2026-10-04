@@ -9,7 +9,6 @@ import numpy as np
 from typing import Any
 
 from loguru import logger
-from autoflowcfd.core.turbulence.sst.log_omega import lift_log_omega
 
 
 
@@ -175,11 +174,10 @@ def interpolate_to_new_order(solver: Any, new_order: int):
     solver.state.Q = np.zeros_like(solver.state.U)
     solver.state._update_primitives()
 
-    # 更新湍流场（如果有）——(n_cells, old_n_sps) -> (n_cells, new_n_sps)
-    if hasattr(solver.turb_model, 'k_field'):
-        solver.turb_model.k_field = _lift(solver.turb_model.k_field)
-        solver.turb_model.omega_field = lift_log_omega(solver.turb_model.omega_field, _lift,
-                                                       solver.turb_model.omega_max)
+    # 更新湍流输运场（如果有）——(n_cells, old_n_sps) -> (n_cells, new_n_sps)，在未知量空间延拓
+    # （`TransportedTurbulence.mapped_fields`）
+    if hasattr(solver.turb_model, 'transported_fields'):
+        solver.turb_model.set_transported_fields(solver.turb_model.mapped_fields(_lift, np))
 
     # nu_t（湍流涡粘系数）同样按每单元 SPs 存储，但不会随 k_field/
     # omega_field 自动变形——它只在 compute_turbulence_source 被调用时
@@ -194,17 +192,9 @@ def interpolate_to_new_order(solver: Any, new_order: int):
     if getattr(solver.turb_model, "nu_t", None) is not None and solver.turb_model.nu_t.shape[1] == old_n_sps:
         solver.turb_model.nu_t = _lift(solver.turb_model.nu_t)
 
-    # 壁面距离场同样按每单元 SPs 存储（core/fr_solver_turbulence.py 的湍流
-    # 源项计算直接按 SP 索引取值），阶数变化后形状同样必须一起插值——
-    # 此前遗漏这一步，P0 阶段用均值压缩过的 (n_cells,1) 场会在阶数提升到
-    # P1/P2 后与新的 SPs 数量不匹配，下一次湍流源项计算会形状不符崩溃
-    # （真实网格已复现：与 mesh Jacobian 缺少按阶数重建是同一类"阶数变化
-    # 后遗漏同步派生量"问题的另一处）。
-    if getattr(solver, "wall_distance", None) is not None:
-        # 这一步只是让形状先对上；真正的壁距在下面
-        # `recompute_wall_distance_for_current_order` 里按新解点重新做
-        # KD-Tree 查询（壁距是**纯几何量**，不是解多项式场，见该函数文档）。
-        solver.wall_distance = _lift(solver.wall_distance)
+    # 壁面距离不在这里处理：它是纯几何量，`set_order` 之后由来源在新解点上重新查询
+    # （`run.py` -> `recompute_wall_distance_for_current_order`）。此前这里先插值"让形状对上"，
+    # 没有来源时插值结果就被静默保留（2026-09-06 修掉的同类缺陷）。
 
     # DDES 的有效长度尺度按上一个阶数的 SPs 维度算出，阶数变化后与刚插值
     # 完的 k_field 形状不再匹配——不能像 k_field/omega_field/wall_distance

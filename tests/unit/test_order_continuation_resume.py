@@ -140,15 +140,18 @@ class TestResumeCeilingFractionResetHeuristic:
 
     def _fake_solver_with_turb(self, current_order, target_order, k_field, omega_field,
                                 k_max=555.44, omega_max=1e6):
+        from autoflowcfd.core.fr_solver.turbulence import _set_freestream_turbulence
+        from autoflowcfd.core.turbulence.sst import SSTModelFR
+
         solver = _fake_solver(current_order=current_order, target_order=target_order, resumed=True)
         n_cells, n_sps = solver.state.n_cells, _n_sps(current_order)
-        solver.turb_model = SimpleNamespace(
-            k_field=np.full((n_cells, n_sps), k_field, dtype=np.float64),
-            omega_field=np.full((n_cells, n_sps), omega_field, dtype=np.float64),
-            k_max=k_max, omega_max=omega_max,
-            nu_t=np.zeros((n_cells, n_sps)),
-            production_factor=0.0,
-        )
+        k_inf, omega_inf = _set_freestream_turbulence(solver)
+        model = SSTModelFR(n_cells, n_sps, k_inf=k_inf, omega_inf=omega_inf)
+        model.k_field = np.full((n_cells, n_sps), k_field, dtype=np.float64)
+        model.omega_field = np.full((n_cells, n_sps), omega_field, dtype=np.float64)
+        model.k_max, model.omega_max = k_max, omega_max
+        model.production_factor = 0.0
+        solver.turb_model = model
         return solver
 
     def test_healthy_high_turbulence_field_is_not_falsely_reset(self):

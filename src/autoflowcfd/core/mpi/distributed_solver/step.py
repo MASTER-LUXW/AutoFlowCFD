@@ -203,10 +203,10 @@ class _DistributedStepMixin:
         )
 
         mu_t_field_compact = None
-        from autoflowcfd.core.fr_solver.turbulence.implicit import IMPLICIT_TURBULENCE_MODELS
+        from autoflowcfd.core.turbulence.registry import has_transport_equations
 
         coupled_nk = (is_newton and self.turb_model is not None
-                      and str(self.turb_model_name).upper() in IMPLICIT_TURBULENCE_MODELS)
+                      and has_transport_equations(self.turb_model_name))
         if coupled_nk:
             # 隐式稳态 + k-omega：湍流与平均流在下面紧耦合求解（单机同一个算法，
             # time_integration/implicit/coupled_step.py；适配器见 distributed_implicit.py）。

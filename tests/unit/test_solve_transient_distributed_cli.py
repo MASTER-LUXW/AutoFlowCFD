@@ -18,6 +18,17 @@ from autoflowcfd.cli.main import cli
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 
 
+def _arg(mock, name):
+    """按 `_solve_transient_distributed` 的签名把被 mock 的调用绑定到参数名（此前按位置下标取，
+    签名每增删一个参数就整体错位）。"""
+    import inspect
+
+    from autoflowcfd.cli.solve.transient_distributed import _solve_transient_distributed
+
+    args, kwargs = mock.call_args
+    return inspect.signature(_solve_transient_distributed).bind(*args, **kwargs).arguments[name]
+
+
 class TestSolveTransientDistributedCliWiring:
     def test_n_ranks_dispatches_to_distributed_with_dual_time_scheme(self, tmp_path):
         mesh_file = tmp_path / "mesh.pkl"
@@ -35,13 +46,7 @@ class TestSolveTransientDistributedCliWiring:
 
         assert result.exit_code == 0, result.output
         mock_distributed.assert_called_once()
-        call_args = mock_distributed.call_args[0]
-        # 位置参数顺序见 _solve_transient_distributed 签名（2026-09-03
-        # 起不再有 tet_basis_mode，见 fr/operators.py 模块文档"删除
-        # collapsed 相关内容"一节）：
-        # (input_file, order, surface_mesh, skip_quality_check,
-        #  time_scheme, dual_time_inner_iter, ...)
-        assert call_args[4] == TimeIntegrationScheme.DUAL_TIME
+        assert _arg(mock_distributed, "time_scheme") == TimeIntegrationScheme.DUAL_TIME
 
     def test_fully_distributed_accepts_dual_time(self, tmp_path):
         """2026-09-02 起 `--fully-distributed` + `--time-method
@@ -64,14 +69,8 @@ class TestSolveTransientDistributedCliWiring:
 
         assert result.exit_code == 0, result.output
         mock_distributed.assert_called_once()
-        call_args = mock_distributed.call_args[0]
-        assert call_args[4] == TimeIntegrationScheme.DUAL_TIME
-        # fully_distributed 是 _solve_transient_distributed 签名里的
-        # 第 22 个位置参数（索引 21，multi_gpu 之后一位——见
-        # test_multi_gpu_dispatches_with_rk3_default 同一处参数顺序
-        # 注释，那里 multi_gpu=索引20；tet_basis_mode 已删除，所有索引
-        # 相对旧版本整体前移 1）。
-        assert call_args[21] is True
+        assert _arg(mock_distributed, "time_scheme") == TimeIntegrationScheme.DUAL_TIME
+        assert _arg(mock_distributed, "fully_distributed") is True
 
     def test_init_from_dispatches_with_distributed(self, tmp_path):
         """2026-09-02 起 `--init-from` + `--n-ranks`/`--multi-gpu`/
@@ -95,12 +94,7 @@ class TestSolveTransientDistributedCliWiring:
 
         assert result.exit_code == 0, result.output
         mock_distributed.assert_called_once()
-        call_args = mock_distributed.call_args[0]
-        # init_checkpoint 是 _solve_transient_distributed 签名里的最后
-        # 一个位置参数（第 28 个，索引 27——tet_basis_mode 已删除，
-        # 所有索引相对旧版本整体前移 1，见 test_multi_gpu_dispatches_
-        # with_rk3_default 同一处参数顺序注释）。
-        assert call_args[27] == str(ckpt_file)
+        assert _arg(mock_distributed, "init_checkpoint") == str(ckpt_file)
 
     def test_multi_gpu_dispatches_with_rk3_default(self, tmp_path):
         mesh_file = tmp_path / "mesh.pkl"
@@ -118,13 +112,5 @@ class TestSolveTransientDistributedCliWiring:
 
         assert result.exit_code == 0, result.output
         mock_distributed.assert_called_once()
-        call_args = mock_distributed.call_args[0]
-        assert call_args[4] == TimeIntegrationScheme.SSP_RK3
-        # multi_gpu 是 _solve_transient_distributed 签名里第 21 个位置
-        # 参数（索引 20：input_file/order/surface_mesh/skip_quality_check/
-        # time_scheme/dual_time_inner_iter/turbulence_model/
-        # max_iter/dt/use_eikonal/output_dir/reference_area/threads/
-        # turbulence_intensity/viscosity_ratio/mu_molecular/rho_inf/
-        # vel_inf/p_inf/n_ranks/multi_gpu——tet_basis_mode 已删除，
-        # 所有索引相对旧版本整体前移 1）。
-        assert call_args[20] is True
+        assert _arg(mock_distributed, "time_scheme") == TimeIntegrationScheme.SSP_RK3
+        assert _arg(mock_distributed, "multi_gpu") is True

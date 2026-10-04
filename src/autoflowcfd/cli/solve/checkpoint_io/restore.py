@@ -113,7 +113,7 @@ def restore_solver_state_from_fields(solver, fields: dict, metadata: dict) -> No
     solver.state.U = U_restored
     solver.state._update_primitives()
 
-    # 湍流场恢复（配套 write_checkpoint 的 k_field/omega_field 持久化，
+    # 湍流场恢复（配套 write_checkpoint 的输运场持久化，字段名为模型声明的 TRANSPORTED_FIELDS，
     # 见该函数文档）：checkpoint 里有就精确恢复，形状必须与刚重建的
     # turb_model 字段一致（否则说明网格/阶数不匹配，同 U_sps 的处理，
     # 拒绝恢复而不是静默截断/广播）；checkpoint 是旧版本写的、没有这两个
@@ -121,20 +121,16 @@ def restore_solver_state_from_fields(solver, fields: dict, metadata: dict) -> No
     # 这是此前一直存在的行为，向后兼容，不因为新加了持久化就让旧
     # checkpoint 无法 resume。
     turb_model = getattr(solver, "turb_model", None)
-    if turb_model is not None and (hasattr(turb_model, "k_field") or hasattr(turb_model, "omega_field")):
-        if "k_field" in fields and "omega_field" in fields:
-            k_restored = fields["k_field"]
-            omega_restored = fields["omega_field"]
-            if k_restored.shape != turb_model.k_field.shape or omega_restored.shape != turb_model.omega_field.shape:
-                raise click.ClickException(
-                    f"Checkpoint 湍流场形状 k={k_restored.shape}/omega={omega_restored.shape} 与重建求解器的 "
-                    f"turb_model 形状 k={turb_model.k_field.shape}/omega={turb_model.omega_field.shape} "
-                    f"不匹配（网格或阶数可能已变化），拒绝恢复。"
-                )
-            turb_model.k_field = k_restored
-            from autoflowcfd.core.turbulence.sst.log_omega import admissible_omega
-
-            turb_model.omega_field = admissible_omega(np.asarray(omega_restored), turb_model.omega_inf)
+    names = getattr(turb_model, "TRANSPORTED_FIELDS", ())
+    if turb_model is not None and names:
+        if all(name in fields for name in names):
+            for name, current in zip(names, turb_model.transported_fields()):
+                if fields[name].shape != current.shape:
+                    raise click.ClickException(
+                        f"Checkpoint 湍流场 {name} 形状 {fields[name].shape} 与重建求解器的 turb_model "
+                        f"形状 {current.shape} 不匹配（网格或阶数可能已变化），拒绝恢复。"
+                    )
+            turb_model.restore_transported([np.asarray(fields[name]) for name in names])
             # 跳过 production ramp（2026-08-25 代码审查）：k/omega 场已精确恢复，
             # 说明湍流已充分发展，再重新压制产生项 50 步会把已收敛的湍流场
             # 往回压。order_continuation.py 的 resume 分支已有同样的跳过逻辑，
@@ -151,9 +147,9 @@ def restore_solver_state_from_fields(solver, fields: dict, metadata: dict) -> No
                 # _phase_initial_residual 丢掉。
                 solver._ramp_baseline_reset_done = True
         else:
-            print("   ⚠️  Checkpoint 缺少 k_field/omega_field（旧版本 checkpoint）："
+            print(f"   ⚠️  Checkpoint 缺少湍流场 {'/'.join(names)}（旧版本 checkpoint 或模型不同）："
                   "湍流场从均匀初始猜测值重新开始，与已恢复的平均流场不连续，"
-                  "SST 收敛可能需要重新爬升。")
+                  "收敛可能需要重新爬升。")
 
         # nu_t 恢复（配套 write_checkpoint 的 nu_t 持久化）：
         # checkpoint 里有就精确恢复，没有时保留 FRSolver 构造时的零值。

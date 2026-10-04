@@ -32,11 +32,11 @@ VTK 兼容查看器可视化使用。
       占位实现——带 binary+zlib 压缩的 XML VTU（`binary=True`，xml 的
       默认值）是当前主流 CFD 后处理工具（OpenFOAM 的 foamToVTK、
       ParaView 原生写入器）实际使用的现代标准格式。
-    - `mu_t`（湍流动力粘度），如果提供了，是求解器自己算出的 SST 混合
-      值（见 core/turbulence_sst.py 的 `compute_eddy_viscosity`），通过
-      CheckpointManager 的 extra_fields 持久化保存——而不是在它不可用时
-      （例如加上这个功能之前保存的旧 checkpoint）退化用的简化
-      nu_t = k/omega 估计值。
+    - 湍流量（`k`/`omega`/`nu_tilde`/`nut`）取自湍流模型输运场与涡粘的单元平均
+      （`core/turbulence/output.py::turbulence_cell_means`，checkpoint 里是 `turb_cell_*`
+      字段）。2026-10-04 以前 `k`/`omega` 读的是守恒解第 6、7 列——SST 状态数组里从未
+      更新的历史槽位，导出的永远是初值；`nut` 在缺 `mu_t` 字段时（写 checkpoint 的一方从未
+      写过它）退化成用这两列算的估计。
     - `export_boundaries()` 只导出命名的边界面片（WALL/INLET/OUTLET/...
       表面三角形），标记稳定的整数 BoundaryID/BoundaryTypeID（并把
       名称对照表作为 field data 嵌入）——这是 Fluent/OpenFOAM/STAR-CCM+
@@ -45,7 +45,7 @@ VTK 兼容查看器可视化使用。
 
 Example:
     >>> from autoflowcfd.postprocess import VTKExporter
-    >>> exporter = VTKExporter(grid_data, solution, mu_t=mu_t)
+    >>> exporter = VTKExporter(grid_data, solution, turbulence=turbulence_cell_means(model, n_prism, order))
     >>> exporter.export("output.vtk", binary=True)
 """
 
@@ -64,7 +64,10 @@ _VTK_WEDGE = 13  # 三棱柱——VTK 自己的节点顺序正好与本项目的
                  # (v0,v1,v2,w0,w1,w2) 约定直接一致（两个三角形"底面"
                  # 依次列出），不需要重新排序
 
-_VALID_FIELDS = {'velocity', 'pressure', 'k', 'omega', 'nut', 'turbulence', 'q_criterion'}
+#: 湍流输出键（`core/turbulence/output.py`：SST 有 k/omega/nut，SA-neg 有 nu_tilde/nut）。
+_TURBULENCE_FIELDS = ('k', 'omega', 'nu_tilde', 'nut')
+#: `turbulence` 是"该模型全部湍流输出"的别名，导出时展开（`_expand_fields`）。
+_VALID_FIELDS = {'velocity', 'pressure', 'turbulence', 'q_criterion'} | set(_TURBULENCE_FIELDS)
 
 
 class VTKExporter:
@@ -78,12 +81,11 @@ class VTKExporter:
     Attributes:
         grid_data: 网格数据对象
         solution: 流场解向量
-        mu_t: 可选的 (n_cells,) 湍流动力粘度，求解器实际算出的值（来自
-            CheckpointManager 的 extra_fields）。缺失时，'nut' 导出会
-            退化成简化的 k/omega 估计并记录警告。
+        turbulence: 湍流单元场 `{键: (n_cells,)}`（键见 `_TURBULENCE_FIELDS`）。请求了而缺失的
+            湍流量写零并记录警告。
 
     Example:
-        >>> exporter = VTKExporter(grid_data, solution, mu_t=mu_t)
+        >>> exporter = VTKExporter(grid_data, solution, turbulence=turbulence)
         >>> exporter.export("result.vtk", fields=['velocity', 'pressure'], binary=True)
     """
 
@@ -91,22 +93,23 @@ class VTKExporter:
         self,
         grid_data: GridData,
         solution: SolutionVector,
-        mu_t: Optional[np.ndarray] = None,
+        turbulence: Optional[Dict[str, np.ndarray]] = None,
     ):
         """初始化 VTK 导出器。
 
         Args:
             grid_data: 网格数据对象
             solution: 流场解向量
-            mu_t: 可选的、求解器算出的精确逐单元湍流动力粘度
-                (Pa.s)，形状 (n_cells,)
+            turbulence: 可选的湍流单元场 `{键: (n_cells,)}`（键见 `_TURBULENCE_FIELDS`），取自
+                湍流模型的输运场与涡粘（`core/turbulence/output.py::turbulence_cell_means`，
+                checkpoint 里是 `turb_cell_*` 字段）
 
         Raises:
             ValueError: 网格或解数据无效
         """
         self.grid_data = grid_data
         self.solution = solution
-        self.mu_t = np.asarray(mu_t, dtype=np.float64) if mu_t is not None else None
+        self.turbulence = {k: np.asarray(v, dtype=np.float64) for k, v in (turbulence or {}).items()}
 
         logger.info(
             f"VTKExporter initialized:\n"
@@ -144,15 +147,7 @@ class VTKExporter:
             >>> path = exporter.export("result.vtk", binary=True)
             >>> print(f"Exported to: {path}")
         """
-        if fields is None:
-            fields = ['velocity', 'pressure']
-
-        invalid_fields = set(fields) - _VALID_FIELDS
-        if invalid_fields:
-            raise ValueError(
-                f"Invalid fields: {invalid_fields}. "
-                f"Valid fields: {_VALID_FIELDS}"
-            )
+        fields = self._expand_fields(fields)
 
         output_path = Path(output_path)
 
@@ -231,14 +226,7 @@ class VTKExporter:
                 "boundary groups over tetrahedra + face extraction), not "
                 "a bare surface GridData."
             )
-        if fields is None:
-            fields = ['velocity', 'pressure']
-        invalid_fields = set(fields) - _VALID_FIELDS
-        if invalid_fields:
-            raise ValueError(
-                f"Invalid fields: {invalid_fields}. "
-                f"Valid fields: {_VALID_FIELDS}"
-            )
+        fields = self._expand_fields(fields)
 
         faces = self.grid_data.ensure_faces_exist()
         if faces.node_connectivity is None:
@@ -313,9 +301,31 @@ class VTKExporter:
         'pressure': 'Pressure',
         'k': 'TurbulentKineticEnergy',
         'omega': 'SpecificDissipationRate',
+        'nu_tilde': 'SANuTilde',
         'nut': 'TurbulentViscosity',
         'q_criterion': 'QCriterion',
     }
+
+    def _expand_fields(self, fields: Optional[List[str]]) -> List[str]:
+        """校验场名并展开 `turbulence` 别名（该模型实际有的湍流输出，`self.turbulence` 的键）。"""
+        if fields is None:
+            fields = ['velocity', 'pressure']
+        invalid_fields = set(fields) - _VALID_FIELDS
+        if invalid_fields:
+            raise ValueError(
+                f"Invalid fields: {invalid_fields}. "
+                f"Valid fields: {_VALID_FIELDS}"
+            )
+        out = []
+        for name in fields:
+            if name == 'turbulence':
+                if not self.turbulence:
+                    logger.warning("'turbulence' requested but no turbulence fields are available "
+                                   "(laminar case or checkpoint predates turb_cell_* fields)")
+                out.extend(k for k in _TURBULENCE_FIELDS if k in self.turbulence and k not in out)
+            elif name not in out:
+                out.append(name)
+        return out
 
     def _export_legacy(self, output_path: Path, fields: List[str], binary: bool) -> None:
         from .vtk_export_legacy import export_legacy  # 见 vtk_export_legacy.export_legacy

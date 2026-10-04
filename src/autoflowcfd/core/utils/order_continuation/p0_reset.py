@@ -9,7 +9,6 @@ import numpy as np
 
 
 
-from autoflowcfd.core.fr_solver.turbulence import _set_freestream_turbulence
 
 
 def _reset_state_to_p0(solver, expected_p0_n_sps: int = 1) -> None:
@@ -45,13 +44,12 @@ def _reset_state_to_p0(solver, expected_p0_n_sps: int = 1) -> None:
     )
     solver.state = p0_state
 
-    if getattr(solver, "turb_model", None) is not None and hasattr(solver.turb_model, "k_field"):
-        # 用 Tu/VR 推导的物理自洽值重置（与 init_turbulence_models 一致）
-        k_inf, omega_inf = _set_freestream_turbulence(solver)
-        solver.turb_model.k_field = np.ones((solver.state.n_cells, expected_p0_n_sps)) * k_inf
-        solver.turb_model.omega_field = np.ones((solver.state.n_cells, expected_p0_n_sps)) * omega_inf
+    if getattr(solver, "turb_model", None) is not None and hasattr(solver.turb_model, "transported_fields"):
+        # 重置为模型的来流值（构造时由 Tu/VR 推导，与 init_turbulence_models 同一组值）
+        solver.turb_model.set_transported_fields(
+            solver.turb_model.freestream_fields((solver.state.n_cells, expected_p0_n_sps), np))
         # nu_t 同样必须重置到 P0 维度——理由同 interpolate_to_new_order
-        # 里的 nu_t 插值处理：它不会自动跟着 k_field/omega_field 变形，
+        # 里的 nu_t 插值处理：它不会自动跟着输运场变形，
         # 只在 compute_source_terms 被调用时才按当时的 k/omega 重新
         # 算出，遗漏会让它保留重置前的形状，被 _compute_local_time_step
         # 在 compute_turbulence_source 刷新它之前读取时引发同一类形状
@@ -68,25 +66,12 @@ def _reset_state_to_p0(solver, expected_p0_n_sps: int = 1) -> None:
     if getattr(solver, "sgs_model", None) is not None and hasattr(solver.sgs_model, "nu_t"):
         solver.sgs_model.nu_t = None
 
-    if solver.wall_distance is not None:
-        old_wall_dist = solver.wall_distance
-        if old_wall_dist.ndim == 2 and old_wall_dist.shape[1] > 1:
-            mean_wall_dist = np.mean(old_wall_dist, axis=1, keepdims=True)
-            solver.wall_distance = np.tile(mean_wall_dist, (1, expected_p0_n_sps))
-            print(f"[INFO] Wall distance field reset to P0 dimensions")
-
     solver.current_order = 0
     solver.ops = generate_fr_operators(0)
     solver.mesh.set_order(0)
 
-    # 真实 bug 修复（2026-09-06）：上面第 434-439 行的 `np.mean` 压缩
-    # 只是权宜的形状占位，不是壁面距离在 P0 下的正确值——见
-    # `recompute_wall_distance_for_current_order` 文档完整推导。
-    # `set_order(0)` 之后 `solver.mesh.sps_coords` 才反映 P0 真实的
-    # 单 SP 坐标，这里重新查询覆盖掉那个被压缩、失真的值；如果没有
-    # 缓存（没调用过 `compute_wall_distance_field`，或本来就没有
-    # wall_distance），保留上面的均值压缩结果作为退化但形状正确的
-    # 后备。
+    # 壁面距离是纯几何量：`set_order(0)` 之后 `sps_coords` 才是 P0 的解点，由来源重新查询
+    # （不取单元平均——见 `recompute_wall_distance_for_current_order` 文档）。
     from autoflowcfd.core.fr_solver.turbulence import recompute_wall_distance_for_current_order
     recompute_wall_distance_for_current_order(solver)
 

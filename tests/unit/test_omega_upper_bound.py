@@ -11,7 +11,7 @@
    或非正的壁距退回下限；
 2. 四个后端在壁距设定（含换阶重查）后都按当前壁距更新上界：CPU 单机
    `apply_wall_distance_source`、单 GPU `_init_wall_distance_gpu`、CPU 分布式与
-   多 GPU 共用的 `apply_distributed_omega_bound`（按**全局**最小壁距，各 rank 一致）。
+   多 GPU 共用的 `apply_distributed_wall_distance`（按**全局**最小壁距，各 rank 一致）。
 """
 
 from types import SimpleNamespace
@@ -36,7 +36,13 @@ def _expected(d_min):
 
 
 def _model():
-    return SimpleNamespace(omega_max=OMEGA_MAX_FLOOR, beta1=BETA1)
+    """真实 SST 模型（壁距经 `TransportedTurbulence.apply_wall_distance` 交给模型）；beta1 = 0.075。"""
+    from autoflowcfd.core.turbulence.sst import SSTModelFR
+
+    m = SSTModelFR(2, 2, k_inf=1e-3, omega_inf=10.0)
+    m.omega_max = OMEGA_MAX_FLOOR
+    assert m.beta1 == BETA1
+    return m
 
 
 def test_upper_bound_formula():
@@ -76,14 +82,14 @@ def test_single_gpu_wall_distance_sets_bound(monkeypatch):
     import autoflowcfd.core.gpu.solver.gpu_solver_init as init_mod
     from autoflowcfd.core.gpu.solver.gpu_solver import GPUFRSolver
     from tests.unit._gpu_cupy_shim import patch_module_get_cupy
-    from tests.validation._flat_plate_case import AnalyticWallDistance
+    from tests.validation._flat_plate_case import plate_wall_source
 
     patch_module_get_cupy(monkeypatch, init_mod, SimpleNamespace(asarray=np.asarray))
     y = np.array([[1e-6, 5e-3], [2e-2, 3e-1]])
     sps = np.zeros(y.shape + (3,))
     sps[..., 0] = 0.5
     sps[..., 1] = y
-    fake = SimpleNamespace(_wall_distance_source=AnalyticWallDistance(), turb_model_name="SST",
+    fake = SimpleNamespace(_wall_distance_source=plate_wall_source(0.05), turb_model_name="SST",
                            mesh=SimpleNamespace(sps_coords=sps, n_cells=2, n_sps_per_cell=2),
                            turb_model_gpu=_model(), mu_molecular=MU, freestream={"rho_inf": RHO})
     GPUFRSolver._init_wall_distance_gpu(fake)
@@ -93,7 +99,7 @@ def test_single_gpu_wall_distance_sets_bound(monkeypatch):
 def test_distributed_bound_uses_global_min(monkeypatch):
     """两个 rank 本地最小壁距不同：经全局最小归约后上界一致，等于单机值。"""
     import autoflowcfd.core.mpi.comm as comm_mod
-    from autoflowcfd.core.mpi.distributed_turbulence import apply_distributed_omega_bound
+    from autoflowcfd.core.mpi.distributed_turbulence import apply_distributed_wall_distance
 
     local = {0: np.array([[3e-6, 1e-2]]), 1: np.array([[4e-4, 2e-1]])}
     global_min = min(float(v.min()) for v in local.values())
@@ -102,11 +108,11 @@ def test_distributed_bound_uses_global_min(monkeypatch):
     bounds = []
     for rank in (0, 1):
         model = _model()
-        apply_distributed_omega_bound(model, local[rank], solver)
+        apply_distributed_wall_distance(model, local[rank], solver)
         bounds.append(model.omega_max)
     assert bounds[0] == bounds[1] == pytest.approx(_expected(global_min), rel=1e-12)
     # 没有 SST 类模型或没有壁距时不做事
-    apply_distributed_omega_bound(None, local[0], solver)
+    apply_distributed_wall_distance(None, local[0], solver)
     untouched = _model()
-    apply_distributed_omega_bound(untouched, None, solver)
+    apply_distributed_wall_distance(untouched, None, solver)
     assert untouched.omega_max == OMEGA_MAX_FLOOR

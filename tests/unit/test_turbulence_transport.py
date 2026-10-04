@@ -23,6 +23,7 @@ import pytest
 
 from autoflowcfd.core.turbulence.transport.face_frames import extrapolate_scalar_pair_kernel
 from autoflowcfd.core.turbulence.transport import _compute_wall_dirichlet_face_mask
+from autoflowcfd.fr.native_padding import real_sps_per_cell
 
 
 class TestExtrapolateScalarToFacesKernelWallDirichlet:
@@ -311,7 +312,9 @@ class TestComputeOmegaWallTarget:
         flat = get_flat_face_geometry(mesh, ops)
         for f in np.nonzero(wall_mask)[0]:
             owner = flat.owner_cell[f]
-            d1_expected = max(np.min(wall_distance[owner]), 1e-8)
+            # 只在真实解点里取 min（2026-10-04：此前对整行取，原生四面体零填充槽位的任意值会被选中）
+            n_real = real_sps_per_cell(mesh.order)[0 if owner < mesh.n_prism_cells else 1]
+            d1_expected = max(np.min(wall_distance[owner, :n_real]), 1e-8)
             nu = mu / rho[owner].mean()
             omega_expected = 60.0 * nu / (beta1 * d1_expected**2)
             np.testing.assert_allclose(omega_wall_value_face[f], omega_expected, rtol=1e-10)

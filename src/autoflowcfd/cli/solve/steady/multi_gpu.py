@@ -13,7 +13,6 @@ from autoflowcfd.cli.solve.helpers import load_mesh_for_solver
 
 def _run_multi_gpu(
     *,
-    use_eikonal,
     aoa_deg, aos_deg, artificial_viscosity_alpha, artificial_viscosity_enabled,
     cfl_max, cfl_min, cfl_start, checkpoint_interval,
     fully_distributed, gpu_device, input_file, max_iter, mu_molecular, n_ranks,
@@ -57,7 +56,6 @@ def _run_multi_gpu(
             freestream=freestream, mu_molecular=mu_molecular, mach_ref=mach_ref,
             enable_viscous=True, skip_quality_check=skip_quality_check,
             turb_model_name=turbulence_model.upper(),
-            use_eikonal=use_eikonal,
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
@@ -83,7 +81,7 @@ def _run_multi_gpu(
             # --turbulence-model 无论填什么都被静默丢弃、恒定跑层流，
             # 终端打印的 Turbulence 行却仍显示用户输入的模型名。
             turb_model=turbulence_model.upper(),
-            wall_distance_source=wall_distance_source_if_needed(turbulence_model, volume_data, use_eikonal),
+            wall_distance_source=wall_distance_source_if_needed(turbulence_model, volume_data),
             # SST 分布式湍流真正接入后（2026-09-02）才需要这两个值算
             # k_inf/omega_inf——此前 turb_model 恒被拒绝，这两个 CLI
             # 选项从未真正传到这里过，与单机 GPU 路径（上面

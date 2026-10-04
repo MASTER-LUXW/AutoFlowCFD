@@ -41,9 +41,9 @@ from autoflowcfd.cli.solve.transient_distributed import _solve_transient_distrib
                    "湍流结构为目的的模型必须用 dual-time，否则结果不能当作"
                    "非稳态数据解读——组合不当时本命令会显式警告。")
 @click.option("--turbulence-model", "-m",
-              type=click.Choice(["sst", "ddes", "iddes", "wmles", "les"]),
+              type=click.Choice(["sst", "sa", "ddes", "iddes", "wmles", "les"]),
               default="ddes",
-              help="湍流模型。iddes 按 Shur et al. (2008)/Gritskevich et al. (2012) "
+              help="湍流模型。sa 为 SA-neg URANS（core/turbulence/sa）。iddes 按 Shur et al. (2008)/Gritskevich et al. (2012) "
                    "SST-IDDES 重新实现（取代此前的死代码版本），部分常数（f_e2 的 "
                    "c_t/c_l）本会话未能独立复核原始文献数值，见 core/turbulence/des.py "
                    "::IDDESModel 文档。注意：ddes/iddes/les 会在 VELOCITY_INLET 边界"
@@ -88,7 +88,6 @@ from autoflowcfd.cli.solve.transient_distributed import _solve_transient_distrib
                    'adaptive_cfl.py 模块文档第 11 条）。')
 @click.option("--physical-time", default=None, help="总物理时间（秒）")
 @click.option("--output", "-o", "output_dir", default="./transient_results", help="输出目录")
-@click.option("--use-eikonal", is_flag=True, help='使用 Eikonal 方程求解壁面距离')
 @click.option("--surface-mesh", "-s", type=click.Path(exists=True), default=None,
               help='原始面网格路径 - input_file 是 .nas 体网格时必填，用于反推边界分组；input_file 是 .pkl 时不需要')
 @click.option("--skip-quality-check", is_flag=True, help='跳过求解前的网格质量门检查（不建议，仅用于临时诊断）')
@@ -138,7 +137,7 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
               dt: float, cfl_start: Optional[float], cfl_max: Optional[float], cfl_min: Optional[float],
         aoa_deg: float, aos_deg: float,
         physical_time: float,
-              output_dir: str, use_eikonal: bool, surface_mesh: Optional[str],
+              output_dir: str, surface_mesh: Optional[str],
               skip_quality_check: bool, reference_area: Optional[float],
               dual_time_inner_iter: int, threads: int, init_checkpoint: Optional[str],
               turbulence_intensity: float, viscosity_ratio: float, sem_num_eddies: int,
@@ -165,7 +164,6 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
         dt: 时间步长
         physical_time: 总物理时间（秒）
         output_dir: 输出目录
-        use_eikonal: 是否使用 Eikonal 方程
         surface_mesh: 原始面网格路径，input_file 是 .nas 体网格时必填
         skip_quality_check: 跳过求解前的网格质量门检查
         init_checkpoint: 从稳态 checkpoint 初始化（可选）
@@ -257,7 +255,7 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
         _solve_transient_distributed(
             input_file, order, surface_mesh, skip_quality_check,
             scheme_from_name(time_method), dual_time_inner_iter,
-            turbulence_model, max_iter, dt, use_eikonal, output_dir,
+            turbulence_model, max_iter, dt, output_dir,
             reference_area, threads, turbulence_intensity, viscosity_ratio,
             mu_molecular, rho_inf, vel_inf, p_inf,
             n_ranks, multi_gpu, fully_distributed, gpu_device, backend,
@@ -334,7 +332,7 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
     )
 
     # 4. 计算壁面距离场（DES/LES/WMLES 必须）
-    compute_wall_distance_for_solver(solver, volume_data, use_eikonal=use_eikonal)
+    compute_wall_distance_for_solver(solver, volume_data)
 
     # 4.5. 从 checkpoint 初始化（可选：以稳态结果为初场启动瞬态计算）
     if init_checkpoint:

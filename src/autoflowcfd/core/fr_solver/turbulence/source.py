@@ -6,9 +6,9 @@
 from typing import Optional
 
 import numpy as np
-from loguru import logger
 
 from autoflowcfd.core.turbulence.des import IDDESModel
+from autoflowcfd.core.turbulence.registry import is_sa_family, is_sst_family
 from autoflowcfd.core.turbulence.transported import TurbulenceRates
 from autoflowcfd.core.fr_operators.corrected_gradient import source_velocity_gradient
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
@@ -71,44 +71,30 @@ def prepare_turbulence_inputs(solver):
     Q = solver.state.Q
     grad_vel = turbulence_velocity_gradient(solver, Q)
 
+    # 壁距是纯几何量，每个阶数都在当时的解点上由来源重新查询（`wall_distance.py`）。缺失或
+    # 形状不符一律报错：此前形状不符时取单元平均再广播（2026-09-06 修掉的同类缺陷，近壁
+    # 分辨率被抹平），缺失时退回"单元特征长度"——到达这里的模型全部需要壁距，两条兜底只会
+    # 让近壁湍流静默变坏。
     d_wall = solver.wall_distance
-    if d_wall is not None:
-        expected_shape = (solver.state.n_cells, solver.state.n_sps)
-        if d_wall.shape != expected_shape:
-            logger.warning(
-                f"Wall distance shape mismatch: expected {expected_shape}, got {d_wall.shape}. "
-                f"Rescaling to match current state..."
-            )
-            if d_wall.ndim == 2:
-                mean_d = np.mean(d_wall, axis=1, keepdims=True)
-                d_wall = np.tile(mean_d, (1, solver.state.n_sps))
-                solver.wall_distance = d_wall
-            else:
-                raise RuntimeError(f"Cannot rescale wall distance from shape {d_wall.shape}")
-
+    expected_shape = (solver.state.n_cells, solver.state.n_sps)
     if d_wall is None:
-        if solver.turb_model_name in ["SST", "DDES", "IDDES", "WMLES", "LES"]:
-            raise RuntimeError(
-                f"Wall distance field not computed for turbulence model '{solver.turb_model_name}'. "
-                f"Please call compute_wall_distance_field() before solving, or ensure wall distance "
-                f"is provided during solver initialization. Industrial-grade calculation requires "
-                f"accurate wall distance, not simplified estimates."
-            )
-        else:
-            n_cells, n_sps = solver.state.U.shape[:2]
-            volumes = solver._get_cell_volumes()
-            h_char = np.power(np.abs(volumes), 1.0 / 3.0)
-            d_wall = np.tile(h_char[:, np.newaxis], (1, n_sps))
-            logger.warning("Using characteristic length scale as wall distance estimate")
-
-    mu = getattr(solver, 'mu_molecular', 1.8e-5)  # 分子粘度（k/omega方程自身扩散系数用分子粘度，与平均流粘性应力
-    # 张量所用的有效粘度[core/fr_solver.py::_get_turbulent_viscosity_field]是两个不同量）
-    return Q, grad_vel, d_wall, mu
+        raise RuntimeError(
+            f"湍流模型 '{solver.turb_model_name}' 需要壁面距离场，但求解器没有施加过"
+            f"（apply_wall_distance_source）——不能用估计值代替。")
+    if d_wall.shape != expected_shape:
+        raise RuntimeError(
+            f"壁面距离场形状 {d_wall.shape} 与当前解点 {expected_shape} 不符：换阶后必须由来源"
+            f"重新查询（recompute_wall_distance_for_current_order），不能插值或平均。")
+    # 分子粘度：湍流方程自身扩散系数用分子粘度，与平均流粘性应力张量所用的有效粘度是两个不同量
+    return Q, grad_vel, d_wall, solver.mu_molecular
 
 
 def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, apply_des: bool, conv_geom=None):
-    """在 `turb_model` 当前的 `k_field/omega_field` 上求 `dk/dt` 与 `dw/dt`（`w = ln omega`，
-    见 `core/turbulence/sst/log_omega.py`）。
+    """在 `turb_model` 当前的输运场上求各 Newton 未知量的时间导数。
+
+    SA-neg 走 `turbulence/sa/rates.py::evaluate_sa_rates`（后端无关的一份算法，这里注入 CPU 的
+    标量输运原语）；SST 族在 `k_field/omega_field` 上求 `dk/dt` 与 `dw/dt`（`w = ln omega`，见
+    `core/turbulence/sst/log_omega.py`），下面各段说明都是 SST 的。
 
     返回 `TurbulenceRates`（`turbulence/transported.py`）：`raw = (Sk, S_omega)` 是模型源项
     （带 rho），`source = (Sk/rho, S_omega/(rho omega))` 是**源项部分**，`transport` 是输运部分
@@ -122,17 +108,24 @@ def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, apply_des: boo
     `conv_geom`：标量对流的共享几何（只依赖平均流），隐式路径在 Newton 步起点
     算一次传入（`transport/residual.py::prepare_convection_geometry`）。
     """
+    if is_sa_family(solver.turb_model_name):
+        from autoflowcfd.core.turbulence.sa import evaluate_sa_rates
+        from autoflowcfd.core.turbulence.transport.primitives import CpuScalarTransport
+
+        transport = CpuScalarTransport(solver, conv_geom, getattr(solver, "_turbulence_flat_face_override", None))
+        return evaluate_sa_rates(solver.turb_model, transport, Q, grad_vel, d_wall, mu)
+
     grad_k = None
     grad_w = None
     grad_omega = None
     omega = solver.turb_model.omega_field
-    if solver.turb_model_name in ["SST", "DDES", "IDDES"]:
+    if is_sst_family(solver.turb_model_name):
         from autoflowcfd.core.fr_residual.viscous import compute_scalar_gradient
-        from autoflowcfd.core.turbulence.sst.bounds import clip_gradient_magnitude
+        from autoflowcfd.core.turbulence.limits import clip_gradient_magnitude
         from autoflowcfd.core.turbulence.sst.log_omega import log_omega
 
         # 梯度对 k 与 w = ln(omega) 求（被输运的量），模长上限只作用在这两者上（退化单元上
-        # 的度量噪声放大，见 `sst/bounds.py::MAX_GRADIENT_MAGNITUDE`）；模型项用物理梯度
+        # 的度量噪声放大，见 `turbulence/limits.py::MAX_GRADIENT_MAGNITUDE`）；模型项用物理梯度
         # grad(omega) = omega grad(w)
         grad_k = clip_gradient_magnitude(
             compute_scalar_gradient(solver.turb_model.k_field[:, :, np.newaxis], solver.ops, solver.mesh), np)
@@ -200,7 +193,7 @@ def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, apply_des: boo
     # 跨单元扩散。见 core/turbulence_transport.py 模块文档。
     transport_k = None
     transport_w = None
-    if solver.turb_model_name in ["SST", "DDES", "IDDES"]:
+    if is_sst_family(solver.turb_model_name):
         from autoflowcfd.core.turbulence.transport import compute_turbulence_transport_residual
         # 扩散系数读 compute_source_terms 刚在同一组 (k, omega) 上刷新的 nu_t 与 F1；
         # grad_k / grad_w 复用上面为源项算好、裁剪过的同一份（79 万单元 P2 冗余梯度
@@ -215,7 +208,10 @@ def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, apply_des: boo
 
 
 def finalize_turbulence_update(solver) -> None:
-    """`k/omega` 更新之后的后处理：模态滤波（非恒等滤波矩阵时）。显式与隐式路径共用。
+    """湍流场更新之后的后处理：模态滤波（非恒等滤波矩阵时）。显式与隐式路径共用。
+
+    滤波作用在模型的 Newton 未知量上（被多项式表示、被输运的量：SST 为 k 与 `ln omega`、
+    SA-neg 为 `nu_tilde`，`TransportedTurbulence.newton_unknowns`），逐列施加后经模型写回。
 
     **壁面 omega 不在这里做步后松弛**（2026-10-01 删除）：壁面条件只由扩散残差里
     的面 Dirichlet 施加（显式与隐式同一离散）。此前显式路径每步把壁面 owner 单元
@@ -237,7 +233,10 @@ def finalize_turbulence_update(solver) -> None:
             compute_turb_troubled_mask, filter_scalar_field,
             filter_scalar_field_gated, resolve_turb_filter_gate,
         )
-        from autoflowcfd.core.turbulence.sst.log_omega import log_omega, omega_from_log
+        model = solver.turb_model
+        shape = model.transported_fields()[0].shape
+        x = model.newton_unknowns(np)
+        columns = [np.ascontiguousarray(x[:, j]).reshape(shape) for j in range(x.shape[1])]
         n_prism = solver.mesh.n_prism_cells
         # 门控维度与平均流的 `AFCFD_FILTER_MODE` **独立**（2026-09-15）：
         # 真实网格 250 步对照决定性证明两维的效果可以完全分离——off 与
@@ -248,28 +247,15 @@ def finalize_turbulence_update(solver) -> None:
             order = getattr(solver, "current_order", None)
             if order is None:
                 order = solver.order
-            # 传感器量的是多项式表示的光滑度，被表示的是 w = ln(omega)
-            troubled = compute_turb_troubled_mask(
-                solver.turb_model.k_field, log_omega(solver.turb_model.omega_field, np),
-                int(order), n_prism=n_prism)
+            # 传感器量的是多项式表示的光滑度，被表示的是未知量本身（SST 为 w = ln(omega)）
+            troubled = compute_turb_troubled_mask(columns, int(order), n_prism=n_prism)
             solver._turb_filter_troubled_frac = float(np.mean(troubled))
-            solver.turb_model.k_field = filter_scalar_field_gated(
-                solver.turb_model.k_field, solver.ops.filter_prism,
-                solver.ops.filter_tet, troubled, n_prism=n_prism,
-            )
-            # 滤波作用在被求解/被输运的 w = ln(omega) 上（sst/log_omega.py）
-            solver.turb_model.omega_field = omega_from_log(filter_scalar_field_gated(
-                log_omega(solver.turb_model.omega_field, np), solver.ops.filter_prism,
-                solver.ops.filter_tet, troubled, n_prism=n_prism,
-            ), solver.turb_model.omega_max, np)
+            filtered = [filter_scalar_field_gated(c, solver.ops.filter_prism, solver.ops.filter_tet, troubled,
+                                                  n_prism=n_prism) for c in columns]
         else:
-            solver.turb_model.k_field = filter_scalar_field(
-                solver.turb_model.k_field, n_prism, solver.ops.filter_prism, solver.ops.filter_tet,
-            )
-            solver.turb_model.omega_field = omega_from_log(filter_scalar_field(
-                log_omega(solver.turb_model.omega_field, np), n_prism, solver.ops.filter_prism,
-                solver.ops.filter_tet,
-            ), solver.turb_model.omega_max, np)
+            filtered = [filter_scalar_field(c, n_prism, solver.ops.filter_prism, solver.ops.filter_tet)
+                        for c in columns]
+        model.set_newton_unknowns(np.stack([np.asarray(f).ravel() for f in filtered], axis=1), np)
         # 滤波可能把场值推到正性下限以下（滤波器系数含负权重，理论上
         # 可能），滤波后必须重新过一遍正性/上界限制器，不能假设滤波
         # 输出天然满足这些约束。

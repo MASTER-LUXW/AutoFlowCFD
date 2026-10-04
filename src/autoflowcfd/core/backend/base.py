@@ -30,10 +30,11 @@ class SolutionVector:
     - data[:, 0]: rho（密度）
     - data[:, 1:4]: rho*u, rho*v, rho*w（动量）
     - data[:, 4]: rho*E（总能密度）
-    - data[:, 5:7]: rho*k, rho*omega（湍流量，可选）
+    - data[:, 5:7]: SST 求解器状态数组的两个历史槽位（从未被更新，湍流量在模型对象上，
+      后处理读 `core/turbulence/output.py` 的单元平均）
 
-    下面的 get_velocity()/get_pressure()/get_turbulence() 访问器会把
-    这些量转换成方法名所承诺的**原始**量（真实速度、静压、k 和 omega）
+    下面的 get_velocity()/get_pressure() 访问器会把
+    这些量转换成方法名所承诺的**原始**量（真实速度、静压）
     ——以前这几个方法直接原样返回未转换的守恒量列（例如所谓的
     "velocity" 其实是动量，"pressure" 其实是总能密度），会给任何调用方
     悄悄地把数值标错好几个数量级。这里保留是为了向后兼容，但要注意
@@ -88,10 +89,4 @@ class SolutionVector:
             return (self.GAMMA - 1.0) * (rhoE - 0.5 * rho * V_sq)
         return np.array([])
 
-    def get_turbulence(self) -> tuple:
-        """获取原始湍流量 (k, omega)，即把守恒形式 (rho*k, rho*omega)
-        列除以密度。若该解没有湍流量列，返回两个空数组。"""
-        if self.data is not None and self.data.shape[1] >= 7:
-            rho = np.maximum(self.data[:, 0], self._RHO_FLOOR)
-            return (self.data[:, 5] / rho, self.data[:, 6] / rho)
-        return (np.array([]), np.array([]))
+

@@ -188,7 +188,7 @@ class BoundaryMap:
     # 猜错（壁面边界单元是边界层棱柱、索引落在 [0, n_prism)，两张真实
     # 网格都满足 n_prism < n_nodes），使壁面距离场变成"到一堆按编号散布
     # 在全域的任意节点的距离"。完整推导见
-    # `solve_wall_distance.wall_nodes_from_boundary_faces` 的文档。
+    # `core/utils/wall_distance/surface.py` 的模块文档。
     # 需要单元索引用 `get_cell_indices`；需要壁面节点用那个函数。
 
     def get_cell_indices(self, boundary_name: str) -> np.ndarray:

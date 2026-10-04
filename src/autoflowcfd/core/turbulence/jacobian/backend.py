@@ -50,17 +50,32 @@ def turbulence_linearization(solver_like, turb, inputs, conv_geom, flat):
     `solver_like` 是湍流残差实际求值的那个对象（单机为求解器，分布式为紧凑空间适配器），
     壁面/开放边界掩码与 omega 壁面目标值取自与残差同一组函数。
     """
-    from autoflowcfd.core.turbulence.sst.unknowns import sst_dirichlet_spec
+    from autoflowcfd.core.turbulence.sa import SAModel
     from autoflowcfd.core.turbulence.transport.omega_wall import (
         _compute_omega_wall_target, _compute_open_boundary_face_mask, _compute_wall_dirichlet_face_mask,
     )
 
     Q, grad_vel, d_wall, mu = inputs
     wall_zero = _compute_wall_dirichlet_face_mask(solver_like)
-    omega_wall, has_wall = _compute_omega_wall_target(solver_like, wall_zero, mu, Q[..., 0],
-                                                      flat_face_override=flat)
-    faces, values = sst_dirichlet_spec(wall_zero, omega_wall, has_wall)
+    pointwise = None
+    strong_rows = None
+    if isinstance(turb, SAModel):
+        from autoflowcfd.core.fr_operators.gradients import compute_physical_scalar_gradient
+        from autoflowcfd.core.turbulence.sa.linearization import SAPointwise, sa_dirichlet_spec, sa_strong_rows
+
+        faces, values = sa_dirichlet_spec(wall_zero)
+        strong_rows = sa_strong_rows(d_wall)
+        grad_rho = compute_physical_scalar_gradient(np.ascontiguousarray(Q[..., 0]), solver_like.mesh,
+                                                    solver_like.ops)
+        pointwise = SAPointwise(np, turb, Q, grad_vel, d_wall, mu, grad_rho)
+    else:
+        from autoflowcfd.core.turbulence.sst.unknowns import sst_dirichlet_spec
+
+        omega_wall, has_wall = _compute_omega_wall_target(solver_like, wall_zero, mu, Q[..., 0],
+                                                          flat_face_override=flat)
+        faces, values = sst_dirichlet_spec(wall_zero, omega_wall, has_wall)
     return TurbulenceLinearization(
         mesh=solver_like.mesh, ops=solver_like.ops, flat=flat, turb=turb, Q=Q, grad_vel=grad_vel,
         d_wall=d_wall, mu=float(mu), conv_geom=conv_geom, dirichlet_faces=faces, dirichlet_values=values,
-        open_face=_compute_open_boundary_face_mask(solver_like, flat))
+        open_face=_compute_open_boundary_face_mask(solver_like, flat), pointwise=pointwise,
+        strong_rows=strong_rows)

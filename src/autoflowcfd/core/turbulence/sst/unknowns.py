@@ -10,7 +10,8 @@ import numpy as np
 from autoflowcfd.core.turbulence.transported import TransportedTurbulence
 
 from .bounds import ABS_FLOOR, K_FLOOR_FRACTION
-from .log_omega import log_omega, omega_from_log
+from .bounds import apply_omega_upper_bound
+from .log_omega import admissible_omega, log_omega, omega_from_log
 
 
 class _SSTTransportedMixin(TransportedTurbulence):
@@ -19,6 +20,7 @@ class _SSTTransportedMixin(TransportedTurbulence):
     TRANSPORTED_FIELDS = ("k_field", "omega_field")
     NEWTON_LOG_COLUMNS = (1,)
     CACHED_ATTRS = ("nu_t", "_last_F1", "_last_beta_blend", "_omega_realizability_min")
+    OUTPUT_FIELD_KEYS = ("k", "omega")
 
     def _unknown_from_field(self, j, field, xp):
         return field if j == 0 else log_omega(field, xp)
@@ -30,6 +32,23 @@ class _SSTTransportedMixin(TransportedTurbulence):
         """`(k, ln omega)` 的逐列尺度：k 为尺度下限（物理性限幅与差分步长），`ln omega` 是
         O(1) 的对数量、取 1（它的限幅是绝对的，见 `ScaledFieldRowLimits` 的 `log_columns`）。"""
         return max(ABS_FLOOR, K_FLOOR_FRACTION * float(self.k_inf)), 1.0
+
+    def freestream_values(self):
+        return float(self.k_inf), float(self.omega_inf)
+
+    def upper_bounds(self):
+        return float(self.k_max), float(self.omega_max)
+
+    def apply_wall_distance(self, wall_distance, nu_ref, global_min=None):
+        """omega 上界随最近壁面解点给定（`bounds.py` 模块文档）。"""
+        apply_omega_upper_bound(self, wall_distance, nu_ref, global_min=global_min)
+
+    def restore_transported(self, fields, source: str = "checkpoint"):
+        """恢复 `(k, omega)`；omega 经可容许性投影（旧格式直接输运 omega、允许越过零，见
+        `log_omega.py::admissible_omega`）。"""
+        k, omega = fields
+        self.k_field = k
+        self.omega_field = admissible_omega(omega, self.omega_inf, source=source)
 
 
 def sst_dirichlet_spec(wall_zero_face, omega_wall_face, has_omega_wall):

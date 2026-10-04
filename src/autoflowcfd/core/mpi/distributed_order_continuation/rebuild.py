@@ -4,7 +4,6 @@
 """
 
 import numpy as np
-from autoflowcfd.core.turbulence.sst.log_omega import lift_log_omega
 
 
 
@@ -43,9 +42,10 @@ def _interp_state_and_turbulence_local(solver, old_order: int,
     new_local_U = _lift(old_local_U)
 
     turb_model = getattr(solver, 'turb_model', None)
-    if turb_model is not None and hasattr(turb_model, 'k_field'):
-        turb_model.k_field = _lift(turb_model.k_field[:n_local])
-        turb_model.omega_field = lift_log_omega(turb_model.omega_field[:n_local], _lift, turb_model.omega_max)
+    if turb_model is not None and hasattr(turb_model, 'transported_fields'):
+        # 输运场在未知量空间延拓（`TransportedTurbulence.mapped_fields`）
+        turb_model.set_transported_fields(turb_model.mapped_fields(
+            _lift, np, fields=[f[:n_local] for f in turb_model.transported_fields()]))
         # nu_t：同 order_continuation.py 文档说明，只有形状匹配旧阶数时
         # 才插值（可能在 compute_source 刷新前已经是别的形状/尚未构造）。
         if getattr(turb_model, 'nu_t', None) is not None and turb_model.nu_t.shape[1] == old_local_U.shape[1]:
@@ -103,7 +103,7 @@ def _rebuild_cpu_traditional_partition_and_state(solver, target_p: int, new_loca
     from autoflowcfd.core.mpi.distributed_state import DistributedFRState
     from autoflowcfd.core.mpi.halo import HaloExchange
     from autoflowcfd.core.mpi.distributed_turbulence import (
-        apply_distributed_omega_bound, compute_distributed_wall_distance,
+        apply_distributed_wall_distance, compute_distributed_wall_distance,
     )
     from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
 
@@ -160,7 +160,7 @@ def _rebuild_cpu_traditional_partition_and_state(solver, target_p: int, new_loca
         solver.wall_distance_compact = compute_distributed_wall_distance(
             new_dist_fc, solver.mesh, getattr(solver, "_wall_distance_source", None))
         # 换阶后贴壁解点更靠近壁面：omega 上界随之重定
-        apply_distributed_omega_bound(solver.turb_model, solver.wall_distance_compact, solver)
+        apply_distributed_wall_distance(solver.turb_model, solver.wall_distance_compact, solver)
 
         if solver.ddes_model is not None:
             # 真实 bug 修复（2026-09-02，DDES 补齐 max_edge 网格尺度时
@@ -218,7 +218,6 @@ def cpu_traditional_interpolate_to_new_order(solver, target_p: int) -> None:
       意义），直接重置为均匀自由流场——与单机 `run_order_continuation`
       "状态不在 P0 就重置回 P0 均匀流场"分支同一个处理方式。
     """
-    from autoflowcfd.core.fr_solver.turbulence import _set_freestream_turbulence
 
     old_order = solver.current_order
     if old_order == target_p:
@@ -246,9 +245,7 @@ def cpu_traditional_interpolate_to_new_order(solver, target_p: int) -> None:
             solver.freestream, solver.state.n_vars)
 
         if solver.turb_model is not None:
-            k_inf, omega_inf = _set_freestream_turbulence(solver)
-            solver.turb_model.k_field = np.ones((n_local, new_n_sps)) * k_inf
-            solver.turb_model.omega_field = np.ones((n_local, new_n_sps)) * omega_inf
+            solver.turb_model.set_transported_fields(solver.turb_model.freestream_fields((n_local, new_n_sps), np))
             if hasattr(solver.turb_model, 'nu_t'):
                 solver.turb_model.nu_t = np.zeros((n_local, new_n_sps))
             if hasattr(solver.turb_model, 'des_length_scale'):

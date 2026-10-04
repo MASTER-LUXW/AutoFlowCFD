@@ -57,7 +57,8 @@ class _SolverSetupMixin:
             # 比较，会导致 `turbulence-model sst`（小写，steady CLI 路径）
             # 与 `SST`（大写，transient CLI 路径）判出不同的 n_vars——已用
             # 两条 CLI 路径实测复现（steady 得到 n_vars=5，transient 得到 7）。
-            default_n_vars = 7 if turb_model_name.upper() in ["SST", "DDES", "IDDES"] else 5
+            from autoflowcfd.core.turbulence.registry import n_state_vars
+            default_n_vars = n_state_vars(turb_model_name)
             self.state = FRState(n_cells, n_sps, default_n_vars)
             # 初场必须与自由来流边界条件一致（都用同一套 rho_inf/vel_inf/p_inf），
             # 否则显式伪时间推进第一步就要吸收一个几个数量级的压力跳跃

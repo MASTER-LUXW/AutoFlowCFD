@@ -387,7 +387,7 @@ class GPUTurbulenceSST(_SSTTransportedMixin):
         if resolve_turb_filter_gate() == "sensor":
             from autoflowcfd.core.gpu.gpu_troubled_cell import compute_turb_troubled_mask_gpu
 
-            troubled = compute_turb_troubled_mask_gpu(self.k_field, w, n_prism, int(order))
+            troubled = compute_turb_troubled_mask_gpu((self.k_field, w), n_prism, int(order))
             frac = float(cp.mean(troubled))
             self.k_field = filter_scalar_field_gated_gpu(
                 self.k_field, n_prism, ops.filter_prism, ops.filter_tet, troubled)

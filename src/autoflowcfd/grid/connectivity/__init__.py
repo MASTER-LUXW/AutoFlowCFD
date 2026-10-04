@@ -13,7 +13,6 @@ from autoflowcfd.grid.connectivity.face_connectivity import (
     CUBE_FACE_CODES,
     CUBE_FACE_NAMES,
 )
-from autoflowcfd.grid.connectivity.node_connectivity import build_node_adjacency
 
 __all__ = [
     'FRFaceConnectivity',
@@ -23,5 +22,4 @@ __all__ = [
     'tag_boundary_groups_for_mesh',
     'CUBE_FACE_CODES',
     'CUBE_FACE_NAMES',
-    'build_node_adjacency',
 ]

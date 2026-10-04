@@ -156,12 +156,19 @@ def write_checkpoint(
     # 连续。用 hasattr 而非硬编码 SST，同样覆盖内部复用 SSTModelFR 字段
     # 的 DES 包装；turb_model 为 None（--turbulence none）或不含这两个
     # 属性的湍流模型（如纯 SGS 的 LES/WMLES）时自然跳过，不强行造字段。
+    # 字段名取模型声明的输运场（`TransportedTurbulence.TRANSPORTED_FIELDS`：SST 为
+    # k_field/omega_field、SA-neg 为 nu_tilde_field），旧 checkpoint 的 SST 字段名不变。
     turb_model = getattr(solver, "turb_model", None)
     if turb_model is not None:
-        if hasattr(turb_model, "k_field"):
-            extra_fields["k_field"] = turb_model.k_field
-        if hasattr(turb_model, "omega_field"):
-            extra_fields["omega_field"] = turb_model.omega_field
+        for name in getattr(turb_model, "TRANSPORTED_FIELDS", ()):
+            extra_fields[name] = getattr(turb_model, name)
+        # 后处理用的单元平均（`turbulence/output.py`：守恒解的第 6、7 列是从未更新的历史槽位，
+        # VTK 的 k/omega/nut 此前读的正是它们）
+        if getattr(turb_model, "TRANSPORTED_FIELDS", ()):
+            from autoflowcfd.core.turbulence.output import CHECKPOINT_PREFIX, turbulence_cell_means
+
+            for key, arr in turbulence_cell_means(turb_model, solver.mesh.n_prism_cells, _order_ck).items():
+                extra_fields[CHECKPOINT_PREFIX + key] = arr
         # nu_t（湍流涡粘度）持久化：此前只存 k/omega，nu_t 在 resume 后
         # 从 FRSolver 构造时的零值重新开始，而粘性残差计算依赖 nu_t
         # （mu_eff = mu_molecular + nu_t）。Checkpoint 时刻 nu_t 已有充分

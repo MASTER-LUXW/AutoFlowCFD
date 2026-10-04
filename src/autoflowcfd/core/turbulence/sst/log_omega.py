@@ -70,8 +70,3 @@ def admissible_omega(omega, omega_inf: float, xp=np, source: str = "checkpoint")
         omega = xp.where(bad, OMEGA_FLOOR_FRACTION * float(omega_inf), omega)
     return omega
 
-
-def lift_log_omega(omega, lift, omega_max: float):
-    """升阶延拓 omega：多项式表示的是 `w = ln(omega)`，所以在对数空间延拓再取指数
-    （`lift` 是作用在主机数组上的线性延拓算子，全部后端的切阶路径共用本函数）。"""
-    return omega_from_log(lift(log_omega(np.asarray(omega), np)), omega_max, np)

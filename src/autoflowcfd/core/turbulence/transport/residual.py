@@ -13,7 +13,7 @@ from autoflowcfd.core.fr_operators.gradients import compute_physical_scalar_grad
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 
 from .faces import precompute_scalar_convection_geometry
-from ..sst.bounds import clip_gradient_magnitude
+from ..limits import clip_gradient_magnitude
 from ..sst.log_omega import log_omega, log_omega_gradient_source
 from .convection import compute_scalar_convection_residual
 from .diffusion import compute_scalar_diffusion_residual

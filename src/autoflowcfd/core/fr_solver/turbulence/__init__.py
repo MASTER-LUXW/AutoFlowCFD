@@ -30,7 +30,6 @@ from .init import (  # noqa: F401
 )
 from .wall_distance import (  # noqa: F401
     apply_wall_distance_source,
-    compute_wall_distance_field,
     recompute_wall_distance_for_current_order,
 )
 from .source import compute_turbulence_source  # noqa: F401
@@ -43,7 +42,6 @@ __all__ = [
     "apply_turbulence_corrections",
     "compute_turbulence_source",
     "apply_wall_distance_source",
-    "compute_wall_distance_field",
     "get_turbulent_viscosity_field",
     "init_turbulence_models",
     "recompute_wall_distance_for_current_order",

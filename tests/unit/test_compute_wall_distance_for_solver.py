@@ -1,32 +1,26 @@
-"""Unit tests for cli/solve_helpers.compute_wall_distance_for_solver's
-use_eikonal handling - specifically that it now actually builds a node
-adjacency graph (grid.node_connectivity.build_node_adjacency) and forwards
-it to solver.compute_wall_distance_field, instead of the previous dead
-branch that printed a "falling back to KD-Tree" warning and did exactly
-that regardless of the flag.
-"""
+"""CLI 壁距入口（`cli/solve/wall_distance.py::compute_wall_distance_for_solver`）与壁面面片的取法
+（`core/utils/wall_distance/surface.py`）。"""
 
 from unittest.mock import MagicMock, patch
 
+import click
 import numpy as np
+import pytest
 
 from autoflowcfd.cli.solve.helpers import compute_wall_distance_for_solver
+from autoflowcfd.core.utils.wall_distance import wall_face_nodes
 from autoflowcfd.grid.structures import (
     BoundaryMap, GridMetadata, NodeArray, TetrahedralCells, VolumeMeshData,
 )
 
+_APPLY = "autoflowcfd.core.fr_solver.turbulence.apply_wall_distance_source"
+
 
 def _volume_mesh_with_wall():
-    """两个共享一个面的四面体，WALL 组 = **单元** 0。
+    """两个共享一个面的四面体，WALL 组 = **单元** 0（`BoundaryMap.groups` 存单元索引）。
 
-    2026-09-15 更正：原 fixture 写的是 `groups={'wall': [0, 1]}` 配一个
-    只有 1 个单元、4 个节点的网格——那两个数当时被当作**节点**索引，正是
-    `BoundaryMap.groups` 契约（存**单元**索引，见该类 `groups` 字段文档）
-    被误读的体现，而这个误读在生产代码里造成了一处一阶物理错误（壁面
-    距离场算到一堆按编号散布在全域的任意节点上，见
-    `core/utils/wall_distance_source.py::wall_nodes_from_boundary_faces` 的完整推导）。
-    现在 fixture 按契约给单元索引，并且单元数 > 1 以便 WALL 组有真实的
-    边界面可取。
+    单元 0 = [0,1,2,3] 与单元 1 共享面 [1,2,3]，故单元 0 有 3 个边界面，节点并集恰是
+    {0,1,2,3}；节点 4 只属于单元 1。
     """
     nodes = NodeArray(
         x=np.array([0.0, 1.0, 0.0, 0.0, 1.0]),
@@ -45,156 +39,78 @@ def _volume_mesh_with_wall():
                           metadata=metadata)
 
 
-class TestComputeWallDistanceForSolverEikonalWiring:
-    """CLI 入口的接线（2026-09-25 起 CLI 构造 `WallDistanceSource` 并施加，
-    分布式/GPU 后端用同一个来源）。"""
-
-    _APPLY = "autoflowcfd.core.fr_solver.turbulence.apply_wall_distance_source"
-
+class TestCliEntry:
     def test_non_turbulent_model_skips_everything(self):
         solver = MagicMock()
         solver.turb_model_name = 'NONE'
-        with patch(self._APPLY) as mock_apply:
-            compute_wall_distance_for_solver(solver, _volume_mesh_with_wall(), use_eikonal=True)
+        with patch(_APPLY) as mock_apply:
+            compute_wall_distance_for_solver(solver, _volume_mesh_with_wall())
         mock_apply.assert_not_called()
 
-    def test_use_eikonal_false_does_not_build_connectivity(self):
-        """邻接图有实打实的构造成本，只在真的要用 Eikonal 时才建。"""
+    @pytest.mark.parametrize("model", ["SST", "SA", "DDES", "LES"])
+    def test_every_wall_distance_model_gets_the_source(self, model):
+        """判据取唯一的模型分类：此前入口写死 sst/ddes/iddes/wmles/les 一份列表，SA 会被
+        静默跳过（随后在求解时因缺壁距报错）。"""
+        solver = MagicMock()
+        solver.turb_model_name = model
+        with patch(_APPLY) as mock_apply:
+            compute_wall_distance_for_solver(solver, _volume_mesh_with_wall())
+        mock_apply.assert_called_once()
+
+    def test_solver_receives_the_face_derived_surface(self):
+        """施加到求解器上的来源由 WALL 组的边界面构造：壁面节点处距离为 0，节点 4 不在壁面上。"""
         solver = MagicMock()
         solver.turb_model_name = 'SST'
-        with patch("autoflowcfd.grid.connectivity.node_connectivity.build_node_adjacency") as mock_build,                 patch(self._APPLY) as mock_apply:
-            compute_wall_distance_for_solver(solver, _volume_mesh_with_wall(), use_eikonal=False)
-        mock_build.assert_not_called()
-        (_, source), _ = mock_apply.call_args
-        assert source.kind == "kdtree"
-
-    def test_use_eikonal_true_builds_and_forwards_connectivity(self):
-        solver = MagicMock()
-        solver.turb_model_name = 'DDES'
-        from autoflowcfd.grid.connectivity.node_connectivity import build_node_adjacency as real_build
-        seen = {}
-
-        def _spy(*a, **k):
-            seen["conn"] = real_build(*a, **k)
-            return seen["conn"]
-        with patch("autoflowcfd.grid.connectivity.node_connectivity.build_node_adjacency", side_effect=_spy),                 patch(self._APPLY) as mock_apply:
-            compute_wall_distance_for_solver(solver, _volume_mesh_with_wall(), use_eikonal=True)
-        (_, source), _ = mock_apply.call_args
-        assert source.kind == "eikonal"
-        conn = seen["conn"]
-        assert conn.shape[0] == 5  # one row per node
-        # node 0 and node 1 share the single tet - must be neighbors.
-        assert 1 in conn[0] and 0 in conn[1]
-
-
-class TestWallNodesComeFromBoundaryFacesNotIndexGuessing:
-    """壁面节点必须取自 WALL 组的**边界面**（2026-09-15 一阶物理错误修复）。
-
-    原实现用 `max(indices) >= n_nodes` 猜 `BoundaryMap.groups` 存的是单元
-    还是节点索引。它按契约恒为**单元**索引，所以那是在猜一件已经确定的
-    事——而且**恰好只在 WALL 组上猜错**：壁面的边界单元就是边界层棱柱、
-    占单元索引低位区间 `[0, n_prism)`，而两张真实 ANSA 网格都满足
-    `n_prism < n_nodes`：
-
-        cube_demo : body  range=[0,136974]  n_nodes=187702  -> 猜错
-        plate_demo: body  range=[0, 65235]  n_nodes= 88496  -> 猜错
-
-    实测后果（plate_demo）：壁距 max 0.976 m，而到平板的真实最远距离是
-    4.359 m；修复后逐位吻合独立 KD-Tree 核算的 4.359498 m。SST 的 F1/F2
-    混合、omega 壁面目标值、nu_t 限幅、DES 长度尺度与 WMLES 全部由壁距
-    驱动，所以这不是精度问题。
-    """
-
-    def test_wall_nodes_are_boundary_face_nodes(self):
-        from autoflowcfd.core.utils.wall_distance_source import wall_nodes_from_boundary_faces
         vd = _volume_mesh_with_wall()
-        wn, n_faces = wall_nodes_from_boundary_faces(vd, vd.boundaries)
-        # 单元 0 = [0,1,2,3]，与单元 1 共享面 [1,2,3]，故有 3 个边界面，
-        # 其节点并集恰是单元 0 的四个节点。
-        assert n_faces == 3
-        assert sorted(wn.tolist()) == [0, 1, 2, 3]
+        with patch(_APPLY) as mock_apply:
+            compute_wall_distance_for_solver(solver, vd)
+        (_, source), _ = mock_apply.call_args
+        assert source.n_wall_faces == 3
+        nodes = vd.nodes.get_coordinates()
+        assert np.all(source.query(nodes[:4]) == 0.0)
+        # 节点 4 = (1,1,1)：三个壁面面片是 x=0、y=0、z=0 坐标面上的直角三角形，投影 (1,1,0) 等
+        # 都落在三角形外，最近点是斜边中点（如 (0.5,0.5,0)），距离 sqrt(1.5)
+        assert source.query(nodes[4:5])[0] == pytest.approx(np.sqrt(1.5), rel=1e-14)
 
-    def test_old_heuristic_would_have_picked_the_wrong_set(self):
-        """fail 半边：复现原判据在这个拓扑上的错误结果。
-
-        WALL 组是 `[0]`，`max(0) < n_nodes=5`，所以原实现会走 else 分支、
-        把 `[0]` 当**节点**索引——壁面节点集只剩 {0}，而正确答案是
-        {0,1,2,3}。
-        """
-        vd = _volume_mesh_with_wall()
-        idx = vd.boundaries.get_cell_indices('wall')
-        n_nodes = vd.node_count
-        assert idx.max() < n_nodes, "本用例必须命中原判据的错误分支"
-        old_result = sorted(idx[idx < n_nodes].tolist())
-        assert old_result == [0], "原判据会把单元索引当节点索引"
-
-        from autoflowcfd.core.utils.wall_distance_source import wall_nodes_from_boundary_faces
-        new_result = sorted(wall_nodes_from_boundary_faces(vd, vd.boundaries)[0].tolist())
-        assert new_result != old_result
-        assert new_result == [0, 1, 2, 3]
-
-    def test_cell_index_out_of_range_is_rejected_not_truncated(self):
-        """BoundaryMap 与体网格不是一对时必须显式报错。
-
-        原实现对越界索引的处理是静默过滤（`indices[indices < n_nodes]`
-        / `if cell_idx < len(all_connectivity)`），于是"两份文件对不上"
-        会表现为一个悄悄少了一部分壁面的距离场。
-        """
-        import click
-        import pytest
-
-        from autoflowcfd.core.utils.wall_distance_source import wall_nodes_from_boundary_faces
+    def test_out_of_range_cell_index_is_a_cli_error(self):
         vd = _volume_mesh_with_wall()
         vd.boundaries.groups['wall'] = np.array([0, 999], dtype=np.int32)
-        # 核心层报 ValueError，CLI 入口转成可读的命令行错误
-        with pytest.raises(ValueError, match='超出体网格单元数'):
-            wall_nodes_from_boundary_faces(vd, vd.boundaries)
         solver = MagicMock()
         solver.turb_model_name = 'SST'
         with pytest.raises(click.ClickException, match='超出体网格单元数'):
-            compute_wall_distance_for_solver(solver, vd, use_eikonal=False)
+            compute_wall_distance_for_solver(solver, vd)
+
+
+class TestWallFacesComeFromBoundaryFaces:
+    """壁面取自 WALL 组的**边界面**（2026-09-15 一阶物理错误修复：此前用 `max(indices) >=
+    n_nodes` 猜 `BoundaryMap.groups` 存的是单元还是节点索引，恰好只在 WALL 组上猜错——
+    plate_demo 壁距 max 0.976 m，真实 4.359 m）。"""
+
+    def test_wall_faces_are_the_wall_cells_boundary_faces(self):
+        fn = wall_face_nodes(_volume_mesh_with_wall())
+        assert fn.shape[0] == 3
+        assert sorted(np.unique(fn[fn >= 0]).tolist()) == [0, 1, 2, 3]
+
+    def test_cell_index_out_of_range_is_rejected_not_truncated(self):
+        vd = _volume_mesh_with_wall()
+        vd.boundaries.groups['wall'] = np.array([0, 999], dtype=np.int32)
+        with pytest.raises(ValueError, match='超出体网格单元数'):
+            wall_face_nodes(vd)
 
     def test_non_wall_groups_are_excluded(self):
-        """只有 bc_type == 'WALL' 的组参与壁距；SLIP_WALL（外场/风洞壁）
-        必须排除——否则外场壁会把全域的壁距压到域半高量级。"""
-        from autoflowcfd.core.utils.wall_distance_source import wall_nodes_from_boundary_faces
+        """只有 bc_type == 'WALL' 的组参与壁距；SLIP_WALL（外场/风洞壁）必须排除。"""
         vd = _volume_mesh_with_wall()
         vd.boundaries.groups['tunnel'] = np.array([1], dtype=np.int32)
         vd.boundaries.bc_types['tunnel'] = 'SLIP_WALL'
-        wn, n_faces = wall_nodes_from_boundary_faces(vd, vd.boundaries)
-        assert n_faces == 3
-        assert sorted(wn.tolist()) == [0, 1, 2, 3]
-        assert 4 not in wn.tolist()   # 节点 4 只属于 tunnel 那个单元
+        fn = wall_face_nodes(vd)
+        assert fn.shape[0] == 3 and 4 not in fn.tolist()
 
     def test_no_wall_group_returns_empty(self):
-        """没有 WALL 组时返回空集，由调用方决定报错——不在这里兜底。"""
-        from autoflowcfd.core.utils.wall_distance_source import wall_nodes_from_boundary_faces
         vd = _volume_mesh_with_wall()
         vd.boundaries.bc_types['wall'] = 'SLIP_WALL'
-        wn, n_faces = wall_nodes_from_boundary_faces(vd, vd.boundaries)
-        assert len(wn) == 0 and n_faces == 0
+        assert wall_face_nodes(vd).shape[0] == 0
 
     def test_misnamed_accessor_is_gone(self):
-        """`get_node_indices` 这个错名别名必须不再存在。
-
-        它返回的恒是单元索引，名字却让调用方以为是节点索引——这正是本次
-        缺陷的直接成因。需要单元索引用 `get_cell_indices`，需要壁面节点用
-        `wall_nodes_from_boundary_faces`。
-        """
         from autoflowcfd.grid.structures import BoundaryMap as BM
         assert not hasattr(BM, 'get_node_indices')
         assert hasattr(BM, 'get_cell_indices')
-
-    def test_solver_receives_the_face_derived_set(self):
-        """端到端：`compute_wall_distance_for_solver` 施加到求解器上的来源必须
-        由面导出的节点集构造（节点 0~3 在壁面上，节点 4 不在）。"""
-        solver = MagicMock()
-        solver.turb_model_name = 'SST'
-        vd = _volume_mesh_with_wall()
-        with patch("autoflowcfd.core.fr_solver.turbulence.apply_wall_distance_source") as mock_apply:
-            compute_wall_distance_for_solver(solver, vd, use_eikonal=False)
-        (_, source), _ = mock_apply.call_args
-        assert source.n_wall_nodes == 4
-        nodes = vd.nodes.get_coordinates()
-        np.testing.assert_allclose(source.query(nodes[:4]), 0.0, atol=1e-14)
-        assert source.query(nodes[4:5])[0] > 0.0

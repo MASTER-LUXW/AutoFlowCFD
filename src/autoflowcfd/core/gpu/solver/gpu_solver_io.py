@@ -185,7 +185,7 @@ class _GPUSolverIOMixin:
         cp = get_cupy()
         rho = self.Q_gpu[:, :, 0]
         from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_gradient_gpu
-        from autoflowcfd.core.turbulence.sst.bounds import clip_gradient_magnitude
+        from autoflowcfd.core.turbulence.limits import clip_gradient_magnitude
         from autoflowcfd.core.turbulence.sst.log_omega import log_omega
 
         # 梯度对 k 与 w = ln(omega) 求（被输运的量），模长上限只作用在这两者上；模型项

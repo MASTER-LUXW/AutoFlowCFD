@@ -33,19 +33,19 @@ class BackendType(str, Enum):
 class TurbulenceModel(str, Enum):
     """湍流模型枚举。
 
-    与求解器真正支持的集合逐一对应（见 fr_solver/turbulence.py::
-    init_turbulence_models）：NONE/SST/DDES/IDDES/WMLES/LES。此前这里
-    还有 `SA`（Spalart-Allmaras）/`DES`（非延迟 DES）两个值，但求解器
-    从未实现过这两种模型——配置层能表示、真正接入求解器构造时才报错，
-    是"信息源"层面的过度承诺；用户确认没有这两种模型的需求后
-    （2026-09-02）移除，不再保留这两个从未有对应实现的占位值。
+    与求解器真正支持的集合逐一对应（见 fr_solver/turbulence/init.py::
+    init_turbulence_models）：NONE/SST/SA/DDES/IDDES/WMLES/LES。2026-09-02 曾删除
+    从未实现的 `SA`/`DES` 占位值；2026-10-04 SA-neg 真正实现后（高阶下 SST 的 C0 折点
+    使 P2/P3 无法快速收敛，见 core/turbulence/sa 模块文档）重新加入 `SA`。
     """
     NONE = "none"       # 层流 Navier-Stokes（无湍流模型）
     SST_KW = "sst_kw"
+    SA = "sa"           # SA-neg（Allmaras, Johnson & Spalart 2012，core/turbulence/sa）
     DDES = "ddes"
     IDDES = "iddes"
     WMLES = "wmles"
     LES = "les"
+
 
 
 # **2026-09-18：配置层原本在这里定义了一个独立的同名枚举，已删除。**
