@@ -13,6 +13,8 @@ from autoflowcfd.core.mpi import get_comm, get_rank
 from .package import build_fully_distributed_rank_package
 
 
+from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
+
 def distributed_mesh_load_v2(
     input_file: str,
     order: int,
@@ -34,6 +36,7 @@ def distributed_mesh_load_v2(
     cfl_min: Optional[float] = None,
     artificial_viscosity_enabled: bool = False,
     artificial_viscosity_alpha: float = 1.0,
+    sem_num_eddies: int = _SEM_DEFAULT_NUM_EDDIES,
 ):
     """真正的完全分布式网格加载（2026-09-02）——只有 root rank 加载
     完整网格并对每个 rank 分别调用 `build_fully_distributed_rank_
@@ -117,9 +120,12 @@ def distributed_mesh_load_v2(
         # `is_no_slip=True`，与单机/CPU MPI 传统模式行为不一致（这里只
         # 需要一个非 None 的哨兵值，不需要真正的 WMLESModel 实例——
         # `build_boundary_ghost_provider` 只检查 is None）。
+        # 合成湍流入口（SEM）在这里由 root 构造、随包下发：涡核数与湍流强度必须取用户设置
+        # （此前桩上没有这两个属性，边界构造的兜底让它们静默变成默认值）
         root_solver_stub = types.SimpleNamespace(
             mesh=mesh, freestream=freestream, turb_model_name=turb_model_name,
             wmles_model=(object() if turb_model_name == "WMLES" else None),
+            _turbulence_intensity=turbulence_intensity, _sem_num_eddies=sem_num_eddies,
         )
         boundary_ghost_provider_global = build_boundary_ghost_provider(
             root_solver_stub, bc_overrides=bc_overrides or {},
@@ -196,6 +202,7 @@ def distributed_mesh_load_v2(
             'wall_distance_source': wall_distance_source,
             'h_max_global': h_max_global, 'h_wn_global': h_wn_global,
             'turbulence_intensity': turbulence_intensity, 'viscosity_ratio': viscosity_ratio,
+            'sem_num_eddies': sem_num_eddies,
             'bc_overrides': bc_overrides or {}, 'n_ranks': n_ranks,
             'time_scheme': time_scheme, 'dual_time_inner_iter': dual_time_inner_iter,
             'cfl_start': cfl_start, 'cfl_max': cfl_max, 'cfl_min': cfl_min,
@@ -416,6 +423,8 @@ def exchange_packages_for_new_order(root_context, target_p: int, n_ranks: int, *
         root_solver_stub = types.SimpleNamespace(
             mesh=mesh, freestream=root_context['freestream'], turb_model_name=turb_model_name,
             wmles_model=(object() if turb_model_name == "WMLES" else None),
+            _turbulence_intensity=root_context['turbulence_intensity'],
+            _sem_num_eddies=root_context['sem_num_eddies'],
         )
         provider = build_boundary_ghost_provider(
             root_solver_stub, bc_overrides=root_context.get('bc_overrides', {}))

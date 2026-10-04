@@ -27,6 +27,8 @@ from .solve_loop import _SolverSolveMixin
 from .threads import configure_numba_threads
 
 
+from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
+
 class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
                _SolverGeometryMixin):
     """
@@ -64,7 +66,7 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
                  cfl_min: Optional[float] = None,
                  turbulence_intensity: float = 0.01,
                  viscosity_ratio: float = 5.0,
-                 sem_num_eddies: int = 200,
+                 sem_num_eddies: int = _SEM_DEFAULT_NUM_EDDIES,
                  artificial_viscosity_enabled: bool = False,
                  artificial_viscosity_alpha: float = 1.0,
                  entropy_stable_volume_enabled: bool = False,

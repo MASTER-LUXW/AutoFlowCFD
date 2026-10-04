@@ -18,7 +18,7 @@ def _run_multi_gpu(
     fully_distributed, gpu_device, input_file, max_iter, mu_molecular, n_ranks,
     order, output_dir, p_inf, phase_max_iter, residual_drop_threshold, rho_inf,
     skip_quality_check, surface_mesh, time_scheme, turbulence_intensity, turbulence_model,
-    vel_inf, viscosity_ratio,
+    vel_inf, viscosity_ratio, sem_num_eddies,
 ):
     """`solve steady` 的多 GPU + MPI 分布式（传统模式 / 完全分布式加载）路径。"""
     # 多 GPU + MPI 分布式路径
@@ -56,7 +56,7 @@ def _run_multi_gpu(
             freestream=freestream, mu_molecular=mu_molecular, mach_ref=mach_ref,
             enable_viscous=True, skip_quality_check=skip_quality_check,
             turb_model_name=turbulence_model.upper(),
-            turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
+            turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio, sem_num_eddies=sem_num_eddies,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
@@ -87,7 +87,7 @@ def _run_multi_gpu(
             # 选项从未真正传到这里过，与单机 GPU 路径（上面
             # GPUFRSolver 构造处）保持一致。
             turbulence_intensity=turbulence_intensity,
-            viscosity_ratio=viscosity_ratio,
+            viscosity_ratio=viscosity_ratio, sem_num_eddies=sem_num_eddies,
             # 真实缺口修复（2026-09-15）：`--cfl-start/--cfl-max/--cfl-min`
             # 此前在**全部分布式路径**上被静默丢弃（这四处构造点都不传），
             # 与本文件上方注释记录过的 turb_model/turbulence_intensity

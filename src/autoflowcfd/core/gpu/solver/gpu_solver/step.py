@@ -53,6 +53,9 @@ class _GPUSolverStepMixin:
 
         self._update_primitives_gpu()
         scheme = self.time_integrator.scheme
+        # 合成湍流入口（SEM）每个物理步推进一次（与 CPU 同一个函数；此前单 GPU 从不推进，入口涡结构冻结）
+        from autoflowcfd.boundary.synthetic_inlet import advance_synthetic_inlets
+        advance_synthetic_inlets(self.boundary_ghost_provider, self.freestream, dt)
         # 本步冻结的问题单元人工扩散系数（与 CPU step.py 同一算子分裂约定；
         # 未启用时 None），同时进入粘性步长限制与全部粘性残差求值
         nu_av = self.compute_artificial_diffusivity_field_gpu()

@@ -98,6 +98,9 @@ class _MultiGPUSteppingMixin:
         cp = get_cupy()
         n_local = self.partition.n_local_cells
         n_sps = self.mesh.n_sps_per_cell
+        # 合成湍流入口（SEM）每个物理步推进一次（与 CPU 同一个函数；此前多 GPU 从不推进）
+        from autoflowcfd.boundary.synthetic_inlet import advance_synthetic_inlets
+        advance_synthetic_inlets(self.boundary_ghost_provider, self.freestream, dt)
 
         # #1（2026-08-28）：此前这里用 self.mesh.n_cells（全局单元数）
         # 展平/reshape self.U_gpu——self.U_gpu 现在只有 n_local 个单元，

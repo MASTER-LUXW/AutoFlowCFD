@@ -163,6 +163,10 @@ class _DistributedStepMixin:
         mu = self.local_solver.mu_molecular
         boundary_ghost_provider = self.local_solver.boundary_ghost_provider
         mach_ref = self.local_solver.freestream["mach_ref"]
+        # 合成湍流入口（SEM）每个物理步推进一次（与单机同一个函数；各 rank 的 SEM 由确定性种子构造、
+        # 推进序列相同，入口脉动在分区间一致）
+        from autoflowcfd.boundary.synthetic_inlet import advance_synthetic_inlets
+        advance_synthetic_inlets(boundary_ghost_provider, self.local_solver.freestream, dt)
         n_local = self.partition.n_local_cells
         n_sps = self.state.n_sps
         n_vars = self.state.n_vars

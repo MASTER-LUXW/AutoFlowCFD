@@ -12,7 +12,6 @@ from loguru import logger
 from autoflowcfd.boundary.fr_ghost_state import BoundaryGhostStateProvider, InletSEMGhostState
 
 from autoflowcfd.grid.connectivity.face_connectivity import tag_boundary_groups_for_mesh
-from .constants import _SEM_DEFAULT_NUM_EDDIES, _SEM_DEFAULT_TURBULENCE_INTENSITY
 
 
 def _compute_inlet_fp_positions(solver, face_conn, is_target_face: np.ndarray) -> Dict[int, np.ndarray]:
@@ -146,7 +145,6 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
     # 补充说明这条排除规则，避免用户误以为 wmles 模式也会获得 SEM 入口
     # 湍流。
     use_sem = solver.turb_model_name in ("LES", "DDES", "IDDES") and getattr(solver, "wmles_model", None) is None
-    solver._sem_instances = []
 
     code_to_config: Dict[int, Dict[str, Any]] = {}
     for name, code in name_to_code.items():
@@ -159,7 +157,7 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
         config = {"type": mapped_type, **default_params}
 
         if mapped_type == "INLET" and use_sem:
-            from autoflowcfd.boundary.synthetic_inlet import SyntheticEddyMethod
+            from autoflowcfd.boundary.synthetic_inlet import SyntheticEddyMethod, synthetic_inlet_seed
 
             is_this_group_face = group_code == code
             positions_by_face = _compute_inlet_fp_positions(solver, face_conn, is_this_group_face)
@@ -173,15 +171,15 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
                 span = np.max(all_positions, axis=0) - np.min(all_positions, axis=0)
                 length_scale = max(float(np.max(span)) / 10.0, 1e-3)
 
-                num_eddies = getattr(solver, "_sem_num_eddies", _SEM_DEFAULT_NUM_EDDIES)
+                # 涡核数与湍流强度直接取求解器上的值（全部求解器与完全分布式加载的根桩都设置；
+                # 此前 getattr 兜底让根桩上缺的值静默变成默认值）
+                num_eddies = int(solver._sem_num_eddies)
                 sem = SyntheticEddyMethod(
-                    num_eddies=num_eddies, length_scale=length_scale
+                    num_eddies=num_eddies, length_scale=length_scale, seed=synthetic_inlet_seed(name)
                 )
                 sem.configure_inlet_box(all_positions, flow_direction=flow_direction)
 
-                turbulence_intensity = getattr(
-                    solver, "_turbulence_intensity", _SEM_DEFAULT_TURBULENCE_INTENSITY
-                )
+                turbulence_intensity = float(solver._turbulence_intensity)
                 u_fluct = turbulence_intensity * vel_inf
                 reynolds_stress = np.diag([u_fluct**2, u_fluct**2, u_fluct**2])
 
@@ -189,7 +187,6 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
                     sem, positions_by_face, Q_mean=np.array(Q_free), reynolds_stress=reynolds_stress
                 )
                 config["sem"] = sem_ghost
-                solver._sem_instances.append(sem)
                 logger.info(
                     f"BD-02: Synthetic Eddy Method inlet turbulence enabled for group '{name}' "
                     f"({len(positions_by_face)} faces, {num_eddies} eddies, "

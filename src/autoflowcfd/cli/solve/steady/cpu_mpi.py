@@ -17,7 +17,7 @@ def _run_cpu_mpi(
     fully_distributed, input_file, max_iter, mu_molecular, n_ranks, order,
     output_dir, p_inf, phase_max_iter, residual_drop_threshold, rho_inf,
     skip_quality_check, surface_mesh, threads, time_scheme, turbulence_intensity,
-    turbulence_model, vel_inf, viscosity_ratio,
+    turbulence_model, vel_inf, viscosity_ratio, sem_num_eddies,
 ):
     """`solve steady` 的CPU MPI 分布式（传统模式 / 完全分布式加载）路径。"""
     # 分布式求解器路径。
@@ -79,7 +79,7 @@ def _run_cpu_mpi(
             mach_ref=mach_ref,
             enable_viscous=True, skip_quality_check=skip_quality_check,
             turb_model_name=turbulence_model.upper(),
-            turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
+            turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio, sem_num_eddies=sem_num_eddies,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
@@ -116,7 +116,7 @@ def _run_cpu_mpi(
             time_scheme=scheme_from_name(time_scheme),
             n_threads=threads,
             turbulence_intensity=turbulence_intensity,
-            viscosity_ratio=viscosity_ratio,
+            viscosity_ratio=viscosity_ratio, sem_num_eddies=sem_num_eddies,
             mu_molecular=mu_molecular,
             rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
             aoa_deg=aoa_deg, aos_deg=aos_deg,

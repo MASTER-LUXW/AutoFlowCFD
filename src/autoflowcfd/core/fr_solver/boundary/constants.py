@@ -10,19 +10,10 @@
 
 
 
-# LES/DDES 入口合成湍流默认参数（BD-02）。真实修复（V2.0 专家组盲审
-# 发现，2026-08-28）：此前这两个量恒为硬编码常量，没有任何 CLI/配置
-# 途径覆盖，跑真实工程案例（不同来流湍流度/涡核密度）只能改源码。现在：
-# - 目标雷诺应力改为复用已有的 `--turbulence-intensity`（solver._turbulence_
-#   intensity，同一个量本来就用于 RANS 自由来流 k/omega 初值），不再单独
-#   维护一个 SEM 专用湍流度——一个旋钮统一表达"来流湍流强度"，
-#   见 build_boundary_ghost_provider 内 u_fluct 的计算。这个下面的常量
-#   现在只是 solver 没有设置 _turbulence_intensity 属性时（理论上不会
-#   发生，FRSolver/GPUFRSolver 构造时恒会设置）的兜底默认值。
-# - 涡核数量新增 `--sem-num-eddies` CLI 选项（solver._sem_num_eddies），
-#   默认值沿用原来的 200（未指定时保持向后兼容的行为）。
-_SEM_DEFAULT_TURBULENCE_INTENSITY = 0.01
-
+# LES/DDES 入口合成湍流（BD-02）：目标雷诺应力复用 `--turbulence-intensity`（solver._turbulence_intensity，
+# 与 RANS 来流湍流同一个量），涡核数量由 `--sem-num-eddies`（solver._sem_num_eddies）给定。下面是涡核数的
+# 默认值（各求解器构造签名的唯一来源）；构造边界提供者时直接读求解器上的两个值、不再兜底（2026-10-04：
+# 完全分布式加载的根桩缺这两个属性，兜底让 CLI 设置被静默忽略）。
 _SEM_DEFAULT_NUM_EDDIES = 200
 
 #: BJ 越界判据里"没有 Dirichlet 值"的标记。用 NaN 而不是哨兵数值：任何

@@ -34,6 +34,8 @@ from .stepping import _MultiGPUSteppingMixin
 from .timestep import _MultiGPUTimeStepMixin
 
 
+from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
+
 class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _MultiGPUResidualMixin,
                                 _MultiGPUTimeStepMixin, _GPUDistributedInitMixin):
     """多 GPU + MPI 分布式求解器。
@@ -78,6 +80,7 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
         wall_distance_source=None,
         artificial_viscosity_enabled: bool = False,
         artificial_viscosity_alpha: float = 1.0,
+        sem_num_eddies: int = _SEM_DEFAULT_NUM_EDDIES,
     ):
         """初始化多 GPU 分布式求解器。
 
@@ -97,10 +100,12 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
             rho_inf, vel_inf, p_inf: 自由来流条件
             artificial_viscosity_enabled, artificial_viscosity_alpha: 问题单元人工
                 粘性（与单机 FRSolver 同名参数、同一实现）
+            sem_num_eddies: 合成湍流入口（SEM）的涡核数（与单机同名参数；此前写死 200）
         """
         # 壁面距离来源（core/utils/wall_distance）：与单机 CPU 同一个，
         # CLI 由体网格 WALL 边界面构造后传入；湍流模型需要壁距时必须提供
         self._wall_distance_source = wall_distance_source
+        self._sem_num_eddies = int(sem_num_eddies)
         self.artificial_viscosity_enabled = bool(artificial_viscosity_enabled)
         self.artificial_viscosity_alpha = float(artificial_viscosity_alpha)
         self._setup_identity_and_device(

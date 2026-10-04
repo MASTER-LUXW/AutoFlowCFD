@@ -27,7 +27,7 @@ def _solve_transient_distributed(
     input_file, order, surface_mesh, skip_quality_check,
     time_scheme, dual_time_inner_iter,
     turbulence_model, max_iter, dt, output_dir,
-    reference_area, threads, turbulence_intensity, viscosity_ratio,
+    reference_area, threads, turbulence_intensity, viscosity_ratio, sem_num_eddies,
     mu_molecular, rho_inf, vel_inf, p_inf,
     n_ranks, multi_gpu, fully_distributed, gpu_device, backend,
     checkpoint_interval, phase_max_iter=None, residual_drop_threshold=100.0,
@@ -58,7 +58,7 @@ def _solve_transient_distributed(
         _solve_transient_multi_gpu(
             input_file, order, time_scheme, dual_time_inner_iter,
             turbulence_model, max_iter, dt, output_dir, threads,
-            turbulence_intensity, viscosity_ratio, mu_molecular, rho_inf, vel_inf, p_inf,
+            turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf,
             n_ranks, gpu_device, surface_mesh, skip_quality_check, checkpoint_interval,
             phase_max_iter, residual_drop_threshold, init_checkpoint,
             fully_distributed,
@@ -78,7 +78,7 @@ def _solve_transient_distributed(
             input_file, order, surface_mesh, skip_quality_check,
             time_scheme, dual_time_inner_iter,
             turbulence_model, max_iter, dt, output_dir, backend,
-            turbulence_intensity, viscosity_ratio, mu_molecular, rho_inf, vel_inf, p_inf,
+            turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf,
             n_ranks, checkpoint_interval, phase_max_iter, residual_drop_threshold,
             init_checkpoint,
             # 同上：此前五个参数全没转发（见 multi_gpu 分支处注释）。
@@ -93,7 +93,7 @@ def _solve_transient_distributed(
         input_file, order, surface_mesh, skip_quality_check,
         time_scheme, dual_time_inner_iter,
         turbulence_model, max_iter, dt, output_dir, backend, threads,
-        turbulence_intensity, viscosity_ratio, mu_molecular, rho_inf, vel_inf, p_inf,
+        turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf,
         n_ranks, checkpoint_interval, reference_area, phase_max_iter, residual_drop_threshold,
         init_checkpoint,
         cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
@@ -107,7 +107,7 @@ def _solve_transient_cpu_traditional(
     input_file, order, surface_mesh, skip_quality_check,
     time_scheme, dual_time_inner_iter,
     turbulence_model, max_iter, dt, output_dir, backend, threads,
-    turbulence_intensity, viscosity_ratio, mu_molecular, rho_inf, vel_inf, p_inf,
+    turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf,
     n_ranks, checkpoint_interval, reference_area,
     phase_max_iter=None, residual_drop_threshold=100.0,
     init_checkpoint=None,
@@ -151,6 +151,7 @@ def _solve_transient_cpu_traditional(
         wall_distance_source=wall_distance_source_if_needed(turbulence_model, volume_data),
         dual_time_inner_iter=dual_time_inner_iter, n_threads=threads,
         turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
+        sem_num_eddies=sem_num_eddies,
         mu_molecular=mu_molecular, rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
         # CFL 三元组（2026-09-17 补齐）：rk3/imex 瞬态走的是逐单元局部
         # CFL 推进、控制器是激活的，此前这里一个都不传 -> 恒用控制器
@@ -220,7 +221,7 @@ def _solve_transient_fully_distributed(
     input_file, order, surface_mesh, skip_quality_check,
     time_scheme, dual_time_inner_iter,
     turbulence_model, max_iter, dt, output_dir, backend,
-    turbulence_intensity, viscosity_ratio, mu_molecular, rho_inf, vel_inf, p_inf,
+    turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf,
     n_ranks, checkpoint_interval,
     phase_max_iter=None, residual_drop_threshold=100.0,
     init_checkpoint=None,
@@ -254,6 +255,7 @@ def _solve_transient_fully_distributed(
         enable_viscous=True, skip_quality_check=skip_quality_check,
         turb_model_name=turbulence_model.upper(),
         turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
+        sem_num_eddies=sem_num_eddies,
         time_scheme=time_scheme, dual_time_inner_iter=dual_time_inner_iter,
         # 三个 CFL 边界靠 package 传到各 rank（见
         # `build_fully_distributed_rank_package`）；不传就静默退回控制器
@@ -318,7 +320,7 @@ def _solve_transient_fully_distributed(
 def _solve_transient_multi_gpu(
     input_file, order, time_scheme, dual_time_inner_iter,
     turbulence_model, max_iter, dt, output_dir, threads,
-    turbulence_intensity, viscosity_ratio, mu_molecular, rho_inf, vel_inf, p_inf,
+    turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf,
     n_ranks, gpu_device, surface_mesh, skip_quality_check, checkpoint_interval,
     phase_max_iter=None, residual_drop_threshold=100.0,
     init_checkpoint=None,
@@ -364,6 +366,7 @@ def _solve_transient_multi_gpu(
             enable_viscous=True, skip_quality_check=skip_quality_check,
             turb_model_name=turbulence_model.upper(),
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
+            sem_num_eddies=sem_num_eddies,
             time_scheme=time_scheme, dual_time_inner_iter=dual_time_inner_iter,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
@@ -387,6 +390,7 @@ def _solve_transient_multi_gpu(
             turb_model=turbulence_model.upper(), time_scheme=time_scheme_str,
             wall_distance_source=wall_distance_source_if_needed(turbulence_model, volume_data),
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
+            sem_num_eddies=sem_num_eddies,
             # 与 `solve steady --multi-gpu` 构造点逐项对齐（2026-09-24）：
             # 攻角/侧滑角与三个 CFL 边界此前在这条瞬态路径上完全没传 ——
             # 前者让初场恒为零攻角，后者让用户设的 CFL 被静默丢弃。

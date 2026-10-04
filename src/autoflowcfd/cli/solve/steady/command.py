@@ -255,6 +255,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
             turbulence_model=turbulence_model,
             vel_inf=vel_inf,
             viscosity_ratio=viscosity_ratio,
+            sem_num_eddies=sem_num_eddies,
         )
     elif backend == 'gpu' and (not multi_gpu):
         _run_single_gpu(
@@ -282,6 +283,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
             turbulence_model=turbulence_model,
             vel_inf=vel_inf,
             viscosity_ratio=viscosity_ratio,
+            sem_num_eddies=sem_num_eddies,
         )
     elif n_ranks > 1:
         _run_cpu_mpi(
@@ -313,6 +315,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
             turbulence_model=turbulence_model,
             vel_inf=vel_inf,
             viscosity_ratio=viscosity_ratio,
+            sem_num_eddies=sem_num_eddies,
         )
     else:
         _run_cpu_single(

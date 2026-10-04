@@ -418,7 +418,6 @@ class _MultiGPUSetupMixin:
         # None) 判断 WALL 组 is_no_slip 取值，必须能读到真实值。
         # self._turbulence_intensity/_viscosity_ratio 已在上面湍流模型
         # 初始化处设置（构造参数，不再在这里用硬编码默认值覆盖）。
-        self._sem_num_eddies = 200
         self.boundary_ghost_provider = build_boundary_ghost_provider(self, bc_overrides={})
 
         # 真实 bug 修复（2026-09-02，实现分布式湍流模型时排查发现，与

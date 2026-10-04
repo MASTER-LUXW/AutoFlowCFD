@@ -78,13 +78,10 @@ def step(solver, dt: float) -> float:
     try:
         solver.state._update_primitives()
 
-        # BD-02：合成湍流入口 (SEM) 涡核对流——每个物理步调用一次
-        # advance()，不在每次残差求值/RK 子迭代里调用（见
-        # boundary/fr_ghost_state.py::InletSEMGhostState 文档）。
-        # solver._sem_instances 由 _build_boundary_ghost_provider 在
-        # LES/DDES 模式下、存在 VELOCITY_INLET 组时填充，否则是空列表。
-        for sem in getattr(solver, "_sem_instances", []):
-            sem.advance(dt, mean_velocity=np.array([solver.freestream["vel_inf"], 0.0, 0.0]))
+        # BD-02：合成湍流入口 (SEM) 涡核对流——每个物理步一次，不在每次残差求值/RK 子迭代里
+        # （见 boundary/fr_ghost_state.py::InletSEMGhostState 文档）；全部后端共用
+        from autoflowcfd.boundary.synthetic_inlet import advance_synthetic_inlets
+        advance_synthetic_inlets(solver.boundary_ghost_provider, solver.freestream, dt)
 
         n_cells, n_sps, n_vars = solver.state.U.shape
         # 低马赫数伪时间预处理（2026-09-14 新增）：`dt_local` 是**平均流**用

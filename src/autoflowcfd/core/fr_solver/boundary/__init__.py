@@ -16,7 +16,6 @@ BoundaryGhostStateProvider 接口上，供 core/fr_residual_inviscid.py 使用�
 from .constants import (  # noqa: F401
     _NO_DIRICHLET,
     _SEM_DEFAULT_NUM_EDDIES,
-    _SEM_DEFAULT_TURBULENCE_INTENSITY,
 )
 from .ghost import (  # noqa: F401
     _compute_inlet_fp_positions,

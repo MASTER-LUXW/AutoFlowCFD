@@ -202,3 +202,33 @@ if __name__ == "__main__":
     u2 = sem.generate_fluctuations(inlet_pos, mean_u, R)
     print("time-varying (u1 != u2):", not np.allclose(u1, u2))
     print("u1 shape:", u1.shape, "mean fluct magnitude:", np.std(u1 - mean_u))
+
+
+def synthetic_inlet_seed(group_name: str) -> int:
+    """入口组的确定性随机种子（组名的 CRC32）。
+
+    2026-10-04 以前种子为 None：同一算例两次运行的入口脉动不同（结果不可复现）；CPU 分布式传统模式下
+    各 rank 各自构造 SEM、涡核互不相同，入口合成湍流在分区边界上不连续。
+    """
+    import zlib
+
+    return zlib.crc32(str(group_name).encode("utf-8"))
+
+
+def synthetic_inlets(provider):
+    """边界幽灵态提供者里的全部 SEM 实例（`InletSEMGhostState.sem`）。"""
+    return [cfg["sem"].sem for cfg in provider.code_to_config.values() if cfg.get("sem") is not None]
+
+
+def advance_synthetic_inlets(provider, freestream: dict, dt: float) -> None:
+    """每个物理步把全部 SEM 入口的涡核沿来流对流一步（全部后端共用）。
+
+    平动速度取真实来流向量（`flow_direction.direction_from_freestream`，与入口盒的配置方向一致）。
+    此前 CPU 单机写死 `(vel_inf, 0, 0)`（有攻角/侧滑角时与入口盒方向不一致），单 GPU、多 GPU、CPU 分布式
+    则从不推进（GPU 上入口涡结构在时间上冻结）。
+    """
+    from autoflowcfd.core.utils.flow_direction import direction_from_freestream
+
+    velocity = float(freestream["vel_inf"]) * direction_from_freestream(freestream)
+    for sem in synthetic_inlets(provider):
+        sem.advance(dt, mean_velocity=velocity)
