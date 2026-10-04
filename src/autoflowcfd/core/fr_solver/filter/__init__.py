@@ -51,6 +51,7 @@ from .mode import (  # noqa: F401
     resolve_filter_mode,
 )
 from .scalar import (  # noqa: F401
+    CpuFilterKernels,
     compute_turb_troubled_mask,
     filter_scalar_field,
     filter_scalar_field_gated,

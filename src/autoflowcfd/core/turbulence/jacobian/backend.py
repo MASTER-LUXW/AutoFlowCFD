@@ -44,6 +44,16 @@ def _host(a):
     return np.ascontiguousarray(a.get() if hasattr(a, "get") else a, dtype=np.float64)
 
 
+def sa_linearization_parts(xp, model, Q, grad_vel, d_wall, mu, grad_rho, wall_zero_face):
+    """SA-neg 的线性化部件 `(dirichlet_faces, dirichlet_values, pointwise, strong_rows)`：全部后端共用
+    （CPU 单机/分布式经 `turbulence_linearization`，GPU 经其块装配器）。输入是残差用的同一组冻结量，
+    数组在模型的数组模块 `xp` 上；`wall_zero_face` 为主机布尔面掩码。"""
+    from autoflowcfd.core.turbulence.sa.linearization import SAPointwise, sa_dirichlet_spec, sa_strong_rows
+
+    faces, values = sa_dirichlet_spec(wall_zero_face)
+    return faces, values, SAPointwise(xp, model, Q, grad_vel, d_wall, mu, grad_rho), sa_strong_rows(d_wall)
+
+
 def turbulence_linearization(solver_like, turb, inputs, conv_geom, flat):
     """由残差用的同一组冻结输入构造 `TurbulenceLinearization`（单机与分布式共用）。
 
@@ -61,13 +71,11 @@ def turbulence_linearization(solver_like, turb, inputs, conv_geom, flat):
     strong_rows = None
     if isinstance(turb, SAModel):
         from autoflowcfd.core.fr_operators.gradients import compute_physical_scalar_gradient
-        from autoflowcfd.core.turbulence.sa.linearization import SAPointwise, sa_dirichlet_spec, sa_strong_rows
 
-        faces, values = sa_dirichlet_spec(wall_zero)
-        strong_rows = sa_strong_rows(d_wall)
         grad_rho = compute_physical_scalar_gradient(np.ascontiguousarray(Q[..., 0]), solver_like.mesh,
                                                     solver_like.ops)
-        pointwise = SAPointwise(np, turb, Q, grad_vel, d_wall, mu, grad_rho)
+        faces, values, pointwise, strong_rows = sa_linearization_parts(np, turb, Q, grad_vel, d_wall, mu,
+                                                                       grad_rho, wall_zero)
     else:
         from autoflowcfd.core.turbulence.sst.unknowns import sst_dirichlet_spec
 

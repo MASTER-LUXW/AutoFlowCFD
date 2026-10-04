@@ -1,4 +1,4 @@
-"""AutoFlowCFD V2.0 - 多 GPU 分布式湍流源项（SST/DDES/IDDES/LES/WMLES）
+"""AutoFlowCFD V2.0 - 多 GPU 分布式湍流源项（SST/DDES/IDDES/SA-neg/LES/WMLES）
 
 从 `src/autoflowcfd/core/gpu/distributed/gpu_distributed_init.py` 的 `_GPUDistributedInitMixin` 拆出（2026-09-24，项目「单文件不超
 500 行」规范）。mixin 是本仓库既有惯例（`_SolverGeometryMixin`、
@@ -14,10 +14,9 @@
 finalize -> write-back；隐式 k-omega（`gpu_distributed_implicit.py` 的适配器）
 在一个 Newton 步内冻结 prepare 的平均流输入，反复 evaluate。
 
-compact 视图（`_TurbulenceView`）：k/omega 是 local 大小的持久状态，而源项与
-输运要读 halo 单元，所以每次求值都经 2 变量 halo 交换写进一个 compact 大小的
-临时 `GPUTurbulenceSST`，结果只把 local 段写回真正的模型——与 CPU 分布式
-`core/mpi/distributed_turbulence.py` 同一个设计。
+compact 视图：输运场是 local 大小的持久状态，而源项与输运要读 halo 单元，所以每次求值都经一次
+halo 交换写进一个 compact 大小的临时模型（`TransportedTurbulence.like`），结果只把 local 段写回
+真正的模型——与 CPU 分布式 `core/mpi/distributed_turbulence.py` 同一个设计。
 """
 
 import types
@@ -26,7 +25,7 @@ from autoflowcfd.core.gpu import get_cupy
 
 
 class _GPUDistributedTurbSourceMixin:
-    """多 GPU 分布式湍流源项（SST/DDES/IDDES/LES/WMLES）"""
+    """多 GPU 分布式湍流源项（SST/DDES/IDDES/SA-neg/LES/WMLES）"""
 
     def _compute_turbulence_source_distributed(self, dt):
         """分布式湍流源项+输运的显式更新，返回 compact 排列的动力涡粘
@@ -51,7 +50,7 @@ class _GPUDistributedTurbSourceMixin:
         ctx = self._prepare_turbulence_view_distributed()
         self._sync_turbulence_view(ctx)
         rates = self._evaluate_turbulence_rates_distributed(ctx, apply_des=True)
-        # 场更新（k 与 w = ln omega 的点隐式阻尼 + 输运，见 sst/update.py::advance_k_log_omega）
+        # 场更新（模型的点隐式阻尼 + 输运：SST 见 sst/update.py::advance_k_log_omega，SA 见 sa/model.py）
         ctx.view.update_fields(dt, rates.source, rates.transport)
         self._finalize_turbulence_update_distributed(ctx)
         self._write_back_turbulence_distributed(ctx, fields=True)
@@ -92,20 +91,10 @@ class _GPUDistributedTurbSourceMixin:
         # 平均流 halo 交换 + 重排到 compact 索引空间（与无粘残差同一处理）
         U_compact = self._permute_to_compact(self.gpu_halo.exchange(self.U_gpu))
 
-        # compact 视图。k_inf/omega_inf 不只是初值：开边界来流 ghost 取它们
-        # 作为来流值（gpu_scalar_transport/residual.py），必须与真正的模型一致
-        # ——2026-09-25 前视图用构造默认值 1e-6/1.0（CPU 分布式同一缺陷）
-        from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
-
+        # compact 视图（`TransportedTurbulence.like`：常数、来流值与全局量取自真正的模型——
+        # 2026-09-25 前视图用构造默认来流值，CPU 分布式同一缺陷）
         model = self.turb_model_gpu
-        view = GPUTurbulenceSST(n_compact, n_sps, self.device_id,
-                                k_inf=model.k_inf, omega_inf=model.omega_inf)
-        for attr in (
-            "sigma_k1", "sigma_k2", "sigma_w1", "sigma_w2", "beta1", "beta2",
-            "a1", "kappa", "beta_star", "k_max", "omega_max", "production_factor",
-        ):
-            if hasattr(model, attr):
-                setattr(view, attr, getattr(model, attr))
+        view = model.like(n_compact, n_sps, wall_distance=self.wall_distance_gpu)
 
         # DDES/IDDES 的 des_length_scale 是跨步持久状态（上一步用上一步 nu_t
         # 算出、本步读取），与 k/omega 同一套 halo 交换 + compact 重排，不能把
@@ -145,13 +134,10 @@ class _GPUDistributedTurbSourceMixin:
                                      cp=cp)
 
     def _sync_turbulence_view(self, ctx) -> None:
-        """把真正模型（local）当前的 k/omega 经 2 变量 halo 交换写进 compact 视图。"""
-        cp = ctx.cp
-        k_omega_local = cp.stack([self.turb_model_gpu.k_field, self.turb_model_gpu.omega_field],
-                                 axis=-1)
-        k_omega_compact = self._permute_to_compact(self.gpu_halo.exchange(k_omega_local))
-        ctx.view.k_field = k_omega_compact[..., 0].copy()
-        ctx.view.omega_field = k_omega_compact[..., 1].copy()
+        """把真正模型（local）当前的输运场经一次 halo 交换写进 compact 视图。"""
+        stacked = self._permute_to_compact(
+            self.gpu_halo.exchange(ctx.cp.stack(self.turb_model_gpu.transported_fields(), axis=-1)))
+        ctx.view.set_transported_fields([stacked[..., j].copy() for j in range(stacked.shape[-1])])
 
     def _evaluate_turbulence_rates_distributed(self, ctx, *, apply_des: bool):
         """在 compact 视图当前的 k/omega 上求 k 与 `w = ln(omega)` 的 `TurbulenceRates`
@@ -161,6 +147,17 @@ class _GPUDistributedTurbSourceMixin:
         副作用同单机：刷新视图上的 nu_t / 混合 beta；`apply_des=True` 时按刚算出
         的 nu_t 刷新 DES 长度尺度（供下一步用）——隐式路径的试探求值必须传 False。
         """
+        from autoflowcfd.core.turbulence.registry import is_sa_family
+
+        if is_sa_family(self.turb_model_name):
+            # 与单机同一份算法（`core/turbulence/sa/rates.py`），注入紧凑空间桩上的 GPU 标量输运原语
+            from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport.primitives import GpuScalarTransport
+            from autoflowcfd.core.turbulence.sa.rates import evaluate_sa_rates
+
+            return evaluate_sa_rates(ctx.view, GpuScalarTransport(ctx.transport), ctx.Q, ctx.grad_vel,
+                                     ctx.d_wall, self.mu_molecular)
+
+        # 以下为 SST 族（SST/DDES/IDDES）
         cp = ctx.cp
         view = ctx.view
         from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_gradient_gpu
@@ -208,27 +205,26 @@ class _GPUDistributedTurbSourceMixin:
         """k/omega 更新之后的后处理（compact 视图上）：模态滤波 + 正性限幅。与单机
         `finalize_turbulence_update` 同一份；壁面 omega 只由扩散残差的面 Dirichlet
         施加，不做步后松弛（2026-10-01 删除，理由见单机同名函数文档）。"""
-        view = ctx.view
-        n_sps = self.mesh.n_sps_per_cell
-        if n_sps > 1:
-            # k 与 w = ln(omega) 的模态滤波（与单机同一份，`GPUTurbulenceSST.filter_fields_gpu`）；
-            # compact 排列"棱柱在前"
-            order = int(getattr(self, "current_order", getattr(self, "order", 0)))
-            frac = view.filter_fields_gpu(self.flat_face_gpu.n_prism, self.ops, order)
-            if frac is not None:
-                self._turb_filter_troubled_frac = frac
+        # 与单机同一份算法（`core/turbulence/unknown_filter.py`）；compact 排列"棱柱在前"
+        from autoflowcfd.core.gpu.gpu_modal_filter import GpuFilterKernels
+        from autoflowcfd.core.turbulence.unknown_filter import filter_turbulence_unknowns
+
+        order = int(getattr(self, "current_order", getattr(self, "order", 0)))
+        frac = filter_turbulence_unknowns(ctx.view, GpuFilterKernels(), self.flat_face_gpu.n_prism, order, self.ops)
+        if frac is not None:
+            self._turb_filter_troubled_frac = frac
 
 
     def _write_back_turbulence_distributed(self, ctx, *, fields: bool) -> None:
         """compact 视图的结果换回原生排列、切 local 段写回真正的模型：nu_t 与
-        DES 长度尺度总是写；`fields=True` 时连 k/omega 一起写（隐式路径的 k/omega
+        DES 长度尺度总是写；`fields=True` 时连输运场一起写（隐式路径的输运场
         由 Newton 步直接更新在模型上，只在 finalize 之后写回）。"""
         n_local = self.partition.n_local_cells
         model = self.turb_model_gpu
         view = ctx.view
         if fields:
-            model.k_field[:] = self._unpermute_from_compact(view.k_field)[:n_local]
-            model.omega_field[:] = self._unpermute_from_compact(view.omega_field)[:n_local]
-        model.nu_t[:] = self._unpermute_from_compact(view.nu_t)[:n_local]
+            model.set_transported_fields(
+                [self._unpermute_from_compact(f)[:n_local].copy() for f in view.transported_fields()])
+        model.nu_t = self._unpermute_from_compact(view.nu_t)[:n_local].copy()
         if self.ddes_model_gpu is not None and getattr(view, "des_length_scale", None) is not None:
             model.des_length_scale = self._unpermute_from_compact(view.des_length_scale)[:n_local].copy()

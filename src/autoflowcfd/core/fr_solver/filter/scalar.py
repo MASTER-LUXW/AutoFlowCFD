@@ -168,3 +168,21 @@ def compute_turb_troubled_mask(fields, order: int, *, n_prism=None,
         m = compute_troubled_cell_mask(np.ascontiguousarray(field), order, **kw)
         mask = m if mask is None else mask | m
     return mask
+
+
+class CpuFilterKernels:
+    """`core/turbulence/unknown_filter.py` 的 CPU 滤波核（接口与 GPU 版 `GpuFilterKernels` 相同）。"""
+
+    xp = np
+
+    @staticmethod
+    def troubled_mask(fields, n_prism: int, order: int):
+        return compute_turb_troubled_mask(fields, order, n_prism=n_prism)
+
+    @staticmethod
+    def full(phi, n_prism: int, filter_prism, filter_tet):
+        return filter_scalar_field(phi, n_prism, filter_prism, filter_tet)
+
+    @staticmethod
+    def gated(phi, n_prism: int, filter_prism, filter_tet, troubled):
+        return filter_scalar_field_gated(phi, filter_prism, filter_tet, troubled, n_prism=n_prism)

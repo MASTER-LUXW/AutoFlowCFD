@@ -214,12 +214,10 @@ class TestRealDofReductionCallSitesAreWired:
         assert "reduce_per_cell_over_real_sps(" in s1
         assert "solver.state.U.mean(axis=1)" not in s1
         s2 = module_source(distributed_checkpoint)
-        assert "reduce_per_cell_over_real_sps(" in s2
-        # 完全分布式模式下拿不到全局棱柱数，退回全场平均是**显式记录**的
-        # 有界失真，不是静默兜底——判据是那段说明必须在源码里，且必须说明
-        # 精确数据走的是 U_sps。
-        assert "_fully_distributed" in s2
-        assert "U_sps" in s2
+        # 2026-10-04 起分布式写出端收集逐单元棱柱标志（两种分布式模式都适用），用逐行掩码版
+        # 归约；此前完全分布式加载下退回含零填充槽位的全场平均
+        assert "reduce_rows_over_real_sps(" in s2 and "global_cell_is_prism(" in s2
+        assert "U_global.mean(axis=1)" not in s2
 
     def test_gpu_local_dt_both_sites(self):
         """GPU 的逐单元 dt 是 `min(axis=1)` 归约，必须掩码。
@@ -344,54 +342,56 @@ class TestGpuTurbFilterGate:
         np.testing.assert_array_equal(np.asarray(out), k)
 
     def test_both_gpu_paths_are_wired(self):
-        """两条 GPU 调用路径都走同一个滤波入口 `GPUTurbulenceSST.filter_fields_gpu`
-        （2026-09-27 起单机与多 GPU 共用，开关在它里面读）。"""
-        import inspect
-
+        """单机与多 GPU 都走全部后端共用的 `core/turbulence/unknown_filter.py::filter_turbulence_unknowns`
+        并注入 GPU 滤波核（2026-10-04 起；此前是 SST 专用的 `GPUTurbulenceSST.filter_fields_gpu`）。"""
         from autoflowcfd.core.gpu.distributed import gpu_distributed_init
         from autoflowcfd.core.gpu.solver import gpu_solver_io
-        from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
         # gpu_distributed_init 2026-09-24 拆成子包；inspect.getsource(包)
         # 只返回 __init__.py。
         for mod in (gpu_solver_io, gpu_distributed_init):
-            assert ".filter_fields_gpu(" in module_source(mod), mod.__name__
-        s = inspect.getsource(GPUTurbulenceSST.filter_fields_gpu)
-        for name in ("resolve_turb_filter_gate()", "filter_scalar_field_gated_gpu",
-                     "compute_turb_troubled_mask_gpu"):
-            assert name in s, name
+            src = module_source(mod)
+            assert "filter_turbulence_unknowns(" in src and "GpuFilterKernels()" in src, mod.__name__
 
-    def test_filter_fields_gpu_matches_cpu_in_log_space(self, fields, monkeypatch):
-        """sensor 门控下 `filter_fields_gpu` 与 CPU `finalize_turbulence_update` 的滤波段
-        一致：传感器看 (k, ln omega)，滤波作用在 k 与 ln omega 上（k-ln(omega)）。"""
+    @pytest.mark.parametrize("model_name", ["SST", "SA"])
+    def test_gpu_kernels_match_cpu_kernels(self, fields, monkeypatch, model_name):
+        """sensor 门控下 GPU 滤波核与 CPU 滤波核在同一状态上给出同一结果：传感器看 Newton 未知量
+        （SST 为 (k, ln omega)、SA 为 nu_tilde），滤波也作用在它们上。"""
         from types import SimpleNamespace
 
-        import autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst as gts
-        from autoflowcfd.core.fr_solver.filter import (
-            compute_turb_troubled_mask, filter_scalar_field_gated,
-        )
-        patch_module_get_cupy(monkeypatch, gts, _NumpyAsCupy())
+        import autoflowcfd.core.gpu.gpu_modal_filter as gmf
+        import autoflowcfd.core.gpu.gpu_troubled_cell as gtc
+        from autoflowcfd.core.fr_solver.filter import CpuFilterKernels
+        from autoflowcfd.core.turbulence.sa import SAModel
+        from autoflowcfd.core.turbulence.sst import SSTModelFR
+        from autoflowcfd.core.turbulence.unknown_filter import filter_turbulence_unknowns
+
+        shim = _NumpyAsCupy()
+        patch_module_get_cupy(monkeypatch, [gmf, gtc], shim)
         monkeypatch.setenv("AFCFD_FILTER_TURB_GATE", "sensor")
         order, n_prism, n_cells, k, om = fields
-        # 滤波档在导入时定（默认 off 即单位阵、整段跳过）：直接给一对非单位矩阵，
-        # 对照只要求两侧用同一对矩阵
         n_sps = k.shape[1]
         rng = np.random.default_rng(3)
+        # 滤波档在导入时定（默认 off 即单位阵、整段跳过）：直接给一对非单位矩阵
         ops = SimpleNamespace(filter_prism=np.eye(n_sps) - 0.05 * rng.random((n_sps, n_sps)),
                               filter_tet=np.eye(n_sps) - 0.05 * rng.random((n_sps, n_sps)))
-        model = SimpleNamespace(k_field=k.copy(), omega_field=om.copy(), omega_max=1e8,
-                                apply_positivity_limiter=lambda: None)
-        frac = gts.GPUTurbulenceSST.filter_fields_gpu(model, n_prism, ops, order)
 
-        w = np.log(om)
-        troubled = compute_turb_troubled_mask((k, w), order, n_prism=n_prism)
-        assert 0 < troubled.sum() < n_cells
-        assert frac == pytest.approx(troubled.mean())
-        np.testing.assert_allclose(
-            model.k_field, filter_scalar_field_gated(k, ops.filter_prism, ops.filter_tet, troubled,
-                                                     n_prism=n_prism), rtol=1e-13, atol=1e-300)
-        np.testing.assert_allclose(
-            model.omega_field, np.exp(filter_scalar_field_gated(w, ops.filter_prism, ops.filter_tet,
-                                                                troubled, n_prism=n_prism)), rtol=1e-12)
+        def build(xp):
+            if model_name == "SA":
+                m = SAModel(n_cells, n_sps, nu_ref=1.5e-5, viscosity_ratio=3.0, xp=xp)
+                m.nu_tilde_field = k * 1e-4
+            else:
+                m = SSTModelFR(n_cells, n_sps, k_inf=1e-3, omega_inf=10.0)
+                m.omega_max = 1e8
+                m.k_field, m.omega_field = k.copy(), om.copy()
+            return m
+
+        mc, mg = build(np), build(shim)
+        frac_c = filter_turbulence_unknowns(mc, CpuFilterKernels, n_prism, order, ops)
+        frac_g = filter_turbulence_unknowns(mg, gmf.GpuFilterKernels(), n_prism, order, ops)
+        assert 0.0 < frac_c < 1.0 and frac_g == frac_c
+        for fg, fc, f0 in zip(mg.transported_fields(), mc.transported_fields(), build(np).transported_fields()):
+            assert not np.array_equal(fc, f0), "滤波应改变被标记单元"
+            np.testing.assert_allclose(fg, fc, rtol=1e-12, atol=1e-300)
 
     def test_default_gate_keeps_ungated_path(self):
         """默认 "all" 必须仍走无门控分支（既有行为逐位不变）。"""

@@ -91,13 +91,10 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, _
         """
         turb_model_name = solver_kwargs.get('turb_model_name', 'none')
         turb_model_upper = str(turb_model_name).upper() if turb_model_name is not None else 'NONE'
-        if turb_model_upper not in ('NONE', 'SST', 'DDES', 'IDDES', 'WMLES', 'LES'):
+        from autoflowcfd.core.turbulence.registry import require_supported
+        if turb_model_upper != require_supported(turb_model_name):
             raise NotImplementedError(
-                f"MPI 分布式求解器（--n-ranks/--np > 1，或 --multi-gpu）目前只支持 "
-                f"turbulence_model='none'/'sst'/'ddes'/'iddes'/'wmles'/'les'，"
-                f"收到的是 '{turb_model_name}'。"
-                f"请改用 --turbulence-model none/sst/ddes/iddes/wmles/les，"
-                f"或改用单机模式。"
+                f"MPI 分布式求解器收到无法识别的 turbulence_model '{turb_model_name}'。"
             )
         self._turb_model_upper = turb_model_upper
         # 真实 bug 修复（2026-09-02，扩展 DDES/IDDES 分布式支持时发现，
@@ -326,10 +323,11 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, _
         # core/mpi/distributed_artificial_viscosity.py）
         self.artificial_viscosity_enabled = bool(solver_kwargs.get('artificial_viscosity_enabled', False))
         self.artificial_viscosity_alpha = float(solver_kwargs.get('artificial_viscosity_alpha', 1.0))
-        if turb_model_upper in ('SST', 'DDES', 'IDDES', 'WMLES'):
-            if turb_model_upper in ('SST', 'DDES', 'IDDES'):
+        from autoflowcfd.core.turbulence.registry import has_transport_equations
+        if has_transport_equations(turb_model_upper) or turb_model_upper == 'WMLES':
+            if has_transport_equations(turb_model_upper):
                 from autoflowcfd.core.fr_solver.turbulence import init_turbulence_models
-                init_turbulence_models(self, n_local, n_sps)  # 设置 self.turb_model,
+                init_turbulence_models(self, n_local, n_sps)  # 设置 self.turb_model（SST 族或 SA-neg）,
                 # self._turb_ramp_step/_turb_production_ramp_steps（产项渐变，
                 # 见该函数与 _update_production_ramp 文档）。distributed_compute_
                 # turbulence_source_and_viscosity 内部用的是一个每步都重新构造

@@ -1,4 +1,4 @@
-"""AutoFlowCFD V2.0 - 分布式 SST/DDES/IDDES 湍流模型（CPU MPI 路径）。
+"""AutoFlowCFD V2.0 - 分布式输运湍流模型（SST/DDES/IDDES/SA-neg，CPU MPI 路径）。
 
 真正接入分布式状态与残差计算（2026-09-02）——此前 `DistributedFRSolver`/
 `MultiGPUDistributedSolver` 都在构造时对非 'none' 湍流模型 fail-fast
@@ -65,8 +65,18 @@ def apply_distributed_wall_distance(model, wall_distance, solver) -> None:
 
     if not hasattr(model, "apply_wall_distance") or wall_distance is None:
         return
-    model.apply_wall_distance(wall_distance, solver.mu_molecular / solver.freestream["rho_inf"],
-                              global_min=allreduce_min)
+    model.apply_wall_distance(local_part(solver, wall_distance),
+                              solver.mu_molecular / solver.freestream["rho_inf"], global_min=allreduce_min)
+
+
+def local_part(solver, a_compact):
+    """紧凑空间（local + halo，"棱柱在前"）的逐单元数组 -> 本 rank local 单元（原生排列）：
+    模型的场只有 local 单元。numpy 与 cupy 数组都适用（CPU 分布式与多 GPU 共用）。"""
+    idx = np.asarray(solver.dist_flat_face.inv_perm)[:int(solver.partition.n_local_cells)]
+    if hasattr(a_compact, "device"):
+        from autoflowcfd.core.gpu import get_cupy
+        idx = get_cupy().asarray(idx)
+    return a_compact[idx]
 
 
 def compute_distributed_wall_distance(dist_fc, global_mesh, source) -> np.ndarray:
@@ -181,7 +191,7 @@ def build_distributed_turbulence_view(
     """compact 索引空间（local + halo）上的湍流求值"视图"，返回 `(adapter, turb_view)`。
 
     `adapter` 满足单机 `fr_solver/turbulence/source.py` 求值件的鸭子类型接口，
-    `turb_view` 是 n_compact 大小的临时 `SSTModelFR`（k/omega 经 halo 交换填好）。
+    `turb_view` 是 n_compact 大小的临时模型（`turb_model.like`，输运场经 halo 交换填好）。
     显式更新（`distributed_compute_turbulence_source_and_viscosity`）与隐式
     k-omega Newton（`distributed_implicit_turbulence.py`）共用这一份构造。
     """
@@ -192,29 +202,16 @@ def build_distributed_turbulence_view(
     U_extended = halo_exchange.exchange(U_local)
     U_compact = U_extended[dist_fc.perm]
 
-    # 2. k/omega halo 交换（同一个交换器，逐单元形状 (n_sps, 2)）。
-    k_omega_local = np.stack([turb_model.k_field, turb_model.omega_field], axis=-1)  # (n_local,n_sps,2)
-    k_omega_compact = halo_exchange.exchange(k_omega_local)[dist_fc.perm]
-
     mesh_adapter = DistributedMeshAdapter(partition, dist_fc, local_mesh, ops)
     n_compact = mesh_adapter.n_cells
 
-    # 3. 构造 compact 索引空间的临时 SSTModelFR"视图"——不能直接复用
-    # 真正的 turb_model（那个只有 n_local 大小），需要一个同形状为
-    # n_compact 的临时对象供 compute_source_terms/update_fields 读写，
-    # 用完只把 local 部分写回真正的 turb_model。
-    from autoflowcfd.core.turbulence.sst import SSTModelFR
-    # k_inf/omega_inf 不只是初值：开边界来流 ghost 取它们作为来流值
-    # （`transport/residual.py`），必须与真正的模型一致——2026-09-25 前视图
-    # 用构造默认值 1e-6/1.0，分布式来流面上的 k/omega 被当成近乎零的来流。
-    turb_view = SSTModelFR(n_compact, n_sps, k_inf=turb_model.k_inf, omega_inf=turb_model.omega_inf)
-    # 复制真正模型当前的可调常数/状态标记（k_field/omega_field 下面整体覆盖）。
-    for attr in (
-        "sigma_k1", "sigma_k2", "sigma_w1", "sigma_w2", "beta1", "beta2",
-        "a1", "kappa", "beta_star", "k_max", "omega_max", "production_factor",
-    ):
-        if hasattr(turb_model, attr):
-            setattr(turb_view, attr, getattr(turb_model, attr))
+    # 2. compact 索引空间的临时"视图"（`TransportedTurbulence.like`）——不能直接复用真正的
+    # turb_model（那个只有 n_local 大小），需要一个 n_compact 大小的对象供求值件读写，用完只把
+    # local 部分写回。常数、来流值与全局量（上界、斜坡）取自真正的模型（2026-09-25 前视图用构造
+    # 默认来流值，分布式来流面上的 k/omega 被当成近乎零的来流）。
+    turb_view = turb_model.like(n_compact, n_sps, wall_distance=wall_distance_compact)
+    # 3. 输运场经 halo 交换写进视图（同一个交换器，逐单元形状 (n_sps, n_transported)）
+    set_view_fields(turb_view, halo_exchange, dist_fc, turb_model.transported_fields())
 
     # `des_length_scale` 是跨步持久状态（本步 apply_to_sst_model[_iddes] 用本步 nu_t 算出、
     # 写回 turb_model.des_length_scale 供下一步读取），n_local 大小，与 k/omega 同一套
@@ -224,9 +221,6 @@ def build_distributed_turbulence_view(
         turb_view.des_length_scale = halo_exchange.exchange(turb_model.des_length_scale)[dist_fc.perm]
     else:
         turb_view.des_length_scale = None
-
-    turb_view.k_field = k_omega_compact[..., 0].copy()
-    turb_view.omega_field = k_omega_compact[..., 1].copy()
 
     if ddes_model is not None:
         from autoflowcfd.core.turbulence.des import IDDESModel
@@ -251,12 +245,10 @@ def build_distributed_turbulence_view(
     return adapter, turb_view
 
 
-def set_view_k_omega(turb_view, halo_exchange, dist_fc, k_local, omega_local) -> None:
-    """把 local 的 k/omega（native 排列）经 halo 交换写进 compact 视图。"""
-    k_omega_local = np.stack([k_local, omega_local], axis=-1)
-    k_omega_compact = halo_exchange.exchange(k_omega_local)[dist_fc.perm]
-    turb_view.k_field = k_omega_compact[..., 0].copy()
-    turb_view.omega_field = k_omega_compact[..., 1].copy()
+def set_view_fields(turb_view, halo_exchange, dist_fc, fields_local) -> None:
+    """把 local 的输运场（native 排列，模型声明的顺序）经一次 halo 交换写进 compact 视图。"""
+    stacked = halo_exchange.exchange(np.stack(fields_local, axis=-1))[dist_fc.perm]
+    turb_view.set_transported_fields([stacked[..., j].copy() for j in range(stacked.shape[-1])])
 
 
 def distributed_compute_turbulence_source_and_viscosity(
@@ -359,14 +351,11 @@ def distributed_compute_turbulence_source_and_viscosity(
     compute_turbulence_source(adapter, dt_local_compact)
 
     # 4. 只把 local cells 的更新结果写回真正的 turb_model（native 排列，
-    # 见 dist_fc.inv_perm 文档——turb_view.k_field 是 compact 排列，需要
-    # 先换回原生排列再切 [:n_local]，与平均流残差同一处理）。
-    k_native = turb_view.k_field[dist_fc.inv_perm]
-    omega_native = turb_view.omega_field[dist_fc.inv_perm]
-    turb_model.k_field[:] = k_native[:n_local]
-    turb_model.omega_field[:] = omega_native[:n_local]
-    nu_t_native = turb_view.nu_t[dist_fc.inv_perm]
-    turb_model.nu_t[:] = nu_t_native[:n_local]
+    # 见 dist_fc.inv_perm 文档——视图是 compact 排列，需要先换回原生排列
+    # 再切 [:n_local]，与平均流残差同一处理）。
+    turb_model.set_transported_fields(
+        [f[dist_fc.inv_perm][:n_local].copy() for f in turb_view.transported_fields()])
+    turb_model.nu_t = turb_view.nu_t[dist_fc.inv_perm][:n_local].copy()
 
     # DDES/IDDES：des_length_scale 是跨步持久状态（本步 apply_to_sst_
     # model/_iddes 用本步 nu_t/grad_vel 算出的 l_eff，供*下一步*

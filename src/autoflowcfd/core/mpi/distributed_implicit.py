@@ -32,11 +32,11 @@ rank 的耦合块（rank 间按块 Jacobi 式分解，与解析装配 `select_ro
 
 单元着色只依赖拓扑，与阶数无关，换阶后沿用。
 
-## k-omega 的未知量与求值
+## 湍流未知量与求值
 
-湍流未知量是本 rank local 单元的 `(k, ln omega)`（原生排列，与 `turb_model` 一致）。
-每次残差求值：按当前 local 平均流重建 compact 视图，local 湍流场经 2 变量 halo 交换写进视图
-（`distributed_turbulence.py::set_view_k_omega`），在视图上调用单机的
+湍流未知量是本 rank local 单元的模型 Newton 未知量（SST 为 `(k, ln omega)`、SA-neg 为 `nu_tilde`；
+原生排列，与 `turb_model` 一致）。每次残差求值：按当前 local 平均流重建 compact 视图，local 输运场
+经一次 halo 交换写进视图（`distributed_turbulence.py::set_view_fields`），在视图上调用单机的
 `evaluate_turbulence_rates`，结果按 `inv_perm` 换回原生排列、切 local 段。
 halo 交换是集体调用：Newton/GMRES/线搜索里一切决定"再求值一次"的判据都
 经过全局归约，各 rank 的求值次数一致。
@@ -52,7 +52,7 @@ from autoflowcfd.core.fr_solver.turbulence.source import (
 )
 from autoflowcfd.core.mpi.distributed_turbulence import (
     build_distributed_turbulence_view,
-    set_view_k_omega,
+    set_view_fields,
 )
 from autoflowcfd.core.mpi.reductions import MPIReductions
 from autoflowcfd.core.time_integration.implicit.coloring import (
@@ -170,30 +170,8 @@ def distributed_coupling_graph(solver, coarse_ctx) -> CouplingGraph:
                          halo_col_is_prism=halo_cols < int(flat.n_prism))
 
 
-class _TurbulenceCompactState:
-    """local `(k, w)`（未知量，`w = ln omega`）-> 紧凑空间（与湍流残差 `_sync_view` 同一次
-    halo 交换与换序；两者都是线性的，对 w 与对 omega 同样适用）。"""
-
-    __slots__ = ("backend",)
-
-    def __init__(self, backend):
-        self.backend = backend
-
-    def __call__(self, kw_local):
-        be = self.backend
-        s = be.solver
-        view = be._view
-        saved = (view.k_field, view.omega_field)
-        try:
-            set_view_k_omega(view, s.halo_exchange, s.dist_flat_face,
-                             np.ascontiguousarray(kw_local[..., 0]), np.ascontiguousarray(kw_local[..., 1]))
-            return np.stack([view.k_field, view.omega_field], axis=-1)
-        finally:
-            view.k_field, view.omega_field = saved
-
-
 class DistributedTurbulenceBackend:
-    """`DistributedFRSolver`（CPU-MPI）的隐式 k-omega 适配器，接口见
+    """`DistributedFRSolver`（CPU-MPI）的隐式湍流适配器，接口见
     `fr_solver/turbulence/implicit.py` 模块文档"后端"一节。
 
     额外产出 `mu_t_compact`：最后一次（`apply_des=True`）求值之后 compact
@@ -219,8 +197,7 @@ class DistributedTurbulenceBackend:
 
     def _sync_view(self) -> None:
         s = self.solver
-        set_view_k_omega(self._view, s.halo_exchange, s.dist_flat_face,
-                         self.model.k_field, self.model.omega_field)
+        set_view_fields(self._view, s.halo_exchange, s.dist_flat_face, self.model.transported_fields())
 
     def advance_ramp(self) -> None:
         """产生项斜坡推进一步：计数器在求解器上、产生项因子写在真实模型上，之后每次
@@ -267,8 +244,7 @@ class DistributedTurbulenceBackend:
         # 模态滤波在 compact 视图上做（它按"棱柱在前"分块），再写回 local
         self._sync_view()
         finalize_turbulence_update(self._adapter)
-        self.model.k_field = self._to_local(self._view.k_field).copy()
-        self.model.omega_field = self._to_local(self._view.omega_field).copy()
+        self.model.set_transported_fields([self._to_local(f).copy() for f in self._view.transported_fields()])
 
     def cell_colors(self):
         return distributed_block_jacobi_colors(self.solver)
@@ -287,15 +263,16 @@ class DistributedTurbulenceBackend:
         flat = adapter._turbulence_flat_face_override
         ctx = turbulence_linearization(adapter, self._view, self._inputs, self._conv_geom, flat)
         dist_fc = self.solver.dist_flat_face
+        # Newton 未知量到紧凑空间：与输运场同一次 halo 交换与换序（线性，对 ln omega 同样适用）
         return TurbulenceBlockAssembler(
-            ctx, self.shape[1], compact_state=_TurbulenceCompactState(self),
+            ctx, self.shape[1], compact_state=HaloCompactState(self.solver.halo_exchange.exchange, dist_fc.perm),
             row_compact=np.asarray(dist_fc.inv_perm)[:self.shape[0]])
 
 
 class DistributedCoupledBackend:
     """`DistributedFRSolver`（CPU-MPI）的耦合 Newton 适配器（`time_integration/implicit/
     coupled_step.py` 模块文档"后端适配器"）。未知量是本 rank local 单元（原生排列）的
-    `(U[:5], k, ln omega)`；平均流残差与湍流求值各自做 halo 交换（集体调用：Newton/GMRES/
+    `(U[:5], 湍流 Newton 未知量)`；平均流残差与湍流求值各自做 halo 交换（集体调用：Newton/GMRES/
     线搜索里一切决定"再求值一次"的判据都经过全局归约，各 rank 求值次数一致）。
     `nu_av_compact`：本步冻结的人工扩散系数（compact 排列，未启用时 None）；`coarse_ctx`：
     块 ILU 档的全局粗校正通信上下文（平均流与湍流两套块共用）。"""

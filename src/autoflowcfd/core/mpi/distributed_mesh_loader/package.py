@@ -185,7 +185,7 @@ def build_fully_distributed_rank_package(
             稳态需要；调用方对同一个网格算一次），包里放本 rank local 段
         global_cell_colors_d2: (n_global_cells,) 全局一致的距离 2 着色（P0 差分装配
             面邻居耦合块用，`distributed_implicit.py::global_cell_colors_d2`），同上
-        turb_model_name: "NONE"/"SST"/"DDES"/"IDDES"/"WMLES"/"LES"
+        turb_model_name: 规范化的大写模型名（`core/turbulence/registry.py::SUPPORTED_MODELS`）
             （大写），决定是否需要计算 wall_distance/h_max/h_wn
         wall_distance_source: 壁面距离来源（`core/utils/wall_distance`），
             root 由体网格构造一次、对每个 rank 的 compact 解点查询
@@ -207,12 +207,11 @@ def build_fully_distributed_rank_package(
     # compact=None`、但 `'turb_model_name'` 仍标记为该值的包（会被原样
     # pickle 发给非 root rank，物理不完整地跑出结果而不报错）。在 root
     # 侧构造期就拒绝，比等 MPI 分发之后再报错更早、更便宜。
-    if turb_model_name not in ("NONE", "SST", "DDES", "IDDES", "WMLES", "LES"):
+    from autoflowcfd.core.turbulence.registry import has_transport_equations, require_supported
+    if turb_model_name != require_supported(turb_model_name):
         raise NotImplementedError(
-            f"build_fully_distributed_rank_package: 完全分布式加载模式"
-            f"目前只支持 turb_model_name='NONE'/'SST'/'DDES'/'IDDES'/"
-            f"'WMLES'/'LES'，收到的是 '{turb_model_name}'。"
-        )
+            f"build_fully_distributed_rank_package: 无法识别的 turb_model_name '{turb_model_name}'"
+            f"（应为规范化的大写模型名）。")
     if time_scheme is None:
         time_scheme = TimeIntegrationScheme.SSP_RK3
 
@@ -297,7 +296,7 @@ def build_fully_distributed_rank_package(
     wall_distance_compact = None
     iddes_h_max_compact = None
     iddes_h_wn_compact = None
-    if turb_model_name in ("SST", "DDES", "IDDES", "WMLES"):
+    if has_transport_equations(turb_model_name) or turb_model_name == "WMLES":
         wall_distance_compact = compute_distributed_wall_distance(
             dist_fc, mesh, wall_distance_source,
         )

@@ -268,3 +268,41 @@ class TestGpuSolverStoresTurbulenceIntensityAndViscosityRatio:
         # 非默认配置"没有区分度。
         k_inf_default = 1.5 * (vel_inf * 0.01) ** 2
         assert not np.isclose(k_inf, k_inf_default)
+
+
+class TestGpuSolverSA:
+    """单 GPU 的 SA-neg：真实 `GPUFRSolver` 构造（模型、来流、壁距钩子）与换阶（场插值、按新解点
+    重查壁距后壁面解点重新置零）。速率求值与紧耦合 Newton 步对照 CPU 见 `test_gpu_coupled_nk_step.py`。"""
+
+    def _wall_points(self, solver):
+        from autoflowcfd.fr.native_padding import real_row_mask
+
+        mesh = solver.mesh
+        real = real_row_mask(np.arange(mesh.n_cells) < mesh.n_prism_cells, mesh.n_sps_per_cell,
+                             int(solver.current_order)).reshape(mesh.n_cells, -1)
+        return real & (np.asarray(solver.wall_distance_gpu) == 0.0)
+
+    def test_construction_builds_sa_with_cpu_freestream(self):
+        from autoflowcfd.core.turbulence.sa import SAModel
+        from autoflowcfd.core.turbulence.sa.constants import chi_for_viscosity_ratio
+
+        solver = _make_solver(1, turb_model="sa", viscosity_ratio=3.0)
+        m = solver.turb_model_gpu
+        assert isinstance(m, SAModel)
+        nu = 1.8e-5 / 1.225
+        assert m.nu_tilde_inf == pytest.approx(chi_for_viscosity_ratio(3.0) * nu, rel=1e-14)
+        wall = self._wall_points(solver)
+        assert wall.sum() > 0, "合成网格最低 z 平面上应有四面体解点"
+        assert np.all(m.nu_tilde_field[wall] == 0.0)
+        assert np.all(m.nu_tilde_field[~wall & (np.asarray(solver.wall_distance_gpu) > 0)] == m.nu_tilde_inf)
+
+    def test_order_switch_repins_wall_points(self):
+        solver = _make_solver(1, turb_model="sa")
+        m = solver.turb_model_gpu
+        solver._interpolate_to_new_order(2)
+        assert m is solver.turb_model_gpu
+        assert m.nu_tilde_field.shape == (solver.mesh.n_cells, solver.mesh.n_sps_per_cell)
+        wall = self._wall_points(solver)
+        assert wall.sum() > 0
+        assert np.all(m.nu_tilde_field[wall] == 0.0)
+        assert np.all(np.isfinite(m.nu_tilde_field))

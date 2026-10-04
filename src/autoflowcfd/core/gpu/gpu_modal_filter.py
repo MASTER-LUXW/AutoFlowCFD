@@ -207,3 +207,24 @@ def filter_scalar_field_gated_gpu(phi, n_prism: int, filter_prism, filter_tet,
         filt = cp.einsum("sj,cj->cs", filter_tet, phi[n_prism:])
         out[n_prism:] = cp.where(sel2[n_prism:], filt, phi[n_prism:])
     return out
+
+
+class GpuFilterKernels:
+    """`core/turbulence/unknown_filter.py` 的 GPU 滤波核（接口与 CPU 版 `CpuFilterKernels` 相同）。"""
+
+    def __init__(self):
+        self.xp = get_cupy()
+
+    @staticmethod
+    def troubled_mask(fields, n_prism: int, order: int):
+        from autoflowcfd.core.gpu.gpu_troubled_cell import compute_turb_troubled_mask_gpu
+
+        return compute_turb_troubled_mask_gpu(fields, n_prism, order)
+
+    @staticmethod
+    def full(phi, n_prism: int, filter_prism, filter_tet):
+        return filter_scalar_field_gpu(phi, n_prism, filter_prism, filter_tet)
+
+    @staticmethod
+    def gated(phi, n_prism: int, filter_prism, filter_tet, troubled):
+        return filter_scalar_field_gated_gpu(phi, n_prism, filter_prism, filter_tet, troubled)

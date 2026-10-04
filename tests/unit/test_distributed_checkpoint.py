@@ -144,6 +144,11 @@ class TestGpuDistributedCheckpointRoundtrip:
         solver.partition = partition
         solver.state = DistributedFRState(partition, n_sps, n_vars)
         solver.mesh = mesh
+        # 写出端按紧凑排列收集逐单元棱柱标志（真实求解器恒有分布式面几何）
+        from autoflowcfd.core.mpi.distributed_flat_face import build_distributed_flat_face
+        from autoflowcfd.fr.operators import generate_fr_operators
+        solver.dist_flat_face = build_distributed_flat_face(mesh, generate_fr_operators(1), partition,
+                                                            cell_partition=cell_partition)
         solver.device_id = 0
         # 真实求解器恒有来流字典；checkpoint 必须记录它（2026-09-25 起分布式
         # 写入端与单机共用 core/utils/checkpoint_physics.py）。

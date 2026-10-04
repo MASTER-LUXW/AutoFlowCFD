@@ -226,7 +226,7 @@ def reduce_rows_over_real_sps(field, row_is_prism, order: int, how: str,
     `n_prism` 切片没有意义。
 
     Args:
-        field: `(n_rows, n_sps)`
+        field: `(n_rows, n_sps[, ...])`（SP 轴之后的轴原样保留）
         row_is_prism: `(n_rows,)` 布尔，True=该行对应棱柱单元
         order, how, xp: 同 `reduce_per_cell_over_real_sps`
     """
@@ -245,7 +245,8 @@ def reduce_rows_over_real_sps(field, row_is_prism, order: int, how: str,
                  else fn(field[:, :n_prism_real], axis=1))
     tet_val = (fn(field, axis=1) if n_tet_real >= n_sps
                else fn(field[:, :n_tet_real], axis=1))
-    return xp.where(row_is_prism, prism_val, tet_val)
+    mask = xp.asarray(row_is_prism).reshape((-1,) + (1,) * (prism_val.ndim - 1))
+    return xp.where(mask, prism_val, tet_val)
 
 
 def reduce_per_cell_over_real_sps(field, n_prism: int, order: int, how: str,

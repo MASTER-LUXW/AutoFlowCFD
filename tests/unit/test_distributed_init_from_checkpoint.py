@@ -67,11 +67,10 @@ def _nonuniform_euler_U(n_cells, n_sps, rng):
 
 
 class TestRestoreDistributedStateFromCheckpoint:
-    def test_sst_to_sst_restores_euler_state_and_turbulence(self, mesh_and_ops, tmp_path):
-        """稳态 SST → 瞬态 SST：Euler 部分 + k/omega 都必须精确恢复
-        （checkpoint 里 U_sps 的 7 个"变量"实际是单机语义——这里用一个
-        手工构造的 7 通道数组模拟"若单机曾写过这个 checkpoint"的
-        格式，验证 k=rho_k/rho 的换算）。"""
+    @pytest.mark.parametrize("model_name", ["sst", "sa"])
+    def test_roundtrip_restores_euler_state_and_turbulence(self, mesh_and_ops, tmp_path, model_name):
+        """分布式 checkpoint 写出 -> `--init-from` 读回：平均流与湍流输运场、涡粘都精确恢复
+        （2026-10-04 起分布式 checkpoint 写湍流场；此前只写 U_sps）。"""
         from autoflowcfd.core.mpi.distributed_checkpoint import (
             distributed_save_checkpoint, restore_distributed_state_from_checkpoint,
         )
@@ -80,42 +79,66 @@ class TestRestoreDistributedStateFromCheckpoint:
         mesh, ops = mesh_and_ops
         n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
         rng = np.random.default_rng(11)
-
         U5 = _nonuniform_euler_U(n_cells, n_sps, rng)
-        rho = U5[..., 0]
+
+        solver_a = _make_solver(mesh, ops, model_name)
+        solver_a.state.U[:n_cells] = U5
+        m = solver_a.turb_model
+        truth = [f * (1.0 + 0.3 * rng.random(f.shape)) for f in m.transported_fields()]
+        m.set_transported_fields([t.copy() for t in truth])
+        m.nu_t = rng.uniform(1e-5, 1e-4, size=(n_cells, n_sps))
+        saved_path = distributed_save_checkpoint(
+            solver_a, str(tmp_path), 42, "dummy_input.nas", mesh.order, model_name, "cpu")
+
+        solver_b = _make_solver(mesh, ops, model_name)
+        assert restore_distributed_state_from_checkpoint(saved_path, solver_b) == 42
+        np.testing.assert_allclose(solver_b.state.U[:n_cells], U5, rtol=1e-12)
+        np.testing.assert_allclose(solver_b.state.Q[:n_cells, :, :5], conserved_to_primitive(U5), rtol=1e-12)
+        for got, want in zip(solver_b.turb_model.transported_fields(), truth):
+            np.testing.assert_array_equal(got, want)
+        np.testing.assert_array_equal(solver_b.turb_model.nu_t, m.nu_t)
+        assert solver_b.turb_model.production_factor == 1.0, "湍流已发展：跳过产生项斜坡"
+
+    def test_turbulence_comes_from_model_fields_not_state_slots(self, mesh_and_ops, tmp_path):
+        """fail 半边：单机 SST checkpoint 的 U_sps[...,5:7] 是从未更新的历史槽位（初值），真正的湍流场
+        在 k_field/omega_field 字段里。此前分布式 --init-from 从槽位换算 k/omega。"""
+        import types
+
+        from autoflowcfd.core.mpi.distributed_checkpoint import restore_distributed_state_from_checkpoint
+        from autoflowcfd.core.utils.checkpoint import CheckpointManager
+
+        mesh, ops = mesh_and_ops
+        n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
+        rng = np.random.default_rng(5)
+        U5 = _nonuniform_euler_U(n_cells, n_sps, rng)
         k_true = 0.05 + rng.uniform(0, 0.01, size=(n_cells, n_sps))
         omega_true = 100.0 + rng.uniform(0, 10.0, size=(n_cells, n_sps))
-
-        solver_a = _make_solver(mesh, ops, "sst")
-        solver_a.state.U[:n_cells] = U5
-
-        # 手工写一个 7 通道 checkpoint（模拟单机 SST checkpoint 的
-        # U_sps 格式：最后两列是 rho*k/rho*omega）——分布式 solver_a 的
-        # state.U 本身恒为 5 通道，这里直接构造 fields 绕开
-        # distributed_save_checkpoint（它只会存 5 通道），专门测试
-        # restore 端对 7 通道输入的正确换算。
-        import types
-        from autoflowcfd.core.utils.checkpoint import CheckpointManager
-        U7 = np.concatenate([U5, (rho * k_true)[..., None], (rho * omega_true)[..., None]], axis=-1)
+        stale = np.full((n_cells, n_sps, 2), 1e-3)          # 槽位里留着的初值
+        U7 = np.concatenate([U5, stale], axis=-1)
         config = types.SimpleNamespace(mode="steady", backend="cpu", order=mesh.order, turbulence="sst_kw")
-        manager = CheckpointManager(config, output_dir=str(tmp_path))
-        saved_path = manager.save(
-            U7.mean(axis=1), {"iterations": [42]}, 42,
-            metadata={"input_file": "dummy.nas", "order": mesh.order},
-            extra_fields={"U_sps": U7},
-        )
+        saved_path = CheckpointManager(config, output_dir=str(tmp_path)).save(
+            U7.mean(axis=1), {"iterations": [7]}, 7, metadata={"input_file": "dummy.nas", "order": mesh.order},
+            extra_fields={"U_sps": U7, "k_field": k_true, "omega_field": omega_true})
 
         solver_b = _make_solver(mesh, ops, "sst")
-        ckpt_iter = restore_distributed_state_from_checkpoint(saved_path, solver_b)
+        restore_distributed_state_from_checkpoint(saved_path, solver_b)
+        np.testing.assert_array_equal(solver_b.turb_model.k_field, k_true)
+        np.testing.assert_array_equal(solver_b.turb_model.omega_field, omega_true)
 
-        assert ckpt_iter == 42
-        assert solver_b.state.U.shape[-1] == 5
-        np.testing.assert_allclose(solver_b.state.U[:n_cells], U5, rtol=1e-9, atol=1e-9)
-        np.testing.assert_allclose(
-            solver_b.state.Q[:n_cells, :, :5], conserved_to_primitive(U5), rtol=1e-9, atol=1e-9,
+    def test_other_model_checkpoint_keeps_freestream(self, mesh_and_ops, tmp_path):
+        """SST checkpoint -> SA 瞬态：没有 nu_tilde_field，SA 场保留来流初值（壁面解点仍为 0）。"""
+        from autoflowcfd.core.mpi.distributed_checkpoint import (
+            distributed_save_checkpoint, restore_distributed_state_from_checkpoint,
         )
-        np.testing.assert_allclose(solver_b.turb_model.k_field, k_true, rtol=1e-8)
-        np.testing.assert_allclose(solver_b.turb_model.omega_field, omega_true, rtol=1e-8)
+
+        mesh, ops = mesh_and_ops
+        solver_a = _make_solver(mesh, ops, "sst")
+        saved_path = distributed_save_checkpoint(
+            solver_a, str(tmp_path), 3, "dummy_input.nas", mesh.order, "sst", "cpu")
+        solver_b = _make_solver(mesh, ops, "sa")
+        before = solver_b.turb_model.nu_tilde_field.copy()
+        restore_distributed_state_from_checkpoint(saved_path, solver_b)
+        np.testing.assert_array_equal(solver_b.turb_model.nu_tilde_field, before)
 
     def test_none_to_sst_fills_turbulence_with_freestream_defaults(self, mesh_and_ops, tmp_path):
         """稳态 'none'（5 vars）→ 瞬态 'sst'：Euler 部分精确恢复，
@@ -170,3 +193,33 @@ class TestRestoreDistributedStateFromCheckpoint:
 
         with pytest.raises(ValueError):
             restore_distributed_state_from_checkpoint(saved_path, solver_b)
+
+
+@pytest.mark.parametrize("model_name", ["sst", "sa"])
+def test_distributed_resume_restores_turbulence(mesh_and_ops, tmp_path, model_name):
+    """`solve resume` 的分布式读回（`distributed_load_checkpoint`）恢复湍流输运场与涡粘。2026-10-04
+    以前分布式 checkpoint 不写湍流场，resume 后湍流从来流初值重新开始。"""
+    from autoflowcfd.core.mpi.distributed_checkpoint import distributed_load_checkpoint, distributed_save_checkpoint
+
+    mesh, ops = mesh_and_ops
+    rng = np.random.default_rng(2)
+    solver_a = _make_solver(mesh, ops, model_name)
+    m = solver_a.turb_model
+    truth = [f * (1.0 + 0.3 * rng.random(f.shape)) for f in m.transported_fields()]
+    m.set_transported_fields([t.copy() for t in truth])
+    m.nu_t = rng.uniform(1e-5, 1e-4, size=m.nu_t.shape)
+    path = distributed_save_checkpoint(solver_a, str(tmp_path), 9, "dummy_input.nas", mesh.order, model_name, "cpu")
+
+    solver_b = _make_solver(mesh, ops, model_name)
+    _, metadata, iteration = distributed_load_checkpoint(path, solver_b)
+    assert iteration == 9
+    for got, want in zip(solver_b.turb_model.transported_fields(), truth):
+        np.testing.assert_array_equal(got, want)
+    np.testing.assert_array_equal(solver_b.turb_model.nu_t, m.nu_t)
+    # 后处理用的单元平均同样写出（VTK 导出读它，`core/turbulence/output.py`）
+    from autoflowcfd.core.turbulence.output import turbulence_cell_means, turbulence_fields_from_checkpoint
+    cell = turbulence_fields_from_checkpoint(metadata["fields"])
+    ref = turbulence_cell_means(m, mesh.n_prism_cells, mesh.order)
+    assert set(cell) == set(ref)
+    for key in ref:
+        np.testing.assert_allclose(cell[key], ref[key], rtol=1e-13)

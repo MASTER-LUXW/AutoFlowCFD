@@ -60,8 +60,7 @@ def distributed_mesh_load_v2(
     n_ranks=n_ranks, root_context=root_context)`。
 
     Args:
-        turb_model_name: "NONE"/"SST"/"DDES"/"IDDES"/"WMLES"/"LES"
-            （大写）。root 用真实全局网格算 wall_distance/h_max/h_wn
+        turb_model_name: 规范化的大写模型名（`core/turbulence/registry.py::SUPPORTED_MODELS`）。root 用真实全局网格算 wall_distance/h_max/h_wn
             （`compute_distributed_wall_distance`/`compute_h_max_and_
             h_wn` 都只需要完整网格，root 有，只算一次，见下方调用点；
             WMLES 同样需要 wall_distance——y+ 计算依赖它，LES 不需要
@@ -126,12 +125,13 @@ def distributed_mesh_load_v2(
             root_solver_stub, bc_overrides=bc_overrides or {},
         )
 
-        # SST/DDES/IDDES/WMLES：wall_distance_source/h_max/h_wn 只依赖完整
+        # 输运模型（SST 族、SA-neg）与 WMLES：wall_distance_source/h_max/h_wn 只依赖完整
         # 全局网格，只需要算一次（不随 rank 变化），见
         # build_fully_distributed_rank_package 文档对应参数说明。
+        from autoflowcfd.core.turbulence.registry import has_transport_equations
         wall_distance_source = None
         h_max_global = h_wn_global = None
-        if turb_model_name in ("SST", "DDES", "IDDES", "WMLES"):
+        if has_transport_equations(turb_model_name) or turb_model_name == "WMLES":
             # 壁面距离来源与单机同一个构造（WALL 组边界面，见 core/utils/wall_distance；
             # 此前这里把 BoundaryMap 的数组当字典读，真实网格上直接崩溃）
             from autoflowcfd.core.utils.wall_distance import WallDistanceSource

@@ -18,6 +18,7 @@ from autoflowcfd.core.mpi.comm import barrier
 from autoflowcfd.core.utils.checkpoint_physics import physics_metadata
 
 from .state import gather_global_state
+from .turbulence import gather_turbulence_fields, global_cell_is_prism
 
 
 def distributed_save_checkpoint(
@@ -77,6 +78,12 @@ def distributed_save_checkpoint(
     local_cells = solver.partition.local_cells  # 全局索引
 
     U_global = gather_global_state(U_local, local_cells, n_global)
+    # 以下两次收集都是集体调用，必须在非 root 返回之前
+    from autoflowcfd.fr.native_padding import order_from_n_sps
+
+    is_prism_global = global_cell_is_prism(solver, n_global)
+    turb_fields = gather_turbulence_fields(solver, n_global, order_from_n_sps(int(solver.state.n_sps)),
+                                           is_prism_global)
 
     if rank != 0:
         barrier()
@@ -98,31 +105,14 @@ def distributed_save_checkpoint(
     # order=1 下占一半槽位）。见 fr/native_padding.py::
     # reduce_per_cell_over_real_sps。
     #
-    # `U_global` 是**全局**索引空间（gather_global_state 按全局 id 归位），
-    # 所以需要**全局**棱柱数。两种分布式模式的 `solver.mesh` 含义不同：
-    #   - 传统模式：每个 rank 持有完整网格，`mesh.n_prism_cells` 就是全局值；
-    #   - 完全分布式加载：`self.mesh` 是 `PrecompactedMeshData`，它的
-    #     n_prism 是本 rank 的 **compact** 值，用在全局索引上是错的。
-    # 因此只在能可靠取到全局值时做掩码；完全分布式模式下退回原样的全场
-    # 平均，并**显式记录**这一点——它是一处有界、已知的输出侧失真，而不是
-    # 静默行为：`U_sps`（下方 extra_fields）始终是精确的逐 SP 数据，所有
-    # 内部消费方（resume、气动力后处理）都强制要求 U_sps 且缺失即报错，
-    # 本字段只供粗粒度外部消费方使用。要在完全分布式下也修对，需要把
-    # 逐单元 is_prism 标志一起 gather（需要真实 MPI 环境验证）。
-    from autoflowcfd.fr.native_padding import (
-        order_from_n_sps, reduce_per_cell_over_real_sps,
-    )
-    _mesh_ck = getattr(solver, 'mesh', None)
-    _fully_dist = bool(getattr(solver, '_is_fully_distributed', False))
-    _n_prism_global = (getattr(_mesh_ck, 'n_prism_cells', None)
-                       if (_mesh_ck is not None and not _fully_dist) else None)
-    if _n_prism_global is not None:
-        solution_cell_avg = reduce_per_cell_over_real_sps(
-            U_global, int(_n_prism_global),
-            order_from_n_sps(U_global.shape[1]), 'mean')
-    else:
-        solution_cell_avg = U_global.mean(axis=1)  # (n_global, n_vars)
-    extra_fields = {"U_sps": U_global}
+    # `U_global` 是**全局**索引空间（gather_global_state 按全局 id 归位），逐单元的棱柱标志也是
+    # 收集来的（`turbulence.py::global_cell_is_prism`，两种分布式模式都适用——此前完全分布式加载
+    # 下取不到全局棱柱数，退回含零填充槽位的全场平均）。
+    from autoflowcfd.fr.native_padding import reduce_rows_over_real_sps
+
+    solution_cell_avg = reduce_rows_over_real_sps(
+        U_global, is_prism_global, order_from_n_sps(U_global.shape[1]), 'mean')
+    extra_fields = {"U_sps": U_global, **turb_fields}
 
     metadata = {
         "input_file": input_file,

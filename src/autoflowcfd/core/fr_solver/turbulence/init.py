@@ -93,6 +93,14 @@ def _set_freestream_turbulence(solver) -> tuple:
     return k_inf, omega_inf
 
 
+def create_sa_model(owner, n_cells: int, n_sps: int, xp=np) -> SAModel:
+    """SA-neg 模型（CPU 求解器、GPU 求解器共用的构造）：来流由涡粘比 `VR` 给定（与 SST 定
+    omega_inf 用的同一个参数，`_freestream_turbulence_parameters`），参考运动粘度 `mu / rho_inf`。"""
+    _, VR = _freestream_turbulence_parameters(owner)
+    return SAModel(n_cells, n_sps, nu_ref=owner.mu_molecular / owner.freestream["rho_inf"],
+                   viscosity_ratio=VR, xp=xp)
+
+
 def _set_turbulence_bounds(solver) -> None:
     """根据来流条件设置 k/omega 物理上界。
 
@@ -214,13 +222,10 @@ def init_turbulence_models(solver, n_cells: int, n_sps: int) -> None:
               f"production ramp: {solver._turb_production_ramp_steps} steps)")
 
     elif solver.turb_model_name == "SA":
-        _, VR = _freestream_turbulence_parameters(solver)
-        solver.turb_model = SAModel(n_cells, n_sps, nu_ref=solver.mu_molecular / solver.freestream["rho_inf"],
-                                    viscosity_ratio=VR)
+        solver.turb_model = m = create_sa_model(solver, n_cells, n_sps)
         _update_production_ramp(solver)
-        m = solver.turb_model
         print(f"   [OK] SA-neg model initialized (nu_tilde_inf={m.nu_tilde_inf:.4e}, "
-              f"chi_inf={m.nu_tilde_inf / m.nu_ref:.4g}, viscosity ratio={VR:g}, "
+              f"chi_inf={m.nu_tilde_inf / m.nu_ref:.4g}, viscosity ratio={m.viscosity_ratio:g}, "
               f"production ramp: {solver._turb_production_ramp_steps} steps)")
 
     elif solver.turb_model_name == "WMLES":

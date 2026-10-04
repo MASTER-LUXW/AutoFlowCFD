@@ -137,13 +137,13 @@ class _DistributedFromPackageMixin:
         # 设成该值但 `self.turb_model`/`.wmles_model`/`.sgs_model` 都
         # 留空——`step()` 会静默把它当成 'none' 跑（湍流物理完全缺失，
         # 不会有任何报错或警告）。
-        if turb_model_name not in ('NONE', 'SST', 'DDES', 'IDDES', 'WMLES', 'LES'):
+        from autoflowcfd.core.turbulence.registry import (
+            has_transport_equations, is_sa_family, require_supported,
+        )
+        if turb_model_name != require_supported(turb_model_name):
             raise NotImplementedError(
-                f"DistributedFRSolver.from_fully_distributed_package: "
-                f"'完全分布式加载' 模式目前只支持 turbulence_model="
-                f"'none'/'sst'/'ddes'/'iddes'/'wmles'/'les'，收到的是 "
-                f"'{turb_model_name}'。"
-            )
+                f"DistributedFRSolver.from_fully_distributed_package: 无法识别的 turbulence_model "
+                f"'{turb_model_name}'（应为规范化的大写模型名）。")
         self.turb_model_name = turb_model_name
         self._turb_model_upper = turb_model_name
         # Order Continuation 支持（2026-09-02，见 core/mpi/distributed_
@@ -191,7 +191,7 @@ class _DistributedFromPackageMixin:
             rho_inf = package['freestream'].get('rho_inf', 1.225)
             self.wmles_model = WMLESModel(nu=mu_molecular / max(rho_inf, 1e-10))
 
-        if turb_model_name in ('SST', 'DDES', 'IDDES'):
+        if has_transport_equations(turb_model_name):
             n_local = self.partition.n_local_cells
             # 直接复用单机路径同一套 Tu/VR 推导 k_inf/omega_inf +
             # k_max/omega_max 物理上界公式（`_set_freestream_
@@ -206,15 +206,20 @@ class _DistributedFromPackageMixin:
             from autoflowcfd.core.fr_solver.turbulence import (
                 _set_freestream_turbulence, _set_turbulence_bounds,
             )
-            from autoflowcfd.core.turbulence.sst import SSTModelFR
-            k_inf, omega_inf = _set_freestream_turbulence(self)
-            self.turb_model = SSTModelFR(n_local, n_sps, k_inf=k_inf, omega_inf=omega_inf)
-            _set_turbulence_bounds(self)
-            # omega 上界按 root 算好的壁距（全局最小）重定，与传统模式同一函数
+            from autoflowcfd.core.fr_solver.turbulence.init import TURB_PRODUCTION_RAMP_STEPS, create_sa_model
+            if is_sa_family(turb_model_name):
+                self.turb_model = create_sa_model(self, n_local, n_sps)
+            else:
+                from autoflowcfd.core.turbulence.sst import SSTModelFR
+                k_inf, omega_inf = _set_freestream_turbulence(self)
+                self.turb_model = SSTModelFR(n_local, n_sps, k_inf=k_inf, omega_inf=omega_inf)
+                _set_turbulence_bounds(self)
+            # 壁距交给模型（SST 的 omega 上界按 root 算好的壁距取全局最小、SA 的壁面解点），
+            # 与传统模式同一函数
             from autoflowcfd.core.mpi.distributed_turbulence import apply_distributed_wall_distance
             apply_distributed_wall_distance(self.turb_model, self.wall_distance_compact, self)
             self._turb_ramp_step = 0
-            self._turb_production_ramp_steps = 50
+            self._turb_production_ramp_steps = TURB_PRODUCTION_RAMP_STEPS
             self._turb_production_ramp_complete = False
 
             if turb_model_name == 'DDES':

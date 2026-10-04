@@ -96,6 +96,12 @@ class TransportedTurbulence:
         return tuple(self._field_from_unknown(j, fn(self._unknown_from_field(j, f, xp)), xp)
                      for j, f in enumerate(fields))
 
+    def like(self, n_cells: int, n_sps: int, wall_distance=None) -> "TransportedTurbulence":
+        """同常数、同来流、同全局量（上界、产生项斜坡）的新实例：分布式紧凑空间（local + halo）的
+        求值视图，场随后由调用方整体写入。`wall_distance` 是视图形状的壁距（模型需要逐点壁面信息
+        时用，SA-neg 的壁面解点）；全局量取自本实例，不按视图上的局部壁距重算。"""
+        raise NotImplementedError
+
     def apply_wall_distance(self, wall_distance, nu_ref: float, global_min=None) -> None:
         """壁距设定/重算后调用（四个后端各一处：单机 `apply_wall_distance_source`、单 GPU
         `_init_wall_distance_gpu`、CPU 分布式与多 GPU 的 `apply_distributed_wall_distance`）。

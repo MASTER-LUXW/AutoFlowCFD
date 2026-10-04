@@ -46,6 +46,9 @@ class GPUTurbulenceSST(_SSTTransportedMixin):
         nu_t: 涡粘系数场 (GPU)
     """
 
+    def _new_instance(self, n_cells: int, n_sps: int):
+        return type(self)(n_cells, n_sps, self.device_id, k_inf=self.k_inf, omega_inf=self.omega_inf)
+
     def __init__(self, n_cells: int, n_sps: int, device_id: int = 0,
                  k_inf: float = 1e-6, omega_inf: float = 1.0):
         """初始化 GPU SST 模型。
@@ -358,46 +361,6 @@ class GPUTurbulenceSST(_SSTTransportedMixin):
 
         advance_k_log_omega(self, dt, sources[0], sources[1], transports[0], transports[1], get_cupy())
         self.apply_positivity_limiter()
-
-    def filter_fields_gpu(self, n_prism: int, ops, order: int):
-        """k 与 `w = ln(omega)` 的模态滤波 + 正性/上界限制器（CPU 版
-        `fr_solver/turbulence/source.py::finalize_turbulence_update` 的滤波段），单机
-        GPU 与多 GPU（compact 视图，"棱柱在前"）共用。门控档 `AFCFD_FILTER_TURB_GATE=
-        sensor` 时传感器同样看 w（被多项式表示的量）。
-
-        滤波矩阵为单位阵（`AFCFD_FILTER_MODE=off`）时整段跳过，与 CPU 同一判据
-        （`fr_solver/turbulence/init.py::_filter_matrices_are_identity`）。
-
-        Returns:
-            门控档下被标记单元的比例；全场滤波档或跳过时为 None
-        """
-        from autoflowcfd.core.fr_solver.filter import resolve_turb_filter_gate
-        from autoflowcfd.core.fr_solver.turbulence.init import _filter_matrices_are_identity
-
-        if _filter_matrices_are_identity(ops):
-            return None
-        from autoflowcfd.core.gpu.gpu_modal_filter import (
-            filter_scalar_field_gated_gpu, filter_scalar_field_gpu,
-        )
-        from autoflowcfd.core.turbulence.sst.log_omega import log_omega, omega_from_log
-
-        cp = get_cupy()
-        w = log_omega(self.omega_field, cp)
-        frac = None
-        if resolve_turb_filter_gate() == "sensor":
-            from autoflowcfd.core.gpu.gpu_troubled_cell import compute_turb_troubled_mask_gpu
-
-            troubled = compute_turb_troubled_mask_gpu((self.k_field, w), n_prism, int(order))
-            frac = float(cp.mean(troubled))
-            self.k_field = filter_scalar_field_gated_gpu(
-                self.k_field, n_prism, ops.filter_prism, ops.filter_tet, troubled)
-            w = filter_scalar_field_gated_gpu(w, n_prism, ops.filter_prism, ops.filter_tet, troubled)
-        else:
-            self.k_field = filter_scalar_field_gpu(self.k_field, n_prism, ops.filter_prism, ops.filter_tet)
-            w = filter_scalar_field_gpu(w, n_prism, ops.filter_prism, ops.filter_tet)
-        self.omega_field = omega_from_log(w, self.omega_max, cp)
-        self.apply_positivity_limiter()
-        return frac
 
     def get_nu_t_cpu(self) -> np.ndarray:
         """获取涡粘系数（下载到 CPU）。"""

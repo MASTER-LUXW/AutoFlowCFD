@@ -92,10 +92,11 @@ class SAModel(TransportedTurbulence):
     def upper_bounds(self):
         return (self.nu_tilde_max,)
 
-    def like(self, n_cells: int, n_sps: int) -> "SAModel":
-        """同常数、同来流、同斜坡状态的新实例（分布式紧凑视图用），场取来流值。"""
+    def like(self, n_cells: int, n_sps: int, wall_distance=None) -> "SAModel":
         other = SAModel(n_cells, n_sps, self.nu_ref, self.viscosity_ratio, xp=self.xp)
         other.production_factor = self.production_factor
+        if wall_distance is not None:
+            other.wall_points = self.xp.asarray(wall_distance) == 0.0
         return other
 
     def apply_wall_distance(self, wall_distance, nu_ref, global_min=None):

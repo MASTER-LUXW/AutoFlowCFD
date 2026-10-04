@@ -27,6 +27,9 @@ class SSTModelFR(_SSTBlendingMixin, _SSTSourceMixin, _SSTUpdateMixin, _SSTTransp
         nu_t: 湍流涡粘系数场，形状 (n_cells, n_sps)
     """
 
+    def _new_instance(self, n_cells: int, n_sps: int):
+        return type(self)(n_cells, n_sps, k_inf=self.k_inf, omega_inf=self.omega_inf)
+
     def __init__(self, n_cells: int, n_sps: int,
                  k_inf: float = 1e-6, omega_inf: float = 1.0):
         """

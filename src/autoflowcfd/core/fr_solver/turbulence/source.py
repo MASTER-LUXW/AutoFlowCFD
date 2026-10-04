@@ -13,7 +13,6 @@ from autoflowcfd.core.turbulence.transported import TurbulenceRates
 from autoflowcfd.core.fr_operators.corrected_gradient import source_velocity_gradient
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from .init import (
-    _filter_matrices_are_identity,
     _update_production_ramp,
 )
 
@@ -228,35 +227,15 @@ def finalize_turbulence_update(solver) -> None:
     # 单元内部相邻解点间出现数量级跳变，外插到面后被上风格式放大成
     # 巨大虚假对流残差）。用与平均流完全同一套 filter_prism/filter_tet
     # 矩阵，P0（n_sps=1）下矩阵退化为单位矩阵，天然是无操作。
-    if solver.mesh.n_sps_per_cell > 1 and not _filter_matrices_are_identity(solver.ops):
-        from autoflowcfd.core.fr_solver.filter import (
-            compute_turb_troubled_mask, filter_scalar_field,
-            filter_scalar_field_gated, resolve_turb_filter_gate,
-        )
-        model = solver.turb_model
-        shape = model.transported_fields()[0].shape
-        x = model.newton_unknowns(np)
-        columns = [np.ascontiguousarray(x[:, j]).reshape(shape) for j in range(x.shape[1])]
-        n_prism = solver.mesh.n_prism_cells
-        # 门控维度与平均流的 `AFCFD_FILTER_MODE` **独立**（2026-09-15）：
-        # 真实网格 250 步对照决定性证明两维的效果可以完全分离——off 与
-        # sensor 两档的平均流轨迹几乎逐位相同，om_max 却差一个量级，差异
-        # 全部来自这里。理由与实测数据见 filter.py::resolve_turb_filter_gate。
-        # 默认 "all" 与此前行为逐位一致。
-        if resolve_turb_filter_gate() == "sensor":
-            order = getattr(solver, "current_order", None)
-            if order is None:
-                order = solver.order
-            # 传感器量的是多项式表示的光滑度，被表示的是未知量本身（SST 为 w = ln(omega)）
-            troubled = compute_turb_troubled_mask(columns, int(order), n_prism=n_prism)
-            solver._turb_filter_troubled_frac = float(np.mean(troubled))
-            filtered = [filter_scalar_field_gated(c, solver.ops.filter_prism, solver.ops.filter_tet, troubled,
-                                                  n_prism=n_prism) for c in columns]
-        else:
-            filtered = [filter_scalar_field(c, n_prism, solver.ops.filter_prism, solver.ops.filter_tet)
-                        for c in columns]
-        model.set_newton_unknowns(np.stack([np.asarray(f).ravel() for f in filtered], axis=1), np)
-        # 滤波可能把场值推到正性下限以下（滤波器系数含负权重，理论上
-        # 可能），滤波后必须重新过一遍正性/上界限制器，不能假设滤波
-        # 输出天然满足这些约束。
-        solver.turb_model.apply_positivity_limiter()
+    # 滤波作用在 Newton 未知量上（SST 为 k 与 w = ln omega、SA-neg 为 nu_tilde），算法全部后端共用；
+    # 门控维度与平均流的 `AFCFD_FILTER_MODE` 独立（理由见 filter/scalar.py::resolve_turb_filter_gate）
+    from autoflowcfd.core.fr_solver.filter import CpuFilterKernels
+    from autoflowcfd.core.turbulence.unknown_filter import filter_turbulence_unknowns
+
+    order = getattr(solver, "current_order", None)
+    if order is None:
+        order = getattr(solver, "order", None)     # 只有门控档的传感器用到（紧凑空间适配器没有阶数属性）
+    frac = filter_turbulence_unknowns(solver.turb_model, CpuFilterKernels, solver.mesh.n_prism_cells,
+                                      order, solver.ops)
+    if frac is not None:
+        solver._turb_filter_troubled_frac = frac

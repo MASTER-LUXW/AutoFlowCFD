@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
-"""多 GPU 分布式的平均流 + k-omega 紧耦合 Newton 接线（`gpu/distributed/gpu_distributed_implicit.py::
-MultiGpuCoupledBackend` 与 `MultiGpuTurbulenceBackend`）。
+"""多 GPU 分布式的平均流 + 湍流紧耦合 Newton 接线（`gpu/distributed/gpu_distributed_implicit.py::
+MultiGpuCoupledBackend` 与 `MultiGpuTurbulenceBackend`）；SST（棱柱槽道）与 SA-neg（四面体槽道，含壁面
+解点）各验一遍。
 
 紧耦合步本身（`time_integration/implicit/coupled_step.py`）各后端共用；这里验多 GPU 这一侧：试探
 状态写进 `U_gpu`、湍流求值走真实的 compact 视图件（`gpu_distributed_init/turb_source.py` 的
@@ -8,11 +9,11 @@ MultiGpuCoupledBackend` 与 `MultiGpuTurbulenceBackend`）。
 / `_finalize_turbulence_update_distributed` / `_write_back_turbulence_distributed`）、湍流解析块在
 compact 视图上装配并按 `inv_perm` 取行、快照还原、步后收尾。
 
-做法：单 rank、全棱柱槽道——compact 排列恰为恒等（第一条断言钉住这个前提），分区、`dist_flat_face`、
+做法：单 rank、单一单元类型的槽道——compact 排列恰为恒等（第一条断言钉住这个前提），分区、`dist_flat_face`、
 halo 交换与 compact 面空间的边界提供者借自同一网格上的 CPU 分布式求解器；`get_cupy` 换成 numpy；平均流
 残差委托给单机 CPU 求解器。与单机 CPU 的紧耦合步对照：
 
-1. 耦合残差（7 列）一致；
+1. 耦合残差（平均流 5 列 + 湍流未知量列）一致；
 2. 各走 3 个耦合 Newton 步，GMRES 次数相同、平均流与湍流状态一致。
 
 此前多 GPU + k-omega 的隐式路径没有任何测试：`MultiGpuTurbulenceBackend.block_assembler` 用到
@@ -26,6 +27,7 @@ import pytest
 
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 from tests.unit.test_distributed_turbulence_bc_parity import _pair
+from tests.unit.test_gpu_coupled_nk_step import _gpu_turbulence_model
 from tests.unit.test_gpu_solver_turbulence_source import _NumpyAsCupy, _prepare_mesh_ops_data
 
 import autoflowcfd.core.gpu.distributed.gpu_distributed_implicit as mgi_mod
@@ -51,19 +53,13 @@ def _multi_gpu_standin(single, dist):
     from autoflowcfd.core.gpu.distributed.gpu_distributed.residual import _MultiGPUResidualMixin
     from autoflowcfd.core.gpu.distributed.gpu_distributed_init.turb_source import _GPUDistributedTurbSourceMixin
     from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_turbulence_face_masks_gpu
-    from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
     from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
     from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
 
-    n, n_sps = single.turb_model.k_field.shape
+    n, n_sps = single.turb_model.transported_fields()[0].shape
     fc = dist.dist_flat_face
     assert np.array_equal(np.asarray(fc.perm)[:n], np.arange(n)), "compact 排列不是恒等，本测试的替身前提不成立"
-    tc = single.turb_model
-    tg = GPUTurbulenceSST(n, n_sps, device_id=0, k_inf=tc.k_inf, omega_inf=tc.omega_inf)
-    for a in ("k_field", "omega_field", "nu_t"):
-        setattr(tg, a, np.array(getattr(tc, a), copy=True))
-    for a in ("k_max", "omega_max", "production_factor"):
-        setattr(tg, a, getattr(tc, a))
+    tg = _gpu_turbulence_model(single)
     provider = dist.local_solver.boundary_ghost_provider
     wall, open_ = compute_turbulence_face_masks_gpu(
         types.SimpleNamespace(face_connectivity=types.SimpleNamespace(n_faces=fc.base_flat.n_faces)), provider)
@@ -75,7 +71,8 @@ def _multi_gpu_standin(single, dist):
         gpu_halo=types.SimpleNamespace(exchange=dist.halo_exchange.exchange), flat_face_gpu=fc.base_flat,
         wall_distance_gpu=np.asarray(dist.wall_distance_compact), _wall_mask_k_gpu=wall, _open_mask_gpu=open_,
         turb_model_gpu=tg, ddes_model_gpu=None, iddes_h_max_compact=None, iddes_h_wn_compact=None,
-        turb_model_name="SST", mu_molecular=single.mu_molecular, freestream=dist.local_solver.freestream,
+        turb_model_name=single.turb_model_name, mu_molecular=single.mu_molecular,
+        freestream=dist.local_solver.freestream,
         boundary_ghost_provider=provider, low_mach_precond_enabled=single.low_mach_precond_enabled,
         wmles_model=None, U_gpu=np.array(single.state.U[..., :5], copy=True),
         _turb_ramp_step=single._turb_ramp_step, _turb_production_ramp_steps=single._turb_production_ramp_steps,
@@ -107,16 +104,15 @@ def _multi_gpu_standin(single, dist):
     return g
 
 
-@pytest.fixture
-def pair():
+@pytest.fixture(params=["SST", "SA"])
+def pair(request):
     from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 
-    single, dist = _pair(TimeIntegrationScheme.NEWTON_KRYLOV, 1)
-    # 非平凡湍流场（均匀来流下 k/omega 也均匀，耦合项与湍流输运都退化）
+    single, dist = _pair(TimeIntegrationScheme.NEWTON_KRYLOV, 1, request.param)
+    # 非平凡湍流场（均匀来流下湍流场也均匀，耦合项与湍流输运都退化）；经模型写回（SA 壁面解点保持 0）
     rng = np.random.default_rng(5)
-    single.turb_model.k_field = single.turb_model.k_field * (1 + 0.2 * rng.standard_normal(single.turb_model.k_field.shape))
-    single.turb_model.omega_field = single.turb_model.omega_field * (
-        1 + 0.2 * rng.standard_normal(single.turb_model.omega_field.shape))
+    m = single.turb_model
+    m.restore_transported([f * (1 + 0.2 * rng.standard_normal(f.shape)) for f in m.transported_fields()])
     single.step(1e-6)                       # 一个耦合步，让平均流也非均匀
     # 两侧从同样干净的跨步状态出发（块缓存、forcing 历史、dtau 缩放）：预热步留下的状态会让
     # 单机复用过时的块，两侧的 Newton 步因此不可比
@@ -148,13 +144,15 @@ def test_coupled_residual_matches_single_machine(pair):
     x = xc.copy()
     x[:, 0] *= 1.0 + 1e-3 * rng.standard_normal(x.shape[0])
     x[:, 5] *= 1.0 + 0.1 * rng.standard_normal(x.shape[0])
-    x[:, 6] += 0.1 * rng.standard_normal(x.shape[0])
+    if x.shape[1] > 6:
+        x[:, 6] += 0.1 * rng.standard_normal(x.shape[0])
     rc = CoupledResidual(bc, real, xc)(x)
     rg = CoupledResidual(bg, real, xg)(x)
     scale = np.abs(rc).max(axis=0)
     assert np.all(np.abs(rg - rc).max(axis=0) <= 1e-9 * scale), np.abs(rg - rc).max(axis=0) / scale
     np.testing.assert_array_equal(g.U_gpu, single.state.U[..., :5])     # 试探求值后还原
-    np.testing.assert_array_equal(g.turb_model_gpu.k_field, single.turb_model.k_field)
+    for fg, fc in zip(g.turb_model_gpu.transported_fields(), single.turb_model.transported_fields()):
+        np.testing.assert_array_equal(fg, fc)
 
 
 def test_multi_gpu_coupled_steps_match_single_machine(pair):
@@ -179,7 +177,7 @@ def test_multi_gpu_coupled_steps_match_single_machine(pair):
         rel = (np.abs(got - exp) / scale).max()
         tol_mean, tol_turb = (1e-8, 1e-8) if k == 0 else (1e-7, 2e-6)
         assert rel <= tol_mean, f"第 {k + 1} 步平均流相对差 {rel:.3e}"
-        for name in ("k_field", "omega_field", "nu_t"):
+        for name in tuple(single.turb_model.TRANSPORTED_FIELDS) + ("nu_t",):
             a, b = np.asarray(getattr(g.turb_model_gpu, name)), np.asarray(getattr(single.turb_model, name))
             r = np.abs(a - b).max() / np.abs(b).max()
             assert r <= tol_turb, f"第 {k + 1} 步 {name} 相对差 {r:.2e}"

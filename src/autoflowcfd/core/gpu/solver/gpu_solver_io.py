@@ -5,7 +5,6 @@ CPU↔GPU 状态传输、资源释放和湍流源项计算。
 """
 
 import numpy as np
-from loguru import logger
 
 from autoflowcfd.core.gpu import get_cupy
 
@@ -32,59 +31,6 @@ class _GPUSolverIOMixin:
     def cleanup(self):
         """释放 GPU 资源。"""
         self.array_mgr.cleanup()
-
-    def save_checkpoint(self, path: str):
-        """保存 GPU 求解器状态到 checkpoint 文件。"""
-        import h5py
-        cp = get_cupy()
-
-        U_cpu = cp.asnumpy(self.U_gpu)
-        Q_cpu = cp.asnumpy(self.Q_gpu)
-
-        with h5py.File(path, 'w') as f:
-            f.create_dataset('U', data=U_cpu)
-            f.create_dataset('Q', data=Q_cpu)
-            f.attrs['iteration'] = self.iteration
-            f.attrs['n_cells'] = self.mesh.n_cells
-            f.attrs['n_sps'] = self.mesh.n_sps_per_cell
-            f.attrs['order'] = self.order
-            f.attrs['time_scheme'] = self.time_integrator.scheme.value
-            f.attrs['cfl'] = self._current_cfl()
-
-            if self.residual_history:
-                f.create_dataset('residual_history', data=np.array(self.residual_history))
-            if self.turb_model_gpu is not None:
-                f.create_dataset('k', data=cp.asnumpy(self.turb_model_gpu.k_field))
-                f.create_dataset('omega', data=cp.asnumpy(self.turb_model_gpu.omega_field))
-            if self._dual_time_U_prev is not None:
-                f.create_dataset('U_prev', data=cp.asnumpy(self._dual_time_U_prev))
-
-        logger.info(f"GPU checkpoint saved to {path}")
-
-    def load_checkpoint(self, path: str):
-        """从 checkpoint 文件加载 GPU 求解器状态。"""
-        import h5py
-        cp = get_cupy()
-
-        with h5py.File(path, 'r') as f:
-            U_cpu = f['U'][:]
-            Q_cpu = f['Q'][:]
-            self.U_gpu = cp.asarray(U_cpu)
-            self.Q_gpu = cp.asarray(Q_cpu)
-            self.iteration = int(f.attrs['iteration'])
-
-            if 'residual_history' in f:
-                self.residual_history = f['residual_history'][:].tolist()
-            if 'k' in f and 'omega' in f and self.turb_model_gpu is not None:
-                self.turb_model_gpu.k_field = cp.asarray(f['k'][:])
-                from autoflowcfd.core.turbulence.sst.log_omega import admissible_omega
-
-                self.turb_model_gpu.omega_field = cp.asarray(
-                    admissible_omega(f['omega'][:], self.turb_model_gpu.omega_inf, source='GPU checkpoint'))
-            if 'U_prev' in f:
-                self._dual_time_U_prev = cp.asarray(f['U_prev'][:])
-
-        logger.info(f"GPU checkpoint loaded from {path}, iteration={self.iteration}")
 
     def _update_production_ramp_gpu(self) -> None:
         """湍流产生项渐变（全部后端同一份，见
@@ -182,6 +128,17 @@ class _GPUSolverIOMixin:
         源项部分与输运部分 `(dk_dt, dw_dt, transport_k, transport_w)`（CPU 版
         `source.py::evaluate_turbulence_rates` 的 GPU 对应，同一组副作用约定：
         刷新模型上的 `nu_t` 等缓存；`apply_des=False` 时不改写 DES 长度尺度）。"""
+        from autoflowcfd.core.turbulence.registry import is_sa_family
+
+        if is_sa_family(self.turb_model_name):
+            # 与 CPU 同一份算法（`core/turbulence/sa/rates.py`），注入 GPU 的标量输运原语
+            from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport.primitives import GpuScalarTransport
+            from autoflowcfd.core.turbulence.sa.rates import evaluate_sa_rates
+
+            return evaluate_sa_rates(self.turb_model_gpu, GpuScalarTransport(self), self.Q_gpu, grad_vel,
+                                     d_wall, self.mu_molecular)
+
+        # 以下为 SST 族（SST/DDES/IDDES）
         cp = get_cupy()
         rho = self.Q_gpu[:, :, 0]
         from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_gradient_gpu
@@ -263,15 +220,12 @@ class _GPUSolverIOMixin:
         # 模块文档），k/omega 场只靠逐点源项 ODE 弛豫，没有跨单元对流/
         # 扩散。与 CPU 版 fr_solver_turbulence.py::compute_turbulence_source
         # 同一个触发条件（SST/DDES/IDDES 都需要）。
-        transport_k = None
-        transport_w = None
-        if self.turb_model_name.upper() in ("SST", "DDES", "IDDES"):
-            from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import (
-                compute_turbulence_transport_residual_gpu,
-            )
-            transport_k, transport_w = compute_turbulence_transport_residual_gpu(
-                self, grad_k=grad_k, grad_log_omega=grad_w,
-            )
+        from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import (
+            compute_turbulence_transport_residual_gpu,
+        )
+        transport_k, transport_w = compute_turbulence_transport_residual_gpu(
+            self, grad_k=grad_k, grad_log_omega=grad_w,
+        )
 
         from autoflowcfd.core.turbulence.transported import TurbulenceRates
         return TurbulenceRates((Sk, S_omega), (dk_dt, dw_dt), (transport_k, transport_w))
@@ -285,13 +239,15 @@ class _GPUSolverIOMixin:
         # fr_solver/turbulence.py::compute_turbulence_source 同一处修复，
         # 完整推导见 gpu_modal_filter.py::filter_scalar_field_gpu 文档）：
         # k/omega 场同样需要模态滤波，理由/CPU-GPU一致性要求同上。
-        if self.mesh.n_sps_per_cell > 1:
-            # 门控维度 `AFCFD_FILTER_TURB_GATE` 与 CPU 同一套传感器（2026-09-15 补齐，
-            # 此前 GPU 无条件全场滤波）；滤波作用在 k 与 w = ln(omega) 上
-            _order = int(getattr(self, "current_order", None) or getattr(self, "order", 0))
-            frac = self.turb_model_gpu.filter_fields_gpu(self.mesh.n_prism_cells, self.ops, _order)
-            if frac is not None:
-                self._turb_filter_troubled_frac = frac
+        # 与 CPU 同一份算法（`core/turbulence/unknown_filter.py`），作用在 Newton 未知量上
+        from autoflowcfd.core.gpu.gpu_modal_filter import GpuFilterKernels
+        from autoflowcfd.core.turbulence.unknown_filter import filter_turbulence_unknowns
+
+        _order = int(getattr(self, "current_order", None) or getattr(self, "order", 0))
+        frac = filter_turbulence_unknowns(self.turb_model_gpu, GpuFilterKernels(), self.mesh.n_prism_cells,
+                                          _order, self.ops)
+        if frac is not None:
+            self._turb_filter_troubled_frac = frac
 
     def _turbulent_mu_t_gpu(self):
         """当前湍流场对应的动力涡粘 `rho*nu_t`（含 SGS 部分）。"""

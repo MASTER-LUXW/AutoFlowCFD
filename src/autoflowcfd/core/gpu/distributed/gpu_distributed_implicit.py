@@ -6,9 +6,9 @@ prepare / evaluate / finalize / write-back 与平均流的 `_compute_total_resid
 rank 的 `MPIReductions(cupy)`，块 Jacobi 着色与 CPU 分布式同一个全局一致着色
 （`core/mpi/distributed_implicit.py`，那里的模块文档说明了为什么必须全局一致）。
 
-湍流未知量是本 rank local 单元的 `(k, w = ln omega)`（原生排列，模型上存物理 omega）；
-每次求值按当前 local 平均流重建 compact 视图，湍流场经 2 变量 halo 交换写进视图，结果按
-`inv_perm` 换回原生排列、切 local 段。
+湍流未知量是本 rank local 单元的模型 Newton 未知量（SST 为 `(k, w = ln omega)`、SA-neg 为
+`nu_tilde`；原生排列）；每次求值按当前 local 平均流重建 compact 视图，输运场经一次 halo 交换写进
+视图，结果按 `inv_perm` 换回原生排列、切 local 段。
 """
 
 from functools import partial
@@ -82,8 +82,7 @@ class MultiGpuTurbulenceBackend:
         s, ctx = self.solver, self._ctx
         s._sync_turbulence_view(ctx)
         s._finalize_turbulence_update_distributed(ctx)
-        self.model.k_field = self._to_local(ctx.view.k_field).copy()
-        self.model.omega_field = self._to_local(ctx.view.omega_field).copy()
+        self.model.set_transported_fields([self._to_local(f).copy() for f in ctx.view.transported_fields()])
 
     def cell_colors(self):
         return distributed_block_jacobi_colors(self.solver)
@@ -97,11 +96,9 @@ class MultiGpuTurbulenceBackend:
     def block_assembler(self):
         """解析单元块装配器（最近一次 `prepare_inputs` 的视图）：在与残差同一个紧凑视图上装配（线性算子部分在主机，
         逐点量用 GPU 模型的求值件），按 `inv_perm` 取回本 rank 的行。"""
-        from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import _host, gpu_turbulence_pointwise
-        from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_omega_wall_target_gpu
+        from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import _host, gpu_linearization_parts
         from autoflowcfd.core.mpi.distributed_compute import DistributedMeshAdapter
         from autoflowcfd.core.turbulence.jacobian import TurbulenceBlockAssembler, TurbulenceLinearization
-        from autoflowcfd.core.turbulence.sst.unknowns import sst_dirichlet_spec
         from autoflowcfd.core.turbulence.transport import precompute_scalar_convection_geometry
 
         s, ctx, cp = self.solver, self._ctx, self.xp
@@ -110,23 +107,21 @@ class MultiGpuTurbulenceBackend:
         mesh = DistributedMeshAdapter(s.partition, dist_fc, s.mesh, s.ops)
         flat = dist_fc.base_flat
         Q_h = _host(ctx.Q)
-        omega_wall, has_wall = compute_omega_wall_target_gpu(
-            cp, s.flat_face_gpu, tr._wall_mask_k_gpu, ctx.d_wall, ctx.Q, s.mu_molecular,
-            view.beta1, omega_max=view.omega_max,
-            turb_k_field=view.k_field)
-        faces, values = sst_dirichlet_spec(_host(tr._wall_mask_k_gpu), _host(omega_wall), _host(has_wall))
+        faces, values, pointwise, strong_rows = gpu_linearization_parts(
+            cp, view, ctx.Q, ctx.grad_vel, ctx.d_wall, float(s.mu_molecular), s.flat_face_gpu,
+            tr._wall_mask_k_gpu, s.mesh_data, s.ops_data)
         lin = TurbulenceLinearization(
             mesh=mesh, ops=s.ops, flat=flat, turb=view, Q=Q_h, grad_vel=_host(ctx.grad_vel),
             d_wall=_host(ctx.d_wall), mu=float(s.mu_molecular),
             conv_geom=precompute_scalar_convection_geometry(Q_h[..., 0], Q_h[..., 1:4], mesh, s.ops, flat),
             dirichlet_faces=faces, dirichlet_values=values, open_face=_host(tr._open_mask_gpu),
-            pointwise=gpu_turbulence_pointwise(cp, view, ctx.Q, ctx.grad_vel, ctx.d_wall, float(s.mu_molecular)))
+            pointwise=pointwise, strong_rows=strong_rows)
         return TurbulenceBlockAssembler(lin, self.shape[1], compact_state=_MultiGpuTurbulenceCompactState(s),
                                         row_compact=np.asarray(dist_fc.inv_perm)[:self.shape[0]])
 
 
 class _MultiGpuTurbulenceCompactState:
-    """local `(k, w)`（设备数组，未知量；交换与换序是线性的，对 w 与对 omega 同样适用）
+    """local 湍流 Newton 未知量（设备数组；交换与换序是线性的，对 ln omega 同样适用）
     -> 紧凑空间（与 `_sync_turbulence_view` 同一次交换与换序）。"""
 
     __slots__ = ("solver",)
@@ -134,9 +129,9 @@ class _MultiGpuTurbulenceCompactState:
     def __init__(self, solver):
         self.solver = solver
 
-    def __call__(self, kw_local):
+    def __call__(self, u_local):
         s = self.solver
-        return s._permute_to_compact(s.gpu_halo.exchange(kw_local))
+        return s._permute_to_compact(s.gpu_halo.exchange(u_local))
 
 
 class MultiGpuCoupledBackend:

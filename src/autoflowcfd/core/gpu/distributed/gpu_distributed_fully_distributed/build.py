@@ -59,13 +59,12 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     cp = get_cupy()
 
     turb_model_name = package.get('turb_model_name', 'NONE')
-    if turb_model_name not in ('NONE', 'SST', 'DDES', 'IDDES', 'WMLES', 'LES'):
+    from autoflowcfd.core.turbulence.registry import require_supported
+    from autoflowcfd.core.turbulence.registry import is_sst_family
+    if turb_model_name != require_supported(turb_model_name):
         raise NotImplementedError(
-            f"MultiGPUDistributedSolver.from_fully_distributed_package: "
-            f"完全分布式加载模式目前只支持 turbulence_model="
-            f"'none'/'sst'/'ddes'/'iddes'/'wmles'/'les'，收到的是 "
-            f"'{turb_model_name}'。"
-        )
+            f"MultiGPUDistributedSolver.from_fully_distributed_package: 无法识别的 turbulence_model "
+            f"'{turb_model_name}'（应为规范化的大写模型名）。")
 
     self = cls.__new__(cls)
     self.rank = rank if rank is not None else get_rank()
@@ -189,12 +188,18 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     self.wmles_model = None
     self.wall_distance_gpu = None
 
-    if turb_model_name in ('SST', 'DDES', 'IDDES'):
+    if turb_model_name == 'SA':
+        from autoflowcfd.core.fr_solver.turbulence.init import create_sa_model
+        with cp.cuda.Device(device_id):
+            self.turb_model_gpu = create_sa_model(self, n_local, n_sps, xp=cp)
+        logger.info(f"Rank {self.rank}: GPU SA-neg model initialized (fully-distributed mode, "
+                    f"nu_tilde_inf={self.turb_model_gpu.nu_tilde_inf:.4e})")
+        _upload_wall_geometry_compact(self, package, cp, device_id)
+
+    elif is_sst_family(turb_model_name):
+        from autoflowcfd.core.fr_solver.turbulence.init import _set_freestream_turbulence
         from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
-        nu = self.mu_molecular / max(rho_inf, 1e-10)
-        k_inf = 1.5 * (vel_inf * self._turbulence_intensity) ** 2
-        nu_t_inf = self._viscosity_ratio * nu
-        omega_inf = k_inf / max(nu_t_inf, 1e-30)
+        k_inf, omega_inf = _set_freestream_turbulence(self)     # 与 CPU 同一个函数
         self.turb_model_gpu = GPUTurbulenceSST(
             n_local, n_sps, device_id, k_inf=k_inf, omega_inf=omega_inf
         )

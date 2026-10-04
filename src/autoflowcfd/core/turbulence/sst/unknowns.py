@@ -39,6 +39,24 @@ class _SSTTransportedMixin(TransportedTurbulence):
     def upper_bounds(self):
         return float(self.k_max), float(self.omega_max)
 
+    #: 视图（`like`）从父模型复制的常数与全局量（`k_inf/omega_inf` 由构造参数给定：开边界来流
+    #: ghost 取它们作为来流值，必须与真正的模型一致）
+    _LIKE_ATTRS = ("sigma_k1", "sigma_k2", "sigma_w1", "sigma_w2", "beta1", "beta2",
+                   "a1", "kappa", "beta_star", "k_max", "omega_max", "production_factor")
+
+    def _new_instance(self, n_cells: int, n_sps: int):
+        """同类的空实例（CPU 与 GPU 两个类的构造参数不同，各自给出）。"""
+        raise NotImplementedError
+
+    def like(self, n_cells, n_sps, wall_distance=None):
+        """视图：常数、上界与斜坡取自本实例（omega 上界是全局最小壁距给定的，见 `bounds.py`）；
+        SST 不需要逐点壁面信息，`wall_distance` 不用。"""
+        other = self._new_instance(n_cells, n_sps)
+        for attr in self._LIKE_ATTRS:
+            if hasattr(self, attr):
+                setattr(other, attr, getattr(self, attr))
+        return other
+
     def apply_wall_distance(self, wall_distance, nu_ref, global_min=None):
         """omega 上界随最近壁面解点给定（`bounds.py` 模块文档）。"""
         apply_omega_upper_bound(self, wall_distance, nu_ref, global_min=global_min)
@@ -47,8 +65,12 @@ class _SSTTransportedMixin(TransportedTurbulence):
         """恢复 `(k, omega)`；omega 经可容许性投影（旧格式直接输运 omega、允许越过零，见
         `log_omega.py::admissible_omega`）。"""
         k, omega = fields
+        xp = np
+        if hasattr(omega, "device"):
+            from autoflowcfd.core.gpu import get_cupy
+            xp = get_cupy()
         self.k_field = k
-        self.omega_field = admissible_omega(omega, self.omega_inf, source=source)
+        self.omega_field = admissible_omega(omega, self.omega_inf, xp=xp, source=source)
 
 
 def sst_dirichlet_spec(wall_zero_face, omega_wall_face, has_omega_wall):

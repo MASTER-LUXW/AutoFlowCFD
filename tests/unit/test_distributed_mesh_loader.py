@@ -373,6 +373,45 @@ class TestFullyDistributedSstTurbulence:
         assert np.all(solver.turb_model.k_field > 0)
         assert np.all(solver.turb_model.omega_field > 0)
 
+    def test_sa_package_builds_model_pins_wall_points_and_steps(self, mesh_and_ops):
+        """SA-neg 走完全分布式加载：root 为输运模型算壁距并放进包，rank 侧构造 SA 模型（来流值与
+        单机同一个工厂），按本 rank 的 local 壁距识别壁面解点并置零，真正推进一步保持有限。"""
+        mesh, ops = mesh_and_ops
+        n_cells = mesh.n_cells
+        cell_partition = np.zeros(n_cells, dtype=np.int32)
+        freestream = {"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0}
+        mu = 1.8e-5
+
+        import types
+        from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
+        from autoflowcfd.core.turbulence.sa import SAModel
+        from autoflowcfd.core.turbulence.sa.constants import chi_for_viscosity_ratio
+        root_stub = types.SimpleNamespace(mesh=mesh, freestream=freestream, turb_model_name="SA", wmles_model=None)
+        package = build_fully_distributed_rank_package(
+            mesh, ops, mesh.face_connectivity, cell_partition, rank=0, n_ranks=1,
+            boundary_ghost_provider_global=build_boundary_ghost_provider(root_stub, bc_overrides={}),
+            freestream=freestream, mu_molecular=mu, mach_ref=0.2, order=mesh.order, enable_viscous=True,
+            turb_model_name="SA", viscosity_ratio=3.0, wall_distance_source=synthetic_wall_source(mesh),
+        )
+        assert package['wall_distance_compact'] is not None
+
+        from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
+        from autoflowcfd.core.mpi.distributed_turbulence import local_part
+        from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
+        solver = DistributedFRSolver.from_fully_distributed_package(package, n_ranks=1, rank=0)
+        m = solver.turb_model
+        assert isinstance(m, SAModel)
+        assert m.nu_tilde_inf == pytest.approx(chi_for_viscosity_ratio(3.0) * mu / 1.225, rel=1e-14)
+        wall = np.asarray(local_part(solver, solver.wall_distance_compact)) == 0.0
+        assert wall.any() and np.all(m.nu_tilde_field[wall] == 0.0)
+
+        U0 = _nonuniform_U(mesh, np.random.default_rng(7))
+        solver.state.U[:n_cells] = U0
+        solver.state.Q[:n_cells] = conserved_to_primitive(U0[..., :5])
+        solver.step(1e-6)
+        assert np.all(np.isfinite(solver.state.U[:n_cells])) and np.all(np.isfinite(m.nu_tilde_field))
+        assert np.all(m.nu_tilde_field[wall] == 0.0)
+
     def test_step_with_ddes_runs_and_stays_finite(self, mesh_and_ops):
         """同上 SST 收尾集成测试，换成 DDES——与 IDDES 共用
         `from_fully_distributed_package` 里同一个 `ddes_model` 构造分支，

@@ -104,7 +104,10 @@ def test_distributed_bound_uses_global_min(monkeypatch):
     local = {0: np.array([[3e-6, 1e-2]]), 1: np.array([[4e-4, 2e-1]])}
     global_min = min(float(v.min()) for v in local.values())
     monkeypatch.setattr(comm_mod, "allreduce_min", lambda v: min(v, global_min))
-    solver = SimpleNamespace(mu_molecular=MU, freestream={"rho_inf": RHO})
+    # 壁距按紧凑空间传入、钩子切出本 rank 的 local 段（这里 1 个 local 单元、恒等排列）
+    solver = SimpleNamespace(mu_molecular=MU, freestream={"rho_inf": RHO},
+                             dist_flat_face=SimpleNamespace(inv_perm=np.arange(1)),
+                             partition=SimpleNamespace(n_local_cells=1))
     bounds = []
     for rank in (0, 1):
         model = _model()

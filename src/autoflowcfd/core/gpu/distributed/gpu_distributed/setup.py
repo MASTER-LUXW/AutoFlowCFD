@@ -10,6 +10,7 @@ from loguru import logger
 
 from autoflowcfd.core.gpu import get_cupy, gpu_available
 from autoflowcfd.core.turbulence.sst.bounds import OMEGA_MAX_FLOOR
+from autoflowcfd.core.turbulence.registry import is_sst_family
 from autoflowcfd.core.gpu.array_manager import GPUArrayManager
 from autoflowcfd.core.gpu.distributed.gpu_halo_exchange import GPUHaloExchange
 from autoflowcfd.core.gpu.gpu_time_integration import GPUTimeIntegrator
@@ -62,13 +63,8 @@ class _MultiGPUSetupMixin:
         # override`+`boundary_ghost_provider.group_code`识别 WALL 面
         # （与 CPU MPI 分布式同一处修复，见 core/utils/solver_helpers.py
         # 文档），不再需要完整全局网格的边界几何信息。
-        if turb_model is not None and str(turb_model).upper() not in ("NONE", "SST", "DDES", "IDDES", "LES", "WMLES"):
-            raise NotImplementedError(
-                f"MultiGPUDistributedSolver（--multi-gpu）目前只支持 "
-                f"turbulence_model='none'/'sst'/'ddes'/'iddes'/'les'/'wmles'，"
-                f"收到的是 '{turb_model}'。请改用 --turbulence-model "
-                f"none/sst/ddes/iddes/les/wmles，或改用单机 GPU/CPU 后端。"
-            )
+        from autoflowcfd.core.turbulence.registry import require_supported
+        require_supported(turb_model)      # 合法模型名的唯一来源，与单机/CPU 分布式同一组
 
         self.rank = rank if rank is not None else get_rank()
         self.n_ranks = n_ranks
@@ -262,7 +258,10 @@ class _MultiGPUSetupMixin:
 
     def _setup_turbulence(self, mesh, turb_model, n_sps, mu_molecular, rho_inf, vel_inf,
                           turbulence_intensity, viscosity_ratio):
-        """湍流模型（SST/DDES/IDDES/LES/WMLES）、壁面距离、网格尺度与模态滤波。"""
+        """湍流模型（SST/DDES/IDDES/SA-neg/LES/WMLES）、壁面距离、网格尺度与模态滤波。"""
+        # 来流湍流参数：湍流模型构造（`_set_freestream_turbulence` / `create_sa_model`）要读
+        self._turbulence_intensity = turbulence_intensity
+        self._viscosity_ratio = viscosity_ratio
         cp = get_cupy()
         device_id = self.device_id
         # 初始化 GPU 湍流模型（与单机版 gpu_solver.py 同一套 Tu/VR 推导
@@ -277,13 +276,17 @@ class _MultiGPUSetupMixin:
         self.ddes_model_gpu = None
         self.iddes_h_max_compact = None
         self.iddes_h_wn_compact = None
-        if turb_model in ("SST", "DDES", "IDDES"):
+        if str(turb_model).upper() == "SA":
+            from autoflowcfd.core.fr_solver.turbulence.init import create_sa_model
+            with cp.cuda.Device(device_id):
+                self.turb_model_gpu = create_sa_model(self, self.partition.n_local_cells, n_sps, xp=cp)
+            logger.info(f"Rank {self.rank}: GPU SA-neg model initialized "
+                        f"(nu_tilde_inf={self.turb_model_gpu.nu_tilde_inf:.4e})")
+        elif is_sst_family(turb_model):
+            from autoflowcfd.core.fr_solver.turbulence.init import _set_freestream_turbulence
             from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
             n_local_cells = self.partition.n_local_cells
-            nu = mu_molecular / max(rho_inf, 1e-10)
-            k_inf = 1.5 * (vel_inf * turbulence_intensity) ** 2
-            nu_t_inf = viscosity_ratio * nu
-            omega_inf = k_inf / max(nu_t_inf, 1e-30)
+            k_inf, omega_inf = _set_freestream_turbulence(self)     # 与 CPU 同一个函数
             self.turb_model_gpu = GPUTurbulenceSST(
                 n_local_cells, n_sps, device_id, k_inf=k_inf, omega_inf=omega_inf
             )
@@ -342,9 +345,6 @@ class _MultiGPUSetupMixin:
             from autoflowcfd.core.gpu.turbulence.gpu_sgs import GPUWALEModel
             self.sgs_model_gpu = GPUWALEModel()
             logger.info(f"Rank {self.rank}: GPU LES with WALE SGS model initialized")
-
-        self._turbulence_intensity = turbulence_intensity
-        self._viscosity_ratio = viscosity_ratio
 
         # WMLES（2026-09-02）：没有 k/omega ODE 状态，不需要
         # turb_model_gpu——只需要真实的 CPU 版 WMLESModel

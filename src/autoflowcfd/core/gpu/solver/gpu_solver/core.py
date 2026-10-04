@@ -123,13 +123,10 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
             raise RuntimeError(
                 "CuPy is not available. Install with: pip install cupy-cuda12x"
             )
-        _SUPPORTED_TURB_MODELS = ("NONE", "SST", "DDES", "IDDES", "WMLES", "LES")
-        if turb_model is not None and str(turb_model).upper() not in _SUPPORTED_TURB_MODELS:
-            raise NotImplementedError(
-                f"GPUFRSolver（--backend gpu）目前支持 turbulence_model="
-                f"{[m.lower() for m in _SUPPORTED_TURB_MODELS]}，收到的是 '{turb_model}'。"
-            )
-        turb_model_upper = str(turb_model).upper() if turb_model is not None else "NONE"
+        # 合法模型名的唯一来源（`core/turbulence/registry.py`），GPU 与 CPU 支持同一组模型
+        from autoflowcfd.core.turbulence.registry import require_supported
+        from autoflowcfd.core.turbulence.registry import is_sst_family
+        turb_model_upper = require_supported(turb_model)
 
         self.mesh = mesh
         self.ops = ops
@@ -187,7 +184,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         self._turbulence_intensity = turbulence_intensity
         self._viscosity_ratio = viscosity_ratio
         self.turb_model_name = turb_model
-        self.turb_model_gpu = None  # GPU SST 模型（SST/DDES/IDDES 共用，可选）
+        self.turb_model_gpu = None  # GPU 输运湍流模型（SST/DDES/IDDES 共用 GPUTurbulenceSST；SA-neg 为 SAModel）
         self.ddes_model_gpu = None  # GPU DDES/IDDES 长度尺度计算器（可选）
         self.sgs_model_gpu = None  # GPU WALE 亚格子模型（WMLES/LES 共用，可选）
         # WMLES 激活时构造真实的 CPU 版 WMLESModel 实例（与 CPU 版
@@ -258,13 +255,18 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         # SST 内部的 RANS 耗散长度尺度，见 gpu_turbulence_des.py 模块文档；
         # WMLES/LES 不构造 SST，只构造 GPUWALEModel，与 CPU 版
         # fr_solver_turbulence.py::init_turbulence_models 分支结构一致）。
-        if turb_model_upper in ("SST", "DDES", "IDDES"):
+        if turb_model_upper == "SA":
+            from autoflowcfd.core.fr_solver.turbulence.init import create_sa_model
+            with cp.cuda.Device(device_id):
+                self.turb_model_gpu = m = create_sa_model(self, n_cells, n_sps, xp=cp)
+            print(f"   [OK] GPU SA-neg model initialized (nu_tilde_inf={m.nu_tilde_inf:.4e}, "
+                  f"chi_inf={m.nu_tilde_inf / m.nu_ref:.4g})")
+
+        elif is_sst_family(turb_model_upper):
+            from autoflowcfd.core.fr_solver.turbulence.init import _set_freestream_turbulence
             from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
-            # 从 Tu/VR 推导物理自洽的 k/omega 初值（与 CPU 版一致）
-            nu = mu_molecular / max(rho_inf, 1e-10)
-            k_inf = 1.5 * (vel_inf * turbulence_intensity) ** 2
-            nu_t_inf = viscosity_ratio * nu
-            omega_inf = k_inf / max(nu_t_inf, 1e-30)
+            # 从 Tu/VR 推导物理自洽的 k/omega 初值（与 CPU 同一个函数）
+            k_inf, omega_inf = _set_freestream_turbulence(self)
             self.turb_model_gpu = GPUTurbulenceSST(
                 n_cells, n_sps, device_id, k_inf=k_inf, omega_inf=omega_inf
             )

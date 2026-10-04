@@ -244,6 +244,23 @@ class TestDistributedOrderContinuationWithTurbulence:
         assert np.all(np.isfinite(solver.turb_model.omega_field))
 
 
+    def test_sa_order_continuation_reshapes_and_repins_wall_points(self, mesh_p2_and_ops):
+        """SA-neg：nu_tilde 随阶数切换重塑形状；每次换阶由来源按新解点重查壁距，经
+        `apply_distributed_wall_distance` 把新阶数上落在壁面的解点重新置零。"""
+        from autoflowcfd.core.mpi.distributed_turbulence import local_part
+
+        mesh, ops = mesh_p2_and_ops
+        solver = _make_p2_solver(mesh, ops, turb_model_name="sa")
+        result = solver.solve(n_steps=60, dt=1e-9, output_interval=1000)   # dt 的理由见上一个用例
+        assert solver.current_order == 2
+        n_local = solver.partition.n_local_cells
+        nt = solver.turb_model.nu_tilde_field
+        assert nt.shape == (n_local, 27)
+        assert np.isfinite(result.final_residual) and np.all(np.isfinite(nt))
+        wall = np.asarray(local_part(solver, solver.wall_distance_compact)) == 0.0
+        assert wall.any() and np.all(nt[wall] == 0.0)
+
+
 class TestPhaseMaxIterDefaultGivesFinalStageRemainingBudgetDistributed:
     """Same real bug/fix as the single-machine `run_order_continuation`
     (see `test_order_continuation_resume.py::

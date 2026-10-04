@@ -14,6 +14,7 @@ import numpy as np
 from autoflowcfd.core.mpi import get_comm, get_rank, get_size
 
 from .state import scatter_local_state
+from .turbulence import restore_turbulence_fields, transported_model
 
 
 def distributed_load_checkpoint(
@@ -62,10 +63,11 @@ def distributed_load_checkpoint(
         metadata = None
         iteration = 0
 
-    # 2. 广播元数据
+    # 2. 广播元数据（含全部字段：各 rank 由此恢复自己的湍流场）
     if n_ranks > 1:
         metadata = get_comm().bcast(metadata, root=0)
         iteration = get_comm().bcast(iteration, root=0)
+    restore_turbulence_fields(solver, (metadata or {}).get("fields", {}), source="分布式 checkpoint")
 
     # 3. 分发数据到各 rank
     if n_ranks > 1:
@@ -108,15 +110,12 @@ def restore_distributed_state_from_checkpoint(checkpoint_path: str, solver) -> i
     1. `state.U` 恒只取 checkpoint `U_sps` 的前 5 个变量（不管
        checkpoint 本身是 5 还是 7 变量——分布式 `state.U` 从来就不
        打包湍流量，这不是"截断"，是恢复到分布式本来的数据模型）。
-    2. 若 `solver.turb_model is not None`（目标瞬态是 SST/DDES/IDDES）：
-       checkpoint 是 7 变量时，从 `U_sps[...,5:7]` 换算出 k/omega
-       （`k=rho_k/rho`, `omega=rho_omega/rho`，与单机 `FRState.
-       _update_primitives` 同一个换算公式）写入 `turb_model.k_field`/
-       `.omega_field`；checkpoint 只有 5 变量（源自稳态 `none`/纯
-       层流）时，退回自由来流默认值（`_set_freestream_turbulence`，
-       与单机 `restore_state_from_checkpoint`"湍流量用自由来流默认值
-       初始化"同一个理念，只是单机用固定常数 k=1e-6/omega=1e-2，这里
-       复用分布式已有的、更物理自洽的 Tu/VR 推导公式）。
+    2. 有输运湍流模型时，按模型声明的输运场名（`TransportedTurbulence.TRANSPORTED_FIELDS`，
+       `write_checkpoint` 写的同一组字段）取全局场，各 rank 切出 local 段交给
+       `model.restore_transported`（SST 的 omega 可容许性投影、SA-neg 壁面解点置零都在里面）。
+       checkpoint 是层流、另一个湍流模型或旧版本写的（没有这些字段）时保留构造时的来流初值并
+       提示。**2026-10-04 修复**：此前从 `U_sps[...,5:7]/rho` 换算 k/omega——那是 SST 状态
+       数组里从未更新的历史槽位，恢复出来的永远是初值。
 
     root 读取 checkpoint 的**全局** `U_sps` 后先在全局索引空间完成上述
     换算，再 broadcast 给全部 rank，各自用 `partition.local_cells`
@@ -139,7 +138,6 @@ def restore_distributed_state_from_checkpoint(checkpoint_path: str, solver) -> i
     """
     from autoflowcfd.core.utils.checkpoint import CheckpointManager
     from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
-    from autoflowcfd.core.fr_solver.turbulence import _set_freestream_turbulence
     from types import SimpleNamespace
 
     rank = get_rank()
@@ -152,8 +150,8 @@ def restore_distributed_state_from_checkpoint(checkpoint_path: str, solver) -> i
     # `solver.turb_model` 会让任何 GPU 分布式求解器的 `has_turb_model`
     # 恒为 False，checkpoint 里的 k/omega 场从未被恢复（不报错，静默
     # 退回自由来流默认值），DDES/IDDES/SST 瞬态从"假层流"初场起步。
-    is_gpu_turb_model = getattr(solver, 'turb_model_gpu', None) is not None
-    has_turb_model = getattr(solver, 'turb_model', None) is not None or is_gpu_turb_model
+    model, _ = transported_model(solver)
+    names = tuple(model.TRANSPORTED_FIELDS) + ("nu_t",) if model is not None else ()
 
     if rank == 0:
         config = SimpleNamespace(
@@ -180,32 +178,20 @@ def restore_distributed_state_from_checkpoint(checkpoint_path: str, solver) -> i
                 f"（网格或阶数可能已变化），拒绝恢复。"
             )
 
-        n_vars_ckpt = U_ckpt.shape[2]
         U_global = U_ckpt[:, :, :5].copy()
 
-        k_omega_global = None
-        if has_turb_model:
-            if n_vars_ckpt >= 7:
-                rho = np.maximum(U_ckpt[:, :, 0], 1e-10)
-                k_global = U_ckpt[:, :, 5] / rho
-                omega_global = U_ckpt[:, :, 6] / rho
-                k_omega_global = (k_global, omega_global)
-            else:
-                k_inf, omega_inf = _set_freestream_turbulence(solver)
-                k_omega_global = (
-                    np.full((n_global_cells, n_sps_solver), k_inf),
-                    np.full((n_global_cells, n_sps_solver), omega_inf),
-                )
+        # 只广播湍流恢复需要的字段（形状与缺失的判断在 restore_turbulence_fields 里）
+        turb_global = {name: fields[name] for name in names if name in fields}
 
         iteration = ckpt_iter
     else:
         U_global = None
-        k_omega_global = None
+        turb_global = None
         iteration = 0
 
     if n_ranks > 1:
         U_global = get_comm().bcast(U_global, root=0)
-        k_omega_global = get_comm().bcast(k_omega_global, root=0)
+        turb_global = get_comm().bcast(turb_global, root=0)
         iteration = get_comm().bcast(iteration, root=0)
 
     local_cells = solver.partition.local_cells
@@ -215,28 +201,7 @@ def restore_distributed_state_from_checkpoint(checkpoint_path: str, solver) -> i
     solver.state.U[:n_local] = U_local
     solver.state.Q[:n_local] = conserved_to_primitive(U_local[..., :5])
 
-    if has_turb_model and k_omega_global is not None:
-        k_global, omega_global = k_omega_global
-        k_local = scatter_local_state(k_global[:, :, None], local_cells)[:, :, 0]
-        omega_local = scatter_local_state(omega_global[:, :, None], local_cells)[:, :, 0]
-        from autoflowcfd.core.turbulence.sst.log_omega import admissible_omega
-
-        turb_for_inf = solver.turb_model_gpu if is_gpu_turb_model else solver.turb_model
-        omega_local = admissible_omega(omega_local, turb_for_inf.omega_inf, source='分布式 checkpoint')
-        if is_gpu_turb_model:
-            # GPU 分布式求解器（"传统模式"/"完全分布式加载"皆可）：
-            # `turb_model_gpu.k_field`/`.omega_field` 是 CuPy 数组，写入
-            # 普通 numpy 会让后续 `cp.stack`/`cp.asarray` 消费点直接
-            # TypeError（或更隐蔽地静默退化——取决于 CuPy 版本），必须
-            # 在这里就地转成 GPU 数组，与 `save_checkpoint_distributed`/
-            # `load_checkpoint_distributed` 里 U_gpu 的同步方式一致。
-            from autoflowcfd.core.gpu import get_cupy
-            cp = get_cupy()
-            with cp.cuda.Device(solver.device_id):
-                solver.turb_model_gpu.k_field = cp.asarray(k_local)
-                solver.turb_model_gpu.omega_field = cp.asarray(omega_local)
-        else:
-            solver.turb_model.k_field = k_local
-            solver.turb_model.omega_field = omega_local
+    if turb_global is not None:
+        restore_turbulence_fields(solver, turb_global, source="分布式 checkpoint")
 
     return iteration
