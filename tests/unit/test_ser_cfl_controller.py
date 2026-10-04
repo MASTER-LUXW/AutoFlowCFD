@@ -134,3 +134,20 @@ def test_defaults_come_from_the_selected_controller():
         assert controller_default("cfl_start", scheme) == want
         _, fixed = build_cfl_policy(scheme, adaptive=False)
         assert fixed == pytest.approx(want)
+
+
+def test_newton_krylov_default_cfl_max_lets_ptc_vanish():
+    """NK 的默认上限 1e8（2026-10-04 由 1e4 调高，A/B 数据见 `ser.py` 模块文档）：1e4 时伪时间项远未
+    可忽略，湍流平板 SA P3 尾段每步只降到 0.85 倍。CLI 不传 `--cfl-max` 时策略取的就是这个签名默认值。"""
+    controller, _ = build_cfl_policy(S.NEWTON_KRYLOV)
+    assert controller_default("cfl_max", S.NEWTON_KRYLOV) == 1.0e8
+    assert controller.cfl_max == 1.0e8
+    # 完整接受、残差每步减半：从 1e4 起每步翻倍，约 14 步到上限
+    c = SERCFLController(cfl_start=1.0e4)
+    c.update(1.0)
+    r, n = 1.0, 0
+    while c.cfl_number < c.cfl_max:
+        r *= 0.5
+        c.update(r)
+        n += 1
+    assert n == 14

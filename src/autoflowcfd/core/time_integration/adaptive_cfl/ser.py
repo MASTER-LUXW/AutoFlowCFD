@@ -33,6 +33,15 @@ Mulder & van Leer (1985) 的 Switched Evolution Relaxation：
   下一步 GMRES 在远未收敛的线性化上发散。
 * `shrink_limit = 0.1`：与 PETSc `TSPSEUDO`/SU2 同一量级；非有限残差
   （发散本身）直接按它收缩。
+* `cfl_max = 1e8`（2026-10-04 由 1e4 调高）：1e4 时 PTC 项远未可忽略——湍流平板 SA P3（3072 单元）
+  CFL 到 1e4 后约 80 步每步只降到 0.85 倍（GMRES 12~14 次/步）；上限 1e8 时 CFL 继续按残差下降放大、
+  尾段变成超线性。同算例/同设置 A/B（`cfl_max` 1e4 -> 1e8）：湍流平板 SA P0->P3 P3 阶段 141 -> 66 步、
+  GMRES 总次数 1336 -> 1144、耗时 3099 -> 2059 s（结果一致）；层流平板 P2 116 -> 81 步、GMRES
+  2604 -> 2520、606 -> 517 s；槽道 SST P1/P3、SA 棱柱 P3 持平，SA 四面体 P3 82 -> 58 步、26.5 -> 22.2 s。
+  单步 GMRES 次数随 CFL 增大（尾段 100~200 次），但总工作量下降。2026-10-03 在层流平板 P2 上曾测得
+  "步数降、GMRES 成本抵消"，当时 GMRES 与接受判据的范数还不一致（`globalization.py`）。
+  "CFL 在上限且完整接受"仍是 Order Continuation 判断"近乎纯 Newton / 停在舍入平台"的依据
+  （`order_continuation/policy.py`）：收敛正常时被接受的步每步翻倍，从 1e4 到 1e8 约 14 步。
 
 ### R 用哪一个范数：Newton 实际在解的那个方程的
 
@@ -120,7 +129,7 @@ class SERCFLController:
     def __init__(
         self,
         cfl_start: float = 5.0,
-        cfl_max: float = 1.0e4,
+        cfl_max: float = 1.0e8,
         cfl_min: float = 0.5,
         exponent: float = 1.0,
         growth_limit: float = 2.0,

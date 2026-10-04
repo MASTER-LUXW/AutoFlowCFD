@@ -56,7 +56,8 @@ from .cpu_single import _run_cpu_single
                    '--cfl-max 爬。')
 @click.option('--cfl-max', type=float, default=None,
               help='自适应 CFL 上限，默认按 --time-scheme 取（rk3 为 0.06；newton-krylov 为 '
-                   'SER 的 1e4——隐式没有线性稳定极限，上限只防止 dtau 失去伪瞬态阻尼）。'
+                   'SER 的 1e8——隐式没有线性稳定极限；1e4 时伪时间项远未可忽略，高阶尾段退化成线性收敛，'
+                   'A/B 数据见 adaptive_cfl/ser.py）。'
                    'rk3 默认值标定历史：上限（稳态，默认 0.06）。**2026-09-17 从 0.5 '
                    '下调**，依据是三类实测：(1) 直接谱测量——预处理后算子 '
                    'Gamma^-1 R 在干净通道网格上 max|dt*lambda| = 0.444 @CFL 0.03、'

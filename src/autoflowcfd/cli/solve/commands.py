@@ -84,7 +84,7 @@ from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coeffici
                    'CFL 是纯数值加速参数，不影响物理解，每次 resume 可根据上一段'
                    '收敛表现重新调。下调依据见 `solve steady --cfl-max` 的帮助：2026-09-17 按直接谱测量 + 两张真实网格的失效点重定，线性极限约 0.117、实测失效点 plate 0.30 / 平板边界层 0.10，默认值留 1.7 倍以上裕度。')
 @click.option('--cfl-max', type=float, default=None,
-              help='自适应 CFL 上限，默认按时间格式取（rk3 为 0.06，newton-krylov 为 1e4）。'
+              help='自适应 CFL 上限，默认按时间格式取（rk3 为 0.06，newton-krylov 为 1e8）。'
                    'rk3 默认值历史：（默认 0.06，2026-09-17 从 0.5 下调）。'
                    '仅单机 CPU 路径（非 --n-ranks>1/--multi-gpu）支持。原文案建议的'
                    '"稳定收敛可试 0.8"已删除——0.8 比实测线性极限高近 7 倍，从来'
