@@ -31,10 +31,10 @@ class _SSTUpdateMixin:
         """
         clip_to_bounds(self, np)
 
-    def update_fields(self, dt, Sk: np.ndarray, S_log_omega: np.ndarray,
-                      transport_k: np.ndarray = None, transport_log_omega: np.ndarray = None):
-        """执行一个时间步长的湍流场更新（`advance_k_log_omega`），再过正性/上界限制器。"""
-        advance_k_log_omega(self, dt, Sk, S_log_omega, transport_k, transport_log_omega, np)
+    def update_fields(self, dt, sources, transports):
+        """执行一个时间步长的湍流场更新（`advance_k_log_omega`），再过正性/上界限制器。
+        `sources`/`transports` 按未知量 `(k, w)` 排列（`TurbulenceRates.source/transport`）。"""
+        advance_k_log_omega(self, dt, sources[0], sources[1], transports[0], transports[1], np)
         self.apply_positivity_limiter()
 
 

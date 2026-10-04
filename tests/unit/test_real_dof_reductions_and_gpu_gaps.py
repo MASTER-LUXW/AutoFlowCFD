@@ -379,7 +379,7 @@ class TestGpuTurbFilterGate:
         ops = SimpleNamespace(filter_prism=np.eye(n_sps) - 0.05 * rng.random((n_sps, n_sps)),
                               filter_tet=np.eye(n_sps) - 0.05 * rng.random((n_sps, n_sps)))
         model = SimpleNamespace(k_field=k.copy(), omega_field=om.copy(), omega_max=1e8,
-                                apply_positivity_limiter_gpu=lambda: None)
+                                apply_positivity_limiter=lambda: None)
         frac = gts.GPUTurbulenceSST.filter_fields_gpu(model, n_prism, ops, order)
 
         w = np.log(om)

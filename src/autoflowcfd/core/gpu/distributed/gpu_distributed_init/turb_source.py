@@ -50,10 +50,9 @@ class _GPUDistributedTurbSourceMixin:
         advance_production_ramp(self, self.turb_model_gpu)
         ctx = self._prepare_turbulence_view_distributed()
         self._sync_turbulence_view(ctx)
-        dk_dt, dw_dt, transport_k, transport_w = self._evaluate_turbulence_rates_distributed(
-            ctx, apply_des=True)
+        rates = self._evaluate_turbulence_rates_distributed(ctx, apply_des=True)
         # 场更新（k 与 w = ln omega 的点隐式阻尼 + 输运，见 sst/update.py::advance_k_log_omega）
-        ctx.view.update_fields_gpu(dt, dk_dt, dw_dt, transport_k=transport_k, transport_log_omega=transport_w)
+        ctx.view.update_fields(dt, rates.source, rates.transport)
         self._finalize_turbulence_update_distributed(ctx)
         self._write_back_turbulence_distributed(ctx, fields=True)
         return ctx.rho * ctx.view.nu_t
@@ -155,9 +154,9 @@ class _GPUDistributedTurbSourceMixin:
         ctx.view.omega_field = k_omega_compact[..., 1].copy()
 
     def _evaluate_turbulence_rates_distributed(self, ctx, *, apply_des: bool):
-        """在 compact 视图当前的 k/omega 上求 k 与 `w = ln(omega)` 的 `(dk/dt, dw/dt,
-        transport_k, transport_w)`（compact 排列；源项部分已除以 rho，与单机
-        `gpu_solver_io.py::_evaluate_turbulence_rates_gpu` 同一套变换）。
+        """在 compact 视图当前的 k/omega 上求 k 与 `w = ln(omega)` 的 `TurbulenceRates`
+        （compact 排列；源项部分已除以 rho，与单机 `gpu_solver_io.py::_evaluate_turbulence_rates_gpu`
+        同一套变换）。
 
         副作用同单机：刷新视图上的 nu_t / 混合 beta；`apply_des=True` 时按刚算出
         的 nu_t 刷新 DES 长度尺度（供下一步用）——隐式路径的试探求值必须传 False。
@@ -202,7 +201,8 @@ class _GPUDistributedTurbSourceMixin:
         )
         transport_k, transport_w = compute_turbulence_transport_residual_gpu(
             ctx.transport, grad_k=grad_k, grad_log_omega=grad_w)
-        return dk_dt, dw_dt, transport_k, transport_w
+        from autoflowcfd.core.turbulence.transported import TurbulenceRates
+        return TurbulenceRates((Sk, S_omega), (dk_dt, dw_dt), (transport_k, transport_w))
 
     def _finalize_turbulence_update_distributed(self, ctx) -> None:
         """k/omega 更新之后的后处理（compact 视图上）：模态滤波 + 正性限幅。与单机

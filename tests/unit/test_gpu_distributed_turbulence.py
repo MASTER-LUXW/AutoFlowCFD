@@ -10,7 +10,7 @@ distributed` 对全局 sps_coords 整体 reshape 再切 (n_local,n_sps)，
 n_ranks>1 时形状不匹配。本次真正实现，与 CPU MPI 路径
 （`core/mpi/distributed_turbulence.py`）同一个设计：复用单机
 `compute_source_terms_gpu`/`compute_turbulence_transport_residual_gpu`/
-`update_fields_gpu` 的数值逻辑，只把 halo 交换+compact 索引空间重排
+`update_fields` 的数值逻辑，只把 halo 交换+compact 索引空间重排
 接上。
 
 验证方式：本机没有真实 CuPy/CUDA 设备，用把 `get_cupy()` 替换成"返回

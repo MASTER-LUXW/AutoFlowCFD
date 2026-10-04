@@ -9,6 +9,8 @@
 """
 
 import numpy as np
+
+from autoflowcfd.core.turbulence.limits import TURBULENT_VISCOSITY_RATIO_MAX
 from .kernels import compute_strain_and_vorticity_magnitude
 
 
@@ -141,7 +143,7 @@ class _SSTBlendingMixin:
     # SST 涡粘公式本身没有自带上限保护的反馈环——见 compute_eddy_
     # viscosity 文档。不是为这次调试新发明的阈值，是补齐标准 SST/
     # RANS 实现里本来就该有、这里此前没有的一道物理限制。
-    TURBULENT_VISCOSITY_RATIO_MAX = 1.0e5
+    TURBULENT_VISCOSITY_RATIO_MAX = TURBULENT_VISCOSITY_RATIO_MAX
 
     def compute_eddy_viscosity(self, k: np.ndarray, omega: np.ndarray,
                               rho: np.ndarray, S_mag: np.ndarray,

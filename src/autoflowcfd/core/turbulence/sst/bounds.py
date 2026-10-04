@@ -39,6 +39,9 @@ nu`，工程雷诺数下是 5e7 ~ 2e8。湍流平板（`tests/validation/_flat_p
 
 import numpy as np
 
+# 梯度模长裁剪的唯一定义在 `turbulence/limits.py`（各湍流模型共用），这里导入供既有调用方使用
+from autoflowcfd.core.turbulence.limits import MAX_GRADIENT_MAGNITUDE, clip_gradient_magnitude  # noqa: F401
+
 #: 防止 0/负值进入 sqrt 与除法的绝对下限。
 ABS_FLOOR = 1e-12
 
@@ -62,9 +65,6 @@ OMEGA_WALL_VISCOUS_COEFF = 6.0
 #: Menter 放大式 `omega_wall = OMEGA_WALL_AMPLIFICATION * omega_vis`（壁面目标值默认档）。
 OMEGA_WALL_AMPLIFICATION = 10.0
 
-#: k/omega 梯度模长上限。退化单元上理论为常数的场求梯度，度量比值 adj(J)/det(J)
-#: 把浮点噪声放大到 >1e150（2026-08-22 真实网格），模长超过上限的点等比缩到上限。
-MAX_GRADIENT_MAGNITUDE = 1e6
 
 
 def omega_realizability_floor(model, S_mag, xp):
@@ -75,27 +75,6 @@ def omega_realizability_floor(model, S_mag, xp):
 def model_evaluation_fields(k, omega, omega_r, xp):
     """模型项求值用的 `(k_bar, omega_eff)`（见模块文档）。"""
     return xp.maximum(k, 0.0), xp.maximum(omega, xp.maximum(omega_r, ABS_FLOOR))
-
-
-def clip_gradient_magnitude(grad, xp):
-    """`grad (..., 3)` 模长超过 `MAX_GRADIENT_MAGNITUDE` 的点等比缩到上限，返回新数组。
-
-    源项与输运（CPU、单机 GPU、多 GPU）共用这一份。分量平方溢出时模长为 inf、缩放为
-    0（该点梯度置零，不是 NaN；有限输入不会产生 NaN）。
-    """
-    if xp is np:
-        with np.errstate(over="ignore", invalid="ignore"):
-            mag = np.linalg.norm(grad, axis=-1)
-            return grad * np.clip(MAX_GRADIENT_MAGNITUDE / np.maximum(mag, 1e-10), 0.0, 1.0)[..., None]
-    mag = xp.linalg.norm(grad, axis=-1)
-    return grad * xp.clip(MAX_GRADIENT_MAGNITUDE / xp.maximum(mag, 1e-10), 0.0, 1.0)[..., None]
-
-
-def turbulence_scales(model):
-    """隐式 k-omega 未知量 `(k, ln omega)` 的逐列尺度：k 为尺度下限（物理性限幅与差分
-    步长），`ln omega` 是 O(1) 的对数量、取 1（它的限幅是绝对的，见
-    `time_integration/implicit/physicality.py::ScaledFieldRowLimits` 的 `log_columns`）。"""
-    return max(ABS_FLOOR, K_FLOOR_FRACTION * float(model.k_inf)), 1.0
 
 
 def omega_upper_bound(d_min: float, nu: float, beta1: float) -> float:

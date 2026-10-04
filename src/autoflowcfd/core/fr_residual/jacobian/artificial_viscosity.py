@@ -14,45 +14,30 @@
 
 import numpy as np
 
-from .coupling import CouplingBlocks, CouplingGroup
+from .coupling import CouplingBlocks
 
 
 def artificial_diffusion_blocks(mesh, ops, flat, nu, want_coupling: bool = False):
     """`-L_nu` 的标量块：`(prism (n_prism, npr, npr), tet (n_tet, nte, nte)[, CouplingBlocks])`。"""
     # 函数内导入：标量输运装配依赖本包的 coupling 模块（模块级导入成环）
-    from autoflowcfd.core.turbulence.jacobian.pointwise import N_TURB_INPUTS
-    from autoflowcfd.core.turbulence.jacobian.scalar_blocks import (
-        assemble_scalar_pair_blocks, convection_ghost_affine,
-    )
+    from autoflowcfd.core.turbulence.jacobian.scalar_blocks import assemble_scalar_blocks, convection_ghost_affine
     from autoflowcfd.core.turbulence.transport.faces import boundary_diffusion_targets
 
     n_cells, n_sps = int(mesh.n_cells), int(mesh.n_sps_per_cell)
-    nu = np.ascontiguousarray(np.asarray(nu, dtype=np.float64).reshape(n_cells, n_sps))
+    nu = np.ascontiguousarray(np.asarray(nu, dtype=np.float64).reshape(n_cells, n_sps, 1))
     zero_faces = np.zeros(flat.n_faces, dtype=bool)
     m = np.zeros(np.asarray(flat.owner_adj_row_exact).shape[:2])
-    ghost_o, a_o = convection_ghost_affine(flat, "owner", m, zero_faces, zero_faces, zero_faces)
-    ghost_n, a_n = convection_ghost_affine(flat, "neighbor", m, zero_faces, zero_faces, zero_faces)
+    ghost_o, a_o = convection_ghost_affine(flat, "owner", m, (zero_faces,), zero_faces)
+    ghost_n, a_n = convection_ghost_affine(flat, "neighbor", m, (zero_faces,), zero_faces)
     diff = {}
     for frame in ("owner", "neighbor"):
         b, d, t = boundary_diffusion_targets(np, flat, frame)
-        diff[frame] = (np.ascontiguousarray(b), np.ascontiguousarray(np.stack([d, d])),
-                       np.ascontiguousarray(np.stack([t, t])))
-    out = assemble_scalar_pair_blocks(
-        mesh, ops, flat, np.zeros((n_cells, n_sps, 2)), np.ascontiguousarray(np.stack([nu, nu], axis=-1)),
-        np.zeros((n_cells, n_sps, 2, N_TURB_INPUTS)), np.zeros((n_cells, n_sps, 2, N_TURB_INPUTS)),
+        diff[frame] = (np.ascontiguousarray(b), np.ascontiguousarray(d[None]), np.ascontiguousarray(t[None]))
+    zero_partials = np.zeros((n_cells, n_sps, 1, 4))
+    return assemble_scalar_blocks(
+        mesh, ops, flat, np.zeros((n_cells, n_sps, 1)), nu, zero_partials, zero_partials,
         np.ones((n_cells, n_sps)), np.zeros((n_cells, n_sps, 3)), np.zeros((n_cells, n_sps, 3)), m, m,
         (ghost_o, np.ascontiguousarray(a_o), ghost_n, np.ascontiguousarray(a_n)), diff, want_coupling)
-
-    def first_var(blocks):
-        n_pairs, rows, cols = blocks.shape
-        return np.ascontiguousarray(blocks.reshape(n_pairs, rows // 2, 2, cols // 2, 2)[:, :, 0, :, 0])
-
-    scalar = (first_var(out[0]), first_var(out[1]))
-    if not want_coupling:
-        return scalar
-    groups = [CouplingGroup(row_is_prism=g.row_is_prism, col_is_prism=g.col_is_prism, rows=g.rows, cols=g.cols,
-                            blocks=first_var(g.blocks)) for g in out[2].groups]
-    return scalar + (CouplingBlocks(groups=groups),)
 
 
 def add_scalar_kron_gamma(blocks, scalar, gamma, use_gamma: bool):

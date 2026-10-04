@@ -80,12 +80,11 @@ def _transport(solver):
     from autoflowcfd.core.fr_solver.turbulence.source import (
         evaluate_turbulence_rates, prepare_turbulence_inputs,
     )
-    from autoflowcfd.core.turbulence.jacobian.pointwise import CACHED_MODEL_ATTRS
 
     t = solver.turb_model
-    saved = {a: getattr(t, a) for a in CACHED_MODEL_ATTRS if hasattr(t, a)}
+    saved = {a: getattr(t, a) for a in t.CACHED_ATTRS if hasattr(t, a)}
     try:
-        *_, tk, tw = evaluate_turbulence_rates(solver, *prepare_turbulence_inputs(solver), apply_des=False)
+        tk, tw = evaluate_turbulence_rates(solver, *prepare_turbulence_inputs(solver), apply_des=False).transport
     finally:
         for a, v in saved.items():
             setattr(t, a, v)

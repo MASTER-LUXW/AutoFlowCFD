@@ -9,10 +9,11 @@ from typing import Optional
 from .blending import _SSTBlendingMixin
 from .bounds import OMEGA_MAX_FLOOR
 from .source import _SSTSourceMixin
+from .unknowns import _SSTTransportedMixin
 from .update import _SSTUpdateMixin
 
 
-class SSTModelFR(_SSTBlendingMixin, _SSTSourceMixin, _SSTUpdateMixin):
+class SSTModelFR(_SSTBlendingMixin, _SSTSourceMixin, _SSTUpdateMixin, _SSTTransportedMixin):
     """
     FR 框架下的 SST k-omega 模型处理器。
 

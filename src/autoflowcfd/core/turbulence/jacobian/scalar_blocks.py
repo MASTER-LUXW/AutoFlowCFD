@@ -1,16 +1,17 @@
-"""AutoFlowCFD V2.0 - 一对冻结系数标量输运方程的解析单元块 Jacobian（湍流 k-omega 与人工粘性共用）。
+"""AutoFlowCFD V2.0 - 冻结系数标量输运方程组的解析单元块 Jacobian（湍流与人工粘性共用）。
 
-    R_v = -[S_v + conv_v + diff_v] / rho          v = 0, 1
+    R_v = -[S_v + conv_v + diff_v] / rho          v = 0 .. nv-1
 
 `conv_v` 是冻结质量通量下的迎风对流、`diff_v = div(Gamma_v grad phi_v)` 是 IIPG 内罚扩散
 （`core/turbulence/transport` 的同一个离散）。调用方给出逐点源项与扩散系数的导数
-（`dS`、`dG`，`(n_cells, n_sps, 2, 8)`）、冻结平均流量与边界数据：
+（`dS`、`dG`，`(n_cells, n_sps, nv, 4 nv)`）、冻结平均流量与边界数据：
 
-* 湍流（`assemble.py`）：`phi = (k, ln omega)`，源项与 `Gamma` 随 `phi` 变化；
-* 人工粘性（`core/fr_residual/jacobian/artificial_viscosity.py`）：`dS = dG = 0`、质量通量为零、
+* 湍流（`assemble.py`）：`phi` 是模型的 Newton 未知量（SST `(k, ln omega)`、SA-neg `nu_tilde`），
+  源项与 `Gamma` 随 `phi` 变化；
+* 人工粘性（`core/fr_residual/jacobian/artificial_viscosity.py`）：`nv = 1`、`dS = dG = 0`、质量通量为零、
   边界全为齐次 Neumann、`rho = 1`，得到冻结 `nu` 的标量扩散算子 `-L_nu` 本身。
 
-布局与 `CellBlockJacobian` 相同：逐单元 `(n_real*2, n_real*2)`，下标 `s*2 + v`；
+布局与 `CellBlockJacobian` 相同：逐单元 `(n_real*nv, n_real*nv)`，下标 `s*nv + v`；
 `want_coupling` 时再给出面邻居耦合块。
 """
 
@@ -30,9 +31,11 @@ from .faces import add_turbulence_face_blocks_color
 _CHUNK = 4096
 
 
-def convection_ghost_affine(flat, frame, m_side, wall_zero, has_value, open_face):
-    """某一侧坐标系下"另一侧是本侧迹的仿射函数"的点与系数 `(ghost (n_faces,n_fp), a (2,n_faces,n_fp))`，
-    规则与 `face_frames.extrapolate_scalar_pair_kernel` + 对流来流覆盖一致。"""
+def convection_ghost_affine(flat, frame, m_side, dirichlet_faces, open_face):
+    """某一侧坐标系下"另一侧是本侧迹的仿射函数"的点与系数 `(ghost (n_faces,n_fp), a (nv,n_faces,n_fp))`，
+    规则与 `face_frames.extrapolate_scalar_pair_kernel` + 对流来流覆盖一致。
+
+    `dirichlet_faces`：逐变量的壁面 Dirichlet 面掩码序列（目标值是常数，不影响导数）。"""
     n_faces, n_fp = flat.owner_adj_row_exact.shape[:2]
     if frame == "owner":
         true_bnd = (np.asarray(flat.neighbor_src0_cell) < 0) & (np.asarray(flat.neighbor_src1_idx) < 0)
@@ -43,8 +46,9 @@ def convection_ghost_affine(flat, frame, m_side, wall_zero, has_value, open_face
     mp = np.maximum(partner, 0)
     in_mixed = (partner >= 0)[:, None] & mask
     ghost = true_bnd[:, None] | in_mixed
-    a = np.ones((2, n_faces, n_fp))
-    for v, dirichlet in ((0, wall_zero), (1, has_value)):
+    a = np.ones((len(dirichlet_faces), n_faces, n_fp))
+    for v, dirichlet in enumerate(dirichlet_faces):
+        dirichlet = np.asarray(dirichlet, dtype=bool)
         d = np.where(in_mixed, dirichlet[mp][:, None], dirichlet[:, None])
         a[v] = np.where(ghost & d, -1.0, 1.0)
     if frame == "owner":
@@ -71,26 +75,27 @@ def _segments(mesh, ops, npr, nte):
             yield kind, lo, hi, n, Dn, np.eye(n), np.ascontiguousarray(Dn), None, None
 
 
-def assemble_scalar_pair_blocks(mesh, ops, flat, kw, gam, dS, dG, rho, vel, rho_u_tilde, mass_flux,
-                                mass_flux_neighbor, ghost, diff, want_coupling: bool = False):
-    """返回 `(blocks_prism, blocks_tet[, coupling])`（float32，`n_var=2`，见模块文档）。
+def assemble_scalar_blocks(mesh, ops, flat, kw, gam, dS, dG, rho, vel, rho_u_tilde, mass_flux,
+                           mass_flux_neighbor, ghost, diff, want_coupling: bool = False):
+    """返回 `(blocks_prism, blocks_tet[, coupling])`（float32，`n_var = nv`，见模块文档）。
 
     Args:
-        kw: `(n_cells, n_sps, 2)` 两个标量；gam/dS/dG: 逐点扩散系数与导数。
+        kw: `(n_cells, n_sps, nv)` 各标量；gam/dS/dG: 逐点扩散系数与导数。
         rho, vel: `(n_cells, n_sps)` / `(n_cells, n_sps, 3)` 冻结密度与速度（过积分对流体积项）。
         rho_u_tilde: `(n_cells, n_sps, 3)` 解点上的逆变质量通量（不过积分时的对流体积项）。
         mass_flux, mass_flux_neighbor: 两侧坐标系下的面质量通量 `(n_faces, n_fp)`。
         ghost: `(ghost_o, a_o, ghost_n, a_n)` 对流 ghost 的仿射规则（`convection_ghost_affine`）。
-        diff: `{"owner"|"neighbor": (is_bnd, is_dir (2,...), target (2,...))}` 扩散边界数据。
+        diff: `{"owner"|"neighbor": (is_bnd, is_dir (nv,...), target (nv,...))}` 扩散边界数据。
     """
     n_cells, n_sps = int(mesh.n_cells), int(mesh.n_sps_per_cell)
+    nv = int(kw.shape[2])
     n_prism = int(mesh.n_prism_cells)
     npr, nte = real_sps_per_cell(int(mesh.order))
     det = np.asarray(mesh.jacobians["det_jacs"]).reshape(n_cells, n_sps)
     inv_sp = np.ascontiguousarray(np.asarray(mesh.jacobians["inv_jacs"]).reshape(n_cells, n_sps, 3, 3))
 
-    acc = [np.zeros((n_prism, npr, 2, npr, 2), dtype=np.float32),
-           np.zeros((n_cells - n_prism, nte, 2, nte, 2), dtype=np.float32)]
+    acc = [np.zeros((n_prism, npr, nv, npr, nv), dtype=np.float32),
+           np.zeros((n_cells - n_prism, nte, nv, nte, nv), dtype=np.float32)]
     src = [np.zeros_like(acc[0]), np.zeros_like(acc[1])]
     slot = np.concatenate([np.arange(n_prism), np.arange(n_cells - n_prism)]).astype(np.int64)
     # ---- 单元内项 ----
@@ -116,7 +121,7 @@ def assemble_scalar_pair_blocks(mesh, ops, flat, kw, gam, dS, dG, rho, vel, rho_
     m_n = np.ascontiguousarray(mass_flux_neighbor)
     ghost_o, a_o, ghost_n, a_n = ghost
     if want_coupling:
-        cross_offset, expected_col, cross_size, slots = cross_layout(flat, n_prism, npr, nte, n_var=2,
+        cross_offset, expected_col, cross_size, slots = cross_layout(flat, n_prism, npr, nte, n_var=nv,
                                                                       include_partner=False)
         cross_data = np.zeros(cross_size, dtype=np.float32)
         cross_col = -np.ones_like(cross_offset)
@@ -151,27 +156,28 @@ def assemble_scalar_pair_blocks(mesh, ops, flat, kw, gam, dS, dG, rho, vel, rho_
     for kind, lo, n in ((0, 0, npr), (1, n_prism, nte)):
         if acc[kind].shape[0]:
             _finalize_diag(acc[kind], src[kind], lo, n, np.ascontiguousarray(det), np.ascontiguousarray(inv_rho))
-    blocks = (acc[0].reshape(n_prism, npr * 2, npr * 2), acc[1].reshape(n_cells - n_prism, nte * 2, nte * 2))
+    blocks = (acc[0].reshape(n_prism, npr * nv, npr * nv), acc[1].reshape(n_cells - n_prism, nte * nv, nte * nv))
     if not want_coupling:
         return blocks
     return blocks + (_finalize_coupling(cross_data, slots, np.ascontiguousarray(det),
-                                        np.ascontiguousarray(inv_rho), npr, nte),)
+                                        np.ascontiguousarray(inv_rho), npr, nte, nv),)
 
 
 @njit(cache=True, parallel=True)
 def _finalize_diag(acc, src, lo, n, det, inv_rho):
+    nv = acc.shape[2]
     for k in prange(acc.shape[0]):
         c = lo + k
         for s in range(n):
             scale = -inv_rho[c, s]
             inv_det = 1.0 / det[c, s]
-            for v in range(2):
+            for v in range(nv):
                 for t in range(n):
-                    for u in range(2):
+                    for u in range(nv):
                         acc[k, s, v, t, u] = scale * (acc[k, s, v, t, u] * inv_det + src[k, s, v, t, u])
 
 
-def _finalize_coupling(data, slots, det, inv_rho, npr, nte):
+def _finalize_coupling(data, slots, det, inv_rho, npr, nte, nv):
     rows, cols, offs, bounds = slots
     groups = []
     for g in range(4):
@@ -185,33 +191,34 @@ def _finalize_coupling(data, slots, det, inv_rho, npr, nte):
         new_pair = np.ones(hi - lo, dtype=bool)
         new_pair[1:] = (r[1:] != r[:-1]) | (c[1:] != c[:-1])
         first = np.nonzero(new_pair)[0].astype(np.int64)
-        out = np.empty((first.size, nr, 2, ny, 2), dtype=np.float32)
+        out = np.empty((first.size, nr, nv, ny, nv), dtype=np.float32)
         _finalize_pairs(data, int(offs[lo]), nr, ny, first, hi - lo, r, det, inv_rho, out)
         groups.append(CouplingGroup(row_is_prism=row_p, col_is_prism=col_p, rows=r[first], cols=c[first],
-                                    blocks=out.reshape(first.size, nr * 2, ny * 2)))
+                                    blocks=out.reshape(first.size, nr * nv, ny * nv)))
     return CouplingBlocks(groups=groups)
 
 
 @njit(cache=True, parallel=True)
 def _finalize_pairs(data, base, nr, ny, first, n_slots, rows, det, inv_rho, out):
-    blk = 4 * nr * ny
+    nv = out.shape[2]
+    blk = nv * nv * nr * ny
     n_u = first.shape[0]
     for u_ in prange(n_u):
         k0 = first[u_]
         k1 = first[u_ + 1] if u_ + 1 < n_u else n_slots
         r = rows[k0]
-        X = np.zeros((nr, 2, ny, 2))
+        X = np.zeros((nr, nv, ny, nv))
         for kk in range(k0, k1):
             p = base + kk * blk
             for s in range(nr):
-                for v in range(2):
+                for v in range(nv):
                     for t in range(ny):
-                        for u in range(2):
+                        for u in range(nv):
                             X[s, v, t, u] += data[p]
                             p += 1
         for s in range(nr):
             scale = -inv_rho[r, s] / det[r, s]
-            for v in range(2):
+            for v in range(nv):
                 for t in range(ny):
-                    for u in range(2):
+                    for u in range(nv):
                         out[u_, s, v, t, u] = scale * X[s, v, t, u]

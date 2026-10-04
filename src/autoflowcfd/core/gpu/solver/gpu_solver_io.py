@@ -135,11 +135,9 @@ class _GPUSolverIOMixin:
         self._update_production_ramp_gpu()
 
         grad_vel, d_wall = self._prepare_turbulence_inputs_gpu()
-        dk_dt, dw_dt, transport_k, transport_w = self._evaluate_turbulence_rates_gpu(
-            grad_vel, d_wall, apply_des=True)
+        rates = self._evaluate_turbulence_rates_gpu(grad_vel, d_wall, apply_des=True)
 
-        self.turb_model_gpu.update_fields_gpu(
-            turb_dt, dk_dt, dw_dt, transport_k=transport_k, transport_log_omega=transport_w)
+        self.turb_model_gpu.update_fields(turb_dt, rates.source, rates.transport)
 
         self._finalize_turbulence_update_gpu()
         return self._turbulent_mu_t_gpu()
@@ -260,7 +258,7 @@ class _GPUSolverIOMixin:
         dw_dt = S_omega / (cp.maximum(rho, 1e-10) * omega)
 
         # k/omega 完整输运（对流+扩散，#7 新增）：真正补齐 GPU SST 长期
-        # 缺失的输运项——此前 update_fields_gpu 的 transport_k/
+        # 缺失的输运项——此前 GPU 显式更新的 transport_k/
         # transport_omega 参数从未被调用方传入（见 gpu_turbulence_sst.py
         # 模块文档），k/omega 场只靠逐点源项 ODE 弛豫，没有跨单元对流/
         # 扩散。与 CPU 版 fr_solver_turbulence.py::compute_turbulence_source
@@ -275,7 +273,8 @@ class _GPUSolverIOMixin:
                 self, grad_k=grad_k, grad_log_omega=grad_w,
             )
 
-        return dk_dt, dw_dt, transport_k, transport_w
+        from autoflowcfd.core.turbulence.transported import TurbulenceRates
+        return TurbulenceRates((Sk, S_omega), (dk_dt, dw_dt), (transport_k, transport_w))
 
     def _finalize_turbulence_update_gpu(self):
         """`k/omega` 更新之后的后处理：模态滤波 + 正性限幅（非恒等滤波时）。显式与

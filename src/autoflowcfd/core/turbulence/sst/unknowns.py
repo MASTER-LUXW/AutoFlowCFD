@@ -1,0 +1,40 @@
+"""AutoFlowCFD V2.0 - SST 的输运场与 Newton 未知量（`turbulence/transported.py` 接口）。
+
+被输运的是 `k` 与 `w = ln omega`（`log_omega.py`）：模型存物理 omega，Newton 未知量的第二列是
+它的对数，写回时经 `omega_from_log` 施加上界。CPU（`SSTModelFR`）与 GPU（`GPUTurbulenceSST`）
+共用本混入类。
+"""
+
+import numpy as np
+
+from autoflowcfd.core.turbulence.transported import TransportedTurbulence
+
+from .bounds import ABS_FLOOR, K_FLOOR_FRACTION
+from .log_omega import log_omega, omega_from_log
+
+
+class _SSTTransportedMixin(TransportedTurbulence):
+    """SST 的 `TransportedTurbulence` 实现。"""
+
+    TRANSPORTED_FIELDS = ("k_field", "omega_field")
+    NEWTON_LOG_COLUMNS = (1,)
+    CACHED_ATTRS = ("nu_t", "_last_F1", "_last_beta_blend", "_omega_realizability_min")
+
+    def _unknown_from_field(self, j, field, xp):
+        return field if j == 0 else log_omega(field, xp)
+
+    def _field_from_unknown(self, j, column, xp):
+        return column if j == 0 else omega_from_log(column, self.omega_max, xp)
+
+    def unknown_scales(self):
+        """`(k, ln omega)` 的逐列尺度：k 为尺度下限（物理性限幅与差分步长），`ln omega` 是
+        O(1) 的对数量、取 1（它的限幅是绝对的，见 `ScaledFieldRowLimits` 的 `log_columns`）。"""
+        return max(ABS_FLOOR, K_FLOOR_FRACTION * float(self.k_inf)), 1.0
+
+
+def sst_dirichlet_spec(wall_zero_face, omega_wall_face, has_omega_wall):
+    """SST 两个 Newton 未知量的壁面 Dirichlet 规格 `(faces, values)`（主机数组，湍流解析块
+    Jacobian 的 `TurbulenceLinearization` 用）：k 在壁面为 0；`w = ln omega` 取壁面解析值的对数
+    （与残差 `transport/residual.py` 同一换算；没有目标的面该值不被读取）。"""
+    return ((np.asarray(wall_zero_face, dtype=bool), np.asarray(has_omega_wall, dtype=bool)),
+            (None, log_omega(np.asarray(omega_wall_face, dtype=np.float64), np)))

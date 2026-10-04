@@ -18,7 +18,7 @@ from .assemble import TurbulenceLinearization, assemble_turbulence_blocks
 
 class TurbulenceBlockAssembler:
     """`(u0_flat, r0_flat) -> (blocks_prism, blocks_tet[, coupling[, cross_rank_coupling]])`（主机 float32，
-    `n_var=2`；跨 rank 耦合块只在分布式给出，见 `select_rows`）。"""
+    `n_var` 为模型的输运标量个数；跨 rank 耦合块只在分布式给出，见 `select_rows`）。"""
 
     __slots__ = ("ctx", "n_sps", "compact_state", "row_compact", "want_coupling")
 
@@ -31,7 +31,7 @@ class TurbulenceBlockAssembler:
         self.want_coupling = False
 
     def __call__(self, u0_flat, r0_flat):
-        u_dev = u0_flat.reshape(-1, self.n_sps, 2)
+        u_dev = u0_flat.reshape(-1, self.n_sps, int(self.ctx.turb.n_transported))
         if self.row_compact is None:
             return assemble_turbulence_blocks(self.ctx, _host(u_dev), want_coupling=self.want_coupling)
         # halo 交换在状态自己的数组模块上做（多 GPU 的交换器收 cupy 数组），再搬回主机
@@ -50,6 +50,7 @@ def turbulence_linearization(solver_like, turb, inputs, conv_geom, flat):
     `solver_like` 是湍流残差实际求值的那个对象（单机为求解器，分布式为紧凑空间适配器），
     壁面/开放边界掩码与 omega 壁面目标值取自与残差同一组函数。
     """
+    from autoflowcfd.core.turbulence.sst.unknowns import sst_dirichlet_spec
     from autoflowcfd.core.turbulence.transport.omega_wall import (
         _compute_omega_wall_target, _compute_open_boundary_face_mask, _compute_wall_dirichlet_face_mask,
     )
@@ -58,8 +59,8 @@ def turbulence_linearization(solver_like, turb, inputs, conv_geom, flat):
     wall_zero = _compute_wall_dirichlet_face_mask(solver_like)
     omega_wall, has_wall = _compute_omega_wall_target(solver_like, wall_zero, mu, Q[..., 0],
                                                       flat_face_override=flat)
+    faces, values = sst_dirichlet_spec(wall_zero, omega_wall, has_wall)
     return TurbulenceLinearization(
         mesh=solver_like.mesh, ops=solver_like.ops, flat=flat, turb=turb, Q=Q, grad_vel=grad_vel,
-        d_wall=d_wall, mu=float(mu), conv_geom=conv_geom, wall_zero_face=wall_zero,
-        omega_wall_face=omega_wall, has_omega_wall=has_wall,
+        d_wall=d_wall, mu=float(mu), conv_geom=conv_geom, dirichlet_faces=faces, dirichlet_values=values,
         open_face=_compute_open_boundary_face_mask(solver_like, flat))

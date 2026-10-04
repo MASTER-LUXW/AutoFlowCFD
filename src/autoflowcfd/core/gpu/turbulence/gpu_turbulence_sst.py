@@ -25,12 +25,14 @@ from typing import Optional, Tuple
 
 from autoflowcfd.core.gpu import gpu_available, get_cupy
 from autoflowcfd.core.turbulence.sst.ambient import ambient_sustaining_terms
+from autoflowcfd.core.turbulence.limits import TURBULENT_VISCOSITY_RATIO_MAX
+from autoflowcfd.core.turbulence.sst.unknowns import _SSTTransportedMixin
 from autoflowcfd.core.turbulence.sst.bounds import (
     OMEGA_MAX_FLOOR, model_evaluation_fields, omega_realizability_floor,
 )
 
 
-class GPUTurbulenceSST:
+class GPUTurbulenceSST(_SSTTransportedMixin):
     """GPU 版 SST k-ω 湍流模型。
 
     所有场变量存储在 GPU 上，源项计算全程在 GPU 完成。
@@ -74,7 +76,7 @@ class GPUTurbulenceSST:
         # 来流 omega/k（持久属性）：与 CPU 版 sst.py 同一处真实 bug 修复
         # 同一个理由——P0 阶段 grad_vel 恒为零导致 S_mag 恒零，omega
         # realizability 下限若只依赖 S_mag 会完全失效，需要一个不依赖
-        # 阶数的物理量纲下限；k_inf 供 apply_positivity_limiter_gpu 里
+        # 阶数的物理量纲下限；k_inf 供 apply_positivity_limiter 里
         # k 的同类下限使用（2026-09-11，见该处文档）。
         self.omega_inf = omega_inf
         self.k_inf = k_inf
@@ -194,7 +196,7 @@ class GPUTurbulenceSST:
     # 湍流粘性比上限（与 CPU 版 SSTModelFR.TURBULENT_VISCOSITY_RATIO_MAX
     # 保持一致，见该类属性文档：主流 RANS 求解器标准安全阀，切断
     # k/omega 比值局部失控增长的反馈环）。
-    TURBULENT_VISCOSITY_RATIO_MAX = 1.0e5
+    TURBULENT_VISCOSITY_RATIO_MAX = TURBULENT_VISCOSITY_RATIO_MAX
 
     def compute_eddy_viscosity_gpu(
         self, k: 'cp.ndarray', omega: 'cp.ndarray',
@@ -286,7 +288,7 @@ class GPUTurbulenceSST:
 
         beta = F1 * self.beta1 + (1.0 - F1) * self.beta2
 
-        # 暂存本次求值用的混合 beta（供 update_fields_gpu 的半隐式阻尼
+        # 暂存本次求值用的混合 beta（供 update_fields 的半隐式阻尼
         # 使用，见该方法文档，与 CPU 版 SSTModelFR.compute_source_terms
         # 完全一致）。
         self._last_beta_blend = beta
@@ -330,14 +332,14 @@ class GPUTurbulenceSST:
         # 专家组盲审发现 GPU 版此前缺这一步）：F1/F2 的 overflow 保护
         # 只清理了这两个混合函数本身，P_k/D_k/P_omega/D_omega 各自的
         # 中间量（如 CD_omega 里的 1/omega_safe）在极端退化网格上仍可能
-        # 产生局部 NaN/Inf，若不在这里兜底，会被 update_fields_gpu 的
+        # 产生局部 NaN/Inf，若不在这里兜底，会被 update_fields 的
         # 半隐式阻尼放大后写入 k_field/omega_field。
         Sk = cp.where(cp.isfinite(Sk), Sk, 0.0)
         S_omega = cp.where(cp.isfinite(S_omega), S_omega, 0.0)
 
         return Sk, S_omega
 
-    def apply_positivity_limiter_gpu(self):
+    def apply_positivity_limiter(self):
         """GPU 正性保持限制器（含物理上界）：与 CPU 版同一个区间定义与实现
         （`core/turbulence/sst/bounds.py::clip_to_bounds`，数组模块换成 cupy）。
 
@@ -348,21 +350,14 @@ class GPUTurbulenceSST:
 
         clip_to_bounds(self, get_cupy())
 
-    def update_fields_gpu(
-        self,
-        dt,
-        Sk: 'cp.ndarray',
-        S_log_omega: 'cp.ndarray',
-        transport_k: Optional['cp.ndarray'] = None,
-        transport_log_omega: Optional['cp.ndarray'] = None,
-    ):
+    def update_fields(self, dt, sources, transports):
         """GPU 湍流场时间更新：k 与 `w = ln(omega)` 的点隐式阻尼 + 输运，与 CPU
         `SSTModelFR.update_fields` 同一份实现（`sst/update.py::advance_k_log_omega`），
-        再过正性/上界限制器。参数含义见该函数。"""
+        再过正性/上界限制器。`sources`/`transports` 按未知量 `(k, w)` 排列。"""
         from autoflowcfd.core.turbulence.sst.update import advance_k_log_omega
 
-        advance_k_log_omega(self, dt, Sk, S_log_omega, transport_k, transport_log_omega, get_cupy())
-        self.apply_positivity_limiter_gpu()
+        advance_k_log_omega(self, dt, sources[0], sources[1], transports[0], transports[1], get_cupy())
+        self.apply_positivity_limiter()
 
     def filter_fields_gpu(self, n_prism: int, ops, order: int):
         """k 与 `w = ln(omega)` 的模态滤波 + 正性/上界限制器（CPU 版
@@ -401,7 +396,7 @@ class GPUTurbulenceSST:
             self.k_field = filter_scalar_field_gpu(self.k_field, n_prism, ops.filter_prism, ops.filter_tet)
             w = filter_scalar_field_gpu(w, n_prism, ops.filter_prism, ops.filter_tet)
         self.omega_field = omega_from_log(w, self.omega_max, cp)
-        self.apply_positivity_limiter_gpu()
+        self.apply_positivity_limiter()
         return frac
 
     def get_nu_t_cpu(self) -> np.ndarray:

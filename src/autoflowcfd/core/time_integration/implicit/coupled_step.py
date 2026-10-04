@@ -1,4 +1,4 @@
-"""AutoFlowCFD V2.0 - 平均流 + k-ln(omega) 紧耦合的一个 PTC-Newton-Krylov 步（全部后端共用）。
+"""AutoFlowCFD V2.0 - 平均流 + 湍流输运方程紧耦合的一个 PTC-Newton-Krylov 步（全部后端共用）。
 
 ## 为什么必须紧耦合（2026-10-02）
 
@@ -16,9 +16,10 @@ Gauss-Seidel 迭代——它在不动点处的谱半径一旦大于 1 就周期�
 
 ## 做法
 
-未知量 `x = (rho, rho u, rho v, rho w, rho E, k, w)`（`w = ln omega`），每行一个解点：
+未知量 `x = (rho, rho u, rho v, rho w, rho E, t_1 .. t_n)`，每行一个解点；湍流未知量 `t` 由模型
+声明（`turbulence/transported.py`：SST 为 `(k, ln omega)`，SA-neg 为 `nu_tilde`）：
 
-    ( I/dtau + dR/dx ) dx = -R(x),     R = [ Gamma R_mean(U; mu_t(k, w, U)),  R_t(k, w; U) ]
+    ( I/dtau + dR/dx ) dx = -R(x),     R = [ Gamma R_mean(U; mu_t(t, U)),  R_t(t; U) ]
 
 * 残差每次求值都按当前平均流重算湍流的冻结输入（速度梯度、质量通量、壁面目标值）、按
   当前 `(k, omega)` 刷新涡粘——差分 matvec 含两个子系统之间的全部耦合，外层不再有块
@@ -32,9 +33,9 @@ Gauss-Seidel 迭代——它在不动点处的谱半径一旦大于 1 就周期�
 
     turb                    隐式湍流适配器（`fr_solver/turbulence/implicit.py` 模块文档"后端"）
     red / cell_is_prism / order / n_sps / scales_mean
-    state() -> x            当前 (N, 7)（`red.xp` 上，本 rank 行）
-    snapshot() / restore(s) 平均流状态 + k/omega + 模型缓存（试探求值后还原）
-    set_trial(x)            写入试探状态（平均流 5 列 + k、omega = exp(w)）
+    state() -> x            当前 (N, 5 + n)（`red.xp` 上，本 rank 行）
+    snapshot() / restore(s) 平均流状态 + 湍流输运场 + 模型缓存（试探求值后还原）
+    set_trial(x)            写入试探状态（平均流 5 列 + 湍流未知量经模型写回）
     trial_mu_t()            最近一次 `turb.rates` 之后平均流粘性残差用的涡粘（后端排列）
     mean_residual(mu_t)     平均流 `Gamma R`，(N, 5)
     mean_assembler(mu_t)    平均流解析单元块装配器（不覆盖时 None）
@@ -55,7 +56,6 @@ from typing import Optional
 import numpy as np
 from loguru import logger
 
-from autoflowcfd.core.turbulence.sst.bounds import turbulence_scales
 from autoflowcfd.fr.native_padding import real_row_mask, real_sps_per_cell
 
 from .block_jacobi import BlockJacobiCache
@@ -65,15 +65,9 @@ from .jfnk import step_newton_krylov
 from .mean_flow_step import N_MEAN_FLOW_VARS, require_no_modal_filter
 from .physicality import ScaledFieldRowLimits
 
-#: 湍流未知量个数（k, w = ln omega）。
-N_TURB_VARS = 2
-
-#: 耦合未知量个数。
-N_COUPLED_VARS = N_MEAN_FLOW_VARS + N_TURB_VARS
-
-#: 两个子系统在耦合未知量里的列。
+#: 两个子系统在耦合未知量里的列（湍流列数由模型声明，`TransportedTurbulence.n_transported`）。
 MEAN_COLUMNS = slice(0, N_MEAN_FLOW_VARS)
-TURB_COLUMNS = slice(N_MEAN_FLOW_VARS, N_COUPLED_VARS)
+TURB_COLUMNS = slice(N_MEAN_FLOW_VARS, None)
 
 
 class CoupledResidual:
@@ -98,11 +92,11 @@ class CoupledResidual:
         try:
             be.set_trial(x)
             be.turb.prepare_inputs()
-            rate_k, rate_w = be.turb.rates(apply_des=False)
-            out = xp.empty((x.shape[0], N_COUPLED_VARS), dtype=xp.float64)
+            rates = be.turb.rates(apply_des=False)
+            out = xp.empty((x.shape[0], N_MEAN_FLOW_VARS + len(rates)), dtype=xp.float64)
             out[:, :N_MEAN_FLOW_VARS] = be.mean_residual(be.trial_mu_t())
-            out[:, N_MEAN_FLOW_VARS] = -rate_k.ravel()
-            out[:, N_MEAN_FLOW_VARS + 1] = -rate_w.ravel()
+            for j, rate in enumerate(rates):
+                out[:, N_MEAN_FLOW_VARS + j] = -rate.ravel()
             out[~self.real_rows, N_MEAN_FLOW_VARS:] = 0.0
         finally:
             be.restore(snap)
@@ -172,10 +166,11 @@ class CoupledBlockPreconditioner:
     `BlockJacobiCache` 子集。两套块都在基态上解析装配（另一子系统冻结在基态），与此前
     分离式两步各自的预处理同一份块。"""
 
-    __slots__ = ("be", "mean", "turb", "residual")
+    __slots__ = ("be", "mean", "turb", "residual", "n_turb")
 
     def __init__(self, backend, mean_cache: BlockJacobiCache, turb_cache: BlockJacobiCache, residual):
         self.be, self.mean, self.turb, self.residual = backend, mean_cache, turb_cache, residual
+        self.n_turb = int(backend.turb.model.n_transported)
 
     @property
     def flexible(self) -> bool:
@@ -205,10 +200,10 @@ class CoupledBlockPreconditioner:
         self._with_assemblers(u0, "refresh", r0, scales, dtau)
 
     def preconditioner(self, dtau, n_var: int):
-        if n_var != N_COUPLED_VARS:
-            raise ValueError(f"耦合预处理只接受 {N_COUPLED_VARS} 列，收到 {n_var}")
+        if n_var != N_MEAN_FLOW_VARS + self.n_turb:
+            raise ValueError(f"耦合预处理只接受 {N_MEAN_FLOW_VARS + self.n_turb} 列，收到 {n_var}")
         return _BlockDiagonal(self.mean.preconditioner(dtau, N_MEAN_FLOW_VARS),
-                              self.turb.preconditioner(dtau, N_TURB_VARS), dtau)
+                              self.turb.preconditioner(dtau, self.n_turb), dtau)
 
     def stale_budget(self) -> Optional[int]:
         budgets = [b for b in (self.mean.stale_budget(), self.turb.stale_budget()) if b is not None]
@@ -243,7 +238,8 @@ def _caches(solver, backend):
                       n_real_prism=n_real_prism, n_real_tet=n_real_tet, red=backend.red,
                       colors=backend.cell_colors(), global_coarse=backend.coarse_context())
         if need_turb:
-            solver._newton_turb_state = {"block": BlockJacobiCache(n_var=N_TURB_VARS, **common)}
+            solver._newton_turb_state = {
+                "block": BlockJacobiCache(n_var=int(backend.turb.model.n_transported), **common)}
         if need_mean:
             solver._newton_block_precond = BlockJacobiCache(
                 n_var=N_MEAN_FLOW_VARS, coupling_graph=backend.coupling_graph, with_turbulence=True, **common)
@@ -269,12 +265,13 @@ def step_coupled_newton(solver, backend, dtau_flat, *, filter_active: bool = Fal
     real = xp.asarray(real_row_mask(np.asarray(backend.cell_is_prism, dtype=bool), backend.n_sps,
                                     int(backend.order)))
     model = backend.turb.model
-    t_scales = turbulence_scales(model)
+    t_scales = model.unknown_scales()
     scales = np.concatenate([np.asarray(backend.scales_mean, dtype=np.float64)[:N_MEAN_FLOW_VARS],
                              np.asarray(t_scales, dtype=np.float64)])
     physicality = CoupledPhysicality(
         backend.positivity,
-        ScaledFieldRowLimits(t_scales, log_columns=(1,), rows_per_cell=backend.n_sps, real_rows=real))
+        ScaledFieldRowLimits(t_scales, log_columns=model.NEWTON_LOG_COLUMNS, rows_per_cell=backend.n_sps,
+                             real_rows=real))
     x0 = xp.ascontiguousarray(backend.state(), dtype=xp.float64)
     residual = CoupledResidual(backend, real, x0)
     dtau_flat = xp.ascontiguousarray(dtau_flat, dtype=xp.float64).ravel()

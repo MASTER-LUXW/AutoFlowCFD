@@ -97,11 +97,12 @@ class AnalyticWallDistance:
 def build_flat_plate_solver(order: int, *, nx_up: int = 8, nx_plate: int = 24, ny: int = 24,
                             dx_le: float = 2e-3, dy_wall: float = 2e-5, lz: float = 0.05,
                             turb_model: str = "SST", turbulence_intensity: float = 1e-3,
-                            viscosity_ratio: float = 1.0, order_continuation: bool = False):
+                            viscosity_ratio: float = 1.0, order_continuation: bool = False,
+                            time_scheme=None):
     """构造湍流平板隐式稳态（NK）求解器，均匀来流初场；返回 `(solver, meta)`。
 
     `order_continuation=True` 时 `solver.solve()` 走生产的逐阶爬坡（P0 -> ... -> `order`），
-    否则直接在 `order` 阶上推进（`solver.step`）。
+    否则直接在 `order` 阶上推进（`solver.step`）。`time_scheme` 默认隐式稳态（NK）。
     """
     from autoflowcfd.core.fr_solver import FRSolver
     from autoflowcfd.core.fr_solver.turbulence.wall_distance import apply_wall_distance_source
@@ -138,7 +139,8 @@ def build_flat_plate_solver(order: int, *, nx_up: int = 8, nx_plate: int = 24, n
     placeholder = {name: {"type": "SYMMETRY"} for name in
                    ("x_min", "x_max", "wall_bottom", "wall_top", "z_min", "z_max")}
     solver = FRSolver(mesh=mesh, order=order, turb_model_name=turb_model, n_vars=5 if turb_model == "NONE" else 7,
-                      time_scheme=TimeIntegrationScheme.NEWTON_KRYLOV, rho_inf=RHO_INF, vel_inf=U_INF,
+                      time_scheme=time_scheme if time_scheme is not None else TimeIntegrationScheme.NEWTON_KRYLOV,
+                      rho_inf=RHO_INF, vel_inf=U_INF,
                       p_inf=P_INF, mu_molecular=MU, bc_overrides=placeholder,
                       turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio)
     solver.order_continuation_enabled = order_continuation

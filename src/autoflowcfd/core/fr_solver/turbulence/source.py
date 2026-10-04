@@ -9,6 +9,7 @@ import numpy as np
 from loguru import logger
 
 from autoflowcfd.core.turbulence.des import IDDESModel
+from autoflowcfd.core.turbulence.transported import TurbulenceRates
 from autoflowcfd.core.fr_operators.corrected_gradient import source_velocity_gradient
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from .init import (
@@ -39,12 +40,11 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
     _update_production_ramp(solver)
 
     Q, grad_vel, d_wall, mu = prepare_turbulence_inputs(solver)
-    Sk, S_omega, dk_dt, dw_dt, transport_k, transport_w = evaluate_turbulence_rates(
-        solver, Q, grad_vel, d_wall, mu, apply_des=True)
+    rates = evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, apply_des=True)
 
-    solver.turb_model.update_fields(dt, dk_dt, dw_dt, transport_k=transport_k, transport_log_omega=transport_w)
+    solver.turb_model.update_fields(dt, rates.source, rates.transport)
     finalize_turbulence_update(solver)
-    return (Sk, S_omega)
+    return rates.raw
 
 
 def turbulence_velocity_gradient(solver, Q):
@@ -110,9 +110,9 @@ def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, apply_des: boo
     """在 `turb_model` 当前的 `k_field/omega_field` 上求 `dk/dt` 与 `dw/dt`（`w = ln omega`，
     见 `core/turbulence/sst/log_omega.py`）。
 
-    返回 `(Sk, S_omega, dk_dt, dw_dt, transport_k, transport_w)`：`Sk/S_omega` 是模型源项
-    （带 rho），`dk_dt = Sk/rho`、`dw_dt = S_omega/(rho omega)` 是**源项部分**，输运部分
-    单独返回——显式路径的 `update_fields` 只对源项做点隐式阻尼，所以两者必须分开。
+    返回 `TurbulenceRates`（`turbulence/transported.py`）：`raw = (Sk, S_omega)` 是模型源项
+    （带 rho），`source = (Sk/rho, S_omega/(rho omega))` 是**源项部分**，`transport` 是输运部分
+    ——显式路径的 `update_fields` 只对源项做点隐式阻尼，所以两者必须分开。
 
     副作用：`compute_source_terms` 会刷新模型上的 `nu_t`、混合 `beta` 与
     realizability 下限（都是当前场的函数）。`apply_des=True` 时还按刚算出的
@@ -211,7 +211,7 @@ def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, apply_des: boo
             conv_geom=conv_geom,
         )
 
-    return Sk, S_omega, dk_dt, dw_dt, transport_k, transport_w
+    return TurbulenceRates((Sk, S_omega), (dk_dt, dw_dt), (transport_k, transport_w))
 
 
 def finalize_turbulence_update(solver) -> None:

@@ -208,7 +208,7 @@ class DistributedTurbulenceBackend:
         self.model = solver.turb_model
         self.xp = np
         self.red = MPIReductions(np)
-        self.shape = self.model.k_field.shape
+        self.shape = self.model.transported_fields()[0].shape
         self.cell_is_prism = cell_is_prism
         self.order = int(order)
         self._adapter = self._view = self._inputs = self._conv_geom = None
@@ -244,11 +244,8 @@ class DistributedTurbulenceBackend:
 
     def rates(self, apply_des: bool):
         self._sync_view()
-        _, _, dk, dw, tk, tw = evaluate_turbulence_rates(self._adapter, *self._inputs,
-                                                         apply_des=apply_des,
-                                                         conv_geom=self._conv_geom)
-        rate_k = dk if tk is None else dk + tk
-        rate_w = dw if tw is None else dw + tw
+        rates = evaluate_turbulence_rates(self._adapter, *self._inputs, apply_des=apply_des,
+                                          conv_geom=self._conv_geom).total()
         if apply_des:
             # 最终场上的求值：涡粘与 DES 长度尺度写回真正的模型（与显式路径
             # `distributed_compute_turbulence_source_and_viscosity` 的写回相同）
@@ -257,7 +254,7 @@ class DistributedTurbulenceBackend:
             if self.solver.ddes_model is not None and getattr(view, "des_length_scale", None) is not None:
                 self.model.des_length_scale = self._to_local(view.des_length_scale).copy()
             self.mu_t_compact = self._adapter.state.Q[..., 0] * view.nu_t
-        return self._to_local(rate_k), self._to_local(rate_w)
+        return tuple(self._to_local(r) for r in rates)
 
     def positivity(self) -> None:
         self.model.apply_positivity_limiter()
@@ -324,38 +321,28 @@ class DistributedCoupledBackend:
         self._coarse = coarse_ctx
 
     def state(self):
-        from autoflowcfd.core.turbulence.sst.log_omega import log_omega
-
         n, m = self._n_local, self.turb.model
-        x = np.empty((n * self.n_sps, 7))
+        x = np.empty((n * self.n_sps, 5 + m.n_transported))
         x[:, :5] = self.solver.state.U[:n, :, :5].reshape(-1, 5)
-        x[:, 5] = m.k_field.ravel()
-        x[:, 6] = log_omega(m.omega_field, np).ravel()
+        x[:, 5:] = m.newton_unknowns(np)
         return x
 
     def snapshot(self):
-        from autoflowcfd.core.turbulence.jacobian.pointwise import CACHED_MODEL_ATTRS
-
-        n, st, m = self._n_local, self.solver.state, self.turb.model
-        return (st.U[:n].copy(), st.Q[:n].copy(), m.k_field, m.omega_field,
-                {a: getattr(m, a) for a in CACHED_MODEL_ATTRS if hasattr(m, a)})
+        n, st = self._n_local, self.solver.state
+        return st.U[:n].copy(), st.Q[:n].copy(), self.turb.model.field_snapshot()
 
     def restore(self, snap) -> None:
-        n, st, m = self._n_local, self.solver.state, self.turb.model
+        n, st = self._n_local, self.solver.state
         st.U[:n], st.Q[:n] = snap[0], snap[1]
-        m.k_field, m.omega_field = snap[2], snap[3]
-        for a, v in snap[4].items():
-            setattr(m, a, v)
+        self.turb.model.field_restore(snap[2])
 
     def set_trial(self, x) -> None:
         from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
-        from autoflowcfd.core.turbulence.sst.log_omega import omega_from_log
 
-        n, st, m = self._n_local, self.solver.state, self.turb.model
+        n, st = self._n_local, self.solver.state
         st.U[:n, :, :5] = x[:, :5].reshape(n, self.n_sps, 5)
         st.Q[:n] = conserved_to_primitive(st.U[:n, :, :5])
-        m.k_field = np.ascontiguousarray(x[:, 5]).reshape(self.turb.shape)
-        m.omega_field = omega_from_log(np.ascontiguousarray(x[:, 6]), m.omega_max, np).reshape(self.turb.shape)
+        self.turb.model.set_newton_unknowns(x[:, 5:], np)
 
     def trial_mu_t(self):
         return self.turb.trial_mu_t_compact()

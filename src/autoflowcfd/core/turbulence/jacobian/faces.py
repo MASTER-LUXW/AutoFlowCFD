@@ -1,4 +1,4 @@
-"""AutoFlowCFD V2.0 - k-omega 输运界面项对单元块的贡献（numba）。
+"""AutoFlowCFD V2.0 - 湍流标量输运界面项对单元块的贡献（numba，变量个数 `nv` 由数组形状给出）。
 
 与残差（`transport/convection.py`、`transport/diffusion.py`、`transport/face_frames.py`）
 逐项对应：每个 primary 面侧、每个通量点、每个变量 `v`，
@@ -12,11 +12,11 @@
 迹对单元解点的线性链（`M` 为本侧外插或另一侧 sources 插值矩阵）：
 
     phi 迹   p_v   = M phi_v
-    Gamma 迹 g_v   = M Gamma_v，Gamma_v 依赖两个未知量及其梯度（`pointwise.py`）
+    Gamma 迹 g_v   = M Gamma_v，Gamma_v 依赖全部未知量及其梯度（`pointwise.py`）
     法向梯度 dn_v  = M (Gop phi_v) . n
 
 边界与混合拆分面边界半区上，另一侧状态是本侧迹的仿射函数 `po = a ps + b`
-（壁面 k=0 镜像 `a=-1`、omega 壁面解析值 `a=-1`、零梯度 `a=1`、来流 `a=0`），由调用方按
+（壁面 Dirichlet 镜像 `a=-1`、零梯度 `a=1`、来流 `a=0`），由调用方按
 残差同一套规则给出（`scalar_blocks.py::convection_ghost_affine`）；扩散在这些点上是内罚
 Dirichlet 或齐次 Neumann，只依赖本侧迹。混合面配对边界面的 owner 就是本侧单元
 （`face_frames.extrapolate_scalar_pair_kernel` 文档），不产生额外耦合。
@@ -49,31 +49,32 @@ def _diffusion_partials(ps, gs, dns, po, go, dno, h, c_ip, is_bnd, is_dir, targe
 
 @njit(cache=True)
 def _trace_ops(M, phi, gam, dG, inv_c, D, cell, n, nrm):
-    """一侧的迹与迹导数算子：返回 `(p (fp,2), g (fp,2), dn (fp,2), DGt (fp,2,n,2), Nt (fp,n))`，
+    """一侧的迹与迹导数算子：返回 `(p (fp,nv), g (fp,nv), dn (fp,nv), DGt (fp,nv,n,nv), Nt (fp,n))`，
     `DGt[i,v,t,u] = d g_v(i) / d phi_u(t)`，`Nt[i,t] = d dn_v(i) / d phi_v(t)`（与变量无关）。"""
     n_fp = M.shape[0]
+    nv = phi.shape[2]
     Gop = _gradient_operator(inv_c, D, n)
     DG = _pointwise_chain(dG[cell], Gop, n)
-    p = np.zeros((n_fp, 2))
-    g = np.zeros((n_fp, 2))
-    dn = np.zeros((n_fp, 2))
-    DGt = np.zeros((n_fp, 2, n, 2))
+    p = np.zeros((n_fp, nv))
+    g = np.zeros((n_fp, nv))
+    dn = np.zeros((n_fp, nv))
+    DGt = np.zeros((n_fp, nv, n, nv))
     Nt = np.zeros((n_fp, n))
     for i in range(n_fp):
         for sp in range(n):
             e = M[i, sp]
             if e == 0.0:
                 continue
-            for v in range(2):
+            for v in range(nv):
                 p[i, v] += e * phi[cell, sp, v]
                 g[i, v] += e * gam[cell, sp, v]
             for t in range(n):
                 nt = nrm[i, 0] * Gop[sp, 0, t] + nrm[i, 1] * Gop[sp, 1, t] + nrm[i, 2] * Gop[sp, 2, t]
                 Nt[i, t] += e * nt
-                for v in range(2):
-                    for u in range(2):
+                for v in range(nv):
+                    for u in range(nv):
                         DGt[i, v, t, u] += e * DG[sp, v, t, u]
-        for v in range(2):
+        for v in range(nv):
             acc = 0.0
             for t in range(n):
                 acc += Nt[i, t] * phi[cell, t, v]
@@ -86,12 +87,13 @@ def _side_blocks(c, n, E, L, w, nrm, m_side, h, c_ip, ghost_row, conv_a, is_bnd_
                  src_cells, src_mats, phi, gam, dG, inv_sp, D_prism, D_tet, n_prism, n_real_prism, n_real_tet,
                  want_cross):
     n_fp = E.shape[0]
+    nv = phi.shape[2]
     D = D_prism if c < n_prism else D_tet
     ps, gs, dns, DGs, Ns = _trace_ops(E, phi, gam, dG, inv_sp[c], D, c, n, nrm)
     # 另一侧（sources 插值，两个来源累加）
-    po = np.zeros((n_fp, 2))
-    go = np.zeros((n_fp, 2))
-    dno = np.zeros((n_fp, 2))
+    po = np.zeros((n_fp, nv))
+    go = np.zeros((n_fp, nv))
+    dno = np.zeros((n_fp, nv))
     for k in range(2):
         y = src_cells[k]
         if y < 0:
@@ -103,15 +105,15 @@ def _side_blocks(c, n, E, L, w, nrm, m_side, h, c_ip, ghost_row, conv_a, is_bnd_
         go += gy
         dno += dy
     # 逐点逐变量的跳变量导数（本侧 / 另一侧），写成 J = Jd - Jc
-    dS_p = np.zeros((n_fp, 2))
-    dS_g = np.zeros((n_fp, 2))
-    dS_n = np.zeros((n_fp, 2))
-    dO_p = np.zeros((n_fp, 2))
-    dO_g = np.zeros((n_fp, 2))
-    dO_n = np.zeros((n_fp, 2))
+    dS_p = np.zeros((n_fp, nv))
+    dS_g = np.zeros((n_fp, nv))
+    dS_n = np.zeros((n_fp, nv))
+    dO_p = np.zeros((n_fp, nv))
+    dO_g = np.zeros((n_fp, nv))
+    dO_n = np.zeros((n_fp, nv))
     for i in range(n_fp):
         m = m_side[i]
-        for v in range(2):
+        for v in range(nv):
             if ghost_row[i]:
                 a = conv_a[v, i]
                 p_other = a * ps[i, v]       # 常数部分不影响导数
@@ -138,9 +140,9 @@ def _side_blocks(c, n, E, L, w, nrm, m_side, h, c_ip, ghost_row, conv_a, is_bnd_
                 dO_n[i, v] = dd[5]
             dS_g[i, v] = dd[1]
             dS_n[i, v] = dd[2]
-    self_block = np.zeros((n, 2, n, 2))
+    self_block = np.zeros((n, nv, n, nv))
     for i in range(n_fp):
-        for v in range(2):
+        for v in range(nv):
             coef_p = dS_p[i, v]
             coef_g = dS_g[i, v]
             coef_n = dS_n[i, v]
@@ -150,10 +152,10 @@ def _side_blocks(c, n, E, L, w, nrm, m_side, h, c_ip, ghost_row, conv_a, is_bnd_
                     continue
                 for t in range(n):
                     self_block[s, v, t, v] += lw * (coef_p * E[i, t] + coef_n * Ns[i, t])
-                    for u in range(2):
+                    for u in range(nv):
                         self_block[s, v, t, u] += lw * coef_g * DGs[i, v, t, u]
     nmax = max(n_real_prism, n_real_tet)
-    cross = np.zeros((2, n, 2, nmax, 2))
+    cross = np.zeros((2, n, nv, nmax, nv))
     if want_cross:
         for k in range(2):
             y = src_cells[k]
@@ -164,14 +166,14 @@ def _side_blocks(c, n, E, L, w, nrm, m_side, h, c_ip, ghost_row, conv_a, is_bnd_
             My = src_mats[k][:, :n_y]
             _, _, _, DGy, Ny = _trace_ops(My, phi, gam, dG, inv_sp[y], Dy, y, n_y, nrm)
             for i in range(n_fp):
-                for v in range(2):
+                for v in range(nv):
                     for s in range(n):
                         lw = L[s, i] * w[i]
                         if lw == 0.0:
                             continue
                         for t in range(n_y):
                             cross[k, s, v, t, v] += lw * (dO_p[i, v] * My[i, t] + dO_n[i, v] * Ny[i, t])
-                            for u in range(2):
+                            for u in range(nv):
                                 cross[k, s, v, t, u] += lw * dO_g[i, v] * DGy[i, v, t, u]
     return self_block, cross
 
@@ -191,12 +193,13 @@ def add_turbulence_face_blocks_color(face_indices, acc_prism, acc_tet, slot, n_p
     """一个颜色组内全部面的块贡献（乘 det 的量）：对角部分累加到 `acc_prism/acc_tet`，
     耦合块写入 `cross_data`（`cross_offset (n_faces, 2, 3)` 为空数组时不输出）。
 
-    `ghost_*/a_*`：两个坐标系下"另一侧是本侧仿射函数"的点与系数 `a (2, n_faces, n_fp)`；
+    `ghost_*/a_*`：两个坐标系下"另一侧是本侧仿射函数"的点与系数 `a (nv, n_faces, n_fp)`；
     `bnd_*/dir_*/tgt_*`：扩散边界点分类（`transport/faces.py::boundary_diffusion_targets`），
-    `dir/tgt` 按变量 `(2, n_faces, n_fp)`。
+    `dir/tgt` 按变量 `(nv, n_faces, n_fp)`。
     """
     want_cross = cross_offset.shape[0] > 0
     n_fp = E_nat.shape[1]
+    nv = phi.shape[2]
     for fi in prange(face_indices.shape[0]):
         f = face_indices[fi]
         for side in range(2):
@@ -251,9 +254,9 @@ def add_turbulence_face_blocks_color(face_indices, acc_prism, acc_tet, slot, n_p
             k = slot[c]
             acc = acc_prism if is_p else acc_tet
             for s in range(n):
-                for v in range(2):
+                for v in range(nv):
                     for t in range(n):
-                        for u in range(2):
+                        for u in range(nv):
                             acc[k, s, v, t, u] += blk[s, v, t, u]
             if want_cross:
                 for src in range(2):
@@ -265,8 +268,8 @@ def add_turbulence_face_blocks_color(face_indices, acc_prism, acc_tet, slot, n_p
                     n_y = n_real_prism if y < n_prism else n_real_tet
                     pos = off
                     for s in range(n):
-                        for v in range(2):
+                        for v in range(nv):
                             for t in range(n_y):
-                                for u in range(2):
+                                for u in range(nv):
                                     cross_data[pos] = cross[src, s, v, t, u]
                                     pos += 1

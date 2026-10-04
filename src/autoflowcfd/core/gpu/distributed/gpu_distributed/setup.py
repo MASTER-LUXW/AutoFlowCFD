@@ -40,7 +40,7 @@ class _MultiGPUSetupMixin:
         #
         # SST 真正接入分布式状态与残差计算（2026-09-02，见
         # `_compute_turbulence_source_distributed` 文档——复用单机
-        # `compute_source_terms_gpu`/`update_fields_gpu`/`compute_
+        # `compute_source_terms_gpu`/`update_fields`/`compute_
         # turbulence_transport_residual_gpu` 的数值逻辑，只是把 halo
         # 交换+compact 索引空间重排接上，同一套模式已经在 CPU MPI 路径
         # （`core/mpi/distributed_turbulence.py`）验证过）：此前 2026-08-28

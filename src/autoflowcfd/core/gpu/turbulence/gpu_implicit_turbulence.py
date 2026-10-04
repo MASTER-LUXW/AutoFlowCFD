@@ -24,7 +24,7 @@ class GpuTurbulenceBackend:
         self.model = solver.turb_model_gpu
         self.xp = cp
         self.red = LocalReductions(cp)
-        self.shape = tuple(self.model.k_field.shape)
+        self.shape = tuple(self.model.transported_fields()[0].shape)
         self.cell_is_prism = np.arange(self.shape[0]) < int(solver.mesh.n_prism_cells)
         order = getattr(solver, "current_order", None)
         self.order = int(order if order is not None else solver.order)
@@ -37,11 +37,10 @@ class GpuTurbulenceBackend:
         self._inputs = self.solver._prepare_turbulence_inputs_gpu()
 
     def rates(self, apply_des: bool):
-        dk, dw, tk, tw = self.solver._evaluate_turbulence_rates_gpu(*self._inputs, apply_des=apply_des)
-        return (dk if tk is None else dk + tk), (dw if tw is None else dw + tw)
+        return self.solver._evaluate_turbulence_rates_gpu(*self._inputs, apply_des=apply_des).total()
 
     def positivity(self) -> None:
-        self.model.apply_positivity_limiter_gpu()
+        self.model.apply_positivity_limiter()
 
     def finalize(self, dtau) -> None:
         self.solver._finalize_turbulence_update_gpu()
@@ -59,6 +58,7 @@ class GpuTurbulenceBackend:
         from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
         from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_omega_wall_target_gpu
         from autoflowcfd.core.turbulence.jacobian import TurbulenceBlockAssembler, TurbulenceLinearization
+        from autoflowcfd.core.turbulence.sst.unknowns import sst_dirichlet_spec
         from autoflowcfd.core.turbulence.transport import precompute_scalar_convection_geometry
 
         s, cp, m = self.solver, self.xp, self.model
@@ -69,12 +69,12 @@ class GpuTurbulenceBackend:
             cp, s.flat_face_gpu, s._wall_mask_k_gpu, d_wall, s.Q_gpu, s.mu_molecular,
             m.beta1, omega_max=m.omega_max,
             turb_k_field=m.k_field)
+        faces, values = sst_dirichlet_spec(_host(s._wall_mask_k_gpu), _host(omega_wall), _host(has_wall))
         ctx = TurbulenceLinearization(
             mesh=s.mesh, ops=s.ops, flat=flat, turb=m, Q=Q_h, grad_vel=_host(grad_vel), d_wall=_host(d_wall),
             mu=float(s.mu_molecular),
             conv_geom=precompute_scalar_convection_geometry(Q_h[..., 0], Q_h[..., 1:4], s.mesh, s.ops, flat),
-            wall_zero_face=_host(s._wall_mask_k_gpu), omega_wall_face=_host(omega_wall),
-            has_omega_wall=_host(has_wall), open_face=_host(s._open_mask_gpu),
+            dirichlet_faces=faces, dirichlet_values=values, open_face=_host(s._open_mask_gpu),
             pointwise=gpu_turbulence_pointwise(cp, m, s.Q_gpu, grad_vel, d_wall, float(s.mu_molecular)))
         return TurbulenceBlockAssembler(ctx, self.shape[1])
 
@@ -106,39 +106,27 @@ class GpuCoupledBackend:
         self._nu_av = nu_av
 
     def state(self):
-        from autoflowcfd.core.turbulence.sst.log_omega import log_omega
-
-        cp, s, m = self.turb.xp, self.solver, self.turb.model
-        x = cp.empty((self._n_rows, 7), dtype=cp.float64)
-        x[:, :5] = s.U_gpu.reshape(self._n_rows, -1)[:, :5]
-        x[:, 5] = m.k_field.ravel()
-        x[:, 6] = log_omega(m.omega_field, cp).ravel()
+        cp, m = self.turb.xp, self.turb.model
+        x = cp.empty((self._n_rows, 5 + m.n_transported), dtype=cp.float64)
+        x[:, :5] = self.solver.U_gpu.reshape(self._n_rows, -1)[:, :5]
+        x[:, 5:] = m.newton_unknowns(cp)
         return x
 
     def snapshot(self):
-        from autoflowcfd.core.turbulence.jacobian.pointwise import CACHED_MODEL_ATTRS
-
-        m = self.turb.model
-        return (self.solver.U_gpu, m.k_field, m.omega_field,
-                {a: getattr(m, a) for a in CACHED_MODEL_ATTRS if hasattr(m, a)})
+        return self.solver.U_gpu, self.turb.model.field_snapshot()
 
     def restore(self, snap) -> None:
-        m = self.turb.model
-        self.solver.U_gpu, m.k_field, m.omega_field = snap[0], snap[1], snap[2]
-        for a, v in snap[3].items():
-            setattr(m, a, v)
+        self.solver.U_gpu = snap[0]
+        self.turb.model.field_restore(snap[1])
         self.solver._update_primitives_gpu()
 
     def set_trial(self, x) -> None:
-        from autoflowcfd.core.turbulence.sst.log_omega import omega_from_log
-
-        cp, s, m = self.turb.xp, self.solver, self.turb.model
+        cp, s = self.turb.xp, self.solver
         U = s.U_gpu.copy()
         U.reshape(self._n_rows, -1)[:, :5] = x[:, :5]
         s.U_gpu = U
         s._update_primitives_gpu()
-        m.k_field = cp.ascontiguousarray(x[:, 5]).reshape(self.turb.shape)
-        m.omega_field = omega_from_log(cp.ascontiguousarray(x[:, 6]), m.omega_max, cp).reshape(self.turb.shape)
+        self.turb.model.set_newton_unknowns(x[:, 5:], cp)
 
     def trial_mu_t(self):
         return self.solver._turbulent_mu_t_gpu()

@@ -63,8 +63,6 @@ from functools import partial
 import numpy as np
 
 from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
-from autoflowcfd.core.turbulence.jacobian.pointwise import CACHED_MODEL_ATTRS
-from autoflowcfd.core.turbulence.sst.log_omega import log_omega, omega_from_log
 from autoflowcfd.core.turbulence.transport import prepare_convection_geometry
 
 from .init import _update_production_ramp
@@ -114,7 +112,7 @@ class CpuTurbulenceBackend:
         self.model = solver.turb_model
         self.xp = np
         self.red = LocalReductions(np)
-        self.shape = self.model.k_field.shape
+        self.shape = self.model.transported_fields()[0].shape
         self.cell_is_prism = np.arange(self.shape[0]) < int(solver.mesh.n_prism_cells)
         self.order = _current_order(solver)
         self._inputs = None
@@ -129,9 +127,8 @@ class CpuTurbulenceBackend:
             self.solver, getattr(self.solver, "_turbulence_flat_face_override", None))
 
     def rates(self, apply_des: bool):
-        _, _, dk, dw, tk, tw = evaluate_turbulence_rates(
-            self.solver, *self._inputs, apply_des=apply_des, conv_geom=self._conv_geom)
-        return (dk if tk is None else dk + tk), (dw if tw is None else dw + tw)
+        return evaluate_turbulence_rates(
+            self.solver, *self._inputs, apply_des=apply_des, conv_geom=self._conv_geom).total()
 
     def positivity(self) -> None:
         self.model.apply_positivity_limiter()
@@ -181,33 +178,27 @@ class CpuCoupledBackend:
         self._nu_av = nu_av
 
     def state(self):
-        s, m = self.solver, self.turb.model
-        x = np.empty((self._n_rows, 7))
-        x[:, :5] = np.asarray(s.state.U).reshape(self._n_rows, -1)[:, :5]
-        x[:, 5] = m.k_field.ravel()
-        x[:, 6] = log_omega(m.omega_field, np).ravel()
+        m = self.turb.model
+        x = np.empty((self._n_rows, 5 + m.n_transported))
+        x[:, :5] = np.asarray(self.solver.state.U).reshape(self._n_rows, -1)[:, :5]
+        x[:, 5:] = m.newton_unknowns(np)
         return x
 
     def snapshot(self):
-        m = self.turb.model
-        return (self.solver.state.U, m.k_field, m.omega_field,
-                {a: getattr(m, a) for a in CACHED_MODEL_ATTRS if hasattr(m, a)})
+        return self.solver.state.U, self.turb.model.field_snapshot()
 
     def restore(self, snap) -> None:
-        m = self.turb.model
-        self.solver.state.U, m.k_field, m.omega_field = snap[0], snap[1], snap[2]
-        for a, v in snap[3].items():
-            setattr(m, a, v)
+        self.solver.state.U = snap[0]
+        self.turb.model.field_restore(snap[1])
         self.solver.state._update_primitives()
 
     def set_trial(self, x) -> None:
-        s, m = self.solver, self.turb.model
+        s = self.solver
         U = np.array(s.state.U, copy=True)
         U.reshape(self._n_rows, -1)[:, :5] = x[:, :5]
         s.state.U = U
         s.state._update_primitives()
-        m.k_field = np.ascontiguousarray(x[:, 5]).reshape(self.turb.shape)
-        m.omega_field = omega_from_log(np.ascontiguousarray(x[:, 6]), m.omega_max, np).reshape(self.turb.shape)
+        self.turb.model.set_newton_unknowns(x[:, 5:], np)
 
     def trial_mu_t(self):
         from .corrections import get_turbulent_viscosity_field
