@@ -33,7 +33,6 @@ P0 与解析装配不覆盖的离散（见 `fr_residual/jacobian/backend.py::uns
 `J_cc` 只依赖状态，不依赖 `dtau`：每个 Newton 步只按新的 `dtau` 重新
 求逆（逐块 `J_cc + diag(1/dtau)`，廉价），`J_cc` 本身跨步复用，直到
 
-* 已经复用了 `MAX_AGE` 个 Newton 步；或
 * 上一步的 GMRES 迭代数超过"刚装配完那一步"的基线加上**一次装配折合的迭代数**
   （`refresh_cost.py`：解析装配按块类型与阶数查实测标定表，差分装配按精确的残差求值
   次数折算，下限 `REFRESH_SLACK_MIN`）：多出来的迭代比重装配一次还贵时才重装配。
@@ -49,7 +48,10 @@ P0 与解析装配不覆盖的离散（见 `fr_residual/jacobian/backend.py::uns
   的迭代预算烧完，重装配要等下一步才发生。
 
 冻结 Jacobian 的预处理是隐式 CFD 的标准做法；过时的预处理子仍然是合法
-的预处理子，只是迭代数上升，由上面的刷新判据兜住。
+的预处理子，只是迭代数上升，由上面的刷新判据兜住。此前另有"复用满 20 步无条件重装配"的硬上限
+（2026-10-05 删除）：湍流平板 SA P3（3072 单元）上它在每步只要 1~3 次 GMRES 的阶段强制重装配
+（每次约 15 s，折合约 30 次迭代），去掉后到收敛的耗时 1216 s -> 1133 s、GMRES 1290 -> 1206 次
+（`ProjectFiles/V2.0/38_*.md` 第 25.13 节）。
 
 ## 内存
 
@@ -83,11 +85,15 @@ from .preconditioner import PseudoTransientDiagonal
 from .reductions import LocalReductions
 from .refresh_cost import assembly_cost_iters, block_kind
 
-#: 一份 `J_cc` 最多复用多少个 Newton 步。
-MAX_AGE = 20
 
-#: 单份模式：当前 dtau 与求逆时 dtau 的几何平均比值超过这个倍数（任一方向）就重装配。
+#: 单份模式：当前 dtau 与求逆时 dtau 的几何平均比值超过这个倍数（任一方向）就重装配；
+#: 块 ILU 档：超过它就重新分解（`J_cc` 不变时分解跨步复用，见 `preconditioner`）。
 DTAU_REBUILD_RATIO = 2.0
+
+#: 块 ILU 档：伪时间项 `1/dtau` 相对 `J_cc` 对角的几何平均比值，分解时与当前都低于它时，
+#: 分解与 dtau 无关、不论 dtau 怎么变都复用（收敛末段 SER 让 CFL 每步翻倍，此时 `I/dtau`
+#: 已可忽略，按比值判据会每步白白重分解）。
+PTC_NEGLIGIBLE = 1e-2
 
 class CellBlockJacobiPreconditioner(PseudoTransientDiagonal):
     """`M = blockdiag(J_cc + I/dtau)` 的逆作用；接口与对角预处理相同。
@@ -229,7 +235,8 @@ class BlockJacobiCache:
                  "jac", "age", "baseline_iters", "last_iters", "last_accepted",
                  "disabled_reason", "n_builds", "red", "n_var", "assembler", "use_ilu", "coupling",
                  "_coupling_graph_fn", "_coupling_graph", "kind", "refresh_slack",
-                 "single_copy", "_inverted_dtau", "_coarse", "cross")
+                 "single_copy", "_inverted_dtau", "_coarse", "cross",
+                 "_factored", "_factored_dtau", "_ptc_diag")
 
     def __init__(self, *, cell_is_prism, colors: np.ndarray, n_sps: int,
                  n_real_prism: int, n_real_tet: int, n_var: int,
@@ -260,6 +267,9 @@ class BlockJacobiCache:
         self.refresh_slack = None        # 一次装配折合的 GMRES 迭代数，每次装配后按 refresh_cost.py 给出
         self.single_copy = False
         self._inverted_dtau = None
+        self._factored = None            # 块 ILU 档：当前 J_cc 下按 `_factored_dtau` 构造的预处理子
+        self._factored_dtau = None
+        self._ptc_diag = None            # 逐（单元, 解点）的 max_v |J_cc 对角|（PTC 项可忽略判据用）
         self.cross = None
         self.cell_is_prism = np.asarray(cell_is_prism, dtype=bool)
         self.n_sps, self.n_real_prism, self.n_real_tet = n_sps, n_real_prism, n_real_tet
@@ -295,7 +305,7 @@ class BlockJacobiCache:
         return int(baseline + self.refresh_slack)
 
     def _needs_rebuild(self, dtau_flat) -> bool:
-        if self.jac is None or self.age >= MAX_AGE or not self.last_accepted:
+        if self.jac is None or not self.last_accepted:
             return True
         if self.single_copy and self._dtau_drifted(dtau_flat):
             return True
@@ -303,13 +313,39 @@ class BlockJacobiCache:
             return self.last_iters > self._refresh_threshold(self.baseline_iters)
         return False
 
-    def _dtau_drifted(self, dtau_flat) -> bool:
-        """单份模式：当前 dtau 相对求逆时 dtau 的几何平均比值是否超过 `DTAU_REBUILD_RATIO`
-        （几何平均不让少数被局部缩小 dtau 的行触发整场重装配）。分布式下取全局平均。"""
+    def _dtau_drifted(self, dtau_flat, ref=None) -> bool:
+        """当前 dtau 相对 `ref`（默认：单份模式求逆时的 dtau）的几何平均比值是否超过
+        `DTAU_REBUILD_RATIO`（几何平均不让少数被局部缩小 dtau 的行触发整场重来）。分布式下取全局平均。"""
         xp = self.red.xp
-        log_ratio = xp.log(xp.asarray(dtau_flat, dtype=xp.float64).ravel() / self._inverted_dtau)
+        ref = self._inverted_dtau if ref is None else ref
+        log_ratio = xp.log(xp.asarray(dtau_flat, dtype=xp.float64).ravel() / ref)
         mean = self.red.sum(log_ratio) / max(self.red.count(log_ratio), 1.0)
         return abs(mean) > np.log(DTAU_REBUILD_RATIO)
+
+    def _ptc_relative(self, dtau_flat) -> float:
+        """`1/dtau` 相对 `J_cc` 对角的几何平均比值（只取真实行；分布式下取全局平均）。"""
+        xp = self.red.xp
+        if self._ptc_diag is None:
+            d = xp.zeros(self.cell_is_prism.size * self.n_sps, dtype=xp.float64)
+            for blocks, cells, n_real in ((self.jac.blocks_prism, self.jac.prism_cells, self.n_real_prism),
+                                          (self.jac.blocks_tet, self.jac.tet_cells, self.n_real_tet)):
+                if cells.size:
+                    diag = xp.abs(xp.diagonal(blocks, axis1=1, axis2=2)).reshape(cells.size, n_real, self.n_var)
+                    rows = xp.asarray(cells)[:, None] * self.n_sps + xp.arange(n_real)[None, :]
+                    d[rows.ravel()] = diag.max(axis=-1).ravel()
+            self._ptc_diag = d
+        real = self._ptc_diag > 0.0
+        log_rel = -xp.log(xp.asarray(dtau_flat, dtype=xp.float64).ravel()[real] * self._ptc_diag[real])
+        return float(np.exp(self.red.sum(log_rel) / max(self.red.count(log_rel), 1.0)))
+
+    def _factorization_stale(self, dtau_flat) -> bool:
+        """块 ILU 档：按 `_factored_dtau` 做的分解对当前 dtau 是否已过时（判据见 `preconditioner`）。"""
+        if self._factored is None:
+            return True
+        if not self._dtau_drifted(dtau_flat, self._factored_dtau):
+            return False
+        return not (self._ptc_relative(dtau_flat) < PTC_NEGLIGIBLE
+                    and self._ptc_relative(self._factored_dtau) < PTC_NEGLIGIBLE)
 
     def stale_budget(self) -> Optional[int]:
         """复用中的 `J_cc`（`age > 0`）在本步的 GMRES 迭代预算：超过它就说明
@@ -347,6 +383,9 @@ class BlockJacobiCache:
         self.jac = None
         self.coupling = None
         self.cross = None
+        self._factored = None
+        self._factored_dtau = None
+        self._ptc_diag = None
         if self.assembler is not None:
             self.assembler.want_coupling = self.use_ilu
             out = self.assembler(u0_flat, r0_flat)
@@ -408,12 +447,23 @@ class BlockJacobiCache:
 
     def preconditioner(self, dtau_flat: np.ndarray, n_var: int):
         """给定 `dtau` 下的预处理子（`begin_step` 之后调用，可多次）。块 ILU 档交给
-        `coarse/selection.py`（本地多层或块 ILU，分布式再叠全局粗校正）。"""
+        `coarse/selection.py`（本地多层或块 ILU，分布式再叠全局粗校正）。
+
+        块 ILU 档的分解在 `J_cc` 不变时跨步复用，直到 dtau 相对分解时的几何平均比值超过
+        `DTAU_REBUILD_RATIO`——除非伪时间项在两个时刻都已可忽略（`PTC_NEGLIGIBLE`）。复用的分解
+        仍是合法的预处理子（右预处理 GMRES 解的是精确系统），dtau 略微过时只影响迭代数，由
+        刷新判据兜住。此前每次调用都重新分解：湍流平板 P3（3072 单元）早期每步 GMRES 只 1 次，
+        分解（当时 11 s）却占步耗时 75%。判据全部经全局归约，各 rank 一致（粗校正的构造是集体操作）。
+        """
         if self.disabled_reason is not None:
             return PseudoTransientDiagonal(dtau_flat, n_var)
-        if self.coupling is not None:
-            return self._coarse.make(self.jac, self.coupling, self.cross, dtau_flat)
-        return CellBlockJacobiPreconditioner(self.jac, dtau_flat, inverted=self.single_copy)
+        if self.coupling is None:
+            return CellBlockJacobiPreconditioner(self.jac, dtau_flat, inverted=self.single_copy)
+        if self._factorization_stale(dtau_flat):
+            self._factored = None        # 先释放旧分解，不同时持有两份
+            self._factored = self._coarse.make(self.jac, self.coupling, self.cross, dtau_flat)
+            self._factored_dtau = self.red.xp.asarray(dtau_flat, dtype=self.red.xp.float64).ravel().copy()
+        return self._factored
 
     def record(self, gmres_iters: int, accepted: bool) -> None:
         """一个 Newton 步结束后调用：更新刷新判据的依据。"""

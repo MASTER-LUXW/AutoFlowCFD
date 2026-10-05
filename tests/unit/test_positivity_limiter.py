@@ -170,3 +170,14 @@ def test_interleaved_cell_order_matches_prism_first(case):
     lim(U_a.reshape(-1, 7))
     lim_p(U_b.reshape(-1, 7))
     assert np.array_equal(U_b, U_a[perm]), "交错单元顺序下结果与棱柱在前不一致"
+
+
+def test_point_interpolation_matches_einsum_on_cpu():
+    """物理性限幅的解点 -> 通量求值点插值（2026-10-05 由不并行的 np.einsum 改为并行收缩核）。"""
+    from autoflowcfd.core.time_integration.positivity.limiter import _interpolate_points
+
+    rng = np.random.default_rng(4)
+    E = rng.standard_normal((37, 10))[:, :8]          # 与生产一样是列切片（非连续）
+    X = rng.standard_normal((50, 8, 6))
+    np.testing.assert_allclose(_interpolate_points(np, E, X), np.einsum("qs,csv->cqv", E, X),
+                               rtol=1e-13, atol=1e-13)

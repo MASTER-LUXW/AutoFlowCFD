@@ -397,6 +397,8 @@ def step_newton_krylov(
             break
         n_cuts += 1
 
+    if forcing is not None:
+        forcing.record_step(linear_rel, full_step=theta >= 1.0 and limited_frac == 0.0)
     if block_precond is not None:
         # 刷新判据的基线用最后一次求解（刚装配时即新块的迭代数），不含过时那一次
         block_precond.record(iters_since_build, accepted=theta > 0.0)

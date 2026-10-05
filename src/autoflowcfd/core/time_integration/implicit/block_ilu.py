@@ -133,54 +133,24 @@ def _wavefront_levels(perm, rank, indptr, cols):
 
 
 @njit(cache=True)
-def _invert_small(a):
-    """`a` (m, m) float64 的逆（部分选主元 Gauss-Jordan）。"""
-    m = a.shape[0]
-    w = np.zeros((m, 2 * m))
-    for i in range(m):
-        for j in range(m):
-            w[i, j] = a[i, j]
-        w[i, m + i] = 1.0
-    for col in range(m):
-        piv = col
-        best = abs(w[col, col])
-        for r in range(col + 1, m):
-            if abs(w[r, col]) > best:
-                best = abs(w[r, col])
-                piv = r
-        if piv != col:
-            for j in range(2 * m):
-                t = w[col, j]
-                w[col, j] = w[piv, j]
-                w[piv, j] = t
-        inv_p = 1.0 / w[col, col]
-        for j in range(2 * m):
-            w[col, j] *= inv_p
-        for r in range(m):
-            if r != col:
-                f = w[r, col]
-                if f != 0.0:
-                    for j in range(2 * m):
-                        w[r, j] -= f * w[col, j]
-    out = np.empty((m, m))
-    for i in range(m):
-        for j in range(m):
-            out[i, j] = w[i, m + j]
-    return out
+def _block64(flat, start, rows, cols):
+    """扁平 float32 存储里从 `start` 起的 `rows x cols` 块（行主序）-> 连续 float64 矩阵。"""
+    return flat[start:start + rows * cols].astype(np.float64).reshape((rows, cols))
 
 
 @njit(cache=True, parallel=True)
 def _factor_level(cells, rank, diag_data, diag_off, inv_data, indptr, cols, offset, data, row_dof, inv_dtau,
                   n_sps, n_var):
-    """一个波前层的 `D~_c^{-1}`（写入 `inv_data`，float32）。"""
+    """一个波前层的 `D~_c^{-1}`（写入 `inv_data`，float32；计算在 float64 里做）。
+
+    块乘与求逆走 BLAS/LAPACK（`np.dot`、`np.linalg.inv`）：P3 原生棱柱平均流块 200x200 时，此前的
+    手写三重循环与 Gauss-Jordan 一次分解 11.1 s（湍流平板 3072 单元，占 P3 Newton 步耗时 75%）。
+    """
     for ci in prange(cells.shape[0]):
         c = cells[ci]
         m = row_dof[c]
-        a = np.empty((m, m))
         base = diag_off[c]
-        for i in range(m):
-            for j in range(m):
-                a[i, j] = diag_data[base + i * m + j]
+        a = _block64(diag_data, base, m, m)
         for i in range(m):
             a[i, i] += inv_dtau[c * n_sps + i // n_var]
         for k in range(indptr[c], indptr[c + 1]):
@@ -196,25 +166,12 @@ def _factor_level(cells, rank, diag_data, diag_off, inv_data, indptr, cols, offs
                     break
             if kyc < 0:
                 continue
-            ocy, oyc, oinv = offset[k], offset[kyc], diag_off[y]
-            # T = J_cy D~_y^{-1}   (m x my)
-            T = np.zeros((m, my))
-            for i in range(m):
-                for p in range(my):
-                    acc = 0.0
-                    for q in range(my):
-                        acc += data[ocy + i * my + q] * inv_data[oinv + q * my + p]
-                    T[i, p] = acc
-            for i in range(m):
-                for j in range(m):
-                    acc = 0.0
-                    for p in range(my):
-                        acc += T[i, p] * data[oyc + p * m + j]
-                    a[i, j] -= acc
-        inv = _invert_small(a)
-        for i in range(m):
-            for j in range(m):
-                inv_data[base + i * m + j] = inv[i, j]
+            # D~_c -= J_cy D~_y^{-1} J_yc
+            a -= np.dot(np.dot(_block64(data, offset[k], m, my), _block64(inv_data, diag_off[y], my, my)),
+                        _block64(data, offset[kyc], my, m))
+        inv = np.linalg.inv(a).ravel()
+        for i in range(m * m):
+            inv_data[base + i] = inv[i]
 
 
 @njit(cache=True, parallel=True)

@@ -17,7 +17,6 @@ import numpy as np
 import pytest
 
 from autoflowcfd.core.time_integration.implicit import block_budget as bb
-from autoflowcfd.core.time_integration.implicit import block_jacobi as bj
 from autoflowcfd.core.time_integration.implicit.block_jacobi import (
     BlockJacobiCache,
     CellBlockJacobiPreconditioner,
@@ -161,10 +160,10 @@ def test_refresh_policy():
     c.record(15, accepted=False)               # 步未被接受
     _begin(c, rng)
     assert c.n_builds == 3
-    for _ in range(bj.MAX_AGE):                # 超龄
+    for _ in range(100):                       # 迭代数不劣化时不按步数重装配（硬上限已删除）
         c.record(15, accepted=True)
-    _begin(c, rng)
-    assert c.n_builds == 4
+        _begin(c, rng)
+    assert c.n_builds == 3
 
 
 def test_over_memory_budget_falls_back_to_diagonal(monkeypatch):

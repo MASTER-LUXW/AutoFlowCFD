@@ -114,8 +114,8 @@ class PositivityLimiter:
                 continue
             Ec = E[:, :nr]
             u0c, dc = U0[idx, :nr], D[idx, :nr]
-            P0 = xp.concatenate([u0c, xp.einsum("qs,csv->cqv", Ec, u0c)], axis=1)
-            PD = xp.concatenate([dc, xp.einsum("qs,csv->cqv", Ec, dc)], axis=1)
+            P0 = xp.concatenate([u0c, _interpolate_points(xp, Ec, u0c)], axis=1)
+            PD = xp.concatenate([dc, _interpolate_points(xp, Ec, dc)], axis=1)
             a = density_pressure_row_limits(P0.reshape(-1, n_var), PD.reshape(-1, n_var), red)
             alpha_cell[idx] = a.reshape(idx.size, -1).min(axis=1)
         return xp.repeat(alpha_cell, self.n_sps)
@@ -123,6 +123,20 @@ class PositivityLimiter:
     def summary(self) -> str:
         return (f"positivity limiter: {self.n_calls} stage 调用，累计限制 "
                 f"{self.n_limited_total} 个单元次，最小 θ={self.min_theta:.4g}")
+
+
+def _interpolate_points(xp, E, X):
+    """共享插值 `E (q, s)` 作用于逐单元场 `X (c, s, v)` -> `(c, q, v)`。
+
+    CPU 走 numba 并行核（`fr_operators/volume_contract.py::contract_shared_operator_1axis`）：不带
+    `optimize` 的 `np.einsum` 走通用逐元素路径、不并行，湍流平板 P3（3072 单元）上隐式步的物理性限幅
+    因此每步 0.63 s，比一次完整残差求值还贵。GPU 用 cupy 的 einsum。
+    """
+    if xp is np:
+        from autoflowcfd.core.fr_operators.volume_contract import contract_shared_operator_1axis
+
+        return contract_shared_operator_1axis(E, X)
+    return xp.einsum("qs,csv->cqv", E, X)
 
 
 def build_positivity_limiter_from_arrays(det_jacs, cell_is_prism, ops, order, xp=np):

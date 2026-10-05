@@ -10,23 +10,30 @@ inexact Newton 的判据是：只要求
 
     || R + (I/dtau + J) dU ||  <=  eta * || R ||
 
-其中 `eta` 是 forcing term。取定值（例如 0.1）可用但不最优；
-Eisenstat & Walker (1996) 的 "choice 2" 用**上一步实际取得的残差下降**
-来自适应决定下一步该解多准：
+其中 `eta` 是 forcing term。取定值（例如 0.1）可用但不最优；Eisenstat & Walker (1996) 的
+"choice 1" 按**线性模型与真实残差的吻合程度**自适应决定下一步该解多准：
 
-    eta_k = gamma * ( ||R_k|| / ||R_{k-1}|| )^alpha
+    eta_k = | ||R_k|| - ||R_{k-1} + J_{k-1} s_{k-1}|| | / ||R_{k-1}||
 
-含义是"上一步残差掉得多（Newton 方向好），就把下一步解得更准；掉得少
-（还在非线性主导区），就别浪费迭代"。标准参数 `gamma=0.9, alpha=2`。
+`||R_{k-1} + J s||` 取上一步 GMRES 实际达到的线性残差（与 PETSc SNES 的 EW 实现同一做法，不额外求值）。
+含义：线性模型预测得准（真实残差 ~ 线性残差），说明 Newton 模型可信、值得解得更准；预测得不准
+（真实下降远小于线性求解给出的下降），再解准也是白算。
 
-两个必须有的护栏（原文即建议）：
+**为什么不用 choice 2**（2026-10-05 改，此前是 `eta_k = 0.9 (||R_k||/||R_{k-1}||)^2`）：choice 2 只看
+"上一步残差掉了多少"，看不到下降其实受线性模型以外的因素限制。湍流平板 SA P3（3072 单元）收敛末段
+的实测：eta 按 choice 2 收紧到 0.088 -> 0.031 -> 0.0079 -> 0.0026 -> 0.001，GMRES 76 -> 253 次/步，
+而非线性残差每步只降 3.2 / 5.4 / 10.7 / 18.6 / 29 倍（远小于 1/eta）——5 步共 804 次 GMRES、约 660 s，
+占 P3 阶段到收敛耗时的一半以上。A/B 数据见 `ProjectFiles/V2.0/38_*.md` 第 25.13 节。
+
+护栏（原文即建议）：
 
 * **安全下限**：`eta` 不能掉到远小于最终要达到的非线性容差，否则最后
   几步在做无意义的高精度线性求解。取
   `eta = max(eta, 0.5 * tol_nonlinear / ||R||)`。
-* **过度收缩保护**：`eta_k` 相比 `eta_{k-1}` 掉得太快时（`eta_{k-1}^alpha
-  > 0.1`）回退到 `max(eta_k, gamma * eta_{k-1}^alpha)`，避免一次偶然的
-  大幅下降把后面所有步都锁在过严的容差上。
+* **过度收缩保护**：`eta_{k-1}^phi > 0.1`（`phi = (1+sqrt5)/2`）时取 `max(eta_k, eta_{k-1}^phi)`，
+  避免一次偶然的大幅下降把后面的步锁在过严的容差上。
+* **线性模型不对应实际步时**（步被回溯 `theta < 1`、被物理性限幅逐单元松弛，或线性残差非有限）：
+  下一步取上界 `_ETA_MAX`（宽松方向）。
 
 ## 与 PTC 的关系
 
@@ -35,9 +42,8 @@ term 基本不起作用；它真正省时间是在 `dtau` 放大、系统接近�
 后期 —— 那时一次线性求解可能要几十次残差求值。
 """
 
-#: Eisenstat-Walker "choice 2" 的标准参数。
-_EW_GAMMA = 0.9
-_EW_ALPHA = 2.0
+#: Eisenstat-Walker choice 1 过度收缩保护的指数（黄金分割比，原文 (2.2)）。
+_EW_PHI = 0.5 * (1.0 + 5.0 ** 0.5)
 
 #: `eta` 的上界。
 #:
@@ -70,13 +76,14 @@ _ETA_MIN = 1.0e-4
 
 
 class EisenstatWalkerForcing:
-    """按 Eisenstat-Walker choice 2 给出每个 Newton 步的线性求解容差。"""
+    """按 Eisenstat-Walker choice 1 给出每个 Newton 步的线性求解容差（见模块文档）。"""
 
-    __slots__ = ("_eta", "_res_prev")
+    __slots__ = ("_eta", "_res_prev", "_lin_prev")
 
     def __init__(self):
         self._eta = _ETA_MAX
         self._res_prev = None
+        self._lin_prev = None    # 上一步线性模型预测的残差 ||R + J s||（绝对值）；不可用时 None
 
     def next_eta(self, res_norm: float, tol_nonlinear: float) -> float:
         """给出当前 Newton 步该用的相对线性容差 `eta`。
@@ -89,19 +96,32 @@ class EisenstatWalkerForcing:
             `eta`，落在 `[_ETA_MIN, _ETA_MAX]` 内。
         """
         res_norm = float(res_norm)
-        if self._res_prev is None or self._res_prev <= 0.0 or res_norm <= 0.0:
+        if self._lin_prev is None or self._res_prev is None or self._res_prev <= 0.0 or res_norm <= 0.0:
             eta = _ETA_MAX
         else:
-            ratio = res_norm / self._res_prev
-            eta = _EW_GAMMA * ratio ** _EW_ALPHA
-            # 过度收缩保护（原文 (2.6)）
-            eta_prev_pow = _EW_GAMMA * self._eta ** _EW_ALPHA
-            if eta_prev_pow > 0.1:
-                eta = max(eta, eta_prev_pow)
+            eta = abs(res_norm - self._lin_prev) / self._res_prev
+            guard = self._eta ** _EW_PHI           # 过度收缩保护（原文 (2.2)）
+            if guard > 0.1:
+                eta = max(eta, guard)
         # 安全下限：别比"最终非线性容差的一半"还严
         if res_norm > 0.0:
             eta = max(eta, 0.5 * tol_nonlinear / res_norm)
         eta = float(min(_ETA_MAX, max(_ETA_MIN, eta)))
         self._eta = eta
         self._res_prev = res_norm
+        self._lin_prev = None                      # 本步结束由 record_step 给出
         return eta
+
+    def record_step(self, linear_rel_residual: float, full_step: bool) -> None:
+        """一个 Newton 步结束后调用：记下线性模型对本步预测的残差 `||R + J s||`。
+
+        Args:
+            linear_rel_residual: GMRES 实际达到的相对线性残差（相对本步 `||R||`）。
+            full_step: 实际走的是否就是 GMRES 给出的完整方向（未回溯、未被物理性限幅松弛）。
+                否则线性模型不对应实际步，下一步取上界。
+        """
+        lin = float(linear_rel_residual)
+        if full_step and self._res_prev is not None and lin == lin and lin < float("inf"):
+            self._lin_prev = lin * self._res_prev
+        else:
+            self._lin_prev = None

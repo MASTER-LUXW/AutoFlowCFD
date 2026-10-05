@@ -72,6 +72,9 @@ class TestLinearProblem:
             def next_eta(self, res_norm, tol_nonlinear):
                 return eta_target
 
+            def record_step(self, linear_rel_residual, full_step):
+                pass
+
         r0 = _rms(residual(u))
         u1, info = step_newton_krylov(
             residual, u, dtau, _SCALES, forcing=_FixedEta(),
