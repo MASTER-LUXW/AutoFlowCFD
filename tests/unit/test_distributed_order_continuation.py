@@ -6,7 +6,7 @@
 `core/mpi/distributed_order_continuation.py` 模块文档）。本文件验证：
 
 1. `DistributedFRSolver.solve()` 在 `order>=2` 时真正自动分派到
-   `run_distributed_order_continuation`（不是仍然走原来的单一阶数
+   `run_order_continuation`（四个后端共用的循环；不是仍然走原来的单一阶数
    直接迭代循环）。
 2. 阶数切换（`_interpolate_to_new_order`）正确重建 partition/
    dist_flat_face/state/halo_exchange，新阶数下 `step()` 仍能正常
@@ -16,7 +16,6 @@
    （`orders` 序列退化成单元素）。
 """
 
-import types
 
 import numpy as np
 from tests.unit._wall_source import synthetic_wall_source
@@ -105,7 +104,7 @@ class TestDistributedOrderContinuationDispatch:
         """目标 P1 也走逐阶爬坡（2026-09-25，同一版代码的 A/B：直接 P1 起步第 20
         步驻点线 Cp_t 3.5、板边 152 m/s，先 P0 再 P1 为 1.1、50 m/s，见
         core/utils/order_continuation/policy.py）；显式关闭时直接迭代。"""
-        import autoflowcfd.core.mpi.distributed_order_continuation as doc_mod
+        import autoflowcfd.core.utils.order_continuation as oc_mod
         from tests.unit._patch_pkg import patch_pkg_attr
         from autoflowcfd.core.fr_solver.state import SolverResult
         from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
@@ -124,7 +123,7 @@ class TestDistributedOrderContinuationDispatch:
         def _fake_run(s, *args, **kwargs):
             calls.append(s)
             return SolverResult(converged=False, iterations=0, final_residual=1.0)
-        patch_pkg_attr(monkeypatch, doc_mod, "run_distributed_order_continuation", _fake_run)
+        patch_pkg_attr(monkeypatch, oc_mod, "run_order_continuation", _fake_run)
 
         solver.solve(max_iter=3, dt=1e-6)
         assert (len(calls) == 1) == enabled
@@ -261,57 +260,30 @@ class TestDistributedOrderContinuationWithTurbulence:
         assert wall.any() and np.all(nt[wall] == 0.0)
 
 
-class TestPhaseMaxIterDefaultGivesFinalStageRemainingBudgetDistributed:
-    """Same real bug/fix as the single-machine `run_order_continuation`
-    (see `test_order_continuation_resume.py::
-    TestPhaseMaxIterDefaultGivesFinalStageRemainingBudget` for the full
-    write-up) — `run_distributed_order_continuation` had the exact same
-    `if phase_max_iter is not None: ... else: ...` bifurcation, gating
-    "final stage eats the remaining budget" behind an explicit
-    `--phase-max-iter`. Verified here with a minimal fake solver (the
-    phase-budget arithmetic is pure orchestration logic, independent of
-    any real distributed/GPU state) rather than a real
-    `DistributedFRSolver`, mirroring the single-machine test's
-    methodology."""
+class TestUnifiedLoopPerPhaseCflReset:
+    def test_distributed_controller_restarts_at_every_phase(self, monkeypatch):
+        """换阶时残差的跳变是延拓误差、不是解在恶化，每阶都从控制器初值起步（2026-10-05 Order Continuation
+        并成一个循环之前，分布式那份从不复位，上一阶收缩出的 CFL 被带进下一阶）。"""
+        from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
 
-    def _make_fake_solver(self, residuals):
-        calls = {"i": 0}
-
-        def _scripted_step(dt):
-            i = calls["i"]
-            calls["i"] += 1
-            return residuals[min(i, len(residuals) - 1)]
-
-        def _fake_interpolate(new_order):
-            solver.current_order = new_order
-
-        solver = types.SimpleNamespace(
-            order=1, current_order=0, step=_scripted_step,
-            _resumed_from_checkpoint=False,
+        mesh = _build_synthetic_mixed_mesh(1)
+        ops = generate_fr_operators(1)
+        solver = DistributedFRSolver(
+            mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
+            n_ranks=1, order=1, turb_model_name="none",
+            time_scheme=TimeIntegrationScheme.SSP_RK3,
+            mu_molecular=1.8e-5, rho_inf=1.225, vel_inf=33.33, p_inf=101325.0,
         )
-        solver._interpolate_to_new_order = _fake_interpolate
-        # 延拓后的正性限制钩子：替身没有状态场，无事可做
-        solver._limit_prolongated_state = lambda: None
-        return solver
+        ctrl = solver._cfl_controller
+        assert ctrl is not None
+        seen = []
+        original_reset = ctrl.reset
 
-    def test_final_stage_gets_leftover_budget_without_explicit_phase_max_iter(self):
-        from autoflowcfd.core.mpi.distributed_order_continuation import (
-            run_distributed_order_continuation,
-        )
-        # Same construction as the single-machine test: P0 promotes early
-        # (at i=20, the default residual_drop_threshold=100 met exactly),
-        # using only 21 of its 50-iteration default share (max_iter=100,
-        # len(orders)=2 -> 100//2=50); P1 (final) never triggers any exit
-        # condition on its own (residual held flat at 10.0 once the
-        # scripted sequence is exhausted) and must run for whatever budget
-        # it's actually given.
-        residuals = [1000.0] * 20 + [10.0]
-        solver = self._make_fake_solver(residuals)
+        def _spy_reset():
+            seen.append(solver.current_order)
+            original_reset()
+        monkeypatch.setattr(ctrl, "reset", _spy_reset)
 
-        result = run_distributed_order_continuation(solver, max_iter=100, dt=1e-3, tol=1e-6)
-
-        # Old (buggy) behaviour: P1 capped at the same 50-iteration share
-        # as P0 -> total_iter = 21 + 50 = 71. Fixed behaviour: P1 gets all
-        # of max_iter's remainder -> total_iter = 21 + (100 - 21) = 100.
-        assert result.iterations == 100
-        assert result.converged is False
+        solver.solve(max_iter=4, dt=1e-6, phase_max_iter=2)
+        assert seen == [0, 1]
+        assert np.all(np.isfinite(solver.state.U[:solver.partition.n_local_cells]))

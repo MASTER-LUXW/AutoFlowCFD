@@ -72,11 +72,18 @@ def _fake_solver(current_order, target_order, resumed):
         sgs_model=None,
         _resumed_from_checkpoint=resumed,
         step=_decreasing_step,
+        # 统一循环（2026-10-05）的日志/守卫钩子：替身没有这些诊断
+        _divergence_hint=lambda: "",
+        _loop_monitor_suffix=lambda: "",
+        _scaled_residual_field=lambda: None,
+        _pseudo_time_budget=lambda n_steps: None,
     )
 
     def _fake_interpolate(new_order):
+        # 统一换阶接口：这一阶的状态与几何全部就绪（真实求解器在这里切网格阶数）
         solver.current_order = new_order
         solver.state.U = np.full((2, _n_sps(new_order), 7), 42.0)
+        mesh.set_order(new_order)
 
     solver._interpolate_to_new_order = _fake_interpolate
     # 延拓后的正性限制：替身状态是常数 42，本来就可容许，钩子无事可做
@@ -103,9 +110,9 @@ class TestResumeSkipsP0Reinit:
         # The P0-reinit branch must never have run: FRState() is only
         # constructed there.
         mock_frstate.assert_not_called()
-        # The ramp must never have visited P0 at all.
+        # The ramp must never have visited P0 at all; resumed P1 is already in place (no re-entry).
         assert 0 not in solver.mesh.set_order_calls
-        assert solver.mesh.set_order_calls == [1, 2]
+        assert solver.mesh.set_order_calls == [2]
         assert result.converged is True
 
     def test_non_resumed_fresh_solver_still_restarts_from_p0(self):
@@ -118,10 +125,8 @@ class TestResumeSkipsP0Reinit:
         ):
             run_order_continuation(solver, max_iter=30, dt=1e-3, tol=1e-6)
 
-        # P0 appears twice: once from the reinit-to-P0 branch itself, once
-        # from the ramp loop's own first (P0) phase - pre-existing,
-        # harmless redundancy, not something this fix changes.
-        assert solver.mesh.set_order_calls == [0, 0, 1, 2]
+        # 重置到 P0 一次（统一循环不再在 P0 阶段开头重复切一次）
+        assert solver.mesh.set_order_calls == [0, 1, 2]
 
 
 class TestResumeCeilingFractionResetHeuristic:
@@ -311,7 +316,7 @@ class TestResumeSeedsPhaseInitialResidualFromCheckpoint:
         p0_iters = {"n": 0}
 
         def _count_p0_iters(solver_ref, local_iter):
-            if solver_ref.mesh.set_order_calls == [0]:
+            if solver_ref.current_order == 0:
                 p0_iters["n"] += 1
 
         with patch(
@@ -321,7 +326,7 @@ class TestResumeSeedsPhaseInitialResidualFromCheckpoint:
                                     checkpoint_callback=_count_p0_iters)
 
         assert p0_iters["n"] == 100  # full phase_max_iter budget, criterion never fired
-        assert "旧版本 checkpoint" in capsys.readouterr().out
+        assert "没有阶段起始残差记录" in capsys.readouterr().out
 
     def test_solver_phase_initial_residual_attribute_tracks_current_phase(self):
         """`solver._phase_initial_residual` must be kept in sync every step
@@ -417,3 +422,25 @@ class TestPhaseMaxIterDefaultGivesFinalStageRemainingBudget:
         # caller asked for.
         assert result.iterations == 100
         assert result.converged is False
+
+
+class TestPerPhaseCflReset:
+    def test_every_phase_starts_from_the_controller_initial_value(self):
+        """换阶时残差的跳变是延拓误差、不是解在恶化：每阶第一步都从控制器初值起步。复位在四个后端共用的循环里
+        （2026-10-05 以前只有 CPU 单机循环与单 GPU 的换阶方法各自复位，两个分布式后端不复位）。"""
+        from autoflowcfd.core.time_integration.adaptive_cfl import AdaptiveCFLController
+
+        solver = _fake_solver(current_order=0, target_order=2, resumed=False)
+        ctrl = AdaptiveCFLController(cfl_start=0.02, cfl_max=0.5, cfl_min=0.01, ramp_steps=0)
+        solver._cfl_controller = ctrl
+        inner = solver.step
+        first_step_cfl = {}
+
+        def _step(dt):
+            first_step_cfl.setdefault(solver.current_order, ctrl.cfl_number)
+            ctrl.cfl_number = 0.3          # 模拟本阶内控制器已经爬起来
+            return inner(dt)
+        solver.step = _step
+        with patch("autoflowcfd.fr.operators.generate_fr_operators", side_effect=_fake_generate_ops):
+            run_order_continuation(solver, max_iter=30, dt=1e-3, tol=1e-6)
+        assert first_step_cfl == {0: 0.02, 1: 0.02, 2: 0.02}

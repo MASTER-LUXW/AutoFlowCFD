@@ -107,8 +107,7 @@ class TestAllSolveLoopsAreGuarded:
     #: 踩到 distributed_order_continuation 这一项）。
     LOOPS = [
         'autoflowcfd.core.fr_solver.solver',
-        'autoflowcfd.core.utils.order_continuation',
-        'autoflowcfd.core.mpi.distributed_order_continuation',
+        'autoflowcfd.core.utils.order_continuation',     # 四个后端共用的唯一 Order Continuation 循环
     ]
 
     @pytest.mark.parametrize('cls_path', [
@@ -217,6 +216,7 @@ class TestSolveLoopActuallyAborts:
             _loop_monitor_suffix=lambda: "",
             _scaled_residual_field=lambda: None,
             _divergence_hint=lambda: "",
+            _pseudo_time_budget=lambda n_steps: None,
         )
         return stub, calls
 

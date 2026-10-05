@@ -55,73 +55,17 @@ def init(template: str, output: str) -> None:
         # 瞬态模板
         $ autoflowcfd config init --template transient -o transient_config.yaml
     """
-    from autoflowcfd.config import SteadyConfig, TransientConfig
-    
+    # 模板由配置类的字段与默认值逐项生成（`config/loader.py::ConfigLoader.save_template`，唯一实现）。
+    # 2026-10-05 以前这里另有两份手写模板：默认值过时（CFL 0.1/5.0、收敛容差 1e-6），瞬态模板的
+    # `turbulence: des` 不是合法取值——生成的文件本身就加载不了
+    from autoflowcfd.config.loader import ConfigLoader
+
     logger.info(f"正在生成 {template} 配置模板")
-    
+
     try:
         output_path = Path(output)
-        
-        if template == "steady":
-            config_obj = SteadyConfig()
-            template_content = f"""# AutoFlowCFD 稳态配置
-# 由 'autoflowcfd config init' 生成
-
-mode: steady
-
-# 求解器设置
-backend: auto  # cpu, gpu, 或 auto
-order: 3       # FR 阶数 (1, 2, 或 3)
-turbulence: sst_kw  # sst_kw, sa
-
-# 收敛设置
-max_iter: 5000
-cfl_init: 0.1
-cfl_max: 5.0
-convergence_tol: 1.0e-6
-
-# 输出设置
-output_dir: ./results
-checkpoint_interval: 100
-verbose: false
-"""
-        else:  # transient
-            config_obj = TransientConfig()
-            # 取值表从唯一那张词汇表读，不在模板里硬编码——此前这里写的是
-            # `backward_euler, rk2, rk3, ab3`，其中 backward_euler/ab3 在
-            # 核心层**从未实现**（面向用户的假选项），又漏了真实存在的
-            # imex/dual-time。
-            from autoflowcfd.core.time_integration.base import scheme_names
-            _TIME_SCHEME_CHOICES = ", ".join(scheme_names())
-            template_content = f"""# AutoFlowCFD 瞬态配置
-# 由 'autoflowcfd config init' 生成
-
-mode: transient
-
-# 求解器设置
-backend: auto  # cpu, gpu, 或 auto
-order: 3       # FR 阶数 (1, 2, 或 3)
-turbulence: des  # des, ddes, les
-
-# 时间积分
-time_scheme: dual-time  # {_TIME_SCHEME_CHOICES}
-dt: 1.0e-4     # 时间步长 (s)
-total_time: 0.3  # 总物理时间 (s)
-
-# 采样设置
-sample_interval: 10
-
-# 输出设置
-output_dir: ./transient_results
-checkpoint_interval: 100
-verbose: false
-"""
-        
-        # 写入文件
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(template_content)
-        
+        ConfigLoader().save_template(output_path, template)
         logger.info(f"配置模板已保存至 {output_path}")
         click.echo(f"✓ 配置模板已创建: {output}")
         click.echo(f"  类型: {template}")

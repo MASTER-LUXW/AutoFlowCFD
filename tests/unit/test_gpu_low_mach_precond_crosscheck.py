@@ -231,10 +231,8 @@ class TestGpuSolverWiring:
         时间方案门控）必须与 CPU 版一致；
       * GPU 此前**完全没有**自适应 CFL 控制器（恒用构造时的固定 cfl），
         `--cfl-start/--cfl-max` 只对 CPU 生效——本轮补齐，这里钉住；
-      * 阶数切换必须复位控制器：CPU MPI 分布式靠"重建 _local_solver"
-        免费拿到复位，单机 GPU 是**原地**改 mesh/ops，控制器会跨阶数
-        存活下来，必须显式 reset（否则阶数跳变的残差突变会被当成恶化，
-        把 CFL 一路打到下限）。
+      * 阶数切换复位控制器已移到四个后端共用的 Order Continuation 循环
+        （2026-10-05，见 test_order_continuation_resume.py::TestPerPhaseCflReset）。
     """
 
     @staticmethod
@@ -311,38 +309,6 @@ class TestGpuSolverWiring:
         ref = AdaptiveCFLController()
         assert (s._cfl_controller.cfl_start, s._cfl_controller.cfl_max) == (
             ref.cfl_start, ref.cfl_max)
-
-    def test_order_change_resets_controller(self, monkeypatch):
-        """阶数切换必须复位控制器——**行为**测试，不是源码字符串匹配。
-
-        `_interpolate_to_new_order` 在函数体内部 import 真正的插值实现，
-        所以可以在调用前把那个模块属性替身掉，于阶数切换路径上只保留
-        控制器复位这一件事来验证，不需要 CuPy 或真实网格。
-        """
-        from autoflowcfd.core.gpu.solver import gpu_solver_order_continuation as oc
-        monkeypatch.setattr(oc, "gpu_solver_interpolate_to_new_order",
-                            lambda solver, target_p: None)
-        from autoflowcfd.core.gpu.solver.gpu_solver import GPUFRSolver
-        from autoflowcfd.core.time_integration.adaptive_cfl import AdaptiveCFLController
-
-        ctrl = AdaptiveCFLController(cfl_start=0.1, cfl_max=0.5, ramp_steps=0)
-        # 先把 CFL 推离起始值（模拟"前一阶数已经爬起来了"）
-        r = 1.0
-        for _ in range(400):
-            r *= 0.99916
-            ctrl.update(r)
-        assert ctrl.cfl_number > 0.1, "本测试需要控制器先离开起始值"
-
-        class _S:
-            pass
-        s = _S()
-        s._cfl_controller = ctrl
-        GPUFRSolver._interpolate_to_new_order(s, 2)
-
-        assert ctrl.cfl_number == pytest.approx(0.1), (
-            "GPU 阶数切换没有复位自适应 CFL 控制器——阶数跳变的残差突变会被"
-            "当成解在恶化，把 CFL 一路打到下限")
-        assert ctrl._prev_residual == 0.0, "残差基线没有随复位清掉"
 
     def test_turbulence_uses_physical_dt_in_source(self):
         """GPU 湍流场更新必须取物理 dt（不能跟着预处理放大 7 倍）。

@@ -195,6 +195,28 @@ class SolverConfig:
         return self.backend == BackendType.CPU
 
 
+def cfl_triplet_errors(cfl_init: Optional[float], cfl_max: Optional[float],
+                       cfl_min: Optional[float]) -> list:
+    """自适应 CFL 三元组的校验（`SteadyConfig` / `TransientConfig` 构造与 `ConfigSchema` 共用）。
+
+    只校验给出的值（None = 由 CFL 律按时间格式取默认，见 `build_cfl_policy`）：都必须为正；给出的两两之间满足
+    min <= init <= max。cfl_min > cfl_max 会让控制器的"收缩"分支把 CFL 调高并突破上限（adaptive_cfl 第 11 条），
+    cfl_min > cfl_init 会让初值被钳上去，实际跑的不是请求的 CFL。
+    """
+    named = {"cfl_init": cfl_init, "cfl_max": cfl_max, "cfl_min": cfl_min}
+    errors = [f"{k} 必须为正数（CFL），得到 {v}" for k, v in named.items() if v is not None and v <= 0]
+    for lo, hi in (("cfl_min", "cfl_init"), ("cfl_init", "cfl_max"), ("cfl_min", "cfl_max")):
+        if named[lo] is not None and named[hi] is not None and named[lo] > named[hi]:
+            errors.append(f"{lo} ({named[lo]}) 不能超过 {hi} ({named[hi]})（CFL）")
+    return errors
+
+
+def _raise_on_cfl_triplet(config) -> None:
+    errors = cfl_triplet_errors(config.cfl_init, config.cfl_max, config.cfl_min)
+    if errors:
+        raise ValueError("; ".join(errors))
+
+
 @dataclass
 class SteadyConfig(SolverConfig):
     """稳态仿真配置。
@@ -203,26 +225,12 @@ class SteadyConfig(SolverConfig):
     
     属性:
         max_iter: 最大迭代步数
-        cfl_init: 初始 CFL 数（推荐：复杂网格为 0.05-0.1）。**刻意低于 CLI
-            `--cfl-start` 的默认 0.1**：79 万单元 cube_demo 上真 P1
-            （AFCFD_FILTER_MODE=off、零阶数损失）实测稳定的 CFL 在 0.03
-            量级，0.05 更靠近可用区间。不要为了"两边一致"把它调高。
-        cfl_max: 最大 CFL 数。**2026-09-15 从 10.0 改为 0.5**：10.0 是
-            CLI `--cfl-max` 默认值（0.5）的 20 倍，也是 SSP-RK3 线性稳定
-            极限（~1.0）的 10 倍——自适应控制器会真的往那个上限爬（软上限
-            只在失败之后才收紧，见 core/time_integration/adaptive_cfl.py
-            模块文档第 8 条），于是 YAML 驱动的算例会反复穿越稳定边界。
-            同一个物理量在两个配置面上差 20 倍本身就是缺陷。
-        cfl_min: 自适应 CFL 下限（2026-09-15 新增，与 CLI `--cfl-min` 对应）。
-            此前配置层完全没有这个字段，而控制器默认 0.05 **高于**上面提到
-            的实测稳定值 0.03——也就是说通过 YAML 根本到不了那个已验证可用
-            的工作点（`cfl_init` 会被下限钳上去，见 adaptive_cfl.py 第 11 条）。
-
-            默认取 **0.01** 而不是跟随控制器的 0.05，有两个理由：(a) 0.05
-            会恰好等于 `cfl_init` 的默认 0.05，那样控制器**一步也收缩不了**，
-            YAML 驱动的算例就完全失去了向下的保护；(b) 0.05 挡住 0.03 这个
-            唯一在真实网格上被 250 步验证过稳定的值。0.01 远低于任何实测值，
-            只留作"再低就说明问题本身不对"的兜底。
+        cfl_init / cfl_max / cfl_min: 自适应 CFL 的初值 / 上限 / 下限。默认 None = 按时间格式取该格式 CFL 律
+            签名里的默认值（显式 `AdaptiveCFLController` 与隐式 `SERCFLController` 相差两个数量级，见
+            `core/time_integration/adaptive_cfl/policy.py::build_cfl_policy`），与 CLI `--cfl-start/--cfl-max/
+            --cfl-min`、`FRSolver.__init__` 同一约定。2026-10-05 以前这里写死显式那一组（0.03/0.06/0.01）：CLI
+            与求解器 2026-09-25 已改为 None，配置层这份拷贝被漏掉，经 API 选隐式格式时隐式 CFL 律会被压在
+            0.06 的上限下。三者给出时的序关系由 `cfl_triplet_errors` 校验。
         convergence_tol: 收敛容差（残差）
         monitor_coefficients: 在迭代期间监控气动系数
         growth_rate: 边界层几何增长率（表面 -> 体网格）
@@ -260,9 +268,9 @@ class SteadyConfig(SolverConfig):
         ... )
     """
     max_iter: int = 50
-    cfl_init: float = 0.03  # 2026-09-17：原为 0.05，与 CLI --cfl-start 对齐
-    cfl_max: float = 0.06   # 2026-09-17：原为 0.5，见本类文档 cfl_max 一节
-    cfl_min: float = 0.01   # 2026-09-15 新增，见本类文档 cfl_min 一节
+    cfl_init: Optional[float] = None
+    cfl_max: Optional[float] = None
+    cfl_min: Optional[float] = None
     convergence_tol: float = 1e-3
     monitor_coefficients: bool = True
     growth_rate: float = 1.15
@@ -283,26 +291,7 @@ class SteadyConfig(SolverConfig):
         if self.max_iter < 1:
             raise ValueError(f"最大迭代次数必须为正数，得到 {self.max_iter}")
 
-        # 验证 CFL 数
-        if self.cfl_init <= 0:
-            raise ValueError(f"初始 CFL 必须为正数，得到 {self.cfl_init}")
-        if self.cfl_max <= 0:
-            raise ValueError(f"最大 CFL 必须为正数，得到 {self.cfl_max}")
-        if self.cfl_init > self.cfl_max:
-            raise ValueError(f"初始 CFL ({self.cfl_init}) 不能超过最大 CFL ({self.cfl_max})")
-        # 三者的序关系必须自洽（2026-09-15）：控制器里 cfl_min > cfl_max
-        # 会让"收缩"分支把 CFL 调高并突破 cfl_max（adaptive_cfl.py 第 11 条
-        # 记录的真实缺陷），配置层应当在更早的地方就拦下这种矛盾配置。
-        if self.cfl_min <= 0:
-            raise ValueError(f"CFL 下限必须为正数，得到 {self.cfl_min}")
-        if self.cfl_min > self.cfl_max:
-            raise ValueError(
-                f"CFL 下限 ({self.cfl_min}) 不能超过最大 CFL ({self.cfl_max})")
-        if self.cfl_min > self.cfl_init:
-            raise ValueError(
-                f"CFL 下限 ({self.cfl_min}) 不能超过初始 CFL "
-                f"({self.cfl_init})——否则控制器会把初始值钳上去，"
-                f"实际跑的不是你要的那个 CFL")
+        _raise_on_cfl_triplet(self)
 
         # 验证收敛容差
         if self.convergence_tol <= 0:
@@ -365,17 +354,11 @@ class TransientConfig(SolverConfig):
     dt: float = 1e-4
     total_time: float = 0.1
     time_scheme: TimeIntegrationScheme = TimeIntegrationScheme.SSP_RK3
-    # 自适应 CFL 三元组（2026-09-17 新增）。为什么瞬态也需要：
-    # `--time-method rk3/imex` 下 `step()` 忽略 dt、按**逐单元局部 CFL
-    # 步长**推进（见 core/fr_solver/step.py 的 dt 语义一节），那条路径上
-    # 自适应 CFL 控制器是**激活**的；而此前 TransientConfig 没有这三个
-    # 字段、`solve transient` 也没有对应 CLI 选项，于是瞬态运行只能吃
-    # FRSolver 的构造默认值，配置不出本项目实测稳定的 ~0.03。
-    # （`dual-time` 档不构造这个控制器，内层伪时间有自己的逻辑，这三个
-    # 字段对它无效——语义与 `solve steady` 完全一致。）
-    cfl_init: float = 0.03   # 2026-09-17：与 CLI --cfl-start 对齐
-    cfl_max: float = 0.06    # 2026-09-17：原为 0.5，见 SteadyConfig.cfl_max 一节
-    cfl_min: float = 0.01
+    # 自适应 CFL 三元组：`rk3/imex` 下 `step()` 按逐单元局部 CFL 步长推进，控制器是激活的；`dual-time` 档外层不构造
+    # 控制器（内层伪时间有自己的步长调节）。默认 None 的含义见 SteadyConfig 文档 cfl_init 一节
+    cfl_init: Optional[float] = None
+    cfl_max: Optional[float] = None
+    cfl_min: Optional[float] = None
     sample_interval: int = 10
     warmup_time: float = 0.05
     init_from_checkpoint: Optional[str] = None
@@ -406,6 +389,8 @@ class TransientConfig(SolverConfig):
             raise ValueError(f"预热时间必须为非负数，得到 {self.warmup_time}")
         if self.warmup_time >= self.total_time:
             raise ValueError(f"预热时间 ({self.warmup_time}) 不能超过总时间 ({self.total_time})")
+
+        _raise_on_cfl_triplet(self)
 
         # 计算总步数
         self.total_steps = int(self.total_time / self.dt)

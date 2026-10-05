@@ -98,8 +98,8 @@ class CheckpointManager:
             "backend": getattr(self.config, "backend", "cpu"),
             "order": getattr(self.config, "order", 2),
             "turbulence": str(getattr(self.config, "turbulence", "sst_kw")),
-            "cfl_initial": getattr(self.config, "cfl_init", 0.1),
-            "cfl_max": getattr(self.config, "cfl_max", 5.0),
+            "cfl_initial": getattr(self.config, "cfl_init", None),
+            "cfl_max": getattr(self.config, "cfl_max", None),
         }
 
         config_str = json.dumps(config_dict, sort_keys=True)

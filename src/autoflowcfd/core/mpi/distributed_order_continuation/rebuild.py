@@ -212,7 +212,7 @@ def cpu_traditional_interpolate_to_new_order(solver, target_p: int) -> None:
       `_build_linear_interp_matrix_3d` 文档"只会从低阶向高阶单调推进"
       一节——这个精确性只在升阶方向成立）。
     - **降阶到目标阶数以下**（`target_p < current_order`，唯一真实
-      发生的场景是 `run_distributed_order_continuation` 开始爬坡前把
+      发生的场景是 `run_order_continuation`（四个后端共用）开始爬坡前把
       solver 从"CLI 直接在目标阶数构造"重置回 P0，见该函数文档）：
       不调用插值（对降阶而言不是精确延拓，只是走样的粗化投影，没有
       意义），直接重置为均匀自由流场——与单机 `run_order_continuation`

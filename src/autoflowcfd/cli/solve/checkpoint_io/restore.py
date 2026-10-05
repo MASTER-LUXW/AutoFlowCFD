@@ -9,6 +9,8 @@
 import click
 import numpy as np
 
+from autoflowcfd.core.utils.order_continuation.checkpoint_state import restore_phase_state
+
 
 def restore_state_from_checkpoint(
     checkpoint_path: str,
@@ -186,15 +188,8 @@ def restore_solver_state_from_fields(solver, fields: dict, metadata: dict) -> No
             solver.tau_accum = _tau
             solver._tau_accum_seeded = True
 
-    # Order Continuation 阶段起始残差恢复（配套 write_checkpoint 的
-    # phase_initial_residual 持久化，见该函数文档）：checkpoint 里有就
-    # 恢复到 solver 属性上，供 run_order_continuation 在 resume 恢复出的
-    # 第一个阶段用作残差下降判据的种子；旧版本 checkpoint 没有这个字段
-    # 时不设置，run_order_continuation 会走向后兼容分支（打印警告，
-    # 从这次 resume 的第一步重新捕获，不崩溃）。
-    _phase_initial_residual = metadata.get("phase_initial_residual")
-    if _phase_initial_residual is not None:
-        solver._phase_initial_residual = float(_phase_initial_residual)
+    # Order Continuation 阶段起始残差（与分布式恢复端共用，见 order_continuation/checkpoint_state.py）
+    restore_phase_state(solver, metadata)
 
     # 标记这个 solver 的状态是从 checkpoint 恢复的真实解、不是构造函数
     # 生成的均匀自由流场占位值——order_continuation.run_order_continuation

@@ -8,6 +8,7 @@ from typing import Optional
 import click
 from loguru import logger
 
+from autoflowcfd.cli.solve.option_help import PHASE_MAX_ITER_HELP, RESIDUAL_DROP_THRESHOLD_HELP, THREADS_HELP
 from autoflowcfd.cli.solve.solver_factory import validate_backend_options
 from autoflowcfd.cli.solve.checkpoint_io import periodic_checkpoint_callback, write_single_node_outputs
 from autoflowcfd.cli.solve.helpers import (
@@ -51,13 +52,9 @@ from autoflowcfd.cli.solve.transient_distributed import _solve_transient_distrib
                    "core/fr_solver/boundary.py 文档）")
 @click.option("--max-iter", "-n", default=100, help="最大迭代次数")
 @click.option('--phase-max-iter', type=int, default=None,
-              help='Order Continuation（--order>=1 时触发）非最终阶段(P0/P1/...，不含目标'
-                   '阶数)各自的最大迭代步数上限。默认(不传)时保留旧行为——总步数按阶段数'
-                   '机械均分。传具体值后目标阶数改为吃掉这次求解剩余的全部步数，不再随'
-                   '阶段数被稀释，见 core/utils/order_continuation.py 文档。仅 CPU 后端支持')
+              help=PHASE_MAX_ITER_HELP)
 @click.option('--residual-drop-threshold', type=float, default=100.0,
-              help='Order Continuation 单个非最终阶段判定"可以提前升阶"的残差下降倍数，'
-                   '默认100(降2个数量级)。仅 CPU 后端支持')
+              help=RESIDUAL_DROP_THRESHOLD_HELP)
 @click.option('--aoa', 'aoa_deg', type=float, default=0.0,
               help='攻角 alpha（度，绕 y 轴、抬头为正，默认 0）。**2026-09-17 新增**：'
                    '此前来流方向在全代码库被硬编码成 +x，没有任何攻角选项——而攻角'
@@ -94,7 +91,7 @@ from autoflowcfd.cli.solve.transient_distributed import _solve_transient_distrib
 @click.option('--dual-time-inner-iter', type=int, default=20,
               help='--time-method dual-time 时每个物理步的伪时间内迭代次数（此前恒为硬编码3，'
                    '真实测得默认保守CFL策略下通常不足以收敛到物理时间精度，见 TimeIntegrator 文档）')
-@click.option('--threads', '-j', type=int, default=-1, help='CPU 后端 numba 并行 kernel 使用的线程数，默认 -1 = 4（本机真实网格实测扩展性甜点，不是核数）')
+@click.option('--threads', '-j', type=int, default=-1, help=THREADS_HELP)
 @click.option('--init-from', 'init_checkpoint', type=click.Path(exists=True), default=None,
               help='从稳态 checkpoint 文件初始化瞬态求解器（典型工作流：先稳态 SST 收敛，'
                    '再从该流场启动 DES/LES 瞬态计算，避免从均匀流场直接启动需要极长的瞬态发展时间）')
@@ -157,7 +154,7 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
         turbulence_model: 湍流模型 (推荐 DDES 或 LES)
         max_iter: 最大迭代次数
         phase_max_iter: Order Continuation(--order>=1 时触发)非最终阶段各自的
-            最大迭代步数上限，None(默认)时保留旧行为(按阶段数均分)；仅 CPU 后端支持
+            最大迭代步数上限，None 时按阶段数均分（目标阶数总是吃掉剩余步数）
         residual_drop_threshold: Order Continuation 单阶段提前升阶所需的残差
             下降倍数，默认100
         dt: 时间步长

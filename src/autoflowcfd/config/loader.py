@@ -283,12 +283,16 @@ class ConfigLoader:
         Returns:
             Dict[str, Any]: 字符串值字典
         """
+        import dataclasses
+
+        # 只导出构造参数（`__post_init__` 派生的 `total_steps` 等不是可配置项，写进模板会让加载时报
+        # "未知的配置键"）
         result = {}
-        for key, value in config.__dict__.items():
-            if isinstance(value, Enum):
-                result[key] = value.value
-            else:
-                result[key] = value
+        for f in dataclasses.fields(config):
+            if not f.init:
+                continue
+            value = getattr(config, f.name)
+            result[f.name] = value.value if isinstance(value, Enum) else value
         return result
     
     def _add_yaml_comments(self, config_dict: Dict[str, Any], mode: str) -> str:
@@ -342,12 +346,15 @@ class ConfigLoader:
             str: 帮助注释文本
         """
         comments = {
-            'backend': '计算后端: cpu, gpu, 或 auto',
-            'order': 'FR 离散阶数: 1, 2, 或 3',
-            'turbulence': '湍流模型: sst_kw, sa, des, ddes, les',
+            # 可选值从枚举读（唯一来源）：此前手写的湍流模型表里有不存在的 `des`、漏了 none/iddes/wmles
+            'backend': '计算后端: ' + ', '.join(b.value for b in BackendType) + '（auto：有可用 GPU 用 gpu）',
+            'order': 'FR 目标阶数 0~3（阶数爬坡从 P0 起步）',
+            'turbulence': '湍流模型: ' + ', '.join(t.value for t in TurbulenceModel),
             'max_iter': '最大迭代步数（仅定常）',
-            'cfl_init': '初始 CFL 数（仅定常）',
-            'cfl_max': '最大 CFL 数（仅定常）',
+            # 留空（null）= 按时间格式取 CFL 律的默认值（显式与隐式相差两个数量级，见 build_cfl_policy）
+            'cfl_init': '自适应 CFL 初值（null：按时间格式取默认）',
+            'cfl_max': '自适应 CFL 上限（null：按时间格式取默认）',
+            'cfl_min': '自适应 CFL 下限（null：按时间格式取默认）',
             'convergence_tol': '残差收敛容差（仅定常）',
             'dt': '时间步长，单位秒（仅瞬态）',
             'total_time': '总物理时间，单位秒（仅瞬态）',

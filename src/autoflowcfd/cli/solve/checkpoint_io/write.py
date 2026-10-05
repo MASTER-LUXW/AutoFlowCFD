@@ -10,6 +10,7 @@ import pickle
 from typing import Optional
 
 from autoflowcfd.core.utils.checkpoint_physics import physics_metadata
+from autoflowcfd.core.utils.order_continuation.checkpoint_state import phase_state_metadata
 
 
 
@@ -210,16 +211,8 @@ def write_checkpoint(
     }
     if surface_mesh:
         metadata["surface_mesh"] = surface_mesh
-
-    # Order Continuation 阶段起始残差持久化（2026-08-23，配套
-    # order_continuation.py::run_order_continuation 的 resume 状态丢失
-    # 修复，见该函数文档）：h5py attrs 不接受 None，未设置时（例如
-    # checkpoint_callback 在 run_order_continuation 第一次 solver.step()
-    # 之前就被调用——实际不会发生，但防御性地允许缺失）跳过，同
-    # surface_mesh 的处理方式一致。
-    phase_initial_residual = getattr(solver, "_phase_initial_residual", None)
-    if phase_initial_residual is not None:
-        metadata["phase_initial_residual"] = float(phase_initial_residual)
+    # Order Continuation 阶段起始残差（与分布式写入端共用，见 order_continuation/checkpoint_state.py）
+    metadata.update(phase_state_metadata(solver))
 
     path = manager.save(
         solution_cell_avg,

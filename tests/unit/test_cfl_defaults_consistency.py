@@ -98,26 +98,21 @@ class TestSolverConstructorDefaults:
 
 
 class TestConfigLayer:
-    """配置层（`SteadyConfig` / `TransientConfig`）必须有这三个字段且默认一致。"""
+    """配置层（`SteadyConfig` / `TransientConfig`）必须有这三个字段，且与 CLI、`FRSolver.__init__` 一样默认 None。"""
 
     @pytest.mark.parametrize("cls_name", ["SteadyConfig", "TransientConfig"])
-    def test_fields_exist_and_consistent(self, cls_name):
+    def test_fields_exist_and_defer_to_the_control_law(self, cls_name):
+        """2026-10-05 以前配置层写死显式那一组（0.03/0.06/0.01）：CLI 与求解器 2026-09-25 已改为 None，这份拷贝被
+        漏掉，经 API 选隐式格式时隐式 CFL 律（默认上限 1e8）会被压在 0.06 下。"""
         from autoflowcfd.config import solver_config
 
-        cls = getattr(solver_config, cls_name)
-        cfg = cls()
+        cfg = getattr(solver_config, cls_name)()
         for field in ("cfl_init", "cfl_max", "cfl_min"):
             assert hasattr(cfg, field), (
                 f"{cls_name} 缺 {field} 字段 —— YAML/config 用户配置不出它，"
                 f"而 rk3/imex 路径上自适应控制器是激活的"
             )
-        assert cfg.cfl_min == EXPECTED_CFL_MIN, (
-            f"{cls_name}.cfl_min = {cfg.cfl_min} != {EXPECTED_CFL_MIN}"
-        )
-        assert cfg.cfl_min <= cfg.cfl_init <= cfg.cfl_max, (
-            f"{cls_name} 默认 CFL 三元组不自洽："
-            f"{cfg.cfl_min} / {cfg.cfl_init} / {cfg.cfl_max}"
-        )
+            assert getattr(cfg, field) is None, f"{cls_name}.{field} 默认值不是 None"
 
 
 class TestApiForwardsConfigCfl:

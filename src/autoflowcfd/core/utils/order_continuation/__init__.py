@@ -9,7 +9,8 @@ AutoFlowCFD V2.0 - Order Continuation Utilities
     interp.py            阶数切换时解场/湍流场的插值（延拓）算子
     turbulence_reset.py  resume 后湍流场被上界大面积钳制时的重置安全网（全部后端共用的唯一实现）
     p0_reset.py          全新求解器在 Order Continuation 起步时重建到 P0
-    run.py               顶层编排：P0 -> P1 -> ... -> 目标阶数
+    run.py               顶层编排：P0 -> P1 -> ... -> 目标阶数（四个后端共用的唯一循环）
+    checkpoint_state.py  随 checkpoint 持久化的阶段状态（单机/分布式写入与恢复共用）
 
 本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
 """
@@ -27,7 +28,6 @@ from .p0_reset import (  # noqa: F401
     _reset_state_to_p0,
 )
 from .run import (  # noqa: F401
-    _print_pseudo_time_summary,
     run_order_continuation,
 )
 

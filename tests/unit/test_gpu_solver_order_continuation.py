@@ -208,7 +208,7 @@ class TestGpuSolverInterpolateToNewOrder:
         assert solver.mesh_data['det_jacs'].shape[1] == 27
 
     def test_reset_to_p0_when_downgrading(self):
-        """降阶（reset 场景，供 run_distributed_order_continuation 在
+        """降阶（reset 场景，供 run_order_continuation 在
         非 resume 场景下从目标阶数重置回 P0 时使用）：不做插值，直接
         重置为均匀自由流场。"""
         solver = _make_solver(2, turb_model="none")

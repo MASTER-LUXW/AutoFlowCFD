@@ -25,6 +25,7 @@ from .solver_config import (
     BackendType,
     TurbulenceModel,
     TimeIntegrationScheme,
+    cfl_triplet_errors,
 )
 
 
@@ -179,16 +180,7 @@ class ConfigSchema:
         if config.max_iter < 1:
             errors.append(f"max_iter 必须 >= 1，得到 {config.max_iter}")
         
-        if config.cfl_init <= 0:
-            errors.append(f"cfl_init 必须 > 0，得到 {config.cfl_init}")
-        
-        if config.cfl_max <= 0:
-            errors.append(f"cfl_max 必须 > 0，得到 {config.cfl_max}")
-        
-        if config.cfl_init > config.cfl_max:
-            errors.append(
-                f"cfl_init ({config.cfl_init}) 不能超过 cfl_max ({config.cfl_max})"
-            )
+        errors.extend(cfl_triplet_errors(config.cfl_init, config.cfl_max, config.cfl_min))
         
         if config.convergence_tol <= 0:
             errors.append(f"convergence_tol 必须 > 0，得到 {config.convergence_tol}")
@@ -216,6 +208,8 @@ class ConfigSchema:
         
         if config.total_time <= 0:
             errors.append(f"total_time 必须 > 0，得到 {config.total_time}")
+        
+        errors.extend(cfl_triplet_errors(config.cfl_init, config.cfl_max, config.cfl_min))
         
         if config.warmup_time < 0:
             errors.append(f"warmup_time 必须 >= 0，得到 {config.warmup_time}")

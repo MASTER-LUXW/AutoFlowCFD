@@ -112,15 +112,12 @@ class _APISolveMixin:
             for field in ("mu_molecular", "turbulence_intensity", "viscosity_ratio",
                           "artificial_viscosity_enabled", "artificial_viscosity_alpha"):
                 kwargs.setdefault(field, getattr(config, field))
-            # SteadyConfig.cfl_init/cfl_max -> FRSolver.cfl_start/cfl_max
-            # （2026-09-07：此前这两个 config 字段从未真正接到求解器上）。
+            # SteadyConfig.cfl_init/cfl_max/cfl_min -> FRSolver.cfl_start/cfl_max/cfl_min，只转发给出的值
+            # （默认 None：由 CFL 律按时间格式取默认，见 build_cfl_policy）。
             if getattr(config, "cfl_init", None) is not None:
                 kwargs.setdefault("cfl_start", config.cfl_init)
             if getattr(config, "cfl_max", None) is not None:
                 kwargs.setdefault("cfl_max", config.cfl_max)
-            # cfl_min（2026-09-15）：配置层此前没有这个字段，于是 YAML 用户
-            # 到不了低于控制器默认下限 0.05 的工作点——而真 P1 实测稳定的
-            # CFL 在 0.03 量级。见 SteadyConfig.cfl_min 文档。
             if getattr(config, "cfl_min", None) is not None:
                 kwargs.setdefault("cfl_min", config.cfl_min)
 
@@ -242,12 +239,7 @@ class _APISolveMixin:
             for field in ("mu_molecular", "turbulence_intensity", "viscosity_ratio",
                           "artificial_viscosity_enabled", "artificial_viscosity_alpha"):
                 kwargs.setdefault(field, getattr(config, field))
-            # 自适应 CFL 三元组（2026-09-17 补齐）。`TransientConfig` 此前
-            # 根本没有这三个字段，所以 YAML/config 用户配置不出瞬态的 CFL
-            # ——而 `--time-method rk3/imex` 下 `step()` 忽略 dt、按逐单元
-            # 局部 CFL 步长推进，那条路径上控制器是**激活**的。字段名映射
-            # 与 run_steady 一致（config.cfl_init -> FRSolver.cfl_start）。
-            # dual-time 档不构造这个控制器，这三个值对它无效。
+            # 自适应 CFL 三元组：字段名映射与 run_steady 一致，只转发给出的值（dual-time 档外层不构造控制器）
             if getattr(config, "cfl_init", None) is not None:
                 kwargs.setdefault("cfl_start", config.cfl_init)
             if getattr(config, "cfl_max", None) is not None:

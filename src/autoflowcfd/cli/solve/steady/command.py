@@ -6,6 +6,7 @@
 
 import click
 
+from autoflowcfd.cli.solve.option_help import PHASE_MAX_ITER_HELP, RESIDUAL_DROP_THRESHOLD_HELP, THREADS_HELP
 from autoflowcfd.cli.solve.solver_factory import validate_backend_options
 from autoflowcfd.cli.solve.helpers import (
     load_physical_config_if_given,
@@ -87,23 +88,16 @@ from .single_node import _run_single_node
                    '收缩得更多，绝不会抬高 CFL，因此不可能把原本稳定的运行变'
                    '成不稳定。')
 @click.option('--phase-max-iter', type=int, default=None,
-              help='Order Continuation（--order>=1 时触发）非最终阶段(P0/P1/...，不含目标'
-                   '阶数)各自的最大迭代步数上限。默认(不传)时保留旧行为——总步数按阶段数'
-                   '机械均分(max_iter // 阶段数)，目标阶数与非最终阶段拿到同一份额。传具体值'
-                   '后非最终阶段各自最多跑这么多步(提前满足--residual-drop-threshold仍可'
-                   '提前升阶)，目标阶数改为吃掉这次求解剩余的全部步数，不再随阶段数被稀释。'
-                   '目前仅单机 CPU 路径支持，GPU/多GPU/MPI 分布式路径传非默认值会报错')
+              help=PHASE_MAX_ITER_HELP)
 @click.option('--residual-drop-threshold', type=float, default=100.0,
-              help='Order Continuation 单个非最终阶段判定"可以提前升阶"的残差下降倍数，'
-                   '默认100(降2个数量级)，原来硬编码，现在可配置。目前仅单机 CPU 路径支持，'
-                   'GPU/多GPU/MPI 分布式路径传非默认值会报错')
+              help=RESIDUAL_DROP_THRESHOLD_HELP)
 @click.option('--output', '-o', 'output_dir', type=click.Path(), default='./results', help='结果输出目录')
 @click.option('--checkpoint-interval', type=int, default=100, help='检查点保存间隔')
 @click.option('--surface-mesh', '-s', type=click.Path(exists=True), default=None,
               help='原始面网格路径 - input_file 是 .nas 体网格时必填，用于反推边界分组；input_file 是 .pkl 时不需要')
 @click.option('--skip-quality-check', is_flag=True, help='跳过求解前的网格质量门检查（不建议，仅用于临时诊断）')
 @click.option('--reference-area', type=float, default=None, help='气动系数参考面积 (m^2)，提供时求解结束后打印 Cd/Cl')
-@click.option('--threads', '-j', type=int, default=-1, help='numba 并行 kernel 使用的线程数（CPU 残差；GPU 后端的主机侧 Jacobian 装配），默认 -1 = 4（本机真实网格实测扩展性甜点，不是核数）')
+@click.option('--threads', '-j', type=int, default=-1, help=THREADS_HELP)
 @click.option('--n-ranks', '--np', type=int, default=1, help='MPI 并行 rank 数（域分解并行，需配合 mpirun 使用。默认 1 = 单机模式）')
 @click.option('--fully-distributed', is_flag=True,
               help='真正的完全分布式网格加载（2026-09-02 新增，同日/次日续接补齐 SST/DDES/'

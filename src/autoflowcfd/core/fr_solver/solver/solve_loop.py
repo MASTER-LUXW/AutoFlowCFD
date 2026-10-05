@@ -28,6 +28,57 @@ from .. import step as fr_solver_step
 from .threads import blas_threads_limited
 
 
+def format_step_line(solver, order: int, iteration: int, res: float, initial_res: float, elapsed: float,
+                     n_steps: int) -> str:
+    """每步一行日志（定阶循环 `SolveLoopMixin.solve` 与 Order Continuation 共用，此前两边各写一份）。
+
+    残差、相对本阶段起点的下降倍数、单步耗时、CFL、Newton 诊断、后端附注；设置了 `_reference_area`
+    时附压力积分气动力系数（经 `host_view()` 读主机状态）。第 1 步与之后每 10 步再附逐方程缩放残差与最大
+    残差定位（参照 Fluent scaled residuals / STAR-CCM+ Max 监视器；最大残差单元的体积分位是区分"退化单元
+    机制"与"壁面处理机制"最直接的指标）和累计伪时间预算（残差下降不等于物理场已建立，见
+    `pseudotime_budget.py` 模块文档）——数据源由后端钩子 `_scaled_residual_field()` 给出。
+
+    Args:
+        order: 本阶段阶数；iteration: 本阶段内步号（1 起）；n_steps: 本次求解累计步数（伪时间预算用）。
+    """
+    drop = initial_res / max(res, 1e-30)
+    msg = f"P{order} Iter {iteration}: Residual = {res:.6e} | Drop: {drop:.1f}x | Time: {elapsed:.2f}s"
+    ctrl = getattr(solver, "_cfl_controller", None)
+    if ctrl is not None:
+        msg += f" | CFL={ctrl.cfl_number:.3f}"
+    msg += newton_monitor_suffix(solver) + solver._loop_monitor_suffix()
+    ref_area = getattr(solver, "_reference_area", None)
+    if ref_area is not None and ref_area > 0:
+        from autoflowcfd.postprocess.fr_coefficients import compute_forces_pressure_only
+
+        aero = compute_forces_pressure_only(solver.host_view(), ref_area)
+        msg += f" | Cd={aero['Cd']:.4f} Cl={aero['Cl']:.4f} Cs={aero['Cs']:.4f}"
+    freestream = getattr(solver, "freestream", None)
+    field = solver._scaled_residual_field() if (iteration == 1 or iteration % 10 == 0) else None
+    if freestream is not None and field is not None:
+        from autoflowcfd.core.fr_solver.residual_diagnostics import (
+            compute_scaled_residuals, format_scaled_residual_line,
+        )
+        from autoflowcfd.core.fr_solver.pseudotime_budget import format_pseudo_time_budget
+
+        msg += " | " + format_scaled_residual_line(
+            compute_scaled_residuals(field, freestream),
+            cell_volumes=getattr(getattr(solver, "mesh", None), "cell_volumes", None))
+        budget = solver._pseudo_time_budget(n_steps=n_steps)
+        if budget is not None:
+            msg += " | " + format_pseudo_time_budget(budget, compact=True)
+    return msg
+
+
+def report_pseudo_time_summary(solver, n_steps: int) -> None:
+    """收尾时把"物理场到底走了多远"完整报一次（两个循环共用）。"""
+    budget = solver._pseudo_time_budget(n_steps=n_steps)
+    if budget is not None:
+        from autoflowcfd.core.fr_solver.pseudotime_budget import format_pseudo_time_budget
+
+        print(format_pseudo_time_budget(budget))
+
+
 class SolveLoopMixin:
     """与后端无关的求解循环（见模块文档）。"""
 
@@ -51,11 +102,8 @@ class SolveLoopMixin:
                                        checkpoint_callback=None,
                                        phase_max_iter: Optional[int] = None,
                                        residual_drop_threshold: float = 1e2):
-        """Order Continuation（`run_distributed_order_continuation`：只依赖 `step()`/`order`/`current_order`/
-        `_interpolate_to_new_order` 这几个接口，单 GPU 与两个分布式后端共用；CPU 单机覆盖为自己的实现）。"""
-        from autoflowcfd.core.mpi.distributed_order_continuation import run_distributed_order_continuation
-
-        return run_distributed_order_continuation(
+        """Order Continuation（四个后端同一个循环，`core/utils/order_continuation/run.py`）。"""
+        return order_continuation.run_order_continuation(
             self, max_iter, dt, tol, checkpoint_callback,
             phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold)
 
@@ -210,60 +258,8 @@ class SolveLoopMixin:
                 # 过格式。这里改成逐字段对齐 order_continuation.py 的格式
                 # （以其为准），包括每步都打印、同样的字段顺序与 Cd/Cl/Cs
                 # 气动力系数打印。
-                drop = initial_res / max(res, 1e-30)
-                msg = f"P{self.order} Iter {i+1}: Residual = {res:.6e} | Drop: {drop:.1f}x | Time: {t_end - t_start:.2f}s"
-                if self._cfl_controller is not None:
-                    msg += f" | CFL={self._cfl_controller.cfl_number:.3f}"
-                msg += newton_monitor_suffix(self) + self._loop_monitor_suffix()
-                ref_area = getattr(self, '_reference_area', None)
-                if ref_area is not None and ref_area > 0:
-                    from autoflowcfd.postprocess.fr_coefficients import compute_forces_pressure_only
-                    aero = compute_forces_pressure_only(self.host_view(), ref_area)
-                    msg += f" | Cd={aero['Cd']:.4f} Cl={aero['Cl']:.4f} Cs={aero['Cs']:.4f}"
-                # 按方程分别归一化残差 + 最大残差定位（与 order_continuation.py
-                # 同一处新增，参照 Fluent scaled residuals / STAR-CCM+ Max
-                # 监视器，见 residual_diagnostics.py 模块文档"背景"一节）：
-                # 只新增打印，不改变本函数自己的 `tol`/`drop` 收敛判据。
-                #
-                # 打印频率（2026-09-13 用户反馈修复，与 order_continuation.py
-                # 同一处、同一理由）：只在第 1 步和其后每 10 步打印一次，避免
-                # 正常运行时每步都刷出这行长诊断信息。
-                freestream = getattr(self, 'freestream', None)
-                field = self._scaled_residual_field() if (i == 0 or (i + 1) % 10 == 0) else None
-                if freestream is not None and field is not None:
-                    from autoflowcfd.core.fr_solver.residual_diagnostics import (
-                        compute_scaled_residuals, format_scaled_residual_line,
-                    )
-                    diag = compute_scaled_residuals(field, freestream)
-                    msg += " | " + format_scaled_residual_line(
-                        diag,
-                        # 最大残差单元的体积分位：残差被 det(J) 除，体积
-                        # 极小的退化单元天然把任何通量不平衡放大若干个
-                        # 量级，所以这个数字是区分"退化单元机制"与"壁面
-                        # 处理机制"最直接的单个指标（2026-09-16 真实排查
-                        # 驱动，见 residual_diagnostics.py::
-                        # cell_volume_percentile 文档）。
-                        cell_volumes=getattr(
-                            getattr(self, "mesh", None), "cell_volumes", None),
-                    )
-                    # 累计伪时间 / 物体尺度对流时标（2026-09-17）：与上面
-                    # 那行诊断同频打印。这个比值此前算得出来但从未被报告，
-                    # 结果"残差在降但物理场只走了 1.8% 个特征时间"这件事在
-                    # 日志里完全看不出来，直接导致一次把启动暂态误判成壁面
-                    # 处理缺陷、追了好几天的事故。完整记录见
-                    # `pseudotime_budget.py` 模块文档。
-                    _ptb_fn = getattr(
-                        self, "_pseudo_time_budget", None)
-                    _ptb = (_ptb_fn(n_steps=i + 1)
-                            if _ptb_fn is not None else None)
-                    if _ptb is not None:
-                        from autoflowcfd.core.fr_solver.pseudotime_budget import (
-                            format_pseudo_time_budget,
-                        )
-                        msg += " | " + format_pseudo_time_budget(
-                            _ptb, compact=True)
                 if report:
-                    print(msg)
+                    print(format_step_line(self, self.order, i + 1, res, initial_res, t_end - t_start, i + 1))
 
                 # 中间 checkpoint 保存
                 if checkpoint_callback is not None:
@@ -280,19 +276,9 @@ class SolveLoopMixin:
                               f"(dropped {initial_res/res:.1e}x)")
                     break
 
-        # 收尾摘要：把"物理场到底走了多远"完整报一次。残差是否收敛与
-        # 物理场是否建立是**两件事**，只报前者会让人拿启动暂态的气动力
-        # 系数去和文献值比（这件事真实发生过，见 `pseudotime_budget.py`）。
-        # `getattr` 而不是直接调用：`test_solver_divergence_abort.py` 用
-        # SimpleNamespace 替身直接调用未绑定的 solve()（本仓库既有的测试
-        # 手法），那种替身没有这个方法；一行纯诊断不该让它失败。
-        _ptb_fn = getattr(self, "_pseudo_time_budget", None)
-        _ptb = _ptb_fn(n_steps=i + 1) if _ptb_fn is not None else None
-        if _ptb is not None and report:
-            from autoflowcfd.core.fr_solver.pseudotime_budget import (
-                format_pseudo_time_budget,
-            )
-            print(format_pseudo_time_budget(_ptb))
+        # 收尾摘要：把"物理场到底走了多远"完整报一次（残差是否收敛与物理场是否建立是两件事）
+        if report:
+            report_pseudo_time_summary(self, i + 1)
 
         return SolverResult(converged=converged, iterations=i+1, final_residual=final_residual)
 
@@ -320,20 +306,31 @@ class _SolverSolveMixin(SolveLoopMixin):
         """在主机上修改状态（恢复 checkpoint、`--init-from`）：CPU 直接改自身。"""
         yield self
 
-    def _solve_with_order_continuation(self, max_iter: int, dt: float, tol: float,
-                                        checkpoint_callback=None,
-                                        phase_max_iter: Optional[int] = None,
-                                        residual_drop_threshold: float = 1e2) -> SolverResult:
-        """实现 Order Continuation 策略：从P0逐步提升到目标阶数（委托给 order_continuation）。"""
-        return order_continuation.run_order_continuation(
-            self, max_iter, dt, tol, checkpoint_callback,
-            phase_max_iter=phase_max_iter,
-            residual_drop_threshold=residual_drop_threshold,
-        )
-
     def _interpolate_to_new_order(self, new_order: int):
-        """将解从当前阶数插值到新的阶数（委托给 order_continuation）。"""
-        order_continuation.interpolate_to_new_order_checked(self, new_order)
+        """换到 `new_order` 阶（Order Continuation 的统一换阶接口，四个后端同一语义）：`new_order == 0` 时用
+        来流重置（全新求解器从 P0 起步），否则对解与湍流场做精确多项式延拓；随后算子、网格几何、壁距、
+        边界幽灵态（SEM 入口持有构造阶数的通量点坐标）全部切到新阶数，旧阶数的几何缓存释放。
+
+        此前这串步骤内联在 CPU 单机自己的 Order Continuation 循环里，其余后端的同名方法各自完成同一件事。
+        """
+        from autoflowcfd.core.fr_solver.turbulence import recompute_wall_distance_for_current_order
+        from autoflowcfd.fr.operators import generate_fr_operators
+
+        if new_order == 0:
+            order_continuation._reset_state_to_p0(self, 1)
+            from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
+
+            self._dual_time_U_prev = None
+            reset_newton_state(self)
+        else:
+            order_continuation.interpolate_to_new_order_checked(self, new_order)
+            self.ops = generate_fr_operators(new_order)
+        for o in [o for o in list(self.mesh._order_geometry_cache) if o != new_order]:
+            del self.mesh._order_geometry_cache[o]
+        if new_order != 0:
+            self.mesh.set_order(new_order)
+            recompute_wall_distance_for_current_order(self)
+        self.boundary_ghost_provider = self._build_boundary_ghost_provider(self.bc_overrides)
 
     def _limit_prolongated_state(self) -> None:
         """升阶延拓之后在**新阶数**的点集（解点 + 面通量点 + 过积分细点）上施加守恒的

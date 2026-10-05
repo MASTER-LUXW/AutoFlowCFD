@@ -44,8 +44,7 @@ set_order` 那样只换个缓存条目。三条后端的重建成本各不相同
   `distributed_mesh_loader.py::distributed_mesh_load_v2` 的
   `root_context` 返回值），非 root rank 参与对应的 Recv 一侧。
 
-三条路径共用同一套残差-下降判据/checkpoint 回调/打印格式的迭代循环
-（`run_distributed_order_continuation`），只是阶数切换时调用各自的
+迭代循环与单机后端是同一份（`core/utils/order_continuation/run.py::run_order_continuation`），只是阶数切换时调用各自的
 `solver._interpolate_to_new_order(target_p)`（在
 `DistributedFRSolver._interpolate_to_new_order`/
 `MultiGPUDistributedSolver._interpolate_to_new_order` 里按构造方式
@@ -56,7 +55,6 @@ set_order` 那样只换个缓存条目。三条后端的重建成本各不相同
 
     p0_residual.py       P0 阶的分布式无粘残差（阶数延拓起点需要它单独一条路径）
     rebuild.py           阶数切换时重建 CPU 传统模式的分区与状态、逐 rank 插值
-    run.py               顶层编排：按 phase 推进各阶数
 
 本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
 """
@@ -75,12 +73,8 @@ from .rebuild import (  # noqa: F401
 from autoflowcfd.core.utils.order_continuation import (  # noqa: F401
     _reset_turbulence_if_resumed_field_exploded,
 )
-from .run import (  # noqa: F401
-    run_distributed_order_continuation,
-)
 
 __all__ = [
     "compute_distributed_p0_inviscid_residual",
     "cpu_traditional_interpolate_to_new_order",
-    "run_distributed_order_continuation",
 ]

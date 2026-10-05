@@ -296,7 +296,8 @@ class TestEveryBackendConstructsAController:
 
 
 class TestConfigLayerCflDefaultsAreConsistent:
-    """配置层与 CLI 是同一个物理量的两个入口，默认值不能互相矛盾。
+    """显式格式的默认 CFL 三元组（唯一来源：`AdaptiveCFLController` 签名）的实测依据；配置层与 CLI 一样默认 None、
+    交给 CFL 律按时间格式取值（2026-10-05 以前配置层写死显式那一组，经 API 选隐式格式时隐式 CFL 律被压在 0.06 下）。
 
     2026-09-15 发现：`SteadyConfig.cfl_max` 的默认值是 **10.0**，而 CLI
     `--cfl-max` 的默认是 0.5——差 20 倍。2026-09-17 两边一起重定为
@@ -316,18 +317,15 @@ class TestConfigLayerCflDefaultsAreConsistent:
     #: 真实网格上实测的最低失效点（平板边界层通道 CFL 0.10 第 3187 步发散）。
     MEASURED_LOWEST_FAILURE = 0.10
 
-    def test_cfl_max_default_matches_the_explicit_control_law(self):
-        """配置层（只服务显式 RK3 稳态）与显式控制器签名的默认上限必须是同一个数。
-
-        2026-09-25 起 CLI 的 CFL 选项默认 None（按时间格式取对应 CFL 律的
-        签名默认值），所以这里对照的是唯一来源本身，而不是 CLI 默认值。"""
-        from autoflowcfd.config.solver_config import SteadyConfig
-        from autoflowcfd.core.time_integration.adaptive_cfl import AdaptiveCFLController
-        assert SteadyConfig().cfl_max == pytest.approx(AdaptiveCFLController().cfl_max)
+    def test_config_layer_defers_to_the_control_law(self):
+        """配置层三个字段默认 None（与 CLI `--cfl-*`、`FRSolver.__init__` 同一约定）；API 只转发给出的值。"""
+        from autoflowcfd.config.solver_config import SteadyConfig, TransientConfig
+        for cfg in (SteadyConfig(), TransientConfig()):
+            assert (cfg.cfl_init, cfg.cfl_max, cfg.cfl_min) == (None, None, None), type(cfg).__name__
 
     def test_cfl_max_default_is_below_every_measured_failure(self):
-        from autoflowcfd.config.solver_config import SteadyConfig
-        cm = SteadyConfig().cfl_max
+        from autoflowcfd.core.time_integration.adaptive_cfl import AdaptiveCFLController
+        cm = AdaptiveCFLController().cfl_max
         assert cm < self.MEASURED_LOWEST_FAILURE, (
             f"默认上限 {cm} 不低于实测失效点 "
             f"{self.MEASURED_LOWEST_FAILURE}")
@@ -340,32 +338,48 @@ class TestConfigLayerCflDefaultsAreConsistent:
     def test_cfl_max_default_is_not_pointlessly_small(self):
         """反向判据：上限也不能压到比已验证可用的工作点还低，否则等于
         把实测跑通过的加速度扔掉（0.03 在真实网格上跑过 350+ 步单调下降）。"""
-        from autoflowcfd.config.solver_config import SteadyConfig
-        assert SteadyConfig().cfl_max >= 0.03
+        from autoflowcfd.core.time_integration.adaptive_cfl import AdaptiveCFLController
+        assert AdaptiveCFLController().cfl_max >= 0.03
 
     def test_cfl_min_field_exists_and_leaves_shrink_room(self):
         """下限必须严格小于初始值，否则控制器一步也收缩不了。"""
-        from autoflowcfd.config.solver_config import SteadyConfig
-        c = SteadyConfig()
-        assert c.cfl_min < c.cfl_init, "cfl_min == cfl_init 会让收缩失效"
+        from autoflowcfd.core.time_integration.adaptive_cfl import AdaptiveCFLController
+        c = AdaptiveCFLController()
+        assert c.cfl_min < c.cfl_start, "cfl_min == cfl_start 会让收缩失效"
 
     def test_cfl_min_default_does_not_block_the_measured_stable_value(self):
         """0.03 是唯一在真实网格上被 250 步验证过稳定的 CFL；默认下限
         不得挡住它。"""
-        from autoflowcfd.config.solver_config import SteadyConfig
-        assert SteadyConfig().cfl_min <= 0.03
+        from autoflowcfd.core.time_integration.adaptive_cfl import AdaptiveCFLController
+        assert AdaptiveCFLController().cfl_min <= 0.03
 
+    @pytest.mark.parametrize("cls_name", ["SteadyConfig", "TransientConfig"])
     @pytest.mark.parametrize("kw", [
         dict(cfl_min=0.2, cfl_init=0.05, cfl_max=0.5),   # min > init
         dict(cfl_min=0.6, cfl_init=0.6, cfl_max=0.5),    # min > max
         dict(cfl_min=0.0, cfl_init=0.05, cfl_max=0.5),   # min <= 0
+        dict(cfl_min=0.2, cfl_max=0.1),                  # 只给两个、二者矛盾
+        dict(cfl_init=-1.0),                             # 只给一个、非正
     ])
-    def test_inconsistent_ordering_rejected(self, kw):
+    def test_inconsistent_ordering_rejected(self, kw, cls_name):
         """矛盾配置要在配置层就拦下，不要等到控制器里变成"收缩把 CFL
-        调高"（第 11 条那个缺陷）。"""
-        from autoflowcfd.config.solver_config import SteadyConfig
+        调高"（第 11 条那个缺陷）。瞬态此前完全不校验（2026-10-05 起两者与
+        ConfigSchema 共用 `cfl_triplet_errors`）。"""
+        from autoflowcfd.config import solver_config
         with pytest.raises(ValueError, match="CFL"):
-            SteadyConfig(**kw)
+            getattr(solver_config, cls_name)(**kw)
+
+    def test_schema_reports_the_same_errors(self):
+        from autoflowcfd.config.schema import ConfigSchema
+        from autoflowcfd.config.solver_config import SteadyConfig, TransientConfig
+        assert ConfigSchema.validate_steady(SteadyConfig(cfl_min=0.01)) == []
+        # 构造后改出的矛盾值
+        bad = SteadyConfig()
+        bad.cfl_min, bad.cfl_max = 0.2, 0.1
+        assert any("cfl_min" in e for e in ConfigSchema.validate_steady(bad))
+        bad_t = TransientConfig()
+        bad_t.cfl_min, bad_t.cfl_max = 0.2, 0.1
+        assert any("cfl_min" in e for e in ConfigSchema.validate_transient(bad_t))
 
     def test_low_cfl_config_is_expressible(self):
         """真 P1 的工作点必须能通过配置层表达出来。"""

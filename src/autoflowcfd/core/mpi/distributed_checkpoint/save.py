@@ -16,6 +16,7 @@ from autoflowcfd.core.mpi import is_root, get_rank, get_size
 
 from autoflowcfd.core.mpi.comm import barrier
 from autoflowcfd.core.utils.checkpoint_physics import physics_metadata
+from autoflowcfd.core.utils.order_continuation.checkpoint_state import phase_state_metadata
 
 from .state import gather_global_state
 from .turbulence import gather_turbulence_fields, global_cell_is_prism
@@ -131,6 +132,8 @@ def distributed_save_checkpoint(
         # 与单机写入端共用同一个函数。
         **physics_metadata(solver),
     }
+    # Order Continuation 阶段起始残差（与单机写入端共用，见 order_continuation/checkpoint_state.py）
+    metadata.update(phase_state_metadata(solver))
     if surface_mesh:
         # resume 按它重新做边界归属；缺了就退回"无面网格"的几何匹配，
         # 边界组可能与原运行不同（单机写入端一直写这个键）。

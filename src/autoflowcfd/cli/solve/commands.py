@@ -21,6 +21,7 @@ from typing import Optional
 import click
 from loguru import logger
 
+from autoflowcfd.cli.solve.option_help import PHASE_MAX_ITER_HELP, RESIDUAL_DROP_THRESHOLD_HELP, THREADS_HELP
 from autoflowcfd.cli.solve.solver_factory import validate_backend_options
 from autoflowcfd.cli.solve.distributed_checkpoint_io import distributed_periodic_checkpoint_callback
 from autoflowcfd.cli.solve.checkpoint_io import (
@@ -68,7 +69,7 @@ from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coeffici
                    "checkpoint 里已经存了一份，此处可不传；两者都缺失且 "
                    "input_file 是 .nas 体网格时才会报错")
 @click.option('--reference-area', type=float, default=None, help='气动系数参考面积 (m^2)')
-@click.option('--threads', '-j', type=int, default=-1, help='CPU 后端 numba 并行 kernel 使用的线程数，默认 -1 = 4（本机真实网格实测扩展性甜点，不是核数）')
+@click.option('--threads', '-j', type=int, default=-1, help=THREADS_HELP)
 @click.option('--skip-quality-check', is_flag=True,
               help='跳过重建时的网格质量门检查（B-11：原求解靠该选项才跑得起来的'
                    '网格，resume 同样需要跳过；不建议，仅用于临时诊断）')
@@ -88,7 +89,7 @@ from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coeffici
 @click.option('--cfl-max', type=float, default=None,
               help='自适应 CFL 上限，默认按时间格式取（rk3 为 0.06，newton-krylov 为 1e8）。'
                    'rk3 默认值历史：（默认 0.06，2026-09-17 从 0.5 下调）。'
-                   '仅单机 CPU 路径（非 --n-ranks>1/--multi-gpu）支持。原文案建议的'
+                   '单机与分布式续算都生效。原文案建议的'
                    '"稳定收敛可试 0.8"已删除——0.8 比实测线性极限高近 7 倍，从来'
                    '不是可达值。下调依据见 `solve steady --cfl-max` 的帮助：2026-09-17 按直接谱测量 + 两张真实网格的失效点重定，线性极限约 0.117、实测失效点 plate 0.30 / 平板边界层 0.10，默认值留 1.7 倍以上裕度。')
 @click.option('--cfl-min', type=float, default=None,
@@ -98,17 +99,11 @@ from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coeffici
                    'plate_demo 实测的稳定边界，等于一个已验证可用的工作点通过 CLI 根本'
                    '到不了），但 `solve resume` 从未跟上——续算会静默退回控制器默认 '
                    '0.05，把原本固定 CFL 0.03 的稳定运行抬到发散。默认值与 `solve '
-                   'steady` 对齐为 0.01。仅单机 CPU 路径生效。')
+                   'steady` 对齐为 0.01。单机与分布式续算都生效。')
 @click.option('--phase-max-iter', type=int, default=None,
-              help='Order Continuation（目标阶数>=2 时触发）非最终阶段各自的最大迭代'
-                   '步数上限。默认(不传)时取本次续算新增的额外迭代数按剩余阶段数机械'
-                   '均分的结果作为这一个数字的默认值；不论默认还是显式传值，目标阶数'
-                   '永远吃掉这次续算剩余的全部步数，不会被稀释——见'
-                   'core/utils/order_continuation.py 文档。CPU/单GPU/CPU MPI分布式/'
-                   '多GPU分布式全部支持')
+              help=PHASE_MAX_ITER_HELP)
 @click.option('--residual-drop-threshold', type=float, default=100.0,
-              help='Order Continuation 单个非最终阶段判定"可以提前升阶"的残差下降倍数，'
-                   '默认100(降2个数量级)。CPU/单GPU/CPU MPI分布式/多GPU分布式全部支持')
+              help=RESIDUAL_DROP_THRESHOLD_HELP)
 @click.option('--n-ranks', type=int, default=1,
               help='MPI rank 总数（>1 时重建为分布式求解器——CPU MPI"传统模式"，'
                    '或配合 --multi-gpu/--fully-distributed 走对应的分布式构造入口）。'
@@ -152,7 +147,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
         checkpoint_interval: 中间 checkpoint 保存间隔（额外迭代数）
         cfl_start, cfl_max, cfl_min: 自适应 CFL 的初始值/上限/下限（纯数值加速参数，不影响
             物理解，不从 checkpoint 恢复——每次 resume 由本次命令行重新指定，
-            方便根据上一段收敛表现调整）。仅单机 CPU 路径生效。
+            方便根据上一段收敛表现调整）。单机与分布式续算都生效。
         phase_max_iter: Order Continuation 非最终阶段最大步数上限，None 时取
             max_iter // len(orders) 作为这个数字的默认值——不论默认还是
             显式值，目标阶数都吃掉剩余全部步数，见同名 CLI 选项帮助文本

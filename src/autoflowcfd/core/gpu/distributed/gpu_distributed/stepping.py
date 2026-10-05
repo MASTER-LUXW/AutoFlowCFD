@@ -56,9 +56,8 @@ class _MultiGPUSteppingMixin:
         """阶数切换（2026-09-02，见 core/gpu/distributed/
         gpu_distributed_order_continuation.py 模块文档）——与 CPU
         `DistributedFRSolver._interpolate_to_new_order` 同一个命名/
-        调用约定，供 `run_distributed_order_continuation`（CPU/GPU
-        共用同一份迭代循环，见 core/mpi/distributed_order_
-        continuation.py）统一调用。"""
+        调用约定，供 `core/utils/order_continuation/run.py::run_order_continuation`（四个后端
+        共用同一份迭代循环）统一调用。"""
         from autoflowcfd.core.gpu.distributed.gpu_distributed_order_continuation import (
             gpu_interpolate_to_new_order,
         )

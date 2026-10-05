@@ -34,21 +34,30 @@ class TestConfigLoaderTemplateRoundTrip:
             "2026-09-18：配置层那个独立的同名枚举已删除，`rk3` 现在解析成"
             "核心层的 SSP_RK3（此前是配置层的 RK3，两者是不同的类）")
 
-    def test_generated_transient_template_uses_the_real_field_name(self):
-        """The hardcoded template text in `cli/config_commands.py` must use
-        `time_scheme:` (the real TransientConfig field), not a differently
-        named key that would be silently dropped by the loader."""
-        from autoflowcfd.cli.config_commands import init as config_init_cmd
+    def test_generated_templates_round_trip_to_the_config_defaults(self, tmp_path, caplog):
+        """`config init` 的模板由配置类字段生成（2026-10-05 起，此前是手写模板：默认值过时、瞬态模板的
+        `turbulence: des` 不是合法取值、加载即失败）：加载回来等于默认配置，且没有未知键警告。"""
+        import dataclasses
 
-        # Reach into the module source rather than invoking the CLI, so this
-        # test pins the exact literal key name independent of Click's I/O.
-        # `init` is a Click Command wrapping the real function - inspect its
-        # `.callback`, not the Command object itself.
-        import inspect
+        from click.testing import CliRunner
 
-        source = inspect.getsource(config_init_cmd.callback)
-        assert "time_scheme:" in source
-        assert "time_integration:" not in source
+        from autoflowcfd.cli.main import cli
+        from autoflowcfd.config.loader import load_config
+        from autoflowcfd.config.solver_config import SteadyConfig, TransientConfig, TurbulenceModel
+
+        for template, cls in (("steady", SteadyConfig), ("transient", TransientConfig)):
+            out = tmp_path / f"{template}.yaml"
+            result = CliRunner().invoke(cli, ["config", "init", "--template", template, "-o", str(out)])
+            assert result.exit_code == 0, result.output
+            text = out.read_text(encoding="utf-8")
+            assert ", ".join(t.value for t in TurbulenceModel) in text
+            loaded, default = load_config(out), cls()
+            for f in dataclasses.fields(cls):
+                if f.init:
+                    assert getattr(loaded, f.name) == getattr(default, f.name), (template, f.name)
+            assert "total_steps" not in text
+            if template == "transient":
+                assert "time_scheme:" in text and "time_integration:" not in text
 
     def test_mode_key_does_not_trigger_unknown_config_key_warning(self, tmp_path, caplog):
         """`mode` is a legitimate top-level routing key consumed by

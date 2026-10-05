@@ -465,22 +465,9 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         self._update_primitives_gpu()
 
     def _interpolate_to_new_order(self, target_p: int) -> None:
-        """阶数切换（2026-09-02，见 core/gpu/solver/gpu_solver_order_
-        continuation.py 模块文档）——与 CPU/GPU 分布式版本同一个命名/
-        调用约定。"""
+        """阶数切换（Order Continuation 的统一换阶接口，见 `core/utils/order_continuation/run.py`；自适应 CFL
+        复位由那个循环对全部后端统一做）。"""
         from autoflowcfd.core.gpu.solver.gpu_solver_order_continuation import (
             gpu_solver_interpolate_to_new_order,
         )
         gpu_solver_interpolate_to_new_order(self, target_p)
-
-        # 自适应 CFL 控制器必须在阶数切换时复位（2026-09-14，与 CPU 侧
-        # order_continuation.py 里 `_cfl_ctrl.reset()` 同一理由）：阶数变化
-        # 会让残差发生一次跳变（插值误差），那不是"解在恶化"，不应触发
-        # CFL 收缩。
-        # **这条对单机 GPU 是必需的、不能照抄分布式路径的"不用管"**：
-        # CPU MPI 分布式在阶数切换时把 `_local_solver` 置 None、下次访问
-        # 重新构造一个全新 FRSolver（连带全新控制器），相当于免费拿到了
-        # 复位；而这里 `gpu_solver_interpolate_to_new_order` 是**原地**改
-        # mesh/ops/GPU 常驻数组，`self._cfl_controller` 会跨阶数存活下来。
-        if getattr(self, "_cfl_controller", None) is not None:
-            self._cfl_controller.reset()

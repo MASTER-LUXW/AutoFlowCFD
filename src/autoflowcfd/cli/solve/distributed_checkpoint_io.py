@@ -19,6 +19,7 @@ from typing import Optional
 import click
 
 from autoflowcfd.cli.solve.wall_distance import wall_distance_source_if_needed
+from autoflowcfd.core.utils.order_continuation.checkpoint_state import restore_phase_state
 
 
 def rebuild_distributed_solver_from_checkpoint(
@@ -241,7 +242,7 @@ def rebuild_distributed_solver_from_checkpoint(
     # current_order），这里把 solver.order 单独纠正回真正的目标阶数，
     # 否则 solve() 里 `self.order_continuation_enabled and self.order
     # >= 2` 这个门槛会被错误地拿 current_order 去判断。`_resumed_from_
-    # checkpoint` 告诉 `run_distributed_order_continuation` 不要把刚
+    # checkpoint` 告诉 `run_order_continuation` 不要把刚
     # 恢复的真实解重置回 P0 均匀流场、从 `solver.current_order`（而不是
     # 0）继续爬坡。multi_gpu 分支（"传统模式"与"完全分布式加载"均已于
     # 2026-09-02 接入，见 gpu_distributed_order_continuation.py/
@@ -250,6 +251,8 @@ def rebuild_distributed_solver_from_checkpoint(
     if hasattr(solver, "order"):
         solver.order = target_order
     solver._resumed_from_checkpoint = True
+    # Order Continuation 阶段起始残差（与单机恢复端共用；2026-10-05 以前分布式不写也不读）
+    restore_phase_state(solver, metadata)
 
     metadata["order"] = order
     metadata["target_order"] = target_order
