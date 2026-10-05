@@ -9,6 +9,13 @@ import numpy as np
 from numba import njit, prange
 from dataclasses import dataclass
 
+#: 求解器状态数组的变量数：平均流守恒变量 (rho, rho*u, rho*v, rho*w, rho*E)。湍流输运场存在模型对象上
+#: （`turbulence/transported.py`）。2026-10-05 以前 SST 族的 CPU 单机状态另带两个 k/omega 槽位
+#: `U[..., 5:7]`：全仓库无人读取、残差恒为零，却让 CPU SST 的残差 RMS 分母多算两列（比 GPU/分布式小
+#: sqrt(7/5) 倍）、写出的 checkpoint 是 7 列（恢复到 5 列的单 GPU 时形状校验拒绝）、隐式步每次残差求值
+#: 多拷一份整状态。旧 checkpoint 的 7 列状态恢复时只取前 5 列（`cli/solve/checkpoint_io/restore.py`）。
+N_MEAN_FLOW_VARS = 5
+
 
 def uniform_conservative(rho: float, u: float, v: float, w: float,
                          p: float, gamma: float = 1.4) -> np.ndarray:
@@ -41,65 +48,47 @@ class SolverResult:
 class FRState:
     """
     FR 求解器状态容器。
-    
+
     Attributes:
-        U: 守恒变量数组，形状为 (n_cells, n_sps_per_cell, n_vars)。
-           n_vars = 5 (rho, rho_u, rho_v, rho_w, rho_e)
+        U: 守恒变量数组，形状为 (n_cells, n_sps_per_cell, N_MEAN_FLOW_VARS)
         dU_dt: 残差/时间导数数组，形状同 U。
         Q: 原始变量数组 (rho, u, v, w, p)，用于通量计算。
     """
 
-    def __init__(self, n_cells: int, n_sps_per_cell: int, n_vars: int = 7):
+    def __init__(self, n_cells: int, n_sps_per_cell: int):
         """
         初始化 FRState。
-        
+
         Args:
             n_cells: 单元数量
             n_sps_per_cell: 每个单元的解点数量
-            n_vars: 守恒变量数量 (5个流体 + 2个湍流)
         """
         self.n_cells = n_cells
         self.n_sps = n_sps_per_cell
-        self.n_vars = n_vars
-        
-        # 采用 SoA (Structure of Arrays) 思想的连续内存布局优化
+        self.n_vars = N_MEAN_FLOW_VARS
+
         # 形状: (n_cells, n_sps_per_cell, n_vars)
-        self.U = np.zeros((n_cells, n_sps_per_cell, n_vars), dtype=np.float64)
+        self.U = np.zeros((n_cells, n_sps_per_cell, self.n_vars), dtype=np.float64)
         self.dU_dt = np.zeros_like(self.U)
         self.Q = np.zeros_like(self.U)  # 原始变量用于通量计算
 
-    def initialize_uniform(self, rho=1.0, u=0.0, v=0.0, w=0.0, p=1.0, k=1e-6, omega=1e-2):
-        """
-        用均匀流场初始化状态。
-        
-        Args:
-            rho: 密度
-            u, v, w: 速度分量
-            p: 压力
-            k: 湍动能
-            omega: 比耗散率
-        """
-        # 公式的唯一事实来源见模块级 `uniform_conservative`
-        self.U[:, :, :5] = uniform_conservative(rho, u, v, w, p)
-
-        if self.n_vars > 5:
-            self.U[:, :, 5] = rho * k      # rho_k
-            self.U[:, :, 6] = rho * omega  # rho_omega
-        
+    def initialize_uniform(self, rho=1.0, u=0.0, v=0.0, w=0.0, p=1.0):
+        """用均匀流场初始化状态（公式的唯一事实来源见模块级 `uniform_conservative`）。"""
+        self.U[:, :, :] = uniform_conservative(rho, u, v, w, p)
         self._update_primitives()
 
     def _update_primitives(self):
-        """从守恒变量 U 更新原始变量 Q (含湍流量)。
+        """从守恒变量 U 更新原始变量 Q。
 
         numba 并行实现（2026-09-25，算式与此前的 numpy 版本逐项相同：密度下限
-        1e-10、压力下限 1 Pa、k/omega 下限 1e-12，下限都用比较实现以保证 NaN
-        照样传播）。此前每次约 85 ms、单线程，每次残差求值前都要调一次。
+        1e-10、压力下限 1 Pa，下限都用比较实现以保证 NaN 照样传播）。此前每次约
+        85 ms、单线程，每次残差求值前都要调一次。
         """
-        _update_primitives_kernel(self.U, self.Q, self.n_vars > 5)
+        _update_primitives_kernel(self.U, self.Q)
 
     def get_residual_norm(self) -> float:
         """计算残差的 RMS 范数（按单元数归一化），用于收敛性判断。
-        
+
         使用 RMS (Root Mean Square) 而非原始 L2 范数，使残差量级与网格尺寸无关，
         便于不同网格间的收敛行为对比。RMS = L2 / sqrt(N)，其中 N 是总自由度数。
         """
@@ -110,7 +99,7 @@ class FRState:
 
 
 @njit(cache=True, parallel=True)
-def _update_primitives_kernel(U, Q, with_turbulence):
+def _update_primitives_kernel(U, Q):
     for c in prange(U.shape[0]):
         for s in range(U.shape[1]):
             rho = U[c, s, 0]
@@ -128,12 +117,3 @@ def _update_primitives_kernel(U, Q, with_turbulence):
             Q[c, s, 2] = v
             Q[c, s, 3] = w
             Q[c, s, 4] = p
-            if with_turbulence:
-                k = U[c, s, 5] / rho
-                if k < 1e-12:
-                    k = 1e-12
-                om = U[c, s, 6] / rho
-                if om < 1e-12:
-                    om = 1e-12
-                Q[c, s, 5] = k
-                Q[c, s, 6] = om

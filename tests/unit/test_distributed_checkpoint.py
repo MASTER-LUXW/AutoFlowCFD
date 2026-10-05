@@ -142,7 +142,7 @@ class TestGpuDistributedCheckpointRoundtrip:
         import types
         solver = types.SimpleNamespace()
         solver.partition = partition
-        solver.state = DistributedFRState(partition, n_sps, n_vars)
+        solver.state = DistributedFRState(partition, n_sps)
         solver.mesh = mesh
         # 写出端按紧凑排列收集逐单元棱柱标志（真实求解器恒有分布式面几何）
         from autoflowcfd.core.mpi.distributed_flat_face import build_distributed_flat_face
@@ -172,7 +172,7 @@ class TestGpuDistributedCheckpointRoundtrip:
 
         saved_path = MultiGPUDistributedSolver.save_checkpoint_distributed(
             solver, str(tmp_path), iteration=42, input_file="dummy.nas",
-            order=1, turbulence_model="none", backend="gpu",
+            order=1, turbulence_model="none",
         )
         assert saved_path is not None
         assert Path(saved_path).exists()

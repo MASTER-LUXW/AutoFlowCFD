@@ -143,7 +143,7 @@ def _build_span_extruded(nx, n_wall, n_span, cfl):
         "x_max": {"type": "OUTLET", "p_outlet": P_INF},
     }
     solver = FRSolver(
-        mesh=mesh, order=1, turb_model_name="NONE", n_vars=5,
+        mesh=mesh, order=1, turb_model_name="NONE",
         time_scheme=TimeIntegrationScheme.SSP_RK3,
         rho_inf=RHO_INF, vel_inf=U_INF, p_inf=P_INF,
         mu_molecular=mu, bc_overrides=bc,

@@ -41,24 +41,34 @@ def restore_state_from_checkpoint(
             f"无法精确恢复。"
         )
 
-    U_ckpt = fields["U_sps"]
     ckpt_iter = metadata.get("iteration", 0)
-
-    # 形状校验：n_cells 和 n_sps 必须一致（网格/阶数不匹配）
-    if U_ckpt.shape[0] != solver.state.n_cells or U_ckpt.shape[1] != solver.state.n_sps:
-        raise click.ClickException(
-            f"Checkpoint 状态形状 {U_ckpt.shape} 与重建求解器的状态形状 "
-            f"{solver.state.U.shape} 不匹配（网格或阶数可能已变化），拒绝恢复。"
-        )
-
-    # 平均流只取 5 个守恒变量：SST 族状态数组的第 6、7 列是从未更新的历史槽位（湍流场在模型
-    # 对象上，`core/turbulence/registry.py::n_state_vars`）。2026-10-04 以前这里整体拷贝状态数组、
-    # 从不恢复模型上的湍流场——"稳态 SST 收敛 -> --init-from 启动 DDES"的湍流场其实是来流初值。
-    solver.state.U[:, :, :5] = U_ckpt[:, :, :5]
+    # 2026-10-04 以前这里只拷状态数组、从不恢复模型上的湍流场——"稳态 SST 收敛 -> --init-from 启动
+    # DDES"的湍流场其实是来流初值。
+    solver.state.U = mean_flow_state_from_checkpoint(fields["U_sps"], solver.state)
     solver.state._update_primitives()
     restored = restore_turbulence_from_fields(solver, fields)
     print("   ✅ 从 checkpoint 恢复平均流场" + ("与湍流场" if restored else ""))
     return ckpt_iter
+
+
+def mean_flow_state_from_checkpoint(U_ckpt, state) -> np.ndarray:
+    """checkpoint 的 `U_sps` -> 求解器状态（平均流守恒变量，`fr_solver/state.py::N_MEAN_FLOW_VARS`）。
+
+    2026-10-05 以前 CPU 单机 SST 族的状态带两个从未更新的 k/omega 槽位，那时写出的 checkpoint 是 7 列；
+    只取前 5 列（湍流场按模型声明的字段名另存，见 `restore_turbulence_from_fields`）。
+
+    Raises:
+        click.ClickException: 单元数/解点数不符（网格或阶数已变化）或不足 5 列
+    """
+    from autoflowcfd.core.fr_solver.state import N_MEAN_FLOW_VARS
+
+    U_ckpt = np.asarray(U_ckpt)
+    if U_ckpt.ndim != 3 or U_ckpt.shape[:2] != state.U.shape[:2] or U_ckpt.shape[2] < N_MEAN_FLOW_VARS:
+        raise click.ClickException(
+            f"Checkpoint 状态形状 {U_ckpt.shape} 与重建求解器的状态形状 "
+            f"{state.U.shape} 不匹配（网格或阶数可能已变化），拒绝恢复。"
+        )
+    return np.ascontiguousarray(U_ckpt[:, :, :N_MEAN_FLOW_VARS])
 
 
 def restore_turbulence_from_fields(solver, fields: dict) -> bool:
@@ -151,13 +161,7 @@ def restore_solver_state_from_fields(solver, fields: dict, metadata: dict) -> No
     Raises:
         click.ClickException: 状态形状与 solver 当前几何不匹配
     """
-    U_restored = fields["U_sps"]
-    if U_restored.shape != solver.state.U.shape:
-        raise click.ClickException(
-            f"Checkpoint 状态形状 {U_restored.shape} 与重建求解器的状态形状 "
-            f"{solver.state.U.shape} 不匹配（网格或阶数可能已变化），拒绝恢复。"
-        )
-    solver.state.U = U_restored
+    solver.state.U = mean_flow_state_from_checkpoint(fields["U_sps"], solver.state)
     solver.state._update_primitives()
 
     restore_turbulence_from_fields(solver, fields)

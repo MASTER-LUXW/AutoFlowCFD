@@ -126,7 +126,7 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     self.ops_data = {k: v for k, v in self.mesh_data.items()}
 
     self.gpu_halo = GPUHaloExchange(self.partition, n_sps=n_sps, n_vars=5, device_id=device_id)
-    self.state = DistributedFRState(self.partition, n_sps, 5)
+    self.state = DistributedFRState(self.partition, n_sps)
 
     freestream_pkg = package['freestream']
     # 不给兜底值（2026-09-24）：package 的 freestream 由

@@ -88,7 +88,7 @@ class TestDistributedOrderContinuationDispatch:
         # 步 inf；换成 dt=1e-9 后 P2 全程有限、数值稳定），与本次 Order
         # Continuation 重建逻辑本身是否正确无关，只是这个合成小网格在
         # 固定步长下的真实 CFL 约束。
-        result = solver.solve(n_steps=60, dt=1e-9, output_interval=1000)
+        result = solver.solve(max_iter=60, dt=1e-9)
 
         # 爬坡走完后必须停在目标阶数 P2，不能停在中途的 P0/P1。
         assert solver.current_order == 2
@@ -126,7 +126,7 @@ class TestDistributedOrderContinuationDispatch:
             return SolverResult(converged=False, iterations=0, final_residual=1.0)
         patch_pkg_attr(monkeypatch, doc_mod, "run_distributed_order_continuation", _fake_run)
 
-        solver.solve(n_steps=3, dt=1e-6, output_interval=1000)
+        solver.solve(max_iter=3, dt=1e-6)
         assert (len(calls) == 1) == enabled
         assert np.all(np.isfinite(solver.state.U[:solver.partition.n_local_cells]))
 
@@ -233,7 +233,7 @@ class TestDistributedOrderContinuationWithTurbulence:
         # 步 inf；换成 dt=1e-9 后 P2 全程有限、数值稳定），与本次 Order
         # Continuation 重建逻辑本身是否正确无关，只是这个合成小网格在
         # 固定步长下的真实 CFL 约束。
-        result = solver.solve(n_steps=60, dt=1e-9, output_interval=1000)
+        result = solver.solve(max_iter=60, dt=1e-9)
 
         assert solver.current_order == 2
         n_local = solver.partition.n_local_cells
@@ -251,7 +251,7 @@ class TestDistributedOrderContinuationWithTurbulence:
 
         mesh, ops = mesh_p2_and_ops
         solver = _make_p2_solver(mesh, ops, turb_model_name="sa")
-        result = solver.solve(n_steps=60, dt=1e-9, output_interval=1000)   # dt 的理由见上一个用例
+        result = solver.solve(max_iter=60, dt=1e-9)   # dt 的理由见上一个用例
         assert solver.current_order == 2
         n_local = solver.partition.n_local_cells
         nt = solver.turb_model.nu_tilde_field

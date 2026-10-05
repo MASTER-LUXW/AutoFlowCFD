@@ -55,7 +55,7 @@ def _build_couette_solver(order: int = 2):
         "x_min": {"type": "OUTLET", "p_outlet": p_inf}, "x_max": {"type": "OUTLET", "p_outlet": p_inf},
     }
     solver = FRSolver(
-        mesh=mesh, order=order, turb_model_name="NONE", n_vars=5,
+        mesh=mesh, order=order, turb_model_name="NONE",
         time_scheme=TimeIntegrationScheme.SSP_RK3,
         rho_inf=rho_inf, vel_inf=U_wall, p_inf=p_inf,
         bc_overrides=bc_overrides,
@@ -318,7 +318,7 @@ def test_couette_prism_freestream_preservation():
     bc_overrides = {name: {"type": "FARFIELD", "Q_free": Q_free}
                     for name in ("wall_bottom", "wall_top", "z_min", "z_max", "x_min", "x_max")}
     solver = FRSolver(
-        mesh=mesh, order=2, turb_model_name="NONE", n_vars=5,
+        mesh=mesh, order=2, turb_model_name="NONE",
         time_scheme=TimeIntegrationScheme.SSP_RK3,
         rho_inf=rho_inf, vel_inf=u_inf, p_inf=p_inf,
         bc_overrides=bc_overrides,

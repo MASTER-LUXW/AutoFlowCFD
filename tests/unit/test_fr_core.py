@@ -167,12 +167,12 @@ class TestFRState:
     """测试FR状态数据结构"""
 
     def test_fr_state_initialization(self):
-        """Test S-01: FRState initialization with turbulence variables."""
+        """S-01：状态只含平均流 5 个守恒变量（湍流场在模型对象上；SST 的两个历史槽位 2026-10-05 删除）。"""
         n_cells, n_sps = 10, 8
-        state = FRState(n_cells, n_sps, n_vars=7) # V2.0 默认支持 SST 模型
-        
-        assert state.U.shape == (n_cells, n_sps, 7)
-        assert state.Q.shape == (n_cells, n_sps, 7)
+        state = FRState(n_cells, n_sps)
+
+        assert state.U.shape == (n_cells, n_sps, 5)
+        assert state.Q.shape == (n_cells, n_sps, 5)
         assert np.all(state.U == 0)
 
     def test_fr_state_uniform_flow(self):

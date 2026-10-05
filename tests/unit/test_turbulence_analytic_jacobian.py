@@ -18,7 +18,6 @@ from autoflowcfd.core.time_integration.implicit.coupled_step import (
     TURB_COLUMNS, CoupledResidual, SubsystemResidual,
 )
 from autoflowcfd.core.time_integration.implicit.cell_blocks import CellBlockJacobian
-from autoflowcfd.core.turbulence.registry import n_state_vars
 from autoflowcfd.fr.native_padding import real_row_mask, real_sps_per_cell
 from autoflowcfd.core.fr_solver.turbulence import apply_wall_distance_source
 from tests.validation._channel_mesh import (
@@ -40,7 +39,7 @@ def _turb_solver(kind, order, model="SST", n_warm=3):
         bc[n] = {"type": "WALL", "is_no_slip": True, "wall_velocity": [0.0, 0.0, 0.0]}
     for n in ("x_min", "x_max"):
         bc[n] = {"type": "FARFIELD", "Q_free": [RHO, U, 0.0, 0.0, P]}
-    s = FRSolver(mesh=mesh, order=order, turb_model_name=model, n_vars=n_state_vars(model),
+    s = FRSolver(mesh=mesh, order=order, turb_model_name=model,
                  time_scheme=TimeIntegrationScheme.NEWTON_KRYLOV, rho_inf=RHO, vel_inf=U, p_inf=P,
                  mu_molecular=1.8e-5, bc_overrides=bc)
     s.order_continuation_enabled = False

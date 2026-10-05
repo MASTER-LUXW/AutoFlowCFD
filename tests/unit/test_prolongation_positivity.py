@@ -42,7 +42,7 @@ def test_prolongated_state_is_admissible_on_new_point_set():
     from autoflowcfd.core.fr_solver import FRSolver
 
     mesh = build_channel_mesh_prism(2, 3, 3, 2, 0.4, 0.1, 0.08)
-    s = FRSolver(mesh=mesh, order=2, turb_model_name="NONE", n_vars=5, rho_inf=1.225, vel_inf=30.0,
+    s = FRSolver(mesh=mesh, order=2, turb_model_name="NONE", rho_inf=1.225, vel_inf=30.0,
                  p_inf=101325.0, mu_molecular=1.8e-5)
     # 回到 P1：几何、算子、状态
     s.mesh.set_order(1)

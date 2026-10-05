@@ -237,7 +237,7 @@ class TestDistributedStepMatchesSingleMachine:
 
 class TestDistributedDualTimeStepping:
     """DUAL_TIME（真正时间精度的瞬态仿真模式）分布式支持验证（2026-09-02，
-    真实bug修复——见 __init__/step() 里 `self._time_integrator` 构造处的
+    真实bug修复——见 __init__/step() 里 `self.time_integrator` 构造处的
     说明：此前无条件硬编码 SSP_RK3、`step()` 无条件调用
     `_ssp_rk_stage_step`，DUAL_TIME 请求了也会被静默换成稳态收敛加速
     模式，完全无路可走）。
@@ -268,7 +268,7 @@ class TestDistributedDualTimeStepping:
         residual()+compute_viscous_residual()`（DUAL_TIME 用的正是
         同一个纯空间残差，与所选时间推进方案本身无关）在同一个初始
         状态上逐位一致——这是本次改动真正新增、真正有风险的部分
-        （`_time_integrator` 构造/`step()` 分支/`residual_func` 复用），
+        （`time_integrator` 构造/`step()` 分支/`residual_func` 复用），
         `step_dual_time` 内部 BDF 构造+收敛迭代本身是既有单机数值
         逻辑，不是本次改动的对象。"""
         from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
@@ -302,13 +302,13 @@ class TestDistributedDualTimeStepping:
         dist_solver.state.Q[:n_cells] = conserved_to_primitive(U0[..., :5])
 
         captured = {}
-        real_step_dual_time = dist_solver._time_integrator.step_dual_time
+        real_step_dual_time = dist_solver.time_integrator.step_dual_time
 
         def _spy_step_dual_time(solution, spatial_residual, *args, **kwargs):
             captured["value"] = spatial_residual(solution)
             return real_step_dual_time(solution, spatial_residual, *args, **kwargs)
 
-        dist_solver._time_integrator.step_dual_time = _spy_step_dual_time
+        dist_solver.time_integrator.step_dual_time = _spy_step_dual_time
         dist_solver.step(1e-5)
 
         assert "value" in captured, "step_dual_time 必须真正被 step() 调用到"
@@ -453,9 +453,31 @@ class TestDistributedCheckpointRoundTrip:
         def _cb(solver_ref, iteration):
             calls.append(iteration)
 
-        solver.solve(n_steps=5, dt=1e-6, output_interval=100, checkpoint_callback=_cb)
+        solver.solve(max_iter=5, dt=1e-6, checkpoint_callback=_cb)
 
         assert calls == [1, 2, 3, 4, 5]
+
+    def test_solve_uses_the_shared_loop_relative_criterion_and_history(self, mesh_and_ops):
+        """2026-10-05 起与其余后端共用 `SolveLoopMixin`：返回 `SolverResult`、收敛历史每步一条、收敛判据是
+        相对下降 1/tol 倍（此前是绝对的 `res < tol`，且不记收敛历史）。"""
+        from autoflowcfd.core.fr_solver.state import SolverResult
+
+        mesh, ops = mesh_and_ops
+        n_cells = mesh.n_cells
+        solver = self._make_solver(mesh, ops)
+        U0 = _nonuniform_U(mesh, np.random.default_rng(3))
+        solver.state.U[:n_cells] = U0
+        solver.state.Q[:n_cells] = conserved_to_primitive(U0[..., :5])
+
+        solver.order_continuation_enabled = False   # 测定阶循环本身（爬坡路径的判据另有测试）
+        result = solver.solve(max_iter=3, dt=1e-6, tol=1e-6)
+        assert isinstance(result, SolverResult) and result.iterations == 3 and not result.converged
+        assert len(solver.residual_history) == 3 and solver.residual_history[-1] == result.final_residual
+        # 判据区分：tol 远大于残差时，绝对判据 `res < tol` 第 1 步即停；相对判据从第 2 步起检查
+        # "下降 1/tol 倍"，第 2 步停（与单机同一语义）
+        assert solver.residual_history[0] < 1e300
+        result = solver.solve(max_iter=5, dt=1e-6, tol=1e300)
+        assert result.converged and result.iterations == 2
 
 
 if __name__ == "__main__":

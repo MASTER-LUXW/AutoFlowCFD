@@ -66,16 +66,8 @@ class _SolverResidualMixin:
             self.state.U, self.mesh, self.ops,
             boundary_ghost_provider=self.boundary_ghost_provider,
             mach_ref=self.freestream["mach_ref"],
-            entropy_stable_volume=self.entropy_stable_volume_enabled,
         )
 
-        if self.state.n_vars > 5:
-            # 湍流量 (k, omega) 的对流输运项当前仍由 compute_turbulence_source
-            # 单独处理（局部源项积分，不含对流通量），此处只补零占位维度，
-            # 不在这里静默引入未经验证的湍流对流项。
-            res_full = np.zeros((res_euler.shape[0], res_euler.shape[1], self.state.n_vars))
-            res_full[:, :, :5] = res_euler
-            return res_full
         return res_euler
 
     def compute_viscous_residual(self, mu_t_turb=None, nu_av=None):

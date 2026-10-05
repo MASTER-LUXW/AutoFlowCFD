@@ -21,7 +21,7 @@ class _GPUDistributedCheckpointMixin:
 
     def save_checkpoint_distributed(
         self, output_dir: str, iteration: int, input_file: str,
-        order: int, turbulence_model: str, backend: str = "gpu",
+        order: int, turbulence_model: str,
         history: dict = None, target_order: int = None,
         surface_mesh: str = None,
     ):
@@ -58,7 +58,6 @@ class _GPUDistributedCheckpointMixin:
                 `distributed_save_checkpoint` 同名参数同一处修复同一个
                 理由。
             turbulence_model: 湍流模型名（目前恒为 'none'，见 __init__）
-            backend: 后端名，默认 'gpu'
             history: 收敛历史（可选）
             target_order: Order Continuation 的最终目标阶数
                 （`self.order`）。None（默认，兼容旧调用方）时回退到
@@ -74,7 +73,7 @@ class _GPUDistributedCheckpointMixin:
         self.state.U[:n_local] = cp.asnumpy(self.U_gpu)
 
         return distributed_save_checkpoint(
-            self, output_dir, iteration, input_file, order, turbulence_model, backend,
+            self, output_dir, iteration, input_file, order, turbulence_model, "gpu",
             history=history, target_order=target_order, surface_mesh=surface_mesh,
         )
 

@@ -34,9 +34,6 @@ from .constants import (  # noqa: F401
     VISCOUS_IP_C_BASE,
 )
 from .euler import (  # noqa: F401
-    _log_mean_point,
-    chandrashekar_flux_point,
-    entropy_stable_volume_divergence_batch,
     euler_physical_flux_batch,
     euler_physical_flux_point,
 )
@@ -72,8 +69,6 @@ __all__ = [
     "VBC_NOSLIP_WALL",
     "VISCOUS_IP_C_BASE",
     "boundary_other_gradients",
-    "chandrashekar_flux_point",
-    "entropy_stable_volume_divergence_batch",
     "euler_physical_flux_batch",
     "euler_physical_flux_point",
     "mirror_normal_component",

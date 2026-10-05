@@ -22,7 +22,7 @@ def _run_single_node(
     *,
     aoa_deg, aos_deg, artificial_viscosity_alpha, artificial_viscosity_enabled,
     backend, cfl_max, cfl_min, cfl_start, checkpoint_interval,
-    entropy_stable_volume_enabled, gpu_device, input_file, max_iter, mu_molecular, order,
+    gpu_device, input_file, max_iter, mu_molecular, order,
     output_dir, p_inf, phase_max_iter, reference_area, residual_drop_threshold,
     rho_inf, sem_num_eddies, skip_quality_check, surface_mesh, threads,
     time_scheme, turbulence_intensity, turbulence_model, vel_inf, viscosity_ratio,
@@ -49,7 +49,6 @@ def _run_single_node(
         aoa_deg=aoa_deg, aos_deg=aos_deg,
         artificial_viscosity_enabled=artificial_viscosity_enabled,
         artificial_viscosity_alpha=artificial_viscosity_alpha,
-        entropy_stable_volume_enabled=entropy_stable_volume_enabled,
     )
 
     # 参考面积（未给时沿来流方向自动估算），供迭代中输出气动力系数

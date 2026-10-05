@@ -819,8 +819,8 @@ class TestFullyDistributedDualTimeSupport:
             wall_distance_source=synthetic_wall_source(mesh),
         )
         solver = DistributedFRSolver.from_fully_distributed_package(package, n_ranks=1, rank=0)
-        assert solver._time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME
-        assert solver._time_integrator.dual_time_steps == 3
+        assert solver.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME
+        assert solver.time_integrator.dual_time_steps == 3
 
         solver.state.U[:n_cells] = U0
         solver.state.Q[:n_cells] = conserved_to_primitive(U0[..., :5])

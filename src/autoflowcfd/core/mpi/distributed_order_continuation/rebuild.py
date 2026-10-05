@@ -140,7 +140,7 @@ def _rebuild_cpu_traditional_partition_and_state(solver, target_p: int, new_loca
     n_local = new_partition.n_local_cells
     new_n_sps = solver.ops.D_3d.shape[0]
     n_vars = solver.state.n_vars
-    new_state = DistributedFRState(new_partition, new_n_sps, n_vars)
+    new_state = DistributedFRState(new_partition, new_n_sps)
     new_state.U[:n_local] = new_local_U
     new_state.Q[:n_local] = conserved_to_primitive(new_local_U[..., :5])
 

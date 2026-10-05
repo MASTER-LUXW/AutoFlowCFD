@@ -419,7 +419,7 @@ def build_blasius_solver(
     # implicit=True：隐式稳态 NK + 默认 SER 自适应 CFL（`cfl` 不用）；否则显式 SSP-RK3、固定 CFL
     cfl_kw = {} if implicit else dict(adaptive_cfl=False, cfl_start=cfl, cfl_max=cfl, cfl_min=cfl)
     solver = FRSolver(
-        mesh=mesh, order=order, turb_model_name=turb_model, n_vars=5,
+        mesh=mesh, order=order, turb_model_name=turb_model,
         time_scheme=(TimeIntegrationScheme.NEWTON_KRYLOV if implicit else TimeIntegrationScheme.SSP_RK3),
         rho_inf=RHO_INF, vel_inf=U_INF, p_inf=P_INF,
         mu_molecular=mu, bc_overrides=bc_overrides, **cfl_kw,

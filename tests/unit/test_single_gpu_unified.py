@@ -177,17 +177,6 @@ def test_factory_auto_picks_cpu_without_a_gpu(monkeypatch):
     assert type(solver) is FRSolver
 
 
-def test_factory_rejects_the_cpu_only_entropy_stable_volume_on_gpu():
-    import click
-
-    from autoflowcfd.cli.solve.solver_factory import build_single_node_solver
-
-    mesh, volume = _mesh_and_volume()
-    with pytest.raises(click.BadParameter, match="CPU"):
-        build_single_node_solver("gpu", mesh, volume, order=1, turb_model_name="none",
-                                 entropy_stable_volume_enabled=True)
-
-
 @pytest.mark.parametrize("command", ["steady", "transient"])
 @pytest.mark.parametrize("args, hint", [
     (["--backend", "gpu", "--n-ranks", "2"], "--multi-gpu"),

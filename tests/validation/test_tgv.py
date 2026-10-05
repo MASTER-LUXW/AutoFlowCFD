@@ -26,7 +26,8 @@
    声学 CFL/AUSM+up 不一致的覆辙。
 3. 时间推进：与等熵涡一致，用全局（非逐单元局部）步长的显式 SSP-RK3，
    理由同样是局部时间步长是稳态收敛加速技术、会破坏时间精度。
-4. 计算预算：实测（Re=20, n=4^3 网格, 150 步）动能比 KE/KE0 从初始
+4. 计算预算（2026-10-05 更新，下面这段 4^3 的旧数据作废：当时开着低马赫预处理、动能按解点等权平均，
+   见 `_build_tgv_solver`/`_kinetic_energy` 注释）：6^3 网格、150 步约 15 s。旧记录——实测（Re=20, n=4^3 网格, 150 步）动能比 KE/KE0 从初始
    短暂的数值适应小波动（第 0 步 1.069，正常的初场到离散 SPs 插值
    适应瞬态，不是发散迹象）后单调下降到 0.678（约 32% 净耗散），
    耗时 359s——用这组已验证的真实数据标定判据阈值，不追求复现文献
@@ -41,7 +42,9 @@ from autoflowcfd.core.time_integration import TimeIntegrationScheme
 from ._tgv_mesh import build_triply_periodic_tet_mesh
 
 ORDER = 2
-N = 4
+#: 每方向单元数。4^3 时粘性耗散率是解析值的 2.20 倍、6^3 时 1.45 倍（内罚项在欠分辨网格上的离散误差，随加密
+#: 以约 2.4 阶收敛到 1，见 `test_tgv_viscous_dissipation_rate_converges`），4^3 上 150 步净衰减是解析值的 4.7 倍。
+N = 6
 L = 2.0 * np.pi
 LC = 1.0
 RHO_INF, P_INF, U0 = 1.225, 101325.0, 30.0
@@ -54,9 +57,13 @@ N_STEPS = 150
 def _build_tgv_solver():
     mesh = build_triply_periodic_tet_mesh(order=ORDER, n=N, L=L)
     solver = FRSolver(
-        mesh=mesh, order=ORDER, turb_model_name="NONE", n_vars=5,
+        mesh=mesh, order=ORDER, turb_model_name="NONE",
         time_scheme=TimeIntegrationScheme.SSP_RK3,
         rho_inf=RHO_INF, vel_inf=U0, p_inf=P_INF,
+        # 全局物理时间步（时间精确）必须关掉低马赫伪时间预处理 Gamma：它是稳态加速手段，推进的是
+        # dU/dt = -Gamma R，改变声速且逐点混合守恒分量——周期域上质量/总能每 100 步漂移 2.5e-6
+        # （关闭后 5e-15），验证的就不是物理动力学（2026-10-05 查出，此前一直开着）。
+        low_mach_precond=False,
     )
     solver.order_continuation_enabled = False
 
@@ -136,10 +143,22 @@ def _set_tgv_ic(solver, mesh):
 
 
 def _kinetic_energy(solver) -> float:
+    """体积平均动能 `∫ 0.5 rho |u|^2 dV / V`（解点求积权重；原生四面体的填充槽位权重为 0）。
+
+    2026-10-05 以前是全部解点的等权平均：填充槽位冻结在初值、解点在单元内也不等权，近无粘 TGV 上
+    把真实的单调下降（0.935，600 步）显示成增长 1.46%。
+    """
+    from autoflowcfd.fr.native_tet.quadrature import build_native_tet_sp_weights
+
+    mesh = solver.mesh
+    assert mesh.n_prism_cells == 0, "本算例是纯四面体网格"
+    w_nat = build_native_tet_sp_weights(mesh.order)
+    w = np.zeros(mesh.n_sps_per_cell)
+    w[:w_nat.size] = w_nat
+    vol = mesh.get_all_cell_volumes()
     Q = solver.state.Q
-    rho = Q[:, :, 0]
-    ke_density = 0.5 * rho * (Q[:, :, 1]**2 + Q[:, :, 2]**2 + Q[:, :, 3]**2)
-    return float(ke_density.mean())
+    ke_density = 0.5 * Q[:, :, 0] * (Q[:, :, 1]**2 + Q[:, :, 2]**2 + Q[:, :, 3]**2)
+    return float(np.sum((vol / w_nat.sum())[:, None] * w[None, :] * ke_density) / vol.sum())
 
 
 def _analytic_tgv_dissipation(n: int = 128):
@@ -251,11 +270,49 @@ def test_tgv_kinetic_energy_decays_monotonically():
         f"100% 标记、等价于全局施加 mild 非幂等衰减）会出现这个现象，"
         f"`off` 与 `project` 都不会。")
     ratio = actual_drop / expect_drop
+    # 允许区间：离散粘性耗散率（6^3 上 1.45 倍解析值，见 N 的注释）+ 初场离散适应
     assert 0.1 < ratio < 3.0, (
         f"净衰减 {actual_drop * 100:.3f}% 与解析耗散率给出的 "
         f"{expect_drop * 100:.3f}% 相差 {ratio:.2f} 倍（允许 0.1~3 倍）。"
         f"总物理时间 {t_total:.5e} s，占衰减时标 "
         f"{t_total / (k_ana / (RHO_INF * eps_ana)) * 100:.2f}%")
+
+
+def test_tgv_viscous_dissipation_rate_converges():
+    """半离散粘性动能耗散率 `∫u·R_visc` 与解析 `-rho*eps` 之比：大于 1（内罚项额外耗散）且随加密单调趋于 1；
+    无粘部分的动能变化率在无散初场上为零（舍入级）。
+
+    这是 TGV 上判别粘性算子正确性的直接判据（与时间推进、步数无关）：比值不收敛说明粘性算子不相容，
+    小于 1 说明耗散不足或符号错误（`heat_conduction_sign_antidiffusion` 那类缺陷）。
+    """
+    from autoflowcfd.fr.native_tet.quadrature import build_native_tet_sp_weights
+
+    global N
+    eps_ana, _ = _analytic_tgv_dissipation()
+    ratios = []
+    saved = N
+    try:
+        for n in (4, 6):
+            N = n
+            solver, mesh = _build_tgv_solver()
+            _set_tgv_ic(solver, mesh)
+            w_nat = build_native_tet_sp_weights(mesh.order)
+            w = np.zeros(mesh.n_sps_per_cell)
+            w[:w_nat.size] = w_nat
+            vol = mesh.get_all_cell_volumes()
+            U = solver.state.U
+            u = U[:, :, 1:4] / U[:, :, 0:1]
+
+            def rate(R):
+                f = np.sum(u * R[:, :, 1:4], axis=-1) - 0.5 * np.sum(u * u, axis=-1) * R[:, :, 0]
+                return float(np.sum((vol / w_nat.sum())[:, None] * w[None, :] * f) / vol.sum())
+
+            ratios.append(rate(solver.compute_viscous_residual()) / (-RHO_INF * eps_ana))
+            assert abs(rate(solver.compute_inviscid_residual())) < 1e-10 * RHO_INF * eps_ana
+    finally:
+        N = saved
+    assert 1.0 < ratios[1] < ratios[0], f"粘性耗散率/解析值 4^3, 6^3 = {ratios}"
+    assert ratios[1] < 1.6, f"6^3 上粘性耗散率是解析值的 {ratios[1]:.3f} 倍"
 
 
 def test_tgv_freestream_preservation():

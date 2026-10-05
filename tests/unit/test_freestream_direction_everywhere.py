@@ -68,7 +68,7 @@ def _fs(aoa=0.0, aos=0.0):
 class TestFreestreamConservativeState:
     def test_zero_angle_is_bit_identical_to_frstate(self):
         """两条黄金轨迹都走 `FRState.initialize_uniform`，零攻角时必须逐位相同。"""
-        s = FRState(2, 4, 7)
+        s = FRState(2, 4)
         s.initialize_uniform(rho=_RHO, u=_VEL, v=0.0, w=0.0, p=_P)
         assert np.array_equal(freestream_conservative_state(_fs(), 5),
                               s.U[0, 0, :5])
@@ -119,8 +119,8 @@ class TestFreestreamConservativeState:
 
 
 def _fake_cpu_solver(aoa):
-    n_cells, n_vars = 3, 7
-    state = FRState(n_cells, 8, n_vars)       # 目标阶数的状态（将被重建到 P0）
+    n_cells = 3
+    state = FRState(n_cells, 8)       # 目标阶数的状态（将被重建到 P0）
     state.initialize_uniform(rho=_RHO, u=_VEL, v=0.0, w=0.0, p=_P)
     return SimpleNamespace(
         state=state, freestream=_fs(aoa), turb_model=None, sgs_model=None,
@@ -149,7 +149,7 @@ class TestSingleCpuP0ResetKeepsTheDirection:
 
         solver = _fake_cpu_solver(aoa=0.0)
         _reset_state_to_p0(solver, 1)
-        ref = FRState(3, 1, 7)
+        ref = FRState(3, 1)
         ref.initialize_uniform(rho=_RHO, u=_VEL, v=0.0, w=0.0, p=_P)
         assert np.array_equal(solver.state.U, ref.U)
 

@@ -35,9 +35,10 @@ from .timestep import _MultiGPUTimeStepMixin
 
 
 from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
+from autoflowcfd.core.fr_solver.solver.solve_loop import DistributedSolveLoopMixin
 
 class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _MultiGPUResidualMixin,
-                                _MultiGPUTimeStepMixin, _GPUDistributedInitMixin):
+                                _MultiGPUTimeStepMixin, _GPUDistributedInitMixin, DistributedSolveLoopMixin):
     """多 GPU + MPI 分布式求解器。
 
     每个 MPI rank 绑定一块 GPU，使用 GPU 进行所有计算，

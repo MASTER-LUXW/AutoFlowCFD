@@ -44,7 +44,7 @@ def _build_periodic_solver():
         "z_min": {"type": "SYMMETRY"}, "z_max": {"type": "SYMMETRY"},
     }
     solver = FRSolver(
-        mesh=mesh, order=ORDER, turb_model_name="NONE", n_vars=5,
+        mesh=mesh, order=ORDER, turb_model_name="NONE",
         time_scheme=TimeIntegrationScheme.SSP_RK3,
         rho_inf=RHO_INF, vel_inf=U_INF, p_inf=P_INF,
         bc_overrides=bc_overrides,

@@ -32,9 +32,9 @@ from autoflowcfd.core.fr_operators.kernels import (
     compute_ausm_up_flux,
     resolve_ausm_precond_mode,
 )
-from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_batch, entropy_stable_volume_divergence_batch
+from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_batch
 from autoflowcfd.core.fr_operators.volume_contract import (
-    contract_lifted_divergence, contract_shared_operator_1axis, contract_shared_operator_2axis, compute_adj_j,
+    contract_lifted_divergence, contract_shared_operator_1axis,
     contravariant_flux_from_metric, get_overintegration_context,
 )
 
@@ -172,7 +172,6 @@ def compute_inviscid_residual_fr(
     boundary_ghost_provider: Optional[Callable[[int, np.ndarray, np.ndarray], np.ndarray]] = None,
     mach_ref: float = 0.1,
     flat_face_override=None,
-    entropy_stable_volume: bool = False,
     precond_mode: Optional[int] = None,
 ) -> np.ndarray:
     """计算真实面耦合的 FR 无粘残差 dU/dt（物理空间，已除以 det(J)）。
@@ -201,23 +200,6 @@ def compute_inviscid_residual_fr(
             以实参形式传进 njit kernel：numba 的 `cache=True` 会把 njit
             里读到的模块级全局量冻结成编译期常量（2026-09-16 已真实踩过
             一次，见 resolve_ausm_precond_mode 文档）。
-        entropy_stable_volume: 体积项非线性通量混叠优化开关（默认关闭，
-            行为与此前完全一致）。开启后过积分分支（`mesh.jacobians_fine
-            is not None`）改用 Chandrashekar (2013) 熵守恒两点通量 +
-            对称平均度量项替代逐点通量代入（见
-            `core/fr_operators/flux_kernels.py::entropy_stable_volume_
-            divergence_batch` 与 `8_算法重构-Entropy-Stable_Split-Form
-            通量重构-Part1/2.md` 完整推导/验证）——真实决定性测试确认
-            方向一致、幅度真实但有限的改善（P2 中位数额外再改善约
-            3.5 倍，在已经用了过积分的基础上），代价是体积项计算复杂度
-            从 O(n_fine) 升到 O(n_fine^2)（两点通量需要遍历 SP 对，是
-            entropy-stable 方案的固有代价），默认关闭以避免无条件拖慢
-            现有全部生产用例；无过积分分支（P0）或用户显式设为 False
-            时行为完全不变。**该档不精确守恒**（封闭对称盒子 P1 质量相对
-            2.5e-8）：两点通量的通量差分恒等式 `Q + Q^T = E` 要求面求积对
-            2*over_order 次精确，p 阶面通量点达不到；要精确守恒须改成杂交 SBP
-            的体积-面耦合（Chan 2018），是另一套离散。默认档（强形式）精确守恒，
-            见 `fr/face_flux_trace.py`。
 
     Returns:
         residual: 形状 (n_cells, n_sps, 5)
@@ -292,15 +274,11 @@ def compute_inviscid_residual_fr(
         # 彻底消失。分块不改变任何逐单元的计算顺序/形状，结果与全场版
         # 逐位相同。
         div_comp = np.zeros((n_cells, n_sps, 5))
-        # entropy-stable 路径是 O(n_fine^2)（两点通量遍历 SP 对），用比
-        # 强形式更小的分块降低单块瞬态峰值/便于 numba prange 调度粒度，
-        # 强形式路径块大小不变（沿用既有 P2 OOM 修复的取值）。
-        _OVERINT_CHUNK_CELLS = 4096 if entropy_stable_volume else 32768
+        _OVERINT_CHUNK_CELLS = 32768
         # 度量按**段内局部**索引切（`i0 = c0 - seg_lo`）——用全局 c0 去切
         # 段内数组会静默取到错误的单元。
         for (seg_lo, seg_hi, n_fine, det_seg, inv_seg,
-             op_c2f, op_D_fine, _f2c_interp), (K_all, combo_seg), op_proj in zip(_oi["segs"], _oi["lifted_div"],
-                                                                     _oi["projection"]):
+             op_c2f, _D_fine, _f2c_interp), (K_all, combo_seg) in zip(_oi["segs"], _oi["lifted_div"]):
             for c0 in range(seg_lo, seg_hi, _OVERINT_CHUNK_CELLS):
                 c1 = min(c0 + _OVERINT_CHUNK_CELLS, seg_hi)
                 i0, i1 = c0 - seg_lo, c1 - seg_lo
@@ -309,21 +287,6 @@ def compute_inviscid_residual_fr(
                 det_chunk = det_seg[i0:i1]
                 inv_chunk = inv_seg[i0:i1]
                 Q_fine = contract_shared_operator_1axis(op_c2f, Q[c0:c1])
-                if entropy_stable_volume:
-                    # adj(J) 只有 entropy-stable 分支需要显式物化（该 kernel
-                    # 的对称平均度量项要按 SP 对访问 adj_j 本身）；强形式
-                    # 分支已改用 `contravariant_flux_from_metric` 融合计算，
-                    # 不再需要这份 (块长,n_fine,3,3) 中间数组（性能优化
-                    # 2026-09-13，79万单元 P1 细点下约 1.5GiB）。
-                    adj_j_fine = compute_adj_j(det_chunk, inv_chunk)
-                    # Chandrashekar 两点熵守恒通量 + 对称平均度量项，见
-                    # entropy_stable_volume_divergence_batch 文档；该函数
-                    # 内部已经把 "-2*div_comp/det_jacs" 里的 2.0 折进
-                    # 返回值（与 8_算法重构-Entropy-Stable_Split-Form
-                    # 通量重构-Part2.md 决定性验证脚本同一约定），下游
-                    # `residual = -div_comp/det_jacs` 不需要再乘 2。
-                    div_fine_chunk = entropy_stable_volume_divergence_batch(Q_fine, adj_j_fine, op_D_fine)
-                    del adj_j_fine
                 F_phys_fine = euler_physical_flux_batch(
                     Q_fine.reshape(-1, 5)
                 ).reshape(c1 - c0, n_fine, 3, 5)
@@ -340,12 +303,6 @@ def compute_inviscid_residual_fr(
                 # 坍缩顶点槽位组合取（与界面核同一组通量点）。块内收缩、块内
                 # 释放，不再需要全场 (n_cells,n_fine,5) 的细点数组。
                 div_comp[c0:c1] = contract_lifted_divergence(K_all, combo_seg[i0:i1], F_tilde_fine)
-                if entropy_stable_volume:
-                    # 熵稳定两点通量散度替换体积散度那一半；本侧迹仍取细层标准通量
-                    # 多项式（K - 投影·D_fine 部分）。该档不精确守恒，见参数文档。
-                    div_comp[c0:c1] += contract_shared_operator_1axis(
-                        op_proj, div_fine_chunk - contract_shared_operator_2axis(op_D_fine, F_tilde_fine))
-                    del div_fine_chunk
                 del F_tilde_fine
     else:
         # order>=1 时 `build_order_geometry` 恒构造细点度量与过积分算子；没有它们说明

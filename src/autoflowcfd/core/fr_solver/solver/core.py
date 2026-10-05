@@ -43,7 +43,7 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
         turb_model: 湍流模型处理器
     """
     def __init__(self, mesh: 'HighOrderMesh', order: int = 2,
-                 turb_model_name: str = "SST", n_vars: int = 5,
+                 turb_model_name: str = "SST",
                  time_scheme: TimeIntegrationScheme = TimeIntegrationScheme.SSP_RK3,
                  initial_state: Optional[FRState] = None,
                  rho_inf: float = 1.225, vel_inf: float = 33.33, p_inf: float = 101325.0,
@@ -69,7 +69,6 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
                  sem_num_eddies: int = _SEM_DEFAULT_NUM_EDDIES,
                  artificial_viscosity_enabled: bool = False,
                  artificial_viscosity_alpha: float = 1.0,
-                 entropy_stable_volume_enabled: bool = False,
                  low_mach_precond: bool = True):
         """
         初始化 FRSolver。
@@ -85,7 +84,6 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
                 否则 CFL 步长会与真正参与残差组装的粘度脱节（同类问题见
                 记忆条目 hardcoded_molecular_viscosity_mismatch）。现在两处
                 都从这个构造参数读取。
-            n_vars: 守恒变量数量（默认5：rho, rho_u, rho_v, rho_w, rho_e）
             time_scheme: 时间推进方案
             initial_state: 初始状态（用于 Order Continuation）
             aoa_deg, aos_deg: 攻角/侧滑角（度）。此前来流方向在全代码库被
@@ -128,18 +126,6 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
                 见 `core/fr_operators/artificial_viscosity/entropy_viscosity.py`。
             artificial_viscosity_alpha: 人工粘性强度标定常数（无量纲，默认
                 1.0），`nu = ramp * alpha * |u| * h / p`。
-            entropy_stable_volume_enabled: 是否在体积项过积分（over-
-                integration）分支启用 Chandrashekar (2013) 熵守恒两点
-                通量替代逐点通量代入（见 core/fr_residual/inviscid.py::
-                compute_inviscid_residual_fr 的 entropy_stable_volume
-                参数文档、`8_算法重构-Entropy-Stable_Split-Form通量
-                重构-Part1/2.md`）。默认 False——这是 2026-08-30 调查
-                引入的全新可选能力，不改变任何未显式启用它的现有求解
-                路径/测试的行为。真实决定性测试确认方向一致的真实改善
-                （在已经用了过积分的基础上再改善约 2~4 倍），代价是
-                体积项计算量从 O(n_fine) 升到 O(n_fine^2)（两点通量
-                遍历 SP 对的固有代价），默认关闭以避免无条件拖慢现有
-                全部生产用例。
             turbulence_intensity: 来流湍流强度 Tu（默认 0.01 = 1%），用于从
                 物理自洽的公式推导 k/omega 初值（工业 RANS 标准做法）。
                 外部气动默认 ≤1%，城市道路 3-5%，风洞对标 0.5-2%。
@@ -152,8 +138,7 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
         """
         resolved_n_threads = configure_numba_threads(n_threads, mesh)
 
-        self._setup_options(mesh, order, artificial_viscosity_enabled,
-                            artificial_viscosity_alpha, entropy_stable_volume_enabled)
+        self._setup_options(mesh, order, artificial_viscosity_enabled, artificial_viscosity_alpha)
         # 安全地获取网格信息
         n_cells = getattr(mesh, 'n_cells', 0)
         n_sps = getattr(mesh, 'n_sps_per_cell', 8)

@@ -319,7 +319,6 @@ def step(solver, dt: float) -> float:
                     positivity=positivity_func,
                     block_assembler=None if unsupported_reason(
                         order=_current_order(solver),
-                        entropy_stable_volume=solver.entropy_stable_volume_enabled,
                         wmles=solver.wmles_model is not None) else MeanFlowBlockAssembler(
                         mesh=solver.mesh, ops=solver.ops, ghost_provider=solver.boundary_ghost_provider,
                         mu=solver.mu_molecular, mach_ref=solver.freestream["mach_ref"],
@@ -341,15 +340,7 @@ def step(solver, dt: float) -> float:
             )
         solver.state.U = U_new_flat.reshape(n_cells, n_sps, n_vars)
 
-        # 湍流量 (k,omega) 的更新已经在上面 compute_turbulence_source()
-        # 内部通过 turb_model.update_fields() 完成（真正被
-        # _get_turbulent_viscosity_field/nu_t 消费的是 turb_model.
-        # k_field/omega_field，不是 state.U[:,:,5:7]）。此前这里还有
-        # 一段用 dt_local（逐 SP 局部 CFL 步长）对 state.U[:,:,5:7]
-        # 做的第二次更新——用的是同一份 Sk/S_omega，却是与
-        # update_fields 内部用的 dt（全局步长）不同的 dt_local，且
-        # state.U[:,:,5:7] 全仓库没有任何代码读取（已核实），是纯粹
-        # 的死代码+双重更新，删除。
+        # 湍流输运场在上面 compute_turbulence_source() 里由模型对象自己更新（状态数组只含平均流）
         solver.apply_turbulence_corrections()
         solver.state._update_primitives()
 

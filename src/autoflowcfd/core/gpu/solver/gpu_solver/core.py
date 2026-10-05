@@ -19,6 +19,7 @@ from .residual import _GPUSolverResidualMixin
 from .timestep import _GPUSolverTimeStepMixin
 from .step import _GPUSolverStepMixin
 from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
+from autoflowcfd.core.fr_solver.state import N_MEAN_FLOW_VARS
 from autoflowcfd.core.fr_solver.solver.solve_loop import SolveLoopMixin
 from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 
@@ -45,7 +46,6 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         mesh,
         ops=None,
         order: int = 2,
-        n_vars: int = 5,
         device_id: int = 0,
         time_scheme: str = "ssp_rk3",
         rho_inf: float = 1.225,
@@ -78,7 +78,6 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
             mesh: HighOrderMesh 实例
             ops: FROperators 实例；None 时按 `order` 生成（与 CPU 版 FRSolver 一致）
             order: 多项式阶数
-            n_vars: 守恒变量数
             device_id: GPU 设备 ID
             time_scheme: 时间积分方案（字符串或 `TimeIntegrationScheme`）
             dual_time_inner_iter: 双时间步每个物理步的伪时间内迭代次数（与 CPU 版同名同义；此前单 GPU
@@ -158,7 +157,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         # `self.current_order`（当前实际所在阶数）。
         self.current_order = order
         self.order_continuation_enabled = True
-        self.n_vars = n_vars
+        self.n_vars = n_vars = N_MEAN_FLOW_VARS
         self.device_id = device_id
         self.mu_molecular = mu_molecular
         self.artificial_viscosity_enabled = bool(artificial_viscosity_enabled)
@@ -439,16 +438,6 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
     def _loop_monitor_suffix(self) -> str:
         mem = self.array_mgr.get_memory_usage()
         return f" | GPU mem: {mem['used_mb']:.0f}/{mem['total_mb']:.0f} MB"
-
-    def _solve_with_order_continuation(self, max_iter, dt, tol, checkpoint_callback=None,
-                                       phase_max_iter=None, residual_drop_threshold=1e2):
-        """Order Continuation（`run_distributed_order_continuation`：逻辑只依赖 `step()`/`order`/
-        `current_order`/`_interpolate_to_new_order` 这几个接口，单 GPU 与分布式后端共用）。"""
-        from autoflowcfd.core.mpi.distributed_order_continuation import run_distributed_order_continuation
-
-        return run_distributed_order_continuation(
-            self, max_iter, dt, tol, checkpoint_callback,
-            phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold)
 
     def _build_boundary_ghost_provider(self, bc_overrides):
         """构建边界幽灵态提供者 (BD-01)，与 CPU 版 FRSolver 复用同一套

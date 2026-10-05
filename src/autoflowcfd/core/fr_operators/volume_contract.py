@@ -350,8 +350,7 @@ def get_overintegration_context(mesh, ops):
         细点度量；其中 `f2c` 是解点插值（湍流 k-omega 输运用）。`lifted_div`——与
         `segs` 逐段对应的 `(K_all, combo)`：平均流体积算子 `K` 按三角形面槽位组合各一份
         `(n_combo, n_sps, n_fine, 3)`（本侧通量迹已并入，`fr/face_flux_trace.py`）与该段
-        逐单元组合编号，收缩走 `contract_lifted_divergence`；
-        `projection`——逐段的平均流细->粗 L2 投影（熵稳定分支用，与 K 的体积部分一致）。
+        逐单元组合编号，收缩走 `contract_lifted_divergence`。
 
     ## 为什么每段各自带 n_fine（2026-09-17 改动）
 
@@ -382,8 +381,7 @@ def get_overintegration_context(mesh, ops):
     for name in ("overint_interp_c2f_prism", "overint_D_fine_prism",
                  "overint_restrict_f2c_prism", "overint_interp_c2f_tet",
                  "overint_D_fine_tet", "overint_restrict_f2c_tet",
-                 "overint_lifted_div_prism", "overint_lifted_div_tet",
-                 "overint_project_f2c_prism", "overint_project_f2c_tet"):
+                 "overint_lifted_div_prism", "overint_lifted_div_tet"):
         if getattr(ops, name, None) is None:
             return None
     fine = mesh.jacobians_fine
@@ -429,5 +427,4 @@ def get_overintegration_context(mesh, ops):
         ),
         lifted_div=((ops.overint_lifted_div_prism, fine["prism_k_combo"]),
                     (ops.overint_lifted_div_tet, fine["tet_k_combo"])),
-        projection=(ops.overint_project_f2c_prism, ops.overint_project_f2c_tet),
     )

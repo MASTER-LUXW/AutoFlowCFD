@@ -85,11 +85,6 @@ class FROperators:
     #: `fr/face_flux_trace.py`）。
     overint_lifted_div_tet: np.ndarray = None
     overint_lifted_div_prism: np.ndarray = None
-    #: 平均流的细->粗限制：参考单元 L2 投影 `(n_sps, n_fine)`（K 与熵稳定分支用）；上面的
-    #: `overint_restrict_f2c_*` 是解点插值，湍流 k-omega 输运用（分工与实测见
-    #: `fr/native_tet/overintegration.py` 模块文档）。
-    overint_project_f2c_tet: np.ndarray = None
-    overint_project_f2c_prism: np.ndarray = None
     # 四面体路径C（独立于坍缩坐标，见 fr/native_tet/basis.py 与
     # `8_算法重构-微分算子对坍缩坐标退化参考轴的病态条件数-Part6.md`
     # 阶段0/1）：2026-09-03 起恒为非 None（native 现在是四面体唯一

@@ -224,7 +224,7 @@ class _MultiGPUSetupMixin:
         # MultiGPUDistributedSolver 此前从未真正构造成功过（第四次评审
         # 第二轮复核发现，与上面的 UnboundLocalError 修复是两个独立
         # 的、相邻的崩溃 bug）。
-        self.state = DistributedFRState(self.partition, n_sps, 5)
+        self.state = DistributedFRState(self.partition, n_sps)
         return n_sps, n_local
 
     def _setup_time_integration(self, time_scheme, cfl_start, cfl_max, cfl_min):

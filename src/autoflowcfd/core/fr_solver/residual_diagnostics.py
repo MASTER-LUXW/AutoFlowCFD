@@ -79,12 +79,6 @@ def _reference_scales(freestream: dict, n_vars: int) -> np.ndarray:
         rho_inf * vel_inf,       # rho_w
         p_inf,                   # rho_E
     ])
-    if n_vars > 5:
-        # k/omega（若 state.U 里真的携带，见调用方文档——本项目实际把
-        # k/omega 维护在 turb_model.k_field/omega_field，state.U 对应
-        # 槽位是死代码，这里只是防御性地不让形状不匹配崩溃，不代表
-        # 这两个槽位的诊断有实际意义）。
-        scales = np.concatenate([scales, np.ones(n_vars - 5)])
     return scales
 
 

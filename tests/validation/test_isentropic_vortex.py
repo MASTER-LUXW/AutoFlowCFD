@@ -29,8 +29,8 @@
 涡核中心是整个流场里梯度最陡的一小片区域，L∞ 误差对峰值恰好落在配置点
 何处非常敏感，不是网格收敛性的稳健判据；空间平均误差衡量的是"整个流场
 是否真的在跟随解析解演化"，更能反映离散化在无粘周期输运下是否正确。
-实测（见本文件下方参数配置的独立探索脚本）密度平均相对误差 ~0.44%，
-速度平均相对误差 ~4.4%~4.6%，判据阈值在此基础上留了数倍安全裕度。
+实测（2026-10-05，关闭低马赫预处理后）密度平均相对误差 0.50%、速度 0.86%/0.91%，判据阈值留约 3 倍
+裕度。此前开着预处理（推进的是 dU/dt = -Gamma R，改变声速、不守恒）时速度误差 4.4%~4.6%，阈值 2%/10%。
 """
 import numpy as np
 
@@ -53,9 +53,13 @@ N_STEPS = 150
 def _build_vortex_solver():
     mesh = build_vortex_mesh(ORDER, NX, NY, NZ, LX, H, LZ)
     solver = FRSolver(
-        mesh=mesh, order=ORDER, turb_model_name="NONE", n_vars=5,
+        mesh=mesh, order=ORDER, turb_model_name="NONE",
         time_scheme=TimeIntegrationScheme.SSP_RK3,
         rho_inf=RHO_INF, vel_inf=U_INF, p_inf=P_INF,
+        # 全局物理时间步（时间精确）必须关掉低马赫伪时间预处理 Gamma：它是稳态加速手段，推进的是
+        # dU/dt = -Gamma R，改变声速且逐点混合守恒分量——周期域上质量/总能每 100 步漂移 2.5e-6
+        # （关闭后 5e-15），验证的就不是物理动力学（2026-10-05 查出，此前一直开着）。
+        low_mach_precond=False,
     )
     solver.order_continuation_enabled = False
     solver.boundary_ghost_provider = build_vortex_farfield_ghost_provider(mesh, LX, H, LZ, RHO_INF, P_INF, U_INF)
@@ -123,9 +127,9 @@ def test_isentropic_vortex_advection_tracks_exact_solution():
     err_u = np.abs(u_n - u_e) / U_INF
     err_v = np.abs(v_n - v_e) / U_INF
 
-    assert err_rho.mean() < 0.02, f"mean density error too large: {err_rho.mean():.4e}"
-    assert err_u.mean() < 0.10, f"mean u-velocity error too large: {err_u.mean():.4e}"
-    assert err_v.mean() < 0.10, f"mean v-velocity error too large: {err_v.mean():.4e}"
+    assert err_rho.mean() < 0.015, f"mean density error too large: {err_rho.mean():.4e}"
+    assert err_u.mean() < 0.03, f"mean u-velocity error too large: {err_u.mean():.4e}"
+    assert err_v.mean() < 0.03, f"mean v-velocity error too large: {err_v.mean():.4e}"
 
 
 def test_isentropic_vortex_freestream_preservation():

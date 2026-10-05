@@ -321,7 +321,7 @@ class TestEndToEndOnRealSolver:
         from autoflowcfd.core.time_integration import TimeIntegrationScheme
 
         mesh = build_channel_mesh_prism(1, 4, 3, 1, 1.0, 1.0, 0.25)
-        s = FRSolver(mesh=mesh, order=1, turb_model_name="NONE", n_vars=5,
+        s = FRSolver(mesh=mesh, order=1, turb_model_name="NONE",
                      time_scheme=TimeIntegrationScheme.SSP_RK3,
                      rho_inf=1.225, vel_inf=vel, p_inf=101325.0,
                      aoa_deg=aoa, aos_deg=aos)

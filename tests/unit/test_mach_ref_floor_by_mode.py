@@ -123,7 +123,7 @@ def _solver(vel, mode):
     os.environ["AFCFD_AUSM_PRECOND_MODE"] = mode
     try:
         mesh = build_channel_mesh_prism(1, 4, 3, 1, 1.0, 1.0, 0.25)
-        return FRSolver(mesh=mesh, order=1, turb_model_name="NONE", n_vars=5,
+        return FRSolver(mesh=mesh, order=1, turb_model_name="NONE",
                         rho_inf=1.225, vel_inf=vel, p_inf=101325.0)
     finally:
         if old is None:

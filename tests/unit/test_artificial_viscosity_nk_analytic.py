@@ -28,7 +28,7 @@ def _solver():
     bc = {n: {"type": "SYMMETRY"} for n in ("wall_bottom", "wall_top", "z_min", "z_max")}
     for n in ("x_min", "x_max"):
         bc[n] = {"type": "FARFIELD", "Q_free": [RHO, U_INF, 0.0, 0.0, P]}
-    solver = FRSolver(mesh=mesh, order=1, turb_model_name="NONE", n_vars=5,
+    solver = FRSolver(mesh=mesh, order=1, turb_model_name="NONE",
                       time_scheme=TimeIntegrationScheme.NEWTON_KRYLOV, rho_inf=RHO, vel_inf=U_INF, p_inf=P,
                       mu_molecular=1.8e-5, bc_overrides=bc, n_threads=1, artificial_viscosity_enabled=True)
     solver.order_continuation_enabled = False
@@ -88,7 +88,7 @@ def test_distributed_artificial_viscosity_nk_matches_single_machine():
         bc[n] = {"type": "FARFIELD", "Q_free": [RHO, U_INF, 0.0, 0.0, P]}
     dist = DistributedFRSolver(
         mesh=mesh, ops=generate_fr_operators(1), face_connectivity=mesh.face_connectivity, n_ranks=1,
-        order=1, turb_model_name="NONE", n_vars=5,
+        order=1, turb_model_name="NONE",
         time_scheme=TimeIntegrationScheme.NEWTON_KRYLOV, mu_molecular=1.8e-5, rho_inf=RHO, vel_inf=U_INF,
         p_inf=P, bc_overrides=bc, artificial_viscosity_enabled=True)
     dist.local_solver.boundary_ghost_provider = build_face_exact_ghost_provider(mesh, LX, H, LZ, bc)

@@ -19,15 +19,6 @@ Continuation，Newton 外迭代放在它里面让这些机制原样生效（见 
 `FILTER_MODE=off` 本来就不构造滤波回调；显式指定了非 off 档时这里明确
 报错，不静默忽略。
 
-## 未知量只有平均流 5 个守恒变量
-
-湍流模型开启时状态向量带两个 k/omega 槽位（`U[..., 5:7]`），它们全仓库
-无人读取、残差恒为零（2026-09-25 实测 inv/visc 残差这两列 max = 0.0），
-k/omega 真正的值在湍流模型对象上、由隐式湍流步更新
-（`fr_solver/turbulence/implicit.py`）。带着它们解会让 Krylov 向量、块
-Jacobi 的块尺寸与装配次数都白白多出 7/5 倍（plate_demo P1+SST：196 次 vs
-140 次残差求值）。
-
 ## 跨步状态（挂在求解器对象上，换阶时由 Order Continuation 清空）
 
     _newton_forcing         inexact-Newton 的 forcing term（Eisenstat-Walker）
@@ -46,30 +37,8 @@ from .forcing import EisenstatWalkerForcing
 from .jfnk import step_newton_krylov
 from .reductions import LocalReductions
 
-#: 平均流守恒变量个数（rho, rho*u, rho*v, rho*w, rho*E）
-N_MEAN_FLOW_VARS = 5
-
-
-class ResidualVariableSlice:
-    """把 `(N, n_vars)` 的残差函数限制到前 `n` 个变量上，其余列固定在步前值。
-
-    做成类而不是闭包，理由同 `jacobian_vector.py::MatrixFreeJacobian`（在
-    整个 Krylov 求解期间存活，只持有需要的字段）。数组模块由状态决定。
-    """
-
-    __slots__ = ("_residual", "_full", "_n")
-
-    def __init__(self, residual: Callable, u_full, n: int):
-        self._residual = residual
-        self._full = u_full.copy()
-        self._n = n
-
-    def __call__(self, u_sub):
-        if self._n == self._full.shape[1]:
-            return self._residual(u_sub)
-        u = self._full.copy()
-        u[:, :self._n] = u_sub
-        return self._residual(u)[:, :self._n]
+# 平均流守恒变量个数（唯一来源在状态容器；coupled_step 从这里取）
+from autoflowcfd.core.fr_solver.state import N_MEAN_FLOW_VARS  # noqa: E402,F401
 
 
 #: 线性求解至少要把线性残差降到这个比例以下，Newton 方向才算可信（SU2 自适应
@@ -191,8 +160,8 @@ def step_mean_flow_newton(
     from autoflowcfd.fr.native_padding import real_row_mask, real_sps_per_cell
 
     require_no_modal_filter(filter_active)
-    n_vars = u_flat.shape[1]
-    n_mf = min(n_vars, N_MEAN_FLOW_VARS)
+    if u_flat.shape[1] != N_MEAN_FLOW_VARS:
+        raise ValueError(f"平均流 Newton 步的未知量是 {N_MEAN_FLOW_VARS} 个守恒变量，收到 {u_flat.shape[1]} 列")
     if solver._newton_forcing is None:
         solver._newton_forcing = EisenstatWalkerForcing()
     if solver._newton_block_precond is None:
@@ -204,15 +173,14 @@ def step_mean_flow_newton(
         solver._newton_block_precond = BlockJacobiCache(
             cell_is_prism=cell_is_prism, colors=cell_colors(),
             n_sps=u_flat.shape[0] // n_cells, n_real_prism=n_real_prism,
-            n_real_tet=n_real_tet, n_var=n_mf, red=red, coupling_graph=coupling_graph,
+            n_real_tet=n_real_tet, n_var=N_MEAN_FLOW_VARS, red=red, coupling_graph=coupling_graph,
             # 隐式湍流在同一步里先于平均流运行、已建好它的状态：两者共享预处理内存预算
             with_turbulence=getattr(solver, "_newton_turb_state", None) is not None,
             global_coarse=global_coarse)
 
     solver._newton_block_precond.assembler = block_assembler
     u_new_mf, info = step_newton_krylov(
-        ResidualVariableSlice(residual, u_flat, n_mf), u_flat[:, :n_mf], dtau_flat,
-        np.asarray(scales)[:n_mf],
+        residual, u_flat, dtau_flat, np.asarray(scales),
         forcing=solver._newton_forcing, dtau_scale=solver._newton_dtau_scale,
         block_precond=solver._newton_block_precond, physicality=positivity.density_pressure_limits,
         rows_per_cell=u_flat.shape[0] // np.asarray(cell_is_prism).size, red=red,
@@ -220,8 +188,6 @@ def step_mean_flow_newton(
         norm_weights=positivity.norm_weights,
         real_rows=red.xp.asarray(real_row_mask(cell_is_prism, u_flat.shape[0] // np.asarray(cell_is_prism).size,
                                                order)))
-    u_new = u_flat.copy()
-    u_new[:, :n_mf] = u_new_mf
     solver._newton_last_info = info
     solver._newton_dtau_scale = info["dtau_scale"]
     solver._newton_local_dtau = info["local_dtau_scale"]
@@ -235,5 +201,5 @@ def step_mean_flow_newton(
     elif info["n_dtau_cuts"] > 0:
         logger.info("Newton 步缩 %d 档 dtau 后被接受（dtau_scale=%.3e, theta=%.3f）"
                     % (info["n_dtau_cuts"], info["dtau_scale"], info["theta"]))
-    return u_new, info
+    return u_new_mf, info
 

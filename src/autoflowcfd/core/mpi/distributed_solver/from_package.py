@@ -107,8 +107,9 @@ class _DistributedFromPackageMixin:
         self.dist_flat_face = package['dist_fc']
 
         n_sps = precompacted_mesh.n_sps_per_cell
-        n_vars = 5
-        self.state = DistributedFRState(self.partition, n_sps, n_vars)
+        self.state = DistributedFRState(self.partition, n_sps)
+        self.residual_history = []   # 每步一条（单步里追加，与其余后端一致）
+        n_vars = self.state.n_vars
         # 均匀自由流场初始化（同一处真实 bug 修复，见
         # DistributedFRState.initialize_uniform 文档）——"完全分布式
         # 加载"路径同样从未初始化过 state，同一个根因。
@@ -263,7 +264,7 @@ class _DistributedFromPackageMixin:
         time_scheme = require_distributed_scheme(
             package.get('time_scheme', TimeIntegrationScheme.SSP_RK3))
         dual_time_steps = package.get('dual_time_inner_iter', DEFAULT_DUAL_TIME_STEPS)
-        self._time_integrator = TimeIntegrator(
+        self.time_integrator = TimeIntegrator(
             scheme=time_scheme, dt=1.0, dual_time_steps=dual_time_steps,
         )
         self._dual_time_U_prev = None

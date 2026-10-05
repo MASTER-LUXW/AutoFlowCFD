@@ -43,20 +43,13 @@ def compute_viscous_residual(
             compute_viscous_residual 的调用处）
 
     Returns:
-        viscous_res: 形状与 state_U 相同（n_vars>5 时高阶湍流分量补零，
-            湍流量自身的输运方程仍由 compute_turbulence_source 单独处理）
+        viscous_res: 形状与 state_U 相同
     """
-    n_vars = state_U.shape[-1]
-    res_euler = compute_viscous_residual_fr(
+    return compute_viscous_residual_fr(
         state_U, mesh, ops, mu=mu, Pr=Pr, mu_t_field=mu_t_field, Pr_t=Pr_t,
         boundary_ghost_provider=boundary_ghost_provider,
         flat_face_override=flat_face_override,
     )
-    if n_vars > 5:
-        res_full = np.zeros(state_U.shape)
-        res_full[:, :, :5] = res_euler
-        return res_full
-    return res_euler
 
 
 def compute_gradients(U: np.ndarray, ops, mesh=None) -> np.ndarray:

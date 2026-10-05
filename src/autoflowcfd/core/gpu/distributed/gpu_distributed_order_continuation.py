@@ -154,7 +154,7 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
         solver.U_gpu = cp.asarray(new_U_np)
 
     solver.gpu_halo = GPUHaloExchange(solver.partition, n_sps=n_sps, n_vars=5, device_id=solver.device_id)
-    solver.state = DistributedFRState(solver.partition, n_sps, 5)
+    solver.state = DistributedFRState(solver.partition, n_sps)
 
     # --- 3. 湍流场对象（k_field/omega_field/nu_t 数组替换 + halo 交换器
     # 重建；模型本身——GPUTurbulenceSST/GPUDDESModel/GPUIDDESModel/

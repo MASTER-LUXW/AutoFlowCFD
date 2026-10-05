@@ -11,6 +11,7 @@ AutoFlowCFD V2.0 - 分布式 FRState
 - 残差范数需要 MPI Allreduce（全局 L2 范数）
 """
 
+from autoflowcfd.core.fr_solver.state import N_MEAN_FLOW_VARS
 import numpy as np
 from typing import Optional
 
@@ -30,15 +31,15 @@ class DistributedFRState:
         n_local_cells: 本 rank 的 local cell 数
         n_halo_cells: 本 rank 的 halo cell 数
         n_sps: 每单元解点数
-        n_vars: 变量数
+        n_vars: 变量数（平均流守恒变量，`fr_solver/state.py::N_MEAN_FLOW_VARS`）
     """
 
-    def __init__(self, partition: DistributedPartition, n_sps: int, n_vars: int):
+    def __init__(self, partition: DistributedPartition, n_sps: int):
         self.partition = partition
         self.n_local_cells = partition.n_local_cells
         self.n_halo_cells = partition.n_halo
         self.n_sps = n_sps
-        self.n_vars = n_vars
+        self.n_vars = n_vars = N_MEAN_FLOW_VARS
 
         n_total = partition.n_total_cells
         self.U = np.zeros((n_total, n_sps, n_vars))

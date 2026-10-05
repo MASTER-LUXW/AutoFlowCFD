@@ -21,7 +21,7 @@ def build_single_node_solver(backend: str, mesh, volume_data, *, gpu_device: int
 
     Raises:
         click.ClickException: `--backend gpu` 但 CuPy 不可用
-        click.BadParameter: 请求了 GPU 未实现的选项（熵稳定体积项）
+        click.BadParameter: 未知后端
     """
     from autoflowcfd.cli.solve.wall_distance import (
         compute_wall_distance_for_solver,
@@ -45,9 +45,6 @@ def build_single_node_solver(backend: str, mesh, volume_data, *, gpu_device: int
         raise click.BadParameter(f"未知后端 {backend!r}（cpu / gpu / auto）", param_hint="--backend")
     if not gpu_available:
         raise click.ClickException("--backend gpu 需要 CuPy 与可用的 CUDA 设备（pip install cupy-cuda12x）")
-    if solver_kwargs.pop("entropy_stable_volume_enabled", False):
-        raise click.BadParameter("熵稳定体积项只在 CPU 后端实现（core/fr_residual/inviscid.py）",
-                                 param_hint="--entropy-stable-volume")
     from autoflowcfd.core.gpu.solver.gpu_solver import GPUFRSolver
 
     return GPUFRSolver(
@@ -55,3 +52,17 @@ def build_single_node_solver(backend: str, mesh, volume_data, *, gpu_device: int
         wall_distance_source=wall_distance_source_if_needed(solver_kwargs.get("turb_model_name", "NONE"),
                                                             volume_data),
         **solver_kwargs)
+
+
+def validate_backend_options(backend, n_ranks: int, multi_gpu: bool) -> None:
+    """`--backend/--n-ranks/--multi-gpu` 的组合校验（`solve steady/transient/resume` 共用）。
+
+    多 rank 的 GPU 计算必须显式 `--multi-gpu`；`--multi-gpu` 要求多 rank 且后端是 GPU（`backend=None` 表示
+    续算沿用 checkpoint 记录的后端）。此前 `--backend gpu --n-ranks N` 不加 `--multi-gpu` 时 steady 静默只用
+    单 GPU、transient 每个 rank 构造 CPU 求解器的 GPU 分支，`--multi-gpu --n-ranks 1` 落到单机路径。
+    """
+    if multi_gpu and (n_ranks <= 1 or backend not in (None, "gpu")):
+        raise click.BadParameter("--multi-gpu 需要 --backend gpu 且 --n-ranks > 1（单 GPU 直接用 --backend gpu）",
+                                 param_hint="--multi-gpu")
+    if backend == "gpu" and n_ranks > 1 and not multi_gpu:
+        raise click.BadParameter("多 rank 的 GPU 计算需要 --multi-gpu", param_hint="--n-ranks")

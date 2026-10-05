@@ -38,7 +38,7 @@ def _channel_solver(scheme, order=1):
     bc["wall_top"] = {"type": "WALL", "is_no_slip": True, "wall_velocity": [0.0, 0.0, 0.0]}
     for n in ("x_min", "x_max"):
         bc[n] = {"type": "FARFIELD", "Q_free": [RHO, U, 0.0, 0.0, P]}
-    solver = FRSolver(mesh=mesh, order=order, turb_model_name="SST", n_vars=7,
+    solver = FRSolver(mesh=mesh, order=order, turb_model_name="SST",
                       time_scheme=scheme, rho_inf=RHO, vel_inf=U, p_inf=P,
                       mu_molecular=1.8e-5, bc_overrides=bc)
     solver.order_continuation_enabled = False

@@ -29,11 +29,10 @@ from autoflowcfd.core.fr_solver.state import SolverResult
 from autoflowcfd.cli.main import cli
 
 
-#: 假求解器的 solve() 在第 5、10 步各调一次回调，即跑了 10 步。返回值按真实
-#: 契约：CPU 分布式返回 `SolverResult`，多 GPU 返回带 `iterations` 的 dict
-#: （CLI 用它把实际步数写进最终 checkpoint，而不是 max_iter）。
+#: 假求解器的 solve() 在第 5、10 步各调一次回调，即跑了 10 步。两个分布式后端都返回 `SolverResult`
+#: （2026-10-05 起共用求解循环；CLI 用它把实际步数写进最终 checkpoint，而不是 max_iter）。
 _CPU_RESULT = SolverResult(converged=False, iterations=10, final_residual=1e-4)
-_GPU_RESULT = {"final_residual": 1e-4, "converged": True, "iterations": 10}
+_GPU_RESULT = SolverResult(converged=True, iterations=10, final_residual=1e-4)
 
 
 def _fake_distributed_solver(solve_return):
@@ -72,15 +71,15 @@ class TestResumeDistributedCpuTraditionalMode(object):
             return_value=(fake_solver, 2000, fake_metadata),
         ) as mock_rebuild, patch(
             "autoflowcfd.core.mpi.distributed_checkpoint.distributed_save_results"
-        ), patch(
-            "autoflowcfd.core.mpi.distributed_checkpoint.distributed_save_checkpoint"
-        ) as mock_save_checkpoint:
+        ):
             runner = CliRunner()
             result = runner.invoke(
                 cli,
                 ["solve", "resume", str(checkpoint_file), "--max-iter", "10",
                  "--n-ranks", "2", "--checkpoint-interval", "5"],
             )
+        # 两个分布式后端都经求解器自身的 save_checkpoint_distributed（同名同签名）
+        mock_save_checkpoint = fake_solver.save_checkpoint_distributed
 
         assert result.exit_code == 0, result.output
         mock_rebuild.assert_called_once()
@@ -92,7 +91,7 @@ class TestResumeDistributedCpuTraditionalMode(object):
 
         # 2 次中途保存（local iter 5/10）+ 1 次最终保存 = 3 次。
         assert mock_save_checkpoint.call_count == 3
-        written_iterations = [c.args[2] for c in mock_save_checkpoint.call_args_list]
+        written_iterations = [c.args[1] for c in mock_save_checkpoint.call_args_list]
         assert 2005 in written_iterations
         assert 2010 in written_iterations
         assert 5 not in written_iterations
@@ -270,3 +269,29 @@ class TestResumeDistributedPhaseMaxIterForwarding(object):
         assert result.exit_code == 0, result.output
         assert fake_solver.solve.call_args.kwargs["phase_max_iter"] is None
         assert fake_solver.solve.call_args.kwargs["residual_drop_threshold"] == 100.0
+
+
+def test_distributed_periodic_checkpoint_callback_is_shared_by_both_backends():
+    """CPU MPI 与多 GPU 的中间 checkpoint 回调是同一个工厂（2026-10-05，此前 CLI 里 7 份拷贝）：按间隔调用
+    求解器的 `save_checkpoint_distributed`（两个后端同名同签名），resume 时迭代数加起点偏移。"""
+    import inspect
+    from unittest.mock import MagicMock
+
+    from autoflowcfd.cli.solve.distributed_checkpoint_io import distributed_periodic_checkpoint_callback
+    from autoflowcfd.core.gpu.distributed.gpu_distributed import MultiGPUDistributedSolver
+    from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
+
+    sig_cpu = inspect.signature(DistributedFRSolver.save_checkpoint_distributed).parameters
+    sig_gpu = inspect.signature(MultiGPUDistributedSolver.save_checkpoint_distributed).parameters
+    assert list(sig_cpu) == list(sig_gpu)
+
+    solver = MagicMock(current_order=1, order=2)
+    solver.save_checkpoint_distributed.return_value = None
+    cb = distributed_periodic_checkpoint_callback(5, "out", "mesh.pkl", "sa", surface_mesh="s.nas",
+                                                  iteration_offset=3000)
+    for it in range(1, 11):
+        cb(solver, it)
+    calls = solver.save_checkpoint_distributed.call_args_list
+    assert [c.args[1] for c in calls] == [3005, 3010]
+    assert all(c.args[3] == 1 and c.kwargs["target_order"] == 2 and c.kwargs["surface_mesh"] == "s.nas"
+               for c in calls)

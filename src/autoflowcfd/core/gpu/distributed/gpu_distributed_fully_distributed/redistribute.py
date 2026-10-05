@@ -149,7 +149,7 @@ def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int
         solver.U_gpu = cp.asarray(new_U_np)
 
     solver.gpu_halo = GPUHaloExchange(solver.partition, n_sps=new_n_sps, n_vars=5, device_id=solver.device_id)
-    solver.state = DistributedFRState(solver.partition, new_n_sps, 5)
+    solver.state = DistributedFRState(solver.partition, new_n_sps)
 
     if solver.turb_model_gpu is not None:
         with cp.cuda.Device(solver.device_id):

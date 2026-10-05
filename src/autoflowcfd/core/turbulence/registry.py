@@ -40,13 +40,6 @@ def needs_wall_distance(name) -> bool:
     return normalized(name) in WALL_DISTANCE_MODELS
 
 
-def n_state_vars(name) -> int:
-    """求解器状态数组的变量数。湍流输运场一律存在模型对象上（`TransportedTurbulence`），状态
-    数组只需要 5 个守恒变量；SST 族历史上另带两个 k/omega 槽位 `U[..., 5:7]`（全仓库无人读取、
-    残差恒为零，见 `time_integration/implicit/mean_flow_step.py` 模块文档），SA-neg 不再携带。"""
-    return 7 if is_sst_family(name) else 5
-
-
 def require_supported(name) -> str:
     """规范化并校验模型名，非法时报错（列出全部合法值）。"""
     n = normalized(name)

@@ -21,6 +21,8 @@ from typing import Optional
 import click
 from loguru import logger
 
+from autoflowcfd.cli.solve.solver_factory import validate_backend_options
+from autoflowcfd.cli.solve.distributed_checkpoint_io import distributed_periodic_checkpoint_callback
 from autoflowcfd.cli.solve.checkpoint_io import (
     periodic_checkpoint_callback,
     rebuild_solver_from_checkpoint,
@@ -159,16 +161,12 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
     logger.info(f"Resuming simulation from checkpoint: {checkpoint_file}")
 
     # 后端组合校验（与 `solve steady/transient` 同一规则）
-    if multi_gpu and n_ranks <= 1:
-        raise click.BadParameter("--multi-gpu 需要 --n-ranks > 1（单 GPU 续算用 --backend gpu）",
-                                 param_hint="--multi-gpu")
-    if backend == 'gpu' and n_ranks > 1 and not multi_gpu:
-        raise click.BadParameter("多 rank 的 GPU 续算需要 --multi-gpu", param_hint="--n-ranks")
+    validate_backend_options(backend, n_ranks, multi_gpu)
 
     if n_ranks > 1:
         _resume_distributed(
             checkpoint_file, max_iter, n_ranks, multi_gpu, fully_distributed,
-            gpu_device, backend, surface_mesh, threads, skip_quality_check,
+            gpu_device, surface_mesh, threads, skip_quality_check,
             checkpoint_interval, phase_max_iter, residual_drop_threshold,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
             time_scheme=time_scheme,
@@ -212,7 +210,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
 
 def _resume_distributed(
     checkpoint_file: str, max_iter: int, n_ranks: int, multi_gpu: bool,
-    fully_distributed: bool, gpu_device: Optional[int], backend: Optional[str],
+    fully_distributed: bool, gpu_device: Optional[int],
     surface_mesh: Optional[str], threads: int, skip_quality_check: bool,
     checkpoint_interval: int,
     phase_max_iter: Optional[int] = None,
@@ -257,14 +255,12 @@ def _resume_distributed(
     solver, iteration, metadata = rebuild_distributed_solver_from_checkpoint(
         checkpoint_file, n_ranks=n_ranks, multi_gpu=multi_gpu,
         fully_distributed=fully_distributed, gpu_device=gpu_device,
-        backend=backend, surface_mesh=surface_mesh, threads=threads,
+        surface_mesh=surface_mesh, threads=threads,
         cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
         skip_quality_check=skip_quality_check, time_scheme=time_scheme,
     )
     input_file = metadata["input_file"]
-    order = metadata["order"]
     turbulence_model = metadata["turbulence_model"]
-    target_backend = "gpu" if multi_gpu else (backend or "cpu")
     resolved_surface_mesh = metadata.get("surface_mesh")
     output_dir = str(Path(checkpoint_file).parent.parent)
 
@@ -275,40 +271,23 @@ def _resume_distributed(
         )
 
     if multi_gpu:
-        def _checkpoint_cb(solver_ref, local_iteration):
-            if local_iteration % checkpoint_interval != 0:
-                return
-            absolute_iteration = iteration + local_iteration
-            try:
-                # order/target_order 分离（2026-09-02）：见
-                # solve_steady_command.py 的 _multi_gpu_checkpoint_cb
-                # 同一处修复文档——resume 之后若仍在 Order Continuation
-                # 爬坡中途，必须记录 solver_ref.current_order。
-                saved_path = solver_ref.save_checkpoint_distributed(
-                    output_dir, absolute_iteration, input_file,
-                    solver_ref.current_order, turbulence_model, backend="gpu",
-                    target_order=solver_ref.order, surface_mesh=resolved_surface_mesh,
-                )
-                if saved_path and is_root():
-                    print(f"   [Checkpoint] iter {absolute_iteration} saved: {saved_path}")
-            except Exception as e:
-                if is_root():
-                    print(f"   [Checkpoint] Warning: save failed at iter {absolute_iteration}: {e}")
+        _checkpoint_cb = distributed_periodic_checkpoint_callback(
+            checkpoint_interval, output_dir, input_file, turbulence_model, surface_mesh=resolved_surface_mesh, iteration_offset=iteration)
 
         result = solver.solve(
             max_iter=max_iter, dt=1e-3, tol=1e-6, checkpoint_callback=_checkpoint_cb,
             phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold,
         )
-        total_iterations = iteration + result['iterations']
+        total_iterations = iteration + result.iterations
         if is_root():
             print(
                 f"\n✅ Resumed multi-GPU simulation finished: "
                 f"total_iterations={total_iterations}, "
-                f"Residual={result['final_residual']:.6e}"
+                f"Residual={result.final_residual:.6e}"
             )
         saved_path = solver.save_checkpoint_distributed(
             output_dir, total_iterations, input_file,
-            solver.current_order, turbulence_model, backend="gpu",
+            solver.current_order, turbulence_model,
             target_order=solver.order, surface_mesh=resolved_surface_mesh,
         )
         if saved_path and is_root():
@@ -318,30 +297,13 @@ def _resume_distributed(
 
     # CPU MPI（"传统模式"/"完全分布式加载"共用同一个 solve()/checkpoint 格式）。
     from autoflowcfd.core.mpi.distributed_checkpoint import (
-        distributed_save_results, distributed_save_checkpoint,
+        distributed_save_results,
     )
 
-    def _checkpoint_cb(solver_ref, local_iteration):
-        if local_iteration % checkpoint_interval != 0:
-            return
-        absolute_iteration = iteration + local_iteration
-        try:
-            # order/target_order 分离（2026-09-02）：resume 之后若仍在
-            # Order Continuation 爬坡中途，必须记录 solver_ref.
-            # current_order（U_sps 实际形状），不是 metadata 里那个
-            # "checkpoint 保存时"的旧 order 值。
-            saved_path = distributed_save_checkpoint(
-                solver_ref, output_dir, absolute_iteration, input_file,
-                solver_ref.current_order, turbulence_model, target_backend,
-                target_order=solver_ref.order, surface_mesh=resolved_surface_mesh,
-            )
-            if saved_path and is_root():
-                print(f"   [Checkpoint] iter {absolute_iteration} saved: {saved_path}")
-        except Exception as e:
-            if is_root():
-                print(f"   [Checkpoint] Warning: save failed at iter {absolute_iteration}: {e}")
+    _checkpoint_cb = distributed_periodic_checkpoint_callback(
+        checkpoint_interval, output_dir, input_file, turbulence_model, surface_mesh=resolved_surface_mesh, iteration_offset=iteration)
 
-    result = solver.solve(n_steps=max_iter, dt=1e-3, output_interval=checkpoint_interval,
+    result = solver.solve(max_iter=max_iter, dt=1e-3, tol=1e-6,
                           checkpoint_callback=_checkpoint_cb,
                           phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold)
     total_iterations = iteration + result.iterations
@@ -349,9 +311,8 @@ def _resume_distributed(
         print(f"\n✅ Resumed distributed simulation finished: total_iterations={total_iterations}")
 
     distributed_save_results(solver, output_dir)
-    distributed_save_checkpoint(
-        solver, output_dir, total_iterations, input_file,
-        solver.current_order, turbulence_model, target_backend,
+    solver.save_checkpoint_distributed(
+        output_dir, total_iterations, input_file, solver.current_order, turbulence_model,
         target_order=solver.order, surface_mesh=resolved_surface_mesh,
     )
 

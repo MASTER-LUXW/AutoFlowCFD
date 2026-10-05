@@ -251,7 +251,7 @@ class TestTrialStatePrimitivesContract:
         }
         mesh = build_channel_mesh_prism(1, nx=4, ny=4, nz=1, Lx=Lx, H=H, Lz=Lz)
         solver = FRSolver(
-            mesh=mesh, order=1, turb_model_name="NONE", n_vars=5,
+            mesh=mesh, order=1, turb_model_name="NONE",
             time_scheme=TimeIntegrationScheme.SSP_RK3,
             rho_inf=1.225, vel_inf=5.0, p_inf=101325.0, mu_molecular=1.8e-5,
             bc_overrides=bc, n_threads=1,

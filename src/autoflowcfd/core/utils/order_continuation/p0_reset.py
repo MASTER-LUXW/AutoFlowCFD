@@ -29,7 +29,7 @@ def _reset_state_to_p0(solver, expected_p0_n_sps: int = 1) -> None:
 
     from autoflowcfd.core.utils.flow_direction import direction_from_freestream
 
-    p0_state = FRState(solver.state.n_cells, expected_p0_n_sps, solver.state.n_vars)
+    p0_state = FRState(solver.state.n_cells, expected_p0_n_sps)
     # 速度方向必须取自 aoa/aos（2026-09-24 修复）：此前这里写死 (vel_inf, 0, 0)，
     # 而边界 Q_free 用的是正确方向，`--aoa` 非零时初场与边界不一致。
     # 8 处同类写法已统一到 `freestream_conservative_state`（见其文档）。

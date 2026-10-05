@@ -181,7 +181,7 @@ class _DistributedStepMixin:
         # 波速放大），`dt_phys_local` 是按物理波速那一份——湍流标量的**显式**
         # 更新用后者（k/omega 的显式更新刻意没有 point-implicit 阻尼），隐式紧耦合
         # Newton 用前者，与单机 `fr_solver/step.py` 一致（见 coupled_step.py 模块文档）。
-        is_newton = self._time_integrator.scheme == TimeIntegrationScheme.NEWTON_KRYLOV
+        is_newton = self.time_integrator.scheme == TimeIntegrationScheme.NEWTON_KRYLOV
         dist_fc = self.dist_flat_face
         from autoflowcfd.core.mpi.distributed_flat_face import native_cell_is_prism
 
@@ -330,18 +330,18 @@ class _DistributedStepMixin:
         else:
             residual0 = residual0_raw.reshape(n_local * n_sps, n_vars)
 
-        # 真实 bug 修复（2026-09-02，见 __init__ 里 self._time_integrator
+        # 真实 bug 修复（2026-09-02，见 __init__ 里 self.time_integrator
         # 构造处同一处说明）：此前这里无条件调用 `_ssp_rk_stage_step`，
         # DUAL_TIME（真正时间精度的瞬态仿真）请求了也无路可走——现在
         # 与单机 `fr_solver/step.py::step` 同一个分派方式：`residual_
         # func` 本身就是 `spatial_residual(U) -> R(U)`（`dU/dt=-R(U)`
         # 约定，与 `step_dual_time` 需要的语义完全一致，不需要额外
         # 包装），直接复用。
-        if self._time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME:
-            U_new_flat = self._time_integrator.step_dual_time(
+        if self.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME:
+            U_new_flat = self.time_integrator.step_dual_time(
                 U_flat, residual_func, dt_local_flat, dt_physical=dt,
                 solution_prev=self._dual_time_U_prev,
-                max_inner_iter=self._time_integrator.dual_time_steps,
+                max_inner_iter=self.time_integrator.dual_time_steps,
                 filter_func=filter_func, positivity_func=positivity_func,
             )
             self._dual_time_U_prev = U_flat.copy()
@@ -382,7 +382,7 @@ class _DistributedStepMixin:
                         self, self.local_solver, order=order_now, mu_t_compact=mu_t_field_compact,
                         exchange=self.halo_exchange.exchange, perm=self.dist_flat_face.perm, n_sps=n_sps,
                         nu_av_compact=nu_av_compact))
-        elif self._time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
+        elif self.time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
             # 显式无粘对流 + 隐式粘性（阻尼 Picard），与单机
             # `fr_solver/step.py` 同一个拆分、同一个积分器。**2026-09-25 补齐**：
             # 此前这里无条件走 `_ssp_rk_stage_step`，而 IMEX_EULER 在系数表里
@@ -399,14 +399,14 @@ class _DistributedStepMixin:
                 return (-self._viscous_dudt_local(U3, mu_t_field_compact, nu_av_compact)).reshape(
                     n_local * n_sps, n_vars)
 
-            U_new_flat = self._time_integrator.step_imex(
+            U_new_flat = self.time_integrator.step_imex(
                 U_flat, _explicit_R, _implicit_R, dt_local_flat,
                 positivity_func=positivity_func,
             )
         else:
             # `TimeIntegrator.step()` 对 IMEX/DUAL_TIME/NEWTON_KRYLOV 显式报错（不静默
             # 退化成前向 Euler）；三者上面都已分派。
-            U_new_flat = self._time_integrator.step(
+            U_new_flat = self.time_integrator.step(
                 U_flat, residual_func, dt_local_flat, residual0=residual0,
                 filter_func=filter_func, positivity_func=positivity_func,
             )
@@ -425,6 +425,7 @@ class _DistributedStepMixin:
                 mu_t_field_compact[self.dist_flat_face.inv_perm][:n_local])
 
         residual_norm = self.compute_global_residual_norm()
+        self.residual_history.append(residual_norm)   # 收敛历史在单步里记录（与其余后端一致）
         # 自适应 CFL 按**全局**残差范数更新：所有 rank 喂同一个值，因此
         # 得到同一个 CFL 数（按各自局部残差更新会让 rank 间 CFL 漂移）。
         if self._cfl_controller is not None:

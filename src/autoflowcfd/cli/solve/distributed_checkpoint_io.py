@@ -27,7 +27,6 @@ def rebuild_distributed_solver_from_checkpoint(
     multi_gpu: bool = False,
     fully_distributed: bool = False,
     gpu_device: Optional[int] = None,
-    backend: Optional[str] = None,
     surface_mesh: Optional[str] = None,
     threads: int = -1,
     skip_quality_check: bool = False,
@@ -60,8 +59,6 @@ def rebuild_distributed_solver_from_checkpoint(
             完整网格）——与 `multi_gpu` 互斥，两者都为 False 时是 CPU
             MPI"传统模式"
         gpu_device: `multi_gpu=True` 时的 GPU 设备号
-        backend: 后端覆盖（`multi_gpu`/`fully_distributed` 场景下当前
-            未使用，保留与单机版同名参数一致的签名）
         surface_mesh: 面网格路径覆盖，None 时回退到 checkpoint metadata
         threads: CPU 后端线程数
         skip_quality_check: 跳过重建时的网格质量门检查
@@ -259,3 +256,31 @@ def rebuild_distributed_solver_from_checkpoint(
     metadata["turbulence_model"] = turbulence_model
     metadata["surface_mesh"] = resolved_surface_mesh
     return solver, iteration, metadata
+
+
+def distributed_periodic_checkpoint_callback(interval: int, output_dir: str, input_file: str,
+                                             turbulence_model: str, *, surface_mesh: Optional[str] = None,
+                                             iteration_offset: int = 0):
+    """分布式 `solve()` 的中间 checkpoint 回调（CPU MPI 与多 GPU、steady/transient/resume 共用；此前 CLI
+    里 7 份拷贝）：每 `interval` 步调用 `solver.save_checkpoint_distributed`（集体操作，全部 rank 调用）。
+
+    阶数记 `solver.current_order`（爬坡中途 `U_sps` 的实际形状）、目标阶数记 `solver.order`。
+    `iteration_offset`：resume 起点的绝对迭代数（否则会用小迭代数覆盖 resume 之前的同名 checkpoint）。
+    """
+    from autoflowcfd.core.mpi import is_root
+
+    def callback(solver, local_iteration):
+        if local_iteration % interval != 0:
+            return
+        iteration = iteration_offset + local_iteration
+        try:
+            saved_path = solver.save_checkpoint_distributed(
+                output_dir, iteration, input_file, solver.current_order, turbulence_model,
+                target_order=solver.order, surface_mesh=surface_mesh)
+            if saved_path and is_root():
+                print(f"   [Checkpoint] iter {iteration} saved: {saved_path}")
+        except Exception as e:
+            if is_root():
+                print(f"   [Checkpoint] Warning: save failed at iter {iteration}: {e}")
+
+    return callback

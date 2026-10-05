@@ -109,7 +109,7 @@ def _uniform_solver(monkeypatch):
           for name in ("wall_bottom", "wall_top", "x_min", "x_max",
                        "z_min", "z_max")}
     solver = FRSolver(
-        mesh=mesh, order=1, turb_model_name="NONE", n_vars=5,
+        mesh=mesh, order=1, turb_model_name="NONE",
         time_scheme=TimeIntegrationScheme.SSP_RK3,
         rho_inf=_RHO, vel_inf=_U, p_inf=_P, mu_molecular=_MU,
         bc_overrides=bc, adaptive_cfl=False,

@@ -109,15 +109,21 @@ class TestAllSolveLoopsAreGuarded:
         'autoflowcfd.core.fr_solver.solver',
         'autoflowcfd.core.utils.order_continuation',
         'autoflowcfd.core.mpi.distributed_order_continuation',
-        'autoflowcfd.core.gpu.distributed.gpu_distributed',
     ]
 
-    def test_single_gpu_shares_the_guarded_cpu_loop(self):
-        """单 GPU 没有自己的循环（2026-10-04 起与 CPU 共用 `SolveLoopMixin`，守卫随之共享）。"""
-        from autoflowcfd.core.fr_solver.solver.solve_loop import SolveLoopMixin
-        from autoflowcfd.core.gpu.solver.gpu_solver import GPUFRSolver
+    @pytest.mark.parametrize('cls_path', [
+        ('autoflowcfd.core.gpu.solver.gpu_solver', 'GPUFRSolver'),
+        ('autoflowcfd.core.mpi.distributed_solver', 'DistributedFRSolver'),
+        ('autoflowcfd.core.gpu.distributed.gpu_distributed', 'MultiGPUDistributedSolver'),
+    ])
+    def test_other_backends_share_the_guarded_loop(self, cls_path):
+        """单 GPU（2026-10-04 起）与两个分布式后端（2026-10-05 起）没有自己的循环，守卫随共用循环共享。"""
+        import importlib
 
-        assert GPUFRSolver.solve is SolveLoopMixin.solve
+        from autoflowcfd.core.fr_solver.solver.solve_loop import SolveLoopMixin
+
+        cls = getattr(importlib.import_module(cls_path[0]), cls_path[1])
+        assert cls.solve is SolveLoopMixin.solve
 
     @pytest.mark.parametrize('rel', LOOPS)
     def test_loop_calls_guard(self, rel):
@@ -209,6 +215,8 @@ class TestSolveLoopActuallyAborts:
             freestream=None,
             state=SimpleNamespace(),
             _loop_monitor_suffix=lambda: "",
+            _scaled_residual_field=lambda: None,
+            _divergence_hint=lambda: "",
         )
         return stub, calls
 

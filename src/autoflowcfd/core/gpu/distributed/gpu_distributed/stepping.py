@@ -1,20 +1,17 @@
-"""AutoFlowCFD V2.0 - `MultiGPUDistributedSolver` 的单步推进与求解循环（mixin，只含方法）。
+"""AutoFlowCFD V2.0 - `MultiGPUDistributedSolver` 的单步推进（mixin，只含方法）。
 
-从 `core/gpu/distributed/gpu_distributed.py` 拆出（2026-09-25）。
+从 `core/gpu/distributed/gpu_distributed.py` 拆出（2026-09-25）。求解循环与其余后端共用
+`fr_solver/solver/solve_loop.py::SolveLoopMixin`（2026-10-05 起）。
 """
 
-import time
 from functools import partial
-from typing import Any, Dict, Optional
 
-from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
 from autoflowcfd.core.gpu import get_cupy
-from autoflowcfd.core.mpi import is_root
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 
 
 class _MultiGPUSteppingMixin:
-    """完全分布式加载入口、阶数切换、单步推进与求解循环。"""
+    """完全分布式加载入口、阶数切换与单步推进。"""
 
     @classmethod
     def from_fully_distributed_package(cls, package: dict, n_ranks: int,
@@ -302,110 +299,3 @@ class _MultiGPUSteppingMixin:
         self.iteration += 1
         self._update_cfl_controller(residual_norm, newton_info=nk_info)
         return residual_norm
-
-    def solve(
-        self,
-        max_iter: int = 1000,
-        dt: float = 1e-4,
-        tol: float = 1e-6,
-        output_interval: int = 10,
-        checkpoint_callback=None,
-        phase_max_iter: Optional[int] = None,
-        residual_drop_threshold: float = 1e2,
-    ) -> Dict[str, Any]:
-        """执行分布式稳态求解循环。
-
-        真实 bug 修复（2026-09-02，与 CPU MPI 分布式 `DistributedFRSolver.
-        solve` 同一处修复、同一个理由——用户明确要求"不允许出现完成度
-        不是100%的功能点"后排查发现）：此前 `output_interval` 只控制
-        `print` 进度打印频率，没有任何中间 checkpoint 保存机制。补上
-        与单机 `FRSolver.solve`/CPU 分布式 `DistributedFRSolver.solve`
-        同一个约定的 `checkpoint_callback(solver, iteration)` 回调。
-
-        Order Continuation 自动分派（2026-09-02，见 core/gpu/distributed/
-        gpu_distributed_order_continuation.py 模块文档）：与 CPU
-        `DistributedFRSolver.solve()` 同一个判据——`self.order`（目标
-        阶数）>= 2 时自动改用逐阶爬坡（`run_distributed_order_
-        continuation`，CPU/GPU 共用同一份迭代循环），不需要调用方显式
-        请求。该函数返回 `SolverResult`（dataclass），这里适配转换成
-        本方法一贯的 dict 返回约定，不改变调用方（CLI）已有的
-        `result['final_residual']`/`result['iterations']` 访问方式。
-
-        Args:
-            max_iter: 最大迭代次数
-            dt: 时间步长
-            tol: 收敛容差
-            output_interval: 输出间隔
-            checkpoint_callback: 可选，`callback(solver, iteration)`，
-                每步结束后调用一次
-
-        Returns:
-            结果字典
-        """
-        from autoflowcfd.core.utils.order_continuation.policy import uses_order_continuation
-
-        if uses_order_continuation(self):
-            from autoflowcfd.core.mpi.distributed_order_continuation import (
-                run_distributed_order_continuation,
-            )
-            result = run_distributed_order_continuation(
-                self, max_iter, dt, tol, checkpoint_callback=checkpoint_callback,
-                phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold,
-            )
-            return {
-                'converged': result.converged,
-                'iterations': result.iterations,
-                'final_residual': result.final_residual,
-            }
-
-        if is_root():
-            print(f"Starting multi-GPU solve: {self.n_ranks} ranks, max_iter={max_iter}")
-
-        converged = False
-        final_residual = 1e10
-        _last_finite = None
-
-        for i in range(max_iter):
-            t_start = time.time()
-            res = self.step(dt)
-            t_end = time.time()
-            final_residual = res
-
-            if is_root():
-                if i == 0 or (i + 1) % output_interval == 0:
-                    from autoflowcfd.core.time_integration.implicit.mean_flow_step import (
-                        newton_monitor_suffix,
-                    )
-                    print(
-                        f"Multi-GPU Iter {i+1}: Residual = {res:.6e} | "
-                        f"Time/step: {t_end-t_start:.3f}s" + newton_monitor_suffix(self)
-                    )
-
-            # 发散检查必须在 checkpoint 回调**之前**（2026-09-16 修复）：
-            # 此前顺序是先保存再检查，于是发散那一步的 NaN 状态会被如实
-            # 写进 checkpoint。`res` 来自 `self.step()` 的全域 allreduce，
-            # 各 rank 取值相同，所以全部 rank 会同时抛出、不会死锁。
-            check_residual_finite(
-                res, i + 1, last_finite=_last_finite,
-                extra_hint=f"分布式路径：{self.n_ranks} 个 rank，"
-                           f"残差是全域 allreduce 值（各 rank 一致）",
-            )
-            _last_finite = res
-
-            if checkpoint_callback is not None:
-                # 全部 rank 都要调用——保存需要每个 rank 各自贡献 local
-                # cells 数据（见 CPU 分布式 solve 同一处注释）。
-                checkpoint_callback(self, i + 1)
-
-            if res < tol:
-                converged = True
-                if is_root():
-                    print(f"✅ Multi-GPU Converged at iteration {i+1}")
-                break
-
-        return {
-            'converged': converged,
-            'iterations': self.iteration,
-            'final_residual': final_residual,
-            'residual_history': self.residual_history,
-        }

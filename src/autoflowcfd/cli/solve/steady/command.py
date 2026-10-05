@@ -6,6 +6,7 @@
 
 import click
 
+from autoflowcfd.cli.solve.solver_factory import validate_backend_options
 from autoflowcfd.cli.solve.helpers import (
     load_physical_config_if_given,
     resolve_physical_constants,
@@ -148,15 +149,8 @@ from .single_node import _run_single_node
 @click.option('--av-alpha', 'artificial_viscosity_alpha', type=float, default=1.0,
               help='人工粘性强度标定常数（无量纲，默认1.0，ν = 斜坡·alpha·|u|·h/p），'
                    '只在 --artificial-viscosity 时有意义')
-@click.option('--entropy-stable-volume', 'entropy_stable_volume_enabled', is_flag=True,
-              help='体积项过积分分支启用 Chandrashekar (2013) 熵守恒两点通量替代逐点通量代入'
-                   '（2026-08-30 新增，默认关闭，见 core/fr_operators/flux_kernels.py::'
-                   'entropy_stable_volume_divergence_batch 与 ProjectFiles/V2.0/'
-                   '8_算法重构-Entropy-Stable_Split-Form通量重构-Part1/2.md）。真实测试确认在'
-                   '已启用过积分的基础上再改善约2~4倍，代价是体积项计算量从O(n_fine)升到'
-                   'O(n_fine^2)，仅 CPU 后端实现')
 def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_scheme, cfl_start, cfl_max, cfl_min,
-                 aoa_deg, aos_deg, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, artificial_viscosity_enabled, artificial_viscosity_alpha, entropy_stable_volume_enabled):
+                 aoa_deg, aos_deg, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, artificial_viscosity_enabled, artificial_viscosity_alpha):
     """执行稳态 FR 求解。
 
     支持高阶精度 (P1-P4) 和多种湍流模型 (SST, DDES, WMLES)。
@@ -224,14 +218,8 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
         print(f"MPI Ranks  : {n_ranks} (domain decomposition)")
     print("Wall Dist : exact point-to-wall-surface distance (AABB tree)\n")
 
-    # 1. 按后端分派（各分支的参数由 AST 分析得出，逐名传入）。单机（n_ranks == 1）的 CPU 与单 GPU 同一个
-    # 分支；多 rank 的 GPU 必须显式 --multi-gpu（此前 --backend gpu --n-ranks N 不加 --multi-gpu 时静默只用
-    # 单 GPU、忽略 N，--multi-gpu --n-ranks 1 则落到 CPU 求解器的 GPU 分支）
-    if multi_gpu and (backend != 'gpu' or n_ranks <= 1):
-        raise click.BadParameter("--multi-gpu 需要 --backend gpu 且 --n-ranks > 1（单 GPU 直接用 --backend gpu）",
-                                 param_hint="--multi-gpu")
-    if backend == 'gpu' and n_ranks > 1 and not multi_gpu:
-        raise click.BadParameter("多 rank 的 GPU 计算需要 --multi-gpu", param_hint="--n-ranks")
+    # 1. 按后端分派（各分支的参数由 AST 分析得出，逐名传入）。单机（n_ranks == 1）的 CPU 与单 GPU 同一个分支
+    validate_backend_options(backend, n_ranks, multi_gpu)
     if backend == 'gpu' and multi_gpu:
         _run_multi_gpu(
             aoa_deg=aoa_deg,
@@ -305,7 +293,6 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
             cfl_min=cfl_min,
             cfl_start=cfl_start,
             checkpoint_interval=checkpoint_interval,
-            entropy_stable_volume_enabled=entropy_stable_volume_enabled,
             gpu_device=gpu_device,
             input_file=input_file,
             max_iter=max_iter,

@@ -355,7 +355,7 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
     solver.dist_flat_face = my_package['dist_fc']
 
     new_n_sps = solver.mesh.n_sps_per_cell
-    new_state = DistributedFRState(solver.partition, new_n_sps, n_vars)
+    new_state = DistributedFRState(solver.partition, new_n_sps)
     new_state.U[:n_local] = new_local_U
     new_state.Q[:n_local] = conserved_to_primitive(new_local_U[..., :5])
     solver.state = new_state

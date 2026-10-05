@@ -347,8 +347,6 @@ def generate_fr_operators(order: int) -> FROperators:
         overint_restrict_f2c_prism=overint_restrict_f2c_prism,
         overint_lifted_div_tet=overint_lifted_div_tet,
         overint_lifted_div_prism=overint_lifted_div_prism,
-        overint_project_f2c_tet=overint_project_f2c_tet,
-        overint_project_f2c_prism=overint_project_f2c_prism,
         D_native_tet=D_native_tet,
         ref_native_tet=ref_native_tet,
         n_native_sps_tet=n_native_sps_tet,

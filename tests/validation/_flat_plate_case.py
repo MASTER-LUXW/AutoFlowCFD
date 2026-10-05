@@ -100,7 +100,6 @@ def build_flat_plate_solver(order: int, *, nx_up: int = 8, nx_plate: int = 24, n
     """
     from autoflowcfd.core.fr_solver import FRSolver
     from autoflowcfd.core.fr_solver.turbulence.wall_distance import apply_wall_distance_source
-    from autoflowcfd.core.turbulence.registry import n_state_vars
     from autoflowcfd.core.time_integration import TimeIntegrationScheme
     from tests.validation._channel_mesh import build_ghost_provider_by_classifier, build_prism_mesh_from_lines
 
@@ -133,7 +132,7 @@ def build_flat_plate_solver(order: int, *, nx_up: int = 8, nx_plate: int = 24, n
     # 网格自带的分组只是占位（构造需要），真正的边界类型由逐面分类的提供者给出
     placeholder = {name: {"type": "SYMMETRY"} for name in
                    ("x_min", "x_max", "wall_bottom", "wall_top", "z_min", "z_max")}
-    solver = FRSolver(mesh=mesh, order=order, turb_model_name=turb_model, n_vars=n_state_vars(turb_model),
+    solver = FRSolver(mesh=mesh, order=order, turb_model_name=turb_model,
                       time_scheme=time_scheme if time_scheme is not None else TimeIntegrationScheme.NEWTON_KRYLOV,
                       rho_inf=RHO_INF, vel_inf=U_INF,
                       p_inf=P_INF, mu_molecular=MU, bc_overrides=placeholder,

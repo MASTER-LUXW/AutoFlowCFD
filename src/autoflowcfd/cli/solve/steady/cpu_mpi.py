@@ -6,6 +6,7 @@
 
 import click
 
+from autoflowcfd.cli.solve.distributed_checkpoint_io import distributed_periodic_checkpoint_callback
 from autoflowcfd.cli.solve.wall_distance import wall_distance_source_if_needed
 from autoflowcfd.core.time_integration.base import scheme_from_name
 from autoflowcfd.cli.solve.helpers import load_mesh_for_solver
@@ -39,7 +40,7 @@ def _run_cpu_mpi(
     # connectivity 是真实、完整的，build_distributed_flat_face 能
     # 正确工作，DistributedMeshAdapter/distributed_compute_*_residual
     # 的 local+halo 压缩索引空间重排（#2 修复）才有意义。
-    from autoflowcfd.core.mpi import mpi_available, is_root
+    from autoflowcfd.core.mpi import mpi_available
     if not mpi_available:
         print("\n❌ MPI not available. Please install mpi4py and run with mpirun.")
         print("   pip install mpi4py")
@@ -143,35 +144,15 @@ def _run_cpu_mpi(
     # 分支说明）。
     from autoflowcfd.core.mpi.distributed_checkpoint import (
         distributed_save_results,
-        distributed_save_checkpoint,
     )
 
-    def _distributed_checkpoint_cb(solver_ref, iteration):
-        if iteration % checkpoint_interval != 0:
-            return
-        try:
-            # order 传 solver_ref.current_order（不是固定的目标
-            # order）：Order Continuation 接入分布式路径后
-            # （2026-09-02），爬坡阶段中途保存的 checkpoint 的
-            # `U_sps` 形状对应的是当时的 current_order，不是最终
-            # 目标阶数，见 distributed_save_checkpoint 同名参数
-            # 文档。target_order 记录真正的目标，供 resume 时继续
-            # 爬坡。
-            saved_path = distributed_save_checkpoint(
-                solver_ref, output_dir, iteration,
-                input_file, solver_ref.current_order, turbulence_model, "cpu",
-                target_order=solver_ref.order, surface_mesh=surface_mesh,
-            )
-            if saved_path and is_root():
-                print(f"   [Checkpoint] iter {iteration} saved: {saved_path}")
-        except Exception as e:
-            if is_root():
-                print(f"   [Checkpoint] Warning: save failed at iter {iteration}: {e}")
+    _distributed_checkpoint_cb = distributed_periodic_checkpoint_callback(
+        checkpoint_interval, output_dir, input_file, turbulence_model, surface_mesh=surface_mesh)
 
     # 执行分布式求解
     try:
         result = solver.solve(
-            n_steps=max_iter, dt=1e-3, output_interval=checkpoint_interval,
+            max_iter=max_iter, dt=1e-3, tol=1e-6,
             checkpoint_callback=_distributed_checkpoint_cb,
             phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold,
         )
@@ -180,9 +161,8 @@ def _run_cpu_mpi(
 
         # 保存结果（分布式版本：root 收集全局数据后保存）
         distributed_save_results(solver, output_dir)
-        distributed_save_checkpoint(
-            solver, output_dir, result.iterations,
-            input_file, solver.current_order, turbulence_model, "cpu",
+        solver.save_checkpoint_distributed(
+            output_dir, result.iterations, input_file, solver.current_order, turbulence_model,
             target_order=solver.order, surface_mesh=surface_mesh,
         )
 

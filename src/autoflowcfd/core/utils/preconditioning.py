@@ -231,7 +231,7 @@ def apply_low_mach_preconditioner(residual: np.ndarray, Q: np.ndarray,
 
     Args:
         residual: (n_cells, n_sps, n_vars>=5) 残差；只有前 5 个守恒变量
-            分量被预处理，n_vars>5 时（SST 把 k/omega 槽位挂在同一个数组上）
+            分量被预处理，n_vars>5 时（如平均流与湍流紧耦合的未知量）
             其余分量原样保留——湍流标量是被动输运量，不含声学模态，
             没有需要预处理的刚性。
         Q: (n_cells, n_sps, >=5) 原始变量 (rho,u,v,w,p)

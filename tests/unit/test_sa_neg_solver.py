@@ -32,7 +32,7 @@ def _sa_channel(kind, order, scheme=None, order_continuation=False):
         bc[n] = {"type": "WALL", "is_no_slip": True, "wall_velocity": [0.0, 0.0, 0.0]}
     for n in ("x_min", "x_max"):
         bc[n] = {"type": "FARFIELD", "Q_free": [RHO, U, 0.0, 0.0, P]}
-    s = FRSolver(mesh=mesh, order=order, turb_model_name="SA", n_vars=5,
+    s = FRSolver(mesh=mesh, order=order, turb_model_name="SA",
                  time_scheme=scheme if scheme is not None else TimeIntegrationScheme.NEWTON_KRYLOV,
                  rho_inf=RHO, vel_inf=U, p_inf=P, mu_molecular=1.8e-5, bc_overrides=bc)
     s.order_continuation_enabled = order_continuation

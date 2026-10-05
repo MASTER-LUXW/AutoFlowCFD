@@ -65,7 +65,7 @@ class TestRamp:
 def _build(order=1, alpha=1.0):
     mesh = build_channel_mesh_prism(order, nx=NX, ny=NY, nz=NZ, Lx=LX, H=H, Lz=LZ)
     solver = FRSolver(
-        mesh=mesh, order=order, turb_model_name="NONE", n_vars=5,
+        mesh=mesh, order=order, turb_model_name="NONE",
         time_scheme=TimeIntegrationScheme.SSP_RK3,
         rho_inf=RHO, vel_inf=U_INF, p_inf=P, mu_molecular=1.8e-5,
         bc_overrides=BC, n_threads=1,

@@ -93,7 +93,7 @@ class TestFullyDistributedOrderContinuation:
 
         # dt 选择理由见 test_distributed_order_continuation.py 同名注释
         # （分布式路径固定步长，P2 阶数 CFL 稳定域更窄）。
-        result = solver.solve(n_steps=60, dt=1e-9, output_interval=1000)
+        result = solver.solve(max_iter=60, dt=1e-9)
 
         assert solver.current_order == 2
         assert np.isfinite(result.final_residual)
@@ -112,7 +112,7 @@ class TestFullyDistributedOrderContinuation:
             package, n_ranks=1, root_context=None,
         )
         with pytest.raises(NotImplementedError):
-            solver.solve(n_steps=5, dt=1e-9, output_interval=1000)
+            solver.solve(max_iter=5, dt=1e-9)
 
     def test_sst_order_continuation_keeps_turb_fields_consistent(self):
         from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
@@ -123,7 +123,7 @@ class TestFullyDistributedOrderContinuation:
         )
         assert solver.turb_model is not None
 
-        result = solver.solve(n_steps=60, dt=1e-9, output_interval=1000)
+        result = solver.solve(max_iter=60, dt=1e-9)
 
         assert solver.current_order == 2
         n_local = solver.partition.n_local_cells

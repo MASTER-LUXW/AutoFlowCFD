@@ -110,7 +110,7 @@ def _build(wall_plane, order, monkeypatch):
     bc[wall_plane] = {"type": "WALL", "is_no_slip": True,
                       "wall_velocity": [0.0, 0.0, 0.0]}
     solver = FRSolver(
-        mesh=mesh, order=order, turb_model_name="NONE", n_vars=5,
+        mesh=mesh, order=order, turb_model_name="NONE",
         time_scheme=TimeIntegrationScheme.SSP_RK3,
         rho_inf=_RHO, vel_inf=_U, p_inf=_P, mu_molecular=1.8e-3,
         bc_overrides=bc, adaptive_cfl=False,

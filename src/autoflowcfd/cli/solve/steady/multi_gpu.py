@@ -6,6 +6,7 @@
 
 import click
 
+from autoflowcfd.cli.solve.distributed_checkpoint_io import distributed_periodic_checkpoint_callback
 from autoflowcfd.core.time_integration.base import scheme_from_name
 from autoflowcfd.cli.solve.wall_distance import wall_distance_source_if_needed
 from autoflowcfd.cli.solve.helpers import load_mesh_for_solver
@@ -103,26 +104,8 @@ def _run_multi_gpu(
     # 只控制进度打印，跑到一半崩溃/被杀会丢失全部进度，与单机路径
     # `_checkpoint_cb` 同一个设计，见 solver.solve/save_checkpoint_
     # distributed 文档"完成度"一节说明）。
-    def _multi_gpu_checkpoint_cb(solver_ref, iteration):
-        if iteration % checkpoint_interval != 0:
-            return
-        try:
-            # order/target_order 分离（2026-09-02，Order Continuation
-            # 接入多GPU分布式路径后补齐——与 CPU 分布式
-            # _distributed_checkpoint_cb 同一处修复同一个理由）：
-            # 爬坡阶段中途的 checkpoint 必须记录
-            # solver_ref.current_order（U_sps 实际形状），不是固定
-            # 的目标 order。
-            saved_path = solver_ref.save_checkpoint_distributed(
-                output_dir, iteration, input_file,
-                solver_ref.current_order, turbulence_model, backend="gpu",
-                target_order=solver_ref.order, surface_mesh=surface_mesh,
-            )
-            if saved_path and is_root():
-                print(f"   [Checkpoint] iter {iteration} saved: {saved_path}")
-        except Exception as e:
-            if is_root():
-                print(f"   [Checkpoint] Warning: save failed at iter {iteration}: {e}")
+    _multi_gpu_checkpoint_cb = distributed_periodic_checkpoint_callback(
+        checkpoint_interval, output_dir, input_file, turbulence_model, surface_mesh=surface_mesh)
 
     try:
         result = solver.solve(
@@ -130,14 +113,14 @@ def _run_multi_gpu(
             checkpoint_callback=_multi_gpu_checkpoint_cb,
             phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold,
         )
-        print(f"\n✅ Multi-GPU Simulation Finished: Iterations={result['iterations']}")
+        print(f"\n✅ Multi-GPU Simulation Finished: Iterations={result.iterations}")
         # #4（2026-08-28）：此前这里从不保存结果——分布式 checkpoint
         # save/load 依赖的 self.U_gpu 本地尺寸缺陷（#1）修复之前，
         # 保存也没有意义，见 MultiGPUDistributedSolver.
         # save_checkpoint_distributed 文档。
         saved_path = solver.save_checkpoint_distributed(
-            output_dir, result['iterations'], input_file,
-            solver.current_order, turbulence_model, backend="gpu",
+            output_dir, result.iterations, input_file,
+            solver.current_order, turbulence_model,
             target_order=solver.order, surface_mesh=surface_mesh,
         )
         if saved_path and is_root():

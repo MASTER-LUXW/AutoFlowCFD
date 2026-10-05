@@ -15,6 +15,17 @@ from autoflowcfd.core.mpi.comm import allreduce_sum
 class _DistributedSupportMixin:
     """halo 交换、阶数切换、传感器门控滤波、负载均衡报告"""
 
+    def save_checkpoint_distributed(self, output_dir: str, iteration: int, input_file: str, order: int,
+                                    turbulence_model: str, history: dict = None, target_order: int = None,
+                                    surface_mesh: str = None):
+        """分布式 checkpoint 保存（集体操作，全部 rank 调用）；与多 GPU 同名同签名，CLI 对两个分布式后端
+        用同一个回调（`cli/solve/distributed_checkpoint_io.py::distributed_periodic_checkpoint_callback`）。"""
+        from autoflowcfd.core.mpi.distributed_checkpoint import distributed_save_checkpoint
+
+        return distributed_save_checkpoint(
+            self, output_dir, iteration, input_file, order, turbulence_model, "cpu",
+            history=history, target_order=target_order, surface_mesh=surface_mesh)
+
     def _distributed_positivity_limiter(self):
         """正性保持限制器（与单机同一个、同一个核）：几何取 local 段、原生排列——
         adapter 的 jacobians 在紧凑排列，经 inv_perm 换回后切片。按阶数缓存。"""

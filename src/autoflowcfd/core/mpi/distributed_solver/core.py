@@ -23,12 +23,12 @@ from autoflowcfd.core.time_integration.base import (
     TimeIntegrator, TimeIntegrationScheme, require_distributed_scheme,
 )
 from .from_package import _DistributedFromPackageMixin
-from .solve_loop import _DistributedSolveMixin
+from autoflowcfd.core.fr_solver.solver.solve_loop import DistributedSolveLoopMixin
 from .step import _DistributedStepMixin
 from .support import _DistributedSupportMixin
 
 
-class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, _DistributedSolveMixin,
+class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, DistributedSolveLoopMixin,
                           _DistributedSupportMixin):
     """MPI 域分解分布式 FR 求解器。
 
@@ -249,8 +249,9 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, _
 
         # 4. 初始化分布式状态（在面几何/halo 扩展之后构造）
         n_sps = mesh.n_sps_per_cell
-        n_vars = solver_kwargs.get('n_vars', 5)
-        self.state = DistributedFRState(self.partition, n_sps, n_vars)
+        self.state = DistributedFRState(self.partition, n_sps)
+        self.residual_history = []   # 每步一条（单步里追加，与其余后端一致）
+        n_vars = self.state.n_vars
         # 均匀自由流场初始化（真实 bug 修复，2026-09-02，见
         # DistributedFRState.initialize_uniform 文档）：此前这里从未
         # 对新构造的 state 赋初值，conserved state 恒为全零。
@@ -407,7 +408,7 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, _
         time_scheme = require_distributed_scheme(
             solver_kwargs.get('time_scheme', TimeIntegrationScheme.SSP_RK3))
         dual_time_steps = solver_kwargs.get('dual_time_inner_iter', DEFAULT_DUAL_TIME_STEPS)
-        self._time_integrator = TimeIntegrator(
+        self.time_integrator = TimeIntegrator(
             scheme=time_scheme, dt=1.0, dual_time_steps=dual_time_steps,
         )
         # DUAL_TIME 模式下 BDF2 需要的上一物理时间层状态（None 表示

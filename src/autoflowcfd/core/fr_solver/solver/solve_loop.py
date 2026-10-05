@@ -1,9 +1,15 @@
-"""AutoFlowCFD V2.0 - 单机求解循环（mixin，只含方法）。
+"""AutoFlowCFD V2.0 - 求解循环（mixin，只含方法）。
 
-从 `core/fr_solver/solver.py` 拆出（2026-09-25）。`SolveLoopMixin` 与后端无关，CPU `FRSolver` 与单 GPU
-`GPUFRSolver` 共用（2026-10-04 起；此前 GPU 另有一份只打印残差、不调 checkpoint 回调、返回字典的
-循环）。后端差异只通过这几个接口进入：`step()`、`_solve_with_order_continuation()`、`host_view()`
-（每步气动力系数读主机上的状态）与 `_loop_monitor_suffix()`（每步日志末尾的后端信息）。
+从 `core/fr_solver/solver.py` 拆出（2026-09-25）。`SolveLoopMixin` 与后端无关，四个后端共用：CPU `FRSolver`、
+单 GPU `GPUFRSolver`（2026-10-04 起）、CPU MPI `DistributedFRSolver` 与多 GPU `MultiGPUDistributedSolver`
+（2026-10-05 起）。此前单 GPU、CPU 分布式、多 GPU 各有一份循环：单 GPU 与多 GPU 返回字典，两个分布式循环
+的定阶收敛判据是绝对的 `res < tol`（单机与全部 Order Continuation 路径是相对下降 1/tol 倍，同一个 `tol`
+两种含义），CPU 分布式不记收敛历史、步数参数名是 `n_steps`。
+
+后端差异只通过这几个接口进入：`step()`（返回全域残差范数，分布式各 rank 一致）、
+`_solve_with_order_continuation()`、`host_view()`（每步气动力系数读主机上的状态，只在设置了
+`_reference_area` 时调用）、`_scaled_residual_field()`（逐方程缩放残差诊断的数据源）、
+`_loop_monitor_suffix()` 与 `_divergence_hint()`（日志与发散报错的后端附注）。日志只在 root rank 打印。
 """
 
 from contextlib import contextmanager
@@ -11,6 +17,7 @@ from typing import Optional
 
 import numpy as np
 
+from autoflowcfd.core.mpi import is_root
 from autoflowcfd.core.utils.order_continuation.policy import uses_order_continuation
 from autoflowcfd.core.time_integration.implicit.mean_flow_step import newton_monitor_suffix
 from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
@@ -27,6 +34,30 @@ class SolveLoopMixin:
     def _loop_monitor_suffix(self) -> str:
         """每步日志末尾的后端信息（CPU 无；GPU 打印显存占用）。"""
         return ""
+
+    def _scaled_residual_field(self):
+        """逐方程缩放残差诊断（每 10 步一行）的数据源：完整的 `(n_cells, n_sps, 5)` 主机残差，没有时 None。
+
+        只有 CPU 单机保留着整场物理残差；GPU 不为一行诊断把残差拷回主机，分布式各 rank 只有本分区的
+        残差（按本分区算出的分位与最大残差单元会被误读成全域结果）。
+        """
+        return None
+
+    def _divergence_hint(self) -> str:
+        """残差非有限时报错信息的后端附注。"""
+        return ""
+
+    def _solve_with_order_continuation(self, max_iter: int, dt: float, tol: float,
+                                       checkpoint_callback=None,
+                                       phase_max_iter: Optional[int] = None,
+                                       residual_drop_threshold: float = 1e2):
+        """Order Continuation（`run_distributed_order_continuation`：只依赖 `step()`/`order`/`current_order`/
+        `_interpolate_to_new_order` 这几个接口，单 GPU 与两个分布式后端共用；CPU 单机覆盖为自己的实现）。"""
+        from autoflowcfd.core.mpi.distributed_order_continuation import run_distributed_order_continuation
+
+        return run_distributed_order_continuation(
+            self, max_iter, dt, tol, checkpoint_callback,
+            phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold)
 
     def _pseudo_time_budget(self, n_steps: int):
         """本次求解已推进的伪时间与各层物理时标之比；拿不到就返回 None。
@@ -121,10 +152,12 @@ class SolveLoopMixin:
         else:
             self.tau_accum = None
 
-        logger_msg = f"Starting solve loop with {self.time_integrator.scheme.value}"
-        if self.turb_model_name != "NONE":
-            logger_msg += f", turbulence={self.turb_model_name}"
-        print(logger_msg)
+        report = is_root()
+        if report:
+            logger_msg = f"Starting solve loop with {self.time_integrator.scheme.value}"
+            if self.turb_model_name != "NONE":
+                logger_msg += f", turbulence={self.turb_model_name}"
+            print(logger_msg)
 
         # Order Continuation: 从低阶开始逐步提升精度
         if uses_order_continuation(self):
@@ -160,7 +193,7 @@ class SolveLoopMixin:
                 # 遗漏——是路径不对等，不是有意设计。检查必须在
                 # checkpoint 回调**之前**。
                 check_residual_finite(res, i + 1, order=self.order,
-                                      last_finite=last_finite)
+                                      last_finite=last_finite, extra_hint=self._divergence_hint())
                 last_finite = res
 
                 if initial_res is None:
@@ -196,11 +229,12 @@ class SolveLoopMixin:
                 # 同一处、同一理由）：只在第 1 步和其后每 10 步打印一次，避免
                 # 正常运行时每步都刷出这行长诊断信息。
                 freestream = getattr(self, 'freestream', None)
-                if freestream is not None and hasattr(getattr(self, "state", None), 'dU_dt') and (i == 0 or (i + 1) % 10 == 0):
+                field = self._scaled_residual_field() if (i == 0 or (i + 1) % 10 == 0) else None
+                if freestream is not None and field is not None:
                     from autoflowcfd.core.fr_solver.residual_diagnostics import (
                         compute_scaled_residuals, format_scaled_residual_line,
                     )
-                    diag = compute_scaled_residuals(self.state.dU_dt, freestream)
+                    diag = compute_scaled_residuals(field, freestream)
                     msg += " | " + format_scaled_residual_line(
                         diag,
                         # 最大残差单元的体积分位：残差被 det(J) 除，体积
@@ -228,7 +262,8 @@ class SolveLoopMixin:
                         )
                         msg += " | " + format_pseudo_time_budget(
                             _ptb, compact=True)
-                print(msg)
+                if report:
+                    print(msg)
 
                 # 中间 checkpoint 保存
                 if checkpoint_callback is not None:
@@ -240,8 +275,9 @@ class SolveLoopMixin:
                 # 直接 ZeroDivisionError 崩溃），此时不启用收敛判据。
                 if i >= 1 and tol > 0.0 and initial_res / max(res, 1e-30) >= 1.0 / tol:
                     converged = True
-                    print(f"[OK] Converged at iteration {i+1} with residual {res:.6e} "
-                          f"(dropped {initial_res/res:.1e}x)")
+                    if report:
+                        print(f"[OK] Converged at iteration {i+1} with residual {res:.6e} "
+                              f"(dropped {initial_res/res:.1e}x)")
                     break
 
         # 收尾摘要：把"物理场到底走了多远"完整报一次。残差是否收敛与
@@ -252,7 +288,7 @@ class SolveLoopMixin:
         # 手法），那种替身没有这个方法；一行纯诊断不该让它失败。
         _ptb_fn = getattr(self, "_pseudo_time_budget", None)
         _ptb = _ptb_fn(n_steps=i + 1) if _ptb_fn is not None else None
-        if _ptb is not None:
+        if _ptb is not None and report:
             from autoflowcfd.core.fr_solver.pseudotime_budget import (
                 format_pseudo_time_budget,
             )
@@ -261,12 +297,23 @@ class SolveLoopMixin:
         return SolverResult(converged=converged, iterations=i+1, final_residual=final_residual)
 
 
+class DistributedSolveLoopMixin(SolveLoopMixin):
+    """CPU MPI 与多 GPU 分布式：`step()` 返回全域 allreduce 残差（各 rank 一致，收敛/发散判定同步发生；
+    checkpoint 回调是集体操作，全部 rank 都调用）。"""
+
+    def _divergence_hint(self) -> str:
+        return f"分布式路径：{self.n_ranks} 个 rank，残差是全域 allreduce 值（各 rank 一致，同时抛出）"
+
+
 class _SolverSolveMixin(SolveLoopMixin):
     """CPU `FRSolver`：主机视图、Order Continuation 委托、阶数切换与单步推进。"""
 
     def host_view(self):
         """主机视图：CPU 求解器的状态本来就在主机上，返回自身（单 GPU 的见 `core/gpu/solver/host_view.py`）。"""
         return self
+
+    def _scaled_residual_field(self):
+        return self.state.dU_dt
 
     @contextmanager
     def edit_host_state(self):

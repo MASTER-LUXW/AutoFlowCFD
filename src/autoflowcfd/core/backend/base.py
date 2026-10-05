@@ -30,8 +30,8 @@ class SolutionVector:
     - data[:, 0]: rho（密度）
     - data[:, 1:4]: rho*u, rho*v, rho*w（动量）
     - data[:, 4]: rho*E（总能密度）
-    - data[:, 5:7]: SST 求解器状态数组的两个历史槽位（从未被更新，湍流量在模型对象上，
-      后处理读 `core/turbulence/output.py` 的单元平均）
+    - 2026-10-05 以前写出的 SST checkpoint 还有 data[:, 5:7]：状态数组的两个历史槽位（从未被更新，
+      已删除；湍流量在模型对象上，后处理读 `core/turbulence/output.py` 的单元平均）
 
     下面的 get_velocity()/get_pressure() 访问器会把
     这些量转换成方法名所承诺的**原始**量（真实速度、静压）

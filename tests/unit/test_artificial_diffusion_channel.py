@@ -38,7 +38,7 @@ def _build(av_enabled, alpha=1.0):
         "x_max": {"type": "OUTLET", "p_outlet": P},
     }
     solver = FRSolver(
-        mesh=mesh, order=2, turb_model_name="NONE", n_vars=5,
+        mesh=mesh, order=2, turb_model_name="NONE",
         time_scheme=TimeIntegrationScheme.SSP_RK3,
         rho_inf=RHO, vel_inf=U_INF, p_inf=P, mu_molecular=1.8e-5,
         bc_overrides=bc, n_threads=1,

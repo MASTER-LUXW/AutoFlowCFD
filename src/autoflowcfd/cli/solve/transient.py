@@ -8,6 +8,7 @@ from typing import Optional
 import click
 from loguru import logger
 
+from autoflowcfd.cli.solve.solver_factory import validate_backend_options
 from autoflowcfd.cli.solve.checkpoint_io import periodic_checkpoint_callback, write_single_node_outputs
 from autoflowcfd.cli.solve.helpers import (
     load_mesh_for_solver,
@@ -233,13 +234,8 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
     # 词汇->枚举唯一事实来源（见 core/time_integration/base.py）。
     from autoflowcfd.core.time_integration.base import scheme_from_name
 
-    # 后端组合校验（与 `solve steady` 同一规则）：此前 --backend gpu --n-ranks N 不加 --multi-gpu 时，
-    # 每个 rank 构造的是 CPU 求解器的 GPU 分支（只有 P0 无粘项在 GPU 上）
-    if multi_gpu and (backend != 'gpu' or n_ranks <= 1):
-        raise click.BadParameter("--multi-gpu 需要 --backend gpu 且 --n-ranks > 1（单 GPU 直接用 --backend gpu）",
-                                 param_hint="--multi-gpu")
-    if backend == 'gpu' and n_ranks > 1 and not multi_gpu:
-        raise click.BadParameter("多 rank 的 GPU 计算需要 --multi-gpu", param_hint="--n-ranks")
+    # 后端组合校验（与 `solve steady/resume` 同一个函数）
+    validate_backend_options(backend, n_ranks, multi_gpu)
 
     if n_ranks > 1:
         # 分布式瞬态求解路径（2026-09-02 补齐——此前本命令完全没有

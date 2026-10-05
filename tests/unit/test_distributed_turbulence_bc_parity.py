@@ -56,10 +56,9 @@ def _single(scheme, order, model="SST", mesh=None):
     """单机求解器（均匀来流初场，壁距经生产入口由精确来源施加）。"""
     from autoflowcfd.core.fr_solver.solver import FRSolver
     from autoflowcfd.core.fr_solver.turbulence import apply_wall_distance_source
-    from autoflowcfd.core.turbulence.registry import n_state_vars
 
     mesh = mesh or _mesh(model, order)
-    single = FRSolver(mesh, order=order, turb_model_name=model, n_vars=n_state_vars(model), time_scheme=scheme,
+    single = FRSolver(mesh, order=order, turb_model_name=model, time_scheme=scheme,
                       bc_overrides=_bc(), **_KW)
     single.order_continuation_enabled = False
     single.state.U[...] = _uniform_U(*single.state.U.shape)
@@ -81,7 +80,7 @@ def _pair(scheme, order=1, model="SST"):
 
     dist = DistributedFRSolver(
         mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity, n_ranks=1,
-        order=order, turb_model_name=model, n_vars=5, time_scheme=scheme,
+        order=order, turb_model_name=model, time_scheme=scheme,
         wall_distance_source=channel_wall_source(LX, H, LZ), bc_overrides=_bc(), **_KW)
     # 分布式状态只存平均流 5 变量（湍流场由湍流模型持有，见 DistributedFRState）
     dist.state.U[:n_cells] = U0[..., :5]
