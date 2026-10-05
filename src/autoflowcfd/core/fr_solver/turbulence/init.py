@@ -129,32 +129,56 @@ def _set_turbulence_bounds(solver) -> None:
     )
 
 
-#: 湍流产生项渐变步数：前这么多步内 production_factor 从 0 线性增加到 1。
-#: 工业 RANS 标准做法：防止初始流场未发展时 P_k >> D_k 导致 k/omega 指数爆炸。
-#: 50 步足够：配合物理上界限制（k_max, omega_max），k/omega 在此步数内达到准平衡。
-#: Fluent 默认 ~50 步，OpenFOAM ~100 步；过长的 ramp 浪费收敛机会。
+#: 显式格式的湍流产生项渐变步数：前这么多步内 production_factor 从 0 线性增加到 1，防止初始流场未发展时
+#: P_k >> D_k 导致 k/omega 指数爆炸（配合物理上界 k_max/omega_max）。
 TURB_PRODUCTION_RAMP_STEPS = 50
+
+
+def production_ramp_steps(time_scheme) -> int:
+    """按时间格式给出产生项渐变步数（唯一来源）。
+
+    隐式稳态（Newton-Krylov）不渐变：渐变按**步数**计，显式 50 步只是很短的一段伪时间，隐式 50 个 Newton 步
+    却几乎是整个 P0 阶段，期间每步要解的方程都在变（产生项每步增加 2%），Newton 追着移动目标走——残差停在
+    这 2% 变化的量级上，CFL 被反复回退。隐式的全局化已由 PTC（起步 CFL 5，强阻尼）与正性限制器提供，SA 用的
+    是允许负值的 SA-neg。湍流平板 P0->P3 同一快照 A/B（2026-10-05，渐变 50 vs 0）：SA P0 55->30 步、GMRES
+    501->158，P1~P3 步数相同，5 个站位 cf 逐位相同；SST P0 119->55 步、GMRES 5154->742，P1 32->24 步
+    （SST 两臂都卡 P2，是已知的 SST 折点问题，与渐变无关）。
+    """
+    from autoflowcfd.core.time_integration.base import TimeIntegrationScheme, scheme_from_name
+
+    if scheme_from_name(time_scheme) == TimeIntegrationScheme.NEWTON_KRYLOV:
+        return 0
+    return TURB_PRODUCTION_RAMP_STEPS
+
+
+def init_production_ramp(owner, time_scheme) -> None:
+    """置渐变计数器初值（五个求解器构造点共用，在时间格式确定之后调用）。
+
+    构造时不推进计数器，每一步由 `advance_production_ramp` 推进一次：2026-10-05 以前 CPU 单机与 CPU MPI 传统
+    模式在构造时就推进了一次（渐变期间产生项因子比单 GPU / CPU MPI 完全分布式 / 多 GPU 多 1/N），多 GPU 则靠
+    `advance_production_ramp` 里的懒默认值。checkpoint 恢复湍流场后由恢复路径把计数器推到终点。
+    """
+    owner._turb_ramp_step = 0
+    owner._turb_production_ramp_steps = production_ramp_steps(time_scheme)
+    owner._turb_production_ramp_complete = False
 
 
 def advance_production_ramp(owner, model) -> None:
     """推进一步湍流产生项渐变：按 `owner` 上的计数器设置 `model.production_factor`。
 
     全部后端共用这一份（CPU 单机/分布式视图、单机 GPU、多 GPU）。`owner` 持有
-    `_turb_ramp_step` / `_turb_production_ramp_steps`（没有时取
-    `TURB_PRODUCTION_RAMP_STEPS`）/ `_turb_production_ramp_complete`（渐变完成时
-    一次性置 True，供 Order Continuation 重置残差基准）。2026-09-25 以前 CPU 与
+    `init_production_ramp` 置好的 `_turb_ramp_step` / `_turb_production_ramp_steps` /
+    `_turb_production_ramp_complete`（渐变完成时一次性置 True，供 Order Continuation 重置残差基准）。2026-09-25 以前 CPU 与
     单机 GPU 各写一份，多 GPU 分布式则**从未推进过**（`production_factor` 恒为 1，
     与其余后端前 50 步的物理不同）。
     """
     if model is None or not hasattr(model, 'production_factor'):
         return
-    ramp_steps = getattr(owner, '_turb_production_ramp_steps', None)
-    if ramp_steps is None:
-        ramp_steps = owner._turb_production_ramp_steps = TURB_PRODUCTION_RAMP_STEPS
-    current_step = getattr(owner, '_turb_ramp_step', 0)
+    ramp_steps = owner._turb_production_ramp_steps
+    current_step = owner._turb_ramp_step
     if ramp_steps <= 0 or current_step >= ramp_steps:
         model.production_factor = 1.0
-        if not getattr(owner, '_turb_production_ramp_complete', False):
+        if not owner._turb_production_ramp_complete:
             owner._turb_production_ramp_complete = True
             logger.info(
                 f"[ProductionRamp] Ramp complete after {ramp_steps} steps, "
@@ -171,12 +195,8 @@ def _update_production_ramp(solver) -> None:
 
 
 def init_turbulence_models(solver, n_cells: int, n_sps: int) -> None:
-    """初始化湍流模型（对应 FRSolver._init_turbulence_models）。"""
-    # 湍流产项渐变计数器（与迭代步数同步，控制 production_factor 从 0 渐增到 1）
-    solver._turb_ramp_step = 0
-    # 渐变完成标记（_update_production_ramp 在渐变完成时设为 True）
-    solver._turb_production_ramp_complete = False
-    solver._turb_production_ramp_steps = TURB_PRODUCTION_RAMP_STEPS
+    """初始化湍流模型（对应 FRSolver._init_turbulence_models）。产生项渐变计数器由构造点在时间格式确定后经
+    `init_production_ramp` 设置。"""
 
     # 从 Tu/VR 推导物理自洽的 k/omega 初值（工业标准）
     k_inf, omega_inf = _set_freestream_turbulence(solver)
@@ -184,15 +204,12 @@ def init_turbulence_models(solver, n_cells: int, n_sps: int) -> None:
     if solver.turb_model_name == "SST":
         solver.turb_model = SSTModelFR(n_cells, n_sps, k_inf=k_inf, omega_inf=omega_inf)
         _set_turbulence_bounds(solver)
-        _update_production_ramp(solver)
         print(f"   [OK] SST k-omega model initialized "
-              f"(k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e}, "
-              f"production ramp: {solver._turb_production_ramp_steps} steps)")
+              f"(k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
 
     elif solver.turb_model_name == "DDES":
         solver.turb_model = SSTModelFR(n_cells, n_sps, k_inf=k_inf, omega_inf=omega_inf)
         _set_turbulence_bounds(solver)
-        _update_production_ramp(solver)
         solver.ddes_model = DDESModel()
         # h_max（2026-09-02 补齐，与下面 IDDES 分支同一处几何量、同一个
         # 一次性缓存策略）：`apply_to_sst_model` 现在优先用各向异性感知
@@ -203,13 +220,11 @@ def init_turbulence_models(solver, n_cells: int, n_sps: int) -> None:
         # 用不到的 h_wn 即可。
         solver._iddes_h_max, _ = compute_h_max_and_h_wn(solver.mesh)
         print(f"   [OK] DDES model initialized (based on SST, "
-              f"k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e}, "
-              f"production ramp: {solver._turb_production_ramp_steps} steps)")
+              f"k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
 
     elif solver.turb_model_name == "IDDES":
         solver.turb_model = SSTModelFR(n_cells, n_sps, k_inf=k_inf, omega_inf=omega_inf)
         _set_turbulence_bounds(solver)
-        _update_production_ramp(solver)
         solver.ddes_model = IDDESModel()
         # h_max/h_wn 只依赖网格几何（边长），与流场状态无关——mesh 在
         # 整个求解过程中不变，初始化时算一次并缓存在 solver 上，避免
@@ -218,15 +233,12 @@ def init_turbulence_models(solver, n_cells: int, n_sps: int) -> None:
         # 的消费点）。
         solver._iddes_h_max, solver._iddes_h_wn = compute_h_max_and_h_wn(solver.mesh)
         print(f"   [OK] IDDES model initialized (based on SST, "
-              f"k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e}, "
-              f"production ramp: {solver._turb_production_ramp_steps} steps)")
+              f"k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
 
     elif solver.turb_model_name == "SA":
         solver.turb_model = m = create_sa_model(solver, n_cells, n_sps)
-        _update_production_ramp(solver)
         print(f"   [OK] SA-neg model initialized (nu_tilde_inf={m.nu_tilde_inf:.4e}, "
-              f"chi_inf={m.nu_tilde_inf / m.nu_ref:.4g}, viscosity ratio={m.viscosity_ratio:g}, "
-              f"production ramp: {solver._turb_production_ramp_steps} steps)")
+              f"chi_inf={m.nu_tilde_inf / m.nu_ref:.4g}, viscosity ratio={m.viscosity_ratio:g})")
 
     elif solver.turb_model_name == "WMLES":
         # `solver.wmles_model` 已在 `FRSolver.__init__` 第 3 步提前构造

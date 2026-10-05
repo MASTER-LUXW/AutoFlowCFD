@@ -226,12 +226,12 @@ def test_gpu_distributed_sst_matches_cpu_distributed_sst(rank, turb_model_name):
     d_wall_compact = d_wall[compact_global_ids]
     dt_local_local = np.full((n_local, n_sps), dt)
 
-    mu_t_compact_cpu, _ = distributed_compute_turbulence_source_and_viscosity(
+    mu_t_compact_cpu = distributed_compute_turbulence_source_and_viscosity(
         U_local, partition, fake_halo_cpu, dist_fc, mesh, ops,
         turb_cpu, mu, d_wall_compact, dt_local_local,
         # 产生项渐变进行中（第 10/50 步）：两侧必须按同一个计数器渐变（多 GPU
         # 2026-09-25 以前从不推进渐变，production_factor 恒为 1）
-        turb_ramp_step=10, turb_ramp_steps=50,
+        ramp_owner=types.SimpleNamespace(_turb_ramp_step=10, _turb_production_ramp_steps=50, _turb_production_ramp_complete=False),
         turb_model_name=turb_model_name, ddes_model=_make_ddes_cpu(turb_model_name),
         iddes_h_max_compact=iddes_h_max_compact, iddes_h_wn_compact=iddes_h_wn_compact,
     )
@@ -260,7 +260,7 @@ def test_gpu_distributed_sst_matches_cpu_distributed_sst(rank, turb_model_name):
         U_gpu=U_local,
         ddes_model_gpu=_make_ddes_gpu(turb_model_name),
         iddes_h_max_compact=iddes_h_max_compact, iddes_h_wn_compact=iddes_h_wn_compact,
-        _turb_ramp_step=10, _turb_production_ramp_steps=50,
+        _turb_ramp_step=10, _turb_production_ramp_steps=50, _turb_production_ramp_complete=False,
     )
     stub._permute_to_compact = lambda arr: arr[stub._perm_gpu]
     stub._unpermute_from_compact = lambda arr: arr[stub._inv_perm_gpu]
@@ -345,6 +345,7 @@ def test_gpu_distributed_ddes_two_consecutive_calls_does_not_crash(turb_model_na
         mesh_data=mesh_data, ops_data=mesh_data, ops=ops,
         flat_face_gpu=dist_fc.base_flat,
         turb_model_gpu=turb_gpu, turb_model_name=turb_model_name, gpu_halo=fake_halo_gpu,
+        _turb_ramp_step=0, _turb_production_ramp_steps=0, _turb_production_ramp_complete=False,   # 不做产生项渐变
         _perm_gpu=dist_fc.perm, _inv_perm_gpu=dist_fc.inv_perm, n_compact=n_compact,
         wall_distance_gpu=d_wall_compact,
         _wall_mask_k_gpu=np.zeros(dist_fc.base_flat.n_faces, dtype=bool),

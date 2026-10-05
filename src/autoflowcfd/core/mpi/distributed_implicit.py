@@ -210,8 +210,7 @@ class DistributedTurbulenceBackend:
         self._adapter, self._view = build_distributed_turbulence_view(
             s.state.get_local_U()[..., :5], s.partition, s.halo_exchange,
             s.dist_flat_face, s.mesh, s.ops, self.model, s.local_solver.mu_molecular,
-            s.wall_distance_compact, turb_ramp_step=s._turb_ramp_step,
-            turb_ramp_steps=s._turb_production_ramp_steps, turb_model_name=s.turb_model_name,
+            s.wall_distance_compact, ramp_owner=s, turb_model_name=s.turb_model_name,
             ddes_model=s.ddes_model, iddes_h_max_compact=s.iddes_h_max_compact,
             iddes_h_wn_compact=s.iddes_h_wn_compact,
             boundary_ghost_provider=s.local_solver.boundary_ghost_provider)

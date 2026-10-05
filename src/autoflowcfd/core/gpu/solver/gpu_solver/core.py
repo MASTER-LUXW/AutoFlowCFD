@@ -387,11 +387,10 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         # 残差范数历史
         self.residual_history = []
         self.iteration = 0
-        # 湍流产生项渐变计数器（与 CPU `init_turbulence_models` 同一组属性；checkpoint 恢复湍流场后
-        # 把它推到终点，见 `cli/solve/checkpoint_io/restore.py`）
-        from autoflowcfd.core.fr_solver.turbulence.init import TURB_PRODUCTION_RAMP_STEPS
-        self._turb_ramp_step = 0
-        self._turb_production_ramp_steps = TURB_PRODUCTION_RAMP_STEPS
+        # 湍流产生项渐变计数器（四个后端同一个初始化函数；checkpoint 恢复湍流场后把它推到终点，
+        # 见 `cli/solve/checkpoint_io/restore.py`）
+        from autoflowcfd.core.fr_solver.turbulence.init import init_production_ramp
+        init_production_ramp(self, time_scheme)
 
         logger.info(
             f"GPUFRSolver initialized: {n_cells} cells, P{order}, "

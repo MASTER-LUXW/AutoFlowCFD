@@ -158,6 +158,8 @@ class _SolverSetupMixin:
         
         # 6. 初始化时间积分器 (S-05)
         self.time_integrator = TimeIntegrator(scheme=time_scheme, dual_time_steps=dual_time_inner_iter)
+        from autoflowcfd.core.fr_solver.turbulence.init import init_production_ramp
+        init_production_ramp(self, time_scheme)
 
         # 6b. 自适应 CFL 控制器（2026-08-24）：
         # 稳态伪时间迭代中根据残差历史自动调节 CFL 数，替代此前硬编码 0.1。

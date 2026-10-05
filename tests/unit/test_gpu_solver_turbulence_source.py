@@ -189,17 +189,8 @@ def _build_standins(turb_model_name):
         _open_mask_gpu=np.zeros(flat.n_faces, dtype=bool),
         time_integrator=types.SimpleNamespace(cfl=0.5),
         order=order,
-        # 产项渐变因子已完成状态（两侧 CPU/GPU 必须显式设成同一个值才
-        # 能逐位对照——GPU 版 `_update_production_ramp_gpu` 在
-        # `_turb_production_ramp_steps` 缺失时默认 50（渐变中，
-        # production_factor 在前 50 步内 <1），CPU 版
-        # `_update_production_ramp` 缺失时 `getattr(...,0)` 默认 0
-        # （渐变立即完成，production_factor=1.0）——两者默认值不同，
-        # 若两侧测试 stub 都不显式设置会造成一个纯测试搭建失误导致的
-        # 虚假数值差异，不是真实的 GPU/CPU 行为不一致（生产路径下
-        # `init_turbulence_models`/GPU 对应构造都会显式设 50，不会
-        # 依赖这个容易踩坑的默认值分叉）。
-        _turb_ramp_step=10 ** 9, _turb_production_ramp_steps=0,
+        # 渐变已完成（两侧同一组计数器，真实求解器由 init_production_ramp 设置）
+        _turb_ramp_step=10 ** 9, _turb_production_ramp_steps=0, _turb_production_ramp_complete=True,
     )
     # `SimpleNamespace` 不会自动绑定方法——`_update_production_ramp_gpu`
     # 以 `self.xxx()` 形式被内部调用，需要显式绑定成 stub 的方法。
@@ -252,6 +243,7 @@ def _build_standins(turb_model_name):
             self_inner.boundary_ghost_provider = None
             self_inner._turb_ramp_step = 10 ** 9
             self_inner._turb_production_ramp_steps = 0
+            self_inner._turb_production_ramp_complete = True
 
         def _compute_gradients(self_inner):
             from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient

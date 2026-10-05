@@ -77,6 +77,8 @@ def _fake_solver(current_order, target_order, resumed):
         _loop_monitor_suffix=lambda: "",
         _scaled_residual_field=lambda: None,
         _pseudo_time_budget=lambda n_steps: None,
+        # 产生项渐变计数器（真实求解器构造时由 init_production_ramp 设置）
+        _turb_ramp_step=0, _turb_production_ramp_steps=50, _turb_production_ramp_complete=False,
     )
 
     def _fake_interpolate(new_order):

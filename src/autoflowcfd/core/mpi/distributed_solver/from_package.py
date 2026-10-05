@@ -208,7 +208,7 @@ class _DistributedFromPackageMixin:
             from autoflowcfd.core.fr_solver.turbulence import (
                 _set_freestream_turbulence, _set_turbulence_bounds,
             )
-            from autoflowcfd.core.fr_solver.turbulence.init import TURB_PRODUCTION_RAMP_STEPS, create_sa_model
+            from autoflowcfd.core.fr_solver.turbulence.init import create_sa_model
             if is_sa_family(turb_model_name):
                 self.turb_model = create_sa_model(self, n_local, n_sps)
             else:
@@ -220,9 +220,6 @@ class _DistributedFromPackageMixin:
             # 与传统模式同一函数
             from autoflowcfd.core.mpi.distributed_turbulence import apply_distributed_wall_distance
             apply_distributed_wall_distance(self.turb_model, self.wall_distance_compact, self)
-            self._turb_ramp_step = 0
-            self._turb_production_ramp_steps = TURB_PRODUCTION_RAMP_STEPS
-            self._turb_production_ramp_complete = False
 
             if turb_model_name == 'DDES':
                 from autoflowcfd.core.turbulence.des import DDESModel
@@ -267,6 +264,8 @@ class _DistributedFromPackageMixin:
         self.time_integrator = TimeIntegrator(
             scheme=time_scheme, dt=1.0, dual_time_steps=dual_time_steps,
         )
+        from autoflowcfd.core.fr_solver.turbulence.init import init_production_ramp
+        init_production_ramp(self, time_scheme)
         self._dual_time_U_prev = None
         # NEWTON_KRYLOV 跨步状态（构造时置初值，理由见 reset_newton_state 文档）
         from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state

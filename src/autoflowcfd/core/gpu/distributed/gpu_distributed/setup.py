@@ -232,6 +232,8 @@ class _MultiGPUSetupMixin:
         # 时间积分器
         self.time_integrator = GPUTimeIntegrator(
             scheme=require_distributed_scheme(time_scheme))
+        from autoflowcfd.core.fr_solver.turbulence.init import init_production_ramp
+        init_production_ramp(self, time_scheme)
         # 自适应 CFL + 低马赫数伪时间预处理（2026-09-14 补齐）：与 CPU
         # 分布式同一批改动、同一套语义。两者都以"存在由 CFL 数决定的
         # 逐单元局部步长"为前提，而这条路径此前用全局固定 dt（被记作

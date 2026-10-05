@@ -57,9 +57,7 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
     if resumed:
         # 湍流场已精确恢复（充分发展），不再重新压制产生项：计数器推到终点，下一步的产生项渐变
         # （`fr_solver/turbulence/init.py::advance_production_ramp`）即给出因子 1，四个后端通用
-        from autoflowcfd.core.fr_solver.turbulence.init import TURB_PRODUCTION_RAMP_STEPS
-
-        solver._turb_ramp_step = getattr(solver, "_turb_production_ramp_steps", TURB_PRODUCTION_RAMP_STEPS)
+        solver._turb_ramp_step = solver._turb_production_ramp_steps
         solver._turb_production_ramp_complete = True
         solver._ramp_baseline_reset_done = True
         _reset_turbulence_if_resumed_field_exploded(solver)
@@ -124,8 +122,9 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
                     initial_residual = res
                 if (getattr(solver, "_turb_production_ramp_complete", False)
                         and not getattr(solver, "_ramp_baseline_reset_done", False)):
-                    # 产生项渐变结束时湍流方程的残差尺度变了：阶段基准从这一步重新起算
-                    if report:
+                    # 产生项渐变结束时湍流方程的残差尺度变了：阶段基准从这一步重新起算（不渐变时发生在
+                    # 第 1 步，基准本来就是这一步，不打印）
+                    if report and res != initial_residual:
                         print(f"[INFO] P{target_p} Iter {i + 1}: Production ramp complete, "
                               f"resetting residual baseline: {initial_residual:.6e} -> {res:.6e}")
                     initial_residual = res

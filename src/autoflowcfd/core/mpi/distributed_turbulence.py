@@ -132,7 +132,7 @@ class DistributedTurbulenceSolverAdapter:
 
     def __init__(
         self, mesh_adapter, ops, turb_model, wall_distance, mu_molecular, flat_face_override,
-        turb_ramp_step=10 ** 9, turb_ramp_steps=0,
+        ramp_owner=None,
         turb_model_name="SST", ddes_model=None, iddes_h_max=None, iddes_h_wn=None,
         boundary_ghost_provider=None, halo_refresh=None,
     ):
@@ -160,13 +160,22 @@ class DistributedTurbulenceSolverAdapter:
         self.wall_distance = wall_distance
         self.mu_molecular = mu_molecular
         self._turbulence_flat_face_override = flat_face_override
-        # 产项渐变因子状态（见 fr_solver/turbulence.py::_update_production_ramp）
-        # ——调用方（distributed_compute_turbulence_source_and_viscosity）
-        # 从真正的分布式求解器读取当前迭代步数/渐变总步数并传入，默认值
-        # （ramp_step 远大于 ramp_steps=0）等价于"渐变已完成、production_
-        # factor=1.0"，只在调用方没有显式提供时才是这个默认行为。
-        self._turb_ramp_step = turb_ramp_step
-        self._turb_production_ramp_steps = turb_ramp_steps
+        # 产生项渐变计数器转发到真实求解器（`ramp_owner`，见下面三个属性）；None 时不渐变
+        self._ramp_owner = ramp_owner if ramp_owner is not None else SimpleNamespace(
+            _turb_ramp_step=0, _turb_production_ramp_steps=0, _turb_production_ramp_complete=False)
+
+    # 产生项渐变计数器（`fr_solver/turbulence/init.py::advance_production_ramp` 读写）转发到真实求解器。
+    # 2026-10-05 以前适配器持有计数器的副本：计数靠返回值写回，完成标记却留在每步重建的适配器上，
+    # 于是 CPU MPI 显式路径上 `_turb_production_ramp_complete` 永远是 False（Order Continuation 的
+    # 渐变完成基准重置从不触发、PhaseGate 的湍流判据读不到完成）。
+    def _ramp_attr(name):
+        return property(lambda self: getattr(self._ramp_owner, name),
+                        lambda self, value: setattr(self._ramp_owner, name, value))
+
+    _turb_ramp_step = _ramp_attr("_turb_ramp_step")
+    _turb_production_ramp_steps = _ramp_attr("_turb_production_ramp_steps")
+    _turb_production_ramp_complete = _ramp_attr("_turb_production_ramp_complete")
+    del _ramp_attr
 
     def set_state(self, U_compact: np.ndarray):
         from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
@@ -184,7 +193,7 @@ class DistributedTurbulenceSolverAdapter:
 
 def build_distributed_turbulence_view(
     U_local, partition, halo_exchange, dist_fc, local_mesh, ops,
-    turb_model, mu, wall_distance_compact, *, turb_ramp_step, turb_ramp_steps,
+    turb_model, mu, wall_distance_compact, *, ramp_owner,
     turb_model_name, ddes_model, iddes_h_max_compact, iddes_h_wn_compact,
     boundary_ghost_provider,
 ):
@@ -235,7 +244,7 @@ def build_distributed_turbulence_view(
 
     adapter = DistributedTurbulenceSolverAdapter(
         mesh_adapter, ops, turb_view, wall_distance_compact, mu, dist_fc.base_flat,
-        turb_ramp_step=turb_ramp_step, turb_ramp_steps=turb_ramp_steps,
+        ramp_owner=ramp_owner,
         turb_model_name=turb_model_name, ddes_model=ddes_model,
         iddes_h_max=iddes_h_max_compact, iddes_h_wn=iddes_h_wn_compact,
         boundary_ghost_provider=boundary_ghost_provider,
@@ -262,14 +271,13 @@ def distributed_compute_turbulence_source_and_viscosity(
     mu: float,
     wall_distance_compact: np.ndarray,
     dt_local: np.ndarray,
-    turb_ramp_step: int = 10 ** 9,
-    turb_ramp_steps: int = 0,
+    ramp_owner=None,
     turb_model_name: str = "SST",
     ddes_model=None,
     iddes_h_max_compact: Optional[np.ndarray] = None,
     iddes_h_wn_compact: Optional[np.ndarray] = None,
     boundary_ghost_provider=None,
-) -> "tuple[np.ndarray, int]":
+) -> np.ndarray:
     """分布式 SST/DDES/IDDES 源项+输运计算，就地更新 `turb_model`
     （local cells），返回 compact 索引空间的 `mu_t_field`（供平均流
     粘性残差消费）。
@@ -293,6 +301,8 @@ def distributed_compute_turbulence_source_and_viscosity(
             `ddes_model is not None` 触发，这个参数本身对计算结果没有
             直接影响，只是如实传给 adapter（保持鸭子类型属性语义正确，
             不是死参数）。
+        ramp_owner: 持有产生项渐变计数器的真实求解器（`init_production_ramp` 设置的三个属性），
+            本步在它上面推进一次；None 时不渐变（单元测试）。
         ddes_model: `DDESModel`/`IDDESModel` 实例（None 时退化为纯 SST，
             与此前行为一致）——调用方（`DistributedFRSolver`）持有的
             真实对象，本函数只是每步复用它，不重新构造。
@@ -305,19 +315,14 @@ def distributed_compute_turbulence_source_and_viscosity(
             不该悄悄退化成别的行为）。
 
     Returns:
-        (mu_t_field_compact, next_turb_ramp_step)：`mu_t_field_compact`
-        是 (n_compact, n_sps) 供 distributed_compute_viscous_residual
-        的 mu_t_field 参数使用；`next_turb_ramp_step` 是调用方需要写回
-        `self._turb_ramp_step`（供下一步调用）的递增计数（见
-        `_update_production_ramp` 文档"递增计数器"一节——本函数内部的
-        adapter 对象每步都重新构造，不会自动持久化这个计数）。
+        mu_t_field_compact：(n_compact, n_sps)，供 distributed_compute_viscous_residual 的 mu_t_field 参数使用。
     """
     n_local = partition.n_local_cells
     n_sps = local_mesh.n_sps_per_cell
     adapter, turb_view = build_distributed_turbulence_view(
         U_local, partition, halo_exchange, dist_fc, local_mesh, ops,
-        turb_model, mu, wall_distance_compact, turb_ramp_step=turb_ramp_step,
-        turb_ramp_steps=turb_ramp_steps, turb_model_name=turb_model_name, ddes_model=ddes_model,
+        turb_model, mu, wall_distance_compact, ramp_owner=ramp_owner,
+        turb_model_name=turb_model_name, ddes_model=ddes_model,
         iddes_h_max_compact=iddes_h_max_compact, iddes_h_wn_compact=iddes_h_wn_compact,
         boundary_ghost_provider=boundary_ghost_provider,
     )
@@ -371,7 +376,7 @@ def distributed_compute_turbulence_source_and_viscosity(
     # 同一处理）。
     rho_compact = adapter.state.Q[..., 0]
     mu_t_field_compact = rho_compact * turb_view.nu_t
-    return mu_t_field_compact, adapter._turb_ramp_step
+    return mu_t_field_compact
 
 
 def distributed_compute_les_viscosity(

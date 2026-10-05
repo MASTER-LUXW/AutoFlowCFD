@@ -226,12 +226,11 @@ class _DistributedStepMixin:
                 distributed_compute_turbulence_source_and_viscosity,
             )
             dt_local = dt_phys_local
-            mu_t_field_compact, self._turb_ramp_step = distributed_compute_turbulence_source_and_viscosity(
+            mu_t_field_compact = distributed_compute_turbulence_source_and_viscosity(
                 self.state.get_local_U()[..., :5], self.partition, self.halo_exchange,
                 self.dist_flat_face, self.mesh, self.ops,
                 self.turb_model, mu, self.wall_distance_compact, dt_local,
-                turb_ramp_step=self._turb_ramp_step,
-                turb_ramp_steps=self._turb_production_ramp_steps,
+                ramp_owner=self,
                 turb_model_name=self.turb_model_name, ddes_model=self.ddes_model,
                 iddes_h_max_compact=self.iddes_h_max_compact,
                 iddes_h_wn_compact=self.iddes_h_wn_compact,

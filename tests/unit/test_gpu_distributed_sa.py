@@ -76,9 +76,10 @@ def test_gpu_distributed_sa_matches_cpu_distributed_sa(rank):
     # ---- CPU 分布式参照 ----
     turb_cpu = model(np)
     halo_cpu = ShapeKeyedFakeHalo(U[native_ids][..., :5], np.where(d_wall == 0.0, 0.0, nu_tilde)[native_ids][..., None])
-    mu_t_cpu, _ = distributed_compute_turbulence_source_and_viscosity(
+    mu_t_cpu = distributed_compute_turbulence_source_and_viscosity(
         U[partition.local_cells], partition, halo_cpu, dist_fc, mesh, ops, turb_cpu, MU, d_compact,
-        np.full((n_local, n_sps), dt), turb_ramp_step=10, turb_ramp_steps=50, turb_model_name="SA")
+        np.full((n_local, n_sps), dt), ramp_owner=types.SimpleNamespace(_turb_ramp_step=10, _turb_production_ramp_steps=50, _turb_production_ramp_complete=False),
+        turb_model_name="SA")
 
     # ---- 多 GPU（numpy 替身）----
     mesh_data = _prepare_compact_mesh_data(mesh, ops, compact_ids)
@@ -94,7 +95,8 @@ def test_gpu_distributed_sa_matches_cpu_distributed_sa(rank):
         _inv_perm_gpu=dist_fc.inv_perm, n_compact=len(compact_ids), wall_distance_gpu=d_compact,
         _wall_mask_k_gpu=np.zeros(n_faces, dtype=bool), _open_mask_gpu=np.zeros(n_faces, dtype=bool),
         U_gpu=U[partition.local_cells], ddes_model_gpu=None, sgs_model_gpu=None,
-        iddes_h_max_compact=None, iddes_h_wn_compact=None, _turb_ramp_step=10, _turb_production_ramp_steps=50)
+        iddes_h_max_compact=None, iddes_h_wn_compact=None, _turb_ramp_step=10, _turb_production_ramp_steps=50,
+        _turb_production_ramp_complete=False)
     stub._permute_to_compact = lambda arr: arr[stub._perm_gpu]
     stub._unpermute_from_compact = lambda arr: arr[stub._inv_perm_gpu]
     _bind_turb_source(stub)

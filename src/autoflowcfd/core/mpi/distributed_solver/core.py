@@ -329,13 +329,9 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         if has_transport_equations(turb_model_upper) or turb_model_upper == 'WMLES':
             if has_transport_equations(turb_model_upper):
                 from autoflowcfd.core.fr_solver.turbulence import init_turbulence_models
-                init_turbulence_models(self, n_local, n_sps)  # 设置 self.turb_model（SST 族或 SA-neg）,
-                # self._turb_ramp_step/_turb_production_ramp_steps（产项渐变，
-                # 见该函数与 _update_production_ramp 文档）。distributed_compute_
-                # turbulence_source_and_viscosity 内部用的是一个每步都重新构造
-                # 的临时 adapter 对象，_turb_ramp_step 的递增不会自动持久化，
-                # step() 显式在每次调用后把结果写回 self._turb_ramp_step
-                # （见该方法对应注释）。
+                init_turbulence_models(self, n_local, n_sps)  # 设置 self.turb_model（SST 族或 SA-neg）；
+                # 产项渐变计数器在下面时间格式确定后由 init_production_ramp 设置（每步重建的湍流
+                # 适配器把计数器转发回本对象，见 distributed_turbulence.py）。
             else:
                 # WMLES（2026-09-02）：没有 k/omega ODE 状态，不需要
                 # init_turbulence_models——只需要真实
@@ -411,6 +407,8 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         self.time_integrator = TimeIntegrator(
             scheme=time_scheme, dt=1.0, dual_time_steps=dual_time_steps,
         )
+        from autoflowcfd.core.fr_solver.turbulence.init import init_production_ramp
+        init_production_ramp(self, time_scheme)
         # DUAL_TIME 模式下 BDF2 需要的上一物理时间层状态（None 表示
         # 尚未跑过一个物理步，退化为 BDF1——与单机
         # `solver._dual_time_U_prev` 同一个约定）。
