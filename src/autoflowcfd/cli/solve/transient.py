@@ -22,6 +22,8 @@ from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coeffici
 from autoflowcfd.cli.solve.commands import solve
 from autoflowcfd.cli.solve.solver_factory import build_single_node_solver
 from autoflowcfd.cli.solve.transient_distributed import _solve_transient_distributed
+from autoflowcfd.core.utils.order_continuation.initial_field import start_from_checkpoint_field
+from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 
 
 @solve.command(name='transient')
@@ -88,17 +90,18 @@ from autoflowcfd.cli.solve.transient_distributed import _solve_transient_distrib
               help='原始面网格路径 - input_file 是 .nas 体网格时必填，用于反推边界分组；input_file 是 .pkl 时不需要')
 @click.option("--skip-quality-check", is_flag=True, help='跳过求解前的网格质量门检查（不建议，仅用于临时诊断）')
 @click.option('--reference-area', type=float, default=None, help='气动系数参考面积 (m^2)，提供时求解结束后打印 Cd/Cl')
-@click.option('--dual-time-inner-iter', type=int, default=20,
-              help='--time-method dual-time 时每个物理步的伪时间内迭代次数（此前恒为硬编码3，'
-                   '真实测得默认保守CFL策略下通常不足以收敛到物理时间精度，见 TimeIntegrator 文档）')
+@click.option('--dual-time-inner-iter', type=int, default=DEFAULT_DUAL_TIME_STEPS,
+              help=f'--time-method dual-time 时每个物理步的伪时间内迭代次数（默认 {DEFAULT_DUAL_TIME_STEPS}）')
 @click.option('--threads', '-j', type=int, default=-1, help=THREADS_HELP)
 @click.option('--init-from', 'init_checkpoint', type=click.Path(exists=True), default=None,
               help='从稳态 checkpoint 文件初始化瞬态求解器（典型工作流：先稳态 SST 收敛，'
-                   '再从该流场启动 DES/LES 瞬态计算，避免从均匀流场直接启动需要极长的瞬态发展时间）')
+                   '再从该流场启动 DES/LES 瞬态计算，避免从均匀流场直接启动需要极长的瞬态发展时间）。'
+                   'checkpoint 阶数可以低于 --order（平均流与湍流场精确延拓到目标阶数），不能高于；'
+                   '从 checkpoint 起步时直接在 --order 上推进，不做阶数爬坡')
 @click.option('--turbulence-intensity', type=float, default=0.01,
-              help='来流湍流强度 Tu（默认 0.01=1%%）。也驱动 ddes/iddes/les 模式下 '
+              help='来流湍流强度 Tu（默认 0.01=1%）。也驱动 ddes/iddes/les 模式下 '
                    'BD-02 SEM 入口的目标雷诺应力（2026-08-28 起复用同一个值，'
-                   '此前 SEM 用独立硬编码 5%%，见 core/fr_solver/boundary.py 文档）')
+                   '此前 SEM 用独立硬编码 5%，见 core/fr_solver/boundary.py 文档）')
 @click.option('--sem-num-eddies', type=int, default=200,
               help='ddes/iddes/les 模式下 BD-02 合成湍流入口 (SEM) 的涡核数量（默认 200）')
 @click.option('--viscosity-ratio', type=float, default=5.0, help='来流粘性比 VR=nu_t/nu（默认 5.0）')
@@ -126,8 +129,7 @@ from autoflowcfd.cli.solve.transient_distributed import _solve_transient_distrib
 @click.option('--av-alpha', 'artificial_viscosity_alpha', type=float, default=1.0,
               help='人工粘性强度标定常数（无量纲，默认1.0），只在 --artificial-viscosity 时有意义')
 @click.option('--checkpoint-interval', type=int, default=100,
-              help='分布式路径中间 checkpoint 保存间隔（单机路径瞬态求解不做中间保存，'
-                   '只在结束后写一次，与 solve steady 的分布式分支同一个约定）')
+              help='中间 checkpoint 保存间隔（步数，单机与分布式路径都生效），结束时另写一次')
 def transient(input_file: str, backend: str, order: int, time_method: str,
               turbulence_model: str, max_iter: int, phase_max_iter: Optional[int], residual_drop_threshold: float,
               dt: float, cfl_start: Optional[float], cfl_max: Optional[float], cfl_min: Optional[float],
@@ -341,7 +343,8 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
         ).load(init_checkpoint)
 
         with solver.edit_host_state() as host:
-            restore_state_from_checkpoint(init_checkpoint, host, ckpt_meta)
+            _, ckpt_order = restore_state_from_checkpoint(init_checkpoint, host, ckpt_meta)
+        start_from_checkpoint_field(solver, ckpt_order)
         print(f"   源 checkpoint 迭代数: {ckpt_iter}\n")
 
     # 参考面积（未给时沿来流方向自动估算，与 solve steady 同一个函数）

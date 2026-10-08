@@ -21,6 +21,7 @@ import click
 
 from autoflowcfd.cli.solve.distributed_checkpoint_io import distributed_periodic_checkpoint_callback
 from autoflowcfd.cli.solve.wall_distance import wall_distance_source_if_needed
+from autoflowcfd.core.utils.order_continuation.initial_field import start_from_checkpoint_field
 
 
 def _solve_transient_distributed(
@@ -172,7 +173,8 @@ def _solve_transient_cpu_traditional(
         )
         if is_root():
             print(f"\n🔄 从 checkpoint 加载稳态结果作为瞬态初场...")
-        ckpt_iter = restore_distributed_state_from_checkpoint(init_checkpoint, solver)
+        ckpt_iter, ckpt_order = restore_distributed_state_from_checkpoint(init_checkpoint, solver)
+        start_from_checkpoint_field(solver, ckpt_order, report=is_root())
         if is_root():
             print(f"   源 checkpoint 迭代数: {ckpt_iter}\n")
 
@@ -260,7 +262,8 @@ def _solve_transient_fully_distributed(
         )
         if is_root():
             print(f"\n🔄 从 checkpoint 加载稳态结果作为瞬态初场...")
-        ckpt_iter = restore_distributed_state_from_checkpoint(init_checkpoint, solver)
+        ckpt_iter, ckpt_order = restore_distributed_state_from_checkpoint(init_checkpoint, solver)
+        start_from_checkpoint_field(solver, ckpt_order, report=is_root())
         if is_root():
             print(f"   源 checkpoint 迭代数: {ckpt_iter}\n")
 
@@ -377,7 +380,7 @@ def _solve_transient_multi_gpu(
         from autoflowcfd.core.gpu import get_cupy
         if is_root():
             print(f"\n🔄 从 checkpoint 加载稳态结果作为瞬态初场...")
-        ckpt_iter = restore_distributed_state_from_checkpoint(init_checkpoint, solver)
+        ckpt_iter, ckpt_order = restore_distributed_state_from_checkpoint(init_checkpoint, solver)
         # `restore_distributed_state_from_checkpoint` 只写 `solver.
         # state.U`（numpy，与 CPU 路径共用的接口）——GPU 路径真正参与
         # 计算的是 `self.U_gpu`，必须显式同步，与 `load_checkpoint_
@@ -387,6 +390,7 @@ def _solve_transient_multi_gpu(
         n_local = solver.partition.n_local_cells
         with cp.cuda.Device(solver.device_id):
             solver.U_gpu = cp.asarray(solver.state.U[:n_local])
+        start_from_checkpoint_field(solver, ckpt_order, report=is_root())
         if is_root():
             print(f"   源 checkpoint 迭代数: {ckpt_iter}\n")
 

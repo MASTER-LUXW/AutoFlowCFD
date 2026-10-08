@@ -13,8 +13,11 @@ import numpy as np
 
 from autoflowcfd.core.mpi import get_comm, get_rank, get_size
 
+from autoflowcfd.core.utils.order_continuation.initial_field import prolongate_checkpoint_fields
+from autoflowcfd.fr.native_padding import order_from_n_sps
+
 from .state import scatter_local_state
-from .turbulence import restore_turbulence_fields, transported_model
+from .turbulence import global_cell_is_prism, restore_turbulence_fields, transported_model
 
 
 def distributed_load_checkpoint(
@@ -91,7 +94,7 @@ def distributed_load_checkpoint(
     return U_local, metadata or {}, iteration
 
 
-def restore_distributed_state_from_checkpoint(checkpoint_path: str, solver) -> int:
+def restore_distributed_state_from_checkpoint(checkpoint_path: str, solver) -> Tuple[int, int]:
     """`solve transient --init-from` 的分布式版本（2026-09-02，补齐此前
     "--init-from 目前只有单机路径支持"的真实缺口——不是设计上不支持，
     只是没人把"全局解按分区切给各 rank"这一步接上；`gather_global_
@@ -127,18 +130,19 @@ def restore_distributed_state_from_checkpoint(checkpoint_path: str, solver) -> i
         solver: 已构造好（对应目标瞬态阶数/湍流模型）的分布式求解器
             实例（`DistributedFRSolver`/`MultiGPUDistributedSolver`）
 
+    checkpoint 阶数低于求解器阶数时，root 在全局索引空间先把平均流、湍流输运场与涡粘精确延拓到求解器
+    阶数（与单机同一个函数，`order_continuation/initial_field.py`），再分发；调用方随后用
+    `start_from_checkpoint_field` 起步（延拓后的正性限制、不做阶数爬坡）。
+
     Returns:
-        checkpoint 记录的迭代数（供调用方打印日志）
+        `(checkpoint 记录的迭代数, checkpoint 阶数)`（各 rank 一致）
 
     Raises:
-        ValueError: checkpoint 缺少 U_sps 字段或形状（n_global_cells/
-            n_sps）与当前求解器不兼容——与 `distributed_load_checkpoint`
-            同一个既有护栏风格（这个模块是 `core/`，不依赖 `click`，
+        ValueError: checkpoint 缺少 U_sps 字段、单元数不符或阶数高于求解器阶数（全部 rank 一起抛出）——与
+            `distributed_load_checkpoint` 同一个既有护栏风格（这个模块是 `core/`，不依赖 `click`，
             由 CLI 调用方按需要转换成 `click.ClickException`）。
     """
-    from autoflowcfd.core.utils.checkpoint import CheckpointManager
     from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
-    from types import SimpleNamespace
 
     rank = get_rank()
     n_ranks = get_size()
@@ -153,46 +157,22 @@ def restore_distributed_state_from_checkpoint(checkpoint_path: str, solver) -> i
     model, _ = transported_model(solver)
     names = tuple(model.TRANSPORTED_FIELDS) + ("nu_t",) if model is not None else ()
 
+    # 全局单元的棱柱标志（集体调用，root 有值）：延拓时棱柱与四面体各用自己的矩阵
+    is_prism_global = global_cell_is_prism(solver, solver.partition.n_global_cells)
+
+    # root 读取并延拓；校验失败时把错误信息广播出去、全部 rank 一起报错（此前 root 直接抛出，其余 rank
+    # 停在 bcast 里等待）
+    payload, error = None, None
     if rank == 0:
-        config = SimpleNamespace(
-            mode="steady", backend="cpu", order=solver.mesh.n_points_1d, turbulence="sst_kw",
-        )
-        manager = CheckpointManager(config)
-        _solution, _history, ckpt_iter, metadata = manager.load(checkpoint_path)
-
-        fields = metadata.get("fields", {})
-        if "U_sps" not in fields:
-            raise ValueError(
-                f"Checkpoint '{checkpoint_path}' 缺少 'U_sps' 字段（完整的 "
-                f"(n_cells,n_sps,n_vars) 求解器状态），无法精确恢复。"
-            )
-        U_ckpt = fields["U_sps"]
-
-        n_global_cells = solver.partition.n_global_cells
-        n_sps_solver = solver.state.n_sps
-
-        if U_ckpt.shape[0] != n_global_cells or U_ckpt.shape[1] != n_sps_solver:
-            raise ValueError(
-                f"Checkpoint 状态形状 {U_ckpt.shape} 与目标求解器的全局形状 "
-                f"(n_global_cells={n_global_cells}, n_sps={n_sps_solver}) 不匹配"
-                f"（网格或阶数可能已变化），拒绝恢复。"
-            )
-
-        U_global = U_ckpt[:, :, :5].copy()
-
-        # 只广播湍流恢复需要的字段（形状与缺失的判断在 restore_turbulence_fields 里）
-        turb_global = {name: fields[name] for name in names if name in fields}
-
-        iteration = ckpt_iter
-    else:
-        U_global = None
-        turb_global = None
-        iteration = 0
-
+        try:
+            payload = _read_initial_fields(checkpoint_path, solver, names, is_prism_global, model)
+        except ValueError as e:
+            error = str(e)
     if n_ranks > 1:
-        U_global = get_comm().bcast(U_global, root=0)
-        turb_global = get_comm().bcast(turb_global, root=0)
-        iteration = get_comm().bcast(iteration, root=0)
+        payload, error = get_comm().bcast((payload, error), root=0)
+    if error is not None:
+        raise ValueError(error)
+    U_global, turb_global, iteration, ckpt_order = payload
 
     local_cells = solver.partition.local_cells
     U_local = scatter_local_state(U_global, local_cells)
@@ -204,4 +184,25 @@ def restore_distributed_state_from_checkpoint(checkpoint_path: str, solver) -> i
     if turb_global is not None:
         restore_turbulence_fields(solver, turb_global, source="分布式 checkpoint")
 
-    return iteration
+    return iteration, ckpt_order
+
+
+def _read_initial_fields(checkpoint_path: str, solver, names: tuple, is_prism_global, model):
+    """root 上读取 checkpoint、精确延拓到求解器阶数，返回 `(U_global, turb_global, iteration, ckpt_order)`。"""
+    from types import SimpleNamespace
+
+    from autoflowcfd.core.utils.checkpoint import CheckpointManager
+
+    config = SimpleNamespace(mode="steady", backend="cpu", order=solver.mesh.n_points_1d, turbulence="sst_kw")
+    _solution, _history, ckpt_iter, metadata = CheckpointManager(config).load(checkpoint_path)
+    fields = metadata.get("fields", {})
+    if "U_sps" not in fields:
+        raise ValueError(
+            f"Checkpoint '{checkpoint_path}' 缺少 'U_sps' 字段（完整的 (n_cells,n_sps,n_vars) 求解器状态），无法精确恢复。")
+    fields, ckpt_order = prolongate_checkpoint_fields(
+        {key: fields[key] for key in ("U_sps",) + names if key in fields},
+        order_from_n_sps(solver.state.n_sps), is_prism_global, model)
+    U_global = np.ascontiguousarray(fields["U_sps"][:, :, :5])
+    # 只广播湍流恢复需要的字段（形状与缺失的判断在 restore_turbulence_fields 里）
+    turb_global = {name: fields[name] for name in names if name in fields}
+    return U_global, turb_global, ckpt_iter, ckpt_order

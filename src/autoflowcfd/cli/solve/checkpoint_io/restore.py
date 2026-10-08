@@ -10,6 +10,8 @@ import click
 import numpy as np
 
 from autoflowcfd.core.utils.order_continuation.checkpoint_state import restore_phase_state
+from autoflowcfd.core.utils.order_continuation.initial_field import prolongate_checkpoint_fields
+from autoflowcfd.fr.native_padding import order_from_n_sps
 
 
 def restore_state_from_checkpoint(
@@ -21,6 +23,9 @@ def restore_state_from_checkpoint(
     为初场启动瞬态仿真（典型工作流：先跑稳态 SST 收敛到平衡态，再用 DDES/LES
     从该流场启动瞬态计算——避免从均匀流场直接启动 DES 需要极长的瞬态发展时间）。
 
+    checkpoint 阶数低于求解器阶数时先精确延拓（`order_continuation/initial_field.py`）；调用方随后用
+    `start_from_checkpoint_field` 起步（延拓后的正性限制、不做阶数爬坡）。
+
     平均流取 checkpoint 的 5 个守恒变量；湍流模型的输运场与涡粘按模型声明的字段名恢复
     （`restore_turbulence_from_fields`），checkpoint 由另一个湍流模型写出或是层流时保留来流初值。
 
@@ -30,10 +35,10 @@ def restore_state_from_checkpoint(
         metadata: checkpoint 加载后返回的 metadata 字典（含 fields 键）
 
     Returns:
-        checkpoint 记录的迭代数（供调用方打印日志）
+        `(checkpoint 记录的迭代数, checkpoint 阶数)`
 
     Raises:
-        click.ClickException: checkpoint 缺少 U_sps 字段或形状不兼容
+        click.ClickException: checkpoint 缺少 U_sps 字段、单元数不符或阶数高于求解器阶数
     """
     fields = metadata.get("fields", {})
     if "U_sps" not in fields:
@@ -44,13 +49,20 @@ def restore_state_from_checkpoint(
         )
 
     ckpt_iter = metadata.get("iteration", 0)
+    target_order = order_from_n_sps(solver.state.U.shape[1])
+    cell_is_prism = np.arange(solver.state.U.shape[0]) < int(solver.mesh.n_prism_cells)
+    try:
+        fields, ckpt_order = prolongate_checkpoint_fields(
+            fields, target_order, cell_is_prism, getattr(solver, "turb_model", None))
+    except ValueError as e:
+        raise click.ClickException(f"Checkpoint '{checkpoint_path}'：{e}") from e
     # 2026-10-04 以前这里只拷状态数组、从不恢复模型上的湍流场——"稳态 SST 收敛 -> --init-from 启动
     # DDES"的湍流场其实是来流初值。
     solver.state.U = mean_flow_state_from_checkpoint(fields["U_sps"], solver.state)
     solver.state._update_primitives()
     restored = restore_turbulence_from_fields(solver, fields)
     print("   ✅ 从 checkpoint 恢复平均流场" + ("与湍流场" if restored else ""))
-    return ckpt_iter
+    return ckpt_iter, ckpt_order
 
 
 def mean_flow_state_from_checkpoint(U_ckpt, state) -> np.ndarray:
@@ -104,12 +116,9 @@ def restore_turbulence_from_fields(solver, fields: dict) -> bool:
                 f"形状 {current.shape} 不匹配（网格或阶数可能已变化），拒绝恢复。"
             )
     turb_model.restore_transported([np.asarray(fields[name]) for name in names])
-    # 跳过 production ramp（2026-08-25 代码审查）：k/omega 场已精确恢复，
-    # 说明湍流已充分发展，再重新压制产生项 50 步会把已收敛的湍流场
-    # 往回压。order_continuation.py 的 resume 分支已有同样的跳过逻辑，
-    # 但 order_continuation_enabled=False 或 order < 2 时 solver.solve()
-    # 走普通循环不经过那里，而 init_turbulence_models 已把重建求解器的
-    # _turb_ramp_step 推到 ≈1（production_factor≈0.02）——在这里统一补上。
+    # 跳过 production ramp（2026-08-25 代码审查）：湍流场已精确恢复，说明湍流已充分发展，再重新
+    # 压制产生项会把已收敛的湍流场往回压。Order Continuation 的 resume 分支有同样的处理，但
+    # --init-from 与不爬坡的 resume 走普通循环不经过那里，在这里统一置为渐变已完成。
     if hasattr(turb_model, "production_factor"):
         turb_model.production_factor = 1.0
         solver._turb_ramp_step = solver._turb_production_ramp_steps

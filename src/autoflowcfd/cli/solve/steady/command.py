@@ -113,7 +113,7 @@ from .single_node import _run_single_node
 @click.option('--gpu-device', type=int, default=0, help='GPU 设备 ID（默认 0，多 GPU 时每个 rank 自动分配）')
 @click.option('--multi-gpu', is_flag=True, help='启用多 GPU + MPI 分布式求解（每个 rank 使用一块 GPU）')
 @click.option('--turbulence-intensity', type=float, default=0.01,
-              help='来流湍流强度 Tu（默认 0.01=1%%），外部气动 ≤1%%，城市道路 3-5%%。'
+              help='来流湍流强度 Tu（默认 0.01=1%），外部气动 ≤1%，城市道路 3-5%。'
                    '也驱动 --turbulence-model ddes 时 BD-02 SEM 入口的目标雷诺应力')
 @click.option('--viscosity-ratio', type=float, default=5.0, help='来流粘性比 VR=nu_t/nu（默认 5.0），外部气动推荐 2-10')
 @click.option('--sem-num-eddies', type=int, default=200,

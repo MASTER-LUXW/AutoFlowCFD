@@ -21,15 +21,19 @@
 import sys
 import os
 
-# 修复Windows控制台中文乱码问题
-if sys.platform == 'win32':
-    # 设置标准输出编码为UTF-8
-    if hasattr(sys.stdout, 'reconfigure'):
-        sys.stdout.reconfigure(encoding='utf-8')
-    if hasattr(sys.stderr, 'reconfigure'):
-        sys.stderr.reconfigure(encoding='utf-8')
-    # 设置环境变量
-    os.environ['PYTHONIOENCODING'] = 'utf-8'
+# 本 CLI 的日志输出和 click.echo() 调用中使用 Unicode 符号
+#（勾选标记、°、³ 等）。Windows 下 stdout/stderr 默认使用活动控制台
+#代码页（如中文环境为 GBK/936），而非 UTF-8，这些字符会触发
+# UnicodeEncodeError 并中断命令执行。强制使用 UTF-8 并设置安全回退，
+# 确保输出不会因宿主控制台代码页不同而导致 CLI 崩溃。
+#
+# 行缓冲（2026-10-08）：输出被重定向到文件时 Python 默认整块缓冲，长程计算的日志会滞后几十分钟
+# （cube_demo 稳态实测：日志停在第 53 步时 checkpoint 已写到第 150 步），进程异常退出时最后一段直接丢失。
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+# 子进程（mpirun 拉起的各 rank 等）同样用 UTF-8
+os.environ['PYTHONIOENCODING'] = 'utf-8'
 
 import click
 from loguru import logger
@@ -40,15 +44,6 @@ from autoflowcfd.cli.solve.commands import solve
 from autoflowcfd.cli.post.commands import post
 from .config_commands import config
 from .utils_commands import utils
-
-# 本 CLI 的日志输出和 click.echo() 调用中使用 Unicode 符号
-#（勾选标记、°、³ 等）。Windows 下 stdout/stderr 默认使用活动控制台
-#代码页（如中文环境为 GBK/936），而非 UTF-8，这些字符会触发
-# UnicodeEncodeError 并中断命令执行。强制使用 UTF-8 并设置安全回退，
-# 确保输出不会因宿主控制台代码页不同而导致 CLI 崩溃。
-for _stream in (sys.stdout, sys.stderr):
-    if hasattr(_stream, "reconfigure"):
-        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 
 @click.group()

@@ -94,6 +94,17 @@ class TestWriteCheckpointStoresTurbulenceFields:
             assert "omega_field" not in f["solution"]
 
 
+    def test_only_the_conserved_state_is_stored(self, tmp_path):
+        """原始变量由守恒变量导出、没有读取方（2026-10-08 以前另存 `Q_sps`，占单机 checkpoint 将近一半体积）。"""
+        write_checkpoint(
+            _fake_solver(with_turb_model=False), str(tmp_path), 100, "volume.nas",
+            order=0, turbulence_model="none", backend="cpu", quiet=True,
+        )
+        import h5py
+        with h5py.File(tmp_path / "checkpoints" / "checkpoint_iter_000100.h5", "r") as f:
+            assert "U_sps" in f["solution"] and "Q_sps" not in f["solution"]
+
+
 class TestRebuildRestoresTurbulenceFields:
     def _rebuild(self, ckpt_path, n_cells=2, n_sps=1, k_fresh=None, omega_fresh=None):
         """Mimics rebuild_solver_from_checkpoint's FRSolver(...) call

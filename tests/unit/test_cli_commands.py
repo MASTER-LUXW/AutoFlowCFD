@@ -343,3 +343,17 @@ class TestCLIGlobalOptions:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+def test_cli_output_is_line_buffered_when_redirected(tmp_path):
+    """输出被重定向到文件时 Python 默认整块缓冲：长程计算的日志会滞后几十分钟，进程异常退出时最后一段丢失
+    （2026-10-08 cube_demo 稳态：日志停在第 53 步时 checkpoint 已写到第 150 步）。CLI 入口改为行缓冲。"""
+    import subprocess
+    import sys
+
+    out = tmp_path / "log.txt"
+    with open(out, "w") as f:
+        subprocess.run([sys.executable, "-c",
+                        "import sys, autoflowcfd.cli.main; print(sys.stdout.line_buffering, sys.stderr.line_buffering)"],
+                       stdout=f, stderr=subprocess.DEVNULL, check=True)
+    assert out.read_text().split() == ["True", "True"]

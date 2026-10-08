@@ -91,7 +91,7 @@ class TestRestoreDistributedStateFromCheckpoint:
             solver_a, str(tmp_path), 42, "dummy_input.nas", mesh.order, model_name, "cpu")
 
         solver_b = _make_solver(mesh, ops, model_name)
-        assert restore_distributed_state_from_checkpoint(saved_path, solver_b) == 42
+        assert restore_distributed_state_from_checkpoint(saved_path, solver_b) == (42, mesh.order)
         np.testing.assert_allclose(solver_b.state.U[:n_cells], U5, rtol=1e-12)
         np.testing.assert_allclose(solver_b.state.Q[:n_cells, :, :5], conserved_to_primitive(U5), rtol=1e-12)
         for got, want in zip(solver_b.turb_model.transported_fields(), truth):
@@ -175,24 +175,64 @@ class TestRestoreDistributedStateFromCheckpoint:
         np.testing.assert_allclose(solver_b.turb_model.k_field, k_inf)
         np.testing.assert_allclose(solver_b.turb_model.omega_field, omega_inf)
 
-    def test_shape_mismatch_raises(self, mesh_and_ops, tmp_path):
+    def test_lower_order_checkpoint_is_prolongated_exactly(self, mesh_and_ops, tmp_path):
+        """P1 checkpoint -> P2 求解器（2026-10-08 以前因解点数不符被拒绝）：root 在全局索引空间延拓，平均流
+        按单元类型各用自己的矩阵，SST 场在未知量空间（`ln omega`）延拓。"""
+        from autoflowcfd.core.mpi.distributed_checkpoint import (
+            distributed_save_checkpoint, restore_distributed_state_from_checkpoint,
+        )
+        from autoflowcfd.fr.order_interp import apply_order_interp
+
+        mesh, ops = mesh_and_ops
+        n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
+        rng = np.random.default_rng(3)
+        U5 = _nonuniform_euler_U(n_cells, n_sps, rng)
+        solver_a = _make_solver(mesh, ops, "sst")
+        solver_a.state.U[:n_cells] = U5
+        m = solver_a.turb_model
+        m.set_transported_fields([f * (1.0 + 0.3 * rng.random(f.shape)) for f in m.transported_fields()])
+        saved = distributed_save_checkpoint(solver_a, str(tmp_path), 9, "dummy_input.nas", mesh.order, "sst", "cpu")
+
+        mesh2 = _build_synthetic_mixed_mesh(2)
+        solver_b = _make_solver(mesh2, generate_fr_operators(2), "sst")
+        assert restore_distributed_state_from_checkpoint(saved, solver_b) == (9, 1)
+
+        n_prism = int(mesh.n_prism_cells)
+        assert 0 < n_prism < n_cells, "合成网格必须同时含棱柱与四面体"
+
+        def lift(f):
+            return apply_order_interp(f, n_prism, 1, 2)
+        np.testing.assert_allclose(solver_b.state.U[:n_cells], lift(U5), rtol=1e-12)
+        for got, want in zip(solver_b.turb_model.transported_fields(), m.mapped_fields(lift, np)):
+            np.testing.assert_allclose(got, want, rtol=1e-12)
+        assert np.all(solver_b.turb_model.omega_field > 0.0)
+
+    def test_higher_order_checkpoint_is_rejected(self, mesh_and_ops, tmp_path):
+        """降阶不是精确操作（会丢掉高阶分量）：P2 checkpoint -> P1 求解器明确拒绝。"""
         from autoflowcfd.core.mpi.distributed_checkpoint import (
             distributed_save_checkpoint, restore_distributed_state_from_checkpoint,
         )
 
         mesh, ops = mesh_and_ops
-        solver_a = _make_solver(mesh, ops, "none")
-        saved_path = distributed_save_checkpoint(
-            solver_a, str(tmp_path), 5, "dummy_input.nas", mesh.order, "none", "cpu",
+        mesh2 = _build_synthetic_mixed_mesh(2)
+        solver_a = _make_solver(mesh2, generate_fr_operators(2), "none")
+        saved = distributed_save_checkpoint(solver_a, str(tmp_path), 5, "dummy_input.nas", 2, "none", "cpu")
+        with pytest.raises(ValueError, match="高于目标阶数"):
+            restore_distributed_state_from_checkpoint(saved, _make_solver(mesh, ops, "none"))
+
+    def test_different_mesh_is_rejected(self, mesh_and_ops, tmp_path):
+        from autoflowcfd.core.mpi.distributed_checkpoint import (
+            distributed_save_checkpoint, restore_distributed_state_from_checkpoint,
         )
+        from tests.validation._channel_mesh import build_channel_mesh_prism
 
-        order2 = 2
-        mesh2 = _build_synthetic_mixed_mesh(order2)
-        ops2 = generate_fr_operators(order2)
-        solver_b = _make_solver(mesh2, ops2, "none")
-
-        with pytest.raises(ValueError):
-            restore_distributed_state_from_checkpoint(saved_path, solver_b)
+        mesh, ops = mesh_and_ops
+        other = build_channel_mesh_prism(1, 3, 3, 2, 0.4, 0.1, 0.08)
+        assert other.n_cells != mesh.n_cells
+        saved = distributed_save_checkpoint(
+            _make_solver(other, ops, "none"), str(tmp_path), 5, "dummy_input.nas", 1, "none", "cpu")
+        with pytest.raises(ValueError, match="网格已变化"):
+            restore_distributed_state_from_checkpoint(saved, _make_solver(mesh, ops, "none"))
 
 
 @pytest.mark.parametrize("model_name", ["sst", "sa"])

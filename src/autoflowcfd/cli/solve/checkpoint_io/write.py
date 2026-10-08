@@ -145,11 +145,13 @@ def write_checkpoint(
         solution_cell_avg = reduce_per_cell_over_real_sps(
             _U_ck, solver.mesh.n_prism_cells, _order_ck,
             'mean')  # (n_cells, n_vars)
-    extra_fields = {"U_sps": solver.state.U, "Q_sps": solver.state.Q}
+    # 只存守恒变量：原始变量由它导出（恢复端一律 `_update_primitives`），2026-10-08 以前另存的 `Q_sps` 没有任何读取方，
+    # 却占单机 checkpoint 将近一半体积（cube_demo 79 万单元 P1 每个 658 MB）；分布式写入端从来不写它
+    extra_fields = {"U_sps": solver.state.U}
 
     # 湍流场 (k_field/omega_field) 持久化（真实 bug，2026-08-23，用户直接
     # 问"k和omega场在ckpt中没有存储的问题存在吗"发现）：此前只存平均流场
-    # U_sps/Q_sps，SSTModelFR.k_field/omega_field 从未写入 checkpoint。
+    # U_sps，SSTModelFR.k_field/omega_field 从未写入 checkpoint。
     # resume 时 rebuild_solver_from_checkpoint 走 FRSolver(...) 全新构造，
     # 内部全新 SSTModelFR.__init__ 无条件把湍流场初始化成 k=1e-6/omega=1.0
     # 这个"刚开始求解"的均匀猜测值——resume 出来的求解器因此是"平均流场

@@ -11,6 +11,7 @@ AutoFlowCFD V2.0 - Order Continuation Utilities
     p0_reset.py          全新求解器在 Order Continuation 起步时重建到 P0
     run.py               顶层编排：P0 -> P1 -> ... -> 目标阶数（四个后端共用的唯一循环）
     checkpoint_state.py  随 checkpoint 持久化的阶段状态（单机/分布式写入与恢复共用）
+    initial_field.py     从 checkpoint 场起步（--init-from）：低阶 checkpoint 精确延拓到目标阶数、不做阶数爬坡
 
 本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
 """
