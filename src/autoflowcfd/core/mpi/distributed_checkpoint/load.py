@@ -15,6 +15,10 @@ from autoflowcfd.core.mpi import get_comm, get_rank, get_size
 
 from autoflowcfd.core.utils.order_continuation.initial_field import prolongate_checkpoint_fields
 from autoflowcfd.fr.native_padding import order_from_n_sps
+from autoflowcfd.core.fr_solver.turbulence.init import RAMP_COMPLETE_KEY, RAMP_STEP_KEY, RAMP_TOTAL_KEY
+from autoflowcfd.core.utils.checkpoint_time import (
+    PREVIOUS_LEVEL_FIELD, TURBULENCE_PREVIOUS_FIELD, restore_previous_level, restore_turbulence_previous,
+)
 
 from .state import scatter_local_state
 from .turbulence import global_cell_is_prism, restore_turbulence_fields, transported_model
@@ -70,7 +74,7 @@ def distributed_load_checkpoint(
     if n_ranks > 1:
         metadata = get_comm().bcast(metadata, root=0)
         iteration = get_comm().bcast(iteration, root=0)
-    restore_turbulence_fields(solver, (metadata or {}).get("fields", {}), source="分布式 checkpoint")
+    restore_turbulence_fields(solver, (metadata or {}).get("fields", {}), metadata or {}, source="分布式 checkpoint")
 
     # 3. 分发数据到各 rank
     if n_ranks > 1:
@@ -90,6 +94,15 @@ def distributed_load_checkpoint(
             U_local = scatter_local_state(U_global, local_cells)
     else:
         U_local = U_global
+
+    # dual-time 的上一物理时间层：元数据已广播到全部 rank，各自切出 local 段
+    prev_global = (metadata or {}).get("fields", {}).get(PREVIOUS_LEVEL_FIELD)
+    if prev_global is not None:
+        restore_previous_level(solver, scatter_local_state(np.asarray(prev_global), solver.partition.local_cells))
+    turb_prev_global = (metadata or {}).get("fields", {}).get(TURBULENCE_PREVIOUS_FIELD)
+    if turb_prev_global is not None:
+        restore_turbulence_previous(
+            solver, scatter_local_state(np.asarray(turb_prev_global), solver.partition.local_cells))
 
     return U_local, metadata or {}, iteration
 
@@ -172,7 +185,7 @@ def restore_distributed_state_from_checkpoint(checkpoint_path: str, solver) -> T
         payload, error = get_comm().bcast((payload, error), root=0)
     if error is not None:
         raise ValueError(error)
-    U_global, turb_global, iteration, ckpt_order = payload
+    U_global, turb_global, ramp, iteration, ckpt_order = payload
 
     local_cells = solver.partition.local_cells
     U_local = scatter_local_state(U_global, local_cells)
@@ -182,13 +195,14 @@ def restore_distributed_state_from_checkpoint(checkpoint_path: str, solver) -> T
     solver.state.Q[:n_local] = conserved_to_primitive(U_local[..., :5])
 
     if turb_global is not None:
-        restore_turbulence_fields(solver, turb_global, source="分布式 checkpoint")
+        restore_turbulence_fields(solver, turb_global, ramp, source="分布式 checkpoint")
 
     return iteration, ckpt_order
 
 
 def _read_initial_fields(checkpoint_path: str, solver, names: tuple, is_prism_global, model):
-    """root 上读取 checkpoint、精确延拓到求解器阶数，返回 `(U_global, turb_global, iteration, ckpt_order)`。"""
+    """root 上读取 checkpoint、精确延拓到求解器阶数，返回 `(U_global, turb_global, 产生项渐变进度, iteration,
+    ckpt_order)`。"""
     from types import SimpleNamespace
 
     from autoflowcfd.core.utils.checkpoint import CheckpointManager
@@ -205,4 +219,5 @@ def _read_initial_fields(checkpoint_path: str, solver, names: tuple, is_prism_gl
     U_global = np.ascontiguousarray(fields["U_sps"][:, :, :5])
     # 只广播湍流恢复需要的字段（形状与缺失的判断在 restore_turbulence_fields 里）
     turb_global = {name: fields[name] for name in names if name in fields}
-    return U_global, turb_global, ckpt_iter, ckpt_order
+    ramp = {key: metadata[key] for key in (RAMP_STEP_KEY, RAMP_TOTAL_KEY, RAMP_COMPLETE_KEY) if key in metadata}
+    return U_global, turb_global, ramp, ckpt_iter, ckpt_order

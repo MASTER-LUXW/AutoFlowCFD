@@ -13,7 +13,6 @@ numpy，GPU 的残差与局部步长入口委托给同一个 CPU 求解器——
 """
 
 import types
-
 import numpy as np
 import pytest
 
@@ -22,17 +21,10 @@ from tests.validation._channel_mesh import (
     build_channel_mesh_prism,
     build_face_exact_ghost_provider,
 )
+from tests.unit._numpy_as_cupy import NumpyAsCupy
 
 RHO, U_INF, P, GAMMA = 1.225, 30.0, 101325.0, 1.4
 LX, H, LZ = 0.4, 0.1, 0.08
-
-
-class _NumpyAsCupy:
-    def __getattr__(self, name):
-        return getattr(np, name)
-
-    def asnumpy(self, x):
-        return np.asarray(x)
 
 
 def _laminar_channel():
@@ -66,7 +58,7 @@ def patched(monkeypatch):
     import autoflowcfd.core.gpu.solver.gpu_solver as gsol
     import autoflowcfd.core.gpu.solver.gpu_solver_io as gio
 
-    patch_module_get_cupy(monkeypatch, [gsol, gio, gpre], _NumpyAsCupy())
+    patch_module_get_cupy(monkeypatch, [gsol, gio, gpre], NumpyAsCupy())
 
 
 def _frozen_dt(cpu):

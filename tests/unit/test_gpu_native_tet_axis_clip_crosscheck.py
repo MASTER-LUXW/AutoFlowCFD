@@ -65,33 +65,12 @@ import pytest
 
 from tests.unit._patch_pkg import patch_pkg_attr
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
-
-
-class _NumpyAsCupy:
-    def __getattr__(self, name):
-        return getattr(np, name)
-
-    def scatter_add(self, a, indices, b):
-        np.add.at(a, indices, b)
-
-    def asnumpy(self, x):
-        return np.asarray(x)
-
-    class cuda:
-        class Device:
-            def __init__(self, device_id=0):
-                pass
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
+from tests.unit._numpy_as_cupy import NumpyAsCupy
 
 
 @pytest.fixture(autouse=True)
 def _patch_gpu_modules(monkeypatch):
-    shim = _NumpyAsCupy()
+    shim = NumpyAsCupy()
 
     import autoflowcfd.core.gpu as core_gpu_mod
     import autoflowcfd.core.gpu.residual.gpu_inviscid as gpu_inviscid_mod

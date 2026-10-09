@@ -323,12 +323,6 @@ AutoFlowCFD V2.0 - 稳态求解器自适应 CFL 控制器
 # 下面 re-export 全部公开名与测试在用的私有名，所以全仓库
 # `from autoflowcfd.core.time_integration.adaptive_cfl import ...` 一个字都不用改。
 
-from .gates import (  # noqa: F401
-    _CFLGatesMixin,
-)
-from .update import (  # noqa: F401
-    _CFLUpdateMixin,
-)
 from .controller import (  # noqa: F401
     AdaptiveCFLController,
 )

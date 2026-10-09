@@ -1,4 +1,4 @@
-"""Unit tests for VolumeMeshData and tetrahedral volume computation."""
+"""VolumeMeshData 与四面体体积计算的单元测试。"""
 import numpy as np
 import pytest
 from autoflowcfd.grid.structures import (
@@ -7,13 +7,13 @@ from autoflowcfd.grid.structures import (
 
 
 class TestTetrahedralCells:
-    """Test tetrahedral cell operations."""
+    """四面体单元操作的测试。"""
     
     def test_compute_single_tet_volume(self):
-        """Test volume calculation for a single tetrahedron."""
-        # Create a simple tetrahedron with known volume
-        # Vertices: (0,0,0), (1,0,0), (0,1,0), (0,0,1)
-        # Volume should be 1/6
+        """单个四面体的体积计算。"""
+        # 创建一个体积已知的简单四面体
+        # 顶点：(0,0,0), (1,0,0), (0,1,0), (0,0,1)
+        # 体积应为 1/6
         nodes = NodeArray(
             x=np.array([0.0, 1.0, 0.0, 0.0]),
             y=np.array([0.0, 0.0, 1.0, 0.0]),
@@ -28,7 +28,7 @@ class TestTetrahedralCells:
         assert abs(volumes[0] - expected_volume) < 1e-10
     
     def test_compute_multiple_tets(self):
-        """Test volume calculation for multiple tetrahedra."""
+        """多个四面体的体积计算。"""
         # Create two identical tetrahedra
         nodes = NodeArray(
             x=np.array([0.0, 1.0, 0.0, 0.0, 2.0, 3.0, 2.0]),
@@ -59,7 +59,7 @@ class TestTetrahedralCells:
         assert cells.volumes[0] == 1e-6
     
     def test_negative_volume_rejection(self):
-        """Test that negative volumes are rejected."""
+        """拒绝负体积。"""
         connectivity = np.array([[0, 1, 2, 3]], dtype=np.int32)
         volumes = np.array([-1e-6])  # Negative volume
         
@@ -67,7 +67,7 @@ class TestTetrahedralCells:
             TetrahedralCells(connectivity=connectivity, volumes=volumes)
     
     def test_shape_mismatch_rejection(self):
-        """Test that mismatched shapes are rejected."""
+        """拒绝形状不符。"""
         connectivity = np.array([[0, 1, 2, 3]], dtype=np.int32)
         volumes = np.array([1e-6, 2e-6])  # Wrong size
         
@@ -79,7 +79,7 @@ class TestVolumeMeshData:
     """Test VolumeMeshData container."""
     
     def test_create_simple_volume_mesh(self):
-        """Test creating a simple volume mesh."""
+        """创建简单的体网格。"""
         nodes = NodeArray(
             x=np.array([0.0, 1.0, 0.0, 0.0]),
             y=np.array([0.0, 0.0, 1.0, 0.0]),
@@ -110,7 +110,7 @@ class TestVolumeMeshData:
         assert abs(volume_mesh.total_volume - 1.0/6.0) < 1e-10
     
     def test_get_cell_volumes(self):
-        """Test retrieving cell volumes from VolumeMeshData."""
+        """从 VolumeMeshData 取单元体积。"""
         nodes = NodeArray(
             x=np.array([0.0, 1.0, 0.0, 0.0]),
             y=np.array([0.0, 0.0, 1.0, 0.0]),
@@ -141,7 +141,7 @@ class TestVolumeMeshData:
         assert abs(retrieved_volumes[0] - 1.0/6.0) < 1e-10
     
     def test_metadata_consistency_check(self):
-        """Test that metadata counts are validated."""
+        """校验元数据里的数量。"""
         nodes = NodeArray(
             x=np.array([0.0, 1.0, 0.0, 0.0]),
             y=np.array([0.0, 0.0, 1.0, 0.0]),

@@ -21,14 +21,8 @@ halo 交换与 compact 面空间的边界提供者借自同一网格上的 CPU �
 """
 
 import types
-
 import numpy as np
 import pytest
-
-from tests.unit._gpu_cupy_shim import patch_module_get_cupy
-from tests.unit.test_distributed_turbulence_bc_parity import _pair
-from tests.unit.test_gpu_coupled_nk_step import _gpu_turbulence_model
-from tests.unit.test_gpu_solver_turbulence_source import _NumpyAsCupy, _prepare_mesh_ops_data
 
 import autoflowcfd.core.gpu.distributed.gpu_distributed_implicit as mgi_mod
 import autoflowcfd.core.gpu.gpu_preconditioning as gpu_pre_mod
@@ -40,12 +34,18 @@ import autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence as gpu_implicit_t
 import autoflowcfd.core.gpu.turbulence.gpu_scalar_transport as gst_mod
 import autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst as gpu_turbulence_sst_mod
 
+from tests.unit._gpu_cupy_shim import patch_module_get_cupy
+from tests.unit.test_distributed_turbulence_bc_parity import _pair
+from tests.unit.test_gpu_coupled_nk_step import _gpu_turbulence_model
+from tests.unit.test_gpu_solver_turbulence_source import _prepare_mesh_ops_data
+from tests.unit._numpy_as_cupy import NumpyAsCupy
+
 
 @pytest.fixture(autouse=True)
 def _patch_get_cupy(monkeypatch):
     patch_module_get_cupy(monkeypatch, [
         mgi_mod, ts_mod, gpu_flux_mod, gpu_gradients_mod, gpu_volume_contract_mod, gst_mod,
-        gpu_implicit_turb_mod, gpu_turbulence_sst_mod, gpu_pre_mod], _NumpyAsCupy())
+        gpu_implicit_turb_mod, gpu_turbulence_sst_mod, gpu_pre_mod], NumpyAsCupy())
     monkeypatch.setattr(gpu_turbulence_sst_mod, "gpu_available", True)
 
 

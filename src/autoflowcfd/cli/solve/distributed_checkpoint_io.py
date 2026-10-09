@@ -35,6 +35,7 @@ def rebuild_distributed_solver_from_checkpoint(
     cfl_max: Optional[float] = None,
     cfl_min: Optional[float] = None,
     time_scheme: Optional[str] = None,
+    reference_area: Optional[float] = None,
 ):
     """从 checkpoint 完整重建一个分布式求解器（不继续迭代）。
 
@@ -130,6 +131,7 @@ def rebuild_distributed_solver_from_checkpoint(
         freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf,
                       "aoa_deg": aoa_deg, "aos_deg": aos_deg}
         mach_ref = resolve_mach_ref(rho_inf, vel_inf, p_inf)
+        volume_data = None          # 只在 root 的 `_root_context` 里
         package, root_context = distributed_mesh_load_v2(
             input_file, order, resolved_surface_mesh, n_ranks,
             freestream=freestream, mu_molecular=mu_molecular, mach_ref=mach_ref,
@@ -151,7 +153,7 @@ def rebuild_distributed_solver_from_checkpoint(
         from autoflowcfd.core.gpu.distributed.gpu_distributed import MultiGPUDistributedSolver
         from autoflowcfd.fr.operators import generate_fr_operators
 
-        mesh, _volume_data = load_mesh_for_solver(
+        mesh, volume_data = load_mesh_for_solver(
             input_file, order, surface_mesh=resolved_surface_mesh,
             skip_quality_check=skip_quality_check,
         )
@@ -161,7 +163,7 @@ def rebuild_distributed_solver_from_checkpoint(
             mu_molecular=mu_molecular, rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
             aoa_deg=aoa_deg, aos_deg=aos_deg,
             turb_model=turbulence_model.upper(),
-            wall_distance_source=wall_distance_source_if_needed(turbulence_model, _volume_data),
+            wall_distance_source=wall_distance_source_if_needed(turbulence_model, volume_data),
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
             **av_kwargs,
@@ -183,6 +185,7 @@ def rebuild_distributed_solver_from_checkpoint(
                       "aoa_deg": aoa_deg, "aos_deg": aos_deg}
         from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
         mach_ref = resolve_mach_ref(rho_inf, vel_inf, p_inf)
+        volume_data = None          # 只在 root 的 `_root_context` 里
         package, root_context = distributed_mesh_load_v2(
             input_file, order, resolved_surface_mesh, n_ranks,
             freestream=freestream, mu_molecular=mu_molecular, mach_ref=mach_ref,
@@ -211,7 +214,7 @@ def rebuild_distributed_solver_from_checkpoint(
         from autoflowcfd.core.mpi.distributed_checkpoint import distributed_load_checkpoint
         from autoflowcfd.fr.operators import generate_fr_operators
 
-        mesh, _volume_data = load_mesh_for_solver(
+        mesh, volume_data = load_mesh_for_solver(
             input_file, order, surface_mesh=resolved_surface_mesh,
             skip_quality_check=skip_quality_check,
         )
@@ -220,7 +223,7 @@ def rebuild_distributed_solver_from_checkpoint(
             mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
             n_ranks=n_ranks, order=order,
             turb_model_name=turbulence_model, time_scheme=scheme,
-            wall_distance_source=wall_distance_source_if_needed(turbulence_model, _volume_data),
+            wall_distance_source=wall_distance_source_if_needed(turbulence_model, volume_data),
             n_threads=threads, turbulence_intensity=turbulence_intensity,
             viscosity_ratio=viscosity_ratio, mu_molecular=mu_molecular,
             rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
@@ -251,6 +254,10 @@ def rebuild_distributed_solver_from_checkpoint(
     if hasattr(solver, "order"):
         solver.order = target_order
     solver._resumed_from_checkpoint = True
+    # 收尾气动系数用的参考面积（root 上；传统模式各 rank 都加载了体网格，完全分布式在 root 的 `_root_context`）
+    from autoflowcfd.cli.solve.aero_coefficients import distributed_reference_area
+
+    solver._report_reference_area = distributed_reference_area(solver, volume_data, reference_area)
     # Order Continuation 阶段起始残差（与单机恢复端共用；2026-10-05 以前分布式不写也不读）
     restore_phase_state(solver, metadata)
 

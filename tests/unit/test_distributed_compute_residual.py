@@ -45,7 +45,6 @@ max(abs(residual))/p_inf < 3e-5`）。分布式路径与单机路径在这类
 """
 
 import copy
-
 import numpy as np
 import pytest
 
@@ -59,7 +58,9 @@ from autoflowcfd.core.mpi.distributed_compute import (
 from autoflowcfd.core.fr_residual.inviscid import compute_inviscid_residual_fr, primitive_to_conserved
 from autoflowcfd.core.fr_residual.viscous import compute_viscous_residual
 from autoflowcfd.fr.operators import generate_fr_operators
+
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
+from tests.unit._boundary_groups import tag_wall_cells
 
 
 class _FakeHaloExchange:
@@ -234,8 +235,7 @@ class TestDistributedResidualMatchesSingleMachine:
         fc = mesh.face_connectivity
         boundary_face = int(np.nonzero(fc.is_boundary)[0][0])
         wall_cell = int(fc.owner_cell[boundary_face])
-        mesh.boundary_groups = {"wall_group": np.array([wall_cell], dtype=np.int64)}
-        mesh.boundary_bc_types = {"wall_group": "WALL"}
+        tag_wall_cells(mesh, [wall_cell])
 
         import types
         root_stub = types.SimpleNamespace(

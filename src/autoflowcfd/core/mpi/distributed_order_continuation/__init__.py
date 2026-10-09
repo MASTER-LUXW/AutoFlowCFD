@@ -62,11 +62,7 @@ set_order` 那样只换个缓存条目。三条后端的重建成本各不相同
 from .p0_residual import (  # noqa: F401
     compute_distributed_p0_inviscid_residual,
 )
-from .rebuild import (  # noqa: F401
-    _interp_state_and_turbulence_local,
-    _rebuild_cpu_traditional_partition_and_state,
-    cpu_traditional_interpolate_to_new_order,
-)
+from .rebuild import cpu_traditional_interpolate_to_new_order  # noqa: F401
 # resume 钳制检测是全部后端共用的**唯一实现**，住在后端中立的
 # `core/utils/order_continuation`（2026-09-24 合并：此前单机内联一份、
 # 这里再写一份）。re-export 让既有导入一字不改。

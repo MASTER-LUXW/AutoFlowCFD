@@ -1,26 +1,20 @@
-"""Regression test for a real bug found 2026-08-23 during a live resume
-investigation on a 791k-cell cube_demo run: `write_checkpoint` only ever
-persisted the mean-flow state (`U_sps`/`Q_sps`), never
-`turb_model.k_field`/`omega_field`.
+"""2026-08-23 在 79.1 万单元 cube_demo 的真实续算排查中发现的真实缺陷的回归
+测试：`write_checkpoint` 只持久化平均流状态（`U_sps`/`Q_sps`），从不存
+`turb_model.k_field`/`omega_field`。
 
-`rebuild_solver_from_checkpoint` reconstructs the solver via a fresh
-`FRSolver(...)` call, whose internal `SSTModelFR.__init__` unconditionally
-seeds `k_field`/`omega_field` with the same uniform "just starting a solve"
-guess (k=1e-6, omega=1.0) used for a brand-new run. Since the checkpoint
-never carried the real, converged turbulence field, resume silently
-produced a solver whose mean flow was exactly the converged state but
-whose turbulence field was reset to the initial guess - a real physical
-discontinuity at the resume boundary, confirmed by directly inspecting
-`solver.turb_model.omega_field` after a real rebuild (uniformly 1.0,
-matching the fresh-construction default rather than any spatially-varying
-converged SST field).
+`rebuild_solver_from_checkpoint` 经一次全新的 `FRSolver(...)` 调用重建
+求解器，其内部的 `SSTModelFR.__init__` 无条件地用全新运行同样的均匀
+"刚开始求解"猜测值（k=1e-6，omega=1.0）给 `k_field`/`omega_field` 做种子。
+由于 checkpoint 从不带真实的、已收敛的湍流场，续算静默地得到一个平均流
+恰好是收敛状态、湍流场却被重置成初始猜测的求解器——续算边界上一个真实的
+物理间断，在真实重建之后直接检查 `solver.turb_model.omega_field` 得到确认
+（均匀的 1.0，与全新构造的默认值一致，而不是任何随空间变化的收敛 SST 场）。
 
-Fix: `write_checkpoint` now also persists `k_field`/`omega_field` (via
-`hasattr`, so it no-ops for `turb_model=None` or SGS-only models like LES
-that don't expose these attributes); `rebuild_solver_from_checkpoint`
-restores them when present, with a shape check mirroring the existing
-`U_sps` check, and a safe backward-compatible fallback (keep the fresh
-uniform guess, print a warning) for checkpoints written before this fix.
+修复：`write_checkpoint` 现在也持久化 `k_field`/`omega_field`（经 `hasattr`，
+对 `turb_model=None` 或 LES 这类不暴露这些属性的纯亚格子模型不起作用）；
+`rebuild_solver_from_checkpoint` 在它们存在时恢复，形状检查与已有的
+`U_sps` 检查一致，对修复之前写出的 checkpoint 有安全的向后兼容处理
+（保留全新的均匀猜测值并打印警告）。
 """
 
 from types import SimpleNamespace
@@ -82,7 +76,7 @@ class TestWriteCheckpointStoresTurbulenceFields:
             np.testing.assert_array_equal(sol["omega_field"][:], omega)
 
     def test_no_turbulence_fields_written_when_turb_model_is_none(self, tmp_path):
-        """--turbulence none: must not fabricate k_field/omega_field keys."""
+        """--turbulence none：不能凭空造出 k_field/omega_field 键。"""
         write_checkpoint(
             _fake_solver(with_turb_model=False), str(tmp_path), 100, "volume.nas",
             order=0, turbulence_model="none", backend="cpu", quiet=True,
@@ -107,10 +101,10 @@ class TestWriteCheckpointStoresTurbulenceFields:
 
 class TestRebuildRestoresTurbulenceFields:
     def _rebuild(self, ckpt_path, n_cells=2, n_sps=1, k_fresh=None, omega_fresh=None):
-        """Mimics rebuild_solver_from_checkpoint's FRSolver(...) call
-        returning a *freshly constructed* solver (uniform-guess turbulence
-        field, distinct from whatever was checkpointed) so restoration is
-        actually exercised, not just a no-op identity copy."""
+        """模仿 rebuild_solver_from_checkpoint 的 FRSolver(...) 调用返回一个
+        *全新构造*的求解器（均匀猜测值的湍流场，与 checkpoint 里的不同），这样
+        恢复才真的被测到，而不只是一次什么都不做的原样拷贝。
+        """
         def _fake_frsolver(**kwargs):
             return _fake_solver(
                 n_cells=n_cells, n_sps=n_sps, order=kwargs["order"],
@@ -137,9 +131,8 @@ class TestRebuildRestoresTurbulenceFields:
         )
         ckpt = tmp_path / "checkpoints" / "checkpoint_iter_003000.h5"
 
-        # Fresh FRSolver() construction would normally seed the uniform
-        # "just starting" guess - deliberately different from the
-        # checkpointed values above so a silent no-restore would be caught.
+        # 全新构造的 FRSolver() 通常以均匀的"刚开始"猜测值做种子——故意与上面
+        # checkpoint 里的值不同，这样静默的"没有恢复"会被抓到。
         k_fresh = np.full((2, 1), 1e-6)
         omega_fresh = np.full((2, 1), 1.0)
         solver, iteration, metadata = self._rebuild(
@@ -150,10 +143,10 @@ class TestRebuildRestoresTurbulenceFields:
         np.testing.assert_array_equal(solver.turb_model.omega_field, omega_converged)
 
     def test_old_checkpoint_without_turbulence_fields_falls_back_to_fresh_guess(self, tmp_path, capsys):
-        """Pre-fix checkpoint has no k_field/omega_field at all - resume
-        must not crash, and must keep whatever fresh-construction default
-        FRSolver.__init__ produced (documented, backward-compatible
-        degradation), while warning the user."""
+        """修复之前的 checkpoint 根本没有 k_field/omega_field——续算不能崩溃，
+        必须保留 FRSolver.__init__ 全新构造给出的默认值（有文档记录的、向后兼容的
+        降级），同时警告用户。
+        """
         write_checkpoint(
             _fake_solver(n_cells=2, n_sps=1), str(tmp_path), 3000, "volume.nas",
             order=0, turbulence_model="sst", backend="cpu", quiet=True,
@@ -175,10 +168,10 @@ class TestRebuildRestoresTurbulenceFields:
         assert "旧版本" in capsys.readouterr().out
 
     def test_turbulence_field_shape_mismatch_rejected(self, tmp_path):
-        """U_sps shape matches (so the pre-existing mean-flow check passes
-        through) but the checkpointed k_field/omega_field shape doesn't
-        match the freshly-reconstructed turb_model's - must be caught by
-        the new dedicated check, not silently broadcast/truncated."""
+        """U_sps 形状相符（所以原有的平均流检查会放行），但 checkpoint 里的
+        k_field/omega_field 形状与重新构造的 turb_model 不符——必须被新增的专门
+        检查抓到，而不是静默地广播/截断。
+        """
         write_checkpoint(
             _fake_solver(n_cells=2, n_sps=1, k=np.zeros((2, 1)), omega=np.ones((2, 1))),
             str(tmp_path), 3000, "volume.nas",
@@ -187,9 +180,8 @@ class TestRebuildRestoresTurbulenceFields:
         ckpt = tmp_path / "checkpoints" / "checkpoint_iter_003000.h5"
 
         import click
-        # Fresh reconstruction has matching U shape (n_cells=2) but a
-        # mismatched turb_model shape (n_cells=5) - simulates a turb_model
-        # whose field shape drifted independently of the mean-flow state.
+        # 重新构造出的求解器 U 形状相符（n_cells=2）但 turb_model 形状不符
+        # （n_cells=5）——模拟湍流模型的场形状与平均流状态各自漂移的情形。
         def _fake_frsolver(**kwargs):
             from autoflowcfd.core.turbulence.sst import SSTModelFR
 
@@ -209,16 +201,15 @@ class TestRebuildRestoresTurbulenceFields:
 
 
 class TestPhaseInitialResidualPersistence:
-    """Regression test for a real bug found 2026-08-23 (same live resume
-    investigation): Order Continuation's residual-drop promotion criterion
-    (`initial_residual_this_order` in order_continuation.py) is a pure
-    local variable with no memory of a phase's true starting residual
-    across a `solve resume` process boundary - see
-    order_continuation.py::run_order_continuation for the full mechanism.
-    This tests the checkpoint round-trip half of the fix (write_checkpoint/
-    rebuild_solver_from_checkpoint persisting `solver._phase_initial_
-    residual`); the promotion-criteria behaviour itself is covered by
-    tests/unit/test_order_continuation_resume.py."""
+    """2026-08-23 发现的真实缺陷的回归测试（同一次真实续算排查）：Order
+    Continuation 的残差下降升阶判据（order_continuation.py 里的
+    `initial_residual_this_order`）是纯局部变量，跨 `solve resume` 的进程边界
+    不记得阶段真实的起始残差——完整机制见
+    order_continuation.py::run_order_continuation。这里测的是修复里 checkpoint
+    往返的那一半（write_checkpoint/rebuild_solver_from_checkpoint 持久化
+    `solver._phase_initial_residual`）；升阶判据本身的行为由
+    tests/unit/test_order_continuation_resume.py 覆盖。
+    """
 
     def _rebuild(self, ckpt_path, n_cells=2, n_sps=1):
         def _fake_frsolver(**kwargs):
@@ -251,9 +242,9 @@ class TestPhaseInitialResidualPersistence:
         assert restored._phase_initial_residual == pytest.approx(12345.6789)
 
     def test_not_yet_set_is_skipped_not_written_as_none(self, tmp_path):
-        """h5py attrs don't accept None - a solver that hasn't run a single
-        step yet (attribute never assigned) must not blow up write_checkpoint,
-        and the key must simply be absent, not written as some sentinel."""
+        """h5py 的 attrs 不接受 None——一步都没走过的求解器（该属性从未赋值）
+        不能让 write_checkpoint 出错，这个键必须直接缺席，而不是写成某个哨兵值。
+        """
         solver = _fake_solver(n_cells=2, n_sps=1)
         assert not hasattr(solver, "_phase_initial_residual")
         write_checkpoint(
@@ -267,18 +258,18 @@ class TestPhaseInitialResidualPersistence:
             assert "phase_initial_residual" not in f["metadata"].attrs
 
     def test_old_checkpoint_without_field_leaves_attribute_unset(self, tmp_path):
-        """Pre-fix checkpoint has no phase_initial_residual at all - resume
-        must not crash and must not fabricate a value; order_continuation.py
-        detects the absence via getattr(...,None) and falls back safely
-        (see test_order_continuation_resume.py for that half)."""
+        """修复之前的 checkpoint 根本没有 phase_initial_residual——续算不能崩溃，
+        也不能凭空造一个值；order_continuation.py 经 getattr(...,None) 检出缺失并
+        安全地退回（那一半见 test_order_continuation_resume.py）。
+        """
         solver = _fake_solver(n_cells=2, n_sps=1)
         write_checkpoint(
             solver, str(tmp_path), 3000, "volume.nas",
             order=0, turbulence_model="sst", backend="cpu", quiet=True,
         )
         ckpt = tmp_path / "checkpoints" / "checkpoint_iter_003000.h5"
-        # No need to strip anything - this solver never had the attribute
-        # set, so write_checkpoint already skipped it (previous test).
+        # 不需要去掉任何东西——这个求解器从未设置过该属性，write_checkpoint
+        # 已经跳过它（上一个测试）。
 
         restored, _, _ = self._rebuild(ckpt)
         assert getattr(restored, "_phase_initial_residual", None) is None

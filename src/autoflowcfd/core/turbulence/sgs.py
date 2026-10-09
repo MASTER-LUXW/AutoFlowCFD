@@ -41,7 +41,7 @@ WMLES 与 LES 两个分支都是 `solver.sgs_model = WALEModel()`。
 """
 
 import numpy as np
-from typing import Optional, Tuple
+from typing import Tuple
 
 
 class WALEModel:

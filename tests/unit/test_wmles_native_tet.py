@@ -27,7 +27,9 @@ from autoflowcfd.core.turbulence.wmles import WMLESModel
 from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
 from autoflowcfd.core.utils.solver_helpers import compute_wmles_wall_stress_correction
 from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive, primitive_to_conserved
+
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
+from tests.unit._boundary_groups import tag_wall_cells
 
 
 def _uniform_freestream_U(mesh) -> np.ndarray:
@@ -79,8 +81,7 @@ class TestNativeTetWmlesBoundaryExtrap:
         assert len(tet_boundary_faces) > 0, "test setup must have a real tet boundary face"
         boundary_face = int(tet_boundary_faces[0])
         wall_cell = int(fc.owner_cell[boundary_face])
-        mesh.boundary_groups = {"wall_group": np.array([wall_cell], dtype=np.int64)}
-        mesh.boundary_bc_types = {"wall_group": "WALL"}
+        tag_wall_cells(mesh, [wall_cell])
 
         import types
         root_stub = types.SimpleNamespace(

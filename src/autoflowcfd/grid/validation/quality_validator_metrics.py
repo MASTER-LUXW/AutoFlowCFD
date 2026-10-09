@@ -182,7 +182,7 @@ def compute_face_diagnostics(
     if faces is None:
         faces = validator._extract_faces(nodes, cells)
 
-    conn = faces.connectivity  # (n_faces, 2): [owner, neighbour], neighbour=-1 for boundary
+    conn = faces.connectivity  # (n_faces, 2)：[owner, neighbour]，边界面 neighbour=-1
     internal_mask = conn[:, 1] >= 0
     if not np.any(internal_mask):
         empty = np.array([], dtype=np.int64)

@@ -1,14 +1,11 @@
-"""Unit tests for core/fr_operators/volume_contract.py's numba adj(J) kernel.
+"""core/fr_operators/volume_contract.py 的 numba adj(J) 核的单元测试。
 
-`compute_adj_j` replaced `det_jacs[..., None, None] * inv_jacs` - a plain
-numpy broadcast multiply that runs single-threaded regardless of thread
-count settings. On the P2 over-integration fine grid (n_pts=64) for a
-production-scale mesh this single line processes several GiB of data and
-showed up as a real, measurable chunk of `compute_inviscid_residual_fr`'s
-own (non-sub-function) time in a real cProfile run. The numba `prange`
-kernel is mathematically the exact same elementwise product, just computed
-in parallel across cells - these tests pin it against the original
-broadcast expression for bit-exact equivalence.
+`compute_adj_j` 取代了 `det_jacs[..., None, None] * inv_jacs`——一个普通的
+numpy 广播乘法，不论线程数设置如何都是单线程。在生产规模网格的 P2 过积分
+细网格（n_pts=64）上，这一行要处理数 GiB 数据，在一次真实的 cProfile 运行
+里占了 `compute_inviscid_residual_fr` 自身（非子函数）时间里可测的一大块。
+numba `prange` 核在数学上是完全相同的逐元素乘积，只是跨单元并行计算——
+这些测试把它与原来的广播表达式钉成逐位相等。
 """
 
 import numpy as np

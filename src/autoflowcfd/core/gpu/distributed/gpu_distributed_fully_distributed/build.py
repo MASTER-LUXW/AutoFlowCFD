@@ -21,6 +21,7 @@ from autoflowcfd.core.mpi.distributed_state import DistributedFRState
 
 from autoflowcfd.core.gpu.distributed.gpu_halo_exchange import GPUHaloExchange
 from .upload import _upload_wall_geometry_compact
+from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
 
 def build_multi_gpu_solver_from_fully_distributed_package(
@@ -71,7 +72,6 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     self.rank = rank if rank is not None else get_rank()
     self.n_ranks = n_ranks
     self._is_fully_distributed = True
-    self._using_distributed_mesh = True
     self.cell_partition = None  # 本 rank 从未持有完整全局网格，见类文档
     self._root_context = root_context
 
@@ -171,7 +171,7 @@ def build_multi_gpu_solver_from_fully_distributed_package(
         package.get('low_mach_precond', True), time_scheme_str)
     # 双时间步内迭代次数取 package 携带的值（时间积分器在上面按格式构造）
     self.time_integrator.dual_time_steps = package.get('dual_time_inner_iter', DEFAULT_DUAL_TIME_STEPS)
-    self._dual_time_U_prev = None
+    reset_dual_time_history(self)
     # NEWTON_KRYLOV 跨步状态（构造时置初值，理由见 reset_newton_state 文档）
     from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
 

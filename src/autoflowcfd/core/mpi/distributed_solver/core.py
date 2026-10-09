@@ -5,7 +5,6 @@
 """
 
 from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
-import numpy as np
 from typing import Optional
 from loguru import logger
 from autoflowcfd.core.mpi import get_rank, is_root
@@ -26,6 +25,7 @@ from .from_package import _DistributedFromPackageMixin
 from autoflowcfd.core.fr_solver.solver.solve_loop import DistributedSolveLoopMixin
 from .step import _DistributedStepMixin
 from .support import _DistributedSupportMixin
+from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
 
 class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, DistributedSolveLoopMixin,
@@ -49,46 +49,26 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         mesh,
         ops,
         n_ranks: int,
-        face_connectivity=None,
-        face_connectivity_data=None,
-        partition_info=None,
+        face_connectivity,
         rank: Optional[int] = None,
         wall_distance_source=None,
         **solver_kwargs,
     ):
-        """初始化分布式求解器。
+        """初始化分布式求解器（"传统模式"：每个 rank 持有完整全局网格，root 用 METIS 分区后广播）。
+        只有 root 持有完整网格的"完全分布式加载"走 `from_fully_distributed_package`。
 
         Args:
-            mesh: HighOrderMesh（分布式模式下为局部网格）
+            mesh: 完整全局 HighOrderMesh
             ops: FROperators
             n_ranks: MPI rank 总数
-            face_connectivity: FRFaceConnectivity（单机模式，已废弃）
-            face_connectivity_data: dict（分布式模式，局部面连接关系数据）
-            partition_info: dict（分布式模式，分区信息）
+            face_connectivity: 全局 FRFaceConnectivity（分区与 halo 探测都在全局面连接关系上做）
             rank: 当前 rank 编号（默认从 MPI 获取）
-            **solver_kwargs: 传递给 FRSolver 的参数
+            wall_distance_source: 壁面距离来源（湍流模型需要时）
+            **solver_kwargs: 与单机 FRSolver 同名的构造参数
 
         Raises:
-            NotImplementedError: 请求了 'none'/'sst'/'ddes'/'iddes'/'wmles'/
-                'les' 以外的湍流模型时。SST/DDES/IDDES 已真正接入分布式
-                状态与残差计算（SST 2026-09-02，DDES/IDDES 同日续接，见
-                core/mpi/distributed_turbulence.py）——三者共享同一套
-                k/omega 输运基础设施，DDES/IDDES 只是多了一段 DES 长度
-                尺度替换，且所需的额外几何量（cell_volumes、IDDES 的
-                h_max/h_wn）都是纯逐单元局部量，不需要新的跨 rank 几何
-                交换。WMLES（2026-09-02 续接）壁面剪应力修正本身也只是
-                纯逐 owner 单元的局部操作（WALL 面必然只属于拥有该单元
-                的 rank，不需要跨 rank 数据）——真正的障碍是
-                `compute_wmles_wall_stress_correction`此前直接用全局
-                `mesh.face_flux_points`对象列表逐面取值，不认 compact
-                索引空间，现已改用`flat_face_override`（与本文件其余
-                面残差函数同一个约定）+`boundary_ghost_provider.
-                group_code`识别 WALL 面，不再需要完整全局网格的边界
-                几何信息，见该函数文档。LES（同日续接）是纯代数 SGS
-                模型（WALE，没有跨步 ODE 状态），"每步现算"即可，走独立
-                的 `distributed_compute_les_viscosity`，不经过 SST/DDES/
-                IDDES 共用的那套 k/omega 输运基础设施。单机模式已完整
-                支持全部模型。
+            NotImplementedError: 湍流模型名无法识别（支持的模型见 `core/turbulence/registry.py`，
+                与单机相同）
         """
         turb_model_name = solver_kwargs.get('turb_model_name', 'none')
         turb_model_upper = str(turb_model_name).upper() if turb_model_name is not None else 'NONE'
@@ -127,97 +107,23 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         self.order_continuation_enabled = solver_kwargs.get('order_continuation_enabled', True)
         self._is_fully_distributed = False
 
-        # 分布式模式：使用传入的分区信息
-        if partition_info is not None:
-            cell_partition = partition_info['cell_partition']
-        elif face_connectivity is not None:
-            # 兼容旧接口：所有 rank 独立执行分区
-            if self.rank == 0:
-                logger.info(f"Partitioning mesh into {n_ranks} parts (METIS on root)...")
-                cell_partition = partition_mesh(face_connectivity, n_ranks, n_cells=mesh.n_cells)
-            else:
-                cell_partition = None
-            if n_ranks > 1:
-                from autoflowcfd.core.mpi.comm import bcast_from_root
-                cell_partition = bcast_from_root(cell_partition)
+        # root 用 METIS 分区，广播给全部 rank
+        if self.rank == 0:
+            logger.info(f"Partitioning mesh into {n_ranks} parts (METIS on root)...")
+            cell_partition = partition_mesh(face_connectivity, n_ranks, n_cells=mesh.n_cells)
         else:
-            raise ValueError("Either face_connectivity or partition_info must be provided")
+            cell_partition = None
+        if n_ranks > 1:
+            from autoflowcfd.core.mpi.comm import bcast_from_root
+            cell_partition = bcast_from_root(cell_partition)
 
-        # Order Continuation 分布式支持（2026-09-02）：阶数切换需要用
-        # 同一个 cell_partition 重建 partition/dist_flat_face（`mesh`
-        # 在"传统模式"下是每个 rank 都持有的完整全局网格，`mesh.
-        # face_connectivity` 是阶数无关的拓扑信息，见
-        # `high_order_mesh_order.py::set_order` 文档——不随阶数变化，
-        # 不需要额外持久化）。只对 `face_connectivity is not None`
-        # 这条"兼容旧接口"/CLI 生产路径分支支持（`partition_info` 这条
-        # 分支要求调用方自带一个可能不是完整全局网格的 `mesh`，CLI 从未
-        # 真正使用过这条分支构造 `DistributedFRSolver`，见该分支上方
-        # 文档——如实标注为不支持，而不是假装能用）。
-        self._oc_cell_partition = cell_partition if face_connectivity is not None else None
+        # 换阶时用同一个 cell_partition 重建 partition/dist_flat_face（`mesh.face_connectivity` 是阶数无关的
+        # 拓扑信息，见 `high_order_mesh_order.py::set_order`）
+        self._oc_cell_partition = cell_partition
 
-        # 构建本 rank 的分区数据结构。
-        #
-        # build_distributed_partition 的 halo 探测（哪些面跨越分区边界、
-        # 因此需要 halo 交换）必须在**全局、未裁剪**的面连接关系上做——
-        # 它要用 cell_partition[owner]/cell_partition[neighbor] 判断一条
-        # 面两侧是否属于不同 rank，cell_partition 本身是全局数组
-        # （下标是全局 cell id）。此前这里传入的是
-        # face_connectivity_data（distributed_mesh_load 提取的**局部**
-        # 数据，owner_cell/neighbor_cell 已经重映射成本 rank 的局部索引，
-        # 跨 rank 的 neighbor 被强制置为 -1，与真正的边界面用同一个
-        # 哨兵值、在本 rank 视角下已经无法区分），拿它当 face_connectivity
-        # 传给 build_distributed_partition 有两个独立问题：(1) 该
-        # 函数第一行就要读 face_connectivity.n_faces，一个用普通
-        # dataclass 拼出来的 LocalFaceConnectivity 对象没有这个属性，
-        # 必然 AttributeError；(2) 即便补上这个属性，用局部索引去查
-        # cell_partition（全局索引空间）也是错的，且跨 rank 邻居已经
-        # 提前坍缩成 -1，halo 探测的 `if nc < 0: continue` 会直接跳过
-        # 所有真正的分区边界面——halo_cells/send_lists/recv_lists 会
-        # 算成空的，粘性/无粘残差在分区边界上完全得不到邻居数据
-        # （V2.0 专家组评审逐行核实：这条路径此前从未被真正跑通过）。
-        #
-        # 修复：用 distributed_mesh_load 随 partition_info 一起广播的
-        # **全局**面连接关系（global_owner_cell/global_neighbor_cell/
-        # global_is_boundary）构建分区——这才是 build_distributed_
-        # partition 设计时假设的输入形态，cell_partition 也是同一个
-        # 全局索引空间，两者能正确对齐。
-        if face_connectivity_data is not None:
-            if partition_info is None or 'global_owner_cell' not in partition_info:
-                raise ValueError(
-                    "DistributedFRSolver(face_connectivity_data=...) 需要 "
-                    "partition_info 里包含 global_owner_cell/global_neighbor_cell/"
-                    "global_is_boundary（distributed_mesh_load 的输出）才能正确"
-                    "构建分区——不能只用局部（已按 rank 裁剪）的面连接关系，"
-                    "见本方法上方注释。"
-                )
-            from dataclasses import dataclass
-
-            @dataclass
-            class GlobalFaceConnectivityView:
-                """构建分区专用的最小全局面连接关系视图（只读，不重新
-                实例化完整 FRFaceConnectivity，避免要求调用方提供它
-                不需要的其余几何字段）。"""
-                owner_cell: np.ndarray
-                neighbor_cell: np.ndarray
-                is_boundary: np.ndarray
-
-                @property
-                def n_faces(self) -> int:
-                    return len(self.owner_cell)
-
-            global_fc = GlobalFaceConnectivityView(
-                owner_cell=np.asarray(partition_info['global_owner_cell']),
-                neighbor_cell=np.asarray(partition_info['global_neighbor_cell']),
-                is_boundary=np.asarray(partition_info['global_is_boundary']),
-            )
-            self.partition = build_distributed_partition(
-                global_fc, cell_partition, self.rank, n_ranks
-            )
-        else:
-            # 兼容旧接口
-            self.partition = build_distributed_partition(
-                face_connectivity, cell_partition, self.rank, n_ranks
-            )
+        # 分区与 halo 探测必须在**全局、未裁剪**的面连接关系上做：cell_partition 的下标是全局 cell id，
+        # 一条面两侧是否属于不同 rank 要用 cell_partition[owner]/cell_partition[neighbor] 判断
+        self.partition = build_distributed_partition(face_connectivity, cell_partition, self.rank, n_ranks)
 
         if is_root():
             logger.info(
@@ -239,12 +145,8 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         # 此前的构造顺序正是反的，这里改为先做面几何（含 halo 扩展），
         # 再构造依赖最终 halo 布局的对象。
         #
-        # 传入 cell_partition 以便扩展 halo 层；"完全分布式加载"模式下
-        # mesh 是局部网格而非全局网格，这个扩展步骤依赖的
-        # get_flat_face_geometry(mesh, ops) 全局面几何假设在那条路径下
-        # 可能不成立——这是一个更深层、超出本次修复范围的架构问题，此处
-        # 不展开，只保证"传统模式：所有 rank 有完整网格"这条路径
-        # （cell_partition 在此处始终是全局数组）正确。
+        # 传入（全局）cell_partition 以便扩展 halo 层；完全分布式加载的 halo 扩展由 root 在全局网格上预先
+        # 完成（`distributed_mesh_loader/package.py`），不经过这里。
         self.dist_flat_face = build_distributed_flat_face(mesh, ops, self.partition, cell_partition=cell_partition)
 
         # 4. 初始化分布式状态（在面几何/halo 扩展之后构造）
@@ -412,7 +314,7 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         # DUAL_TIME 模式下 BDF2 需要的上一物理时间层状态（None 表示
         # 尚未跑过一个物理步，退化为 BDF1——与单机
         # `solver._dual_time_U_prev` 同一个约定）。
-        self._dual_time_U_prev = None
+        reset_dual_time_history(self)
         # NEWTON_KRYLOV 跨步状态（构造时置初值，理由见 reset_newton_state 文档）
         from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
 

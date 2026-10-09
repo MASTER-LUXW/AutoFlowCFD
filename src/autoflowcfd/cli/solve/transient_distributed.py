@@ -21,6 +21,7 @@ import click
 
 from autoflowcfd.cli.solve.distributed_checkpoint_io import distributed_periodic_checkpoint_callback
 from autoflowcfd.cli.solve.wall_distance import wall_distance_source_if_needed
+from autoflowcfd.cli.solve.aero_coefficients import distributed_reference_area, report_distributed_aerodynamic_coefficients
 from autoflowcfd.core.utils.order_continuation.initial_field import start_from_checkpoint_field
 
 
@@ -68,7 +69,7 @@ def _solve_transient_distributed(
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
-            aoa_deg=aoa_deg, aos_deg=aos_deg,
+            aoa_deg=aoa_deg, aos_deg=aos_deg, reference_area=reference_area,
         )
         return
 
@@ -84,7 +85,7 @@ def _solve_transient_distributed(
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
-            aoa_deg=aoa_deg, aos_deg=aos_deg,
+            aoa_deg=aoa_deg, aos_deg=aos_deg, reference_area=reference_area,
         )
         return
 
@@ -172,7 +173,7 @@ def _solve_transient_cpu_traditional(
             restore_distributed_state_from_checkpoint,
         )
         if is_root():
-            print(f"\n🔄 从 checkpoint 加载稳态结果作为瞬态初场...")
+            print("\n🔄 从 checkpoint 加载稳态结果作为瞬态初场...")
         ckpt_iter, ckpt_order = restore_distributed_state_from_checkpoint(init_checkpoint, solver)
         start_from_checkpoint_field(solver, ckpt_order, report=is_root())
         if is_root():
@@ -195,6 +196,8 @@ def _solve_transient_cpu_traditional(
             output_dir, result.iterations, input_file, solver.current_order, turbulence_model,
             target_order=solver.order, surface_mesh=surface_mesh,
         )
+        report_distributed_aerodynamic_coefficients(
+            solver, distributed_reference_area(solver, volume_data, reference_area))
     except Exception as e:
         print(f"\n❌ Distributed transient simulation failed: {e}")
         raise click.Abort()
@@ -211,6 +214,7 @@ def _solve_transient_fully_distributed(
     cfl_start=None, cfl_max=None, cfl_min=None,
     aoa_deg=0.0, aos_deg=0.0,
     artificial_viscosity_enabled=False, artificial_viscosity_alpha=1.0,
+    reference_area=None,
 ):
     """"完全分布式加载"：只有 root rank 加载完整网格（与 `solve steady`
     的 `if fully_distributed:` 分支同一套构造方式）。DUAL_TIME
@@ -232,6 +236,7 @@ def _solve_transient_fully_distributed(
                   "p_inf": p_inf,
                   "aoa_deg": aoa_deg, "aos_deg": aos_deg}
     mach_ref = resolve_mach_ref(rho_inf, vel_inf, p_inf)
+    volume_data = None          # 只在 root 的 `_root_context` 里
     package, root_context = distributed_mesh_load_v2(
         input_file, order, surface_mesh, n_ranks,
         freestream=freestream, mu_molecular=mu_molecular, mach_ref=mach_ref,
@@ -261,7 +266,7 @@ def _solve_transient_fully_distributed(
             restore_distributed_state_from_checkpoint,
         )
         if is_root():
-            print(f"\n🔄 从 checkpoint 加载稳态结果作为瞬态初场...")
+            print("\n🔄 从 checkpoint 加载稳态结果作为瞬态初场...")
         ckpt_iter, ckpt_order = restore_distributed_state_from_checkpoint(init_checkpoint, solver)
         start_from_checkpoint_field(solver, ckpt_order, report=is_root())
         if is_root():
@@ -284,6 +289,8 @@ def _solve_transient_fully_distributed(
             output_dir, result.iterations, input_file, solver.current_order, turbulence_model,
             target_order=solver.order, surface_mesh=surface_mesh,
         )
+        report_distributed_aerodynamic_coefficients(
+            solver, distributed_reference_area(solver, volume_data, reference_area))
     except Exception as e:
         print(f"\n❌ Distributed transient simulation failed: {e}")
         raise click.Abort()
@@ -300,6 +307,7 @@ def _solve_transient_multi_gpu(
     cfl_start=None, cfl_max=None, cfl_min=None,
     aoa_deg=0.0, aos_deg=0.0,
     artificial_viscosity_enabled=False, artificial_viscosity_alpha=1.0,
+    reference_area=None,
 ):
     """多 GPU + MPI 分布式（与 `solve steady` 的 `--multi-gpu` 分支同一套
     构造方式）。`fully_distributed`（#1，2026-09-02 补齐）：走
@@ -332,6 +340,7 @@ def _solve_transient_multi_gpu(
                       "p_inf": p_inf,
                       "aoa_deg": aoa_deg, "aos_deg": aos_deg}
         mach_ref = resolve_mach_ref(rho_inf, vel_inf, p_inf)
+        volume_data = None          # 只在 root 的 `_root_context` 里
         package, root_context = distributed_mesh_load_v2(
             input_file, order, surface_mesh, n_ranks,
             freestream=freestream, mu_molecular=mu_molecular, mach_ref=mach_ref,
@@ -379,7 +388,7 @@ def _solve_transient_multi_gpu(
         )
         from autoflowcfd.core.gpu import get_cupy
         if is_root():
-            print(f"\n🔄 从 checkpoint 加载稳态结果作为瞬态初场...")
+            print("\n🔄 从 checkpoint 加载稳态结果作为瞬态初场...")
         ckpt_iter, ckpt_order = restore_distributed_state_from_checkpoint(init_checkpoint, solver)
         # `restore_distributed_state_from_checkpoint` 只写 `solver.
         # state.U`（numpy，与 CPU 路径共用的接口）——GPU 路径真正参与
@@ -412,6 +421,8 @@ def _solve_transient_multi_gpu(
         )
         if saved_path and is_root():
             print(f"   Checkpoint saved: {saved_path}")
+        report_distributed_aerodynamic_coefficients(
+            solver, distributed_reference_area(solver, volume_data, reference_area))
         solver.cleanup()
     except Exception as e:
         print(f"\n❌ Multi-GPU transient simulation failed: {e}")

@@ -114,12 +114,6 @@ def resolve_turb_overintegration() -> str:
     return v
 
 
-#: `get_overintegration_context` 的旧名别名：三个消费方（无粘体积项、
-#: 本模块的 k/omega 输运、粘性体积项）共用同一份实现，见
-#: `fr_operators/volume_contract.py::get_overintegration_context`。
-_turb_overint_ops = get_overintegration_context
-
-_TURB_OVERINT_CHUNK_CELLS = OVERINT_CHUNK_CELLS
 
 
 def _scalar_convection_volume_overintegrated(
@@ -143,8 +137,8 @@ def _scalar_convection_volume_overintegrated(
     # 用全局 c0 去切段内数组会静默取到错误的单元。
     for (seg_lo, seg_hi, n_fine, det_seg, inv_seg,
          op_c2f, op_D_fine, op_f2c) in oi["segs"]:
-        for c0 in range(seg_lo, seg_hi, _TURB_OVERINT_CHUNK_CELLS):
-            c1 = min(c0 + _TURB_OVERINT_CHUNK_CELLS, seg_hi)
+        for c0 in range(seg_lo, seg_hi, OVERINT_CHUNK_CELLS):
+            c1 = min(c0 + OVERINT_CHUNK_CELLS, seg_hi)
             i0, i1 = c0 - seg_lo, c1 - seg_lo
             phi_f = contract_shared_operator_1axis(
                 op_c2f, np.ascontiguousarray(scalar_field[c0:c1, :, None]))
@@ -177,7 +171,7 @@ def scalar_convection_volume_divergence(scalar_field, rho, velocity, rho_u_tilde
     n_cells = mesh.n_cells
     n_sps = mesh.n_sps_per_cell
     n_prism = mesh.n_prism_cells
-    oi = _turb_overint_ops(mesh, ops) if resolve_turb_overintegration() == "on" else None
+    oi = get_overintegration_context(mesh, ops) if resolve_turb_overintegration() == "on" else None
     if oi is not None:
         return _scalar_convection_volume_overintegrated(scalar_field, rho, velocity, oi, n_sps)
     tet_op_D = ops.D_native_tet_padded if getattr(ops, "D_native_tet_padded", None) is not None else ops.D_3d_tet

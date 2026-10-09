@@ -15,6 +15,7 @@ from .package import build_fully_distributed_rank_package
 
 
 from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
+from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
 def distributed_mesh_load_v2(
     input_file: str,
@@ -42,12 +43,7 @@ def distributed_mesh_load_v2(
     """真正的完全分布式网格加载（2026-09-02）——只有 root rank 加载
     完整网格并对每个 rank 分别调用 `build_fully_distributed_rank_
     package`，其余 rank 只通过 MPI 接收自己的那一份紧凑包，从未持有
-    完整全局网格。取代此前从未真正跑通过的 `distributed_mesh_load`
-    （见该函数/`build_local_mesh_from_data` 文档"注意"一节——那条路径
-    产出的 `local_mesh` 缺 `face_connectivity`/`face_flux_points`，
-    `DistributedMeshAdapter` 需要完整全局网格重新切片 jacobians，两个
-    前提在那条路径下都不成立，构造期必然出错，此前从未被 CLI 实际
-    调用过，见 `solve_steady_command.py` 对应注释）。
+    完整全局网格。
 
     Order Continuation 支持（2026-09-02 续接，见 core/mpi/
     distributed_order_continuation.py 模块文档"完全分布式加载"一节）：
@@ -82,7 +78,7 @@ def distributed_mesh_load_v2(
         字段完全一致），`root_context` 见上方"Order Continuation 支持"
         一节。
     """
-    from autoflowcfd.cli.solve.helpers import load_mesh_for_solver
+    from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
     from autoflowcfd.core.mpi.partition import partition_mesh
     from autoflowcfd.fr.operators import generate_fr_operators
     from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
@@ -92,7 +88,7 @@ def distributed_mesh_load_v2(
 
     if rank == 0:
         logger.info("Root rank loading full mesh (fully-distributed mode)...")
-        mesh, _volume_data = load_mesh_for_solver(
+        mesh, volume_data = load_mesh_for_solver(
             input_file, order, surface_mesh=surface_mesh,
             skip_quality_check=skip_quality_check,
         )
@@ -142,7 +138,7 @@ def distributed_mesh_load_v2(
             # 壁面距离来源与单机同一个构造（WALL 组边界面，见 core/utils/wall_distance；
             # 此前这里把 BoundaryMap 的数组当字典读，真实网格上直接崩溃）
             from autoflowcfd.core.utils.wall_distance import WallDistanceSource
-            wall_distance_source = WallDistanceSource.from_volume_data(_volume_data)
+            wall_distance_source = WallDistanceSource.from_volume_data(volume_data)
             if turb_model_name in ("DDES", "IDDES"):
                 # DDES（2026-09-02 补齐）：apply_to_sst_model 现在优先用
                 # h_max（max_edge 网格尺度）而不是 cube_root(V)，见
@@ -197,6 +193,8 @@ def distributed_mesh_load_v2(
         # 也不应该持有完整全局网格）。
         root_context = {
             'mesh': mesh, 'ops': ops, 'fc': fc, 'cell_partition': cell_partition,
+            # 体网格数据：收尾的气动系数在 root 上按它估算参考面积（`cli/solve/aero_coefficients.py`）
+            'volume_data': volume_data,
             'boundary_ghost_provider_global': boundary_ghost_provider_global,
             'freestream': freestream, 'mu_molecular': mu_molecular, 'mach_ref': mach_ref,
             'enable_viscous': enable_viscous, 'turb_model_name': turb_model_name,
@@ -384,8 +382,7 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
     )
     solver._package_freestream = my_package['freestream']
 
-    if hasattr(solver, '_dual_time_U_prev'):
-        solver._dual_time_U_prev = None
+    reset_dual_time_history(solver)
     # NEWTON_KRYLOV 跨步状态（换阶时置初值，理由见 reset_newton_state 文档）
     from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
 

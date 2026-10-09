@@ -2,9 +2,8 @@
 
 和 parser_core.NASParser（读取 CTRIA3 面网格，体网格由本项目自己的
 生成-体积 流程从零生成）不同，本模块读取的是别的工具已经生成好的
-完整体网格（例如 ANSA 自身的体网格导出：GRID + CTETRA + CPENTA 卡片，
-fixed-width Nastran 小-字段 格式——和 nas_export.py 自己写出来的格式
-一致，已经拿真实的 ANSA 导出文件核实过）。
+完整体网格（例如 ANSA 自身的体网格导出：GRID/GRID* + CTETRA + CPENTA 卡片；节点与面网格共用同一个解析器，
+小字段/大字段/逗号分隔都支持）。
 
 解析出来的 VolumeMeshData 的 BoundaryMap 是空的——外部生成的体网格通常
 完全不带边界条件信息（ANSA 自身的体网格导出只标注 PSOLID 材料分区，不带
@@ -22,45 +21,46 @@ from loguru import logger
 from ..structures import (
     NodeArray, TetrahedralCells, PrismCells, GridMetadata, VolumeMeshData, BoundaryMap,
 )
-from .nas_parser_utils import parse_nastran_float
+
+
+def _cell_node_ids(line: str, n_nodes: int) -> list:
+    """CTETRA/CPENTA 卡片的节点 id：固定小字段（列 25 起每 8 列一个）或逗号分隔（`CTETRA,EID,PID,G1,...`）。"""
+    if "," in line:
+        return [int(p) for p in line.split(",")[3:3 + n_nodes]]
+    return [int(line[24 + 8 * k:32 + 8 * k]) for k in range(n_nodes)]
 
 
 def _parse_cards(path: str) -> Tuple[np.ndarray, np.ndarray, list, list]:
-    """单次流式扫描文件：收集 GRID 节点 id/xyz、
-    CTETRA 节点-id 行和 CPENTA 节点-id 行。全程使用固定宽度
-    8 字符 Nastran 小字段卡片（与 nas_export.py 自己的
-    CTETRA/CPENTA 写入器完全匹配，ANSA 自身的体导出也使用
-    相同约定）。"""
-    node_ids = []
-    node_xyz = []
+    """节点经 `nas_parser_nodes.parse_nodes_from_nas`（与面网格同一个解析器：小字段固定/逗号/空白分隔与大字段
+    `GRID*`）；再流式扫描一遍收集 CTETRA / CPENTA 的节点 id 行。
+
+    2026-10-09 以前这里另有一份只认 8 字符小字段的 GRID 解析：本项目导出端改写大字段 `GRID*`（保留 10 位有效
+    数字，见 `nas_export.py::_write_nodes`）之后，它在自家导出的体网格上报"找不到 GRID 卡片"。"""
+    from .nas_parser_nodes import parse_nodes_from_nas
+
+    nodes, id_to_index = parse_nodes_from_nas(path)
+    if not id_to_index:
+        raise ValueError(f"No GRID cards found in {path} - not a valid volume-mesh NAS file")
+    node_ids_arr = np.empty(len(id_to_index), dtype=np.int64)
+    for nid, idx in id_to_index.items():
+        node_ids_arr[idx] = nid
+    node_xyz_arr = np.column_stack([nodes.x, nodes.y, nodes.z]).astype(np.float64)
+
     tet_rows = []
     prism_rows = []
-
     with open(path, 'r', encoding='utf-8', errors='replace') as f:
         for line in f:
-            card = line[:8].strip()
-            if card == "GRID":
-                nid = int(line[8:16])
-                x = parse_nastran_float(line[24:32])
-                y = parse_nastran_float(line[32:40])
-                z = parse_nastran_float(line[40:48])
-                node_ids.append(nid)
-                node_xyz.append((x, y, z))
-            elif card == "CTETRA":
-                tet_rows.append([int(line[24 + 8 * k:32 + 8 * k]) for k in range(4)])
+            card = line[:8].split(",")[0].strip()
+            if card == "CTETRA":
+                tet_rows.append(_cell_node_ids(line, 4))
             elif card == "CPENTA":
-                prism_rows.append([int(line[24 + 8 * k:32 + 8 * k]) for k in range(6)])
+                prism_rows.append(_cell_node_ids(line, 6))
 
-    if not node_ids:
-        raise ValueError(f"No GRID cards found in {path} - not a valid volume-mesh NAS file")
     if not tet_rows and not prism_rows:
         raise ValueError(
             f"No CTETRA/CPENTA cards found in {path} - this looks like a surface mesh "
             f"(CTRIA3-only); use NASParser instead"
         )
-
-    node_ids_arr = np.array(node_ids, dtype=np.int64)
-    node_xyz_arr = np.array(node_xyz, dtype=np.float64)
     return node_ids_arr, node_xyz_arr, tet_rows, prism_rows
 
 

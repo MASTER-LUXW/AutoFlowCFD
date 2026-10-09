@@ -6,8 +6,8 @@
 和阶段 B/B'（`run_stage_b_repair`/`remesh_core_cavity`）的坏单元判据，
 全程只作用于 `merged_cells`——这个数组**只是核心 tetgen 填充的四面体**，
 从不包含棱柱（见 `mesh_background_merge_with_bl.py` 的返回签名：
-`prism_cells`/`tet_cells` 是两个独立数组，`generate_hybrid_mesh` 里
-`n_bl_cells` 绑定的是恒为 0 的 `n_transition_cells`，不是棱柱数量）。
+`prism_cells`/`tet_cells` 是两个独立数组；`generate_hybrid_mesh` 里曾经的
+`n_bl_cells` 绑定的是恒为 0 的过渡单元数，2026-10-09 已删除）。
 
 而全网格唯一一次在**完整混合面图**（棱柱+四面体，`FaceExtractor.
 extract_faces_mixed` 的全局单元索引：棱柱 `[0,n_prism)`、四面体
@@ -33,17 +33,11 @@ A/B/B' 的 badness 判据看到过——无论怎么调 BL 挤出参数（衰减
 **开发过程中的两个真实教训（已用 cube_demo 实测数据定位，供下一轮
 接手者参考，不要重复验证）：**
 
-1. `remesh_core_cavity` 自身基于**纯四面体子图**的 `touches_physical_
-   boundary` 判定，会把"接触本函数刚标记为坏单元的棱柱接口"误判为
-   "接触物理外部边界"（纯四面体视角下二者都表现为"这个面没有 tet
-   邻居"，无法区分），导致全部候选单元被判定 ineligible（已实测复现：
-   81 个候选全部被拒绝，"all touch an out-of-scope core boundary"）。
-   修复方式：改用**混合面图**的边界面判定（`mixed_faces.
-   get_boundary_face_indices()`，棱柱-四面体接口在混合图里正确显示
-   为内部面）逐一识别真正接触物理外部边界的四面体，调用
-   `remesh_core_cavity` 时传 `n_bl_cells=len(merged_cells)` 让它自身
-   基于纯四面体子图的（对本场景系统性假阳性的）排除逻辑对整个数组
-   失效，只依赖上面更准确的判定。
+1. `remesh_core_cavity` 曾排除"接触物理边界"的单元，而它是在**纯四面体子图**上判断的：贴着棱柱的
+   四面体面在纯四面体视角下也"没有邻居"，于是本阶段的全部候选都被排除（实测 81/81，"all touch an
+   out-of-scope core boundary"），阶段 B' 也因此从未修补过 BL/core 界面处的四面体。这条排除的理由是
+   "可能携带 tetgen 面标记"，2026-10-09 面标记机制删除后已一并删除：空腔边界面（含界面面与物理外边界面）
+   在局部重铺中逐字保留并逐面核对（`retile_is_conformal`），全部单元都可以参与重铺。
 
 2. **更根本的发现**：用 cube_demo 实测数据核实这 81 个违规单元的
    体积比方向后，确认全部 100% 是"棱柱更大、四面体是近零体积
@@ -162,11 +156,10 @@ def run_stage_d_interface_repair(
     merged_nodes: np.ndarray,
     prism_cells: np.ndarray,
     merged_cells: np.ndarray,
-    cell_groups: np.ndarray,
     nodes_obj: 'NodeArray',
     validator: 'MeshQualityValidator',
     max_rounds: int = 2,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, 'NodeArray', bool, List[str]]:
+) -> Tuple[np.ndarray, np.ndarray, 'NodeArray', bool, List[str]]:
     """阶段 D：基于完整混合面图的 BL/core 界面相邻体积比定向修复。
 
     Args:
@@ -174,7 +167,6 @@ def run_stage_d_interface_repair(
         prism_cells: 棱柱连接关系（本函数只读，从不修改/重铺）。
         merged_cells: 四面体连接关系（阶段 A/B/B' 之后，本函数唯一可能
             修改的单元数组）。
-        cell_groups: 与 merged_cells 平行的边界组标签。
         nodes_obj: merged_nodes 对应的 NodeArray（供面提取/体积计算用，
             调用方已构造好，避免本函数重复构造）。
         validator: 质量校验器实例，复用其 `max_adjacent_volume_ratio`
@@ -184,7 +176,7 @@ def run_stage_d_interface_repair(
             收敛，而非一次性假设修复完全，也避免在退化输入上死循环）。
 
     Returns:
-        (merged_nodes, merged_cells, cell_groups, nodes_obj, changed, actions)
+        (merged_nodes, merged_cells, nodes_obj, changed, actions)
         —— merged_nodes/nodes_obj 原样透传（本阶段从不新增/移动节点属于
         棱柱一侧；`remesh_core_cavity` 可能为四面体一侧插入新的内部点，
         因而 merged_nodes/nodes_obj 在有实际修复发生时会被替换为更新
@@ -205,7 +197,7 @@ def run_stage_d_interface_repair(
     threshold = validator.thresholds.get('max_adjacent_volume_ratio', 5.0)
 
     if n_prism == 0 or len(merged_cells) == 0:
-        return merged_nodes, merged_cells, cell_groups, nodes_obj, changed, actions
+        return merged_nodes, merged_cells, nodes_obj, changed, actions
 
     for round_idx in range(max_rounds):
         tet_volumes = TetrahedralCells.compute_volumes(nodes_obj, merged_cells.astype(np.int32))
@@ -246,24 +238,6 @@ def run_stage_d_interface_repair(
         if len(bad_tet_local) == 0:
             break
 
-        # 真正的物理外部边界面（入口/出口/隧道/远场——可能携带
-        # remesh_core_cavity 不处理的 tetgen 面标记/区域归属，见其自身
-        # 文档字符串"作用域"一节）必须用**混合面图**上的边界判定来识别，
-        # 见本模块文档"已知局限"第 1 条——纯四面体子图无法区分"真正的
-        # 物理外部边界"和"邻居是棱柱（BL/core 接口）"。
-        true_boundary_idx = mixed_faces.get_boundary_face_indices()
-        true_boundary_owner = mixed_faces.connectivity[true_boundary_idx, 0]
-        tets_on_real_boundary = np.unique(
-            true_boundary_owner[true_boundary_owner >= n_prism] - n_prism
-        )
-        bad_tet_local = np.setdiff1d(bad_tet_local, tets_on_real_boundary, assume_unique=False)
-        if len(bad_tet_local) == 0:
-            actions.append(
-                "Stage D: all interface-violating tet(s) also touch a real exterior "
-                "boundary face - out of scope (may carry facet markers), skipping"
-            )
-            break
-
         bad_cell_mask = np.zeros(len(merged_cells), dtype=bool)
         bad_cell_mask[bad_tet_local] = True
 
@@ -275,11 +249,8 @@ def run_stage_d_interface_repair(
         )
 
         tet_faces = FaceExtractor.extract_faces(merged_cells.astype(np.int32), nodes_obj)
-        # n_bl_cells=len(merged_cells)：见本模块文档"已知局限"第 1 条，
-        # 让 remesh_core_cavity 自身基于纯四面体子图的 touches_physical_
-        # boundary 排除对整个数组失效，只依赖上面更准确的混合面图判定。
-        new_nodes, new_cells, new_groups, _new_bad_mask, cavity_actions = remesh_core_cavity(
-            merged_nodes, merged_cells, cell_groups, len(merged_cells), tet_faces, bad_cell_mask, validator,
+        new_nodes, new_cells, _new_bad_mask, cavity_actions = remesh_core_cavity(
+            merged_nodes, merged_cells, tet_faces, bad_cell_mask, validator,
         )
         actions.extend(f"Stage D: {a}" for a in cavity_actions)
 
@@ -311,8 +282,7 @@ def run_stage_d_interface_repair(
 
         merged_nodes = new_nodes
         merged_cells = new_cells
-        cell_groups = new_groups
         nodes_obj = NodeArray.from_array(merged_nodes)
         changed = True
 
-    return merged_nodes, merged_cells, cell_groups, nodes_obj, changed, actions
+    return merged_nodes, merged_cells, nodes_obj, changed, actions

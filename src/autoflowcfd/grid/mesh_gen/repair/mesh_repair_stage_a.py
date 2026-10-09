@@ -18,7 +18,6 @@ def run_stage_a_repair(
     validator: 'MeshQualityValidator',
     pre_repair_faces: 'FaceData',
     overlap_bad_mask: Optional[np.ndarray],
-    n_bl_cells: int,
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """执行阶段 A：质量门控的拉普拉斯平滑。
 
@@ -30,7 +29,6 @@ def run_stage_a_repair(
         validator: 质量验证器实例。
         pre_repair_faces: 预提取的面数据。
         overlap_bad_mask: 物理重叠单元的掩码。
-        n_bl_cells: BL 单元数量（用于保护界面）。
 
     Returns:
         (新节点数组, 坏单元掩码, 修复动作列表) 的元组。
@@ -43,7 +41,7 @@ def run_stage_a_repair(
     merged_nodes, bad_mask, repair_actions = smooth_bad_cells(
         merged_nodes, merged_cells, validator, max_passes=5, 
         initial_faces=pre_repair_faces,
-        extra_bad_mask=overlap_bad_mask, n_bl_cells=n_bl_cells,
+        extra_bad_mask=overlap_bad_mask,
     )
     
     mesh_changed_by_repair = not np.array_equal(nodes_before_repair, merged_nodes)

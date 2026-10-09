@@ -1,14 +1,11 @@
-"""Unit tests for config/loader.py's template <-> loader round-trip.
+"""config/loader.py 模板 <-> 加载器往返的单元测试。
 
-Real bug caught here (fixed 2026-08-21): `config_commands.py`'s hardcoded
-transient template text used the key `time_integration`, but
-`TransientConfig`'s actual dataclass field is `time_scheme`. `ConfigLoader.
-_merge_defaults` only recognizes keys that are fields of the target
-dataclass - an unrecognized key is logged as an "unknown config key" and
-silently dropped, so any non-default value a user wrote under
-`time_integration:` in a generated template had zero effect: the loaded
-config always silently fell back to the default `time_scheme`, without any
-visible error (only a log warning easy to miss).
+这里抓到的真实缺陷（2026-08-21 修复）：`config_commands.py` 里手写的瞬态模板
+用的键是 `time_integration`，而 `TransientConfig` 的 dataclass 字段实际叫
+`time_scheme`。`ConfigLoader._merge_defaults` 只认目标 dataclass 的字段——
+不认识的键记一条"未知配置键"日志后被静默丢弃，于是用户在生成的模板里写在
+`time_integration:` 下的任何非默认值都完全不起作用：加载出的配置总是静默
+退回默认的 `time_scheme`，没有任何可见的错误（只有一条容易漏看的日志警告）。
 """
 
 from autoflowcfd.config import ConfigLoader, TransientConfig
@@ -17,9 +14,9 @@ from autoflowcfd.config.solver_config import TimeIntegrationScheme
 
 class TestConfigLoaderTemplateRoundTrip:
     def test_transient_time_scheme_key_is_not_silently_dropped(self, tmp_path):
-        """A non-default `time_scheme` value in the YAML must actually reach
-        the loaded TransientConfig, not be silently ignored in favor of the
-        dataclass default."""
+        """YAML 里非默认的 `time_scheme` 必须真的到达加载出的 TransientConfig，
+        不能被静默忽略而用 dataclass 默认值。
+        """
         yaml_path = tmp_path / "transient.yaml"
         yaml_path.write_text(
             "mode: transient\ntime_scheme: rk3\ndt: 1.0e-4\ntotal_time: 0.3\n",
@@ -60,9 +57,9 @@ class TestConfigLoaderTemplateRoundTrip:
                 assert "time_scheme:" in text and "time_integration:" not in text
 
     def test_mode_key_does_not_trigger_unknown_config_key_warning(self, tmp_path, caplog):
-        """`mode` is a legitimate top-level routing key consumed by
-        `ConfigLoader.load()` itself - it must not be reported as an
-        unrecognized config key when merging with dataclass defaults."""
+        """`mode` 是 `ConfigLoader.load()` 自己消费的合法顶层路由键——与 dataclass
+        默认值合并时不能把它报成未识别的配置键。
+        """
         yaml_path = tmp_path / "steady.yaml"
         yaml_path.write_text("mode: steady\n", encoding="utf-8")
 

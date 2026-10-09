@@ -6,15 +6,14 @@
 缺陷都出在顺序上，例如 WMLES 模型必须先于边界幽灵态构造）。
 """
 
-from typing import Optional
 
-import numpy as np
 
 from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
 from autoflowcfd.core.fr_solver.state import FRState
 from autoflowcfd.core.time_integration.base import TimeIntegrator
 from autoflowcfd.core.utils.preconditioning import resolve_low_mach_precond
 from autoflowcfd.fr.operators import generate_fr_operators
+from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
 
 class _SolverSetupMixin:
@@ -213,7 +212,7 @@ class _SolverSetupMixin:
         # 与 order_continuation.interpolate_to_new_order_checked（阶数
         # 变化后 SPs 布局改变，必须让这份历史失效，否则形状不匹配/物理
         # 上不连续的历史层会被静默用于 BDF2）。
-        self._dual_time_U_prev: Optional[np.ndarray] = None
+        reset_dual_time_history(self)
 
         # NEWTON_KRYLOV（隐式稳态）跨步状态：含义与换阶失效的理由见
         # `time_integration/implicit/mean_flow_step.py`（模块文档与 reset_newton_state）

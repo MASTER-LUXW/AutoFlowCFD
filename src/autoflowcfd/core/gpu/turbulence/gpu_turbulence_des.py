@@ -18,7 +18,6 @@ DDES/IDDES 都不需要 GPU 版 k/omega 输运（gpu_scalar_transport.py）才�
 （对流+扩散）与是否启用 DDES/IDDES 无关，两者是正交的两处独立修复。
 """
 
-from typing import Optional
 
 from autoflowcfd.core.gpu import gpu_available, get_cupy
 

@@ -18,14 +18,14 @@ from unittest.mock import MagicMock, patch
 import click
 import pytest
 
-from autoflowcfd.cli.solve.helpers import load_mesh_for_solver
+from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
 
 
 def _fake_volume_mesh_data():
-    """A minimal stand-in good enough for HighOrderMesh.load_from_volume_mesh
-    and the print()s in load_mesh_for_solver to not blow up - the solver/mesh
-    machinery itself is mocked out in every test here, only load_mesh_for_
-    solver's own dispatch/gate logic is under test."""
+    """一个最小替身，足以让 HighOrderMesh.load_from_volume_mesh 与
+    load_mesh_for_solver 里的 print() 不出错——这里每个测试都把求解器/网格
+    机制换成了替身，被测的只是 load_mesh_for_solver 自己的分派/闸门逻辑。
+    """
     vm = MagicMock()
     vm.nodes.count = 10
     vm.cell_count = 5
@@ -41,9 +41,10 @@ def _fake_report(passed: bool):
 
 @pytest.fixture
 def fake_pkl(tmp_path):
-    """A .pkl file containing a genuinely picklable minimal VolumeMeshData
-    (a MagicMock cannot be pickled), for tests that need a real file on disk
-    for load_mesh_for_solver's own open()/pickle.load()."""
+    """一个 .pkl 文件，内含真正可 pickle 的最小 VolumeMeshData（MagicMock 不能
+    pickle），供需要磁盘上有真实文件给 load_mesh_for_solver 自己的
+    open()/pickle.load() 用的测试。
+    """
     import numpy as np
     from autoflowcfd.grid.structures import (
         BoundaryMap, GridMetadata, NodeArray, TetrahedralCells, VolumeMeshData,
@@ -107,8 +108,7 @@ class TestLoadMeshForSolverExtensionDispatch:
             mock_validator_cls.return_value.validate_volume_mesh.return_value = _fake_report(passed=True)
             mesh, volume_data = load_mesh_for_solver(str(pkl_path), order=2)
 
-        # pickle.load produces a new object, not the same identity as `vm` -
-        # compare content instead.
+        # pickle.load 产生的是新对象，与 `vm` 不是同一个——改为比较内容。
         assert volume_data.nodes.count == vm.nodes.count
         assert volume_data.cell_count == vm.cell_count
 
@@ -127,8 +127,8 @@ class TestLoadMeshForSolverQualityGate:
     @patch("autoflowcfd.cli.solve.mesh_loader.HighOrderMesh")
     def test_skip_quality_check_bypasses_a_failing_gate(self, mock_high_order_mesh, fake_pkl):
         pkl_path, vm = fake_pkl
-        # No MeshQualityValidator patch needed here - skip_quality_check=True
-        # must short-circuit before it's ever constructed.
+        # 这里不需要给 MeshQualityValidator 打补丁——skip_quality_check=True
+        # 必须在它被构造之前就短路。
         mesh, volume_data = load_mesh_for_solver(str(pkl_path), order=2, skip_quality_check=True)
         assert volume_data.nodes.count == vm.nodes.count
 
@@ -137,9 +137,9 @@ class TestLoadMeshForSolverQualityGate:
     def test_failing_quality_gate_blocks_nas_input_too(
         self, mock_import, mock_high_order_mesh, tmp_path
     ):
-        """The .nas path already gets a report back from import_external_
-        volume_mesh itself - the gate must still apply to it, not just the
-        freshly-computed report the .pkl path takes."""
+        """.nas 路径本来就从 import_external_volume_mesh 拿回一份报告——闸门仍
+        必须对它生效，而不只是对 .pkl 路径新算出来的报告生效。
+        """
         volume_nas = tmp_path / "volume.nas"
         volume_nas.write_text("dummy")
         surface_nas = tmp_path / "surface.nas"

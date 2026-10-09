@@ -21,15 +21,6 @@ AutoFlowCFD V2.0 - GPU FRSolver
 # 下面 re-export 全部公开名与测试在用的私有名，所以全仓库
 # `from autoflowcfd.core.gpu.solver.gpu_solver import ...` 一个字都不用改。
 
-from .residual import (  # noqa: F401
-    _GPUSolverResidualMixin,
-)
-from .timestep import (  # noqa: F401
-    _GPUSolverTimeStepMixin,
-)
-from .step import (  # noqa: F401
-    _GPUSolverStepMixin,
-)
 from .core import (  # noqa: F401
     GPUFRSolver,
 )

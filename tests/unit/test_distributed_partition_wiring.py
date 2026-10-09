@@ -1,13 +1,9 @@
 """DistributedFRSolver 分区构建的单元测试。
 
 核心回归判据：build_distributed_partition 的 halo 探测必须在**全局**
-面连接关系上进行——用 distributed_mesh_load/extract_local_mesh_data
-产出的**局部**（已按 rank 裁剪、跨 rank 邻居坍缩成 -1）面连接关系去
+面连接关系上进行——用**局部**（已按 rank 裁剪、跨 rank 邻居坍缩成 -1）面连接关系去
 调用它，会让分区边界上的所有面被误判成"没有远端邻居"，halo 列表算成
-全空，残差在分区边界上完全得不到邻居数据（V2.0 专家组评审逐行核实：
-DistributedFRSolver 的 face_connectivity_data 路径此前从未被真正跑
-通过——旧代码甚至连 build_distributed_partition 要求的 n_faces 属性
-都没提供，直接 AttributeError）。
+全空，残差在分区边界上完全得不到邻居数据。
 
 这些测试不需要真实多进程 MPI 环境：build_distributed_partition 是
 纯函数，接受显式的 rank/n_ranks 参数，可以在单进程里模拟多个 rank
@@ -91,7 +87,7 @@ class TestLocallyClippedDataCorruptsHaloDetection:
     def test_local_clipping_hides_the_cross_rank_neighbour(self):
         owner_cell, neighbor_cell, is_boundary, cell_partition = _synthetic_two_rank_mesh()
 
-        # 模拟 extract_local_mesh_data 对 rank0 的裁剪：
+        # 模拟按 rank 裁剪后的局部面连接关系（rank0 视角）：
         # 只保留 owner 属于 rank0 的面（f0, f1, f3），
         # neighbor 不在 local_cells={0,1} 里的一律坍缩成 -1。
         local_cells = np.array([0, 1])

@@ -20,7 +20,7 @@ from autoflowcfd.core.mpi.vertex_stencil_mpi import (
     build_distributed_vertex_stencil, local_vertex_pairs, vertex_pairs_of_cells,
 )
 from tests.unit._thread_comm import ThreadComm
-from tests.unit.test_sensor_gate_distributed import _build_global_case, _rank_view
+from tests.unit._sensor_gate_distributed_common import _build_global_case, _rank_view
 
 _REF = _reference_scales({"rho_inf": 1.225, "vel_inf": 30.0, "p_inf": 101325.0}, 5)
 

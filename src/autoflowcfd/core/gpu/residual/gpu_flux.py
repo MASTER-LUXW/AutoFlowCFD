@@ -158,7 +158,6 @@ def viscous_physical_flux_gpu(Q, grad_vel, grad_T, mu, Pr, mu_t=None, Pr_t=PRAND
     cp = get_cupy()
     batch_shape = Q.shape[:-1]
 
-    rho = Q[..., 0]
     u = Q[..., 1]
     v = Q[..., 2]
     w = Q[..., 3]

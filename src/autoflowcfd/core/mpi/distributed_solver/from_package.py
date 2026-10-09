@@ -17,6 +17,7 @@ from autoflowcfd.core.mpi.comm import barrier
 from autoflowcfd.core.time_integration.base import (
     TimeIntegrator, TimeIntegrationScheme, require_distributed_scheme,
 )
+from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
 
 class _DistributedFromPackageMixin:
@@ -41,23 +42,7 @@ class _DistributedFromPackageMixin:
         ——本身就要求一个完整全局网格，在这条路径下没有意义、也没有
         数据可用），直接把 package 里已经算好的内容赋到对应属性上。
 
-        范围边界（与 `build_fully_distributed_rank_package` 文档一致，
-        这里重复一遍避免只读一处文档漏掉）：支持 `turbulence_
-        model='none'/'sst'/'ddes'/'iddes'/'wmles'/'les'`（2026-09-02
-        补齐 SST/DDES/IDDES，同日续接 WMLES/LES——两者此前"需要额外
-        基础设施"的排除理由排查后不成立：WMLES 壁面剪应力修正只是
-        纯逐 owner 单元的局部操作，真正的障碍是 `compute_wmles_wall_
-        stress_correction` 没有跟随 `flat_face_override` 约定，现已
-        修复；LES（WALE）纯代数现算，不需要 root 预计算任何几何量）。
-        DUAL_TIME、checkpoint 已接入。Order Continuation（2026-09-02
-        续接）——见 `core/mpi/distributed_order_continuation.py` 模块
-        文档：本 rank 只持有 compact 数据，阶数切换需要 root 用完整
-        全局网格重新算一遍紧凑包再重新分发（"完全分布式加载"名副
-        其实的代价），本方法本身不做这件事，由
-        `DistributedFRSolver._interpolate_to_new_order` 调用
-        `distributed_order_continuation.py::redistribute_fully_
-        distributed_for_new_order`（需要 root 持有的 `_root_context`，
-        见下面 `root_context` 参数）触发。
+        全部湍流模型（`core/turbulence/registry.py::SUPPORTED_MODELS`，与单机相同）、全部时间格式、checkpoint 续算与 Order Continuation 均已接入。换阶由 `DistributedFRSolver._interpolate_to_new_order` 调用 `redistribute_fully_distributed_for_new_order`：本 rank 只持有紧凑数据，root 用持有的 `_root_context` （完整全局网格）重新计算并分发新阶数的紧凑包。
 
         Args:
             package: `build_fully_distributed_rank_package` 的返回值
@@ -266,7 +251,7 @@ class _DistributedFromPackageMixin:
         )
         from autoflowcfd.core.fr_solver.turbulence.init import init_production_ramp
         init_production_ramp(self, time_scheme)
-        self._dual_time_U_prev = None
+        reset_dual_time_history(self)
         # NEWTON_KRYLOV 跨步状态（构造时置初值，理由见 reset_newton_state 文档）
         from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
 

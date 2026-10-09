@@ -30,12 +30,8 @@ class NASParser:
     
     SUPPORTED_VERSIONS = {"v22", "v23", "v24"}
     
-    # Below this raw (pre-scale) bounding-box max dimension, a file is
-    # assumed to already be in meters when units='auto'; above it, assumed
-    # to be in millimeters. A single-vehicle external-aero domain is
-    # typically a few meters (car) to a few tens of meters (surrounding
-    # tunnel/farfield) - the same geometry expressed in mm would read in
-    # the thousands, comfortably on the other side of this threshold.
+    # units='auto' 时：原始（未缩放）包围盒最大边长低于此值视为已是米，高于此值视为毫米。单车外流计算域
+    # 通常是几米（车）到几十米（风洞/远场），同一几何以毫米表示会到几千，远在阈值另一侧。
     AUTO_UNITS_MM_THRESHOLD = 50.0
 
     def __init__(self, file_path: str, encoding: str = 'UTF-8', units: str = 'mm'):
@@ -121,7 +117,7 @@ class NASParser:
             if nodes.count == 0:
                 raise NASParseError("No nodes found in NAS file")
             
-            # Convert units to meters (or detect them, if units='auto').
+            # 坐标换算到米（units='auto' 时先检测单位）
             raw_extent = float(max(
                 nodes.x.max() - nodes.x.min(),
                 nodes.y.max() - nodes.y.min(),
@@ -185,16 +181,10 @@ class NASParser:
             logger.info(f"Parsed {surface_cells.count:,} surface cells")
 
             if surface_cells.count == 0:
-                # A common cause: the file is actually a VOLUME mesh
-                # (CTETRA/CPENTA, e.g. ANSA's own volume export) handed to
-                # a code path that only ever looks for CTRIA3 surface
-                # triangles - silently parsing 0 cells and failing here
-                # with no clue why, unless this is checked for and called
-                # out explicitly. `grid import-volume` is the path built for
-                # a volume mesh instead - see nas_parser_volume.py. (`solve
-                # steady`/`transient` themselves only ever accept an
-                # already-generated .pkl volume mesh, never a raw .nas file
-                # of either kind - see solve_helpers.load_mesh_for_solver.)
+                # 常见原因：文件其实是体网格（CTETRA/CPENTA，例如 ANSA 的体网格导出），被交给了只找 CTRIA3
+                # 面三角形的路径——不在这里明确指出，就只会解析出 0 个单元、看不出原因地失败。体网格应走
+                # `grid import-volume`（nas_parser_volume.py），或直接交给 `solve steady/transient`
+                # （.nas 体网格 + --surface-mesh，见 cli/solve/mesh_loader.py::load_mesh_for_solver）。
                 looks_like_volume_mesh = False
                 try:
                     with open(self.file_path, 'r', encoding=self.encoding, errors='replace') as f:
@@ -215,13 +205,9 @@ class NASParser:
                     )
                 raise NASParseError("No cells found in NAS file")
 
-            # Step 4: Parse boundaries (delegated)
-            # Pass the PID already resolved for each surviving cell (cells_data)
-            # instead of letting parse_boundary_properties re-scan CTRIA3 cards
-            # independently. A second independent scan does not know which
-            # cells parse_cells_from_nas skipped (missing node references), so
-            # its cell indices would drift out of alignment with surface_cells
-            # as soon as any cell is skipped.
+            # 第 4 步：解析边界（委托）。把每个保留下来的单元已解析出的 PID（cells_data）直接传过去，
+            # 而不是让 parse_boundary_properties 再独立扫描一遍 CTRIA3：第二遍扫描不知道 parse_cells_from_nas
+            # 跳过了哪些单元（引用了不存在的节点），一旦有单元被跳过，单元编号就和 surface_cells 对不上。
             logger.info("Parsing boundary conditions...")
             cells_data = list(enumerate(cell_pids.tolist()))
             boundaries = parse_boundary_properties(
@@ -235,7 +221,7 @@ class NASParser:
             # Step 5: Compute bounding box
             bounding_box = self._compute_bounding_box(nodes)
 
-            # Step 6: Generate volume mesh if requested
+            # 第 6 步：需要时生成体网格
             if generate_volume_mesh:
                 metadata = GridMetadata(
                     node_count=nodes.count,

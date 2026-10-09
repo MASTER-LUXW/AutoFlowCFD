@@ -1,4 +1,4 @@
-"""Unit tests for postprocessing module."""
+"""后处理模块的单元测试。"""
 
 import unittest
 import numpy as np
@@ -23,17 +23,17 @@ from autoflowcfd.postprocess import (
 
 
 class TestAerodynamicCoefficients(unittest.TestCase):
-    """Test aerodynamic coefficients data class"""
+    """气动力系数数据类的测试"""
     
     def test_default_values(self):
-        """Test default coefficient values are zero"""
+        """系数默认值为零"""
         coeffs = AerodynamicCoefficients()
         self.assertEqual(coeffs.Cd, 0.0)
         self.assertEqual(coeffs.Cl, 0.0)
         self.assertEqual(coeffs.Cm, 0.0)
     
     def test_to_dict(self):
-        """Test conversion to dictionary"""
+        """转换为字典"""
         coeffs = AerodynamicCoefficients(Cd=0.3, Cl=0.1, Cm=-0.05)
         d = coeffs.to_dict()
         self.assertAlmostEqual(d['Cd'], 0.3)
@@ -41,7 +41,7 @@ class TestAerodynamicCoefficients(unittest.TestCase):
         self.assertAlmostEqual(d['Cm'], -0.05)
     
     def test_string_representation(self):
-        """Test string representation contains all coefficients"""
+        """字符串表示包含全部系数"""
         coeffs = AerodynamicCoefficients(Cd=0.28)
         s = str(coeffs)
         self.assertIn("Cd", s)
@@ -49,16 +49,16 @@ class TestAerodynamicCoefficients(unittest.TestCase):
 
 
 class TestAerodynamicForces(unittest.TestCase):
-    """Test aerodynamic forces data class"""
+    """气动力数据类的测试"""
     
     def test_default_values(self):
-        """Test default force values are zero"""
+        """力的默认值为零"""
         forces = AerodynamicForces()
         self.assertEqual(forces.drag_force, 0.0)
         self.assertEqual(forces.lift_force, 0.0)
     
     def test_to_dict(self):
-        """Test conversion to dictionary"""
+        """转换为字典"""
         forces = AerodynamicForces(drag_force=150.0, lift_force=-20.0)
         d = forces.to_dict()
         self.assertAlmostEqual(d['drag_force'], 150.0)
@@ -84,7 +84,7 @@ class TestVTKExporter(unittest.TestCase):
     """Test VTK exporter"""
     
     def setUp(self):
-        """Set up test fixtures"""
+        """准备测试夹具"""
         nodes = NodeArray(
             x=np.array([0.0, 1.0, 2.0]),
             y=np.array([0.0, 0.0, 0.0]),
@@ -113,7 +113,7 @@ class TestVTKExporter(unittest.TestCase):
         self.solution = SolutionVector()
     
     def test_export_legacy_format(self):
-        """Test export to legacy VTK format"""
+        """导出 legacy VTK 格式"""
         exporter = VTKExporter(self.grid_data, self.solution)
         
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -130,7 +130,7 @@ class TestVTKExporter(unittest.TestCase):
                 self.assertIn("DATASET UNSTRUCTURED_GRID", content)
     
     def test_export_with_custom_fields(self):
-        """Test export with specific fields"""
+        """导出指定的场"""
         exporter = VTKExporter(self.grid_data, self.solution)
         
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -142,7 +142,7 @@ class TestVTKExporter(unittest.TestCase):
                 self.assertIn("VECTORS Velocity", content)
     
     def test_export_invalid_field(self):
-        """Test rejection of invalid field name"""
+        """拒绝非法的场名"""
         exporter = VTKExporter(self.grid_data, self.solution)
         
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -151,7 +151,7 @@ class TestVTKExporter(unittest.TestCase):
                 exporter.export(str(output_path), fields=['invalid_field'])
     
     def test_export_invalid_format(self):
-        """Test rejection of invalid format"""
+        """拒绝非法的格式"""
         exporter = VTKExporter(self.grid_data, self.solution)
         
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -164,11 +164,11 @@ class TestConvergenceAnalyzer(unittest.TestCase):
     """Test convergence analyzer"""
     
     def setUp(self):
-        """Set up test fixtures"""
+        """准备测试夹具"""
         self.analyzer = ConvergenceAnalyzer()
     
     def test_add_iteration(self):
-        """Test adding iteration data"""
+        """添加迭代数据"""
         self.analyzer.add_iteration(
             iteration=1,
             residuals={'continuity': 1e-2, 'momentum': 1e-3},
@@ -178,7 +178,7 @@ class TestConvergenceAnalyzer(unittest.TestCase):
         self.assertEqual(self.analyzer.history[0].iteration, 1)
     
     def test_export_csv(self):
-        """Test exporting convergence history to CSV"""
+        """把收敛历史导出为 CSV"""
         # Add some iterations
         for i in range(5):
             self.analyzer.add_iteration(
@@ -201,7 +201,7 @@ class TestConvergenceAnalyzer(unittest.TestCase):
                 self.assertIn('iteration', rows[0])
     
     def test_get_summary(self):
-        """Test getting simulation summary"""
+        """取仿真摘要"""
         # Add iterations
         for i in range(10):
             self.analyzer.add_iteration(
@@ -216,10 +216,10 @@ class TestConvergenceAnalyzer(unittest.TestCase):
 
 
 class TestSimulationReport(unittest.TestCase):
-    """Test simulation report generator"""
+    """仿真报告生成器的测试"""
     
     def setUp(self):
-        """Set up test fixtures"""
+        """准备测试夹具"""
         self.config = {'backend': 'cpu', 'order': 2}
         self.analyzer = ConvergenceAnalyzer()
         
@@ -234,7 +234,7 @@ class TestSimulationReport(unittest.TestCase):
         self.report = SimulationReport(self.config, self.analyzer)
     
     def test_generate_report(self):
-        """Test generating JSON report"""
+        """生成 JSON 报告"""
         with tempfile.TemporaryDirectory() as tmpdir:
             output_path = Path(tmpdir) / "report.json"
             result = self.report.generate(str(output_path), computation_time=60.0)
@@ -251,10 +251,10 @@ class TestSimulationReport(unittest.TestCase):
 
 
 class TestTransientStatistics(unittest.TestCase):
-    """Test transient statistics calculator"""
+    """瞬态统计计算器的测试"""
     
     def setUp(self):
-        """Set up test fixtures"""
+        """准备测试夹具"""
         nodes = NodeArray(
             x=np.array([0.0, 1.0, 2.0]),
             y=np.array([0.0, 0.0, 0.0]),
@@ -280,18 +280,18 @@ class TestTransientStatistics(unittest.TestCase):
         self.solution = SolutionVector()
     
     def test_initialization(self):
-        """Test statistics calculator initialization"""
+        """统计计算器初始化"""
         stats = TransientStatistics(self.grid_data, window_size=50)
         self.assertEqual(stats.window_size, 50)
         self.assertEqual(stats.n_samples, 0)
     
     def test_invalid_window_size(self):
-        """Test rejection of invalid window size"""
+        """拒绝非法的窗口大小"""
         with self.assertRaises(ValueError):
             TransientStatistics(self.grid_data, window_size=0)
     
     def test_accumulate_samples(self):
-        """Test accumulating solution samples"""
+        """累积解的样本"""
         stats = TransientStatistics(self.grid_data, window_size=10)
         
         for i in range(5):
@@ -301,7 +301,7 @@ class TestTransientStatistics(unittest.TestCase):
         self.assertEqual(len(stats.samples), 5)
     
     def test_sliding_window(self):
-        """Test sliding window enforcement"""
+        """滑动窗口生效"""
         stats = TransientStatistics(self.grid_data, window_size=3)
         
         for i in range(10):
@@ -312,14 +312,14 @@ class TestTransientStatistics(unittest.TestCase):
         self.assertEqual(stats.n_samples, 10)
     
     def test_compute_statistics_no_samples(self):
-        """Test error when computing statistics without samples"""
+        """没有样本时计算统计量报错"""
         stats = TransientStatistics(self.grid_data)
         
         with self.assertRaises(RuntimeError):
             stats.compute_statistics()
     
     def test_compute_statistics_with_samples(self):
-        """Test computing statistics with accumulated samples"""
+        """用累积的样本计算统计量"""
         stats = TransientStatistics(self.grid_data, window_size=10)
         
         for i in range(5):
@@ -331,47 +331,47 @@ class TestTransientStatistics(unittest.TestCase):
 
 
 class TestPressurePSD(unittest.TestCase):
-    """Test pressure PSD analyzer"""
+    """压力 PSD 分析器的测试"""
     
     def setUp(self):
-        """Set up test fixtures"""
+        """准备测试夹具"""
         self.monitor_points = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0)]
         self.dt = 1e-4
         self.psd = PressurePSD(self.monitor_points, self.dt)
     
     def test_initialization(self):
-        """Test PSD analyzer initialization"""
+        """PSD 分析器初始化"""
         self.assertEqual(len(self.psd.monitor_points), 2)
         self.assertEqual(self.psd.dt, 1e-4)
     
     def test_invalid_dt(self):
-        """Test rejection of invalid time step"""
+        """拒绝非法的时间步长"""
         with self.assertRaises(ValueError):
             PressurePSD(self.monitor_points, dt=0.0)
     
     def test_empty_monitor_points(self):
-        """Test rejection of empty monitor points"""
+        """拒绝空的监测点"""
         with self.assertRaises(ValueError):
             PressurePSD([], dt=1e-4)
     
     def test_add_sample(self):
-        """Test adding pressure samples"""
+        """添加压力样本"""
         self.psd.add_sample(time=0.0, pressures=[101325.0, 101326.0])
         self.assertEqual(len(self.psd.times), 1)
         self.assertEqual(len(self.psd.pressure_history[0]), 1)
     
     def test_add_sample_length_mismatch(self):
-        """Test rejection of mismatched pressure array length"""
+        """拒绝长度不符的压力数组"""
         with self.assertRaises(ValueError):
             self.psd.add_sample(time=0.0, pressures=[101325.0])
     
     def test_compute_psd_insufficient_samples(self):
-        """Test error when computing PSD with insufficient samples"""
+        """样本不足时计算 PSD 报错"""
         with self.assertRaises(RuntimeError):
             self.psd.compute_psd(0)
     
     def test_compute_psd_valid(self):
-        """Test computing PSD with sufficient samples"""
+        """样本充足时计算 PSD"""
         # Add enough samples
         for i in range(20):
             pressure = 101325.0 + 10.0 * np.sin(2 * np.pi * 100 * i * self.dt)
@@ -384,7 +384,7 @@ class TestPressurePSD(unittest.TestCase):
         self.assertGreater(freqs[-1], 0)  # Max frequency > 0
     
     def test_find_dominant_frequency(self):
-        """Test finding dominant frequency"""
+        """找主频"""
         # Add sinusoidal signal at 100 Hz
         for i in range(100):
             pressure = 101325.0 + 10.0 * np.sin(2 * np.pi * 100 * i * self.dt)
@@ -392,12 +392,12 @@ class TestPressurePSD(unittest.TestCase):
         
         freq, psd_val = self.psd.find_dominant_frequency(0, min_freq=50, max_freq=150)
         
-        # Should find frequency close to 100 Hz
+        # 应找到接近 100 Hz 的频率
         self.assertGreater(freq, 90)
         self.assertLess(freq, 110)
     
     def test_invalid_point_index(self):
-        """Test rejection of invalid point index"""
+        """拒绝非法的点索引"""
         with self.assertRaises(IndexError):
             self.psd.compute_psd(10)
 

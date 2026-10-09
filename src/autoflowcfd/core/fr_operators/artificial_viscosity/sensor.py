@@ -4,11 +4,9 @@
 算子构造与缓存在 `sensor_operators.py`。
 """
 
-from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-from autoflowcfd.fr.quadrature_points import gauss_legendre
 from autoflowcfd.core.utils.array_module import array_module as _array_module
 
 from .sensor_operators import (

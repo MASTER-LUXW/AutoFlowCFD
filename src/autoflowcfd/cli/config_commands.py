@@ -69,7 +69,7 @@ def init(template: str, output: str) -> None:
         logger.info(f"配置模板已保存至 {output_path}")
         click.echo(f"✓ 配置模板已创建: {output}")
         click.echo(f"  类型: {template}")
-        click.echo(f"\n编辑此文件以自定义您的仿真设置。")
+        click.echo("\n编辑此文件以自定义您的仿真设置。")
     
     except Exception as e:
         logger.error(f"创建配置模板失败: {e}")
@@ -178,7 +178,7 @@ def validate(config_file: str, json_output: bool) -> None:
         if json_output:
             click.echo(json.dumps(result, indent=2))
         else:
-            click.echo(f"✓ 配置有效")
+            click.echo("✓ 配置有效")
             click.echo(f"  文件: {config_file}")
             click.echo(f"  模式: {mode}")
     

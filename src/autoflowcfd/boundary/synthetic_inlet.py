@@ -25,7 +25,7 @@ the Numerical Simulation of Turbulence." PhD thesis, University of
 Manchester.
 """
 
-from typing import Optional, Tuple
+from typing import Optional
 
 import numpy as np
 

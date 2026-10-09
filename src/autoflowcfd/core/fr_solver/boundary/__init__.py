@@ -13,10 +13,6 @@ BoundaryGhostStateProvider 接口上，供 core/fr_residual_inviscid.py 使用�
 本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
 """
 
-from .constants import (  # noqa: F401
-    _NO_DIRICHLET,
-    _SEM_DEFAULT_NUM_EDDIES,
-)
 from .ghost import (  # noqa: F401
     _compute_inlet_fp_positions,
     build_boundary_ghost_provider,

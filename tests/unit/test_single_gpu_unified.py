@@ -26,7 +26,7 @@ from tests.unit._patch_pkg import patch_pkg_attr
 from tests.unit.test_gpu_solver_order_continuation import _patch_gpu_modules  # noqa: F401（自动夹具）
 from tests.validation._channel_mesh import build_channel_mesh_prism, channel_wall_source
 
-_BC = {"x_min": "VELOCITY_INLET", "x_max": "PRESSURE_OUTLET", "y_min": "WALL", "y_max": "WALL",
+_BC = {"x_min": "VELOCITY_INLET", "x_max": "PRESSURE_OUTLET", "wall_bottom": "WALL", "wall_top": "WALL",
        "z_min": "SYMMETRY", "z_max": "SYMMETRY"}
 
 
@@ -110,9 +110,10 @@ def test_checkpoint_round_trip_through_the_host_view(tmp_path, turb):
         np.testing.assert_array_equal(np.asarray(getattr(b.turb_model_gpu, n)), np.asarray(getattr(a.turb_model_gpu, n)))
     np.testing.assert_array_equal(np.asarray(b.turb_model_gpu.nu_t), np.asarray(a.turb_model_gpu.nu_t))
     np.testing.assert_array_equal(b.tau_accum, a.tau_accum)
-    # 湍流场已恢复：产生项渐变直接到终点（与 CPU 同一处理）
-    assert b.turb_model_gpu.production_factor == 1.0
-    assert b._turb_ramp_step == b._turb_production_ramp_steps and b._resumed_from_checkpoint
+    # 产生项渐变按 checkpoint 记录的进度续接（与 CPU 同一处理）：因子经主机视图回写到设备上的模型
+    assert a._turb_ramp_step == 3 and b._turb_ramp_step == 3 and not b._turb_production_ramp_complete
+    assert b.turb_model_gpu.production_factor == a.turb_model_gpu.production_factor
+    assert b._resumed_from_checkpoint
 
 
 def test_host_view_eddy_viscosity_matches_the_device_fields():

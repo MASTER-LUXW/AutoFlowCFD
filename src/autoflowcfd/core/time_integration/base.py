@@ -209,6 +209,14 @@ _SCHEME_TABLE = {
 #: `TimeIntegrator.__init__` 的 `dual_time_steps` 注释）
 DEFAULT_DUAL_TIME_STEPS = 20
 
+#: 稳态相对收敛容差的默认值（残差降到初值的这个倍数即收敛；唯一来源：CLI `--tol`、配置 `convergence_tol`、
+#: API 与 `solve()` 都取它。2026-10-09 以前 CLI 六处写死 1e-6、配置层默认 1e-3，两者互不相干）
+DEFAULT_STEADY_TOL = 1e-6
+
+#: 稳态命令传给 `solve()` 的 dt：按局部伪时间步推进的格式（显式、隐式稳态）不用它推进平均流（局部步长由 CFL
+#: 决定），只有合成湍流入口（SEM）按它输运涡结构
+STEADY_DT = 1e-3
+
 
 class TimeIntegrator:
     """带局部时间步长的显式 SSP Runge-Kutta 积分器。"""

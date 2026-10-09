@@ -44,6 +44,11 @@ class _DistributedSupportMixin:
 
         return get_positivity_limiter(self, geometry=_local_geometry)
 
+    def _local_dynamic_eddy_viscosity(self):
+        """本 rank local 单元的动力涡粘 rho*nu_t（湍流模型 + 亚格子），层流时 None：最近一步残差实际使用的那一份
+        （`step()` 末尾缓存的 `_prev_mu_t_local`）。供 `core/mpi/global_view.py` 汇总。"""
+        return None if self._prev_mu_t_local is None else np.asarray(self._prev_mu_t_local)
+
     def _limit_prolongated_state(self) -> None:
         """升阶延拓之后在**新阶数**的点集（解点 + 面通量点 + 过积分细点）上施加守恒的
         正性限制器（`time_integration/positivity`，向单元均值收缩、均值不变）。

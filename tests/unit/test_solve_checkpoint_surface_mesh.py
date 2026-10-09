@@ -1,16 +1,13 @@
-"""Unit tests for solve_checkpoint_io.py's surface_mesh persistence.
+"""solve_checkpoint_io.py 持久化 surface_mesh 的单元测试。
 
-Real gap fixed here (2026-08-22): `write_checkpoint` stored `input_file`/
-`order`/`turbulence_model`/`backend` in checkpoint metadata so `solve
-resume` could auto-reload the volume mesh, but never stored `surface_mesh`
-even though it was in scope at every call site (solve_steady_command.py,
-solve_transient_command.py, solve_commands.py's own resume()) - the user
-had to manually re-pass `-s <original surface mesh>` on every resume of a
-run whose input_file was a raw .nas volume mesh, with no way for the CLI
-to remind them what path that even was. `rebuild_solver_from_checkpoint`
-now falls back to the stored value when the caller doesn't pass one
-explicitly, mirroring how `backend`/`order`/`turbulence_model` already
-behave.
+这里修掉的真实缺口（2026-08-22）：`write_checkpoint` 把 `input_file`/
+`order`/`turbulence_model`/`backend` 存进 checkpoint 元数据，让
+`solve resume` 能自动重新加载体网格，却从不存 `surface_mesh`，尽管每个
+调用点（solve_steady_command.py、solve_transient_command.py、
+solve_commands.py 自己的 resume()）都拿得到它——输入是原始 .nas 体网格的
+算例每次续算都得手动重新传 `-s <原始面网格>`，CLI 也无法提醒那个路径是
+什么。`rebuild_solver_from_checkpoint` 现在在调用方没有显式给出时退回
+存下来的值，与 `backend`/`order`/`turbulence_model` 已有的行为一致。
 """
 
 from types import SimpleNamespace
@@ -49,8 +46,9 @@ class TestWriteCheckpointSurfaceMeshPersistence:
             assert f["metadata"].attrs["surface_mesh"].decode("utf-8") == "surface.nas"
 
     def test_surface_mesh_key_omitted_when_none(self, tmp_path):
-        """h5py attrs can't store None - must skip the key entirely, not
-        write a null/sentinel value that would corrupt round-tripping."""
+        """h5py 的 attrs 存不了 None——必须整个跳过这个键，而不是写一个会破坏
+        往返的空值/哨兵值。
+        """
         write_checkpoint(
             _fake_solver(), str(tmp_path), 100, "volume.pkl", 0, "sst", "cpu",
             surface_mesh=None, quiet=True,
@@ -62,9 +60,9 @@ class TestWriteCheckpointSurfaceMeshPersistence:
 
 
 class TestRebuildSolverSurfaceMeshFallback:
-    """`load_mesh_for_solver`/FRSolver construction/wall-distance are too
-    heavy for a unit test (real mesh geometry) - mocked out here to isolate
-    just the surface_mesh resolution logic under test."""
+    """`load_mesh_for_solver`/FRSolver 构造/壁面距离对单元测试太重（真实网格
+    几何）——这里用替身，只隔离被测的 surface_mesh 解析逻辑。
+    """
 
     def _write_and_rebuild(self, tmp_path, stored_surface_mesh, call_surface_mesh):
         write_checkpoint(

@@ -19,8 +19,10 @@ import numpy as np
 import pytest
 
 from autoflowcfd.fr.native_padding import real_row_mask
+
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 from tests.validation._channel_mesh import build_channel_mesh_prism, build_face_exact_ghost_provider
+from tests.unit._numpy_as_cupy import NumpyAsCupy
 
 RHO, U, P = 1.225, 30.0, 101325.0
 LX, H, LZ = 0.4, 0.1, 0.08
@@ -154,9 +156,9 @@ def test_gpu_matches_cpu_p0(monkeypatch):
     import autoflowcfd.core.gpu.residual.gpu_inviscid as gi_mod
     import autoflowcfd.core.gpu.residual.gpu_volume_contract as gvc_mod
     import autoflowcfd.core.gpu.turbulence.gpu_scalar_transport as gst_mod
-    from tests.unit.test_gpu_solver_turbulence_source import _NumpyAsCupy, _prepare_mesh_ops_data
+    from tests.unit.test_gpu_solver_turbulence_source import _prepare_mesh_ops_data
 
-    shim = _NumpyAsCupy()
+    shim = NumpyAsCupy()
     patch_module_get_cupy(monkeypatch, [gg_mod, gi_mod, gvc_mod, gst_mod], shim)
     solver, Q = _couette_solver(0)
     rng = np.random.default_rng(11)

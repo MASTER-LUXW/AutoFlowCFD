@@ -27,9 +27,7 @@ class _MultiGPUSteppingMixin:
         实现拆到独立模块 `gpu_distributed_fully_distributed.py`（控制
         单文件行数，与 `_interpolate_to_new_order`/
         `gpu_distributed_order_continuation.py` 同一个拆分动机），见该
-        模块文档完整说明（范围边界：支持 turbulence_model='none'/'sst'/
-        'ddes'/'iddes'/'wmles'/'les'，DUAL_TIME/checkpoint/Order
-        Continuation 均已接入）。
+        模块文档。全部湍流模型（`core/turbulence/registry.py::SUPPORTED_MODELS`，与单机相同）、全部时间格式、checkpoint 续算与 Order Continuation 均已接入。
 
         Args:
             package: `build_fully_distributed_rank_package` 的返回值
@@ -62,6 +60,12 @@ class _MultiGPUSteppingMixin:
             gpu_interpolate_to_new_order,
         )
         gpu_interpolate_to_new_order(self, target_p)
+
+    def set_dual_time_history(self, U_prev_flat) -> None:
+        """恢复 dual-time 的上一物理时间层（本 rank local 段，放到本 GPU 上）。"""
+        cp = get_cupy()
+        with cp.cuda.Device(self.device_id):
+            self._dual_time_U_prev = cp.asarray(U_prev_flat, dtype=cp.float64)
 
     def _limit_prolongated_state(self) -> None:
         """升阶延拓之后在**新阶数**的点集（解点 + 面通量点 + 过积分细点）上施加守恒的
@@ -144,13 +148,23 @@ class _MultiGPUSteppingMixin:
         positivity_func = self._get_positivity_limiter_gpu()
 
         if self.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME:
-            # 湍流与平均流站在同一物理时间上：用物理时间步 dt（与 CPU 同一规则）
-            mu_t_field = self._compute_turbulence_source_distributed(dt)
-            U_flat = self.U_gpu.reshape(n_local * n_sps, 5)
-
             # 内层伪时间迭代的局部加速步长：与单机一致用局部 CFL 步长
             # （`dt` 仍然是真正的物理时间步长，通过 dt_physical= 传入）。
-            dt_mean_c = self._compute_local_time_step_gpu(nu_av_compact=nu_av_compact)
+            dt_mean_c, dt_phys_c = self._compute_local_time_step_gpu(
+                return_physical_too=True, nu_av_compact=nu_av_compact)
+            if self.turb_model_gpu is not None:
+                # 湍流方程的双时间步（四后端同一份，`core/turbulence/dual_time.py`）；物理时间项的 b 经
+                # 与输运场相同的 halo 交换 + 重排换到 compact 视图
+                from autoflowcfd.core.turbulence.dual_time import advance_turbulence_dual_time
+
+                mu_t_field = advance_turbulence_dual_time(
+                    self, self.turb_model_gpu, cp,
+                    lambda dtau, term, first: self._compute_turbulence_source_distributed(dtau, term, first),
+                    dt_phys_c[:, None], dt, self.time_integrator.dual_time_steps,
+                    to_view=lambda x: self._permute_to_compact(self.gpu_halo.exchange(x)))
+            else:
+                mu_t_field = self._compute_turbulence_source_distributed(dt)
+            U_flat = self.U_gpu.reshape(n_local * n_sps, 5)
             dt_mean_local = dt_mean_c[self._inv_perm_gpu][:n_local]
             pseudo_dt = cp.broadcast_to(
                 dt_mean_local[:, None], (n_local, n_sps)).reshape(n_local * n_sps)

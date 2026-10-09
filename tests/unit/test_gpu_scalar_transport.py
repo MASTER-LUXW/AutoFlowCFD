@@ -13,12 +13,10 @@ scatter_add 方法）"的 monkeypatch，直接跑*生产函数本身*（不是�
 """
 
 import types
-
 import numpy as np
-
-from autoflowcfd.core.fr_operators.flux_kernels import resolve_viscous_ip_constant
 import pytest
 
+from autoflowcfd.core.fr_operators.flux_kernels import resolve_viscous_ip_constant
 from autoflowcfd.fr.operators import generate_fr_operators
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from autoflowcfd.core.turbulence.transport import (
@@ -30,28 +28,15 @@ from autoflowcfd.core.turbulence.transport import (
 from autoflowcfd.core.fr_operators.gradients import compute_physical_scalar_gradient as _cpu_compute_physical_scalar_gradient
 from autoflowcfd.core.turbulence.sst import SSTModelFR
 from autoflowcfd.core.fr_residual.inviscid import primitive_to_conserved
-from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
-
 import autoflowcfd.core.gpu.residual.gpu_gradients as gpu_gradients_mod
 import autoflowcfd.core.gpu.residual.gpu_volume_contract as gpu_volume_contract_mod
 import autoflowcfd.core.gpu.turbulence.gpu_scalar_transport as gst
 import autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst as gpu_turbulence_sst_mod
+from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport.faces import _extrapolate_scalar_to_faces_gpu
+
+from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
-
-
-class _NumpyAsCupy:
-    """把 numpy 伪装成 CuPy 模块接口，供 gpu_scalar_transport.py 的生产
-    函数在没有真实 CUDA 设备的机器上直接运行（不是重新实现，是给同一份
-    代码换一个张量库后端）。"""
-
-    def __getattr__(self, name):
-        return getattr(np, name)
-
-    def scatter_add(self, a, indices, b):
-        np.add.at(a, indices, b)
-
-    def asnumpy(self, x):
-        return np.asarray(x)
+from tests.unit._numpy_as_cupy import NumpyAsCupy
 
 
 @pytest.fixture(autouse=True)
@@ -63,7 +48,7 @@ def _patch_get_cupy(monkeypatch):
     再出现在包命名空间里（它的调用点在子模块），而为了这几处调用把一个
     基础设施访问器 re-export 到包 `__init__` 只是污染 API 表面。
     """
-    shim = _NumpyAsCupy()
+    shim = NumpyAsCupy()
     patch_module_get_cupy(monkeypatch, [
         gst, gpu_gradients_mod, gpu_volume_contract_mod,
         gpu_turbulence_sst_mod], shim)
@@ -131,7 +116,7 @@ class TestExtrapolateScalarToFacesGpuMatchesCpu:
         scalar = _synthetic_scalar_field(mesh)
 
         phi_o_cpu, phi_n_cpu = _cpu_extrapolate_scalar_to_faces(scalar, flat, ops, mesh)
-        phi_o_gpu, phi_n_gpu = gst._extrapolate_scalar_to_faces_gpu(np, flat, mesh.n_prism_cells, scalar)
+        phi_o_gpu, phi_n_gpu = _extrapolate_scalar_to_faces_gpu(np, flat, mesh.n_prism_cells, scalar)
 
         np.testing.assert_allclose(phi_o_gpu, phi_o_cpu, rtol=1e-12, atol=1e-12)
         np.testing.assert_allclose(phi_n_gpu, phi_n_cpu, rtol=1e-12, atol=1e-12)
@@ -148,7 +133,7 @@ class TestExtrapolateScalarToFacesGpuMatchesCpu:
         phi_o_cpu, phi_n_cpu = _cpu_extrapolate_scalar_to_faces(
             scalar, flat, ops, mesh, wall_dirichlet_zero_face=wall_mask,
         )
-        phi_o_gpu, phi_n_gpu = gst._extrapolate_scalar_to_faces_gpu(
+        phi_o_gpu, phi_n_gpu = _extrapolate_scalar_to_faces_gpu(
             np, flat, mesh.n_prism_cells, scalar, wall_dirichlet_zero_face=wall_mask,
         )
         np.testing.assert_allclose(phi_o_gpu, phi_o_cpu, rtol=1e-12, atol=1e-12)
@@ -169,7 +154,7 @@ class TestExtrapolateScalarToFacesGpuMatchesCpu:
             scalar, flat, ops, mesh,
             wall_dirichlet_value_face=value_face, has_wall_dirichlet_value=has_value,
         )
-        phi_o_gpu, phi_n_gpu = gst._extrapolate_scalar_to_faces_gpu(
+        phi_o_gpu, phi_n_gpu = _extrapolate_scalar_to_faces_gpu(
             np, flat, mesh.n_prism_cells, scalar,
             wall_dirichlet_value_face=value_face, has_wall_dirichlet_value=has_value,
         )

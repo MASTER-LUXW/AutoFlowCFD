@@ -9,12 +9,12 @@
 """
 
 import types
-
 import numpy as np
 
 from autoflowcfd.core.mpi.distributed_coarse import CompactCellValues
 from autoflowcfd.core.mpi.distributed_implicit import distributed_coupling_graph
 
+from tests.unit._numpy_as_cupy import NumpyAsCupy
 
 
 class _FakeHalo:
@@ -27,21 +27,13 @@ class _FakeHalo:
         return np.concatenate([local, self.halo])
 
 
-class _NumpyAsCupy:
-    def __getattr__(self, name):
-        return getattr(np, name)
-
-    def asnumpy(self, x):
-        return np.asarray(x)
-
-
 def test_cpu_and_gpu_compact_values_agree_with_definition():
     local = np.array([10.0, 11.0, 12.0, 13.0])
     halo = _FakeHalo([20.0, 21.0])
     perm = np.array([4, 0, 2, 5, 1, 3])
     expected = np.concatenate([local, halo.halo])[perm]
     np.testing.assert_array_equal(CompactCellValues(halo, perm, np)(local), expected)
-    np.testing.assert_array_equal(CompactCellValues(halo, perm, _NumpyAsCupy())(local), expected)
+    np.testing.assert_array_equal(CompactCellValues(halo, perm, NumpyAsCupy())(local), expected)
 
 
 def test_coupling_graph_lists_cross_rank_pairs_with_halo_colors():

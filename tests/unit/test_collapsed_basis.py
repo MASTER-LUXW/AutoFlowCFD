@@ -28,7 +28,7 @@ def test_jacobi_polynomial_low_order_sanity():
     x = np.array([-0.5, 0.0, 0.3, 0.9])
     assert np.allclose(jacobi_polynomial(x, 0, 0, 0), 1.0)
     assert np.allclose(jacobi_polynomial(x, 0, 0, 1), x)  # P_1^(0,0)(x) = x
-    # numerical derivative check for a higher (alpha,beta,n) combination
+    # 对一组较高的 (alpha,beta,n) 做数值导数检查
     eps = 1e-6
     n, alpha, beta = 3, 2, 1
     analytic = grad_jacobi_polynomial(x, alpha, beta, n)

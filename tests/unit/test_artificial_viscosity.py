@@ -104,10 +104,10 @@ class TestSensorMonotonicInTopModeAmplitude:
         assert all(a < b for a, b in zip(s_e_values, s_e_values[1:])), s_e_values
 
         ramps = compute_artificial_viscosity_ramp(np.array(s_e_values), order)
-        # low amplitude -> untriggered, high amplitude -> (near-)fully triggered
+        # 幅值小 -> 不触发，幅值大 -> （几乎）完全触发
         assert ramps[0] == 0.0
         assert ramps[-1] > 0.99
-        # ramp itself must be monotonically non-decreasing
+        # 斜坡本身必须单调不减
         assert np.all(np.diff(ramps) >= -1e-12)
 
     def test_tiny_contamination_does_not_trigger_but_large_does(self):

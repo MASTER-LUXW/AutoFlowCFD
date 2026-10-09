@@ -272,6 +272,8 @@ def distributed_compute_turbulence_source_and_viscosity(
     wall_distance_compact: np.ndarray,
     dt_local: np.ndarray,
     ramp_owner=None,
+    physical_time=None,
+    advance_ramp: bool = True,
     turb_model_name: str = "SST",
     ddes_model=None,
     iddes_h_max_compact: Optional[np.ndarray] = None,
@@ -353,7 +355,9 @@ def distributed_compute_turbulence_source_and_viscosity(
     dt_local_compact = dt_native[dist_fc.perm]
 
     from autoflowcfd.core.fr_solver.turbulence import compute_turbulence_source
-    compute_turbulence_source(adapter, dt_local_compact)
+    # physical_time（DUAL_TIME 的物理时间项，`core/turbulence/dual_time.py`）的 b 由调用方的 `to_view`
+    # 换到 compact 排列；advance_ramp 为 False 时不推进产生项渐变（内迭代只有第一次推进）
+    compute_turbulence_source(adapter, dt_local_compact, physical_time, advance_ramp)
 
     # 4. 只把 local cells 的更新结果写回真正的 turb_model（native 排列，
     # 见 dist_fc.inv_perm 文档——视图是 compact 排列，需要先换回原生排列

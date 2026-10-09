@@ -27,7 +27,8 @@ def _stub(**overrides):
     from autoflowcfd.fr.operators import generate_fr_operators
 
     mesh = build_channel_mesh_prism(1, 2, 2, 2, 0.4, 0.1, 0.08)
-    mesh.boundary_bc_types = {"x_min": "VELOCITY_INLET", "x_max": "PRESSURE_OUTLET"}
+    mesh.boundary_bc_types = {"x_min": "VELOCITY_INLET", "x_max": "PRESSURE_OUTLET", "wall_bottom": "WALL",
+                              "wall_top": "WALL", "z_min": "SYMMETRY", "z_max": "SYMMETRY"}
     attrs = dict(mesh=mesh, ops=generate_fr_operators(1), freestream=dict(FREESTREAM), turb_model_name="LES",
                  wmles_model=None, _sem_num_eddies=40, _turbulence_intensity=0.05)
     attrs.update(overrides)

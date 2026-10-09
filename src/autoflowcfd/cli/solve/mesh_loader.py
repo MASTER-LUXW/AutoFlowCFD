@@ -1,7 +1,4 @@
-"""求解命令的体网格加载辅助函数 —— 从 solve_helpers.py 拆出，控制单文件行数。
-
-见 solve_helpers.py 文档说明整体拆分结构。
-"""
+"""求解命令的体网格加载（.pkl / .nas 体网格 + 面网格反推边界分组 + 求解前质量门）。"""
 
 import os
 import pickle
@@ -83,7 +80,7 @@ def load_mesh_for_solver(
     report = None
 
     if ext == '.pkl':
-        print(f"Detected pickle format. Loading volume mesh...")
+        print("Detected pickle format. Loading volume mesh...")
         with open(input_file, 'rb') as f:
             volume_data = pickle.load(f)
 
@@ -101,7 +98,7 @@ def load_mesh_for_solver(
                 f"和边界条件都无法正确设置。用法：--surface-mesh <原始面网格.nas>"
             )
         from autoflowcfd.grid.mesh_gen.utils.mesh_external_import import import_external_volume_mesh
-        print(f"Detected volume-mesh NAS format. Parsing and attributing boundaries...")
+        print("Detected volume-mesh NAS format. Parsing and attributing boundaries...")
         try:
             volume_data, report = import_external_volume_mesh(input_file, surface_mesh)
         except ValueError as e:

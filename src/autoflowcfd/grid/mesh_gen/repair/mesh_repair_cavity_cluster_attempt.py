@@ -17,6 +17,7 @@ from loguru import logger
 from .mesh_repair_cavity_shared import (
     _grow_cavity_rings,
     _cavity_boundary_faces,
+    retile_is_conformal,
     _count_bad_cells,
 )
 
@@ -31,7 +32,6 @@ def _attempt_cavity_retile_clusters(
     n_clusters: int,
     owner: np.ndarray,
     neighbor: np.ndarray,
-    ineligible: np.ndarray,
     n_buffer_rings: int,
     max_cavity_cells: int,
     max_clusters_attempted: int,
@@ -132,7 +132,7 @@ def _attempt_cavity_retile_clusters(
                 return accepted, claimed, n_skipped_size, n_rejected, n_failed, n_skipped_budget
 
             cavity_mask = _grow_cavity_rings(
-                cluster_seed_mask, owner, neighbor, ineligible | claimed, attempt_rings
+                cluster_seed_mask, owner, neighbor, claimed, attempt_rings
             )
             cavity_idx = np.flatnonzero(cavity_mask)
             if len(cavity_idx) > max_cavity_cells:
@@ -161,7 +161,7 @@ def _attempt_cavity_retile_clusters(
                 # 真实案例上的真实大效应：使用 tetgen 默认值时，约 72%
                 # 的尝试重铺被拒绝为"非改进"；参见 CORE_TETGEN_MINRATIO
                 # 自身文档字符串。
-                retiled_nodes, retiled_tets, _, _ = fill_core_volume(
+                retiled_nodes, retiled_tets = fill_core_volume(
                     local_points, local_faces, verbose=False,
                     minratio=CORE_TETGEN_MINRATIO, mindihedral=CORE_TETGEN_MINDIHEDRAL,
                 )
@@ -172,15 +172,19 @@ def _attempt_cavity_retile_clusters(
 
             n_boundary_pts = len(local_points)
             if not np.array_equal(retiled_nodes[:n_boundary_pts], local_points):
-                # fill_core_volume already logs+handles this internally (coincident-
-                # point stitching fallback), but the cavity's own boundary points
-                # are exactly the ones that must stay pinned for the splice below
-                # to be valid - if even the fallback couldn't preserve them
-                # verbatim, don't risk stitching a silently-shifted boundary into
-                # the still-good rest of the mesh.
+                # fill_core_volume 内部已记录并处理这种情况（重合点缝合回退），但空腔自己的边界点正是下面
+                # 拼接时必须固定不动的点——连回退都没能原样保留它们，就不能把一条悄悄移位的边界拼进网格其余
+                # 完好的部分。
                 logger.warning(
                     "Stage B': cavity boundary points weren't preserved "
                     "verbatim by the local retile, keeping original cells"
+                )
+                result = 'failed'
+                continue
+            if not retile_is_conformal(retiled_tets, n_boundary_pts, local_faces):
+                # 重铺外表面与空腔边界不逐面相同（tetgen 在边界上插了点）：拼进去会与空腔外单元之间留缝
+                logger.warning(
+                    "Stage B': local retile is not conformal with the cavity boundary, keeping original cells"
                 )
                 result = 'failed'
                 continue

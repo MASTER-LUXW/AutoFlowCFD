@@ -5,12 +5,11 @@
 内积形式，见各构造函数的文档。
 """
 
-from typing import Dict, Optional, Tuple
+from typing import Dict, Tuple
 
 import numpy as np
 
 from autoflowcfd.fr.quadrature_points import gauss_legendre
-from autoflowcfd.core.utils.array_module import array_module as _array_module
 
 
 # Persson-Peraire 传感器分段过渡宽度（对数尺度），沿用 mirgecom 的默认值。

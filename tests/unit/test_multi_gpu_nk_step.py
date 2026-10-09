@@ -11,25 +11,18 @@
 """
 
 import types
-
 import numpy as np
 import pytest
 
 import autoflowcfd.core.gpu.distributed.gpu_distributed as gd_mod
+
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
-
-
-class _NumpyAsCupy:
-    def __getattr__(self, name):
-        return getattr(np, name)
-
-    def asnumpy(self, x):
-        return np.asarray(x)
+from tests.unit._numpy_as_cupy import NumpyAsCupy
 
 
 @pytest.fixture(autouse=True)
 def _patch_get_cupy(monkeypatch):
-    patch_module_get_cupy(monkeypatch, gd_mod, _NumpyAsCupy())
+    patch_module_get_cupy(monkeypatch, gd_mod, NumpyAsCupy())
     # 残差是合成的线性算子、不是 FR 离散：解析单元块（对 FR 残差求导）不适用，
     # 块 Jacobi 用着色差分装配（对任意残差精确）
     import autoflowcfd.core.mpi.distributed_implicit as di

@@ -30,7 +30,6 @@ k/omega/nu_t 更新结果与 CPU 单机路径 `compute_turbulence_source`
 """
 
 import types
-
 import numpy as np
 import pytest
 
@@ -42,8 +41,6 @@ from autoflowcfd.core.turbulence.des import DDESModel, IDDESModel, compute_h_max
 from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
 from autoflowcfd.core.gpu.turbulence.gpu_turbulence_des import GPUDDESModel, GPUIDDESModel
 from autoflowcfd.core.gpu.solver.gpu_solver_io import _GPUSolverIOMixin
-from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
-
 import autoflowcfd.core.gpu.solver.gpu_solver_io as gpu_solver_io_mod
 import autoflowcfd.core.gpu.solver.gpu_solver as gpu_solver_mod
 import autoflowcfd.core.gpu.residual.gpu_gradients as gpu_gradients_mod
@@ -54,34 +51,15 @@ import autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst as gpu_turbulence_sst_
 import autoflowcfd.core.gpu.turbulence.gpu_turbulence_des as gpu_turbulence_des_mod
 import autoflowcfd.core.gpu.gpu_modal_filter as gpu_modal_filter_mod
 import autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence as gpu_implicit_turb_mod
+
+from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
-
-
-class _NumpyAsCupy:
-    def __getattr__(self, name):
-        return getattr(np, name)
-
-    def scatter_add(self, a, indices, b):
-        np.add.at(a, indices, b)
-
-    def asnumpy(self, x):
-        return np.asarray(x)
-
-    class cuda:
-        class Device:
-            def __init__(self, device_id):
-                pass
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
+from tests.unit._numpy_as_cupy import NumpyAsCupy
 
 
 @pytest.fixture(autouse=True)
 def _patch_get_cupy(monkeypatch):
-    shim = _NumpyAsCupy()
+    shim = NumpyAsCupy()
     patch_module_get_cupy(monkeypatch, [
         gpu_solver_io_mod, gpu_solver_mod, gpu_gradients_mod, gpu_volume_contract_mod,
         gpu_flux_mod, gst_mod, gpu_turbulence_sst_mod, gpu_turbulence_des_mod,
@@ -277,8 +255,6 @@ def test_compute_turbulence_source_gpu_matches_cpu_single_machine(turb_model_nam
     np.testing.assert_allclose(turb_gpu.k_field, turb_cpu.k_field, rtol=1e-8, atol=1e-10)
     np.testing.assert_allclose(turb_gpu.omega_field, turb_cpu.omega_field, rtol=1e-8, atol=1e-6)
     np.testing.assert_allclose(turb_gpu.nu_t, turb_cpu.nu_t, rtol=1e-8, atol=1e-12)
-
-
 
 
 if __name__ == "__main__":

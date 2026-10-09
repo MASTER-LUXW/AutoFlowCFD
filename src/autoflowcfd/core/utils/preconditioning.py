@@ -277,10 +277,11 @@ def resolve_low_mach_precond(requested, time_scheme) -> bool:
     (|un|+c_precond) 决定，M=0.1 下放大约 5 倍。
     不动点不变（det(Gamma)=beta^2>0），收敛解与关闭时是同一个解。
     
-    DUAL_TIME（真正的非稳态物理时间推进）下强制关闭：那条路径的
-    dt 是有物理时间精度含义的物理步长，不是伪时间步长，预处理的
-    前提（"只要收敛到 R=0，路径无所谓"）不成立。
-    对 SSP-RK2/RK3 与 NEWTON_KRYLOV 这三个"纯稳态伪时间推进"方案启用。
+    对 SSP-RK2/RK3 与 NEWTON_KRYLOV 这三个"纯稳态伪时间推进"方案启用：这里的推进只是到达 R=0 的路径，
+    Gamma 只改路径、不改不动点。DUAL_TIME 与 IMEX 不启用（请求了也只打一条日志说明）：
+    * DUAL_TIME 的内迭代按未预处理的伪时间推进实现，物理时间精度不受影响；低马赫下内迭代收敛较慢。
+    对内迭代做预处理（Weiss–Smith 双时间步预处理，Gamma 只作用于伪时间导数项、物理时间导数项保持原样）
+    是另一套半离散形式，不能直接复用本函数控制的"整体残差乘 Gamma"接入点；
 
     NEWTON_KRYLOV（2026-09-25 加入）：Newton 解的是 F(U)=Gamma(U)R(U)=0，Gamma
     可逆，不动点不变；伪瞬态延拓项随之被预处理（标准的"预处理隐式"做法），
@@ -288,13 +289,10 @@ def resolve_low_mach_precond(requested, time_scheme) -> bool:
     4.7e8 降到 ~3e6 后停滞，驻点区压力在 Cp=+15 与 −11 之间周期振荡（封闭风洞里
     被入口/出口/洞壁反射的弱阻尼声学模态）；加上后同样 120 步残差降到 9.5e5 且
     仍在下降，驻点区 Cp≈0.92（物理值≈1）。其余方案不启用的原因：
-    * DUAL_TIME 的 dt 是有物理时间精度含义的物理步长，不是伪时间
-    步长，预处理的前提（"只要收敛到 R=0，路径无所谓"）不成立；
     * IMEX 把残差**拆成**对流/扩散两半分别显式/隐式处理
     （见 step.py 的 convective_residual_only/diffusive_residual_only），
-    Gamma 作用在拆分后的任一半上都不等价于作用在整体残差上，
-    需要专门推导如何在两半之间分配预处理——不在本次范围内，
-    所以这里直接不启用，而不是套一个未经验证的近似。
+    Gamma 作用在拆分后的任一半上都不等价于作用在整体残差上，同样不能直接复用这个接入点，
+    因此不启用，而不是套一个未经验证的近似。
     环境变量 `AFCFD_LOW_MACH_PRECOND=0/1` 可强制关闭/开启，优先于
     构造参数——供 A/B 对照实验与现场排查用（"把这个新机制单独关掉
     再跑一遍"必须是一条随时可用的路径，不需要改代码）。
@@ -309,6 +307,13 @@ def resolve_low_mach_precond(requested, time_scheme) -> bool:
 
     env = os.environ.get("AFCFD_LOW_MACH_PRECOND")
     req = bool(requested) if env is None else (env == "1")
-    return req and scheme_from_name(time_scheme) in (
+    scheme = scheme_from_name(time_scheme)
+    applicable = scheme in (
         TimeIntegrationScheme.SSP_RK2, TimeIntegrationScheme.SSP_RK3,
         TimeIntegrationScheme.NEWTON_KRYLOV)
+    if req and not applicable:
+        from loguru import logger
+        logger.info(
+            f"低马赫预处理不用于时间格式 {scheme.name}（只用于稳态伪时间推进 SSP-RK2/RK3 与 NEWTON_KRYLOV；"
+            f"物理时间精度不受影响，低马赫下内迭代/子迭代收敛较慢）")
+    return req and applicable

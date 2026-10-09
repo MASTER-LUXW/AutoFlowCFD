@@ -1,4 +1,4 @@
-"""`solve steady` 命令：click 选项、公共前段（物理常数解析与范围校验）与后端分派。
+"""`solve steady` 命令：click 选项、公共前段（`--config` 覆盖与物理量范围校验）与后端分派。
 
 四个后端分支在同目录的 `multi_gpu`/`single_gpu`/`cpu_mpi`/`cpu_single` 模块
 （2026-09-25 从单文件 `cli/solve/steady.py` 拆出）；命令组定义见 `cli/solve/commands.py`。
@@ -8,11 +8,8 @@ import click
 
 from autoflowcfd.cli.solve.option_help import PHASE_MAX_ITER_HELP, RESIDUAL_DROP_THRESHOLD_HELP, THREADS_HELP
 from autoflowcfd.cli.solve.solver_factory import validate_backend_options
-from autoflowcfd.cli.solve.helpers import (
-    load_physical_config_if_given,
-    resolve_physical_constants,
-    resolve_turbulence_model,
-)
+from autoflowcfd.cli.solve.config_file import check_physical_ranges, config_file_overrides
+from autoflowcfd.core.time_integration.base import DEFAULT_STEADY_TOL
 from autoflowcfd.cli.solve.commands import solve
 
 from .multi_gpu import _run_multi_gpu
@@ -23,7 +20,7 @@ from .single_node import _run_single_node
 @solve.command(name='steady')
 @click.argument('input_file', type=click.Path(exists=True))
 @click.option('--backend', type=click.Choice(['cpu', 'gpu']), default='cpu', help='计算后端 (CPU/GPU)')
-@click.option('--order', type=int, default=2, help='FR 多项式阶数 (P1/P2/P3)')
+@click.option('--order', type=click.IntRange(0, 3), default=2, help='FR 目标阶数（0~3；>=1 时从 P0 逐阶爬坡）')
 @click.option('--turbulence-model', type=click.Choice(['none', 'sst', 'sa', 'ddes', 'iddes', 'wmles', 'les']),
               default='sst',
               help='湍流模型。sa 为 SA-neg（Allmaras, Johnson & Spalart 2012，为高阶离散设计的负值鲁棒 '
@@ -100,16 +97,9 @@ from .single_node import _run_single_node
 @click.option('--threads', '-j', type=int, default=-1, help=THREADS_HELP)
 @click.option('--n-ranks', '--np', type=int, default=1, help='MPI 并行 rank 数（域分解并行，需配合 mpirun 使用。默认 1 = 单机模式）')
 @click.option('--fully-distributed', is_flag=True,
-              help='真正的完全分布式网格加载（2026-09-02 新增，同日/次日续接补齐 SST/DDES/'
-                   'IDDES/WMLES/LES 全部湍流模型 + Order Continuation + checkpoint resume + '
-                   '多 GPU）：只有 root rank 加载完整网格，其余 rank 只接收 root 预先切好的'
-                   '紧凑数据，不需要各自持有完整网格（--n-ranks>1 默认走的"传统模式"是每个'
-                   ' rank 独立加载完整网格，内存上不是最优）。可单独用（CPU MPI），也可配合'
-                   '--multi-gpu 使用（多 GPU 完全分布式加载，见 '
-                   'gpu_distributed_fully_distributed.py 模块文档）。需要 --n-ranks>1 才生效。'
-                   '此前这段帮助文本声称"只支持 turbulence_model none 且不支持 Order '
-                   'Continuation/resume"是过时信息（写于该功能刚实现、后续批次未同步更新），'
-                   '已更正。')
+              help='完全分布式网格加载：只有 root rank 加载完整网格，其余 rank 只接收 root 预先切好的紧凑数据'
+                   '（--n-ranks>1 默认的"传统模式"是每个 rank 各自加载完整网格）。可单独用（CPU MPI），也可配合 '
+                   '--multi-gpu；全部湍流模型、时间格式、Order Continuation 与续算都支持。需要 --n-ranks>1')
 @click.option('--gpu-device', type=int, default=0, help='GPU 设备 ID（默认 0，多 GPU 时每个 rank 自动分配）')
 @click.option('--multi-gpu', is_flag=True, help='启用多 GPU + MPI 分布式求解（每个 rank 使用一块 GPU）')
 @click.option('--turbulence-intensity', type=float, default=0.01,
@@ -123,18 +113,16 @@ from .single_node import _run_single_node
 @click.option('--vel-inf', type=float, default=33.33, help='自由流速度大小 (m/s)，默认 33.33')
 @click.option('--p-inf', type=float, default=101325.0, help='自由流静压 (Pa)，默认 101325.0（标准大气压）')
 @click.option('--aoa', 'aoa_deg', type=float, default=0.0,
-              help='攻角 alpha（度，绕 y 轴、抬头为正，默认 0）。**2026-09-17 新增**：'
-                   '此前来流方向在全代码库被硬编码成 +x，没有任何攻角选项——而攻角'
-                   '扫掠是最常见的外流气动研究。开启后 Q_free（边界自由来流态）、'
-                   '初场、SEM 入口方向、气动力的风轴系分解（Cd 沿来流、Cl 垂直于来流）、'
-                   '参考面积的迎风投影五处统一按它构造。0 时与此前行为逐位相同。'
-                   '力矩 Cm/Cy/Cr 仍报在体轴系，不随攻角旋转（气动数据标准呈现方式）。'
-                   '约定与风轴系公式见 core/utils/flow_direction.py')
+              help='攻角 alpha（度，绕 y 轴、抬头为正，默认 0）。来流边界、初场、SEM 入口方向、气动力的风轴系'
+                   '分解（Cd 沿来流、Cl 垂直于来流）与参考面积的迎风投影都按它构造；力矩 Cm/Cy/Cr 报在体轴系。'
+                   '约定见 core/utils/flow_direction.py')
 @click.option('--aos', 'aos_deg', type=float, default=0.0,
               help='侧滑角 beta（度，绕 z 轴，默认 0）。语义与 --aoa 同，见其说明')
 @click.option('--config', 'config_path', type=click.Path(exists=True), default=None,
-              help='从 YAML 文件读取物理常量默认值（mu_molecular/rho_inf/vel_inf/p_inf/'
-                   'turbulence_intensity/viscosity_ratio）；显式传入的同名 --xxx 选项优先于此文件')
+              help='YAML 配置文件（`config init` 生成模板）：文件里写出的字段覆盖对应选项的默认值，命令行显式'
+                   '给出的选项优先于文件')
+@click.option('--tol', type=float, default=DEFAULT_STEADY_TOL, show_default=True,
+              help='相对收敛容差（目标阶数的残差下降到初值的 tol 倍即收敛；Order Continuation 低一阶放宽 10 倍）')
 @click.option('--artificial-viscosity', 'artificial_viscosity_enabled', is_flag=True,
               help='启用问题单元人工粘性（默认关闭，全部后端可用）：熵残差判据 '
                    '(h/p)·max|û·∇s| 定位数值熵产生的单元（P1 起有效），只对它们叠加全部'
@@ -143,68 +131,19 @@ from .single_node import _run_single_node
 @click.option('--av-alpha', 'artificial_viscosity_alpha', type=float, default=1.0,
               help='人工粘性强度标定常数（无量纲，默认1.0，ν = 斜坡·alpha·|u|·h/p），'
                    '只在 --artificial-viscosity 时有意义')
+@config_file_overrides
 def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_scheme, cfl_start, cfl_max, cfl_min,
-                 aoa_deg, aos_deg, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, artificial_viscosity_enabled, artificial_viscosity_alpha):
-    """执行稳态 FR 求解。
+                 aoa_deg, aos_deg, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, tol, artificial_viscosity_enabled, artificial_viscosity_alpha):
+    """执行稳态 FR 求解（P0~P3，全部湍流模型）。
 
-    支持高阶精度 (P1-P4) 和多种湍流模型 (SST, DDES, WMLES)。
     输入文件必须是体网格 - .pkl（`grid generate-volume`/`grid
     import-volume` 的输出）或 .nas 体网格（需要配合 --surface-mesh 反推边界
     分组）。求解前会强制检查网格质量门，除非传了 --skip-quality-check。
     """
-    print(f"=== Starting Steady FR Simulation ===")
+    print("=== Starting Steady FR Simulation ===")
 
-    # 物理常量解析：显式 CLI 选项 > --config YAML > 上面 click 声明的内建默认值。
-    # 不能硬编码——mu_molecular/rho_inf/vel_inf/p_inf 等基础物理量必须能被
-    # 用户为非标准工况（不同流体/温度/高度）覆盖，见 solve_physical_constants.py 文档。
-    _phys_cfg = load_physical_config_if_given(config_path)
-    _resolved = resolve_physical_constants(
-        click.get_current_context(),
-        {
-            'turbulence_intensity': turbulence_intensity, 'viscosity_ratio': viscosity_ratio,
-            'mu_molecular': mu_molecular, 'rho_inf': rho_inf, 'vel_inf': vel_inf, 'p_inf': p_inf,
-            'order': order, 'max_iter': max_iter,
-            'phase_max_iter': phase_max_iter, 'residual_drop_threshold': residual_drop_threshold,
-        },
-        _phys_cfg,
-    )
-    turbulence_intensity = _resolved['turbulence_intensity']
-    viscosity_ratio = _resolved['viscosity_ratio']
-    mu_molecular = _resolved['mu_molecular']
-    rho_inf = _resolved['rho_inf']
-    vel_inf = _resolved['vel_inf']
-    p_inf = _resolved['p_inf']
-    order = _resolved['order']
-    max_iter = _resolved['max_iter']
-    phase_max_iter = _resolved['phase_max_iter']
-    residual_drop_threshold = _resolved['residual_drop_threshold']
-    # turbulence_model：CLI 字符串词汇与 SteadyConfig.turbulence 的枚举
-    # 命名不完全一致，需要专门的映射，不能靠 resolve_physical_constants
-    # 的同名 getattr（见 resolve_turbulence_model 文档）。
-    turbulence_model = resolve_turbulence_model(click.get_current_context(), turbulence_model, _phys_cfg)
-
-    # Tu/VR/mu_molecular/rho_inf/vel_inf/p_inf 范围校验：CLI 路径不构造
-    # SolverConfig，其 __post_init__ 的校验到不了这里，必须在入口拦截
-    # （2026-08-25 代码审查；mu_molecular/rho_inf/vel_inf/p_inf 是本轮新增）。
-    if not (0.0 < turbulence_intensity <= 1.0):
-        raise click.BadParameter("湍流强度 Tu 必须在 (0, 1] 区间", param_hint="--turbulence-intensity")
-    if viscosity_ratio <= 0.0:
-        raise click.BadParameter("粘性比 VR 必须 > 0", param_hint="--viscosity-ratio")
-    if mu_molecular <= 0.0:
-        raise click.BadParameter("分子动力粘度必须 > 0", param_hint="--mu-molecular")
-    if rho_inf <= 0.0:
-        raise click.BadParameter("自由流密度必须 > 0", param_hint="--rho-inf")
-    if vel_inf <= 0.0:
-        raise click.BadParameter("自由流速度必须 > 0", param_hint="--vel-inf")
-    if p_inf <= 0.0:
-        raise click.BadParameter("自由流静压必须 > 0", param_hint="--p-inf")
-    # --phase-max-iter/--residual-drop-threshold（2026-09-02 续接）：
-    # 全部四种后端（单机 CPU/单 GPU/多GPU/MPI 分布式，含"传统模式"与
-    # "完全分布式加载"）现在都真正接入了 Order Continuation（`solve()`
-    # 在 `uses_order_continuation` 为真时自动分派到 `run_distributed_order_
-    # continuation`，见 core/mpi/distributed_order_continuation.py/
-    # core/gpu/solver/gpu_solver_order_continuation.py 模块文档），
-    # 不再需要任何"某后端不支持"的拒绝。
+    # `--config` 已由 `config_file_overrides` 在调用前应用；CLI 路径不经过配置类的构造校验，物理量范围在这里拦截
+    check_physical_ranges(turbulence_intensity, viscosity_ratio, mu_molecular, rho_inf, vel_inf, p_inf)
     print(f"\nInput Grid : {input_file}")
     print(f"Backend    : {backend} | Order: P{order} | Method: {time_scheme}")
     print(f"Turbulence : {turbulence_model} | Max Iter: {max_iter}")
@@ -234,11 +173,13 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
             output_dir=output_dir,
             p_inf=p_inf,
             phase_max_iter=phase_max_iter,
+            reference_area=reference_area,
             residual_drop_threshold=residual_drop_threshold,
             rho_inf=rho_inf,
             skip_quality_check=skip_quality_check,
             surface_mesh=surface_mesh,
             time_scheme=time_scheme,
+            tol=tol,
             turbulence_intensity=turbulence_intensity,
             turbulence_model=turbulence_model,
             vel_inf=vel_inf,
@@ -264,12 +205,14 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
             output_dir=output_dir,
             p_inf=p_inf,
             phase_max_iter=phase_max_iter,
+            reference_area=reference_area,
             residual_drop_threshold=residual_drop_threshold,
             rho_inf=rho_inf,
             skip_quality_check=skip_quality_check,
             surface_mesh=surface_mesh,
             threads=threads,
             time_scheme=time_scheme,
+            tol=tol,
             turbulence_intensity=turbulence_intensity,
             turbulence_model=turbulence_model,
             vel_inf=vel_inf,
@@ -303,6 +246,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
             surface_mesh=surface_mesh,
             threads=threads,
             time_scheme=time_scheme,
+            tol=tol,
             turbulence_intensity=turbulence_intensity,
             turbulence_model=turbulence_model,
             vel_inf=vel_inf,

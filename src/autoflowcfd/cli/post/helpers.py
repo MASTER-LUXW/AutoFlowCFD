@@ -4,10 +4,7 @@
 阈值）：这一批"案例目录/checkpoint 定位与加载"辅助函数被
 coefficients/export-vtk/report/convergence/transient-mean/
 transient-rms/transient-psd 七个命令共用，与任何单个具体命令都不是
-强绑定关系，独立成一个纯辅助模块最清晰——镜像
-cli/solve/commands.py + cli/solve/helpers.py 已经用过的同一种拆分
-方式（重量级命令主体保留在 *_commands.py，共用辅助函数搬到
-*_helpers.py）。纯代码搬移，不改变任何行为。
+强绑定关系，独立成一个纯辅助模块最清晰（重量级命令主体保留在 *_commands.py）。
 """
 
 import pickle
@@ -18,63 +15,51 @@ import numpy as np
 from loguru import logger
 
 
-def _locate_grid_file(case_path: Path, grid: Optional[str]) -> Path:
-    """定位网格文件（支持 .pkl 体网格缓存和 .nas 面网格）。"""
+def _locate_grid_file(case_path: Path, grid: Optional[str], metadata: Optional[dict] = None) -> Path:
+    """后处理用的体网格文件：`--grid` > 算例目录里的 `volume_mesh.pkl` > checkpoint 记录的求解输入文件。
+
+    解属于求解时的那张体网格，后处理必须用同一张。2026-10-09 以前这里把任何 .nas 都当成面网格、现场重新
+    生成体网格（单元数与顺序都与解对不上；传入体网格 .nas 时 tetgen 直接失败），找不到时还会去算例目录里
+    搜面网格。
+    """
     if grid:
-        grid_file = Path(grid)
-        logger.info(f"Using specified grid file: {grid_file}")
-        return grid_file
-
-    # 优先级：volume_mesh.pkl（已保存的体网格）> grid/*.nas（面网格）> *.nas（面网格）
-    grid_candidates = [
-        case_path / "volume_mesh.pkl",
-        case_path / "grid" / "*.nas",
-        case_path / "*.nas",
-    ]
-
-    for pattern in grid_candidates:
-        if pattern.exists():
-            logger.info(f"Auto-detected grid file: {pattern}")
-            return pattern
-        if '*' in str(pattern):
-            matches = list(pattern.parent.glob(pattern.name))
-            if matches:
-                logger.info(f"Auto-detected grid file: {matches[0]}")
-                return matches[0]
-
+        logger.info(f"Using specified grid file: {grid}")
+        return Path(grid)
+    cached = case_path / "volume_mesh.pkl"
+    if cached.exists():
+        logger.info(f"Auto-detected grid file: {cached}")
+        return cached
+    if metadata is None:       # 调用方还没读 checkpoint（瞬态统计类命令）：取最新 checkpoint 的元数据
+        metadata = _load_history_only(str(case_path))[2]
+    recorded = metadata.get("input_file")
+    if recorded and Path(str(recorded)).exists():
+        logger.info(f"Using the solver input mesh recorded in the checkpoint: {recorded}")
+        return Path(str(recorded))
     raise FileNotFoundError(
-        f"Grid file not found in case directory: {case_path}\n"
-        f"Please specify grid file with --grid option.\n"
-        f"Expected locations:\n"
-        f"  - {case_path}/volume_mesh.pkl (saved volume mesh)\n"
-        f"  - {case_path}/grid/*.nas (surface mesh)\n"
-        f"  - {case_path}/*.nas (surface mesh)"
-    )
+        f"找不到体网格：算例目录 {case_path} 里没有 volume_mesh.pkl，checkpoint 记录的求解输入文件 "
+        f"{recorded!r} 也不存在。请用 --grid 给出求解时用的体网格（.pkl 或含 CTETRA/CPENTA 的 .nas）。")
 
 
 def _load_grid_data(grid_file: Path):
-    """加载网格数据（.pkl 直接反序列化；.nas 解析并重新生成体网格）。"""
+    """加载求解时用的体网格：.pkl 直接反序列化；.nas 必须是体网格（`grid/conversion/source.py::
+    load_volume_mesh_nas`，带边界三角形时一并读入供边界面片定组）。面网格报错——后处理不重新生成网格。"""
     logger.info("Loading grid data...")
     if grid_file.suffix.lower() == '.pkl':
         logger.info(f"Loading volume mesh from PKL: {grid_file}")
         try:
             with open(grid_file, 'rb') as f:
                 grid_data = pickle.load(f)
-            logger.success(f"✓ Volume mesh loaded: {grid_data.node_count} nodes, "
-                         f"{grid_data.cell_count} cells")
         except Exception as e:
             raise ValueError(f"Failed to load volume mesh from {grid_file}: {e}")
     else:
-        from autoflowcfd.grid import NASParser
+        from autoflowcfd.grid.conversion.source import load_volume_mesh_nas
 
-        logger.warning(f"⚠ Parsing surface mesh file: {grid_file}")
-        logger.warning("  This will RE-GENERATE the volume mesh!")
-        logger.warning("  For best results, use volume_mesh.pkl if available.")
-
-        parser = NASParser(str(grid_file))
-        grid_data = parser.parse(generate_volume_mesh=True)
-        logger.info(f"✓ Grid generated: {grid_data.node_count} nodes, "
-                   f"{grid_data.cell_count} cells")
+        logger.info(f"Loading volume mesh from NAS: {grid_file}")
+        try:
+            grid_data = load_volume_mesh_nas(str(grid_file))
+        except ValueError as e:
+            raise ValueError(f"{e}。后处理需要求解时用的体网格（解的单元与它一一对应），不能由面网格重新生成。")
+    logger.success(f"✓ Volume mesh loaded: {grid_data.node_count} nodes, {grid_data.cell_count} cells")
     return grid_data
 
 
@@ -137,13 +122,12 @@ def _load_case(case: str, grid: Optional[str] = None, checkpoint: Optional[str] 
     from autoflowcfd.core.utils.checkpoint import CheckpointManager
 
     case_path = Path(case)
-    grid_file = _locate_grid_file(case_path, grid)
-    grid_data = _load_grid_data(grid_file)
-
     ckpt_file = _locate_checkpoint(case_path, checkpoint)
     ckpt_manager = CheckpointManager(str(ckpt_file.parent))
     solution_data, history, iteration, metadata = ckpt_manager.load(ckpt_file, target_backend=None)
     logger.info(f"✓ Solution loaded from iteration {iteration}")
+
+    grid_data = _load_grid_data(_locate_grid_file(case_path, grid, metadata))
 
     solution = _to_solution_vector(solution_data)
 

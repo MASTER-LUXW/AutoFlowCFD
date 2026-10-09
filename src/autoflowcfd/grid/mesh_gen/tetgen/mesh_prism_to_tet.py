@@ -105,9 +105,8 @@ def convert_layers_to_tetrahedra(
 
     logger.info(f"Converting {n_layers-1} layer pairs to conformal tetrahedra...")
 
-    # Sort each base triangle's vertices by global index once; the relative
-    # order is identical on every layer (index = base + layer*nodes_per_layer),
-    # so one sort is valid for the whole stack.
+    # 每个底面三角形的顶点按全局编号排序一次：各层的相对顺序相同（编号 = 底层编号 + 层号*nodes_per_layer），
+    # 一次排序对整列有效。
     sorted_base = np.sort(base_faces, axis=1)          # (n_faces, 3) -> v0<v1<v2
 
     n_tets = n_base_faces * (n_layers - 1) * 3
@@ -138,13 +137,11 @@ def convert_layers_to_tetrahedra(
             face_of_tet[sl] = face_range
             tet_idx += n_base_faces
 
-    # Enforce positive signed volume (swap two vertices where inverted) so that
-    # downstream code can rely on orientation instead of taking |det|.
+    # 统一为正有向体积（倒置的交换两个顶点），下游可以依赖朝向，不必取 |det|。
     tetrahedra = orient_tetrahedra(all_nodes, tetrahedra)
 
-    # Drop degenerate/near-degenerate connector-artifact tets (see "Dropped
-    # tets" above) - recomputed post-orientation since orient_tetrahedra
-    # only flips sign, never changes magnitude.
+    # 丢弃退化/近退化的连接伪四面体（见上方"丢弃的四面体"）；在定向之后重算即可——orient_tetrahedra
+    # 只翻转符号、不改变大小。
     p0 = all_nodes[tetrahedra[:, 0]]
     p1 = all_nodes[tetrahedra[:, 1]]
     p2 = all_nodes[tetrahedra[:, 2]]
@@ -211,7 +208,7 @@ def convert_layers_to_prisms(
     layer_connectivity: List[np.ndarray],
     base_faces: np.ndarray,
     min_cell_size: Optional[float] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> np.ndarray:
     """将分层棱柱网格转换为真正的三角棱柱单元——
     convert_layers_to_tetrahedra 的真棱柱对应版本，保留在同一模块
    是因为两者共享完全相同的每层节点对应关系记录（只有最终发出的
@@ -242,10 +239,8 @@ def convert_layers_to_prisms(
             保持旧的固定 1e-20 阈值，用于没有大小参考的调用方。
 
     Returns:
-        (prisms, face_of_prism)：棱柱连接关系，shape=(n_prisms, 6)，
-        格式 (v0,v1,v2,w0,w1,w2)；face_of_prism，shape=(n_prisms,)，
-        将每个幸存的棱柱映射回其 base_faces 行索引（n_prisms 可能
-        少于 n_base_faces*(n_layers-1)——体积相对于上述退化体积
+        prisms：棱柱连接关系，shape=(n_prisms, 6)，格式 (v0,v1,v2,w0,w1,w2)
+        （n_prisms 可能少于 n_base_faces*(n_layers-1)——体积相对于上述退化体积
         阈值可忽略的棱柱（无论是因 taper_scale 为 0 将整个底面
         坍缩到零厚度，还是——见该阈值自身的注释——整体面停滞
         到接近但不精确为零的位置）都被丢弃。只有一条垂直边
@@ -274,8 +269,6 @@ def convert_layers_to_prisms(
 
     n_prisms = n_base_faces * (n_layers - 1)
     prisms = np.empty((n_prisms, 6), dtype=np.int64)
-    face_of_prism = np.empty(n_prisms, dtype=np.int64)
-    face_range = np.arange(n_base_faces)
 
     prism_idx = 0
     for layer_idx in range(n_layers - 1):
@@ -288,15 +281,11 @@ def convert_layers_to_prisms(
         prisms[sl, 3] = off_hi + sorted_base[:, 0]
         prisms[sl, 4] = off_hi + sorted_base[:, 1]
         prisms[sl, 5] = off_hi + sorted_base[:, 2]
-        face_of_prism[sl] = face_range
         prism_idx += n_base_faces
 
-    # Drop fully-collapsed (whole-base-face) prisms - see
-    # DEGENERATE_VOLUME_FRACTION's own comment for why this threshold is
-    # scaled to min_cell_size rather than a fixed float-noise epsilon, and
-    # this function's own Returns doc for why a volume-based (not per-
-    # edge) check is what keeps a genuine wedge prism safe from being
-    # dropped.
+    # 丢弃整个底面完全坍缩的棱柱：阈值为何按 min_cell_size 缩放而不用固定的浮点噪声量，见
+    # DEGENERATE_VOLUME_FRACTION 的注释；为何按体积（而不是逐条棱）判断才能保住真正的楔形棱柱，见本函数
+    # Returns 文档。
     from ...validation.quality_metrics import compute_prism_volumes
     volumes = compute_prism_volumes(all_nodes, prisms)
     degenerate_threshold = (
@@ -313,7 +302,6 @@ def convert_layers_to_prisms(
         )
         keep = ~drop
         prisms = prisms[keep]
-        face_of_prism = face_of_prism[keep]
 
     logger.info(f"Total prisms generated: {len(prisms)}")
-    return prisms, face_of_prism
+    return prisms

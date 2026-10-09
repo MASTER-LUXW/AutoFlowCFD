@@ -46,6 +46,8 @@ from autoflowcfd.core.fr_operators.kernels import (
     resolve_ausm_precond_mode,
 )
 
+from tests.unit._numpy_as_cupy import NumpyAsCupy
+
 GAMMA = 1.4
 RHO_INF = 1.225
 P_INF = 101325.0
@@ -436,11 +438,8 @@ class TestEveryImplementationUsesTheSameP5:
         import autoflowcfd.core.gpu.residual.gpu_inviscid.flux as gflux
         from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 
-        class _NumpyAsCupy:
-            def __getattr__(self, name):
-                return getattr(np, name)
 
-        patch_module_get_cupy(monkeypatch, gflux, _NumpyAsCupy())
+        patch_module_get_cupy(monkeypatch, gflux, NumpyAsCupy())
         rng = np.random.default_rng(99)
         m = 300
         QL = np.column_stack([RHO_INF * (0.5 + rng.random(m)), (rng.random((m, 3)) - 0.5) * 2 * U_INF,

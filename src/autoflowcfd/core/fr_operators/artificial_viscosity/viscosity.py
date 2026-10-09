@@ -15,7 +15,7 @@ from .sensor import (
     compute_persson_peraire_sensor_native_prism,
     compute_persson_peraire_sensor_native_tet,
 )
-from .sensor_operators import DEFAULT_SENSOR_VAR_INDEX, SENSOR_KAPPA
+from .sensor_operators import SENSOR_KAPPA
 
 
 def compute_artificial_viscosity_ramp(s_e: np.ndarray, order: int, kappa: float = SENSOR_KAPPA) -> np.ndarray:

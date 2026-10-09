@@ -48,12 +48,9 @@ def generate_hybrid_mesh(
     bounding_box: Dict[str, np.ndarray],
     growth_rate: float = 1.2,
     min_cell_size: float = 0.001,
-    target_cells: int = 500000,
     surface_boundaries: Optional['BoundaryMap'] = None,
     max_cell_size: Optional[float] = None,
-    extra_thickness_limit: Optional[np.ndarray] = None,
     bl_layers: Optional[int] = None,
-    _is_stage_b_retry: bool = False,
     export_bl_only: bool = False,
     export_bl_only_path: Optional[str] = None,
     export_core_only: bool = False,
@@ -70,11 +67,9 @@ def generate_hybrid_mesh(
 
         logger.info("Starting domain-conforming hybrid mesh generation...")
 
-        (merged_nodes, prism_cells, merged_cells, cell_groups, n_bl_prisms,
-         bl_source_vertex, bl_extrude_faces, bl_cell_groups, n_bl_cells) = _build_merged_mesh(
+        merged_nodes, prism_cells, merged_cells = _build_merged_mesh(
             surface_nodes, surface_faces, bounding_box, surface_boundaries,
-            growth_rate, min_cell_size, max_cell_size,
-            extra_thickness_limit, bl_layers,
+            growth_rate, min_cell_size, max_cell_size, bl_layers,
             export_bl_only=export_bl_only,
             export_bl_only_path=export_bl_only_path,
             export_core_only=export_core_only,
@@ -82,8 +77,7 @@ def generate_hybrid_mesh(
         )
 
         # 已核实（第四次评审）：export_bl_only/export_core_only=True 时，
-        # _build_merged_mesh 内部路径（_export_bl_only_and_exit /
-        # _export_partial_mesh_and_exit）本身总会以 sys.exit(0)/exit(1)
+        # _build_merged_mesh 内部路径（_export_partial_mesh_and_exit）本身总会以 sys.exit(0)/exit(1)
         # 终止进程，正常情况下永远不会执行到这一行——这里是防御性兜底
         # （防止未来有人给 _build_merged_mesh_no_bl 加了新分支、忘记
         # 同步调用导出函数），不是当前实际会走到的路径。
@@ -105,15 +99,13 @@ def generate_hybrid_mesh(
         n_invalid = np.sum(~valid_mask)
         if n_invalid > 0:
             logger.warning(f"Found {n_invalid} degenerate cells, removing them...")
-            n_bl_cells = int(np.sum(valid_mask[:n_bl_cells]))
             merged_cells = merged_cells[valid_mask]
             volumes = volumes[valid_mask]
-            cell_groups = cell_groups[valid_mask]
 
         # 修复非流形面（参见 repair_nonmanifold_tets_with_escalation 自身
         # 文档字符串了解局部重铺/升级/兜底删除的原理）。
-        merged_nodes, merged_cells, cell_groups, n_bl_cells, _nm_changed = (
-            repair_nonmanifold_tets_with_escalation(merged_nodes, merged_cells, cell_groups, n_bl_cells)
+        merged_nodes, merged_cells, _nm_changed = (
+            repair_nonmanifold_tets_with_escalation(merged_nodes, merged_cells)
         )
         if _nm_changed:
             _tmp_nodes_obj_nm = NodeArray.from_array(merged_nodes)
@@ -131,13 +123,11 @@ def generate_hybrid_mesh(
             valid_mask_seam = post_merge_volumes_seam > degenerate_threshold_seam
             if int(np.sum(~valid_mask_seam)) > 0:
                 logger.warning(f"Seam merge left {int(np.sum(~valid_mask_seam))} newly-degenerate cells, removing them...")
-                n_bl_cells = int(np.sum(valid_mask_seam[:n_bl_cells]))
                 merged_cells = merged_cells[valid_mask_seam]
                 volumes = volumes[valid_mask_seam]
-                cell_groups = cell_groups[valid_mask_seam]
-            merged_nodes, merged_cells, cell_groups, n_bl_cells, _nm_changed_seam = (
+            merged_nodes, merged_cells, _nm_changed_seam = (
                 repair_nonmanifold_tets_with_escalation(
-                    merged_nodes, merged_cells, cell_groups, n_bl_cells,
+                    merged_nodes, merged_cells,
                     context_suffix=" (post seam-merge)",
                 )
             )
@@ -167,39 +157,16 @@ def generate_hybrid_mesh(
         # 运行阶段 A 修复
         nodes_before_repair = merged_nodes
         merged_nodes, bad_mask, repair_actions = run_stage_a_repair(
-            merged_nodes, merged_cells, validator, pre_repair_faces, 
-            overlap_bad_mask, n_bl_cells
+            merged_nodes, merged_cells, validator, pre_repair_faces, overlap_bad_mask,
         )
         mesh_changed_by_repair = not np.array_equal(nodes_before_repair, merged_nodes)
 
-        # 运行阶段 B 修复（空腔重划 + BL 厚度限制）
+        # 运行阶段 B' 修复（局部空腔重铺）
         if np.any(bad_mask):
-            (merged_nodes, merged_cells, cell_groups, bad_mask, stage_b_actions,
-             extra_limit, bl_verts) = run_stage_b_repair(
-                merged_nodes, merged_cells, cell_groups, n_bl_cells, pre_repair_faces,
-                bad_mask, validator, min_cell_size, bl_source_vertex, bl_extrude_faces, surface_nodes
+            merged_nodes, merged_cells, bad_mask, stage_b_actions = run_stage_b_repair(
+                merged_nodes, merged_cells, pre_repair_faces, bad_mask, validator,
             )
             repair_actions.extend(stage_b_actions)
-
-            # 处理阶段 B 重试逻辑（递归调用）——复用 run_stage_b_repair
-            # 已计算的 extra_limit/bl_verts（基于 dijkstra，并非免费）
-            # 而非在此用相同参数重新计算。
-            if np.any(bad_mask) and not _is_stage_b_retry:
-                if extra_limit is not None:
-                    logger.warning("Stage B: Retrying generation with targeted local BL thickness cap...")
-                    del merged_nodes, merged_cells, volumes, cell_groups, bad_mask, initial_report
-                    del prism_cells, bl_cell_groups
-                    import gc
-                    gc.collect()
-                    return generate_hybrid_mesh(
-                        surface_nodes, surface_faces, bounding_box,
-                        growth_rate=growth_rate, min_cell_size=min_cell_size,
-                        target_cells=target_cells, surface_boundaries=surface_boundaries,
-                        max_cell_size=max_cell_size,
-                        extra_thickness_limit=extra_limit,
-                        bl_layers=bl_layers,
-                        _is_stage_b_retry=True,
-                    )
 
         # 最终防御遍：合并重合点并修复非流形
         n_nodes_before_merge = len(merged_nodes)
@@ -217,7 +184,6 @@ def generate_hybrid_mesh(
             if int(np.sum(~valid_mask)) > 0:
                 logger.warning(f"Final merge left {int(np.sum(~valid_mask))} newly-degenerate cells, removing them...")
                 merged_cells = merged_cells[valid_mask]
-                cell_groups = cell_groups[valid_mask]
 
         # 构建最终对象
         nodes_obj = NodeArray.from_array(merged_nodes)
@@ -227,18 +193,18 @@ def generate_hybrid_mesh(
         # 降级为四面体）拆到了 mesh_background_mixed_repair.py（本文件超
         # 过 400 行上限）——三个子步骤共享同一组滚动状态，作为一个整体
         # 一起搬运，逐字对应原来这里的代码，未改动任何数值逻辑。
-        (merged_nodes, prism_cells, merged_cells, bl_cell_groups, cell_groups,
+        (merged_nodes, prism_cells, merged_cells,
          nodes_obj, mesh_changed_by_repair) = _repair_mixed_mesh_post_stage_c(
-            merged_nodes, prism_cells, merged_cells, bl_cell_groups, cell_groups,
+            merged_nodes, prism_cells, merged_cells,
             nodes_obj, mesh_changed_by_repair, min_cell_size,
         )
 
         # 阶段 D：见 run_stage_d_interface_repair 模块文档——在完整混合
         # 面图（棱柱+四面体）上定向修复 BL/core 界面相邻体积比违规，只
         # 局部重铺四面体一侧，不改动任何棱柱/BL 几何。
-        (merged_nodes, merged_cells, cell_groups, nodes_obj,
+        (merged_nodes, merged_cells, nodes_obj,
          _stage_d_changed, stage_d_actions) = run_stage_d_interface_repair(
-            merged_nodes, prism_cells, merged_cells, cell_groups, nodes_obj, validator,
+            merged_nodes, prism_cells, merged_cells, nodes_obj, validator,
         )
         if stage_d_actions:
             for _action in stage_d_actions:
@@ -261,31 +227,11 @@ def generate_hybrid_mesh(
             prism_volumes = PrismCells.compute_volumes(nodes_obj, prism_cells)
             prism_cells_obj = PrismCells(connectivity=prism_cells, volumes=prism_volumes)
 
-        from ..utils.mesh_boundary import identify_boundaries_from_surface
-        tet_boundaries = identify_boundaries_from_surface(
-            merged_cells, surface_faces, surface_boundaries, direct_cell_groups=cell_groups
+        # 边界分组：外部面按节点坐标与输入面网格逐面对应（同时校验体网格外表面与输入表面逐面相同）
+        from ..utils.mesh_boundary import map_generated_boundaries
+        boundaries_obj = map_generated_boundaries(
+            merged_nodes, prism_cells, merged_cells, surface_nodes, surface_faces, surface_boundaries,
         )
-
-        # 合并边界组
-        groups: Dict[str, np.ndarray] = {}
-        bc_types: Dict[str, str] = {}
-        if n_prism > 0:
-            for name in np.unique(bl_cell_groups):
-                if not name: continue
-                idx = np.flatnonzero(bl_cell_groups == name).astype(np.int32)
-                groups[name] = idx
-                bc_types[name] = surface_boundaries.bc_types.get(name, 'WALL')
-
-        for name, idx in tet_boundaries.groups.items():
-            shifted = (idx.astype(np.int64) + n_prism).astype(np.int32)
-            if name in groups:
-                groups[name] = np.union1d(groups[name], shifted).astype(np.int32)
-            else:
-                groups[name] = shifted
-                bc_types[name] = tet_boundaries.bc_types.get(name, 'WALL')
-
-        from ...schema.grid_boundaries import BoundaryMap
-        boundaries_obj = BoundaryMap(groups=groups, bc_types=bc_types)
 
         metadata = GridMetadata(
             node_count=len(merged_nodes),
@@ -294,12 +240,16 @@ def generate_hybrid_mesh(
             file_format="hybrid"
         )
 
+        # 输入面网格随体网格保存（与外部导入路径同一格式）：求解期逐面打边界标签
+        # （tag_boundary_groups_for_mesh）与导出边界面（exterior_faces_by_group）都靠它逐面判定归属，
+        # 不经过有歧义的单元级分组——此前 .pkl 路径没有它，角上单元的外部面会被归到同一个组
         return VolumeMeshData(
             nodes=nodes_obj,
             cells=cells_obj,
             boundaries=boundaries_obj,
             metadata=metadata,
             prism_cells=prism_cells_obj,
+            surface_mesh={'nodes': surface_nodes, 'faces': surface_faces, 'boundaries': surface_boundaries},
         )
     except Exception as e:
         logger.error(f"Error in generate_hybrid_mesh: {e}")

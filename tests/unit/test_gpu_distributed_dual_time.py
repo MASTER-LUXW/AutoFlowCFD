@@ -17,26 +17,19 @@ integrator.scheme` 是什么都无条件走手动展开的 RK stage 逻辑，
 """
 
 import types
-
 import numpy as np
 import pytest
 
 import autoflowcfd.core.gpu.distributed.gpu_distributed as gd_mod
 import autoflowcfd.core.gpu.gpu_time_integration as gti_mod
+
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
-
-
-class _NumpyAsCupy:
-    def __getattr__(self, name):
-        return getattr(np, name)
-
-    def asnumpy(self, x):
-        return np.asarray(x)
+from tests.unit._numpy_as_cupy import NumpyAsCupy
 
 
 @pytest.fixture(autouse=True)
 def _patch_get_cupy(monkeypatch):
-    shim = _NumpyAsCupy()
+    shim = NumpyAsCupy()
     patch_module_get_cupy(monkeypatch, gd_mod, shim)
     patch_module_get_cupy(monkeypatch, gti_mod, shim)
 
@@ -123,6 +116,9 @@ def _make_stub(n_local, n_sps, n_vars, target):
     stub._update_cfl_controller = _update_cfl_controller
 
     calls = {"count": 0}
+
+    # 层流：没有湍流模型时湍流更新直接返回 None（带输运方程的双时间步见 test_dual_time_turbulence.py）
+    stub.turb_model_gpu = None
 
     def _compute_turbulence_source_distributed(dt):
         return None

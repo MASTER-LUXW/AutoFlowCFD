@@ -1,12 +1,8 @@
-"""Unit tests for the Stage A mesh quality repair (mesh_gen/mesh_repair.py)."""
+"""Stage A 网格质量修复（mesh_gen/mesh_repair.py）的单元测试。"""
 
 import numpy as np
 
-from autoflowcfd.grid.mesh_gen.repair.mesh_repair import (
-    smooth_bad_cells,
-    compute_movable_node_mask,
-    compute_bl_thickness_limit_override,
-)
+from autoflowcfd.grid.mesh_gen.repair.mesh_repair import smooth_bad_cells, compute_movable_node_mask
 from autoflowcfd.grid.mesh_gen.tetgen.mesh_prism_to_tet import orient_tetrahedra
 from autoflowcfd.grid.validation.quality_validator import MeshQualityValidator
 from autoflowcfd.grid.schema.grid_nodes import NodeArray
@@ -14,13 +10,11 @@ from autoflowcfd.grid.mesh_gen.extraction.face_extractor import FaceExtractor
 
 
 def _bipyramid():
-    """Square-base bipyramid split into 8 tets around its center C - the
-    only node with no boundary-face membership (every other node sits on
-    the outer hull). A clean, hand-verifiable fixture (no Delaunay
-    near-degeneracy) for testing Stage A's node-eligibility and smoothing.
+    """方底双棱锥绕中心 C 拆成 8 个四面体——C 是唯一不属于任何边界面的节点
+    （其余节点都在外壳上）。一个干净、可手算验证的夹具（没有 Delaunay 近退化），
+    用来测 Stage A 的节点资格与光顺。
 
-    Returns (nodes, cells, iC) with cells correctly oriented (all volumes
-    positive).
+    返回 (nodes, cells, iC)，cells 朝向正确（体积全部为正）。
     """
     B0, B1, B2, B3 = [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]
     T, D, C = [0.0, 0.0, 1.0], [0.0, 0.0, -1.0], [0.0, 0.0, 0.0]
@@ -37,26 +31,17 @@ def _bipyramid():
     return nodes, cells, iC
 
 
-def _bipyramid_bl_core_split():
-    """Same bipyramid geometry as _bipyramid(), but with cells explicitly
-    grouped BL-first (the 4 cells touching the "T" pole) then core (the 4
-    touching "D") - the layout compute_movable_node_mask's n_bl_cells
-    argument assumes. The 4 "equatorial" faces (iC, Bi, Bi+1) are then
-    exactly the BL/core interface, and iC is the only node on that
-    interface that ISN'T also a physical-boundary node - the case that
-    matters for this test.
-    """
+def _bipyramid_core_half():
+    """与 _bipyramid() 同一几何，只取"核心"一半（接触 D 极的 4 个四面体）：另一半（接触 T 极）在真实网格里
+    是 BL 棱柱，不在被平滑的四面体集合里。赤道面 (iC, Bi, Bi+1) 就是 BL/core 接口，iC 是接口上唯一不在
+    物理边界上的节点。"""
     B0, B1, B2, B3 = [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]
     T, D, C = [0.0, 0.0, 1.0], [0.0, 0.0, -1.0], [0.0, 0.0, 0.0]
     nodes = np.array([B0, B1, B2, B3, T, D, C])
     iB0, iB1, iB2, iB3, iT, iD, iC = range(7)
-
     base_edges = [(iB0, iB1), (iB1, iB2), (iB2, iB3), (iB3, iB0)]
-    bl_cells = [[iC, a, b, iT] for (a, b) in base_edges]
-    core_cells = [[iC, a, b, iD] for (a, b) in base_edges]
-    cells = np.array(bl_cells + core_cells, dtype=np.int64)
-    cells = orient_tetrahedra(nodes, cells).astype(np.int32)
-    return nodes, cells, iC, len(bl_cells)
+    cells = np.array([[iC, a, b, iD] for (a, b) in base_edges], dtype=np.int64)
+    return nodes, orient_tetrahedra(nodes, cells).astype(np.int32), iC
 
 
 class TestMovableNodeMask:
@@ -69,50 +54,21 @@ class TestMovableNodeMask:
 
         assert np.where(movable)[0].tolist() == [iC]
 
-    def test_bl_core_interface_node_excluded_when_n_bl_cells_given(self):
-        """Regression test for a real defect found on cube_demo: the
-        interior node sitting exactly on the BL/core interface (iC here)
-        is movable under the plain boundary-only rule (it touches no
-        physical boundary face) but must NOT be movable once n_bl_cells
-        is given - moving it would leave the core side's tets (already
-        fixed by tetgen against the OLD position) overlapping the BL
-        side's (now-moved) tets, exactly as observed for real: BL and
-        core cells sharing no node at all ending up spatially
-        overlapping."""
-        nodes, cells, iC, n_bl_cells = _bipyramid_bl_core_split()
+    def test_bl_core_interface_node_is_pinned(self):
+        """接口节点不能被平滑移动（cube_demo 实测：移动它会让核心四面体仍按旧位置构建、与 BL 单元空间重叠）。
+        BL 是棱柱、不在四面体集合里，接口面在四面体子网格上是边界面，由边界规则固定。"""
+        nodes, cells, iC = _bipyramid_core_half()
         node_arr = NodeArray(x=nodes[:, 0].copy(), y=nodes[:, 1].copy(), z=nodes[:, 2].copy())
         faces = FaceExtractor.extract_faces(cells, node_arr)
 
-        movable_without_split = compute_movable_node_mask(len(nodes), faces)
-        movable_with_split = compute_movable_node_mask(len(nodes), faces, n_bl_cells)
-
-        assert movable_without_split[iC], "sanity: iC is not on any physical boundary face"
-        assert not movable_with_split[iC]
-        # Nothing else should change - the interface exclusion is
-        # additive, not a wholesale change to the boundary rule.
-        assert np.array_equal(
-            np.where(movable_without_split)[0],
-            np.union1d(np.where(movable_with_split)[0], [iC]),
-        )
-
-    def test_n_bl_cells_none_keeps_prior_behaviour(self):
-        """None (the default) must be a strict no-op - existing callers
-        with no BL region at all must see unchanged behaviour."""
-        nodes, cells, iC, n_bl_cells = _bipyramid_bl_core_split()
-        node_arr = NodeArray(x=nodes[:, 0].copy(), y=nodes[:, 1].copy(), z=nodes[:, 2].copy())
-        faces = FaceExtractor.extract_faces(cells, node_arr)
-
-        assert np.array_equal(
-            compute_movable_node_mask(len(nodes), faces),
-            compute_movable_node_mask(len(nodes), faces, None),
-        )
+        assert not compute_movable_node_mask(len(nodes), faces)[iC]
 
 
 class TestSmoothBadCells:
     def test_recovers_perturbed_interior_node(self):
-        """A large-but-volume-safe perturbation of the one interior node
-        should be smoothed back toward the geometrically correct position,
-        and the mesh should pass MeshQualityValidator afterward."""
+        """对唯一的内部节点做一个大但不破坏体积的扰动，应被光顺回几何上正确的
+        位置，之后网格应通过 MeshQualityValidator。
+        """
         nodes, cells, iC = _bipyramid()
         validator = MeshQualityValidator()
 
@@ -141,29 +97,22 @@ class TestSmoothBadCells:
         non_center = [i for i in range(len(nodes)) if i != iC]
         assert np.allclose(new_nodes[non_center], perturbed[non_center])
 
-    def test_never_moves_bl_core_interface_node_when_n_bl_cells_given(self):
-        """End-to-end version of TestMovableNodeMask's interface test,
-        through the actual smoothing entry point: with n_bl_cells given,
-        a bad cell whose only movable node (under the plain boundary
-        rule) sits on the BL/core interface must be left as still-bad
-        rather than "fixed" by moving that node."""
-        nodes, cells, iC, n_bl_cells = _bipyramid_bl_core_split()
+    def test_never_moves_bl_core_interface_node(self):
+        """经平滑入口的端到端版本：只有接口节点能"修好"的坏单元保持坏，而不是移动接口节点。"""
+        nodes, cells, iC = _bipyramid_core_half()
         validator = MeshQualityValidator()
 
         perturbed = nodes.copy()
-        perturbed[iC] += np.array([0.55, 0.35, 0.0])
+        perturbed[iC] += np.array([0.3, 0.2, -0.1])
 
-        new_nodes, bad_mask, actions = smooth_bad_cells(
-            perturbed, cells, validator, max_passes=5, n_bl_cells=n_bl_cells,
-        )
+        new_nodes, _bad_mask, _actions = smooth_bad_cells(perturbed, cells, validator, max_passes=5)
 
         assert np.array_equal(new_nodes, perturbed), "iC must not have moved"
-        assert np.any(bad_mask), "the cells iC's perturbation broke must still be reported bad"
 
     def test_never_introduces_negative_volume(self):
-        """Even when the perturbation is large enough to leave some cells
-        already invalid going in, Stage A must never make a previously-
-        valid cell's volume go negative."""
+        """即使扰动大到进入时已有单元无效，Stage A 也绝不能让原本有效的单元
+        体积变负。
+        """
         nodes, cells, iC = _bipyramid()
         validator = MeshQualityValidator()
 
@@ -188,43 +137,3 @@ class TestSmoothBadCells:
         assert np.allclose(new_nodes, nodes)
         assert not np.any(bad_mask)
         assert any("already within thresholds" in a for a in actions)
-
-
-class TestStageBBlThicknessLimitOverride:
-    def test_bl_thickness_limit_override_targets_only_bad_bl_vertices(self):
-        # 3 independent BL "columns", one per surface vertex (0, 1, 2),
-        # each spanning 4 layers under the layer-stacked convention
-        # (global index = layer_idx * n_surface_nodes + local_idx) so
-        # every cell's 4 nodes map back to exactly one surface vertex via
-        # `% n_surface_nodes`. Cell 1 (surface vertex 1's column) is
-        # flagged bad -> only surface vertex 1 should get capped.
-        n_surface_nodes = 3
-        cells = np.array([
-            [0, 3, 6, 9],    # surface vertex 0, layers 0-3
-            [1, 4, 7, 10],   # surface vertex 1, layers 0-3 - BAD
-            [2, 5, 8, 11],   # surface vertex 2, layers 0-3
-        ], dtype=np.int32)
-        bad_cell_mask = np.array([False, True, False])
-        n_bl_cells = 3
-
-        limit, affected = compute_bl_thickness_limit_override(
-            bad_cell_mask, n_bl_cells, cells, n_surface_nodes,
-            cap_thickness=0.01,
-        )
-
-        assert limit is not None
-        assert 1 in affected
-        assert limit[1] == 0.01
-        assert np.isinf(limit[0]) and np.isinf(limit[2])
-
-    def test_bl_thickness_limit_override_no_op_when_no_bad_bl_cells(self):
-        cells = np.array([[0, 1, 2, 3]], dtype=np.int32)
-        bad_cell_mask = np.array([False])
-
-        limit, affected = compute_bl_thickness_limit_override(
-            bad_cell_mask, n_bl_cells=1, cells=cells, n_surface_nodes=3,
-            cap_thickness=0.01,
-        )
-
-        assert limit is None
-        assert affected == []

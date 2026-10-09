@@ -32,16 +32,16 @@ from autoflowcfd.cli.main import cli
 def _fake_solver(current_order=0):
     solver = MagicMock()
     solver.current_order = current_order
-    # Real rebuild_solver_from_checkpoint always sets this explicitly (to a
-    # real value or None) - a bare MagicMock auto-creating it instead would
-    # make the final _report_aerodynamic_coefficients(solver, ...) call
-    # compare a MagicMock against 0 and blow up with a TypeError.
+    # 真实的 rebuild_solver_from_checkpoint 总是显式设置它（真实值或 None）
+    # ——换成裸 MagicMock 自动生成的属性，会让最后的
+    # _report_aerodynamic_coefficients(solver, ...) 拿 MagicMock 与 0 比较，
+    # 抛 TypeError。
     solver._reference_area = None
 
     def _solve(*args, **kwargs):
-        # Simulates Order Continuation ramping P0->P1 partway through this
-        # resume's own solve() call - current_order changes *after*
-        # resume() already read metadata["order"] into its local `order`.
+        # 模拟 Order Continuation 在这次续算自己的 solve() 调用中途从 P0 爬到 P1
+        # ——current_order 在 resume() 已经把 metadata["order"] 读进局部变量
+        # `order` *之后*才变化。
         solver.current_order = current_order + 1
         return SimpleNamespace(iterations=10, final_residual=1e-3)
 
@@ -52,12 +52,12 @@ def _fake_solver(current_order=0):
 class TestResumeWritesLiveOrderNotStaleMetadataOrder:
     def test_checkpoint_rewritten_with_post_solve_current_order(self, tmp_path):
         checkpoint_file = tmp_path / "checkpoint_iter_000100.h5"
-        checkpoint_file.write_bytes(b"")  # CliRunner's click.Path(exists=True) just needs it to exist
+        checkpoint_file.write_bytes(b"")  # CliRunner 的 click.Path(exists=True) 只要求它存在
 
         fake_solver = _fake_solver(current_order=0)
         fake_metadata = {
             "input_file": "volume.nas",
-            "order": 0,  # stale pre-solve snapshot, matches solver's order *before* solve()
+            "order": 0,  # 求解前的过时快照，与 solve() *之前*求解器的阶数一致
             "turbulence_model": "sst",
             "backend": "cpu",
             "surface_mesh": "surface.nas",
@@ -77,9 +77,9 @@ class TestResumeWritesLiveOrderNotStaleMetadataOrder:
             )
 
         assert result.exit_code == 0, result.output
-        assert fake_solver.current_order == 1  # sanity: solve() really did bump it
+        assert fake_solver.current_order == 1  # 检查：solve() 确实把它改了
 
-        # positional args: (solver, output_dir, iteration, input_file, order, turbulence_model, backend)
+        # 位置参数：(solver, output_dir, iteration, input_file, order, turbulence_model, backend)
         call_args = mock_write_checkpoint.call_args
         written_order = call_args.args[4]
         assert written_order == 1, (

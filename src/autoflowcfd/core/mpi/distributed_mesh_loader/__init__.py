@@ -21,7 +21,8 @@ AutoFlowCFD V2.0 - 完全分布式网格加载
     package.py            root 端预切的紧凑包（`PrecompactedMeshData` +
                           `build_fully_distributed_rank_package`）
     fully_distributed.py  完全分布式加载入口与跨阶数重分发
-    legacy.py             CPU MPI"传统模式"分发（每 rank 各自加载完整网格）
+
+"传统模式"（每个 rank 各自加载完整网格、进程内分区）不经过本包，由分布式求解器构造函数自己完成。
 
 本 `__init__.py` re-export 全部既有公开名，所以全仓库
 `from autoflowcfd.core.mpi.distributed_mesh_loader import ...` 一个字
@@ -36,20 +37,10 @@ from .fully_distributed import (  # noqa: F401
     distributed_mesh_load_v2,
     redistribute_fully_distributed_for_new_order,
 )
-from .legacy import (  # noqa: F401
-    build_local_mesh_from_data,
-    distribute_mesh_data,
-    distributed_mesh_load,
-    extract_local_mesh_data,
-)
 
 __all__ = [
     "PrecompactedMeshData",
     "build_fully_distributed_rank_package",
-    "build_local_mesh_from_data",
-    "distribute_mesh_data",
-    "distributed_mesh_load",
     "distributed_mesh_load_v2",
-    "extract_local_mesh_data",
     "redistribute_fully_distributed_for_new_order",
 ]

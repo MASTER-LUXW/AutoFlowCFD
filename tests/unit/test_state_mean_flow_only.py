@@ -14,7 +14,7 @@ import pytest
 from tests.unit.test_gpu_solver_order_continuation import _patch_gpu_modules  # noqa: F401（自动夹具）
 from tests.validation._channel_mesh import build_channel_mesh_prism, channel_wall_source
 
-_BC = {"x_min": "VELOCITY_INLET", "x_max": "PRESSURE_OUTLET", "y_min": "WALL", "y_max": "WALL",
+_BC = {"x_min": "VELOCITY_INLET", "x_max": "PRESSURE_OUTLET", "wall_bottom": "WALL", "wall_top": "WALL",
        "z_min": "SYMMETRY", "z_max": "SYMMETRY"}
 
 

@@ -34,21 +34,7 @@ core/fr_residual/viscous_flux_kernel.py 模块文档。
 from .constants import (  # noqa: F401
     GAMMA,
 )
-from .extrap import (  # noqa: F401
-    _add_src1_to_fp,
-    _extrap_side,
-    _extrap_to_fp,
-    _self_extrap_side,
-    _viscous_tilde_flux,
-)
-from .volume import (  # noqa: F401
-    _viscous_volume_term_gpu,
-    compute_temperature_gpu,
-    compute_viscous_residual_fr_gpu,
-)
-from .interface import (  # noqa: F401
-    _compute_viscous_interface_correction_gpu,
-)
+from .volume import compute_temperature_gpu, compute_viscous_residual_fr_gpu  # noqa: F401
 
 __all__ = [
     "GAMMA",

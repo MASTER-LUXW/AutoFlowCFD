@@ -14,8 +14,7 @@
 拆分说明（本文件原有 974 行，超过 400 行硬性拆分阈值——本仓库全部
 Python 文件里单文件行数最多的一个）：
 1. 案例目录/checkpoint 定位与加载的共用辅助函数（10 个）搬到
-   post_helpers.py，镜像 cli/solve/commands.py + cli/solve/helpers.py
-   已有的拆分方式。
+   post_helpers.py。
 2. export-vtk（单个命令约 170 行，全文件最重）搬到
    post_export_commands.py。
 3. transient-mean/transient-rms/transient-psd 三个围绕"瞬态历史统计"
@@ -39,8 +38,8 @@ import click
 import numpy as np
 from loguru import logger
 
-from autoflowcfd.cli.post.helpers import _load_case, _load_history_only, _locate_checkpoint, _replay_history
-from autoflowcfd.cli.solve.helpers import rebuild_solver_from_checkpoint
+from autoflowcfd.cli.post.helpers import _load_history_only, _locate_checkpoint, _replay_history
+from autoflowcfd.cli.solve.checkpoint_io import rebuild_solver_from_checkpoint
 
 
 @click.group()

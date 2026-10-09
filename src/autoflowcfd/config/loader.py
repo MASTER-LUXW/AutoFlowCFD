@@ -53,13 +53,20 @@ class ConfigLoader:
         self.default_transient = TransientConfig()
     
     def load(self, config_path: Union[str, Path]) -> Union[SteadyConfig, TransientConfig]:
-        """从 YAML 文件加载配置。
+        """从 YAML 文件加载配置（`load_with_keys` 的配置对象部分）。"""
+        return self.load_with_keys(config_path)[0]
+
+    def load_with_keys(self, config_path: Union[str, Path]):
+        """从 YAML 文件加载配置，同时返回文件里显式写出的字段名（不含路由键 `mode`）。
+
+        CLI `--config` 只用文件里显式写出的字段覆盖选项默认值（`cli/solve/config_file.py`）：配置类的默认值与
+        CLI 默认值并不处处相同，不能拿前者去覆盖后者。
 
         Args:
             config_path: YAML 配置文件路径
 
         Returns:
-            SteadyConfig or TransientConfig: 加载的配置对象
+            (SteadyConfig 或 TransientConfig, 显式写出的字段名集合)
 
         Raises:
             FileNotFoundError: 配置文件不存在
@@ -89,10 +96,11 @@ class ConfigLoader:
         # 确定仿真模式
         mode = config_dict.get('mode', 'steady')
         
+        keys = {k for k in config_dict if k != 'mode'}
         if mode == 'steady':
-            return self._load_steady_config(config_dict)
+            return self._load_steady_config(config_dict), keys
         elif mode == 'transient':
-            return self._load_transient_config(config_dict)
+            return self._load_transient_config(config_dict), keys
         else:
             raise ValueError(f"未知的仿真模式: {mode}。必须是 'steady' 或 'transient'")
     
@@ -306,7 +314,7 @@ class ConfigLoader:
             str: 带注释的 YAML 内容
         """
         lines = [f"# AutoFlowCFD {mode.capitalize()} 仿真配置"]
-        lines.append(f"# 由 ConfigLoader 生成")
+        lines.append("# 由 ConfigLoader 生成")
         lines.append("")
         lines.append(f"mode: {mode}")
         lines.append("")
@@ -321,7 +329,7 @@ class ConfigLoader:
                 lines.append(f"# {comment}")
 
             # 通过 yaml.safe_dump 本身序列化值，而不是使用 f-string，
-            # 否则 None 值（例如默认的 max_cell_size）会呈现为字面文本 "None" - 
+            # 否则 None 值（例如默认的 phase_max_iter）会呈现为字面文本 "None" - 
             # PyYAML 不将裸写的 "None" 识别为 null（只有 null/Null/NULL/~ /空可以），
             # 所以 safe_load 会将其读回为字符串 "None"，而不是 Python None，
             # 并且它会静默地因类型错误而验证失败，而不是加载为真正的默认值。
@@ -355,7 +363,7 @@ class ConfigLoader:
             'cfl_init': '自适应 CFL 初值（null：按时间格式取默认）',
             'cfl_max': '自适应 CFL 上限（null：按时间格式取默认）',
             'cfl_min': '自适应 CFL 下限（null：按时间格式取默认）',
-            'convergence_tol': '残差收敛容差（仅定常）',
+            'convergence_tol': '相对收敛容差（对应 --tol）',
             'dt': '时间步长，单位秒（仅瞬态）',
             'total_time': '总物理时间，单位秒（仅瞬态）',
             # 取值表从唯一那张词汇表读，不在这里硬编码——此前这里写的是
@@ -364,11 +372,6 @@ class ConfigLoader:
             'time_scheme': '时间积分方案: ' + ', '.join(scheme_names()) + '（仅瞬态）',
             'output_dir': '结果输出目录',
             'checkpoint_interval': '检查点保存间隔，单位步数',
-            'growth_rate': '边界层几何增长率（仅定常）',
-            'bl_layers': '在切换到（固定增长率）过渡阶段之前，计为精细 BL 阶段的层数（未设置 = 8）',
-            'min_cell_size': '第一层（近壁）厚度，单位米（仅定常）',
-            'target_cells': '目标总单元数（仅定常；被 tetgen 混合网格路径忽略）',
-            'max_cell_size': '核心区域最大单元尺寸，单位米，从近壁尺寸向外渐变（未设置 = 无上限）',
             'rho_inf': '自由流密度，单位 kg/m^3',
             'vel_inf': '自由流速度大小，单位 m/s',
             'p_inf': '自由流静压，单位 Pa',

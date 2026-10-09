@@ -87,7 +87,6 @@ def build_distributed_flat_face(
     # 重排"这个局部范围内使用（见 gpu_distributed.py::compute_
     # inviscid_residual_gpu 对 perm/inv_perm 的消费），不影响 halo
     # 交换协议本身。
-    n_local_cells = partition.n_local_cells
     halo_cells = partition.halo_cells
     n_halo = len(halo_cells)
 

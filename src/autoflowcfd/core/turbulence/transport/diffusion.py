@@ -15,9 +15,11 @@ from autoflowcfd.core.fr_operators.gradients import (
     compute_physical_scalar_gradient,
 )
 from autoflowcfd.core.fr_operators.volume_contract import (
+    OVERINT_CHUNK_CELLS,
     contract_shared_operator_1axis,
     contract_shared_operator_2axis,
     contravariant_flux_from_metric,
+    get_overintegration_context,
 )
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from autoflowcfd.core.turbulence.transport_kernel import (
@@ -31,11 +33,7 @@ from .faces import (
     _lift_side_jumps,
     boundary_diffusion_targets,
 )
-from .convection import (
-    _TURB_OVERINT_CHUNK_CELLS,
-    _turb_overint_ops,
-    resolve_turb_overintegration,
-)
+from .convection import resolve_turb_overintegration
 
 
 def _scalar_diffusion_volume_overintegrated(gamma_field, grad_phi, oi, n_sps):
@@ -85,8 +83,8 @@ def _scalar_diffusion_volume_overintegrated(gamma_field, grad_phi, oi, n_sps):
     div_G = np.empty((n_cells, n_sps))
     for (seg_lo, seg_hi, n_fine, det_seg, inv_seg,
          op_c2f, op_D_fine, op_f2c) in oi["segs"]:
-        for c0 in range(seg_lo, seg_hi, _TURB_OVERINT_CHUNK_CELLS):
-            c1 = min(c0 + _TURB_OVERINT_CHUNK_CELLS, seg_hi)
+        for c0 in range(seg_lo, seg_hi, OVERINT_CHUNK_CELLS):
+            c1 = min(c0 + OVERINT_CHUNK_CELLS, seg_hi)
             i0, i1 = c0 - seg_lo, c1 - seg_lo
             gam_f = contract_shared_operator_1axis(
                 op_c2f, np.ascontiguousarray(gamma_field[c0:c1, :, None]))
@@ -179,7 +177,7 @@ def compute_scalar_diffusion_residual(
     # 去混叠（AFCFD_TURB_OVERINT=on），理由见 `resolve_turb_overintegration`
     # 与 `_scalar_diffusion_volume_overintegrated`（含那里明确写出的、
     # Gamma 自身混叠仍在的局限）。默认 off，行为逐位不变。
-    _oi = _turb_overint_ops(mesh, ops) if resolve_turb_overintegration() == "on" else None
+    _oi = get_overintegration_context(mesh, ops) if resolve_turb_overintegration() == "on" else None
     if _oi is not None:
         div_G = _scalar_diffusion_volume_overintegrated(
             gamma_field, grad_phi, _oi, n_sps)

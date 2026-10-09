@@ -96,7 +96,7 @@ def validate_mixed_mesh(
         report.std_volume = float(np.std(positive_volumes))
         report.volume_ratio = report.max_volume / max(report.min_volume, 1e-12)
 
-    # --- Aspect ratio (BL/core split is exact here, not heuristic) ---
+    # --- 长宽比（这里 BL/核心按单元类型精确划分，不是启发式）---
     prism_ar = _qm.compute_prism_aspect_ratios(nodes, prism_conn)
     tet_ar = _qm.compute_tetrahedron_aspect_ratios(nodes, tet_conn)
     all_ar = np.concatenate([prism_ar, tet_ar])
@@ -119,14 +119,14 @@ def validate_mixed_mesh(
         report.max_skewness = float(np.max(all_sk))
         report.mean_skewness = float(np.mean(all_sk))
 
-    # --- Orthogonality / adjacent-volume-ratio / overlap (face-based) ---
+    # --- 正交性 / 相邻体积比 / 重叠（基于面）---
     if faces is None:
         faces = volume_mesh.ensure_faces_exist()
     cell_centroids = np.vstack([
         _compute_prism_centroids(nodes, prism_conn),
         _compute_tet_centroids(nodes, tet_conn),
     ]) if n_prism > 0 else _compute_tet_centroids(nodes, tet_conn.astype(np.int64))
-    cell_volumes = all_volumes  # already concatenated prism+tet, same global order
+    cell_volumes = all_volumes  # 已按棱柱+四面体拼接，与全局编号顺序一致
 
     validator._check_orthogonality_and_adjacency(
         report, nodes, tet_conn, faces, cell_centroids=cell_centroids, cell_volumes=cell_volumes

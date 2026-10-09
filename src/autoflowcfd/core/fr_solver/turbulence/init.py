@@ -156,7 +156,7 @@ def init_production_ramp(owner, time_scheme) -> None:
 
     构造时不推进计数器，每一步由 `advance_production_ramp` 推进一次：2026-10-05 以前 CPU 单机与 CPU MPI 传统
     模式在构造时就推进了一次（渐变期间产生项因子比单 GPU / CPU MPI 完全分布式 / 多 GPU 多 1/N），多 GPU 则靠
-    `advance_production_ramp` 里的懒默认值。checkpoint 恢复湍流场后由恢复路径把计数器推到终点。
+    `advance_production_ramp` 里的懒默认值。checkpoint 恢复湍流场后由 `restore_production_ramp` 续接计数。
     """
     owner._turb_ramp_step = 0
     owner._turb_production_ramp_steps = production_ramp_steps(time_scheme)
@@ -187,6 +187,52 @@ def advance_production_ramp(owner, model) -> None:
     else:
         model.production_factor = current_step / ramp_steps
     owner._turb_ramp_step = current_step + 1
+
+
+RAMP_STEP_KEY = "turb_ramp_step"
+RAMP_TOTAL_KEY = "turb_ramp_steps"
+RAMP_COMPLETE_KEY = "turb_ramp_complete"
+
+
+def production_ramp_metadata(owner) -> dict:
+    """要写进 checkpoint 元数据的渐变进度（单机与分布式写入端共用）。"""
+    return {RAMP_STEP_KEY: int(owner._turb_ramp_step), RAMP_TOTAL_KEY: int(owner._turb_production_ramp_steps),
+            RAMP_COMPLETE_KEY: bool(owner._turb_production_ramp_complete)}
+
+
+def restore_production_ramp(owner, model, metadata: dict) -> None:
+    """checkpoint 恢复出湍流场之后续接产生项渐变（单机、单 GPU 主机视图与分布式恢复端共用）。
+
+    2026-10-09 以前三处恢复路径一律把计数器推到终点（"湍流场已恢复 = 已充分发展"）：在渐变期间写出的
+    checkpoint 续算时产生项因子从例如 0.02 跳到 1，续算与连续计算不是同一个算例。现在按 checkpoint 记录的
+    进度续接：
+
+    * 写出时渐变已走完（含不渐变的隐式稳态，总步数 0）：直接完成；
+    * 写出时还在渐变中：从记录的步数继续（各显式格式的总步数同为 `TURB_PRODUCTION_RAMP_STEPS`）；
+    * 早于本记录的 checkpoint：进度不可知，沿用此前的做法视为已完成。
+
+    `_ramp_baseline_reset_done` 随完成标记置位：渐变已完成时 Order Continuation 不再重置残差基准（否则会丢掉
+    刚恢复的阶段起始残差），未完成时留给渐变结束那一步重置。
+    """
+    if model is None or not hasattr(model, "production_factor"):
+        return
+    total = int(owner._turb_production_ramp_steps)
+    if RAMP_STEP_KEY not in metadata:
+        step, complete = total, True
+    else:
+        ckpt_step, ckpt_total = int(metadata[RAMP_STEP_KEY]), int(metadata[RAMP_TOTAL_KEY])
+        if ckpt_step >= ckpt_total:
+            step, complete = total, bool(metadata[RAMP_COMPLETE_KEY])
+        else:
+            step, complete = min(ckpt_step, total), False
+    owner._turb_ramp_step = step
+    owner._turb_production_ramp_complete = complete
+    owner._ramp_baseline_reset_done = complete
+    # 因子取上一次 `advance_production_ramp` 留下的值（下一步推进时会重设；主机视图回写设备时带着它）
+    if complete or total <= 0:
+        model.production_factor = 1.0
+    elif step > 0:
+        model.production_factor = (step - 1) / total
 
 
 def _update_production_ramp(solver) -> None:

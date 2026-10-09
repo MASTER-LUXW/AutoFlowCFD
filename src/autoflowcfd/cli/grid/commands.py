@@ -364,57 +364,12 @@ def info(input_file: str, json_output: bool) -> None:
         raise click.ClickException(f"Failed to get grid info: {e}")
 
 
-@grid.command()
-@click.argument("input_file", type=click.Path(exists=True))
-@click.option("--format", "-f", type=click.Choice(["vtk", "cgns", "stl"]),
-              required=True, help="输出格式")
-@click.option("--output", "-o", type=click.Path(), help="输出文件路径")
-@click.option("--json", "-j", "json_output", is_flag=True, help="以 JSON 格式输出")
-def convert(input_file: str, format: str, output: str, json_output: bool) -> None:
-    """转换网格为其他格式。
-
-    把 .nas 网格转换为 VTK、CGNS 或 STL 格式。
-
-    Args:
-        input_file: .nas 网格文件路径
-        format: 输出格式（vtk/cgns/stl）
-        output: 输出文件路径
-        json_output: 以 JSON 格式输出结果
-
-    Examples:
-        # 转换为 VTK
-        $ autoflowcfd grid convert sedan.nas -f vtk -o sedan.vtk
-
-        # 转换为 STL
-        $ autoflowcfd grid convert sedan.nas -f stl -o sedan.stl
-
-    Note:
-        这个功能计划在 v1.0 发布。其余全部 grid/solve 子命令都支持
-        --json，成功/失败两条路径都产出真正的 JSON；这个命令此前两者
-        都没有（没有 --json 选项，且 `click.echo({...})` 打印的是
-        Python dict 的 repr——单引号键名，`json.loads()` 解析不了），
-        尽管形状上其余部分与其他命令的 `{"command", "status", ...}`
-        约定一致，会误导调用方以为它遵循同一套契约。这个命令本身仍未
-        实现；现在只是让它以响亮、机器可读的方式失败，而不是静默。
-    """
-    logger.warning("Grid conversion is planned for v1.0 release")
-    result = {
-        "command": "grid.convert",
-        "status": "not_implemented",
-        "message": "Grid conversion not yet implemented",
-    }
-    if json_output:
-        click.echo(json.dumps(result, indent=2))
-    else:
-        click.echo(f"{result['status']}: {result['message']}")
-    raise click.ClickException("Grid conversion is not yet implemented (planned for v1.0)")
-
-
 # generate-volume / import-volume 两个体网格重量级命令已搬到
 # grid_volume_commands.py（见本文件顶部拆分说明），这里用与
 # cli/main.py 给 grid/solve/post/... 注册到 cli 完全一致的
 # add_command 机制接回来，注册后 CLI 可见效果与拆分前完全一致。
 from autoflowcfd.cli.grid.volume_commands import generate_volume, import_volume  # noqa: E402
+from autoflowcfd.cli.grid.convert_command import convert  # noqa: E402,F401
 
 grid.add_command(generate_volume)
 grid.add_command(import_volume)

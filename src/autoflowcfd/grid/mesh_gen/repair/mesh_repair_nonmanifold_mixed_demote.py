@@ -113,8 +113,7 @@ def _split_collapsed_corner_to_2_tets(prisms: np.ndarray, corner: int) -> np.nda
 
 def demote_invalid_prisms_to_tets(
     prism_cells: np.ndarray,
-    bl_cell_groups: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray]:
     """保证没有导出的 CPENTA 引用同一节点两次。
 
     "折叠角"棱柱（增长恰好在某个底顶点冻结，v_i == w_i——参见
@@ -151,21 +150,14 @@ def demote_invalid_prisms_to_tets(
 
     Args:
         prism_cells: (n_prism, 6) 棱柱连接关系
-        bl_cell_groups: (n_prism,) 与 prism_cells 平行的字符串数组——
-            每个降级棱柱的组名称直接由其存活的四面体继承
-            （作为 `cell_groups`/`direct_cell_groups`），因此
-            棱柱所属的壁面边界组不会丢失。
 
     Returns:
-        (new_prism_cells, new_bl_cell_groups, extra_tets, extra_tet_groups)
-        ——无需降级时 extra_tets/extra_tet_groups 为空数组（非 None），
-        因此调用方可以始终无条件地 np.vstack/np.concatenate 它们到
-        merged_cells/cell_groups 上。
+        (new_prism_cells, extra_tets)——无需降级时 extra_tets 为空数组（非 None），
+        因此调用方可以始终无条件地 np.vstack 到 merged_cells 上。
     """
     empty_tets = np.empty((0, 4), dtype=prism_cells.dtype)
-    empty_groups = np.empty((0,), dtype=object)
     if len(prism_cells) == 0:
-        return prism_cells, bl_cell_groups, empty_tets, empty_groups
+        return prism_cells, empty_tets
 
     # 竖直对（折叠角的标志）与全部 15 对的重复计数分开统计，用于区分
     # "干净的单角折叠"（情况 1）与其他重复模式（情况 2）。
@@ -179,14 +171,13 @@ def demote_invalid_prisms_to_tets(
 
     has_dup = total_dup_pairs > 0
     if not has_dup.any():
-        return prism_cells, bl_cell_groups, empty_tets, empty_groups
+        return prism_cells, empty_tets
 
     n_vertical = vertical_match.sum(axis=1)
     clean_single_collapse = has_dup & (total_dup_pairs == 1) & (n_vertical == 1)
     messy = has_dup & ~clean_single_collapse
 
     tet_parts = []
-    group_parts = []
 
     if clean_single_collapse.any():
         collapsed_corner = np.argmax(vertical_match, axis=1)  # 仅在 clean 行上有意义
@@ -196,7 +187,6 @@ def demote_invalid_prisms_to_tets(
                 continue
             two_tets = _split_collapsed_corner_to_2_tets(prism_cells[rows], c)
             tet_parts.append(two_tets)
-            group_parts.append(np.tile(bl_cell_groups[rows], 2))
         logger.warning(
             f"{int(clean_single_collapse.sum())} prism(s) with a single collapsed "
             f"corner (v_i == w_i, invalid as a CPENTA record) - demoting to "
@@ -214,7 +204,6 @@ def demote_invalid_prisms_to_tets(
             (split_tets[:, 1] == split_tets[:, 3]) | (split_tets[:, 2] == split_tets[:, 3])
         )
         valid_tets = split_tets[~degenerate]
-        source_idx = np.tile(bad_idx, 3)[~degenerate]
         logger.warning(
             f"{len(bad_idx)} prism(s) with an unexpected duplicate-vertex pattern "
             f"(not a single clean corner collapse) - falling back to generic "
@@ -222,15 +211,8 @@ def demote_invalid_prisms_to_tets(
             f"{len(valid_tets)} plain tet(s)"
         )
         tet_parts.append(valid_tets)
-        group_parts.append(bl_cell_groups[source_idx])
 
     extra_tets = np.concatenate(tet_parts, axis=0) if tet_parts else empty_tets
-    extra_groups = np.concatenate(group_parts, axis=0) if group_parts else empty_groups
 
     keep_mask = ~has_dup
-    return (
-        prism_cells[keep_mask],
-        bl_cell_groups[keep_mask],
-        extra_tets.astype(prism_cells.dtype),
-        extra_groups,
-    )
+    return prism_cells[keep_mask], extra_tets.astype(prism_cells.dtype)

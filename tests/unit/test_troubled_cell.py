@@ -20,25 +20,20 @@ from autoflowcfd.core.fr_operators.troubled_cell import (
 
 
 def _reference_cell_face_misalignment(mesh):
-    """Independent per-face Python-loop oracle for
-    `precompute_cell_face_misalignment`'s numba kernel (real perf bug this
-    guards against: indexing `mesh.face_flux_points[f]` for every face
-    lazily *constructs* a full FaceFluxPointGeometry object per access -
-    1.88M such constructions measured to cost minutes on a production mesh,
-    see `_cell_face_misalignment_kernel`'s docstring for the fix).
+    """`precompute_cell_face_misalignment` 的 numba 核的独立逐面 Python 循环
+    参照实现（它防的真实性能缺陷：对每个面取 `mesh.face_flux_points[f]` 每次
+    访问都会惰性*构造*一个完整的 FaceFluxPointGeometry 对象——生产网格上
+    188 万次这样的构造实测要几分钟，修法见
+    `_cell_face_misalignment_kernel` 的文档）。
 
-    Updated 2026-08-23 (see fr/face_flux_points/exact_normal.py module
-    docstring): `own_dir_outward` used to be computed here via its own
-    independent SP-grid Lagrange extrapolation of `adj_j` - an
-    *approximation* of the true local metric direction, with real
-    truncation error (worse at low order). The production kernel now reads
-    the exact per-FP adj(J) row precomputed at mesh-load time instead of
-    extrapolating - this reference must use the same exact values (still
-    computed independently here, via `compute_exact_adj_rows` rather than
-    the kernel's own precomputed arrays, so this remains a real oracle for
-    the *reduction loop* logic, not a tautology) or it would be comparing
-    the new kernel against a stale, less-accurate approximation of a
-    different quantity.
+    2026-08-23 更新（见 fr/face_flux_points/exact_normal.py 模块文档）：
+    `own_dir_outward` 此前在这里由自己独立的一份解点网格 Lagrange 外插从
+    `adj_j` 算出——是真实局部度量方向的*近似*，有真实的截断误差（低阶更差）。
+    生产核现在读取网格加载时预先算好的逐通量点精确 adj(J) 行，不再外插——
+    这份参照实现必须用同样的精确值（仍在这里独立计算，经
+    `compute_exact_adj_rows` 而不是核自己预先算好的数组，所以对*归约循环*
+    的逻辑它仍是真正的参照而不是同义反复），否则就是拿新核去和一个过时、
+    精度更低、算的还是另一个量的近似比较。
     """
     from autoflowcfd.fr.face_flux_points.exact_normal import compute_exact_adj_rows
 

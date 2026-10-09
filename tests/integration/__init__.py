@@ -1,5 +1,4 @@
-"""Integration tests for AutoFlowCFD.
+"""AutoFlowCFD 集成测试。
 
-Integration tests verify that multiple modules work together correctly,
-testing complete workflows from grid parsing to result output.
+集成测试验证多个模块协同工作是否正确，覆盖从网格解析到结果输出的完整流程。
 """

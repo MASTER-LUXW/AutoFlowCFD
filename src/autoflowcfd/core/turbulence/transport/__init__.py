@@ -46,23 +46,10 @@ ODE 源项弛豫，而是通过 FR 高阶离散真正参与空间输运。
 """
 
 from .faces import (  # noqa: F401
-    ScalarConvectionGeometry,
-    _extrapolate_scalar_to_faces,
-    _extrapolate_scalar_to_faces_neighbor_frame,
-    _lift_side_jumps,
-    precompute_scalar_convection_geometry,
+    ScalarConvectionGeometry, _extrapolate_scalar_to_faces, precompute_scalar_convection_geometry,
 )
-from .convection import (  # noqa: F401
-    _TURB_OVERINT_CHUNK_CELLS,
-    _turb_overint_ops,
-    _scalar_convection_volume_overintegrated,
-    compute_scalar_convection_residual,
-    resolve_turb_overintegration,
-)
-from .diffusion import (  # noqa: F401
-    _scalar_diffusion_volume_overintegrated,
-    compute_scalar_diffusion_residual,
-)
+from .convection import compute_scalar_convection_residual, resolve_turb_overintegration  # noqa: F401
+from .diffusion import compute_scalar_diffusion_residual  # noqa: F401
 from .omega_wall import (  # noqa: F401
     _OMEGA_WALL_CMU,
     _OMEGA_WALL_KAPPA,

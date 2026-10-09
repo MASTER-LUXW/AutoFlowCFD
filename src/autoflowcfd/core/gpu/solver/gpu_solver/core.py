@@ -22,6 +22,7 @@ from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIE
 from autoflowcfd.core.fr_solver.state import N_MEAN_FLOW_VARS
 from autoflowcfd.core.fr_solver.solver.solve_loop import SolveLoopMixin
 from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
+from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
 
 class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverStepMixin, _GPUSolverInitMixin,
@@ -118,13 +119,9 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         GPU 湍流模型支持范围（#7，V2.0 专家组盲审第四轮，2026-08-28）：
         NONE/SST/DDES/IDDES/WMLES/LES 均已实现（core/gpu/turbulence/
         gpu_turbulence_sst.py、gpu_turbulence_des.py、gpu_sgs.py、
-        gpu_turbulence_wmles.py）。明确的、真实的既有限制（不是本次
-        遗漏，是本次移植范围之外的独立大工作）：GPU 版 k/omega 输运
-        （gpu_scalar_transport.py）只有 isfinite 归零这一道防线 ——
-        **这条此前记作"缺少 suppress_residual_outliers 那样的离群值
-        抑制"，2026-09-19 起不再是缺口**：机制3 已整体删除（真实网格
-        消融对照证明它无效，见 fr_residual/inviscid.py），CPU 侧现在
-        同样只有 isfinite 归零，两侧对称。
+        gpu_turbulence_wmles.py）。k/omega 输运（gpu_scalar_transport.py）与 CPU 侧同样只有 isfinite
+        归零这一道防线（离群值抑制"机制3"已于 2026-09-19 在两侧一并删除——真实网格消融对照证明它无效，
+        见 fr_residual/inviscid.py），两侧对称。
         GPU 侧整体仍未在真实 CUDA 硬件上执行验证过（本机
         无 CuPy），已用 numpy 替身对照 CPU 版逐位数值核对过所有新增
         公式，但真正的端到端 GPU 冒烟测试需要用户在有 GPU 的环境上补做。
@@ -314,7 +311,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
                 h_max_cpu, _ = compute_h_max_and_h_wn(mesh)
                 with cp.cuda.Device(device_id):
                     self._iddes_h_max_gpu = cp.asarray(h_max_cpu)
-                print(f"   [OK] GPU DDES model initialized (based on SST)")
+                print("   [OK] GPU DDES model initialized (based on SST)")
             elif turb_model_upper == "IDDES":
                 from autoflowcfd.core.gpu.turbulence.gpu_turbulence_des import GPUIDDESModel
                 from autoflowcfd.core.turbulence.des import compute_h_max_and_h_wn
@@ -327,17 +324,17 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
                 with cp.cuda.Device(device_id):
                     self._iddes_h_max_gpu = cp.asarray(h_max_cpu)
                     self._iddes_h_wn_gpu = cp.asarray(h_wn_cpu)
-                print(f"   [OK] GPU IDDES model initialized (based on SST)")
+                print("   [OK] GPU IDDES model initialized (based on SST)")
 
         elif turb_model_upper == "WMLES":
             from autoflowcfd.core.gpu.turbulence.gpu_sgs import GPUWALEModel
             self.sgs_model_gpu = GPUWALEModel()
-            print(f"   [OK] GPU WMLES model initialized (wall stress correction + WALE SGS)")
+            print("   [OK] GPU WMLES model initialized (wall stress correction + WALE SGS)")
 
         elif turb_model_upper == "LES":
             from autoflowcfd.core.gpu.turbulence.gpu_sgs import GPUWALEModel
             self.sgs_model_gpu = GPUWALEModel()
-            print(f"   [OK] GPU LES with WALE SGS model initialized")
+            print("   [OK] GPU LES with WALE SGS model initialized")
 
         # 网格尺度 Delta = V^(1/3)（WALE/Smagorinsky 用，与 CPU 版
         # fr_solver/solver_geometry.py::_get_grid_scale 同一个公式）：
@@ -377,7 +374,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         self._init_modal_filter_gpu()
 
         # DUAL_TIME 专用：物理时间层 n-1 的解（BDF2 时间导数项需要）
-        self._dual_time_U_prev = None
+        reset_dual_time_history(self)
 
         # NEWTON_KRYLOV 跨步状态（含义见 time_integration/implicit/mean_flow_step.py）
         from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
@@ -396,7 +393,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
             f"GPUFRSolver initialized: {n_cells} cells, P{order}, "
             f"device {device_id}, scheme={time_scheme}, CFL={self._current_cfl():g}"
         )
-        print(f"✅ GPUFRSolver Ready:")
+        print("✅ GPUFRSolver Ready:")
         print(f"   Cells: {n_cells}, Order: P{order}")
         print(f"   Device: {device_id} ({self.array_mgr._device_name})")
         print(f"   Time Scheme: {time_scheme}")
@@ -433,6 +430,12 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         view = self.host_view()
         yield view
         view.push()
+
+    def set_dual_time_history(self, U_prev_flat) -> None:
+        """恢复 dual-time 的上一物理时间层（放到本 GPU 上）。"""
+        cp = get_cupy()
+        with cp.cuda.Device(self.device_id):
+            self._dual_time_U_prev = cp.asarray(U_prev_flat, dtype=cp.float64)
 
     def _loop_monitor_suffix(self) -> str:
         mem = self.array_mgr.get_memory_usage()

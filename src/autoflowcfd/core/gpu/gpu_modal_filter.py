@@ -11,7 +11,7 @@ AutoFlowCFD V2.0 - GPU 版模态滤波
 - 与 CPU 版公式完全一致
 """
 
-from typing import Callable, Optional
+from typing import Callable
 
 import numpy as np
 
@@ -99,7 +99,6 @@ def build_gpu_filter_func(
         Returns:
             filtered_U: CuPy 数组 (n_cells * n_sps, n_vars)
         """
-        cp = get_cupy()
         n_vars = U_flat.shape[1]
 
         # 重塑为 (n_cells, n_sps, n_vars)

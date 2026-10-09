@@ -1,13 +1,12 @@
-"""Topology and validity tests for generated volume meshes.
+"""生成的体网格的拓扑与有效性测试。
 
-These tests target the mesh-generation defects found in the grid audit:
+这些测试针对网格审计里发现的网格生成缺陷：
 
-* prism -> tetrahedron splitting must be **conformal** (every interior face is
-  shared by exactly two cells).  A blindly-applied fixed template produces
-  hanging faces that the finite-volume face extractor then mistakes for
-  boundary faces, silently turning interior regions into walls.
-* generated tetrahedra must have **positive signed volume**, so that inverted
-  cells can be detected instead of being hidden behind ``abs()``.
+* 棱柱 -> 四面体的拆分必须**协调**（每个内部面恰好被两个单元共享）。
+  盲目套用固定模板会产生悬挂面，有限体积的面提取器会把它们当成边界面，
+  把内部区域静默地变成壁面。
+* 生成的四面体必须有**正的有符号体积**，这样翻转的单元才能被检出，
+  而不是被 ``abs()`` 掩盖。
 """
 
 import numpy as np
@@ -19,7 +18,7 @@ from autoflowcfd.grid.mesh_gen.tetgen.mesh_prism_to_tet import (
 
 
 def _flat_patch(nx=3, ny=3, lx=1.0, ly=1.0):
-    """Triangulated flat surface patch in the z=0 plane."""
+    """z=0 平面上三角化的平面片。"""
     xs = np.linspace(0.0, lx, nx + 1)
     ys = np.linspace(0.0, ly, ny + 1)
     nodes, idx = [], {}
@@ -36,21 +35,20 @@ def _flat_patch(nx=3, ny=3, lx=1.0, ly=1.0):
             b = idx[(i + 1, j)]
             c = idx[(i + 1, j + 1)]
             d = idx[(i, j + 1)]
-            # Two triangles per quad, deliberately with mixed winding so the
-            # test does not depend on a tidy input ordering.
+            # 每个四边形拆成两个三角形，故意混用绕向，让测试不依赖整齐的输入顺序。
             faces.append([a, b, c])
             faces.append([c, d, a])
     return nodes, np.array(faces, dtype=np.int64)
 
 
 def _stack_layers(base_nodes, n_layers=4, dz=0.1):
-    """Stack the patch into n_layers, returning all_nodes."""
+    """把这片堆成 n_layers 层，返回 all_nodes。"""
     layers = [base_nodes + np.array([0.0, 0.0, k * dz]) for k in range(n_layers)]
     return np.vstack(layers)
 
 
 def _face_occurrence_counts(tets):
-    """Count how many cells each triangular face belongs to."""
+    """统计每个三角形面属于几个单元。"""
     templates = np.array([[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]], dtype=np.int64)
     faces = tets[:, templates].reshape(-1, 3)
     faces = np.sort(faces, axis=1)
@@ -59,18 +57,15 @@ def _face_occurrence_counts(tets):
 
 
 class TestPrismSplitConformality:
-    # NOTE: layer_conn below always has n_layers - 1 entries (one per
-    # extrusion STEP), not n_layers (one per node-layer) - see
-    # convert_layers_to_tetrahedra's own layer_connectivity docstring.
-    # Passing n_layers entries here used to silently miscompute
-    # nodes_per_layer internally (off by one), which conformality/closed-
-    # surface checks don't happen to notice but the volume checks below do.
+    # 注意：下面的 layer_conn 总是 n_layers - 1 项（每个挤出**步**一项），
+    # 不是 n_layers 项（每层节点一项）——见 convert_layers_to_tetrahedra 的
+    # layer_connectivity 文档。这里传 n_layers 项曾让内部的 nodes_per_layer 静默
+    # 算错（差一），协调性/封闭面检查恰好注意不到，但下面的体积检查能发现。
     def test_every_face_shared_by_at_most_two_cells(self):
-        """The definitive conformality check.
+        """决定性的协调性检查。
 
-        In a valid volume mesh a face is either on the boundary (1 cell) or
-        interior (2 cells).  A count of 3+ means neighbouring prisms disagreed
-        on a diagonal, i.e. the mesh is non-conformal.
+        有效的体网格里，一个面要么在边界上（1 个单元）要么在内部（2 个单元）。
+        计数 3 以上说明相邻棱柱在对角线上不一致，即网格不协调。
         """
         base_nodes, base_faces = _flat_patch()
         n_layers = 4
@@ -86,11 +81,10 @@ class TestPrismSplitConformality:
         )
 
     def test_boundary_faces_form_closed_surface(self):
-        """Faces owned by exactly one cell must enclose the volume.
+        """只属于一个单元的面必须围成整个体积。
 
-        For a closed surface the sum of outward area vectors vanishes.  If the
-        split were non-conformal, spurious 'boundary' faces would appear in the
-        interior and this sum would not cancel.
+        封闭面的外向面积矢量之和为零。拆分不协调时，内部会出现伪"边界"面，
+        这个和就不会抵消。
         """
         base_nodes, base_faces = _flat_patch()
         n_layers = 4
@@ -112,7 +106,7 @@ class TestPrismSplitConformality:
         areas = 0.5 * np.linalg.norm(raw, axis=1)
         unit = raw / np.maximum(2.0 * areas, 1e-30)[:, None]
 
-        # Orient each boundary face outward w.r.t. its owning cell.
+        # 把每个边界面相对所属单元定向为朝外。
         owner = np.repeat(np.arange(len(tets)), 4)[boundary_positions]
         centroids = all_nodes[tets].mean(axis=1)
         fc = (p0 + p1 + p2) / 3.0
@@ -127,7 +121,7 @@ class TestPrismSplitConformality:
         )
 
     def test_all_volumes_positive(self):
-        """Signed volumes must be positive after orientation repair."""
+        """朝向修复之后有符号体积必须为正。"""
         base_nodes, base_faces = _flat_patch()
         n_layers = 3
         all_nodes = _stack_layers(base_nodes, n_layers)
@@ -143,7 +137,7 @@ class TestPrismSplitConformality:
         )
 
     def test_volume_sums_to_slab_volume(self):
-        """Total mesh volume must equal the analytic extruded slab volume."""
+        """网格总体积必须等于挤出平板的解析体积。"""
         base_nodes, base_faces = _flat_patch(nx=3, ny=3, lx=1.0, ly=1.0)
         n_layers, dz = 4, 0.1
         all_nodes = _stack_layers(base_nodes, n_layers, dz)
@@ -160,7 +154,7 @@ class TestPrismSplitConformality:
 class TestOrientTetrahedra:
     def test_flips_inverted_cell(self):
         nodes = np.array([[0.0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]])
-        # Deliberately inverted ordering (negative signed volume).
+        # 故意颠倒的顺序（有符号体积为负）。
         tets = np.array([[0, 1, 3, 2]], dtype=np.int64)
         p0, p1, p2, p3 = (nodes[tets[:, i]] for i in range(4))
         before = np.einsum('ij,ij->i', p1 - p0, np.cross(p2 - p0, p3 - p0))

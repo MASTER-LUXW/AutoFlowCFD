@@ -27,7 +27,6 @@ from .mesh_tetgen_postprocess import (
     _dedupe_coincident_points,
     subdivide_oversized_tetrahedra,
     repair_nonmanifold_cells,
-    attribute_cells_from_trifaces,
 )
 from .mesh_tetgen_seeding import (
     estimate_steinerleft,
@@ -45,7 +44,6 @@ __all__ = [
     'compute_local_thickness_limit',
     'subdivide_oversized_tetrahedra',
     'repair_nonmanifold_cells',
-    'attribute_cells_from_trifaces',
     'estimate_steinerleft',
     'generate_core_background_points',
     'prepare_plc_input',
@@ -103,12 +101,11 @@ def fill_core_volume(
     mindihedral: float = 15.0,
     holes: Optional[List[np.ndarray]] = None,
     regions: Optional[List[Tuple[np.ndarray, int, float]]] = None,
-    face_markers: Optional[np.ndarray] = None,
     background_points: Optional[np.ndarray] = None,
     verbose: bool = True,
     force_preserve_boundary: bool = False,
     allow_boundary_bisect: bool = False,
-) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray]]:
+) -> Tuple[np.ndarray, np.ndarray]:
     """对封闭 PLC 围成的体积做约束四面体化。
 
     Args:
@@ -165,12 +162,6 @@ def fill_core_volume(
             限输出完全相同），因为 `nobisect` 禁止在边界面上或附近
             插入点，这也阻止了对边界相邻单元的体积分裂，不仅仅是
             面本身。
-        face_markers: (n_faces,) int32，每个输入面一个标记，与 `regions`
-            配套使用——边界归属机制（mesh_background.py）不能再按节点
-            索引把细分后的边界面对回其源分组（nobisect=False 意味着
-            那些索引在输入中不再原样存在），所以改用 tetgen 自身的
-            facet 标记，每个被标记面的子面都继承该标记，通过本函数
-            的第 3/4 个返回值返回。
         background_points: (q, 3) 可选的额外自由点，不被 `faces` 任何
             行引用，在 tetgen 运行前拼接到 `points` 末尾（见上方
             `generate_core_background_points` 关于如何为稀疏远场逃逸
@@ -191,17 +182,14 @@ def fill_core_volume(
             例行进度。
 
     Returns:
-        (nodes, tets, trifaces, triface_markers)：nodes shape=(n, 3)
-        float64（输入点原样保留为前 len(points) 行，即使在 subdivision
-        下也是如此——经验验证，tetgen 只追加新点，从不重排/替换现有点），
-        tets shape=(m, 4) int64。trifaces/triface_markers 除非
-        `face_markers` 被给定否则为 None，否则为四面体化后的边界三角
-        （shape=(p, 3) int64，索引到 `nodes`）及其继承的标记
-        （shape=(p,) int32）。
+        (nodes, tets)：nodes shape=(n, 3) float64（输入点原样保留为前 len(points) 行，即使在 subdivision
+        下也是如此——经验验证，tetgen 只追加新点，从不重排/替换现有点），tets shape=(m, 4) int64。
+        边界面被细分时外部面是输入三角形的细分；边界组由生成器最后按几何包含关系统一给出
+        （`mesh_boundary.map_generated_boundaries`），这里不追踪。
     """
     import tetgen
 
-    points, faces, face_markers = prepare_plc_input(points, faces, background_points, face_markers)
+    points, faces = prepare_plc_input(points, faces, background_points)
 
     # 稍微放宽质量约束以确保在复杂 BL 表面上收敛。
     effective_minratio = max(1.1, minratio - 0.2)
@@ -239,10 +227,7 @@ def fill_core_volume(
         f"minratio={effective_minratio:.1f}, mindihedral={effective_mindihedral:.1f})..."
     )
 
-    if face_markers is not None:
-        tgen = tetgen.TetGen(points, faces, np.ascontiguousarray(face_markers, dtype=np.int32))
-    else:
-        tgen = tetgen.TetGen(points, faces)
+    tgen = tetgen.TetGen(points, faces)
     if holes:
         for hole_pt in holes:
             tgen.add_hole(hole_pt)
@@ -255,7 +240,7 @@ def fill_core_volume(
         log(f"Marked {len(regions)} graded max-cell-size region(s)")
 
     steinerleft = estimate_steinerleft(points, regions)
-    # Optimization: For sharp-corner models, increase the Steiner point budget
+    # 锐角模型需要更多 Steiner 点：预算至少 50 万
     steinerleft = max(steinerleft, 500_000)
     log(f"Steiner-point budget: {steinerleft:,}")
 
@@ -293,12 +278,6 @@ def fill_core_volume(
             raise translated from e
         raise
 
-    trifaces = None
-    triface_markers = None
-    if face_markers is not None:
-        trifaces = tgen.trifaces.astype(np.int64)
-        triface_markers = tgen.triface_markers.astype(np.int32)
-
     n_input = len(points)
     conformal = nodes.shape[0] >= n_input and np.array_equal(nodes[:n_input], points)
 
@@ -308,17 +287,8 @@ def fill_core_volume(
             "(likely near-duplicate/degenerate input facets); "
             "falling back to coincident-point stitching"
         )
-        nodes, elems, remap = _dedupe_coincident_points(nodes, elems)
-        if trifaces is not None:
-            # trifaces 是在去重前的索引空间（即上面那行操作前的 `nodes`
-            # 数组）中从 tgen.trifaces 读取的。不做 remap 的话，会与
-            # 现在重新编号的 nodes/elems 失去同步——mesh_background.
-            # attribute_cells_from_trifaces 按排序节点三元组匹配
-            # trifaces 和 core_tets，所以过时的索引空间会让该匹配在
-            # 此回退和 face_markers（即 max_cell_size）同时激活时静默
-            # 漏掉或错误归属边界单元。
-            trifaces = remap[trifaces]
+        nodes, elems, _remap = _dedupe_coincident_points(nodes, elems)
 
     log(f"Core tetrahedralization complete: {len(nodes)} nodes, {len(elems)} tets")
 
-    return nodes.astype(np.float64), elems.astype(np.int64), trifaces, triface_markers
+    return nodes.astype(np.float64), elems.astype(np.int64)

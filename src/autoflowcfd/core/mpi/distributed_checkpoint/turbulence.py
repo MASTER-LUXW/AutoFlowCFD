@@ -63,9 +63,11 @@ def gather_turbulence_fields(solver, n_global: int, order: int, is_prism_global)
     return out
 
 
-def restore_turbulence_fields(solver, fields: dict, *, source: str) -> bool:
-    """由全局字段恢复本 rank 的输运场与涡粘，并跳过产生项斜坡（湍流已发展）。字段缺失（层流、
-    另一个湍流模型或旧版本 checkpoint）时保留构造时的来流初值并返回 False。"""
+def restore_turbulence_fields(solver, fields: dict, metadata: dict, *, source: str) -> bool:
+    """由全局字段恢复本 rank 的输运场与涡粘，并按 `metadata` 记录的进度续接产生项渐变（与单机恢复端共用
+    `restore_production_ramp`）。字段缺失（层流、另一个湍流模型或旧版本 checkpoint）时保留构造时的来流初值
+    并返回 False。"""
+    from autoflowcfd.core.fr_solver.turbulence.init import restore_production_ramp
     from autoflowcfd.core.mpi import is_root
 
     model, is_gpu = transported_model(solver)
@@ -94,7 +96,5 @@ def restore_turbulence_fields(solver, fields: dict, *, source: str) -> bool:
     model.restore_transported(local[:len(names)], source=source)
     if len(local) > len(names):
         model.nu_t = local[len(names)]
-    model.production_factor = 1.0
-    solver._turb_ramp_step = solver._turb_production_ramp_steps
-    solver._turb_production_ramp_complete = True
+    restore_production_ramp(solver, model, metadata)
     return True

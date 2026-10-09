@@ -1,10 +1,10 @@
-"""阶段 B：结合 BL 厚度封顶与 cavity 重新铺网的定向再生成。
+"""阶段 B'：局部空腔重铺。
 
 从 mesh_background.py 拆分出来以控制行数。
 """
 
 import numpy as np
-from typing import List, Optional, Tuple, TYPE_CHECKING
+from typing import List, Tuple, TYPE_CHECKING
 from loguru import logger
 
 if TYPE_CHECKING:
@@ -15,55 +15,42 @@ if TYPE_CHECKING:
 def run_stage_b_repair(
     merged_nodes: np.ndarray,
     merged_cells: np.ndarray,
-    cell_groups: np.ndarray,
-    n_bl_cells: int,
     pre_repair_faces: 'FaceData',
     bad_mask: np.ndarray,
     validator: 'MeshQualityValidator',
-    min_cell_size: float,
-    bl_source_vertex: np.ndarray,
-    bl_extrude_faces: np.ndarray,
-    surface_nodes: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str], Optional[np.ndarray], Optional[np.ndarray]]:
-    """执行阶段 B：局部空腔重铺网和/或 BL 厚度封顶。
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
+    """阶段 B'：对阶段 A 后仍不合格的单元做局部空腔重铺（最多 3 轮）。
+
+    2026-10-09 以前这里还有"按残留坏单元局部封顶 BL 厚度、整体重新生成"的阶段 B 重试：它按
+    `bad_cell_mask[:n_bl_cells]` 挑 BL 单元，而 BL 早已改成独立的棱柱数组，四面体集合里的 BL 单元数恒为 0，
+    这条重试从未执行过（cube_demo 剩 887 个坏单元也没触发），已删除。
 
     Args:
         merged_nodes: 节点坐标数组。
-        merged_cells: 单元连接数组。
-        cell_groups: 单元组标签。
-        n_bl_cells: BL 单元数量。
+        merged_cells: 四面体连接数组。
         pre_repair_faces: 预提取的面数据。
         bad_mask: 阶段 A 输出的坏单元掩码。
         validator: 质量验证器实例。
-        min_cell_size: 最小单元尺寸参数。
-        bl_source_vertex: BL 节点到表面顶点的映射。
-        bl_extrude_faces: 用于 BL 拉伸的面。
-        surface_nodes: 原始表面节点。
 
     Returns:
-        (新节点, 新单元, 新单元组, 新坏单元掩码, 修复动作列表,
-        extra_limit, bl_verts) 元组 —— 后两者是下方计算的 BL 厚度
-        封顶覆盖值（如果阶段 B' 的空腔重铺已清除所有坏单元则为
-        (None, None)），返回给调用方 (mesh_background.generate_hybrid_mesh)
-        以便在重试时复用，避免用相同参数重新计算完全相同的
-        Dijkstra 结果。
+        (新节点, 新单元, 新坏单元掩码, 修复动作列表)
     """
-    from .mesh_repair import remesh_core_cavity, compute_bl_thickness_limit_override
+    from autoflowcfd.grid.mesh_gen.repair.mesh_repair_cavity import remesh_core_cavity
     from ..extraction.face_extractor import FaceExtractor
     from ...schema.grid_nodes import NodeArray
 
     repair_actions = []
 
     if not np.any(bad_mask):
-        return merged_nodes, merged_cells, cell_groups, bad_mask, repair_actions, None, None
+        return merged_nodes, merged_cells, bad_mask, repair_actions
 
     # Stage B': Local cavity remesh
     max_b_prime_attempts = 3
     b_prime_attempt_count = 0
 
     while np.any(bad_mask) and b_prime_attempt_count < max_b_prime_attempts:
-        merged_nodes, merged_cells, cell_groups, bad_mask, cavity_actions = remesh_core_cavity(
-            merged_nodes, merged_cells, cell_groups, n_bl_cells, pre_repair_faces, bad_mask, validator,
+        merged_nodes, merged_cells, bad_mask, cavity_actions = remesh_core_cavity(
+            merged_nodes, merged_cells, pre_repair_faces, bad_mask, validator,
         )
         repair_actions.extend(cavity_actions)
 
@@ -93,25 +80,4 @@ def run_stage_b_repair(
         logger.warning(f"Stage B' reached max attempts ({max_b_prime_attempts}), "
                        f"{int(np.sum(bad_mask))} bad cells remain.")
 
-    # Stage B: BL thickness capping retry
-    extra_limit, bl_verts = None, None
-    if np.any(bad_mask):
-        n_bad = int(np.sum(bad_mask))
-        cap_thickness = min_cell_size * 3.0
-        extra_limit, bl_verts = compute_bl_thickness_limit_override(
-            bad_mask, n_bl_cells, merged_cells, len(surface_nodes), cap_thickness,
-            nodes_per_layer=len(bl_source_vertex), node_original_vertex=bl_source_vertex,
-            local_surface_faces=bl_extrude_faces,
-        )
-
-        if extra_limit is not None:
-            logger.warning(
-                f"Stage A/B' left {n_bad} cells still bad ({len(bl_verts)} BL vertices "
-                f"implicated) - triggering Stage B: targeted local BL thickness cap."
-            )
-            # 注意：实际的重试逻辑（再次调用 generate_hybrid_mesh）
-            # 由 mesh_background.py 中的编排器处理，使用下面返回的
-            # extra_limit/bl_verts。
-            repair_actions.append(f"Stage B: computed thickness limit for {len(bl_verts)} vertices")
-
-    return merged_nodes, merged_cells, cell_groups, bad_mask, repair_actions, extra_limit, bl_verts
+    return merged_nodes, merged_cells, bad_mask, repair_actions

@@ -97,16 +97,11 @@ class TestDemoteInvalidPrismsToTets:
         row = [0, 1, 2, 3, 4, 5]
         row[3 + corner] = row[corner]
         prism_cells = np.array([row], dtype=np.int64)
-        bl_cell_groups = np.array(['WALL'], dtype=object)
 
-        new_prism, new_groups, extra_tets, extra_groups = demote_invalid_prisms_to_tets(
-            prism_cells, bl_cell_groups
-        )
+        new_prism, extra_tets = demote_invalid_prisms_to_tets(prism_cells)
 
         assert len(new_prism) == 0, "折叠棱柱本身必须从存活棱柱数组中移除"
-        assert len(new_groups) == 0
         assert extra_tets.shape == (2, 4), "干净单角折叠必须精确产出 2 个四面体，不多不少"
-        assert list(extra_groups) == ['WALL', 'WALL'], "子四面体必须继承源棱柱的边界组标签"
 
         vols = _tet_volumes(_REGULAR_PRISM_NODES, extra_tets)
         ref_volume = compute_prism_volumes(_REGULAR_PRISM_NODES, prism_cells)[0]
@@ -115,24 +110,16 @@ class TestDemoteInvalidPrismsToTets:
 
     def test_no_duplicates_returns_input_unchanged(self):
         prism_cells = np.array([[0, 1, 2, 3, 4, 5]], dtype=np.int64)
-        bl_cell_groups = np.array(['WALL'], dtype=object)
 
-        new_prism, new_groups, extra_tets, extra_groups = demote_invalid_prisms_to_tets(
-            prism_cells, bl_cell_groups
-        )
+        new_prism, extra_tets = demote_invalid_prisms_to_tets(prism_cells)
 
         assert np.array_equal(new_prism, prism_cells)
-        assert np.array_equal(new_groups, bl_cell_groups)
         assert len(extra_tets) == 0
-        assert len(extra_groups) == 0
 
     def test_empty_input(self):
         prism_cells = np.empty((0, 6), dtype=np.int64)
-        bl_cell_groups = np.empty((0,), dtype=object)
 
-        new_prism, new_groups, extra_tets, extra_groups = demote_invalid_prisms_to_tets(
-            prism_cells, bl_cell_groups
-        )
+        new_prism, extra_tets = demote_invalid_prisms_to_tets(prism_cells)
         assert len(new_prism) == 0
         assert len(extra_tets) == 0
 
@@ -147,16 +134,12 @@ class TestDemoteInvalidPrismsToTets:
         # v0==v1（同一底面内重复，不是竖直对）且 w0==w1（顶面同样重复）:
         # 两对重复，且都不是 v_i==w_i 形式。
         prism_cells = np.array([[0, 0, 2, 3, 3, 5]], dtype=np.int64)
-        bl_cell_groups = np.array(['WALL'], dtype=object)
 
-        new_prism, new_groups, extra_tets, extra_groups = demote_invalid_prisms_to_tets(
-            prism_cells, bl_cell_groups
-        )
+        new_prism, extra_tets = demote_invalid_prisms_to_tets(prism_cells)
         assert len(new_prism) == 0
         # 通用拆分对这个特定简并输入可能产出 0~3 个非退化子四面体，
         # 只要求形状一致、不崩溃。
         assert extra_tets.shape[1] == 4
-        assert len(extra_groups) == len(extra_tets)
 
     def test_mixed_batch_clean_and_messy_together(self):
         """同一批里既有干净单角折叠又有杂乱模式，两条路径的结果必须
@@ -168,15 +151,11 @@ class TestDemoteInvalidPrismsToTets:
         good_row = [20, 21, 22, 23, 24, 25]  # 无重复，应原样保留
 
         prism_cells = np.array([clean_row, messy_row, good_row], dtype=np.int64)
-        bl_cell_groups = np.array(['WALL', 'INLET', 'OUTLET'], dtype=object)
 
-        new_prism, new_groups, extra_tets, extra_groups = demote_invalid_prisms_to_tets(
-            prism_cells, bl_cell_groups
-        )
+        new_prism, extra_tets = demote_invalid_prisms_to_tets(prism_cells)
 
         assert len(new_prism) == 1
         assert np.array_equal(new_prism[0], good_row)
-        assert new_groups[0] == 'OUTLET'
         # 干净折叠贡献 2 个四面体，杂乱模式贡献若干个（>=0）。
         assert extra_tets.shape[1] == 4
-        assert 'WALL' in extra_groups  # 来自 clean_row 的子四面体
+        assert len(extra_tets) >= 2

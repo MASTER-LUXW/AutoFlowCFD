@@ -179,6 +179,19 @@ class _MultiGPUTimeStepMixin:
             mu_c = mu_c + rho_c * nu_av_compact
         return mu_c
 
+    def _local_dynamic_eddy_viscosity(self):
+        """本 rank local 单元的动力涡粘 rho*nu_t（湍流模型 + 亚格子，主机数组），层流时 None。
+        供 `core/mpi/global_view.py` 汇总（与上面粘性 CFL 用的是同一组量）。"""
+        n_local = int(self.partition.n_local_cells)
+        model = getattr(self, "turb_model_gpu", None)
+        if model is not None:
+            mu_t = self.U_gpu[:n_local, :, 0] * model.nu_t[:n_local]
+        elif getattr(self, "sgs_model_gpu", None) is not None:
+            mu_t = self._les_mu_t_compact()[self._inv_perm_gpu][:n_local]
+        else:
+            return None
+        return mu_t.get()
+
     def _current_cfl(self) -> float:
         """当前 CFL 数：有自适应控制器时用它，否则退回固定值。
 

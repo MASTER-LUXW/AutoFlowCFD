@@ -7,88 +7,16 @@ nas_export_boundary.py，本文件只保留节点/体单元几何的写入与编
 主要组件：
     - export_volume_mesh_to_nas：主导出函数
     - _write_header：写入 NAS 文件头
-    - _write_nodes：写入 GRID 卡片
+    - _write_nodes：写入 GRID* 卡片（大字段，保留 10 位有效数字）
     - _write_tetrahedra：写入 CTETRA 卡片
     - _write_pentahedra：写入 CPENTA 卡片
 """
 
-import math
 import numpy as np
 from pathlib import Path
 from loguru import logger
 
 from .nas_export_boundary import write_boundaries as _write_boundaries
-
-
-def _format_nastran_compact_exponent(value: float, width: int = 8) -> str:
-    """以 Nastran 紧凑指数格式格式化浮点数（无 'e'）。
-
-    例如 -123000.0 格式化为 "-1.23+05"，保证在 `width` 字符内。
-    这也是 nas_parser_utils.parse_nastran_float 已经知道如何读回的格式，
-    所以舍入后的文件保持自洽。它作为下面 format_coord_8char 的
-    最后手段备选，用于即使 2 位小数定点格式也放不下 8 字符 Nastran
-    小字段的坐标——Python 的 "%e"（之前用过）也放不下：
-    "-5.0000e+04" 是 11 个字符，本身就溢出了它本应保护的字段。
-    汽车外气动域通常有 +/-数十米的范围，即以 scale_factor=1000
-    导出时为 +/-数万千米的 mm，所以这条路径实际上是可以达到的，
-    不仅仅是理论边界情况。
-    """
-    if value == 0.0:
-        return "0.0"
-
-    sign = '-' if value < 0 else ''
-    abs_value = abs(value)
-    exponent = int(math.floor(math.log10(abs_value)))
-    mantissa = abs_value / (10.0 ** exponent)
-    # 防止 log10 舍入恰好落在幂次边界上。
-    if mantissa >= 10.0:
-        mantissa /= 10.0
-        exponent += 1
-    elif mantissa < 1.0:
-        mantissa *= 10.0
-        exponent -= 1
-
-    def _render(mantissa: float, exponent: int) -> str:
-        exp_sign = '+' if exponent >= 0 else '-'
-        exp_str = f"{abs(exponent):02d}"
-        avail = width - len(sign) - 1 - len(exp_str)  # 1 for exp_sign
-        decimals = max(avail - 2, 0)  # 2 = one leading digit + '.'
-        mantissa_str = f"{mantissa:.{decimals}f}" if decimals > 0 else f"{mantissa:.0f}"
-        return mantissa_str, exp_sign, exp_str
-
-    mantissa_str, exp_sign, exp_str = _render(mantissa, exponent)
-    if float(mantissa_str) >= 10.0:
-        # 舍入把尾数又推回了两位数；改用高一级的指数重新渲染，
-        # 保持字段宽度预算正确。
-        exponent += 1
-        mantissa /= 10.0
-        mantissa_str, exp_sign, exp_str = _render(mantissa, exponent)
-
-    result = f"{sign}{mantissa_str}{exp_sign}{exp_str}"
-    if len(result) > width:
-        # 只有指数达到 3 位数（|value| >= 1e100 或 <= 1e-100）才会
-        # 走到这里——对物理网格坐标而言毫无意义，但还是截断而非
-        # 静默溢出这个固定宽度字段。
-        result = result[:width]
-    return result
-
-
-def _format_coord_8char(value: float) -> str:
-    """将坐标格式化以适应 8 字符 Nastran 小字段。
-
-    模块级函数（不是每个节点的闭包），因为它不从调用方捕获任何内容
-    ——之前在 _write_nodes 的循环中每个节点重新定义，无谓地每个节点
-    构造一个新函数对象。
-    """
-    for precision in [6, 5, 4, 3, 2]:
-        formatted = f"{value:.{precision}f}"
-        if len(formatted) <= 8:
-            return formatted
-
-    # 备选方案：Nastran 紧凑指数格式（无 'e'，所以确实
-    # 放得下 8 字符——Python 的 "%e"/.4e 本身是 10-11 字符，会
-    # 静默溢出字段）。
-    return _format_nastran_compact_exponent(value, width=8)
 
 
 def export_volume_mesh_to_nas(
@@ -207,16 +135,11 @@ def _write_header(f, volume_mesh) -> None:
     """
     from datetime import datetime
     
-    # ANSA 风格文件头
-    f.write("$ANSA_VERSION;21.0.1;\n")
-    f.write("$\n")
-    f.write("$\n")
+    # 注释行如实写明来源（2026-10-09 以前写的是 "$ANSA_VERSION;21.0.1;" 与 "file created by ANSA"——
+    # 文件并不是 ANSA 生成的；没有任何解析器依赖这两行，ANSA 导入标准 Nastran bulk data 也不需要它们）
     timestamp = datetime.now().strftime("%a %b %d %H:%M:%S %Y")
-    f.write(f"$ file created by  A N S A  {timestamp}\n")
     f.write("$\n")
-    f.write("$ output from :\n")
-    f.write("$\n")
-    f.write("$ AutoFlowCFD Volume Mesh Export\n")
+    f.write(f"$ AutoFlowCFD Volume Mesh Export  {timestamp}\n")
     f.write(f"$ Nodes: {volume_mesh.node_count:,}\n")
     f.write(f"$ Elements: {volume_mesh.cell_count:,}\n")
     f.write(f"$ Total Volume: {volume_mesh.total_volume:.6e} m^3\n")
@@ -226,17 +149,20 @@ def _write_header(f, volume_mesh) -> None:
     f.write("BEGIN BULK                                                                      \n")
 
 
-def _write_nodes(f, nodes, scale_factor: float) -> None:
-    """写入所有节点的 GRID 卡片。
+def _format_large_field_float(value: float) -> str:
+    """16 字符大字段浮点数（10 位有效数字，`-1.234567890E+03` 恰好 16 字符）。"""
+    return f"{value:16.9E}"
 
-    Nastran 小字段格式（下面实际写入的内容——
-    见 Field 1-6 的内联注释了解权威的列布局）：
-    列 1-8：   "GRID" 关键字
-    列 9-16：  节点 ID（右对齐，8 字符）
-    列 17-24： 坐标系 ID（右对齐，8 字符）
-    列 25-32： X 坐标（右对齐，8 字符）
-    列 33-40： Y 坐标（右对齐，8 字符）
-    列 41-48： Z 坐标（右对齐，8 字符）
+
+def _write_nodes(f, nodes, scale_factor: float) -> None:
+    """写入所有节点的 GRID 卡片（Nastran 大字段格式 `GRID*` + `*` 续行）。
+
+    小字段每个坐标只有 8 个字符：以毫米写出时，量级上千的坐标只剩 3 位小数（1 µm）。2026-10-08 cube_demo
+    实测：同一份生成网格的相邻单元体积比在内存里是 33.20，导出、再导入后变成 222.69（偏斜度 0.975 -> 0.995），
+    边界层与锐边处的近退化单元被坐标截断进一步压扁。大字段保留 10 位有效数字。
+
+        行 1：列 1-8 "GRID*"，9-24 节点 ID，25-40 坐标系 ID（0 = 全局），41-56 X，57-72 Y，73-80 续行标识（空）
+        行 2：列 1-8 "*"（续行），9-24 Z
 
     Args:
         f: 文件句柄
@@ -244,42 +170,19 @@ def _write_nodes(f, nodes, scale_factor: float) -> None:
         scale_factor: 坐标缩放因子
     """
     n_nodes = len(nodes.x)
-
-    # 批量写入以提高性能（每批 1000 个节点）：行累积在列表中，
-    # 每批通过单次 writelines() 调用刷新，而不是每个节点一次 f.write()
-    # ——这是实际的批量 I/O 模式，而不仅仅是批量进度日志节奏。
+    # 批量写入：行累积在列表中，每批一次 writelines()
     batch_size = 1000
-
     for start_idx in range(0, n_nodes, batch_size):
         end_idx = min(start_idx + batch_size, n_nodes)
-
         lines = []
         for i in range(start_idx, end_idx):
-            node_id = i + 1  # Nastran ID 从 1 开始
-            x = nodes.x[i] * scale_factor
-            y = nodes.y[i] * scale_factor
-            z = nodes.z[i] * scale_factor
-
-            x_str = _format_coord_8char(x)
-            y_str = _format_coord_8char(y)
-            z_str = _format_coord_8char(z)
-
-            # Small Field 格式：每个字段严格 8 字符
-            # Field 1 (列 1-8):   "GRID" 关键字
-            # Field 2 (列 9-16):  节点 ID（右对齐）
-            # Field 3 (列 17-24): 坐标系 ID（0 = 全局，显式设置）
-            # Field 4 (列 25-32): X 坐标（右对齐，最多 8 字符）
-            # Field 5 (列 33-40): Y 坐标（右对齐，最多 8 字符）
-            # Field 6 (列 41-48): Z 坐标（右对齐，最多 8 字符）
-            # Field 7-9：省略（末尾字段可以截断）
-
-            lines.append(f"GRID    {node_id:>8}{0:>8}{x_str:>8}{y_str:>8}{z_str:>8}\n")
-
+            x = _format_large_field_float(nodes.x[i] * scale_factor)
+            y = _format_large_field_float(nodes.y[i] * scale_factor)
+            z = _format_large_field_float(nodes.z[i] * scale_factor)
+            lines.append(f"GRID*   {i + 1:>16}{0:>16}{x}{y}\n*       {z}\n")
         f.writelines(lines)
-
         if (start_idx + batch_size) % 10000 == 0:
             logger.debug(f"  Written {start_idx + batch_size}/{n_nodes} nodes")
-
     logger.info(f"  Total nodes written: {n_nodes:,}")
 
 

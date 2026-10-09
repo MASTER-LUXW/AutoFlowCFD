@@ -63,8 +63,8 @@ def _fake_solver(n_cells=2, n_sps=1, n_vars=7, order=0):
 
 class TestWriteCheckpointStoresTargetOrderSeparately:
     def test_target_order_stored_distinctly_from_current_order(self, tmp_path):
-        # Simulates a checkpoint saved mid-ramp: current_order=0 (P0),
-        # but the run's real target is P2.
+        # 模拟爬坡中途保存的 checkpoint：current_order=0（P0），
+        # 但这次运行真正的目标是 P2。
         write_checkpoint(
             _fake_solver(order=0), str(tmp_path), 100, "volume.nas",
             order=0, turbulence_model="sst", backend="cpu",
@@ -77,8 +77,9 @@ class TestWriteCheckpointStoresTargetOrderSeparately:
             assert f["metadata"].attrs["target_order"] == 2
 
     def test_target_order_defaults_to_order_when_not_given(self, tmp_path):
-        """Old call sites / non-ramping runs where order==target_order
-        should keep working without passing target_order explicitly."""
+        """旧的调用点 / 不爬坡的运行（order==target_order）不显式传 target_order
+        也应继续可用。
+        """
         write_checkpoint(
             _fake_solver(order=2), str(tmp_path), 100, "volume.nas",
             order=2, turbulence_model="sst", backend="cpu", quiet=True,
@@ -97,9 +98,8 @@ class TestRebuildRestoresSolverOrderToTarget:
         )
         ckpt = tmp_path / "checkpoints" / "checkpoint_iter_000100.h5"
 
-        # FRSolver mock: mimics the real __init__ behaviour of setting
-        # both current_order and order from the single `order` kwarg it's
-        # constructed with (n_sps=1, matching the checkpoint's P0 shape).
+        # FRSolver 替身：模仿真实 __init__ 的行为，由构造时的单个 `order` 参数
+        # 同时设置 current_order 与 order（n_sps=1，与 checkpoint 的 P0 形状一致）。
         def _fake_frsolver(**kwargs):
             s = _fake_solver(n_cells=2, n_sps=1, order=kwargs["order"])
             return s
@@ -114,21 +114,21 @@ class TestRebuildRestoresSolverOrderToTarget:
         ):
             solver, iteration, metadata = rebuild_solver_from_checkpoint(str(ckpt))
 
-        assert solver.current_order == 0  # matches the saved (n_cells,1,n_vars) state shape
-        assert solver.order == 2  # NOT 0 - restored to the real ramp target
+        assert solver.current_order == 0  # 与保存的 (n_cells,1,n_vars) 状态形状一致
+        assert solver.order == 2  # 不是 0——恢复成真实的爬坡目标
         assert metadata["target_order"] == 2
 
     def test_old_checkpoint_without_target_order_field_falls_back_safely(self, tmp_path):
-        """A checkpoint written before this fix has no target_order key at
-        all - metadata.get("target_order", order) must fall back to order,
-        reproducing the old (order==target_order-always) behaviour rather
-        than crashing on a missing key."""
+        """修复之前写出的 checkpoint 根本没有 target_order 键——
+        metadata.get("target_order", order) 必须退回 order，重现旧的
+        （恒有 order==target_order）行为，而不是因为缺键崩溃。
+        """
         write_checkpoint(
             _fake_solver(n_cells=2, n_sps=27, order=2), str(tmp_path), 100, "volume.nas",
             order=2, turbulence_model="sst", backend="cpu", quiet=True,
         )
         ckpt = tmp_path / "checkpoints" / "checkpoint_iter_000100.h5"
-        # Remove the target_order key to simulate a pre-fix checkpoint.
+        # 去掉 target_order 键，模拟修复之前的 checkpoint。
         import h5py
         with h5py.File(ckpt, "r+") as f:
             del f["metadata"].attrs["target_order"]

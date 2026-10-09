@@ -17,16 +17,27 @@ WMLES 激活时 WALL 组的 ghost state 改用 is_no_slip=False。
 """
 
 from unittest.mock import patch
-
 import numpy as np
 
 from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
+
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
+from tests.unit._boundary_groups import tag_wall_cells
+
+
+class _FakeFaceConnectivity:
+    """4 个面：0、1 是边界面（下面 mock 的组号把它们归入 wall_group），2、3 是内部面。"""
+
+    center = np.zeros((4, 3))
+
+    @staticmethod
+    def get_boundary_face_indices():
+        return np.array([0, 1])
 
 
 class _FakeMesh:
     def __init__(self):
-        self.face_connectivity = object()  # 只需非 None，几何细节由下面的 mock 绕过
+        self.face_connectivity = _FakeFaceConnectivity()
         self.boundary_groups = {"wall_group": np.array([0])}
         self.boundary_bc_types = {"wall_group": "WALL"}
         self.boundary_surface_mesh = None
@@ -95,15 +106,8 @@ class TestRealFRSolverWmlesConstructionOrder:
     def test_fr_solver_wmles_wall_is_no_slip_false(self):
         order = 2
         mesh = _build_synthetic_mixed_mesh(order)
-        # 手动给一个真实边界面的 owner 单元打上 WALL 组标签（沿用
-        # BoundaryMap.groups 的既定约定：name -> owner 单元全局索引数组，
-        # 见 tag_boundary_groups 文档），不依赖 boundary_surface_mesh
-        # （回退到单元级别匹配 `tag_boundary_groups`，足以验证本次修复）。
         fc = mesh.face_connectivity
-        boundary_face = int(np.nonzero(fc.is_boundary)[0][0])
-        wall_cell = int(fc.owner_cell[boundary_face])
-        mesh.boundary_groups = {"wall_group": np.array([wall_cell], dtype=np.int64)}
-        mesh.boundary_bc_types = {"wall_group": "WALL"}
+        tag_wall_cells(mesh, [int(fc.owner_cell[np.nonzero(fc.is_boundary)[0][0]])])
 
         from autoflowcfd.core.fr_solver.solver import FRSolver
         solver = FRSolver(mesh, order=order, turb_model_name="wmles")
@@ -123,10 +127,7 @@ class TestRealFRSolverWmlesConstructionOrder:
         order = 2
         mesh = _build_synthetic_mixed_mesh(order)
         fc = mesh.face_connectivity
-        boundary_face = int(np.nonzero(fc.is_boundary)[0][0])
-        wall_cell = int(fc.owner_cell[boundary_face])
-        mesh.boundary_groups = {"wall_group": np.array([wall_cell], dtype=np.int64)}
-        mesh.boundary_bc_types = {"wall_group": "WALL"}
+        tag_wall_cells(mesh, [int(fc.owner_cell[np.nonzero(fc.is_boundary)[0][0]])])
 
         from autoflowcfd.core.fr_solver.solver import FRSolver
         solver = FRSolver(mesh, order=order, turb_model_name="sst")

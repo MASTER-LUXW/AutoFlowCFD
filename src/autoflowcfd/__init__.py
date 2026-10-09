@@ -73,7 +73,7 @@ __email__ = "luxw_chd@126.com"
 __license__ = "Apache-2.0"
 __name__ = "AutoFlowCFD"  # 添加包名称
 
-from typing import Any, Dict
+from typing import Dict
 
 # 导入主 API 类
 from .api import AutoFlowCFDAPI

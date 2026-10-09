@@ -1,9 +1,7 @@
 """
 AutoFlowCFD V2.0 - 多 GPU 分布式 Order Continuation（2026-09-02）
 
-`MultiGPUDistributedSolver`（"传统模式"：每个 rank 持有完整全局
-`mesh`，见 `gpu_distributed.py::__init__` 的 `partition_info is None`
-分支）的阶数切换重建——与 CPU `DistributedFRSolver`
+`MultiGPUDistributedSolver`（"传统模式"：每个 rank 持有完整全局 `mesh`）的阶数切换重建——与 CPU `DistributedFRSolver`
 （`core/mpi/distributed_order_continuation.py`）同一套设计，唯一区别
 是需要在 CPU（numpy）上做插值/重置运算后再上传 GPU（CuPy 数组不支持
 `np.einsum`，且插值矩阵构造本身是一次性的小矩阵运算，没有必要为它
@@ -16,15 +14,10 @@ multi_gpu_fully_distributed_for_new_order`（root 用持续持有的
 `solver._root_context` 重新计算 + 重新分发新阶数紧凑包，见该函数
 文档），不复用下面"传统模式"的逻辑（那需要每个 rank 持有的完整全局
 `mesh`，这条路径下不存在）。
-
-`__init__` 的 `partition_info` 参数构造模式（与"完全分布式加载"是两个
-不同的东西——`partition_info` 是该构造函数里从未被 CLI 真正使用过的
-遗留/未验证分支，`self.cell_partition` 恒为 None 且不设
-`_is_fully_distributed`）仍然不支持——`solver._is_fully_distributed`
-不为 True 且 `solver.cell_partition is None` 时 fail-fast。
 """
 
 import numpy as np
+from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
 
 
@@ -54,15 +47,6 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
         )
         redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p)
         return
-
-    if getattr(solver, 'cell_partition', None) is None:
-        raise NotImplementedError(
-            "gpu_interpolate_to_new_order: 本 solver 实例是通过 "
-            "partition_info（'分布式加载'）构造的——本 rank 没有完整"
-            "全局网格，Order Continuation 在这条路径上不支持（如实"
-            "报告，见 MultiGPUDistributedSolver.__init__ 文档"
-            "'partition_info' 分支说明）。"
-        )
 
     n_local = solver.partition.n_local_cells
 
@@ -221,8 +205,7 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
 
     # DUAL_TIME 上一物理时间层历史随阶数切换失效——与 CPU 版
     # distributed_order_continuation.py 同一处处理，理由同该文档。
-    if hasattr(solver, '_dual_time_U_prev'):
-        solver._dual_time_U_prev = None
+    reset_dual_time_history(solver)
     # NEWTON_KRYLOV 跨步状态（换阶时置初值，理由见 reset_newton_state 文档）
     from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
 

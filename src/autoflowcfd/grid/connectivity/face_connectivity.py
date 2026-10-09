@@ -369,17 +369,3 @@ def build_face_connectivity(
         is_boundary=is_boundary,
     )
 
-
-# 以下四个函数（边界组标签打标 + 周期边界配对）已拆分到独立文件以控制
-# 单文件行数（本文件此前 675 行，超过 600 行硬性阈值），这里保留原符号名
-# 的 re-export，所有现有调用点（fr_solver/boundary.py 等）的导入路径
-# `from autoflowcfd.grid.connectivity.face_connectivity import X` 不受影响。
-from .face_connectivity_boundary_tags import (  # noqa: E402,F401
-    tag_boundary_groups,
-    tag_boundary_groups_by_geometry,
-    tag_boundary_groups_for_mesh,
-)
-from .face_connectivity_periodic import (  # noqa: E402,F401
-    pair_periodic_boundary_faces,
-    apply_periodic_pairing_from_boundary_map,
-)

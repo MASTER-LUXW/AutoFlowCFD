@@ -17,6 +17,10 @@ from autoflowcfd.core.mpi import is_root, get_rank, get_size
 from autoflowcfd.core.mpi.comm import barrier
 from autoflowcfd.core.utils.checkpoint_physics import physics_metadata
 from autoflowcfd.core.utils.order_continuation.checkpoint_state import phase_state_metadata
+from autoflowcfd.core.fr_solver.turbulence.init import production_ramp_metadata
+from autoflowcfd.core.utils.checkpoint_time import (
+    PREVIOUS_LEVEL_FIELD, TURBULENCE_PREVIOUS_FIELD, previous_level_rows, time_metadata, turbulence_previous_rows,
+)
 
 from .state import gather_global_state
 from .turbulence import gather_turbulence_fields, global_cell_is_prism
@@ -85,6 +89,12 @@ def distributed_save_checkpoint(
     is_prism_global = global_cell_is_prism(solver, n_global)
     turb_fields = gather_turbulence_fields(solver, n_global, order_from_n_sps(int(solver.state.n_sps)),
                                            is_prism_global)
+    # dual-time 的上一物理时间层（全部 rank 的格式相同，要么都有要么都没有）
+    prev_local = previous_level_rows(solver, solver.partition.n_local_cells)
+    prev_global = None if prev_local is None else gather_global_state(prev_local, local_cells, n_global)
+    turb_prev_local = turbulence_previous_rows(solver, solver.partition.n_local_cells)
+    turb_prev_global = (None if turb_prev_local is None
+                        else gather_global_state(turb_prev_local, local_cells, n_global))
 
     if rank != 0:
         barrier()
@@ -114,6 +124,10 @@ def distributed_save_checkpoint(
     solution_cell_avg = reduce_rows_over_real_sps(
         U_global, is_prism_global, order_from_n_sps(U_global.shape[1]), 'mean')
     extra_fields = {"U_sps": U_global, **turb_fields}
+    if prev_global is not None:
+        extra_fields[PREVIOUS_LEVEL_FIELD] = prev_global
+    if turb_prev_global is not None:
+        extra_fields[TURBULENCE_PREVIOUS_FIELD] = turb_prev_global
 
     metadata = {
         "input_file": input_file,
@@ -134,6 +148,8 @@ def distributed_save_checkpoint(
     }
     # Order Continuation 阶段起始残差（与单机写入端共用，见 order_continuation/checkpoint_state.py）
     metadata.update(phase_state_metadata(solver))
+    metadata.update(production_ramp_metadata(solver))
+    metadata.update(time_metadata(solver))
     if surface_mesh:
         # resume 按它重新做边界归属；缺了就退回"无面网格"的几何匹配，
         # 边界组可能与原运行不同（单机写入端一直写这个键）。

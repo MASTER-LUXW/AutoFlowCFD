@@ -88,7 +88,8 @@
 import numpy as np
 import pytest
 
-from ._blasius_case import (
+from ._blasius_case import build_blasius_solver, inlet_outlet_mass_flux, set_blasius_exact_state, wall_shear_profile
+from ._blasius_exact import (
     L_PLATE,
     P_INF,
     RHO_INF,
@@ -98,11 +99,7 @@ from ._blasius_case import (
     blasius_fpp0,
     blasius_profile,
     blasius_thicknesses,
-    build_blasius_solver,
-    inlet_outlet_mass_flux,
     nu_for,
-    set_blasius_exact_state,
-    wall_shear_profile,
 )
 
 
@@ -150,7 +147,7 @@ class TestReferenceSolutionItself:
         assert np.allclose(blasius_cf(x, nu), 0.664 / np.sqrt(re_x))
 
     def test_thicknesses_have_the_standard_ratios(self):
-        """delta99 : delta* : theta = 4.91 : 1.7208 : 0.6641（Blasius）。"""
+        """Blasius 解的厚度比：delta99 : delta* : theta = 4.91 : 1.7208 : 0.6641。"""
         t = blasius_thicknesses(0.5, nu_for(1.0e4))
         assert t["delta_star"] / t["theta"] == pytest.approx(2.591, rel=1e-3)
         assert t["delta99"] / t["theta"] == pytest.approx(7.394, rel=1e-3)
@@ -167,7 +164,7 @@ class TestReferenceSolutionItself:
         （横向速度 `v` 需要 `f` 本身，不只是 `f'`）。这条把它与既有的
         `f'` 实现绑在一起：`d f/d eta` 的数值微分必须回到 `f'`。
         """
-        from ._blasius_case import blasius_f_and_fp
+        from ._blasius_exact import blasius_f_and_fp
 
         eta = np.linspace(0.0, 8.0, 801)
         f, fp = blasius_f_and_fp(eta)
@@ -187,7 +184,7 @@ class TestReferenceSolutionItself:
         近似"）实测让无奇点档的残差比含奇点档还差 4.5 倍 —— `v` 与 `u`
         由连续性方程绑死，取零就是在入口面上违反连续性。
         """
-        from ._blasius_case import blasius_v_over_u
+        from ._blasius_exact import blasius_v_over_u
 
         for re_x in (1.0e3, 5.0e3, 1.0e5):
             got = float(blasius_v_over_u(np.array([10.0]), re_x)[0])

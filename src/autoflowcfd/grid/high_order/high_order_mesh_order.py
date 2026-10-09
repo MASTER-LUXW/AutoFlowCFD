@@ -12,24 +12,17 @@ from typing import TYPE_CHECKING, Dict, Optional
 import numpy as np
 from loguru import logger
 
-from ..curved_mapping.curved_mapping import (
-    CurvedMapping,
-    map_prism_to_physical,
-    map_tet_to_physical,
-)
+from ..curved_mapping.curved_mapping import CurvedMapping, map_prism_to_physical
 from autoflowcfd.fr.operators import generate_fr_operators
 
 if TYPE_CHECKING:
     from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
 
-# Jacobian 计算函数族已拆到 `order_jacobians.py`（2026-09-19，项目
-# "单文件不超 500 行"规范）。这里 import 回来，既有调用点
-# （`high_order_mesh.py` 的薄委托方法、测试）不用改。
-from .order_jacobians import (  # noqa: F401
+# Jacobian 计算函数族在 `order_jacobians.py`（2026-09-19 拆出，项目"单文件不超 500 行"规范）
+from .order_jacobians import (
     _combine_prism_and_tet_jacobians,
     build_fine_metrics,
     _compute_prism_only_jacobians,
-    compute_jacobians_at_ref_points,
     compute_native_prism_jacobians,
     compute_native_tet_jacobians,
 )

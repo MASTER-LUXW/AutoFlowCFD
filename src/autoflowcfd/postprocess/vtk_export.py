@@ -190,11 +190,8 @@ class VTKExporter:
             对照表改为记录日志，BoundaryID 本身不受影响。如果既要二进制
             又要嵌入对照表，优先用 format='xml'（binary+对照表这个组合
             默认就能正常工作）。
-          - BoundaryTypeID（CELL_DATA，int32）：更粗粒度的物理角色分类
-            （WALL/GROUND/INLET/OUTLET/SYMMETRY/FARFIELD），用的是与
-            实际求解路径*完全相同*的分类方式
-            （BoundaryConditionHandler._classify）——而不是这里独立
-            重新推导、可能悄悄偏离求解器实际处理方式的猜测。对照表：
+          - BoundaryTypeID（CELL_DATA，int32）：该面所属边界组的边界条件
+            类型，取网格记录的 `bc_types`（求解器用的就是它）。对照表：
             'BoundaryTypeID_to_Name'。
           - 请求的流场，直接取自每个三角形的 owner 单元（原始、未插值
             的值；这里没有 point-data 处理——仅边界的节点平均在节点被
@@ -240,7 +237,7 @@ class VTKExporter:
         owner_cells = faces.connectivity[bidx, 0].astype(np.int64)
         tri_conn = faces.node_connectivity[bidx]
 
-        boundary_id, type_id, id_legend, type_legend = self._boundary_zone_ids(owner_cells)
+        boundary_id, type_id, id_legend, type_legend = self._boundary_zone_ids(tri_conn)
 
         full_cell_fields = self._cell_fields(fields)
         boundary_fields = {k: v[owner_cells] for k, v in full_cell_fields.items()}
@@ -267,17 +264,15 @@ class VTKExporter:
         logger.success(f"VTK boundary patches exported: {output_path}")
         return output_path
 
-    _BC_TYPE_NAMES = ['WALL', 'GROUND', 'INLET', 'OUTLET', 'SYMMETRY', 'FARFIELD']
-
     # ------------------------------------------------------------------
     # 边界分区分类 + 场数据计算——已搬到 vtk_export_fields.py，这里只
     # 保留薄委托包装，保证 `exporter._xxx(...)` 这种直接方法调用（类
     # 内部互相调用，以及 cli/post/helpers.py 等外部调用方）行为不变。
     # ------------------------------------------------------------------
 
-    def _boundary_zone_ids(self, owner_cells: np.ndarray):
+    def _boundary_zone_ids(self, tri_conn: np.ndarray):
         from .vtk_export_fields import boundary_zone_ids  # 见 vtk_export_fields.boundary_zone_ids
-        return boundary_zone_ids(self, owner_cells)
+        return boundary_zone_ids(self, tri_conn)
 
     def _cell_fields(self, fields: List[str]) -> Dict[str, np.ndarray]:
         from .vtk_export_fields import cell_fields  # 见 vtk_export_fields.cell_fields

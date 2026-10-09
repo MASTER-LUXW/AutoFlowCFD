@@ -26,12 +26,9 @@ class _SolverResidualMixin:
         """构建边界幽灵态提供者 (BD-01)，委托给 fr_solver_boundary。"""
         return fr_solver_boundary.build_boundary_ghost_provider(self, bc_overrides)
 
-    def compute_turbulence_source(self, dt) -> Optional[tuple]:
-        """计算湍流模型源项（委托给 fr_solver_turbulence）。dt 可以是标量
-        （DUAL_TIME 物理步长）或逐 SP 数组（稳态加速模式的局部 CFL
-        步长 dt_local）——见 fr_solver_turbulence.compute_turbulence_source
-        文档。"""
-        return fr_solver_turbulence.compute_turbulence_source(self, dt)
+    def compute_turbulence_source(self, dt, physical_time=None, advance_ramp: bool = True) -> Optional[tuple]:
+        """湍流场的一次更新（委托给 fr_solver_turbulence.compute_turbulence_source，参数含义见该函数）。"""
+        return fr_solver_turbulence.compute_turbulence_source(self, dt, physical_time, advance_ramp)
 
     def apply_turbulence_corrections(self):
         """应用湍流模型的修正（SGS 涡粘系数），委托给 fr_solver_turbulence。

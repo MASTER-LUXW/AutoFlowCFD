@@ -33,23 +33,7 @@ class _GPUSolverTimeStepMixin:
         n_cells = self.mesh.n_cells
         n_sps = self.mesh.n_sps_per_cell
 
-        fc = self.mesh.face_connectivity
-        n_faces = fc.n_faces
-
-        owner_cell = cp.asarray(fc.owner_cell)
-        neighbor_cell = cp.asarray(
-            np.where(fc.is_boundary, 0, fc.neighbor_cell)
-        )
-        is_boundary = cp.asarray(fc.is_boundary)
-
-        # 面法向和面积：与 compute_inviscid_residual_gpu 同一类每步热路径
-        # 性能修复，理由/验证方式相同（见该方法文档）——本方法是每步都要
-        # 调用的局部 CFL 步长计算，逐面对象构造的开销在这里同样是每步
-        # 复现，不是一次性成本。
-        from autoflowcfd.core.fr_residual.inviscid_p0 import _extract_p0_face_geometry
-        normal, area_w = _extract_p0_face_geometry(self.mesh.face_flux_points, fc, n_faces)
-        normals_gpu = cp.asarray(normal)
-        areas_gpu = cp.asarray(area_w)
+        owner_cell, neighbor_cell, is_boundary, normals_gpu, areas_gpu = self._face_geometry_gpu()
 
         cell_volumes = self._cell_volumes_gpu()
 
@@ -80,8 +64,7 @@ class _GPUSolverTimeStepMixin:
         # 公式与 CPU 同一个函数（`core/fr_solver/cfl_viscous.py`）。2026-10-01
         # 以前这里不传 mu_eff，粘性限制整段不生效。
         from autoflowcfd.core.fr_solver.cfl_viscous import viscous_length_scale_sq
-        visc_Lc2 = viscous_length_scale_sq(cell_volumes, owner_cell, neighbor_cell,
-                                           is_boundary, cp.asarray(fc.area))
+        visc_Lc2 = viscous_length_scale_sq(cell_volumes, owner_cell, neighbor_cell, is_boundary, areas_gpu)
         mu_eff = self._effective_viscosity_gpu(nu_av)
         # 当前阶数（Order Continuation 期间与目标阶数不同；此前误读 `self.order`）
         _co = getattr(self, "current_order", None)
@@ -147,6 +130,28 @@ class _GPUSolverTimeStepMixin:
         dt_phys = (reduce_per_cell_over_real_sps(
             dt_phys_all_sps, _np_cells, _p, 'min', xp=cp) if precond else dt_mean)
         return dt_mean, dt_phys
+
+    def _face_geometry_gpu(self):
+        """步长计算用的逐面数组 `(owner, neighbor, is_boundary, 单位法向, 物理面积)`，常驻显存（只依赖网格，
+        换阶不变）。
+
+        面积与法向取 `face_connectivity` 的物理面几何，与 CPU `cfl.py`、CPU 分布式 `distributed_cfl.py`、
+        多 GPU 同一口径。2026-10-09 以前这里取 `inviscid_p0.py::_extract_p0_face_geometry` 的"面积权重"：
+        那是每面**第一个通量点**的求积权重，只在 P0（每面一个通量点）等于整面面积；P1 下各单元的面积和
+        只有真实值的 1/3.35、P2 只有 1/10.3（棱柱；四面体 1/2.54、1/7.30），对流步长限制随之放大同样的
+        倍数——单 GPU 的实际 CFL 是名义值的 3~10 倍，且每步都把这两个数组重新上传一次。
+        """
+        fc = self.mesh.face_connectivity
+        cached = getattr(self, "_face_geometry_gpu_cache", None)
+        if cached is not None and cached[0] is fc:
+            return cached[1]
+        cp = get_cupy()
+        normal = np.asarray(fc.normal, dtype=np.float64)
+        unit = normal / np.maximum(np.linalg.norm(normal, axis=1, keepdims=True), 1e-30)
+        arrays = (cp.asarray(fc.owner_cell), cp.asarray(np.where(fc.is_boundary, 0, fc.neighbor_cell)),
+                  cp.asarray(fc.is_boundary), cp.asarray(unit), cp.asarray(np.asarray(fc.area, dtype=np.float64)))
+        self._face_geometry_gpu_cache = (fc, arrays)
+        return arrays
 
     def _cell_volumes_gpu(self):
         """单元体积（显存常驻的那份；网格数据没上传它时现传一份）。"""

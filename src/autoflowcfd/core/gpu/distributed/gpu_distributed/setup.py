@@ -20,6 +20,7 @@ from autoflowcfd.core.mpi.partition import build_distributed_partition, partitio
 from autoflowcfd.core.time_integration.base import require_distributed_scheme
 
 from .compact_view import _CompactMeshDataView
+from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
 
 class _MultiGPUSetupMixin:
@@ -106,7 +107,7 @@ class _MultiGPUSetupMixin:
         # 初始化 GPU 数组管理器
         self.array_mgr = GPUArrayManager(device_id=device_id)
 
-    def _setup_partition_and_geometry(self, mesh, ops, n_ranks, partition_info):
+    def _setup_partition_and_geometry(self, mesh, ops, n_ranks):
         """分区、局部面几何、压缩索引空间的网格数据、halo 交换器与分布式状态。
 
         Returns:
@@ -114,34 +115,21 @@ class _MultiGPUSetupMixin:
         """
         cp = get_cupy()
         device_id = self.device_id
-        # 分区
-        if partition_info is not None:
-            # 分布式加载模式：已有分区信息。这里 mesh 是局部网格而非全局
-            # 网格，build_distributed_flat_face 的 halo 扩展步骤依赖的
-            # get_flat_face_geometry(mesh, ops) 全局面几何假设在这条路径
-            # 下不成立（更深层、超出本次修复范围的架构问题），因此不设
-            # self.cell_partition，让 _init_distributed_face_geometry
-            # 退回到"缺失依赖时报错"而不是尝试扩展。
-            self.partition = self._rebuild_partition(partition_info)
-            self._using_distributed_mesh = True
-            self.cell_partition = None
+        # 分区：每个 rank 持有完整网格，root 用 METIS 分区后广播
+        fc = mesh.face_connectivity
+        if self.rank == 0:
+            cell_partition = partition_mesh(fc, n_ranks, n_cells=mesh.n_cells)
         else:
-            # 传统模式：所有 rank 有完整网格，执行分区
-            fc = mesh.face_connectivity
-            if self.rank == 0:
-                cell_partition = partition_mesh(fc, n_ranks, n_cells=mesh.n_cells)
-            else:
-                cell_partition = None
-            from autoflowcfd.core.mpi.comm import bcast_from_root
-            if n_ranks > 1:
-                cell_partition = bcast_from_root(cell_partition)
-            self.partition = build_distributed_partition(
-                fc, cell_partition, self.rank, n_ranks
-            )
-            self._using_distributed_mesh = False
-            # 供 _init_distributed_face_geometry 扩展 halo 层覆盖 FR Flux
-            # Point 多源交叉插值依赖用（见该方法与 build_distributed_flat_face 文档）。
-            self.cell_partition = cell_partition
+            cell_partition = None
+        from autoflowcfd.core.mpi.comm import bcast_from_root
+        if n_ranks > 1:
+            cell_partition = bcast_from_root(cell_partition)
+        self.partition = build_distributed_partition(
+            fc, cell_partition, self.rank, n_ranks
+        )
+        # 供 _init_distributed_face_geometry 扩展 halo 层覆盖 FR Flux
+        # Point 多源交叉插值依赖用（见该方法与 build_distributed_flat_face 文档）。
+        self.cell_partition = cell_partition
 
         # n_sps 必须先于下面的 GPUHaloExchange 构造赋值——此前这里是反的：
         # GPUHaloExchange(..., n_sps=n_sps, ...) 在 `n_sps = mesh.
@@ -252,7 +240,7 @@ class _MultiGPUSetupMixin:
         # DUAL_TIME 模式下 BDF2 需要的上一物理时间层状态（2026-09-02，
         # 见 step() 里 DUAL_TIME 分支说明）——None 表示尚未跑过一个
         # 物理步，退化为 BDF1，与单机 GPU `gpu_solver.py` 同一个约定。
-        self._dual_time_U_prev = None
+        reset_dual_time_history(self)
         # NEWTON_KRYLOV 跨步状态（构造时置初值，理由见 reset_newton_state 文档）
         from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
 

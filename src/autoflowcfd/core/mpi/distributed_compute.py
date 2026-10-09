@@ -17,7 +17,6 @@ AutoFlowCFD V2.0 - 分布式残差计算
 import numpy as np
 from typing import Optional, Callable
 
-from loguru import logger
 
 from autoflowcfd.core.mpi.partition import DistributedPartition
 from autoflowcfd.core.mpi.halo import HaloExchange
@@ -46,15 +45,13 @@ class DistributedMeshAdapter:
     `n_prism_cells` 也改用这套压缩索引空间对应的值（`dist_fc.base_flat.
     n_prism`）。
 
-    要求 `local_mesh` 是**完整全局网格**（`build_distributed_flat_face`
-    构造 `dist_fc` 时本来就要求这一点，见该函数文档"传统模式"一节）——
-    "完全分布式加载"（只有 root 持有完整网格）模式下这个前提尚不成立，
-    是仍然未解决的架构缺口，不在本次修复范围内。
+    `local_mesh` 两种形态都支持：传统模式下是完整全局网格（按 `compact_global_ids` 抽取重排）；
+    "完全分布式加载"模式下是 root 预先切好的 `PrecompactedMeshData`（已经是压缩索引空间，原样使用）。
 
     Attributes:
         partition: 分区信息
         dist_fc: 分布式面连接关系（"棱柱在前"压缩索引空间）
-        local_mesh: 完整全局网格对象（提供 jacobians 等，见上方说明）
+        local_mesh: 完整全局网格或 `PrecompactedMeshData`（提供 jacobians 等，见上方说明）
         n_cells: local+halo 压缩索引空间大小（不是 n_local_cells）
         n_halo_cells: 本 rank 的 halo cell 数
     """
@@ -71,8 +68,7 @@ class DistributedMeshAdapter:
         Args:
             partition: 本 rank 的分区信息
             dist_fc: 分布式面连接关系
-            local_mesh: 完整全局网格对象（提供 jacobians、face_flux_points
-                等，见类文档"要求 local_mesh 是完整全局网格"一节）
+            local_mesh: 完整全局网格或 `PrecompactedMeshData`（见类文档）
             ops: FR 算子
         """
         self.partition = partition

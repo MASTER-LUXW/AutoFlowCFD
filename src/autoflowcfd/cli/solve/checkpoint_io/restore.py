@@ -12,6 +12,10 @@ import numpy as np
 from autoflowcfd.core.utils.order_continuation.checkpoint_state import restore_phase_state
 from autoflowcfd.core.utils.order_continuation.initial_field import prolongate_checkpoint_fields
 from autoflowcfd.fr.native_padding import order_from_n_sps
+from autoflowcfd.core.fr_solver.turbulence.init import restore_production_ramp
+from autoflowcfd.core.utils.checkpoint_time import (
+    PREVIOUS_LEVEL_FIELD, TURBULENCE_PREVIOUS_FIELD, restore_previous_level, restore_turbulence_previous,
+)
 
 
 def restore_state_from_checkpoint(
@@ -44,7 +48,7 @@ def restore_state_from_checkpoint(
     if "U_sps" not in fields:
         raise click.ClickException(
             f"Checkpoint '{checkpoint_path}' 缺少 'U_sps' 字段（完整的 (n_cells,n_sps,n_vars) "
-            f"求解器状态）——不是本版本 solve_helpers.write_checkpoint 写出的 checkpoint，"
+            f"求解器状态）——不是本版本 checkpoint_io/write.py::write_checkpoint 写出的 checkpoint，"
             f"无法精确恢复。"
         )
 
@@ -60,7 +64,7 @@ def restore_state_from_checkpoint(
     # DDES"的湍流场其实是来流初值。
     solver.state.U = mean_flow_state_from_checkpoint(fields["U_sps"], solver.state)
     solver.state._update_primitives()
-    restored = restore_turbulence_from_fields(solver, fields)
+    restored = restore_turbulence_from_fields(solver, fields, metadata)
     print("   ✅ 从 checkpoint 恢复平均流场" + ("与湍流场" if restored else ""))
     return ckpt_iter, ckpt_order
 
@@ -85,7 +89,7 @@ def mean_flow_state_from_checkpoint(U_ckpt, state) -> np.ndarray:
     return np.ascontiguousarray(U_ckpt[:, :, :N_MEAN_FLOW_VARS])
 
 
-def restore_turbulence_from_fields(solver, fields: dict) -> bool:
+def restore_turbulence_from_fields(solver, fields: dict, metadata: dict) -> bool:
     """由 checkpoint 字段恢复湍流模型的输运场与涡粘（`solve resume` 与 `--init-from` 共用）。
 
     字段名取模型声明的 `TRANSPORTED_FIELDS`（`write_checkpoint` 按同一组名字写）。checkpoint 是
@@ -116,18 +120,8 @@ def restore_turbulence_from_fields(solver, fields: dict) -> bool:
                 f"形状 {current.shape} 不匹配（网格或阶数可能已变化），拒绝恢复。"
             )
     turb_model.restore_transported([np.asarray(fields[name]) for name in names])
-    # 跳过 production ramp（2026-08-25 代码审查）：湍流场已精确恢复，说明湍流已充分发展，再重新
-    # 压制产生项会把已收敛的湍流场往回压。Order Continuation 的 resume 分支有同样的处理，但
-    # --init-from 与不爬坡的 resume 走普通循环不经过那里，在这里统一置为渐变已完成。
-    if hasattr(turb_model, "production_factor"):
-        turb_model.production_factor = 1.0
-        solver._turb_ramp_step = solver._turb_production_ramp_steps
-        solver._turb_production_ramp_complete = True
-        # 同步置位基准重置完成标记（与 order_continuation.py 的 resume
-        # 分支一致）：否则 run_order_continuation 循环里的"ramp 完成 →
-        # 重置残差基准"检测会在 resume 后第一步把上面刚恢复的
-        # _phase_initial_residual 丢掉。
-        solver._ramp_baseline_reset_done = True
+    # 产生项渐变按 checkpoint 记录的进度续接（与分布式恢复端共用）
+    restore_production_ramp(solver, turb_model, metadata)
 
     # nu_t 恢复（配套 write_checkpoint 的 nu_t 持久化）：
     # checkpoint 里有就精确恢复，没有时保留 FRSolver 构造时的零值。
@@ -175,7 +169,7 @@ def restore_solver_state_from_fields(solver, fields: dict, metadata: dict) -> No
     solver.state.U = mean_flow_state_from_checkpoint(fields["U_sps"], solver.state)
     solver.state._update_primitives()
 
-    restore_turbulence_from_fields(solver, fields)
+    restore_turbulence_from_fields(solver, fields, metadata)
 
     # `tau_accum` 恢复（2026-09-24，配套 write_checkpoint 的持久化，见
     # 那边的完整理由）：`_tau_accum_seeded` 这个标记让 `FRSolver.solve()`
@@ -199,6 +193,9 @@ def restore_solver_state_from_fields(solver, fields: dict, metadata: dict) -> No
 
     # Order Continuation 阶段起始残差（与分布式恢复端共用，见 order_continuation/checkpoint_state.py）
     restore_phase_state(solver, metadata)
+    # dual-time 的上一物理时间层（与分布式恢复端共用，见 core/utils/checkpoint_time.py）
+    restore_previous_level(solver, fields.get(PREVIOUS_LEVEL_FIELD))
+    restore_turbulence_previous(solver, fields.get(TURBULENCE_PREVIOUS_FIELD))
 
     # 标记这个 solver 的状态是从 checkpoint 恢复的真实解、不是构造函数
     # 生成的均匀自由流场占位值——order_continuation.run_order_continuation

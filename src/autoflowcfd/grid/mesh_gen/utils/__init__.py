@@ -11,8 +11,8 @@ from autoflowcfd.grid.mesh_gen.utils.mesh_utils import (
     check_reached_boundary,
 )
 from autoflowcfd.grid.mesh_gen.utils.mesh_boundary import (
-    identify_boundaries_from_surface,
-    map_surface_boundaries,
+    map_boundaries_by_geometry,
+    map_generated_boundaries,
 )
 
 __all__ = [
@@ -20,6 +20,6 @@ __all__ = [
     'validate_bounding_box',
     'compute_face_normals',
     'check_reached_boundary',
-    'identify_boundaries_from_surface',
-    'map_surface_boundaries',
+    'map_boundaries_by_geometry',
+    'map_generated_boundaries',
 ]

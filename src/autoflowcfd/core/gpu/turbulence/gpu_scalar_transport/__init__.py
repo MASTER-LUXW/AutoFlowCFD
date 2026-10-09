@@ -31,22 +31,13 @@ omega_wall / residual), 便于两侧对照 -- 本项目反复出过"同一语义
 本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
 """
 
-from .faces import (  # noqa: F401
-    _extrapolate_scalar_pair_gpu,
-    _extrapolate_scalar_to_faces_gpu,
-    _face_mass_flux_gpu,
-    _lift_side_jumps_gpu,
-)
 from .omega_wall import (  # noqa: F401
     compute_omega_wall_target_gpu,
     compute_turbulence_face_masks_gpu,
 )
 from .residual import (  # noqa: F401
-    _scalar_volume_div_overintegrated_gpu,
-    compute_scalar_convection_residual_gpu,
-    compute_scalar_diffusion_residual_gpu,
-    compute_turbulence_transport_residual_gpu,
-    scalar_convection_volume_divergence_gpu,
+    compute_scalar_convection_residual_gpu, compute_scalar_diffusion_residual_gpu,
+    compute_turbulence_transport_residual_gpu, scalar_convection_volume_divergence_gpu,
 )
 
 __all__ = [

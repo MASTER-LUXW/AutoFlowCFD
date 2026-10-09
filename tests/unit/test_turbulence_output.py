@@ -65,6 +65,7 @@ def test_checkpoint_carries_model_means_not_state_slots(tmp_path):
     import h5py
 
     from autoflowcfd.cli.solve.checkpoint_io import write_checkpoint
+    from autoflowcfd.core.fr_solver.turbulence.init import init_production_ramp
 
     rng = np.random.default_rng(1)
     m = _sst(2, 0, 1, rng)
@@ -76,6 +77,7 @@ def test_checkpoint_carries_model_means_not_state_slots(tmp_path):
                              mesh=SimpleNamespace(n_prism_cells=2),
                              freestream={"rho_inf": 1.225, "vel_inf": 30.0, "p_inf": 101325.0},
                              time_integrator=SimpleNamespace(scheme=TimeIntegrationScheme.SSP_RK3))
+    init_production_ramp(solver, TimeIntegrationScheme.SSP_RK3)     # 真实求解器在构造时设置
     write_checkpoint(solver, str(tmp_path), 7, "volume.nas", order=1, turbulence_model="sst",
                      backend="cpu", quiet=True)
     with h5py.File(tmp_path / "checkpoints" / "checkpoint_iter_000007.h5", "r") as f:

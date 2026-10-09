@@ -1,9 +1,8 @@
-"""Test utilities for reliable command execution.
+"""可靠执行命令的测试工具。
 
-This module provides utility functions for running tests and commands
-with reliable output capture, avoiding terminal output issues.
+本模块提供运行测试与命令的工具函数，可靠地捕获输出，避开终端输出的问题。
 
-Example:
+示例:
     >>> from tests.test_utils import run_pytest, run_command
     >>> output = run_pytest("tests/unit/test_fr_residual_inviscid.py")
     >>> print(output)
@@ -16,16 +15,16 @@ from typing import Optional
 
 
 def run_pytest(test_path: str, verbose: bool = True) -> str:
-    """Run pytest and return output reliably.
-    
+    """运行 pytest 并可靠地返回输出。
+
     Args:
-        test_path: Path to test file or directory
-        verbose: Enable verbose output
-        
+        test_path: 测试文件或目录的路径
+        verbose: 是否输出详细信息
+
     Returns:
-        str: Test output
-        
-    Example:
+        str: 测试输出
+
+    示例:
         >>> output = run_pytest("tests/unit/test_fr_residual_inviscid.py")
         >>> if "passed" in output:
         ...     print("Tests passed!")
@@ -57,22 +56,22 @@ def run_pytest(test_path: str, verbose: bool = True) -> str:
 
 
 def run_command(command: str, timeout: int = 60) -> dict:
-    """Run arbitrary command and capture output reliably.
-    
+    """运行任意命令并可靠地捕获输出。
+
     Args:
-        command: Command to execute
-        timeout: Timeout in seconds
-        
+        command: 要执行的命令
+        timeout: 超时（秒）
+
     Returns:
         dict: {'success': bool, 'stdout': str, 'stderr': str, 'returncode': int}
-        
-    Example:
+
+    示例:
         >>> result = run_command("python scripts/verify_iteration4.py")
         >>> if result['success']:
         ...     print(result['stdout'])
     """
     try:
-        # Use shell=True for complex commands
+        # 复杂命令用 shell=True 执行
         result = subprocess.run(
             command,
             shell=True,
@@ -108,15 +107,15 @@ def run_command(command: str, timeout: int = 60) -> dict:
 
 
 def verify_module_import(module_name: str) -> dict:
-    """Verify that a module can be imported without errors.
-    
+    """验证模块可以无错误地导入。
+
     Args:
-        module_name: Module name to import
-        
+        module_name: 要导入的模块名
+
     Returns:
         dict: {'success': bool, 'error': str or None}
-        
-    Example:
+
+    示例:
         >>> result = verify_module_import("autoflowcfd.boundary")
         >>> if result['success']:
         ...     print("Module imports successfully")
@@ -140,15 +139,15 @@ def verify_module_import(module_name: str) -> dict:
 
 
 def check_code_syntax(file_path: str) -> dict:
-    """Check Python file for syntax errors.
-    
+    """检查 Python 文件的语法错误。
+
     Args:
-        file_path: Path to Python file
-        
+        file_path: Python 文件路径
+
     Returns:
         dict: {'valid': bool, 'errors': list}
-        
-    Example:
+
+    示例:
         >>> result = check_code_syntax("src/autoflowcfd/api.py")
         >>> if result['valid']:
         ...     print("No syntax errors")
@@ -176,12 +175,12 @@ def check_code_syntax(file_path: str) -> dict:
 
 
 def run_all_unit_tests() -> str:
-    """Run all unit tests and return summary.
-    
+    """运行全部单元测试并返回摘要。
+
     Returns:
-        str: Test summary output
-        
-    Example:
+        str: 测试摘要输出
+
+    示例:
         >>> summary = run_all_unit_tests()
         >>> print(summary)
     """
@@ -189,10 +188,10 @@ def run_all_unit_tests() -> str:
 
 
 def run_integration_tests() -> str:
-    """Run all integration tests and return summary.
-    
+    """运行全部集成测试并返回摘要。
+
     Returns:
-        str: Test summary output
+        str: 测试摘要输出
     """
     return run_pytest("tests/integration/", verbose=True)
 

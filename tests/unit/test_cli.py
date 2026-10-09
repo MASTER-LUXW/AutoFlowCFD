@@ -1,4 +1,4 @@
-"""Unit tests for CLI module."""
+"""CLI 模块的单元测试。"""
 
 import pytest
 from click.testing import CliRunner
@@ -6,21 +6,21 @@ from autoflowcfd.cli.main import cli
 
 
 class TestCLI:
-    """Test suite for CLI commands."""
+    """CLI 命令的测试。"""
 
     def setup_method(self) -> None:
-        """Set up test fixtures."""
+        """准备测试夹具。"""
         self.runner = CliRunner()
 
     def test_cli_version(self) -> None:
-        """Test that --version flag works."""
+        """--version 选项可用。"""
         result = self.runner.invoke(cli, ["--version"])
         assert result.exit_code == 0
         assert "AutoFlowCFD" in result.output
         assert "0.1.0" in result.output
 
     def test_cli_help(self) -> None:
-        """Test that --help flag works."""
+        """--help 选项可用。"""
         result = self.runner.invoke(cli, ["--help"])
         assert result.exit_code == 0
         assert "AutoFlowCFD" in result.output
@@ -28,33 +28,33 @@ class TestCLI:
         assert "post" in result.output
 
     def test_solve_command_help(self) -> None:
-        """Test solve command help."""
+        """solve 命令的帮助。"""
         result = self.runner.invoke(cli, ["solve", "--help"])
         assert result.exit_code == 0
         assert "run" in result.output or "transient" in result.output
 
     def test_post_command_help(self) -> None:
-        """Test post command help."""
+        """post 命令的帮助。"""
         result = self.runner.invoke(cli, ["post", "--help"])
         assert result.exit_code == 0
         assert "coefficients" in result.output or "export-vtk" in result.output
 
     def test_grid_command_help(self) -> None:
-        """Test grid command help."""
+        """grid 命令的帮助。"""
         result = self.runner.invoke(cli, ["grid", "--help"])
         assert result.exit_code == 0
 
     def test_utils_command_help(self) -> None:
-        """Test utils command help."""
+        """utils 命令的帮助。"""
         result = self.runner.invoke(cli, ["utils", "--help"])
         assert result.exit_code == 0
 
     def test_solve_run_missing_args(self) -> None:
-        """Test solve run command without required arguments."""
+        """solve run 命令缺少必需参数。"""
         result = self.runner.invoke(cli, ["solve", "run"])
         assert result.exit_code != 0
 
     def test_verbose_flag(self) -> None:
-        """Test verbose flag enables debug output."""
+        """verbose 选项打开调试输出。"""
         result = self.runner.invoke(cli, ["-v", "--help"])
         assert result.exit_code == 0

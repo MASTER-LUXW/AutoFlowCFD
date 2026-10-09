@@ -332,7 +332,7 @@ class TestFilterIsIdempotentProjection:
         `tests/unit/test_modal_filter_order_loss.py::_expected_legacy_rank`
         —— 那里是同一个量的唯一事实来源，这里直接复用，不抄第二份。
         """
-        from tests.unit.test_modal_filter_order_loss import (
+        from tests.unit._modal_filter_order_loss_common import (
             _expected_legacy_rank,
         )
 

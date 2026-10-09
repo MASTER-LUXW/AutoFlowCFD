@@ -56,8 +56,6 @@ __all__ = [
 def remesh_core_cavity(
     nodes: np.ndarray,
     cells: np.ndarray,
-    cell_groups: np.ndarray,
-    n_bl_cells: int,
     faces: 'FaceData',
     bad_cell_mask: np.ndarray,
     validator: 'MeshQualityValidator',
@@ -65,7 +63,7 @@ def remesh_core_cavity(
     max_cavity_cells: int = 20_000,
     max_clusters_attempted: int = 15_000,
     max_seconds: float = 400.0,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, List[str]]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[str]]:
     """阶段 B'：对仍然不合格的单元（加上良好邻居缓冲区）按其自身固定边界
     局部重新四面体化，而非微调节点（阶段 A）或重新生成整个网格（阶段 B，
     BL 侧）。参见本模块文档字符串了解为何这在结构上避免了旧核心侧区域
@@ -77,26 +75,14 @@ def remesh_core_cavity(
     阶段 A 拒绝移动壁面节点（正确——它是物理几何），阶段 B 只缩短
     BL 柱，无法重新铺网已生成的形状。直接的局部重铺可以。
 
-    作用域：接触物理边界面的单元仅在其自身为 BL 单元（索引 < n_bl_cells）
-    时才合格——这是预期的，因为 BL 单元始终与其挤出来源的壁面相邻，且
-    该壁面面片的自身节点索引被局部重铺（nobisect=True）逐字保留，因此
-    identify_boundaries_from_surface 现有的节点索引匹配回退无需本函数
-    跟踪即可恢复其边界分组归属。接触物理边界面（入口/出口/隧道/远场
-    类型）的核心单元仍超出范围——真正不同、未验证的场景（该面片可能
-    携带本函数不处理的 tetgen 面标记/区域归属）。需要生长到超出范围
-    单元的空腔只是在那里停止——该单元（以及只能通过它到达的任何坏
-    单元）留给下一个运行的修复阶段，不是中止整体操作的理由。
+    作用域：全部单元都合格，包括接触物理外边界面的单元。空腔的边界面（含其中的物理外边界面）在局部
+    重铺中被逐字保留——tetgen 不带区域调用时 nobisect=True，接受前还要通过 `retile_is_conformal`
+    逐面核对——外表面不变，最终的 map_generated_boundaries（外部面按几何包含关系对应输入面网格）照常给出
+    边界组。2026-10-09 以前接触外边界的核心单元被排除，理由是"可能携带 tetgen 面标记"；面标记机制已删除，
+    这条排除随之删除。
 
     Args:
         nodes, cells: 完整合并网格（阶段 A 后）
-        cell_groups: (n_cells,) 字符串数组，与 cells 平行——每单元的
-            边界组（参见 mesh_background._build_merged_mesh）；替换的
-            单元始终得到 ''——对替换的核心单元正确（按上方作用域，它
-            不可能拥有真实边界面），且对接触壁面的替换 BL 单元无害
-            （identify_boundaries_from_surface 的节点索引回退独立于
-            此数组重新推导该归属，按上方作用域说明）
-        n_bl_cells: BL 单元占据 cells[:n_bl_cells]——合格（见上方
-            作用域），只是不受核心单元那样的物理边界排除
         faces: 已从此确切 (nodes, cells) 对提取的 FaceData（调用方
             自身的修复前或阶段 A 输出提取）
         bad_cell_mask: (n_cells,) bool，哪些单元在阶段 A 后仍不合格
@@ -128,8 +114,7 @@ def remesh_core_cavity(
             与 max_clusters_attempted 一起从早期 90 秒提高，原因相同。
 
     Returns:
-        (new_nodes, new_cells, new_cell_groups, new_bad_cell_mask,
-        action_log) - 如果未找到合格空腔或每个候选空腔都未通过接受
+        (new_nodes, new_cells, new_bad_cell_mask, action_log) - 如果未找到合格空腔或每个候选空腔都未通过接受
         门控则全部不变（非副本）。new_bad_cell_mask 将 bad_cell_mask
         跨应用于 new_cells 的相同单元移除/插入向前传递（每个新插入
         单元标记为 good=False，因为它已通过本函数自身的接受门控）——
@@ -138,27 +123,10 @@ def remesh_core_cavity(
     actions: List[str] = []
     n_cells = len(cells)
 
-    boundary_face_idx = faces.get_boundary_face_indices()
-    touches_physical_boundary = np.zeros(n_cells, dtype=bool)
-    touches_physical_boundary[faces.connectivity[boundary_face_idx, 0]] = True
-
-    # 接触物理边界面的 BL 单元是预期的，不是取消资格的
-    # （它始终与其挤出来源的壁面相邻）——只有接触物理边界面
-    # （入口/出口/隧道/远场类型）的核心单元仍超出范围：那是
-    # 真正不同、未验证的场景（核心单元的边界 facets 可能携带
-    # 本函数不处理的面标记/区域归属——参见上方壁面面片处理
-    # 说明）。壁面面片本身在局部重铺中被 nobisect=True 逐节点
-    # 保留（_cavity_boundary_faces 已依赖的相同保证，用于保留
-    # 邻居的共享面），因此 identify_boundaries_from_surface 现有
-    # 的节点索引匹配回退为最终拥有该面片的任何新单元恢复壁面
-    # 组归属，无需本函数自行跟踪。
-    ineligible = touches_physical_boundary.copy()
-    ineligible[:n_bl_cells] = False
-
-    seed = bad_cell_mask & ~ineligible
+    seed = bad_cell_mask
     if not np.any(seed):
-        actions.append("Stage B': no eligible bad cells (all touch an out-of-scope core boundary) - skipping")
-        return nodes, cells, cell_groups, bad_cell_mask, actions
+        actions.append("Stage B': no bad cells - skipping")
+        return nodes, cells, bad_cell_mask, actions
 
     interior_mask = faces.connectivity[:, 1] >= 0
     owner = faces.connectivity[interior_mask, 0]
@@ -191,7 +159,7 @@ def remesh_core_cavity(
         _attempt_cavity_retile_clusters(
             nodes, cells, bad_cell_mask, validator,
             seed_idx, labels, n_clusters,
-            owner, neighbor, ineligible,
+            owner, neighbor,
             n_buffer_rings, max_cavity_cells, max_clusters_attempted, max_seconds,
         )
     )
@@ -209,12 +177,11 @@ def remesh_core_cavity(
             f"(skipped_size={n_skipped_size}, rejected={n_rejected}, "
             f"failed={n_failed}, skipped_budget={n_skipped_budget})"
         )
-        return nodes, cells, cell_groups, bad_cell_mask, actions
+        return nodes, cells, bad_cell_mask, actions
 
     keep_mask = ~claimed
     new_nodes_parts = [nodes]
     new_cells_parts = [cells[keep_mask]]
-    new_groups_parts = [cell_groups[keep_mask]]
     new_bad_parts = [bad_cell_mask[keep_mask]]
     interior_start = len(nodes)
 
@@ -237,7 +204,6 @@ def remesh_core_cavity(
 
         new_nodes_parts.append(new_interior_nodes)
         new_cells_parts.append(new_tets_global)
-        new_groups_parts.append(np.full(len(new_tets_global), '', dtype=object))
         new_bad_parts.append(np.zeros(len(new_tets_global), dtype=bool))
         interior_start += len(new_interior_nodes)
 
@@ -249,7 +215,6 @@ def remesh_core_cavity(
 
     new_nodes = np.vstack(new_nodes_parts)
     new_cells = np.vstack(new_cells_parts)
-    new_cell_groups = np.concatenate(new_groups_parts)
     new_bad_cell_mask = np.concatenate(new_bad_parts)
 
     # generate_hybrid_mesh 运行同样的检查一次，正好在初始
@@ -273,15 +238,11 @@ def remesh_core_cavity(
     # 两个 repair_nonmanifold_cells 调用点（mesh_background.py，
     # 两者都已修补）被证明不是真实 cube_demo 运行剩余
     # 0.147 m^3 缺口（原始 0.189 m^3）的来源之后——它追溯
-    # 到正好是这个块。n_bl_cells 未从 patch 自身的返回值
-    # 在此更新（下方丢弃）——本函数的空腔生长已容忍
-    # n_bl_cells 在普通拼接后保持近似（参见本函数自身
-    # 文档字符串：不接触物理边界面的 BL 单元已可在 n_bl_cells
-    # 不变的情况下被替换），因此 patch 路径不需要更严格。
+    # 到正好是这个块。
     keep = repair_nonmanifold_cells(new_nodes, new_cells)
     if not keep.all():
-        new_nodes, new_cells, new_cell_groups, _n_bl_cells_unused, new_bad_cell_mask = patch_nonmanifold_cavity(
-            new_nodes, new_cells, keep, new_cell_groups, n_bl_cells,
+        new_nodes, new_cells, new_bad_cell_mask = patch_nonmanifold_cavity(
+            new_nodes, new_cells, keep,
             bad_cell_mask=new_bad_cell_mask,
         )
         keep = repair_nonmanifold_cells(new_nodes, new_cells)
@@ -289,7 +250,6 @@ def remesh_core_cavity(
             n_removed = int(np.size(keep) - np.count_nonzero(keep))
             actions.append(f"Stage B': removed {n_removed} non-manifold cell(s) introduced by cavity splicing")
             new_cells = new_cells[keep]
-            new_cell_groups = new_cell_groups[keep]
             new_bad_cell_mask = new_bad_cell_mask[keep]
 
     logger.info(
@@ -298,4 +258,4 @@ def remesh_core_cavity(
         f"failed={n_failed}, skipped_budget={n_skipped_budget})"
     )
 
-    return new_nodes, new_cells, new_cell_groups, new_bad_cell_mask, actions
+    return new_nodes, new_cells, new_bad_cell_mask, actions

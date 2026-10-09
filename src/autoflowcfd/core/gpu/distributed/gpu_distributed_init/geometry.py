@@ -12,10 +12,6 @@ from .checkpoint import _GPUDistributedCheckpointMixin
 class _GPUDistributedInitMixin(_GPUDistributedTurbSourceMixin, _GPUDistributedCheckpointMixin):
     """MultiGPUDistributedSolver 初始化/I/O 混入。"""
 
-    def _rebuild_partition(self, partition_info):
-        """从分区信息字典重建 DistributedPartition。"""
-        return partition_info
-
     def _init_wall_distance_distributed(self):
         """分布式壁面距离（compact 索引空间：local + halo，"棱柱在前"）。
 
@@ -66,7 +62,6 @@ class _GPUDistributedInitMixin(_GPUDistributedTurbSourceMixin, _GPUDistributedCh
         在本后端的接线，此前会退回 `project`（全局逐 stage 施加精确
         投影，功能上等于 legacy：P1 退化成 P0、壁面剪应力恒为零）。
         """
-        cp = get_cupy()
         n_local = self.partition.n_local_cells
         n_sps = self.mesh.n_sps_per_cell
 

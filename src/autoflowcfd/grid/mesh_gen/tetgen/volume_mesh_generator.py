@@ -27,14 +27,12 @@ class VolumeMeshGenerator:
     Attributes:
         growth_rate: 边界层网格增长率
         min_cell_size: 最小单元尺寸约束
-        target_cells: 目标体积单元数
     """
 
     def __init__(
         self,
         growth_rate: float = 1.2,
         min_cell_size: float = 0.01,
-        target_cells: int = 400000,
         max_cell_size: Optional[float] = None,
         bl_layers: Optional[int] = None,
         bl_only: bool = False,
@@ -46,7 +44,6 @@ class VolumeMeshGenerator:
         Args:
             growth_rate: 层厚度的几何增长率（1.2 为典型值）
             min_cell_size: 最小允许单元尺寸（米），默认 1cm
-            target_cells: 目标总单元数
             max_cell_size: 可选的 core 区域单元尺寸硬上限（米），
                 从 BL 的近壁大小向外分级（mesh_background.
                 generate_hybrid_mesh）。None 使 core 填充的单元
@@ -65,7 +62,6 @@ class VolumeMeshGenerator:
         """
         self.growth_rate = growth_rate
         self.min_cell_size = min_cell_size
-        self.target_cells = target_cells
         self.max_cell_size = max_cell_size
         self.bl_layers = bl_layers
         self.bl_only = bl_only
@@ -75,7 +71,7 @@ class VolumeMeshGenerator:
         logger.info(
             f"VolumeMeshGenerator initialized: growth_rate={growth_rate}, "
             f"min_cell_size={min_cell_size}m, "
-            f"target_cells={target_cells}, max_cell_size={max_cell_size}, "
+            f"max_cell_size={max_cell_size}, "
             f"bl_layers={bl_layers}, bl_only={bl_only}"
         )
 
@@ -128,7 +124,6 @@ class VolumeMeshGenerator:
             surface_nodes, surface_faces, bounding_box,
             growth_rate=self.growth_rate,
             min_cell_size=self.min_cell_size,
-            target_cells=self.target_cells,
             surface_boundaries=surface_boundaries,
             max_cell_size=self.max_cell_size,
             bl_layers=self.bl_layers,

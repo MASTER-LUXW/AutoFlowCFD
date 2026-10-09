@@ -1,7 +1,7 @@
-"""Unit tests for mesh_tetgen_error_translation.translate_tetgen_failure -
-extracted out of mesh_tetgen_core.fill_core_volume's except-block, isolated
-from tetgen itself which is never invoked to produce these exceptions
-(they're constructed directly to exercise the translation logic)."""
+"""mesh_tetgen_error_translation.translate_tetgen_failure 的单元测试——
+它是从 mesh_tetgen_core.fill_core_volume 的 except 块里抽出来的，与 tetgen
+本身隔离：从不调用 tetgen 来产生这些异常（直接构造异常来测翻译逻辑）。
+"""
 
 import pytest
 

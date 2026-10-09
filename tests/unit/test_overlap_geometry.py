@@ -1,14 +1,11 @@
-"""Unit tests for validation/overlap_geometry.py's triangle-triangle
-intersection test - no permanent test file existed for this module before
-(the "15 hand-built edge cases + 3000-case stress test" mentioned in
-ProjectFiles Part5 P2 were one-off validation scripts, never committed).
+"""validation/overlap_geometry.py 三角形-三角形相交判定的单元测试——这个
+模块此前没有常驻的测试文件（ProjectFiles Part5 P2 提到的"15 个手工边界
+情形 + 3000 例压力测试"是一次性的验证脚本，从未提交）。
 
-The thin-sliver-triangle regression cases here are not synthetic worst
-cases - they were extracted directly from a real cube_demo BL extrusion
-run (two triangles from different original surface faces, each correctly
-shaped on its own, whose sharp-corner miter compensation left them thin
-and similarly oriented) and confirmed as false positives via independent
-brute-force point sampling before triangle_triangle_intersect was fixed.
+这里的薄片三角形回归算例不是人造的最坏情形——它们直接取自 cube_demo 的
+一次真实边界层挤出（来自不同原始表面的两个三角形，各自形状正确，尖角
+斜接补偿让它们变薄且朝向相近），在修复 triangle_triangle_intersect 之前
+经独立的暴力点采样确认是误报。
 """
 
 import numpy as np
@@ -19,19 +16,16 @@ from autoflowcfd.grid.validation.overlap_geometry import (
     triangle_triangle_min_distance,
 )
 
-# Two triangles that genuinely cross in 3D, sharing no vertices (same
-# fixture used throughout this project's mesh_front_collision tests).
+# 两个在三维里真正相交、不共享顶点的三角形（本项目 mesh_front_collision
+# 测试通用的同一个夹具）。
 A0, A1, A2 = np.array([-2., -2., 0.]), np.array([2., -2., 0.]), np.array([0., 2., 0.])
 B0, B1, B2 = np.array([0., 0., -2.]), np.array([0., 0., 2.]), np.array([0., 3., 0.])
 
-# The real cube_demo thin-sliver false-positive pair: two thin "fin"
-# triangles from different original surface faces, offset by a genuine,
-# unambiguous 0.01m gap along z (verified via independent brute-force
-# sampling: true minimum distance ~0.01, nowhere near eps) - yet flagged
-# as intersecting before the fix, because their near-degenerate shape
-# makes each one's own plane only weakly sensitive to a real offset along
-# the triangle's own long axis (see triangle_triangle_intersect's own
-# "Thin-sliver-triangle correction" comment for the full mechanism).
+# cube_demo 上真实的薄片误报对：来自不同原始表面的两个薄"翅"三角形，
+# 沿 z 有一个真实、明确的 0.01m 间隙（经独立的暴力采样验证：真实最小距离
+# 约 0.01，远不在 eps 附近）——修复之前却被判为相交，因为它们近乎退化的
+# 形状让各自的平面对沿三角形长轴方向的真实偏移只有很弱的敏感性（完整机制
+# 见 triangle_triangle_intersect 里"薄片三角形修正"的注释）。
 SLIVER_A = np.array([
     [0.503, 0.241369, -0.055],
     [0.503, 0.24137, -0.045],
@@ -69,12 +63,11 @@ class TestTriangleTriangleIntersect:
         assert not _intersects(a, b)
 
     def test_thin_sliver_triangles_with_a_real_gap_are_not_flagged(self):
-        """Regression test for the real false positive found on
-        cube_demo. The two triangles' z-extents are disjoint by a clear
-        0.01m gap (10 million times larger than any float64 noise) -
-        confirmed via triangle_triangle_min_distance and independent
-        brute-force point sampling before the fix; the un-fixed function
-        reported this pair as intersecting anyway."""
+        """cube_demo 上发现的真实误报的回归测试。两个三角形的 z 范围相隔一个明确
+        的 0.01m 间隙（比任何 float64 噪声大一千万倍）——修复之前经
+        triangle_triangle_min_distance 与独立的暴力点采样确认过；未修复的函数仍
+        把这一对报成相交。
+        """
         assert not _intersects(SLIVER_A, SLIVER_B)
 
         dist = triangle_triangle_min_distance(
@@ -84,27 +77,22 @@ class TestTriangleTriangleIntersect:
         assert dist == pytest.approx(0.01, abs=1e-4)
 
     def test_genuine_intersection_still_detected_regardless_of_correction(self):
-        """The thin-sliver correction (triangle_triangle_min_distance as
-        a second opinion) must only ever turn a false positive into a
-        correct negative - a genuine, unambiguous intersection (min
-        distance 0) must still be reported as True."""
+        """薄片修正（用 triangle_triangle_min_distance 做第二意见）只能把误报变成
+        正确的否定——真正、明确的相交（最小距离 0）仍必须报告为 True。
+        """
         assert _intersects(np.array([A0, A1, A2]), np.array([B0, B1, B2]))
         dist = triangle_triangle_min_distance(
             A0[None], A1[None], A2[None], B0[None], B1[None], B2[None],
         )
-        # Precondition-violating call (the pair DOES intersect) - only
-        # used here to confirm it's not spuriously large; not a
-        # meaningful "distance" for a genuine overlap (see that
-        # function's own docstring).
+        # 违反前提的调用（这一对**确实**相交）——这里只用来确认它不会大得
+        # 离谱；对真正的重叠它不是有意义的"距离"（见该函数的文档）。
         assert dist[0] < 1.0
 
     def test_shared_vertex_is_not_reported_as_intersecting(self):
-        """Two triangles touching only at a single shared vertex have a
-        zero-measure overlap interval - not reported as an intersection
-        by this function's own construction (callers apply a separate
-        node-sharing pre-filter for mesh purposes, but the geometric
-        primitive itself must also behave this way at the exact
-        boundary)."""
+        """只在一个共享顶点处相接的两个三角形，重叠区间的测度为零——按这个函数
+        的构造不报告为相交（调用方为网格用途另有一道共享节点的预过滤，但几何
+        原语本身在这个临界情形上也必须如此）。
+        """
         shared = np.array([0., 0., 0.])
         a = np.array([shared, [1., 0., 0.], [0., 1., 0.]])
         b = np.array([shared, [-1., 0., 0.], [0., -1., 0.]])

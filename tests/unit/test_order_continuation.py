@@ -139,8 +139,9 @@ class TestBuildLinearInterpMatrix3D:
         np.testing.assert_allclose(actual, expected, atol=1e-12)
 
     def test_p0_single_point_grid_broadcasts_constant(self):
-        """P0's reference 'grid' is a single point per axis - the matrix
-        must broadcast that one value to every new SP, not raise."""
+        """P0 的参考"网格"每个轴只有一个点——矩阵必须把这一个值广播到每个新解点，
+        而不是报错。
+        """
         old_sps_1d, _ = gauss_legendre(1)
         new_sps_1d, _ = gauss_legendre(2)
 
@@ -150,8 +151,7 @@ class TestBuildLinearInterpMatrix3D:
         np.testing.assert_allclose(W, np.ones((8, 1)))
 
     def test_identity_when_grids_match(self):
-        """Interpolating onto the exact same SPs must reproduce the field
-        exactly (the matrix should behave as an identity for this case)."""
+        """插值到完全相同的解点上必须精确重现原场（这种情形下矩阵应当是单位阵）。"""
         sps_1d, _ = gauss_legendre(2)
         W = _build_linear_interp_matrix_3d(sps_1d, sps_1d)
         np.testing.assert_allclose(W, np.eye(8), atol=1e-12)

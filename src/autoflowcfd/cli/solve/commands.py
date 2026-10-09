@@ -24,6 +24,7 @@ from loguru import logger
 from autoflowcfd.cli.solve.option_help import PHASE_MAX_ITER_HELP, RESIDUAL_DROP_THRESHOLD_HELP, THREADS_HELP
 from autoflowcfd.cli.solve.solver_factory import validate_backend_options
 from autoflowcfd.cli.solve.distributed_checkpoint_io import distributed_periodic_checkpoint_callback
+from autoflowcfd.core.time_integration.base import DEFAULT_STEADY_TOL
 from autoflowcfd.cli.solve.checkpoint_io import (
     periodic_checkpoint_callback,
     rebuild_solver_from_checkpoint,
@@ -55,7 +56,9 @@ def solve():
 # 只做转发的 solve_steady_commands.py 中间层）
 from autoflowcfd.cli.solve import steady as _steady_cmd  # noqa: F401,E402
 from autoflowcfd.cli.solve import transient as _transient_cmd  # noqa: F401,E402
-from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coefficients  # noqa: E402
+from autoflowcfd.cli.solve.aero_coefficients import (  # noqa: E402
+    _report_aerodynamic_coefficients, report_distributed_aerodynamic_coefficients,
+)
 
 
 
@@ -116,6 +119,11 @@ from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coeffici
                    '与 --multi-gpu 互斥）')
 @click.option('--gpu-device', type=int, default=None,
               help='GPU 设备号（单 GPU 续算默认 0；--multi-gpu 时按 rank 分配）')
+@click.option('--dt', type=float, default=None,
+              help='时间步长覆盖。不给时沿用 checkpoint 记录的值（dual-time 瞬态的物理时间步长必须与原算例一致；'
+                   '早于 2026-10-09 的 dual-time checkpoint 没有记录，需要显式给出）')
+@click.option('--tol', type=float, default=DEFAULT_STEADY_TOL, show_default=True,
+              help='相对收敛容差（与 solve steady --tol 同义）')
 def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
            surface_mesh: Optional[str], reference_area: Optional[float], threads: int,
            skip_quality_check: bool, checkpoint_interval: int,
@@ -123,12 +131,12 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
            cfl_start: Optional[float], cfl_max: Optional[float], cfl_min: Optional[float],
            phase_max_iter: Optional[int], residual_drop_threshold: float,
            n_ranks: int, multi_gpu: bool, fully_distributed: bool,
-           gpu_device: Optional[int]) -> None:
+           gpu_device: Optional[int], dt: Optional[float], tol: float) -> None:
     """从检查点真正恢复并继续求解（不是只打印元信息）。
 
     重建流程：checkpoint 的 metadata 记录了重建 FRSolver 所需的全部
     构造参数（input_file/order/turbulence_model/backend/自由来流条件，
-    见 solve_helpers.write_checkpoint 文档），用它们重新走一遍
+    见 checkpoint_io/write.py::write_checkpoint 文档），用它们重新走一遍
     load_mesh_for_solver + FRSolver(...) 构造出一个全新求解器，再用
     checkpoint 里完整保存的 (n_cells,n_sps,n_vars) 状态（metadata['fields']
     ['U_sps']，不是拍扁过的单元中心近似）整体替换掉初始化时生成的均匀
@@ -152,6 +160,8 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
             max_iter // len(orders) 作为这个数字的默认值——不论默认还是
             显式值，目标阶数都吃掉剩余全部步数，见同名 CLI 选项帮助文本
         residual_drop_threshold: Order Continuation 单阶段提前升阶所需的残差下降倍数
+        dt: 时间步长覆盖（None 时沿用 checkpoint 记录的值，见 core/utils/checkpoint_time.py::resume_time_step）
+        tol: 相对收敛容差
     """
     logger.info(f"Resuming simulation from checkpoint: {checkpoint_file}")
 
@@ -164,7 +174,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
             gpu_device, surface_mesh, threads, skip_quality_check,
             checkpoint_interval, phase_max_iter, residual_drop_threshold,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
-            time_scheme=time_scheme,
+            time_scheme=time_scheme, dt=dt, tol=tol, reference_area=reference_area,
         )
         return
 
@@ -188,7 +198,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
     logger.info(f"State restored from checkpoint (iter={iteration}), "
                 f"continuing for {max_iter} more iterations...")
     result = solver.solve(
-        max_iter=max_iter, dt=1e-3, tol=1e-6,
+        max_iter=max_iter, dt=_resume_dt(dt, metadata, solver), tol=tol,
         checkpoint_callback=periodic_checkpoint_callback(
             checkpoint_interval, output_dir, input_file, turbulence_model, target_backend,
             surface_mesh=resolved_surface_mesh, iteration_offset=iteration),
@@ -203,6 +213,16 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
     _report_aerodynamic_coefficients(solver.host_view(), getattr(solver, "_reference_area", None))
 
 
+def _resume_dt(dt_option: Optional[float], metadata: dict, solver) -> float:
+    """续算时间步长（`core/utils/checkpoint_time.py::resume_time_step`），无法确定时转成命令行错误。"""
+    from autoflowcfd.core.utils.checkpoint_time import resume_time_step
+
+    try:
+        return resume_time_step(dt_option, metadata, solver)
+    except ValueError as e:
+        raise click.ClickException(str(e)) from e
+
+
 def _resume_distributed(
     checkpoint_file: str, max_iter: int, n_ranks: int, multi_gpu: bool,
     fully_distributed: bool, gpu_device: Optional[int],
@@ -214,6 +234,9 @@ def _resume_distributed(
     cfl_max: Optional[float] = None,
     cfl_min: Optional[float] = None,
     time_scheme: Optional[str] = None,
+    dt: Optional[float] = None,
+    tol: float = DEFAULT_STEADY_TOL,
+    reference_area: Optional[float] = None,
 ) -> None:
     """`resume` 的分布式分支（2026-09-02 补齐，见 `resume` 文档"完成度"
     一节）——CPU MPI"传统模式"/"完全分布式加载"/多GPU 三条路径共用同一个
@@ -237,10 +260,7 @@ def _resume_distributed(
     帮助文本此前写的"仅 CPU 后端支持"因此也是过时/错误的说法，一并
     改正。
 
-    不做气动系数报告（`_report_aerodynamic_coefficients` 假设单机
-    `FRSolver` 的 `.state`/`.mesh` 布局，与分布式求解器的 local+halo
-    布局不兼容）——`solve_steady_command.py` 的分布式分支本身同样不
-    调用它，这里保持同一个范围边界。
+    收尾时与单机一样报告气动系数（汇总到 root，`aero_coefficients.py::report_distributed_aerodynamic_coefficients`）。
     """
     from autoflowcfd.core.mpi import is_root
     from autoflowcfd.cli.solve.distributed_checkpoint_io import (
@@ -253,6 +273,7 @@ def _resume_distributed(
         surface_mesh=surface_mesh, threads=threads,
         cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
         skip_quality_check=skip_quality_check, time_scheme=time_scheme,
+        reference_area=reference_area,
     )
     input_file = metadata["input_file"]
     turbulence_model = metadata["turbulence_model"]
@@ -264,13 +285,14 @@ def _resume_distributed(
             f"[Distributed resume] State restored from checkpoint (iter={iteration}), "
             f"continuing for {max_iter} more iterations..."
         )
+    resume_dt = _resume_dt(dt, metadata, solver)
 
     if multi_gpu:
         _checkpoint_cb = distributed_periodic_checkpoint_callback(
             checkpoint_interval, output_dir, input_file, turbulence_model, surface_mesh=resolved_surface_mesh, iteration_offset=iteration)
 
         result = solver.solve(
-            max_iter=max_iter, dt=1e-3, tol=1e-6, checkpoint_callback=_checkpoint_cb,
+            max_iter=max_iter, dt=resume_dt, tol=tol, checkpoint_callback=_checkpoint_cb,
             phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold,
         )
         total_iterations = iteration + result.iterations
@@ -287,6 +309,7 @@ def _resume_distributed(
         )
         if saved_path and is_root():
             print(f"   Checkpoint saved: {saved_path}")
+        report_distributed_aerodynamic_coefficients(solver, solver._report_reference_area)
         solver.cleanup()
         return
 
@@ -298,7 +321,7 @@ def _resume_distributed(
     _checkpoint_cb = distributed_periodic_checkpoint_callback(
         checkpoint_interval, output_dir, input_file, turbulence_model, surface_mesh=resolved_surface_mesh, iteration_offset=iteration)
 
-    result = solver.solve(max_iter=max_iter, dt=1e-3, tol=1e-6,
+    result = solver.solve(max_iter=max_iter, dt=resume_dt, tol=tol,
                           checkpoint_callback=_checkpoint_cb,
                           phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold)
     total_iterations = iteration + result.iterations
@@ -310,6 +333,7 @@ def _resume_distributed(
         output_dir, total_iterations, input_file, solver.current_order, turbulence_model,
         target_order=solver.order, surface_mesh=resolved_surface_mesh,
     )
+    report_distributed_aerodynamic_coefficients(solver, solver._report_reference_area)
 
 
 @solve.command()

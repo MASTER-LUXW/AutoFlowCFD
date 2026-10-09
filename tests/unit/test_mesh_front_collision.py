@@ -1,9 +1,8 @@
-"""Unit tests for the reactive per-layer self-collision freeze mechanism
-(mesh_front_collision.py) that mesh_extrusion.extrude_layers now calls
-after every layer - see that module's own docstring for why a static,
-undeformed-surface estimate (the miter join in mesh_layer_step, or an
-a-priori thickness_limit) cannot by itself guarantee an extruded front
-never folds over itself, regardless of growth_rate/bl_layers/transition_growth_rate.
+"""逐层反应式自碰撞冻结机制（mesh_front_collision.py）的单元测试，
+mesh_extrusion.extrude_layers 现在每层之后都调用它——为什么静态的、基于
+未变形表面的估计（mesh_layer_step 里的斜接，或先验的 thickness_limit）
+单靠自身无法保证挤出前沿不折叠到自己身上（不论 growth_rate/bl_layers/
+transition_growth_rate 取什么），见该模块自己的文档。
 """
 
 import numpy as np
@@ -18,11 +17,10 @@ from autoflowcfd.grid.mesh_gen.utils.mesh_front_collision import (
 )
 from autoflowcfd.grid.mesh_gen.utils.mesh_utils import compute_face_normals
 
-# Two triangles that genuinely cross in 3D, sharing no vertices - verified
-# directly against overlap_geometry.triangle_triangle_intersect. Triangle A
-# lies flat in z=0 and contains the origin in its interior; edge B0-B1 of
-# triangle B is the segment x=0,y=0,z in [-2,2], which pierces straight
-# through that interior point.
+# 两个在三维里真正相交、不共享顶点的三角形——直接对照
+# overlap_geometry.triangle_triangle_intersect 验证过。三角形 A 平放在 z=0
+# 且内部包含原点；三角形 B 的边 B0-B1 是线段 x=0,y=0,z∈[-2,2]，正好穿过
+# 那个内部点。
 A0, A1, A2 = np.array([-2., -2., 0.]), np.array([2., -2., 0.]), np.array([0., 2., 0.])
 B0, B1, B2 = np.array([0., 0., -2.]), np.array([0., 0., 2.]), np.array([0., 3., 0.])
 
@@ -41,9 +39,9 @@ class TestFindSelfCollidingFaces:
         assert len(find_self_colliding_faces(nodes, faces)) == 0
 
     def test_adjacent_faces_sharing_a_vertex_are_never_flagged(self):
-        """A flat fan of triangles sharing a common centre vertex is
-        ordinary, valid mesh topology, not a self-collision - even though
-        every pair of fan blades literally touches at that shared vertex."""
+        """共享一个中心顶点的平面三角形扇是普通、合法的网格拓扑，不是自碰撞——
+        尽管每一对扇叶都在那个共享顶点上相接。
+        """
         center = np.array([0., 0., 0.])
         n = 8
         rim = [np.array([np.cos(t), np.sin(t), 0.])
@@ -61,9 +59,9 @@ class TestFindSelfCollidingFaces:
 
 class TestFreezeSelfCollidingNodes:
     def _two_face_setup(self):
-        """faces=[0,1,2] (A) and [3,4,5] (B); `current` is B held far away
-        (the previous, already-accepted, collision-free layer) while
-        `new` has B pulled back in to genuinely cross A."""
+        """faces=[0,1,2]（A）与 [3,4,5]（B）；`current` 里 B 在很远处（上一层，
+        已被接受、无碰撞），`new` 里 B 被拉回来与 A 真正相交。
+        """
         new_nodes = np.array([A0, A1, A2, B0, B1, B2])
         current_nodes = new_nodes.copy()
         current_nodes[3:] = np.array([B0, B1, B2]) + 100.0
@@ -79,18 +77,17 @@ class TestFreezeSelfCollidingNodes:
         assert sorted(frozen.tolist()) == [0, 1, 2, 3, 4, 5]
         assert np.array_equal(new_nodes, current_nodes)
         assert np.all(budget == 0.0)
-        # The rolled-back result must itself be collision-free - freezing
-        # to the previous, already-accepted layer can never make things worse.
+        # 回退后的结果本身必须无碰撞——冻结到上一层（已被接受的那层）
+        # 绝不会让情况变坏。
         assert len(find_self_colliding_faces(new_nodes, faces)) == 0
 
     def test_uninvolved_face_is_left_untouched(self):
-        """A third, well-separated face must be unaffected by freezing the
-        colliding pair - freezing is local to the offending nodes, not the
-        whole layer."""
+        """第三个、离得很远的面不应受冻结碰撞对的影响——冻结只作用于出问题的
+        节点，不是整层。
+        """
         new_nodes, current_nodes, faces = self._two_face_setup()
-        # Far from both the origin (A/B's own coordinates) AND +100 (where
-        # B gets rolled back to by this setup) so it can never accidentally
-        # land near either.
+        # 既远离原点（A/B 自己的坐标）**又**远离 +100（这个设置里 B 被回退到的
+        # 位置），所以绝不会意外落在两者附近。
         far_face = np.array([[1e5, 1e5, 1e5], [1e5 + 1, 1e5, 1e5], [1e5, 1e5 + 1, 1e5]])
         new_nodes = np.vstack([new_nodes, far_face])
         current_nodes = np.vstack([current_nodes, far_face + np.array([0., 0., 5.])])
@@ -115,9 +112,9 @@ class TestFreezeSelfCollidingNodes:
         assert np.all(budget == np.inf)
 
     def test_two_independent_collisions_are_both_resolved(self):
-        """Two unrelated colliding pairs elsewhere in the same layer (e.g.
-        two different sharp corners of the same body) must both be caught
-        and frozen in one call, not just the first one found."""
+        """同一层里别处两对互不相关的碰撞（例如同一物体的两个不同尖角）必须在
+        一次调用里都被抓到并冻结，而不是只处理找到的第一对。
+        """
         new1, cur1, _ = self._two_face_setup()
         offset = np.array([500., 0., 0.])
         new2, cur2 = new1 + offset, cur1 + offset
@@ -132,12 +129,10 @@ class TestFreezeSelfCollidingNodes:
         assert len(find_self_colliding_faces(new_nodes, faces)) == 0
 
     def test_partially_frozen_pair_only_refreezes_the_still_moving_side(self):
-        """If one side of a colliding pair was already frozen on an
-        earlier layer (budget already 0, so extrude_single_layer already
-        clamped its displacement to 0 - it never actually moved this
-        layer either) and the other side is still advancing normally,
-        only the still-moving side's nodes come back as newly frozen; the
-        already-frozen side has nothing to roll back."""
+        """碰撞对的一侧在更早的层已被冻结（预算已为 0，extrude_single_layer 已把
+        它的位移钳为 0——这一层它本来就没动）、另一侧仍在正常推进时，只有仍在
+        移动的那一侧的节点作为新冻结返回；已冻结的一侧没有可回退的东西。
+        """
         new_nodes, current_nodes, faces = self._two_face_setup()
         new_nodes[:3] = current_nodes[:3]  # triangle A already frozen: unmoved
         budget = np.array([0., 0., 0., np.inf, np.inf, np.inf])
@@ -152,12 +147,11 @@ class TestFreezeSelfCollidingNodes:
 
 class TestClampBudgetForConvergence:
     def _facing_pair(self, gap=0.05):
-        """Two triangles, each other's only close neighbour, `gap` apart,
-        wound so their normals oppose (B's normal is -z, facing back down
-        at A's +z) - a genuinely converging pair, not just two nearby
-        triangles that happen to be parallel (see
-        CONVERGING_DOT_THRESHOLD's own comment for why direction, not
-        just proximity, is what this function must key off)."""
+        """两个三角形，互为唯一的近邻，相距 `gap`，绕向使法向相对（B 的法向是
+        -z，正对着 A 的 +z 朝下）——真正相向汇聚的一对，而不只是两个恰好平行的
+        邻近三角形（这个函数为什么必须看方向而不只是邻近度，见
+        CONVERGING_DOT_THRESHOLD 的注释）。
+        """
         a = np.array([[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]])
         b = np.array([[0., 0., gap], [1., 0., gap], [0., 1., gap]])
         nodes = np.vstack([a, b])
@@ -175,18 +169,16 @@ class TestClampBudgetForConvergence:
         assert budget == pytest.approx(np.full(6, expected))
 
     def test_fraction_is_strictly_below_one_half(self):
-        """The whole point of the safety margin: two sides both fully
-        spending a budget derived from strictly less than half the gap
-        can never meet exactly (see CONVERGENCE_SAFETY_FRACTION's own
-        comment) - regression guard against someone "simplifying" this
-        back to an exact 0.5 and silently reintroducing exact-coincidence
-        convergence."""
+        """安全裕度的全部意义：两侧各自用完由"严格小于半个间隙"导出的预算，
+        永远不会恰好相遇（见 CONVERGENCE_SAFETY_FRACTION 的注释）——防止有人
+        把它"简化"回精确的 0.5，悄悄重新引入恰好重合的汇聚。
+        """
         assert CONVERGENCE_SAFETY_FRACTION < 0.5
 
     def test_never_loosens_an_already_tighter_budget(self):
-        """A node frozen by an earlier layer (or by find_self_colliding_
-        faces's own freeze) must stay frozen - this function may only
-        tighten, never restore, a budget."""
+        """被更早的层（或 find_self_colliding_faces 自己的冻结）冻结的节点必须
+        保持冻结——这个函数只能收紧预算，不能恢复。
+        """
         nodes, faces = self._facing_pair(gap=0.05)
         budget = np.array([0.001] * 3 + [np.inf] * 3)
 
@@ -197,7 +189,7 @@ class TestClampBudgetForConvergence:
 
     def test_well_separated_faces_are_not_clamped(self):
         nodes, faces = self._facing_pair(gap=0.05)
-        nodes[3:] += 1000.0  # push the second triangle far away
+        nodes[3:] += 1000.0  # 把第二个三角形推到很远
         budget = np.full(6, np.inf)
 
         clamp_budget_for_convergence(nodes, faces, budget)
@@ -205,33 +197,24 @@ class TestClampBudgetForConvergence:
         assert np.all(np.isinf(budget))
 
     def test_close_but_diverging_pair_across_a_convex_edge_is_not_clamped(self):
-        """Regression test for a real, serious bug found on cube_demo:
-        two small triangles straddling an ordinary CONVEX box edge
-        (material at x<0 and y<0, shared edge at x=0,y=0) are close
-        together near the shared edge from the very first layer - this is
-        normal, correctly-shaped mesh refinement near a feature, not a
-        defect - and moving each along its own normal (~(1,0,0) and
-        ~(0,1,0)) INCREASES their separation (a convex edge's fronts
-        diverge as they extrude, which is what the miter join in
-        mesh_layer_step.py exists to handle). Clamping based on proximity
-        alone (no directional filter at all) could not tell this apart
-        from genuine convergence and froze nodes along essentially every
-        edge of the cube - measured directly to produce 131x MORE
-        overlapping cells than the unfixed baseline (132,260 vs. 1,004)
-        once the resulting frozen, near-duplicate geometry reached
-        tetgen. See CONVERGING_CLOSING_RATE_THRESHOLD's own comment -
-        including for why a plain normal-vs-normal dot product test
-        (tried second) is ALSO not sufficient, just for a narrower case
-        this particular fixture doesn't happen to exercise (a sharp
-        convex wedge/thin fin).
+        """cube_demo 上发现的一个真实、严重缺陷的回归测试：跨在普通**凸**棱边
+        两侧的两个小三角形（材料在 x<0 与 y<0，共享边在 x=0,y=0）从第一层起就在
+        共享边附近靠得很近——这是特征附近正常、形状正确的网格加密，不是缺陷——
+        并且各自沿自己的法向（约 (1,0,0) 与 (0,1,0)）移动会**增大**它们的间距
+        （凸棱的前沿在挤出时发散，mesh_layer_step.py 的斜接正是为它而设）。
+        只按邻近度钳制（完全没有方向过滤）无法把它与真正的汇聚区分开，于是几乎
+        沿立方体的每条棱都冻结了节点——直接测量：由此产生的冻结、近乎重复的几何
+        送进 tetgen 之后，重叠单元比未修复的基线**多 131 倍**（132,260 对 1,004）。
+        见 CONVERGING_CLOSING_RATE_THRESHOLD 的注释——包括为什么单纯的法向点积
+        判据（第二个尝试）**同样**不够，只是它失效的情形更窄、这个夹具恰好没有
+        覆盖（尖锐的凸楔/薄翅）。
         """
         a0, a1, a2 = np.array([0., -0.2, 0.]), np.array([0., -0.05, 0.]), np.array([0., -0.125, 0.1])
         b0, b1, b2 = np.array([-0.2, 0., 0.]), np.array([-0.05, 0., 0.]), np.array([-0.125, 0., 0.1])
         nodes = np.array([a0, a1, a2, b0, b1, b2])
         faces = np.array([[0, 1, 2], [3, 4, 5]])
-        # Confirm the fixture is actually a close pair (a naive proximity-
-        # only version of this function WOULD wrongly clamp it) - not a
-        # vacuous test that passes only because nothing was ever nearby.
+        # 确认夹具确实是一对靠得很近的三角形（只看邻近度的朴素版本**会**错误地
+        # 钳制它）——不是因为附近什么都没有而空洞通过的测试。
         centroid_a, centroid_b = nodes[:3].mean(axis=0), nodes[3:].mean(axis=0)
         assert np.linalg.norm(centroid_a - centroid_b) < 0.2
         budget = np.full(6, np.inf)
@@ -241,18 +224,15 @@ class TestClampBudgetForConvergence:
         assert np.all(np.isinf(budget))
 
     def test_sharp_convex_wedge_is_not_clamped(self):
-        """Regression test for a second, sneakier false-positive found
-        while fixing the convex-edge bug above: a plain dot(normal_a,
-        normal_b) < 0 filter (tried as the first fix) is ALSO wrong for a
-        sharp CONVEX wedge (e.g. a thin fin or airfoil trailing edge) -
-        its two faces have near-OPPOSITE normals purely because the wedge
-        angle is acute (a symmetric 10 degree wedge gives dot=-0.98), yet
-        the two surfaces genuinely DIVERGE as they extrude outward, same
-        as any other convex feature; material thinness doesn't change
-        which way the offset surfaces move. The closing-rate test this
-        function actually uses gets this right where a plain normal-dot
-        test would not (verified directly: +0.35 for this exact fixture,
-        see CONVERGING_CLOSING_RATE_THRESHOLD's own comment)."""
+        """修上面凸棱缺陷时发现的第二个、更隐蔽的误报的回归测试：单纯的
+        dot(normal_a, normal_b) < 0 过滤（第一个尝试的修法）对尖锐的**凸**楔
+        （例如薄翅或翼型后缘）**同样**是错的——它的两个面法向近乎**相反**纯粹
+        因为楔角是锐角（对称的 10 度楔给出 dot=-0.98），但两个表面在向外挤出时
+        确实是**发散**的，与任何其它凸特征一样；材料薄并不改变偏移面的移动方向。
+        这个函数实际使用的闭合速率判据在单纯法向点积判据出错的地方给出正确结果
+        （直接验证过：这个夹具是 +0.35，见 CONVERGING_CLOSING_RATE_THRESHOLD 的
+        注释）。
+        """
         half_angle = np.deg2rad(5.0)
         top_dir = np.array([np.cos(half_angle), np.sin(half_angle), 0.])
         bot_dir = np.array([np.cos(half_angle), -np.sin(half_angle), 0.])
@@ -269,16 +249,14 @@ class TestClampBudgetForConvergence:
         assert np.all(np.isinf(budget))
 
     def test_already_intersecting_pair_clamps_straight_to_zero(self):
-        """A candidate pair that is already (exactly) intersecting isn't
-        expected in practice (see the function's own docstring - by
-        induction current_nodes is always already collision-free), but
-        must be handled defensively (triangle_triangle_min_distance is
-        only meaningful for a non-intersecting pair) rather than crash or
-        silently skip clamping. Needs a pair that is BOTH overlapping AND
-        converging (negative closing rate, see CONVERGING_CLOSING_RATE_
-        THRESHOLD) - two tilted triangles crossing through each other,
-        verified directly against triangle_triangle_intersect and the
-        closing-rate formula before being fixed into this test."""
+        """候选对已经（恰好）相交的情形在实际中不应出现（见函数文档——按归纳
+        current_nodes 总是已经无碰撞），但必须防御性地处理
+        （triangle_triangle_min_distance 只对不相交的一对有意义），而不是崩溃或
+        静默跳过钳制。需要一对**既**重叠**又**汇聚（闭合速率为负，见
+        CONVERGING_CLOSING_RATE_THRESHOLD）的三角形——两个倾斜、互相穿过的三角形，
+        固定进这个测试之前直接对照 triangle_triangle_intersect 与闭合速率公式
+        验证过。
+        """
         a0, a1, a2 = np.array([0., 0., 0.4]), np.array([1., 0., 0.1]), np.array([0., 1., -0.1])
         b0, b1, b2 = np.array([0., 0., -0.1]), np.array([1., 0., -0.1]), np.array([0., 1., 0.1])
         nodes = np.array([a0, a1, a2, b0, b1, b2])
@@ -297,21 +275,18 @@ class TestClampBudgetForConvergence:
 
 
 class TestExtrudeLayersNeverProducesASelfIntersectingLayer:
-    """End-to-end regression: two flat facing patches with a tight 0.05m
-    gap between them (the same class of defect as a body's underbody
-    approaching the ground - see mesh_tetgen_core.compute_local_thickness_
-    limit's own docstring) extruded toward each other with NO a-priori
-    thickness_limit supplied, so the only thing that can prevent the two
-    fronts from crossing is the reactive freeze under test. Growth
-    parameters are ordinary defaults, not tuned to make this pass - the
-    point (per this project's own explicit requirement) is that no layer
-    count or growth rate should be able to produce an overlap."""
+    """端到端回归：两片相对的平面片，之间只有 0.05m 的窄缝（与车身底部贴近
+    地面是同一类缺陷——见 mesh_tetgen_core.compute_local_thickness_limit 的
+    文档），相向挤出且**不**提供先验的 thickness_limit，所以唯一能阻止两个
+    前沿交叉的就是被测的反应式冻结。生长参数是普通默认值，没有为了让测试
+    通过而调——要点（按本项目的明确要求）是任何层数或增长率都不应产生重叠。
+    """
 
     def _facing_patches(self, gap=0.05):
-        # Patch A: unit square in z=0, wound so its normal is +z.
+        # 片 A：z=0 上的单位正方形，绕向使法向为 +z。
         a = np.array([[0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.]])
-        # Patch B: same footprint at z=gap, wound so its normal is -z
-        # (facing directly back down at A).
+        # 片 B：同一投影位置、z=gap，绕向使法向为 -z
+        # （正对着 A 朝下）。
         b = np.array([[0., 0., gap], [1., 0., gap], [1., 1., gap], [0., 1., gap]])
         nodes = np.vstack([a, b])
         faces = np.array([
@@ -345,17 +320,13 @@ class TestExtrudeLayersNeverProducesASelfIntersectingLayer:
                 f"layer {k} self-intersects (faces {colliding.tolist()}) - "
                 f"the reactive freeze failed to stop the fronts from crossing"
             )
-            # A's four nodes (0-3, growing +z) must never overtake B's
-            # corresponding four nodes (4-7, growing -z): the physical
-            # meaning of "never crossed", checked directly on top of the
-            # geometric self-intersection check above.
+            # A 的四个节点（0-3，向 +z 生长）绝不能越过 B 对应的四个节点（4-7，向
+            # -z 生长）："从未交叉"的物理含义，在上面几何自相交检查之外直接检查。
             assert np.all(layer_nodes[0:4, 2] <= layer_nodes[4:8, 2] + 1e-12)
 
-        # The mechanism must actually have engaged (this gap is tight
-        # enough that unconstrained growth at these settings would have
-        # closed it well within the 20 available layers) - otherwise the
-        # test above would pass vacuously just because nothing ever grew
-        # far enough to matter.
+        # 机制必须真的起过作用（这个间隙足够窄，按这些设置不受约束地生长会在
+        # 20 层之内早早把它填满）——否则上面的测试只是因为没有任何东西长到足够远
+        # 而空洞通过。
         final_a_z = all_nodes[(n_layers - 1) * npl + 0, 2]
         final_b_z = all_nodes[(n_layers - 1) * npl + 4, 2]
         assert final_b_z - final_a_z < 0.05, "fronts should have advanced close to the gap"

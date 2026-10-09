@@ -1,19 +1,17 @@
-"""Unit tests for core/turbulence/transport.py's WALL k=0 Dirichlet fix.
+"""core/turbulence/transport.py 的壁面 k=0 Dirichlet 修复的单元测试。
 
-`extrapolate_scalar_pair_kernel` (owner frame; formerly `extrapolate_scalar_to_faces_kernel`) previously always used a Neumann
-(ghost=owner) default at every boundary face, including WALL, for k and
-omega alike - a known, documented approximation (see the kernel's own
-docstring history). k is exactly zero at a no-slip wall (a standard SST/
-k-omega boundary condition, not an approximation), so for k specifically a
-Dirichlet-zero ghost (ghost = -owner, mirroring the mean-flow no-slip wall
-ghost state formula) is now applied wherever `_compute_wall_dirichlet_
-face_mask` identifies a face as WALL-typed via the solver's
-`boundary_ghost_provider`. omega is left on the Neumann default (its
-analytic near-wall value needs additional wall-distance data, tracked as
-separate future work).
+`extrapolate_scalar_pair_kernel`（owner 坐标系；原名
+`extrapolate_scalar_to_faces_kernel`）此前在每个边界面（包括 WALL）上对 k
+与 omega 一律用 Neumann（ghost=owner）默认值——一个已知、有文档的近似
+（见该核文档的历史）。无滑移壁面上 k 严格为零（标准的 SST/k-omega 边界
+条件，不是近似），所以专门对 k，在 `_compute_wall_dirichlet_face_mask`
+经求解器的 `boundary_ghost_provider` 识别为 WALL 类型的面上，现在施加
+Dirichlet 零的 ghost（ghost = -owner，与平均流无滑移壁面的 ghost 状态公式
+同一种镜像）。omega 保持 Neumann 默认值（它的近壁解析值需要额外的壁面
+距离数据，另行处理）。
 
-These tests pin the kernel-level Dirichlet-zero mirroring in isolation and
-the mask builder's face classification / defensive fallback.
+这些测试隔离地钉住核层面的 Dirichlet 零镜像，以及掩码构造函数的面分类/
+防御性兜底。
 """
 
 from types import SimpleNamespace
@@ -28,10 +26,10 @@ from autoflowcfd.fr.native_padding import real_sps_per_cell
 
 class TestExtrapolateScalarToFacesKernelWallDirichlet:
     def test_wall_face_mirrors_to_zero_non_wall_stays_neumann(self):
-        """Two boundary faces on the same single cell (value 5.0): face 0 is
-        flagged WALL-Dirichlet-zero, face 1 is not. Expect ghost = -owner for
-        face 0 (enforces phi=0 at the wall) and ghost = owner for face 1
-        (unchanged Neumann default)."""
+        """同一个单元（值 5.0）上的两个边界面：面 0 标记为壁面 Dirichlet 零，
+        面 1 没有。面 0 应得到 ghost = -owner（在壁面上强制 phi=0），面 1 应得到
+        ghost = owner（不变的 Neumann 默认值）。
+        """
         n_faces, n_fp, n_sps = 2, 1, 1
         scalar_sps = np.array([[5.0]])
 
@@ -42,7 +40,7 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
 
         owner_cell = np.array([0, 0], dtype=np.int64)
 
-        # Both faces are boundary faces: no real neighbor source.
+        # 两个面都是边界面：没有真实的邻居来源。
         neighbor_src0_cell = np.array([-1, -1], dtype=np.int64)
         # 插值矩阵是模板表 + 逐面编号（fr/face_flux_points/templates.py）
         neighbor_src0_tpl = np.zeros((1, n_fp, n_sps))
@@ -73,9 +71,9 @@ class TestExtrapolateScalarToFacesKernelWallDirichlet:
         np.testing.assert_allclose(phi_neighbor[1], [5.0])   # non-WALL: unchanged Neumann
 
     def test_all_false_mask_reproduces_old_neumann_only_behavior(self):
-        """A mask of all False must reproduce the pre-fix behavior exactly
-        (ghost = owner at every boundary face) - guards against the new
-        parameter silently changing existing (non-WALL) callers."""
+        """全 False 的掩码必须精确重现修复之前的行为（每个边界面上
+        ghost = owner）——防止新参数悄悄改变已有的（非壁面）调用方。
+        """
         n_faces, n_fp, n_sps = 1, 1, 1
         scalar_sps = np.array([[3.0]])
         # 原生自身面外插表：编码 [6,10) 四面体、[10,15) 棱柱，统一按
@@ -175,9 +173,10 @@ class TestComputeWallDirichletFaceMask:
         np.testing.assert_array_equal(mask, [False, False, False])
 
     def test_missing_provider_metadata_falls_back_to_all_false(self):
-        """A ghost provider without group_code/code_to_config (e.g. a plain
-        callable used by some tests) must not raise - it degrades to the
-        pre-fix Neumann-everywhere default, not a new failure mode."""
+        """没有 group_code/code_to_config 的 ghost provider（例如某些测试用的普通
+        可调用对象）不能抛异常——它退化为修复之前处处 Neumann 的默认值，而不是
+        一种新的失效方式。
+        """
         mesh = SimpleNamespace(face_connectivity=SimpleNamespace(n_faces=4))
         solver = SimpleNamespace(mesh=mesh, boundary_ghost_provider=lambda f, q, n: q)
 

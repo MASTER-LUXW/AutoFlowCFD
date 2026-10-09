@@ -27,12 +27,8 @@ turbulence.py::distributed_compute_turbulence_source_and_viscosity`，
 """
 
 import types
-
 import numpy as np
-from tests.unit._wall_source import synthetic_wall_source
 import pytest
-
-from tests.unit._patch_pkg import patch_pkg_attr
 
 from autoflowcfd.fr.operators import generate_fr_operators
 from autoflowcfd.core.mpi.partition import build_distributed_partition
@@ -41,139 +37,20 @@ from autoflowcfd.core.mpi.distributed_turbulence import (
     distributed_compute_turbulence_source_and_viscosity,
 )
 from autoflowcfd.core.turbulence.sst import SSTModelFR
-from autoflowcfd.core.turbulence.des import DDESModel, IDDESModel, compute_h_max_and_h_wn
-from autoflowcfd.core.fr_residual.inviscid import primitive_to_conserved
+from autoflowcfd.core.turbulence.des import compute_h_max_and_h_wn
 from autoflowcfd.core.gpu.distributed.gpu_distributed_init import _GPUDistributedInitMixin
 from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
-from autoflowcfd.core.gpu.turbulence.gpu_turbulence_des import GPUDDESModel, GPUIDDESModel
+
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
-
-import autoflowcfd.core.gpu.distributed.gpu_distributed_init as gdi_mod
-import autoflowcfd.core.gpu.distributed.gpu_distributed as gd_mod
-import autoflowcfd.core.gpu.residual.gpu_gradients as gpu_gradients_mod
-import autoflowcfd.core.gpu.residual.gpu_volume_contract as gpu_volume_contract_mod
-import autoflowcfd.core.gpu.residual.gpu_flux as gpu_flux_mod
-import autoflowcfd.core.gpu.turbulence.gpu_scalar_transport as gst_mod
-import autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst as gpu_turbulence_sst_mod
-import autoflowcfd.core.gpu.turbulence.gpu_turbulence_des as gpu_turbulence_des_mod
-import autoflowcfd.core.gpu.turbulence.gpu_sgs as gpu_sgs_mod
-import autoflowcfd.core.gpu.gpu_modal_filter as gpu_modal_filter_mod
-from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 from tests.unit._fake_halo import ShapeKeyedFakeHalo
-
-
-
-def _bind_turb_source(stub):
-    """把 `_GPUDistributedTurbSourceMixin` 的求值件绑定到替身上（被测入口
-    `_compute_turbulence_source_distributed` 通过 `self` 调用它们）。"""
-    from autoflowcfd.core.gpu.distributed.gpu_distributed_init.turb_source import (
-        _GPUDistributedTurbSourceMixin as M,
-    )
-    for name in ("_les_mu_t_compact", "_prepare_turbulence_view_distributed", "_turbulence_velocity_gradient_compact",
-                 "_sync_turbulence_view", "_evaluate_turbulence_rates_distributed",
-                 "_finalize_turbulence_update_distributed", "_write_back_turbulence_distributed"):
-        setattr(stub, name, types.MethodType(getattr(M, name), stub))
-
-class _NumpyAsCupy:
-    """把 numpy 伪装成 CuPy 模块接口，供各 gpu_*.py 生产函数在没有真实
-    CUDA 设备的机器上直接运行（不是重新实现，是给同一份代码换一个张量
-    库后端）——与本会话此前 `test_gpu_scalar_transport.py` 同一个模式，
-    额外加了 `cuda.Device` 空上下文管理器（`GPUTurbulenceSST.__init__`
-    需要）。"""
-
-    def __getattr__(self, name):
-        return getattr(np, name)
-
-    def scatter_add(self, a, indices, b):
-        np.add.at(a, indices, b)
-
-    def asnumpy(self, x):
-        return np.asarray(x)
-
-    class cuda:
-        class Device:
-            def __init__(self, device_id):
-                pass
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-
-@pytest.fixture(autouse=True)
-def _patch_get_cupy(monkeypatch):
-    shim = _NumpyAsCupy()
-    patch_module_get_cupy(monkeypatch, [
-        gdi_mod, gd_mod, gpu_gradients_mod, gpu_volume_contract_mod, gpu_flux_mod,
-        gst_mod, gpu_turbulence_sst_mod, gpu_turbulence_des_mod, gpu_sgs_mod,
-        gpu_modal_filter_mod], shim)
-    # `GPUTurbulenceSST.__init__`/`GPUDDESModel.__init__`/`GPUWALEModel.
-    # __init__` 单独检查模块级 `gpu_available` 标志（与 `get_cupy()` 是
-    # 否被换成替身无关），本机没有真实 CuPy 时恒为 False，需要一并
-    # patch 掉才能在没有真实 CUDA 设备时构造这些类。
-    monkeypatch.setattr(gpu_turbulence_sst_mod, "gpu_available", True)
-    monkeypatch.setattr(gpu_turbulence_des_mod, "gpu_available", True)
-    monkeypatch.setattr(gpu_sgs_mod, "gpu_available", True)
-
-
-def _prepare_compact_mesh_data(mesh, ops, compact_global_ids):
-    """构造 compact 索引空间的 mesh_data/ops_data（与 `_CompactMeshDataView`
-    /`GPUArrayManager.upload_mesh_data` 语义一致，只是数组仍是 numpy）。"""
-    n_sps = mesh.n_sps_per_cell
-    det_jacs = mesh.jacobians['det_jacs'].reshape(mesh.n_cells, n_sps)[compact_global_ids]
-    inv_jacs = mesh.jacobians['inv_jacs'].reshape(mesh.n_cells, n_sps, 3, 3)[compact_global_ids]
-    adj_j = det_jacs[..., None, None] * inv_jacs
-    mesh_data = {
-        'det_jacs': det_jacs, 'inv_jacs': inv_jacs, 'adj_j': adj_j,
-        'n_cells': len(compact_global_ids), 'n_prism': None,  # 调用方会覆盖 n_prism
-        'D_3d_prism': ops.D_3d_prism, 'D_3d_tet': ops.D_3d_tet,
-    }
-    # 补齐生产 GPU 路径会上传、替身容易漏掉的键，见
-    # _gpu_standin_helpers 模块文档。本文件算子与网格数据在同一个
-    # dict，且细点度量要按 compact 索引空间切。
-    from ._gpu_standin_helpers import complete_gpu_standin
-    complete_gpu_standin(mesh, ops, mesh_data, mesh_data,
-                         compact_ids=compact_global_ids)
-    return mesh_data
-
-
-def _nonuniform_state(mesh, rng):
-    rho_inf, u_inf, v_inf, w_inf, p_inf = 1.225, 30.0, 5.0, -3.0, 101325.0
-    n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
-    Q = np.zeros((n_cells, n_sps, 5))
-    Q[..., 0] = rho_inf * (1.0 + rng.uniform(-0.02, 0.02, size=(n_cells, n_sps)))
-    Q[..., 1] = u_inf + rng.uniform(-3.0, 3.0, size=(n_cells, n_sps))
-    Q[..., 2] = v_inf + rng.uniform(-2.0, 2.0, size=(n_cells, n_sps))
-    Q[..., 3] = w_inf + rng.uniform(-2.0, 2.0, size=(n_cells, n_sps))
-    Q[..., 4] = p_inf * (1.0 + rng.uniform(-0.01, 0.01, size=(n_cells, n_sps)))
-    U = np.stack(
-        [primitive_to_conserved(Q[c, s]) for c in range(n_cells) for s in range(n_sps)]
-    ).reshape(n_cells, n_sps, 5)
-    k_field = 1.0 * (1.0 + rng.uniform(-0.3, 0.3, size=(n_cells, n_sps)))
-    omega_field = 500.0 * (1.0 + rng.uniform(-0.3, 0.3, size=(n_cells, n_sps)))
-    return U, k_field, omega_field
-
-
-def _make_ddes_gpu(turb_model_name):
-    if turb_model_name == "SST":
-        return None
-    if turb_model_name == "DDES":
-        return GPUDDESModel()
-    if turb_model_name == "IDDES":
-        return GPUIDDESModel()
-    raise ValueError(turb_model_name)
-
-
-def _make_ddes_cpu(turb_model_name):
-    if turb_model_name == "SST":
-        return None
-    if turb_model_name == "DDES":
-        return DDESModel()
-    if turb_model_name == "IDDES":
-        return IDDESModel()
-    raise ValueError(turb_model_name)
+from tests.unit._gpu_distributed_turbulence_common import (
+    _bind_turb_source,
+    _make_ddes_cpu,
+    _make_ddes_gpu,
+    _nonuniform_state,
+    _prepare_compact_mesh_data,
+)
+from tests.unit._gpu_distributed_turbulence_common import _patch_get_cupy  # noqa: F401  autouse 夹具：进入本模块命名空间才生效
 
 
 @pytest.mark.parametrize("turb_model_name", ["SST", "DDES", "IDDES"])
@@ -448,160 +325,6 @@ def test_gpu_distributed_les_matches_single_machine_wale(rank):
     mu_t_local_gpu = mu_t_native_gpu[:n_local]
     expected = mu_t_cpu_global[partition.local_cells]
     np.testing.assert_allclose(mu_t_local_gpu, expected, rtol=1e-9, atol=1e-14)
-
-
-class TestWallDistanceDistributedGpu:
-    """`_init_wall_distance_distributed`：compact 索引空间（local + halo）解点上
-    按壁面距离来源查询。2026-09-02 修过的缺陷是对全局 sps_coords reshape 后按
-    n_local 切（n_ranks>1 时元素总数对不上）；2026-09-25 起它与 CPU 分布式共用
-    同一个函数，且删除了"没有壁面就退回单元特征长度"的兜底。"""
-
-    @pytest.mark.parametrize("rank", [0, 1])
-    def test_compact_shaped_query_from_the_source(self, rank):
-        order = 1
-        mesh = _build_synthetic_mixed_mesh(order)
-        ops = generate_fr_operators(order)
-        cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
-        fc = mesh.face_connectivity
-        partition = build_distributed_partition(fc, cell_partition, rank=rank, n_ranks=2)
-        dist_fc = build_distributed_flat_face(mesh, ops, partition, cell_partition=cell_partition)
-        compact_global_ids = dist_fc.compact_global_ids
-        source = synthetic_wall_source(mesh)
-
-        stub = types.SimpleNamespace(
-            rank=rank, mesh=mesh, dist_flat_face=dist_fc, turb_model_name="SST",
-            _wall_distance_source=source,
-        )
-        _GPUDistributedInitMixin._init_wall_distance_distributed(stub)
-
-        assert stub.wall_distance_gpu.shape == (len(compact_global_ids), mesh.n_sps_per_cell)
-        np.testing.assert_allclose(stub.wall_distance_gpu,
-                                   source.query(mesh.sps_coords[compact_global_ids]))
-
-    def test_missing_source_is_an_error_not_an_estimate(self):
-        mesh = _build_synthetic_mixed_mesh(1)
-        ops = generate_fr_operators(1)
-        cell_partition = np.zeros(mesh.n_cells, dtype=np.int32)
-        partition = build_distributed_partition(mesh.face_connectivity, cell_partition, rank=0, n_ranks=1)
-        dist_fc = build_distributed_flat_face(mesh, ops, partition, cell_partition=cell_partition)
-        stub = types.SimpleNamespace(rank=0, mesh=mesh, dist_flat_face=dist_fc, turb_model_name="SST")
-        with pytest.raises(RuntimeError):
-            _GPUDistributedInitMixin._init_wall_distance_distributed(stub)
-
-
-class TestWmlesDistributedGpu:
-    """多GPU分布式 WMLES 壁面剪应力修正端到端验证（2026-09-02）——与
-    `TestWallDistanceDistributedGpu`/上面 SST 系列同一套 numpy 替身
-    方法论，直接调用 `MultiGPUDistributedSolver.compute_viscous_
-    residual_gpu` 这个真实生产方法（用 stub 对象承载它需要的属性），
-    只 mock 掉与本次改动无关的 `compute_viscous_residual_fr_gpu`
-    （GPU 粘性通量核，本次没有改动，返回全零隔离出 WMLES 修正项本身），
-    判据：stub 路径算出的修正与直接调用 CPU 核心函数
-    `compute_wmles_wall_stress_correction`（用同一份 compact 数据）算出
-    的参照值逐位一致。"""
-
-    @pytest.mark.parametrize("rank", [0, 1])
-    def test_wmles_correction_matches_direct_cpu_call(self, rank, monkeypatch):
-        from autoflowcfd.core.turbulence.wmles import WMLESModel
-        from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-        from autoflowcfd.core.utils.solver_helpers import compute_wmles_wall_stress_correction
-        import autoflowcfd.core.gpu.residual.gpu_viscous as gpu_viscous_mod
-
-        order = 1
-        mesh = _build_synthetic_mixed_mesh(order)
-        ops = generate_fr_operators(order)
-        n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
-        mu = 1.8e-5
-        rho_inf = 1.225
-        rng = np.random.default_rng(777)
-        U, _k, _omega = _nonuniform_state(mesh, rng)
-
-        fc = mesh.face_connectivity
-        boundary_face = int(np.nonzero(fc.is_boundary)[0][0])
-        wall_cell = int(fc.owner_cell[boundary_face])
-        mesh.boundary_groups = {"wall_group": np.array([wall_cell], dtype=np.int64)}
-        mesh.boundary_bc_types = {"wall_group": "WALL"}
-
-        root_stub = types.SimpleNamespace(
-            mesh=mesh, freestream={"rho_inf": rho_inf, "vel_inf": 30.0, "p_inf": 101325.0},
-            turb_model_name="WMLES", wmles_model=object(),
-        )
-        provider_global = build_boundary_ghost_provider(root_stub, bc_overrides={})
-        wmles_model = WMLESModel(nu=mu / rho_inf)
-        wall_distance = np.full((n_cells, n_sps), 1e-2)
-
-        cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
-        partition = build_distributed_partition(fc, cell_partition, rank=rank, n_ranks=2)
-        dist_fc = build_distributed_flat_face(mesh, ops, partition, cell_partition=cell_partition)
-        compact_global_ids = dist_fc.compact_global_ids
-
-        import copy as copy_mod
-        provider_local = copy_mod.copy(provider_global)
-        provider_local.group_code = provider_global.group_code[partition.local_faces]
-        wall_distance_compact = wall_distance[compact_global_ids]
-
-        mesh_data = _prepare_compact_mesh_data(mesh, ops, compact_global_ids)
-        mesh_data['n_prism'] = dist_fc.base_flat.n_prism
-
-        compact_mesh_view = types.SimpleNamespace(
-            n_prism_cells=dist_fc.base_flat.n_prism, n_points_1d=mesh.n_points_1d,
-            jacobians={'det_jacs': mesh_data['det_jacs'], 'inv_jacs': mesh_data['inv_jacs']},
-        )
-
-        n_halo = partition.n_halo
-        native_ids = (
-            np.concatenate([partition.local_cells, partition.halo_cells])
-            if n_halo > 0 else partition.local_cells
-        )
-        U_extended = U[native_ids]
-
-        # 与本次改动无关的 GPU 粘性通量核返回全零，隔离出 WMLES 修正项
-        # 本身（该核函数本次未改动，不是要重新验证的对象）。
-        patch_pkg_attr(monkeypatch, 
-            gpu_viscous_mod, "compute_viscous_residual_fr_gpu",
-            lambda *a, **k: np.zeros((len(compact_global_ids), n_sps, 5)),
-        )
-
-        stub = types.SimpleNamespace(
-            rank=rank, device_id=0, mesh=mesh, mu_molecular=mu,
-            mesh_data=mesh_data, ops=ops,
-            boundary_ghost_provider=provider_local,
-            flat_face_gpu=None,
-            dist_flat_face=dist_fc,
-            wall_distance_gpu=wall_distance_compact,
-            wmles_model=wmles_model,
-            _compact_mesh_view=compact_mesh_view,
-            U_extended_gpu=U_extended,
-            partition=partition,
-        )
-        stub._permute_to_compact = lambda arr: arr[dist_fc.perm]
-        stub._unpermute_from_compact = lambda arr: arr[dist_fc.inv_perm]
-        _bind_turb_source(stub)
-
-        residual_local = gd_mod.MultiGPUDistributedSolver.compute_viscous_residual_gpu(stub)
-
-        # 参照值：直接调用 CPU 核心函数，用同一份 compact 数据。
-        from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
-        U_compact = U_extended[dist_fc.perm]
-        Q_compact = conserved_to_primitive(U_compact[..., :5])
-        facade = types.SimpleNamespace(
-            wmles_model=wmles_model, mesh=compact_mesh_view, ops=ops,
-            wall_distance=wall_distance_compact,
-            state=types.SimpleNamespace(U=U_compact, Q=Q_compact),
-            boundary_ghost_provider=provider_local,
-        )
-        expected_compact = compute_wmles_wall_stress_correction(facade, flat_face_override=dist_fc.base_flat)
-        if expected_compact is None:
-            # 这个 rank 的 local+halo compact 区域里恰好不含任何真实 WALL
-            # 面（4 单元合成网格切成 2 rank 时完全可能发生——WALL 单元
-            # 落在另一个 rank）：GPU 侧同样应该完全不叠加任何修正，
-            # 残差退化为 mock 的粘性核返回值（全零）。
-            np.testing.assert_allclose(residual_local, np.zeros_like(residual_local), atol=1e-10)
-            return
-        expected_native = expected_compact[dist_fc.inv_perm]
-        expected_local = expected_native[:partition.n_local_cells, :, :5]
-
-        np.testing.assert_allclose(residual_local, expected_local, atol=1e-10)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,10 @@ import pickle
 from typing import Optional
 
 from autoflowcfd.core.utils.checkpoint_physics import physics_metadata
+from autoflowcfd.core.fr_solver.turbulence.init import production_ramp_metadata
+from autoflowcfd.core.utils.checkpoint_time import (
+    PREVIOUS_LEVEL_FIELD, TURBULENCE_PREVIOUS_FIELD, previous_level_rows, time_metadata, turbulence_previous_rows,
+)
 from autoflowcfd.core.utils.order_continuation.checkpoint_state import phase_state_metadata
 
 
@@ -215,6 +219,15 @@ def write_checkpoint(
         metadata["surface_mesh"] = surface_mesh
     # Order Continuation 阶段起始残差（与分布式写入端共用，见 order_continuation/checkpoint_state.py）
     metadata.update(phase_state_metadata(solver))
+    metadata.update(production_ramp_metadata(solver))
+    # dual-time 的物理时间步长与上一时间层（续算接上 BDF2，见 core/utils/checkpoint_time.py）
+    metadata.update(time_metadata(solver))
+    _prev = previous_level_rows(solver, solver.state.U.shape[0])
+    if _prev is not None:
+        extra_fields[PREVIOUS_LEVEL_FIELD] = _prev
+    _turb_prev = turbulence_previous_rows(solver, solver.state.U.shape[0])
+    if _turb_prev is not None:
+        extra_fields[TURBULENCE_PREVIOUS_FIELD] = _turb_prev
 
     path = manager.save(
         solution_cell_avg,

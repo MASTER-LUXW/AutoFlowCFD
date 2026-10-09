@@ -132,13 +132,43 @@ def resolve_reference_area(solver, volume_data, reference_area: Optional[float])
 
     参考面积必须沿**来流方向**投影（有攻角时按 X 投影会偏大 1/cos(alpha)，15 度就是 3.5%，直接进 Cd 分母）。
     """
-    if reference_area is None:
-        from autoflowcfd.core.utils.flow_direction import direction_from_freestream
-
-        reference_area = _compute_reference_area_auto(
-            volume_data, direction=direction_from_freestream(solver.freestream))
+    reference_area = reference_area_for(solver.freestream, volume_data, reference_area)
     solver._reference_area = reference_area
     return reference_area
+
+
+def reference_area_for(freestream: dict, volume_data, reference_area: Optional[float]) -> Optional[float]:
+    """参考面积：给了就用，没给时沿来流方向由体网格的面网格自动估算（单机与分布式共用）。"""
+    if reference_area is not None:
+        return reference_area
+    from autoflowcfd.core.utils.flow_direction import direction_from_freestream
+
+    return _compute_reference_area_auto(volume_data, direction=direction_from_freestream(freestream))
+
+
+def distributed_reference_area(solver, volume_data, reference_area: Optional[float]) -> Optional[float]:
+    """root 上的参考面积（其余 rank 返回 None）。`volume_data` 为 None 时取完全分布式加载在 root 上保留的那一份
+    （`solver._root_context["volume_data"]`）。"""
+    from autoflowcfd.core.mpi import is_root
+
+    if not is_root():
+        return None
+    if volume_data is None:
+        volume_data = solver._root_context["volume_data"]
+    return reference_area_for(solver.freestream, volume_data, reference_area)
+
+
+def report_distributed_aerodynamic_coefficients(solver, reference_area: Optional[float]) -> None:
+    """分布式求解收尾的气动系数（**集体调用**，全部 rank 都要调用；参考面积只需 root 给出）。
+
+    各 rank 的 local 段汇总到 root（`core/mpi/global_view.py`），之后与单机同一个函数。2026-10-09 以前分布式路径
+    不报告气动系数。逐步日志里的 Cd/Cl 只在单机打印：分布式每步汇总整场代价过高。
+    """
+    from autoflowcfd.core.mpi.global_view import gather_global_view
+
+    view = gather_global_view(solver)
+    if view is not None:
+        _report_aerodynamic_coefficients(view, reference_area)
 
 
 def _report_aerodynamic_coefficients(solver, reference_area: Optional[float]) -> None:

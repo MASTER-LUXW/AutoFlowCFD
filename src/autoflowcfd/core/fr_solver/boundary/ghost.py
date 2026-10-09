@@ -11,7 +11,7 @@ from loguru import logger
 
 from autoflowcfd.boundary.fr_ghost_state import BoundaryGhostStateProvider, InletSEMGhostState
 
-from autoflowcfd.grid.connectivity.face_connectivity import tag_boundary_groups_for_mesh
+from autoflowcfd.grid.connectivity.face_connectivity_boundary_tags import tag_boundary_groups_for_mesh
 
 
 def _compute_inlet_fp_positions(solver, face_conn, is_target_face: np.ndarray) -> Dict[int, np.ndarray]:
@@ -72,6 +72,15 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
 
     face_conn = solver.mesh.face_connectivity
     group_code, name_to_code = tag_boundary_groups_for_mesh(solver.mesh, face_conn)
+    # 每个边界面都必须属于一个边界组（2026-10-09 以前没有组的边界面静默当成远场：网格内部缺口的面因此在流场
+    # 内部施加来流条件——cube_demo 生成网格的 86 个缺口面里有 20 个就是这样）
+    boundary_idx = face_conn.get_boundary_face_indices()
+    untagged = boundary_idx[group_code[boundary_idx] < 0]
+    if len(untagged):
+        centers = face_conn.center[untagged]
+        raise ValueError(
+            f"{len(untagged)}/{len(boundary_idx)} 个边界面不属于任何边界组（位于 {centers.min(axis=0)} ~ "
+            f"{centers.max(axis=0)}），无法给出边界条件：体网格不封闭（内部缺口），或体网格与面网格不对应")
 
     # 真实 bug 修复（#9，V2.0 专家组盲审第4轮，2026-08-28，WMLES 假滑移
     # 边界）：WMLES 激活时，WALL 组此前恒用 is_no_slip=True 构造 ghost
@@ -125,6 +134,8 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
         "VELOCITY_INLET": ("INLET", {"Q_inlet": Q_free}),
         "PRESSURE_OUTLET": ("OUTLET", {"p_outlet": p_inf}),
         "SYMMETRY": ("SYMMETRY", {}),
+        # 远场（来流特征边界）。2026-10-09 以前没有组的边界面一律静默当成它，现在必须显式声明
+        "FARFIELD": ("FARFIELD", {"Q_free": Q_free}),
     }
 
     # BD-02：LES/DDES 模式下给 VELOCITY_INLET 组接入合成湍流入口 (SEM)，
@@ -146,14 +157,42 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
     # 湍流。
     use_sem = solver.turb_model_name in ("LES", "DDES", "IDDES") and getattr(solver, "wmles_model", None) is None
 
+    # 声明为周期的组必须真的配对过（配对在网格加载时完成，`face_connectivity_periodic.py`；这里防的是加载之后
+    # 才把类型改成 PERIODIC——那些面仍是普通边界面，却没有任何边界条件）。判据与边界面标记方式无关：该组的
+    # 单元必须出现在带平移向量的内部面上。
+    periodic_names = [name for name, raw_type in bc_types.items() if raw_type == "PERIODIC"]
+    if periodic_names:
+        periodic_face = (~face_conn.is_boundary) & np.any(face_conn.face_translation != 0.0, axis=1)
+    for name in periodic_names:
+        cells = np.asarray((solver.mesh.boundary_groups or {}).get(name, ()), dtype=np.int64)
+        paired = periodic_face & (np.isin(face_conn.owner_cell, cells) | np.isin(face_conn.neighbor_cell, cells))
+        if not np.any(paired):
+            raise ValueError(f"周期边界组 '{name}' 的面未配对（网格连接关系里没有它的周期面）：周期类型必须在"
+                             "网格加载之前给出，并带 paired_with/translation 参数")
+
     code_to_config: Dict[int, Dict[str, Any]] = {}
     for name, code in name_to_code.items():
         override = bc_overrides.get(name)
         if override is not None:
             code_to_config[code] = override
             continue
-        raw_type = bc_types.get(name, "FARFIELD")
-        mapped_type, default_params = type_map.get(raw_type, ("FARFIELD", {"Q_free": Q_free}))
+        # 类型必须明确（2026-10-09 以前缺类型、或类型不认识时一律静默当成远场：壁面被当成远场时结果完全错误、
+        # 没有任何提示）
+        if name not in bc_types:
+            raise ValueError(
+                f"边界组 '{name}' 没有边界条件类型（mesh.boundary_bc_types 缺这个组，也没有 bc_overrides）")
+        raw_type = bc_types[name]
+        if raw_type == "PERIODIC":
+            # 周期面配对之后是内部面，这个组不需要幽灵态；逐面几何匹配下仍留在边界上的面说明配对失败
+            # （单元级匹配不含周期组，见 `tag_boundary_groups_for_mesh`）
+            n_left = int(np.count_nonzero(face_conn.is_boundary & (group_code == code)))
+            if n_left:
+                raise ValueError(f"周期边界组 '{name}' 有 {n_left} 个未配对的边界面（配对后的周期面是内部面），"
+                                 "检查周期面的几何对应")
+            continue
+        if raw_type not in type_map:
+            raise ValueError(f"边界组 '{name}' 的类型 {raw_type!r} 求解器不支持（支持 {sorted(type_map)}）")
+        mapped_type, default_params = type_map[raw_type]
         config = {"type": mapped_type, **default_params}
 
         if mapped_type == "INLET" and use_sem:
@@ -200,7 +239,7 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
 
     logger.info(
         f"Boundary conditions configured for {len(name_to_code)} group(s): "
-        f"{[(name, code_to_config[code]['type']) for name, code in name_to_code.items()]}"
+        f"{[(name, code_to_config[code]['type']) for name, code in name_to_code.items() if code in code_to_config]}"
     )
 
     return BoundaryGhostStateProvider(group_code, code_to_config, default_config)

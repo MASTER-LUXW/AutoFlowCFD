@@ -13,7 +13,6 @@ AutoFlowCFD V2.0 - 分布式 FRState
 
 from autoflowcfd.core.fr_solver.state import N_MEAN_FLOW_VARS
 import numpy as np
-from typing import Optional
 
 from autoflowcfd.core.mpi.partition import DistributedPartition
 from autoflowcfd.core.mpi.comm import allreduce_sum

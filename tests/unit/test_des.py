@@ -200,9 +200,9 @@ class TestDDESGridScaleMaxEdge:
         with pytest.raises(ValueError):
             ddes.compute_grid_scale(np.array([1e-8]), method='max_edge')
 
-    def test_unknown_method_still_raises(self):
+    def test_unknown_method_is_rejected(self):
         ddes = DDESModel()
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(ValueError, match="未知的网格尺度方法"):
             ddes.compute_grid_scale(np.array([1e-8]), method='wurz')
 
     def test_cube_root_severely_underestimates_flat_prism_delta(self):

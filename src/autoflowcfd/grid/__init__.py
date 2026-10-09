@@ -51,8 +51,8 @@ from .mesh_gen.extrusion.mesh_layer_step import extrude_single_layer
 from .mesh_gen.tetgen.mesh_prism_to_tet import convert_layers_to_tetrahedra
 from .mesh_gen.background.mesh_background import generate_hybrid_mesh
 from .mesh_gen.utils.mesh_boundary import (
-    identify_boundaries_from_surface,
-    map_surface_boundaries
+    map_boundaries_by_geometry,
+    map_generated_boundaries,
 )
 
 # NAS 导出模块
@@ -102,8 +102,8 @@ __all__ = [
     # mesh_background 背景网格
     "generate_hybrid_mesh",
     # mesh_boundary 边界识别
-    "identify_boundaries_from_surface",
-    "map_surface_boundaries",
+    "map_boundaries_by_geometry",
+    "map_generated_boundaries",
     # NAS 导出
     "export_volume_mesh_to_nas",
 ]

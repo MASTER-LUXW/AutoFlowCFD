@@ -22,15 +22,6 @@ AutoFlowCFD V2.0 - 分布式 FRSolver
 # 下面 re-export 全部公开名与测试在用的私有名，所以全仓库
 # `from autoflowcfd.core.mpi.distributed_solver import ...` 一个字都不用改。
 
-from .from_package import (  # noqa: F401
-    _DistributedFromPackageMixin,
-)
-from .step import (  # noqa: F401
-    _DistributedStepMixin,
-)
-from .support import (  # noqa: F401
-    _DistributedSupportMixin,
-)
 from .core import (  # noqa: F401
     DistributedFRSolver,
 )

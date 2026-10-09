@@ -12,7 +12,6 @@ AutoFlowCFD V2.0 - MPI 通信封装
 """
 
 import numpy as np
-from typing import Optional
 
 from autoflowcfd.core.mpi import get_comm, get_mpi, mpi_available
 

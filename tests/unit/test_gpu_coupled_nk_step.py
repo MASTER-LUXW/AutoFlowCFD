@@ -17,13 +17,8 @@ GPU 部件（`gpu_linearization_parts`）、快照还原、步后收尾。
 """
 
 import types
-
 import numpy as np
 import pytest
-
-from tests.unit._gpu_cupy_shim import patch_module_get_cupy
-from tests.unit.test_gpu_solver_turbulence_source import _NumpyAsCupy, _prepare_mesh_ops_data
-from tests.unit.test_implicit_sst_nk import _channel_solver
 
 import autoflowcfd.core.gpu.gpu_preconditioning as gpu_pre_mod
 import autoflowcfd.core.gpu.residual.gpu_corrected_gradient as gpu_corrected_gradient_mod
@@ -36,13 +31,18 @@ import autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence as gpu_implicit_t
 import autoflowcfd.core.gpu.turbulence.gpu_scalar_transport as gst_mod
 import autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst as gpu_turbulence_sst_mod
 
+from tests.unit._gpu_cupy_shim import patch_module_get_cupy
+from tests.unit.test_gpu_solver_turbulence_source import _prepare_mesh_ops_data
+from tests.unit.test_implicit_sst_nk import _channel_solver
+from tests.unit._numpy_as_cupy import NumpyAsCupy
+
 
 @pytest.fixture(autouse=True)
 def _patch_get_cupy(monkeypatch):
     patch_module_get_cupy(monkeypatch, [
         gpu_solver_io_mod, gpu_solver_mod, gpu_gradients_mod, gpu_volume_contract_mod, gst_mod,
         gpu_turbulence_sst_mod, gpu_implicit_turb_mod, gpu_pre_mod, gpu_inviscid_mod,
-        gpu_corrected_gradient_mod], _NumpyAsCupy())
+        gpu_corrected_gradient_mod], NumpyAsCupy())
     monkeypatch.setattr(gpu_turbulence_sst_mod, "gpu_available", True)
 
 
@@ -61,7 +61,7 @@ def _gpu_turbulence_model(cpu):
     tc = cpu.turb_model
     n_cells, n_sps = tc.transported_fields()[0].shape
     if isinstance(tc, SAModel):
-        tg = SAModel(n_cells, n_sps, tc.nu_ref, tc.viscosity_ratio, xp=_NumpyAsCupy())
+        tg = SAModel(n_cells, n_sps, tc.nu_ref, tc.viscosity_ratio, xp=NumpyAsCupy())
         attrs = ("nu_tilde_field", "nu_t", "wall_points", "production_factor")
     else:
         tg = GPUTurbulenceSST(n_cells, n_sps, device_id=0)

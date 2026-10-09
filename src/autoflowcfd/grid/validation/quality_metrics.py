@@ -114,8 +114,7 @@ def compute_triangle_skewness_values(nodes: np.ndarray, cells: np.ndarray) -> np
     c = np.linalg.norm(p0 - p1, axis=1)
 
     degenerate = (a < 1e-12) | (b < 1e-12) | (c < 1e-12)
-    # Guard the law-of-cosines division for degenerate triangles; their
-    # skewness is overridden to the worst value (1.0) below regardless.
+    # 退化三角形的余弦定理除法要防零；它们的偏斜度下面无论如何都会被置为最差值 1.0。
     safe_b = np.where(degenerate, 1.0, b)
     safe_c = np.where(degenerate, 1.0, c)
     safe_a = np.where(degenerate, 1.0, a)

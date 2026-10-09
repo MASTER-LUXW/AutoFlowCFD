@@ -59,8 +59,6 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
         mesh,
         ops,
         n_ranks: int,
-        face_connectivity_data=None,
-        partition_info=None,
         rank: Optional[int] = None,
         device_id: Optional[int] = None,
         time_scheme: str = "ssp_rk3",
@@ -83,14 +81,13 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
         artificial_viscosity_alpha: float = 1.0,
         sem_num_eddies: int = _SEM_DEFAULT_NUM_EDDIES,
     ):
-        """初始化多 GPU 分布式求解器。
+        """初始化多 GPU 分布式求解器（"传统模式"：每个 rank 持有完整全局网格，root 用 METIS 分区后广播）。
+        只有 root 持有完整网格的"完全分布式加载"走 `from_fully_distributed_package`。
 
         Args:
-            mesh: HighOrderMesh（局部网格或完整网格）
+            mesh: 完整全局 HighOrderMesh
             ops: FROperators
             n_ranks: MPI rank 总数
-            face_connectivity_data: 局部面连接关系数据（分布式加载模式）
-            partition_info: 分区信息（分布式加载模式）
             rank: 当前 rank（默认从 MPI 获取）
             device_id: GPU 设备 ID（默认 rank % n_gpus）
             time_scheme: 时间积分方案
@@ -112,7 +109,7 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
         self._setup_identity_and_device(
             mesh, ops, n_ranks, rank, device_id, mu_molecular,
             rho_inf, vel_inf, p_inf, aoa_deg, aos_deg, turb_model)
-        n_sps, n_local = self._setup_partition_and_geometry(mesh, ops, n_ranks, partition_info)
+        n_sps, n_local = self._setup_partition_and_geometry(mesh, ops, n_ranks)
         self._setup_time_integration(time_scheme, cfl_start, cfl_max, cfl_min)
         self._setup_turbulence(mesh, turb_model, n_sps, mu_molecular, rho_inf, vel_inf,
                                turbulence_intensity, viscosity_ratio)

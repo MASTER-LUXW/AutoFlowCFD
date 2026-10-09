@@ -9,6 +9,7 @@ import numpy as np
 from typing import Any
 
 from loguru import logger
+from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
 
 
@@ -148,7 +149,7 @@ def interpolate_to_new_order(solver: Any, new_order: int):
 
     # 如果阶数相同，无需插值
     if old_n_sps == new_n_sps:
-        print(f"    Same order, skipping interpolation")
+        print("    Same order, skipping interpolation")
         return
 
     # 延拓算子**按基分派**（2026-09-20 修复的真实生产缺陷）：一维 Gauss
@@ -237,8 +238,7 @@ def interpolate_to_new_order_checked(solver: Any, new_order: int) -> None:
     # （若存在）形状不再匹配，且严格来说也不再是同一离散空间下的解，
     # 必须让它失效——否则下一步 BDF2 会静默用一份形状不匹配/物理上不
     # 连续的历史层，而不是干净地退化回 BDF1。
-    if hasattr(solver, "_dual_time_U_prev"):
-        solver._dual_time_U_prev = None
+    reset_dual_time_history(solver)
 
     # NEWTON_KRYLOV 跨步状态随阶数失效（理由见 reset_newton_state 文档）
     from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state

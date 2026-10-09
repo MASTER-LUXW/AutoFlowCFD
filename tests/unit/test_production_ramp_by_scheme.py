@@ -104,3 +104,82 @@ def test_cpu_distributed_explicit_ramp_completion_reaches_the_solver():
         s.step(1e-6)
     assert s._turb_ramp_step == 3
     assert s._turb_production_ramp_complete is True
+
+
+# ---------------------------------------------------------------------------
+# checkpoint 续接渐变进度（2026-10-09，`restore_production_ramp`）
+# ---------------------------------------------------------------------------
+
+def _owner(total):
+    from types import SimpleNamespace
+
+    return (SimpleNamespace(_turb_ramp_step=0, _turb_production_ramp_steps=total,
+                            _turb_production_ramp_complete=False),
+            SimpleNamespace(production_factor=0.0))
+
+
+@pytest.mark.parametrize("record, total, step, complete, factor", [
+    # 渐变中写出：从记录的步数继续（上一次推进留下的因子是 (step-1)/total）
+    ({"turb_ramp_step": 2, "turb_ramp_steps": 50, "turb_ramp_complete": False}, 50, 2, False, 1 / 50),
+    # 刚走满、完成标记要等下一次推进才置位：与连续计算同一时刻置位
+    ({"turb_ramp_step": 50, "turb_ramp_steps": 50, "turb_ramp_complete": False}, 50, 50, False, 49 / 50),
+    ({"turb_ramp_step": 80, "turb_ramp_steps": 50, "turb_ramp_complete": True}, 50, 50, True, 1.0),
+    # 隐式稳态（不渐变）写出 -> 显式瞬态续接：已完成
+    ({"turb_ramp_step": 7, "turb_ramp_steps": 0, "turb_ramp_complete": True}, 50, 50, True, 1.0),
+    # 显式渐变中写出 -> 隐式续接：隐式不渐变
+    ({"turb_ramp_step": 2, "turb_ramp_steps": 50, "turb_ramp_complete": False}, 0, 0, False, 1.0),
+    # 早于本记录的 checkpoint：进度不可知，视为已完成
+    ({}, 50, 50, True, 1.0),
+])
+def test_restore_production_ramp_rules(record, total, step, complete, factor):
+    from autoflowcfd.core.fr_solver.turbulence.init import restore_production_ramp
+
+    owner, model = _owner(total)
+    restore_production_ramp(owner, model, record)
+    assert (owner._turb_ramp_step, owner._turb_production_ramp_complete) == (step, complete)
+    assert owner._ramp_baseline_reset_done is complete
+    assert model.production_factor == pytest.approx(factor)
+
+
+def test_restored_ramp_continues_exactly_where_the_checkpoint_left_it():
+    """写出 -> 恢复 -> 推进，产生项因子序列与不间断推进相同。"""
+    from autoflowcfd.core.fr_solver.turbulence.init import production_ramp_metadata, restore_production_ramp
+
+    straight, model_a = _owner(5)
+    factors = []
+    for _ in range(8):
+        advance_production_ramp(straight, model_a)
+        factors.append((model_a.production_factor, straight._turb_production_ramp_complete))
+
+    for cut in range(8):
+        first, model_b = _owner(5)
+        for _ in range(cut):
+            advance_production_ramp(first, model_b)
+        resumed, model_c = _owner(5)
+        restore_production_ramp(resumed, model_c, production_ramp_metadata(first))
+        got = []
+        for _ in range(cut, 8):
+            advance_production_ramp(resumed, model_c)
+            got.append((model_c.production_factor, resumed._turb_production_ramp_complete))
+        assert got == factors[cut:], cut
+
+
+def test_distributed_checkpoint_carries_the_ramp_progress(tmp_path):
+    from autoflowcfd.core.mpi.distributed_checkpoint import distributed_load_checkpoint, distributed_save_checkpoint
+    from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
+    from autoflowcfd.fr.operators import generate_fr_operators
+
+    def _dist():
+        mesh = build_channel_mesh_prism(1, 3, 4, 2, LX, H, LZ)
+        return DistributedFRSolver(
+            mesh=mesh, ops=generate_fr_operators(1), face_connectivity=mesh.face_connectivity,
+            n_ranks=1, order=1, turb_model_name="SA", time_scheme=RK3,
+            wall_distance_source=channel_wall_source(LX, H, LZ))
+    a = _dist()
+    for _ in range(3):
+        a.step(1e-6)
+    path = distributed_save_checkpoint(a, str(tmp_path), 3, "mesh.nas", 1, "sa", "cpu")
+    b = _dist()
+    distributed_load_checkpoint(path, b)
+    assert (b._turb_ramp_step, b._turb_production_ramp_complete) == (3, False)
+    assert float(b.turb_model.production_factor) == pytest.approx(2 / 50)

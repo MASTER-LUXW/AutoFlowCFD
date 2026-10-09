@@ -34,15 +34,12 @@ class PrecompactedMeshData:
     不是全局那一份）。
 
     face_connectivity 故意留空（`None`）；`face_flux_points` 是一个
-    非 None 的哨兵值，不是真实数据（见下方"哨兵值说明"）：本次范围只
-    覆盖"均值流残差计算"这一条主线（`DistributedMeshAdapter`/
+    非 None 的哨兵值，不是真实数据（见下方"哨兵值说明"）：非 root rank 上的全部计算
+    （`DistributedMeshAdapter`/
     `distributed_compute_inviscid_residual`/`_viscous_residual` 全部
     只通过 `dist_fc`（压缩面几何，由 root 预先构建、随本对象一起下发）
     访问面数据，从未读取 `mesh.face_connectivity`/`mesh.face_flux_points`
-    本身——这两个属性只在 `boundary_ghost_provider`/湍流模型壁面距离
-    这类需要"完整全局面拓扑/节点坐标"的辅助路径里才用得到，这两类目前
-    仍需要真实全局网格（湍流模型在这个模式下未接入，见
-    `build_fully_distributed_rank_package` 文档"范围边界"一节）。
+    本身——边界幽灵态与湍流模型需要的全局量（壁距、IDDES 网格尺度）都由 root 在完整网格上算好、切成紧凑索引空间随包下发。
 
     哨兵值说明：`compute_inviscid_residual_fr`/`compute_viscous_
     residual` 入口处各有一个 `mesh.face_connectivity is None or mesh.
@@ -148,27 +145,7 @@ def build_fully_distributed_rank_package(
     计算一次，不会因为循环 n_ranks 次而重复付出这个昂贵的 Newton
     迭代开销。
 
-    范围边界（本次实现覆盖的范围，如实标注不覆盖的部分）：
-    - 覆盖：inviscid/viscous 均值流残差计算所需的全部数据
-      （`DistributedMeshAdapter` 需要的紧凑几何 + `boundary_ghost_
-      provider`，两者共同决定 `distributed_compute_inviscid_residual`/
-      `_viscous_residual` 能否正确工作）；SST/DDES/IDDES 湍流模型
-      （2026-09-02 补齐——`compute_distributed_wall_distance`/
-      `compute_h_max_and_h_wn` 都只需要**完整全局网格**（root 有，
-      非 root rank 不需要），root 侧算好、切成 compact 索引空间随
-      紧凑包一起发送即可，此前"范围不覆盖"的理由本身就不成立，只是
-      当时没有一并做）；WMLES/LES（同日续接）——WMLES 复用与 SST 完全
-      同一套 `wall_distance_compact`（y+ 计算需要），LES（WALE）不需要
-      root 预计算任何额外几何量，纯代数每步现算。DUAL_TIME
-      （2026-09-02 续接）——`time_scheme`/`dual_time_inner_iter` 只是
-      纯配置量（不依赖 root 的完整网格），随包一起透传给
-      `DistributedFRSolver.from_fully_distributed_package`（该方法早已
-      读取这两个字段，见其文档，此前只是本函数从未真正把它们塞进
-      package，`--fully-distributed --time-method dual-time` 因此
-      恒被 CLI 拒绝——不是设计上不支持，只是没人接上这两个参数）。
-      Order Continuation（2026-09-02 同日续接）已通过
-      `redistribute_fully_distributed_for_new_order`（阶数切换时 root
-      重新调用本函数）接入，不再是"不覆盖"的特性。
+    覆盖范围：均值流无粘/粘性残差所需的紧凑几何与边界幽灵态；湍流模型所需的全局量（壁距、IDDES 的 h_max/h_wn）由 root 在完整网格上算好、切成紧凑索引空间；全部湍流模型（`core/turbulence/registry.py::SUPPORTED_MODELS`，与单机相同）、全部时间格式、checkpoint 续算与 Order Continuation 均已接入（换阶时 root 重新调用本函数，见 `redistribute_fully_distributed_for_new_order`）。
 
     Args:
         mesh, ops, face_connectivity: root rank 持有的完整全局网格/

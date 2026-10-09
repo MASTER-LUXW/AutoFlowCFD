@@ -22,6 +22,7 @@ checkpoint_callback 是否正确调用、绝对迭代数是否正确、最终保
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
+import pytest
 from click.testing import CliRunner
 
 from autoflowcfd.core.fr_solver.state import SolverResult
@@ -33,6 +34,16 @@ from autoflowcfd.cli.main import cli
 #: （2026-10-05 起共用求解循环；CLI 用它把实际步数写进最终 checkpoint，而不是 max_iter）。
 _CPU_RESULT = SolverResult(converged=False, iterations=10, final_residual=1e-4)
 _GPU_RESULT = SolverResult(converged=True, iterations=10, final_residual=1e-4)
+
+
+@pytest.fixture(autouse=True)
+def _aero_report_calls(monkeypatch):
+    """收尾气动系数报告要汇总真实求解器状态（替身求解器没有），这里只记录调用——报告本身与单机逐位一致
+    由 test_distributed_aero_report.py 验证。"""
+    calls = []
+    monkeypatch.setattr("autoflowcfd.cli.solve.commands.report_distributed_aerodynamic_coefficients",
+                        lambda solver, area: calls.append((solver, area)))
+    return calls
 
 
 def _fake_distributed_solver(solve_return):
@@ -53,7 +64,7 @@ class TestResumeDistributedCpuTraditionalMode(object):
     """--n-ranks>1（不加 --multi-gpu/--fully-distributed）：CPU MPI
     "传统模式"。"""
 
-    def test_checkpoint_callback_wired_with_absolute_iteration(self, tmp_path):
+    def test_checkpoint_callback_wired_with_absolute_iteration(self, tmp_path, _aero_report_calls):
         checkpoint_file = tmp_path / "checkpoint_iter_002000.h5"
         checkpoint_file.write_bytes(b"")
 
@@ -82,6 +93,7 @@ class TestResumeDistributedCpuTraditionalMode(object):
         mock_save_checkpoint = fake_solver.save_checkpoint_distributed
 
         assert result.exit_code == 0, result.output
+        assert [c[0] for c in _aero_report_calls] == [fake_solver]   # 续算收尾报告气动系数
         mock_rebuild.assert_called_once()
         assert mock_rebuild.call_args.kwargs["n_ranks"] == 2
         assert mock_rebuild.call_args.kwargs["multi_gpu"] is False
@@ -236,13 +248,11 @@ class TestResumeDistributedPhaseMaxIterForwarding(object):
         assert fake_solver.solve.call_args.kwargs["residual_drop_threshold"] == 99.0
 
     def test_cpu_traditional_mode_default_none_is_forwarded_not_dropped(self, tmp_path):
-        """Not passing `--phase-max-iter` must still reach `solver.solve`
-        as an explicit `phase_max_iter=None` kwarg (the callee's own
-        default-value logic then takes over, see `run_distributed_order_
-        continuation` docs) — not silently omitted from the call
-        entirely (which would be indistinguishable from this test's
-        perspective, but the point is the wiring itself, not just the
-        non-default case)."""
+        """不传 `--phase-max-iter` 时，它仍必须作为显式的 `phase_max_iter=None`
+        关键字参数到达 `solver.solve`（之后由被调方自己的默认值逻辑接管，见
+        `run_order_continuation` 文档）——而不是在调用里被静默省略（从这个测试的
+        角度两者无法区分，但要点是接线本身，而不只是非默认值的情形）。
+        """
         checkpoint_file = tmp_path / "checkpoint_iter_002000.h5"
         checkpoint_file.write_bytes(b"")
 

@@ -47,15 +47,12 @@ face_flux_points/merge.py 的既有记录）。P0（每个面只有 1 个"平均
 tests/unit/test_face_flux_points_exact_normal.py 显式验证了这一点。
 """
 
-from typing import Dict, Optional, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
 from autoflowcfd.grid.curved_mapping.curved_mapping import (
     TET_CUBE_FACES, PRISM_CUBE_FACES,
-)
-from autoflowcfd.grid.curved_mapping.curved_mapping_exact_jacobian import (
-    tet_exact_jacobian, prism_exact_jacobian,
 )
 from .geometry import CUBE_FACE_AXIS_SIDE, face_ref_grid
 
@@ -338,7 +335,6 @@ def compute_exact_face_normals_and_weights(
         与原 `_all_normals`/`_all_area_w` 完全相同的语义和消费方式（owner 侧
         外法向按 owner FP 网格顺序排列；neighbor 侧取负号，调用方不变）。
     """
-    n_fp = n1d * n1d
     wx, wy = np.meshgrid(weights_1d, weights_1d, indexing="ij")
     w_fp = (wx * wy).ravel()  # (n_fp,) 原始（未归一化）张量积求积权重，覆盖 [-1,1]^2
 

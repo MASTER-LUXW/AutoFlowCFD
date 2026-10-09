@@ -8,7 +8,6 @@
 """
 
 import types
-
 import numpy as np
 import pytest
 
@@ -25,13 +24,17 @@ from autoflowcfd.core.mpi.distributed_turbulence import distributed_compute_turb
 from autoflowcfd.core.mpi.partition import build_distributed_partition
 from autoflowcfd.core.turbulence.sa import SAModel
 from autoflowcfd.fr.operators import generate_fr_operators
+
 from tests.unit._fake_halo import ShapeKeyedFakeHalo
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 from tests.unit.test_gpu_distributed_fully_distributed import gpu_shim  # noqa: F401  （夹具）
-from tests.unit.test_gpu_distributed_turbulence import (
-    _NumpyAsCupy, _bind_turb_source, _nonuniform_state, _prepare_compact_mesh_data,
+from tests.unit._gpu_distributed_turbulence_common import (
+    _bind_turb_source,
+    _nonuniform_state,
+    _prepare_compact_mesh_data,
 )
+from tests.unit._numpy_as_cupy import NumpyAsCupy
 
 MU, RHO = 1.8e-5, 1.225
 
@@ -39,7 +42,7 @@ MU, RHO = 1.8e-5, 1.225
 @pytest.fixture(autouse=True)
 def _patch_get_cupy(monkeypatch):
     patch_module_get_cupy(monkeypatch, [gdi_mod, gd_mod, gpu_gradients_mod, gpu_volume_contract_mod, gpu_flux_mod,
-                                        gst_mod, gpu_modal_filter_mod], _NumpyAsCupy())
+                                        gst_mod, gpu_modal_filter_mod], NumpyAsCupy())
 
 
 @pytest.mark.parametrize("rank", [0, 1])
@@ -85,7 +88,7 @@ def test_gpu_distributed_sa_matches_cpu_distributed_sa(rank):
     mesh_data = _prepare_compact_mesh_data(mesh, ops, compact_ids)
     mesh_data['n_prism'] = dist_fc.base_flat.n_prism
     mesh_data['cell_volumes'] = mesh.cell_volumes[compact_ids]
-    turb_gpu = model(_NumpyAsCupy())
+    turb_gpu = model(NumpyAsCupy())
     halo_gpu = ShapeKeyedFakeHalo(U[native_ids], np.where(d_wall == 0.0, 0.0, nu_tilde)[native_ids][..., None])
     n_faces = dist_fc.base_flat.n_faces
     stub = types.SimpleNamespace(

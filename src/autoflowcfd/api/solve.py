@@ -14,6 +14,7 @@ from autoflowcfd.grid.structures import VolumeMeshData
 from autoflowcfd.cli.solve.solver_factory import build_single_node_solver
 from autoflowcfd.config.solver_config import SteadyConfig, TransientConfig
 from autoflowcfd.config.turbulence_names import turbulence_solver_name
+from autoflowcfd.core.time_integration.base import DEFAULT_STEADY_TOL
 from autoflowcfd.api_config import api_resume_simulation
 
 
@@ -28,12 +29,11 @@ class _APISolveMixin:
         turbulence_model: Optional[str] = None,
         max_iter: Optional[int] = None,
         dt: float = 1e-4,
-        tol: float = 1e-6,
+        tol: Optional[float] = None,
         rho_inf: Optional[float] = None,
         vel_inf: Optional[float] = None,
         p_inf: Optional[float] = None,
-        threads: int = -1,
-        output_dir: str = "./results",
+        threads: Optional[int] = None,
         config: Optional[SteadyConfig] = None,
         phase_max_iter: Optional[int] = None,
         residual_drop_threshold: Optional[float] = None,
@@ -66,9 +66,9 @@ class _APISolveMixin:
                 order/max_iter 等参数同一套优先级规则；直接透传给
                 `FRSolver.solve()`，见该方法/`order_continuation.
                 run_order_continuation` 同名参数文档。
-            dt, tol: 时间步长与收敛容差，直接透传给 FRSolver.solve()
-            threads: CPU 后端 numba 并行线程数
-            output_dir: Output directory
+            dt: 时间步长（稳态格式按局部伪时间步推进，只有合成湍流入口用到它）
+            tol: 相对收敛容差；None 时取 `config.convergence_tol`，都没有时 `DEFAULT_STEADY_TOL`
+            threads: numba 并行线程数；None 时取 `config.n_threads`，都没有时 -1（自动）
             **kwargs: 其余参数透传给 FRSolver 构造函数
                 （例如 mu_molecular/dual_time_inner_iter/bc_overrides；
                 config 提供时，这三个物理量的 config 字段仅在 kwargs 里
@@ -103,6 +103,8 @@ class _APISolveMixin:
         else:
             turbulence_model = "sst"
         max_iter = max_iter if max_iter is not None else (config.max_iter if config is not None else 1000)
+        tol = tol if tol is not None else (config.convergence_tol if config is not None else DEFAULT_STEADY_TOL)
+        threads = threads if threads is not None else (config.n_threads if config is not None else -1)
         rho_inf = rho_inf if rho_inf is not None else (config.rho_inf if config is not None else 1.225)
         vel_inf = vel_inf if vel_inf is not None else (config.vel_inf if config is not None else 33.33)
         p_inf = p_inf if p_inf is not None else (config.p_inf if config is not None else 101325.0)
@@ -153,7 +155,7 @@ class _APISolveMixin:
         volume_mesh: VolumeMeshData,
         backend: Optional[str] = None,
         order: Optional[int] = None,
-        time_method: str = "rk3",
+        time_method: Optional[str] = None,
         turbulence_model: Optional[str] = None,
         mode: str = None,
         physical_time: Optional[float] = None,
@@ -162,8 +164,7 @@ class _APISolveMixin:
         rho_inf: Optional[float] = None,
         vel_inf: Optional[float] = None,
         p_inf: Optional[float] = None,
-        threads: int = -1,
-        output_dir: str = "./transient_results",
+        threads: Optional[int] = None,
         config: Optional[TransientConfig] = None,
         phase_max_iter: Optional[int] = None,
         residual_drop_threshold: Optional[float] = None,
@@ -178,18 +179,15 @@ class _APISolveMixin:
                 同名字段 > 内建默认值"解析，显式传值始终优先——与
                 run_steady 的 `config` 参数同一套规则（见该方法文档）。
                 `physical_time` 对应 `config.total_time`。
-            time_method: 时间推进方案，与 core.time_integration.base.
-                TimeIntegrationScheme 的取值对齐：
-                "rk3"（默认，SSP_RK3）/"imex"（IMEX_EULER）/
-                "dual-time"（DUAL_TIME）/"forward_euler"
+            time_method: 时间推进方案（`core/time_integration/base.py::scheme_from_name` 的取值，如 "rk3"/"imex"/
+                "dual-time"）；None 时取 `config.time_scheme`，都没有时 "rk3"
             turbulence_model: Turbulence model (none/sst/ddes/wmles/les)
             mode: turbulence_model 的别名（向后兼容）
             physical_time: 总物理时间（秒）；未提供时按 dt*1000 估算迭代数
             dt: 时间步长
             tol: 收敛容差（瞬态通常传 0.0，跑满 max_iter）
             rho_inf, vel_inf, p_inf: 自由来流条件
-            threads: CPU 后端 numba 并行线程数
-            output_dir: Output directory
+            threads: numba 并行线程数；None 时取 `config.n_threads`，都没有时 -1（自动）
             config: 可选的 `TransientConfig`，见上方参数说明与
                 run_steady 同名参数的文档（`mu_molecular`/
                 `turbulence_intensity`/`viscosity_ratio` 同样从
@@ -228,6 +226,9 @@ class _APISolveMixin:
         else:
             turbulence_model = "sst"
         dt = dt if dt is not None else (config.dt if config is not None else 1e-4)
+        threads = threads if threads is not None else (config.n_threads if config is not None else -1)
+        if time_method is None:
+            time_method = config.time_scheme if config is not None else "rk3"
         if physical_time is None and config is not None:
             physical_time = config.total_time
         rho_inf = rho_inf if rho_inf is not None else (config.rho_inf if config is not None else 1.225)

@@ -99,15 +99,13 @@ def split_sharp_corners(
             （原始和副本）映射回输入 `nodes` 数组中的原始顶点索引，
             用于同样方式扩展其他 per-原始-顶点数组
             （taper_scale、thickness_limit）
-        bevel_source_face: int64, shape=(n_extra,) - 对每个追加行，
-            它应从哪个原始 `faces` 行（0 起始）继承边界组属性
     """
     n_nodes = len(nodes)
     n_faces = len(faces)
     if n_faces == 0:
         return (
             nodes.copy(), faces.copy(), np.ones(0, dtype=bool),
-            np.arange(n_nodes), np.zeros(0, dtype=np.int64),
+            np.arange(n_nodes),
         )
 
     face_normals = _face_normals(nodes, faces)
@@ -282,17 +280,14 @@ def split_sharp_corners(
     # 将结果四边形的一侧折叠为一个点（其两个三角形在该侧
     # 共享 2 个相同顶点）——作为退化三角形在下方过滤掉。
     bevel_tris = []
-    bevel_source = []
     if len(hard_edges):
-        v0, v1, fa, fb = hard_edges[:, 0], hard_edges[:, 1], hard_edges[:, 2], hard_edges[:, 3]
+        v0, v1 = hard_edges[:, 0], hard_edges[:, 1]
         c_v0_a = lookup_copy(v0, he_pa)
         c_v1_a = lookup_copy(v1, he_pa)
         c_v0_b = lookup_copy(v0, he_pb)
         c_v1_b = lookup_copy(v1, he_pb)
         bevel_tris.append(np.stack([c_v0_a, c_v1_a, c_v1_b], axis=1))
-        bevel_source.append(fa)
         bevel_tris.append(np.stack([c_v0_a, c_v1_b, c_v0_b], axis=1))
-        bevel_source.append(fa)
 
     # --- 拐角帽盖：为上方计算的每个规则 valence-3+ 顶点的
     # 真实循环顺序进行扇形三角化。force_single 对每个这样的 v
@@ -306,12 +301,9 @@ def split_sharp_corners(
         apex = int(copies[0])
         for i in range(1, len(cyclic) - 1):
             bevel_tris.append(np.array([[apex, int(copies[i]), int(copies[i + 1])]], dtype=np.int64))
-            bevel_source.append(np.array([-1], dtype=np.int64))  # 下方再填充实际值
 
     if bevel_tris:
         extra_faces = np.vstack(bevel_tris)
-        bevel_source_face = np.concatenate(bevel_source)
-
         # 丢弃退化行（force_single 端点在其他wise拆分的边上
         # 将其倒角四边形的一侧折叠为重复顶点——见上方倒角条注释）。
         degenerate = (
@@ -319,29 +311,9 @@ def split_sharp_corners(
             (extra_faces[:, 1] == extra_faces[:, 2]) |
             (extra_faces[:, 0] == extra_faces[:, 2])
         )
-        if np.any(degenerate):
-            extra_faces = extra_faces[~degenerate]
-            bevel_source_face = bevel_source_face[~degenerate]
-
-        # 拐角帽盖行以占位符 -1 源面追加
-        # （帽盖三角形不“属于”任何单个原始面）——
-        # 回退到恰好接触其 apex 顶点的任何面，
-        # 使边界组继承仍能解析到正确的组名，
-        # 而非在 -1 索引上崩溃。
-        need_fallback = bevel_source_face < 0
-        if np.any(need_fallback):
-            vertex_to_any_face = np.full(n_nodes + n_extra_copies, -1, dtype=np.int64)
-            vertex_to_any_face[faces[:, 0]] = np.arange(n_faces)
-            vertex_to_any_face[faces[:, 1]] = np.arange(n_faces)
-            vertex_to_any_face[faces[:, 2]] = np.arange(n_faces)
-            apex_nodes = extra_faces[need_fallback, 0]
-            apex_orig = orig_of_node[apex_nodes]
-            resolved = vertex_to_any_face[apex_orig]
-            resolved = np.where(resolved < 0, 0, resolved)
-            bevel_source_face[need_fallback] = resolved
+        extra_faces = extra_faces[~degenerate]
     else:
         extra_faces = np.zeros((0, 3), dtype=np.int64)
-        bevel_source_face = np.zeros(0, dtype=np.int64)
 
     topology_faces = np.vstack([topology_faces_real, extra_faces]).astype(np.int64)
     real_face_mask = np.zeros(len(topology_faces), dtype=bool)
@@ -353,4 +325,4 @@ def split_sharp_corners(
             f"triangle(s) to keep the split surface watertight"
         )
 
-    return new_nodes, topology_faces, real_face_mask, orig_of_node, bevel_source_face
+    return new_nodes, topology_faces, real_face_mask, orig_of_node

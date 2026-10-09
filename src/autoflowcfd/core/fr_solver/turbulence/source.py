@@ -17,31 +17,31 @@ from .init import (
 )
 
 
-def compute_turbulence_source(solver, dt) -> Optional[tuple]:
-    """计算湍流模型源项（对应 FRSolver.compute_turbulence_source）。
+def compute_turbulence_source(solver, dt, physical_time=None, advance_ramp: bool = True) -> Optional[tuple]:
+    """湍流场的一次更新（对应 FRSolver.compute_turbulence_source）。
 
     Args:
-        dt: k/omega 场显式更新使用的时间步长，直接转发给
-            `turb_model.update_fields`。调用方（fr_solver/step.py）
-            按 scheme 传入不同的量：稳态加速模式（SSP-RK/IMEX）传
-            逐 SP 的局部 CFL 步长数组 dt_local（形状 (n_cells, n_sps)，
-            与 dk_total/domega_total 广播兼容），DUAL_TIME 模式传标量
-            物理 dt。之前这里统一收到的是原始物理 dt 标量，未经
-            cfl.py 的阶数/粘性/几何刚性收紧，真实复现过在合成 Couette
-            +SST 算例与 cube_demo 生产网格上都会让 omega 场显式积分
-            失稳（一步内放大几十倍，Order Continuation 升阶后几步内
-            发散至 inf/NaN）——修复见 step.py::step 文档。
+        dt: 一次更新的（伪）时间步长，转发给 `turb_model.update_fields`：逐 SP 的局部步长
+            （形状 (n_cells, n_sps)，按物理波速，cfl.py 的阶数/粘性/几何刚性收紧都在里面）。
+            稳态加速模式就是推进步长；DUAL_TIME 下是伪时间内迭代的步长，物理时间项由
+            `physical_time` 并入（`core/turbulence/dual_time.py`）。
+        physical_time: DUAL_TIME 的物理时间项（`PhysicalTimeTerm`），在 update_fields 之后、
+            后处理之前施加；其余格式 None
+        advance_ramp: 是否推进产生项渐变计数（DUAL_TIME 的内迭代里只有第一次推进：渐变按物理步计）
     """
     if solver.turb_model is None:
         return None
 
-    # 更新湍流产项渐变因子（每步调用，production_factor 从 0 渐增到 1）
-    _update_production_ramp(solver)
+    # 更新湍流产项渐变因子（每个物理步一次，production_factor 从 0 渐增到 1）
+    if advance_ramp:
+        _update_production_ramp(solver)
 
     Q, grad_vel, d_wall, mu = prepare_turbulence_inputs(solver)
     rates = evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, apply_des=True)
 
     solver.turb_model.update_fields(dt, rates.source, rates.transport)
+    if physical_time is not None:
+        physical_time.apply(solver.turb_model, np, dt)
     finalize_turbulence_update(solver)
     return rates.raw
 

@@ -20,7 +20,7 @@ P0 架构缺口完全不适用于这里。
 """
 
 import numpy as np
-from typing import Optional
+from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
 
 
@@ -153,8 +153,7 @@ def gpu_solver_interpolate_to_new_order(solver, target_p: int) -> None:
 
     # DUAL_TIME 上一物理时间层历史随阶数切换失效——与 CPU/GPU 分布式
     # 版本同一处处理，理由同该文档。
-    if hasattr(solver, '_dual_time_U_prev'):
-        solver._dual_time_U_prev = None
+    reset_dual_time_history(solver)
     # NEWTON_KRYLOV 跨步状态随阶数失效（理由见 reset_newton_state 文档）
     from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
 

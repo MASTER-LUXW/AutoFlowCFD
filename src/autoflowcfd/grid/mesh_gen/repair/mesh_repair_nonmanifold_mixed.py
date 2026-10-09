@@ -16,8 +16,10 @@ from .mesh_repair_cavity_shared import (
     _cavity_boundary_faces,
     _count_bad_cells,
     _weld_near_coincident_boundary_points,
+    retile_is_conformal,
 )
-from .mesh_repair_nonmanifold_mixed_demote import _split_prisms_to_tets, demote_invalid_prisms_to_tets  # noqa: F401  (demote_invalid_prisms_to_tets 是本模块的公开出口，保持原有导入路径可用)
+from .mesh_repair_nonmanifold_mixed_demote import _split_prisms_to_tets
+from .mesh_repair_nonmanifold_mixed_weld import GlobalWeldState
 
 # _weld_near_coincident_boundary_points 的容差——空腔边界面自身中位边长
 # 的比例，不是固定长度（见该函数自己的文档字符串了解为什么必须用局部
@@ -46,6 +48,9 @@ from .mesh_repair_nonmanifold_mixed_demote import _split_prisms_to_tets, demote_
 # 有实际参与的机会，而不是退化成事实上从不触发的死代码。
 CAVITY_WELD_TOLERANCE_FRACTION = 0.10
 
+# 焊接让空腔外单元退化时把它并进空腔重来的最多次数（每次都会重新求边界、重新焊接）
+_MAX_WELD_GROWTH = 3
+
 
 def patch_nonmanifold_cavity_mixed(
     nodes: np.ndarray,
@@ -53,12 +58,10 @@ def patch_nonmanifold_cavity_mixed(
     tet_cells: np.ndarray,
     prism_keep: np.ndarray,
     tet_keep: np.ndarray,
-    bl_cell_groups: np.ndarray,
-    cell_groups: np.ndarray,
     n_buffer_rings: int = 1,
     max_cavity_cells: int = 5000,
     max_clusters_attempted: int = 20_000,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """在棱柱(BL)+四面体(transition/core)混合网格上局部重铺非流形/标记坏的空腔。
 
     是 mesh_repair_cavity.patch_nonmanifold_cavity 的混合网格版本。
@@ -93,9 +96,6 @@ def patch_nonmanifold_cavity_mixed(
             之前——两者都是提议，尚未执行）。
         prism_keep, tet_keep: bool 数组——False 标记一个否则会被无条件
             丢弃/标记为坏的单元。
-        bl_cell_groups: (n_prism,) 字符串数组，与 prism_cells 平行。
-        cell_groups: (n_tet,) 字符串数组，与 tet_cells 平行——每个
-            新重铺的单元获得 ''（与 patch_nonmanifold_cavity 相同的约定）。
         n_buffer_rings: 在提取每个簇的边界之前，围绕每个簇的面邻接
             环数。
         max_cavity_cells: 单簇安全上限（不是总预算）——单个簇这么大
@@ -107,14 +107,13 @@ def patch_nonmanifold_cavity_mixed(
             每个都便宜，但每次调用 tetgen 有实际开销，仍会累积）。
 
     Returns:
-        (new_nodes, new_prism_cells, new_tet_cells, new_bl_cell_groups,
-        new_cell_groups) —— 如果两个 keep 掩码已经全为 True 则返回
+        (new_nodes, new_prism_cells, new_tet_cells) —— 如果两个 keep 掩码已经全为 True 则返回
         未修改的（非副本）原始数组；否则反映成功修补的簇数（0 或更多
         ——部分结果，超大/失败的簇保持调用方 keep 掩码找到的原样，
         是预期且正常的，不是错误）。
     """
     if prism_keep.all() and tet_keep.all():
-        return nodes, prism_cells, tet_cells, bl_cell_groups, cell_groups
+        return nodes, prism_cells, tet_cells
 
     from ..tetgen.mesh_tetgen_core import fill_core_volume, CORE_TETGEN_MINRATIO, CORE_TETGEN_MINDIHEDRAL
     from ...validation.quality_validator import MeshQualityValidator
@@ -139,8 +138,7 @@ def patch_nonmanifold_cavity_mixed(
     if n_prism:
         prism_as_tets = _split_prisms_to_tets(prism_cells)  # (3*n_prism, 4)
         prism_faces = prism_as_tets[:, _CAVITY_FACE_TEMPLATES].reshape(-1, 3)
-        # _split_prisms_to_tets block-concatenates (all T1's, then all
-        # T2's, then all T3's) rather than interleaving per prism.
+        # _split_prisms_to_tets 按块拼接（先全部 T1、再全部 T2、再全部 T3），不是逐棱柱交错。
         prism_cell_of_face = np.repeat(np.tile(np.arange(n_prism), 3), 4)
     else:
         prism_faces = np.empty((0, 3), dtype=np.int64)
@@ -151,15 +149,10 @@ def patch_nonmanifold_cavity_mixed(
 
     all_faces = np.vstack([prism_faces, tet_faces])
     cell_of_face = np.concatenate([prism_cell_of_face, tet_cell_of_face])
-    # A degenerate (repeated-vertex) face - from a "collapsed corner"
-    # prism whose growth froze at exactly one base vertex, splitting into
-    # one fully-degenerate sub-tet - is not a real geometric face and
-    # must not participate in adjacency/grouping at all: left in, it
-    # collides with itself and with genuinely-unrelated faces that happen
-    # to share the same repeated node, corrupting both the non-manifold
-    # detection and the cavity-growing graph (confirmed directly: this
-    # was the actual cause of ~23,000 phantom cavity seeds in an earlier,
-    # unfiltered version of this function).
+    # 退化面（顶点重复）——来自恰好一个底顶点增长冻结的"坍缩角"棱柱，拆分后有一个完全退化的子四面体——
+    # 不是真实的几何面，不能参与邻接/分组：留着它会和自己、以及恰好共享那个重复节点的无关面撞在一起，
+    # 同时破坏非流形检测和空腔生长图（已直接确认：本函数早期不过滤的版本里约 23,000 个虚假空腔种子
+    # 就是这样来的）。
     degenerate = (
         (all_faces[:, 0] == all_faces[:, 1])
         | (all_faces[:, 0] == all_faces[:, 2])
@@ -196,7 +189,7 @@ def patch_nonmanifold_cavity_mixed(
     seed_idx = np.flatnonzero(seed)
     if len(seed_idx) == 0:
         logger.warning("Non-manifold mixed-cavity patch: seed set empty after degenerate-face filtering - falling back to plain cell removal")
-        return nodes, prism_cells, tet_cells, bl_cell_groups, cell_groups
+        return nodes, prism_cells, tet_cells
 
     seed_pos = -np.ones(n_total, dtype=np.int64)
     seed_pos[seed_idx] = np.arange(len(seed_idx))
@@ -217,6 +210,9 @@ def patch_nonmanifold_cavity_mixed(
     n_skipped_size = 0
     n_failed = 0
     n_rejected = 0
+    # 域外边界节点：只出现一次的（非退化）面上的节点
+    exterior_nodes = np.unique(all_faces[group_counts[group_id] == 1])
+    weld_state = GlobalWeldState(len(nodes), prism_cells, tet_cells, exterior_nodes)
 
     for cluster_id in range(min(n_clusters, max_clusters_attempted)):
         cluster_seed_mask = np.zeros(n_total, dtype=bool)
@@ -235,40 +231,59 @@ def patch_nonmanifold_cavity_mixed(
                 break
             cavity |= newly
 
-        cavity_idx = np.flatnonzero(cavity)
-        if len(cavity_idx) == 0:
+        # 焊接会把被合并点在全部单元里换成幸存点；空腔外同时引用一对被合并点的单元换点后退化，
+        # 把它并进空腔重来（至多 _MAX_WELD_GROWTH 次）
+        status = None
+        for _grow in range(_MAX_WELD_GROWTH + 1):
+            cavity_idx = np.flatnonzero(cavity)
+            if len(cavity_idx) == 0:
+                status = "empty"
+                break
+            if len(cavity_idx) > max_cavity_cells:
+                status = "size"
+                break
+            cavity_as_tets = weld_state.current(cavity_idx)
+            boundary_faces = _cavity_boundary_faces(cavity_as_tets, np.arange(len(cavity_as_tets)))
+            global_pts = np.unique(boundary_faces)
+            local_of_global = -np.ones(len(nodes), dtype=np.int64)
+            local_of_global[global_pts] = np.arange(len(global_pts))
+            local_faces = local_of_global[boundary_faces].astype(np.int32)
+            local_points = nodes[global_pts]
+
+            # 焊接空腔边界点集里的近重合点对（撕裂的 BL 前沿留下的典型产物），在把边界交给 tetgen 之前——
+            # 见 _weld_near_coincident_boundary_points 的文档："重铺完再拒绝"修不了退化输入边界导致的退化输出
+            local_points, local_faces, global_pts, removed, survivor = _weld_near_coincident_boundary_points(
+                local_points, local_faces, global_pts,
+                tolerance_fraction=CAVITY_WELD_TOLERANCE_FRACTION,
+                protected=weld_state.protected(),
+            )
+            step = np.arange(len(nodes), dtype=np.int64)
+            step[removed] = survivor
+            affected = weld_state.affected_outside(removed, cavity) if len(removed) else np.empty(0, np.int64)
+            grow = weld_state.degenerate_after(affected, step) if len(affected) else np.empty(0, np.int64)
+            if len(grow) == 0:
+                status = "ready"
+                break
+            if claimed[grow].any():
+                status = "conflict"
+                break
+            cavity[grow] = True
+        if status in ("empty",):
             continue
-        if len(cavity_idx) > max_cavity_cells:
+        if status == "size":
             n_skipped_size += 1
             continue
-
-        cavity_prism_idx = cavity_idx[cavity_idx < n_prism]
-        cavity_tet_idx = cavity_idx[cavity_idx >= n_prism] - n_prism
-
-        cavity_as_tets = np.vstack([
-            _split_prisms_to_tets(prism_cells[cavity_prism_idx]) if len(cavity_prism_idx) else np.empty((0, 4), dtype=prism_cells.dtype),
-            tet_cells[cavity_tet_idx] if len(cavity_tet_idx) else np.empty((0, 4), dtype=tet_cells.dtype),
-        ]).astype(np.int64)
-
-        boundary_faces = _cavity_boundary_faces(cavity_as_tets, np.arange(len(cavity_as_tets)))
-        global_pts = np.unique(boundary_faces)
-        local_of_global = -np.ones(len(nodes), dtype=np.int64)
-        local_of_global[global_pts] = np.arange(len(global_pts))
-        local_faces = local_of_global[boundary_faces].astype(np.int32)
-        local_points = nodes[global_pts]
-
-        # 焊接空腔自身边界点集里的近重合点对（撕裂的 BL 前沿留下的典型
-        # 产物），在把边界原样交给 tetgen 之前——见
-        # _weld_near_coincident_boundary_points 自己的文档字符串了解
-        # 为什么这必须在 tetgen 调用*之前*做，"重铺完再拒绝"本身不能
-        # 修复由退化输入边界导致的退化输出。
-        local_points, local_faces, global_pts = _weld_near_coincident_boundary_points(
-            local_points, local_faces, global_pts,
-            tolerance_fraction=CAVITY_WELD_TOLERANCE_FRACTION,
-        )
+        if status != "ready":
+            logger.debug(f"  Cavity weld could not be made conformal ({status}), keeping original cells")
+            n_rejected += 1
+            continue
+        if len(affected) and not weld_state.orientation_preserved(nodes, affected, step):
+            logger.debug("  Cavity weld would invert a cell outside the cavity, keeping original cells")
+            n_rejected += 1
+            continue
 
         try:
-            retiled_nodes, retiled_tets, _, _ = fill_core_volume(
+            retiled_nodes, retiled_tets = fill_core_volume(
                 local_points, local_faces, verbose=False,
                 minratio=CORE_TETGEN_MINRATIO, mindihedral=CORE_TETGEN_MINDIHEDRAL,
             )
@@ -283,17 +298,22 @@ def patch_nonmanifold_cavity_mixed(
         if not np.array_equal(retiled_nodes[:n_boundary_pts], local_points):
             n_failed += 1
             continue
+        # 共形：重铺的外表面必须与交给 tetgen 的边界逐面相同，否则与空腔外单元之间留缝
+        # （tetgen 在边界上插 Steiner 点就会这样，前一项"边界点原样保留"看不出来）
+        if not retile_is_conformal(retiled_tets, n_boundary_pts, local_faces):
+            logger.debug("  Cavity retile is not conformal with the cavity boundary, keeping original cells")
+            n_failed += 1
+            continue
 
-        # 事后体积/形状质量门控——这个混合网格版本此前完全没有（对照
-        # mesh_repair_cavity.remesh_core_cavity/_attempt_cavity_retile_
-        # clusters 已有的 is_improvement/is_acceptable_fallback 门控），
-        # 是本函数把撕裂"缝合"成 sliver 却从不拒绝的直接原因（见
-        # mesh_front_collision.py 模块文档字符串了解撕裂如何产生）。
-        # 与 Stage B' 相同的双重接受条件：严格改善，或者原始空腔本来就
-        # 只有很少（<=2）坏单元时至少不变差——用于在困难几何特征上
-        # tetgen 找不到完美解时打破死锁，而不是无限拒绝。
+        # 事后体积/形状质量门控（对照 mesh_repair_cavity.remesh_core_cavity 的 is_improvement/
+        # is_acceptable_fallback）：严格改善，或者原始空腔本来就只有很少（<=2）坏单元时至少不变差——
+        # 用于在困难几何特征上 tetgen 找不到完美解时打破死锁。焊接换了点的空腔外单元一起计入（换点前后），
+        # 否则焊接把外部单元变坏也看不见。
         old_bad = _count_bad_cells(validator, nodes, cavity_as_tets)
         bad_new = _count_bad_cells(validator, retiled_nodes, retiled_tets)
+        if len(affected):
+            old_bad += _count_bad_cells(validator, nodes, weld_state.as_tets_after(affected, None))
+            bad_new += _count_bad_cells(validator, nodes, weld_state.as_tets_after(affected, step))
         is_improvement = bad_new < old_bad
         is_acceptable_fallback = (old_bad <= 2 and bad_new <= old_bad)
         if not is_improvement and not is_acceptable_fallback:
@@ -306,6 +326,9 @@ def patch_nonmanifold_cavity_mixed(
             continue
 
         claimed[cavity_idx] = True
+        weld_state.accept(removed, survivor, global_pts)
+        cavity_prism_idx = cavity_idx[cavity_idx < n_prism]
+        cavity_tet_idx = cavity_idx[cavity_idx >= n_prism] - n_prism
         accepted.append(dict(
             cavity_prism_idx=cavity_prism_idx, cavity_tet_idx=cavity_tet_idx,
             global_pts=global_pts, retiled_nodes=retiled_nodes, retiled_tets=retiled_tets,
@@ -318,7 +341,7 @@ def patch_nonmanifold_cavity_mixed(
             f"accepted (skipped_size={n_skipped_size}, rejected={n_rejected}, "
             f"failed={n_failed}) - falling back to plain cell removal"
         )
-        return nodes, prism_cells, tet_cells, bl_cell_groups, cell_groups
+        return nodes, prism_cells, tet_cells
 
     keep_prism_outside = np.ones(n_prism, dtype=bool)
     keep_tet_outside = np.ones(n_tet, dtype=bool)
@@ -326,13 +349,14 @@ def patch_nonmanifold_cavity_mixed(
         keep_prism_outside[res['cavity_prism_idx']] = False
         keep_tet_outside[res['cavity_tet_idx']] = False
 
+    # 全部保留单元按累积焊接换点（被合并点一律改引用幸存点）
+    remap = weld_state.node_remap
     new_nodes_parts = [nodes]
-    new_tet_parts = [tet_cells[keep_tet_outside]]
-    new_group_parts = [cell_groups[keep_tet_outside]]
+    new_tet_parts = [remap[tet_cells[keep_tet_outside]]]
     interior_start = len(nodes)
 
     for res in accepted:
-        global_pts = res['global_pts']
+        global_pts = remap[res['global_pts']]
         retiled_nodes = res['retiled_nodes']
         retiled_tets = res['retiled_tets']
         n_boundary_pts = res['n_boundary_pts']
@@ -345,20 +369,19 @@ def patch_nonmanifold_cavity_mixed(
         new_interior_nodes = retiled_nodes[n_boundary_pts:]
         new_nodes_parts.append(new_interior_nodes)
         new_tet_parts.append(remapped.astype(tet_cells.dtype))
-        new_group_parts.append(np.full(len(remapped), '', dtype=object))
         interior_start += len(new_interior_nodes)
 
     new_nodes = np.vstack(new_nodes_parts)
-    new_prism_cells = prism_cells[keep_prism_outside]
-    new_bl_cell_groups = bl_cell_groups[keep_prism_outside]
+    new_prism_cells = remap[prism_cells[keep_prism_outside]].astype(prism_cells.dtype)
     new_tet_cells = np.vstack(new_tet_parts)
-    new_cell_groups = np.concatenate(new_group_parts)
 
     n_cavity_cells_replaced = sum(len(r['cavity_prism_idx']) + len(r['cavity_tet_idx']) for r in accepted)
     n_new_cells = sum(len(r['retiled_tets']) for r in accepted)
+    n_welded = int(np.sum(remap != np.arange(len(remap))))
     logger.info(
         f"Non-manifold mixed-cavity patch: {len(accepted)}/{n_clusters} cluster(s) patched "
         f"({n_cavity_cells_replaced} cell(s) -> {n_new_cells} local retile cell(s); "
+        f"{n_welded} node(s) welded mesh-wide; "
         f"skipped_size={n_skipped_size}, rejected={n_rejected}, failed={n_failed})"
     )
-    return new_nodes, new_prism_cells, new_tet_cells, new_bl_cell_groups, new_cell_groups
+    return new_nodes, new_prism_cells, new_tet_cells

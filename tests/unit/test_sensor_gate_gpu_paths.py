@@ -157,7 +157,7 @@ class TestGpuApplyFormIsEquivalent:
 
 
 class TestMultiGpuCellTypeIndexAlgebra:
-    """`cell_is_prism = compact_cell_type[inv_perm][:n_local]`。"""
+    """单元类型按 `cell_is_prism = compact_cell_type[inv_perm][:n_local]` 取。"""
 
     def _build(self, n_local=11, n_halo=5, seed=2):
         """构造一对自洽的 (紧凑"棱柱在前"排列, perm/inv_perm)。

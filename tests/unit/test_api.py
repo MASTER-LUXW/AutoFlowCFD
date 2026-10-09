@@ -1,4 +1,4 @@
-"""Unit tests for Python API."""
+"""Python API 的单元测试。"""
 
 import pytest
 from unittest.mock import Mock, MagicMock, patch
@@ -8,10 +8,10 @@ from autoflowcfd import AutoFlowCFDAPI, create_api, get_version
 
 
 class TestAutoFlowCFDAPI:
-    """Test suite for AutoFlowCFDAPI class."""
+    """AutoFlowCFDAPI 类的测试。"""
 
     def setup_method(self) -> None:
-        """Set up test fixtures."""
+        """准备测试夹具。"""
         self.api = AutoFlowCFDAPI()
 
     def test_initialization(self) -> None:
@@ -20,7 +20,7 @@ class TestAutoFlowCFDAPI:
         assert self.api._config_loader is not None
 
     def test_initialization_verbose(self) -> None:
-        """Test API initialization with verbose mode."""
+        """verbose 模式下的 API 初始化。"""
         api = AutoFlowCFDAPI(verbose=True)
         assert api.verbose is True
 
@@ -38,7 +38,7 @@ class TestAutoFlowCFDAPI:
         assert "gpu_available" in env_info
 
     def test_create_steady_config(self) -> None:
-        """Test steady config creation."""
+        """创建稳态配置。"""
         config = self.api.create_steady_config(
             backend="gpu",
             order=3,
@@ -49,7 +49,7 @@ class TestAutoFlowCFDAPI:
         assert config.turbulence.value == "sst_kw"
 
     def test_create_transient_config(self) -> None:
-        """Test transient config creation."""
+        """创建瞬态配置。"""
         config = self.api.create_transient_config(
             backend="cpu",
             mode="ddes",
@@ -79,7 +79,7 @@ class TestAutoFlowCFDAPI:
         mock_parser_class.assert_called_once()
 
     def test_get_grid_info(self) -> None:
-        """Test grid info extraction."""
+        """提取网格信息。"""
         mock_grid = MagicMock()
         mock_grid.node_count = 1000
         mock_grid.cell_count = 2000
@@ -172,12 +172,12 @@ class TestAutoFlowCFDAPI:
         assert solve_kwargs["max_iter"] == int(0.3 / 1e-4)
 
     def test_resume_simulation_missing_checkpoint(self) -> None:
-        """Test resume raises FileNotFoundError for missing checkpoint."""
+        """checkpoint 不存在时 resume 抛 FileNotFoundError。"""
         with pytest.raises(FileNotFoundError, match="Checkpoint file not found"):
             self.api.resume_simulation("nonexistent.h5")
 
     def test_calculate_coefficients_placeholder(self) -> None:
-        """Test coefficient calculation placeholder."""
+        """气动力系数计算接口。"""
         mock_result = MagicMock()
         coeffs = self.api.calculate_coefficients(mock_result)
         
@@ -197,7 +197,7 @@ class TestAutoFlowCFDAPI:
             self.api.export_vtk(result=None, filename="output.vtk")
 
     def test_get_convergence_history_placeholder(self) -> None:
-        """Test convergence history placeholder."""
+        """收敛历史接口。"""
         mock_result = MagicMock()
         history = self.api.get_convergence_history(mock_result)
         
@@ -222,31 +222,31 @@ max_iter: 1000
 
 
 class TestCreateAPI:
-    """Test suite for create_api convenience function."""
+    """便捷函数 create_api 的测试。"""
 
     def test_create_api_default(self) -> None:
-        """Test API creation with defaults."""
+        """用默认参数创建 API。"""
         api = create_api()
         assert isinstance(api, AutoFlowCFDAPI)
         assert api.verbose is False
 
     def test_create_api_verbose(self) -> None:
-        """Test API creation with verbose mode."""
+        """verbose 模式下创建 API。"""
         api = create_api(verbose=True)
         assert api.verbose is True
 
 
 class TestGetVersion:
-    """Test suite for get_version function."""
+    """get_version 函数的测试。"""
 
     def test_version_format(self) -> None:
-        """Test version string format."""
+        """版本字符串的格式。"""
         version = get_version()
         assert isinstance(version, str)
         assert len(version) > 0
 
     def test_version_matches_module(self) -> None:
-        """Test version matches module __version__."""
+        """版本号与模块的 __version__ 一致。"""
         import autoflowcfd
         assert get_version() == autoflowcfd.__version__
 

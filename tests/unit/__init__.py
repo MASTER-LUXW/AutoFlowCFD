@@ -1,5 +1,4 @@
-"""Unit tests for AutoFlowCFD modules.
+"""AutoFlowCFD 各模块的单元测试。
 
-Unit tests focus on testing individual components in isolation,
-with mocked dependencies where necessary.
+单元测试隔离地测试单个组件，必要时对依赖做替身。
 """

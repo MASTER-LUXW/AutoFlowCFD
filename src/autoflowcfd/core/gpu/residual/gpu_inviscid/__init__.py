@@ -22,23 +22,8 @@ AutoFlowCFD V2.0 - P>=1 高阶 FR 无粘残差 GPU 实现
 本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
 """
 
-from .flux import (  # noqa: F401
-    _ausm_up_flux_batch_gpu,
-)
-from .interface import (  # noqa: F401
-    _add_q_src1_to_fp,
-    _ausm_direction,
-    _compute_interface_correction_gpu,
-    _extrap_q_to_fp,
-    _lift_native_contrib,
-    _native_self_extrap,
-    _scatter_add_to_correction,
-)
-from .residual import (  # noqa: F401
-    _compute_boundary_ghost_states_gpu,
-    _compute_volume_term_gpu,
-    compute_inviscid_residual_fr_gpu,
-)
+from .interface import _lift_native_contrib, _native_self_extrap, _scatter_add_to_correction  # noqa: F401
+from .residual import _compute_boundary_ghost_states_gpu, compute_inviscid_residual_fr_gpu  # noqa: F401
 
 __all__ = [
     "compute_inviscid_residual_fr_gpu",

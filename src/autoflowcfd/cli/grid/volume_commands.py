@@ -26,7 +26,6 @@ from loguru import logger
 @click.option("--output", "-o", required=True, help="输出体网格 .nas 文件路径")
 @click.option("--growth-rate", default=1.2, show_default=True, help="边界层增长率")
 @click.option("--min-cell-size", default=0.001, show_default=True, help="最小单元尺寸 (m)")
-@click.option("--target-cells", default=500000, show_default=True, help="目标体网格单元总数")
 @click.option("--max-cell-size", default=None, type=float, help="最大单元尺寸 (m)")
 @click.option("--bl-layers", default=None, type=int, help="边界层层数")
 @click.option("--skip-quality-report", is_flag=True, help="跳过质量报告计算")
@@ -42,7 +41,6 @@ def generate_volume(
     output: str,
     growth_rate: float,
     min_cell_size: float,
-    target_cells: int,
     max_cell_size: Optional[float],
     bl_layers: Optional[int],
     skip_quality_report: bool,
@@ -64,7 +62,6 @@ def generate_volume(
         output: 输出体网格 .nas 文件路径
         growth_rate: 边界层增长率
         min_cell_size: 最小单元尺寸 (m)
-        target_cells: 目标体网格单元总数
         bl_layers: 边界层阶段挤出多少层之后，剩余体积直接由边界层自身
             外表面交给 tetgen 填充（见
             mesh_background_merge._build_merged_mesh——现在已经没有单独
@@ -112,7 +109,6 @@ def generate_volume(
             volume_mesh_params={
                 'growth_rate': growth_rate,
                 'min_cell_size': min_cell_size,
-                'target_cells': target_cells,
                 'max_cell_size': max_cell_size,
                 'bl_layers': bl_layers,
                 'bl_only': bl_only,

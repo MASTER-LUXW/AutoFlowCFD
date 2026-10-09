@@ -16,10 +16,8 @@ from ..repair.mesh_repair_cavity import patch_nonmanifold_cavity
 def repair_nonmanifold_tets_with_escalation(
     nodes: np.ndarray,
     cells: np.ndarray,
-    cell_groups: np.ndarray,
-    n_bl_cells: int,
     context_suffix: str = "",
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, bool]:
+) -> Tuple[np.ndarray, np.ndarray, bool]:
     """修复非流形四面体：先局部重铺（填补简单"保留最大、丢弃其余"修复在额外
     单元来自两个不同区域在锐角处合法相遇而非真正重复时会留下的孔洞——参见
     patch_nonmanifold_cavity 自身文档字符串了解真实测量情况，0.189 m^3 的
@@ -29,22 +27,18 @@ def repair_nonmanifold_tets_with_escalation(
 
     Args:
         nodes, cells: 当前合并网格
-        cell_groups: (n_cells,) 与 cells 平行的字符串数组
-        n_bl_cells: BL 单元占据 cells[:n_bl_cells]
         context_suffix: 追加到最终兜底删除警告消息中，用于在日志中区分
             seam 合并前和 seam 合并后的调用点
 
     Returns:
-        (nodes, cells, cell_groups, n_bl_cells, changed) - changed 为 True
+        (nodes, cells, changed) - changed 为 True
         当且仅当实际有东西被修复/删除，调用方据此知道是否需要重新计算单元体积。
     """
     nonmanifold_keep = repair_nonmanifold_cells(nodes, cells)
     if nonmanifold_keep.all():
-        return nodes, cells, cell_groups, n_bl_cells, False
+        return nodes, cells, False
 
-    nodes, cells, cell_groups, n_bl_cells, _ = patch_nonmanifold_cavity(
-        nodes, cells, nonmanifold_keep, cell_groups, n_bl_cells,
-    )
+    nodes, cells, _ = patch_nonmanifold_cavity(nodes, cells, nonmanifold_keep)
     # patch_nonmanifold_cavity 在无法安全修补时会返回输入不变
     # （仍为非流形）——在此情况下重新运行简单的保留掩码检查，与
     # 此修复存在之前相同，因此它无法修复的缺陷仍会被清理而非留在
@@ -54,8 +48,8 @@ def repair_nonmanifold_tets_with_escalation(
     # 定义更好的局部边界，而非因为不可修复——在回退到简单删除之前
     # 先升级一次。
     if not nonmanifold_keep.all():
-        nodes, cells, cell_groups, n_bl_cells, _ = patch_nonmanifold_cavity(
-            nodes, cells, nonmanifold_keep, cell_groups, n_bl_cells,
+        nodes, cells, _ = patch_nonmanifold_cavity(
+            nodes, cells, nonmanifold_keep,
             n_buffer_rings=4, max_cavity_cells=15_000,
         )
         nonmanifold_keep = repair_nonmanifold_cells(nodes, cells)
@@ -68,8 +62,6 @@ def repair_nonmanifold_tets_with_escalation(
             f"(bbox min={del_pts.min(axis=0)}, max={del_pts.max(axis=0)}); this "
             f"leaves a real gap at that location, not just missing volume"
         )
-        n_bl_cells = int(np.sum(nonmanifold_keep[:n_bl_cells]))
         cells = cells[nonmanifold_keep]
-        cell_groups = cell_groups[nonmanifold_keep]
 
-    return nodes, cells, cell_groups, n_bl_cells, True
+    return nodes, cells, True

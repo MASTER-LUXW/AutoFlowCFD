@@ -6,18 +6,13 @@
 from typing import Optional
 
 import click
-from loguru import logger
 
 from autoflowcfd.cli.solve.option_help import PHASE_MAX_ITER_HELP, RESIDUAL_DROP_THRESHOLD_HELP, THREADS_HELP
 from autoflowcfd.cli.solve.solver_factory import validate_backend_options
 from autoflowcfd.cli.solve.checkpoint_io import periodic_checkpoint_callback, write_single_node_outputs
-from autoflowcfd.cli.solve.helpers import (
-    load_mesh_for_solver,
-    restore_state_from_checkpoint,
-    load_physical_config_if_given,
-    resolve_physical_constants,
-    resolve_turbulence_model,
-)
+from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
+from autoflowcfd.cli.solve.checkpoint_io import restore_state_from_checkpoint
+from autoflowcfd.cli.solve.config_file import check_physical_ranges, config_file_overrides
 from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coefficients, resolve_reference_area
 from autoflowcfd.cli.solve.commands import solve
 from autoflowcfd.cli.solve.solver_factory import build_single_node_solver
@@ -110,8 +105,8 @@ from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 @click.option('--vel-inf', type=float, default=33.33, help='自由流速度大小 (m/s)，默认 33.33')
 @click.option('--p-inf', type=float, default=101325.0, help='自由流静压 (Pa)，默认 101325.0（标准大气压）')
 @click.option('--config', 'config_path', type=click.Path(exists=True), default=None,
-              help='从 YAML 文件读取物理常量默认值（mu_molecular/rho_inf/vel_inf/p_inf/'
-                   'turbulence_intensity/viscosity_ratio）；显式传入的同名 --xxx 选项优先于此文件')
+              help='YAML 配置文件（`config init -t transient` 生成模板）：文件里写出的字段覆盖对应选项的默认值'
+                   '（total_time 对应 --physical-time），命令行显式给出的选项优先于文件')
 @click.option('--n-ranks', type=int, default=1,
               help='MPI rank 总数（>1 时走分布式求解器——CPU MPI"传统模式"，或配合 '
                    '--multi-gpu/--fully-distributed 走对应的分布式构造入口）。'
@@ -130,6 +125,7 @@ from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
               help='人工粘性强度标定常数（无量纲，默认1.0），只在 --artificial-viscosity 时有意义')
 @click.option('--checkpoint-interval', type=int, default=100,
               help='中间 checkpoint 保存间隔（步数，单机与分布式路径都生效），结束时另写一次')
+@config_file_overrides
 def transient(input_file: str, backend: str, order: int, time_method: str,
               turbulence_model: str, max_iter: int, phase_max_iter: Optional[int], residual_drop_threshold: float,
               dt: float, cfl_start: Optional[float], cfl_max: Optional[float], cfl_min: Optional[float],
@@ -166,59 +162,10 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
         skip_quality_check: 跳过求解前的网格质量门检查
         init_checkpoint: 从稳态 checkpoint 初始化（可选）
     """
-    print(f"=== Starting Transient FR Simulation (DES/LES) ===")
+    print("=== Starting Transient FR Simulation (DES/LES) ===")
 
-    # 物理常量解析：显式 CLI 选项 > --config YAML > 上面 click 声明的内建默认值。
-    # 不能硬编码——见 solve_physical_constants.py 文档。
-    _phys_cfg = load_physical_config_if_given(config_path)
-    _resolved = resolve_physical_constants(
-        click.get_current_context(),
-        {
-            'turbulence_intensity': turbulence_intensity, 'viscosity_ratio': viscosity_ratio,
-            'mu_molecular': mu_molecular, 'rho_inf': rho_inf, 'vel_inf': vel_inf, 'p_inf': p_inf,
-            'order': order, 'dt': dt,
-            'phase_max_iter': phase_max_iter, 'residual_drop_threshold': residual_drop_threshold,
-        },
-        _phys_cfg,
-    )
-    turbulence_intensity = _resolved['turbulence_intensity']
-    viscosity_ratio = _resolved['viscosity_ratio']
-    mu_molecular = _resolved['mu_molecular']
-    rho_inf = _resolved['rho_inf']
-    vel_inf = _resolved['vel_inf']
-    p_inf = _resolved['p_inf']
-    order = _resolved['order']
-    dt = _resolved['dt']
-    phase_max_iter = _resolved['phase_max_iter']
-    residual_drop_threshold = _resolved['residual_drop_threshold']
-    # turbulence_model：见 solve_steady_command.py 同一处的说明。
-    turbulence_model = resolve_turbulence_model(click.get_current_context(), turbulence_model, _phys_cfg)
-    # physical_time ← config.total_time：字段名不同（CLI 用 physical_time，
-    # TransientConfig 用 total_time），resolve_physical_constants 的同名
-    # getattr 不适用；physical_time 的 click 默认值就是 None，不需要
-    # get_parameter_source 也能安全判断"用户是否显式传过"。
-    if physical_time is None and _phys_cfg is not None and hasattr(_phys_cfg, 'total_time'):
-        physical_time = _phys_cfg.total_time
-
-    # Tu/VR/mu_molecular/rho_inf/vel_inf/p_inf 范围校验：与
-    # solve_steady_command.py 入口同一规则（CLI 路径不经过
-    # SolverConfig.__post_init__ 的校验，2026-08-25 代码审查）。
-    if not (0.0 < turbulence_intensity <= 1.0):
-        raise click.BadParameter("湍流强度 Tu 必须在 (0, 1] 区间", param_hint="--turbulence-intensity")
-    if viscosity_ratio <= 0.0:
-        raise click.BadParameter("粘性比 VR 必须 > 0", param_hint="--viscosity-ratio")
-    if mu_molecular <= 0.0:
-        raise click.BadParameter("分子动力粘度必须 > 0", param_hint="--mu-molecular")
-    if rho_inf <= 0.0:
-        raise click.BadParameter("自由流密度必须 > 0", param_hint="--rho-inf")
-    if vel_inf <= 0.0:
-        raise click.BadParameter("自由流速度必须 > 0", param_hint="--vel-inf")
-    if p_inf <= 0.0:
-        raise click.BadParameter("自由流静压必须 > 0", param_hint="--p-inf")
-    # --phase-max-iter/--residual-drop-threshold（2026-09-02 续接）：
-    # 全部四种后端（单机 CPU/单 GPU/多GPU/MPI 分布式）现在都真正接入了
-    # Order Continuation，不再需要任何"某后端不支持"的拒绝，见
-    # solve_steady_command.py 同一处修复文档。
+    # `--config` 已由 `config_file_overrides` 在调用前应用；CLI 路径不经过配置类的构造校验，物理量范围在这里拦截
+    check_physical_ranges(turbulence_intensity, viscosity_ratio, mu_molecular, rho_inf, vel_inf, p_inf)
     print(f"\nInput Grid : {input_file}")
     print(f"Backend    : {backend} | Order: P{order} | Method: {time_method}")
     print(f"Turbulence : {turbulence_model} | dt: {dt:.2e}")
@@ -337,7 +284,7 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
         from types import SimpleNamespace
         from autoflowcfd.core.utils.checkpoint import CheckpointManager
 
-        print(f"\n🔄 从 checkpoint 加载稳态结果作为瞬态初场...")
+        print("\n🔄 从 checkpoint 加载稳态结果作为瞬态初场...")
         solution, history, ckpt_iter, ckpt_meta = CheckpointManager(
             config=SimpleNamespace(), output_dir="."
         ).load(init_checkpoint)

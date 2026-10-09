@@ -26,13 +26,11 @@
    `current_order`/mesh/partition 更新。
 """
 
-from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
 import types
-
 import numpy as np
-from tests.unit._wall_source import synthetic_wall_source
 import pytest
 
+from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
 from autoflowcfd.core.mpi.distributed_mesh_loader import (
     build_fully_distributed_rank_package,
     distributed_mesh_load_v2,
@@ -40,37 +38,15 @@ from autoflowcfd.core.mpi.distributed_mesh_loader import (
 from autoflowcfd.core.mpi.distributed_flat_face import build_distributed_flat_face
 from autoflowcfd.core.mpi.partition import build_distributed_partition
 from autoflowcfd.fr.operators import generate_fr_operators
-from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
-
 import autoflowcfd.core.gpu.distributed.gpu_distributed_fully_distributed as gdfd_mod
 import autoflowcfd.core.gpu.array_manager as array_manager_mod
 import autoflowcfd.core.gpu.gpu_face_geometry as gpu_face_geometry_mod
+
+from tests.unit._wall_source import synthetic_wall_source
+from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 from tests.unit._patch_pkg import patch_pkg_attr
-
-
-class _NumpyAsCupy:
-    def __getattr__(self, name):
-        return getattr(np, name)
-
-    def asnumpy(self, x):
-        return np.asarray(x)
-
-    class cuda:
-        class Device:
-            def __init__(self, device_id=0):
-                pass
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-        class runtime:
-            @staticmethod
-            def getDeviceCount():
-                return 1
+from tests.unit._numpy_as_cupy import NumpyAsCupy
 
 
 class _FakeArrayManager:
@@ -102,7 +78,7 @@ def _fake_build_gpu_flat_face(flat_face, device_id):
 def gpu_shim(monkeypatch):
     """把本次改动新模块 + 其调用的 GPU 硬件相关类全部换成替身，
     见模块文档"方法论"一节。"""
-    shim = _NumpyAsCupy()
+    shim = NumpyAsCupy()
     patch_module_get_cupy(monkeypatch, gdfd_mod, shim)
     # `GPUHaloExchange` 由 build.py / redistribute.py 在**顶层**导入，所以
     # 它进的是这两个子模块的全局；对包对象 setattr 不会改变它们内部的
@@ -440,11 +416,8 @@ class TestRedistributeMultiGpuFullyDistributedForNewOrder:
 
 
 class TestGpuInterpolateDispatchesFullyDistributed:
-    """`gpu_interpolate_to_new_order` 必须按 `_is_fully_distributed`
-    分派到本次新增的重建函数，而不是落到"传统模式"的 `cell_partition
-    is None` fail-fast 分支（那是给 `__init__` 的 `partition_info` 遗留
-    分支用的，两者是不同的东西，见 `gpu_distributed_order_continuation.py`
-    模块文档更正说明）。"""
+    """`gpu_interpolate_to_new_order` 必须按 `_is_fully_distributed` 分派到完全分布式的重建函数，
+    而不是落到"传统模式"的重建（那需要每个 rank 持有完整全局网格）。"""
 
     def test_fully_distributed_flag_dispatches_to_redistribute(self, monkeypatch):
         from autoflowcfd.core.gpu.distributed.gpu_distributed_order_continuation import (
@@ -469,17 +442,6 @@ class TestGpuInterpolateDispatchesFullyDistributed:
 
         assert captured['solver'] is solver
         assert captured['target_p'] == 1
-
-    def test_traditional_mode_without_cell_partition_still_raises(self):
-        """回归防护：非"完全分布式加载"（`_is_fully_distributed` 缺失/
-        False）且 `cell_partition is None` 的旧路径必须继续 fail-fast，
-        不能被本次改动误放行。"""
-        from autoflowcfd.core.gpu.distributed.gpu_distributed_order_continuation import (
-            gpu_interpolate_to_new_order,
-        )
-        solver = types.SimpleNamespace(current_order=0, cell_partition=None)
-        with pytest.raises(NotImplementedError):
-            gpu_interpolate_to_new_order(solver, 1)
 
 
 if __name__ == "__main__":

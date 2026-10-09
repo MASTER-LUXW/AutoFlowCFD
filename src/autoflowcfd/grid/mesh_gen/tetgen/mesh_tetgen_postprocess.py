@@ -24,8 +24,8 @@ def _dedupe_coincident_points(
 
     同时返回 `remap`（shape=(len(points),)，旧索引 -> 新索引），
     这样持有指向同一原始 `points` 的任意其他索引数组的调用方
-    （例如 fill_core_volume 单独读取的 `tgen.trifaces`）可以应用
-    相同的重映射并保持一致——传 `remap[some_other_array]` 即可。
+    （例如同一网格的棱柱连接关系）可以应用相同的重映射并保持一致
+    ——传 `remap[some_other_array]` 即可。
     `remap` 在没有重合点时为恒等映射。
 
     完全传递闭包（使用 scipy connected_components 处理重合图，
@@ -83,7 +83,7 @@ def _dedupe_coincident_points(
 
 
 def _tet_volumes(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
-    """Unsigned tetrahedron volumes (orientation-independent)."""
+    """四面体无符号体积（与朝向无关）。"""
     p0 = nodes[cells[:, 0]]
     p1 = nodes[cells[:, 1]]
     p2 = nodes[cells[:, 2]]
@@ -131,12 +131,10 @@ def subdivide_oversized_tetrahedra(
     保留原始四面体的 4 个面之一完全不变。共享该面的邻居看到的是
     未受影响的、仍然保形的边界——没有悬挂节点，不需要也去细分
     邻居，没有全局闭合/传播过程（不像最长边二分需要这些来保持
-    保形）。这也意味着基于面的边界归属（attribute_cells_from_trifaces，
-    按排序节点三元组匹配 tetgen 自身的 facet 标记）在结果上仍然
-    无需修改地工作：继承了被标记边界面的子体仍然通过相同的匹配
-    找到，且绕向对于这个匹配和本函数自身的（无符号）体积计算都
-    不重要——任何下游方向要求都在稍后对整个合并网格统一归一化
-    （mesh_background.py 的 orient_tetrahedra 调用）。
+    保形）。外表面不变，生成器最后的边界映射（map_generated_boundaries）
+    不受影响；绕向对本函数自身的（无符号）体积计算不重要——任何下游方向
+    要求都在稍后对整个合并网格统一归一化（mesh_background.py 的
+    orient_tetrahedra 调用）。
 
     Args:
         nodes: (n, 3) float64 节点坐标（仅 `tets` 实际引用的那些；
@@ -301,64 +299,3 @@ def repair_nonmanifold_cells(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray
             f"{n_removed} redundant overlapping tetrahedra"
         )
     return keep
-
-
-def attribute_cells_from_trifaces(
-    cells: np.ndarray,
-    trifaces: np.ndarray,
-    triface_markers: np.ndarray,
-    marker_to_name: dict,
-) -> np.ndarray:
-    """从 fill_core_volume 的 facet 标记恢复每个单元的源边界分组，
-    用于拥有一个被标记边界面的单元。
-
-    当 fill_core_volume 以 nobisect=False（分级 max-cell-size 区域）
-    运行时需要：tetgen 可能将一个输入边界细分为许多子面以满足
-    大小上限，所以这些子面的节点索引不再存在于填充前的表面网格
-    中，简单的节点索引匹配（先前存在的 mesh_boundary.py 回退）不再
-    能找到它们。tetgen 自身的 facet 标记被无论怎么细分的每个被标记
-    输入面的子面继承，所以按节点集合（而不是某个外部数组的索引）
-    匹配单元自身的边界面对标记集可以无条件工作。
-
-    Args:
-        cells: (n_cells, 4) 四面体连接关系，与 `trifaces` 在同一索引
-            空间中（即在任何节点重索引之前调用——重索引只改变节点
-            索引的含义，从不改变哪个单元拥有哪一行，所以返回的每行
-            分组赋值在后续重映射后仍然有效）
-        trifaces: (n_tri, 3) 来自 fill_core_volume 的边界三角
-        triface_markers: (n_tri,) int32，0 = 无标记（仅内部面，
-            例如 BL/core 接口——永远不是真正的外边界，所以不归属
-            也没问题）
-        marker_to_name: 将非零标记值映射回其边界分组名称
-
-    Returns:
-        (n_cells,) str 数组，单元不拥有被标记边界面处为 ''
-    """
-    n_cells = len(cells)
-    cell_groups = np.full(n_cells, '', dtype=object)
-
-    nonzero = triface_markers != 0
-    if not np.any(nonzero):
-        return cell_groups
-
-    marked_tri = np.sort(trifaces[nonzero], axis=1)
-    marked_markers = triface_markers[nonzero]
-    tri_dtype = np.dtype((np.void, marked_tri.dtype.itemsize * 3))
-    marked_hash = np.ascontiguousarray(marked_tri).view(tri_dtype).reshape(-1)
-
-    order = np.argsort(marked_hash, kind='stable')
-    sorted_hash = marked_hash[order]
-    sorted_marker = marked_markers[order]
-
-    face_templates = np.array([[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]], dtype=np.int64)
-    all_faces = cells[:, face_templates].reshape(-1, 3)
-    cell_of_face = np.repeat(np.arange(n_cells), 4)
-    face_hash = np.ascontiguousarray(np.sort(all_faces, axis=1)).view(tri_dtype).reshape(-1)
-
-    pos = np.clip(np.searchsorted(sorted_hash, face_hash), 0, len(sorted_hash) - 1)
-    matched = sorted_hash[pos] == face_hash
-
-    for cell_idx, marker in zip(cell_of_face[matched].tolist(), sorted_marker[pos[matched]].tolist()):
-        cell_groups[cell_idx] = marker_to_name[marker]
-
-    return cell_groups

@@ -17,9 +17,9 @@
     >>> transient = TransientConfig(dt=1e-4, total_time=0.3)
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Literal
+from typing import Optional
 import os
 
 
@@ -65,6 +65,7 @@ class TurbulenceModel(str, Enum):
 # 现在配置层直接复用核心层那个枚举，字符串解析统一走
 # `core/time_integration/base.py::scheme_from_name`（唯一那张词汇表，
 # 未知取值报错而不是静默换方案）。
+from autoflowcfd.core.time_integration.base import DEFAULT_STEADY_TOL  # noqa: E402
 from autoflowcfd.core.time_integration.base import (  # noqa: E402
     TimeIntegrationScheme,
 )
@@ -87,7 +88,6 @@ class SolverConfig:
         n_threads: CPU 线程数（仅 CPU 模式，auto=检测）
         output_dir: 输出目录路径
         checkpoint_interval: 检查点保存间隔（步数）
-        verbose: 启用详细日志记录
         mu_molecular: 分子动力粘度 (Pa*s)，默认 1.8e-5（标准状态下空气）。
             与 core/fr_solver/solver.py::FRSolver 构造参数同名同义——
             粘性残差组装和粘性 CFL 步长必须用同一个值，不能各自硬编码
@@ -122,7 +122,6 @@ class SolverConfig:
     n_threads: int = -1  # -1 表示自动检测
     output_dir: str = "./results"
     checkpoint_interval: int = 100
-    verbose: bool = False
     turbulence_intensity: float = 0.01  # 来流湍流强度 Tu（默认 1%）
     viscosity_ratio: float = 5.0  # 来流粘性比 VR = nu_t/nu
     mu_molecular: float = 1.8e-5  # 分子动力粘度 (Pa*s)，默认标准状态下空气
@@ -231,32 +230,11 @@ class SteadyConfig(SolverConfig):
             --cfl-min`、`FRSolver.__init__` 同一约定。2026-10-05 以前这里写死显式那一组（0.03/0.06/0.01）：CLI
             与求解器 2026-09-25 已改为 None，配置层这份拷贝被漏掉，经 API 选隐式格式时隐式 CFL 律会被压在
             0.06 的上限下。三者给出时的序关系由 `cfl_triplet_errors` 校验。
-        convergence_tol: 收敛容差（残差）
-        monitor_coefficients: 在迭代期间监控气动系数
-        growth_rate: 边界层几何增长率（表面 -> 体网格）
-        bl_layers: 可选覆盖项，用于定义在切换到（固定增长率）过渡阶段之前，
-            计为精细边界层阶段的层数（参见 mesh_extrusion.extrude_layers 的
-            bl_layers 文档）。None（默认）使用 8。过渡阶段本身没有层数上限 - 
-            它以固定速率增长，直到达到 max_cell_size。
-        min_cell_size: 第一层（近壁）厚度，单位米
-        target_cells: 目标总单元数（目前仅由纯挤出体网格路径 consulted；
-            基于 tetgen 的混合路径忽略它）
-        max_cell_size: 核心区域单元尺寸的可选硬上限（米），
-            从边界层的近壁尺寸向外渐变，而不是统一应用。
-            None 使核心填充的单元尺寸无界（仅应用 tetgen 自身的形状质量边界，
-            因此单元可以 grow 到与粗远场输入面一样大，例如
-            稀疏三角化的隧道/入口/出口壁所允许的）。
+        convergence_tol: 相对收敛容差（对应 CLI `--tol`；默认取 `DEFAULT_STEADY_TOL`）
         rho_inf: 自由流密度 (kg/m^3) - 初始条件、入口/远场边界条件和
             Cd/Cl 归一化的单一真实来源，确保三者始终保持一致。
         vel_inf: 自由流速度大小 (m/s)，与 rho_inf 作用相同。
         p_inf: 自由流静压 (Pa)，与 rho_inf 作用相同。
-        use_wall_functions: 在 WALL/GROUND 边界面上启用 Menter 可扩展/自动壁面
-            处理（基于对数律），而不是解析到壁面。False（默认）完全保留之前的行为 - 
-            即解析梯度壁面剪切力/k/omega 处理，这需要第一个单元的 y+~1 才能准确。
-            True 允许较粗的近壁网格（y+ 高达 ~100+）仍能给出具有物理意义的
-            皮肤摩擦力和近壁湍流，代价是对数律模型自身的平衡边界层假设在强分离流中
-            不如解析梯度准确。默认为关闭，因为这是新的、尚未在实际中广泛使用的物理模型 - 
-            请显式选择加入，而不是静默更改现有精细网格案例的结果。
 
     示例:
         >>> config = SteadyConfig(
@@ -271,17 +249,10 @@ class SteadyConfig(SolverConfig):
     cfl_init: Optional[float] = None
     cfl_max: Optional[float] = None
     cfl_min: Optional[float] = None
-    convergence_tol: float = 1e-3
-    monitor_coefficients: bool = True
-    growth_rate: float = 1.15
-    bl_layers: Optional[int] = None
-    min_cell_size: float = 0.003
-    target_cells: int = 500000
-    max_cell_size: Optional[float] = None
+    convergence_tol: float = DEFAULT_STEADY_TOL
     rho_inf: float = 1.225
     vel_inf: float = 33.33
     p_inf: float = 101325.0
-    use_wall_functions: bool = False
 
     def __post_init__(self):
         """验证稳态配置。"""
@@ -296,22 +267,6 @@ class SteadyConfig(SolverConfig):
         # 验证收敛容差
         if self.convergence_tol <= 0:
             raise ValueError(f"收敛容差必须为正数，得到 {self.convergence_tol}")
-
-        # 验证体网格参数
-        if self.growth_rate <= 1.0:
-            raise ValueError(f"growth_rate 必须 > 1.0，得到 {self.growth_rate}")
-        if self.min_cell_size <= 0:
-            raise ValueError(f"min_cell_size 必须为正数，得到 {self.min_cell_size}")
-        if self.target_cells < 1:
-            raise ValueError(f"target_cells 必须为正数，得到 {self.target_cells}")
-        if self.max_cell_size is not None:
-            if self.max_cell_size <= 0:
-                raise ValueError(f"max_cell_size 必须为正数，得到 {self.max_cell_size}")
-            if self.max_cell_size < self.min_cell_size:
-                raise ValueError(
-                    f"max_cell_size ({self.max_cell_size}) 不能小于 "
-                    f"min_cell_size ({self.min_cell_size})"
-                )
 
         # 验证自由流条件
         if self.rho_inf <= 0:
@@ -332,15 +287,9 @@ class TransientConfig(SolverConfig):
         dt: 时间步长（秒）
         total_time: 总物理时间（秒）
         time_scheme: 时间积分方案
-        sample_interval: 数据采样间隔（步数）
-        warmup_time: 跳过的预热时间（秒，用于统计）
-        init_from_checkpoint: 从稳态检查点初始化
-        growth_rate, bl_layers, min_cell_size, target_cells,
-            max_cell_size: 体网格生成参数，含义与 SteadyConfig 相同。
+        init_from_checkpoint: 从 checkpoint 初始化（对应 CLI `--init-from`）
         rho_inf, vel_inf, p_inf: 自由流条件，含义和作用与 SteadyConfig 相同
             （初始条件、边界条件和 Cd/Cl 归一化的单一真实来源）。
-        use_wall_functions: 在 WALL/GROUND 面上启用 Menter 可扩展/自动壁面处理，
-            含义与 SteadyConfig 相同。
 
     示例:
         >>> config = TransientConfig(
@@ -359,18 +308,10 @@ class TransientConfig(SolverConfig):
     cfl_init: Optional[float] = None
     cfl_max: Optional[float] = None
     cfl_min: Optional[float] = None
-    sample_interval: int = 10
-    warmup_time: float = 0.05
     init_from_checkpoint: Optional[str] = None
-    growth_rate: float = 1.15
-    bl_layers: Optional[int] = None
-    min_cell_size: float = 0.003
-    target_cells: int = 500000
-    max_cell_size: Optional[float] = None
     rho_inf: float = 1.225
     vel_inf: float = 33.33
     p_inf: float = 101325.0
-    use_wall_functions: bool = False
 
     def __post_init__(self):
         """验证瞬态配置。"""
@@ -384,32 +325,10 @@ class TransientConfig(SolverConfig):
         if self.total_time <= 0:
             raise ValueError(f"总时间必须为正数，得到 {self.total_time}")
 
-        # 验证预热时间
-        if self.warmup_time < 0:
-            raise ValueError(f"预热时间必须为非负数，得到 {self.warmup_time}")
-        if self.warmup_time >= self.total_time:
-            raise ValueError(f"预热时间 ({self.warmup_time}) 不能超过总时间 ({self.total_time})")
-
         _raise_on_cfl_triplet(self)
 
         # 计算总步数
         self.total_steps = int(self.total_time / self.dt)
-
-        # 验证体网格参数
-        if self.growth_rate <= 1.0:
-            raise ValueError(f"growth_rate 必须 > 1.0，得到 {self.growth_rate}")
-        if self.min_cell_size <= 0:
-            raise ValueError(f"min_cell_size 必须为正数，得到 {self.min_cell_size}")
-        if self.target_cells < 1:
-            raise ValueError(f"target_cells 必须为正数，得到 {self.target_cells}")
-        if self.max_cell_size is not None:
-            if self.max_cell_size <= 0:
-                raise ValueError(f"max_cell_size 必须为正数，得到 {self.max_cell_size}")
-            if self.max_cell_size < self.min_cell_size:
-                raise ValueError(
-                    f"max_cell_size ({self.max_cell_size}) 不能小于 "
-                    f"min_cell_size ({self.min_cell_size})"
-                )
 
         # 验证自由流条件
         if self.rho_inf <= 0:

@@ -24,8 +24,10 @@ from autoflowcfd.core.fr_operators.artificial_viscosity import (
 from autoflowcfd.core.fr_residual.viscous import compute_scalar_gradient
 from autoflowcfd.core.fr_solver.solver import FRSolver
 from autoflowcfd.core.time_integration import TimeIntegrationScheme
+
 from tests.validation._channel_mesh import (
     build_channel_mesh_prism, build_face_exact_ghost_provider)
+from tests.unit._numpy_as_cupy import NumpyAsCupy
 
 H, LX, LZ = 1.0e-2, 2.0e-2, 2.5e-3
 NX, NY, NZ = 6, 6, 1
@@ -199,19 +201,6 @@ def test_laplacian_conserves_every_variable_and_is_dissipative():
     assert float(d @ (M @ R[:, :n_real, 0].ravel())) < 0.0, "质量扩散对扰动不是耗散的"
 
 
-class _NumpyAsCupy:
-    """numpy 充当 CuPy（与 test_gpu_scalar_transport 同一种替身）：跑的是 GPU 生产函数本身。"""
-
-    def __getattr__(self, name):
-        return getattr(np, name)
-
-    def scatter_add(self, a, indices, b):
-        np.add.at(a, indices, b)
-
-    def asnumpy(self, x):
-        return np.asarray(x)
-
-
 def test_single_gpu_path_matches_cpu(monkeypatch):
     """单 GPU 的系数场与人工扩散残差，与 CPU 同一算例逐点一致（numpy 替身跑 GPU 生产代码）。"""
     from types import SimpleNamespace
@@ -225,7 +214,7 @@ def test_single_gpu_path_matches_cpu(monkeypatch):
     from tests.unit._gpu_cupy_shim import patch_module_get_cupy
     from tests.unit._gpu_standin_helpers import complete_gpu_standin
 
-    patch_module_get_cupy(monkeypatch, [gg, gvc, gres, gts, gst], _NumpyAsCupy())
+    patch_module_get_cupy(monkeypatch, [gg, gvc, gres, gts, gst], NumpyAsCupy())
     solver, mesh = _build(alpha=0.7)
     _spike(solver, 0.5)
     U = solver.state.U.copy()
@@ -318,7 +307,7 @@ def test_multi_gpu_path_matches_single_machine(monkeypatch, rank):
     from tests.unit._gpu_cupy_shim import patch_module_get_cupy
     from tests.unit._gpu_standin_helpers import complete_gpu_standin
 
-    patch_module_get_cupy(monkeypatch, [gg, gvc, gst, mres], _NumpyAsCupy())
+    patch_module_get_cupy(monkeypatch, [gg, gvc, gst, mres], NumpyAsCupy())
     solver, mesh = _build(alpha=0.7)
     _spike(solver, 0.5)
     U = solver.state.U.copy()

@@ -42,16 +42,14 @@ def generate_volume_mesh_from_surface(
 
     params = volume_mesh_params or {}
 
-    # Hybrid mesh strategy:
-    # Stage 1: Boundary Layer (fixed layer count, fine resolution for y+ control)
-    # Stage 2: Core fill - tetgen fills the remaining volume directly from
-    #   the BL's own outer surface, using its own unstructured grading out
-    #   to max_cell_size (see mesh_background_merge._build_merged_mesh;
-    #   ProjectFiles Part13 P49 - no separate structured transition stage)
+    # 混合网格策略：
+    # 第 1 段：边界层（固定层数，细分辨率以控制 y+）
+    # 第 2 段：核心填充——tetgen 直接从 BL 自身的外表面填充剩余体积，用它自己的非结构分级一直到
+    #   max_cell_size（见 mesh_background_merge._build_merged_mesh；ProjectFiles Part13 P49——没有单独的
+    #   结构化过渡段）
     optimized_params = {
         'growth_rate': params.get('growth_rate', 1.2),
         'min_cell_size': params.get('min_cell_size', 0.01),
-        'target_cells': params.get('target_cells', 400000),  # 平衡目标
         'max_cell_size': params.get('max_cell_size'),
         'bl_layers': params.get('bl_layers'),
         'bl_only': params.get('bl_only', False),
@@ -69,8 +67,7 @@ def generate_volume_mesh_from_surface(
         f"  Stage 1 (BL): {resolved_bl_layers} layers, "
         f"growth_rate={optimized_params['growth_rate']}\n"
         f"  Stage 2 (Core fill): tetgen, graded out to "
-        f"max_cell_size={optimized_params['max_cell_size']}\n"
-        f"  Target total cells: ~{optimized_params['target_cells']:,}"
+        f"max_cell_size={optimized_params['max_cell_size']}"
     )
 
     generator = VolumeMeshGenerator(**optimized_params)

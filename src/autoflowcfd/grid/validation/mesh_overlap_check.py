@@ -50,10 +50,8 @@ CANDIDATE_CAP_PER_FACE = 2000
 
 
 def _extract_faces(nodes: np.ndarray, cells: np.ndarray) -> 'FaceData':
-    # Lazy-imported: mesh_gen -> validation is a one-way dependency
-    # elsewhere in this package (see quality_validator.py's identical
-    # _extract_faces) - importing the other direction only at call time
-    # avoids ever needing to reason about import order.
+    # 延迟导入：本包其余地方 mesh_gen -> validation 是单向依赖（见 quality_validator.py 里相同的
+    # _extract_faces），反方向只在调用时导入，不必考虑导入顺序。
     from ..mesh_gen.extraction.face_extractor import FaceExtractor
     from ..schema.grid_nodes import NodeArray
 
@@ -244,7 +242,7 @@ def check_face_overlap_and_proximity(
         pairs = np.unique(pairs, axis=0)
         i_idx, j_idx = pairs[:, 0], pairs[:, 1]
 
-        # Exclude any pair sharing a node (legitimate topology, not overlap).
+        # 排除共享节点的单元对（正常拓扑，不是重叠）。
         shares_node = np.zeros(len(i_idx), dtype=bool)
         ni, nj = face_nodes[i_idx], face_nodes[j_idx]
         for a in range(3):

@@ -1,22 +1,19 @@
-"""Unit tests for cli/utils_commands.py::benchmark's mesh-construction and
-residual-call wiring.
+"""cli/utils_commands.py::benchmark 的网格构造与残差调用接线的单元测试。
 
-Real bug caught here (fixed 2026-08-22): `benchmark` called
-`HighOrderMesh(grid_data, order=order)` - but `HighOrderMesh.__init__` takes
-only `order` (no positional data argument at all), and `grid_data` here was
-a *surface* GridData (from `NASParser.parse()`), not the VolumeMeshData
-`load_from_volume_mesh` needs anyway. Every invocation crashed immediately
-with `TypeError: HighOrderMesh.__init__() got multiple values for argument
-'order'` before ever reaching the actual benchmark loop - this command had
-never successfully run once. It also called `compute_inviscid_residual_fr
-(mesh, U_init)`, the wrong argument order/arity for a function whose real
-signature is `(U, mesh, ops, boundary_ghost_provider=None)`.
+这里抓到的真实缺陷（2026-08-22 修复）：`benchmark` 调用
+`HighOrderMesh(grid_data, order=order)`——但 `HighOrderMesh.__init__` 只接受
+`order`（根本没有位置数据参数），而这里的 `grid_data` 是*面网格* GridData
+（来自 `NASParser.parse()`），本来也不是 `load_from_volume_mesh` 需要的
+VolumeMeshData。每次调用都在到达真正的基准循环之前立刻以
+`TypeError: HighOrderMesh.__init__() got multiple values for argument
+'order'` 崩溃——这条命令从未成功运行过一次。它还调用
+`compute_inviscid_residual_fr(mesh, U_init)`，参数顺序/个数都不对，该函数
+真实的签名是 `(U, mesh, ops, boundary_ghost_provider=None)`。
 
-Mesh generation itself (BL extrusion + tetgen) is too heavy to run in a
-unit test, so this patches `generate_volume_mesh_from_surface` to return a
-tiny synthetic VolumeMeshData and asserts the *construction and call
-pattern* is correct - the same pattern proven separately, many times, in
-this session's real end-to-end CLI runs against cube_demo.nas.
+网格生成本身（边界层挤出 + tetgen）对单元测试太重，所以这里给
+`generate_volume_mesh_from_surface` 打补丁，让它返回一个很小的合成
+VolumeMeshData，并断言*构造与调用方式*正确——同样的方式已在对
+cube_demo.nas 的真实端到端 CLI 运行里另行多次验证。
 """
 
 from unittest.mock import patch, MagicMock
@@ -31,10 +28,10 @@ from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 
 
 def _tiny_volume_mesh_data():
-    """The exact node/connectivity data from `_build_synthetic_mixed_mesh`
-    (2 tets + 2 prisms, already validated many times over elsewhere in this
-    test suite - see test_fr_residual_inviscid.py, test_troubled_cell.py),
-    wrapped as a stand-in VolumeMeshData."""
+    """`_build_synthetic_mixed_mesh` 的节点/连接数据原样（2 个四面体 + 2 个
+    棱柱，已在本测试套件别处多次验证——见 test_fr_residual_inviscid.py、
+    test_troubled_cell.py），包成 VolumeMeshData 的替身。
+    """
     nodes = np.array(
         [
             [0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1],
@@ -62,9 +59,9 @@ def _tiny_volume_mesh_data():
 
 class TestBenchmarkMeshConstruction:
     def test_benchmark_builds_and_solves_without_crashing(self):
-        """End-to-end through the CLI command (with mesh generation mocked
-        out) - must reach the residual loop and print results, not crash on
-        HighOrderMesh construction or the residual call signature."""
+        """经 CLI 命令的端到端（网格生成用替身）——必须走到残差循环并打印结果，
+        而不是在 HighOrderMesh 构造或残差调用签名上崩溃。
+        """
         with patch(
             "autoflowcfd.grid.nas_io.parser_core.NASParser.parse"
         ) as mock_parse, patch(
@@ -74,7 +71,7 @@ class TestBenchmarkMeshConstruction:
             mock_gen.return_value = _tiny_volume_mesh_data()
 
             runner = CliRunner()
-            # order=0 (P0) keeps the residual kernels cheap for a unit test.
+            # order=0（P0）让残差核对单元测试来说足够便宜。
             result = runner.invoke(
                 cli,
                 ["utils", "benchmark", __file__, "-n", "1", "-p", "1", "--json"],

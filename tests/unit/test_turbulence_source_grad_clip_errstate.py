@@ -1,27 +1,21 @@
-"""Regression test for a real bug found 2026-08-22 (user directly saw the
-raw RuntimeWarning in a real P0->P1 order-continuation transition log):
+"""2026-08-22 发现的真实缺陷的回归测试（用户在一次真实的 P0->P1 换阶日志
+里直接看到了原始的 RuntimeWarning）：
 
-`fr_solver/turbulence.py::compute_turbulence_source`'s grad_k/grad_omega
-magnitude clipping (`np.linalg.norm(grad_k, axis=-1)` followed by a
-1e6-cap) had no `np.errstate` protection. On degenerate cells (metric
-ratio adj(J)/det(J) blown up by collapsed-coordinate geometry - see
-troubled_cell.py's degenerate-cell diagnostics), floating-point noise in
-a theoretically-constant gradient gets amplified past 1e150; squaring
-that inside `np.linalg.norm`'s internals overflows float64 and raises a
-RuntimeWarning that reaches the user's console, even though the
-subsequent clip already handles an `inf` input correctly (inf > 1e6 is
-always True, so the value gets scaled down, not turned into NaN).
+`fr_solver/turbulence.py::compute_turbulence_source` 对 grad_k/grad_omega
+模长的限幅（`np.linalg.norm(grad_k, axis=-1)` 之后截到 1e6）没有
+`np.errstate` 保护。在退化单元上（坍缩坐标几何让度量比 adj(J)/det(J)
+爆掉——见 troubled_cell.py 的退化单元诊断），理论上为常数的梯度里的浮点
+噪声被放大到超过 1e150；`np.linalg.norm` 内部对它平方时 float64 溢出，
+抛出一条到达用户控制台的 RuntimeWarning，尽管随后的限幅本来就能正确处理
+`inf` 输入（inf > 1e6 恒为 True，值被缩小而不是变成 NaN）。
 
-`turbulence/transport.py` has the *exact* same clipping pattern and was
-already wrapped in `np.errstate(over='ignore', invalid='ignore')` on
-2026-08-21 - this file (the older, original location the transport.py
-comment itself references) was missed at the time. This test pins the
-suppression behaviour on the isolated numeric pattern (not the full
-`compute_turbulence_source` call, which needs a large solver mock with
-real mesh/ops geometry for `compute_scalar_gradient` - not worth
-mocking out just to re-prove numpy's own documented errstate semantics);
-what matters is that this file's code is now wrapped identically to the
-already-covered transport.py location.
+`turbulence/transport.py` 有*完全相同*的限幅写法，2026-08-21 已经包进
+`np.errstate(over='ignore', invalid='ignore')`——这个文件（transport.py
+的注释自己引用的、更早的原始位置）当时被漏掉了。本测试在隔离出来的数值
+写法上钉住抑制行为（不是完整的 `compute_turbulence_source` 调用，那需要
+带真实网格/算子几何的大型求解器替身来跑 `compute_scalar_gradient`——
+只为重新证明 numpy 自己有文档的 errstate 语义而去造替身不值得）；要紧的
+是这个文件的代码现在与已覆盖的 transport.py 位置包法相同。
 """
 
 import warnings
@@ -32,11 +26,11 @@ import numpy as np
 
 class TestGradClipErrstateWrapping:
     def test_source_file_wraps_grad_clip_in_errstate(self):
-        """Guards against the wrapping being silently removed by a future
-        edit. 2026-09-26: the clipping lives in one shared helper
-        (`sst/bounds.py::clip_gradient_magnitude`, used by the CPU source,
-        CPU transport, single-GPU and multi-GPU paths); the norm must sit
-        inside `np.errstate` there, and the source evaluation must call it."""
+        """防止这层包装被以后的修改悄悄去掉。2026-09-26：限幅只在一个共用函数
+        里（`sst/bounds.py::clip_gradient_magnitude`，CPU 源项、CPU 输运、单 GPU
+        与多 GPU 路径都用它）；范数必须在那里的 `np.errstate` 之内，源项求值必须
+        调用它。
+        """
         import inspect
 
         from autoflowcfd.core.fr_solver.turbulence.source import evaluate_turbulence_rates
@@ -51,10 +45,10 @@ class TestGradClipErrstateWrapping:
         assert inspect.getsource(evaluate_turbulence_rates).count("clip_gradient_magnitude(") >= 2
 
     def test_overflow_prone_norm_and_clip_is_warning_free_under_errstate(self):
-        """Reproduces the actual numeric failure mode in isolation: a
-        gradient component large enough that squaring it overflows
-        float64 (>~1.34e154), run through the shared clipping helper -
-        must produce zero warnings and a correctly clipped (not NaN) result."""
+        """隔离地复现实际的数值失效方式：一个大到平方会让 float64 溢出
+        （>~1.34e154）的梯度分量，过一遍共用的限幅函数——必须零警告，并给出
+        正确限幅（不是 NaN）的结果。
+        """
         from autoflowcfd.core.turbulence.limits import clip_gradient_magnitude
 
         grad_k = np.zeros((2, 1, 3))

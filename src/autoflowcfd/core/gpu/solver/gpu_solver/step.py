@@ -77,8 +77,16 @@ class _GPUSolverStepMixin:
             # compute_turbulence_source_gpu 文档
             dt_local, dt_physical = self._compute_local_time_step_gpu(
                 return_physical_too=True, nu_av=nu_av)
-            turb_dt = dt if scheme == TimeIntegrationScheme.DUAL_TIME else dt_physical[:, None]
-            mu_t_field = self.compute_turbulence_source_gpu(turb_dt)
+            if scheme == TimeIntegrationScheme.DUAL_TIME and self.turb_model_gpu is not None:
+                # 湍流方程的双时间步（与 CPU 同一份，`core/turbulence/dual_time.py`）
+                from autoflowcfd.core.turbulence.dual_time import advance_turbulence_dual_time
+
+                mu_t_field = advance_turbulence_dual_time(
+                    self, self.turb_model_gpu, cp,
+                    lambda dtau, term, first: self.compute_turbulence_source_gpu(dtau, term, first),
+                    dt_physical[:, None], dt, self.time_integrator.dual_time_steps)
+            else:
+                mu_t_field = self.compute_turbulence_source_gpu(dt_physical[:, None])
         dt_local_full = cp.broadcast_to(
             dt_local[:, None], (n_cells, n_sps)
         ).reshape(n_cells * n_sps)
@@ -217,7 +225,7 @@ class _GPUSolverStepMixin:
             )
 
         else:
-            # SSP-RK2/RK3 or Forward Euler
+            # SSP-RK2/RK3 或前向 Euler
             U_new_flat = self.time_integrator.step(
                 U_flat, mean_flow_residual, dt_local_full,
                 residual0=residual0,

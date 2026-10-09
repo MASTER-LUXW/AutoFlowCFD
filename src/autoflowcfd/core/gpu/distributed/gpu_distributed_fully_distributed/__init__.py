@@ -1,7 +1,5 @@
 """
-AutoFlowCFD V2.0 - MultiGPUDistributedSolver "完全分布式加载"构造入口
-（2026-09-02，问题清单 #1：多 GPU "完全分布式加载"/内存最优模式此前
-从未实现，只支持"传统模式"——每个 rank 独立加载完整全局网格）。
+AutoFlowCFD V2.0 - MultiGPUDistributedSolver "完全分布式加载"构造入口（只有 root 持有完整全局网格）。
 
 镜像 CPU `DistributedFRSolver.from_fully_distributed_package`（见
 `core/mpi/distributed_mesh_loader.py`/`core/mpi/distributed_solver.py`
@@ -15,8 +13,7 @@ package`/`distributed_mesh_load_v2`，两者本身与后端无关，CPU/GPU 共�
 上传到 GPU（`GPUArrayManager.upload_mesh_data`/`GPUFlatFaceGeometry`/
 `cp.asarray`），且湍流模型用 GPU 版类（`GPUTurbulenceSST`/`GPUDDESModel`/
 `GPUIDDESModel`/`GPUWALEModel`）而不是 CPU 版——除此之外，package 的
-构造、字段含义、范围边界（支持 turbulence_model='none'/'sst'/'ddes'/
-'iddes'/'wmles'/'les'，DUAL_TIME 已接入）与 CPU 版完全一致，直接复用
+构造、字段含义与 CPU 版完全一致（全部湍流模型（`core/turbulence/registry.py::SUPPORTED_MODELS`，与单机相同）、全部时间格式、checkpoint 续算与 Order Continuation 均已接入），直接复用
 同一个 `build_fully_distributed_rank_package`/`distributed_mesh_load_v2`，
 不重新实现一遍。
 
@@ -39,9 +36,6 @@ order`（`distributed_mesh_loader.py`）同一套协议——root 用持续持�
 本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
 """
 
-from .upload import (  # noqa: F401
-    _upload_wall_geometry_compact,
-)
 from .build import (  # noqa: F401
     build_multi_gpu_solver_from_fully_distributed_package,
 )

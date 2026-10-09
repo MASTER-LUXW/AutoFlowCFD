@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 from .mesh_background_merge_utils import _refine_large_boundary_faces, _export_partial_mesh_and_exit
 from ..tetgen.mesh_tetgen_core import (
-    fill_core_volume, attribute_cells_from_trifaces, generate_core_background_points,
+    fill_core_volume, generate_core_background_points,
     subdivide_oversized_tetrahedra,
     CORE_TETGEN_MINRATIO, CORE_TETGEN_MINDIHEDRAL, CORE_VOLUME_CAP_FRACTION,
 )
@@ -27,26 +27,18 @@ def _build_merged_mesh_no_bl(
     surface_nodes: np.ndarray,
     surface_faces: np.ndarray,
     surface_boundaries: 'BoundaryMap',
-    extrude_faces: np.ndarray,
     hole_points,
     max_cell_size: Optional[float],
-    group_name_to_marker: dict,
-    marker_to_name: dict,
     export_core_only: bool,
     export_core_only_path: Optional[str],
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, np.ndarray, np.ndarray, int]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """没有曲面组适合挤出边界层时，直接用 tetgen 填充整张封闭曲面。
 
     对应 mesh_background_merge._build_merged_mesh 里原来的
     `if len(extrude_faces) == 0:` 分支，逐字搬运，未改动任何数值逻辑。
-    extrude_faces 在这个分支下总是空数组，直接传入是为了让
-    `topology_faces = extrude_faces` 这一步和原代码逐字一致（而不是
-    在这里重新构造一个看起来等价的空数组）。
 
     Returns:
-        与 _build_merged_mesh 自身完全相同的 9 元组：
-        (merged_nodes, prism_cells, tet_cells, cell_groups, n_bl_cells,
-        source_vertex, topology_faces, bl_cell_groups, n_transition_cells)
+        (merged_nodes, prism_cells, tet_cells)，与 _build_merged_mesh 自身相同
     """
     # OVERSIZED_TET_FACTOR 定义在 mesh_background_merge.py（本函数唯一
     # 的调用者所在文件），延迟导入以避免循环导入——本模块被
@@ -57,28 +49,19 @@ def _build_merged_mesh_no_bl(
         "No boundary group was eligible for BL extrusion; filling the "
         "entire closed surface directly with tetgen (no boundary layer)"
     )
-    n_bl_cells = 0
-    source_vertex = np.arange(len(surface_nodes))
-    topology_faces = extrude_faces  # 空数组——无 BL 区域无需角点拆分
-    face_markers = None
     regions = None
 
-    # 准备 markers 和 regions（如果设置了 max_cell_size）
+    # 设置了 max_cell_size 时：先共形细分过大的边界面，再按区域限制体积（tetgen 也可能在边界上插点——
+    # 外部面因此是面网格三角形的细分，边界组由最后的 map_generated_boundaries 按几何包含关系给出）
     if max_cell_size is not None:
-        face_group_name = np.full(len(surface_faces), '', dtype=object)
-        for name, idx in surface_boundaries.groups.items():
-            face_group_name[idx] = name
-        face_markers = np.array(
-            [group_name_to_marker.get(n, 0) for n in face_group_name], dtype=np.int32
-        )
         center = surface_nodes.mean(axis=0)
         # max_cell_size 已经是米制，与 surface_nodes 一致
         target_edge_length = max_cell_size
 
         # 在 TetGen 之前细化过大的边界面的边
         logger.info(f"Refining boundary faces with max edge length > {target_edge_length:.4f}m...")
-        proc_nodes, proc_faces, face_markers = _refine_large_boundary_faces(
-            surface_nodes, surface_faces, face_markers, target_edge_length
+        proc_nodes, proc_faces = _refine_large_boundary_faces(
+            surface_nodes, surface_faces, target_edge_length
         )
 
         regions = [(center, 1, target_edge_length ** 3 * CORE_VOLUME_CAP_FRACTION)]
@@ -89,9 +72,9 @@ def _build_merged_mesh_no_bl(
         proc_nodes, proc_faces = surface_nodes, surface_faces
         background_points = None
 
-    core_nodes, core_tets, trifaces, triface_markers = fill_core_volume(
+    core_nodes, core_tets = fill_core_volume(
         proc_nodes, proc_faces, holes=hole_points,
-        regions=regions, face_markers=face_markers,
+        regions=regions,
         background_points=background_points,
         minratio=CORE_TETGEN_MINRATIO, mindihedral=CORE_TETGEN_MINDIHEDRAL,
     )
@@ -102,24 +85,14 @@ def _build_merged_mesh_no_bl(
         )
     merged_nodes, tet_cells = core_nodes, core_tets
     prism_cells = np.zeros((0, 6), dtype=np.int64)
-    bl_cell_groups = np.zeros(0, dtype=object)
-    n_transition_cells = 0
-    if face_markers is not None:
-        cell_groups = attribute_cells_from_trifaces(
-            core_tets, trifaces, triface_markers, marker_to_name
-        )
-    else:
-        cell_groups = np.full(len(tet_cells), '', dtype=object)
 
     if export_core_only:
         if not export_core_only_path:
             raise ValueError("export_core_only=True requires export_core_only_path to be set")
         _export_partial_mesh_and_exit(
-            merged_nodes, prism_cells, bl_cell_groups, tet_cells, cell_groups,
+            merged_nodes, prism_cells, tet_cells,
             export_core_only_path, "core-only (no BL region - this is the whole mesh)",
+            surface_nodes, surface_faces, surface_boundaries,
         )
 
-    return (
-        merged_nodes, prism_cells, tet_cells, cell_groups, n_bl_cells,
-        source_vertex, topology_faces, bl_cell_groups, n_transition_cells,
-    )
+    return merged_nodes, prism_cells, tet_cells

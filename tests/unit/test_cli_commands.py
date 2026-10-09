@@ -1,4 +1,4 @@
-"""Unit tests for CLI commands."""
+"""CLI 命令的单元测试。"""
 
 import pytest
 from click.testing import CliRunner
@@ -6,14 +6,14 @@ from autoflowcfd.cli.main import cli
 
 
 class TestCLIGridCommands:
-    """Test suite for grid subcommands."""
+    """grid 子命令的测试。"""
 
     def setup_method(self) -> None:
-        """Set up test fixtures."""
+        """准备测试夹具。"""
         self.runner = CliRunner()
 
     def test_grid_help(self) -> None:
-        """Test grid command help."""
+        """grid 命令的帮助。"""
         result = self.runner.invoke(cli, ["grid", "--help"])
         assert result.exit_code == 0
         assert "parse" in result.output
@@ -21,35 +21,35 @@ class TestCLIGridCommands:
         assert "info" in result.output
 
     def test_grid_parse_help(self) -> None:
-        """Test grid parse help."""
+        """grid parse 的帮助。"""
         result = self.runner.invoke(cli, ["grid", "parse", "--help"])
         assert result.exit_code == 0
         assert "--output" in result.output
         assert "--streaming" in result.output
 
     def test_grid_validate_help(self) -> None:
-        """Test grid validate help."""
+        """grid validate 的帮助。"""
         result = self.runner.invoke(cli, ["grid", "validate", "--help"])
         assert result.exit_code == 0
         assert "--report" in result.output
         assert "--threshold-aspect-ratio" in result.output
 
     def test_grid_info_help(self) -> None:
-        """Test grid info help."""
+        """grid info 的帮助。"""
         result = self.runner.invoke(cli, ["grid", "info", "--help"])
         assert result.exit_code == 0
         assert "--json" in result.output
 
 
 class TestCLISolveCommands:
-    """Test suite for solve subcommands."""
+    """solve 子命令的测试。"""
 
     def setup_method(self) -> None:
-        """Set up test fixtures."""
+        """准备测试夹具。"""
         self.runner = CliRunner()
 
     def test_solve_help(self) -> None:
-        """Test solve command help."""
+        """solve 命令的帮助。"""
         result = self.runner.invoke(cli, ["solve", "--help"])
         assert result.exit_code == 0
         assert "steady" in result.output
@@ -57,7 +57,7 @@ class TestCLISolveCommands:
         assert "resume" in result.output
 
     def test_solve_steady_help(self) -> None:
-        """Test solve steady help."""
+        """solve steady 的帮助。"""
         result = self.runner.invoke(cli, ["solve", "steady", "--help"])
         assert result.exit_code == 0
         assert "--backend" in result.output
@@ -68,7 +68,7 @@ class TestCLISolveCommands:
         assert "--surface-mesh" in result.output
 
     def test_solve_transient_help(self) -> None:
-        """Test solve transient help."""
+        """solve transient 的帮助。"""
         result = self.runner.invoke(cli, ["solve", "transient", "--help"])
         assert result.exit_code == 0
         assert "--physical-time" in result.output
@@ -78,8 +78,9 @@ class TestCLISolveCommands:
         assert "--surface-mesh" in result.output
 
     def test_solve_steady_rejects_unsupported_extension(self, tmp_path) -> None:
-        """Neither .pkl nor .nas - solve steady must reject with a clear
-        pointer to grid generate-volume/import-volume."""
+        """既不是 .pkl 也不是 .nas：solve steady 必须拒绝，并明确指向
+        grid generate-volume/import-volume。
+        """
         bogus_file = tmp_path / "mesh.su2"
         bogus_file.write_text("dummy\n")
         result = self.runner.invoke(cli, ["solve", "steady", str(bogus_file)])
@@ -87,7 +88,7 @@ class TestCLISolveCommands:
         assert "generate-volume" in result.output or "import-volume" in result.output
 
     def test_solve_transient_rejects_unsupported_extension(self, tmp_path) -> None:
-        """Same as steady's own version of this check, for transient."""
+        """与 steady 的同一项检查，针对 transient。"""
         bogus_file = tmp_path / "mesh.su2"
         bogus_file.write_text("dummy\n")
         result = self.runner.invoke(cli, ["solve", "transient", str(bogus_file)])
@@ -95,10 +96,10 @@ class TestCLISolveCommands:
         assert "generate-volume" in result.output or "import-volume" in result.output
 
     def test_solve_steady_nas_without_surface_mesh_is_rejected(self, tmp_path) -> None:
-        """A .nas volume mesh is now accepted by solve steady, but only
-        together with --surface-mesh (needed to attribute WALL/INLET/OUTLET
-        boundary groups) - passed alone it must be rejected, not silently
-        solved with no boundary conditions at all."""
+        """solve steady 接受 .nas 体网格，但必须同时给 --surface-mesh（用来划分
+        WALL/INLET/OUTLET 边界组）——单独传入必须被拒绝，而不是在没有任何边界
+        条件的情况下静默求解。
+        """
         volume_nas = tmp_path / "volume.nas"
         volume_nas.write_text("$ dummy nas file\n")
         result = self.runner.invoke(cli, ["solve", "steady", str(volume_nas)])
@@ -106,7 +107,7 @@ class TestCLISolveCommands:
         assert "--surface-mesh" in result.output
 
     def test_solve_transient_nas_without_surface_mesh_is_rejected(self, tmp_path) -> None:
-        """Same as steady's own version of this check, for transient."""
+        """与 steady 的同一项检查，针对 transient。"""
         volume_nas = tmp_path / "volume.nas"
         volume_nas.write_text("$ dummy nas file\n")
         result = self.runner.invoke(cli, ["solve", "transient", str(volume_nas)])
@@ -114,26 +115,26 @@ class TestCLISolveCommands:
         assert "--surface-mesh" in result.output
 
     def test_solve_resume_help(self) -> None:
-        """Test solve resume help."""
+        """solve resume 的帮助。"""
         result = self.runner.invoke(cli, ["solve", "resume", "--help"])
         assert result.exit_code == 0
         assert "checkpoint" in result.output.lower()
 
     def test_solve_status_help(self) -> None:
-        """Test solve status help."""
+        """solve status 的帮助。"""
         result = self.runner.invoke(cli, ["solve", "status", "--help"])
         assert result.exit_code == 0
 
 
 class TestCLIPostCommands:
-    """Test suite for post subcommands."""
+    """post 子命令的测试。"""
 
     def setup_method(self) -> None:
-        """Set up test fixtures."""
+        """准备测试夹具。"""
         self.runner = CliRunner()
 
     def test_post_help(self) -> None:
-        """Test post command help."""
+        """post 命令的帮助。"""
         result = self.runner.invoke(cli, ["post", "--help"])
         assert result.exit_code == 0
         assert "coefficients" in result.output
@@ -141,14 +142,14 @@ class TestCLIPostCommands:
         assert "convergence" in result.output
 
     def test_post_coefficients_help(self) -> None:
-        """Test post coefficients help."""
+        """post coefficients 的帮助。"""
         result = self.runner.invoke(cli, ["post", "coefficients", "--help"])
         assert result.exit_code == 0
         assert "--case" in result.output
         assert "--reference-area" in result.output
 
     def test_post_export_vtk_help(self) -> None:
-        """Test post export-vtk help."""
+        """post export-vtk 的帮助。"""
         result = self.runner.invoke(cli, ["post", "export-vtk", "--help"])
         assert result.exit_code == 0
         assert "--output" in result.output
@@ -166,36 +167,36 @@ class TestCLIPostCommands:
         assert "--output" in result.output
 
     def test_post_convergence_help(self) -> None:
-        """Test post convergence help."""
+        """post convergence 的帮助。"""
         result = self.runner.invoke(cli, ["post", "convergence", "--help"])
         assert result.exit_code == 0
 
     def test_post_transient_mean_help(self) -> None:
-        """Test post transient-mean help."""
+        """post transient-mean 的帮助。"""
         result = self.runner.invoke(cli, ["post", "transient-mean", "--help"])
         assert result.exit_code == 0
 
     def test_post_transient_rms_help(self) -> None:
-        """Test post transient-rms help."""
+        """post transient-rms 的帮助。"""
         result = self.runner.invoke(cli, ["post", "transient-rms", "--help"])
         assert result.exit_code == 0
 
     def test_post_transient_psd_help(self) -> None:
-        """Test post transient-psd help."""
+        """post transient-psd 的帮助。"""
         result = self.runner.invoke(cli, ["post", "transient-psd", "--help"])
         assert result.exit_code == 0
         assert "--probe-location" in result.output
 
 
 class TestCLIConfigCommands:
-    """Test suite for config subcommands."""
+    """config 子命令的测试。"""
 
     def setup_method(self) -> None:
-        """Set up test fixtures."""
+        """准备测试夹具。"""
         self.runner = CliRunner()
 
     def test_config_help(self) -> None:
-        """Test config command help."""
+        """config 命令的帮助。"""
         result = self.runner.invoke(cli, ["config", "--help"])
         assert result.exit_code == 0
         assert "init" in result.output
@@ -203,7 +204,7 @@ class TestCLIConfigCommands:
         assert "validate" in result.output
 
     def test_config_init_help(self) -> None:
-        """Test config init help."""
+        """config init 的帮助。"""
         result = self.runner.invoke(cli, ["config", "init", "--help"])
         assert result.exit_code == 0
         assert "--template" in result.output
@@ -211,12 +212,12 @@ class TestCLIConfigCommands:
         assert "transient" in result.output
 
     def test_config_show_help(self) -> None:
-        """Test config show help."""
+        """config show 的帮助。"""
         result = self.runner.invoke(cli, ["config", "show", "--help"])
         assert result.exit_code == 0
 
     def test_config_validate_help(self) -> None:
-        """Test config validate help."""
+        """config validate 的帮助。"""
         result = self.runner.invoke(cli, ["config", "validate", "--help"])
         assert result.exit_code == 0
 
@@ -224,17 +225,15 @@ class TestCLIConfigCommands:
     def test_config_init_then_validate_round_trip_reports_correct_mode(
         self, tmp_path, template
     ) -> None:
-        """`config init --template X` followed by `config validate` on the
-        generated file must round-trip cleanly: exit 0 and report the same
-        mode that was requested.
+        """`config init --template X` 生成的文件再过 `config validate` 必须干净地
+        往返：退出码 0，并报告与请求相同的 mode。
 
-        Real bug caught by this test (fixed 2026-08-21): `validate` derived
-        `mode` via `config_obj.mode if hasattr(config_obj, 'mode') else
-        "unknown"`, but `mode` is a top-level YAML routing key consumed by
-        `ConfigLoader.load()` before the config dataclass is even
-        constructed - it was never an attribute on SteadyConfig/
-        TransientConfig, so `hasattr` was always False and every config
-        file, regardless of its actual mode, reported "unknown".
+        本测试抓到的真实缺陷（2026-08-21 修复）：`validate` 用
+        `config_obj.mode if hasattr(config_obj, 'mode') else "unknown"` 取 `mode`，
+        但 `mode` 是 YAML 顶层的路由键，在配置 dataclass 构造之前就被
+        `ConfigLoader.load()` 消费掉了——它从来不是 SteadyConfig/TransientConfig
+        的属性，于是 `hasattr` 恒为 False，任何配置文件不论实际 mode 是什么都
+        报告 "unknown"。
         """
         out_file = tmp_path / f"{template}.yaml"
         init_result = self.runner.invoke(
@@ -247,11 +246,10 @@ class TestCLIConfigCommands:
         )
         assert validate_result.exit_code == 0, validate_result.output
 
-        # `--json` must be pipeable/parseable on stdout alone (the real-world
-        # contract: `autoflowcfd ... --json > out.json` only redirects
-        # stdout) - INFO-level log lines belong on stderr and must not leak
-        # into stdout and corrupt the JSON payload (see cli/main.py's
-        # `logger.add(..., err=True)` fix).
+        # `--json` 的输出必须只靠 stdout 就能管道传递/解析（实际用法：
+        # `autoflowcfd ... --json > out.json` 只重定向 stdout）——INFO 级日志属于
+        # stderr，不能漏进 stdout 破坏 JSON 内容（见 cli/main.py 的
+        # `logger.add(..., err=True)`）。
         import json
         payload = json.loads(validate_result.stdout)
         assert payload["status"] == "valid"
@@ -259,14 +257,14 @@ class TestCLIConfigCommands:
 
 
 class TestCLIUtilsCommands:
-    """Test suite for utils subcommands."""
+    """utils 子命令的测试。"""
 
     def setup_method(self) -> None:
-        """Set up test fixtures."""
+        """准备测试夹具。"""
         self.runner = CliRunner()
 
     def test_utils_help(self) -> None:
-        """Test utils command help."""
+        """utils 命令的帮助。"""
         result = self.runner.invoke(cli, ["utils", "--help"])
         assert result.exit_code == 0
         assert "version" in result.output
@@ -274,14 +272,14 @@ class TestCLIUtilsCommands:
         assert "benchmark" in result.output
 
     def test_utils_version(self) -> None:
-        """Test utils version command."""
+        """utils version 命令。"""
         result = self.runner.invoke(cli, ["utils", "version"])
         assert result.exit_code == 0
         assert "AutoFlowCFD" in result.output
         assert "0.1.0" in result.output
 
     def test_utils_version_json(self) -> None:
-        """Test utils version with JSON output."""
+        """utils version 的 JSON 输出。"""
         result = self.runner.invoke(cli, ["utils", "version", "--json"])
         assert result.exit_code == 0
         import json
@@ -289,13 +287,13 @@ class TestCLIUtilsCommands:
         assert "autoflowcfd" in data
 
     def test_utils_doctor(self) -> None:
-        """Test utils doctor command."""
+        """utils doctor 命令。"""
         result = self.runner.invoke(cli, ["utils", "doctor"])
         assert result.exit_code == 0
         assert "Python" in result.output or "python" in result.output
 
     def test_utils_doctor_json(self) -> None:
-        """Test utils doctor with JSON output."""
+        """utils doctor 的 JSON 输出。"""
         result = self.runner.invoke(cli, ["utils", "doctor", "--json"])
         assert result.exit_code == 0
         import json
@@ -304,7 +302,7 @@ class TestCLIUtilsCommands:
         assert "info" in data
 
     def test_utils_benchmark_help(self) -> None:
-        """Test utils benchmark help."""
+        """utils benchmark 的帮助。"""
         result = self.runner.invoke(cli, ["utils", "benchmark", "--help"])
         assert result.exit_code == 0
         assert "--backend" in result.output
@@ -312,14 +310,14 @@ class TestCLIUtilsCommands:
 
 
 class TestCLIGlobalOptions:
-    """Test suite for global CLI options."""
+    """CLI 全局选项的测试。"""
 
     def setup_method(self) -> None:
-        """Set up test fixtures."""
+        """准备测试夹具。"""
         self.runner = CliRunner()
 
     def test_main_help(self) -> None:
-        """Test main help shows all command groups."""
+        """主帮助列出全部命令组。"""
         result = self.runner.invoke(cli, ["--help"])
         assert result.exit_code == 0
         assert "grid" in result.output

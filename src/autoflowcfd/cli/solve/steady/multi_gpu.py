@@ -9,7 +9,9 @@ import click
 from autoflowcfd.cli.solve.distributed_checkpoint_io import distributed_periodic_checkpoint_callback
 from autoflowcfd.core.time_integration.base import scheme_from_name
 from autoflowcfd.cli.solve.wall_distance import wall_distance_source_if_needed
-from autoflowcfd.cli.solve.helpers import load_mesh_for_solver
+from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
+from autoflowcfd.cli.solve.aero_coefficients import distributed_reference_area, report_distributed_aerodynamic_coefficients
+from autoflowcfd.core.time_integration.base import STEADY_DT
 
 
 def _run_multi_gpu(
@@ -17,8 +19,8 @@ def _run_multi_gpu(
     aoa_deg, aos_deg, artificial_viscosity_alpha, artificial_viscosity_enabled,
     cfl_max, cfl_min, cfl_start, checkpoint_interval,
     fully_distributed, gpu_device, input_file, max_iter, mu_molecular, n_ranks,
-    order, output_dir, p_inf, phase_max_iter, residual_drop_threshold, rho_inf,
-    skip_quality_check, surface_mesh, time_scheme, turbulence_intensity, turbulence_model,
+    order, output_dir, p_inf, phase_max_iter, reference_area, residual_drop_threshold, rho_inf,
+    skip_quality_check, surface_mesh, time_scheme, tol, turbulence_intensity, turbulence_model,
     vel_inf, viscosity_ratio, sem_num_eddies,
 ):
     """`solve steady` 的多 GPU + MPI 分布式（传统模式 / 完全分布式加载）路径。"""
@@ -37,6 +39,7 @@ def _run_multi_gpu(
     from autoflowcfd.fr.operators import generate_fr_operators
 
     if fully_distributed:
+        volume_data = None          # 只在 root 的 `_root_context` 里
         # 多 GPU"完全分布式加载"（#1，2026-09-02 实现——此前只有
         # "传统模式"，见 MultiGPUDistributedSolver.from_fully_
         # distributed_package/gpu_distributed_fully_distributed.py
@@ -109,7 +112,7 @@ def _run_multi_gpu(
 
     try:
         result = solver.solve(
-            max_iter=max_iter, dt=1e-3, tol=1e-6,
+            max_iter=max_iter, dt=STEADY_DT, tol=tol,
             checkpoint_callback=_multi_gpu_checkpoint_cb,
             phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold,
         )
@@ -125,6 +128,8 @@ def _run_multi_gpu(
         )
         if saved_path and is_root():
             print(f"   Checkpoint saved: {saved_path}")
+        report_distributed_aerodynamic_coefficients(
+            solver, distributed_reference_area(solver, volume_data, reference_area))
         solver.cleanup()
     except Exception as e:
         print(f"\n❌ Multi-GPU Simulation Failed: {e}")

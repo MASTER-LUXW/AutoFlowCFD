@@ -156,11 +156,7 @@ def _scan_sorted_faces_numba(
     for i in range(1, n_faces_raw):
         if sorted_key1[i] != sorted_key1[i-1] or sorted_max[i] != sorted_max[i-1]:
             # 找到新的唯一面
-            uniq_idx += 1
-            # 安全检柋（alloc_size = n_faces_raw 时不应触发）
-            if uniq_idx >= alloc_size:
-                break  # Defensive: stop if we somehow exceed allocation
-
+            uniq_idx += 1    # uniq_idx <= i < n_faces_raw = alloc_size，不会越界
             unique_key1_temp[uniq_idx] = sorted_key1[i]
             unique_max_temp[uniq_idx] = sorted_max[i]
             face_conn_temp[uniq_idx, 0] = sorted_cells[i]

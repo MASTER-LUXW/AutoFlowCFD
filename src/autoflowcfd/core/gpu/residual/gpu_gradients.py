@@ -95,7 +95,6 @@ def compute_physical_scalar_gradient_gpu(scalar_field, mesh_data, ops_data):
     Returns:
         grad: CuPy 数组 (n_cells, n_sps, 3)
     """
-    cp = get_cupy()
     if scalar_field.ndim == 2:
         scalar_field = scalar_field[..., None]  # (n_cells, n_sps, 1)
 

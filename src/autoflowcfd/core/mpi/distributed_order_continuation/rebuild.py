@@ -4,6 +4,7 @@
 """
 
 import numpy as np
+from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
 
 
@@ -107,17 +108,7 @@ def _rebuild_cpu_traditional_partition_and_state(solver, target_p: int, new_loca
     )
     from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
 
-    cell_partition = getattr(solver, '_oc_cell_partition', None)
-    if cell_partition is None:
-        raise NotImplementedError(
-            "distributed_order_continuation: 本 solver 实例的 partition "
-            "不是通过 DistributedFRSolver 主 __init__ 的 face_connectivity "
-            "（'兼容旧接口'，即 CLI 生产路径 --n-ranks>1 不加 "
-            "--fully-distributed）构造的——用 partition_info 直接构造的"
-            "路径从未被 CLI 使用过、也从未验证过是否持有完整全局网格，"
-            "Order Continuation 在这条未验证路径上不支持（如实报告，"
-            "不是假装能用）。"
-        )
+    cell_partition = solver._oc_cell_partition
 
     # mesh 是"传统模式"下每个 rank 都持有的完整全局网格——阶数切换与
     # 单机 run_order_continuation 同一套流程（先清理旧阶数几何缓存，
@@ -192,8 +183,7 @@ def _rebuild_cpu_traditional_partition_and_state(solver, target_p: int, new_loca
     # order_continuation.py::interpolate_to_new_order_checked 同名
     # 处理文档——形状不再匹配，且严格来说也不再是同一离散空间下的解），
     # 否则下一步 BDF2 会静默用一份形状不匹配的历史层。
-    if hasattr(solver, '_dual_time_U_prev'):
-        solver._dual_time_U_prev = None
+    reset_dual_time_history(solver)
     # NEWTON_KRYLOV 跨步状态（换阶时置初值，理由见 reset_newton_state 文档）
     from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
 

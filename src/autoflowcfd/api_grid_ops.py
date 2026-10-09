@@ -96,7 +96,7 @@ def api_generate_volume_mesh(self, grid_data: GridData, **kwargs) -> VolumeMeshD
     此前这里调用 `VolumeMeshGenerator(grid_data, method=method, **kwargs)`
     再调用 `.generate()`——但 VolumeMeshGenerator 真实的构造函数完全不
     接受 grid_data/method 这两个位置/关键字参数（只接受 growth_rate/
-    min_cell_size/target_cells/max_cell_size/bl_layers 等网格生成参数，
+    min_cell_size/max_cell_size/bl_layers 等网格生成参数，
     见 grid/mesh_gen/tetgen/volume_mesh_generator.py），也没有 `.generate()`
     方法（真实方法是 `.generate_from_surface(surface_nodes, surface_faces,
     bounding_box, surface_boundaries=None)`）——任何调用都必然
@@ -106,7 +106,7 @@ def api_generate_volume_mesh(self, grid_data: GridData, **kwargs) -> VolumeMeshD
     bounding box，传给 generate_from_surface。
 
     kwargs 透传给 VolumeMeshGenerator 构造函数（growth_rate/
-    min_cell_size/target_cells/max_cell_size/bl_layers 等，与 CLI
+    min_cell_size/max_cell_size/bl_layers 等，与 CLI
     `grid generate-volume` 的同名选项含义一致）。
     """
     logger.info("Generating volume mesh...")

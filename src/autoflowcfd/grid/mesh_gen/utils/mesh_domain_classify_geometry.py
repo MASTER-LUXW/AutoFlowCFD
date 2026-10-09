@@ -17,8 +17,7 @@ _BBOX_TOUCH_MAJORITY = 0.9
 
 
 def _face_edges(faces: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Return (edge_id per face-edge occurrence, unique edge occurrence counts,
-    face index per occurrence) for the given face array."""
+    """返回（每次面-棱出现对应的棱编号、每条唯一棱的出现次数、每次出现所属的面编号）。"""
     n_faces = len(faces)
     edges = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
     face_of_edge = np.tile(np.arange(n_faces), 3)
@@ -30,7 +29,7 @@ def _face_edges(faces: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 def _connected_components(faces: np.ndarray, inverse: np.ndarray, face_of_edge: np.ndarray) -> np.ndarray:
-    """Label each face row with a connected-component id (shared-edge adjacency)."""
+    """给每个面标上连通分量编号（按共享棱相邻）。"""
     n_faces = len(faces)
     order = np.argsort(inverse, kind='stable')
     sorted_edge_id = inverse[order]
@@ -196,14 +195,14 @@ def _bbox_touch_fraction(
         frac_min = np.count_nonzero(near_min) / n
         if frac_min >= _BBOX_TOUCH_MAJORITY:
             direction = np.zeros(3)
-            direction[axis] = 1.0  # inward = away from the min face
+            direction[axis] = 1.0  # 向内 = 背离最小坐标面
             candidates.append((frac_min, direction))
 
         near_max = np.abs(coords[:, axis] - bbox_max[axis]) <= tol
         frac_max = np.count_nonzero(near_max) / n
         if frac_max >= _BBOX_TOUCH_MAJORITY:
             direction = np.zeros(3)
-            direction[axis] = -1.0  # inward = away from the max face
+            direction[axis] = -1.0  # 向内 = 背离最大坐标面
             candidates.append((frac_max, direction))
 
     if len(candidates) == 1:

@@ -19,7 +19,6 @@ from typing import Callable
 
 import numpy as np
 
-from autoflowcfd.core.utils.array_module import array_module as _array_module
 
 from .mask import compute_bounds_violation_ratio
 

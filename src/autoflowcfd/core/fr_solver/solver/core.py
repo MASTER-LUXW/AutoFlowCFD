@@ -92,13 +92,12 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
                 迎风投影五处统一按这两个角度构造。0/0 时逐位退化为原行为。
             rho_inf, vel_inf, p_inf: 自由来流条件（密度/速度**大小**/静压；
                 方向由 aoa_deg/aos_deg 决定，不再固定 +x），
-                用作 FARFIELD 边界的幽灵态、未匹配到边界组的默认边界条件，
-                以及 INLET 组未显式覆盖时的默认入口状态
+                用作 FARFIELD 边界的幽灵态，以及 INLET 组未显式覆盖时的默认入口状态
             bc_overrides: 按边界组名称覆盖 BC 类型/参数，例如
                 {"inlet": {"type": "INLET", "Q_inlet": [...]}, "car_body": {"type": "WALL"}}；
                 未提供的组按 mesh.boundary_bc_types 自动映射
-                （WALL/SLIP_WALL->WALL, VELOCITY_INLET->INLET,
-                PRESSURE_OUTLET->OUTLET, SYMMETRY->SYMMETRY, 其余->FARFIELD）
+                （WALL/SLIP_WALL->WALL, VELOCITY_INLET->INLET, PRESSURE_OUTLET->OUTLET,
+                SYMMETRY->SYMMETRY, FARFIELD->FARFIELD；缺类型、类型不认识、或边界面不属于任何组都直接报错）
             dual_time_inner_iter: DUAL_TIME 方案每个物理步的伪时间内迭代
                 次数（仅 time_scheme=DUAL_TIME 时有意义）。此前完全没有
                 途径设置，恒为硬编码 3；真实测得默认保守 CFL 起点下 3 次

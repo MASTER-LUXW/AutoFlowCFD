@@ -7,7 +7,7 @@ import click
 import numpy as np
 import pytest
 
-from autoflowcfd.cli.solve.helpers import compute_wall_distance_for_solver
+from autoflowcfd.cli.solve.wall_distance import compute_wall_distance_for_solver
 from autoflowcfd.core.utils.wall_distance import wall_face_nodes
 from autoflowcfd.grid.structures import (
     BoundaryMap, GridMetadata, NodeArray, TetrahedralCells, VolumeMeshData,

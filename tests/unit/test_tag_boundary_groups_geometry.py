@@ -32,8 +32,8 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from autoflowcfd.grid.connectivity.face_connectivity import (
-    FRFaceConnectivity,
+from autoflowcfd.grid.connectivity.face_connectivity import FRFaceConnectivity
+from autoflowcfd.grid.connectivity.face_connectivity_boundary_tags import (
     tag_boundary_groups,
     tag_boundary_groups_by_geometry,
     tag_boundary_groups_for_mesh,
@@ -41,9 +41,9 @@ from autoflowcfd.grid.connectivity.face_connectivity import (
 
 
 def _corner_cell_face_conn():
-    """A single owner cell (id=0) with two boundary faces: one centred at
-    x=0 (true group 'WALL'), one at x=10 (true group 'FARFIELD') - the
-    classic corner-cell scenario."""
+    """一个 owner 单元（id=0）带两个边界面：一个中心在 x=0（真实组 'WALL'），
+    一个在 x=10（真实组 'FARFIELD'）——典型的角点单元情形。
+    """
     n_faces = 2
     return FRFaceConnectivity(
         owner_cell=np.array([0, 0], dtype=np.int32),
@@ -59,9 +59,9 @@ def _corner_cell_face_conn():
 
 
 def _corner_cell_surface_mesh():
-    """Two tiny triangles, one near x=0 (group 'WALL'), one near x=10
-    (group 'FARFIELD') - the ground truth the volume mesh's boundary
-    faces should each independently match against."""
+    """两个小三角形，一个在 x=0 附近（组 'WALL'），一个在 x=10 附近
+    （组 'FARFIELD'）——体网格的每个边界面各自应当匹配到的真值。
+    """
     nodes = np.array([
         [-0.1, 0.0, 0.0], [0.1, 0.1, 0.0], [0.1, -0.1, 0.0],  # tri 0: near x=0
         [9.9, 0.0, 0.0], [10.1, 0.1, 0.0], [10.1, -0.1, 0.0],  # tri 1: near x=10
@@ -76,9 +76,9 @@ def _corner_cell_surface_mesh():
 
 class TestCellBasedTaggingMisattributesCornerCellFaces:
     def test_both_faces_get_the_same_wrong_group_when_owner_cell_is_shared(self):
-        """Pins the actual bug: boundary_groups says cell 0 is in both
-        'WALL' and 'FARFIELD' (a corner cell) - the cell-based matcher
-        can only pick one, and applies it to *both* faces."""
+        """钉住实际的缺陷：boundary_groups 说单元 0 同时在 'WALL' 与 'FARFIELD'
+        里（角点单元）——按单元的匹配器只能选一个，并把它用到*两个*面上。
+        """
         fc = _corner_cell_face_conn()
         boundary_groups = {
             "WALL": np.array([0], dtype=np.int32),
@@ -86,18 +86,17 @@ class TestCellBasedTaggingMisattributesCornerCellFaces:
         }
         group_code, name_to_code = tag_boundary_groups(fc, boundary_groups)
 
-        # Both faces get the SAME code (whichever group was iterated
-        # last) even though they physically belong to different groups.
+        # 两个面得到**同一个**编码（最后遍历到的那个组），尽管它们在物理上
+        # 属于不同的组。
         assert group_code[0] == group_code[1]
         assert group_code[0] == name_to_code["FARFIELD"]  # last-iterated wins
 
     def test_warns_loudly_about_the_specific_ambiguous_cell(self):
-        """2026-08-23 fix: a true per-face fix is impossible from
-        cell-granular input alone (the group->cell_ids mapping has
-        already lost which face belongs to which group) - so the fallback
-        must at least turn this from a silent mis-tag into a loud,
-        diagnosable warning naming the specific cell and the conflicting
-        group names, instead of the previous complete silence."""
+        """2026-08-23 修复：只凭单元粒度的输入不可能做到真正的逐面修复
+        （组->单元编号的映射已经丢掉了哪个面属于哪个组）——所以兜底路径至少
+        必须把静默的错标变成响亮、可诊断的警告，点出具体的单元与冲突的组名，
+        而不是此前的完全沉默。
+        """
         from loguru import logger
 
         fc = _corner_cell_face_conn()
@@ -118,9 +117,9 @@ class TestCellBasedTaggingMisattributesCornerCellFaces:
         assert "WALL" in ambiguity_warnings[0] and "FARFIELD" in ambiguity_warnings[0]
 
     def test_no_ambiguity_warning_when_groups_do_not_overlap(self):
-        """Non-overlapping groups (the common case, e.g. cube_demo's four
-        boundary groups) must not trigger the new warning - it should
-        only fire for genuinely ambiguous cells."""
+        """互不重叠的组（常见情形，例如 cube_demo 的四个边界组）不能触发这条
+        新警告——它只应对真正有歧义的单元触发。
+        """
         from loguru import logger
 
         fc = _corner_cell_face_conn()
@@ -172,4 +171,4 @@ class TestUnifiedEntryPointPicksStrategyByMeshAttribute:
             boundary_surface_mesh=None,
         )
         group_code, name_to_code = tag_boundary_groups_for_mesh(mesh)
-        assert group_code[0] == group_code[1]  # fallback: old cell-based behaviour, still ambiguous
+        assert group_code[0] == group_code[1]  # 兜底：旧的按单元的行为，仍有歧义

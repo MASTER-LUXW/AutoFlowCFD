@@ -1,4 +1,4 @@
-"""Test suite for AutoFlowCFD.
+"""AutoFlowCFD 测试套件。
 
-This package contains unit tests and integration tests for all modules.
+本包含全部模块的单元测试与集成测试。
 """

@@ -92,7 +92,6 @@ def compute_inviscid_residual_fr_gpu(
         n_cells = mesh.n_cells
         n_prism = mesh.n_prism_cells
     n_sps = mesh.n_sps_per_cell
-    n1d = mesh.n_points_1d
 
     # ── 准备网格数据（如果未预上传）──
     if mesh_data is None:

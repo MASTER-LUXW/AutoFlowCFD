@@ -25,33 +25,17 @@ if TYPE_CHECKING:
     from ...validation.quality_validator import MeshQualityValidator
 
 
-def compute_movable_node_mask(
-    n_nodes: int, faces: 'FaceData', n_bl_cells: Optional[int] = None,
-) -> np.ndarray:
-    """阶段 A 可安全移动的节点：不属于任何边界面，且（当给出 `n_bl_cells` 时）
-    不在 BL/core 接口任一侧。
+def compute_movable_node_mask(n_nodes: int, faces: 'FaceData') -> np.ndarray:
+    """阶段 A 可安全移动的节点：不属于任何边界面（`faces` 是四面体子网格的面）。
 
-    接口最初也被视为可自由移动，理由是它是"合并后的内部网格接缝，
-    而非物理边界"——这没错，但不完整：不同于普通内部节点，接口节点
-    对两块独立构建且从未相互协调的已 finalized 几何起承载作用——
-    BL 侧的挤出（mesh_front_collision.py 的反应式检查已保证边是自洽的）
-    和 tetgen 的核心填充，后者将接口的位置作为固定的 PLC 边界约束
-    并据此三角化整个核心体积。在平滑期间移动接口节点会改善接触它的
-    BL 单元，但留下另一侧的核心四面体仍按节点的旧位置构建——已直接在
-    cube_demo 上确认为真实、可复现的缺陷：BL 单元和核心单元完全没有
-    共享节点（真正不相邻）却在空间上重叠，每个单独案例都可追溯到
-    正好是这个不匹配。排除这些节点是保守修复——一些形状错误源于
-    接口节点位置的 BL 单元可能不被平滑，但 CRITICAL 级别的重叠比
-    HIGH 级别的偏斜度/正交性警告更严重，阶段 B'/C 仍可在不触碰
-    接口的情况下处理后者。
+    BL 是独立的棱柱数组、不在被平滑的四面体集合里，因此 BL/core 接口面在四面体子网格上也是"只出现一次"
+    的边界面，接口节点由同一条规则固定。这一点是必须的：接口节点同时承载两块独立构建的几何（BL 挤出与
+    以接口为固定 PLC 边界的 tetgen 核心填充），移动它会改善一侧单元、却让另一侧仍按旧位置构建——cube_demo
+    上实测为 BL 单元与核心单元互不共享节点却空间重叠。
 
     Args:
         n_nodes: 总节点数
         faces: 当前 (nodes, cells) 几何的 FaceData
-        n_bl_cells: 可选——如果给出，单元索引 [0, n_bl_cells) 被视为
-            BL 来源，其余为核心来源（与 mesh_background._build_merged_mesh
-            自身的约定一致：BL 单元在前，核心单元追加在后）。None（默认）
-            完全跳过接口排除——仅对没有任何 BL 区域的调用方安全。
     """
     if faces.node_connectivity is None:
         raise ValueError(
@@ -62,17 +46,6 @@ def compute_movable_node_mask(
     boundary_nodes = np.unique(faces.node_connectivity[boundary_face_idx].ravel())
     movable = np.ones(n_nodes, dtype=bool)
     movable[boundary_nodes] = False
-
-    if n_bl_cells is not None:
-        owner = faces.connectivity[:, 0]
-        neighbor = faces.connectivity[:, 1]
-        interior = neighbor >= 0
-        crosses_interface = interior & ((owner < n_bl_cells) != (neighbor < n_bl_cells))
-        interface_face_idx = np.flatnonzero(crosses_interface)
-        if len(interface_face_idx):
-            interface_nodes = np.unique(faces.node_connectivity[interface_face_idx].ravel())
-            movable[interface_nodes] = False
-
     return movable
 
 
@@ -143,7 +116,6 @@ def smooth_bad_cells(
     max_passes: int = 5,
     initial_faces: Optional['FaceData'] = None,
     extra_bad_mask: Optional[np.ndarray] = None,
-    n_bl_cells: Optional[int] = None,
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """阶段 A：对偏斜/非正交/体积不匹配单元的质量门控拉普拉斯平滑，
     限制为可移动（非边界）节点。
@@ -201,11 +173,6 @@ def smooth_bad_cells(
             _bad_cell_mask 自身文档（例如 mesh_overlap_check.py 标记的
             单元）。全程针对原始单元索引评估——安全因为此函数从不
             添加/删除单元，只移动节点位置。
-        n_bl_cells: 可选——单元索引 [0, n_bl_cells) 为 BL 来源，其余为
-            核心来源（参见 compute_movable_node_mask 自身文档字符串了解
-            为何这将 BL/core 接口排除在平滑之外）。None（默认）使接口
-            可移动——仅对没有任何 BL 区域的调用方正确。
-
     Returns:
         (new_nodes, bad_cell_mask_after, action_log) - bad_cell_mask_after
         在最终几何上重新评估（如果网格开始时完全没有坏单元因此没有运行
@@ -224,7 +191,7 @@ def smooth_bad_cells(
         else:
             node_arr = NodeArray.from_array(nodes)
             faces = FaceExtractor.extract_faces(cells.astype(np.int32), node_arr)
-        movable_mask = compute_movable_node_mask(len(nodes), faces, n_bl_cells)
+        movable_mask = compute_movable_node_mask(len(nodes), faces)
 
         bad_mask = _bad_cell_mask(validator, nodes, cells, faces, extra_bad_mask=extra_bad_mask)
         if not np.any(bad_mask):
@@ -288,9 +255,3 @@ def smooth_bad_cells(
 
     return nodes, bad_mask, actions
 
-
-# 阶段 B / B' - 参见 mesh_repair_bl_thickness.py / mesh_repair_cavity.py。
-# 在此重新导出，使 `from .mesh_repair import ...` 对现有调用方
-# （mesh_background.py、tests/unit/test_mesh_repair.py）继续有效，无需修改。
-from .mesh_repair_bl_thickness import compute_bl_thickness_limit_override  # noqa: E402
-from .mesh_repair_cavity import remesh_core_cavity  # noqa: E402

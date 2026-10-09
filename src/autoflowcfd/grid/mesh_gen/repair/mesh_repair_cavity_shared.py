@@ -100,11 +100,59 @@ def _cavity_boundary_faces(cells: np.ndarray, cavity_cell_idx: np.ndarray) -> np
     return all_faces[boundary_mask]
 
 
+def _repeated_node_rows(cells: np.ndarray) -> np.ndarray:
+    s = np.sort(cells, axis=1)
+    return (s[:, 1:] == s[:, :-1]).any(axis=1)
+
+
+def retile_is_conformal(retiled_tets: np.ndarray, n_boundary_pts: int, local_faces: np.ndarray) -> bool:
+    """重剖分的外表面（只出现一次的非退化面）是否与输入边界 `local_faces` 逐面相同（按排序后的节点三元组）。
+
+    全部空腔重剖分（Stage B'、非流形补丁、混合网格补丁）接受前都必须通过：tetgen 在空腔边界上插 Steiner 点时
+    重剖分的外表面是边界三角形的细分，与空腔外单元的面对不上、网格在这里留缝——"边界点原样保留在节点数组
+    最前面"那一项检查看不出来（2026-10-09 以前只有那一项）。
+    """
+    faces = retiled_tets[:, _CAVITY_FACE_TEMPLATES].reshape(-1, 3)
+    faces = faces[~_repeated_node_rows(faces)]
+    s = np.sort(faces, axis=1)
+    uniq, counts = np.unique(s, axis=0, return_counts=True)
+    outer = uniq[counts == 1]
+    if len(outer) != len(local_faces) or (outer >= n_boundary_pts).any():
+        return False
+    want = np.unique(np.sort(np.asarray(local_faces, dtype=outer.dtype), axis=1), axis=0)
+    return len(want) == len(outer) and np.array_equal(want, outer)
+
+
+def _glued_face_pairs(faces: np.ndarray) -> np.ndarray:
+    """焊接后成对重合、朝向相反的边界面（掩码，两份都标记）。
+
+    撕裂缝两侧的面 (A,C,D) 与 (B,C,D) 在 A 并入 B 之后是同一个三角形、朝向相反——缝隙闭合，它成了缝两侧
+    空腔外单元之间的内部面，不再是空腔边界，必须成对移出交给 tetgen 的边界（留着就是重复面，tetgen 无法
+    原样保留边界）。同向重合是折叠、出现超过两次是非流形，都不标记：留给 tetgen 失败、该空腔不修补。
+    """
+    if len(faces) < 2:
+        return np.zeros(len(faces), dtype=bool)
+    key = np.sort(faces, axis=1)
+    _, inverse, counts = np.unique(key, axis=0, return_inverse=True, return_counts=True)
+    inverse = inverse.ravel()
+    glued = np.zeros(len(faces), dtype=bool)
+    for g in np.flatnonzero(counts == 2):
+        i, j = np.flatnonzero(inverse == g)
+        # 同一三元组的两种循环序：把 i 旋转到与 j 同起点后比较方向
+        fi, fj = list(faces[i]), list(faces[j])
+        k = fi.index(fj[0])
+        rotated = fi[k:] + fi[:k]
+        if rotated[1] == fj[2] and rotated[2] == fj[1]:
+            glued[i] = glued[j] = True
+    return glued
+
+
 def _weld_near_coincident_boundary_points(
     local_points: np.ndarray,
     local_faces: np.ndarray,
     global_pts: np.ndarray,
     tolerance_fraction: float,
+    protected: np.ndarray,
 ):
     """在交给 tetgen 之前，焊接一个空腔自身边界点集里彼此距离小于局部
     特征尺度某个比例的近重合点对。
@@ -125,12 +173,17 @@ def _weld_near_coincident_boundary_points(
     区域太松（合并真正不同的顶点，撕开与外部网格的缝合缝），要么在
     粗糙区域太紧（漏掉这个函数本该焊接的撕裂对）。
 
-    焊接是纯粹的索引合并（保留每个组里*最小局部索引*那个点的原始坐标
-    作为代表，不取质心平均）——不移动任何幸存点的坐标。这样被合并组
-    里"消失"的那个索引，如果确实是这个空腔与外部保留单元共享的真实
-    缝合点，外部单元仍然引用它自己的原始（未变的）全局索引和坐标，不
-    受影响；只有这个空腔自己的重铺不再把它当独立点处理。合并后按
-    mesh_repair_cavity_shared 自己 `_cavity_boundary_faces` 的既有先例
+    焊接是纯粹的索引合并（保留每组里一个点的原始坐标作为代表，不取质心平均）——不移动任何幸存点的坐标。
+    合并结果以 `(removed, survivor)` 全局索引对返回，**调用方必须把它施加到全部单元上**（空腔外引用被合并点
+    的单元一律改引用幸存点），否则空腔外单元的面与重铺结果的边界面对不上，网格在这里不再封闭。
+    2026-10-09 以前这里写的是"外部单元仍然引用它自己的原始全局索引，不受影响"——这正是缺陷：重铺的边界面
+    引用幸存点、外部单元的面引用被合并点，两侧各剩一个外部面；被丢弃的退化面在外部单元一侧同样成了外部面。
+    cube_demo 实测：体网格 39574 个外部面，面网格只有 39488 个三角形，多出的 86 个就出在这里
+    （`patch_nonmanifold_cavity_mixed` 照样报告"修补成功"）。
+
+    受保护点（`protected[global]` 为真：域外边界上的点、已被接受的重铺引用的点）不会被合并掉：一组里有受保护
+    点时它当幸存者，两个受保护点不合并（并查集保证一组里至多一个受保护点）——移动域外边界点会改变物体表面
+    几何，移动已接受重铺的边界点会改变那份已经过质量门的重铺。合并后按 `_cavity_boundary_faces` 的既有先例
     过滤退化（重复顶点索引）面。
 
     Args:
@@ -140,34 +193,38 @@ def _weld_near_coincident_boundary_points(
             用于把重铺结果的边界部分映射回调用方的全局节点数组
         tolerance_fraction: 焊接容差占本空腔边界面中位边长的比例；
             <= 0 时直接原样返回，不做任何事
+        protected: (n_global_nodes,) bool，受保护的全局节点（见上）
 
     Returns:
-        (new_local_points, new_local_faces, new_global_pts) - 未发生
-        焊接时是输入的（非副本）原始数组
+        (new_local_points, new_local_faces, new_global_pts, removed, survivor) - 未发生焊接时前三项是输入的
+        （非副本）原始数组、后两项为空；`removed[i]` 合并到 `survivor[i]`（全局索引）
     """
+    no_weld = (local_points, local_faces, global_pts,
+               np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64))
     n = len(local_points)
     if tolerance_fraction <= 0.0 or n == 0 or len(local_faces) == 0:
-        return local_points, local_faces, global_pts
+        return no_weld
 
     edges = np.vstack([local_faces[:, [0, 1]], local_faces[:, [1, 2]], local_faces[:, [2, 0]]])
     edge_len = np.linalg.norm(local_points[edges[:, 0]] - local_points[edges[:, 1]], axis=1)
     edge_len = edge_len[edge_len > 1e-300]
     if len(edge_len) == 0:
-        return local_points, local_faces, global_pts
+        return no_weld
     local_scale = float(np.median(edge_len))
     tol = tolerance_fraction * local_scale
     if tol <= 0.0:
-        return local_points, local_faces, global_pts
+        return no_weld
 
     from scipy.spatial import cKDTree
 
     tree = cKDTree(local_points)
     pairs = tree.query_pairs(r=tol, output_type='ndarray')
     if len(pairs) == 0:
-        return local_points, local_faces, global_pts
+        return no_weld
 
-    # 并查集，合并时总是把较大索引的根接到较小索引的根上——保证每组
-    # 最终收敛到该组*最小*原始局部索引，无论 pairs 的处理顺序如何。
+    # 并查集：受保护点总是当根；两个根都受保护时不合并；都不受保护时较大索引的根接到较小索引的根上
+    # ——结果与 pairs 的处理顺序无关。
+    is_protected = np.asarray(protected, dtype=bool)[global_pts]
     parent = np.arange(n)
 
     def _find(i: int) -> int:
@@ -180,16 +237,17 @@ def _weld_near_coincident_boundary_points(
 
     for a, b in pairs:
         ra, rb = _find(int(a)), _find(int(b))
-        if ra != rb:
-            if ra < rb:
-                parent[rb] = ra
-            else:
-                parent[ra] = rb
+        if ra == rb or (is_protected[ra] and is_protected[rb]):
+            continue
+        if is_protected[rb] or (not is_protected[ra] and rb < ra):
+            ra, rb = rb, ra
+        parent[rb] = ra
 
     root = np.array([_find(i) for i in range(n)])
     survivors, remap_compact = np.unique(root, return_inverse=True)
     if len(survivors) == n:
-        return local_points, local_faces, global_pts
+        return no_weld
+    merged = np.flatnonzero(root != np.arange(n))
 
     new_local_points = local_points[survivors]
     new_global_pts = global_pts[survivors]
@@ -202,15 +260,27 @@ def _weld_near_coincident_boundary_points(
     )
     n_degenerate = int(np.sum(degenerate))
     new_faces = new_faces[~degenerate]
+    glued = _glued_face_pairs(new_faces)
+    new_faces = new_faces[~glued]
+    # 只在粘合面上出现的点已不在空腔边界上（它现在夹在空腔外两个单元之间），不能交给 tetgen
+    used = np.unique(new_faces)
+    if len(used) < len(new_local_points):
+        compact = -np.ones(len(new_local_points), dtype=np.int64)
+        compact[used] = np.arange(len(used))
+        new_faces = compact[new_faces]
+        new_local_points = new_local_points[used]
+        new_global_pts = new_global_pts[used]
 
     logger.info(
         f"Cavity boundary weld: merged {n - len(survivors)} near-coincident "
         f"point(s) (tolerance {tol:.4e} m = {tolerance_fraction:.1%} of local "
         f"median edge length {local_scale:.4e} m) before local retile"
         + (f", dropped {n_degenerate} degenerate face(s)" if n_degenerate else "")
+        + (f", {int(glued.sum()) // 2} glued face pair(s)" if glued.any() else "")
     )
 
-    return new_local_points, new_faces.astype(local_faces.dtype), new_global_pts
+    return (new_local_points, new_faces.astype(local_faces.dtype), new_global_pts,
+            global_pts[merged].astype(np.int64), global_pts[root[merged]].astype(np.int64))
 
 
 def _count_bad_cells(validator: 'MeshQualityValidator', nodes: np.ndarray, cells: np.ndarray) -> int:

@@ -12,19 +12,17 @@ from typing import Optional, Tuple
 import numpy as np
 from loguru import logger
 
-from .mesh_repair_cavity_shared import _CAVITY_FACE_TEMPLATES, _cavity_boundary_faces
+from .mesh_repair_cavity_shared import _CAVITY_FACE_TEMPLATES, _cavity_boundary_faces, retile_is_conformal
 
 
 def patch_nonmanifold_cavity(
     nodes: np.ndarray,
     cells: np.ndarray,
     keep_mask: np.ndarray,
-    cell_groups: np.ndarray,
-    n_bl_cells: int,
     n_buffer_rings: int = 1,
     max_cavity_cells: int = 5000,
     bad_cell_mask: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, Optional[np.ndarray]]:
+) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
     """对 mesh_tetgen_core.repair_nonmanifold_cells 标记的区域进行局部
     重新四面体化，代替仅删除它标记移除的单元（keep_mask False）并在
     原位留下孔洞。
@@ -62,38 +60,26 @@ def patch_nonmanifold_cavity(
             cells 自身的 keep_mask 是提议，尚未应用）
         keep_mask: (n_cells,) bool，来自 repair_nonmanifold_cells
             ——False 标记否则会被无条件丢弃的单元
-        cell_groups: (n_cells,) 与 cells 平行的字符串数组——每个新
-            重铺单元得到 ''（与 remesh_core_cavity 自身对其创建单元
-            的约定一致：从不会被重新分类为"过渡"或物理壁面组，因为
-            跨越旧过渡/核心接缝的补丁比它替换的任何一侧都更接近
-            普通内部几何）
-        n_bl_cells: cells[:n_bl_cells] 在来源上为过渡阶段（参见
-            generate_hybrid_mesh 自身的 n_bl_cells 约定）——被扫入
-            空腔且未被逐字保留的那些单元数减少；每个新重铺单元
-            追加到末尾，即始终计在此分割的核心/通用侧，从不计在
-            过渡侧
         n_buffer_rings: 在提取非流形单元簇边界之前填充的普通邻居
             面邻接圈数
         max_cavity_cells: 安全上限——这么大的缺陷表明有结构性问题
             值得自行调查，不适合局部补丁；回退到简单删除
         bad_cell_mask: 可选 (n_cells,) bool 数组，与 cells 平行——
-            与 cell_groups 完全同步保持（每个新重铺单元得到 False，
+            与 cells 完全同步保持（每个新重铺单元得到 False，
             即"不已知坏"——与 remesh_core_cavity 自身对其创建单元
             的约定一致），因此跟踪自身坏单元掩码的调用方
             （remesh_core_cavity 自身的重试循环）不必在此调用后
             单独重建它。None（默认）表示调用方没有此类数组要跟踪。
 
     Returns:
-        (new_nodes, new_cells, new_cell_groups, new_n_bl_cells,
-        new_bad_cell_mask) - 如果 keep_mask 已全真、空腔超过
-        max_cavity_cells、或局部重铺失败/自身仍产生非流形，
-        则节点/单元/单元组/bad_cell_mask 不变（非副本）且
-        n_bl_cells 原样传递（任一情况都记录日志；调用方自身的
+        (new_nodes, new_cells, new_bad_cell_mask) - 如果 keep_mask 已全真、空腔超过
+        max_cavity_cells、或局部重铺失败/与空腔边界不共形/自身仍产生非流形，
+        则节点/单元/bad_cell_mask 不变（非副本）（任一情况都记录日志；调用方自身的
         repair_nonmanifold_cells 删除是对此无法修复情况的安全网）。
         new_bad_cell_mask 为 None 当且仅当 bad_cell_mask 为 None。
     """
     if keep_mask.all():
-        return nodes, cells, cell_groups, n_bl_cells, bad_cell_mask
+        return nodes, cells, bad_cell_mask
 
     from ..tetgen.mesh_tetgen_core import fill_core_volume, repair_nonmanifold_cells, CORE_TETGEN_MINRATIO, CORE_TETGEN_MINDIHEDRAL
 
@@ -106,10 +92,8 @@ def patch_nonmanifold_cavity(
     _, group_id, group_counts = np.unique(voids, return_inverse=True, return_counts=True)
     group_id = group_id.ravel()
 
-    # Seed: every cell touching a face some OTHER cell also touches
-    # (interior, count>=2) where either side is non-manifold (count>2) or
-    # keep_mask already flagged one of the sharers for removal - i.e. the
-    # whole locally-contested cluster, not just the "losing" cells.
+    # 种子：接触某个"也被别的单元接触"的面（内部面，count>=2）、且该面非流形（count>2）或其共享者之一
+    # 已被 keep_mask 标记删除的全部单元——即整个局部争用簇，而不只是"落败"的那些单元。
     nonmanifold_group = group_counts[group_id] > 2
     dropped_group = np.zeros(len(group_counts), dtype=bool)
     np.logical_or.at(dropped_group, group_id, ~keep_mask[cell_of_face])
@@ -133,7 +117,7 @@ def patch_nonmanifold_cavity(
             f"Non-manifold cavity patch: {len(cavity_idx)} cell(s) implicated "
             f"(cap {max_cavity_cells}) - falling back to plain cell removal"
         )
-        return nodes, cells, cell_groups, n_bl_cells, bad_cell_mask
+        return nodes, cells, bad_cell_mask
 
     boundary_faces = _cavity_boundary_faces(cells, cavity_idx)
     global_pts = np.unique(boundary_faces)
@@ -143,13 +127,13 @@ def patch_nonmanifold_cavity(
     local_points = nodes[global_pts]
 
     try:
-        retiled_nodes, retiled_tets, _, _ = fill_core_volume(
+        retiled_nodes, retiled_tets = fill_core_volume(
             local_points, local_faces, verbose=False,
             minratio=CORE_TETGEN_MINRATIO, mindihedral=CORE_TETGEN_MINDIHEDRAL,
         )
     except Exception as e:
         logger.warning(f"Non-manifold cavity patch: local retile failed ({e}), falling back to plain cell removal")
-        return nodes, cells, cell_groups, n_bl_cells, bad_cell_mask
+        return nodes, cells, bad_cell_mask
 
     n_boundary_pts = len(local_points)
     if not np.array_equal(retiled_nodes[:n_boundary_pts], local_points):
@@ -157,7 +141,13 @@ def patch_nonmanifold_cavity(
             "Non-manifold cavity patch: boundary points weren't preserved "
             "verbatim by the local retile, falling back to plain cell removal"
         )
-        return nodes, cells, cell_groups, n_bl_cells, bad_cell_mask
+        return nodes, cells, bad_cell_mask
+    if not retile_is_conformal(retiled_tets, n_boundary_pts, local_faces):
+        logger.warning(
+            "Non-manifold cavity patch: local retile is not conformal with the cavity "
+            "boundary (tetgen split a boundary face), falling back to plain cell removal"
+        )
+        return nodes, cells, bad_cell_mask
 
     keep_outside = np.ones(n_cells, dtype=bool)
     keep_outside[cavity_idx] = False
@@ -170,10 +160,6 @@ def patch_nonmanifold_cavity(
     new_interior_nodes = retiled_nodes[n_boundary_pts:]
     new_nodes = np.vstack([nodes, new_interior_nodes])
     new_cells = np.vstack([cells[keep_outside], remapped.astype(cells.dtype)])
-    new_cell_groups = np.concatenate([
-        cell_groups[keep_outside], np.full(len(remapped), '', dtype=object)
-    ])
-    new_n_bl_cells = int(np.sum(keep_outside[:n_bl_cells]))
     new_bad_cell_mask = (
         np.concatenate([bad_cell_mask[keep_outside], np.zeros(len(remapped), dtype=bool)])
         if bad_cell_mask is not None else None
@@ -190,11 +176,11 @@ def patch_nonmanifold_cavity(
             "Non-manifold cavity patch: retile still produced non-manifold "
             "faces, falling back to plain cell removal"
         )
-        return nodes, cells, cell_groups, n_bl_cells, bad_cell_mask
+        return nodes, cells, bad_cell_mask
 
     logger.info(
         f"Patched a {len(cavity_idx)}-cell non-manifold cavity with a "
         f"{len(remapped)}-cell local retile ({len(new_interior_nodes)} new "
         f"interior point(s)) instead of deleting it"
     )
-    return new_nodes, new_cells, new_cell_groups, new_n_bl_cells, new_bad_cell_mask
+    return new_nodes, new_cells, new_bad_cell_mask

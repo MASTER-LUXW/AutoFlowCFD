@@ -16,7 +16,6 @@ DG，没有这个参数可选。完整论证、两种修正函数的闭式解/�
 """
 
 import numpy as np
-from typing import Tuple
 
 
 
@@ -122,7 +121,6 @@ def compute_interpolation_matrix(sps: np.ndarray, fps: np.ndarray) -> np.ndarray
            使得 u_fps = L @ u_sps
     """
     n_sps = len(sps)
-    n_fps = len(fps)
     
     # 构造 Vandermonde 矩阵
     V_sps = compute_vandermonde(sps, n_sps)

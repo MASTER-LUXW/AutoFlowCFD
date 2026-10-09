@@ -16,6 +16,7 @@ from autoflowcfd.cli.solve.aero_coefficients import (
     _report_aerodynamic_coefficients,
     resolve_reference_area,
 )
+from autoflowcfd.core.time_integration.base import STEADY_DT
 
 
 def _run_single_node(
@@ -24,7 +25,7 @@ def _run_single_node(
     backend, cfl_max, cfl_min, cfl_start, checkpoint_interval,
     gpu_device, input_file, max_iter, mu_molecular, order,
     output_dir, p_inf, phase_max_iter, reference_area, residual_drop_threshold,
-    rho_inf, sem_num_eddies, skip_quality_check, surface_mesh, threads,
+    rho_inf, sem_num_eddies, skip_quality_check, surface_mesh, threads, tol,
     time_scheme, turbulence_intensity, turbulence_model, vel_inf, viscosity_ratio,
 ):
     """`solve steady` 的单机路径（`--backend cpu|gpu`）。"""
@@ -56,7 +57,7 @@ def _run_single_node(
 
     try:
         result = solver.solve(
-            max_iter=max_iter, dt=1e-3, tol=1e-6,
+            max_iter=max_iter, dt=STEADY_DT, tol=tol,
             checkpoint_callback=periodic_checkpoint_callback(
                 checkpoint_interval, output_dir, input_file, turbulence_model, backend, surface_mesh=surface_mesh),
             phase_max_iter=phase_max_iter,

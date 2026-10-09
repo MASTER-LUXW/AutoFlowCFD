@@ -25,7 +25,10 @@ from autoflowcfd.core.fr_solver.state import SolverResult
 from autoflowcfd.core.utils import order_continuation
 
 from .. import step as fr_solver_step
+from autoflowcfd.core.time_integration.base import DEFAULT_STEADY_TOL
+
 from .threads import blas_threads_limited
+from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
 
 def format_step_line(solver, order: int, iteration: int, res: float, initial_res: float, elapsed: float,
@@ -85,6 +88,11 @@ class SolveLoopMixin:
     def _loop_monitor_suffix(self) -> str:
         """每步日志末尾的后端信息（CPU 无；GPU 打印显存占用）。"""
         return ""
+
+    def set_dual_time_history(self, U_prev_flat) -> None:
+        """恢复 dual-time 的上一物理时间层（续算，见 `core/utils/checkpoint_time.py`）：CPU 后端存主机数组，
+        GPU 后端覆盖为设备数组。形状 `(本 rank 单元数 * n_sps, n_vars)`。"""
+        self._dual_time_U_prev = np.ascontiguousarray(U_prev_flat, dtype=np.float64)
 
     def _scaled_residual_field(self):
         """逐方程缩放残差诊断（每 10 步一行）的数据源：完整的 `(n_cells, n_sps, 5)` 主机残差，没有时 None。
@@ -157,7 +165,7 @@ class SolveLoopMixin:
                 "伪时间预算诊断计算失败（只影响这行日志，不影响求解）")
             return None
 
-    def solve(self, max_iter: int = 1000, dt: float = 1e-4, tol: float = 1e-6,
+    def solve(self, max_iter: int = 1000, dt: float = 1e-4, tol: float = DEFAULT_STEADY_TOL,
               checkpoint_callback=None,
               phase_max_iter: Optional[int] = None,
               residual_drop_threshold: float = 1e2) -> SolverResult:
@@ -195,6 +203,8 @@ class SolveLoopMixin:
         # 同一个 solver 对象上第二次全新 `solve()` 仍然会正常清零。
         # 旧版本 checkpoint 没有这个字段时标记不会被置上，行为与改动前
         # 完全一致。打印时始终标注步数（见 `pseudotime_budget.py`）。
+        # 物理时间步长（dual-time 的 checkpoint 写出它，续算沿用；见 core/utils/checkpoint_time.py）
+        self._physical_dt = float(dt)
         if getattr(self, "_tau_accum_seeded", False):
             self._tau_accum_seeded = False
         else:
@@ -216,12 +226,17 @@ class SolveLoopMixin:
                 phase_max_iter=phase_max_iter,
                 residual_drop_threshold=residual_drop_threshold,
             )
-        
+
         import time
         converged = False
         final_residual = 1e10
-        initial_res = None
-        
+        # 残差下降基准：定阶循环就是单个阶段，与 Order Continuation 共用 `_phase_initial_residual`（随 checkpoint
+        # 持久化，`order_continuation/checkpoint_state.py`）。续算时用恢复出的基准做种子——此前定阶循环不写它，
+        # 定阶运行（例如 --init-from 起步的瞬态）的 checkpoint 续算时被报成"没有阶段起始残差记录"，相对收敛
+        # 判据也从续算的第一步重新起算。
+        initial_res = (getattr(self, "_phase_initial_residual", None)
+                       if getattr(self, "_resumed_from_checkpoint", False) else None)
+
         # BLAS 线程数只在求解循环期间限制为 1（性能：求解阶段实测快
         # 9~11%；作用域必须是"循环期间"而不是"构造时一次"，理由见
         # `blas_threads_limited` 文档记录的真实 bug）。
@@ -246,7 +261,8 @@ class SolveLoopMixin:
 
                 if initial_res is None:
                     initial_res = res
-            
+                self._phase_initial_residual = initial_res
+
                 # 每步打印详细信息（真实功能缺口修复，2026-08-31，用户直接
                 # 指出"P0/P1直接运算和P2 order continuation打印的信息应该
                 # 一样"）：这条"非 order continuation"常规循环（目标阶数<2，
@@ -264,7 +280,7 @@ class SolveLoopMixin:
                 # 中间 checkpoint 保存
                 if checkpoint_callback is not None:
                     checkpoint_callback(self, i + 1)
-                
+
                 # 相对收敛判据：残差相对初始值下降 1/tol 倍
                 # tol=1e-6 表示需要下降 6 个量级；tol<=0 表示纯定步数迭代（
                 # B-10：transient 命令固定传 tol=0.0，此前 1.0 / tol 在第 2 步
@@ -320,7 +336,7 @@ class _SolverSolveMixin(SolveLoopMixin):
             order_continuation._reset_state_to_p0(self, 1)
             from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
 
-            self._dual_time_U_prev = None
+            reset_dual_time_history(self)
             reset_newton_state(self)
         else:
             order_continuation.interpolate_to_new_order_checked(self, new_order)

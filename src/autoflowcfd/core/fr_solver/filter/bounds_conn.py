@@ -9,7 +9,6 @@
 
 
 import numpy as np
-from loguru import logger
 
 
 def build_single_machine_bounds_conn(solver) -> dict:

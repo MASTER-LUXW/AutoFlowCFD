@@ -89,6 +89,11 @@ def _build_synthetic_mixed_mesh(order: int, tet_basis_mode: str = "native") -> H
 
     mesh = HighOrderMesh(order=order)
     mesh.load_from_volume_mesh(mock_volume)
+    # 全部边界面显式归远场组（每个边界面都必须有组，见 build_boundary_ghost_provider）；
+    # 需要别的边界条件的测试自行覆盖 boundary_groups/boundary_bc_types
+    fc = mesh.face_connectivity
+    mesh.boundary_groups = {"farfield": np.unique(fc.owner_cell[fc.is_boundary]).astype(np.int64)}
+    mesh.boundary_bc_types = {"farfield": "FARFIELD"}
     return mesh
 
 

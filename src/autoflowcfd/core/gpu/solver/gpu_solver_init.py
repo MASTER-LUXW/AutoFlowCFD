@@ -39,7 +39,6 @@ class _GPUSolverInitMixin:
 
     def _init_modal_filter_gpu(self):
         """初始化 GPU 模态滤波回调函数。"""
-        cp = get_cupy()
         n_cells = self.mesh.n_cells
         n_sps = self.mesh.n_sps_per_cell
         n_prism = self.mesh.n_prism_cells

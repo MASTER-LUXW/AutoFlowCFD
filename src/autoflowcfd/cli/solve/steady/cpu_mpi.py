@@ -9,37 +9,24 @@ import click
 from autoflowcfd.cli.solve.distributed_checkpoint_io import distributed_periodic_checkpoint_callback
 from autoflowcfd.cli.solve.wall_distance import wall_distance_source_if_needed
 from autoflowcfd.core.time_integration.base import scheme_from_name
-from autoflowcfd.cli.solve.helpers import load_mesh_for_solver
+from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
+from autoflowcfd.cli.solve.aero_coefficients import distributed_reference_area, report_distributed_aerodynamic_coefficients
+from autoflowcfd.core.time_integration.base import STEADY_DT
 
 
 def _run_cpu_mpi(
     *,
     aoa_deg, aos_deg, artificial_viscosity_alpha, artificial_viscosity_enabled, cfl_max, cfl_min, cfl_start, checkpoint_interval,
-    fully_distributed, input_file, max_iter, mu_molecular, n_ranks, order,
+    fully_distributed, input_file, max_iter, mu_molecular, n_ranks, order, reference_area,
     output_dir, p_inf, phase_max_iter, residual_drop_threshold, rho_inf,
-    skip_quality_check, surface_mesh, threads, time_scheme, turbulence_intensity,
+    skip_quality_check, surface_mesh, threads, time_scheme, tol, turbulence_intensity,
     turbulence_model, vel_inf, viscosity_ratio, sem_num_eddies,
 ):
     """`solve steady` 的CPU MPI 分布式（传统模式 / 完全分布式加载）路径。"""
     # 分布式求解器路径。
     #
-    # #2（V2.0 专家组盲审第4轮，2026-08-28）：此前这里唯一的路径是
-    # "完全分布式网格加载"（只有 root 加载完整网格，通过
-    # distributed_mesh_load 分发局部数据）——但 distributed_mesh_load
-    # 产出的 local_mesh 缺少 face_connectivity/face_flux_points（见
-    # distributed_mesh_loader.py::build_local_mesh_from_data 文档），
-    # DistributedFRSolver.__init__ 内部 build_distributed_flat_face
-    # 需要真实的全局面几何才能构建分布式面几何，这条路径构造期必然
-    # 失败——这是一个更深的架构缺口（真正做到"只有 root 持有完整
-    # 网格"需要 root 逐 rank 预构建+分发压缩几何数据，工作量与 GPU
-    # 侧 #1 修复相当，未在本次修复范围内）。
-    #
-    # 改为"传统模式"（与 --multi-gpu 已经在用的模式一致，见
-    # solve_steady_command.py 的 --multi-gpu 分支）：每个 rank 独立
-    # 加载完整网格，进程内分区——不是内存最优，但 mesh.face_
-    # connectivity 是真实、完整的，build_distributed_flat_face 能
-    # 正确工作，DistributedMeshAdapter/distributed_compute_*_residual
-    # 的 local+halo 压缩索引空间重排（#2 修复）才有意义。
+    # CPU MPI "传统模式"：每个 rank 独立加载完整网格、进程内分区（root 用 METIS 分区后广播）。
+    # 只有 root 持有完整网格的加载方式是 --fully-distributed（`distributed_mesh_load_v2`）。
     from autoflowcfd.core.mpi import mpi_available
     if not mpi_available:
         print("\n❌ MPI not available. Please install mpi4py and run with mpirun.")
@@ -51,15 +38,9 @@ def _run_cpu_mpi(
     from autoflowcfd.fr.operators import generate_fr_operators
 
     if fully_distributed:
-        # 真正的完全分布式网格加载（2026-09-02 实现，同日续接补齐
-        # SST/DDES/IDDES/WMLES/LES——见 distributed_mesh_loader.py::
-        # distributed_mesh_load_v2/DistributedFRSolver.from_fully_
-        # distributed_package 文档"范围边界"一节）。此前这里的
-        # 硬编码 `!= 'NONE'` 拒绝早于 SST 支持接入、且从未跟随后续
-        # 批次同步更新，是过时的信息源——真实 bug：既拒绝了后端已经
-        # 支持的全部湍流模型，也从未把 `turbulence_model` 传给
-        # `distributed_mesh_load_v2`（该函数签名里 `turb_model_name`
-        # 参数一直被忽略，恒用默认值 'NONE'）。
+        # 完全分布式网格加载：只有 root 持有完整网格（`distributed_mesh_load_v2`）。全部湍流模型（与单机相同，
+        # `core/turbulence/registry.py`）、全部时间格式、checkpoint 续算与 Order Continuation 均已接入
+        volume_data = None          # 只在 root 的 `_root_context` 里
         from autoflowcfd.core.mpi.distributed_mesh_loader import distributed_mesh_load_v2
         from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
 
@@ -132,9 +113,7 @@ def _run_cpu_mpi(
         print(f"[Distributed] Initialized with {n_ranks} ranks")
         print(f"[Distributed] {solver.partition.n_local_cells} local cells, "
               f"{solver.partition.n_halo} halo cells")
-        print(f"[Distributed] Traditional mode: every rank loaded the full mesh "
-              f"(not memory-optimal, see #2 fix notes; use --fully-distributed "
-              f"for the memory-optimal path)")
+        print("[Distributed] 传统模式：每个 rank 都加载了完整网格（内存非最优；大网格请用 --fully-distributed）")
 
     # 中间 checkpoint 保存回调（2026-09-02 补齐——此前只在 solve()
     # 返回之后保存一次最终 checkpoint，跑到一半崩溃/被杀会丢失全部
@@ -152,7 +131,7 @@ def _run_cpu_mpi(
     # 执行分布式求解
     try:
         result = solver.solve(
-            max_iter=max_iter, dt=1e-3, tol=1e-6,
+            max_iter=max_iter, dt=STEADY_DT, tol=tol,
             checkpoint_callback=_distributed_checkpoint_cb,
             phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold,
         )
@@ -165,6 +144,8 @@ def _run_cpu_mpi(
             output_dir, result.iterations, input_file, solver.current_order, turbulence_model,
             target_order=solver.order, surface_mesh=surface_mesh,
         )
+        report_distributed_aerodynamic_coefficients(
+            solver, distributed_reference_area(solver, volume_data, reference_area))
 
     except Exception as e:
         print(f"\n❌ Distributed Simulation Failed: {str(e)}")

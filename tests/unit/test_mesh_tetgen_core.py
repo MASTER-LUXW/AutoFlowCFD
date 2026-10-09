@@ -1,6 +1,7 @@
-"""Unit tests for mesh_gen/mesh_tetgen_core.py's Steiner-point budget
-estimation (estimate_steinerleft) - isolated from tetgen itself, which
-these tests never invoke."""
+"""mesh_gen/mesh_tetgen_core.py 的 Steiner 点预算估计
+（estimate_steinerleft）的单元测试——与 tetgen 本身隔离，这些测试从不
+调用它。
+"""
 
 import numpy as np
 import pytest
@@ -9,7 +10,7 @@ from autoflowcfd.grid.mesh_gen.tetgen.mesh_tetgen_core import estimate_steinerle
 
 
 def _box_points(dx, dy, dz):
-    """Minimal point set spanning a dx x dy x dz bounding box."""
+    """张成 dx x dy x dz 包围盒的最小点集。"""
     return np.array([[0.0, 0.0, 0.0], [dx, dy, dz]])
 
 
@@ -30,14 +31,14 @@ class TestEstimateSteinerleft:
         assert result == expected == 300_000  # clipped to the floor here
 
     def test_extra_small_regions_do_not_explode_the_estimate(self):
-        """Regression test for the real bug: Stage B's small local repair
-        regions (fine maxvol, from min_cell_size) must not get divided
-        into the FULL bounding box - that produced an estimate of ~17.8
-        billion tets on a real case (bbox ~72 m^3, a 0.003m Stage B
-        region), which inflated steinerleft to the 20M ceiling and let
-        tetgen balloon the actual core fill 5x (1.2M -> 6.1M tets)."""
-        points = _box_points(8.0, 3.0, 3.0)  # bbox_volume = 72, matches the real case
-        main_maxvol = 0.1 ** 3 * 0.15  # matches _build_merged_mesh's own formula
+        """真实缺陷的回归测试：Stage B 的小局部修复区域（由 min_cell_size 得到的
+        细 maxvol）不能拿去除**整个**包围盒——真实算例上（包围盒约 72 m^3、
+        一个 0.003m 的 Stage B 区域）那样估出约 178 亿个四面体，把 steinerleft
+        顶到 2000 万上限，让 tetgen 把实际的核心填充放大了 5 倍（120 万 -> 610 万
+        个四面体）。
+        """
+        points = _box_points(8.0, 3.0, 3.0)  # bbox_volume = 72，与真实算例一致
+        main_maxvol = 0.1 ** 3 * 0.15  # 与 _build_merged_mesh 自己的公式一致
         stage_b_maxvol = 0.003 ** 3 * 0.15  # tiny relative to main_maxvol
         regions = [
             (np.array([4.0, 1.5, 1.5]), 1, main_maxvol),
@@ -47,30 +48,28 @@ class TestEstimateSteinerleft:
 
         result = estimate_steinerleft(points, regions)
 
-        # The old (buggy) formula - bbox_volume / min(maxvol) - for these
-        # exact inputs:
+        # 旧的（有缺陷的）公式——bbox_volume / min(maxvol)——在这组输入下
+        # 的值：
         old_buggy_estimate = 72.0 / stage_b_maxvol
-        assert old_buggy_estimate > 1e10  # confirms this really would have exploded
+        assert old_buggy_estimate > 1e10  # 确认它确实会爆
 
-        # The fixed formula must stay far below that, and below the 20M
-        # ceiling both old and new formulas share - it should not just
-        # coincidentally hit the same ceiling both ways.
+        # 修复后的公式必须远低于它，并且低于新旧公式共用的 2000 万上限——
+        # 不应两种算法只是碰巧都撞到同一个上限。
         assert result < 10_000_000
         assert result < 20_000_000
 
-        # And it should be in the right ballpark: dominated by the main
-        # region's own domain-wide estimate (480,000 target tets, matching
-        # what the real log reported) plus a bounded allowance per extra
-        # region, not by the finest region's target resolution.
+        # 并且量级应当正确：由主区域自己的全域估计主导（目标 48 万个四面体，
+        # 与真实日志报告的一致），每个额外区域加一个有界的余量，而不是由最细区域的
+        # 目标分辨率主导。
         main_region_estimate = 72.0 / main_maxvol
         assert main_region_estimate == pytest.approx(480_000.0)
         expected = int(np.clip((main_region_estimate + 8 * 200_000) * 3.0, 300_000, 20_000_000))
         assert result == expected
 
     def test_only_small_regions_no_main_region(self):
-        """No domain-wide max_cell_size region at all (only Stage B
-        patches) - still must not blow up, using the coarsest of the small
-        regions rather than the full bbox at the finest one."""
+        """完全没有全域的 max_cell_size 区域（只有 Stage B 补丁）——仍不能爆，
+        应取各小区域里最粗的那个，而不是在最细的分辨率上用整个包围盒。
+        """
         points = _box_points(8.0, 3.0, 3.0)
         maxvol_a = 0.01
         maxvol_b = 0.02  # coarsest of the two
@@ -87,6 +86,6 @@ class TestEstimateSteinerleft:
 
     def test_result_always_within_bounds(self):
         points = _box_points(100.0, 100.0, 100.0)
-        regions = [(np.array([0.0, 0.0, 0.0]), 1, 1e-12)]  # absurdly fine, would blow past ceiling
+        regions = [(np.array([0.0, 0.0, 0.0]), 1, 1e-12)]  # 细得离谱，会冲过上限
         result = estimate_steinerleft(points, regions)
         assert 300_000 <= result <= 20_000_000

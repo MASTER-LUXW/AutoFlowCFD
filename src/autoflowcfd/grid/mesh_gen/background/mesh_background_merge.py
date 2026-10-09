@@ -67,14 +67,17 @@ def _build_merged_mesh(
     growth_rate: float = 1.2,
     min_cell_size: float = 0.001,
     max_cell_size: Optional[float] = None,
-    extra_thickness_limit: Optional[np.ndarray] = None,
     bl_layers: Optional[int] = None,
     export_bl_only: bool = False,
     export_bl_only_path: Optional[str] = None,
     export_core_only: bool = False,
     export_core_only_path: Optional[str] = None,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, np.ndarray, np.ndarray, int]:
-    """构建合并网格（BL 棱柱 + TetGen 核心四面体）。"""
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """构建合并网格（BL 棱柱 + TetGen 核心四面体）。
+
+    Returns:
+        (merged_nodes, prism_cells, tet_cells)
+    """
     bbox_min = np.asarray(bounding_box['min'], dtype=np.float64)
     bbox_max = np.asarray(bounding_box['max'], dtype=np.float64)
 
@@ -82,18 +85,9 @@ def _build_merged_mesh(
     # CLI 传入的 max_cell_size 也是米制。无需额外缩放。
 
     logger.info("Step 1/4: Classifying boundary groups (extrude vs. core-only)...")
-    (extrude_faces, core_faces, extruded_groups, extrude_face_groups,
-     hole_points, core_face_groups, _is_closed_solid_face) = classify_boundary_groups(
+    extrude_faces, core_faces, extruded_groups, hole_points = classify_boundary_groups(
         surface_nodes, surface_faces, surface_boundaries, bbox_min, bbox_max
     )
-
-    # tetgen facet-marker 机制的 marker ID 映射表
-    # （attribute_cells_from_trifaces）——仅在 max_cell_size 梯度生效时需要
-    # （它是唯一会关闭 fill_core_volume 的 nobisect 的选项，而正是这会导致
-    # 简单的节点索引匹配边界归属在细分面上失效）。
-    # 0 被 tetgen 保留为"无标记"（未标记/内部面）。
-    group_name_to_marker = {name: i + 1 for i, name in enumerate(surface_boundaries.groups.keys())}
-    marker_to_name = {v: k for k, v in group_name_to_marker.items()}
 
     if len(extrude_faces) == 0:
         if export_bl_only:
@@ -112,16 +106,16 @@ def _build_merged_mesh(
             )
         from .mesh_background_merge_no_bl import _build_merged_mesh_no_bl
         return _build_merged_mesh_no_bl(
-            surface_nodes, surface_faces, surface_boundaries, extrude_faces,
-            hole_points, max_cell_size, group_name_to_marker, marker_to_name,
+            surface_nodes, surface_faces, surface_boundaries,
+            hole_points, max_cell_size,
             export_core_only, export_core_only_path,
         )
     else:
         from .mesh_background_merge_with_bl import _build_merged_mesh_with_bl
         return _build_merged_mesh_with_bl(
-            surface_nodes, surface_boundaries, bbox_min, bbox_max,
-            extrude_faces, core_faces, extruded_groups, extrude_face_groups,
-            hole_points, core_face_groups, group_name_to_marker, marker_to_name,
-            growth_rate, min_cell_size, max_cell_size, extra_thickness_limit, bl_layers,
+            surface_nodes, surface_faces, surface_boundaries, bbox_min, bbox_max,
+            extrude_faces, core_faces, extruded_groups,
+            hole_points,
+            growth_rate, min_cell_size, max_cell_size, bl_layers,
             export_bl_only, export_bl_only_path, export_core_only, export_core_only_path,
         )

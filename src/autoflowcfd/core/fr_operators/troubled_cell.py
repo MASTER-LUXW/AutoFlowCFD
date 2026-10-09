@@ -84,7 +84,7 @@ from typing import Dict, Optional
 
 import numpy as np
 from loguru import logger
-from numba import njit, prange
+from numba import njit
 
 # 机制1（体积项）硬保护阈值：单元内最小*原始* det(J) 低于此值时，Q 场
 # 局部降为 P=0。真实 cube_demo 网格实测（自由流场残差分布分析）：残差

@@ -9,6 +9,15 @@ CuPy 不可用时还会静默退回 CPU。两个求解器的构造参数同名�
 import click
 
 
+def resolve_backend_name(backend: str) -> str:
+    """"auto" -> 有可用 GPU 时 "gpu"，否则 "cpu"；其余原样返回（配置层 `backend: auto` 与工厂共用）。"""
+    if backend != "auto":
+        return backend
+    from autoflowcfd.core.gpu import gpu_available
+
+    return "gpu" if gpu_available else "cpu"
+
+
 def build_single_node_solver(backend: str, mesh, volume_data, *, gpu_device: int = 0, **solver_kwargs):
     """按后端构造单机求解器；湍流模型需要壁距时一并准备（两个后端同一个壁距来源）。
 
@@ -31,9 +40,8 @@ def build_single_node_solver(backend: str, mesh, volume_data, *, gpu_device: int
     from autoflowcfd.core.gpu import gpu_available
 
     if backend == "auto":
-        # 配置层 `backend: auto`（`SolverConfig` 默认值）：有可用 GPU 用单 GPU，否则 CPU。此前 "auto" 原样传进
-        # `FRSolver`，既不等于 "gpu" 也不等于 "cpu"，实际恒为 CPU
-        backend = "gpu" if gpu_available else "cpu"
+        # 配置层 `backend: auto`（`SolverConfig` 默认值）：有可用 GPU 用单 GPU，否则 CPU
+        backend = resolve_backend_name(backend)
         print(f"   Backend auto -> {backend}")
     if backend == "cpu":
         from autoflowcfd.core import FRSolver

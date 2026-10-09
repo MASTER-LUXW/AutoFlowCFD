@@ -5,20 +5,11 @@
 其中原生棱柱那条是 2026-09-20 修掉的一处**静默给错值**的真实缺陷。
 """
 
-from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Tuple
 
 import numpy as np
-from loguru import logger
 
-from .node_layout import (
-    _MAX_SUPPORTED_ORDER,
-    _MAX_SUPPORTED_ORDER_TET,
-    _MAX_SUPPORTED_ORDER_WEDGE,
-    _tet_vtk_node_barycentrics,
-    _tri_barycentric_to_cube_ab,
-    _wedge_vtk_node_layout,
-)
+from .node_layout import _tet_vtk_node_barycentrics, _tri_barycentric_to_cube_ab, _wedge_vtk_node_layout
 
 def _build_vtk_lagrange_export_data(cell_type: str, order: int, ref_cube_sps: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """构造棱柱 VTK Lagrange 节点在参考立方体坐标下的位置与"SPs 节点值
@@ -146,7 +137,6 @@ def _build_native_tet_vtk_lagrange_export_data(order: int) -> Tuple[np.ndarray, 
     from ...fr.native_tet.basis import (
         build_native_tet_operators, restricted_tet_modes, simplex3d_value, rst_to_abc,
     )
-    from ...grid.curved_mapping.curved_mapping import tet_barycentric
     from scipy.linalg import lu_factor, lu_solve
 
     bary = _tet_vtk_node_barycentrics(order)  # (n_vtk_nodes, 4), (L0,L1,L2,L3)

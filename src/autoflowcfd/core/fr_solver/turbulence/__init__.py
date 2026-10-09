@@ -22,10 +22,7 @@ AutoFlowCFD V2.0 - FRSolver 湍流模型管理 (从 fr_solver.py 拆分)
 """
 
 from .init import (  # noqa: F401
-    _filter_matrices_are_identity,
-    _set_freestream_turbulence,
-    _set_turbulence_bounds,
-    _update_production_ramp,
+    _filter_matrices_are_identity, _set_freestream_turbulence, _set_turbulence_bounds,
     init_turbulence_models,
 )
 from .wall_distance import (  # noqa: F401

@@ -16,7 +16,6 @@
 import click
 import json
 import sys
-from pathlib import Path
 from loguru import logger
 
 
@@ -157,12 +156,10 @@ def doctor(json_output: bool) -> None:
         info['optional_packages'] = optional_installed
         
         # 检查 GPU 可用性
-        gpu_available = False
         try:
             import cupy as cp
-            # 尝试在 GPU 上创建一个简单数组
-            test_array = cp.array([1, 2, 3])
-            gpu_available = True
+            # 尝试在 GPU 上创建一个简单数组（失败即视为不可用）
+            cp.array([1, 2, 3])
             info['gpu_status'] = 'available'
         except Exception:
             info['gpu_status'] = 'not available'
@@ -187,34 +184,34 @@ def doctor(json_output: bool) -> None:
         if json_output:
             click.echo(json.dumps(result, indent=2))
         else:
-            click.echo(f"\n环境诊断")
+            click.echo("\n环境诊断")
             click.echo(f"{'='*60}")
             
             if issues:
-                click.echo(f"状态: ❌ 不健康")
+                click.echo("状态: ❌ 不健康")
                 click.echo(f"\n问题 ({len(issues)}):")
                 for issue in issues:
                     click.echo(f"  ❌ {issue}")
             else:
-                click.echo(f"状态: ✅ 健康")
+                click.echo("状态: ✅ 健康")
             
             if warnings:
                 click.echo(f"\n警告 ({len(warnings)}):")
                 for warning in warnings:
                     click.echo(f"  ⚠️  {warning}")
             
-            click.echo(f"\n系统信息:")
+            click.echo("\n系统信息:")
             click.echo(f"  Python:      {info.get('python_version', 'unknown')}")
             click.echo(f"  CPU 核心数:   {info.get('cpu_cores', 'unknown')}")
             click.echo(f"  GPU 状态:  {info.get('gpu_status', 'unknown')}")
             
             if info.get('installed_packages'):
-                click.echo(f"\n已安装的包:")
+                click.echo("\n已安装的包:")
                 for pkg, ver in info['installed_packages'].items():
                     click.echo(f"  ✓ {pkg:<20} {ver}")
             
             if info.get('optional_packages'):
-                click.echo(f"\n可选包:")
+                click.echo("\n可选包:")
                 for pkg, ver in info['optional_packages'].items():
                     click.echo(f"  {'✓' if ver != 'not installed' else '✗'} {pkg:<20} {ver}")
             
@@ -292,7 +289,6 @@ def benchmark(
             volume_mesh_params={
                 'growth_rate': 1.2,
                 'min_cell_size': 0.001,
-                'target_cells': 500000,
                 'max_cell_size': None,
                 'bl_layers': None,
                 'bl_only': False,

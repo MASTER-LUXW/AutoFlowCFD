@@ -67,11 +67,11 @@ class AutoFlowCFDAPI(_APISolveMixin, _APIPostMixin):
         }
 
     def load_grid(self, grid_file, encoding="UTF-8", validate=True):
-        """Load and parse grid file."""
+        """加载并解析网格文件。"""
         return api_load_grid(self, grid_file, encoding, validate)
 
     def get_grid_info(self, grid_data):
-        """Get grid information and statistics."""
+        """网格信息与统计。"""
         return api_get_grid_info(self, grid_data)
 
     def validate_grid(self, grid_data):
@@ -83,15 +83,15 @@ class AutoFlowCFDAPI(_APISolveMixin, _APIPostMixin):
         return api_validate_surface_grid(self, grid_data)
 
     def generate_volume_mesh(self, grid_data, method="tetrahedral", **kwargs):
-        """Generate volume mesh from grid data."""
+        """由面网格生成体网格。"""
         return api_generate_volume_mesh(self, grid_data, method, **kwargs)
 
     def get_volume_mesh_info(self, volume_mesh):
-        """Get volume mesh information and statistics."""
+        """体网格信息与统计。"""
         return api_get_volume_mesh_info(self, volume_mesh)
 
     def validate_volume_mesh(self, volume_mesh):
-        """Validate volume mesh quality."""
+        """校验体网格质量。"""
         return api_validate_volume_mesh(self, volume_mesh)
 
     def create_steady_config(self, **kwargs) -> SteadyConfig:
@@ -128,5 +128,5 @@ class AutoFlowCFDAPI(_APISolveMixin, _APIPostMixin):
 
 
 def create_api(verbose: bool = False) -> AutoFlowCFDAPI:
-    """Factory function to create API instance."""
+    """创建 API 实例的工厂函数。"""
     return AutoFlowCFDAPI(verbose=verbose)

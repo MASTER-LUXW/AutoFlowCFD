@@ -24,38 +24,19 @@ Continuation 本身无关的既有障碍——因此本文件不测试完整
 """
 
 import types
-
 import numpy as np
 import pytest
 
 from tests.unit._patch_pkg import patch_pkg_attr
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
-
-
-class _NumpyAsCupy:
-    def __getattr__(self, name):
-        return getattr(np, name)
-
-    def asnumpy(self, x):
-        return np.asarray(x)
-
-    class cuda:
-        class Device:
-            def __init__(self, device_id=0):
-                pass
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
+from tests.unit._numpy_as_cupy import NumpyAsCupy
 
 
 @pytest.fixture()
 def gpu_oc_module(monkeypatch):
     import autoflowcfd.core.gpu.distributed.gpu_distributed_order_continuation as mod
     import autoflowcfd.core.gpu as core_gpu_mod
-    shim = _NumpyAsCupy()
+    shim = NumpyAsCupy()
     # `gpu_interpolate_to_new_order` 内部用 `from autoflowcfd.core.gpu
     # import get_cupy`（函数内延迟导入，每次调用都重新从源模块取），
     # patch 源模块的属性即可，本模块自身不持有这个名字。
@@ -246,22 +227,11 @@ class TestGpuInterpolateToNewOrderCoreMath:
         assert solver.U_gpu.shape == (n_local, 1, 5)
         np.testing.assert_allclose(solver.U_gpu[:, :, 0], rho_inf)
 
-    def test_cell_partition_none_raises(self, gpu_oc_module):
-        """'分布式加载'（partition_info 构造）模式：本 rank 没有完整
-        全局网格，必须 fail-fast，不能假装能用。"""
-        from autoflowcfd.core.gpu.distributed.gpu_distributed_order_continuation import (
-            gpu_interpolate_to_new_order,
-        )
-        solver = types.SimpleNamespace(current_order=0, cell_partition=None)
-        with pytest.raises(NotImplementedError):
-            gpu_interpolate_to_new_order(solver, 1)
-
 
 class TestResumeCeilingFractionResetHeuristicGpu:
     """真实完整性缺口修复回归测试（2026-09-05）：多 GPU 分布式（以及
     单机 `GPUFRSolver`，鸭子类型复用同一份实现，见
-    `distributed_order_continuation.py::run_distributed_order_
-    continuation` 模块文档"三条后端统一走本模块"一节）此前完全没有
+    `core/utils/order_continuation/run.py`：四个后端同一个循环）此前完全没有
     单机 CPU 早就有的"resume 时检测湍流场是否被上界大面积钳制"安全网，
     见 `_reset_turbulence_if_resumed_field_exploded` 文档完整推导。
 
@@ -271,7 +241,7 @@ class TestResumeCeilingFractionResetHeuristicGpu:
     数组操作），不需要真正的 CUDA 设备就能决定性验证——用一个只暴露
     `turb_model_gpu`/`freestream`/`mu_molecular` 这几个被读取属性的
     最小 stub（同本文件其余测试类的既有方法论），数组用 numpy 构造
-    （不经过 `_NumpyAsCupy` shim 也可以，因为函数本身不调用 `get_cupy()`；
+    （不经过 `NumpyAsCupy` shim 也可以，因为函数本身不调用 `get_cupy()`；
     这里仍然用 shim 构造只是与本文件既有风格保持一致）。
     """
 

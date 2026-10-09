@@ -14,7 +14,6 @@ cp.asnumpy/cp.asarray 对 numpy 输入是恒等操作），验证 GPU 入口函�
 
 import types
 from unittest.mock import patch
-
 import numpy as np
 import pytest
 
@@ -22,18 +21,9 @@ from autoflowcfd.fr.operators import generate_fr_operators
 from autoflowcfd.core.turbulence.wmles import WMLESModel
 from autoflowcfd.core.utils.solver_helpers import compute_wmles_wall_stress_correction
 from autoflowcfd.core.gpu.turbulence.gpu_turbulence_wmles import compute_wmles_wall_stress_correction_gpu
+
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
-
-
-class _NumpyAsCupy:
-    """把 numpy 数组本身当成"CuPy 数组"：asnumpy/asarray 对 numpy 输入是
-    恒等操作，足以验证 facade 的往返逻辑本身是否透明无损。"""
-
-    def asnumpy(self, x):
-        return np.asarray(x)
-
-    def asarray(self, x):
-        return np.asarray(x)
+from tests.unit._numpy_as_cupy import NumpyAsCupy
 
 
 @pytest.fixture(scope="function")
@@ -67,7 +57,7 @@ class TestGpuWmlesWallStressFacadeMatchesCpu:
         solver = types.SimpleNamespace(
             wmles_model=None, mesh=mesh, ops=ops, wall_distance_gpu=None, U_gpu=None, Q_gpu=None,
         )
-        with patch("autoflowcfd.core.gpu.turbulence.gpu_turbulence_wmles.get_cupy", return_value=_NumpyAsCupy()):
+        with patch("autoflowcfd.core.gpu.turbulence.gpu_turbulence_wmles.get_cupy", return_value=NumpyAsCupy()):
             assert compute_wmles_wall_stress_correction_gpu(solver) is None
 
     def test_gpu_facade_matches_direct_cpu_call(self, mesh_and_ops):
@@ -97,7 +87,7 @@ class TestGpuWmlesWallStressFacadeMatchesCpu:
         )
 
         with patch(
-            "autoflowcfd.core.gpu.turbulence.gpu_turbulence_wmles.get_cupy", return_value=_NumpyAsCupy(),
+            "autoflowcfd.core.gpu.turbulence.gpu_turbulence_wmles.get_cupy", return_value=NumpyAsCupy(),
         ):
             expected = compute_wmles_wall_stress_correction(cpu_facade)
             actual = compute_wmles_wall_stress_correction_gpu(gpu_solver)
@@ -126,7 +116,7 @@ class TestGpuWmlesWallStressFacadeMatchesCpu:
             boundary_ghost_provider=provider,
         )
         with patch(
-            "autoflowcfd.core.gpu.turbulence.gpu_turbulence_wmles.get_cupy", return_value=_NumpyAsCupy(),
+            "autoflowcfd.core.gpu.turbulence.gpu_turbulence_wmles.get_cupy", return_value=NumpyAsCupy(),
         ):
             assert compute_wmles_wall_stress_correction_gpu(gpu_solver) is None
 

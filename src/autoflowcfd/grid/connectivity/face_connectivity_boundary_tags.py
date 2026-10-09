@@ -7,7 +7,7 @@ AutoFlowCFD - 边界面组标签打标 (从 face_connectivity.py 拆出，控制
 postprocess/fr_coefficients.py 的气动系数积分等调用点统一复用。
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 from loguru import logger
@@ -108,8 +108,8 @@ def tag_boundary_groups(
         logger.warning(
             f"{n_unmatched}/{len(boundary_idx)} boundary faces did not match any "
             f"boundary_groups entry (owner cell not found in any group's cell-index "
-            f"list) - these faces will not receive a weak BC penalty term unless "
-            f"handled by a default/fallback boundary condition."
+            f"list) - build_boundary_ghost_provider rejects untagged boundary faces "
+            f"(no boundary condition can be assigned to them)."
         )
 
     return group_code, name_to_code
@@ -143,62 +143,31 @@ def tag_boundary_groups_by_geometry(
         (group_code, name_to_code)，与 tag_boundary_groups 完全相同的
         返回值约定，可直接替换该函数在所有调用点的返回值
     """
-    from scipy.spatial import cKDTree
+    from autoflowcfd.grid.mesh_gen.utils.mesh_boundary import match_points_to_surface_groups
 
     n_faces = face_conn.n_faces
     group_code = np.full(n_faces, -1, dtype=np.int32)
-    name_to_code: Dict[str, int] = {}
 
     boundary_idx = face_conn.get_boundary_face_indices()
+    surf_groups = surface_mesh["boundaries"].groups
+    name_to_code: Dict[str, int] = {name: code for code, name in enumerate(surf_groups)}
     if len(boundary_idx) == 0:
         return group_code, name_to_code
 
-    surf_nodes = surface_mesh["nodes"]
-    surf_faces = surface_mesh["faces"]
-    surf_boundaries = surface_mesh["boundaries"]
-
-    surf_centroids_list: List[np.ndarray] = []
-    surf_radius_list: List[np.ndarray] = []
-    surf_group_code_list: List[np.ndarray] = []
-    for code, (name, face_idx) in enumerate(surf_boundaries.groups.items()):
-        name_to_code[name] = code
-        face_idx = np.asarray(face_idx)
-        face_idx = face_idx[face_idx < len(surf_faces)]
-        if len(face_idx) == 0:
-            continue
-        verts = surf_faces[face_idx]
-        pts = surf_nodes[verts]
-        centroids = pts.mean(axis=1)
-        # 外接半径代理量：质心到自己 3 个顶点的最大距离——跟
-        # map_boundaries_by_geometry 用同一个近似，不需要精确外接半径，
-        # 只需要一个跟"这个面有多大"成正比的局部尺度。
-        radius = np.linalg.norm(pts - centroids[:, None, :], axis=2).max(axis=1)
-        surf_centroids_list.append(centroids)
-        surf_radius_list.append(radius)
-        surf_group_code_list.append(np.full(len(face_idx), code, dtype=np.int32))
-
-    if not surf_centroids_list:
-        return group_code, name_to_code
-
-    surf_centroids = np.vstack(surf_centroids_list)
-    surf_radius = np.concatenate(surf_radius_list)
-    surf_group_code = np.concatenate(surf_group_code_list)
-
-    face_centroids = face_conn.center[boundary_idx]
-    tree = cKDTree(surf_centroids)
-    dist, nearest_idx = tree.query(face_centroids)
-    tolerance = np.maximum(surf_radius[nearest_idx] * distance_tolerance_factor, 1e-12)
-    matched = dist <= tolerance
-
-    group_code[boundary_idx[matched]] = surf_group_code[nearest_idx[matched]]
+    _names, group_index = match_points_to_surface_groups(
+        face_conn.center[boundary_idx], surface_mesh["nodes"], surface_mesh["faces"],
+        surf_groups, distance_tolerance_factor,
+    )
+    matched = group_index >= 0
+    group_code[boundary_idx[matched]] = group_index[matched]
 
     n_unmatched = int(np.sum(~matched))
     if n_unmatched > 0:
         logger.warning(
             f"{n_unmatched}/{len(boundary_idx)} boundary faces (face-level geometric "
-            f"match) did not match any surface boundary group within tolerance - these "
-            f"faces will not receive a weak BC penalty term unless handled by a "
-            f"default/fallback boundary condition."
+            f"match) did not match any surface boundary group within tolerance - "
+            f"build_boundary_ghost_provider rejects untagged boundary faces "
+            f"(no boundary condition can be assigned to them)."
         )
 
     return group_code, name_to_code
@@ -233,4 +202,8 @@ def tag_boundary_groups_for_mesh(mesh, face_conn: Optional[FRFaceConnectivity] =
     surface_mesh = getattr(mesh, "boundary_surface_mesh", None)
     if surface_mesh is not None:
         return tag_boundary_groups_by_geometry(fc, surface_mesh)
-    return tag_boundary_groups(fc, mesh.boundary_groups or {})
+    # 周期组不参与单元级匹配：周期面配对之后是内部面（`face_connectivity_periodic.py`），这些组在边界上已经
+    # 没有面；留在候选里的话，同时贴着周期面与别的边界的角点单元，其余边界面会被标成周期组
+    bc_types = getattr(mesh, "boundary_bc_types", None) or {}
+    groups = {name: cells for name, cells in (mesh.boundary_groups or {}).items() if bc_types.get(name) != "PERIODIC"}
+    return tag_boundary_groups(fc, groups)

@@ -1,4 +1,4 @@
-"""Unit tests for grid data structures."""
+"""网格数据结构的单元测试。"""
 
 import pytest
 import numpy as np
@@ -12,10 +12,10 @@ from autoflowcfd.grid.structures import (
 
 
 class TestNodeArray:
-    """Test suite for NodeArray data structure."""
+    """NodeArray 数据结构的测试。"""
 
     def test_create_node_array(self) -> None:
-        """Test creating a basic NodeArray."""
+        """创建基本的 NodeArray。"""
         nodes = NodeArray(
             x=np.array([0.0, 1.0, 2.0], dtype=np.float64),
             y=np.array([0.0, 0.0, 0.0], dtype=np.float64),
@@ -27,7 +27,7 @@ class TestNodeArray:
         assert nodes.x.dtype == np.float64
     
     def test_node_array_shape_mismatch(self) -> None:
-        """Test that shape mismatch raises ValueError."""
+        """形状不符抛 ValueError。"""
         with pytest.raises(ValueError, match="shape mismatch"):
             NodeArray(
                 x=np.array([0.0, 1.0], dtype=np.float64),
@@ -36,7 +36,7 @@ class TestNodeArray:
             )
     
     def test_node_array_wrong_dtype(self) -> None:
-        """Test that wrong dtype raises ValueError."""
+        """dtype 不对抛 ValueError。"""
         with pytest.raises(ValueError, match="must be float64"):
             NodeArray(
                 x=np.array([0.0, 1.0], dtype=np.float32),
@@ -45,7 +45,7 @@ class TestNodeArray:
             )
     
     def test_get_coordinates(self) -> None:
-        """Test getting coordinates as stacked array."""
+        """以堆叠数组的形式取坐标。"""
         nodes = NodeArray(
             x=np.array([0.0, 1.0, 2.0], dtype=np.float64),
             y=np.array([0.0, 1.0, 2.0], dtype=np.float64),
@@ -58,7 +58,7 @@ class TestNodeArray:
         np.testing.assert_array_equal(coords[1], [1.0, 1.0, 0.0])
     
     def test_get_coordinates_with_indices(self) -> None:
-        """Test getting coordinates for specific nodes."""
+        """取指定节点的坐标。"""
         nodes = NodeArray(
             x=np.array([0.0, 1.0, 2.0, 3.0], dtype=np.float64),
             y=np.array([0.0, 0.0, 0.0, 0.0], dtype=np.float64),
@@ -73,10 +73,10 @@ class TestNodeArray:
 
 
 class TestCellArray:
-    """Test suite for CellArray data structure."""
+    """CellArray 数据结构的测试。"""
 
     def test_create_cell_array(self) -> None:
-        """Test creating a basic CellArray."""
+        """创建基本的 CellArray。"""
         cells = CellArray(
             connectivity=np.array([[0, 1, 2], [1, 2, 3]], dtype=np.int32),
             cell_type=np.array([0, 0], dtype=np.int32)
@@ -87,7 +87,7 @@ class TestCellArray:
         assert cells.connectivity.dtype == np.int32
     
     def test_cell_array_wrong_dimensions(self) -> None:
-        """Test that wrong connectivity dimensions raise ValueError."""
+        """连接关系维数不对抛 ValueError。"""
         with pytest.raises(ValueError, match="must be 2D array"):
             CellArray(
                 connectivity=np.array([0, 1, 2], dtype=np.int32),
@@ -95,7 +95,7 @@ class TestCellArray:
             )
     
     def test_cell_array_wrong_columns(self) -> None:
-        """Test that non-triangular connectivity raises ValueError."""
+        """非三角形的连接关系抛 ValueError。"""
         with pytest.raises(ValueError, match="must have 3 columns"):
             CellArray(
                 connectivity=np.array([[0, 1, 2, 3]], dtype=np.int32),
@@ -103,7 +103,7 @@ class TestCellArray:
             )
     
     def test_cell_array_count_mismatch(self) -> None:
-        """Test that count mismatch raises ValueError."""
+        """数量不符抛 ValueError。"""
         with pytest.raises(ValueError, match="doesn't match"):
             CellArray(
                 connectivity=np.array([[0, 1, 2]], dtype=np.int32),
@@ -112,10 +112,10 @@ class TestCellArray:
 
 
 class TestBoundaryMap:
-    """Test suite for BoundaryMap data structure."""
+    """BoundaryMap 数据结构的测试。"""
 
     def test_create_boundary_map(self) -> None:
-        """Test creating a basic BoundaryMap."""
+        """创建基本的 BoundaryMap。"""
         boundaries = BoundaryMap(
             groups={
                 "inlet": np.array([0, 1, 2], dtype=np.int32),
@@ -132,7 +132,7 @@ class TestBoundaryMap:
         assert boundaries.get_boundary_type("inlet") == "INLET"
 
     def test_boundary_map_key_mismatch(self) -> None:
-        """Test that key mismatch raises ValueError."""
+        """键不一致抛 ValueError。"""
         with pytest.raises(ValueError, match="keys mismatch"):
             BoundaryMap(
                 groups={"inlet": np.array([0, 1], dtype=np.int32)},
@@ -140,7 +140,7 @@ class TestBoundaryMap:
             )
 
     def test_get_group_size(self) -> None:
-        """Test getting boundary group size."""
+        """取边界组的大小。"""
         boundaries = BoundaryMap(
             groups={"wall": np.array([0, 1, 2, 3], dtype=np.int32)},
             bc_types={"wall": "WALL"}
@@ -149,7 +149,7 @@ class TestBoundaryMap:
         assert len(boundaries.get_cell_indices("wall")) == 4
 
     def test_get_nonexistent_group(self) -> None:
-        """Test that accessing nonexistent group raises KeyError."""
+        """访问不存在的组抛 KeyError。"""
         boundaries = BoundaryMap(
             groups={"wall": np.array([0], dtype=np.int32)},
             bc_types={"wall": "WALL"}
@@ -160,10 +160,10 @@ class TestBoundaryMap:
 
 
 class TestGridMetadata:
-    """Test suite for GridMetadata data structure."""
+    """GridMetadata 数据结构的测试。"""
 
     def test_create_metadata(self) -> None:
-        """Test creating basic metadata."""
+        """创建基本的元数据。"""
         metadata = GridMetadata(
             node_count=1000,
             cell_count=2000,
@@ -176,7 +176,7 @@ class TestGridMetadata:
         assert metadata.file_format == "v24"
     
     def test_negative_node_count(self) -> None:
-        """Test that negative counts raise ValueError."""
+        """数量为负抛 ValueError。"""
         with pytest.raises(ValueError, match="cannot be negative"):
             GridMetadata(
                 node_count=-1,
@@ -186,7 +186,7 @@ class TestGridMetadata:
             )
     
     def test_summary_string(self) -> None:
-        """Test metadata summary generation."""
+        """生成元数据摘要。"""
         metadata = GridMetadata(
             node_count=1000000,
             cell_count=2000000,
@@ -201,10 +201,10 @@ class TestGridMetadata:
 
 
 class TestGridData:
-    """Test suite for GridData data structure."""
+    """GridData 数据结构的测试。"""
 
     def test_create_grid_data(self) -> None:
-        """Test creating a complete GridData object."""
+        """创建完整的 GridData 对象。"""
         nodes = NodeArray(
             x=np.array([0.0, 1.0, 0.0, 1.0], dtype=np.float64),
             y=np.array([0.0, 0.0, 1.0, 1.0], dtype=np.float64),
@@ -240,7 +240,7 @@ class TestGridData:
         assert grid.metadata.file_format == "v24"
     
     def test_grid_data_count_mismatch(self) -> None:
-        """Test that metadata count mismatch raises ValueError."""
+        """元数据里的数量不符抛 ValueError。"""
         nodes = NodeArray(
             x=np.array([0.0, 1.0], dtype=np.float64),
             y=np.array([0.0, 0.0], dtype=np.float64),
@@ -274,7 +274,7 @@ class TestGridData:
             )
     
     def test_hdf5_save_load(self, tmp_path) -> None:
-        """Test saving and loading grid data to/from HDF5."""
+        """网格数据经 HDF5 保存并读回。"""
         pytest.importorskip("h5py")
         
         # Create test grid

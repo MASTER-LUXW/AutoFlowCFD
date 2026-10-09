@@ -75,8 +75,9 @@ class DDESModel:
             直接复用同一个函数的输出：调用方（`apply_to_sst_model`）
             按与 IDDES 完全一致的方式，在求解器初始化时算好 `h_max`
             （与流场状态无关，只依赖网格几何，算一次缓存即可）并传入。
-            `'wurz'`（Chapman/Scotti 各向异性修正）仍未实现——没有已知
-            调用方要求它，不在本次范围内。
+
+        Raises:
+            ValueError: method 不是上面两种之一（不静默退化成其中之一）。
         """
         if method == 'cube_root':
             return cell_volumes ** (1.0 / 3.0)
@@ -88,9 +89,8 @@ class DDESModel:
                 )
             return h_max
         else:
-            raise NotImplementedError(
-                f"compute_grid_scale: method='{method}' 尚未实现——只有 "
-                f"'cube_root'/'max_edge' 已实现，请勿静默退化为其中之一。"
+            raise ValueError(
+                f"compute_grid_scale: 未知的网格尺度方法 '{method}'（可选 'cube_root'、'max_edge'）"
             )
 
     def compute_strain_rate_magnitude(self, grad_u: np.ndarray) -> np.ndarray:

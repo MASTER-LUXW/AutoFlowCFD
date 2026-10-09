@@ -17,6 +17,7 @@ from autoflowcfd.core.mpi.distributed_state import DistributedFRState
 
 from autoflowcfd.core.gpu.distributed.gpu_halo_exchange import GPUHaloExchange
 from .upload import _upload_wall_geometry_compact
+from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
 
 def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int) -> None:
@@ -190,8 +191,7 @@ def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int
     solver.freestream = {**my_package['freestream'], "mach_ref": my_package['mach_ref']}
     solver._package_freestream = my_package['freestream']
 
-    if hasattr(solver, '_dual_time_U_prev'):
-        solver._dual_time_U_prev = None
+    reset_dual_time_history(solver)
     # NEWTON_KRYLOV 跨步状态（换阶时置初值，理由见 reset_newton_state 文档）
     from autoflowcfd.core.time_integration.implicit.mean_flow_step import reset_newton_state
 

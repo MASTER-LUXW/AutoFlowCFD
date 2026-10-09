@@ -24,11 +24,7 @@ AutoFlowCFD V2.0 - 分布式面几何
 本 `__init__.py` re-export 全部既有名, 所以全仓库导入一字不改。
 """
 
-from .types import (  # noqa: F401
-    DistributedFlatFaceGeometry,
-    _expand_compact_src1,
-    native_cell_is_prism,
-)
+from .types import DistributedFlatFaceGeometry, native_cell_is_prism  # noqa: F401
 from .build import (  # noqa: F401
     build_distributed_flat_face,
 )

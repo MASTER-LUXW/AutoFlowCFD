@@ -1,27 +1,19 @@
-"""Unit tests for face_flux_points/exact_normal.py — the real fix for
-core/fr_residual/inviscid_kernel.py's `true_normal`/`true_area_weight`
-previously being one constant (flat, triangulated) value per face, reused
-across every Flux Point on that face regardless of whether the face
-(a prism quadrilateral side) is actually planar. See the module docstring
-for the full mechanism.
+"""face_flux_points/exact_normal.py 的单元测试——core/fr_residual/
+inviscid_kernel.py 的 `true_normal`/`true_area_weight` 此前每个面只有一个
+（平面、三角化的）常数值，不论该面（棱柱的四边形侧面）是否真的共面，面上
+所有通量点都复用它；这个模块是对它的真正修复。完整机制见模块文档。
 
-These tests validate the core mathematical claims before the function is
-wired into the real geometry pipeline:
-1. For a PLANAR face (any tet face, or a prism quad whose 4 corners
-   happen to be coplanar), the new per-FP computation must reduce to a
-   SINGLE constant normal across all FPs, matching a hand-computed flat
-   normal/area exactly (not approximately) — the batched exact-Jacobian
-   route must not silently change results on the huge majority of faces
-   where the old flat approximation was already exact.
-2. For a genuinely WARPED (non-planar) prism quad, the normal must vary
-   meaningfully across FPs (this is the actual bug being fixed — the old
-   code used one constant value here too).
-3. The batched Jacobian helpers must agree exactly with the existing,
-   already-validated single-point `tet_exact_jacobian`/
-   `prism_exact_jacobian` (curved_mapping_exact_jacobian.py) - the batched
-   versions are a vectorization of the identical formulas, not a
-   reimplementation, and must be bit-for-bit consistent on overlapping
-   inputs (up to floating-point associativity).
+这些测试在函数接入真实几何流程之前验证核心的数学论断：
+1. 对**平面**（任意四面体面，或四个角点恰好共面的棱柱四边形面），新的逐
+   通量点计算必须退化为所有通量点上的**同一个**常数法向，并与手算的平面
+   法向/面积精确（不是近似）相等——批量精确 Jacobian 的做法不能在绝大多数
+   旧平面近似本来就精确的面上悄悄改变结果。
+2. 对真正**翘曲**（不共面）的棱柱四边形面，法向必须在各通量点之间有实质
+   变化（这正是被修复的缺陷——旧代码在这里也只用一个常数值）。
+3. 批量 Jacobian 函数必须与已有的、验证过的单点 `tet_exact_jacobian`/
+   `prism_exact_jacobian`（curved_mapping_exact_jacobian.py）精确一致——
+   批量版是同一组公式的向量化而不是重新实现，在重叠的输入上必须逐位一致
+   （至多差浮点结合顺序）。
 """
 
 import numpy as np
@@ -72,9 +64,9 @@ def _n1d_and_grids(order):
 
 class TestPlanarFacesReduceToConstantNormal:
     def test_tet_face_gives_constant_normal_matching_flat_geometry(self):
-        """A regular tet's 'a=-1' face (nodes 0,2,3, per TET_CUBE_FACES) is
-        exactly planar by construction — every FP must get the identical
-        normal, equal to the standard cross-product flat normal."""
+        """正四面体的 'a=-1' 面（节点 0,2,3，见 TET_CUBE_FACES）按构造严格共面——
+        每个通量点必须得到同一个法向，等于标准叉积给出的平面法向。
+        """
         order = 2
         n1d, sps_1d, weights_1d = _n1d_and_grids(order)
         n_fp = n1d * n1d
@@ -92,27 +84,27 @@ class TestPlanarFacesReduceToConstantNormal:
             node_coords=cell_nodes,
         )
 
-        # every FP on this planar face must have the identical normal
+        # 这个平面上的每个通量点法向必须完全相同
         n = true_normal[0]
         np.testing.assert_allclose(n, np.tile(n[0], (n_fp, 1)), atol=1e-12)
 
-        # face (0,2,3) in physical space: (0,0,0),(0,1,0),(0,0,1) - the x=0 plane,
-        # outward normal (away from node 1 at x=1) must be -x direction.
+        # 物理空间里的面 (0,2,3)：(0,0,0),(0,1,0),(0,0,1)——x=0 平面，
+        # 外法向（背离 x=1 处的节点 1）必须是 -x 方向。
         np.testing.assert_allclose(n[0], [-1.0, 0.0, 0.0], atol=1e-10)
 
-        # total area must equal the true flat triangle area (0.5 for this right triangle)
+        # 总面积必须等于真实的平面三角形面积（这个直角三角形是 0.5）
         assert true_area_weight[0].sum() == pytest.approx(0.5, rel=1e-10)
 
     def test_planar_prism_quad_gives_constant_normal(self):
-        """A rectangular-box prism's quad side is exactly planar - all FPs
-        must agree on the same normal/direction, matching the flat
-        cross-product normal of that rectangle."""
+        """长方体棱柱的四边形侧面严格共面——所有通量点必须给出同一个法向/方向，
+        与该矩形的叉积平面法向一致。
+        """
         order = 2
         n1d, sps_1d, weights_1d = _n1d_and_grids(order)
         n_fp = n1d * n1d
 
-        # v0,v1,v2 bottom triangle; w0,w1,w2 top - an axis-aligned box,
-        # side "a=-1" -> PRISM_CUBE_FACES nodes (0,2,5,3) = v0,v2,w2,w0.
+        # v0,v1,v2 是底面三角形，w0,w1,w2 是顶面——一个轴对齐的盒子，
+        # 侧面 "a=-1" -> PRISM_CUBE_FACES 的节点 (0,2,5,3) = v0,v2,w2,w0。
         cell_nodes = np.array([
             [0, 0, 0], [1, 0, 0], [0, 1, 0],
             [0, 0, 1], [1, 0, 1], [0, 1, 1],
@@ -131,8 +123,8 @@ class TestPlanarFacesReduceToConstantNormal:
 
         n = true_normal[0]
         np.testing.assert_allclose(n, np.tile(n[0], (n_fp, 1)), atol=1e-10)
-        # quad v0(0,0,0)-v2(0,1,0)-w2(0,1,1)-w0(0,0,1) is the x=0 plane;
-        # outward (away from v1 at x=1) is -x.
+        # 四边形 v0(0,0,0)-v2(0,1,0)-w2(0,1,1)-w0(0,0,1) 在 x=0 平面上；
+        # 外法向（背离 x=1 处的 v1）是 -x。
         np.testing.assert_allclose(n[0], [-1.0, 0.0, 0.0], atol=1e-10)
         # unit square face area = 1.0
         assert true_area_weight[0].sum() == pytest.approx(1.0, rel=1e-10)
@@ -140,10 +132,10 @@ class TestPlanarFacesReduceToConstantNormal:
 
 class TestWarpedPrismQuadVariesAcrossFluxPoints:
     def test_non_planar_quad_normal_is_not_constant(self):
-        """Displace one corner of the quad side out of plane - the old
-        code's single constant normal is exactly the bug being fixed;
-        the new per-FP computation must show real variation across FPs
-        (that's the whole point of this change)."""
+        """把四边形侧面的一个角点移出平面——旧代码的单个常数法向正是被修复的
+        缺陷；新的逐通量点计算必须在各通量点之间表现出真实的变化（这就是这次
+        改动的全部意义）。
+        """
         order = 2
         n1d, sps_1d, weights_1d = _n1d_and_grids(order)
 
@@ -151,8 +143,8 @@ class TestWarpedPrismQuadVariesAcrossFluxPoints:
             [0, 0, 0], [1, 0, 0], [0, 1, 0],
             [0, 0, 1], [1, 0, 1], [0, 1, 1],
         ], dtype=float)
-        # Warp the quad side "a=-1" = (v0,v2,w2,w0) by pushing w0 (node 3)
-        # out of the x=0 plane - v0,v2,w2 stay at x=0, w0 moves to x=0.4.
+        # 把 w0（节点 3）推出 x=0 平面，使四边形侧面 "a=-1" = (v0,v2,w2,w0) 翘曲
+        # ——v0,v2,w2 留在 x=0，w0 移到 x=0.4。
         cell_nodes[3] = [0.4, 0.0, 1.0]
 
         owner_cell = np.array([0], dtype=np.int64)
@@ -173,17 +165,16 @@ class TestWarpedPrismQuadVariesAcrossFluxPoints:
             "expected meaningfully different normals across FPs on a warped "
             f"quad, got max pairwise difference {max_pairwise_diff:.3e}"
         )
-        # every direction must still be a unit vector
+        # 每个方向仍必须是单位向量
         np.testing.assert_allclose(np.linalg.norm(n, axis=-1), 1.0, atol=1e-10)
 
 
 class TestComputeExactAdjRowsValidMask:
-    """`compute_exact_adj_rows` is the shared primitive behind both
-    `true_normal` (owner side, side-oriented+normalized) and the
-    self-consistent-direction fix (owner AND neighbor side, raw/
-    unnormalized) - this pins its `valid_mask` behaviour, which the
-    neighbor-side callers rely on to skip boundary faces (whose
-    neighbor_axis/neighbor_side are -1/0.0 sentinels, not real values)."""
+    """`compute_exact_adj_rows` 是 `true_normal`（owner 侧，按 side 定向并归一化）
+    与"自洽方向"修复（owner 与 neighbor 两侧，原始/未归一化）共用的原语——
+    这里钉住它的 `valid_mask` 行为：neighbor 侧的调用方靠它跳过边界面（边界面
+    的 neighbor_axis/neighbor_side 是 -1/0.0 哨兵值，不是真实值）。
+    """
 
     def test_invalid_entries_stay_zero(self):
         order = 1
@@ -191,7 +182,7 @@ class TestComputeExactAdjRowsValidMask:
         cell_nodes = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float)
 
         cell_arr = np.array([0, 0], dtype=np.int64)
-        axis_arr = np.array([0, -1], dtype=np.int64)  # face 1: sentinel axis (boundary face, no neighbor)
+        axis_arr = np.array([0, -1], dtype=np.int64)  # 面 1：哨兵轴（边界面，没有邻居）
         side_arr = np.array([-1.0, 0.0])
         valid_mask = np.array([True, False])
 
@@ -204,15 +195,15 @@ class TestComputeExactAdjRowsValidMask:
             valid_mask=valid_mask,
         )
 
-        assert not np.allclose(adj_row[0], 0.0)  # valid entry: real (nonzero) adj(J) row
-        np.testing.assert_array_equal(adj_row[1], 0.0)  # invalid entry: left untouched at zero
+        assert not np.allclose(adj_row[0], 0.0)  # 有效项：真实（非零）的 adj(J) 行
+        np.testing.assert_array_equal(adj_row[1], 0.0)  # 无效项：保持为零不动
 
     def test_raw_row_is_unnormalized_and_not_side_oriented(self):
-        """Unlike `compute_exact_face_normals_and_weights`'s `true_normal`,
-        this is the *raw* adj(J) row - not a unit vector, not flipped by
-        `side` - matching what inviscid_kernel.py's `a0,a1,a2` (before its
-        own local `*oside` direction correction) currently gets from SP
-        extrapolation."""
+        """与 `compute_exact_face_normals_and_weights` 的 `true_normal` 不同，这是
+        *原始*的 adj(J) 行——不是单位向量，也没有按 `side` 翻转——对应
+        inviscid_kernel.py 的 `a0,a1,a2`（在它自己的 `*oside` 方向修正之前）目前
+        由解点外插得到的量。
+        """
         order = 1
         n1d, sps_1d, weights_1d = _n1d_and_grids(order)
         cell_nodes = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=float)
@@ -226,10 +217,9 @@ class TestComputeExactAdjRowsValidMask:
             tet_conn=np.array([[0, 1, 2, 3]], dtype=np.int64),
             node_coords=cell_nodes,
         )
-        # face (0,2,3) of this tet is the x=0 plane; raw adj(J) row for
-        # axis=0 points in +x (into the cell, from node 1 at x=1) - the
-        # *outward* direction (-x, matching true_normal's test above)
-        # only appears after the caller's own `*side` correction.
+        # 这个四面体的面 (0,2,3) 是 x=0 平面；axis=0 的原始 adj(J) 行指向 +x
+        # （从 x=1 处的节点 1 指向单元内部）——*外*方向（-x，与上面 true_normal 的
+        # 测试一致）要等调用方自己乘 `*side` 修正之后才出现。
         row = adj_row[0, 0]
-        assert row[0] > 0  # NOT yet flipped to outward (-x) - raw value
+        assert row[0] > 0  # 尚未翻到外向（-x）——原始值
         assert not np.isclose(np.linalg.norm(row), 1.0)  # NOT unit-normalized

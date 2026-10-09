@@ -225,19 +225,31 @@ class _DistributedStepMixin:
             from autoflowcfd.core.mpi.distributed_turbulence import (
                 distributed_compute_turbulence_source_and_viscosity,
             )
-            dt_local = dt_phys_local
-            mu_t_field_compact = distributed_compute_turbulence_source_and_viscosity(
-                self.state.get_local_U()[..., :5], self.partition, self.halo_exchange,
-                self.dist_flat_face, self.mesh, self.ops,
-                self.turb_model, mu, self.wall_distance_compact, dt_local,
-                ramp_owner=self,
-                turb_model_name=self.turb_model_name, ddes_model=self.ddes_model,
-                iddes_h_max_compact=self.iddes_h_max_compact,
-                iddes_h_wn_compact=self.iddes_h_wn_compact,
-                # compact 面空间的 provider（group_code 已重切），湍流输运的
-                # 壁面/来流条件靠它按边界组取类型
-                boundary_ghost_provider=boundary_ghost_provider,
-            )
+            def _turbulence_update(dtau, physical_time=None, advance_ramp=True):
+                return distributed_compute_turbulence_source_and_viscosity(
+                    self.state.get_local_U()[..., :5], self.partition, self.halo_exchange,
+                    self.dist_flat_face, self.mesh, self.ops,
+                    self.turb_model, mu, self.wall_distance_compact, dtau,
+                    ramp_owner=self, physical_time=physical_time, advance_ramp=advance_ramp,
+                    turb_model_name=self.turb_model_name, ddes_model=self.ddes_model,
+                    iddes_h_max_compact=self.iddes_h_max_compact,
+                    iddes_h_wn_compact=self.iddes_h_wn_compact,
+                    # compact 面空间的 provider（group_code 已重切），湍流输运的
+                    # 壁面/来流条件靠它按边界组取类型
+                    boundary_ghost_provider=boundary_ghost_provider,
+                )
+
+            if self.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME:
+                # 湍流方程的双时间步（四后端同一份，`core/turbulence/dual_time.py`）；物理时间项的 b 经与
+                # 输运场相同的 halo 交换 + 重排换到 compact 视图
+                from autoflowcfd.core.turbulence.dual_time import advance_turbulence_dual_time
+
+                mu_t_field_compact = advance_turbulence_dual_time(
+                    self, self.turb_model, np, _turbulence_update, dt_phys_local, dt,
+                    self.time_integrator.dual_time_steps,
+                    to_view=lambda x: self.halo_exchange.exchange(x)[dist_fc.perm])
+            else:
+                mu_t_field_compact = _turbulence_update(dt_phys_local)
         elif self.sgs_model is not None:
             # LES（2026-09-02）：WALE 纯代数模型，用当前状态现算，见
             # distributed_compute_les_viscosity 文档。

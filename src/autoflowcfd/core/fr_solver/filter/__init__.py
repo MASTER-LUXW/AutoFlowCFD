@@ -38,14 +38,7 @@ from typing import Callable
 
 import numpy as np
 
-from .apply import (  # noqa: F401
-    _filter_flat_U,
-    _filter_flat_U_by_cell_type,
-    _filter_leading_vars_inplace_kernel,
-    _filter_scalar_kernel,
-    _matrices_are_identity,
-    build_filter_func_by_cell_type,
-)
+from .apply import _filter_flat_U, _matrices_are_identity, build_filter_func_by_cell_type  # noqa: F401
 from .mode import (  # noqa: F401
     _SENSOR_MODE_SUPPORTED_BACKENDS,
     resolve_filter_mode,

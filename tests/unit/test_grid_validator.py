@@ -1,4 +1,4 @@
-"""Unit tests for grid quality validator."""
+"""网格质量校验器的单元测试。"""
 
 import pytest
 import numpy as np
@@ -13,12 +13,12 @@ from autoflowcfd.grid.validation.validator import GridValidator
 
 
 class TestGridValidator:
-    """Test suite for GridValidator."""
+    """GridValidator 的测试。"""
 
     @pytest.fixture
     def simple_grid(self) -> GridData:
-        """Create a simple triangular mesh for testing."""
-        # Create an equilateral triangle mesh (ideal quality)
+        """创建测试用的简单三角形网格。"""
+        # 创建等边三角形网格（质量理想）
         nodes = NodeArray(
             x=np.array([0.0, 1.0, 0.5], dtype=np.float64),
             y=np.array([0.0, 0.0, np.sqrt(3)/2], dtype=np.float64),
@@ -51,7 +51,7 @@ class TestGridValidator:
     
     @pytest.fixture
     def stretched_grid(self) -> GridData:
-        """Create a stretched triangle mesh (poor quality)."""
+        """创建拉长的三角形网格（质量差）。"""
         # Create a very stretched triangle
         nodes = NodeArray(
             x=np.array([0.0, 10.0, 0.0], dtype=np.float64),
@@ -91,7 +91,7 @@ class TestGridValidator:
         assert 'skewness_max' in validator.thresholds
     
     def test_validate_equilateral_triangle(self, simple_grid: GridData) -> None:
-        """Test validation of ideal equilateral triangle."""
+        """校验理想的等边三角形。"""
         validator = GridValidator(simple_grid)
         results = validator.validate()
         
@@ -101,17 +101,17 @@ class TestGridValidator:
         assert results['jacobian']['min'] > 0.0
     
     def test_validate_stretched_triangle(self, stretched_grid: GridData) -> None:
-        """Test validation of stretched triangle."""
+        """校验拉长的三角形。"""
         validator = GridValidator(stretched_grid)
         results = validator.validate()
         
-        # Stretched triangle should have high aspect ratio
+        # 拉长的三角形长宽比应当很大
         assert results['aspect_ratio']['max'] > 10.0
-        # May or may not pass depending on threshold
+        # 是否通过取决于阈值
         assert 'aspect_ratio' in results
     
     def test_aspect_ratio_calculation(self, simple_grid: GridData) -> None:
-        """Test aspect ratio calculation."""
+        """长宽比计算。"""
         validator = GridValidator(simple_grid)
         ar_stats = validator._check_aspect_ratio()
         
@@ -133,7 +133,7 @@ class TestGridValidator:
         assert 0.0 <= skew_stats['max'] <= 1.0
     
     def test_jacobian_calculation(self, simple_grid: GridData) -> None:
-        """Test Jacobian determinant calculation."""
+        """Jacobian 行列式计算。"""
         validator = GridValidator(simple_grid)
         jac_stats = validator._check_jacobian()
         
@@ -144,7 +144,7 @@ class TestGridValidator:
         assert 'negative_count' in jac_stats
     
     def test_validation_summary(self, simple_grid: GridData) -> None:
-        """Test validation summary generation."""
+        """生成校验摘要。"""
         validator = GridValidator(simple_grid)
         results = validator.validate()
         
@@ -156,19 +156,19 @@ class TestGridValidator:
         assert "RESULT:" in summary
     
     def test_threshold_violation_detection(self, stretched_grid: GridData) -> None:
-        """Test that threshold violations are detected."""
-        # Set very strict thresholds to force failure
+        """能检出超过阈值的情形。"""
+        # 把阈值设得很严，强制不通过
         validator = GridValidator(stretched_grid)
         validator.thresholds['aspect_ratio_max'] = 5.0
         
         results = validator.validate()
         
-        # Should fail due to high aspect ratio
+        # 应因长宽比过大而不通过
         if results['aspect_ratio']['max'] > 5.0:
             assert results['passed'] is False
     
     def test_quality_histogram(self, simple_grid: GridData) -> None:
-        """Test histogram generation for quality metrics."""
+        """生成质量指标的直方图。"""
         validator = GridValidator(simple_grid)
         
         # Test aspect ratio histogram
@@ -177,14 +177,14 @@ class TestGridValidator:
         assert len(bins) == 11  # n bins have n+1 edges
     
     def test_invalid_histogram_metric(self, simple_grid: GridData) -> None:
-        """Test that invalid metric name raises ValueError."""
+        """指标名非法抛 ValueError。"""
         validator = GridValidator(simple_grid)
         
         with pytest.raises(ValueError, match="Invalid metric"):
             validator.get_quality_histogram('invalid_metric')
     
     def test_multiple_cells_validation(self) -> None:
-        """Test validation with multiple cells."""
+        """多个单元的校验。"""
         # Create a mesh with multiple triangles
         nodes = NodeArray(
             x=np.array([0.0, 1.0, 0.0, 1.0], dtype=np.float64),
@@ -224,8 +224,8 @@ class TestGridValidator:
         assert 'skewness' in results
     
     def test_degenerate_triangle_detection(self) -> None:
-        """Test detection of degenerate (collapsed) triangles."""
-        # Create a degenerate triangle (all nodes collinear)
+        """检出退化（坍缩）的三角形。"""
+        # 创建退化三角形（三个节点共线）
         nodes = NodeArray(
             x=np.array([0.0, 1.0, 2.0], dtype=np.float64),
             y=np.array([0.0, 0.0, 0.0], dtype=np.float64),
@@ -259,11 +259,11 @@ class TestGridValidator:
         validator = GridValidator(grid)
         results = validator.validate()
         
-        # Degenerate triangle should have near-zero Jacobian
+        # 退化三角形的 Jacobian 应接近零
         assert results['jacobian']['min'] < 1e-10
     
     def test_custom_thresholds(self, simple_grid: GridData) -> None:
-        """Test using custom quality thresholds."""
+        """使用自定义质量阈值。"""
         validator = GridValidator(simple_grid)
         
         # Customize thresholds
@@ -277,17 +277,13 @@ class TestGridValidator:
         assert validator.thresholds['aspect_ratio_max'] == 50.0
     
     def test_validation_with_negative_jacobian(self) -> None:
-        """Test handling of cells with inconsistent (flipped) winding.
+        """处理绕向不一致（翻转）的单元。
 
-        A single isolated triangle has no absolute orientation sign in 3D
-        without an external reference frame - "swap two vertices" alone
-        isn't detectable that way (np.linalg.norm of the face-normal cross
-        product is never negative, regardless of winding). What *is*
-        detectable is whether two triangles that share an edge agree with
-        each other: on a consistently-oriented surface they must traverse
-        their shared edge in opposite directions. This fixture builds two
-        triangles sharing an edge, with the second one's vertex order
-        reversed, so the check has an actual inconsistency to find.
+        单独一个孤立三角形在三维里没有外部参考系就没有绝对的朝向符号——只"交换
+        两个顶点"是检测不出来的（面法向叉积的 np.linalg.norm 不论绕向如何都不会
+        为负）。*能*检测的是共享一条边的两个三角形彼此是否一致：朝向一致的曲面上，
+        它们必须以相反的方向走过共享边。这个夹具构造两个共享一条边的三角形，
+        第二个的顶点顺序反过来，让检查有一个真实的不一致可找。
         """
         nodes = NodeArray(
             x=np.array([0.0, 1.0, 1.0, 0.0], dtype=np.float64),
@@ -298,10 +294,8 @@ class TestGridValidator:
         cells = CellArray(
             connectivity=np.array([
                 [0, 1, 2],  # consistently oriented
-                [0, 3, 2],  # shares edge (0,2) with the same winding as
-                            # the first triangle instead of the opposite -
-                            # one of the pair is flipped relative to the
-                            # other
+                [0, 3, 2],  # 共享边 (0,2)，绕向与第一个三角形相同而不是相反——
+                            # 两者之一相对另一个是翻转的
             ], dtype=np.int32),
             cell_type=np.array([0, 0], dtype=np.int32)
         )
@@ -328,7 +322,7 @@ class TestGridValidator:
         validator = GridValidator(grid)
         results = validator.validate()
 
-        # Both triangles sharing the inconsistently-wound edge are flagged,
-        # and the mismatch now actually fails validation.
+        # 共享这条绕向不一致的边的两个三角形都被标记，
+        # 并且这种不一致现在确实会让校验不通过。
         assert results['jacobian']['negative_count'] == 2
         assert results['passed'] is False

@@ -15,65 +15,59 @@ from typing import Dict, List
 from loguru import logger
 
 
-def boundary_zone_ids(exporter, owner_cells: np.ndarray):
-    """把每个边界面的 owner 四面体映射到 BoundaryID（按边界组名）
-    和 BoundaryTypeID（按名称模式匹配的分类桶）。
+#: 没有记录边界条件类型的组（外部体网格不带边界三角形时的 'exterior' 等）
+_UNKNOWN_TYPE = "UNKNOWN"
+
+
+def boundary_zone_ids(exporter, tri_conn: np.ndarray):
+    """每个外部面三角形的 BoundaryID（边界组）与 BoundaryTypeID（该组的边界条件类型）。
+
+    逐面定组，与体网格导出、格式转换同一个函数（`mesh_boundary.exterior_faces_by_group`）；类型取网格记录的
+    `bc_types`（求解器用的就是它）。2026-10-09 以前按 owner 单元定组：同时贴着两个边界的角点单元，它的面
+    全部标成后遍历到的那个组；类型则是在这里按组名另猜一遍，与求解器实际使用的类型可以不同。
+
+    Args:
+        tri_conn: (n_boundary_faces, 3) 外部面的节点编号
 
     Returns:
-        (boundary_id, type_id, id_legend, type_legend)——前两个是
-        (n_boundary_faces,) 的 int32 数组，对照表是 "<id>=<name>"
-        形式的 List[str]。
+        (boundary_id, type_id, id_legend, type_legend)——前两个是 (n_boundary_faces,) 的 int32 数组，对照表是
+        "<id>=<name>" 形式的 List[str]。
+
+    Raises:
+        ValueError: 有外部面不属于任何边界组
     """
-    boundary_names = exporter.grid_data.boundaries.boundary_names
-    name_to_id = {name: i for i, name in enumerate(boundary_names)}
-    type_to_id = {t: i for i, t in enumerate(exporter._BC_TYPE_NAMES)}
-    unclassified_id = len(boundary_names)
+    from autoflowcfd.grid.mesh_gen.utils.mesh_boundary import exterior_faces_by_group
 
-    def _classify(name: str) -> str:
-        """基于名称模式匹配进行边界类型分类"""
-        name_upper = name.upper()
-        if any(prefix in name_upper for prefix in ['WALL', 'SOLID']):
-            return 'WALL'
-        elif 'GROUND' in name_upper:
-            return 'GROUND'
-        elif any(prefix in name_upper for prefix in ['INLET', 'INTAKE', 'ENTRY']):
-            return 'INLET'
-        elif any(prefix in name_upper for prefix in ['OUTLET', 'OUTFLOW', 'EXIT']):
-            return 'OUTLET'
-        elif 'SYM' in name_upper or 'MIRROR' in name_upper:
-            return 'SYMMETRY'
-        elif any(prefix in name_upper for prefix in ['FARFIELD', 'FAR_FIELD', 'BOUNDARY']):
-            return 'FARFIELD'
-        else:
-            return 'WALL'
+    grid = exporter.grid_data
+    faces_by_group = exterior_faces_by_group(grid)
+    boundary_names = list(faces_by_group)
+    surface = getattr(grid, "surface_mesh", None)
+    bc_types = dict(surface["boundaries"].bc_types) if surface is not None else dict(grid.boundaries.bc_types)
+    group_type = [str(bc_types.get(name, _UNKNOWN_TYPE)) for name in boundary_names]
+    type_names = sorted(set(group_type))
 
-    # 向量化的 单元 -> id 查找：构建一个按单元 id 索引的稠密数组
-    # （哨兵值 = unclassified/WALL），而不是用 Python 字典 + 逐
-    # owner 单元的列表推导 + .get() 调用——对真实网格 owner_cells
-    # 可能有 1e5-1e6 量级，这样改成了一次花式索引 gather。
-    n_cells = exporter.grid_data.cell_count
-    cell_to_name_id = np.full(n_cells, unclassified_id, dtype=np.int32)
-    cell_to_type_id = np.full(n_cells, type_to_id['WALL'], dtype=np.int32)
-    for name in boundary_names:
-        btype = _classify(name)
-        nid = name_to_id[name]
-        tid = type_to_id.get(btype, type_to_id['WALL'])
-        cells = np.asarray(exporter.grid_data.boundaries.get_cell_indices(name), dtype=np.int64)
-        cell_to_name_id[cells] = nid
-        cell_to_type_id[cells] = tid
+    # 外部面按排序后的节点三元组对号（两边来自同一张网格的同一套面提取）
+    n_nodes = int(grid.node_count)
 
-    boundary_id = cell_to_name_id[owner_cells]
-    type_id = cell_to_type_id[owner_cells]
+    def _key(tris):
+        t = np.sort(np.asarray(tris, dtype=np.int64), axis=1)
+        return (t[:, 0] * n_nodes + t[:, 1]) * n_nodes + t[:, 2]
 
-    id_legend = [f"{i}={name}" for name, i in sorted(name_to_id.items(), key=lambda kv: kv[1])]
-    if np.any(boundary_id == unclassified_id):
-        n_unclassified = int(np.sum(boundary_id == unclassified_id))
-        logger.warning(
-            f"{n_unclassified} boundary faces have no matching boundary "
-            f"group; tagged BoundaryID={unclassified_id} (<UNCLASSIFIED>)"
-        )
-        id_legend.append(f"{unclassified_id}=<UNCLASSIFIED>")
-    type_legend = [f"{i}={name}" for name, i in sorted(type_to_id.items(), key=lambda kv: kv[1])]
+    keys = np.concatenate([_key(faces_by_group[name]) for name in boundary_names])
+    ids = np.concatenate([np.full(len(faces_by_group[name]), gi, dtype=np.int32)
+                          for gi, name in enumerate(boundary_names)])
+    order = np.argsort(keys)
+    keys, ids = keys[order], ids[order]
+    query = _key(tri_conn)
+    pos = np.minimum(np.searchsorted(keys, query), len(keys) - 1)
+    found = keys[pos] == query
+    if not found.all():
+        raise ValueError(f"{int((~found).sum())}/{len(query)} 个外部面不属于任何边界组")
+    boundary_id = ids[pos]
+    type_id = np.asarray([type_names.index(t) for t in group_type], dtype=np.int32)[boundary_id]
+
+    id_legend = [f"{i}={name}" for i, name in enumerate(boundary_names)]
+    type_legend = [f"{i}={name}" for i, name in enumerate(type_names)]
 
     return boundary_id, type_id, id_legend, type_legend
 

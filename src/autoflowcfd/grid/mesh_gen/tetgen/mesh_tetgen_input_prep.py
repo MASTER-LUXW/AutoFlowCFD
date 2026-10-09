@@ -2,7 +2,7 @@
 
 从 mesh_tetgen_core.py 的 fill_core_volume 里拆出来的纯数据预处理步骤：
 背景点拼接、面索引越界校验、退化面（三个顶点里有重复）剔除。三者共同点是
-只读/只变换 点/面/face_markers 这三个数组本身，不涉及 tetgen 对象
+只读/只变换 点/面这两个数组本身，不涉及 tetgen 对象
 的创建或调用，拆成独立、可单独单元测试的纯函数。
 """
 
@@ -16,8 +16,7 @@ def prepare_plc_input(
     points: np.ndarray,
     faces: np.ndarray,
     background_points: Optional[np.ndarray] = None,
-    face_markers: Optional[np.ndarray] = None,
-) -> Tuple[np.ndarray, np.ndarray, Optional[np.ndarray]]:
+) -> Tuple[np.ndarray, np.ndarray]:
     """把 fill_core_volume 收到的原始输入整理成可以直接喂给 tetgen 的形式。
 
     Args:
@@ -25,12 +24,9 @@ def prepare_plc_input(
         faces: (n_faces, 3) int32 PLC 三角面
         background_points: 可选，(q, 3) 额外自由点（不被 faces 任何一行引
             用），拼接在 点 末尾 - 见 fill_core_volume 自己的同名参数文档
-        face_markers: 可选，(n_faces,) int32 每个面的标记，随 faces 一起被
-            退化面剔除同步过滤
 
     Returns:
-        (points, faces, face_markers) - points 可能因为拼接背景点而变长；
-        面/face_markers 可能因为剔除退化面而变短。
+        (points, faces) - points 可能因为拼接背景点而变长；面可能因为剔除退化面而变短。
 
     Raises:
         RuntimeError: faces 引用了越界的顶点索引 - 上游 bug 的早期信号，
@@ -68,7 +64,5 @@ def prepare_plc_input(
             f"Removing them before TetGen call to prevent hangs."
         )
         faces = faces[~degenerate_mask]
-        if face_markers is not None:
-            face_markers = face_markers[~degenerate_mask]
 
-    return points, faces, face_markers
+    return points, faces

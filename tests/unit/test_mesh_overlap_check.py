@@ -1,15 +1,11 @@
-"""Unit tests for validation/mesh_overlap_check.py.
+"""validation/mesh_overlap_check.py 的单元测试。
 
-The CANDIDATE_CAP_PER_FACE tests are a regression for a real hang: a
-single outlier-huge boundary face (one of cube_demo's coarse farfield/
-domain-shell panels) gets a broad-phase search radius scaled to its own
-huge size and can return hundreds of thousands of
-candidates from ONE query - 142,944 in the measured case, blowing one
-500-face chunk out to 5.58M candidate pairs and making the whole check
-take 6+ minutes and several GB of RAM. The fix caps any one face's
-candidate set at its CAP nearest neighbours. These tests confirm the cap
-doesn't cause a genuine small-vs-small overlap to be missed just because
-an unrelated huge face is also present in the mesh.
+CANDIDATE_CAP_PER_FACE 的测试是一次真实卡死的回归：单个尺寸离群的巨大
+边界面（cube_demo 粗的远场/计算域外壳面片之一）的粗筛搜索半径随它自己
+巨大的尺寸放大，**一次**查询就能返回几十万个候选——实测 142,944 个，把
+一个 500 面的分块撑到 558 万候选对，整个检查要 6 分钟以上、数 GB 内存。
+修复是把任何一个面的候选集截断到最近的 CAP 个邻居。这些测试确认：网格里
+同时存在一张不相干的巨大面时，截断不会让真正的小面对小面的重叠被漏掉。
 """
 
 import numpy as np
@@ -20,15 +16,16 @@ from autoflowcfd.grid.validation.mesh_overlap_check import check_face_overlap_an
 from autoflowcfd.grid.schema.grid_nodes import NodeArray
 from autoflowcfd.grid.mesh_gen.extraction.face_extractor import FaceExtractor
 
-# Two triangles that genuinely cross in 3D, sharing no vertices (same
-# fixture used in test_overlap_geometry.py / test_mesh_front_collision.py).
+# 两个在三维里真正相交、不共享顶点的三角形（与
+# test_overlap_geometry.py / test_mesh_front_collision.py 用的是同一个夹具）。
 A0, A1, A2 = np.array([-2., -2., 0.]), np.array([2., -2., 0.]), np.array([0., 2., 0.])
 B0, B1, B2 = np.array([0., 0., -2.]), np.array([0., 0., 2.]), np.array([0., 3., 0.])
 
 
 def _cap_tet(p0, p1, p2, eps=1e-3):
-    """A thin tetrahedron with one face exactly (p0, p1, p2) - the other 3
-    faces are thin slivers, irrelevant to the test other than existing."""
+    """一个薄四面体，其中一个面恰好是 (p0, p1, p2)——另外 3 个面是薄片，
+    除了存在之外与测试无关。
+    """
     centroid = (p0 + p1 + p2) / 3.0
     normal = np.cross(p1 - p0, p2 - p0)
     normal = normal / np.linalg.norm(normal)
@@ -49,19 +46,19 @@ def _huge_tet(center, scale=200.0):
     return _tiny_tet(center, scale=scale)
 
 
-# Placed far below the distractor line along z (which the distractors
-# never occupy) so its own extent can never geometrically reach any other
-# tet - only its search radius (which scales with its own huge size) does.
-# Tuned empirically (see scratchpad/tune_huge_tet.py): scale=200,
-# z-offset=-600 makes its broad-phase candidate count far exceed a small
-# patched cap while producing zero real triangle-triangle intersections.
+# 沿 z 放在干扰单元那条线的远下方（干扰单元从不占据那里），所以它自身的
+# 范围在几何上碰不到任何其它四面体——只有它的搜索半径（随它自己巨大的尺寸
+# 放大）能碰到。经验调出的参数（见 scratchpad/tune_huge_tet.py）：scale=200、
+# z 偏移 -600 让它的粗筛候选数远超一个调小的上限，同时不产生任何真实的
+# 三角形-三角形相交。
 HUGE_TET_CENTER = np.array([40.0, 0.0, -600.0])
 HUGE_TET_SCALE = 200.0
 
 
 def _build_mesh(tets):
-    """tets: list of (4,3) node arrays, each an isolated tetrahedron (no
-    shared nodes across tets - keeps every face a boundary face)."""
+    """tets：(4,3) 节点数组的列表，每个是孤立的四面体（四面体之间不共享节点
+    ——让每个面都是边界面）。
+    """
     all_nodes = np.concatenate(tets, axis=0)
     cells = np.arange(len(all_nodes), dtype=np.int64).reshape(-1, 4)
     return all_nodes, cells
@@ -69,21 +66,20 @@ def _build_mesh(tets):
 
 class TestCandidateCapPreservesCorrectness:
     def test_small_overlap_still_found_next_to_a_huge_distractor_face(self, monkeypatch):
-        """A huge face (far away, not touching anything) forces one of its
-        own broad-phase queries to be capped; a genuine small-vs-small
-        overlap elsewhere in the mesh must still be detected."""
+        """一张巨大的面（在远处，不接触任何东西）迫使它自己的某次粗筛查询被截断；
+        网格里别处真正的小面对小面重叠仍必须被检出。
+        """
         monkeypatch.setattr(mesh_overlap_check, "CANDIDATE_CAP_PER_FACE", 3)
 
         tet_a = _cap_tet(A0, A1, A2)
         tet_b = _cap_tet(B0, B1, B2)
 
-        # Several well-separated, mutually non-overlapping small tets to
-        # pad the candidate count for the huge face's own query.
+        # 几个彼此分开、互不重叠的小四面体，用来填充那张巨大面自己那次查询的
+        # 候选数。
         distractors = [_tiny_tet(np.array([10.0 * i, 0.0, 0.0])) for i in range(1, 9)]
 
-        # Placed near the "cluster center" (within the huge face's own
-        # oversized search radius of everything else) but far enough from
-        # any other single tet that it never geometrically intersects one.
+        # 放在"簇中心"附近（在巨大面自己过大的搜索半径之内、靠近其余所有单元），
+        # 但离任何单个四面体都足够远，在几何上从不与之相交。
         huge = _huge_tet(HUGE_TET_CENTER, scale=HUGE_TET_SCALE)
 
         tets = [tet_a, tet_b] + distractors + [huge]
@@ -95,18 +91,17 @@ class TestCandidateCapPreservesCorrectness:
         report = check_face_overlap_and_proximity(nodes, cells, faces=faces)
 
         assert report.has_overlaps
-        # tet_a is cell 0, tet_b is cell 1 (in `cells` construction order).
+        # tet_a 是单元 0，tet_b 是单元 1（按 `cells` 的构造顺序）。
         assert 0 in report.overlapping_cell_ids
         assert 1 in report.overlapping_cell_ids
-        # The huge distractor never touches anything and must not be
-        # implicated by capping-induced false positives.
+        # 巨大的干扰单元不接触任何东西，不能因为截断引起的误报而被牵连进来。
         huge_cell_id = len(tets) - 1
         assert huge_cell_id not in report.overlapping_cell_ids
 
     def test_cap_actually_engages_for_the_huge_face(self, monkeypatch):
-        """Sanity check on the test fixture itself: without capping, the
-        huge face's own query really does exceed a small cap (otherwise
-        the test above wouldn't be exercising the capping path at all)."""
+        """对测试夹具本身的检查：不截断时，巨大面自己的查询确实超过一个小的上限
+        （否则上面的测试根本没有走到截断路径）。
+        """
         monkeypatch.setattr(mesh_overlap_check, "CANDIDATE_CAP_PER_FACE", 3)
 
         tet_a = _cap_tet(A0, A1, A2)

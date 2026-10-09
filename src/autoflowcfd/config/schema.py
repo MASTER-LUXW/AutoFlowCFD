@@ -16,7 +16,6 @@
 """
 
 from typing import List, Optional, Union
-from dataclasses import is_dataclass
 
 from .solver_config import (
     SolverConfig,
@@ -210,14 +209,6 @@ class ConfigSchema:
             errors.append(f"total_time 必须 > 0，得到 {config.total_time}")
         
         errors.extend(cfl_triplet_errors(config.cfl_init, config.cfl_max, config.cfl_min))
-        
-        if config.warmup_time < 0:
-            errors.append(f"warmup_time 必须 >= 0，得到 {config.warmup_time}")
-        
-        if config.warmup_time >= config.total_time:
-            errors.append(
-                f"warmup_time ({config.warmup_time}) 不能超过 total_time ({config.total_time})"
-            )
         
         # 计算总步数
         total_steps = int(config.total_time / config.dt)

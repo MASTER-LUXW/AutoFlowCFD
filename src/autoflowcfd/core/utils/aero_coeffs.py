@@ -108,7 +108,7 @@ class ReferenceAreaMixin:
 
             body_face_indices = np.array(body_face_indices, dtype=np.int64)
 
-            logger.info(f"Surface mesh body analysis:")
+            logger.info("Surface mesh body analysis:")
             logger.info(f"  Body faces: {len(body_face_indices)}")
 
             # 取车身面的节点坐标

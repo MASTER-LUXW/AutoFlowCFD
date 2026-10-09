@@ -7,11 +7,13 @@ AutoFlowCFD Grid - 连接性模块
 from autoflowcfd.grid.connectivity.face_connectivity import (
     FRFaceConnectivity,
     build_face_connectivity,
+    CUBE_FACE_CODES,
+    CUBE_FACE_NAMES,
+)
+from autoflowcfd.grid.connectivity.face_connectivity_boundary_tags import (  # noqa: F401
     tag_boundary_groups,
     tag_boundary_groups_by_geometry,
     tag_boundary_groups_for_mesh,
-    CUBE_FACE_CODES,
-    CUBE_FACE_NAMES,
 )
 
 __all__ = [

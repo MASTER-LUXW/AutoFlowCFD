@@ -6,7 +6,7 @@
 generate_hybrid_mesh 原来紧接着"Final defensive pass: merge coincident
 点并修复 non-manifold"之后的那一整段，未改动任何数值逻辑——
 三个子步骤共享同一组滚动状态（merged_nodes/prism_cells/merged_cells/
-bl_cell_groups/cell_groups/nodes_obj/mesh_changed_by_repair），因此作为
+nodes_obj/mesh_changed_by_repair），因此作为
 一个整体一起搬运，而不是拆成三个更小的函数。
 """
 
@@ -19,12 +19,10 @@ def _repair_mixed_mesh_post_stage_c(
     merged_nodes: np.ndarray,
     prism_cells: np.ndarray,
     merged_cells: np.ndarray,
-    bl_cell_groups: np.ndarray,
-    cell_groups: np.ndarray,
     nodes_obj,
     mesh_changed_by_repair: bool,
     min_cell_size: float,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, object, bool]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, object, bool]:
     """跨棱柱 + 四面体的非流形面修补、BL 棱柱长细比修补、collapsed-corner
     棱柱降级为四面体——见本模块文档字符串。逐字对应
     mesh_background.generate_hybrid_mesh 原来这一段代码，未改动任何数值
@@ -37,8 +35,7 @@ def _repair_mixed_mesh_post_stage_c(
             对 _build_merged_mesh 直接输出的同名过滤完全一致）。
 
     Returns:
-        (merged_nodes, prism_cells, merged_cells, bl_cell_groups,
-        cell_groups, nodes_obj, mesh_changed_by_repair) - 与传入参数一一
+        (merged_nodes, prism_cells, merged_cells, nodes_obj, mesh_changed_by_repair) - 与传入参数一一
         对应，反映本阶段可能施加的任意次原地重建。
     """
     # 延迟导入，避免循环导入（约定见本项目 core/fr_solver_cfl.py 等）。
@@ -47,7 +44,10 @@ def _repair_mixed_mesh_post_stage_c(
     from ..extraction.face_extractor import repair_nonmanifold_mixed
     from ..tetgen.mesh_prism_to_tet import orient_tetrahedra
     from ..tetgen.mesh_tetgen_core import _dedupe_coincident_points
-    from ..repair.mesh_repair_nonmanifold_mixed import patch_nonmanifold_cavity_mixed, demote_invalid_prisms_to_tets
+    from autoflowcfd.grid.mesh_gen.repair.mesh_repair_nonmanifold_mixed import patch_nonmanifold_cavity_mixed
+    from autoflowcfd.grid.mesh_gen.repair.mesh_repair_nonmanifold_mixed_demote import (
+        demote_invalid_prisms_to_tets,
+    )
 
     # 跨混合网格的非流形检查——先尝试局部重铺
     # （与上方仅四面体的 patch 相同原理：简单的"保留最大、丢弃其余"
@@ -59,9 +59,9 @@ def _repair_mixed_mesh_post_stage_c(
     if len(prism_cells):
         prism_keep_mm, tet_keep_mm = repair_nonmanifold_mixed(nodes_obj, prism_cells, merged_cells.astype(np.int64))
         if not prism_keep_mm.all() or not tet_keep_mm.all():
-            merged_nodes, prism_cells, merged_cells, bl_cell_groups, cell_groups = patch_nonmanifold_cavity_mixed(
+            merged_nodes, prism_cells, merged_cells = patch_nonmanifold_cavity_mixed(
                 merged_nodes, prism_cells, merged_cells.astype(np.int64),
-                prism_keep_mm, tet_keep_mm, bl_cell_groups, cell_groups,
+                prism_keep_mm, tet_keep_mm,
             )
             nodes_obj = NodeArray.from_array(merged_nodes)
             prism_keep_mm, tet_keep_mm = repair_nonmanifold_mixed(nodes_obj, prism_cells, merged_cells)
@@ -78,9 +78,9 @@ def _repair_mixed_mesh_post_stage_c(
             # 如 ANSA 可以走进去的孔洞，因为周围存活单元的新暴露面闭合
             # 成自身自洽的小流形，甚至通过了水密性开放边检查）。
             if not prism_keep_mm.all() or not tet_keep_mm.all():
-                merged_nodes, prism_cells, merged_cells, bl_cell_groups, cell_groups = patch_nonmanifold_cavity_mixed(
+                merged_nodes, prism_cells, merged_cells = patch_nonmanifold_cavity_mixed(
                     merged_nodes, prism_cells, merged_cells.astype(np.int64),
-                    prism_keep_mm, tet_keep_mm, bl_cell_groups, cell_groups,
+                    prism_keep_mm, tet_keep_mm,
                     n_buffer_rings=4, max_cavity_cells=15_000,
                 )
                 nodes_obj = NodeArray.from_array(merged_nodes)
@@ -107,9 +107,7 @@ def _repair_mixed_mesh_post_stage_c(
                         f"not just missing volume"
                     )
                 prism_cells = prism_cells[prism_keep_mm]
-                bl_cell_groups = bl_cell_groups[prism_keep_mm]
                 merged_cells = merged_cells[tet_keep_mm]
-                cell_groups = cell_groups[tet_keep_mm]
             mesh_changed_by_repair = True
 
     # BL 棱柱长细比修补：上方阶段 A/B/B' 只操作 merged_cells（过渡/核心
@@ -154,9 +152,9 @@ def _repair_mixed_mesh_post_stage_c(
             # 会话记录），但触发这次崩溃的确切机制本轮未能定位。在
             # 找到真正根因之前，调大 n_buffer_rings 对这个调用点是已
             # 验证的不安全操作，不要在未确认修复的情况下重新尝试。
-            merged_nodes, prism_cells, merged_cells, bl_cell_groups, cell_groups = patch_nonmanifold_cavity_mixed(
+            merged_nodes, prism_cells, merged_cells = patch_nonmanifold_cavity_mixed(
                 merged_nodes, prism_cells, merged_cells.astype(np.int64),
-                ar_keep, tet_keep_allones, bl_cell_groups, cell_groups,
+                ar_keep, tet_keep_allones,
             )
             # 成功的 patch 会将新内部节点追加到 merged_nodes——
             # nodes_obj（在此块之前构建）必须从可能更大的数组重建，
@@ -176,9 +174,7 @@ def _repair_mixed_mesh_post_stage_c(
     # 像 tetgen 补丁那样失败，因此必须作为最终不变量检查无条件运行，
     # 而非仅在上方长细比补丁报告剩余失败时。
     if len(prism_cells):
-        prism_cells, bl_cell_groups, extra_tets, extra_tet_groups = demote_invalid_prisms_to_tets(
-            prism_cells, bl_cell_groups
-        )
+        prism_cells, extra_tets = demote_invalid_prisms_to_tets(prism_cells)
         if len(extra_tets):
             # _split_prisms_to_tets 的固定模板假设格式良好棱柱的底/顶
             # 缠绕方向；折叠角棱柱的近零几何可能翻转该近退化情况，
@@ -186,7 +182,6 @@ def _repair_mixed_mesh_post_stage_c(
             # merged_cells 后已应用的相同约定。
             extra_tets = orient_tetrahedra(merged_nodes, extra_tets.astype(np.int64))
             merged_cells = np.vstack([merged_cells.astype(np.int64), extra_tets])
-            cell_groups = np.concatenate([cell_groups, extra_tet_groups])
             mesh_changed_by_repair = True
 
     # 收尾去重：子步骤 1/2 都通过 patch_nonmanifold_cavity_mixed 调用
@@ -239,6 +234,5 @@ def _repair_mixed_mesh_post_stage_c(
                 f"a downstream hard crash)"
             )
             merged_cells = merged_cells[valid_mask]
-            cell_groups = cell_groups[valid_mask]
 
-    return merged_nodes, prism_cells, merged_cells, bl_cell_groups, cell_groups, nodes_obj, mesh_changed_by_repair
+    return merged_nodes, prism_cells, merged_cells, nodes_obj, mesh_changed_by_repair

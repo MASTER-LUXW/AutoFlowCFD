@@ -7,10 +7,10 @@ AutoFlowCFD Grid - 高阶网格模块
 from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
 from autoflowcfd.grid.high_order.high_order_mesh_order import (
     generate_reference_cube_sps,
-    compute_jacobians_at_ref_points,
     build_order_geometry,
     set_order,
 )
+from autoflowcfd.grid.high_order.order_jacobians import compute_jacobians_at_ref_points  # noqa: F401
 
 __all__ = [
     'HighOrderMesh',

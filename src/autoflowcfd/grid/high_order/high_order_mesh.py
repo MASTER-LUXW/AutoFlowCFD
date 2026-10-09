@@ -264,7 +264,9 @@ class HighOrderMesh:
             # 文档。
             boundary_map = getattr(volume_mesh_data, "boundaries", None)
             if boundary_map is not None and "PERIODIC" in getattr(boundary_map, "bc_types", {}).values():
-                from autoflowcfd.grid.connectivity.face_connectivity import apply_periodic_pairing_from_boundary_map
+                from autoflowcfd.grid.connectivity.face_connectivity_periodic import (
+                    apply_periodic_pairing_from_boundary_map,
+                )
 
                 self.face_connectivity = apply_periodic_pairing_from_boundary_map(
                     self.face_connectivity, boundary_map
@@ -333,7 +335,7 @@ class HighOrderMesh:
     ) -> Optional[Dict[str, np.ndarray]]:
         """在给定参考点集上批量计算精确 Jacobian。实现见
         high_order_mesh_order.py::compute_jacobians_at_ref_points。"""
-        from .high_order_mesh_order import compute_jacobians_at_ref_points
+        from autoflowcfd.grid.high_order.order_jacobians import compute_jacobians_at_ref_points
 
         return compute_jacobians_at_ref_points(self, mapper, ref_pts, want_scaled_quality)
 

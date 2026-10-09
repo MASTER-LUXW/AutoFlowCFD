@@ -5,12 +5,13 @@ AutoFlowCFD V2.0 - 分布式 Checkpoint 和结果保存测试
 """
 
 from pathlib import Path
-
 import pytest
 import numpy as np
 
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
+
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
+from tests.unit._numpy_as_cupy import NumpyAsCupy
 
 
 class TestDistributedCheckpointImport:
@@ -27,6 +28,9 @@ class TestDistributedCheckpointImport:
         )
         assert gather_global_state is not None
         assert scatter_local_state is not None
+        assert distributed_save_checkpoint is not None
+        assert distributed_load_checkpoint is not None
+        assert distributed_save_results is not None
 
 
 class TestGatherScatter:
@@ -91,32 +95,6 @@ class TestGatherScatter:
         np.testing.assert_array_equal(U_recovered, U_local)
 
 
-class _NumpyAsCupy:
-    """把 numpy 数组本身当成"CuPy 数组"：asnumpy/asarray 对 numpy 输入
-    是恒等操作；`cuda.Device(id)` 返回一个 no-op 上下文管理器——足以
-    验证 `MultiGPUDistributedSolver.save_checkpoint_distributed`/
-    `load_checkpoint_distributed` 这层"GPU 下载/上传 + 复用 CPU
-    distributed_save_checkpoint/distributed_load_checkpoint"round-trip
-    逻辑本身是否透明无损，不需要真实 CUDA 设备。"""
-
-    def asnumpy(self, x):
-        return np.asarray(x)
-
-    def asarray(self, x):
-        return np.asarray(x)
-
-    class cuda:
-        class Device:
-            def __init__(self, device_id):
-                pass
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *args):
-                return False
-
-
 class TestGpuDistributedCheckpointRoundtrip:
     """`MultiGPUDistributedSolver.save_checkpoint_distributed`/
     `load_checkpoint_distributed`（gpu_distributed_init.py，#4，
@@ -155,6 +133,9 @@ class TestGpuDistributedCheckpointRoundtrip:
         solver.freestream = {"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0}
         # 时间格式同样写进元数据（resume 默认沿用它）；多 GPU 的积分器属性名
         solver.time_integrator = types.SimpleNamespace(scheme=TimeIntegrationScheme.NEWTON_KRYLOV)
+        # 产生项渐变计数器（真实求解器在构造时由同一个函数设置；checkpoint 记录渐变进度）
+        from autoflowcfd.core.fr_solver.turbulence.init import init_production_ramp
+        init_production_ramp(solver, TimeIntegrationScheme.NEWTON_KRYLOV)
         n_local = partition.n_local_cells
         rng = np.random.default_rng(123)
         solver.U_gpu = rng.uniform(-1.0, 1.0, size=(n_local, n_sps, n_vars))
@@ -164,7 +145,7 @@ class TestGpuDistributedCheckpointRoundtrip:
         import autoflowcfd.core.gpu.distributed.gpu_distributed_init as gdi_mod
         from autoflowcfd.core.gpu.distributed.gpu_distributed import MultiGPUDistributedSolver
 
-        shim = _NumpyAsCupy()
+        shim = NumpyAsCupy()
         patch_module_get_cupy(monkeypatch, gdi_mod, shim)
 
         solver = self._build_fake_solver(tmp_path)

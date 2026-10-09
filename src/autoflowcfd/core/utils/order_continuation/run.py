@@ -55,11 +55,9 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
     # 2026-08-22 真实复现过：P1 checkpoint 续算静默从 P0 重新开始整个爬升。
     resumed = getattr(solver, "_resumed_from_checkpoint", False)
     if resumed:
-        # 湍流场已精确恢复（充分发展），不再重新压制产生项：计数器推到终点，下一步的产生项渐变
-        # （`fr_solver/turbulence/init.py::advance_production_ramp`）即给出因子 1，四个后端通用
-        solver._turb_ramp_step = solver._turb_production_ramp_steps
-        solver._turb_production_ramp_complete = True
-        solver._ramp_baseline_reset_done = True
+        # 产生项渐变的进度已由恢复路径按 checkpoint 续接（`fr_solver/turbulence/init.py::
+        # restore_production_ramp`）：渐变已完成时不再重置残差基准（否则丢掉刚恢复的阶段起始残差）
+        solver._ramp_baseline_reset_done = bool(solver._turb_production_ramp_complete)
         _reset_turbulence_if_resumed_field_exploded(solver)
     else:
         solver._ramp_baseline_reset_done = False

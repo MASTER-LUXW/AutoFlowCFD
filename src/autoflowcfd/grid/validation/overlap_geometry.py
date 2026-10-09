@@ -229,7 +229,7 @@ def _intersect_on_line(
     # 回退为通过已空的区间将其视为非相交，而非除以约零并放大
     # 浮点噪声到无意义的"直线"方向。
     line_dir = np.divide(line_dir, line_dir_mag, out=np.zeros_like(line_dir), where=line_dir_mag > 1e-9)
-    line_pt = a0  # any point on plane A's own triangle works as a projection origin
+    line_pt = a0  # 平面 A 上自身三角形的任一点都可作投影原点
 
     lo_a, hi_a = _interval_on_line(a0, a1, a2, da0, da1, da2, line_pt, line_dir, eps)
     lo_b, hi_b = _interval_on_line(b0, b1, b2, db0, db1, db2, line_pt, line_dir, eps)
@@ -243,11 +243,8 @@ def _coplanar_triangle_overlap(
     normal: np.ndarray,
     eps: float = 1e-9,
 ) -> np.ndarray:
-    """2D separating-axis test for coplanar triangles: project onto the
-    plane's dominant axis pair (drop the coordinate with the largest
-    |normal| component, which minimizes projection distortion) and test
-    the 6 candidate separating axes (each triangle's 3 edge normals, in
-    2D)."""
+    """共面三角形的二维分离轴检验：投影到平面的主坐标对上（去掉 |normal| 分量最大的坐标，投影畸变最小），
+    检验 6 条候选分离轴（两个三角形各自 3 条棱在二维中的法向）。"""
     n = len(a0)
     abs_normal = np.abs(normal)
     drop_axis = np.argmax(abs_normal, axis=1)  # (N,), 0/1/2

@@ -172,9 +172,8 @@ def configure_numba_threads(n_threads: int, mesh) -> int:
     # 越少，屏障与调度开销占比越高，加上本机是 P 核/E 核混合架构、
     # numba prange 是静态均分调度（最慢的 E 核决定每个屏障的时间），
     # 两者叠加。要真正吃满 16 核需要把 scatter 改成"逐面算通量 +
-    # 逐单元 gather"的两趟无冲突结构（不需要着色、没有逐色屏障），
-    # 是独立的架构改动，不在本次优化范围内；8 是当前实现下有实测
-    # 数据支撑的最优默认值。
+    # 逐单元 gather"的两趟无冲突结构（不需要着色、没有逐色屏障）；
+    # 在现有着色结构下，8 是有实测数据支撑的最优默认值（显式 --threads 照常生效）。
     _DEFAULT_N_THREADS = 8
     resolved_n_threads = n_threads if n_threads > 0 else _DEFAULT_N_THREADS
     # 真实健壮性 bug 修复（2026-09-14）：`numba.set_num_threads(n)` 要求

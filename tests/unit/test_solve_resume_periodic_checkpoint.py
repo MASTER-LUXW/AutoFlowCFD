@@ -74,16 +74,15 @@ class TestResumePeriodicCheckpoint:
 
         assert result.exit_code == 0, result.output
 
-        # solve() was called with a checkpoint_callback at all.
+        # solve() 确实带着 checkpoint_callback 被调用。
         assert fake_solver.solve.call_args.kwargs.get("checkpoint_callback") is not None
 
-        # Two mid-run checkpoints (local iter 5 and 10) + one final
-        # end-of-run checkpoint = 3 total write_checkpoint calls.
+        # 两个中途 checkpoint（局部迭代 5 与 10）+ 一个结束时的最终 checkpoint
+        # = 共 3 次 write_checkpoint 调用。
         assert mock_write_checkpoint.call_count == 3
 
-        # Mid-run ones must be offset by the checkpoint's starting
-        # iteration (3000), not the bare local counter (5, 10) - a bare
-        # local number would collide with a pre-resume checkpoint file.
+        # 中途的那些必须加上 checkpoint 的起始迭代数（3000），不能用裸的局部
+        # 计数（5、10）——裸的局部编号会与续算之前的 checkpoint 文件撞名。
         written_iterations = [c.args[2] for c in mock_write_checkpoint.call_args_list]
         assert 3005 in written_iterations
         assert 3010 in written_iterations

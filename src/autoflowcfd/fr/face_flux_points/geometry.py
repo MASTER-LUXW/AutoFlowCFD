@@ -27,7 +27,7 @@ import numpy as np
 
 from autoflowcfd.fr.matrix_operators import compute_interpolation_matrix
 from autoflowcfd.fr.collapsed_basis import tet_modal_basis_and_grad, prism_modal_basis_and_grad
-from .locate import map_ref_points, newton_locate_on_face
+from .locate import newton_locate_on_face
 from autoflowcfd.grid.connectivity.face_connectivity import (
     CUBE_FACE_NAMES,
     NATIVE_PRISM_FACE_CODE_RANGE,
@@ -264,8 +264,6 @@ def build_cross_interp(
     source_phys: np.ndarray,
     char_length: float = 1.0,
     translation: np.ndarray = None,
-    precomputed_free_coords: np.ndarray = None,
-    precomputed_resid: float = None,
 ) -> tuple:
     """求 target_cell 的解在给定 source_phys 目标物理点集上的取值算子，
     形状 (n_source_pts, n_sps)（n_sps=n1d**3，与 coarse 网格全局体积
@@ -284,13 +282,6 @@ def build_cross_interp(
             周期像位置）里定位，必须先减去平移量，把目标点从"来源"侧
             的物理坐标系平移到"目标"侧的物理坐标系。非周期面（绝大多数
             调用）传 None，等价于零平移。
-        precomputed_free_coords: (n_pts, 2) 或 None。numba 并行 kernel
-            预计算的 Newton 自由坐标（native 分支目前不支持这个预计算
-            路径，传入非 None 会报错——native 定位是解析闭式解，比
-            Newton 迭代本身还快，不需要这个性能优化，见 Part7 文档
-            "实现顺序建议"未覆盖 numba 层这一如实说明）。
-        precomputed_resid: float 或 None。与 precomputed_free_coords 配套
-            的预计算残差。
     """
     is_prism, cell_nodes = cell_info(mesh, target_cell)
     is_tet_native = (not is_prism) and (
@@ -305,11 +296,6 @@ def build_cross_interp(
         < NATIVE_PRISM_FACE_CODE_RANGE[1])
 
     if is_tet_native:
-        if precomputed_free_coords is not None:
-            raise NotImplementedError(
-                "native 四面体分支暂不支持 precomputed_free_coords（numba 预计算路径）——"
-                "见 build_cross_interp 文档，闭式解本身已经足够快，未来如需要可以补上。"
-            )
         excluded_vertex = target_face_code - 6
         from .locate import locate_native_tet_face_point
 
@@ -337,14 +323,10 @@ def build_cross_interp(
 
     target_axis, target_side = CUBE_FACE_AXIS_SIDE[CUBE_FACE_NAMES[target_face_code]]
 
-    if precomputed_free_coords is not None:
-        free_coords = precomputed_free_coords
-        final_resid = precomputed_resid if precomputed_resid is not None else 0.0
-    else:
-        search_phys = source_phys if translation is None else source_phys - translation[np.newaxis, :]
-        free_coords, final_resid = newton_locate_on_face(
-            is_prism, cell_nodes, target_axis, target_side, search_phys, char_length=char_length
-        )
+    search_phys = source_phys if translation is None else source_phys - translation[np.newaxis, :]
+    free_coords, final_resid = newton_locate_on_face(
+        is_prism, cell_nodes, target_axis, target_side, search_phys, char_length=char_length
+    )
 
     # 用与 fr/collapsed_basis.py::build_collapsed_boundary_extrap（owner
     # 侧自身外插用的同一套算子）一致的坍缩坐标模态基插值，而不是朴素 1D

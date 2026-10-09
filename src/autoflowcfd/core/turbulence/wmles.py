@@ -11,7 +11,7 @@ AutoFlowCFD V2.0 - WMLES 壁面应力模型 (T-05)
 """
 
 import numpy as np
-from typing import Tuple, Optional
+from typing import Tuple
 
 
 class WMLESModel:
@@ -164,7 +164,6 @@ class WMLESModel:
             u_tau: 摩擦速度，形状 (n_points,)
         """
         u_mag = np.linalg.norm(u_tangent, axis=-1)
-        n_points = len(u_mag)
         
         # 防止除以零
         y_dist = np.maximum(y_dist, 1e-6)
@@ -438,7 +437,7 @@ if __name__ == "__main__":
     # 计算壁面剪应力
     tau_w = wmles.compute_wall_shear_stress(u_tangent, y_dist, rho, method='iterative')
     
-    print(f"Wall shear stress computed:")
+    print("Wall shear stress computed:")
     print(f"  tau_w magnitude: min={np.linalg.norm(tau_w, axis=1).min():.4f}, "
           f"max={np.linalg.norm(tau_w, axis=1).max():.4f} Pa")
     print(f"  u_tau: min={wmles.u_tau.min():.4f}, max={wmles.u_tau.max():.4f} m/s")
@@ -446,7 +445,7 @@ if __name__ == "__main__":
     
     # 验证 y+ 范围
     is_valid, stats = wmles.validate_y_plus_range()
-    print(f"\ny+ Distribution:")
+    print("\ny+ Distribution:")
     print(f"  Range: [{stats['min']:.1f}, {stats['max']:.1f}]")
     print(f"  Mean: {stats['mean']:.1f} ± {stats['std']:.1f}")
     print(f"  In range [30, 300]: {stats['n_in_range']}/{n_points}")

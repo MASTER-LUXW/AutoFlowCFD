@@ -56,7 +56,7 @@ def _reset_state_to_p0(solver, expected_p0_n_sps: int = 1) -> None:
         # 不匹配问题。用 SSTModelFR.__init__ 同样的初值约定（零）。
         if hasattr(solver.turb_model, "nu_t"):
             solver.turb_model.nu_t = np.zeros((solver.state.n_cells, expected_p0_n_sps))
-        print(f"[INFO] Turbulence fields reset to P0 dimensions")
+        print("[INFO] Turbulence fields reset to P0 dimensions")
 
     if getattr(solver, "turb_model", None) is not None and hasattr(solver.turb_model, "des_length_scale"):
         # 同 interpolate_to_new_order 里的处理：清空而不是插值，理由见

@@ -10,7 +10,7 @@ FP 外插，FP 按对角线解析分类分别匹配到正确的相邻单元。
 核心类和辅助函数位于 face_flux_points_data 模块。
 """
 
-from typing import Dict, List, Tuple
+from typing import List
 
 import numpy as np
 from loguru import logger
@@ -22,20 +22,10 @@ from .geometry import (
 from .basis_inverses import build_basis_inverses
 from .face_metrics import build_face_metrics
 from .grouping import build_face_groups
-from .data import (
-    _KernelFaceData, _PRISM_QUAD_CODES, _classify_half, prism_quad_local_idx,
-)
-from .exact_normal import (
-    compute_exact_face_normals_and_weights,
-)
+from .data import _KernelFaceData, _classify_half, prism_quad_local_idx
 from .validation import validate_face_flux_point_residuals
 from .templates import deduplicate_face_matrices
-from autoflowcfd.grid.curved_mapping.curved_mapping import PRISM_CUBE_FACES
-from autoflowcfd.grid.connectivity.face_connectivity import (
-    CUBE_FACE_NAMES,
-    NATIVE_PRISM_FACE_CODE_RANGE,
-    FRFaceConnectivity,
-)
+from autoflowcfd.grid.connectivity.face_connectivity import FRFaceConnectivity
 
 # numba 并行 kernel（延迟导入避免启动时 numba 编译阻塞）
 _build_fp_newton_parallel = None
@@ -86,7 +76,6 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         is_lower_fp_standard, is_lower_fp_flipped)
     owner_groups = grp.owner_groups
     neighbor_groups = grp.neighbor_groups
-    boundary_owner_groups = grp.boundary_owner_groups
     owner_primary = grp.owner_primary
     neighbor_primary = grp.neighbor_primary
     mixed_nb_partner = grp.mixed_nb_partner

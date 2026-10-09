@@ -80,9 +80,8 @@ os.environ["AFCFD_PRISM_BASIS"] = "native"
 os.environ["AFCFD_TROUBLED_SENSOR"] = "bounds"
 import numpy as np
 from loguru import logger; logger.remove()
-from validation._blasius_case import (
-    build_blasius_solver, wall_shear_profile, set_blasius_exact_state,
-    blasius_cf, L_PLATE)
+from validation._blasius_case import build_blasius_solver, wall_shear_profile, set_blasius_exact_state
+from validation._blasius_exact import blasius_cf, L_PLATE
 
 solver, meta = build_blasius_solver(nx=16, cells_in_delta=4.0, cfl=0.10,
                                     le_offset=0.5)

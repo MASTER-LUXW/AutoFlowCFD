@@ -4,7 +4,7 @@
 """
 
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
 from loguru import logger
@@ -12,14 +12,12 @@ from loguru import logger
 from .interp_matrices import (
     _build_native_prism_vtk_lagrange_export_data,
     _build_native_tet_vtk_lagrange_export_data,
-    _build_vtk_lagrange_export_data,
 )
 from .node_layout import (
     _MAX_SUPPORTED_ORDER_TET,
     _MAX_SUPPORTED_ORDER_WEDGE,
     _VTK_LAGRANGE_TETRAHEDRON,
     _VTK_LAGRANGE_WEDGE,
-    _tet_vtk_node_barycentrics,
 )
 
 _FIELD_LABELS = {
@@ -64,7 +62,7 @@ def export_highorder_vtk(
     import pyvista as pv
 
     from ...core.fr_residual.inviscid import conserved_to_primitive
-    from ...grid.curved_mapping.curved_mapping import map_prism_to_physical, tet_barycentric
+    from ...grid.curved_mapping.curved_mapping import tet_barycentric
     from ...fr.native_tet.basis import build_native_tet_operators
 
     order = mesh.order
@@ -96,7 +94,6 @@ def export_highorder_vtk(
 
     Q = conserved_to_primitive(U[..., :5])  # (n_cells, n_sps, 5)
 
-    ref_cube_sps = mesh._ref_cube_sps
     n_prism = mesh.n_prism_cells
     n_cells = mesh.n_cells
 

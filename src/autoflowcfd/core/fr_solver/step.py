@@ -60,10 +60,9 @@ def step(solver, dt: float) -> float:
       的物理时间步长，通过 BDF1/BDF2 时间导数项耦合进伪残差（见
       TimeIntegrator.step_dual_time），伪时间迭代收敛后得到的解在
       物理时间上精确前进了 dt；局部 CFL 步长只用作内层伪时间迭代的
-      加速手段，不影响物理时间精度。湍流场更新在这个模式下仍然用
-      物理 dt（不是 dt_local）——必须与平均流站在同一个物理时间基准
-      上前进，换成伪时间步长会让两者时间不同步，物理时间精度失去
-      意义。
+      加速手段，不影响物理时间精度。湍流输运方程用同一套双时间步
+      （BDF 物理时间项 + 局部伪时间步内迭代，`core/turbulence/dual_time.py`），
+      与平均流在同一个物理时间上前进。
 
     Args:
         solver: FRSolver 实例
@@ -133,16 +132,27 @@ def step(solver, dt: float) -> float:
         # 不同的“时间”上，物理时间精度失去意义。稳态收敛加速模式
         # （SSP-RK/IMEX）下 dt 参数定义上就应被忽略（见文档），
         # 用 dt_local 才是这里的一致行为。
-        turb_dt = (dt if solver.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME
-                   else dt_physical)
         # 隐式稳态 + k-omega：湍流与平均流在下面的 NEWTON_KRYLOV 分支里紧耦合求解
         # （time_integration/implicit/coupled_step.py 模块文档：分离式在大 CFL 下的块
         # Gauss-Seidel 外迭代会振荡），这里不再单独推进湍流
         coupled_nk = (solver.time_integrator.scheme == TimeIntegrationScheme.NEWTON_KRYLOV
                       and solver.turb_model is not None
                       and has_transport_equations(solver.turb_model_name))
-        if not coupled_nk:
-            solver.compute_turbulence_source(turb_dt)
+        if coupled_nk:
+            pass
+        elif (solver.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME and solver.turb_model is not None
+              and has_transport_equations(solver.turb_model_name)):
+            # DUAL_TIME：湍流方程同样做双时间步——BDF 物理时间项 + 与平均流同样次数的伪时间内迭代、
+            # 伪时间步取按物理波速的局部步长（`core/turbulence/dual_time.py` 模块文档：此前按物理 dt
+            # 做一次显式更新，物理 dt 不受近壁显式稳定极限约束，k/omega 几步内失去正性并发散）
+            from autoflowcfd.core.turbulence.dual_time import advance_turbulence_dual_time
+
+            advance_turbulence_dual_time(
+                solver, solver.turb_model, np,
+                lambda dtau, term, first: solver.compute_turbulence_source(dtau, term, first),
+                dt_physical, dt, solver.time_integrator.dual_time_steps)
+        else:
+            solver.compute_turbulence_source(dt_physical)
 
         # 本步冻结的湍流涡粘（算子分裂：湍流已更新，本步全部残差求值共用
         # 同一份，与 GPU/分布式后端同一约定，见 compute_viscous_residual 文档）

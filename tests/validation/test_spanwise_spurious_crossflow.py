@@ -59,9 +59,9 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from validation._blasius_case import (  # noqa: E402
-    L_PLATE, P_INF, RE_L_DEFAULT, RHO_INF, U_INF,
-    blasius_delta99, build_blasius_solver, nu_for,
+from validation._blasius_case import build_blasius_solver  # noqa: E402
+from validation._blasius_exact import (  # noqa: E402
+    L_PLATE, P_INF, RE_L_DEFAULT, RHO_INF, U_INF, blasius_delta99, nu_for,
 )
 from validation._channel_mesh import (  # noqa: E402
     build_channel_mesh_prism, build_face_exact_ghost_provider,

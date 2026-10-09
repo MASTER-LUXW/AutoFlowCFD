@@ -18,19 +18,7 @@ AutoFlowCFD V2.0 - SST k-omega 湍流模型 FR 离散 (T-01, T-02)
 # 下面 re-export 全部公开名与测试在用的私有名，所以全仓库
 # `from autoflowcfd.core.turbulence.sst import ...` 一个字都不用改。
 
-from .kernels import (  # noqa: F401
-    _strain_vorticity_magnitude_kernel,
-    compute_strain_and_vorticity_magnitude,
-)
-from .blending import (  # noqa: F401
-    _SSTBlendingMixin,
-)
-from .source import (  # noqa: F401
-    _SSTSourceMixin,
-)
-from .update import (  # noqa: F401
-    _SSTUpdateMixin,
-)
+from .kernels import compute_strain_and_vorticity_magnitude  # noqa: F401
 from .model import (  # noqa: F401
     SSTModelFR,
 )

@@ -22,12 +22,11 @@ from ..extrusion.mesh_extrusion import extrude_layers
 from ..tetgen.mesh_prism_to_tet import convert_layers_to_prisms
 from ..utils.mesh_utils import compute_face_normals
 from ..utils.mesh_corner_split import split_sharp_corners
-from .mesh_background_merge_bl_export import _export_bl_only_and_exit
 from .mesh_background_merge_utils import _export_partial_mesh_and_exit
 from ..tetgen.mesh_tetgen_core import (
     build_seam_taper_scale, fill_core_volume,
     compute_local_thickness_limit,
-    attribute_cells_from_trifaces, generate_core_background_points,
+    generate_core_background_points,
     subdivide_oversized_tetrahedra,
     CORE_TETGEN_MINRATIO, CORE_TETGEN_MINDIHEDRAL,
 )
@@ -35,27 +34,23 @@ from ..tetgen.mesh_tetgen_core import (
 
 def _build_merged_mesh_with_bl(
     surface_nodes: np.ndarray,
+    surface_faces: np.ndarray,
     surface_boundaries: 'BoundaryMap',
     bbox_min: np.ndarray,
     bbox_max: np.ndarray,
     extrude_faces: np.ndarray,
     core_faces: np.ndarray,
     extruded_groups,
-    extrude_face_groups: np.ndarray,
     hole_points,
-    core_face_groups: np.ndarray,
-    group_name_to_marker: dict,
-    marker_to_name: dict,
     growth_rate: float,
     min_cell_size: float,
     max_cell_size: Optional[float],
-    extra_thickness_limit: Optional[np.ndarray],
     bl_layers: Optional[int],
     export_bl_only: bool,
     export_bl_only_path: Optional[str],
     export_core_only: bool,
     export_core_only_path: Optional[str],
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, int, np.ndarray, np.ndarray, np.ndarray, int]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """至少有一个曲面组适合挤出边界层时的主路径：挤出 BL 棱柱，再用
     tetgen 从 BL 的真实外表面直接填充剩余体积（不再有独立的"过渡"阶段）。
 
@@ -63,9 +58,7 @@ def _build_merged_mesh_with_bl(
     支，逐字搬运，未改动任何数值逻辑。
 
     Returns:
-        与 _build_merged_mesh 自身完全相同的 9 元组：
-        (merged_nodes, prism_cells, tet_cells, cell_groups, n_bl_cells,
-        source_vertex, topology_faces, bl_cell_groups, n_transition_cells)
+        (merged_nodes, prism_cells, tet_cells)，与 _build_merged_mesh 自身相同
     """
     # OVERSIZED_TET_FACTOR / CORE_FILL_VOLUME_CAP_FRACTION 定义在
     # mesh_background_merge.py（本函数唯一的调用者所在文件），延迟导入
@@ -88,8 +81,6 @@ def _build_merged_mesh_with_bl(
     thickness_limit = compute_local_thickness_limit(
         surface_nodes, extrude_faces, np.unique(extrude_faces), domain_size
     )
-    if extra_thickness_limit is not None:
-        thickness_limit = np.minimum(thickness_limit, extra_thickness_limit)
 
     # 在挤出之前，将每个锐角/硬边顶点的挤出合格子网格拆分为每个
     # 光滑面片一份副本——参见 mesh_corner_split 的模块文档字符串了解
@@ -98,33 +89,20 @@ def _build_merged_mesh_with_bl(
     # mesh_front_collision.freeze_self_colliding_nodes 从第一个 BL 层
     # 开始就触发，正好在车身自身的锐边/角点处，在少数几层内影响大部分
     # 表面）。
-    # taper_scale/thickness_limit/extrude_face_groups 是按原始顶点/面
-    # 的数组——用相同方式扩展它们（副本继承源的值/组），再送入
-    # extrude_layers/下游单元归属。
+    # taper_scale/thickness_limit 是按原始顶点的数组——用相同方式扩展它们
+    # （副本继承源的值），再送入 extrude_layers。
     # min_feature_radius=min_cell_size: 自身几何暗示的曲率半径达到或超过
     # BL 目标近壁单元尺寸的边被视为普通曲面（无论网格多粗）而非锐折痕
     # 来拆分——参见 split_sharp_corners 的自身文档字符串。低于该
     # 尺度时，更密的网格分辨率也不会显著改变 BL 如何看待该特征，因此它
     # 仍被归类为硬边。
-    split_nodes, topology_faces, real_face_mask, orig_of_node, bevel_source_face = (
+    split_nodes, topology_faces, real_face_mask, orig_of_node = (
         split_sharp_corners(
             surface_nodes, extrude_faces, min_feature_radius=min_cell_size
         )
     )
     taper_scale = taper_scale[orig_of_node]
     thickness_limit = thickness_limit[orig_of_node]
-    extrude_face_groups = np.concatenate(
-        [extrude_face_groups, extrude_face_groups[bevel_source_face]]
-    )
-
-    # source_vertex 将拆分后的局部（取模后）节点索引映射回其代表的
-    # 原始表面顶点——在 n_surface_nodes 以下时是恒等映射（未被拆分
-    # 触及），在以上时映射到该副本所复制自的顶点。阶段 B 自身的
-    # 节点到顶点簿记（mesh_repair_bl_thickness.
-    # compute_bl_thickness_limit_override）已通过其
-    # node_original_vertex/local_surface_faces 参数支持非恒等映射——
-    # 甚至在拆分存在之前就已为此可能性而构建。
-    source_vertex = orig_of_node
 
     normal_faces = topology_faces[real_face_mask]
     normals = compute_face_normals(split_nodes, normal_faces)
@@ -170,57 +148,23 @@ def _build_merged_mesh_with_bl(
     # 其自身文档字符串/修复）——此处也传入 +1 会重复计数并静默破坏此
     # 调用点，就像下方过渡四面体调用点在该修复之前一样（参见本项目的
     # 自身调查：一个横跨域的 ~14 m^3 过渡四面体，而非 tetgen 缺陷）。
-    bl_prisms, bl_face_of_cell = convert_layers_to_prisms(
+    bl_prisms = convert_layers_to_prisms(
         bl_nodes[:bl_split_offset + nodes_per_layer],
         bl_layer_conn[:_effective_bl_layers],
         topology_faces,
         min_cell_size=min_cell_size,
     )
-    n_bl_cells = len(bl_prisms)
     logger.info(f"  BL mesh: {len(bl_nodes)} nodes, {len(bl_prisms)} prism cells")
 
     if export_bl_only:
-        _export_bl_only_and_exit(
-            export_bl_only_path, bl_nodes, bl_prisms, n_bl_cells,
-            bl_split_offset, nodes_per_layer, _effective_bl_layers,
+        if not export_bl_only_path:
+            raise ValueError("export_bl_only=True requires export_bl_only_path to be set")
+        # bl_prisms 只索引 BL 阶段前缀的节点（见上方 convert_layers_to_prisms 的切片），导出也只带这一段
+        _export_partial_mesh_and_exit(
+            bl_nodes[:bl_split_offset + nodes_per_layer], bl_prisms, np.empty((0, 4), dtype=bl_prisms.dtype),
+            export_bl_only_path, "BL-only (extruded boundary-layer prisms)",
+            surface_nodes, surface_faces, surface_boundaries,
         )
-
-    # 将每个 BL 单元直接归属回其源边界分组——通过位置而非节点索引匹配
-    # 挤出前的表面：convert_layers_to_prisms 自身的 bl_face_of_cell 将
-    # 每个存活的单元直接映射回其 extrude_faces 行（一个简单的平铺——
-    # 每层 len(extrude_faces) 个棱柱的连续块——不再精确成立，因为该
-    # 函数现在可以丢弃解析零体积的折叠层棱柱，参见其自身文档字符串）。
-    # 这对每个存活的 BL 单元都是精确的，包括 body/ground 自身外表面
-    # 的绝大部分——节点索引匹配永远无法到达那里（参见 mesh_boundary.py
-    # ——那些节点在被挤出真正位移后获得全新的偏移索引，因此其挤出后的
-    # 面无法匹配从原始挤出前节点索引构建的查找表中的任何内容）。
-    #
-    # 只有 LAYER 0 自身的棱柱（底盖为实际物理壁面的那些）被标记源组
-    # 名称——其他所有层得到 '' 代替，即使 bl_face_of_cell 会乐意告诉我
-    # 们它们的源面。这在具体上很重要，不仅是美观：BL 柱可能在锐利/复杂
-    # 几何特征处提前终止（触发局部厚度上限——参见
-    # compute_local_thickness_limit），最后一个存活棱柱的顶盖随后成为
-    # 合法、不可避免的终端边界面——真实的面，而非面提取中的 bug——但
-    # 它不是物理壁面，而是该特定柱恰好停止位置的人工产物。将所有层
-    # 标记为相同（之前的行为，自真正棱柱存在之前就一直未变）会将该
-    # 终端面归属到与真实壁面相同的 "body"/WALL 组，这会错误地在原本
-    # 应该是开放内部空间的地方施加无滑移条件。已在真实案例上确认为
-    # 真实（非理论）效应（ProjectFiles Part6/7 P21）：33,448 个这样的
-    # 面，集中在立方体锐边处，分布在层 1-3——不在 BL/过渡接缝处（如
-    # 最初怀疑），证实这是预先存在的 BL 挤出特性，与棱柱/四面体拆分
-    # 无关，只是之前从未从它静默合并进的壁面组中分离出来。
-    #
-    # Layer-0 检测是简单的节点索引范围检查，不是 convert_layers_to_prisms
-    # 的返回值：第 L 层的节点始终占据
-    # bl_nodes[L*nodes_per_layer : (L+1)*nodes_per_layer]
-    # （extrude_layers 自身的节点布局，自本会话之前就未变），因此棱柱
-    # 的底盖（v0）< nodes_per_layer 是"此棱柱底面为 layer 0"的充要
-    # 条件——无需为了重新推导其返回的节点索引中已隐含的信息而通过
-    # convert_layers_to_prisms 引入新的返回值。
-    is_layer0_prism = bl_prisms[:, 0] < nodes_per_layer
-    # 确保 bl_face_of_cell 为整数类型以用于索引
-    bl_face_of_cell = bl_face_of_cell.astype(np.int64) if not np.issubdtype(bl_face_of_cell.dtype, np.integer) else bl_face_of_cell
-    bl_cell_groups = np.where(is_layer0_prism, extrude_face_groups[bl_face_of_cell], '')
 
     # Layer 0 保留裸表面节点索引不变；BL 自身的真正最后一层（现在始终
     # 是 extrude_layers 实际生成的最后一层，因为 bl_only=True）占据
@@ -258,24 +202,9 @@ def _build_merged_mesh_with_bl(
     core_plc_points = outer_nodes.copy()
     core_plc_faces = np.vstack([topology_faces, core_faces])
 
-    face_markers = None
     regions = None
     background_points = None
     if max_cell_size is not None:
-        # bl_outer_surface 自身的部分也用其源组标记（extrude_face_groups）
-        # ——通常与 bl_cell_groups 冗余（BL/核心界面面本身从不暴露给域
-        # 外部），但完全被接缝锥度钉住（折叠为零 BL 厚度）的柱的"外表面"
-        # 变成了真实暴露的壁面——参见 attribute_cells_from_trifaces 自身
-        # 的调用方文档。顶点混合了真正生长和早期冻结节点的面被留为未标记
-        # 而非猜测，回退到 mesh_boundary.py 自身的 UNCLASSIFIED 兜底，
-        # 而非被静默错误归属到物理壁面组。
-        bl_outer_markers = np.array(
-            [group_name_to_marker.get(n, 0) for n in extrude_face_groups], dtype=np.int32
-        )
-        core_markers = np.array(
-            [group_name_to_marker.get(n, 0) for n in core_face_groups], dtype=np.int32
-        )
-        face_markers = np.concatenate([bl_outer_markers, core_markers])
         target_edge_length = max_cell_size
         # 参见本模块自身的 CORE_FILL_VOLUME_CAP_FRACTION 注释
         # （文件顶部）了解此值的调优历史。
@@ -286,8 +215,8 @@ def _build_merged_mesh_with_bl(
         )
         logger.info(f"TetGen constraint: target_edge_length={target_edge_length:.4f}m, volume_cap={volume_cap_fraction}")
 
-    core_nodes, core_tets, trifaces, triface_markers = fill_core_volume(
-        core_plc_points, core_plc_faces, holes=hole_points, regions=regions, face_markers=face_markers,
+    core_nodes, core_tets = fill_core_volume(
+        core_plc_points, core_plc_faces, holes=hole_points, regions=regions,
         background_points=background_points,
         minratio=CORE_TETGEN_MINRATIO, mindihedral=CORE_TETGEN_MINDIHEDRAL,
         force_preserve_boundary=True,
@@ -306,20 +235,15 @@ def _build_merged_mesh_with_bl(
         core_nodes, core_tets = subdivide_oversized_tetrahedra(
             core_nodes, core_tets, oversized_max_volume
         )
-    core_cell_groups = (
-        attribute_cells_from_trifaces(core_tets, trifaces, triface_markers, marker_to_name)
-        if face_markers is not None
-        else np.full(len(core_tets), '', dtype=object)
-    )
 
     if export_core_only:
         path = export_core_only_path
         if not path:
             raise ValueError("export_core_only=True requires export_core_only_path to be set")
         _export_partial_mesh_and_exit(
-            core_nodes, np.empty((0, 6), dtype=core_tets.dtype), np.empty(0, dtype=object),
-            core_tets, core_cell_groups,
+            core_nodes, np.empty((0, 6), dtype=core_tets.dtype), core_tets,
             path, "core-only (tetgen core fill from the real BL outer surface)",
+            surface_nodes, surface_faces, surface_boundaries,
         )
 
     # 最终拼接：bl_nodes（BL 棱柱，不变，已在自身全局空间中）+ core 自身
@@ -333,21 +257,14 @@ def _build_merged_mesh_with_bl(
 
     # 棱柱和四面体保持为两个独立的连接数组（参见本函数的文档字符串）
     # 而非一个 vstacked 数组——棱柱的 (n,6) 形状无论如何无法与四面体的
-    # (n,4) 共享行布局。不再有独立的"过渡"单元块（参见本段开头的注释）
-    # ——n_transition_cells 保持为 0 仅因为 generate_hybrid_mesh 自身的
-    # 返回签名仍期望"多少个合并单元源自近壁"的计数；此处的每个四面体
-    # 现在都是核心填充来源。
+    # (n,4) 共享行布局。不再有独立的"过渡"单元块（参见本段开头的注释）——
+    # 此处的每个四面体都是核心填充来源。
     prism_cells = bl_prisms
     tet_cells = core_tets_remapped
-    cell_groups = core_cell_groups
-    n_transition_cells = 0
     logger.info(
         f"  Merged mesh: {len(merged_nodes)} nodes, "
         f"{len(prism_cells) + len(tet_cells)} cells "
         f"({len(prism_cells)} BL prisms + {len(tet_cells)} core tets)"
     )
 
-    return (
-        merged_nodes, prism_cells, tet_cells, cell_groups, n_bl_cells,
-        source_vertex, topology_faces, bl_cell_groups, n_transition_cells,
-    )
+    return merged_nodes, prism_cells, tet_cells

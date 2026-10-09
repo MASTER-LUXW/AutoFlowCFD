@@ -7,12 +7,6 @@
 # 下面 re-export 全部公开名与测试在用的私有名，所以全仓库
 # `from autoflowcfd.api import ...` 一个字都不用改。
 
-from .solve import (  # noqa: F401
-    _APISolveMixin,
-)
-from .post import (  # noqa: F401
-    _APIPostMixin,
-)
 from .facade import (  # noqa: F401
     AutoFlowCFDAPI,
     create_api,
