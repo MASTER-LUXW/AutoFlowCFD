@@ -98,6 +98,7 @@ class _SingleMachineView:
             self.jacobians = mesh.jacobians
             self.n_sps_per_cell = mesh.n_sps_per_cell
             self.n_cells = mesh.n_cells
+            self.n_prism_cells = mesh.n_prism_cells      # 单元内对真实解点取最小值要用
 
         def get_all_cell_volumes(self):
             return self._m.get_all_cell_volumes()

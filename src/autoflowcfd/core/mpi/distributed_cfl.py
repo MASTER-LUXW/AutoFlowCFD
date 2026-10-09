@@ -157,8 +157,9 @@ class DistributedCFLView:
     """
 
     class _MeshView:
-        def __init__(self, fc_view, cell_volumes, jacobians, n_sps_per_cell, n_cells):
+        def __init__(self, fc_view, cell_volumes, jacobians, n_sps_per_cell, n_cells, n_prism_cells):
             self.face_connectivity = fc_view
+            self.n_prism_cells = n_prism_cells
             self.jacobians = jacobians
             self.n_sps_per_cell = n_sps_per_cell
             self.n_cells = n_cells
@@ -189,7 +190,9 @@ class DistributedCFLView:
             )
 
         self.state = self._StateView(U_compact, Q_compact)
-        self.mesh = self._MeshView(fc_view, cell_volumes, jacobians, n_sps, n_compact)
+        # compact 排列是"棱柱在前"（`distributed_flat_face/build.py`）：单元内对真实解点取最小值要用棱柱数
+        n_prism_compact = int(np.count_nonzero(np.asarray(dist_fc.compact_cell_type) == 0))
+        self.mesh = self._MeshView(fc_view, cell_volumes, jacobians, n_sps, n_compact, n_prism_compact)
         self.mu_molecular = mu_molecular
         self.freestream = freestream
         self._cfl_controller = cfl_controller

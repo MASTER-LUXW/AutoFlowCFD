@@ -77,7 +77,8 @@ def compute_local_time_step(solver, return_physical_too: bool = False):
     湍流更新推到未经验证的步长上。
 
     Returns:
-        return_physical_too=False（默认）: dt_local，形状 (n_cells, n_sps)
+        return_physical_too=False（默认）: dt_local，形状 (n_cells, n_sps)，同一单元的各槽位取同一个值
+            （对流/粘性/几何三项限制逐解点求出后在真实解点上取最小，与 GPU 后端同一定义）
         return_physical_too=True: (dt_mean_flow, dt_physical)——前者可能是
             预处理后的（未启用预处理时两者是同一个数组对象）
     """
@@ -154,46 +155,23 @@ def compute_local_time_step(solver, return_physical_too: bool = False):
     face_norms = np.linalg.norm(face_normals, axis=1, keepdims=True)
     face_unit_normals = face_normals / np.maximum(face_norms, 1e-30)
 
-    # 每个面的波速（owner 侧）
-    owner_cells = fc.owner_cell  # (n_faces,)
-    is_bnd = fc.is_boundary  # (n_faces,)
+    # 对流谱半径逐解点计算（2026-10-09）：此前只取每个单元第 0 个解点的速度与声速，单元内流动变化大时
+    # （边界层单元里速度从 0 到外缘值）低估谱半径；两个 GPU 后端一直是逐解点算的。
+    from .cfl_spectral import face_spectral_sum_kernel
 
-    # wave_speed shape: (n_cells, n_sps) → 取 SP0 用于面级 CFL（P0 只有一个 SP）
-    # 面谱半径 = (|u·n| + a) * A_f —— 标准有限体积 CFL 公式，
-    # 使用物理声速（不用预处理声速，见上方文档）。
-    a_o = a[owner_cells, 0]  # (n_faces,)
-    vel_owner_x = u[owner_cells, 0]
-    vel_owner_y = v[owner_cells, 0]
-    vel_owner_z = w[owner_cells, 0]
-    un_owner = (vel_owner_x * face_unit_normals[:, 0] +
-                vel_owner_y * face_unit_normals[:, 1] +
-                vel_owner_z * face_unit_normals[:, 2])
-    # 谱半径贡献 = (|un| + a) * A_f
-    spectral_per_face = (np.abs(un_owner) + a_o) * face_areas
+    owner_cells = np.ascontiguousarray(fc.owner_cell, dtype=np.int64)
+    neighbor_cells = np.ascontiguousarray(fc.neighbor_cell, dtype=np.int64)   # 边界面为 -1（核里不读）
+    is_bnd = np.ascontiguousarray(fc.is_boundary, dtype=np.bool_)
+    face_unit_normals = np.ascontiguousarray(face_unit_normals, dtype=np.float64)
+    face_areas = np.ascontiguousarray(face_areas, dtype=np.float64)
+    u_c, v_c, w_c = (np.ascontiguousarray(x, dtype=np.float64) for x in (u, v, w))
 
-    # 每个单元的谱半径 = sum of face contributions
-    spectral = np.zeros(n_cells, dtype=np.float64)
-    np.add.at(spectral, owner_cells, spectral_per_face)
-    # 内部面：neighbor 侧也贡献
-    neighbor_cells = fc.neighbor_cell  # (n_faces,) 边界面为 -1
-    internal = ~is_bnd
-    if np.any(internal):
-        nc = neighbor_cells[internal]
-        a_n = a[nc, 0]
-        vel_neigh_x = u[nc, 0]
-        vel_neigh_y = v[nc, 0]
-        vel_neigh_z = w[nc, 0]
-        un_neigh = (vel_neigh_x * face_unit_normals[internal, 0] +
-                    vel_neigh_y * face_unit_normals[internal, 1] +
-                    vel_neigh_z * face_unit_normals[internal, 2])
-        spectral_per_face_neigh = (np.abs(un_neigh) + a_n) * face_areas[internal]
-        np.add.at(spectral, nc, spectral_per_face_neigh)
+    def _advective_step(sound):
+        spectral = face_spectral_sum_kernel(u_c, v_c, w_c, np.ascontiguousarray(sound, dtype=np.float64),
+                                            owner_cells, neighbor_cells, is_bnd, face_unit_normals, face_areas)
+        return CFL * order_factor_advective * volumes[:, np.newaxis] / np.maximum(spectral, 1e-30)
 
-    spectral = np.maximum(spectral, 1e-30)
-    # 基于面的 CFL: dt = CFL * V / spectral
-    dt_face = CFL * order_factor_advective * volumes / spectral
-    # 广播到 (n_cells, n_sps)
-    dt_advective = np.tile(dt_face[:, np.newaxis], (1, n_sps))
+    dt_advective = _advective_step(a)
 
     # 粘性稳定性限制（见上方文档 2）：分子粘度 + 当前湍流模型给出的
     # 涡粘（若有）
@@ -281,38 +259,30 @@ def compute_local_time_step(solver, return_physical_too: bool = False):
         metric_flux_scale = np.tile(metric_flux_scale, (1, rep))[:, :n_sps]
     dt_geometric = CFL * np.abs(det_jacs) / np.maximum(metric_flux_scale * wave_speed, 1e-300)
 
-    dt_physical = np.minimum(np.minimum(dt_advective, dt_visc), dt_geometric)
+    # 一个单元一个步长：对流、粘性、几何三项限制逐解点求出后，在单元的**真实**解点上取最小值再广播回全部
+    # 槽位（原生四面体的零填充槽位冻结在初值，不参与）。2026-10-09 以前返回逐解点各不相同的步长：同一个
+    # 单元的自由度由同一个多项式耦合，各走各的伪时间步与两个 GPU 后端（一直是单元内取最小）不是同一个离散。
+    from autoflowcfd.fr.native_padding import order_from_n_sps, reduce_per_cell_over_real_sps
+
+    n_prism = int(solver.mesh.n_prism_cells)
+    sp_order = order_from_n_sps(n_sps)
+
+    def _per_cell(dt_sp):
+        cell_min = reduce_per_cell_over_real_sps(dt_sp, n_prism, sp_order, 'min')
+        return np.repeat(cell_min[:, np.newaxis], n_sps, axis=1)
+
+    dt_physical = _per_cell(np.minimum(np.minimum(dt_advective, dt_visc), dt_geometric))
 
     if not getattr(solver, "low_mach_precond_enabled", False):
         return (dt_physical, dt_physical) if return_physical_too else dt_physical
 
-    # === 预处理后的平均流 dt（见本函数文档"低马赫数伪时间预处理"一节）===
-    # 只有对流项与几何/度量项里的波速需要换成预处理声速；粘性限制
-    # （dt_visc）与声速无关，原样复用。
-    # beta^2 必须按**速度模**取，不能按面法向速度 un 取——完整论证见
-    # `preconditioning.py::preconditioned_sound_speed` 文档：Gamma 里的
-    # beta^2 是速度模定义的，而 |un| <= |u| 使 beta^2(un) <= beta^2(|u|)，
-    # 误用前者会让有效声速偏小、dt 被系统性高估（流动与面法向越斜越严重），
-    # 与 2026-08-24 那次"步长与算子不成对"的事故同类。
-    # （`preconditioned_acoustic_eigs` 从它的第一个参数自算 beta^2，服务的
-    #  是逐面通量特征值，不能直接拿来定伪时间步长。）
+    # 预处理后的平均流步长：对流项与几何项里的声速换成有效声速（只有 Gamma 真的作用到平均流残差上时才成立，
+    # 见函数文档）；粘性限制与声速无关，原样复用。
     from autoflowcfd.core.utils.preconditioning import preconditioned_sound_speed
     mach_ref = solver.freestream["mach_ref"]
-    vel_mag_owner = vel_mag[owner_cells, 0]
-    c_pre_face = preconditioned_sound_speed(vel_mag_owner, a_o, mach_ref)
-    spectral_p = np.zeros(n_cells, dtype=np.float64)
-    np.add.at(spectral_p, owner_cells, (np.abs(un_owner) + c_pre_face) * face_areas)
-    if np.any(internal):
-        c_pre_nb = preconditioned_sound_speed(vel_mag[nc, 0], a_n, mach_ref)
-        np.add.at(spectral_p, nc, (np.abs(un_neigh) + c_pre_nb) * face_areas[internal])
-    spectral_p = np.maximum(spectral_p, 1e-30)
-    dt_adv_p = np.tile((CFL * order_factor_advective * volumes / spectral_p)[:, np.newaxis],
-                       (1, n_sps))
-
-    # 几何/度量项：逐 SP 的波速同样换成预处理值，beta^2 同样按速度模取
     c_pre_sp = preconditioned_sound_speed(vel_mag, a, mach_ref)
     wave_speed_p = np.maximum(vel_mag + c_pre_sp, 1e-10)
     dt_geo_p = CFL * np.abs(det_jacs) / np.maximum(metric_flux_scale * wave_speed_p, 1e-300)
 
-    dt_mean = np.minimum(np.minimum(dt_adv_p, dt_visc), dt_geo_p)
+    dt_mean = _per_cell(np.minimum(np.minimum(_advective_step(c_pre_sp), dt_visc), dt_geo_p))
     return (dt_mean, dt_physical) if return_physical_too else dt_mean
