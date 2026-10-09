@@ -98,3 +98,19 @@ def test_retile_conformity_rejects_a_split_boundary_face():
     # 在面 (1,2,3) 上插一个 Steiner 点 4（tetgen 不保边界时的样子）：外表面多了点 4 的面
     split = np.array([[0, 1, 2, 4], [0, 2, 3, 4], [0, 3, 1, 4]])
     assert not retile_is_conformal(split, 4, faces)
+
+
+def test_count_bad_cells_handles_tets_with_repeated_nodes():
+    """塌缩棱柱按固定模板拆出的四面体可以有重复节点；两对重复的那种四个面全部退化、不被任何面引用，
+    2026-10-09 以前面数据的完整性检查因此抛异常（cube_demo `--bl-layers 10` 整个生成失败）。它们按定义计为
+    坏单元。"""
+    from autoflowcfd.grid.mesh_gen.repair.mesh_repair_cavity_shared import _count_bad_cells
+    from autoflowcfd.grid.validation.quality_validator import MeshQualityValidator
+
+    nodes = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1]], dtype=float)
+    good = np.array([[0, 1, 2, 3], [1, 2, 3, 4]], dtype=np.int64)
+    validator = MeshQualityValidator()
+    base = _count_bad_cells(validator, nodes, good)
+    with_degenerate = np.vstack([good, [[0, 0, 1, 1]], [[2, 3, 3, 4]]])
+    assert _count_bad_cells(validator, nodes, with_degenerate) == base + 2
+    assert _count_bad_cells(validator, nodes, np.array([[0, 0, 1, 1]], dtype=np.int64)) == 1

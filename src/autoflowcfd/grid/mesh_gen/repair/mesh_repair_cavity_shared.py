@@ -294,6 +294,16 @@ def _count_bad_cells(validator: 'MeshQualityValidator', nodes: np.ndarray, cells
     from ..extraction.face_extractor import FaceExtractor
     from ...schema.grid_nodes import NodeArray
 
+    # 同一节点出现两次的四面体（塌缩棱柱按固定模板拆出来的）不占体积、也没有合法的面：它们按定义是坏单元，
+    # 直接计数、不进面提取。2026-10-09 以前原样送进面提取——四个面全部退化的那种（两对重复节点）不被任何面
+    # 引用，面数据的完整性检查直接抛 "Face connectivity references N cells, expected N+1"，`grid
+    # generate-volume --bl-layers 10` 在 cube_demo 上因此整个失败。
+    degenerate = _repeated_node_rows(cells)
+    n_degenerate = int(degenerate.sum())
+    if n_degenerate:
+        cells = cells[~degenerate]
+        if len(cells) == 0:
+            return n_degenerate
     bad = validator.compute_cell_skewness(nodes, cells) > validator.thresholds['max_skewness']
 
     node_arr = NodeArray.from_array(nodes)
@@ -325,4 +335,4 @@ def _count_bad_cells(validator: 'MeshQualityValidator', nodes: np.ndarray, cells
         bad[diag['owner'][face_bad]] = True
         bad[diag['neighbor'][face_bad]] = True
 
-    return int(np.sum(bad))
+    return int(np.sum(bad)) + n_degenerate

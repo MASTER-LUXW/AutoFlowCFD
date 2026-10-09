@@ -80,6 +80,13 @@ CORE_VOLUME_CAP_FRACTION = 0.08  # was 0.15, of max_cell_size**3
 # tetgen C++ 内部位掩码语义猜测的安全参数。
 CORE_TETGEN_OPT_ITERATIONS = 6  # tetgen 默认 3
 
+# 优化阶段的目标最大二面角（度）：只有最大二面角超过它的四面体才会被翻转/光顺处理。Python 绑定的默认值是
+# 177——几乎只剩完全压扁的单元才算目标，薄片（两个二面角接近 180、其余接近 0）基本不被处理。取 165
+# （tetgen 手册 -o 开关的经典默认值）。cube_demo 实测（2026-10-09，耗时不变，65 s）：主填充里最小二面角 <5 度的
+# 四面体 106 -> 28，相邻体积比 >10 的面 296 -> 100；最终网格相邻体积比 >5 的面 1768 -> 1208、最大值
+# 32.4 -> 18.3。再往下取（150）或同时加大翻转层数/迭代遍数，输出逐位相同（优化器已收敛）。
+CORE_TETGEN_OPT_MAX_DIHEDRAL = 165.0
+
 
 # 从目标边长到 tetgen maxvolume 上限的粗略换算
 # （正四面体 volume/edge^3 ≈ 0.118；Delaunay 精化出的四面体更不规则，
@@ -263,6 +270,7 @@ def fill_core_volume(
             # nobisect 正交，多跑几轮只会让已经精化出的点集更彻底地消除
             # 退化单元，不会重新触发 nobisect 原本要规避的挂起问题。
             opt_iterations=CORE_TETGEN_OPT_ITERATIONS,
+            optmaxdihedral=CORE_TETGEN_OPT_MAX_DIHEDRAL,
             # 曾不顾此函数自身的 `verbose` 参数硬编码为 True——
             # 意味着每个调用方都无条件收到 tetgen 自身的原始 C 层
             # 控制台输出（内存池大小、各阶段进度、Steiner 点计数……），
