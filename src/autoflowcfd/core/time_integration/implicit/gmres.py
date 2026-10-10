@@ -30,6 +30,14 @@
 真实残差，代价是多存一组与 Krylov 基同样多的向量。预处理对象带
 `flexible = True` 时由调用方打开（`jfnk.py::_solve_direction`）；线性预处理
 不打开，不白占这份内存。
+
+## 停滞提前终止（2026-10-10）
+
+最近 `STAGNATION_WINDOW` 次迭代残差下降不到 `1 - STAGNATION_RATE`，并且按这个速率用完剩余迭代数也到
+不了容差时，立即按"用满"返回（`info > 0`）。残差由 Givens 递推逐次给出，判据不需要额外的算子作用。
+系统不定（伪瞬态项与物理时间项压不住 Jacobian 的不稳定模态）时 GMRES 一点都降不动：cube_demo SA P1
+双时间步 dt=1e-3 / 5e-4 的第一次内迭代 200 次后线性残差 1.0 / 0.99，一次失败的求解 1220 s；提前终止后
+是 50 次。能收敛的求解不受影响：判据只在"按当前速率到不了"时触发。
 """
 
 from typing import Callable, Tuple
@@ -40,13 +48,29 @@ from . import vector_ops
 from .reductions import LocalReductions
 
 
+#: 停滞判据的回看窗口（迭代数）与窗口内的残差比值下限（见模块文档"停滞提前终止"）
+STAGNATION_WINDOW = 50
+STAGNATION_RATE = 0.98
+
+
+def _stagnated(history, rtol: float, max_iter: int) -> bool:
+    """`history[i]` 是第 `i + 1` 次迭代后的相对残差。"""
+    n = len(history)
+    if n <= STAGNATION_WINDOW or n >= max_iter:
+        return False
+    rate = history[-1] / history[-1 - STAGNATION_WINDOW]
+    if rate < STAGNATION_RATE:
+        return False
+    return history[-1] * rate ** ((max_iter - n) / STAGNATION_WINDOW) > rtol
+
+
 def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
                 restart: int, max_iter: int, red: LocalReductions = None,
                 flexible: bool = False) -> Tuple[object, int, int, float]:
     """解 `A x = b`，返回 `(x, iterations, info, rel_residual)`。
 
     `info == 0` 表示达到 `||b - A x|| <= rtol * ||b||`；`info > 0` 表示
-    用满 `max_iter` 仍未达到（`x` 是当时的最好解）；`info < 0` 表示出现
+    用满 `max_iter`、或停滞提前终止仍未达到（`x` 是当时的最好解）；`info < 0` 表示出现
     非有限值（`x` 不可用，调用方不得静默使用它）。
 
     `rel_residual` 是返回的 `x` 实际达到的 `||b - A x|| / ||b||`（Givens 递推
@@ -66,6 +90,8 @@ def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
     r = b.copy()
     beta = bnorm
     total = 0
+    history = []        # 逐次迭代后的相对残差（停滞判据用）
+    stalled = False
     # Krylov 基**按需**逐个分配、重启之间复用：修正 Gram-Schmidt 的 `w -= h*V[i]`
     # 原地做，不再每次新分配一个整长向量（见 vector_ops.py）。不按重启长度整块预分配
     # （2026-09-29）：Windows 上 `empty` 立即计入提交量，plate_demo P3 一个向量 0.16 GB、
@@ -129,6 +155,10 @@ def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
             if abs(g[j + 1]) <= target:
                 converged = True
                 break
+            history.append(abs(g[j + 1]) / bnorm)
+            if _stagnated(history, rtol, max_iter):
+                stalled = True
+                break
             if total >= max_iter or h_next == 0.0:     # 用满 / 幸运击穿
                 converged = h_next == 0.0
                 break
@@ -143,7 +173,7 @@ def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
         rel = abs(g[k_used]) / bnorm
         if converged:
             return x, total, 0, rel
-        if total >= max_iter:
+        if total >= max_iter or stalled:
             return x, total, total, rel
         r = b - apply_A(x)
         beta = red.norm(r)

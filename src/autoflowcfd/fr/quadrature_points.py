@@ -9,23 +9,35 @@ AutoFlowCFD V2.0 - FR 点集生成器
 3. 三维张量积点集生成
 """
 
-import numpy as np
+from functools import lru_cache
 from typing import Tuple
+
+import numpy as np
+
+
+@lru_cache(maxsize=None)
+def _leggauss(n: int) -> Tuple[np.ndarray, np.ndarray]:
+    """按点数缓存的 `leggauss`（只读数组）。逐面的几何例程（`native_prism/face.py` 等）对每个面都
+    要同一组求积点：cube_demo（72.8 万个面）网格初始化时 `leggauss` 被调用 145 万次、127 s（每次都重解
+    一遍伴随矩阵的特征值问题），占网格初始化 398 s 的三分之一。"""
+    points, weights = np.polynomial.legendre.leggauss(n)
+    points.setflags(write=False)
+    weights.setflags(write=False)
+    return points, weights
 
 
 def gauss_legendre(n: int) -> Tuple[np.ndarray, np.ndarray]:
     """
     生成 1D Gauss-Legendre 求积点和权重。
-    
+
     Args:
         n: 点数（对应多项式阶数 P = n-1）
-        
+
     Returns:
         points: 求积点坐标 (-1, 1)
-        weights: 求积权重
+        weights: 求积权重（两者都是只读数组，按点数缓存；要改就先 copy）
     """
-    points, weights = np.polynomial.legendre.leggauss(n)
-    return points, weights
+    return _leggauss(int(n))
 
 
 def gauss_lobatto(n: int) -> Tuple[np.ndarray, np.ndarray]:

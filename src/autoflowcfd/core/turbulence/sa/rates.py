@@ -15,6 +15,7 @@
 
 from autoflowcfd.core.turbulence.limits import clip_gradient_magnitude
 from autoflowcfd.core.turbulence.transported import TurbulenceRates
+from autoflowcfd.core.utils.pointwise_threads import map_cell_chunks
 
 from .pointwise import sa_diffusivity, sa_gradient_source
 
@@ -34,19 +35,25 @@ def evaluate_sa_rates(model, transport, Q, grad_vel, d_wall, mu) -> TurbulenceRa
     nt = model.nu_tilde_field
     rho = xp.maximum(Q[:, :, 0], 1e-10)
     raw = model.compute_source_terms(Q, grad_vel, d_wall, mu)
-    grad_nt = clip_gradient_magnitude(transport.gradient(nt), xp)
+    # 逐点函数按单元分块并行（numpy 下；同一份定义、结果逐位相同，`core/utils/pointwise_threads.py`）
+    grad_nt = map_cell_chunks(clip_gradient_magnitude, (transport.gradient(nt),), xp, xp=xp)
     grad_rho = transport.gradient(Q[:, :, 0])
-    gamma = sa_diffusivity(nt, rho, mu, xp)
+    gamma = map_cell_chunks(sa_diffusivity, (nt, rho), mu, xp, xp=xp)
     with _errstate(xp):
         conv = transport.convection(nt, model.nu_tilde_inf)
         diff = transport.diffusion(nt, gamma)
-        trans = (conv + diff + sa_gradient_source(nt, rho, mu, grad_nt, grad_rho, xp)) / rho
+        trans = (conv + diff + map_cell_chunks(_gradient_source, (nt, rho, grad_nt, grad_rho), mu, xp, xp=xp)) / rho
         src = raw / rho
     off_wall = d_wall != 0.0
     raw = xp.where(off_wall, raw, 0.0)
     src = xp.where(off_wall, src, 0.0)
     trans = xp.where(off_wall & xp.isfinite(trans), trans, 0.0)
     return TurbulenceRates((raw,), (src,), (trans,))
+
+
+def _gradient_source(nu_tilde, rho, grad_nu_tilde, grad_rho, mu, xp):
+    """`sa_gradient_source` 按"数组在前、标量在后"的参数顺序（`map_cell_chunks` 的约定）。"""
+    return sa_gradient_source(nu_tilde, rho, mu, grad_nu_tilde, grad_rho, xp)
 
 
 class _errstate:

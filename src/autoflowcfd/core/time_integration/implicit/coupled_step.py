@@ -203,8 +203,20 @@ class CoupledBlockPreconditioner:
                               self.turb.preconditioner(dtau, self.n_turb), dtau)
 
     def stale_budget(self) -> Optional[int]:
-        budgets = [b for b in (self.mean.stale_budget(), self.turb.stale_budget()) if b is not None]
-        return min(budgets) if budgets else None
+        """本步 GMRES 的过时预算：复用中的块的基线迭代数，加上 `refresh` 实际要付的代价——它把**两套**块
+        一起重装配，所以松弛是两者之和。
+
+        2026-10-10 以前取两套块各自预算的较小者：湍流块的松弛只有 3 次迭代，耦合系统的 GMRES 次数比基线
+        多 4 次就触发一次平均流 + 湍流的整套重装配（折合约 11 次迭代）。cube_demo SA P1 双时间步的第一个
+        物理步 6 次内迭代里因此重装配 4 次（每次 35~75 s，外加被丢弃的那次过时求解），而重装配之后 GMRES
+        次数并没有下降（15 -> 19）：次数上升来自右端项，不是块过时。
+        """
+        stale = [c for c in (self.mean, self.turb) if c.stale_budget() is not None]
+        if not stale:
+            return None
+        # 没装配过的块（预处理被禁用）没有松弛，不参与
+        return int(min(c.baseline_iters for c in stale)
+                   + (self.mean.refresh_slack or 0) + (self.turb.refresh_slack or 0))
 
     def record(self, gmres_iters: int, accepted: bool) -> None:
         self.mean.record(gmres_iters, accepted)

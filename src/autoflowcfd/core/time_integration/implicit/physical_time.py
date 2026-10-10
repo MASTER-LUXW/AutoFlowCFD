@@ -33,9 +33,14 @@
 是良态的——不稳定模态被时间分辨，而不是被绕开。
 """
 
+import time
 from typing import Callable, Optional
 
 from loguru import logger
+
+
+#: 内迭代里线性求解（线性残差降不到 `LINEAR_SOLVE_MAX_REL_RESIDUAL`）连续失败这么多次就报错停下
+MAX_CONSECUTIVE_LINEAR_FAILURES = 3
 
 
 class BdfTerm:
@@ -123,7 +128,7 @@ def advance_physical_step(solver, x_now, x_prev, newton_step: Callable, dt: floa
         `{"iterations", "initial", "final", "converged"}`（也记在 `solver._dual_time_inner`）。
     """
     from ..base import DUAL_TIME_UPDATE_FLOOR
-    from .mean_flow_step import newton_step_ok
+    from .mean_flow_step import LINEAR_SOLVE_MAX_REL_RESIDUAL, newton_step_ok
 
     max_inner = int(solver.time_integrator.dual_time_steps)
     tolerance = float(solver.time_integrator.dual_time_tolerance)
@@ -142,7 +147,9 @@ def advance_physical_step(solver, x_now, x_prev, newton_step: Callable, dt: floa
     final = float("nan")
     iterations = 0
     converged = False
+    linear_failures = 0
     for k in range(max_inner):
+        t_start = time.perf_counter()
         info = newton_step(term, k == 0)
         iterations = k + 1
         if initial is None:
@@ -153,9 +160,22 @@ def advance_physical_step(solver, x_now, x_prev, newton_step: Callable, dt: floa
             controller.update(info["res_norm"], step_ok=step_ok)
         # 每次内迭代一行：物理步的监控行要等内迭代全部结束才打印，大算例上一步可能是几十分钟
         logger.info("[dual-time] inner %d: |G| %.3e -> %.3e | GMRES %d (rel %.1e) | theta %.3g | dtau cuts %d | CFL %s"
+                    " | %.1f s"
                     % (iterations, float(info["res_norm"]), final, int(info["gmres_iters"]),
                        float(info["linear_rel_residual"]), float(info["theta"]), int(info["n_dtau_cuts"]),
-                       "%.3g" % controller.cfl_number if controller is not None else "fixed"))
+                       "%.3g" % controller.cfl_number if controller is not None else "fixed",
+                       time.perf_counter() - t_start))
+        # 线性求解连续失败：伪时间 CFL 已经在逐次减半（SER），仍然解不动说明 `a0/dt + J` 不定——物理时间
+        # 步长大于最快不稳定模态的时间尺度。这种系统在伪时间里也不收敛（不稳定模态在伪时间里同样增长），
+        # 继续内迭代只是烧时间，带着没解出来的状态进下一个物理步更没有意义
+        linear_failures = (linear_failures + 1
+                           if float(info["linear_rel_residual"]) > LINEAR_SOLVE_MAX_REL_RESIDUAL else 0)
+        if linear_failures >= MAX_CONSECUTIVE_LINEAR_FAILURES:
+            raise RuntimeError(
+                "双时间步内迭代的线性求解连续 %d 次失败（最后一次线性残差只降到 %.2f，||G|| %.3e -> %.3e）。"
+                "物理时间步长 dt=%.3e 大于流动里最快的不稳定模态的时间尺度时 a0/dt + dR/dU 不定，Newton 的"
+                "线性系统解不动。请减小 --dt（经验：先减到 1/3）。"
+                % (linear_failures, float(info["linear_rel_residual"]), initial, final, term.dt))
         converged = bool(final <= tolerance * initial
                          or (step_ok and float(info["update_norm"]) <= DUAL_TIME_UPDATE_FLOOR))
         if converged:

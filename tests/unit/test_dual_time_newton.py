@@ -408,3 +408,32 @@ def test_time_budget_counts_physical_time_in_dual_time():
     for _ in range(3):
         s.step(2e-4)
     np.testing.assert_allclose(s.tau_accum, 3 * 2e-4, rtol=1e-12)
+
+
+def test_inner_iterations_stop_with_an_error_when_the_linear_solves_keep_failing():
+    """`a0/dt + J` 不定（dt 大于不稳定模态的时间尺度）时线性求解解不动：连续失败 3 次就报错并指向 dt，
+    不把内迭代次数烧完、也不带着没解出来的状态进下一个物理步。cube_demo SA P1 dt=1e-3 的实测是每次内迭代
+    GMRES 200 次、线性残差 1.0、1220 s。"""
+    from autoflowcfd.core.time_integration.implicit.physical_time import MAX_CONSECUTIVE_LINEAR_FAILURES
+
+    calls = []
+
+    def failing_step(term, first):
+        calls.append(first)
+        return dict(res_norm=1.0, res_norm_new=1.0, gmres_iters=50, linear_rel_residual=0.99, theta=1.0,
+                    n_dtau_cuts=0, update_norm=1.0)
+
+    x = np.ones((4, 5))
+    with pytest.raises(RuntimeError, match="减小 --dt"):
+        advance_physical_step(_owner(max_inner=30), x, None, failing_step, 1e-3)
+    assert len(calls) == MAX_CONSECUTIVE_LINEAR_FAILURES
+
+    # 失败不连续（中间有一次解到位）不触发
+    seq = iter([0.99, 0.99, 0.05, 0.99, 0.99, 0.05] * 5)
+
+    def flaky_step(term, first):
+        return dict(res_norm=1.0, res_norm_new=0.9, gmres_iters=10, linear_rel_residual=next(seq), theta=1.0,
+                    n_dtau_cuts=0, update_norm=1.0)
+
+    summary = advance_physical_step(_owner(max_inner=12), x, None, flaky_step, 1e-3)
+    assert summary["iterations"] == 12 and not summary["converged"]

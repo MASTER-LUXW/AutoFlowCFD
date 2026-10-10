@@ -94,3 +94,23 @@ def test_unlimited_columns_are_left_out_of_the_relative_change_limit():
     only_first = ScaledFieldRowLimits((1e-3, 1.5e-5), unlimited_columns=(1,))(u2, d2, red)
     assert both[0] < only_first[0] < 1.0
     assert _SSTTransportedMixin.NEWTON_UNLIMITED_COLUMNS == ()
+
+
+def test_coupled_stale_budget_charges_the_cost_of_rebuilding_both_block_sets():
+    """紧耦合步的过时预算 = 基线迭代数 + 两套块的松弛之和（`refresh` 把两套一起重装配）。此前取两套各自
+    预算的较小者：湍流块松弛 3、平均流块松弛 8 时，GMRES 比基线多 4 次就整套重装配。"""
+    from autoflowcfd.core.time_integration.implicit.coupled_step import CoupledBlockPreconditioner
+
+    def cache(baseline, slack, stale=True):
+        return SimpleNamespace(baseline_iters=baseline, refresh_slack=slack,
+                               stale_budget=lambda: (baseline + slack) if stale else None)
+
+    backend = SimpleNamespace(turb=SimpleNamespace(model=SimpleNamespace(n_transported=1)))
+
+    def budget(mean, turb):
+        return CoupledBlockPreconditioner(backend, mean, turb, None).stale_budget()
+
+    assert budget(cache(5, 8), cache(5, 3)) == 5 + 8 + 3           # 此前是 min(13, 8) = 8
+    assert budget(cache(5, 8, stale=False), cache(5, 3, stale=False)) is None      # 两套都刚装配：用满预算
+    assert budget(cache(5, 8), cache(5, 3, stale=False)) == 16     # 只有一套在复用，重装配仍是两套
+    assert budget(cache(7, 8), cache(5, None, stale=False)) == 15  # 另一套从未装配（预处理被禁用）
