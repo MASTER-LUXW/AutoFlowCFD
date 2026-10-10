@@ -68,3 +68,29 @@ def test_repeated_unstable_steps_are_reported_once_per_batch():
         logger.remove(sink)
     reset_newton_state(solver)                       # 换阶后重新计数
     assert solver._newton_unstable_steps == 0
+
+
+def test_unlimited_columns_are_left_out_of_the_relative_change_limit():
+    """SA-neg 的 nu_tilde 对任意实数值都良态（`SAModel.NEWTON_UNLIMITED_COLUMNS`）：不做相对变化限幅。
+    湍流/非湍流界面上它只有来流量级，限幅会把界面推进需要的几十倍增长压到百分之几（cube_demo P1 每步约
+    3000 行）。SST 的 k / ln omega 仍然限幅。"""
+    from autoflowcfd.core.time_integration.implicit.physicality import ScaledFieldRowLimits
+    from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
+    from autoflowcfd.core.turbulence.sa.model import SAModel
+    from autoflowcfd.core.turbulence.sst.unknowns import _SSTTransportedMixin
+
+    red = LocalReductions(np)
+    u0 = np.array([[1e-5], [2e-3], [-1e-4]])
+    du = np.array([[1e-3], [-5e-3], [4e-3]])                     # 涨 100 倍、越过零、由负转正
+    limited = ScaledFieldRowLimits((1.5e-5,))(u0, du, red)
+    assert limited.max() < 0.3                                    # 默认：每一行都被压住
+    assert SAModel.NEWTON_UNLIMITED_COLUMNS == (0,)
+    free = ScaledFieldRowLimits((1.5e-5,), unlimited_columns=SAModel.NEWTON_UNLIMITED_COLUMNS)(u0, du, red)
+    np.testing.assert_array_equal(free, np.ones(3))
+
+    # 两列里只放开一列：另一列的限值原样保留
+    u2, d2 = np.array([[1.0, 1e-5]]), np.array([[-0.9, 1e-3]])
+    both = ScaledFieldRowLimits((1e-3, 1.5e-5))(u2, d2, red)
+    only_first = ScaledFieldRowLimits((1e-3, 1.5e-5), unlimited_columns=(1,))(u2, d2, red)
+    assert both[0] < only_first[0] < 1.0
+    assert _SSTTransportedMixin.NEWTON_UNLIMITED_COLUMNS == ()

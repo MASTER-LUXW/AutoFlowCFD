@@ -13,6 +13,8 @@
     TRANSPORTED_FIELDS   被输运场的属性名（物理量形式，例如 ("k_field", "omega_field")）
     NEWTON_LOG_COLUMNS   Newton 未知量里取对数的列（物理性限幅按对数量处理，见
                          `time_integration/implicit/physicality.py::ScaledFieldRowLimits`）
+    NEWTON_UNLIMITED_COLUMNS  Newton 更新不做相对变化限幅的列：模型对该未知量的任意实数值都良态时列出
+                         （SA-neg 的 nu_tilde），默认空（全部限幅）
     CACHED_ATTRS         源项求值刷新的模型缓存（涡粘等）：试探求值之后必须恢复，否则
                          试探场会泄漏进平均流用的涡粘
     OUTPUT_FIELD_KEYS    各输运场在后处理输出里的键名（与 TRANSPORTED_FIELDS 一一对应，
@@ -56,6 +58,7 @@ class TransportedTurbulence:
 
     TRANSPORTED_FIELDS: Tuple[str, ...] = ()
     NEWTON_LOG_COLUMNS: Tuple[int, ...] = ()
+    NEWTON_UNLIMITED_COLUMNS: Tuple[int, ...] = ()
     CACHED_ATTRS: Tuple[str, ...] = ()
     OUTPUT_FIELD_KEYS: Tuple[str, ...] = ()
 

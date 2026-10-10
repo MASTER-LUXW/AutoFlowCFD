@@ -143,18 +143,23 @@ class ScaledFieldRowLimits:
     做成类而不是闭包：在整个 Newton 步存活（项目规范）。
     """
 
-    __slots__ = ("_scales", "_log_columns", "_rows_per_cell", "_real_weight")
+    __slots__ = ("_scales", "_log_columns", "_rows_per_cell", "_real_weight", "_limited")
 
-    def __init__(self, scales, log_columns=(), rows_per_cell: int = 1, real_rows=None):
+    def __init__(self, scales, log_columns=(), rows_per_cell: int = 1, real_rows=None, unlimited_columns=()):
         """`rows_per_cell`/`real_rows`：状态按单元连续排列时每单元的行数，与标记真实解点
         （非零填充槽位）的逐行布尔掩码（在状态所在的数组模块上）；默认不取单元量级。"""
         self._scales = np.asarray(scales, dtype=np.float64)
         self._log_columns = tuple(int(c) for c in log_columns)
         self._rows_per_cell = int(rows_per_cell)
         self._real_weight = None if real_rows is None else real_rows.astype(np.float64)
+        # 不限幅的列（模型声明对任意实数值都良态，`TransportedTurbulence.NEWTON_UNLIMITED_COLUMNS`）
+        skip = {int(c) for c in unlimited_columns}
+        self._limited = [c for c in range(len(self._scales)) if c not in skip]
 
     def __call__(self, u0_flat, du_flat, red: LocalReductions):
         xp = red.xp
+        if not self._limited:
+            return xp.ones(u0_flat.shape[0])
         mag = xp.abs(u0_flat)
         base = xp.maximum(mag, xp.asarray(self._scales)[None, :])
         if self._rows_per_cell > 1:
@@ -169,7 +174,7 @@ class ScaledFieldRowLimits:
             for c in self._log_columns:
                 with np.errstate(divide="ignore"):
                     lim[:, c] = step / xp.abs(du_flat[:, c])
-        return xp.clip(lim.min(axis=1), 0.0, 1.0)
+        return xp.clip(lim[:, self._limited].min(axis=1), 0.0, 1.0)
 
 
 def _cellwise_relaxation(alpha_rows, rows_per_cell: int, red: LocalReductions):

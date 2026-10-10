@@ -49,6 +49,13 @@ class SAModel(TransportedTurbulence):
     #: 壁面解点（`d == 0`）上的强 Dirichlet 值（模块文档）
     WALL_POINT_VALUE = 0.0
     NEWTON_LOG_COLUMNS = ()
+    #: `nu_tilde` 的 Newton 更新不做相对变化限幅：SA-neg 的负支让任意实数值都良态（上界由步后的
+    #: `apply_positivity_limiter` 钳到 `nu_tilde_max`），限幅保护的"非物理态"在这里不存在。SU2 对 SA-neg 同样
+    #: 不做欠松弛（只对不带负支的 SA 做）。限幅的代价在湍流/非湍流界面上：那里 `nu_tilde` 只有来流量级
+    #: （1e-5），界面推进需要它一步涨几十上百倍，而限幅基准是 max(|u|, 单元均值, 分子粘度)——cube_demo P1
+    #: （2026-10-10）每步约 3000 行（1500 个单元，离物面 4~6 cm）被压到 2%~7%，随后局部伪时间步长被逐步削到
+    #: 千分之几，界面冻住。
+    NEWTON_UNLIMITED_COLUMNS = (0,)
     CACHED_ATTRS = ("nu_t", "_last_damping")
     OUTPUT_FIELD_KEYS = ("nu_tilde",)
 

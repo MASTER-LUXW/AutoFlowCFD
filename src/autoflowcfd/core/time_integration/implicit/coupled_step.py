@@ -271,7 +271,7 @@ def step_coupled_newton(solver, backend, dtau_flat, *, filter_active: bool = Fal
     physicality = CoupledPhysicality(
         backend.positivity,
         ScaledFieldRowLimits(t_scales, log_columns=model.NEWTON_LOG_COLUMNS, rows_per_cell=backend.n_sps,
-                             real_rows=real))
+                             real_rows=real, unlimited_columns=model.NEWTON_UNLIMITED_COLUMNS))
     x0 = xp.ascontiguousarray(backend.state(), dtype=xp.float64)
     residual = CoupledResidual(backend, real, x0)
     dtau_flat = xp.ascontiguousarray(dtau_flat, dtype=xp.float64).ravel()
