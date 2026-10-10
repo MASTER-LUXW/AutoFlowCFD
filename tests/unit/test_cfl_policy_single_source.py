@@ -37,9 +37,19 @@ def test_adaptive_schemes_get_a_controller(scheme):
 
 
 @pytest.mark.parametrize("scheme", [S.DUAL_TIME, "dual-time", "dual_time"])
-def test_dual_time_uses_fixed_cfl_start(scheme):
-    ctrl, fixed = build_cfl_policy(scheme, cfl_start=0.037)
-    assert ctrl is None and fixed == pytest.approx(0.037)
+def test_dual_time_uses_ser_for_the_inner_newton_iterations(scheme):
+    """双时间步的内迭代是 Newton 步：伪时间 CFL 用 SER，起点 `DUAL_TIME_PSEUDO_CFL_START`
+    （2026-10-10 以前内迭代是显式的，用固定 CFL）。显式给出的起点照用；关掉自适应仍是固定 CFL。"""
+    from autoflowcfd.core.time_integration.adaptive_cfl.policy import DUAL_TIME_PSEUDO_CFL_START
+    from autoflowcfd.core.time_integration.adaptive_cfl.ser import SERCFLController
+
+    ctrl, fixed = build_cfl_policy(scheme)
+    assert isinstance(ctrl, SERCFLController) and fixed is None
+    assert ctrl.cfl_start == DUAL_TIME_PSEUDO_CFL_START
+    ctrl, _ = build_cfl_policy(scheme, cfl_start=250.0)
+    assert ctrl.cfl_start == 250.0
+    ctrl, fixed = build_cfl_policy(scheme, adaptive=False)
+    assert ctrl is None and fixed == DUAL_TIME_PSEUDO_CFL_START
 
 
 def test_non_adaptive_uses_fixed_cfl_start():
@@ -52,7 +62,7 @@ def test_missing_values_come_from_the_controller_signature():
     ctrl, _ = build_cfl_policy(S.SSP_RK3)
     ref = AdaptiveCFLController()
     assert (ctrl.cfl_start, ctrl.cfl_max, ctrl.cfl_min) == (ref.cfl_start, ref.cfl_max, ref.cfl_min)
-    _, fixed = build_cfl_policy(S.DUAL_TIME)
+    _, fixed = build_cfl_policy(S.IMEX_EULER, adaptive=False)
     assert fixed == pytest.approx(_DEFAULT_START)
 
 
@@ -61,7 +71,7 @@ def test_current_cfl_number_priority():
         pass
 
     o = Obj()
-    o._cfl_controller, o.fixed_cfl_number = build_cfl_policy(S.DUAL_TIME, cfl_start=0.044)
+    o._cfl_controller, o.fixed_cfl_number = build_cfl_policy(S.SSP_RK3, adaptive=False, cfl_start=0.044)
     assert current_cfl_number(o) == pytest.approx(0.044)
     o._cfl_controller, o.fixed_cfl_number = build_cfl_policy(S.SSP_RK3, cfl_start=0.025)
     assert current_cfl_number(o) == pytest.approx(0.025)

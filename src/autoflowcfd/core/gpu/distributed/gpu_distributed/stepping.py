@@ -113,17 +113,6 @@ class _MultiGPUSteppingMixin:
         # 与"只用 SP0"的简化，见该方法文档），这里改用它。
         # 返回值是**紧凑排列**（棱柱在前），按 inv_perm 换回原生排列后
         # 切 local 段才能与 `self.U_gpu` 对齐。
-        # 真实 bug 修复（2026-09-02，与 CPU 分布式 `DistributedFRSolver.
-        # step` 同一处修复、同一个理由——用户明确要求"不允许出现完成度
-        # 不是100%的功能点"后排查发现）：此前这里无论 `self.time_
-        # integrator.scheme` 是什么都无条件走下面手动展开的 RK stage
-        # 逻辑，`scheme` 只被用来查系数表——DUAL_TIME（真正时间精度的
-        # 瞬态仿真，DES/LES 场景理应使用的模式）请求了也完全无路可走。
-        # 与单机 GPU `gpu_solver.py::step` 同一个分派方式（`GPUTime
-        # Integrator.step_dual_time` 本身早已实现，只是从未被这条
-        # 分布式路径调用过）：构造一个把 trial U 临时写入 `self.U_gpu`
-        # 再调用既有 `_compute_total_residual_gpu`（自带 halo 交换）的
-        # 残差闭包，直接复用，不需要另起一套残差组装逻辑。
         mu_t_field = None
         # 本步冻结的问题单元人工扩散系数（compact 排列；未启用时 None），同时
         # 进入粘性步长限制与全部粘性残差求值（与单机/CPU 分布式同一约定）
@@ -147,49 +136,15 @@ class _MultiGPUSteppingMixin:
 
         positivity_func = self._get_positivity_limiter_gpu()
 
-        if self.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME:
-            # 内层伪时间迭代的局部加速步长：与单机一致用局部 CFL 步长
-            # （`dt` 仍然是真正的物理时间步长，通过 dt_physical= 传入）。
-            dt_mean_c, dt_phys_c = self._compute_local_time_step_gpu(
-                return_physical_too=True, nu_av_compact=nu_av_compact)
-            if self.turb_model_gpu is not None:
-                # 湍流方程的双时间步（四后端同一份，`core/turbulence/dual_time.py`）；物理时间项的 b 经
-                # 与输运场相同的 halo 交换 + 重排换到 compact 视图
-                from autoflowcfd.core.turbulence.dual_time import advance_turbulence_dual_time
-
-                mu_t_field = advance_turbulence_dual_time(
-                    self, self.turb_model_gpu, cp,
-                    lambda dtau, term, first: self._compute_turbulence_source_distributed(dtau, term, first),
-                    dt_phys_c[:, None], dt, self.time_integrator.dual_time_steps,
-                    to_view=lambda x: self._permute_to_compact(self.gpu_halo.exchange(x)))
-            else:
-                mu_t_field = self._compute_turbulence_source_distributed(dt)
-            U_flat = self.U_gpu.reshape(n_local * n_sps, 5)
-            dt_mean_local = dt_mean_c[self._inv_perm_gpu][:n_local]
-            pseudo_dt = cp.broadcast_to(
-                dt_mean_local[:, None], (n_local, n_sps)).reshape(n_local * n_sps)
-            U_new_flat = self.time_integrator.step_dual_time(
-                U_flat, _spatial_residual, pseudo_dt, dt_physical=dt,
-                solution_prev=self._dual_time_U_prev,
-                max_inner_iter=self.time_integrator.dual_time_steps,
-                filter_func=self.filter_func_gpu, positivity_func=positivity_func,
-            )
-            self._dual_time_U_prev = U_flat.copy()
-            self.U_gpu = U_new_flat.reshape(n_local, n_sps, 5)
-            final_res_flat = _spatial_residual(U_new_flat)
-            residual_norm = self._global_residual_norm(final_res_flat)
-            self.residual_history.append(residual_norm)
-            self.iteration += 1
-            self._update_cfl_controller(residual_norm)
-            return residual_norm
-
         dt_mean_c, dt_phys_c = self._compute_local_time_step_gpu(
             return_physical_too=True, nu_av_compact=nu_av_compact)
         dt_mean_local = dt_mean_c[self._inv_perm_gpu][:n_local]
         dt_flat = cp.broadcast_to(
             dt_mean_local[:, None], (n_local, n_sps)).reshape(n_local * n_sps)
 
-        is_newton = self.time_integrator.scheme == TimeIntegrationScheme.NEWTON_KRYLOV
+        dual_time = self.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME
+        # 隐式步：稳态 Newton-Krylov，或双时间步的隐式内迭代（implicit/physical_time.py）
+        is_newton = dual_time or self.time_integrator.scheme == TimeIntegrationScheme.NEWTON_KRYLOV
         if is_newton:
             # 隐式步的块结构：local 单元（原生排列）的类型掩码与当前阶数
             from autoflowcfd.core.mpi.distributed_flat_face import native_cell_is_prism
@@ -198,8 +153,8 @@ class _MultiGPUSteppingMixin:
             order_now = int(getattr(self, "current_order", self.order))
 
         # 湍流（算子分裂，每个 step 开始时一次，用当前——上一步末尾——的状态，
-        # 与 CPU 分布式同一时序）。显式更新用**物理**波速算出的那一份 dt。隐式稳态 +
-        # k-omega 时湍流与平均流在下面紧耦合求解（time_integration/implicit/coupled_step.py，
+        # 与 CPU 分布式同一时序）。显式更新用**物理**波速算出的那一份 dt。隐式步 +
+        # 带输运方程的湍流模型时湍流与平均流在下面紧耦合求解（time_integration/implicit/coupled_step.py，
         # 适配器见 gpu_distributed_implicit.py），这里只取当前状态的涡粘供残差监控。
         from autoflowcfd.core.turbulence.registry import has_transport_equations
 
@@ -254,9 +209,10 @@ class _MultiGPUSteppingMixin:
 
         nk_info = None
         if is_newton:
-            # 隐式稳态步：与单机 CPU/GPU、CPU 分布式同一个实现（带 k-omega 时紧耦合
-            # implicit/coupled_step.py，否则 implicit/mean_flow_step.py），归约跨 rank，块
-            # Jacobi 着色全局一致
+            # 隐式步：与单机 CPU/GPU、CPU 分布式同一个实现（带输运方程的湍流模型时紧耦合
+            # implicit/coupled_step.py，否则 implicit/mean_flow_step.py），归约跨 rank，块 Jacobi 着色
+            # 全局一致。稳态一步一个 Newton 步；双时间步每个物理步做若干个带 BDF 物理时间项的 Newton 步
+            # （implicit/physical_time.py）
             from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
             from autoflowcfd.core.mpi.distributed_coarse import CompactCellValues, coarse_comm_context
             from autoflowcfd.core.mpi.distributed_implicit import (
@@ -269,25 +225,52 @@ class _MultiGPUSteppingMixin:
 
             coarse_ctx = coarse_comm_context(
                 self.partition, CompactCellValues(self.gpu_halo, self._perm_gpu, cp))
+            coupled = None
             if coupled_nk:
                 from autoflowcfd.core.gpu.distributed.gpu_distributed_implicit import MultiGpuCoupledBackend
                 from autoflowcfd.core.time_integration.implicit.coupled_step import step_coupled_newton
 
                 coupled = MultiGpuCoupledBackend(self, cell_is_prism, order_now, nu_av_compact, coarse_ctx)
-                nk_info = step_coupled_newton(self, coupled, dt_flat, filter_active=self.filter_func_gpu is not None)
-                U_new_flat = self.U_gpu.reshape(n_local * n_sps, 5)
-            else:
-                U_new_flat, nk_info = step_mean_flow_newton(
-                    self, _residual, U_flat, dt_flat, _reference_scales(self.freestream, 5),
+
+            def newton_step(dtau_flat, physical_time=None, advance_ramp=True):
+                """一个 Newton 步，新状态写回 `U_gpu`（与湍流模型），返回诊断 info。"""
+                if coupled is not None:
+                    return step_coupled_newton(self, coupled, dtau_flat,
+                                               filter_active=self.filter_func_gpu is not None,
+                                               physical_time=physical_time, advance_ramp=advance_ramp)
+                u_next, info = step_mean_flow_newton(
+                    self, _residual, self.U_gpu.reshape(n_local * n_sps, 5), dtau_flat,
+                    _reference_scales(self.freestream, 5),
                     red=MPIReductions(cp), cell_is_prism=cell_is_prism,
                     cell_colors=lambda: distributed_block_jacobi_colors(self),
                     coupling_graph=partial(distributed_coupling_graph, self, coarse_ctx), global_coarse=coarse_ctx,
                     order=order_now, filter_active=self.filter_func_gpu is not None,
-                    positivity=positivity_func,
+                    positivity=positivity_func, physical_time=physical_time,
                     block_assembler=distributed_mean_flow_assembler(
                         self, self, order=order_now, mu_t_compact=mu_t_field,
                         exchange=self.gpu_halo.exchange, perm=self._perm_gpu, n_sps=n_sps,
                         nu_av_compact=nu_av_compact))
+                self.U_gpu = u_next.reshape(n_local, n_sps, 5)
+                return info
+
+            if dual_time:
+                from autoflowcfd.core.time_integration.implicit.physical_time import (
+                    advance_physical_step, previous_newton_state, store_newton_state,
+                )
+
+                def pseudo_time_step():
+                    dtau_c = self._compute_local_time_step_gpu(nu_av_compact=nu_av_compact)
+                    return cp.broadcast_to(dtau_c[self._inv_perm_gpu][:n_local, None],
+                                           (n_local, n_sps)).reshape(n_local * n_sps)
+
+                x_now = coupled.state() if coupled is not None else U_flat.copy()
+                advance_physical_step(
+                    self, x_now, previous_newton_state(self, cp, n_local, n_sps),
+                    lambda term, first: newton_step(pseudo_time_step(), term, first), dt)
+                store_newton_state(self, x_now, n_local, n_sps, 5)
+            else:
+                nk_info = newton_step(dt_flat)
+            U_new_flat = self.U_gpu.reshape(n_local * n_sps, 5)
         elif self.time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
             # 显式无粘对流 + 隐式粘性（阻尼 Picard），与单机/CPU 分布式同一个
             # 拆分、同一个积分器（低马赫预处理在 IMEX 下不启用，理由见
@@ -310,5 +293,6 @@ class _MultiGPUSteppingMixin:
 
         self.residual_history.append(residual_norm)
         self.iteration += 1
-        self._update_cfl_controller(residual_norm, newton_info=nk_info)
+        if not dual_time:        # 双时间步的伪时间 CFL 在内迭代里更新（implicit/physical_time.py）
+            self._update_cfl_controller(residual_norm, newton_info=nk_info)
         return residual_norm

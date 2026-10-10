@@ -140,13 +140,17 @@ class _RealRows:
         return y[self.idx].reshape(-1)
 
 
-def _solve_direction(jac: MatrixFreeJacobian, prec, r0, n_var: int, eta: float,
+def _solve_direction(jac: MatrixFreeJacobian, prec, dtau, r0, n_var: int, eta: float,
                      gmres_restart: int, gmres_max_iter: int, red: LocalReductions,
                      rows: Optional[_RealRows] = None, norm: Optional[ResidualNorm] = None):
     """解 `(I/dtau + J) dU = -R`，返回 `(du, gmres_iters, gmres_info, linear_rel_residual)`。
 
-    `prec` 同时提供 PTC 对角项（`add_ptc_term`）与预处理作用（`apply`），
-    即 `PseudoTransientDiagonal` 或其子类 `CellBlockJacobiPreconditioner`。
+    `dtau` 是本次求解的逐行步长，Krylov 算子的对角项 `I/dtau` 在这里按它加；`prec` 只提供预处理
+    作用（`apply`）。2026-10-10 以前对角项由 `prec.add_ptc_term` 提供：块 ILU 档的预处理对象跨步
+    复用（`block_jacobi.py::preconditioner`，dtau 变化不到 2 倍不重分解），它带着**分解时**的 dtau，
+    于是被求解的不是请求的那个系统。稳态下只是伪时间步与请求值差不到 2 倍；双时间步的物理时间项并在
+    这个对角项里，BDF1 -> BDF2 时 `a0` 从 1 变 1.5 而算子仍按 1，Newton 从二次收敛退化成每次只降到
+    0.45 倍（等熵涡，`tests/unit/test_dual_time_newton.py`）。
     线性求解用后端无关的 `gmres.py::gmres_right`（右预处理：它的收敛判据
     就是真实线性残差 `||R + (I/dtau+J) dU|| <= eta ||R||`，正是 inexact
     Newton 要求的量）。
@@ -170,12 +174,14 @@ def _solve_direction(jac: MatrixFreeJacobian, prec, r0, n_var: int, eta: float,
     """
     n_dof = r0.shape[0]
     xp = red.xp
+    dtau_col = xp.asarray(dtau, dtype=xp.float64).reshape(n_dof, 1)
 
     if rows is None:
         def _apply_A(x_1d):
             v = x_1d.reshape(n_dof, n_var)
             jv = jac.matvec(v)
-            return prec.add_ptc_term(jv, v).reshape(-1)
+            jv += v / dtau_col
+            return jv.reshape(-1)
 
         def _apply_Minv(x_1d):
             return prec.apply(x_1d.reshape(n_dof, n_var)).reshape(-1)
@@ -184,7 +190,7 @@ def _solve_direction(jac: MatrixFreeJacobian, prec, r0, n_var: int, eta: float,
     else:
         def _apply_A(x_1d):
             v = rows.expand(x_1d, xp)
-            return rows.compact(prec.add_ptc_term(jac.matvec(v), v))
+            return rows.compact(jac.matvec(v) + v / dtau_col)
 
         def _apply_Minv(x_1d):
             return rows.compact(prec.apply(rows.expand(x_1d, xp)))
@@ -233,6 +239,7 @@ def step_newton_krylov(
     local_dtau_scale=None,
     norm_weights=None,
     real_rows=None,
+    physical_time=None,
 ) -> Tuple[object, dict]:
     """做**一个** PTC-Newton-Krylov 步，返回 `(U_new_flat, info)`。
 
@@ -265,6 +272,10 @@ def step_newton_krylov(
             局部伪时间步长缩放，见 `LOCAL_DTAU_CUT_MIN`）；None 时全为 1。调用方持久化。
         real_rows: `(N,)` 布尔，真实解点行（原生基零填充槽位为 False）。给出时 Krylov
             向量只存真实行（`_RealRows`）；零填充行的残差必须恒为零，否则报错。
+        physical_time: 双时间步的 BDF 物理时间项（`physical_time.py::BdfTerm`）。给出时 `residual`
+            仍是空间残差 `R`，本函数解 `(I/dtau + a0/dt + J_R) dU = -G`，`G = R + (a0 U - b)/dt`：
+            右端、接受判据与返回的残差范数都按 `G`，Krylov 算子与预处理用 `J_R` 加等效步长
+            `1/(1/dtau + a0/dt)`。
         red: 全局归约（`reductions.py`）。`None` 时为单进程 numpy；GPU 传
             `LocalReductions(cupy)`、分布式传跨 rank 归约的子类——本函数
             里一切"对整个解向量取标量"的操作都经过它。
@@ -299,10 +310,20 @@ def step_newton_krylov(
     local_scale = (xp.ones(u0_flat.shape[0]) if local_dtau_scale is None
                    else xp.asarray(local_dtau_scale, dtype=xp.float64).ravel())
 
-    r0 = xp.ascontiguousarray(residual(u0_flat), dtype=xp.float64)
-    if r0.shape != u0_flat.shape:
+    # `spatial`/`r0_spatial`：线性化与单元块装配用的空间残差；`residual`/`r0`：Newton 实际在解的方程
+    # （双时间步时多一个物理时间项）
+    spatial = residual
+    r0_spatial = xp.ascontiguousarray(spatial(u0_flat), dtype=xp.float64)
+    if r0_spatial.shape != u0_flat.shape:
         raise ValueError(
-            f"残差形状 {r0.shape} 与状态形状 {u0_flat.shape} 不符")
+            f"残差形状 {r0_spatial.shape} 与状态形状 {u0_flat.shape} 不符")
+    time_shift = 0.0
+    if physical_time is not None:
+        residual = physical_time.bind(spatial, None if real_rows is None else xp.asarray(real_rows, dtype=bool))
+        time_shift = physical_time.shift
+        r0 = xp.ascontiguousarray(residual(u0_flat), dtype=xp.float64)
+    else:
+        r0 = r0_spatial
     norm = ResidualNorm(norm_weights, red)
     res_norm = norm(r0)
     if res_norm == 0.0:
@@ -319,10 +340,15 @@ def step_newton_krylov(
         pad = ~xp.asarray(real_rows, dtype=bool)
         if red.sum(xp.abs(r0[pad])) != 0.0:
             raise ValueError("零填充槽位的残差不为零：Krylov 向量不能只存真实行（见 _RealRows）")
-    jac = MatrixFreeJacobian(residual, u0_flat, r0, scales, red=red)
+    jac = MatrixFreeJacobian(spatial, u0_flat, r0_spatial, scales, red=red)
     dtau_base = xp.ascontiguousarray(dtau_flat, dtype=xp.float64).ravel() * local_scale
+
+    def _linear_dtau(dtau):
+        # 线性系统对角上的 1/dtau + a0/dt 写成一个等效步长，交给预处理（它同时提供 Krylov 算子的对角项）
+        return dtau if time_shift == 0.0 else dtau / (1.0 + time_shift * dtau)
+
     if block_precond is not None:
-        block_precond.begin_step(residual, u0_flat, r0, scales, dtau_base * ctrl.scale)
+        block_precond.begin_step(spatial, u0_flat, r0_spatial, scales, _linear_dtau(dtau_base * ctrl.scale))
     if gmres_restart is None:
         gmres_restart = krylov_restart(u0_flat.size if rows is None else rows.idx.size * n_var, red,
                                        flexible=block_precond is not None and block_precond.flexible)
@@ -349,12 +375,13 @@ def step_newton_krylov(
     # 真实停滞记录（残差逐位不变 -> 按残差历史工作的控制器看不到它）。
     while True:
         dtau_try = dtau_base * ctrl.scale
+        dtau_lin = _linear_dtau(dtau_try)
         prec = None          # 上一档的逆先释放，再按本档 dtau 构造（不同时持有两份）
-        prec = (block_precond.preconditioner(dtau_try, n_var) if block_precond is not None
-                else PseudoTransientDiagonal(dtau_try, n_var))
+        prec = (block_precond.preconditioner(dtau_lin, n_var) if block_precond is not None
+                else PseudoTransientDiagonal(dtau_lin, n_var))
         budget = block_precond.stale_budget() if block_precond is not None else None
         du, iters, ginfo, linear_rel = _solve_direction(
-            jac, prec, r0, n_var, eta, gmres_restart,
+            jac, prec, dtau_lin, r0, n_var, eta, gmres_restart,
             gmres_max_iter if budget is None else min(budget, gmres_max_iter), red, rows, norm)
         iters_total += iters
         if ginfo > 0 and budget is not None and budget < gmres_max_iter:
@@ -362,15 +389,16 @@ def step_newton_krylov(
             # （见 block_jacobi.py 模块文档"复用与刷新"）。ginfo 是全局量，各 rank
             # 在这里的分支一致。
             prec = None          # 释放持有旧块的预处理对象，重装配期间不留两份（见 block_jacobi._build）
-            block_precond.refresh(residual, u0_flat, r0, scales, dtau_try)
-            prec = block_precond.preconditioner(dtau_try, n_var)
+            block_precond.refresh(spatial, u0_flat, r0_spatial, scales, dtau_lin)
+            prec = block_precond.preconditioner(dtau_lin, n_var)
             du, iters, ginfo, linear_rel = _solve_direction(
-                jac, prec, r0, n_var, eta, gmres_restart, gmres_max_iter, red, rows, norm)
+                jac, prec, dtau_lin, r0, n_var, eta, gmres_restart, gmres_max_iter, red, rows, norm)
             iters_total += iters
         iters_since_build = iters
         gmres_info = ginfo
         if du is not None:
-            # 线性系统自己预测的残差放大倍数：(I/dtau + J) dU = -R 解出的 dU 满足 R + J dU = -dU/dtau，
+            # 线性系统自己预测的残差放大倍数：(I/dtau + J) dU = -R 解出的 dU 满足 R + J dU = -dU/dtau
+            # （双时间步时 R、J 换成 G、dG/dU，dtau 仍是伪时间步），
             # 所以 ||dU/dtau|| / ||R|| 就是"走完这一步后线性化残差是原来的几倍"（见
             # `mean_flow_step.py::note_linear_growth`）。
             linear_growth = norm(du / dtau_try[:, None]) / res_norm
@@ -407,7 +435,7 @@ def step_newton_krylov(
     if block_precond is not None:
         # 刷新判据的基线用最后一次求解（刚装配时即新块的迭代数），不含过时那一次
         block_precond.record(iters_since_build, accepted=theta > 0.0)
-    return u_new, dict(res_norm=res_norm, res_norm_new=res_norm_new,
+    return u_new, dict(res_norm=res_norm, res_norm_new=res_norm_new, update_norm=norm(u_new - u0_flat),
                        eta=eta, gmres_iters=iters_total,
                        n_matvec=jac.n_matvec,
                        n_residual_extra=n_extra_total,

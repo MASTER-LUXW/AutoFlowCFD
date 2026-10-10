@@ -116,7 +116,7 @@ def _level_from_scipy(A, n_var: int) -> _Level:
 
 
 class MultilevelPreconditioner(PseudoTransientDiagonal):
-    """接口与对角预处理相同（`add_ptc_term` / `apply`）；向量是 cupy 数组时在主机上作用。"""
+    """接口与对角预处理相同（`apply`）；向量是 cupy 数组时在主机上作用。"""
 
     __slots__ = ("_fine", "_smoother", "_levels", "_hierarchy", "_lu", "_n_var", "_xp")
 

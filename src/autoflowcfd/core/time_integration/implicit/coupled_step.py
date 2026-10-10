@@ -151,9 +151,6 @@ class _BlockDiagonal:
         self.mean, self.turb, self.dtau = mean, turb, dtau
         self.flexible = bool(mean.flexible or turb.flexible)
 
-    def add_ptc_term(self, jv, v):
-        return jv + v / self.dtau[:, None]
-
     def apply(self, v):
         out = v.copy()
         out[:, :N_MEAN_FLOW_VARS] = self.mean.apply(v[:, :N_MEAN_FLOW_VARS].copy())
@@ -246,7 +243,8 @@ def _caches(solver, backend):
     return solver._newton_block_precond, solver._newton_turb_state["block"]
 
 
-def step_coupled_newton(solver, backend, dtau_flat, *, filter_active: bool = False) -> dict:
+def step_coupled_newton(solver, backend, dtau_flat, *, filter_active: bool = False, physical_time=None,
+                        advance_ramp: bool = True) -> dict:
     """平均流 + 湍流紧耦合的一个 PTC-Newton-Krylov 步：求解、写回新状态、记录诊断，返回 info。
 
     Args:
@@ -254,13 +252,16 @@ def step_coupled_newton(solver, backend, dtau_flat, *, filter_active: bool = Fal
         backend: 该后端的耦合适配器（模块文档"后端适配器"）。
         dtau_flat: `(N,)` 平均流逐解点伪时间步长（天花板，见 `jfnk.py`）。
         filter_active: 是否构造了模态滤波回调（为真时报错，见 `mean_flow_step.py`）。
+        physical_time: 双时间步的 BDF 物理时间项（`physical_time.py`，平均流与湍流列同一个），稳态为 None。
+        advance_ramp: 是否推进产生项渐变计数（双时间步的内迭代里只有每个物理步的第一次推进）。
     """
     require_no_modal_filter(filter_active)
     red = backend.red
     xp = red.xp
     if solver._newton_forcing is None:
         solver._newton_forcing = EisenstatWalkerForcing()
-    backend.turb.advance_ramp()
+    if advance_ramp:
+        backend.turb.advance_ramp()
     mean_cache, turb_cache = _caches(solver, backend)
     real = xp.asarray(real_row_mask(np.asarray(backend.cell_is_prism, dtype=bool), backend.n_sps,
                                     int(backend.order)))
@@ -280,7 +281,8 @@ def step_coupled_newton(solver, backend, dtau_flat, *, filter_active: bool = Fal
         forcing=solver._newton_forcing, dtau_scale=solver._newton_dtau_scale,
         block_precond=CoupledBlockPreconditioner(backend, mean_cache, turb_cache, residual),
         physicality=physicality, rows_per_cell=1, red=red,
-        local_dtau_scale=solver._newton_local_dtau, norm_weights=backend.positivity.norm_weights, real_rows=real)
+        local_dtau_scale=solver._newton_local_dtau, norm_weights=backend.positivity.norm_weights, real_rows=real,
+        physical_time=physical_time)
     solver._newton_dtau_scale = info["dtau_scale"]
     solver._newton_local_dtau = info["local_dtau_scale"]
     backend.install(x_new, dtau_flat)

@@ -27,20 +27,15 @@ from autoflowcfd.core.gpu import get_cupy
 class _GPUDistributedTurbSourceMixin:
     """多 GPU 分布式湍流源项（SST/DDES/IDDES/SA-neg/LES/WMLES）"""
 
-    def _compute_turbulence_source_distributed(self, dt, physical_time=None, advance_ramp: bool = True):
+    def _compute_turbulence_source_distributed(self, dt):
         """分布式湍流源项+输运的显式更新，返回 compact 排列的动力涡粘
         `(n_compact, n_sps)`（供粘性残差的 BR1 界面项），无湍流模型时 None。
 
         Args:
-            dt: k/omega 显式更新的步长，与单机 CPU/GPU 同一规则：DUAL_TIME 下是
-                物理时间步（标量），其余是按**物理**波速算出的逐单元局部步长，
-                **紧凑排列** `(n_compact, 1)`（`_compute_local_time_step_gpu`
-                的第二个返回值），与 compact 视图逐点对齐。2026-09-25 以前
-                调用方传的是全场均值（单机 GPU 同一缺陷，见
+            dt: 显式更新的步长，与单机 CPU/GPU 同一规则：按**物理**波速算出的逐单元局部步长，
+                **紧凑排列** `(n_compact, 1)`（`_compute_local_time_step_gpu` 的第二个返回值），与
+                compact 视图逐点对齐。2026-09-25 以前调用方传的是全场均值（单机 GPU 同一缺陷，见
                 `gpu_solver_io.py::compute_turbulence_source_gpu` 文档）。
-            physical_time: DUAL_TIME 的物理时间项（`core/turbulence/dual_time.py`，其 b 经 `to_view`
-                换到 compact 排列），其余格式 None
-            advance_ramp: 是否推进产生项渐变计数（DUAL_TIME 内迭代只有第一次推进）
         """
         if self.turb_model_gpu is None:
             if self.sgs_model_gpu is None:
@@ -49,15 +44,12 @@ class _GPUDistributedTurbSourceMixin:
 
         from autoflowcfd.core.fr_solver.turbulence.init import advance_production_ramp
 
-        if advance_ramp:
-            advance_production_ramp(self, self.turb_model_gpu)
+        advance_production_ramp(self, self.turb_model_gpu)
         ctx = self._prepare_turbulence_view_distributed()
         self._sync_turbulence_view(ctx)
         rates = self._evaluate_turbulence_rates_distributed(ctx, apply_des=True)
         # 场更新（模型的点隐式阻尼 + 输运：SST 见 sst/update.py::advance_k_log_omega，SA 见 sa/model.py）
         ctx.view.update_fields(dt, rates.source, rates.transport)
-        if physical_time is not None:
-            physical_time.apply(ctx.view, ctx.cp, dt)
         self._finalize_turbulence_update_distributed(ctx)
         self._write_back_turbulence_distributed(ctx, fields=True)
         return ctx.rho * ctx.view.nu_t

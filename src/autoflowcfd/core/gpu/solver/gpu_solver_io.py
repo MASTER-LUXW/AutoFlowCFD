@@ -25,7 +25,7 @@ class _GPUSolverIOMixin:
 
         advance_production_ramp(self, self.turb_model_gpu)
 
-    def compute_turbulence_source_gpu(self, turb_dt, physical_time=None, advance_ramp: bool = True):
+    def compute_turbulence_source_gpu(self, turb_dt):
         """GPU 上湍流场的一次更新（参数含义与 CPU `fr_solver/turbulence/source.py::compute_turbulence_source`
         相同）。
 
@@ -33,8 +33,6 @@ class _GPUSolverIOMixin:
             turb_dt: 一次更新的（伪）时间步长：按**物理**波速算出的逐单元局部步长 `(n_cells, 1)`（不跟
                 低马赫预处理放大）。2026-09-25 以前这里自己取 `cp.mean(dt_physical)`：全场一个平均
                 步长——小单元拿到超过自身稳定限的步长、大单元走得慢。
-            physical_time: DUAL_TIME 的物理时间项（`core/turbulence/dual_time.py`），其余格式 None
-            advance_ramp: 是否推进产生项渐变计数（DUAL_TIME 内迭代只有第一次推进）
 
         完整流程：
         1. 计算速度梯度（GPU）
@@ -63,15 +61,12 @@ class _GPUSolverIOMixin:
                 return None
             return rho * self.sgs_model_gpu.nu_t
 
-        if advance_ramp:
-            self._update_production_ramp_gpu()
+        self._update_production_ramp_gpu()
 
         grad_vel, d_wall = self._prepare_turbulence_inputs_gpu()
         rates = self._evaluate_turbulence_rates_gpu(grad_vel, d_wall, apply_des=True)
 
         self.turb_model_gpu.update_fields(turb_dt, rates.source, rates.transport)
-        if physical_time is not None:
-            physical_time.apply(self.turb_model_gpu, get_cupy(), turb_dt)
 
         self._finalize_turbulence_update_gpu()
         return self._turbulent_mu_t_gpu()

@@ -279,9 +279,9 @@ def resolve_low_mach_precond(requested, time_scheme) -> bool:
     
     对 SSP-RK2/RK3 与 NEWTON_KRYLOV 这三个"纯稳态伪时间推进"方案启用：这里的推进只是到达 R=0 的路径，
     Gamma 只改路径、不改不动点。DUAL_TIME 与 IMEX 不启用（请求了也只打一条日志说明）：
-    * DUAL_TIME 的内迭代按未预处理的伪时间推进实现，物理时间精度不受影响；低马赫下内迭代收敛较慢。
-    对内迭代做预处理（Weiss–Smith 双时间步预处理，Gamma 只作用于伪时间导数项、物理时间导数项保持原样）
-    是另一套半离散形式，不能直接复用本函数控制的"整体残差乘 Gamma"接入点；
+    * DUAL_TIME 的内迭代是带 BDF 物理时间项的 Newton 步（`time_integration/implicit/physical_time.py`），
+      对角上的 `a0/dt` 已经让系统良态，伪时间项只是步被拒时的回退手段，不需要 Gamma；"整体残差乘 Gamma"
+      会把物理时间导数项一起乘掉，解的就不是 BDF 方程了；
 
     NEWTON_KRYLOV（2026-09-25 加入）：Newton 解的是 F(U)=Gamma(U)R(U)=0，Gamma
     可逆，不动点不变；伪瞬态延拓项随之被预处理（标准的"预处理隐式"做法），

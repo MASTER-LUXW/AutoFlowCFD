@@ -118,8 +118,8 @@ def distributed_block_jacobi_colors(solver) -> np.ndarray:
         if fc is None:
             raise RuntimeError(
                 "分布式隐式步需要全局一致的块 Jacobi 着色：传统模式由全局网格的面连接"
-                "关系计算，完全分布式加载由 root 随紧凑包下发（time_scheme 为 "
-                "newton_krylov 时）——这里两者都没有。")
+                "关系计算，完全分布式加载由 root 随紧凑包下发（隐式格式时）"
+                "——这里两者都没有。")
         part = solver.partition
         colors = global_cell_colors(fc, part.n_global_cells)[part.local_cells]
         solver._block_jacobi_colors_local = colors

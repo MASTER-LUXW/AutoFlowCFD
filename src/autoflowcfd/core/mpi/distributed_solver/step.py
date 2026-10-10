@@ -181,7 +181,9 @@ class _DistributedStepMixin:
         # 波速放大），`dt_phys_local` 是按物理波速那一份——湍流标量的**显式**
         # 更新用后者（k/omega 的显式更新刻意没有 point-implicit 阻尼），隐式紧耦合
         # Newton 用前者，与单机 `fr_solver/step.py` 一致（见 coupled_step.py 模块文档）。
-        is_newton = self.time_integrator.scheme == TimeIntegrationScheme.NEWTON_KRYLOV
+        dual_time = self.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME
+        # 隐式步：稳态 Newton-Krylov，或双时间步的隐式内迭代（implicit/physical_time.py）
+        is_newton = dual_time or self.time_integrator.scheme == TimeIntegrationScheme.NEWTON_KRYLOV
         dist_fc = self.dist_flat_face
         from autoflowcfd.core.mpi.distributed_flat_face import native_cell_is_prism
 
@@ -212,7 +214,7 @@ class _DistributedStepMixin:
         coupled_nk = (is_newton and self.turb_model is not None
                       and has_transport_equations(self.turb_model_name))
         if coupled_nk:
-            # 隐式稳态 + k-omega：湍流与平均流在下面紧耦合求解（单机同一个算法，
+            # 隐式步 + 带输运方程的湍流模型：湍流与平均流在下面紧耦合求解（单机同一个算法，
             # time_integration/implicit/coupled_step.py；适配器见 distributed_implicit.py）。
             # 这里只取当前状态的涡粘供残差监控
             from autoflowcfd.core.mpi.distributed_implicit import DistributedTurbulenceBackend
@@ -225,31 +227,18 @@ class _DistributedStepMixin:
             from autoflowcfd.core.mpi.distributed_turbulence import (
                 distributed_compute_turbulence_source_and_viscosity,
             )
-            def _turbulence_update(dtau, physical_time=None, advance_ramp=True):
-                return distributed_compute_turbulence_source_and_viscosity(
-                    self.state.get_local_U()[..., :5], self.partition, self.halo_exchange,
-                    self.dist_flat_face, self.mesh, self.ops,
-                    self.turb_model, mu, self.wall_distance_compact, dtau,
-                    ramp_owner=self, physical_time=physical_time, advance_ramp=advance_ramp,
-                    turb_model_name=self.turb_model_name, ddes_model=self.ddes_model,
-                    iddes_h_max_compact=self.iddes_h_max_compact,
-                    iddes_h_wn_compact=self.iddes_h_wn_compact,
-                    # compact 面空间的 provider（group_code 已重切），湍流输运的
-                    # 壁面/来流条件靠它按边界组取类型
-                    boundary_ghost_provider=boundary_ghost_provider,
-                )
-
-            if self.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME:
-                # 湍流方程的双时间步（四后端同一份，`core/turbulence/dual_time.py`）；物理时间项的 b 经与
-                # 输运场相同的 halo 交换 + 重排换到 compact 视图
-                from autoflowcfd.core.turbulence.dual_time import advance_turbulence_dual_time
-
-                mu_t_field_compact = advance_turbulence_dual_time(
-                    self, self.turb_model, np, _turbulence_update, dt_phys_local, dt,
-                    self.time_integrator.dual_time_steps,
-                    to_view=lambda x: self.halo_exchange.exchange(x)[dist_fc.perm])
-            else:
-                mu_t_field_compact = _turbulence_update(dt_phys_local)
+            mu_t_field_compact = distributed_compute_turbulence_source_and_viscosity(
+                self.state.get_local_U()[..., :5], self.partition, self.halo_exchange,
+                self.dist_flat_face, self.mesh, self.ops,
+                self.turb_model, mu, self.wall_distance_compact, dt_phys_local,
+                ramp_owner=self,
+                turb_model_name=self.turb_model_name, ddes_model=self.ddes_model,
+                iddes_h_max_compact=self.iddes_h_max_compact,
+                iddes_h_wn_compact=self.iddes_h_wn_compact,
+                # compact 面空间的 provider（group_code 已重切），湍流输运的
+                # 壁面/来流条件靠它按边界组取类型
+                boundary_ghost_provider=boundary_ghost_provider,
+            )
         elif self.sgs_model is not None:
             # LES（2026-09-02）：WALE 纯代数模型，用当前状态现算，见
             # distributed_compute_les_viscosity 文档。
@@ -341,25 +330,11 @@ class _DistributedStepMixin:
         else:
             residual0 = residual0_raw.reshape(n_local * n_sps, n_vars)
 
-        # 真实 bug 修复（2026-09-02，见 __init__ 里 self.time_integrator
-        # 构造处同一处说明）：此前这里无条件调用 `_ssp_rk_stage_step`，
-        # DUAL_TIME（真正时间精度的瞬态仿真）请求了也无路可走——现在
-        # 与单机 `fr_solver/step.py::step` 同一个分派方式：`residual_
-        # func` 本身就是 `spatial_residual(U) -> R(U)`（`dU/dt=-R(U)`
-        # 约定，与 `step_dual_time` 需要的语义完全一致，不需要额外
-        # 包装），直接复用。
-        if self.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME:
-            U_new_flat = self.time_integrator.step_dual_time(
-                U_flat, residual_func, dt_local_flat, dt_physical=dt,
-                solution_prev=self._dual_time_U_prev,
-                max_inner_iter=self.time_integrator.dual_time_steps,
-                filter_func=filter_func, positivity_func=positivity_func,
-            )
-            self._dual_time_U_prev = U_flat.copy()
-        elif is_newton:
-            # 隐式稳态步：与单机 CPU/GPU 同一个实现（implicit/mean_flow_step.py），
-            # 归约换成跨 rank 的 MPIReductions，块 Jacobi 着色是全局一致着色里
-            # 本 rank 那一段（见 core/mpi/distributed_implicit.py 模块文档）
+        if is_newton:
+            # 隐式步：与单机 CPU/GPU 同一个实现（带输运方程的湍流模型时紧耦合 implicit/coupled_step.py，
+            # 否则 implicit/mean_flow_step.py），归约换成跨 rank 的 MPIReductions，块 Jacobi 着色是全局
+            # 一致着色里本 rank 那一段（见 core/mpi/distributed_implicit.py 模块文档）。稳态一步一个
+            # Newton 步；双时间步每个物理步做若干个带 BDF 物理时间项的 Newton 步（implicit/physical_time.py）
             from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
             from autoflowcfd.core.mpi.distributed_coarse import CompactCellValues, coarse_comm_context
             from autoflowcfd.core.mpi.distributed_implicit import (
@@ -372,27 +347,55 @@ class _DistributedStepMixin:
 
             coarse_ctx = coarse_comm_context(
                 self.partition, CompactCellValues(self.halo_exchange, self.dist_flat_face.perm, np))
+            coupled = None
             if coupled_nk:
                 from autoflowcfd.core.mpi.distributed_implicit import DistributedCoupledBackend
                 from autoflowcfd.core.time_integration.implicit.coupled_step import step_coupled_newton
 
                 coupled = DistributedCoupledBackend(self, cell_is_prism, order_now, nu_av_compact, coarse_ctx)
-                nk_info = step_coupled_newton(self, coupled, dt_local_flat, filter_active=filter_func is not None)
-                U_new_flat = self.state.get_local_U().reshape(n_local * n_sps, n_vars)
-                mu_t_field_compact = coupled.turb.mu_t_compact
-            else:
-                U_new_flat, nk_info = step_mean_flow_newton(
-                    self, residual_func, U_flat, dt_local_flat,
+
+            def newton_step(dtau_flat, physical_time=None, advance_ramp=True):
+                """一个 Newton 步，新状态写回 `state`（与湍流模型），返回诊断 info。"""
+                if coupled is not None:
+                    return step_coupled_newton(self, coupled, dtau_flat, filter_active=filter_func is not None,
+                                               physical_time=physical_time, advance_ramp=advance_ramp)
+                u_next, info = step_mean_flow_newton(
+                    self, residual_func, self.state.get_local_U().reshape(n_local * n_sps, n_vars), dtau_flat,
                     _reference_scales(self.local_solver.freestream, n_vars),
                     red=MPIReductions(np), cell_is_prism=cell_is_prism,
                     cell_colors=lambda: distributed_block_jacobi_colors(self),
                     coupling_graph=partial(distributed_coupling_graph, self, coarse_ctx), global_coarse=coarse_ctx,
                     order=order_now, filter_active=filter_func is not None,
-                    positivity=positivity_func,
+                    positivity=positivity_func, physical_time=physical_time,
                     block_assembler=distributed_mean_flow_assembler(
                         self, self.local_solver, order=order_now, mu_t_compact=mu_t_field_compact,
                         exchange=self.halo_exchange.exchange, perm=self.dist_flat_face.perm, n_sps=n_sps,
                         nu_av_compact=nu_av_compact))
+                u_next = u_next.reshape(n_local, n_sps, n_vars)
+                self.state.U[:n_local] = u_next
+                self.state.Q[:n_local] = conserved_to_primitive(u_next[..., :5])
+                return info
+
+            if dual_time:
+                from autoflowcfd.core.time_integration.implicit.physical_time import (
+                    advance_physical_step, previous_newton_state, store_newton_state,
+                )
+
+                def pseudo_time_step():
+                    return self._compute_distributed_local_time_step(
+                        self.state.get_local_U(), mu_t_local=mu_cfl_local).reshape(n_local * n_sps)
+
+                x_now = coupled.state() if coupled is not None else U_flat.copy()
+                advance_physical_step(
+                    self, x_now, previous_newton_state(self, np, n_local, n_sps),
+                    lambda term, first: newton_step(pseudo_time_step(), term, first), dt)
+                store_newton_state(self, x_now, n_local, n_sps, n_vars)
+                nk_info = self._newton_last_info
+            else:
+                nk_info = newton_step(dt_local_flat)
+            U_new_flat = self.state.get_local_U().reshape(n_local * n_sps, n_vars)
+            if coupled is not None:
+                mu_t_field_compact = coupled.turb.mu_t_compact
         elif self.time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
             # 显式无粘对流 + 隐式粘性（阻尼 Picard），与单机
             # `fr_solver/step.py` 同一个拆分、同一个积分器。**2026-09-25 补齐**：
@@ -415,8 +418,8 @@ class _DistributedStepMixin:
                 positivity_func=positivity_func,
             )
         else:
-            # `TimeIntegrator.step()` 对 IMEX/DUAL_TIME/NEWTON_KRYLOV 显式报错（不静默
-            # 退化成前向 Euler）；三者上面都已分派。
+            # `TimeIntegrator.step()` 对 IMEX 与隐式格式显式报错（不静默退化成前向 Euler）；
+            # 它们上面都已分派。
             U_new_flat = self.time_integrator.step(
                 U_flat, residual_func, dt_local_flat, residual0=residual0,
                 filter_func=filter_func, positivity_func=positivity_func,
@@ -439,7 +442,8 @@ class _DistributedStepMixin:
         self.residual_history.append(residual_norm)   # 收敛历史在单步里记录（与其余后端一致）
         # 自适应 CFL 按**全局**残差范数更新：所有 rank 喂同一个值，因此
         # 得到同一个 CFL 数（按各自局部残差更新会让 rank 间 CFL 漂移）。
-        if self._cfl_controller is not None:
+        # 双时间步的伪时间 CFL 在每个物理步的内迭代里更新（implicit/physical_time.py）
+        if self._cfl_controller is not None and not dual_time:
             if is_newton:
                 # SER 看 Newton 实际在解的系统的全局残差 ||Gamma R||，并区分
                 # "残差上升但步被完整接受"与"步没被完整接受"（adaptive_cfl/ser.py）

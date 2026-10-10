@@ -89,12 +89,6 @@ class PseudoTransientDiagonal:
         """逐 SP 的 `dtau`，形状 `(N,)`。"""
         return self._dtau
 
-    def add_ptc_term(self, jv_flat: np.ndarray, v_flat: np.ndarray
-                     ) -> np.ndarray:
-        """把 `J v` 变成 `(I/dtau + J) v`（**原地**加到 `jv_flat` 上）。"""
-        jv_flat += v_flat / self._dtau_col
-        return jv_flat
-
     def apply(self, v_flat: np.ndarray) -> np.ndarray:
         """`P^{-1} v = dtau_local * v`。"""
         return v_flat * self._dtau_col

@@ -82,6 +82,7 @@ def reset_newton_state(solver) -> None:
     solver._newton_forcing = None
     solver._newton_last_info = None
     solver._newton_unstable_steps = 0
+    solver._dual_time_inner = None
     solver._newton_dtau_scale = 1.0
     solver._newton_local_dtau = None
     solver._newton_block_precond = None
@@ -164,7 +165,7 @@ def step_mean_flow_newton(
     solver, residual: Callable, u_flat, dtau_flat, scales: np.ndarray, *,
     red: LocalReductions, cell_is_prism: np.ndarray, cell_colors: Callable[[], np.ndarray],
     order: int, filter_active: bool, positivity, block_assembler=None,
-    coupling_graph: Optional[Callable] = None, global_coarse=None,
+    coupling_graph: Optional[Callable] = None, global_coarse=None, physical_time=None,
 ):
     """平均流的一个 PTC-Newton-Krylov 步，返回 `(U_new_flat, info)`。
 
@@ -196,6 +197,7 @@ def step_mean_flow_newton(
             None 时 P0 只有块 Jacobi。
         global_coarse: 分布式后端的 `coarse.CoarseCommContext`（块 ILU 档叠全局粗校正，
             `implicit/coarse/global_coarse.py`），只在首次构造缓存时使用；单机为 None。
+        physical_time: 双时间步的 BDF 物理时间项（`physical_time.py`），稳态为 None。
     """
     from autoflowcfd.fr.native_padding import real_row_mask, real_sps_per_cell
 
@@ -227,7 +229,8 @@ def step_mean_flow_newton(
         local_dtau_scale=getattr(solver, "_newton_local_dtau", None),
         norm_weights=positivity.norm_weights,
         real_rows=red.xp.asarray(real_row_mask(cell_is_prism, u_flat.shape[0] // np.asarray(cell_is_prism).size,
-                                               order)))
+                                               order)),
+        physical_time=physical_time)
     solver._newton_last_info = info
     note_linear_growth(solver, info)
     solver._newton_dtau_scale = info["dtau_scale"]

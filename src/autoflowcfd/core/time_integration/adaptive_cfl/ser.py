@@ -192,5 +192,10 @@ class SERCFLController:
         """Order Continuation 换阶：新离散问题的残差量级与旧的不可比，
         回到起点重新按 SER 爬升。"""
         logger.info(f"[SER-CFL] reset（CFL was {self.cfl_number:.3g}）")
+        self.restart()
+
+    def restart(self) -> None:
+        """回到起点、清掉残差基准，不打日志：双时间步每个物理步的内迭代都从起点重新爬升
+        （`implicit/physical_time.py`），按步打印没有信息量。"""
         self.cfl_number = self._clamp(self.cfl_start)
         self._prev_residual = None

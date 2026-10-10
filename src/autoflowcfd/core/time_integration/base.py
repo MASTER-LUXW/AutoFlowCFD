@@ -205,9 +205,23 @@ _SCHEME_TABLE = {
 
 
 
-#: 双时间步每个物理步的伪时间内迭代次数默认值（全部后端与 CLI 的唯一来源；取值理由见
-#: `TimeIntegrator.__init__` 的 `dual_time_steps` 注释）
+#: 每一步解 Newton-Krylov 线性系统的格式：隐式稳态，以及双时间步（内迭代是带 BDF 物理时间项的同一个
+#: Newton 步，`implicit/physical_time.py`）。CFL 律、全局一致的块着色等按它判断
+IMPLICIT_SCHEMES = (TimeIntegrationScheme.NEWTON_KRYLOV, TimeIntegrationScheme.DUAL_TIME)
+
+#: 双时间步每个物理步的内迭代（带 BDF 物理时间项的 Newton 步，`implicit/physical_time.py`）次数上限的
+#: 默认值，全部后端与 CLI 的唯一来源。内迭代按收敛判据提前结束（下一个常量），通常 2~7 次
 DEFAULT_DUAL_TIME_STEPS = 20
+
+#: 双时间步每个物理步内迭代的收敛判据：BDF 方程的残差 `||G||` 相对该物理步第一次内迭代之前下降到这个
+#: 比例即停（`implicit/physical_time.py`）
+DEFAULT_DUAL_TIME_TOLERANCE = 1.0e-3
+
+#: 双时间步内迭代的另一个收敛判据：一个被完整接受的 Newton 步的更新量（按参考量归一的均方根，与残差
+#: 同一个加权范数）小于这个值即停。物理步起点已经满足 BDF 方程到舍入水平时（均匀流、已收敛的定常解上
+#: 继续推进）`||G||` 的初值就是舍入噪声，相对判据永远不成立；此时解每次迭代只在第 8 位以后变化，
+#: 远小于任何时间离散误差
+DUAL_TIME_UPDATE_FLOOR = 1.0e-8
 
 #: 稳态相对收敛容差的默认值（残差降到初值的这个倍数即收敛；唯一来源：CLI `--tol`、配置 `convergence_tol`、
 #: API 与 `solve()` 都取它。2026-10-09 以前 CLI 六处写死 1e-6、配置层默认 1e-3，两者互不相干）
@@ -226,16 +240,7 @@ class TimeIntegrator:
         scheme: TimeIntegrationScheme = TimeIntegrationScheme.SSP_RK3,
         dt: float = 1e-5,
         cfl_target: float = 1.0,
-        dual_time_steps: int = DEFAULT_DUAL_TIME_STEPS,  # 每个物理步内的伪时间迭代次数
-        # 默认值从 3 提高到 20：真实测得 BDF1 单物理步（受控衰减算例，
-        # dt_physical=0.05）在默认 cfl 起点=下限=0.1 的保守步长策略下，
-        # 3 次内迭代只完成 28% 的目标收敛量，需要约 60 次才能收敛到
-        # BDF1 精度（见 time_integration.py::step_dual_time 文档 cfl
-        # 起点选择的说明）。20 不是"证明足够"的精确值，是在"默认值必须
-        # 明显好于 3"与"不无谓拖慢每个物理步"之间的工程折衷，通过
-        # --dual-time-inner-iter（CLI）/FRSolver(dual_time_inner_iter=...)
-        # 暴露给需要更严格收敛的场景调整，而不是像此前那样完全没有
-        # 途径设置。
+        dual_time_steps: int = DEFAULT_DUAL_TIME_STEPS,  # 每个物理步的内迭代次数上限
     ):
         # 把任何旧别名映射到规范的枚举成员。
         self.scheme = TimeIntegrationScheme(scheme.value) if isinstance(scheme, TimeIntegrationScheme) \
@@ -243,6 +248,7 @@ class TimeIntegrator:
         self.dt = dt
         self.cfl_target = cfl_target
         self.dual_time_steps = dual_time_steps
+        self.dual_time_tolerance = DEFAULT_DUAL_TIME_TOLERANCE
         self.n_steps = 0
         self.current_time = 0.0
         self._table = _SCHEME_TABLE.get(self.scheme, _EULER)
@@ -294,14 +300,10 @@ class TimeIntegrator:
             )
 
         elif self.scheme == TimeIntegrationScheme.DUAL_TIME:
-            # DUAL_TIME 需要真正的物理时间步长 dt_physical 与上一物理时间层
-            # 的解 solution_prev（BDF2 时间导数项必需，见 step_dual_time
-            # 文档），这两个概念在这个通用 dt_local 数组接口里表达不了，
-            # 调用方（fr_solver.py::step）须直接调用 step_dual_time，不能
-            # 经过这个通用分发入口。
+            # DUAL_TIME 每个物理步是若干个带 BDF 物理时间项的 Newton 步，由各后端的 step() 经
+            # `implicit/physical_time.py::advance_physical_step` 推进，不经过这个显式积分器入口。
             raise ValueError(
-                "DUAL_TIME scheme 需要 dt_physical/solution_prev，请直接调用 "
-                "step_dual_time(...)，不要通过通用的 step(...) 入口"
+                "DUAL_TIME scheme 由隐式内迭代推进（implicit/physical_time.py），不经过通用的 step(...) 入口"
             )
 
         elif self.scheme == TimeIntegrationScheme.NEWTON_KRYLOV:
@@ -335,15 +337,10 @@ class TimeIntegrator:
         filter_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
         positivity_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
     ) -> np.ndarray:
-        """SSP-RK2/RK3 的 Shu-Osher stage 推进本体，不含 scheme 分发/计步——
-        从 step() 拆出来，供 step_dual_time 的内层伪时间迭代复用（见该方法
-        文档：内层迭代此前用的是纯前向欧拉，但 dt_local/pseudo_dt 是按这套
-        SSP-RK 格式的稳定性域标定的 CFL 步长，前向欧拉的稳定性域明显更小，
-        直接复用同一个 CFL 数会失稳——真实复现：Couette 层流验证算例第一次
-        内层迭代残差就从 5.5e6 暴涨到 2e27，两步内 NaN）。
+        """SSP-RK2/RK3 的 Shu-Osher stage 推进本体，不含 scheme 分发/计步。
 
         Args:
-            table: 显式指定要用的 Shu-Osher 系数表；None 时用 self._table
+            table: 显式指定要用的 Shu-Osher 系数表；None 时用 self._table（即 self.scheme 对应的表）。
                 （即 self.scheme 对应的表）。step_dual_time 调用时必须显式
                 传入 _SSP_RK3——self.scheme 此时是 DUAL_TIME 本身，
                 self._table 会回退成 1-stage 的 _EULER 表（_SCHEME_TABLE
@@ -429,29 +426,6 @@ class TimeIntegrator:
 
         return _step_imex(self, solution, residual_explicit, residual_implicit, dt_local,
                           positivity_func=positivity_func)
-
-    def step_dual_time(
-        self,
-        solution: np.ndarray,
-        spatial_residual: Callable[[np.ndarray], np.ndarray],
-        pseudo_dt: np.ndarray,
-        dt_physical: float,
-        solution_prev: Optional[np.ndarray] = None,
-        max_inner_iter: int = 5,
-        tol: float = 1e-4,
-        filter_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
-        positivity_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
-    ) -> np.ndarray:
-        """执行一步 Dual-Time Stepping (S-05)。实现见
-        time_integration/dual.py::step_dual_time（从本文件拆出，控制
-        单文件行数），文档字符串也在那里。"""
-        from .dual import step_dual_time as _step_dual_time
-
-        return _step_dual_time(
-            self, solution, spatial_residual, pseudo_dt, dt_physical,
-            solution_prev=solution_prev, max_inner_iter=max_inner_iter, tol=tol, filter_func=filter_func,
-            positivity_func=positivity_func,
-        )
 
     def reset(self) -> None:
         self.n_steps = 0

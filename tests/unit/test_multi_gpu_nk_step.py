@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""多 GPU 分布式 `step()` 的隐式稳态（NEWTON_KRYLOV）分支接线。
+"""多 GPU 分布式 `step()` 的隐式分支接线：隐式稳态（NEWTON_KRYLOV）与双时间步（DUAL_TIME）。
 
 隐式步的算法（`implicit/mean_flow_step.py`）已由单机与 CPU 分布式的对照测试
 覆盖；这里只验证多 GPU 分支自己的接线：Newton 步真的被调用、试探态经
@@ -73,7 +73,8 @@ def _stub(n_local, n_sps, target):
     s._compute_turbulence_source_distributed = lambda dt: None
     s._global_residual_norm = lambda r: float(np.linalg.norm(r))
     big = np.full(n_local, 1e3)          # dtau 远大于 1/5：接近纯 Newton
-    s._compute_local_time_step_gpu = lambda return_physical_too=False, nu_av_compact=None: (big, big)
+    s._compute_local_time_step_gpu = lambda return_physical_too=False, nu_av_compact=None: (
+        (big, big) if return_physical_too else big)
     s.compute_artificial_diffusivity_compact_gpu = lambda: None   # 人工粘性未启用
     s.artificial_viscosity_enabled = False
     s._cfl_controller = SERCFLController()
@@ -113,3 +114,37 @@ def test_newton_branch_lands_on_the_fixed_point_and_feeds_ser():
     # SER 拿到的是 Newton 诊断：首步只记录基准，第二步残差大降、CFL 放大
     gd_mod.MultiGPUDistributedSolver.step(s, dt=0.0)
     assert s._cfl_controller.cfl_number > cfl0
+
+
+def test_dual_time_branch_solves_bdf1_then_bdf2():
+    """DUAL_TIME：每个物理步解 BDF 方程。线性残差 `dU/dt = -5 (U - target)` 下可手算：
+    BDF1 `U1 = (U0 + 5 dt T) / (1 + 5 dt)`，BDF2 `U2 = (2 U1 - U0/2 + 5 dt T) / (3/2 + 5 dt)`。
+    上一时间层落在求解器上，伪时间 CFL 不被 step() 末尾的外层残差更新。"""
+    from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
+    from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
+
+    n_local, n_sps, dt = 4, 6, 0.05
+    target = _conservative(n_local, n_sps, np.random.default_rng(7))
+    s = _stub(n_local, n_sps, target)
+    s.time_integrator = types.SimpleNamespace(scheme=TimeIntegrationScheme.DUAL_TIME, dual_time_steps=30,
+                                              dual_time_tolerance=1e-9)
+    reset_dual_time_history(s)
+    outer_updates = []
+    s._update_cfl_controller = lambda *a, **k: outer_updates.append(a)
+    U0 = s.U_gpu.copy()
+
+    gd_mod.MultiGPUDistributedSolver.step(s, dt=dt)
+    U1 = s.U_gpu.copy()
+    expected1 = (U0 + 5.0 * dt * target) / (1.0 + 5.0 * dt)
+    step = np.abs(expected1 - U0).max(axis=(0, 1))
+    assert np.all(np.abs(U1 - expected1).max(axis=(0, 1)) <= 1e-6 * step)
+    assert s._dual_time_inner["converged"] and s._dual_time_inner["a0"] == 1.0
+    np.testing.assert_array_equal(s._dual_time_U_prev.reshape(U0.shape), U0)
+
+    gd_mod.MultiGPUDistributedSolver.step(s, dt=dt)
+    expected2 = (2.0 * U1 - 0.5 * U0 + 5.0 * dt * target) / (1.5 + 5.0 * dt)
+    step = np.abs(expected2 - U1).max(axis=(0, 1))
+    assert np.all(np.abs(s.U_gpu - expected2).max(axis=(0, 1)) <= 1e-6 * step)
+    assert s._dual_time_inner["a0"] == 1.5
+    np.testing.assert_array_equal(s._dual_time_U_prev.reshape(U0.shape), U1)
+    assert not outer_updates and s.iteration == 2 and len(s.residual_history) == 2

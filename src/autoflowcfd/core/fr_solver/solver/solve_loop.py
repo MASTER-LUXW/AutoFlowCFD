@@ -20,6 +20,7 @@ import numpy as np
 from autoflowcfd.core.mpi import is_root
 from autoflowcfd.core.utils.order_continuation.policy import uses_order_continuation
 from autoflowcfd.core.time_integration.implicit.mean_flow_step import newton_monitor_suffix
+from autoflowcfd.core.time_integration.implicit.physical_time import inner_iteration_suffix
 from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
 from autoflowcfd.core.fr_solver.state import SolverResult
 from autoflowcfd.core.utils import order_continuation
@@ -49,7 +50,7 @@ def format_step_line(solver, order: int, iteration: int, res: float, initial_res
     ctrl = getattr(solver, "_cfl_controller", None)
     if ctrl is not None:
         msg += f" | CFL={ctrl.cfl_number:.3f}"
-    msg += newton_monitor_suffix(solver) + solver._loop_monitor_suffix()
+    msg += inner_iteration_suffix(solver) + newton_monitor_suffix(solver) + solver._loop_monitor_suffix()
     ref_area = getattr(solver, "_reference_area", None)
     if ref_area is not None and ref_area > 0:
         from autoflowcfd.postprocess.fr_coefficients import compute_forces_pressure_only

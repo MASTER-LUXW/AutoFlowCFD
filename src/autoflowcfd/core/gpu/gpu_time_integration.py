@@ -212,9 +212,7 @@ class GPUTimeIntegrator(TimeIntegrator):
     `adaptive_cfl/policy.py::build_cfl_policy` 在求解器上建立（此前这里的
     `cfl=1.0` 是 IMEX/双时间步下的实际 CFL，远超 P>=1 显式稳定极限）。
 
-    `dual_time_steps` 默认值与 CPU 同一个（父类构造参数，理由见那里）；此前
-    GPU 侧没有这个属性，调用方各自 `getattr(..., 5)` 兜底，内迭代预算比 CPU
-    少 4 倍。
+    `dual_time_steps` 默认值与 CPU 同一个（父类构造参数）。
     """
 
     def __init__(self, scheme="ssp_rk3", dual_time_steps: int = DEFAULT_DUAL_TIME_STEPS):

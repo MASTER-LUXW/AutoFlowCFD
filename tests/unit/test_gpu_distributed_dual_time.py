@@ -1,19 +1,6 @@
-"""AutoFlowCFD V2.0 - 多GPU分布式 DUAL_TIME 支持验证（2026-09-02）。
+"""多 GPU 分布式 `step()` 的显式 RK 分支与单机共用同一个积分器。
 
-真实 bug 修复（与 CPU 分布式 `DistributedFRSolver.step` 同一处修复、
-同一个理由——用户明确要求"不允许出现完成度不是100%的功能点"后排查
-发现）：`MultiGPUDistributedSolver.step()` 此前无论 `self.time_
-integrator.scheme` 是什么都无条件走手动展开的 RK stage 逻辑，
-`scheme` 只被用来查系数表——DUAL_TIME 请求了也完全无路可走。
-
-本文件不重新验证 `GPUTurbulenceSST`/`compute_viscous_residual_gpu`
-这类既有 GPU 数值 kernel（已在 `test_gpu_distributed_turbulence.py`
-决定性验证过），也不重新验证积分器 `step_dual_time`（CPU/GPU 同一份）本身的 BDF 构造/
-收敛迭代（单机 GPU 路径早已使用、是既有数值逻辑，不是本次改动的
-对象）——只验证本次新增分支的真实风险点：`_spatial_residual` 闭包
-是否正确地把 trial U 临时写入 `self.U_gpu`（再正确恢复）、
-`_dual_time_U_prev` 是否正确持久化。用一个简单的、可手算验证的解析
-残差函数（而不是真实的 FR 通量 kernel）隔离出这个风险点本身。
+DUAL_TIME（隐式内迭代）与隐式稳态的接线见 `test_multi_gpu_nk_step.py`。
 """
 
 import types
@@ -117,7 +104,7 @@ def _make_stub(n_local, n_sps, n_vars, target):
 
     calls = {"count": 0}
 
-    # 层流：没有湍流模型时湍流更新直接返回 None（带输运方程的双时间步见 test_dual_time_turbulence.py）
+    # 层流：没有湍流模型时湍流更新直接返回 None（带输运方程的双时间步见 test_dual_time_newton.py）
     stub.turb_model_gpu = None
 
     def _compute_turbulence_source_distributed(dt):
@@ -141,67 +128,6 @@ def _make_stub(n_local, n_sps, n_vars, target):
 
     stub._calls = calls
     return stub
-
-
-class TestMultiGpuDistributedDualTime:
-    def test_spatial_residual_closure_swaps_and_restores_u_gpu(self):
-        """决定性验证本次改动真正的风险点：`_spatial_residual` 闭包
-        必须（1）把传入的 trial U 正确临时写入 `self.U_gpu`，让
-        `_compute_total_residual_gpu` 读到的是 trial 值而不是原值；
-        （2）调用结束后把 `self.U_gpu` 恢复回原值，不泄漏到外部。
-
-        只验证第一次 `_spatial_residual` 调用本身、以及调用前后
-        `self.U_gpu` 的状态（收敛性不是本用例的对象）。"""
-        n_local, n_sps, n_vars = 2, 3, 5
-        rng = np.random.default_rng(13)
-        target = _make_target(n_local, n_sps, rng)
-        stub = _make_stub(n_local, n_sps, n_vars, target)
-        original_U = stub.U_gpu.copy()
-
-        captured = {}
-        real_step_dual_time = stub.time_integrator.step_dual_time
-
-        def _spy(solution, spatial_residual, *args, **kwargs):
-            # 用一个与 self.U_gpu 当前值不同的 trial 调一次：
-            # `residual_at_trial` 是否正确反映 trial（而不是外层
-            # self.U_gpu 原值）证明了"调用期间确实临时替换成了 trial"
-            # ——不能直接在 spatial_residual 内部拍照 self.U_gpu，
-            # 因为 finally 块会在 spatial_residual *返回前* 就已经把
-            # self.U_gpu 恢复，调用方在这里永远只能看到恢复后的值
-            # （这正是我们想要的行为，见下面 res_before 判据）。
-            trial = solution + 1.0
-            res_before = stub.U_gpu.copy()
-            captured["residual_at_trial"] = spatial_residual(trial)
-            captured["u_gpu_restored"] = np.allclose(stub.U_gpu, res_before)
-            return real_step_dual_time(solution, spatial_residual, *args, **kwargs)
-
-        stub.time_integrator.step_dual_time = _spy
-        gd_mod.MultiGPUDistributedSolver.step(stub, dt=1e-2)
-
-        assert "residual_at_trial" in captured
-        trial_flat = (original_U + 1.0).reshape(n_local * n_sps, n_vars)
-        # spatial_residual 返回 R = -dU/dt = 5 (U - target)
-        expected_residual_at_trial = 5.0 * (trial_flat - target.reshape(n_local * n_sps, n_vars))
-        np.testing.assert_allclose(
-            captured["residual_at_trial"], expected_residual_at_trial, rtol=1e-10, atol=1e-10,
-        )
-        assert captured["u_gpu_restored"], "spatial_residual 调用后必须把 self.U_gpu 恢复回调用前的值"
-
-    def test_dual_time_u_prev_persists_across_two_steps(self):
-        n_local, n_sps, n_vars = 2, 2, 5
-        rng = np.random.default_rng(12)
-        target = _make_target(n_local, n_sps, rng)
-        stub = _make_stub(n_local, n_sps, n_vars, target)
-
-        assert stub._dual_time_U_prev is None
-        gd_mod.MultiGPUDistributedSolver.step(stub, dt=1e-2)
-        assert stub._dual_time_U_prev is not None
-        first_prev = stub._dual_time_U_prev.copy()
-
-        gd_mod.MultiGPUDistributedSolver.step(stub, dt=1e-2)
-        # 第二步的 solution_prev 必须更新为第一步*结束时*的状态
-        # （BDF2 用的 U^{n-1}），不是恒等于第一步开始前的初值。
-        assert not np.allclose(stub._dual_time_U_prev, first_prev)
 
 
 class TestMultiGpuDistributedRkUsesSharedIntegrator:

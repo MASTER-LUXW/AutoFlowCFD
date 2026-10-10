@@ -77,6 +77,7 @@ class TestFullyDistributedDualTimeSupport:
         from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
         from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
         from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
+        from autoflowcfd.core.mpi.distributed_implicit import global_cell_colors, global_cell_colors_d2
 
         mesh, ops = mesh_and_ops
         n_cells = mesh.n_cells
@@ -100,6 +101,9 @@ class TestFullyDistributedDualTimeSupport:
             order=mesh.order, enable_viscous=True,
             time_scheme=TimeIntegrationScheme.DUAL_TIME, dual_time_inner_iter=3,
             wall_distance_source=synthetic_wall_source(mesh),
+            # 内迭代是 Newton 步：全局一致的块着色由 root 随包下发（`fully_distributed.py` 对隐式格式同样这样做）
+            global_cell_colors=global_cell_colors(mesh.face_connectivity, n_cells),
+            global_cell_colors_d2=global_cell_colors_d2(mesh.face_connectivity, n_cells),
         )
         solver = DistributedFRSolver.from_fully_distributed_package(package, n_ranks=1, rank=0)
         assert solver.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME
@@ -116,3 +120,4 @@ class TestFullyDistributedDualTimeSupport:
         # DUAL_TIME 分支必须在 step() 结束时持久化上一物理时间层状态
         # （BDF2 需要），不是 SSP_RK3 分支（那条分支从不碰这个属性）。
         assert solver._dual_time_U_prev is not None
+        assert solver._dual_time_inner["a0"] == 1.0 and solver._dual_time_inner["iterations"] >= 1

@@ -57,12 +57,10 @@ def step(solver, dt: float) -> float:
       平均流步长与湍流场步长都改用局部 CFL 决定——用于收敛到定常解，
       不要求时间精度，局部时间步是标准且正确的加速手段。
     - DUAL_TIME（DES/LES 等真正非稳态仿真应使用的模式）：dt 是真正
-      的物理时间步长，通过 BDF1/BDF2 时间导数项耦合进伪残差（见
-      TimeIntegrator.step_dual_time），伪时间迭代收敛后得到的解在
-      物理时间上精确前进了 dt；局部 CFL 步长只用作内层伪时间迭代的
-      加速手段，不影响物理时间精度。湍流输运方程用同一套双时间步
-      （BDF 物理时间项 + 局部伪时间步内迭代，`core/turbulence/dual_time.py`），
-      与平均流在同一个物理时间上前进。
+      的物理时间步长（BDF1/BDF2）；局部 CFL 步长只是内迭代里 Newton 步被拒时的回退手段，
+      不影响物理时间精度。每个物理步的 BDF 方程用隐式内迭代求解
+      （`time_integration/implicit/physical_time.py`：物理时间项并入稳态的
+      Newton-Krylov 步，带输运方程的湍流模型与平均流紧耦合、同一个物理时间）。
 
     Args:
         solver: FRSolver 实例
@@ -98,8 +96,12 @@ def step(solver, dt: float) -> float:
         # 加法，相对一步残差求值可忽略。
         from autoflowcfd.core.fr_solver.pseudotime_budget import accumulate_pseudo_time
 
-        accumulate_pseudo_time(solver, dt_local.reshape(n_cells, n_sps)[:, 0] if dt_local.ndim > 1
-                               else dt_local[::max(n_sps, 1)])
+        if solver.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME:
+            # 双时间步：每个单元都前进同一个物理时间步（伪时间步只是内迭代的回退手段，不是"走过的时间"）
+            accumulate_pseudo_time(solver, np.full(n_cells, float(dt)))
+        else:
+            accumulate_pseudo_time(solver, dt_local.reshape(n_cells, n_sps)[:, 0] if dt_local.ndim > 1
+                                   else dt_local[::max(n_sps, 1)])
 
         # 湍流源项在当前状态下求值一次（沿用旧有的单步显式-半隐式
         # 阻尼更新，见 turbulence_sst.py::update_fields）。
@@ -135,23 +137,14 @@ def step(solver, dt: float) -> float:
         # 隐式稳态 + k-omega：湍流与平均流在下面的 NEWTON_KRYLOV 分支里紧耦合求解
         # （time_integration/implicit/coupled_step.py 模块文档：分离式在大 CFL 下的块
         # Gauss-Seidel 外迭代会振荡），这里不再单独推进湍流
-        coupled_nk = (solver.time_integrator.scheme == TimeIntegrationScheme.NEWTON_KRYLOV
+        scheme = solver.time_integrator.scheme
+        dual_time = scheme == TimeIntegrationScheme.DUAL_TIME
+        # 隐式步（稳态 Newton-Krylov，或双时间步的隐式内迭代）里带输运方程的湍流模型与平均流紧耦合求解；
+        # 其余情形（显式格式、代数/亚格子模型）湍流按算子分裂先更新
+        coupled_nk = (scheme in (TimeIntegrationScheme.NEWTON_KRYLOV, TimeIntegrationScheme.DUAL_TIME)
                       and solver.turb_model is not None
                       and has_transport_equations(solver.turb_model_name))
-        if coupled_nk:
-            pass
-        elif (solver.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME and solver.turb_model is not None
-              and has_transport_equations(solver.turb_model_name)):
-            # DUAL_TIME：湍流方程同样做双时间步——BDF 物理时间项 + 与平均流同样次数的伪时间内迭代、
-            # 伪时间步取按物理波速的局部步长（`core/turbulence/dual_time.py` 模块文档：此前按物理 dt
-            # 做一次显式更新，物理 dt 不受近壁显式稳定极限约束，k/omega 几步内失去正性并发散）
-            from autoflowcfd.core.turbulence.dual_time import advance_turbulence_dual_time
-
-            advance_turbulence_dual_time(
-                solver, solver.turb_model, np,
-                lambda dtau, term, first: solver.compute_turbulence_source(dtau, term, first),
-                dt_physical, dt, solver.time_integrator.dual_time_steps)
-        else:
+        if not coupled_nk:
             solver.compute_turbulence_source(dt_physical)
 
         # 本步冻结的湍流涡粘（算子分裂：湍流已更新，本步全部残差求值共用
@@ -281,27 +274,11 @@ def step(solver, dt: float) -> float:
         from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
         positivity_func = get_positivity_limiter(solver)
 
-        if solver.time_integrator.scheme == TimeIntegrationScheme.DUAL_TIME:
-            # 真正时间精度的物理时间推进：dt 是物理时间步长（不再被
-            # 忽略），dt_local 只用作内层伪时间迭代的局部加速步长，
-            # 两者不能混用——见 TimeIntegrator.step_dual_time 文档。
-            U_new_flat = solver.time_integrator.step_dual_time(
-                U_flat,
-                mean_flow_residual,
-                dt_local_flat,
-                dt_physical=dt,
-                solution_prev=solver._dual_time_U_prev,
-                max_inner_iter=solver.time_integrator.dual_time_steps,
-                filter_func=filter_func,
-                positivity_func=positivity_func,
-            )
-            solver._dual_time_U_prev = U_flat.copy()
-        elif solver.time_integrator.scheme == TimeIntegrationScheme.NEWTON_KRYLOV:
-            # 隐式稳态步（矩阵自由 Newton-Krylov + 伪瞬态延拓），与其它后端共用同一个
-            # 实现：带 k-omega 时平均流与湍流紧耦合（`implicit/coupled_step.py`），否则
-            # 只解平均流 5 个变量（`implicit/mean_flow_step.py`，一步一个 Newton 步、
-            # 与模态滤波互斥、跨步状态）。
-            # `dt_local_flat` 是 PTC 的 `dtau` 天花板（CFL 律见 adaptive_cfl/ser.py）。
+        if scheme in (TimeIntegrationScheme.DUAL_TIME, TimeIntegrationScheme.NEWTON_KRYLOV):
+            # 隐式步（矩阵自由 Newton-Krylov + 伪瞬态延拓），与其它后端共用同一个实现：带输运方程的湍流
+            # 模型时平均流与湍流紧耦合（`implicit/coupled_step.py`），否则只解平均流 5 个变量
+            # （`implicit/mean_flow_step.py`）。与模态滤波互斥。稳态一步一个 Newton 步；双时间步每个
+            # 物理步做若干个带 BDF 物理时间项的 Newton 步（`implicit/physical_time.py`）。
             from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
             from autoflowcfd.core.time_integration.implicit.mean_flow_step import (
                 step_mean_flow_newton,
@@ -311,22 +288,25 @@ def step(solver, dt: float) -> float:
                 MeanFlowBlockAssembler, unsupported_reason,
             )
 
-            if coupled_nk:
-                from autoflowcfd.core.time_integration.implicit.coupled_step import step_coupled_newton
+            def newton_step(dtau_flat, physical_time=None, advance_ramp=True):
+                """一个 Newton 步（`dtau_flat` 是伪时间步长天花板，CFL 律见 adaptive_cfl/ser.py），
+                新状态写回求解器，返回诊断 info。"""
+                if coupled_nk:
+                    from autoflowcfd.core.time_integration.implicit.coupled_step import step_coupled_newton
 
-                _nk_info = step_coupled_newton(solver, CpuCoupledBackend(solver, nu_av_step), dt_local_flat,
-                                               filter_active=filter_func is not None)
-                U_new_flat = solver.state.U.reshape(n_cells * n_sps, n_vars)
-            else:
-                U_new_flat, _nk_info = step_mean_flow_newton(
-                    solver, mean_flow_residual, U_flat, dt_local_flat,
+                    return step_coupled_newton(solver, CpuCoupledBackend(solver, nu_av_step), dtau_flat,
+                                               filter_active=filter_func is not None,
+                                               physical_time=physical_time, advance_ramp=advance_ramp)
+                u_now = solver.state.U.reshape(n_cells * n_sps, n_vars)
+                u_next, info = step_mean_flow_newton(
+                    solver, mean_flow_residual, u_now, dtau_flat,
                     _reference_scales(solver.freestream, n_vars),
                     red=LocalReductions(np),
                     cell_is_prism=np.arange(n_cells) < int(solver.mesh.n_prism_cells),
                     cell_colors=lambda: single_machine_cell_colors(solver),
                     coupling_graph=partial(single_machine_coupling_graph, solver),
                     order=_current_order(solver), filter_active=filter_func is not None,
-                    positivity=positivity_func,
+                    positivity=positivity_func, physical_time=physical_time,
                     block_assembler=None if unsupported_reason(
                         order=_current_order(solver),
                         wmles=solver.wmles_model is not None) else MeanFlowBlockAssembler(
@@ -334,6 +314,25 @@ def step(solver, dt: float) -> float:
                         mu=solver.mu_molecular, mach_ref=solver.freestream["mach_ref"],
                         low_mach=solver.low_mach_precond_enabled,
                         mu_t=solver._get_turbulent_viscosity_field(mu_t_step), nu_av=nu_av_step, n_sps=n_sps))
+                solver.state.U = u_next.reshape(n_cells, n_sps, n_vars)
+                solver.state._update_primitives()
+                return info
+
+            if dual_time:
+                from autoflowcfd.core.time_integration.implicit.physical_time import (
+                    advance_physical_step, previous_newton_state, store_newton_state,
+                )
+
+                x_now = (CpuCoupledBackend(solver, nu_av_step).state() if coupled_nk else U_flat.copy())
+                advance_physical_step(
+                    solver, x_now, previous_newton_state(solver, np, n_cells, n_sps),
+                    lambda term, first: newton_step(
+                        solver._compute_local_time_step().reshape(n_cells * n_sps), term, first), dt)
+                store_newton_state(solver, x_now, n_cells, n_sps, n_vars)
+                _nk_info = solver._newton_last_info
+            else:
+                _nk_info = newton_step(dt_local_flat)
+            U_new_flat = solver.state.U.reshape(n_cells * n_sps, n_vars)
         elif solver.time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
             # 显式处理无粘对流项、隐式处理粘性+湍流扩散项——通用的
             # step(...) 单一残差入口表达不了这个拆分（见该方法里的
@@ -363,7 +362,9 @@ def step(solver, dt: float) -> float:
         # 放在 step() 末尾（不是 solve() 循环里），这样 solve() 和
         # order_continuation 两条路径都自动受益。
         _cfl_ctrl = getattr(solver, '_cfl_controller', None)
-        if _cfl_ctrl is not None:
+        if dual_time:
+            pass          # 伪时间 CFL 在每个物理步的内迭代里更新（implicit/physical_time.py）
+        elif _cfl_ctrl is not None:
             if solver.time_integrator.scheme == TimeIntegrationScheme.NEWTON_KRYLOV:
                 # SER 看 Newton 实际在解的系统的残差 ||Gamma R||（步前、与上面
                 # 物理残差同一时刻），并区分"残差上升但步被完整接受"（物理暂态，

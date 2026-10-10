@@ -14,7 +14,7 @@ FRSolver.step() 的主循环，产出 `build_filter_func` 回调。真实复现�
 Shu-Osher stage 全部组合完成后）滤波一次并不够——混叠噪声在*中间*
 stage（Stage1/Stage2 各自重新求值残差时）就已经放大到 NaN，等不到
 最终组合完成；因此 `build_filter_func` 产出的回调要传给
-TimeIntegrator.step()/step_dual_time()，由它们在*每个* stage 的正定性
+TimeIntegrator.step()，由它在*每个* stage 的正定性
 投影之后立即调用（见 core/time_integration.py::_ssp_rk_stage_step），
 是谱/DG 方法处理这类混叠失稳的标准做法（Hesthaven & Warburton 2008
 §5.3；Boyd 2001 Ch.11），不改变已解析到的低阶物理精度（滤波器对常数场
@@ -61,7 +61,7 @@ from .sensor_gate import (  # noqa: F401
 
 
 def build_filter_func(solver) -> Callable[[np.ndarray], np.ndarray]:
-    """构造供 TimeIntegrator.step()/step_dual_time() 在每个 RK stage 后
+    """构造供 TimeIntegrator.step() 在每个 RK stage 后
     调用的滤波回调，操作对象是展平形状 (n_cells*n_sps, n_vars) 的数组
     （TimeIntegrator 内部约定，与 fr_solver.py::step 里 U_flat 的展平
     方式一致）。
@@ -69,8 +69,8 @@ def build_filter_func(solver) -> Callable[[np.ndarray], np.ndarray]:
     Returns:
         滤波回调，**或 None**——两个滤波矩阵都是单位阵时（`AFCFD_FILTER_
         MODE=off`，或 mild 档取 sigma_top=1.0）返回 None，让调用方整个
-        跳过这次调用而不是白乘一遍单位阵。`TimeIntegrator.step`/
-        `step_dual_time` 对 `filter_func=None` 有显式支持（分布式路径在
+        跳过这次调用而不是白乘一遍单位阵。`TimeIntegrator.step`
+        对 `filter_func=None` 有显式支持（分布式路径在
         n_sps==1 时本来就传 None）。
     """
     mesh = solver.mesh
@@ -90,7 +90,7 @@ def build_filter_func(solver) -> Callable[[np.ndarray], np.ndarray]:
     # `AFCFD_FILTER_MODE=off` 下两个矩阵都是单位阵（见 fr/modal_filter.py
     # 的 `FILTER_MODE == "off"` 短路），继续每个 RK stage 乘一遍是纯浪费：
     # 79 万单元 P1 下 U 是 (791492,8,5) ≈ 253MB，一步三个 stage 要多读写
-    # 约 1.5GB，全是内存带宽。`TimeIntegrator.step`/`step_dual_time` 对
+    # 约 1.5GB，全是内存带宽。`TimeIntegrator.step` 对
     # `filter_func=None` 有显式支持（分布式路径在 n_sps==1 时本来就传
     # None），所以直接返回 None 让调用方跳过整个调用。
     #

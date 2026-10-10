@@ -86,7 +86,8 @@ from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 @click.option("--skip-quality-check", is_flag=True, help='跳过求解前的网格质量门检查（不建议，仅用于临时诊断）')
 @click.option('--reference-area', type=float, default=None, help='气动系数参考面积 (m^2)，提供时求解结束后打印 Cd/Cl')
 @click.option('--dual-time-inner-iter', type=int, default=DEFAULT_DUAL_TIME_STEPS,
-              help=f'--time-method dual-time 时每个物理步的伪时间内迭代次数（默认 {DEFAULT_DUAL_TIME_STEPS}）')
+              help=f'--time-method dual-time 时每个物理步的内迭代（带 BDF 物理时间项的 Newton 步）次数上限，'
+                   f'残差降到该物理步起点的 1e-3 即提前结束，通常 2~7 次（默认上限 {DEFAULT_DUAL_TIME_STEPS}）')
 @click.option('--threads', '-j', type=int, default=-1, help=THREADS_HELP)
 @click.option('--init-from', 'init_checkpoint', type=click.Path(exists=True), default=None,
               help='从稳态 checkpoint 文件初始化瞬态求解器（典型工作流：先稳态 SST 收敛，'

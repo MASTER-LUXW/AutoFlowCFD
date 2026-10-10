@@ -236,115 +236,64 @@ class TestDistributedStepMatchesSingleMachine:
         assert rel <= 1e-10, f"分布式 IMEX 一步后的状态与单机不一致（相对 {rel:.3e}）"
 
 class TestDistributedDualTimeStepping:
-    """DUAL_TIME（真正时间精度的瞬态仿真模式）分布式支持验证（2026-09-02，
-    真实bug修复——见 __init__/step() 里 `self.time_integrator` 构造处的
-    说明：此前无条件硬编码 SSP_RK3、`step()` 无条件调用
-    `_ssp_rk_stage_step`，DUAL_TIME 请求了也会被静默换成稳态收敛加速
-    模式，完全无路可走）。
+    """DUAL_TIME 的分布式接线：每个物理步是带 BDF 物理时间项的 Newton 步（与单机同一个实现，
+    `time_integration/implicit/physical_time.py`），上一时间层跨步保存。带湍流模型的对照见
+    `test_dual_time_newton.py`。"""
 
-    判据：分布式路径与单机路径用同一个物理 dt_physical、同一个
-    max_inner_iter，只要两者的伪时间内迭代都真正收敛到容差以内，
-    最终解就应该逐位一致——不像 SSP-RK3 稳态加速模式那样有"分布式用
-    全局固定 dt、单机用逐 SP 局部 CFL 步长"这个天然的、无关本次改动
-    的差异（那个差异只存在于伪时间加速路径，不影响 DUAL_TIME 收敛到
-    的物理解本身，见 TestDistributedFRSolverMainInitStep 类文档的
-    说明）。"""
+    _KW = dict(mu_molecular=1.8e-5, rho_inf=1.225, vel_inf=33.33, p_inf=101325.0)
 
-    def test_dual_time_spatial_residual_matches_single_machine(self, mesh_and_ops):
-        """DUAL_TIME 完整收敛后的最终解不适合用来跟单机比较：单机路径
-        用逐 SP 局部 CFL 步长做伪时间加速、分布式路径目前用全局固定
-        步长（见 __init__ 里对应说明——这是分布式稳态加速路径本来就
-        有的、独立于本次 DUAL_TIME 改动的已知架构差异），两条路径的
-        伪时间迭代*路径*不同，走到收敛判据触发的落点也可能不同（已
-        实测复现，即使从精确均匀自由流场出发也是如此——这个合成网格
-        的四面体单元已知有坍缩坐标退化引起的条件数病态，见
-        [[tet_collapsed_coord_anisotropy]] 记忆，具体成因超出本次
-        DUAL_TIME 接入验证的范围）。
-
-        真正需要验证、且不受这个架构差异干扰的是：`step_dual_time`
-        实际收到的 `spatial_residual(U)` 回调（分布式版就是 step()
-        已有的 `residual_func`，DUAL_TIME 分支直接复用它，不需要额外
-        包装）算出的值，必须与单机 `FRSolver.compute_inviscid_
-        residual()+compute_viscous_residual()`（DUAL_TIME 用的正是
-        同一个纯空间残差，与所选时间推进方案本身无关）在同一个初始
-        状态上逐位一致——这是本次改动真正新增、真正有风险的部分
-        （`time_integrator` 构造/`step()` 分支/`residual_func` 复用），
-        `step_dual_time` 内部 BDF 构造+收敛迭代本身是既有单机数值
-        逻辑，不是本次改动的对象。"""
-        from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
+    def _pair(self, mesh, ops, seed):
         from autoflowcfd.core.fr_solver.solver import FRSolver
-
-        mesh, ops = mesh_and_ops
-        n_cells = mesh.n_cells
-        rng = np.random.default_rng(555)
-        U0 = _nonuniform_U(mesh, rng)
-        freestream_kwargs = dict(
-            mu_molecular=1.8e-5, rho_inf=1.225, vel_inf=33.33, p_inf=101325.0,
-        )
-
-        ref_solver = FRSolver(
-            mesh, order=mesh.order, turb_model_name="none",
-            time_scheme=TimeIntegrationScheme.DUAL_TIME, **freestream_kwargs,
-        )
-        ref_solver.state.U[:] = U0
-        ref_solver.state.Q[:] = conserved_to_primitive(U0[..., :5])
-        expected_R = (
-            ref_solver.compute_inviscid_residual() + ref_solver.compute_viscous_residual()
-        )
-        expected_spatial_residual = (-expected_R).reshape(n_cells * mesh.n_sps_per_cell, 5)
-
-        dist_solver = DistributedFRSolver(
-            mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
-            n_ranks=1, order=mesh.order, turb_model_name="none",
-            time_scheme=TimeIntegrationScheme.DUAL_TIME, **freestream_kwargs,
-        )
-        dist_solver.state.U[:n_cells] = U0
-        dist_solver.state.Q[:n_cells] = conserved_to_primitive(U0[..., :5])
-
-        captured = {}
-        real_step_dual_time = dist_solver.time_integrator.step_dual_time
-
-        def _spy_step_dual_time(solution, spatial_residual, *args, **kwargs):
-            captured["value"] = spatial_residual(solution)
-            return real_step_dual_time(solution, spatial_residual, *args, **kwargs)
-
-        dist_solver.time_integrator.step_dual_time = _spy_step_dual_time
-        dist_solver.step(1e-5)
-
-        assert "value" in captured, "step_dual_time 必须真正被 step() 调用到"
-        np.testing.assert_allclose(
-            captured["value"], expected_spatial_residual, rtol=1e-10, atol=1e-14,
-        )
-
-    def test_dual_time_second_step_uses_bdf2_with_solution_prev(self, mesh_and_ops):
-        """第二步应该真正用上 BDF2（`solution_prev`），不是每步都退化成
-        BDF1——验证 `self._dual_time_U_prev` 确实在两步之间被正确持久化
-        并传给 `step_dual_time`。"""
         from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
 
-        mesh, ops = mesh_and_ops
-        n_cells = mesh.n_cells
-        rng = np.random.default_rng(556)
-        U0 = _nonuniform_U(mesh, rng)
-
-        dist_solver = DistributedFRSolver(
+        U0 = _nonuniform_U(mesh, np.random.default_rng(seed))
+        single = FRSolver(mesh, order=mesh.order, turb_model_name="none",
+                          time_scheme=TimeIntegrationScheme.DUAL_TIME, **self._KW)
+        single.state.U[:] = U0
+        single.state.Q[:] = conserved_to_primitive(U0[..., :5])
+        dist = DistributedFRSolver(
             mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity,
             n_ranks=1, order=mesh.order, turb_model_name="none",
-            time_scheme=TimeIntegrationScheme.DUAL_TIME,
-            mu_molecular=1.8e-5, rho_inf=1.225, vel_inf=33.33, p_inf=101325.0,
-        )
-        dist_solver.state.U[:n_cells] = U0
-        dist_solver.state.Q[:n_cells] = conserved_to_primitive(U0[..., :5])
+            time_scheme=TimeIntegrationScheme.DUAL_TIME, **self._KW)
+        dist.state.U[:mesh.n_cells] = U0
+        dist.state.Q[:mesh.n_cells] = conserved_to_primitive(U0[..., :5])
+        for s in (single, dist):
+            s.time_integrator.dual_time_steps = 40
+            s.time_integrator.dual_time_tolerance = 1e-10
+        return single, dist, U0
 
-        assert dist_solver._dual_time_U_prev is None
-        dist_solver.step(1e-5)
-        assert dist_solver._dual_time_U_prev is not None
-        first_step_prev = dist_solver._dual_time_U_prev.copy()
-        dist_solver.step(1e-5)
-        # solution_prev 必须更新为第一步*结束时*的 U_flat（BDF2 用的
-        # U^{n-1}），不是恒为初始 U0 或恒为 None。
-        assert not np.allclose(dist_solver._dual_time_U_prev, first_step_prev)
-        assert np.all(np.isfinite(dist_solver.state.U[:n_cells]))
+    def test_two_physical_steps_match_single_machine(self, mesh_and_ops):
+        """两个物理步（BDF1 + BDF2）都解到 1e-10：分布式与单机得到同一个 BDF 解。"""
+        mesh, ops = mesh_and_ops
+        n = mesh.n_cells
+        single, dist, U0 = self._pair(mesh, ops, 555)
+        scale = np.abs(U0).max(axis=(0, 1))
+        scale[1:4] = np.abs(U0[..., 1:4]).max()
+        for k, a0 in enumerate((1.0, 1.5)):
+            before = dist.state.U[:n].copy()
+            single.step(1e-5)
+            dist.step(1e-5)
+            assert dist._dual_time_inner["converged"] and dist._dual_time_inner["a0"] == a0
+            # 上一时间层是本物理步开始时的解
+            np.testing.assert_array_equal(dist._dual_time_U_prev.reshape(before.shape), before)
+            rel = (np.abs(dist.state.U[:n] - single.state.U) / scale).max()
+            assert rel <= 1e-7, f"第 {k + 1} 个物理步与单机相对差 {rel:.3e}"
+        assert (np.abs(dist.state.U[:n] - U0) / scale).max() > 1e-6          # 解确实推进了
+
+    def test_pseudo_time_cfl_is_not_driven_by_the_outer_residual(self, mesh_and_ops):
+        """伪时间 CFL 每个物理步从起点重新起步、只在内迭代里更新；step() 末尾不再拿外层残差更新它
+        （此前显式内迭代下它是固定 CFL，没有这个问题）。"""
+        from autoflowcfd.core.time_integration.adaptive_cfl.policy import DUAL_TIME_PSEUDO_CFL_START
+
+        mesh, ops = mesh_and_ops
+        _single, dist, _U0 = self._pair(mesh, ops, 556)
+        seen = []
+        real_update = dist._cfl_controller.update
+        dist._cfl_controller.update = lambda *a, **k: (seen.append(dist._dual_time_inner), real_update(*a, **k))[1]
+        dist._dual_time_inner = "before"
+        dist.step(1e-5)
+        assert dist._cfl_controller.cfl_start == DUAL_TIME_PSEUDO_CFL_START
+        assert seen and all(x == "before" for x in seen)      # 全部更新都发生在内迭代期间（摘要尚未写回）
 
 
 class TestDistributedCheckpointRoundTrip:

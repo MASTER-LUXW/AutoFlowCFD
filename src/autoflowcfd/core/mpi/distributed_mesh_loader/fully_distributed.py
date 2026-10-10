@@ -146,14 +146,11 @@ def distributed_mesh_load_v2(
                 from autoflowcfd.core.turbulence.des import compute_h_max_and_h_wn
                 h_max_global, h_wn_global = compute_h_max_and_h_wn(mesh)
 
-        # 隐式稳态的块 Jacobi 着色必须全局一致（见 core/mpi/distributed_implicit.py），
+        # 隐式步（稳态 Newton-Krylov、双时间步内迭代）的块 Jacobi 着色必须全局一致（见 core/mpi/distributed_implicit.py），
         # 只有 root 持有全局面连接关系，在这里算一次
         global_cell_colors = global_cell_colors_d2 = None
-        from autoflowcfd.core.time_integration.base import (
-            TimeIntegrationScheme, scheme_from_name,
-        )
-        if (time_scheme is not None
-                and scheme_from_name(time_scheme) == TimeIntegrationScheme.NEWTON_KRYLOV):
+        from autoflowcfd.core.time_integration.base import IMPLICIT_SCHEMES, scheme_from_name
+        if time_scheme is not None and scheme_from_name(time_scheme) in IMPLICIT_SCHEMES:
             from autoflowcfd.core.mpi.distributed_implicit import (
                 global_cell_colors as _colors, global_cell_colors_d2 as _colors_d2,
             )
