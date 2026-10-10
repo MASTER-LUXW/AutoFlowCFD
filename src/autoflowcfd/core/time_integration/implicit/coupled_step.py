@@ -62,7 +62,7 @@ from .block_jacobi import BlockJacobiCache
 from .forcing import EisenstatWalkerForcing
 from .globalization import ResidualNorm
 from .jfnk import step_newton_krylov
-from .mean_flow_step import N_MEAN_FLOW_VARS, require_no_modal_filter
+from .mean_flow_step import N_MEAN_FLOW_VARS, note_linear_growth, require_no_modal_filter
 from .physicality import ScaledFieldRowLimits
 
 #: 两个子系统在耦合未知量里的列（湍流列数由模型声明，`TransportedTurbulence.n_transported`）。
@@ -286,6 +286,7 @@ def step_coupled_newton(solver, backend, dtau_flat, *, filter_active: bool = Fal
     backend.install(x_new, dtau_flat)
     info.update(_subsystem_norms(residual.r0, backend.positivity.norm_weights, red))
     solver._newton_last_info = info
+    note_linear_growth(solver, info)
     if info["theta"] <= 0.0:
         logger.warning(
             "耦合 Newton 步未能前进（theta=0, gmres_info=%s, gmres_iters=%d, dtau_scale=%.3e, 本步已缩 "

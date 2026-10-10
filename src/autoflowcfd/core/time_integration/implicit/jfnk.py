@@ -309,7 +309,7 @@ def step_newton_krylov(
         return u0_flat, dict(res_norm=0.0, res_norm_new=0.0, eta=0.0,
                              gmres_iters=0, n_matvec=0, n_residual_extra=0,
                              theta=0.0, theta_physicality=0.0, limited_fraction=0.0,
-                             gmres_info=0, linear_rel_residual=0.0,
+                             gmres_info=0, linear_rel_residual=0.0, linear_growth=0.0,
                              dtau_scale=ctrl.scale, n_dtau_cuts=0,
                              local_dtau_scale=local_scale, local_dtau_min=red.min(local_scale))
 
@@ -336,6 +336,7 @@ def step_newton_krylov(
     res_norm_new = res_norm
     gmres_info = 0
     linear_rel = float("nan")
+    linear_growth = float("nan")
     iters_total = 0
     iters_since_build = 0
     n_extra_total = 0
@@ -369,6 +370,10 @@ def step_newton_krylov(
         iters_since_build = iters
         gmres_info = ginfo
         if du is not None:
+            # 线性系统自己预测的残差放大倍数：(I/dtau + J) dU = -R 解出的 dU 满足 R + J dU = -dU/dtau，
+            # 所以 ||dU/dtau|| / ||R|| 就是"走完这一步后线性化残差是原来的几倍"（见
+            # `mean_flow_step.py::note_linear_growth`）。
+            linear_growth = norm(du / dtau_try[:, None]) / res_norm
             alpha, theta_phys, limited_frac = _cellwise_relaxation(
                 physicality(u0_flat, du, red), rows_per_cell, red)
             u_try, theta, res_norm_new, n_extra = accept_step(
@@ -408,7 +413,7 @@ def step_newton_krylov(
                        n_residual_extra=n_extra_total,
                        theta=theta, theta_physicality=theta_phys,
                        limited_fraction=limited_frac,
-                       gmres_info=gmres_info, linear_rel_residual=linear_rel,
+                       gmres_info=gmres_info, linear_rel_residual=linear_rel, linear_growth=linear_growth,
                        dtau_scale=ctrl.scale, n_dtau_cuts=n_cuts,
                        local_dtau_scale=local_scale,
                        local_dtau_min=red.min(local_scale))

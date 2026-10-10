@@ -81,6 +81,7 @@ def reset_newton_state(solver) -> None:
     """
     solver._newton_forcing = None
     solver._newton_last_info = None
+    solver._newton_unstable_steps = 0
     solver._newton_dtau_scale = 1.0
     solver._newton_local_dtau = None
     solver._newton_block_precond = None
@@ -105,7 +106,46 @@ def _format_newton_info(tag: str, info) -> str:
     if info.get("local_dtau_min", 1.0) < 1.0:
         # 逐行局部伪时间步长缩放的最小值（被物理性松弛的行降过局部 dtau，见 physicality.py）
         txt += f" ldtau={info['local_dtau_min']:.2g}"
+    if info.get("linear_growth", 0.0) > 1.0:
+        # 线性系统自己预测残差放大（见 note_linear_growth）
+        txt += f" lin_growth={info['linear_growth']:.2f}"
     return txt
+
+
+#: 线性预测放大倍数超过它、且该步没有被完整接受，记为一次"线性化不稳定"的步。
+UNSTABLE_LINEAR_GROWTH = 1.5
+
+#: 累计这么多次之后给出提示（之后每隔同样的次数再提示一次）。
+UNSTABLE_STEPS_BEFORE_WARNING = 5
+
+
+def note_linear_growth(solver, info: dict) -> None:
+    """记录一个 Newton 步的线性预测放大倍数，反复出现时提示"该阶数下的定常解线性不稳定"。
+
+    伪瞬态 Newton 步解的是 `(I/dtau + J) dU = -R`，于是线性化残差 `R + J dU = -dU/dtau`，
+    `linear_growth = ||dU/dtau|| / ||R||`。`J` 的特征值实部全为正（定常解线性稳定）时
+    `(I + dtau J)^{-1}` 不放大，这个比值不超过 1 的量级；比值明显大于 1 说明 `J` 有实部为负、
+    量级约 `1/dtau` 的特征值——线性化流动里有增长率约 `1/dtau` 的不稳定模态，`dtau` 再放大
+    `I/dtau + J` 就接近奇异，Newton 方向失去意义、被残差接受判据回溯，自适应 CFL 因此停在
+    `dtau ~ 1/增长率` 附近，残差不再下降。
+
+    cube_demo（SA，P1，2026-10-10 实测）：CFL 37/75/150 下比值 0.80/1.52/4.75，对应整步后的真实残差
+    1.7/4.7/47 倍；超出线性预测的部分 99% 集中在立方体前缘棱边后方、贴壁第一层的约 300 个棱柱里
+    （分离剪切层），那里 `1/dtau` 约 1e4 1/s，与按剪切层速度差/厚度估计的 Kelvin-Helmholtz 增长率同量级；
+    逐单元对角块的特征值实部全部为正（不是单元内离散的反阻尼）。P0 的数值耗散压住了这个模态，同一网格上
+    P0 在 21 步内收敛 7 个量级。这种情形不是求解器参数能解决的：该阶数下没有稳定的定常解，应改用
+    时间精确计算并做时间平均。
+    """
+    if newton_step_ok(info) or not info.get("linear_growth", 0.0) > UNSTABLE_LINEAR_GROWTH:
+        return
+    solver._newton_unstable_steps += 1
+    if solver._newton_unstable_steps % UNSTABLE_STEPS_BEFORE_WARNING == 0:
+        logger.warning(
+            "隐式稳态：已有 %d 个 Newton 步的线性系统自身预测残差放大（本步 %.2f 倍）且未被完整接受——线性化"
+            "算子有增长率约 1/dtau 的不稳定模态，伪时间步长无法继续放大。持续出现说明当前阶数下的定常解线性"
+            "不稳定（典型：钝体分离剪切层、尾迹脱落），残差不会再下降；应改用瞬态计算（solve transient）"
+            "并对结果做时间平均，或以低一阶的定常解为准。"
+            % (solver._newton_unstable_steps, info["linear_growth"]))
 
 
 def newton_monitor_suffix(solver) -> str:
@@ -189,6 +229,7 @@ def step_mean_flow_newton(
         real_rows=red.xp.asarray(real_row_mask(cell_is_prism, u_flat.shape[0] // np.asarray(cell_is_prism).size,
                                                order)))
     solver._newton_last_info = info
+    note_linear_growth(solver, info)
     solver._newton_dtau_scale = info["dtau_scale"]
     solver._newton_local_dtau = info["local_dtau_scale"]
     if info["theta"] <= 0.0:
