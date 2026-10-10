@@ -362,7 +362,7 @@ def _compute_boundary_ghost_states_batched(flat, Q: np.ndarray, ghost_provider) 
         elif bc_type == "FARFIELD":
             result = farfield_ghost_state(Q_o_flat, cfg["Q_free"])
         elif bc_type == "INLET":
-            result = inlet_ghost_state(Q_o_flat, cfg["Q_inlet"], normal_flat)
+            result = inlet_ghost_state(Q_o_flat, cfg["Q_inlet"])
         elif bc_type == "OUTLET":
             result = outlet_ghost_state(Q_o_flat, cfg["p_outlet"], normal_flat)
         elif bc_type == "SYMMETRY":

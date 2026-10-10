@@ -104,21 +104,25 @@ def farfield_ghost_state(Q_int: np.ndarray, Q_free: np.ndarray) -> np.ndarray:
     return np.tile(np.asarray(Q_free), (Q_int.shape[0], 1))
 
 
-def inlet_ghost_state(Q_int: np.ndarray, Q_inlet: np.ndarray, normal: np.ndarray) -> np.ndarray:
-    """速度入口幽灵态：法向流入时用指定入口状态，流出（回流）时用内部状态延拓。
+def inlet_ghost_state(Q_int: np.ndarray, Q_inlet: np.ndarray) -> np.ndarray:
+    """速度入口幽灵态：给定的入口状态，与本侧流向无关（哪些分量真正起作用由黎曼求解器的迎风决定，
+    与远场同一机制）。
+
+    2026-10-10 以前"本侧法向流出时改用内部状态延拓"。那是一个**间断**的切换：入口与无滑移壁相交处
+    本侧法向速度在零附近，幽灵态在"入口状态（来流速度）"与"内部状态"之间来回跳，残差在该点不连续。
+    实测（通道 4x4x2 棱柱 P1，均匀来流 30 m/s + 无滑移壁，BDF1 一个物理步 dt=1e-4，稠密差分 Jacobian
+    的精确 Newton）：入口用切换时 6 次迭代 ||G|| 停在 3e-3~8e-3 来回跳，Jacobian 在迭代间时有时无地
+    出现 -1.4e3 1/s 的特征值；不切换时 7.7e-2 -> 7.3e-7 -> 8e-11 二次收敛。回流点上延拓内部状态本身
+    也不适定（没有给任何条件）。
 
     Args:
-        Q_inlet: 形状 (5,)（全入口面统一常量，原有行为）或 (n_fp,5)
-            （逐 Flux Point 不同——BD-02 合成湍流入口 SEM 用这个形式喂入
-            随时间演化、逐点不同的脉动速度，见 boundary/synthetic_inlet.py
-            与本文件 InletSEMGhostState）。
+        Q_inlet: 形状 (5,)（全入口面统一常量）或 (n_fp,5)（逐通量点不同——合成湍流入口 SEM 喂入
+            随时间演化的脉动速度，见 boundary/synthetic_inlet.py 与本文件 InletSEMGhostState）。
     """
-    vel_n = np.sum(Q_int[:, 1:4] * normal, axis=1)
-    inflow = vel_n < 0.0  # 法向量指向域外，流入时法向速度为负
-    Q_inlet_arr = np.asarray(Q_inlet)
-    Q_inlet_broadcast = Q_inlet_arr[np.newaxis, :] if Q_inlet_arr.ndim == 1 else Q_inlet_arr
-    Q_ghost = np.where(inflow[:, np.newaxis], Q_inlet_broadcast, Q_int)
-    return Q_ghost
+    Q_inlet_arr = np.asarray(Q_inlet, dtype=Q_int.dtype)
+    if Q_inlet_arr.ndim == 1:
+        return np.tile(Q_inlet_arr, (Q_int.shape[0], 1))
+    return Q_inlet_arr.copy()
 
 
 class InletSEMGhostState:
@@ -159,16 +163,27 @@ class InletSEMGhostState:
         Q_inlet_fp = np.tile(self.Q_mean, (n_fp, 1))
         Q_inlet_fp[:, 1:4] = u_inst
 
-        return inlet_ghost_state(Q_owner_fp, Q_inlet_fp, true_normal)
+        return inlet_ghost_state(Q_owner_fp, Q_inlet_fp)
 
 
 def outlet_ghost_state(Q_int: np.ndarray, p_outlet: float, normal: np.ndarray) -> np.ndarray:
-    """压力出口幽灵态：法向流出时固定静压、其余变量延拓；回流时用内部状态。"""
+    """压力出口幽灵态：密度与速度延拓，压力给定——流出时是静压 `p_outlet`，回流时把 `p_outlet` 当总压
+    （静压取 `p_outlet - rho u_n^2 / 2`，`u_n` 为本侧法向速度）。
+
+    回流时扣掉动压是工业软件压力出口的通行做法（给定值按总压解释）：回流带进域内的动能由压差提供，
+    回流不会自我加速。两支在 `u_n = 0` 处连续且一阶导数连续。
+
+    2026-10-10 以前"回流时幽灵态取内部状态"（压力也延拓），在 `u_n = 0` 处幽灵态压力从 `p_outlet`
+    跳到内部压力。出口与无滑移壁相交处本侧法向速度在零附近，残差不连续，Newton 不收敛（同
+    `inlet_ghost_state` 的实测：只把出口换成切换写法，6 次精确 Newton 后 ||G|| 仍在 1e-3 量级，
+    Jacobian 最小特征值实部在 -8e2 ~ -9e3 1/s 之间跳）。
+    """
+    rho = Q_int[:, 0]
     vel_n = np.sum(Q_int[:, 1:4] * normal, axis=1)
-    outflow = vel_n > 0.0
+    backflow = np.minimum(vel_n, 0.0)
 
     Q_ghost = Q_int.copy()
-    Q_ghost[:, 4] = np.where(outflow, p_outlet, Q_int[:, 4])
+    Q_ghost[:, 4] = p_outlet - 0.5 * rho * backflow ** 2
     return Q_ghost
 
 
@@ -220,7 +235,7 @@ class BoundaryGhostStateProvider:
             sem_ghost = cfg.get("sem")
             if sem_ghost is not None:
                 return sem_ghost(face_idx, Q_owner_fp, true_normal)
-            return inlet_ghost_state(Q_owner_fp, cfg["Q_inlet"], true_normal)
+            return inlet_ghost_state(Q_owner_fp, cfg["Q_inlet"])
         elif bc_type == "OUTLET":
             return outlet_ghost_state(Q_owner_fp, cfg["p_outlet"], true_normal)
         elif bc_type == "SYMMETRY":
@@ -253,7 +268,7 @@ def viscous_boundary_kind_for_config(cfg: dict) -> int:
     就是解析梯度算出的那一份，与 `tau_w` 叠加。
     """
     from autoflowcfd.core.fr_operators.flux_kernels import (
-        VBC_DIRICHLET, VBC_INLET, VBC_MIRROR, VBC_NEUMANN, VBC_NOSLIP_WALL,
+        VBC_DIRICHLET, VBC_MIRROR, VBC_NEUMANN, VBC_NOSLIP_WALL,
     )
 
     bc_type = cfg["type"]
@@ -261,10 +276,8 @@ def viscous_boundary_kind_for_config(cfg: dict) -> int:
         return VBC_NOSLIP_WALL if cfg.get("is_no_slip", True) else VBC_MIRROR
     if bc_type == "SYMMETRY":
         return VBC_MIRROR
-    if bc_type == "FARFIELD":
+    if bc_type in ("FARFIELD", "INLET"):
         return VBC_DIRICHLET
-    if bc_type == "INLET":
-        return VBC_INLET
     if bc_type == "OUTLET":
         return VBC_NEUMANN
     raise ValueError(f"Unknown boundary condition type '{bc_type}'")

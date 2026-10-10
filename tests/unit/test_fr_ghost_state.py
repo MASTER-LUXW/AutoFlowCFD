@@ -1,6 +1,7 @@
 """AutoFlowCFD V2.0 - FR 边界幽灵态构造单元测试 (BD-01)。"""
 
 import numpy as np
+import pytest
 
 from autoflowcfd.boundary.fr_ghost_state import (
     farfield_ghost_state,
@@ -40,31 +41,51 @@ def test_farfield_returns_freestream_everywhere():
     assert np.allclose(Q_ghost, np.tile(Q_free, (5, 1)))
 
 
-def test_inlet_uses_inlet_state_on_inflow_and_interior_on_outflow():
-    normal = np.array([[1.0, 0.0, 0.0]])  # 指向域外 (+x)
+def test_inlet_ghost_is_the_inlet_state_whatever_the_interior_flow_direction():
+    """入口幽灵态恒为给定的入口状态。此前本侧法向流出时改用内部状态——在法向速度过零处间断。"""
     Q_inlet = np.array([1.2, -10.0, 0.0, 0.0, 1e5])
+    Q_int = np.array([[1.0, -5.0, 0.0, 0.0, 9e4],          # 本侧流入
+                      [1.0, 5.0, 0.0, 0.0, 9e4],           # 本侧流出
+                      [1.0, 0.0, 3.0, 0.0, 9e4]])          # 法向速度为零
+    np.testing.assert_array_equal(inlet_ghost_state(Q_int, Q_inlet), np.tile(Q_inlet, (3, 1)))
+    per_point = np.array([[1.2, -10.0, 0.0, 0.0, 1e5], [1.1, -9.0, 1.0, 0.0, 1e5], [1.3, -8.0, 0.0, 2.0, 1e5]])
+    ghost = inlet_ghost_state(Q_int, per_point)
+    np.testing.assert_array_equal(ghost, per_point)
+    assert ghost is not per_point
 
-    Q_int_inflow = np.array([[1.0, -5.0, 0.0, 0.0, 9e4]])  # un = -5 < 0 -> 流入
-    Q_ghost = inlet_ghost_state(Q_int_inflow, Q_inlet, normal)
-    assert np.allclose(Q_ghost[0], Q_inlet)
 
-    Q_int_outflow = np.array([[1.0, 5.0, 0.0, 0.0, 9e4]])  # un = 5 > 0 -> 流出
-    Q_ghost2 = inlet_ghost_state(Q_int_outflow, Q_inlet, normal)
-    assert np.allclose(Q_ghost2[0], Q_int_outflow[0])
-
-
-def test_outlet_fixes_pressure_on_outflow_only():
+def test_outlet_pressure_is_static_on_outflow_and_total_on_backflow():
     normal = np.array([[1.0, 0.0, 0.0]])
     p_outlet = 101325.0
 
-    Q_int_out = np.array([[1.0, 5.0, 0.0, 0.0, 9e4]])  # 流出
-    Q_ghost = outlet_ghost_state(Q_int_out, p_outlet, normal)
-    assert np.isclose(Q_ghost[0, 4], p_outlet)
-    assert np.isclose(Q_ghost[0, 0], Q_int_out[0, 0])  # 密度延拓不变
+    Q_out = np.array([[1.0, 5.0, 2.0, 0.0, 9e4]])  # 流出
+    ghost = outlet_ghost_state(Q_out, p_outlet, normal)
+    assert ghost[0, 4] == p_outlet
+    np.testing.assert_array_equal(ghost[0, :4], Q_out[0, :4])   # 密度与速度延拓
 
-    Q_int_in = np.array([[1.0, -5.0, 0.0, 0.0, 9e4]])  # 回流
-    Q_ghost2 = outlet_ghost_state(Q_int_in, p_outlet, normal)
-    assert np.isclose(Q_ghost2[0, 4], Q_int_in[0, 4])  # 回流时延拓内部压力，不强加出口压力
+    Q_back = np.array([[1.2, -5.0, 2.0, 0.0, 9e4]])  # 回流：给定值按总压解释，扣掉法向动压
+    ghost = outlet_ghost_state(Q_back, p_outlet, normal)
+    assert ghost[0, 4] == pytest.approx(p_outlet - 0.5 * 1.2 * 25.0)
+    np.testing.assert_array_equal(ghost[0, :4], Q_back[0, :4])
+
+
+def test_inlet_and_outlet_ghosts_are_smooth_through_zero_normal_velocity():
+    """幽灵态对本侧法向速度连续可微。此前两者都在 u_n = 0 处跳变（入口：入口状态 <-> 内部状态；出口：
+    p_outlet <-> 内部压力），与无滑移壁相交处 u_n 在零附近，残差不连续，Newton 不收敛
+    （`test_dual_time_newton.py::test_inner_iterations_converge_on_a_wall_bounded_channel`）。"""
+    normal = np.array([[1.0, 0.0, 0.0]])
+    Q_inlet = np.array([1.2, 30.0, 0.0, 0.0, 1e5])
+
+    def at(un):
+        return np.array([[1.1, un, 4.0, -2.0, 9e4]])
+
+    eps = 1e-6
+    for ghost in (lambda q: inlet_ghost_state(q, Q_inlet), lambda q: outlet_ghost_state(q, 101325.0, normal)):
+        g0, gp, gm = ghost(at(0.0)), ghost(at(eps)), ghost(at(-eps))
+        # 连续：跨零的变化是 O(eps)
+        assert np.abs(gp - g0).max() <= 2.0 * eps and np.abs(gm - g0).max() <= 2.0 * eps
+        # 一阶导数连续：两侧单边差商一致
+        np.testing.assert_allclose((gp - g0) / eps, (g0 - gm) / eps, rtol=0, atol=1e-5)
 
 
 def test_symmetry_mirrors_normal_velocity_only():

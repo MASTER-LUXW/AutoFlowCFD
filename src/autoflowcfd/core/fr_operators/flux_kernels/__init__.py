@@ -45,7 +45,6 @@ from .viscous import (  # noqa: F401
 )
 from .viscous_bc import (  # noqa: F401
     VBC_DIRICHLET,
-    VBC_INLET,
     VBC_INTERIOR,
     VBC_MIRROR,
     VBC_NEUMANN,
@@ -54,7 +53,6 @@ from .viscous_bc import (  # noqa: F401
     mirror_normal_component,
     mirror_normal_derivative,
     mirror_velocity_gradient,
-    resolve_point_kind,
 )
 
 __all__ = [
@@ -62,7 +60,6 @@ __all__ = [
     "GAMMA",
     "R_AIR",
     "VBC_DIRICHLET",
-    "VBC_INLET",
     "VBC_INTERIOR",
     "VBC_MIRROR",
     "VBC_NEUMANN",
@@ -74,7 +71,6 @@ __all__ = [
     "mirror_normal_component",
     "mirror_normal_derivative",
     "mirror_velocity_gradient",
-    "resolve_point_kind",
     "resolve_viscous_ip_constant",
     "viscous_ip_penalty_tilde",
     "viscous_physical_flux_batch",

@@ -66,7 +66,13 @@ class _GPUSolverInitMixin:
         # 滤波档是数值方案的一部分，构建失败必须让构造失败。
         filter_prism = self.ops.filter_prism
         filter_tet = self.ops.filter_tet
-        if filter_prism is not None or filter_tet is not None:
+        # 单位阵（`off` 档，或 mild 档取 sigma_top=1）不构造回调，与 CPU `build_filter_func` 同一判据：
+        # 隐式步以"有没有滤波回调"判断滤波是否启用（`require_no_modal_filter`），此前这里对单位阵也构造
+        # 回调，真实求解器上隐式稳态与双时间步一律报"与模态滤波不能同时启用"（已有的 GPU 隐式测试都在
+        # 替身上把回调置 None，没有暴露）；显式格式则每个 RK stage 白乘一遍单位阵。
+        from autoflowcfd.core.fr_solver.filter import _matrices_are_identity
+        if (filter_prism is not None or filter_tet is not None) and not _matrices_are_identity(
+                filter_prism, filter_tet):
             if mode == "sensor":
                 self.filter_func_gpu = self._build_sensor_gated_filter_gpu(
                     n_cells, n_sps, n_prism, filter_prism, filter_tet)

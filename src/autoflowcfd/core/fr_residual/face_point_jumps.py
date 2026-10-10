@@ -24,7 +24,7 @@ from numba import njit
 from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
 from autoflowcfd.core.fr_operators.flux_kernels import (
     CP_AIR, VBC_DIRICHLET, VBC_INTERIOR, VBC_NEUMANN, mirror_normal_component,
-    mirror_normal_derivative, resolve_point_kind,
+    mirror_normal_derivative,
     viscous_physical_flux_point, viscous_ip_penalty_tilde,
 )
 
@@ -67,18 +67,16 @@ def viscous_common_flux_point(Q_s, gv_s, gT_s, mut_s, Q_x, gv_x, gT_x, mut_x, ad
     `viscous_self_normal_flux_point`。
 
     `bkind`：该面（混合拆分面的边界半区取配对面）的粘性边界种类
-    （`flux_kernels/viscous_bc.py`），内部面传 `VBC_INTERIOR`；入口在这里按本点
-    状态落到 Dirichlet / Neumann（`resolve_point_kind`）。边界面上 `Q_x` 是幽灵态、
+    （`flux_kernels/viscous_bc.py`），内部面传 `VBC_INTERIOR`。边界面上 `Q_x` 是幽灵态、
     `(gv_x, gT_x)` 由 `boundary_other_gradients` 按同一个种类构造。
 
-    * `VBC_NEUMANN`（出口、入口回流点）：另一侧梯度取 `gv_s·R` 与 `R gT_s`
+    * `VBC_NEUMANN`（出口）：另一侧梯度取 `gv_s·R` 与 `R gT_s`
       （充分发展条件 du_i/dn = dT/dn = 0，见 `viscous_bc.py`），其余同下；幽灵态
       速度就是本侧速度，罚项只剩零；
     * 其余：`a·G(平均态)` 加罚项。内部面罚项用面平均涡粘与热传导率；
       边界面用本侧涡粘，热传导率只在 `VBC_DIRICHLET` 时给（温度被弱施加到
       幽灵态温度），无滑移壁/镜像类传 0（绝热由 ∇T 镜像精确施加）。
     """
-    bkind = resolve_point_kind(bkind, Q_s, adjrow)
     a0 = adjrow[0]
     a1 = adjrow[1]
     a2 = adjrow[2]

@@ -5,7 +5,7 @@
 粘性界面项在边界面上的公共通量是 `G(Q_avg, 梯度_avg)`，其中 `Q_avg` 用幽灵态、
 "另一侧"梯度由本侧构造。此前除绝热类（WALL/SYMMETRY）把 `∇T` 法向镜像外，
 **其余一律取本侧梯度**，且除速度罚项外不加任何罚项。后果是：凡幽灵态**延拓**
-内部值的分量（出口的速度与温度、入口回流点、对称面与滑移壁的切向速度、
+内部值的分量（出口的速度与温度、对称面与滑移壁的切向速度、
 远场与入口的温度），该面上的公共法向粘性通量就等于本单元自己的通量，
 FR 修正量为零 —— 那个分量**在扩散算子里没有施加任何边界条件**。弱形式里
 于是留下一项不定号的边界积分 `-∮ φ (κ ∇φ)·n`，离散扩散算子失去强制性
@@ -31,15 +31,12 @@ x1.23），把热传导整个关掉后同一模态每步衰减（x0.79~0.99）�
                      场的梯度（速度 R∇uR、温度 R∇T，R = I - 2nn^T）。面平均后
                      应变的法-切分量与法向温度梯度恰为零，公共牵引只剩法向分量
                      （法向速度由罚项弱施加为零）——正是对称/滑移的精确条件
-    VBC_DIRICHLET    远场：幽灵态整份给定（自由来流），速度与温度都按 Dirichlet
+    VBC_DIRICHLET    远场、入口：幽灵态整份给定（自由来流 / 入口状态），速度与温度都按 Dirichlet
                      施加（本侧梯度 + 速度罚项 + 以热传导率为系数的温度罚项）
     VBC_NEUMANN      出口：充分发展条件 du_i/dn = 0、dT/dn = 0（另一侧梯度取
                      `grad u · R` 与 `R grad T`，只镜像法向导数、不镜像速度矢量），
                      平均后法向导数恰为零，切向导数保留；幽灵态速度即本侧速度，
                      速度罚项为零，不罚温度
-    VBC_INLET        入口：逐通量点按本侧法向速度判定（与 `inlet_ghost_state` 同一
-                     条件）—— 流入（给定入口状态）按 VBC_DIRICHLET，回流（幽灵态
-                     延拓内部）按 VBC_NEUMANN
 
 **出口为什么不是零牵引（2026-10-01 更正）**：09-30 首版把出口取成"公共法向粘性
 通量为零"（零牵引 + 绝热）。零牵引与充分发展的内流不相容——Couette 精确解在
@@ -61,7 +58,6 @@ VBC_NOSLIP_WALL = 1
 VBC_MIRROR = 2
 VBC_DIRICHLET = 3
 VBC_NEUMANN = 4
-VBC_INLET = 5
 
 
 @njit(cache=True, inline='always')
@@ -148,31 +144,10 @@ def mirror_velocity_gradient(gv: np.ndarray, adj_row: np.ndarray) -> np.ndarray:
 
 
 @njit(cache=True, inline='always')
-def resolve_point_kind(kind: int, Q_s: np.ndarray, adj_row: np.ndarray) -> int:
-    """把入口（`VBC_INLET`）按本通量点实际流入/回流落到 Dirichlet / Neumann。
-
-    判据与 `inlet_ghost_state` 同一条物理条件：本侧法向速度 `u·n < 0`（外法向，
-    原生面的 `adj_row` 已 outward 定向）为流入、幽灵态是给定入口状态；否则回流、
-    幽灵态延拓本侧。**不能**用"幽灵态是否与本侧逐位相同"来判：回流时幽灵态与
-    kernel 里的本侧外插值来自两次独立的外插，舍入差会把回流点误判成 Dirichlet
-    （解析 Jacobian 的复合差分里本侧平移后的迹与平移场外插出的幽灵态也不逐位
-    相同，实测单元块偏差 11%）。其余种类原样返回。
-    """
-    if kind != VBC_INLET:
-        return kind
-    un = Q_s[1] * adj_row[0] + Q_s[2] * adj_row[1] + Q_s[3] * adj_row[2]
-    if un < 0.0:
-        return VBC_DIRICHLET
-    return VBC_NEUMANN
-
-
-@njit(cache=True, inline='always')
 def boundary_other_gradients(gv_s: np.ndarray, gT_s: np.ndarray, adj_row: np.ndarray, kind: int):
     """边界（含混合拆分面的边界半区）上"另一侧"的梯度 `(gv_x, gT_x)`。
 
-    入口与出口（Neumann）在这里都取本侧梯度：Neumann 点的法向镜像梯度由
-    `viscous_jump_point` 在把入口落到流入/回流之后统一构造（同一个点在两种情形下
-    梯度不同，必须先判流向）。无滑移壁：速度梯度取本侧（壁面切向
+    出口（Neumann）在这里取本侧梯度，法向镜像梯度由 `viscous_common_flux_point` 构造。无滑移壁：速度梯度取本侧（壁面切向
     速度的法向导数就是壁面剪应力本身），温度梯度法向镜像（绝热）；对称面 /
     滑移壁：两者都取镜像场的梯度；Dirichlet：取本侧。
     """

@@ -80,7 +80,9 @@ class _GPUDistributedInitMixin(_GPUDistributedTurbSourceMixin, _GPUDistributedCh
         # warning + **完全无滤波**继续跑。
         filter_prism = self.ops.filter_prism
         filter_tet = self.ops.filter_tet
-        if filter_prism is None and filter_tet is None:
+        # 单位阵不构造回调（理由见 `gpu_solver_init.py::_init_modal_filter_gpu`）
+        from autoflowcfd.core.fr_solver.filter import _matrices_are_identity
+        if (filter_prism is None and filter_tet is None) or _matrices_are_identity(filter_prism, filter_tet):
             return
 
         # 原生排列的 local 段——`self.U_gpu` 所在的空间。

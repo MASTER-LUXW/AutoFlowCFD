@@ -16,8 +16,7 @@ fr_viscous_flux.py 里原来的纯 Python `for f in range(fc.n_faces)` 循环)�
 
 **边界面的公共粘性通量按粘性边界种类分派（2026-09-30）**：状态 Q_n 取
 幽灵态，"另一侧"梯度由本侧按种类构造（`flux_kernels/viscous_bc.py::
-boundary_other_gradients`），入口在逐点跳变函数里按本通量点实际流入/回流
-落到 Dirichlet / Neumann，种类数组 `vbc_kind` 由
+boundary_other_gradients`），种类数组 `vbc_kind` 由
 `boundary/fr_ghost_state.py::build_viscous_boundary_kind` 按边界组 BC 类型给出。
 此前除绝热类法向镜像 ∇T 外一律取本侧梯度、不加温度罚项，于是出口/远场/入口
 的温度、出口与对称面切向的速度在扩散算子里没有任何边界条件，离散扩散算子

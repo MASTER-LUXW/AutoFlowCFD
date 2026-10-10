@@ -16,8 +16,7 @@ low_mach_cfl_ausm_inconsistency，本文件是那一整轮诊断-修复的最终
    修复（CFL 改用真实未预处理声速）。
 
 判据说明：标况大气条件下（p_inf~1e5 Pa）声速与 Couette 低速粘性扩散
-时间尺度相差~1e9 量级，纯显式可压缩格式（无论 SSP-RK3 还是当前实现的
-DUAL_TIME，其内层伪时间迭代仍是显式子迭代）无法在合理测试预算内达到
+时间尺度相差~1e9 量级，纯显式可压缩格式（SSP-RK3）无法在合理测试预算内达到
 完全定量收敛到解析解——这是显式可压缩格式处理低速粘性主导流动的已知
 固有特性（真实工业 CFD 靠隐式时间积分或连通量本身都做预处理的一致低
 马赫数预处理解决，属于比本次修复更大的独立工作），不是这次要修的
@@ -33,7 +32,7 @@ import pytest
 from autoflowcfd.core.fr_solver import FRSolver
 from autoflowcfd.core.time_integration import TimeIntegrationScheme
 
-from ._channel_mesh import build_channel_mesh_prism, build_face_exact_ghost_provider
+from ._channel_mesh import build_channel_mesh_prism, build_face_exact_ghost_provider, wrap_inlet_with_profile
 
 
 def _build_couette_solver(order: int = 2):
@@ -52,7 +51,12 @@ def _build_couette_solver(order: int = 2):
         "wall_bottom": {"type": "WALL", "is_no_slip": True, "wall_velocity": [0.0, 0.0, 0.0]},
         "wall_top": {"type": "WALL", "is_no_slip": True, "wall_velocity": [U_wall, 0.0, 0.0]},
         "z_min": {"type": "SYMMETRY"}, "z_max": {"type": "SYMMETRY"},
-        "x_min": {"type": "OUTLET", "p_outlet": p_inf}, "x_max": {"type": "OUTLET", "p_outlet": p_inf},
+        # 上游端是入流：给精确的线性剪切剖面（下面挂逐点剖面态）；下游端压力出口。
+        # 2026-10-10 以前两端都是压力出口：上游端整面回流，而回流时出口幽灵态当时取内部状态（什么条件
+        # 都不给），均匀静压的精确解因此"被保持"。出口回流现在把给定压力按总压解释
+        # （`boundary/fr_ghost_state.py::outlet_ghost_state`），入流端必须是真正的入口。
+        "x_min": {"type": "INLET", "Q_inlet": [rho_inf, 0.0, 0.0, 0.0, p_inf]},
+        "x_max": {"type": "OUTLET", "p_outlet": p_inf},
     }
     solver = FRSolver(
         mesh=mesh, order=order, turb_model_name="NONE",
@@ -62,6 +66,17 @@ def _build_couette_solver(order: int = 2):
     )
     solver.order_continuation_enabled = False
     solver.boundary_ghost_provider = build_face_exact_ghost_provider(mesh, Lx, H, Lz, bc_overrides)
+
+    def _couette_profile(positions):
+        pos = np.asarray(positions)
+        q = np.zeros((pos.shape[0], 5))
+        q[:, 0] = rho_inf
+        q[:, 1] = U_wall * pos[:, 1] / H
+        q[:, 4] = p_inf
+        return q
+
+    solver.boundary_ghost_provider = wrap_inlet_with_profile(
+        solver.boundary_ghost_provider, solver, "x_min", bc_overrides, _couette_profile)
     return solver, mesh, H, U_wall, Lx, rho_inf, p_inf
 
 

@@ -10,7 +10,7 @@ from autoflowcfd.core.gpu import get_cupy
 from autoflowcfd.core.gpu.residual.gpu_inviscid import _lift_native_contrib
 
 from autoflowcfd.core.fr_operators.flux_kernels import (
-    CP_AIR, R_AIR, VBC_DIRICHLET, VBC_INLET, VBC_INTERIOR, VBC_MIRROR, VBC_NEUMANN, VBC_NOSLIP_WALL,
+    CP_AIR, R_AIR, VBC_DIRICHLET, VBC_INTERIOR, VBC_MIRROR, VBC_NEUMANN, VBC_NOSLIP_WALL,
 )
 from .extrap import _extrap_side, _self_extrap_side, _viscous_tilde_flux
 
@@ -36,16 +36,13 @@ def _mirror_velocity_gradient_gpu(cp, gv, adjrow):
 
 
 def _boundary_other_side_gpu(cp, K, Q_s, gv_s, gT_s, mut_s, Q_x, gv_x, gT_x, mut_x, adjrow):
-    """边界点（`K != VBC_INTERIOR`）的"另一侧"梯度与涡粘，并把入口落到 Dirichlet/Neumann。
+    """边界点（`K != VBC_INTERIOR`）的"另一侧"梯度与涡粘。
 
-    逐点对应 CPU `flux_kernels/viscous_bc.py::boundary_other_gradients` 与
-    `resolve_point_kind`：无滑移壁速度梯度取本侧、∇T 法向镜像；镜像类两者都取
-    镜像场梯度；Neumann 点（出口、入口回流点）速度梯度取 `gv·R`、∇T 法向镜像
+    逐点对应 CPU `flux_kernels/viscous_bc.py::boundary_other_gradients`：无滑移壁速度梯度取本侧、∇T 法向镜像；镜像类两者都取
+    镜像场梯度；Neumann 点（出口）速度梯度取 `gv·R`、∇T 法向镜像
     （充分发展条件，与 CPU `viscous_jump_point` 同一处理）；Dirichlet 取本侧。
     `Q_x` 在边界点上已经是幽灵态。返回解析后的 `K`。
     """
-    inflow = cp.sum(Q_s[..., 1:4] * adjrow, axis=-1) < 0.0
-    K = cp.where(K == VBC_INLET, cp.where(inflow, VBC_DIRICHLET, VBC_NEUMANN), K)
     bnd = K != VBC_INTERIOR
     mirror = K == VBC_MIRROR
     neumann = K == VBC_NEUMANN

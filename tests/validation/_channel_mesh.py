@@ -152,7 +152,7 @@ class ProfileInletGhostProvider:
             # 不能走 `farfield_ghost_state`：那个函数把 `(5,)` 常量 tile
             # 成逐点，这里已经是逐点的 `(n_fp,5)`。
             return q_given
-        return inlet_ghost_state(Q_owner_fp, q_given, true_normal)
+        return inlet_ghost_state(Q_owner_fp, q_given)
 
 
 def wrap_inlet_with_profile(provider, solver, inlet_plane_name,

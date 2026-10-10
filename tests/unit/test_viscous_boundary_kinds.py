@@ -35,7 +35,7 @@ from autoflowcfd.boundary.fr_ghost_state import (
 )
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from autoflowcfd.core.fr_operators.flux_kernels import (
-    VBC_DIRICHLET, VBC_INLET, VBC_INTERIOR, VBC_MIRROR, VBC_NEUMANN, VBC_NOSLIP_WALL,
+    VBC_DIRICHLET, VBC_INTERIOR, VBC_MIRROR, VBC_NEUMANN, VBC_NOSLIP_WALL,
     mirror_normal_component, mirror_velocity_gradient,
 )
 from autoflowcfd.core.fr_residual.inviscid import (
@@ -177,7 +177,7 @@ class TestViscousBoundaryKind:
         ("WALL", {"is_no_slip": False}, VBC_MIRROR),
         ("SYMMETRY", {}, VBC_MIRROR),
         ("FARFIELD", {"Q_free": Q_FREE}, VBC_DIRICHLET),
-        ("INLET", {"Q_inlet": Q_FREE}, VBC_INLET),
+        ("INLET", {"Q_inlet": Q_FREE}, VBC_DIRICHLET),
         ("OUTLET", {"p_outlet": 101325.0}, VBC_NEUMANN),
     ])
     def test_classification(self, flat, bc_type, cfg, expected):

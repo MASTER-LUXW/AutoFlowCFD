@@ -57,7 +57,7 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
             无滑移壁速度梯度取本侧（壁面切向速度的法向导数就是壁面剪应力，
             **不能**镜像掉）、∇T 法向镜像（绝热）；对称面/滑移壁取镜像场的
             梯度（切向牵引与法向热通量恰为零）；远场与入口流入点按 Dirichlet
-            加速度与温度罚项；出口与入口回流点取零法向粘性通量。此前除绝热类
+            加速度与温度罚项；出口取充分发展条件。此前除绝热类
             镜像 ∇T 外一律"本侧梯度、只罚速度"，延拓分量上扩散算子没有任何
             边界条件、失去强制性，完整论证与实测见
             core/fr_operators/flux_kernels/viscous_bc.py 模块文档。非
