@@ -22,6 +22,16 @@ from .reductions import LocalReductions
 #: 残差增幅远小于此），又足够紧以立刻拦住发散。
 RESIDUAL_ACCEPT_GROWTH = 1.5
 
+#: 线性求解至少要把线性残差降到这个比例以下，Newton 方向才算可信（SU2 自适应 CFL 的同一判据：
+#: 线性求解没能把残差减半就缩 CFL）。没达到容差且高于它的方向**不走出去**（`jfnk.py` 按未接受
+#: 处理、缩 `dtau` 重解）：这样的 `dU` 只是 Krylov 子空间里让线性残差略降的一个向量，与 Newton
+#: 方向无关，而残差接受判据拦不住它——cube_demo SA P1（37.4 万单元，CFL 300 续算）第 3 步 GMRES
+#: 用满迭代数、线性残差只到 0.90（恢复 nu_tilde 更新限幅的对照组）/ 0.72（不限幅），步照样被
+#: 接受（`R_new/R` 0.92 / 1.05，范数由单个贴壁棱柱的湍流残差主导），一步之内 Cd 0.736 -> 0.457 /
+#: 0.636、平均流残差 1.24 -> 3.3 / 1.28 -> 8.4；不限幅组此后 CFL 减到 37 线性求解仍失败，三步后
+#: 平均流残差 264、最大速度 394 m/s。越界一次之后收缩救不回来，所以必须在走出去之前拦。
+LINEAR_SOLVE_MAX_REL_RESIDUAL = 0.5
+
 #: 回溯次数上限。每次回溯把 `theta` 减半并重算一次残差，所以代价是
 #: 最多这么多次额外残差求值。4 次即 `theta` 最小到 1/16。
 MAX_BACKTRACK = 4
@@ -43,7 +53,7 @@ class ResidualNorm:
     半范数（该处文档）。线性求解在同一个加权范数里最小化（`jfnk.py::_solve_direction`）。
 
     **逐方程按参考量级无量纲化**（`scales`，2026-10-11）：各列先除以该未知量的参考量级（平均流
-    `residual_diagnostics._reference_scales`：rho_inf、rho_inf U_inf、p_inf；湍流为模型的 `unknown_scales`）再求
+    `residual_diagnostics._reference_scales`：rho_inf、rho_inf U_inf、p_inf；湍流列为场的实际量级，`coupled_step.py::residual_reference_scales`）再求
     加权平方和。此前直接对有量纲的残差求和：能量方程的残差比质量方程大 `p_inf / rho_inf`（约 1e5）倍、比
     动量方程大 `p_inf / (rho_inf U_inf)`（约 3e3）倍，范数实际只是能量方程的范数——cube_demo SA P1 上能量
     方程占 `sum w r^2` 的 1.000，其余五个方程合计 0.000。接受判据、SER、GMRES 最小化的都是它，质量、动量、

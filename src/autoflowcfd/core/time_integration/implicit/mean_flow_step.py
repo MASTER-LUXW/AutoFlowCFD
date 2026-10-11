@@ -41,9 +41,7 @@ from .reductions import LocalReductions
 from autoflowcfd.core.fr_solver.state import N_MEAN_FLOW_VARS  # noqa: E402,F401
 
 
-#: 线性求解至少要把线性残差降到这个比例以下，Newton 方向才算可信（SU2 自适应
-#: CFL 的同一判据：线性求解没能把残差减半就缩 CFL）。
-LINEAR_SOLVE_MAX_REL_RESIDUAL = 0.5
+from .globalization import LINEAR_SOLVE_MAX_REL_RESIDUAL  # noqa: E402,F401  （唯一定义在 globalization.py）
 
 
 def newton_step_ok(info: dict) -> bool:

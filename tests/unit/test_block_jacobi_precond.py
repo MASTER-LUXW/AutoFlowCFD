@@ -247,7 +247,9 @@ def test_jfnk_block_precond_needs_fewer_gmres_iterations():
     cache = BlockJacobiCache(colors=greedy_cell_coloring(owner, nb, is_prism.size), cell_is_prism=is_prism,
                              n_sps=N_SPS, n_real_prism=N_REAL_P, n_real_tet=N_REAL_T, n_var=NV)
     _, info_b = step_newton_krylov(R, u0, dtau, np.ones(NV), block_precond=cache)
-    assert info_b["theta"] > 0.0 and info_d["theta"] > 0.0
+    # 对角预处理在这个系统上用满迭代数也解不到容差：线性残差没减半的方向不走出去（theta=0，
+    # `globalization.LINEAR_SOLVE_MAX_REL_RESIDUAL`），块预处理一次解到容差
+    assert info_b["theta"] > 0.0 and info_b["gmres_info"] == 0
     assert info_b["gmres_iters"] * 5 <= info_d["gmres_iters"], (info_b["gmres_iters"], info_d["gmres_iters"])
     assert cache.n_builds == 1 and cache.age == 1
 

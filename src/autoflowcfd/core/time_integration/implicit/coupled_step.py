@@ -287,6 +287,8 @@ def step_coupled_newton(solver, backend, dtau_flat, *, filter_active: bool = Fal
                              real_rows=real, unlimited_columns=model.NEWTON_UNLIMITED_COLUMNS))
     x0 = xp.ascontiguousarray(backend.state(), dtype=xp.float64)
     residual = CoupledResidual(backend, real, x0)
+    norm_scales = residual_reference_scales(x0, scales, backend.positivity.norm_weights, red,
+                                            model.NEWTON_LOG_COLUMNS)
     dtau_flat = xp.ascontiguousarray(dtau_flat, dtype=xp.float64).ravel()
     x_new, info = step_newton_krylov(
         residual, x0, dtau_flat, scales,
@@ -294,11 +296,11 @@ def step_coupled_newton(solver, backend, dtau_flat, *, filter_active: bool = Fal
         block_precond=CoupledBlockPreconditioner(backend, mean_cache, turb_cache, residual),
         physicality=physicality, rows_per_cell=1, red=red,
         local_dtau_scale=solver._newton_local_dtau, norm_weights=backend.positivity.norm_weights, real_rows=real,
-        physical_time=physical_time)
+        physical_time=physical_time, norm_scales=norm_scales)
     solver._newton_dtau_scale = info["dtau_scale"]
     solver._newton_local_dtau = info["local_dtau_scale"]
     backend.install(x_new, dtau_flat)
-    info.update(_subsystem_norms(residual.r0, backend.positivity.norm_weights, red, scales))
+    info.update(_subsystem_norms(residual.r0, backend.positivity.norm_weights, red, norm_scales))
     solver._newton_last_info = info
     note_linear_growth(solver, info)
     if info["theta"] <= 0.0:
@@ -310,6 +312,35 @@ def step_coupled_newton(solver, backend, dtau_flat, *, filter_active: bool = Fal
         logger.info("耦合 Newton 步缩 %d 档 dtau 后被接受（dtau_scale=%.3e, theta=%.3f）"
                     % (info["n_dtau_cuts"], info["dtau_scale"], info["theta"]))
     return info
+
+
+def residual_reference_scales(x0, scales, weights, red, log_columns=()) -> np.ndarray:
+    """残差范数的逐列参考量级：平均流列原样（来流量级，`scales`），湍流列取该未知量在场里的实际量级——
+    体积加权 RMS（与 `ResidualNorm` 同一组权重，分布式下是全局量），下限为 `scales`（模型的
+    `unknown_scales`：差分步长与物理性限幅的尺度下限）。
+
+    残差是 `dU/dt`，除以参考量级后是"该未知量的相对变化率"，各方程才可比。平均流的来流量级就是场的
+    量级；湍流的 `unknown_scales` 不是——SA 的是分子粘度，而湍流区里 `nu_tilde` 是它的几百上千倍
+    （cube_demo SA P1：体积加权前的逐点 RMS 769 nu，99 分位 3352 nu）。2026-10-11 用它当参考量级
+    （上一提交）把湍流残差在范数里放大了约三个数量级：合成范数 2e4，平均流只有 1~2。GMRES 的容差
+    是合成范数的 0.1 倍，平均流各行的线性残差是自身的上千倍也算达标；接受判据同理。cube_demo 从
+    稳态 P1 第 44 步起 CFL 300 续算：线性求解达标、整步接受的一步里平均流残差 1.28 -> 8.42，下一步
+    91.5，Cd 0.734 -> 0.676，不限幅时三步后最大速度 394 m/s。
+
+    对数未知量（`log_columns`，`ln omega`）的残差本身就是相对变化率，保持 `scales`。逐步按当前场
+    求值：场的量级随收敛缓慢变化，同一步内步前、步后的范数用同一组值。
+    """
+    out = np.array(scales, dtype=np.float64)
+    xp = red.xp
+    w = xp.asarray(weights, dtype=xp.float64).ravel()
+    total = red.sum(w)
+    if total <= 0.0:
+        return out
+    skip = {N_MEAN_FLOW_VARS + int(c) for c in log_columns}
+    for j in range(N_MEAN_FLOW_VARS, out.size):
+        if j not in skip:
+            out[j] = max(out[j], float(np.sqrt(red.sum(w * x0[:, j] * x0[:, j]) / total)))
+    return out
 
 
 def _subsystem_norms(r0, weights, red, scales) -> dict:

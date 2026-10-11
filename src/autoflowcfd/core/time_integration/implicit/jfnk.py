@@ -58,7 +58,7 @@ from .block_jacobi import BlockJacobiCache
 from .gmres import gmres_right
 from .physicality import _cellwise_relaxation, density_pressure_row_limits, update_local_dtau_scale
 from .preconditioner import PseudoTransientDiagonal
-from .globalization import ResidualNorm, accept_step
+from .globalization import LINEAR_SOLVE_MAX_REL_RESIDUAL, ResidualNorm, accept_step
 from .reductions import LocalReductions
 
 #: GMRES 重启长度的**下限**。Krylov 基向量按 `(N, n_var)` 存，重启长度直接决定
@@ -245,6 +245,7 @@ def step_newton_krylov(
     norm_weights=None,
     real_rows=None,
     physical_time=None,
+    norm_scales=None,
 ) -> Tuple[object, dict]:
     """做**一个** PTC-Newton-Krylov 步，返回 `(U_new_flat, info)`。
 
@@ -329,10 +330,14 @@ def step_newton_krylov(
         r0 = xp.ascontiguousarray(residual(u0_flat), dtype=xp.float64)
     else:
         r0 = r0_spatial
-    if np.asarray(scales).size != u0_flat.shape[1]:
-        raise ValueError(f"参考量级长度 {np.asarray(scales).size} 与变量数 {u0_flat.shape[1]} 不符 —— 残差范数与差分步长"
-                         f"都逐变量无量纲化，形状不符不能静默按广播处理")
-    norm = ResidualNorm(norm_weights, red, scales)
+    # 残差范数的逐列参考量级：默认与差分步长同一组；`norm_scales` 给出时用它（紧耦合步的湍流列，
+    # 见 `coupled_step.py::residual_reference_scales`）
+    norm_scales = scales if norm_scales is None else norm_scales
+    for s in (scales, norm_scales):
+        if np.asarray(s).size != u0_flat.shape[1]:
+            raise ValueError(f"参考量级长度 {np.asarray(s).size} 与变量数 {u0_flat.shape[1]} 不符 —— 残差范数与差分步长"
+                             f"都逐变量无量纲化，形状不符不能静默按广播处理")
+    norm = ResidualNorm(norm_weights, red, norm_scales)
     res_norm = norm(r0)
     if res_norm == 0.0:
         return u0_flat, dict(res_norm=0.0, res_norm_new=0.0, eta=0.0,
@@ -404,6 +409,11 @@ def step_newton_krylov(
             iters_total += iters
         iters_since_build = iters
         gmres_info = ginfo
+        if du is not None and ginfo > 0 and linear_rel > LINEAR_SOLVE_MAX_REL_RESIDUAL:
+            # 没解到容差、线性残差也没减半：方向不可信，不走出去（`LINEAR_SOLVE_MAX_REL_RESIDUAL` 文档），
+            # 与残差判据不接受同样处理——缩 dtau 让系统更接近对角主导后重解
+            du = None
+            theta = 0.0
         if du is not None:
             # 线性系统自己预测的残差放大倍数：(I/dtau + J) dU = -R 解出的 dU 满足 R + J dU = -dU/dtau
             # （双时间步时 R、J 换成 G、dG/dU，dtau 仍是伪时间步），
