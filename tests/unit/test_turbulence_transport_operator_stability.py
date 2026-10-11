@@ -91,7 +91,7 @@ def test_scalar_diffusion_operator_is_stable(kind, order):
     gamma = np.full(real.shape, 1.2 * 1e-3)
 
     def apply(phi):
-        return compute_scalar_diffusion_residual(phi, gamma, mesh, ops) / 1.2
+        return compute_scalar_diffusion_residual(phi, gamma, mesh, ops, gamma_band=1.8e-5) / 1.2
 
     lam = _operator_spectrum(apply, real)
     assert lam.real.max() <= 1e-9 * np.abs(lam).max(), (
@@ -116,5 +116,5 @@ def test_scalar_diffusion_is_conservative_across_unequal_cells():
     assert (np.maximum(v[own[inner]], v[nei[inner]]) / np.minimum(v[own[inner]], v[nei[inner]])).max() > 1.5
     W = build_positivity_limiter(mesh, ops).W
     phi = np.random.default_rng(0).standard_normal(W.shape)
-    R = compute_scalar_diffusion_residual(phi, np.full(W.shape, 1e-3), mesh, ops)
+    R = compute_scalar_diffusion_residual(phi, np.full(W.shape, 1e-3), mesh, ops, gamma_band=1.8e-5)
     assert abs((W * R).sum()) <= 1e-13 * np.abs(W * R).sum()

@@ -21,6 +21,7 @@ from typing import Optional
 import numpy as np
 from loguru import logger
 
+from autoflowcfd.core.fr_operators.flux_kernels import effective_eddy_viscosity_array
 from autoflowcfd.postprocess.coefficients import AerodynamicCoefficients
 
 
@@ -149,8 +150,11 @@ def compute_aerodynamic_coefficients_fr(
 
         if include_viscous:
             gv_fp = extrap_to_face(grad_vel_full[owner_cell], oc_code, oc_slot)  # (n_fp,3,3)
+            # 壁面上外插的涡粘换成取用值（与求解器的粘性通量同一个函数，见
+            # `fr_operators/flux_kernels/viscous.py::effective_eddy_viscosity`）
             mu_t_fp = (
-                extrap_to_face(mu_t_field[owner_cell][:, None], oc_code, oc_slot)[:, 0]
+                effective_eddy_viscosity_array(
+                    extrap_to_face(mu_t_field[owner_cell][:, None], oc_code, oc_slot)[:, 0], mu)
                 if mu_t_field is not None
                 else np.zeros(gv_fp.shape[0])
             )

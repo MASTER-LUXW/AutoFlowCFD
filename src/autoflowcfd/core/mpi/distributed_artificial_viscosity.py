@@ -46,7 +46,7 @@ def distributed_artificial_diffusion_dudt(U_local, nu_compact, partition, halo_e
     res_compact = artificial_diffusion_residual(
         U_compact[..., :5], nu_compact,
         lambda phi, gamma: compute_scalar_diffusion_residual(
-            phi, gamma, adapter, ops, flat_face_override=dist_fc.base_flat))
+            phi, gamma, adapter, ops, flat_face_override=dist_fc.base_flat, gamma_band=0.0))
     out = np.zeros_like(U_local)
     out[..., :5] = res_compact[dist_fc.inv_perm][:partition.n_local_cells]
     return out

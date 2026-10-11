@@ -9,6 +9,7 @@ import numpy as np
 
 from autoflowcfd.core.fr_operators.flux_kernels import resolve_viscous_ip_constant
 from autoflowcfd.core.gpu import get_cupy
+from autoflowcfd.core.fr_operators.flux_kernels.viscous import smooth_nonnegative_array
 
 from autoflowcfd.core.gpu.residual.gpu_volume_contract import (
     gpu_contract_shared_operator_1axis, gpu_contract_shared_operator_2axis,
@@ -39,7 +40,7 @@ from .omega_wall import compute_omega_wall_target_gpu
 
 
 def _scalar_volume_div_overintegrated_gpu(cp, factors, segs,
-                                          n_cells, n_sps):
+                                          n_cells, n_sps, first_band=None):
     """标量体积项 `div(adj(J) * prod(factors))` 的去混叠版（GPU）。
 
     `factors` 是一串 (n_cells, n_sps, k) 的场，k 为 1 或 3；各自精确插值
@@ -48,7 +49,8 @@ def _scalar_volume_div_overintegrated_gpu(cp, factors, segs,
 
     对流用 (rho, phi, u)、扩散用 (gamma, grad_phi)，与 CPU 端
     `_scalar_convection_volume_overintegrated` /
-    `_scalar_diffusion_volume_overintegrated` 逐字对应。
+    `_scalar_diffusion_volume_overintegrated` 逐字对应。`first_band` 不为 None 时第一个因子是扩散系数，
+    细点上的插值换成取用值 `smooth_nonnegative_array(., first_band)`（与 CPU 同一处理）。
     """
     div = cp.zeros((n_cells, n_sps), dtype=cp.float64)
     # 每段自带自己的 n_fine 与**已切好**的细点度量（2026-09-17，与 CPU 端
@@ -61,6 +63,8 @@ def _scalar_volume_div_overintegrated_gpu(cp, factors, segs,
         prod = None
         for f in factors:
             ff_ = gpu_contract_shared_operator_1axis(c2f, f[lo:hi])
+            if prod is None and first_band is not None:
+                ff_ = smooth_nonnegative_array(ff_, first_band, cp)
             prod = ff_ if prod is None else prod * ff_
         F_tilde = cp.matmul(adj_seg, prod[..., None]).squeeze(-1)
         div_f = gpu_contract_shared_operator_2axis(D_fine, F_tilde[..., None])[..., 0]
@@ -131,12 +135,13 @@ def compute_scalar_convection_residual_gpu(
 
 
 def compute_scalar_diffusion_residual_gpu(
-    scalar_field, gamma_field, mesh_data, ops_data, ff, n_cells, n_prism, n_sps, *, c_ip,
+    scalar_field, gamma_field, mesh_data, ops_data, ff, n_cells, n_prism, n_sps, *, c_ip, gamma_band,
     wall_dirichlet_zero_face=None, wall_dirichlet_value_face=None, has_wall_dirichlet_value=None,
 ):
     """标量扩散 FR 残差（体积项 + IIPG 内罚界面项），与 CPU 版
     `compute_scalar_diffusion_residual` 逐项对应。`c_ip` 由调用方按阶数取
-    `flux_kernels.resolve_viscous_ip_constant`（与平均流粘性项同一处定义）。"""
+    `flux_kernels.resolve_viscous_ip_constant`（与平均流粘性项同一处定义）；`gamma_band` 是非解点处扩散
+    系数取用值的过渡带宽（含义与取值同 CPU 版）。"""
     cp = get_cupy()
     det_jacs = mesh_data['det_jacs']
     adj_j = mesh_data['adj_j']
@@ -150,7 +155,7 @@ def compute_scalar_diffusion_residual_gpu(
     if _segs is not None:
         div_G = _scalar_volume_div_overintegrated_gpu(
             cp, (gamma_field[..., None], grad_phi),
-            _segs, n_cells, n_sps)
+            _segs, n_cells, n_sps, first_band=float(gamma_band))
     else:
         G_phys = gamma_field[..., None] * grad_phi
         G_tilde = cp.matmul(adj_j, G_phys[..., None]).squeeze(-1)  # (n_cells,n_sps,3)
@@ -180,6 +185,9 @@ def compute_scalar_diffusion_residual_gpu(
     jumps = []
     for frame, normal in (("owner", ff.owner_unit_normal), ("neighbor", ff.neighbor_unit_normal)):
         g_self, g_other = _extrapolate_scalar_pair_gpu(cp, ff, gamma_field, frame)
+        # 面上外插的扩散系数换成取用值（与 CPU `face_frames.py::diffusion_jump_point` 同一处理）
+        g_self = smooth_nonnegative_array(g_self, float(gamma_band), cp)
+        g_other = smooth_nonnegative_array(g_other, float(gamma_band), cp)
         p_self, p_other = _extrapolate_scalar_pair_gpu(cp, ff, scalar_field, frame)
         gn_self = 0.0
         gn_other = 0.0
@@ -266,7 +274,7 @@ def compute_turbulence_transport_residual_gpu(
     c_ip = resolve_viscous_ip_constant(int(solver.mesh.order))
     diff_k = compute_scalar_diffusion_residual_gpu(
         turb.k_field, gamma_k, solver.mesh_data, solver.ops_data, ff, n_cells, n_prism, n_sps,
-        c_ip=c_ip, wall_dirichlet_zero_face=wall_mask_k,
+        c_ip=c_ip, gamma_band=float(mu), wall_dirichlet_zero_face=wall_mask_k,
     )
     dk_dt_transport = (conv_k + diff_k) / cp.maximum(rho, 1e-10)
 
@@ -285,7 +293,8 @@ def compute_turbulence_transport_residual_gpu(
     )
     diff_w = compute_scalar_diffusion_residual_gpu(
         w_log, gamma_w, solver.mesh_data, solver.ops_data, ff, n_cells, n_prism, n_sps,
-        c_ip=c_ip, wall_dirichlet_value_face=log_wall_value_face, has_wall_dirichlet_value=has_omega_wall,
+        c_ip=c_ip, gamma_band=float(mu), wall_dirichlet_value_face=log_wall_value_face,
+        has_wall_dirichlet_value=has_omega_wall,
     )
     dw_dt_transport = ((conv_w + diff_w + log_omega_gradient_source(gamma_w, grad_log_omega, cp))
                        / cp.maximum(rho, 1e-10))

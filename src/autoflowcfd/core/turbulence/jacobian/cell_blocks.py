@@ -21,6 +21,10 @@
 import numpy as np
 from numba import njit, prange
 
+from autoflowcfd.core.fr_operators.flux_kernels.viscous import (
+    smooth_nonnegative, smooth_nonnegative_derivative,
+)
+
 
 @njit(cache=True, inline='always')
 def _gradient_operator(inv_c, D, n):
@@ -54,12 +58,14 @@ def _pointwise_chain(dX, Gop, n):
 
 
 @njit(cache=True, parallel=True)
-def turbulence_cell_blocks(acc, src, slot0, phi, gam, dS, dG, inv_sp, D, c2f, W, adj, rut):
+def turbulence_cell_blocks(acc, src, slot0, phi, gam, dS, dG, inv_sp, D, c2f, W, adj, rut, gamma_band):
     """逐单元的单元内导数，累加到 `acc[slot0+c]`（乘 det）与 `src[slot0+c]`（源项）。
 
     形状（单元 c 为本块第 c 个）：`phi/gam (C, n, nv)`、`dS/dG (C, n, nv, 4 nv)`、
     `inv_sp (C, n, 3, 3)`、`D (n, n, 3)`、`c2f (nf, n)`、`W (n, nf, 3)`、`adj (C, nf, 3, 3)`、
-    `rut (C, nf, 3)`；输出块 `(n, nv, n, nv)`。
+    `rut (C, nf, 3)`；输出块 `(n, nv, n, nv)`。`gamma_band`：细点上扩散系数取用值的过渡带宽，与残差
+    `transport/diffusion.py::_scalar_diffusion_volume_overintegrated` 同一个函数（对 Gamma 求导的那一项乘它的导数）；
+    负值表示不过积分（体积项的求值点就是解点，残差直接用解点上的扩散系数，这里同样不换算）。
     """
     n_cells = phi.shape[0]
     nv = phi.shape[2]
@@ -107,6 +113,13 @@ def turbulence_cell_blocks(acc, src, slot0, phi, gam, dS, dG, inv_sp, D, c2f, W,
                     for t in range(n):
                         acc_g += GF[r, b, t] * phi[c, t, v]
                     grad_f[r, v, b] = acc_g
+        # 细点上的 Gamma 换成取用值，导数留给"对 Gamma 求导"那一项
+        dgam_f = np.ones((nf, nv))
+        if gamma_band >= 0.0:
+            for r in range(nf):
+                for v in range(nv):
+                    dgam_f[r, v] = smooth_nonnegative_derivative(gam_f[r, v], gamma_band)
+                    gam_f[r, v] = smooth_nonnegative(gam_f[r, v], gamma_band)
         DGc = _pointwise_chain(dG[c], Gop, n)       # dGamma_v(s')/dphi_u(t)
         # 对流体积项取对流形式 div(rho u phi) - phi div(rho u)（transport/convection.py 模块
         # 文档）：后一项对 phi_s 的导数是对角的 div_vol(rho u)_s = sum_r conv[s,r] (c2f 1)_r
@@ -134,7 +147,8 @@ def turbulence_cell_blocks(acc, src, slot0, phi, gam, dS, dG, inv_sp, D, c2f, W,
                         a = A[s, r, 0] * GF[r, 0, t] + A[s, r, 1] * GF[r, 1, t] + A[s, r, 2] * GF[r, 2, t]
                         out[s, v, t, v] += g * a
                     # 扩散：grad phi 固定、对 Gamma_v 求导（经 Gamma 依赖全部未知量）
-                    ag = A[s, r, 0] * grad_f[r, v, 0] + A[s, r, 1] * grad_f[r, v, 1] + A[s, r, 2] * grad_f[r, v, 2]
+                    ag = (A[s, r, 0] * grad_f[r, v, 0] + A[s, r, 1] * grad_f[r, v, 1]
+                          + A[s, r, 2] * grad_f[r, v, 2]) * dgam_f[r, v]
                     if ag != 0.0:
                         for sp in range(n):
                             e = c2f[r, sp]

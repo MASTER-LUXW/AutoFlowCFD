@@ -171,7 +171,7 @@ class _MultiGPUResidualMixin:
             U_compact[..., :5], nu_compact,
             lambda phi, gamma: compute_scalar_diffusion_residual_gpu(
                 phi, gamma, self.mesh_data, self.mesh_data, self.flat_face_gpu,
-                n_compact, n_prism, n_sps, c_ip=c_ip))
+                n_compact, n_prism, n_sps, c_ip=c_ip, gamma_band=0.0))
 
     def _compute_total_residual_gpu(self, mu_t_field=None, inviscid=True, viscous=True,
                                     nu_av_compact=None):

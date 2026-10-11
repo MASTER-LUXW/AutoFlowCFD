@@ -25,7 +25,8 @@ from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
 from autoflowcfd.core.fr_operators.flux_kernels import (
     CP_AIR, VBC_DIRICHLET, VBC_INTERIOR, VBC_NEUMANN, mirror_normal_component,
     mirror_normal_derivative,
-    viscous_physical_flux_point, viscous_ip_penalty_tilde,
+    effective_eddy_viscosity, viscous_physical_flux_point, viscous_physical_flux_point_effective,
+    viscous_ip_penalty_tilde,
 )
 
 
@@ -95,9 +96,13 @@ def viscous_common_flux_point(Q_s, gv_s, gT_s, mut_s, Q_x, gv_x, gT_x, mut_x, ad
     gT_avg = np.empty(3)
     for a in range(3):
         gT_avg[a] = 0.5 * (gT_s[a] + gT_x[a])
+    # 两侧的涡粘各自换成取用值后再平均（外插到面上的涡粘可以为负，见
+    # `flux_kernels/viscous.py::viscous_physical_flux_point` 文档"涡粘按非负取用"）；下面的罚项用同一组值
+    mut_s = effective_eddy_viscosity(mut_s, mu)
+    mut_x = effective_eddy_viscosity(mut_x, mu)
     mut_avg = 0.5 * (mut_s + mut_x)
 
-    G_common = viscous_physical_flux_point(Q_avg, gv_avg, gT_avg, mu, Pr, mut_avg, Pr_t)
+    G_common = viscous_physical_flux_point_effective(Q_avg, gv_avg, gT_avg, mu, Pr, mut_avg, Pr_t)
     for v in range(5):
         jump[v] = a0 * G_common[0, v] + a1 * G_common[1, v] + a2 * G_common[2, v]
 

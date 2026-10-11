@@ -151,7 +151,7 @@ class TestFreestreamPreservation:
         oi = get_overintegration_context(mesh, ops)
         grad = np.ones((n_cells, n_sps, 3))
         div = _scalar_diffusion_volume_overintegrated(
-            np.zeros((n_cells, n_sps)), grad, oi, n_sps)
+            np.zeros((n_cells, n_sps)), grad, oi, n_sps, 1.8e-5)
         np.testing.assert_allclose(div, 0.0, rtol=0, atol=0)
 
 

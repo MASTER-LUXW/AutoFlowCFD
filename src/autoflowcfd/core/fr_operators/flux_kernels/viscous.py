@@ -61,11 +61,76 @@ def resolve_viscous_ip_constant(order: int) -> float:
 
 
 @njit(cache=True, inline='always')
+def smooth_nonnegative(x: float, band: float) -> float:
+    """非解点处（界面通量点的外插值、过积分细点的插值）扩散系数的取用值：
+
+        x <= 0          ->  0
+        0 < x < band    ->  band t^2 (2 - t)，t = x / band     （三次 Hermite，两端值与一阶导数都接上）
+        x >= band       ->  x
+
+    一阶导数连续（0 处为 0，`band` 处为 1）；`band <= 0` 时退化为 `max(x, 0)`。`x >= band` 的值逐位不变，
+    窄带里略小于原值（最多差 0.148 band）。数组版（numpy / cupy）是 `smooth_nonnegative_array`，导数是
+    `smooth_nonnegative_derivative`。
+    """
+    if x <= 0.0:
+        return 0.0
+    if x >= band:
+        return x
+    t = x / band
+    return band * t * t * (2.0 - t)
+
+
+@njit(cache=True, inline='always')
+def smooth_nonnegative_derivative(x: float, band: float) -> float:
+    """`d smooth_nonnegative / dx`：0（x <= 0）、`t (4 - 3 t)`（窄带内）、1（x >= band）。"""
+    if x <= 0.0:
+        return 0.0
+    if x >= band:
+        return 1.0
+    t = x / band
+    return t * (4.0 - 3.0 * t)
+
+
+def smooth_nonnegative_array(x, band: float, xp=np):
+    """`smooth_nonnegative` 的数组版（同一个分段函数）。"""
+    if band <= 0.0:
+        return xp.maximum(x, 0.0)
+    t = xp.clip(x / band, 0.0, 1.0)
+    return xp.where(x >= band, x, band * t * t * (2.0 - t))
+
+
+@njit(cache=True, inline='always')
+def effective_eddy_viscosity(mu_t: float, mu: float) -> float:
+    """非解点处涡粘的取用值：`smooth_nonnegative(mu_t, mu)`——负的外插值取 0，不小于分子粘度的原样，中间光滑
+    过渡。层流（`mu_t` 恒为零）与充分湍流区逐位不变。为什么需要、为什么不用硬截断 `max(mu_t, 0)`，见
+    `viscous_physical_flux_point` 文档"涡粘按非负取用"。数组版是 `effective_eddy_viscosity_array`。
+    """
+    return smooth_nonnegative(mu_t, mu)
+
+
+def effective_eddy_viscosity_array(mu_t, mu: float, xp=np):
+    """`effective_eddy_viscosity` 的数组版（GPU 与后处理用）。"""
+    return smooth_nonnegative_array(mu_t, mu, xp)
+
+
+@njit(cache=True, inline='always')
 def viscous_physical_flux_point(
     Q: np.ndarray, grad_vel: np.ndarray, grad_T: np.ndarray,
     mu: float, Pr: float, mu_t: float, Pr_t: float,
 ) -> np.ndarray:
-    """粘性物理通量，单点版。
+    """粘性物理通量，单点版。`mu_t` 是该点处涡粘场的值（可以是外插 / 插值出来的），在这里统一换成
+    `effective_eddy_viscosity`；已经换算过的调用方（`face_point_jumps.viscous_common_flux_point` 的面平均）
+    用 `viscous_physical_flux_point_effective`。
+    """
+    return viscous_physical_flux_point_effective(Q, grad_vel, grad_T, mu, Pr, effective_eddy_viscosity(mu_t, mu), Pr_t)
+
+
+@njit(cache=True, inline='always')
+def viscous_physical_flux_point_effective(
+    Q: np.ndarray, grad_vel: np.ndarray, grad_T: np.ndarray,
+    mu: float, Pr: float, mu_t: float, Pr_t: float,
+) -> np.ndarray:
+    """粘性物理通量，单点版（`mu_t` 已是取用值，原样使用）。
 
     Args:
         Q: (5,) (rho,u,v,w,p)
@@ -92,6 +157,24 @@ def viscous_physical_flux_point(
     密度到 0.01），平均流 Newton 步在这些单元被物理性限幅冻住、全局残差回升。
     CPU 两份实现与 GPU 版同一次改正（GPU 版 2026-09-03 曾被"对齐"到这个错误
     符号，那次对照只验证了两边一致，没有对照物理方向）。
+
+    ## 涡粘按非负取用（2026-10-11 修复的一阶物理缺陷）
+
+    `mu_t` 在解点上非负，但本函数的求值点不只是解点：界面通量点上的值是单元内涡粘多项式的**外插**，过积分
+    细点上是插值。涡粘在贴壁第一层里从接近零陡升到几十上百倍分子粘度，P1 线性外插到壁面就是负的，而且
+    绝对值超过分子粘度——总粘度 `mu + mu_t < 0`，粘性通量与壁面罚项从耗散变成**反耗散**，往贴壁层里注入
+    动量。物理上壁面的涡粘是零（SA-neg 对负的 `nu_tilde` 同样规定 `mu_t = 0`）。实测：
+    * 平板（无滑移壁、第一层 1 mm、来流 30 m/s、SA P1 隐式稳态），来流粘性比 5 / 50 / 500：收敛后第一层内
+      最大速度 30.6 / 78.3 / 90.4 m/s（残差都收敛到 6e-5，是"收敛的错解"）；取非负后 30.6 / 30.8 / 30.5；
+    * cube_demo SA P1：稳态升阶后 20 / 40 步最大速度 82 / 162 m/s，接着算隐式瞬态第 4 / 10 步 176 / 307 m/s
+      （来流 30，M 到 0.94，同一单元内解点速度反号）；|v| > 100 的 3398 个棱柱里约 2670 个是底面在壁面上的
+      第一层。稳态 P1 停滞、双时间步 dt 上限 1e-4、内迭代逐步变差都是它的表现。
+    取用值由 `effective_eddy_viscosity` 给出，施加在 `viscous_physical_flux_point`——界面、体积、解析 Jacobian
+    的差分都经过的唯一逐点定义——不在各处外插之后分别补。
+
+    **不用硬截断 `max(mu_t, 0)`**：它在零点有折角。同一个平板算例来流粘性比 500 时，硬截断给出物理的解
+    （最大速度 30.8 m/s）但隐式稳态不收敛（残差停在 8e5，CFL 在 2~30 之间反复）；外插值在零附近的通量点让
+    Newton 的线性化来回跳。
     """
     mu_total = mu + mu_t
 

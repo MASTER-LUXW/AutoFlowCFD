@@ -37,7 +37,8 @@ def artificial_diffusion_blocks(mesh, ops, flat, nu, want_coupling: bool = False
     return assemble_scalar_blocks(
         mesh, ops, flat, np.zeros((n_cells, n_sps, 1)), nu, zero_partials, zero_partials,
         np.ones((n_cells, n_sps)), np.zeros((n_cells, n_sps, 3)), np.zeros((n_cells, n_sps, 3)), m, m,
-        (ghost_o, np.ascontiguousarray(a_o), ghost_n, np.ascontiguousarray(a_n)), diff, want_coupling)
+        (ghost_o, np.ascontiguousarray(a_o), ghost_n, np.ascontiguousarray(a_n)), diff, want_coupling,
+        gamma_band=0.0)
 
 
 def add_scalar_kron_gamma(blocks, scalar, gamma, use_gamma: bool):

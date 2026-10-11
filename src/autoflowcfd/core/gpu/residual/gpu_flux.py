@@ -114,7 +114,8 @@ def euler_physical_flux_gpu(Q):
     return F
 
 
-def viscous_physical_flux_gpu(Q, grad_vel, grad_T, mu, Pr, mu_t=None, Pr_t=PRANDTL_TURBULENT):
+def viscous_physical_flux_gpu(Q, grad_vel, grad_T, mu, Pr, mu_t=None, Pr_t=PRANDTL_TURBULENT,
+                              mu_t_is_effective: bool = False):
     """GPU 版粘性物理通量张量 G_i(Q, grad_vel, grad_T)。
 
     与 core/fr_flux_kernels_pointwise.py::viscous_physical_flux_batch 公式一致。
@@ -164,6 +165,12 @@ def viscous_physical_flux_gpu(Q, grad_vel, grad_T, mu, Pr, mu_t=None, Pr_t=PRAND
 
     # 有效粘度（mu_t 标量/数组两种情况下 mu + mu_t 的计算完全相同，
     # 此前拆成三个分支但后两个分支代码逐字相同，合并为一个）
+    # 涡粘换成取用值（外插 / 插值到非解点处可以为负，与 CPU `flux_kernels/viscous.py::effective_eddy_viscosity`
+    # 同一个分段函数）；`mu_t_is_effective`：调用方已经换算过（界面的面平均），原样使用
+    if mu_t is not None and not mu_t_is_effective:
+        from autoflowcfd.core.fr_operators.flux_kernels import effective_eddy_viscosity_array
+
+        mu_t = effective_eddy_viscosity_array(cp.asarray(mu_t), mu, cp)
     mu_total = mu if mu_t is None else mu + mu_t
 
     # 热导率：k = mu * Cp / Pr（分子）+ mu_t * Cp / Pr_t（湍流）

@@ -72,10 +72,15 @@ def _viscous_jump_gpu(cp, K, Q_s, gv_s, gT_s, mut_s, Q_x, gv_x, gT_x, mut_x, adj
     Q_avg = 0.5 * (Q_s + Q_x)
     gv_avg = 0.5 * (gv_s + gv_x)
     gT_avg = 0.5 * (gT_s + gT_x)
+    # 两侧涡粘各自换成取用值后再平均，罚项用同一组值（与 CPU `viscous_common_flux_point` 同一处理）
+    from autoflowcfd.core.fr_operators.flux_kernels import effective_eddy_viscosity_array
+
+    mut_s = effective_eddy_viscosity_array(mut_s, mu, cp)
+    mut_x = effective_eddy_viscosity_array(mut_x, mu, cp)
     mut_avg = 0.5 * (mut_s + mut_x)
-    jump = _viscous_tilde_flux(Q_avg, gv_avg, gT_avg, mut_avg, adjrow, mu, Pr, Pr_t)
+    jump = _viscous_tilde_flux(Q_avg, gv_avg, gT_avg, mut_avg, adjrow, mu, Pr, Pr_t, mut_is_effective=True)
     if subtract_self:
-        jump = jump - _viscous_tilde_flux(Q_s, gv_s, gT_s, mut_s, adjrow, mu, Pr, Pr_t)
+        jump = jump - _viscous_tilde_flux(Q_s, gv_s, gT_s, mut_s, adjrow, mu, Pr, Pr_t, mut_is_effective=True)
     interior = K == VBC_INTERIOR
 
     adj_mag = cp.sqrt(cp.sum(adjrow * adjrow, axis=-1))

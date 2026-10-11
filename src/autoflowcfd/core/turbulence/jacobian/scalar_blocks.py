@@ -76,7 +76,7 @@ def _segments(mesh, ops, npr, nte):
 
 
 def assemble_scalar_blocks(mesh, ops, flat, kw, gam, dS, dG, rho, vel, rho_u_tilde, mass_flux,
-                           mass_flux_neighbor, ghost, diff, want_coupling: bool = False):
+                           mass_flux_neighbor, ghost, diff, want_coupling: bool = False, *, gamma_band: float):
     """返回 `(blocks_prism, blocks_tet[, coupling])`（float32，`n_var = nv`，见模块文档）。
 
     Args:
@@ -114,7 +114,9 @@ def assemble_scalar_blocks(mesh, ops, flat, kw, gam, dS, dG, rho, vel, rho_u_til
             turbulence_cell_blocks(acc[kind], src[kind], int(slot[c0]),
                                    np.ascontiguousarray(kw[c0:c1, :n]), gam[c0:c1, :n], dS[c0:c1, :n],
                                    dG[c0:c1, :n], inv_sp[c0:c1, :n], Dn, np.ascontiguousarray(c2f), W,
-                                   np.ascontiguousarray(adj), np.ascontiguousarray(rut))
+                                   np.ascontiguousarray(adj), np.ascontiguousarray(rut),
+                                   # 不过积分时体积项直接用解点上的扩散系数（残差同样不经取用函数）
+                                   float(gamma_band) if det_f is not None else -1.0)
 
     # ---- 界面项 ----
     m_o = np.ascontiguousarray(mass_flux)
@@ -142,7 +144,7 @@ def assemble_scalar_blocks(mesh, ops, flat, kw, gam, dS, dG, rho, vel, rho_u_til
             flat.owner_cell, flat.neighbor_cell, flat.is_boundary, flat.owner_is_primary,
             flat.neighbor_is_primary, flat.owner_face_op, flat.neighbor_face_op, n_own, n_nei,
             flat.owner_adj_row_exact, flat.neighbor_adj_row_exact, flat.ref_area_weight,
-            flat.boundary_extrap_native, flat.lift_native, flat.ip_length, float(c_ip),
+            flat.boundary_extrap_native, flat.lift_native, flat.ip_length, float(c_ip), float(gamma_band),
             flat.neighbor_src0_cell, flat.neighbor_src0_tpl, flat.neighbor_src0_tid, flat.neighbor_src1_idx,
             flat.neighbor_src1_cell, flat.neighbor_src1_mat, flat.owner_src0_cell, flat.owner_src0_tpl, flat.owner_src0_tid,
             flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,

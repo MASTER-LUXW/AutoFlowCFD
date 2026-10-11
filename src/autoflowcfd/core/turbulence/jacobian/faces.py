@@ -32,10 +32,10 @@ _SQRT_EPS = float(np.sqrt(np.finfo(np.float64).eps))
 
 
 @njit(cache=True, inline='always')
-def _diffusion_partials(ps, gs, dns, po, go, dno, h, c_ip, is_bnd, is_dir, target):
-    """`dJd/d(ps, gs, dns, po, go, dno)`（前向差分，双线性函数上精确到舍入）。"""
+def _diffusion_partials(ps, gs, dns, po, go, dno, h, c_ip, is_bnd, is_dir, target, gamma_band):
+    """`dJd/d(ps, gs, dns, po, go, dno)`（前向差分；扩散系数的取用函数一阶导数连续，差分对它同样成立）。"""
     x = np.array([ps, gs, dns, po, go, dno])
-    j0 = diffusion_jump_point(ps, gs, dns, po, go, dno, h, c_ip, is_bnd, is_dir, target)
+    j0 = diffusion_jump_point(ps, gs, dns, po, go, dno, h, c_ip, is_bnd, is_dir, target, gamma_band)
     out = np.zeros(6)
     n_in = 3 if is_bnd else 6
     for q in range(n_in):
@@ -43,7 +43,7 @@ def _diffusion_partials(ps, gs, dns, po, go, dno, h, c_ip, is_bnd, is_dir, targe
         y = x.copy()
         y[q] += hq
         out[q] = (diffusion_jump_point(y[0], y[1], y[2], y[3], y[4], y[5], h, c_ip, is_bnd, is_dir,
-                                       target) - j0) / hq
+                                       target, gamma_band) - j0) / hq
     return out
 
 
@@ -83,7 +83,7 @@ def _trace_ops(M, phi, gam, dG, inv_c, D, cell, n, nrm):
 
 
 @njit(cache=True)
-def _side_blocks(c, n, E, L, w, nrm, m_side, h, c_ip, ghost_row, conv_a, is_bnd_row, is_dir_row, target_row,
+def _side_blocks(c, n, E, L, w, nrm, m_side, h, c_ip, gamma_band, ghost_row, conv_a, is_bnd_row, is_dir_row, target_row,
                  src_cells, src_mats, phi, gam, dG, inv_sp, D_prism, D_tet, n_prism, n_real_prism, n_real_tet,
                  want_cross):
     n_fp = E.shape[0]
@@ -130,7 +130,7 @@ def _side_blocks(c, n, E, L, w, nrm, m_side, h, c_ip, ghost_row, conv_a, is_bnd_
                 hq = _SQRT_EPS * (abs(p_other) + 1.0)
                 dc_o = (convection_jump_point(m, ps[i, v], p_other + hq) - j0) / hq
             dd = _diffusion_partials(ps[i, v], gs[i, v], dns[i, v], po[i, v], go[i, v], dno[i, v], h, c_ip,
-                                     is_bnd_row[i], is_dir_row[v, i], target_row[v, i])
+                                     is_bnd_row[i], is_dir_row[v, i], target_row[v, i], gamma_band)
             if ghost_row[i]:
                 dS_p[i, v] = dd[0] - (dc_s + a * dc_o)
             else:
@@ -184,6 +184,7 @@ def add_turbulence_face_blocks_color(face_indices, acc_prism, acc_tet, slot, n_p
                                      owner_cell, neighbor_cell, is_boundary, owner_is_primary, neighbor_is_primary,
                                      owner_face_op, neighbor_face_op, normal_owner, normal_neighbor,
                                      adj_owner, adj_neighbor, ref_area_weight, E_nat, lift_nat, ip_length, c_ip,
+                                     gamma_band,
                                      neighbor_src0_cell, neighbor_src0_tpl, neighbor_src0_tid, neighbor_src1_idx, neighbor_src1_cell,
                                      neighbor_src1_mat, owner_src0_cell, owner_src0_tpl, owner_src0_tid, owner_src1_idx,
                                      owner_src1_cell, owner_src1_mat,
@@ -248,7 +249,7 @@ def add_turbulence_face_blocks_color(face_indices, acc_prism, acc_tet, slot, n_p
             w = np.empty(n_fp)
             for i in range(n_fp):
                 w[i] = ref_area_weight[i] * np.sqrt(adj[i, 0] ** 2 + adj[i, 1] ** 2 + adj[i, 2] ** 2)
-            blk, cross = _side_blocks(c, n, E, L, w, nrm, m_side, ip_length[f], c_ip, ghost_row, conv_a,
+            blk, cross = _side_blocks(c, n, E, L, w, nrm, m_side, ip_length[f], c_ip, gamma_band, ghost_row, conv_a,
                                       bnd_row, dir_row, tgt_row, src_cells, (m0, m1), phi, gam, dG, inv_sp,
                                       D_prism, D_tet, n_prism, n_real_prism, n_real_tet, want_cross)
             k = slot[c]

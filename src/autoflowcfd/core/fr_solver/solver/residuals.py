@@ -148,7 +148,7 @@ class _SolverResidualMixin:
 
         return artificial_diffusion_residual(
             self.state.U, nu_av,
-            lambda phi, gamma: compute_scalar_diffusion_residual(phi, gamma, self.mesh, self.ops))
+            lambda phi, gamma: compute_scalar_diffusion_residual(phi, gamma, self.mesh, self.ops, gamma_band=0.0))
 
     def _get_turbulent_viscosity_field(self, mu_t_turb=None) -> Optional[np.ndarray]:
         """当前激活的湍流模型给出的动力涡粘度场 mu_t = rho * nu_t（委托给

@@ -87,7 +87,8 @@ def assemble_turbulence_blocks(ctx: TurbulenceLinearization, u_flat, want_coupli
     out = assemble_scalar_blocks(
         mesh, ctx.ops, flat, np.ascontiguousarray(u), gam, dS, dG, rho, ctx.Q[:, :, 1:4],
         ctx.conv_geom.rho_u_tilde, m_o, m_n,
-        (ghost_o, np.ascontiguousarray(a_o), ghost_n, np.ascontiguousarray(a_n)), diff, want_coupling)
+        (ghost_o, np.ascontiguousarray(a_o), ghost_n, np.ascontiguousarray(a_n)), diff, want_coupling,
+        gamma_band=float(ctx.mu))
     if ctx.strong_rows is not None:
         zero_strong_rows(out, np.asarray(ctx.strong_rows, dtype=bool), int(mesh.n_prism_cells), nv)
     return out

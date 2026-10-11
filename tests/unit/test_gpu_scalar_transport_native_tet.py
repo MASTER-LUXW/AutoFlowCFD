@@ -172,10 +172,10 @@ class TestNativeScalarTransportMatchesCpu:
         scalar = _synthetic_scalar_field(mesh, seed=order * 2000 + 21)
         gamma = np.full((n_cells, n_sps), 1.8e-5) + 0.5 * scalar
 
-        expected = _cpu_diffusion(scalar, gamma, mesh, ops)
+        expected = _cpu_diffusion(scalar, gamma, mesh, ops, gamma_band=1.8e-5)
         actual = np.asarray(gst.compute_scalar_diffusion_residual_gpu(
             scalar, gamma, mesh_data, ops_data, flat, n_cells, mesh.n_prism_cells, n_sps,
-            c_ip=resolve_viscous_ip_constant(int(mesh.order)),
+            c_ip=resolve_viscous_ip_constant(int(mesh.order)), gamma_band=1.8e-5,
         ))
 
         max_diff = np.max(np.abs(actual - expected))

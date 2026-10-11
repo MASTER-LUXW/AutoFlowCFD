@@ -189,10 +189,10 @@ class TestScalarResidualsMatchCpu:
         scalar = _synthetic_scalar_field(mesh)
         gamma = np.full((n_cells, n_sps), 1.8e-5) + 0.5 * scalar
 
-        expected = _cpu_compute_scalar_diffusion_residual(scalar, gamma, mesh, ops)
+        expected = _cpu_compute_scalar_diffusion_residual(scalar, gamma, mesh, ops, gamma_band=1.8e-5)
         actual = gst.compute_scalar_diffusion_residual_gpu(
             scalar, gamma, mesh_data, ops_data, flat, n_cells, mesh.n_prism_cells, n_sps,
-            c_ip=resolve_viscous_ip_constant(int(mesh.order)),
+            c_ip=resolve_viscous_ip_constant(int(mesh.order)), gamma_band=1.8e-5,
         )
         np.testing.assert_allclose(actual, expected, rtol=1e-10, atol=1e-10)
 

@@ -195,4 +195,4 @@ class _GPUSolverResidualMixin:
             U, nu_av,
             lambda phi, gamma: compute_scalar_diffusion_residual_gpu(
                 phi, gamma, self.mesh_data, self.ops_data, self.flat_face_gpu,
-                n_cells, int(self.mesh.n_prism_cells), n_sps, c_ip=c_ip))
+                n_cells, int(self.mesh.n_prism_cells), n_sps, c_ip=c_ip, gamma_band=0.0))

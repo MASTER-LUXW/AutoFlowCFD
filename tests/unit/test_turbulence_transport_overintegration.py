@@ -178,7 +178,7 @@ class TestOverintegrationIsMoreAccurate:
         det = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
 
         div_oi = _scalar_diffusion_volume_overintegrated(
-            gamma_field, grad_field, oi, n_sps) / det
+            gamma_field, grad_field, oi, n_sps, 0.0) / det
 
         from autoflowcfd.core.fr_operators.volume_contract import (
             contravariant_flux_from_metric,

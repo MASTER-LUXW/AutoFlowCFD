@@ -59,4 +59,4 @@ class CpuScalarTransport:
     def diffusion(self, phi, gamma):
         s = self.solver
         return compute_scalar_diffusion_residual(phi, gamma, s.mesh, s.ops, wall_dirichlet_zero_face=self.wall_zero,
-                                                 flat_face_override=self.flat)
+                                                 flat_face_override=self.flat, gamma_band=float(s.mu_molecular))

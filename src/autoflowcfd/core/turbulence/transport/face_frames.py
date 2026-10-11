@@ -32,6 +32,8 @@ neighbor "+=" 的非对称约定只对反对称跳变量成立，扩散（BR1 �
 import numpy as np
 from numba import get_thread_id, njit, prange
 
+from autoflowcfd.core.fr_operators.flux_kernels.viscous import smooth_nonnegative
+
 
 
 @njit(cache=True, parallel=True)
@@ -166,9 +168,18 @@ def face_mass_flux_kernel(
 
 
 @njit(cache=True, inline='always')
-def diffusion_jump_point(ps, gs, dns, po, go, dno, h, c_ip, is_bnd, is_dir, target):
+def diffusion_jump_point(ps, gs, dns, po, go, dno, h, c_ip, is_bnd, is_dir, target, gamma_band):
     """一个通量点上的扩散跳变量 `J = (G* - G_self) . n_self`（公式见
-    `diffusion_face_jumps_kernel`）。残差核与湍流解析 Jacobian 共用这一份。"""
+    `diffusion_face_jumps_kernel`）。残差核与湍流解析 Jacobian 共用这一份。
+
+    `gs`/`go` 是单元内扩散系数多项式**外插**到面上的值，在这里换成取用值 `smooth_nonnegative(., gamma_band)`
+    （`gamma_band` 取分子粘度；解点上的扩散系数不小于它，所以只改负的与窄带内的外插值）。扩散系数在贴壁
+    第一层里随湍流量陡升时外插到壁面为负——cube_demo SA P1 上 91% 的第一层棱柱如此，最负到分子值的 -5 倍——
+    壁面内罚 Dirichlet 的罚项系数 `c_ip Gamma / h` 随之为负，把壁面处的湍流量推离给定值；与平均流的涡粘是
+    同一个缺陷（`fr_operators/flux_kernels/viscous.py::viscous_physical_flux_point` 文档"涡粘按非负取用"）。
+    """
+    gs = smooth_nonnegative(gs, gamma_band)
+    go = smooth_nonnegative(go, gamma_band)
     if is_bnd:
         if is_dir:
             return -(c_ip * gs / h) * (ps - target)
@@ -191,7 +202,7 @@ def diffusion_face_jumps_kernel(
     phi, gamma, grad_phi,
     self_cell, self_face_op, boundary_extrap_native,
     other_src0_cell, other_src0_tpl, other_src0_tid, other_src1_idx, other_src1_cell, other_src1_mat,
-    normal, h_face, c_ip, is_boundary, is_dirichlet, target,
+    normal, h_face, c_ip, is_boundary, is_dirichlet, target, gamma_band,
 ):
     """某一侧坐标系下扩散界面项的跳变量 `J = (G* - G_self) . n_self`，`(n_faces, n_fp)`。
 
@@ -231,7 +242,7 @@ def diffusion_face_jumps_kernel(
                 dns += w * (grad_phi[sc, s, 0] * n0 + grad_phi[sc, s, 1] * n1 + grad_phi[sc, s, 2] * n2)
             if is_boundary[f, i]:
                 J[f, i] = diffusion_jump_point(ps, gs, dns, 0.0, 0.0, 0.0, h, c_ip, True,
-                                               is_dirichlet[f, i], target[f, i])
+                                               is_dirichlet[f, i], target[f, i], gamma_band)
                 continue
             po = 0.0
             go = 0.0
@@ -249,7 +260,7 @@ def diffusion_face_jumps_kernel(
                     po += w * phi[c1, s]
                     go += w * gamma[c1, s]
                     dno += w * (grad_phi[c1, s, 0] * n0 + grad_phi[c1, s, 1] * n1 + grad_phi[c1, s, 2] * n2)
-            J[f, i] = diffusion_jump_point(ps, gs, dns, po, go, dno, h, c_ip, False, False, 0.0)
+            J[f, i] = diffusion_jump_point(ps, gs, dns, po, go, dno, h, c_ip, False, False, 0.0, gamma_band)
     return J
 
 

@@ -117,7 +117,7 @@ def _self_extrap_side(cp, cell_idx, face_op, boundary_extrap_native,
     return Q, gv, gT, mut
 
 
-def _viscous_tilde_flux(Q, gv, gT, mut, adjrow, mu, Pr, Pr_t):
+def _viscous_tilde_flux(Q, gv, gT, mut, adjrow, mu, Pr, Pr_t, mut_is_effective: bool = False):
     """`a·G(Q, grad u, grad T, mu_t)`（参考空间法向粘性通量），`(n, n_fp, 5)`——对应 CPU 端
     每个通量点上 `viscous_physical_flux_point` 再投影到 adj 行的那一段，向量化到
     `(n*n_fp,)` 展平批量。"""
@@ -125,6 +125,7 @@ def _viscous_tilde_flux(Q, gv, gT, mut, adjrow, mu, Pr, Pr_t):
     G = viscous_physical_flux_gpu(
         Q.reshape(n * n_fp, 5), gv.reshape(n * n_fp, 3, 3),
         gT.reshape(n * n_fp, 3), mu, Pr, mu_t=mut.reshape(n * n_fp), Pr_t=Pr_t,
+        mu_t_is_effective=mut_is_effective,
     ).reshape(n, n_fp, 3, 5)
     return (adjrow[..., 0:1] * G[..., 0, :] + adjrow[..., 1:2] * G[..., 1, :]
             + adjrow[..., 2:3] * G[..., 2, :])

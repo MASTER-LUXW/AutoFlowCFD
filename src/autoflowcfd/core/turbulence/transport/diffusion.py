@@ -27,6 +27,7 @@ from autoflowcfd.core.turbulence.transport_kernel import (
 )
 
 from autoflowcfd.core.fr_operators.flux_kernels import resolve_viscous_ip_constant
+from autoflowcfd.core.fr_operators.flux_kernels.viscous import smooth_nonnegative_array
 
 from .face_frames import diffusion_face_jumps_kernel
 from .faces import (
@@ -36,7 +37,7 @@ from .faces import (
 from .convection import resolve_turb_overintegration
 
 
-def _scalar_diffusion_volume_overintegrated(gamma_field, grad_phi, oi, n_sps):
+def _scalar_diffusion_volume_overintegrated(gamma_field, grad_phi, oi, n_sps, gamma_band):
     """扩散体积项 `div(adj(J)*Gamma*grad_phi)` 的去混叠版，返回
     (n_cells,n_sps)。
 
@@ -86,8 +87,10 @@ def _scalar_diffusion_volume_overintegrated(gamma_field, grad_phi, oi, n_sps):
         for c0 in range(seg_lo, seg_hi, OVERINT_CHUNK_CELLS):
             c1 = min(c0 + OVERINT_CHUNK_CELLS, seg_hi)
             i0, i1 = c0 - seg_lo, c1 - seg_lo
-            gam_f = contract_shared_operator_1axis(
-                op_c2f, np.ascontiguousarray(gamma_field[c0:c1, :, None]))
+            # 细点上插值出的扩散系数换成取用值（单元角点处是外插，可以为负；见
+            # `face_frames.py::diffusion_jump_point`）
+            gam_f = smooth_nonnegative_array(contract_shared_operator_1axis(
+                op_c2f, np.ascontiguousarray(gamma_field[c0:c1, :, None])), gamma_band)
             grad_f = contract_shared_operator_1axis(
                 op_c2f, np.ascontiguousarray(grad_phi[c0:c1]))        # (n,n_fine,3)
             G_phys_f = (gam_f * grad_f)[..., None]                    # (n,n_fine,3,1)
@@ -111,9 +114,14 @@ def compute_scalar_diffusion_residual(
     wall_dirichlet_value_face: np.ndarray = None,
     has_wall_dirichlet_value: np.ndarray = None,
     flat_face_override=None,
+    *,
+    gamma_band: float,
 ) -> np.ndarray:
     """标量扩散 FR 残差 `+div(Gamma*grad(phi))/det(J)`（体积项 + IIPG 内罚界面项），
     返回 `d(rho*phi)/dt` 的扩散部分（调用方再除以 rho）。
+
+    `gamma_band`：非解点处（面上的外插值、过积分细点的插值）扩散系数取用值的过渡带宽
+    （`flux_kernels/viscous.py::smooth_nonnegative`）。湍流输运传分子粘度；人工粘性传 0（硬截断）。
 
     ## 符号
 
@@ -180,7 +188,7 @@ def compute_scalar_diffusion_residual(
     _oi = get_overintegration_context(mesh, ops) if resolve_turb_overintegration() == "on" else None
     if _oi is not None:
         div_G = _scalar_diffusion_volume_overintegrated(
-            gamma_field, grad_phi, _oi, n_sps)
+            gamma_field, grad_phi, _oi, n_sps, float(gamma_band))
     else:
         G_phys = gamma_field[:, :, None] * grad_phi                      # (n_cells,n_sps,3)
         G_tilde = contravariant_flux_from_metric(det_jacs, inv_jacs, G_phys[..., None])[..., 0]
@@ -239,7 +247,7 @@ def compute_scalar_diffusion_residual(
                 phi_c, gamma_c, grad_c, self_cell, self_op, flat.boundary_extrap_native, *src,
                 normal, h_face, float(c_ip),
                 np.ascontiguousarray(is_bnd), np.ascontiguousarray(is_dir),
-                np.ascontiguousarray(target, dtype=np.float64)))
+                np.ascontiguousarray(target, dtype=np.float64), float(gamma_band)))
     del grad_phi
 
     with np.errstate(over='ignore', invalid='ignore'):

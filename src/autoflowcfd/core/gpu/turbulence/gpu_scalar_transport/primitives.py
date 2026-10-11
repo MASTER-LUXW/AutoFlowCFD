@@ -51,4 +51,4 @@ class GpuScalarTransport:
         s = self.solver
         return compute_scalar_diffusion_residual_gpu(
             phi, gamma, s.mesh_data, s.ops_data, s.flat_face_gpu, self.n_cells, self.n_prism, self.n_sps,
-            c_ip=self.c_ip, wall_dirichlet_zero_face=s._wall_mask_k_gpu)
+            c_ip=self.c_ip, gamma_band=float(s.mu_molecular), wall_dirichlet_zero_face=s._wall_mask_k_gpu)

@@ -83,7 +83,8 @@ class _Residual:
                                           flat_face_override=self.flat)
         if self.nu_av is not None:
             vis = vis + artificial_diffusion_residual(
-                U, self.nu_av, lambda phi, gamma: compute_scalar_diffusion_residual(phi, gamma, self.mesh, self.ops))
+                U, self.nu_av, lambda phi, gamma: compute_scalar_diffusion_residual(phi, gamma, self.mesh, self.ops,
+                                                                                    gamma_band=0.0))
         return -(inv + vis)
 
     def __call__(self, u_flat):

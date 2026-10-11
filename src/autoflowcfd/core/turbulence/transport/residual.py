@@ -135,7 +135,7 @@ def compute_turbulence_transport_residual(
     )
     diff_k = compute_scalar_diffusion_residual(
         turb.k_field, gamma_k, solver.mesh, solver.ops, wall_dirichlet_zero_face=wall_mask_k,
-        flat_face_override=flat_face_override,
+        flat_face_override=flat_face_override, gamma_band=float(mu),
     )
     with np.errstate(over='ignore', invalid='ignore'):
         dk_dt_transport = (conv_k + diff_k) / np.maximum(rho, 1e-10)
@@ -164,7 +164,7 @@ def compute_turbulence_transport_residual(
     diff_w = compute_scalar_diffusion_residual(
         w_log, gamma_w, solver.mesh, solver.ops,
         wall_dirichlet_value_face=log_wall_value_face, has_wall_dirichlet_value=has_omega_wall,
-        flat_face_override=flat_face_override,
+        flat_face_override=flat_face_override, gamma_band=float(mu),
     )
     with np.errstate(over='ignore', invalid='ignore'):
         dw_dt_transport = (conv_w + diff_w + log_omega_gradient_source(gamma_w, grad_log_omega, np)) \
