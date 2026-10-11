@@ -68,3 +68,49 @@ def test_norm_weights_are_positive_cell_volume_shares(order):
     assert np.all(nw[real] > 0.0)
     assert np.all(nw[~real] == 0.0)
     np.testing.assert_allclose(nw.sum(axis=1), W.sum(axis=1), rtol=1e-13)
+
+
+def test_norm_is_taken_on_residuals_scaled_by_the_reference_magnitudes():
+    """各方程先按参考量级无量纲化再求范数（2026-10-11）。此前直接对有量纲的残差求平方和，能量方程比质量方程
+    大约 1e5 倍，范数实际只看能量方程（cube_demo SA P1：能量方程占 1.000）。"""
+    red = LocalReductions()
+    scales = np.array([1.2, 36.0, 36.0, 36.0, 1.0e5])
+    r = np.tile(scales * np.array([3.0, 1.0, 1.0, 1.0, 1.0]), (7, 1))      # 无量纲残差：质量 3，其余 1
+    raw = ResidualNorm(None, red)(r)
+    scaled = ResidualNorm(None, red, scales)(r)
+    assert scaled == pytest.approx(np.sqrt((9.0 + 4.0) / 5.0))
+    assert raw == pytest.approx(np.sqrt((r[0] ** 2).mean()))               # 不给 scales 时不缩放
+    # 只改质量方程的残差：缩放后的范数明显变化，有量纲的范数几乎不动
+    r2 = r.copy()
+    r2[:, 0] *= 10.0
+    assert ResidualNorm(None, red, scales)(r2) > 5.0 * scaled
+    assert ResidualNorm(None, red)(r2) == pytest.approx(raw, rel=1e-6)
+    w = np.linspace(0.5, 2.0, 7)
+    full = ResidualNorm(w, red, scales)
+    assert full.restricted(slice(0, 4))(r[:, :4]) == pytest.approx(np.sqrt((9.0 + 3.0) / 4.0))
+    with pytest.raises(ValueError, match="参考量级"):
+        ResidualNorm(None, red, np.array([1.0, 0.0]))
+
+
+def test_linear_solve_minimizes_the_scaled_residual():
+    """GMRES 在同一个（按参考量级缩放的）范数里最小化：两个方程量级差 1e6、只给 1 次迭代时，不缩放的求解
+    只顾大量级的那个方程，缩放后的范数里残差不降；现在接受判据所用的范数单调不增。"""
+    n = 40
+    rng = np.random.default_rng(3)
+    scales = np.array([1.0, 1.0e6])
+    A = np.zeros((2 * n, 2 * n))
+    for k in range(n):
+        A[2 * k:2 * k + 2, 2 * k:2 * k + 2] = np.array([[2.0, 0.3e-6], [0.4e6, 5.0]]) * rng.uniform(0.5, 1.5)
+    c = (rng.standard_normal((n, 2)) * scales).reshape(-1)
+
+    def residual(u):
+        return (A @ u.reshape(-1) + c).reshape(n, 2)
+
+    u0 = np.zeros((n, 2))
+    u_new, info = step_newton_krylov(
+        residual, u0, np.full(n, 1e12), scales, gmres_max_iter=1, gmres_restart=1,
+        physicality=lambda u, du, red: np.ones(u.shape[0]))
+    norm = ResidualNorm(None, LocalReductions(), scales)
+    assert info["res_norm"] == pytest.approx(norm(residual(u0)))
+    assert norm(residual(u_new)) <= norm(residual(u0)) * (1.0 + 1e-12)
+    assert info["linear_rel_residual"] <= 1.0 + 1e-12

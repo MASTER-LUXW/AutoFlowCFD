@@ -298,7 +298,7 @@ def step_coupled_newton(solver, backend, dtau_flat, *, filter_active: bool = Fal
     solver._newton_dtau_scale = info["dtau_scale"]
     solver._newton_local_dtau = info["local_dtau_scale"]
     backend.install(x_new, dtau_flat)
-    info.update(_subsystem_norms(residual.r0, backend.positivity.norm_weights, red))
+    info.update(_subsystem_norms(residual.r0, backend.positivity.norm_weights, red, scales))
     solver._newton_last_info = info
     note_linear_growth(solver, info)
     if info["theta"] <= 0.0:
@@ -312,9 +312,9 @@ def step_coupled_newton(solver, backend, dtau_flat, *, filter_active: bool = Fal
     return info
 
 
-def _subsystem_norms(r0, weights, red) -> dict:
-    """步前两个子系统各自的残差范数（监控与升阶判据用，与接受判据同一个体积加权 RMS）。
-    `res_norm` 本身是两者合在一起的耦合范数。"""
-    norm = ResidualNorm(weights, red)
-    return {"res_norm_mean": norm(r0[:, :N_MEAN_FLOW_VARS]),
-            "res_norm_turbulence": norm(r0[:, N_MEAN_FLOW_VARS:])}
+def _subsystem_norms(r0, weights, red, scales) -> dict:
+    """步前两个子系统各自的残差范数（监控与升阶判据用，与接受判据同一个体积加权、按参考量级无量纲化的
+    RMS）。`res_norm` 本身是两者合在一起的耦合范数。"""
+    norm = ResidualNorm(weights, red, scales)
+    return {"res_norm_mean": norm.restricted(slice(0, N_MEAN_FLOW_VARS))(r0[:, :N_MEAN_FLOW_VARS]),
+            "res_norm_turbulence": norm.restricted(slice(N_MEAN_FLOW_VARS, None))(r0[:, N_MEAN_FLOW_VARS:])}

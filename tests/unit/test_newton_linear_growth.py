@@ -60,7 +60,7 @@ def test_repeated_unstable_steps_are_reported_once_per_batch():
             note_linear_growth(solver, _info(4.75, ok=False))
         assert not messages
         note_linear_growth(solver, _info(4.75, ok=False))
-        assert len(messages) == 1 and "solve transient" in messages[0] and "4.75" in messages[0]
+        assert len(messages) == 1 and "先看解" in messages[0] and "4.75" in messages[0]
         for _ in range(UNSTABLE_STEPS_BEFORE_WARNING):
             note_linear_growth(solver, _info(2.0, ok=False))
         assert len(messages) == 2

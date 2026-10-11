@@ -95,6 +95,7 @@ class TestQuadraticConvergence:
 
         prev = _rms(residual(u))
         assert prev > 0.0
+        initial = prev
         ratios = []
         n_steps = 0
         for _ in range(6):
@@ -109,8 +110,10 @@ class TestQuadraticConvergence:
             cur = _rms(residual(u))
             ratios.append(cur / max(prev, 1e-300))
             prev = cur
-            if prev == 0.0:
-                break        # 已到机器零，再迭代是无操作（下面单独断言）
+            if prev == 0.0 or prev < 1.0e-11 * initial:
+                # 已到舍入底，再迭代的比值只是噪声。线性求解在按参考量级缩放的范数里最小化（2026-10-11）之后
+                # 残差停在舍入底而不是恰好 0.0，比值序列 8.7e-02 / 2.0e-04 / 1.8e-07
+                break
 
         assert prev == 0.0 or prev < 1.0e-5, (
             f"{n_steps} 步之后残差仍有 {prev:.3e}")

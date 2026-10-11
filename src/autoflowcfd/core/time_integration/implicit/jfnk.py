@@ -157,7 +157,7 @@ def _solve_direction(jac: MatrixFreeJacobian, prec, dtau, r0, n_var: int, eta: f
 
     **线性残差在全局化的同一个范数里最小化**（2026-10-03）：`norm` 带逐行权重 `w`
     时（`ResidualNorm`），对 `D A M^{-1} D^{-1}`（`D = diag(sqrt(w))`）做 GMRES，解
-    `x = M^{-1} D^{-1} y`。它的残差就是 `D (b - A x)`，即接受判据与 SER 所用的加权范数；
+    `x = M^{-1} D^{-1} y`（`D` 另含逐列的参考量级倒数，见 `ResidualNorm`）。它的残差就是 `D (b - A x)`，即接受判据与 SER 所用的加权范数；
     `D A M^{-1} D^{-1}` 与 `A M^{-1}` 相似，预处理后算子的谱不变。此前 GMRES 在未加权
     2 范数里最小化：残差被体积小 1e6 倍的单元主导，GMRES 在那里把线性残差压到
     `eta` 以下，在占全域体积的大单元上却让它变大——湍流平板层流 P2（`tests/validation/
@@ -197,8 +197,13 @@ def _solve_direction(jac: MatrixFreeJacobian, prec, dtau, r0, n_var: int, eta: f
 
         b = rows.compact(-r0)
 
-    if norm is not None and norm.weights is not None:
-        d_full = xp.broadcast_to(xp.sqrt(norm.weights)[:, None], (n_dof, n_var))
+    if norm is not None and (norm.weights is not None or norm.inv_scales is not None):
+        # D = sqrt(w) / scale：行权重与逐列的参考量级（`ResidualNorm` 的同一个范数）
+        d_full = xp.ones((n_dof, n_var))
+        if norm.weights is not None:
+            d_full = d_full * xp.sqrt(norm.weights)[:, None]
+        if norm.inv_scales is not None:
+            d_full = d_full * norm.inv_scales[None, :]
         d = xp.ascontiguousarray(d_full).reshape(-1) if rows is None else rows.compact(d_full)
         if not bool(red.all_finite(d)) or red.min(d) <= 0.0:
             raise ValueError("残差范数权重在真实行上必须为正有限值（加权线性求解需要 D 可逆）")
@@ -324,7 +329,10 @@ def step_newton_krylov(
         r0 = xp.ascontiguousarray(residual(u0_flat), dtype=xp.float64)
     else:
         r0 = r0_spatial
-    norm = ResidualNorm(norm_weights, red)
+    if np.asarray(scales).size != u0_flat.shape[1]:
+        raise ValueError(f"参考量级长度 {np.asarray(scales).size} 与变量数 {u0_flat.shape[1]} 不符 —— 残差范数与差分步长"
+                         f"都逐变量无量纲化，形状不符不能静默按广播处理")
+    norm = ResidualNorm(norm_weights, red, scales)
     res_norm = norm(r0)
     if res_norm == 0.0:
         return u0_flat, dict(res_norm=0.0, res_norm_new=0.0, eta=0.0,

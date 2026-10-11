@@ -41,15 +41,38 @@ class ResidualNorm:
     权重取单元体积在真实解点上均分（`positivity/limiter.py::PositivityLimiter.norm_weights`，2026-10-03），
     不取解点插值型求积权重本身：原生基 P2/P3 的那套权重有零与负值，加权平方和只是
     半范数（该处文档）。线性求解在同一个加权范数里最小化（`jfnk.py::_solve_direction`）。
+
+    **逐方程按参考量级无量纲化**（`scales`，2026-10-11）：各列先除以该未知量的参考量级（平均流
+    `residual_diagnostics._reference_scales`：rho_inf、rho_inf U_inf、p_inf；湍流为模型的 `unknown_scales`）再求
+    加权平方和。此前直接对有量纲的残差求和：能量方程的残差比质量方程大 `p_inf / rho_inf`（约 1e5）倍、比
+    动量方程大 `p_inf / (rho_inf U_inf)`（约 3e3）倍，范数实际只是能量方程的范数——cube_demo SA P1 上能量
+    方程占 `sum w r^2` 的 1.000，其余五个方程合计 0.000。接受判据、SER、GMRES 最小化的都是它，质量、动量、
+    湍流方程收敛与否不进判据。`scales` 为 None 时不缩放（各列量纲相同的调用方）。
     """
 
-    __slots__ = ("weights", "red")
+    __slots__ = ("weights", "red", "inv_scales")
 
-    def __init__(self, weights, red: LocalReductions):
+    def __init__(self, weights, red: LocalReductions, scales=None):
         self.red = red
         self.weights = None if weights is None else red.xp.asarray(weights, dtype=red.xp.float64).ravel()
+        if scales is None:
+            self.inv_scales = None
+        else:
+            s = np.asarray(scales, dtype=np.float64).ravel()
+            if not (np.all(np.isfinite(s)) and np.all(s > 0.0)):
+                raise ValueError(f"残差范数的参考量级必须为正有限值，收到 {s}")
+            self.inv_scales = red.xp.asarray(1.0 / s)
+
+    def restricted(self, columns) -> "ResidualNorm":
+        """同一组权重、只取 `columns` 这些列的范数（紧耦合步里平均流 / 湍流各自的残差范数）。"""
+        out = ResidualNorm(None, self.red)
+        out.weights = self.weights
+        out.inv_scales = None if self.inv_scales is None else self.inv_scales[columns]
+        return out
 
     def __call__(self, r) -> float:
+        if self.inv_scales is not None:
+            r = r * self.inv_scales[None, :]
         if self.weights is None:
             return self.red.rms(r)
         s = self.red.sum(self.weights)
