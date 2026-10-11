@@ -17,6 +17,7 @@ from typing import Optional
 import numpy as np
 
 DT_KEY = "dt"
+INNER_ITERATIONS_KEY = "dual_time_inner_iter"
 PREVIOUS_LEVEL_FIELD = "U_prev_sps"
 TURBULENCE_PREVIOUS_FIELD = "turb_prev_unknowns"
 
@@ -28,9 +29,24 @@ def is_dual_time(solver) -> bool:
 
 
 def time_metadata(solver) -> dict:
-    """{"dt": 本次 `solve()` 的时间步长}；尚未求解过时空。"""
+    """{"dt": 本次 `solve()` 的时间步长}（尚未求解过时没有）；dual-time 另记内迭代次数上限。"""
     dt = getattr(solver, "_physical_dt", None)
-    return {} if dt is None else {DT_KEY: float(dt)}
+    out = {} if dt is None else {DT_KEY: float(dt)}
+    if is_dual_time(solver):
+        out[INNER_ITERATIONS_KEY] = int(solver.time_integrator.dual_time_steps)
+    return out
+
+
+def restore_inner_iteration_limit(solver, metadata: dict) -> None:
+    """dual-time 续算沿用 checkpoint 记录的内迭代次数上限（早于 2026-10-11 的 checkpoint 没有记录，
+    保持求解器构造时的默认值）。"""
+    if is_dual_time(solver) and INNER_ITERATIONS_KEY in metadata:
+        solver.time_integrator.dual_time_steps = int(metadata[INNER_ITERATIONS_KEY])
+
+
+def run_tolerance(tol: float, solver) -> float:
+    """`solve()` 的相对收敛容差：时间精确的计算跑满指定步数（残差下降不是停止条件），其余原样。"""
+    return 0.0 if is_dual_time(solver) else tol
 
 
 def resume_time_step(dt_option, metadata: dict, solver) -> float:

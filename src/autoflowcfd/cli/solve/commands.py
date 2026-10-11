@@ -25,6 +25,7 @@ from autoflowcfd.cli.solve.option_help import PHASE_MAX_ITER_HELP, RESIDUAL_DROP
 from autoflowcfd.cli.solve.solver_factory import validate_backend_options
 from autoflowcfd.cli.solve.distributed_checkpoint_io import distributed_periodic_checkpoint_callback
 from autoflowcfd.core.time_integration.base import DEFAULT_STEADY_TOL
+from autoflowcfd.core.utils.checkpoint_time import is_dual_time, run_tolerance
 from autoflowcfd.cli.solve.checkpoint_io import (
     periodic_checkpoint_callback,
     rebuild_solver_from_checkpoint,
@@ -80,7 +81,9 @@ from autoflowcfd.cli.solve.aero_coefficients import (  # noqa: E402
               help='中间 checkpoint 保存间隔（本次 resume 自己新跑的额外迭代数，'
                    '非绝对迭代数）——与 solve steady 同名参数含义一致')
 @click.option('--time-scheme', type=click.Choice(['rk3', 'newton-krylov']), default=None,
-              help='续算用的稳态格式；默认沿用 checkpoint 记录的格式（早于 2026-09-25 的 '
+              help='在两个稳态格式之间切换；默认沿用 checkpoint 记录的格式——瞬态（dual-time）的 checkpoint 续算'
+                   '仍是 dual-time（物理时间步长、上一时间层、内迭代次数上限随 checkpoint 恢复，跑满 --max-iter 步，'
+                   '不传本选项）。早于 2026-09-25 的 '
                    'checkpoint 没有记录，它们只可能是 rk3）。单机与分布式（--n-ranks/'
                    '--multi-gpu/--fully-distributed）续算都支持 newton-krylov。')
 @click.option('--cfl-start', type=float, default=None,
@@ -198,10 +201,10 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
     logger.info(f"State restored from checkpoint (iter={iteration}), "
                 f"continuing for {max_iter} more iterations...")
     result = solver.solve(
-        max_iter=max_iter, dt=_resume_dt(dt, metadata, solver), tol=tol,
+        max_iter=max_iter, dt=_resume_dt(dt, metadata, solver), tol=run_tolerance(tol, solver),
         checkpoint_callback=periodic_checkpoint_callback(
             checkpoint_interval, output_dir, input_file, turbulence_model, target_backend,
-            surface_mesh=resolved_surface_mesh, iteration_offset=iteration),
+            surface_mesh=resolved_surface_mesh, iteration_offset=iteration, transient=is_dual_time(solver)),
         phase_max_iter=phase_max_iter,
         residual_drop_threshold=residual_drop_threshold)
     print(f"\n✅ Resumed simulation finished: total_iterations~={iteration + result.iterations}, "
@@ -292,7 +295,7 @@ def _resume_distributed(
             checkpoint_interval, output_dir, input_file, turbulence_model, surface_mesh=resolved_surface_mesh, iteration_offset=iteration)
 
         result = solver.solve(
-            max_iter=max_iter, dt=resume_dt, tol=tol, checkpoint_callback=_checkpoint_cb,
+            max_iter=max_iter, dt=resume_dt, tol=run_tolerance(tol, solver), checkpoint_callback=_checkpoint_cb,
             phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold,
         )
         total_iterations = iteration + result.iterations
@@ -321,7 +324,7 @@ def _resume_distributed(
     _checkpoint_cb = distributed_periodic_checkpoint_callback(
         checkpoint_interval, output_dir, input_file, turbulence_model, surface_mesh=resolved_surface_mesh, iteration_offset=iteration)
 
-    result = solver.solve(max_iter=max_iter, dt=resume_dt, tol=tol,
+    result = solver.solve(max_iter=max_iter, dt=resume_dt, tol=run_tolerance(tol, solver),
                           checkpoint_callback=_checkpoint_cb,
                           phase_max_iter=phase_max_iter, residual_drop_threshold=residual_drop_threshold)
     total_iterations = iteration + result.iterations

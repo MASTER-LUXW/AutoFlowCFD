@@ -8,7 +8,6 @@
 from typing import Optional
 
 import click
-from loguru import logger
 from .restore import restore_solver_state_from_fields
 
 
@@ -49,36 +48,32 @@ def physics_from_metadata(metadata: dict) -> dict:
     }
 
 
-#: `solve resume` 是**稳态**续算（`solver.solve(dt=1e-3)`，dt 在稳态格式下
-#: 被忽略）。时间精确的格式（DUAL_TIME）续算要求物理 dt 与历史层，不在
-#: 这条命令的语义里。
-_RESUME_STEADY_SCHEMES = ("ssp_rk3", "newton_krylov")
+#: `--time-scheme` 能换成的格式：两个稳态格式（稳态续算在显式与隐式之间切换）。不给时沿用
+#: checkpoint 记录的格式，包括时间精确的 dual_time。
+_RESUME_OVERRIDE_SCHEMES = ("ssp_rk3", "newton_krylov")
 
 
 def resolve_resume_time_scheme(requested, metadata):
     """续算用的时间格式：显式覆盖 > checkpoint 记录 > `ssp_rk3`。
 
-    checkpoint 记录的是非稳态格式（瞬态运行的末态 checkpoint）时不能照搬
-    ——`resume` 按稳态语义推进；此时退回 `ssp_rk3` 并打 WARNING，而不是
-    静默换格式。早于 2026-09-25 的 checkpoint 没有这个键，它们产生时只有
+    checkpoint 记录什么格式就续算什么格式——瞬态（dual_time）运行的 checkpoint 续算仍是 dual_time：
+    物理时间步长、上一时间层、内迭代次数上限都随 checkpoint 恢复（`core/utils/checkpoint_time.py`）。
+    2026-10-11 以前记录的是非稳态格式时退回 `ssp_rk3` 并打一条 WARNING："续算"一个瞬态算例实际跑的
+    是显式稳态推进（cube_demo DDES/SA 的续算日志里 `Time Scheme: ssp_rk3`、CFL 0.03、没有内迭代），
+    瞬态计算一旦中断就无法接着算。早于 2026-09-25 的 checkpoint 没有这个键，它们产生时只有
     `ssp_rk3` 一种稳态格式，取它是精确的而不是猜测。
     """
     from autoflowcfd.core.time_integration.base import scheme_from_name
 
     if requested is not None:
         scheme = scheme_from_name(requested)
-        if scheme.value not in _RESUME_STEADY_SCHEMES:
+        if scheme.value not in _RESUME_OVERRIDE_SCHEMES:
             raise click.BadParameter(
-                f"solve resume 只支持稳态格式 {_RESUME_STEADY_SCHEMES}，收到 {requested!r}",
+                f"--time-scheme 只用来在稳态格式 {_RESUME_OVERRIDE_SCHEMES} 之间切换，收到 {requested!r}；"
+                f"瞬态续算不传它，沿用 checkpoint 记录的格式",
                 param_hint="--time-scheme")
         return scheme
-    recorded = metadata.get("time_scheme", "ssp_rk3")
-    if recorded not in _RESUME_STEADY_SCHEMES:
-        logger.warning(
-            f"checkpoint 记录的时间格式是 {recorded!r}（非稳态）；solve resume 按稳态"
-            f"语义续算，改用 ssp_rk3。需要隐式稳态续算请显式传 --time-scheme newton-krylov。")
-        recorded = "ssp_rk3"
-    return scheme_from_name(recorded)
+    return scheme_from_name(metadata.get("time_scheme", "ssp_rk3"))
 
 
 def rebuild_solver_from_checkpoint(
@@ -238,4 +233,7 @@ def rebuild_solver_from_checkpoint(
     metadata["turbulence_model"] = turbulence_model
     metadata["backend"] = target_backend
     metadata["surface_mesh"] = resolved_surface_mesh
+    from autoflowcfd.core.utils.checkpoint_time import restore_inner_iteration_limit
+
+    restore_inner_iteration_limit(solver, metadata)
     return solver, iteration, metadata

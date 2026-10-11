@@ -265,6 +265,9 @@ def rebuild_distributed_solver_from_checkpoint(
     metadata["target_order"] = target_order
     metadata["turbulence_model"] = turbulence_model
     metadata["surface_mesh"] = resolved_surface_mesh
+    from autoflowcfd.core.utils.checkpoint_time import restore_inner_iteration_limit
+
+    restore_inner_iteration_limit(solver, metadata)
     return solver, iteration, metadata
 
 
