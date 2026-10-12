@@ -42,7 +42,7 @@ P0 与解析装配不覆盖的离散（见 `fr_residual/jacobian/backend.py::uns
   轨迹不可复现改为确定性查表（各 rank 自然一致，不需要归约）；或
 * 上一步没有被接受（`theta == 0`）；或
 * **本步**的 GMRES 在上一条的迭代预算内没有达到容差（`stale_budget` /
-  `refresh`，由 `jfnk.py` 当场调用）。此前只按上一步的迭代数决定下一步是否
+  `recover`，由 `jfnk.py` 当场调用；同时启用预处理的对角位移，`precond_shift.py`）。此前只按上一步的迭代数决定下一步是否
   重装配：plate_demo P1+SST 上湍流块在一步里从 10 次跳到 200 次（用满、只到
   0.29），平均流同一步也用满 200 次，那一步耗时 1173 s——过时的预处理把整步
   的迭代预算烧完，重装配要等下一步才发生。
@@ -81,6 +81,7 @@ from numba import njit, prange
 from . import block_budget
 from .block_budget import block_mode_bytes, plan_block_mode
 from .cell_blocks import CellBlockJacobian
+from .precond_shift import block_diagonal_scale, shifted_dtau
 from .preconditioner import PseudoTransientDiagonal
 from .reductions import LocalReductions
 from .refresh_cost import assembly_cost_iters, block_kind
@@ -236,7 +237,7 @@ class BlockJacobiCache:
                  "disabled_reason", "n_builds", "red", "n_var", "assembler", "use_ilu", "coupling",
                  "_coupling_graph_fn", "_coupling_graph", "kind", "refresh_slack",
                  "single_copy", "_inverted_dtau", "_coarse", "cross",
-                 "_factored", "_factored_dtau", "_ptc_diag")
+                 "_factored", "_factored_dtau", "_ptc_diag", "shifted")
 
     def __init__(self, *, cell_is_prism, colors: np.ndarray, n_sps: int,
                  n_real_prism: int, n_real_tet: int, n_var: int,
@@ -269,7 +270,8 @@ class BlockJacobiCache:
         self._inverted_dtau = None
         self._factored = None            # 块 ILU 档：当前 J_cc 下按 `_factored_dtau` 构造的预处理子
         self._factored_dtau = None
-        self._ptc_diag = None            # 逐（单元, 解点）的 max_v |J_cc 对角|（PTC 项可忽略判据用）
+        self._ptc_diag = None            # 逐（单元, 解点）的 max_v |J_cc 对角|（PTC 项可忽略判据、对角位移用）
+        self.shifted = False             # 预处理的伪时间项是否带下限（`precond_shift.py`，`recover` 启用）
         self.cross = None
         self.cell_is_prism = np.asarray(cell_is_prism, dtype=bool)
         self.n_sps, self.n_real_prism, self.n_real_tet = n_sps, n_real_prism, n_real_tet
@@ -325,18 +327,40 @@ class BlockJacobiCache:
     def _ptc_relative(self, dtau_flat) -> float:
         """`1/dtau` 相对 `J_cc` 对角的几何平均比值（只取真实行；分布式下取全局平均）。"""
         xp = self.red.xp
-        if self._ptc_diag is None:
-            d = xp.zeros(self.cell_is_prism.size * self.n_sps, dtype=xp.float64)
-            for blocks, cells, n_real in ((self.jac.blocks_prism, self.jac.prism_cells, self.n_real_prism),
-                                          (self.jac.blocks_tet, self.jac.tet_cells, self.n_real_tet)):
-                if cells.size:
-                    diag = xp.abs(xp.diagonal(blocks, axis1=1, axis2=2)).reshape(cells.size, n_real, self.n_var)
-                    rows = xp.asarray(cells)[:, None] * self.n_sps + xp.arange(n_real)[None, :]
-                    d[rows.ravel()] = diag.max(axis=-1).ravel()
-            self._ptc_diag = d
-        real = self._ptc_diag > 0.0
-        log_rel = -xp.log(xp.asarray(dtau_flat, dtype=xp.float64).ravel()[real] * self._ptc_diag[real])
+        diag = self._diag_scale()
+        real = diag > 0.0
+        log_rel = -xp.log(xp.asarray(dtau_flat, dtype=xp.float64).ravel()[real] * diag[real])
         return float(np.exp(self.red.sum(log_rel) / max(self.red.count(log_rel), 1.0)))
+
+    def _diag_scale(self):
+        """逐（单元, 解点）的 `J_cc` 对角量级（每次装配后首次用到时计算；单份模式在原地求逆之前算）。"""
+        if self._ptc_diag is None:
+            self._ptc_diag = block_diagonal_scale(self.jac, self.cell_is_prism, self.n_sps, self.n_real_prism,
+                                                  self.n_real_tet, self.red.xp)
+        return self._ptc_diag
+
+    def _preconditioner_dtau(self, dtau_flat):
+        """预处理里用的伪时间步：启用对角位移后带下限（`precond_shift.py`），否则就是系统的 dtau。"""
+        if not self.shifted or self.jac is None:
+            return dtau_flat
+        return shifted_dtau(dtau_flat, self._diag_scale(), self.red.xp)
+
+    @property
+    def recoverable(self) -> bool:
+        """线性求解失败后 `recover` 是否还有动作可做。"""
+        return self.disabled_reason is None and self.jac is not None and (self.age > 0 or not self.shifted)
+
+    def recover(self, residual, u0_flat, r0_flat, scales, dtau_flat) -> bool:
+        """本步线性求解没到容差时调用：复用中的块按本步基态重装配，并启用预处理的对角位移
+        （`precond_shift.py`）。有动作返回 True（调用方重新求解）；刚装配的块且位移已启用时无可补救。"""
+        if not self.recoverable:
+            return False
+        if not self.shifted:
+            self.shifted = True
+            logger.info(f"[NK] 单元块预处理（n_var={self.n_var}）：线性求解未达容差，启用对角位移")
+        if self.age > 0 or self.single_copy:
+            self._build(residual, u0_flat, r0_flat, scales, dtau_flat, reason="本步线性求解未达容差")
+        return True
 
     def _factorization_stale(self, dtau_flat) -> bool:
         """块 ILU 档：按 `_factored_dtau` 做的分解对当前 dtau 是否已过时（判据见 `preconditioner`）。"""
@@ -357,10 +381,6 @@ class BlockJacobiCache:
             return None
         return self._refresh_threshold(self.baseline_iters)
 
-    def refresh(self, residual, u0_flat, r0_flat, scales, dtau_flat) -> None:
-        """当场按本步基态重装配（本步 GMRES 超出 `stale_budget` 时调用）。"""
-        self._build(residual, u0_flat, r0_flat, scales, dtau_flat, reason="本步 GMRES 超出过时预算")
-
     def begin_step(self, residual, u0_flat, r0_flat, scales, dtau_flat) -> None:
         """每个 Newton 步开始时调用一次：按刷新判据决定是否重装配 `J_cc`。
 
@@ -370,7 +390,7 @@ class BlockJacobiCache:
         `dtau_flat`：本步的伪时间步长（缩档之前）。单份模式据它判断存下的逆是否已经
         过时（`_dtau_drifted`），重装配时也按它求逆。
         """
-        if self.disabled_reason is not None or not self._needs_rebuild(dtau_flat):
+        if self.disabled_reason is not None or not self._needs_rebuild(self._preconditioner_dtau(dtau_flat)):
             return
         self._build(residual, u0_flat, r0_flat, scales, dtau_flat, reason="刷新判据")
 
@@ -379,7 +399,7 @@ class BlockJacobiCache:
 
         t0 = time.time()
         # 先释放旧块再装配：新旧两份同时存在时 P3 单份模式要 2 x 8.9 GiB（plate_demo 实测
-        # 步内 refresh 时 OOM）；调用方同样先丢掉持有旧块的预处理对象（jfnk.py）
+        # 步内重装配时 OOM）；调用方同样先丢掉持有旧块的预处理对象（jfnk.py）
         self.jac = None
         self.coupling = None
         self.cross = None
@@ -412,6 +432,8 @@ class BlockJacobiCache:
                     self.n_var)
                 self.cross = self._coarse.cross_coupling(self.jac.cross_coupling, self.coupling)
         if self.single_copy:
+            self._diag_scale()                                  # 块原地求逆之后对角量级就取不到了
+            dtau_flat = self._preconditioner_dtau(dtau_flat)
             invert_blocks_in_place(self.jac, dtau_flat)
             self._inverted_dtau = self.red.xp.asarray(dtau_flat, dtype=self.red.xp.float64).ravel().copy()
         self.age = 0
@@ -457,6 +479,7 @@ class BlockJacobiCache:
         """
         if self.disabled_reason is not None:
             return PseudoTransientDiagonal(dtau_flat, n_var)
+        dtau_flat = self._preconditioner_dtau(dtau_flat)
         if self.coupling is None:
             return CellBlockJacobiPreconditioner(self.jac, dtau_flat, inverted=self.single_copy)
         if self._factorization_stale(dtau_flat):

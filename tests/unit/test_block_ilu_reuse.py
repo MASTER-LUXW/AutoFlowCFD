@@ -71,7 +71,8 @@ def test_negligible_pseudo_time_term_never_triggers_a_refactorization(cache_and_
 def test_reassembly_discards_the_factorization(cache_and_counter):
     cache, calls, n, (res, u0, r0) = cache_and_counter
     p = cache.preconditioner(np.full(n, 1e-6), 5)
-    cache.refresh(res, u0, r0, np.ones(5), np.full(n, 1e-6))
+    cache.age = 1                                    # 复用中的块：线性求解失败后的补救会重装配
+    assert cache.recover(res, u0, r0, np.ones(5), np.full(n, 1e-6))
     assert cache._factored is None
     assert cache.preconditioner(np.full(n, 1e-6), 5) is not p and calls["n"] == 2
 

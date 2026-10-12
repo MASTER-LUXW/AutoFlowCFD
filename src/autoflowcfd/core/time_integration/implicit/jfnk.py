@@ -55,7 +55,7 @@ from .dtau_control import MIN_SCALE as DTAU_MIN_SCALE, PtcDtauScale
 from .forcing import EisenstatWalkerForcing
 from .jacobian_vector import MatrixFreeJacobian
 from .block_jacobi import BlockJacobiCache
-from .gmres import gmres_right
+from .gmres import basis_itemsize, gmres_right
 from .physicality import _cellwise_relaxation, density_pressure_row_limits, update_local_dtau_scale
 from .preconditioner import PseudoTransientDiagonal
 from .globalization import LINEAR_SOLVE_MAX_REL_RESIDUAL, ResidualNorm, accept_step
@@ -103,16 +103,18 @@ GMRES_MAX_ITER = 200
 #: 不受这个值限制、单步成本却受它限制。
 DTAU_MAX_CUTS_PER_STEP = 3
 
-def krylov_restart(n_local_entries: int, red: LocalReductions, flexible: bool = False) -> int:
+def krylov_restart(n_local_entries: int, red: LocalReductions, flexible: bool = False, itemsize: int = 8) -> int:
     """按 Krylov 基内存预算给出的重启长度（见 `KRYLOV_BASIS_BYTES`）。
 
     分布式下各 rank 的 GMRES 必须走同样多步（内积是集体操作），所以取全局最小。
     灵活模式每步多存一个 `M^{-1} v_j`（`gmres.py`），同一预算下重启长度减半。
+    `itemsize`：基向量每个元素的字节数（`gmres.py::basis_itemsize`）；下限 `GMRES_RESTART` 是按双精度
+    定的内存量，单精度存储时同样的内存是两倍的向量数。
     """
-    per_step = 8 * max(int(n_local_entries), 1) * (2 if flexible else 1)
+    per_step = itemsize * max(int(n_local_entries), 1) * (2 if flexible else 1)
     m_local = KRYLOV_BASIS_BYTES // per_step - 1
     m = int(red.min(red.xp.asarray([float(m_local)])))
-    return int(min(GMRES_RESTART_MAX, max(GMRES_RESTART, m)))
+    return int(min(GMRES_RESTART_MAX, max(GMRES_RESTART * 8 // itemsize, m)))
 
 
 class _RealRows:
@@ -142,7 +144,8 @@ class _RealRows:
 
 def _solve_direction(jac: MatrixFreeJacobian, prec, dtau, r0, n_var: int, eta: float,
                      gmres_restart: int, gmres_max_iter: int, red: LocalReductions,
-                     rows: Optional[_RealRows] = None, norm: Optional[ResidualNorm] = None):
+                     rows: Optional[_RealRows] = None, norm: Optional[ResidualNorm] = None,
+                     review_at: Optional[int] = None):
     """解 `(I/dtau + J) dU = -R`，返回 `(du, gmres_iters, gmres_info, linear_rel_residual)`。
 
     `dtau` 是本次求解的逐行步长，Krylov 算子的对角项 `I/dtau` 在这里按它加；`prec` 只提供预处理
@@ -219,7 +222,7 @@ def _solve_direction(jac: MatrixFreeJacobian, prec, dtau, r0, n_var: int, eta: f
 
     du_1d, iters, info, rel = gmres_right(
         _apply_A, b, _apply_Minv, rtol=eta,
-        restart=gmres_restart, max_iter=gmres_max_iter, red=red, flexible=prec.flexible)
+        restart=gmres_restart, max_iter=gmres_max_iter, red=red, flexible=prec.flexible, review_at=review_at)
     if info < 0 or not red.all_finite(du_1d):
         return None, iters, -1, float("nan")
     du = du_1d.reshape(n_dof, n_var) if rows is None else rows.expand(du_1d, xp)
@@ -362,11 +365,12 @@ def step_newton_krylov(
 
     if block_precond is not None:
         block_precond.begin_step(spatial, u0_flat, r0_spatial, scales, _linear_dtau(dtau_base * ctrl.scale))
-    if gmres_restart is None:
-        gmres_restart = krylov_restart(u0_flat.size if rows is None else rows.idx.size * n_var, red,
-                                       flexible=block_precond is not None and block_precond.flexible)
     eta = (forcing.next_eta(res_norm, tol_nonlinear)
            if forcing is not None else 0.1)
+    if gmres_restart is None:
+        gmres_restart = krylov_restart(u0_flat.size if rows is None else rows.idx.size * n_var, red,
+                                       flexible=block_precond is not None and block_precond.flexible,
+                                       itemsize=basis_itemsize(eta))
 
     u_new = u0_flat
     theta = 0.0
@@ -393,20 +397,23 @@ def step_newton_krylov(
         prec = (block_precond.preconditioner(dtau_lin, n_var) if block_precond is not None
                 else PseudoTransientDiagonal(dtau_lin, n_var))
         budget = block_precond.stale_budget() if block_precond is not None else None
+        # 复核点（`gmres.py`）：复用的块在过时预算处；刚装配的块在还有补救可做（对角位移未启用）时取一个
+        # 重启周期——外推到容差还要更久就不把预算烧完，直接补救
+        review = budget if budget is not None or block_precond is None or not block_precond.recoverable             else gmres_restart
         du, iters, ginfo, linear_rel = _solve_direction(
-            jac, prec, dtau_lin, r0, n_var, eta, gmres_restart,
-            gmres_max_iter if budget is None else min(budget, gmres_max_iter), red, rows, norm)
+            jac, prec, dtau_lin, r0, n_var, eta, gmres_restart, gmres_max_iter, red, rows, norm,
+            review_at=None if review is None or review >= gmres_max_iter else review)
         iters_total += iters
-        if ginfo > 0 and budget is not None and budget < gmres_max_iter:
-            # 复用的 J_cc 在过时预算内解不到容差：当场按本步基态重装配再解
-            # （见 block_jacobi.py 模块文档"复用与刷新"）。ginfo 是全局量，各 rank
-            # 在这里的分支一致。
+        if ginfo > 0 and block_precond is not None:
+            # 没解到容差（复用的块在过时预算处外推还差得远，`gmres.py` 模块文档"复核点"；或用满 / 停滞）：
+            # 复用的块当场按本步基态重装配、预处理启用对角位移（`BlockJacobiCache.recover`），有动作就
+            # 再解一次。ginfo 是全局量，各 rank 在这里的分支一致。
             prec = None          # 释放持有旧块的预处理对象，重装配期间不留两份（见 block_jacobi._build）
-            block_precond.refresh(spatial, u0_flat, r0_spatial, scales, dtau_lin)
-            prec = block_precond.preconditioner(dtau_lin, n_var)
-            du, iters, ginfo, linear_rel = _solve_direction(
-                jac, prec, dtau_lin, r0, n_var, eta, gmres_restart, gmres_max_iter, red, rows, norm)
-            iters_total += iters
+            if block_precond.recover(spatial, u0_flat, r0_spatial, scales, dtau_lin):
+                prec = block_precond.preconditioner(dtau_lin, n_var)
+                du, iters, ginfo, linear_rel = _solve_direction(
+                    jac, prec, dtau_lin, r0, n_var, eta, gmres_restart, gmres_max_iter, red, rows, norm)
+                iters_total += iters
         iters_since_build = iters
         gmres_info = ginfo
         if du is not None and ginfo > 0 and linear_rel > LINEAR_SOLVE_MAX_REL_RESIDUAL:

@@ -173,8 +173,10 @@ def test_krylov_operator_takes_the_pseudo_time_term_from_this_step():
         def stale_budget(self):
             return None
 
-        def refresh(self, *args):
-            pass
+        recoverable = False
+
+        def recover(self, *args):
+            return False
 
         def record(self, *args, **kwargs):
             pass

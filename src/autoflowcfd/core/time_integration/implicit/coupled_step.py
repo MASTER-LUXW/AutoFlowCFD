@@ -185,16 +185,23 @@ class CoupledBlockPreconditioner:
             self.turb.assembler = be.turb.block_assembler()
             subsystems = ((self.mean, MEAN_COLUMNS, FrozenViscosityMeanResidual(be, u0, mu_t0)),
                           (self.turb, TURB_COLUMNS, SubsystemResidual(self.residual, u0, TURB_COLUMNS)))
-            for cache, cols, sub_residual in subsystems:
-                getattr(cache, action)(sub_residual, u0[:, cols].copy(), r0[:, cols].copy(), scales[cols], dtau)
+            return [getattr(cache, action)(sub_residual, u0[:, cols].copy(), r0[:, cols].copy(), scales[cols], dtau)
+                    for cache, cols, sub_residual in subsystems]
         finally:
             be.restore(snap)
 
     def begin_step(self, residual, u0, r0, scales, dtau) -> None:
         self._with_assemblers(u0, "begin_step", r0, scales, dtau)
 
-    def refresh(self, residual, u0, r0, scales, dtau) -> None:
-        self._with_assemblers(u0, "refresh", r0, scales, dtau)
+    @property
+    def recoverable(self) -> bool:
+        return self.mean.recoverable or self.turb.recoverable
+
+    def recover(self, residual, u0, r0, scales, dtau) -> bool:
+        """本步线性求解没到容差后的补救（`BlockJacobiCache.recover`），两套块各做各的；任一有动作即重新求解。"""
+        if not self.recoverable:
+            return False
+        return any(self._with_assemblers(u0, "recover", r0, scales, dtau))
 
     def preconditioner(self, dtau, n_var: int):
         if n_var != N_MEAN_FLOW_VARS + self.n_turb:
@@ -203,7 +210,7 @@ class CoupledBlockPreconditioner:
                               self.turb.preconditioner(dtau, self.n_turb), dtau)
 
     def stale_budget(self) -> Optional[int]:
-        """本步 GMRES 的过时预算：复用中的块的基线迭代数，加上 `refresh` 实际要付的代价——它把**两套**块
+        """本步 GMRES 的过时预算：复用中的块的基线迭代数，加上 `recover` 重装配实际要付的代价——它把**两套**块
         一起重装配，所以松弛是两者之和。
 
         2026-10-10 以前取两套块各自预算的较小者：湍流块的松弛只有 3 次迭代，耦合系统的 GMRES 次数比基线

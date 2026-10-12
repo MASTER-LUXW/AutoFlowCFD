@@ -282,12 +282,16 @@ def test_stale_blocks_are_refreshed_within_the_step():
     res2, t2 = make(2)                 # 块整体换掉：复用的预处理对它几乎无效
     budget = cache.stale_budget()
     assert budget is not None and budget < 200
+    r_before = np.linalg.norm(res2(u))
     u, info2 = step_newton_krylov(res2, u, dtau, np.ones(2), block_precond=cache, gmres_max_iter=200,
                                   physicality=ScaledFieldRowLimits([1e-12, 1e-12]))
     assert cache.n_builds == 2, "本步没有当场重装配"
-    assert info2["gmres_iters"] <= budget + 2, info2["gmres_iters"]
+    # 补救同时启用预处理的对角位移（`precond_shift.py`）：重装配后的预处理不再是精确逆，按 forcing 容差
+    # 0.1 解到为止，迭代数仍远在"把 200 次预算烧完"之下
+    assert cache.shifted
+    assert info2["gmres_iters"] <= budget + 10, info2["gmres_iters"]
     assert info2["gmres_info"] == 0 and info2["theta"] == 1.0
-    np.testing.assert_allclose(u, t2, rtol=1e-5, atol=1e-6)
+    assert np.linalg.norm(res2(u)) <= 0.1 * r_before * (1.0 + 1e-6)
 
 
 def test_block_modes_share_one_budget_with_mean_flow_first(monkeypatch):
