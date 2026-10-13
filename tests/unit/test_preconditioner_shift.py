@@ -136,3 +136,69 @@ def test_newton_step_recovers_from_an_unreliable_assembled_matrix():
     assert info["gmres_info"] == 0 and info["theta"] == 1.0
     assert info["gmres_iters"] < 120
     assert np.linalg.norm(res(u)) <= 0.1 * np.linalg.norm(r0) * (1.0 + 1e-6)
+
+
+class _CountingPreconditioner:
+    """`jfnk` 用到的块缓存接口的替身：对角预处理，记录 `recover` 被调用的次数。"""
+
+    flexible = False
+    recoverable = True
+
+    def __init__(self):
+        self.n_recover = 0
+
+    def begin_step(self, *args):
+        pass
+
+    def stale_budget(self):
+        return None
+
+    def preconditioner(self, dtau, n_var):
+        from autoflowcfd.core.time_integration.implicit.preconditioner import PseudoTransientDiagonal
+
+        return PseudoTransientDiagonal(dtau, n_var)
+
+    def recover(self, *args):
+        self.n_recover += 1
+        return False
+
+    def record(self, *args, **kwargs):
+        pass
+
+
+def test_recovery_is_only_attempted_when_the_direction_is_untrusted():
+    """没到容差但线性残差已减半的方向直接用，不重装配重解；线性残差没减半才补救。
+
+    2026-10-13 以前只要没到容差就补救：cube_demo SA P1 稳态 CFL 3e4~1e5 的十几步里第一次求解 200 次到
+    0.14~0.3，仍重装配再解 200 次。"""
+    from autoflowcfd.core.time_integration.implicit.globalization import LINEAR_SOLVE_MAX_REL_RESIDUAL
+
+    rng = np.random.default_rng(0)
+    n = 120
+    A = np.diag(np.geomspace(1.0, 300.0, n)) + rng.normal(0.0, 1.0, (n, n)) / np.sqrt(n)
+    c = rng.normal(0.0, 1.0, (n, 1))
+
+    def res(u):
+        return A @ u + c
+
+    def step(max_iter):
+        prec = _CountingPreconditioner()
+        u, info = step_newton_krylov(res, np.zeros((n, 1)), np.full(n, 1e12), np.ones(1), block_precond=prec,
+                                     gmres_max_iter=max_iter, gmres_restart=max_iter,
+                                     physicality=lambda u, du, red: np.ones(u.shape[0]))
+        return prec, info
+
+    # 对角预处理在 dtau 极大时等于不预处理；逐个迭代数上限看截断的求解落在哪一档
+    seen = set()
+    for max_iter in range(1, 80):
+        prec, info = step(max_iter)
+        if info["gmres_info"] == 0:
+            assert prec.n_recover == 0
+            break
+        if info["linear_rel_residual"] <= LINEAR_SOLVE_MAX_REL_RESIDUAL:
+            seen.add("usable")
+            assert prec.n_recover == 0 and info["theta"] == 1.0
+        else:
+            seen.add("untrusted")
+            assert prec.n_recover >= 1 and info["theta"] == 0.0
+    assert seen == {"usable", "untrusted"}, seen

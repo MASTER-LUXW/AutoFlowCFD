@@ -404,10 +404,12 @@ def step_newton_krylov(
             jac, prec, dtau_lin, r0, n_var, eta, gmres_restart, gmres_max_iter, red, rows, norm,
             review_at=None if review is None or review >= gmres_max_iter else review)
         iters_total += iters
-        if ginfo > 0 and block_precond is not None:
-            # 没解到容差（复用的块在过时预算处外推还差得远，`gmres.py` 模块文档"复核点"；或用满 / 停滞）：
-            # 复用的块当场按本步基态重装配、预处理启用对角位移（`BlockJacobiCache.recover`），有动作就
-            # 再解一次。ginfo 是全局量，各 rank 在这里的分支一致。
+        if ginfo > 0 and linear_rel > LINEAR_SOLVE_MAX_REL_RESIDUAL and block_precond is not None:
+            # 方向不可信（没到容差、线性残差也没减半）：复用的块当场按本步基态重装配、预处理启用对角位移
+            # （`BlockJacobiCache.recover`），有动作就再解一次。没到容差但线性残差已减半的方向是可用的
+            # inexact-Newton 方向，直接用：cube_demo SA P1 稳态 CFL 3e4~1e5 的十几步里第一次求解 200 次
+            # 到 0.14~0.3 后仍重装配再解 200 次，一步 37 分钟里一半白费。ginfo、linear_rel 是全局量，
+            # 各 rank 在这里的分支一致。
             prec = None          # 释放持有旧块的预处理对象，重装配期间不留两份（见 block_jacobi._build）
             if block_precond.recover(spatial, u0_flat, r0_spatial, scales, dtau_lin):
                 prec = block_precond.preconditioner(dtau_lin, n_var)
