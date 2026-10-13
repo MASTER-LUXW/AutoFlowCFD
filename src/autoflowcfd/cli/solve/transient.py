@@ -11,13 +11,12 @@ from autoflowcfd.cli.solve.option_help import PHASE_MAX_ITER_HELP, RESIDUAL_DROP
 from autoflowcfd.cli.solve.solver_factory import validate_backend_options
 from autoflowcfd.cli.solve.checkpoint_io import periodic_checkpoint_callback, write_single_node_outputs
 from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
-from autoflowcfd.cli.solve.checkpoint_io import restore_state_from_checkpoint
+from autoflowcfd.cli.solve.checkpoint_io import start_single_node_from_checkpoint
 from autoflowcfd.cli.solve.config_file import check_physical_ranges, config_file_overrides
 from autoflowcfd.cli.solve.aero_coefficients import _report_aerodynamic_coefficients, resolve_reference_area
 from autoflowcfd.cli.solve.commands import solve
 from autoflowcfd.cli.solve.solver_factory import build_single_node_solver
 from autoflowcfd.cli.solve.transient_distributed import _solve_transient_distributed
-from autoflowcfd.core.utils.order_continuation.initial_field import start_from_checkpoint_field
 from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 
 
@@ -282,18 +281,7 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
 
     # 4.5. 从 checkpoint 初始化（可选：以稳态结果为初场启动瞬态计算）
     if init_checkpoint:
-        from types import SimpleNamespace
-        from autoflowcfd.core.utils.checkpoint import CheckpointManager
-
-        print("\n🔄 从 checkpoint 加载稳态结果作为瞬态初场...")
-        solution, history, ckpt_iter, ckpt_meta = CheckpointManager(
-            config=SimpleNamespace(), output_dir="."
-        ).load(init_checkpoint)
-
-        with solver.edit_host_state() as host:
-            _, ckpt_order = restore_state_from_checkpoint(init_checkpoint, host, ckpt_meta)
-        start_from_checkpoint_field(solver, ckpt_order)
-        print(f"   源 checkpoint 迭代数: {ckpt_iter}\n")
+        start_single_node_from_checkpoint(solver, init_checkpoint)
 
     # 参考面积（未给时沿来流方向自动估算，与 solve steady 同一个函数）
     reference_area = resolve_reference_area(solver, volume_data, reference_area)

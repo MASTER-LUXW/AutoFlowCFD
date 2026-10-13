@@ -105,3 +105,81 @@ def test_single_gpu_init_from_lower_order_through_the_host_view():
     want_nu = g.turb_model_gpu.mapped_fields(lambda f: apply_order_interp(f, n_prism, 1, 2), np,
                                              fields=[fields["nu_tilde_field"]])[0]
     np.testing.assert_allclose(np.asarray(g.turb_model_gpu.nu_tilde_field), want_nu, rtol=1e-12)
+
+
+def _write_p1_steady_checkpoint(tmp_path, rng):
+    """稳态 P1（Newton-Krylov）的求解器写出的真实 checkpoint 文件；返回 `(路径, 写入的场)`。"""
+    from autoflowcfd.cli.solve.checkpoint_io import write_checkpoint
+
+    p1 = _sa_channel("prism", 1)
+    fields = _checkpoint_fields(p1, rng)
+    p1.state.U = fields["U_sps"].copy()
+    p1.state._update_primitives()
+    p1.turb_model.set_transported_fields([fields["nu_tilde_field"].copy()])
+    path = write_checkpoint(p1, str(tmp_path), 7, "channel.nas", 1, "sa", "cpu", quiet=True)
+    assert path is not None
+    return path, fields
+
+
+def test_steady_init_from_a_lower_order_checkpoint_file(tmp_path):
+    """`solve steady --init-from`：稳态 P1 的 checkpoint 文件 -> 稳态 P2，经稳态 / 瞬态共用的入口。
+
+    2026-10-14 以前 `solve steady` 没有这个选项，`solve resume` 又只能沿用 checkpoint 记录的目标阶数：
+    低阶解收敛后要升阶只能从 P0 重新爬坡。"""
+    from autoflowcfd.cli.solve.checkpoint_io import start_single_node_from_checkpoint
+    from autoflowcfd.core.time_integration.base import STEADY_DT
+
+    rng = np.random.default_rng(5)
+    path, fields = _write_p1_steady_checkpoint(tmp_path, rng)
+    p2 = _sa_channel("prism", 2, order_continuation=True)
+    start_single_node_from_checkpoint(p2, path)
+    assert p2.order_continuation_enabled is False
+
+    n_prism = int(p2.mesh.n_prism_cells)
+    np.testing.assert_allclose(p2.state.U, apply_order_interp(fields["U_sps"], n_prism, 1, 2), rtol=1e-12)
+
+    rho_u_inf = float(p2.freestream["rho_inf"] * p2.freestream["vel_inf"])
+    before = float(p2.state.U[..., 1].mean())
+    result = p2.solve(max_iter=2, dt=STEADY_DT, tol=0.0)
+    assert p2.current_order == 2 and result.iterations == 2
+    after = float(p2.state.U[..., 1].mean())
+    assert np.all(np.isfinite(p2.state.U))
+    assert abs(after - before) < 0.5 * abs(before - rho_u_inf), "初场被重置回来流"
+
+
+@pytest.mark.parametrize("extra, runner", [
+    ([], "_run_single_node"),
+    (["--n-ranks", "2"], "_run_cpu_mpi"),
+    (["--backend", "gpu", "--multi-gpu", "--n-ranks", "2"], "_run_multi_gpu"),
+])
+def test_steady_init_from_reaches_every_backend_branch(tmp_path, monkeypatch, extra, runner):
+    """`--init-from` 逐名传到三个后端分支（单机 CPU / 单 GPU 同一个分支）。"""
+    from click.testing import CliRunner
+
+    from autoflowcfd.cli.solve.steady import command
+
+    grid = tmp_path / "volume.pkl"
+    grid.write_bytes(b"")
+    ckpt = tmp_path / "checkpoint_iter_000007.h5"
+    ckpt.write_bytes(b"")
+    seen = {}
+    monkeypatch.setattr(command, runner, lambda **kw: seen.update(kw))
+    monkeypatch.setattr(command, "validate_backend_options", lambda *a, **k: None)
+    out = CliRunner().invoke(command.solve_steady, [str(grid), "--order", "2", "--init-from", str(ckpt)] + extra)
+    assert out.exit_code == 0, out.output
+    assert seen["init_checkpoint"] == str(ckpt) and "Init From" in out.output
+
+
+@pytest.mark.parametrize("module, call", [
+    ("single_node", "start_single_node_from_checkpoint(solver, init_checkpoint)"),
+    ("cpu_mpi", "start_distributed_from_checkpoint(solver, init_checkpoint)"),
+    ("multi_gpu", "start_distributed_from_checkpoint(solver, init_checkpoint, sync_device=True)"),
+])
+def test_steady_branches_start_from_the_checkpoint_before_solving(module, call):
+    """三个分支在构造求解器之后、`solve()` 之前调用共用入口（多 GPU 同步设备数组）。"""
+    import importlib
+    import inspect
+
+    src = inspect.getsource(importlib.import_module(f"autoflowcfd.cli.solve.steady.{module}"))
+    assert src.count(call) == 1
+    assert src.index(call) < src.index("result = solver.solve(")

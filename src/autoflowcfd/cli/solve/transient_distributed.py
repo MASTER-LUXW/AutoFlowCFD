@@ -22,7 +22,7 @@ import click
 from autoflowcfd.cli.solve.distributed_checkpoint_io import distributed_periodic_checkpoint_callback
 from autoflowcfd.cli.solve.wall_distance import wall_distance_source_if_needed
 from autoflowcfd.cli.solve.aero_coefficients import distributed_reference_area, report_distributed_aerodynamic_coefficients
-from autoflowcfd.core.utils.order_continuation.initial_field import start_from_checkpoint_field
+from autoflowcfd.cli.solve.checkpoint_io import start_distributed_from_checkpoint
 
 
 def _solve_transient_distributed(
@@ -169,15 +169,7 @@ def _solve_transient_cpu_traditional(
               f"{solver.partition.n_halo} halo cells")
 
     if init_checkpoint:
-        from autoflowcfd.core.mpi.distributed_checkpoint import (
-            restore_distributed_state_from_checkpoint,
-        )
-        if is_root():
-            print("\n🔄 从 checkpoint 加载稳态结果作为瞬态初场...")
-        ckpt_iter, ckpt_order = restore_distributed_state_from_checkpoint(init_checkpoint, solver)
-        start_from_checkpoint_field(solver, ckpt_order, report=is_root())
-        if is_root():
-            print(f"   源 checkpoint 迭代数: {ckpt_iter}\n")
+        start_distributed_from_checkpoint(solver, init_checkpoint)
 
     _checkpoint_cb = distributed_periodic_checkpoint_callback(
         checkpoint_interval, output_dir, input_file, turbulence_model, surface_mesh=surface_mesh)
@@ -262,15 +254,7 @@ def _solve_transient_fully_distributed(
               f"{solver.partition.n_halo} halo cells")
 
     if init_checkpoint:
-        from autoflowcfd.core.mpi.distributed_checkpoint import (
-            restore_distributed_state_from_checkpoint,
-        )
-        if is_root():
-            print("\n🔄 从 checkpoint 加载稳态结果作为瞬态初场...")
-        ckpt_iter, ckpt_order = restore_distributed_state_from_checkpoint(init_checkpoint, solver)
-        start_from_checkpoint_field(solver, ckpt_order, report=is_root())
-        if is_root():
-            print(f"   源 checkpoint 迭代数: {ckpt_iter}\n")
+        start_distributed_from_checkpoint(solver, init_checkpoint)
 
     _checkpoint_cb = distributed_periodic_checkpoint_callback(
         checkpoint_interval, output_dir, input_file, turbulence_model, surface_mesh=surface_mesh)
@@ -383,25 +367,7 @@ def _solve_transient_multi_gpu(
     solver.time_integrator.dual_time_steps = dual_time_inner_iter
 
     if init_checkpoint:
-        from autoflowcfd.core.mpi.distributed_checkpoint import (
-            restore_distributed_state_from_checkpoint,
-        )
-        from autoflowcfd.core.gpu import get_cupy
-        if is_root():
-            print("\n🔄 从 checkpoint 加载稳态结果作为瞬态初场...")
-        ckpt_iter, ckpt_order = restore_distributed_state_from_checkpoint(init_checkpoint, solver)
-        # `restore_distributed_state_from_checkpoint` 只写 `solver.
-        # state.U`（numpy，与 CPU 路径共用的接口）——GPU 路径真正参与
-        # 计算的是 `self.U_gpu`，必须显式同步，与 `load_checkpoint_
-        # distributed`/`save_checkpoint_distributed` 同一个既有模式
-        # （见 gpu_distributed_init.py 对应方法文档）。
-        cp = get_cupy()
-        n_local = solver.partition.n_local_cells
-        with cp.cuda.Device(solver.device_id):
-            solver.U_gpu = cp.asarray(solver.state.U[:n_local])
-        start_from_checkpoint_field(solver, ckpt_order, report=is_root())
-        if is_root():
-            print(f"   源 checkpoint 迭代数: {ckpt_iter}\n")
+        start_distributed_from_checkpoint(solver, init_checkpoint, sync_device=True)
 
     _checkpoint_cb = distributed_periodic_checkpoint_callback(
         checkpoint_interval, output_dir, input_file, turbulence_model, surface_mesh=surface_mesh)

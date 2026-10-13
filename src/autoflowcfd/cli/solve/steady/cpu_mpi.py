@@ -6,6 +6,7 @@
 
 import click
 
+from autoflowcfd.cli.solve.checkpoint_io import start_distributed_from_checkpoint
 from autoflowcfd.cli.solve.distributed_checkpoint_io import distributed_periodic_checkpoint_callback
 from autoflowcfd.cli.solve.wall_distance import wall_distance_source_if_needed
 from autoflowcfd.core.time_integration.base import scheme_from_name
@@ -17,7 +18,7 @@ from autoflowcfd.core.time_integration.base import STEADY_DT
 def _run_cpu_mpi(
     *,
     aoa_deg, aos_deg, artificial_viscosity_alpha, artificial_viscosity_enabled, cfl_max, cfl_min, cfl_start, checkpoint_interval,
-    fully_distributed, input_file, max_iter, mu_molecular, n_ranks, order, reference_area,
+    fully_distributed, init_checkpoint, input_file, max_iter, mu_molecular, n_ranks, order, reference_area,
     output_dir, p_inf, phase_max_iter, residual_drop_threshold, rho_inf,
     skip_quality_check, surface_mesh, threads, time_scheme, tol, turbulence_intensity,
     turbulence_model, vel_inf, viscosity_ratio, sem_num_eddies,
@@ -114,6 +115,9 @@ def _run_cpu_mpi(
         print(f"[Distributed] {solver.partition.n_local_cells} local cells, "
               f"{solver.partition.n_halo} halo cells")
         print("[Distributed] 传统模式：每个 rank 都加载了完整网格（内存非最优；大网格请用 --fully-distributed）")
+
+    if init_checkpoint:
+        start_distributed_from_checkpoint(solver, init_checkpoint)
 
     # 中间 checkpoint 保存回调（2026-09-02 补齐——此前只在 solve()
     # 返回之后保存一次最终 checkpoint，跑到一半崩溃/被杀会丢失全部

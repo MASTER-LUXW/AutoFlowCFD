@@ -121,6 +121,10 @@ from .single_node import _run_single_node
 @click.option('--config', 'config_path', type=click.Path(exists=True), default=None,
               help='YAML 配置文件（`config init` 生成模板）：文件里写出的字段覆盖对应选项的默认值，命令行显式'
                    '给出的选项优先于文件')
+@click.option('--init-from', 'init_checkpoint', type=click.Path(exists=True), default=None,
+              help='以已有 checkpoint 的场为初场（例如低阶解收敛后直接在更高阶上继续，不重走低阶的爬坡）。'
+                   'checkpoint 阶数可以低于 --order（平均流与湍流场精确延拓），不能高于；起步后直接在 '
+                   '--order 上推进，--tol 相对于该阶数上的第一个残差。全部后端可用')
 @click.option('--tol', type=float, default=DEFAULT_STEADY_TOL, show_default=True,
               help='相对收敛容差（目标阶数的残差下降到初值的 tol 倍即收敛；Order Continuation 低一阶放宽 10 倍）')
 @click.option('--artificial-viscosity', 'artificial_viscosity_enabled', is_flag=True,
@@ -133,7 +137,7 @@ from .single_node import _run_single_node
                    '只在 --artificial-viscosity 时有意义')
 @config_file_overrides
 def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_scheme, cfl_start, cfl_max, cfl_min,
-                 aoa_deg, aos_deg, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, tol, artificial_viscosity_enabled, artificial_viscosity_alpha):
+                 aoa_deg, aos_deg, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, tol, artificial_viscosity_enabled, artificial_viscosity_alpha, init_checkpoint):
     """执行稳态 FR 求解（P0~P3，全部湍流模型）。
 
     输入文件必须是体网格 - .pkl（`grid generate-volume`/`grid
@@ -149,6 +153,8 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
     print(f"Turbulence : {turbulence_model} | Max Iter: {max_iter}")
     if n_ranks > 1:
         print(f"MPI Ranks  : {n_ranks} (domain decomposition)")
+    if init_checkpoint:
+        print(f"Init From  : {init_checkpoint}")
     print("Wall Dist : exact point-to-wall-surface distance (AABB tree)\n")
 
     # 1. 按后端分派（各分支的参数由 AST 分析得出，逐名传入）。单机（n_ranks == 1）的 CPU 与单 GPU 同一个分支
@@ -165,6 +171,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
             checkpoint_interval=checkpoint_interval,
             fully_distributed=fully_distributed,
             gpu_device=gpu_device,
+            init_checkpoint=init_checkpoint,
             input_file=input_file,
             max_iter=max_iter,
             mu_molecular=mu_molecular,
@@ -197,6 +204,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
             cfl_start=cfl_start,
             checkpoint_interval=checkpoint_interval,
             fully_distributed=fully_distributed,
+            init_checkpoint=init_checkpoint,
             input_file=input_file,
             max_iter=max_iter,
             mu_molecular=mu_molecular,
@@ -231,6 +239,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
             cfl_start=cfl_start,
             checkpoint_interval=checkpoint_interval,
             gpu_device=gpu_device,
+            init_checkpoint=init_checkpoint,
             input_file=input_file,
             max_iter=max_iter,
             mu_molecular=mu_molecular,

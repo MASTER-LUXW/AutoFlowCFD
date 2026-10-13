@@ -9,7 +9,9 @@ checkpoint、最终只存一份不含湍流场的 pickle、不算参考面积与
 import click
 
 from autoflowcfd.core.time_integration.base import scheme_from_name
-from autoflowcfd.cli.solve.checkpoint_io import periodic_checkpoint_callback, write_single_node_outputs
+from autoflowcfd.cli.solve.checkpoint_io import (
+    periodic_checkpoint_callback, start_single_node_from_checkpoint, write_single_node_outputs,
+)
 from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
 from autoflowcfd.cli.solve.solver_factory import build_single_node_solver
 from autoflowcfd.cli.solve.aero_coefficients import (
@@ -23,7 +25,7 @@ def _run_single_node(
     *,
     aoa_deg, aos_deg, artificial_viscosity_alpha, artificial_viscosity_enabled,
     backend, cfl_max, cfl_min, cfl_start, checkpoint_interval,
-    gpu_device, input_file, max_iter, mu_molecular, order,
+    gpu_device, init_checkpoint, input_file, max_iter, mu_molecular, order,
     output_dir, p_inf, phase_max_iter, reference_area, residual_drop_threshold,
     rho_inf, sem_num_eddies, skip_quality_check, surface_mesh, threads, tol,
     time_scheme, turbulence_intensity, turbulence_model, vel_inf, viscosity_ratio,
@@ -51,6 +53,9 @@ def _run_single_node(
         artificial_viscosity_enabled=artificial_viscosity_enabled,
         artificial_viscosity_alpha=artificial_viscosity_alpha,
     )
+
+    if init_checkpoint:
+        start_single_node_from_checkpoint(solver, init_checkpoint)
 
     # 参考面积（未给时沿来流方向自动估算），供迭代中输出气动力系数
     reference_area = resolve_reference_area(solver, volume_data, reference_area)

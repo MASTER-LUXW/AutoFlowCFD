@@ -6,6 +6,7 @@
 
 import click
 
+from autoflowcfd.cli.solve.checkpoint_io import start_distributed_from_checkpoint
 from autoflowcfd.cli.solve.distributed_checkpoint_io import distributed_periodic_checkpoint_callback
 from autoflowcfd.core.time_integration.base import scheme_from_name
 from autoflowcfd.cli.solve.wall_distance import wall_distance_source_if_needed
@@ -18,7 +19,7 @@ def _run_multi_gpu(
     *,
     aoa_deg, aos_deg, artificial_viscosity_alpha, artificial_viscosity_enabled,
     cfl_max, cfl_min, cfl_start, checkpoint_interval,
-    fully_distributed, gpu_device, input_file, max_iter, mu_molecular, n_ranks,
+    fully_distributed, gpu_device, init_checkpoint, input_file, max_iter, mu_molecular, n_ranks,
     order, output_dir, p_inf, phase_max_iter, reference_area, residual_drop_threshold, rho_inf,
     skip_quality_check, surface_mesh, time_scheme, tol, turbulence_intensity, turbulence_model,
     vel_inf, viscosity_ratio, sem_num_eddies,
@@ -102,6 +103,9 @@ def _run_multi_gpu(
             artificial_viscosity_alpha=artificial_viscosity_alpha,
             time_scheme=scheme_from_name(time_scheme).value,
         )
+
+    if init_checkpoint:
+        start_distributed_from_checkpoint(solver, init_checkpoint, sync_device=True)
 
     # 中间 checkpoint 保存回调（2026-09-02 补齐——此前 output_interval
     # 只控制进度打印，跑到一半崩溃/被杀会丢失全部进度，与单机路径
