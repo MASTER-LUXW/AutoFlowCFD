@@ -423,3 +423,29 @@ class TestPerPhaseCflReset:
         with patch("autoflowcfd.fr.operators.generate_fr_operators", side_effect=_fake_generate_ops):
             run_order_continuation(solver, max_iter=30, dt=1e-3, tol=1e-6)
         assert first_step_cfl == {0: 0.02, 1: 0.02, 2: 0.02}
+
+
+class TestTotalIterationBudget:
+    """`max_iter` 是总步数：`phase_max_iter` 大于剩余步数时非最终阶段也不能越过它；用完时停在当前阶数，
+    不再做一次没有步数可跑的升阶（2026-10-14：plate_demo `solve resume --max-iter 8 --phase-max-iter 100`
+    在 P1 跑了 30 步）。"""
+
+    @staticmethod
+    def _never_converging_solver(current_order, target_order):
+        solver = _fake_solver(current_order=current_order, target_order=target_order, resumed=True)
+        solver.step = lambda dt: 1.0          # 残差不降：只有步数上限能让阶段结束
+        return solver
+
+    def test_non_final_phase_is_capped_by_the_total_budget(self):
+        solver = self._never_converging_solver(1, 2)
+        with patch("autoflowcfd.fr.operators.generate_fr_operators", side_effect=_fake_generate_ops):
+            result = run_order_continuation(solver, max_iter=8, dt=1e-3, tol=1e-6, phase_max_iter=100)
+        assert result.iterations == 8
+        assert solver.current_order == 1 and solver.mesh.set_order_calls == []
+
+    def test_remaining_budget_still_reaches_the_target_order(self):
+        solver = self._never_converging_solver(1, 2)
+        with patch("autoflowcfd.fr.operators.generate_fr_operators", side_effect=_fake_generate_ops):
+            result = run_order_continuation(solver, max_iter=12, dt=1e-3, tol=1e-6, phase_max_iter=5)
+        assert result.iterations == 12
+        assert solver.mesh.set_order_calls == [2]          # P1 跑 5 步后升阶，目标阶数吃掉剩下的 7 步

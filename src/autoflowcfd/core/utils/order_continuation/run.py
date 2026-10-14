@@ -73,6 +73,12 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
     final_residual = 1e10
     with blas_threads_limited(1):
         for target_p in orders:
+            if total_iter >= max_iter:
+                # 总步数已用完：停在当前阶数（不再做一次没有步数可跑的升阶——延拓与算子重建都不便宜，
+                # 写出的 checkpoint 也会是一个从未推进过的高阶状态）
+                if report:
+                    print(f"[INFO] 总步数 {max_iter} 已用完，停在 P{solver.current_order}（未升到 P{target_p}）")
+                break
             if report:
                 print(f"\n--- Phase: P{target_p} ---")
             if target_p != solver.current_order:
@@ -86,7 +92,12 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
 
             is_final_stage = target_p == original_order
             effective_phase_max_iter = phase_max_iter if phase_max_iter is not None else max_iter // len(orders)
-            stage_iter_budget = (max_iter - total_iter) if is_final_stage else effective_phase_max_iter
+            # 非最终阶段的上限同样受总步数约束：`max_iter` 是本次调用的总步数（CLI `--max-iter`），2026-10-14 以前
+            # `--phase-max-iter` 大于剩余步数时非最终阶段照跑满它——plate_demo `solve resume --max-iter 8
+            # --phase-max-iter 100` 在 P1 跑了 30 步（被手动停下），目标阶数分到的剩余步数为负、一步不跑
+            stage_iter_budget = max_iter - total_iter
+            if not is_final_stage:
+                stage_iter_budget = min(stage_iter_budget, effective_phase_max_iter)
             phase_tol = tol * (10 ** (original_order - target_p))
             required_drop = 1.0 / max(phase_tol, 1e-30)
 
