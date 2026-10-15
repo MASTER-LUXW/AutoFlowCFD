@@ -62,7 +62,9 @@ class GPUArrayManager:
 
         with self._cp.cuda.Device(device_id):
             self._stream = self._cp.cuda.Stream(non_blocking=True)
-            self._mem_pool = self._cp.cuda.get_default_memory_pool()
+            # CuPy 的默认显存池是顶层函数（`cupy.cuda` 下没有 get_default_memory_pool；2026-10-15 以前这里写成
+            # `cp.cuda.get_default_memory_pool()`，真机上构造即 AttributeError，测试替身把它放在同一个错误位置上）
+            self._mem_pool = self._cp.get_default_memory_pool()
 
         self.mesh_data: Dict[str, Any] = {}
         self.state_data: Dict[str, Any] = {}

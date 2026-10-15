@@ -17,10 +17,8 @@ import numpy as np
 import pytest
 
 from autoflowcfd.core.time_integration.implicit import block_budget as bb
-from autoflowcfd.core.time_integration.implicit.block_jacobi import (
-    BlockJacobiCache,
-    CellBlockJacobiPreconditioner,
-)
+from autoflowcfd.core.time_integration.implicit.block_jacobi import BlockJacobiCache
+from autoflowcfd.core.time_integration.implicit.cell_block_inverse import CellBlockJacobiPreconditioner
 from autoflowcfd.core.time_integration.implicit.cell_blocks import CellBlockJacobian
 from autoflowcfd.core.time_integration.implicit.coloring import greedy_cell_coloring
 from autoflowcfd.core.time_integration.implicit.jfnk import step_newton_krylov
@@ -124,9 +122,10 @@ def test_preconditioner_is_exact_block_inverse_and_diagonal_on_padding():
         np.testing.assert_allclose(out[pad], v[pad] * dtau[pad, None])
 
 
-def _cache(n_cells=6, n_prism=3):
+def _cache(n_cells=6, n_prism=3, budget=2 ** 50):
     owner, nb, is_prism = _chain_mesh(n_cells, n_prism)
     return BlockJacobiCache(colors=greedy_cell_coloring(owner, nb, is_prism.size), cell_is_prism=is_prism,
+                            plan=bb.plan_for_budget(is_prism, N_REAL_P, N_REAL_T, NV, 0, budget),
                             n_sps=N_SPS, n_real_prism=N_REAL_P, n_real_tet=N_REAL_T, n_var=NV)
 
 
@@ -166,9 +165,8 @@ def test_refresh_policy():
     assert c.n_builds == 3
 
 
-def test_over_memory_budget_falls_back_to_diagonal(monkeypatch):
-    monkeypatch.setattr(bb, "PRECOND_TOTAL_BYTES", 1)
-    c = _cache()
+def test_over_memory_budget_falls_back_to_diagonal():
+    c = _cache(budget=1)
     assert c.disabled_reason is not None
     _begin(c, np.random.default_rng(4))
     p = c.preconditioner(np.ones(c.cell_is_prism.size * N_SPS), NV)
@@ -176,13 +174,12 @@ def test_over_memory_budget_falls_back_to_diagonal(monkeypatch):
     assert c.n_builds == 0
 
 
-def test_single_copy_mode_freezes_dtau_and_rebuilds_on_drift(monkeypatch):
+def test_single_copy_mode_freezes_dtau_and_rebuilds_on_drift():
     """两份放不下、一份放得下：装配后按当时 dtau 原地求逆、不留 J_cc；预处理用这份逆
     （与传入的 dtau 无关）；dtau 几何平均漂移超过 DTAU_REBUILD_RATIO 才重装配。"""
     # 预算恰好放得下一份、放不下两份
-    monkeypatch.setattr(bb, "PRECOND_TOTAL_BYTES", bb.block_mode_bytes("single", 3, 3, N_REAL_P, N_REAL_T, NV))
     rng = np.random.default_rng(6)
-    c = _cache()
+    c = _cache(budget=bb.block_mode_bytes("single", 3, 3, N_REAL_P, N_REAL_T, NV))
     assert c.single_copy and c.disabled_reason is None and not c.use_ilu
     n_cells = c.cell_is_prism.size
     A, _ = _linear_system(n_cells, c.cell_is_prism, rng)
@@ -245,6 +242,7 @@ def test_jfnk_block_precond_needs_fewer_gmres_iterations():
     dtau = np.full(n_cells * N_SPS, 1e6)
     _, info_d = step_newton_krylov(R, u0, dtau, np.ones(NV))
     cache = BlockJacobiCache(colors=greedy_cell_coloring(owner, nb, is_prism.size), cell_is_prism=is_prism,
+                             plan=bb.plan_for_budget(is_prism, N_REAL_P, N_REAL_T, NV, 0, 2 ** 50),
                              n_sps=N_SPS, n_real_prism=N_REAL_P, n_real_tet=N_REAL_T, n_var=NV)
     _, info_b = step_newton_krylov(R, u0, dtau, np.ones(NV), block_precond=cache)
     # 对角预处理在这个系统上用满迭代数也解不到容差：线性残差没减半的方向不走出去（theta=0，
@@ -270,7 +268,9 @@ def test_stale_blocks_are_refreshed_within_the_step():
         t = 1.0 + 0.1 * g.standard_normal((n, 2))
         return lambda u: np.einsum("nij,nj->ni", A, u - t), t
 
-    cache = BlockJacobiCache(cell_is_prism=np.ones(n, dtype=bool), colors=np.zeros(n, dtype=np.int64),
+    cip = np.ones(n, dtype=bool)
+    cache = BlockJacobiCache(cell_is_prism=cip, colors=np.zeros(n, dtype=np.int64),
+                             plan=bb.plan_for_budget(cip, 1, 1, 5, 2, 2 ** 50),
                              n_sps=1, n_real_prism=1, n_real_tet=1, n_var=2)
     dtau = np.full(n, 1e8)
     u = 1.0 + 0.1 * rng.standard_normal((n, 2))
@@ -294,21 +294,77 @@ def test_stale_blocks_are_refreshed_within_the_step():
     assert np.linalg.norm(res2(u)) <= 0.1 * r_before * (1.0 + 1e-6)
 
 
-def test_block_modes_share_one_budget_with_mean_flow_first(monkeypatch):
-    """平均流与湍流两个缓存共享 `PRECOND_TOTAL_BYTES`，平均流优先（plate_demo P3 实测：各自按
-    自己的上限选档时湍流 ILU 8.38 GiB + 平均流单份 8.9 GiB 叠加 OOM）。"""
+def test_block_modes_share_one_budget_with_mean_flow_first():
+    """平均流与湍流两个缓存共享一个预算，平均流优先（plate_demo P3 实测：各自按自己的上限选档时湍流 ILU
+    8.38 GiB + 平均流单份 8.9 GiB 叠加 OOM）。"""
     sizes = (19872, 159365, 40, 20)                    # plate_demo P3
     single_mean = bb.block_mode_bytes("single", *sizes, 5)
     single_turb = bb.block_mode_bytes("single", *sizes, 2)
-    monkeypatch.setattr(bb, "PRECOND_TOTAL_BYTES", single_mean + single_turb)
-    assert bb.plan_block_mode(5, *sizes, with_turbulence=True) == "single"
-    assert bb.plan_block_mode(2, *sizes, with_turbulence=True) == "single"
+    assert bb.plan_block_modes(sizes, 5, 2, single_mean + single_turb) == ("single", "single")
     # 预算不够两者都放单份：平均流仍然拿到单份，湍流退回对角预处理
-    monkeypatch.setattr(bb, "PRECOND_TOTAL_BYTES", single_mean + single_turb - 1)
-    assert bb.plan_block_mode(5, *sizes, with_turbulence=True) == "single"
-    assert bb.plan_block_mode(2, *sizes, with_turbulence=True) is None
+    assert bb.plan_block_modes(sizes, 5, 2, single_mean + single_turb - 1) == ("single", None)
     # 合计不超预算
-    monkeypatch.setattr(bb, "PRECOND_TOTAL_BYTES", 12 * 2 ** 30)
-    m = bb.plan_block_mode(5, *sizes, with_turbulence=True)
-    t = bb.plan_block_mode(2, *sizes, with_turbulence=True)
-    assert bb.block_mode_bytes(m, *sizes, 5) + bb.block_mode_bytes(t, *sizes, 2) <= bb.PRECOND_TOTAL_BYTES
+    budget = 12 * 2 ** 30
+    m, t = bb.plan_block_modes(sizes, 5, 2, budget)
+    assert bb.block_mode_bytes(m, *sizes, 5) + bb.block_mode_bytes(t, *sizes, 2) <= budget
+    # 层流：平均流独占预算
+    assert bb.plan_block_modes(sizes, 5, 0, single_mean) == ("single", None)
+
+
+def test_one_equation_turbulence_shares_the_budget():
+    """SA（1 个湍流未知量）与 SST 一样在合计预算内：平均流按 1 个变量的湍流单份预留，两者合计不超预算。
+
+    2026-10-15 以前按"湍流就是 2 个变量"写死：n_var=1 的湍流缓存走"不在合计预算内"的分支、独占全部预算，
+    平均流给它预留的又是 2 个变量的单份——cube_demo 粗网格 SA P2 两个缓存合计 10.2 GiB（平均流两份 9.12 +
+    湍流 ILU 1.07），只是恰好没超过写死的 11 GiB。"""
+    sizes = (90649, 105095, 18, 10)                    # cube_demo 粗网格 P2
+    single_mean = bb.block_mode_bytes("single", *sizes, 5)
+    single_sa = bb.block_mode_bytes("single", *sizes, 1)
+    assert bb.plan_block_modes(sizes, 5, 1, single_mean + single_sa) == ("single", "single")
+    for budget in (single_mean + single_sa, 6 * 2 ** 30, 9 * 2 ** 30, 11 * 2 ** 30, 40 * 2 ** 30):
+        m, t = bb.plan_block_modes(sizes, 5, 1, budget)
+        used = sum(bb.block_mode_bytes(mode, *sizes, n) for mode, n in ((m, 5), (t, 1)) if mode is not None)
+        assert used <= budget, (budget, m, t)
+
+
+def test_budget_follows_available_memory(monkeypatch):
+    """预算 = 可用内存 − Krylov 基 − 残差求值工作数组 − 余量；可用内存少时降到单份而不是照样选最贵的档。
+
+    cube_demo 粗网格 SA P2：写死的 11 GiB 选了平均流两份（9.12 GiB），第 2 步 GMRES 时进程 29.4 GB 内存不足。"""
+    from autoflowcfd.core.time_integration.implicit.linear_solve import krylov_basis_bytes
+    from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
+    import autoflowcfd.core.utils.system_memory as sm
+
+    red = LocalReductions()
+    cip = np.arange(195744) < 90649
+    sizes = (90649, 105095, 18, 10)
+    real_entries = (90649 * 18 + 105095 * 10) * 6
+    fixed = bb.RESIDUAL_WORK_FACTOR * 195744 * 27 * 6 * 8 + bb.MEMORY_HEADROOM
+    # 平均流不是块 ILU 时它的预处理线性，只有 SA 那 1 列要存预处理向量（`gmres.py` 模块文档"部分灵活"）
+    reserve = krylov_basis_bytes(real_entries, red, flexible=1 / 6) + fixed
+    reserve_all = krylov_basis_bytes(real_entries, red, flexible=1.0) + fixed
+    assert reserve < reserve_all
+
+    def plan(available):
+        monkeypatch.setattr(sm, "available_bytes", lambda xp: available)
+        return bb.plan_block_memory(red, cip, 27, 18, 10, 5, 1)
+
+    two_mean = bb.block_mode_bytes("two", *sizes, 5)
+    ilu_sa = bb.block_mode_bytes("ilu", *sizes, 1)
+    roomy = plan(reserve + two_mean + ilu_sa + 2 ** 30)
+    assert (roomy.mean, roomy.turbulence) == ("two", "ilu") and roomy.reserve == reserve
+    tight = plan(reserve + two_mean - 2 ** 30)
+    assert tight.mean == "single" and tight.budget == two_mean - 2 ** 30
+    assert plan(reserve // 2).budget == 0 and plan(reserve // 2).mean is None
+    # 平均流放得下块 ILU 时它也变成非线性：按整份灵活预留
+    ilu_mean = bb.block_mode_bytes("ilu", *sizes, 5)
+    rich = plan(reserve_all + ilu_mean + ilu_sa + 2 ** 30)
+    assert (rich.mean, rich.turbulence) == ("ilu", "ilu") and rich.reserve == reserve_all
+    assert "可用" in roomy.describe() and "预留" in roomy.describe()
+
+
+def test_available_memory_query_is_positive_and_below_physical():
+    from autoflowcfd.core.utils.system_memory import available_bytes
+
+    got = available_bytes(np)
+    assert 0 < got < 2 ** 50

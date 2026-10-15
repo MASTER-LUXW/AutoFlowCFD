@@ -60,6 +60,10 @@ class PseudoTransientDiagonal:
     #: 作用是否随调用变化（非线性预处理）。为真时 GMRES 走灵活模式（`gmres.py`）。
     flexible = False
 
+    #: 只有一部分列非线性时给出逐列布尔（`(n_var,)`，真为非线性）与 `apply_linear`（`gmres.py` 模块文档
+    #: "部分灵活"，块对角组合 `coupled_step.py::_BlockDiagonal`）；单一预处理整体线性或整体非线性，为 None。
+    nonlinear_columns = None
+
     def __init__(self, dtau_flat: np.ndarray, n_var: int):
         """
         Args:

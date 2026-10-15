@@ -6,7 +6,7 @@
 1. **线性求解与全局化用不同范数**：接受判据与 SER 用体积加权 RMS（`globalization.py::
    ResidualNorm`），GMRES 却在未加权 2 范数里最小化。被回溯的步上未加权线性残差 0.03~0.10、
    体积加权 1.1~2.5 倍（非线性误差只有 0.001~0.003）——线性模型本身就让全局度量恶化。
-   现在 GMRES 对 `D A M^{-1} D^{-1}`（`D = sqrt(w)`）求解（`jfnk.py::_solve_direction`）。
+   现在 GMRES 对 `D A M^{-1} D^{-1}`（`D = sqrt(w)`）求解（`linear_solve.py::_solve_direction`）。
 2. **范数权重用了解点插值型求积权重**：原生基 P2/P3 有零与负权重，加权平方和只是半范数。
    现在取单元体积在真实解点上均分（`PositivityLimiter.norm_weights`）。
 """

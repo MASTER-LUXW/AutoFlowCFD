@@ -11,7 +11,7 @@ from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from autoflowcfd.core.fr_operators.kernels import resolve_ausm_precond_mode
 from autoflowcfd.core.fr_residual.jacobian import MeanFlowLinearization, assemble_mean_flow_blocks
 from autoflowcfd.core.time_integration.implicit.block_ilu import BlockCouplingStructure, BlockILUPreconditioner
-from autoflowcfd.core.time_integration.implicit.block_jacobi import CellBlockJacobiPreconditioner
+from autoflowcfd.core.time_integration.implicit.cell_block_inverse import CellBlockJacobiPreconditioner
 from autoflowcfd.core.time_integration.implicit.cell_blocks import CellBlockJacobian
 from autoflowcfd.core.time_integration.implicit.coloring import greedy_cell_coloring
 from autoflowcfd.core.time_integration.implicit.gmres import gmres_right

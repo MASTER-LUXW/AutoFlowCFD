@@ -130,7 +130,7 @@ def test_basis_precision_follows_the_tolerance_and_sets_the_restart_length():
 
     cube_demo SA P1 的尺寸（1109.8 万个未知量、灵活模式）：双精度被压在下限 30，单精度 60——同一个 CFL 1500
     的线性系统 GMRES(30) 198 次、GMRES(60) 46 次。"""
-    from autoflowcfd.core.time_integration.implicit.jfnk import GMRES_RESTART, GMRES_RESTART_MAX, krylov_restart
+    from autoflowcfd.core.time_integration.implicit.linear_solve import GMRES_RESTART, GMRES_RESTART_MAX, krylov_restart
 
     assert basis_itemsize(0.1) == 4 and basis_itemsize(SINGLE_BASIS_MIN_RTOL) == 4
     assert basis_itemsize(0.5 * SINGLE_BASIS_MIN_RTOL) == 8 and basis_itemsize(0.0) == 8
@@ -233,3 +233,54 @@ def test_review_point_keeps_a_solve_that_is_about_to_converge():
     # 平台中段复核：按当前下降率还差得远，返回未达到，迭代数停在复核点
     _, it_cut, info_cut, rel_cut = solve(review_at=10)
     assert it_cut == 10 and info_cut > 0 and rel_cut > 1e-3
+
+
+class _HalfFlexible:
+    """前 `n_lin` 个分量用固定对角逆（线性），其余分量用每次作用都不同的近似逆（非线性）——紧耦合步里
+    "平均流块 Jacobi + 湍流多层 K 循环"的最小模型。"""
+
+    def __init__(self, A, n_lin, seed):
+        self.d = np.diag(A).copy()
+        self.n_lin = n_lin
+        self.inner = _VaryingPreconditioner(A, seed)
+        self.mask = np.arange(A.shape[0]) >= n_lin
+
+    def __call__(self, v):
+        z = self.inner(v)
+        z[: self.n_lin] = v[: self.n_lin] / self.d[: self.n_lin]
+        return z
+
+    def apply_linear(self, v):
+        z = np.zeros_like(v)
+        z[: self.n_lin] = v[: self.n_lin] / self.d[: self.n_lin]
+        return z
+
+
+@pytest.mark.parametrize("rtol, restart", [(1e-10, 200), (1e-10, 15), (1e-2, 200)])
+def test_partial_flexible_matches_full_flexible(rtol, restart):
+    """只为非线性分量存预处理向量（线性分量在更新解时现算）与整份存储是同一个 FGMRES：迭代数相同、解一致
+    （双精度基到舍入、单精度基到真实残差满足容差），返回的残差是真实残差。"""
+    from autoflowcfd.core.time_integration.implicit.gmres import FlexibleSplit
+
+    A, b, _ = _system(80, 11, spread=3.0)
+    full = gmres_right(lambda v: A @ v, b, _HalfFlexible(A, 50, 3), rtol=rtol, restart=restart, max_iter=2000,
+                       flexible=True)
+    prec = _HalfFlexible(A, 50, 3)
+    part = gmres_right(lambda v: A @ v, b, prec, rtol=rtol, restart=restart, max_iter=2000, flexible=True,
+                       split=FlexibleSplit(prec.mask, prec.apply_linear))
+    assert full[2] == 0 and part[2] == 0 and part[1] == full[1]
+    true_rel = np.linalg.norm(b - A @ part[0]) / np.linalg.norm(b)
+    assert true_rel <= rtol * 1.0001 and abs(true_rel - part[3]) <= 1e-6 * max(rtol, 1e-10)
+    np.testing.assert_allclose(part[0], full[0], rtol=1e-8 if rtol < 1e-5 else 1e-3, atol=1e-12)
+
+
+def test_restart_length_follows_the_flexible_fraction():
+    """重启长度按需要存预处理向量的分量占比分内存：不灵活 1 份、整体灵活 2 份、6 列里 1 列非线性 7/6 份。"""
+    from autoflowcfd.core.time_integration.implicit.linear_solve import krylov_basis_bytes, krylov_restart
+
+    red = LocalReductions()
+    n = 16_080_000                                    # cube_demo 粗网格 P2 SA 的真实分量数（6 列）
+    m_lin, m_full, m_part = (krylov_restart(n, red, flexible=f, itemsize=4) for f in (0.0, 1.0, 1 / 6))
+    assert m_full <= m_part <= m_lin
+    assert krylov_basis_bytes(n, red, flexible=1 / 6) < krylov_basis_bytes(n, red, flexible=1.0)
+    assert krylov_restart(n, red, flexible=True, itemsize=4) == m_full     # 布尔值按 0/1

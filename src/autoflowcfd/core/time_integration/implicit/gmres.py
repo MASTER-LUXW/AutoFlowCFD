@@ -28,8 +28,16 @@
 步数的内层 Krylov，`coarse/multilevel.py`），`x = M^{-1}(V y)` 不再成立。
 灵活模式存下每个 `z_j = M^{-1} v_j`，用 `x = x + Z y` 更新——最小化的仍是
 真实残差，代价是多存一组与 Krylov 基同样多的向量。预处理对象带
-`flexible = True` 时由调用方打开（`jfnk.py::_solve_direction`）；线性预处理
+`flexible = True` 时由调用方打开（`linear_solve.py::_solve_direction`）；线性预处理
 不打开，不白占这份内存。
+
+## 部分灵活（2026-10-15）
+
+预处理是若干列块的块对角组合、只有一部分块非线性时（紧耦合 Newton 步里平均流用块 Jacobi、湍流用多层 K 循环），
+只为非线性列存 `z_j`（`FlexibleSplit.mask` 为真的分量）：线性列的 `z_j` 是固定线性算子 `M_lin^{-1}` 作用在
+`v_j` 上，`sum_j y_j z_j` 在那些列上等于 `M_lin^{-1}(sum_j y_j v_j)`，更新解时现算一次（`FlexibleSplit.apply_linear`）。
+Arnoldi 关系里 `A` 作用的 `z_j` 与更新解用的是同一组值：非线性列是存下来（可能舍入到单精度）的值，线性列是
+双精度的 `M_lin^{-1} v_j`。cube_demo 粗网格 SA P2（6 列里 1 列非线性）灵活模式那一份从 3.85 GiB 降到 0.64 GiB。
 
 ## 基向量单精度存储（2026-10-12）
 
@@ -77,8 +85,18 @@ SINGLE_BASIS_MIN_RTOL = 1.0e-5
 
 
 def basis_itemsize(rtol: float) -> int:
-    """容差为 `rtol` 的求解里每个基向量元素占的字节数（重启长度按它定，`jfnk.py::krylov_restart`）。"""
+    """容差为 `rtol` 的求解里每个基向量元素占的字节数（重启长度按它定，`linear_solve.py::krylov_restart`）。"""
     return 4 if rtol >= SINGLE_BASIS_MIN_RTOL else 8
+
+
+class FlexibleSplit:
+    """部分灵活（模块文档）：`mask` 是与求解向量同形状的布尔数组，真为预处理作用非线性的分量；`apply_linear(y)`
+    给出线性部分的作用（`mask` 为假的分量有效）。"""
+
+    __slots__ = ("mask", "apply_linear")
+
+    def __init__(self, mask, apply_linear):
+        self.mask, self.apply_linear = mask, apply_linear
 
 
 #: 复核点外推剩余迭代数用的回看窗口（迭代数）。
@@ -113,7 +131,8 @@ def projected_remaining(history, rtol: float) -> float:
 
 def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
                 restart: int, max_iter: int, red: LocalReductions = None,
-                flexible: bool = False, review_at: int = None) -> Tuple[object, int, int, float]:
+                flexible: bool = False, review_at: int = None,
+                split: "FlexibleSplit" = None) -> Tuple[object, int, int, float]:
     """解 `A x = b`，返回 `(x, iterations, info, rel_residual)`。
 
     `info == 0` 表示达到 `||b - A x|| <= rtol * ||b||`；`info > 0` 表示
@@ -125,7 +144,8 @@ def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
     时它说明方向还有多少可信度——自适应 CFL 据此判断线性求解是否失败
     （`adaptive_cfl/ser.py`）。
 
-    `flexible`：灵活模式（见模块文档），`M^{-1}` 可以每次作用都不同。
+    `flexible`：灵活模式（见模块文档），`M^{-1}` 可以每次作用都不同。`split`：灵活模式下只有一部分分量的作用
+    非线性时给出（模块文档"部分灵活"），只为那些分量存 `z_j`。
 
     `review_at`：迭代到这个次数仍未达到容差时复核一次（模块文档"复核点"）：按残差曲线外推，剩余迭代数
     超过 `review_at` 就按"未达到"返回（`info > 0`），否则继续到 `max_iter`。
@@ -162,17 +182,39 @@ def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
         """存储的向量升回运算精度（双精度存储时原样）。"""
         return v.astype(b.dtype) if single else v
 
+    partial = flexible and split is not None
+
     def precond(j):
         z = apply_Minv(working(V[j]))
         if not flexible:
             return z
+        kept = z[split.mask] if partial else z
         if single:
-            z = z.astype(store)
+            kept = kept.astype(store)
         if j == len(Z):
-            Z.append(z)
+            Z.append(kept)
         else:
-            Z[j] = z
-        return working(z)       # A 作用在存下来的 z_j 上（模块文档"基向量单精度存储"）
+            Z[j] = kept
+        if not partial:
+            return working(kept)    # A 作用在存下来的 z_j 上（模块文档"基向量单精度存储"）
+        z[split.mask] = working(kept)
+        return z
+
+    def _combine(W, y, k_used):
+        out = xp.multiply(W[0], y[0], dtype=b.dtype)
+        for i in range(1, k_used):
+            vector_ops.axpy_(xp, out, y[i], W[i])
+        return out
+
+    def _update(y, k_used):
+        """解的增量 `M^{-1}(V y)`（灵活模式 `Z y`；部分灵活时非线性分量 `Z y`、线性分量现算）。"""
+        if not flexible:
+            return apply_Minv(_combine(V, y, k_used))
+        if not partial:
+            return _combine(Z, y, k_used)
+        upd = split.apply_linear(_combine(V, y, k_used))
+        upd[split.mask] = _combine(Z, y, k_used)
+        return upd
 
     while True:
         m = restart
@@ -225,11 +267,7 @@ def gmres_right(apply_A: Callable, b, apply_Minv: Callable, *, rtol: float,
             xp.divide(w, h_next, out=basis(j + 1))
         # 回代 y，更新 x = x + M^{-1} (V y)（灵活模式：x = x + Z y）
         y = np.linalg.solve(np.triu(H[:k_used, :k_used]), g[:k_used]) if k_used else np.zeros(0)
-        W = Z if flexible else V
-        upd = xp.multiply(W[0], y[0], dtype=b.dtype)
-        for i in range(1, k_used):
-            vector_ops.axpy_(xp, upd, y[i], W[i])
-        x = x + (upd if flexible else apply_Minv(upd))
+        x = x + _update(y, k_used)
         rel = abs(g[k_used]) / bnorm
         exhausted = total >= max_iter or stalled
         if converged and not single:

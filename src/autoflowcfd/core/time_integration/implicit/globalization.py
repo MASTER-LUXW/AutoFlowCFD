@@ -2,7 +2,7 @@
 
 `jfnk.py::step_newton_krylov` 的每个 Newton 步用同一个残差范数做三件事：残差接受判据
 （`accept_step`）、SER 自适应 CFL 的输入（`adaptive_cfl/ser.py`），以及线性求解的最小化
-范数（`jfnk.py::_solve_direction`）。三者必须一致，见 `ResidualNorm` 文档。
+范数（`linear_solve.py::_solve_direction`）。三者必须一致，见 `ResidualNorm` 文档。
 """
 
 from typing import Callable, Tuple
@@ -50,7 +50,7 @@ class ResidualNorm:
 
     权重取单元体积在真实解点上均分（`positivity/limiter.py::PositivityLimiter.norm_weights`，2026-10-03），
     不取解点插值型求积权重本身：原生基 P2/P3 的那套权重有零与负值，加权平方和只是
-    半范数（该处文档）。线性求解在同一个加权范数里最小化（`jfnk.py::_solve_direction`）。
+    半范数（该处文档）。线性求解在同一个加权范数里最小化（`linear_solve.py::_solve_direction`）。
 
     **逐方程按参考量级无量纲化**（`scales`，2026-10-11）：各列先除以该未知量的参考量级（平均流
     `residual_diagnostics._reference_scales`：rho_inf、rho_inf U_inf、p_inf；湍流列为场的实际量级，`coupled_step.py::residual_reference_scales`）再求

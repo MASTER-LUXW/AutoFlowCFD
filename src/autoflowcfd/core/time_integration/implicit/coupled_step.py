@@ -58,6 +58,7 @@ from loguru import logger
 
 from autoflowcfd.fr.native_padding import real_row_mask, real_sps_per_cell
 
+from .block_budget import plan_block_memory
 from .block_jacobi import BlockJacobiCache
 from .forcing import EisenstatWalkerForcing
 from .globalization import ResidualNorm
@@ -145,16 +146,29 @@ class FrozenViscosityMeanResidual:
 class _BlockDiagonal:
     """两个子系统预处理子的块对角组合（`PseudoTransientDiagonal` 接口）。"""
 
-    __slots__ = ("mean", "turb", "dtau", "flexible")
+    __slots__ = ("mean", "turb", "dtau", "flexible", "nonlinear_columns")
 
-    def __init__(self, mean, turb, dtau):
+    def __init__(self, mean, turb, dtau, n_turb: int):
         self.mean, self.turb, self.dtau = mean, turb, dtau
         self.flexible = bool(mean.flexible or turb.flexible)
+        # 只有一块非线性时 GMRES 只为那几列存预处理向量（`gmres.py` 模块文档"部分灵活"）
+        self.nonlinear_columns = (
+            np.array([mean.flexible] * N_MEAN_FLOW_VARS + [turb.flexible] * int(n_turb), dtype=bool)
+            if mean.flexible != turb.flexible else None)
 
     def apply(self, v):
         out = v.copy()
         out[:, :N_MEAN_FLOW_VARS] = self.mean.apply(v[:, :N_MEAN_FLOW_VARS].copy())
         out[:, N_MEAN_FLOW_VARS:] = self.turb.apply(v[:, N_MEAN_FLOW_VARS:].copy())
+        return out
+
+    def apply_linear(self, v):
+        """线性那一块的作用（另一块的列置零，由 GMRES 用存下来的预处理向量填上）。"""
+        out = v.copy()
+        out[:, :N_MEAN_FLOW_VARS] = (0.0 if self.mean.flexible
+                                     else self.mean.apply(v[:, :N_MEAN_FLOW_VARS].copy()))
+        out[:, N_MEAN_FLOW_VARS:] = (0.0 if self.turb.flexible
+                                     else self.turb.apply(v[:, N_MEAN_FLOW_VARS:].copy()))
         return out
 
 
@@ -172,6 +186,12 @@ class CoupledBlockPreconditioner:
     @property
     def flexible(self) -> bool:
         return self.mean.flexible or self.turb.flexible
+
+    @property
+    def flexible_fraction(self) -> float:
+        """需要存预处理向量的列占比（重启长度按它分内存，`linear_solve.py::krylov_restart`）。"""
+        n_flex = N_MEAN_FLOW_VARS * self.mean.flexible + self.n_turb * self.turb.flexible
+        return n_flex / (N_MEAN_FLOW_VARS + self.n_turb)
 
     def _with_assemblers(self, u0, action: str, r0, scales, dtau):
         be = self.be
@@ -207,7 +227,7 @@ class CoupledBlockPreconditioner:
         if n_var != N_MEAN_FLOW_VARS + self.n_turb:
             raise ValueError(f"耦合预处理只接受 {N_MEAN_FLOW_VARS + self.n_turb} 列，收到 {n_var}")
         return _BlockDiagonal(self.mean.preconditioner(dtau, N_MEAN_FLOW_VARS),
-                              self.turb.preconditioner(dtau, self.n_turb), dtau)
+                              self.turb.preconditioner(dtau, self.n_turb), dtau, self.n_turb)
 
     def stale_budget(self) -> Optional[int]:
         """本步 GMRES 的过时预算：复用中的块的基线迭代数，加上 `recover` 重装配实际要付的代价——它把**两套**块
@@ -250,12 +270,16 @@ def _caches(solver, backend):
     need_mean = solver._newton_block_precond is None
     if need_turb or need_mean:
         n_real_prism, n_real_tet = real_sps_per_cell(int(backend.order))
-        common = dict(cell_is_prism=np.asarray(backend.cell_is_prism, dtype=bool), n_sps=backend.n_sps,
+        cell_is_prism = np.asarray(backend.cell_is_prism, dtype=bool)
+        n_turb = int(backend.turb.model.n_transported)
+        plan = plan_block_memory(backend.red, cell_is_prism, backend.n_sps, n_real_prism, n_real_tet,
+                                 N_MEAN_FLOW_VARS, n_turb)
+        common = dict(cell_is_prism=cell_is_prism, n_sps=backend.n_sps, plan=plan,
                       n_real_prism=n_real_prism, n_real_tet=n_real_tet, red=backend.red,
                       colors=backend.cell_colors(), global_coarse=backend.coarse_context())
         if need_turb:
             solver._newton_turb_state = {
-                "block": BlockJacobiCache(n_var=int(backend.turb.model.n_transported), **common)}
+                "block": BlockJacobiCache(n_var=n_turb, **common)}
         if need_mean:
             solver._newton_block_precond = BlockJacobiCache(
                 n_var=N_MEAN_FLOW_VARS, coupling_graph=backend.coupling_graph, with_turbulence=True, **common)

@@ -23,7 +23,7 @@ P0 顺带给出面邻居耦合块）或解析装配（下一节）。
 差分装配要 `色数 x 真实解点数 x 5` 次整场残差求值，P2 起不可承受（plate_demo
 P2 450 次、单次 5.5 s）。P>=1 由各后端传入解析装配器
 （`fr_residual/jacobian`，逐点导数与参考算子的收缩，同一个矩阵、代价约十几次
-残差求值），它同时给出面邻居耦合块，合计预算放得下（`plan_block_mode`）时预处理
+残差求值），它同时给出面邻居耦合块，合计预算放得下（`plan_block_modes`）时预处理
 换成块 ILU（`block_ilu.py`，大 CFL 下 GMRES 迭代数约为块 Jacobi 的 0.4 倍）。
 P0 与解析装配不覆盖的离散（见 `fr_residual/jacobian/backend.py::unsupported_reason`）
 仍用差分装配。
@@ -60,7 +60,7 @@ P0 与解析装配不覆盖的离散（见 `fr_residual/jacobian/backend.py::uns
 存储（逐块求逆在 float64 下做）：预处理子的精度只影响迭代数，不影响
 GMRES 解的精度。
 
-合计预算（`block_budget.py`，平均流与湍流共享）放不下两份、放得下一份时用**单份**（冻结 dtau）：
+合计预算（`block_budget.py`：按可用内存定，平均流与湍流共享）放不下两份、放得下一份时用**单份**（冻结 dtau）：
 装配后立即按当时的 `dtau` 原地求逆、不再保留 `J_cc`；之后每步直接用这份逆，
 当前 `dtau` 与求逆时的 `dtau`（几何平均比值）相差超过 `DTAU_REBUILD_RATIO` 倍才
 重装配。预处理子里的 `dtau` 略微过时只影响迭代数（它仍是合法的预处理子），迭代
@@ -76,10 +76,9 @@ from typing import Optional
 
 import numpy as np
 from loguru import logger
-from numba import njit, prange
 
-from . import block_budget
-from .block_budget import block_mode_bytes, plan_block_mode
+from .block_budget import BlockPlan, block_mode_bytes
+from .cell_block_inverse import CellBlockJacobiPreconditioner, invert_blocks_in_place
 from .cell_blocks import CellBlockJacobian
 from .precond_shift import block_diagonal_scale, shifted_dtau
 from .preconditioner import PseudoTransientDiagonal
@@ -95,124 +94,6 @@ DTAU_REBUILD_RATIO = 2.0
 #: 分解与 dtau 无关、不论 dtau 怎么变都复用（收敛末段 SER 让 CFL 每步翻倍，此时 `I/dtau`
 #: 已可忽略，按比值判据会每步白白重分解）。
 PTC_NEGLIGIBLE = 1e-2
-
-class CellBlockJacobiPreconditioner(PseudoTransientDiagonal):
-    """`M = blockdiag(J_cc + I/dtau)` 的逆作用；接口与对角预处理相同。
-
-    零填充槽位不在任何块里：那些行的残差恒为零、Jacobian 行也为零，
-    `A` 在那里就是 `I/dtau`，所以它们的预处理保持对角形式 `dtau * v`
-    （继承自 `PseudoTransientDiagonal.apply`，先整体作用再被块覆盖）。
-    """
-
-    __slots__ = ("_jac", "_inv_prism", "_inv_tet", "_rows_prism", "_rows_tet")
-
-    def __init__(self, jac: CellBlockJacobian, dtau_flat, inverted: bool = False):
-        """`inverted=True`：`jac` 的块已经是 `inv(J_cc + diag(1/dtau_build))`（单份模式，
-        `invert_blocks_in_place`），直接使用；`dtau_flat` 只用于零填充行的对角部分。"""
-        super().__init__(dtau_flat, jac.n_var)
-        self._jac = jac
-        self._rows_prism, self._rows_tet = _block_rows(jac)
-        if inverted:
-            self._inv_prism, self._inv_tet = jac.blocks_prism, jac.blocks_tet
-        else:
-            self._inv_prism = _inverted_blocks(jac, jac.blocks_prism, self._rows_prism, self.dtau, out=None)
-            self._inv_tet = _inverted_blocks(jac, jac.blocks_tet, self._rows_tet, self.dtau, out=None)
-
-    def apply(self, v_flat):
-        out = super().apply(v_flat)
-        xp = self._jac.xp
-        nv = self._jac.n_var
-        for inv, rows in ((self._inv_prism, self._rows_prism), (self._inv_tet, self._rows_tet)):
-            if inv.shape[0]:
-                # float32 作用：逆以 float32 存储，把向量也降到 float32 再乘，避免
-                # 混合精度 matmul 每次把整份逆隐式提升成 float64（实测 5 倍慢）
-                x = v_flat[rows].reshape(rows.shape[0], -1, 1).astype(xp.float32)
-                out[rows] = xp.matmul(inv, x).reshape(rows.shape[0], rows.shape[1], nv)
-        return out
-
-
-def _block_rows(jac: CellBlockJacobian):
-    """棱柱块、四面体块各自覆盖的状态行（真实解点）。"""
-    xp, n_sps = jac.xp, jac.n_sps
-    return (xp.asarray(jac.prism_cells[:, None] * n_sps + np.arange(jac.n_real_prism)[None, :]),
-            xp.asarray(jac.tet_cells[:, None] * n_sps + np.arange(jac.n_real_tet)[None, :]))
-
-
-def _inverted_blocks(jac: CellBlockJacobian, blocks, rows, dtau, out):
-    """逐块 `inv(blocks + diag(1/dtau))`（float32）；`out is blocks` 时原地。"""
-    xp, nv = jac.xp, jac.n_var
-    if blocks.shape[0] == 0:
-        return blocks if out is not None else xp.empty_like(blocks)
-    diag = xp.ascontiguousarray(xp.repeat(1.0 / dtau[rows], nv, axis=1))  # 与块内 (s,v) 序一致
-    if xp is np:
-        res = np.empty_like(blocks) if out is None else out
-        _invert_blocks_plus_diag(blocks, diag, res)
-        return res
-    # cupy：一次批量 cuSOLVER 调用（GPU 上没有 CPU LAPACK 逐矩阵调用的开销）
-    a = blocks.astype(xp.float64)
-    idx = xp.arange(blocks.shape[1])
-    a[:, idx, idx] += diag
-    inv = xp.linalg.inv(a).astype(xp.float32)
-    if out is None:
-        return inv
-    out[...] = inv
-    return out
-
-
-def invert_blocks_in_place(jac: CellBlockJacobian, dtau_flat) -> None:
-    """单份模式：把 `jac` 的块原地换成 `inv(J_cc + diag(1/dtau))`（见模块文档"内存"）。"""
-    dtau = jac.xp.asarray(dtau_flat, dtype=jac.xp.float64).ravel()
-    rows_prism, rows_tet = _block_rows(jac)
-    _inverted_blocks(jac, jac.blocks_prism, rows_prism, dtau, out=jac.blocks_prism)
-    _inverted_blocks(jac, jac.blocks_tet, rows_tet, dtau, out=jac.blocks_tet)
-
-
-@njit(parallel=True, cache=True)
-def _invert_blocks_plus_diag(blocks, diag, out):
-    """逐块 `inv(blocks[b] + diag(diag[b]))`：float64 Gauss-Jordan、部分选主元，
-    结果写回 float32 的 `out`。
-
-    **为什么不用 `np.linalg.inv` 的批量形式**：它对每个小矩阵单独走一次
-    LAPACK，调用开销与 BLAS 线程调度远大于 30x30 本身的计算量——实测
-    10.7 万个 30x30 块要 107 s（本核并行版不到 1 s），在每个 Newton 步都要
-    按新 `dtau` 重新求逆的前提下不可接受。
-
-    `out` 可以就是 `blocks`（原地）：每块先整块读入局部数组再写回。
-    """
-    n_blk, m, _ = blocks.shape
-    for b in prange(n_blk):
-        a = np.empty((m, 2 * m))
-        for i in range(m):
-            for j in range(m):
-                a[i, j] = blocks[b, i, j]
-                a[i, m + j] = 0.0
-            a[i, i] += diag[b, i]
-            a[i, m + i] = 1.0
-        for col in range(m):
-            piv = col
-            best = abs(a[col, col])
-            for r in range(col + 1, m):
-                if abs(a[r, col]) > best:
-                    best = abs(a[r, col])
-                    piv = r
-            if piv != col:
-                for j in range(2 * m):
-                    tmp = a[col, j]
-                    a[col, j] = a[piv, j]
-                    a[piv, j] = tmp
-            inv_p = 1.0 / a[col, col]
-            for j in range(2 * m):
-                a[col, j] *= inv_p
-            for r in range(m):
-                if r != col:
-                    f = a[r, col]
-                    if f != 0.0:
-                        for j in range(2 * m):
-                            a[r, j] -= f * a[col, j]
-        for i in range(m):
-            for j in range(m):
-                out[b, i, j] = a[i, m + j]
-
 
 def _order_of(n_real_prism: int, n_real_tet: int) -> int:
     """由每单元真实自由度反解阶数（刷新判据查标定表用）。"""
@@ -240,7 +121,7 @@ class BlockJacobiCache:
                  "_factored", "_factored_dtau", "_ptc_diag", "shifted")
 
     def __init__(self, *, cell_is_prism, colors: np.ndarray, n_sps: int,
-                 n_real_prism: int, n_real_tet: int, n_var: int,
+                 n_real_prism: int, n_real_tet: int, n_var: int, plan: BlockPlan,
                  red: LocalReductions = None, coupling_graph=None, with_turbulence: bool = False,
                  global_coarse=None):
         """`colors`：块装配用的单元着色（单机 `coloring.greedy_cell_coloring`；分布式
@@ -253,7 +134,10 @@ class BlockJacobiCache:
         每单元一个真实解点（P0）且没有解析装配器时，差分装配按它的距离 2 着色同时给出
         面邻居耦合块，预处理用块 ILU（见 `cell_blocks.py` 模块文档）。
 
-        `with_turbulence`：平均流缓存是否与隐式湍流缓存共享预算（`plan_block_mode`）。
+        `plan`：调用方按可用内存一次规划好的两个缓存的档位（`block_budget.py::plan_block_memory`）；本缓存
+        取其中对应自己的那一档（`with_turbulence` 的平均流缓存与湍流缓存共享这一个预算）。
+
+        `with_turbulence`：平均流缓存是否与隐式湍流缓存耦合（刷新判据的代价标定按它分类，`refresh_cost.py`）。
 
         `global_coarse`（`coarse.CoarseCommContext`，分布式后端给出）：块 ILU 档在本 rank 的
         预处理之外再叠全局粗校正（`coarse/global_coarse.py`），装配器须同时给出跨 rank 耦合块。
@@ -282,7 +166,7 @@ class BlockJacobiCache:
         self.last_accepted = True
         self.n_builds = 0
         sizes = (int(self.cell_is_prism.sum()), int((~self.cell_is_prism).sum()), n_real_prism, n_real_tet)
-        mode = plan_block_mode(self.n_var, *sizes, with_turbulence=with_turbulence)
+        mode = plan.turbulence if self.kind.startswith("turbulence") else plan.mean
         # 块 ILU 要面邻居耦合块（解析装配或 P0 差分装配给出）
         self.use_ilu = mode == "ilu"
         self.single_copy = mode == "single"
@@ -293,15 +177,14 @@ class BlockJacobiCache:
         if mode is None:
             self.disabled_reason = (
                 f"单元块 Jacobi（n_var={self.n_var}）一份也需要 "
-                f"{block_mode_bytes('single', *sizes, self.n_var) / 2 ** 30:.1f} GiB，超出预处理合计预算 "
-                f"{block_budget.PRECOND_TOTAL_BYTES / 2 ** 30:.0f} GiB，改用逐 SP 对角预处理——大 CFL 下 GMRES "
-                f"迭代数会显著上升")
+                f"{block_mode_bytes('single', *sizes, self.n_var) / 2 ** 30:.1f} GiB，超出{plan.describe()}，"
+                f"改用逐 SP 对角预处理——大 CFL 下 GMRES 迭代数会显著上升")
             logger.warning("[NK] " + self.disabled_reason)
             self.colors = None
         else:
             logger.info(f"[NK] 单元块预处理（n_var={self.n_var}）：{mode}，"
                         f"{block_mode_bytes(mode, *sizes, self.n_var) / 2 ** 30:.2f} GiB"
-                        f"（合计预算 {block_budget.PRECOND_TOTAL_BYTES / 2 ** 30:.0f} GiB）")
+                        f"（{plan.describe()}）")
 
     def _refresh_threshold(self, baseline: int) -> int:
         return int(baseline + self.refresh_slack)
@@ -460,6 +343,11 @@ class BlockJacobiCache:
         if self._coupling_graph is None:
             self._coupling_graph = self._coupling_graph_fn()
         return self._coupling_graph
+
+    @property
+    def flexible_fraction(self) -> float:
+        """需要存预处理向量的列占比：单一缓存整体灵活或整体线性（`linear_solve.py::krylov_restart`）。"""
+        return 1.0 if self.flexible else 0.0
 
     @property
     def flexible(self) -> bool:

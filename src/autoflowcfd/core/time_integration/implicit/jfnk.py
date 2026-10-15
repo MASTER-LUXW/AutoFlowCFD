@@ -55,43 +55,12 @@ from .dtau_control import MIN_SCALE as DTAU_MIN_SCALE, PtcDtauScale
 from .forcing import EisenstatWalkerForcing
 from .jacobian_vector import MatrixFreeJacobian
 from .block_jacobi import BlockJacobiCache
-from .gmres import basis_itemsize, gmres_right
+from .gmres import basis_itemsize
+from .linear_solve import GMRES_MAX_ITER, _RealRows, _solve_direction, krylov_restart
 from .physicality import _cellwise_relaxation, density_pressure_row_limits, update_local_dtau_scale
 from .preconditioner import PseudoTransientDiagonal
 from .globalization import LINEAR_SOLVE_MAX_REL_RESIDUAL, ResidualNorm, accept_step
 from .reductions import LocalReductions
-
-#: GMRES 重启长度的**下限**。Krylov 基向量按 `(N, n_var)` 存，重启长度直接决定
-#: 峰值内存：P2 下 79 万单元一个基向量 1.2 GB，大问题只能取小值。
-GMRES_RESTART = 30
-
-#: 重启长度的上限（正交化代价随 m 线性增长，m=200 时每次迭代约 200 次向量更新）。
-GMRES_RESTART_MAX = 200
-
-#: Krylov 基允许的内存（每个 rank / 每块设备）。重启长度按它自适应
-#: （`krylov_restart`），夹在 `[GMRES_RESTART, GMRES_RESTART_MAX]` 之间。
-#:
-#: **为什么不是固定 30**（2026-09-26）：大 CFL 下迭代数上百时 GMRES(30) 反复
-#: 重启、丢掉 Krylov 子空间，会停滞。plate_demo P0（17.9 万单元，一个基向量
-#: 7 MB）CFL 1000 的同一线性系统、同一块 ILU、`rtol=0.1`：GMRES(30) 600 次仍停在
-#: 0.136，GMRES(100) 181 次、GMRES(200) 121 次达到。固定 30 是按 P2 大网格的内存
-#: 定的，小问题完全没必要受它限制。
-KRYLOV_BASIS_BYTES = 2 * 2 ** 30
-
-#: 单个 Newton 步允许的最大 Krylov 迭代数（= 最大残差求值次数）。
-#:
-#: **60 -> 200（2026-09-19，被真实运行修正）**：`dtau` 大的时候预处理后
-#: 的算子是 `I + dtau*J`，特征值随 `dtau` 线性增长，GMRES 需要的迭代数
-#: 跟着涨。实测 Blasius P1 在 CFL 100 下每步用满 60 次仍未达到 `eta`，
-#: 于是拿到一个**半收敛**的方向 —— 而半收敛的方向既不是 Newton 方向也
-#: 不是显式方向，是最坏的情形。
-#:
-#: 放开到 200 的同时加了两道闸，所以"成本失控"这件事由它们承担而不是
-#: 由这个上限承担：
-#:   * `gmres_info > 0`（未达容差）会被记录并交给残差接受判据；
-#:   * 残差接受判据（`globalization.py::accept_step`）不接受让残差恶化的步，回溯到接受
-#:     或者放弃这一步（`theta=0`，外层自适应 CFL 随之缩小 dtau）。
-GMRES_MAX_ITER = 200
 
 #: 单次 `step_newton_krylov` 调用里允许缩小 `dtau` 重试的档数
 #: （每档 `dtau_control.FAIL_SHRINK`，即 4 倍）。
@@ -102,131 +71,6 @@ GMRES_MAX_ITER = 200
 #: **下一次调用**继续（`dtau_scale` 跨步持久化），于是极端情形下总档数
 #: 不受这个值限制、单步成本却受它限制。
 DTAU_MAX_CUTS_PER_STEP = 3
-
-def krylov_restart(n_local_entries: int, red: LocalReductions, flexible: bool = False, itemsize: int = 8) -> int:
-    """按 Krylov 基内存预算给出的重启长度（见 `KRYLOV_BASIS_BYTES`）。
-
-    分布式下各 rank 的 GMRES 必须走同样多步（内积是集体操作），所以取全局最小。
-    灵活模式每步多存一个 `M^{-1} v_j`（`gmres.py`），同一预算下重启长度减半。
-    `itemsize`：基向量每个元素的字节数（`gmres.py::basis_itemsize`）；下限 `GMRES_RESTART` 是按双精度
-    定的内存量，单精度存储时同样的内存是两倍的向量数。
-    """
-    per_step = itemsize * max(int(n_local_entries), 1) * (2 if flexible else 1)
-    m_local = KRYLOV_BASIS_BYTES // per_step - 1
-    m = int(red.min(red.xp.asarray([float(m_local)])))
-    return int(min(GMRES_RESTART_MAX, max(GMRES_RESTART * 8 // itemsize, m)))
-
-
-class _RealRows:
-    """Krylov 向量只存真实解点行（原生基的零填充槽位不进基向量）。
-
-    零填充行的残差恒为零（调用方保证、`step_newton_krylov` 入口核查）、Jacobian
-    行列也为零，`A` 在那里就是 `I/dtau`、右端项为零，解在那里恒为零——在真实行
-    上求解与全尺寸求解数学上等价。P3 原生基真实行只占约 42%（棱柱 40/64、四面体
-    20/64），plate_demo P3 一个全尺寸基向量 0.46 GB、紧凑后 0.16 GB。
-    做成类而不是闭包：在整个 Newton 步存活（项目规范）。
-    """
-
-    __slots__ = ("idx", "n_dof", "n_var")
-
-    def __init__(self, real_rows, n_dof: int, n_var: int, xp):
-        self.idx = xp.nonzero(xp.asarray(real_rows, dtype=bool))[0]
-        self.n_dof, self.n_var = int(n_dof), int(n_var)
-
-    def expand(self, x_1d, xp):
-        full = xp.zeros((self.n_dof, self.n_var), dtype=x_1d.dtype)
-        full[self.idx] = x_1d.reshape(-1, self.n_var)
-        return full
-
-    def compact(self, y):
-        return y[self.idx].reshape(-1)
-
-
-def _solve_direction(jac: MatrixFreeJacobian, prec, dtau, r0, n_var: int, eta: float,
-                     gmres_restart: int, gmres_max_iter: int, red: LocalReductions,
-                     rows: Optional[_RealRows] = None, norm: Optional[ResidualNorm] = None,
-                     review_at: Optional[int] = None):
-    """解 `(I/dtau + J) dU = -R`，返回 `(du, gmres_iters, gmres_info, linear_rel_residual)`。
-
-    `dtau` 是本次求解的逐行步长，Krylov 算子的对角项 `I/dtau` 在这里按它加；`prec` 只提供预处理
-    作用（`apply`）。2026-10-10 以前对角项由 `prec.add_ptc_term` 提供：块 ILU 档的预处理对象跨步
-    复用（`block_jacobi.py::preconditioner`，dtau 变化不到 2 倍不重分解），它带着**分解时**的 dtau，
-    于是被求解的不是请求的那个系统。稳态下只是伪时间步与请求值差不到 2 倍；双时间步的物理时间项并在
-    这个对角项里，BDF1 -> BDF2 时 `a0` 从 1 变 1.5 而算子仍按 1，Newton 从二次收敛退化成每次只降到
-    0.45 倍（等熵涡，`tests/unit/test_dual_time_newton.py`）。
-    线性求解用后端无关的 `gmres.py::gmres_right`（右预处理：它的收敛判据
-    就是真实线性残差 `||R + (I/dtau+J) dU|| <= eta ||R||`，正是 inexact
-    Newton 要求的量）。
-
-    **线性残差在全局化的同一个范数里最小化**（2026-10-03）：`norm` 带逐行权重 `w`
-    时（`ResidualNorm`），对 `D A M^{-1} D^{-1}`（`D = diag(sqrt(w))`）做 GMRES，解
-    `x = M^{-1} D^{-1} y`（`D` 另含逐列的参考量级倒数，见 `ResidualNorm`）。它的残差就是 `D (b - A x)`，即接受判据与 SER 所用的加权范数；
-    `D A M^{-1} D^{-1}` 与 `A M^{-1}` 相似，预处理后算子的谱不变。此前 GMRES 在未加权
-    2 范数里最小化：残差被体积小 1e6 倍的单元主导，GMRES 在那里把线性残差压到
-    `eta` 以下，在占全域体积的大单元上却让它变大——湍流平板层流 P2（`tests/validation/
-    _flat_plate_case.py`）被回溯的步上未加权线性残差 0.03~0.10、体积加权 1.1~2.5 倍
-    （非线性误差只有 0.001~0.003），线性模型本身就让全局度量恶化，接受判据回溯、SER
-    收缩，CFL 卡在 ~60 近 200 步。
-
-    `du` 为 `None` 表示线性求解产出了非有限方向（调用方据此缩小 `dtau`
-    重试或放弃这一步，**不**静默用一个截断后的方向凑一步）。
-
-    `jac` 由调用方构造并跨重试复用：它只依赖基态 `(U0, R0)` 与参考量级，
-    与 `dtau` 无关，所以缩小 `dtau` 重试时不需要重算基残差、也不需要
-    重建 Krylov 算子的基态部分（`n_matvec` 在它内部累计）。
-    """
-    n_dof = r0.shape[0]
-    xp = red.xp
-    dtau_col = xp.asarray(dtau, dtype=xp.float64).reshape(n_dof, 1)
-
-    if rows is None:
-        def _apply_A(x_1d):
-            v = x_1d.reshape(n_dof, n_var)
-            jv = jac.matvec(v)
-            jv += v / dtau_col
-            return jv.reshape(-1)
-
-        def _apply_Minv(x_1d):
-            return prec.apply(x_1d.reshape(n_dof, n_var)).reshape(-1)
-
-        b = (-r0).reshape(-1)
-    else:
-        def _apply_A(x_1d):
-            v = rows.expand(x_1d, xp)
-            return rows.compact(jac.matvec(v) + v / dtau_col)
-
-        def _apply_Minv(x_1d):
-            return rows.compact(prec.apply(rows.expand(x_1d, xp)))
-
-        b = rows.compact(-r0)
-
-    if norm is not None and (norm.weights is not None or norm.inv_scales is not None):
-        # D = sqrt(w) / scale：行权重与逐列的参考量级（`ResidualNorm` 的同一个范数）
-        d_full = xp.ones((n_dof, n_var))
-        if norm.weights is not None:
-            d_full = d_full * xp.sqrt(norm.weights)[:, None]
-        if norm.inv_scales is not None:
-            d_full = d_full * norm.inv_scales[None, :]
-        d = xp.ascontiguousarray(d_full).reshape(-1) if rows is None else rows.compact(d_full)
-        if not bool(red.all_finite(d)) or red.min(d) <= 0.0:
-            raise ValueError("残差范数权重在真实行上必须为正有限值（加权线性求解需要 D 可逆）")
-        unscaled_A, unscaled_Minv = _apply_A, _apply_Minv
-
-        def _apply_A(x_1d):
-            return d * unscaled_A(x_1d)
-
-        def _apply_Minv(y_1d):
-            return unscaled_Minv(y_1d / d)
-
-        b = d * b
-
-    du_1d, iters, info, rel = gmres_right(
-        _apply_A, b, _apply_Minv, rtol=eta,
-        restart=gmres_restart, max_iter=gmres_max_iter, red=red, flexible=prec.flexible, review_at=review_at)
-    if info < 0 or not red.all_finite(du_1d):
-        return None, iters, -1, float("nan")
-    du = du_1d.reshape(n_dof, n_var) if rows is None else rows.expand(du_1d, xp)
-    return du, iters, int(info), float(rel)
 
 
 def step_newton_krylov(
@@ -369,7 +213,7 @@ def step_newton_krylov(
            if forcing is not None else 0.1)
     if gmres_restart is None:
         gmres_restart = krylov_restart(u0_flat.size if rows is None else rows.idx.size * n_var, red,
-                                       flexible=block_precond is not None and block_precond.flexible,
+                                       flexible=0.0 if block_precond is None else block_precond.flexible_fraction,
                                        itemsize=basis_itemsize(eta))
 
     u_new = u0_flat

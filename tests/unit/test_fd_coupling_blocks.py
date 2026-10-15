@@ -10,9 +10,11 @@
 import numpy as np
 import pytest
 
+from autoflowcfd.core.time_integration.implicit.block_budget import plan_for_budget
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from autoflowcfd.core.time_integration.implicit.block_ilu import BlockILUPreconditioner
-from autoflowcfd.core.time_integration.implicit.block_jacobi import BlockJacobiCache, CellBlockJacobiPreconditioner
+from autoflowcfd.core.time_integration.implicit.block_jacobi import BlockJacobiCache
+from autoflowcfd.core.time_integration.implicit.cell_block_inverse import CellBlockJacobiPreconditioner
 from autoflowcfd.core.time_integration.implicit.cell_blocks import CellBlockJacobian
 from autoflowcfd.core.time_integration.implicit.coloring import (
     coupling_graph_from_faces, distance2_cell_coloring, greedy_cell_coloring, stencil_pairs,
@@ -105,7 +107,7 @@ def test_p0_cache_switches_to_block_ilu_and_beats_block_jacobi():
     colors = greedy_cell_coloring(fl.owner_cell, fl.neighbor_cell, n)
     graph = coupling_graph_from_faces(fl.owner_cell, fl.neighbor_cell, n)
     cache = BlockJacobiCache(cell_is_prism=cip, colors=colors, n_sps=1, n_real_prism=1, n_real_tet=1, n_var=5,
-                             coupling_graph=lambda: graph)
+                             plan=plan_for_budget(cip, 1, 1, 5, 0, 2 ** 50), coupling_graph=lambda: graph)
     cache.begin_step(res, u0, r0, SCALES, np.full(u0.shape[0], 1e-2))
     assert cache.coupling is not None
     mf = MatrixFreeJacobian(res, u0, r0, SCALES)

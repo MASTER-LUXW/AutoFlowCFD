@@ -22,7 +22,7 @@
 
 预处理矩阵对角上的伪时间项逐行取 `max(1/dtau, PRECONDITIONER_SHIFT * d)`，`d` 是该（单元, 解点）处 `J_cc`
 对角元绝对值的最大值——带对角位移的不完全分解，位移与对角量级成比例。被求解的线性系统不变（Krylov 算子
-自己加 `I/dtau`，`jfnk.py::_solve_direction`），右预处理 GMRES 的解仍是原系统的解。
+自己加 `I/dtau`，`linear_solve.py::_solve_direction`），右预处理 GMRES 的解仍是原系统的解。
 
 **只在线性求解失败之后启用**（`block_jacobi.py::BlockJacobiCache.recover`，启用后保持到块缓存重建，即
 换阶）：`J_a` 足够准的算例靠的正是大 CFL 下预处理接近精确（湍流平板 P3 每步 GMRES 1~3 次），位移会让它们

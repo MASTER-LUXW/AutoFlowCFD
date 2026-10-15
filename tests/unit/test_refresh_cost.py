@@ -9,6 +9,7 @@
 import numpy as np
 import pytest
 
+from autoflowcfd.core.time_integration.implicit.block_budget import plan_for_budget
 from autoflowcfd.core.time_integration.implicit.refresh_cost import (
     ANALYTIC_ASSEMBLY_ITERS, FD_EVAL_ITERS, REFRESH_SLACK_MIN, assembly_cost_iters, block_kind,
 )
@@ -40,7 +41,9 @@ def test_cache_threshold_uses_the_table_after_a_build():
     """装配之后刷新阈值 = 基线 + 查表值（与耗时无关）。"""
     from autoflowcfd.core.time_integration.implicit.block_jacobi import BlockJacobiCache
 
-    cache = BlockJacobiCache(cell_is_prism=np.ones(4, dtype=bool), colors=np.zeros(4, dtype=np.int64),
+    cip = np.ones(4, dtype=bool)
+    cache = BlockJacobiCache(cell_is_prism=cip, colors=np.zeros(4, dtype=np.int64),
+                             plan=plan_for_budget(cip, 6, 4, 5, 2, 2 ** 50),
                              n_sps=8, n_real_prism=6, n_real_tet=4, n_var=5, with_turbulence=True)
     blocks = np.tile(np.eye(30, dtype=np.float32), (4, 1, 1))
 

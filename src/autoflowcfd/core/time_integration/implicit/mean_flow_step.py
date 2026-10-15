@@ -32,6 +32,7 @@ from typing import Callable, Optional
 import numpy as np
 from loguru import logger
 
+from .block_budget import plan_block_memory
 from .block_jacobi import BlockJacobiCache
 from .forcing import EisenstatWalkerForcing
 from .jfnk import step_newton_krylov
@@ -211,12 +212,13 @@ def step_mean_flow_newton(
         n_real_prism, n_real_tet = real_sps_per_cell(int(order))
         if u_flat.shape[0] % n_cells:
             raise ValueError(f"状态行数 {u_flat.shape[0]} 不是单元数 {n_cells} 的整数倍")
+        n_sps = u_flat.shape[0] // n_cells
+        # 平均流单独做 Newton 步只在没有输运型湍流方程时（层流、LES 一类）：预处理预算由它独占
+        plan = plan_block_memory(red, cell_is_prism, n_sps, n_real_prism, n_real_tet, N_MEAN_FLOW_VARS, 0)
         solver._newton_block_precond = BlockJacobiCache(
-            cell_is_prism=cell_is_prism, colors=cell_colors(),
-            n_sps=u_flat.shape[0] // n_cells, n_real_prism=n_real_prism,
+            cell_is_prism=cell_is_prism, colors=cell_colors(), plan=plan,
+            n_sps=n_sps, n_real_prism=n_real_prism,
             n_real_tet=n_real_tet, n_var=N_MEAN_FLOW_VARS, red=red, coupling_graph=coupling_graph,
-            # 隐式湍流在同一步里先于平均流运行、已建好它的状态：两者共享预处理内存预算
-            with_turbulence=getattr(solver, "_newton_turb_state", None) is not None,
             global_coarse=global_coarse)
 
     solver._newton_block_precond.assembler = block_assembler

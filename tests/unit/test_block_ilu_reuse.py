@@ -7,6 +7,9 @@
 """
 
 import numpy as np
+
+from autoflowcfd.core.time_integration.implicit.block_budget import plan_for_budget
+from autoflowcfd.core.time_integration.implicit.block_budget import plan_for_budget
 import pytest
 
 from autoflowcfd.core.time_integration.implicit import block_jacobi as BJ
@@ -19,7 +22,8 @@ def cache_and_counter(monkeypatch):
 
     mesh, res, U, r0, bp, bt, cp, n_real, colors, diag, off = _setup("tet", 1)
     npr, nte = real_sps_per_cell(1)
-    cache = BJ.BlockJacobiCache(cell_is_prism=np.arange(mesh.n_cells) < mesh.n_prism_cells, colors=colors,
+    cip = np.arange(mesh.n_cells) < mesh.n_prism_cells
+    cache = BJ.BlockJacobiCache(cell_is_prism=cip, colors=colors, plan=plan_for_budget(cip, npr, nte, 5, 0, 2 ** 50),
                                 n_sps=mesh.n_sps_per_cell, n_real_prism=npr, n_real_tet=nte, n_var=5)
     assert cache.use_ilu, "本测试需要块 ILU 档"
 

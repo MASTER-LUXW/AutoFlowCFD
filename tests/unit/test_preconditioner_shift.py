@@ -12,6 +12,7 @@
 
 import numpy as np
 
+from autoflowcfd.core.time_integration.implicit.block_budget import plan_for_budget
 from autoflowcfd.core.time_integration.implicit import precond_shift as ps
 from autoflowcfd.core.time_integration.implicit.block_jacobi import BlockJacobiCache
 from autoflowcfd.core.time_integration.implicit.gmres import gmres_right
@@ -31,7 +32,9 @@ def test_shifted_dtau_floors_the_pseudo_time_term_relative_to_the_block_diagonal
 
 
 def _cache(n):
-    return BlockJacobiCache(cell_is_prism=np.ones(n, dtype=bool), colors=np.zeros(n, dtype=np.int64),
+    cip = np.ones(n, dtype=bool)
+    return BlockJacobiCache(cell_is_prism=cip, colors=np.zeros(n, dtype=np.int64),
+                            plan=plan_for_budget(cip, 1, 1, 5, NV, 2 ** 50),
                             n_sps=1, n_real_prism=1, n_real_tet=1, n_var=NV)
 
 
@@ -202,3 +205,97 @@ def test_recovery_is_only_attempted_when_the_direction_is_untrusted():
             seen.add("untrusted")
             assert prec.n_recover >= 1 and info["theta"] == 0.0
     assert seen == {"usable", "untrusted"}, seen
+
+
+def test_block_diagonal_reports_only_the_nonlinear_block():
+    """平均流块线性、湍流块非线性时只把湍流列标为非线性，`apply_linear` 只给平均流列；两块同类时不分列。"""
+    from autoflowcfd.core.time_integration.implicit.coupled_step import _BlockDiagonal
+    from autoflowcfd.core.time_integration.implicit.preconditioner import PseudoTransientDiagonal
+
+    class _Flex(PseudoTransientDiagonal):
+        flexible = True
+
+    n = 4
+    dtau = np.full(n, 0.5)
+    lin, flex = PseudoTransientDiagonal(dtau, 5), _Flex(dtau, 1)
+    combo = _BlockDiagonal(lin, flex, dtau, 1)
+    assert combo.flexible and list(combo.nonlinear_columns) == [False] * 5 + [True]
+    v = np.arange(n * 6, dtype=float).reshape(n, 6) + 1.0
+    out = combo.apply_linear(v)
+    np.testing.assert_allclose(out[:, :5], 0.5 * v[:, :5])
+    assert np.all(out[:, 5:] == 0.0)
+    assert _BlockDiagonal(flex, _Flex(dtau, 1), dtau, 1).nonlinear_columns is None
+    assert _BlockDiagonal(lin, PseudoTransientDiagonal(dtau, 1), dtau, 1).nonlinear_columns is None
+
+
+class _CoupledLike:
+    """块缓存接口的替身：预处理平均流 2 列用固定对角逆（线性）、第 3 列每次作用都乘不同的因子（非线性）。"""
+
+    recoverable = False
+    flexible = True
+
+    def __init__(self, split: bool):
+        self.split = split
+        self.flexible_fraction = 1 / 3 if split else 1.0
+
+    def begin_step(self, *args):
+        pass
+
+    def stale_budget(self):
+        return None
+
+    def recover(self, *args):
+        return False
+
+    def record(self, *args, **kwargs):
+        pass
+
+    def preconditioner(self, dtau, n_var):
+        split = self.split
+
+        class _Prec:
+            flexible = True
+            nonlinear_columns = np.array([False, False, True]) if split else None
+            calls = [0]
+
+            def apply(self, v):
+                self.calls[0] += 1
+                out = v / 4.0
+                out[:, 2] *= 1.0 + 0.3 * np.sin(self.calls[0])
+                return out
+
+            def apply_linear(self, v):
+                out = v / 4.0
+                out[:, 2] = 0.0
+                return out
+
+        return _Prec()
+
+
+def test_newton_step_with_partial_flexible_matches_full_flexible():
+    """经 `step_newton_krylov`（真实行压缩、逐列加权范数）：只为非线性列存预处理向量与整份存储迭代数相同、
+    Newton 方向一致。"""
+    rng = np.random.default_rng(12)
+    n_rows, nv = 40, 3
+    A = 4.0 * np.eye(n_rows * nv) + rng.normal(0.0, 1.0, (n_rows * nv,) * 2) / np.sqrt(n_rows * nv)
+    c = rng.normal(0.0, 1.0, (n_rows, nv))
+    real = np.ones(n_rows, dtype=bool)
+    real[::7] = False                                # 零填充行
+    c[~real] = 0.0
+    mask = np.repeat(real, nv)
+    A[~mask, :] = 0.0
+    A[:, ~mask] = 0.0
+
+    def res(u):
+        return (A @ u.reshape(-1)).reshape(n_rows, nv) + c
+
+    def step(split):
+        return step_newton_krylov(res, np.zeros((n_rows, nv)), np.full(n_rows, 1e12), np.array([1.0, 2.0, 0.5]),
+                                  block_precond=_CoupledLike(split), real_rows=real,
+                                  norm_weights=np.where(real, 1.0, 0.0), tol_nonlinear=1e-14,
+                                  physicality=lambda u, du, red: np.ones(u.shape[0]))
+
+    (u_full, info_full), (u_part, info_part) = step(False), step(True)
+    assert info_part["gmres_info"] == 0 and info_part["gmres_iters"] == info_full["gmres_iters"]
+    np.testing.assert_allclose(u_part, u_full, rtol=1e-3, atol=1e-9)
+    assert np.all(u_part[~real] == 0.0)
