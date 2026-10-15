@@ -1,7 +1,7 @@
 """AutoFlowCFD V2.0 - 本进程还能用多少内存（主机或 GPU 设备）。
 
 隐式步的单元块预处理按它定档（`time_integration/implicit/block_budget.py`）：块预处理是 Newton 步里最大的
-一块内存，此前用写死的 11 GiB 合计预算选档，不看求解器其余部分占了多少——cube_demo 粗网格（19.6 万单元）
+一块内存，此前用写死的 11 GiB 合计预算选档，不看求解器其余部分占了多少——cube_demo 粗网格（28.6 万单元）
 SA P2 在 31.5 GB 的机器上平均流选了"两份块 Jacobi"（9.12 GiB），第 2 步 GMRES 时进程 29.4 GB、内存不足，
 而"单份"档（4.56 GiB）放得下。
 

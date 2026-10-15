@@ -317,7 +317,7 @@ def test_one_equation_turbulence_shares_the_budget():
     2026-10-15 以前按"湍流就是 2 个变量"写死：n_var=1 的湍流缓存走"不在合计预算内"的分支、独占全部预算，
     平均流给它预留的又是 2 个变量的单份——cube_demo 粗网格 SA P2 两个缓存合计 10.2 GiB（平均流两份 9.12 +
     湍流 ILU 1.07），只是恰好没超过写死的 11 GiB。"""
-    sizes = (90649, 105095, 18, 10)                    # cube_demo 粗网格 P2
+    sizes = (90649, 195744, 18, 10)                    # cube_demo 粗网格 P2（28.6 万单元）
     single_mean = bb.block_mode_bytes("single", *sizes, 5)
     single_sa = bb.block_mode_bytes("single", *sizes, 1)
     assert bb.plan_block_modes(sizes, 5, 1, single_mean + single_sa) == ("single", "single")
@@ -336,10 +336,10 @@ def test_budget_follows_available_memory(monkeypatch):
     import autoflowcfd.core.utils.system_memory as sm
 
     red = LocalReductions()
-    cip = np.arange(195744) < 90649
-    sizes = (90649, 105095, 18, 10)
-    real_entries = (90649 * 18 + 105095 * 10) * 6
-    fixed = bb.RESIDUAL_WORK_FACTOR * 195744 * 27 * 6 * 8 + bb.MEMORY_HEADROOM
+    cip = np.arange(286393) < 90649                    # cube_demo 粗网格：9.06 万棱柱 + 19.6 万四面体
+    sizes = (90649, 195744, 18, 10)
+    real_entries = (90649 * 18 + 195744 * 10) * 6
+    fixed = bb.RESIDUAL_WORK_FACTOR * 286393 * 27 * 6 * 8 + bb.MEMORY_HEADROOM
     # 平均流不是块 ILU 时它的预处理线性，只有 SA 那 1 列要存预处理向量（`gmres.py` 模块文档"部分灵活"）
     reserve = krylov_basis_bytes(real_entries, red, flexible=1 / 6) + fixed
     reserve_all = krylov_basis_bytes(real_entries, red, flexible=1.0) + fixed

@@ -14,7 +14,7 @@
 * `MEMORY_HEADROOM`：操作系统与其余进程的波动。
 
 此前是写死的 11 GiB（按 plate_demo P3 在 31.5 GB 机器上的一次实测定的），不看求解器其余部分占了多少：
-cube_demo 粗网格（19.6 万单元）SA P2 平均流选了"两份块 Jacobi"（9.12 GiB），加上湍流块 ILU 1.07 GiB、
+cube_demo 粗网格（28.6 万单元：9.06 万棱柱 + 19.6 万四面体）SA P2 平均流选了"两份块 Jacobi"（9.12 GiB），加上湍流块 ILU 1.07 GiB、
 常驻约 8.5 GiB、Krylov 基约 7.7 GiB、残差求值瞬时约 3.8 GiB，第 2 步 GMRES 时进程 29.4 GB、内存不足；
 "单份"档（4.56 GiB）放得下。在大内存机器上，写死的上限又把本可以用块 ILU 的算例压在更弱的档上。
 
@@ -41,9 +41,11 @@ BLOCK_MODES = ("ilu", "two", "single")
 _MEAN_FACE_NEIGHBORS = 4.2
 
 #: 残差求值与 Newton 步工作数组占用的内存，以"一个按统一槽位存的 float64 状态数组"（`n_cells × n_sps ×
-#: n_vars × 8` 字节）为单位。标定：cube_demo 粗网格（19.6 万单元）SA P2 的一次耦合残差求值瞬时 +3.77 GiB，
-#: 状态数组 0.254 GiB，比值 14.9；另有 u0、r0、du、试探态等 Newton 步工作数组。取 16。
-RESIDUAL_WORK_FACTOR = 16
+#: n_vars × 8` 字节）为单位。标定：cube_demo 粗网格（28.6 万单元）SA P2 的一次耦合残差求值瞬时 +3.77 GiB，
+#: 状态数组 0.346 GiB，比值 10.9；另有 u0、r0、du、试探态等 Newton 步工作数组（同一算例 GMRES 前常驻增量
+#: 约 0.3 GiB）。取 12。2026-10-15 第一版按误读的单元数（19.6 万，实为四面体数）标成 16，多预留 1.4 GiB，
+#: 湍流块差 0.08 GiB 放不下单份、退回对角预处理。
+RESIDUAL_WORK_FACTOR = 12
 
 #: 预留给操作系统、其余进程与分配碎片的余量（字节）。
 MEMORY_HEADROOM = 2 * 2 ** 30
