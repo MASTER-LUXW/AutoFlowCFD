@@ -17,9 +17,23 @@ tests/unit/test_fr_gradients.py）。
 
 import numpy as np
 
-from autoflowcfd.core.fr_operators.volume_contract import (
-    contract_shared_operator_1axis, grad_computational_to_physical,
-)
+from numba import njit, prange
+
+from autoflowcfd.core.fr_operators.volume_contract import cell_blocks, contract_local, grad_to_physical_point
+
+
+@njit(cache=True, parallel=True)
+def _physical_gradient_kernel(field, lo, hi, D2, inv_jacs, out, n_blocks):
+    """单元 `lo..hi-1`：`out[c, s, v, n] = sum_m inv_jacs[c, s, m, n] * (D2 field[c])[3 s + m, v]`。"""
+    n = hi - lo
+    n_sps = field.shape[1]
+    for b in prange(n_blocks):
+        g_c = np.empty((3 * n_sps, field.shape[2]))
+        for i in range(b * n // n_blocks, (b + 1) * n // n_blocks):
+            c = lo + i
+            contract_local(D2, field[c], g_c)
+            for s in range(n_sps):
+                grad_to_physical_point(g_c[3 * s:3 * s + 3], inv_jacs[c, s], out[c, s])
 
 
 def compute_physical_gradient(field: np.ndarray, mesh, ops) -> np.ndarray:
@@ -49,25 +63,16 @@ def compute_physical_gradient(field: np.ndarray, mesh, ops) -> np.ndarray:
     # 主要热点（py-spy 采样证实）。
     # 链式法则转物理空间：grad_phys[c,s,v,n] = sum_m inv_jac[c,s,m,n] * grad_comp[c,s,m,v]
     # 输出维度顺序 (n_cells,n_sps,n_field_vars,3)，与代码库既有 grad_U 约定一致。
-    # 计算用 `grad_computational_to_physical` 融合 kernel（性能优化
-    # 2026-09-13，见 volume_contract.py 同名函数文档：原
-    # `np.matmul(np.swapaxes(grad_comp,-1,-2), inv_jacs)` 要先物化一份
-    # 非连续转置副本、再做数百万次 (V,3)@(3,3) 微型 gemm，开销主导且
-    # 不随核数并行）。对 m 求和顺序与 np.matmul 一致，结果逐位相同。
+    # 逐点链式法则 `volume_contract.grad_to_physical_point`（性能优化 2026-09-13：原
+    # `np.matmul(np.swapaxes(grad_comp,-1,-2), inv_jacs)` 要先物化一份非连续转置副本、再做数百万次
+    # (V,3)@(3,3) 微型 gemm，开销主导且不随核数并行）。对 m 求和顺序与 np.matmul 一致，结果逐位相同。
     #
-    # **按单元分块**（内存优化 2026-09-14，为 P2 OOM 排查新增）：本函数
-    # 此前先为全场物化 `grad_comp`（(n_cells,n_sps,3,V)），再整体转物理
-    # 空间，于是 `grad_comp` + 收缩临时结果 + 输出 `grad_phys` 三份大数组
-    # 同时存活。79 万单元 P2（n_sps=27）、V=5 时每份约 2.56GiB，实测峰值
-    # 约 7.2GiB——而这条链每一步都是**逐单元独立**的（收缩只在单元内的
-    # SPs 之间、链式法则只在同一 (cell,SP) 上），完全可以切块：现在只有
-    # 输出是全场数组，块内临时量按 32768 单元计只有约 106MiB×2。P2/V=5
-    # 下峰值从约 7.2GiB 降到约 2.8GiB（省约 4.4GiB）。分块不改变任何
-    # 逐单元的计算顺序与形状，结果与全场版**逐位相同**（见
-    # tests/unit/test_fr_gradients.py 与
-    # tests/unit/test_perf_fusion_kernels.py 的等价性用例）。
-    # prism/tet 两段分开切块：两者用不同的微分矩阵，且单元存储本来就是
-    # prism 在前 tet 在后，块不会跨类型。
+    # **逐单元融合**（2026-10-15）：每个单元先收缩出计算空间梯度、再按链式法则转物理空间，中间量只在块内
+    # 局部工作数组里（`_physical_gradient_kernel`）。此前按 32768 单元分块，每块分配收缩结果与转换结果两份
+    # 块大小的临时数组（P2/V=5 每份约 106 MiB）——Windows 上新分配的大数组每 MB 约 0.21 ms 花在缺页上，是
+    # 复用内存的 10 倍以上，一次残差求值要做 6 次梯度。求和顺序取自同一份内联定义（`contract_local` /
+    # `grad_to_physical_point`），与分块版逐位相同。prism/tet 两段用不同的微分矩阵，单元存储本来就是
+    # prism 在前 tet 在后。
     n_prism = mesh.n_prism_cells
     grad_phys = np.empty((n_cells, n_sps, n_field_vars, 3))
     D2_prism = None
@@ -92,16 +97,10 @@ def compute_physical_gradient(field: np.ndarray, mesh, ops) -> np.ndarray:
         D2_tet = np.ascontiguousarray(
             np.transpose(tet_ops, (0, 2, 1))).reshape(n_sps * 3, n_sps)
 
-    _GRAD_CHUNK_CELLS = 32768
     for seg_lo, seg_hi, D2 in ((0, n_prism, D2_prism), (n_prism, n_cells, D2_tet)):
         if D2 is None or seg_hi <= seg_lo:
             continue
-        for c0 in range(seg_lo, seg_hi, _GRAD_CHUNK_CELLS):
-            c1 = min(c0 + _GRAD_CHUNK_CELLS, seg_hi)
-            gc = contract_shared_operator_1axis(D2, field[c0:c1]).reshape(
-                c1 - c0, n_sps, 3, n_field_vars)
-            grad_phys[c0:c1] = grad_computational_to_physical(gc, inv_jacs[c0:c1])
-            del gc  # 块内用完即弃，下一轮迭代变量重新绑定
+        _physical_gradient_kernel(field, seg_lo, seg_hi, D2, inv_jacs, grad_phys, cell_blocks(seg_hi - seg_lo))
     return grad_phys
 
 

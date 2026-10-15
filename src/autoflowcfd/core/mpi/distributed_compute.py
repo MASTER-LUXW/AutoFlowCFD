@@ -257,13 +257,13 @@ def distributed_compute_viscous_residual(
     `config.physics.enable_viscous=True`（真实粘性算例的默认配置）就会
     在第一次残差求值时立刻因属性访问失败而崩溃——分布式求解器实际上
     从未跑通过任何粘性算例。改用单机路径同一个入口
-    `core.fr_residual.viscous.compute_viscous_residual`（该函数内部会
+    `core.fr_residual.viscous_flux.compute_viscous_residual_fr`（该函数内部会
     重新计算 primitive 变量与梯度，不需要调用方预先算好并传入，`grad_U`
     参数因此整个不再需要）。
 
     湍流涡粘度耦合（2026-09-02 新增，见 core/mpi/distributed_turbulence.py
     模块文档）：`mu_t_field_compact` 非 None 时传给底层
-    `compute_viscous_residual_ldg` 的 `mu_t_field` 参数——必须已经是
+    `compute_viscous_residual_fr` 的 `mu_t_field` 参数——必须已经是
     compact 索引空间（local+halo，"棱柱在前"排列，与本函数内部的
     `U_compact` 同一个索引空间），由调用方（`distributed_compute_
     turbulence_source_and_viscosity`）在 halo 交换 k/omega 后算出。
@@ -291,7 +291,8 @@ def distributed_compute_viscous_residual(
         residual: (n_local_cells, n_sps, 5) local cells 的粘性残差
     """
     import types
-    from autoflowcfd.core.fr_residual.viscous import compute_viscous_residual as compute_viscous_residual_ldg
+    from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
+    from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL
     from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
 
     # 1. Halo 交换（原生排列，local 在前 halo 在后）
@@ -305,13 +306,10 @@ def distributed_compute_viscous_residual(
     # distributed_compute_inviscid_residual 同一处理，见该函数文档。
     U_compact = U_extended[dist_fc.perm]
 
-    # 4. 调用现有残差函数（state_Q 参数只为兼容旧签名保留，函数内部
-    # 从 state_U 自行重新计算 primitive 变量，见该函数文档；
-    # flat_face_override=dist_fc.base_flat 避免对 adapter 重新调用
+    # 4. 与单机同一个残差函数（flat_face_override=dist_fc.base_flat 避免对 adapter 重新调用
     # get_flat_face_geometry，见该参数文档）
-    Q_compact = conserved_to_primitive(U_compact[..., :5])
-    residual_compact = compute_viscous_residual_ldg(
-        U_compact, Q_compact, ops, adapter, mu=mu,
+    residual_compact = compute_viscous_residual_fr(
+        U_compact, adapter, ops, mu, PRANDTL,
         mu_t_field=mu_t_field_compact,
         boundary_ghost_provider=boundary_ghost_provider,
         flat_face_override=dist_fc.base_flat,
@@ -330,7 +328,7 @@ def distributed_compute_viscous_residual(
         facade = types.SimpleNamespace(
             wmles_model=wmles_model, mesh=adapter, ops=ops,
             wall_distance=wall_distance_compact,
-            state=types.SimpleNamespace(U=U_compact, Q=Q_compact),
+            state=types.SimpleNamespace(U=U_compact, Q=conserved_to_primitive(U_compact[..., :5])),
             boundary_ghost_provider=boundary_ghost_provider,
         )
         from autoflowcfd.core.utils.solver_helpers import compute_wmles_wall_stress_correction

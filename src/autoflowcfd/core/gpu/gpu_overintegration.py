@@ -40,7 +40,7 @@ def lifted_divergence_gpu(mesh_data, ops_data):
 
 
 def contract_lifted_divergence_gpu(cp, K_all, combo, X):
-    """GPU 版 `volume_contract.contract_lifted_divergence`：`out[c] = K_all[combo[c]] : X[c]`。
+    """`out[c] = K_all[combo[c]] : X[c]`（CPU 在逐单元融合核里做同一收缩，`fr_residual/inviscid.py::inviscid_volume_divergence`）。
 
     GPU 上按组合分组、每组一次批量收缩（组合数四面体 81、棱柱 9，组内是连续 gemm）；只有
     一组时不做 gather。

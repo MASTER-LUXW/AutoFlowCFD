@@ -144,7 +144,8 @@ class TestNativeTetAxisClipFix:
         from autoflowcfd.core.fr_residual.inviscid import (
             primitive_to_conserved, conserved_to_primitive,
         )
-        from autoflowcfd.core.fr_residual.viscous import compute_viscous_residual
+        from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
+        from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL
         from autoflowcfd.core.gpu.residual.gpu_viscous import compute_viscous_residual_fr_gpu
 
         mesh = _build_synthetic_mixed_mesh(order, tet_basis_mode="native")
@@ -170,7 +171,7 @@ class TestNativeTetAxisClipFix:
         compute_inviscid_residual_fr_gpu(U, mesh, ops, mach_ref=0.2)
 
         mu_t_field = rng.uniform(0.0, 5e-5, size=(n_cells, n_sps))
-        r_cpu = compute_viscous_residual(U, conserved_to_primitive(U), ops, mesh, mu=1.8e-5, mu_t_field=mu_t_field)
+        r_cpu = compute_viscous_residual_fr(U, mesh, ops, 1.8e-5, PRANDTL, mu_t_field=mu_t_field)
         r_gpu = np.asarray(compute_viscous_residual_fr_gpu(U, mesh, ops, mu=1.8e-5, mu_t_field=mu_t_field))
 
         max_diff = np.max(np.abs(r_gpu - r_cpu))

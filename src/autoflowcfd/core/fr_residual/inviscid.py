@@ -22,7 +22,7 @@ AutoFlowCFD V2.0 - FR 无粘残差组装 (Tier-0 重建版, 对应 S-02/S-04)
 离散 GCL 的实际检验) 数值验证，见 tests/unit/test_fr_residual_inviscid.py。
 """
 
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
 import os
 
 import numpy as np
@@ -32,10 +32,9 @@ from autoflowcfd.core.fr_operators.kernels import (
     compute_ausm_up_flux,
     resolve_ausm_precond_mode,
 )
-from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_batch
+from autoflowcfd.core.fr_operators.flux_kernels import euler_physical_flux_point
 from autoflowcfd.core.fr_operators.volume_contract import (
-    contract_lifted_divergence, contract_shared_operator_1axis,
-    contravariant_flux_from_metric, get_overintegration_context,
+    cell_blocks, contract_local, contravariant_point, get_overintegration_context, lifted_segments,
 )
 
 GAMMA = 1.4
@@ -136,6 +135,22 @@ def ausm_up_flux_batch(Q_L: np.ndarray, Q_R: np.ndarray, normal: np.ndarray,
     return flux
 
 
+class MeanFlowPrimitives(NamedTuple):
+    """一次平均流残差求值里无粘与粘性两项共用的原始变量与边界幽灵态（`mean_flow_primitives`）。"""
+    Q: np.ndarray          # (n_cells, n_sps, 5)
+    Q_ghost: np.ndarray    # (n_faces, n_fp, 5)，只有边界面的行有意义
+
+
+def mean_flow_primitives(U: np.ndarray, flat, ghost_provider=None) -> MeanFlowPrimitives:
+    """`U` 上的原始变量与边界幽灵态，各算一次供无粘、粘性两项共用
+    （`FRSolver.compute_mean_flow_residual`）。两项此前各自从 `U` 重算这两样，结果逐位相同。"""
+    from autoflowcfd.core.fr_residual.inviscid_kernel import compute_boundary_ghost_states
+
+    Q = conserved_to_primitive(U[..., :5])
+    provider = ghost_provider if ghost_provider is not None else DefaultGhostProvider()
+    return MeanFlowPrimitives(Q, compute_boundary_ghost_states(flat, Q, provider))
+
+
 class DefaultGhostProvider:
     """默认的边界幽灵态提供者：零梯度外插（ghost = 内部外插态），
     仅用于尚未接入真实边界条件（BD-01，见 boundary/fr_weak_bc.py 的接入
@@ -165,6 +180,46 @@ def _compute_inviscid_residual_fv_p0(
     )
 
 
+@njit(cache=True, parallel=True)
+def _inviscid_volume_kernel(Q, lo, c2f, det_f, inv_f, K2, combo, out, n_blocks):
+    """段内单元 `lo + i`：`out[c] = K2[combo[i]] : adj(J) F(Q_fine)`（`inviscid_volume_divergence`）。"""
+    n = combo.shape[0]
+    n_fine = c2f.shape[0]
+    for b in prange(n_blocks):
+        q_f = np.empty((n_fine, 5))
+        f_t = np.empty((3 * n_fine, 5))
+        for i in range(b * n // n_blocks, (b + 1) * n // n_blocks):
+            c = lo + i
+            contract_local(c2f, Q[c], q_f)
+            for p in range(n_fine):
+                contravariant_point(det_f[i, p], inv_f[i, p], euler_physical_flux_point(q_f[p]),
+                                    f_t[3 * p:3 * p + 3])
+            contract_local(K2[combo[i]], f_t, out[c])
+
+
+def inviscid_volume_divergence(Q, oi):
+    """无粘体积项 `K F~`（参考空间、除 det 之前），`(n_cells, n_sps, 5)`；`oi` 为
+    `get_overintegration_context` 的结果。
+
+    强形式：`K = f2c·D_fine - Σ_面 lift·W·Tn` 一次收缩——体积散度的 L2 投影减去修正项的本侧通量（细层通量
+    多项式在面通量点上的法向迹），界面核只施加公共通量（离散守恒，`fr/face_flux_trace.py`）。`K` 按单元
+    三角形面的坍缩顶点槽位组合取（与界面核同一组通量点）。
+
+    **逐单元融合（2026-10-15）**：一个单元的整条链在块内局部工作数组里走完，细点数组不再落成块大小的
+    临时数组。此前按 32768 单元分块、每步各自分配（Q_fine / F_phys_fine / F_tilde_fine）：Windows 上新
+    分配 1 MB 以上的数组约 0.21 ms/MB 花在缺页上，是复用同一块内存的 10 倍以上；cube_demo 粗网格（28.6 万
+    单元）P2 一次残差求值的无粘体积项要分配约 4 GB。逐点公式与求和顺序取自批量核同一份内联定义
+    （`volume_contract.contract_local` / `contravariant_point`、`euler_physical_flux_point`），与分块版
+    逐位相同（`tests/unit/test_fused_overintegration.py`）。分块那一版本身是为了去掉全场细点数组（79 万
+    单元 P2 体积项峰值约 38 GB 的 OOM，2026-08-26）；逐单元执行同样不需要它们。
+    """
+    Q = np.ascontiguousarray(Q)
+    out = np.empty(Q.shape[:2] + (5,))
+    for lo, hi, c2f, det_f, inv_f, K2, combo in lifted_segments(oi):
+        _inviscid_volume_kernel(Q, lo, c2f, det_f, inv_f, K2, combo, out, cell_blocks(hi - lo))
+    return out
+
+
 def compute_inviscid_residual_fr(
     U: np.ndarray,
     mesh,
@@ -173,6 +228,7 @@ def compute_inviscid_residual_fr(
     mach_ref: float = 0.1,
     flat_face_override=None,
     precond_mode: Optional[int] = None,
+    primitives: Optional[MeanFlowPrimitives] = None,
 ) -> np.ndarray:
     """计算真实面耦合的 FR 无粘残差 dU/dt（物理空间，已除以 det(J)）。
 
@@ -200,6 +256,8 @@ def compute_inviscid_residual_fr(
             以实参形式传进 njit kernel：numba 的 `cache=True` 会把 njit
             里读到的模块级全局量冻结成编译期常量（2026-09-16 已真实踩过
             一次，见 resolve_ausm_precond_mode 文档）。
+        primitives: 与粘性项共用的原始变量与边界幽灵态（`mean_flow_primitives`，必须由同一个 `U`、同一个
+            幽灵态提供者算出）；None 时在这里算。P0 走有限体积路径，不读它。
 
     Returns:
         residual: 形状 (n_cells, n_sps, 5)
@@ -225,7 +283,7 @@ def compute_inviscid_residual_fr(
 
     n_cells = mesh.n_cells
     n_sps = mesh.n_sps_per_cell
-    Q = conserved_to_primitive(U[..., :5])  # (n_cells, n_sps, 5)
+    Q = conserved_to_primitive(U[..., :5]) if primitives is None else primitives.Q  # (n_cells, n_sps, 5)
 
     det_jacs = mesh.jacobians["det_jacs"].reshape(n_cells, n_sps)
 
@@ -250,60 +308,8 @@ def compute_inviscid_residual_fr(
         # ④ 把结果插值限制回 coarse SPs。见
         # fr/collapsed_basis.py::build_overintegration_operators 文档。
 
-        # 按单元分块执行整条 插值→物理通量→逆变通量→散度 链（B-12 P2
-        # OOM 修复，2026-08-26）：原实现把四个全场临时数组（adj_j_fine
-        # ~3.4GiB、Q_fine ~1.9GiB、F_phys_fine ~5.7GiB、F_tilde_fine ~5.7GiB，
-        # 79万单元×64过积分点）先后全量分配，峰值时刻三者共存——仪表化
-        # 实测（_tmp_review/diag_p2_13.py，31万单元网格）体积项链路自身峰值
-        # RSS≈16.6GB，按单元数比例外推 79万单元生产网格峰值≈38GB，超过本机
-        # commit limit 43GB 减去系统其余进程占用后的剩余额度，P1→P2 切换后
-        # 首次残差求值在 F_phys_fine 处分配失败崩溃（三次独立复现）。这条链上
-        # 每一步都是 cell 局部的（批量矩阵乘按 cell 广播、numba kernel 按点纯
-        # gather，cell 之间零数据依赖），把 cell 轴切成块、块内走完五步再进下一
-        # 块，同一块内的每步计算形状/求和顺序与全场版逐位一致，数值结果不变；
-        # 峰值降为常驻的 div_comp_fine（~1.9GiB）+ 块内瞬态（32768 单元块约
-        # 0.7GiB）。prism/tet 两段分开切块是因为两者用不同的算子，且单元存储
-        # 本来就是 prism 在前 tet 在后，块不会跨类型。
-        # 内存优化（2026-09-14，P2 OOM 攻关）：此前这里先物化一份**全场**的
-        # 细点散度 `div_comp_fine`（(n_cells,n_fine,5)，79 万单元 P2/n_fine=64
-        # 下约 2.0GiB），等两段分块循环全部跑完之后再整体做一次"细->粗"限制
-        # （restrict_f2c）。但限制算子同样是**逐单元**的（只在单元自己的
-        # fine 点与 SPs 之间收缩，单元之间零耦合），完全没必要等全场算完：
-        # 现在在块内算完细点散度就立刻限制、直接写进粗网格的 `div_comp`，
-        # 于是细点数组只需要块大小（32768 单元约 84MiB），全场那份 2.0GiB
-        # 彻底消失。分块不改变任何逐单元的计算顺序/形状，结果与全场版
-        # 逐位相同。
-        div_comp = np.zeros((n_cells, n_sps, 5))
-        _OVERINT_CHUNK_CELLS = 32768
-        # 度量按**段内局部**索引切（`i0 = c0 - seg_lo`）——用全局 c0 去切
-        # 段内数组会静默取到错误的单元。
-        for (seg_lo, seg_hi, n_fine, det_seg, inv_seg,
-             op_c2f, _D_fine, _f2c_interp), (K_all, combo_seg) in zip(_oi["segs"], _oi["lifted_div"]):
-            for c0 in range(seg_lo, seg_hi, _OVERINT_CHUNK_CELLS):
-                c1 = min(c0 + _OVERINT_CHUNK_CELLS, seg_hi)
-                i0, i1 = c0 - seg_lo, c1 - seg_lo
-                # 段内度量是带偏移的非连续视图，numba kernel 要连续输入
-                # 度量视图直接传给逐元素读取的核（四面体段是步长 0 的广播，不物化）
-                det_chunk = det_seg[i0:i1]
-                inv_chunk = inv_seg[i0:i1]
-                Q_fine = contract_shared_operator_1axis(op_c2f, Q[c0:c1])
-                F_phys_fine = euler_physical_flux_batch(
-                    Q_fine.reshape(-1, 5)
-                ).reshape(c1 - c0, n_fine, 3, 5)
-                del Q_fine  # 块内用完即弃，下一轮迭代变量重新绑定
-                # 度量×通量融合 kernel（性能优化 2026-09-13，见
-                # volume_contract.py::contravariant_flux_from_metric
-                # 文档：原 `np.matmul(adj_j_fine, F_phys_fine)` 是逐点
-                # 3x3@3x5 批量微型 gemm，不随核数并行）。逐位等价。
-                F_tilde_fine = contravariant_flux_from_metric(det_chunk, inv_chunk, F_phys_fine)
-                del F_phys_fine
-                # 强形式：`K = f2c·D_fine - Σ_面 lift·W·Tn` 一次收缩——体积散度的 L2 投影
-                # 减去修正项的本侧通量（细层通量多项式在面通量点上的法向迹），界面核
-                # 只施加公共通量（离散守恒，见 fr/face_flux_trace.py）。K 按单元三角形面的
-                # 坍缩顶点槽位组合取（与界面核同一组通量点）。块内收缩、块内
-                # 释放，不再需要全场 (n_cells,n_fine,5) 的细点数组。
-                div_comp[c0:c1] = contract_lifted_divergence(K_all, combo_seg[i0:i1], F_tilde_fine)
-                del F_tilde_fine
+        # 逐单元执行整条 插值→物理通量→逆变通量→体积算子 K 链（`inviscid_volume_divergence`）。
+        div_comp = inviscid_volume_divergence(Q, _oi)
     else:
         # order>=1 时 `build_order_geometry` 恒构造细点度量与过积分算子；没有它们说明
         # 网格/算子构造不完整。旧版这里有一条"直接在解点上微分"的兜底分支，它的
@@ -311,9 +317,10 @@ def compute_inviscid_residual_fr(
         raise RuntimeError(
             "P>=1 无粘残差需要过积分细点度量（mesh.jacobians_fine）与 ops.overint_* 算子，"
             "这里缺失：网格或算子是按不完整的阶数几何构造的")
-    residual = -div_comp / det_jacs[..., None]  # 物理空间残差（体积项部分）
-    # div_comp（~854MiB）用完即弃，理由同上（over-integration 分支/朴素
-    # 分支的 div_comp 是同一个局部变量名，del 同样安全，之后不再被引用）。
+    # 物理空间残差（体积项部分）`-div_comp / det`，原地算（取负与除法都不改变舍入，与 `-a / b` 逐位相同）：
+    # 每个全尺寸临时数组在 cube_demo 粗网格（28.6 万单元）P2 上是 0.31 GB、新分配约 0.07 s 缺页
+    residual = np.divide(div_comp, det_jacs[..., None], out=div_comp)
+    np.negative(residual, out=residual)
     del div_comp
 
     # --- 界面项：numba 逐点标量 kernel（性能优化，替代原纯 Python
@@ -348,7 +355,7 @@ def compute_inviscid_residual_fr(
     # gpu_inviscid.py::compute_inviscid_residual_fr_gpu 的 flat_face_cpu
     # 参数同一个道理）。单机路径不传，行为完全不变。
     flat = flat_face_override if flat_face_override is not None else get_flat_face_geometry(mesh, ops)
-    Q_ghost = compute_boundary_ghost_states(flat, Q, ghost_provider)
+    Q_ghost = compute_boundary_ghost_states(flat, Q, ghost_provider) if primitives is None else primitives.Q_ghost
 
     # 图着色方案：同色面无 owner_cell 冲突，直接写入共享 buffer
     # 内存从 O(n_threads * n_cells * n_sps * 5) 降至 O(n_cells * n_sps * 5)
@@ -402,7 +409,8 @@ def compute_inviscid_residual_fr(
             flat.ref_area_weight,
             flat.boundary_extrap_native, flat.lift_native,
         )
-    residual = residual + correction
+    residual += correction
+    del correction
 
     # 机制3（`suppress_residual_outliers`，按 (cell,SP,变量) 粒度检测残差
     # 量级异常并清零）**已于 2026-09-19 删除**。删除依据是真实网格上的

@@ -21,7 +21,6 @@ from autoflowcfd.core.fr_operators.volume_contract import (
     contract_shared_operator_1axis,
     contract_shared_operator_2axis,
     contravariant_flux_from_metric,
-    grad_computational_to_physical,
 )
 from autoflowcfd.core.turbulence.sst import compute_strain_and_vorticity_magnitude
 from autoflowcfd.core.turbulence.transport_kernel import scalar_convection_volume_kernel
@@ -111,24 +110,6 @@ class TestContravariantFluxFromMetric:
         F_phys = np.ones((5, 8, 3, 5))
         got = contravariant_flux_from_metric(det, inv, F_phys)
         assert np.all(got == 0.0)
-
-
-class TestGradComputationalToPhysical:
-    """`grad_computational_to_physical`：原实现
-    `np.matmul(np.swapaxes(grad_comp,-1,-2), inv_jacs)` 的左操作数是非连续
-    转置视图，numpy 必须先物化一份连续副本再做逐点 (V,3)@(3,3) 微型 gemm。"""
-
-    @pytest.mark.parametrize("n_sps", [1, 8, 27])
-    @pytest.mark.parametrize("n_vars", [1, 3, 5])
-    def test_matches_swapaxes_matmul(self, n_sps, n_vars):
-        rng = np.random.default_rng(4)
-        grad_comp = rng.standard_normal((31, n_sps, 3, n_vars))
-        inv_jacs = rng.standard_normal((31, n_sps, 3, 3))
-        ref = np.matmul(np.swapaxes(grad_comp, -1, -2), inv_jacs)
-        got = grad_computational_to_physical(grad_comp, inv_jacs)
-        assert got.shape == ref.shape
-        # 对 m 的求和顺序（m=0,1,2）与 np.matmul 一致 -> 逐位相同
-        assert np.array_equal(ref, got)
 
 
 class TestStrainVorticityMagnitude:

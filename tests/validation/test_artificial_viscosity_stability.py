@@ -61,8 +61,8 @@ def test_couette_stable_from_wrong_ic_with_artificial_viscosity():
 
 
 def test_tgv_stable_and_still_dissipative_with_artificial_viscosity():
-    """复用 test_tgv.py 的真实 fixture（含针对 TGV 特定 MU 的 monkeypatch
-    与动态 CFL 步长），启用人工粘性后：(a) 150 步全程数值稳定；(b) 动能
+    """复用 test_tgv.py 的真实 fixture（TGV 特定的 MU 经 `mu_molecular` 传入，
+    动态 CFL 步长），启用人工粘性后：(a) 150 步全程数值稳定；(b) 动能
     衰减仍与**解析耗散率**同量级、且不增长。
 
     ## 判据换过一次（2026-09-19）

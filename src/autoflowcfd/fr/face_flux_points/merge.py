@@ -350,9 +350,13 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         )
         logger.info("Multi-source numba kernel completed.")
 
-        # 将 kernel 输出拷贝到紧凑 extra 列表
-        _nb_extra_cells = face_conn.neighbor_cell[_multi_nb_faces].astype(np.int64) if len(_multi_nb_faces) > 0 else np.empty(0, dtype=np.int64)
-        _ow_extra_cells = face_conn.owner_cell[_multi_ow_faces].astype(np.int64) if len(_multi_ow_faces) > 0 else np.empty(0, dtype=np.int64)
+        # 次源单元 = 次源插值矩阵构造时用的那个单元（另一条子面的跨单元邻居 `_ms_*_sec_cell`）。2026-10-15
+        # 之前这里记的是面 f 自己的邻居：f 是分组首条子面，于是次源单元与主源相同，另一半通量点用 A 单元的
+        # 解点值配 B 单元的插值权重（两侧公共通量不相等、离散不守恒）。共形的棱柱-棱柱四边形面两条子面邻居
+        # 相同，看不出来；棱柱四边形侧面挨着两个四面体时错（cube_demo 粗网格 297 处，
+        # tests/unit/test_prism_quad_two_tet_sources.py）。混合分组没有次源（src1_idx 保持 -1），值不被读取。
+        _nb_extra_cells = _ms_nb_sec_cell.astype(np.int64)
+        _ow_extra_cells = _ms_ow_sec_cell.astype(np.int64)
         # 更新 src1_idx（混合分组无次源，保持 -1；另半区由残差 kernel 的
         # mixed_{nb,ow}_partner/mask 分支逐 FP 取边界幽灵态）
         for i, f in enumerate(_multi_nb_faces):

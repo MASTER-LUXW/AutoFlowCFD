@@ -14,11 +14,14 @@ import numpy as np
 from autoflowcfd.core.fr_operators.gradients import (
     compute_physical_scalar_gradient,
 )
+from numba import njit, prange
+
 from autoflowcfd.core.fr_operators.volume_contract import (
-    OVERINT_CHUNK_CELLS,
-    contract_shared_operator_1axis,
-    contract_shared_operator_2axis,
+    cell_blocks,
+    contract_local,
     contravariant_flux_from_metric,
+    contravariant_point,
+    fine_segments,
     get_overintegration_context,
 )
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
@@ -27,7 +30,7 @@ from autoflowcfd.core.turbulence.transport_kernel import (
 )
 
 from autoflowcfd.core.fr_operators.flux_kernels import resolve_viscous_ip_constant
-from autoflowcfd.core.fr_operators.flux_kernels.viscous import smooth_nonnegative_array
+from autoflowcfd.core.fr_operators.flux_kernels.viscous import smooth_nonnegative
 
 from .face_frames import diffusion_face_jumps_kernel
 from .faces import (
@@ -35,6 +38,33 @@ from .faces import (
     boundary_diffusion_targets,
 )
 from .convection import resolve_turb_overintegration
+
+
+@njit(cache=True, parallel=True)
+def _diffusion_volume_kernel(gamma, grad_phi, gamma_band, lo, c2f, det_f, inv_f, D2, f2c, out, n_blocks):
+    """段内单元 `lo + i`：`out[c, :, 0] = f2c D_fine (adj(J) Gamma grad phi)`，细点 `Gamma` 取 `smooth_nonnegative`。"""
+    n = det_f.shape[0]
+    n_fine, n_sps = c2f.shape
+    for b in prange(n_blocks):
+        g_c = np.empty((n_sps, 1))
+        g_f = np.empty((n_fine, 1))
+        grad_f = np.empty((n_fine, 3))
+        f_p = np.empty((3, 1))
+        f_t = np.empty((3 * n_fine, 1))
+        div_f = np.empty((n_fine, 1))
+        for i in range(b * n // n_blocks, (b + 1) * n // n_blocks):
+            c = lo + i
+            for s in range(n_sps):
+                g_c[s, 0] = gamma[c, s]
+            contract_local(c2f, g_c, g_f)
+            contract_local(c2f, grad_phi[c], grad_f)
+            for p in range(n_fine):
+                gam = smooth_nonnegative(g_f[p, 0], gamma_band)
+                for j in range(3):
+                    f_p[j, 0] = gam * grad_f[p, j]
+                contravariant_point(det_f[i, p], inv_f[i, p], f_p, f_t[3 * p:3 * p + 3])
+            contract_local(D2, f_t, div_f)
+            contract_local(f2c, div_f, out[c])
 
 
 def _scalar_diffusion_volume_overintegrated(gamma_field, grad_phi, oi, n_sps, gamma_band):
@@ -76,33 +106,14 @@ def _scalar_diffusion_volume_overintegrated(gamma_field, grad_phi, oi, n_sps, ga
     有数据支撑的结论，不是待办项**——若将来工作阶数或精度诉求变化需要
     重新评估，上面的数字与代价分析可以直接复用。
     """
-    n_cells = gamma_field.shape[0]
-    # 每段自带自己的 n_fine 与已切好的细点度量（2026-09-17）：native
-    # 四面体的过积分细网格轴不再填充到棱柱的 (oo+1)^3 宽度，两段的
-    # n_fine 不同了。度量按**段内局部**索引切（`i0 = c0 - seg_lo`）——
-    # 用全局 c0 去切段内数组会静默取到错误的单元。
-    div_G = np.empty((n_cells, n_sps))
-    for (seg_lo, seg_hi, n_fine, det_seg, inv_seg,
-         op_c2f, op_D_fine, op_f2c) in oi["segs"]:
-        for c0 in range(seg_lo, seg_hi, OVERINT_CHUNK_CELLS):
-            c1 = min(c0 + OVERINT_CHUNK_CELLS, seg_hi)
-            i0, i1 = c0 - seg_lo, c1 - seg_lo
-            # 细点上插值出的扩散系数换成取用值（单元角点处是外插，可以为负；见
-            # `face_frames.py::diffusion_jump_point`）
-            gam_f = smooth_nonnegative_array(contract_shared_operator_1axis(
-                op_c2f, np.ascontiguousarray(gamma_field[c0:c1, :, None])), gamma_band)
-            grad_f = contract_shared_operator_1axis(
-                op_c2f, np.ascontiguousarray(grad_phi[c0:c1]))        # (n,n_fine,3)
-            G_phys_f = (gam_f * grad_f)[..., None]                    # (n,n_fine,3,1)
-            del gam_f, grad_f
-            G_tilde_f = contravariant_flux_from_metric(
-                det_seg[i0:i1], inv_seg[i0:i1], G_phys_f)  # 度量视图直接传（见 contravariant_flux_from_metric）
-            del G_phys_f
-            div_f = contract_shared_operator_2axis(op_D_fine, G_tilde_f)
-            del G_tilde_f
-            div_G[c0:c1] = contract_shared_operator_1axis(op_f2c, div_f)[..., 0]
-            del div_f
-    return div_G
+    out = np.empty((gamma_field.shape[0], n_sps, 1))
+    # 逐单元在块内局部工作数组里走完（理由见 `fr_residual/inviscid.py::inviscid_volume_divergence` 文档
+    # "逐单元融合"）；细点上插值出的扩散系数换成取用值（单元角点处是外插，可以为负；见
+    # `face_frames.py::diffusion_jump_point`）
+    for lo, hi, c2f, det_f, inv_f, D2, f2c in fine_segments(oi):
+        _diffusion_volume_kernel(gamma_field, grad_phi, float(gamma_band), lo, c2f, det_f, inv_f, D2, f2c, out,
+                                 cell_blocks(hi - lo))
+    return out[:, :, 0]
 
 
 def compute_scalar_diffusion_residual(

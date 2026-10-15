@@ -88,7 +88,7 @@ class MatrixFreeJacobian:
     """
 
     __slots__ = ("_residual", "_u0", "_r0", "_scales_flat", "_inv_scales_flat",
-                 "_u0_rms_scaled", "_red", "n_matvec")
+                 "_u0_rms_scaled", "_red", "n_matvec", "_trial_buf", "_out_buf")
 
     def __init__(self, residual: Callable, u0_flat, r0_flat, scales: np.ndarray,
                  red: LocalReductions = None):
@@ -125,6 +125,11 @@ class MatrixFreeJacobian:
         # ||U~||_rms，只依赖基态，整个 Krylov 求解期间是常数
         self._u0_rms_scaled = red.rms(u0_flat * self._inv_scales_flat)
         self.n_matvec = 0
+        # 每次 `matvec` 的两个全尺寸工作数组（试探态——求 RMS 时先暂放无量纲化的 v——与输出），整个 Krylov
+        # 求解期间复用。每次新分配时 P2 粗网格（28.6 万单元）上一次 `matvec` 在残差求值之外要花约 0.4 s 在
+        # 分配与缺页上。
+        self._trial_buf = xp.empty_like(u0_flat)
+        self._out_buf = xp.empty_like(u0_flat)
 
     def matvec(self, v_flat: np.ndarray) -> np.ndarray:
         """`J v`，形状与 `v_flat` 相同 `(N, n_var)`。
@@ -132,14 +137,23 @@ class MatrixFreeJacobian:
         `v` 按**物理**量纲给出（与 `U` 同量纲），内部自行无量纲化。
         `v` 为零向量时直接返回零（GMRES 的初始/退化情形），不去做一次
         无意义的残差求值。
+
+        **返回的数组是本对象持有的工作数组，下一次调用会改写它**：调用方要立即使用（`linear_solve.py`
+        的 `_apply_A` 即如此），需要保留时自行复制。残差函数在求值结束后不得持有输入数组（试探态同样
+        被复用）。运算顺序与 `u0 + eps*v`、`(R - R0)/eps` 相同，结果逐位一致。
         """
         xp = self._red.xp
         v_flat = xp.ascontiguousarray(v_flat, dtype=xp.float64)
-        v_rms = self._red.rms(v_flat * self._inv_scales_flat)
+        xp.multiply(v_flat, self._inv_scales_flat, out=self._trial_buf)
+        v_rms = self._red.rms(self._trial_buf)
         if v_rms == 0.0:
             return xp.zeros_like(v_flat)
 
         eps = _SQRT_EPS * (1.0 + self._u0_rms_scaled) / v_rms
-        r_pert = self._residual(self._u0 + eps * v_flat)
+        xp.multiply(v_flat, eps, out=self._trial_buf)
+        xp.add(self._u0, self._trial_buf, out=self._trial_buf)
+        r_pert = self._residual(self._trial_buf)
         self.n_matvec += 1
-        return (xp.asarray(r_pert, dtype=xp.float64) - self._r0) / eps
+        xp.subtract(xp.asarray(r_pert, dtype=xp.float64), self._r0, out=self._out_buf)
+        xp.divide(self._out_buf, eps, out=self._out_buf)
+        return self._out_buf

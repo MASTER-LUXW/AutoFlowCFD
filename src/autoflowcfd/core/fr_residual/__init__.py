@@ -9,7 +9,7 @@ from autoflowcfd.core.fr_residual.inviscid import (
     conserved_to_primitive,
     DefaultGhostProvider,
 )
-from autoflowcfd.core.fr_residual.viscous import compute_viscous_residual_fr
+from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
 from autoflowcfd.core.fr_residual.viscous_flux import viscous_physical_flux
 
 __all__ = [

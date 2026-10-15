@@ -80,22 +80,28 @@ def compute_adj_j(det_jacs: np.ndarray, inv_jacs: np.ndarray) -> np.ndarray:
     return out
 
 
+@njit(cache=True, inline="always")
+def contravariant_point(d, inv, F, out) -> None:
+    """单点逆变通量 `out[i, v] = sum_j (d * inv[i, j]) * F[j, v]`（`inv`: (3, 3)，`F`/`out`: (3, V)）。
+
+    批量核 `_contravariant_flux_kernel` 与逐单元融合核（`fused_volume/`）共用这一个定义，乘加顺序因此
+    处处相同（融合前后逐位一致的前提）。
+    """
+    for i in range(3):
+        a0 = d * inv[i, 0]
+        a1 = d * inv[i, 1]
+        a2 = d * inv[i, 2]
+        for v in range(F.shape[1]):
+            out[i, v] = a0 * F[0, v] + a1 * F[1, v] + a2 * F[2, v]
+
+
 @njit(cache=True, parallel=True)
 def _contravariant_flux_kernel(det_jacs, inv_jacs, F_phys, out) -> None:
     """`out[c,p,i,v] = det_jacs[c,p] * sum_j inv_jacs[c,p,i,j] * F_phys[c,p,j,v]`。"""
     C, P = det_jacs.shape
-    V = F_phys.shape[3]
     for c in prange(C):
         for p in range(P):
-            d = det_jacs[c, p]
-            for i in range(3):
-                a0 = d * inv_jacs[c, p, i, 0]
-                a1 = d * inv_jacs[c, p, i, 1]
-                a2 = d * inv_jacs[c, p, i, 2]
-                for v in range(V):
-                    out[c, p, i, v] = (a0 * F_phys[c, p, 0, v]
-                                       + a1 * F_phys[c, p, 1, v]
-                                       + a2 * F_phys[c, p, 2, v])
+            contravariant_point(det_jacs[c, p], inv_jacs[c, p], F_phys[c, p], out[c, p])
 
 
 def contravariant_flux_from_metric(det_jacs: np.ndarray, inv_jacs: np.ndarray,
@@ -137,48 +143,16 @@ def contravariant_flux_from_metric(det_jacs: np.ndarray, inv_jacs: np.ndarray,
     return out
 
 
-@njit(cache=True, parallel=True)
-def _grad_to_physical_kernel(grad_comp, inv_jacs, out) -> None:
-    """`out[c,s,v,n] = sum_m grad_comp[c,s,m,v] * inv_jacs[c,s,m,n]`。"""
-    C, S, _, V = grad_comp.shape
-    for c in prange(C):
-        for s in range(S):
-            for v in range(V):
-                g0 = grad_comp[c, s, 0, v]
-                g1 = grad_comp[c, s, 1, v]
-                g2 = grad_comp[c, s, 2, v]
-                for n in range(3):
-                    out[c, s, v, n] = (g0 * inv_jacs[c, s, 0, n]
-                                       + g1 * inv_jacs[c, s, 1, n]
-                                       + g2 * inv_jacs[c, s, 2, n])
-
-
-def grad_computational_to_physical(grad_comp: np.ndarray, inv_jacs: np.ndarray) -> np.ndarray:
-    """等价于 `np.matmul(np.swapaxes(grad_comp, -1, -2), inv_jacs)`——把
-    计算空间梯度按链式法则转到物理空间。
-
-    Args:
-        grad_comp: (C, S, 3, V) 计算空间梯度（3 是计算坐标方向 m）
-        inv_jacs: (C, S, 3, 3) 逆 Jacobian（inv_jacs[c,s,m,n]）
-
-    Returns:
-        grad_phys: (C, S, V, 3)
-
-    性能优化（2026-09-13，与本模块其余两处同一次真实剖析）：原
-    `np.matmul(np.swapaxes(grad_comp,-1,-2), inv_jacs)` 的左操作数是
-    **非连续的转置视图**，numpy 为了做批量 gemm 必须先物化一份连续副本
-    （79万单元 P1、V=5 时约 760MiB），随后又是逐 (cell,SP) 的
-    (V,3)@(3,3) 微型 gemm——单次仅 45 FLOPs、630 万次，纯开销主导，同样
-    不随 CPU 核数并行。融合成一个 prange kernel 后既不需要转置副本、也
-    不再有 gemm 调用开销。对 m 的求和顺序（m=0,1,2）与 `np.matmul` 一致，
-    结果逐位相同（随机张量实测最大误差 0.0）。
-    """
-    g_c = np.ascontiguousarray(grad_comp)
-    inv_c = np.ascontiguousarray(inv_jacs)
-    C, S, _, V = g_c.shape
-    out = np.empty((C, S, V, 3))
-    _grad_to_physical_kernel(g_c, inv_c, out)
-    return out
+@njit(cache=True, inline="always")
+def grad_to_physical_point(g, inv, out) -> None:
+    """单点链式法则 `out[v, n] = sum_m g[m, v] * inv[m, n]`（`g`: (3, V)，`inv`: (3, 3)，`out`: (V, 3)）。
+    批量核与逐单元融合梯度（`gradients.py`）共用。"""
+    for v in range(g.shape[1]):
+        g0 = g[0, v]
+        g1 = g[1, v]
+        g2 = g[2, v]
+        for n in range(3):
+            out[v, n] = g0 * inv[0, n] + g1 * inv[1, n] + g2 * inv[2, n]
 
 
 @njit(cache=True, parallel=True)
@@ -210,41 +184,44 @@ def _contract_shared_kernel(D_flat: np.ndarray, X_flat: np.ndarray, out: np.ndar
     两条理由本身成立，**不是**那次失败的修复手段。
     """
     for c in prange(X_flat.shape[0]):
-        _contract_one_cell(D_flat, X_flat, out, c)
-
-
-@njit(cache=True, parallel=True)
-def _contract_per_cell_operator_kernel(D_all: np.ndarray, combo: np.ndarray, X_flat: np.ndarray,
-                                       out: np.ndarray) -> None:
-    """`out[c,f,v] = sum_k D_all[combo[c],f,k] * X_flat[c,k,v]`：逐单元从一组算子里取自己的
-    那份（无粘体积算子按三角形面槽位组合各一份，`fr/face_flux_trace.py`）。与共享算子核
-    同一个单元内累加（逐位相同的求和顺序），不做任何 gather。"""
-    for c in prange(X_flat.shape[0]):
-        _contract_one_cell(D_all[combo[c]], X_flat, out, c)
+        contract_local(D_flat, X_flat[c], out[c])
 
 
 @njit(cache=True, inline="always")
-def _contract_one_cell(D_flat, X_flat, out, c) -> None:
-    """单元 `c` 的 `out[c,f,v] = sum_k D_flat[f,k] * X_flat[c,k,v]`（4 路累加器，见
-    `_contract_shared_kernel` 文档）。"""
-    K = X_flat.shape[1]
-    V = X_flat.shape[2]
+def contract_local(D, X, out) -> None:
+    """`out[f, v] = sum_k D[f, k] * X[k, v]`（`X`: (K, V)），4 路累加器（见 `_contract_shared_kernel` 文档）。
+
+    共享算子收缩、逐单元算子收缩与逐单元融合核（`fused_volume/`、`gradients.py`）都经过这一个定义，求和
+    顺序处处相同。`X` 可以是非连续视图（逐元素读取）。
+    """
+    K = X.shape[0]
+    V = X.shape[1]
     K4 = (K // 4) * 4
-    for f in range(D_flat.shape[0]):
+    for f in range(D.shape[0]):
         for v in range(V):
             s0 = 0.0
             s1 = 0.0
             s2 = 0.0
             s3 = 0.0
             for k in range(0, K4, 4):
-                s0 += D_flat[f, k] * X_flat[c, k, v]
-                s1 += D_flat[f, k + 1] * X_flat[c, k + 1, v]
-                s2 += D_flat[f, k + 2] * X_flat[c, k + 2, v]
-                s3 += D_flat[f, k + 3] * X_flat[c, k + 3, v]
+                s0 += D[f, k] * X[k, v]
+                s1 += D[f, k + 1] * X[k + 1, v]
+                s2 += D[f, k + 2] * X[k + 2, v]
+                s3 += D[f, k + 3] * X[k + 3, v]
             tail = 0.0
             for k in range(K4, K):
-                tail += D_flat[f, k] * X_flat[c, k, v]
-            out[c, f, v] = (s0 + s1) + (s2 + s3) + tail
+                tail += D[f, k] * X[k, v]
+            out[f, v] = (s0 + s1) + (s2 + s3) + tail
+
+
+def cell_blocks(n_cells: int) -> int:
+    """逐单元融合核的并行块数：每块按单元区间顺序处理、块内只分配一次局部工作数组（不随单元数分配）。
+
+    取线程数的 8 倍以平衡单元间工作量差异（混合面、不同组合编号的算子都在同一段里），不超过单元数。
+    """
+    import numba
+
+    return max(1, min(int(n_cells), 8 * int(numba.get_num_threads())))
 
 
 def _contract_shared(D_flat: np.ndarray, X_flat: np.ndarray) -> np.ndarray:
@@ -302,33 +279,25 @@ def contract_shared_operator_2axis(D: np.ndarray, X: np.ndarray) -> np.ndarray:
     # J,M 相邻，合并成 K 轴是 no-copy view（小算子 D 同理）。
     return _contract_shared(D.reshape(F, J * M), X.reshape(C, J * M, V))
 
-def contract_lifted_divergence(K_all: np.ndarray, combo: np.ndarray, X: np.ndarray) -> np.ndarray:
-    """逐单元按槽位组合取无粘体积算子的收缩：`out[c] = K_all[combo[c]] : X[c]`。
-
-    `K` 按三角形面坍缩顶点槽位组合各存一份（`fr/face_flux_trace.py`）。按组合分组再做共享
-    收缩要 gather/scatter 细点通量，plate_demo P1 上无粘残差因此慢 32%；这里在共享收缩的
-    同一个按单元并行核里直接取 `K_all[combo[c]]`，开销与单个共享算子相同。
-
-    Args:
-        K_all: `(n_combo, F, J, M)`
-        combo: `(C,)` 逐单元组合编号
-        X: `(C, J, M, V)`
-
-    Returns:
-        `(C, F, V)`
-    """
-    n_combo, F, J, M = K_all.shape
-    C, _, _, V = X.shape
-    X_c = np.ascontiguousarray(X).reshape(C, J * M, V)
-    out = np.empty((C, F, V))
-    _contract_per_cell_operator_kernel(np.ascontiguousarray(K_all).reshape(n_combo, F, J * M),
-                                       np.ascontiguousarray(combo, dtype=np.int64), X_c, out)
-    return out
+def fine_segments(oi):
+    """过积分上下文逐段给出 `(lo, hi, c2f, det_f, inv_f, D2, f2c)`（空段跳过），供逐单元融合核使用：
+    `D2` 是细点微分矩阵收缩轴合并后的 `(n_fine, 3 n_fine)`（行 `q`、列 `3 p + m`，与逆变通量按 `(p, m)`
+    展平的顺序一致），算子都已转连续；细点度量保持原样（四面体段是步长 0 的广播视图，核逐元素读取）。"""
+    for lo, hi, n_fine, det_f, inv_f, c2f, D_fine, f2c in oi["segs"]:
+        if hi > lo:
+            yield (lo, hi, np.ascontiguousarray(c2f), det_f, inv_f,
+                   np.ascontiguousarray(D_fine).reshape(n_fine, 3 * n_fine), np.ascontiguousarray(f2c))
 
 
-#: 过积分（去混叠）分块大小，与 `fr_residual/inviscid.py` 的强形式分支
-#: 同一取值，理由见该处 P2 OOM 修复说明。
-OVERINT_CHUNK_CELLS = 32768
+def lifted_segments(oi):
+    """平均流体积算子 `K` 的逐段 `(lo, hi, c2f, det_f, inv_f, K2, combo)`：`K2` 是 `K_all` 收缩轴合并后的
+    `(n_combo, n_sps, 3 n_fine)`，`combo` 为该段逐单元组合编号（`fr/face_flux_trace.py`）。"""
+    for (lo, hi, _n_fine, det_f, inv_f, c2f, _D, _f2c), (K_all, combo) in zip(oi["segs"], oi["lifted_div"]):
+        if hi > lo:
+            n_combo, n_out, n_fine, three = K_all.shape
+            yield (lo, hi, np.ascontiguousarray(c2f), det_f, inv_f,
+                   np.ascontiguousarray(K_all).reshape(n_combo, n_out, n_fine * three),
+                   np.ascontiguousarray(combo, dtype=np.int64))
 
 
 def get_overintegration_context(mesh, ops):
@@ -350,7 +319,7 @@ def get_overintegration_context(mesh, ops):
         细点度量；其中 `f2c` 是解点插值（湍流 k-omega 输运用）。`lifted_div`——与
         `segs` 逐段对应的 `(K_all, combo)`：平均流体积算子 `K` 按三角形面槽位组合各一份
         `(n_combo, n_sps, n_fine, 3)`（本侧通量迹已并入，`fr/face_flux_trace.py`）与该段
-        逐单元组合编号，收缩走 `contract_lifted_divergence`。
+        逐单元组合编号，收缩在融合核里做（`lifted_segments`）。
 
     ## 为什么每段各自带 n_fine（2026-09-17 改动）
 

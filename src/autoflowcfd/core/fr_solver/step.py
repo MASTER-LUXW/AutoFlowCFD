@@ -170,17 +170,9 @@ def step(solver, dt: float) -> float:
             saved_U = solver.state.U
             solver.state.U = U_trial
             try:
-                inv_res = solver.compute_inviscid_residual()
-                visc_res = solver.compute_viscous_residual(mu_t_turb=mu_t_step, nu_av=nu_av_step)
+                return solver.compute_mean_flow_residual(mu_t_turb=mu_t_step, nu_av=nu_av_step)
             finally:
                 solver.state.U = saved_U
-            # B-12 P2 OOM 修复第⑤级（2026-08-26）：原 `total = inv_res + visc_res`
-            # 再 `-total` 会先后多分配两个 (n_cells,n_sps,n_vars)≈1.2GB 的全场数组，
-            # 且峰值时三者共存；visc_res 是刚算出的新数组，对它原地加与原地取负严格等价，
-            # 峰值降 2.4GB。见 time_integration/base.py 的 del L0/L1 同类注释。
-            visc_res += inv_res
-            visc_res *= -1  # dU/dt → R(U)（TimeIntegrator 约定 dU/dt=-R）
-            return visc_res
 
         def mean_flow_residual(U_flat_trial: np.ndarray) -> np.ndarray:
             """供 TimeIntegrator 推进用的残差：启用低马赫数预处理时返回
@@ -191,7 +183,7 @@ def step(solver, dt: float) -> float:
             2026-08-24 那次失稳（完整推导/正确性论证见
             core/utils/preconditioning.py 模块末尾"伪时间预处理矩阵 Gamma"）。
             `solver.state.Q` 此刻正是 U_trial 对应的原始变量——
-            `compute_inviscid_residual` 入口的 `_update_primitives()` 是用
+            `compute_mean_flow_residual` 入口的 `_update_primitives()` 是用
             U_trial 算的（闭包里刚把 state.U 换成 U_trial），不是基态；
             这一点是这里能直接用它的前提。
             """

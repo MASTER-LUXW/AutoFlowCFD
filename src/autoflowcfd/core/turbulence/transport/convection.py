@@ -28,10 +28,10 @@ import os
 import numpy as np
 
 
+from numba import njit, prange
+
 from autoflowcfd.core.fr_operators.volume_contract import (
-    OVERINT_CHUNK_CELLS, contract_shared_operator_1axis,
-    contract_shared_operator_2axis, contravariant_flux_from_metric,
-    get_overintegration_context,
+    cell_blocks, contract_local, contravariant_point, fine_segments, get_overintegration_context,
 )
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from autoflowcfd.core.turbulence.transport_kernel import (
@@ -116,6 +116,36 @@ def resolve_turb_overintegration() -> str:
 
 
 
+@njit(cache=True, parallel=True)
+def _convection_volume_kernel(phi, rho, velocity, lo, c2f, det_f, inv_f, D2, f2c, out, n_blocks):
+    """段内单元 `lo + i`：`out[c, :, v] = f2c D_fine (adj(J) rho u phi_v)`（`phi` 的各列独立）。"""
+    n = det_f.shape[0]
+    n_fine, n_sps = c2f.shape
+    V = phi.shape[2]
+    for b in prange(n_blocks):
+        r_c = np.empty((n_sps, 1))
+        phi_f = np.empty((n_fine, V))
+        rho_f = np.empty((n_fine, 1))
+        u_f = np.empty((n_fine, 3))
+        f_p = np.empty((3, V))
+        f_t = np.empty((3 * n_fine, V))
+        div_f = np.empty((n_fine, V))
+        for i in range(b * n // n_blocks, (b + 1) * n // n_blocks):
+            c = lo + i
+            for s in range(n_sps):
+                r_c[s, 0] = rho[c, s]
+            contract_local(c2f, phi[c], phi_f)
+            contract_local(c2f, r_c, rho_f)
+            contract_local(c2f, velocity[c], u_f)
+            for p in range(n_fine):
+                for j in range(3):
+                    for v in range(V):
+                        f_p[j, v] = rho_f[p, 0] * phi_f[p, v] * u_f[p, j]
+                contravariant_point(det_f[i, p], inv_f[i, p], f_p, f_t[3 * p:3 * p + 3])
+            contract_local(D2, f_t, div_f)
+            contract_local(f2c, div_f, out[c])
+
+
 def _scalar_convection_volume_overintegrated(
     scalar_field, rho, velocity, oi, n_sps,
 ):
@@ -128,37 +158,14 @@ def _scalar_convection_volume_overintegrated(
       ② 用解析精确的 FINE 点度量算逆变通量；
       ③ 用 FINE 网格自己的微分矩阵求散度；
       ④ 精确插值限制回 coarse SPs。
+    逐单元在块内局部工作数组里走完（理由见 `fr_residual/inviscid.py::inviscid_volume_divergence`
+    文档"逐单元融合"），与按块分配临时数组的旧版逐位相同。
     """
-    n_cells = scalar_field.shape[0]
-    div_F = np.empty((n_cells, n_sps))
-    # 每段自带自己的 n_fine 与已切好的细点度量（2026-09-17）：native
-    # 四面体的过积分细网格轴不再填充到棱柱的 (oo+1)^3 宽度，两段的
-    # n_fine 不同了。度量按**段内局部**索引切（`i0 = c0 - seg_lo`）——
-    # 用全局 c0 去切段内数组会静默取到错误的单元。
-    for (seg_lo, seg_hi, n_fine, det_seg, inv_seg,
-         op_c2f, op_D_fine, op_f2c) in oi["segs"]:
-        for c0 in range(seg_lo, seg_hi, OVERINT_CHUNK_CELLS):
-            c1 = min(c0 + OVERINT_CHUNK_CELLS, seg_hi)
-            i0, i1 = c0 - seg_lo, c1 - seg_lo
-            phi_f = contract_shared_operator_1axis(
-                op_c2f, np.ascontiguousarray(scalar_field[c0:c1, :, None]))
-            rho_f = contract_shared_operator_1axis(
-                op_c2f, np.ascontiguousarray(rho[c0:c1, :, None]))
-            u_f = contract_shared_operator_1axis(
-                op_c2f, np.ascontiguousarray(velocity[c0:c1]))       # (n,n_fine,3)
-            # rho*u*phi 在 FINE 点上相乘（去混叠的核心）
-            F_phys_f = (rho_f * phi_f * u_f)[..., None]              # (n,n_fine,3,1)
-            del phi_f, rho_f, u_f
-            # ascontiguousarray：段内度量是带偏移的非连续视图
-            # （`det_all[n_prism:, :n_fine_tet]`），numba kernel 要连续输入
-            F_tilde_f = contravariant_flux_from_metric(
-                det_seg[i0:i1], inv_seg[i0:i1], F_phys_f)  # 度量视图直接传（见 contravariant_flux_from_metric）
-            del F_phys_f
-            div_f = contract_shared_operator_2axis(op_D_fine, F_tilde_f)  # (n,n_fine,1)
-            del F_tilde_f
-            div_F[c0:c1] = contract_shared_operator_1axis(op_f2c, div_f)[..., 0]
-            del div_f
-    return div_F
+    phi = np.ascontiguousarray(scalar_field[:, :, None], dtype=np.float64)
+    out = np.empty((scalar_field.shape[0], n_sps, 1))
+    for lo, hi, c2f, det_f, inv_f, D2, f2c in fine_segments(oi):
+        _convection_volume_kernel(phi, rho, velocity, lo, c2f, det_f, inv_f, D2, f2c, out, cell_blocks(hi - lo))
+    return out[:, :, 0]
 
 
 def scalar_convection_volume_divergence(scalar_field, rho, velocity, rho_u_tilde, mesh, ops):

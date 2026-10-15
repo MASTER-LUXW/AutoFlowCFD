@@ -16,14 +16,12 @@
    已通过独立的自由流场保持性 + 非均匀周期一致场无异常离群残差
    两项检查确认这套三方向周期四面体网格在本算例参数下没有触发
    该风险（见 test_tgv_freestream_preservation）。
-2. 分子粘度：`FRSolver` 当前没有暴露配置 mu 的参数，
-   `compute_viscous_residual`/`_compute_local_time_step` 各自独立硬编码
-   mu=1.8e-5（详见项目记忆 hardcoded_molecular_viscosity_mismatch）。
-   TGV 要在粗网格、有限步数预算内看到有意义的粘性衰减，需要一个远大于
+2. 分子粘度：TGV 要在粗网格、有限步数预算内看到有意义的粘性衰减，需要一个远大于
    空气分子粘度的等效粘度（对应一个能被这套粗网格分辨的低雷诺数层流
-   TGV，不是文献里 Re=1600 那种需要精细网格才能分辨的准湍流衰减曲线）
-   ——本文件对两处硬编码统一 monkeypatch 成同一个真实 mu，避免重蹈
-   声学 CFL/AUSM+up 不一致的覆辙。
+   TGV，不是文献里 Re=1600 那种需要精细网格才能分辨的准湍流衰减曲线），
+   经构造参数 `mu_molecular` 传给求解器——粘性残差与局部步长的粘性限制读的是同一个
+   `solver.mu_molecular`。（此前求解器没有这个参数、两处各自硬编码 1.8e-5，本文件把粘性残差
+   整个替换成另一份调用；2026-10-15 删掉那份替换，它绕过了生产的残差组装。）
 3. 时间推进：与等熵涡一致，用全局（非逐单元局部）步长的显式 SSP-RK3，
    理由同样是局部时间步长是稳态收敛加速技术、会破坏时间精度。
 4. 计算预算（2026-10-05 更新，下面这段 4^3 的旧数据作废：当时开着低马赫预处理、动能按解点等权平均，
@@ -36,7 +34,6 @@
 import numpy as np
 
 from autoflowcfd.core.fr_solver import FRSolver
-from autoflowcfd.core.fr_residual.viscous import compute_viscous_residual as _compute_visc_res
 from autoflowcfd.core.time_integration import TimeIntegrationScheme
 
 from ._tgv_mesh import build_triply_periodic_tet_mesh
@@ -59,26 +56,13 @@ def _build_tgv_solver():
     solver = FRSolver(
         mesh=mesh, order=ORDER, turb_model_name="NONE",
         time_scheme=TimeIntegrationScheme.SSP_RK3,
-        rho_inf=RHO_INF, vel_inf=U0, p_inf=P_INF,
+        rho_inf=RHO_INF, vel_inf=U0, p_inf=P_INF, mu_molecular=MU,
         # 全局物理时间步（时间精确）必须关掉低马赫伪时间预处理 Gamma：它是稳态加速手段，推进的是
         # dU/dt = -Gamma R，改变声速且逐点混合守恒分量——周期域上质量/总能每 100 步漂移 2.5e-6
         # （关闭后 5e-15），验证的就不是物理动力学（2026-10-05 查出，此前一直开着）。
         low_mach_precond=False,
     )
     solver.order_continuation_enabled = False
-
-    # 见模块文档第 2 条：两处硬编码 mu 必须同步 monkeypatch。
-    def _visc_res_with_mu(mu_t_turb=None, nu_av=None):
-        # 与生产 `compute_viscous_residual` 同签名（`step()` 传本步冻结的两个系数）；
-        # 只把分子粘度换成本算例的 MU，人工扩散项照生产路径叠加。
-        res = _compute_visc_res(solver.state.U, solver.state.Q, solver.ops, solver.mesh,
-                                mu=MU, mu_t_field=solver._get_turbulent_viscosity_field(mu_t_turb))
-        if nu_av is None:
-            nu_av = solver.compute_artificial_diffusivity_field()
-        if nu_av is not None:
-            res = res + solver._artificial_diffusion_residual(nu_av)
-        return res
-    solver.compute_viscous_residual = _visc_res_with_mu
 
     orig_local_dt = solver._compute_local_time_step
 

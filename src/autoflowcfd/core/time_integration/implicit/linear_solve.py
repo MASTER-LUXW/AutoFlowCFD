@@ -90,8 +90,9 @@ class _RealRows:
         self.idx = xp.nonzero(xp.asarray(real_rows, dtype=bool))[0]
         self.n_dof, self.n_var = int(n_dof), int(n_var)
 
-    def expand(self, x_1d, xp):
-        full = xp.zeros((self.n_dof, self.n_var), dtype=x_1d.dtype)
+    def expand(self, x_1d, xp, out=None):
+        """真实行写回全尺寸场。`out`：调用方复用的缓冲区（零填充行必须已经是零、且只被这里写真实行）。"""
+        full = xp.zeros((self.n_dof, self.n_var), dtype=x_1d.dtype) if out is None else out
         full[self.idx] = x_1d.reshape(-1, self.n_var)
         return full
 
@@ -152,13 +153,32 @@ def _solve_direction(jac: MatrixFreeJacobian, prec, dtau, r0, n_var: int, eta: f
         """`(n_dof, n_var)` 场 -> 求解向量（只取真实行）。"""
         return field.reshape(-1) if rows is None else rows.compact(field)
 
-    def to_field(x_1d):
-        return x_1d.reshape(n_dof, n_var) if rows is None else rows.expand(x_1d, xp)
+    # 真实行展开到全尺寸场的缓冲区，整个求解期间复用：零填充行恒为零，只有真实行被改写。每次新分配时
+    # cube_demo 粗网格（28.6 万单元）P2 一个全尺寸场 0.37 GB，每次 GMRES 迭代分配 2~3 次、每次约 0.07 s
+    # 花在缺页上。Krylov 算子与预处理作用共用一份：两个消费方（`jac.matvec`、预处理作用）都只读输入、不跨
+    # 调用持有它，并且每次展开的结果在下一次展开之前就已被消费完（GMRES 先取预处理向量、再作用 Krylov
+    # 算子，两者不嵌套；预处理作用的结果当场压回求解向量）。不用两份是为了不在残差求值的峰值上多占一个
+    # 全尺寸场（`block_budget.py::RESIDUAL_WORK_FACTOR`）。
+    if rows is None:
+        def to_field(x_1d):
+            return x_1d.reshape(n_dof, n_var)
+    else:
+        field_buf = xp.zeros((n_dof, n_var))
+
+        def to_field(x_1d):
+            return rows.expand(x_1d, xp, out=field_buf)
+
+    # 对角项 `v / dtau` 在求解向量上算：与全尺寸 `to_vector(J v + v / dtau)` 的真实行逐位相同
+    dtau_vec = to_vector(xp.ascontiguousarray(xp.broadcast_to(dtau_col, (n_dof, n_var))))
 
     def _apply_A(x_1d):
-        v = to_field(x_1d)
-        out = to_vector(jac.matvec(v) + v / dtau_col)
-        return out if d is None else d * out
+        out = to_vector(jac.matvec(to_field(x_1d)))
+        if rows is None:
+            out = out.copy()    # `matvec` 的返回值是它的工作数组（`jacobian_vector.py`），GMRES 会原地改写结果
+        out += x_1d / dtau_vec
+        if d is not None:
+            out *= d
+        return out
 
     def preconditioner_action(op):
         """`(n_dof, n_var)` 上的预处理作用 -> 求解向量（真实行、加权）上的右预处理作用。"""
@@ -180,4 +200,6 @@ def _solve_direction(jac: MatrixFreeJacobian, prec, dtau, r0, n_var: int, eta: f
         split=split)
     if info < 0 or not red.all_finite(du_1d):
         return None, iters, -1, float("nan")
-    return to_field(du_1d), iters, int(info), float(rel)
+    # 方向由调用方持有，不能放进复用的缓冲区
+    du = du_1d.reshape(n_dof, n_var) if rows is None else rows.expand(du_1d, xp)
+    return du, iters, int(info), float(rel)

@@ -4,52 +4,15 @@ AutoFlowCFD V2.0 - FR 粘性残差计算入口 (S-03, Tier-0 重建版)
 真正的物理通量函数、度量项一致的体积项、基于真实单元-面连接关系的
 BR1 界面耦合都在 core/fr_viscous_flux.py 中实现（该文件的历史版本
 体积过大且混杂了从未被真正触发的"完整LDG"死代码分支，已拆分——
-理由与验证记录见该文件模块文档）。本文件保留对外的公开函数名
-（compute_viscous_residual/compute_gradients/compute_scalar_gradient），
-避免影响其他调用方，但函数体委托给已验证正确的新实现。
+理由与验证记录见该文件模块文档）。本文件保留梯度的公开函数名
+（compute_gradients/compute_scalar_gradient），函数体委托给已验证正确的新实现。粘性残差
+直接调用 `compute_viscous_residual_fr`（2026-10-15 删掉了旧签名包装 `compute_viscous_residual`：
+它的 `state_Q` 参数从未被使用，分布式路径为了凑这个参数每次多算一遍原始变量）。
 """
 
 import numpy as np
 
 from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient, compute_physical_scalar_gradient
-from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
-from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL, PRANDTL_TURBULENT
-
-
-def compute_viscous_residual(
-    state_U: np.ndarray,
-    state_Q: np.ndarray,
-    ops,
-    mesh,
-    mu: float = 1.8e-5,
-    Pr: float = PRANDTL,
-    gamma: float = 1.4,
-    mu_t_field: np.ndarray = None,
-    Pr_t: float = PRANDTL_TURBULENT,
-    boundary_ghost_provider=None,
-    flat_face_override=None,
-) -> np.ndarray:
-    """计算粘性残差。真正的实现见 fr_viscous_flux.compute_viscous_residual_fr。
-
-    Args:
-        state_U: 守恒变量 (n_cells, n_sps, n_vars)
-        state_Q: 原始变量（保留参数以兼容旧调用签名；新实现从 state_U
-            自行重新计算原始变量，因为需要与梯度计算共用同一份、
-            保证一致性的 conserved_to_primitive 转换）
-        mu: **有效**动力粘度（分子粘度 + 湍流涡粘度，调用方负责传入
-            湍流模型算出的 mu_t 之和——这是本次修复的一部分：旧版本
-            调用方从不传 mu，粘性残差永远只用分子粘度，湍流模型算出的
-            涡粘系数从未真正进入粘性应力张量，见 core/fr_solver.py
-            compute_viscous_residual 的调用处）
-
-    Returns:
-        viscous_res: 形状与 state_U 相同
-    """
-    return compute_viscous_residual_fr(
-        state_U, mesh, ops, mu=mu, Pr=Pr, mu_t_field=mu_t_field, Pr_t=Pr_t,
-        boundary_ghost_provider=boundary_ghost_provider,
-        flat_face_override=flat_face_override,
-    )
 
 
 def compute_gradients(U: np.ndarray, ops, mesh=None) -> np.ndarray:

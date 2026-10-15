@@ -56,7 +56,8 @@ from autoflowcfd.core.mpi.distributed_compute import (
     distributed_compute_viscous_residual,
 )
 from autoflowcfd.core.fr_residual.inviscid import compute_inviscid_residual_fr, primitive_to_conserved
-from autoflowcfd.core.fr_residual.viscous import compute_viscous_residual
+from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
+from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL
 from autoflowcfd.fr.operators import generate_fr_operators
 
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
@@ -182,7 +183,7 @@ class TestDistributedResidualMatchesSingleMachine:
         U = _uniform_freestream_U(mesh)
         mu = 1.8e-5
 
-        residual_single = compute_viscous_residual(U, None, ops, mesh, mu=mu)
+        residual_single = compute_viscous_residual_fr(U, mesh, ops, mu, PRANDTL)
 
         cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
         fc = mesh.face_connectivity
@@ -247,8 +248,8 @@ class TestDistributedResidualMatchesSingleMachine:
         wmles_model = WMLESModel(nu=mu / rho_inf)
 
         Q = conserved_to_primitive(U[..., :5])
-        residual_single = compute_viscous_residual(
-            U, Q, ops, mesh, mu=mu, boundary_ghost_provider=provider_global,
+        residual_single = compute_viscous_residual_fr(
+            U, mesh, ops, mu, PRANDTL, boundary_ghost_provider=provider_global,
         )
         facade = types.SimpleNamespace(
             wmles_model=wmles_model, mesh=mesh, ops=ops, wall_distance=wall_distance,
@@ -325,7 +326,7 @@ class TestDistributedResidualMatchesSingleMachineNative:
         U = _uniform_freestream_U(mesh)
         mu = 1.8e-5
 
-        residual_single = compute_viscous_residual(U, None, ops, mesh, mu=mu)
+        residual_single = compute_viscous_residual_fr(U, mesh, ops, mu, PRANDTL)
 
         cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
         fc = mesh.face_connectivity

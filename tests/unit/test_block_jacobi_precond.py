@@ -122,6 +122,54 @@ def test_preconditioner_is_exact_block_inverse_and_diagonal_on_padding():
         np.testing.assert_allclose(out[pad], v[pad] * dtau[pad, None])
 
 
+def test_apply_accumulates_stored_inverse_in_float64_and_accepts_column_views():
+    """作用核按行号直接读写（`cell_block_inverse.py::_apply_inverse_blocks`）：等于 float32 存储的逆在 float64
+    里乘向量；输入是更宽数组的列切片（块对角组合传入的平均流列）时结果逐位相同、输入不被改动。"""
+    rng = np.random.default_rng(12)
+    n_cells, n_prism = 6, 3
+    owner, nb, is_prism = _chain_mesh(n_cells, n_prism)
+    A, _ = _linear_system(n_cells, is_prism, rng)
+    u0 = rng.normal(size=(n_cells * N_SPS, NV))
+    R = _residual(A)
+    jac = CellBlockJacobian(R, u0, R(u0), np.ones(NV), n_sps=N_SPS, cell_is_prism=is_prism,
+                            n_real_prism=N_REAL_P, n_real_tet=N_REAL_T,
+                            colors=greedy_cell_coloring(owner, nb, n_cells))
+    dtau = rng.uniform(0.1, 2.0, n_cells * N_SPS)
+    M = CellBlockJacobiPreconditioner(jac, dtau)
+    wide = rng.normal(size=(n_cells * N_SPS, NV + 2))
+    before = wide.copy()
+    v = wide[:, 1:NV + 1]
+    out = M.apply(v)
+    assert np.array_equal(wide, before)
+    assert np.array_equal(out, M.apply(np.ascontiguousarray(v)))
+    for inv, cells, n_real in ((M._inv_prism, jac.prism_cells, N_REAL_P), (M._inv_tet, jac.tet_cells, N_REAL_T)):
+        assert inv.dtype == np.float32
+        for i, c in enumerate(cells):
+            rows = c * N_SPS + np.arange(n_real)
+            want = inv[i].astype(np.float64) @ v[rows].ravel()
+            np.testing.assert_allclose(out[rows].ravel(), want, rtol=1e-12, atol=1e-12 * np.abs(want).max())
+
+
+def test_block_diagonal_combination_reads_column_views_without_modifying_input():
+    """平均流 / 湍流两块的组合（`coupled_step.py::_BlockDiagonal`）不复制输入：各块拿到列切片、输入不变，
+    结果等于各块分别作用在连续副本上。"""
+    from autoflowcfd.core.time_integration.implicit.coupled_step import _BlockDiagonal
+
+    rng = np.random.default_rng(13)
+    n = 40
+    mean = PseudoTransientDiagonal(rng.uniform(0.5, 2.0, n), 5)
+    turb = PseudoTransientDiagonal(rng.uniform(0.5, 2.0, n), 1)
+    combo = _BlockDiagonal(mean, turb, None, 1)
+    v = rng.normal(size=(n, 6))
+    before = v.copy()
+    out = combo.apply(v)
+    assert np.array_equal(v, before)
+    assert np.array_equal(out[:, :5], mean.apply(v[:, :5].copy()))
+    assert np.array_equal(out[:, 5:], turb.apply(v[:, 5:].copy()))
+    lin = combo.apply_linear(v)
+    assert np.array_equal(lin, out)          # 两块都线性
+
+
 def _cache(n_cells=6, n_prism=3, budget=2 ** 50):
     owner, nb, is_prism = _chain_mesh(n_cells, n_prism)
     return BlockJacobiCache(colors=greedy_cell_coloring(owner, nb, is_prism.size), cell_is_prism=is_prism,

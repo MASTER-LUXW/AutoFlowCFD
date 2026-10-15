@@ -24,7 +24,7 @@ from .constants import PRANDTL_TURBULENT
 def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
                                  mu_t_field=None, Pr_t: float = PRANDTL_TURBULENT,
                                  boundary_ghost_provider=None,
-                                 flat_face_override=None) -> np.ndarray:
+                                 flat_face_override=None, primitives=None) -> np.ndarray:
     """计算真实面耦合的 FR 粘性残差 dU/dt（物理空间，已除以 det(J)）。
 
     Args:
@@ -78,6 +78,11 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
             调用方式已在已知线性场 T=x / T=3y 上验证到机器精度
             7.6e-16，不是算子用错导致的虚低。）
 
+        flat_face_override: 分布式路径预先按 local+halo 压缩索引空间构造的面几何（见
+            `fr_residual/inviscid.py::compute_inviscid_residual_fr` 同名参数）。
+        primitives: 与无粘项共用的原始变量与边界幽灵态（`fr_residual/inviscid.py::mean_flow_primitives`）；
+            None 时在这里算。
+
     Returns:
         residual: (n_cells, n_sps, 5)
     """
@@ -90,7 +95,7 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
 
     mu_t_field = np.zeros((n_cells, n_sps)) if mu_t_field is None else mu_t_field
 
-    Q = conserved_to_primitive(U[..., :5])  # (n_cells,n_sps,5)
+    Q = conserved_to_primitive(U[..., :5]) if primitives is None else primitives.Q  # (n_cells,n_sps,5)
     T = compute_temperature(Q)  # (n_cells,n_sps)
 
     grad_Q = compute_physical_gradient(Q, mesh, ops)  # (n_cells,n_sps,5,3)
@@ -115,8 +120,8 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
             raise RuntimeError(
                 "P>=1 粘性残差需要过积分细点度量（mesh.jacobians_fine）与 ops.overint_* 算子，"
                 "这里缺失：网格或算子是按不完整的阶数几何构造的")
-        residual = viscous_volume_term(
-            Q, grad_vel, grad_T, mu_t_field, mu, Pr, Pr_t, _oi, n_sps) / det_jacs[..., None]
+        residual = viscous_volume_term(Q, grad_vel, grad_T, mu_t_field, mu, Pr, Pr_t, _oi, n_sps)
+        np.divide(residual, det_jacs[..., None], out=residual)      # 原地（全尺寸，见无粘残差同一处）
 
     # --- 界面项：numba 逐点标量 kernel（性能优化，替代原纯 Python
     # `for f in range(fc.n_faces)` 逐面循环，理由/验证方式与
@@ -132,7 +137,7 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
     # 预先按 local+halo 压缩索引空间构造好的 flat_face_override，不能让
     # 这里对 DistributedMeshAdapter 重新调用 get_flat_face_geometry。
     flat = flat_face_override if flat_face_override is not None else get_flat_face_geometry(mesh, ops)
-    Q_ghost = compute_boundary_ghost_states(flat, Q, ghost_provider)
+    Q_ghost = compute_boundary_ghost_states(flat, Q, ghost_provider) if primitives is None else primitives.Q_ghost
     # 边界面的公共粘性通量按粘性边界种类分派（Dirichlet / 无滑移壁 / 镜像 /
     # Neumann / 入口逐点判定），见 core/fr_operators/flux_kernels/viscous_bc.py。
     from autoflowcfd.boundary.fr_ghost_state import build_viscous_boundary_kind
@@ -234,7 +239,8 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
                 flat.ip_length,
                 _c_ip,
             )
-    residual = residual + correction
+    residual += correction
+    del correction
 
     # 机制3 已删除，依据见 `fr_residual/inviscid.py` 同一处的完整记录
     # （真实网格消融对照：触发 15 次但残差轨迹只差 ~1e-10、结局不变）。

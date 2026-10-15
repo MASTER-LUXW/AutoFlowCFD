@@ -24,7 +24,8 @@ from autoflowcfd.core.fr_residual.inviscid import (
     compute_inviscid_residual_fr,
     primitive_to_conserved,
 )
-from autoflowcfd.core.fr_residual.viscous import compute_viscous_residual
+from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
+from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL
 from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
 
 
@@ -120,10 +121,10 @@ class TestViscousColoredParity:
         U = _random_nonuniform_state(mesh, seed=5678)
 
         monkeypatch.setenv("AFCFD_USE_COLORING", "1")
-        residual_colored = compute_viscous_residual(U, U, mesh.operators, mesh)
+        residual_colored = compute_viscous_residual_fr(U, mesh, mesh.operators, 1.8e-5, PRANDTL)
 
         monkeypatch.setenv("AFCFD_USE_COLORING", "0")
-        residual_uncolored = compute_viscous_residual(U, U, mesh.operators, mesh)
+        residual_uncolored = compute_viscous_residual_fr(U, mesh, mesh.operators, 1.8e-5, PRANDTL)
 
         np.testing.assert_allclose(
             residual_colored, residual_uncolored, rtol=1e-10, atol=1e-8,

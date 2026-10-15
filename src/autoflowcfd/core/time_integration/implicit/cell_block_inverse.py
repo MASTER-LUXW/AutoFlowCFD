@@ -34,15 +34,20 @@ class CellBlockJacobiPreconditioner(PseudoTransientDiagonal):
             self._inv_tet = _inverted_blocks(jac, jac.blocks_tet, self._rows_tet, self.dtau, out=None)
 
     def apply(self, v_flat):
+        """`v_flat` 可以是非连续视图（块对角组合传入列切片）。"""
         out = super().apply(v_flat)
         xp = self._jac.xp
         nv = self._jac.n_var
         for inv, rows in ((self._inv_prism, self._rows_prism), (self._inv_tet, self._rows_tet)):
-            if inv.shape[0]:
-                # float32 作用：逆以 float32 存储，把向量也降到 float32 再乘，避免
-                # 混合精度 matmul 每次把整份逆隐式提升成 float64（实测 5 倍慢）
-                x = v_flat[rows].reshape(rows.shape[0], -1, 1).astype(xp.float32)
-                out[rows] = xp.matmul(inv, x).reshape(rows.shape[0], rows.shape[1], nv)
+            if not inv.shape[0]:
+                continue
+            if xp is np:
+                _apply_inverse_blocks(inv, rows, v_flat, out)
+                continue
+            # cupy：float32 批量 matmul（逆以 float32 存储，向量也降到 float32 再乘，避免混合精度 matmul
+            # 把整份逆隐式提升成 float64）
+            x = v_flat[rows].reshape(rows.shape[0], -1, 1).astype(xp.float32)
+            out[rows] = xp.matmul(inv, x).reshape(rows.shape[0], rows.shape[1], nv)
         return out
 
 
@@ -80,6 +85,32 @@ def invert_blocks_in_place(jac: CellBlockJacobian, dtau_flat) -> None:
     rows_prism, rows_tet = _block_rows(jac)
     _inverted_blocks(jac, jac.blocks_prism, rows_prism, dtau, out=jac.blocks_prism)
     _inverted_blocks(jac, jac.blocks_tet, rows_tet, dtau, out=jac.blocks_tet)
+
+
+@njit(parallel=True, cache=True)
+def _apply_inverse_blocks(inv, rows, v, out):
+    """`out[rows[b, s], k] = sum_{t,l} inv[b, s*nv+k, t*nv+l] * v[rows[b, t], l]`，按块并行，float64 累加。
+
+    块内行序与装配一致（`(解点, 变量)`，`_inverted_blocks` 的 `diag` 同一顺序）。此前 CPU 也走 float32 批量
+    `matmul`：先把块内向量 gather 成 `(n_blk, m, 1)` 再降精度、乘完再 scatter 回去，三份全尺寸临时数组，
+    numpy 的批量 matmul 又不随核数并行——cube_demo 粗网格（28.6 万单元）P2 每次作用约 0.6 s。这里直接按
+    行号读写，逆仍是 float32 存储，乘加在 float64 里做（比 float32 累加更准；预处理的作用因此在 float32
+    舍入量级上与旧路径不同，不影响被求解的线性系统）。
+    """
+    n_blk, m, _ = inv.shape
+    n_real = rows.shape[1]
+    nv = v.shape[1]
+    for b in prange(n_blk):
+        for s in range(n_real):
+            rs = rows[b, s]
+            for k in range(nv):
+                i = s * nv + k
+                acc = 0.0
+                for t in range(n_real):
+                    rt = rows[b, t]
+                    for l in range(nv):
+                        acc += inv[b, i, t * nv + l] * v[rt, l]
+                out[rs, k] = acc
 
 
 @njit(parallel=True, cache=True)

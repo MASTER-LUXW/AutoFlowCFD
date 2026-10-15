@@ -109,13 +109,12 @@ def _make_mesh(order):
 
 
 def _cross_check(U, mesh, ops, mu_t_field=None, provider=None):
-    from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
-    from autoflowcfd.core.fr_residual.viscous import compute_viscous_residual
+    from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
+    from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL
     from autoflowcfd.core.gpu.residual.gpu_viscous import compute_viscous_residual_fr_gpu
 
-    Q = conserved_to_primitive(U)
-    r_cpu = compute_viscous_residual(U, Q, ops, mesh, mu=1.8e-5, mu_t_field=mu_t_field,
-                                     boundary_ghost_provider=provider)
+    r_cpu = compute_viscous_residual_fr(U, mesh, ops, 1.8e-5, PRANDTL, mu_t_field=mu_t_field,
+                                        boundary_ghost_provider=provider)
     r_gpu = compute_viscous_residual_fr_gpu(U, mesh, ops, mu=1.8e-5, mu_t_field=mu_t_field,
                                             boundary_ghost_provider=provider)
     return r_cpu, np.asarray(r_gpu)

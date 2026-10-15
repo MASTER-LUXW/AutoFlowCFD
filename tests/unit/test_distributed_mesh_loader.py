@@ -40,7 +40,8 @@ from autoflowcfd.core.mpi.distributed_mesh_loader import (
     build_fully_distributed_rank_package,
 )
 from autoflowcfd.core.fr_residual.inviscid import compute_inviscid_residual_fr
-from autoflowcfd.core.fr_residual.viscous import compute_viscous_residual
+from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
+from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL
 
 from tests.unit._wall_source import synthetic_wall_source
 from tests.unit._distributed_mesh_loader_common import _FakeHaloExchange, _build_all_packages, _nonuniform_U, mesh_and_ops
@@ -166,10 +167,8 @@ class TestFullyDistributedResidualMatchesSingleMachine:
         packages, boundary_ghost_provider_global, _ = _build_all_packages(mesh, ops)
         # 见 test_inviscid_residual_matches 同一处注释：单机参照必须用
         # 同一个（未切片的全局）边界幽灵态提供者。
-        from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
-        Q = conserved_to_primitive(U[..., :5])
-        residual_single = compute_viscous_residual(
-            U, Q, ops, mesh, mu=mu, boundary_ghost_provider=boundary_ghost_provider_global,
+        residual_single = compute_viscous_residual_fr(
+            U, mesh, ops, mu, PRANDTL, boundary_ghost_provider=boundary_ghost_provider_global,
         )
 
         pkg = packages[rank]

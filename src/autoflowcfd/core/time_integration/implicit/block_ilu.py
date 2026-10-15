@@ -41,7 +41,8 @@ P0 阶段因此收敛不深。改为 CFD Newton-Krylov 的标准排序 Reverse C
 
 并行靠**波前分层**：`level(c) = 1 + max{level(y) : y 邻 c, rank(y) < rank(c)}`，
 同层单元之间没有依赖，分解与前代/回代按层分批、层内并行（回代反序）。核函数只
-比较名次，对任意排序都成立。
+比较名次，对任意排序都成立。"邻"按对称化的耦合结构取（`rcm_wavefronts`）：耦合模式本身
+可以不对称，只按单元自己那一行分层时回代会有同层读写冲突。
 
 零填充槽位（原生基的填充解点）不在任何块里，它们的残差行恒为零，`A` 在那里
 就是 `I/dtau`，预处理保持对角形式 `dtau * v`（与块 Jacobi 相同）。
@@ -105,15 +106,27 @@ def coupling_csr(coupling, n_rows: int):
 
 def rcm_wavefronts(indptr, cols, n_cells: int):
     """耦合图上的 RCM 名次 `rank`（`(n_cells,)`）与波前层（按层的单元数组列表，
-    层内互不依赖），见模块文档"排序"。"""
+    层内互不依赖），见模块文档"排序"。
+
+    排序与分层都在**对称化**的结构（耦合模式并上它的转置）上做：回代里单元 `c` 读名次更高的
+    行内邻居 `z`，要求 `z` 在更后的层；`level` 只按 `c` 自己那一行里名次更低的邻居定义，只有
+    `c` 也在 `z` 的行里时才保证这一点。本函数对任意块稀疏结构都要成立，不能以"耦合模式恰好对称"
+    为前提：2026-10-15 cube_demo 粗网格（28.6 万单元）湍流块有 297 个单向耦合（来自棱柱四边形侧面
+    次源单元记错的缺陷，`fr/face_flux_points/merge.py`），按单侧行分层时回代有 65 处同层读写冲突——
+    并行回代在那里读到另一个线程正在写的值，同一向量连续作用两次结果不同（单次 2e-4、经多层 K 循环
+    放大到 7e-3），而且不是 D-ILU 的回代。对称化之后前代与回代的依赖都只指向更早的层；分解只读
+    名次更低的邻居，不受影响。"""
     import scipy.sparse as sp
     from scipy.sparse.csgraph import reverse_cuthill_mckee
 
     graph = sp.csr_matrix((np.ones(cols.size, dtype=np.int8), cols, indptr), shape=(n_cells, n_cells))
-    perm = np.asarray(reverse_cuthill_mckee(graph, symmetric_mode=True), dtype=np.int64)
+    sym = ((graph + graph.T) != 0).astype(np.int8).tocsr()
+    sym.sort_indices()
+    perm = np.asarray(reverse_cuthill_mckee(sym, symmetric_mode=True), dtype=np.int64)
     rank = np.empty(n_cells, dtype=np.int64)
     rank[perm] = np.arange(n_cells)
-    level = _wavefront_levels(perm, rank, indptr, cols)
+    level = _wavefront_levels(perm, rank, np.asarray(sym.indptr, dtype=np.int64),
+                              np.asarray(sym.indices, dtype=np.int64))
     order = np.argsort(level, kind="stable")
     bounds = np.searchsorted(level[order], np.arange(int(level.max()) + 2 if n_cells else 1))
     return rank, [order[bounds[k]:bounds[k + 1]] for k in range(bounds.size - 1)]
@@ -290,7 +303,7 @@ class BlockILUPreconditioner(PseudoTransientDiagonal):
         if self._xp is not np:
             v_flat, out = v_flat.get(), out.get()
         x = np.ascontiguousarray(v_flat, dtype=np.float64).reshape(-1)
-        y = np.ascontiguousarray(out, dtype=np.float64).reshape(-1).copy()
+        y = np.ascontiguousarray(out, dtype=np.float64).reshape(-1)     # `out` 是对角作用新分配的，可原地改写
         solve_block_ilu(self._inv, self._diag_off, self._struct, x, y, self._n_sps)
         y = y.reshape(out.shape)
         return y if self._xp is np else self._xp.asarray(y)

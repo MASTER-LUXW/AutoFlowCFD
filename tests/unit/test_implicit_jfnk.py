@@ -295,3 +295,34 @@ class TestInputValidation:
         assert info["res_norm"] == 0.0
         assert info["n_matvec"] == 0, "残差已为零时不该再做任何 J.v"
         assert np.array_equal(u1, u)
+
+
+class TestMatvecWorkBuffers:
+    """`matvec` 复用三个工作数组：结果与逐次新分配的写法逐位一致，连续调用互不污染。"""
+
+    @staticmethod
+    def _reference(jac, v):
+        v = np.ascontiguousarray(v, dtype=np.float64)
+        v_rms = jac._red.rms(v * jac._inv_scales_flat)
+        eps = JV._SQRT_EPS * (1.0 + jac._u0_rms_scaled) / v_rms
+        return (np.asarray(jac._residual(jac._u0 + eps * v)) - jac._r0) / eps
+
+    def test_bitwise_equal_to_fresh_allocation_and_independent_across_calls(self):
+        residual, u_base, _ = TestFrechetEpsScaling._nonlinear_with_analytic_jacobian(seed=5)
+        jac = JV.MatrixFreeJacobian(residual, u_base, residual(u_base), _SCALES)
+        rng = np.random.default_rng(9)
+        for _ in range(4):
+            v = _SCALES[None, :] * rng.normal(size=(_N, _NV))
+            ref = self._reference(jac, v)
+            assert np.array_equal(jac.matvec(v), ref)
+        # 把上一次的结果直接当下一次的输入（幂迭代式调用）：输入与输出是同一个工作数组
+        w = jac.matvec(v)
+        ref = self._reference(jac, w.copy())
+        assert np.array_equal(jac.matvec(w), ref)
+        assert jac.n_matvec == 6
+
+    def test_zero_vector_returns_fresh_zeros(self):
+        residual, u_base, _ = TestFrechetEpsScaling._nonlinear_with_analytic_jacobian(seed=5)
+        jac = JV.MatrixFreeJacobian(residual, u_base, residual(u_base), _SCALES)
+        z = jac.matvec(np.zeros((_N, _NV)))
+        assert not np.any(z) and jac.n_matvec == 0

@@ -189,8 +189,12 @@ class CpuCoupledBackend:
 
     def set_trial(self, x) -> None:
         s = self.solver
-        U = np.array(s.state.U, copy=True)
-        U.reshape(self._n_rows, -1)[:, :5] = x[:, :5]
+        # 新数组（快照仍持有旧的 `U`，不能原地改写）；前 5 列整列来自 `x`，不必先整份复制旧值
+        U = np.empty(np.shape(s.state.U))          # C 连续：下面经 reshape 视图写入
+        rows = U.reshape(self._n_rows, -1)
+        rows[:, :5] = x[:, :5]
+        if rows.shape[1] > 5:
+            rows[:, 5:] = np.asarray(s.state.U).reshape(self._n_rows, -1)[:, 5:]
         s.state.U = U
         s.state._update_primitives()
         self.turb.model.set_newton_unknowns(x[:, 5:], np)
@@ -203,9 +207,7 @@ class CpuCoupledBackend:
     def mean_residual(self, mu_t):
         """平均流 `Gamma R`（`fr_solver/step.py::mean_flow_residual` 同一约定，`dU/dt = -R`）。"""
         s = self.solver
-        res = s.compute_viscous_residual(mu_t_turb=mu_t, nu_av=self._nu_av)
-        res += s.compute_inviscid_residual()
-        res *= -1
+        res = s.compute_mean_flow_residual(mu_t_turb=mu_t, nu_av=self._nu_av)
         if s.low_mach_precond_enabled:
             from autoflowcfd.core.utils.preconditioning import apply_low_mach_preconditioner
 

@@ -56,6 +56,7 @@ from typing import Optional
 import numpy as np
 from loguru import logger
 
+from autoflowcfd.core.utils.array_module import array_module
 from autoflowcfd.fr.native_padding import real_row_mask, real_sps_per_cell
 
 from .block_budget import plan_block_memory
@@ -156,19 +157,18 @@ class _BlockDiagonal:
             np.array([mean.flexible] * N_MEAN_FLOW_VARS + [turb.flexible] * int(n_turb), dtype=bool)
             if mean.flexible != turb.flexible else None)
 
+    # 两块的作用都只读输入、返回新数组（接受非连续的列切片），所以这里不再先复制输入
     def apply(self, v):
-        out = v.copy()
-        out[:, :N_MEAN_FLOW_VARS] = self.mean.apply(v[:, :N_MEAN_FLOW_VARS].copy())
-        out[:, N_MEAN_FLOW_VARS:] = self.turb.apply(v[:, N_MEAN_FLOW_VARS:].copy())
+        out = array_module(v).empty_like(v)
+        out[:, :N_MEAN_FLOW_VARS] = self.mean.apply(v[:, :N_MEAN_FLOW_VARS])
+        out[:, N_MEAN_FLOW_VARS:] = self.turb.apply(v[:, N_MEAN_FLOW_VARS:])
         return out
 
     def apply_linear(self, v):
         """线性那一块的作用（另一块的列置零，由 GMRES 用存下来的预处理向量填上）。"""
-        out = v.copy()
-        out[:, :N_MEAN_FLOW_VARS] = (0.0 if self.mean.flexible
-                                     else self.mean.apply(v[:, :N_MEAN_FLOW_VARS].copy()))
-        out[:, N_MEAN_FLOW_VARS:] = (0.0 if self.turb.flexible
-                                     else self.turb.apply(v[:, N_MEAN_FLOW_VARS:].copy()))
+        out = array_module(v).empty_like(v)
+        out[:, :N_MEAN_FLOW_VARS] = 0.0 if self.mean.flexible else self.mean.apply(v[:, :N_MEAN_FLOW_VARS])
+        out[:, N_MEAN_FLOW_VARS:] = 0.0 if self.turb.flexible else self.turb.apply(v[:, N_MEAN_FLOW_VARS:])
         return out
 
 

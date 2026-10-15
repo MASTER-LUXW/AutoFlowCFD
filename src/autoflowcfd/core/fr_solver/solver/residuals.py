@@ -7,8 +7,9 @@ from typing import Any, Dict, Optional
 
 import numpy as np
 
-from autoflowcfd.core.fr_residual.inviscid import compute_inviscid_residual_fr
-from autoflowcfd.core.fr_residual.viscous import compute_viscous_residual as compute_viscous_residual_ldg
+from autoflowcfd.core.fr_residual.inviscid import compute_inviscid_residual_fr, mean_flow_primitives
+from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
+from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL
 from autoflowcfd.core.utils import solver_helpers
 
 from .. import boundary as fr_solver_boundary
@@ -41,6 +42,38 @@ class _SolverResidualMixin:
         """
         fr_solver_turbulence.apply_turbulence_corrections(self)
 
+    def compute_mean_flow_residual(self, mu_t_turb=None, nu_av=None):
+        """平均流残差 `R = -(无粘 + 粘性)`（TimeIntegrator 约定 `dU/dt = -R`），未经低马赫预处理；参数见
+        `compute_viscous_residual`。显式推进（`fr_solver/step.py`）与隐式耦合步
+        （`fr_solver/turbulence/implicit.py`）共用这一处组装。
+
+        两项共用同一份原始变量与边界幽灵态（`mean_flow_primitives`）。原地累加与取负：粘性结果是新数组
+        （B-12 P2 OOM 修复第⑤级，2026-08-26：`total = inv + visc` 再 `-total` 会多分配两个全场数组）。
+        """
+        self._refresh_primitives()
+        from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+
+        primitives = mean_flow_primitives(self.state.U, get_flat_face_geometry(self.mesh, self.ops),
+                                          self.boundary_ghost_provider)
+        res = self.compute_viscous_residual(mu_t_turb=mu_t_turb, nu_av=nu_av, primitives=primitives)
+        res += self._inviscid_residual(primitives)
+        res *= -1
+        return res
+
+    def _refresh_primitives(self) -> None:
+        """`state.Q` 与当前 `state.U` 同步（低马赫预处理与湍流读它），`U` 转连续（残差核要连续输入）。"""
+        self.state._update_primitives()
+        if not self.state.U.flags['C_CONTIGUOUS']:
+            self.state.U = np.ascontiguousarray(self.state.U)
+
+    def _inviscid_residual(self, primitives=None):
+        return compute_inviscid_residual_fr(
+            self.state.U, self.mesh, self.ops,
+            boundary_ghost_provider=self.boundary_ghost_provider,
+            mach_ref=self.freestream["mach_ref"],
+            primitives=primitives,
+        )
+
     def compute_inviscid_residual(self):
         """
         计算无粘残差 (S-02/S-04)。
@@ -54,20 +87,10 @@ class _SolverResidualMixin:
         详见 core/fr_residual_inviscid.py 模块文档与
         tests/unit/test_fr_residual_inviscid.py 的自由流场保持性验证。
         """
-        self.state._update_primitives()
+        self._refresh_primitives()
+        return self._inviscid_residual()
 
-        if not self.state.U.flags['C_CONTIGUOUS']:
-            self.state.U = np.ascontiguousarray(self.state.U)
-
-        res_euler = compute_inviscid_residual_fr(
-            self.state.U, self.mesh, self.ops,
-            boundary_ghost_provider=self.boundary_ghost_provider,
-            mach_ref=self.freestream["mach_ref"],
-        )
-
-        return res_euler
-
-    def compute_viscous_residual(self, mu_t_turb=None, nu_av=None):
+    def compute_viscous_residual(self, mu_t_turb=None, nu_av=None, primitives=None):
         """
         计算粘性残差 (S-03)。
 
@@ -83,6 +106,7 @@ class _SolverResidualMixin:
                 且启用人工粘性时按当前状态求。冻结的理由与 mu_t_turb 相同：系数
                 是"本步参数"，隐式步的残差与 Jacobian 看到同一个系数，判据里的
                 max 不进入 Newton 线性化。
+            primitives: 与无粘项共用的原始变量与边界幽灵态（`compute_mean_flow_residual`）；None 时现算。
 
         真实的 BR1 面耦合粘性离散（core/fr_viscous_flux.py），并把湍流模型
         算出的涡粘系数真正耦合进应力张量/热传导（T-01/T-04/T-06 修复：
@@ -97,11 +121,11 @@ class _SolverResidualMixin:
                 施加才能真正影响本步的解，而不是像此前那样在状态更新
                 之后才计算）；启用人工粘性时已叠加 `div(nu grad U)`
         """
-        res = compute_viscous_residual_ldg(
-            self.state.U, self.state.Q, self.ops, self.mesh,
-            mu=self.mu_molecular,
+        res = compute_viscous_residual_fr(
+            self.state.U, self.mesh, self.ops, self.mu_molecular, PRANDTL,
             mu_t_field=self._get_turbulent_viscosity_field(mu_t_turb),
             boundary_ghost_provider=self.boundary_ghost_provider,
+            primitives=primitives,
         )
 
         if self.wmles_model is not None:
