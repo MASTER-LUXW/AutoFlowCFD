@@ -368,3 +368,39 @@ def test_available_memory_query_is_positive_and_below_physical():
 
     got = available_bytes(np)
     assert 0 < got < 2 ** 50
+
+
+def test_restart_is_shortened_only_as_far_as_needed_to_fit_every_cache(monkeypatch):
+    """湍流块差一点放不下单份时缩短 GMRES 重启长度换内存（只缩到刚好放得下）；缩到下限仍放不下则保持默认
+    长度、退回对角预处理。Newton 步的重启长度按规划给出的上限截断。
+
+    cube_demo 粗网格 SA P2：规划时可用 17.9 GiB，重启 60 时平均流单份之后湍流差 0.08 GiB 退回对角预处理。"""
+    from autoflowcfd.core.time_integration.implicit.linear_solve import krylov_basis_bytes, krylov_restart
+    from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
+    import autoflowcfd.core.utils.system_memory as sm
+
+    red = LocalReductions()
+    cip = np.arange(286393) < 90649
+    sizes = (90649, 195744, 18, 10)
+    real_entries = (90649 * 18 + 195744 * 10) * 6
+    fixed = bb.RESIDUAL_WORK_FACTOR * 286393 * 27 * 6 * 8 + bb.MEMORY_HEADROOM
+    single_mean = bb.block_mode_bytes("single", *sizes, 5)
+    single_sa = bb.block_mode_bytes("single", *sizes, 1)
+    default_m = krylov_restart(real_entries, red, flexible=1.0, itemsize=4)
+
+    def plan(available):
+        monkeypatch.setattr(sm, "available_bytes", lambda xp: int(available))
+        return bb.plan_block_memory(red, cip, 27, 18, 10, 5, 1)
+
+    # 默认重启长度下差 1 MiB：缩一档就放得下
+    short_by = krylov_basis_bytes(real_entries, red, flexible=1 / 6) + fixed + single_mean + single_sa - 2 ** 20
+    p = plan(short_by)
+    assert p.mean == "single" and p.turbulence is not None     # 缩一档腾出的内存够湍流取更好的档
+    assert p.restart_cap == default_m - bb.RESTART_STEP and "重启长度缩到" in p.describe()
+    assert krylov_restart(real_entries, red, flexible=1 / 6, itemsize=4, cap=p.restart_cap) == p.restart_cap
+    # 缩到下限也放不下：保持默认长度
+    floor = krylov_basis_bytes(real_entries, red, flexible=1 / 6, restart=bb.RESTART_FLOOR_FOR_BLOCKS) + fixed
+    hopeless = plan(floor + single_mean - 2 ** 20)
+    assert hopeless.restart_cap is None and (hopeless.mean is None or hopeless.turbulence is None)
+    # 放得下时不缩
+    assert plan(short_by + 2 ** 30).restart_cap is None

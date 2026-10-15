@@ -146,6 +146,7 @@ class _CountingPreconditioner:
 
     flexible = False
     recoverable = True
+    restart_cap = None
 
     def __init__(self):
         self.n_recover = 0
@@ -232,6 +233,8 @@ class _CoupledLike:
     """块缓存接口的替身：预处理平均流 2 列用固定对角逆（线性）、第 3 列每次作用都乘不同的因子（非线性）。"""
 
     recoverable = False
+
+    restart_cap = None
     flexible = True
 
     def __init__(self, split: bool):

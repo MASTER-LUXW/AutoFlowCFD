@@ -46,7 +46,8 @@ KRYLOV_BASIS_BYTES = 2 * 2 ** 30
 GMRES_MAX_ITER = 200
 
 
-def krylov_restart(n_local_entries: int, red: LocalReductions, flexible: float = 0.0, itemsize: int = 8) -> int:
+def krylov_restart(n_local_entries: int, red: LocalReductions, flexible: float = 0.0, itemsize: int = 8,
+                   cap: Optional[int] = None) -> int:
     """按 Krylov 基内存预算给出的重启长度（见 `KRYLOV_BASIS_BYTES`）。
 
     分布式下各 rank 的 GMRES 必须走同样多步（内积是集体操作），所以取全局最小。
@@ -54,19 +55,22 @@ def krylov_restart(n_local_entries: int, red: LocalReductions, flexible: float =
     非线性列的占比、不灵活为 0；布尔值按 0/1）。
     `itemsize`：基向量每个元素的字节数（`gmres.py::basis_itemsize`）；下限 `GMRES_RESTART` 是按双精度
     定的内存量，单精度存储时同样的内存是两倍的向量数。
+    `cap`：内存规划给出的上限（`block_budget.py::plan_block_memory` 为让每个块缓存都放得下而缩短重启长度时）。
     """
     per_step = itemsize * max(int(n_local_entries), 1) * (1.0 + float(flexible))
     m_local = int(KRYLOV_BASIS_BYTES // per_step) - 1
     m = int(red.min(red.xp.asarray([float(m_local)])))
-    return int(min(GMRES_RESTART_MAX, max(GMRES_RESTART * 8 // itemsize, m)))
+    m = int(min(GMRES_RESTART_MAX, max(GMRES_RESTART * 8 // itemsize, m)))
+    return m if cap is None else min(m, int(cap))
 
 
-def krylov_basis_bytes(n_local_entries: int, red: LocalReductions, flexible: float = 1.0) -> int:
+def krylov_basis_bytes(n_local_entries: int, red: LocalReductions, flexible: float = 1.0,
+                       restart: Optional[int] = None) -> int:
     """一次 Newton 步的 Krylov 基最多占多少字节（预处理块定档时预留，`block_budget.py`）：重启长度与存储精度
     与 `step_newton_krylov` 同一规则（forcing 容差下限 `_ETA_MIN` 时的精度），`m + 1` 个基向量，灵活模式另加
-    `m` 个预处理向量（按 `flexible` 占比，部分灵活见 `gmres.py`）。"""
+    `m` 个预处理向量（按 `flexible` 占比，部分灵活见 `gmres.py`）。`restart` 给出时按它（规划缩短重启长度时）。"""
     itemsize = basis_itemsize(_ETA_MIN)
-    m = krylov_restart(n_local_entries, red, flexible=flexible, itemsize=itemsize)
+    m = krylov_restart(n_local_entries, red, flexible=flexible, itemsize=itemsize) if restart is None else int(restart)
     return int(((m + 1) + m * float(flexible)) * int(n_local_entries) * itemsize)
 
 

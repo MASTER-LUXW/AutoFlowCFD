@@ -188,6 +188,11 @@ class CoupledBlockPreconditioner:
         return self.mean.flexible or self.turb.flexible
 
     @property
+    def restart_cap(self):
+        """两个缓存共用的一次规划给出的重启长度上限（`block_budget.py::plan_block_memory`）。"""
+        return self.mean.restart_cap
+
+    @property
     def flexible_fraction(self) -> float:
         """需要存预处理向量的列占比（重启长度按它分内存，`linear_solve.py::krylov_restart`）。"""
         n_flex = N_MEAN_FLOW_VARS * self.mean.flexible + self.n_turb * self.turb.flexible

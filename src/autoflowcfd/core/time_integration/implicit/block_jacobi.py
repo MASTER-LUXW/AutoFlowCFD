@@ -118,7 +118,7 @@ class BlockJacobiCache:
                  "disabled_reason", "n_builds", "red", "n_var", "assembler", "use_ilu", "coupling",
                  "_coupling_graph_fn", "_coupling_graph", "kind", "refresh_slack",
                  "single_copy", "_inverted_dtau", "_coarse", "cross",
-                 "_factored", "_factored_dtau", "_ptc_diag", "shifted")
+                 "_factored", "_factored_dtau", "_ptc_diag", "shifted", "plan")
 
     def __init__(self, *, cell_is_prism, colors: np.ndarray, n_sps: int,
                  n_real_prism: int, n_real_tet: int, n_var: int, plan: BlockPlan,
@@ -166,6 +166,7 @@ class BlockJacobiCache:
         self.last_accepted = True
         self.n_builds = 0
         sizes = (int(self.cell_is_prism.sum()), int((~self.cell_is_prism).sum()), n_real_prism, n_real_tet)
+        self.plan = plan
         mode = plan.turbulence if self.kind.startswith("turbulence") else plan.mean
         # 块 ILU 要面邻居耦合块（解析装配或 P0 差分装配给出）
         self.use_ilu = mode == "ilu"
@@ -343,6 +344,11 @@ class BlockJacobiCache:
         if self._coupling_graph is None:
             self._coupling_graph = self._coupling_graph_fn()
         return self._coupling_graph
+
+    @property
+    def restart_cap(self):
+        """内存规划给出的 GMRES 重启长度上限（None 为不限，`block_budget.py::plan_block_memory`）。"""
+        return self.plan.restart_cap
 
     @property
     def flexible_fraction(self) -> float:

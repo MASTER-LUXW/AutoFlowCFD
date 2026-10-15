@@ -214,7 +214,8 @@ def step_newton_krylov(
     if gmres_restart is None:
         gmres_restart = krylov_restart(u0_flat.size if rows is None else rows.idx.size * n_var, red,
                                        flexible=0.0 if block_precond is None else block_precond.flexible_fraction,
-                                       itemsize=basis_itemsize(eta))
+                                       itemsize=basis_itemsize(eta),
+                                       cap=None if block_precond is None else block_precond.restart_cap)
 
     u_new = u0_flat
     theta = 0.0

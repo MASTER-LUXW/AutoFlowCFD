@@ -41,11 +41,19 @@ BLOCK_MODES = ("ilu", "two", "single")
 _MEAN_FACE_NEIGHBORS = 4.2
 
 #: 残差求值与 Newton 步工作数组占用的内存，以"一个按统一槽位存的 float64 状态数组"（`n_cells × n_sps ×
-#: n_vars × 8` 字节）为单位。标定：cube_demo 粗网格（28.6 万单元）SA P2 的一次耦合残差求值瞬时 +3.77 GiB，
-#: 状态数组 0.346 GiB，比值 10.9；另有 u0、r0、du、试探态等 Newton 步工作数组（同一算例 GMRES 前常驻增量
-#: 约 0.3 GiB）。取 12。2026-10-15 第一版按误读的单元数（19.6 万，实为四面体数）标成 16，多预留 1.4 GiB，
-#: 湍流块差 0.08 GiB 放不下单份、退回对角预处理。
-RESIDUAL_WORK_FACTOR = 12
+#: n_vars × 8` 字节）为单位。标定（cube_demo 粗网格 28.6 万单元 SA P2，状态数组 0.346 GiB，分段内存探针）：
+#: 峰值在 GMRES 阶段——除 Krylov 基之外的瞬时量 5.8 GiB（矩阵向量乘里的残差求值 3.77 GiB、预处理作用与
+#: 真实行展开的全尺寸临时数组），比值 16.8，取 17。只按残差接受判据处的 3.77 GiB 标定（比值 10.9、取 12）
+#: 低估了 2 GiB：同一算例平均流单份 + 湍流 ILU 时进程 27.6 GB，约 4 GB 被换出到磁盘，一步 GMRES 超过一小时。
+RESIDUAL_WORK_FACTOR = 17
+
+#: 为让每个块缓存都至少放得下单份，GMRES 重启长度最多缩到这里（`plan_block_memory`）。对角预处理在大 CFL 下
+#: 几乎不起作用（迭代数随 CFL 增长），缩短重启长度只多几次迭代——但缩得太多同样会停滞（cube_demo 同一线性
+#: 系统 GMRES(30) 198 次、GMRES(60) 46 次，`gmres.py` 模块文档），所以不低于 30、并且只缩到刚好放得下为止。
+RESTART_FLOOR_FOR_BLOCKS = 30
+
+#: 缩短重启长度的步长。
+RESTART_STEP = 5
 
 #: 预留给操作系统、其余进程与分配碎片的余量（字节）。
 MEMORY_HEADROOM = 2 * 2 ** 30
@@ -107,21 +115,24 @@ class BlockPlan:
     budget: int
     available: int
     reserve: int
+    restart_cap: Optional[int] = None
 
     def describe(self) -> str:
         gib = 2 ** 30
+        cap = "" if self.restart_cap is None else f"，GMRES 重启长度缩到 {self.restart_cap}"
         return (f"合计预算 {self.budget / gib:.2f} GiB = 可用 {self.available / gib:.2f} GiB − 预留 "
-                f"{self.reserve / gib:.2f} GiB（Krylov 基、残差求值与 Newton 工作数组、余量）")
+                f"{self.reserve / gib:.2f} GiB（Krylov 基、残差求值与 Newton 工作数组、余量）{cap}")
 
 
 def plan_for_budget(cell_is_prism, n_real_prism: int, n_real_tet: int, n_mean: int, n_turb: int, budget: int,
-                    available: Optional[int] = None, reserve: int = 0) -> BlockPlan:
+                    available: Optional[int] = None, reserve: int = 0, restart_cap: Optional[int] = None) -> BlockPlan:
     """在给定合计预算下为两个缓存定档（`plan_block_memory` 先由可用内存算出预算再调它；测试直接给预算）。"""
     cell_is_prism = np.asarray(cell_is_prism, dtype=bool)
     n_prism = int(cell_is_prism.sum())
     sizes = (n_prism, int(cell_is_prism.size - n_prism), n_real_prism, n_real_tet)
     mean, turb = plan_block_modes(sizes, n_mean, n_turb, int(budget))
-    return BlockPlan(mean, turb, int(budget), int(budget if available is None else available), int(reserve))
+    return BlockPlan(mean, turb, int(budget), int(budget if available is None else available), int(reserve),
+                     restart_cap)
 
 
 def plan_block_memory(red, cell_is_prism, n_sps: int, n_real_prism: int, n_real_tet: int,
@@ -137,7 +148,9 @@ def plan_block_memory(red, cell_is_prism, n_sps: int, n_real_prism: int, n_real_
     """
     from autoflowcfd.core.utils.system_memory import available_bytes
 
-    from .linear_solve import krylov_basis_bytes
+    from .forcing import _ETA_MIN
+    from .gmres import basis_itemsize
+    from .linear_solve import krylov_basis_bytes, krylov_restart
 
     cell_is_prism = np.asarray(cell_is_prism, dtype=bool)
     n_prism = int(cell_is_prism.sum())
@@ -147,13 +160,29 @@ def plan_block_memory(red, cell_is_prism, n_sps: int, n_real_prism: int, n_real_
     fixed = RESIDUAL_WORK_FACTOR * cell_is_prism.size * n_sps * n_vars * 8 + MEMORY_HEADROOM
     available = available_bytes(red.xp)
 
-    def plan(flexible_fraction: float) -> BlockPlan:
-        reserve = krylov_basis_bytes(real_entries, red, flexible=flexible_fraction) + fixed
+    def plan(flexible_fraction: float, restart_cap: Optional[int]) -> BlockPlan:
+        reserve = krylov_basis_bytes(real_entries, red, flexible=flexible_fraction, restart=restart_cap) + fixed
         budget = int(red.min(red.xp.asarray([float(max(available - reserve, 0))])))
-        return plan_for_budget(cell_is_prism, n_real_prism, n_real_tet, n_mean, n_turb, budget, available, reserve)
+        return plan_for_budget(cell_is_prism, n_real_prism, n_real_tet, n_mean, n_turb, budget, available, reserve,
+                               restart_cap)
 
-    # 只有块 ILU 档的那一块会用多层（非线性）预处理、要存预处理向量（`gmres.py` 模块文档"部分灵活"）。先按
-    # "平均流线性、湍流非线性"规划；平均流选到块 ILU 时它也变成非线性，按整份灵活重新规划（结果再降档也安全：
-    # 预留只多不少）。
-    first = plan(n_turb / n_vars)
-    return first if first.mean != "ilu" else plan(1.0)
+    def plan_at(restart_cap: Optional[int]) -> BlockPlan:
+        # 只有块 ILU 档的那一块会用多层（非线性）预处理、要存预处理向量（`gmres.py` 模块文档"部分灵活"）。先按
+        # "平均流线性、湍流非线性"规划；平均流选到块 ILU 时它也变成非线性，按整份灵活重新规划（结果再降档也
+        # 安全：预留只多不少）。
+        first = plan(n_turb / n_vars, restart_cap)
+        return first if first.mean != "ilu" else plan(1.0, restart_cap)
+
+    def complete(p: BlockPlan) -> bool:
+        return p.mean is not None and (n_turb == 0 or p.turbulence is not None)
+
+    full = plan_at(None)
+    if complete(full):
+        return full
+    # 有缓存连单份都放不下：缩短 GMRES 重启长度换内存，取第一个让每个缓存都有块预处理的长度
+    default_restart = krylov_restart(real_entries, red, flexible=1.0, itemsize=basis_itemsize(_ETA_MIN))
+    for m in range(default_restart - RESTART_STEP, RESTART_FLOOR_FOR_BLOCKS - 1, -RESTART_STEP):
+        candidate = plan_at(m)
+        if complete(candidate):
+            return candidate
+    return full

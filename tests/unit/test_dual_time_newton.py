@@ -175,6 +175,8 @@ def test_krylov_operator_takes_the_pseudo_time_term_from_this_step():
 
         recoverable = False
 
+        restart_cap = None
+
         def recover(self, *args):
             return False
 
