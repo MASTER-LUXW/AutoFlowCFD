@@ -73,3 +73,27 @@ def test_prism_side_sources_reproduce_its_own_flux_point_positions(order, layout
         np.testing.assert_allclose(other, own, atol=1e-10)
         checked += 1
     assert checked == 1
+
+
+@pytest.mark.parametrize("order", [1, 2])
+def test_conformal_prism_quad_face_is_single_source_and_table_keeps_only_two_cell_faces(order):
+    """共形棱柱-棱柱四边形面两半来自同一个棱柱：次源并进主源（`merge.py::_merge_single_cell_halves`），单一来源
+    仍逐点复现自身通量点坐标；次源表只留真正两个单元的面（两四面体网格上恰好 1 个，共形网格上 0 个）。"""
+    from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
+
+    mesh = _build_synthetic_mixed_mesh(order)
+    flat = get_flat_face_geometry(mesh, mesh.operators)
+    X = np.asarray(mesh.sps_coords).reshape(mesh.n_cells, mesh.n_sps_per_cell, 3)
+    n_prism = mesh.n_prism_cells
+    pp = [f for f in range(flat.n_faces) if not flat.is_boundary[f] and flat.owner_is_primary[f]
+          and flat.owner_cell[f] < n_prism and flat.neighbor_cell[f] < n_prism]
+    assert pp, "合成网格里应有棱柱-棱柱共享的四边形侧面"
+    for f in pp:
+        assert flat.neighbor_src1_idx[f] == -1
+        c0 = int(flat.neighbor_src0_cell[f])
+        own = flat.boundary_extrap_native[flat.owner_face_op[f]] @ X[flat.owner_cell[f]]
+        np.testing.assert_allclose(flat.neighbor_src0_tpl[flat.neighbor_src0_tid[f]] @ X[c0], own, atol=1e-10)
+    assert flat.neighbor_src1_cell.size == 0 and flat.owner_src1_cell.size == 0
+
+    two_mesh = _mesh(order, "standard")
+    assert get_flat_face_geometry(two_mesh, two_mesh.operators).neighbor_src1_cell.size == 1

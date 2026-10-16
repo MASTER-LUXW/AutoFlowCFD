@@ -100,8 +100,11 @@ def test_distributed_artificial_viscosity_nk_matches_single_machine():
         dist.step(0.0)
         a, b = dist._newton_last_info, single._newton_last_info
         assert a["gmres_iters"] == b["gmres_iters"], f"第 {k + 1} 步 GMRES 次数不同：{a} vs {b}"
-        # 残差范数含大量相消项（密度扰动场），compact 换序的重结合噪声被放大到 ~2e-9
-        assert abs(a["res_norm"] / b["res_norm"] - 1) < 1e-8, (a["res_norm"], b["res_norm"])
+        # 残差范数含大量相消项（密度扰动场），把状态上的重结合噪声放大 1e2~1e3 倍：两条路径状态相对差在
+        # 1e-10 量级时，第 3 步残差范数相对差实测 4.5e-9（2026-10-15 前）/ 2.0e-8（共形四边形面次源并入主源后，
+        # 状态相对差 1.5e-10 -> 1.05e-10 反而更小、GMRES 次数与线性残差逐位一致）。判据取 1e-7；两条路径是否
+        # 一致由下面的状态判据（1e-9）与逐步 GMRES 次数判定
+        assert abs(a["res_norm"] / b["res_norm"] - 1) < 1e-7, (a["res_norm"], b["res_norm"])
     assert dist._newton_block_precond.assembler is not None, "分布式隐式步未走解析装配"
     rel = np.abs(dist.state.U[:n] - single.state.U).max() / np.abs(single.state.U).max()
     assert rel < 1e-9, rel

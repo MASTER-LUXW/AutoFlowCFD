@@ -234,15 +234,20 @@ def step(solver, dt: float) -> float:
         # 积分器要的 `Gamma R`——不额外分配 1.2GiB（P2 规模）的数组。
         residual0_raw = mean_flow_residual_raw(U_flat)
         solver.state.dU_dt = (-residual0_raw).reshape(n_cells, n_sps, n_vars)
-        if solver.low_mach_precond_enabled:
-            from autoflowcfd.core.utils.preconditioning import (
-                apply_low_mach_preconditioner,
-            )
-            residual0_raw = apply_low_mach_preconditioner(
-                residual0_raw, solver.state.Q, solver.freestream["mach_ref"],
-                out=residual0_raw,
-            )
-        residual0 = residual0_raw.reshape(n_cells * n_sps, n_vars)
+        residual0 = None
+        if scheme not in (TimeIntegrationScheme.DUAL_TIME, TimeIntegrationScheme.NEWTON_KRYLOV):
+            # 只有显式积分器复用它；隐式步自己在基态上求残差，这里留着它只会在整个 Newton 步里多占一个
+            # 全尺寸数组（cube_demo 粗网格 P2 为 0.29 GiB，正落在线性求解的内存峰值上）
+            if solver.low_mach_precond_enabled:
+                from autoflowcfd.core.utils.preconditioning import (
+                    apply_low_mach_preconditioner,
+                )
+                residual0_raw = apply_low_mach_preconditioner(
+                    residual0_raw, solver.state.Q, solver.freestream["mach_ref"],
+                    out=residual0_raw,
+                )
+            residual0 = residual0_raw.reshape(n_cells * n_sps, n_vars)
+        del residual0_raw
 
         # 模态滤波回调（S-05 补充修复）：见 fr_solver_filter.py 文档——
         # 必须传给 TimeIntegrator，由它在*每个* RK stage 的正定性投影

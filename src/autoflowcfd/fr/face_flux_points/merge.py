@@ -49,6 +49,25 @@ def _get_ms_numba_kernel():
         _build_ms_interp_parallel = build_ms_interp_parallel
     return _build_ms_interp_parallel
 
+def _merge_single_cell_halves(faces, mixed, pn_cell, sec_cell, mask, interp, extra_cells, extra_mats, src1_idx):
+    """多源面里两半来自同一个单元的（共形棱柱-棱柱四边形面，两条三角形子面的跨单元邻居是同一个棱柱）：
+    次源矩阵（只在另一半的通量点行非零）并进主源矩阵（只在本半的行非零）、改为单一来源；次源表只保留
+    真正来自两个不同单元的面。返回压缩后的 `(extra_cells, extra_mats)`，`src1_idx` 原地重排。
+
+    两个矩阵在对方的行上都是零，并入后每行的权重与求和顺序都不变；并入的那一半随主源矩阵一起进模板去重
+    （`templates.py`，同一模板内逐元素差 < 1e-13），所以与并入前只差模板容差：cube_demo 粗网格（28.6 万
+    单元）P2 基态残差最大相对差 1.8e-13。两侧各约 13.6 万个多源面，真正两个单元的只有 297 个：次源表从各
+    0.25 GiB 降到约 0.5 MiB，界面核在这些面上也少一次来源插值。混合分组（另半区是域边界）没有次源，不进表。"""
+    same = ~mixed & (pn_cell == sec_cell)
+    if same.any():
+        fs = faces[same]
+        interp[fs] = np.where(mask[fs][:, :, None], interp[fs], extra_mats[np.nonzero(same)[0]])
+        src1_idx[fs] = -1
+    keep = np.nonzero(~mixed & ~same)[0]
+    src1_idx[faces[keep]] = np.arange(keep.size, dtype=np.int64)
+    return extra_cells[keep], np.ascontiguousarray(extra_mats[keep])
+
+
 def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFluxPointGeometry]:
     """为 face_conn 里的每个面预计算 Flux Points 几何（正确处理棱柱四边形
     侧面被拆分成 1~2 个真实相邻单元的情形，见模块文档）。"""
@@ -355,16 +374,16 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         # 解点值配 B 单元的插值权重（两侧公共通量不相等、离散不守恒）。共形的棱柱-棱柱四边形面两条子面邻居
         # 相同，看不出来；棱柱四边形侧面挨着两个四面体时错（cube_demo 粗网格 297 处，
         # tests/unit/test_prism_quad_two_tet_sources.py）。混合分组没有次源（src1_idx 保持 -1），值不被读取。
-        _nb_extra_cells = _ms_nb_sec_cell.astype(np.int64)
-        _ow_extra_cells = _ms_ow_sec_cell.astype(np.int64)
-        # 更新 src1_idx（混合分组无次源，保持 -1；另半区由残差 kernel 的
+        _nb_extra_cells, _nb_extra_mats_arr = _merge_single_cell_halves(
+            _multi_nb_faces, _ms_nb_mixed, _ms_nb_pn_cell, _ms_nb_sec_cell, nb_mask, _nb_interp,
+            _ms_nb_sec_cell.astype(np.int64), _nb_extra_mats_arr[:len(_multi_nb_faces)], nb_src1_idx)
+        _ow_extra_cells, _ow_extra_mats_arr = _merge_single_cell_halves(
+            _multi_ow_faces, _ms_ow_mixed, _ms_ow_pn_cell, _ms_ow_sec_cell, ow_mask, _ow_interp,
+            _ms_ow_sec_cell.astype(np.int64), _ow_extra_mats_arr[:len(_multi_ow_faces)], ow_src1_idx)
+        logger.info(f"  Two-cell multi-source faces kept as second sources: nb={len(_nb_extra_cells)}, "
+                    f"ow={len(_ow_extra_cells)}")
+        # src1_idx 由 `_merge_single_cell_halves` 定（混合分组无次源，保持 -1；另半区由残差 kernel 的
         # mixed_{nb,ow}_partner/mask 分支逐 FP 取边界幽灵态）
-        for i, f in enumerate(_multi_nb_faces):
-            if mixed_nb_partner[f] < 0:
-                nb_src1_idx[f] = i
-        for i, f in enumerate(_multi_ow_faces):
-            if mixed_ow_partner[f] < 0:
-                ow_src1_idx[f] = i
         # src0 cell（矩阵已由 ms_kernel 原地写进 _nb_interp/_ow_interp 的
         # multi-source 面对应位置，见上面"内存说明"，不再单独拷贝）
         nb_src0_cell[_multi_nb_faces] = _ms_nb_pn_cell.astype(np.int64)
@@ -443,14 +462,8 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         mixed_p0_bnd_frac=mixed_p0_bnd_frac,
         owner_tri_slot=owner_tri_slot,
         neighbor_tri_slot=neighbor_tri_slot,
-        _mesh=mesh,
         _face_conn=face_conn,
         _sps_1d=sps_1d,
-        _nb_fc=_nb_fc, _nb_resid=_nb_resid,
-        _ow_fc=_ow_fc, _ow_resid=_ow_resid,
-        _nb_cell_id=_nb_cell_id, _ow_cell_id=_ow_cell_id,
-        _is_lower_fp_standard=is_lower_fp_standard,
-        _is_lower_fp_flipped=is_lower_fp_flipped,
         _owner_groups=owner_groups,
         _neighbor_groups=neighbor_groups,
     )

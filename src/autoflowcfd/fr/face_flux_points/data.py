@@ -93,10 +93,7 @@ class _KernelFaceData:
         'mixed_nb_partner', 'mixed_nb_mask', 'mixed_ow_partner', 'mixed_ow_mask',
         'mixed_bnd_face', 'mixed_p0_bnd_frac',
         'owner_tri_slot', 'neighbor_tri_slot',
-        '_mesh', '_face_conn', '_sps_1d',
-        '_nb_fc', '_nb_resid', '_ow_fc', '_ow_resid',
-        '_nb_cell_id', '_ow_cell_id',
-        '_is_lower_fp_standard', '_is_lower_fp_flipped',
+        '_face_conn', '_sps_1d',
         '_owner_groups', '_neighbor_groups',
         '_cache',
     )
