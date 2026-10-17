@@ -2,10 +2,10 @@
 
 每个壁面通量点 x_fp（单位外法向 n，流体 -> 壁）沿内法向取匹配点
 
-    x_m = x_fp - h_wm n，  h_wm = d - n . c
+    x_m = x_fp - h_wm n，  h_wm = (x_fp - c) . n
 
-c 为 owner 单元的积分形心、`n . x = d` 为壁面面记录所在平面（`FlatFaceGeometry.face_plane`），即匹配点与形心
-同高（贴壁单元的中部）。h_wm 取自平面而不是通量点坐标：P0 每面一个通量点，解点外插只能得到单元中心。匹配点在 owner 单元里的参考坐标由解点坐标的
+c 为 owner 单元的积分形心，即匹配点与形心同高（贴壁单元的中部）。通量点坐标取自唯一来源
+`core/fr_operators/face_points.py::flux_point_positions`（P0 每面一个通量点，解点外插只能得到单元中心）。匹配点在 owner 单元里的参考坐标由解点坐标的
 插值多项式反解（直边单元的几何映射在该多项式空间里，P>=1 时插值精确；四面体一次 Newton 即精确，棱柱为双线性、
 几步收敛）。斜单元上匹配点若越出 owner 单元，沿 x_fp -> x_m 线段二分到单元内最远点，h_wm 按实际取值。
 P0 每单元一个解点（单元值），插值行即该解点。
@@ -116,21 +116,21 @@ def build_wall_matching(mesh, flat, points, cell_is_prism: np.ndarray, W: np.nda
     """
     from autoflowcfd.fr.native_padding import real_sps_per_cell
 
-    face, ghost, fp, code = points
+    from autoflowcfd.core.fr_operators.face_points import flux_point_positions
+
+    face, _, fp, code = points
     owner = np.asarray(flat.owner_cell)[face].astype(np.int64)
     face_op = np.asarray(flat.owner_face_op)[face].astype(np.int64)
     X_sp = np.asarray(mesh.sps_coords, dtype=np.float64)
     m, n_sps = len(face), X_sp.shape[1]
 
-    E_o = np.asarray(flat.boundary_extrap_native)[face_op, fp]                 # (m, n_sps)
-    x_fp = np.einsum('ks,ksd->kd', E_o, X_sp[owner])
-    plane = np.asarray(flat.face_plane)[ghost]                                 # 壁面边界记录的平面
-    normal = np.ascontiguousarray(plane[:, :3])
+    x_fp = flux_point_positions(mesh, flat, face, fp)
+    normal = np.asarray(flat.true_normal)[face, fp]
     area = np.asarray(flat.true_area_weight)[face, fp]
     lift = np.ascontiguousarray(np.asarray(flat.lift_native)[face_op, :, fp])  # (m, n_sps)
     inv_det = np.where(W[owner] > 0.0, 1.0 / det[owner], 0.0)                 # 填充槽位（权重 0）不写残差
     centroid = np.einsum('cs,csd->cd', W, X_sp) / W.sum(axis=1)[:, None]
-    h_wm = plane[:, 3] - np.einsum('kd,kd->k', normal, centroid[owner])
+    h_wm = np.einsum('kd,kd->k', x_fp - centroid[owner], normal)
     if np.any(h_wm <= 0.0):
         raise ValueError(f"{int(np.count_nonzero(h_wm <= 0.0))} 个壁面通量点的 owner 单元形心不在流体一侧（法向朝向错误）")
 

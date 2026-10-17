@@ -25,6 +25,7 @@ from autoflowcfd.core.fr_operators.flux_kernels.viscous_bc import boundary_other
 from autoflowcfd.core.fr_operators.small_dense import extrap_tensor3x3, matvec_small
 from autoflowcfd.core.fr_residual.face_point_jumps import inviscid_common_flux_point, viscous_common_flux_point
 from autoflowcfd.core.fr_residual.inviscid_kernel import _extrap_matmul
+from autoflowcfd.core.fr_operators.face_points import flux_point_positions
 from autoflowcfd.core.fr_residual.wall_points import wall_flux_points
 
 
@@ -39,12 +40,11 @@ class WallSamples:
 
 @njit(cache=True, parallel=True)
 def _wall_point_fluxes(rec, ghost, fp, owner_cell, owner_face_op, E_all, adj_rows, ref_w, ip_length,
-                       Q, Q_ghost, grad_vel, grad_T, mu_t, sps_coords, vbc_kind,
+                       Q, Q_ghost, grad_vel, grad_T, mu_t, vbc_kind,
                        mach_ref, precond_mode, mu, Pr, Pr_t, c_ip, p_ref, viscous):
     m = rec.shape[0]
     f_inv = np.zeros((m, 3))
     f_vis = np.zeros((m, 3))
-    pos = np.zeros((m, 3))
     for k in prange(m):
         f = rec[k]
         g = ghost[k]
@@ -52,13 +52,11 @@ def _wall_point_fluxes(rec, ghost, fp, owner_cell, owner_face_op, E_all, adj_row
         oc = owner_cell[f]
         E = E_all[owner_face_op[f]][i:i + 1]                  # (1, n_sps)
         Q_o = _extrap_matmul(Q[oc], E)[0]
-        x_o = _extrap_matmul(sps_coords[oc], E)[0]
         a = adj_rows[f, i]
         w = ref_w[i]
         F = inviscid_common_flux_point(Q_o, Q_ghost[g, i], a, mach_ref, precond_mode)
         for d in range(3):
             f_inv[k, d] = w * (F[1 + d] - p_ref * a[d])
-            pos[k, d] = x_o[d]
         if viscous:
             gv_o = extrap_tensor3x3(grad_vel[oc], E)[0]
             gT_o = _extrap_matmul(grad_T[oc], E)[0]
@@ -69,7 +67,7 @@ def _wall_point_fluxes(rec, ghost, fp, owner_cell, owner_face_op, E_all, adj_row
                                           a, ip_length[f], bk, mu, Pr, Pr_t, c_ip)
             for d in range(3):
                 f_vis[k, d] = -w * G[1 + d]
-    return f_inv, f_vis, pos
+    return f_inv, f_vis
 
 
 def sample_wall(solver, codes: Sequence[int], viscous: bool = True) -> WallSamples:
@@ -105,16 +103,18 @@ def sample_wall(solver, codes: Sequence[int], viscous: bool = True) -> WallSampl
         mu_t = np.zeros((1, n_sps))
     vbc_kind = build_viscous_boundary_kind(flat.n_faces, flat.is_boundary, provider)
     vbc_kind = np.ascontiguousarray(vbc_kind[used])
-    f_inv, f_vis, pos = _wall_point_fluxes(
+    f_inv, f_vis = _wall_point_fluxes(
         rec, ghost_pos.astype(np.int64), fp, flat.owner_cell, flat.owner_face_op, flat.boundary_extrap_native,
         flat.owner_adj_row_exact, flat.ref_area_weight, flat.ip_length,
-        Q, Q_ghost, grad_vel, grad_T, mu_t, np.ascontiguousarray(mesh.sps_coords), vbc_kind,
+        Q, Q_ghost, grad_vel, grad_T, mu_t, vbc_kind,
         float(host.freestream["mach_ref"]), int(resolve_ausm_precond_mode()),
         float(host.mu_molecular), PRANDTL, PRANDTL_TURBULENT, resolve_viscous_ip_constant(int(mesh.order)),
         float(host.freestream["p_inf"]), bool(viscous))
     wmles = getattr(host, "wmles_model", None)
     if viscous and wmles is not None:
         _add_wall_model_traction(f_vis, wmles, host, mesh, flat, provider, rec, fp)
+    # 力臂：通量点的物理坐标（唯一来源；P0 每面一个通量点，解点外插只能得到单元中心）
+    pos = flux_point_positions(mesh, flat, rec, fp)
     return WallSamples(f_inv, f_vis, pos, code)
 
 

@@ -117,5 +117,6 @@ def test_compute_inlet_fp_positions_on_native_tet_face():
     fc = mesh.face_connectivity
     tet_boundary_faces = np.flatnonzero(fc.is_boundary & (fc.owner_cell >= mesh.n_prism_cells))
     assert tet_boundary_faces.size > 0
-    positions = _compute_inlet_fp_positions(SimpleNamespace(mesh=mesh, ops=mesh.operators), fc, fc.is_boundary.copy())
-    assert all(np.all(np.isfinite(positions[f])) for f in tet_boundary_faces if f in positions)
+    positions = _compute_inlet_fp_positions(SimpleNamespace(mesh=mesh, ops=mesh.operators), fc.is_boundary.copy())
+    assert set(positions) == set(np.flatnonzero(fc.is_boundary).tolist())
+    assert all(np.all(np.isfinite(positions[f])) for f in tet_boundary_faces)

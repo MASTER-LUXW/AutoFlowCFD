@@ -148,13 +148,19 @@ class InletSEMGhostState:
         self.Q_mean = np.asarray(Q_mean, dtype=float)
         self.reynolds_stress = reynolds_stress
 
+    def restricted_to_faces(self, face_ids: np.ndarray) -> "InletSEMGhostState":
+        """面号换成 `face_ids` 的下标（分布式：`face_ids` 是本 rank 面序对应的全局面号）；涡核对象共享
+        （每个物理步推进一次，见 `synthetic_inlet.py::advance_synthetic_inlets`）。"""
+        local = {int(i): self.face_positions[int(g)] for i, g in enumerate(np.asarray(face_ids))
+                 if int(g) in self.face_positions}
+        return InletSEMGhostState(self.sem, local, self.Q_mean, self.reynolds_stress)
+
     def __call__(self, face_idx: int, Q_owner_fp: np.ndarray, true_normal: np.ndarray) -> np.ndarray:
         positions = self.face_positions.get(face_idx)
         if positions is None:
-            # 该面不在预先构造涡核影响区时枚举到的 INLET 面集合里（理论上
-            # 不应发生，因为 face_positions 是按同一批 INLET 面构造的），
-            # 兜底退回常量均值状态而不是崩溃。
-            return np.tile(self.Q_mean, (Q_owner_fp.shape[0], 1))
+            # 坐标表按该组全部面记录构造（`fr_solver/boundary/ghost.py::_compute_inlet_fp_positions`），查不到
+            # 说明面号空间错了（例如分布式用本 rank 面号查全局面号的表）——此前静默返回无脉动的均值态
+            raise KeyError(f"SEM 入口面 {face_idx} 不在坐标表里（面号空间与构造时不一致）")
 
         mean_u = self.Q_mean[1:4]
         u_inst = self.sem.generate_fluctuations(positions, mean_u, self.reynolds_stress)  # (n_fp,3)
@@ -284,6 +290,21 @@ class BoundaryGhostStateProvider(GhostStateProvider):
     def config_of_code(self, code: int) -> dict:
         return self.code_to_config.get(int(code), self.default_config)
 
+    def restricted_to_faces(self, face_ids: np.ndarray) -> "BoundaryGhostStateProvider":
+        """只含 `face_ids` 这些面、面号换成其下标的 provider（分布式：全局 provider -> 本 rank 面序）。
+
+        组编码与按面号查表的 SEM 入口坐标一起换（此前四处分布式构造点只重切 `group_code`，SEM 坐标表仍以
+        全局面号为键：本 rank 面号要么查不到、要么查到别处的坐标）。
+        """
+        face_ids = np.asarray(face_ids, dtype=np.int64)
+        configs = {}
+        for code, cfg in self.code_to_config.items():
+            if cfg.get("sem") is not None:
+                cfg = dict(cfg, sem=cfg["sem"].restricted_to_faces(face_ids))
+            configs[code] = cfg
+        return BoundaryGhostStateProvider(np.asarray(self.group_code)[face_ids], configs, self.default_config,
+                                          code_to_name=self.code_to_name)
+
     def __call__(self, face_idx: int, Q_owner_fp: np.ndarray, true_normal: np.ndarray) -> np.ndarray:
         return self.ghost_states(np.array([face_idx]), Q_owner_fp[np.newaxis], true_normal[np.newaxis])[0]
 
@@ -403,3 +424,11 @@ def build_viscous_boundary_kind(n_faces: int, is_boundary: np.ndarray, ghost_pro
     except AttributeError:  # 只读/带 __slots__ 的 provider，放弃缓存即可
         pass
     return kind
+
+
+def restrict_ghost_provider(provider, face_ids: np.ndarray):
+    """把幽灵态提供者限制到 `face_ids`（分布式本 rank 面序）：`BoundaryGhostStateProvider` 用其
+    `restricted_to_faces`；None 原样返回。"""
+    if provider is None:
+        return None
+    return provider.restricted_to_faces(face_ids)

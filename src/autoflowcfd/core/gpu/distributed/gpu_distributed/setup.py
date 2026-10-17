@@ -374,10 +374,9 @@ class _MultiGPUSetupMixin:
         # `group_code[partition.local_faces[i]]`（全局空间）。只有真正
         # 构造出 `BoundaryGhostStateProvider`（有 `group_code` 属性）时
         # 才重映射，`None`/自定义 callable（没有这个属性）不受影响。
-        if self.boundary_ghost_provider is not None and hasattr(self.boundary_ghost_provider, 'group_code'):
-            self.boundary_ghost_provider.group_code = (
-                self.boundary_ghost_provider.group_code[self.partition.local_faces]
-            )
+        from autoflowcfd.boundary.fr_ghost_state import restrict_ghost_provider
+
+        self.boundary_ghost_provider = restrict_ghost_provider(self.boundary_ghost_provider, self.partition.local_faces)
 
         # WALL 边界面拓扑掩码（compact 索引空间，SST k/omega 输运
         # Dirichlet BC 用，2026-09-02 补齐——与单机 GPUFRSolver 同一个

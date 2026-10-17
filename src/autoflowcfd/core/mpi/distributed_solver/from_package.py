@@ -321,7 +321,7 @@ class _DistributedFromPackageMixin:
             # （67%）压缩面会被分配到错误的边界组编码。修复：把
             # `group_code` 重映射到压缩索引空间。
             provider = getattr(self._local_solver, 'boundary_ghost_provider', None)
-            if provider is not None and hasattr(provider, 'group_code'):
+            if provider is not None:
                 # P0 分布式残差路径（2026-09-02，见 core/mpi/
                 # distributed_order_continuation.py 模块文档"P0 有限
                 # 体积残差"一节）需要一份**未经压缩索引空间重映射**的
@@ -332,7 +332,9 @@ class _DistributedFromPackageMixin:
                 # 仍然原地重映射 `self._local_solver.boundary_ghost_
                 # provider` 本身（P1+ 路径继续使用压缩索引空间版本，
                 # 行为不变）。
-                import copy as _copy
-                self._p0_global_boundary_ghost_provider = _copy.copy(provider)
-                provider.group_code = provider.group_code[self.partition.local_faces]
+                from autoflowcfd.boundary.fr_ghost_state import restrict_ghost_provider
+
+                self._p0_global_boundary_ghost_provider = provider
+                self._local_solver.boundary_ghost_provider = restrict_ghost_provider(
+                    provider, self.partition.local_faces)
         return self._local_solver

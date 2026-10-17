@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - 边界幽灵态 provider（含 SEM 入口 FP 位置）
 
-从 `src/autoflowcfd/core/fr_solver/boundary.py`(原 506 行)拆出(2026-09-24, 项目"单文件不超 500 行"规范)。**纯搬家, 逻辑未改**。
+从 `core/fr_solver/boundary.py` 拆出（2026-09-24，单文件不超 500 行规范）。
 """
 
 from typing import Any, Dict, Optional
@@ -14,36 +14,21 @@ from autoflowcfd.boundary.fr_ghost_state import BoundaryGhostStateProvider, Inle
 from autoflowcfd.grid.connectivity.face_connectivity_boundary_tags import tag_boundary_groups_for_mesh
 
 
-def _compute_inlet_fp_positions(solver, face_conn, is_target_face: np.ndarray) -> Dict[int, np.ndarray]:
-    """预计算一组边界面各自 Flux Points 的物理坐标。
+def _compute_inlet_fp_positions(solver, is_target_face: np.ndarray) -> Dict[int, np.ndarray]:
+    """一组边界面记录（全部记录，含拆分四边形的非主记录）各自通量点的物理坐标 `{面号: (n_fp, 3)}`。
 
-    Flux Points 几何（fr/face_flux_points/geometry.py::FaceFluxPointGeometry）本身
-    不存储物理坐标（只存插值矩阵/法向/面积权重，见 G-01 数值审计发现），
-    这里用同一个外插矩阵直接作用在 `mesh.sps_coords`（SPs 的物理坐标场）
-    上——外插算子是线性的，对坐标分量和对流场分量做外插是同一个矩阵
-    运算，不需要另外实现一套"参考坐标 -> 物理坐标"映射。
+    坐标取自唯一来源 `core/fr_operators/face_points.py::flux_point_positions`（P>=1 解点外插精确；P0 每面
+    一个通量点，外插只能得到单元中心，取构造面几何时由网格节点算出的位置）。
     """
-    mesh = solver.mesh
-    ops = solver.ops
-    positions: Dict[int, np.ndarray] = {}
+    from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+    from autoflowcfd.core.fr_operators.face_points import flux_point_positions
 
-    for f in np.nonzero(is_target_face)[0]:
-        ffp = mesh.face_flux_points[f]
-        if not ffp.owner_is_primary:
-            continue
-        owner_cell = int(face_conn.owner_cell[f])
-        oc_code = int(face_conn.owner_cube_face[f])
-        # 原生面（四面体 [6,10) / 棱柱 [10,15)）统一走
-        # `ops.native_face_extrap(编码, 坍缩顶点槽位)`，不在这里自己取表 ——
-        # 两类单元的键与 n_native 都不同，配错不会报错、只会静默用错
-        # 矩阵（见 FROperators 里那段说明）。只对 `mesh.sps_coords` 的
-        # 真实自由度切片 `[:n_native]` 求值。这条路径只在 LES/DDES 的
-        # INLET SEM 合成湍流入口用到。
-        E = ops.native_face_extrap(oc_code, int(mesh.face_flux_points.owner_tri_slot[f]))  # (n_fp, n_native)
-        positions[f] = E @ mesh.sps_coords[owner_cell][:E.shape[1]]
-
-    return positions
-
+    flat = get_flat_face_geometry(solver.mesh, solver.ops)
+    faces = np.flatnonzero(np.asarray(is_target_face))
+    n_fp = int(flat.n_fp)
+    xyz = flux_point_positions(solver.mesh, flat, np.repeat(faces, n_fp), np.tile(np.arange(n_fp), faces.size))
+    xyz = xyz.reshape(faces.size, n_fp, 3)
+    return {int(f): xyz[k] for k, f in enumerate(faces)}
 
 def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]]) -> Optional[BoundaryGhostStateProvider]:
     """构建边界幽灵态提供者 (BD-01)。
@@ -199,7 +184,7 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
             from autoflowcfd.boundary.synthetic_inlet import SyntheticEddyMethod, synthetic_inlet_seed
 
             is_this_group_face = group_code == code
-            positions_by_face = _compute_inlet_fp_positions(solver, face_conn, is_this_group_face)
+            positions_by_face = _compute_inlet_fp_positions(solver, is_this_group_face)
             if positions_by_face:
                 all_positions = np.concatenate(list(positions_by_face.values()), axis=0)
                 # SEM 入口的平动方向同样按真实来流方向（此前硬编码 +x）

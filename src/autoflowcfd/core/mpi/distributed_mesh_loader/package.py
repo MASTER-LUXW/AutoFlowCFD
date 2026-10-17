@@ -8,7 +8,6 @@
 """
 
 from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
-import copy
 import numpy as np
 from typing import Optional
 
@@ -256,13 +255,9 @@ def build_fully_distributed_rank_package(
     # 完整 provider 后再切（那样仍然需要先有完整 provider 才能切，
     # provider 本身不大，但如果 code_to_config/其余标量属性之外还有
     # 别的大数组字段就会浪费——目前只有 group_code 是数组字段）。
-    boundary_ghost_provider = None
-    if boundary_ghost_provider_global is not None:
-        boundary_ghost_provider = copy.copy(boundary_ghost_provider_global)
-        if hasattr(boundary_ghost_provider, 'group_code'):
-            boundary_ghost_provider.group_code = (
-                boundary_ghost_provider_global.group_code[partition.local_faces]
-            )
+    from autoflowcfd.boundary.fr_ghost_state import restrict_ghost_provider
+
+    boundary_ghost_provider = restrict_ghost_provider(boundary_ghost_provider_global, partition.local_faces)
 
     # 输运模型（SST 族、SA-neg）：wall_distance/h_max/h_wn 都只需要 root 手上
     # 的**完整**全局网格（`compute_distributed_wall_distance`/

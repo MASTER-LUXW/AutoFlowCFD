@@ -187,11 +187,10 @@ def wrap_inlet_with_profile(provider, solver, inlet_plane_name,
         raise ValueError(
             f"在 provider 里找不到 {inlet_plane_name} 对应的 group_code")
     is_target = np.asarray(provider.group_code) == code
-    positions = _compute_inlet_fp_positions(
-        solver, solver.mesh.face_connectivity, is_target)
+    positions = _compute_inlet_fp_positions(solver, is_target)
     if not positions:
         raise ValueError(
-            f"{inlet_plane_name} 组里没有 owner_is_primary 的边界面 —— "
+            f"{inlet_plane_name} 组里没有边界面 —— "
             f"剖面入口不会生效")
     return ProfileInletGhostProvider(provider, code, positions, profile_fn,
                                      bc_type=bc_type)

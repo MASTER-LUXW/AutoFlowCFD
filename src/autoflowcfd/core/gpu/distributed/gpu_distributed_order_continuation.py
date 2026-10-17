@@ -163,11 +163,10 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
 
     # --- 4. boundary_ghost_provider（SEM 入口幽灵态按当时阶数的 FP
     # 几何预存了每面 FP 物理坐标，必须重建）---
-    solver.boundary_ghost_provider = build_boundary_ghost_provider(solver, bc_overrides={})
-    if solver.boundary_ghost_provider is not None and hasattr(solver.boundary_ghost_provider, 'group_code'):
-        solver.boundary_ghost_provider.group_code = (
-            solver.boundary_ghost_provider.group_code[solver.partition.local_faces]
-        )
+    from autoflowcfd.boundary.fr_ghost_state import restrict_ghost_provider
+
+    solver.boundary_ghost_provider = restrict_ghost_provider(
+        build_boundary_ghost_provider(solver, bc_overrides={}), solver.partition.local_faces)
 
     # WALL 边界面拓扑掩码（compact 索引空间，SST k/omega 输运 Dirichlet
     # BC 用）——与 __init__ 同一套构造，压缩面数已随上面的重建改变。
