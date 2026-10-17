@@ -3,8 +3,7 @@ AutoFlowCFD - 边界面组标签打标 (从 face_connectivity.py 拆出，控制
 
 本模块提供三个把 FRFaceConnectivity 的边界面按所属边界组
 （WALL/INLET/OUTLET/...）打标签的函数，供 fr_solver/boundary.py 的 BC
-幽灵态构建、core/utils/solver_helpers.py 的 WMLES 壁面剪应力、
-postprocess/fr_coefficients.py 的气动系数积分等调用点统一复用。
+幽灵态构建等调用点统一复用（WMLES 与气动力积分经幽灵态提供者的组编码取壁面）。
 """
 
 from typing import Dict, Optional, Tuple
@@ -182,9 +181,8 @@ def tag_boundary_groups_for_mesh(mesh, face_conn: Optional[FRFaceConnectivity] =
     透传，input_file 是 .nas 体网格 + --surface-mesh 反推边界的路径才有）
     可用时走 `tag_boundary_groups_by_geometry`；不可用时（例如从 .pkl
     加载——边界分组已经在 pkl 里但原始面网格数据没有一起序列化）回退到
-    `tag_boundary_groups`。四处调用点（fr_solver/boundary.py 的 BC 幽灵态
-    构建、core/utils/solver_helpers.py 的 WMLES 壁面剪应力、
-    postprocess/fr_coefficients.py 的两处气动系数积分）此前各自重复同一段
+    `tag_boundary_groups`。当时的四处调用点（BC 幽灵态构建、WMLES 壁面剪应力、
+    两处气动系数积分）此前各自重复同一段
     `tag_boundary_groups(fc, mesh.boundary_groups or {})`，都受同一个
     单元级别聚合缺陷影响（气动系数积分场景下，被错误纳入/排除的 WALL
     面直接污染 Cd/Cl）——统一到这一个入口，行为对四处调用点完全一致。

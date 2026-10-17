@@ -10,7 +10,6 @@ import numpy as np
 from autoflowcfd.core.fr_residual.inviscid import compute_inviscid_residual_fr, mean_flow_primitives
 from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
 from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL
-from autoflowcfd.core.utils import solver_helpers
 
 from .. import boundary as fr_solver_boundary
 from .. import turbulence as fr_solver_turbulence
@@ -115,11 +114,8 @@ class _SolverResidualMixin:
         动量/能量方程的扩散项）。
 
         Returns:
-            viscous_res: 粘性残差（WMLES 激活时已叠加壁面剪应力修正，
-                见 solver_helpers.compute_wmles_wall_stress_correction
-                文档 T-05 修复说明——必须在这里（残差组装、时间积分之前）
-                施加才能真正影响本步的解，而不是像此前那样在状态更新
-                之后才计算）；启用人工粘性时已叠加 `div(nu grad U)`
+            viscous_res: 粘性残差（WMLES 激活时已叠加壁面剪应力修正，`core/turbulence/wmles/`；
+                必须在残差组装里施加才影响本步的解）；启用人工粘性时已叠加 `div(nu grad U)`
         """
         res = compute_viscous_residual_fr(
             self.state.U, self.mesh, self.ops, self.mu_molecular, PRANDTL,
@@ -129,7 +125,11 @@ class _SolverResidualMixin:
         )
 
         if self.wmles_model is not None:
-            wall_stress_correction = solver_helpers.compute_wmles_wall_stress_correction(self)
+            from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+
+            wall_stress_correction = self.wmles_model.residual_correction(
+                np, self.mesh, get_flat_face_geometry(self.mesh, self.ops), self.boundary_ghost_provider,
+                self.state.U, self.mu_molecular)
             if wall_stress_correction is not None:
                 res = res + wall_stress_correction[..., : res.shape[-1]]
 

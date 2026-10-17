@@ -193,11 +193,10 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         self.iddes_h_max_compact = None
         self.iddes_h_wn_compact = None
         self.wmles_model = None
-        # LES（2026-09-02）：WALE 是纯代数 SGS 模型，没有 k/omega 那样的
-        # 跨步 ODE 状态，也不需要 wall_distance（不像 WMLES 的 y+ 计算）
-        # ——单独一个分支，不并入下面 SST/DDES/IDDES/WMLES 共用的构造块。
+        # LES：WALE 是纯代数 SGS 模型，没有跨步状态，也不需要壁距——单独一个分支，不并入下面输运模型的构造块。
         self.sgs_model = None
-        if turb_model_upper == 'LES':
+        from autoflowcfd.core.turbulence.registry import uses_algebraic_sgs
+        if uses_algebraic_sgs(turb_model_upper):
             from autoflowcfd.core.turbulence.sgs import WALEModel
             self.sgs_model = WALEModel()
         # 自由来流条件**无条件**设置（2026-09-18）：单机 FRSolver 的
@@ -230,20 +229,15 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         self.artificial_viscosity_enabled = bool(solver_kwargs.get('artificial_viscosity_enabled', False))
         self.artificial_viscosity_alpha = float(solver_kwargs.get('artificial_viscosity_alpha', 1.0))
         from autoflowcfd.core.turbulence.registry import has_transport_equations
-        if has_transport_equations(turb_model_upper) or turb_model_upper == 'WMLES':
-            if has_transport_equations(turb_model_upper):
-                from autoflowcfd.core.fr_solver.turbulence import init_turbulence_models
-                init_turbulence_models(self, n_local, n_sps)  # 设置 self.turb_model（SST 族或 SA-neg）；
-                # 产项渐变计数器在下面时间格式确定后由 init_production_ramp 设置（每步重建的湍流
-                # 适配器把计数器转发回本对象，见 distributed_turbulence.py）。
-            else:
-                # WMLES（2026-09-02）：没有 k/omega ODE 状态，不需要
-                # init_turbulence_models——只需要真实
-                # 的 CPU 版 WMLESModel 实例（与单机 `gpu_solver.py`/CPU
-                # `FRSolver.__init__` 构造 wmles_model 同一个模式）+
-                # 下面统一计算的 wall_distance_compact（y+ 计算需要）。
-                from autoflowcfd.core.turbulence.wmles import WMLESModel
-                self.wmles_model = WMLESModel(nu=self.mu_molecular / max(self.rho_inf, 1e-10))
+        if turb_model_upper == 'WMLES':
+            # 壁面模型（与单机同一份，`core/turbulence/wmles/`）：没有输运状态，不需要壁距
+            from autoflowcfd.core.turbulence.wmles import WMLESModel
+            self.wmles_model = WMLESModel()
+        if has_transport_equations(turb_model_upper):
+            from autoflowcfd.core.fr_solver.turbulence import init_turbulence_models
+            init_turbulence_models(self, n_local, n_sps)  # 设置 self.turb_model（SST 族或 SA-neg）；
+            # 产项渐变计数器在下面时间格式确定后由 init_production_ramp 设置（每步重建的湍流
+            # 适配器把计数器转发回本对象，见 distributed_turbulence.py）。
 
             # 壁面距离：与单机同一个来源（CLI 由体网格 WALL 边界面构造后以
             # `wall_distance_source=` 传入），在本 rank compact 解点上查询；

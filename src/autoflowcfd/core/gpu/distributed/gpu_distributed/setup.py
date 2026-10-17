@@ -10,7 +10,7 @@ from loguru import logger
 
 from autoflowcfd.core.gpu import get_cupy, gpu_available
 from autoflowcfd.core.turbulence.sst.bounds import OMEGA_MAX_FLOOR
-from autoflowcfd.core.turbulence.registry import is_sst_family
+from autoflowcfd.core.turbulence.registry import is_sst_family, uses_algebraic_sgs
 from autoflowcfd.core.gpu.array_manager import GPUArrayManager
 from autoflowcfd.core.gpu.distributed.gpu_halo_exchange import GPUHaloExchange
 from autoflowcfd.core.gpu.gpu_time_integration import GPUTimeIntegrator
@@ -53,16 +53,8 @@ class _MultiGPUSetupMixin:
         # LES 同日移植——WALE 是纯代数模型（不像 SST 的 k/omega 有跨步
         # ODE 积分状态），不需要"halo 交换持久状态"这层复杂度，只需要
         # 用当前状态现算 mu_t，实现和验证成本远低于 SST/DDES/IDDES。
-        # WMLES（2026-09-02 续接）：此前认为"壁面剪应力修正需要分布式
-        # 面级外插——WALL 面可能横跨分区边界"是独立更大的架构缺口，
-        # 排查后发现这个理由不成立——WALL 面必然完全属于拥有该 owner
-        # 单元的单个 rank（边界面没有"neighbor 侧"，不是内部面，不
-        # 可能横跨分区），真正的障碍是 `compute_wmles_wall_stress_
-        # correction` 此前直接用全局 `mesh.face_flux_points`对象列表
-        # 逐面取值，不认 compact 索引空间——现已改用 `flat_face_
-        # override`+`boundary_ghost_provider.group_code`识别 WALL 面
-        # （与 CPU MPI 分布式同一处修复，见 core/utils/solver_helpers.py
-        # 文档），不再需要完整全局网格的边界几何信息。
+        # WMLES：壁面面完全属于 owner 单元所在的 rank（边界面没有 neighbor 侧），壁面模型在 compact 空间上
+        # 直接求值（`core/turbulence/wmles/`，面几何取 `dist_flat_face.base_flat`），不需要全局边界几何。
         from autoflowcfd.core.turbulence.registry import require_supported
         require_supported(turb_model)      # 合法模型名的唯一来源，与单机/CPU 分布式同一组
 
@@ -173,14 +165,9 @@ class _MultiGPUSetupMixin:
         compact_mesh_view = _CompactMeshDataView(
             mesh, self.dist_flat_face.compact_global_ids, self.dist_flat_face.base_flat.n_prism,
         )
-        # WMLES 壁面剪应力修正（见下方 wmles_model 构造处）需要一个
-        # numpy（非 GPU 上传）、compact 索引空间的 mesh-like 对象——
-        # `compute_wmles_wall_stress_correction` 读 `mesh.n_prism_cells`/
-        # `n_points_1d`/`jacobians['det_jacs']`，直接用 `self.mesh`（"传统
-        # 模式"下是完整全局网格）会按全局索引空间取值，压缩索引传进去
-        # 会读到不相关单元——`compact_mesh_view` 本身已经是这个 numpy
-        # compact 视图（升 GPU 前的中间产物），保存下来复用，不需要再
-        # 构造一份。
+        # WMLES 的匹配点几何要一个主机上、compact 索引空间的网格视图（`n_prism_cells`/`jacobians`/
+        # `sps_coords`）；`self.mesh`（"传统模式"下是完整全局网格）按全局索引取值，不能直接用。
+        # `compact_mesh_view` 本身就是它（升 GPU 前的中间产物），保存下来复用。
         self._compact_mesh_view = compact_mesh_view
         self.mesh_data = self.array_mgr.upload_mesh_data(compact_mesh_view, ops)
         self.n_compact = compact_mesh_view.n_cells
@@ -301,28 +288,23 @@ class _MultiGPUSetupMixin:
         # 跨步 ODE 积分状态），`_compute_turbulence_source_distributed`
         # 用当前状态现算 mu_t，不需要任何跨步持久 halo 交换基础设施。
         self.sgs_model_gpu = None
-        if turb_model == "LES":
+        if uses_algebraic_sgs(turb_model):
             from autoflowcfd.core.turbulence.sgs import WALEModel
             self.sgs_model_gpu = WALEModel()
-            logger.info(f"Rank {self.rank}: GPU LES with WALE SGS model initialized")
+            logger.info(f"Rank {self.rank}: GPU {turb_model} with WALE SGS model initialized")
 
-        # WMLES（2026-09-02）：没有 k/omega ODE 状态，不需要
-        # turb_model_gpu——只需要真实的 CPU 版 WMLESModel
-        # 实例（与单机 gpu_solver.py/CPU FRSolver.__init__ 构造
-        # wmles_model 同一个模式：必须在下面 build_boundary_ghost_
-        # provider 之前构造，该函数用 getattr(self,"wmles_model",None)
-        # 判断 WALL 组是否要切换成 is_no_slip=False）+ wall_distance_gpu
-        # （y+ 计算需要，见下方统一计算）。
+        # WMLES：没有输运状态，只构造壁面模型（与单机同一份）。必须在下面 build_boundary_ghost_provider
+        # 之前构造——该函数据 `wmles_model` 是否为 None 决定物理无滑移壁面取滑移镜像幽灵态。
         self.wmles_model = None
         if turb_model == "WMLES":
             from autoflowcfd.core.turbulence.wmles import WMLESModel
-            self.wmles_model = WMLESModel(nu=mu_molecular / max(rho_inf, 1e-10))
+            self.wmles_model = WMLESModel()
             logger.info(f"Rank {self.rank}: GPU-distributed WMLES model initialized")
 
         # 预计算壁面距离（compact 索引空间，见 _init_wall_distance_
         # distributed 文档"真实 bug 修复"一节）
         self.wall_distance_gpu = None
-        if self.turb_model_gpu is not None or self.wmles_model is not None:
+        if self.turb_model_gpu is not None:
             self._init_wall_distance_distributed()
 
         # 初始化 GPU 模态滤波

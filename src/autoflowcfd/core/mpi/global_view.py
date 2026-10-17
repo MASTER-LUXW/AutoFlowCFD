@@ -36,7 +36,9 @@ class GlobalSolverView:
         self._mu_t = mu_t
         self._reference_area = None
         self.turb_model_name = "NONE"                 # 不构造 SEM 入口（力积分不读入口幽灵态）
-        self.wmles_model = True if wmles_active else None
+        from autoflowcfd.core.turbulence.wmles import WMLESModel
+
+        self.wmles_model = WMLESModel() if wmles_active else None
         from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
         self.boundary_ghost_provider = build_boundary_ghost_provider(self, dict(bc_overrides or {}))
 

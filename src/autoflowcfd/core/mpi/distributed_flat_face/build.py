@@ -299,6 +299,7 @@ def build_distributed_flat_face(
         owner_face_op=global_flat.owner_face_op[local_face_indices],
         neighbor_face_op=global_flat.neighbor_face_op[local_face_indices],
         true_area_weight=global_flat.true_area_weight[local_face_indices],
+        face_plane=global_flat.face_plane[local_face_indices],
         # `ref_area_weight` 是**逐面相同**的参考求积权重（(n_fp,)），
         # 所以不按 local_face_indices 切、整块复用。
         ref_area_weight=global_flat.ref_area_weight,

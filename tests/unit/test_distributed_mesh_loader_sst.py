@@ -300,7 +300,7 @@ class TestFullyDistributedSstTurbulence:
     def test_step_with_wmles_runs_and_stays_finite(self, mesh_and_ops):
         """"完全分布式加载"模式补齐 WMLES（2026-09-02 续接——此前
         fail-fast 拒绝，排查发现"需要额外分布式面外插"的理由不成立后
-        真正实现，见 core/utils/solver_helpers.py 模块文档）。需要一个
+        真正实现，壁面模型见 core/turbulence/wmles/）。需要一个
         真实 WALL 组才能验证壁面剪应力修正真正生效（不是恰好没有 WALL
         面、correction 恒为 None 的平凡通过），手动给一个真实边界面的
         owner 单元打标签，与 test_wmles_wall_bc_wiring.py 同一个手法。"""
@@ -331,7 +331,8 @@ class TestFullyDistributedSstTurbulence:
             wall_distance_source=synthetic_wall_source(mesh),
         )
 
-        assert package['wall_distance_compact'] is not None
+        # WMLES 的匹配点高度取自单元几何，不需要壁距（WALL_DISTANCE_MODELS 只含输运模型）
+        assert package['wall_distance_compact'] is None
 
         from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
         from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
@@ -340,6 +341,9 @@ class TestFullyDistributedSstTurbulence:
         assert solver.turb_model_name == "WMLES"
         assert solver.wmles_model is not None
         assert solver.turb_model is None  # WMLES 没有 k/omega ODE 状态
+        # I-111：与单机一样带 WALE 亚格子模型（此前分布式 WMLES 没有任何亚格子涡粘）
+        from autoflowcfd.core.turbulence.sgs import WALEModel
+        assert isinstance(solver.sgs_model, WALEModel)
 
         rng = np.random.default_rng(17)
         U0 = _nonuniform_U(mesh, rng)

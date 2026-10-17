@@ -213,23 +213,16 @@ class TestDistributedResidualMatchesSingleMachine:
 
     @pytest.mark.parametrize("rank", [0, 1])
     def test_viscous_residual_with_wmles_matches(self, mixed_mesh_and_ops, rank):
-        """WMLES 壁面剪应力修正的分布式支持（2026-09-02）：核心判据与
-        上面的纯层流版本完全一致，唯一区别是同时激活一个真实 WALL 组
-        +真实 `WMLESModel`+`boundary_ghost_provider`。这也顺带覆盖了
-        `compute_wmles_wall_stress_correction` 本次改用 `flat_face_
-        override`/`boundary_ghost_provider` 之后的分布式正确性——此前
-        这条路径完全不存在（WMLES 是 MPI 分布式明确拒绝的湍流模型之一，
-        见 DistributedFRSolver.__init__ 文档）。"""
+        """WMLES 壁面剪应力修正的分布式支持：判据与上面的纯层流版本一致，同时激活一个真实 WALL 组
+        与 `WMLESModel`（匹配点几何在紧凑空间上由 `DistributedMeshAdapter.sps_coords` 构造）。"""
         mesh, ops = mixed_mesh_and_ops
         U = _uniform_freestream_U(mesh)
-        n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
         mu = 1.8e-5
         rho_inf = 1.225
 
-        from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
+        from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
         from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
         from autoflowcfd.core.turbulence.wmles import WMLESModel
-        from autoflowcfd.core.utils.solver_helpers import compute_wmles_wall_stress_correction
 
         # 真实 WALL 组：取一个真实边界面的 owner 单元打标签（与
         # test_wmles_wall_bc_wiring.py 新增的端到端测试同一个手法）。
@@ -244,18 +237,12 @@ class TestDistributedResidualMatchesSingleMachine:
             turb_model_name="WMLES", wmles_model=object(),  # 触发 is_no_slip=False
         )
         provider_global = build_boundary_ghost_provider(root_stub, bc_overrides={})
-        wall_distance = np.full((n_cells, n_sps), 1e-2)
-        wmles_model = WMLESModel(nu=mu / rho_inf)
 
-        Q = conserved_to_primitive(U[..., :5])
         residual_single = compute_viscous_residual_fr(
             U, mesh, ops, mu, PRANDTL, boundary_ghost_provider=provider_global,
         )
-        facade = types.SimpleNamespace(
-            wmles_model=wmles_model, mesh=mesh, ops=ops, wall_distance=wall_distance,
-            state=types.SimpleNamespace(U=U, Q=Q), boundary_ghost_provider=provider_global,
-        )
-        correction_single = compute_wmles_wall_stress_correction(facade)
+        correction_single = WMLESModel().residual_correction(
+            np, mesh, get_flat_face_geometry(mesh, ops), provider_global, U, mu)
         assert correction_single is not None, "test setup must produce at least one real WALL face"
         residual_single = residual_single + correction_single[..., :residual_single.shape[-1]]
 
@@ -265,7 +252,6 @@ class TestDistributedResidualMatchesSingleMachine:
 
         provider_local = copy.copy(provider_global)
         provider_local.group_code = provider_global.group_code[partition.local_faces]
-        wall_distance_compact = wall_distance[dist_fc.compact_global_ids]
 
         n_halo = partition.n_halo
         native_global_ids = (
@@ -278,7 +264,7 @@ class TestDistributedResidualMatchesSingleMachine:
         residual_local = distributed_compute_viscous_residual(
             U_local, partition, fake_halo, dist_fc, mesh, ops, mu=mu,
             boundary_ghost_provider=provider_local,
-            wmles_model=wmles_model, wall_distance_compact=wall_distance_compact,
+            wmles_model=WMLESModel(),
         )
 
         expected_local = residual_single[partition.local_cells]

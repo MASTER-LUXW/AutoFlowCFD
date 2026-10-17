@@ -100,7 +100,7 @@ class _DistributedStepMixin:
         dudt = distributed_compute_viscous_residual(
             U_local, self.partition, self.halo_exchange, self.dist_flat_face, self.mesh, self.ops,
             ls.mu_molecular, ls.boundary_ghost_provider, mu_t_field_compact=mu_t_compact,
-            wmles_model=self.wmles_model, wall_distance_compact=self.wall_distance_compact)
+            wmles_model=self.wmles_model)
         if nu_av_compact is not None:
             from autoflowcfd.core.mpi.distributed_artificial_viscosity import (
                 distributed_artificial_diffusion_dudt,

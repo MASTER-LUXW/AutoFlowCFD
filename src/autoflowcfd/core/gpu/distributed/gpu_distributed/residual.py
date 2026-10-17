@@ -96,37 +96,13 @@ class _MultiGPUResidualMixin:
             device_id=self.device_id,
         )
 
-        # WMLES 壁面剪应力修正（2026-09-02）：与单机 GPUFRSolver.
-        # compute_viscous_residual_gpu 同一个施加时机（残差组装阶段，
-        # 时间积分之前），直接调用 CPU 核心函数而不是
-        # gpu_turbulence_wmles.py 的单机 facade（后者用 `solver.mesh`
-        # 构造 extrap 所需的 n_prism_cells/jacobians，单机语境下就是
-        # compact 空间本身；分布式场景下 `self.mesh` 在"传统模式"下是
-        # **全局**网格，必须换成 `self._compact_mesh_view`，见该属性
-        # 构造处的说明），自己搭建同样结构的 facade——与 CPU MPI 分布式
-        # `distributed_compute_viscous_residual` 完全同一个模式。
+        # WMLES 壁面剪应力修正：与单机同一份实现，在 compact 空间（几何取 `_compact_mesh_view`、面几何取
+        # `dist_flat_face.base_flat`，与粘性残差同一个索引空间）上直接以 cupy 求值
         if self.wmles_model is not None:
-            cp = get_cupy()
-            import types
-            from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
-            from autoflowcfd.core.utils.solver_helpers import compute_wmles_wall_stress_correction
-
-            U_compact_cpu = cp.asnumpy(U_compact)
-            Q_compact_cpu = conserved_to_primitive(U_compact_cpu[..., :5])
-            wall_distance_cpu = (
-                cp.asnumpy(self.wall_distance_gpu) if self.wall_distance_gpu is not None else None
-            )
-            facade = types.SimpleNamespace(
-                wmles_model=self.wmles_model, mesh=self._compact_mesh_view, ops=self.ops,
-                wall_distance=wall_distance_cpu,
-                state=types.SimpleNamespace(U=U_compact_cpu, Q=Q_compact_cpu),
-                boundary_ghost_provider=self.boundary_ghost_provider,
-            )
-            correction_cpu = compute_wmles_wall_stress_correction(
-                facade, flat_face_override=self.dist_flat_face.base_flat,
-            )
-            if correction_cpu is not None:
-                correction_compact = cp.asarray(correction_cpu)
+            correction_compact = self.wmles_model.residual_correction(
+                get_cupy(), self._compact_mesh_view, self.dist_flat_face.base_flat, self.boundary_ghost_provider,
+                U_compact, self.mu_molecular)
+            if correction_compact is not None:
                 residual_compact = residual_compact + correction_compact[..., :residual_compact.shape[-1]]
 
         if nu_av_compact is not None:

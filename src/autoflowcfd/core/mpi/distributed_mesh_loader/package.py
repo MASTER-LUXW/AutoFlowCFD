@@ -264,17 +264,16 @@ def build_fully_distributed_rank_package(
                 boundary_ghost_provider_global.group_code[partition.local_faces]
             )
 
-    # SST/DDES/IDDES/WMLES（2026-09-02，WMLES 同日续接——y+ 计算同样
-    # 需要 wall_distance）：wall_distance/h_max/h_wn 都只需要 root 手上
+    # 输运模型（SST 族、SA-neg）：wall_distance/h_max/h_wn 都只需要 root 手上
     # 的**完整**全局网格（`compute_distributed_wall_distance`/
     # `compute_h_max_and_h_wn` 的输入都是 `mesh`，不是某个 rank 的局部
     # 数据），root 算好后按本 rank 的 compact_global_ids 切片即可，与
-    # 其余紧凑几何数据同一个模式——不需要新的跨 rank 几何交换。LES
-    # （WALE）不需要 wall_distance，不在这个分支里。
+    # 其余紧凑几何数据同一个模式——不需要新的跨 rank 几何交换。LES/WMLES
+    # 不需要 wall_distance，不在这个分支里。
     wall_distance_compact = None
     iddes_h_max_compact = None
     iddes_h_wn_compact = None
-    if has_transport_equations(turb_model_name) or turb_model_name == "WMLES":
+    if has_transport_equations(turb_model_name):
         wall_distance_compact = compute_distributed_wall_distance(
             dist_fc, mesh, wall_distance_source,
         )

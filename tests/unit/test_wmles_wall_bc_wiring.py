@@ -3,7 +3,7 @@
 真实 bug（V2.0 专家组盲审第4轮，2026-08-28，"WMLES 假滑移边界"）：此前
 WALL 边界的 ghost state 恒用严格无滑移镜像构造（is_no_slip=True），BR1/LDG
 粘性通量因此已经从解析速度梯度算出一个虚假壁面剪应力，
-`solver_helpers.compute_wmles_wall_stress_correction` 算出的 tau_w 又作为
+壁面模型（当时的 `solver_helpers.compute_wmles_wall_stress_correction`）算出的 tau_w 又作为
 额外动量源项叠加在其上，造成双重计权。按 WMLES 壁面模型文献标准做法
 （tau_w 应该"取代"而非"叠加"解析梯度剪应力，见
 `fr_solver/boundary.py::build_boundary_ghost_provider` 文档引用的

@@ -64,3 +64,13 @@ def array_module(*arrays: Any):
     import numpy
 
     return numpy
+
+
+def scatter_add(xp, out, index, values) -> None:
+    """`out[index] += values`，重复下标累加（numpy 为 `np.add.at`，cupy 为 `cupyx.scatter_add`）。"""
+    if xp.__name__ == "numpy":
+        xp.add.at(out, index, values)
+        return
+    import cupyx
+
+    cupyx.scatter_add(out, index, values)

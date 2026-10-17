@@ -258,7 +258,7 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
             "（配合 --dt 与 --dual-time-inner-iter）。\n",
             fg="yellow")
 
-    # 3. 初始化求解器（CPU / 单 GPU；湍流模型需要时带上壁距，DES/LES/WMLES 必须）
+    # 3. 初始化求解器（CPU / 单 GPU；输运湍流模型（含 DES）带上壁距，LES/WMLES 不需要）
     solver = build_single_node_solver(
         backend, mesh, volume_data,
         gpu_device=gpu_device,

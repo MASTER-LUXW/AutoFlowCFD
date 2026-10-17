@@ -87,7 +87,7 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
     # state——`wall_ghost_state` 把 ghost 切向速度镜像为与内部值相反
     # （Q_ghost=2*v_wall-Q_int），逼出一个基于（本项目近壁网格通常无法
     # 真正分辨粘性底层的）解析速度梯度的虚假壁面剪应力，然后
-    # `solver_helpers.compute_wmles_wall_stress_correction` 又把壁面模型
+    # 壁面模型（当时的 `solver_helpers.compute_wmles_wall_stress_correction`）又把壁面模型
     # 算出的 tau_w 作为**额外**动量源项叠加在这个虚假剪应力之上——两者
     # 同时存在，造成双重计权。
     #

@@ -139,7 +139,7 @@ def _solve_transient_cpu_traditional(
     )
     ops = generate_fr_operators(order)
 
-    # 壁面距离场（SST/DDES/IDDES/WMLES 需要）已在 DistributedFRSolver.
+    # 壁面距离场（输运湍流模型需要）已在 DistributedFRSolver.
     # __init__ 内部按 turb_model_name 自动计算好（self.wall_distance_
     # compact，见该构造函数对应分支），不需要在这里再调用单机版
     # compute_wall_distance_for_solver——与 solve_steady_command.py 的

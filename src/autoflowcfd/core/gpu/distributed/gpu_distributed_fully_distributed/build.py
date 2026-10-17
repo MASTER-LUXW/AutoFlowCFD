@@ -62,7 +62,7 @@ def build_multi_gpu_solver_from_fully_distributed_package(
 
     turb_model_name = package.get('turb_model_name', 'NONE')
     from autoflowcfd.core.turbulence.registry import require_supported
-    from autoflowcfd.core.turbulence.registry import is_sst_family
+    from autoflowcfd.core.turbulence.registry import is_sst_family, uses_algebraic_sgs
     if turb_model_name != require_supported(turb_model_name):
         raise NotImplementedError(
             f"MultiGPUDistributedSolver.from_fully_distributed_package: 无法识别的 turbulence_model "
@@ -133,7 +133,6 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     # `build_fully_distributed_rank_package` 从 CLI 的 freestream 字典原样
     # 写入，三个键必然存在；此前 `.get('vel_inf', 33.33)` 这类兜底与 CLI
     # 默认值是两份事实来源，缺字段时会静默用一个错的来流。
-    rho_inf = freestream_pkg['rho_inf']
     vel_inf = freestream_pkg['vel_inf']
     # `self.freestream`（含 mach_ref）在"传统模式" `__init__` 里是无条件
     # 设置的（AUSM+up Weiss-Smith 预处理在全部 turb_model_name 下都要
@@ -215,16 +214,13 @@ def build_multi_gpu_solver_from_fully_distributed_package(
             from autoflowcfd.core.turbulence.des import IDDESModel
             self.ddes_model_gpu = IDDESModel()
 
-    elif turb_model_name == 'LES':
+    if uses_algebraic_sgs(turb_model_name):
         from autoflowcfd.core.turbulence.sgs import WALEModel
         self.sgs_model_gpu = WALEModel()
-        logger.info(f"Rank {self.rank}: GPU LES with WALE SGS model initialized (fully-distributed mode)")
-
-    elif turb_model_name == 'WMLES':
+        logger.info(f"Rank {self.rank}: GPU {turb_model_name} with WALE SGS model initialized (fully-distributed mode)")
+    if turb_model_name == 'WMLES':
         from autoflowcfd.core.turbulence.wmles import WMLESModel
-        self.wmles_model = WMLESModel(nu=self.mu_molecular / max(rho_inf, 1e-10))
-        _upload_wall_geometry_compact(self, package, cp, device_id)
-        logger.info(f"Rank {self.rank}: GPU-distributed WMLES model initialized (fully-distributed mode)")
+        self.wmles_model = WMLESModel()
 
     self.filter_func_gpu = None
     self._init_modal_filter_distributed()

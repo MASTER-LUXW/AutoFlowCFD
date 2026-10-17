@@ -12,7 +12,7 @@ from loguru import logger
 from autoflowcfd.core.turbulence.sa import SAModel
 from autoflowcfd.core.turbulence.sst import SSTModelFR
 from autoflowcfd.core.turbulence.des import DDESModel, IDDESModel, compute_h_max_and_h_wn
-from autoflowcfd.core.turbulence.wmles import WMLESModel
+from autoflowcfd.core.turbulence.registry import uses_algebraic_sgs
 from autoflowcfd.core.turbulence.sgs import WALEModel
 from autoflowcfd.core.turbulence.sst.bounds import OMEGA_MAX_FLOOR
 
@@ -281,22 +281,13 @@ def init_turbulence_models(solver, n_cells: int, n_sps: int) -> None:
         print(f"   [OK] SA-neg model initialized (nu_tilde_inf={m.nu_tilde_inf:.4e}, "
               f"chi_inf={m.nu_tilde_inf / m.nu_ref:.4g}, viscosity ratio={m.viscosity_ratio:g})")
 
-    elif solver.turb_model_name == "WMLES":
-        # `solver.wmles_model` 已在 `FRSolver.__init__` 第 3 步提前构造
-        # （必须先于 boundary_ghost_provider 构造，见该处说明——2026-
-        # 09-02 修复的构造顺序 bug）；这里不再重复构造，只在它意外为
-        # None 时（例如某个不经过 FRSolver.__init__ 第 3 步、直接调用
-        # 本函数的测试/脚本场景）按 GPU 版同一个公式补建，避免真正生产
-        # 路径下出现两个物理等价但对象不同的 WMLESModel 实例。
-        if getattr(solver, "wmles_model", None) is None:
-            rho_inf = solver.freestream.get("rho_inf", 1.225)
-            solver.wmles_model = WMLESModel(nu=solver.mu_molecular / max(rho_inf, 1e-10))
+    elif uses_algebraic_sgs(solver.turb_model_name):
+        # LES / WMLES：WALE 亚格子涡粘（全部后端同一判据，`turbulence/registry.py::uses_algebraic_sgs`）。
+        # WMLES 的壁面模型由 `FRSolver.__init__` 先于边界幽灵态构造（幽灵态据它取滑移镜像），这里不再补建
+        if solver.turb_model_name == "WMLES" and getattr(solver, "wmles_model", None) is None:
+            raise RuntimeError("WMLES 的壁面模型必须先于边界幽灵态构造（FRSolver.__init__），这里不补建")
         solver.sgs_model = WALEModel()
-        print("   [OK] WMLES model initialized")
-
-    elif solver.turb_model_name == "LES":
-        solver.sgs_model = WALEModel()
-        print("   [OK] LES with WALE SGS model initialized")
+        print(f"   [OK] {solver.turb_model_name} with WALE SGS model initialized")
 
     elif solver.turb_model_name == "NONE":
         print("   [OK] Laminar flow (no turbulence model)")

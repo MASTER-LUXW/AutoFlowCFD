@@ -7,15 +7,8 @@
 
 范围更新（2026-09-02 续，"过时信息源"教训——见
 ProjectFiles/V2.0/19_重大问题修复-湍流模型跨后端逐项排查与完全分布式加载补齐.md）：
-本文件只覆盖 SST/DDES/IDDES 的 k/omega 输运本身；WMLES 不需要这套
-k/omega 输运（没有 ODE 状态），它的壁面剪应力修正
-（`core/utils/solver_helpers.py::compute_wmles_wall_stress_correction`）
-已独立接入 `DistributedFRSolver.__init__`/`MultiGPUDistributedSolver.
-__init__`（"传统模式"两条路径均已支持，"完全分布式加载"仍不支持，见
-`distributed_solver.py::from_fully_distributed_package` 文档），不经过
-本文件——本文件此前"WMLES 需要额外的分布式面外插"的表述已经过时（
-真正的障碍是 `compute_wmles_wall_stress_correction` 没有跟随
-`flat_face_override` 约定，不是需要全新的面外插基础设施，现已修复）。
+本文件只覆盖输运湍流模型；WMLES 没有输运状态，它的壁面剪应力修正（`core/turbulence/wmles/`）在分布式粘性
+残差里于 compact 空间直接求值（`distributed_compute.py::distributed_compute_viscous_residual`），不经过本文件。
 LES（WALE）同样不经过本文件的 SST/DDES/IDDES 主函数（没有 ODE 状态，
 纯代数现算），走独立的 `distributed_compute_les_viscosity`——已在
 `MultiGPUDistributedSolver`（多GPU分布式）与本文件（CPU MPI，2026-

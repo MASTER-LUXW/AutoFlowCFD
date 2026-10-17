@@ -7,6 +7,9 @@
   边界种类构造）。P0 时单元内梯度为零，壁面摩擦完全来自罚项——与求解器实际施加的一致；只用单元内梯度
   外插会在 P0 得到恒为零的摩阻。
 - 作用在物体上的力 = sum_fp w (F_inv - F_vis)[动量] - p_ref sum_fp w a（a 为本侧外向逆变度量行，流体 -> 物体）。
+- WMLES：物理无滑移壁面的幽灵态是滑移镜像，粘性公共通量的切向牵引为零，壁面剪应力来自壁面模型——力积分
+  用残差里同一个牵引（`core/turbulence/wmles/`），物体受力为 -sum A tau_w（tau_w 为壁面对流体的牵引）。
+- 缺省只积分物理无滑移的 WALL 组：滑移壁（隧道壁、远场滑移面）不属于物体；按名字显式指定时可以取任意 WALL 组。
 
 混合拆分面（棱柱四边形侧面一半在边界）上落在边界半区的通量点同样计入：它们的通量由配对的内部面记录
 在掩码通量点上施加（`fr/face_flux_points/merge.py`）。
@@ -22,6 +25,7 @@ from autoflowcfd.core.fr_operators.flux_kernels.viscous_bc import boundary_other
 from autoflowcfd.core.fr_operators.small_dense import extrap_tensor3x3, matvec_small
 from autoflowcfd.core.fr_residual.face_point_jumps import inviscid_common_flux_point, viscous_common_flux_point
 from autoflowcfd.core.fr_residual.inviscid_kernel import _extrap_matmul
+from autoflowcfd.core.fr_residual.wall_points import wall_flux_points
 
 
 @dataclass
@@ -31,34 +35,6 @@ class WallSamples:
     force_viscous: np.ndarray    # (m, 3) -w * F_vis[动量]
     position: np.ndarray         # (m, 3) 通量点物理坐标
     group_code: np.ndarray       # (m,) 所属边界组编码
-
-
-def wall_flux_points(flat, group_code: np.ndarray, codes: Sequence[int]):
-    """选出属于 `codes` 的边界面通量点：返回 (取本侧数据的面记录, 取幽灵态的面记录, 通量点下标, 组编码)。"""
-    codes = np.asarray(list(codes), dtype=np.int64)
-    in_group = np.isin(group_code, codes)
-    n_fp = flat.n_fp
-    rec, ghost, fp, code = [], [], [], []
-    primary = np.flatnonzero(flat.is_boundary & flat.owner_is_primary & in_group)
-    if primary.size:
-        rec.append(np.repeat(primary, n_fp))
-        ghost.append(np.repeat(primary, n_fp))
-        fp.append(np.tile(np.arange(n_fp), primary.size))
-        code.append(np.repeat(group_code[primary], n_fp))
-    partner = np.asarray(flat.mixed_nb_partner)
-    mixed = np.flatnonzero((partner >= 0) & flat.owner_is_primary & ~flat.is_boundary)
-    mixed = mixed[in_group[partner[mixed]]]
-    for f in mixed:
-        pts = np.flatnonzero(flat.mixed_nb_mask[f])
-        rec.append(np.full(pts.size, f))
-        ghost.append(np.full(pts.size, partner[f]))
-        fp.append(pts)
-        code.append(np.full(pts.size, group_code[partner[f]]))
-    if not rec:
-        empty = np.empty(0, dtype=np.int64)
-        return empty, empty, empty, empty
-    return (np.concatenate(rec).astype(np.int64), np.concatenate(ghost).astype(np.int64),
-            np.concatenate(fp).astype(np.int64), np.concatenate(code).astype(np.int64))
 
 
 @njit(cache=True, parallel=True)
@@ -136,17 +112,39 @@ def sample_wall(solver, codes: Sequence[int], viscous: bool = True) -> WallSampl
         float(host.freestream["mach_ref"]), int(resolve_ausm_precond_mode()),
         float(host.mu_molecular), PRANDTL, PRANDTL_TURBULENT, resolve_viscous_ip_constant(int(mesh.order)),
         float(host.freestream["p_inf"]), bool(viscous))
+    wmles = getattr(host, "wmles_model", None)
+    if viscous and wmles is not None:
+        _add_wall_model_traction(f_vis, wmles, host, mesh, flat, provider, rec, fp)
     return WallSamples(f_inv, f_vis, pos, code)
 
 
+def _add_wall_model_traction(f_vis, wmles, host, mesh, flat, provider, rec, fp) -> None:
+    """WMLES 壁面模型牵引计入粘性力（残差里同一个牵引；只在壁面模型覆盖的通量点上，即物理无滑移壁面）。"""
+    U = np.ascontiguousarray(host.state.U[..., :5])
+    m, tau = wmles.traction(np, mesh, flat, provider, U, float(host.mu_molecular))
+    if m is None:
+        return
+    n_fp = int(flat.n_fp)
+    key_model = m.face * n_fp + m.fp
+    key_sample = rec * n_fp + fp
+    order = np.argsort(key_model)
+    pos = np.minimum(np.searchsorted(key_model[order], key_sample), len(order) - 1)
+    idx = order[pos]
+    hit = key_model[idx] == key_sample
+    f_vis[hit] -= m.area[idx[hit], None] * tau[idx[hit]]
+
+
 def wall_group_codes(provider, groups: Optional[Sequence[str]] = None) -> Dict[int, str]:
-    """参与积分的组：缺省为全部无滑移/滑移 WALL 组；`groups` 给出时按名字取（必须存在且是 WALL 组）。"""
+    """参与积分的组：缺省为全部物理无滑移的 WALL 组（滑移壁不属于物体，模块文档）；`groups` 给出时按名字取
+    （必须存在且是 WALL 组，滑移壁也可以显式指定）。"""
     names = dict(getattr(provider, "code_to_name", {}) or {})
     wall = {code: names.get(code, str(code)) for code, cfg in provider.code_to_config.items() if cfg.get("type") == "WALL"}
     if groups is None:
-        if not wall:
-            raise RuntimeError("网格没有 WALL 边界组，无法积分气动力")
-        return wall
+        body = {code: name for code, name in wall.items()
+                if provider.code_to_config[code].get("physical_no_slip", True)}
+        if not body:
+            raise RuntimeError("网格没有物理无滑移的 WALL 边界组，无法积分气动力（可按名字显式指定滑移壁组）")
+        return body
     by_name = {name: code for code, name in wall.items()}
     missing = [g for g in groups if g not in by_name]
     if missing:

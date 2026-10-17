@@ -47,7 +47,16 @@ class TestCliEntry:
             compute_wall_distance_for_solver(solver, _volume_mesh_with_wall())
         mock_apply.assert_not_called()
 
-    @pytest.mark.parametrize("model", ["SST", "SA", "DDES", "LES"])
+    @pytest.mark.parametrize("model", ["LES", "WMLES"])
+    def test_algebraic_models_need_no_wall_distance(self, model):
+        """WALE 不读壁距，WMLES 的匹配点高度取自单元几何（`core/turbulence/wmles/matching.py`）。"""
+        solver = MagicMock()
+        solver.turb_model_name = model
+        with patch(_APPLY) as mock_apply:
+            compute_wall_distance_for_solver(solver, _volume_mesh_with_wall())
+        mock_apply.assert_not_called()
+
+    @pytest.mark.parametrize("model", ["SST", "SA", "DDES", "IDDES"])
     def test_every_wall_distance_model_gets_the_source(self, model):
         """判据取唯一的模型分类：此前入口写死 sst/ddes/iddes/wmles/les 一份列表，SA 会被
         静默跳过（随后在求解时因缺壁距报错）。"""

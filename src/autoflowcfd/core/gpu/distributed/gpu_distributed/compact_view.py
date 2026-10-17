@@ -29,6 +29,8 @@ class _CompactMeshDataView:
 
     def __init__(self, mesh, compact_global_ids: np.ndarray, n_prism_compact: int):
         n_sps = mesh.n_sps_per_cell
+        self._mesh = mesh
+        self._compact_global_ids = compact_global_ids
         self.n_cells = len(compact_global_ids)
         self.n_sps_per_cell = n_sps
         self.n_points_1d = mesh.n_points_1d
@@ -68,3 +70,8 @@ class _CompactMeshDataView:
         self.cell_volumes = None
         if getattr(mesh, 'cell_volumes', None) is not None:
             self.cell_volumes = mesh.cell_volumes[compact_global_ids]
+
+    @property
+    def sps_coords(self):
+        """解点物理坐标 (n_compact, n_sps, 3)（按需切片：只有 WMLES 的匹配点几何读它，且结果被缓存）。"""
+        return self._mesh.sps_coords[self._compact_global_ids]

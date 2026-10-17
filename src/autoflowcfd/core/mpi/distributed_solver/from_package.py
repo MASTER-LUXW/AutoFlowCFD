@@ -161,22 +161,15 @@ class _DistributedFromPackageMixin:
         self.wmles_model = None
         self.sgs_model = None
 
-        if turb_model_name == 'LES':
-            # LES（2026-09-02）：WALE 纯代数 SGS 模型，不需要 root 预
-            # 计算任何几何量（不像 SST 需要 wall_distance），package
-            # 里也没有为它准备任何字段——直接构造即可。
+        from autoflowcfd.core.turbulence.registry import uses_algebraic_sgs
+        if uses_algebraic_sgs(turb_model_name):
+            # LES / WMLES：WALE 纯代数 SGS 模型，不需要 root 预计算任何几何量
             from autoflowcfd.core.turbulence.sgs import WALEModel
             self.sgs_model = WALEModel()
-        elif turb_model_name == 'WMLES':
-            # WMLES（2026-09-02）：没有 k/omega ODE 状态，不需要
-            # SSTModelFR——只需要真实的 WMLESModel
-            # 实例 + package 里 root 已经算好的 wall_distance_compact
-            # （y+ 计算需要，上面 `self.wall_distance_compact = package.
-            # get('wall_distance_compact')` 已经取到）。
+        if turb_model_name == 'WMLES':
+            # WMLES 另加壁面模型（与单机同一份，不需要壁距）
             from autoflowcfd.core.turbulence.wmles import WMLESModel
-            mu_molecular = package['mu_molecular']
-            rho_inf = package['freestream'].get('rho_inf', 1.225)
-            self.wmles_model = WMLESModel(nu=mu_molecular / max(rho_inf, 1e-10))
+            self.wmles_model = WMLESModel()
 
         if has_transport_equations(turb_model_name):
             n_local = self.partition.n_local_cells

@@ -185,7 +185,7 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
     # 壁面距离（compact 索引空间，y+/SST 输运需要）——复用 __init__ 同一个
     # 实例方法，内部按 solver.dist_flat_face.compact_global_ids/
     # solver.mesh.sps_coords（已经 set_order 到 target_p）重新算。
-    if solver.turb_model_gpu is not None or solver.wmles_model is not None:
+    if solver.turb_model_gpu is not None:
         solver._init_wall_distance_distributed()
 
     # DUAL_TIME 上一物理时间层历史随阶数切换失效——与 CPU 版

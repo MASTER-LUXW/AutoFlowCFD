@@ -136,7 +136,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
             )
         # 合法模型名的唯一来源（`core/turbulence/registry.py`），GPU 与 CPU 支持同一组模型
         from autoflowcfd.core.turbulence.registry import require_supported
-        from autoflowcfd.core.turbulence.registry import is_sst_family
+        from autoflowcfd.core.turbulence.registry import is_sst_family, uses_algebraic_sgs
         turb_model_upper = require_supported(turb_model_name)
         from autoflowcfd.core.fr_solver.solver.threads import configure_numba_threads
         configure_numba_threads(n_threads, mesh)
@@ -204,10 +204,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         self.ddes_model_gpu = None  # GPU DDES/IDDES 长度尺度计算器（可选）
         self._iddes_h_max_gpu = self._iddes_h_wn_gpu = None  # DES 逐单元网格尺度（DDES/IDDES 时设置）
         self.sgs_model_gpu = None  # GPU WALE 亚格子模型（WMLES/LES 共用，可选）
-        # WMLES 激活时构造真实的 CPU 版 WMLESModel 实例（与 CPU 版
-        # fr_solver_turbulence.py::init_turbulence_models 完全同一个类，
-        # 摩擦速度迭代求解本身就是纯 numpy、不需要也不该有 GPU 版——见
-        # gpu_turbulence_wmles.py 模块文档"为什么不重新实现"一节）。
+        # WMLES 壁面模型：与 CPU 同一个类（数组模块无关，残差里以 cupy 求值，`core/turbulence/wmles/`）。
         # 必须在下面 _build_boundary_ghost_provider 之前构造：
         # build_boundary_ghost_provider 用 getattr(solver,"wmles_model",
         # None) 判断 WALL 边界是否要切换成真滑移 ghost 态（is_no_slip=
@@ -215,7 +212,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         self.wmles_model = None
         if turb_model_upper == "WMLES":
             from autoflowcfd.core.turbulence.wmles import WMLESModel
-            self.wmles_model = WMLESModel(nu=mu_molecular / max(rho_inf, 1e-10))
+            self.wmles_model = WMLESModel()
         self.bc_overrides = bc_overrides or {}
         self.boundary_ghost_provider = (
             boundary_ghost_provider if boundary_ghost_provider is not None
@@ -307,22 +304,15 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
                     self._iddes_h_wn_gpu = cp.asarray(h_wn_cpu)
                 print(f"   [OK] GPU {turb_model_upper} model initialized (based on SST)")
 
-        elif turb_model_upper == "WMLES":
+        elif uses_algebraic_sgs(turb_model_upper):
             from autoflowcfd.core.turbulence.sgs import WALEModel
             self.sgs_model_gpu = WALEModel()
-            print("   [OK] GPU WMLES model initialized (wall stress correction + WALE SGS)")
+            print(f"   [OK] GPU {turb_model_upper} with WALE SGS model initialized")
 
-        elif turb_model_upper == "LES":
-            from autoflowcfd.core.turbulence.sgs import WALEModel
-            self.sgs_model_gpu = WALEModel()
-            print("   [OK] GPU LES with WALE SGS model initialized")
-
-        # 预计算壁面距离（用于湍流模型）——与 CPU 版
-        # fr_solver_turbulence.py 的 ["SST","DDES","IDDES","WMLES","LES"]
-        # 同一个判据集合（WMLES 壁面剪应力修正/LES 近壁行为都需要它，
-        # 即便 WALE 本身的公式不直接读 d_wall）。
+        # 预计算壁面距离：只有输运湍流模型需要（`turbulence/registry.py::WALL_DISTANCE_MODELS`；WALE 不读壁距，
+        # WMLES 的匹配点高度取自单元几何）
         self.wall_distance_gpu = None
-        if self.turb_model_gpu is not None or self.sgs_model_gpu is not None:
+        if self.turb_model_gpu is not None:
             self._init_wall_distance_gpu()
 
         # WALL 边界面拓扑掩码（#7，k/omega 输运 Dirichlet BC 用）：纯几何/

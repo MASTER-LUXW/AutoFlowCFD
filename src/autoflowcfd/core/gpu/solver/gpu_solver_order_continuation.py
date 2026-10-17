@@ -130,7 +130,7 @@ def gpu_solver_interpolate_to_new_order(solver, target_p: int) -> None:
 
     # 壁面距离（compact/阶数相关，y+/SST 输运需要）——复用 __init__ 同一个
     # 实例方法。
-    if solver.turb_model_gpu is not None or solver.sgs_model_gpu is not None:
+    if solver.turb_model_gpu is not None:
         solver._init_wall_distance_gpu()
 
     # 分布式模态滤波：新阶数的 filter_prism/filter_tet 形状不同，必须

@@ -7,7 +7,7 @@
     SA_FAMILY           SA-neg（`turbulence/sa`）
     TRANSPORT_MODELS    带输运方程、走隐式紧耦合 Newton 的模型（上面两族）
     ALGEBRAIC_MODELS    亚格子粘性是代数的（LES / 壁模化 LES）
-    WALL_DISTANCE_MODELS 需要壁面距离场的模型
+    WALL_DISTANCE_MODELS 需要壁面距离场的模型（输运模型；WALE 不读壁距，WMLES 的匹配点高度取自单元几何）
     SUPPORTED_MODELS    全部合法模型名（含层流 "NONE"）
 """
 
@@ -15,7 +15,7 @@ SST_FAMILY = ("SST", "DDES", "IDDES")
 SA_FAMILY = ("SA",)
 TRANSPORT_MODELS = SST_FAMILY + SA_FAMILY
 ALGEBRAIC_MODELS = ("WMLES", "LES")
-WALL_DISTANCE_MODELS = TRANSPORT_MODELS + ALGEBRAIC_MODELS
+WALL_DISTANCE_MODELS = TRANSPORT_MODELS
 SUPPORTED_MODELS = ("NONE",) + TRANSPORT_MODELS + ALGEBRAIC_MODELS
 
 
@@ -34,6 +34,11 @@ def is_sa_family(name) -> bool:
 
 def has_transport_equations(name) -> bool:
     return normalized(name) in TRANSPORT_MODELS
+
+
+def uses_algebraic_sgs(name) -> bool:
+    """亚格子涡粘由代数模型（WALE）给出：LES 与 WMLES（后者另加壁面应力模型）。"""
+    return normalized(name) in ALGEBRAIC_MODELS
 
 
 def needs_wall_distance(name) -> bool:

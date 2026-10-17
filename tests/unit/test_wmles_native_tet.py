@@ -1,42 +1,11 @@
-"""AutoFlowCFD V2.0 - native 四面体 + WMLES 支持验证（2026-09-02）。
+"""AutoFlowCFD V2.0 - native 四面体 + WMLES：坍缩坐标外插表不得复活。
 
-真实 bug（排查分布式 WMLES 支持时顺带发现，见
-core/utils/solver_helpers.py 模块文档"native tet + WMLES"一节）：
-`compute_wmles_wall_stress_correction`此前对四面体单元恒用坍缩坐标
-专属的`ops.boundary_extrap_tet[(axis,side)]`/1D Radau/VCJH 修正函数
-导数（`_distribute_from_face`），未区分`tet_basis_mode`。native 面的
-`owner_axis`/`owner_side`存的是复用的 excluded_vertex/哑值（见
-face_kernels.py::FlatFaceGeometry 字段文档），拿去查坍缩坐标专用的
-矩阵字典在语义上是错的——修复前若真的用这些伪值去查
-`ops.boundary_extrap_tet`，六个合法 `(axis,side)` 组合是
-`{(0,-1),(0,1),(1,-1),(1,1),(2,-1),(2,1)}`，而 native 面存的
-`owner_side`是恒定的哑值（见下方决定性验证），大概率不在这个集合里，
-直接 KeyError；即使凑巧落在合法集合里，取到的也是语义不匹配的
-坍缩坐标矩阵。
-
-本文件验证修复后的行为：native 四面体 WALL 面能正确走
-原生面外插/提升分支，产出
-有限、非零、只作用在正确 owner 单元上的动量修正。
+2026-09-02 曾查出 WMLES 壁面剪应力修正对四面体恒用坍缩坐标专属外插表（原生面上的 owner_axis/owner_side
+是哑值，查表或 KeyError、或取到语义不对的矩阵）。现行 WMLES（`core/turbulence/wmles/`）只用原生面外插与
+提升；四面体 owner 的匹配点与残差修正由 `test_wmles_wall_model.py::test_native_tet_wall_face` 覆盖。
 """
 
-import numpy as np
-import pytest
-
 from autoflowcfd.fr.operators import generate_fr_operators
-from autoflowcfd.core.turbulence.wmles import WMLESModel
-from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-from autoflowcfd.core.utils.solver_helpers import compute_wmles_wall_stress_correction
-from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive, primitive_to_conserved
-
-from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
-from tests.unit._boundary_groups import tag_wall_cells
-
-
-def _uniform_freestream_U(mesh) -> np.ndarray:
-    rho_inf, u_inf, v_inf, w_inf, p_inf = 1.225, 30.0, 5.0, -3.0, 101325.0
-    Q_inf = np.array([rho_inf, u_inf, v_inf, w_inf, p_inf])
-    U_inf = primitive_to_conserved(Q_inf)
-    return np.tile(U_inf, (mesh.n_cells, mesh.n_sps_per_cell, 1))
 
 
 class TestNativeTetWmlesBoundaryExtrap:
@@ -67,52 +36,7 @@ class TestNativeTetWmlesBoundaryExtrap:
                 f"离散路径（见 ProjectFiles/V2.0/27_...md）")
 
 
-    def test_wmles_wall_stress_on_native_tet_face(self):
-        order = 2
-        mesh = _build_synthetic_mixed_mesh(order, tet_basis_mode="native")
-        ops = generate_fr_operators(order)
-        n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
-        n_prism = mesh.n_prism_cells
-        mu, rho_inf = 1.8e-5, 1.225
-
-        # 找一个真实的四面体（native）边界面，把它的 owner 单元标成 WALL。
-        fc = mesh.face_connectivity
-        tet_boundary_faces = np.nonzero(fc.is_boundary & (fc.owner_cell >= n_prism))[0]
-        assert len(tet_boundary_faces) > 0, "test setup must have a real tet boundary face"
-        boundary_face = int(tet_boundary_faces[0])
-        wall_cell = int(fc.owner_cell[boundary_face])
-        tag_wall_cells(mesh, [wall_cell])
-
-        import types
-        root_stub = types.SimpleNamespace(
-            mesh=mesh, freestream={"rho_inf": rho_inf, "vel_inf": 30.0, "p_inf": 101325.0},
-            turb_model_name="WMLES", wmles_model=object(),
-        )
-        provider = build_boundary_ghost_provider(root_stub, bc_overrides={})
-        wmles_model = WMLESModel(nu=mu / rho_inf)
-        wall_distance = np.full((n_cells, n_sps), 1e-2)
-
-        U = _uniform_freestream_U(mesh)
-        Q = conserved_to_primitive(U[..., :5])
-        facade = types.SimpleNamespace(
-            wmles_model=wmles_model, mesh=mesh, ops=ops, wall_distance=wall_distance,
-            state=types.SimpleNamespace(U=U, Q=Q), boundary_ghost_provider=provider,
-        )
-
-        correction = compute_wmles_wall_stress_correction(facade)
-
-        assert correction is not None, "test setup must produce at least one real WALL face"
-        assert correction.shape == (n_cells, n_sps, 5)
-        assert np.all(np.isfinite(correction))
-        # 只有分量 1:4（动量）非零。
-        assert np.allclose(correction[..., 0], 0.0)
-        assert np.allclose(correction[..., 4], 0.0)
-        # 修正只施加在 wall_cell 上，其余单元恒为零。
-        other_cells = [c for c in range(n_cells) if c != wall_cell]
-        for c in other_cells:
-            assert np.allclose(correction[c], 0.0), f"correction leaked onto non-WALL cell {c}"
-        assert np.any(correction[wall_cell, :, 1:4] != 0.0), "wall cell should get a nonzero momentum correction"
-
-
 if __name__ == "__main__":
+    import pytest
+
     pytest.main([__file__, "-v"])

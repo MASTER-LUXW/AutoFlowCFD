@@ -118,15 +118,13 @@ class _GPUSolverResidualMixin:
             device_id=self.device_id,
         )
 
-        # WMLES 壁面剪应力修正（#7）：与 CPU 版
-        # `FRSolver.compute_viscous_residual` 同一个调用点——必须叠加在
-        # 这里（残差组装阶段），不能等 step() 状态更新之后才生效，见
-        # gpu_turbulence_wmles.py 模块文档。
+        # WMLES 壁面剪应力修正：与 CPU 同一份实现（`core/turbulence/wmles/`，数组模块无关），残差组装阶段施加
         if self.wmles_model is not None:
-            from autoflowcfd.core.gpu.turbulence.gpu_turbulence_wmles import (
-                compute_wmles_wall_stress_correction_gpu,
-            )
-            wall_stress_correction = compute_wmles_wall_stress_correction_gpu(self, U=U)
+            from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+
+            wall_stress_correction = self.wmles_model.residual_correction(
+                get_cupy(), self.mesh, get_flat_face_geometry(self.mesh, self.ops), self.boundary_ghost_provider,
+                U, self.mu_molecular)
             if wall_stress_correction is not None:
                 res = res + wall_stress_correction[..., : res.shape[-1]]
 

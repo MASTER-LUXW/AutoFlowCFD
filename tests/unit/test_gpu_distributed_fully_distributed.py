@@ -137,6 +137,33 @@ def _build_sst_package(mesh, ops, rank=0, n_ranks=1):
     )
 
 
+@pytest.mark.parametrize("model", ["LES", "WMLES"])
+def test_algebraic_sgs_models_get_wale_on_multi_gpu(mesh_and_ops, gpu_shim, model):
+    """I-111：WMLES 与单机一样 = 壁面模型 + WALE 亚格子模型（此前四条分布式路径只给 LES 构造 WALE，
+    WMLES 在分布式上没有任何亚格子涡粘）；两者都不需要壁距。"""
+    from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
+    from autoflowcfd.core.gpu.distributed.gpu_distributed import MultiGPUDistributedSolver
+    from autoflowcfd.core.gpu.distributed.gpu_distributed_fully_distributed import (
+        build_multi_gpu_solver_from_fully_distributed_package,
+    )
+    from autoflowcfd.core.turbulence.sgs import WALEModel
+    from autoflowcfd.core.turbulence.wmles import WMLESModel
+
+    mesh, ops = mesh_and_ops
+    freestream = {"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0}
+    stub = types.SimpleNamespace(mesh=mesh, freestream=freestream, turb_model_name=model,
+                                 wmles_model=WMLESModel() if model == "WMLES" else None)
+    package = build_fully_distributed_rank_package(
+        mesh, ops, mesh.face_connectivity, np.zeros(mesh.n_cells, dtype=np.int32), 0, 1,
+        build_boundary_ghost_provider(stub, bc_overrides={}), freestream, mu_molecular=1.8e-5, mach_ref=0.2,
+        order=mesh.order, enable_viscous=True, turb_model_name=model)
+    solver = build_multi_gpu_solver_from_fully_distributed_package(
+        MultiGPUDistributedSolver, package, n_ranks=1, device_id=0, rank=0, root_context=None)
+    assert isinstance(solver.sgs_model_gpu, WALEModel)
+    assert isinstance(solver.wmles_model, WMLESModel) == (model == "WMLES")
+    assert solver.turb_model_gpu is None and solver.wall_distance_gpu is None
+
+
 class TestBuildFromFullyDistributedPackageNoneTurbulence:
     def test_wires_geometry_and_freestream_correctly(self, mesh_and_ops, gpu_shim):
         from autoflowcfd.core.gpu.distributed.gpu_distributed import MultiGPUDistributedSolver

@@ -66,23 +66,22 @@ class TestWmlesDistributedGpu:
     `TestWallDistanceDistributedGpu`/上面 SST 系列同一套 numpy 替身
     方法论，直接调用 `MultiGPUDistributedSolver.compute_viscous_
     residual_gpu` 这个真实生产方法（用 stub 对象承载它需要的属性），
-    只 mock 掉与本次改动无关的 `compute_viscous_residual_fr_gpu`
-    （GPU 粘性通量核，本次没有改动，返回全零隔离出 WMLES 修正项本身），
-    判据：stub 路径算出的修正与直接调用 CPU 核心函数
-    `compute_wmles_wall_stress_correction`（用同一份 compact 数据）算出
-    的参照值逐位一致。"""
+    只 mock 掉 GPU 粘性通量核（返回全零，隔离出 WMLES 修正项本身）。
+    判据：本 rank 的修正与单机在全局网格上的修正逐位一致（壁面面完全
+    属于 owner 单元所在的 rank）。"""
 
     @pytest.mark.parametrize("rank", [0, 1])
     def test_wmles_correction_matches_direct_cpu_call(self, rank, monkeypatch):
-        from autoflowcfd.core.turbulence.wmles import WMLESModel
+        from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
         from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-        from autoflowcfd.core.utils.solver_helpers import compute_wmles_wall_stress_correction
+        from autoflowcfd.core.gpu.distributed.gpu_distributed.compact_view import _CompactMeshDataView
+        from autoflowcfd.core.turbulence.wmles import WMLESModel
         import autoflowcfd.core.gpu.residual.gpu_viscous as gpu_viscous_mod
 
         order = 1
         mesh = _build_synthetic_mixed_mesh(order)
         ops = generate_fr_operators(order)
-        n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
+        n_sps = mesh.n_sps_per_cell
         mu = 1.8e-5
         rho_inf = 1.225
         rng = np.random.default_rng(777)
@@ -98,8 +97,6 @@ class TestWmlesDistributedGpu:
             turb_model_name="WMLES", wmles_model=object(),
         )
         provider_global = build_boundary_ghost_provider(root_stub, bc_overrides={})
-        wmles_model = WMLESModel(nu=mu / rho_inf)
-        wall_distance = np.full((n_cells, n_sps), 1e-2)
 
         cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
         partition = build_distributed_partition(fc, cell_partition, rank=rank, n_ranks=2)
@@ -109,15 +106,11 @@ class TestWmlesDistributedGpu:
         import copy as copy_mod
         provider_local = copy_mod.copy(provider_global)
         provider_local.group_code = provider_global.group_code[partition.local_faces]
-        wall_distance_compact = wall_distance[compact_global_ids]
 
         mesh_data = _prepare_compact_mesh_data(mesh, ops, compact_global_ids)
         mesh_data['n_prism'] = dist_fc.base_flat.n_prism
 
-        compact_mesh_view = types.SimpleNamespace(
-            n_prism_cells=dist_fc.base_flat.n_prism, n_points_1d=mesh.n_points_1d,
-            jacobians={'det_jacs': mesh_data['det_jacs'], 'inv_jacs': mesh_data['inv_jacs']},
-        )
+        compact_mesh_view = _CompactMeshDataView(mesh, compact_global_ids, dist_fc.base_flat.n_prism)
 
         n_halo = partition.n_halo
         native_ids = (
@@ -139,8 +132,7 @@ class TestWmlesDistributedGpu:
             boundary_ghost_provider=provider_local,
             flat_face_gpu=None,
             dist_flat_face=dist_fc,
-            wall_distance_gpu=wall_distance_compact,
-            wmles_model=wmles_model,
+            wmles_model=WMLESModel(),
             _compact_mesh_view=compact_mesh_view,
             U_extended_gpu=U_extended,
             partition=partition,
@@ -151,25 +143,10 @@ class TestWmlesDistributedGpu:
 
         residual_local = gd_mod.MultiGPUDistributedSolver.compute_viscous_residual_gpu(stub)
 
-        # 参照值：直接调用 CPU 核心函数，用同一份 compact 数据。
-        from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
-        U_compact = U_extended[dist_fc.perm]
-        Q_compact = conserved_to_primitive(U_compact[..., :5])
-        facade = types.SimpleNamespace(
-            wmles_model=wmles_model, mesh=compact_mesh_view, ops=ops,
-            wall_distance=wall_distance_compact,
-            state=types.SimpleNamespace(U=U_compact, Q=Q_compact),
-            boundary_ghost_provider=provider_local,
-        )
-        expected_compact = compute_wmles_wall_stress_correction(facade, flat_face_override=dist_fc.base_flat)
-        if expected_compact is None:
-            # 这个 rank 的 local+halo compact 区域里恰好不含任何真实 WALL
-            # 面（4 单元合成网格切成 2 rank 时完全可能发生——WALL 单元
-            # 落在另一个 rank）：GPU 侧同样应该完全不叠加任何修正，
-            # 残差退化为 mock 的粘性核返回值（全零）。
-            np.testing.assert_allclose(residual_local, np.zeros_like(residual_local), atol=1e-10)
-            return
-        expected_native = expected_compact[dist_fc.inv_perm]
-        expected_local = expected_native[:partition.n_local_cells, :, :5]
+        # 参照值：单机在全局网格上的修正，取本 rank 的 local 单元
+        expected_global = WMLESModel().residual_correction(
+            np, mesh, get_flat_face_geometry(mesh, ops), provider_global, U, mu)
+        assert expected_global is not None
+        expected_local = expected_global[partition.local_cells]
 
         np.testing.assert_allclose(residual_local, expected_local, atol=1e-10)

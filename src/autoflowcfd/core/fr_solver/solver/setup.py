@@ -115,7 +115,7 @@ class _SolverSetupMixin:
         self.wmles_model = None
         if self.turb_model_name == "WMLES":
             from autoflowcfd.core.turbulence.wmles import WMLESModel
-            self.wmles_model = WMLESModel(nu=mu_molecular / max(rho_inf, 1e-10))
+            self.wmles_model = WMLESModel()
         # mach_ref 的唯一来源（按 AUSM+up 预处理档钳下限，推导与标定见该函数）。
         mach_ref = resolve_mach_ref(rho_inf, vel_inf, p_inf)
         # aoa_deg/aos_deg 进 freestream 字典：下游的 Q_free 构造、SEM 入口
@@ -220,7 +220,7 @@ class _SolverSetupMixin:
 
         reset_newton_state(self)
         
-        # 7. 壁面距离场（用于DDES/WMLES）
+        # 7. 壁面距离场（输运湍流模型用，`turbulence/registry.py::WALL_DISTANCE_MODELS`）
         self.wall_distance = None
 
         # 8. Order Continuation 状态

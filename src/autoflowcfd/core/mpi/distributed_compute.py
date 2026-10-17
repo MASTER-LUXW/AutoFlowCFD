@@ -165,6 +165,16 @@ class DistributedMeshAdapter:
         """返回单元体积，已按 local+halo 压缩索引空间重排。"""
         return self._cell_volumes
 
+    @property
+    def sps_coords(self):
+        """解点物理坐标 (n_compact, n_sps, 3)，按 local+halo 压缩索引空间重排（按需切片，只有 WMLES 的
+        匹配点几何读它，且结果被缓存）。"""
+        from autoflowcfd.core.mpi.distributed_mesh_loader import PrecompactedMeshData
+
+        if isinstance(self.local_mesh, PrecompactedMeshData):
+            return self.local_mesh.sps_coords
+        return self.local_mesh.sps_coords[self.dist_fc.compact_global_ids]
+
 
 def distributed_compute_inviscid_residual(
     U_local: np.ndarray,
@@ -244,7 +254,6 @@ def distributed_compute_viscous_residual(
     boundary_ghost_provider=None,
     mu_t_field_compact: Optional[np.ndarray] = None,
     wmles_model=None,
-    wall_distance_compact: Optional[np.ndarray] = None,
 ) -> np.ndarray:
     """分布式粘性残差计算。
 
@@ -280,20 +289,13 @@ def distributed_compute_viscous_residual(
         boundary_ghost_provider: 边界幽灵态提供者
         mu_t_field_compact: (n_compact, n_sps) 湍流动力涡粘度场（compact
             索引空间），None 时等价于纯层流（此前唯一行为）
-        wmles_model: WMLESModel 实例（2026-09-02 新增，见 `core/utils/
-            solver_helpers.py::compute_wmles_wall_stress_correction`
-            文档），None 时跳过壁面剪应力修正（此前唯一行为）
-        wall_distance_compact: (n_compact, n_sps) 壁面距离场（compact
-            索引空间，与 `mu_t_field_compact` 同一个索引空间），WMLES
-            激活时必须提供
+        wmles_model: `core/turbulence/wmles::WMLESModel`，None 时没有壁面剪应力修正
 
     Returns:
         residual: (n_local_cells, n_sps, 5) local cells 的粘性残差
     """
-    import types
     from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
     from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL
-    from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
 
     # 1. Halo 交换（原生排列，local 在前 halo 在后）
     U_extended = halo_exchange.exchange(U_local)
@@ -315,24 +317,10 @@ def distributed_compute_viscous_residual(
         flat_face_override=dist_fc.base_flat,
     )
 
-    # 4b. WMLES 壁面剪应力修正（2026-09-02）：与单机路径
-    # `FRSolver.compute_viscous_residual` 同一个施加时机（残差组装
-    # 阶段，时间积分之前）——复用同一个 CPU 核心函数，
-    # `flat_face_override=dist_fc.base_flat` 与上面粘性残差调用同一个
-    # 对象，避免它退回到对 `adapter` 重新调用
-    # `get_flat_face_geometry`（那样会因 `adapter.face_flux_points`
-    # 是"传统模式"下真实全局 mesh 的 face_flux_points 对象、但这里的
-    # 面索引是 compact 空间而语义错位——与 `_compute_omega_wall_target`
-    # 此前的同一类 bug，见该函数文档）。
+    # 4b. WMLES 壁面剪应力修正：与单机同一份实现，面几何用 `dist_fc.base_flat`（与上面粘性残差同一个对象）
     if wmles_model is not None:
-        facade = types.SimpleNamespace(
-            wmles_model=wmles_model, mesh=adapter, ops=ops,
-            wall_distance=wall_distance_compact,
-            state=types.SimpleNamespace(U=U_compact, Q=conserved_to_primitive(U_compact[..., :5])),
-            boundary_ghost_provider=boundary_ghost_provider,
-        )
-        from autoflowcfd.core.utils.solver_helpers import compute_wmles_wall_stress_correction
-        correction_compact = compute_wmles_wall_stress_correction(facade, flat_face_override=dist_fc.base_flat)
+        correction_compact = wmles_model.residual_correction(
+            np, adapter, dist_fc.base_flat, boundary_ghost_provider, U_compact, mu)
         if correction_compact is not None:
             residual_compact = residual_compact + correction_compact[..., :residual_compact.shape[-1]]
 

@@ -113,6 +113,10 @@ class FlatFaceGeometry:
     # 需要它按面点物理面积加权跳跃量，因此新增这个字段——对坍缩坐标
     # 面同样有意义（本来就已经算好），只是此前从未被这个 kernel 消费过。
     true_area_weight: np.ndarray    # float64 (n_faces, n_fp)
+    # 面记录所在平面 `n . x = d`：float64 (n_faces, 4)，前三列为 owner 外向单位法向、第四列为 d（面形心算出）。
+    # 通量点物理坐标在 P>=1 由解点外插精确得到，P0 每面只有一个通量点、外插只得到单元中心；需要
+    # "单元到面的距离"的量（WMLES 匹配点高度）从这里取，与阶数无关
+    face_plane: np.ndarray          # float64 (n_faces, 4)
     # **参考**面求积权重，float64 (n_fp,) —— 逐面相同（所有面都用同一套
     # `[-1,1]^2` 上的张量积 Gauss-Legendre 网格），所以只存一份。
     #
@@ -393,6 +397,8 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
         true_normal=true_normal,
         owner_cube_face=owner_cube_face, neighbor_cube_face=neighbor_cube_face,
         true_area_weight=true_area_weight,
+        face_plane=np.concatenate([np.asarray(fc.normal, dtype=np.float64),
+                                   np.einsum('fd,fd->f', fc.normal, fc.center)[:, None]], axis=1),
         ref_area_weight=ref_area_weight,
         ip_length=ip_length,
         owner_adj_row_exact=owner_adj_row_exact, neighbor_adj_row_exact=neighbor_adj_row_exact,

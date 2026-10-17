@@ -43,7 +43,7 @@ def wall_ghost_state(
     后一种场景下，"切向速度保持不变"不是在建模真实滑移，而是刻意让这个
     面对 BR1/LDG 粘性通量的切向梯度贡献退化为零（ghost 切向速度与内部值
     无跳跃），使壁面模型另外算出的 tau_w
-    （core/utils/solver_helpers.py::compute_wmles_wall_stress_correction）
+    （core/turbulence/wmles/，只作用于物理无滑移壁面）
     成为该面切向应力的唯一来源，而不是叠加在一个由无滑移镜像逼出的虚假
     解析梯度剪应力之上——按 WMLES 壁面模型文献的标准做法（wall model 的
     tau_w 应该"取代"而非"叠加"解析梯度算出的剪应力，见

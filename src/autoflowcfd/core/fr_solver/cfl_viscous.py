@@ -15,17 +15,8 @@
 两份公式只改一份是本项目反复出现的缺陷，所以只留这一份。
 """
 
-import numpy as np
-
 from autoflowcfd.core.utils.array_module import array_module as _array_module
-
-
-def _scatter_add(xp, out, idx, val):
-    if xp is np:
-        np.add.at(out, idx, val)
-    else:
-        import cupyx
-        cupyx.scatter_add(out, idx, val)
+from autoflowcfd.core.utils.array_module import scatter_add as _scatter_add
 
 
 def viscous_length_scale_sq(volumes, owner_cell, neighbor_cell, is_boundary, face_areas):
