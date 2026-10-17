@@ -76,6 +76,26 @@ def _check_prism_basis(meta_group, checkpoint_path) -> None:
             f"从头开始。")
 
 
+def _check_tet_node_set(meta_group, solution, checkpoint_path) -> None:
+    """P4 及以上：checkpoint 的四面体节点集必须与当前一致，否则硬失败。
+
+    2026-10-17 改正了 Warp & Blend 优化参数的下标（`fr/warp_blend_nodes.py`），P4+ 四面体解点位置随之改变；
+    节点值在旧、新节点上含义不同，形状恰好相同、不会报错，续算会静默重解释成错解。P1~P3 的节点没有变，
+    不检查。阶数由解的每单元解点数推出（`(p+1)^3`）。
+    """
+    from autoflowcfd.fr.native_padding import order_from_n_sps
+    from autoflowcfd.fr.warp_blend_nodes import TET_NODE_SET
+
+    if solution.ndim != 3 or order_from_n_sps(int(solution.shape[1])) < 4:
+        return
+    saved = decode_attr(meta_group.attrs['tet_node_set']) if 'tet_node_set' in meta_group.attrs else None
+    if saved != TET_NODE_SET:
+        raise ValueError(
+            f"Checkpoint {checkpoint_path} 的四面体节点集是 {saved!r}，当前是 {TET_NODE_SET!r}："
+            f"P4 及以上的四面体解点位置不同，续算会把解点值静默重解释到另一组节点上（形状相同、不会报错）。"
+            f"请从低阶 checkpoint 延拓（--init-from 低阶 checkpoint）或从头开始。")
+
+
 def load_checkpoint(
     manager,
     checkpoint_path: Union[str, Path],
@@ -145,6 +165,7 @@ def load_checkpoint(
             # === 加载解 ===
             sol_group = f["solution"]
             solution = sol_group["conserved"][:]
+            _check_tet_node_set(meta_group, solution, checkpoint_path)
 
             # 随守恒解一起保存的任何额外逐单元字段（见 save() 的
             # extra_fields 参数，例如 'mu_t'）——放在

@@ -25,6 +25,7 @@ import numpy as np
 from loguru import logger
 
 from autoflowcfd.fr.native_prism.mode import resolve_prism_basis_mode
+from autoflowcfd.fr.warp_blend_nodes import TET_NODE_SET
 
 try:
     import h5py
@@ -161,6 +162,8 @@ class CheckpointManager:
                 # 不匹配直接硬失败。
                 meta_group.attrs['prism_basis'] = np.string_(
                     resolve_prism_basis_mode())
+                # 四面体节点集版本（P3+ 节点随它变，`checkpoint_load.py::_check_tet_node_set`）
+                meta_group.attrs['tet_node_set'] = np.string_(TET_NODE_SET)
 
                 if metadata:
                     for key, value in metadata.items():

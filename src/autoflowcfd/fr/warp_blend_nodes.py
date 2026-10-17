@@ -20,8 +20,21 @@ AutoFlowCFD 约定 v1=(-1,-1,-1),v2=(1,-1,-1),v3=(-1,1,-1),v4=(-1,-1,1)，
 
 import numpy as np
 
+#: Nodes3D.m 的 `alpopt`：`alpha = alpopt(N)`，MATLAB 1 起下标，即第 N 个元素对应阶数 N（N <= 15），其余取 1。
+#: 2026-10-17 以前按 0 起下标取 `ALPHA_STORE[p]`，p >= 3 错位一档（P3 用了 0.1002，应为 0；P4 用了 1.1332，应为
+#: 0.1002），且上限写成 p <= 14：P4+ 四面体节点不是文献的优化节点集。P1/P2 两种取法都是 0；P3 的 alpha 不影响
+#: 节点（四面体 P3 没有内部节点、每个面内只有面心一个点，blend 在面心处为零），所以 P1~P3 节点不变。
 ALPHA_STORE = [0, 0, 0, 0.1002, 1.1332, 1.5608, 1.3413, 1.2577, 1.1603,
                1.10153, 0.6080, 0.4523, 0.8856, 0.8717, 0.9655]
+
+#: 四面体节点集的版本标识，写入 checkpoint：节点集改过之后，P4+ 的解点值在旧、新节点上含义不同
+#: （`core/utils/checkpoint_load.py::_check_tet_node_set`）
+TET_NODE_SET = "warp-blend-alpopt-v2"
+
+
+def warp_blend_alpha(p: int) -> float:
+    """Nodes3D.m：`if N <= 15, alpha = alpopt(N); else alpha = 1.0`（alpopt 1 起下标）。"""
+    return float(ALPHA_STORE[p - 1]) if 1 <= p <= 15 else 1.0
 
 
 def _jacobi_gl(p: int) -> np.ndarray:
@@ -112,7 +125,7 @@ def warp_blend_nodes_3d(p: int):
     if p == 0:
         return np.array([-0.5]), np.array([-0.5]), np.array([-0.5])
 
-    alpha = ALPHA_STORE[p] if p <= 14 else 1.0
+    alpha = warp_blend_alpha(p)
 
     r0, s0, t0 = _equi_nodes_3d(p)
     L1 = (1 + t0) / 2.0
