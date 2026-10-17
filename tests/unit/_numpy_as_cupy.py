@@ -33,8 +33,11 @@ class NumpyAsCupy:
     def __getattr__(self, name):
         return getattr(np, name)
 
-    def asnumpy(self, x):
-        return np.asarray(x)
+    def asnumpy(self, x, out=None):
+        if out is None:
+            return np.asarray(x)
+        out[...] = x
+        return out
 
     def scatter_add(self, a, indices, b):
         np.add.at(a, indices, b)
@@ -80,3 +83,7 @@ class NumpyAsCupy:
 
             def synchronize(self):
                 pass
+
+        @staticmethod
+        def get_current_stream():
+            return NumpyAsCupy.cuda.Stream()
