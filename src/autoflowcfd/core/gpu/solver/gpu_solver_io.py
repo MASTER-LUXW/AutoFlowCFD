@@ -177,21 +177,9 @@ class _GPUSolverIOMixin:
         # 的顺序：`compute_source_terms_gpu` 在前，DDES/IDDES 长度尺度
         # 更新在后。
         if apply_des and self.ddes_model_gpu is not None:
-            nu_field = self.mu_molecular / cp.maximum(rho, 1e-10)
-            from autoflowcfd.core.gpu.turbulence.gpu_turbulence_des import GPUIDDESModel
-            if isinstance(self.ddes_model_gpu, GPUIDDESModel):
-                self.ddes_model_gpu.apply_to_sst_model_iddes_gpu(
-                    self.turb_model_gpu, d_wall, self._iddes_h_max_gpu, self._iddes_h_wn_gpu,
-                    nu_field, grad_vel,
-                )
-            else:
-                cell_volumes = self.mesh_data.get('cell_volumes')
-                if cell_volumes is None:
-                    cell_volumes = cp.asarray(self.mesh.get_all_cell_volumes())
-                self.ddes_model_gpu.apply_to_sst_model_gpu(
-                    self.turb_model_gpu, d_wall, cell_volumes, nu_field, grad_vel,
-                    h_max=getattr(self, '_iddes_h_max_gpu', None),
-                )
+            self.ddes_model_gpu.apply(
+                self.turb_model_gpu, d_w=d_wall, nu=self.mu_molecular / cp.maximum(rho, 1e-10), grad_u=grad_vel,
+                h_max=self._iddes_h_max_gpu, h_wn=self._iddes_h_wn_gpu, xp=cp)
 
         dk_dt = Sk / cp.maximum(rho, 1e-10)
         # w = ln(omega) 方程的源项部分（omega 由 exp(w) 产生、恒为正）
@@ -253,9 +241,15 @@ class _GPUSolverIOMixin:
         """
         if self.sgs_model_gpu is None:
             return
-        # 与 SST 源项同一份速度梯度（原始变量速度 + 提升修正）
-        nu_t = self.sgs_model_gpu.compute_eddy_viscosity_gpu(self._turbulence_velocity_gradient_gpu(),
-                                                             self._grid_scale_gpu)
+        from autoflowcfd.core.turbulence.sgs import les_filter_width
+        from autoflowcfd.fr.native_padding import order_from_n_sps
 
-        if self.turb_model_gpu is not None and hasattr(self.turb_model_gpu, "nu_t"):
-            self.turb_model_gpu.nu_t = self.turb_model_gpu.nu_t + nu_t
+        cp = get_cupy()
+        n_cells, n_sps = self.U_gpu.shape[:2]
+        volumes = self.mesh_data.get('cell_volumes')
+        if volumes is None:
+            volumes = cp.asarray(self.mesh.get_all_cell_volumes())
+        delta = les_filter_width(volumes, cp.arange(n_cells) < int(self.mesh.n_prism_cells), order_from_n_sps(n_sps),
+                                 xp=cp)
+        # 与 SST 源项同一份速度梯度（原始变量速度 + 提升修正）；结果留在 sgs_model_gpu.nu_t
+        self.sgs_model_gpu.compute_eddy_viscosity(self._turbulence_velocity_gradient_gpu(), delta, xp=cp)

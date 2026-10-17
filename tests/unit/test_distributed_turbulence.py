@@ -77,7 +77,7 @@ def test_distributed_turbulence_matches_single_machine(rank, turb_model_name):
     dt_local = np.full((n_cells, n_sps), 1e-5)
 
     h_max_global = h_wn_global = None
-    if turb_model_name == "IDDES":
+    if turb_model_name in ("DDES", "IDDES"):
         h_max_global, h_wn_global = compute_h_max_and_h_wn(mesh)
 
     # ---- 单机参考：直接复用 compute_turbulence_source ----
@@ -149,7 +149,7 @@ def test_distributed_turbulence_matches_single_machine(rank, turb_model_name):
 
     ddes_model_distributed = _make_ddes_model(turb_model_name)
     iddes_h_max_compact = iddes_h_wn_compact = None
-    if turb_model_name == "IDDES":
+    if turb_model_name in ("DDES", "IDDES"):
         iddes_h_max_compact = h_max_global[dist_fc.compact_global_ids]
         iddes_h_wn_compact = h_wn_global[dist_fc.compact_global_ids]
 
@@ -187,26 +187,25 @@ def test_distributed_les_viscosity_matches_single_machine(rank):
     只需要比对一次调用的输出。"""
     from autoflowcfd.core.mpi.distributed_turbulence import distributed_compute_les_viscosity
     from autoflowcfd.core.turbulence.sgs import WALEModel
-    from autoflowcfd.core.fr_residual.viscous import compute_gradients
 
     order = 1
     mesh = _build_synthetic_mixed_mesh(order)
     ops = generate_fr_operators(order)
-    n_sps = mesh.n_sps_per_cell
     rng = np.random.default_rng(2024)
     U, _k, _omega = _nonuniform_state(mesh, rng)
 
-    # 单机参照：与 apply_turbulence_corrections（fr_solver/turbulence.py）
-    # 同一套计算——grad_vel、delta=|V|^(1/3)、WALEModel.compute_eddy_viscosity。
-    grad_U_ref = compute_gradients(U, ops, mesh)
-    grad_vel_ref = grad_U_ref[:, :, 1:4, :]
-    delta_ref = np.power(np.abs(mesh.get_all_cell_volumes()), 1.0 / 3.0)
-    delta_ref = np.tile(delta_ref[:, None], (1, n_sps))
-    sgs_ref = WALEModel()
-    nu_t_ref = sgs_ref.compute_eddy_viscosity(grad_vel_ref, delta_ref)
+    # 单机参照：与 apply_turbulence_corrections（fr_solver/turbulence/corrections.py）同一套计算——
+    # 原始变量速度梯度（source_velocity_gradient）、滤波宽度 (V/N_p)^(1/3)、WALEModel.compute_eddy_viscosity
+    from autoflowcfd.core.fr_operators.corrected_gradient import source_velocity_gradient
+    from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
     from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
-    rho_ref = conserved_to_primitive(U[..., :5])[..., 0]
-    mu_t_ref = rho_ref * nu_t_ref
+    from autoflowcfd.core.turbulence.sgs import les_filter_width
+
+    Q_ref = conserved_to_primitive(U[..., :5])
+    grad_vel_ref = source_velocity_gradient(Q_ref, mesh, ops, get_flat_face_geometry(mesh, ops), None)
+    delta_ref = les_filter_width(mesh.get_all_cell_volumes(), np.arange(mesh.n_cells) < mesh.n_prism_cells, order)
+    nu_t_ref = WALEModel().compute_eddy_viscosity(grad_vel_ref, delta_ref)
+    mu_t_ref = Q_ref[..., 0] * nu_t_ref
 
     cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
     fc = mesh.face_connectivity
@@ -357,7 +356,7 @@ def test_distributed_ddes_two_consecutive_steps_matches_single_machine(turb_mode
 
             ddes_model = _make_ddes_model(turb_model_name)
             iddes_h_max_compact = iddes_h_wn_compact = None
-            if turb_model_name == "IDDES":
+            if turb_model_name in ("DDES", "IDDES"):
                 iddes_h_max_compact = h_max_global[dist_fc.compact_global_ids]
                 iddes_h_wn_compact = h_wn_global[dist_fc.compact_global_ids]
 
@@ -432,7 +431,7 @@ class TestDdesModelDistinctFromSst:
                     self_inner.turb_model = turb
                     self_inner.turb_model_name = turb_model_name
                     self_inner.ddes_model = _make_ddes_model(turb_model_name)
-                    if turb_model_name == "IDDES":
+                    if turb_model_name in ("DDES", "IDDES"):
                         self_inner._iddes_h_max, self_inner._iddes_h_wn = compute_h_max_and_h_wn(mesh)
                     self_inner.wall_distance = d_wall
                     self_inner.mu_molecular = mu

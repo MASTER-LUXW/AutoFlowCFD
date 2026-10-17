@@ -428,10 +428,12 @@ def distributed_compute_les_viscosity(
         Q_compact, mesh_adapter, ops, dist_fc.base_flat, boundary_ghost_provider,
         halo_refresh=CompactHaloRefresh(halo_exchange, dist_fc.perm, dist_fc.inv_perm, partition.n_local_cells))
 
-    cell_volumes = mesh_adapter.cell_volumes
-    delta = np.power(np.abs(cell_volumes), 1.0 / 3.0)
-    delta = np.tile(delta[:, None], (1, n_sps))
+    from autoflowcfd.core.turbulence.sgs import les_filter_width
+    from autoflowcfd.fr.native_padding import order_from_n_sps
 
+    n_compact = Q_compact.shape[0]
+    delta = les_filter_width(mesh_adapter.cell_volumes, np.arange(n_compact) < int(mesh_adapter.n_prism_cells),
+                             order_from_n_sps(n_sps))
     nu_t = sgs_model.compute_eddy_viscosity(grad_vel, delta)
     rho_compact = Q_compact[..., 0]
     return rho_compact * nu_t

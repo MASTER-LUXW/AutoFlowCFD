@@ -141,8 +141,8 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
     solver.state = DistributedFRState(solver.partition, n_sps)
 
     # --- 3. 湍流场对象（k_field/omega_field/nu_t 数组替换 + halo 交换器
-    # 重建；模型本身——GPUTurbulenceSST/GPUDDESModel/GPUIDDESModel/
-    # GPUWALEModel 实例——不含任何阶数相关内部状态，不需要重新构造）---
+    # 重建；模型本身——GPUTurbulenceSST/DDESModel/IDDESModel/WALEModel
+    # 实例——不含任何阶数相关内部状态，不需要重新构造）---
     if solver.turb_model_gpu is not None:
         with cp.cuda.Device(solver.device_id):
             solver.turb_model_gpu.set_transported_fields([cp.asarray(f) for f in new_fields_np])
@@ -166,11 +166,6 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
                 if h_wn_global is not None:
                     with cp.cuda.Device(solver.device_id):
                         solver.iddes_h_wn_compact = cp.asarray(h_wn_global[compact_global_ids])
-
-    if solver.sgs_model_gpu is not None:
-        cell_volumes_compact = solver.mesh_data.get('cell_volumes')
-        delta = cp.abs(cell_volumes_compact) ** (1.0 / 3.0)
-        solver._grid_scale_compact = cp.tile(delta[:, None], (1, n_sps))
 
     # 分布式模态滤波：新阶数的 filter_prism/filter_tet 形状不同，必须
     # 重建（复用 __init__ 同一个实例方法）。

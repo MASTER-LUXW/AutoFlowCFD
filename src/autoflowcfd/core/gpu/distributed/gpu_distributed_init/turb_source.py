@@ -76,7 +76,15 @@ class _GPUDistributedTurbSourceMixin:
         U_compact = self._permute_to_compact(self.gpu_halo.exchange(self.U_gpu))
         Q_compact = conserved_to_primitive_gpu(U_compact[..., :5])
         grad_vel = self._turbulence_velocity_gradient_compact(Q_compact)
-        nu_t_compact = self.sgs_model_gpu.compute_eddy_viscosity_gpu(grad_vel, self._grid_scale_compact)
+        from autoflowcfd.core.turbulence.sgs import les_filter_width
+        from autoflowcfd.fr.native_padding import order_from_n_sps
+
+        cp = get_cupy()
+        n_compact, n_sps = Q_compact.shape[:2]
+        delta = les_filter_width(self.mesh_data['cell_volumes'],
+                                 cp.arange(n_compact) < int(self.dist_flat_face.base_flat.n_prism),
+                                 order_from_n_sps(n_sps), xp=cp)
+        nu_t_compact = self.sgs_model_gpu.compute_eddy_viscosity(grad_vel, delta, xp=cp)
         return Q_compact[:, :, 0] * nu_t_compact
 
     def _prepare_turbulence_view_distributed(self):
@@ -177,16 +185,9 @@ class _GPUDistributedTurbSourceMixin:
         # DDES/IDDES 长度尺度必须排在源项**之后**（"慢一拍"耦合：源项用上一步
         # 的长度尺度，算完再用本步 nu_t 写下一步要用的，见单机 gpu_solver_io.py）
         if apply_des and self.ddes_model_gpu is not None:
-            nu_field = self.mu_molecular / cp.maximum(ctx.rho, 1e-10)
-            from autoflowcfd.core.gpu.turbulence.gpu_turbulence_des import GPUIDDESModel
-            if isinstance(self.ddes_model_gpu, GPUIDDESModel):
-                self.ddes_model_gpu.apply_to_sst_model_iddes_gpu(
-                    view, ctx.d_wall, self.iddes_h_max_compact, self.iddes_h_wn_compact,
-                    nu_field, ctx.grad_vel)
-            else:
-                self.ddes_model_gpu.apply_to_sst_model_gpu(
-                    view, ctx.d_wall, self.mesh_data.get('cell_volumes'), nu_field, ctx.grad_vel,
-                    h_max=getattr(self, 'iddes_h_max_compact', None))
+            self.ddes_model_gpu.apply(
+                view, d_w=ctx.d_wall, nu=self.mu_molecular / cp.maximum(ctx.rho, 1e-10), grad_u=ctx.grad_vel,
+                h_max=self.iddes_h_max_compact, h_wn=self.iddes_h_wn_compact, xp=cp)
 
         dk_dt = Sk / cp.maximum(ctx.rho, 1e-10)
         dw_dt = S_omega / (cp.maximum(ctx.rho, 1e-10) * omega)

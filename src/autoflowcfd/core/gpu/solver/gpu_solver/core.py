@@ -6,7 +6,6 @@
 
 from contextlib import contextmanager
 
-import numpy as np
 from typing import Optional
 from loguru import logger
 from autoflowcfd.core.gpu import gpu_available, get_cupy
@@ -117,9 +116,9 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
             NotImplementedError: turb_model_name 是本方法支持集合之外的值
 
         GPU 湍流模型支持范围（#7，V2.0 专家组盲审第四轮，2026-08-28）：
-        NONE/SST/DDES/IDDES/WMLES/LES 均已实现（core/gpu/turbulence/
-        gpu_turbulence_sst.py、gpu_turbulence_des.py、gpu_sgs.py、
-        gpu_turbulence_wmles.py）。k/omega 输运（gpu_scalar_transport.py）与 CPU 侧同样只有 isfinite
+        NONE/SST/SA/DDES/IDDES/WMLES/LES 均已实现（SST 为 core/gpu/turbulence/gpu_turbulence_sst.py；
+        DES 长度尺度、WALE、WMLES 壁面模型是数组模块无关的同一份实现 core/turbulence/des/、sgs.py、
+        wmles/，以 xp=cupy 调用）。k/omega 输运（gpu_scalar_transport.py）与 CPU 侧同样只有 isfinite
         归零这一道防线（离群值抑制"机制3"已于 2026-09-19 在两侧一并删除——真实网格消融对照证明它无效，
         见 fr_residual/inviscid.py），两侧对称。
         GPU 侧整体仍未在真实 CUDA 硬件上执行验证过（本机
@@ -269,9 +268,9 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
 
         # 初始化 GPU 湍流模型（#7：SST/DDES/IDDES 共用同一个 GPUTurbulenceSST
         # 源项 ODE，DDES/IDDES 只是额外提供一个 des_length_scale 替换掉
-        # SST 内部的 RANS 耗散长度尺度，见 gpu_turbulence_des.py 模块文档；
-        # WMLES/LES 不构造 SST，只构造 GPUWALEModel，与 CPU 版
-        # fr_solver_turbulence.py::init_turbulence_models 分支结构一致）。
+        # SST 内部的 RANS 耗散长度尺度，见 core/turbulence/des/ddes.py 模块文档；
+        # WMLES/LES 不构造 SST，只构造 WALEModel，与 CPU 版
+        # fr_solver/turbulence/init.py::init_turbulence_models 分支结构一致）。
         if turb_model_upper == "SA":
             from autoflowcfd.core.fr_solver.turbulence.init import create_sa_model
             with cp.cuda.Device(device_id):
@@ -297,55 +296,25 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
             print(f"   [OK] GPU SST k-omega model initialized "
                   f"(k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
 
-            if turb_model_upper == "DDES":
-                from autoflowcfd.core.gpu.turbulence.gpu_turbulence_des import GPUDDESModel
-                from autoflowcfd.core.turbulence.des import compute_h_max_and_h_wn
-                self.ddes_model_gpu = GPUDDESModel()
-                # h_max（2026-09-02 补齐，与下面 IDDES 分支同一处几何量、
-                # 同一个一次性缓存策略）：`apply_to_sst_model_gpu` 现在
-                # 优先用各向异性感知的 max_edge 网格尺度而不是
-                # cube_root(V)，见 CPU 版 des.py::DDESModel.compute_
-                # grid_scale 文档"Note"一节——本项目高度依赖棱柱边界层
-                # 网格，cube_root 会系统性低估扁平单元的 Δ。只需要
-                # h_max（第一个返回值），h_wn 是 IDDES 专属几何量。
-                h_max_cpu, _ = compute_h_max_and_h_wn(mesh)
-                with cp.cuda.Device(device_id):
-                    self._iddes_h_max_gpu = cp.asarray(h_max_cpu)
-                print("   [OK] GPU DDES model initialized (based on SST)")
-            elif turb_model_upper == "IDDES":
-                from autoflowcfd.core.gpu.turbulence.gpu_turbulence_des import GPUIDDESModel
-                from autoflowcfd.core.turbulence.des import compute_h_max_and_h_wn
-                self.ddes_model_gpu = GPUIDDESModel()
-                # h_max/h_wn 只依赖网格几何，与 CPU 版
-                # fr_solver_turbulence.py 同一个一次性缓存策略：CPU 算一次
-                # （复用已验证的 quality_metrics 边长几何函数），结果上传
-                # 常驻显存，不是每步都重算。
+            if turb_model_upper in ("DDES", "IDDES"):
+                from autoflowcfd.core.turbulence.des import DDESModel, IDDESModel, compute_h_max_and_h_wn
+                self.ddes_model_gpu = DDESModel() if turb_model_upper == "DDES" else IDDESModel()
+                # 逐单元网格尺度只依赖几何：算一次常驻显存（DDES 只用 h_max，IDDES 还用 h_wn）
                 h_max_cpu, h_wn_cpu = compute_h_max_and_h_wn(mesh)
                 with cp.cuda.Device(device_id):
                     self._iddes_h_max_gpu = cp.asarray(h_max_cpu)
                     self._iddes_h_wn_gpu = cp.asarray(h_wn_cpu)
-                print("   [OK] GPU IDDES model initialized (based on SST)")
+                print(f"   [OK] GPU {turb_model_upper} model initialized (based on SST)")
 
         elif turb_model_upper == "WMLES":
-            from autoflowcfd.core.gpu.turbulence.gpu_sgs import GPUWALEModel
-            self.sgs_model_gpu = GPUWALEModel()
+            from autoflowcfd.core.turbulence.sgs import WALEModel
+            self.sgs_model_gpu = WALEModel()
             print("   [OK] GPU WMLES model initialized (wall stress correction + WALE SGS)")
 
         elif turb_model_upper == "LES":
-            from autoflowcfd.core.gpu.turbulence.gpu_sgs import GPUWALEModel
-            self.sgs_model_gpu = GPUWALEModel()
+            from autoflowcfd.core.turbulence.sgs import WALEModel
+            self.sgs_model_gpu = WALEModel()
             print("   [OK] GPU LES with WALE SGS model initialized")
-
-        # 网格尺度 Delta = V^(1/3)（WALE/Smagorinsky 用，与 CPU 版
-        # fr_solver/solver_geometry.py::_get_grid_scale 同一个公式）：
-        # 只依赖单元体积几何，与流场无关，一次性算好缓存。
-        self._grid_scale_gpu = None
-        if self.sgs_model_gpu is not None:
-            volumes_cpu = mesh.get_all_cell_volumes()
-            delta_cpu = np.power(np.abs(volumes_cpu), 1.0 / 3.0)
-            delta_cpu = np.tile(delta_cpu[:, np.newaxis], (1, n_sps))
-            with cp.cuda.Device(device_id):
-                self._grid_scale_gpu = cp.asarray(delta_cpu)
 
         # 预计算壁面距离（用于湍流模型）——与 CPU 版
         # fr_solver_turbulence.py 的 ["SST","DDES","IDDES","WMLES","LES"]

@@ -7,7 +7,6 @@ from typing import Optional
 
 import numpy as np
 
-from autoflowcfd.core.turbulence.des import IDDESModel
 from autoflowcfd.core.turbulence.registry import is_sa_family, is_sst_family
 from autoflowcfd.core.turbulence.transported import TurbulenceRates
 from autoflowcfd.core.fr_operators.corrected_gradient import source_velocity_gradient
@@ -141,30 +140,10 @@ def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, apply_des: boo
     Sk, S_omega = solver.turb_model.compute_source_terms(Q, grad_vel, d_wall, mu, grad_k=grad_k, grad_omega=grad_omega)
 
     if apply_des and solver.ddes_model is not None:
-        rho = Q[:, :, 0]
-        nu_field = mu / np.maximum(rho, 1e-10)
-        if isinstance(solver.ddes_model, IDDESModel):
-            # IDDES 的 Δ/f_B/f_e 公式需要逐单元 h_max/h_wn（见
-            # init_turbulence_models 里 IDDES 分支的一次性缓存），与
-            # DDESModel 基类只需要 cell_volumes 的 cube_root(V) 网格
-            # 尺度公式结构不同，走独立的 apply_to_sst_model_iddes。
-            solver.ddes_model.apply_to_sst_model_iddes(
-                solver.turb_model, d_wall, solver._iddes_h_max, solver._iddes_h_wn,
-                nu_field, grad_vel,
-            )
-        else:
-            cell_volumes = solver._get_cell_volumes()
-            # h_max（2026-09-02）：`init_turbulence_models` 的 DDES 分支
-            # 现在也会设置 `solver._iddes_h_max`（与 IDDES 同一处几何量、
-            # 同一个一次性缓存，见该分支文档）——传入后 apply_to_sst_
-            # model 改用各向异性感知的 max_edge 网格尺度，不再是
-            # cube_root(V)。`getattr` 兜底：极少数不经过 init_
-            # turbulence_models（例如脱离 solver 直接构造 DDESModel 的
-            # 测试场景）没有这个属性时，退化为 cube_root，不报错。
-            solver.ddes_model.apply_to_sst_model(
-                solver.turb_model, d_wall, cell_volumes, nu_field, grad_vel,
-                h_max=getattr(solver, '_iddes_h_max', None),
-            )
+        # DES 长度尺度用本步刚算出的 F1 与 nu_t（排在源项之后），供下一次源项求值的 k 破坏项使用
+        solver.ddes_model.apply(
+            solver.turb_model, d_w=d_wall, nu=mu / np.maximum(Q[:, :, 0], 1e-10), grad_u=grad_vel,
+            h_max=solver._iddes_h_max, h_wn=solver._iddes_h_wn, xp=np)
 
     # Sk/S_omega 是 compute_source_terms 按标准 SST 公式算出的 rho*k、
     # rho*omega 方程源项（P_k/D_k/P_omega/D_omega/CD_omega 都显式带 rho

@@ -106,13 +106,12 @@ def gpu_solver_interpolate_to_new_order(solver, target_p: int) -> None:
     solver.ops_data = {k: v for k, v in solver.mesh_data.items()}
     solver._init_face_geometry()
 
-    n_sps = solver.mesh.n_sps_per_cell
     with cp.cuda.Device(solver.device_id):
         solver.U_gpu = cp.asarray(new_U_np)
     solver._update_primitives_gpu()
 
     # --- 4. 湍流场对象（k_field/omega_field/nu_t 数组替换；模型本身
-    # ——GPUTurbulenceSST/GPUDDESModel/GPUIDDESModel/GPUWALEModel 实例
+    # ——GPUTurbulenceSST/DDESModel/IDDESModel/WALEModel 实例
     # ——不含任何阶数相关内部状态，不需要重新构造，与 GPU 分布式版本
     # 同一处理）---
     if solver.turb_model_gpu is not None:
@@ -120,13 +119,6 @@ def gpu_solver_interpolate_to_new_order(solver, target_p: int) -> None:
             solver.turb_model_gpu.set_transported_fields([cp.asarray(f) for f in new_fields_np])
             if new_nu_t_np is not None:
                 solver.turb_model_gpu.nu_t = cp.asarray(new_nu_t_np)
-
-    if solver.sgs_model_gpu is not None:
-        cell_volumes = solver.mesh.get_all_cell_volumes()
-        delta_cpu = np.power(np.abs(cell_volumes), 1.0 / 3.0)
-        delta_cpu = np.tile(delta_cpu[:, np.newaxis], (1, n_sps))
-        with cp.cuda.Device(solver.device_id):
-            solver._grid_scale_gpu = cp.asarray(delta_cpu)
 
     # --- 5. boundary_ghost_provider（SEM 入口幽灵态按当时阶数的 FP
     # 几何预存了每面 FP 物理坐标，必须重建）---

@@ -20,18 +20,16 @@ def apply_turbulence_corrections(solver) -> None:
     更新之后，为时已晚）。
     """
     if solver.sgs_model is not None:
+        from autoflowcfd.core.turbulence.sgs import les_filter_width
+        from autoflowcfd.fr.native_padding import order_from_n_sps
+
         # 与 SST 源项同一份速度梯度（原始变量速度 + 提升修正，见该函数文档）
         grad_u = turbulence_velocity_gradient(solver, solver.state.Q)
-        delta = solver._get_grid_scale()
+        n_cells, n_sps = solver.state.U.shape[:2]
+        delta = les_filter_width(solver._get_cell_volumes(), np.arange(n_cells) < int(solver.mesh.n_prism_cells),
+                                 order_from_n_sps(n_sps))
         nu_t = solver.sgs_model.compute_eddy_viscosity(grad_u, delta)
-
-        if hasattr(solver.turb_model, "nu_t"):
-            solver.turb_model.nu_t += nu_t
-            logger.debug(f"SGS eddy viscosity added to turbulence model: mean={nu_t.mean():.6e}")
-        else:
-            solver.sgs_model.nu_t = nu_t
-            logger.debug(f"SGS eddy viscosity computed: mean={nu_t.mean():.6e}, max={nu_t.max():.6e}")
-
+        logger.debug(f"SGS eddy viscosity computed: mean={nu_t.mean():.6e}, max={nu_t.max():.6e}")
 
 def get_turbulent_viscosity_field(solver) -> Optional[np.ndarray]:
     """汇总当前激活的湍流模型给出的动力涡粘度场 mu_t = rho * nu_t。"""

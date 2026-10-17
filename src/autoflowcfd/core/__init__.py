@@ -29,7 +29,7 @@ from .utils.wall_distance import WallDistanceSource
 from .turbulence.sst import SSTModelFR
 from .turbulence.des import DDESModel, IDDESModel
 from .turbulence.wmles import WMLESModel
-from .turbulence.sgs import WALEModel, SmagorinskyModel
+from .turbulence.sgs import WALEModel
 
 # Backend 模块（第四次评审：删除了 V1 时代与生产路径完全脱节、且用
 # 已被弃用的 numba.cuda 判据的 create_backend/NumbaBackend/CUDABackend/
@@ -53,7 +53,6 @@ __all__ = [
     'IDDESModel',
     'WMLESModel',
     'WALEModel',
-    'SmagorinskyModel',
     'SolutionVector',
     'FRSolver',
     'get_available_backends',

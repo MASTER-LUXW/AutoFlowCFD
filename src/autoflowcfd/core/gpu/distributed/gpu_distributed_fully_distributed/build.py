@@ -183,7 +183,6 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     self.iddes_h_max_compact = None
     self.iddes_h_wn_compact = None
     self.sgs_model_gpu = None
-    self._grid_scale_compact = None
     self.wmles_model = None
     self.wall_distance_gpu = None
 
@@ -210,18 +209,15 @@ def build_multi_gpu_solver_from_fully_distributed_package(
         _upload_wall_geometry_compact(self, package, cp, device_id)
 
         if turb_model_name == 'DDES':
-            from autoflowcfd.core.gpu.turbulence.gpu_turbulence_des import GPUDDESModel
-            self.ddes_model_gpu = GPUDDESModel()
+            from autoflowcfd.core.turbulence.des import DDESModel
+            self.ddes_model_gpu = DDESModel()
         elif turb_model_name == 'IDDES':
-            from autoflowcfd.core.gpu.turbulence.gpu_turbulence_des import GPUIDDESModel
-            self.ddes_model_gpu = GPUIDDESModel()
+            from autoflowcfd.core.turbulence.des import IDDESModel
+            self.ddes_model_gpu = IDDESModel()
 
     elif turb_model_name == 'LES':
-        from autoflowcfd.core.gpu.turbulence.gpu_sgs import GPUWALEModel
-        self.sgs_model_gpu = GPUWALEModel()
-        cell_volumes_compact = self.mesh_data.get('cell_volumes')
-        delta = cp.abs(cell_volumes_compact) ** (1.0 / 3.0)
-        self._grid_scale_compact = cp.tile(delta[:, None], (1, n_sps))
+        from autoflowcfd.core.turbulence.sgs import WALEModel
+        self.sgs_model_gpu = WALEModel()
         logger.info(f"Rank {self.rank}: GPU LES with WALE SGS model initialized (fully-distributed mode)")
 
     elif turb_model_name == 'WMLES':

@@ -72,7 +72,7 @@ def test_gpu_distributed_sst_matches_cpu_distributed_sst(rank, turb_model_name):
     d_wall = np.full((n_cells, n_sps), 0.05)
 
     h_max_global = h_wn_global = None
-    if turb_model_name == "IDDES":
+    if turb_model_name in ("DDES", "IDDES"):
         h_max_global, h_wn_global = compute_h_max_and_h_wn(mesh)
 
     cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
@@ -89,7 +89,7 @@ def test_gpu_distributed_sst_matches_cpu_distributed_sst(rank, turb_model_name):
     )
 
     iddes_h_max_compact = iddes_h_wn_compact = None
-    if turb_model_name == "IDDES":
+    if turb_model_name in ("DDES", "IDDES"):
         iddes_h_max_compact = h_max_global[compact_global_ids]
         iddes_h_wn_compact = h_wn_global[compact_global_ids]
 
@@ -181,7 +181,7 @@ def test_gpu_distributed_ddes_two_consecutive_calls_does_not_crash(turb_model_na
     d_wall = np.full((n_cells, n_sps), 0.05)
 
     h_max_global = h_wn_global = None
-    if turb_model_name == "IDDES":
+    if turb_model_name in ("DDES", "IDDES"):
         h_max_global, h_wn_global = compute_h_max_and_h_wn(mesh)
 
     rank = 1
@@ -199,7 +199,7 @@ def test_gpu_distributed_ddes_two_consecutive_calls_does_not_crash(turb_model_na
     )
 
     iddes_h_max_compact = iddes_h_wn_compact = None
-    if turb_model_name == "IDDES":
+    if turb_model_name in ("DDES", "IDDES"):
         iddes_h_max_compact = h_max_global[compact_global_ids]
         iddes_h_wn_compact = h_wn_global[compact_global_ids]
 
@@ -260,27 +260,22 @@ def test_gpu_distributed_les_matches_single_machine_wale(rank):
     对同一批全局单元逐位一致——WALE 是纯代数模型（不依赖跨步状态），
     分布式路径直接用当前 halo 交换后的速度场现算，理论上不需要任何
     "跨步 lag"这类复杂度，这里用真实计算验证这个简化确实成立。"""
-    from autoflowcfd.core.turbulence.sgs import WALEModel
-    from autoflowcfd.core.gpu.turbulence.gpu_sgs import GPUWALEModel
-    from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient as cpu_compute_physical_gradient
+    from autoflowcfd.core.fr_operators.corrected_gradient import source_velocity_gradient
+    from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+    from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
+    from autoflowcfd.core.turbulence.sgs import WALEModel, les_filter_width
 
     order = 1
     mesh = _build_synthetic_mixed_mesh(order)
     ops = generate_fr_operators(order)
-    n_sps = mesh.n_sps_per_cell
     rng = np.random.default_rng(4242)
     U, _, _ = _nonuniform_state(mesh, rng)
 
-    # ---- CPU 单机参照 ----
-    grad_U_cpu = cpu_compute_physical_gradient(U[..., :5], mesh, ops)
-    grad_vel_cpu = grad_U_cpu[..., 1:4, :]
-    delta_cpu = np.abs(mesh.cell_volumes) ** (1.0 / 3.0)
-    delta_cpu = np.tile(delta_cpu[:, None], (1, n_sps))
-    wale_cpu = WALEModel()
-    nu_t_cpu = wale_cpu.compute_eddy_viscosity(grad_vel_cpu, delta_cpu)
-    from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
-    rho_cpu = conserved_to_primitive(U[..., :5])[..., 0]
-    mu_t_cpu_global = rho_cpu * nu_t_cpu
+    # ---- CPU 单机参照：原始变量速度梯度 + 滤波宽度 (V/N_p)^(1/3) ----
+    Q_cpu = conserved_to_primitive(U[..., :5])
+    grad_vel_cpu = source_velocity_gradient(Q_cpu, mesh, ops, get_flat_face_geometry(mesh, ops), None)
+    delta_cpu = les_filter_width(mesh.cell_volumes, np.arange(mesh.n_cells) < mesh.n_prism_cells, order)
+    mu_t_cpu_global = Q_cpu[..., 0] * WALEModel().compute_eddy_viscosity(grad_vel_cpu, delta_cpu)
 
     # ---- GPU 分布式（numpy 替身）----
     cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
@@ -299,10 +294,6 @@ def test_gpu_distributed_les_matches_single_machine_wale(rank):
     mesh_data['n_prism'] = dist_fc.base_flat.n_prism
     mesh_data['cell_volumes'] = mesh.cell_volumes[compact_global_ids]
 
-    n_sps_val = n_sps
-    delta_compact = np.abs(mesh_data['cell_volumes']) ** (1.0 / 3.0)
-    grid_scale_compact = np.tile(delta_compact[:, None], (1, n_sps_val))
-
     U_local = U[partition.local_cells]
     fake_halo_gpu = ShapeKeyedFakeHalo(U[native_ids])
 
@@ -310,10 +301,10 @@ def test_gpu_distributed_les_matches_single_machine_wale(rank):
         rank=rank, device_id=0, mesh=mesh, boundary_ghost_provider=None,
         partition=partition, dist_flat_face=dist_fc, flat_face_gpu=dist_fc.base_flat,
         mesh_data=mesh_data, ops_data=mesh_data,
-        turb_model_gpu=None, sgs_model_gpu=GPUWALEModel(),
+        turb_model_gpu=None, sgs_model_gpu=WALEModel(),
         gpu_halo=fake_halo_gpu,
         _perm_gpu=dist_fc.perm, _inv_perm_gpu=dist_fc.inv_perm,
-        U_gpu=U_local, _grid_scale_compact=grid_scale_compact,
+        U_gpu=U_local,
     )
     stub._permute_to_compact = lambda arr: arr[stub._perm_gpu]
     stub._unpermute_from_compact = lambda arr: arr[stub._inv_perm_gpu]

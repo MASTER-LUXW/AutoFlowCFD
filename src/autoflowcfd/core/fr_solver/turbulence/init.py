@@ -264,7 +264,7 @@ def init_turbulence_models(solver, n_cells: int, n_sps: int) -> None:
         # 只需要 h_max（第一个返回值），h_wn 是 IDDES 专属几何量，DDES
         # 不用，但 compute_h_max_and_h_wn 只有一个返回两者的接口，丢弃
         # 用不到的 h_wn 即可。
-        solver._iddes_h_max, _ = compute_h_max_and_h_wn(solver.mesh)
+        solver._iddes_h_max, solver._iddes_h_wn = compute_h_max_and_h_wn(solver.mesh)
         print(f"   [OK] DDES model initialized (based on SST, "
               f"k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
 

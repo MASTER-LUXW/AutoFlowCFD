@@ -48,9 +48,8 @@ class _MultiGPUSetupMixin:
         # （`core/mpi/distributed_turbulence.py`）验证过）：此前 2026-08-28
         # #1 修复只收紧到 'none' 是因为 wall_distance/compact 索引空间
         # 对齐这部分工作本身还没做，不是设计上不可行——现在补齐。
-        # DDES/IDDES 已于 2026-09-02 真正移植（复用单机 GPUDDESModel/
-        # GPUIDDESModel 数值逻辑+CPU MPI 分布式同一套 halo 交换+compact
-        # 重排模式，见 `_compute_turbulence_source_distributed` 文档）。
+        # DDES/IDDES 与单机共用 `core/turbulence/des/` 的同一份长度尺度实现（数组模块无关），
+        # 加上 CPU MPI 分布式同一套 halo 交换+compact 重排（见 `_compute_turbulence_source_distributed`）。
         # LES 同日移植——WALE 是纯代数模型（不像 SST 的 k/omega 有跨步
         # ODE 积分状态），不需要"halo 交换持久状态"这层复杂度，只需要
         # 用当前状态现算 mu_t，实现和验证成本远低于 SST/DDES/IDDES。
@@ -285,55 +284,26 @@ class _MultiGPUSetupMixin:
             logger.info(f"Rank {self.rank}: GPU SST model initialized "
                         f"(k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
 
-            # DDES/IDDES（2026-09-02）：与单机 GPU 路径同一套构造
-            # （gpu_solver.py），复用 CPU 版 des.py::compute_h_max_and_h_wn
-            # （纯逐单元几何量，与相邻单元/分区无关，"传统模式"下
-            # self.mesh 是完整全局网格，算完按 compact_global_ids 切一次
-            # 片即可，不需要新的跨 rank 几何交换）。des_length_scale_
-            # halo_gpu 是跨步持久状态专用的 1-var halo 交换器，见
-            # `_compute_turbulence_source_distributed` 对应修复文档。
-            if turb_model == "DDES":
-                from autoflowcfd.core.gpu.turbulence.gpu_turbulence_des import GPUDDESModel
-                from autoflowcfd.core.turbulence.des import compute_h_max_and_h_wn
-                self.ddes_model_gpu = GPUDDESModel()
-                # h_max（2026-09-02 补齐，与下面 IDDES 分支同一处几何量、
-                # 同一个持久化+按 compact_global_ids 切片策略）：
-                # `apply_to_sst_model_gpu` 现在优先用各向异性感知的
-                # max_edge 网格尺度，见 CPU 版 des.py 对应方法文档。
-                # 只需要 h_max，h_wn 是 IDDES 专属几何量。
-                h_max_cpu, _ = compute_h_max_and_h_wn(mesh)
-                self._iddes_h_max_global = h_max_cpu
+            # DDES/IDDES：逐单元网格尺度只依赖几何（`des/grid_scale.py::compute_h_max_and_h_wn`），
+            # "传统模式"下 self.mesh 是完整全局网格，算一次、按 compact_global_ids 切片；全局结果
+            # 保留供 Order Continuation 换阶数后重新切片（几何量与阶数无关）
+            if turb_model in ("DDES", "IDDES"):
+                from autoflowcfd.core.turbulence.des import DDESModel, IDDESModel, compute_h_max_and_h_wn
+                self.ddes_model_gpu = DDESModel() if turb_model == "DDES" else IDDESModel()
+                self._iddes_h_max_global, self._iddes_h_wn_global = compute_h_max_and_h_wn(mesh)
                 compact_global_ids = self.dist_flat_face.compact_global_ids
                 with cp.cuda.Device(device_id):
-                    self.iddes_h_max_compact = cp.asarray(h_max_cpu[compact_global_ids])
-                logger.info(f"Rank {self.rank}: GPU DDES model initialized (based on SST)")
-            elif turb_model == "IDDES":
-                from autoflowcfd.core.gpu.turbulence.gpu_turbulence_des import GPUIDDESModel
-                from autoflowcfd.core.turbulence.des import compute_h_max_and_h_wn
-                self.ddes_model_gpu = GPUIDDESModel()
-                h_max_cpu, h_wn_cpu = compute_h_max_and_h_wn(mesh)
-                # 持久化全局（阶数无关）h_max/h_wn（2026-09-02，Order
-                # Continuation 支持需要——见 gpu_distributed_order_
-                # continuation.py 文档）：阶数切换后 compact_global_ids
-                # 会变，需要重新切片，但 compute_h_max_and_h_wn(mesh) 本身
-                # 是纯逐单元几何量、与阶数无关（见该函数文档），不需要
-                # 重新计算，只需要保留这份全局结果供重新切片。
-                self._iddes_h_max_global = h_max_cpu
-                self._iddes_h_wn_global = h_wn_cpu
-                compact_global_ids = self.dist_flat_face.compact_global_ids
-                with cp.cuda.Device(device_id):
-                    self.iddes_h_max_compact = cp.asarray(h_max_cpu[compact_global_ids])
-                    self.iddes_h_wn_compact = cp.asarray(h_wn_cpu[compact_global_ids])
-                logger.info(f"Rank {self.rank}: GPU IDDES model initialized (based on SST)")
+                    self.iddes_h_max_compact = cp.asarray(self._iddes_h_max_global[compact_global_ids])
+                    self.iddes_h_wn_compact = cp.asarray(self._iddes_h_wn_global[compact_global_ids])
+                logger.info(f"Rank {self.rank}: GPU {turb_model} model initialized (based on SST)")
 
         # LES（2026-09-02）：WALE 是纯代数模型（不像 SST 的 k/omega 有
         # 跨步 ODE 积分状态），`_compute_turbulence_source_distributed`
         # 用当前状态现算 mu_t，不需要任何跨步持久 halo 交换基础设施。
         self.sgs_model_gpu = None
-        self._grid_scale_compact = None
         if turb_model == "LES":
-            from autoflowcfd.core.gpu.turbulence.gpu_sgs import GPUWALEModel
-            self.sgs_model_gpu = GPUWALEModel()
+            from autoflowcfd.core.turbulence.sgs import WALEModel
+            self.sgs_model_gpu = WALEModel()
             logger.info(f"Rank {self.rank}: GPU LES with WALE SGS model initialized")
 
         # WMLES（2026-09-02）：没有 k/omega ODE 状态，不需要
@@ -354,14 +324,6 @@ class _MultiGPUSetupMixin:
         self.wall_distance_gpu = None
         if self.turb_model_gpu is not None or self.wmles_model is not None:
             self._init_wall_distance_distributed()
-
-        # 网格尺度 Delta = V^(1/3)（WALE 用，compact 索引空间——
-        # `mesh_data['cell_volumes']` 已经是 compact 大小，见
-        # `_CompactMeshDataView` 构造处，直接用不需要再切片）。
-        if self.sgs_model_gpu is not None:
-            cell_volumes_compact = self.mesh_data.get('cell_volumes')
-            delta = cp.abs(cell_volumes_compact) ** (1.0 / 3.0)
-            self._grid_scale_compact = cp.tile(delta[:, None], (1, n_sps))
 
         # 初始化 GPU 模态滤波
         self.filter_func_gpu = None

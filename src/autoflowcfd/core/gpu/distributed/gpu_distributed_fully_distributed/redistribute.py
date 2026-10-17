@@ -159,11 +159,6 @@ def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int
                 solver.turb_model_gpu.nu_t = cp.asarray(new_nu_t_np)
         _upload_wall_geometry_compact(solver, my_package, cp, solver.device_id)
 
-    if solver.sgs_model_gpu is not None:
-        cell_volumes_compact = solver.mesh_data.get('cell_volumes')
-        delta = cp.abs(cell_volumes_compact) ** (1.0 / 3.0)
-        solver._grid_scale_compact = cp.tile(delta[:, None], (1, new_n_sps))
-
     if solver.wmles_model is not None:
         wall_distance_compact = my_package.get('wall_distance_compact')
         with cp.cuda.Device(solver.device_id):

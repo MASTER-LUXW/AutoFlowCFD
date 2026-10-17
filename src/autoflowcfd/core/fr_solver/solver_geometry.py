@@ -70,15 +70,3 @@ class _SolverGeometryMixin:
         """
         return self.mesh.get_all_cell_volumes()
 
-    def _get_grid_scale(self) -> np.ndarray:
-        """
-        获取网格尺度（用于LES/SGS模型）。
-
-        Returns:
-            delta: 网格尺度，形状 (n_cells, n_sps)
-        """
-        n_cells, n_sps = self.state.U.shape[:2]
-
-        volumes = self.mesh.get_all_cell_volumes()
-        delta = np.power(np.abs(volumes), 1.0 / 3.0)
-        return np.tile(delta[:, np.newaxis], (1, n_sps))

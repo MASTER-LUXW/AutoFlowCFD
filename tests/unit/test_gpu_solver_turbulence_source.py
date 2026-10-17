@@ -39,7 +39,6 @@ from autoflowcfd.core.fr_residual.inviscid import primitive_to_conserved, conser
 from autoflowcfd.core.turbulence.sst import SSTModelFR
 from autoflowcfd.core.turbulence.des import DDESModel, IDDESModel, compute_h_max_and_h_wn
 from autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst import GPUTurbulenceSST
-from autoflowcfd.core.gpu.turbulence.gpu_turbulence_des import GPUDDESModel, GPUIDDESModel
 from autoflowcfd.core.gpu.solver.gpu_solver_io import _GPUSolverIOMixin
 import autoflowcfd.core.gpu.solver.gpu_solver_io as gpu_solver_io_mod
 import autoflowcfd.core.gpu.solver.gpu_solver as gpu_solver_mod
@@ -48,7 +47,6 @@ import autoflowcfd.core.gpu.residual.gpu_volume_contract as gpu_volume_contract_
 import autoflowcfd.core.gpu.residual.gpu_flux as gpu_flux_mod
 import autoflowcfd.core.gpu.turbulence.gpu_scalar_transport as gst_mod
 import autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst as gpu_turbulence_sst_mod
-import autoflowcfd.core.gpu.turbulence.gpu_turbulence_des as gpu_turbulence_des_mod
 import autoflowcfd.core.gpu.gpu_modal_filter as gpu_modal_filter_mod
 import autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence as gpu_implicit_turb_mod
 
@@ -62,10 +60,9 @@ def _patch_get_cupy(monkeypatch):
     shim = NumpyAsCupy()
     patch_module_get_cupy(monkeypatch, [
         gpu_solver_io_mod, gpu_solver_mod, gpu_gradients_mod, gpu_volume_contract_mod,
-        gpu_flux_mod, gst_mod, gpu_turbulence_sst_mod, gpu_turbulence_des_mod,
+        gpu_flux_mod, gst_mod, gpu_turbulence_sst_mod,
         gpu_modal_filter_mod, gpu_implicit_turb_mod], shim)
     monkeypatch.setattr(gpu_turbulence_sst_mod, "gpu_available", True)
-    monkeypatch.setattr(gpu_turbulence_des_mod, "gpu_available", True)
 
 
 def _prepare_mesh_ops_data(mesh, ops):
@@ -119,9 +116,9 @@ def _make_ddes_model_gpu(turb_model_name):
     if turb_model_name == "SST":
         return None
     if turb_model_name == "DDES":
-        return GPUDDESModel()
+        return DDESModel()
     if turb_model_name == "IDDES":
-        return GPUIDDESModel()
+        return IDDESModel()
     raise ValueError(turb_model_name)
 
 
@@ -142,7 +139,7 @@ def _build_standins(turb_model_name):
     d_wall = np.full((n_cells, n_sps), 0.05)
 
     h_max = h_wn = None
-    if turb_model_name == "IDDES":
+    if turb_model_name in ("DDES", "IDDES"):
         h_max, h_wn = compute_h_max_and_h_wn(mesh)
 
     # ---- GPU（numpy 替身）：调用完整的 compute_turbulence_source_gpu ----
