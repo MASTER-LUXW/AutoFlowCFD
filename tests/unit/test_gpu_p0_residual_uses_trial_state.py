@@ -35,7 +35,7 @@ def test_p0_inviscid_residual_is_evaluated_at_trial_state(monkeypatch):
     seen = {}
 
     def recording_kernel(Q_flat, owner, neighbor, is_bnd, normal, area_w, volumes,
-                         Q_ghost, mixed_frac, n_cells_, n_faces, mach_ref=0.1):
+                         Q_ghost, n_cells_, n_faces, mach_ref=0.1):
         seen["Q_flat"] = np.array(Q_flat)
         seen["Q_ghost"] = np.array(Q_ghost)
         return np.zeros((n_cells_, 1, 5))

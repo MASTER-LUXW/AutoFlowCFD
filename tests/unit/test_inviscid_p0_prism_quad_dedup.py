@@ -42,6 +42,8 @@ def _make_ffp(n_faces, true_normal, true_area_weight, owner_is_primary,
         true_normal=true_normal, true_area_weight=true_area_weight,
         owner_is_primary=owner_is_primary, neighbor_is_primary=neighbor_is_primary,
         _owner_groups=owner_groups, _neighbor_groups=neighbor_groups,
+        # 没有混合拆分面（混合面的处理见 test_p0_mixed_split_faces.py）
+        mixed_nb_partner=np.full(n_faces, -1), mixed_ow_partner=np.full(n_faces, -1),
     )
 
 

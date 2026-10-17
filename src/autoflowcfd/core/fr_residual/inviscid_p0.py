@@ -97,16 +97,10 @@ def compute_inviscid_residual_fv_p0(
     owner_cell = fc.owner_cell.astype(np.int64)
     neighbor_cell = fc.neighbor_cell.astype(np.int64)
     is_boundary = fc.is_boundary.astype(np.bool_)
-    # 混合拆分面（B-8）面积占比权重，非混合面恒 0；慢速路径无混合面概念，补零占位。
-    mixed_p0_bnd_frac = getattr(ffp_list, "mixed_p0_bnd_frac", None)
-    if mixed_p0_bnd_frac is None:
-        mixed_p0_bnd_frac = np.zeros(n_faces, dtype=np.float64)
-
     residual_per_thread = _p0_inviscid_kernel(
         owner_cell, neighbor_cell, is_boundary,
         unit_normals, area_weights,
         Q_all, Q_ghost, cell_volumes,
-        mixed_p0_bnd_frac,
         n_cells, n_threads, mach_ref, int(precond_mode),
     )
 
@@ -205,6 +199,18 @@ def _extract_p0_face_geometry(ffp_list, fc, n_faces: int):
     # 情形，直接按 primary 去重即可。
     is_bnd = fc.is_boundary
     area_weights[is_bnd & ~owner_is_primary] = 0.0
+
+    # 混合拆分面（棱柱四边形侧面一半挨内部单元、一半在边界上；`fr/face_flux_points/grouping.py`）：P>=1 由
+    # 内部子面记录担任整张面 primary、逐通量点按半区取邻居或幽灵态。P0 每面一个通量点，两半直接当作两个
+    # 独立的面——内部半区是普通内部面，边界半区是其所属棱柱（边界子面记录的 owner）的普通边界面——各用自己
+    # 的真实三角形几何（与上面 genuine multi-source 的回退同一思路）。2026-10-17 以前改为在内部记录上按面积
+    # 占比混合两份通量：边界半区的通量用了内部记录上从未计算过的全零"幽灵态"（均匀来流残差 5.6e7），邻居
+    # 一侧还多加了 (1-b) 倍的边界半区通量（不守恒，I-7）
+    for partner in (ffp_list.mixed_nb_partner, ffp_list.mixed_ow_partner):
+        f_int = np.flatnonzero(np.asarray(partner) >= 0)
+        for f in (f_int, np.asarray(partner)[f_int]):
+            unit_normals[f] = old_normal[f]
+            area_weights[f] = old_area[f]
 
     return unit_normals, area_weights
 

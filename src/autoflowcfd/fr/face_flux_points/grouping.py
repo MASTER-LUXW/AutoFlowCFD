@@ -133,8 +133,8 @@ def build_face_groups(
         is_lower = is_lower_fp_standard if is_std else is_lower_fp_flipped
         interior_mask = is_lower if half == "lower" else ~is_lower
         mask_arr[f_int] = ~interior_mask  # True = 边界半区（取幽灵态）
-        # P0 单态/面粒度：边界半区通量单独用幽灵态算，按面积占比混合，
-        # 见 inviscid_p0_kernel.py 的 mixed_p0_bnd_frac 分支。
+        # 边界半区的面积占比：P0 粘性核（DG 提升形式，提升算子作用在整张四边形面上）按它把内部半区与边界
+        # 半区的跳量加权（viscous_p0_kernel.py）；P0 无粘把两半当作独立的面，不用它（inviscid_p0.py）
         total_area = float(face_conn.area[f_int]) + float(face_conn.area[bf])
         mixed_p0_bnd_frac[f_int] = float(face_conn.area[bf]) / max(total_area, 1e-300)
 

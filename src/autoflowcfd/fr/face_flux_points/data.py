@@ -75,7 +75,7 @@ class _KernelFaceData:
     边界子面记录索引（-1 表示普通面）；mixed_nb_mask/mixed_ow_mask：
     (n_faces, n_fp) bool，True 的 FP 落在边界半区（残差 kernel 逐 FP 取幽灵态）；
     mixed_bnd_face：(n_faces,) bool，边界子面记录标志（不参与累加但需算幽灵态）；
-    mixed_p0_bnd_frac：(n_faces,) float64，P0 面积占比混合用。
+    mixed_p0_bnd_frac：(n_faces,) float64，边界子面面积占比（P0 粘性核加权两半的跳量）。
 
     owner_tri_slot/neighbor_tri_slot：(n_faces,) int64，两侧三角形面的坍缩顶点槽位
     （`fr/triangle_apex.py`；四边形面与边界面 neighbor 侧为 0）。该侧通量点集与顺序、

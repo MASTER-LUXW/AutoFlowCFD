@@ -63,8 +63,11 @@ def compute_viscous_interface_correction_p0_kernel(
     neighbor_src1_idx: np.ndarray, neighbor_src1_cell: np.ndarray, neighbor_src1_mat: np.ndarray,
     owner_src0_cell: np.ndarray, owner_src0_tpl: np.ndarray, owner_src0_tid: np.ndarray,
     owner_src1_idx: np.ndarray, owner_src1_cell: np.ndarray, owner_src1_mat: np.ndarray,
-    mixed_nb_partner: np.ndarray, mixed_nb_mask: np.ndarray,
-    mixed_ow_partner: np.ndarray, mixed_ow_mask: np.ndarray,
+    mixed_nb_partner: np.ndarray, mixed_ow_partner: np.ndarray,
+    # 混合拆分面边界半区的面积占比 b（`FlatFaceGeometry.mixed_p0_bnd_frac`）。P0 每面一个通量点，提升算子作用
+    # 在棱柱的整张四边形面上：棱柱一侧的跳量取 (1-b) J_内 + b J_边界（两半各自的公共通量按面积加权）。
+    # 2026-10-17 以前按这一个通量点落在哪个半区整张面二选一，而另一侧单元照样施加内部贡献，不守恒（I-7）
+    mixed_p0_bnd_frac: np.ndarray,
     Q_ghost: np.ndarray,          # (n_boundary_faces, n_fp, 5)
     vbc_kind: np.ndarray,         # (n_faces,) 粘性边界种类，见 flux_kernels/viscous_bc.py
     n_threads: int,
@@ -220,23 +223,22 @@ def compute_viscous_interface_correction_p0_kernel(
                                     gv_n[a, b] += w * grad_vel[c1, 0, a, b]
                                 gT_n[a] += w * grad_T[c1, 0, a]
                             mut_n += w * mu_t_field[c1, 0]
-                    # 混合拆分面边界半区（B-8）：状态取配对面幽灵态，梯度按该边界种类构造。
-                    if mp >= 0 and mixed_nb_mask[f, i]:
-                        for v in range(5):
-                            Q_n[v] = Q_ghost[mp, i, v]
-                        bk = vbc_kind[mp]
-                        gv_bnd, gT_bnd = boundary_other_gradients(gv_o_i, gT_o_i, adj_o_i, bk)
-                        for a in range(3):
-                            for b in range(3):
-                                gv_n[a, b] = gv_bnd[a, b]
-                            gT_n[a] = gT_bnd[a]
-                        mut_n = mut_o_i
-
                 # P0 没有体积算子可以并入本侧通量（P>=1 见 fr/face_flux_trace.py），这里直接减
-                jump_owner[i] = viscous_common_flux_point(
+                self_flux = viscous_self_normal_flux_point(Q_o_i, gv_o_i, gT_o_i, mut_o_i, adj_o_i, mu, Pr, Pr_t)
+                common = viscous_common_flux_point(
                     Q_o_i, gv_o_i, gT_o_i, mut_o_i, Q_n, gv_n, gT_n, mut_n,
-                    adj_o_i, ip_length[f], bk, mu, Pr, Pr_t, c_ip) - viscous_self_normal_flux_point(
-                    Q_o_i, gv_o_i, gT_o_i, mut_o_i, adj_o_i, mu, Pr, Pr_t)
+                    adj_o_i, ip_length[f], bk, mu, Pr, Pr_t, c_ip)
+                # 混合拆分面（棱柱是 owner）：边界半区的公共通量取配对面幽灵态与该边界种类的梯度，按面积占比加权
+                if (not is_boundary[f]) and mp >= 0:
+                    bk_b = vbc_kind[mp]
+                    gv_bnd, gT_bnd = boundary_other_gradients(gv_o_i, gT_o_i, adj_o_i, bk_b)
+                    common_b = viscous_common_flux_point(
+                        Q_o_i, gv_o_i, gT_o_i, mut_o_i, Q_ghost[mp, i], gv_bnd, gT_bnd, mut_o_i,
+                        adj_o_i, ip_length[f], bk_b, mu, Pr, Pr_t, c_ip)
+                    bfrac = mixed_p0_bnd_frac[f]
+                    for v in range(5):
+                        common[v] = (1.0 - bfrac) * common[v] + bfrac * common_b[v]
+                jump_owner[i] = common - self_flux
 
             dj = det_jacs[oc, 0]
             # DG 提升算子：`lift_native[op]` 形状 (1,n_fp)，@ 之后直接
@@ -309,24 +311,23 @@ def compute_viscous_interface_correction_p0_kernel(
                                 gv_o_at_n[a, b] += w * grad_vel[c1, 0, a, b]
                             gT_o_at_n[a] += w * grad_T[c1, 0, a]
                         mut_o_at_n += w * mu_t_field[c1, 0]
-                # 混合拆分面边界半区（B-8）：neighbor 侧对称处理，规则同通用 kernel。
+                self_flux_n = viscous_self_normal_flux_point(
+                    Q_n_i, gv_n_i, gT_n_i, mut_n_i, adj_n_i, mu, Pr, Pr_t)
+                common_n = viscous_common_flux_point(
+                    Q_n_i, gv_n_i, gT_n_i, mut_n_i, Q_o_at_n, gv_o_at_n, gT_o_at_n, mut_o_at_n,
+                    adj_n_i, ip_length[f], VBC_INTERIOR, mu, Pr, Pr_t, c_ip)
+                # 混合拆分面（棱柱是 neighbor）：对称处理，按面积占比加权
                 mp_o = mixed_ow_partner[f]
-                bk_n = VBC_INTERIOR
-                if mp_o >= 0 and mixed_ow_mask[f, i]:
-                    for v in range(5):
-                        Q_o_at_n[v] = Q_ghost[mp_o, i, v]
+                if mp_o >= 0:
                     bk_n = vbc_kind[mp_o]
                     gv_bnd_n, gT_bnd_n = boundary_other_gradients(gv_n_i, gT_n_i, adj_n_i, bk_n)
-                    for a in range(3):
-                        for b in range(3):
-                            gv_o_at_n[a, b] = gv_bnd_n[a, b]
-                        gT_o_at_n[a] = gT_bnd_n[a]
-                    mut_o_at_n = mut_n_i
-
-                jump_neighbor[i] = viscous_common_flux_point(
-                    Q_n_i, gv_n_i, gT_n_i, mut_n_i, Q_o_at_n, gv_o_at_n, gT_o_at_n, mut_o_at_n,
-                    adj_n_i, ip_length[f], bk_n, mu, Pr, Pr_t, c_ip) - viscous_self_normal_flux_point(
-                    Q_n_i, gv_n_i, gT_n_i, mut_n_i, adj_n_i, mu, Pr, Pr_t)
+                    common_nb = viscous_common_flux_point(
+                        Q_n_i, gv_n_i, gT_n_i, mut_n_i, Q_ghost[mp_o, i], gv_bnd_n, gT_bnd_n, mut_n_i,
+                        adj_n_i, ip_length[f], bk_n, mu, Pr, Pr_t, c_ip)
+                    bfrac = mixed_p0_bnd_frac[f]
+                    for v in range(5):
+                        common_n[v] = (1.0 - bfrac) * common_n[v] + bfrac * common_nb[v]
+                jump_neighbor[i] = common_n - self_flux_n
 
             dj = det_jacs[nc, 0]
             weighted_jump_n = np.empty((n_fp, 5))

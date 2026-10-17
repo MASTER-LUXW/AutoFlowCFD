@@ -197,7 +197,7 @@ class FlatFaceGeometry:
     # 这类面 owner_primary 已被置 False（不参与残差累加，整张面由配对的内部面记录），
     # 但幽灵态仍需计算（compute_boundary_ghost_states 据此保留）。
     mixed_bnd_face: np.ndarray     # bool (n_faces,)
-    # P0 专用：混合面中边界子面的面积占比（面积加权混合通量用），非混合面为 0。
+    # 混合面中边界子面的面积占比（P0 粘性核按它加权两半的跳量，见 viscous_p0_kernel.py），非混合面为 0。
     mixed_p0_bnd_frac: np.ndarray  # float64 (n_faces,)
 
     # --- 原生基面算子：按面算子索引 `op = (code - 6) + 9 * slot` 排好的整表

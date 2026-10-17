@@ -49,7 +49,7 @@ class _GPUSolverResidualMixin:
             res = compute_inviscid_residual_p0_cupy_gpu_resident(
                 Q_flat, geo["owner"], geo["neighbor"], geo["is_bnd"],
                 geo["normal"], geo["area_w"], geo["volumes"],
-                Q_ghost, geo["mixed_bnd_frac"], self.mesh.n_cells, fc.n_faces,
+                Q_ghost, self.mesh.n_cells, fc.n_faces,
                 mach_ref=self.freestream["mach_ref"],
             )
             return cp.broadcast_to(res, (self.mesh.n_cells, self.mesh.n_sps_per_cell, 5)).copy()
@@ -77,7 +77,6 @@ class _GPUSolverResidualMixin:
         fc = self.mesh.face_connectivity
         ffp = self.mesh.face_flux_points
         normal, area_w = _extract_p0_face_geometry(ffp, fc, fc.n_faces)
-        mixed_frac = getattr(ffp, "mixed_p0_bnd_frac", None)
         volumes = self.mesh_data.get("cell_volumes")
         cache = {
             "mesh": self.mesh,
@@ -88,7 +87,6 @@ class _GPUSolverResidualMixin:
             "normal": cp.asarray(normal),
             "area_w": cp.asarray(area_w),
             "volumes": volumes if volumes is not None else cp.asarray(self.mesh.get_all_cell_volumes()),
-            "mixed_bnd_frac": cp.asarray(mixed_frac if mixed_frac is not None else np.zeros(fc.n_faces)),
         }
         self._p0_face_cache = cache
         return cache
