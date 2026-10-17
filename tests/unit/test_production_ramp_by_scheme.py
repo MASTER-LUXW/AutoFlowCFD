@@ -26,7 +26,6 @@ RK3 = TimeIntegrationScheme.SSP_RK3
 @pytest.mark.parametrize("scheme,expected", [
     (NK, 0), ("newton-krylov", 0),
     (RK3, TURB_PRODUCTION_RAMP_STEPS), (TimeIntegrationScheme.DUAL_TIME, TURB_PRODUCTION_RAMP_STEPS),
-    (TimeIntegrationScheme.IMEX_EULER, TURB_PRODUCTION_RAMP_STEPS),
 ])
 def test_ramp_steps_follow_the_time_scheme(scheme, expected):
     assert production_ramp_steps(scheme) == expected

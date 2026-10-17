@@ -57,9 +57,12 @@ class _SolverGeometryMixin:
 
         `return_physical_too=True` 时额外返回"用物理波速算出的"那一份
         （低马赫数预处理启用时两者不同，湍流标量用后者，见 cfl.py 文档）。"""
+        from autoflowcfd.core.time_integration.time_accurate import uniform_time_step
+
         from .cfl import compute_local_time_step
 
-        return compute_local_time_step(self, return_physical_too=return_physical_too)
+        return uniform_time_step(self, compute_local_time_step(self, return_physical_too=return_physical_too),
+                                 return_physical_too)
 
     def _get_cell_volumes(self) -> np.ndarray:
         """

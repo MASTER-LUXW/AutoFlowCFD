@@ -98,9 +98,6 @@ class _MultiGPUSteppingMixin:
         cp = get_cupy()
         n_local = self.partition.n_local_cells
         n_sps = self.mesh.n_sps_per_cell
-        # 合成湍流入口（SEM）每个物理步推进一次（与 CPU 同一个函数；此前多 GPU 从不推进）
-        from autoflowcfd.boundary.synthetic_inlet import advance_synthetic_inlets
-        advance_synthetic_inlets(self.boundary_ghost_provider, self.freestream, dt)
 
         # #1（2026-08-28）：此前这里用 self.mesh.n_cells（全局单元数）
         # 展平/reshape self.U_gpu——self.U_gpu 现在只有 n_local 个单元，
@@ -118,18 +115,15 @@ class _MultiGPUSteppingMixin:
         # 进入粘性步长限制与全部粘性残差求值（与单机/CPU 分布式同一约定）
         nu_av_compact = self.compute_artificial_diffusivity_compact_gpu()
 
-        def _spatial_residual(U_flat_trial, inviscid=True, viscous=True):
+        def _spatial_residual(U_flat_trial):
             """物理残差 R（约定 dU/dt = -R）。残差组装与 halo 交换都读
             `self.U_gpu`，所以试探态临时写进去、算完恢复。`mu_t_field` 在
-            下面各分支里、第一次调用之前求好（本步内固定，算子分裂）。
-            `inviscid`/`viscous` 供 IMEX 分别取显式/隐式两半。"""
+            下面各分支里、第一次调用之前求好（本步内固定，算子分裂）。"""
             U_trial = U_flat_trial.reshape(n_local, n_sps, 5)
             saved_U = self.U_gpu
             self.U_gpu = U_trial
             try:
-                res = self._compute_total_residual_gpu(
-                    mu_t_field=mu_t_field, inviscid=inviscid, viscous=viscous,
-                    nu_av_compact=nu_av_compact)
+                res = self._compute_total_residual_gpu(mu_t_field=mu_t_field, nu_av_compact=nu_av_compact)
             finally:
                 self.U_gpu = saved_U
             return (-res).reshape(n_local * n_sps, 5)
@@ -138,6 +132,10 @@ class _MultiGPUSteppingMixin:
 
         dt_mean_c, dt_phys_c = self._compute_local_time_step_gpu(
             return_physical_too=True, nu_av_compact=nu_av_compact)
+        # 合成湍流入口（SEM）每个物理步推进一次（与 CPU 同一个函数）；时间精确子步按实际步长推进
+        from autoflowcfd.boundary.synthetic_inlet import advance_synthetic_inlets
+        from autoflowcfd.core.time_integration.time_accurate import sem_time_step
+        advance_synthetic_inlets(self.boundary_ghost_provider, self.freestream, sem_time_step(self, dt))
         dt_mean_local = dt_mean_c[self._inv_perm_gpu][:n_local]
         dt_flat = cp.broadcast_to(
             dt_mean_local[:, None], (n_local, n_sps)).reshape(n_local * n_sps)
@@ -271,18 +269,6 @@ class _MultiGPUSteppingMixin:
             else:
                 nk_info = newton_step(dt_flat)
             U_new_flat = self.U_gpu.reshape(n_local * n_sps, 5)
-        elif self.time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
-            # 显式无粘对流 + 隐式粘性（阻尼 Picard），与单机/CPU 分布式同一个
-            # 拆分、同一个积分器（低马赫预处理在 IMEX 下不启用，理由见
-            # `FRSolver.__init__`）。**2026-09-25 补齐**：此前这里只查 RK 系数
-            # 表，IMEX_EULER 没有条目、回退成 1 级前向 Euler —— `--time-method
-            # imex --multi-gpu` 静默跑成前向 Euler（假选项）。
-            U_new_flat = self.time_integrator.step_imex(
-                U_flat,
-                lambda U: _spatial_residual(U, viscous=False),
-                lambda U: _spatial_residual(U, inviscid=False),
-                dt_flat, positivity_func=positivity_func,
-            )
         else:
             residual0 = _precond(residual0_raw, U_flat)
             U_new_flat = self.time_integrator.step(

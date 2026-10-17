@@ -9,7 +9,7 @@
 1. 规则本身（DUAL_TIME -> 固定 CFL；adaptive=False -> 固定 CFL；其余 -> 控制器；
    None 参数取控制器默认值，不另写一份）；
 2. 结构：除 policy.py 外，`src/` 里不得再直接构造 `AdaptiveCFLController(`；
-3. 行为：CPU 单机与 CPU 分布式在 IMEX / DUAL_TIME 下拿到同一个 CFL 来源。
+3. 行为：CPU 单机与 CPU 分布式在 DUAL_TIME 下拿到同一个 CFL 来源。
 """
 
 import inspect
@@ -28,8 +28,8 @@ from autoflowcfd.core.time_integration.base import TimeIntegrationScheme as S
 _DEFAULT_START = inspect.signature(AdaptiveCFLController.__init__).parameters["cfl_start"].default
 
 
-@pytest.mark.parametrize("scheme", [S.SSP_RK3, S.SSP_RK2, S.FORWARD_EULER, S.IMEX_EULER,
-                                    S.NEWTON_KRYLOV, "rk3", "imex"])
+@pytest.mark.parametrize("scheme", [S.SSP_RK3, S.SSP_RK2, S.FORWARD_EULER,
+                                    S.NEWTON_KRYLOV, "rk3"])
 def test_adaptive_schemes_get_a_controller(scheme):
     ctrl, fixed = build_cfl_policy(scheme, cfl_start=0.02, cfl_max=0.05, cfl_min=0.01)
     assert fixed is None and ctrl is not None
@@ -62,7 +62,7 @@ def test_missing_values_come_from_the_controller_signature():
     ctrl, _ = build_cfl_policy(S.SSP_RK3)
     ref = AdaptiveCFLController()
     assert (ctrl.cfl_start, ctrl.cfl_max, ctrl.cfl_min) == (ref.cfl_start, ref.cfl_max, ref.cfl_min)
-    _, fixed = build_cfl_policy(S.IMEX_EULER, adaptive=False)
+    _, fixed = build_cfl_policy(S.FORWARD_EULER, adaptive=False)
     assert fixed == pytest.approx(_DEFAULT_START)
 
 

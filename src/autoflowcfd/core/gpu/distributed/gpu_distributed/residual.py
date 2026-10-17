@@ -149,8 +149,7 @@ class _MultiGPUResidualMixin:
                 phi, gamma, self.mesh_data, self.mesh_data, self.flat_face_gpu,
                 n_compact, n_prism, n_sps, c_ip=c_ip, gamma_band=0.0))
 
-    def _compute_total_residual_gpu(self, mu_t_field=None, inviscid=True, viscous=True,
-                                    nu_av_compact=None):
+    def _compute_total_residual_gpu(self, mu_t_field=None, nu_av_compact=None):
         """计算总的 **dU/dt**（无粘 + 粘性），先执行 halo 交换。
 
         符号约定与 `compute_*_residual_fr_gpu`（以及 CPU 的
@@ -162,17 +161,10 @@ class _MultiGPUResidualMixin:
         Args:
             mu_t_field: 动力涡粘度 (n_cells, n_sps) CuPy 数组（可选）
             nu_av_compact: 问题单元人工扩散系数（compact 排列，可选）
-            inviscid, viscous: 取哪几部分（IMEX 分别要显式/隐式两半；
-                至少一个为 True）。
         """
-        if not (inviscid or viscous):
-            raise ValueError("inviscid 与 viscous 至少要取一个")
         self._halo_exchange_gpu()
-        res = self.compute_inviscid_residual_gpu() if inviscid else None
-        if viscous:
-            visc_res = self.compute_viscous_residual_gpu(
-                mu_t_field=mu_t_field, nu_av_compact=nu_av_compact)
-            res = visc_res if res is None else res + visc_res
+        res = self.compute_inviscid_residual_gpu()
+        res = res + self.compute_viscous_residual_gpu(mu_t_field=mu_t_field, nu_av_compact=nu_av_compact)
         return res
 
     def local_cell_geometry(self):

@@ -236,8 +236,3 @@ class TestDeadCodeRemoved:
         from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
         assert not hasattr(DistributedFRSolver, "compute_global_min_dt")
 
-    def test_unused_import_dropped(self):
-        # **否定式**断言，必须拼上全部子模块：distributed_solver 一旦拆成
-        # 子包，inspect.getsource(包) 只返回 __init__.py，这条会静默通过。
-        assert "allreduce_min" not in module_source(
-            "autoflowcfd.core.mpi.distributed_solver")

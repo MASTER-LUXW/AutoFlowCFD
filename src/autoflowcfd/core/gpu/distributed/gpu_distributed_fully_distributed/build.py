@@ -159,15 +159,15 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     # CFL 策略（控制器 or 固定 CFL）的唯一事实来源：
     # `time_integration/adaptive_cfl/policy.py::build_cfl_policy`（六个后端
     # 构造点此前各写一份且已分叉，见该模块文档）。
-    from autoflowcfd.core.time_integration.adaptive_cfl.policy import build_cfl_policy
-    self._cfl_controller, self.fixed_cfl_number = build_cfl_policy(
-        time_scheme_str, cfl_start=package.get('cfl_start'),
-        cfl_max=package.get('cfl_max'), cfl_min=package.get('cfl_min'))
+    from autoflowcfd.core.time_integration.time_accurate import configure_time_stepping
+
+    configure_time_stepping(
+        self, time_scheme_str, time_accurate=bool(package.get('time_accurate', False)),
+        adaptive_cfl=bool(package.get('adaptive_cfl', True)),
+        cfl_start=package.get('cfl_start'), cfl_max=package.get('cfl_max'), cfl_min=package.get('cfl_min'),
+        low_mach_precond=package.get('low_mach_precond', True))
     # 低马赫预处理开关（2026-09-25 补齐）：此前这条路径**从未设置**它，而
     # `step()` 直接读取 —— 每个 RK 步都会 AttributeError。与其余后端同一判据。
-    from autoflowcfd.core.utils.preconditioning import resolve_low_mach_precond
-    self.low_mach_precond_enabled = resolve_low_mach_precond(
-        package.get('low_mach_precond', True), time_scheme_str)
     # 双时间步内迭代次数取 package 携带的值（时间积分器在上面按格式构造）
     self.time_integrator.dual_time_steps = package.get('dual_time_inner_iter', DEFAULT_DUAL_TIME_STEPS)
     reset_dual_time_history(self)

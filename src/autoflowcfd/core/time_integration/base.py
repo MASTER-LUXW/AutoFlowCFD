@@ -50,7 +50,6 @@ class TimeIntegrationScheme(Enum):
     FORWARD_EULER = "forward_euler"
     SSP_RK2 = "ssp_rk2"
     SSP_RK3 = "ssp_rk3"
-    IMEX_EULER = "imex_euler"  # 一阶 IMEX（阻尼 Picard 子迭代，见 imex.py）
     DUAL_TIME = "dual_time"    # 双时间步长
     #: 矩阵自由 Newton-Krylov + 伪瞬态延拓（**唯一的真隐式格式**，
     #: 2026-09-19 新增，见 `time_integration/implicit/jfnk.py`）。
@@ -79,16 +78,18 @@ class TimeIntegrationScheme(Enum):
     # 旧注释"每单元 n_sps*n_var 次残差求值、成本不可接受"漏掉了着色，
     # 真实次数与单元数无关）。CFL 律是 SER（`adaptive_cfl/ser.py`）。
     #
-    # 其余两个仍然**不是**隐式格式：IMEX_EULER 只对粘性/源项做阻尼
-    # Picard 子迭代（不是 Newton），DUAL_TIME 的内层仍是显式推进。
-    # 不要再用一个别名把这些区别盖住。
+    # DUAL_TIME 的内迭代同样是隐式 Newton-Krylov（`implicit/physical_time.py`）。
+    #
+    # **2026-10-17 删除 IMEX_EULER**：它的"隐式"子步是以 U_new 为基点的阻尼 Picard 迭代——每次子迭代
+    # 再走一步显式步，收敛到的是稳态而不是隐式 Euler 解，收敛时还返回了未经最后一次更新的值。时间
+    # 精确的隐式推进由双时间步承担。
 
 
 
 #: **用户词汇 -> 枚举的唯一事实来源**（2026-09-18）。
 #:
 #: 此前同一个语义有**三套**词汇表、各自一份映射：
-#:   * CLI `--time-method`：`rk3` / `imex` / `dual-time`
+#:   * CLI `--time-method`：`rk3` / `dual-time`
 #:     （`cli/solve/transient.py` 一份 3 项的表）
 #:   * `api.run_transient`：上面那些 + 枚举自身的取值
 #:     （`api.py` 一份 8 项的表）
@@ -105,8 +106,6 @@ _SCHEME_ALIASES = {
     "ssp_rk3": TimeIntegrationScheme.SSP_RK3,
     "rk2": TimeIntegrationScheme.SSP_RK2,
     "ssp_rk2": TimeIntegrationScheme.SSP_RK2,
-    "imex": TimeIntegrationScheme.IMEX_EULER,
-    "imex_euler": TimeIntegrationScheme.IMEX_EULER,
     "newton-krylov": TimeIntegrationScheme.NEWTON_KRYLOV,
     "newton_krylov": TimeIntegrationScheme.NEWTON_KRYLOV,
     "jfnk": TimeIntegrationScheme.NEWTON_KRYLOV,
@@ -160,12 +159,11 @@ def scheme_from_name(name):
 #: 都经跨 rank 的归约对象（`core/mpi/reductions.py`），块 Jacobi 用全局一致
 #: 着色（`core/mpi/distributed_implicit.py`）。表外的方案由
 #: `require_distributed_scheme` 在构造时拒绝，而不是让 `step()` 走到某个回退
-#: 分支里静默换成别的格式 —— IMEX 此前正是那样在分布式上跑成了前向 Euler。
+#: 分支里静默换成别的格式。
 DISTRIBUTED_SCHEMES = (
     TimeIntegrationScheme.FORWARD_EULER,
     TimeIntegrationScheme.SSP_RK2,
     TimeIntegrationScheme.SSP_RK3,
-    TimeIntegrationScheme.IMEX_EULER,
     TimeIntegrationScheme.DUAL_TIME,
     TimeIntegrationScheme.NEWTON_KRYLOV,
 )
@@ -307,20 +305,7 @@ class TimeIntegrator:
         Returns:
             U_new: 更新后的解 U^{n+1}
         """
-        if self.scheme == TimeIntegrationScheme.IMEX_EULER:
-            # IMEX 需要把残差拆成显式对流项/隐式粘性+源项两部分分别求值
-            # （见 step_imex 文档），这个拆分只有调用方（fr_solver.py）知道
-            # 怎么做——通用的单一 residual_func 接口表达不了。此前这里直接
-            # 把同一个组合残差函数传了两遍，代数上退化成 total_res=2*R(U)，
-            # 不是真正的 IMEX。做法与下面 DUAL_TIME 分支一致：拒绝走这条
-            # 通用入口，调用方须直接调用 step_imex(...)。
-            raise ValueError(
-                "IMEX_EULER scheme 需要拆分的显式(对流)/隐式(粘性+源项)残差函数，"
-                "请直接调用 step_imex(solution, residual_explicit, residual_implicit, ...)，"
-                "不要通过通用的 step(...) 入口（该入口只有一个组合残差函数，无法拆分）"
-            )
-
-        elif self.scheme == TimeIntegrationScheme.DUAL_TIME:
+        if self.scheme == TimeIntegrationScheme.DUAL_TIME:
             # DUAL_TIME 每个物理步是若干个带 BDF 物理时间项的 Newton 步，由各后端的 step() 经
             # `implicit/physical_time.py::advance_physical_step` 推进，不经过这个显式积分器入口。
             raise ValueError(
@@ -432,22 +417,6 @@ class TimeIntegrator:
 
         return U_new
     
-    def step_imex(
-        self,
-        solution: np.ndarray,
-        residual_explicit: Callable[[np.ndarray], np.ndarray],
-        residual_implicit: Callable[[np.ndarray], np.ndarray],
-        dt_local: np.ndarray,
-        positivity_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
-    ) -> np.ndarray:
-        """执行一步 IMEX Euler 推进 (S-05)。实现见
-        time_integration/imex.py::step_imex（从本文件拆出，控制单文件
-        行数），文档字符串也在那里。"""
-        from .imex import step_imex as _step_imex
-
-        return _step_imex(self, solution, residual_explicit, residual_implicit, dt_local,
-                          positivity_func=positivity_func)
-
     def reset(self) -> None:
         self.n_steps = 0
         self.current_time = 0.0

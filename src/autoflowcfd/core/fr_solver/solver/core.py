@@ -69,7 +69,8 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
                  sem_num_eddies: int = _SEM_DEFAULT_NUM_EDDIES,
                  artificial_viscosity_enabled: bool = False,
                  artificial_viscosity_alpha: float = 1.0,
-                 low_mach_precond: bool = True):
+                 low_mach_precond: bool = True,
+                 time_accurate: bool = False):
         """
         初始化 FRSolver。
 
@@ -85,6 +86,8 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
                 记忆条目 hardcoded_molecular_viscosity_mismatch）。现在两处
                 都从这个构造参数读取。
             time_scheme: 时间推进方案
+            time_accurate: 时间精确的显式推进（瞬态的显式格式；每个物理步切成全场同步长的子步，固定 CFL、
+                关低马赫预处理，见 `core/time_integration/time_accurate.py`）
             initial_state: 初始状态（用于 Order Continuation）
             aoa_deg, aos_deg: 攻角/侧滑角（度）。此前来流方向在全代码库被
                 硬编码成 +x、没有任何攻角选项；现在 `Q_free`（边界自由来流
@@ -140,13 +143,13 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
         n_sps = getattr(mesh, 'n_sps_per_cell', 8)
         self._setup_initial_state(initial_state, n_cells, n_sps, turb_model_name,
                                   rho_inf, vel_inf, p_inf, aoa_deg, aos_deg)
-        self._setup_operators(order, time_scheme, low_mach_precond)
+        self._setup_operators(order)
         self._setup_physics_and_boundary(
             turb_model_name, mu_molecular, rho_inf, vel_inf, p_inf, aoa_deg, aos_deg,
             turbulence_intensity, viscosity_ratio, sem_num_eddies, bc_overrides)
         self._setup_turbulence_time_and_runtime(
             n_cells, n_sps, order, time_scheme, dual_time_inner_iter, adaptive_cfl,
-            cfl_start, cfl_max, cfl_min)
+            cfl_start, cfl_max, cfl_min, low_mach_precond, time_accurate)
 
         print("[OK] FRSolver Ready:")
         print(f"   Cells: {n_cells}, Order: P{order}")

@@ -11,7 +11,6 @@
 from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
 from autoflowcfd.core.fr_solver.state import FRState
 from autoflowcfd.core.time_integration.base import TimeIntegrator
-from autoflowcfd.core.utils.preconditioning import resolve_low_mach_precond
 from autoflowcfd.fr.operators import generate_fr_operators
 from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
@@ -54,18 +53,13 @@ class _SolverSetupMixin:
                 p=p_inf)
         
 
-    def _setup_operators(self, order, time_scheme, low_mach_precond):
-        """FR 算子与低马赫预处理开关（两者都只依赖阶数/时间方案）。"""
+    def _setup_operators(self, order):
+        """FR 算子（只依赖阶数）。"""
         # 2. 预计算算子 (G-04)——四面体坍缩坐标基已删除（2026-09-03，
         # 见 fr/operators.py 模块文档），`generate_fr_operators` 不再
         # 接受 `tet_basis_mode` 参数，恒生成 native 四面体算子，与
         # `mesh`（同样恒为 native，见 HighOrderMesh 文档）天然一致，
         # 不再需要从 mesh 读取这个属性来保持两者同步。
-        # 低马赫数伪时间预处理开关：规则与环境变量覆盖的唯一来源是
-        # `core/utils/preconditioning.py::resolve_low_mach_precond`。
-        self.low_mach_precond_enabled = resolve_low_mach_precond(
-            low_mach_precond, time_scheme)
-
         self.ops = generate_fr_operators(order)
 
         # BLAS 线程数压到 1（性能优化 2026-09-13，见 `blas_threads_limited`
@@ -143,7 +137,7 @@ class _SolverSetupMixin:
 
     def _setup_turbulence_time_and_runtime(self, n_cells, n_sps, order, time_scheme,
                                            dual_time_inner_iter, adaptive_cfl,
-                                           cfl_start, cfl_max, cfl_min):
+                                           cfl_start, cfl_max, cfl_min, low_mach_precond, time_accurate):
         """湍流模型、时间积分器、CFL 策略、启动日志开关与运行期状态。"""
         # 5. 初始化湍流模型（self.turb_model_name 已在第 3 步设置；
         # self.wmles_model 若适用也已在第 3 步提前构造好，供
@@ -168,12 +162,13 @@ class _SolverSetupMixin:
         # 构造点此前各写一份且已分叉，见该模块文档）。
         # 固定 CFL（`adaptive_cfl=False` 或 DUAL_TIME）时记下请求值给 cfl.py 用
         # —— 2026-09-17 修过的"固定 CFL 请求被静默换成 0.1"缺陷就出在这里。
-        from autoflowcfd.core.time_integration.adaptive_cfl.policy import (
-            build_cfl_policy, describe_cfl_policy,
-        )
-        self._cfl_controller, self.fixed_cfl_number = build_cfl_policy(
-            time_scheme, adaptive=adaptive_cfl,
-            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min)
+        # 低马赫预处理开关与时间精确显式模式也在这里（全部后端同一个函数）
+        from autoflowcfd.core.time_integration.adaptive_cfl.policy import describe_cfl_policy
+        from autoflowcfd.core.time_integration.time_accurate import configure_time_stepping
+
+        configure_time_stepping(self, time_scheme, time_accurate=time_accurate, adaptive_cfl=adaptive_cfl,
+                                cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+                                low_mach_precond=low_mach_precond)
         print("   " + describe_cfl_policy(self._cfl_controller, self.fixed_cfl_number))
 
         # 影响物理/数值的开关必须在启动日志里可见（2026-09-15 引入）：做

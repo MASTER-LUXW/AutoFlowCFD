@@ -37,6 +37,7 @@ def _solve_transient_distributed(
     cfl_start: Optional[float] = None,
     cfl_max: Optional[float] = None,
     cfl_min: Optional[float] = None,
+    time_accurate: bool = False,
     aoa_deg: float = 0.0,
     aos_deg: float = 0.0,
     artificial_viscosity_enabled: bool = False,
@@ -66,7 +67,7 @@ def _solve_transient_distributed(
             # 调函数体里就在用（freestream 字典），所以这条 CLI 路径
             # **100% 必现 NameError**；三个 CFL 边界则是被静默丢弃
             # （`solve steady` 的四处已于 2026-09-15 补齐，这两条漏了）。
-            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, time_accurate=time_accurate,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
             aoa_deg=aoa_deg, aos_deg=aos_deg, reference_area=reference_area,
@@ -82,7 +83,7 @@ def _solve_transient_distributed(
             n_ranks, checkpoint_interval, phase_max_iter, residual_drop_threshold,
             init_checkpoint,
             # 同上：此前五个参数全没转发（见 multi_gpu 分支处注释）。
-            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, time_accurate=time_accurate,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
             aoa_deg=aoa_deg, aos_deg=aos_deg, reference_area=reference_area,
@@ -96,7 +97,7 @@ def _solve_transient_distributed(
         turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf,
         n_ranks, checkpoint_interval, reference_area, phase_max_iter, residual_drop_threshold,
         init_checkpoint,
-        cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+        cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, time_accurate=time_accurate,
         artificial_viscosity_enabled=artificial_viscosity_enabled,
         artificial_viscosity_alpha=artificial_viscosity_alpha,
         aoa_deg=aoa_deg, aos_deg=aos_deg,
@@ -114,6 +115,7 @@ def _solve_transient_cpu_traditional(
     cfl_start: Optional[float] = None,
     cfl_max: Optional[float] = None,
     cfl_min: Optional[float] = None,
+    time_accurate: bool = False,
     aoa_deg: float = 0.0,
     aos_deg: float = 0.0,
     artificial_viscosity_enabled: bool = False,
@@ -153,11 +155,8 @@ def _solve_transient_cpu_traditional(
         turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
         sem_num_eddies=sem_num_eddies,
         mu_molecular=mu_molecular, rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
-        # CFL 三元组（2026-09-17 补齐）：rk3/imex 瞬态走的是逐单元局部
-        # CFL 推进、控制器是激活的，此前这里一个都不传 -> 恒用控制器
-        # 默认值。与 `solve steady --n-ranks` 在 2026-09-15 补齐的那四处
-        # 同类，瞬态这条被漏掉了。
-        cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+        # CFL 与时间精确显式模式（与单机同一组参数，time_integration/time_accurate.py）
+        cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, time_accurate=time_accurate,
         artificial_viscosity_enabled=artificial_viscosity_enabled,
         artificial_viscosity_alpha=artificial_viscosity_alpha,
         aoa_deg=aoa_deg, aos_deg=aos_deg,
@@ -203,7 +202,7 @@ def _solve_transient_fully_distributed(
     n_ranks, checkpoint_interval,
     phase_max_iter=None, residual_drop_threshold=100.0,
     init_checkpoint=None,
-    cfl_start=None, cfl_max=None, cfl_min=None,
+    cfl_start=None, cfl_max=None, cfl_min=None, time_accurate=False,
     aoa_deg=0.0, aos_deg=0.0,
     artificial_viscosity_enabled=False, artificial_viscosity_alpha=1.0,
     reference_area=None,
@@ -240,7 +239,7 @@ def _solve_transient_fully_distributed(
         # 三个 CFL 边界靠 package 传到各 rank（见
         # `build_fully_distributed_rank_package`）；不传就静默退回控制器
         # 默认值，与 `solve steady` 的同名构造点脱节。
-        cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+        cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, time_accurate=time_accurate,
         artificial_viscosity_enabled=artificial_viscosity_enabled,
         artificial_viscosity_alpha=artificial_viscosity_alpha,
     )
@@ -288,7 +287,7 @@ def _solve_transient_multi_gpu(
     phase_max_iter=None, residual_drop_threshold=100.0,
     init_checkpoint=None,
     fully_distributed=False,
-    cfl_start=None, cfl_max=None, cfl_min=None,
+    cfl_start=None, cfl_max=None, cfl_min=None, time_accurate=False,
     aoa_deg=0.0, aos_deg=0.0,
     artificial_viscosity_enabled=False, artificial_viscosity_alpha=1.0,
     reference_area=None,
@@ -333,7 +332,7 @@ def _solve_transient_multi_gpu(
             turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
             sem_num_eddies=sem_num_eddies,
             time_scheme=time_scheme, dual_time_inner_iter=dual_time_inner_iter,
-            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, time_accurate=time_accurate,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
         )
@@ -360,7 +359,7 @@ def _solve_transient_multi_gpu(
             # 攻角/侧滑角与三个 CFL 边界此前在这条瞬态路径上完全没传 ——
             # 前者让初场恒为零攻角，后者让用户设的 CFL 被静默丢弃。
             aoa_deg=aoa_deg, aos_deg=aos_deg,
-            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, time_accurate=time_accurate,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
         )

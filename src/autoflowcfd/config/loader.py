@@ -315,7 +315,7 @@ class ConfigLoader:
             'total_time': '总物理时间，单位秒（仅瞬态）',
             # 取值表从唯一那张词汇表读，不在这里硬编码——此前这里写的是
             # `backward_euler, rk2, rk3, ab3`，其中前两个在核心层从未实现、
-            # 后面又漏了真实存在的 imex/dual-time。
+            # 后面又漏了真实存在的 dual-time。
             'time_scheme': '时间积分方案: ' + ', '.join(scheme_names()) + '（仅瞬态）',
             'output_dir': '结果输出目录',
             'checkpoint_interval': '检查点保存间隔，单位步数',

@@ -25,9 +25,9 @@ def step(solver, dt: float) -> float:
     执行一个时间步长 (S-05)。
 
     平均流（5个欧拉变量）真正通过 solver.time_integrator 推进
-    （SSP-RK2/RK3/IMEX/Dual-Time，由构造时的 time_scheme 决定），
+    （SSP-RK2/RK3/Dual-Time/Newton-Krylov，由构造时的 time_scheme 决定），
     取代旧版本里恒定不变的单级前向欧拉——此前不管 CLI 传
-    --time-method rk3/imex/dual-time 哪一个，step() 内部都硬编码执行
+    哪一种时间方法，step() 内部都硬编码执行
     `U = U + dt_local*residual`，`solver.time_integrator` 被构造出来后
     从未被调用过。
 
@@ -52,10 +52,13 @@ def step(solver, dt: float) -> float:
     dt_local（工业 RANS 求解器标准做法：湍流量与平均流共用局部时间
     步加速），但 DUAL_TIME 模式下例外，见下方。
 
-    dt 参数的语义按 time_scheme 分两种情况：
-    - SSP-RK2/RK3/IMEX（稳态收敛加速模式）：dt 参数确实被忽略，
+    dt 参数的语义按 time_scheme 分三种情况：
+    - SSP-RK2/RK3（稳态收敛加速模式）：dt 参数被忽略，
       平均流步长与湍流场步长都改用局部 CFL 决定——用于收敛到定常解，
       不要求时间精度，局部时间步是标准且正确的加速手段。
+    - SSP-RK2/RK3 + 时间精确（`solver.time_accurate`，瞬态的显式档）：求解循环经
+      `time_integration/time_accurate.py::advance` 把物理步切成子步，本函数每次推进一个子步，
+      局部步长函数返回全场同一步长 h（`uniform_time_step`），dt 是该物理步的剩余时间。
     - DUAL_TIME（DES/LES 等真正非稳态仿真应使用的模式）：dt 是真正
       的物理时间步长（BDF1/BDF2）；局部 CFL 步长只是内迭代里 Newton 步被拒时的回退手段，
       不影响物理时间精度。每个物理步的 BDF 方程用隐式内迭代求解
@@ -64,8 +67,7 @@ def step(solver, dt: float) -> float:
 
     Args:
         solver: FRSolver 实例
-        dt: 见上——SSP-RK/IMEX 模式下被忽略，DUAL_TIME 模式下是真正
-            生效的物理时间步长
+        dt: 见上——稳态 SSP-RK 下被忽略；时间精确子步里是物理步的剩余时间；DUAL_TIME 下是物理时间步长
 
     Returns:
         residual_norm: 残差范数
@@ -75,11 +77,6 @@ def step(solver, dt: float) -> float:
     try:
         solver.state._update_primitives()
 
-        # BD-02：合成湍流入口 (SEM) 涡核对流——每个物理步一次，不在每次残差求值/RK 子迭代里
-        # （见 boundary/fr_ghost_state.py::InletSEMGhostState 文档）；全部后端共用
-        from autoflowcfd.boundary.synthetic_inlet import advance_synthetic_inlets
-        advance_synthetic_inlets(solver.boundary_ghost_provider, solver.freestream, dt)
-
         n_cells, n_sps, n_vars = solver.state.U.shape
         # 低马赫数伪时间预处理（2026-09-14 新增）：`dt_local` 是**平均流**用
         # 的步长（启用预处理时按预处理波速 (|un|+c_precond) 放大，M~0.1 下
@@ -88,6 +85,12 @@ def step(solver, dt: float) -> float:
         # "低马赫数伪时间预处理"一节（湍流输运的显式更新刻意没有 point-
         # implicit 阻尼，不跟着放大步长）。未启用预处理时两者是同一个数组。
         dt_local, dt_physical = solver._compute_local_time_step(return_physical_too=True)
+
+        # BD-02：合成湍流入口 (SEM) 涡核对流——每个物理步一次，不在每次残差求值/RK 子迭代里
+        # （见 boundary/fr_ghost_state.py::InletSEMGhostState 文档）；全部后端共用。时间精确子步按实际步长推进
+        from autoflowcfd.boundary.synthetic_inlet import advance_synthetic_inlets
+        from autoflowcfd.core.time_integration.time_accurate import sem_time_step
+        advance_synthetic_inlets(solver.boundary_ghost_provider, solver.freestream, sem_time_step(solver, dt))
 
         # 累计伪时间（2026-09-17）：局部时间步进下不存在单一的"当前时间"，
         # 所以按单元累加。这个量此前算得出来但**从来没被报告过**，导致日志
@@ -132,7 +135,7 @@ def step(solver, dt: float) -> float:
         # 湍流场必须与平均流用同一个物理时间基准前进，不能像稳态加速
         # 模式那样换成逐 SP 伪时间步长——否则湍流场与平均流各自站在
         # 不同的“时间”上，物理时间精度失去意义。稳态收敛加速模式
-        # （SSP-RK/IMEX）下 dt 参数定义上就应被忽略（见文档），
+        # （SSP-RK）下 dt 参数定义上就应被忽略（见文档），
         # 用 dt_local 才是这里的一致行为。
         # 隐式稳态 + k-omega：湍流与平均流在下面的 NEWTON_KRYLOV 分支里紧耦合求解
         # （time_integration/implicit/coupled_step.py 模块文档：分离式在大 CFL 下的块
@@ -196,31 +199,6 @@ def step(solver, dt: float) -> float:
                     res, solver.state.Q, solver.freestream["mach_ref"], out=res,
                 )
             return res.reshape(n_cells * n_sps, n_vars)
-
-        def convective_residual_only(U_flat_trial: np.ndarray) -> np.ndarray:
-            """IMEX 显式项：只含无粘对流残差，供 step_imex 使用。"""
-            U_trial = U_flat_trial.reshape(n_cells, n_sps, n_vars)
-            saved_U = solver.state.U
-            solver.state.U = U_trial
-            try:
-                inv_res = solver.compute_inviscid_residual()
-            finally:
-                solver.state.U = saved_U
-            inv_res *= -1  # 原地取负，理由同 mean_flow_residual 的 B-12 注释
-            return inv_res.reshape(n_cells * n_sps, n_vars)
-
-        def diffusive_residual_only(U_flat_trial: np.ndarray) -> np.ndarray:
-            """IMEX 隐式项：只含粘性残差（含湍流涡粘耦合的扩散项），
-            供 step_imex 的 Picard 子迭代反复重新求值。"""
-            U_trial = U_flat_trial.reshape(n_cells, n_sps, n_vars)
-            saved_U = solver.state.U
-            solver.state.U = U_trial
-            try:
-                visc_res = solver.compute_viscous_residual(mu_t_turb=mu_t_step, nu_av=nu_av_step)
-            finally:
-                solver.state.U = saved_U
-            visc_res *= -1  # 原地取负，理由同 mean_flow_residual 的 B-12 注释
-            return visc_res.reshape(n_cells * n_sps, n_vars)
 
         # residual0 是 TimeIntegrator 自身的 R(U) 约定（dU/dt=-R），
         # 复用它既避免重复计算 Stage 0 残差，也用来更新
@@ -330,15 +308,6 @@ def step(solver, dt: float) -> float:
             else:
                 _nk_info = newton_step(dt_local_flat)
             U_new_flat = solver.state.U.reshape(n_cells * n_sps, n_vars)
-        elif solver.time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
-            # 显式处理无粘对流项、隐式处理粘性+湍流扩散项——通用的
-            # step(...) 单一残差入口表达不了这个拆分（见该方法里的
-            # 说明），必须直接调用 step_imex 并传入两个独立的残差
-            # 闭包。
-            U_new_flat = solver.time_integrator.step_imex(
-                U_flat, convective_residual_only, diffusive_residual_only,
-                dt_local_flat, positivity_func=positivity_func,
-            )
         else:
             U_new_flat = solver.time_integrator.step(
                 U_flat, mean_flow_residual, dt_local_flat, residual0=residual0,

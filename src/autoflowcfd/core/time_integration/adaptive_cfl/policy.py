@@ -69,7 +69,7 @@ def build_cfl_policy(time_scheme, adaptive: bool = True, cfl_start=None,
     * Newton-Krylov 稳态：SER 律（`ser.py`）；
     * DUAL_TIME：内迭代的伪时间 CFL 同样用 SER，起点 `DUAL_TIME_PSEUDO_CFL_START`、每个物理步重新起步
       （2026-10-10 以前内迭代是显式的，伪时间步长用固定 CFL 0.03）；
-    * 其余（SSP-RK、前向 Euler、IMEX）：显式自适应控制器。
+    * 其余（SSP-RK、前向 Euler）：显式自适应控制器（时间精确模式固定 CFL，见 time_accurate.py）。
 
     固定 CFL 取 `cfl_start`（关掉自适应时"初始值"就是全程唯一的值）；未给
     时取该格式所用控制器 `cfl_start` 的默认值。`None` 的参数一律不传给

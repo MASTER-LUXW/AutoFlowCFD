@@ -122,6 +122,8 @@ def build_fully_distributed_rank_package(
     cfl_start: Optional[float] = None,
     cfl_max: Optional[float] = None,
     cfl_min: Optional[float] = None,
+    time_accurate: bool = False,
+    adaptive_cfl: bool = True,
     global_cell_colors: Optional[np.ndarray] = None,
     global_cell_colors_d2: Optional[np.ndarray] = None,
     artificial_viscosity_enabled: bool = False,
@@ -317,6 +319,9 @@ def build_fully_distributed_rank_package(
         'artificial_viscosity_enabled': bool(artificial_viscosity_enabled),
         'artificial_viscosity_alpha': float(artificial_viscosity_alpha),
         'cfl_min': cfl_min,
+        # 时间精确显式模式与固定/自适应 CFL（`time_integration/time_accurate.py::configure_time_stepping`）
+        'time_accurate': bool(time_accurate),
+        'adaptive_cfl': bool(adaptive_cfl),
         'cell_colors': (None if global_cell_colors is None
                         else np.asarray(global_cell_colors)[partition.local_cells].copy()),
         'cell_colors_d2': (None if global_cell_colors_d2 is None

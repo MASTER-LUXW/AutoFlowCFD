@@ -39,6 +39,8 @@ def distributed_mesh_load_v2(
     artificial_viscosity_enabled: bool = False,
     artificial_viscosity_alpha: float = 1.0,
     sem_num_eddies: int = _SEM_DEFAULT_NUM_EDDIES,
+    time_accurate: bool = False,
+    adaptive_cfl: bool = True,
 ):
     """真正的完全分布式网格加载（2026-09-02）——只有 root rank 加载
     完整网格并对每个 rank 分别调用 `build_fully_distributed_rank_
@@ -164,6 +166,7 @@ def distributed_mesh_load_v2(
                 turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
                 time_scheme=time_scheme, dual_time_inner_iter=dual_time_inner_iter,
                 cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+                time_accurate=time_accurate, adaptive_cfl=adaptive_cfl,
                 global_cell_colors=global_cell_colors,
                 global_cell_colors_d2=global_cell_colors_d2,
                 artificial_viscosity_enabled=artificial_viscosity_enabled,
@@ -199,6 +202,7 @@ def distributed_mesh_load_v2(
             'bc_overrides': bc_overrides or {}, 'n_ranks': n_ranks,
             'time_scheme': time_scheme, 'dual_time_inner_iter': dual_time_inner_iter,
             'cfl_start': cfl_start, 'cfl_max': cfl_max, 'cfl_min': cfl_min,
+            'time_accurate': time_accurate, 'adaptive_cfl': adaptive_cfl,
             'artificial_viscosity_enabled': artificial_viscosity_enabled,
             'artificial_viscosity_alpha': artificial_viscosity_alpha,
             'global_cell_colors': global_cell_colors,
@@ -434,6 +438,8 @@ def exchange_packages_for_new_order(root_context, target_p: int, n_ranks: int, *
                 cfl_start=root_context.get('cfl_start'),
                 cfl_max=root_context.get('cfl_max'),
                 cfl_min=root_context.get('cfl_min'),
+                time_accurate=root_context.get('time_accurate', False),
+                adaptive_cfl=root_context.get('adaptive_cfl', True),
                 # 着色只依赖拓扑，换阶沿用同一份
                 global_cell_colors=root_context.get('global_cell_colors'),
                 global_cell_colors_d2=root_context.get('global_cell_colors_d2'),

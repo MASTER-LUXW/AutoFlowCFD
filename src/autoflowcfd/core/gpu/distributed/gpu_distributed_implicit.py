@@ -184,7 +184,7 @@ class MultiGpuCoupledBackend:
     def mean_residual(self, mu_t):
         """平均流 `Gamma R`（`gpu_distributed/stepping.py::_residual` 同一约定，`dU/dt = -R`）。"""
         s = self.solver
-        res = -s._compute_total_residual_gpu(mu_t_field=mu_t, inviscid=True, viscous=True,
+        res = -s._compute_total_residual_gpu(mu_t_field=mu_t,
                                              nu_av_compact=self._nu_av)
         if s.low_mach_precond_enabled:
             from autoflowcfd.core.gpu.gpu_preconditioning import apply_low_mach_preconditioner_gpu

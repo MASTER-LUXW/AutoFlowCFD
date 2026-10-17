@@ -36,10 +36,12 @@ class _DistributedStepMixin:
         （含 halo）的速度与声速，这是这项功能的内在需求，不是可以省掉的
         开销（相比之下 RK3 每个 stage 各有一次交换）。
         """
+        from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
+        from autoflowcfd.core.mpi.comm import allreduce_min
         from autoflowcfd.core.mpi.distributed_cfl import (
             compute_distributed_local_time_step,
         )
-        from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
+        from autoflowcfd.core.time_integration.time_accurate import uniform_time_step
 
         dist_fc = self.dist_flat_face
         U_extended = self.halo_exchange.exchange(U_local)
@@ -52,7 +54,8 @@ class _DistributedStepMixin:
         from autoflowcfd.core.mpi.distributed_compute import DistributedMeshAdapter
         adapter = DistributedMeshAdapter(self.partition, dist_fc, self.mesh, self.ops)
 
-        return compute_distributed_local_time_step(
+        # 时间精确子步：全场同一步长（跨 rank 最小值），见 time_integration/time_accurate.py
+        return uniform_time_step(self, compute_distributed_local_time_step(
             U_compact, Q_compact, dist_fc, self.mesh,
             jacobians=adapter.jacobians,
             cell_volumes=adapter.cell_volumes,
@@ -66,7 +69,7 @@ class _DistributedStepMixin:
                 self, "low_mach_precond_enabled", False),
             mu_t_local=mu_t_local,
             return_physical_too=return_physical_too,
-        )
+        ), return_physical_too, reduce_min=allreduce_min)
 
     def _viscous_enabled(self) -> bool:
         """粘性残差是否计算：完全分布式加载的替身显式给出，真实 `FRSolver`（传统模式）恒为真
@@ -163,10 +166,6 @@ class _DistributedStepMixin:
         mu = self.local_solver.mu_molecular
         boundary_ghost_provider = self.local_solver.boundary_ghost_provider
         mach_ref = self.local_solver.freestream["mach_ref"]
-        # 合成湍流入口（SEM）每个物理步推进一次（与单机同一个函数；各 rank 的 SEM 由确定性种子构造、
-        # 推进序列相同，入口脉动在分区间一致）
-        from autoflowcfd.boundary.synthetic_inlet import advance_synthetic_inlets
-        advance_synthetic_inlets(boundary_ghost_provider, self.local_solver.freestream, dt)
         n_local = self.partition.n_local_cells
         n_sps = self.state.n_sps
         n_vars = self.state.n_vars
@@ -207,6 +206,11 @@ class _DistributedStepMixin:
         dt_mean_local, dt_phys_local = self._compute_distributed_local_time_step(
             U_local_now, mu_t_local=mu_cfl_local, return_physical_too=True,
         )
+        # 合成湍流入口（SEM）每个物理步推进一次（与单机同一个函数；各 rank 的 SEM 由确定性种子构造、
+        # 推进序列相同，入口脉动在分区间一致）；时间精确子步按实际步长推进
+        from autoflowcfd.boundary.synthetic_inlet import advance_synthetic_inlets
+        from autoflowcfd.core.time_integration.time_accurate import sem_time_step
+        advance_synthetic_inlets(boundary_ghost_provider, self.local_solver.freestream, sem_time_step(self, dt))
 
         mu_t_field_compact = None
         from autoflowcfd.core.turbulence.registry import has_transport_equations
@@ -396,30 +400,8 @@ class _DistributedStepMixin:
             U_new_flat = self.state.get_local_U().reshape(n_local * n_sps, n_vars)
             if coupled is not None:
                 mu_t_field_compact = coupled.turb.mu_t_compact
-        elif self.time_integrator.scheme == TimeIntegrationScheme.IMEX_EULER:
-            # 显式无粘对流 + 隐式粘性（阻尼 Picard），与单机
-            # `fr_solver/step.py` 同一个拆分、同一个积分器。**2026-09-25 补齐**：
-            # 此前这里无条件走 `_ssp_rk_stage_step`，而 IMEX_EULER 在系数表里
-            # 没有条目、回退成 1 级的前向 Euler 表 —— `--time-method imex
-            # --n-ranks N` 静默跑成了前向 Euler（假选项）。
-            def _explicit_R(U_flat_trial):
-                U3 = U_flat_trial.reshape(n_local, n_sps, n_vars)
-                return (-self._inviscid_dudt_local(U3)).reshape(n_local * n_sps, n_vars)
-
-            def _implicit_R(U_flat_trial):
-                if not self._viscous_enabled():
-                    return np.zeros_like(U_flat_trial)
-                U3 = U_flat_trial.reshape(n_local, n_sps, n_vars)
-                return (-self._viscous_dudt_local(U3, mu_t_field_compact, nu_av_compact)).reshape(
-                    n_local * n_sps, n_vars)
-
-            U_new_flat = self.time_integrator.step_imex(
-                U_flat, _explicit_R, _implicit_R, dt_local_flat,
-                positivity_func=positivity_func,
-            )
         else:
-            # `TimeIntegrator.step()` 对 IMEX 与隐式格式显式报错（不静默退化成前向 Euler）；
-            # 它们上面都已分派。
+            # `TimeIntegrator.step()` 对隐式格式显式报错（不静默退化成前向 Euler）；它们上面都已分派。
             U_new_flat = self.time_integrator.step(
                 U_flat, residual_func, dt_local_flat, residual0=residual0,
                 filter_func=filter_func, positivity_func=positivity_func,

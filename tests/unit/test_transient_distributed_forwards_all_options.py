@@ -116,7 +116,7 @@ def test_freestream_dicts_all_carry_the_angles():
             f"路径要么必现 NameError，要么静默退回零攻角")
 
 
-@pytest.mark.parametrize("key", ("cfl_start", "cfl_max", "cfl_min"))
+@pytest.mark.parametrize("key", ("cfl_start", "cfl_max", "cfl_min", "time_accurate"))
 def test_every_solver_construction_site_receives_cfl(key):
     """第三层（CFL）：每个求解器/package 构造点都必须真正收到三个边界。
 

@@ -2,13 +2,13 @@
 AutoFlowCFD V2.0 - GPU 版时间积分
 
 * `GPUTimeIntegrator`：**不是**独立实现。SSP-RK stage 推进、双时间步、
-  IMEX 全部继承 CPU 的 `time_integration.TimeIntegrator`（它们与数组模块
+  全部继承 CPU 的 `time_integration.TimeIntegrator`（它们与数组模块
   无关，CuPy 数组原样走同一份代码）。
 * `compute_local_cfl_step_gpu`：GPU 版局部 CFL 时间步长。
 
 **2026-09-25 删除的 GPU 独立拷贝**（`enforce_positivity_gpu`、
 `_ssp_rk_stage_step_gpu`、`gpu_time_integration_dual.py`、
-`gpu_time_integration_imex.py`）：
+`gpu_time_integration_imex.py`；IMEX 本身已于 2026-10-17 删除）：
 
 1. 正性用的是逐点硬钳（密度钳 1e-6、速度钳 1e4 m/s、压力钳 1 Pa），CPU 侧
    已证实它不守恒、且是 plate_demo 第 4134 步一步爆炸到 1e53 的放大器；
@@ -210,7 +210,7 @@ class GPUTimeIntegrator(TimeIntegrator):
     取值报错，不静默退回前向 Euler —— 此前 `_SCHEME_TABLE.get(scheme, _EULER)`
     正是那样）。CFL 不归积分器管：控制器 / 固定 CFL 由
     `adaptive_cfl/policy.py::build_cfl_policy` 在求解器上建立（此前这里的
-    `cfl=1.0` 是 IMEX/双时间步下的实际 CFL，远超 P>=1 显式稳定极限）。
+    `cfl=1.0` 是双时间步下的实际 CFL，远超 P>=1 显式稳定极限）。
 
     `dual_time_steps` 默认值与 CPU 同一个（父类构造参数）。
     """

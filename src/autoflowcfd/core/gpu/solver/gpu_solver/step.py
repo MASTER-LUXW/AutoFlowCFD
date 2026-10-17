@@ -33,7 +33,7 @@ class _GPUSolverStepMixin:
         2. 湍流源项求值（算子分裂：湍流走独立显式更新）
         3. 局部 CFL 步长
         4. 平均流残差计算（含湍流涡粘耦合）
-        5. SSP-RK / IMEX / 隐式（稳态 Newton-Krylov、双时间步的隐式内迭代）时间推进
+        5. SSP-RK / 隐式（稳态 Newton-Krylov、双时间步的隐式内迭代）时间推进
         6. 湍流场更新（k/ω 正性限制）
 
         Args:
@@ -49,9 +49,6 @@ class _GPUSolverStepMixin:
 
         self._update_primitives_gpu()
         scheme = self.time_integrator.scheme
-        # 合成湍流入口（SEM）每个物理步推进一次（与 CPU 同一个函数；此前单 GPU 从不推进，入口涡结构冻结）
-        from autoflowcfd.boundary.synthetic_inlet import advance_synthetic_inlets
-        advance_synthetic_inlets(self.boundary_ghost_provider, self.freestream, dt)
         # 本步冻结的问题单元人工扩散系数（与 CPU step.py 同一算子分裂约定；
         # 未启用时 None），同时进入粘性步长限制与全部粘性残差求值
         nu_av = self.compute_artificial_diffusivity_field_gpu()
@@ -68,6 +65,10 @@ class _GPUSolverStepMixin:
                       and self.turb_model_gpu is not None and has_transport_equations(self.turb_model_name))
         dt_local, dt_physical = self._compute_local_time_step_gpu(
             return_physical_too=True, nu_av=nu_av)
+        # 合成湍流入口（SEM）每个物理步推进一次（与 CPU 同一个函数）；时间精确子步按实际步长推进
+        from autoflowcfd.boundary.synthetic_inlet import advance_synthetic_inlets
+        from autoflowcfd.core.time_integration.time_accurate import sem_time_step
+        advance_synthetic_inlets(self.boundary_ghost_provider, self.freestream, sem_time_step(self, dt))
         if coupled_nk:
             mu_t_field = self._turbulent_mu_t_gpu()
         else:
@@ -203,23 +204,6 @@ class _GPUSolverStepMixin:
             else:
                 nk_info = newton_step(dt_local_full)
             U_new_flat = self.U_gpu.reshape(n_cells * n_sps, self.n_vars)
-
-        elif scheme == TimeIntegrationScheme.IMEX_EULER:
-            # IMEX: 显式处理对流，隐式处理粘性
-            def convective_residual_only(U_flat_trial):
-                U_trial = U_flat_trial.reshape(n_cells, n_sps, self.n_vars)
-                inv_res = self.compute_inviscid_residual_gpu(U_trial)
-                return -inv_res.reshape(n_cells * n_sps, self.n_vars)
-
-            def diffusive_residual_only(U_flat_trial):
-                U_trial = U_flat_trial.reshape(n_cells, n_sps, self.n_vars)
-                visc_res = self.compute_viscous_residual_gpu(U_trial, mu_t_field=mu_t_field, nu_av=nu_av)
-                return -visc_res.reshape(n_cells * n_sps, self.n_vars)
-
-            U_new_flat = self.time_integrator.step_imex(
-                U_flat, convective_residual_only, diffusive_residual_only,
-                dt_local_full, positivity_func=positivity_func,
-            )
 
         else:
             # SSP-RK2/RK3 或前向 Euler

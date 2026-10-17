@@ -116,9 +116,12 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
             converged = False
             last_finite = None
 
+            # 本模块被 core.utils 包导入期加载，time_integration 在那时尚未初始化完，局部导入
+            from autoflowcfd.core.time_integration.time_accurate import advance
+
             for i in range(stage_iter_budget):
                 t_start = _time.time()
-                res = solver.step(dt)
+                res = advance(solver, dt)
                 elapsed = _time.time() - t_start
                 final_residual = res
                 total_iter += 1

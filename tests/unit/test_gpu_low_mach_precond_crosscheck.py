@@ -266,7 +266,7 @@ class TestGpuSolverWiring:
         return s
 
     def test_switch_semantics_match_cpu(self):
-        """全部后端必须经同一个 `resolve_low_mach_precond` 决定开关（此前五份
+        """全部后端必须经同一个函数决定开关（`configure_time_stepping` -> `resolve_low_mach_precond`；此前五份
         写法，多 GPU 完全分布式加载那条路径根本没设这个属性）。"""
         from tests.unit._module_source import module_source
 
@@ -277,13 +277,13 @@ class TestGpuSolverWiring:
         import autoflowcfd.core.mpi.distributed_solver as cpu_mpi
         for mod in (cpu_single, gpu_single, gpu_multi, gpu_multi_fd, cpu_mpi):
             src = module_source(mod)
-            assert "resolve_low_mach_precond(" in src, mod.__name__
+            assert "configure_time_stepping(" in src, mod.__name__
             assert 'os.environ.get("AFCFD_LOW_MACH_PRECOND")' not in src, (
                 f"{mod.__name__} 又自己解析了一遍环境变量")
 
     @pytest.mark.parametrize("scheme,expected", [
         ("ssp_rk3", True), ("ssp_rk2", True), ("newton_krylov", True),
-        ("dual_time", False), ("imex_euler", False), ("forward_euler", False),
+        ("dual_time", False), ("forward_euler", False),
     ])
     def test_precond_gated_by_time_scheme(self, scheme, expected):
         s = self._fake_solver(time_scheme=scheme, env=None)

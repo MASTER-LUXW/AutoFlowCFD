@@ -140,7 +140,7 @@ class TestAllSolveLoopsAreGuarded:
 
         多 GPU 路径此前就是顺序错了（先保存再检查），检查在也没用。
 
-        判定从循环体里那条 `res = ....step(dt)` 起算，而不是从文件开头
+        判定从循环体里那条 `res = advance(..., dt)` 起算，而不是从文件开头
         ——`gpu_distributed.py` 的 `solve` **文档字符串**里就提到了
         `checkpoint_callback(solver, iteration)` 这个回调约定，按文件
         开头找首次出现会命中文档而不是调用（第一版判据就踩了这个，
@@ -155,7 +155,7 @@ class TestAllSolveLoopsAreGuarded:
         # 求解循环的那个子模块，再在它内部判顺序。
         src, m = None, None
         for _name, _s in module_sources(rel):
-            _m = re.search(r'res = (?:self|solver)\.step\(', _s)
+            _m = re.search(r'res = advance\((?:self|solver), ', _s)
             if _m is not None:
                 src, m = _s, _m
                 break

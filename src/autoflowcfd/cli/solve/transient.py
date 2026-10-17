@@ -27,15 +27,12 @@ from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 @click.option("--order", "-p", type=click.IntRange(1, 3), default=2,
               help="FR 离散阶数")
 @click.option("--time-method", "-t",
-              type=click.Choice(["rk3", "imex", "dual-time"]),
-              default="rk3",
-              help="时间推进方法。**只有 dual-time 是时间精确的**："
-                   "rk3/imex 下 --dt 参数被忽略，平均流与湍流场都按逐单元"
-                   "局部 CFL 步长推进（稳态收敛加速手段，见 "
-                   "core/fr_solver/step.py::step 的 dt 语义一节），各单元"
-                   "推进的物理时间并不相同。DES/LES/WMLES 这类以时间解析"
-                   "湍流结构为目的的模型必须用 dual-time，否则结果不能当作"
-                   "非稳态数据解读——组合不当时本命令会显式警告。")
+              type=click.Choice(["dual-time", "rk3"]),
+              default="dual-time",
+              help="时间推进方法，两档都是时间精确的。dual-time（默认）：每个物理步 --dt 是若干个带 BDF 物理时间项"
+                   "的隐式 Newton 步，步长不受显式稳定条件限制。rk3：显式 SSP-RK3、全场同一物理步长——每个 --dt 切成"
+                   "若干子步，子步长取全场显式稳定步长（--cfl-start）的最小值、最后一个子步恰好落在 t+dt；CFL 固定、"
+                   "低马赫预处理关闭（core/time_integration/time_accurate.py）。")
 @click.option("--turbulence-model", "-m",
               type=click.Choice(["sst", "sa", "ddes", "iddes", "wmles", "les"]),
               default="ddes",
@@ -63,21 +60,12 @@ from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
               help='侧滑角 beta（度，绕 z 轴，默认 0）。语义与 --aoa 同，见其说明')
 @click.option("--dt", default=1e-5, help="时间步长 (秒)")
 @click.option('--cfl-start', type=float, default=None,
-              help='自适应 CFL 初始值（默认取显式控制器签名默认值 0.03，adaptive_cfl/policy.py 唯一来源）。**只对 --time-method '
-                   'rk3/imex 生效**：那两档下 step() 忽略 --dt、按逐单元'
-                   '局部 CFL 步长推进，自适应控制器是激活的；dual-time 档'
-                   '不构造这个控制器（内层伪时间有自己的逻辑）。'
-                   '**2026-09-17 补齐**：此前 solve transient 一个 CFL 选项'
-                   '都没有，rk3/imex 瞬态只能吃 FRSolver 构造默认值，配置'
-                   '不出本项目在两张真实网格上实测稳定的 ~0.03。')
+              help='CFL 数。--time-method rk3：显式子步的固定 CFL（全场显式稳定步长按它取，默认 0.03，'
+                   'adaptive_cfl/policy.py 唯一来源）；dual-time：内迭代伪时间 CFL 的起点（SER 律，默认 1e4）。')
 @click.option('--cfl-max', type=float, default=None,
-              help='自适应 CFL 上限（默认 0.06，2026-09-17 从 0.5 下调）。'
-                   '语义与 --cfl-start 同，只对 rk3/imex 生效。下调依据见 `solve steady --cfl-max` 的帮助：2026-09-17 按直接谱测量 + 两张真实网格的失效点重定，线性极限约 0.117、实测失效点 plate 0.30 / 平板边界层 0.10，默认值留 1.7 倍以上裕度。')
+              help='dual-time 内迭代伪时间 CFL 的上限（SER 律）。rk3 档 CFL 固定为 --cfl-start，不用它。')
 @click.option('--cfl-min', type=float, default=None,
-              help='自适应 CFL 下限（默认 0.01，与 solve steady/resume 对齐）。'
-                   '注意下限会把低于它的 --cfl-start 钳上去，做低 CFL 工况'
-                   '时三个都要一起调（见 core/time_integration/'
-                   'adaptive_cfl.py 模块文档第 11 条）。')
+              help='dual-time 内迭代伪时间 CFL 的下限（SER 律）。rk3 档 CFL 固定为 --cfl-start，不用它。')
 @click.option("--physical-time", default=None, help="总物理时间（秒）")
 @click.option("--output", "-o", "output_dir", default="./transient_results", help="输出目录")
 @click.option("--surface-mesh", "-s", type=click.Path(exists=True), default=None,
@@ -183,6 +171,8 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
 
     # 后端组合校验（与 `solve steady/resume` 同一个函数）
     validate_backend_options(backend, n_ranks, multi_gpu)
+    # 显式档做时间精确推进（全场同一物理步长的子步，time_integration/time_accurate.py）；dual-time 本身时间精确
+    time_accurate = scheme_from_name(time_method) != scheme_from_name("dual-time")
 
     if n_ranks > 1:
         # 分布式瞬态求解路径（2026-09-02 补齐——此前本命令完全没有
@@ -210,7 +200,7 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
             n_ranks, multi_gpu, fully_distributed, gpu_device,
             checkpoint_interval, phase_max_iter, residual_drop_threshold,
             init_checkpoint,
-            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+            cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, time_accurate=time_accurate,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
             aoa_deg=aoa_deg, aos_deg=aos_deg,
@@ -224,39 +214,6 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
 
     # 2. 映射时间推进方法
     time_scheme = scheme_from_name(time_method)
-
-    # 时间精度与湍流模型的组合校验（2026-09-15）：本命令的默认组合是
-    # `--time-method rk3` + `--turbulence-model ddes`，而 rk3/imex 下
-    # `step()` **忽略** --dt、按逐单元局部 CFL 步长推进（见
-    # core/fr_solver/step.py::step 文档"dt 参数的语义按 time_scheme 分两种
-    # 情况"一节）。各单元因此推进的物理时间并不相同，结果不是时间精确解。
-    # DES/LES/WMLES 的全部意义就在于时间上解析湍流结构，用非时间精确的
-    # 推进跑出来的场不能当作非稳态数据解读——而此前这个组合没有任何提示。
-    #
-    # 这里**不直接拒绝**：rk3 + DES 作为"先把流场大致吹起来"的快速冒烟
-    # 是有用的（本项目既有的 DDES/LES CLI 端到端验证就是这么跑的），
-    # 拒绝会破坏一条已验证可用的路径。但必须显式、醒目地说清它不是什么。
-    _TIME_RESOLVED_MODELS = ("ddes", "iddes", "les", "wmles")
-    if (time_method in ("rk3", "imex")
-            and turbulence_model.lower() in _TIME_RESOLVED_MODELS):
-        click.secho(
-            "\n⚠️  时间精度警告：--turbulence-model "
-            + turbulence_model
-            + " 是以**时间解析**湍流结构为目的的模型，但 --time-method "
-            + time_method + " **不是时间精确的**。",
-            fg="yellow", bold=True)
-        click.secho(
-            "   rk3/imex 下 --dt 被忽略，平均流与湍流场按逐单元局部 CFL "
-            "步长推进（稳态收敛加速手段），各单元推进的物理时间并不相同。",
-            fg="yellow")
-        click.secho(
-            "   本次结果可用于观察流场大致形态，但**不能当作非稳态/频谱"
-            "数据解读**（涡脱落频率、TKE 谱、相位等一概无效）。",
-            fg="yellow")
-        click.secho(
-            "   要做真正的非稳态仿真请用：--time-method dual-time"
-            "（配合 --dt 与 --dual-time-inner-iter）。\n",
-            fg="yellow")
 
     # 3. 初始化求解器（CPU / 单 GPU；输运湍流模型（含 DES）带上壁距，LES/WMLES 不需要）
     solver = build_single_node_solver(
@@ -273,9 +230,8 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
         mu_molecular=mu_molecular,
         rho_inf=rho_inf, vel_inf=vel_inf, p_inf=p_inf,
         aoa_deg=aoa_deg, aos_deg=aos_deg,
-        # CFL 三元组（2026-09-17 补齐）：rk3/imex 档走逐单元局部 CFL
-        # 推进、自适应控制器是激活的，此前这里一个都不传。
-        cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+        # CFL：rk3 档为显式子步的固定 CFL（cfl_start），dual-time 档为内迭代伪时间 CFL 的 SER 律参数
+        cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, time_accurate=time_accurate,
         artificial_viscosity_enabled=artificial_viscosity_enabled,
         artificial_viscosity_alpha=artificial_viscosity_alpha,
     )

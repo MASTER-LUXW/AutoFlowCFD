@@ -164,6 +164,27 @@ def test_algebraic_sgs_models_get_wale_on_multi_gpu(mesh_and_ops, gpu_shim, mode
     assert solver.turb_model_gpu is None and solver.wall_distance_gpu is None
 
 
+def test_time_accurate_flag_reaches_multi_gpu(mesh_and_ops, gpu_shim):
+    """瞬态 rk3 档的时间精确显式模式经完全分布式包送到多 GPU 求解器：固定 CFL、关低马赫预处理
+    （`time_integration/time_accurate.py::configure_time_stepping`，与其余后端同一个函数）。"""
+    from autoflowcfd.core.gpu.distributed.gpu_distributed import MultiGPUDistributedSolver
+    from autoflowcfd.core.gpu.distributed.gpu_distributed_fully_distributed import (
+        build_multi_gpu_solver_from_fully_distributed_package,
+    )
+    from autoflowcfd.core.time_integration import TimeIntegrationScheme
+
+    mesh, ops = mesh_and_ops
+    package = _build_none_package(mesh, ops)
+    package["time_scheme"] = TimeIntegrationScheme.SSP_RK3
+    package["time_accurate"] = True
+    package["cfl_start"] = 0.02
+    solver = build_multi_gpu_solver_from_fully_distributed_package(
+        MultiGPUDistributedSolver, package, n_ranks=1, device_id=0, rank=0, root_context=None)
+    assert solver.time_accurate is True
+    assert solver._cfl_controller is None and solver.fixed_cfl_number == pytest.approx(0.02)
+    assert solver.low_mach_precond_enabled is False
+
+
 class TestBuildFromFullyDistributedPackageNoneTurbulence:
     def test_wires_geometry_and_freestream_correctly(self, mesh_and_ops, gpu_shim):
         from autoflowcfd.core.gpu.distributed.gpu_distributed import MultiGPUDistributedSolver

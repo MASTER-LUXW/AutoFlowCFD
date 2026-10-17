@@ -52,7 +52,7 @@ class TurbulenceModel(str, Enum):
 #
 # 那是一个"同一语义两个事实来源"的典型：配置层的是 `str, Enum`、取值
 # `backward_euler/rk2/rk3/ab3`；核心层的是普通 `Enum`、取值
-# `forward_euler/ssp_rk2/ssp_rk3/imex_euler/dual_time`。两者取值范围既
+# `forward_euler/ssp_rk2/ssp_rk3/imex_euler/dual_time`（imex_euler 已于 2026-10-17 删除）。两者取值范围既
 # 不相同、也不可互相表达（配置层没有 dual_time/imex_euler，核心层没有
 # backward_euler/ab3 —— 后两个在核心层**从未实现**）。
 #
@@ -302,9 +302,11 @@ class TransientConfig(SolverConfig):
     """
     dt: float = 1e-4
     total_time: float = 0.1
-    time_scheme: TimeIntegrationScheme = TimeIntegrationScheme.SSP_RK3
-    # 自适应 CFL 三元组：`rk3/imex` 下 `step()` 按逐单元局部 CFL 步长推进，控制器是激活的；`dual-time` 档外层不构造
-    # 控制器（内层伪时间有自己的步长调节）。默认 None 的含义见 SteadyConfig 文档 cfl_init 一节
+    # 瞬态默认双时间步（时间精确的隐式内迭代）；显式格式在瞬态里做全场同一物理步长的时间精确推进
+    # （`core/time_integration/time_accurate.py`）
+    time_scheme: TimeIntegrationScheme = TimeIntegrationScheme.DUAL_TIME
+    # CFL：显式格式为子步的固定 CFL（cfl_init）；dual-time 为内迭代伪时间 CFL 的 SER 律参数。
+    # 默认 None 的含义见 SteadyConfig 文档 cfl_init 一节
     cfl_init: Optional[float] = None
     cfl_max: Optional[float] = None
     cfl_min: Optional[float] = None

@@ -355,6 +355,6 @@ def status(backend: bool) -> None:
         logger.info("V2.0 FR Solver Status: Ready")
         logger.info("Supported features:")
         logger.info("  - Orders: P1, P2, P3")
-        logger.info("  - Time methods: RK3, IMEX, Dual-Time")
+        logger.info("  - Time methods: Dual-Time, RK3 (time-accurate)")
         logger.info("  - Turbulence models: SST, SA-neg, DDES, IDDES, WMLES, LES")
         logger.info("  - Order continuation: P0 → P2/P3 smooth transition")

@@ -261,20 +261,20 @@ class _DistributedFromPackageMixin:
         #     做法，按各自的局部残差更新会让各 rank 的 CFL 漂移、
         #     破坏一致性；
         #   * 预处理只在 SSP-RK2/RK3 下启用（DUAL_TIME 的物理时间导数项
-        #     与 IMEX 的残差拆分都需要单独推导 Gamma 的分配方式）；
+        #     需要单独推导 Gamma 的分配方式；时间精确显式推进同样不启用）；
         #   * 环境变量 AFCFD_LOW_MACH_PRECOND / AFCFD_CFL_LEGACY 同样生效。
         # CFL 策略（控制器 or 固定 CFL）的唯一事实来源：
         # `time_integration/adaptive_cfl/policy.py::build_cfl_policy`（六个后端
         # 构造点此前各写一份且已分叉，见该模块文档）。
-        # 此前这里只对 SSP-RK2/RK3 建控制器，其余方案（IMEX、DUAL_TIME 的伪
+        # 此前这里只对 SSP-RK2/RK3 建控制器，其余方案（DUAL_TIME 的伪
         # 时间步）走 cfl.py 的替身回退 0.1，与单机的 cfl_start 不一致。
-        from autoflowcfd.core.time_integration.adaptive_cfl.policy import build_cfl_policy
-        self._cfl_controller, self.fixed_cfl_number = build_cfl_policy(
-            time_scheme, cfl_start=package.get('cfl_start'),
-            cfl_max=package.get('cfl_max'), cfl_min=package.get('cfl_min'))
-        from autoflowcfd.core.utils.preconditioning import resolve_low_mach_precond
-        self.low_mach_precond_enabled = resolve_low_mach_precond(
-            package.get('low_mach_precond', True), time_scheme)
+        from autoflowcfd.core.time_integration.time_accurate import configure_time_stepping
+
+        configure_time_stepping(
+            self, time_scheme, time_accurate=bool(package.get('time_accurate', False)),
+            adaptive_cfl=bool(package.get('adaptive_cfl', True)),
+            cfl_start=package.get('cfl_start'), cfl_max=package.get('cfl_max'), cfl_min=package.get('cfl_min'),
+            low_mach_precond=package.get('low_mach_precond', True))
         # 上一步的涡粘场（local 排列），供下一步的粘性 CFL 限制使用——
         # 与单机 `_get_turbulent_viscosity_field` 读取湍流模型已存字段
         # （即上一步的结果）是同一个时序。

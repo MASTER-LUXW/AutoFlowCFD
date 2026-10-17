@@ -110,7 +110,7 @@ class TestConfigLayer:
         for field in ("cfl_init", "cfl_max", "cfl_min"):
             assert hasattr(cfg, field), (
                 f"{cls_name} 缺 {field} 字段 —— YAML/config 用户配置不出它，"
-                f"而 rk3/imex 路径上自适应控制器是激活的"
+                f"而显式稳态路径上自适应控制器是激活的"
             )
             assert getattr(cfg, field) is None, f"{cls_name}.{field} 默认值不是 None"
 

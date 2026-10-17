@@ -179,8 +179,9 @@ class _APISolveMixin:
                 同名字段 > 内建默认值"解析，显式传值始终优先——与
                 run_steady 的 `config` 参数同一套规则（见该方法文档）。
                 `physical_time` 对应 `config.total_time`。
-            time_method: 时间推进方案（`core/time_integration/base.py::scheme_from_name` 的取值，如 "rk3"/"imex"/
-                "dual-time"）；None 时取 `config.time_scheme`，都没有时 "rk3"
+            time_method: 时间推进方案（`core/time_integration/base.py::scheme_from_name` 的取值，如 "dual-time"/
+                "rk3"）；None 时取 `config.time_scheme`，都没有时 "dual-time"。显式格式做全场同一物理步长的时间
+                精确推进（`core/time_integration/time_accurate.py`）
             turbulence_model: Turbulence model (none/sst/ddes/wmles/les)
             mode: turbulence_model 的别名（向后兼容）
             physical_time: 总物理时间（秒）；未提供时按 dt*1000 估算迭代数
@@ -228,7 +229,7 @@ class _APISolveMixin:
         dt = dt if dt is not None else (config.dt if config is not None else 1e-4)
         threads = threads if threads is not None else (config.n_threads if config is not None else -1)
         if time_method is None:
-            time_method = config.time_scheme if config is not None else "rk3"
+            time_method = config.time_scheme if config is not None else "dual-time"
         if physical_time is None and config is not None:
             physical_time = config.total_time
         rho_inf = rho_inf if rho_inf is not None else (config.rho_inf if config is not None else 1.225)
@@ -240,7 +241,7 @@ class _APISolveMixin:
             for field in ("mu_molecular", "turbulence_intensity", "viscosity_ratio",
                           "artificial_viscosity_enabled", "artificial_viscosity_alpha"):
                 kwargs.setdefault(field, getattr(config, field))
-            # 自适应 CFL 三元组：字段名映射与 run_steady 一致，只转发给出的值（dual-time 档外层不构造控制器）
+            # CFL：字段名映射与 run_steady 一致，只转发给出的值
             if getattr(config, "cfl_init", None) is not None:
                 kwargs.setdefault("cfl_start", config.cfl_init)
             if getattr(config, "cfl_max", None) is not None:
@@ -252,8 +253,10 @@ class _APISolveMixin:
         # `core/time_integration/base.py::scheme_from_name`（2026-09-18
         # 合并，此前这里、CLI、配置层各有一份，其中配置层那份把
         # dual-time 映到 backward_euler、imex 映到 RK3，都是静默给错值）。
-        from autoflowcfd.core.time_integration.base import scheme_from_name
+        from autoflowcfd.core.time_integration.base import TimeIntegrationScheme, scheme_from_name
         core_time_scheme = scheme_from_name(time_method)
+        # 瞬态的显式格式做时间精确推进（全场同一物理步长的子步）；双时间步本身时间精确
+        kwargs.setdefault("time_accurate", core_time_scheme != TimeIntegrationScheme.DUAL_TIME)
 
         if physical_time is None:
             raise ValueError("run_transient 需要 physical_time（或带 total_time 的 config）")

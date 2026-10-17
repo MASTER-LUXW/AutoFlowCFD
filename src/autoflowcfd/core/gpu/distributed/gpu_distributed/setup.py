@@ -201,7 +201,8 @@ class _MultiGPUSetupMixin:
         self.state = DistributedFRState(self.partition, n_sps)
         return n_sps, n_local
 
-    def _setup_time_integration(self, time_scheme, cfl_start, cfl_max, cfl_min):
+    def _setup_time_integration(self, time_scheme, cfl_start, cfl_max, cfl_min, *, adaptive_cfl=True,
+                                time_accurate=False, low_mach_precond=True):
         """时间积分器、CFL 策略与低马赫预处理开关（均为全后端唯一来源）。"""
         # 时间积分器
         self.time_integrator = GPUTimeIntegrator(
@@ -217,11 +218,11 @@ class _MultiGPUSetupMixin:
         # CFL 策略（控制器 or 固定 CFL）的唯一事实来源：
         # `time_integration/adaptive_cfl/policy.py::build_cfl_policy`（六个后端
         # 构造点此前各写一份且已分叉，见该模块文档）。
-        from autoflowcfd.core.time_integration.adaptive_cfl.policy import build_cfl_policy
-        self._cfl_controller, self.fixed_cfl_number = build_cfl_policy(
-            time_scheme, cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min)
-        from autoflowcfd.core.utils.preconditioning import resolve_low_mach_precond
-        self.low_mach_precond_enabled = resolve_low_mach_precond(True, time_scheme)
+        from autoflowcfd.core.time_integration.time_accurate import configure_time_stepping
+
+        configure_time_stepping(self, time_scheme, time_accurate=time_accurate, adaptive_cfl=adaptive_cfl,
+                                cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+                                low_mach_precond=low_mach_precond)
 
         # DUAL_TIME 模式下 BDF2 需要的上一物理时间层状态（2026-09-02，
         # 见 step() 里 DUAL_TIME 分支说明）——None 表示尚未跑过一个

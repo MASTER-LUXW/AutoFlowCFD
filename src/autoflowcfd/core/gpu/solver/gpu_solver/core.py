@@ -62,6 +62,8 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         turbulence_intensity: float = 0.01,
         viscosity_ratio: float = 5.0,
         low_mach_precond: bool = True,
+        adaptive_cfl: bool = True,
+        time_accurate: bool = False,
         cfl_start: Optional[float] = None,
         cfl_max: Optional[float] = None,
         cfl_min: Optional[float] = None,
@@ -89,9 +91,9 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
             low_mach_precond: 是否启用低马赫数伪时间预处理（默认 True，
                 与 CPU 版一致）。环境变量 AFCFD_LOW_MACH_PRECOND=0/1
                 优先于本参数。
-            cfl_start, cfl_max, cfl_min: 自适应 CFL 参数（与 CPU 版 FRSolver
-                同名参数、同一语义；None 取控制器默认值，规则见
-                `adaptive_cfl/policy.py::build_cfl_policy`）。
+            adaptive_cfl, time_accurate, cfl_start, cfl_max, cfl_min: 与 CPU 版 FRSolver 同名参数、同一语义
+                （`core/time_integration/time_accurate.py::configure_time_stepping`；此前单 GPU 不接受
+                `adaptive_cfl`，固定 CFL 请求无从表达）。
             boundary_ghost_provider: 边界幽灵态提供者。None 时按
                 CPU 版 FRSolver 同一套逻辑（fr_solver/boundary.py::
                 build_boundary_ghost_provider）自行构建——真实 bug
@@ -170,17 +172,8 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
                            "mach_ref": mach_ref,
                            "aoa_deg": float(aoa_deg), "aos_deg": float(aos_deg)}
 
-        # 低马赫数伪时间预处理（2026-09-14，与 CPU 版 FRSolver 同一机制/
-        # 同一开关语义）：dt 按预处理波速放大**必须**与把 Gamma 作用到
-        # 平均流残差上成对出现，缺一半就是 2026-08-25 在本文件
-        # compute_local_cfl_step_gpu 里记录的那次失稳。完整推导见
-        # core/utils/preconditioning.py 模块末尾；GPU 侧实现见
-        # core/gpu/gpu_preconditioning.py。
-        # 只在 SSP-RK2/RK3 下启用：DUAL_TIME 的物理时间导数项与 IMEX 的
-        # 残差拆分都需要单独推导 Gamma 的分配方式，不套未经验证的近似
-        # （与 CPU 侧同一判据）。
-        from autoflowcfd.core.utils.preconditioning import resolve_low_mach_precond
-        self.low_mach_precond_enabled = resolve_low_mach_precond(low_mach_precond, time_scheme)
+        # 低马赫数伪时间预处理开关与 CFL 策略在下面 `configure_time_stepping` 里设定（全部后端同一判据；
+        # GPU 侧 Gamma 的实现见 core/gpu/gpu_preconditioning.py）。
         # 真实 bug 修复（2026-09-05，代码复审发现）：CPU 版
         # `DistributedFRSolver`/`MultiGPUDistributedSolver` 都把构造期
         # 传入的 `turbulence_intensity`/`viscosity_ratio` 存成
@@ -236,12 +229,14 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         # CFL 策略（控制器 or 固定 CFL）的唯一事实来源：
         # `time_integration/adaptive_cfl/policy.py::build_cfl_policy`（六个后端
         # 构造点此前各写一份且已分叉，见该模块文档）。
-        # 此前这里对 IMEX/DUAL_TIME 不建控制器、退回构造参数 `cfl`（默认 1.0，
+        # 此前这里对 DUAL_TIME 等不建控制器、退回构造参数 `cfl`（默认 1.0，
         # 远超 P>=1 显式稳定极限），并对 cfl_start/cfl_max 留着"缺省退回 cfl"
         # 的硬编码兜底。
-        from autoflowcfd.core.time_integration.adaptive_cfl.policy import build_cfl_policy
-        self._cfl_controller, self.fixed_cfl_number = build_cfl_policy(
-            time_scheme, cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min)
+        from autoflowcfd.core.time_integration.time_accurate import configure_time_stepping
+
+        configure_time_stepping(self, time_scheme, time_accurate=time_accurate, adaptive_cfl=adaptive_cfl,
+                                cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
+                                low_mach_precond=low_mach_precond)
 
         # 初始化求解状态
         n_cells = mesh.n_cells

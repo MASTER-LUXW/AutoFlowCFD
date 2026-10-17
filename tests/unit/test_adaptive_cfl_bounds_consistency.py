@@ -263,12 +263,10 @@ class TestEveryBackendConstructsAController:
         # 这个模块 2026-09-24 拆成子包；`inspect.getsource(包)` 只返回
         # `__init__.py`，控制器构造点在 `build.py` 里。
         src = module_source(fd)
-        # 2026-09-25：控制器统一经 `adaptive_cfl/policy.py::build_cfl_policy`
-        # 构造（六个构造点此前各写一份且已分叉）。这里查这条路径确实调用
-        # 它、并 None 感知地从 package 取三个边界值；兜底默认值只能来自
-        # 控制器签名（结构守卫见 test_cfl_policy_single_source.py）。
-        assert 'build_cfl_policy(' in src
-        assert '_cfl_controller' in src
+        # 控制器统一经 `time_integration/time_accurate.py::configure_time_stepping`（内部调
+        # `adaptive_cfl/policy.py::build_cfl_policy`）构造。这里查这条路径确实调用它、并 None 感知地
+        # 从 package 取三个边界值；兜底默认值只能来自控制器签名（结构守卫见 test_cfl_policy_single_source.py）。
+        assert 'configure_time_stepping(' in src
         for key in ('cfl_start', 'cfl_max', 'cfl_min'):
             assert f"package.get('{key}')" in src, f"{key} 没有从 package 里取"
         assert "('cfl_start', 0.1)" not in src, (
@@ -276,8 +274,8 @@ class TestEveryBackendConstructsAController:
             "（AdaptiveCFLController 的签名）")
 
     def test_all_five_controller_sites_pass_cfl_min(self):
-        """构造点逐一核对，防止将来新增后端时又漏一处（2026-09-25 起统一
-        经 `build_cfl_policy`，这里查每处都调用它且接了 cfl_min）。"""
+        """构造点逐一核对，防止将来新增后端时又漏一处（统一经 `configure_time_stepping`，这里查每处都调用它
+        且接了 cfl_min）。"""
         from tests.unit._module_source import module_source
 
         from autoflowcfd.core.fr_solver import solver as cpu_single
@@ -291,7 +289,7 @@ class TestEveryBackendConstructsAController:
             # 用 module_source：这五个里已经有拆成子包的（gpu_multi_fd），
             # `inspect.getsource(包)` 只返回 `__init__.py`。
             src = module_source(mod)
-            assert 'build_cfl_policy(' in src, mod.__name__
+            assert 'configure_time_stepping(' in src, mod.__name__
             assert 'cfl_min' in src, f"{mod.__name__} 的控制器构造没有接 cfl_min"
 
 

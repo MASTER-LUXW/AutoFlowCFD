@@ -96,7 +96,7 @@ class TestSolveTransientDistributedCliWiring:
         mock_distributed.assert_called_once()
         assert _arg(mock_distributed, "init_checkpoint") == str(ckpt_file)
 
-    def test_multi_gpu_dispatches_with_rk3_default(self, tmp_path):
+    def test_multi_gpu_dispatches_with_dual_time_default(self, tmp_path):
         mesh_file = tmp_path / "mesh.pkl"
         mesh_file.write_bytes(b"")
 
@@ -112,5 +112,6 @@ class TestSolveTransientDistributedCliWiring:
 
         assert result.exit_code == 0, result.output
         mock_distributed.assert_called_once()
-        assert _arg(mock_distributed, "time_scheme") == TimeIntegrationScheme.SSP_RK3
+        assert _arg(mock_distributed, "time_scheme") == TimeIntegrationScheme.DUAL_TIME
+        assert _arg(mock_distributed, "time_accurate") is False
         assert _arg(mock_distributed, "multi_gpu") is True

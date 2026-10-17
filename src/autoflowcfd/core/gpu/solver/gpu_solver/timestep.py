@@ -125,11 +125,13 @@ class _GPUSolverTimeStepMixin:
         _p = order_from_n_sps(dt_all_sps.shape[1])
         dt_mean = reduce_per_cell_over_real_sps(
             dt_all_sps, _np_cells, _p, 'min', xp=cp)  # (n_cells,)
+        from autoflowcfd.core.time_integration.time_accurate import uniform_time_step
+
         if not return_physical_too:
-            return dt_mean
+            return uniform_time_step(self, dt_mean, False)
         dt_phys = (reduce_per_cell_over_real_sps(
             dt_phys_all_sps, _np_cells, _p, 'min', xp=cp) if precond else dt_mean)
-        return dt_mean, dt_phys
+        return uniform_time_step(self, (dt_mean, dt_phys), True)
 
     def _face_geometry_gpu(self):
         """步长计算用的逐面数组 `(owner, neighbor, is_boundary, 单位法向, 物理面积)`，常驻显存（只依赖网格，

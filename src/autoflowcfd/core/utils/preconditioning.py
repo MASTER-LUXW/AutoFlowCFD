@@ -278,7 +278,8 @@ def resolve_low_mach_precond(requested, time_scheme) -> bool:
     不动点不变（det(Gamma)=beta^2>0），收敛解与关闭时是同一个解。
     
     对 SSP-RK2/RK3 与 NEWTON_KRYLOV 这三个"纯稳态伪时间推进"方案启用：这里的推进只是到达 R=0 的路径，
-    Gamma 只改路径、不改不动点。DUAL_TIME 与 IMEX 不启用（请求了也只打一条日志说明）：
+    Gamma 只改路径、不改不动点。DUAL_TIME 不启用（请求了也只打一条日志说明），显式格式的时间精确推进同样
+    不启用（`time_integration/time_accurate.py::configure_time_stepping`）：
     * DUAL_TIME 的内迭代是带 BDF 物理时间项的 Newton 步（`time_integration/implicit/physical_time.py`），
       对角上的 `a0/dt` 已经让系统良态，伪时间项只是步被拒时的回退手段，不需要 Gamma；"整体残差乘 Gamma"
       会把物理时间导数项一起乘掉，解的就不是 BDF 方程了；
@@ -289,10 +290,6 @@ def resolve_low_mach_precond(requested, time_scheme) -> bool:
     4.7e8 降到 ~3e6 后停滞，驻点区压力在 Cp=+15 与 −11 之间周期振荡（封闭风洞里
     被入口/出口/洞壁反射的弱阻尼声学模态）；加上后同样 120 步残差降到 9.5e5 且
     仍在下降，驻点区 Cp≈0.92（物理值≈1）。其余方案不启用的原因：
-    * IMEX 把残差**拆成**对流/扩散两半分别显式/隐式处理
-    （见 step.py 的 convective_residual_only/diffusive_residual_only），
-    Gamma 作用在拆分后的任一半上都不等价于作用在整体残差上，同样不能直接复用这个接入点，
-    因此不启用，而不是套一个未经验证的近似。
     环境变量 `AFCFD_LOW_MACH_PRECOND=0/1` 可强制关闭/开启，优先于
     构造参数——供 A/B 对照实验与现场排查用（"把这个新机制单独关掉
     再跑一遍"必须是一条随时可用的路径，不需要改代码）。

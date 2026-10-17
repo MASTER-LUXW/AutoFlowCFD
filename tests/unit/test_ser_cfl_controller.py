@@ -123,7 +123,7 @@ def test_policy_dispatches_by_scheme():
     assert fixed is None and isinstance(ctrl, SERCFLController)
     ref = SERCFLController()
     assert (ctrl.cfl_start, ctrl.cfl_max, ctrl.cfl_min) == (ref.cfl_start, ref.cfl_max, ref.cfl_min)
-    for scheme in (S.SSP_RK3, S.SSP_RK2, S.FORWARD_EULER, S.IMEX_EULER):
+    for scheme in (S.SSP_RK3, S.SSP_RK2, S.FORWARD_EULER):
         ctrl, _ = build_cfl_policy(scheme)
         assert type(ctrl) is AdaptiveCFLController
 

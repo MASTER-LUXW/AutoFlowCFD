@@ -76,6 +76,9 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
         cfl_start: Optional[float] = None,
         cfl_max: Optional[float] = None,
         cfl_min: Optional[float] = None,
+        adaptive_cfl: bool = True,
+        time_accurate: bool = False,
+        low_mach_precond: bool = True,
         wall_distance_source=None,
         artificial_viscosity_enabled: bool = False,
         artificial_viscosity_alpha: float = 1.0,
@@ -94,6 +97,8 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
             cfl_start, cfl_max, cfl_min: 自适应 CFL 参数（与单机 FRSolver/
                 GPUFRSolver 同名参数同一语义；None 取控制器默认值，规则见
                 `adaptive_cfl/policy.py::build_cfl_policy`）。
+            adaptive_cfl, time_accurate, low_mach_precond: 与单机同名参数同一语义
+                （`core/time_integration/time_accurate.py::configure_time_stepping`）
             mu_molecular: 分子动力粘度
             rho_inf, vel_inf, p_inf: 自由来流条件
             artificial_viscosity_enabled, artificial_viscosity_alpha: 问题单元人工
@@ -110,7 +115,9 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
             mesh, ops, n_ranks, rank, device_id, mu_molecular,
             rho_inf, vel_inf, p_inf, aoa_deg, aos_deg, turb_model)
         n_sps, n_local = self._setup_partition_and_geometry(mesh, ops, n_ranks)
-        self._setup_time_integration(time_scheme, cfl_start, cfl_max, cfl_min)
+        self._setup_time_integration(time_scheme, cfl_start, cfl_max, cfl_min,
+                                     adaptive_cfl=adaptive_cfl, time_accurate=time_accurate,
+                                     low_mach_precond=low_mach_precond)
         self._setup_turbulence(mesh, turb_model, n_sps, mu_molecular, rho_inf, vel_inf,
                                turbulence_intensity, viscosity_ratio)
         self._setup_state_and_boundary(n_local, n_sps)

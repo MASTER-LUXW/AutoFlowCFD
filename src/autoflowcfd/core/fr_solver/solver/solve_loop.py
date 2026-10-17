@@ -27,6 +27,7 @@ from autoflowcfd.core.utils import order_continuation
 
 from .. import step as fr_solver_step
 from autoflowcfd.core.time_integration.base import DEFAULT_STEADY_TOL
+from autoflowcfd.core.time_integration.time_accurate import advance
 
 from .threads import blas_threads_limited
 from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
@@ -245,7 +246,7 @@ class SolveLoopMixin:
         with blas_threads_limited(1):
             for i in range(max_iter):
                 t_start = time.time()
-                res = self.step(dt)
+                res = advance(self, dt)
                 t_end = time.time()
                 final_residual = res
 
