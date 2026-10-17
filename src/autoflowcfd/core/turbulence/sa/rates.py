@@ -13,7 +13,6 @@
 壁面解点（`d == 0`）上三者都为零：那里施加强 Dirichlet `nu_tilde = 0`（`model.py` 模块文档）。
 """
 
-from autoflowcfd.core.turbulence.limits import clip_gradient_magnitude
 from autoflowcfd.core.turbulence.transported import TurbulenceRates
 from autoflowcfd.core.utils.pointwise_threads import map_cell_chunks
 
@@ -36,7 +35,7 @@ def evaluate_sa_rates(model, transport, Q, grad_vel, d_wall, mu) -> TurbulenceRa
     rho = xp.maximum(Q[:, :, 0], 1e-10)
     raw = model.compute_source_terms(Q, grad_vel, d_wall, mu)
     # 逐点函数按单元分块并行（numpy 下；同一份定义、结果逐位相同，`core/utils/pointwise_threads.py`）
-    grad_nt = map_cell_chunks(clip_gradient_magnitude, (transport.gradient(nt),), xp, xp=xp)
+    grad_nt = transport.gradient(nt)
     grad_rho = transport.gradient(Q[:, :, 0])
     gamma = map_cell_chunks(sa_diffusivity, (nt, rho), mu, xp, xp=xp)
     with _errstate(xp):

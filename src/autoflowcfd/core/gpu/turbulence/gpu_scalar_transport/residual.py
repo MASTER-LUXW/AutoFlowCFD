@@ -19,7 +19,6 @@ from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_
 
 
 from autoflowcfd.core.turbulence.transport import resolve_turb_overintegration
-from autoflowcfd.core.turbulence.limits import clip_gradient_magnitude
 from autoflowcfd.core.turbulence.transport.residual import turbulence_diffusivities
 from autoflowcfd.core.turbulence.transport.faces import boundary_diffusion_targets
 from autoflowcfd.core.turbulence.sst.log_omega import log_omega, log_omega_gradient_source
@@ -222,7 +221,7 @@ def compute_turbulence_transport_residual_gpu(
     Args:
         solver: GPUFRSolver 实例，需要 turb_model_gpu 已初始化
             （SST/DDES/IDDES 均可，都是 GPUTurbulenceSST 实例）
-        grad_k, grad_log_omega: 可选，调用方为源项算好、已裁剪的 k、ln(omega)
+        grad_k, grad_log_omega: 可选，调用方为源项算好的 k、ln(omega)
             物理梯度（CuPy），复用避免重复计算物理梯度这个真实热点，与 CPU 版
             同名参数同一个考量。有效扩散系数读模型上源项刷新的 `nu_t` 与 `F1`，
             调用方须先在同一组 `(k, omega)` 上求源项（同 CPU 版）。
@@ -244,13 +243,10 @@ def compute_turbulence_transport_residual_gpu(
     mu = solver.mu_molecular
 
     w_log = log_omega(turb.omega_field, cp)
-    # 梯度模长上限在求梯度处施加一次（调用方传入的梯度已裁剪，同 CPU 版约定）
     if grad_k is None:
-        grad_k = clip_gradient_magnitude(
-            compute_physical_scalar_gradient_gpu(turb.k_field, solver.mesh_data, solver.ops_data), cp)
+        grad_k = compute_physical_scalar_gradient_gpu(turb.k_field, solver.mesh_data, solver.ops_data)
     if grad_log_omega is None:
-        grad_log_omega = clip_gradient_magnitude(
-            compute_physical_scalar_gradient_gpu(w_log, solver.mesh_data, solver.ops_data), cp)
+        grad_log_omega = compute_physical_scalar_gradient_gpu(w_log, solver.mesh_data, solver.ops_data)
 
     gamma_k, gamma_w = turbulence_diffusivities(turb, rho * turb.nu_t, mu)
     d_wall = solver.wall_distance_gpu

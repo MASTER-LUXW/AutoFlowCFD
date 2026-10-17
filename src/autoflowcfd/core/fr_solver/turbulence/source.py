@@ -110,16 +110,13 @@ def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, conv_geom=None
     omega = solver.turb_model.omega_field
     if is_sst_family(solver.turb_model_name):
         from autoflowcfd.core.fr_residual.viscous import compute_scalar_gradient
-        from autoflowcfd.core.turbulence.limits import clip_gradient_magnitude
         from autoflowcfd.core.turbulence.sst.log_omega import log_omega
 
-        # 梯度对 k 与 w = ln(omega) 求（被输运的量），模长上限只作用在这两者上（退化单元上
-        # 的度量噪声放大，见 `turbulence/limits.py::MAX_GRADIENT_MAGNITUDE`）；模型项用物理梯度
-        # grad(omega) = omega grad(w)
-        grad_k = clip_gradient_magnitude(
-            compute_scalar_gradient(solver.turb_model.k_field[:, :, np.newaxis], solver.ops, solver.mesh), np)
-        grad_w = clip_gradient_magnitude(
-            compute_scalar_gradient(log_omega(omega, np)[:, :, np.newaxis], solver.ops, solver.mesh), np)
+        # 梯度对 k 与 w = ln(omega) 求（被输运的量）；模型项用物理梯度 grad(omega) = omega grad(w)。
+        # 2026-10-17 以前两者都按有量纲绝对上限 1e6 截断：近壁 |grad ln omega| ~ 2/y 在 y < 2e-6 m 时被截，
+        # 改变交叉扩散与 ln omega 方程的 |grad w|^2 源项（I-42）
+        grad_k = compute_scalar_gradient(solver.turb_model.k_field[:, :, np.newaxis], solver.ops, solver.mesh)
+        grad_w = compute_scalar_gradient(log_omega(omega, np)[:, :, np.newaxis], solver.ops, solver.mesh)
         grad_omega = omega[:, :, np.newaxis] * grad_w
 
     # DES 族：破坏项长度尺度在同一次源项求值里用本次的 F1 与 nu_t 算出（`turbulence/sst/source.py`）
@@ -148,7 +145,7 @@ def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, conv_geom=None
     if is_sst_family(solver.turb_model_name):
         from autoflowcfd.core.turbulence.transport import compute_turbulence_transport_residual
         # 扩散系数读 compute_source_terms 刚在同一组 (k, omega) 上刷新的 nu_t 与 F1；
-        # grad_k / grad_w 复用上面为源项算好、裁剪过的同一份（79 万单元 P2 冗余梯度
+        # grad_k / grad_w 复用上面为源项算好的同一份（79 万单元 P2 冗余梯度
         # 约 1 GB，2026-08-28 OOM 追查）。输运失败直接抛出，不降级为"仅源项更新"。
         transport_k, transport_w = compute_turbulence_transport_residual(
             solver, grad_k=grad_k, grad_log_omega=grad_w,

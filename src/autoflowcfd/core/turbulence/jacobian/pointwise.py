@@ -2,7 +2,7 @@
 
 冻结平均流下，湍流残差里的非线性全部落在两个逐点函数上：源项 `S` 与有效扩散系数
 `Gamma`（各 `nv` 个分量，`nv` 为模型的输运标量个数）。两者在每个解点上只依赖该点的
-`(phi, grad phi)`（梯度按模型自己的裁剪规则处理之后使用，与残差同一顺序）。这里对**残差用的
+`(phi, grad phi)`。这里对**残差用的
 那两个函数**逐输入做前向差分：逐点函数对全场同时平移一个输入分量，每个解点得到的就是它自己
 的偏导（`4 nv` 个输入、共 `4 nv + 1` 次整场求值），不写解析式，模型函数日后修改导数自动跟随。
 
@@ -21,7 +21,6 @@
 
 import numpy as np
 
-from autoflowcfd.core.turbulence.limits import clip_gradient_magnitude
 from autoflowcfd.core.turbulence.sst.log_omega import log_omega_gradient_source, omega_from_log
 from autoflowcfd.core.turbulence.transport.residual import turbulence_diffusivities
 
@@ -57,8 +56,8 @@ class TurbulencePointwise:
         omega = omega_from_log(w, turb.omega_max, xp)
         turb.k_field, turb.omega_field = xp.ascontiguousarray(xp.asarray(u[..., 0])), omega
         try:
-            gk = clip_gradient_magnitude(xp.ascontiguousarray(xp.asarray(g[..., 0, :])), xp)
-            gw = clip_gradient_magnitude(xp.ascontiguousarray(xp.asarray(g[..., 1, :])), xp)
+            gk = xp.ascontiguousarray(xp.asarray(g[..., 0, :]))
+            gw = xp.ascontiguousarray(xp.asarray(g[..., 1, :]))
             Sk, Sw = self.source(self.Q, self.grad_vel, self.d_wall, self.mu, gk, omega[..., None] * gw, des=self.des)
             Gk, Gw = turbulence_diffusivities(turb, self.Q[:, :, 0] * turb.nu_t, self.mu)
         finally:

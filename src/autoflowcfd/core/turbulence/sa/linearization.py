@@ -10,7 +10,6 @@
 
 import numpy as np
 
-from autoflowcfd.core.turbulence.limits import clip_gradient_magnitude
 
 from .pointwise import sa_diffusivity, sa_gradient_source, sa_source_terms, vorticity_magnitude
 
@@ -35,7 +34,7 @@ class SAPointwise:
     def __call__(self, u, g):
         xp = self.xp
         nt = xp.ascontiguousarray(xp.asarray(u[..., 0]))
-        gnt = clip_gradient_magnitude(xp.ascontiguousarray(xp.asarray(g[..., 0, :])), xp)
+        gnt = xp.ascontiguousarray(xp.asarray(g[..., 0, :]))
         source, _ = sa_source_terms(nt, self.nu, self.d_wall, self.omega_mag, self.production_factor, xp)
         S = self.rho * source + sa_gradient_source(nt, self.rho, self.mu, gnt, self.grad_rho, xp)
         Gamma = sa_diffusivity(nt, self.rho, self.mu, xp)

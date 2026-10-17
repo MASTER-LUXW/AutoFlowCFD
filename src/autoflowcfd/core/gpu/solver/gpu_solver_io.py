@@ -125,16 +125,15 @@ class _GPUSolverIOMixin:
         cp = get_cupy()
         rho = self.Q_gpu[:, :, 0]
         from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_gradient_gpu
-        from autoflowcfd.core.turbulence.limits import clip_gradient_magnitude
         from autoflowcfd.core.turbulence.sst.log_omega import log_omega
 
-        # 梯度对 k 与 w = ln(omega) 求（被输运的量），模长上限只作用在这两者上；模型项
-        # 用物理梯度 grad(omega) = omega grad(w)（与 CPU 版同一处）
+        # 梯度对 k 与 w = ln(omega) 求（被输运的量）；模型项用物理梯度 grad(omega) = omega grad(w)
+        # （与 CPU 版同一处）
         omega = self.turb_model_gpu.omega_field
-        grad_k = clip_gradient_magnitude(compute_physical_scalar_gradient_gpu(
-            self.turb_model_gpu.k_field, self.mesh_data, self.ops_data), cp)
-        grad_w = clip_gradient_magnitude(compute_physical_scalar_gradient_gpu(
-            log_omega(omega, cp), self.mesh_data, self.ops_data), cp)
+        grad_k = compute_physical_scalar_gradient_gpu(
+            self.turb_model_gpu.k_field, self.mesh_data, self.ops_data)
+        grad_w = compute_physical_scalar_gradient_gpu(
+            log_omega(omega, cp), self.mesh_data, self.ops_data)
         grad_omega = omega[:, :, None] * grad_w
 
         # grad_U 是速度梯度 (n_cells, n_sps, 3, 3)（2026-09-02 修过：此前传 5 变量梯度，真机上必崩）；

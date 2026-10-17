@@ -13,7 +13,6 @@ from autoflowcfd.core.fr_operators.gradients import compute_physical_scalar_grad
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 
 from .faces import precompute_scalar_convection_geometry
-from ..limits import clip_gradient_magnitude
 from ..sst.log_omega import log_omega, log_omega_gradient_source
 from .convection import compute_scalar_convection_residual
 from .diffusion import compute_scalar_diffusion_residual
@@ -69,8 +68,7 @@ def compute_turbulence_transport_residual(
         solver: FRSolver 实例（需要已初始化 SST/DDES 湍流模型）
         grad_k, grad_log_omega: 可选，调用方（`fr_solver/turbulence/source.py::
             compute_turbulence_source`）为源项算过的同一份 k、ln(omega) 物理梯度，
-            传进来复用（`compute_physical_scalar_gradient` 是 profile 过的热点）；
-            须已按 `clip_gradient_magnitude` 裁剪。None 时在这里现算并裁剪。
+            传进来复用（`compute_physical_scalar_gradient` 是 profile 过的热点）。None 时在这里现算。
         flat_face_override: 显式传入时优先使用，透传给内部四次
             `compute_scalar_convection_residual`/`compute_scalar_
             diffusion_residual` 调用（2026-09-02 分布式湍流移植新增，
@@ -99,11 +97,10 @@ def compute_turbulence_transport_residual(
     mu = solver.mu_molecular
 
     w_log = log_omega(turb.omega_field, np)
-    # 梯度模长上限在求梯度处施加一次（调用方传入的梯度已裁剪，见参数文档）
     if grad_k is None:
-        grad_k = clip_gradient_magnitude(compute_physical_scalar_gradient(turb.k_field, solver.mesh, solver.ops), np)
+        grad_k = compute_physical_scalar_gradient(turb.k_field, solver.mesh, solver.ops)
     if grad_log_omega is None:
-        grad_log_omega = clip_gradient_magnitude(compute_physical_scalar_gradient(w_log, solver.mesh, solver.ops), np)
+        grad_log_omega = compute_physical_scalar_gradient(w_log, solver.mesh, solver.ops)
 
     gamma_k, gamma_w = turbulence_diffusivities(turb, rho * turb.nu_t, mu)
 
