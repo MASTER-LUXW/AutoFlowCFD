@@ -264,17 +264,15 @@ def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray,
         s_mass = sqrt_beta2
         s_pres = sqrt_beta2
 
-    aL_m = s_mass * aL
-    aR_m = s_mass * aR
     a_half_m = s_mass * a_half
     a_half_pr = s_pres * a_half
-
-    # 质量分裂 M4± 用的马赫数
-    M_L = unL / max(aL_m, 1e-10)
-    M_R = unR / max(aR_m, 1e-10)
-    # 压力分裂 P5± 用的马赫数
-    M_L_pr = unL / max(s_pres * aL, 1e-10)
-    M_R_pr = unR / max(s_pres * aR, 1e-10)
+    # 两侧马赫数都用**界面公共声速**归一（Liou 2006 式 (13)；SU2 `mL = ProjVelL/aF`）。2026-10-17 以前
+    # 各用本侧声速 aL/aR：接触间断两侧声速不同（等压、密度跳变），M4+(uL/aL)+M4-(uR/aR) 不再等于 u/a，
+    # 运动接触间断上的质量通量不等于迎风值。
+    M_L = unL / max(a_half_m, 1e-10)
+    M_R = unR / max(a_half_m, 1e-10)
+    M_L_pr = unL / max(a_half_pr, 1e-10)
+    M_R_pr = unR / max(a_half_pr, 1e-10)
 
 
     # === 3. AUSM+ 质量通量分裂 (van Leer 多项式分裂函数) ===
@@ -299,25 +297,19 @@ def compute_ausm_up_flux(qL: np.ndarray, qR: np.ndarray, normal: np.ndarray,
             return -0.25 * (M - 1)**2 - beta_mass * (M**2 - 1)**2
 
     # === 4. 压力扩散项 Mp (Liou 2006, AUSM+up 式17) ===
-    # 取代此前版本的"熵修正"：旧实现在 mass_flux 上叠加 0.5*(rhoL+rhoR)*a_half
-    # *|M_L-M_R|*0.1，而 |M_L-M_R| 在 (L,R,n)->(R,L,-n) 变换下不翻号（是偶量），
-    # 直接破坏了 mass_flux 必须满足的反对称性 F(A,B,n)=-F(B,A,-n)（已用受控
-    # 数值算例验证：|M|<0.1 时两次调用之和最大相对不平衡达 1.08%，且触发窗口
-    # 恰好覆盖本项目 30 m/s / M≈0.087 的目标工况，即全域每个内部面都不守恒）。
-    # Mp 项是 Liou 原始 AUSM+up 方案自带的低马赫数稳定化机制，(pR-pL) 在同一
-    # 变换下翻号、其余因子（Mbar2/rho_half/a_half/fa）不变，故 Mp 本身翻号，
-    # 叠加到已验证满足反对称性的 M_half 上不会破坏该性质。
-    # Mp 的声速项与 mass_flux 前面的声阻抗项都用上面按 precond_mode 定好
-    # 的 aL_m/aR_m/a_half_m（PRECOND_PHYSICAL 档等于物理声速 aL/aR/a_half，
-    # 另两档等于预处理声速）——这是 Weiss-Smith 预处理在 mass_flux 上生效
-    # 的地方。相容性不因归一声速的选择而破坏：qL=qR 时 (pR-pL)=0 使 Mp=0，
-    # 而 M_plus(M)+M_minus(M) = M 这个恒等式与 M 用哪个声速归一无关，
-    # mass_flux = rho*aL_m*(M_half+0) = rho*aL_m*(un/aL_m) = rho*un。
+    # (pR-pL) 在 (L,R,n)->(R,L,-n) 下翻号、其余因子（Mbar2/rho_half/a_half/fa）不变，Mp 随之翻号，
+    # 质量通量的反对称性 F(A,B,n) = -F(B,A,-n) 保持。Mp 与质量通量的声速都用按 precond_mode 定好的
+    # a_half_m（PRECOND_PHYSICAL 档为物理声速，另两档为 Weiss-Smith 预处理声速）。相容性：qL=qR 时
+    # Mp=0，M_plus(M)+M_minus(M) = M，mass_flux = a_half_m * (un/a_half_m) * rho = rho*un。
     Kp = 0.25
     sigma_p = 1.0
     M_half = M_plus(M_L) + M_minus(M_R)
     Mp = -(Kp / fa) * max(1.0 - sigma_p * Mbar2, 0.0) * (pR - pL) / (rho_half * a_half_m**2)
-    mass_flux = 0.5 * (rhoL * aL_m + rhoR * aR_m) * (M_half + Mp)
+    # 质量通量取**迎风密度**（Liou 2006 式 (12)；SU2 `mdot = aF*(max(mF,0)*rhoL + min(mF,0)*rhoR)`）。
+    # 2026-10-17 以前是 0.5*(rhoL*aL + rhoR*aR)*M：密度按中心平均进入质量通量，接触间断与熵波
+    # （等压的密度/温度扰动）上没有迎风耗散。
+    M_tot = M_half + Mp
+    mass_flux = a_half_m * (M_tot * rhoL if M_tot >= 0.0 else M_tot * rhoR)
 
     # === 5. AUSM+up 压力通量分裂 ===
     # P5±（Liou 2006, AUSM+up 式 (24)）：

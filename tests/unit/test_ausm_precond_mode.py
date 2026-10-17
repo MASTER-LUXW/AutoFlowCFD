@@ -210,7 +210,8 @@ def _liou_reference_flux(qL, qR, n, mach_ref, mode):
     """Liou (2006) AUSM+up 的独立转写（逐项对照 SU2 `CUpwAUSMPLUSUP_Flow::
     ComputeMassAndPressureFluxes`），加上本项目的预处理声速作用域 `mode`。
 
-    刻意与生产实现分开写：两者只有同时出错才会一起通过。P5± 的 α 项
+    刻意与生产实现分开写：两者只有同时出错才会一起通过——2026-10-17 以前这份参考与生产实现
+    一样，用各自声速归一两侧马赫数、质量通量取中心化的 0.5*(rhoL*aL + rhoR*aR)，两者一起偏离 SU2。P5± 的 α 项
     **不**乘 1/4（Liou 式 (24) 展开、SU2 `pLP = 0.25*(mL+1)^2*(2-mL) +
     alpha*mL*(mL^2-1)^2`）—— 生产实现 2026-09-25 之前在这里多乘了 1/4。
     """
@@ -229,8 +230,9 @@ def _liou_reference_flux(qL, qR, n, mach_ref, mode):
     sm, sp = {PRECOND_PHYSICAL: (1.0, 1.0),
               PRECOND_PRESSURE_PHYSICAL: (np.sqrt(b2), 1.0),
               PRECOND_LEGACY: (np.sqrt(b2), np.sqrt(b2))}[mode]
-    ML, MR = unL / (sm * aL), unR / (sm * aR)
-    MLp, MRp = unL / (sp * aL), unR / (sp * aR)
+    # 两侧马赫数都用界面公共声速归一（SU2 `mL = ProjVelL/aF`）
+    ML, MR = unL / (sm * ah), unR / (sm * ah)
+    MLp, MRp = unL / (sp * ah), unR / (sp * ah)
 
     def m4(M, s):
         if abs(M) >= 1:
@@ -243,7 +245,8 @@ def _liou_reference_flux(qL, qR, n, mach_ref, mode):
         return 0.25 * (M + s) ** 2 * (2 - s * M) + s * alpha * M * (M * M - 1) ** 2
 
     Mp = -(0.25 / fa) * max(1 - Mbar2, 0.0) * (pR - pL) / (rh * (sm * ah) ** 2)
-    mdot = 0.5 * (rL * sm * aL + rR * sm * aR) * (m4(ML, 1) + m4(MR, -1) + Mp)
+    mF = m4(ML, 1) + m4(MR, -1) + Mp
+    mdot = sm * ah * (max(mF, 0.0) * rL + min(mF, 0.0) * rR)    # SU2 `mdot = aF*(max(mF,0)*rhoL+min(mF,0)*rhoR)`
     PL, PR = p5(MLp, 1), p5(MRp, -1)
     ph = PL * pL + PR * pR - 0.75 * PL * PR * (rL + rR) * fa * (sp * ah) * (unR - unL)
     up = qL if mdot >= 0 else qR
@@ -270,6 +273,34 @@ class TestAusmUpMatchesLiouReference:
             R = _liou_reference_flux(qL, qR, n, MACH_REF, mode)
             worst = max(worst, float(np.max(np.abs(F - R) / (np.abs(R) + 1e-9 * P_INF))))
         assert worst < 1e-10, f"mode={ausm_precond_mode_label(mode)} 与 Liou/SU2 参考最大相对差 {worst:.3e}"
+
+
+class TestAusmUpMovingContact:
+    """运动接触间断（压力、速度相同，密度跳变）：标准 AUSM+up 的质量通量恰为迎风密度 x 速度，
+    动量 = 质量通量 x 速度 + p n，能量 = 质量通量 x 迎风总焓（Liou 2006 的接触间断保持性质）。
+    2026-10-17 以前质量通量取 0.5*(rhoL*aL + rhoR*aR)*M、马赫数用各自声速归一：密度不迎风，
+    这条性质不成立。"""
+
+    @pytest.mark.parametrize('mode', ALL_MODES)
+    @pytest.mark.parametrize('u', [12.0, -12.0])
+    def test_mass_flux_is_upwind(self, mode, u):
+        n = np.array([1.0, 0.0, 0.0])
+        qL = np.array([1.40, u, 3.0, -2.0, P_INF])
+        qR = np.array([0.95, u, 3.0, -2.0, P_INF])
+        F = _flux(qL, qR, n, MACH_REF, mode)
+        up = qL if u > 0 else qR
+        H = GAMMA / (GAMMA - 1.0) * up[4] / up[0] + 0.5 * float(up[1:4] @ up[1:4])
+        mdot = up[0] * u
+        np.testing.assert_allclose(F[0], mdot, rtol=1e-12)
+        np.testing.assert_allclose(F[1:4], mdot * up[1:4] + P_INF * n, rtol=1e-12)
+        np.testing.assert_allclose(F[4], mdot * H, rtol=1e-12)
+
+    @pytest.mark.parametrize('mode', ALL_MODES)
+    def test_stationary_contact_has_no_mass_flux(self, mode):
+        n = np.array([0.0, 1.0, 0.0])
+        F = _flux(np.array([1.40, 0.0, 0.0, 0.0, P_INF]), np.array([0.95, 0.0, 0.0, 0.0, P_INF]), n, MACH_REF, mode)
+        assert F[0] == 0.0
+        np.testing.assert_allclose(F[1:4], P_INF * n, rtol=1e-14)
 
 
 class TestAusmUpLowMachWallScaling:

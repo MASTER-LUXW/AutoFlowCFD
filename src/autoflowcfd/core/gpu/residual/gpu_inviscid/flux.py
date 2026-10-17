@@ -120,15 +120,14 @@ def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref, precond_mode):
     else:
         raise ValueError(f'未知 precond_mode: {precond_mode!r}')
 
-    aL_m = s_mass * aL
-    aR_m = s_mass * aR
     a_half_m = s_mass * a_half
     a_half_pr = s_pres * a_half
 
-    M_L = unL / cp.maximum(aL_m, 1e-10)
-    M_R = unR / cp.maximum(aR_m, 1e-10)
-    M_L_pr = unL / cp.maximum(s_pres * aL, 1e-10)
-    M_R_pr = unR / cp.maximum(s_pres * aR, 1e-10)
+    # 两侧马赫数用界面公共声速归一、质量通量取迎风密度（标准 AUSM+up，与 CPU `kernels.compute_ausm_up_flux` 同式）
+    M_L = unL / cp.maximum(a_half_m, 1e-10)
+    M_R = unR / cp.maximum(a_half_m, 1e-10)
+    M_L_pr = unL / cp.maximum(a_half_pr, 1e-10)
+    M_R_pr = unR / cp.maximum(a_half_pr, 1e-10)
 
     # M+ / M-
     abs_ML = cp.abs(M_L)
@@ -150,7 +149,8 @@ def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref, precond_mode):
     sigma_p = 1.0
     one_minus_sigma = cp.maximum(1.0 - sigma_p * Mbar2, 0.0)
     Mp = -(Kp / fa) * one_minus_sigma * (pR - pL) / (rho_half * a_half_m**2)
-    mass_flux = 0.5 * (rhoL * aL_m + rhoR * aR_m) * (M_half + Mp)
+    M_tot = M_half + Mp
+    mass_flux = a_half_m * cp.where(M_tot >= 0.0, M_tot * rhoL, M_tot * rhoR)
 
     # P+ / P-（用压力分裂专属的马赫数 M_*_pr，见上方 s_pres 分派）
     abs_ML_pr = cp.abs(M_L_pr)

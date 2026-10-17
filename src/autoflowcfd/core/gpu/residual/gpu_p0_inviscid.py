@@ -84,15 +84,14 @@ void ausm_up_flux(
         s_pres = 1.0;
     }
 
-    double aL_m = s_mass * aL;
-    double aR_m = s_mass * aR;
     double a_half_m = s_mass * a_half;
     double a_half_pr = s_pres * a_half;
 
-    double M_L = unL / fmax(aL_m, 1e-10);
-    double M_R = unR / fmax(aR_m, 1e-10);
-    double M_L_pr = unL / fmax(s_pres * aL, 1e-10);
-    double M_R_pr = unR / fmax(s_pres * aR, 1e-10);
+    // 两侧马赫数用界面公共声速归一、质量通量取迎风密度（标准 AUSM+up，与 CPU 同式）
+    double M_L = unL / fmax(a_half_m, 1e-10);
+    double M_R = unR / fmax(a_half_m, 1e-10);
+    double M_L_pr = unL / fmax(a_half_pr, 1e-10);
+    double M_R_pr = unR / fmax(a_half_pr, 1e-10);
 
     // 质量通量分裂 M+ / M-
     double Mp_L, Mm_R;
@@ -114,7 +113,8 @@ void ausm_up_flux(
     double one_minus_sigma = 1.0 - sigma_p * Mbar2;
     if (one_minus_sigma < 0.0) one_minus_sigma = 0.0;
     double Mp = -(Kp / fa) * one_minus_sigma * (pR_s - pL_s) / (rho_half * a_half_m * a_half_m);
-    double mass_flux = 0.5 * (rhoL_s * aL_m + rhoR_s * aR_m) * (M_half + Mp);
+    double M_tot = M_half + Mp;
+    double mass_flux = a_half_m * (M_tot >= 0.0 ? M_tot * rhoL_s : M_tot * rhoR_s);
 
     // 压力分裂 P+ / P-
     double Pp_L, Pm_R;
