@@ -233,8 +233,9 @@ class TestFullyDistributedSstTurbulence:
         assert np.all(np.isfinite(solver.turb_model.omega_field))
         assert np.all(solver.turb_model.k_field > 0)
         assert np.all(solver.turb_model.omega_field > 0)
-        assert solver.turb_model.des_length_scale is not None
-        assert np.all(np.isfinite(solver.turb_model.des_length_scale))
+        # DES 长度尺度在源项求值里按当前状态算出（无跨步状态），它要用的 compact 网格尺度须已到位
+        assert solver.iddes_h_max_compact is not None
+        assert np.all(np.isfinite(solver.turb_model.nu_t))
 
     def test_step_with_iddes_runs_and_stays_finite(self, mesh_and_ops):
         """同上一个 SST 收尾集成测试，换成 IDDES——补齐"完全分布式加载"
@@ -283,10 +284,7 @@ class TestFullyDistributedSstTurbulence:
         solver.state.U[:n_cells] = U0
         solver.state.Q[:n_cells] = conserved_to_primitive(U0[..., :5])
 
-        # 两步（与 CPU 分布式 DDES/IDDES 的既有回归测试一致），因为
-        # des_length_scale 第二步才真正走 halo-exchange 读回路径（第一
-        # 步是 None，跳过读入分支——见 distributed_turbulence.py 里
-        # build_distributed_turbulence_view 的 des_length_scale 一段）。
+        # 两步（与 CPU 分布式 DDES/IDDES 的既有回归测试一致）
         solver.step(1e-6)
         solver.step(1e-6)
 
@@ -295,8 +293,9 @@ class TestFullyDistributedSstTurbulence:
         assert np.all(np.isfinite(solver.turb_model.omega_field))
         assert np.all(solver.turb_model.k_field > 0)
         assert np.all(solver.turb_model.omega_field > 0)
-        assert solver.turb_model.des_length_scale is not None
-        assert np.all(np.isfinite(solver.turb_model.des_length_scale))
+        # DES 长度尺度在源项求值里按当前状态算出（无跨步状态），它要用的 compact 网格尺度须已到位
+        assert solver.iddes_h_max_compact is not None
+        assert np.all(np.isfinite(solver.turb_model.nu_t))
 
     def test_step_with_wmles_runs_and_stays_finite(self, mesh_and_ops):
         """"完全分布式加载"模式补齐 WMLES（2026-09-02 续接——此前

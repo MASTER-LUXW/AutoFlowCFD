@@ -29,8 +29,12 @@ C_L = 5.0
 class IDDESModel(DDESModel):
     """SST-IDDES（常数见模块文档）。"""
 
+    REQUIRES_WALL_NORMAL_SCALE = True
+
     def length_scale(self, xp, k, omega, nu_t, nu, d_w, grad_u, F1, h_max, order: int, beta_star: float,
                      h_wn=None):
+        if h_wn is None:
+            raise ValueError("IDDES 需要逐单元壁法向尺度 h_wn")
         n_sps = k.shape[1]
         hmax = _cell_to_points(xp, resolution_scale(h_max, order), n_sps)
         hwn = _cell_to_points(xp, resolution_scale(h_wn, order), n_sps)
@@ -51,19 +55,6 @@ class IDDESModel(DDESModel):
 
         l_rans = rans_length(xp, k, omega, beta_star)
         return f_d_tilde * (1.0 + f_e) * l_rans + (1.0 - f_d_tilde) * des_constant(F1) * delta
-
-    def apply(self, model, *, d_w, nu, grad_u, h_max, h_wn, xp):
-        from autoflowcfd.fr.native_padding import order_from_n_sps
-
-        order = order_from_n_sps(model.k_field.shape[1])
-        F1 = getattr(model, "_last_F1", None)
-        if F1 is None:
-            raise RuntimeError("DES 长度尺度需要本步的 F1：须在 SST 源项求值之后调用")
-        if h_wn is None:
-            raise ValueError("IDDES 需要逐单元壁法向尺度 h_wn")
-        model.des_length_scale = self.length_scale(
-            xp, model.k_field, model.omega_field, model.nu_t, nu, d_w, grad_u, F1, h_max, order, model.beta_star,
-            h_wn=h_wn)
 
 
 __all__ = ["IDDESModel", "C_W", "C_DT1", "C_DT2", "C_T", "C_L", "KAPPA", "R_SATURATION"]

@@ -140,9 +140,7 @@ def distributed_mesh_load_v2(
             from autoflowcfd.core.utils.wall_distance import WallDistanceSource
             wall_distance_source = WallDistanceSource.from_volume_data(volume_data)
             if turb_model_name in ("DDES", "IDDES"):
-                # DDES（2026-09-02 补齐）：apply_to_sst_model 现在优先用
-                # h_max（max_edge 网格尺度）而不是 cube_root(V)，见
-                # build_fully_distributed_rank_package 对应分支文档。
+                # 逐单元网格尺度（DDES 用 h_max，IDDES 还用 h_wn），见 build_fully_distributed_rank_package
                 from autoflowcfd.core.turbulence.des import compute_h_max_and_h_wn
                 h_max_global, h_wn_global = compute_h_max_and_h_wn(mesh)
 
@@ -313,8 +311,6 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
             old_nu_t = getattr(solver.turb_model, 'nu_t', None)
             if old_nu_t is not None and old_nu_t.shape[1] == old_local_U.shape[1]:
                 solver.turb_model.nu_t = _lift(old_nu_t[:n_local])
-            if hasattr(solver.turb_model, 'des_length_scale'):
-                solver.turb_model.des_length_scale = None
         if getattr(solver, 'sgs_model', None) is not None and hasattr(solver.sgs_model, 'nu_t'):
             solver.sgs_model.nu_t = None
     else:
@@ -333,8 +329,6 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
             solver.turb_model.set_transported_fields(solver.turb_model.freestream_fields((n_local, new_n_sps), np))
             if hasattr(solver.turb_model, 'nu_t'):
                 solver.turb_model.nu_t = np.zeros((n_local, new_n_sps))
-            if hasattr(solver.turb_model, 'des_length_scale'):
-                solver.turb_model.des_length_scale = None
         if getattr(solver, 'sgs_model', None) is not None and hasattr(solver.sgs_model, 'nu_t'):
             solver.sgs_model.nu_t = None
 

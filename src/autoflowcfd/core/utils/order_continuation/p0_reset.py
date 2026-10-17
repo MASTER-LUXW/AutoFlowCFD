@@ -58,11 +58,6 @@ def _reset_state_to_p0(solver, expected_p0_n_sps: int = 1) -> None:
             solver.turb_model.nu_t = np.zeros((solver.state.n_cells, expected_p0_n_sps))
         print("[INFO] Turbulence fields reset to P0 dimensions")
 
-    if getattr(solver, "turb_model", None) is not None and hasattr(solver.turb_model, "des_length_scale"):
-        # 同 interpolate_to_new_order 里的处理：清空而不是插值，理由见
-        # 该函数文档。
-        solver.turb_model.des_length_scale = None
-
     if getattr(solver, "sgs_model", None) is not None and hasattr(solver.sgs_model, "nu_t"):
         solver.sgs_model.nu_t = None
 

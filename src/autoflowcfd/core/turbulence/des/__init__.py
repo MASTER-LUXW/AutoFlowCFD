@@ -5,10 +5,9 @@ AutoFlowCFD V2.0 - DDES/IDDES 混合湍流模型 (T-04)
 通过屏蔽函数在边界层内保持 RANS，在分离区切换为 LES。
 
 核心功能:
-1. DDES 屏蔽函数 F_d 计算
-2. 有效长度尺度 l_eff 计算（RANS/LES 切换）
-3. IDDES 改进型延迟分离涡模拟
-4. 与 SST k-ω 模型的无缝集成
+1. DDES 屏蔽函数 f_d 与混合长度尺度（Gritskevich et al. 2012）
+2. IDDES 改进型延迟分离涡模拟（Shur et al. 2008）
+3. 与 SST k-omega 模型的集成：长度尺度在 SST 源项求值里按当前状态算出（`DESLengthScale`）
 
 
 ## 文件分工(2026-09-24 拆包, 原 657 行)
@@ -24,7 +23,7 @@ from .grid_scale import (  # noqa: F401
     compute_h_max_and_h_wn,
 )
 from .ddes import (  # noqa: F401
-    DDESModel,
+    DDESModel, DESLengthScale, des_length_for,
 )
 from .iddes import (  # noqa: F401
     IDDESModel,
@@ -32,6 +31,8 @@ from .iddes import (  # noqa: F401
 
 __all__ = [
     "DDESModel",
+    "DESLengthScale",
+    "des_length_for",
     "IDDESModel",
     "compute_h_max_and_h_wn",
 ]

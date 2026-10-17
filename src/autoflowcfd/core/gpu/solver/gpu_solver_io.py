@@ -38,10 +38,9 @@ class _GPUSolverIOMixin:
         1. 计算速度梯度（GPU）
         2. 计算 k/ω 的真实物理梯度（GPU）
         3. 使用预计算的壁面距离
-        4. DDES/IDDES 长度尺度（可选，写入 turb_model_gpu.des_length_scale）
-        5. 计算 SST 源项
-        6. k/ω 完整输运（对流+扩散，#7 新增，见 gpu_scalar_transport.py）
-        7. 更新 k/ω 场（含正性限制器）
+        4. 计算 SST 源项（DDES/IDDES 的破坏项长度尺度在同一次求值里算出）
+        5. k/ω 完整输运（对流+扩散，#7 新增，见 gpu_scalar_transport.py）
+        6. 更新 k/ω 场（含正性限制器）
 
         纯 WMLES/LES（无 SST 输运，`turb_model_gpu is None`）：mu_t 只
         来自 SGS 模型，读取上一步 `_apply_turbulence_corrections_gpu()`
@@ -64,7 +63,7 @@ class _GPUSolverIOMixin:
         self._update_production_ramp_gpu()
 
         grad_vel, d_wall = self._prepare_turbulence_inputs_gpu()
-        rates = self._evaluate_turbulence_rates_gpu(grad_vel, d_wall, apply_des=True)
+        rates = self._evaluate_turbulence_rates_gpu(grad_vel, d_wall)
 
         self.turb_model_gpu.update_fields(turb_dt, rates.source, rates.transport)
 
@@ -106,11 +105,12 @@ class _GPUSolverIOMixin:
 
         return grad_vel, d_wall
 
-    def _evaluate_turbulence_rates_gpu(self, grad_vel, d_wall, *, apply_des: bool):
+    def _evaluate_turbulence_rates_gpu(self, grad_vel, d_wall):
         """在 `turb_model_gpu` 当前的 `k_field/omega_field` 上求 k 与 `w = ln(omega)` 的
         源项部分与输运部分 `(dk_dt, dw_dt, transport_k, transport_w)`（CPU 版
         `source.py::evaluate_turbulence_rates` 的 GPU 对应，同一组副作用约定：
-        刷新模型上的 `nu_t` 等缓存；`apply_des=False` 时不改写 DES 长度尺度）。"""
+        刷新模型上的 `nu_t` 等缓存）。"""
+        from autoflowcfd.core.turbulence.des import des_length_for
         from autoflowcfd.core.turbulence.registry import is_sa_family
 
         if is_sa_family(self.turb_model_name):
@@ -137,49 +137,11 @@ class _GPUSolverIOMixin:
             log_omega(omega, cp), self.mesh_data, self.ops_data), cp)
         grad_omega = omega[:, :, None] * grad_w
 
-        # 真实 bug 修复（2026-09-02，排查多GPU分布式SST时对照发现，与
-        # 分布式本身无关，单机 GPU 路径同样中招，此前从未被端到端验证
-        # 过）：`compute_source_terms_gpu` 的 `grad_U` 参数按文档/CPU版
-        # `SSTModelFR.compute_source_terms` 同名参数实际期望的是**速度
-        # 梯度**（(n_cells,n_sps,3,3)，内部 `compute_strain_rate_
-        # magnitude_gpu` 直接对末两维做转置相加），不是 5 变量梯度
-        # ((n_cells,n_sps,5,3))——此前这里传的是后者，
-        # `compute_strain_rate_magnitude_gpu` 内部
-        # `cp.transpose(grad_u,(0,1,3,2))` 会产出 (...,3,5) 与
-        # (...,5,3) 无法广播相加，真实 CUDA 环境下必然 ValueError 崩溃。
-        # 应该传上面已经算好的 `grad_vel`（2026-09-03 起直接对 Q_gpu 速度
-        # 分量求梯度算出，不再是从 5 变量梯度切片，见上面 grad_vel 赋值
-        # 处文档）。
-        Sk, S_omega = self.turb_model_gpu.compute_source_terms_gpu(
-            self.Q_gpu, grad_vel, d_wall, self.mu_molecular,
-            grad_k, grad_omega,
-        )
-
-        # 真实 bug 修复（2026-09-02，排查"GPU侧DDES/IDDES是否有同类未
-        # 发现的bug"时对照 CPU 版发现，与上面 grad_U/grad_vel 是两个
-        # 独立的问题）：此前这里的 DDES/IDDES 长度尺度更新排在
-        # `compute_source_terms_gpu` **之前**，注释还声称"与 CPU 版
-        # 调用顺序完全一致"——但 CPU 版
-        # `fr_solver_turbulence.py::compute_turbulence_source` 的真实
-        # 顺序是反的：`compute_source_terms`（用*上一步*遗留的
-        # `des_length_scale`，写死为"慢一拍"耦合，见 CPU 版 turbulence.py
-        # "DDES 的有效长度尺度"一节注释的完整推导——`apply_to_sst_model`
-        # 依赖当前 nu_t，而 nu_t 只有 `compute_source_terms` 算完才是
-        # 当前值，两者互相依赖对方的输出，只能先后错开一步，且顺序不能
-        # 颠倒）在前，`apply_to_sst_model[_iddes]`（为*下一步*写入新的
-        # `des_length_scale`）在后。此前 GPU 版顺序颠倒，等价于让
-        # DDES/IDDES 长度尺度提前一步生效（"快一拍"耦合，且用的还是
-        # `apply_to_sst_model_gpu` 内部读取的 `nu_t`——此时 `nu_t` 还是
-        # 上一次调用（或初始值）遗留的，语义上更混乱），与 CPU 版数值
-        # 结果不一致——用真实非均匀状态实测：DDES 在这份测试数据下巧合
-        # 数值一致（f_d 恰好被推到掩盖差异的区间），IDDES 上实测出
-        # 2.2% 相对差异，暴露了这个顺序错误。现改为与 CPU 版逐字一致
-        # 的顺序：`compute_source_terms_gpu` 在前，DDES/IDDES 长度尺度
-        # 更新在后。
-        if apply_des and self.ddes_model_gpu is not None:
-            self.ddes_model_gpu.apply(
-                self.turb_model_gpu, d_w=d_wall, nu=self.mu_molecular / cp.maximum(rho, 1e-10), grad_u=grad_vel,
-                h_max=self._iddes_h_max_gpu, h_wn=self._iddes_h_wn_gpu, xp=cp)
+        # grad_U 是速度梯度 (n_cells, n_sps, 3, 3)（2026-09-02 修过：此前传 5 变量梯度，真机上必崩）；
+        # DES 族的破坏项长度尺度在同一次源项求值里算出（`turbulence/sst/source.py`）
+        des = des_length_for(self.ddes_model_gpu, self._iddes_h_max_gpu, self._iddes_h_wn_gpu)
+        Sk, S_omega = self.turb_model_gpu.compute_source_terms(
+            self.Q_gpu, grad_vel, d_wall, self.mu_molecular, grad_k, grad_omega, des=des)
 
         dk_dt = Sk / cp.maximum(rho, 1e-10)
         # w = ln(omega) 方程的源项部分（omega 由 exp(w) 产生、恒为正）

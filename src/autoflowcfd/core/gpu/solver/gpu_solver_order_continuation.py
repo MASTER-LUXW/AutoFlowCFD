@@ -87,12 +87,6 @@ def gpu_solver_interpolate_to_new_order(solver, target_p: int) -> None:
             new_fields_np = solver.turb_model_gpu.freestream_fields((n_cells, new_n_sps), np)
             new_nu_t_np = np.zeros((n_cells, new_n_sps))
 
-    if solver.ddes_model_gpu is not None and hasattr(solver, 'des_length_scale_gpu'):
-        # DDES/IDDES 有效长度尺度：清空而不是插值，理由同 CPU/GPU 分布式
-        # 版本文档——依赖 nu_t，nu_t 要到本阶数第一次 compute_source
-        # 调用后才会被重新算出。
-        solver.des_length_scale_gpu = None
-
     # --- 2. mesh/ops 切换（self.mesh 是完整真实网格，无分布式/compact
     # 索引空间这层复杂度）---
     stale_orders = [o for o in list(solver.mesh._order_geometry_cache) if o != target_p]

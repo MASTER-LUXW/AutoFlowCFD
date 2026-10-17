@@ -27,7 +27,7 @@ class MultiGpuTurbulenceBackend:
     """`MultiGPUDistributedSolver` 的隐式湍流适配器，接口见
     `fr_solver/turbulence/implicit.py` 模块文档"后端"一节。
 
-    额外产出 `mu_t_compact`：最后一次（`apply_des=True`）求值之后 compact 空间
+    额外产出 `mu_t_compact`：最后一次（`commit=True`）求值之后 compact 空间
     的动力涡粘，供本步平均流的粘性残差使用（与显式路径的返回值同一个量）。
     """
 
@@ -63,13 +63,12 @@ class MultiGpuTurbulenceBackend:
         """最近一次 `rates` 之后的紧凑空间动力涡粘（试探求值用，不写回模型）。"""
         return self._ctx.rho * self._ctx.view.nu_t
 
-    def rates(self, apply_des: bool):
+    def rates(self, commit: bool = False):
         s, ctx = self.solver, self._ctx
         s._sync_turbulence_view(ctx)
-        rates = s._evaluate_turbulence_rates_distributed(ctx, apply_des=apply_des).total()
-        if apply_des:
-            # 最终场上的求值：涡粘与 DES 长度尺度写回真正的模型（k/omega 已由
-            # Newton 步更新在模型上）
+        rates = s._evaluate_turbulence_rates_distributed(ctx).total()
+        if commit:
+            # 最终场上的求值：涡粘写回真正的模型（k/omega 已由 Newton 步更新在模型上）
             s._write_back_turbulence_distributed(ctx, fields=False)
             self.mu_t_compact = ctx.rho * ctx.view.nu_t
         return tuple(self._to_local(r) for r in rates)
@@ -98,6 +97,7 @@ class MultiGpuTurbulenceBackend:
         逐点量用 GPU 模型的求值件），按 `inv_perm` 取回本 rank 的行。"""
         from autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence import _host, gpu_linearization_parts
         from autoflowcfd.core.mpi.distributed_compute import DistributedMeshAdapter
+        from autoflowcfd.core.turbulence.des import des_length_for
         from autoflowcfd.core.turbulence.jacobian import TurbulenceBlockAssembler, TurbulenceLinearization
         from autoflowcfd.core.turbulence.transport import precompute_scalar_convection_geometry
 
@@ -109,7 +109,8 @@ class MultiGpuTurbulenceBackend:
         Q_h = _host(ctx.Q)
         faces, values, pointwise, strong_rows = gpu_linearization_parts(
             cp, view, ctx.Q, ctx.grad_vel, ctx.d_wall, float(s.mu_molecular), s.flat_face_gpu,
-            tr._wall_mask_k_gpu, s.mesh_data, s.ops_data)
+            tr._wall_mask_k_gpu, s.mesh_data, s.ops_data,
+            des=des_length_for(s.ddes_model_gpu, s.iddes_h_max_compact, s.iddes_h_wn_compact))
         lin = TurbulenceLinearization(
             mesh=mesh, ops=s.ops, flat=flat, turb=view, Q=Q_h, grad_vel=_host(ctx.grad_vel),
             d_wall=_host(ctx.d_wall), mu=float(s.mu_molecular),
@@ -205,10 +206,10 @@ class MultiGpuCoupledBackend:
 
     def install(self, x, dtau) -> None:
         """写入新状态，做湍流步后收尾，并在新状态上刷新涡粘（写回模型并留下 compact 一份
-        `turb.mu_t_compact`）与 DES 长度尺度。"""
+        `turb.mu_t_compact`）。"""
         self.set_trial(x)
         turb = self.turb
         turb.positivity()
         turb.finalize(dtau.reshape(turb.shape))
         turb.prepare_inputs()
-        turb.rates(apply_des=True)
+        turb.rates(commit=True)

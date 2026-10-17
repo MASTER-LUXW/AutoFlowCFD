@@ -221,7 +221,7 @@ class _DistributedStepMixin:
 
             turb_backend = DistributedTurbulenceBackend(self, cell_is_prism, order_now)
             turb_backend.prepare_inputs()
-            turb_backend.rates(apply_des=False)
+            turb_backend.rates()
             mu_t_field_compact = turb_backend.trial_mu_t_compact()
         elif self.turb_model is not None:
             from autoflowcfd.core.mpi.distributed_turbulence import (

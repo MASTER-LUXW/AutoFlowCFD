@@ -55,7 +55,7 @@ def _rates(s):
         evaluate_turbulence_rates, prepare_turbulence_inputs,
     )
 
-    return evaluate_turbulence_rates(s, *prepare_turbulence_inputs(s), apply_des=False).total()[0]
+    return evaluate_turbulence_rates(s, *prepare_turbulence_inputs(s)).total()[0]
 
 
 def _run_nk(s, n_max, drop=1e-9):

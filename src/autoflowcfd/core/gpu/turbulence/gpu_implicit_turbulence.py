@@ -36,8 +36,8 @@ class GpuTurbulenceBackend:
     def prepare_inputs(self) -> None:
         self._inputs = self.solver._prepare_turbulence_inputs_gpu()
 
-    def rates(self, apply_des: bool):
-        return self.solver._evaluate_turbulence_rates_gpu(*self._inputs, apply_des=apply_des).total()
+    def rates(self, commit: bool = False):
+        return self.solver._evaluate_turbulence_rates_gpu(*self._inputs).total()
 
     def positivity(self) -> None:
         self.model.apply_positivity_limiter()
@@ -56,6 +56,7 @@ class GpuTurbulenceBackend:
         `core/turbulence/jacobian`），逐点量 `(S, Gamma)` 用 GPU 模型自己的求值件
         （`gpu_turbulence_pointwise`），冻结的平均流输入与残差同一份。"""
         from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+        from autoflowcfd.core.turbulence.des import des_length_for
         from autoflowcfd.core.turbulence.jacobian import TurbulenceBlockAssembler, TurbulenceLinearization
         from autoflowcfd.core.turbulence.transport import precompute_scalar_convection_geometry
 
@@ -65,7 +66,7 @@ class GpuTurbulenceBackend:
         flat = get_flat_face_geometry(s.mesh, s.ops)
         faces, values, pointwise, strong_rows = gpu_linearization_parts(
             cp, m, s.Q_gpu, grad_vel, d_wall, float(s.mu_molecular), s.flat_face_gpu, s._wall_mask_k_gpu,
-            s.mesh_data, s.ops_data)
+            s.mesh_data, s.ops_data, des=des_length_for(s.ddes_model_gpu, s._iddes_h_max_gpu, s._iddes_h_wn_gpu))
         ctx = TurbulenceLinearization(
             mesh=s.mesh, ops=s.ops, flat=flat, turb=m, Q=Q_h, grad_vel=_host(grad_vel), d_wall=_host(d_wall),
             mu=float(s.mu_molecular),
@@ -159,23 +160,24 @@ class GpuCoupledBackend:
         return None
 
     def install(self, x, dtau) -> None:
-        """写入新状态，做湍流步后收尾，并在新状态上刷新涡粘与 DES 长度尺度。"""
+        """写入新状态，做湍流步后收尾，并在新状态上刷新涡粘。"""
         self.set_trial(x)
         turb = self.turb
         turb.positivity()
         turb.finalize(dtau.reshape(turb.shape))
         turb.prepare_inputs()
-        turb.rates(apply_des=True)
+        turb.rates(commit=True)
 
 
 def _host(a):
     return a.get() if hasattr(a, "get") else np.asarray(a)
 
 
-def gpu_linearization_parts(cp, model, Q, grad_vel, d_wall, mu, flat_face_gpu, wall_mask_gpu, mesh_data, ops_data):
+def gpu_linearization_parts(cp, model, Q, grad_vel, d_wall, mu, flat_face_gpu, wall_mask_gpu, mesh_data, ops_data,
+                            des=None):
     """GPU 模型的线性化部件 `(dirichlet_faces, dirichlet_values, pointwise, strong_rows)`（单机与多 GPU
     compact 视图共用）：SA-neg 走全部后端共用的 `sa_linearization_parts`；SST 族的壁面 omega 目标值与
-    逐点求值器取 GPU 残差同一份。"""
+    逐点求值器取 GPU 残差同一份（`des`：与残差同一个 DES 长度尺度求值器）。"""
     from autoflowcfd.core.turbulence.sa import SAModel
 
     wall_zero = _host(wall_mask_gpu)
@@ -192,16 +194,16 @@ def gpu_linearization_parts(cp, model, Q, grad_vel, d_wall, mu, flat_face_gpu, w
         cp, flat_face_gpu, wall_mask_gpu, d_wall, Q, mu, model.beta1, omega_max=model.omega_max,
         turb_k_field=model.k_field)
     faces, values = sst_dirichlet_spec(wall_zero, _host(omega_wall), _host(has_wall))
-    return faces, values, gpu_turbulence_pointwise(cp, model, Q, grad_vel, d_wall, mu), None
+    return faces, values, gpu_turbulence_pointwise(cp, model, Q, grad_vel, d_wall, mu, des), None
 
 
-def gpu_turbulence_pointwise(cp, turb, Q, grad_vel, d_wall, mu):
+def gpu_turbulence_pointwise(cp, turb, Q, grad_vel, d_wall, mu, des=None):
     """GPU 模型上的逐点 `(S, Gamma)` 求值器（`core/turbulence/jacobian/pointwise.py::
-    TurbulencePointwise`，注入 `compute_source_terms_gpu`，与 GPU 残差同一份）；单机与
+    TurbulencePointwise`，注入模型的 `compute_source_terms`，与 GPU 残差同一份）；单机与
     多 GPU（compact 视图）共用。"""
     from autoflowcfd.core.turbulence.jacobian.pointwise import TurbulencePointwise
 
-    return TurbulencePointwise(cp, turb, Q, grad_vel, d_wall, mu, turb.compute_source_terms_gpu)
+    return TurbulencePointwise(cp, turb, Q, grad_vel, d_wall, mu, turb.compute_source_terms, des)
 
 
 def gpu_coupling_graph(cp, flat_face_gpu, n_cells: int):

@@ -257,13 +257,8 @@ def init_turbulence_models(solver, n_cells: int, n_sps: int) -> None:
         solver.turb_model = SSTModelFR(n_cells, n_sps, k_inf=k_inf, omega_inf=omega_inf)
         _set_turbulence_bounds(solver)
         solver.ddes_model = DDESModel()
-        # h_max（2026-09-02 补齐，与下面 IDDES 分支同一处几何量、同一个
-        # 一次性缓存策略）：`apply_to_sst_model` 现在优先用各向异性感知
-        # 的 max_edge 网格尺度而不是 cube_root(V)，见该方法文档——本项目
-        # 高度依赖棱柱边界层网格，cube_root 会系统性低估扁平单元的 Δ。
-        # 只需要 h_max（第一个返回值），h_wn 是 IDDES 专属几何量，DDES
-        # 不用，但 compute_h_max_and_h_wn 只有一个返回两者的接口，丢弃
-        # 用不到的 h_wn 即可。
+        # 逐单元网格尺度只依赖几何，算一次缓存：DDES 的 LES 长度用最大边长 h_max（棱柱边界层
+        # 网格上 cube_root(V) 会系统性低估扁平单元的面内尺度）；h_wn 只有 IDDES 用
         solver._iddes_h_max, solver._iddes_h_wn = compute_h_max_and_h_wn(solver.mesh)
         print(f"   [OK] DDES model initialized (based on SST, "
               f"k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")

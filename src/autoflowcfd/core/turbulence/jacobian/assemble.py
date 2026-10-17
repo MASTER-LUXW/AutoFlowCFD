@@ -50,6 +50,7 @@ class TurbulenceLinearization:
     open_face: np.ndarray         # (n_faces,) 开放边界（来流条件）
     pointwise: object = None      # 逐点 (S, Gamma) 求值器；None -> cpu_turbulence_pointwise（SST）
     strong_rows: np.ndarray = None  # (n_cells, n_sps, nv) 强 Dirichlet 行
+    des: object = None            # SST 的 DES 长度尺度求值器（与残差同一个）；None 为 RANS
 
 
 def assemble_turbulence_blocks(ctx: TurbulenceLinearization, u_flat, want_coupling: bool = False):
@@ -61,7 +62,7 @@ def assemble_turbulence_blocks(ctx: TurbulenceLinearization, u_flat, want_coupli
     g = np.stack([compute_physical_scalar_gradient(np.ascontiguousarray(u[..., v]), mesh, ctx.ops)
                   for v in range(nv)], axis=-2)
     evaluate = ctx.pointwise if ctx.pointwise is not None else cpu_turbulence_pointwise(
-        turb, ctx.Q, ctx.grad_vel, ctx.d_wall, ctx.mu)
+        turb, ctx.Q, ctx.grad_vel, ctx.d_wall, ctx.mu, ctx.des)
     _, gam, dS, dG = turbulence_pointwise_partials(evaluate, u, g, turb.unknown_scales())
     gam = np.ascontiguousarray(gam)
     dG = np.ascontiguousarray(dG)

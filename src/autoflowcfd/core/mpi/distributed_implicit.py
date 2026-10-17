@@ -174,7 +174,7 @@ class DistributedTurbulenceBackend:
     """`DistributedFRSolver`（CPU-MPI）的隐式湍流适配器，接口见
     `fr_solver/turbulence/implicit.py` 模块文档"后端"一节。
 
-    额外产出 `mu_t_compact`：最后一次（`apply_des=True`）求值之后 compact
+    额外产出 `mu_t_compact`：最后一次（`commit=True`）求值之后 compact
     空间的涡粘，供本步平均流的粘性残差使用（与显式路径的返回值同一个量）。
     """
 
@@ -218,17 +218,14 @@ class DistributedTurbulenceBackend:
         self._conv_geom = prepare_convection_geometry(
             self._adapter, self._adapter._turbulence_flat_face_override)
 
-    def rates(self, apply_des: bool):
+    def rates(self, commit: bool = False):
         self._sync_view()
-        rates = evaluate_turbulence_rates(self._adapter, *self._inputs, apply_des=apply_des,
-                                          conv_geom=self._conv_geom).total()
-        if apply_des:
-            # 最终场上的求值：涡粘与 DES 长度尺度写回真正的模型（与显式路径
+        rates = evaluate_turbulence_rates(self._adapter, *self._inputs, conv_geom=self._conv_geom).total()
+        if commit:
+            # 最终场上的求值：涡粘写回真正的模型（与显式路径
             # `distributed_compute_turbulence_source_and_viscosity` 的写回相同）
             view = self._view
             self.model.nu_t[:] = self._to_local(view.nu_t)
-            if self.solver.ddes_model is not None and getattr(view, "des_length_scale", None) is not None:
-                self.model.des_length_scale = self._to_local(view.des_length_scale).copy()
             self.mu_t_compact = self._adapter.state.Q[..., 0] * view.nu_t
         return tuple(self._to_local(r) for r in rates)
 
@@ -351,10 +348,10 @@ class DistributedCoupledBackend:
 
     def install(self, x, dtau) -> None:
         """写入新状态，做湍流步后收尾，并在新状态上刷新涡粘（写回模型并留下 compact 一份
-        `turb.mu_t_compact` 供下一步粘性步长）与 DES 长度尺度。"""
+        `turb.mu_t_compact` 供下一步粘性步长）。"""
         self.set_trial(x)
         turb = self.turb
         turb.positivity()
         turb.finalize(dtau.reshape(turb.shape))
         turb.prepare_inputs()
-        turb.rates(apply_des=True)
+        turb.rates(commit=True)

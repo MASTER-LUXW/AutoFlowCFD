@@ -288,10 +288,7 @@ def build_fully_distributed_rank_package(
             iddes_h_max_compact = h_max_global[compact_ids].copy()
             iddes_h_wn_compact = h_wn_global[compact_ids].copy()
         elif turb_model_name == "DDES":
-            # DDES（2026-09-02 补齐，与 IDDES 同一处理）：`apply_to_sst_
-            # model` 现在优先用各向异性感知的 max_edge 网格尺度（见
-            # des.py 对应方法文档），需要 h_max_global——不需要 h_wn
-            # （那是 IDDES 专属的近壁法向间距量）。
+            # DDES 的 LES 长度用最大边长 h_max（`des/ddes.py`），不需要 IDDES 专属的壁法向尺度 h_wn
             if h_max_global is None:
                 raise RuntimeError(
                     "build_fully_distributed_rank_package: turb_model_name='DDES' "

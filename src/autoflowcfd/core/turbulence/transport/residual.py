@@ -27,8 +27,8 @@ from .omega_wall import (
 def turbulence_diffusivities(turb, rho_nu_t, mu):
     """k / ln(omega) 方程的有效扩散系数 `(Gamma_k, Gamma_w) = mu + sigma(F1) * rho * nu_t`。
 
-    `F1` 与 `rho_nu_t = rho * nu_t` 都取源项求值（CPU `compute_source_terms` / GPU
-    `compute_source_terms_gpu`）在同一组 `(k, omega)` 上刷新的模型缓存，不在这里重算
+    `F1` 与 `rho_nu_t = rho * nu_t` 都取源项求值（`compute_source_terms`，CPU 与
+    GPU 同一份）在同一组 `(k, omega)` 上刷新的模型缓存，不在这里重算
     （此前另算一遍 F1，交叉扩散的乘法顺序不同、两份 F1 只在舍入上一致）。调用方须先
     求源项，输运残差（`fr_solver/turbulence/source.py` 等四个后端入口）与湍流解析
     Jacobian 的逐点求值器（`jacobian/pointwise.py`）都是这个顺序。逐点运算，numpy /

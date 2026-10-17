@@ -233,20 +233,10 @@ def test_distributed_les_viscosity_matches_single_machine(rank):
 
 @pytest.mark.parametrize("turb_model_name", ["DDES", "IDDES"])
 def test_distributed_ddes_two_consecutive_steps_matches_single_machine(turb_model_name):
-    """真实 bug 回归测试（2026-09-02，用两次连续调用才测出来——第一次
-    调用之前从未被本模块任何测试覆盖过）：`des_length_scale` 是跨步
-    持久状态，此前 `distributed_compute_turbulence_source_and_
-    viscosity` 把它（n_local 大小）直接 setattr 到 compact 大小的临时
-    视图上，不做任何 halo 交换/重排——第一次调用时 `des_length_scale`
-    还是 None，问题被掩盖；第二次调用（真实 DDES/IDDES 生产运行的
-    第二个物理步）必现 `ValueError: operands could not be broadcast
-    together`（(n_local,n_sps) vs (n_compact,n_sps)）。修复为与
-    k_field/omega_field 完全同一套"halo 交换+compact 重排"处理。
-
-    本测试真正模拟两个 rank 之间的 des_length_scale 交换（不是像上面
-    单步测试那样从已知全局真值直接切片——第 2 步的"真值"本身就是第
-    1 步两个 rank 各自算出来、需要真正交换后才能拼出的结果），对照
-    单机路径连续两步的结果。
+    """连续两步：两个 rank 各自持有一份 turb_local，第 2 步的 halo 数据由第 1 步两个 rank
+    各自的结果拼出（不是从已知全局真值切片），对照单机连续两步。DES 长度尺度在源项求值里
+    按当前状态算出，没有跨步状态需要交换（2026-10-17 起；此前它是"慢一拍"的持久状态、要经
+    halo 交换，第二步曾因形状不匹配必崩）。
     """
     order = 1
     mesh = _build_synthetic_mixed_mesh(order)
@@ -303,8 +293,8 @@ def test_distributed_ddes_two_consecutive_steps_matches_single_machine(turb_mode
     compute_turbulence_source(solver_ref, dt_local_global)
 
     # ---- 分布式路径：两个 rank 各自持有一份 turb_local，两步之间真正
-    # 交换 U/k/omega/des_length_scale（从两个 rank 各自的最新结果拼出
-    # "全局"数组，模拟真实 halo 交换会拿到的邻居数据）----
+    # 交换 U/k/omega（从两个 rank 各自的最新结果拼出"全局"数组，模拟真实
+    # halo 交换会拿到的邻居数据）----
     cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
     fc = mesh.face_connectivity
     partitions = {r: build_distributed_partition(fc, cell_partition, rank=r, n_ranks=2) for r in (0, 1)}
@@ -316,10 +306,6 @@ def test_distributed_ddes_two_consecutive_steps_matches_single_machine(turb_mode
         t.k_field = k_field[partitions[r].local_cells].copy()
         t.omega_field = omega_field[partitions[r].local_cells].copy()
         turb_locals[r] = t
-
-    # "全局"des_length_scale 数组（None 表示还没有任何 rank 算出来过），
-    # 每步结束后用两个 rank 各自的 turb_local.des_length_scale 更新。
-    des_length_scale_global = None
 
     for step in range(2):
         results = {}
@@ -351,9 +337,6 @@ def test_distributed_ddes_two_consecutive_steps_matches_single_machine(turb_mode
             d_wall_compact = d_wall[dist_fc.compact_global_ids]
             dt_local_local = dt_local_global[partition.local_cells]
 
-            if des_length_scale_global is not None:
-                fake_halo.set(des_length_scale_global[native_ids])
-
             ddes_model = _make_ddes_model(turb_model_name)
             iddes_h_max_compact = iddes_h_wn_compact = None
             if turb_model_name in ("DDES", "IDDES"):
@@ -367,11 +350,6 @@ def test_distributed_ddes_two_consecutive_steps_matches_single_machine(turb_mode
                 iddes_h_max_compact=iddes_h_max_compact, iddes_h_wn_compact=iddes_h_wn_compact,
             )
             results[r] = turb
-
-        # 用本步两个 rank 的结果拼出下一步要用的"全局" des_length_scale。
-        des_length_scale_global = np.zeros((n_cells, n_sps))
-        for r in (0, 1):
-            des_length_scale_global[partitions[r].local_cells] = results[r].des_length_scale
 
     # 决定性判据：两步之后，两个 rank 各自的 k/omega/nu_t 必须与单机
     # 路径连续两步的结果逐位一致。
@@ -405,12 +383,13 @@ class TestDdesModelDistinctFromSst:
         mu = 1.8e-5
         rng = np.random.default_rng(4242)
         U, k_field, omega_field = _nonuniform_state(mesh, rng)
-        d_wall = np.full((n_cells, n_sps), 0.05)
-        # 用比其余测试更大的 dt（1e-3 而不是 1e-5）放大两步之间的分叉幅度
-        # ——第一步 SST/DDES/IDDES 恰好数值相同（见下方注释），只有第二步
-        # 才会分叉，分叉幅度正比于 dt，1e-5 下差异被 np.allclose 默认
-        # 容差盖过（真实量级约 1e-7 相对差），1e-3 下能有清晰、不依赖
-        # np.allclose 容差选择的可见差异。
+        # DES 分支要真正激活：合成网格单元尺度 ~1.4（LES 长度 C_DES h_max/(P+1) ~ 0.4~0.8），omega 取
+        # 原值的 1/100 使 l_RANS = sqrt(k)/(beta* omega) ~ 2 超过它；壁距取 3 使 DDES 屏蔽函数不把它
+        # 拉回 RANS（r_d 小）、IDDES 的 Delta 由 h_wn 决定而与 DDES 的 h_max 不同
+        omega_field = 0.01 * omega_field
+        d_wall = np.full((n_cells, n_sps), 3.0)
+        # 用比其余测试更大的 dt（1e-3 而不是 1e-5）放大分叉幅度（正比于 dt；1e-5 下真实量级约 1e-7
+        # 相对差，会被 np.allclose 默认容差盖过）
         dt_local = np.full((n_cells, n_sps), 1e-3)
 
         from types import SimpleNamespace
@@ -452,17 +431,9 @@ class TestDdesModelDistinctFromSst:
                     return mesh.cell_volumes
 
             solver = _Solver()
-            # 两步：DDES/IDDES 的 des_length_scale 是"慢一拍"的跨步状态
-            # （第一步 apply_to_sst_model 用 nu_t 算出 l_eff，供*下一步*
-            # compute_source_terms 读取，见 compute_turbulence_source
-            # 里"DDES 的有效长度尺度"一段注释）——第一步 des_length_scale
-            # 还是初始的 None，D_k 对三个模型都退化成标准 RANS 公式，
-            # Sk/S_omega（进而 nu_t）在第一步结束时对三者恰好相同；第二步
-            # compute_source_terms 才会真正读到（DDES/IDDES 各自不同的）
-            # des_length_scale 算出不同的 D_k，改变 Sk，进而在第二步
-            # update_fields 之后让 k_field 分叉——只跑一步看不出区别，
-            # 不是本测试的判据。
-            compute_turbulence_source(solver, dt_local)
+            # 一步：DES 长度尺度在同一次源项求值里用本次的 F1 与 nu_t 算出，第一步的破坏项就已
+            # 不同于 RANS。修复前（2026-10-17 以前）长度尺度"慢一拍"——第一步还是 None、三个模型的
+            # 第一步逐位相同，要第二步才分叉（I-179）
             compute_turbulence_source(solver, dt_local)
             return turb.k_field
 
@@ -470,8 +441,8 @@ class TestDdesModelDistinctFromSst:
         k_ddes = _run("DDES")
         k_iddes = _run("IDDES")
 
-        # 用绝对差值直接判定（不用 np.allclose 默认容差——两步之间的
-        # 分叉幅度本来就小，容差选择不当会掩盖真实差异，见上方 dt 注释），
+        # 用绝对差值直接判定（不用 np.allclose 默认容差——分叉幅度正比于 dt、本来就小，
+        # 容差选择不当会掩盖真实差异，见上方 dt 注释），
         # 阈值 1e-6 远高于浮点噪声、远低于观测到的真实差异量级。
         assert np.max(np.abs(k_sst - k_ddes)) > 1e-6, (
             "DDES 的长度尺度替换应该真正改变 k_field 的演化，不应该和纯 SST 数值一致"

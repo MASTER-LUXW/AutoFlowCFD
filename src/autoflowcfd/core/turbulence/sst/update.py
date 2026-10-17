@@ -1,14 +1,12 @@
 """AutoFlowCFD V2.0 - 正性限幅与场更新
 
-从 `src/autoflowcfd/core/turbulence/sst.py` 的 `SSTModelFR` 拆出（2026-09-24，项目「单文件不超
-500 行」规范）。mixin 是本仓库既有惯例（`_SolverGeometryMixin`、
-`_GPUSolverInitMixin` 等），沿用它而不是另发明一套。
-
-**只含方法，没有状态**：全部属性由 `SSTModelFR` 的 `__init__` 建立，
-这里通过 `self` 访问。
+**只含方法，没有状态**：全部属性由 `SSTModelFR` 的 `__init__` 建立，这里通过 `self` 访问。
+数组模块取自 `k_field` 所在的模块，CPU 与 GPU 模型共用这一份。
 """
 
 import numpy as np
+
+from autoflowcfd.core.utils.array_module import array_module
 
 from .bounds import clip_to_bounds
 from .log_omega import log_omega, omega_from_log
@@ -29,12 +27,12 @@ class _SSTUpdateMixin:
         transport ∝ ∇k）会让 k/omega 指数增长到 1e260 量级（cube_demo 100 步内实测），
         而平均流因 nu_t 被 a1 限幅保持正常——"平均流正常但湍流场完全发散"。
         """
-        clip_to_bounds(self, np)
+        clip_to_bounds(self, array_module(self.k_field))
 
     def update_fields(self, dt, sources, transports):
         """执行一个时间步长的湍流场更新（`advance_k_log_omega`），再过正性/上界限制器。
         `sources`/`transports` 按未知量 `(k, w)` 排列（`TurbulenceRates.source/transport`）。"""
-        advance_k_log_omega(self, dt, sources[0], sources[1], transports[0], transports[1], np)
+        advance_k_log_omega(self, dt, sources[0], sources[1], transports[0], transports[1], array_module(self.k_field))
         self.apply_positivity_limiter()
 
 

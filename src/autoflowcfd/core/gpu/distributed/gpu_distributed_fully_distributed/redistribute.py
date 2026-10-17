@@ -115,11 +115,6 @@ def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int
             new_fields_np = solver.turb_model_gpu.freestream_fields((n_local, new_n_sps), np)
             new_nu_t_np = np.zeros((n_local, new_n_sps))
 
-    # des_length_scale：与"传统模式"同一处理，清空而不是插值（依赖 nu_t，
-    # 要到本阶数第一次 compute_source 调用后才会被重新算出）。
-    if solver.ddes_model_gpu is not None and hasattr(solver.turb_model_gpu, 'des_length_scale'):
-        solver.turb_model_gpu.des_length_scale = None
-
     # --- 2. Root 重新计算 + 分发新紧凑包（与 CPU 共用，见该函数文档）---
     from autoflowcfd.core.mpi.distributed_mesh_loader.fully_distributed import (
         exchange_packages_for_new_order,

@@ -1,11 +1,11 @@
 """AutoFlowCFD V2.0 - SSTModelFR 主类：构造与对外接口
 
-从 `src/autoflowcfd/core/turbulence/sst.py` 拆出（2026-09-24）。方法按职责分到同目录的 mixin 里，
-这里只留构造与对外接口。
+方法按职责分到同目录的 mixin 里（数组模块无关），这里只留构造与对外接口。场数组放在构造参数
+`xp` 给定的数组模块上：CPU 为 numpy；GPU 模型（`core/gpu/turbulence/gpu_turbulence_sst.py`）是本类的
+子类，只在设备上下文里以 `xp=cupy` 构造，公式与 CPU 是同一份。
 """
 
 import numpy as np
-from typing import Optional
 from .blending import _SSTBlendingMixin
 from .bounds import OMEGA_MAX_FLOOR
 from .source import _SSTSourceMixin
@@ -31,7 +31,7 @@ class SSTModelFR(_SSTBlendingMixin, _SSTSourceMixin, _SSTUpdateMixin, _SSTTransp
         return type(self)(n_cells, n_sps, k_inf=self.k_inf, omega_inf=self.omega_inf)
 
     def __init__(self, n_cells: int, n_sps: int,
-                 k_inf: float = 1e-6, omega_inf: float = 1.0):
+                 k_inf: float = 1e-6, omega_inf: float = 1.0, xp=np):
         """
         初始化 SST 模型。
 
@@ -41,6 +41,7 @@ class SSTModelFR(_SSTBlendingMixin, _SSTSourceMixin, _SSTUpdateMixin, _SSTTransp
             k_inf: 来流湍动能初值（默认 1e-6，工业标准由 Tu/VR 推导，
                 见 turbulence.py::_set_freestream_turbulence）
             omega_inf: 来流比耗散率初值（默认 1.0，工业标准由 Tu/VR 推导）
+            xp: 场数组所在的数组模块（numpy 或 cupy）
         """
         self.n_cells = n_cells
         self.n_sps = n_sps
@@ -49,9 +50,9 @@ class SSTModelFR(_SSTBlendingMixin, _SSTSourceMixin, _SSTUpdateMixin, _SSTTransp
         # 而非拍脑袋的 k=1e-6, omega=1.0）。
         # 参考：Fluent 用户手册 Section 7.3.2，
         # k = 1.5*(U*Tu)^2, omega = k/(VR*nu)。
-        self.k_field = np.ones((n_cells, n_sps)) * k_inf
-        self.omega_field = np.ones((n_cells, n_sps)) * omega_inf
-        self.nu_t = np.zeros((n_cells, n_sps))
+        self.k_field = xp.full((n_cells, n_sps), float(k_inf))
+        self.omega_field = xp.full((n_cells, n_sps), float(omega_inf))
+        self.nu_t = xp.zeros((n_cells, n_sps))
         # 源项求值刷新的混合函数 F1（`compute_source_terms`），有效扩散系数读它
         self._last_F1 = None
 
@@ -84,18 +85,6 @@ class SSTModelFR(_SSTBlendingMixin, _SSTSourceMixin, _SSTUpdateMixin, _SSTTransp
         self.a1 = 0.31
         self.kappa = 0.41  # Von Karman 常数
         self.beta_star = 0.09
-
-        # Blending function 相关常数
-        self.CD_epsilon = 1e-10
-
-        # DES/DDES 长度尺度替换 (T-04)：非 None 时，k 方程耗散项改用
-        # D_k = rho*k^1.5/l_eff 替代标准 RANS 的 D_k=rho*beta_star*k*omega，
-        # 由 turbulence_des.py::DDESModel.apply_to_sst_model 设置。
-        # 之前的版本用 "beta_star *= (1+0.5*f_d)" 这个启发式系数冒充 DES
-        # 修正，且该写法会在每次调用时把已经修改过的 self.beta_star 当成
-        # "original" 再乘一次，多步迭代下 beta_star 会无界增长——是原地
-        # 修改一个应保持不变的模型常数导致的复合 bug，不只是公式选择有误。
-        self.des_length_scale: Optional[np.ndarray] = None
 
     def get_turbulent_viscosity(self) -> np.ndarray:
         """

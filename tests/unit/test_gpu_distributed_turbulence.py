@@ -57,8 +57,7 @@ from tests.unit._gpu_distributed_turbulence_common import _patch_get_cupy  # noq
 @pytest.mark.parametrize("rank", [0, 1])
 def test_gpu_distributed_sst_matches_cpu_distributed_sst(rank, turb_model_name):
     """决定性判据：GPU 分布式 SST/DDES/IDDES（numpy 替身）与 CPU 分布式
-    同名模型（本会话早些时候已经与单机逐位验证过，含 des_length_scale
-    halo 交换修复）在同一份非均匀状态下必须逐位一致——两者是同一套
+    同名模型（已与单机逐位验证过）在同一份非均匀状态下必须逐位一致——两者是同一套
     数值算法的两个后端实现，不应该有任何差异。"""
     order = 1
     mesh = _build_synthetic_mixed_mesh(order)
@@ -155,102 +154,6 @@ def test_gpu_distributed_sst_matches_cpu_distributed_sst(rank, turb_model_name):
     np.testing.assert_allclose(
         mu_t_native_gpu[:n_local], mu_t_native_cpu[:n_local], rtol=1e-10, atol=1e-14
     )
-
-
-@pytest.mark.parametrize("turb_model_name", ["DDES", "IDDES"])
-def test_gpu_distributed_ddes_two_consecutive_calls_does_not_crash(turb_model_name):
-    """真实 bug 回归测试（2026-09-02，移植自 CPU 侧同一处修复——本次
-    移植 GPU 分布式 DDES/IDDES 时把这个修复直接一并做进去了，但仍然
-    需要一个决定性测试锁定它，不能只靠"移植时抄对了"这个假设）：
-    `des_length_scale` 是跨步持久状态，只有 1 个分量，若被直接原样
-    setattr 到 compact 大小的临时视图上而不做 halo 交换+重排，第二次
-    调用会因 (n_local,n_sps) 与 (n_compact,n_sps) 形状不匹配崩溃——见
-    `core/mpi/distributed_turbulence.py` 同名 bug 的完整记录。这里只
-    验证"连续调用两次不崩溃、des_length_scale 形状始终正确"，不重复
-    做两步数值一致性对照（CPU 侧已经用真实跨 rank 数据交换决定性
-    验证过数值正确性，GPU 侧走的是完全同构的代码路径）。"""
-    order = 1
-    mesh = _build_synthetic_mixed_mesh(order)
-    ops = generate_fr_operators(order)
-    n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
-    mu = 1.8e-5
-    dt = 1e-3
-    rng = np.random.default_rng(4242)
-
-    U, k_field, omega_field = _nonuniform_state(mesh, rng)
-    d_wall = np.full((n_cells, n_sps), 0.05)
-
-    h_max_global = h_wn_global = None
-    if turb_model_name in ("DDES", "IDDES"):
-        h_max_global, h_wn_global = compute_h_max_and_h_wn(mesh)
-
-    rank = 1
-    cell_partition = np.array([0, 1, 0, 1], dtype=np.int32)
-    fc = mesh.face_connectivity
-    partition = build_distributed_partition(fc, cell_partition, rank=rank, n_ranks=2)
-    dist_fc = build_distributed_flat_face(mesh, ops, partition, cell_partition=cell_partition)
-    compact_global_ids = dist_fc.compact_global_ids
-    n_compact = len(compact_global_ids)
-    n_local = partition.n_local_cells
-    n_halo = partition.n_halo
-    native_ids = (
-        np.concatenate([partition.local_cells, partition.halo_cells])
-        if n_halo > 0 else partition.local_cells
-    )
-
-    iddes_h_max_compact = iddes_h_wn_compact = None
-    if turb_model_name in ("DDES", "IDDES"):
-        iddes_h_max_compact = h_max_global[compact_global_ids]
-        iddes_h_wn_compact = h_wn_global[compact_global_ids]
-
-    mesh_data = _prepare_compact_mesh_data(mesh, ops, compact_global_ids)
-    mesh_data['n_prism'] = dist_fc.base_flat.n_prism
-    mesh_data['cell_volumes'] = mesh.cell_volumes[compact_global_ids]
-
-    turb_gpu = GPUTurbulenceSST(n_local, n_sps, device_id=0)
-    turb_gpu.k_field = k_field[partition.local_cells].copy()
-    turb_gpu.omega_field = omega_field[partition.local_cells].copy()
-
-    d_wall_compact = d_wall[compact_global_ids]
-    U_local = U[partition.local_cells]
-    k_omega_extended = np.stack([k_field[native_ids], omega_field[native_ids]], axis=-1)
-    fake_halo_gpu = ShapeKeyedFakeHalo(U[native_ids], k_omega_extended)
-
-    stub = types.SimpleNamespace(
-        rank=rank, device_id=0, mu_molecular=mu, boundary_ghost_provider=None,
-        partition=partition, mesh=mesh, dist_flat_face=dist_fc,
-        mesh_data=mesh_data, ops_data=mesh_data, ops=ops,
-        flat_face_gpu=dist_fc.base_flat,
-        turb_model_gpu=turb_gpu, turb_model_name=turb_model_name, gpu_halo=fake_halo_gpu,
-        _turb_ramp_step=0, _turb_production_ramp_steps=0, _turb_production_ramp_complete=False,   # 不做产生项渐变
-        _perm_gpu=dist_fc.perm, _inv_perm_gpu=dist_fc.inv_perm, n_compact=n_compact,
-        wall_distance_gpu=d_wall_compact,
-        _wall_mask_k_gpu=np.zeros(dist_fc.base_flat.n_faces, dtype=bool),
-        _open_mask_gpu=np.zeros(dist_fc.base_flat.n_faces, dtype=bool),
-        U_gpu=U_local,
-        ddes_model_gpu=_make_ddes_gpu(turb_model_name),
-        iddes_h_max_compact=iddes_h_max_compact, iddes_h_wn_compact=iddes_h_wn_compact,
-    )
-    stub._permute_to_compact = lambda arr: arr[stub._perm_gpu]
-    stub._unpermute_from_compact = lambda arr: arr[stub._inv_perm_gpu]
-    _bind_turb_source(stub)
-
-    # call 1：des_length_scale 还是 None，第一次调用不会触发它的 halo 交换
-    _GPUDistributedInitMixin._compute_turbulence_source_distributed(stub, dt)
-    assert turb_gpu.des_length_scale is not None
-    assert turb_gpu.des_length_scale.shape == (n_local, n_sps)
-
-    # call 2：这次 des_length_scale 非 None，会真正触发 halo 交换分支——
-    # 用一个"halo 部分填 0，local 部分是本 rank 自己刚写回的值"的假
-    # halo（不追求跨 rank 数值真实性，只验证 shape 路径不崩溃、结果
-    # 形状始终正确——数值正确性已经由 CPU 侧同构代码路径的两步测试
-    # 决定性验证过）。
-    des_ext = np.zeros((len(native_ids), n_sps))
-    des_ext[:n_local] = turb_gpu.des_length_scale
-    fake_halo_gpu.set(des_ext)
-    _GPUDistributedInitMixin._compute_turbulence_source_distributed(stub, dt)
-    assert turb_gpu.des_length_scale.shape == (n_local, n_sps)
-    assert np.all(np.isfinite(turb_gpu.k_field))
 
 
 @pytest.mark.parametrize("rank", [0, 1])

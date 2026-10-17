@@ -53,7 +53,8 @@
 
 适配器接口：`model / xp / red / shape / cell_is_prism / order / solver`、`advance_ramp()`
 （产生项斜坡，每个 Newton 步一次）、`prepare_inputs()`（按**当前**平均流准备冻结输入与标量
-对流几何，耦合残差每次求值都调）、`rates(apply_des)`、`positivity()`、`finalize(dtau)`、
+对流几何，耦合残差每次求值都调）、`rates(commit)`（`commit=True`：最终状态上的求值，分布式后端把涡粘
+写回真正的模型；单机后端求值的就是真正的模型）、`positivity()`、`finalize(dtau)`、
 `cell_colors()`、`block_assembler()`、`coarse_context()`。耦合 Newton 步再要一个包住它的
 耦合适配器（`coupled_step.py` 模块文档"后端适配器"；单机 CPU 是本文件的 `CpuCoupledBackend`）。
 """
@@ -121,9 +122,8 @@ class CpuTurbulenceBackend:
         self._conv_geom = prepare_convection_geometry(
             self.solver, getattr(self.solver, "_turbulence_flat_face_override", None))
 
-    def rates(self, apply_des: bool):
-        return evaluate_turbulence_rates(
-            self.solver, *self._inputs, apply_des=apply_des, conv_geom=self._conv_geom).total()
+    def rates(self, commit: bool = False):
+        return evaluate_turbulence_rates(self.solver, *self._inputs, conv_geom=self._conv_geom).total()
 
     def positivity(self) -> None:
         self.model.apply_positivity_limiter()
@@ -233,10 +233,10 @@ class CpuCoupledBackend:
 
     def install(self, x, dtau) -> None:
         """写入 Newton 步的新状态，再做湍流步后收尾（上界、finalize），并在新的平均流与
-        湍流场上刷新涡粘与 DES 长度尺度（供本步之后的一切消费方使用）。"""
+        湍流场上刷新涡粘（供本步之后的一切消费方使用）。"""
         self.set_trial(x)
         turb = self.turb
         turb.positivity()
         turb.finalize(dtau.reshape(turb.shape))
         turb.prepare_inputs()
-        turb.rates(apply_des=True)
+        turb.rates(commit=True)

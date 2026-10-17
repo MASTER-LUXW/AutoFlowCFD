@@ -115,19 +115,10 @@ class DistributedTurbulenceSolverAdapter:
     `_compute_gradients()`、`_get_cell_volumes()`、
     `_turbulence_flat_face_override`），不是完整 FRSolver 接口。
 
-    DDES/IDDES 支持（2026-09-02 补齐）：`compute_turbulence_source`
-    对 SST/DDES/IDDES 三者复用完全相同的 k/omega 梯度/输运代码路径
-    （只按 `solver.turb_model_name in ["SST","DDES","IDDES"]` 判断，
-    三者结果相同），DES 特有的长度尺度替换是单独一段、只按
-    `solver.ddes_model is not None`（及 `isinstance(..., IDDESModel)`
-    进一步区分 DDES/IDDES）触发——与本适配器已有的"复用单机函数式接口，
-    不重新实现数值逻辑"设计完全一致，只需要真正传入 `ddes_model`（而
-    不是硬编码 `None`）即可。IDDES 额外需要的 `_iddes_h_max`/
-    `_iddes_h_wn`（逐单元网格边长几何量，见 `des.py::
-    compute_h_max_and_h_wn` 文档——纯粹是每个单元自身节点坐标的函数，
-    与相邻单元/分区无关，本来就可以直接对"传统模式"下每个 rank 都持有
-    的完整全局网格算一次、再按 compact_global_ids 切片，不需要新的
-    跨 rank 几何交换基础设施）同样通过构造参数传入。
+    DDES/IDDES：`compute_turbulence_source` 对 SST/DDES/IDDES 复用同一条 k/omega 梯度/输运
+    路径，DES 长度尺度在 SST 源项求值里按当前状态算出（`des_length_for(solver.ddes_model,
+    _iddes_h_max, _iddes_h_wn)`），没有跨步状态。逐单元网格尺度（`des/grid_scale.py::
+    compute_h_max_and_h_wn`，单元自身节点坐标的函数）按 compact_global_ids 切片后由构造参数传入。
     """
 
     def __init__(
@@ -222,26 +213,6 @@ def build_distributed_turbulence_view(
     # 3. 输运场经 halo 交换写进视图（同一个交换器，逐单元形状 (n_sps, n_transported)）
     set_view_fields(turb_view, halo_exchange, dist_fc, turb_model.transported_fields())
 
-    # `des_length_scale` 是跨步持久状态（本步 apply_to_sst_model[_iddes] 用本步 nu_t 算出、
-    # 写回 turb_model.des_length_scale 供下一步读取），n_local 大小，与 k/omega 同一套
-    # "halo 交换、再换到 compact"（2026-09-02 修复：此前原样挂到 n_compact 的视图上，第二次
-    # 调用必现形状不匹配）。首次调用时为 None，与单机首次调用一致。
-    if getattr(turb_model, "des_length_scale", None) is not None:
-        turb_view.des_length_scale = halo_exchange.exchange(turb_model.des_length_scale)[dist_fc.perm]
-    else:
-        turb_view.des_length_scale = None
-
-    if ddes_model is not None:
-        from autoflowcfd.core.turbulence.des import IDDESModel
-        if isinstance(ddes_model, IDDESModel):
-            if iddes_h_max_compact is None or iddes_h_wn_compact is None:
-                raise RuntimeError(
-                    "distributed_compute_turbulence_source_and_viscosity: "
-                    "ddes_model 是 IDDESModel 实例，但 iddes_h_max_compact/"
-                    "iddes_h_wn_compact 未提供——IDDES 的长度尺度公式离不开"
-                    "这两个几何量，不接受静默退化。"
-                )
-
     adapter = DistributedTurbulenceSolverAdapter(
         mesh_adapter, ops, turb_view, wall_distance_compact, mu, dist_fc.base_flat,
         ramp_owner=ramp_owner,
@@ -306,13 +277,10 @@ def distributed_compute_turbulence_source_and_viscosity(
         ddes_model: `DDESModel`/`IDDESModel` 实例（None 时退化为纯 SST，
             与此前行为一致）——调用方（`DistributedFRSolver`）持有的
             真实对象，本函数只是每步复用它，不重新构造。
-        iddes_h_max_compact, iddes_h_wn_compact: (n_compact,) IDDES
-            专用的逐单元网格边长几何量（`des.py::compute_h_max_and_h_wn`
-            的输出按 `dist_fc.compact_global_ids` 切片），`ddes_model`
-            是 `IDDESModel` 实例时必须提供，否则 `compute_turbulence_
-            source` 内部 `isinstance(solver.ddes_model, IDDESModel)`
-            分支会读到 `None` 直接崩溃（有意不做静默兜底，缺几何数据
-            不该悄悄退化成别的行为）。
+        iddes_h_max_compact, iddes_h_wn_compact: (n_compact,) 逐单元最大边长 / 壁法向尺度
+            （`des/grid_scale.py::compute_h_max_and_h_wn` 的输出按 `dist_fc.compact_global_ids`
+            切片）。DDES 需要 h_max、IDDES 两者都要，缺失时 `DESLengthScale` 构造即报错
+            （不静默退化）。
 
     Returns:
         mu_t_field_compact：(n_compact, n_sps)，供 distributed_compute_viscous_residual 的 mu_t_field 参数使用。
@@ -361,15 +329,6 @@ def distributed_compute_turbulence_source_and_viscosity(
     turb_model.set_transported_fields(
         [f[dist_fc.inv_perm][:n_local].copy() for f in turb_view.transported_fields()])
     turb_model.nu_t = turb_view.nu_t[dist_fc.inv_perm][:n_local].copy()
-
-    # DDES/IDDES：des_length_scale 是跨步持久状态（本步 apply_to_sst_
-    # model/_iddes 用本步 nu_t/grad_vel 算出的 l_eff，供*下一步*
-    # compute_source_terms 读取，见类文档"计算顺序"一节）——上面的
-    # k_field/omega_field/nu_t 写回都处理了，这个此前遗漏（2026-09-02
-    # 补齐，与那两个同一个 native/compact 重排写回模式）。
-    if ddes_model is not None and getattr(turb_view, "des_length_scale", None) is not None:
-        des_length_scale_native = turb_view.des_length_scale[dist_fc.inv_perm]
-        turb_model.des_length_scale = des_length_scale_native[:n_local].copy()
 
     # mu_t_field 保持 compact 排列（平均流粘性残差直接消费 compact 索引
     # 空间的场，见 distributed_compute_viscous_residual 里 Q_compact 的

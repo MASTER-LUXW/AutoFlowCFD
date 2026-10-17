@@ -85,7 +85,7 @@ def _transport(solver):
     t = solver.turb_model
     saved = {a: getattr(t, a) for a in t.CACHED_ATTRS if hasattr(t, a)}
     try:
-        tk, tw = evaluate_turbulence_rates(solver, *prepare_turbulence_inputs(solver), apply_des=False).transport
+        tk, tw = evaluate_turbulence_rates(solver, *prepare_turbulence_inputs(solver)).transport
     finally:
         for a, v in saved.items():
             setattr(t, a, v)
@@ -151,7 +151,7 @@ class TestCoupledResidual:
         try:
             be.set_trial(x)
             be.turb.prepare_inputs()
-            rate_k, rate_w = be.turb.rates(apply_des=False)
+            rate_k, rate_w = be.turb.rates()
             r_mean = be.mean_residual(be.trial_mu_t())
         finally:
             be.restore(snap)

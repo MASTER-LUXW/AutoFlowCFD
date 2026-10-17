@@ -99,11 +99,45 @@ def test_wall_points_are_rans():
     np.testing.assert_allclose(l_i, l_rans, rtol=1e-12)
 
 
-def test_apply_requires_current_f1():
-    from types import SimpleNamespace
+def test_binding_validates_grid_scales():
+    with pytest.raises(ValueError, match="h_max"):
+        DDESModel().bind(None)
+    with pytest.raises(ValueError, match="h_wn"):
+        IDDESModel().bind(np.ones(1))
 
-    model = SimpleNamespace(k_field=np.ones((1, 1)), omega_field=np.ones((1, 1)), nu_t=np.ones((1, 1)),
-                            beta_star=BETA_STAR, _last_F1=None)
-    with pytest.raises(RuntimeError, match="F1"):
-        DDESModel().apply(model, d_w=np.ones((1, 1)), nu=1.5e-5, grad_u=_shear(1, 1, 1.0),
-                          h_max=np.ones(1), h_wn=None, xp=np)
+
+@pytest.mark.parametrize("model_cls", [DDESModel, IDDESModel])
+def test_sst_destruction_uses_lengths_from_the_same_evaluation(model_cls):
+    """SST 源项的 DES 破坏项用同一次求值的 F1 与 nu_t（I-179：此前长度尺度在源项之后另算、供下一次
+    求值使用，第一次求值退回 RANS）。k 源项与 RANS 的差恰为两种破坏项（及对应环境项）之差。"""
+    from autoflowcfd.core.turbulence.sst import SSTModelFR
+    from autoflowcfd.core.turbulence.sst.bounds import model_evaluation_fields
+    from autoflowcfd.fr.native_padding import order_from_n_sps
+
+    rng = np.random.default_rng(7)
+    n, m = 3, 8                                   # order 1 的全局解点宽度
+    k_inf, omega_inf, mu, rho = 0.05, 400.0, 1.8e-5, 1.2
+    model = SSTModelFR(n, m, k_inf=k_inf, omega_inf=omega_inf)
+    model.k_field = rng.uniform(0.01, 0.5, (n, m))
+    model.omega_field = rng.uniform(50.0, 5e3, (n, m))
+    Q = np.zeros((n, m, 5))
+    Q[..., 0] = rho
+    Q[..., 4] = 1e5
+    grad_U = rng.normal(scale=200.0, size=(n, m, 3, 3))
+    d = rng.uniform(1e-3, 0.2, (n, m))
+    g0 = np.zeros((n, m, 3))
+    h = rng.uniform(5e-3, 0.05, n)
+    binding = model_cls().bind(h, h * 0.3)
+
+    Sk_rans, _ = model.compute_source_terms(Q, grad_U, d, mu, g0, g0)
+    Sk_des, _ = model.compute_source_terms(Q, grad_U, d, mu, g0, g0, des=binding)
+
+    k_safe, omega_safe = model_evaluation_fields(model.k_field, model.omega_field,
+                                                 model._omega_realizability_min, np)
+    l = model_cls().length_scale(np, k_safe, omega_safe, model.nu_t, mu / rho, d, grad_U, model._last_F1, h,
+                                 order_from_n_sps(m), model.beta_star, h_wn=h * 0.3)
+    k = model.k_field
+    expected = (rho * model.beta_star * k * omega_safe - rho * k * np.sqrt(k) / l
+                + rho * k_inf ** 1.5 / l - rho * model.beta_star * k_inf * omega_inf)
+    np.testing.assert_allclose(Sk_des - Sk_rans, expected, rtol=1e-10, atol=1e-12 * np.abs(Sk_rans).max())
+    assert np.max(np.abs(Sk_des - Sk_rans)) > 1e-3 * np.abs(Sk_rans).max()

@@ -11,6 +11,7 @@ from autoflowcfd.core.turbulence.registry import is_sa_family, is_sst_family
 from autoflowcfd.core.turbulence.transported import TurbulenceRates
 from autoflowcfd.core.fr_operators.corrected_gradient import source_velocity_gradient
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+from autoflowcfd.core.turbulence.des import des_length_for
 from .init import (
     _update_production_ramp,
 )
@@ -30,7 +31,7 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
     _update_production_ramp(solver)
 
     Q, grad_vel, d_wall, mu = prepare_turbulence_inputs(solver)
-    rates = evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, apply_des=True)
+    rates = evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu)
 
     solver.turb_model.update_fields(dt, rates.source, rates.transport)
     finalize_turbulence_update(solver)
@@ -79,7 +80,7 @@ def prepare_turbulence_inputs(solver):
     return Q, grad_vel, d_wall, solver.mu_molecular
 
 
-def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, apply_des: bool, conv_geom=None):
+def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, conv_geom=None):
     """在 `turb_model` 当前的输运场上求各 Newton 未知量的时间导数。
 
     SA-neg 走 `turbulence/sa/rates.py::evaluate_sa_rates`（后端无关的一份算法，这里注入 CPU 的
@@ -91,9 +92,7 @@ def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, apply_des: boo
     ——显式路径的 `update_fields` 只对源项做点隐式阻尼，所以两者必须分开。
 
     副作用：`compute_source_terms` 会刷新模型上的 `nu_t`、混合 `beta` 与
-    realizability 下限（都是当前场的函数）。`apply_des=True` 时还按刚算出的
-    `nu_t` 刷新 DES 长度尺度（供**下一步**用，见下方原注释）——隐式路径的
-    每次残差求值必须传 `False`，否则 Newton 内部的试探场会改写它。
+    realizability 下限（都是当前场的函数，DES 长度尺度也在同一次求值里算出、不跨步保存）。
 
     `conv_geom`：标量对流的共享几何（只依赖平均流），隐式路径在 Newton 步起点
     算一次传入（`transport/residual.py::prepare_convection_geometry`）。
@@ -123,27 +122,10 @@ def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, apply_des: boo
             compute_scalar_gradient(log_omega(omega, np)[:, :, np.newaxis], solver.ops, solver.mesh), np)
         grad_omega = omega[:, :, np.newaxis] * grad_w
 
-    # DDES 的有效长度尺度 (sst_model.des_length_scale) 依赖涡粘 nu_t，而
-    # nu_t 只在 compute_source_terms 内部才会被重新计算（sst_model.nu_t 是
-    # 上一次调用留下的缓存），两者互相依赖对方的输出，天然只能"慢一拍"：
-    # apply_to_sst_model 必须排在 compute_source_terms 之后，用这一步刚算
-    # 出的 nu_t 算出 des_length_scale，供*下一步*使用——这是有意为之的
-    # 近似（同阶数内连续迭代时物理上完全合理），不是疏忽，因此调用顺序
-    # 本身不能颠倒（真实网格已验证：颠倒后 nu_t 变成读取上一步的旧维度
-    # 缓存，问题只是从 des_length_scale 转移到 nu_t，没有解决）。
-    #
-    # 真正需要处理的是"跨阶数切换"这一刻：des_length_scale 是按上一个阶数
-    # 的 SPs 维度算出的，阶数切换后与已经正确插值过的 k_field 形状不匹配。
-    # 修复见 order_continuation.py：阶数切换时显式清空 des_length_scale，
-    # 让切换后的第一步自动退回标准 RANS 耗散项（不依赖过期维度的缓存），
-    # 而不是在这里颠倒调用顺序。
-    Sk, S_omega = solver.turb_model.compute_source_terms(Q, grad_vel, d_wall, mu, grad_k=grad_k, grad_omega=grad_omega)
-
-    if apply_des and solver.ddes_model is not None:
-        # DES 长度尺度用本步刚算出的 F1 与 nu_t（排在源项之后），供下一次源项求值的 k 破坏项使用
-        solver.ddes_model.apply(
-            solver.turb_model, d_w=d_wall, nu=mu / np.maximum(Q[:, :, 0], 1e-10), grad_u=grad_vel,
-            h_max=solver._iddes_h_max, h_wn=solver._iddes_h_wn, xp=np)
+    # DES 族：破坏项长度尺度在同一次源项求值里用本次的 F1 与 nu_t 算出（`turbulence/sst/source.py`）
+    des = des_length_for(solver.ddes_model, getattr(solver, "_iddes_h_max", None), getattr(solver, "_iddes_h_wn", None))
+    Sk, S_omega = solver.turb_model.compute_source_terms(Q, grad_vel, d_wall, mu, grad_k=grad_k, grad_omega=grad_omega,
+                                                         des=des)
 
     # Sk/S_omega 是 compute_source_terms 按标准 SST 公式算出的 rho*k、
     # rho*omega 方程源项（P_k/D_k/P_omega/D_omega/CD_omega 都显式带 rho

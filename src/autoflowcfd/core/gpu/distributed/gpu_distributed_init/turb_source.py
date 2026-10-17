@@ -47,7 +47,7 @@ class _GPUDistributedTurbSourceMixin:
         advance_production_ramp(self, self.turb_model_gpu)
         ctx = self._prepare_turbulence_view_distributed()
         self._sync_turbulence_view(ctx)
-        rates = self._evaluate_turbulence_rates_distributed(ctx, apply_des=True)
+        rates = self._evaluate_turbulence_rates_distributed(ctx)
         # 场更新（模型的点隐式阻尼 + 输运：SST 见 sst/update.py::advance_k_log_omega，SA 见 sa/model.py）
         ctx.view.update_fields(dt, rates.source, rates.transport)
         self._finalize_turbulence_update_distributed(ctx)
@@ -102,13 +102,6 @@ class _GPUDistributedTurbSourceMixin:
         model = self.turb_model_gpu
         view = model.like(n_compact, n_sps, wall_distance=self.wall_distance_gpu)
 
-        # DDES/IDDES 的 des_length_scale 是跨步持久状态（上一步用上一步 nu_t
-        # 算出、本步读取），与 k/omega 同一套 halo 交换 + compact 重排，不能把
-        # n_local 大小的数组直接挂到 compact 视图上（2026-09-02 修复）
-        view.des_length_scale = None
-        if self.ddes_model_gpu is not None and getattr(model, "des_length_scale", None) is not None:
-            view.des_length_scale = self._permute_to_compact(self.gpu_halo.exchange(model.des_length_scale))
-
         from autoflowcfd.core.gpu.residual.gpu_flux import conserved_to_primitive_gpu
 
         Q_compact = conserved_to_primitive_gpu(U_compact[..., :5])
@@ -145,14 +138,15 @@ class _GPUDistributedTurbSourceMixin:
             self.gpu_halo.exchange(ctx.cp.stack(self.turb_model_gpu.transported_fields(), axis=-1)))
         ctx.view.set_transported_fields([stacked[..., j].copy() for j in range(stacked.shape[-1])])
 
-    def _evaluate_turbulence_rates_distributed(self, ctx, *, apply_des: bool):
+    def _evaluate_turbulence_rates_distributed(self, ctx):
         """在 compact 视图当前的 k/omega 上求 k 与 `w = ln(omega)` 的 `TurbulenceRates`
         （compact 排列；源项部分已除以 rho，与单机 `gpu_solver_io.py::_evaluate_turbulence_rates_gpu`
         同一套变换）。
 
-        副作用同单机：刷新视图上的 nu_t / 混合 beta；`apply_des=True` 时按刚算出
-        的 nu_t 刷新 DES 长度尺度（供下一步用）——隐式路径的试探求值必须传 False。
+        副作用同单机：刷新视图上的 nu_t / 混合 beta（DES 长度尺度在同一次源项求值里算出，
+        网格尺度取 compact 空间的一份）。
         """
+        from autoflowcfd.core.turbulence.des import des_length_for
         from autoflowcfd.core.turbulence.registry import is_sa_family
 
         if is_sa_family(self.turb_model_name):
@@ -179,15 +173,9 @@ class _GPUDistributedTurbSourceMixin:
             compute_physical_scalar_gradient_gpu(log_omega(omega, cp), self.mesh_data, self.ops_data), cp)
         grad_omega = omega[:, :, None] * grad_w
 
-        Sk, S_omega = view.compute_source_terms_gpu(
-            ctx.Q, ctx.grad_vel, ctx.d_wall, self.mu_molecular, grad_k, grad_omega)
-
-        # DDES/IDDES 长度尺度必须排在源项**之后**（"慢一拍"耦合：源项用上一步
-        # 的长度尺度，算完再用本步 nu_t 写下一步要用的，见单机 gpu_solver_io.py）
-        if apply_des and self.ddes_model_gpu is not None:
-            self.ddes_model_gpu.apply(
-                view, d_w=ctx.d_wall, nu=self.mu_molecular / cp.maximum(ctx.rho, 1e-10), grad_u=ctx.grad_vel,
-                h_max=self.iddes_h_max_compact, h_wn=self.iddes_h_wn_compact, xp=cp)
+        des = des_length_for(self.ddes_model_gpu, self.iddes_h_max_compact, self.iddes_h_wn_compact)
+        Sk, S_omega = view.compute_source_terms(
+            ctx.Q, ctx.grad_vel, ctx.d_wall, self.mu_molecular, grad_k, grad_omega, des=des)
 
         dk_dt = Sk / cp.maximum(ctx.rho, 1e-10)
         dw_dt = S_omega / (cp.maximum(ctx.rho, 1e-10) * omega)
@@ -215,9 +203,9 @@ class _GPUDistributedTurbSourceMixin:
 
 
     def _write_back_turbulence_distributed(self, ctx, *, fields: bool) -> None:
-        """compact 视图的结果换回原生排列、切 local 段写回真正的模型：nu_t 与
-        DES 长度尺度总是写；`fields=True` 时连输运场一起写（隐式路径的输运场
-        由 Newton 步直接更新在模型上，只在 finalize 之后写回）。"""
+        """compact 视图的结果换回原生排列、切 local 段写回真正的模型：nu_t 总是写；
+        `fields=True` 时连输运场一起写（隐式路径的输运场由 Newton 步直接更新在模型上，
+        只在 finalize 之后写回）。"""
         n_local = self.partition.n_local_cells
         model = self.turb_model_gpu
         view = ctx.view
@@ -225,5 +213,3 @@ class _GPUDistributedTurbSourceMixin:
             model.set_transported_fields(
                 [self._unpermute_from_compact(f)[:n_local].copy() for f in view.transported_fields()])
         model.nu_t = self._unpermute_from_compact(view.nu_t)[:n_local].copy()
-        if self.ddes_model_gpu is not None and getattr(view, "des_length_scale", None) is not None:
-            model.des_length_scale = self._unpermute_from_compact(view.des_length_scale)[:n_local].copy()

@@ -256,17 +256,9 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
                 self.dist_flat_face, mesh, wall_distance_source)
             apply_distributed_wall_distance(self.turb_model, self.wall_distance_compact, self)
 
-            # DDES/IDDES（2026-09-02）：`init_turbulence_models` 的 DDES/
-            # IDDES 分支已经把 `self.ddes_model` 设成真实的 DDESModel/
-            # IDDESModel 实例（复用单机同一份初始化逻辑，鸭子类型只需要
-            # `.turb_model_name`）。IDDES 分支还顺带把
-            # `self._iddes_h_max`/`self._iddes_h_wn` 设成了**全局**尺寸
-            # （`compute_h_max_and_h_wn(solver.mesh)` 用 `self.mesh`——
-            # "传统模式"下就是完整全局网格，与 h_max/h_wn 纯粹是"每个
-            # 单元自身节点坐标的函数、和相邻单元/分区无关"这一事实一致，
-            # 见 des.py::compute_h_max_and_h_wn 文档）——这里只需要按
-            # compact_global_ids 切一次片，得到分布式 adapter 真正需要
-            # 的 compact 索引空间版本，不需要任何新的跨 rank 几何交换。
+            # DDES/IDDES：`init_turbulence_models` 已设好 `self.ddes_model` 与**全局**尺寸的
+            # `self._iddes_h_max/_iddes_h_wn`（"传统模式"下 self.mesh 是完整全局网格；两者是单元
+            # 自身节点坐标的函数，与分区无关），按 compact_global_ids 切片即得 compact 空间版本。
             if turb_model_upper in ('DDES', 'IDDES'):
                 assert self.ddes_model is not None, (
                     "init_turbulence_models 应该已经为 DDES/IDDES 设置了 "
@@ -274,20 +266,9 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
                     "被跳过或修改，需要检查 turbulence.py::init_turbulence_"
                     "models 的 DDES/IDDES 分支是否还在。"
                 )
-            if turb_model_upper == 'IDDES':
                 compact_global_ids = self.dist_flat_face.compact_global_ids
                 self.iddes_h_max_compact = self._iddes_h_max[compact_global_ids]
                 self.iddes_h_wn_compact = self._iddes_h_wn[compact_global_ids]
-            elif turb_model_upper == 'DDES':
-                # DDES（2026-09-02 补齐，与 IDDES 同一处理）：
-                # `init_turbulence_models` 现在也会为 DDES 分支设置
-                # `self._iddes_h_max`（见 fr_solver/turbulence.py 对应
-                # 分支——`apply_to_sst_model` 用它换成各向异性感知的
-                # max_edge 网格尺度，不再是 cube_root(V)），这里同样切
-                # 一次片得到 compact 索引空间版本。DDES 不需要 h_wn
-                # （那是 IDDES 专属的近壁法向间距量），不切它。
-                compact_global_ids = self.dist_flat_face.compact_global_ids
-                self.iddes_h_max_compact = self._iddes_h_max[compact_global_ids]
 
 
         # 7. 时间推进器：与单机 FRSolver 同一套 Shu-Osher SSP-RK3 stage

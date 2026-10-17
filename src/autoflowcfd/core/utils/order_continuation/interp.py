@@ -197,20 +197,7 @@ def interpolate_to_new_order(solver: Any, new_order: int):
     # （`run.py` -> `recompute_wall_distance_for_current_order`）。此前这里先插值"让形状对上"，
     # 没有来源时插值结果就被静默保留（2026-09-06 修掉的同类缺陷）。
 
-    # DDES 的有效长度尺度按上一个阶数的 SPs 维度算出，阶数变化后与刚插值
-    # 完的 k_field 形状不再匹配——不能像 k_field/omega_field/wall_distance
-    # 那样直接插值（它依赖 nu_t，而 nu_t 要到这一阶数第一次
-    # compute_source_terms 调用后才会被重新算出，插值一个维度对但物理上
-    # 过期的值没有意义），直接清空即可：下一步 compute_source_terms 会
-    # 因为 des_length_scale is None 自动退回标准 RANS 耗散项（物理上是
-    # 合理的边界处理，见 fr_solver_turbulence.py 的文档），再下一步
-    # apply_to_sst_model 就能用这一阶数正确维度的 nu_t 重新算出它（真实
-    # 网格已复现：不清空会在 P1->P2 等跨阶数切换时因形状不匹配崩溃）。
-    if getattr(solver, "turb_model", None) is not None and hasattr(solver.turb_model, "des_length_scale"):
-        solver.turb_model.des_length_scale = None
-
-    # 同一类"残差计算之后才更新的缓存量，跨阶数切换后维度过期"问题
-    # （见上面 des_length_scale 的处理）：LES/WMLES 的 SGS 涡粘
+    # "残差计算之后才更新的缓存量，跨阶数切换后维度过期"：LES/WMLES 的 SGS 涡粘
     # (sgs_model.nu_t) 由 apply_turbulence_corrections 在 step() 末尾算出，
     # 但 compute_viscous_residual（同一步更早）就要读取它——跨阶数切换后
     # 直接清空，get_turbulent_viscosity_field 已经对 None 做了判断（这一

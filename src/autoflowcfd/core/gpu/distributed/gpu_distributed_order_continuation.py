@@ -96,16 +96,6 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
             new_fields_np = solver.turb_model_gpu.freestream_fields((n_local, new_n_sps), np)
             new_nu_t_np = np.zeros((n_local, new_n_sps))
 
-    if solver.ddes_model_gpu is not None:
-        # DDES/IDDES 有效长度尺度：与 CPU 版同一处理，清空而不是插值
-        # （依赖 nu_t，nu_t 要到本阶数第一次 compute_source 调用后才会
-        # 被重新算出，见 order_continuation.py::interpolate_to_new_order
-        # 对应文档）。
-        if hasattr(solver, 'des_length_scale_gpu'):
-            solver.des_length_scale_gpu = None
-    if getattr(solver, 'sgs_model_gpu', None) is not None:
-        # WALE 没有跨步持久 nu_t 状态（每步现算），无需处理。
-        pass
 
     # --- 2. mesh/ops 切换（mesh 是"传统模式"下每个 rank 都持有的完整
     # 全局网格）---

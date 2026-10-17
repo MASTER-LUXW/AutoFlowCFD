@@ -51,11 +51,6 @@ def _interp_state_and_turbulence_local(solver, old_order: int,
         # 才插值（可能在 compute_source 刷新前已经是别的形状/尚未构造）。
         if getattr(turb_model, 'nu_t', None) is not None and turb_model.nu_t.shape[1] == old_local_U.shape[1]:
             turb_model.nu_t = _lift(turb_model.nu_t[:n_local])
-        # des_length_scale：同 order_continuation.py 文档"DDES 有效长度
-        # 尺度"一节的处理——清空而不是插值，下一步 compute_source 会
-        # 用新阶数维度重新算出。
-        if hasattr(turb_model, 'des_length_scale'):
-            turb_model.des_length_scale = None
 
     sgs_model = getattr(solver, 'sgs_model', None)
     if sgs_model is not None and hasattr(sgs_model, 'nu_t'):
@@ -72,7 +67,7 @@ def _rebuild_cpu_traditional_partition_and_state(solver, target_p: int, new_loca
     调用方（`cpu_traditional_interpolate_to_new_order`/
     `_reset_cpu_traditional_to_p0`）负责在调用**之前**把
     `solver.turb_model.k_field`/`.omega_field`/`.nu_t`/
-    `.des_length_scale`/`solver.sgs_model.nu_t` 处理成新阶数的形状
+    `solver.sgs_model.nu_t` 处理成新阶数的形状
     （插值或重置，两条路径的处理方式不同）——这些字段只按
     `n_local`（阶数切换不变，见下）存储，与本函数要重建的
     partition/dist_flat_face 无关，不需要等这里的重建完成。
@@ -238,8 +233,6 @@ def cpu_traditional_interpolate_to_new_order(solver, target_p: int) -> None:
             solver.turb_model.set_transported_fields(solver.turb_model.freestream_fields((n_local, new_n_sps), np))
             if hasattr(solver.turb_model, 'nu_t'):
                 solver.turb_model.nu_t = np.zeros((n_local, new_n_sps))
-            if hasattr(solver.turb_model, 'des_length_scale'):
-                solver.turb_model.des_length_scale = None
         if getattr(solver, 'sgs_model', None) is not None and hasattr(solver.sgs_model, 'nu_t'):
             solver.sgs_model.nu_t = None
 

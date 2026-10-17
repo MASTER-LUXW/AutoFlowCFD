@@ -60,6 +60,7 @@ def turbulence_linearization(solver_like, turb, inputs, conv_geom, flat):
     `solver_like` 是湍流残差实际求值的那个对象（单机为求解器，分布式为紧凑空间适配器），
     壁面/开放边界掩码与 omega 壁面目标值取自与残差同一组函数。
     """
+    from autoflowcfd.core.turbulence.des import des_length_for
     from autoflowcfd.core.turbulence.sa import SAModel
     from autoflowcfd.core.turbulence.transport.omega_wall import (
         _compute_omega_wall_target, _compute_open_boundary_face_mask, _compute_wall_dirichlet_face_mask,
@@ -86,4 +87,6 @@ def turbulence_linearization(solver_like, turb, inputs, conv_geom, flat):
         mesh=solver_like.mesh, ops=solver_like.ops, flat=flat, turb=turb, Q=Q, grad_vel=grad_vel,
         d_wall=d_wall, mu=float(mu), conv_geom=conv_geom, dirichlet_faces=faces, dirichlet_values=values,
         open_face=_compute_open_boundary_face_mask(solver_like, flat), pointwise=pointwise,
-        strong_rows=strong_rows)
+        strong_rows=strong_rows,
+        des=des_length_for(getattr(solver_like, "ddes_model", None), getattr(solver_like, "_iddes_h_max", None),
+                           getattr(solver_like, "_iddes_h_wn", None)))

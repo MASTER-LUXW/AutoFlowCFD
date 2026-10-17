@@ -36,18 +36,19 @@ def n_pointwise_inputs(nv: int) -> int:
 class TurbulencePointwise:
     """SST 的逐点 `(S, Gamma)` 求值器（主机数组，各 `(n_cells, n_sps, 2)`），全部后端共用；后端只
     注入它自己的源项求值（与该后端残差同一份）
-    `source(Q, grad_vel, d_wall, mu, grad_k, grad_omega) -> (S_k, S_omega)`，扩散系数读源项刷新的
+    `source(Q, grad_vel, d_wall, mu, grad_k, grad_omega, des=) -> (S_k, S_omega)`（`des` 为 DES 长度尺度
+    求值器，与残差同一个，`core/turbulence/des/ddes.py::DESLengthScale`），扩散系数读源项刷新的
     模型缓存（`turbulence_diffusivities`，numpy / cupy 同一份）。
 
     求值时临时把 `k/omega` 场换成试探值（`omega = exp(w)`），结束后恢复场与源项刷新的缓存。
     做成类而不是闭包（项目规范）。CPU 用 `cpu_turbulence_pointwise` 构造。
     """
 
-    __slots__ = ("xp", "turb", "Q", "grad_vel", "d_wall", "mu", "source")
+    __slots__ = ("xp", "turb", "Q", "grad_vel", "d_wall", "mu", "source", "des")
 
-    def __init__(self, xp, turb, Q, grad_vel, d_wall, mu, source):
+    def __init__(self, xp, turb, Q, grad_vel, d_wall, mu, source, des=None):
         self.xp, self.turb, self.Q, self.grad_vel, self.d_wall = xp, turb, Q, grad_vel, d_wall
-        self.mu, self.source = float(mu), source
+        self.mu, self.source, self.des = float(mu), source, des
 
     def __call__(self, u, g):
         xp, turb = self.xp, self.turb
@@ -58,7 +59,7 @@ class TurbulencePointwise:
         try:
             gk = clip_gradient_magnitude(xp.ascontiguousarray(xp.asarray(g[..., 0, :])), xp)
             gw = clip_gradient_magnitude(xp.ascontiguousarray(xp.asarray(g[..., 1, :])), xp)
-            Sk, Sw = self.source(self.Q, self.grad_vel, self.d_wall, self.mu, gk, omega[..., None] * gw)
+            Sk, Sw = self.source(self.Q, self.grad_vel, self.d_wall, self.mu, gk, omega[..., None] * gw, des=self.des)
             Gk, Gw = turbulence_diffusivities(turb, self.Q[:, :, 0] * turb.nu_t, self.mu)
         finally:
             turb.field_restore(snap)
@@ -66,9 +67,9 @@ class TurbulencePointwise:
         return _host(xp.stack([Sk, S_w], axis=-1)), _host(xp.stack([Gk, Gw], axis=-1))
 
 
-def cpu_turbulence_pointwise(turb, Q, grad_vel, d_wall, mu) -> TurbulencePointwise:
+def cpu_turbulence_pointwise(turb, Q, grad_vel, d_wall, mu, des=None) -> TurbulencePointwise:
     """单机 / CPU 分布式的 SST 逐点求值器（`SSTModelFR` 的源项）。"""
-    return TurbulencePointwise(np, turb, Q, grad_vel, d_wall, mu, turb.compute_source_terms)
+    return TurbulencePointwise(np, turb, Q, grad_vel, d_wall, mu, turb.compute_source_terms, des)
 
 
 def turbulence_pointwise_partials(evaluate, u, g, scales):

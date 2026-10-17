@@ -198,11 +198,10 @@ class TestGPUTurbulenceSST:
         # 纯剪切流：du/dy = 1, 其他梯度为零
         grad_u = cupy.zeros((2, 4, 3, 3))
         grad_u[:, :, 0, 1] = 1.0  # du/dy = 1
-        S_mag = sst.compute_strain_rate_magnitude_gpu(grad_u)
+        S_mag = sst.compute_strain_rate_magnitude(grad_u)
         S_np = cupy.asnumpy(S_mag)
         # |S| = sqrt(2 * S_ij * S_ij) = sqrt(2 * 0.5^2 * 2) = 1
         np.testing.assert_allclose(S_np, 1.0, rtol=1e-10)
-        sst.cleanup()
 
     def test_blending_functions_range(self):
         """Blending functions F1, F2 应在 [0, 1] 范围内。"""
@@ -215,14 +214,13 @@ class TestGPUTurbulenceSST:
         rho = cupy.ones((10, 4)) * 1.225
         CD_kw = cupy.ones((10, 4)) * 1e-5
 
-        F1 = sst.compute_blending_F1_gpu(k, omega, d, nu, rho, CD_kw)
-        F2 = sst.compute_blending_F2_gpu(k, omega, d, nu)
+        F1 = sst.compute_blending_function_F1(k, omega, d, nu, rho, CD_kw)
+        F2 = sst.compute_blending_function_F2(k, omega, d, nu)
 
         F1_np = cupy.asnumpy(F1)
         F2_np = cupy.asnumpy(F2)
         assert np.all(F1_np >= 0) and np.all(F1_np <= 1)
         assert np.all(F2_np >= 0) and np.all(F2_np <= 1)
-        sst.cleanup()
 
     def test_eddy_viscosity_positive(self):
         """涡粘系数应为正值。"""
@@ -234,10 +232,9 @@ class TestGPUTurbulenceSST:
         S_mag = cupy.ones((5, 4)) * 10.0
         F2 = cupy.ones((5, 4)) * 0.5
 
-        nu_t = sst.compute_eddy_viscosity_gpu(k, omega, rho, S_mag, F2, mu=1.8e-5)
+        nu_t = sst.compute_eddy_viscosity(k, omega, rho, S_mag, F2, mu=1.8e-5)
         nu_t_np = cupy.asnumpy(nu_t)
         assert np.all(nu_t_np > 0)
-        sst.cleanup()
 
     def test_source_terms_shape(self):
         """源项输出形状应与输入一致。"""
@@ -253,12 +250,11 @@ class TestGPUTurbulenceSST:
         grad_k = cupy.zeros((n_cells, n_sps, 3))
         grad_omega = cupy.zeros((n_cells, n_sps, 3))
 
-        Sk, S_omega = sst.compute_source_terms_gpu(
+        Sk, S_omega = sst.compute_source_terms(
             Q, grad_U, d_wall, 1.8e-5, grad_k, grad_omega
         )
         assert Sk.shape == (n_cells, n_sps)
         assert S_omega.shape == (n_cells, n_sps)
-        sst.cleanup()
 
 
 class TestGPUHaloExchange:

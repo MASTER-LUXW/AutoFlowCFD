@@ -94,7 +94,7 @@ class CoupledResidual:
         try:
             be.set_trial(x)
             be.turb.prepare_inputs()
-            rates = be.turb.rates(apply_des=False)
+            rates = be.turb.rates()
             out = xp.empty((x.shape[0], N_MEAN_FLOW_VARS + len(rates)), dtype=xp.float64)
             out[:, :N_MEAN_FLOW_VARS] = be.mean_residual(be.trial_mu_t())
             for j, rate in enumerate(rates):
@@ -204,7 +204,7 @@ class CoupledBlockPreconditioner:
         try:
             be.set_trial(u0)
             be.turb.prepare_inputs()
-            be.turb.rates(apply_des=False)
+            be.turb.rates()
             mu_t0 = be.trial_mu_t()
             self.mean.assembler = be.mean_assembler(mu_t0)
             self.turb.assembler = be.turb.block_assembler()

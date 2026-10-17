@@ -29,10 +29,20 @@ def _build_source_term_inputs(n_cells, n_sps, grad_U_value=0.0):
     return Q, grad_U, d_wall, grad_k, grad_omega
 
 
-def _sources(model, grad_U_value=0.0):
+def _sources(model, grad_U_value=0.0, des=None):
     n_cells, n_sps = model.k_field.shape
     Q, grad_U, d_wall, grad_k, grad_omega = _build_source_term_inputs(n_cells, n_sps, grad_U_value)
-    return model.compute_source_terms(Q, grad_U, d_wall, mu=1.8e-5, grad_k=grad_k, grad_omega=grad_omega)
+    return model.compute_source_terms(Q, grad_U, d_wall, mu=1.8e-5, grad_k=grad_k, grad_omega=grad_omega, des=des)
+
+
+class _ConstantLength:
+    """DES 长度尺度求值器的替身：处处返回同一个长度（只检验 DES 分支的破坏项与环境项配对）。"""
+
+    def __init__(self, length):
+        self.length = length
+
+    def __call__(self, xp, k, *args):
+        return xp.full(k.shape, self.length)
 
 
 class TestAmbientSustainingTerms:
@@ -53,8 +63,7 @@ class TestAmbientSustainingTerms:
         model = SSTModelFR(2, 1, k_inf=K_INF, omega_inf=OMEGA_INF)
         model.k_field[:] = K_INF
         model.omega_field[:] = OMEGA_INF
-        model.des_length_scale = np.full((2, 1), 0.02)
-        Sk, _ = _sources(model)
+        Sk, _ = _sources(model, des=_ConstantLength(0.02))
         assert np.max(np.abs(Sk)) <= 1e-12 * 1.225 * K_INF ** 1.5 / 0.02
 
     def test_decay_below_ambient_is_restored(self):

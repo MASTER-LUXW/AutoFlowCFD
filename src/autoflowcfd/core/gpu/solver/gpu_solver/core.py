@@ -202,6 +202,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         self.turb_model_name = turb_model_upper   # 与 CPU 版同一约定（大写）
         self.turb_model_gpu = None  # GPU 输运湍流模型（SST/DDES/IDDES 共用 GPUTurbulenceSST；SA-neg 为 SAModel）
         self.ddes_model_gpu = None  # GPU DDES/IDDES 长度尺度计算器（可选）
+        self._iddes_h_max_gpu = self._iddes_h_wn_gpu = None  # DES 逐单元网格尺度（DDES/IDDES 时设置）
         self.sgs_model_gpu = None  # GPU WALE 亚格子模型（WMLES/LES 共用，可选）
         # WMLES 激活时构造真实的 CPU 版 WMLESModel 实例（与 CPU 版
         # fr_solver_turbulence.py::init_turbulence_models 完全同一个类，
@@ -267,8 +268,8 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
             self._update_primitives_gpu()
 
         # 初始化 GPU 湍流模型（#7：SST/DDES/IDDES 共用同一个 GPUTurbulenceSST
-        # 源项 ODE，DDES/IDDES 只是额外提供一个 des_length_scale 替换掉
-        # SST 内部的 RANS 耗散长度尺度，见 core/turbulence/des/ddes.py 模块文档；
+        # 源项 ODE，DDES/IDDES 只是在源项求值里把 RANS 耗散长度尺度换成 DES 长度尺度，
+        # 见 core/turbulence/des/ddes.py 模块文档；
         # WMLES/LES 不构造 SST，只构造 WALEModel，与 CPU 版
         # fr_solver/turbulence/init.py::init_turbulence_models 分支结构一致）。
         if turb_model_upper == "SA":

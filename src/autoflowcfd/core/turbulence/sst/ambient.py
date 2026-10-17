@@ -40,13 +40,14 @@ DES 分支用同一个长度尺度 `l_eff` 求环境耗散，是为了让 DDES/I
 """
 
 
-def ambient_sustaining_terms(model, rho, beta, xp):
+def ambient_sustaining_terms(model, rho, beta, xp, l_des=None):
     """返回 `(S_k^amb, S_omega^amb)`，与 `compute_source_terms` 的 `Sk`/`S_omega`
-    同量纲、可直接相加（形状随 `rho`/`beta` 广播）。"""
+    同量纲、可直接相加（形状随 `rho`/`beta` 广播）。`l_des`：同一次求值的 DES 长度尺度（已有正下限），
+    None 为 RANS。"""
     k_amb = float(model.k_inf)
     omega_amb = float(model.omega_inf)
-    if model.des_length_scale is not None:
-        s_k = rho * k_amb ** 1.5 / xp.maximum(model.des_length_scale, 1e-10)
+    if l_des is not None:
+        s_k = rho * k_amb ** 1.5 / l_des
     else:
         s_k = rho * (model.beta_star * k_amb * omega_amb)
     s_omega = rho * beta * omega_amb ** 2

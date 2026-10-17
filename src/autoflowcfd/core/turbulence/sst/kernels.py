@@ -47,8 +47,17 @@ def _strain_vorticity_magnitude_kernel(grad_u, s_out, w_out) -> None:
             w_out[c, sp] = np.sqrt(2.0 * acc_w)
 
 
-def compute_strain_and_vorticity_magnitude(grad_u: np.ndarray):
-    """同时返回 (|S|, |Omega|)，见 `_strain_vorticity_magnitude_kernel` 文档。"""
+def compute_strain_and_vorticity_magnitude(grad_u):
+    """同时返回 (|S|, |Omega|)。主机数组走上面的融合 numba 核；设备数组（cupy）用同一公式的
+    数组表达式（逐元素运算在 GPU 上本来就是并行的，没有主机侧那份中间大数组的问题）。"""
+    from autoflowcfd.core.utils.array_module import array_module
+
+    xp = array_module(grad_u)
+    if xp is not np:
+        gt = xp.swapaxes(grad_u, -1, -2)
+        S = 0.5 * (grad_u + gt)
+        W = 0.5 * (grad_u - gt)
+        return xp.sqrt(2.0 * xp.sum(S * S, axis=(-2, -1))), xp.sqrt(2.0 * xp.sum(W * W, axis=(-2, -1)))
     g = np.ascontiguousarray(grad_u)
     n_cells, n_sps = g.shape[0], g.shape[1]
     s_out = np.empty((n_cells, n_sps))

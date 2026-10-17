@@ -165,7 +165,7 @@ class _MultiGPUSteppingMixin:
 
             turb_backend = MultiGpuTurbulenceBackend(self, cell_is_prism, order_now)
             turb_backend.prepare_inputs()
-            turb_backend.rates(apply_des=False)
+            turb_backend.rates()
             mu_t_field = turb_backend.trial_mu_t_compact()
         else:
             # turb_model_gpu 为 None（turbulence_model='none'）时恒返回 None
