@@ -155,3 +155,21 @@ def test_fixed_order_loop_converges_by_the_relative_criterion(monkeypatch):
     result = FRSolver.solve(stub, max_iter=10, dt=1e-4, tol=1e-6)
     assert result.converged is True and calls["step"] == 7
 
+
+
+def test_phase_baseline_from_an_older_residual_definition_is_not_reused():
+    """阶段基准随 checkpoint 带上残差范数定义版本；旧定义（或没有版本）写出的基准与当前残差不可比，不做种子。"""
+    from autoflowcfd.core.time_integration.residual_norm import RESIDUAL_NORM_VERSION
+    from autoflowcfd.core.utils.order_continuation.checkpoint_state import (
+        phase_state_metadata, restore_phase_state,
+    )
+
+    meta = phase_state_metadata(SimpleNamespace(_phase_initial_residual=3.5))
+    assert meta["residual_norm_version"] == RESIDUAL_NORM_VERSION
+    fresh = SimpleNamespace()
+    restore_phase_state(fresh, meta)
+    assert fresh._phase_initial_residual == 3.5
+    for old in ({"phase_initial_residual": 3.5}, {"phase_initial_residual": 3.5, "residual_norm_version": 1}):
+        s = SimpleNamespace()
+        restore_phase_state(s, old)
+        assert not hasattr(s, "_phase_initial_residual")

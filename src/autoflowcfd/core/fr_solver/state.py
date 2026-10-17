@@ -86,16 +86,6 @@ class FRState:
         """
         _update_primitives_kernel(self.U, self.Q)
 
-    def get_residual_norm(self) -> float:
-        """计算残差的 RMS 范数（按单元数归一化），用于收敛性判断。
-
-        使用 RMS (Root Mean Square) 而非原始 L2 范数，使残差量级与网格尺寸无关，
-        便于不同网格间的收敛行为对比。RMS = L2 / sqrt(N)，其中 N 是总自由度数。
-        """
-        n_total = self.dU_dt.size  # n_cells * n_sps * n_vars
-        if n_total == 0:
-            return 0.0
-        return np.linalg.norm(self.dU_dt) / np.sqrt(n_total)
 
 
 @njit(cache=True, parallel=True)

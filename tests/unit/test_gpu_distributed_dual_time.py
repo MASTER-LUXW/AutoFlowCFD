@@ -124,7 +124,7 @@ def _make_stub(n_local, n_sps, n_vars, target):
 
     def _global_residual_norm(res_flat):
         return float(np.linalg.norm(res_flat))
-    stub._global_residual_norm = _global_residual_norm
+    stub._monitor_residual_norm = _global_residual_norm
 
     stub._calls = calls
     return stub

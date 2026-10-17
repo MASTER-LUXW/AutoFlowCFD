@@ -11,6 +11,7 @@ from functools import partial
 import numpy as np
 
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
+from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
 from autoflowcfd.core.fr_solver.filter import build_filter_func
 from autoflowcfd.core.turbulence.registry import has_transport_equations
 from autoflowcfd.core.fr_solver.turbulence.implicit import (
@@ -164,7 +165,7 @@ def step(solver, dt: float) -> float:
         def mean_flow_residual_raw(U_flat_trial: np.ndarray) -> np.ndarray:
             """未经预处理的原始残差 R（TimeIntegrator 约定 dU/dt = -R）。
 
-            残差监控（`state.dU_dt` -> `get_residual_norm`）与自适应 CFL
+            残差监控（`state.dU_dt` -> `residual_norm.py::monitor_residual_norm`）与自适应 CFL
             都必须用这一份**物理**残差，不能用预处理后的：Gamma 可逆、
             两者同时趋零，但量级不同，用预处理值会让打印出来的残差、
             收敛判据以及与历史算例的对比全部失去可比性。
@@ -202,7 +203,7 @@ def step(solver, dt: float) -> float:
 
         # residual0 是 TimeIntegrator 自身的 R(U) 约定（dU/dt=-R），
         # 复用它既避免重复计算 Stage 0 残差，也用来更新
-        # solver.state.dU_dt——收敛监控 (get_residual_norm) 依赖这个量，
+        # solver.state.dU_dt——收敛监控（monitor_residual_norm）依赖这个量，
         # 重构 step() 时若遗漏这一步，会让残差历史恒为 0（表面上"已收敛"，
         # 实际只是从未被更新过），已用非均匀扰动初场验证发现并修复。
         # `residual0` 复用给积分器省掉一次 Stage 0 残差求值；但监控用的
@@ -258,7 +259,6 @@ def step(solver, dt: float) -> float:
             from autoflowcfd.core.time_integration.implicit.mean_flow_step import (
                 step_mean_flow_newton,
             )
-            from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
             from autoflowcfd.core.fr_residual.jacobian.backend import (
                 MeanFlowBlockAssembler, unsupported_reason,
             )
@@ -319,7 +319,12 @@ def step(solver, dt: float) -> float:
         solver.apply_turbulence_corrections()
         solver.state._update_primitives()
 
-        residual_norm = solver.state.get_residual_norm()
+        from autoflowcfd.core.time_integration.residual_norm import monitor_residual_norm
+        from autoflowcfd.fr.native_padding import order_from_n_sps
+
+        residual_norm = monitor_residual_norm(
+            LocalReductions(np), solver.state.dU_dt, np.arange(n_cells) < int(solver.mesh.n_prism_cells),
+            order_from_n_sps(n_sps))
         # 收敛历史每步一条，记在单步里（单 GPU 同一位置）：求解循环与 Order Continuation 两条路径
         # 此前各自追加，GPU 共用求解循环后会记两遍
         solver.residual_history.append(residual_norm)

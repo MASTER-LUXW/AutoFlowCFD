@@ -12,15 +12,12 @@ from functools import partial
 
 import numpy as np
 
+from autoflowcfd.core.mpi.reductions import MPIReductions
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 
 
 class _DistributedStepMixin:
     """CPU MPI 分布式的单步推进与局部时间步长"""
-
-    def compute_global_residual_norm(self) -> float:
-        """全局残差 L2 范数。"""
-        return self.state.global_residual_norm()
 
     def _compute_distributed_local_time_step(self, U_local, mu_t_local=None,
                                              return_physical_too: bool = False):
@@ -318,7 +315,7 @@ class _DistributedStepMixin:
         # 也通过 residual0= 传给 _ssp_rk_stage_step 复用，避免它内部再重复
         # 算一次同样的 R(U^n)。
         # `residual0_raw` 是**物理**残差：收敛监控（state.dU_dt ->
-        # compute_global_residual_norm）与自适应 CFL 都必须用它，不能用
+        # residual_norm.py::monitor_residual_norm）与自适应 CFL 都必须用它，不能用
         # 预处理值（Gamma 可逆、两者同时趋零，但量级不同，用预处理值会
         # 让打印的残差与历史算例失去可比性）。与单机 step.py 同一分工。
         residual0_raw = residual_func_raw(U_flat)
@@ -344,7 +341,6 @@ class _DistributedStepMixin:
             from autoflowcfd.core.mpi.distributed_implicit import (
                 distributed_block_jacobi_colors, distributed_coupling_graph, distributed_mean_flow_assembler,
             )
-            from autoflowcfd.core.mpi.reductions import MPIReductions
             from autoflowcfd.core.time_integration.implicit.mean_flow_step import (
                 step_mean_flow_newton,
             )
@@ -420,7 +416,10 @@ class _DistributedStepMixin:
             self._prev_mu_t_local = (
                 mu_t_field_compact[self.dist_flat_face.inv_perm][:n_local])
 
-        residual_norm = self.compute_global_residual_norm()
+        from autoflowcfd.core.time_integration.residual_norm import monitor_residual_norm
+
+        residual_norm = monitor_residual_norm(MPIReductions(np), self.state.dU_dt[:n_local], cell_is_prism,
+                                              order_now)
         self.residual_history.append(residual_norm)   # 收敛历史在单步里记录（与其余后端一致）
         # 自适应 CFL 按**全局**残差范数更新：所有 rank 喂同一个值，因此
         # 得到同一个 CFL 数（按各自局部残差更新会让 rank 间 CFL 漂移）。

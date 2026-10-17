@@ -6,7 +6,6 @@
 import numpy as np
 
 from autoflowcfd.core.gpu import get_cupy
-from autoflowcfd.core.mpi.comm import allreduce_sum
 
 
 class _MultiGPUResidualMixin:
@@ -186,21 +185,15 @@ class _MultiGPUResidualMixin:
 
         return get_positivity_limiter(self, xp=get_cupy(), geometry=self.local_cell_geometry)
 
-    def _global_residual_norm(self, res_flat) -> float:
-        """MPI 全局残差归约。
+    def _monitor_residual_norm(self, residual_local) -> float:
+        """监控残差范数：本 rank local 单元（原生排列）的残差，全部后端同一个定义（真实自由度上的全局 RMS，
+        `time_integration/residual_norm.py`）。"""
+        from autoflowcfd.core.mpi.distributed_flat_face import native_cell_is_prism
+        from autoflowcfd.core.mpi.reductions import MPIReductions
+        from autoflowcfd.core.time_integration.residual_norm import monitor_residual_norm
+        from autoflowcfd.fr.native_padding import order_from_n_sps
 
-        #1（2026-08-28）：分母此前是 `self.mesh.n_cells（全局）* n_sps *
-        5 * self.n_ranks`——`self.mesh.n_cells` 在传统模式下本来就已经是
-        全局单元数，再乘一次 `n_ranks` 会把分母错误放大 n_ranks 倍
-        （与 self.U_gpu 此前错误按全局尺寸分配是两个独立的 bug，凑巧
-        当时两边都用了同一个"全局 n_cells"所以没有立刻表现为形状错误，
-        但归一化分母本身始终是错的）。改用 `partition.n_global_cells`
-        （不确定 partition_mesh 是否严格均分负载，这是唯一真正的全局
-        单元总数来源），不再额外乘 n_ranks。
-        """
-        cp = get_cupy()
-        local_norm_sq = float(cp.sum(res_flat ** 2))
-        global_norm_sq = allreduce_sum(local_norm_sq)
-        n_sps = self.mesh.n_sps_per_cell
-        n_global = self.partition.n_global_cells * n_sps * 5
-        return np.sqrt(global_norm_sq / max(1, n_global))
+        n_local = self.partition.n_local_cells
+        return monitor_residual_norm(MPIReductions(get_cupy()), residual_local,
+                                     native_cell_is_prism(self.dist_flat_face)[:n_local],
+                                     order_from_n_sps(self.mesh.n_sps_per_cell))

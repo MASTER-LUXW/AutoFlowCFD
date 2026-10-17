@@ -110,3 +110,40 @@ def test_single_gpu_matches_cpu():
     assert gpu.last_substeps == cpu.last_substeps
     scale = np.abs(cpu.state.U).max(axis=(0, 1))
     assert (np.abs(np.asarray(gpu.U_gpu) - cpu.state.U) / scale).max() < 1e-11
+
+
+def test_residual_norm_is_rms_over_real_dofs_and_matches_across_backends():
+    """监控残差范数（I-99）：真实自由度上的 RMS（此前单机/单 GPU 含填充槽位，CPU 分布式是不除自由度数的 L2），
+    CPU 单机、单 GPU 与 CPU 分布式给出同一个值。"""
+    from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
+    from autoflowcfd.core.gpu.solver.gpu_solver import GPUFRSolver
+    from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
+    from autoflowcfd.fr.native_padding import real_row_mask
+    from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
+
+    order = 2
+    mesh = _build_synthetic_mixed_mesh(order)
+    kw = dict(turb_model_name="NONE", time_scheme=TimeIntegrationScheme.SSP_RK3, adaptive_cfl=False,
+              low_mach_precond=False)
+    cpu = __import__("autoflowcfd.core.fr_solver", fromlist=["FRSolver"]).FRSolver(mesh, order=order, **kw)
+    gpu = GPUFRSolver(mesh=mesh, order=order, **kw)
+    dist = DistributedFRSolver(mesh=mesh, ops=mesh.operators, face_connectivity=mesh.face_connectivity, n_ranks=1,
+                               order=order, **kw)
+    for s in (cpu, gpu):
+        s.order_continuation_enabled = False
+    U0 = _perturbed(cpu, seed=9)
+    cpu.state.U = U0.copy()
+    cpu.state._update_primitives()
+    gpu.U_gpu = U0.copy()
+    gpu._update_primitives_gpu()
+    n = mesh.n_cells
+    dist.state.U[:n] = U0
+    dist.state.Q[:n] = conserved_to_primitive(U0[..., :5])
+
+    r_cpu = cpu.step(1e-6)
+    mask = real_row_mask(np.arange(n) < mesh.n_prism_cells, U0.shape[1], order)
+    rows = cpu.state.dU_dt.reshape(-1, 5)
+    assert r_cpu == pytest.approx(float(np.sqrt(np.mean(rows[mask] ** 2))), rel=1e-14)
+    assert mask.sum() < mask.size                    # 网格含四面体，确有填充槽位被排除
+    assert gpu.step(1e-6) == pytest.approx(r_cpu, rel=1e-11)
+    assert dist.step(1e-6) == pytest.approx(r_cpu, rel=1e-11)

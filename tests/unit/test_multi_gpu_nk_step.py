@@ -71,7 +71,7 @@ def _stub(n_local, n_sps, target):
                              np.ones(n_local, dtype=bool), n_sps, n_sps)
     s._get_positivity_limiter_gpu = lambda: _lim
     s._compute_turbulence_source_distributed = lambda dt: None
-    s._global_residual_norm = lambda r: float(np.linalg.norm(r))
+    s._monitor_residual_norm = lambda r: float(np.linalg.norm(r))
     big = np.full(n_local, 1e3)          # dtau 远大于 1/5：接近纯 Newton
     s._compute_local_time_step_gpu = lambda return_physical_too=False, nu_av_compact=None: (
         (big, big) if return_physical_too else big)

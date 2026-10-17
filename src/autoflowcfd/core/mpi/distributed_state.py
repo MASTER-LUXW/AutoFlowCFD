@@ -15,7 +15,6 @@ from autoflowcfd.core.fr_solver.state import N_MEAN_FLOW_VARS
 import numpy as np
 
 from autoflowcfd.core.mpi.partition import DistributedPartition
-from autoflowcfd.core.mpi.comm import allreduce_sum
 
 
 class DistributedFRState:
@@ -96,14 +95,3 @@ class DistributedFRState:
     def get_local_Q(self) -> np.ndarray:
         """返回 local cells 的原变量。"""
         return self.Q[:self.n_local_cells].copy()
-
-    def local_residual_norm(self) -> float:
-        """本 rank 的 local cells 残差 L2 范数。"""
-        local_sum = np.sum(self.dU_dt[:self.n_local_cells] ** 2)
-        return float(np.sqrt(local_sum))
-
-    def global_residual_norm(self) -> float:
-        """全局残差 L2 范数（MPI Allreduce）。"""
-        local_sq_sum = np.sum(self.dU_dt[:self.n_local_cells] ** 2)
-        global_sq_sum = allreduce_sum(local_sq_sum)
-        return float(np.sqrt(global_sq_sum))

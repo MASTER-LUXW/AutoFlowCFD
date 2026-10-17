@@ -200,7 +200,7 @@ class _MultiGPUSteppingMixin:
         # （RK3 下是 `R(U^(2))`），同一个算例在不同后端上打印的残差因此不是
         # 同一个量，自适应 CFL 控制器也吃到不同的信号。
         residual0_raw = _spatial_residual(U_flat)
-        residual_norm = self._global_residual_norm(residual0_raw)
+        residual_norm = self._monitor_residual_norm(residual0_raw)
 
         def _residual(U_flat_trial):
             return _precond(_spatial_residual(U_flat_trial), U_flat_trial)
