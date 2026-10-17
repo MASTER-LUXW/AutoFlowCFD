@@ -259,7 +259,10 @@ def test_distributed_resume_restores_turbulence(mesh_and_ops, tmp_path, model_na
     # 后处理用的单元平均同样写出（VTK 导出读它，`core/turbulence/output.py`）
     from autoflowcfd.core.turbulence.output import turbulence_cell_means, turbulence_fields_from_checkpoint
     cell = turbulence_fields_from_checkpoint(metadata["fields"])
-    ref = turbulence_cell_means(m, mesh.n_prism_cells, mesh.order)
+    from autoflowcfd.fr.native_padding import sp_integration_weights
+    det_local, prism_local = solver_a.local_cell_geometry()
+    ref = turbulence_cell_means(m, sp_integration_weights(det_local, prism_local, mesh.order))
+    local_cells = np.asarray(solver_a.partition.local_cells)
     assert set(cell) == set(ref)
     for key in ref:
-        np.testing.assert_allclose(cell[key], ref[key], rtol=1e-13)
+        np.testing.assert_allclose(cell[key][local_cells], ref[key], rtol=1e-13)

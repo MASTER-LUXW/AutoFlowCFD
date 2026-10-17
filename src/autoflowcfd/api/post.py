@@ -9,7 +9,7 @@
 """
 
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict, List, Optional
 from loguru import logger
 
 
@@ -18,91 +18,48 @@ class _APIPostMixin:
 
     def calculate_coefficients(
         self,
-        result: Any,
+        result: Any = None,
         reference_area: float = 1.0,
         reference_length: float = 1.0,
-        density: float = 1.225,
-        velocity: float = 33.33
+        moment_center: Optional[List[float]] = None,
+        groups: Optional[List[str]] = None,
     ) -> Dict[str, float]:
-        """计算气动力系数。
-        
+        """当前求解器状态的气动力/力矩系数（`postprocess/fr_coefficients.py`）。
+
         Args:
-            result: 求解器结果
-            reference_area: 参考面积
-            reference_length: 参考长度
-            density: 流体密度
-            velocity: 参考速度
-            
-        Returns:
-            气动力系数字典（使用大写键名Cd, Cl等）
+            result: 不使用（`SolverResult` 不携带解场），保留位置参数兼容
+            reference_area: 参考面积 (m^2)
+            reference_length: 力矩参考长度 (m)
+            moment_center: 力矩参考点 (3,)，缺省为原点
+            groups: 参与积分的 WALL 组名，缺省为全部 WALL 组
         """
-        # FR 原生积分路径（唯一真实积分实现，见 api_postprocess.py 同名委托函数文档）
-        if self.solver is not None and hasattr(self.solver, 'mesh'):
-            from autoflowcfd.postprocess.fr_coefficients import (
-                compute_aerodynamic_coefficients_fr,
-            )
-            coeffs = compute_aerodynamic_coefficients_fr(
-                self.solver.host_view(),   # 单 GPU 求解器经主机视图读状态
-                reference_area=reference_area,
-                reference_length=reference_length,
-            )
-            return coeffs.to_dict()
+        if self.solver is None or not hasattr(self.solver, 'mesh'):
+            raise ValueError("calculate_coefficients 需要先运行 run_steady/run_transient 或 resume_simulation")
+        from autoflowcfd.postprocess.fr_coefficients import compute_aerodynamic_coefficients_fr
 
-        # 无求解器：返回诚实零值并警告，不回退到伪积分实现（旧版 V1
-        # CoefficientCalculator 依赖不存在的 get_face_data()，已移除）
-        logger.warning(
-            "calculate_coefficients: 没有可用的 FR 求解器（需先调用 run_steady/"
-            "run_transient 或 resume_simulation），返回零系数。"
-        )
-        return {
-            'Cd': 0.0, 'Cl': 0.0, 'Cm': 0.0,
-            'Cs': 0.0, 'Cy': 0.0, 'Cr': 0.0,
-        }
+        return compute_aerodynamic_coefficients_fr(
+            self.solver.host_view(), reference_area=reference_area, reference_length=reference_length,
+            moment_center=moment_center, groups=groups,
+        ).to_dict()
 
-    def export_vtk(self, result: Any = None, filename: str = None, high_order: bool = False) -> None:
-        """导出 VTK 可视化文件。
-
-        使用 VTKExporter 将流场数据导出为 VTK 格式，支持 legacy .vtk
-        和 XML .vtu 两种格式（根据文件扩展名自动选择）。
+    def export_vtk(self, result: Any = None, filename: str = None, high_order: bool = False,
+                   fields: Optional[List[str]] = None) -> None:
+        """导出当前求解器状态的 VTK 文件（低阶：.vtk/.vtu 按扩展名；高阶拉格朗日单元：只 .vtu）。
 
         Args:
-            result: 未使用，仅为向后兼容签名保留——真正的解场从
-                self.solver.state.U 读取（见下方说明），不是从
-                SolverResult 对象（它只有 converged/iterations/
-                final_residual 三个字段，从不携带解场，见
-                core/fr_solver/state.py）。
-            filename: 输出文件名（.vtk 或 .vtu）
-            high_order: True 时改走 postprocess/vtk_export_highorder.py
-                （#5，2026-08-28 新增）：按 FR 解真实的分段多项式（而不是
-                `U.mean(axis=1)` 拍扁的单元中心平均值）导出成 VTK
-                VTK_LAGRANGE_TETRAHEDRON/WEDGE 高阶单元，能在 ParaView 里
-                看到单元内部真实的多项式分布。只支持 order<=2（见该模块
-                文档），且只输出 .vtu（VTK legacy 格式不支持任意阶
-                Lagrange 单元）；filename 若没有 .vtu 后缀会被自动改写。
-
-        此前这里用 `result.solution`（SolverResult 根本没有这个字段，
-        `hasattr` 检查恒为 False，必然走进"抛异常"分支）和
-        `self.grid_data`（run_steady/run_transient 从不写入的表面网格，
-        即便写了，单元数也和体网格解场对不上）构造 VTKExporter——两个
-        参数都是错的，从未被真正跑通过（V2.0 专家组评审逐行核实）。
-        改为镜像 CLI `post export-vtk`（cli/post/export_commands.py）
-        真正验证过的用法：VTKExporter 的 `grid_data` 参数只是鸭子类型
-        地读取 `.metadata.node_count`/`.cell_count`，`self.volume_mesh`
-        （generate_volume_mesh 的输出，run_steady/run_transient 求解的
-        就是它）满足这个接口；解场用 `self.solver.state.U.mean(axis=1)`
-        拍扁成单元中心平均值（与 CheckpointManager.save 写 checkpoint
-        时的约定一致）包装成 SolutionVector。
+            result: 不使用（`SolverResult` 不携带解场），保留位置参数兼容
+            filename: 输出文件名
+            high_order: True 时按 FR 解的分段多项式导出高阶拉格朗日单元（`postprocess/vtk_export_highorder`）
+            fields: 低阶导出的场（默认速度、压力；可含 k/omega/nu_tilde/nut/turbulence/q_criterion）
         """
         from autoflowcfd.postprocess.vtk_export import VTKExporter
         from autoflowcfd.core.backend.base import SolutionVector
 
         if self.solver is None or self.volume_mesh is None:
-            raise ValueError(
-                "export_vtk 需要先成功运行 run_steady/run_transient "
-                "（需要 self.solver 和 self.volume_mesh 均已设置）。"
-            )
+            raise ValueError("export_vtk 需要先成功运行 run_steady/run_transient（self.solver 与 self.volume_mesh 均已设置）")
         if filename is None:
-            raise ValueError("export_vtk 需要提供 filename。")
+            raise ValueError("export_vtk 需要提供 filename")
+        host = self.solver.host_view()
 
         if high_order:
             from autoflowcfd.postprocess.vtk_export_highorder import export_highorder_vtk
@@ -110,30 +67,26 @@ class _APIPostMixin:
             out_path = Path(filename)
             if out_path.suffix != '.vtu':
                 out_path = out_path.with_suffix('.vtu')
-            export_highorder_vtk(self.solver.mesh, self.solver.state.U, out_path)
-            logger.info(f"High-order VTK exported: {out_path}")
+            export_highorder_vtk(host.mesh, host.state.U, out_path)
+            logger.info(f"高阶 VTK 已导出：{out_path}")
             return
 
         from autoflowcfd.core.turbulence.output import turbulence_cell_means
-        from autoflowcfd.fr.native_padding import order_from_n_sps, reduce_per_cell_over_real_sps
+        from autoflowcfd.fr.native_padding import cell_integration_weights, weighted_cell_average
 
-        # 单元平均只统计真实自由度（原生基的零填充槽位冻结在初值，见 `fr/native_padding.py`），
-        # 与 checkpoint 写出的守恒解单元平均同一个归约
-        U = self.solver.state.U
-        order = order_from_n_sps(U.shape[1])
-        n_prism = self.solver.mesh.n_prism_cells
-        U_cell_avg = reduce_per_cell_over_real_sps(U, n_prism, order, 'mean')  # (n_cells, n_vars)
-        solution = SolutionVector(
-            data=U_cell_avg, n_cells=U_cell_avg.shape[0], n_variables=U_cell_avg.shape[1],
-        )
+        # 单元积分平均（求积权重 x det(J)），与 checkpoint 写出的守恒解单元平均同一个函数
+        W = cell_integration_weights(host)
+        U_cell_avg = weighted_cell_average(host.state.U, W)
+        solution = SolutionVector(data=U_cell_avg, n_cells=U_cell_avg.shape[0], n_variables=U_cell_avg.shape[1])
+        q_field = None
+        if fields is not None and 'q_criterion' in fields:
+            from autoflowcfd.postprocess.q_criterion import q_criterion_cell_field
+            q_field = q_criterion_cell_field(host)
         exporter = VTKExporter(self.volume_mesh, solution,
-                               turbulence=turbulence_cell_means(getattr(self.solver, 'turb_model', None),
-                                                                n_prism, order))
-
-        # 根据扩展名选择格式
-        fmt = 'xml' if filename.endswith('.vtu') else 'legacy'
-        exporter.export(filename, format=fmt)
-        logger.info(f"VTK exported: {filename}")
+                               turbulence=turbulence_cell_means(getattr(host, 'turb_model', None), W),
+                               q_criterion=q_field)
+        exporter.export(filename, fields=fields, format='xml' if filename.endswith('.vtu') else 'legacy')
+        logger.info(f"VTK 已导出：{filename}")
 
     def get_convergence_history(self, result: Any = None) -> Dict[str, list]:
         """获取收敛历史。

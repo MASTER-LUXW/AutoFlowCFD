@@ -172,7 +172,8 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
     if init_checkpoint:
         print(f"Init From  : {init_checkpoint}")
     if physical_time:
-        max_iter = int(float(physical_time) / dt)
+        from autoflowcfd.core.time_integration.base import physical_time_steps
+        max_iter = physical_time_steps(float(physical_time), dt)
         print(f"Physical Time: {physical_time}s | Iterations: {max_iter}\n")
     else:
         print(f"Iterations : {max_iter}\n")

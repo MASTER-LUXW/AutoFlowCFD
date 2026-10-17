@@ -53,10 +53,10 @@ def format_step_line(solver, order: int, iteration: int, res: float, initial_res
     msg += inner_iteration_suffix(solver) + newton_monitor_suffix(solver) + solver._loop_monitor_suffix()
     ref_area = getattr(solver, "_reference_area", None)
     if ref_area is not None and ref_area > 0:
-        from autoflowcfd.postprocess.fr_coefficients import compute_forces_pressure_only
+        from autoflowcfd.postprocess.fr_coefficients import pressure_force_coefficients
 
-        aero = compute_forces_pressure_only(solver.host_view(), ref_area)
-        msg += f" | Cd={aero['Cd']:.4f} Cl={aero['Cl']:.4f} Cs={aero['Cs']:.4f}"
+        aero = pressure_force_coefficients(solver.host_view(), ref_area)
+        msg += f" | Cd_p={aero['Cd']:.4f} Cl_p={aero['Cl']:.4f} Cs_p={aero['Cs']:.4f}"
     freestream = getattr(solver, "freestream", None)
     field = solver._scaled_residual_field() if (iteration == 1 or iteration % 10 == 0) else None
     if freestream is not None and field is not None:

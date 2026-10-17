@@ -255,7 +255,10 @@ class _APISolveMixin:
         from autoflowcfd.core.time_integration.base import scheme_from_name
         core_time_scheme = scheme_from_name(time_method)
 
-        max_iter = int(physical_time / dt) if physical_time is not None else 1000
+        if physical_time is None:
+            raise ValueError("run_transient 需要 physical_time（或带 total_time 的 config）")
+        from autoflowcfd.core.time_integration.base import physical_time_steps
+        max_iter = physical_time_steps(float(physical_time), float(dt))
 
         mesh = HighOrderMesh(order=order)
         mesh.load_from_volume_mesh(volume_mesh)

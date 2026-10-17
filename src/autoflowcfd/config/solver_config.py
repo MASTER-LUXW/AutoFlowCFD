@@ -328,7 +328,8 @@ class TransientConfig(SolverConfig):
         _raise_on_cfl_triplet(self)
 
         # 计算总步数
-        self.total_steps = int(self.total_time / self.dt)
+        from autoflowcfd.core.time_integration.base import physical_time_steps
+        self.total_steps = physical_time_steps(self.total_time, self.dt)
 
         # 验证自由流条件
         if self.rho_inf <= 0:
@@ -337,11 +338,6 @@ class TransientConfig(SolverConfig):
             raise ValueError(f"vel_inf 必须为正数，得到 {self.vel_inf}")
         if self.p_inf <= 0:
             raise ValueError(f"p_inf 必须为正数，得到 {self.p_inf}")
-        if self.total_steps < 1:
-            raise ValueError(
-                f"总步数必须至少为 1，得到 {self.total_steps} "
-                f"(dt={self.dt}, total_time={self.total_time})"
-            )
     
     @property
     def n_steps(self) -> int:

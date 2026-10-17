@@ -74,3 +74,47 @@ class TestConfigLoaderTemplateRoundTrip:
             logger.remove(handler_id)
 
         assert not any("mode" in m and "未知的配置键" in m for m in messages)
+
+
+class TestConfigLoaderValidation:
+    """继承字段的枚举转换与未知键（2026-10-17）：`_convert_enums` 此前只看子类自己的 `__annotations__`，
+    SolverConfig 上的 backend/turbulence 从不转换——`backend: gpuu`、`turbulence: sstt` 原样作为字符串
+    加载成功；未知键只记一条警告继续。"""
+
+    def _write(self, tmp_path, body):
+        p = tmp_path / "c.yaml"
+        p.write_text(body, encoding="utf-8")
+        return str(p)
+
+    def test_inherited_enum_fields_are_converted(self, tmp_path):
+        from autoflowcfd.config.solver_config import BackendType, TurbulenceModel
+
+        cfg = ConfigLoader().load(self._write(tmp_path, "mode: steady\nbackend: gpu\nturbulence: sa\n"))
+        assert type(cfg.backend) is BackendType and cfg.backend is BackendType.GPU
+        assert type(cfg.turbulence) is TurbulenceModel and cfg.turbulence is TurbulenceModel.SA
+
+    def test_invalid_backend_is_rejected(self, tmp_path):
+        import pytest
+
+        with pytest.raises(ValueError, match="后端"):
+            ConfigLoader().load(self._write(tmp_path, "mode: steady\nbackend: gpuu\n"))
+
+    def test_invalid_turbulence_is_rejected(self, tmp_path):
+        import pytest
+
+        with pytest.raises(ValueError, match="湍流模型"):
+            ConfigLoader().load(self._write(tmp_path, "mode: transient\nturbulence: sstt\n"))
+
+    def test_unknown_key_is_rejected(self, tmp_path):
+        import pytest
+
+        with pytest.raises(ValueError, match="cfl_maxx"):
+            ConfigLoader().load(self._write(tmp_path, "mode: steady\ncfl_maxx: 5\n"))
+
+    def test_config_validate_command_reports_invalid(self, tmp_path):
+        from click.testing import CliRunner
+
+        from autoflowcfd.cli.main import cli
+
+        result = CliRunner().invoke(cli, ["config", "validate", self._write(tmp_path, "mode: steady\nbackend: gpuu\n")])
+        assert result.exit_code != 0

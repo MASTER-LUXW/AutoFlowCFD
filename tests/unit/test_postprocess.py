@@ -110,7 +110,8 @@ class TestVTKExporter(unittest.TestCase):
             boundaries=boundaries,
             metadata=metadata
         )
-        self.solution = SolutionVector()
+        U = np.array([[1.2, 1.2 * 30.0, 0.0, 0.0, 101325.0 / 0.4 + 0.5 * 1.2 * 30.0 ** 2]])
+        self.solution = SolutionVector(data=U, n_cells=1, n_variables=5)
     
     def test_export_legacy_format(self):
         """导出 legacy VTK 格式"""
@@ -251,83 +252,58 @@ class TestSimulationReport(unittest.TestCase):
 
 
 class TestTransientStatistics(unittest.TestCase):
-    """瞬态统计计算器的测试"""
-    
+    """瞬态统计：节点时均/RMS 与 numpy 直接计算一致（Welford，ddof=1）。"""
+
     def setUp(self):
-        """准备测试夹具"""
-        nodes = NodeArray(
-            x=np.array([0.0, 1.0, 2.0]),
-            y=np.array([0.0, 0.0, 0.0]),
-            z=np.array([0.0, 0.0, 0.0])
-        )
-        cells = CellArray(
-            connectivity=np.array([[0, 1, 2]]),
-            cell_type=np.array([0])
-        )
-        boundaries = BoundaryMap(groups={}, bc_types={})
-        metadata = GridMetadata(
-            node_count=3,
-            cell_count=1,
-            boundary_groups=[],
-            file_format="v24"
-        )
-        self.grid_data = GridData(
-            nodes=nodes,
-            cells=cells,
-            boundaries=boundaries,
-            metadata=metadata
-        )
-        self.solution = SolutionVector()
-    
-    def test_initialization(self):
-        """统计计算器初始化"""
-        stats = TransientStatistics(self.grid_data, window_size=50)
-        self.assertEqual(stats.window_size, 50)
-        self.assertEqual(stats.n_samples, 0)
-    
-    def test_invalid_window_size(self):
-        """拒绝非法的窗口大小"""
-        with self.assertRaises(ValueError):
-            TransientStatistics(self.grid_data, window_size=0)
-    
-    def test_accumulate_samples(self):
-        """累积解的样本"""
-        stats = TransientStatistics(self.grid_data, window_size=10)
-        
-        for i in range(5):
-            stats.accumulate(self.solution, time=i*0.01)
-        
-        self.assertEqual(stats.n_samples, 5)
-        self.assertEqual(len(stats.samples), 5)
-    
-    def test_sliding_window(self):
-        """滑动窗口生效"""
-        stats = TransientStatistics(self.grid_data, window_size=3)
-        
-        for i in range(10):
-            stats.accumulate(self.solution, time=i*0.01)
-        
-        # Should only keep last 3 samples
-        self.assertEqual(len(stats.samples), 3)
-        self.assertEqual(stats.n_samples, 10)
-    
-    def test_compute_statistics_no_samples(self):
-        """没有样本时计算统计量报错"""
+        nodes = NodeArray(x=np.array([0.0, 1.0, 2.0]), y=np.array([0.0, 0.0, 0.0]), z=np.array([0.0, 0.0, 0.0]))
+        cells = CellArray(connectivity=np.array([[0, 1, 2]]), cell_type=np.array([0]))
+        self.grid_data = GridData(nodes=nodes, cells=cells, boundaries=BoundaryMap(groups={}, bc_types={}),
+                                  metadata=GridMetadata(node_count=3, cell_count=1, boundary_groups=[],
+                                                        file_format="v24"))
+
+    def _sample(self, u, p):
+        rho = 1.2
+        U = np.array([[rho, rho * u, 0.0, 0.0, p / 0.4 + 0.5 * rho * u * u]])
+        return SolutionVector(data=U, n_cells=1, n_variables=5)
+
+    def test_mean_and_rms_match_direct_computation(self):
         stats = TransientStatistics(self.grid_data)
-        
-        with self.assertRaises(RuntimeError):
-            stats.compute_statistics()
-    
-    def test_compute_statistics_with_samples(self):
-        """用累积的样本计算统计量"""
-        stats = TransientStatistics(self.grid_data, window_size=10)
-        
-        for i in range(5):
-            stats.accumulate(self.solution, time=i*0.01)
-        
+        us = [30.0, 31.5, 29.0, 33.0, 28.5]
+        ps = [101300.0, 101350.0, 101280.0, 101400.0, 101250.0]
+        for i, (u, p) in enumerate(zip(us, ps)):
+            stats.accumulate(self._sample(u, p), time=0.01 * i)
         result = stats.compute_statistics()
-        self.assertIsInstance(result, type(stats).compute_statistics.__annotations__.get('return', object))
         self.assertEqual(result.num_samples, 5)
+        self.assertAlmostEqual(result.sampling_time, 0.04)
+        np.testing.assert_allclose(result.mean_fields['velocity_u'], np.mean(us), rtol=1e-12)
+        np.testing.assert_allclose(result.rms_fields['velocity_u_rms'], np.std(us, ddof=1), rtol=1e-12)
+        np.testing.assert_allclose(result.mean_fields['pressure'], np.mean(ps), rtol=1e-12)
+        np.testing.assert_allclose(result.rms_fields['pressure_rms'], np.std(ps, ddof=1), rtol=1e-9)
+
+    def test_first_sample_counts(self):
+        """此前 Welford 在计数自增前更新（第 2 个样本直接覆盖均值），首样本被丢弃。"""
+        stats = TransientStatistics(self.grid_data)
+        stats.accumulate(self._sample(10.0, 101325.0), time=0.0)
+        stats.accumulate(self._sample(20.0, 101325.0), time=1.0)
+        np.testing.assert_allclose(stats.compute_statistics().mean_fields['velocity_u'], 15.0, rtol=1e-12)
+
+    def test_sample_without_data_is_rejected(self):
+        stats = TransientStatistics(self.grid_data)
+        with self.assertRaises(ValueError):
+            stats.accumulate(SolutionVector(), time=0.0)
+
+    def test_compute_statistics_no_samples(self):
+        with self.assertRaises(RuntimeError):
+            TransientStatistics(self.grid_data).compute_statistics()
+
+    def test_coefficient_statistics(self):
+        stats = TransientStatistics(self.grid_data)
+        cds = [0.30, 0.32, 0.29, 0.31]
+        for cd in cds:
+            stats.accumulate_coefficients(cd, 0.1, 0.0)
+        out = stats.get_coefficient_statistics()
+        self.assertAlmostEqual(out['Cd']['mean'], np.mean(cds), places=14)
+        self.assertAlmostEqual(out['Cd']['std'], np.std(cds, ddof=1), places=14)
 
 
 class TestPressurePSD(unittest.TestCase):

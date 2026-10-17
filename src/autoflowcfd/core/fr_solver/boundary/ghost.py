@@ -242,4 +242,5 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
         f"{[(name, code_to_config[code]['type']) for name, code in name_to_code.items() if code in code_to_config]}"
     )
 
-    return BoundaryGhostStateProvider(group_code, code_to_config, default_config)
+    return BoundaryGhostStateProvider(group_code, code_to_config, default_config,
+                                      code_to_name={code: name for name, code in name_to_code.items()})

@@ -169,21 +169,17 @@ class TestAutoFlowCFDAPI:
         mock_solver_class.assert_called_once()
         # physical_time/dt 决定 max_iter，solve() 应该按算出来的迭代数调用
         _, solve_kwargs = mock_solver.solve.call_args
-        assert solve_kwargs["max_iter"] == int(0.3 / 1e-4)
+        assert solve_kwargs["max_iter"] == 3000  # 0.3 s / 1e-4 s；int(0.3 / 1e-4) 截断成 2999 是 I-164 缺陷
 
     def test_resume_simulation_missing_checkpoint(self) -> None:
         """checkpoint 不存在时 resume 抛 FileNotFoundError。"""
         with pytest.raises(FileNotFoundError, match="Checkpoint file not found"):
             self.api.resume_simulation("nonexistent.h5")
 
-    def test_calculate_coefficients_placeholder(self) -> None:
-        """气动力系数计算接口。"""
-        mock_result = MagicMock()
-        coeffs = self.api.calculate_coefficients(mock_result)
-        
-        assert "Cd" in coeffs
-        assert "Cl" in coeffs
-        assert coeffs["Cd"] == 0.0  # Placeholder value
+    def test_calculate_coefficients_without_solver_raises(self) -> None:
+        """没有求解器时报错（此前返回全零系数，读者无法区分"算出来是 0"与"没算"）。"""
+        with pytest.raises(ValueError, match="run_steady"):
+            self.api.calculate_coefficients(MagicMock())
 
     def test_export_vtk_without_prior_solve_raises(self) -> None:
         """export_vtk 需要先跑过 run_steady/run_transient（self.solver/
@@ -253,3 +249,43 @@ class TestGetVersion:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestApiGenerateVolumeMesh:
+    """`AutoFlowCFDAPI.generate_volume_mesh` 此前必崩（门面多传一个位置参数 `method`），且 API 自己直接构造
+    VolumeMeshGenerator、生成的网格不带面网格数据。现在与 CLI 走同一个入口。"""
+
+    def _surface(self):
+        import numpy as np
+        from types import SimpleNamespace
+
+        xyz = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        nodes = SimpleNamespace(x=xyz[:, 0], y=xyz[:, 1], z=xyz[:, 2])
+        return SimpleNamespace(
+            nodes=nodes, cells=SimpleNamespace(connectivity=np.array([[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]])),
+            boundaries=SimpleNamespace(groups={}), metadata=SimpleNamespace(bounding_box=[0, 1, 0, 1, 0, 1]))
+
+    def test_forwards_parameters_and_keeps_surface_mesh(self, monkeypatch):
+        from types import SimpleNamespace
+        import autoflowcfd.grid.mesh_gen.tetgen.volume_mesh_generator as vmg
+
+        seen = {}
+
+        class FakeGenerator:
+            def __init__(self, **kwargs):
+                seen.update(kwargs)
+
+            def generate_from_surface(self, **kwargs):
+                return SimpleNamespace(node_count=4, cell_count=1, total_volume=1.0 / 6.0)
+
+        monkeypatch.setattr(vmg, "VolumeMeshGenerator", FakeGenerator)
+        api = create_api()
+        mesh = api.generate_volume_mesh(self._surface(), growth_rate=1.15, min_cell_size=2e-4, bl_layers=6)
+        assert seen == {"growth_rate": 1.15, "min_cell_size": 2e-4, "bl_layers": 6}
+        assert api.volume_mesh is mesh
+        assert mesh.surface_mesh["faces"].shape == (4, 3)
+
+    def test_unknown_parameter_is_rejected(self):
+        api = create_api()
+        with pytest.raises(TypeError, match="method"):
+            api.generate_volume_mesh(self._surface(), method="tetrahedral")

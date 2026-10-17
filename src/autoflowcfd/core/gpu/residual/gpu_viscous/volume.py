@@ -217,7 +217,7 @@ def compute_viscous_residual_fr_gpu(
     # _compute_boundary_ghost_states_gpu 现在用的是同一个 CPU round-trip
     # 模式（此前那边有个真实 bug：完全没调用 ghost_provider，用"owner
     # cell 零梯度外插"代替，V2.0 专家组盲审发现并已修复，两处现已一致）。
-    from autoflowcfd.core.fr_residual.inviscid import DefaultGhostProvider
+    from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
     from autoflowcfd.core.fr_residual.inviscid_kernel import compute_boundary_ghost_states
     ghost_provider = (
         boundary_ghost_provider if boundary_ghost_provider is not None else DefaultGhostProvider()

@@ -80,6 +80,27 @@ def compute_jacobians_at_ref_points(
     return result
 
 
+def _require_positive_det(det_per_cell: np.ndarray, cell_offset: int, cell_kind: str) -> None:
+    """全部真实求值点上的 Jacobian 行列式必须为正，否则抛 MeshDistortionError（列出最坏单元）。
+
+    Args:
+        det_per_cell: (n_cells, n_points) 真实求值点上的行列式（不含填充槽位）
+        cell_offset: 本段单元在全局单元编号中的起点（棱柱段 0，四面体段 n_prism）
+        cell_kind: 报错用的单元类型名
+    """
+    from autoflowcfd.grid.curved_mapping.curved_mapping import MeshDistortionError
+
+    min_per_cell = det_per_cell.min(axis=1)
+    bad = np.flatnonzero(~(min_per_cell > 0.0))
+    if bad.size == 0:
+        return
+    worst = bad[np.argsort(min_per_cell[bad])[:10]]
+    listing = ", ".join(f"{cell_offset + int(c)}({min_per_cell[c]:.3e})" for c in worst)
+    raise MeshDistortionError(
+        f"{bad.size} 个{cell_kind}单元在求值点上的 Jacobian 行列式非正（翻转或退化），"
+        f"最坏单元（全局编号(最小 det)）：{listing}。须在网格生成/修复阶段处理这些单元。")
+
+
 def compute_native_tet_jacobians(
     mesh: "HighOrderMesh", order: int, n_sps_per_cell: int, want_scaled_quality: bool
 ) -> Optional[Dict[str, np.ndarray]]:
@@ -102,6 +123,11 @@ def compute_native_tet_jacobians(
     n_tets = len(mesh._fixed_tet_conn) if mesh._fixed_tet_conn is not None else 0
     if n_tets == 0:
         return None
+
+    nodes = mesh._node_coords[mesh._fixed_tet_conn]                       # (n_tets,4,3)
+    J_all = 0.5 * np.stack([nodes[:, 1] - nodes[:, 0], nodes[:, 2] - nodes[:, 0],
+                            nodes[:, 3] - nodes[:, 0]], axis=2)            # 列 = dphys/d(r,s,t)
+    _require_positive_det(np.linalg.det(J_all)[:, None], mesh.n_prism_cells, "四面体")
 
     all_dets = np.empty(n_tets * n_sps_per_cell)
     all_inv_jacs = np.empty((n_tets * n_sps_per_cell, 3, 3))
@@ -314,10 +340,14 @@ def compute_native_prism_jacobians(
     all_scaled_quality = (np.empty(n_prisms * n_sps_per_cell)
                           if want_scaled_quality else None)
 
+    real_dets = np.empty((n_prisms, n_native))
     for i in range(n_prisms):
         cell_nodes = mesh._node_coords[mesh._fixed_prism_conn[i]]
         jac = native_prism_exact_jacobian(ref_native, cell_nodes)   # (n_native,3,3)
         det = np.linalg.det(jac)
+        real_dets[i] = det
+        if not (det > 0.0).all():
+            continue                      # 循环后统一报错（求逆会在奇异点先抛出不相干的异常）
         inv = np.linalg.inv(jac)
         lo = i * n_sps_per_cell
         all_dets[lo:lo + n_native] = det
@@ -329,6 +359,7 @@ def compute_native_prism_jacobians(
             q = compute_scaled_jacobian_quality(jac, det)
             all_scaled_quality[lo:lo + n_native] = q
             all_scaled_quality[lo + n_native:lo + n_sps_per_cell] = q[0]
+    _require_positive_det(real_dets, 0, "棱柱")
 
     result = {"det_jacs": all_dets, "inv_jacs": all_inv_jacs}
     if want_scaled_quality:

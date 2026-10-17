@@ -16,7 +16,7 @@ from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 from autoflowcfd.core.turbulence.output import (
     CHECKPOINT_PREFIX, turbulence_cell_means, turbulence_fields_from_checkpoint,
 )
-from autoflowcfd.fr.native_padding import real_sps_per_cell
+from autoflowcfd.fr.native_padding import real_sps_per_cell, sp_integration_weights
 
 
 def _sst(n_prism, n_tet, order, rng):
@@ -30,19 +30,24 @@ def _sst(n_prism, n_tet, order, rng):
     return m
 
 
-def _real_mean(field, n_prism, order):
-    npr, nte = real_sps_per_cell(order)
-    return np.concatenate([field[:n_prism, :npr].mean(axis=1), field[n_prism:, :nte].mean(axis=1)])
+def _weights(n_cells, n_prism, order, n_sps):
+    """单位 det(J) 下的解点积分权重（参考单元求积权重，填充槽位为 0）。"""
+    return sp_integration_weights(np.ones((n_cells, n_sps)), np.arange(n_cells) < n_prism, order)
+
+
+def _integral_mean(field, W):
+    return (W * field).sum(axis=1) / W.sum(axis=1)
 
 
 def test_sst_outputs_follow_the_model_fields():
     rng = np.random.default_rng(0)
     m = _sst(3, 2, 1, rng)
-    out = turbulence_cell_means(m, 3, 1)
+    W = _weights(5, 3, 1, m.k_field.shape[1])
+    out = turbulence_cell_means(m, W)
     assert set(out) == {"k", "omega", "nut"}
-    np.testing.assert_allclose(out["k"], _real_mean(m.k_field, 3, 1), rtol=1e-14)
-    np.testing.assert_allclose(out["omega"], _real_mean(m.omega_field, 3, 1), rtol=1e-14)
-    np.testing.assert_allclose(out["nut"], _real_mean(m.nu_t, 3, 1), rtol=1e-14)
+    np.testing.assert_allclose(out["k"], _integral_mean(m.k_field, W), rtol=1e-14)
+    np.testing.assert_allclose(out["omega"], _integral_mean(m.omega_field, W), rtol=1e-14)
+    np.testing.assert_allclose(out["nut"], _integral_mean(m.nu_t, W), rtol=1e-14)
 
 
 def test_sa_outputs_nu_tilde_and_nut():
@@ -50,13 +55,14 @@ def test_sa_outputs_nu_tilde_and_nut():
 
     m = SAModel(4, 8, nu_ref=1.5e-5, viscosity_ratio=3.0)
     m.nu_tilde_field = np.arange(32, dtype=float).reshape(4, 8) * 1e-6
-    out = turbulence_cell_means(m, 4, 1)
+    W = _weights(4, 4, 1, 8)
+    out = turbulence_cell_means(m, W)
     assert set(out) == {"nu_tilde", "nut"}
-    np.testing.assert_allclose(out["nu_tilde"], _real_mean(m.nu_tilde_field, 4, 1), rtol=1e-14)
+    np.testing.assert_allclose(out["nu_tilde"], _integral_mean(m.nu_tilde_field, W), rtol=1e-14)
 
 
 def test_laminar_has_no_turbulence_outputs():
-    assert turbulence_cell_means(None, 3, 1) == {}
+    assert turbulence_cell_means(None, np.ones((3, 8))) == {}
 
 
 def test_checkpoint_carries_model_means_not_state_slots(tmp_path):
@@ -74,7 +80,7 @@ def test_checkpoint_carries_model_means_not_state_slots(tmp_path):
     U[..., 6] = -456.0
     state = SimpleNamespace(U=U, Q=U.copy(), n_sps=8, n_vars=7)
     solver = SimpleNamespace(state=state, order=1, current_order=1, turb_model=m,
-                             mesh=SimpleNamespace(n_prism_cells=2),
+                             mesh=SimpleNamespace(n_prism_cells=2, jacobians={"det_jacs": np.ones(16)}),
                              freestream={"rho_inf": 1.225, "vel_inf": 30.0, "p_inf": 101325.0},
                              time_integrator=SimpleNamespace(scheme=TimeIntegrationScheme.SSP_RK3))
     init_production_ramp(solver, TimeIntegrationScheme.SSP_RK3)     # 真实求解器在构造时设置
@@ -85,8 +91,9 @@ def test_checkpoint_carries_model_means_not_state_slots(tmp_path):
     turb = turbulence_fields_from_checkpoint(fields)
     assert set(turb) == {"k", "omega", "nut"}
     assert all(f"{CHECKPOINT_PREFIX}{k}" in fields for k in turb)
-    np.testing.assert_allclose(turb["k"], _real_mean(m.k_field, 2, 1), rtol=1e-14)
-    np.testing.assert_allclose(turb["omega"], _real_mean(m.omega_field, 2, 1), rtol=1e-14)
+    W = _weights(2, 2, 1, 8)
+    np.testing.assert_allclose(turb["k"], _integral_mean(m.k_field, W), rtol=1e-14)
+    np.testing.assert_allclose(turb["omega"], _integral_mean(m.omega_field, W), rtol=1e-14)
 
 
 @pytest.mark.parametrize("name,label", [("k", "TurbulentKineticEnergy"), ("nu_tilde", "SANuTilde")])
@@ -110,3 +117,24 @@ def test_vtk_writes_the_given_turbulence_fields(tmp_path, name, label):
     for sec, n in zip(sections, (1, 3)):
         vals = sec.split("LOOKUP_TABLE default")[1].split()[:n]
         np.testing.assert_allclose([float(v) for v in vals], value, rtol=1e-6)
+
+
+@pytest.mark.parametrize("order", [2, 3])
+def test_cell_average_is_the_integral_mean_of_a_quadratic_on_a_tet(order):
+    """单元平均 = 单元上的积分平均：f = x^2（P>=2 插值精确）在四面体上的精确平均是
+    (sum x_i^2 + sum_{i<j} x_i x_j) / 10；解点等权平均与之不同（P2 四面体解点的积分权重顶点为负、棱为正）。"""
+    from autoflowcfd.fr.native_padding import weighted_cell_average
+    from autoflowcfd.fr.native_tet.basis import build_native_tet_operators, map_native_tet_to_physical
+
+    verts = np.array([[0.1, 0.0, 0.0], [1.3, 0.2, 0.0], [0.2, 0.9, 0.1], [0.4, 0.3, 1.1]])
+    ref, _ = build_native_tet_operators(order)
+    x = map_native_tet_to_physical(ref, verts)[:, 0]
+    n_sps = (order + 1) ** 3
+    f = np.zeros((1, n_sps))
+    f[0, :len(x)] = x ** 2
+    f[0, len(x):] = 1e6                       # 填充槽位的值不得进入平均
+    vx = verts[:, 0]
+    exact = (np.sum(vx ** 2) + sum(vx[i] * vx[j] for i in range(4) for j in range(i + 1, 4))) / 10.0
+    W = sp_integration_weights(np.ones((1, n_sps)), np.array([False]), order)
+    np.testing.assert_allclose(weighted_cell_average(f, W), [exact], rtol=1e-12)
+    assert abs(np.mean(x ** 2) - exact) > 1e-3 * exact

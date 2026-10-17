@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
-from autoflowcfd.boundary.fr_ghost_state import BoundaryGhostStateProvider
+from autoflowcfd.boundary.fr_ghost_state import BoundaryGhostStateProvider, GhostStateProvider
 
 
 def channel_wall_source(Lx, H, Lz):
@@ -81,10 +81,11 @@ def build_ghost_provider_by_classifier(mesh, classify, bc_by_name):
         group_code[f] = name_to_code[name]
 
     default_config = {"type": "FARFIELD", "Q_free": [1.225, 0.0, 0.0, 0.0, 101325.0]}
-    return BoundaryGhostStateProvider(group_code, code_to_config, default_config)
+    return BoundaryGhostStateProvider(group_code, code_to_config, default_config,
+                                      code_to_name={c: n for n, c in name_to_code.items()})
 
 
-class ProfileInletGhostProvider:
+class ProfileInletGhostProvider(GhostStateProvider):
     """把某个边界组的 INLET 状态换成**逐通量点**的给定剖面。
 
     ## 为什么需要它

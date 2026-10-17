@@ -205,35 +205,7 @@ def _export_point_fields_vtk(
     scalar_fields: Dict[str, np.ndarray],
     binary: bool = False,
 ) -> None:
-    """把已经是节点分辨率的场（TransientStatistics 算出的 mean/RMS 场）
-    写成只含 POINT_DATA 的 legacy VTK 文件。
+    """把节点分辨率的场（瞬态统计的时均/RMS）写成只含 POINT_DATA 的 legacy VTK（与体网格导出同一写入器）。"""
+    from autoflowcfd.postprocess.vtk_export_legacy import export_volume
 
-    复用 VTKExporter 里已经验证过的网格写入逻辑（_write_points/
-    _write_cells，处理三棱柱+四面体混合网格）和标量/矢量场写入逻辑
-    （_write_scalar/_write_vector），而不是重新实现一遍 VTK 格式细节——
-    只是这里的场数据来源（已经在节点分辨率上）和 VTKExporter.export()
-    的主路径（从单元中心的求解器数据出发，逐单元/逐节点各写一份）不同，
-    所以没有直接复用 export()/export_boundaries()。
-    """
-    from autoflowcfd.postprocess import VTKExporter
-
-    exporter = VTKExporter(grid_data, solution=None)
-    n_points = grid_data.node_count
-
-    mode = 'wb' if binary else 'w'
-    with open(output_path, mode) as f:
-        exporter._wl(f, "# vtk DataFile Version 3.0\n", binary)
-        exporter._wl(f, f"AutoFlowCFD Export - {output_path.name}\n", binary)
-        exporter._wl(f, ("BINARY\n" if binary else "ASCII\n"), binary)
-        exporter._wl(f, "\n", binary)
-        exporter._wl(f, "DATASET UNSTRUCTURED_GRID\n", binary)
-        exporter._wl(f, "\n", binary)
-
-        exporter._write_points(f, binary)
-        exporter._write_cells(f, binary)
-
-        exporter._wl(f, f"POINT_DATA {n_points}\n", binary)
-        for name, values in vector_fields.items():
-            exporter._write_vector(f, name, values, binary)
-        for name, values in scalar_fields.items():
-            exporter._write_scalar(f, name, values, binary)
+    export_volume(Path(output_path), grid_data, {}, {**vector_fields, **scalar_fields}, binary)

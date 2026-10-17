@@ -14,7 +14,10 @@ CFD 里标准、可证明正确的显式积分器，配合按对流+声速+粘�
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
+from loguru import logger
 from enum import Enum
 from typing import Callable, Optional
 
@@ -231,6 +234,24 @@ DEFAULT_STEADY_TOL = 1e-6
 #: 决定），只有合成湍流入口（SEM）按它输运涡结构
 STEADY_DT = 1e-3
 
+
+
+def physical_time_steps(total_time: float, dt: float) -> int:
+    """推进到物理时刻 `total_time` 所需的时间步数（瞬态命令、配置层、API 共用的唯一换算）。
+
+    `total_time / dt` 在相对 1e-9 内是整数时取该整数（`int(0.3 / 0.1)` 截断成 2 这类浮点误差不再丢步）；
+    否则取能越过 `total_time` 的最小步数，并报告实际结束时刻。
+    """
+    if not (dt > 0.0) or not (total_time > 0.0):
+        raise ValueError(f"物理时长与时间步必须为正，收到 total_time={total_time}, dt={dt}")
+    ratio = total_time / dt
+    nearest = round(ratio)
+    if nearest >= 1 and abs(ratio - nearest) <= 1e-9 * ratio:
+        return int(nearest)
+    n = int(math.ceil(ratio))
+    logger.warning(f"物理时长 {total_time:g} s 不是时间步 {dt:g} s 的整数倍：推进 {n} 步，"
+                   f"结束于 t = {n * dt:.9g} s")
+    return n
 
 class TimeIntegrator:
     """带局部时间步长的显式 SSP Runge-Kutta 积分器。"""

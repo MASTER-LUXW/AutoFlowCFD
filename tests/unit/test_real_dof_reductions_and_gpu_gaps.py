@@ -196,12 +196,11 @@ class TestRealDofReductionCallSitesAreWired:
         from autoflowcfd.cli.solve import checkpoint_io as solve_checkpoint_io
         from autoflowcfd.core.mpi import distributed_checkpoint
         s1 = module_source(solve_checkpoint_io)
-        assert "reduce_per_cell_over_real_sps(" in s1
+        assert "weighted_cell_average(" in s1
         assert "solver.state.U.mean(axis=1)" not in s1
         s2 = module_source(distributed_checkpoint)
-        # 2026-10-04 起分布式写出端收集逐单元棱柱标志（两种分布式模式都适用），用逐行掩码版
-        # 归约；此前完全分布式加载下退回含零填充槽位的全场平均
-        assert "reduce_rows_over_real_sps(" in s2 and "global_cell_is_prism(" in s2
+        # 单元积分平均在各 rank 本地按求积权重求，再收集（2026-10-17，此前是 root 上的等权平均）
+        assert "weighted_cell_average(" in s2 and "local_cell_geometry(" in s2
         assert "U_global.mean(axis=1)" not in s2
 
     def test_gpu_local_dt_both_sites(self):

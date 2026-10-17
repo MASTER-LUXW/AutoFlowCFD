@@ -26,23 +26,26 @@ class _DistributedSupportMixin:
             self, output_dir, iteration, input_file, order, turbulence_model, "cpu",
             history=history, target_order=target_order, surface_mesh=surface_mesh)
 
-    def _distributed_positivity_limiter(self):
-        """正性保持限制器（与单机同一个、同一个核）：几何取 local 段、原生排列——
-        adapter 的 jacobians 在紧凑排列，经 inv_perm 换回后切片。按阶数缓存。"""
+    def local_cell_geometry(self):
+        """本 rank local 单元（原生排列，与 `state.U[:n_local]` 同序）的 `(det_jacs (n_local, n_sps), 是否棱柱)`。
+
+        adapter 的 jacobians 在"棱柱在前"紧凑排列，经 inv_perm 换回后切片。正性限制器与写盘的单元积分平均共用。
+        """
         from autoflowcfd.core.mpi.distributed_compute import DistributedMeshAdapter
         from autoflowcfd.core.mpi.distributed_flat_face import native_cell_is_prism
-        from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
 
         dist_fc = self.dist_flat_face
         n_local = int(self.partition.n_local_cells)
+        adapter = DistributedMeshAdapter(self.partition, dist_fc, self.mesh, self.ops)
+        n_sps = self.state.U.shape[1]
+        det_compact = np.asarray(adapter.jacobians["det_jacs"]).reshape(-1, n_sps)
+        return det_compact[dist_fc.inv_perm][:n_local], native_cell_is_prism(dist_fc)[:n_local]
 
-        def _local_geometry():
-            adapter = DistributedMeshAdapter(self.partition, dist_fc, self.mesh, self.ops)
-            n_sps = self.state.U.shape[1]
-            det_compact = np.asarray(adapter.jacobians["det_jacs"]).reshape(-1, n_sps)
-            return det_compact[dist_fc.inv_perm][:n_local], native_cell_is_prism(dist_fc)[:n_local]
+    def _distributed_positivity_limiter(self):
+        """正性保持限制器（与单机同一个、同一个核），几何取 `local_cell_geometry`。按阶数缓存。"""
+        from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
 
-        return get_positivity_limiter(self, geometry=_local_geometry)
+        return get_positivity_limiter(self, geometry=self.local_cell_geometry)
 
     def _local_dynamic_eddy_viscosity(self):
         """本 rank local 单元的动力涡粘 rho*nu_t（湍流模型 + 亚格子），层流时 None：最近一步残差实际使用的那一份

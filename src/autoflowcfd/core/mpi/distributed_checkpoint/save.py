@@ -23,7 +23,7 @@ from autoflowcfd.core.utils.checkpoint_time import (
 )
 
 from .state import gather_global_state
-from .turbulence import gather_turbulence_fields, global_cell_is_prism
+from .turbulence import gather_turbulence_fields
 
 
 def distributed_save_checkpoint(
@@ -83,12 +83,14 @@ def distributed_save_checkpoint(
     local_cells = solver.partition.local_cells  # 全局索引
 
     U_global = gather_global_state(U_local, local_cells, n_global)
-    # 以下两次收集都是集体调用，必须在非 root 返回之前
-    from autoflowcfd.fr.native_padding import order_from_n_sps
+    # 以下收集都是集体调用，必须在非 root 返回之前
+    from autoflowcfd.fr.native_padding import order_from_n_sps, sp_integration_weights, weighted_cell_average
 
-    is_prism_global = global_cell_is_prism(solver, n_global)
-    turb_fields = gather_turbulence_fields(solver, n_global, order_from_n_sps(int(solver.state.n_sps)),
-                                           is_prism_global)
+    det_local, prism_local = solver.local_cell_geometry()
+    W_local = sp_integration_weights(det_local, prism_local, order_from_n_sps(int(U_local.shape[1])))
+    # 单元积分平均在各 rank 本地求（本地有几何），再收集——不在 root 上为全局场重建几何
+    avg_global = gather_global_state(weighted_cell_average(U_local, W_local)[:, None, :], local_cells, n_global)
+    turb_fields = gather_turbulence_fields(solver, n_global, W_local)
     # dual-time 的上一物理时间层（全部 rank 的格式相同，要么都有要么都没有）
     prev_local = previous_level_rows(solver, solver.partition.n_local_cells)
     prev_global = None if prev_local is None else gather_global_state(prev_local, local_cells, n_global)
@@ -109,20 +111,7 @@ def distributed_save_checkpoint(
     )
     manager = CheckpointManager(config, output_dir=output_dir)
 
-    # 只对**真实自由度**取平均（2026-09-15 系统性审计发现的真实缺陷）：
-    # 直接 `.mean(axis=1)` 会把 native 四面体的零填充槽位一起算进去，而
-    # 那些槽位按约定在初始化时复制真实 SP #0、之后残差行填零/滤波行是
-    # 单位阵，**永远冻结在初值**（实测推进 10 步后与真实 SP#0 相差 3.4%，
-    # order=1 下占一半槽位）。见 fr/native_padding.py::
-    # reduce_per_cell_over_real_sps。
-    #
-    # `U_global` 是**全局**索引空间（gather_global_state 按全局 id 归位），逐单元的棱柱标志也是
-    # 收集来的（`turbulence.py::global_cell_is_prism`，两种分布式模式都适用——此前完全分布式加载
-    # 下取不到全局棱柱数，退回含零填充槽位的全场平均）。
-    from autoflowcfd.fr.native_padding import reduce_rows_over_real_sps
-
-    solution_cell_avg = reduce_rows_over_real_sps(
-        U_global, is_prism_global, order_from_n_sps(U_global.shape[1]), 'mean')
+    solution_cell_avg = avg_global[:, 0, :]
     extra_fields = {"U_sps": U_global, **turb_fields}
     if prev_global is not None:
         extra_fields[PREVIOUS_LEVEL_FIELD] = prev_global

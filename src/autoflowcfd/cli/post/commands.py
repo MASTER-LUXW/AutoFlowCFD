@@ -69,6 +69,12 @@ def post() -> None:
 @click.option("--reference-area", type=float, required=True,
               help="参考面积 A_ref (m^2)，通常是车辆正面投影面积——没有默认值，"
                    "错的参考面积会给出误导性的 Cd/Cl，宁可强制用户显式指定")
+@click.option("--reference-length", type=float, default=1.0, show_default=True,
+              help="力矩参考长度 L_ref (m)，车辆通常取轴距")
+@click.option("--moment-center", nargs=3, type=float, default=(0.0, 0.0, 0.0), show_default=True,
+              help="力矩参考点 x y z (m)，车辆通常取前后轴中点在地面上的投影")
+@click.option("--groups", multiple=True,
+              help="参与积分的 WALL 组名（可重复给出；缺省为全部 WALL 组，例如要排除地面时只给车身各组）")
 @click.option("--threads", type=int, default=-1, help="CPU 后端 numba 并行线程数")
 @click.option("--skip-quality-check", is_flag=True,
               help="跳过重建时的网格质量门检查（B-11：原求解靠该选项才跑得起来的"
@@ -81,6 +87,9 @@ def coefficients(
     checkpoint: Optional[str],
     surface_mesh: Optional[str],
     reference_area: float,
+    reference_length: float,
+    moment_center: tuple,
+    groups: tuple,
     threads: int,
     skip_quality_check: bool,
     output: str,
@@ -109,12 +118,16 @@ def coefficients(
             ckpt_file, backend="cpu", surface_mesh=surface_mesh, threads=threads,
             skip_quality_check=skip_quality_check,
         )
-        coeffs = compute_aerodynamic_coefficients_fr(solver, reference_area=reference_area)
+        coeffs = compute_aerodynamic_coefficients_fr(
+            solver, reference_area=reference_area, reference_length=reference_length,
+            moment_center=moment_center, groups=list(groups) or None)
         result = coeffs.to_dict()
 
         output_path = Path(output)
         with open(output_path, 'w') as f:
-            json.dump({'iteration': iteration, **result}, f, indent=2)
+            json.dump({'iteration': iteration, 'reference_area': reference_area,
+                       'reference_length': reference_length, 'moment_center': list(moment_center),
+                       'groups': list(groups) or 'all WALL groups', **result}, f, indent=2)
         logger.success(f"Coefficients written to: {output_path}")
 
         if json_output:

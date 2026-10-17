@@ -7,20 +7,24 @@
 残差恒为零"）——导出的永远是初值；`nut` 期望 checkpoint 里有 `mu_t` 字段，而写 checkpoint 的
 一方从未写过它，于是退化成用那两个初值列算的 `k/omega` 估计。真正的湍流场在模型对象上
 （`TransportedTurbulence`）。这里把模型的输运场与涡粘按**真实自由度**求单元平均（与守恒解
-单元平均同一个归约，`fr/native_padding.py::reduce_per_cell_over_real_sps`），键名取模型声明的
+单元平均同一个积分平均，`fr/native_padding.py::weighted_cell_average`），键名取模型声明的
 `OUTPUT_FIELD_KEYS`（SST: `k`、`omega`；SA-neg: `nu_tilde`），外加 `nut`（运动涡粘）。
 """
 
 import numpy as np
 
-from autoflowcfd.fr.native_padding import reduce_per_cell_over_real_sps
+from autoflowcfd.fr.native_padding import weighted_cell_average
 
 #: 写进 checkpoint 时的字段名前缀（`turb_cell_<键>`）。
 CHECKPOINT_PREFIX = "turb_cell_"
 
 
-def turbulence_cell_means(turb_model, n_prism: int, order: int) -> dict:
-    """`{输出键: (n_cells,) 单元平均}`；模型为 None 或不是输运模型时返回空字典。"""
+def turbulence_cell_means(turb_model, W) -> dict:
+    """`{输出键: (n_cells,) 单元积分平均}`；模型为 None 或不是输运模型时返回空字典。
+
+    Args:
+        W: `fr/native_padding.py::sp_integration_weights` 给出的解点积分权重（与模型场同一单元顺序）
+    """
     if turb_model is None or not hasattr(turb_model, "transported_fields"):
         return {}
     out = {}
@@ -29,7 +33,7 @@ def turbulence_cell_means(turb_model, n_prism: int, order: int) -> dict:
         named.append(("nut", turb_model.nu_t))
     for key, field in named:
         host = np.asarray(field.get() if hasattr(field, "get") else field, dtype=np.float64)
-        out[key] = reduce_per_cell_over_real_sps(host, int(n_prism), int(order), "mean")
+        out[key] = weighted_cell_average(host[:W.shape[0]], W)
     return out
 
 

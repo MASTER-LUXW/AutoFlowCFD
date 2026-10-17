@@ -47,29 +47,17 @@ def generate_volume_mesh_from_surface(
     # 第 2 段：核心填充——tetgen 直接从 BL 自身的外表面填充剩余体积，用它自己的非结构分级一直到
     #   max_cell_size（见 mesh_background_merge._build_merged_mesh；ProjectFiles Part13 P49——没有单独的
     #   结构化过渡段）
-    optimized_params = {
-        'growth_rate': params.get('growth_rate', 1.2),
-        'min_cell_size': params.get('min_cell_size', 0.01),
-        'max_cell_size': params.get('max_cell_size'),
-        'bl_layers': params.get('bl_layers'),
-        'bl_only': params.get('bl_only', False),
-        'bl_only_output': params.get('output'),
-        'core_only': params.get('core_only', False),
-    }
+    # 只转发调用方给出的参数，未给出的取 VolumeMeshGenerator 构造参数的默认值（默认值只有那一份）
+    known = ('growth_rate', 'min_cell_size', 'max_cell_size', 'bl_layers', 'bl_only', 'output', 'core_only')
+    unknown = sorted(set(params) - set(known))
+    if unknown:
+        raise TypeError(f"未知的体网格生成参数 {unknown}（可用：{list(known)}）")
+    optimized_params = {('bl_only_output' if k == 'output' else k): params[k] for k in known if k in params}
 
     # 反映实际解析的参数，而不是固定的占位符数字
     # ——以前即使 --growth-rate/--bl-layers 被覆盖，也总是打印
     # "8 layers, growth_rate=1.2 / 4 layers, growth_rate=1.5"，
     # 误导任何试图将此日志与实际生成的内容关联的人（或 agent）。
-    resolved_bl_layers = optimized_params['bl_layers'] or 8
-    logger.info(
-        f"Using hybrid mesh strategy:\n"
-        f"  Stage 1 (BL): {resolved_bl_layers} layers, "
-        f"growth_rate={optimized_params['growth_rate']}\n"
-        f"  Stage 2 (Core fill): tetgen, graded out to "
-        f"max_cell_size={optimized_params['max_cell_size']}"
-    )
-
     generator = VolumeMeshGenerator(**optimized_params)
 
     nodes = surface_grid.nodes

@@ -49,7 +49,7 @@ def _fake_solver(n_cells=2, n_sps=1, n_vars=7, order=0, k=None, omega=None, with
         order=order,
         current_order=order,
         turb_model=turb_model,
-        mesh=SimpleNamespace(n_prism_cells=n_cells),
+        mesh=SimpleNamespace(n_prism_cells=n_cells, jacobians={"det_jacs": np.ones(n_cells * n_sps)}),
         # 真实求解器在湍流初始化时设置（恢复湍流场后跳过产生项斜坡用到它）
         _turb_production_ramp_steps=50,
         freestream={"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0},

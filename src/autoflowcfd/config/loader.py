@@ -12,8 +12,11 @@
     >>> config = loader.load("simulation.yaml")
 """
 
-import yaml
+import dataclasses
+import typing
 from enum import Enum
+
+import yaml
 
 from autoflowcfd.core.time_integration.base import (
     scheme_from_name,
@@ -158,98 +161,43 @@ class ConfigLoader:
             raise ValueError(f"无效的瞬态配置: {e}")
     
     def _merge_defaults(self, user_config: Dict[str, Any], default_config) -> Dict[str, Any]:
-        """合并用户配置与默认值。
+        """以 dataclass 默认值为底，覆盖用户给出的字段；未知字段（拼写错误等）直接报错。
 
-        用户提供的值会覆盖默认值，缺失的值使用默认值。
-
-        Args:
-            user_config: 用户提供的配置字典
-            default_config: 默认配置对象
-
-        Returns:
-            Dict[str, Any]: 合并后的配置字典
+        `mode` 不是 dataclass 字段，由 `load_with_keys` 在分派前读走，这里跳过。
         """
-        # 从默认值开始
-        merged = {}
-        for key in default_config.__dataclass_fields__.keys():
-            if hasattr(default_config, key):
-                merged[key] = getattr(default_config, key)
-        
-        # 用用户值覆盖
-        for key, value in user_config.items():
-            if key in merged:
-                merged[key] = value
-            elif key == "mode":
-                # `mode` 是顶层路由键，本来就不属于 SteadyConfig/
-                # TransientConfig 任何一个的字段——load() 在调用本方法
-                # 之前已经用它选好了 _load_steady_config/_load_transient_
-                # config 分支（见该方法文档），走到这里时它的使命已经
-                # 完成。之前没有这个分支，导致 save_template() 生成的
-                # 每一份配置模板自己都会触发"未知的配置键: mode"这个
-                # 误报——不是真的未知，是本来就不该按 dataclass 字段处理。
-                continue
-            else:
-                logger.warning(f"未知的配置键: {key}")
-        
+        names = [f.name for f in dataclasses.fields(default_config) if f.init]
+        merged = {name: getattr(default_config, name) for name in names}
+        unknown = sorted(k for k in user_config if k != "mode" and k not in merged)
+        if unknown:
+            raise ValueError(f"未知的配置键 {unknown}（{type(default_config).__name__} 的字段：{names}）")
+        merged.update({k: v for k, v in user_config.items() if k != "mode"})
         return merged
-    
+
     def _convert_enums(self, config_dict: Dict[str, Any], config_class) -> Dict[str, Any]:
-        """将字符串值转换为枚举类型。
-
-        Args:
-            config_dict: 配置字典
-            config_class: 目标配置类
-
-        Returns:
-            Dict[str, Any]: 枚举值已转换的字典
-        """
-        converted = config_dict.copy()
-        
-        # 获取字段注解
-        annotations = getattr(config_class, '__annotations__', {})
-        
+        """把字符串取值转换成字段声明的枚举类型（含继承自 SolverConfig 的 backend/turbulence）。"""
+        hints = typing.get_type_hints(config_class)
+        converted = dict(config_dict)
         for key, value in config_dict.items():
-            if key not in annotations:
+            field_type = hints.get(key)
+            if not isinstance(value, str):
                 continue
-            
-            field_type = annotations[key]
-            
-            # 转换 BackendType
-            if field_type == BackendType and isinstance(value, str):
+            if field_type is BackendType:
                 try:
                     converted[key] = BackendType(value.lower())
                 except ValueError:
-                    raise ValueError(
-                        f"无效的后端类型: {value}。"
-                        f"必须是以下之一: {[b.value for b in BackendType]}"
-                    )
-            
-            # 转换 TurbulenceModel
-            elif field_type == TurbulenceModel and isinstance(value, str):
+                    raise ValueError(f"无效的后端类型: {value}。必须是以下之一: {[b.value for b in BackendType]}")
+            elif field_type is TurbulenceModel:
                 try:
                     converted[key] = TurbulenceModel(value.lower())
                 except ValueError:
-                    raise ValueError(
-                        f"无效的湍流模型: {value}。"
-                        f"必须是以下之一: {[t.value for t in TurbulenceModel]}"
-                    )
-            
-            # 转换 TimeIntegrationScheme
-            elif field_type == TimeIntegrationScheme and isinstance(value, str):
-                # 走唯一那张词汇表（`core/time_integration/base.py::
-                # scheme_from_name`）而不是 `Enum(value)`：YAML 里既可以写
-                # CLI 词汇（`rk3`/`imex`/`dual-time`）也可以写枚举取值
-                # （`ssp_rk3`/`imex_euler`/`dual_time`），两边不再各有一套。
+                    raise ValueError(f"无效的湍流模型: {value}。必须是以下之一: {[t.value for t in TurbulenceModel]}")
+            elif field_type is TimeIntegrationScheme:
                 try:
                     converted[key] = scheme_from_name(value)
                 except ValueError:
-                    raise ValueError(
-                        f"无效的时间积分方案: {value}。"
-                        f"必须是以下之一: {scheme_names()}"
-                    )
-        
+                    raise ValueError(f"无效的时间积分方案: {value}。必须是以下之一: {scheme_names()}")
         return converted
-    
+
     def save_template(self, output_path: Union[str, Path], mode: str = 'steady'):
         """保存配置模板到 YAML 文件。
 
@@ -291,7 +239,6 @@ class ConfigLoader:
         Returns:
             Dict[str, Any]: 字符串值字典
         """
-        import dataclasses
 
         # 只导出构造参数（`__post_init__` 派生的 `total_steps` 等不是可配置项，写进模板会让加载时报
         # "未知的配置键"）

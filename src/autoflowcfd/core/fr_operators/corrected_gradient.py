@@ -105,7 +105,7 @@ def source_velocity_gradient(Q, mesh, ops, flat, ghost_provider, halo_refresh=No
     """
     import numpy as np
 
-    from autoflowcfd.core.fr_residual.inviscid import DefaultGhostProvider
+    from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
     from autoflowcfd.core.fr_residual.inviscid_kernel import compute_boundary_ghost_states
     from autoflowcfd.core.turbulence.transport.faces import (
         _extrapolate_scalar_to_faces, _extrapolate_scalar_to_faces_neighbor_frame, _lift_side_jumps,

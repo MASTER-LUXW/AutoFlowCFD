@@ -18,9 +18,14 @@ from .distributed_checkpoint.state import gather_global_state
 
 class GlobalSolverView:
     """root 上的全局视图：属性与单机求解器同名（`mesh`/`ops`/`state`/`mu_molecular`/`freestream`/
-    `_get_turbulent_viscosity_field()`），只读用途。"""
+    `boundary_ghost_provider`/`_get_turbulent_viscosity_field()`），只读用途。
 
-    def __init__(self, mesh, ops, U, mu_t, mu_molecular: float, freestream: dict):
+    边界幽灵态提供者按全局网格构建（分布式求解器自己的那份已重映射到本 rank 的压缩面编号），
+    边界配置与求解器相同（`bc_overrides`、WMLES 时壁面为滑移镜像）；不构造 SEM 入口。
+    """
+
+    def __init__(self, mesh, ops, U, mu_t, mu_molecular: float, freestream: dict,
+                 bc_overrides: Optional[dict] = None, wmles_active: bool = False):
         from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
 
         self.mesh = mesh
@@ -30,6 +35,10 @@ class GlobalSolverView:
         self.freestream = freestream
         self._mu_t = mu_t
         self._reference_area = None
+        self.turb_model_name = "NONE"                 # 不构造 SEM 入口（力积分不读入口幽灵态）
+        self.wmles_model = True if wmles_active else None
+        from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
+        self.boundary_ghost_provider = build_boundary_ghost_provider(self, dict(bc_overrides or {}))
 
     def _get_turbulent_viscosity_field(self) -> Optional[np.ndarray]:
         """动力涡粘 rho * nu_t（湍流模型 + 亚格子），层流时 None（与单机同名方法同一约定）。"""
@@ -59,4 +68,6 @@ def gather_global_view(solver) -> Optional[GlobalSolverView]:
         mesh, ops = solver._root_context["mesh"], solver._root_context["ops"]
     else:
         mesh, ops = solver.mesh, solver.ops
-    return GlobalSolverView(mesh, ops, U_global, mu_t_global, float(solver.mu_molecular), solver.freestream)
+    return GlobalSolverView(mesh, ops, U_global, mu_t_global, float(solver.mu_molecular), solver.freestream,
+                            bc_overrides=getattr(solver, "bc_overrides", None),
+                            wmles_active=getattr(solver, "wmles_model", None) is not None)

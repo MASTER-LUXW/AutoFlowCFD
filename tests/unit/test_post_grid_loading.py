@@ -6,7 +6,6 @@ cube_demo 端到端里 `post export-vtk --grid <体网格.nas>` 失败：`_load_
 """
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -51,7 +50,7 @@ def test_boundary_patches_are_tagged_per_face_with_recorded_types(tmp_path):
     grid = _load_grid_data(Path(src))
     faces = grid.ensure_faces_exist()
     tri = faces.node_connectivity[faces.get_boundary_face_indices()]
-    boundary_id, type_id, id_legend, type_legend = boundary_zone_ids(SimpleNamespace(grid_data=grid), tri)
+    boundary_id, type_id, id_legend, type_legend = boundary_zone_ids(grid, tri)
 
     names = [entry.split("=", 1)[1] for entry in id_legend]
     assert sorted(names) == ["x_max", "x_min", "y_max", "y_min", "z_max", "z_min"]
@@ -75,4 +74,4 @@ def test_exterior_face_outside_every_group_is_an_error(tmp_path):
     src, _ = _volume_nas(tmp_path)
     grid = _load_grid_data(Path(src))
     with pytest.raises(ValueError, match="不属于任何边界组"):
-        boundary_zone_ids(SimpleNamespace(grid_data=grid), np.array([[0, 1, 10**6]]))
+        boundary_zone_ids(grid, np.array([[0, 1, 10**6]]))

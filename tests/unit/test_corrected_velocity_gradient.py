@@ -125,7 +125,7 @@ def test_p0_discrete_divergence_theorem():
 
 @pytest.mark.parametrize("order", [1, 2])
 def test_lifting_is_exact_on_linear_field(order):
-    from autoflowcfd.core.fr_residual.inviscid import DefaultGhostProvider
+    from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 
     solver, Q = _couette_solver(order)
     x = np.asarray(solver.mesh.sps_coords)

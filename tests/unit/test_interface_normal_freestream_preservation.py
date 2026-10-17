@@ -104,7 +104,7 @@ def case():
     assert np.all(np.sum(d_o * tn, axis=1) < 0.5)
     assert np.all(np.sum(d_n * (-tn), axis=1) < 0.5)
 
-    from autoflowcfd.core.fr_residual.inviscid import DefaultGhostProvider
+    from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
     # 均匀流 + 零梯度幽灵态 = 精确解
     ghost = DefaultGhostProvider()          # 零梯度外插：对均匀流正好是精确解
     Q_ghost = compute_boundary_ghost_states(flat, Q, ghost)

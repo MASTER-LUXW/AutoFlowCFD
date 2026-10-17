@@ -1,54 +1,61 @@
-"""后处理模块共用的场插值辅助函数。
+"""后处理共用：单元场 -> 节点场的体积加权平均（混合网格：棱柱在前、四面体在后）。
 
-vtk_export.py（从单元中心的 FVM 解数据写出 POINT_DATA）和
-transient_stats.py（从同一份单元中心数据累积节点分辨率的时间统计量）
-都需要，两者要的是完全相同的单元->节点转换，所以放在这里共用一份，
-而不是各写一份。
+低阶 VTK 导出的 POINT_DATA 与瞬态统计（时均/RMS）的节点场共用这一份实现。
 """
 
 import numpy as np
+from loguru import logger
 
 
-def cell_to_node(
-    connectivity: np.ndarray,
-    cell_values: np.ndarray,
-    n_points: int,
-    volumes: np.ndarray = None,
-    fallback: float = 0.0,
-) -> np.ndarray:
-    """把逐单元的标量场插值成逐节点的值。
+def cell_node_incidence(grid_data):
+    """全部"单元-节点"关联：`(node_ids, cell_ids)`，单元编号按求解器约定（棱柱在前、四面体在后）。
 
-    对每个节点相连的单元做体积加权平均（向量化的 bincount scatter），
-    而不是简单的不加权平均——按单元体积加权可以避免节点值被随便哪个
-    相邻单元（恰好体积特别大或特别小）拉偏，这在边界层附近尤其重要，
-    因为相邻四面体的体积可能相差好几个数量级。
+    `grid_data.cells` 是四面体（体网格）或三角形（面网格）；体网格的棱柱在 `grid_data.prism_cells`。
+    """
+    node_parts, cell_parts = [], []
+    offset = 0
+    prism = getattr(grid_data, "prism_cells", None)
+    if prism is not None and len(prism.connectivity):
+        conn = np.asarray(prism.connectivity, dtype=np.int64)
+        node_parts.append(conn.ravel())
+        cell_parts.append(np.repeat(np.arange(len(conn)), conn.shape[1]))
+        offset = len(conn)
+    conn = np.asarray(grid_data.cells.connectivity, dtype=np.int64)
+    node_parts.append(conn.ravel())
+    cell_parts.append(offset + np.repeat(np.arange(len(conn)), conn.shape[1]))
+    return np.concatenate(node_parts), np.concatenate(cell_parts)
+
+
+def cell_weights(grid_data) -> np.ndarray:
+    """单元权重：体网格用单元体积（与 `get_cell_volumes` 同一单元顺序），面网格用等权。"""
+    if hasattr(grid_data, "get_cell_volumes"):
+        return np.asarray(grid_data.get_cell_volumes(), dtype=np.float64)
+    return np.ones(int(grid_data.cell_count))
+
+
+def cell_to_node(grid_data, cell_values: np.ndarray) -> np.ndarray:
+    """单元场按体积加权平均到节点：`node = sum_c V_c f_c / sum_c V_c`（c 遍历含该节点的单元）。
 
     Args:
-        connectivity: (n_cells, nodes_per_cell) 整数单元-节点数组
-        cell_values: (n_cells,) 逐单元场值
-        n_points: 网格节点数
-        volumes: (n_cells,) 加权用的单元体积；None 表示不加权（等权重）平均
-        fallback: 赋给没有相连单元的节点的值（对正常的体网格不应该发生，
-            但万一发生了可以避免除零）
-
+        cell_values: `(n_cells,)` 或 `(n_cells, k)`，单元顺序为棱柱在前、四面体在后
     Returns:
-        (n_points,) 逐节点插值结果
+        `(n_nodes,)` 或 `(n_nodes, k)`；不属于任何单元的节点为 NaN（不填伪造值）
     """
-    conn = np.asarray(connectivity)
-    n_cells, nodes_per_cell = conn.shape
-    if volumes is None:
-        weights = np.ones(n_cells, dtype=np.float64)
-    else:
-        weights = np.maximum(np.asarray(volumes, dtype=np.float64), 1e-30)
-
-    node_ids = conn.ravel()
-    cell_ids = np.repeat(np.arange(n_cells), nodes_per_cell)
-    w = weights[cell_ids]
-
-    weighted_sum = np.bincount(node_ids, weights=cell_values[cell_ids] * w, minlength=n_points)
-    weight_sum = np.bincount(node_ids, weights=w, minlength=n_points)
-
-    node_values = np.full(n_points, fallback, dtype=np.float64)
-    has_data = weight_sum > 0
-    node_values[has_data] = weighted_sum[has_data] / weight_sum[has_data]
-    return node_values
+    values = np.asarray(cell_values, dtype=np.float64)
+    node_ids, cell_ids = cell_node_incidence(grid_data)
+    n_cells = int(cell_ids.max()) + 1 if cell_ids.size else 0
+    if values.shape[0] != n_cells:
+        raise ValueError(f"单元场长度 {values.shape[0]} 与网格单元数 {n_cells} 不符")
+    w = cell_weights(grid_data)[cell_ids]
+    n_nodes = int(grid_data.node_count)
+    weight_sum = np.bincount(node_ids, weights=w, minlength=n_nodes)
+    orphan = weight_sum <= 0.0
+    if orphan.any():
+        logger.warning(f"{int(orphan.sum())} 个节点不属于任何单元，节点场在这些节点上写 NaN")
+    denom = np.where(orphan, np.nan, weight_sum)
+    if values.ndim == 1:
+        return np.bincount(node_ids, weights=values[cell_ids] * w, minlength=n_nodes) / denom
+    return np.column_stack([
+        np.bincount(node_ids, weights=values[cell_ids, j] * w, minlength=n_nodes) / denom
+        for j in range(values.shape[1])
+    ])

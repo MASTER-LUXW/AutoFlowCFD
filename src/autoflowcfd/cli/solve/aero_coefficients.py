@@ -172,28 +172,16 @@ def report_distributed_aerodynamic_coefficients(solver, reference_area: Optional
 
 
 def _report_aerodynamic_coefficients(solver, reference_area: Optional[float]) -> None:
-    """求解结束后直接在当前 FRSolver 状态上积分并打印 Cd/Cl。
-
-    不经过 checkpoint/post 命令组的往返（那条路径此前完全打不通，见
-    postprocess/fr_coefficients.py 模块文档），直接用求解器仍在内存里的
-    mesh+state 计算——这是让 CLI 验收标准"Cd/Cl 非零、符号正确"能够
-    兑现的最短路径。reference_area 未提供时跳过（不猜一个可能误导的
-    默认值）。
-    """
+    """求解结束时打印力系数（全部 WALL 组、风轴系）。力矩系数需要力矩参考点与参考长度，用
+    `autoflowcfd post coefficients --moment-center ... --reference-length ...` 给出。"""
     if reference_area is None or reference_area <= 0:
-        print("\n(未提供 --reference-area，跳过气动系数计算；如需 Cd/Cl 请指定参考面积)")
+        print("\n(未提供 --reference-area，跳过气动系数；如需 Cd/Cl 请指定参考面积)")
         return
-    try:
-        from autoflowcfd.postprocess.fr_coefficients import compute_aerodynamic_coefficients_fr
+    from autoflowcfd.postprocess.fr_coefficients import compute_aerodynamic_coefficients_fr
 
-        coeffs = compute_aerodynamic_coefficients_fr(solver, reference_area=reference_area)
-        print(f"\n=== Aerodynamic Coefficients (reference_area={reference_area} m^2) ===")
-        print(f"   Cd (drag)  = {coeffs.Cd:.6f}")
-        print(f"   Cl (lift)  = {coeffs.Cl:.6f}")
-        print(f"   Cs (side)  = {coeffs.Cs:.6f}")
-        # 力矩系数基于默认参考长度 1.0 m 与原点的力矩参考点（函数默认值）
-        print(f"   Cm (pitch) = {coeffs.Cm:.6f}")
-        print(f"   Cy (yaw)   = {coeffs.Cy:.6f}")
-        print(f"   Cr (roll)  = {coeffs.Cr:.6f}")
-    except Exception as e:
-        print(f"\n⚠️  Aerodynamic coefficient calculation failed: {e}")
+    coeffs = compute_aerodynamic_coefficients_fr(solver, reference_area=reference_area)
+    print(f"\n=== 气动力系数（全部 WALL 组，A_ref={reference_area} m^2）===")
+    print(f"   Cd (阻力)  = {coeffs.Cd:.6f}")
+    print(f"   Cl (升力)  = {coeffs.Cl:.6f}")
+    print(f"   Cs (侧力)  = {coeffs.Cs:.6f}")
+    print("   力矩系数请用 `autoflowcfd post coefficients` 指定力矩参考点与参考长度后计算")

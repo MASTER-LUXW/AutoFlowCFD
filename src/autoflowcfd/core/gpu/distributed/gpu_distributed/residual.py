@@ -199,27 +199,24 @@ class _MultiGPUResidualMixin:
             res = visc_res if res is None else res + visc_res
         return res
 
-    def _get_positivity_limiter_gpu(self):
-        """守恒的正性保持限制器（与 CPU 同一个，GPU 上走数组模块无关实现）。
-
-        几何取 local 段、**原生**排列（`self.U_gpu` 所在的空间）：
-        `mesh_data['det_jacs']` 在"棱柱在前"紧凑排列，经 `inv_perm` 换回。
-        按阶数缓存，只在缓存失效（阶数切换）时下载一次 det(J)。
-        """
+    def local_cell_geometry(self):
+        """本 rank local 单元（**原生**排列，`self.U_gpu` 所在的空间）的 `(det_jacs (n_local, n_sps), 是否棱柱)`，
+        主机数组。`mesh_data['det_jacs']` 在"棱柱在前"紧凑排列，经 `inv_perm` 换回。正性限制器与写盘共用。"""
         from autoflowcfd.core.mpi.distributed_flat_face import native_cell_is_prism
-        from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
 
         cp = get_cupy()
         n_local = self.partition.n_local_cells
         dist_fc = self.dist_flat_face
+        det_c = cp.asnumpy(self.mesh_data['det_jacs'])
+        det_c = det_c.reshape(det_c.shape[0], -1)
+        return det_c[np.asarray(dist_fc.inv_perm)][:n_local], native_cell_is_prism(dist_fc)[:n_local]
 
-        def _local_geometry():
-            det_c = cp.asnumpy(self.mesh_data['det_jacs'])
-            det_c = det_c.reshape(det_c.shape[0], -1)
-            return (det_c[np.asarray(dist_fc.inv_perm)][:n_local],
-                    native_cell_is_prism(dist_fc)[:n_local])
+    def _get_positivity_limiter_gpu(self):
+        """守恒的正性保持限制器（与 CPU 同一个，GPU 上走数组模块无关实现），几何取 `local_cell_geometry`。
+        按阶数缓存，只在缓存失效（阶数切换）时下载一次 det(J)。"""
+        from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
 
-        return get_positivity_limiter(self, xp=cp, geometry=_local_geometry)
+        return get_positivity_limiter(self, xp=get_cupy(), geometry=self.local_cell_geometry)
 
     def _global_residual_norm(self, res_flat) -> float:
         """MPI 全局残差归约。

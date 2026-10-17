@@ -10,7 +10,6 @@ from pathlib import Path
 from loguru import logger
 
 from autoflowcfd.grid.nas_io.parser import NASParser
-from autoflowcfd.grid.mesh_gen.tetgen.volume_mesh_generator import VolumeMeshGenerator
 from autoflowcfd.grid.structures import GridData, VolumeMeshData
 from autoflowcfd.grid.validation.validator import GridValidator
 
@@ -91,47 +90,15 @@ def api_validate_surface_grid(self, grid_data: GridData) -> Dict[str, Any]:
 
 
 def api_generate_volume_mesh(self, grid_data: GridData, **kwargs) -> VolumeMeshData:
-    """从面网格生成体网格。
+    """由面网格生成体网格，与 CLI `grid generate-volume` 同一个入口
+    （`grid/nas_io/parser_volume.py::generate_volume_mesh_from_surface`，含面网格数据的保存）。
 
-    此前这里调用 `VolumeMeshGenerator(grid_data, method=method, **kwargs)`
-    再调用 `.generate()`——但 VolumeMeshGenerator 真实的构造函数完全不
-    接受 grid_data/method 这两个位置/关键字参数（只接受 growth_rate/
-    min_cell_size/max_cell_size/bl_layers 等网格生成参数，
-    见 grid/mesh_gen/tetgen/volume_mesh_generator.py），也没有 `.generate()`
-    方法（真实方法是 `.generate_from_surface(surface_nodes, surface_faces,
-    bounding_box, surface_boundaries=None)`）——任何调用都必然
-    TypeError，是从未被真正跑通过的死代码（V2.0 专家组评审逐行核实）。
-    改为镜像 CLI `grid generate-volume` 命令（cli/grid/volume_commands.py）
-    的真实调用方式：从 grid_data 取出 nodes/cells/boundaries，自己算
-    bounding box，传给 generate_from_surface。
-
-    kwargs 透传给 VolumeMeshGenerator 构造函数（growth_rate/
-    min_cell_size/max_cell_size/bl_layers 等，与 CLI
-    `grid generate-volume` 的同名选项含义一致）。
+    kwargs：growth_rate / min_cell_size / max_cell_size / bl_layers / bl_only / core_only / output，
+    含义与 CLI 同名选项一致；未知参数报错。
     """
-    logger.info("Generating volume mesh...")
+    from autoflowcfd.grid.nas_io.parser_volume import generate_volume_mesh_from_surface
 
-    nodes = grid_data.nodes
-    surface_nodes = np.column_stack([nodes.x, nodes.y, nodes.z])
-    surface_faces = grid_data.cells.connectivity
-    bounding_box = {
-        'min': surface_nodes.min(axis=0),
-        'max': surface_nodes.max(axis=0),
-    }
-
-    mesh_gen = VolumeMeshGenerator(**kwargs)
-    volume_mesh = mesh_gen.generate_from_surface(
-        surface_nodes=surface_nodes,
-        surface_faces=surface_faces,
-        bounding_box=bounding_box,
-        surface_boundaries=getattr(grid_data, 'boundaries', None),
-    )
-
-    logger.info(
-        f"Volume mesh generated: {volume_mesh.node_count} nodes, "
-        f"{volume_mesh.cell_count} cells"
-    )
-
+    volume_mesh = generate_volume_mesh_from_surface(grid_data, kwargs)
     self.volume_mesh = volume_mesh
     return volume_mesh
 

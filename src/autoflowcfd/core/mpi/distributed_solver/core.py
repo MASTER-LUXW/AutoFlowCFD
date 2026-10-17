@@ -210,9 +210,11 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         self.rho_inf = solver_kwargs.get('rho_inf', 1.225)
         self.vel_inf = solver_kwargs.get('vel_inf', 33.33)
         self.p_inf = solver_kwargs.get('p_inf', 101325.0)
+        from autoflowcfd.core.fr_solver.mach_ref import resolve_mach_ref
         self.freestream = {
             "rho_inf": self.rho_inf, "vel_inf": self.vel_inf,
             "p_inf": self.p_inf,
+            "mach_ref": resolve_mach_ref(self.rho_inf, self.vel_inf, self.p_inf),
             # 见 gpu_solver.py 同一处说明（2026-09-17）
             "aoa_deg": float(solver_kwargs.get("aoa_deg", 0.0) or 0.0),
             "aos_deg": float(solver_kwargs.get("aos_deg", 0.0) or 0.0),

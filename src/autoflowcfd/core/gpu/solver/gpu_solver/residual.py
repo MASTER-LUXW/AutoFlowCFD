@@ -33,72 +33,25 @@ class _GPUSolverResidualMixin:
         U = U_trial if U_trial is not None else self.U_gpu
 
         if self.mesh.n_points_1d == 1:
-            # P0 路径：使用 CuPy RawKernel
+            # P0：有限体积 RawKernel。原始变量取自试探态 U（隐式 Jacobian-向量积与 RK 各级都传试探态）
+            from autoflowcfd.core.gpu.residual.gpu_flux import conserved_to_primitive_gpu
             from autoflowcfd.core.gpu.residual.gpu_p0_inviscid import (
                 compute_inviscid_residual_p0_cupy_gpu_resident,
             )
-            Q_flat = self.Q_gpu[:, 0, :5].copy()
-            # 需要面连接关系数据
+            from autoflowcfd.core.fr_residual.inviscid_p0 import _precompute_ghost_states
+
+            geo = self._p0_face_arrays_gpu()
+            Q_flat = conserved_to_primitive_gpu(U[:, 0, :5])
             fc = self.mesh.face_connectivity
-            owner = cp.asarray(fc.owner_cell)
-            neighbor = cp.asarray(
-                np.where(fc.is_boundary, 0, fc.neighbor_cell)
-            )
-            is_bnd = cp.asarray(fc.is_boundary)
-            # 面法向和面积（性能修复，真实复现：本函数是 GPU P0 无粘残差
-            # 每步都要调用的热路径，此前这里逐面 `ffp_list[f]` 索引——自
-            # face_flux_points/merge.py 的 flat array 重构后
-            # `mesh.face_flux_points` 是 `_KernelFaceData`，`[f]` 会按需
-            # *构造*一个完整 FaceFluxPointGeometry 对象，187 万面级别的
-            # 网格上每步都这样做是灾难级开销，与
-            # core/fr_operators/troubled_cell.py::precompute_cell_face_
-            # misalignment 是同一类遗漏、同一次真实复现中一并发现。改用
-            # inviscid_p0.py 里已经过测试、CPU P0 热路径同样在用的快速
-            # 路径提取函数，数学上是同一批数据，只是不再逐面构造对象。
-            n_faces = fc.n_faces
-            from autoflowcfd.core.fr_residual.inviscid_p0 import _extract_p0_face_geometry
-            normal, area_w = _extract_p0_face_geometry(self.mesh.face_flux_points, fc, n_faces)
-            normal_gpu = cp.asarray(normal)
-            area_w_gpu = cp.asarray(area_w)
-            volumes_gpu = self.mesh_data.get('cell_volumes')
-            if volumes_gpu is None:
-                volumes_gpu = cp.asarray(self.mesh.get_all_cell_volumes())
-
-            # 边界幽灵态（正确性修复，B-8 一并暴露）：此前这里恒传全零，
-            # kernel 会把边界面外部状态当成零态解 AUSM 黎曼问题。改为与
-            # gpu_p0_inviscid.py::compute_inviscid_residual_p0_cupy 同款的
-            # 逐面 ghost_provider 预计算；范围含混合拆分面的边界子面记录（B-8）。
-            from autoflowcfd.core.fr_residual.inviscid import DefaultGhostProvider
-            ghost_provider = (
-                self.boundary_ghost_provider
-                if self.boundary_ghost_provider is not None
-                else DefaultGhostProvider()
-            )
-            ffp_list = self.mesh.face_flux_points
-            mixed_bnd_face = getattr(ffp_list, "mixed_bnd_face", None)
-            if mixed_bnd_face is None:
-                mixed_bnd_face = np.zeros(n_faces, dtype=np.bool_)
-            mixed_bnd_frac = getattr(ffp_list, "mixed_p0_bnd_frac", None)
-            if mixed_bnd_frac is None:
-                mixed_bnd_frac = np.zeros(n_faces, dtype=np.float64)
-            ghost_faces = np.nonzero(fc.is_boundary | mixed_bnd_face)[0]
-            Q_flat_np = cp.asnumpy(Q_flat)
-            Q_ghost_np = np.zeros((n_faces, 5), dtype=np.float64)
-            for f in ghost_faces:
-                oc = int(fc.owner_cell[f])
-                Q_ghost_np[f, :] = ghost_provider(
-                    f, Q_flat_np[oc: oc + 1], normal[f: f + 1]
-                )[0]
-            Q_ghost = cp.asarray(Q_ghost_np)
-            mixed_bnd_frac_gpu = cp.asarray(mixed_bnd_frac)
-
+            Q_ghost = cp.asarray(_precompute_ghost_states(
+                self.mesh.face_flux_points, fc, self.boundary_ghost_provider,
+                cp.asnumpy(Q_flat), fc.n_faces, geo["normal_host"]))
             res = compute_inviscid_residual_p0_cupy_gpu_resident(
-                Q_flat, owner, neighbor, is_bnd,
-                normal_gpu, area_w_gpu, volumes_gpu,
-                Q_ghost, mixed_bnd_frac_gpu, self.mesh.n_cells, n_faces,
+                Q_flat, geo["owner"], geo["neighbor"], geo["is_bnd"],
+                geo["normal"], geo["area_w"], geo["volumes"],
+                Q_ghost, geo["mixed_bnd_frac"], self.mesh.n_cells, fc.n_faces,
                 mach_ref=self.freestream["mach_ref"],
             )
-            # 扩展到 (n_cells, n_sps, 5)
             return cp.broadcast_to(res, (self.mesh.n_cells, self.mesh.n_sps_per_cell, 5)).copy()
         else:
             # P>=1 高阶 FR GPU 路径
@@ -112,6 +65,33 @@ class _GPUSolverResidualMixin:
                 device_id=self.device_id,
                 mach_ref=self.freestream["mach_ref"],
             )
+
+    def _p0_face_arrays_gpu(self) -> dict:
+        """P0 有限体积残差用到的面几何（设备端），按网格对象缓存（几何不随状态变化，换阶数时网格对象随之更换）。"""
+        cache = getattr(self, "_p0_face_cache", None)
+        if cache is not None and cache["mesh"] is self.mesh:
+            return cache
+        cp = get_cupy()
+        from autoflowcfd.core.fr_residual.inviscid_p0 import _extract_p0_face_geometry
+
+        fc = self.mesh.face_connectivity
+        ffp = self.mesh.face_flux_points
+        normal, area_w = _extract_p0_face_geometry(ffp, fc, fc.n_faces)
+        mixed_frac = getattr(ffp, "mixed_p0_bnd_frac", None)
+        volumes = self.mesh_data.get("cell_volumes")
+        cache = {
+            "mesh": self.mesh,
+            "owner": cp.asarray(fc.owner_cell),
+            "neighbor": cp.asarray(np.where(fc.is_boundary, 0, fc.neighbor_cell)),
+            "is_bnd": cp.asarray(fc.is_boundary),
+            "normal_host": normal,
+            "normal": cp.asarray(normal),
+            "area_w": cp.asarray(area_w),
+            "volumes": volumes if volumes is not None else cp.asarray(self.mesh.get_all_cell_volumes()),
+            "mixed_bnd_frac": cp.asarray(mixed_frac if mixed_frac is not None else np.zeros(fc.n_faces)),
+        }
+        self._p0_face_cache = cache
+        return cache
 
     def compute_viscous_residual_gpu(self, U_trial=None, mu_t_field=None, nu_av=None):
         """GPU 计算粘性残差。

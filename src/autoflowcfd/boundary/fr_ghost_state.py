@@ -196,10 +196,73 @@ def symmetry_ghost_state(Q_int: np.ndarray, normal: np.ndarray) -> np.ndarray:
     return Q_ghost
 
 
-class BoundaryGhostStateProvider:
-    """把「面 -> 边界组 -> BC 类型/参数」与幽灵态构造函数粘合起来，产出
-    core/fr_residual_inviscid.compute_inviscid_residual_fr 需要的
-    boundary_ghost_provider 可调用对象。
+def ghost_state_for_config(cfg: dict, Q_int: np.ndarray, normal: np.ndarray) -> np.ndarray:
+    """一组边界配置下的幽灵态（不含 SEM 入口，那一支逐面依赖涡核位置，由调用方处理）。
+
+    Args:
+        cfg: 边界配置 {'type': 'WALL'/'FARFIELD'/'INLET'/'OUTLET'/'SYMMETRY', 及该类型的参数}
+        Q_int: (n, 5) 本侧外插原始变量
+        normal: (n, 3) 单位外法向
+
+    这是边界类型 -> 幽灵态构造的唯一分派处（单面与批量调用都经过这里）。
+    """
+    bc_type = cfg["type"]
+    if bc_type == "WALL":
+        return wall_ghost_state(Q_int, normal, is_no_slip=cfg.get("is_no_slip", True),
+                                wall_velocity=cfg.get("wall_velocity"))
+    if bc_type == "FARFIELD":
+        return farfield_ghost_state(Q_int, cfg["Q_free"])
+    if bc_type == "INLET":
+        return inlet_ghost_state(Q_int, cfg["Q_inlet"])
+    if bc_type == "OUTLET":
+        return outlet_ghost_state(Q_int, cfg["p_outlet"], normal)
+    if bc_type == "SYMMETRY":
+        return symmetry_ghost_state(Q_int, normal)
+    raise ValueError(f"未知的边界条件类型 '{bc_type}'")
+
+
+class GhostStateProvider:
+    """边界幽灵态提供者基类。
+
+    子类实现单面接口 `__call__(face_idx, Q_owner_fp (n_fp,5), true_normal (n_fp,3)) -> (n_fp,5)`；
+    残差组装统一调用批量接口 `ghost_states`，默认逐面调用 `__call__`，按边界组批量化的实现覆盖它。
+    """
+
+    def __call__(self, face_idx: int, Q_owner_fp: np.ndarray, true_normal: np.ndarray) -> np.ndarray:
+        raise NotImplementedError
+
+    def ghost_states(self, faces: np.ndarray, Q_owner: np.ndarray, normals: np.ndarray) -> np.ndarray:
+        """一批边界面的幽灵态。
+
+        Args:
+            faces: (m,) 面号
+            Q_owner: (m, n_fp, 5) 各面通量点上的本侧原始变量
+            normals: (m, n_fp, 3) 单位外法向
+        Returns:
+            (m, n_fp, 5)
+        """
+        out = np.empty_like(Q_owner)
+        for k, f in enumerate(faces):
+            out[k] = self(int(f), Q_owner[k], normals[k])
+        return out
+
+
+class DefaultGhostProvider(GhostStateProvider):
+    """零梯度外插（幽灵态 = 本侧外插态）：对均匀流场恰好零跳跃。
+
+    只用于自由流守恒类测试与没有物理边界的单元测试；生产求解器一律用按边界组给定条件的
+    `BoundaryGhostStateProvider`（`core/fr_solver/boundary/ghost.py::build_boundary_ghost_provider`）。
+    """
+
+    def __call__(self, face_idx: int, Q_owner_fp: np.ndarray, true_normal: np.ndarray) -> np.ndarray:
+        return Q_owner_fp.copy()
+
+    def ghost_states(self, faces: np.ndarray, Q_owner: np.ndarray, normals: np.ndarray) -> np.ndarray:
+        return Q_owner.copy()
+
+
+class BoundaryGhostStateProvider(GhostStateProvider):
+    """把「面 -> 边界组 -> BC 类型/参数」与幽灵态构造函数粘合起来，供残差组装取边界幽灵态。
 
     Attributes:
         group_code: (n_faces,) 每个边界面所属边界组的整数编码
@@ -207,41 +270,45 @@ class BoundaryGhostStateProvider:
             未匹配任何组的边界面为 -1
         code_to_config: Dict[int, dict]，组编码 -> {'type': 'WALL'/'FARFIELD'/
             'INLET'/'OUTLET'/'SYMMETRY', 以及该类型需要的参数}
-        default_config: 未匹配到任何边界组的边界面使用的兜底配置
-            （不允许静默地"什么都不做"——必须显式提供，通常设为 FARFIELD
-            自由来流条件，工业外流场里未分类面多为远场边界）
+        default_config: 未匹配到任何边界组的边界面使用的配置（必须显式提供）
+        code_to_name: Dict[int, str]，组编码 -> 组名（后处理按组给出分量用；可缺省）
     """
 
-    def __init__(self, group_code: np.ndarray, code_to_config: dict, default_config: dict):
+    def __init__(self, group_code: np.ndarray, code_to_config: dict, default_config: dict,
+                 code_to_name: Optional[dict] = None):
         self.group_code = group_code
         self.code_to_config = code_to_config
         self.default_config = default_config
+        self.code_to_name = dict(code_to_name or {})
+
+    def config_of_code(self, code: int) -> dict:
+        return self.code_to_config.get(int(code), self.default_config)
 
     def __call__(self, face_idx: int, Q_owner_fp: np.ndarray, true_normal: np.ndarray) -> np.ndarray:
-        code = int(self.group_code[face_idx])
-        cfg = self.code_to_config.get(code, self.default_config)
-        bc_type = cfg["type"]
+        return self.ghost_states(np.array([face_idx]), Q_owner_fp[np.newaxis], true_normal[np.newaxis])[0]
 
-        if bc_type == "WALL":
-            return wall_ghost_state(
-                Q_owner_fp,
-                true_normal,
-                is_no_slip=cfg.get("is_no_slip", True),
-                wall_velocity=cfg.get("wall_velocity"),
-            )
-        elif bc_type == "FARFIELD":
-            return farfield_ghost_state(Q_owner_fp, cfg["Q_free"])
-        elif bc_type == "INLET":
-            sem_ghost = cfg.get("sem")
+    def ghost_states(self, faces: np.ndarray, Q_owner: np.ndarray, normals: np.ndarray) -> np.ndarray:
+        """按边界组批量构造：同一组共享一份配置，底层幽灵态函数本身按任意长度向量化。
+
+        SEM 合成湍流入口逐面依赖涡核位置，组内逐面调用（面数远小于边界面总数）。
+        """
+        faces = np.asarray(faces, dtype=np.int64)
+        out = np.empty_like(Q_owner)
+        if faces.size == 0:
+            return out
+        n_fp = Q_owner.shape[1]
+        codes = np.asarray(self.group_code)[faces]
+        for code in np.unique(codes):
+            sel = np.flatnonzero(codes == code)
+            cfg = self.config_of_code(code)
+            sem_ghost = cfg.get("sem") if cfg["type"] == "INLET" else None
             if sem_ghost is not None:
-                return sem_ghost(face_idx, Q_owner_fp, true_normal)
-            return inlet_ghost_state(Q_owner_fp, cfg["Q_inlet"])
-        elif bc_type == "OUTLET":
-            return outlet_ghost_state(Q_owner_fp, cfg["p_outlet"], true_normal)
-        elif bc_type == "SYMMETRY":
-            return symmetry_ghost_state(Q_owner_fp, true_normal)
-        else:
-            raise ValueError(f"Unknown boundary condition type '{bc_type}' for face {face_idx}")
+                for k in sel:
+                    out[k] = sem_ghost(int(faces[k]), Q_owner[k], normals[k])
+                continue
+            out[sel] = ghost_state_for_config(
+                cfg, Q_owner[sel].reshape(-1, 5), normals[sel].reshape(-1, 3)).reshape(len(sel), n_fp, 5)
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +371,6 @@ def build_viscous_boundary_kind(n_faces: int, is_boundary: np.ndarray, ghost_pro
     扫描边界面。
     """
     from autoflowcfd.core.fr_operators.flux_kernels import VBC_INTERIOR, VBC_NEUMANN
-    from autoflowcfd.core.fr_residual.inviscid import DefaultGhostProvider
 
     cached = getattr(ghost_provider, "_afcfd_vbc_kind", None)
     if cached is not None and cached.shape[0] == n_faces:

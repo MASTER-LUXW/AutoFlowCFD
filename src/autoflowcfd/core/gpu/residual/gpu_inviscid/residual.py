@@ -191,7 +191,7 @@ def _compute_boundary_ghost_states_gpu(
             `compute_boundary_ghost_states` 返回形状一致
     """
     cp = get_cupy()
-    from autoflowcfd.core.fr_residual.inviscid import DefaultGhostProvider
+    from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
     from autoflowcfd.core.fr_residual.inviscid_kernel import compute_boundary_ghost_states
 
     provider = ghost_provider if ghost_provider is not None else DefaultGhostProvider()

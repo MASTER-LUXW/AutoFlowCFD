@@ -1,14 +1,9 @@
-"""postprocess/vtk_export_xml.py 处理棱柱+四面体混合网格的单元测试。
+"""低阶 VTK 导出在棱柱+四面体混合网格上的正确性。
 
-这里抓到的真实缺陷（2026-08-21 修复）：`export_xml` 只读
-`grid_data.cells.connectivity`（四面体）并只用它构造 pyvista 网格——从不看
-`grid_data.prism_cells`，于是每张带边界层棱柱挤出的网格（也就是本项目
-实际产生的每张网格；棱柱边界层挤出是核心的、始终开启的功能）在导出为
-默认/推荐的 .vtu 格式时静默丢失 100% 的棱柱单元。得到的 VTK 网格的单元数
-（只有四面体）随后与解场数组（按全部单元，棱柱+四面体）对不上，被 VTK
-自己的内部校验抓到并报错——不是一个静默的、看上去不对的文件，但对任何
-混合网格仍是真实、可复现的失败（在真实的 cube_demo.nas 791492 单元算例上
-确认：654512 个四面体 + 136980 个棱柱）。
+- 单元：XML 输出必须同时含棱柱与四面体，顺序为棱柱在前、四面体在后（与单元场同序）。
+- 节点（2026-10-17 修复）：单元 -> 节点插值此前只用四面体连接表去配"棱柱在前"的全部单元场——
+  第 i 个四面体拿到第 i 个单元（其实是棱柱）的值，只属于棱柱的节点（边界层内部节点）没有数据、
+  被填成兜底值。现在按混合连接逐单元体积加权。
 """
 
 from types import SimpleNamespace
@@ -18,85 +13,65 @@ import pytest
 
 pv = pytest.importorskip("pyvista")
 
-from autoflowcfd.postprocess.vtk_export_xml import export_xml
+from autoflowcfd.core.backend.base import SolutionVector
+from autoflowcfd.postprocess._field_utils import cell_to_node
+from autoflowcfd.postprocess.vtk_export import VTKExporter
+from autoflowcfd.postprocess.vtk_export_xml import export_volume
 
 
-def _build_mixed_grid_data(tmp_path):
-    """一个很小的类 grid_data 对象，含 1 个棱柱 + 1 个四面体，与 `export_xml`
-    读取的真实 VolumeMeshData 的结构一致（`.nodes.x/y/z`、
-    `.cells.connectivity`、`.prism_cells.connectivity`）。
-    """
-    n_points = 11
-    nodes = SimpleNamespace(
-        x=np.linspace(0, 1, n_points),
-        y=np.linspace(0, 1, n_points),
-        z=np.linspace(0, 1, n_points),
-        count=n_points,
-    )
-    tet_conn = np.array([[0, 1, 2, 3]], dtype=np.int64)
-    prism_conn = np.array([[4, 5, 6, 7, 8, 9]], dtype=np.int64)
+def _mixed_grid():
+    """1 个棱柱（节点 0..5）+ 1 个四面体（节点 3,4,5,6，与棱柱共享顶面）；体积 0.5 与 1/6。"""
+    xyz = np.array([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 0, 1], [0, 1, 1], [0, 0, 2.0]])
+    nodes = SimpleNamespace(x=xyz[:, 0], y=xyz[:, 1], z=xyz[:, 2], count=len(xyz))
+    vols = np.array([0.5, 1.0 / 6.0])
     return SimpleNamespace(
-        nodes=nodes,
-        cells=SimpleNamespace(connectivity=tet_conn),
-        prism_cells=SimpleNamespace(connectivity=prism_conn),
+        nodes=nodes, node_count=len(xyz), cell_count=2,
+        cells=SimpleNamespace(connectivity=np.array([[3, 4, 5, 6]])),
+        prism_cells=SimpleNamespace(connectivity=np.array([[0, 1, 2, 3, 4, 5]])),
+        get_cell_volumes=lambda: vols,
     )
 
 
-class _StubExporter:
-    """VTKExporter 的最小替身——只有 `export_xml` 实际用到的属性/方法。"""
-
-    _FIELD_LABELS = {"pressure": "Pressure"}
-
-    def __init__(self, grid_data, n_cells):
-        self.grid_data = grid_data
-        self._n_cells = n_cells
-
-    def _cell_fields(self, fields):
-        return {"pressure": np.arange(self._n_cells, dtype=np.float64)}
-
-    def _point_fields(self, cell_fields, n_points):
-        return {}
+def test_cells_are_prism_first_in_xml(tmp_path):
+    out = tmp_path / "mixed.vtu"
+    export_volume(out, _mixed_grid(), {"pressure": np.array([1.0, 2.0])}, {}, binary=True)
+    result = pv.read(str(out))
+    assert result.n_cells == 2
+    assert result.celltypes[0] == int(pv.CellType.WEDGE)
+    assert result.celltypes[1] == int(pv.CellType.TETRA)
+    np.testing.assert_array_equal(result.cell_data["Pressure"], [1.0, 2.0])
 
 
-class TestExportXmlMixedCells:
-    def test_prism_and_tet_cells_both_present_in_output(self, tmp_path):
-        grid_data = _build_mixed_grid_data(tmp_path)
-        exporter = _StubExporter(grid_data, n_cells=2)  # 1 prism + 1 tet
-        out_path = tmp_path / "mixed.vtu"
+def test_cell_to_node_uses_both_cell_types():
+    grid = _mixed_grid()
+    node = cell_to_node(grid, np.array([10.0, 40.0]))
+    np.testing.assert_allclose(node[[0, 1, 2]], 10.0)            # 只属于棱柱
+    np.testing.assert_allclose(node[6], 40.0)                     # 只属于四面体
+    shared = (0.5 * 10.0 + (1.0 / 6.0) * 40.0) / (0.5 + 1.0 / 6.0)
+    np.testing.assert_allclose(node[[3, 4, 5]], shared)           # 两者共享，按体积加权
 
-        export_xml(exporter, out_path, fields=["pressure"], binary=True)
 
-        result = pv.read(str(out_path))
-        assert result.n_cells == 2
-        celltype_counts = {t: int((result.celltypes == t).sum()) for t in set(result.celltypes)}
-        assert celltype_counts.get(int(pv.CellType.WEDGE), 0) == 1
-        assert celltype_counts.get(int(pv.CellType.TETRA), 0) == 1
-        # 全局顺序：先棱柱、后四面体（与本项目的单元编号约定一致，见
-        # vtk_export.py::_VTK_WEDGE 文档）——单元 0 的场值（0.0）必须落在棱柱上，
-        # 而不是四面体上。
-        assert result.celltypes[0] == int(pv.CellType.WEDGE)
-        assert result.celltypes[1] == int(pv.CellType.TETRA)
+@pytest.mark.parametrize("fmt, name", [("xml", "m.vtu"), ("legacy", "m.vtk")])
+def test_point_data_on_mixed_mesh(tmp_path, fmt, name):
+    """POINT_DATA 的压力：只属于棱柱的节点取棱柱值，只属于四面体的取四面体值。"""
+    grid = _mixed_grid()
+    gamma = 1.4
+    p = np.array([101000.0, 99000.0])
+    rho = np.array([1.2, 1.1])
+    U = np.zeros((2, 5))
+    U[:, 0] = rho
+    U[:, 4] = p / (gamma - 1.0)
+    path = VTKExporter(grid, SolutionVector(data=U, n_cells=2, n_variables=5)).export(
+        str(tmp_path / name), fields=["pressure"], format=fmt, binary=False)
+    result = pv.read(str(path))
+    np.testing.assert_allclose(result.point_data["Pressure"][[0, 1, 2]], p[0], rtol=1e-6)
+    np.testing.assert_allclose(result.point_data["Pressure"][6], p[1], rtol=1e-6)
 
-    def test_tet_only_mesh_still_exports_correctly(self, tmp_path):
-        """没有 `prism_cells`（或为空）时必须退回原来只有四面体的路径，行为不变。"""
-        n_points = 4
-        nodes = SimpleNamespace(
-            x=np.array([0.0, 1.0, 0.0, 0.0]),
-            y=np.array([0.0, 0.0, 1.0, 0.0]),
-            z=np.array([0.0, 0.0, 0.0, 1.0]),
-            count=n_points,
-        )
-        tet_conn = np.array([[0, 1, 2, 3]], dtype=np.int64)
-        grid_data = SimpleNamespace(
-            nodes=nodes,
-            cells=SimpleNamespace(connectivity=tet_conn),
-            prism_cells=None,
-        )
-        exporter = _StubExporter(grid_data, n_cells=1)
-        out_path = tmp_path / "tet_only.vtu"
 
-        export_xml(exporter, out_path, fields=["pressure"], binary=True)
-
-        result = pv.read(str(out_path))
-        assert result.n_cells == 1
-        assert result.celltypes[0] == int(pv.CellType.TETRA)
+def test_missing_requested_field_raises():
+    grid = _mixed_grid()
+    exporter = VTKExporter(grid, SolutionVector(data=np.ones((2, 5)), n_cells=2, n_variables=5))
+    with pytest.raises(ValueError, match="湍流场"):
+        exporter.export("unused.vtk", fields=["k"])
+    with pytest.raises(ValueError, match="Q 准则"):
+        exporter.export("unused.vtk", fields=["q_criterion"])

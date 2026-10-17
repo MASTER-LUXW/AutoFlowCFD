@@ -63,7 +63,8 @@ def compute_inviscid_residual_fv_p0(
     Returns:
         residual: 形状 (n_cells, 1, 5)
     """
-    from .inviscid import conserved_to_primitive, DefaultGhostProvider
+    from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
+    from .inviscid import conserved_to_primitive
     from .inviscid_p0_kernel import _p0_inviscid_kernel
     from autoflowcfd.core.fr_operators.kernels import resolve_ausm_precond_mode
 
@@ -209,55 +210,22 @@ def _extract_p0_face_geometry(ffp_list, fc, n_faces: int):
 
 
 def _precompute_ghost_states(ffp_list, fc, ghost_provider, Q_all, n_faces: int, unit_normals):
-    """预计算需要幽灵态的面（真边界面 + 混合拆分面的内部记录，B-8）的
-    幽灵态，按**面**索引（不是按 owner 单元索引）。
+    """需要幽灵态的面（真边界面 + 混合拆分面的边界子面记录）的 P0 幽灵态，按**面**索引。
 
-    真实 bug 修复（V2.0 专家组盲审第四次评审，2026-08-28）：此前这里
-    按 owner 单元索引成 (n_cells,5) 数组、numba kernel 也按
-    `Q_ghost[owner_cell]` 读取——如果同一个 P0 单元同时挨着 2 个以上
-    边界面（角点单元很常见，真实复现：本文件下方交叉验证用的
-    `build_channel_mesh_prism` 测试网格上，单元 3 就同时挨着 3 个边界
-    面），后处理的边界面会把先处理的边界面的幽灵态覆盖掉，导致有些
-    边界面在通量计算时用了另一个边界面（可能是不同 BC 类型/不同法向）
-    算出的幽灵态。用 `DefaultGhostProvider`（ghost=owner 状态，覆盖谁
-    都一样）时这个问题被完全掩盖，只有真实的 WALL/INLET/OUTLET 等
-    幽灵态（不同面算出不同值）才会暴露。改为按面索引的 (n_faces,5)
-    数组，与 GPU 版
-    `core/gpu/residual/gpu_p0_inviscid.py::compute_inviscid_residual_p0_gpu`
-    的既有正确做法保持一致；numba kernel（`inviscid_p0_kernel.py::
-    _p0_inviscid_kernel`）同步改为按面索引读取。
+    按面而不是按 owner 单元索引：同一个 P0 单元可同时挨着多个不同类型/法向的边界面（角点单元）。
 
     Args:
-        unit_normals: (n_faces,3)，`_extract_p0_face_geometry` 已去重
-            过的面法向——真边界面的法向不受多源去重逻辑影响（那只处理
-            内部面的歧义），与原来读 `ffp.true_normal` 数值相同，直接
-            复用避免重复访问 `ffp_list[f]`。
+        Q_all: (n_cells, 5) 单元原始变量
+        unit_normals: (n_faces, 3)，`_extract_p0_face_geometry` 给出的面法向
 
     Returns:
-        Q_ghost: (n_faces, 5)，只有 is_boundary 或混合拆分面对应的行
-            有意义，其余行为零占位（kernel 不会读取）。
+        Q_ghost: (n_faces, 5)，只有需要幽灵态的面的行有意义，其余为零（kernel 不读）。
     """
-    from .inviscid import DefaultGhostProvider
-
     Q_ghost = np.zeros((n_faces, 5), dtype=Q_all.dtype)
-    is_bnd = fc.is_boundary
     mixed_bnd_face = getattr(ffp_list, "mixed_bnd_face", None)
-    if mixed_bnd_face is None:
-        mixed_bnd_face = np.zeros(n_faces, dtype=np.bool_)
-    need_ghost = is_bnd | mixed_bnd_face
-
-    if isinstance(ghost_provider, DefaultGhostProvider):
-        # 快速路径：ghost = owner 状态，向量化赋值，无需逐面调用。
-        owner_of_needed = fc.owner_cell[need_ghost]
-        Q_ghost[need_ghost] = Q_all[owner_of_needed]
-        return Q_ghost
-
-    # 通用路径：逐面调用 ghost_provider（真实边界条件依赖各面自己的
-    # 法向/位置，不能向量化）。
-    for f in np.nonzero(need_ghost)[0]:
-        oc = int(fc.owner_cell[f])
-        Q_owner_fp = Q_all[oc:oc + 1]  # (1,5)
-        true_normal = unit_normals[f:f + 1]  # (1,3)
-        Q_ghost[f, :] = ghost_provider(f, Q_owner_fp, true_normal)[0]
-
+    need = fc.is_boundary if mixed_bnd_face is None else (fc.is_boundary | mixed_bnd_face)
+    faces = np.flatnonzero(need)
+    if faces.size:
+        Q_owner = Q_all[fc.owner_cell[faces]][:, np.newaxis, :]
+        Q_ghost[faces] = ghost_provider.ghost_states(faces, Q_owner, unit_normals[faces][:, np.newaxis, :])[:, 0, :]
     return Q_ghost

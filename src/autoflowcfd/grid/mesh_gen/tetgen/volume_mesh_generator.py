@@ -32,7 +32,7 @@ class VolumeMeshGenerator:
     def __init__(
         self,
         growth_rate: float = 1.2,
-        min_cell_size: float = 0.01,
+        min_cell_size: float = 0.001,
         max_cell_size: Optional[float] = None,
         bl_layers: Optional[int] = None,
         bl_only: bool = False,

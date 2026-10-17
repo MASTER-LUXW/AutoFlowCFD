@@ -139,6 +139,9 @@ class TestGpuDistributedCheckpointRoundtrip:
         n_local = partition.n_local_cells
         rng = np.random.default_rng(123)
         solver.U_gpu = rng.uniform(-1.0, 1.0, size=(n_local, n_sps, n_vars))
+        # 写盘的单元积分平均要本 rank 几何（单 rank：local 即全局顺序）
+        det = np.asarray(mesh.jacobians["det_jacs"]).reshape(mesh.n_cells, -1)
+        solver.local_cell_geometry = lambda: (det[:n_local], np.arange(n_local) < mesh.n_prism_cells)
         return solver
 
     def test_save_then_load_roundtrip_preserves_state(self, tmp_path, monkeypatch):

@@ -151,22 +151,13 @@ def build_positivity_limiter_from_arrays(det_jacs, cell_is_prism, ops, order, xp
     """
     from autoflowcfd.fr.operators.face_ops import face_op_index
     from autoflowcfd.fr.triangle_apex import N_TRI_SLOTS
-    from autoflowcfd.fr.native_padding import real_sps_per_cell
-    from autoflowcfd.fr.native_prism.quadrature import build_native_prism_sp_weights
-    from autoflowcfd.fr.native_tet.quadrature import build_native_tet_sp_weights
+    from autoflowcfd.fr.native_padding import real_sps_per_cell, sp_integration_weights
 
     order = int(order)
-    det = np.asarray(det_jacs, dtype=np.float64)
     is_prism = np.ascontiguousarray(np.asarray(cell_is_prism, dtype=np.bool_))
-    n_cells, n_sps = det.shape
-    if is_prism.shape != (n_cells,):
-        raise ValueError(f"cell_is_prism 形状 {is_prism.shape} 与 det_jacs 的单元数 {n_cells} 不符")
+    W = sp_integration_weights(det_jacs, is_prism, order)
+    n_sps = W.shape[1]
     n_real_prism, n_real_tet = real_sps_per_cell(order)
-
-    w = np.zeros((n_cells, n_sps))
-    w[is_prism, :n_real_prism] = build_native_prism_sp_weights(order)[None, :]
-    w[~is_prism, :n_real_tet] = build_native_tet_sp_weights(order)[None, :]
-    W = np.ascontiguousarray(w * det)
 
     # 面通量点：每类单元全部面、全部坍缩顶点槽位的点集并集（一个单元的面实际用哪个
     # 槽位由全局节点号决定，这里取全部，限制器与网格编号无关；四边形面不存在的槽位

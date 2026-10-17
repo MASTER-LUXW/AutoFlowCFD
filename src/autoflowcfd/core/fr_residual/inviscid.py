@@ -28,6 +28,7 @@ import os
 import numpy as np
 from numba import njit, prange
 
+from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 from autoflowcfd.core.fr_operators.kernels import (
     compute_ausm_up_flux,
     resolve_ausm_precond_mode,
@@ -149,18 +150,6 @@ def mean_flow_primitives(U: np.ndarray, flat, ghost_provider=None) -> MeanFlowPr
     Q = conserved_to_primitive(U[..., :5])
     provider = ghost_provider if ghost_provider is not None else DefaultGhostProvider()
     return MeanFlowPrimitives(Q, compute_boundary_ghost_states(flat, Q, provider))
-
-
-class DefaultGhostProvider:
-    """默认的边界幽灵态提供者：零梯度外插（ghost = 内部外插态），
-    仅用于尚未接入真实边界条件（BD-01，见 boundary/fr_weak_bc.py 的接入
-    工作）之前的开发期占位与自由流场守恒性测试——对均匀流场恰好退化为
-    零跳跃，不会掩盖真实边界条件缺失这一事实（调用方必须显式传入
-    real ghost provider 才能获得物理正确的边界处理）。
-    """
-
-    def __call__(self, face_idx: int, Q_owner_fp: np.ndarray, true_normal: np.ndarray) -> np.ndarray:
-        return Q_owner_fp.copy()
 
 
 def _compute_inviscid_residual_fv_p0(

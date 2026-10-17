@@ -1,44 +1,59 @@
-"""VTKExporter 的场数据计算辅助函数。
+"""VTK 导出的场数据：边界分区编号、单元场组装、单元 -> 节点插值。"""
 
-从 vtk_export.py 中拆分出来（该文件超过 400 行硬性拆分阈值）：边界
-分区分类（_boundary_zone_ids）和单元中心/节点场数据计算
-（_cell_fields/_cell_to_node/_point_fields）是相对独立的一组逻辑，
-被 legacy 和 xml 两种写入路径共用。原来的 `VTKExporter` 方法体原样
-搬到这里，改写成以 `exporter`（原来的 `self`）为第一个参数的模块级
-函数；`VTKExporter` 上仍保留同名方法作为薄委托包装，外部调用方
-（包括 `exporter._cell_fields(...)` 这类直接访问）行为不变。
-"""
+from typing import Dict, List, Optional
 
 import numpy as np
-from typing import Dict, List
 
-from loguru import logger
-
+from ._field_utils import cell_to_node
 
 #: 没有记录边界条件类型的组（外部体网格不带边界三角形时的 'exterior' 等）
 _UNKNOWN_TYPE = "UNKNOWN"
 
+#: 湍流单元场的键（取自湍流模型输运场与涡粘的单元积分平均，`core/turbulence/output.py`）
+TURBULENCE_FIELDS = ('k', 'omega', 'nu_tilde', 'nut')
 
-def boundary_zone_ids(exporter, tri_conn: np.ndarray):
-    """每个外部面三角形的 BoundaryID（边界组）与 BoundaryTypeID（该组的边界条件类型）。
+#: 可请求的场名（'turbulence' 展开为当前可用的全部湍流量）
+VALID_FIELDS = {'velocity', 'pressure', 'turbulence', 'q_criterion'} | set(TURBULENCE_FIELDS)
 
-    逐面定组，与体网格导出、格式转换同一个函数（`mesh_boundary.exterior_faces_by_group`）；类型取网格记录的
-    `bc_types`（求解器用的就是它）。2026-10-09 以前按 owner 单元定组：同时贴着两个边界的角点单元，它的面
-    全部标成后遍历到的那个组；类型则是在这里按组名另猜一遍，与求解器实际使用的类型可以不同。
+#: 写进文件的数组名
+FIELD_LABELS = {
+    'velocity': 'Velocity',
+    'pressure': 'Pressure',
+    'k': 'TurbulentKineticEnergy',
+    'omega': 'SpecificDissipationRate',
+    'nu_tilde': 'SANuTilde',
+    'nut': 'TurbulentViscosity',
+    'q_criterion': 'QCriterion',
+}
 
-    Args:
-        tri_conn: (n_boundary_faces, 3) 外部面的节点编号
 
-    Returns:
-        (boundary_id, type_id, id_legend, type_legend)——前两个是 (n_boundary_faces,) 的 int32 数组，对照表是
-        "<id>=<name>" 形式的 List[str]。
+def expand_fields(fields: Optional[List[str]], turbulence: Dict[str, np.ndarray]) -> List[str]:
+    """校验场名并把 'turbulence' 展开为可用的湍流量；请求了 'turbulence' 却没有任何湍流场时报错。"""
+    if fields is None:
+        fields = ['velocity', 'pressure']
+    invalid = set(fields) - VALID_FIELDS
+    if invalid:
+        raise ValueError(f"无效的场名 {sorted(invalid)}，可用：{sorted(VALID_FIELDS)}")
+    out: List[str] = []
+    for name in fields:
+        if name == 'turbulence':
+            available = [k for k in TURBULENCE_FIELDS if k in turbulence]
+            if not available:
+                raise ValueError("请求了 'turbulence'，但没有任何湍流场（层流算例，或 checkpoint 早于 turb_cell_* 字段）")
+            out.extend(k for k in available if k not in out)
+        elif name not in out:
+            out.append(name)
+    return out
 
-    Raises:
-        ValueError: 有外部面不属于任何边界组
+
+def boundary_zone_ids(grid, tri_conn: np.ndarray):
+    """外部三角面 -> (BoundaryID, BoundaryTypeID, id 图例, 类型图例)。
+
+    边界组的面集合由 `mesh_boundary.exterior_faces_by_group` 逐面给出（有面网格数据时按几何包含逐面
+    归属），这里按排序后的节点三元组对号。
     """
     from autoflowcfd.grid.mesh_gen.utils.mesh_boundary import exterior_faces_by_group
 
-    grid = exporter.grid_data
     faces_by_group = exterior_faces_by_group(grid)
     boundary_names = list(faces_by_group)
     surface = getattr(grid, "surface_mesh", None)
@@ -46,7 +61,6 @@ def boundary_zone_ids(exporter, tri_conn: np.ndarray):
     group_type = [str(bc_types.get(name, _UNKNOWN_TYPE)) for name in boundary_names]
     type_names = sorted(set(group_type))
 
-    # 外部面按排序后的节点三元组对号（两边来自同一张网格的同一套面提取）
     n_nodes = int(grid.node_count)
 
     def _key(tris):
@@ -65,89 +79,37 @@ def boundary_zone_ids(exporter, tri_conn: np.ndarray):
         raise ValueError(f"{int((~found).sum())}/{len(query)} 个外部面不属于任何边界组")
     boundary_id = ids[pos]
     type_id = np.asarray([type_names.index(t) for t in group_type], dtype=np.int32)[boundary_id]
-
     id_legend = [f"{i}={name}" for i, name in enumerate(boundary_names)]
     type_legend = [f"{i}={name}" for i, name in enumerate(type_names)]
-
     return boundary_id, type_id, id_legend, type_legend
 
 
-def cell_fields(exporter, fields: List[str]) -> Dict[str, np.ndarray]:
-    """在单元中心分辨率上计算每个请求的场（标量 (n_cells,)，矢量
-    (n_cells, 3)），解数据不可用时（例如空的 SolutionVector）套用
-    与旧的纯节点写入器相同的兜底常数。
-
-    Returns:
-        场名（'velocity'、'pressure'、湍流键、'q_criterion'）到其原始
-        逐单元数组的字典——正是 CELL_DATA 写入的内容，也是
-        POINT_DATA 插值的数据源。
-    """
-    n_cells = exporter.grid_data.cell_count
-    has_data = exporter.solution.data is not None and exporter.solution.n_cells > 0
+def cell_fields(grid, solution, turbulence: Dict[str, np.ndarray], q_criterion: Optional[np.ndarray],
+                fields: List[str]) -> Dict[str, np.ndarray]:
+    """请求场的单元值（单元顺序：棱柱在前、四面体在后）。缺数据的场报错，不写占位值。"""
+    n_cells = int(grid.cell_count)
     out: Dict[str, np.ndarray] = {}
-
-    if 'velocity' in fields:
-        if has_data:
-            u, v, w = exporter.solution.get_velocity()
-            out['velocity'] = np.column_stack([u, v, w])
-        else:
-            logger.warning("Solution data not available. Using zero velocity.")
-            out['velocity'] = np.zeros((n_cells, 3))
-
-    if 'pressure' in fields:
-        if has_data:
-            out['pressure'] = exporter.solution.get_pressure()
-        else:
-            logger.warning("Solution data not available. Using uniform pressure.")
-            out['pressure'] = np.full(n_cells, 101325.0)
-
-    # 湍流量：取自湍流模型的输运场与涡粘的单元平均（`core/turbulence/output.py`），不再从守恒解
-    # 的第 6、7 列推算（那是 SST 状态数组里从未更新的历史槽位）
-    for key in ('k', 'omega', 'nu_tilde', 'nut'):
+    if 'velocity' in fields or 'pressure' in fields:
+        if solution is None or solution.data is None or solution.n_cells != n_cells:
+            raise ValueError("没有与网格单元数一致的解数据，无法导出速度/压力")
+        if 'velocity' in fields:
+            out['velocity'] = np.column_stack(solution.get_velocity())
+        if 'pressure' in fields:
+            out['pressure'] = solution.get_pressure()
+    for key in TURBULENCE_FIELDS:
         if key not in fields:
             continue
-        value = exporter.turbulence.get(key)
-        if value is not None and len(value) == n_cells:
-            out[key] = value
-        else:
-            logger.warning(f"Turbulence field '{key}' not available (laminar case, model without it, or "
-                           f"checkpoint predates turb_cell_* fields); writing zeros")
-            out[key] = np.zeros(n_cells)
-
-    # Q-Criterion 涡识别准则 (P-02)
+        value = turbulence.get(key)
+        if value is None or len(value) != n_cells:
+            raise ValueError(f"湍流场 '{key}' 不可用（层流、模型不含该量，或 checkpoint 早于 turb_cell_* 字段）")
+        out[key] = value
     if 'q_criterion' in fields:
-        from .q_criterion import compute_q_criterion_from_grid_solution
-        q_val = compute_q_criterion_from_grid_solution(exporter.grid_data, exporter.solution)
-        if q_val is not None and len(q_val) == n_cells:
-            out['q_criterion'] = q_val
-        else:
-            logger.warning("Q-Criterion computation unavailable; writing zeros")
-            out['q_criterion'] = np.zeros(n_cells)
-
+        if q_criterion is None or len(q_criterion) != n_cells:
+            raise ValueError("Q 准则需要由求解器状态算出后传入（postprocess/q_criterion.py::q_criterion_cell_field）")
+        out['q_criterion'] = np.asarray(q_criterion, dtype=np.float64)
     return out
 
 
-def cell_to_node(exporter, cell_values: np.ndarray, n_points: int, fallback: float = 0.0) -> np.ndarray:
-    """把逐单元标量场插值成逐节点值（对每个节点相连的单元做体积
-    加权平均——见 _field_utils.cell_to_node）。"""
-    from ._field_utils import cell_to_node as _cell_to_node_impl
-
-    conn = np.asarray(exporter.grid_data.cells.connectivity)
-    volumes = getattr(exporter.grid_data.cells, "volumes", None)
-    return _cell_to_node_impl(conn, cell_values, n_points, volumes=volumes, fallback=fallback)
-
-
-def point_fields(exporter, cell_fields_data: Dict[str, np.ndarray], n_points: int) -> Dict[str, np.ndarray]:
-    """把 `cell_fields_data` 里每个单元中心场都插值到节点。"""
-    out: Dict[str, np.ndarray] = {}
-    for name, arr in cell_fields_data.items():
-        if arr.ndim == 2:
-            fallback = 0.0 if name == 'velocity' else 0.0
-            out[name] = np.column_stack([
-                exporter._cell_to_node(arr[:, i], n_points, fallback=float(np.mean(arr[:, i])) if len(arr) else 0.0)
-                for i in range(arr.shape[1])
-            ])
-        else:
-            fallback = 101325.0 if name == 'pressure' else 0.0
-            out[name] = exporter._cell_to_node(arr, n_points, fallback=fallback)
-    return out
+def point_fields(grid, cell_fields_data: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    """单元场按体积加权平均到节点（混合网格，`_field_utils.cell_to_node`）。"""
+    return {name: cell_to_node(grid, arr) for name, arr in cell_fields_data.items()}

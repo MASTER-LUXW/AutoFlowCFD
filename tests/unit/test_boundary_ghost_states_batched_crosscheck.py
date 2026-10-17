@@ -1,149 +1,113 @@
-"""AutoFlowCFD V2.0 - `compute_boundary_ghost_states` 按边界组批量化的
-决定性交叉验证（2026-09-03 性能优化）。
+"""边界幽灵态批量接口的交叉验证。
 
-背景：真实 cProfile 画像（cube_demo 374,352 单元子集）显示
-`BoundaryGhostStateProvider.__call__` 逐面 Python 级 dict/if-elif 分派
-（每步约 24 万次调用）占单步耗时约 3~6%——其内部真正调用的
-`wall_ghost_state`/`farfield_ghost_state`/... 本身已经是接受任意长度
-批量的向量化函数，逐面调用纯粹是调度开销。新增
-`_compute_boundary_ghost_states_batched`：先向量化算出全部活跃边界面
-的 Q_o（外插），再按 `group_code` 分组、每组一次性批量调用底层函数
-（INLET+SEM 例外，逐面涡核位置相关，组内仍逐面调用）。
-
-本文件验证：批量版本与原有逐面版本（`_compute_boundary_ghost_states_
-per_face`，保留作为通用回退）在同一份真实含 WALL/INLET/OUTLET/
-SYMMETRY 四种边界类型 + native 四面体面 + 棱柱四边形侧面混合拆分面
-的合成网格上，结果一致到机器精度（rtol/atol=1e-12，不是逐位相等——
-Q_o 的外插矩阵乘法批量版走一次性 `np.einsum`（BLAS），逐面版走
-numba `_extrap_matmul` 单面小矩阵乘法，同一套数学公式的不同求和结合
-顺序，在最后一位浮点尾数上允许有非零但机器精度量级的差异，这与本
-项目其它地方"并行化重结合"判据同一原则，见 inviscid_kernel.py 模块
-文档）。
+`BoundaryGhostStateProvider.ghost_states` 按边界组批量构造幽灵态；基类 `GhostStateProvider.ghost_states`
+是逐面调用 `__call__` 的参照实现。两者在同一份含 WALL（无滑移/滑移）/FARFIELD/INLET/OUTLET/SYMMETRY、
+原生四面体面与棱柱四边形混合拆分面的合成网格上必须逐位相等（底层是同一批幽灵态函数，只是调用分组不同）。
+残差组装入口 `compute_boundary_ghost_states` 对任何 provider 都只走 `ghost_states` 这一条路径。
 """
 
 import numpy as np
 import pytest
 
-from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
-from autoflowcfd.core.fr_residual.inviscid import primitive_to_conserved, conserved_to_primitive
-from autoflowcfd.core.fr_residual.inviscid_kernel import (
-    compute_boundary_ghost_states,
-    _compute_boundary_ghost_states_per_face,
-    _compute_boundary_ghost_states_batched,
+from autoflowcfd.boundary.fr_ghost_state import (
+    BoundaryGhostStateProvider, DefaultGhostProvider, GhostStateProvider,
 )
-from autoflowcfd.boundary.fr_ghost_state import BoundaryGhostStateProvider
+from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+from autoflowcfd.core.fr_residual.inviscid_kernel import compute_boundary_ghost_states
 from autoflowcfd.fr.operators import generate_fr_operators
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 
+Q_FREE = np.array([1.225, 30.0, 0.0, 0.0, 101325.0])
 
-def _build_multi_bc_provider(flat, rng):
-    """给一份真实合成网格的全部边界面随机分配 5 种边界类型之一（含
-    WALL 的 is_no_slip 两种取值、INLET 不含 SEM），构造真实
-    `BoundaryGhostStateProvider`。"""
-    n_faces = flat.n_faces
-    boundary_idx = np.nonzero(flat.is_boundary)[0]
-    n_boundary = len(boundary_idx)
-    assert n_boundary > 0
 
-    group_code = np.full(n_faces, -1, dtype=np.int64)
-    # 5 个边界组编码，循环分配给全部边界面，确保每种类型都被覆盖到。
-    codes_cycle = np.arange(n_boundary) % 5
-    group_code[boundary_idx] = codes_cycle
-
-    Q_free = np.array([1.225, 30.0, 0.0, 0.0, 101325.0])
+def _build_multi_bc_provider(flat, rng=None):
+    """全部边界面循环分配 5 个边界组（每种类型都覆盖到），未分组面走默认 SYMMETRY。"""
+    boundary_idx = np.flatnonzero(flat.is_boundary)
+    assert boundary_idx.size > 0
+    group_code = np.full(flat.n_faces, -1, dtype=np.int64)
+    group_code[boundary_idx] = np.arange(boundary_idx.size) % 5
     code_to_config = {
         0: {"type": "WALL", "is_no_slip": True},
         1: {"type": "WALL", "is_no_slip": False},
-        2: {"type": "FARFIELD", "Q_free": Q_free},
-        3: {"type": "INLET", "Q_inlet": Q_free},
+        2: {"type": "FARFIELD", "Q_free": Q_FREE},
+        3: {"type": "INLET", "Q_inlet": Q_FREE},
         4: {"type": "OUTLET", "p_outlet": 101000.0},
     }
-    default_config = {"type": "SYMMETRY"}
-    return BoundaryGhostStateProvider(group_code, code_to_config, default_config)
+    return BoundaryGhostStateProvider(group_code, code_to_config, {"type": "SYMMETRY"})
+
+
+def _random_primitives(mesh, seed):
+    rng = np.random.default_rng(seed)
+    shape = (mesh.n_cells, mesh.n_sps_per_cell)
+    Q = np.zeros(shape + (5,))
+    Q[..., 0] = 1.225 * (1.0 + rng.uniform(-0.05, 0.05, size=shape))
+    Q[..., 1] = 30.0 + rng.uniform(-5.0, 5.0, size=shape)
+    Q[..., 2] = rng.uniform(-5.0, 5.0, size=shape)
+    Q[..., 3] = rng.uniform(-5.0, 5.0, size=shape)
+    Q[..., 4] = 101325.0 * (1.0 + rng.uniform(-0.02, 0.02, size=shape))
+    return Q
+
+
+def _active_boundary_inputs(flat, Q):
+    faces = np.flatnonzero(flat.is_boundary & (flat.owner_is_primary | flat.mixed_bnd_face))
+    E_o = flat.boundary_extrap_native[flat.owner_face_op[faces]]
+    Q_o = np.einsum('fps,fsv->fpv', E_o, Q[flat.owner_cell[faces]])
+    return faces, Q_o, flat.true_normal[faces]
 
 
 @pytest.mark.parametrize("order", [1, 2])
-def test_batched_matches_per_face_on_real_mixed_mesh(order):
-    mesh = _build_synthetic_mixed_mesh(order)  # native 四面体 + 棱柱
-    ops = generate_fr_operators(order)
-    flat = get_flat_face_geometry(mesh, ops)
-
-    rng = np.random.default_rng(order * 100 + 7)
-    n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
-    rho_inf, p_inf = 1.225, 101325.0
-    Q = np.zeros((n_cells, n_sps, 5))
-    Q[..., 0] = rho_inf * (1.0 + rng.uniform(-0.05, 0.05, size=(n_cells, n_sps)))
-    Q[..., 1] = 30.0 + rng.uniform(-5.0, 5.0, size=(n_cells, n_sps))
-    Q[..., 2] = rng.uniform(-5.0, 5.0, size=(n_cells, n_sps))
-    Q[..., 3] = rng.uniform(-5.0, 5.0, size=(n_cells, n_sps))
-    Q[..., 4] = p_inf * (1.0 + rng.uniform(-0.02, 0.02, size=(n_cells, n_sps)))
-    U = primitive_to_conserved(Q)
-
-    provider = _build_multi_bc_provider(flat, rng)
-
-    expected = _compute_boundary_ghost_states_per_face(flat, U, provider)
-    actual = _compute_boundary_ghost_states_batched(flat, U, provider)
-    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
-
-    # 反向对照：确认判据本身有区分度——换一个明显不同的 provider（全部
-    # 面都当 FARFIELD 处理）应该给出不同的结果，不是恰好对任何输入都
-    # 相等的退化情形。
-    n_faces = flat.n_faces
-    trivial_provider = BoundaryGhostStateProvider(
-        np.full(n_faces, 0, dtype=np.int64),
-        {0: {"type": "FARFIELD", "Q_free": np.array([1.225, 30.0, 0.0, 0.0, 101325.0])}},
-        {"type": "FARFIELD", "Q_free": np.array([1.225, 30.0, 0.0, 0.0, 101325.0])},
-    )
-    trivial_result = _compute_boundary_ghost_states_batched(flat, U, trivial_provider)
-    assert not np.array_equal(actual, trivial_result)
-
-
-@pytest.mark.parametrize("order", [1, 2])
-def test_dispatch_wrapper_uses_batched_path_for_real_provider(order):
-    """`compute_boundary_ghost_states` 顶层分派函数：真实
-    `BoundaryGhostStateProvider` 时应给出与批量实现完全一致的结果
-    （即真的走了批量分支，不是巧合地和逐面版本一样）。"""
+def test_batched_matches_per_face_reference(order):
     mesh = _build_synthetic_mixed_mesh(order)
-    ops = generate_fr_operators(order)
-    flat = get_flat_face_geometry(mesh, ops)
+    flat = get_flat_face_geometry(mesh, generate_fr_operators(order))
+    Q = _random_primitives(mesh, order * 100 + 7)
+    provider = _build_multi_bc_provider(flat)
+    faces, Q_o, normals = _active_boundary_inputs(flat, Q)
 
-    rng = np.random.default_rng(order * 200 + 3)
-    n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
-    U = np.tile(
-        primitive_to_conserved(np.array([1.225, 30.0, 0.0, 0.0, 101325.0])),
-        (n_cells, n_sps, 1),
-    )
+    batched = provider.ghost_states(faces, Q_o, normals)
+    per_face = GhostStateProvider.ghost_states(provider, faces, Q_o, normals)
+    np.testing.assert_array_equal(batched, per_face)
 
-    provider = _build_multi_bc_provider(flat, rng)
-    via_dispatch = compute_boundary_ghost_states(flat, U, provider)
-    via_batched = _compute_boundary_ghost_states_batched(flat, U, provider)
-    np.testing.assert_array_equal(via_dispatch, via_batched)
+    # 判据有区分度：全部当 FARFIELD 给出不同结果
+    farfield_only = BoundaryGhostStateProvider(
+        np.zeros(flat.n_faces, dtype=np.int64), {0: {"type": "FARFIELD", "Q_free": Q_FREE}},
+        {"type": "FARFIELD", "Q_free": Q_FREE})
+    assert not np.array_equal(batched, farfield_only.ghost_states(faces, Q_o, normals))
 
 
-def test_dispatch_wrapper_falls_back_to_per_face_for_generic_provider():
-    """非 `BoundaryGhostStateProvider` 的任意可调用对象（如
-    `DefaultGhostProvider`）必须走逐面回退路径，不假设它能被按
-    group_code 分组——这是分派条件本身要保护的通用契约。"""
-    from autoflowcfd.core.fr_residual.inviscid import DefaultGhostProvider
+@pytest.mark.parametrize("order", [1, 2])
+def test_assembly_entry_uses_provider_batch(order):
+    """残差组装入口给出的幽灵态与直接调用 provider 批量接口逐位一致，非活跃面行为零。"""
+    mesh = _build_synthetic_mixed_mesh(order)
+    flat = get_flat_face_geometry(mesh, generate_fr_operators(order))
+    Q = _random_primitives(mesh, order * 200 + 3)
+    provider = _build_multi_bc_provider(flat)
+    faces, Q_o, normals = _active_boundary_inputs(flat, Q)
 
+    Q_ghost = compute_boundary_ghost_states(flat, Q, provider)
+    np.testing.assert_array_equal(Q_ghost[faces], provider.ghost_states(faces, Q_o, normals))
+    inactive = np.setdiff1d(np.arange(flat.n_faces), faces)
+    assert not Q_ghost[inactive].any()
+
+
+def test_default_provider_is_owner_extrapolation():
     order = 1
     mesh = _build_synthetic_mixed_mesh(order)
-    ops = generate_fr_operators(order)
-    flat = get_flat_face_geometry(mesh, ops)
-
-    n_cells, n_sps = mesh.n_cells, mesh.n_sps_per_cell
-    U = np.tile(
-        primitive_to_conserved(np.array([1.225, 30.0, 0.0, 0.0, 101325.0])),
-        (n_cells, n_sps, 1),
-    )
-
-    provider = DefaultGhostProvider()
-    # 不应该抛错（DefaultGhostProvider 没有 group_code/code_to_config，
-    # 若分派函数误判为批量路径会在这里 AttributeError）。
-    result = compute_boundary_ghost_states(flat, U, provider)
-    expected = _compute_boundary_ghost_states_per_face(flat, U, provider)
-    np.testing.assert_array_equal(result, expected)
+    flat = get_flat_face_geometry(mesh, generate_fr_operators(order))
+    Q = _random_primitives(mesh, 11)
+    faces, Q_o, _ = _active_boundary_inputs(flat, Q)
+    Q_ghost = compute_boundary_ghost_states(flat, Q, DefaultGhostProvider())
+    np.testing.assert_array_equal(Q_ghost[faces], Q_o)
 
 
-if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+def test_single_face_call_matches_batch():
+    """单面接口 `__call__` 是批量接口的特例。"""
+    order = 1
+    mesh = _build_synthetic_mixed_mesh(order)
+    flat = get_flat_face_geometry(mesh, generate_fr_operators(order))
+    Q = _random_primitives(mesh, 5)
+    provider = _build_multi_bc_provider(flat)
+    faces, Q_o, normals = _active_boundary_inputs(flat, Q)
+    batched = provider.ghost_states(faces, Q_o, normals)
+    for k in range(min(len(faces), 12)):
+        np.testing.assert_array_equal(provider(int(faces[k]), Q_o[k], normals[k]), batched[k])
+

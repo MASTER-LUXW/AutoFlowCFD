@@ -26,6 +26,7 @@ from autoflowcfd.core.fr_residual.inviscid_p0 import (
     _extract_p0_face_geometry,
     _precompute_ghost_states,
 )
+from autoflowcfd.boundary.fr_ghost_state import GhostStateProvider
 from tests.validation._channel_mesh import build_channel_mesh_prism
 
 RHO_INF, P_INF, U_INF = 1.225, 101325.0, 30.0
@@ -36,7 +37,7 @@ def _build_mesh():
     return build_channel_mesh_prism(order=0, nx=4, ny=3, nz=2, Lx=2.0, H=1.0, Lz=0.5)
 
 
-class _NormalEncodingGhostProvider:
+class _NormalEncodingGhostProvider(GhostStateProvider):
     """合成 ghost_provider：返回值只由该面自身法向唯一决定（用密度分量
     编码 round(nx)/round(ny)/round(nz)），不同法向的两个面必然得到不同
     的幽灵密度——足以区分"按面索引"（正确）与"按 owner 单元索引"

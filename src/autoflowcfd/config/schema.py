@@ -210,14 +210,6 @@ class ConfigSchema:
         
         errors.extend(cfl_triplet_errors(config.cfl_init, config.cfl_max, config.cfl_min))
         
-        # 计算总步数
-        total_steps = int(config.total_time / config.dt)
-        if total_steps < 1:
-            errors.append(
-                f"总步数必须 >= 1，得到 {total_steps} "
-                f"(dt={config.dt}, total_time={config.total_time})"
-            )
-        
         return errors
     
     @staticmethod

@@ -82,9 +82,9 @@ class AutoFlowCFDAPI(_APISolveMixin, _APIPostMixin):
         """验证表面网格质量的内部方法。"""
         return api_validate_surface_grid(self, grid_data)
 
-    def generate_volume_mesh(self, grid_data, method="tetrahedral", **kwargs):
-        """由面网格生成体网格。"""
-        return api_generate_volume_mesh(self, grid_data, method, **kwargs)
+    def generate_volume_mesh(self, grid_data, **kwargs):
+        """由面网格生成体网格（参数同 CLI `grid generate-volume`）。"""
+        return api_generate_volume_mesh(self, grid_data, **kwargs)
 
     def get_volume_mesh_info(self, volume_mesh):
         """体网格信息与统计。"""

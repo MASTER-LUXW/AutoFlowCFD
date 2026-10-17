@@ -80,7 +80,7 @@ def transient_mean(case: str, grid: Optional[str], output: str,
 
         from autoflowcfd.core.utils.checkpoint import CheckpointManager
         ckpt_manager = CheckpointManager(str(ckpt_files[0].parent))
-        stats = TransientStatistics(grid_data, window_size=len(ckpt_files))
+        stats = TransientStatistics(grid_data)
 
         # P-03 气动系数时间平均：懒构造一次 FRSolver（几何/gh ost provider
         # 只建一次，见 restore_solver_state_from_fields 文档——每个 checkpoint
@@ -221,7 +221,7 @@ def transient_rms(case: str, grid: Optional[str], output: str, warmup_time: floa
 
         from autoflowcfd.core.utils.checkpoint import CheckpointManager
         ckpt_manager = CheckpointManager(str(ckpt_files[0].parent))
-        stats = TransientStatistics(grid_data, window_size=len(ckpt_files))
+        stats = TransientStatistics(grid_data)
 
         n_excluded = 0
         for ckpt_file in ckpt_files:

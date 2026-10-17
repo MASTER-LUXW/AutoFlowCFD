@@ -311,3 +311,57 @@ def reduce_per_cell_over_real_sps(field, n_prism: int, order: int, how: str,
     if out_tet is None:
         return out_prism
     return xp.concatenate([out_prism, out_tet], axis=0)
+
+
+def sp_integration_weights(det_jacs, cell_is_prism, order: int) -> np.ndarray:
+    """解点上的积分权重 W：`sum_s W[c, s] f[c, s]` 是 f 的插值多项式在单元 c 上的积分（填充槽位为 0）。
+
+    W = 参考单元求积权重（原生棱柱/四面体解点上的精确多项式积分权重）x det(J)。
+    单元平均（输出、统计）与守恒正性限制器共用这一份。
+
+    Args:
+        det_jacs: `(n_cells, n_sps)` 解点上的 det(J)
+        cell_is_prism: `(n_cells,)` 布尔，与 det_jacs 同一单元顺序
+        order: 多项式阶数
+    """
+    from autoflowcfd.fr.native_prism.quadrature import build_native_prism_sp_weights
+    from autoflowcfd.fr.native_tet.quadrature import build_native_tet_sp_weights
+
+    det = np.asarray(det_jacs, dtype=np.float64)
+    is_prism = np.asarray(cell_is_prism, dtype=np.bool_)
+    n_cells, n_sps = det.shape
+    if is_prism.shape != (n_cells,):
+        raise ValueError(f"cell_is_prism 形状 {is_prism.shape} 与 det_jacs 的单元数 {n_cells} 不符")
+    _check_order_matches_n_sps(order, n_sps, 'sp_integration_weights')
+    n_real_prism, n_real_tet = real_sps_per_cell(order)
+    w = np.zeros((n_cells, n_sps))
+    w[is_prism, :n_real_prism] = build_native_prism_sp_weights(order)[None, :]
+    w[~is_prism, :n_real_tet] = build_native_tet_sp_weights(order)[None, :]
+    return np.ascontiguousarray(w * det)
+
+
+def weighted_cell_average(field, W: np.ndarray) -> np.ndarray:
+    """单元积分平均 `sum_s W f / sum_s W`。
+
+    Args:
+        field: `(n_cells, n_sps)` 或 `(n_cells, n_sps, V)`
+        W: `sp_integration_weights` 给出的 `(n_cells, n_sps)`
+    """
+    f = np.asarray(field, dtype=np.float64)
+    vol = W.sum(axis=1)
+    if f.ndim == 2:
+        return (W * f).sum(axis=1) / vol
+    return np.einsum('cs,csv->cv', W, f) / vol[:, None]
+
+
+def cell_integration_weights(solver) -> np.ndarray:
+    """单机求解器（主机视图）当前阶数下的解点积分权重 `(n_cells, n_sps)`。
+
+    P0 每单元一个解点、权重即单元体积；没有网格对象的 P0 调用方（只带状态的测试替身）取单位权重——
+    单元平均就是该解点本身，与权重取值无关。
+    """
+    n_cells, n_sps = solver.state.U.shape[:2]
+    if n_sps == 1 and getattr(solver, "mesh", None) is None:
+        return np.ones((n_cells, 1))
+    det = np.asarray(solver.mesh.jacobians["det_jacs"]).reshape(n_cells, n_sps)
+    return sp_integration_weights(det, np.arange(n_cells) < int(solver.mesh.n_prism_cells), order_from_n_sps(n_sps))

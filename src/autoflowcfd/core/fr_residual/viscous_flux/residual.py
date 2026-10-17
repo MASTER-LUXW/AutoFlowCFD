@@ -86,7 +86,8 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
     Returns:
         residual: (n_cells, n_sps, 5)
     """
-    from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive, DefaultGhostProvider
+    from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
+    from autoflowcfd.boundary.fr_ghost_state import DefaultGhostProvider
 
     ghost_provider = boundary_ghost_provider if boundary_ghost_provider is not None else DefaultGhostProvider()
 

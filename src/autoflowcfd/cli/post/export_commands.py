@@ -26,11 +26,15 @@ from autoflowcfd.cli.post.helpers import _load_case
               help="输出 VTK 文件路径")
 @click.option("--variables", multiple=True,
               help="要导出的变量（pressure、velocity 等）")
-@click.option("--time-step", type=int, help="指定时间步（瞬态算例用）")
 @click.option("--grid", "-g", type=click.Path(exists=True),
               help="网格文件路径（若不在算例目录里则需显式指定）")
 @click.option("--checkpoint", type=click.Path(exists=True),
               help="checkpoint 文件路径（默认取最新一个）")
+@click.option("--surface-mesh", "-s", type=click.Path(exists=True), default=None,
+              help="原始面网格路径——导出 q_criterion 需要从 checkpoint 重建求解器，checkpoint 记录的"
+                   "求解输入是 .nas 体网格且未记录面网格时必填（与 'post coefficients' 同义）")
+@click.option("--skip-quality-check", is_flag=True,
+              help="重建求解器时跳过网格质量门（仅当原求解也跳过时使用）")
 @click.option("--binary/--ascii", "binary", default=None,
               help="写二进制而非 ASCII 文本（真实网格规模下体积小得多、速度也"
                    "快得多）。默认：.vtk 用 ASCII，.vtu 用二进制+压缩。")
@@ -44,9 +48,10 @@ def export_vtk(
     case: str,
     output: str,
     variables: tuple,
-    time_step: int,
     grid: Optional[str],
     checkpoint: Optional[str],
+    surface_mesh: Optional[str],
+    skip_quality_check: bool,
     binary: Optional[bool],
     boundaries_only: bool,
 ) -> None:
@@ -57,10 +62,9 @@ def export_vtk(
     Args:
         case: 存有仿真结果的算例目录
         output: 输出 VTK 文件路径
-        variables: 要导出的变量（velocity、pressure、k、omega、nut）
-        time_step: 瞬态仿真的指定时间步
-        grid: 体网格文件路径（.nas）
-        checkpoint: checkpoint 文件路径（.h5）
+        variables: 要导出的变量（velocity、pressure、k、omega、nu_tilde、nut、turbulence、q_criterion）
+        grid: 体网格文件路径（.pkl 或 .nas）
+        checkpoint: checkpoint 文件路径（.h5）；瞬态算例要导出某一时刻就指定那一时刻的 checkpoint
 
     Examples:
         # 基本导出（自动从算例目录探测网格和 checkpoint）
@@ -79,10 +83,10 @@ def export_vtk(
           --variables velocity pressure \
           --output vel_pres.vtk
 
-        # 瞬态：导出指定时间步
+        # 瞬态：导出某一时刻（指定该时刻的 checkpoint）
         $ autoflowcfd post export-vtk \
           --case results/transient/ \
-          --time-step 100 \
+          --checkpoint results/transient/checkpoints/checkpoint_iter_000100.h5 \
           --output step_100.vtk
 
     所需数据：
@@ -109,13 +113,22 @@ def export_vtk(
             logger.info(f"Exporting variables: {var_list}")
 
         # 校验变量名
-        valid_vars = {'velocity', 'pressure', 'k', 'omega', 'nu_tilde', 'nut', 'turbulence', 'q_criterion'}
-        invalid_vars = set(var_list) - valid_vars
+        from autoflowcfd.postprocess.vtk_export_fields import VALID_FIELDS
+        invalid_vars = set(var_list) - VALID_FIELDS
         if invalid_vars:
-            raise ValueError(
-                f"Invalid variables: {invalid_vars}\n"
-                f"Valid options: {valid_vars}"
-            )
+            raise ValueError(f"无效的变量 {sorted(invalid_vars)}，可用：{sorted(VALID_FIELDS)}")
+
+        q_field = None
+        if 'q_criterion' in var_list:
+            # Q 准则需要解点上的速度梯度（与湍流模型同一实现），从 checkpoint 精确重建求解器状态
+            from autoflowcfd.cli.post.helpers import _locate_checkpoint
+            from autoflowcfd.cli.solve.checkpoint_io import rebuild_solver_from_checkpoint
+            from autoflowcfd.postprocess.q_criterion import q_criterion_cell_field
+
+            solver, _it, _meta = rebuild_solver_from_checkpoint(
+                str(_locate_checkpoint(Path(case), checkpoint)), backend="cpu", surface_mesh=surface_mesh,
+                skip_quality_check=skip_quality_check)
+            q_field = q_criterion_cell_field(solver)
 
         # 创建 VTK 导出器并导出。湍流量取 checkpoint 里湍流模型输运场与涡粘的单元平均
         # （`core/turbulence/output.py` 的 `turb_cell_*` 字段）。
@@ -126,6 +139,7 @@ def export_vtk(
             grid_data=grid_data,
             solution=solution,
             turbulence=turbulence_fields_from_checkpoint(metadata.get('fields', {})),
+            q_criterion=q_field,
         )
 
         # 根据扩展名确定输出格式

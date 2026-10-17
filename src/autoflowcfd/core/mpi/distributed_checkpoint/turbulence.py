@@ -40,8 +40,12 @@ def global_cell_is_prism(solver, n_global: int):
     return None if out is None else out[:, 0, 0] > 0.5
 
 
-def gather_turbulence_fields(solver, n_global: int, order: int, is_prism_global):
-    """输运场、涡粘与单元平均的全局字段（root 返回字典，其余 rank 返回 None）。集体调用。"""
+def gather_turbulence_fields(solver, n_global: int, W_local):
+    """输运场、涡粘与单元积分平均的全局字段（root 返回字典，其余 rank 返回 None）。集体调用。
+
+    Args:
+        W_local: 本 rank local 单元的解点积分权重（`fr/native_padding.py::sp_integration_weights`）
+    """
     model, _ = transported_model(solver)
     if model is None:
         return {}
@@ -55,11 +59,14 @@ def gather_turbulence_fields(solver, n_global: int, order: int, is_prism_global)
     out = {name: np.ascontiguousarray(stacked[..., j]) for j, name in enumerate(names)}
     out["nu_t"] = np.ascontiguousarray(stacked[..., len(names)])
 
-    from autoflowcfd.fr.native_padding import reduce_rows_over_real_sps
-    from autoflowcfd.core.turbulence.output import CHECKPOINT_PREFIX
+    from autoflowcfd.core.turbulence.output import CHECKPOINT_PREFIX, turbulence_cell_means
 
-    for key, field in zip(tuple(model.OUTPUT_FIELD_KEYS) + ("nut",), [out[n] for n in names] + [out["nu_t"]]):
-        out[CHECKPOINT_PREFIX + key] = reduce_rows_over_real_sps(field, is_prism_global, order, "mean")
+    means = turbulence_cell_means(model, W_local)                 # 本 rank 本地积分平均
+    keys = list(means)
+    gathered = gather_global_state(np.stack([means[k] for k in keys], axis=-1)[:, None, :],
+                                   solver.partition.local_cells, n_global)
+    for j, key in enumerate(keys):
+        out[CHECKPOINT_PREFIX + key] = np.ascontiguousarray(gathered[:, 0, j])
     return out
 
 
