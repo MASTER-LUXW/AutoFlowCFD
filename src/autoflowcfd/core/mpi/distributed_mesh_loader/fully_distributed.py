@@ -38,7 +38,7 @@ def distributed_mesh_load_v2(
     cfl_min: Optional[float] = None,
     artificial_viscosity_enabled: bool = False,
     artificial_viscosity_alpha: float = 1.0,
-    sem_num_eddies: int = _SEM_DEFAULT_NUM_EDDIES,
+    sem_num_eddies: Optional[int] = _SEM_DEFAULT_NUM_EDDIES,
     time_accurate: bool = False,
     adaptive_cfl: bool = True,
 ):
@@ -118,12 +118,13 @@ def distributed_mesh_load_v2(
         # `is_no_slip=True`，与单机/CPU MPI 传统模式行为不一致（这里只
         # 需要一个非 None 的哨兵值，不需要真正的 WMLESModel 实例——
         # `build_boundary_ghost_provider` 只检查 is None）。
-        # 合成湍流入口（SEM）在这里由 root 构造、随包下发：涡核数与湍流强度必须取用户设置
-        # （此前桩上没有这两个属性，边界构造的兜底让它们静默变成默认值）
+        # 合成湍流入口（SEM）在这里由 root 构造、随包下发：涡核数与来流湍流（湍流强度、涡粘比、分子粘度——
+        # 定涡核尺度与雷诺应力）必须取用户设置（此前桩上缺这些属性，边界构造的兜底让它们静默变成默认值）
         root_solver_stub = types.SimpleNamespace(
             mesh=mesh, freestream=freestream, turb_model_name=turb_model_name,
             wmles_model=(object() if turb_model_name == "WMLES" else None),
-            _turbulence_intensity=turbulence_intensity, _sem_num_eddies=sem_num_eddies,
+            _turbulence_intensity=turbulence_intensity, _viscosity_ratio=viscosity_ratio,
+            mu_molecular=mu_molecular, _sem_num_eddies=sem_num_eddies,
         )
         boundary_ghost_provider_global = build_boundary_ghost_provider(
             root_solver_stub, bc_overrides=bc_overrides or {},
@@ -416,6 +417,7 @@ def exchange_packages_for_new_order(root_context, target_p: int, n_ranks: int, *
             mesh=mesh, freestream=root_context['freestream'], turb_model_name=turb_model_name,
             wmles_model=(object() if turb_model_name == "WMLES" else None),
             _turbulence_intensity=root_context['turbulence_intensity'],
+            _viscosity_ratio=root_context['viscosity_ratio'], mu_molecular=root_context['mu_molecular'],
             _sem_num_eddies=root_context['sem_num_eddies'],
         )
         provider = build_boundary_ghost_provider(

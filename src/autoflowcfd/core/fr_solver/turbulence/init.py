@@ -49,8 +49,9 @@ def _filter_matrices_are_identity(ops) -> bool:
 def _freestream_turbulence_parameters(solver) -> tuple:
     """来流湍流参数 `(Tu, VR)`：湍流强度与涡粘比 `mu_t/mu`（SST 由两者定 k/omega，SA-neg 由 VR
     定 nu_tilde，两种模型按同一组物理量给定来流）。外部气动默认值参考 Fluent 手册
-    （Tu <= 1%，VR = 2~10）。"""
-    return getattr(solver, '_turbulence_intensity', 0.01), getattr(solver, '_viscosity_ratio', 5.0)
+    （Tu <= 1%，VR = 2~10）。全部求解器与完全分布式加载的根桩都设置这两个属性，直接取（此前 getattr 兜底让
+    根桩上缺的值静默变成默认值）。"""
+    return solver._turbulence_intensity, solver._viscosity_ratio
 
 
 def _set_freestream_turbulence(solver) -> tuple:
@@ -76,7 +77,7 @@ def _set_freestream_turbulence(solver) -> tuple:
     # p_inf=101325 —— 没人发现，因为什么都没报错。
     vel_inf = solver.freestream["vel_inf"]
     rho_inf = solver.freestream["rho_inf"]
-    mu = getattr(solver, 'mu_molecular', 1.8e-5)
+    mu = solver.mu_molecular
     nu = mu / max(rho_inf, 1e-10)
 
     Tu, VR = _freestream_turbulence_parameters(solver)

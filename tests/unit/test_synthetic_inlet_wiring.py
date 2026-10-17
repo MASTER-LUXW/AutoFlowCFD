@@ -30,7 +30,8 @@ def _stub(**overrides):
     mesh.boundary_bc_types = {"x_min": "VELOCITY_INLET", "x_max": "PRESSURE_OUTLET", "wall_bottom": "WALL",
                               "wall_top": "WALL", "z_min": "SYMMETRY", "z_max": "SYMMETRY"}
     attrs = dict(mesh=mesh, ops=generate_fr_operators(1), freestream=dict(FREESTREAM), turb_model_name="LES",
-                 wmles_model=None, _sem_num_eddies=40, _turbulence_intensity=0.05)
+                 wmles_model=None, _sem_num_eddies=40, _turbulence_intensity=0.05, _viscosity_ratio=5.0,
+                 mu_molecular=1.8e-5)
     attrs.update(overrides)
     return types.SimpleNamespace(**attrs)
 
@@ -49,7 +50,7 @@ def test_inlet_uses_the_users_eddy_count_and_a_deterministic_seed():
     assert synthetic_inlet_seed("x_min") == zlib.crc32(b"x_min") != synthetic_inlet_seed("x_max")
 
 
-@pytest.mark.parametrize("missing", ["_sem_num_eddies", "_turbulence_intensity"])
+@pytest.mark.parametrize("missing", ["_sem_num_eddies", "_turbulence_intensity", "_viscosity_ratio", "mu_molecular"])
 def test_missing_solver_settings_are_an_error_not_a_default(missing):
     stub = _stub()
     delattr(stub, missing)
@@ -58,7 +59,7 @@ def test_missing_solver_settings_are_an_error_not_a_default(missing):
 
 
 def test_advance_follows_the_freestream_vector():
-    """平动速度 = vel_inf x 来流方向（攻角 10 度）：未越界重生的涡核位移恰为 v dt。"""
+    """平动速度 = vel_inf x 来流方向（攻角 10 度）：涡核（入口局部坐标）位移恰为 E v dt，且 E 的第一行即来流方向。"""
     from autoflowcfd.core.utils.flow_direction import direction_from_freestream
 
     provider = _provider(_stub())
@@ -68,7 +69,9 @@ def test_advance_follows_the_freestream_vector():
     advance_synthetic_inlets(provider, FREESTREAM, dt)
     v = FREESTREAM["vel_inf"] * direction_from_freestream(FREESTREAM)
     assert np.abs(v[1:]).max() > 1.0, "测试需要非零的横向分量（攻角在 x-z 平面内）"
-    np.testing.assert_allclose(sem.eddy_centers - before, np.broadcast_to(v * dt, before.shape), rtol=1e-9)
+    np.testing.assert_allclose(sem.frame[0], v / np.linalg.norm(v), rtol=1e-14)
+    np.testing.assert_allclose(sem.eddy_centers - before, np.broadcast_to(sem.frame @ v * dt, before.shape), rtol=1e-9,
+                               atol=1e-15)
 
 
 @pytest.mark.parametrize("module", [
@@ -100,7 +103,8 @@ def test_fully_distributed_root_stub_carries_the_users_settings():
     from autoflowcfd.core.mpi.distributed_mesh_loader import fully_distributed
 
     src = module_source(fully_distributed)
-    assert src.count("_turbulence_intensity=") >= 2 and src.count("_sem_num_eddies=") >= 2
+    for attr in ("_turbulence_intensity=", "_viscosity_ratio=", "mu_molecular=", "_sem_num_eddies="):
+        assert src.count(attr) >= 2, attr
     assert "sem_num_eddies" in inspect.signature(fully_distributed.distributed_mesh_load_v2).parameters
 
 
@@ -119,3 +123,36 @@ def test_transient_distributed_cli_forwards_the_eddy_count(tmp_path):
                                           "--sem-num-eddies", "77", "--max-iter", "1"])
     assert result.exit_code == 0, result.output
     assert _arg(mock_distributed, "sem_num_eddies") == 77
+
+
+@pytest.mark.parametrize("tu,vr", [(0.05, 5.0), (0.002, 200.0)])
+def test_eddy_scale_and_reynolds_stress_come_from_the_freestream_turbulence(tu, vr):
+    """sigma = max(k^1.5/epsilon, Delta_owner)，epsilon = beta* k omega；R = (2/3) k I（k、omega 与 RANS 来流同一函数）。
+
+    两组来流：大涡粘比时耗散尺度大于网格尺度（取前者），小涡粘比时被网格尺度截住（取后者）。修复前恒为
+    "入口包围盒最大跨度 / 10"。"""
+    from autoflowcfd.core.fr_solver.turbulence.init import _set_freestream_turbulence
+    from autoflowcfd.core.turbulence.sgs import les_filter_width
+
+    stub = _stub(_turbulence_intensity=tu, _viscosity_ratio=vr)
+    provider = _provider(stub)
+    ghost = next(cfg["sem"] for cfg in provider.code_to_config.values() if cfg.get("sem") is not None)
+    k, omega = _set_freestream_turbulence(stub)
+    mesh = stub.mesh
+    delta = les_filter_width(mesh.cell_volumes, np.arange(mesh.n_cells) < mesh.n_prism_cells, 1)
+    ell = np.sqrt(k) / (0.09 * omega)
+    for f, sig in ghost.face_sigma.items():
+        np.testing.assert_allclose(sig, max(ell, delta[mesh.face_connectivity.owner_cell[f]]), rtol=1e-14)
+    np.testing.assert_allclose(ghost.reynolds_stress, (2.0 / 3.0) * k * np.eye(3), rtol=1e-14)
+    sig_all = np.concatenate(list(ghost.face_sigma.values()))
+    assert bool(np.isclose(sig_all.min(), ell, rtol=1e-14)) == (vr > 100.0)      # 哪一项起作用
+
+
+def test_cli_default_eddy_count_is_the_shared_constant():
+    from autoflowcfd.cli.solve.steady.command import solve_steady
+    from autoflowcfd.cli.solve.transient import transient as solve_transient
+    from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
+
+    for cmd in (solve_steady, solve_transient):
+        opt = next(p for p in cmd.params if p.name == "sem_num_eddies")
+        assert opt.default is _SEM_DEFAULT_NUM_EDDIES is None

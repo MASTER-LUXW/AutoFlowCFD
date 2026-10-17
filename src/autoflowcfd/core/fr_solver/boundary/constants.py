@@ -10,11 +10,12 @@
 
 
 
-# LES/DDES 入口合成湍流（BD-02）：目标雷诺应力复用 `--turbulence-intensity`（solver._turbulence_intensity，
-# 与 RANS 来流湍流同一个量），涡核数量由 `--sem-num-eddies`（solver._sem_num_eddies）给定。下面是涡核数的
-# 默认值（各求解器构造签名的唯一来源）；构造边界提供者时直接读求解器上的两个值、不再兜底（2026-10-04：
-# 完全分布式加载的根桩缺这两个属性，兜底让 CLI 设置被静默忽略）。
-_SEM_DEFAULT_NUM_EDDIES = 200
+# LES/DDES 入口合成湍流（`boundary/synthetic_inlet.py`）：雷诺应力与涡核尺度由来流湍流强度、涡粘比给定（与 RANS
+# 来流同一组量），涡核数量由 `--sem-num-eddies`（solver._sem_num_eddies）给定。下面是涡核数的默认值（各求解器
+# 构造签名与 CLI 的唯一来源）：None 表示按 Jarrin 密度判据 N = V_B / sigma_min^3 自动取（2026-10-17 以前固定 200，
+# 与入口大小、涡核尺度无关）。构造边界提供者时直接读求解器上的值、不兜底（2026-10-04：完全分布式加载的根桩缺
+# 这些属性，兜底让 CLI 设置被静默忽略）。
+_SEM_DEFAULT_NUM_EDDIES = None
 
 #: BJ 越界判据里"没有 Dirichlet 值"的标记。用 NaN 而不是哨兵数值：任何
 #: 有限哨兵都可能与真实边界值撞车，而 NaN 在 `xp.isfinite` 下是无歧义的。

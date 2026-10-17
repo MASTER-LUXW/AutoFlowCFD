@@ -126,50 +126,59 @@ def inlet_ghost_state(Q_int: np.ndarray, Q_inlet: np.ndarray) -> np.ndarray:
 
 
 class InletSEMGhostState:
-    """给一组 INLET 边界面提供随时间演化、满足目标雷诺应力的合成湍流
-    入口脉动幽灵态（BD-02）。
+    """一组 INLET 边界面的合成湍流入口幽灵态（`boundary/synthetic_inlet.py`）：平均来流叠加 SEM 速度脉动。
 
-    与旧版本"SEM 算法本身正确但从未被任何边界路径调用"（V2.0 二次评审
-    发现）不同，这个类是 SyntheticEddyMethod 与
-    core/fr_residual_inviscid.py 期望的 boundary_ghost_provider 接口
-    （(face_idx, Q_owner_fp, true_normal) -> Q_ghost）之间的真实粘合层，
-    由 core/fr_solver_boundary.py::build_boundary_ghost_provider 在
-    LES/DDES 模式下为 VELOCITY_INLET 组构造并接入。
-
-    涡核的时间演化（advance）由 FRSolver.step() 每个物理步调用一次
-    （不是每次残差求值都调用——RK 子迭代内多次调用 __call__ 复用同一批
-    涡核位置，只有 generate_fluctuations 按位置重新求值，物理上等价于
-    "本物理步内脉动场冻结、下一物理步涡核才对流"，是标准做法）。
+    由 `core/fr_solver/boundary/ghost.py::build_boundary_ghost_provider` 在 LES/DDES/IDDES 模式下为速度入口组构造。
+    涡核每个物理步推进一次（`advance_synthetic_inlets`）；本物理步内（RK 子步、隐式内迭代）脉动场冻结。脉动在
+    涡核推进后第一次被取用时对本对象的全部入口点一次性求值、缓存，按面切片取用。
     """
 
-    def __init__(self, sem, face_positions: dict, Q_mean: np.ndarray, reynolds_stress: np.ndarray):
+    def __init__(self, sem, face_positions: dict, face_sigma: dict, Q_mean: np.ndarray, reynolds_stress: np.ndarray):
+        from autoflowcfd.boundary.synthetic_inlet import reynolds_stress_factor
+
         self.sem = sem
-        self.face_positions = face_positions  # face_idx -> (n_fp,3) 物理坐标
+        self.face_positions = face_positions  # 面号 -> (n_fp, 3) 物理坐标
+        self.face_sigma = face_sigma          # 面号 -> (n_fp,) 涡核尺度
         self.Q_mean = np.asarray(Q_mean, dtype=float)
-        self.reynolds_stress = reynolds_stress
+        self.reynolds_stress = np.asarray(reynolds_stress, dtype=float)
+        self._a_t = reynolds_stress_factor(self.reynolds_stress).T
+        faces = list(face_positions)
+        self._row = {f: k for k, f in enumerate(faces)}
+        self._points = (np.stack([face_positions[f] for f in faces]) if faces else np.zeros((0, 1, 3)))
+        self._sigma = (np.stack([face_sigma[f] for f in faces]) if faces else np.zeros((0, 1)))
+        self._version = None
+        self._velocity = None                 # (n_faces, n_fp, 3) 瞬时速度
 
     def restricted_to_faces(self, face_ids: np.ndarray) -> "InletSEMGhostState":
         """面号换成 `face_ids` 的下标（分布式：`face_ids` 是本 rank 面序对应的全局面号）；涡核对象共享
         （每个物理步推进一次，见 `synthetic_inlet.py::advance_synthetic_inlets`）。"""
-        local = {int(i): self.face_positions[int(g)] for i, g in enumerate(np.asarray(face_ids))
-                 if int(g) in self.face_positions}
-        return InletSEMGhostState(self.sem, local, self.Q_mean, self.reynolds_stress)
+        pairs = [(int(i), int(g)) for i, g in enumerate(np.asarray(face_ids)) if int(g) in self.face_positions]
+        return InletSEMGhostState(self.sem, {i: self.face_positions[g] for i, g in pairs},
+                                  {i: self.face_sigma[g] for i, g in pairs}, self.Q_mean, self.reynolds_stress)
 
-    def __call__(self, face_idx: int, Q_owner_fp: np.ndarray, true_normal: np.ndarray) -> np.ndarray:
-        positions = self.face_positions.get(face_idx)
-        if positions is None:
+    def _instantaneous_velocity(self) -> np.ndarray:
+        if self._version != self.sem.version:
+            n_faces, n_fp = self._sigma.shape
+            raw = self.sem.unit_fluctuations(self._points.reshape(-1, 3), self._sigma.reshape(-1))
+            self._velocity = (self.Q_mean[1:4] + raw @ self._a_t).reshape(n_faces, n_fp, 3)
+            self._version = self.sem.version
+        return self._velocity
+
+    def ghost_states(self, faces: np.ndarray, Q_owner_fp: np.ndarray) -> np.ndarray:
+        """`(n, n_fp, 5)`：一批面（本对象面号空间）的入口幽灵态。"""
+        faces = np.asarray(faces, dtype=np.int64)
+        try:
+            rows = np.fromiter((self._row[int(f)] for f in faces), dtype=np.int64, count=faces.size)
+        except KeyError as e:
             # 坐标表按该组全部面记录构造（`fr_solver/boundary/ghost.py::_compute_inlet_fp_positions`），查不到
             # 说明面号空间错了（例如分布式用本 rank 面号查全局面号的表）——此前静默返回无脉动的均值态
-            raise KeyError(f"SEM 入口面 {face_idx} 不在坐标表里（面号空间与构造时不一致）")
+            raise KeyError(f"SEM 入口面 {e.args[0]} 不在坐标表里（面号空间与构造时不一致）") from None
+        Q_inlet = np.broadcast_to(self.Q_mean, Q_owner_fp.shape).copy()
+        Q_inlet[..., 1:4] = self._instantaneous_velocity()[rows]
+        return inlet_ghost_state(Q_owner_fp.reshape(-1, 5), Q_inlet.reshape(-1, 5)).reshape(Q_owner_fp.shape)
 
-        mean_u = self.Q_mean[1:4]
-        u_inst = self.sem.generate_fluctuations(positions, mean_u, self.reynolds_stress)  # (n_fp,3)
-
-        n_fp = positions.shape[0]
-        Q_inlet_fp = np.tile(self.Q_mean, (n_fp, 1))
-        Q_inlet_fp[:, 1:4] = u_inst
-
-        return inlet_ghost_state(Q_owner_fp, Q_inlet_fp)
+    def __call__(self, face_idx: int, Q_owner_fp: np.ndarray, true_normal: np.ndarray) -> np.ndarray:
+        return self.ghost_states(np.array([face_idx]), Q_owner_fp[None])[0]
 
 
 def outlet_ghost_state(Q_int: np.ndarray, p_outlet: float, normal: np.ndarray) -> np.ndarray:
@@ -309,10 +318,8 @@ class BoundaryGhostStateProvider(GhostStateProvider):
         return self.ghost_states(np.array([face_idx]), Q_owner_fp[np.newaxis], true_normal[np.newaxis])[0]
 
     def ghost_states(self, faces: np.ndarray, Q_owner: np.ndarray, normals: np.ndarray) -> np.ndarray:
-        """按边界组批量构造：同一组共享一份配置，底层幽灵态函数本身按任意长度向量化。
-
-        SEM 合成湍流入口逐面依赖涡核位置，组内逐面调用（面数远小于边界面总数）。
-        """
+        """按边界组批量构造：同一组共享一份配置，底层幽灵态函数本身按任意长度向量化（SEM 入口按面查缓存的
+        瞬时速度，同样整组一次）。"""
         faces = np.asarray(faces, dtype=np.int64)
         out = np.empty_like(Q_owner)
         if faces.size == 0:
@@ -324,8 +331,7 @@ class BoundaryGhostStateProvider(GhostStateProvider):
             cfg = self.config_of_code(code)
             sem_ghost = cfg.get("sem") if cfg["type"] == "INLET" else None
             if sem_ghost is not None:
-                for k in sel:
-                    out[k] = sem_ghost(int(faces[k]), Q_owner[k], normals[k])
+                out[sel] = sem_ghost.ghost_states(faces[sel], Q_owner[sel])
                 continue
             out[sel] = ghost_state_for_config(
                 cfg, Q_owner[sel].reshape(-1, 5), normals[sel].reshape(-1, 3)).reshape(len(sel), n_fp, 5)

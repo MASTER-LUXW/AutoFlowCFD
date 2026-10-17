@@ -73,7 +73,8 @@ def _sem_provider(mesh):
     tag_wall_cells(mesh, inlet_cells, wall_type="VELOCITY_INLET", rest_type="FARFIELD")
     stub = types.SimpleNamespace(mesh=mesh, ops=mesh.operators, turb_model_name="LES", wmles_model=None,
                                  freestream={"rho_inf": 1.2, "vel_inf": 20.0, "p_inf": 1e5},
-                                 _sem_num_eddies=40, _turbulence_intensity=0.05)
+                                 _sem_num_eddies=40, _turbulence_intensity=0.05, _viscosity_ratio=5.0,
+                                 mu_molecular=1.8e-5)
     return build_boundary_ghost_provider(stub, bc_overrides={})
 
 

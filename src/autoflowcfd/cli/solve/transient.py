@@ -7,6 +7,7 @@ from typing import Optional
 
 import click
 
+from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
 from autoflowcfd.cli.solve.option_help import PHASE_MAX_ITER_HELP, RESIDUAL_DROP_THRESHOLD_HELP, THREADS_HELP
 from autoflowcfd.cli.solve.solver_factory import validate_backend_options
 from autoflowcfd.cli.solve.checkpoint_io import periodic_checkpoint_callback, write_single_node_outputs
@@ -85,8 +86,8 @@ from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
               help='来流湍流强度 Tu（默认 0.01=1%）。也驱动 ddes/iddes/les 模式下 '
                    'BD-02 SEM 入口的目标雷诺应力（2026-08-28 起复用同一个值，'
                    '此前 SEM 用独立硬编码 5%，见 core/fr_solver/boundary.py 文档）')
-@click.option('--sem-num-eddies', type=int, default=200,
-              help='ddes/iddes/les 模式下 BD-02 合成湍流入口 (SEM) 的涡核数量（默认 200）')
+@click.option('--sem-num-eddies', type=int, default=_SEM_DEFAULT_NUM_EDDIES,
+              help='ddes/iddes/les 模式下合成湍流入口 (SEM) 的涡核数量（默认按 Jarrin 密度判据 V_B/sigma^3 自动取）')
 @click.option('--viscosity-ratio', type=float, default=5.0, help='来流粘性比 VR=nu_t/nu（默认 5.0）')
 @click.option('--mu-molecular', type=float, default=1.8e-5, help='分子动力粘度 (Pa*s)，默认 1.8e-5（标准状态下空气），非标准工况请覆盖')
 @click.option('--rho-inf', type=float, default=1.225, help='自由流密度 (kg/m^3)，默认 1.225（标准海平面空气）')
@@ -122,7 +123,7 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
               output_dir: str, surface_mesh: Optional[str],
               skip_quality_check: bool, reference_area: Optional[float],
               dual_time_inner_iter: int, threads: int, init_checkpoint: Optional[str],
-              turbulence_intensity: float, viscosity_ratio: float, sem_num_eddies: int,
+              turbulence_intensity: float, viscosity_ratio: float, sem_num_eddies: Optional[int],
               mu_molecular: float, rho_inf: float, vel_inf: float, p_inf: float,
               config_path: Optional[str], n_ranks: int, multi_gpu: bool,
               fully_distributed: bool, gpu_device: Optional[int],

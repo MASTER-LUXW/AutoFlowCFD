@@ -11,6 +11,7 @@ from autoflowcfd.cli.solve.solver_factory import validate_backend_options
 from autoflowcfd.cli.solve.config_file import check_physical_ranges, config_file_overrides
 from autoflowcfd.core.time_integration.base import DEFAULT_STEADY_TOL
 from autoflowcfd.cli.solve.commands import solve
+from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
 
 from .multi_gpu import _run_multi_gpu
 from .cpu_mpi import _run_cpu_mpi
@@ -106,8 +107,8 @@ from .single_node import _run_single_node
               help='来流湍流强度 Tu（默认 0.01=1%），外部气动 ≤1%，城市道路 3-5%。'
                    '也驱动 --turbulence-model ddes 时 BD-02 SEM 入口的目标雷诺应力')
 @click.option('--viscosity-ratio', type=float, default=5.0, help='来流粘性比 VR=nu_t/nu（默认 5.0），外部气动推荐 2-10')
-@click.option('--sem-num-eddies', type=int, default=200,
-              help='--turbulence-model ddes 时 BD-02 合成湍流入口 (SEM) 的涡核数量（默认 200）')
+@click.option('--sem-num-eddies', type=int, default=_SEM_DEFAULT_NUM_EDDIES,
+              help='ddes/iddes/les 模式下合成湍流入口 (SEM) 的涡核数量（默认按 Jarrin 密度判据 V_B/sigma^3 自动取）')
 @click.option('--mu-molecular', type=float, default=1.8e-5, help='分子动力粘度 (Pa*s)，默认 1.8e-5（标准状态下空气），非标准工况请覆盖')
 @click.option('--rho-inf', type=float, default=1.225, help='自由流密度 (kg/m^3)，默认 1.225（标准海平面空气）')
 @click.option('--vel-inf', type=float, default=33.33, help='自由流速度大小 (m/s)，默认 33.33')

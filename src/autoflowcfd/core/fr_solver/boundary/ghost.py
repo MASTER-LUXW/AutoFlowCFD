@@ -30,6 +30,40 @@ def _compute_inlet_fp_positions(solver, is_target_face: np.ndarray) -> Dict[int,
     xyz = xyz.reshape(faces.size, n_fp, 3)
     return {int(f): xyz[k] for k, f in enumerate(faces)}
 
+def _build_sem_inlet(solver, name: str, is_group_face: np.ndarray, flow_direction: np.ndarray,
+                     Q_free) -> Optional[InletSEMGhostState]:
+    """一个速度入口组的合成湍流入口（`boundary/synthetic_inlet.py`）：涡核尺度、雷诺应力与来流湍流同一组量。"""
+    from autoflowcfd.boundary.synthetic_inlet import SyntheticEddyMethod, sem_length_scale, synthetic_inlet_seed
+    from autoflowcfd.core.fr_solver.turbulence.init import _set_freestream_turbulence
+    from autoflowcfd.core.turbulence.sgs import les_filter_width
+    from autoflowcfd.core.turbulence.sst.model import BETA_STAR
+
+    positions_by_face = _compute_inlet_fp_positions(solver, is_group_face)
+    if not positions_by_face:
+        return None
+    mesh = solver.mesh
+    faces = np.fromiter(positions_by_face, dtype=np.int64)
+    n_fp = next(iter(positions_by_face.values())).shape[0]
+    # 涡核尺度 sigma = max(k^(3/2)/epsilon, Delta)：Delta 取入口面所属单元的 LES 滤波宽度（计入阶数）
+    n_cells = int(mesh.n_cells)
+    delta = les_filter_width(mesh.cell_volumes, np.arange(n_cells) < int(mesh.n_prism_cells), int(mesh.order))
+    k_inf, omega_inf = _set_freestream_turbulence(solver)
+    sigma_face = sem_length_scale(k_inf, omega_inf, BETA_STAR, delta[mesh.face_connectivity.owner_cell[faces]])
+    face_sigma = {int(f): np.full(n_fp, sigma_face[i]) for i, f in enumerate(faces)}
+
+    all_positions = np.concatenate([positions_by_face[int(f)] for f in faces])
+    sem = SyntheticEddyMethod(all_positions, np.repeat(sigma_face, n_fp), flow_direction,
+                              num_eddies=solver._sem_num_eddies, seed=synthetic_inlet_seed(name))
+    # 各向同性雷诺应力 R = (2/3) k I（k 由湍流强度给定，与 RANS 来流同一个量）
+    reynolds_stress = (2.0 / 3.0) * k_inf * np.eye(3)
+    logger.info(
+        f"合成湍流入口（SEM）'{name}'：{faces.size} 个面，涡核 {sem.num_eddies} 个"
+        f"（密度判据 {sem.recommended_num_eddies}），涡核尺度 {sigma_face.min():.4g}~{sigma_face.max():.4g} m"
+        f"（k^1.5/epsilon = {np.sqrt(k_inf) / (BETA_STAR * omega_inf):.4g} m），u' = {np.sqrt(2.0 * k_inf / 3.0):.4g} m/s")
+    return InletSEMGhostState(sem, positions_by_face, face_sigma, Q_mean=np.array(Q_free),
+                              reynolds_stress=reynolds_stress)
+
+
 def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]]) -> Optional[BoundaryGhostStateProvider]:
     """构建边界幽灵态提供者 (BD-01)。
 
@@ -181,42 +215,7 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
         config = {"type": mapped_type, **default_params}
 
         if mapped_type == "INLET" and use_sem:
-            from autoflowcfd.boundary.synthetic_inlet import SyntheticEddyMethod, synthetic_inlet_seed
-
-            is_this_group_face = group_code == code
-            positions_by_face = _compute_inlet_fp_positions(solver, is_this_group_face)
-            if positions_by_face:
-                all_positions = np.concatenate(list(positions_by_face.values()), axis=0)
-                # SEM 入口的平动方向同样按真实来流方向（此前硬编码 +x）
-                flow_direction = _v_free.copy()
-                # length_scale：入口面法向尺度的量级（用坐标散布估计），
-                # 太小涡核影响区退化、太大失去局部湍流结构，取入口面
-                # 特征尺度的 1/10 是标准 SEM 实践的经验起点。
-                span = np.max(all_positions, axis=0) - np.min(all_positions, axis=0)
-                length_scale = max(float(np.max(span)) / 10.0, 1e-3)
-
-                # 涡核数与湍流强度直接取求解器上的值（全部求解器与完全分布式加载的根桩都设置；
-                # 此前 getattr 兜底让根桩上缺的值静默变成默认值）
-                num_eddies = int(solver._sem_num_eddies)
-                sem = SyntheticEddyMethod(
-                    num_eddies=num_eddies, length_scale=length_scale, seed=synthetic_inlet_seed(name)
-                )
-                sem.configure_inlet_box(all_positions, flow_direction=flow_direction)
-
-                turbulence_intensity = float(solver._turbulence_intensity)
-                u_fluct = turbulence_intensity * vel_inf
-                reynolds_stress = np.diag([u_fluct**2, u_fluct**2, u_fluct**2])
-
-                sem_ghost = InletSEMGhostState(
-                    sem, positions_by_face, Q_mean=np.array(Q_free), reynolds_stress=reynolds_stress
-                )
-                config["sem"] = sem_ghost
-                logger.info(
-                    f"BD-02: Synthetic Eddy Method inlet turbulence enabled for group '{name}' "
-                    f"({len(positions_by_face)} faces, {num_eddies} eddies, "
-                    f"length_scale={length_scale:.4g}, u'={u_fluct:.3g} m/s, "
-                    f"Tu={turbulence_intensity:.1%})"
-                )
+            config["sem"] = _build_sem_inlet(solver, name, group_code == code, _dir, Q_free)
 
         code_to_config[code] = config
 

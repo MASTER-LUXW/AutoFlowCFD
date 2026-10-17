@@ -118,7 +118,7 @@ class _SolverSetupMixin:
         self.freestream = {"rho_inf": rho_inf, "vel_inf": vel_inf, "p_inf": p_inf,
                            "mach_ref": mach_ref,
                            "aoa_deg": float(aoa_deg), "aos_deg": float(aos_deg)}
-        # Tu/VR/SEM 涡核数设置必须先于 boundary_ghost_provider 构造（与上面
+        # Tu/VR/SEM 涡核数/分子粘度设置必须先于 boundary_ghost_provider 构造（与上面
         # turb_model_name 的顺序要求同理，2026-08-28 补充）：
         # build_boundary_ghost_provider 现在会读 solver._turbulence_intensity/
         # _sem_num_eddies 来驱动 BD-02 SEM 入口的目标雷诺应力/涡核数量
@@ -129,11 +129,12 @@ class _SolverSetupMixin:
         self._turbulence_intensity = turbulence_intensity
         self._viscosity_ratio = viscosity_ratio
         self._sem_num_eddies = sem_num_eddies
+        # 分子粘度同理：SEM 入口的涡核尺度由来流 k、omega 定（omega 用到运动粘度）
+        self.mu_molecular = mu_molecular
         # B-9：保存 bc_overrides 供 Order Continuation 切阶后重建边界幽灵态
         # provider（SEM 入口幽灵态持有构造阶数的 FP 坐标，见 order_continuation.py）。
         self.bc_overrides = bc_overrides or {}
         self.boundary_ghost_provider = self._build_boundary_ghost_provider(self.bc_overrides)
-        self.mu_molecular = mu_molecular
 
     def _setup_turbulence_time_and_runtime(self, n_cells, n_sps, order, time_scheme,
                                            dual_time_inner_iter, adaptive_cfl,

@@ -66,6 +66,7 @@ def _fake_solver(current_order, target_order, resumed):
         mesh=mesh,
         state=SimpleNamespace(U=U, n_cells=2, n_vars=7),
         freestream={"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0},
+        mu_molecular=1.8e-5, _turbulence_intensity=0.01, _viscosity_ratio=5.0,
         turb_model=None,
         wall_distance=None,
         sgs_model=None,

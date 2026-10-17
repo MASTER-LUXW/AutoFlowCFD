@@ -1,207 +1,152 @@
 """
-AutoFlowCFD V2.0 - 合成湍流入口 (SEM) 实现 (Tier-1 重建版, 对应 BD-02)
+AutoFlowCFD V2.0 - 合成湍流入口（合成涡方法 SEM，Jarrin 2008）
 
-真正的合成涡方法 (Synthetic Eddy Method, Jarrin 2006)，取代旧版本本质上
-是与入口几何无关的静态随机噪声：
+    u'_i(x) = a_ij * (1/sqrt(N)) * sum_k  eps_k,j * f_sigma(x)(x - x_k)
+    f_sigma(x)(r) = sqrt(V_B / sigma(x)^3) * prod_m f(r_m / sigma(x)),   f(s) = sqrt(3/2) (1 - |s|)，|s| < 1
 
-1. **涡核分布范围**：旧版本把涡核撒在硬编码的 [0,10]^3 立方体里，与传入
-   的实际入口 SPs 坐标 `positions` 毫无关系；现在从入口面的真实包围盒
-   构造"影响区"（沿流向额外扩展一个积分尺度，保证边缘处的涡不会突然
-   被截断）。
-2. **涡强度**：旧版本用原始 `randn(N,3)`，与目标雷诺应力张量无关；现在
-   用目标雷诺应力张量的 Cholesky 分解 a_ij（R_ij = a_ik a_jk）对独立的
-   ±1 随机符号做线性变换，保证生成脉动的协方差精确逼近目标雷诺应力
-   （标准 SEM 构造，见 Jarrin 2006 PhD thesis §4）。
-3. **归一化**：旧版本没有按涡数量 N 归一化，脉动方差会随 N 变化；现在
-   用 1/sqrt(N_eddies) 归一化，配合形函数的二阶矩归一化
-   （∫f(r)^2 dr=1），保证 N_eddies 变化时目标雷诺应力保持不变。
-4. **时间演化**：旧版本的涡核构造一次后永不更新，对同一 positions 重复
-   调用返回完全相同的"脉动"，不是真正的瞬态湍流；现在涡核随平均流对流
-   （advance 方法按时间步平移涡核），离开下游边界的涡在上游边界重新
-   以随机位置/符号生成，是 SEM 定义性的关键机制。
+- 涡核 x_k 均匀分布在影响盒 B 内（体积 V_B），各分量随机符号 eps_k,j = +/-1；a 是目标雷诺应力的 Cholesky 因子
+  （R = a a^T）。对盒内均匀分布的单个涡核 E[f_sigma^2] = 1（只要 x 周围边长 2 sigma(x) 的立方体完全在盒内），
+  所以 E[u'_i u'_j] = R_ij 与 N 无关。
+- **影响盒**取在入口的局部正交坐标系里（e1 = 来流方向），入口全部点的局部坐标包围盒在**三个方向**各外扩
+  sigma_max：横向不外扩时入口横向边缘处的雷诺应力只复现约 1/2、角点约 1/4（2026-10-17 以前只沿与来流夹角
+  最小的坐标轴外扩，且盒子与坐标轴对齐，入口倾斜或有攻角时不在入口局部坐标系里，I-71）。
+- **涡核尺度** sigma(x) = max(k^(3/2)/epsilon, Delta(x))（Jarrin 2008 §4.4，入口无边界层故无 kappa delta 项）：
+  k、epsilon = beta* k omega 由来流湍流强度与涡粘比给定（与 RANS 来流同一组量，单一来源
+  `core/fr_solver/turbulence/init.py::_set_freestream_turbulence`）；Delta(x) 为该点所在单元的 LES 滤波宽度
+  （`core/turbulence/sgs.py::les_filter_width`，计入阶数），保证涡核可被网格分辨。2026-10-17 以前取"入口包围盒
+  最大跨度 / 10"，与来流湍流无关（风洞 10 m 入口给出 1 m 的涡，I-74）。
+- **涡核数** 默认按 Jarrin 的密度判据 N = V_B / sigma_min^3（最小涡核处每点平均被 8 个涡核覆盖）；用户给出更少
+  的涡核时脉动统计仍无偏，但概率分布高度间歇（多数时刻为零、偶发尖峰），给出警告。
+- **时间演化**：涡核随来流对流；越过盒下游面的涡核按越过的距离回绕到上游面（保持盒内均匀分布，不在上游面
+  堆积），横向坐标与符号重新随机抽取。
+- **求值**：每个物理步对入口全部点一次性求值（涡核 KD 树，切比雪夫距离查 |x - x_k|_inf < sigma(x)），
+  按面切片取用；2026-10-17 以前每个面每次残差求值都在 Python 里遍历全部涡核。
 
-参考文献：Jarrin, N. (2008). "Synthetic Inflow Boundary Conditions for
-the Numerical Simulation of Turbulence." PhD thesis, University of
-Manchester.
+参考文献：Jarrin, N. (2008). "Synthetic Inflow Boundary Conditions for the Numerical Simulation of Turbulence."
+PhD thesis, University of Manchester.
 """
 
 from typing import Optional
 
 import numpy as np
+from loguru import logger
+from scipy.spatial import cKDTree
+
+#: 形函数 f(s) = sqrt(3/2) (1 - |s|) 满足 int_{-1}^{1} f^2 ds = 1
+_F_COEFF = np.sqrt(1.5)
 
 
-def _cholesky_from_reynolds_stress(reynolds_stress: np.ndarray) -> np.ndarray:
-    """从雷诺应力张量 R_ij 求 Cholesky 分解 a_ij（下三角，R=a@a.T）。
+def inlet_frame(flow_direction) -> np.ndarray:
+    """入口局部正交坐标系 `(3, 3)`，各行依次为 e1（来流方向）、e2、e3（右手系）。"""
+    e1 = np.asarray(flow_direction, dtype=np.float64)
+    norm = np.linalg.norm(e1)
+    if not norm > 0.0:
+        raise ValueError("SEM 来流方向为零向量")
+    e1 = e1 / norm
+    helper = np.eye(3)[int(np.argmin(np.abs(e1)))]           # 与 e1 夹角最大的坐标轴，叉积不退化
+    e2 = np.cross(e1, helper)
+    e2 /= np.linalg.norm(e2)
+    return np.stack([e1, e2, np.cross(e1, e2)])
 
-    若 R 不是（数值上）正定（例如用户直接给了对角近似），退回到
-    对角元素开方的近似分解，而不是让 np.linalg.cholesky 抛异常中止。
+
+def sem_length_scale(k_inf: float, omega_inf: float, beta_star: float, delta: np.ndarray) -> np.ndarray:
+    """逐点涡核尺度 sigma = max(k^(3/2)/epsilon, Delta)，epsilon = beta* k omega（即 sqrt(k) / (beta* omega)）。"""
+    ell = np.sqrt(k_inf) / (beta_star * omega_inf)
+    return np.maximum(ell, np.asarray(delta, dtype=np.float64))
+
+
+def reynolds_stress_factor(reynolds_stress: np.ndarray) -> np.ndarray:
+    """R = a a^T 的下三角因子 a。R 必须对称半正定：全零（来流无湍流）给零因子，其余必须正定。
+
+    2026-10-17 以前分解失败时静默退回"对角元开方"，把非法的目标张量伪装成另一个张量。
     """
-    try:
-        return np.linalg.cholesky(reynolds_stress)
-    except np.linalg.LinAlgError:
-        a = np.zeros((3, 3))
-        for i in range(3):
-            a[i, i] = np.sqrt(max(reynolds_stress[i, i], 0.0))
-        return a
+    R = np.asarray(reynolds_stress, dtype=np.float64)
+    if not np.allclose(R, R.T, rtol=0.0, atol=1e-12 * max(np.abs(R).max(), 1e-300)):
+        raise ValueError(f"SEM 目标雷诺应力不对称：{R.tolist()}")
+    if not np.any(R):
+        return np.zeros((3, 3))
+    return np.linalg.cholesky(R)
 
 
 class SyntheticEddyMethod:
-    """合成涡方法 (SEM) 处理器：为 LES/DES 入口提供满足指定雷诺应力
-    张量、随时间演化的速度脉动。
+    """一个入口组的涡核集合（入口局部坐标），各 rank / 各面切片共享同一个实例。
 
-    使用流程：
-        sem = SyntheticEddyMethod(num_eddies=200, length_scale=0.05)
-        sem.configure_inlet_box(inlet_positions, mean_velocity_normal=[1,0,0])
-        # 每个时间步：
-        sem.advance(dt, mean_velocity)
-        u_fluct = sem.generate_fluctuations(inlet_positions, reynolds_stress)
+    使用：
+        sem = SyntheticEddyMethod(points, sigma, flow_direction, seed=...)
+        sem.advance(dt, velocity)                      # 每个物理步一次
+        raw = sem.unit_fluctuations(points, sigma)     # (n, 3)，各分量方差为 1，再乘 a^T 得 u'
     """
 
-    def __init__(self, num_eddies: int = 200, length_scale: float = 0.1, seed: Optional[int] = None):
-        self.num_eddies = num_eddies
-        self.length_scale = length_scale
+    def __init__(self, points: np.ndarray, sigma: np.ndarray, flow_direction, num_eddies: Optional[int] = None,
+                 seed: Optional[int] = None):
+        points = np.asarray(points, dtype=np.float64)
+        sigma = np.asarray(sigma, dtype=np.float64)
+        if points.ndim != 2 or points.shape[1] != 3 or sigma.shape != points.shape[:1]:
+            raise ValueError(f"SEM 入口点 {points.shape} 与涡核尺度 {sigma.shape} 形状不符")
+        if not np.all(sigma > 0.0):
+            raise ValueError("SEM 涡核尺度必须为正")
+        self.frame = inlet_frame(flow_direction)
+        self.origin = points.mean(axis=0)
+        xi = self.to_local(points)
+        s_max = float(sigma.max())
+        self.box_min = xi.min(axis=0) - s_max
+        self.box_max = xi.max(axis=0) + s_max
+        self.volume = float(np.prod(self.box_max - self.box_min))
+        self.recommended_num_eddies = int(np.ceil(self.volume / float(sigma.min()) ** 3))
+        self.num_eddies = self.recommended_num_eddies if num_eddies is None else int(num_eddies)
+        if self.num_eddies < 1:
+            raise ValueError(f"SEM 涡核数必须为正（{self.num_eddies}）")
+        if self.num_eddies < self.recommended_num_eddies:
+            logger.warning(
+                f"SEM 涡核数 {self.num_eddies} 少于 Jarrin 密度判据 V_B/sigma_min^3 = {self.recommended_num_eddies}："
+                f"入口脉动统计无偏，但分布高度间歇（多数时刻为零）。不给 --sem-num-eddies 时按判据自动取值")
         self._rng = np.random.default_rng(seed)
-
-        self.box_min: Optional[np.ndarray] = None
-        self.box_max: Optional[np.ndarray] = None
-        self.flow_axis: int = 0  # 主流向对应的坐标轴索引（用于上游再生面判断）
-
-        self.eddy_centers: Optional[np.ndarray] = None  # (N,3)
-        self.eddy_signs: Optional[np.ndarray] = None  # (N,3), 各分量独立 ±1
-
-    def configure_inlet_box(self, positions: np.ndarray, flow_direction: np.ndarray) -> None:
-        """根据真实入口 SPs 坐标构造涡核的"影响区"包围盒。
-
-        Args:
-            positions: 入口 SPs 物理坐标，形状 (N, 3)
-            flow_direction: 主流方向（不必归一化），用于确定流向轴以及
-                涡核对流/再生所沿的方向
-        """
-        flow_direction = np.asarray(flow_direction, dtype=float)
-        self.flow_axis = int(np.argmax(np.abs(flow_direction)))
-        self._flow_sign = 1.0 if flow_direction[self.flow_axis] >= 0 else -1.0
-
-        pos_min = positions.min(axis=0)
-        pos_max = positions.max(axis=0)
-        # 影响区沿流向上游/下游各扩展一个积分尺度，保证入口平面边缘处的
-        # SPs 仍能被"即将进入"或"刚离开"的涡核覆盖到（否则边缘涡强度
-        # 系统性偏弱）；横向（非流向）不扩展，直接用入口面的真实包围盒。
-        margin = np.zeros(3)
-        margin[self.flow_axis] = self.length_scale
-        self.box_min = pos_min - margin
-        self.box_max = pos_max + margin
-
-        self._reseed_all_eddies()
-
-    def _reseed_all_eddies(self) -> None:
         self.eddy_centers = self._rng.uniform(self.box_min, self.box_max, size=(self.num_eddies, 3))
-        self.eddy_signs = self._rng.choice([-1.0, 1.0], size=(self.num_eddies, 3))
+        self.eddy_signs = self._random_signs(self.num_eddies)
+        self.version = 0                      # 每次 advance 加一；求值缓存按它失效
+        self._tree = None
 
-    def advance(self, dt: float, mean_velocity: np.ndarray) -> None:
-        """把所有涡核沿平均流对流一个时间步，离开影响区下游边界的涡
-        在上游边界随机位置以新的随机符号重新生成（SEM 的核心机制，
-        保证脉动真正随时间演化，而不是同一个静态场反复复用）。
+    def to_local(self, points: np.ndarray) -> np.ndarray:
+        return (np.asarray(points, dtype=np.float64) - self.origin) @ self.frame.T
 
-        Args:
-            dt: 时间步长
-            mean_velocity: 平均对流速度矢量 (3,)，通常取入口来流速度
-        """
-        if self.eddy_centers is None:
-            raise RuntimeError("configure_inlet_box() must be called before advance()")
+    def _random_signs(self, n: int) -> np.ndarray:
+        return self._rng.choice([-1.0, 1.0], size=(n, 3))
 
-        self.eddy_centers += np.asarray(mean_velocity)[np.newaxis, :] * dt
+    def advance(self, dt: float, velocity) -> None:
+        """涡核沿对流速度 `velocity`（全局坐标，取来流速度）平移 dt；越过下游面的回绕到上游面并重抽横向坐标与符号。"""
+        c = self.eddy_centers
+        c += (self.frame @ np.asarray(velocity, dtype=np.float64)) * float(dt)
+        length = self.box_max - self.box_min
+        crossed = (c[:, 0] < self.box_min[0]) | (c[:, 0] > self.box_max[0])
+        # 流向回绕保留越过的距离（盒内仍均匀）；横向理论上不动（e1 即来流方向），同样回绕保证留在盒内
+        c[:] = self.box_min + np.mod(c - self.box_min, length)
+        n_new = int(crossed.sum())
+        if n_new:
+            c[crossed, 1:] = self._rng.uniform(self.box_min[1:], self.box_max[1:], size=(n_new, 2))
+            self.eddy_signs[crossed] = self._random_signs(n_new)
+        self.version += 1
+        self._tree = None
 
-        axis = self.flow_axis
-        if self._flow_sign >= 0:
-            left_box = self.eddy_centers[:, axis] < self.box_min[axis]
-            downstream = self.eddy_centers[:, axis] > self.box_max[axis]
-        else:
-            downstream = self.eddy_centers[:, axis] < self.box_min[axis]
-            left_box = self.eddy_centers[:, axis] > self.box_max[axis]
-
-        n_regen = int(np.sum(downstream))
-        if n_regen > 0:
-            # 在上游边界面（流向坐标固定为上游端）随机重新生成，
-            # 其余两个方向仍在包围盒内随机取值，符号重新随机抽取。
-            new_positions = self._rng.uniform(self.box_min, self.box_max, size=(n_regen, 3))
-            upstream_coord = self.box_min[axis] if self._flow_sign >= 0 else self.box_max[axis]
-            new_positions[:, axis] = upstream_coord
-            self.eddy_centers[downstream] = new_positions
-            self.eddy_signs[downstream] = self._rng.choice([-1.0, 1.0], size=(n_regen, 3))
-
-        # 理论上不会发生（对流不会让涡瞬间越过整个盒子），但如果时间步
-        # 异常大导致涡直接越过上游边界，同样重新生成，避免涡核漂出
-        # 有效区间后长期不产生任何贡献。
-        if np.any(left_box):
-            n2 = int(np.sum(left_box))
-            new_positions = self._rng.uniform(self.box_min, self.box_max, size=(n2, 3))
-            self.eddy_centers[left_box] = new_positions
-            self.eddy_signs[left_box] = self._rng.choice([-1.0, 1.0], size=(n2, 3))
-
-    def generate_fluctuations(
-        self, positions: np.ndarray, mean_u: np.ndarray, reynolds_stress: np.ndarray
-    ) -> np.ndarray:
-        """在给定位置生成满足目标雷诺应力的速度脉动，叠加到平均速度上。
-
-        Args:
-            positions: 入口 SPs 物理坐标 (N, 3)
-            mean_u: 平均速度剖面，形状 (3,) 或可广播到 (N,3)
-            reynolds_stress: 目标雷诺应力张量 R_ij，形状 (3,3)（对角占优
-                即可，比如各向同性湍流 R=diag(u'^2,u'^2,u'^2)）
-
-        Returns:
-            u_total: 瞬时速度 (N, 3)
-        """
-        if self.eddy_centers is None:
-            raise RuntimeError("configure_inlet_box() must be called before generate_fluctuations()")
-
-        a_chol = _cholesky_from_reynolds_stress(np.asarray(reynolds_stress))
-
-        n_points = positions.shape[0]
-        raw_fluct = np.zeros((n_points, 3))
-        sigma = self.length_scale
-        vol_box = np.prod(self.box_max - self.box_min)
-        # 单个涡核形函数的归一化系数：f_sigma = sqrt(V_box/sigma^3) * f(r1)f(r2)f(r3)，
-        # 使得对随机分布在 V_box 内的单个涡核，E[f_sigma(x-x_k)^2] = 1
-        # （标准 SEM 归一化，Jarrin 2008 式4.5；最终整体场再除以 sqrt(N) 使
-        # Var[u'_i] 精确逼近 1，从而线性变换到目标雷诺应力后方差精确匹配——
-        # 已用统计重构目标张量数值验证，见
-        # tests/unit/test_synthetic_inlet.py）
-        per_eddy_scale = np.sqrt(vol_box / sigma**3)
-
-        for k in range(self.num_eddies):
-            center = self.eddy_centers[k]
-            r = (positions - center[np.newaxis, :]) / sigma  # (N,3)
-            inside = np.all(np.abs(r) < 1.0, axis=1)
-            if not np.any(inside):
-                continue
-            # 各向同性张量形函数：f(r)=sqrt(3/2)*(1-|r|)，满足 ∫_{-1}^1 f(r)^2 dr = 1
-            shape_1d = np.where(np.abs(r) < 1.0, np.sqrt(1.5) * (1.0 - np.abs(r)), 0.0)
-            shape_val = shape_1d[:, 0] * shape_1d[:, 1] * shape_1d[:, 2] * per_eddy_scale  # (N,)
-            raw_fluct += self.eddy_signs[k][np.newaxis, :] * shape_val[:, np.newaxis]
-
-        raw_fluct /= np.sqrt(self.num_eddies)
-
-        # 线性变换到目标雷诺应力：u'_i = a_ij * raw_fluct_j
-        fluctuations = raw_fluct @ a_chol.T
-
-        return np.asarray(mean_u)[np.newaxis, :] + fluctuations
-
-
-if __name__ == "__main__":
-    sem = SyntheticEddyMethod(num_eddies=200, length_scale=0.05, seed=0)
-    inlet_pos = np.column_stack(
-        [np.zeros(50), np.random.default_rng(1).uniform(-0.5, 0.5, 50), np.random.default_rng(2).uniform(-0.3, 0.3, 50)]
-    )
-    mean_u = np.array([30.0, 0.0, 0.0])
-    sem.configure_inlet_box(inlet_pos, flow_direction=mean_u)
-    R = np.diag([2.0, 2.0, 2.0])  # 各向同性湍流，u'^2=2 m^2/s^2
-
-    u1 = sem.generate_fluctuations(inlet_pos, mean_u, R)
-    sem.advance(dt=1e-4, mean_velocity=mean_u)
-    u2 = sem.generate_fluctuations(inlet_pos, mean_u, R)
-    print("time-varying (u1 != u2):", not np.allclose(u1, u2))
-    print("u1 shape:", u1.shape, "mean fluct magnitude:", np.std(u1 - mean_u))
+    def unit_fluctuations(self, points: np.ndarray, sigma: np.ndarray) -> np.ndarray:
+        """`(n, 3)`：sum_k eps_k f_sigma(x)(x - x_k) / sqrt(N)，各分量期望方差为 1（全局坐标分量）。"""
+        xi = self.to_local(points)
+        sigma = np.asarray(sigma, dtype=np.float64)
+        n = xi.shape[0]
+        if self._tree is None:
+            self._tree = cKDTree(self.eddy_centers)
+        hits = self._tree.query_ball_point(xi, r=sigma, p=np.inf)
+        counts = np.fromiter((len(h) for h in hits), dtype=np.int64, count=n)
+        out = np.zeros((n, 3))
+        if counts.sum() == 0:
+            return out
+        pt = np.repeat(np.arange(n), counts)
+        ed = np.fromiter((e for h in hits for e in h), dtype=np.int64, count=int(counts.sum()))
+        s = (xi[pt] - self.eddy_centers[ed]) / sigma[pt, None]
+        f = np.prod(_F_COEFF * np.clip(1.0 - np.abs(s), 0.0, None), axis=1)
+        f *= np.sqrt(self.volume / sigma[pt] ** 3)
+        for j in range(3):
+            out[:, j] = np.bincount(pt, weights=self.eddy_signs[ed, j] * f, minlength=n)
+        return out / np.sqrt(self.num_eddies)
 
 
 def synthetic_inlet_seed(group_name: str) -> int:
@@ -223,7 +168,7 @@ def synthetic_inlets(provider):
 def advance_synthetic_inlets(provider, freestream: dict, dt: float) -> None:
     """每个物理步把全部 SEM 入口的涡核沿来流对流一步（全部后端共用）。
 
-    平动速度取真实来流向量（`flow_direction.direction_from_freestream`，与入口盒的配置方向一致）。
+    平动速度取真实来流向量（`flow_direction.direction_from_freestream`，与入口坐标系的 e1 一致）。
     此前 CPU 单机写死 `(vel_inf, 0, 0)`（有攻角/侧滑角时与入口盒方向不一致），单 GPU、多 GPU、CPU 分布式
     则从不推进（GPU 上入口涡结构在时间上冻结）。
     """
@@ -231,4 +176,4 @@ def advance_synthetic_inlets(provider, freestream: dict, dt: float) -> None:
 
     velocity = float(freestream["vel_inf"]) * direction_from_freestream(freestream)
     for sem in synthetic_inlets(provider):
-        sem.advance(dt, mean_velocity=velocity)
+        sem.advance(dt, velocity)

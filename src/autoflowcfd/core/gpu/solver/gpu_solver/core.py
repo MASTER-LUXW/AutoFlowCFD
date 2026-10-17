@@ -68,7 +68,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         cfl_max: Optional[float] = None,
         cfl_min: Optional[float] = None,
         wall_distance_source=None,
-        sem_num_eddies: int = _SEM_DEFAULT_NUM_EDDIES,
+        sem_num_eddies: Optional[int] = _SEM_DEFAULT_NUM_EDDIES,
         artificial_viscosity_enabled: bool = False,
         artificial_viscosity_alpha: float = 1.0,
         dual_time_inner_iter: int = DEFAULT_DUAL_TIME_STEPS,
@@ -131,7 +131,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         # CLI 由体网格 WALL 边界面构造后传入；湍流模型需要壁距时必须提供
         self._wall_distance_source = wall_distance_source
         # 合成湍流入口（SEM）的涡核数：边界提供者构造时读（与 CPU 同一个属性；此前单 GPU 不接收它）
-        self._sem_num_eddies = int(sem_num_eddies)
+        self._sem_num_eddies = None if sem_num_eddies is None else int(sem_num_eddies)
         if not gpu_available:
             raise RuntimeError(
                 "CuPy is not available. Install with: pip install cupy-cuda12x"

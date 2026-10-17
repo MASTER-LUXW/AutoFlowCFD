@@ -12,6 +12,9 @@ from .source import _SSTSourceMixin
 from .unknowns import _SSTTransportedMixin
 from .update import _SSTUpdateMixin
 
+#: beta* = C_mu（k-omega 与 k-epsilon 的换算 epsilon = beta* k omega 也用它，见 `boundary/synthetic_inlet.py`）
+BETA_STAR = 0.09
+
 
 class SSTModelFR(_SSTBlendingMixin, _SSTSourceMixin, _SSTUpdateMixin, _SSTTransportedMixin):
     """
@@ -84,7 +87,7 @@ class SSTModelFR(_SSTBlendingMixin, _SSTSourceMixin, _SSTUpdateMixin, _SSTTransp
         self.beta2 = 0.0828
         self.a1 = 0.31
         self.kappa = 0.41  # Von Karman 常数
-        self.beta_star = 0.09
+        self.beta_star = BETA_STAR
 
     def get_turbulent_viscosity(self) -> np.ndarray:
         """

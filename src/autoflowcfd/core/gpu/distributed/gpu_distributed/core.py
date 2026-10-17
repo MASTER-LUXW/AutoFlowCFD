@@ -82,7 +82,7 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
         wall_distance_source=None,
         artificial_viscosity_enabled: bool = False,
         artificial_viscosity_alpha: float = 1.0,
-        sem_num_eddies: int = _SEM_DEFAULT_NUM_EDDIES,
+        sem_num_eddies: Optional[int] = _SEM_DEFAULT_NUM_EDDIES,
     ):
         """初始化多 GPU 分布式求解器（"传统模式"：每个 rank 持有完整全局网格，root 用 METIS 分区后广播）。
         只有 root 持有完整网格的"完全分布式加载"走 `from_fully_distributed_package`。
@@ -108,7 +108,7 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
         # 壁面距离来源（core/utils/wall_distance）：与单机 CPU 同一个，
         # CLI 由体网格 WALL 边界面构造后传入；湍流模型需要壁距时必须提供
         self._wall_distance_source = wall_distance_source
-        self._sem_num_eddies = int(sem_num_eddies)
+        self._sem_num_eddies = None if sem_num_eddies is None else int(sem_num_eddies)
         self.artificial_viscosity_enabled = bool(artificial_viscosity_enabled)
         self.artificial_viscosity_alpha = float(artificial_viscosity_alpha)
         self._setup_identity_and_device(
