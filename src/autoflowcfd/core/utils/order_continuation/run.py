@@ -18,7 +18,7 @@ from typing import Any, Optional
 from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
 from autoflowcfd.core.mpi import is_root
 
-from .policy import PhaseGate
+from .policy import PhaseGate, update_phase_baseline
 from .turbulence_reset import _reset_turbulence_if_resumed_field_exploded
 
 #: 非最终阶段至少走这么多步才允许提前升阶（避免过早提升）。
@@ -130,17 +130,8 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
                                       extra_hint=solver._divergence_hint())
                 last_finite = res
                 phase_gate.observe(solver, res)
-                if initial_residual is None:
-                    initial_residual = res
-                if (getattr(solver, "_turb_production_ramp_complete", False)
-                        and not getattr(solver, "_ramp_baseline_reset_done", False)):
-                    # 产生项渐变结束时湍流方程的残差尺度变了：阶段基准从这一步重新起算（不渐变时发生在
-                    # 第 1 步，基准本来就是这一步，不打印）
-                    if report and res != initial_residual:
-                        print(f"[INFO] P{target_p} Iter {i + 1}: Production ramp complete, "
-                              f"resetting residual baseline: {initial_residual:.6e} -> {res:.6e}")
-                    initial_residual = res
-                    solver._ramp_baseline_reset_done = True
+                initial_residual = update_phase_baseline(solver, res, initial_residual, report,
+                                                         f"P{target_p} Iter {i + 1}")
                 solver._phase_initial_residual = initial_residual     # 写入 checkpoint，供 resume 续接
                 if report:
                     print(format_step_line(solver, target_p, i + 1, res, initial_residual, elapsed, total_iter))
@@ -152,6 +143,13 @@ def run_order_continuation(solver: Any, max_iter: int, dt: float, tol: float,
                     if report:
                         print(f"[OK] P{target_p} converged at iter {i + 1}（要求 {required_drop:.1e}x 或舍入误差："
                               f"{phase_gate.describe(solver, res, initial_residual)}）")
+                    break
+                if i >= 1 and phase_gate.stalled_at_roundoff():
+                    # 平台只停止空转、不报收敛（policy.py 模块文档）：中间阶段升阶，最终阶段以未收敛结束
+                    if report:
+                        verdict = "未收敛，结束" if is_final_stage else "升阶"
+                        print(f"[STOP] P{target_p} iter {i + 1} 停在平台，{verdict}："
+                              f"{phase_gate.describe(solver, res, initial_residual)}")
                     break
                 if (not is_final_stage and i >= MIN_ITER_BEFORE_TRANSITION and initial_residual > 0
                         and phase_gate.reached(solver, res, initial_residual, residual_drop_threshold)):

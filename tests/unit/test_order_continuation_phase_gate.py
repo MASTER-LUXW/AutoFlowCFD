@@ -67,10 +67,10 @@ def test_without_implicit_turbulence_only_mean_flow_and_ramp_count():
     assert PhaseGate().reached(laminar, res=1.0, baseline=2e3, required=1e3)
 
 
-def test_nk_stall_at_roundoff_counts_as_reached():
-    """NK：CFL 在上限、每步完整接受、残差在窗口内不再下降 -> 舍入平台，判到位。
-    从已收敛 checkpoint 恢复时首值只有 1.13，相对首值 1e10 的出口到不了（plate_demo
-    P0 在 4.2e-6 平台上空转 240 步）。"""
+def test_nk_stall_is_detected_but_not_counted_as_reached():
+    """NK：CFL 在上限、每步完整接受、残差在窗口内不再下降 -> 平台（`stalled_at_roundoff`，用于停止空转，
+    plate_demo P0 曾在 4.2e-6 平台上空转 240 步）。平台**不算到位**：它只看平坦、不看绝对水平，真实的
+    停滞同样满足它（I-89，此前在最终阶段把未收敛报成收敛）。"""
     from autoflowcfd.core.time_integration.adaptive_cfl.ser import SERCFLController
     from autoflowcfd.core.utils.order_continuation.policy import STALL_WINDOW
 
@@ -85,7 +85,7 @@ def test_nk_stall_at_roundoff_counts_as_reached():
         g.observe(s, r)
         if i < STALL_WINDOW:
             assert not g.reached(s, r, 2.2e-3, 1000.0)
-    assert g.stalled_at_roundoff() and g.reached(s, r, 2.2e-3, 1000.0)
+    assert g.stalled_at_roundoff() and not g.reached(s, r, 2.2e-3, 1000.0)
 
     # CFL 不在上限（仍是伪时间推进）：不是舍入平台
     s._cfl_controller.cfl_number = 5e3
@@ -105,3 +105,53 @@ def test_nk_still_decreasing_is_not_a_stall():
         _turb(s, 3e-3 * 0.9 ** i)
         g.observe(s, 1e-3 * 0.8 ** i)          # 窗口内下降 ~9 倍
     assert not g.stalled_at_roundoff()
+
+
+def _plateau_stub(residuals):
+    """定阶求解循环的最小替身：NK 的 SER 控制器停在上限、每步完整接受，残差按给定序列。"""
+    from autoflowcfd.core.time_integration.adaptive_cfl.ser import SERCFLController
+    from autoflowcfd.core.time_integration.base import TimeIntegrationScheme, TimeIntegrator
+
+    calls = {"step": 0}
+
+    def step(dt):
+        r = residuals[min(calls["step"], len(residuals) - 1)]
+        calls["step"] += 1
+        stub.residual_history.append(r)
+        return r
+
+    stub = SimpleNamespace(
+        step=step, residual_history=[], order=1, turb_model_name="NONE", turb_model=None,
+        order_continuation_enabled=False,
+        time_integrator=TimeIntegrator(scheme=TimeIntegrationScheme.NEWTON_KRYLOV),
+        _cfl_controller=SERCFLController(cfl_start=1e4, cfl_max=1e4), _newton_last_info={"theta": 1.0},
+        _turb_production_ramp_complete=True, _ramp_baseline_reset_done=True,
+        _reference_area=None, freestream=None, state=SimpleNamespace(),
+        _loop_monitor_suffix=lambda: "", _scaled_residual_field=lambda: None, _divergence_hint=lambda: "",
+        _pseudo_time_budget=lambda n_steps: None)
+    return stub, calls
+
+
+def test_fixed_order_loop_stops_on_plateau_without_claiming_convergence(monkeypatch):
+    """残差从 1 降到 1e-3 后停在平台（要求 1e6 倍）：在平台窗口满时结束，converged=False。"""
+    from autoflowcfd.core.fr_solver.solver import FRSolver, solve_loop
+
+    monkeypatch.setattr(solve_loop, "format_step_line", lambda *a, **k: "")     # 监控行不是被测对象
+    from autoflowcfd.core.utils.order_continuation.policy import STALL_WINDOW
+
+    seq = [1.0, 0.1, 0.01] + [1e-3] * 40
+    stub, calls = _plateau_stub(seq)
+    result = FRSolver.solve(stub, max_iter=40, dt=1e-4, tol=1e-6)
+    assert result.converged is False
+    assert calls["step"] == 3 + STALL_WINDOW + 1      # 平台从第 4 步起，窗口需要 STALL_WINDOW+1 个平台值
+
+
+def test_fixed_order_loop_converges_by_the_relative_criterion(monkeypatch):
+    from autoflowcfd.core.fr_solver.solver import FRSolver, solve_loop
+
+    monkeypatch.setattr(solve_loop, "format_step_line", lambda *a, **k: "")
+
+    stub, calls = _plateau_stub([10.0 ** -k for k in range(10)])
+    result = FRSolver.solve(stub, max_iter=10, dt=1e-4, tol=1e-6)
+    assert result.converged is True and calls["step"] == 7
+

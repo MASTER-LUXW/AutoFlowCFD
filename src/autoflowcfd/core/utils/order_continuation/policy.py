@@ -48,6 +48,17 @@ CFL 已在上限 1e4）。舍入平台是绝对水平，不能按相对首值的
 CFL 已在上限（近乎纯 Newton）、最近 `STALL_WINDOW` 步都被完整接受，而平均流与湍流
 残差在窗口内都没有下降 `STALL_FACTOR` 倍以上——纯 Newton 仍降不下去即是噪声底。
 显式格式没有这层含义（停滞可能是极限环），不走这个出口。
+
+**平台出口只停止空转，不报收敛**（2026-10-17）：平台判据只看"平坦"（CFL 在上限、窗口内全接受、下降
+不足 `STALL_FACTOR` 倍），不看残差的绝对水平。真实的停滞（plate_demo 尾迹慢模态、cube_demo P2 薄单元
+线性化——都是 CFL 在上限、步被接受、残差不降）同样满足它；此前它在最终阶段让求解返回 converged=True，
+把未收敛报成收敛。现在中间阶段遇到平台照样升阶（继续算没有收益），最终阶段遇到平台结束并返回
+converged=False、打印原因；"已收敛到舍入误差"由上面两条相对判据认定（续算时阶段基准随 checkpoint 持久化，
+从已收敛的 checkpoint 恢复也按原阶段起点判断）。
+
+**定阶循环用同一个判据**（`fr_solver/solver/solve_loop.py`）：此前定阶循环只比较平均流残差相对首步的下降，
+不等湍流产生项斜坡、不看隐式湍流残差，同一个 `tol` 在两条路径上语义不同。现在两条路径都用 `PhaseGate` 与
+`update_phase_baseline`。
 """
 
 #: 相对本阶段第一步的下降倍数达到这个值即视为已收敛到舍入误差（见模块文档）。
@@ -127,11 +138,10 @@ class PhaseGate:
 
     def reached(self, solver, res: float, baseline: float, required: float) -> bool:
         """平均流（相对 `baseline`）与隐式湍流（相对斜坡完成后的基准）是否都已下降
-        `required` 倍或已收敛到舍入误差（含 NK 舍入平台），且产生项斜坡已完成。"""
+        `required` 倍或已收敛到舍入误差，且产生项斜坡已完成。NK 舍入平台不算（`stalled_at_roundoff`
+        单独判断，只用于停止空转，见模块文档）。"""
         if not production_ramp_complete(solver):
             return False
-        if self.stalled_at_roundoff():
-            return True
         if not self._enough(baseline, self.mean_first, res, required):
             return False
         r = turbulence_residual_norm(solver)
@@ -151,6 +161,21 @@ class PhaseGate:
         if self.stalled_at_roundoff():
             txt += f"；已停在舍入平台（CFL 在上限、{STALL_WINDOW} 步内下降不足 {STALL_FACTOR} 倍）"
         return txt
+
+
+def update_phase_baseline(solver, res: float, baseline, report: bool = False, label: str = "") -> float:
+    """阶段残差基准：首步取当前残差；湍流产生项斜坡完成的那一步重新起算（每个阶段只重置一次，
+    `_ramp_baseline_reset_done`）——斜坡完成时湍流方程的残差尺度变了。定阶循环与 Order Continuation 共用。"""
+    if baseline is None:
+        baseline = res
+    if (getattr(solver, "_turb_production_ramp_complete", False)
+            and not getattr(solver, "_ramp_baseline_reset_done", False)):
+        # 不渐变时发生在第 1 步，基准本来就是这一步，不打印
+        if report and res != baseline:
+            print(f"[INFO] {label}: Production ramp complete, resetting residual baseline: {baseline:.6e} -> {res:.6e}")
+        baseline = res
+        solver._ramp_baseline_reset_done = True
+    return baseline
 
 
 def _pure_newton_accepted(solver) -> bool:

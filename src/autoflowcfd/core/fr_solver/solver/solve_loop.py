@@ -18,7 +18,9 @@ from typing import Optional
 import numpy as np
 
 from autoflowcfd.core.mpi import is_root
-from autoflowcfd.core.utils.order_continuation.policy import uses_order_continuation
+from autoflowcfd.core.utils.order_continuation.policy import (
+    PhaseGate, update_phase_baseline, uses_order_continuation,
+)
 from autoflowcfd.core.time_integration.implicit.mean_flow_step import newton_monitor_suffix
 from autoflowcfd.core.time_integration.implicit.physical_time import inner_iteration_suffix
 from autoflowcfd.core.fr_solver.residual_diagnostics import check_residual_finite
@@ -243,6 +245,8 @@ class SolveLoopMixin:
         # 9~11%；作用域必须是"循环期间"而不是"构造时一次"，理由见
         # `blas_threads_limited` 文档记录的真实 bug）。
         last_finite = None
+        # 收敛判据与 Order Continuation 同一个（湍流斜坡、隐式湍流残差、舍入平台，order_continuation/policy.py）
+        phase_gate = PhaseGate()
         with blas_threads_limited(1):
             for i in range(max_iter):
                 t_start = time.time()
@@ -261,8 +265,8 @@ class SolveLoopMixin:
                                       last_finite=last_finite, extra_hint=self._divergence_hint())
                 last_finite = res
 
-                if initial_res is None:
-                    initial_res = res
+                phase_gate.observe(self, res)
+                initial_res = update_phase_baseline(self, res, initial_res, report, f"P{self.order} Iter {i + 1}")
                 self._phase_initial_residual = initial_res
 
                 # 每步打印详细信息（真实功能缺口修复，2026-08-31，用户直接
@@ -283,16 +287,20 @@ class SolveLoopMixin:
                 if checkpoint_callback is not None:
                     checkpoint_callback(self, i + 1)
 
-                # 相对收敛判据：残差相对初始值下降 1/tol 倍
-                # tol=1e-6 表示需要下降 6 个量级；tol<=0 表示纯定步数迭代（
-                # B-10：transient 命令固定传 tol=0.0，此前 1.0 / tol 在第 2 步
-                # 直接 ZeroDivisionError 崩溃），此时不启用收敛判据。
-                if i >= 1 and tol > 0.0 and initial_res / max(res, 1e-30) >= 1.0 / tol:
-                    converged = True
-                    if report:
-                        print(f"[OK] Converged at iteration {i+1} with residual {res:.6e} "
-                              f"(dropped {initial_res/res:.1e}x)")
-                    break
+                # 相对收敛判据：残差相对阶段基准下降 1/tol 倍（tol=1e-6 即 6 个量级），湍流一起到位；
+                # tol<=0 为纯定步数迭代（瞬态命令传 0.0），不启用判据
+                if i >= 1 and tol > 0.0:
+                    if phase_gate.reached(self, res, initial_res, 1.0 / tol):
+                        converged = True
+                        if report:
+                            print(f"[OK] Converged at iteration {i+1}（要求 {1.0 / tol:.1e}x 或舍入误差："
+                                  f"{phase_gate.describe(self, res, initial_res)}）")
+                        break
+                    if phase_gate.stalled_at_roundoff():
+                        if report:
+                            print(f"[STOP] Iteration {i+1} 停在平台，未收敛，结束："
+                                  f"{phase_gate.describe(self, res, initial_res)}")
+                        break
 
         # 收尾摘要：把"物理场到底走了多远"完整报一次（残差是否收敛与物理场是否建立是两件事）
         if report:
