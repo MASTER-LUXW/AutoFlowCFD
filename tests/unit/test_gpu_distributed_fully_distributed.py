@@ -404,7 +404,6 @@ class TestRedistributeMultiGpuFullyDistributedForNewOrder:
         solver.sgs_model_gpu = None
         solver.wall_model = None
         solver.array_mgr = _FakeArrayManager(device_id=0)
-        solver._init_modal_filter_distributed = types.MethodType(lambda self: None, solver)
 
         redistribute_multi_gpu_fully_distributed_for_new_order(solver, 1)
 
@@ -446,7 +445,6 @@ class TestRedistributeMultiGpuFullyDistributedForNewOrder:
         solver.sgs_model_gpu = None
         solver.wall_model = None
         solver.array_mgr = _FakeArrayManager(device_id=0)
-        solver._init_modal_filter_distributed = types.MethodType(lambda self: None, solver)
 
         redistribute_multi_gpu_fully_distributed_for_new_order(solver, 0)
 

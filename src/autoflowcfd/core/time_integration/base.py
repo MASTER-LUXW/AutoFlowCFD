@@ -26,19 +26,14 @@ from autoflowcfd.core.time_integration.positivity import assert_admissible
 
 
 
-def _finish_stage(U, filter_func, positivity_func):
-    """每个 RK stage 的收尾：先滤波、再正性保持。
-
-    顺序是刻意的：正性保持必须**最后**动手，离开 stage 的状态才一定可容许
-    （滤波是线性的模态衰减，可能把刚被限制好的单元重新推出可容许集）。
+def _finish_stage(U, positivity_func):
+    """每个 RK stage 的收尾：正性保持。
 
     `positivity_func` 由求解器按网格构建（守恒的 Zhang–Shu 限制器，见
     `time_integration/positivity/`）；积分器被脱离网格单独使用时为 None，
     此时只检查、不修改 —— 此前的逐点硬钳不守恒，且正是真实网格上一步爆炸
     的放大器，不再使用。
     """
-    if filter_func is not None:
-        U = filter_func(U)
     if positivity_func is not None:
         positivity_func(U)
     else:
@@ -279,7 +274,6 @@ class TimeIntegrator:
         residual_func: Callable[[np.ndarray], np.ndarray],
         dt_local: np.ndarray,
         residual0: Optional[np.ndarray] = None,
-        filter_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
         positivity_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
     ) -> np.ndarray:
         """根据配置的方案，推进一个时间步。
@@ -295,12 +289,6 @@ class TimeIntegrator:
                 Zhang–Shu 限制器，见 time_integration/positivity/）；None 时
                 每个 stage 只检查可容许性、不修改（见 `_finish_stage`）
             residual0: 预计算的初始残差（可选优化）
-            filter_func: 可选的模态滤波回调（见 core/fr_solver_filter.py），
-                每个 RK stage 的正定性投影之后立即施加一次——不能只在最终
-                组合结果上滤波一次：真实复现，坍缩坐标节点配置法的混叠
-                噪声会在*中间* stage（Stage1/Stage2 各自重新求值残差时）
-                就已经放大到 NaN，等不到最终组合完成，见
-                _ssp_rk_stage_step 里各 stage 后的调用点
 
         Returns:
             U_new: 更新后的解 U^{n+1}
@@ -327,8 +315,7 @@ class TimeIntegrator:
 
         else:
             U_new = self._ssp_rk_stage_step(
-                solution, residual_func, dt_local, residual0, filter_func=filter_func,
-                positivity_func=positivity_func,
+                solution, residual_func, dt_local, residual0, positivity_func=positivity_func,
             )
             self.n_steps += 1
             return U_new
@@ -340,7 +327,6 @@ class TimeIntegrator:
         dt_local: np.ndarray,
         residual0: Optional[np.ndarray] = None,
         table: Optional[dict] = None,
-        filter_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
         positivity_func: Optional[Callable[[np.ndarray], np.ndarray]] = None,
     ) -> np.ndarray:
         """SSP-RK2/RK3 的 Shu-Osher stage 推进本体，不含 scheme 分发/计步。
@@ -377,7 +363,7 @@ class TimeIntegrator:
         # 体积项分块后峰值已大降，但 Stage 2 粘性残差求值时 U0/L0/U_stage1/L1/
         # U_stage2 五份共存（~6GB）仍把剩余 commit 压到临界，连 815MiB 的
         # correction 缓冲都分配失败。纯引用管理，不改变任何数值。
-        U_stage1 = _finish_stage(U_stage1, filter_func, positivity_func)
+        U_stage1 = _finish_stage(U_stage1, positivity_func)
 
         # FORWARD_EULER 只有 1 个 stage：_EULER 表里 alpha 只有 alpha[0]，
         # 下面 Stage 2/3 无条件访问 alpha[1] 会越界 IndexError（已实测复现）。
@@ -395,7 +381,7 @@ class TimeIntegrator:
                    beta[1] * dt * L1)
         del L1  # 同 Stage 1 处 del L0 的 B-12 注释：L1 只参与 Stage 2 组合，
         # 组合完成立即释放，避免与 Stage 2 残差求值的瞬态数组共存。
-        U_stage2 = _finish_stage(U_stage2, filter_func, positivity_func)
+        U_stage2 = _finish_stage(U_stage2, positivity_func)
 
         # 重新计算Stage 2的残差（关键：不能省略）
         L2 = -residual_func(U_stage2)
@@ -407,7 +393,7 @@ class TimeIntegrator:
                        alpha[2][1] * U_stage1 +
                        alpha[2][2] * U_stage2 +
                        beta[2] * dt * L2)
-            U_stage3 = _finish_stage(U_stage3, filter_func, positivity_func)
+            U_stage3 = _finish_stage(U_stage3, positivity_func)
 
             # 对于RK3，最终解就是U^(3)
             U_new = U_stage3

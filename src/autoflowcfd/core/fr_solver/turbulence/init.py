@@ -18,33 +18,6 @@ from autoflowcfd.core.turbulence.sgs import WALEModel
 from .wall_distance import apply_wall_distance_to_model
 
 
-def _filter_matrices_are_identity(ops) -> bool:
-    """两个模态滤波矩阵是否都是单位阵。
-
-    `AFCFD_FILTER_MODE=off` 下（以及 mild 档取 sigma_top=1.0 这种等价
-    配置）矩阵就是单位阵，继续对 k/omega 各乘一遍纯属浪费内存带宽
-    （79 万单元 P1 下每个标量场 (791492,8) ≈ 50MB，k 与 omega 各一遍，
-    每步一次）。判据直接看矩阵内容而不是环境变量，不依赖"环境变量与
-    算子构造保持同步"这个隐含假设——与 fr_solver/filter.py::
-    build_filter_func 里的短路同一个理由、同一套判据。
-    """
-    for M in (getattr(ops, 'filter_prism', None), getattr(ops, 'filter_tet', None)):
-        if M is None:
-            continue
-        A = np.asarray(M)
-        if not (A.ndim == 2 and A.shape[0] == A.shape[1]):
-            return False
-        # 容差而不是逐位相等：`off` 档矩阵是 np.eye 直接返回、逐位相等，
-        # 但 `mild` 档取 sigma_top=1.0 时矩阵是数值算出的
-        # `V @ diag(1) @ inv(V)`——数学上是单位阵、浮点上偏差 ~1e-16。
-        # 那种配置同样是无操作，同样应当被短路。容差 1e-12：元素是 O(1)、
-        # Vandermonde 条件数在本项目工作阶数下只有个位数（order=3 才 56），
-        # 1e-12 远高于舍入噪声又远低于任何有意义的滤波强度。
-        if not np.allclose(A, np.eye(A.shape[0]), rtol=0.0, atol=1e-12):
-            return False
-    return True
-
-
 def _freestream_turbulence_parameters(solver) -> tuple:
     """来流湍流参数 `(Tu, VR)`：湍流强度与涡粘比 `mu_t/mu`（SST 由两者定 k/omega，SA-neg 由 VR
     定 nu_tilde，两种模型按同一组物理量给定来流）。外部气动默认值参考 Fluent 手册
@@ -71,7 +44,7 @@ def _set_freestream_turbulence(solver) -> tuple:
     # 直接取键，不给兜底（2026-09-24）：`freestream` 对全部求解器类无条件
     # 设置，兜底永远不会生效；一旦某条路径真的丢了字段，`.get(k, 33.33)`
     # 会把缺陷伪装成"用了一个合理的来流"。真实例子：
-    # `test_bounds_sensor_mirror` 一直传着键名全错的
+    # 一个（随模态滤波已删除的）测试一直传着键名全错的
     # `{"rho": 1.0, "u": 1.0, ...}`，作者想要单位量级，实际用的是兜底的
     # p_inf=101325 —— 没人发现，因为什么都没报错。
     vel_inf = solver.freestream["vel_inf"]

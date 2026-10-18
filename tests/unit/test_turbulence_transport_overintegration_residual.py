@@ -193,7 +193,7 @@ class TestSwitchSemantics:
 
     @pytest.mark.parametrize("v", ["yes", "1", "true", "", "sensor"])
     def test_rejects_unknown(self, v):
-        """不能静默退回默认——同 AFCFD_FILTER_TURB_GATE 的理由。"""
+        """非法取值必须报错，不能静默退回默认。"""
         old = self._env(v)
         try:
             with pytest.raises(ValueError, match="AFCFD_TURB_OVERINT"):

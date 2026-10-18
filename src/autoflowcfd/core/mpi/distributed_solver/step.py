@@ -285,27 +285,6 @@ class _DistributedStepMixin:
         U_flat = self.state.get_local_U().reshape(n_local * n_sps, n_vars)
         dt_local_flat = dt_mean_local.reshape(n_local * n_sps)
 
-        # 模态滤波（2026-09-14 补齐）：单机 `fr_solver/step.py` 每个 RK
-        # stage 后都施加（`build_filter_func`），多 GPU 分布式也有
-        # `filter_func_gpu`——CPU 分布式此前是唯一没有施加的路径。它是
-        # P>=1 的稳定性机制，不是可选项（坍缩坐标/配置点法对高阶模态
-        # 混叠天然敏感，真实复现记录见 fr_solver/filter.py）。
-        # local 排列里棱柱/四面体交错，所以用按单元类型掩码分派的变体；
-        # 单元类型取自 `dist_fc.compact_cell_type`（0=棱柱/1=四面体，
-        # 紧凑排列），换回原生排列后切 local 段。
-        filter_func = None
-        if n_sps > 1:
-            from autoflowcfd.core.fr_solver.filter import (
-                build_filter_func_by_cell_type, resolve_filter_mode,
-            )
-            mode = resolve_filter_mode("cpu-mpi")
-            if mode == "sensor":
-                filter_func = self._build_sensor_gated_filter_func_distributed(
-                    n_local, n_sps, cell_is_prism)
-            else:
-                filter_func = build_filter_func_by_cell_type(
-                    self.ops, n_local, n_sps, cell_is_prism)
-
         # 正性保持（与单机同一个限制器、同一个核）：几何取 local 段、原生
         # 排列 —— adapter 的 jacobians 在紧凑排列，经 inv_perm 换回后切片，
         # 与上面的 cell_is_prism 同一换序。只在缓存失效（阶数切换）时构建。
@@ -357,16 +336,15 @@ class _DistributedStepMixin:
             def newton_step(dtau_flat, physical_time=None, advance_ramp=True):
                 """一个 Newton 步，新状态写回 `state`（与湍流模型），返回诊断 info。"""
                 if coupled is not None:
-                    return step_coupled_newton(self, coupled, dtau_flat, filter_active=filter_func is not None,
-                                               physical_time=physical_time, advance_ramp=advance_ramp)
+                    return step_coupled_newton(self, coupled, dtau_flat, physical_time=physical_time,
+                                               advance_ramp=advance_ramp)
                 u_next, info = step_mean_flow_newton(
                     self, residual_func, self.state.get_local_U().reshape(n_local * n_sps, n_vars), dtau_flat,
                     _reference_scales(self.local_solver.freestream, n_vars),
                     red=MPIReductions(np), cell_is_prism=cell_is_prism,
                     cell_colors=lambda: distributed_block_jacobi_colors(self),
                     coupling_graph=partial(distributed_coupling_graph, self, coarse_ctx), global_coarse=coarse_ctx,
-                    order=order_now, filter_active=filter_func is not None,
-                    positivity=positivity_func, physical_time=physical_time,
+                    order=order_now, positivity=positivity_func, physical_time=physical_time,
                     block_assembler=distributed_mean_flow_assembler(
                         self, self.local_solver, order=order_now, mu_t_compact=mu_t_field_compact,
                         exchange=self.halo_exchange.exchange, perm=self.dist_flat_face.perm, n_sps=n_sps,
@@ -400,7 +378,7 @@ class _DistributedStepMixin:
             # `TimeIntegrator.step()` 对隐式格式显式报错（不静默退化成前向 Euler）；它们上面都已分派。
             U_new_flat = self.time_integrator.step(
                 U_flat, residual_func, dt_local_flat, residual0=residual0,
-                filter_func=filter_func, positivity_func=positivity_func,
+                positivity_func=positivity_func,
             )
 
         U_new_local = U_new_flat.reshape(n_local, n_sps, n_vars)

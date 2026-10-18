@@ -47,7 +47,6 @@ import autoflowcfd.core.gpu.residual.gpu_volume_contract as gpu_volume_contract_
 import autoflowcfd.core.gpu.residual.gpu_flux as gpu_flux_mod
 import autoflowcfd.core.gpu.turbulence.gpu_scalar_transport as gst_mod
 import autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst as gpu_turbulence_sst_mod
-import autoflowcfd.core.gpu.gpu_modal_filter as gpu_modal_filter_mod
 import autoflowcfd.core.gpu.turbulence.gpu_implicit_turbulence as gpu_implicit_turb_mod
 
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
@@ -60,8 +59,7 @@ def _patch_get_cupy(monkeypatch):
     shim = NumpyAsCupy()
     patch_module_get_cupy(monkeypatch, [
         gpu_solver_io_mod, gpu_solver_mod, gpu_gradients_mod, gpu_volume_contract_mod,
-        gpu_flux_mod, gst_mod, gpu_turbulence_sst_mod,
-        gpu_modal_filter_mod, gpu_implicit_turb_mod], shim)
+        gpu_flux_mod, gst_mod, gpu_turbulence_sst_mod, gpu_implicit_turb_mod], shim)
     monkeypatch.setattr(gpu_turbulence_sst_mod, "gpu_available", True)
 
 
@@ -181,7 +179,7 @@ def _build_standins(turb_model_name):
     # k-omega 更新共用），替身同样绑定真实类里的这几个方法。
     for _name in ("_prepare_turbulence_inputs_gpu", "_turbulence_velocity_gradient_gpu",
                   "_evaluate_turbulence_rates_gpu",
-                  "_finalize_turbulence_update_gpu", "_turbulent_mu_t_gpu"):
+                  "_turbulent_mu_t_gpu"):
         setattr(stub, _name, types.MethodType(getattr(_GPUSolverIOMixin, _name), stub))
     # 签名随 2026-09-14 低马赫数预处理接入 GPU 而变化：湍流场更新必须
     # 取**物理**波速算出的那一份 dt（`return_physical_too=True` 的第二个

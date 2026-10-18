@@ -94,4 +94,4 @@ def test_newton_step_rejects_a_state_with_extra_columns():
 
     with pytest.raises(ValueError, match="5 个守恒变量"):
         step_mean_flow_newton(None, None, np.zeros((8, 7)), None, None, red=None, cell_is_prism=None,
-                              cell_colors=None, order=1, filter_active=False, positivity=None)
+                              cell_colors=None, order=1, positivity=None)

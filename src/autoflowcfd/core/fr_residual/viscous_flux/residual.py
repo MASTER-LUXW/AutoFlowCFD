@@ -71,7 +71,7 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
             |q_n| = k|∇T| ≈ 6.1e-14 W/m^2，相对来流焓通量密度
             rho*U*cp*T = 1.18e7 W/m^2 约 5e-21。**这个 5e-21 是被另一个
             缺陷压出来的**：legacy 模态滤波器每个 RK stage 清掉一整阶模态
-            （见 fr/modal_filter.py 模块文档），P1 的解实际退化成分片常数，
+            （该滤波子系统已于 2026-10-18 删除），P1 的解实际退化成分片常数，
             胞内梯度当然是机器零。滤波器一旦放开，实测胞内 |∇u|/(U/h) 从
             7.7e-16 跳到 O(1)，这一项的真实影响必须重新测量。
             （校验说明：上述 |∇T| 数字所用的 `compute_physical_gradient`

@@ -8,8 +8,7 @@ AutoFlowCFD V2.0 - 单 GPU（`GPUFRSolver`）Order Continuation（2026-09-02）
 复杂度，本质上和单机 CPU `FRSolver` 同构（`self.mesh` 全程都是完整
 真实网格），比三条分布式路径都更接近单机 CPU 的直接镜像：阶数切换
 只需要 `mesh.set_order`/`ops` 重建 + 相应 GPU 常驻数组（`mesh_data`/
-`flat_face_gpu`/`boundary_ghost_provider`/湍流模型 GPU 数组/壁面距离/
-模态滤波）重新计算+重新上传，不需要任何跨 rank 通信或紧凑索引空间
+`flat_face_gpu`/`boundary_ghost_provider`/湍流模型 GPU 数组/壁面距离）重新计算+重新上传，不需要任何跨 rank 通信或紧凑索引空间
 重排。
 
 P0（`mesh.n_points_1d==1`）在单 GPU 路径上不是问题——`compute_
@@ -132,10 +131,6 @@ def gpu_solver_interpolate_to_new_order(solver, target_p: int) -> None:
     # 实例方法。
     if solver.turb_model_gpu is not None:
         solver._init_wall_distance_gpu()
-
-    # 分布式模态滤波：新阶数的 filter_prism/filter_tet 形状不同，必须
-    # 重建（复用 __init__ 同一个实例方法）。
-    solver._init_modal_filter_gpu()
 
     # DUAL_TIME 上一物理时间层历史随阶数切换失效——与 CPU/GPU 分布式
     # 版本同一处处理，理由同该文档。

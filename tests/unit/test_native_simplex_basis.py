@@ -32,7 +32,6 @@ def test_generate_fr_operators_default_unaffected_by_tet_basis_mode_field():
     assert ops.face_extrap_by_op is not None
     assert ops.face_lift_by_op is not None
     assert ops.D_native_tet_padded is not None
-    assert ops.filter_native_tet_padded is not None
     # D_3d_tet 别名到 D_native_tet_padded（不再是独立的坍缩坐标矩阵）
     assert ops.D_3d_tet is ops.D_native_tet_padded
     assert ops.D_3d_tet.shape == (27, 27, 3)
@@ -66,11 +65,6 @@ def test_generate_fr_operators_native_mode_populates_expected_fields():
         padded = ops.face_lift_by_op[op]
         assert padded.shape == (n_sps_global, n1d * n1d)
         assert np.all(padded[expected_n:, :] == 0.0)
-
-    assert ops.filter_native_tet_padded.shape == (n_sps_global, n_sps_global)
-    np.testing.assert_array_equal(
-        ops.filter_native_tet_padded[expected_n:, expected_n:], np.eye(n_sps_global - expected_n)
-    )
 
     # 过积分算子：与坍缩坐标共用同一批字段名（ops.overint_*_tet），
     # 已被 native 版本覆盖——见 fr/operators.py 该分支的完整说明。

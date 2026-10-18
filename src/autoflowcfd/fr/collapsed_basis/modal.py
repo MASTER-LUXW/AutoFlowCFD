@@ -153,7 +153,7 @@ def build_collapsed_diff_matrices(cell_type: str, order: int, ref_cube_sps: np.n
     的理由是它承载**两份仍然有效的证据**，都不是重复实现：
 
       1. 它是仍在生产中的坍缩模态基（`prism_modal_basis_and_grad` /
-         `tet_modal_basis_and_grad`，面通量点参数化与模态滤波器在用）的
+         `tet_modal_basis_and_grad`，面通量点参数化在用）的
          直接数学检验 —— `D = V_xi @ inv(V)` 必须精确重现模态基自身的
          解析导数（`tests/unit/test_collapsed_basis.py`）；
       2. 它是"为什么换成原生基"这个决定的**条件数对照组**

@@ -41,7 +41,7 @@ Gauss-Seidel 迭代——它在不动点处的谱半径一旦大于 1 就周期�
     mean_assembler(mu_t)    平均流解析单元块装配器（不覆盖时 None）
     positivity              该后端的 `PositivityLimiter`
     cell_colors() / coupling_graph / coarse_context()
-    install(x, dtau)        写入新状态并做湍流步后收尾（上界、finalize、刷新 nu_t 与 DES 尺度）
+    install(x)              写入新状态并做湍流步后收尾（正性限幅、刷新 nu_t 与 DES 尺度）
 
 ## 跨步状态（挂在求解器上，换阶时由 `mean_flow_step.reset_newton_state` 清空）
 
@@ -64,7 +64,7 @@ from .block_jacobi import BlockJacobiCache
 from .forcing import EisenstatWalkerForcing
 from .globalization import ResidualNorm
 from .jfnk import step_newton_krylov
-from .mean_flow_step import N_MEAN_FLOW_VARS, note_linear_growth, require_no_modal_filter
+from .mean_flow_step import N_MEAN_FLOW_VARS, note_linear_growth
 from .physicality import ScaledFieldRowLimits
 
 #: 两个子系统在耦合未知量里的列（湍流列数由模型声明，`TransportedTurbulence.n_transported`）。
@@ -291,7 +291,7 @@ def _caches(solver, backend):
     return solver._newton_block_precond, solver._newton_turb_state["block"]
 
 
-def step_coupled_newton(solver, backend, dtau_flat, *, filter_active: bool = False, physical_time=None,
+def step_coupled_newton(solver, backend, dtau_flat, *, physical_time=None,
                         advance_ramp: bool = True) -> dict:
     """平均流 + 湍流紧耦合的一个 PTC-Newton-Krylov 步：求解、写回新状态、记录诊断，返回 info。
 
@@ -299,11 +299,9 @@ def step_coupled_newton(solver, backend, dtau_flat, *, filter_active: bool = Fal
         solver: 持有跨步状态的求解器对象（模块文档"跨步状态"）。
         backend: 该后端的耦合适配器（模块文档"后端适配器"）。
         dtau_flat: `(N,)` 平均流逐解点伪时间步长（天花板，见 `jfnk.py`）。
-        filter_active: 是否构造了模态滤波回调（为真时报错，见 `mean_flow_step.py`）。
         physical_time: 双时间步的 BDF 物理时间项（`physical_time.py`，平均流与湍流列同一个），稳态为 None。
         advance_ramp: 是否推进产生项渐变计数（双时间步的内迭代里只有每个物理步的第一次推进）。
     """
-    require_no_modal_filter(filter_active)
     red = backend.red
     xp = red.xp
     if solver._newton_forcing is None:
@@ -335,7 +333,7 @@ def step_coupled_newton(solver, backend, dtau_flat, *, filter_active: bool = Fal
         physical_time=physical_time, norm_scales=norm_scales)
     solver._newton_dtau_scale = info["dtau_scale"]
     solver._newton_local_dtau = info["local_dtau_scale"]
-    backend.install(x_new, dtau_flat)
+    backend.install(x_new)
     info.update(_subsystem_norms(residual.r0, backend.positivity.norm_weights, red, norm_scales))
     solver._newton_last_info = info
     note_linear_growth(solver, info)

@@ -83,45 +83,6 @@ def pad_native_matrix_to_global(matrix: np.ndarray, n_sps: int, pad_axes: tuple)
     return padded
 
 
-def pad_native_filter_matrix_to_global(filter_matrix: np.ndarray, n_sps: int) -> np.ndarray:
-    """滤波矩阵专用填充——与 `pad_native_matrix_to_global` 用途不同，
-    不能直接复用：滤波矩阵直接作用在 `U` 本身（`U_new = F @ U`，不是像
-    `D_native_tet`/`lift_native_tet` 那样产出一份*残差贡献*）。如果填充
-    槽位照搬"行填零"（`D`/`lift` 用的约定），滤波器每次调用都会把填充
-    行的值**重置为 0**，而不是"冻结在初值"——density=0 会在下游
-    `conserved_to_primitive` 触发 Part8 文档"一、核心不变量"第4点警告
-    过的 0 除风险，不是安全的选择。
-
-    正确的填充块是**单位矩阵**（不是零）：`padded[n_native:,n_native:]
-    =I`，让填充行经过滤波器后原样不变（保持初始化时写入的有限占位值，
-    见 `high_order_mesh_order.py::build_order_geometry` native 分支
-    "填充行复制真实 SP #0"的约定），真实行与填充行之间的交叉块仍然是
-    零（滤波器不应该把体积场的值和占位内容混在一起）。
-
-    Args:
-        filter_matrix: (n_native, n_native) native 滤波矩阵。
-        n_sps: 全局统一宽度。
-
-    Returns:
-        padded: (n_sps, n_sps)，`[:n_native,:n_native]=filter_matrix`，
-            `[n_native:,n_native:]=I`，其余为 0。
-    """
-    n_native = filter_matrix.shape[0]
-    if filter_matrix.shape[1] != n_native:
-        raise ValueError(
-            f"pad_native_filter_matrix_to_global: 滤波矩阵必须是方阵，实际 {filter_matrix.shape}"
-        )
-    if n_sps < n_native:
-        raise ValueError(
-            f"pad_native_filter_matrix_to_global: n_sps={n_sps} 小于 n_native={n_native}"
-        )
-    padded = np.eye(n_sps, dtype=filter_matrix.dtype)
-    padded[:n_native, :n_native] = filter_matrix
-    padded[:n_native, n_native:] = 0.0
-    padded[n_native:, :n_native] = 0.0
-    return padded
-
-
 def native_tet_n_real_sps(order: int) -> int:
     """native 四面体的**真实自由度**个数 `(p+1)(p+2)(p+3)/6`。
 

@@ -80,8 +80,7 @@ def scalar_convection_volume_divergence_gpu(cp, scalar_field, rho, velocity, mes
     （`phi = 1`）共用这一个函数。
 
     去混叠（AFCFD_TURB_OVERINT，默认 on）与 CPU 端同一个开关、同一条链路——同一个
-    环境变量在两个后端不允许意味着不同的数值方案（同一原则见
-    fr_solver/filter.py::resolve_filter_mode）。
+    环境变量在两个后端不允许意味着不同的数值方案。
     """
     segs = (get_overintegration_segs_gpu(mesh_data, ops_data, n_cells, n_prism)
             if resolve_turb_overintegration() == "on" else None)

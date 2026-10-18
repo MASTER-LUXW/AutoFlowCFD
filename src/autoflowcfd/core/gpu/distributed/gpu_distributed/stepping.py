@@ -234,7 +234,6 @@ class _MultiGPUSteppingMixin:
                 """一个 Newton 步，新状态写回 `U_gpu`（与湍流模型），返回诊断 info。"""
                 if coupled is not None:
                     return step_coupled_newton(self, coupled, dtau_flat,
-                                               filter_active=self.filter_func_gpu is not None,
                                                physical_time=physical_time, advance_ramp=advance_ramp)
                 u_next, info = step_mean_flow_newton(
                     self, _residual, self.U_gpu.reshape(n_local * n_sps, 5), dtau_flat,
@@ -242,8 +241,7 @@ class _MultiGPUSteppingMixin:
                     red=MPIReductions(cp), cell_is_prism=cell_is_prism,
                     cell_colors=lambda: distributed_block_jacobi_colors(self),
                     coupling_graph=partial(distributed_coupling_graph, self, coarse_ctx), global_coarse=coarse_ctx,
-                    order=order_now, filter_active=self.filter_func_gpu is not None,
-                    positivity=positivity_func, physical_time=physical_time,
+                    order=order_now, positivity=positivity_func, physical_time=physical_time,
                     block_assembler=distributed_mean_flow_assembler(
                         self, self, order=order_now, mu_t_compact=mu_t_field,
                         exchange=self.gpu_halo.exchange, perm=self._perm_gpu, n_sps=n_sps,
@@ -273,7 +271,7 @@ class _MultiGPUSteppingMixin:
             residual0 = _precond(residual0_raw, U_flat)
             U_new_flat = self.time_integrator.step(
                 U_flat, _residual, dt_flat, residual0=residual0,
-                filter_func=self.filter_func_gpu, positivity_func=positivity_func,
+                positivity_func=positivity_func,
             )
         self.U_gpu = U_new_flat.reshape(n_local, n_sps, 5)
 

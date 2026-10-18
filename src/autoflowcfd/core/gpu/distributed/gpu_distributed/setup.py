@@ -234,7 +234,7 @@ class _MultiGPUSetupMixin:
 
     def _setup_turbulence(self, mesh, turb_model, n_sps, mu_molecular, rho_inf, vel_inf,
                           turbulence_intensity, viscosity_ratio):
-        """湍流模型（SST/DDES/IDDES/SA-neg/LES/WMLES）、壁面距离、网格尺度与模态滤波。"""
+        """湍流模型（SST/DDES/IDDES/SA-neg/LES/WMLES）、壁面距离与网格尺度。"""
         # 来流湍流参数：湍流模型构造（`_set_freestream_turbulence` / `create_sa_model`）要读
         self._turbulence_intensity = turbulence_intensity
         self._viscosity_ratio = viscosity_ratio
@@ -303,10 +303,6 @@ class _MultiGPUSetupMixin:
         self.wall_distance_gpu = None
         if self.turb_model_gpu is not None:
             self._init_wall_distance_distributed()
-
-        # 初始化 GPU 模态滤波
-        self.filter_func_gpu = None
-        self._init_modal_filter_distributed()
 
     def _setup_state_and_boundary(self, n_local, n_sps):
         """GPU 常驻求解状态、边界幽灵态（重映射到压缩面编号）与 WALL 掩码。"""

@@ -13,10 +13,9 @@ import numpy as np
 import pytest
 
 from autoflowcfd.fr.native_padding import (
-    pad_native_matrix_to_global, pad_native_filter_matrix_to_global,
+    pad_native_matrix_to_global,
 )
 from autoflowcfd.fr.native_tet.basis import build_native_tet_operators, build_native_tet_lift
-from autoflowcfd.fr.native_tet.filter import build_native_tet_modal_filter
 
 
 @pytest.mark.parametrize("order", [1, 2, 3])
@@ -135,29 +134,6 @@ def test_padded_lift_matmul_survives_nan_in_padding_columns_of_jump_is_not_appli
     result_reference = Lift_ref @ jump
     assert np.all(result_padded[n_native:] == 0.0)
     np.testing.assert_allclose(result_padded[:n_native], result_reference, atol=1e-11, rtol=1e-11)
-
-
-@pytest.mark.parametrize("order", [1, 2, 3])
-def test_filter_padding_uses_identity_block_and_freezes_padding_rows(order):
-    """滤波矩阵填充块必须是单位矩阵（不是零）——真实场景验证：真实行
-    经过填充后的滤波器与未填充版本一致，填充行原样通过（不被重置为
-    0），且这个"原样通过"对*任意*有限占位值都成立（不只是 0）。"""
-    n1d = order + 1
-    n_sps = n1d ** 3
-    F_native = build_native_tet_modal_filter(order)
-    n_native = F_native.shape[0]
-    padded = pad_native_filter_matrix_to_global(F_native, n_sps)
-    assert padded.shape == (n_sps, n_sps)
-
-    rng = np.random.default_rng(3)
-    field_real = rng.standard_normal(n_native)
-    padding_value = 999.5  # 任意非零有限占位值，验证"原样通过"不只对 0 成立
-    field_padded = np.full(n_sps, padding_value)
-    field_padded[:n_native] = field_real
-
-    result = padded @ field_padded
-    np.testing.assert_allclose(result[:n_native], F_native @ field_real, atol=1e-11, rtol=1e-11)
-    np.testing.assert_allclose(result[n_native:], padding_value, atol=1e-12)
 
 
 def test_pad_rejects_mismatched_axis_lengths():

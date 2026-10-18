@@ -140,10 +140,8 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
     #
     # 为什么必须拆：此前两者共用一个字段，于是 `WALL`（物理无滑移）与
     # `SLIP_WALL`（物理滑移）在 WMLES 下**都**变成 `is_no_slip=False`，
-    # 下游无从区分。`build_boundary_dirichlet_table` 正是按它判断"壁面
-    # 动量是否为零"，结果是 **WMLES 算例整张 Dirichlet 表全是 NaN** ——
-    # BJ 越界判据在贴壁层的结构性误判原封不动回来，而 WMLES 恰恰是最
-    # 关心壁面剪应力的那一类算例（该误判的实测代价是 cf -93%）。
+    # 下游无从区分（壁面距离、壁面模型、气动力积分、湍流壁面条件都只认物理
+    # 无滑移固壁，唯一判据 `boundary/wall_kind.py`）。
     wall_is_no_slip = getattr(solver, "wall_model", None) is None
     type_map = {
         "WALL": ("WALL", {"is_no_slip": wall_is_no_slip,

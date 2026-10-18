@@ -34,7 +34,6 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
     rates = evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu)
 
     solver.turb_model.update_fields(dt, rates.source, rates.transport)
-    finalize_turbulence_update(solver)
     return rates.raw
 
 
@@ -154,38 +153,3 @@ def evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu, *, conv_geom=None
         )
 
     return TurbulenceRates((Sk, S_omega), (dk_dt, dw_dt), (transport_k, transport_w))
-
-
-def finalize_turbulence_update(solver) -> None:
-    """湍流场更新之后的后处理：模态滤波（非恒等滤波矩阵时）。显式与隐式路径共用。
-
-    滤波作用在模型的 Newton 未知量上（被多项式表示、被输运的量：SST 为 k 与 `ln omega`、
-    SA-neg 为 `nu_tilde`，`TransportedTurbulence.newton_unknowns`），逐列施加后经模型写回。
-
-    **壁面 omega 不在这里做步后松弛**（2026-10-01 删除）：壁面条件只由扩散残差里
-    的面 Dirichlet 施加（显式与隐式同一离散）。此前显式路径每步把壁面 owner 单元
-    **全部**解点的 ln(omega) 往壁面目标值拉一半——隐式 NK 收敛到 R≈1e-8 的槽道定常
-    解只做一次就被改动 2.13 倍（P1）/1.58 倍（P3），即正确的离散定常解不是显式
-    路径的不动点（不动点随伪时间步变化），显式槽道 40000 步残差停在 1e4；它的存在
-    理由（扩散残差缺 omega 壁面条件）09-26 起已不成立。隐式路径的同类整单元强约束
-    09-30 已因同一原因删除。"""
-    # 真实 bug 修复（2026-09-12，cube_demo 791,492 单元真实网格 P1 直连
-    # 长程测试发现）：k/omega 场同样需要与平均流一致的模态滤波，见
-    # fr_solver/filter.py::filter_scalar_field 完整推导——此前"湍流走
-    # 单步显式更新、不经过多级 RK 因此不会积累混叠"的排除理由已被真实
-    # 数据证伪（P1 独立发散，omega 8.6% 单元逼近安全上限，定位到具体
-    # 单元内部相邻解点间出现数量级跳变，外插到面后被上风格式放大成
-    # 巨大虚假对流残差）。用与平均流完全同一套 filter_prism/filter_tet
-    # 矩阵，P0（n_sps=1）下矩阵退化为单位矩阵，天然是无操作。
-    # 滤波作用在 Newton 未知量上（SST 为 k 与 w = ln omega、SA-neg 为 nu_tilde），算法全部后端共用；
-    # 门控维度与平均流的 `AFCFD_FILTER_MODE` 独立（理由见 filter/scalar.py::resolve_turb_filter_gate）
-    from autoflowcfd.core.fr_solver.filter import CpuFilterKernels
-    from autoflowcfd.core.turbulence.unknown_filter import filter_turbulence_unknowns
-
-    order = getattr(solver, "current_order", None)
-    if order is None:
-        order = getattr(solver, "order", None)     # 只有门控档的传感器用到（紧凑空间适配器没有阶数属性）
-    frac = filter_turbulence_unknowns(solver.turb_model, CpuFilterKernels, solver.mesh.n_prism_cells,
-                                      order, solver.ops)
-    if frac is not None:
-        solver._turb_filter_troubled_frac = frac

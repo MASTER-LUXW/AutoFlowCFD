@@ -57,7 +57,6 @@ def _stub(n_local, n_sps, target):
     s.boundary_ghost_provider = types.SimpleNamespace(code_to_config={})   # 无 SEM 入口
     s.turb_model_gpu = None
     s.turb_model_name = "NONE"
-    s.filter_func_gpu = None
     s.low_mach_precond_enabled = False
     s.residual_history, s.iteration = [], 0
     s.dist_flat_face = types.SimpleNamespace(perm=np.arange(n_local),

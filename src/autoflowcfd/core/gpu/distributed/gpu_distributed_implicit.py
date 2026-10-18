@@ -76,13 +76,6 @@ class MultiGpuTurbulenceBackend:
     def positivity(self) -> None:
         self.model.apply_positivity_limiter()
 
-    def finalize(self, dtau) -> None:
-        # 模态滤波在 compact 视图上做（按"棱柱在前"分块），再写回 local
-        s, ctx = self.solver, self._ctx
-        s._sync_turbulence_view(ctx)
-        s._finalize_turbulence_update_distributed(ctx)
-        self.model.set_transported_fields([self._to_local(f).copy() for f in ctx.view.transported_fields()])
-
     def cell_colors(self):
         return distributed_block_jacobi_colors(self.solver)
 
@@ -204,12 +197,11 @@ class MultiGpuCoupledBackend:
     def coarse_context(self):
         return self._coarse
 
-    def install(self, x, dtau) -> None:
+    def install(self, x) -> None:
         """写入新状态，做湍流步后收尾，并在新状态上刷新涡粘（写回模型并留下 compact 一份
         `turb.mu_t_compact`）。"""
         self.set_trial(x)
         turb = self.turb
         turb.positivity()
-        turb.finalize(dtau.reshape(turb.shape))
         turb.prepare_inputs()
         turb.rates(commit=True)

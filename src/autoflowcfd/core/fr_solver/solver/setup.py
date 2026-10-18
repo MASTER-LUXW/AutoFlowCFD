@@ -174,8 +174,7 @@ class _SolverSetupMixin:
         # 影响物理/数值的开关必须在启动日志里可见（2026-09-15 引入）：做
         # 人工粘性 A/B 对照时发现，`--artificial-viscosity` 生效与否在
         # 整份日志里**没有任何痕迹**，只能靠翻进程命令行确认——那让
-        # "这份日志是哪个配置跑出来的"变成了事后考古。模态滤波档同理，
-        # 它直接决定解的多项式阶数有没有被清掉一整阶。
+        # "这份日志是哪个配置跑出来的"变成了事后考古。
         #
         # 2026-09-16：这三行原先写在上面 `if adaptive_cfl and ...` 的
         # **then 分支里**，所以关掉自适应 CFL（含全部 DUAL_TIME 运行）
@@ -188,19 +187,10 @@ class _SolverSetupMixin:
             ausm_precond_mode_label as _pm_label,
             resolve_ausm_precond_mode as _pm_resolve,
         )
-        from autoflowcfd.fr.modal_filter import FILTER_MODE as _fm
         _av = ("enabled (entropy sensor, alpha=%g)" % self.artificial_viscosity_alpha
                if self.artificial_viscosity_enabled else "disabled")
         print(f"   Artificial viscosity: {_av}")
-        print(f"   Modal filter mode: {_fm}")
         print(f"   AUSM+up precond mode: {_pm_label(_pm_resolve())}")
-        # troubled-cell 门控判据（只在 FILTER_MODE=sensor 档生效，
-        # 两个维度刻意独立以便受控 A/B）。它决定 P>=1 时"对哪些
-        # 单元施加模态滤波"，是与滤波档同等量级的物理开关。
-        from autoflowcfd.core.fr_operators.bounds_sensor import (
-            resolve_troubled_sensor as _ts_resolve,
-        )
-        print(f"   Troubled-cell sensor: {_ts_resolve()}")
 
         # DUAL_TIME 专用：物理时间层 n-1 的解（BDF2 时间导数项需要），
         # None 表示还没有跑过物理步（下一步会退化为 BDF1），见 step()

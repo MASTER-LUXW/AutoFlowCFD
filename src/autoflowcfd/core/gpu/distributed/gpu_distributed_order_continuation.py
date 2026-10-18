@@ -157,10 +157,6 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
                     with cp.cuda.Device(solver.device_id):
                         solver.iddes_h_wn_compact = cp.asarray(h_wn_global[compact_global_ids])
 
-    # 分布式模态滤波：新阶数的 filter_prism/filter_tet 形状不同，必须
-    # 重建（复用 __init__ 同一个实例方法）。
-    solver._init_modal_filter_distributed()
-
     # --- 4. boundary_ghost_provider（SEM 入口幽灵态按当时阶数的 FP
     # 几何预存了每面 FP 物理坐标，必须重建）---
     from autoflowcfd.boundary.fr_ghost_state import restrict_ghost_provider

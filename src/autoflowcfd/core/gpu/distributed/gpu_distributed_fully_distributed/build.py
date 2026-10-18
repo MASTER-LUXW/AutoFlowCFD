@@ -222,9 +222,6 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     from autoflowcfd.core.turbulence.wall_model import build_wall_model
     self.wall_model = build_wall_model(turb_model_name, self.wall_treatment)
 
-    self.filter_func_gpu = None
-    self._init_modal_filter_distributed()
-
     with cp.cuda.Device(device_id):
         from autoflowcfd.core.utils.flow_direction import (
             freestream_conservative_state,

@@ -128,7 +128,6 @@ class TestGpuInterpolateToNewOrderCoreMath:
                 perm=np.arange(n_local), inv_perm=np.arange(n_local),
             )
         solver._init_distributed_face_geometry = types.MethodType(_init_face_geometry, solver)
-        solver._init_modal_filter_distributed = types.MethodType(lambda self: None, solver)
         solver._init_wall_distance_distributed = types.MethodType(lambda self: None, solver)
 
         class _FakeArrayMgr:
@@ -197,7 +196,6 @@ class TestGpuInterpolateToNewOrderCoreMath:
                 perm=np.arange(n_local), inv_perm=np.arange(n_local),
             )
         solver._init_distributed_face_geometry = types.MethodType(_init_face_geometry, solver)
-        solver._init_modal_filter_distributed = types.MethodType(lambda self: None, solver)
         solver._init_wall_distance_distributed = types.MethodType(lambda self: None, solver)
 
         class _FakeArrayMgr:

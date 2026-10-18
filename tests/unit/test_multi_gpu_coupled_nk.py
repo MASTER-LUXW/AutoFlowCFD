@@ -6,7 +6,7 @@ MultiGpuCoupledBackend` 与 `MultiGpuTurbulenceBackend`）；SST（棱柱槽道�
 紧耦合步本身（`time_integration/implicit/coupled_step.py`）各后端共用；这里验多 GPU 这一侧：试探
 状态写进 `U_gpu`、湍流求值走真实的 compact 视图件（`gpu_distributed_init/turb_source.py` 的
 `_prepare_turbulence_view_distributed` / `_sync_turbulence_view` / `_evaluate_turbulence_rates_distributed`
-/ `_finalize_turbulence_update_distributed` / `_write_back_turbulence_distributed`）、湍流解析块在
+/ `_write_back_turbulence_distributed`）、湍流解析块在
 compact 视图上装配并按 `inv_perm` 取行、快照还原、步后收尾。
 
 做法：单 rank、单一单元类型的槽道——compact 排列恰为恒等（第一条断言钉住这个前提），分区、`dist_flat_face`、
@@ -80,8 +80,7 @@ def _multi_gpu_standin(single, dist):
         _block_jacobi_colors_local=None,
     )
     for name in ("_prepare_turbulence_view_distributed", "_turbulence_velocity_gradient_compact", "_sync_turbulence_view",
-                 "_evaluate_turbulence_rates_distributed", "_finalize_turbulence_update_distributed",
-                 "_write_back_turbulence_distributed"):
+                 "_evaluate_turbulence_rates_distributed", "_write_back_turbulence_distributed"):
         setattr(g, name, types.MethodType(getattr(_GPUDistributedTurbSourceMixin, name), g))
     for name in ("_permute_to_compact", "_unpermute_from_compact"):
         setattr(g, name, types.MethodType(getattr(_MultiGPUResidualMixin, name), g))

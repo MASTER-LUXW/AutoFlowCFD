@@ -12,7 +12,6 @@ import numpy as np
 
 from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 from autoflowcfd.core.time_integration.implicit.reductions import LocalReductions
-from autoflowcfd.core.fr_solver.filter import build_filter_func
 from autoflowcfd.core.turbulence.registry import has_transport_equations
 from autoflowcfd.core.fr_solver.turbulence.implicit import (
     CpuCoupledBackend,
@@ -228,23 +227,6 @@ def step(solver, dt: float) -> float:
             residual0 = residual0_raw.reshape(n_cells * n_sps, n_vars)
         del residual0_raw
 
-        # 模态滤波回调（S-05 补充修复）：见 fr_solver_filter.py 文档——
-        # 必须传给 TimeIntegrator，由它在*每个* RK stage 的正定性投影
-        # 之后立即施加，抑制坍缩坐标节点配置法固有的混叠噪声放大；
-        # 只在最终组合结果上滤波一次不够，真实复现噪声在中间 stage
-        # 就已放大到 NaN。
-        # `AFCFD_FILTER_MODE=sensor`：按 Persson-Peraire 传感器逐单元门控
-        # （见 filter.py::build_sensor_gated_filter_func）。默认 legacy
-        # 行为不变，这一档供受控 A/B 与"光滑区不损失阶数"的正式方案用。
-        from autoflowcfd.core.fr_solver.filter import resolve_filter_mode
-        if resolve_filter_mode("cpu-single") == "sensor":
-            from autoflowcfd.core.fr_solver.filter import (
-                build_sensor_gated_filter_func,
-            )
-            filter_func = build_sensor_gated_filter_func(solver)
-        else:
-            filter_func = build_filter_func(solver)
-
         # 守恒的正性保持限制器（Zhang–Shu 型，取代逐点硬钳；缘由见
         # time_integration/positivity/__init__.py）。按阶数缓存。
         from autoflowcfd.core.time_integration.positivity import get_positivity_limiter
@@ -253,7 +235,7 @@ def step(solver, dt: float) -> float:
         if scheme in (TimeIntegrationScheme.DUAL_TIME, TimeIntegrationScheme.NEWTON_KRYLOV):
             # 隐式步（矩阵自由 Newton-Krylov + 伪瞬态延拓），与其它后端共用同一个实现：带输运方程的湍流
             # 模型时平均流与湍流紧耦合（`implicit/coupled_step.py`），否则只解平均流 5 个变量
-            # （`implicit/mean_flow_step.py`）。与模态滤波互斥。稳态一步一个 Newton 步；双时间步每个
+            # （`implicit/mean_flow_step.py`）。稳态一步一个 Newton 步；双时间步每个
             # 物理步做若干个带 BDF 物理时间项的 Newton 步（`implicit/physical_time.py`）。
             from autoflowcfd.core.fr_solver.residual_diagnostics import _reference_scales
             from autoflowcfd.core.time_integration.implicit.mean_flow_step import (
@@ -270,7 +252,6 @@ def step(solver, dt: float) -> float:
                     from autoflowcfd.core.time_integration.implicit.coupled_step import step_coupled_newton
 
                     return step_coupled_newton(solver, CpuCoupledBackend(solver, nu_av_step), dtau_flat,
-                                               filter_active=filter_func is not None,
                                                physical_time=physical_time, advance_ramp=advance_ramp)
                 u_now = solver.state.U.reshape(n_cells * n_sps, n_vars)
                 u_next, info = step_mean_flow_newton(
@@ -280,8 +261,7 @@ def step(solver, dt: float) -> float:
                     cell_is_prism=np.arange(n_cells) < int(solver.mesh.n_prism_cells),
                     cell_colors=lambda: single_machine_cell_colors(solver),
                     coupling_graph=partial(single_machine_coupling_graph, solver),
-                    order=_current_order(solver), filter_active=filter_func is not None,
-                    positivity=positivity_func, physical_time=physical_time,
+                    order=_current_order(solver), positivity=positivity_func, physical_time=physical_time,
                     block_assembler=None if unsupported_reason(
                         order=_current_order(solver)) else MeanFlowBlockAssembler(
                         mesh=solver.mesh, ops=solver.ops, ghost_provider=solver.boundary_ghost_provider,
@@ -310,8 +290,7 @@ def step(solver, dt: float) -> float:
             U_new_flat = solver.state.U.reshape(n_cells * n_sps, n_vars)
         else:
             U_new_flat = solver.time_integrator.step(
-                U_flat, mean_flow_residual, dt_local_flat, residual0=residual0,
-                filter_func=filter_func, positivity_func=positivity_func,
+                U_flat, mean_flow_residual, dt_local_flat, residual0=residual0, positivity_func=positivity_func,
             )
         solver.state.U = U_new_flat.reshape(n_cells, n_sps, n_vars)
 

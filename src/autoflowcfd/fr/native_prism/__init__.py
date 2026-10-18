@@ -20,7 +20,7 @@
     mode.py            迁移期开关 `AFCFD_PRISM_BASIS`（终态：删掉它）
     triangle_basis.py  三角形 PKD/Dubiner 基 + Warp & Blend 节点
     basis.py           棱柱 = 三角形 ⊗ 直线：节点/Vandermonde/微分算子/
-                       几何映射/解析雅可比/模态滤波
+                       几何映射/解析雅可比
     face.py            5 个面：通量点、体积->面外插、DG 提升、adj 行、
                        立方体面对应表
     interp_numba.py    numba 侧的"目标点 -> 插值矩阵"（残差 kernel 消费）
@@ -35,7 +35,6 @@
 """
 
 from .basis import (
-    build_native_prism_modal_filter,
     build_native_prism_nodes,
     build_native_prism_operators,
     build_native_prism_vandermonde,
@@ -85,7 +84,6 @@ __all__ = [
     "simplex2d_value",
     "warp_blend_nodes_2d",
     # basis
-    "build_native_prism_modal_filter",
     "build_native_prism_nodes",
     "build_native_prism_operators",
     "build_native_prism_vandermonde",

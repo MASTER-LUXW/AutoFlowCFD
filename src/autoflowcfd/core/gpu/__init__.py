@@ -22,7 +22,6 @@ fr_residual/、turbulence/、mpi/——不对称，随文件数增长愈发难�
 顶层保留（CPU 侧无直接对应的基础设施）：
 - array_manager.py: GPU 数组管理与设备管理
 - gpu_face_geometry.py: GPU 版面几何缓存
-- gpu_modal_filter.py: GPU 模态滤波
 - gpu_time_integration.py: GPU 局部 CFL 步长；积分器本体继承 CPU 的
   `TimeIntegrator`（RK/双时间步同一份实现，不另写 GPU 拷贝）
 

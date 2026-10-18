@@ -13,7 +13,6 @@ import pytest
 
 import autoflowcfd.core.gpu.distributed.gpu_distributed as gd_mod
 import autoflowcfd.core.gpu.distributed.gpu_distributed_init as gdi_mod
-import autoflowcfd.core.gpu.gpu_modal_filter as gpu_modal_filter_mod
 import autoflowcfd.core.gpu.residual.gpu_flux as gpu_flux_mod
 import autoflowcfd.core.gpu.residual.gpu_gradients as gpu_gradients_mod
 import autoflowcfd.core.gpu.residual.gpu_volume_contract as gpu_volume_contract_mod
@@ -42,7 +41,7 @@ MU, RHO = 1.8e-5, 1.225
 @pytest.fixture(autouse=True)
 def _patch_get_cupy(monkeypatch):
     patch_module_get_cupy(monkeypatch, [gdi_mod, gd_mod, gpu_gradients_mod, gpu_volume_contract_mod, gpu_flux_mod,
-                                        gst_mod, gpu_modal_filter_mod], NumpyAsCupy())
+                                        gst_mod], NumpyAsCupy())
 
 
 @pytest.mark.parametrize("rank", [0, 1])

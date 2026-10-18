@@ -13,7 +13,6 @@ import autoflowcfd.core.gpu.residual.gpu_volume_contract as gpu_volume_contract_
 import autoflowcfd.core.gpu.residual.gpu_flux as gpu_flux_mod
 import autoflowcfd.core.gpu.turbulence.gpu_scalar_transport as gst_mod
 import autoflowcfd.core.gpu.turbulence.gpu_turbulence_sst as gpu_turbulence_sst_mod
-import autoflowcfd.core.gpu.gpu_modal_filter as gpu_modal_filter_mod
 
 from tests.unit._gpu_cupy_shim import patch_module_get_cupy
 from tests.unit._numpy_as_cupy import NumpyAsCupy
@@ -27,7 +26,7 @@ def _bind_turb_source(stub):
     )
     for name in ("_les_mu_t_compact", "_prepare_turbulence_view_distributed", "_turbulence_velocity_gradient_compact",
                  "_sync_turbulence_view", "_evaluate_turbulence_rates_distributed",
-                 "_finalize_turbulence_update_distributed", "_write_back_turbulence_distributed"):
+                 "_write_back_turbulence_distributed"):
         setattr(stub, name, types.MethodType(getattr(M, name), stub))
 
 
@@ -36,8 +35,7 @@ def _patch_get_cupy(monkeypatch):
     shim = NumpyAsCupy()
     patch_module_get_cupy(monkeypatch, [
         gdi_mod, gd_mod, gpu_gradients_mod, gpu_volume_contract_mod, gpu_flux_mod,
-        gst_mod, gpu_turbulence_sst_mod,
-        gpu_modal_filter_mod], shim)
+        gst_mod, gpu_turbulence_sst_mod], shim)
     # `GPUTurbulenceSST.__init__`/`DDESModel.__init__`/`GPUWALEModel.
     # __init__` 单独检查模块级 `gpu_available` 标志（与 `get_cupy()` 是
     # 否被换成替身无关），本机没有真实 CuPy 时恒为 False，需要一并

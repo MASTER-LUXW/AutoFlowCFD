@@ -66,8 +66,6 @@ class _GPUSolverIOMixin:
         rates = self._evaluate_turbulence_rates_gpu(grad_vel, d_wall)
 
         self.turb_model_gpu.update_fields(turb_dt, rates.source, rates.transport)
-
-        self._finalize_turbulence_update_gpu()
         return self._turbulent_mu_t_gpu()
 
     def _turbulence_velocity_gradient_gpu(self):
@@ -161,25 +159,6 @@ class _GPUSolverIOMixin:
 
         from autoflowcfd.core.turbulence.transported import TurbulenceRates
         return TurbulenceRates((Sk, S_omega), (dk_dt, dw_dt), (transport_k, transport_w))
-
-    def _finalize_turbulence_update_gpu(self):
-        """`k/omega` 更新之后的后处理：模态滤波 + 正性限幅（非恒等滤波时）。显式与
-        隐式路径共用。壁面 omega 只由扩散残差的面 Dirichlet 施加，不做步后松弛
-        （2026-10-01 删除，理由见 CPU `fr_solver/turbulence/source.py::
-        finalize_turbulence_update` 文档）。"""
-        # 真实 bug 修复（2026-09-12，与 CPU 版
-        # fr_solver/turbulence.py::compute_turbulence_source 同一处修复，
-        # 完整推导见 gpu_modal_filter.py::filter_scalar_field_gpu 文档）：
-        # k/omega 场同样需要模态滤波，理由/CPU-GPU一致性要求同上。
-        # 与 CPU 同一份算法（`core/turbulence/unknown_filter.py`），作用在 Newton 未知量上
-        from autoflowcfd.core.gpu.gpu_modal_filter import GpuFilterKernels
-        from autoflowcfd.core.turbulence.unknown_filter import filter_turbulence_unknowns
-
-        _order = int(getattr(self, "current_order", None) or getattr(self, "order", 0))
-        frac = filter_turbulence_unknowns(self.turb_model_gpu, GpuFilterKernels(), self.mesh.n_prism_cells,
-                                          _order, self.ops)
-        if frac is not None:
-            self._turb_filter_troubled_frac = frac
 
     def _turbulent_mu_t_gpu(self):
         """当前湍流场对应的动力涡粘 `rho*nu_t`（含 SGS 部分）。"""

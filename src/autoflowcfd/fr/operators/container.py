@@ -36,22 +36,11 @@ class FROperators:
             能显著降低这一混叠误差（真实网格验证：某棱柱单元体积项
             残差从 3.15e-11 降到 6.53e-12，约 5 倍）。棱柱没有 native
             方案可换，这里的坍缩坐标构造不受本次删除影响。
-        filter_tet: (n_sps,n_sps) 指数模态滤波矩阵——**别名到
-            `filter_native_tet_padded`**（2026-09-03 起，不再是独立
-            构造的坍缩坐标滤波器）。
-        filter_prism: (n_sps,n_sps) 指数模态滤波矩阵（见
-            fr/modal_filter.py 文档）——坍缩坐标节点配置法对高阶模态的
-            混叠噪声天然敏感，重复微分（体积散度、粘性梯度+散度两次）
-            会把这个噪声逐步放大，真实网格上复现过在几步显式时间推进内
-            从机器精度噪声放大到 NaN；每个 RK 阶段结束后对解场施加一次
-            滤波是标准谱/DG 方法对策，不影响已解析到的低阶物理精度。
     """
     D_1d: np.ndarray
     D_3d: np.ndarray
     D_3d_tet: np.ndarray = None
     D_3d_prism: np.ndarray = None
-    filter_tet: np.ndarray = None
-    filter_prism: np.ndarray = None
     # 体积项去混叠（over-integration，见 collapsed_basis.build_overintegration_operators
     # 文档）：order==0 时全部为 None（P0 走独立的有限体积残差路径，不需要）。
     #: 棱柱**实际**使用的过积分阶数（原名 `overint_order`，2026-09-19
@@ -101,19 +90,10 @@ class FROperators:
     # 不变量：零填充块对角"）。`D_3d_tet` 字段（上方 dataclass 开头）就是它的别名。
     # 面外插 / DG 提升见下方 `face_extrap_by_op`/`face_lift_by_op`。
     D_native_tet_padded: np.ndarray = None
-    # native 四面体指数模态滤波器（`native_tet_filter.py::build_native_
-    # tet_modal_filter`，抑制混叠失稳，见该模块与 fr/modal_filter.py
-    # 文档），填充到全局 n_sps 宽度（`native_padding.py::pad_native_
-    # tet_filter_matrix_to_global`——填充块是单位矩阵，不是零，与
-    # D_native_tet_padded 的"零填充"约定不同，
-    # 见该函数文档）。
-    filter_native_tet_padded: np.ndarray = None
 
     # ======================= 原生棱柱基（2026-09-18） =======================
     #
-    # `AFCFD_PRISM_BASIS=native` 时构造并**别名到** `D_3d_prism`/
-    # `filter_prism`（与四面体那套完全同一个做法），所以任何无条件读这两个
-    # 旧字段名的消费点自动拿到原生结果。面算子（外插/提升）在下方整表里按面算子
+    # 构造并**别名到** `D_3d_prism`（与四面体那套完全同一个做法）。面算子（外插/提升）在下方整表里按面算子
     # 索引取（棱柱 face_id 0~4 即面编码 10~14）。
     #
     # 坍缩棱柱基已于 2026-09-23 删除，所以这一整组**恒为非 None**；原先
@@ -124,7 +104,6 @@ class FROperators:
     n_native_sps_prism: int = None
     #: 零填充到全局统一宽度 `(order+1)^3` 之后的体积微分算子。
     D_native_prism_padded: np.ndarray = None
-    filter_native_prism_padded: np.ndarray = None
     #: 全部原生面（含三角形面的 3 个坍缩顶点槽位）按面算子索引排好的外插 / 提升整表，
     #: 填充到全局 `n_sps` 宽度：`(N_FACE_OPS, n_fp, n_sps)` / `(N_FACE_OPS, n_sps, n_fp)`
     #: （`fr/operators/face_ops.py`）。逐面取用走 `native_face_extrap` 或平面面几何里的

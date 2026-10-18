@@ -11,14 +11,6 @@
 Continuation，Newton 外迭代放在它里面让这些机制原样生效（见 `jfnk.py`
 模块文档）。
 
-## 模态滤波与隐式步不能同时启用
-
-模态滤波是显式 RK 逐 stage 的去噪手段；Newton 步里的"解"是线性系统
-的解、没有 stage 的概念，在 Newton 步之后滤一次会改变被求解的不动点方程
-本身（`R(U)=0` 变成另一个问题），让残差与收敛判据失去意义。默认档
-`FILTER_MODE=off` 本来就不构造滤波回调；显式指定了非 off 档时这里明确
-报错，不静默忽略。
-
 ## 跨步状态（挂在求解器对象上，换阶时由 Order Continuation 清空）
 
     _newton_forcing         inexact-Newton 的 forcing term（Eisenstat-Walker）
@@ -56,17 +48,6 @@ def newton_step_ok(info: dict) -> bool:
     """
     return (info["theta"] >= 1.0 and info["n_dtau_cuts"] == 0
             and info["linear_rel_residual"] <= LINEAR_SOLVE_MAX_REL_RESIDUAL)
-
-
-def require_no_modal_filter(filter_active: bool) -> None:
-    """隐式步（平均流 / 紧耦合）不能与模态滤波同时启用（模块文档同名一节）。"""
-    if filter_active:
-        raise ValueError(
-            "NEWTON_KRYLOV（隐式稳态）与模态滤波不能同时启用："
-            "滤波会改变被求解的不动点方程本身（R(U)=0 变成另一个"
-            "问题），使残差与收敛判据失去意义。请用 "
-            "AFCFD_FILTER_MODE=off（默认值），或改用显式格式。"
-        )
 
 
 def reset_newton_state(solver) -> None:
@@ -164,7 +145,7 @@ def newton_monitor_suffix(solver) -> str:
 def step_mean_flow_newton(
     solver, residual: Callable, u_flat, dtau_flat, scales: np.ndarray, *,
     red: LocalReductions, cell_is_prism: np.ndarray, cell_colors: Callable[[], np.ndarray],
-    order: int, filter_active: bool, positivity, block_assembler=None,
+    order: int, positivity, block_assembler=None,
     coupling_graph: Optional[Callable] = None, global_coarse=None, physical_time=None,
 ):
     """平均流的一个 PTC-Newton-Krylov 步，返回 `(U_new_flat, info)`。
@@ -183,7 +164,6 @@ def step_mean_flow_newton(
             一致着色里本 rank 那一段（同色单元跨 rank 也不相邻，见
             `cell_blocks.py::CellBlockJacobian` 文档）。
         order: 当前阶数（决定每类单元的真实解点数）。
-        filter_active: 是否构造了模态滤波回调（为真时报错，见模块文档）。
         positivity: 该后端的 `PositivityLimiter`（`time_integration/positivity`）；
             物理性限幅在它的点集上求值（解点 + 面通量点 + 过积分细点，见
             `PositivityLimiter.density_pressure_limits`）。
@@ -201,7 +181,6 @@ def step_mean_flow_newton(
     """
     from autoflowcfd.fr.native_padding import real_row_mask, real_sps_per_cell
 
-    require_no_modal_filter(filter_active)
     if u_flat.shape[1] != N_MEAN_FLOW_VARS:
         raise ValueError(f"平均流 Newton 步的未知量是 {N_MEAN_FLOW_VARS} 个守恒变量，收到 {u_flat.shape[1]} 列")
     if solver._newton_forcing is None:

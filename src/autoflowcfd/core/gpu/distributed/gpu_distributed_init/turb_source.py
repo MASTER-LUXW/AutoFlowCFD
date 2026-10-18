@@ -50,7 +50,6 @@ class _GPUDistributedTurbSourceMixin:
         rates = self._evaluate_turbulence_rates_distributed(ctx)
         # 场更新（模型的点隐式阻尼 + 输运：SST 见 sst/update.py::advance_k_log_omega，SA 见 sa/model.py）
         ctx.view.update_fields(dt, rates.source, rates.transport)
-        self._finalize_turbulence_update_distributed(ctx)
         self._write_back_turbulence_distributed(ctx, fields=True)
         return ctx.rho * ctx.view.nu_t
 
@@ -184,20 +183,6 @@ class _GPUDistributedTurbSourceMixin:
             ctx.transport, grad_k=grad_k, grad_log_omega=grad_w)
         from autoflowcfd.core.turbulence.transported import TurbulenceRates
         return TurbulenceRates((Sk, S_omega), (dk_dt, dw_dt), (transport_k, transport_w))
-
-    def _finalize_turbulence_update_distributed(self, ctx) -> None:
-        """k/omega 更新之后的后处理（compact 视图上）：模态滤波 + 正性限幅。与单机
-        `finalize_turbulence_update` 同一份；壁面 omega 只由扩散残差的面 Dirichlet
-        施加，不做步后松弛（2026-10-01 删除，理由见单机同名函数文档）。"""
-        # 与单机同一份算法（`core/turbulence/unknown_filter.py`）；compact 排列"棱柱在前"
-        from autoflowcfd.core.gpu.gpu_modal_filter import GpuFilterKernels
-        from autoflowcfd.core.turbulence.unknown_filter import filter_turbulence_unknowns
-
-        order = int(getattr(self, "current_order", getattr(self, "order", 0)))
-        frac = filter_turbulence_unknowns(ctx.view, GpuFilterKernels(), self.flat_face_gpu.n_prism, order, self.ops)
-        if frac is not None:
-            self._turb_filter_troubled_frac = frac
-
 
     def _write_back_turbulence_distributed(self, ctx, *, fields: bool) -> None:
         """compact 视图的结果换回原生排列、切 local 段写回真正的模型：nu_t 总是写；

@@ -164,7 +164,6 @@ class _GPUSolverStepMixin:
                 """一个 Newton 步，新状态写回 `U_gpu`（与湍流模型），返回诊断 info。"""
                 if coupled_nk:
                     return step_coupled_newton(self, GpuCoupledBackend(self, nu_av), dtau_flat,
-                                               filter_active=self.filter_func_gpu is not None,
                                                physical_time=physical_time, advance_ramp=advance_ramp)
                 # 解析单元块在主机上装配（与 CPU 同一份实现），块由缓存上传
                 block_assembler = None if unsupported_reason(order=order_nk) else MeanFlowBlockAssembler(
@@ -180,7 +179,6 @@ class _GPUSolverStepMixin:
                     cell_colors=lambda: gpu_cell_colors(cp, ff, n_cells),
                     coupling_graph=partial(gpu_coupling_graph, cp, ff, n_cells),
                     order=order_nk,
-                    filter_active=self.filter_func_gpu is not None,
                     positivity=positivity_func, physical_time=physical_time, block_assembler=block_assembler)
                 self.U_gpu = u_next.reshape(n_cells, n_sps, self.n_vars)
                 self._update_primitives_gpu()
@@ -209,7 +207,7 @@ class _GPUSolverStepMixin:
             U_new_flat = self.time_integrator.step(
                 U_flat, mean_flow_residual, dt_local_full,
                 residual0=residual0,
-                filter_func=self.filter_func_gpu, positivity_func=positivity_func,
+                positivity_func=positivity_func,
             )
 
         self.U_gpu = U_new_flat.reshape(n_cells, n_sps, self.n_vars)

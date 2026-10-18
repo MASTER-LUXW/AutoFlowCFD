@@ -64,12 +64,11 @@ def _patch_gpu_modules(monkeypatch):
     import autoflowcfd.core.gpu.gpu_face_geometry as gfg_mod
     import autoflowcfd.core.gpu.residual.gpu_inviscid as gpu_inviscid_mod
     import autoflowcfd.core.gpu.residual.gpu_viscous as gpu_viscous_mod
-    import autoflowcfd.core.gpu.gpu_modal_filter as gmf_mod
 
     mods = [
         gs_mod, gsi_mod, gsio_mod, gsoc_mod, gpu_gradients_mod, gpu_volume_contract_mod,
         gpu_flux_mod, gst_mod, gpu_turbulence_sst_mod, array_mgr_mod, gti_mod, gfg_mod,
-        gpu_inviscid_mod, gpu_viscous_mod, gmf_mod,
+        gpu_inviscid_mod, gpu_viscous_mod,
     ]
     # get_cupy 一次性整批替换（含各包的子模块）；断言是聚合的，所以
     # `mods` 里含 gpu_inviscid_volume 这类本就没有 get_cupy 的模块无妨。

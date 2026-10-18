@@ -8,7 +8,7 @@
 
 为什么单独成一个模块：这个判断本身曾经有**两份**实现，且判据不同——
 `core/gpu/gpu_overintegration.py` 按 `type(arr).__module__` 前缀判断，
-`core/fr_operators/bounds_sensor.py` 按有没有 `__cuda_array_interface__`
+`core/fr_operators/bounds_sensor.py`（2026-10-18 随模态滤波删除）按有没有 `__cuda_array_interface__`
 判断。两者在 CuPy 与 NumPy 上结论一致，但对第三方数组（例如 numba 的
 `DeviceNDArray`——它有 `__cuda_array_interface__` 却**不是** CuPy 数组，
 `cupy.ndarray` 的方法在它上面不存在）结论相反：前者返回 NumPy（会在

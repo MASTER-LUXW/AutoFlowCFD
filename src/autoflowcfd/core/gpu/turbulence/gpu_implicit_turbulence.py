@@ -1,9 +1,8 @@
 """AutoFlowCFD V2.0 - 单机 GPU 的隐式稳态（NK）湍流适配器与紧耦合 Newton 适配器。
 
 紧耦合 Newton 的算法只有一份：`core/time_integration/implicit/coupled_step.py`。本文件
-只回答"GPU 上用哪一套求值件"——`GPUFRSolver` 上与 CPU `source.py` 三个求值件一一对应的
-`_prepare_turbulence_inputs_gpu` / `_evaluate_turbulence_rates_gpu` /
-`_finalize_turbulence_update_gpu`，以及平均流的 GPU 残差。湍流适配器接口见
+只回答"GPU 上用哪一套求值件"——`GPUFRSolver` 上与 CPU `source.py` 两个求值件一一对应的
+`_prepare_turbulence_inputs_gpu` / `_evaluate_turbulence_rates_gpu`，以及平均流的 GPU 残差。湍流适配器接口见
 `core/fr_solver/turbulence/implicit.py` 模块文档"后端"一节。
 """
 
@@ -41,9 +40,6 @@ class GpuTurbulenceBackend:
 
     def positivity(self) -> None:
         self.model.apply_positivity_limiter()
-
-    def finalize(self, dtau) -> None:
-        self.solver._finalize_turbulence_update_gpu()
 
     def cell_colors(self):
         return gpu_cell_colors(self.xp, self.solver.flat_face_gpu, self.shape[0])
@@ -159,12 +155,11 @@ class GpuCoupledBackend:
     def coarse_context(self):
         return None
 
-    def install(self, x, dtau) -> None:
+    def install(self, x) -> None:
         """写入新状态，做湍流步后收尾，并在新状态上刷新涡粘。"""
         self.set_trial(x)
         turb = self.turb
         turb.positivity()
-        turb.finalize(dtau.reshape(turb.shape))
         turb.prepare_inputs()
         turb.rates(commit=True)
 

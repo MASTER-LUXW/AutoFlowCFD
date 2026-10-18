@@ -101,7 +101,7 @@ def _gpu_standin(cpu, dt_cell, dt_phys_cell):
         mesh=cpu.mesh, ops=cpu.ops, mesh_data=md, ops_data=md, n_vars=cpu.state.n_vars, U_gpu=cpu.state.U.copy(),
         device_id=0,
         time_integrator=types.SimpleNamespace(scheme=S.NEWTON_KRYLOV),
-        filter_func_gpu=None, low_mach_precond_enabled=cpu.low_mach_precond_enabled,
+        low_mach_precond_enabled=cpu.low_mach_precond_enabled,
         freestream=cpu.freestream, flat_face_gpu=flat, order=1, current_order=None,
         turb_model_gpu=tg, sgs_model_gpu=None, ddes_model_gpu=None, turb_model_name=cpu.turb_model_name,
         residual_history=[], iteration=0,
@@ -126,7 +126,7 @@ def _gpu_standin(cpu, dt_cell, dt_phys_cell):
         (dt_cell, dt_phys_cell) if return_physical_too else dt_cell)
     for name in ("compute_turbulence_source_gpu", "_apply_turbulence_corrections_gpu", "_update_production_ramp_gpu",
                  "_prepare_turbulence_inputs_gpu", "_turbulence_velocity_gradient_gpu", "_evaluate_turbulence_rates_gpu",
-                 "_finalize_turbulence_update_gpu", "_turbulent_mu_t_gpu"):
+                 "_turbulent_mu_t_gpu"):
         setattr(g, name, types.MethodType(getattr(_GPUSolverIOMixin, name), g))
     return g
 

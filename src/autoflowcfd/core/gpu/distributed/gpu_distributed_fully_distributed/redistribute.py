@@ -154,9 +154,6 @@ def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int
                 solver.turb_model_gpu.nu_t = cp.asarray(new_nu_t_np)
         _upload_wall_geometry_compact(solver, my_package, cp, solver.device_id)
 
-    solver.filter_func_gpu = None
-    solver._init_modal_filter_distributed()
-
     solver.boundary_ghost_provider = my_package['boundary_ghost_provider']
     solver._wall_mask_gpu = None
     solver._open_mask_gpu = None

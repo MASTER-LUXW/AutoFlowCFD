@@ -26,8 +26,7 @@
   最多减半/加倍）"，逐**解点**（`physicality.ScaledFieldRowLimits` 的 `log_columns`；被输运的
   k 不裁剪、可越过下限，见 `turbulence/sst/bounds.py`；omega = exp(w) 恒为正）；
 * 零填充槽位（原生基）的 `R_t` 置零，Newton 不动它们；
-* 更新之后的上界限幅与显式路径同一套后处理（`finalize_turbulence_update`），最后在新场
-  上刷新一次涡粘与 DES 长度尺度。
+* 更新之后做正性限幅，最后在新场上刷新一次涡粘与 DES 长度尺度。
 
 ## omega 壁面条件：只在残差里弱施加
 
@@ -47,14 +46,14 @@
 
 湍流求值件的适配器（每个后端一个，只回答"用哪一套求值件、在哪个数组模块上"）：
 
-    CpuTurbulenceBackend   本文件，调 `source.py` 的 prepare/evaluate/finalize
+    CpuTurbulenceBackend   本文件，调 `source.py` 的 prepare/evaluate
     GpuTurbulenceBackend   `core/gpu/turbulence/gpu_implicit_turbulence.py`
     分布式 / 多 GPU        `core/mpi/distributed_implicit.py`、`core/gpu/distributed/gpu_distributed_implicit.py`
 
 适配器接口：`model / xp / red / shape / cell_is_prism / order / solver`、`advance_ramp()`
 （产生项斜坡，每个 Newton 步一次）、`prepare_inputs()`（按**当前**平均流准备冻结输入与标量
 对流几何，耦合残差每次求值都调）、`rates(commit)`（`commit=True`：最终状态上的求值，分布式后端把涡粘
-写回真正的模型；单机后端求值的就是真正的模型）、`positivity()`、`finalize(dtau)`、
+写回真正的模型；单机后端求值的就是真正的模型）、`positivity()`、
 `cell_colors()`、`block_assembler()`、`coarse_context()`。耦合 Newton 步再要一个包住它的
 耦合适配器（`coupled_step.py` 模块文档"后端适配器"；单机 CPU 是本文件的 `CpuCoupledBackend`）。
 """
@@ -69,7 +68,6 @@ from autoflowcfd.core.turbulence.transport import prepare_convection_geometry
 from .init import _update_production_ramp
 from .source import (
     evaluate_turbulence_rates,
-    finalize_turbulence_update,
     prepare_turbulence_inputs,
 )
 
@@ -127,9 +125,6 @@ class CpuTurbulenceBackend:
 
     def positivity(self) -> None:
         self.model.apply_positivity_limiter()
-
-    def finalize(self, dtau) -> None:
-        finalize_turbulence_update(self.solver)
 
     def cell_colors(self):
         return single_machine_cell_colors(self.solver)
@@ -231,12 +226,11 @@ class CpuCoupledBackend:
     def coarse_context(self):
         return None
 
-    def install(self, x, dtau) -> None:
-        """写入 Newton 步的新状态，再做湍流步后收尾（上界、finalize），并在新的平均流与
-        湍流场上刷新涡粘（供本步之后的一切消费方使用）。"""
+    def install(self, x) -> None:
+        """写入 Newton 步的新状态，做湍流正性限幅，并在新的平均流与湍流场上刷新涡粘（供本步之后的
+        一切消费方使用）。"""
         self.set_trial(x)
         turb = self.turb
         turb.positivity()
-        turb.finalize(dtau.reshape(turb.shape))
         turb.prepare_inputs()
         turb.rates(commit=True)

@@ -111,8 +111,7 @@ class TestOperatorsAndGeometrySwitchTogether:
         """
         ops = self._ops(2)
         for name in ("D_native_prism", "ref_native_prism",
-                     "n_native_sps_prism", "D_native_prism_padded",
-                     "filter_native_prism_padded"):
+                     "n_native_sps_prism", "D_native_prism_padded"):
             assert getattr(ops, name) is not None, f"{name} 不该是 None"
         # 原来这里顺手自检"坍缩档 max|D| 应当很大（>20）"，作为改善倍数
         # 判据的对照侧。坍缩棱柱基已于 2026-09-23 删除，该自检随之移除；
@@ -121,7 +120,7 @@ class TestOperatorsAndGeometrySwitchTogether:
 
     @pytest.mark.parametrize("order", [1, 2, 3])
     def test_native_aliases_the_old_field_names(self, order):
-        """`D_3d_prism`/`filter_prism` 必须别名到填充好的原生版本。
+        """`D_3d_prism` 必须别名到填充好的原生版本。
 
         这是让"任何无条件读旧字段名的消费点自动拿到原生结果"成立的关键，
         与四面体当年完全同一个做法。（原先还断言 `ops.prism_basis_mode ==
@@ -131,9 +130,7 @@ class TestOperatorsAndGeometrySwitchTogether:
         ops = self._ops(order)
         n_global = (order + 1) ** 3
         assert ops.D_3d_prism is ops.D_native_prism_padded
-        assert ops.filter_prism is ops.filter_native_prism_padded
         assert ops.D_3d_prism.shape == (n_global, n_global, 3)
-        assert ops.filter_prism.shape == (n_global, n_global)
         assert ops.n_native_sps_prism == native_prism_n_sps(order)
 
     @pytest.mark.parametrize("order", [1, 2, 3])

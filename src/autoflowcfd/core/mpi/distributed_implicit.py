@@ -47,7 +47,6 @@ import numpy as np
 from autoflowcfd.core.fr_solver.turbulence.init import advance_production_ramp
 from autoflowcfd.core.fr_solver.turbulence.source import (
     evaluate_turbulence_rates,
-    finalize_turbulence_update,
     prepare_turbulence_inputs,
 )
 from autoflowcfd.core.mpi.distributed_turbulence import (
@@ -236,12 +235,6 @@ class DistributedTurbulenceBackend:
         """最近一次 `rates` 之后的紧凑空间涡粘（试探求值用，不写回模型）。"""
         return self._adapter.state.Q[..., 0] * self._view.nu_t
 
-    def finalize(self, dtau) -> None:
-        # 模态滤波在 compact 视图上做（它按"棱柱在前"分块），再写回 local
-        self._sync_view()
-        finalize_turbulence_update(self._adapter)
-        self.model.set_transported_fields([self._to_local(f).copy() for f in self._view.transported_fields()])
-
     def cell_colors(self):
         return distributed_block_jacobi_colors(self.solver)
 
@@ -346,12 +339,11 @@ class DistributedCoupledBackend:
     def coarse_context(self):
         return self._coarse
 
-    def install(self, x, dtau) -> None:
+    def install(self, x) -> None:
         """写入新状态，做湍流步后收尾，并在新状态上刷新涡粘（写回模型并留下 compact 一份
         `turb.mu_t_compact` 供下一步粘性步长）。"""
         self.set_trial(x)
         turb = self.turb
         turb.positivity()
-        turb.finalize(dtau.reshape(turb.shape))
         turb.prepare_inputs()
         turb.rates(commit=True)

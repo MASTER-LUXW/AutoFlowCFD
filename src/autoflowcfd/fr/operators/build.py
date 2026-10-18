@@ -42,8 +42,7 @@ def generate_fr_operators(order: int) -> FROperators:
     # `AFCFD_PRISM_BASIS` 的**唯一校验点**（2026-09-24）：坍缩棱柱基删除
     # 之后，除 checkpoint 存/取之外再没有代码读这个环境变量，于是
     # `AFCFD_PRISM_BASIS=collapsed` 会被**静默忽略**、照原生跑 —— 那正是
-    # 本项目明确禁止的静默降级（同一原则见 `fr_solver/filter.py::
-    # resolve_filter_mode`、`overintegration_order.py::
+    # 本项目明确禁止的静默降级（同一原则见 `overintegration_order.py::
     # resolve_native_overintegration_max_order`）。这里调一次纯为它的校验
     # 副作用：非法取值当场报错。每条后端路径（单机 CPU / GPU / CPU MPI /
     # 多 GPU / Order Continuation 重建算子）都要经过本函数，所以这一个点
@@ -143,9 +142,8 @@ def generate_fr_operators(order: int) -> FROperators:
         build_native_tet_operators, build_native_tet_boundary_extrap, build_native_tet_lift,
     )
     from ..native_padding import (
-        pad_native_matrix_to_global, pad_native_filter_matrix_to_global,
+        pad_native_matrix_to_global,
     )
-    from ..native_tet.filter import build_native_tet_modal_filter
 
     ref_native_tet, D_native_tet = build_native_tet_operators(order)
     n_native_sps_tet = ref_native_tet.shape[0]
@@ -157,15 +155,9 @@ def generate_fr_operators(order: int) -> FROperators:
     tet_lift_slots = {(v, sl): build_native_tet_lift(order, v, sl)
                       for v in range(4) for sl in range(N_TRI_SLOTS)}
     D_native_tet_padded = pad_native_matrix_to_global(D_native_tet, n_sps_global, pad_axes=(0, 1))
-    filter_native_tet = build_native_tet_modal_filter(order)
-    filter_native_tet_padded = pad_native_filter_matrix_to_global(filter_native_tet, n_sps_global)
 
-    # `D_3d_tet`/`filter_tet` 别名到 native 填充版本（见模块文档"删除
-    # collapsed 相关内容"一节）——两者形状恒等（"零填充块对角"设计
-    # 从一开始就保证与 D_3d/filter 同构，供任何仍无条件读取这两个
-    # 旧字段名的调用点直接得到正确的 native 结果，不需要逐一修改）。
+    # `D_3d_tet` 别名到 native 填充版本（"零填充块对角"设计保证与 D_3d 同构）
     D_3d_tet = D_native_tet_padded
-    filter_tet = filter_native_tet_padded
     # 3f. 棱柱原生基（迁移期，默认关闭）——见 fr/native_prism/mode.py。
     #
     # **必须与几何一起切换**：原生 `D` 作用在**原生棱柱节点**上的场，而
@@ -177,12 +169,8 @@ def generate_fr_operators(order: int) -> FROperators:
     ref_native_prism = None
     n_native_sps_prism = None
     D_native_prism_padded = None
-    filter_native_prism_padded = None
     if True:  # 棱柱恒为原生基（坍缩档 2026-09-23 删除）
-        from ..native_prism.basis import (
-            build_native_prism_modal_filter,
-            build_native_prism_operators,
-        )
+        from ..native_prism.basis import build_native_prism_operators
         from ..native_prism.face import build_all_native_prism_face_operators
 
         ref_native_prism, D_native_prism = build_native_prism_operators(order)
@@ -190,12 +178,8 @@ def generate_fr_operators(order: int) -> FROperators:
         prism_extrap_slots, prism_lift_slots = build_all_native_prism_face_operators(order)
         D_native_prism_padded = pad_native_matrix_to_global(
             D_native_prism, n_sps_global, pad_axes=(0, 1))
-        filter_native_prism_padded = pad_native_filter_matrix_to_global(
-            build_native_prism_modal_filter(order), n_sps_global)
-        # 与四面体同一个别名做法：无条件读 `D_3d_prism`/`filter_prism` 的
-        # 消费点自动拿到原生结果，形状恒等（零填充块对角设计保证）。
+        # 与四面体同一个别名做法：`D_3d_prism` 即原生填充版本（零填充块对角设计保证形状恒等）
         D_3d_prism = D_native_prism_padded
-        filter_prism = filter_native_prism_padded
 
     # native 单纯形基过积分（去混叠）算子（Part8 文档"四·七"节）：fine
     # 网格宽度沿用与棱柱相同的 (over_order+1)^3（`n_sps_per_cell_fine`，
@@ -333,8 +317,6 @@ def generate_fr_operators(order: int) -> FROperators:
         D_3d=D_3d,
         D_3d_tet=D_3d_tet,
         D_3d_prism=D_3d_prism,
-        filter_tet=filter_tet,
-        filter_prism=filter_prism,
         overint_order_prism=overint_order_prism,
         overint_n_fine_prism=n_fine_prism,
         overint_n_fine_tet=n_fine_tet,
@@ -351,14 +333,12 @@ def generate_fr_operators(order: int) -> FROperators:
         ref_native_tet=ref_native_tet,
         n_native_sps_tet=n_native_sps_tet,
         D_native_tet_padded=D_native_tet_padded,
-        filter_native_tet_padded=filter_native_tet_padded,
         D_native_prism=D_native_prism,
         ref_native_prism=ref_native_prism,
         n_native_sps_prism=n_native_sps_prism,
         D_native_prism_padded=D_native_prism_padded,
         face_extrap_by_op=face_extrap_by_op,
         face_lift_by_op=face_lift_by_op,
-        filter_native_prism_padded=filter_native_prism_padded,
     )
 
 
