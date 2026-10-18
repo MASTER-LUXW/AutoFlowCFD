@@ -29,20 +29,14 @@ def tag_boundary_groups(
         (group_code: (n_faces,) int32，边界面对应组的整数编码，内部面/未匹配为 -1；
          name_to_code: Dict[str,int]，组名到编码的映射)
 
-    真实 bug（已确认，未修复，2026-08-23 用户直接追问"tag_boundary_groups
-    修复了吗"促成排查）：按 owner **单元**索引匹配 boundary_groups——若某个
-    单元的两个不同边界面分别属于两个不同的组（角单元/边界 patch 交界处），
-    这里对该单元只可能命中*一个*组（`np.isin` 按整个 cell_id 集合匹配，
-    最后一次循环覆盖前面的），那个单元全部边界面都会被打上同一个组标签，
-    即使其中某个面物理上明明属于另一个组。cube_demo 网格的四个边界组
-    （tunnel/outlet/inlet/body）互不重叠，未触发此问题，因此当前不是那次
-    真实网格 P1 发散的原因（已用实际数据核实排除），但这仍是一个真实、
-    未修复的正确性缺陷，触发条件是任意存在角单元的网格。真正的修复是
-    `tag_boundary_groups_by_geometry`（按面本身的物理位置几何最近邻匹配，
-    不经过单元级别聚合）+ `tag_boundary_groups_for_mesh`（自动选择：有
-    `mesh.boundary_surface_mesh` 时用前者，否则回退到本函数）——本函数
-    保留作为没有原始面网格数据可用时（例如从 .pkl 加载、或本项目自己
-    `grid generate-volume` 的自包含体网格路径）的后备实现，不删除。
+    按 owner **单元**匹配：只在每个边界单元恰好属于一个组时成立（合成网格按单元定义的组即如此）。一个单元被
+    多个组同时声称拥有（角/棱单元的两个边界面分属两个组）时，单元粒度的输入已经丢掉了"哪个面属于哪个组"，
+    无从判定——报错，要求提供原始面网格走逐面几何匹配（`tag_boundary_groups_by_geometry`）。本项目的体网格
+    生成、导入与 .nas 体网格求解路径都带原始面网格（`VolumeMeshData.surface_mesh`，随 .pkl 一起保存），走的是
+    逐面匹配。2026-10-17 以前这里只给 warning、按最后遍历到的组把该单元的全部边界面打成同一个组（I-125）。
+
+    Raises:
+        ValueError: 有边界单元被多个组同时声称拥有
     """
     n_faces = face_conn.n_faces
     group_code = np.full(n_faces, -1, dtype=np.int32)
@@ -51,18 +45,6 @@ def tag_boundary_groups(
     boundary_idx = face_conn.get_boundary_face_indices()
     boundary_owners = face_conn.owner_cell[boundary_idx]
 
-    # 真实 bug 修复（2026-08-23，用户明确要求处理这个此前已确认、未修复
-    # 的缺陷）：这个函数按 owner *单元* 匹配，对角单元（同一个单元的两个
-    # 不同边界面分属两个不同组）本质上没有足够信息真正修复——单元级别的
-    # `boundary_groups: name->cell_ids` 输入本身就丢失了"这个单元具体
-    # 哪个面属于哪个组"这个信息，唯一真正修复过的路径是
-    # `tag_boundary_groups_by_geometry`（有原始面网格几何数据时优先走
-    # 这条，见 `tag_boundary_groups_for_mesh`），本函数只在没有原始面
-    # 网格数据时作为后备。既然真正修复不可行，这里做能做到的最好事情：
-    # 在赋值*之前*先检测哪些单元被多个组同时声称拥有，把这个此前完全
-    # 静默的数据缺陷变成一个明确、可诊断的告警（列出具体单元和冲突的
-    # 组名），而不是像之前那样"最后一个循环到的组覆盖前面的"、不留任何
-    # 痕迹地错标角单元的某个边界面。
     group_items = list(boundary_groups.items())
     boundary_owner_set = set(np.unique(boundary_owners).tolist())
     ambiguous: Dict[int, list] = {}
@@ -82,19 +64,11 @@ def tag_boundary_groups(
     if ambiguous:
         sample = list(ambiguous.items())[:10]
         sample_str = "; ".join(f"cell {cid} in groups {names}" for cid, names in sample)
-        logger.warning(
-            f"tag_boundary_groups: {len(ambiguous)} boundary owner cell(s) are claimed "
-            f"by more than one boundary_groups entry (corner/edge cells touching two "
-            f"different boundary patches) — this cell-granular fallback cannot "
-            f"correctly disambiguate which of that cell's boundary faces belongs to "
-            f"which group (only tag_boundary_groups_by_geometry, which needs the "
-            f"original surface mesh, can); for these cells, group assignment falls "
-            f"back to whichever group is iterated last, so some faces WILL be "
-            f"mistagged. Provide the original surface mesh (e.g. via --surface-mesh "
-            f"or a .pkl that carries VolumeMeshData.surface_mesh) to use the correct "
-            f"geometric path instead. Examples: {sample_str}"
-            + (f" (+{len(ambiguous) - 10} more)" if len(ambiguous) > 10 else "")
-        )
+        raise ValueError(
+            f"{len(ambiguous)} 个边界单元被多个边界组同时声称拥有（角/棱单元的边界面分属不同的组），按单元匹配"
+            f"无法判定每个面属于哪个组。请提供原始面网格（--surface-mesh，或用 grid generate-volume / "
+            f"import-volume 生成的带面网格的 .pkl）走逐面几何匹配。例：{sample_str}"
+            + (f"（另有 {len(ambiguous) - 10} 个）" if len(ambiguous) > 10 else ""))
 
     for code, (name, cell_ids) in enumerate(boundary_groups.items()):
         name_to_code[name] = code
@@ -176,12 +150,9 @@ def tag_boundary_groups_for_mesh(mesh, face_conn: Optional[FRFaceConnectivity] =
     """所有调用点的统一入口：优先用逐面几何匹配，缺少原始面网格数据时
     回退到单元级别匹配。
 
-    真实网格数据（cube_demo）已验证：`mesh.boundary_surface_mesh`（
-    HighOrderMesh.load_from_volume_mesh 从 VolumeMeshData.surface_mesh
-    透传，input_file 是 .nas 体网格 + --surface-mesh 反推边界的路径才有）
-    可用时走 `tag_boundary_groups_by_geometry`；不可用时（例如从 .pkl
-    加载——边界分组已经在 pkl 里但原始面网格数据没有一起序列化）回退到
-    `tag_boundary_groups`。当时的四处调用点（BC 幽灵态构建、WMLES 壁面剪应力、
+    `mesh.boundary_surface_mesh`（HighOrderMesh.load_from_volume_mesh 从 VolumeMeshData.surface_mesh 透传；体网格
+    生成、导入与 .nas 体网格求解路径都带它，随 .pkl 一起保存）可用时走 `tag_boundary_groups_by_geometry`；
+    不可用时（按单元定义组的合成网格、旧版 .pkl）走 `tag_boundary_groups`，有歧义的单元报错。当时的四处调用点（BC 幽灵态构建、WMLES 壁面剪应力、
     两处气动系数积分）此前各自重复同一段
     `tag_boundary_groups(fc, mesh.boundary_groups or {})`，都受同一个
     单元级别聚合缺陷影响（气动系数积分场景下，被错误纳入/排除的 WALL

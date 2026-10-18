@@ -10,3 +10,5 @@ def tag_wall_cells(mesh, wall_cells, wall_type: str = "WALL", rest_type: str = "
     wall = np.asarray(wall_cells, dtype=np.int64)
     mesh.boundary_groups = {"farfield": np.setdiff1d(owners, wall).astype(np.int64), "wall_group": wall}
     mesh.boundary_bc_types = {"farfield": rest_type, "wall_group": wall_type}
+    # 组按单元重新定义：不再走构造时挂上的按平面分组的面网格（否则逐面几何匹配仍按旧组名分组）
+    mesh.boundary_surface_mesh = None

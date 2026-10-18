@@ -16,7 +16,7 @@ import numpy as np
 from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
 from autoflowcfd.grid.schema.grid_boundaries import BoundaryMap
 
-from ._channel_mesh import _MockCells, _MockNodes, build_face_exact_ghost_provider
+from ._channel_mesh import _MockCells, _MockNodes, attach_plane_surface_mesh, build_face_exact_ghost_provider
 
 
 def build_periodic_channel_mesh_x(order, nx, ny, nz, Lx, H, Lz, side_bc_type="SYMMETRY"):
@@ -96,6 +96,9 @@ def build_periodic_channel_mesh_x(order, nx, ny, nz, Lx, H, Lz, side_bc_type="SY
 
     mesh = HighOrderMesh(order=order)
     mesh.load_from_volume_mesh(mock_volume, build_faces=True)
+    # 周期面配对后是内部面，边界上只剩四个侧面（attach_plane_surface_mesh 只给边界面分组）
+    attach_plane_surface_mesh(mesh, [("wall_bottom", 1, 0.0), ("wall_top", 1, H), ("z_min", 2, 0.0), ("z_max", 2, Lz)],
+                              tol)
     return mesh
 
 

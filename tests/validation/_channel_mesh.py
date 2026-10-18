@@ -215,6 +215,30 @@ class _MockBoundaries:
         self.bc_types = bc_types
 
 
+def attach_plane_surface_mesh(mesh, planes, tol):
+    """按边界面中心所在的平面给边界面分组，作为"原始面网格"挂到 `mesh.boundary_surface_mesh`。
+
+    `planes` 为 `[(组名, 坐标轴, 坐标值), ...]`。按单元定义的组在角/棱单元上无法判定每个面属于哪个组（一个单元
+    同时贴着两个平面），`tag_boundary_groups` 对这种单元报错（I-125）；与生产网格一样带上面网格，边界面按自身
+    位置逐面归组（`tag_boundary_groups_for_mesh` 的几何路径）。此前这些测试网格的角单元边界面被打成同一个组。
+    """
+    from autoflowcfd.grid.structures import BoundaryMap
+
+    fc = mesh.face_connectivity
+    bidx = fc.get_boundary_face_indices()
+    centers = fc.center[bidx]
+    groups = {}
+    for k, c in enumerate(centers):
+        hits = [name for name, axis, value in planes if abs(c[axis] - value) < tol]
+        if len(hits) != 1:
+            raise ValueError(f"边界面中心 {c} 落在 {hits} 上（应恰好一个平面）")
+        groups.setdefault(hits[0], []).append(k)
+    groups = {name: np.asarray(idx, dtype=np.int32) for name, idx in groups.items()}
+    bc_types = {name: (mesh.boundary_bc_types or {}).get(name, "WALL") for name in groups}
+    mesh.boundary_surface_mesh = {"nodes": np.asarray(mesh._node_coords), "faces": np.asarray(fc.face_node_ids[bidx]),
+                                  "boundaries": BoundaryMap(groups=groups, bc_types=bc_types)}
+
+
 def build_channel_mesh(order, nx, ny, nz, Lx, H, Lz, rotate_odd_tets=False):
     """结构化通道四面体网格（每个六面体拆 6 个四面体）。
 
@@ -292,6 +316,8 @@ def build_channel_mesh(order, nx, ny, nz, Lx, H, Lz, rotate_odd_tets=False):
 
     mesh = HighOrderMesh(order=order)
     mesh.load_from_volume_mesh(mock_volume, build_faces=True)
+    attach_plane_surface_mesh(mesh, [("wall_bottom", 1, 0.0), ("wall_top", 1, H), ("z_min", 2, 0.0), ("z_max", 2, Lz),
+                                     ("x_min", 0, 0.0), ("x_max", 0, Lx)], tol)
     return mesh
 
 
@@ -454,4 +480,7 @@ def build_prism_mesh_from_lines(order, x_lines, y_lines, z_lines):
 
     mesh = HighOrderMesh(order=order)
     mesh.load_from_volume_mesh(mock_volume, build_faces=True)
+    attach_plane_surface_mesh(mesh, [("wall_bottom", 1, y_lines[0]), ("wall_top", 1, y_lines[-1]),
+                                     ("z_min", 2, z_lines[0]), ("z_max", 2, z_lines[-1]),
+                                     ("x_min", 0, x_lines[0]), ("x_max", 0, x_lines[-1])], tol)
     return mesh

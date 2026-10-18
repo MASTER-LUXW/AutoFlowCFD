@@ -31,6 +31,7 @@ available and falls back to the old cell-based method otherwise.
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from autoflowcfd.grid.connectivity.face_connectivity import FRFaceConnectivity
 from autoflowcfd.grid.connectivity.face_connectivity_boundary_tags import (
@@ -75,46 +76,17 @@ def _corner_cell_surface_mesh():
 
 
 class TestCellBasedTaggingMisattributesCornerCellFaces:
-    def test_both_faces_get_the_same_wrong_group_when_owner_cell_is_shared(self):
-        """钉住实际的缺陷：boundary_groups 说单元 0 同时在 'WALL' 与 'FARFIELD'
-        里（角点单元）——按单元的匹配器只能选一个，并把它用到*两个*面上。
-        """
+    def test_ambiguous_corner_cell_is_an_error(self):
+        """同一个单元被两个组声称拥有（角点单元）：按单元匹配无法判定每个面属于哪个组，报错并点出具体单元与
+        冲突的组名（I-125；此前只给 warning、按最后遍历到的组把两个面都打成同一个组）。"""
         fc = _corner_cell_face_conn()
         boundary_groups = {
             "WALL": np.array([0], dtype=np.int32),
             "FARFIELD": np.array([0], dtype=np.int32),
         }
-        group_code, name_to_code = tag_boundary_groups(fc, boundary_groups)
-
-        # 两个面得到**同一个**编码（最后遍历到的那个组），尽管它们在物理上
-        # 属于不同的组。
-        assert group_code[0] == group_code[1]
-        assert group_code[0] == name_to_code["FARFIELD"]  # last-iterated wins
-
-    def test_warns_loudly_about_the_specific_ambiguous_cell(self):
-        """2026-08-23 修复：只凭单元粒度的输入不可能做到真正的逐面修复
-        （组->单元编号的映射已经丢掉了哪个面属于哪个组）——所以兜底路径至少
-        必须把静默的错标变成响亮、可诊断的警告，点出具体的单元与冲突的组名，
-        而不是此前的完全沉默。
-        """
-        from loguru import logger
-
-        fc = _corner_cell_face_conn()
-        boundary_groups = {
-            "WALL": np.array([0], dtype=np.int32),
-            "FARFIELD": np.array([0], dtype=np.int32),
-        }
-        messages = []
-        handler_id = logger.add(lambda msg: messages.append(msg.record["message"]), level="WARNING")
-        try:
+        with pytest.raises(ValueError, match="cell 0") as info:
             tag_boundary_groups(fc, boundary_groups)
-        finally:
-            logger.remove(handler_id)
-
-        ambiguity_warnings = [m for m in messages if "claimed by more than one" in m]
-        assert len(ambiguity_warnings) == 1, f"expected exactly one ambiguity warning, got: {messages}"
-        assert "cell 0" in ambiguity_warnings[0]
-        assert "WALL" in ambiguity_warnings[0] and "FARFIELD" in ambiguity_warnings[0]
+        assert "WALL" in str(info.value) and "FARFIELD" in str(info.value)
 
     def test_no_ambiguity_warning_when_groups_do_not_overlap(self):
         """互不重叠的组（常见情形，例如 cube_demo 的四个边界组）不能触发这条
@@ -170,5 +142,8 @@ class TestUnifiedEntryPointPicksStrategyByMeshAttribute:
                               "FARFIELD": np.array([0], dtype=np.int32)},
             boundary_surface_mesh=None,
         )
-        group_code, name_to_code = tag_boundary_groups_for_mesh(mesh)
-        assert group_code[0] == group_code[1]  # 兜底：旧的按单元的行为，仍有歧义
+        with pytest.raises(ValueError, match="原始面网格"):          # 按单元匹配：有歧义的单元报错
+            tag_boundary_groups_for_mesh(mesh)
+        mesh.boundary_groups = {"WALL": np.array([0], dtype=np.int32), "FARFIELD": np.array([1], dtype=np.int32)}
+        group_code, name_to_code = tag_boundary_groups_for_mesh(mesh)     # 无歧义时按单元匹配照常成立
+        assert group_code[0] == group_code[1] == name_to_code["WALL"]

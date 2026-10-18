@@ -55,7 +55,8 @@ def test_boundary_face_without_a_group_is_an_error():
     """没有组的边界面此前静默当成远场（网格内部缺口的面因此在流场内部施加来流条件）。"""
     mesh = build_channel_mesh_prism(1, 4, 4, 2, 0.4, 0.1, 0.08)     # 有只接触 z_max 的单元
     mesh.boundary_bc_types = dict(FULL)
-    mesh.boundary_groups = {k: v for k, v in mesh.boundary_groups.items() if k != "z_max"}
+    surf = mesh.boundary_surface_mesh["boundaries"]                  # z_max 的面在面网格里没有组
+    del surf.groups["z_max"], surf.bc_types["z_max"]
     stub = types.SimpleNamespace(
         mesh=mesh, ops=generate_fr_operators(1), turb_model_name="NONE", wmles_model=None,
         freestream={"rho_inf": 1.225, "vel_inf": 10.0, "p_inf": 101325.0},
