@@ -168,12 +168,23 @@ def report_distributed_aerodynamic_coefficients(solver, reference_area: Optional
 
     view = gather_global_view(solver)
     if view is not None:
-        _report_aerodynamic_coefficients(view, reference_area)
+        _report_aerodynamic_coefficients(view, reference_area, turb_model_name=solver.turb_model_name,
+                                         wall_treatment=solver.wall_treatment)
 
 
-def _report_aerodynamic_coefficients(solver, reference_area: Optional[float]) -> None:
-    """求解结束时打印力系数（全部 WALL 组、风轴系）。力矩系数需要力矩参考点与参考长度，用
-    `autoflowcfd post coefficients --moment-center ... --reference-length ...` 给出。"""
+def _report_aerodynamic_coefficients(solver, reference_area: Optional[float], turb_model_name: Optional[str] = None,
+                                     wall_treatment: Optional[str] = None) -> None:
+    """求解结束时打印壁面 y+ 统计与力系数（全部 WALL 组、风轴系）。力矩系数需要力矩参考点与参考长度，用
+    `autoflowcfd post coefficients --moment-center ... --reference-length ...` 给出。
+
+    `turb_model_name`/`wall_treatment` 缺省取 `solver` 的同名属性（单机求解器与 GPU 主机视图）；分布式汇总视图
+    没有这两项，由调用方给出（y+ 适用性判据按近壁处理方式，`postprocess/wall_yplus.py`）。
+    """
+    from autoflowcfd.postprocess.wall_yplus import report_wall_y_plus
+
+    if float(solver.mu_molecular) > 0.0:
+        report_wall_y_plus(solver, turb_model_name if turb_model_name is not None else solver.turb_model_name,
+                           wall_treatment if wall_treatment is not None else solver.wall_treatment)
     if reference_area is None or reference_area <= 0:
         print("\n(未提供 --reference-area，跳过气动系数；如需 Cd/Cl 请指定参考面积)")
         return

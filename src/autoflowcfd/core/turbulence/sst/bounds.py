@@ -116,6 +116,20 @@ def omega_wall_value(xp, nu, d1, k_owner, beta1: float, wall_treatment: str):
     return xp.sqrt(omega_vis ** 2 + omega_log ** 2)
 
 
+def log_omega_wall_k_slope(xp, nu, d1, k_owner, beta1: float, omega_max: float):
+    """auto 档钳制后的壁面目标值对贴壁单元 k 均值的对数导数 `d ln(min(omega_wall, omega_max)) / d k_owner`
+    （湍流解析块 Jacobian 的 k -> ln omega 壁面耦合用，CPU 与 GPU 共用；resolved 档目标值与 k 无关，不调用）。
+
+    omega^2 = omega_vis^2 + k / (C_mu^0.5 kappa^2 d1^2)，故 d ln omega / dk = 1 / (2 omega^2 C_mu^0.5 kappa^2 d1^2)；
+    k <= 0（`omega_wall_value` 里的 max(k, 0)）或目标值钳到 omega_max 处导数为 0（与残差取同一侧）。
+    """
+    from autoflowcfd.core.turbulence.wall_model.law import KAPPA
+
+    omega = omega_wall_value(xp, nu, d1, k_owner, beta1, "auto")
+    slope = 1.0 / (2.0 * omega ** 2 * BETA_STAR ** 0.5 * KAPPA ** 2 * d1 ** 2)
+    return xp.where((k_owner > 0.0) & (omega < omega_max), slope, 0.0)
+
+
 def configure_sst_model(model, vel_inf: float, wall_treatment: str) -> None:
     """SST 模型构造后的全局设定（CPU、单 GPU、多 GPU 共用）：k_max = 0.5 vel_inf^2（湍动能不超过平均流动能）、
     omega_max 取下限（壁距设定后按最近壁面解点重定）、近壁处理方式。"""

@@ -1,4 +1,4 @@
-"""WMLES 壁面模型的匹配点（Kawai & Larsson 2012：壁面模型输入取在域内距壁 h_wm 处的 LES 解，不取壁面本身）。
+"""平衡壁面模型的匹配点（Kawai & Larsson 2012：壁面模型输入取在域内距壁 h_wm 处的 LES 解，不取壁面本身）。
 
 每个壁面通量点 x_fp（单位外法向 n，流体 -> 壁）沿内法向取匹配点
 
@@ -11,7 +11,7 @@ c 为 owner 单元的积分形心，即匹配点与形心同高（贴壁单元�
 P0 每单元一个解点（单元值），插值行即该解点。
 
 通量点集合与壁面力积分同一个（`core/fr_residual/wall_points.py::wall_flux_points`）：含棱柱四边形侧面一半在
-边界时、由配对内部面记录施加的边界半区通量点——WMLES 下这些点的幽灵态同样是滑移镜像，漏掉它们就没有壁面剪应力。
+边界时、由配对内部面记录施加的边界半区通量点——壁面模型下这些点的幽灵态同样是滑移镜像，漏掉它们就没有壁面剪应力。
 
 几何不随状态变化：插值行、h_wm、法向、面积权重、提升列与 1/det 在构造时算好，每次残差求值只做小矩阵乘。
 """
@@ -26,7 +26,7 @@ _NEWTON_MAX_ITER = 30
 _BISECT_ITER = 40
 
 #: 放到设备上的逐点数组（`WallMatching.to`）
-DEVICE_FIELDS = ("owner", "E_m", "h_wm", "normal", "area", "lift", "inv_det")
+DEVICE_FIELDS = ("owner", "E_m", "h_wm", "normal", "area", "lift", "inv_det", "wall_velocity")
 
 
 @dataclass
@@ -42,6 +42,7 @@ class WallMatching:
     area: np.ndarray        # (m,) 物理面积权重
     lift: np.ndarray        # (m, n_sps) owner 面提升算子的该通量点列
     inv_det: np.ndarray     # (m, n_sps) owner 单元解点上的 1/det(J)
+    wall_velocity: np.ndarray  # (m, 3) 壁面速度（所属边界组的 `wall_velocity`，静止壁为 0）
 
     def to(self, xp) -> "WallMatching":
         """数组放到 xp 所在的设备上（numpy 原样返回）。"""
@@ -98,11 +99,35 @@ def _locate(order: int, prism: bool, X: np.ndarray, x: np.ndarray) -> np.ndarray
         xi = xi - np.linalg.solve(J, resid[..., None])[..., 0]
     phi, _ = _nodal_basis(order, prism, xi)
     worst = float(np.max(np.linalg.norm(np.einsum('ns,nsd->nd', phi, X) - x, axis=1) / scale))
-    raise RuntimeError(f"WMLES 匹配点参考坐标反解 {_NEWTON_MAX_ITER} 次未收敛（最大相对残差 {worst:.3e}）")
+    raise RuntimeError(f"壁面模型匹配点参考坐标反解 {_NEWTON_MAX_ITER} 次未收敛（最大相对残差 {worst:.3e}）")
+
+
+def cell_integration_weights(mesh):
+    """`(W, det, cell_is_prism, order)`：解点积分权重 `(n_cells, n_sps)`（`fr/native_padding.py::sp_integration_weights`，
+    填充槽位为 0）、解点 det(J)、单元类型、阶数。求积分形心与提升用（壁面模型几何、壁面 y+ 统计共用）。"""
+    from autoflowcfd.fr.native_padding import order_from_n_sps, sp_integration_weights
+
+    n_cells = int(mesh.n_cells)
+    n_sps = int(np.asarray(mesh.sps_coords).shape[1])
+    order = order_from_n_sps(n_sps)
+    cell_is_prism = np.arange(n_cells) < int(mesh.n_prism_cells)
+    det = np.asarray(mesh.jacobians["det_jacs"]).reshape(n_cells, n_sps)
+    return sp_integration_weights(det, cell_is_prism, order), det, cell_is_prism, order
+
+
+def owner_centroid_heights(X_sp, W, owner, x_fp, normal):
+    """壁面通量点到其 owner 单元积分形心的法向距离 `h = (x_fp - c) . n`（n 为流体 -> 壁的单位外法向）。
+
+    平衡壁面模型的匹配高度与壁面 y+ 统计（`postprocess/wall_yplus.py`）用同一个定义。
+    """
+    cells, inverse = np.unique(owner, return_inverse=True)
+    w = W[cells]
+    centroid = np.einsum('cs,csd->cd', w, X_sp[cells]) / w.sum(axis=1)[:, None]
+    return np.einsum('kd,kd->k', x_fp - centroid[inverse], normal)
 
 
 def build_wall_matching(mesh, flat, points, cell_is_prism: np.ndarray, W: np.ndarray, det: np.ndarray,
-                        order: int) -> WallMatching:
+                        order: int, wall_velocity=None) -> WallMatching:
     """壁面通量点的匹配点几何（状态无关）。
 
     Args:
@@ -113,6 +138,7 @@ def build_wall_matching(mesh, flat, points, cell_is_prism: np.ndarray, W: np.nda
         W: 解点积分权重 (n_cells, n_sps)（`fr/native_padding.py::sp_integration_weights`），求积分形心用
         det: 解点 det(J) (n_cells, n_sps)
         order: 多项式阶数
+        wall_velocity: (m, 3) 逐点壁面速度；None 为静止壁
     """
     from autoflowcfd.fr.native_padding import real_sps_per_cell
 
@@ -129,8 +155,7 @@ def build_wall_matching(mesh, flat, points, cell_is_prism: np.ndarray, W: np.nda
     area = np.asarray(flat.true_area_weight)[face, fp]
     lift = np.ascontiguousarray(np.asarray(flat.lift_native)[face_op, :, fp])  # (m, n_sps)
     inv_det = np.where(W[owner] > 0.0, 1.0 / det[owner], 0.0)                 # 填充槽位（权重 0）不写残差
-    centroid = np.einsum('cs,csd->cd', W, X_sp) / W.sum(axis=1)[:, None]
-    h_wm = np.einsum('kd,kd->k', x_fp - centroid[owner], normal)
+    h_wm = owner_centroid_heights(X_sp, W, owner, x_fp, normal)
     if np.any(h_wm <= 0.0):
         raise ValueError(f"{int(np.count_nonzero(h_wm <= 0.0))} 个壁面通量点的 owner 单元形心不在流体一侧（法向朝向错误）")
 
@@ -162,5 +187,6 @@ def build_wall_matching(mesh, flat, points, cell_is_prism: np.ndarray, W: np.nda
                 xi[out] = _locate(order, prism, Xo, po - lo[:, None] * do)
             E_m[sel, :n_real] = _nodal_basis(order, prism, xi)[0]
             h_wm[sel] = h_wm[sel] * lam
+    wall_velocity = np.zeros((m, 3)) if wall_velocity is None else np.asarray(wall_velocity, dtype=np.float64)
     return WallMatching(face=face, fp=fp, code=code, owner=owner, E_m=E_m, h_wm=h_wm, normal=normal, area=area,
-                        lift=lift, inv_det=inv_det)
+                        lift=lift, inv_det=inv_det, wall_velocity=wall_velocity)

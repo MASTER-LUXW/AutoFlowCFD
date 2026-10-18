@@ -136,20 +136,24 @@ def _omega_wall_formula(solver, owner_cells, nu_owner, d1, beta1):
     （`turbulence/sst/bounds.py::omega_wall_value`，CPU 与 GPU 共用）。auto 用到贴壁单元 k 的**真实自由度**
     均值（native 四面体的零填充槽位冻结在初值，混进来会带偏；见 fr/native_padding.py）。"""
     from autoflowcfd.core.turbulence.sst.bounds import omega_wall_value
-    from autoflowcfd.fr.native_padding import order_from_n_sps, reduce_rows_over_real_sps
 
     turb = solver.turb_model
-    k_owner = None
-    if turb.wall_treatment == "auto":
-        k_rows = np.asarray(turb.k_field)[owner_cells]
-        k_owner = reduce_rows_over_real_sps(
-            k_rows, owner_cells < solver.mesh.n_prism_cells, order_from_n_sps(k_rows.shape[1]), 'mean')
+    k_owner = _owner_k_mean(solver, owner_cells) if turb.wall_treatment == "auto" else None
     return omega_wall_value(np, nu_owner, d1, k_owner, beta1, turb.wall_treatment)
 
 
+def _owner_k_mean(solver, owner_cells):
+    """贴壁单元 k 的真实自由度均值（auto 档壁面目标值的输入）。"""
+    from autoflowcfd.fr.native_padding import order_from_n_sps, reduce_rows_over_real_sps
+
+    k_rows = np.asarray(solver.turb_model.k_field)[owner_cells]
+    return reduce_rows_over_real_sps(
+        k_rows, owner_cells < solver.mesh.n_prism_cells, order_from_n_sps(k_rows.shape[1]), 'mean')
+
+
 def _compute_omega_wall_target(
-    solver, wall_mask: np.ndarray, mu: float, rho: np.ndarray, flat_face_override=None,
-) -> Tuple[np.ndarray, np.ndarray]:
+    solver, wall_mask: np.ndarray, mu: float, rho: np.ndarray, flat_face_override=None, with_k_slope: bool = False,
+) -> Tuple[np.ndarray, ...]:
     """按 Wilcox 解析式计算 WALL 面各自的 omega 目标值（真实修复，
     V2.0 专家组盲审发现，2026-08-28）：
 
@@ -200,6 +204,8 @@ def _compute_omega_wall_target(
           逐 FP 精细区分），非 WALL 面为 0（不会被使用，has_value_face
           对应位置为 False）
         - has_value_face: (n_faces,) bool，与 wall_mask 相同
+        - （`with_k_slope` 时）k_slope_face: (n_faces,) 目标值的对数对 owner 单元 k 真实自由度均值的导数
+          （`sst/bounds.py::log_omega_wall_k_slope`；resolved 档恒为 0），湍流解析块 Jacobian 用
 
     真实 bug 修复（2026-09-05，真实网格验证决定性发现）：`d1 = np.maximum(
     d1, 1e-8)` 只防止除零，不防止结果本身失控——cube_demo 791,492 单元
@@ -276,5 +282,12 @@ def _compute_omega_wall_target(
             solver, owner_cells, nu_owner, d1, beta1)
         omega_wall = np.minimum(omega_wall, omega_max)
         omega_wall_value_face[wall_face_idx, :] = omega_wall[:, None]
+    if not with_k_slope:
+        return omega_wall_value_face, wall_mask
+    k_slope_face = np.zeros(n_faces)
+    if len(wall_face_idx) > 0 and solver.turb_model.wall_treatment == "auto":
+        from autoflowcfd.core.turbulence.sst.bounds import log_omega_wall_k_slope
 
-    return omega_wall_value_face, wall_mask
+        k_slope_face[wall_face_idx] = log_omega_wall_k_slope(
+            np, nu_owner, d1, _owner_k_mean(solver, owner_cells), beta1, omega_max)
+    return omega_wall_value_face, wall_mask, k_slope_face

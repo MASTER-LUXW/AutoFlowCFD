@@ -36,12 +36,10 @@ def _host(a):
     return get() if get is not None else np.asarray(a)
 
 
-def unsupported_reason(*, order: int, wall_model: bool = False) -> Optional[str]:
+def unsupported_reason(*, order: int) -> Optional[str]:
     """解析装配不覆盖当前离散时返回原因（块 Jacobi 回到着色差分装配，精确、只是贵）。"""
     if int(order) < 1:
         return "P0 走有限体积特化核（差分装配只要 色数 x 5 次残差求值）"
-    if wall_model:
-        return "壁面模型应力修正"
     return None
 
 
@@ -53,14 +51,15 @@ class MeanFlowBlockAssembler:
 
     def __init__(self, *, mesh, ops, ghost_provider, mu, mach_ref, low_mach, mu_t, n_sps: int,
                  nu_av=None, flat=None, compact_state: Optional[Callable] = None, row_compact=None,
-                 want_coupling: bool = False):
+                 want_coupling: bool = False, wall_model=None):
         """`mu_t`/`nu_av`：本步冻结的动力涡粘与问题单元人工扩散系数（与残差同一份；分布式下
-        为 compact 排列），`None` 表示没有该项。"""
+        为 compact 排列），`None` 表示没有该项。`wall_model`：残差用的同一个平衡壁面模型对象（None 表示没有）。"""
         self.ctx = MeanFlowLinearization(
             mesh=mesh, ops=ops, ghost_provider=ghost_provider, mu=float(mu), mach_ref=float(mach_ref),
             precond_mode=resolve_ausm_precond_mode(), low_mach=bool(low_mach),
             mu_t=None if mu_t is None else np.ascontiguousarray(_host(mu_t), dtype=np.float64),
-            nu_av=None if nu_av is None else np.ascontiguousarray(_host(nu_av), dtype=np.float64), flat=flat)
+            nu_av=None if nu_av is None else np.ascontiguousarray(_host(nu_av), dtype=np.float64), flat=flat,
+            wall_model=wall_model)
         self.n_sps = int(n_sps)
         self.compact_state = compact_state
         self.row_compact = None if row_compact is None else np.asarray(row_compact, dtype=np.int64)

@@ -27,10 +27,12 @@ RHO, U_INF, P, GAMMA = 1.225, 30.0, 101325.0, 1.4
 LX, H, LZ = 0.4, 0.1, 0.08
 
 
-def _bc():
+def _bc(wall_treatment="resolved"):
     bc = {n: {"type": "SYMMETRY"} for n in ("z_min", "z_max")}
+    # auto：壁面模型下幽灵态取滑移镜像，物理上仍是无滑移固壁
     for n in ("wall_bottom", "wall_top"):
-        bc[n] = {"type": "WALL", "is_no_slip": True, "wall_velocity": [0.0, 0.0, 0.0]}
+        bc[n] = {"type": "WALL", "is_no_slip": wall_treatment == "resolved", "physical_no_slip": True,
+                 "wall_velocity": [0.0, 0.0, 0.0]}
     for n in ("x_min", "x_max"):
         bc[n] = {"type": "FARFIELD", "Q_free": [RHO, U_INF, 0.0, 0.0, P]}
     return bc
@@ -52,14 +54,14 @@ def _mesh(model, order):
     return build(order, 3, 4, 2, LX, H, LZ)
 
 
-def _single(scheme, order, model="SST", mesh=None):
+def _single(scheme, order, model="SST", mesh=None, wall_treatment="resolved"):
     """单机求解器（均匀来流初场，壁距经生产入口由精确来源施加）。"""
     from autoflowcfd.core.fr_solver.solver import FRSolver
     from autoflowcfd.core.fr_solver.turbulence import apply_wall_distance_source
 
     mesh = mesh or _mesh(model, order)
     single = FRSolver(mesh, order=order, turb_model_name=model, time_scheme=scheme,
-                      bc_overrides=_bc(), **_KW)
+                      bc_overrides=_bc(wall_treatment), wall_treatment=wall_treatment, **_KW)
     single.order_continuation_enabled = False
     single.state.U[...] = _uniform_U(*single.state.U.shape)
     single.state._update_primitives()
@@ -67,21 +69,22 @@ def _single(scheme, order, model="SST", mesh=None):
     return single
 
 
-def _pair(scheme, order=1, model="SST"):
+def _pair(scheme, order=1, model="SST", wall_treatment="resolved"):
     from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
     from autoflowcfd.core.mpi.distributed_solver import DistributedFRSolver
     from autoflowcfd.fr.operators import generate_fr_operators
 
     mesh = _mesh(model, order)
     ops = generate_fr_operators(order)
-    single = _single(scheme, order, model, mesh)
+    single = _single(scheme, order, model, mesh, wall_treatment)
     n_cells = single.state.U.shape[0]
     U0 = single.state.U
 
     dist = DistributedFRSolver(
         mesh=mesh, ops=ops, face_connectivity=mesh.face_connectivity, n_ranks=1,
         order=order, turb_model_name=model, time_scheme=scheme,
-        wall_distance_source=channel_wall_source(LX, H, LZ), bc_overrides=_bc(), **_KW)
+        wall_distance_source=channel_wall_source(LX, H, LZ), bc_overrides=_bc(wall_treatment),
+        wall_treatment=wall_treatment, **_KW)
     # 分布式状态只存平均流 5 变量（湍流场由湍流模型持有，见 DistributedFRState）
     dist.state.U[:n_cells] = U0[..., :5]
     dist.state.Q[:n_cells] = conserved_to_primitive(U0[..., :5])
@@ -120,22 +123,24 @@ def test_explicit_turbulence_with_boundary_conditions_matches_single_machine(mod
         _assert_same(single, dist, f"显式 {model} 第 {k + 1} 步")
 
 
-@pytest.mark.parametrize("model,order", [("SST", 0), ("SST", 1), ("SA", 0), ("SA", 1)])
-def test_newton_krylov_turbulence_matches_single_machine(model, order):
+@pytest.mark.parametrize("model,order,wall_treatment", [
+    ("SST", 0, "resolved"), ("SST", 1, "resolved"), ("SA", 0, "resolved"), ("SA", 1, "resolved"),
+    ("SST", 1, "auto"), ("SA", 1, "auto")])
+def test_newton_krylov_turbulence_matches_single_machine(model, order, wall_treatment):
     """隐式稳态（平均流与 k-omega 紧耦合 NK）：分布式与单机同一个算法，只换了
     归约对象、块 Jacobi 着色来源与湍流求值的 compact 视图。n_ranks=1 下三者
     都应退化为单机行为，差异只能来自浮点重结合。P0 另外覆盖差分装配截取耦合块
     的块 ILU（分布式耦合图 `distributed_coupling_graph` 与单机同一结构）。"""
     from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 
-    single, dist = _pair(TimeIntegrationScheme.NEWTON_KRYLOV, order, model)
+    single, dist = _pair(TimeIntegrationScheme.NEWTON_KRYLOV, order, model, wall_treatment)
     # 容差按单机**自身**对舍入量级扰动的敏感度定：初场乘 (1 + 1e-15 xi) 的孪生单机。
     # P0 的湍流有了产生项之后（`fr_operators/corrected_gradient.py`），差分装配的块
     # 预处理把残差的舍入差异按 1/h 放大、GMRES 只走 1 次时直接进入 Newton 更新：孪生
     # 单机第 1/2/3 步 k 相对差 8.7e-9 / 2.6e-8 / 1.2e-7（此前 P0 产生项恒为零、k 恒为
     # 来流值，同一量只有 1e-13）。分布式与单机的差异只来自重结合时，必然落在这个
     # 敏感度的同一量级；判据取其 10 倍、下限 1e-9。
-    twin = _single(TimeIntegrationScheme.NEWTON_KRYLOV, order, model)
+    twin = _single(TimeIntegrationScheme.NEWTON_KRYLOV, order, model, wall_treatment=wall_treatment)
     rng = np.random.default_rng(0)
     twin.state.U[...] *= 1.0 + 1e-15 * rng.standard_normal(twin.state.U.shape)
     twin.state._update_primitives()

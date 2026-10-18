@@ -283,12 +283,12 @@ def step(solver, dt: float) -> float:
                     order=_current_order(solver), filter_active=filter_func is not None,
                     positivity=positivity_func, physical_time=physical_time,
                     block_assembler=None if unsupported_reason(
-                        order=_current_order(solver),
-                        wall_model=solver.wall_model is not None) else MeanFlowBlockAssembler(
+                        order=_current_order(solver)) else MeanFlowBlockAssembler(
                         mesh=solver.mesh, ops=solver.ops, ghost_provider=solver.boundary_ghost_provider,
                         mu=solver.mu_molecular, mach_ref=solver.freestream["mach_ref"],
                         low_mach=solver.low_mach_precond_enabled,
-                        mu_t=solver._get_turbulent_viscosity_field(mu_t_step), nu_av=nu_av_step, n_sps=n_sps))
+                        mu_t=solver._get_turbulent_viscosity_field(mu_t_step), nu_av=nu_av_step, n_sps=n_sps,
+                        wall_model=solver.wall_model))
                 solver.state.U = u_next.reshape(n_cells, n_sps, n_vars)
                 solver.state._update_primitives()
                 return info

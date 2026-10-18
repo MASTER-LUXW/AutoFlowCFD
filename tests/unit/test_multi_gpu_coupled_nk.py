@@ -74,7 +74,7 @@ def _multi_gpu_standin(single, dist):
         turb_model_name=single.turb_model_name, mu_molecular=single.mu_molecular,
         freestream=dist.local_solver.freestream,
         boundary_ghost_provider=provider, low_mach_precond_enabled=single.low_mach_precond_enabled,
-        wall_model=None, U_gpu=np.array(single.state.U[..., :5], copy=True),
+        wall_model=single.wall_model, U_gpu=np.array(single.state.U[..., :5], copy=True),
         _turb_ramp_step=single._turb_ramp_step, _turb_production_ramp_steps=single._turb_production_ramp_steps,
         _turb_production_ramp_complete=single._turb_production_ramp_complete,
         _block_jacobi_colors_local=None,
@@ -104,11 +104,13 @@ def _multi_gpu_standin(single, dist):
     return g
 
 
-@pytest.fixture(params=["SST", "SA"])
+@pytest.fixture(params=["SST", "SST-auto", "SA"])
 def pair(request):
+    """SST-auto：RANS 自动壁面处理（壁面模型剪应力进平均流解析块、omega 壁面目标值随 k 变化进湍流解析块）。"""
     from autoflowcfd.core.time_integration.base import TimeIntegrationScheme
 
-    single, dist = _pair(TimeIntegrationScheme.NEWTON_KRYLOV, 1, request.param)
+    model, _, treatment = request.param.partition("-")
+    single, dist = _pair(TimeIntegrationScheme.NEWTON_KRYLOV, 1, model, treatment or "resolved")
     # 非平凡湍流场（均匀来流下湍流场也均匀，耦合项与湍流输运都退化）；经模型写回（SA 壁面解点保持 0）
     rng = np.random.default_rng(5)
     m = single.turb_model

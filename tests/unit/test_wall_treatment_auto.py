@@ -13,6 +13,7 @@ from tests.unit.test_gpu_solver_order_continuation import _patch_gpu_modules  # 
 from tests.validation._channel_mesh import build_channel_mesh_prism, channel_wall_source
 
 LX, H, LZ = 0.4, 0.1, 0.08
+RHO_Y = 1.2
 _BC = {"x_min": "VELOCITY_INLET", "x_max": "PRESSURE_OUTLET", "wall_bottom": "WALL", "wall_top": "WALL",
        "z_min": "SYMMETRY", "z_max": "SYMMETRY"}
 
@@ -177,3 +178,105 @@ def test_checkpoint_records_the_wall_treatment():
 
     assert physics_metadata(_cpu("SST", "auto"))["wall_treatment"] == "auto"
 
+
+
+def _set_shear(s, u_of_y, rho=RHO_Y):
+    """守恒变量取给定流向速度剖面 u(y)、均匀密度与压力。"""
+    from autoflowcfd.core.fr_residual.inviscid import primitive_to_conserved
+
+    y = s.mesh.sps_coords[..., 1]
+    Q = np.zeros(y.shape + (5,))
+    Q[..., 0] = rho
+    Q[..., 1] = u_of_y(y)
+    Q[..., 4] = 101325.0
+    s.state.U = np.stack([primitive_to_conserved(q) for q in Q.reshape(-1, 5)]).reshape(Q.shape)
+    s.state._update_primitives()
+
+
+def test_wall_y_plus_resolved_matches_the_exact_couette_value():
+    """resolved：线性剪切 u = S y（P1 精确表示、壁面处为 0）下壁面剪应力恰为 mu S，贴壁单元形心高度为第一层
+    单元高度的一半（棱柱通道 ny=3），y+ 与解析值一致；上壁同理（u 在 y=H 处不为 0，按 |du/dy| 计）。"""
+    from autoflowcfd.postprocess.wall_yplus import wall_y_plus
+
+    s = _cpu("SST", "resolved")
+    S = 200.0
+    _set_shear(s, lambda y: S * y)
+    yp = wall_y_plus(s)
+    bottom = np.abs(yp.position[:, 1]) < 1e-12
+    mu = s.mu_molecular
+    exact = np.sqrt(mu * S / RHO_Y) * (H / 6.0) / (mu / RHO_Y)
+    np.testing.assert_allclose(yp.y_plus[bottom], exact, rtol=1e-9)
+
+
+def test_wall_y_plus_auto_matches_the_wall_model():
+    """auto：均匀密度下壁面通量点处的 nu 与匹配点相同，y+ 与壁面模型在匹配点（形心高度）算出的一致。"""
+    from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+    from autoflowcfd.postprocess.wall_yplus import wall_y_plus
+
+    s = _cpu("SST", "auto")
+    _set_shear(s, lambda y: 30.0 * np.sin(np.pi * y / H))
+    yp = wall_y_plus(s)
+    m, _ = s.wall_model.traction(np, s.mesh, get_flat_face_geometry(s.mesh, s.ops), s.boundary_ghost_provider,
+                                 s.state.U, s.mu_molecular)
+    np.testing.assert_allclose(np.sort(yp.y_plus), np.sort(s.wall_model.y_plus), rtol=1e-9)
+    assert yp.y_plus.size == m.owner.size
+
+
+@pytest.mark.parametrize("treatment,expect_warning", [("resolved", True), ("auto", False)])
+def test_y_plus_report_checks_the_treatment_range(monkeypatch, treatment, expect_warning):
+    """贴壁单元 y+ 远大于 5、小于 300：resolved 报警（越出粘性底层），auto 不报警。"""
+    from autoflowcfd.postprocess import wall_yplus
+
+    s = _cpu("SST", treatment)
+    _set_shear(s, lambda y: 3.0 * np.sin(np.pi * y / H))
+    warnings = []
+    monkeypatch.setattr(wall_yplus.logger, "warning", lambda msg: warnings.append(msg))
+    yp = wall_yplus.report_wall_y_plus(s, "SST", treatment)
+    assert wall_yplus.VISCOUS_SUBLAYER_Y_PLUS < yp.quantile(0.95) < wall_yplus.LOG_LAYER_Y_PLUS
+    assert bool(warnings) is expect_warning
+
+
+def test_wall_model_rejects_a_no_slip_ghost_configuration():
+    """壁面模型下物理无滑移壁面的幽灵态若被覆盖成无滑移（is_no_slip=True），粘性公共通量已带壁面剪应力，再加壁面
+    模型牵引就是重复计入：直接报错（此前静默双计）。"""
+    s = _cpu("SA", "auto")
+    for cfg in _wall_configs(s):
+        cfg["is_no_slip"] = True
+    s.wall_model._cache_flat = None
+    with pytest.raises(ValueError, match="计入两次"):
+        s.compute_viscous_residual()
+
+
+def _moving_bottom_cpu(model, treatment, u_wall):
+    """通道下壁以 u_wall 移动（组配置的 wall_velocity，例如移动地面），上壁静止。"""
+    s = _cpu(model, treatment)
+    provider = s.boundary_ghost_provider
+    names = provider.code_to_name
+    for code, cfg in provider.code_to_config.items():
+        if names.get(code) == "wall_bottom":
+            cfg["wall_velocity"] = list(u_wall)
+    s.wall_model._cache_flat = None
+    return s
+
+
+def test_moving_wall_uses_the_relative_velocity_and_does_work():
+    """移动壁面：壁面律取相对壁面的切向速度（流体随壁面运动时下壁剪应力为 0），剪应力对流体做功
+    `tau . u_wall` 进能量方程；静止上壁能量分量为 0。"""
+    from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+    from autoflowcfd.core.turbulence.wall_model.stress import wall_flux
+
+    u_w = np.array([10.0, 0.0, 0.0])
+    s = _moving_bottom_cpu("SA", "auto", u_w)
+    flat = get_flat_face_geometry(s.mesh, s.ops)
+    _set_shear(s, lambda y: np.full_like(y, u_w[0]))                    # 均匀流 = 下壁速度
+    m, tau = s.wall_model.traction(np, s.mesh, flat, s.boundary_ghost_provider, s.state.U, s.mu_molecular)
+    bottom = np.abs(m.normal[:, 1] + 1.0) < 1e-12                       # 外法向 -y
+    # 插值后 (rho u)/rho 与 u_wall 差一个舍入单位：相对速度 ~1e-15 量级，剪应力相应只剩舍入量级
+    assert np.abs(tau[bottom]).max() < 1e-12 * np.abs(tau[~bottom]).max()
+    np.testing.assert_array_equal(m.wall_velocity[bottom], np.broadcast_to(u_w, (int(bottom.sum()), 3)))
+
+    _set_shear(s, lambda y: 3.0 * np.sin(np.pi * y / H))
+    m, tau = s.wall_model.traction(np, s.mesh, flat, s.boundary_ghost_provider, s.state.U, s.mu_molecular)
+    F = wall_flux(np, m, tau)
+    np.testing.assert_allclose(F[:, 3], m.area * (tau @ u_w) * bottom, rtol=1e-14, atol=0.0)
+    assert np.abs(F[bottom, 3]).min() > 0.0

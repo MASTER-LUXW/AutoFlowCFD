@@ -167,12 +167,11 @@ class _GPUSolverStepMixin:
                                                filter_active=self.filter_func_gpu is not None,
                                                physical_time=physical_time, advance_ramp=advance_ramp)
                 # 解析单元块在主机上装配（与 CPU 同一份实现），块由缓存上传
-                block_assembler = None if unsupported_reason(
-                    order=order_nk, wall_model=getattr(self, "wall_model", None) is not None,
-                ) else MeanFlowBlockAssembler(
+                block_assembler = None if unsupported_reason(order=order_nk) else MeanFlowBlockAssembler(
                     mesh=self.mesh, ops=self.ops, ghost_provider=self.boundary_ghost_provider,
                     mu=self.mu_molecular, mach_ref=self.freestream["mach_ref"],
-                    low_mach=self.low_mach_precond_enabled, mu_t=mu_t_field, nu_av=nu_av, n_sps=n_sps)
+                    low_mach=self.low_mach_precond_enabled, mu_t=mu_t_field, nu_av=nu_av, n_sps=n_sps,
+                    wall_model=self.wall_model)
                 u_next, info = step_mean_flow_newton(
                     self, mean_flow_residual, self.U_gpu.reshape(n_cells * n_sps, self.n_vars), dtau_flat,
                     _reference_scales(self.freestream, self.n_vars),

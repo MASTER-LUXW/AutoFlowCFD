@@ -70,6 +70,7 @@ def turbulence_linearization(solver_like, turb, inputs, conv_geom, flat):
     wall_zero = _compute_wall_dirichlet_face_mask(solver_like)
     pointwise = None
     strong_rows = None
+    k_slope = None
     if isinstance(turb, SAModel):
         from autoflowcfd.core.fr_operators.gradients import compute_physical_scalar_gradient
 
@@ -78,15 +79,16 @@ def turbulence_linearization(solver_like, turb, inputs, conv_geom, flat):
         faces, values, pointwise, strong_rows = sa_linearization_parts(np, turb, Q, grad_vel, d_wall, mu,
                                                                        grad_rho, wall_zero)
     else:
-        from autoflowcfd.core.turbulence.sst.unknowns import sst_dirichlet_spec
+        from autoflowcfd.core.turbulence.sst.unknowns import sst_dirichlet_spec, sst_wall_target_k_slope
 
-        omega_wall, has_wall = _compute_omega_wall_target(solver_like, wall_zero, mu, Q[..., 0],
-                                                          flat_face_override=flat)
+        omega_wall, has_wall, k_slope = _compute_omega_wall_target(solver_like, wall_zero, mu, Q[..., 0],
+                                                                   flat_face_override=flat, with_k_slope=True)
         faces, values = sst_dirichlet_spec(wall_zero, omega_wall, has_wall, turb.wall_treatment)
+        k_slope = sst_wall_target_k_slope(k_slope, turb.wall_treatment)
     return TurbulenceLinearization(
         mesh=solver_like.mesh, ops=solver_like.ops, flat=flat, turb=turb, Q=Q, grad_vel=grad_vel,
         d_wall=d_wall, mu=float(mu), conv_geom=conv_geom, dirichlet_faces=faces, dirichlet_values=values,
         open_face=_compute_open_boundary_face_mask(solver_like, flat), pointwise=pointwise,
-        strong_rows=strong_rows,
+        strong_rows=strong_rows, wall_target_k_slope=k_slope,
         des=des_length_for(getattr(solver_like, "ddes_model", None), getattr(solver_like, "_iddes_h_max", None),
                            getattr(solver_like, "_iddes_h_wn", None)))

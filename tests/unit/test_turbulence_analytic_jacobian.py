@@ -29,17 +29,19 @@ RHO, U, P = 1.225, 30.0, 101325.0
 LX, H, LZ = 0.4, 0.1, 0.08
 
 
-def _turb_solver(kind, order, model="SST", n_warm=3):
+def _turb_solver(kind, order, model="SST", n_warm=3, wall_treatment="resolved"):
     from autoflowcfd.core.fr_solver import FRSolver
     from autoflowcfd.core.time_integration import TimeIntegrationScheme
 
     mesh = (build_channel_mesh if kind == "tet" else build_channel_mesh_prism)(order, 3, 4, 2, LX, H, LZ)
     bc = {n: {"type": "SYMMETRY"} for n in ("z_min", "z_max")}
     for n in ("wall_bottom", "wall_top"):
-        bc[n] = {"type": "WALL", "is_no_slip": True, "wall_velocity": [0.0, 0.0, 0.0]}
+        # auto：壁面模型下幽灵态取滑移镜像（`fr_solver/boundary/ghost.py`），物理上仍是无滑移固壁
+        bc[n] = {"type": "WALL", "is_no_slip": wall_treatment == "resolved", "physical_no_slip": True,
+                 "wall_velocity": [0.0, 0.0, 0.0]}
     for n in ("x_min", "x_max"):
         bc[n] = {"type": "FARFIELD", "Q_free": [RHO, U, 0.0, 0.0, P]}
-    s = FRSolver(mesh=mesh, order=order, turb_model_name=model,
+    s = FRSolver(mesh=mesh, order=order, turb_model_name=model, wall_treatment=wall_treatment,
                  time_scheme=TimeIntegrationScheme.NEWTON_KRYLOV, rho_inf=RHO, vel_inf=U, p_inf=P,
                  mu_molecular=1.8e-5, bc_overrides=bc)
     s.order_continuation_enabled = False
@@ -94,6 +96,16 @@ def _assert_diag_match(fd, bp, bt):
 @pytest.mark.parametrize("kind,order", [("prism", 1), ("prism", 2), ("tet", 1), ("tet", 2)])
 def test_diagonal_blocks_match_colored_finite_difference(kind, order, model):
     _, _, _, _, fd, bp, bt, _ = _blocks(_turb_solver(kind, order, model))
+    _assert_diag_match(fd, bp, bt)
+
+
+@pytest.mark.parametrize("kind,order", [("prism", 1), ("prism", 2), ("tet", 1), ("tet", 2)])
+def test_diagonal_blocks_match_with_auto_wall_treatment(kind, order):
+    """SST 自动壁面处理：omega 壁面目标值随贴壁单元 k 的真实自由度均值变化（Menter 混合式的对数层支），
+    湍流残差因此在贴壁单元里有 d R_w / d k 的耦合（`jacobian/assemble.py::add_wall_target_k_coupling`）。"""
+    s = _turb_solver(kind, order, "SST", wall_treatment="auto")
+    assert s.turb_model.wall_treatment == "auto"
+    _, _, _, _, fd, bp, bt, _ = _blocks(s)
     _assert_diag_match(fd, bp, bt)
 
 

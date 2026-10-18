@@ -29,18 +29,20 @@ RHO, U, P, GAMMA = 1.225, 30.0, 101325.0, 1.4
 LX, H, LZ = 0.4, 0.1, 0.08
 
 
-def _channel_solver(scheme, order=1):
+def _channel_solver(scheme, order=1, wall_treatment="resolved"):
     from autoflowcfd.core.fr_solver import FRSolver
 
     mesh = build_channel_mesh_prism(order, nx=3, ny=4, nz=2, Lx=LX, H=H, Lz=LZ)
     bc = {n: {"type": "SYMMETRY"} for n in ("z_min", "z_max")}
-    bc["wall_bottom"] = {"type": "WALL", "is_no_slip": True, "wall_velocity": [0.0, 0.0, 0.0]}
-    bc["wall_top"] = {"type": "WALL", "is_no_slip": True, "wall_velocity": [0.0, 0.0, 0.0]}
+    # auto：壁面模型下幽灵态取滑移镜像，物理上仍是无滑移固壁
+    for n in ("wall_bottom", "wall_top"):
+        bc[n] = {"type": "WALL", "is_no_slip": wall_treatment == "resolved", "physical_no_slip": True,
+                 "wall_velocity": [0.0, 0.0, 0.0]}
     for n in ("x_min", "x_max"):
         bc[n] = {"type": "FARFIELD", "Q_free": [RHO, U, 0.0, 0.0, P]}
     solver = FRSolver(mesh=mesh, order=order, turb_model_name="SST",
                       time_scheme=scheme, rho_inf=RHO, vel_inf=U, p_inf=P,
-                      mu_molecular=1.8e-5, bc_overrides=bc)
+                      mu_molecular=1.8e-5, bc_overrides=bc, wall_treatment=wall_treatment)
     solver.order_continuation_enabled = False
     solver.boundary_ghost_provider = build_face_exact_ghost_provider(mesh, LX, H, LZ, bc)
     Ua = np.asarray(solver.state.U).copy()

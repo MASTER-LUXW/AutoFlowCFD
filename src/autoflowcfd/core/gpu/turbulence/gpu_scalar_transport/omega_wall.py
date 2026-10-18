@@ -5,7 +5,7 @@
 
 
 def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, mu, beta1,
-                                 omega_max, turb_k_field, wall_treatment):
+                                 omega_max, turb_k_field, wall_treatment, with_k_slope: bool = False):
     """CuPy 版 `_compute_omega_wall_target`：omega_wall = 60*nu/(beta1*d1^2)
     （Wilcox 解析式），逐字对应 CPU 版同名函数——全程 GPU 原生实现（不像
     边界幽灵态那样需要 CPU round-trip：wall_distance_gpu/Q_gpu/owner_cell
@@ -30,9 +30,10 @@ def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, m
         omega_max: omega 上界（`turb_model_gpu.omega_max`，随最近壁面解点给定）
         turb_k_field: k 场（auto 的对数支用到）
         wall_treatment: 近壁处理方式（`turb_model_gpu.wall_treatment`）
+        with_k_slope: 另返回目标值对数对 owner 单元 k 均值的导数（湍流解析块 Jacobian 用）
 
     Returns:
-        (omega_wall_value_face, has_value_face)，与 CPU 版返回语义一致
+        (omega_wall_value_face, has_value_face[, k_slope_face])，与 CPU 版返回语义一致
     """
     n_faces = ff.n_faces
     n_fp = ff.boundary_extrap_native.shape[-2]
@@ -79,7 +80,15 @@ def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, m
         omega_wall = omega_wall_value(cp, nu_owner, d1, k_owner, beta1, wall_treatment)
         omega_wall = cp.minimum(omega_wall, omega_max)
         omega_wall_value_face[wall_idx, :] = omega_wall[:, None]
-    return omega_wall_value_face, wall_mask
+    if not with_k_slope:
+        return omega_wall_value_face, wall_mask
+    # 目标值的对数对 owner 单元 k 均值的导数（湍流解析块 Jacobian 用，与 CPU 同一个函数）
+    k_slope_face = cp.zeros(n_faces)
+    if wall_idx.shape[0] > 0 and wall_treatment == "auto":
+        from autoflowcfd.core.turbulence.sst.bounds import log_omega_wall_k_slope
+
+        k_slope_face[wall_idx] = log_omega_wall_k_slope(cp, nu_owner, d1, k_owner, beta1, omega_max)
+    return omega_wall_value_face, wall_mask, k_slope_face
 
 
 def compute_turbulence_face_masks_gpu(mesh, boundary_ghost_provider):

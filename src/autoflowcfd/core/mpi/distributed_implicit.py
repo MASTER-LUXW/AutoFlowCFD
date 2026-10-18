@@ -97,7 +97,7 @@ def distributed_mean_flow_assembler(solver, physics, *, order: int, mu_t_compact
     from autoflowcfd.core.fr_residual.jacobian.backend import MeanFlowBlockAssembler, unsupported_reason
     from autoflowcfd.core.mpi.distributed_compute import DistributedMeshAdapter
 
-    if unsupported_reason(order=order, wall_model=getattr(solver, "wall_model", None) is not None):
+    if unsupported_reason(order=order):
         return None
     dist_fc = solver.dist_flat_face
     n_local = int(solver.partition.n_local_cells)
@@ -107,7 +107,7 @@ def distributed_mean_flow_assembler(solver, physics, *, order: int, mu_t_compact
         mach_ref=physics.freestream["mach_ref"],
         low_mach=solver.low_mach_precond_enabled, mu_t=mu_t_compact, nu_av=nu_av_compact, n_sps=n_sps,
         flat=dist_fc.base_flat, compact_state=HaloCompactState(exchange, perm),
-        row_compact=np.asarray(dist_fc.inv_perm)[:n_local])
+        row_compact=np.asarray(dist_fc.inv_perm)[:n_local], wall_model=solver.wall_model)
 
 
 def distributed_block_jacobi_colors(solver) -> np.ndarray:

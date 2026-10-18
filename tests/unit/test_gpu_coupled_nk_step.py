@@ -65,7 +65,8 @@ def _gpu_turbulence_model(cpu):
         attrs = ("nu_tilde_field", "nu_t", "wall_points", "production_factor")
     else:
         tg = GPUTurbulenceSST(n_cells, n_sps, device_id=0)
-        attrs = ("k_field", "omega_field", "nu_t", "k_inf", "omega_inf", "k_max", "omega_max", "production_factor")
+        attrs = ("k_field", "omega_field", "nu_t", "k_inf", "omega_inf", "k_max", "omega_max", "production_factor",
+                 "wall_treatment")
     for a in attrs:
         v = getattr(tc, a)
         setattr(tg, a, np.array(v, copy=True) if isinstance(v, np.ndarray) else v)
@@ -107,7 +108,7 @@ def _gpu_standin(cpu, dt_cell, dt_phys_cell):
         _newton_forcing=None, _newton_last_info=None, _newton_dtau_scale=1.0, _newton_local_dtau=None,
         _newton_block_precond=None, _newton_turb_state=None,
         boundary_ghost_provider=cpu.boundary_ghost_provider, mu_molecular=cpu.mu_molecular,
-        wall_model=None, artificial_viscosity_enabled=False,
+        wall_model=cpu.wall_model, artificial_viscosity_enabled=False,
         wall_distance_gpu=np.asarray(cpu.wall_distance), _iddes_h_max_gpu=None, _iddes_h_wn_gpu=None,
         _wall_mask_gpu=_compute_wall_dirichlet_face_mask(cpu),
         _open_mask_gpu=_compute_open_boundary_face_mask(cpu, flat),
@@ -130,13 +131,17 @@ def _gpu_standin(cpu, dt_cell, dt_phys_cell):
     return g
 
 
-@pytest.fixture(params=["SST", "SA"])
+@pytest.fixture(params=["SST", "SST-auto", "SA"])
 def pair(request):
+    """SST-auto：RANS 自动壁面处理（平衡壁面模型剪应力进平均流解析块、omega 壁面目标值随 k 变化进湍流解析块）。"""
     from autoflowcfd.core.time_integration import TimeIntegrationScheme
     from tests.unit.test_sa_neg_solver import _sa_channel
 
-    cpu = (_channel_solver(TimeIntegrationScheme.NEWTON_KRYLOV) if request.param == "SST"
-           else _sa_channel("tet", 1))
+    if request.param == "SA":
+        cpu = _sa_channel("tet", 1)
+    else:
+        cpu = _channel_solver(TimeIntegrationScheme.NEWTON_KRYLOV,
+                              wall_treatment="auto" if request.param == "SST-auto" else "resolved")
     dt_cell, dt_phys_cell = _frozen_dt(cpu)
     n_cells, n_sps = cpu.state.U.shape[:2]
     full = lambda a: np.broadcast_to(a[:, None], (n_cells, n_sps)).copy()  # noqa: E731

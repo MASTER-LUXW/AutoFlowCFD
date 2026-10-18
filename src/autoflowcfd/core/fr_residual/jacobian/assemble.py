@@ -26,8 +26,8 @@
 
 `mu_t` 与问题单元人工扩散系数 `nu_av` 按平均流残差的约定整步冻结，不对它们求导；人工
 粘性的 `div(nu grad U_k)` 在 Newton 空间直接加 `Gamma_s (-L_nu)[s,t]`（`artificial_viscosity.py`）。
-WMLES 壁面应力修正不在稳态隐式路径里（只用于瞬态），熵稳定两点通量体积项由调用方改用差分
-装配（见 `backend.unsupported_reason`）。
+平衡壁面模型（WMLES、RANS 自动壁面处理）的壁面剪应力只依赖 owner 单元，解析导数在收尾后加到对角块
+（`wall_stress.py`）。
 """
 
 from dataclasses import dataclass
@@ -51,6 +51,7 @@ from .faces import add_face_blocks_color
 from .pointwise import _SQRT_EPS, primitive_jacobian, temperature_gradient_row
 from .transform import finalize_diag_kernel
 from .volume import VolumeSegment, add_volume_blocks
+from .wall_stress import add_wall_stress_blocks
 
 
 @dataclass
@@ -66,6 +67,7 @@ class MeanFlowLinearization:
     mu_t: Optional[np.ndarray] = None        # (n_cells, n_sps) 冻结的动力涡粘
     nu_av: Optional[np.ndarray] = None       # (n_cells, n_sps) 冻结的问题单元人工扩散系数（运动粘度）
     flat: object = None                      # None -> get_flat_face_geometry(mesh, ops)
+    wall_model: object = None                # 平衡壁面模型（`EquilibriumWallModel`），None 表示没有壁面模型剪应力
     Pr: float = PRANDTL
     Pr_t: float = PRANDTL_TURBULENT
 
@@ -226,6 +228,10 @@ def assemble_mean_flow_blocks(ctx: MeanFlowLinearization, U, residual=None, want
                                  np.ascontiguousarray(det_c[c0:c1]), TQ, gamma, dgamma, bool(ctx.low_mach))
             if av is not None:
                 add_scalar_kron_gamma(K[k0:k1], av[kind][k0:k1], gamma, bool(ctx.low_mach))
+    if ctx.wall_model is not None:
+        def row_gamma(cells, n):
+            return _transform_arrays(U5[cells, :n], Q[cells, :n], gamma_R[cells, :n], ctx)[1]
+        add_wall_stress_blocks(ctx, K_prism, K_tet, U5, row_gamma if ctx.low_mach else None, n_prism, npr, nte)
     blocks = (K_prism.reshape(n_prism, npr * 5, npr * 5), K_tet.reshape(n_cells - n_prism, nte * 5, nte * 5))
     if not want_coupling:
         return blocks

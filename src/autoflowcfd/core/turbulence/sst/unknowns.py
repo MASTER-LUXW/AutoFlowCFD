@@ -73,6 +73,12 @@ class _SSTTransportedMixin(TransportedTurbulence):
         self.omega_field = admissible_omega(omega, self.omega_inf, xp=xp, source=source)
 
 
+def sst_wall_target_k_slope(k_slope_face, wall_treatment):
+    """湍流解析块的 k -> ln omega 壁面目标值耦合（`TurbulenceLinearization.wall_target_k_slope`，主机数组）：
+    auto 档 omega 壁面目标值随贴壁单元 k 变化；resolved 档与 k 无关，返回 None。"""
+    return np.asarray(k_slope_face, dtype=np.float64) if wall_treatment == "auto" else None
+
+
 def sst_dirichlet_spec(wall_face, omega_wall_face, has_omega_wall, wall_treatment):
     """SST 两个 Newton 未知量的壁面 Dirichlet 规格 `(faces, values)`（主机数组，湍流解析块
     Jacobian 的 `TurbulenceLinearization` 用）：k 在壁面为 0（resolved；auto 为零通量，`bounds.k_wall_zero_mask`）；

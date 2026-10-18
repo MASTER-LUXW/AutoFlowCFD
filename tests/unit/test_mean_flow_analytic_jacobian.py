@@ -39,12 +39,15 @@ MACH_REF = U_INF / np.sqrt(1.4 * P_INF / RHO)
 SCALES = np.array([RHO, RHO * U_INF, RHO * U_INF, RHO * U_INF, P_INF / 0.4])
 
 
-def _channel(kind, order):
+def _channel(kind, order, wall_model=False, bottom_velocity=(0.0, 0.0, 0.0)):
+    """`wall_model`：壁面取平衡壁面模型的配置（幽灵态滑移镜像、物理无滑移，`fr_solver/boundary/ghost.py`）；
+    `bottom_velocity`：下壁的壁面速度（移动壁面）。"""
     build = build_channel_mesh if kind == "tet" else build_channel_mesh_prism
     mesh = build(order, 3, 3, 2, LX, H, LZ)
     bc = {n: {"type": "SYMMETRY"} for n in ("z_min", "z_max")}
     for n in ("wall_bottom", "wall_top"):
-        bc[n] = {"type": "WALL", "is_no_slip": True, "wall_velocity": [0.0, 0.0, 0.0]}
+        bc[n] = {"type": "WALL", "is_no_slip": not wall_model, "physical_no_slip": True,
+                 "wall_velocity": list(bottom_velocity) if n == "wall_bottom" else [0.0, 0.0, 0.0]}
     for n in ("x_min", "x_max"):
         bc[n] = {"type": "FARFIELD", "Q_free": [RHO, U_INF, 0.0, 0.0, P_INF]}
     return mesh, build_face_exact_ghost_provider(mesh, LX, H, LZ, bc)
@@ -70,9 +73,9 @@ def _state(mesh, seed):
 
 
 class _Residual:
-    def __init__(self, mesh, ops, provider, mu_t, low_mach, flat, nu_av=None):
+    def __init__(self, mesh, ops, provider, mu_t, low_mach, flat, nu_av=None, wall_model=None):
         self.mesh, self.ops, self.provider, self.mu_t = mesh, ops, provider, mu_t
-        self.low_mach, self.flat, self.nu_av = low_mach, flat, nu_av
+        self.low_mach, self.flat, self.nu_av, self.wall_model = low_mach, flat, nu_av, wall_model
         self.shape = (mesh.n_cells, mesh.n_sps_per_cell, 5)
 
     def raw(self, U):
@@ -85,6 +88,9 @@ class _Residual:
             vis = vis + artificial_diffusion_residual(
                 U, self.nu_av, lambda phi, gamma: compute_scalar_diffusion_residual(phi, gamma, self.mesh, self.ops,
                                                                                     gamma_band=0.0))
+        if self.wall_model is not None:
+            fl = self.flat if self.flat is not None else get_flat_face_geometry(self.mesh, self.ops)
+            vis = vis + self.wall_model.residual_correction(np, self.mesh, fl, self.provider, U, MU)
         return -(inv + vis)
 
     def __call__(self, u_flat):
@@ -95,9 +101,9 @@ class _Residual:
         return r.reshape(-1, 5)
 
 
-def _compare(mesh, ops, provider, U, *, mu_t=None, low_mach=True, flat=None, nu_av=None):
+def _compare(mesh, ops, provider, U, *, mu_t=None, low_mach=True, flat=None, nu_av=None, wall_model=None):
     order = int(mesh.order)
-    res = _Residual(mesh, ops, provider, mu_t, low_mach, flat, nu_av)
+    res = _Residual(mesh, ops, provider, mu_t, low_mach, flat, nu_av, wall_model)
     u0 = U.reshape(-1, 5)
     r0 = res(u0)
     npr, nte = real_sps_per_cell(order)
@@ -108,7 +114,7 @@ def _compare(mesh, ops, provider, U, *, mu_t=None, low_mach=True, flat=None, nu_
                            n_real_prism=npr, n_real_tet=nte, colors=colors)
     ctx = MeanFlowLinearization(mesh=mesh, ops=ops, ghost_provider=provider, mu=MU, mach_ref=MACH_REF,
                                 precond_mode=resolve_ausm_precond_mode(), low_mach=low_mach, mu_t=mu_t, flat=flat,
-                                nu_av=nu_av)
+                                nu_av=nu_av, wall_model=wall_model)
     bp, bt = assemble_mean_flow_blocks(ctx, U, residual=r0.reshape(U.shape))
     worst = 0.0
     for A, B in ((bp, fd.blocks_prism), (bt, fd.blocks_tet)):
@@ -250,3 +256,68 @@ def test_coupling_blocks_match_dense_difference_with_artificial_viscosity(kind):
                                 for t in range(ny)], axis=2)
                 worst = max(worst, float(np.abs(blk - ref).max() / np.abs(ref).max()))
     assert 0.0 < worst < 2e-4, f"耦合块最大相对误差 {worst:.2e}"
+
+
+@pytest.mark.parametrize("kind", ["tet", "prism"])
+@pytest.mark.parametrize("order", [1, 2])
+@pytest.mark.parametrize("low_mach", [True, False])
+def test_blocks_match_with_wall_model_stress(kind, order, low_mach):
+    """平衡壁面模型（WMLES、RANS 自动壁面处理）的壁面剪应力（`jacobian/wall_stress.py`）：对角块与着色差分一致
+    （2026-10-18 之前解析装配不覆盖它，壁面模型算例的块 Jacobi 整体退回差分装配）。"""
+    from autoflowcfd.core.turbulence.wall_model import EquilibriumWallModel
+
+    mesh, provider = _channel(kind, order, wall_model=True)
+    _compare(mesh, generate_fr_operators(order), provider, _state(mesh, 50 + order), low_mach=low_mach,
+             mu_t=np.full((mesh.n_cells, mesh.n_sps_per_cell), 20.0 * MU), wall_model=EquilibriumWallModel())
+
+
+@pytest.mark.parametrize("kind", ["tet", "prism"])
+@pytest.mark.parametrize("low_mach", [True, False])
+@pytest.mark.parametrize("moving", [False, True])
+def test_wall_stress_block_matches_difference_of_the_wall_term(kind, low_mach, moving):
+    """壁面剪应力项单独对照：解析块（含/不含壁面模型两次装配之差）= `Gamma_s (-d corr/dU)`，`corr` 为残差的
+    壁面模型修正、逐自由度中心差分（只依赖 owner 单元，所有贴壁单元同时扰动）。上面的整块对照里该项相对无粘项
+    很小、分辨不出，这里把它单独拿出来；没有贴壁的单元差为零。`moving`：下壁移动（相对速度 + 剪应力做功的能量行）。块以 float32 存放，两块之差带有各自元素的
+    舍入（`eps32 |A|`），判据扣除这一部分（float64 下解析块与中心差分吻合到 1e-10）。"""
+    from autoflowcfd.core.turbulence.wall_model import EquilibriumWallModel
+
+    mesh, provider = _channel(kind, 1, wall_model=True, bottom_velocity=(12.0, 0.0, 3.0) if moving else (0.0,) * 3)
+    ops = generate_fr_operators(1)
+    flat = get_flat_face_geometry(mesh, ops)
+    U = _state(mesh, 61)
+    wm = EquilibriumWallModel()
+    r0 = _Residual(mesh, ops, provider, None, low_mach, None, None, wm)(U.reshape(-1, 5)).reshape(U.shape)
+    common = dict(mesh=mesh, ops=ops, ghost_provider=provider, mu=MU, mach_ref=MACH_REF,
+                  precond_mode=resolve_ausm_precond_mode(), low_mach=low_mach)
+    with_wm = assemble_mean_flow_blocks(MeanFlowLinearization(**common, wall_model=wm), U, residual=r0)
+    without = assemble_mean_flow_blocks(MeanFlowLinearization(**common), U, residual=r0)
+
+    def corr(V):
+        return wm.residual_correction(np, mesh, flat, provider, V, MU)
+    npr, nte = real_sps_per_cell(1)
+    n_prism = mesh.n_prism_cells
+    Q = conserved_to_primitive(U)
+    worst = 0.0
+    for kind_i, (A, B, lo, n) in enumerate(((with_wm[0], without[0], 0, npr), (with_wm[1], without[1], n_prism, nte))):
+        if A.shape[0] == 0:
+            continue
+        diff = (A.astype(np.float64) - B).reshape(-1, n, 5, n, 5)
+        ref = np.zeros_like(diff)
+        for t in range(n):
+            for b in range(5):
+                h = 1e-5 * SCALES[b]
+                Up, Um = U.copy(), U.copy()
+                Up[lo:lo + A.shape[0], t, b] += h
+                Um[lo:lo + A.shape[0], t, b] -= h
+                ref[:, :, :, t, b] = -(corr(Up) - corr(Um))[lo:lo + A.shape[0], :n] / (2.0 * h)
+        if low_mach:
+            cells = np.arange(lo, lo + A.shape[0])
+            gam = np.stack([apply_low_mach_preconditioner(np.eye(5)[v] * np.ones(Q[cells, :n].shape), Q[cells, :n],
+                                                          MACH_REF) for v in range(5)], axis=-1)
+            ref = np.einsum("csav,csvtb->csatb", gam, ref)
+        touched = np.abs(ref).max(axis=(1, 2, 3, 4)) > 0.0
+        assert touched.any() and np.abs(diff[~touched]).max() == 0.0
+        rounding = 2.0 * np.finfo(np.float32).eps * np.maximum(np.abs(A), np.abs(B)).astype(np.float64)
+        excess = np.maximum(np.abs(diff - ref) - rounding.reshape(diff.shape), 0.0)
+        worst = max(worst, float(excess.max() / np.abs(ref).max()))
+    assert worst < 1e-6, f"壁面剪应力块最大相对误差 {worst:.2e}"

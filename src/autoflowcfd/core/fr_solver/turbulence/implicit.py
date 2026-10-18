@@ -218,12 +218,12 @@ class CpuCoupledBackend:
         from autoflowcfd.core.fr_residual.jacobian.backend import MeanFlowBlockAssembler, unsupported_reason
 
         s = self.solver
-        if unsupported_reason(order=self.order, wall_model=s.wall_model is not None):
+        if unsupported_reason(order=self.order):
             return None
         return MeanFlowBlockAssembler(
             mesh=s.mesh, ops=s.ops, ghost_provider=s.boundary_ghost_provider, mu=s.mu_molecular,
             mach_ref=s.freestream["mach_ref"], low_mach=s.low_mach_precond_enabled, mu_t=mu_t,
-            nu_av=self._nu_av, n_sps=self.n_sps)
+            nu_av=self._nu_av, n_sps=self.n_sps, wall_model=s.wall_model)
 
     def cell_colors(self):
         return self.turb.cell_colors()

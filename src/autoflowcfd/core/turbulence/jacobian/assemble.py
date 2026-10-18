@@ -51,6 +51,8 @@ class TurbulenceLinearization:
     pointwise: object = None      # 逐点 (S, Gamma) 求值器；None -> cpu_turbulence_pointwise（SST）
     strong_rows: np.ndarray = None  # (n_cells, n_sps, nv) 强 Dirichlet 行
     des: object = None            # SST 的 DES 长度尺度求值器（与残差同一个）；None 为 RANS
+    wall_target_k_slope: np.ndarray = None  # (n_faces,) 第 1 个未知量的壁面目标值对 owner 单元第 0 个未知量
+    #                                         真实自由度均值的导数（SST auto 档 d ln omega_w / d k），None 表示没有
 
 
 def assemble_turbulence_blocks(ctx: TurbulenceLinearization, u_flat, want_coupling: bool = False):
@@ -90,9 +92,54 @@ def assemble_turbulence_blocks(ctx: TurbulenceLinearization, u_flat, want_coupli
         ctx.conv_geom.rho_u_tilde, m_o, m_n,
         (ghost_o, np.ascontiguousarray(a_o), ghost_n, np.ascontiguousarray(a_n)), diff, want_coupling,
         gamma_band=float(ctx.mu))
+    if ctx.wall_target_k_slope is not None:
+        add_wall_target_k_coupling(ctx, out, gam)
     if ctx.strong_rows is not None:
         zero_strong_rows(out, np.asarray(ctx.strong_rows, dtype=bool), int(mesh.n_prism_cells), nv)
     return out
+
+
+def add_wall_target_k_coupling(ctx: TurbulenceLinearization, out, gam) -> None:
+    """壁面目标值随状态变化带来的耦合（原地加到对角块）：SST auto 档的 omega 壁面目标值
+    `w_wall = ln omega_wall(k_owner)`，`k_owner` 为 owner 单元 k 的真实自由度均值（`transport/omega_wall.py`）。
+
+    w 的对流与扩散残差对边界目标值是线性齐次的（对流取镜像幽灵态 `2 g - w`，扩散的罚项与边界通量都对 g 线性，
+    质量通量与扩散系数冻结），所以 `sum_f dT_w/dg_f * dg_f/dk_owner` 等于"w 取 0、目标值取 slope_f、来流值取 0"
+    时的输运残差本身——与残差同一组函数一次求值得到，没有差分截断。由此
+
+        d R_w[c, s] / d k[c, t] += -T_probe[c, s] / rho[c, s] / n_real(c)   （t 为真实解点）
+
+    边界面只进它的 owner 单元（混合拆分面的配对边界面 owner 是同一单元），所以只有对角块。
+    """
+    from autoflowcfd.core.turbulence.transport import compute_scalar_convection_residual, compute_scalar_diffusion_residual
+    from autoflowcfd.fr.native_padding import real_sps_per_cell
+
+    slope = np.asarray(ctx.wall_target_k_slope, dtype=np.float64)
+    if not np.any(slope):
+        return
+    mesh, flat = ctx.mesh, ctx.flat
+    n_cells, n_sps = int(mesh.n_cells), int(mesh.n_sps_per_cell)
+    has = np.asarray(ctx.dirichlet_faces[1], dtype=bool)
+    probe = np.ascontiguousarray(np.broadcast_to(slope[:, None], (slope.size, int(flat.n_fp))))
+    zero = np.zeros((n_cells, n_sps))
+    rho = np.ascontiguousarray(ctx.Q[:, :, 0])
+    T = compute_scalar_convection_residual(
+        zero, rho, ctx.Q[:, :, 1:4], mesh, ctx.ops, wall_dirichlet_value_face=probe, has_wall_dirichlet_value=has,
+        flat_face_override=flat, conv_geom=ctx.conv_geom, open_boundary_face=np.asarray(ctx.open_face, dtype=bool),
+        freestream_value=0.0)
+    T = T + compute_scalar_diffusion_residual(
+        zero, np.ascontiguousarray(gam[..., 1]), mesh, ctx.ops, wall_dirichlet_value_face=probe,
+        has_wall_dirichlet_value=has, flat_face_override=flat, gamma_band=float(ctx.mu))
+    col = -T / np.maximum(rho, 1e-10)
+    nv = int(ctx.turb.n_transported)
+    n_prism = int(mesh.n_prism_cells)
+    npr, nte = real_sps_per_cell(int(mesh.order))
+    for blocks, lo, n in ((out[0], 0, npr), (out[1], n_prism, nte)):
+        if blocks.shape[0] == 0:
+            continue
+        b5 = blocks.reshape(blocks.shape[0], n, nv, n, nv)
+        add = (col[lo:lo + blocks.shape[0], :n] / n).astype(blocks.dtype)       # (cells, n)
+        b5[:, :, 1, :, 0] += add[:, :, None]
 
 
 def zero_strong_rows(out, strong, n_prism: int, nv: int) -> None:

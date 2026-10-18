@@ -64,7 +64,7 @@ class GpuTurbulenceBackend:
         grad_vel, d_wall = self._inputs
         Q_h = _host(s.Q_gpu)
         flat = get_flat_face_geometry(s.mesh, s.ops)
-        faces, values, pointwise, strong_rows = gpu_linearization_parts(
+        faces, values, pointwise, strong_rows, k_slope = gpu_linearization_parts(
             cp, m, s.Q_gpu, grad_vel, d_wall, float(s.mu_molecular), s.flat_face_gpu, s._wall_mask_gpu,
             s.mesh_data, s.ops_data, des=des_length_for(s.ddes_model_gpu, s._iddes_h_max_gpu, s._iddes_h_wn_gpu))
         ctx = TurbulenceLinearization(
@@ -72,7 +72,7 @@ class GpuTurbulenceBackend:
             mu=float(s.mu_molecular),
             conv_geom=precompute_scalar_convection_geometry(Q_h[..., 0], Q_h[..., 1:4], s.mesh, s.ops, flat),
             dirichlet_faces=faces, dirichlet_values=values, open_face=_host(s._open_mask_gpu),
-            pointwise=pointwise, strong_rows=strong_rows)
+            pointwise=pointwise, strong_rows=strong_rows, wall_target_k_slope=k_slope)
         return TurbulenceBlockAssembler(ctx, self.shape[1])
 
 
@@ -146,12 +146,12 @@ class GpuCoupledBackend:
         from autoflowcfd.core.fr_residual.jacobian.backend import MeanFlowBlockAssembler, unsupported_reason
 
         s = self.solver
-        if unsupported_reason(order=self.order, wall_model=getattr(s, "wall_model", None) is not None):
+        if unsupported_reason(order=self.order):
             return None
         return MeanFlowBlockAssembler(
             mesh=s.mesh, ops=s.ops, ghost_provider=s.boundary_ghost_provider, mu=s.mu_molecular,
             mach_ref=s.freestream["mach_ref"], low_mach=s.low_mach_precond_enabled, mu_t=mu_t,
-            nu_av=self._nu_av, n_sps=self.n_sps)
+            nu_av=self._nu_av, n_sps=self.n_sps, wall_model=s.wall_model)
 
     def cell_colors(self):
         return self.turb.cell_colors()
@@ -175,9 +175,9 @@ def _host(a):
 
 def gpu_linearization_parts(cp, model, Q, grad_vel, d_wall, mu, flat_face_gpu, wall_mask_gpu, mesh_data, ops_data,
                             des=None):
-    """GPU 模型的线性化部件 `(dirichlet_faces, dirichlet_values, pointwise, strong_rows)`（单机与多 GPU
-    compact 视图共用）：SA-neg 走全部后端共用的 `sa_linearization_parts`；SST 族的壁面 omega 目标值与
-    逐点求值器取 GPU 残差同一份（`des`：与残差同一个 DES 长度尺度求值器）。"""
+    """GPU 模型的线性化部件 `(dirichlet_faces, dirichlet_values, pointwise, strong_rows, wall_target_k_slope)`
+    （单机与多 GPU compact 视图共用）：SA-neg 走全部后端共用的 `sa_linearization_parts`（没有目标值耦合）；SST 族的
+    壁面 omega 目标值、其对 k 的导数与逐点求值器取 GPU 残差同一份（`des`：与残差同一个 DES 长度尺度求值器）。"""
     from autoflowcfd.core.turbulence.sa import SAModel
 
     wall_zero = _host(wall_mask_gpu)
@@ -186,15 +186,16 @@ def gpu_linearization_parts(cp, model, Q, grad_vel, d_wall, mu, flat_face_gpu, w
         from autoflowcfd.core.turbulence.jacobian.backend import sa_linearization_parts
 
         grad_rho = compute_physical_scalar_gradient_gpu(cp.ascontiguousarray(Q[..., 0]), mesh_data, ops_data)
-        return sa_linearization_parts(cp, model, Q, grad_vel, d_wall, mu, grad_rho, wall_zero)
+        return sa_linearization_parts(cp, model, Q, grad_vel, d_wall, mu, grad_rho, wall_zero) + (None,)
     from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_omega_wall_target_gpu
-    from autoflowcfd.core.turbulence.sst.unknowns import sst_dirichlet_spec
+    from autoflowcfd.core.turbulence.sst.unknowns import sst_dirichlet_spec, sst_wall_target_k_slope
 
-    omega_wall, has_wall = compute_omega_wall_target_gpu(
+    omega_wall, has_wall, k_slope = compute_omega_wall_target_gpu(
         cp, flat_face_gpu, wall_mask_gpu, d_wall, Q, mu, model.beta1, omega_max=model.omega_max,
-        turb_k_field=model.k_field, wall_treatment=model.wall_treatment)
+        turb_k_field=model.k_field, wall_treatment=model.wall_treatment, with_k_slope=True)
     faces, values = sst_dirichlet_spec(wall_zero, _host(omega_wall), _host(has_wall), model.wall_treatment)
-    return faces, values, gpu_turbulence_pointwise(cp, model, Q, grad_vel, d_wall, mu, des), None
+    return (faces, values, gpu_turbulence_pointwise(cp, model, Q, grad_vel, d_wall, mu, des), None,
+            sst_wall_target_k_slope(_host(k_slope), model.wall_treatment))
 
 
 def gpu_turbulence_pointwise(cp, turb, Q, grad_vel, d_wall, mu, des=None):

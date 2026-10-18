@@ -107,7 +107,7 @@ class MultiGpuTurbulenceBackend:
         mesh = DistributedMeshAdapter(s.partition, dist_fc, s.mesh, s.ops)
         flat = dist_fc.base_flat
         Q_h = _host(ctx.Q)
-        faces, values, pointwise, strong_rows = gpu_linearization_parts(
+        faces, values, pointwise, strong_rows, k_slope = gpu_linearization_parts(
             cp, view, ctx.Q, ctx.grad_vel, ctx.d_wall, float(s.mu_molecular), s.flat_face_gpu,
             tr._wall_mask_gpu, s.mesh_data, s.ops_data,
             des=des_length_for(s.ddes_model_gpu, s.iddes_h_max_compact, s.iddes_h_wn_compact))
@@ -116,7 +116,7 @@ class MultiGpuTurbulenceBackend:
             d_wall=_host(ctx.d_wall), mu=float(s.mu_molecular),
             conv_geom=precompute_scalar_convection_geometry(Q_h[..., 0], Q_h[..., 1:4], mesh, s.ops, flat),
             dirichlet_faces=faces, dirichlet_values=values, open_face=_host(tr._open_mask_gpu),
-            pointwise=pointwise, strong_rows=strong_rows)
+            pointwise=pointwise, strong_rows=strong_rows, wall_target_k_slope=k_slope)
         return TurbulenceBlockAssembler(lin, self.shape[1], compact_state=_MultiGpuTurbulenceCompactState(s),
                                         row_compact=np.asarray(dist_fc.inv_perm)[:self.shape[0]])
 

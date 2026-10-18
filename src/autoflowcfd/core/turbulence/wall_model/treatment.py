@@ -10,6 +10,10 @@
   多项式在贴壁单元里可以表示）。第一层 y+ 从 1 到对数层都能用，按当地 y+ 自动从解析过渡到壁面函数。
 
 WMLES 恒用平衡壁面模型，与本选项无关。
+
+隐式稳态的解析块 Jacobian 覆盖两档的全部壁面项：壁面模型剪应力（`fr_residual/jacobian/wall_stress.py`）与
+auto 档 omega 壁面目标值对贴壁单元 k 的依赖（`turbulence/jacobian/assemble.py::add_wall_target_k_coupling`）。
+求解收尾按贴壁单元形心高度报告壁面 y+，并按本选项检查适用范围（`postprocess/wall_yplus.py`）。
 """
 
 WALL_TREATMENTS = ("resolved", "auto")

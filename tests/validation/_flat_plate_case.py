@@ -92,11 +92,13 @@ def build_flat_plate_solver(order: int, *, nx_up: int = 8, nx_plate: int = 24, n
                             dx_le: float = 2e-3, dy_wall: float = 2e-5, lz: float = 0.05,
                             turb_model: str = "SST", turbulence_intensity: float = 1e-3,
                             viscosity_ratio: float = 1.0, order_continuation: bool = False,
-                            time_scheme=None):
+                            time_scheme=None, wall_treatment: str = "resolved"):
     """构造湍流平板隐式稳态（NK）求解器，均匀来流初场；返回 `(solver, meta)`。
 
     `order_continuation=True` 时 `solver.solve()` 走生产的逐阶爬坡（P0 -> ... -> `order`），
-    否则直接在 `order` 阶上推进（`solver.step`）。`time_scheme` 默认隐式稳态（NK）。
+    否则直接在 `order` 阶上推进（`solver.step`）。`time_scheme` 默认隐式稳态（NK）。`wall_treatment` 为 RANS 近壁
+    处理方式（`core/turbulence/wall_model/treatment.py`）：auto 时平板取滑移镜像幽灵态、壁面剪应力来自壁面模型
+    （与 `build_boundary_ghost_provider` 的类型表同一配置）。
     """
     from autoflowcfd.core.fr_solver import FRSolver
     from autoflowcfd.core.fr_solver.turbulence.wall_distance import apply_wall_distance_source
@@ -111,7 +113,8 @@ def build_flat_plate_solver(order: int, *, nx_up: int = 8, nx_plate: int = 24, n
         "outlet": {"type": "OUTLET", "p_outlet": P_INF},
         "farfield": {"type": "FARFIELD", "Q_free": q_free},
         "symmetry_upstream": {"type": "SYMMETRY"},
-        "plate": {"type": "WALL", "is_no_slip": True, "wall_velocity": [0.0, 0.0, 0.0]},
+        "plate": {"type": "WALL", "is_no_slip": wall_treatment == "resolved", "physical_no_slip": True,
+                  "wall_velocity": [0.0, 0.0, 0.0]},
         "span": {"type": "SYMMETRY"},
     }
     tol = 1e-9
@@ -136,7 +139,8 @@ def build_flat_plate_solver(order: int, *, nx_up: int = 8, nx_plate: int = 24, n
                       time_scheme=time_scheme if time_scheme is not None else TimeIntegrationScheme.NEWTON_KRYLOV,
                       rho_inf=RHO_INF, vel_inf=U_INF,
                       p_inf=P_INF, mu_molecular=MU, bc_overrides=placeholder,
-                      turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio)
+                      turbulence_intensity=turbulence_intensity, viscosity_ratio=viscosity_ratio,
+                      wall_treatment=wall_treatment)
     solver.order_continuation_enabled = order_continuation
     provider = build_ghost_provider_by_classifier(mesh, classify, bc)
     solver.boundary_ghost_provider = provider
@@ -181,3 +185,21 @@ def wall_cf(solver):
     x, cf = np.concatenate(xs), np.concatenate(cfs)
     o = np.argsort(x)
     return x[o], cf[o]
+
+
+def wall_model_cf(solver):
+    """auto 近壁处理下平板（x > 0）上逐壁面通量点的局部摩阻 `(x, cf)`：取壁面模型的牵引（残差里同一个牵引；
+    滑移镜像幽灵态下壁面梯度不再代表壁面剪应力，`wall_cf` 不适用）。"""
+    from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+    from autoflowcfd.core.fr_operators.face_points import flux_point_positions
+
+    mesh, flat = solver.mesh, get_flat_face_geometry(solver.mesh, solver.ops)
+    m, tau = solver.wall_model.traction(np, mesh, flat, solver.boundary_ghost_provider,
+                                        np.ascontiguousarray(solver.state.U[..., :5]), solver.mu_molecular)
+    pos = flux_point_positions(mesh, flat, m.face, m.fp)
+    on_plate = pos[:, 0] > 0.0
+    x = pos[on_plate, 0]
+    cf = -tau[on_plate, 0] / (0.5 * RHO_INF * U_INF ** 2)
+    o = np.argsort(x)
+    return x[o], cf[o]
+

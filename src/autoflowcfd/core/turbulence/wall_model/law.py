@@ -75,3 +75,38 @@ def wall_shear_stress(xp, u_tangent, y, rho, nu, kappa: float = KAPPA, B: float 
     unit = xp.where(moving[..., None], u_tangent / xp.where(moving, U, 1.0)[..., None], 0.0)
     tau = -(rho * u_tau * u_tau)[..., None] * unit
     return tau, u_tau * y / nu
+
+
+def wall_shear_stress_linearization(xp, u_tangent, y, rho, mu, kappa: float = KAPPA, B: float = B_LOG):
+    """`wall_shear_stress` 的解析线性化（分子动力粘度 mu 固定，nu = mu/rho）。
+
+    tau = -a(U, rho) u_t，a = rho U / u+^2，U = |u_t|，u+ 由 u+ y+(u+) = Re_y = U y rho / mu 给出，
+    du+/dRe_y = 1 / (y+ + u+ dy+/du+)。于是
+
+        dtau/du_t = -(a I + (da/dU) u_t u_t^T / U)
+        dtau/drho = -(da/drho) u_t
+
+    U = 0 处取极限（粘性底层 u+^2 -> Re_y）：a = mu / y，其余两项为零。
+
+    Returns:
+        (tau (..., 3), dtau/du_t (..., 3, 3)，dtau/drho (..., 3))；u_t 作为独立矢量求导（不含切向投影）
+    """
+    U = xp.sqrt(xp.sum(u_tangent * u_tangent, axis=-1))
+    re_y = U * y * rho / mu
+    u_plus, n_bad = solve_u_plus(xp, re_y, kappa, B)
+    if n_bad:
+        raise RuntimeError(f"壁面律 Newton 在 {n_bad} 个点上未收敛")
+    moving = u_plus > 0.0
+    up = xp.where(moving, u_plus, 1.0)
+    Us = xp.where(moving, U, 1.0)
+    y_plus, dy = spalding_y_plus(xp, up, kappa, B)
+    dup_dre = 1.0 / (y_plus + up * dy)
+    a = xp.where(moving, rho * U / (up * up), mu / y)
+    tail = 2.0 * rho * U / up ** 3 * dup_dre                     # 2 rho U / u+^3 * du+/dRe_y
+    da_dU = xp.where(moving, rho / (up * up) - tail * y * rho / mu, 0.0)
+    da_drho = xp.where(moving, U / (up * up) - tail * U * y / mu, 0.0)
+    eye = xp.eye(3)
+    dtau_du = -(a[..., None, None] * eye
+                + (da_dU / Us)[..., None, None] * u_tangent[..., :, None] * u_tangent[..., None, :])
+    tau = -a[..., None] * u_tangent
+    return tau, dtau_du, -da_drho[..., None] * u_tangent
