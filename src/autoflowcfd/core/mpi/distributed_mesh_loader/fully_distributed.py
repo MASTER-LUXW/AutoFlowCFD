@@ -43,6 +43,7 @@ def distributed_mesh_load_v2(
     time_accurate: bool = False,
     adaptive_cfl: bool = True,
     wall_treatment: str = DEFAULT_WALL_TREATMENT,
+    low_mach_precond: bool = True,
 ):
     """真正的完全分布式网格加载（2026-09-02）——只有 root rank 加载
     完整网格并对每个 rank 分别调用 `build_fully_distributed_rank_
@@ -175,6 +176,7 @@ def distributed_mesh_load_v2(
                 artificial_viscosity_enabled=artificial_viscosity_enabled,
                 artificial_viscosity_alpha=artificial_viscosity_alpha,
                 wall_treatment=wall_treatment,
+                low_mach_precond=low_mach_precond,
             )
             for r in range(n_ranks)
         ]
@@ -210,6 +212,7 @@ def distributed_mesh_load_v2(
             'artificial_viscosity_enabled': artificial_viscosity_enabled,
             'artificial_viscosity_alpha': artificial_viscosity_alpha,
             'wall_treatment': wall_treatment,
+            'low_mach_precond': low_mach_precond,
             'global_cell_colors': global_cell_colors,
             'global_cell_colors_d2': global_cell_colors_d2,
         }
@@ -452,6 +455,7 @@ def exchange_packages_for_new_order(root_context, target_p: int, n_ranks: int, *
                 artificial_viscosity_enabled=root_context['artificial_viscosity_enabled'],
                 artificial_viscosity_alpha=root_context['artificial_viscosity_alpha'],
                 wall_treatment=root_context['wall_treatment'],
+                low_mach_precond=root_context['low_mach_precond'],
             )
             for r in range(n_ranks)
         ]

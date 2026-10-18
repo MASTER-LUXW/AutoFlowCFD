@@ -78,8 +78,7 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
     n_prisms = mesh.n_prism_cells
     n_tets = len(mesh._fixed_tet_conn) if mesh._fixed_tet_conn is not None else 0
 
-    # 棱柱的解点位置与度量按**当前生效的棱柱基**分派（见
-    # `fr/native_prism/mode.py`）：原生基的节点不是张量积立方体点，把原生
+    # 棱柱的解点位置与度量用原生基（见 `fr/native_prism/__init__.py`）：原生基的节点不是张量积立方体点，把原生
     # 微分算子套到坍缩节点采样的场上不会报错、只会给出错的导数，所以算子
     # 与几何**必须一起**切换。
     # 棱柱恒为原生基（坍缩档已于 2026-09-23 删除）。保留这个局部名而不是
@@ -167,10 +166,10 @@ def build_order_geometry(mesh: "HighOrderMesh", order: int) -> Dict[str, np.ndar
     n_sps_per_cell_fine = 0
     if order >= 1:
         from autoflowcfd.fr.overintegration_order import (
-            prism_n_fine, resolve_prism_overintegration_order,
+            overintegration_order, prism_n_fine,
         )
 
-        over_order = resolve_prism_overintegration_order(order)
+        over_order = overintegration_order(order)
         n_sps_per_cell_fine = prism_n_fine(over_order)
 
         if n_prisms == 0:

@@ -40,7 +40,7 @@ k 最小 -469 k_inf、残差不降；湍流单独换回插值后 106 步收敛�
 
 与坍缩坐标版本的关键差异：native 单纯形基节点数随阶数增长的方式不同
 （`(order+1)(order+2)(order+3)/6` vs `(order+1)^3`），**过积分阶数也已于
-2026-09-17 与棱柱解耦**（`resolve_tet_overintegration_order`）。
+2026-09-17 与棱柱解耦**；阶数见 `fr/overintegration_order.py::overintegration_order`）。
 
 **这是两件独立的事，2026-09-16 前本文件把它们混成了一件**：
 
@@ -67,14 +67,10 @@ volume_contract.get_overintegration_context`）。
 实测见 `tests/unit/test_tet_overintegration_cap_raised.py`。
 """
 
-from typing import Optional, Tuple
+from typing import Tuple
 
 import numpy as np
 
-from ..overintegration_order import (
-    resolve_native_overintegration_max_order,
-    resolve_native_overintegration_order,
-)
 from .basis import (
     build_native_tet_operators,
     restricted_tet_modes,
@@ -102,7 +98,7 @@ def build_native_tet_overintegration_operators(
 
     Args:
         order: 当前求解阶数 P（coarse）
-        over_order: 过积分阶数（`min(2*order, OVERINTEGRATION_MAX_ORDER)`，
+        over_order: 过积分阶数（`fr/overintegration_order.py::overintegration_order`，
             与坍缩坐标版本同一个经验法则，见模块文档）
 
     Returns:
@@ -167,72 +163,7 @@ def _tet_duffy_rule(n: int):
     wa, wb, wc = (q.ravel() for q in np.meshgrid(w, w, w, indexing="ij"))
     return (a, b, c), wa * wb * wc * (1.0 - b) / 2.0 * ((1.0 - c) / 2.0) ** 2
 
-#: native 四面体过积分阶数的**独立**上限（2026-09-17）。
-#:
-#: 为什么与棱柱分开：`collapsed_basis.OVERINTEGRATION_MAX_ORDER = 3` 是
-#: **坍缩坐标模态 Vandermonde 的数值条件数极限**（cond 在 N=4 达约 1e14、
-#: `max|D|` 暴涨约 6.3 万倍），不是去混叠本身的要求。native 受限 PKD 基
-#: 实测在 over_order=6 才 cond=3856、`max|D|` 从 3 到 6 只长 3.5 倍
-#: （`tests/unit/test_native_tet_overintegration_conditioning.py`），那条
-#: 论证对它不成立。
-#:
-#: 上限的代价是实测过的（`tests/unit/test_overintegration_cap_cost.py`，
-#: 以 over_order=8 为参照的体积项去混叠相对误差）：
-#:
-#:     P2  oo=3（旧上限）2.38e-2  ->  oo=4（理想）7.01e-6   3400 倍
-#:     P3  oo=3（=order，完全无操作）9.17e-2 -> oo=6 4.92e-6  18600 倍
-#:
-#: 取 6 的含义是"不再额外设限"——实际阶数由 `rule*order` 的经验法则决定
-#: （默认 rule=2，所以 P1 取 2、P2 取 4、P3 取 6）。
-#:
-#: **不再有布局约束**（2026-09-17 第二次改动；2026-09-30 起逐单元存储）：
-#: 四面体段的细点度量逐单元一份、使用时广播，而不是切前 n_fine_tet 列（直边
-#: 四面体逐单元常数，见 `grid/high_order/order_jacobians.build_fine_metrics`
-#: 与 `core/fr_operators/volume_contract.get_overintegration_context`）。第一版的"切列"要求 `n_fine_tet <=
-#: (oo_prism+1)^3`，把 P3 夹到 5；而去混叠误差在 `oo = 2*order` 处断崖式
-#: 下降，P3 被夹住只拿到 18.6 倍中的 13000 倍：
-#:
-#:     P3  oo=3  6.26e-2   oo=4  2.66e-2   oo=5  3.37e-3   oo=6  4.80e-6
-#:
-#: 所以现在 P1/P2/P3 都取到理想的 `2*order`。
-NATIVE_TET_OVERINTEGRATION_MAX_ORDER = 6
-
-
 def native_tet_n_fine(over_order: int) -> int:
     """native 四面体在 `over_order` 下的**真实**细点数。"""
     oo = int(over_order)
     return (oo + 1) * (oo + 2) * (oo + 3) // 6
-
-
-def resolve_tet_overintegration_max_order() -> int:
-    """读 `AFCFD_TET_OVERINT_MAX_ORDER`，默认
-    `NATIVE_TET_OVERINTEGRATION_MAX_ORDER`。
-
-    实现在 `fr/overintegration_order.py`（与原生棱柱共用同一份
-    env 解析，见该模块文档"为什么单独一个模块"）；这里只是保留四面体
-    自己的公开名与默认值。
-    """
-    return resolve_native_overintegration_max_order(
-        "AFCFD_TET_OVERINT_MAX_ORDER", NATIVE_TET_OVERINTEGRATION_MAX_ORDER)
-
-
-def resolve_tet_overintegration_order(
-    order: int, n_fine_layout: Optional[int] = None
-) -> int:
-    """定四面体实际用的 over_order（`rule*order` 与自身上限取 min）。
-
-    Args:
-        order: 求解阶数 P
-        n_fine_layout: **已废弃、被忽略**。第一版有第三条"布局约束"
-            `native_tet_n_fine(oo) <= (oo_prism+1)^3`，因为四面体段的细点
-            度量是切共用数组的前 n_fine_tet 列。现在改成第 0 列广播
-            （`volume_contract.get_overintegration_context`），那条约束
-            消失。形参保留只为不破坏既有调用点/测试的签名，传什么都不影响
-            返回值。
-
-    Returns:
-        实际 over_order（>= order；等于 order 时过积分退化为恒等）。
-    """
-    return resolve_native_overintegration_order(
-        order, "AFCFD_TET_OVERINT_MAX_ORDER",
-        NATIVE_TET_OVERINTEGRATION_MAX_ORDER)

@@ -63,10 +63,7 @@ P1/P2/P3 都取到理想的 `2*order`（2/4/6）。
 import numpy as np
 import pytest
 
-from autoflowcfd.fr.native_tet.overintegration import (
-    NATIVE_TET_OVERINTEGRATION_MAX_ORDER,
-    resolve_tet_overintegration_order,
-)
+from autoflowcfd.fr.overintegration_order import overintegration_order
 from autoflowcfd.fr.native_tet.basis import (
     build_native_tet_operators,
     restricted_tet_modes,
@@ -155,7 +152,7 @@ def test_tet_cap_no_longer_truncates_dealiasing_at_any_production_order():
     * 旧状态：四面体继承坍缩基那条 `OVERINTEGRATION_MAX_ORDER = 3`，于是
       `P2 需要 4 -> 得 3`（截断）、`P3 需要 6 -> 得 3 == order`（过积分
       完全失效）。当时这份测试钉的是"这个已知缺口别被悄悄改掉"。
-    * 现状：四面体有自己的上限 `NATIVE_TET_OVERINTEGRATION_MAX_ORDER = 6`
+    * 现状：过积分阶数恒为 `2*order`（`fr/overintegration_order.py`），不另设上限
       （本文件上方那张条件数实测表就是它的依据：oo=6 时 cond(V)=3.86e3，
       而坍缩基 N=4 就已到约 1e14），坍缩基那个常量已随坍缩棱柱基一并
       删除。P1/P2/P3 分别取到 2/4/6，全部等于理想值。
@@ -163,13 +160,9 @@ def test_tet_cap_no_longer_truncates_dealiasing_at_any_production_order():
     代价与收益都已量过，见 `test_overintegration_cap_cost.py`
     （P2 3400 倍、P3 18600 倍的去混叠误差改善）。
     """
-    assert NATIVE_TET_OVERINTEGRATION_MAX_ORDER == 6, (
-        f"四面体过积分上限变成了 {NATIVE_TET_OVERINTEGRATION_MAX_ORDER}；"
-        f"若是有意调整，请同步更新本文件的条件数实测表与 "
-        f"test_overintegration_cap_cost.py 量出的代价数字")
     rule = 2
     for order in (1, 2, 3):
-        got = resolve_tet_overintegration_order(order)
+        got = overintegration_order(order)
         assert got == rule * order, (
             f"P{order} 四面体 over_order={got}，理想 {rule * order}——"
             f"被夹住了，去混叠精度低于可达水平")

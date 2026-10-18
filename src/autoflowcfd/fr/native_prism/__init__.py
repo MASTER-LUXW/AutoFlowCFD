@@ -15,9 +15,29 @@
 四面体当年有完全同类的病理，解法是整套换成 native PKD 基。本子包是棱柱侧
 的同一条路。
 
+## 为什么只剩原生基（坍缩棱柱基 2026-09-20 退出默认、2026-09-23 删除）
+
+删除前的负控制实测（代码删了，证据仍然有效）：
+
+    判据                              坍缩        原生
+    真实网格 179,237 单元 P1+LES      第148步 nan  246步单调降2.5x
+    等熵涡 P2（800 棱柱、CFL 0.1）    第23步非有限 150步降到初值0.557
+    Couette 精确保持性 P2             1.78e-2     8.40e-9（210万倍）
+    伪横流最小复现 P2 CFL 0.1         第82步 nan   400步有限 5.25e-2
+    GCL 残差 P2 / P3                  1.5e-15 /    7.1e-17 /
+                                      4.5e-14      1.4e-16
+    过积分后体积项误差 P2             9.5e-3      2.9e-12（机器零）
+    cond(V) oo=4 / max|D| oo=4        4.72e5 /    6.33e1 /
+                                      33928.8      7.7
+    粘性算子动量块 max Re             +5.80e+00   +0.00e+00
+
+坍缩档还与内部面 IP 罚项数学上不兼容：罚项须经 DG 提升 `M^-1 ∮`，原生路径用 `lift_native` 满足，坍缩路径的界面项
+走 1D Radau/VCJH 修正函数，同一个罚项把动量块从严格耗散变成 10 个增长模态。2026-10-18 起迁移期开关
+`AFCFD_PRISM_BASIS`（`mode.py`）一并删除；checkpoint 仍记录棱柱基并拒绝非原生基写的文件
+（`core/utils/checkpoint_load.py::_check_prism_basis`）。
+
 ## 文件划分（按功能逻辑）
 
-    mode.py            迁移期开关 `AFCFD_PRISM_BASIS`（终态：删掉它）
     triangle_basis.py  三角形 PKD/Dubiner 基 + Warp & Blend 节点
     basis.py           棱柱 = 三角形 ⊗ 直线：节点/Vandermonde/微分算子/
                        几何映射/解析雅可比
@@ -55,11 +75,6 @@ from .face import (
     native_prism_face_points_physical,
     native_prism_mode_norm_squared,
 )
-from .mode import (
-    PRISM_BASIS_MODES,
-    prism_basis_is_native,
-    resolve_prism_basis_mode,
-)
 from .triangle_basis import (
     build_native_tri_vandermonde,
     eval_tri_modes,
@@ -72,9 +87,6 @@ from .triangle_basis import (
 
 __all__ = [
     # mode
-    "PRISM_BASIS_MODES",
-    "prism_basis_is_native",
-    "resolve_prism_basis_mode",
     # triangle
     "build_native_tri_vandermonde",
     "eval_tri_modes",

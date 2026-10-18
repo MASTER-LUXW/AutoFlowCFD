@@ -72,7 +72,7 @@ def build_face_metrics(
     )
 
     # 真实 bug 修复的第二部分（2026-08-23）：P1+ 内部面主通量（
-    # inviscid_kernel.py/inviscid_kernel_colored.py）与 troubled_cell.py
+    # inviscid_kernel.py）与 troubled_cell.py
     # 机制2诊断此前用的"自洽方向"（`own_dir_outward`/`a0,a1,a2`）是对
     # SP 网格上的 adj(J) 做 Lagrange 外插到 FP，不是本次同款的逐点精确
     # 求值——这里预计算 owner/neighbor 两侧各自的精确 adj(J) 行（未归一化、

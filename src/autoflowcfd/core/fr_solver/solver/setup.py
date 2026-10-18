@@ -179,18 +179,10 @@ class _SolverSetupMixin:
         # 2026-09-16：这三行原先写在上面 `if adaptive_cfl and ...` 的
         # **then 分支里**，所以关掉自适应 CFL（含全部 DUAL_TIME 运行）
         # 时它们一行都不打印——恰好复刻了它本该消除的那个问题。已移到
-        # 分支外，与 CFL 档无关。同时补上 AUSM+up 预处理档：它决定壁面
-        # 压力是否被推进 P5± 的饱和分支（legacy 档在固壁上有 7.3 倍虚假
-        # 超压，见 fr_operators/kernels.py 模块级 PRECOND_* 常量上方的
-        # 长注释），是比滤波档更强的物理开关，绝不能只能靠命令行考古。
-        from autoflowcfd.core.fr_operators.kernels import (
-            ausm_precond_mode_label as _pm_label,
-            resolve_ausm_precond_mode as _pm_resolve,
-        )
+        # 分支外，与 CFL 档无关。
         _av = ("enabled (entropy sensor, alpha=%g)" % self.artificial_viscosity_alpha
                if self.artificial_viscosity_enabled else "disabled")
         print(f"   Artificial viscosity: {_av}")
-        print(f"   AUSM+up precond mode: {_pm_label(_pm_resolve())}")
 
         # DUAL_TIME 专用：物理时间层 n-1 的解（BDF2 时间导数项需要），
         # None 表示还没有跑过物理步（下一步会退化为 BDF1），见 step()

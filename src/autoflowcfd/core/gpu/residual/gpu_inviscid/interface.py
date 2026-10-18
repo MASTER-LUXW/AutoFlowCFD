@@ -4,7 +4,6 @@
 """
 
 
-from autoflowcfd.core.fr_operators.kernels import resolve_ausm_precond_mode
 
 from autoflowcfd.core.gpu import get_cupy
 
@@ -107,7 +106,7 @@ def _lift_native_contrib(cp, face_op, lift_native, ref_area_weight, jump):
 
 def _compute_interface_correction_gpu(
     Q_gpu, adj_j, det_jacs, flat_face_gpu, Q_ghost_gpu,
-    n_cells, n_sps, device_id, mach_ref, precond_mode=None,
+    n_cells, n_sps, device_id, mach_ref,
 ):
     """GPU 界面校正计算（按图着色逐色处理）。
 
@@ -146,9 +145,6 @@ def _compute_interface_correction_gpu(
     已经过详细验证的 CPU kernel 逐字核对；请在有真实 GPU 的环境上跑
     该新增测试文件做最终确认。
     """
-    if precond_mode is None:
-        precond_mode = resolve_ausm_precond_mode()
-    precond_mode = int(precond_mode)
 
     cp = get_cupy()
     ff = flat_face_gpu
@@ -212,7 +208,6 @@ def _compute_interface_correction_gpu(
             nO = Q_o.shape[0]
             flux_o = _ausm_up_flux_batch_gpu(
                 Q_o.reshape(nO, n_fp, 5), Q_n.reshape(nO, n_fp, 5), direction_o, mach_ref,
-                precond_mode,
             )
             # 只施加公共通量：本侧通量迹已并进体积算子 K（fr/face_flux_trace.py）
             F_tilde_common_o = flux_o * adj_mag_o[..., None]
@@ -261,7 +256,6 @@ def _compute_interface_correction_gpu(
 
             flux_n = _ausm_up_flux_batch_gpu(
                 Q_n_native.reshape(nN, n_fp, 5), Q_o_at_n.reshape(nN, n_fp, 5), direction_n, mach_ref,
-                precond_mode,
             )
             F_tilde_common_n = flux_n * adj_mag_n[..., None]
 

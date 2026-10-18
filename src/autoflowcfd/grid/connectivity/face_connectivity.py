@@ -220,11 +220,7 @@ class FRFaceConnectivity:
 
         Args:
             n_prism_cells: 棱柱单元数（"棱柱在前"排列下的分界）
-            prism_native: 是否同时把棱柱面翻译成原生编码。由调用方从
-                `fr/native_prism/mode.py::prism_basis_is_native()` 取 ——
-                **必须与 `FROperators`/`build_order_geometry` 读到的是
-                同一个值**，三者不一致会让面算子、体积算子、几何度量
-                分属不同的基，那不会报错、只会给出错的残差。
+            prism_native: 是否同时把棱柱面翻译成原生编码（棱柱只有原生基，生产调用恒为 True）。
         """
         owner_cube_face = self.owner_cube_face.copy()
         neighbor_cube_face = self.neighbor_cube_face.copy()

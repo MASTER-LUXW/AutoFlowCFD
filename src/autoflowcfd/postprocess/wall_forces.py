@@ -41,7 +41,7 @@ class WallSamples:
 @njit(cache=True, parallel=True)
 def _wall_point_fluxes(rec, ghost, fp, owner_cell, owner_face_op, E_all, adj_rows, ref_w, ip_length,
                        Q, Q_ghost, grad_vel, grad_T, mu_t, vbc_kind,
-                       mach_ref, precond_mode, mu, Pr, Pr_t, c_ip, p_ref, viscous):
+                       mach_ref, mu, Pr, Pr_t, c_ip, p_ref, viscous):
     m = rec.shape[0]
     f_inv = np.zeros((m, 3))
     f_vis = np.zeros((m, 3))
@@ -54,7 +54,7 @@ def _wall_point_fluxes(rec, ghost, fp, owner_cell, owner_face_op, E_all, adj_row
         Q_o = _extrap_matmul(Q[oc], E)[0]
         a = adj_rows[f, i]
         w = ref_w[i]
-        F = inviscid_common_flux_point(Q_o, Q_ghost[g, i], a, mach_ref, precond_mode)
+        F = inviscid_common_flux_point(Q_o, Q_ghost[g, i], a, mach_ref)
         for d in range(3):
             f_inv[k, d] = w * (F[1 + d] - p_ref * a[d])
         if viscous:
@@ -76,7 +76,6 @@ def sample_wall(solver, codes: Sequence[int], viscous: bool = True) -> WallSampl
     from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
     from autoflowcfd.core.fr_operators.flux_kernels import resolve_viscous_ip_constant
     from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient
-    from autoflowcfd.core.fr_operators.kernels import resolve_ausm_precond_mode
     from autoflowcfd.core.fr_residual.viscous_flux.constants import PRANDTL, PRANDTL_TURBULENT
     from autoflowcfd.core.fr_residual.viscous_flux.pointwise import compute_temperature
 
@@ -107,7 +106,7 @@ def sample_wall(solver, codes: Sequence[int], viscous: bool = True) -> WallSampl
         rec, ghost_pos.astype(np.int64), fp, flat.owner_cell, flat.owner_face_op, flat.boundary_extrap_native,
         flat.owner_adj_row_exact, flat.ref_area_weight, flat.ip_length,
         Q, Q_ghost, grad_vel, grad_T, mu_t, vbc_kind,
-        float(host.freestream["mach_ref"]), int(resolve_ausm_precond_mode()),
+        float(host.freestream["mach_ref"]),
         float(host.mu_molecular), PRANDTL, PRANDTL_TURBULENT, resolve_viscous_ip_constant(int(mesh.order)),
         float(host.freestream["p_inf"]), bool(viscous))
     wmles = getattr(host, "wall_model", None)

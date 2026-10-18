@@ -310,7 +310,6 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         #     破坏一致性；
         #   * 预处理只在 SSP-RK2/RK3 下启用（DUAL_TIME 的物理时间导数项
         #     需要单独推导 Gamma 的分配方式；时间精确显式推进同样不启用）；
-        #   * 环境变量 AFCFD_LOW_MACH_PRECOND / AFCFD_CFL_LEGACY 同样生效。
         # CFL 策略（控制器 or 固定 CFL）的唯一事实来源：
         # `time_integration/adaptive_cfl/policy.py::build_cfl_policy`（六个后端
         # 构造点此前各写一份且已分叉，见该模块文档）。

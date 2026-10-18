@@ -1,4 +1,4 @@
-"""AutoFlowCFD V2.0 - 原生棱柱基（`AFCFD_PRISM_BASIS=native`）体积项
+"""AutoFlowCFD V2.0 - 原生棱柱基体积项
 去混叠（过积分）算子。
 
 去混叠的物理动机与基无关，完整记录在
@@ -66,7 +66,7 @@ from .basis import (
 # `fr/overintegration_order.py`，那里是棱柱两档与四面体共用的唯一事实
 # 来源。本模块只负责矩阵构造，不做 re-export —— 全仓库唯一的调用点
 # （`fr/operators/build.py`）只需要下面这个构造函数，而阶数是由
-# `overintegration_order.resolve_prism_overintegration_order` 在那里
+# `overintegration_order.overintegration_order` 在那里
 # 直接解析的。多一层 re-export 就多一份要同步的名单。
 
 
@@ -77,7 +77,7 @@ def build_native_prism_overintegration_operators(
 
     Args:
         order: 当前求解阶数 P（coarse）
-        over_order: 过积分阶数（由 `resolve_prism_overintegration_order`
+        over_order: 过积分阶数（由 `overintegration_order`
             给出）
 
     Returns:

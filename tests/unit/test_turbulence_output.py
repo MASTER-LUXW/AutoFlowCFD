@@ -81,7 +81,7 @@ def test_checkpoint_carries_model_means_not_state_slots(tmp_path):
     state = SimpleNamespace(U=U, Q=U.copy(), n_sps=8, n_vars=7)
     solver = SimpleNamespace(state=state, order=1, current_order=1, turb_model=m,
                              mesh=SimpleNamespace(n_prism_cells=2, jacobians={"det_jacs": np.ones(16)}),
-                             freestream={"rho_inf": 1.225, "vel_inf": 30.0, "p_inf": 101325.0}, wall_treatment="resolved",
+                             freestream={"rho_inf": 1.225, "vel_inf": 30.0, "p_inf": 101325.0}, wall_treatment="resolved", low_mach_precond=True,
                              time_integrator=SimpleNamespace(scheme=TimeIntegrationScheme.SSP_RK3))
     init_production_ramp(solver, TimeIntegrationScheme.SSP_RK3)     # 真实求解器在构造时设置
     write_checkpoint(solver, str(tmp_path), 7, "volume.nas", order=1, turbulence_model="sst",

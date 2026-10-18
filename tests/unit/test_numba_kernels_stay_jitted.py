@@ -14,7 +14,7 @@ SST 拆包时拆包工具丢掉了 `_strain_vorticity_magnitude_kernel` 的
 
 仓库里模块级 `*_kernel` 函数共 24 个，其中没有 numba 装饰器的 4 个全是
 `_get_*_kernel` 这种**返回核的工厂函数**（构造并缓存 CUDA/numba 核）。所以
-规则可以没有例外：名为 `*_kernel`（含 `*_kernel_colored` 等变体）、且不以
+规则可以没有例外：名为 `*_kernel`（含 `*_kernel_xxx` 等变体）、且不以
 `_get_` 开头的模块级函数，静态上
 必须带 numba 装饰器，运行时导入后必须是 numba 的 Dispatcher。
 
@@ -46,7 +46,7 @@ def _kernels():
         for n in tree.body:
             if not isinstance(n, ast.FunctionDef):
                 continue
-            # `*_kernel` 与 `*_kernel_colored` 这类变体都算核
+            # `*_kernel` 与 `*_kernel_xxx` 这类变体都算核
             is_kernel = n.name.endswith("_kernel") or "_kernel_" in n.name
             if is_kernel and not n.name.startswith("_get_"):
                 decs = [ast.unparse(d.func if isinstance(d, ast.Call) else d)

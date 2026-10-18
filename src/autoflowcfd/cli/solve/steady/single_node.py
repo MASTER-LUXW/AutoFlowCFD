@@ -23,7 +23,7 @@ from autoflowcfd.core.time_integration.base import STEADY_DT
 
 def _run_single_node(
     *,
-    aoa_deg, aos_deg, artificial_viscosity_alpha, artificial_viscosity_enabled, wall_treatment,
+    aoa_deg, aos_deg, artificial_viscosity_alpha, artificial_viscosity_enabled, wall_treatment, low_mach_precond,
     backend, cfl_max, cfl_min, cfl_start, checkpoint_interval,
     gpu_device, init_checkpoint, input_file, max_iter, mu_molecular, order,
     output_dir, p_inf, phase_max_iter, reference_area, residual_drop_threshold,
@@ -53,6 +53,7 @@ def _run_single_node(
         artificial_viscosity_enabled=artificial_viscosity_enabled,
         artificial_viscosity_alpha=artificial_viscosity_alpha,
         wall_treatment=wall_treatment,
+        low_mach_precond=low_mach_precond,
     )
 
     if init_checkpoint:

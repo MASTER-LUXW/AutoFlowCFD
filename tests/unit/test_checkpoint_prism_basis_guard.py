@@ -37,9 +37,8 @@ def _manager(tmp_path):
 def _write(tmp_path):
     """写一份当前（原生）基下的 checkpoint。
 
-    不再有 `basis` 形参：`AFCFD_PRISM_BASIS=collapsed` 现在会让
-    `resolve_prism_basis_mode()` 直接报错（坍缩棱柱基已删除），所以坍缩
-    时代的 checkpoint 只能靠下面 `_relabel` 直接改 HDF5 属性来伪造。
+    不再有 `basis` 形参：坍缩棱柱基已删除（2026-10-18 起连同迁移期开关 `AFCFD_PRISM_BASIS`），
+    坍缩时代的 checkpoint 只能靠下面 `_relabel` 直接改 HDF5 属性来伪造。
     """
     mgr = _manager(tmp_path)
     path = mgr.save(
@@ -125,25 +124,3 @@ def test_refusal_does_not_advise_the_deleted_collapsed_mode(tmp_path):
         msg = str(exc.value)
         assert "AFCFD_PRISM_BASIS=collapsed" not in msg
         assert "从头开始" in msg
-
-
-def test_collapsed_mode_cannot_be_requested_at_all():
-    """护栏的另一半：环境变量本身已经不接受 `collapsed`。
-
-    否则"拒绝旧 checkpoint"这条判据可以被一次 `AFCFD_PRISM_BASIS=collapsed`
-    绕过成"两边都是 collapsed、放行"。
-    """
-    import os
-
-    from autoflowcfd.fr.native_prism.mode import resolve_prism_basis_mode
-
-    old = os.environ.get("AFCFD_PRISM_BASIS")
-    os.environ["AFCFD_PRISM_BASIS"] = "collapsed"
-    try:
-        with pytest.raises(ValueError, match="collapsed"):
-            resolve_prism_basis_mode()
-    finally:
-        if old is None:
-            os.environ.pop("AFCFD_PRISM_BASIS", None)
-        else:
-            os.environ["AFCFD_PRISM_BASIS"] = old

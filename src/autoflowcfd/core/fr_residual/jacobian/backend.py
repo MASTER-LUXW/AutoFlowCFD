@@ -23,8 +23,6 @@ from typing import Callable, Optional
 
 import numpy as np
 
-from autoflowcfd.core.fr_operators.kernels import resolve_ausm_precond_mode
-
 from .assemble import MeanFlowLinearization, assemble_mean_flow_blocks
 from .coupling import CouplingBlocks, CouplingGroup
 
@@ -56,7 +54,7 @@ class MeanFlowBlockAssembler:
         为 compact 排列），`None` 表示没有该项。`wall_model`：残差用的同一个平衡壁面模型对象（None 表示没有）。"""
         self.ctx = MeanFlowLinearization(
             mesh=mesh, ops=ops, ghost_provider=ghost_provider, mu=float(mu), mach_ref=float(mach_ref),
-            precond_mode=resolve_ausm_precond_mode(), low_mach=bool(low_mach),
+            low_mach=bool(low_mach),
             mu_t=None if mu_t is None else np.ascontiguousarray(_host(mu_t), dtype=np.float64),
             nu_av=None if nu_av is None else np.ascontiguousarray(_host(nu_av), dtype=np.float64), flat=flat,
             wall_model=wall_model)

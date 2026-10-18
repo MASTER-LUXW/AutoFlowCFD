@@ -18,7 +18,6 @@ import pytest
 
 from autoflowcfd.core.fr_operators.artificial_viscosity import artificial_diffusion_residual
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
-from autoflowcfd.core.fr_operators.kernels import resolve_ausm_precond_mode
 from autoflowcfd.core.fr_residual.inviscid import compute_inviscid_residual_fr, conserved_to_primitive
 from autoflowcfd.core.fr_residual.jacobian import MeanFlowLinearization, assemble_mean_flow_blocks
 from autoflowcfd.core.fr_residual.viscous_flux import compute_viscous_residual_fr
@@ -113,7 +112,7 @@ def _compare(mesh, ops, provider, U, *, mu_t=None, low_mach=True, flat=None, nu_
     fd = CellBlockJacobian(res, u0, r0, SCALES, n_sps=mesh.n_sps_per_cell, cell_is_prism=cell_is_prism,
                            n_real_prism=npr, n_real_tet=nte, colors=colors)
     ctx = MeanFlowLinearization(mesh=mesh, ops=ops, ghost_provider=provider, mu=MU, mach_ref=MACH_REF,
-                                precond_mode=resolve_ausm_precond_mode(), low_mach=low_mach, mu_t=mu_t, flat=flat,
+                                low_mach=low_mach, mu_t=mu_t, flat=flat,
                                 nu_av=nu_av, wall_model=wall_model)
     bp, bt = assemble_mean_flow_blocks(ctx, U, residual=r0.reshape(U.shape))
     worst = 0.0
@@ -233,7 +232,7 @@ def test_coupling_blocks_match_dense_difference_with_artificial_viscosity(kind):
     u0 = U.reshape(-1, 5)
     r0 = res(u0)
     ctx = MeanFlowLinearization(mesh=mesh, ops=ops, ghost_provider=provider, mu=MU, mach_ref=MACH_REF,
-                                precond_mode=resolve_ausm_precond_mode(), low_mach=True, nu_av=nu_av)
+                                low_mach=True, nu_av=nu_av)
     _, _, coupling = assemble_mean_flow_blocks(ctx, U, residual=r0.reshape(U.shape), want_coupling=True)
     npr, nte = real_sps_per_cell(1)
     n_sps = mesh.n_sps_per_cell
@@ -288,7 +287,7 @@ def test_wall_stress_block_matches_difference_of_the_wall_term(kind, low_mach, m
     wm = EquilibriumWallModel()
     r0 = _Residual(mesh, ops, provider, None, low_mach, None, None, wm)(U.reshape(-1, 5)).reshape(U.shape)
     common = dict(mesh=mesh, ops=ops, ghost_provider=provider, mu=MU, mach_ref=MACH_REF,
-                  precond_mode=resolve_ausm_precond_mode(), low_mach=low_mach)
+                  low_mach=low_mach)
     with_wm = assemble_mean_flow_blocks(MeanFlowLinearization(**common, wall_model=wm), U, residual=r0)
     without = assemble_mean_flow_blocks(MeanFlowLinearization(**common), U, residual=r0)
 

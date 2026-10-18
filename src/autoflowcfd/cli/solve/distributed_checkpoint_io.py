@@ -36,6 +36,7 @@ def rebuild_distributed_solver_from_checkpoint(
     cfl_min: Optional[float] = None,
     time_scheme: Optional[str] = None,
     reference_area: Optional[float] = None,
+    low_mach_precond: Optional[bool] = None,
 ):
     """从 checkpoint 完整重建一个分布式求解器（不继续迭代）。
 
@@ -67,6 +68,8 @@ def rebuild_distributed_solver_from_checkpoint(
         time_scheme: 续算用的稳态格式覆盖（`rk3`/`newton-krylov`）；`None` 时沿用
             checkpoint 记录的格式——与单机续算同一个解析函数
             （`checkpoint_io/rebuild.py::resolve_resume_time_scheme`）。
+        low_mach_precond: 低马赫预处理覆盖；`None` 时沿用 checkpoint 记录（与单机续算同一个解析函数
+            `resolve_resume_low_mach_precond`）。
 
     Returns:
         (solver, iteration, metadata): 重建好的分布式求解器实例
@@ -118,8 +121,12 @@ def rebuild_distributed_solver_from_checkpoint(
     av_kwargs = dict(artificial_viscosity_enabled=physics["artificial_viscosity_enabled"],
                      artificial_viscosity_alpha=physics["artificial_viscosity_alpha"],
                      wall_treatment=physics["wall_treatment"])
-    from autoflowcfd.cli.solve.checkpoint_io.rebuild import resolve_resume_time_scheme
+    from autoflowcfd.cli.solve.checkpoint_io.rebuild import (
+        resolve_resume_low_mach_precond, resolve_resume_time_scheme,
+    )
     scheme = resolve_resume_time_scheme(time_scheme, metadata)
+    # 不是物理参数（不改定常解），但与 av_kwargs 走同样的四条构造路径
+    av_kwargs["low_mach_precond"] = resolve_resume_low_mach_precond(low_mach_precond, metadata)
 
     if multi_gpu and fully_distributed:
         # 多 GPU"完全分布式加载"（#1，2026-09-02 实现——此前这个组合被

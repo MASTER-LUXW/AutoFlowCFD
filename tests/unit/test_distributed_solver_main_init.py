@@ -168,14 +168,13 @@ class TestDistributedStepMatchesSingleMachine:
         return single, dist
 
     @pytest.mark.parametrize("precond", [False, True])
-    def test_local_dt_matches_single_machine(self, mesh_and_ops, precond, monkeypatch):
+    def test_local_dt_matches_single_machine(self, mesh_and_ops, precond):
         """先单独比对**步长**本身——它是本次补齐的核心产物，单独钉住能在
         出问题时直接指出是 dt 还是时间积分的问题。"""
-        monkeypatch.setenv("AFCFD_LOW_MACH_PRECOND", "1" if precond else "0")
         mesh, ops = mesh_and_ops
         rng = np.random.default_rng(31337)
         U0 = _nonuniform_U(mesh, rng)
-        single, dist = self._build(mesh, ops, U0, TimeIntegrationScheme.SSP_RK3)
+        single, dist = self._build(mesh, ops, U0, TimeIntegrationScheme.SSP_RK3, low_mach_precond=precond)
         assert single.low_mach_precond_enabled is precond
         assert dist.low_mach_precond_enabled is precond
 
@@ -191,12 +190,12 @@ class TestDistributedStepMatchesSingleMachine:
                 "预处理没有真的放大 dt，本用例失去判别力")
 
     @pytest.mark.parametrize("precond", [False, True])
-    def test_one_step_matches_single_machine(self, mesh_and_ops, precond, monkeypatch):
-        monkeypatch.setenv("AFCFD_LOW_MACH_PRECOND", "1" if precond else "0")
+    def test_one_step_matches_single_machine(self, mesh_and_ops, precond):
         mesh, ops = mesh_and_ops
         rng = np.random.default_rng(4242)
         U0 = _nonuniform_U(mesh, rng)
-        single, dist = self._build(mesh, ops, U0, TimeIntegrationScheme.SSP_RK3)
+        single, dist = self._build(mesh, ops, U0, TimeIntegrationScheme.SSP_RK3, low_mach_precond=precond)
+        assert single.low_mach_precond_enabled is precond and dist.low_mach_precond_enabled is precond
 
         single.step(1e-6)
         dist.step(1e-6)

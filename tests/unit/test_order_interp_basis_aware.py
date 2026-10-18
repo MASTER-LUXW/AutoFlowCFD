@@ -53,7 +53,7 @@ def test_linear_field_is_lifted_exactly(p, q):
         err = np.abs(got[sl][:, :n_real] - want[sl][:, :n_real]).max()
         scale = float(np.abs(want[sl][:, :n_real]).max())
         assert err / scale < 1e-13, (
-            f"{basis} {name} P{p}->P{q}: 线性场延拓相对误差 {err/scale:.3e} "
+            f"{name} P{p}->P{q}: 线性场延拓相对误差 {err/scale:.3e} "
             f"不是机器精度 —— 延拓算子与该单元类型的解点/模态族不匹配")
 
 
@@ -132,7 +132,6 @@ def test_negative_order_raises(bad):
 
 
 def test_shape_mismatch_raises(monkeypatch):
-    monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
     f = np.zeros((4, 27))
     with pytest.raises(ValueError, match="全局宽度"):
         apply_order_interp(f, 2, 1, 2)      # 27 是 P2 的宽度，不是 P1 的

@@ -5,7 +5,6 @@
 """
 
 from __future__ import annotations
-import os
 from collections import deque
 from typing import Deque, List, Tuple
 from loguru import logger
@@ -152,13 +151,6 @@ class AdaptiveCFLController(_CFLGatesMixin, _CFLUpdateMixin):
         self.grow_block_ratio = grow_block_ratio
         self.mild_shrink_block_ratio = mild_shrink_block_ratio
 
-        # 环境变量 `AFCFD_CFL_LEGACY=1`：整体退回 2026-09-14 之前的行为
-        # （死区里 CFL 完全不动 + 轻度恶化单步立即收缩），供现场排查与
-        # 受控 A/B 用。与 `AFCFD_LOW_MACH_PRECOND` 同一原则："把这个新
-        # 机制单独关掉再跑一遍"必须是一条随时可用的路径、不需要改代码。
-        # 这条口子不是可选的锦上添花：本次做真实网格 CFL 对照时，"修复
-        # 前"的基线只能靠"进程在改动落盘之前启动"这种巧合来获得，没有
-        # 干净的 A/B 手段——这就是需要它的直接证据。
         # 三个 CFL 边界参数的协调（见模块文档第 11 条）：`cfl_min > cfl_max`
         # 是自相矛盾的配置，而 `cfl_max` 是调用方更强的意图声明（"这个问题
         # 在这个值以上不稳定"），所以以它为准把 `cfl_min` 钳下去。不静默：
@@ -206,13 +198,6 @@ class AdaptiveCFLController(_CFLGatesMixin, _CFLUpdateMixin):
                 f"所需的语义；要让控制器工作请让 cfl_max > cfl_start）"
             )
 
-        self.legacy_mode = os.environ.get("AFCFD_CFL_LEGACY") == "1"
-        if self.legacy_mode:
-            logger.warning(
-                "[AdaptiveCFL] AFCFD_CFL_LEGACY=1：已退回 2026-09-14 之前的"
-                "调节策略（死区不调节 + 轻度恶化单步立即收缩）。稳态收敛"
-                "步数会明显增多，仅用于对照/排查。"
-            )
     
         # 状态
         # 用**钳制后**的 self.cfl_start，不是局部形参 cfl_start——第 11 条的

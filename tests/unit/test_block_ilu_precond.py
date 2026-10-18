@@ -8,7 +8,6 @@
 import numpy as np
 
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
-from autoflowcfd.core.fr_operators.kernels import resolve_ausm_precond_mode
 from autoflowcfd.core.fr_residual.jacobian import MeanFlowLinearization, assemble_mean_flow_blocks
 from autoflowcfd.core.time_integration.implicit.block_ilu import BlockCouplingStructure, BlockILUPreconditioner
 from autoflowcfd.core.time_integration.implicit.cell_block_inverse import CellBlockJacobiPreconditioner
@@ -46,9 +45,9 @@ def _setup(kind, order, smooth=False):
     res = _Residual(mesh, ops, prov, None, True, None)
     r0 = res(U.reshape(-1, 5))
     ctx = MeanFlowLinearization(mesh=mesh, ops=ops, ghost_provider=prov, mu=MU, mach_ref=MACH_REF,
-                                precond_mode=resolve_ausm_precond_mode(), low_mach=True)
+                                low_mach=True)
     bp, bt, cp = assemble_mean_flow_blocks(ctx, U, residual=r0.reshape(U.shape), want_coupling=True)
-    nc, ns = mesh.n_cells, mesh.n_sps_per_cell
+    nc = mesh.n_cells
     npr, nte = real_sps_per_cell(order)
     cip = np.arange(nc) < mesh.n_prism_cells
     n_real = np.where(cip, npr, nte)

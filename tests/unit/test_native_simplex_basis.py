@@ -72,10 +72,10 @@ def test_generate_fr_operators_native_mode_populates_expected_fields():
     # 坍缩档受条件数上限 3 约束、细点数 `(oo+1)^3`；原生档上限 6、细点数
     # `(oo+1)^2(oo+2)/2`。此前这里复制了坍缩档那条公式。
     from autoflowcfd.fr.overintegration_order import (
-        prism_n_fine, resolve_prism_overintegration_order,
+        overintegration_order, prism_n_fine,
     )
 
-    over_order = resolve_prism_overintegration_order(order)
+    over_order = overintegration_order(order)
     # 细网格轴取 native **真实**细点数、不再填充到 (over_order+1)^3
     # （2026-09-17）：填充槽位恒为零、对结果零贡献，却让整条过积分链在
     # 空点上白算，其中 D_fine 的收缩是 O(n_fine^2)（P2 上 64^2/20^2 =
@@ -87,11 +87,8 @@ def test_generate_fr_operators_native_mode_populates_expected_fields():
     # 坍缩基条件数上限约束，那条上限的代价实测 P2 3400 倍、P3 18600 倍，
     # 见 tests/unit/test_overintegration_cap_cost.py）。所以这里不能再用
     # 棱柱的 over_order 去推四面体的细点数。
-    from autoflowcfd.fr.native_tet.overintegration import (
-        resolve_tet_overintegration_order,
-    )
-    over_order_tet = resolve_tet_overintegration_order(
-        order, prism_n_fine(over_order))
+    from autoflowcfd.fr.overintegration_order import overintegration_order
+    over_order_tet = overintegration_order(order)
     n_fine_native = (
         (over_order_tet + 1) * (over_order_tet + 2) * (over_order_tet + 3) // 6
     )

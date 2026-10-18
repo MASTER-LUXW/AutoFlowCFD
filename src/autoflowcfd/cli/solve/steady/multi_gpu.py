@@ -17,7 +17,7 @@ from autoflowcfd.core.time_integration.base import STEADY_DT
 
 def _run_multi_gpu(
     *,
-    aoa_deg, aos_deg, artificial_viscosity_alpha, artificial_viscosity_enabled, wall_treatment,
+    aoa_deg, aos_deg, artificial_viscosity_alpha, artificial_viscosity_enabled, wall_treatment, low_mach_precond,
     cfl_max, cfl_min, cfl_start, checkpoint_interval,
     fully_distributed, gpu_device, init_checkpoint, input_file, max_iter, mu_molecular, n_ranks,
     order, output_dir, p_inf, phase_max_iter, reference_area, residual_drop_threshold, rho_inf,
@@ -66,6 +66,7 @@ def _run_multi_gpu(
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
             wall_treatment=wall_treatment,
+            low_mach_precond=low_mach_precond,
             time_scheme=scheme_from_name(time_scheme),
         )
         solver = MultiGPUDistributedSolver.from_fully_distributed_package(
@@ -103,6 +104,7 @@ def _run_multi_gpu(
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
             wall_treatment=wall_treatment,
+            low_mach_precond=low_mach_precond,
             time_scheme=scheme_from_name(time_scheme).value,
         )
 

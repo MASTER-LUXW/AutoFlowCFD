@@ -31,7 +31,7 @@ from autoflowcfd.core.fr_operators.flux_kernels import (
 
 
 @njit(cache=True, inline='always')
-def inviscid_common_flux_point(Q_s, Q_x, adjrow, mach_ref, precond_mode):
+def inviscid_common_flux_point(Q_s, Q_x, adjrow, mach_ref):
     """无粘公共通量 `|a| F_AUSM(Q_s, Q_x, a/|a|)`，形状 (5,)。
 
     修正项的另一半——本侧通量——不在这里：它是细层体积通量多项式在本通量点上
@@ -52,7 +52,7 @@ def inviscid_common_flux_point(Q_s, Q_x, adjrow, mach_ref, precond_mode):
     normal[0] = a0 / adj_mag
     normal[1] = a1 / adj_mag
     normal[2] = a2 / adj_mag
-    F_common = compute_ausm_up_flux(Q_s, Q_x, normal, mach_ref, precond_mode)
+    F_common = compute_ausm_up_flux(Q_s, Q_x, normal, mach_ref)
     for v in range(5):
         F_common[v] *= adj_mag
     return F_common

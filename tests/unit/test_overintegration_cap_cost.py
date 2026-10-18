@@ -92,13 +92,6 @@ GAMMA, RHO, P0, U = 1.4, 1.225, 101325.0, 30.0
 _LEGACY_COLLAPSED_CAP = 3
 
 
-def _resolve_rule():
-    from autoflowcfd.fr.overintegration_order import (
-        resolve_overintegration_order_rule,
-    )
-
-    return resolve_overintegration_order_rule()
-
 #: 参照档：8 次已远高于任何被测档，用它当"精确"解
 _REF_OVER_ORDER = 8
 
@@ -232,21 +225,17 @@ class TestCapCostIsLarge:
         把"量到的收益"和"实际生效的配置"钉在同一个文件里，避免出现
         "收益量过了但默认值没改"这种状态（本项目此前真实发生过）。
         """
-        from autoflowcfd.fr.native_tet.overintegration import (
-            resolve_tet_overintegration_order,
-        )
+        from autoflowcfd.fr.overintegration_order import overintegration_order
 
-        if _resolve_rule() != 2:
-            pytest.skip("AFCFD_OVERINT_ORDER_RULE 非默认 2x")
         # 布局宽度不再约束（四面体段的细点度量改成"第 0 列广播"），
         # 所以 P2/P3 都取到理想的 2*order
-        assert resolve_tet_overintegration_order(2) == 4
+        assert overintegration_order(2) == 4
         err_old = _median_rel_error(2, 3)
         err_new = _median_rel_error(2, 4)
         assert err_new < err_old / 100.0, (
             f"P2 实际生效的 oo=4 误差 {err_new:.3e} 相对旧上限 oo=3 的 "
             f"{err_old:.3e} 只改善了 {err_old/err_new:.1f} 倍（实测 3400 倍）")
-        assert resolve_tet_overintegration_order(3) == 6
+        assert overintegration_order(3) == 6
         err_p3_old = _median_rel_error(3, 3)
         err_p3_new = _median_rel_error(3, 6)
         assert err_p3_new < err_p3_old / 100.0, (

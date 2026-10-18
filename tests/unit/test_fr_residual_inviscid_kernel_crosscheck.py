@@ -24,7 +24,6 @@ from autoflowcfd.core.fr_residual.inviscid import (
     DefaultGhostProvider,
 )
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
-from autoflowcfd.core.fr_operators.kernels import resolve_ausm_precond_mode
 from autoflowcfd.core.fr_residual.inviscid_kernel import (
     compute_inviscid_interface_correction_kernel,
     compute_boundary_ghost_states,
@@ -81,33 +80,31 @@ def _compute_residual_via_new_kernel(U, mesh, ops, boundary_ghost_provider=None,
 
     residual = -div_comp / det_jacs[..., None]
 
-    # --- 界面项：新 kernel ---
+    # --- 界面项：生产界面核（按面着色逐颜色调用）---
     flat = get_flat_face_geometry(mesh, ops)
     Q_ghost = compute_boundary_ghost_states(flat, Q, ghost_provider)
-    n_threads = numba.get_num_threads()
-    correction = compute_inviscid_interface_correction_kernel(
-        Q, det_jacs,
-        flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
-        flat.owner_is_primary, flat.neighbor_is_primary,
-        flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
-        flat.neighbor_src0_cell, flat.neighbor_src0_tpl, flat.neighbor_src0_tid,
-        flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
-        flat.owner_src0_cell, flat.owner_src0_tpl, flat.owner_src0_tid,
-        flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
-        flat.mixed_nb_partner, flat.mixed_nb_mask,
-        flat.mixed_ow_partner, flat.mixed_ow_mask,
-        Q_ghost,
-        n_threads, mach_ref,
-        # precond_mode：与生产路径共用同一个解析器（见
-        # fr_operators/kernels.py::resolve_ausm_precond_mode）。这里走
-        # 默认档而不是写死常量，这样 CPU 内核新旧实现的交叉对照永远
-        # 比的是当前默认行为，不会在默认档变更后悄悄比一个已经不再
-        # 使用的档。
-        resolve_ausm_precond_mode(),
-        flat.owner_face_op, flat.neighbor_face_op,
-        flat.ref_area_weight,
-        flat.boundary_extrap_native, flat.lift_native,
-    )
+    correction = np.zeros(Q.shape[:2] + (5,))
+    for _color in range(flat.n_colors):
+        face_indices = flat.color_face_indices[_color]
+        if len(face_indices) == 0:
+            continue
+        compute_inviscid_interface_correction_kernel(
+            Q, det_jacs,
+            flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
+            flat.owner_is_primary, flat.neighbor_is_primary,
+            flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
+            flat.neighbor_src0_cell, flat.neighbor_src0_tpl, flat.neighbor_src0_tid,
+            flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
+            flat.owner_src0_cell, flat.owner_src0_tpl, flat.owner_src0_tid,
+            flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
+            flat.mixed_nb_partner, flat.mixed_nb_mask,
+            flat.mixed_ow_partner, flat.mixed_ow_mask,
+            Q_ghost,
+            face_indices, correction, mach_ref,
+            flat.owner_face_op, flat.neighbor_face_op,
+            flat.ref_area_weight,
+            flat.boundary_extrap_native, flat.lift_native,
+        )
     residual = residual + correction
     # 机制3（残差量级离群清零）已于 2026-09-19 从生产实现里删除，
     # 依据见 `core/fr_residual/inviscid.py`；本"新版"复制品同步去掉。
@@ -209,19 +206,11 @@ def test_new_kernel_matches_old_loop_nonuniform_perturbed_flow(order):
     assert max_diff < max(1e-12, scale * 1e-13), f"P={order}: max|old-new|={max_diff:.3e}, scale={scale:.3e}"
 
 
-# --- 多核并行 (阶段二) 验证：nt=1 vs nt=16 ---
+# --- 多核并行验证：nt=1 vs nt=16 ---
 #
-# `compute_inviscid_interface_correction_kernel` 现在用 `prange` +
-# 每线程私有缓冲区归约的方式并行（见该文件模块文档"多核并行"一节）。
-# 判据分两层，理由见该文档：
-#   1. nt=1 时 prange 的静态分块调度与 range(n_faces) 顺序完全一致，
-#      结果应该与串行版本逐位相等——这里通过"同一份代码在 nt=1 下自身
-#      稳定可复现"间接覆盖（重构没有引入 bug 这件事已经在开发阶段用
-#      并行化前的输出快照验证过，见开发记录，这里不重复维护快照文件）。
-#   2. nt=1 vs nt=16 的差异是多线程归约顺序不同带来的合法浮点重结合，
-#      应该在与"numpy/BLAS vs numba 标量重结合"同一量级的容差内——这才是
-#      这个测试真正要长期守护的不变量：以后改动 kernel 时，如果重结合
-#      误差意外跳到远超这个量级，说明改动引入了真正的问题。
+# 界面核按面着色、组内 `prange` 直接累加（见 `inviscid_kernel.py` 模块文档"多核并行"）。线程数不同只改变组内
+# 累加顺序，差异应在"numpy/BLAS vs numba 标量重结合"同一量级的容差内——以后改动核时，如果重结合误差意外
+# 跳到远超这个量级，说明改动引入了写冲突之类的真正问题。
 def _run_with_threads(order, nonuniform, n_threads):
     numba.set_num_threads(n_threads)
     mesh = _build_synthetic_mixed_mesh(order)

@@ -61,10 +61,8 @@ def _over_order(order):
     棱柱基分档 —— 坍缩档受条件数上限 3 约束，原生档走自己的上限。此前
     这里复制了坍缩档那条公式，原生档下会与算子实际用的阶数脱节。
     """
-    from autoflowcfd.fr.overintegration_order import (
-        resolve_prism_overintegration_order,
-    )
-    return resolve_prism_overintegration_order(order)
+    from autoflowcfd.fr.overintegration_order import overintegration_order
+    return overintegration_order(order)
 
 
 def _segmented(det, inv, n_prism):
@@ -97,10 +95,8 @@ def _over_order_tet(order):
     与棱柱共用的 jacobians_fine 布局宽度"三重约束定。P2 因此是 4（不是 3），
     P3 是 5（理想 6 被布局夹住）。
     """
-    from autoflowcfd.fr.native_tet.overintegration import (
-        resolve_tet_overintegration_order,
-    )
-    return resolve_tet_overintegration_order(order, _n_fine_prism(order))
+    from autoflowcfd.fr.overintegration_order import overintegration_order
+    return overintegration_order(order)
 
 
 class TestOperatorShapes:

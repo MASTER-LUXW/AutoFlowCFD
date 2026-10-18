@@ -45,7 +45,7 @@ class FROperators:
     # 文档）：order==0 时全部为 None（P0 走独立的有限体积残差路径，不需要）。
     #: 棱柱**实际**使用的过积分阶数（原名 `overint_order`，2026-09-19
     #: 改名对称化）。取值由 `fr/overintegration_order.py::
-    #: resolve_prism_overintegration_order` 按当前棱柱基分档给出：坍缩档
+    #: overintegration_order`（`2*order`）给出。
     #: `min(rule*order, 3)`（P1/P2/P3 = 2/3/3），原生档不设额外上限
     #: （2/4/6）。order==0 时为 0。
     overint_order_prism: int = 0
@@ -61,7 +61,7 @@ class FROperators:
     #: 四面体**实际**使用的过积分阶数（2026-09-17）。与
     #: `overint_order_prism` 可以不同：两者各走自己的基、各有自己的上限
     #: env，见 `native_tet.overintegration.
-    #: NATIVE_TET_OVERINTEGRATION_MAX_ORDER`。order>=1 时 >0。
+    #: `fr/overintegration_order.py::overintegration_order`（`2*order`）。order>=1 时 >0。
     overint_order_tet: int = 0
     overint_interp_c2f_tet: np.ndarray = None
     overint_interp_c2f_prism: np.ndarray = None
@@ -98,7 +98,7 @@ class FROperators:
     #
     # 坍缩棱柱基已于 2026-09-23 删除，所以这一整组**恒为非 None**；原先
     # 记录档位的那个字段随之删除（只有一条基，再记"当前是哪条"就是冗余）。
-    # 删除前后的对照数据见 `fr/native_prism/mode.py` 的模块函数文档。
+    # 删除前后的对照数据见 `fr/native_prism/__init__.py`。
     D_native_prism: np.ndarray = None
     ref_native_prism: np.ndarray = None
     n_native_sps_prism: int = None

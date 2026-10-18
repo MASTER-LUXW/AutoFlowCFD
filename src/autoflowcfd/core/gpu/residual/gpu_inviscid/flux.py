@@ -4,18 +4,11 @@
 """
 
 
-from autoflowcfd.core.fr_operators.kernels import (
-    PRECOND_LEGACY,
-    PRECOND_PHYSICAL,
-    PRECOND_PRESSURE_PHYSICAL,
-)
-
 from autoflowcfd.core.gpu import get_cupy
 
 
-def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref, precond_mode):
-    """GPU 批量 AUSM+up 通量计算（CuPy 向量化版本，含 Weiss-Smith 低马赫
-    数预处理）。与 kernels.py::compute_ausm_up_flux 逐字对应，理由/推导
+def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref):
+    """GPU 批量 AUSM+up 通量计算（CuPy 向量化版本，通量内部全部用物理声速）。与 kernels.py::compute_ausm_up_flux 逐字对应，理由/推导
     见该函数文档，这里不重复；两处必须同步修改（该文件模块文档要求
     "逐字对应"）。
 
@@ -50,12 +43,6 @@ def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref, precond_mode):
         Q_L, Q_R: (N, n_fp, 5) 左右状态
         normal: (N, n_fp, 3) 单位法向量——逐 FP 各自独立（不是逐面共享
             同一个值，见上方"真实 bug 修复"说明）
-        precond_mode: AUSM+up 预处理声速在通量内部的作用域（
-            kernels.py 的 PRECOND_PHYSICAL/PRECOND_PRESSURE_PHYSICAL/
-            PRECOND_LEGACY，语义与 CPU 端逐字对应，推导见该文件模块级
-            常量上方的长注释）。GPU 侧不存在 numba 磁盘缓存冻结全局量的
-            问题，但仍然按实参传入，以保证 CPU/GPU 交叉一致性测试能对
-            同一档逐项比对。
         mach_ref: 参考（自由来流）马赫数，见 kernels.py::
             compute_ausm_up_flux 文档
 
@@ -100,34 +87,9 @@ def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref, precond_mode):
     # core/fr_operators/kernels.py::compute_ausm_up_flux 的 P5 注释）。
     alpha_pressure = 3.0 / 16.0 * (-4.0 + 5.0 * fa * fa)
 
-    # Weiss-Smith 预处理声速（与 kernels.py::compute_ausm_up_flux 的
-    # _WEISS_SMITH_K=1.1 同一个安全裕度常数、同一套 beta2 公式）。
-    beta2 = cp.minimum(1.0, cp.maximum(cp.maximum(Mbar2, 1.1 * mach_ref**2), 1e-10))
-    sqrt_beta2 = cp.sqrt(beta2)
-
-    # 预处理声速的作用域按 precond_mode 分派，与 kernels.py::
-    # compute_ausm_up_flux 的 s_mass/s_pres 逐字对应（PRECOND_PHYSICAL
-    # 是默认值，此时两个因子都是 1.0、本函数精确退化为标准 AUSM+up）。
-    if precond_mode == PRECOND_PHYSICAL:
-        s_mass = 1.0
-        s_pres = 1.0
-    elif precond_mode == PRECOND_PRESSURE_PHYSICAL:
-        s_mass = sqrt_beta2
-        s_pres = 1.0
-    elif precond_mode == PRECOND_LEGACY:
-        s_mass = sqrt_beta2
-        s_pres = sqrt_beta2
-    else:
-        raise ValueError(f'未知 precond_mode: {precond_mode!r}')
-
-    a_half_m = s_mass * a_half
-    a_half_pr = s_pres * a_half
-
     # 两侧马赫数用界面公共声速归一、质量通量取迎风密度（标准 AUSM+up，与 CPU `kernels.compute_ausm_up_flux` 同式）
-    M_L = unL / cp.maximum(a_half_m, 1e-10)
-    M_R = unR / cp.maximum(a_half_m, 1e-10)
-    M_L_pr = unL / cp.maximum(a_half_pr, 1e-10)
-    M_R_pr = unR / cp.maximum(a_half_pr, 1e-10)
+    M_L = unL / cp.maximum(a_half, 1e-10)
+    M_R = unR / cp.maximum(a_half, 1e-10)
 
     # M+ / M-
     abs_ML = cp.abs(M_L)
@@ -148,30 +110,30 @@ def _ausm_up_flux_batch_gpu(Q_L, Q_R, normal, mach_ref, precond_mode):
     Kp = 0.25
     sigma_p = 1.0
     one_minus_sigma = cp.maximum(1.0 - sigma_p * Mbar2, 0.0)
-    Mp = -(Kp / fa) * one_minus_sigma * (pR - pL) / (rho_half * a_half_m**2)
+    Mp = -(Kp / fa) * one_minus_sigma * (pR - pL) / (rho_half * a_half**2)
     M_tot = M_half + Mp
-    mass_flux = a_half_m * cp.where(M_tot >= 0.0, M_tot * rhoL, M_tot * rhoR)
+    mass_flux = a_half * cp.where(M_tot >= 0.0, M_tot * rhoL, M_tot * rhoR)
 
     # P+ / P-（用压力分裂专属的马赫数 M_*_pr，见上方 s_pres 分派）
-    abs_ML_pr = cp.abs(M_L_pr)
-    abs_MR_pr = cp.abs(M_R_pr)
+    abs_ML_pr = cp.abs(M_L)
+    abs_MR_pr = cp.abs(M_R)
     Pp_L = cp.where(
         abs_ML_pr >= 1.0,
-        0.5 * (1.0 + cp.sign(M_L_pr)),
-        0.25 * (M_L_pr + 1.0)**2 * (2.0 - M_L_pr)
-        + alpha_pressure * M_L_pr * (M_L_pr**2 - 1.0)**2,
+        0.5 * (1.0 + cp.sign(M_L)),
+        0.25 * (M_L + 1.0)**2 * (2.0 - M_L)
+        + alpha_pressure * M_L * (M_L**2 - 1.0)**2,
     )
     Pm_R = cp.where(
         abs_MR_pr >= 1.0,
-        0.5 * (1.0 - cp.sign(M_R_pr)),
-        0.25 * (M_R_pr - 1.0)**2 * (2.0 + M_R_pr)
-        - alpha_pressure * M_R_pr * (M_R_pr**2 - 1.0)**2,
+        0.5 * (1.0 - cp.sign(M_R)),
+        0.25 * (M_R - 1.0)**2 * (2.0 + M_R)
+        - alpha_pressure * M_R * (M_R**2 - 1.0)**2,
     )
 
     # pu 速度扩散
     Ku = 0.75
     p_half = (Pp_L * pL + Pm_R * pR
-              - Ku * Pp_L * Pm_R * (rhoL + rhoR) * fa * a_half_pr * (unR - unL))
+              - Ku * Pp_L * Pm_R * (rhoL + rhoR) * fa * a_half * (unR - unL))
 
     # 上风通量
     upwind_L = (mass_flux >= 0.0)

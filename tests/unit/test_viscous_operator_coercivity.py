@@ -95,7 +95,6 @@ _MU = 1.8e-3
 
 
 def _uniform_solver(monkeypatch):
-    monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
     from autoflowcfd.core.fr_solver import FRSolver
     from autoflowcfd.core.time_integration import TimeIntegrationScheme
 

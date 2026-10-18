@@ -227,14 +227,10 @@ def check_residual_finite(res, iteration: int, order=None,
         f"       adaptive_cfl.py 模块文档第 12 条）\n"
         f"    2. 网格质量门未通过而用 --skip-quality-check 强行求解 ——\n"
         f"       退化单元会把残差放大若干个量级\n"
-        f"    3. AUSM+up 预处理档设成了 legacy（AFCFD_AUSM_PRECOND_MODE）\n"
-        f"       —— 该档在固壁上有 7.3 倍虚假超压，实测会在固定 CFL 0.03\n"
-        f"       下于百步量级发散，见 fr_operators/kernels.py 的 PRECOND_*\n"
-        f"       常量注释\n"
         f"  先看日志里最后几行 `Max=...(var@cellN, vol X%)` 的 `vol X%`：\n"
         f"  那是最大残差单元的体积分位。若它持续很小（<1%，即该单元属于\n"
         f"  全场体积最小的 1%），成因是上面第 2 条（退化薄单元被 1/det(J)\n"
         f"  放大），换 CFL 或换通量格式都只能推迟发散、不能避免；若它是\n"
-        f"  正常量级，才去查第 1、3 条。\n"
+        f"  正常量级，才去查第 1 条。\n"
         + (f"  {extra_hint}\n" if extra_hint else "")
     )

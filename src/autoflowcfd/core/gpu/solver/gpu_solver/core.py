@@ -91,9 +91,8 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
                 同一个取值规则（`fr_solver/solver/threads.py::configure_numba_threads`）；此前单 GPU 从不设置
             rho_inf, vel_inf, p_inf: 自由来流条件
             mu_molecular: 分子动力粘度
-            low_mach_precond: 是否启用低马赫数伪时间预处理（默认 True，
-                与 CPU 版一致）。环境变量 AFCFD_LOW_MACH_PRECOND=0/1
-                优先于本参数。
+            low_mach_precond: 是否启用低马赫数伪时间预处理（默认 True，与 CPU 版一致；
+                按时间格式的判定见 `core/utils/preconditioning.py::resolve_low_mach_precond`）。
             adaptive_cfl, time_accurate, cfl_start, cfl_max, cfl_min: 与 CPU 版 FRSolver 同名参数、同一语义
                 （`core/time_integration/time_accurate.py::configure_time_stepping`；此前单 GPU 不接受
                 `adaptive_cfl`，固定 CFL 请求无从表达）。
@@ -353,11 +352,6 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         # 的开关必须在日志里留痕，否则"这份日志是哪个配置跑出来的"只能
         # 靠翻进程命令行考古。GPU 侧此前完全没有这几行，而 CPU/GPU 交叉
         # 一致性对照恰恰要求两边确认取到同一档。
-        from autoflowcfd.core.fr_operators.kernels import (
-            ausm_precond_mode_label as _pm_label,
-            resolve_ausm_precond_mode as _pm_resolve,
-        )
-        print(f"   AUSM+up precond mode: {_pm_label(_pm_resolve())}")
 
     def host_view(self):
         """主机视图（只读快照）：checkpoint 写出、结果保存、气动力系数用（见 `host_view.py`）。"""

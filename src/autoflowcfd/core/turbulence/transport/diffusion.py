@@ -37,7 +37,6 @@ from .faces import (
     _lift_side_jumps,
     boundary_diffusion_targets,
 )
-from .convection import resolve_turb_overintegration
 
 
 @njit(cache=True, parallel=True)
@@ -193,10 +192,10 @@ def compute_scalar_diffusion_residual(
     # `scalar_volume_divergence_kernel` 两个 numba prange kernel，取代
     # 原来 Python 层分块 + 逐点 3x3@3x1 微型 gemm + 3 次 tensordot 的
     # numpy 链路（见两个 kernel 各自的文档）。
-    # 去混叠（AFCFD_TURB_OVERINT=on），理由见 `resolve_turb_overintegration`
+    # 去混叠（体积项恒走过积分，理由见 convection.py 模块级说明；P0 没有过积分几何）
     # 与 `_scalar_diffusion_volume_overintegrated`（含那里明确写出的、
     # Gamma 自身混叠仍在的局限）。默认 off，行为逐位不变。
-    _oi = get_overintegration_context(mesh, ops) if resolve_turb_overintegration() == "on" else None
+    _oi = get_overintegration_context(mesh, ops)
     if _oi is not None:
         div_G = _scalar_diffusion_volume_overintegrated(
             gamma_field, grad_phi, _oi, n_sps, float(gamma_band))

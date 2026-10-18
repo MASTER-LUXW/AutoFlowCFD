@@ -72,7 +72,6 @@ class TestCheckResidualFinite:
         # 三条常见成因都要在场（CFL / 网格质量门 / AUSM+up 预处理档）
         assert 'CFL' in msg
         assert '--skip-quality-check' in msg
-        assert 'AFCFD_AUSM_PRECOND_MODE' in msg
         # 必须明说不会再写 checkpoint，否则用户会怀疑磁盘上的残骸是否已被污染
         assert 'checkpoint' in msg
 

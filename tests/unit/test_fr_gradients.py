@@ -10,9 +10,7 @@ import numpy as np
 import pytest
 
 from autoflowcfd.core.fr_operators.gradients import compute_physical_gradient, compute_physical_scalar_gradient
-from autoflowcfd.grid.curved_mapping.curved_mapping import map_prism_to_physical, map_tet_to_physical
-from autoflowcfd.fr.operators import generate_fr_operators, gauss_legendre
-from autoflowcfd.fr.native_tet.basis import build_native_tet_operators
+from autoflowcfd.fr.operators import generate_fr_operators
 from autoflowcfd.grid.high_order.high_order_mesh import HighOrderMesh
 
 
@@ -64,7 +62,7 @@ def test_linear_function_gradient_exact_for_tet_and_prism():
     # 近似；对比时必须只看真实自由度（`[:n_native]`），不能再要求
     # 填充行也精确等于常数梯度。
     # 2026-09-20 追加：**棱柱同样可能有零填充槽位**。原生棱柱基
-    # （`AFCFD_PRISM_BASIS=native`，当前默认）每单元只有
+    # （棱柱唯一实现）每单元只有
     # `(p+1)^2(p+2)/2` 个真实自由度，填充行同样恒为零梯度。所以两类
     # 单元都只比较真实自由度，真实数走唯一入口
     # `fr/native_padding.real_sps_per_cell`（它按当前基给出两个数）。
@@ -130,8 +128,8 @@ def test_multi_variable_field_gradient_matches_scalar_case():
 # 也就是机器精度。**不要给这个算子加过积分**：那只会增加成本而不改善
 # 任何东西。去混叠有意义的位置是"乘积被求导"的那些项，现已全部覆盖：
 # 无粘体积项（`fr_residual/inviscid.py`，一直开着）、粘性体积项
-# （`fr_residual/viscous_flux.py`，AFCFD_VISC_OVERINT）、k/omega 对流与
-# 扩散体积项（`core/turbulence/transport.py`，AFCFD_TURB_OVERINT）。
+# （`fr_residual/viscous_flux/overintegration.py`）、k/omega 对流与扩散体积项
+# （`core/turbulence/transport/convection.py`、`diffusion.py`），均恒开、无开关。
 
 @pytest.mark.parametrize("order", [1, 2, 3])
 def test_gradient_is_exact_for_in_space_polynomials(order):

@@ -12,7 +12,7 @@ prange + 写入共享 buffer，无需 per-thread buffer。内存从 O(n_threads 
 降至 O(N)（一个共享 buffer），按色循环处理。
 
 冲突判定必须覆盖 owner 侧和 neighbor 侧两次写入：图着色版本 kernel
-（inviscid_kernel_colored.py / viscous_flux_kernel.py 的 _colored 变体）
+（inviscid_kernel.py / viscous_flux_kernel.py / 标量提升核）
 对每个内部面都会执行两次独立的 scatter-add——`correction[owner_cell[f]] +=`
 （owner_is_primary 分支）和 `correction[neighbor_cell[f]] +=`
 （neighbor_is_primary 分支）。若只按 owner_cell 分组着色，两个面 A、B

@@ -41,7 +41,7 @@ from autoflowcfd.grid.connectivity.face_connectivity import (
 # 里 `_CF_AXIS=[v[0] for v in ...values()]`/`_CF_SIDE=[v[1] for v in
 # ...values()]` 这两个按字典插入顺序构造的查找表在扩到 10 项后依然
 # 给出有效值——下游消费方（core/fr_operators/face_kernels.py::
-# boundary_extrap 数组、inviscid_kernel.py/inviscid_kernel_colored.py
+# boundary_extrap 数组、inviscid_kernel.py
 # 的 celltype/axis 索引）按 celltype==2（native tet）时把这个"axis"值
 # 重新解释成 excluded_vertex，不是真的把 native 面塞进坍缩坐标的
 # (axis,side) 语义里，见 Part7 文档相关小节）。`build_cross_interp`

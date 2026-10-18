@@ -282,7 +282,6 @@ def _vtk_shape_function_samples(grid, label, n_per_cell, rng):
     for c in range(grid.n_cells):
         cell = grid.GetCell(c)
         ids = np.array([cell.GetPointId(q) for q in range(cell.GetNumberOfPoints())])
-        weights = vtk.vtkDoubleArray()
         for _ in range(n_per_cell):
             if cell.GetCellType() == 73:                       # 三棱柱：三角形 (r, s) x t
                 r, s_ = rng.dirichlet(np.ones(3))[:2]

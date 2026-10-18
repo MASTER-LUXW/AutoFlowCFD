@@ -24,7 +24,6 @@ from typing import Dict, List, Optional, Tuple, Union
 import numpy as np
 from loguru import logger
 
-from autoflowcfd.fr.native_prism.mode import resolve_prism_basis_mode
 from autoflowcfd.fr.warp_blend_nodes import TET_NODE_SET
 
 try:
@@ -160,8 +159,9 @@ class CheckpointManager:
                 # 所以跨基 resume 会**静默重解释**同一份数组，给出一个
                 # 看不出异常的错解。校验在 `checkpoint_load.py` 里，
                 # 不匹配直接硬失败。
-                meta_group.attrs['prism_basis'] = np.string_(
-                    resolve_prism_basis_mode())
+                from autoflowcfd.core.utils.checkpoint_load import PRISM_BASIS
+
+                meta_group.attrs['prism_basis'] = np.string_(PRISM_BASIS)
                 # 四面体节点集版本（P3+ 节点随它变，`checkpoint_load.py::_check_tet_node_set`）
                 meta_group.attrs['tet_node_set'] = np.string_(TET_NODE_SET)
 

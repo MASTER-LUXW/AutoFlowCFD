@@ -227,8 +227,7 @@ class TestGpuSolverWiring:
     """GPU 求解器上这两个机制的**接线**（不需要 CuPy 就能验的部分）。
 
     这些是移植时最容易漏、而且漏了之后不会报错只会静默退化的点：
-      * `low_mach_precond_enabled` 的开关语义（含环境变量优先、
-        时间方案门控）必须与 CPU 版一致；
+      * `low_mach_precond_enabled` 的开关语义（构造参数 + 时间方案门控）必须与 CPU 版一致；
       * GPU 此前**完全没有**自适应 CFL 控制器（恒用构造时的固定 cfl），
         `--cfl-start/--cfl-max` 只对 CPU 生效——本轮补齐，这里钉住；
       * 阶数切换复位控制器已移到四个后端共用的 Order Continuation 循环
@@ -236,13 +235,10 @@ class TestGpuSolverWiring:
     """
 
     @staticmethod
-    def _fake_solver(time_scheme="ssp_rk3", env=None, monkeypatch=None,
-                     cfl_start=None, cfl_max=None):
+    def _fake_solver(time_scheme="ssp_rk3", requested=True, cfl_start=None, cfl_max=None):
         """不构造真实 GPUFRSolver（需要 CuPy + 网格），只跑构造函数调用的那两个
         与 GPU 无关的**共享**函数（2026-09-25 起全部后端都经它们构造，此前本替身
         自己抄了一份开关/控制器逻辑，连带抄了已删除的 `cfl` 硬编码兜底）。"""
-        import os as _os
-
         from autoflowcfd.core.time_integration.adaptive_cfl.policy import build_cfl_policy
         from autoflowcfd.core.utils.preconditioning import resolve_low_mach_precond
 
@@ -250,17 +246,7 @@ class TestGpuSolverWiring:
             pass
 
         s = _S()
-        old = _os.environ.get("AFCFD_LOW_MACH_PRECOND")
-        try:
-            if env is not None:
-                _os.environ["AFCFD_LOW_MACH_PRECOND"] = env
-            s.low_mach_precond_enabled = resolve_low_mach_precond(True, time_scheme)
-        finally:
-            if env is not None:
-                if old is None:
-                    _os.environ.pop("AFCFD_LOW_MACH_PRECOND", None)
-                else:
-                    _os.environ["AFCFD_LOW_MACH_PRECOND"] = old
+        s.low_mach_precond_enabled = resolve_low_mach_precond(requested, time_scheme)
         s._cfl_controller, s.fixed_cfl_number = build_cfl_policy(
             time_scheme, cfl_start=cfl_start, cfl_max=cfl_max)
         return s
@@ -278,21 +264,23 @@ class TestGpuSolverWiring:
         for mod in (cpu_single, gpu_single, gpu_multi, gpu_multi_fd, cpu_mpi):
             src = module_source(mod)
             assert "configure_time_stepping(" in src, mod.__name__
-            assert 'os.environ.get("AFCFD_LOW_MACH_PRECOND")' not in src, (
-                f"{mod.__name__} 又自己解析了一遍环境变量")
+            assert "AFCFD_LOW_MACH_PRECOND" not in src, (
+                f"{mod.__name__} 又读起了环境变量（开关只来自构造参数，见 resolve_low_mach_precond）")
 
     @pytest.mark.parametrize("scheme,expected", [
         ("ssp_rk3", True), ("ssp_rk2", True), ("newton_krylov", True),
         ("dual_time", False), ("forward_euler", False),
     ])
     def test_precond_gated_by_time_scheme(self, scheme, expected):
-        s = self._fake_solver(time_scheme=scheme, env=None)
+        s = self._fake_solver(time_scheme=scheme)
         assert s.low_mach_precond_enabled is expected
 
-    @pytest.mark.parametrize("env,expected", [("0", False), ("1", True)])
-    def test_env_override(self, env, expected):
-        s = self._fake_solver(time_scheme="ssp_rk3", env=env)
-        assert s.low_mach_precond_enabled is expected
+    def test_environment_variable_has_no_effect(self, monkeypatch):
+        """2026-10-18 以前 `AFCFD_LOW_MACH_PRECOND` 优先于构造参数，checkpoint 记不下它。"""
+        monkeypatch.setenv("AFCFD_LOW_MACH_PRECOND", "0")
+        assert self._fake_solver(requested=True).low_mach_precond_enabled is True
+        monkeypatch.setenv("AFCFD_LOW_MACH_PRECOND", "1")
+        assert self._fake_solver(requested=False).low_mach_precond_enabled is False
 
     def test_controller_exists_and_honors_cli_values(self):
         s = self._fake_solver(cfl_start=0.2, cfl_max=0.9)

@@ -234,6 +234,8 @@ class SteadyConfig(SolverConfig):
             与求解器 2026-09-25 已改为 None，配置层这份拷贝被漏掉，经 API 选隐式格式时隐式 CFL 律会被压在
             0.06 的上限下。三者给出时的序关系由 `cfl_triplet_errors` 校验。
         convergence_tol: 相对收敛容差（对应 CLI `--tol`；默认取 `DEFAULT_STEADY_TOL`）
+        low_mach_precond: 低马赫数伪时间预处理（对应 CLI `--low-mach-precond/--no-low-mach-precond`，
+            见 `core/utils/preconditioning.py::resolve_low_mach_precond`）
         rho_inf: 自由流密度 (kg/m^3) - 初始条件、入口/远场边界条件和
             Cd/Cl 归一化的单一真实来源，确保三者始终保持一致。
         vel_inf: 自由流速度大小 (m/s)，与 rho_inf 作用相同。
@@ -253,6 +255,7 @@ class SteadyConfig(SolverConfig):
     cfl_max: Optional[float] = None
     cfl_min: Optional[float] = None
     convergence_tol: float = DEFAULT_STEADY_TOL
+    low_mach_precond: bool = True
     rho_inf: float = 1.225
     vel_inf: float = 33.33
     p_inf: float = 101325.0

@@ -34,7 +34,7 @@ ODE 源项弛豫，而是通过 FR 高阶离散真正参与空间输运。
 
     face_frames.py  两侧坐标系的面外插、质量通量与 DG 提升（numba kernel）
     faces.py        上面几个 kernel 的调用层与共享对流几何（对流/扩散共用）
-    convection.py   对流残差（含去混叠体积项）与 `AFCFD_TURB_OVERINT` 解析
+    convection.py   对流残差（含去混叠体积项）
     diffusion.py    扩散残差（含去混叠体积项）
     omega_wall.py   omega 壁面 Dirichlet 掩码、解析目标值
     residual.py     顶层编排：对流 + 扩散
@@ -48,7 +48,7 @@ ODE 源项弛豫，而是通过 FR 高阶离散真正参与空间输运。
 from .faces import (  # noqa: F401
     ScalarConvectionGeometry, _extrapolate_scalar_to_faces, precompute_scalar_convection_geometry,
 )
-from .convection import compute_scalar_convection_residual, resolve_turb_overintegration  # noqa: F401
+from .convection import compute_scalar_convection_residual  # noqa: F401
 from .diffusion import compute_scalar_diffusion_residual  # noqa: F401
 from .omega_wall import (  # noqa: F401
     _compute_omega_wall_target,
@@ -67,5 +67,4 @@ __all__ = [
     "open_boundary_code_mask",
     "wall_dirichlet_face_mask",
     "precompute_scalar_convection_geometry",
-    "resolve_turb_overintegration",
 ]

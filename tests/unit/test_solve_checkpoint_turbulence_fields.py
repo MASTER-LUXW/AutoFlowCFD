@@ -53,7 +53,7 @@ def _fake_solver(n_cells=2, n_sps=1, n_vars=7, order=0, k=None, omega=None, with
         # 真实求解器在湍流初始化时设置（恢复湍流场后跳过产生项斜坡用到它）
         _turb_production_ramp_steps=50,
         freestream={"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0},
-        wall_treatment="resolved",
+        wall_treatment="resolved", low_mach_precond=True,
         # write_checkpoint 记录时间格式（2026-09-25）：真实求解器恒有 time_integrator
         time_integrator=SimpleNamespace(scheme=TimeIntegrationScheme.SSP_RK3),
     ))

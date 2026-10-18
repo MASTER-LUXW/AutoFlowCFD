@@ -5,7 +5,6 @@
 `fr/face_flux_trace.py`）；界面核只施加公共通量与内罚项。
 """
 
-import os
 
 import numpy as np
 
@@ -174,50 +173,20 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
             _c_ip,
         )
     else:
-        # P≥1 通用路径：图着色或 per-thread buffer
+        # P≥1 通用路径：按面着色
         from autoflowcfd.core.fr_residual.viscous_flux_kernel import (
             compute_viscous_interface_correction_kernel,
-        )
-        from autoflowcfd.core.fr_residual.viscous_flux_kernel_colored import (
-            compute_viscous_interface_correction_kernel_colored,
         )
         # 图着色方案：同色面无 owner_cell 冲突，直接写入共享 buffer
         # 内存从 O(n_threads * n_cells * n_sps * 5) 降至 O(n_cells * n_sps * 5)
         # 着色结果已缓存在 flat 中（build 时一次性计算，不再重复着色）
-        # 通过环境变量或配置可切换回 per-thread buffer 方案
-        use_coloring = os.environ.get("AFCFD_USE_COLORING", "1") == "1"
-        
-        if use_coloring:
-            correction = np.zeros((n_cells, n_sps, 5))
-            for c in range(flat.n_colors):
-                face_indices = flat.color_face_indices[c]
-                if len(face_indices) == 0:
-                    continue
-                compute_viscous_interface_correction_kernel_colored(
-                    Q, grad_vel, grad_T, mu_t_field,
-                    det_jacs, mu, Pr, Pr_t,
-                    flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
-                    flat.owner_is_primary, flat.neighbor_is_primary,
-                    flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
-                    flat.neighbor_src0_cell, flat.neighbor_src0_tpl, flat.neighbor_src0_tid,
-                    flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
-                    flat.owner_src0_cell, flat.owner_src0_tpl, flat.owner_src0_tid,
-                    flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
-                    flat.mixed_nb_partner, flat.mixed_nb_mask,
-                    flat.mixed_ow_partner, flat.mixed_ow_mask,
-                    Q_ghost, vbc_kind,
-                    face_indices, correction,
-                    flat.owner_face_op, flat.neighbor_face_op,
-                    flat.ref_area_weight,
-                    flat.boundary_extrap_native, flat.lift_native,
-                    flat.ip_length,
-                    _c_ip,
-                )
-        else:
-            # 回退到 per-thread buffer 方案（小网格 + 低线程数可能更快）
-            import numba
-            n_threads = numba.get_num_threads()
-            correction = compute_viscous_interface_correction_kernel(
+
+        correction = np.zeros((n_cells, n_sps, 5))
+        for c in range(flat.n_colors):
+            face_indices = flat.color_face_indices[c]
+            if len(face_indices) == 0:
+                continue
+            compute_viscous_interface_correction_kernel(
                 Q, grad_vel, grad_T, mu_t_field,
                 det_jacs, mu, Pr, Pr_t,
                 flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
@@ -230,13 +199,14 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
                 flat.mixed_nb_partner, flat.mixed_nb_mask,
                 flat.mixed_ow_partner, flat.mixed_ow_mask,
                 Q_ghost, vbc_kind,
-                n_threads,
+                face_indices, correction,
                 flat.owner_face_op, flat.neighbor_face_op,
                 flat.ref_area_weight,
                 flat.boundary_extrap_native, flat.lift_native,
                 flat.ip_length,
                 _c_ip,
             )
+
     residual += correction
     del correction
 

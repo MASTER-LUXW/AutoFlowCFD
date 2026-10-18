@@ -31,14 +31,12 @@ k/omega 加模态滤波器，而那个滤波器每个 RK stage 清掉一整阶�
 时公开接口逐位不变、开关取值校验。
 """
 
-import os
 import numpy as np
 import pytest
 
 from autoflowcfd.core.fr_operators.volume_contract import get_overintegration_context
 from autoflowcfd.core.turbulence.transport.convection import _scalar_convection_volume_overintegrated
 from autoflowcfd.core.turbulence.transport.diffusion import _scalar_diffusion_volume_overintegrated
-from autoflowcfd.fr.native_prism.mode import resolve_prism_basis_mode
 from autoflowcfd.fr.operators import generate_fr_operators
 
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
@@ -94,7 +92,7 @@ class TestOverintegrationIsMoreAccurate:
         # 61 倍），所以"coarse 必须 > 0.5"那条防空转的下界当年必须分档 ——
         # 原生 P2 的 coarse 只有 1.2e-2，用 0.5 会把一条正常通过的判据
         # 判成"算例没造出混叠"。
-        basis = resolve_prism_basis_mode()
+        basis = "native"
         coarse_min, gain_min = _PRISM_EXPECT[order]
         err_co, err_oi = errs["prism"]
         assert err_co > coarse_min, (
@@ -109,7 +107,7 @@ class TestOverintegrationIsMoreAccurate:
         # 四面体（仿射度量）上有一条更强、可完全解释的判据：三重乘积
         # rho*u*phi 由三个一次场相乘、是**三次**，只要 over_order >= 3
         # 且度量仿射，细网格空间 P3 就精确包含它 -> 必须是机器零。
-        #   over_order = resolve_tet_overintegration_order(order)（上限 6）
+        #   over_order = overintegration_order(order)（上限 6）
         #   order=1 -> 2（不足，残余 5.6e-2）
         #   order=2 -> 4（足够，机器零）
         # 也就是说 `2*order` 这条经验法则是为平均流的**二次**非线性设计
@@ -224,85 +222,3 @@ class TestOverintegrationIsMoreAccurate:
             assert pr_oi < pr_co, (
                 f"order=1 prism: 去混叠误差 {pr_oi:.3e} 不低于 coarse 的 "
                 f"{pr_co:.3e}")
-
-
-class TestOrderRuleSwitch:
-    """`AFCFD_OVERINT_ORDER_RULE` 的语义（2026-09-15）。
-
-    默认 `2x` 必须复现此前已被长期验证的行为。"`3x` 只在 order=1 上与它
-    不同"这句话只对已删除的坍缩棱柱基成立（order>=2 被那条
-    `OVERINTEGRATION_MAX_ORDER=3` 卡住）：原生基的上限是 6，所以 P2 也会
-    被这条规则改变（细点 75 -> 196），见下面的细点数判据。
-    """
-
-    def _env(self, v):
-        old = os.environ.get("AFCFD_OVERINT_ORDER_RULE")
-        if v is None:
-            os.environ.pop("AFCFD_OVERINT_ORDER_RULE", None)
-        else:
-            os.environ["AFCFD_OVERINT_ORDER_RULE"] = v
-        return old
-
-    def _restore(self, old):
-        if old is None:
-            os.environ.pop("AFCFD_OVERINT_ORDER_RULE", None)
-        else:
-            os.environ["AFCFD_OVERINT_ORDER_RULE"] = old
-
-    def test_default_is_2x(self):
-        from autoflowcfd.fr.overintegration_order import (
-            resolve_overintegration_order_rule,
-        )
-        old = self._env(None)
-        try:
-            assert resolve_overintegration_order_rule() == 2
-        finally:
-            self._restore(old)
-
-    @pytest.mark.parametrize("v,expected", [("2x", 2), ("3x", 3), ("3X", 3)])
-    def test_accepted_values(self, v, expected):
-        from autoflowcfd.fr.overintegration_order import (
-            resolve_overintegration_order_rule,
-        )
-        old = self._env(v)
-        try:
-            assert resolve_overintegration_order_rule() == expected
-        finally:
-            self._restore(old)
-
-    @pytest.mark.parametrize("v", ["2", "3", "", "two"])
-    def test_rejects_unknown(self, v):
-        from autoflowcfd.fr.overintegration_order import (
-            resolve_overintegration_order_rule,
-        )
-        old = self._env(v)
-        try:
-            with pytest.raises(ValueError, match="AFCFD_OVERINT_ORDER_RULE"):
-                resolve_overintegration_order_rule()
-        finally:
-            self._restore(old)
-
-    @pytest.mark.parametrize("order,nf_2x,nf_3x", [
-        (1, 18, 40), (2, 75, 196), (3, 196, 196)])
-    def test_fine_point_counts_per_rule(self, order, nf_2x, nf_3x):
-        """两档规则实际构造出的细点数——直接读算子，不重算规则。
-
-        原生棱柱的细点数是 `(oo+1)^2(oo+2)/2`，上限是 6（已删除的坍缩基
-        那条条件数上限是 3），所以：
-
-            rule  P1          P2           P3
-            2x    oo=2 -> 18   oo=4 ->  75  oo=6 -> 196
-            3x    oo=3 -> 40   oo=6 -> 196  oo=6 -> 196（被上限 6 卡住）
-
-        也就是说"这条切换只影响 order=1"这句话**只对已删除的坍缩档成立**：
-        原生档下 P2 也被它改变（75 -> 196）。
-        """
-        for v, want in (("2x", nf_2x), ("3x", nf_3x)):
-            old = self._env(v)
-            try:
-                ops = generate_fr_operators(order)
-                got = ops.overint_D_fine_prism.shape[0]
-                assert got == want, (
-                    f"rule={v} order={order}: 细点数 {got} != {want}")
-            finally:
-                self._restore(old)

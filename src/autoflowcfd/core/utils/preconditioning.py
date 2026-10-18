@@ -290,20 +290,18 @@ def resolve_low_mach_precond(requested, time_scheme) -> bool:
     4.7e8 降到 ~3e6 后停滞，驻点区压力在 Cp=+15 与 −11 之间周期振荡（封闭风洞里
     被入口/出口/洞壁反射的弱阻尼声学模态）；加上后同样 120 步残差降到 9.5e5 且
     仍在下降，驻点区 Cp≈0.92（物理值≈1）。其余方案不启用的原因：
-    环境变量 `AFCFD_LOW_MACH_PRECOND=0/1` 可强制关闭/开启，优先于
-    构造参数——供 A/B 对照实验与现场排查用（"把这个新机制单独关掉
-    再跑一遍"必须是一条随时可用的路径，不需要改代码）。
+    开关来自构造参数（CLI `solve steady --low-mach-precond/--no-low-mach-precond`、配置字段
+    `SteadyConfig.low_mach_precond`），随 checkpoint 记录、续算默认沿用（`solve resume` 同名选项可覆盖）。
+    2026-10-18 以前另有环境变量 `AFCFD_LOW_MACH_PRECOND` 且优先于构造参数：checkpoint 记不下它，
+    关掉预处理跑出的结果续算时会静默换回开启。
 
     Args:
-        requested: 构造参数/包里请求的值。
+        requested: 构造参数/分布式包里请求的值。
         time_scheme: 时间积分方案（枚举或用户侧字符串）。
     """
-    import os
-
     from autoflowcfd.core.time_integration.base import TimeIntegrationScheme, scheme_from_name
 
-    env = os.environ.get("AFCFD_LOW_MACH_PRECOND")
-    req = bool(requested) if env is None else (env == "1")
+    req = bool(requested)
     scheme = scheme_from_name(time_scheme)
     applicable = scheme in (
         TimeIntegrationScheme.SSP_RK2, TimeIntegrationScheme.SSP_RK3,

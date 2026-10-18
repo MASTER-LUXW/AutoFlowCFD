@@ -11,6 +11,9 @@
 不写。分布式 resume 在 2026-09-24 改成"来流缺失即报错"之后，**每一次**分布式
 resume 都会因此失败；改之前则是静默按默认来流（33.33 m/s、零攻角、默认粘度与
 Tu/VR）重建 —— 另一个物理算例。两个写入端现在共用本函数。
+
+`solve_path_metadata` 是另一类：时间格式与低马赫预处理开关**不改变**定常解，但续算默认应沿用（隐式稳态续算
+不应被静默换回显式格式、关掉预处理跑的算例不应续算时被打开），`solve resume` 可用同名选项覆盖。
 """
 
 
@@ -38,4 +41,13 @@ def physics_metadata(solver) -> dict:
         "artificial_viscosity_enabled": bool(getattr(solver, "artificial_viscosity_enabled", False)),
         "artificial_viscosity_alpha": float(getattr(solver, "artificial_viscosity_alpha", 1.0)),
         "wall_treatment": str(solver.wall_treatment),
+    }
+
+
+def solve_path_metadata(solver) -> dict:
+    """续算默认沿用的推进设置：时间格式与低马赫预处理的请求值（读取端见
+    `cli/solve/checkpoint_io/rebuild.py::resolve_resume_time_scheme / resolve_resume_low_mach_precond`）。"""
+    return {
+        "time_scheme": solver.time_integrator.scheme.value,
+        "low_mach_precond": bool(solver.low_mach_precond),
     }

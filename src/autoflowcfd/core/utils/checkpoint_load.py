@@ -30,8 +30,12 @@ def decode_attr(value):
     return value
 
 
+#: checkpoint 记录的棱柱基（唯一实现是原生基；坍缩棱柱基 2026-09-23 删除）
+PRISM_BASIS = "native"
+
+
 def _check_prism_basis(meta_group, checkpoint_path) -> None:
-    """校验 checkpoint 的棱柱基与当前环境一致，不一致就硬失败。
+    """校验 checkpoint 是原生棱柱基下写的，否则硬失败。
 
     **为什么必须硬失败**（2026-09-20）：两条棱柱基的每单元解点布局不同
     —— 原生基 P1 每单元只有前 6 个槽位是自由度，其余是按
@@ -54,9 +58,6 @@ def _check_prism_basis(meta_group, checkpoint_path) -> None:
     两者都拒绝，因为两条基的每单元解点布局不同（原生基有零填充槽位），
     而形状恰好相同、**不会报错**，只会静默重解释成错解。
     """
-    from autoflowcfd.fr.native_prism.mode import resolve_prism_basis_mode
-
-    current = resolve_prism_basis_mode()
     if 'prism_basis' not in meta_group.attrs:
         raise ValueError(
             f"Checkpoint {checkpoint_path} 没有记录棱柱基（2026-09-20 之前"
@@ -66,14 +67,11 @@ def _check_prism_basis(meta_group, checkpoint_path) -> None:
             f"“用坍缩档续算”这个选项了 —— 只能在原生基下从头开始。")
 
     saved = decode_attr(meta_group.attrs['prism_basis'])
-    if saved != current:
+    if saved != PRISM_BASIS:
         raise ValueError(
             f"Checkpoint {checkpoint_path} 是在棱柱基 {saved!r} 下写的，"
-            f"而当前 AFCFD_PRISM_BASIS={current!r}。两条基的每单元解点"
-            f"布局不同（原生基有零填充槽位），跨基 resume 会静默重解释"
-            f"同一份数组、给出看不出异常的错解。"
-            f"请把 AFCFD_PRISM_BASIS 设成 {saved!r} 续算，或在当前基下"
-            f"从头开始。")
+            f"当前只有原生基（{PRISM_BASIS!r}）。两条基的每单元解点布局不同（原生基有零填充槽位），"
+            f"跨基 resume 会静默重解释同一份数组、给出看不出异常的错解。只能在原生基下从头开始。")
 
 
 def _check_tet_node_set(meta_group, solution, checkpoint_path) -> None:

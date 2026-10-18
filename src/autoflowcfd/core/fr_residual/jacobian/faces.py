@@ -1,6 +1,6 @@
 """AutoFlowCFD V2.0 - 界面项对单元块的贡献（numba，原始变量空间）。
 
-与残差核（`inviscid_kernel_colored.py` / `viscous_flux_kernel_colored.py`）逐项
+与残差核（`inviscid_kernel.py` / `viscous_flux_kernel.py`）逐项
 对应：每个 primary 面侧、每个通量点算跳变量 `J_i`（`face_point_jumps.py` 的同一
 个函数），`dU/dt` 增量是 `(1/det_s) sum_i lift[s,i] w_i J_i`，其中
 
@@ -49,8 +49,8 @@ N_CROSS_SOURCES = 3
 
 @njit(cache=True, inline='always')
 def _total_jump(Qs, gvs, gTs, mus, Qx, gvx, gTx, mux, adjrow, h_ip, bkind, mu, Pr, Pr_t, c_ip,
-                mach_ref, precond_mode):
-    J = inviscid_common_flux_point(Qs, Qx, adjrow, mach_ref, precond_mode)
+                mach_ref):
+    J = inviscid_common_flux_point(Qs, Qx, adjrow, mach_ref)
     Jv = viscous_common_flux_point(Qs, gvs, gTs, mus, Qx, gvx, gTx, mux, adjrow, h_ip, bkind,
                             mu, Pr, Pr_t, c_ip)
     for v in range(5):
@@ -140,7 +140,7 @@ def _trace(M, field, c, n):
 def _side_blocks(c, n, E, L, w, adjrow, f, is_bnd_face, masked_row, mp, src_cells, src_mats,
                  Q, gv_sp, gT_sp, mut, dTdQ, inv_sp, D_prism, D_tet, n_prism, n_real_prism, n_real_tet,
                  Qg0, QgP, ghost_row, HG, vbc_kind, owner_cell, owner_face_op, E_nat,
-                 h_ip, mu, Pr, Pr_t, c_ip, mach_ref, precond_mode, want_cross):
+                 h_ip, mu, Pr, Pr_t, c_ip, mach_ref, want_cross):
     """一个 primary 面侧的块贡献（未除 det，原始变量空间）。
 
     返回 `(self_block (n,5,n,5), cross (3, n, 5, nmax, 5), cross_cells (3,))`；
@@ -192,7 +192,7 @@ def _side_blocks(c, n, E, L, w, adjrow, f, is_bnd_face, masked_row, mp, src_cell
                         gTx += wgt * gT_sp[cc, t]
                         mux += wgt * mut[cc, t]
         J0 = _total_jump(Qs[i], gvs[i], gTs[i], mus[i], Qx, gvx, gTx, mux, adjrow[i], h_ip, bk,
-                         mu, Pr, Pr_t, c_ip, mach_ref, precond_mode)
+                         mu, Pr, Pr_t, c_ip, mach_ref)
         # 梯度输入只进粘性跳变量：对它们差分时不必重算 AUSM+up
         Jv0 = viscous_common_flux_point(Qs[i], gvs[i], gTs[i], mus[i], Qx, gvx, gTx, mux, adjrow[i], h_ip, bk,
                                  mu, Pr, Pr_t, c_ip)
@@ -208,7 +208,7 @@ def _side_blocks(c, n, E, L, w, adjrow, f, is_bnd_face, masked_row, mp, src_cell
                 q[v] += h
                 qx = Qx
             J1 = _total_jump(q, gvs[i], gTs[i], mus[i], qx, gvx, gTx, mux, adjrow[i], h_ip, bk,
-                             mu, Pr, Pr_t, c_ip, mach_ref, precond_mode)
+                             mu, Pr, Pr_t, c_ip, mach_ref)
             for o in range(5):
                 dS[i, o, v] = (J1[o] - J0[o]) / h
         # ---- 本侧梯度（边界点另一侧梯度随之重构）----
@@ -243,7 +243,7 @@ def _side_blocks(c, n, E, L, w, adjrow, f, is_bnd_face, masked_row, mp, src_cell
                 qx = Qx.copy()
                 qx[v] += h
                 J1 = _total_jump(Qs[i], gvs[i], gTs[i], mus[i], qx, gvx, gTx, mux, adjrow[i], h_ip,
-                                 bk, mu, Pr, Pr_t, c_ip, mach_ref, precond_mode)
+                                 bk, mu, Pr, Pr_t, c_ip, mach_ref)
                 for o in range(5):
                     dX[o, v] = (J1[o] - J0[o]) / h
             r = ghost_row[mp]
@@ -273,7 +273,7 @@ def _side_blocks(c, n, E, L, w, adjrow, f, is_bnd_face, masked_row, mp, src_cell
                     tt[j - 14] += h
                 if j < 5:
                     J1 = _total_jump(Qs[i], gvs[i], gTs[i], mus[i], qx, g, tt, mux, adjrow[i], h_ip, VBC_INTERIOR,
-                                     mu, Pr, Pr_t, c_ip, mach_ref, precond_mode)
+                                     mu, Pr, Pr_t, c_ip, mach_ref)
                     for o in range(5):
                         dO[i, o, j] = (J1[o] - J0[o]) / h
                 else:
@@ -321,7 +321,7 @@ def add_face_blocks_color(face_indices, K_prism, K_tet, slot, n_prism, n_real_pr
                           owner_src1_cell, owner_src1_mat, mixed_nb_partner, mixed_nb_mask,
                           mixed_ow_partner, mixed_ow_mask, Qg0, QgP, ghost_row, HG, vbc_kind,
                           owner_face_op, neighbor_face_op, ref_area_weight, E_nat, lift_nat,
-                          ip_length, mu, Pr, Pr_t, c_ip, mach_ref, precond_mode,
+                          ip_length, mu, Pr, Pr_t, c_ip, mach_ref,
                           cross_offset, cross_data, cross_col):
     """一个颜色组内全部面的块贡献：对角部分累加到 `K_prism` / `K_tet`（float32）；
     `cross_offset` 非空（形状 `(n_faces, 2, 3)`）时耦合块写入 `cross_data`
@@ -377,7 +377,7 @@ def add_face_blocks_color(face_indices, K_prism, K_tet, slot, n_prism, n_real_pr
                 c, n, E, L, ref_area_weight, adjrow, f, is_bnd_face, masked_row, mp, src_cells, src_mats,
                 Q, gv_sp, gT_sp, mut, dTdQ, inv_sp, D_prism, D_tet, n_prism, n_real_prism, n_real_tet,
                 Qg0, QgP, ghost_row, HG, vbc_kind, owner_cell, owner_face_op, E_nat,
-                ip_length[f], mu, Pr, Pr_t, c_ip, mach_ref, precond_mode, want_cross)
+                ip_length[f], mu, Pr, Pr_t, c_ip, mach_ref, want_cross)
             k = slot[c]
             K = K_prism if is_p else K_tet
             for s in range(n):

@@ -10,9 +10,7 @@ from autoflowcfd.fr.native_tet.basis import (
     build_native_tet_operators, map_native_tet_to_physical, compute_native_tet_jacobian,
     restricted_tet_modes,
 )
-from autoflowcfd.fr.native_tet.overintegration import (
-    resolve_tet_overintegration_order,
-)
+from autoflowcfd.fr.overintegration_order import overintegration_order
 
 TET_NODES = np.array([
     [0.1, -0.3, 0.2], [1.2, 0.0, -0.1], [-0.1, 1.1, 0.0], [0.0, 0.1, 1.3],
@@ -27,7 +25,7 @@ def _over_order(order):
     （上限 6，env `AFCFD_TET_OVERINT_MAX_ORDER`），所以这份测试一直在
     P2/P3 上测一个生产从不使用的阶数（P2 测 3，生产 4；P3 测 3，生产 6）。
     """
-    return resolve_tet_overintegration_order(order)
+    return overintegration_order(order)
 
 
 @pytest.mark.parametrize("order", [1, 2, 3])

@@ -84,7 +84,7 @@
   - 粘性界面 kernel：`compute_viscous_interface_correction_kernel_colored`
   - 湍流输运 kernel：`distribute_corrections_to_cells_kernel_colored`
   - 内存从 O(n_threads × N) 降至 O(N)
-  - 环境变量 `AFCFD_USE_COLORING` 控制（默认启用）
+  - 环境变量 `AFCFD_USE_COLORING` 控制（默认启用）；2026-10-18 起着色为唯一实现，开关与每线程缓冲版 kernel 删除
 - ✅ 面图着色缓存（着色结果在 `FlatFaceGeometry` 构建时一次性计算并缓存，避免每次残差调用重复着色）
 - ✅ MPI 域分解基础设施（`core/mpi/`，6 模块 ~1200 行）
   - METIS 网格分区（pymetis 接口，不可用时降级为 block 分区）

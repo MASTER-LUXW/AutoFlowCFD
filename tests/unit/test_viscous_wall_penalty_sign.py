@@ -89,7 +89,6 @@ _WALL_PLANES = {
 
 
 def _build(wall_plane, order, monkeypatch):
-    monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
     from autoflowcfd.core.fr_solver import FRSolver
     from autoflowcfd.core.time_integration import TimeIntegrationScheme
 

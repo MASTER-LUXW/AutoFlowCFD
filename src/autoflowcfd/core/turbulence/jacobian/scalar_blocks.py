@@ -21,7 +21,6 @@ from numba import njit, prange
 from autoflowcfd.core.fr_operators.flux_kernels import resolve_viscous_ip_constant
 from autoflowcfd.core.fr_operators.volume_contract import get_overintegration_context
 from autoflowcfd.core.fr_residual.jacobian.coupling import CouplingBlocks, CouplingGroup, cross_layout
-from autoflowcfd.core.turbulence.transport.convection import resolve_turb_overintegration
 from autoflowcfd.fr.native_padding import real_sps_per_cell
 
 from .cell_blocks import turbulence_cell_blocks
@@ -59,7 +58,7 @@ def convection_ghost_affine(flat, frame, m_side, dirichlet_faces, open_face):
 
 def _segments(mesh, ops, npr, nte):
     oi = get_overintegration_context(mesh, ops)
-    overint = oi is not None and resolve_turb_overintegration() == "on"
+    overint = oi is not None
     D_sp = {0: np.asarray(ops.D_3d_prism), 1: np.asarray(ops.D_native_tet_padded)}
     n_cells = int(mesh.n_cells)
     n_prism = int(mesh.n_prism_cells)

@@ -45,7 +45,6 @@ from autoflowcfd.core.fr_operators.volume_contract import (
     get_overintegration_context,
 )
 from autoflowcfd.core.fr_residual import viscous_flux as vf
-from autoflowcfd.fr.native_prism.mode import resolve_prism_basis_mode
 from autoflowcfd.fr.operators import generate_fr_operators
 
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
@@ -213,7 +212,7 @@ class TestOverintegrationIsMoreAccurate:
         # 判成"算例没造出混叠"。下界仍然保留 —— 它防的是"判据空转"。
         _CO_MIN = {("collapsed", 1): 1e-3, ("collapsed", 2): 1e-3,
                    ("native", 1): 1e-4, ("native", 2): 1e-6}
-        basis = resolve_prism_basis_mode()
+        basis = "native"
         pr_co, pr_oi = errs["prism"]
         assert pr_co > _CO_MIN[(basis, order)], (
             f"{basis} order={order} prism: coarse 误差只有 {pr_co:.3e}，"

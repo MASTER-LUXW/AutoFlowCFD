@@ -33,7 +33,7 @@ face_flux_points/merge.py 的既有记录）。P0（每个面只有 1 个"平均
    守恒结构）。
 2. `compute_exact_adj_rows`：给定任意一侧（owner 或 neighbor）各自的
    (cell,axis,side) 赋值，返回*未归一化、未按 side 定向*的原始 adj(J)
-   行——供 `inviscid_kernel.py`/`inviscid_kernel_colored.py`/
+   行——供 `inviscid_kernel.py`/
    `viscous_flux.py` 的"自洽方向"计算（P1+ 内部面主通量的实际输入，见
    `5_重大问题修复-黎曼求解器法向.md`）和 `troubled_cell.py` 机制2诊断
    使用——此前这两处都是对 SP 网格上的 adj(J) 做 Lagrange 外插到 FP

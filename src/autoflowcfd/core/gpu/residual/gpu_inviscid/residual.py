@@ -36,7 +36,6 @@ def compute_inviscid_residual_fr_gpu(
     flat_face_cpu=None,
     device_id=0,
     mach_ref=0.1,
-    precond_mode=None,
 ):
     """P>=1 高阶 FR 无粘残差的 GPU 实现。
 
@@ -55,9 +54,6 @@ def compute_inviscid_residual_fr_gpu(
             kernels.py::compute_ausm_up_flux 文档）。默认值 0.1 只是
             保留旧硬编码值，真正的求解器路径（gpu_solver.py）必须显式
             传入 `solver.freestream["mach_ref"]`，不能依赖这个默认值。
-        precond_mode: AUSM+up 预处理声速作用域，None 表示按环境变量
-            `AFCFD_AUSM_PRECOND_MODE` 解析（与 CPU 端同一个解析器，
-            保证同一次运行里 CPU/GPU 两条路径取到同一档）。
 
     Returns:
         residual: CuPy 数组 (n_cells, n_sps, 5) 或 numpy 数组（与输入同类型）
@@ -146,7 +142,7 @@ def compute_inviscid_residual_fr_gpu(
     # 界面校正（按图着色逐色处理）
     correction = _compute_interface_correction_gpu(
         Q_gpu, adj_j, det_jacs, flat_face_gpu, Q_ghost_gpu,
-        n_cells, n_sps, device_id, mach_ref, precond_mode,
+        n_cells, n_sps, device_id, mach_ref,
     )
 
     residual = residual + correction

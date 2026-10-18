@@ -20,7 +20,6 @@ class TestRealSpsCountsFollowTheActivePrismBasis:
     def test_native_prism_reports_its_own_count(self, order, monkeypatch):
         from autoflowcfd.fr.native_padding import real_sps_per_cell
 
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
         n_prism, _ = real_sps_per_cell(order)
         assert n_prism == native_prism_n_sps(order)
         assert n_prism < (order + 1) ** 3
@@ -31,7 +30,6 @@ class TestRealSpsCountsFollowTheActivePrismBasis:
             reduce_per_cell_over_real_sps,
         )
 
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
         f = np.zeros((4, 27))
         f[:, :18] = 2.0
         f[:2, 18:] = 1e6          # 棱柱段的填充槽位：变馊的初值
@@ -62,7 +60,6 @@ class TestRealSpsCountsFollowTheActivePrismBasis:
         """逐行掩码版（按 owner_cell 索引出来的逐面数组）同样要正确。"""
         from autoflowcfd.fr.native_padding import reduce_rows_over_real_sps
 
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
         f = np.zeros((3, 27))
         f[:, :10] = 5.0
         f[:, 10:18] = 5.0
@@ -71,28 +68,13 @@ class TestRealSpsCountsFollowTheActivePrismBasis:
         got = reduce_rows_over_real_sps(f, is_prism, 2, "mean")
         assert np.allclose(got, 5.0), got
 
-    def test_bad_mode_raises_rather_than_falling_back(self, monkeypatch):
-        """拼错环境变量必须报错。
-
-        静默退回默认值会让 A/B 对照失去意义 —— 本项目已经吃过一次
-        "固定 CFL 请求被静默丢弃、两条不同配置给出逐位相同轨迹"的亏。
-        """
-        from autoflowcfd.fr.native_prism.mode import resolve_prism_basis_mode
-
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "Native ")
-        assert resolve_prism_basis_mode() == "native", "应当容忍大小写与空格"
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "nativ")
-        with pytest.raises(ValueError, match="AFCFD_PRISM_BASIS"):
-            resolve_prism_basis_mode()
-
 
 class TestOperatorsAndGeometrySwitchTogether:
     """`FROperators` 与 `build_order_geometry` 必须**一起**切换棱柱基。
 
     原生 `D` 作用在**原生棱柱节点**上的场，坍缩档的 `sps_coords`/
     `jacobians` 建在张量积立方体节点上。把原生算子套到坍缩节点采样的场上
-    不会报错，只会给出错的导数 —— 所以两边读同一个 `AFCFD_PRISM_BASIS`，
-    这里钉住"确实读到了同一个值"。
+    不会报错，只会给出错的导数 —— 这里钉住两边都用原生棱柱基。
     """
 
     @staticmethod
@@ -140,7 +122,6 @@ class TestOperatorsAndGeometrySwitchTogether:
         行填零 -> 填充槽位的残差恒为零、不被时间推进改写；
         列填零 -> 填充行里任何有限数值都不污染真实输出。
         """
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
         ops = self._ops(order)
         nr = ops.n_native_sps_prism
         D = ops.D_native_prism_padded
@@ -180,7 +161,6 @@ class TestOperatorsAndGeometrySwitchTogether:
             cube_face_to_native_prism_face,
         )
 
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
         ops = self._ops(2)
         # 5 个合法立方体面都要能取到算子
         for axis in range(3):
@@ -211,7 +191,6 @@ class TestNativePrismGeometry:
             build_order_geometry,
         )
 
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
         mesh = build_channel_mesh_prism(order, nx=3, ny=2, nz=2,
                                         Lx=0.1, H=0.01, Lz=0.004)
         return mesh, build_order_geometry(mesh, order)
@@ -290,13 +269,12 @@ class TestNativePrismGeometry:
             get_overintegration_context,
         )
         from autoflowcfd.fr.overintegration_order import (
-            prism_n_fine, resolve_prism_overintegration_order,
+            overintegration_order, prism_n_fine,
         )
         from autoflowcfd.grid.connectivity.face_connectivity import (
             NATIVE_PRISM_FACE_CODE_RANGE,
         )
 
-        monkeypatch.setenv("AFCFD_PRISM_BASIS", "native")
         mesh = build_channel_mesh_prism(order, nx=2, ny=2, nz=2,
                                         Lx=0.05, H=0.01, Lz=0.004)
 
@@ -308,7 +286,7 @@ class TestNativePrismGeometry:
             "原生档下面编码里没有任何原生棱柱面 —— 说明 "
             "with_native_face_codes 的 prism_native 分派没生效")
 
-        oo = resolve_prism_overintegration_order(order)
+        oo = overintegration_order(order)
         expect_fine = prism_n_fine(oo)
         assert expect_fine == (oo + 1) ** 2 * (oo + 2) // 2
         assert expect_fine < (oo + 1) ** 3, "原生细点数应当少于坍缩张量积"

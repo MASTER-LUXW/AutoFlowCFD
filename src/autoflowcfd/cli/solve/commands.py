@@ -86,6 +86,9 @@ from autoflowcfd.cli.solve.aero_coefficients import (  # noqa: E402
                    '不传本选项）。早于 2026-09-25 的 '
                    'checkpoint 没有记录，它们只可能是 rk3）。单机与分布式（--n-ranks/'
                    '--multi-gpu/--fully-distributed）续算都支持 newton-krylov。')
+@click.option('--low-mach-precond/--no-low-mach-precond', 'low_mach_precond', default=None,
+              help='低马赫数伪时间预处理开关（只作用于稳态格式 rk3/newton-krylov），默认沿用 checkpoint 记录；'
+                   '不改变定常解，只改变到达它的路径')
 @click.option('--cfl-start', type=float, default=None,
               help='自适应 CFL 初始值，默认按续算所用时间格式取其 CFL 律的签名默认值'
                    '（rk3 为 0.03，newton-krylov 为 5；adaptive_cfl/policy.py 唯一来源）。'
@@ -130,7 +133,7 @@ from autoflowcfd.cli.solve.aero_coefficients import (  # noqa: E402
 def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
            surface_mesh: Optional[str], reference_area: Optional[float], threads: int,
            skip_quality_check: bool, checkpoint_interval: int,
-           time_scheme: Optional[str],
+           time_scheme: Optional[str], low_mach_precond: Optional[bool],
            cfl_start: Optional[float], cfl_max: Optional[float], cfl_min: Optional[float],
            phase_max_iter: Optional[int], residual_drop_threshold: float,
            n_ranks: int, multi_gpu: bool, fully_distributed: bool,
@@ -165,6 +168,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
         residual_drop_threshold: Order Continuation 单阶段提前升阶所需的残差下降倍数
         dt: 时间步长覆盖（None 时沿用 checkpoint 记录的值，见 core/utils/checkpoint_time.py::resume_time_step）
         tol: 相对收敛容差
+        low_mach_precond: 低马赫预处理覆盖（None 时沿用 checkpoint 记录）
     """
     logger.info(f"Resuming simulation from checkpoint: {checkpoint_file}")
 
@@ -178,6 +182,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
             checkpoint_interval, phase_max_iter, residual_drop_threshold,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
             time_scheme=time_scheme, dt=dt, tol=tol, reference_area=reference_area,
+            low_mach_precond=low_mach_precond,
         )
         return
 
@@ -189,6 +194,7 @@ def resume(checkpoint_file: str, max_iter: int, backend: Optional[str],
         cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
         time_scheme=time_scheme,
         gpu_device=0 if gpu_device is None else gpu_device,
+        low_mach_precond=low_mach_precond,
     )
     input_file = metadata["input_file"]
     turbulence_model = metadata["turbulence_model"]
@@ -240,6 +246,7 @@ def _resume_distributed(
     dt: Optional[float] = None,
     tol: float = DEFAULT_STEADY_TOL,
     reference_area: Optional[float] = None,
+    low_mach_precond: Optional[bool] = None,
 ) -> None:
     """`resume` 的分布式分支（2026-09-02 补齐，见 `resume` 文档"完成度"
     一节）——CPU MPI"传统模式"/"完全分布式加载"/多GPU 三条路径共用同一个
@@ -276,7 +283,7 @@ def _resume_distributed(
         surface_mesh=surface_mesh, threads=threads,
         cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
         skip_quality_check=skip_quality_check, time_scheme=time_scheme,
-        reference_area=reference_area,
+        reference_area=reference_area, low_mach_precond=low_mach_precond,
     )
     input_file = metadata["input_file"]
     turbulence_model = metadata["turbulence_model"]

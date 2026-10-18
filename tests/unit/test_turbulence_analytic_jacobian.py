@@ -110,13 +110,6 @@ def test_diagonal_blocks_match_with_auto_wall_treatment(kind, order):
 
 
 @pytest.mark.parametrize("model", ["SST", "SA"])
-def test_diagonal_blocks_match_without_overintegration(monkeypatch, model):
-    monkeypatch.setenv("AFCFD_TURB_OVERINT", "off")
-    _, _, _, _, fd, bp, bt, _ = _blocks(_turb_solver("prism", 1, model))
-    _assert_diag_match(fd, bp, bt)
-
-
-@pytest.mark.parametrize("model", ["SST", "SA"])
 def test_coupling_blocks_match_dense_finite_difference(model):
     s = _turb_solver("tet", 1, model)
     be, res, kw0, r0, fd, bp, bt, cp = _blocks(s)

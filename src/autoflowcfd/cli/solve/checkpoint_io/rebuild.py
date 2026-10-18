@@ -78,6 +78,17 @@ def resolve_resume_time_scheme(requested, metadata):
     return scheme_from_name(metadata.get("time_scheme", "ssp_rk3"))
 
 
+def resolve_resume_low_mach_precond(requested, metadata) -> bool:
+    """续算的低马赫预处理请求值：显式覆盖（`--low-mach-precond/--no-low-mach-precond`）> checkpoint 记录 > 开启。
+
+    早于 2026-10-18 的 checkpoint 没有这个键：那时构造参数默认开启、只能经环境变量关闭，取开启与它们
+    绝大多数的真实设置一致。
+    """
+    if requested is not None:
+        return bool(requested)
+    return bool(metadata.get("low_mach_precond", True))
+
+
 def rebuild_solver_from_checkpoint(
     checkpoint_path: str,
     backend: Optional[str] = None,
@@ -90,6 +101,7 @@ def rebuild_solver_from_checkpoint(
     cfl_min: Optional[float] = None,
     time_scheme: Optional[str] = None,
     gpu_device: int = 0,
+    low_mach_precond: Optional[bool] = None,
 ):
     """从 checkpoint 完整重建一个带解场的单机求解器（不继续迭代）。
 
@@ -136,6 +148,7 @@ def rebuild_solver_from_checkpoint(
             （`adaptive_cfl/policy.py` 唯一来源；显式与隐式差两个数量级）。
         time_scheme: 续算用的稳态格式覆盖（`rk3`/`newton-krylov`）；`None`
             时沿用 checkpoint 记录的格式（见 `resolve_resume_time_scheme`）。
+        low_mach_precond: 低马赫预处理覆盖；`None` 时沿用 checkpoint 记录（`resolve_resume_low_mach_precond`）。
 
     Returns:
         (solver, iteration, metadata): 重建好的 FRSolver 实例（状态已从
@@ -197,6 +210,7 @@ def rebuild_solver_from_checkpoint(
         order=order,
         turb_model_name=turbulence_model,
         time_scheme=resolved_scheme,
+        low_mach_precond=resolve_resume_low_mach_precond(low_mach_precond, metadata),
         # 决定物理解的参数一律从 checkpoint 恢复（来流缺失即报错，见
         # physics_from_metadata）；CFL 等纯数值参数由调用方指定。
         **physics_from_metadata(metadata),

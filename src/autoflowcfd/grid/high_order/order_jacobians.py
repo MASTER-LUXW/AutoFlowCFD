@@ -293,7 +293,7 @@ def compute_native_prism_jacobians(
     mesh: "HighOrderMesh", ref_native: np.ndarray, n_sps_per_cell: int,
     want_scaled_quality: bool
 ) -> Optional[Dict[str, np.ndarray]]:
-    """原生棱柱基（`AFCFD_PRISM_BASIS=native`）版本的 Jacobian 构造。
+    """原生棱柱基版本的 Jacobian 构造。
 
     与四面体那条（`compute_native_tet_jacobians`）的**关键差别**：直边
     四面体的 Jacobian 是逐单元常数，而棱柱即便直边也一般**随点变化**

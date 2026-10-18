@@ -126,6 +126,7 @@ def build_fully_distributed_rank_package(
     artificial_viscosity_enabled: bool = False,
     artificial_viscosity_alpha: float = 1.0,
     wall_treatment: str = DEFAULT_WALL_TREATMENT,
+    low_mach_precond: bool = True,
 ) -> dict:
     """Root rank 专用：为指定 rank 算好它需要的全部紧凑数据（不需要该
     rank 自己持有完整全局网格）。
@@ -316,6 +317,8 @@ def build_fully_distributed_rank_package(
         'artificial_viscosity_alpha': float(artificial_viscosity_alpha),
         # RANS 近壁处理方式（`turbulence/wall_model/treatment.py`）
         'wall_treatment': validate_wall_treatment(wall_treatment),
+        # 低马赫预处理请求值（`core/utils/preconditioning.py::resolve_low_mach_precond`）
+        'low_mach_precond': bool(low_mach_precond),
         'cfl_min': cfl_min,
         # 时间精确显式模式与固定/自适应 CFL（`time_integration/time_accurate.py::configure_time_stepping`）
         'time_accurate': bool(time_accurate),

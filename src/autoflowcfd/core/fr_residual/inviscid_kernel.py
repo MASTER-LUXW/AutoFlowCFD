@@ -14,40 +14,14 @@ fr_residual_inviscid.py 里原来的纯 Python `for f in range(fc.n_faces)` 循�
 （自由流场残差从 9e-5 恶化到 3.1e7，见 fr_residual_inviscid.py 里
 `F_common_n_owner` 附近的注释），必须保留两次独立调用。
 
-**多核并行（阶段二）与 scatter-add 的正确处理**：`correction[oc/nc,
-s, v] += ...` 是典型的 scatter-add——同一个 cell 会被多个不同的面
-（不同的 f）累加，owner_cell[f]/neighbor_cell[f] 在不同 f 之间会重复。
-直接对 `for f in range(n_faces)` 套 `prange` 会有多线程写冲突（已用
-实验证实：不加保护会静默丢失约 23% 的累加更新，无任何报错）。这里
-用"每线程私有累加缓冲区 `correction_per_thread[tid, ...]` + 循环结束
-后按 thread 轴 `sum(axis=0)` 归约"的标准做法。**由此带来两条不能违反
-的约束**：
-1. `n_threads` 参数必须由调用方在调用本函数之前、紧邻调用处取
-   `numba.get_num_threads()` 得到，不能缓存旧值、不能与其他地方并发
-   修改的线程数不一致——`correction_per_thread[tid, ...]` 在 nopython
-   模式下默认关闭 bounds check，`tid >= n_threads` 会静默内存越界，
-   而不是报错。`numba.set_num_threads(...)` 只应该在求解器启动时
-   调用一次（见 core/fr_solver.py），不要在其他地方并发修改。
-2. `get_num_threads()` 本身**不能在这个 `@njit(cache=True,
-   parallel=True)` 函数内部调用**——会导致 numba 静默放弃磁盘缓存
-   （`NumbaWarning: uses dynamic globals`），已用实验证实：修正为
-   "调用方取值、作为普通 int 参数传入，kernel 内部只用
-   `get_thread_id()`"之后缓存行为完全恢复（`get_thread_id()` 本身
-   不影响缓存）。
-
-**并行化后累加顺序的变化（合法，不是 bug）**：串行版本的历史约束是
-"严格保持与 range(n_faces) 相同的处理顺序"，因为退化 Jacobian 单元
-处的舍入误差量级对求和结合顺序敏感。并行化后不同线程并发处理不同的
-f，最终归约顺序（每线程内部保持子区间顺序，最后按 thread id 顺序
-求和）必然不再是严格的 `range(n_faces)` 顺序——这是并行化本身不可
-避免的、合法的浮点重结合来源，用与本项目一贯处理"numpy/BLAS vs
-numba 标量重结合"同一套"相对 p_inf 容差"方法论验证（见
-`tests/unit/test_fr_residual_inviscid_kernel_crosscheck.py` 的
-`nt=16` 用例），不是 `nt=1` 时才用的逐位相等判据。
+**多核并行**：按面着色（同色面的 owner/neighbor 单元互不重复），调用方逐颜色调用
+`compute_inviscid_interface_correction_kernel`，组内 `prange` 直接累加进共享 buffer——不加保护地对全部面
+`prange` 会静默丢失约 23% 的累加更新（已实验证实）。并行后累加顺序不再是 `range(n_faces)` 顺序，这是合法的
+浮点重结合，验证用相对 p_inf 的容差（`tests/unit/test_fr_residual_inviscid_kernel_crosscheck.py`）。
 """
 
 import numpy as np
-from numba import njit, prange, get_thread_id
+from numba import njit, prange
 
 from autoflowcfd.core.fr_operators.small_dense import matmul_small
 from autoflowcfd.core.fr_residual.face_point_jumps import inviscid_common_flux_point
@@ -77,18 +51,19 @@ def compute_inviscid_interface_correction_kernel(
     mixed_nb_partner: np.ndarray, mixed_nb_mask: np.ndarray,
     mixed_ow_partner: np.ndarray, mixed_ow_mask: np.ndarray,
     Q_ghost: np.ndarray,
-    n_threads: int,
+    face_indices: np.ndarray,  # 当前颜色组的面索引
+    correction: np.ndarray,    # 共享输出 buffer（同色面无冲突，直接写入）
     mach_ref: float,
-    precond_mode: int,   # AUSM+up 预处理声速作用域，见 kernels.py::
-                         # compute_ausm_up_flux 文档；必须由纯 Python 层
-                         # 用 resolve_ausm_precond_mode() 解析后传入
     owner_face_op: np.ndarray, neighbor_face_op: np.ndarray,
     ref_area_weight: np.ndarray,
     boundary_extrap_native: np.ndarray, lift_native: np.ndarray,
-) -> np.ndarray:
-    """返回 correction，形状 (n_cells, n_sps, 5)，与
-    fr_residual_inviscid.py::compute_inviscid_residual_fr 里"--- 界面项
-    ---"那一段算出的 correction 逐位对应。
+) -> None:
+    """把颜色组 `face_indices` 里各面的无粘界面修正项累加进 `correction`（(n_cells, n_sps, 5)，就地）。
+
+    **按面着色并行**：调用方按颜色循环，每次只处理一个颜色组（同色面的 owner/neighbor 单元互不重复，构造见
+    `core/utils/face_coloring.py`），所以可以对组内的面 `prange`、直接累加进共享的 `correction`，没有写冲突、
+    不需要每线程缓冲与归约（内存 O(n_cells*n_sps*5)，与线程数无关）。2026-10-18 以前另有一份每线程缓冲版
+    （环境变量切换），两份逐字同步维护，随开关删除。
 
     native 四面体（路径C）支持（Part8 文档"三、本次会话实现范围"）：
     `owner_face_op`/`neighbor_face_op` 是两侧的面算子索引（面编码 + 三角形面的
@@ -113,11 +88,6 @@ def compute_inviscid_interface_correction_kernel(
     条分支在生产上不可达。不可达的第二套离散方案留在最热的 kernel 里，
     正是本项目明确要删的冗余。构造期护栏见
     `core/fr_operators/face_kernels.py::build_flat_face_geometry`。
-
-    `n_threads` 必须是调用方紧邻本次调用之前取的 `numba.
-    get_num_threads()`，理由见模块文档"多核并行"一节——不能在这个函数
-    内部自己查询（会破坏磁盘缓存）。多线程下累加顺序不再是严格的
-    `range(n_faces)` 顺序，验证判据也相应分层，见模块文档。
 
     **法向一律取自本侧精确度量行**（2026-09-24）：此前两侧各有一个
     `alignment = dir(adj_row).true_normal < 0.5` 时改用 `true_normal` 的
@@ -145,24 +115,19 @@ def compute_inviscid_interface_correction_kernel(
     的 `compute_boundary_ghost_states` 是另一个独立函数，自己的
     `adj_j` 参数不受影响）。
     """
-    n_cells = Q.shape[0]
     n_sps = Q.shape[1]
-    n_faces = owner_cell.shape[0]
     n_fp = owner_adj_row_exact.shape[1]
+    n_faces_in_color = face_indices.shape[0]
 
-    correction_per_thread = np.zeros((n_threads, n_cells, n_sps, 5))
-
-    for f in prange(n_faces):
-        tid = get_thread_id()
+    for fi in prange(n_faces_in_color):
+        f = face_indices[fi]
         oc = owner_cell[f]
         oc_op = owner_face_op[f]
-        # 原生面的 adj 行已是正确 outward 定向（见函数文档），所以不再有
-        # side 翻转因子——`owner_axis`/`owner_side` 是复用槽位，不读。
 
         if owner_is_primary[f]:
-            E_o = boundary_extrap_native[oc_op]  # (n_fp, n_sps)
+            E_o = boundary_extrap_native[oc_op]
 
-            Q_o = _extrap_matmul(Q[oc], E_o)  # (n_fp, 5)
+            Q_o = _extrap_matmul(Q[oc], E_o)
             adjrow_o = owner_adj_row_exact[f]  # (n_fp, 3)，逐 FP 精确值，见函数文档
 
             flux_owner = np.empty((n_fp, 5))
@@ -174,7 +139,7 @@ def compute_inviscid_interface_correction_kernel(
                     Q_n = np.zeros(5)
                     c0 = neighbor_src0_cell[f]
                     if c0 >= 0:
-                        mat0 = neighbor_src0_tpl[neighbor_src0_tid[f]]  # (n_fp, n_sps)
+                        mat0 = neighbor_src0_tpl[neighbor_src0_tid[f]]
                         for s in range(n_sps):
                             w = mat0[i, s]
                             if w != 0.0:
@@ -189,34 +154,29 @@ def compute_inviscid_interface_correction_kernel(
                             if w != 0.0:
                                 for v in range(5):
                                     Q_n[v] += w * Q[c1, s, v]
-                    # 混合拆分面（B-8，见 fr/face_flux_points/merge.py）：内部半区由上方多源插值覆盖，
-                    # 边界半区逐 FP 取配对边界面的幽灵态（两条记录共享同一 owner 棱柱与立方体面，
-                    # FP 网格逐点重合）。掩码行内多源插值矩阵权重为 0，先算再覆盖不冲突。
+                    # 混合拆分面（B-8，与主 kernel 同步修改，见 inviscid_kernel.py 同名注释）
                     mp = mixed_nb_partner[f]
                     if mp >= 0 and mixed_nb_mask[f, i]:
                         Q_n = Q_ghost[mp, i]
-                flux_owner[i] = inviscid_common_flux_point(Q_o[i], Q_n, adjrow_o[i], mach_ref, precond_mode)
+                flux_owner[i] = inviscid_common_flux_point(Q_o[i], Q_n, adjrow_o[i], mach_ref)
 
-            # DG 提升算子（见函数文档）：物理面积权重逐 FP 加权跳跃量，
-            # 再用提升算子映射回体积节点，见
-            # native_tet/basis.py::build_native_tet_lift "弱形式提升定义"。
             weighted_flux_o = np.empty((n_fp, 5))
             for i in range(n_fp):
                 w_area = ref_area_weight[i]
                 for v in range(5):
                     weighted_flux_o[i, v] = w_area * flux_owner[i, v]
-            contrib_owner = matmul_small(lift_native[oc_op], weighted_flux_o)  # (n_sps, 5)
+            contrib_owner = matmul_small(lift_native[oc_op], weighted_flux_o)
             for s in range(n_sps):
                 dj = det_jacs[oc, s]
                 for v in range(5):
-                    correction_per_thread[tid, oc, s, v] += -contrib_owner[s, v] / dj
+                    correction[oc, s, v] += -contrib_owner[s, v] / dj
 
         if (not is_boundary[f]) and neighbor_is_primary[f]:
             nc = neighbor_cell[f]
             nc_op = neighbor_face_op[f]
             E_n = boundary_extrap_native[nc_op]
 
-            Q_n_native = _extrap_matmul(Q[nc], E_n)  # (n_fp,5)
+            Q_n_native = _extrap_matmul(Q[nc], E_n)
             adjrow_n_native = neighbor_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
 
             flux_neighbor = np.empty((n_fp, 5))
@@ -240,15 +200,12 @@ def compute_inviscid_interface_correction_kernel(
                         if w != 0.0:
                             for v in range(5):
                                 Q_o_at_n[v] += w * Q[c1, s, v]
-                # 混合拆分面（B-8）：neighbor-primary 分支对称处理——若本面是 neighbor 侧的
-                # 混合配对内部面，边界半区处的对侧状态同样取配对边界面的幽灵态。
-                # 逐元素拷贝而非整体赋值：Q_o_at_n 首次赋值为 np.zeros(5)（C 布局），
-                # numba 不允许再把 A 布局视图赋给 C 布局变量。
+                # 混合拆分面（B-8，与主 kernel 同步；逐元素拷贝避免 numba C/A 布局赋值冲突）
                 mp_o = mixed_ow_partner[f]
                 if mp_o >= 0 and mixed_ow_mask[f, i]:
                     for v in range(5):
                         Q_o_at_n[v] = Q_ghost[mp_o, i, v]
-                flux_neighbor[i] = inviscid_common_flux_point(Q_n_native[i], Q_o_at_n, adjrow_n_native[i], mach_ref, precond_mode)
+                flux_neighbor[i] = inviscid_common_flux_point(Q_n_native[i], Q_o_at_n, adjrow_n_native[i], mach_ref)
 
             weighted_flux_n = np.empty((n_fp, 5))
             for i in range(n_fp):
@@ -259,10 +216,7 @@ def compute_inviscid_interface_correction_kernel(
             for s in range(n_sps):
                 dj = det_jacs[nc, s]
                 for v in range(5):
-                    correction_per_thread[tid, nc, s, v] += -contrib_neighbor[s, v] / dj
-
-    return correction_per_thread.sum(axis=0)
-
+                    correction[nc, s, v] += -contrib_neighbor[s, v] / dj
 
 
 def compute_boundary_ghost_states(flat, Q: np.ndarray, ghost_provider) -> np.ndarray:

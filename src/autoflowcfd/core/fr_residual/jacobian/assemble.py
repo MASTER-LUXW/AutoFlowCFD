@@ -62,7 +62,6 @@ class MeanFlowLinearization:
     ghost_provider: object
     mu: float
     mach_ref: float
-    precond_mode: int
     low_mach: bool
     mu_t: Optional[np.ndarray] = None        # (n_cells, n_sps) 冻结的动力涡粘
     nu_av: Optional[np.ndarray] = None       # (n_cells, n_sps) 冻结的问题单元人工扩散系数（运动粘度）
@@ -201,7 +200,7 @@ def assemble_mean_flow_blocks(ctx: MeanFlowLinearization, U, residual=None, want
             flat.owner_face_op, flat.neighbor_face_op, flat.ref_area_weight,
             flat.boundary_extrap_native, flat.lift_native, flat.ip_length,
             float(ctx.mu), float(ctx.Pr), float(ctx.Pr_t), float(c_ip),
-            float(ctx.mach_ref), int(ctx.precond_mode), cross_offset, cross_data, cross_col)
+            float(ctx.mach_ref), cross_offset, cross_data, cross_col)
     del QgP, Qg0
     if want_coupling:
         if not np.array_equal(cross_col, expected_col):

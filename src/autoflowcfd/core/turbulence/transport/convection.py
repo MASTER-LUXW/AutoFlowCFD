@@ -24,7 +24,6 @@
 不可微，JFNK 湍流 GMRES 每步跑满 200 次。全场 99 分位也有 1.7e4 1/s。
 """
 
-import os
 import numpy as np
 
 
@@ -47,73 +46,10 @@ from .faces import (
 )
 
 
-#: k/omega 输运体积项是否走过积分（去混叠），由 `AFCFD_TURB_OVERINT` 选择：
-#:   "off"（默认，与此前行为逐位一致）
-#:   "on" —— 对流/扩散体积项都在 FINE 点上算完再限制回 coarse
-#:
-#: **为什么需要它（2026-09-15）**：`fr/collapsed_basis.py::
-#: build_overintegration_operators` 文档记录了去混叠的动机，并给出实测
-#: 数字——对解析残差恒为 0 的线性剪切场，不去混叠的 P2 体积项算出的残差
-#: 是真值的 43~62 倍。那套机制一直**只接在平均流的无粘体积项**上
-#: （`fr_residual/inviscid.py` 的 `mesh.jacobians_fine is not None` 分支），
-#: 粘性项与本模块的 k/omega 输运项**完全没有**。
-#:
-#: 而 k/omega 对流体积项算的是 `div(adj(J)·rho·u·phi)`——一个**三重**
-#: 非线性乘积，真实多项式次数约 `3*order + 度量次数`，远高于 order。
-#: 直接在 coarse SPs 上对它做微分就是"先混叠再求导"。
-#:
-#: 这与 2026-09-12 记录的真实 P1 发散症状
-#: 直接对应：那次的诊断原文是"P1 多项式在单元内部相邻解点间出现数量级
-#: 跳变 -> 外插到面通量点后被上风格式放大成巨大的虚假对流残差"，正是
-#: 对流项混叠的形态。当时的处置是给 k/omega 加模态滤波器，而那个滤波器
-#: 每个 RK stage 清掉一整阶（滤波子系统已于 2026-10-18 删除）——用牺牲阶数换
-#: 稳定。去混叠是同一个问题的**不牺牲阶数**的正解。
-#:
-#: **默认已于 2026-09-15 改为 "on"**，三条证据齐备后才改的：
-#:
-#: 1. **解析判据**：`rho`/`u` 取常数、`phi` 取线性（`rho*u*phi` 只有一次、
-#:    完全落在 P1 解空间内，任何非零误差都只能来自离散算子本身），
-#:    `d(rho*phi)/dt = -rho*(u·G)` 有闭式解。走公开接口
-#:    `compute_scalar_convection_residual` 实测：
-#:
-#:        默认 off: order=1 棱柱相对误差 **1.1294（113%）**
-#:                  （残差范围 [-12.26, +1.11]，解析值 -8.5750）
-#:                  order=1 四面体 6.84e-15（机器零）
-#:        打开 on : order=1 棱柱 **4.61e-10**（改善约 2.4e9 倍）
-#:                  order=2 两档逐位相同（2.2597e-09 / 2.2576e-09）
-#:
-#:    棱柱正是边界层单元、k/omega 最要紧的地方；而 order=2 在两档下都
-#:    已足够精确，说明那个 113% 不是"这套离散本来就这么差"，是 order=1
-#:    特有的混叠（非仿射棱柱上 adj(J) 是非平凡多项式，`adj(J)*rho*u*phi`
-#:    真实次数高于 1；四面体在该网格上仿射、adj(J) 常数，所以差 14 个
-#:    数量级）。边界条件不是原因：order=1 与 order=2 的边界面数完全相同。
-#: 2. **代价已量化**：微基准（5 万单元、3 线程、V=1）单次标量链路
-#:    85.5ms，按 79 万单元线性外推 1.354s；每步 4 次（k/omega 对流 +
-#:    k/omega 扩散）约 5.42s，相对实测 ~53s/步约 **+10.2%**。
-#: 3. **真实网格已验证**：79 万单元 cube_demo 的两个 250 步运行
-#:    （`true_cfl03`/`true_adaptive`，零阶数损失 + 逐点 omega 下限）本来
-#:    就是带 `TURB_OVERINT=on` 跑的，已单调收敛 137+ 步、om_max 全程不动。
-#:
-#: +10% 的单步代价换掉生产阶数上 113% 的残差误差——这个权衡不需要再等。
-#: `off` 保留为受控 A/B 与回归复现的入口。
-def resolve_turb_overintegration() -> str:
-    """返回 k/omega 输运体积项的去混叠开关，并校验取值。
-
-    每次调用都重读环境变量（不缓存模块级常量）：这一维不影响算子构造
-    （过积分三件套与 `jacobians_fine` 在 `order>=1` 时本来就无条件构造
-    好了，见 `fr/operators.py` 与 `grid/high_order/high_order_mesh_order.py`），
-    运行期读取是安全的，也让测试可以直接 monkeypatch 环境变量。
-    """
-    v = os.environ.get("AFCFD_TURB_OVERINT", "on").lower()
-    if v not in ("off", "on"):
-        raise ValueError(
-            f"AFCFD_TURB_OVERINT={v!r} 不是合法取值（off | on）。"
-            f"'on'（默认）把对流/扩散体积项改走 FINE 点去混叠，"
-            f"'off' 是 2026-09-15 之前的行为（直接在 coarse SPs 上微分，"
-            f"order=1 棱柱有 113% 相对误差），保留作受控 A/B 入口。")
-    return v
-
-
+#: k/omega 输运体积项恒走过积分（去混叠）：对流通量 `adj(J) rho u phi` 是非线性乘积，真实多项式次数约
+#: `3*order + 度量次数`，直接在 coarse SPs 上微分就是"先混叠再求导"。2026-09-15 起默认开、2026-10-18 删除开关
+#: `AFCFD_TURB_OVERINT`（off 档在坍缩棱柱 P1 上有 113% 的对流残差误差；原生基上 P1 体积项仍有 33 倍改善、P2 到
+#: 机器零，单步代价约 +10%）。P0 没有过积分几何（`get_overintegration_context` 返回 None），走单点路径。
 
 
 @njit(cache=True, parallel=True)
@@ -173,12 +109,12 @@ def scalar_convection_volume_divergence(scalar_field, rho, velocity, rho_u_tilde
 
     残差（`phi`）与 `ScalarConvectionGeometry.mass_divergence`（`phi = 1`）共用这一个函数，
     保证对流形式里相减的两项是同一个离散算子。native 四面体用零填充到全局宽度的
-    `D_native_tet_padded`；去混叠见 `resolve_turb_overintegration`。
+    `D_native_tet_padded`；去混叠见模块级说明。
     """
     n_cells = mesh.n_cells
     n_sps = mesh.n_sps_per_cell
     n_prism = mesh.n_prism_cells
-    oi = get_overintegration_context(mesh, ops) if resolve_turb_overintegration() == "on" else None
+    oi = get_overintegration_context(mesh, ops)
     if oi is not None:
         return _scalar_convection_volume_overintegrated(scalar_field, rho, velocity, oi, n_sps)
     tet_op_D = ops.D_native_tet_padded if getattr(ops, "D_native_tet_padded", None) is not None else ops.D_3d_tet

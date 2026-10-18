@@ -75,8 +75,6 @@ class _CFLGatesMixin:
         最多 ×1.1），不需要额外的振荡抑制。冷却期仍然叠加生效，保证与
         shrink/crawl 之间也不会挤在一起。
         """
-        if self.legacy_mode:
-            return   # 见 __init__ 里 AFCFD_CFL_LEGACY 的说明
         if self._res_window.maxlen is None or len(self._res_window) < self._res_window.maxlen:
             return
         if self._steps_since_last_change < self.cooldown_steps:

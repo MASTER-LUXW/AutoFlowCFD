@@ -49,7 +49,7 @@ extrapolate_to_face），与坍缩坐标的 3D 体积微分奇异性无关，不
 `overintegration.py` 已于 2026-09-23 整体删除：坍缩棱柱基删除后，
 `build_overintegration_operators` 与 `OVERINTEGRATION_MAX_ORDER` 再无任何
 生产调用点（两种原生基各有自己的三件套与上限），唯一还活着的
-`resolve_overintegration_order_rule` **与基无关**，已搬到它真正的归属
+过积分阶数规则 **与基无关**，已搬到它真正的归属
 `fr/overintegration_order.py`（跨基过积分阶数的唯一入口）。
 
 本 `__init__.py` re-export 全部既有公开名，所以全仓库

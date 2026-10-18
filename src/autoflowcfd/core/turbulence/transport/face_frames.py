@@ -12,7 +12,7 @@
     neighbor 侧   self  = E_neighbor @ phi[neighbor]          （neighbor 顺序）
                   other = owner_src    @ phi[owner 来源]       （同上）
 
-这与平均流无粘/粘性 kernel（`fr_residual/inviscid_kernel_colored.py` 等）的
+这与平均流无粘/粘性 kernel（`fr_residual/inviscid_kernel.py` 等）的
 neighbor-primary 分支是同一个结构。此前本模块把 owner 顺序下算出的跳变量
 直接喂给 neighbor 的提升算子：对流算子在均匀来流下线性不稳定（CFL 0.1 的
 SSP-RK3 下扰动 200 步 rms 从 8e-3 涨到 4e-2 并扩散到 13% 的单元，修正后
@@ -30,7 +30,7 @@ neighbor "+=" 的非对称约定只对反对称跳变量成立，扩散（BR1 �
 """
 
 import numpy as np
-from numba import get_thread_id, njit, prange
+from numba import njit, prange
 
 from autoflowcfd.core.fr_operators.flux_kernels.viscous import smooth_nonnegative
 
@@ -290,7 +290,7 @@ def _lift_one_side(jump_f, adj_row_f, ref_area_weight, lift, n_fp):
 
 
 @njit(cache=True, parallel=True)
-def lift_side_jumps_kernel_colored(
+def lift_side_jumps_kernel(
     jump_owner, jump_neighbor, sign,
     owner_cell, neighbor_cell, owner_face_op, neighbor_face_op,
     owner_adj_row_exact, neighbor_adj_row_exact, ref_area_weight, lift_native,
@@ -318,33 +318,3 @@ def lift_side_jumps_kernel_colored(
             for s in range(n_sps):
                 for m in range(n_comp):
                     out[nc, s, m] += sign * c[s, m] / det_jacs[nc, s]
-
-
-@njit(cache=True, parallel=True)
-def lift_side_jumps_kernel(
-    jump_owner, jump_neighbor, sign,
-    owner_cell, neighbor_cell, owner_face_op, neighbor_face_op,
-    owner_adj_row_exact, neighbor_adj_row_exact, ref_area_weight, lift_native,
-    owner_is_primary, neighbor_is_primary, det_jacs, n_threads,
-):
-    """同 `lift_side_jumps_kernel_colored`，逐线程私有缓冲版（`AFCFD_USE_COLORING=0`）。"""
-    n_faces, n_fp, n_comp = jump_owner.shape
-    n_cells, n_sps = det_jacs.shape
-    buf = np.zeros((n_threads, n_cells, n_sps, n_comp))
-    for f in prange(n_faces):
-        tid = get_thread_id()
-        if owner_is_primary[f]:
-            oc = owner_cell[f]
-            c = _lift_one_side(jump_owner[f], owner_adj_row_exact[f], ref_area_weight,
-                               lift_native[owner_face_op[f]], n_fp)
-            for s in range(n_sps):
-                for m in range(n_comp):
-                    buf[tid, oc, s, m] += sign * c[s, m] / det_jacs[oc, s]
-        nc = neighbor_cell[f]
-        if nc >= 0 and neighbor_is_primary[f]:
-            c = _lift_one_side(jump_neighbor[f], neighbor_adj_row_exact[f], ref_area_weight,
-                               lift_native[neighbor_face_op[f]], n_fp)
-            for s in range(n_sps):
-                for m in range(n_comp):
-                    buf[tid, nc, s, m] += sign * c[s, m] / det_jacs[nc, s]
-    return buf.sum(axis=0)

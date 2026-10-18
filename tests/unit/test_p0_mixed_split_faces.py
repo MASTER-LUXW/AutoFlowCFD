@@ -56,7 +56,7 @@ def test_p0_inviscid_preserves_freestream_on_mixed_faces(tri):
 
 def test_p0_inviscid_interior_exchange_is_conservative():
     """非均匀状态：两单元的 V R 之和只剩各自边界面的通量（内部半区的通量两侧等值反号）。"""
-    from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux, resolve_ausm_precond_mode
+    from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
     from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
     from autoflowcfd.core.fr_residual.inviscid_p0 import _extract_p0_face_geometry, _precompute_ghost_states
 
@@ -69,11 +69,10 @@ def test_p0_inviscid_interior_exchange_is_conservative():
     normals, areas = _extract_p0_face_geometry(m.face_flux_points, fc, fc.n_faces)
     Q_all = conserved_to_primitive(U[:, 0, :5])
     Qg = _precompute_ghost_states(m.face_flux_points, fc, prov, Q_all, fc.n_faces, normals)
-    mode = int(resolve_ausm_precond_mode())
     boundary_total = np.zeros(5)
     for f in np.flatnonzero(fc.is_boundary):
         if areas[f] > 0.0:
-            boundary_total -= compute_ausm_up_flux(Q_all[fc.owner_cell[f]], Qg[f], normals[f], 0.1, mode) * areas[f]
+            boundary_total -= compute_ausm_up_flux(Q_all[fc.owner_cell[f]], Qg[f], normals[f], 0.1) * areas[f]
     total = (R[:, 0, :] * m.cell_volumes[:, None]).sum(axis=0)
     np.testing.assert_allclose(total, boundary_total, rtol=1e-12, atol=1e-9 * np.abs(boundary_total).max())
 

@@ -64,36 +64,40 @@ def _compute_residual_via_new_kernel(U, mesh, ops, mu_t_field=None, boundary_gho
     residual = viscous_volume_term(Q, grad_vel, grad_T, mu_t_field, MU, PR, PR_T,
                                    get_overintegration_context(mesh, ops), n_sps) / det_jacs[..., None]
 
-    # --- 界面项：新 kernel ---
+    # --- 界面项：生产界面核（按面着色逐颜色调用）---
     flat = get_flat_face_geometry(mesh, ops)
     Q_ghost = compute_boundary_ghost_states(flat, Q, ghost_provider)
     vbc_kind = build_viscous_boundary_kind(flat.n_faces, flat.is_boundary, ghost_provider)
-    n_threads = numba.get_num_threads()
-    correction = compute_viscous_interface_correction_kernel(
-        Q, grad_vel, grad_T, mu_t_field,
-        det_jacs, MU, PR, PR_T,
-        flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
-        flat.owner_is_primary, flat.neighbor_is_primary,
-        flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
-        flat.neighbor_src0_cell, flat.neighbor_src0_tpl, flat.neighbor_src0_tid,
-        flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
-        flat.owner_src0_cell, flat.owner_src0_tpl, flat.owner_src0_tid,
-        flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
-        flat.mixed_nb_partner, flat.mixed_nb_mask,
-        flat.mixed_ow_partner, flat.mixed_ow_mask,
-        Q_ghost, vbc_kind,
-        n_threads,
-        flat.owner_face_op, flat.neighbor_face_op,
-        flat.ref_area_weight,
-        flat.boundary_extrap_native, flat.lift_native,
-        # IP 罚项的几何量与按阶数解析的常数（2026-09-23 新增形参，
-        # 见 `flux_kernels.viscous_ip_penalty_tilde` /
-        # `resolve_viscous_ip_constant`）——必须与生产调用方
-        # `fr_residual/viscous_flux.py` 传的完全一致，否则这条交叉验证
-        # 比的就不是同一个格式了。
-        flat.ip_length,
-        resolve_viscous_ip_constant(int(mesh.order)),
-    )
+    correction = np.zeros(Q.shape[:2] + (5,))
+    for _color in range(flat.n_colors):
+        face_indices = flat.color_face_indices[_color]
+        if len(face_indices) == 0:
+            continue
+        compute_viscous_interface_correction_kernel(
+            Q, grad_vel, grad_T, mu_t_field,
+            det_jacs, MU, PR, PR_T,
+            flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
+            flat.owner_is_primary, flat.neighbor_is_primary,
+            flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
+            flat.neighbor_src0_cell, flat.neighbor_src0_tpl, flat.neighbor_src0_tid,
+            flat.neighbor_src1_idx, flat.neighbor_src1_cell, flat.neighbor_src1_mat,
+            flat.owner_src0_cell, flat.owner_src0_tpl, flat.owner_src0_tid,
+            flat.owner_src1_idx, flat.owner_src1_cell, flat.owner_src1_mat,
+            flat.mixed_nb_partner, flat.mixed_nb_mask,
+            flat.mixed_ow_partner, flat.mixed_ow_mask,
+            Q_ghost, vbc_kind,
+            face_indices, correction,
+            flat.owner_face_op, flat.neighbor_face_op,
+            flat.ref_area_weight,
+            flat.boundary_extrap_native, flat.lift_native,
+            # IP 罚项的几何量与按阶数解析的常数（2026-09-23 新增形参，
+            # 见 `flux_kernels.viscous_ip_penalty_tilde` /
+            # `resolve_viscous_ip_constant`）——必须与生产调用方
+            # `fr_residual/viscous_flux.py` 传的完全一致，否则这条交叉验证
+            # 比的就不是同一个格式了。
+            flat.ip_length,
+            resolve_viscous_ip_constant(int(mesh.order)),
+        )
     residual = residual + correction
     # 机制3（残差量级离群清零）已于 2026-09-19 从生产实现里删除，
     # 依据见 `core/fr_residual/inviscid.py`；本"新版"复制品同步去掉。

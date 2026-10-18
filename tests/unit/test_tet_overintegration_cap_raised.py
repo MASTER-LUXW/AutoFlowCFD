@@ -18,7 +18,7 @@ conditioning.py`）——那条论证对它不成立，但它一直在无依据�
 
 ## 两条约束
 
-`resolve_tet_overintegration_order(order)`：
+`overintegration_order(order)`：
 
   1. 去混叠经验法则 `rule * order`（`AFCFD_OVERINT_ORDER_RULE`，默认 2x）
   2. 四面体自己的上限（`AFCFD_TET_OVERINT_MAX_ORDER`，默认 6 = 不设限）
@@ -76,15 +76,8 @@ P3 从理想的 oo=6（84 个细点）夹到 5（56 <= 64），而去混叠误�
 import numpy as np
 import pytest
 
-from autoflowcfd.fr.overintegration_order import (
-    resolve_overintegration_order_rule,
-)
-from autoflowcfd.fr.native_tet.overintegration import (
-    NATIVE_TET_OVERINTEGRATION_MAX_ORDER,
-    native_tet_n_fine,
-    resolve_tet_overintegration_max_order,
-    resolve_tet_overintegration_order,
-)
+from autoflowcfd.fr.overintegration_order import overintegration_order
+from autoflowcfd.fr.native_tet.overintegration import native_tet_n_fine
 from autoflowcfd.fr.operators import generate_fr_operators
 
 #: 已删除的坍缩基过积分上限（原 `collapsed_basis.OVERINTEGRATION_MAX_ORDER`
@@ -106,73 +99,12 @@ class TestNFineFormula:
             assert native_tet_n_fine(oo) < (oo + 1) ** 3
 
 
-class TestMaxOrderResolver:
-    def test_default_is_six(self):
-        assert NATIVE_TET_OVERINTEGRATION_MAX_ORDER == 6
-        assert resolve_tet_overintegration_max_order() == 6
-
-    def test_env_override(self, monkeypatch):
-        monkeypatch.setenv("AFCFD_TET_OVERINT_MAX_ORDER", "4")
-        assert resolve_tet_overintegration_max_order() == 4
-
-    def test_blank_falls_back_to_default(self, monkeypatch):
-        monkeypatch.setenv("AFCFD_TET_OVERINT_MAX_ORDER", "   ")
-        assert resolve_tet_overintegration_max_order() == 6
-
-    @pytest.mark.parametrize("bad", ["abc", "2.5", "four"])
-    def test_non_integer_raises_not_silently_defaults(self, monkeypatch, bad):
-        """非法取值必须报错。静默回退会让一次拼写错误伪装成默认行为，把
-        A/B 的两条运行悄悄变成同一档（同一原则见
-        `kernels.py::resolve_ausm_precond_mode`）。"""
-        monkeypatch.setenv("AFCFD_TET_OVERINT_MAX_ORDER", bad)
-        with pytest.raises(ValueError, match="不是整数"):
-            resolve_tet_overintegration_max_order()
-
-    @pytest.mark.parametrize("bad", ["0", "-1", "9", "20"])
-    def test_out_of_range_raises(self, monkeypatch, bad):
-        monkeypatch.setenv("AFCFD_TET_OVERINT_MAX_ORDER", bad)
-        with pytest.raises(ValueError, match=r"超出 \[1, 8\]"):
-            resolve_tet_overintegration_max_order()
-
-
-class TestOrderResolverConstraints:
-    """两条约束各自都要真的起作用，且**没有**第三条布局约束。"""
-
-    def test_rule_is_the_binding_constraint_by_default(self):
-        """布局足够宽、上限足够高时，取的就是经验法则 rule*order。"""
-        if resolve_overintegration_order_rule() != 2:
-            pytest.skip("AFCFD_OVERINT_ORDER_RULE 非默认 2x")
+class TestOrderRule:
+    def test_two_times_order_at_every_production_order(self):
+        """P1/P2/P3 取理想的 2/4/6（P0 有限体积路径为 0），恒大于求解阶数。"""
+        assert overintegration_order(0) == 0
         for order in (1, 2, 3):
-            assert resolve_tet_overintegration_order(order, 10 ** 6) == 2 * order
-
-    def test_cap_binds(self, monkeypatch):
-        monkeypatch.setenv("AFCFD_TET_OVERINT_MAX_ORDER", "3")
-        assert resolve_tet_overintegration_order(3, 10 ** 6) == 3
-
-    def test_layout_no_longer_binds(self):
-        """布局宽度参数已被忽略——传什么都不改变结果。
-
-        它曾是真实约束并且把 P3 夹到 5（代价 700 倍，见模块文档）。形参
-        保留只为签名兼容。这条测试把"已移除"钉住，避免有人因为
-        `n_fine_tet > n_fine_prism` 看起来越界又把限制加回去。
-        """
-        if resolve_overintegration_order_rule() != 2:
-            pytest.skip("AFCFD_OVERINT_ORDER_RULE 非默认 2x")
-        for layout in (1, 8, 20, 27, 35, 56, 64, 84, 165, None):
-            assert resolve_tet_overintegration_order(3, layout) == 6
-            assert resolve_tet_overintegration_order(2, layout) == 4
-            assert resolve_tet_overintegration_order(1, layout) == 2
-
-    def test_never_drops_below_order(self):
-        """结果恒 >= order：低于 order 的"细"网格表示不了解本身，那不是
-        "过积分变弱"而是把解截断，是错误而非退化。"""
-        for order in (1, 2, 3, 4, 5, 6, 7, 8):
-            assert resolve_tet_overintegration_order(order) >= order
-
-    def test_cap_can_never_push_below_order(self, monkeypatch):
-        monkeypatch.setenv("AFCFD_TET_OVERINT_MAX_ORDER", "1")
-        for order in (1, 2, 3):
-            assert resolve_tet_overintegration_order(order) == order
+            assert overintegration_order(order) == 2 * order > order
 
 
 class TestProductionOrders:
@@ -187,14 +119,10 @@ class TestProductionOrders:
 
     @pytest.mark.parametrize("order", [1, 2, 3])
     def test_operators_expose_decoupled_orders(self, order):
-        from autoflowcfd.fr.overintegration_order import (
-            resolve_prism_overintegration_order,
-        )
+        from autoflowcfd.fr.overintegration_order import overintegration_order
 
-        if resolve_overintegration_order_rule() != 2:
-            pytest.skip("AFCFD_OVERINT_ORDER_RULE 非默认 2x")
         oo_tet_exp, n_fine_exp = self.EXPECTED[order]
-        oo_prism_exp = resolve_prism_overintegration_order(order)
+        oo_prism_exp = overintegration_order(order)
         ops = generate_fr_operators(order)
         assert ops.overint_order_prism == oo_prism_exp, (
             "棱柱阶数必须等于唯一入口给出的值（它按棱柱基分档）")
@@ -211,12 +139,12 @@ class TestProductionOrders:
         （`enforce_constant_annihilation` 是同批的**另一项**改动，它确实会
         在舍入量级上改动 P1，见 `test_diff_matrix_constant_annihilation.py`。）
         """
-        assert resolve_tet_overintegration_order(1, (2 + 1) ** 3) == 2
+        assert overintegration_order(1) == 2
         assert min(2 * 1, _LEGACY_COLLAPSED_CAP) == 2
 
     def test_p2_reaches_the_ideal(self):
         """P2 的理想 oo=4 完整达到——这是本改动的主要收益（3400 倍）。"""
-        assert resolve_tet_overintegration_order(2, (3 + 1) ** 3) == 4
+        assert overintegration_order(2) == 4
         assert native_tet_n_fine(4) == 35
         assert native_tet_n_fine(4) <= 64
 
@@ -237,7 +165,7 @@ class TestProductionOrders:
         from autoflowcfd.fr.overintegration_order import prism_n_fine
 
         assert native_tet_n_fine(6) == 84
-        assert resolve_tet_overintegration_order(3) == 6
+        assert overintegration_order(3) == 6
         ops = generate_fr_operators(3)
         assert ops.overint_order_tet == 6
         assert ops.overint_n_fine_tet == 84

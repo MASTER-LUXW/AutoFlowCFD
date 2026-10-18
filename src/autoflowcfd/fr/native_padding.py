@@ -8,8 +8,8 @@
 的填充实现，供 `fr/operators.py::generate_fr_operators` 消费，避免各处
 各写一份、未来不一致。
 
-**2026-09-18 起同时服务原生棱柱基**（`AFCFD_PRISM_BASIS=native`，见
-`native_prism/mode.py`）。填充函数本身与单元类型无关（只是把矩阵某些轴补到
+**2026-09-18 起同时服务原生棱柱基**（见
+`fr/native_prism/__init__.py`）。填充函数本身与单元类型无关（只是把矩阵某些轴补到
 全局宽度），原先名字里带 `tet` 纯属历史，已正名；真正与单元类型绑定的只有
 "真实自由度个数"，见 `real_sps_per_cell`。
 
@@ -124,7 +124,7 @@ def real_sps_per_cell(order: int) -> Tuple[int, int]:
     时候漏改。
     """
     # 棱柱只有原生基一种实现（坍缩棱柱基已于 2026-09-23 删除，见
-    # `native_prism/mode.py::resolve_prism_basis_mode`），所以这里不再分派。
+    # 棱柱只有原生基），所以这里不再分派。
     return native_prism_n_real_sps(order), native_tet_n_real_sps(order)
 
 

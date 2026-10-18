@@ -13,19 +13,13 @@ import re
 
 import pytest
 
-from autoflowcfd.core.fr_solver.mach_ref import (
-    _MACH_REF_FLOOR_LEGACY,
-    _MACH_REF_FLOOR_PHYSICAL,
-    resolve_mach_ref,
-)
-from autoflowcfd.core.fr_operators.kernels import PRECOND_LEGACY, PRECOND_PHYSICAL
+from autoflowcfd.core.fr_solver.mach_ref import MACH_REF_FLOOR, resolve_mach_ref
 
 
-def test_plate_demo_value_depends_on_mode_only_through_the_floor():
+def test_true_mach_above_the_floor_and_clamped_below():
     m_true = 30.0 / (1.4 * 101325.0 / 1.225) ** 0.5
-    assert resolve_mach_ref(1.225, 30.0, 101325.0, PRECOND_PHYSICAL) == pytest.approx(m_true)
-    assert resolve_mach_ref(1.225, 30.0, 101325.0, PRECOND_LEGACY) == pytest.approx(_MACH_REF_FLOOR_LEGACY)
-    assert resolve_mach_ref(1.225, 1.0, 101325.0, PRECOND_PHYSICAL) == pytest.approx(_MACH_REF_FLOOR_PHYSICAL)
+    assert resolve_mach_ref(1.225, 30.0, 101325.0) == pytest.approx(m_true)
+    assert resolve_mach_ref(1.225, 1.0, 101325.0) == pytest.approx(MACH_REF_FLOOR)
 
 
 def test_no_hand_rolled_mach_formula_or_legacy_alias_elsewhere():

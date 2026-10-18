@@ -5,10 +5,8 @@
 owner 顺序的跳变量，且扩散在 neighbor 侧符号相反）。
 """
 
-import os
 from typing import NamedTuple
 
-import numba
 import numpy as np
 
 from autoflowcfd.core.fr_operators.volume_contract import contravariant_flux_from_metric
@@ -17,7 +15,6 @@ from .face_frames import (
     extrapolate_scalar_pair_kernel,
     face_mass_flux_kernel,
     lift_side_jumps_kernel,
-    lift_side_jumps_kernel_colored,
 )
 
 
@@ -162,8 +159,7 @@ def _lift_side_jumps(jump_owner, jump_neighbor, sign, flat, mesh):
     （同一个核，单分量是 n_comp = 1）。
 
     `sign`：对流 -1（`dphi/dt = -div F`）、扩散与梯度 +1（`dphi/dt = +div G`），见
-    `face_frames.py` 模块文档"提升的符号约定只有一个"。默认图着色（同色面不共享
-    单元，直接写共享缓冲）；`AFCFD_USE_COLORING=0` 退回逐线程私有缓冲。
+    `face_frames.py` 模块文档"提升的符号约定只有一个"。按面着色（同色面不共享单元，直接写共享缓冲）。
     """
     n_cells = mesh.n_cells
     n_sps = flat.n_sps
@@ -174,15 +170,10 @@ def _lift_side_jumps(jump_owner, jump_neighbor, sign, flat, mesh):
     args = (flat.owner_cell, flat.neighbor_cell, flat.owner_face_op, flat.neighbor_face_op,
             flat.owner_adj_row_exact, flat.neighbor_adj_row_exact, flat.ref_area_weight,
             flat.lift_native, flat.owner_is_primary, flat.neighbor_is_primary, det_jacs)
-    if os.environ.get("AFCFD_USE_COLORING", "1") == "1":
-        out = np.zeros((n_cells, n_sps, jump_owner.shape[2]))
-        for c in range(flat.n_colors):
-            face_indices = flat.color_face_indices[c]
-            if len(face_indices) == 0:
-                continue
-            lift_side_jumps_kernel_colored(jump_owner, jump_neighbor, float(sign), *args,
-                                           face_indices, out)
-    else:
-        out = lift_side_jumps_kernel(jump_owner, jump_neighbor, float(sign), *args,
-                                     numba.get_num_threads())
+    out = np.zeros((n_cells, n_sps, jump_owner.shape[2]))
+    for c in range(flat.n_colors):
+        face_indices = flat.color_face_indices[c]
+        if len(face_indices) == 0:
+            continue
+        lift_side_jumps_kernel(jump_owner, jump_neighbor, float(sign), *args, face_indices, out)
     return out[..., 0] if scalar else out

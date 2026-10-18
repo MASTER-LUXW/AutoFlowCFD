@@ -1,6 +1,5 @@
-"""湍流输运过积分：完整对流残差对解析解、自由流保持、开关语义（从 test_turbulence_transport_overintegration.py 拆出，背景见该文件模块文档）。"""
+"""湍流输运过积分：完整对流残差对解析解、自由流保持（从 test_turbulence_transport_overintegration.py 拆出，背景见该文件模块文档）。"""
 
-import os
 import numpy as np
 import pytest
 
@@ -12,10 +11,8 @@ from autoflowcfd.fr.operators import generate_fr_operators
 
 from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
 from tests.unit._turbulence_transport_overintegration_common import (
-    _coarse_convection_div,
     _per_type_slices,
     _real_dof_mask,
-    _setup,
 )
 
 
@@ -35,7 +32,7 @@ class TestFullConvectionResidualVsAnalytic:
     有闭式解，且 `rho*u*phi` 本身只有一次、完全落在 P1 解空间内——也就是
     说**任何非零误差都只能来自离散算子本身**，不是表示能力不足。
 
-    实测（默认 `AFCFD_TURB_OVERINT=off`）：
+    实测（2026-09-15，当时的坍缩棱柱基、不去混叠）：
 
         order=1 棱柱 相对误差 1.1294  （113%！残差范围 [-12.26, +1.11]，
                                       解析值 -8.5750）
@@ -60,64 +57,34 @@ class TestFullConvectionResidualVsAnalytic:
     UVEC = np.array([30.0, 7.0, -4.0])
     GRAD = np.array([0.3, -0.2, 0.15])
 
-    def _run(self, order, overint):
-        old = os.environ.get("AFCFD_TURB_OVERINT")
-        os.environ["AFCFD_TURB_OVERINT"] = overint
-        try:
-            mesh = _build_synthetic_mixed_mesh(order)
-            ops = generate_fr_operators(order)
-            nc, ns = mesh.n_cells, mesh.n_sps_per_cell
-            X = mesh.sps_coords.reshape(-1, 3)
-            phi = (1.0 + X @ self.GRAD).reshape(nc, ns)
-            rho = np.full((nc, ns), self.RHO)
-            vel = np.tile(self.UVEC, (nc, ns, 1))
-            res = tp.compute_scalar_convection_residual(phi, rho, vel, mesh, ops)
-        finally:
-            if old is None:
-                os.environ.pop("AFCFD_TURB_OVERINT", None)
-            else:
-                os.environ["AFCFD_TURB_OVERINT"] = old
+    def _run(self, order):
+        mesh = _build_synthetic_mixed_mesh(order)
+        ops = generate_fr_operators(order)
+        nc, ns = mesh.n_cells, mesh.n_sps_per_cell
+        X = mesh.sps_coords.reshape(-1, 3)
+        phi = (1.0 + X @ self.GRAD).reshape(nc, ns)
+        rho = np.full((nc, ns), self.RHO)
+        vel = np.tile(self.UVEC, (nc, ns, 1))
+        res = tp.compute_scalar_convection_residual(phi, rho, vel, mesh, ops)
         exact = -self.RHO * float(self.UVEC @ self.GRAD)
         errs = {}
         for name, sl in _per_type_slices(mesh, order):
             errs[name] = np.abs(res[sl] - exact).max() / abs(exact)
         return errs
 
-    def test_order1_prism_is_already_accurate_without_dealiasing(self):
-        """原生棱柱基（唯一实现）：同一算例 off 档就已经准。
-
-        实测 `off` 档 P1 棱柱相对误差 **2.33e-10**（坍缩档是 1.1294，
-        差 9 个数量级）。原因与坍缩档那 113% 的根因是同一条的反面：
-        原生棱柱基不经过坍缩坐标，`adj(J)` 不被坍缩映射推高次数。
-
-        这条同时说明一件对默认值有影响的事实、如实记录：
-        `AFCFD_TURB_OVERINT=on` 这个默认值当初的**主要**依据（P1 棱柱
-        113% 误差）在默认基改成 native 之后已经不再成立。保留 `on` 仍有
-        依据 —— 体积项对照里原生 P1 仍有 33 倍改善、P2 直接到机器零
-        （见 `_PRISM_EXPECT`）—— 但"不开就有 O(1) 误差"这句话不能再用。
-        """
-        errs = self._run(1, "off")
-        assert errs["prism"] < 1e-8, (
-            f"原生档 P1 棱柱 off 相对误差 {errs['prism']:.3e} 远大于实测的 "
-            f"2.33e-10 —— 若这是真实退化，请查原生棱柱的度量/算子")
-        assert errs["tet"] < 1e-12
-
     def test_dealiasing_gives_an_accurate_order1_prism(self):
-        """打开去混叠后必须准（原生实测 2.3e-10；已删除的坍缩档是 4.6e-10）。"""
-        errs = self._run(1, "on")
+        """去混叠后 P1 棱柱必须准（原生实测 2.3e-10；已删除的坍缩档是 4.6e-10、不去混叠时 1.13）。"""
+        errs = self._run(1)
         assert errs["prism"] < 1e-8, (
             f"打开去混叠后 order=1 棱柱相对误差仍有 "
             f"{errs['prism']:.3e}（实测应为 ~2e-10）")
         assert errs["tet"] < 1e-12
 
-    def test_order2_is_unaffected_by_the_switch(self):
-        """order=2 上两档必须都已足够精确——说明 order=1 那个 113% 不是
-        "这套离散本来就这么差"，而是 order=1 特有的混叠。"""
-        off = self._run(2, "off")
-        on = self._run(2, "on")
+    def test_order2_is_accurate(self):
+        """order=2 同样精确。"""
+        errs = self._run(2)
         for k in ("prism", "tet"):
-            assert off[k] < 1e-7, f"order=2 {k} 默认档相对误差 {off[k]:.3e}"
-            assert on[k] < 1e-7, f"order=2 {k} 去混叠档相对误差 {on[k]:.3e}"
+            assert errs[k] < 1e-7, f"order=2 {k} 相对误差 {errs[k]:.3e}"
 
 
 class TestFreestreamPreservation:
@@ -153,88 +120,3 @@ class TestFreestreamPreservation:
         div = _scalar_diffusion_volume_overintegrated(
             np.zeros((n_cells, n_sps)), grad, oi, n_sps, 1.8e-5)
         np.testing.assert_allclose(div, 0.0, rtol=0, atol=0)
-
-
-class TestSwitchSemantics:
-    def _env(self, value):
-        old = os.environ.get("AFCFD_TURB_OVERINT")
-        if value is None:
-            os.environ.pop("AFCFD_TURB_OVERINT", None)
-        else:
-            os.environ["AFCFD_TURB_OVERINT"] = value
-        return old
-
-    def _restore(self, old):
-        if old is None:
-            os.environ.pop("AFCFD_TURB_OVERINT", None)
-        else:
-            os.environ["AFCFD_TURB_OVERINT"] = old
-
-    def test_default_is_on(self):
-        """默认已于 2026-09-15 改为 `on`——解析判据显示 `off` 在生产阶数
-        P1 的棱柱上有 113% 相对误差，代价只有约 +10.2%/步，且真实网格
-        250 步运行本来就是带 on 跑的。理由全文见
-        `resolve_turb_overintegration` 文档。"""
-        old = self._env(None)
-        try:
-            assert tp.resolve_turb_overintegration() == "on"
-        finally:
-            self._restore(old)
-
-    @pytest.mark.parametrize("v,expected", [
-        ("off", "off"), ("on", "on"), ("OFF", "off"), ("On", "on"),
-    ])
-    def test_accepted_values(self, v, expected):
-        old = self._env(v)
-        try:
-            assert tp.resolve_turb_overintegration() == expected
-        finally:
-            self._restore(old)
-
-    @pytest.mark.parametrize("v", ["yes", "1", "true", "", "sensor"])
-    def test_rejects_unknown(self, v):
-        """非法取值必须报错，不能静默退回默认。"""
-        old = self._env(v)
-        try:
-            with pytest.raises(ValueError, match="AFCFD_TURB_OVERINT"):
-                tp.resolve_turb_overintegration()
-        finally:
-            self._restore(old)
-
-    @pytest.mark.parametrize("order", [1, 2])
-    def test_public_api_bit_identical_when_off(self, order):
-        """显式 `off` 时，公开接口必须逐位等于 2026-09-15 之前的实现。
-
-        判据取"显式 off"与"手工复刻的 coarse 体积项 + 同一条公开接口"
-        之间的一致性：直接比对流残差整体（体积项 + 界面项），任何把
-        去混叠误接进默认路径的改动都会在这里失败。
-        """
-        mesh, ops, phi, rho, vel, _ = _setup(order)
-        old = self._env("off")
-        try:
-            res_off = tp.compute_scalar_convection_residual(
-                phi, rho, vel, mesh, ops)
-        finally:
-            self._restore(old)
-        det = mesh.jacobians["det_jacs"].reshape(mesh.n_cells, mesh.n_sps_per_cell)
-        ones = np.ones_like(phi)
-        # 体积项取对流形式 div(rho u phi) - phi div(rho u)（convection.py 模块文档），
-        # 两档各自用同一个体积算子作用在 phi 与 1 上
-        vol_ref = -(_coarse_convection_div(phi, rho, vel, mesh, ops)
-                    - phi * _coarse_convection_div(ones, rho, vel, mesh, ops)) / det
-        # 残差 = 体积项 + 界面项；这里只能断言"体积项那一半与 coarse 一致"，
-        # 做法是再跑一次 on 档，两者之差必须恰好等于两种体积项之差。
-        old = self._env("on")
-        try:
-            res_on = tp.compute_scalar_convection_residual(
-                phi, rho, vel, mesh, ops)
-        finally:
-            self._restore(old)
-        oi = get_overintegration_context(mesh, ops)
-        n_sps = mesh.n_sps_per_cell
-        vol_oi = -(_scalar_convection_volume_overintegrated(phi, rho, vel, oi, n_sps)
-                   - phi * _scalar_convection_volume_overintegrated(ones, rho, vel, oi, n_sps)) / det
-        np.testing.assert_allclose(res_on - res_off, vol_oi - vol_ref,
-                                   rtol=1e-10, atol=1e-10)
-        # 而且两者确实不同（否则上面那条是平凡真）
-        assert np.abs(res_on - res_off).max() > 0.0

@@ -9,11 +9,7 @@ from ..matrix_operators import (
     compute_diff_matrix_1d,
     compute_diff_matrix_3d,
 )
-from ..overintegration_order import (
-    prism_n_fine,
-    resolve_overintegration_order_rule,
-    resolve_prism_overintegration_order,
-)
+from ..overintegration_order import overintegration_order, prism_n_fine
 from .container import FROperators
 
 
@@ -39,17 +35,6 @@ def generate_fr_operators(order: int) -> FROperators:
     Returns:
         operators: 包含所有预计算算子的 FROperators 对象
     """
-    # `AFCFD_PRISM_BASIS` 的**唯一校验点**（2026-09-24）：坍缩棱柱基删除
-    # 之后，除 checkpoint 存/取之外再没有代码读这个环境变量，于是
-    # `AFCFD_PRISM_BASIS=collapsed` 会被**静默忽略**、照原生跑 —— 那正是
-    # 本项目明确禁止的静默降级（同一原则见 `overintegration_order.py::
-    # resolve_native_overintegration_max_order`）。这里调一次纯为它的校验
-    # 副作用：非法取值当场报错。每条后端路径（单机 CPU / GPU / CPU MPI /
-    # 多 GPU / Order Continuation 重建算子）都要经过本函数，所以这一个点
-    # 就够，不需要在各入口重复。
-    from ..native_prism.mode import resolve_prism_basis_mode
-    resolve_prism_basis_mode()
-
     n = order + 1  # SPs 数量
     # 全局统一 SPs 宽度（张量积立方体点数）——原生基（四面体/棱柱）的
     # 真实自由度少于它，一律零填充到这个宽度，见 fr/native_padding.py
@@ -98,7 +83,7 @@ def generate_fr_operators(order: int) -> FROperators:
     overint_lifted_div_tet = overint_lifted_div_prism = None
     overint_project_f2c_tet = overint_project_f2c_prism = None
     if order >= 1:
-        overint_order_prism = resolve_prism_overintegration_order(order)
+        overint_order_prism = overintegration_order(order)
         n_fine_prism = prism_n_fine(overint_order_prism)
         # 棱柱恒为原生基（坍缩档已于 2026-09-23 删除）：细网格轴取
         # **真实**细点数、不填充到 `(oo+1)^3` —— 填充槽位恒为零、零
@@ -158,13 +143,13 @@ def generate_fr_operators(order: int) -> FROperators:
 
     # `D_3d_tet` 别名到 native 填充版本（"零填充块对角"设计保证与 D_3d 同构）
     D_3d_tet = D_native_tet_padded
-    # 3f. 棱柱原生基（迁移期，默认关闭）——见 fr/native_prism/mode.py。
+    # 3f. 棱柱原生基（唯一实现，见 fr/native_prism/__init__.py）。
     #
     # **必须与几何一起切换**：原生 `D` 作用在**原生棱柱节点**上的场，而
     # 坍缩档的 `sps_coords`/`jacobians` 建在张量积立方体节点上。把原生算子
     # 套到坍缩节点采样的场上没有任何意义（不会报错，只会给出错的导数），
     # 所以 `grid/high_order/high_order_mesh_order.py::build_order_geometry`
-    # 读同一个 `AFCFD_PRISM_BASIS` 分派棱柱段的点位与雅可比。
+    # 用同一组原生棱柱节点与雅可比。
     D_native_prism = None
     ref_native_prism = None
     n_native_sps_prism = None
@@ -193,10 +178,8 @@ def generate_fr_operators(order: int) -> FROperators:
     # 该函数文档）。
     if order >= 1:
         from ..native_tet.overintegration import (
-            NATIVE_TET_OVERINTEGRATION_MAX_ORDER,
             build_native_tet_l2_projection,
             build_native_tet_overintegration_operators,
-            resolve_tet_overintegration_order,
         )
 
         # ===== 四面体过积分阶数与棱柱**解耦**（2026-09-17）=====
@@ -226,27 +209,7 @@ def generate_fr_operators(order: int) -> FROperators:
         # P1 的阶数与改动前相同，所以"放开上限"这一项不改变已验证的 P1
         # 生产结果（同批的 `enforce_constant_annihilation` 会在舍入量级上
         # 改动它，见 tests/unit/test_diff_matrix_constant_annihilation.py）。
-        overint_order_tet = resolve_tet_overintegration_order(order)
-        _oo_tet_ideal = resolve_overintegration_order_rule() * order
-        if overint_order_tet < _oo_tet_ideal:
-            from loguru import logger
-            from ..native_tet.overintegration import (
-                resolve_tet_overintegration_max_order,
-            )
-
-            # 现在只剩"上限"一条可能夹住它，而默认上限 6 >= 任何 rule*order
-            # （rule<=3、order<=2 时）——所以这条只在用户显式调低
-            # `AFCFD_TET_OVERINT_MAX_ORDER`、或 order>=3 且 rule=3x 时出现。
-            logger.warning(
-                f"P{order} 四面体过积分阶数被夹到 {overint_order_tet}"
-                f"（理想 {_oo_tet_ideal}）：上限 "
-                f"AFCFD_TET_OVERINT_MAX_ORDER="
-                f"{resolve_tet_overintegration_max_order()} 在约束（默认 "
-                f"{NATIVE_TET_OVERINTEGRATION_MAX_ORDER}）。去混叠精度因此"
-                f"低于可达水平——实测误差在 `oo = 2*order` 处断崖式下降，"
-                f"低于它基本拿不到去混叠收益（见 tests/unit/"
-                f"test_overintegration_cap_cost.py）"
-            )
+        overint_order_tet = overintegration_order(order)
 
         ref_fine_native, interp_c2f_native, D_fine_native, restrict_f2c_native = (
             build_native_tet_overintegration_operators(order, overint_order_tet)

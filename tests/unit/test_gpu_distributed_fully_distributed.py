@@ -362,6 +362,7 @@ class TestRedistributeMultiGpuFullyDistributedForNewOrder:
             'time_scheme': None, 'dual_time_inner_iter': 20,
             'artificial_viscosity_enabled': False, 'artificial_viscosity_alpha': 1.0,
         'wall_treatment': 'resolved',
+        'low_mach_precond': True,
         }
 
     def test_p0_to_p1_upgrade_interpolates_uniform_field_exactly(self, mesh_and_ops, gpu_shim):

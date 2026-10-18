@@ -141,9 +141,12 @@ from .single_node import _run_single_node
               help='RANS（sa/sst/ddes/iddes）的近壁处理：resolved=低雷诺数壁面处理（要求第一层 y+~1）；'
                    'auto=自动壁面处理（Spalding 平衡壁面模型给壁面剪应力，第一层 y+ 从 1 到对数层都可用），'
                    '见 core/turbulence/wall_model/treatment.py。设置写入 checkpoint，续算沿用')
+@click.option('--low-mach-precond/--no-low-mach-precond', 'low_mach_precond', default=True, show_default=True,
+              help='低马赫数伪时间预处理（rk3/newton-krylov；见 core/utils/preconditioning.py）：不改变定常解，'
+                   '低马赫数下把声学刚性从伪时间推进里去掉。设置写入 checkpoint，续算沿用')
 @config_file_overrides
 def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_scheme, cfl_start, cfl_max, cfl_min,
-                 aoa_deg, aos_deg, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, tol, artificial_viscosity_enabled, artificial_viscosity_alpha, init_checkpoint, wall_treatment):
+                 aoa_deg, aos_deg, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, tol, artificial_viscosity_enabled, artificial_viscosity_alpha, init_checkpoint, wall_treatment, low_mach_precond):
     """执行稳态 FR 求解（P0~P3，全部湍流模型）。
 
     输入文件必须是体网格 - .pkl（`grid generate-volume`/`grid
@@ -170,6 +173,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
             aoa_deg=aoa_deg,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
             wall_treatment=wall_treatment,
+            low_mach_precond=low_mach_precond,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             aos_deg=aos_deg,
             cfl_max=cfl_max,
@@ -205,6 +209,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
             aoa_deg=aoa_deg,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
             wall_treatment=wall_treatment,
+            low_mach_precond=low_mach_precond,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             aos_deg=aos_deg,
             cfl_max=cfl_max,
@@ -241,6 +246,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
             aos_deg=aos_deg,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
             wall_treatment=wall_treatment,
+            low_mach_precond=low_mach_precond,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             backend=backend,
             cfl_max=cfl_max,

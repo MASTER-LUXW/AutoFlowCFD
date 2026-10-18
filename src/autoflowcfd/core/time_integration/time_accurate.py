@@ -44,7 +44,12 @@ _MAX_SUBSTEPS = 1_000_000
 
 def configure_time_stepping(solver, time_scheme, *, time_accurate: bool = False, adaptive_cfl: bool = True,
                             cfl_start=None, cfl_max=None, cfl_min=None, low_mach_precond: bool = True) -> None:
-    """设置 `solver._cfl_controller / fixed_cfl_number / low_mach_precond_enabled / time_accurate`。"""
+    """设置 `solver._cfl_controller / fixed_cfl_number / low_mach_precond(_enabled) / time_accurate`。
+
+    `low_mach_precond` 是请求值（写进 checkpoint，续算默认沿用），`low_mach_precond_enabled` 是按时间格式
+    判定后的生效值（`resolve_low_mach_precond`）。checkpoint 记请求值：瞬态（DUAL_TIME）运行的生效值恒为
+    False，若记生效值，从它切换到稳态格式续算时会把用户没有关过的预处理关掉。
+    """
     from autoflowcfd.core.time_integration.adaptive_cfl.policy import build_cfl_policy
     from autoflowcfd.core.utils.preconditioning import resolve_low_mach_precond
 
@@ -58,6 +63,7 @@ def configure_time_stepping(solver, time_scheme, *, time_accurate: bool = False,
     solver._cfl_controller, solver.fixed_cfl_number = build_cfl_policy(
         scheme, adaptive=adaptive_cfl and not time_accurate,
         cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min)
+    solver.low_mach_precond = bool(low_mach_precond)
     solver.low_mach_precond_enabled = (not time_accurate) and resolve_low_mach_precond(low_mach_precond, scheme)
 
 

@@ -107,7 +107,7 @@ def _native_tet_interp(old_order: int, new_order: int) -> np.ndarray:
 def _build_cached(old_order: int, new_order: int, prism_native: bool
                   ) -> Tuple[np.ndarray, np.ndarray]:
     """真正的构造 + 缓存。**缓存键必须含棱柱基**：矩阵依赖解点位置，
-    而那由 `AFCFD_PRISM_BASIS` 决定。第一版只按 `(old, new)` 缓存，于是
+    而那由当时的棱柱基决定（坍缩棱柱基已删除）。第一版只按 `(old, new)` 缓存，于是
     同一个进程里先跑坍缩档、再跑原生档时会拿到坍缩的矩阵 —— 被
     `tests/unit/test_order_interp_basis_aware.py` 的参数化当场抓到
     （原生棱柱 P1->P2 相对误差 1.44e-01）。

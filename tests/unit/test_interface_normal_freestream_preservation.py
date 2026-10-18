@@ -38,19 +38,14 @@
 不再为零——零的是总残差。这里改为对照定义，钉住的仍是"不许偷换法向"这一条。）
 """
 
-import numba
 import numpy as np
 import pytest
 
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
-from autoflowcfd.core.fr_operators.kernels import resolve_ausm_precond_mode
 from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive, primitive_to_conserved
 from autoflowcfd.core.fr_residual.inviscid_kernel import (
     compute_boundary_ghost_states,
     compute_inviscid_interface_correction_kernel,
-)
-from autoflowcfd.core.fr_residual.inviscid_kernel_colored import (
-    compute_inviscid_interface_correction_kernel_colored,
 )
 from autoflowcfd.fr.operators import generate_fr_operators
 
@@ -162,16 +157,7 @@ def _assert_zero(corr, c):
         f"{_ROT_DEG}° 时界面核用了与传入度量行不同的法向")
 
 
-def test_uncolored_kernel_preserves_freestream_under_rotated_metric(case):
-    c = case
-    corr = compute_inviscid_interface_correction_kernel(
-        c["Q"], c["det"], *_args_common(c),
-        numba.get_num_threads(), 0.1, resolve_ausm_precond_mode(),
-        *_tail(c))
-    _assert_zero(corr, c)
-
-
-def test_colored_kernel_preserves_freestream_under_rotated_metric(case):
+def test_kernel_preserves_freestream_under_rotated_metric(case):
     c = case
     fl = c["flat"]
     n_cells, n_sps = c["Q"].shape[:2]
@@ -180,9 +166,9 @@ def test_colored_kernel_preserves_freestream_under_rotated_metric(case):
         idx = fl.color_face_indices[k]
         if len(idx) == 0:
             continue
-        compute_inviscid_interface_correction_kernel_colored(
+        compute_inviscid_interface_correction_kernel(
             c["Q"], c["det"], *_args_common(c),
-            idx, corr, 0.1, resolve_ausm_precond_mode(),
+            idx, corr, 0.1,
             *_tail(c))
     _assert_zero(corr, c)
 

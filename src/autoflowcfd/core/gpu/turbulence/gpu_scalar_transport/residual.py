@@ -18,7 +18,6 @@ from autoflowcfd.core.gpu.residual.gpu_volume_contract import (
 from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_gradient_gpu
 
 
-from autoflowcfd.core.turbulence.transport import resolve_turb_overintegration
 from autoflowcfd.core.turbulence.transport.residual import turbulence_diffusivities
 from autoflowcfd.core.turbulence.transport.faces import boundary_diffusion_targets
 from autoflowcfd.core.turbulence.sst.bounds import k_wall_zero_mask
@@ -79,11 +78,9 @@ def scalar_convection_volume_divergence_gpu(cp, scalar_field, rho, velocity, mes
     `scalar_convection_volume_divergence` 逐字对应；残差（`phi`）与质量通量体积散度
     （`phi = 1`）共用这一个函数。
 
-    去混叠（AFCFD_TURB_OVERINT，默认 on）与 CPU 端同一个开关、同一条链路——同一个
-    环境变量在两个后端不允许意味着不同的数值方案。
+    体积项恒走过积分（去混叠），与 CPU 端同一条链路；P0 没有过积分几何时走单点路径。
     """
-    segs = (get_overintegration_segs_gpu(mesh_data, ops_data, n_cells, n_prism)
-            if resolve_turb_overintegration() == "on" else None)
+    segs = (get_overintegration_segs_gpu(mesh_data, ops_data, n_cells, n_prism))
     if segs is not None:
         return _scalar_volume_div_overintegrated_gpu(
             cp, (rho[..., None], scalar_field[..., None], velocity), segs, n_cells, n_sps)
@@ -149,8 +146,7 @@ def compute_scalar_diffusion_residual_gpu(
 
     # 去混叠，与 CPU 端 `_scalar_diffusion_volume_overintegrated` 对应
     # （含那边写明的"Gamma 自身混叠仍在"这条已量化、刻意不实施的局限）。
-    _segs = (get_overintegration_segs_gpu(mesh_data, ops_data, n_cells, n_prism)
-             if resolve_turb_overintegration() == "on" else None)
+    _segs = (get_overintegration_segs_gpu(mesh_data, ops_data, n_cells, n_prism))
     if _segs is not None:
         div_G = _scalar_volume_div_overintegrated_gpu(
             cp, (gamma_field[..., None], grad_phi),

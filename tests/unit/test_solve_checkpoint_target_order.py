@@ -56,7 +56,7 @@ def _fake_solver(n_cells=2, n_sps=1, n_vars=7, order=0):
         # n_cells）——本文件测的是 target_order 的读写，单元类型不参与。
         mesh=SimpleNamespace(n_prism_cells=n_cells, jacobians={"det_jacs": np.ones(n_cells * n_sps)}),
         freestream={"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0},
-        wall_treatment="resolved",
+        wall_treatment="resolved", low_mach_precond=True,
         # write_checkpoint 记录时间格式（2026-09-25）：真实求解器恒有 time_integrator
         time_integrator=SimpleNamespace(scheme=TimeIntegrationScheme.SSP_RK3),
     ))

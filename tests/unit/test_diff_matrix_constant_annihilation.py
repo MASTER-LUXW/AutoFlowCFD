@@ -63,9 +63,7 @@ from autoflowcfd.fr.native_prism.basis import build_native_prism_operators
 from autoflowcfd.fr.native_prism.overintegration import (
     build_native_prism_overintegration_operators,
 )
-from autoflowcfd.fr.overintegration_order import (
-    resolve_prism_overintegration_order,
-)
+from autoflowcfd.fr.overintegration_order import overintegration_order
 from autoflowcfd.fr.diff_matrix_consistency import (
     constant_annihilation_error,
     enforce_constant_annihilation,
@@ -244,7 +242,7 @@ class TestPrismDiffMatrices:
 
     @pytest.mark.parametrize("order", [1, 2, 3])
     def test_fine_row_sums_at_resummation_floor(self, order):
-        over_order = resolve_prism_overintegration_order(order)
+        over_order = overintegration_order(order)
         _, _, D_fine, _ = build_native_prism_overintegration_operators(
             order, over_order)
         err = constant_annihilation_error(D_fine)
@@ -270,7 +268,7 @@ class TestPrismDiffMatrices:
         这条测试把这个事实钉成可核对的数字，避免有人以为修正没生效。
         """
         for order in (1, 2, 3):
-            oo = resolve_prism_overintegration_order(order)
+            oo = overintegration_order(order)
             _, _, D_fine, _ = build_native_prism_overintegration_operators(
                 order, oo)
             max_d = np.abs(D_fine).max()

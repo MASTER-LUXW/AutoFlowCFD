@@ -7,8 +7,8 @@
 **两半都已不在生产残差路径的默认档上**：坍缩四面体基已于 2026-09-03
 删除，`tet_modal_basis_and_grad` / `build_collapsed_diff_matrices("tet",
 ...)` 现在只被面通量点的跨单元插值（`fr/face_flux_points/`）与测试消费；
-棱柱那一半自 2026-09-20 起也不再是默认（`AFCFD_PRISM_BASIS` 默认值改为
-`native`，三份证据见 `fr/native_prism/mode.py`），只在显式指定
+棱柱那一半自 2026-09-20 起也不再是默认（默认改为
+`native`，证据见 `fr/native_prism/__init__.py`），只在显式指定
 `collapsed` 时才进入残差路径 —— 而那半边的终态是整套删除。
 """
 

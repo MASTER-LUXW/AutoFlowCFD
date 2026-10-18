@@ -157,7 +157,7 @@ class _CFLUpdateMixin:
                 window_worsened = (
                     math.isfinite(r_old) and math.isfinite(r_new) and r_old > 0
                     and r_new / r_old > self.trend_shrink_threshold)
-            if severe or self.legacy_mode:
+            if severe:
                 confirmed = True
             elif self._mild_shrink_blocked(current_residual):
                 # 绝对基准闸门（模块文档第 13 条）：离历史最好残差还很近，

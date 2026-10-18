@@ -16,7 +16,6 @@
 """
 
 import numpy as np
-import pytest
 
 from autoflowcfd.core.fr_solver.solver import FRSolver
 from autoflowcfd.core.time_integration import TimeIntegrationScheme
@@ -137,9 +136,7 @@ class TestFreeStreamAndStructure:
 
 
 class TestDiffusionIsDissipative:
-    @pytest.mark.parametrize("overint", ["off", "on"])
-    def test_sign_is_negative_under_both_dealiasing_modes(self, overint, monkeypatch):
-        monkeypatch.setenv("AFCFD_TURB_OVERINT", overint)
+    def test_sign_is_negative(self):
         solver, mesh = _build(av_enabled=True)
         pert = _set_density_bump(solver, mesh)
         mass_res = _diff(solver)[..., 0]
@@ -149,5 +146,5 @@ class TestDiffusionIsDissipative:
         norm = float(np.sum(np.abs(pert) * np.abs(mass_res) * det_jacs))
         assert norm > 0.0, "本用例需要该项确实非零才有判别力"
         assert quad_form < 0.0, (
-            f"AFCFD_TURB_OVERINT={overint} 下二次型 {quad_form:.6e} >= 0——"
+            f"二次型 {quad_form:.6e} >= 0——"
             f"算子不是耗散的（反扩散会指数放大高频模态）")

@@ -24,21 +24,12 @@ boundary_other_gradients`），种类数组 `vbc_kind` 由
 模块文档。三份 kernel（本文件、着色版、P0 版）与解析 Jacobian 都走
 `face_point_jumps.viscous_common_flux_point` 这一份逐点函数。
 
-**多核并行（阶段二）**：与 `fr_residual_inviscid_kernel.py` 同一套
-scatter-add 处理方式（每线程私有累加缓冲区 `correction_per_thread[tid,
-...]` + 循环结束后 `sum(axis=0)` 归约）、同一套 `n_threads` 参数化约束
-（调用方紧邻调用前取 `numba.get_num_threads()` 传入，不在本函数内部
-查询——否则破坏磁盘缓存；`numba.set_num_threads()` 只在求解器启动时
-调用一次）、同一套并行化后累加顺序变化的验证方法论，理由与实验依据
-完全相同，见该文件模块文档"多核并行"一节，这里不重复。**唯一要
-额外核对的是符号约定不能弄反**——粘性项 `correction_per_thread[...]
-+= contrib/dj`（不带负号），与无粘残差的负号相反（见本文件模块文档
-"符号约定"一节），并行化改造只应该改数组名和循环头，不应该动到任何
-公式字符。
+**多核并行**：与无粘核同一套按面着色（`inviscid_kernel.py` 模块文档"多核并行"）。**符号约定不能弄反**——
+粘性项 `correction[...] += contrib/dj`（不带负号），与无粘残差的负号相反。
 """
 
 import numpy as np
-from numba import njit, prange, get_thread_id
+from numba import njit, prange
 
 from autoflowcfd.core.fr_operators.small_dense import extrap_tensor3x3, matmul_small, matvec_small
 from autoflowcfd.core.fr_operators.flux_kernels import (
@@ -62,7 +53,8 @@ def compute_viscous_interface_correction_kernel(
     mixed_nb_partner: np.ndarray, mixed_nb_mask: np.ndarray,
     mixed_ow_partner: np.ndarray, mixed_ow_mask: np.ndarray,
     Q_ghost: np.ndarray, vbc_kind: np.ndarray,
-    n_threads: int,
+    face_indices: np.ndarray,  # 当前颜色组的面索引
+    correction: np.ndarray,    # 共享输出 buffer（同色面无冲突，直接写入）
     owner_face_op: np.ndarray, neighbor_face_op: np.ndarray,
     ref_area_weight: np.ndarray,
     boundary_extrap_native: np.ndarray, lift_native: np.ndarray,
@@ -76,16 +68,15 @@ def compute_viscous_interface_correction_kernel(
     # IP 罚项常数，按阶数解析（见 `flux_kernels.resolve_viscous_ip_constant`）。
     # 做成形参而不是模块全局：njit 把全局当编译期常量、且
     # `cache=True` 的磁盘缓存**不因全局值变化而失效**，那样
-    # 扫参数必须隔离缓存目录重编译，极易误读成"改了没生效"
-    # （本项目已栽过一次，见项目记忆 defaults_retuned_2026_09_17）。
+    # 扫参数必须隔离缓存目录重编译，极易误读成"改了没生效"。
     c_ip: float,
-) -> np.ndarray:
-    """返回 correction，形状 (n_cells, n_sps, 5)，与
-    fr_viscous_flux.py::compute_viscous_residual_fr 里逐面循环算出的
-    correction 逐位对应。`n_threads` 必须是调用方紧邻本次调用之前取的
-    `numba.get_num_threads()`，理由见模块文档"多核并行"一节。多线程下
-    累加顺序不再是严格的 `range(n_faces)` 顺序，验证判据分层，同
-    fr_residual_inviscid_kernel.py。
+) -> None:
+    """把颜色组 `face_indices` 里各面的粘性界面修正项累加进 `correction`（(n_cells, n_sps, 5)，就地）。
+
+    **按面着色并行**：调用方按颜色循环，每次只处理一个颜色组 `face_indices`（同色面的 owner/neighbor 单元
+    互不重复，构造见 `core/utils/face_coloring.py`），所以可以对组内的面 `prange`、直接累加进共享的
+    `correction`，没有写冲突、不需要每线程缓冲与归约（内存 O(n_cells*n_sps*5)，与线程数无关）。2026-10-18 以前
+    另有一份每线程缓冲版（环境变量切换），两份逐字同步维护，随开关删除。
 
     真实 bug 修复（2026-08-23，见 fr/face_flux_points/exact_normal.py
     模块文档）：`owner_adj_row_exact`/`neighbor_adj_row_exact` 取代了
@@ -110,45 +101,36 @@ def compute_viscous_interface_correction_kernel(
     删除——生产不可达，完整论证见 `inviscid_kernel.py::
     compute_inviscid_interface_correction_kernel` 文档。
     """
-    n_cells = Q.shape[0]
     n_sps = Q.shape[1]
-    n_faces = owner_cell.shape[0]
     n_fp = Q_ghost.shape[1]
+    n_faces_in_color = face_indices.shape[0]
 
-    correction_per_thread = np.zeros((n_threads, n_cells, n_sps, 5))
-
-    for f in prange(n_faces):
-        tid = get_thread_id()
+    for fi in prange(n_faces_in_color):
+        f = face_indices[fi]
         oc = owner_cell[f]
         oc_op = owner_face_op[f]
-        # **罚项 side 因子恒为 +1**（2026-09-22 修复的真实缺陷）：原生面的
-        # `owner_adj_row_exact` 已按 outward 定向（见
-        # `native_prism/face.py::native_prism_face_adj_rows` 与
-        # `exact_normal.py::compute_exact_face_normals_and_weights`）。此前
-        # 这里乘的是 `oside`（那是坍缩面未定向 adj_row 才需要的翻转），
-        # 于是 `owner_side = -1` 的原生面（棱柱 f0/f3/f4、四面体全部 4 个
-        # 面）罚项符号反了 —— 从耗散变成往壁面单元注入动量（cf 从 +0.96
-        # 变成 -3.24）。坍缩路径已于 2026-09-23 删除，因子不再需要分派。
+        # 罚项 side 因子恒为 +1（与非 colored 版本同一条，见那边的完整
+        # 说明：原生面的 adj_row 已 outward 定向，此前误乘 `owner_side`
+        # 让一半的面把耗散变成注入）。
 
         if owner_is_primary[f]:
-            E_o = boundary_extrap_native[oc_op]  # (n_fp,n_sps)
+            E_o = boundary_extrap_native[oc_op]
 
-            Q_o = _extrap_matmul(Q[oc], E_o)  # (n_fp,5)
-            gv_o = extrap_tensor3x3(grad_vel[oc], E_o)  # (n_fp,3,3)
-            gT_o = _extrap_matmul(grad_T[oc], E_o)  # (n_fp,3)
-            mut_o = matvec_small(E_o, mu_t_field[oc])  # (n_fp,)
+            Q_o = _extrap_matmul(Q[oc], E_o)
+            gv_o = extrap_tensor3x3(grad_vel[oc], E_o)
+            gT_o = _extrap_matmul(grad_T[oc], E_o)
+            mut_o = matvec_small(E_o, mu_t_field[oc])
             adjrow_o = owner_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
 
 
             jump_owner = np.zeros((n_fp, 5))
             for i in range(n_fp):
-                # 混合拆分面（B-8，见 fr/face_flux_points/merge.py）：边界半区与真边界面同等处理。
+                # 混合拆分面（B-8，与非着色版同步，见 compute_viscous_interface_correction_kernel 同名注释）。
                 mp = mixed_nb_partner[f]
                 bk = VBC_INTERIOR
                 if is_boundary[f]:
-                    # 边界面：状态反映真实边界条件，速度梯度镜像内部值本身
-                    # （见模块文档"边界面梯度处理"一节，不能改成 sources/幽灵态）；
-                    # **温度梯度按热边界类型分派**（模块文档"边界温度梯度"一节）。
+                    # 边界温度梯度按热边界类型分派，见非着色版模块文档
+                    # "边界温度梯度"一节（两处必须同步）。
                     Q_n = Q_ghost[f, i]
                     bk = vbc_kind[f]
                     gv_n, gT_n = boundary_other_gradients(gv_o[i], gT_o[i], adjrow_o[i], bk)
@@ -207,22 +189,21 @@ def compute_viscous_interface_correction_kernel(
                 w_area = ref_area_weight[i]
                 for v in range(5):
                     weighted_jump_o[i, v] = w_area * jump_owner[i, v]
-            # (n_sps,5)，注意：粘性项没有负号（见模块文档符号约定）
             contrib_owner = matmul_small(lift_native[oc_op], weighted_jump_o)
             for s in range(n_sps):
                 dj = det_jacs[oc, s]
                 for v in range(5):
-                    correction_per_thread[tid, oc, s, v] += contrib_owner[s, v] / dj
+                    correction[oc, s, v] += contrib_owner[s, v] / dj
 
         if (not is_boundary[f]) and neighbor_is_primary[f]:
             nc = neighbor_cell[f]
             nc_op = neighbor_face_op[f]
             E_n = boundary_extrap_native[nc_op]
 
-            Q_n_native = _extrap_matmul(Q[nc], E_n)  # (n_fp,5)
-            gv_n_native = extrap_tensor3x3(grad_vel[nc], E_n)  # (n_fp,3,3)
-            gT_n_native = _extrap_matmul(grad_T[nc], E_n)  # (n_fp,3)
-            mut_n_native = matvec_small(E_n, mu_t_field[nc])  # (n_fp,)
+            Q_n_native = _extrap_matmul(Q[nc], E_n)
+            gv_n_native = extrap_tensor3x3(grad_vel[nc], E_n)
+            gT_n_native = _extrap_matmul(grad_T[nc], E_n)
+            mut_n_native = matvec_small(E_n, mu_t_field[nc])
             adjrow_n_native = neighbor_adj_row_exact[f]  # (n_fp,3)，逐 FP 精确值，见函数文档
 
 
@@ -289,13 +270,4 @@ def compute_viscous_interface_correction_kernel(
             for s in range(n_sps):
                 dj = det_jacs[nc, s]
                 for v in range(5):
-                    correction_per_thread[tid, nc, s, v] += contrib_neighbor[s, v] / dj
-
-    return correction_per_thread.sum(axis=0)
-
-
-# compute_viscous_interface_correction_kernel_colored 已拆分到
-# viscous_flux_kernel_colored.py 以控制单文件行数（本文件此前 619 行，
-# 超过 600 行硬性阈值）。不在此 re-export（会与该文件反向 import
-# _extrap_matrix3x3 形成循环导入），唯一调用点
-# viscous_flux.py 已改为直接从 viscous_flux_kernel_colored 导入。
+                    correction[nc, s, v] += contrib_neighbor[s, v] / dj

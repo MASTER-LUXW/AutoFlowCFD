@@ -10,7 +10,6 @@ owner/neighbor 单元残差（与 CPU 版 `_compute_inviscid_residual_fv_p0` 同
 """
 
 import numpy as np
-from typing import Optional
 
 from autoflowcfd.core.gpu import get_cupy
 
@@ -30,9 +29,6 @@ void ausm_up_flux(
     double rhoR, double uR, double vR, double wR, double pR,
     double nx, double ny, double nz,
     double mach_ref,
-    int precond_mode,   // 预处理声速作用域：0=physical(默认)/
-                        // 1=pressure_physical/2=legacy，语义与
-                        // kernels.py::compute_ausm_up_flux 逐字对应
     double* flux
 ) {
     // ── AUSM+up 数值通量 ──
@@ -66,32 +62,9 @@ void ausm_up_flux(
     // core/fr_operators/kernels.py::compute_ausm_up_flux 的 P5 注释）。
     double alpha_pressure = 3.0 / 16.0 * (-4.0 + 5.0 * fa * fa);
 
-    // Weiss-Smith 预处理声速（与 kernels.py::compute_ausm_up_flux 的
-    // _WEISS_SMITH_K=1.1 同一个安全裕度常数、同一套 beta2 公式）。
-    double beta2 = fmin(1.0, fmax(fmax(Mbar2, 1.1 * mach_ref * mach_ref), 1e-10));
-    double sqrt_beta2 = sqrt(beta2);
-
-    // 预处理声速的作用域按 precond_mode 分派，与 kernels.py::
-    // compute_ausm_up_flux 的 s_mass/s_pres 逐字对应。默认档
-    // (precond_mode==0) 两个因子都是 1.0，本函数精确退化为标准
-    // AUSM+up；为什么 legacy 档不能做默认见该文件模块级注释。
-    double s_mass = sqrt_beta2;
-    double s_pres = sqrt_beta2;
-    if (precond_mode == 0) {         // PRECOND_PHYSICAL
-        s_mass = 1.0;
-        s_pres = 1.0;
-    } else if (precond_mode == 1) {  // PRECOND_PRESSURE_PHYSICAL
-        s_pres = 1.0;
-    }
-
-    double a_half_m = s_mass * a_half;
-    double a_half_pr = s_pres * a_half;
-
-    // 两侧马赫数用界面公共声速归一、质量通量取迎风密度（标准 AUSM+up，与 CPU 同式）
-    double M_L = unL / fmax(a_half_m, 1e-10);
-    double M_R = unR / fmax(a_half_m, 1e-10);
-    double M_L_pr = unL / fmax(a_half_pr, 1e-10);
-    double M_R_pr = unR / fmax(a_half_pr, 1e-10);
+    // 两侧马赫数用界面公共声速归一、质量通量取迎风密度（标准 AUSM+up，与 CPU 同式；通量内部全部用物理声速）
+    double M_L = unL / fmax(a_half, 1e-10);
+    double M_R = unR / fmax(a_half, 1e-10);
 
     // 质量通量分裂 M+ / M-
     double Mp_L, Mm_R;
@@ -112,33 +85,33 @@ void ausm_up_flux(
     double sigma_p = 1.0;
     double one_minus_sigma = 1.0 - sigma_p * Mbar2;
     if (one_minus_sigma < 0.0) one_minus_sigma = 0.0;
-    double Mp = -(Kp / fa) * one_minus_sigma * (pR_s - pL_s) / (rho_half * a_half_m * a_half_m);
+    double Mp = -(Kp / fa) * one_minus_sigma * (pR_s - pL_s) / (rho_half * a_half * a_half);
     double M_tot = M_half + Mp;
-    double mass_flux = a_half_m * (M_tot >= 0.0 ? M_tot * rhoL_s : M_tot * rhoR_s);
+    double mass_flux = a_half * (M_tot >= 0.0 ? M_tot * rhoL_s : M_tot * rhoR_s);
 
     // 压力分裂 P+ / P-
     double Pp_L, Pm_R;
-    if (fabs(M_L_pr) >= 1.0) {
-        double sign_ML = (M_L_pr > 0.0) ? 1.0 : ((M_L_pr < 0.0) ? -1.0 : 0.0);
+    if (fabs(M_L) >= 1.0) {
+        double sign_ML = (M_L > 0.0) ? 1.0 : ((M_L < 0.0) ? -1.0 : 0.0);
         Pp_L = 0.5 * (1.0 + sign_ML);
     } else {
-        Pp_L = 0.25 * (M_L_pr + 1.0) * (M_L_pr + 1.0) * (2.0 - M_L_pr)
-               + alpha_pressure * M_L_pr * (M_L_pr * M_L_pr - 1.0)
-                 * (M_L_pr * M_L_pr - 1.0);
+        Pp_L = 0.25 * (M_L + 1.0) * (M_L + 1.0) * (2.0 - M_L)
+               + alpha_pressure * M_L * (M_L * M_L - 1.0)
+                 * (M_L * M_L - 1.0);
     }
-    if (fabs(M_R_pr) >= 1.0) {
-        double sign_MR = (M_R_pr > 0.0) ? 1.0 : ((M_R_pr < 0.0) ? -1.0 : 0.0);
+    if (fabs(M_R) >= 1.0) {
+        double sign_MR = (M_R > 0.0) ? 1.0 : ((M_R < 0.0) ? -1.0 : 0.0);
         Pm_R = 0.5 * (1.0 - sign_MR);
     } else {
-        Pm_R = 0.25 * (M_R_pr - 1.0) * (M_R_pr - 1.0) * (2.0 + M_R_pr)
-               - alpha_pressure * M_R_pr * (M_R_pr * M_R_pr - 1.0)
-                 * (M_R_pr * M_R_pr - 1.0);
+        Pm_R = 0.25 * (M_R - 1.0) * (M_R - 1.0) * (2.0 + M_R)
+               - alpha_pressure * M_R * (M_R * M_R - 1.0)
+                 * (M_R * M_R - 1.0);
     }
 
     // pu 速度扩散项
     double Ku = 0.75;
     double p_half = Pp_L * pL_s + Pm_R * pR_s
-        - Ku * Pp_L * Pm_R * (rhoL_s + rhoR_s) * fa * a_half_pr * (unR - unL);
+        - Ku * Pp_L * Pm_R * (rhoL_s + rhoR_s) * fa * a_half * (unR - unL);
 
     // 上风通量
     double flux[5];
@@ -165,7 +138,6 @@ void p0_inviscid_residual(
     const double* cell_volumes,// (n_cells,)
     double* residual,          // (n_cells, 5) 输出残差
     const int n_faces,
-    const int precond_mode,    // AUSM+up 预处理声速作用域（见上）
     const double mach_ref      // AUSM+up Weiss-Smith 预处理参考马赫数，
                                 // 见 kernels.py::compute_ausm_up_flux 文档
 ) {
@@ -205,7 +177,7 @@ void p0_inviscid_residual(
 
     double flux[5];
     ausm_up_flux(rhoL, uL, vL, wL, pL, rhoR, uR, vR, wR, pR,
-                 nx, ny, nz, mach_ref, precond_mode, flux);
+                 nx, ny, nz, mach_ref, flux);
 
     // 混合拆分面的两半在面几何里已经是两个独立的面（inviscid_p0.py::_extract_p0_face_geometry）
 
@@ -250,16 +222,6 @@ def _get_cached_p0_kernel():
     return _p0_kernel_cache
 
 
-def _pm(precond_mode):
-    """把 None 解析成实际的 precond_mode（与 CPU 端同一个解析器）。
-
-    与 CPU 端同一个解析器，否则同一次运行的 CPU/GPU 可能取到不同档。
-    """
-    from autoflowcfd.core.fr_operators.kernels import resolve_ausm_precond_mode
-
-    return int(resolve_ausm_precond_mode() if precond_mode is None else precond_mode)
-
-
 def compute_inviscid_residual_p0_cupy_gpu_resident(
     Q_gpu,
     owner_cell_gpu, neighbor_cell_gpu, is_boundary_gpu,
@@ -267,7 +229,6 @@ def compute_inviscid_residual_p0_cupy_gpu_resident(
     Q_ghost_gpu,
     n_cells: int, n_faces: int,
     mach_ref: float = 0.1,
-    precond_mode: Optional[int] = None,
 ):
     """P0 无粘残差的 GPU 常驻版本（数据已在 GPU 上，无需传输）。
 
@@ -283,9 +244,6 @@ def compute_inviscid_residual_p0_cupy_gpu_resident(
         n_faces: 面数
         mach_ref: AUSM+up Weiss-Smith 预处理参考马赫数，调用方
             （gpu_solver.py）必须显式传入 `solver.freestream["mach_ref"]`。
-        precond_mode: AUSM+up 预处理声速作用域，None 表示按环境变量
-            `AFCFD_AUSM_PRECOND_MODE` 解析（与 CPU 端同一个解析器），
-            语义见 kernels.py::compute_ausm_up_flux 文档。
 
     Returns:
         residual_gpu: (n_cells, 1, 5) CuPy 残差数组
@@ -305,7 +263,7 @@ def compute_inviscid_residual_p0_cupy_gpu_resident(
         (owner_cell_gpu, neighbor_cell_gpu, is_boundary_gpu,
          normal_gpu, area_w_gpu, Q_gpu, Q_ghost_gpu,
          cell_volumes_gpu, d_residual,
-         np.int32(n_faces), np.int32(_pm(precond_mode)), np.float64(mach_ref))
+         np.int32(n_faces), np.float64(mach_ref))
     )
     cp.cuda.Stream.null.synchronize()
 

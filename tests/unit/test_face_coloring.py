@@ -10,7 +10,6 @@
 """
 
 import numpy as np
-import pytest
 from autoflowcfd.core.utils.face_coloring import greedy_face_coloring, get_color_masks
 
 
@@ -104,43 +103,6 @@ class TestGreedyFaceColoring:
         for c in range(n_colors):
             assert masks[c].dtype == bool
             assert np.sum(masks[c]) == np.sum(colors == c)
-
-
-class TestColoringKernelEquivalence:
-    """图着色 kernel 与 per-thread buffer kernel 数值等价性测试。"""
-
-    def test_inviscid_kernel_equivalence_nt1(self):
-        """无粘 kernel：nt=1 时图着色与 per-thread buffer 应 bit-exact 相等。"""
-        # 这个测试在 test_fr_residual_inviscid_kernel_crosscheck.py 中已覆盖
-        # 这里只验证接口存在
-        from autoflowcfd.core.fr_residual.inviscid_kernel import (
-            compute_inviscid_interface_correction_kernel,
-        )
-        from autoflowcfd.core.fr_residual.inviscid_kernel_colored import (
-            compute_inviscid_interface_correction_kernel_colored,
-        )
-        assert callable(compute_inviscid_interface_correction_kernel)
-        assert callable(compute_inviscid_interface_correction_kernel_colored)
-
-    def test_viscous_kernel_equivalence_nt1(self):
-        """粘性 kernel：nt=1 时图着色与 per-thread buffer 应 bit-exact 相等。"""
-        from autoflowcfd.core.fr_residual.viscous_flux_kernel import (
-            compute_viscous_interface_correction_kernel,
-        )
-        from autoflowcfd.core.fr_residual.viscous_flux_kernel_colored import (
-            compute_viscous_interface_correction_kernel_colored,
-        )
-        assert callable(compute_viscous_interface_correction_kernel)
-        assert callable(compute_viscous_interface_correction_kernel_colored)
-
-    def test_turbulence_transport_kernel_equivalence(self):
-        """湍流输运 kernel：图着色版本存在。"""
-        from autoflowcfd.core.turbulence.transport.face_frames import (
-            lift_side_jumps_kernel,
-            lift_side_jumps_kernel_colored,
-        )
-        assert callable(lift_side_jumps_kernel)
-        assert callable(lift_side_jumps_kernel_colored)
 
 
 class TestFlatFaceColoringCache:
