@@ -50,7 +50,7 @@ class _APIPostMixin:
             result: 不使用（`SolverResult` 不携带解场），保留位置参数兼容
             filename: 输出文件名
             high_order: True 时按 FR 解的分段多项式导出高阶拉格朗日单元（`postprocess/vtk_export_highorder`）
-            fields: 低阶导出的场（默认速度、压力；可含 k/omega/nu_tilde/nut/turbulence/q_criterion）
+            fields: 导出的场（默认速度、压力；可含 k/omega/nu_tilde/nut/turbulence/q_criterion，高阶导出另可含 density）
         """
         from autoflowcfd.postprocess.vtk_export import VTKExporter
         from autoflowcfd.core.backend.base import SolutionVector
@@ -62,12 +62,12 @@ class _APIPostMixin:
         host = self.solver.host_view()
 
         if high_order:
-            from autoflowcfd.postprocess.vtk_export_highorder import export_highorder_vtk
+            from autoflowcfd.postprocess.vtk_export_highorder import export_solver_highorder_vtk
 
             out_path = Path(filename)
             if out_path.suffix != '.vtu':
                 out_path = out_path.with_suffix('.vtu')
-            export_highorder_vtk(host.mesh, host.state.U, out_path)
+            export_solver_highorder_vtk(host, out_path, fields=fields)
             logger.info(f"高阶 VTK 已导出：{out_path}")
             return
 

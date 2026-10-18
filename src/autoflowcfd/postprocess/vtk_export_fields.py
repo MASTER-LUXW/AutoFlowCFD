@@ -27,13 +27,14 @@ FIELD_LABELS = {
 }
 
 
-def expand_fields(fields: Optional[List[str]], turbulence: Dict[str, np.ndarray]) -> List[str]:
-    """校验场名并把 'turbulence' 展开为可用的湍流量；请求了 'turbulence' 却没有任何湍流场时报错。"""
+def expand_fields(fields: Optional[List[str]], turbulence: Dict[str, np.ndarray], valid=VALID_FIELDS) -> List[str]:
+    """校验场名并把 'turbulence' 展开为可用的湍流量；请求了 'turbulence' 却没有任何湍流场时报错。
+    `valid`：可请求的场名（低阶导出 `VALID_FIELDS`，高阶导出另含 density，见 `vtk_export_highorder`）。"""
     if fields is None:
         fields = ['velocity', 'pressure']
-    invalid = set(fields) - VALID_FIELDS
+    invalid = set(fields) - set(valid)
     if invalid:
-        raise ValueError(f"无效的场名 {sorted(invalid)}，可用：{sorted(VALID_FIELDS)}")
+        raise ValueError(f"无效的场名 {sorted(invalid)}，可用：{sorted(valid)}")
     out: List[str] = []
     for name in fields:
         if name == 'turbulence':

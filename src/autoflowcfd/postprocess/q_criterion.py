@@ -15,13 +15,20 @@ def q_criterion_from_velocity_gradient(grad: np.ndarray) -> np.ndarray:
     return 0.5 * (np.sum(Omega * Omega, axis=(-2, -1)) - np.sum(S * S, axis=(-2, -1)))
 
 
-def q_criterion_cell_field(solver) -> np.ndarray:
-    """求解器当前状态的 Q 准则单元积分平均 `(n_cells,)`（单机求解器或其主机视图）。"""
+def q_criterion_sp_field(solver) -> np.ndarray:
+    """求解器当前状态解点上的 Q 准则 `(n_cells, n_sps)`（单机求解器或其主机视图；速度梯度与湍流模型同一实现）。"""
     from autoflowcfd.core.fr_operators.corrected_gradient import source_velocity_gradient
     from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
-    from autoflowcfd.fr.native_padding import cell_integration_weights, weighted_cell_average
 
     host = solver.host_view() if hasattr(solver, "host_view") else solver
     flat = get_flat_face_geometry(host.mesh, host.ops)
     grad = source_velocity_gradient(host.state.Q, host.mesh, host.ops, flat, host.boundary_ghost_provider)
-    return weighted_cell_average(q_criterion_from_velocity_gradient(grad), cell_integration_weights(host))
+    return q_criterion_from_velocity_gradient(grad)
+
+
+def q_criterion_cell_field(solver) -> np.ndarray:
+    """求解器当前状态的 Q 准则单元积分平均 `(n_cells,)`。"""
+    from autoflowcfd.fr.native_padding import cell_integration_weights, weighted_cell_average
+
+    host = solver.host_view() if hasattr(solver, "host_view") else solver
+    return weighted_cell_average(q_criterion_sp_field(host), cell_integration_weights(host))

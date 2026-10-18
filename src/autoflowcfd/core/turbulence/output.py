@@ -19,22 +19,26 @@ from autoflowcfd.fr.native_padding import weighted_cell_average
 CHECKPOINT_PREFIX = "turb_cell_"
 
 
+def turbulence_sp_fields(turb_model) -> dict:
+    """`{输出键: (n_cells, n_sps) 解点值}`（主机数组）；模型为 None 或不是输运模型时返回空字典。高阶 VTK 导出用
+    解点值本身，单元平均（`turbulence_cell_means`）由它积分得到。"""
+    if turb_model is None or not hasattr(turb_model, "transported_fields"):
+        return {}
+    named = list(zip(turb_model.OUTPUT_FIELD_KEYS, turb_model.transported_fields()))
+    if getattr(turb_model, "nu_t", None) is not None:
+        named.append(("nut", turb_model.nu_t))
+    return {key: np.asarray(field.get() if hasattr(field, "get") else field, dtype=np.float64)
+            for key, field in named}
+
+
 def turbulence_cell_means(turb_model, W) -> dict:
     """`{输出键: (n_cells,) 单元积分平均}`；模型为 None 或不是输运模型时返回空字典。
 
     Args:
         W: `fr/native_padding.py::sp_integration_weights` 给出的解点积分权重（与模型场同一单元顺序）
     """
-    if turb_model is None or not hasattr(turb_model, "transported_fields"):
-        return {}
-    out = {}
-    named = list(zip(turb_model.OUTPUT_FIELD_KEYS, turb_model.transported_fields()))
-    if getattr(turb_model, "nu_t", None) is not None:
-        named.append(("nut", turb_model.nu_t))
-    for key, field in named:
-        host = np.asarray(field.get() if hasattr(field, "get") else field, dtype=np.float64)
-        out[key] = weighted_cell_average(host[:W.shape[0]], W)
-    return out
+    return {key: weighted_cell_average(field[:W.shape[0]], W)
+            for key, field in turbulence_sp_fields(turb_model).items()}
 
 
 def turbulence_fields_from_checkpoint(fields: dict) -> dict:

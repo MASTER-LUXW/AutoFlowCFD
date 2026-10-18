@@ -150,6 +150,21 @@ autoflowcfd post export-vtk \
   --output step_100.vtk
 ```
 
+### **方法6: 高阶导出（单元内部的真实多项式分布）**
+
+```
+autoflowcfd post export-vtk \
+  --case results/ \
+  --high-order \
+  --variables velocity --variables pressure --variables turbulence \
+  --output flow_highorder.vtu
+```
+
+- 每个单元写成一个 VTK 高阶 Lagrange 单元（四面体、三棱柱，阶数 1~3），节点值是 FR 解多项式的精确取值；
+  ParaView 里看到的是单元内部的真实分布，而不是单元平均。
+- 从 checkpoint 重建求解器（与 `q_criterion` 同一路径；输入是 .nas 体网格且 checkpoint 未记录面网格时需 `--surface-mesh`）。
+- 只写 `.vtu`；可导出 velocity、pressure、density、k、omega、nu_tilde、nut、turbulence、q_criterion；不能与 `--boundaries-only` 同用。
+
 ---
 
 ## 📂 **推荐的目录结构**

@@ -44,6 +44,9 @@ from autoflowcfd.cli.post.helpers import _load_case
                    "网格——可以在 ParaView 里按命名分区筛选/着色（类似 "
                    "Fluent/OpenFOAM 的 patch 工作流）。需要体网格数据"
                    "（VolumeMeshData）。")
+@click.option("--high-order", is_flag=True, default=False,
+              help="按 FR 解的分段多项式导出 VTK 高阶 Lagrange 单元（.vtu；单元内部显示真实分布，而不是单元平均）。"
+                   "从 checkpoint 重建求解器；湍流量取解点场，另可导出 density")
 def export_vtk(
     case: str,
     output: str,
@@ -54,6 +57,7 @@ def export_vtk(
     skip_quality_check: bool,
     binary: Optional[bool],
     boundaries_only: bool,
+    high_order: bool,
 ) -> None:
     """把场数据导出为 VTK 格式。
 
@@ -102,8 +106,6 @@ def export_vtk(
     try:
         from autoflowcfd.postprocess import VTKExporter
 
-        grid_data, solution, history, iteration, metadata = _load_case(case, grid, checkpoint)
-
         # 准备变量列表
         if not variables:
             var_list = ['velocity', 'pressure']
@@ -111,6 +113,13 @@ def export_vtk(
         else:
             var_list = list(variables)
             logger.info(f"Exporting variables: {var_list}")
+
+        if high_order:
+            _export_high_order(case, checkpoint, surface_mesh, skip_quality_check, output, var_list, binary,
+                               boundaries_only)
+            return
+
+        grid_data, solution, history, iteration, metadata = _load_case(case, grid, checkpoint)
 
         # 校验变量名
         from autoflowcfd.postprocess.vtk_export_fields import VALID_FIELDS
@@ -199,3 +208,23 @@ def export_vtk(
         import traceback
         logger.debug(traceback.format_exc())
         raise click.ClickException(f"VTK export failed: {e}")
+
+
+def _export_high_order(case, checkpoint, surface_mesh, skip_quality_check, output, var_list, binary, boundaries_only):
+    """`--high-order`：从 checkpoint 精确重建求解器状态，按解点多项式导出（`postprocess/vtk_export_highorder`）。"""
+    from autoflowcfd.cli.post.helpers import _locate_checkpoint
+    from autoflowcfd.cli.solve.checkpoint_io import rebuild_solver_from_checkpoint
+    from autoflowcfd.postprocess.vtk_export_highorder import export_solver_highorder_vtk
+
+    if boundaries_only:
+        raise ValueError("--high-order 导出体单元，不能与 --boundaries-only 同用")
+    output_path = Path(output)
+    if output_path.suffix not in ("", ".vtu"):
+        raise ValueError(f"--high-order 只写 .vtu（VTK 高阶 Lagrange 单元），收到 {output_path.suffix}")
+    solver, _it, _meta = rebuild_solver_from_checkpoint(
+        str(_locate_checkpoint(Path(case), checkpoint)), backend="cpu", surface_mesh=surface_mesh,
+        skip_quality_check=skip_quality_check)
+    path = export_solver_highorder_vtk(solver, output_path.with_suffix(".vtu"), fields=var_list,
+                                       binary=True if binary is None else binary)
+    click.echo(f"\n✅ 高阶 VTK 导出完成：{path}")
+
