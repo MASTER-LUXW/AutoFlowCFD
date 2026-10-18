@@ -1,6 +1,6 @@
 """单 GPU 的 WMLES 壁面剪应力修正（`GPUFRSolver.compute_viscous_residual_gpu` 里的生产调用点）。
 
-GPU 与 CPU 共用同一份数组模块无关的壁面模型（`core/turbulence/wmles/`），这里在 numpy 替身上跑 GPU 的真实
+GPU 与 CPU 共用同一份数组模块无关的壁面模型（`core/turbulence/wall_model/`），这里在 numpy 替身上跑 GPU 的真实
 残差方法（粘性通量核换成返回零，隔离出壁面模型一项），与 CPU 直接求值逐位比对；此前 GPU 路径是把设备数组
 下载到主机、调用 CPU 函数再上传的转发层。
 """
@@ -13,7 +13,7 @@ import pytest
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from autoflowcfd.core.fr_residual.inviscid import primitive_to_conserved
 from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-from autoflowcfd.core.turbulence.wmles import WMLESModel
+from autoflowcfd.core.turbulence.wall_model import EquilibriumWallModel
 from autoflowcfd.fr.operators import generate_fr_operators
 from tests.unit._boundary_groups import tag_wall_cells
 from tests.unit._numpy_as_cupy import NumpyAsCupy
@@ -33,7 +33,7 @@ def _case(wall: bool):
     else:
         tag_wall_cells(mesh, [], rest_type="FARFIELD")
     stub = types.SimpleNamespace(mesh=mesh, freestream={"rho_inf": 1.225, "vel_inf": 30.0, "p_inf": 101325.0},
-                                 turb_model_name="WMLES", wmles_model=WMLESModel())
+                                 turb_model_name="WMLES", wall_model=EquilibriumWallModel())
     provider = build_boundary_ghost_provider(stub, bc_overrides={})
     rng = np.random.default_rng(0)
     Q = np.zeros((mesh.n_cells, mesh.n_sps_per_cell, 5))
@@ -53,7 +53,7 @@ def _gpu_viscous_residual(monkeypatch, mesh, ops, provider, U, model):
     patch_pkg_attr(monkeypatch, gpu_viscous_mod, "compute_viscous_residual_fr_gpu",
                    lambda U, *a, **k: np.zeros_like(U))
     solver = types.SimpleNamespace(
-        mesh=mesh, ops=ops, mu_molecular=MU, boundary_ghost_provider=provider, wmles_model=model,
+        mesh=mesh, ops=ops, mu_molecular=MU, boundary_ghost_provider=provider, wall_model=model,
         mesh_data=None, ops_data=None, flat_face_gpu=None, device_id=0, U_gpu=U,
     )
     return _GPUSolverResidualMixin.compute_viscous_residual_gpu(solver, U_trial=U)
@@ -61,16 +61,16 @@ def _gpu_viscous_residual(monkeypatch, mesh, ops, provider, U, model):
 
 def test_gpu_residual_path_matches_cpu_model(monkeypatch):
     mesh, ops, provider, U = _case(wall=True)
-    expected = WMLESModel().residual_correction(np, mesh, get_flat_face_geometry(mesh, ops), provider, U, MU)
+    expected = EquilibriumWallModel().residual_correction(np, mesh, get_flat_face_geometry(mesh, ops), provider, U, MU)
     assert expected is not None and np.any(expected != 0.0)
-    actual = _gpu_viscous_residual(monkeypatch, mesh, ops, provider, U, WMLESModel())
+    actual = _gpu_viscous_residual(monkeypatch, mesh, ops, provider, U, EquilibriumWallModel())
     np.testing.assert_array_equal(actual, expected)
 
 
 def test_no_physical_wall_adds_nothing(monkeypatch):
     mesh, ops, provider, U = _case(wall=False)
-    assert WMLESModel().residual_correction(np, mesh, get_flat_face_geometry(mesh, ops), provider, U, MU) is None
-    actual = _gpu_viscous_residual(monkeypatch, mesh, ops, provider, U, WMLESModel())
+    assert EquilibriumWallModel().residual_correction(np, mesh, get_flat_face_geometry(mesh, ops), provider, U, MU) is None
+    actual = _gpu_viscous_residual(monkeypatch, mesh, ops, provider, U, EquilibriumWallModel())
     assert not actual.any()
 
 

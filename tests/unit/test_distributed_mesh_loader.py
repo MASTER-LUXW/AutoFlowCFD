@@ -220,7 +220,7 @@ class TestDistributedFRSolverFromFullyDistributedPackage:
         import types
         from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
         root_stub = types.SimpleNamespace(
-            mesh=mesh, freestream=freestream, turb_model_name="NONE", wmles_model=None,
+            mesh=mesh, freestream=freestream, turb_model_name="NONE", wall_model=None,
         )
         boundary_ghost_provider = build_boundary_ghost_provider(root_stub, bc_overrides={})
 

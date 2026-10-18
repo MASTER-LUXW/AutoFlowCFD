@@ -116,11 +116,11 @@ class _GPUSolverResidualMixin:
             device_id=self.device_id,
         )
 
-        # WMLES 壁面剪应力修正：与 CPU 同一份实现（`core/turbulence/wmles/`，数组模块无关），残差组装阶段施加
-        if self.wmles_model is not None:
+        # WMLES 壁面剪应力修正：与 CPU 同一份实现（`core/turbulence/wall_model/`，数组模块无关），残差组装阶段施加
+        if self.wall_model is not None:
             from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 
-            wall_stress_correction = self.wmles_model.residual_correction(
+            wall_stress_correction = self.wall_model.residual_correction(
                 get_cupy(), self.mesh, get_flat_face_geometry(self.mesh, self.ops), self.boundary_ghost_provider,
                 U, self.mu_molecular)
             if wall_stress_correction is not None:

@@ -121,7 +121,7 @@ class _DistributedFromPackageMixin:
         turb_model_name = package.get('turb_model_name', 'NONE')
         # fail-fast 护栏（真实 bug 修复，2026-09-02）：拒绝任何拼写错误/
         # 未知的 turb_model_name，而不是静默把 `self.turb_model_name`
-        # 设成该值但 `self.turb_model`/`.wmles_model`/`.sgs_model` 都
+        # 设成该值但 `self.turb_model`/`.wall_model`/`.sgs_model` 都
         # 留空——`step()` 会静默把它当成 'none' 跑（湍流物理完全缺失，
         # 不会有任何报错或警告）。
         from autoflowcfd.core.turbulence.registry import (
@@ -154,11 +154,11 @@ class _DistributedFromPackageMixin:
         self.ddes_model = None
         self.iddes_h_max_compact = package.get('iddes_h_max_compact')
         self.iddes_h_wn_compact = package.get('iddes_h_wn_compact')
-        # `step()` 的 `residual_func` 无条件读取 `self.wmles_model`/
+        # `step()` 的 `residual_func` 无条件读取 `self.wall_model`/
         # `self.sgs_model`（与主 `__init__` 同一个属性名约定），必须
         # 存在这两个属性，否则任何 turb_model_name 都会在 step() 里
         # AttributeError——两者默认 None，只在下面对应分支里真正构造。
-        self.wmles_model = None
+        self.wall_model = None
         self.sgs_model = None
 
         from autoflowcfd.core.turbulence.registry import uses_algebraic_sgs
@@ -168,8 +168,8 @@ class _DistributedFromPackageMixin:
             self.sgs_model = WALEModel()
         if turb_model_name == 'WMLES':
             # WMLES 另加壁面模型（与单机同一份，不需要壁距）
-            from autoflowcfd.core.turbulence.wmles import WMLESModel
-            self.wmles_model = WMLESModel()
+            from autoflowcfd.core.turbulence.wall_model import EquilibriumWallModel
+            self.wall_model = EquilibriumWallModel()
 
         if has_transport_equations(turb_model_name):
             n_local = self.partition.n_local_cells

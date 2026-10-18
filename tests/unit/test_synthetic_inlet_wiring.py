@@ -30,7 +30,7 @@ def _stub(**overrides):
     mesh.boundary_bc_types = {"x_min": "VELOCITY_INLET", "x_max": "PRESSURE_OUTLET", "wall_bottom": "WALL",
                               "wall_top": "WALL", "z_min": "SYMMETRY", "z_max": "SYMMETRY"}
     attrs = dict(mesh=mesh, ops=generate_fr_operators(1), freestream=dict(FREESTREAM), turb_model_name="LES",
-                 wmles_model=None, _sem_num_eddies=40, _turbulence_intensity=0.05, _viscosity_ratio=5.0,
+                 wall_model=None, _sem_num_eddies=40, _turbulence_intensity=0.05, _viscosity_ratio=5.0,
                  mu_molecular=1.8e-5)
     attrs.update(overrides)
     return types.SimpleNamespace(**attrs)

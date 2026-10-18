@@ -50,7 +50,7 @@ def _build_initial_package_and_root_context(order, turb_model_name="NONE"):
 
     root_solver_stub = types.SimpleNamespace(
         mesh=mesh, freestream=freestream, turb_model_name=turb_model_name,
-        wmles_model=None,
+        wall_model=None,
     )
     boundary_ghost_provider_global = build_boundary_ghost_provider(root_solver_stub, bc_overrides={})
 

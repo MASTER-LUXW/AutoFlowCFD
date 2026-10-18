@@ -36,7 +36,7 @@ def _mixed_mesh(order, tri=(0, 1, 4)):
 
 def _provider(m):
     return build_boundary_ghost_provider(SimpleNamespace(mesh=m, freestream=dict(FREESTREAM), turb_model_name="NONE",
-                                                         wmles_model=None), bc_overrides={})
+                                                         wall_model=None), bc_overrides={})
 
 
 @pytest.mark.parametrize("tri", [(0, 1, 4), (0, 4, 3)])

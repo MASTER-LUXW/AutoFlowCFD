@@ -182,7 +182,7 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     self.iddes_h_max_compact = None
     self.iddes_h_wn_compact = None
     self.sgs_model_gpu = None
-    self.wmles_model = None
+    self.wall_model = None
     self.wall_distance_gpu = None
 
     if turb_model_name == 'SA':
@@ -219,8 +219,8 @@ def build_multi_gpu_solver_from_fully_distributed_package(
         self.sgs_model_gpu = WALEModel()
         logger.info(f"Rank {self.rank}: GPU {turb_model_name} with WALE SGS model initialized (fully-distributed mode)")
     if turb_model_name == 'WMLES':
-        from autoflowcfd.core.turbulence.wmles import WMLESModel
-        self.wmles_model = WMLESModel()
+        from autoflowcfd.core.turbulence.wall_model import EquilibriumWallModel
+        self.wall_model = EquilibriumWallModel()
 
     self.filter_func_gpu = None
     self._init_modal_filter_distributed()

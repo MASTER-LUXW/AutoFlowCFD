@@ -75,7 +75,7 @@ class TestWmlesDistributedGpu:
         from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
         from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
         from autoflowcfd.core.gpu.distributed.gpu_distributed.compact_view import _CompactMeshDataView
-        from autoflowcfd.core.turbulence.wmles import WMLESModel
+        from autoflowcfd.core.turbulence.wall_model import EquilibriumWallModel
         import autoflowcfd.core.gpu.residual.gpu_viscous as gpu_viscous_mod
 
         order = 1
@@ -94,7 +94,7 @@ class TestWmlesDistributedGpu:
 
         root_stub = types.SimpleNamespace(
             mesh=mesh, freestream={"rho_inf": rho_inf, "vel_inf": 30.0, "p_inf": 101325.0},
-            turb_model_name="WMLES", wmles_model=object(),
+            turb_model_name="WMLES", wall_model=object(),
         )
         provider_global = build_boundary_ghost_provider(root_stub, bc_overrides={})
 
@@ -132,7 +132,7 @@ class TestWmlesDistributedGpu:
             boundary_ghost_provider=provider_local,
             flat_face_gpu=None,
             dist_flat_face=dist_fc,
-            wmles_model=WMLESModel(),
+            wall_model=EquilibriumWallModel(),
             _compact_mesh_view=compact_mesh_view,
             U_extended_gpu=U_extended,
             partition=partition,
@@ -144,7 +144,7 @@ class TestWmlesDistributedGpu:
         residual_local = gd_mod.MultiGPUDistributedSolver.compute_viscous_residual_gpu(stub)
 
         # 参照值：单机在全局网格上的修正，取本 rank 的 local 单元
-        expected_global = WMLESModel().residual_correction(
+        expected_global = EquilibriumWallModel().residual_correction(
             np, mesh, get_flat_face_geometry(mesh, ops), provider_global, U, mu)
         assert expected_global is not None
         expected_local = expected_global[partition.local_cells]

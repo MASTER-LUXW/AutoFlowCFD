@@ -168,7 +168,7 @@ class _GPUSolverStepMixin:
                                                physical_time=physical_time, advance_ramp=advance_ramp)
                 # 解析单元块在主机上装配（与 CPU 同一份实现），块由缓存上传
                 block_assembler = None if unsupported_reason(
-                    order=order_nk, wmles=getattr(self, "wmles_model", None) is not None,
+                    order=order_nk, wall_model=getattr(self, "wall_model", None) is not None,
                 ) else MeanFlowBlockAssembler(
                     mesh=self.mesh, ops=self.ops, ghost_provider=self.boundary_ghost_provider,
                     mu=self.mu_molecular, mach_ref=self.freestream["mach_ref"],

@@ -36,12 +36,12 @@ def _host(a):
     return get() if get is not None else np.asarray(a)
 
 
-def unsupported_reason(*, order: int, wmles: bool = False) -> Optional[str]:
+def unsupported_reason(*, order: int, wall_model: bool = False) -> Optional[str]:
     """解析装配不覆盖当前离散时返回原因（块 Jacobi 回到着色差分装配，精确、只是贵）。"""
     if int(order) < 1:
         return "P0 走有限体积特化核（差分装配只要 色数 x 5 次残差求值）"
-    if wmles:
-        return "WMLES 壁面应力修正"
+    if wall_model:
+        return "壁面模型应力修正"
     return None
 
 

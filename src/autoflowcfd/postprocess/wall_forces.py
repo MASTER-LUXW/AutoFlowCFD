@@ -8,7 +8,7 @@
   外插会在 P0 得到恒为零的摩阻。
 - 作用在物体上的力 = sum_fp w (F_inv - F_vis)[动量] - p_ref sum_fp w a（a 为本侧外向逆变度量行，流体 -> 物体）。
 - WMLES：物理无滑移壁面的幽灵态是滑移镜像，粘性公共通量的切向牵引为零，壁面剪应力来自壁面模型——力积分
-  用残差里同一个牵引（`core/turbulence/wmles/`），物体受力为 -sum A tau_w（tau_w 为壁面对流体的牵引）。
+  用残差里同一个牵引（`core/turbulence/wall_model/`），物体受力为 -sum A tau_w（tau_w 为壁面对流体的牵引）。
 - 缺省只积分物理无滑移的 WALL 组：滑移壁（隧道壁、远场滑移面）不属于物体；按名字显式指定时可以取任意 WALL 组。
 
 混合拆分面（棱柱四边形侧面一半在边界）上落在边界半区的通量点同样计入：它们的通量由配对的内部面记录
@@ -110,7 +110,7 @@ def sample_wall(solver, codes: Sequence[int], viscous: bool = True) -> WallSampl
         float(host.freestream["mach_ref"]), int(resolve_ausm_precond_mode()),
         float(host.mu_molecular), PRANDTL, PRANDTL_TURBULENT, resolve_viscous_ip_constant(int(mesh.order)),
         float(host.freestream["p_inf"]), bool(viscous))
-    wmles = getattr(host, "wmles_model", None)
+    wmles = getattr(host, "wall_model", None)
     if viscous and wmles is not None:
         _add_wall_model_traction(f_vis, wmles, host, mesh, flat, provider, rec, fp)
     # 力臂：通量点的物理坐标（唯一来源；P0 每面一个通量点，解点外插只能得到单元中心）

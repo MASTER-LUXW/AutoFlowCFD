@@ -81,10 +81,11 @@ def wall_dirichlet_face_mask(provider, n_faces: int) -> np.ndarray:
     if group_code is None or code_to_config is None:
         return np.zeros(n_faces, dtype=np.bool_)
 
-    wall_codes = [
-        code for code, cfg in code_to_config.items()
-        if cfg.get("type") == "WALL" and cfg.get("is_no_slip", True)
-    ]
+    # 物理无滑移固壁（`boundary/wall_kind.py`）：壁面模型（WMLES、RANS 自动壁面处理）下幽灵态的 is_no_slip 被
+    # 关掉，但湍流量的壁面条件仍按物理事实施加
+    from autoflowcfd.boundary.wall_kind import is_physical_no_slip_wall
+
+    wall_codes = [code for code, cfg in code_to_config.items() if is_physical_no_slip_wall(cfg)]
     if not wall_codes:
         return np.zeros(n_faces, dtype=np.bool_)
     return np.isin(group_code, wall_codes)

@@ -253,7 +253,7 @@ def distributed_compute_viscous_residual(
     mu: float,
     boundary_ghost_provider=None,
     mu_t_field_compact: Optional[np.ndarray] = None,
-    wmles_model=None,
+    wall_model=None,
 ) -> np.ndarray:
     """分布式粘性残差计算。
 
@@ -289,7 +289,7 @@ def distributed_compute_viscous_residual(
         boundary_ghost_provider: 边界幽灵态提供者
         mu_t_field_compact: (n_compact, n_sps) 湍流动力涡粘度场（compact
             索引空间），None 时等价于纯层流（此前唯一行为）
-        wmles_model: `core/turbulence/wmles::WMLESModel`，None 时没有壁面剪应力修正
+        wall_model: `core/turbulence/wall_model::EquilibriumWallModel`，None 时没有壁面剪应力修正
 
     Returns:
         residual: (n_local_cells, n_sps, 5) local cells 的粘性残差
@@ -318,8 +318,8 @@ def distributed_compute_viscous_residual(
     )
 
     # 4b. WMLES 壁面剪应力修正：与单机同一份实现，面几何用 `dist_fc.base_flat`（与上面粘性残差同一个对象）
-    if wmles_model is not None:
-        correction_compact = wmles_model.residual_correction(
+    if wall_model is not None:
+        correction_compact = wall_model.residual_correction(
             np, adapter, dist_fc.base_flat, boundary_ghost_provider, U_compact, mu)
         if correction_compact is not None:
             residual_compact = residual_compact + correction_compact[..., :residual_compact.shape[-1]]

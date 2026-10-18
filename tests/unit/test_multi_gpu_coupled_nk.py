@@ -74,7 +74,7 @@ def _multi_gpu_standin(single, dist):
         turb_model_name=single.turb_model_name, mu_molecular=single.mu_molecular,
         freestream=dist.local_solver.freestream,
         boundary_ghost_provider=provider, low_mach_precond_enabled=single.low_mach_precond_enabled,
-        wmles_model=None, U_gpu=np.array(single.state.U[..., :5], copy=True),
+        wall_model=None, U_gpu=np.array(single.state.U[..., :5], copy=True),
         _turb_ramp_step=single._turb_ramp_step, _turb_production_ramp_steps=single._turb_production_ramp_steps,
         _turb_production_ramp_complete=single._turb_production_ramp_complete,
         _block_jacobi_colors_local=None,

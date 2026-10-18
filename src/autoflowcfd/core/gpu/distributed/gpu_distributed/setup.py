@@ -54,7 +54,7 @@ class _MultiGPUSetupMixin:
         # ODE 积分状态），不需要"halo 交换持久状态"这层复杂度，只需要
         # 用当前状态现算 mu_t，实现和验证成本远低于 SST/DDES/IDDES。
         # WMLES：壁面面完全属于 owner 单元所在的 rank（边界面没有 neighbor 侧），壁面模型在 compact 空间上
-        # 直接求值（`core/turbulence/wmles/`，面几何取 `dist_flat_face.base_flat`），不需要全局边界几何。
+        # 直接求值（`core/turbulence/wall_model/`，面几何取 `dist_flat_face.base_flat`），不需要全局边界几何。
         from autoflowcfd.core.turbulence.registry import require_supported
         require_supported(turb_model)      # 合法模型名的唯一来源，与单机/CPU 分布式同一组
 
@@ -295,11 +295,11 @@ class _MultiGPUSetupMixin:
             logger.info(f"Rank {self.rank}: GPU {turb_model} with WALE SGS model initialized")
 
         # WMLES：没有输运状态，只构造壁面模型（与单机同一份）。必须在下面 build_boundary_ghost_provider
-        # 之前构造——该函数据 `wmles_model` 是否为 None 决定物理无滑移壁面取滑移镜像幽灵态。
-        self.wmles_model = None
+        # 之前构造——该函数据 `wall_model` 是否为 None 决定物理无滑移壁面取滑移镜像幽灵态。
+        self.wall_model = None
         if turb_model == "WMLES":
-            from autoflowcfd.core.turbulence.wmles import WMLESModel
-            self.wmles_model = WMLESModel()
+            from autoflowcfd.core.turbulence.wall_model import EquilibriumWallModel
+            self.wall_model = EquilibriumWallModel()
             logger.info(f"Rank {self.rank}: GPU-distributed WMLES model initialized")
 
         # 预计算壁面距离（compact 索引空间，见 _init_wall_distance_
@@ -347,9 +347,9 @@ class _MultiGPUSetupMixin:
         # 的 ghost provider，而不是让调用方各自传 None 退化成
         # DefaultGhostProvider。
         from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-        # self.wmles_model 已在上面湍流模型初始化处构造好（WMLES 时为
-        # 真实 WMLESModel 实例，否则 None）——不在这里重置，
-        # build_boundary_ghost_provider 用 getattr(self,"wmles_model",
+        # self.wall_model 已在上面湍流模型初始化处构造好（WMLES 时为
+        # 真实 EquilibriumWallModel 实例，否则 None）——不在这里重置，
+        # build_boundary_ghost_provider 用 getattr(self,"wall_model",
         # None) 判断 WALL 组 is_no_slip 取值，必须能读到真实值。
         # self._turbulence_intensity/_viscosity_ratio 已在上面湍流模型
         # 初始化处设置（构造参数，不再在这里用硬编码默认值覆盖）。

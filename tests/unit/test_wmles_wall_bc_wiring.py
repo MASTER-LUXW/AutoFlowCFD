@@ -11,7 +11,7 @@ Kawai & Larsson 团队页面与 Kang et al. 2024 arXiv:2405.15899）修复：
 WMLES 激活时 WALL 组的 ghost state 改用 is_no_slip=False。
 
 这里只钉住 `build_boundary_ghost_provider` 的条件分支本身（是否正确按
-`solver.wmles_model` 选择 is_no_slip 取值），不重新验证
+`solver.wall_model` 选择 is_no_slip 取值），不重新验证
 `tag_boundary_groups_for_mesh` 的边界匹配几何逻辑（那部分有自己的测试），
 因此用 mock 替换掉它，避免为这一处条件分支搭建一整套真实网格。
 """
@@ -44,15 +44,15 @@ class _FakeMesh:
 
 
 class _FakeSolver:
-    def __init__(self, wmles_model):
+    def __init__(self, wall_model):
         self.mesh = _FakeMesh()
         self.freestream = {"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0}
-        self.turb_model_name = "WMLES" if wmles_model is not None else "SST"
-        self.wmles_model = wmles_model
+        self.turb_model_name = "WMLES" if wall_model is not None else "SST"
+        self.wall_model = wall_model
 
 
-def _build_provider(wmles_model):
-    solver = _FakeSolver(wmles_model)
+def _build_provider(wall_model):
+    solver = _FakeSolver(wall_model)
     group_code = np.array([0, 0, -1, -1], dtype=np.int32)
     name_to_code = {"wall_group": 0}
     # patch 目标必须是**真正持有调用点**的子模块：`boundary` 2026-09-24
@@ -70,7 +70,7 @@ class TestWmlesWallBcNoDoubleCounting:
     def test_wall_is_no_slip_false_when_wmles_active(self):
         """WMLES 激活时：WALL 组必须改用 is_no_slip=False（与 tau_w 修正
         配套，避免叠加在虚假的无滑移解析剪应力上）。"""
-        provider = _build_provider(wmles_model=object())
+        provider = _build_provider(wall_model=object())
         config = provider.code_to_config[0]
         assert config["type"] == "WALL"
         assert config["is_no_slip"] is False
@@ -79,7 +79,7 @@ class TestWmlesWallBcNoDoubleCounting:
         """非 WMLES 场景（SST/DDES/IDDES/LES/NONE）：WALL 组行为必须保持
         此前验证过的严格无滑移不变，这是一个纯粹的 WMLES 专属修复，不能
         影响其余湍流模型的壁面处理。"""
-        provider = _build_provider(wmles_model=None)
+        provider = _build_provider(wall_model=None)
         config = provider.code_to_config[0]
         assert config["type"] == "WALL"
         assert config["is_no_slip"] is True
@@ -87,18 +87,18 @@ class TestWmlesWallBcNoDoubleCounting:
 
 class TestRealFRSolverWmlesConstructionOrder:
     """收尾集成测试：真正构造 `FRSolver(..., turb_model_name="wmles")`，
-    不像上面两个测试那样用手搭的 `_FakeSolver`（提前把 `wmles_model`
+    不像上面两个测试那样用手搭的 `_FakeSolver`（提前把 `wall_model`
     设好再调用 `build_boundary_ghost_provider`）。
 
     真实 bug（2026-09-02，排查分布式 WMLES 支持时发现，与分布式本身
     无关）：`FRSolver.__init__` 此前先构造 `self.boundary_ghost_
-    provider`（第 3 步），几步之后才真正给 `self.wmles_model` 赋值
+    provider`（第 3 步），几步之后才真正给 `self.wall_model` 赋值
     （第 5 步，`_init_turbulence_models`）——`build_boundary_ghost_
-    provider` 用 `getattr(solver,"wmles_model",None) is None` 判断是否
+    provider` 用 `getattr(solver,"wall_model",None) is None` 判断是否
     要切换 is_no_slip，但此时这个属性根本还不存在，`getattr` 安全返回
     None、不报错，`wall_is_no_slip` 因此恒为 True。上面两个测试只验证
     `build_boundary_ghost_provider` 这个纯函数本身的分支逻辑（调用时
-    `wmles_model` 已经摆在那——测试自己保证的前提，不是真实构造流程
+    `wall_model` 已经摆在那——测试自己保证的前提，不是真实构造流程
     保证的），从未捕捉到这个真实构造顺序问题——同一类"子函数测过、
     完整入口没测过"的模式本次会话已经出现多次（grad_U/grad_vel、
     DDES/IDDES 调用顺序）。"""
@@ -112,7 +112,7 @@ class TestRealFRSolverWmlesConstructionOrder:
         from autoflowcfd.core.fr_solver.solver import FRSolver
         solver = FRSolver(mesh, order=order, turb_model_name="wmles")
 
-        assert solver.wmles_model is not None
+        assert solver.wall_model is not None
         wall_configs = [
             cfg for cfg in solver.boundary_ghost_provider.code_to_config.values()
             if cfg.get("type") == "WALL"
@@ -132,7 +132,7 @@ class TestRealFRSolverWmlesConstructionOrder:
         from autoflowcfd.core.fr_solver.solver import FRSolver
         solver = FRSolver(mesh, order=order, turb_model_name="sst")
 
-        assert solver.wmles_model is None
+        assert solver.wall_model is None
         wall_configs = [
             cfg for cfg in solver.boundary_ghost_provider.code_to_config.values()
             if cfg.get("type") == "WALL"

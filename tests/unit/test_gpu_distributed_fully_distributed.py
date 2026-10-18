@@ -105,7 +105,7 @@ def _build_none_package(mesh, ops, rank=0, n_ranks=1):
 
     from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
     root_stub = types.SimpleNamespace(
-        mesh=mesh, freestream=freestream, turb_model_name="NONE", wmles_model=None,
+        mesh=mesh, freestream=freestream, turb_model_name="NONE", wall_model=None,
     )
     boundary_ghost_provider = build_boundary_ghost_provider(root_stub, bc_overrides={})
 
@@ -124,7 +124,7 @@ def _build_sst_package(mesh, ops, rank=0, n_ranks=1):
 
     from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
     root_stub = types.SimpleNamespace(
-        mesh=mesh, freestream=freestream, turb_model_name="SST", wmles_model=None,
+        mesh=mesh, freestream=freestream, turb_model_name="SST", wall_model=None,
     )
     boundary_ghost_provider = build_boundary_ghost_provider(root_stub, bc_overrides={})
 
@@ -147,12 +147,12 @@ def test_algebraic_sgs_models_get_wale_on_multi_gpu(mesh_and_ops, gpu_shim, mode
         build_multi_gpu_solver_from_fully_distributed_package,
     )
     from autoflowcfd.core.turbulence.sgs import WALEModel
-    from autoflowcfd.core.turbulence.wmles import WMLESModel
+    from autoflowcfd.core.turbulence.wall_model import EquilibriumWallModel
 
     mesh, ops = mesh_and_ops
     freestream = {"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0}
     stub = types.SimpleNamespace(mesh=mesh, freestream=freestream, turb_model_name=model,
-                                 wmles_model=WMLESModel() if model == "WMLES" else None)
+                                 wall_model=EquilibriumWallModel() if model == "WMLES" else None)
     package = build_fully_distributed_rank_package(
         mesh, ops, mesh.face_connectivity, np.zeros(mesh.n_cells, dtype=np.int32), 0, 1,
         build_boundary_ghost_provider(stub, bc_overrides={}), freestream, mu_molecular=1.8e-5, mach_ref=0.2,
@@ -160,7 +160,7 @@ def test_algebraic_sgs_models_get_wale_on_multi_gpu(mesh_and_ops, gpu_shim, mode
     solver = build_multi_gpu_solver_from_fully_distributed_package(
         MultiGPUDistributedSolver, package, n_ranks=1, device_id=0, rank=0, root_context=None)
     assert isinstance(solver.sgs_model_gpu, WALEModel)
-    assert isinstance(solver.wmles_model, WMLESModel) == (model == "WMLES")
+    assert isinstance(solver.wall_model, EquilibriumWallModel) == (model == "WMLES")
     assert solver.turb_model_gpu is None and solver.wall_distance_gpu is None
 
 
@@ -237,7 +237,7 @@ class TestBuildFromFullyDistributedPackageNoneTurbulence:
         # NONE：不应该构造任何湍流/SGS/WMLES 模型。
         assert solver.turb_model_gpu is None
         assert solver.sgs_model_gpu is None
-        assert solver.wmles_model is None
+        assert solver.wall_model is None
         assert solver.wall_distance_gpu is None
 
     def test_classmethod_delegates_to_builder(self, mesh_and_ops, gpu_shim, monkeypatch):
@@ -347,7 +347,7 @@ class TestRedistributeMultiGpuFullyDistributedForNewOrder:
         import types as _types
         from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
         root_stub = _types.SimpleNamespace(
-            mesh=mesh, freestream=freestream, turb_model_name="NONE", wmles_model=None,
+            mesh=mesh, freestream=freestream, turb_model_name="NONE", wall_model=None,
         )
         boundary_ghost_provider_global = build_boundary_ghost_provider(root_stub, bc_overrides={})
         return {
@@ -401,7 +401,7 @@ class TestRedistributeMultiGpuFullyDistributedForNewOrder:
         solver.turb_model_gpu = None
         solver.ddes_model_gpu = None
         solver.sgs_model_gpu = None
-        solver.wmles_model = None
+        solver.wall_model = None
         solver.array_mgr = _FakeArrayManager(device_id=0)
         solver._init_modal_filter_distributed = types.MethodType(lambda self: None, solver)
 
@@ -443,7 +443,7 @@ class TestRedistributeMultiGpuFullyDistributedForNewOrder:
         solver.turb_model_gpu = None
         solver.ddes_model_gpu = None
         solver.sgs_model_gpu = None
-        solver.wmles_model = None
+        solver.wall_model = None
         solver.array_mgr = _FakeArrayManager(device_id=0)
         solver._init_modal_filter_distributed = types.MethodType(lambda self: None, solver)
 

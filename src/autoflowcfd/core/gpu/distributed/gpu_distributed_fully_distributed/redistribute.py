@@ -37,7 +37,7 @@ def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int
        partition 布局的 state，替换全部 compact 相关 GPU 属性（mesh_data/
        flat_face_gpu/halo 交换器/wall_distance/boundary_ghost_provider
        等），不重新构造 solver 实例本身（保留 turb_model_gpu/
-       sgs_model_gpu/wmles_model 对象引用，只替换它们的 k_field/
+       sgs_model_gpu/wall_model 对象引用，只替换它们的 k_field/
        omega_field/nu_t 数组——与"传统模式" `gpu_interpolate_to_new_
        order` 同一个设计）。
 
@@ -124,7 +124,7 @@ def redistribute_multi_gpu_fully_distributed_for_new_order(solver, target_p: int
         root_context if is_root_rank else None, target_p, solver.n_ranks, tags=(340, 341))
 
     # --- 3. 应用新包：替换 compact 相关属性，保留 turb_model_gpu/
-    # sgs_model_gpu/wmles_model 对象本身（只是上一步已经替换过它们的
+    # sgs_model_gpu/wall_model 对象本身（只是上一步已经替换过它们的
     # 数组）---
     solver.ops = generate_fr_operators(target_p)
     precompacted_mesh = my_package['precompacted_mesh']

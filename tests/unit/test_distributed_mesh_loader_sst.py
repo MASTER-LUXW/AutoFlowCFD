@@ -34,7 +34,7 @@ class TestFullyDistributedSstTurbulence:
         import types
         from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
         root_stub = types.SimpleNamespace(
-            mesh=mesh, freestream=freestream, turb_model_name="SST", wmles_model=None,
+            mesh=mesh, freestream=freestream, turb_model_name="SST", wall_model=None,
         )
         boundary_ghost_provider = build_boundary_ghost_provider(root_stub, bc_overrides={})
 
@@ -97,7 +97,7 @@ class TestFullyDistributedSstTurbulence:
         import types
         from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
         root_stub = types.SimpleNamespace(
-            mesh=mesh, freestream=freestream, turb_model_name="SST", wmles_model=None,
+            mesh=mesh, freestream=freestream, turb_model_name="SST", wall_model=None,
         )
         boundary_ghost_provider = build_boundary_ghost_provider(root_stub, bc_overrides={})
 
@@ -139,7 +139,7 @@ class TestFullyDistributedSstTurbulence:
         from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
         from autoflowcfd.core.turbulence.sa import SAModel
         from autoflowcfd.core.turbulence.sa.constants import chi_for_viscosity_ratio
-        root_stub = types.SimpleNamespace(mesh=mesh, freestream=freestream, turb_model_name="SA", wmles_model=None)
+        root_stub = types.SimpleNamespace(mesh=mesh, freestream=freestream, turb_model_name="SA", wall_model=None)
         package = build_fully_distributed_rank_package(
             mesh, ops, mesh.face_connectivity, cell_partition, rank=0, n_ranks=1,
             boundary_ghost_provider_global=build_boundary_ghost_provider(root_stub, bc_overrides={}),
@@ -185,7 +185,7 @@ class TestFullyDistributedSstTurbulence:
         from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
         from autoflowcfd.core.turbulence.des import compute_h_max_and_h_wn
         root_stub = types.SimpleNamespace(
-            mesh=mesh, freestream=freestream, turb_model_name="DDES", wmles_model=None,
+            mesh=mesh, freestream=freestream, turb_model_name="DDES", wall_model=None,
         )
         boundary_ghost_provider = build_boundary_ghost_provider(root_stub, bc_overrides={})
 
@@ -255,7 +255,7 @@ class TestFullyDistributedSstTurbulence:
         from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
         from autoflowcfd.core.turbulence.des import compute_h_max_and_h_wn
         root_stub = types.SimpleNamespace(
-            mesh=mesh, freestream=freestream, turb_model_name="IDDES", wmles_model=None,
+            mesh=mesh, freestream=freestream, turb_model_name="IDDES", wall_model=None,
         )
         boundary_ghost_provider = build_boundary_ghost_provider(root_stub, bc_overrides={})
         h_max_global, h_wn_global = compute_h_max_and_h_wn(mesh)
@@ -300,7 +300,7 @@ class TestFullyDistributedSstTurbulence:
     def test_step_with_wmles_runs_and_stays_finite(self, mesh_and_ops):
         """"完全分布式加载"模式补齐 WMLES（2026-09-02 续接——此前
         fail-fast 拒绝，排查发现"需要额外分布式面外插"的理由不成立后
-        真正实现，壁面模型见 core/turbulence/wmles/）。需要一个
+        真正实现，壁面模型见 core/turbulence/wall_model/）。需要一个
         真实 WALL 组才能验证壁面剪应力修正真正生效（不是恰好没有 WALL
         面、correction 恒为 None 的平凡通过），手动给一个真实边界面的
         owner 单元打标签，与 test_wmles_wall_bc_wiring.py 同一个手法。"""
@@ -319,7 +319,7 @@ class TestFullyDistributedSstTurbulence:
         import types
         from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
         root_stub = types.SimpleNamespace(
-            mesh=mesh, freestream=freestream, turb_model_name="WMLES", wmles_model=object(),
+            mesh=mesh, freestream=freestream, turb_model_name="WMLES", wall_model=object(),
         )
         boundary_ghost_provider = build_boundary_ghost_provider(root_stub, bc_overrides={})
 
@@ -339,7 +339,7 @@ class TestFullyDistributedSstTurbulence:
         solver = DistributedFRSolver.from_fully_distributed_package(package, n_ranks=n_ranks, rank=rank)
 
         assert solver.turb_model_name == "WMLES"
-        assert solver.wmles_model is not None
+        assert solver.wall_model is not None
         assert solver.turb_model is None  # WMLES 没有 k/omega ODE 状态
         # I-111：与单机一样带 WALE 亚格子模型（此前分布式 WMLES 没有任何亚格子涡粘）
         from autoflowcfd.core.turbulence.sgs import WALEModel
@@ -368,7 +368,7 @@ class TestFullyDistributedSstTurbulence:
         import types
         from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
         root_stub = types.SimpleNamespace(
-            mesh=mesh, freestream=freestream, turb_model_name="LES", wmles_model=None,
+            mesh=mesh, freestream=freestream, turb_model_name="LES", wall_model=None,
         )
         boundary_ghost_provider = build_boundary_ghost_provider(root_stub, bc_overrides={})
 
@@ -389,7 +389,7 @@ class TestFullyDistributedSstTurbulence:
         assert solver.turb_model_name == "LES"
         assert solver.sgs_model is not None
         assert solver.turb_model is None
-        assert solver.wmles_model is None
+        assert solver.wall_model is None
 
         rng = np.random.default_rng(19)
         U0 = _nonuniform_U(mesh, rng)

@@ -284,7 +284,7 @@ def step(solver, dt: float) -> float:
                     positivity=positivity_func, physical_time=physical_time,
                     block_assembler=None if unsupported_reason(
                         order=_current_order(solver),
-                        wmles=solver.wmles_model is not None) else MeanFlowBlockAssembler(
+                        wall_model=solver.wall_model is not None) else MeanFlowBlockAssembler(
                         mesh=solver.mesh, ops=solver.ops, ghost_provider=solver.boundary_ghost_provider,
                         mu=solver.mu_molecular, mach_ref=solver.freestream["mach_ref"],
                         low_mach=solver.low_mach_precond_enabled,

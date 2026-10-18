@@ -20,7 +20,7 @@ def _provider(bc_types, bc_overrides=None):
     mesh = build_channel_mesh_prism(1, 2, 2, 2, 0.4, 0.1, 0.08)
     mesh.boundary_bc_types = dict(bc_types)
     stub = types.SimpleNamespace(
-        mesh=mesh, ops=generate_fr_operators(1), turb_model_name="NONE", wmles_model=None,
+        mesh=mesh, ops=generate_fr_operators(1), turb_model_name="NONE", wall_model=None,
         freestream={"rho_inf": 1.225, "vel_inf": 10.0, "p_inf": 101325.0},
         _sem_num_eddies=40, _turbulence_intensity=0.01)
     return build_boundary_ghost_provider(stub, bc_overrides=bc_overrides or {})
@@ -58,7 +58,7 @@ def test_boundary_face_without_a_group_is_an_error():
     surf = mesh.boundary_surface_mesh["boundaries"]                  # z_max 的面在面网格里没有组
     del surf.groups["z_max"], surf.bc_types["z_max"]
     stub = types.SimpleNamespace(
-        mesh=mesh, ops=generate_fr_operators(1), turb_model_name="NONE", wmles_model=None,
+        mesh=mesh, ops=generate_fr_operators(1), turb_model_name="NONE", wall_model=None,
         freestream={"rho_inf": 1.225, "vel_inf": 10.0, "p_inf": 101325.0},
         _sem_num_eddies=40, _turbulence_intensity=0.01)
     with pytest.raises(ValueError, match="不属于任何边界组"):
@@ -78,7 +78,7 @@ def test_paired_periodic_groups_need_no_ghost_state_and_do_not_claim_other_faces
     assert (group_code[fc.get_boundary_face_indices()] >= 0).all()
 
     stub = types.SimpleNamespace(
-        mesh=mesh, ops=generate_fr_operators(1), turb_model_name="NONE", wmles_model=None,
+        mesh=mesh, ops=generate_fr_operators(1), turb_model_name="NONE", wall_model=None,
         freestream={"rho_inf": 1.225, "vel_inf": 10.0, "p_inf": 101325.0},
         _sem_num_eddies=40, _turbulence_intensity=0.01)
     provider = build_boundary_ghost_provider(stub, bc_overrides={})

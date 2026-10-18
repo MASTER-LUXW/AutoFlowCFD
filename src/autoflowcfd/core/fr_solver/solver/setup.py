@@ -92,24 +92,24 @@ class _SolverSetupMixin:
         #
         # 真实 bug 修复（2026-09-02，排查分布式 WMLES 支持时发现，与
         # 分布式本身无关，是本文件独立的一个真实回归）：上面这句"ghost
-        # provider 构造时只用 getattr(...,None) 安全读取 wmles_model，
+        # provider 构造时只用 getattr(...,None) 安全读取 wall_model，
         # 不依赖它已经存在"是过时的错误理解——`build_boundary_ghost_
-        # provider` 用 `getattr(solver,"wmles_model",None) is None` 判断
+        # provider` 用 `getattr(solver,"wall_model",None) is None` 判断
         # WALL 组是否要切换成 is_no_slip=False（见该函数文档 #9 修复
-        # 说明），但 `self.wmles_model` 真正被赋值（`_init_turbulence_
+        # 说明），但 `self.wall_model` 真正被赋值（`_init_turbulence_
         # models`，下面第 5 步）发生在 `boundary_ghost_provider` 构造
         # **之后**——`getattr` 在属性完全不存在时同样返回 None，不会
         # 报错，但这意味着 `wall_is_no_slip` 恒为 True，#9 修复的
         # "WMLES 假滑移边界"效果自那次修复写下起就从未真正生效过（只是
-        # 不崩溃，掩盖了这个事实）。这里提前构造真正的 wmles_model（只
+        # 不崩溃，掩盖了这个事实）。这里提前构造真正的 wall_model（只
         # 需要 mu_molecular/rho_inf 两个已经是构造参数的标量，不依赖
         # 第 5 步其余状态），下面第 5 步改为不再重复构造（见该处新增的
         # guard）。
         self.turb_model_name = turb_model_name.upper()
-        self.wmles_model = None
+        self.wall_model = None
         if self.turb_model_name == "WMLES":
-            from autoflowcfd.core.turbulence.wmles import WMLESModel
-            self.wmles_model = WMLESModel()
+            from autoflowcfd.core.turbulence.wall_model import EquilibriumWallModel
+            self.wall_model = EquilibriumWallModel()
         # mach_ref 的唯一来源（按 AUSM+up 预处理档钳下限，推导与标定见该函数）。
         mach_ref = resolve_mach_ref(rho_inf, vel_inf, p_inf)
         # aoa_deg/aos_deg 进 freestream 字典：下游的 Q_free 构造、SEM 入口
@@ -141,7 +141,7 @@ class _SolverSetupMixin:
                                            cfl_start, cfl_max, cfl_min, low_mach_precond, time_accurate):
         """湍流模型、时间积分器、CFL 策略、启动日志开关与运行期状态。"""
         # 5. 初始化湍流模型（self.turb_model_name 已在第 3 步设置；
-        # self.wmles_model 若适用也已在第 3 步提前构造好，供
+        # self.wall_model 若适用也已在第 3 步提前构造好，供
         # boundary_ghost_provider 正确读取，这里不再重置，见第 3 步
         # 的说明与 _init_turbulence_models 里对应的 guard）
         self.turb_model = None

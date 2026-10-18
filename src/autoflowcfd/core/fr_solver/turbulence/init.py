@@ -285,7 +285,7 @@ def init_turbulence_models(solver, n_cells: int, n_sps: int) -> None:
     elif uses_algebraic_sgs(solver.turb_model_name):
         # LES / WMLES：WALE 亚格子涡粘（全部后端同一判据，`turbulence/registry.py::uses_algebraic_sgs`）。
         # WMLES 的壁面模型由 `FRSolver.__init__` 先于边界幽灵态构造（幽灵态据它取滑移镜像），这里不再补建
-        if solver.turb_model_name == "WMLES" and getattr(solver, "wmles_model", None) is None:
+        if solver.turb_model_name == "WMLES" and getattr(solver, "wall_model", None) is None:
             raise RuntimeError("WMLES 的壁面模型必须先于边界幽灵态构造（FRSolver.__init__），这里不补建")
         solver.sgs_model = WALEModel()
         print(f"   [OK] {solver.turb_model_name} with WALE SGS model initialized")

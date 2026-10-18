@@ -144,7 +144,7 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
     # 动量是否为零"，结果是 **WMLES 算例整张 Dirichlet 表全是 NaN** ——
     # BJ 越界判据在贴壁层的结构性误判原封不动回来，而 WMLES 恰恰是最
     # 关心壁面剪应力的那一类算例（该误判的实测代价是 cf -93%）。
-    wall_is_no_slip = getattr(solver, "wmles_model", None) is None
+    wall_is_no_slip = getattr(solver, "wall_model", None) is None
     type_map = {
         "WALL": ("WALL", {"is_no_slip": wall_is_no_slip,
                           "physical_no_slip": True}),
@@ -164,17 +164,10 @@ def build_boundary_ghost_provider(solver, bc_overrides: Dict[str, Dict[str, Any]
     # 供 FRSolver.step() 每个物理步调用一次 advance()（见该列表的
     # 消费点），不在这里（构造阶段）就调用，因为这里只跑一次。
     #
-    # WMLES 显式排除（V2.0 专家组盲审复核，2026-08-28，行为本身不变，
-    # 仅补充说明）：WMLES 依赖壁面模型（对数律/Spalding 律）而非入口湍流
-    # 结构本身来正确预测近壁应力——`wmles_model` 非 None 时即使
-    # `turb_model_name` 恰好也是 "LES"/"DDES"（WMLES 是叠加在其上的近壁
-    # 处理，不是独立的第三种 turb_model_name 取值），也不注入 SEM 入口
-    # 脉动，理由是 WMLES 本身的壁面应力建模已经承担了近壁湍流校正的角色，
-    # 额外叠加 SEM 入口脉动不是这个方案设计要解决的问题。CLI
-    # `--turbulence-model` 帮助文本（见 solve_transient_command.py）已
-    # 补充说明这条排除规则，避免用户误以为 wmles 模式也会获得 SEM 入口
-    # 湍流。
-    use_sem = solver.turb_model_name in ("LES", "DDES", "IDDES") and getattr(solver, "wmles_model", None) is None
+    # WMLES（turb_model_name == "WMLES"）不注入 SEM 入口脉动：近壁应力由壁面模型给出，CLI `--turbulence-model`
+    # 帮助文本已说明。判据按湍流模型名，不按是否有壁面模型对象——DDES/IDDES 配 RANS 自动壁面处理时同样有
+    # 壁面模型（`core/turbulence/wall_model/`），入口照常需要合成湍流。
+    use_sem = solver.turb_model_name in ("LES", "DDES", "IDDES")
 
     # 声明为周期的组必须真的配对过（配对在网格加载时完成，`face_connectivity_periodic.py`；这里防的是加载之后
     # 才把类型改成 PERIODIC——那些面仍是普通边界面，却没有任何边界条件）。判据与边界面标记方式无关：该组的

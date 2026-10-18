@@ -57,7 +57,7 @@ def test_p0_wall_force_moment_arms_lie_on_the_wall():
     provider = build_face_exact_ghost_provider(mesh, 0.4, 0.1, 0.08, bc)
     U = np.tile(primitive_to_conserved(np.array([1.2, 10.0, 0.0, 0.0, 1e5])), (mesh.n_cells, 1, 1))
     host = types.SimpleNamespace(
-        mesh=mesh, ops=mesh.operators, boundary_ghost_provider=provider, wmles_model=None, mu_molecular=1.8e-5,
+        mesh=mesh, ops=mesh.operators, boundary_ghost_provider=provider, wall_model=None, mu_molecular=1.8e-5,
         freestream={"mach_ref": 0.1, "p_inf": 1e5}, state=types.SimpleNamespace(U=U, Q=conserved_to_primitive(U)),
         _get_turbulent_viscosity_field=lambda: None)
     samples = sample_wall(host, list(wall_group_codes(provider)))
@@ -71,7 +71,7 @@ def _sem_provider(mesh):
     fc = mesh.face_connectivity
     inlet_cells = np.unique(fc.owner_cell[fc.is_boundary])[:2]
     tag_wall_cells(mesh, inlet_cells, wall_type="VELOCITY_INLET", rest_type="FARFIELD")
-    stub = types.SimpleNamespace(mesh=mesh, ops=mesh.operators, turb_model_name="LES", wmles_model=None,
+    stub = types.SimpleNamespace(mesh=mesh, ops=mesh.operators, turb_model_name="LES", wall_model=None,
                                  freestream={"rho_inf": 1.2, "vel_inf": 20.0, "p_inf": 1e5},
                                  _sem_num_eddies=40, _turbulence_intensity=0.05, _viscosity_ratio=5.0,
                                  mu_molecular=1.8e-5)

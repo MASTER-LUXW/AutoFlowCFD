@@ -110,7 +110,7 @@ class TestGpuInterpolateToNewOrderCoreMath:
         solver.turb_model_gpu = None
         solver.ddes_model_gpu = None
         solver.sgs_model_gpu = None
-        solver.wmles_model = None
+        solver.wall_model = None
 
         # 短路掉几何/分区/上传相关的重型基础设施——已由本项目其余测试
         # 独立验证过，不是本次改动的对象。
@@ -184,7 +184,7 @@ class TestGpuInterpolateToNewOrderCoreMath:
         solver.turb_model_gpu = None
         solver.ddes_model_gpu = None
         solver.sgs_model_gpu = None
-        solver.wmles_model = None
+        solver.wall_model = None
 
         new_partition = types.SimpleNamespace(n_local_cells=n_local, n_halo=0, n_total_cells=n_local, local_faces=np.array([], dtype=np.int64))
         import autoflowcfd.core.mpi.partition as partition_mod

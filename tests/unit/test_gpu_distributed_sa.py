@@ -139,7 +139,7 @@ def test_fully_distributed_build_wires_sa(monkeypatch, gpu_shim):
     mesh = _build_synthetic_mixed_mesh(1)
     ops = generate_fr_operators(1)
     freestream = {"rho_inf": RHO, "vel_inf": 33.33, "p_inf": 101325.0}
-    stub = types.SimpleNamespace(mesh=mesh, freestream=freestream, turb_model_name="SA", wmles_model=None)
+    stub = types.SimpleNamespace(mesh=mesh, freestream=freestream, turb_model_name="SA", wall_model=None)
     package = build_fully_distributed_rank_package(
         mesh, ops, mesh.face_connectivity, np.zeros(mesh.n_cells, dtype=np.int32), 0, 1,
         build_boundary_ghost_provider(stub, bc_overrides={}), freestream, mu_molecular=MU, mach_ref=0.2,

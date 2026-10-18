@@ -192,7 +192,7 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         self.ddes_model = None
         self.iddes_h_max_compact = None
         self.iddes_h_wn_compact = None
-        self.wmles_model = None
+        self.wall_model = None
         # LES：WALE 是纯代数 SGS 模型，没有跨步状态，也不需要壁距——单独一个分支，不并入下面输运模型的构造块。
         self.sgs_model = None
         from autoflowcfd.core.turbulence.registry import uses_algebraic_sgs
@@ -230,9 +230,9 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         self.artificial_viscosity_alpha = float(solver_kwargs.get('artificial_viscosity_alpha', 1.0))
         from autoflowcfd.core.turbulence.registry import has_transport_equations
         if turb_model_upper == 'WMLES':
-            # 壁面模型（与单机同一份，`core/turbulence/wmles/`）：没有输运状态，不需要壁距
-            from autoflowcfd.core.turbulence.wmles import WMLESModel
-            self.wmles_model = WMLESModel()
+            # 壁面模型（与单机同一份，`core/turbulence/wall_model/`）：没有输运状态，不需要壁距
+            from autoflowcfd.core.turbulence.wall_model import EquilibriumWallModel
+            self.wall_model = EquilibriumWallModel()
         if has_transport_equations(turb_model_upper):
             from autoflowcfd.core.fr_solver.turbulence import init_turbulence_models
             init_turbulence_models(self, n_local, n_sps)  # 设置 self.turb_model（SST 族或 SA-neg）；

@@ -28,7 +28,7 @@ from .utils.wall_distance import WallDistanceSource
 # Turbulence 模块
 from .turbulence.sst import SSTModelFR
 from .turbulence.des import DDESModel, IDDESModel
-from .turbulence.wmles import WMLESModel
+from .turbulence.wall_model import EquilibriumWallModel
 from .turbulence.sgs import WALEModel
 
 # Backend 模块（第四次评审：删除了 V1 时代与生产路径完全脱节、且用
@@ -51,7 +51,7 @@ __all__ = [
     'SSTModelFR',
     'DDESModel',
     'IDDESModel',
-    'WMLESModel',
+    'EquilibriumWallModel',
     'WALEModel',
     'SolutionVector',
     'FRSolver',

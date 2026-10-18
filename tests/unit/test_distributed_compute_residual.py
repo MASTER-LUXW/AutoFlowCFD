@@ -214,7 +214,7 @@ class TestDistributedResidualMatchesSingleMachine:
     @pytest.mark.parametrize("rank", [0, 1])
     def test_viscous_residual_with_wmles_matches(self, mixed_mesh_and_ops, rank):
         """WMLES 壁面剪应力修正的分布式支持：判据与上面的纯层流版本一致，同时激活一个真实 WALL 组
-        与 `WMLESModel`（匹配点几何在紧凑空间上由 `DistributedMeshAdapter.sps_coords` 构造）。"""
+        与 `EquilibriumWallModel`（匹配点几何在紧凑空间上由 `DistributedMeshAdapter.sps_coords` 构造）。"""
         mesh, ops = mixed_mesh_and_ops
         U = _uniform_freestream_U(mesh)
         mu = 1.8e-5
@@ -222,7 +222,7 @@ class TestDistributedResidualMatchesSingleMachine:
 
         from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
         from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-        from autoflowcfd.core.turbulence.wmles import WMLESModel
+        from autoflowcfd.core.turbulence.wall_model import EquilibriumWallModel
 
         # 真实 WALL 组：取一个真实边界面的 owner 单元打标签（与
         # test_wmles_wall_bc_wiring.py 新增的端到端测试同一个手法）。
@@ -234,14 +234,14 @@ class TestDistributedResidualMatchesSingleMachine:
         import types
         root_stub = types.SimpleNamespace(
             mesh=mesh, freestream={"rho_inf": rho_inf, "vel_inf": 30.0, "p_inf": 101325.0},
-            turb_model_name="WMLES", wmles_model=object(),  # 触发 is_no_slip=False
+            turb_model_name="WMLES", wall_model=object(),  # 触发 is_no_slip=False
         )
         provider_global = build_boundary_ghost_provider(root_stub, bc_overrides={})
 
         residual_single = compute_viscous_residual_fr(
             U, mesh, ops, mu, PRANDTL, boundary_ghost_provider=provider_global,
         )
-        correction_single = WMLESModel().residual_correction(
+        correction_single = EquilibriumWallModel().residual_correction(
             np, mesh, get_flat_face_geometry(mesh, ops), provider_global, U, mu)
         assert correction_single is not None, "test setup must produce at least one real WALL face"
         residual_single = residual_single + correction_single[..., :residual_single.shape[-1]]
@@ -264,7 +264,7 @@ class TestDistributedResidualMatchesSingleMachine:
         residual_local = distributed_compute_viscous_residual(
             U_local, partition, fake_halo, dist_fc, mesh, ops, mu=mu,
             boundary_ghost_provider=provider_local,
-            wmles_model=WMLESModel(),
+            wall_model=EquilibriumWallModel(),
         )
 
         expected_local = residual_single[partition.local_cells]

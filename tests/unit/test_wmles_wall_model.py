@@ -1,4 +1,4 @@
-"""WMLES 壁面模型（`core/turbulence/wmles/`）。
+"""WMLES 壁面模型（`core/turbulence/wall_model/`）。
 
 修复前：壁面模型的输入（速度与壁距）外插到壁面通量点本身——壁距在壁面上约为 0、被 1e-8 下限托住，
 y+ 极小，Spalding 律退化为 u+ = y+，tau_w = mu U / 1e-8，等于刚性罚项的伪无滑移；且对 SLIP_WALL（隧道壁、
@@ -9,7 +9,7 @@ y+ 极小，Spalding 律退化为 u+ = y+，tau_w = mu U / 1e-8，等于刚性�
 import numpy as np
 import pytest
 
-from autoflowcfd.core.turbulence.wmles.law import KAPPA, B_LOG, solve_u_plus, spalding_y_plus, wall_shear_stress
+from autoflowcfd.core.turbulence.wall_model.law import KAPPA, B_LOG, solve_u_plus, spalding_y_plus, wall_shear_stress
 
 LX, H, LZ = 0.4, 0.1, 0.08
 NY = 3
@@ -87,10 +87,10 @@ def _linear_profile_U(mesh):
 
 @pytest.mark.parametrize("order", [0, 1, 2])
 def test_matching_points_sit_at_owner_centroid_height(order):
-    from autoflowcfd.core.turbulence.wmles.model import WMLESModel
+    from autoflowcfd.core.turbulence.wall_model.model import EquilibriumWallModel
 
     mesh, flat, provider = _channel(order)
-    m = WMLESModel().matching(np, mesh, flat, provider)
+    m = EquilibriumWallModel().matching(np, mesh, flat, provider)
     assert m is not None and m.face.size > 0
     # 只有下壁（物理无滑移）；上壁是滑移壁，不施加壁面模型
     centers = np.asarray(mesh.face_connectivity.center)[m.face]
@@ -107,10 +107,10 @@ def test_matching_points_sit_at_owner_centroid_height(order):
 @pytest.mark.parametrize("order", [1, 2])
 def test_linear_profile_traction_uses_matching_velocity(order):
     """匹配点速度 = U0 h_wm / H，牵引等于壁面律在 (U(h_wm), h_wm) 处的值。"""
-    from autoflowcfd.core.turbulence.wmles.model import WMLESModel
+    from autoflowcfd.core.turbulence.wall_model.model import EquilibriumWallModel
 
     mesh, flat, provider = _channel(order)
-    m, tau = WMLESModel().traction(np, mesh, flat, provider, _linear_profile_U(mesh), MU)
+    m, tau = EquilibriumWallModel().traction(np, mesh, flat, provider, _linear_profile_U(mesh), MU)
     u_m = U0 * m.h_wm / H
     ref, _ = wall_shear_stress(np, np.stack([u_m, 0 * u_m, 0 * u_m], axis=-1), m.h_wm, RHO + 0 * u_m, MU / RHO)
     np.testing.assert_allclose(tau, ref, rtol=1e-10)
@@ -118,21 +118,21 @@ def test_linear_profile_traction_uses_matching_velocity(order):
 
 
 def test_slip_walls_get_no_wall_model():
-    from autoflowcfd.core.turbulence.wmles.model import WMLESModel
+    from autoflowcfd.core.turbulence.wall_model.model import EquilibriumWallModel
 
-    both = WMLESModel().matching(np, *_channel(1, top_is_slip=False))
-    bottom_only = WMLESModel().matching(np, *_channel(1, top_is_slip=True))
+    both = EquilibriumWallModel().matching(np, *_channel(1, top_is_slip=False))
+    bottom_only = EquilibriumWallModel().matching(np, *_channel(1, top_is_slip=True))
     assert both.face.size == 2 * bottom_only.face.size
 
 
 @pytest.mark.parametrize("order", [0, 1, 2])
 def test_residual_correction_is_conservative_momentum_only(order):
     """修正只在动量分量；按解点积分权重对全域积分等于 sum A tau_w（壁面传给流体的动量，逐位守恒）。"""
-    from autoflowcfd.core.turbulence.wmles.model import WMLESModel
+    from autoflowcfd.core.turbulence.wall_model.model import EquilibriumWallModel
 
     mesh, flat, provider = _channel(order)
     U = _linear_profile_U(mesh)
-    model = WMLESModel()
+    model = EquilibriumWallModel()
     corr = model.residual_correction(np, mesh, flat, provider, U, MU)
     m, tau = model.traction(np, mesh, flat, provider, U, MU)
     assert not corr[..., 0].any() and not corr[..., 4].any()
@@ -153,7 +153,7 @@ def test_native_tet_wall_face():
     from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
     from autoflowcfd.core.fr_residual.inviscid import primitive_to_conserved
     from autoflowcfd.core.fr_solver.boundary import build_boundary_ghost_provider
-    from autoflowcfd.core.turbulence.wmles.model import WMLESModel
+    from autoflowcfd.core.turbulence.wall_model.model import EquilibriumWallModel
     from autoflowcfd.fr.operators import generate_fr_operators
     from tests.unit._boundary_groups import tag_wall_cells
     from tests.unit.test_fr_residual_inviscid import _build_synthetic_mixed_mesh
@@ -166,11 +166,11 @@ def test_native_tet_wall_face():
     wall_cell = int(fc.owner_cell[tet_faces[0]])
     tag_wall_cells(mesh, [wall_cell])
     stub = types.SimpleNamespace(mesh=mesh, freestream={"rho_inf": RHO, "vel_inf": U0, "p_inf": 101325.0},
-                                 turb_model_name="WMLES", wmles_model=WMLESModel())
+                                 turb_model_name="WMLES", wall_model=EquilibriumWallModel())
     provider = build_boundary_ghost_provider(stub, bc_overrides={})
     U = np.tile(primitive_to_conserved(np.array([RHO, U0, 5.0, -3.0, 101325.0])),
                 (mesh.n_cells, mesh.n_sps_per_cell, 1))
-    model = WMLESModel()
+    model = EquilibriumWallModel()
     corr = model.residual_correction(np, mesh, get_flat_face_geometry(mesh, ops), provider, U, MU)
     assert corr is not None and np.all(np.isfinite(corr))
     others = np.arange(mesh.n_cells) != wall_cell
@@ -186,7 +186,7 @@ def _host(mesh, provider, U, wmles):
     from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
 
     return types.SimpleNamespace(
-        mesh=mesh, ops=mesh.operators, boundary_ghost_provider=provider, wmles_model=wmles, mu_molecular=MU,
+        mesh=mesh, ops=mesh.operators, boundary_ghost_provider=provider, wall_model=wmles, mu_molecular=MU,
         freestream={"mach_ref": 0.1, "p_inf": 101325.0},
         state=types.SimpleNamespace(U=U, Q=conserved_to_primitive(U)),
         _get_turbulent_viscosity_field=lambda: None)
@@ -195,15 +195,15 @@ def _host(mesh, provider, U, wmles):
 def test_wall_forces_use_wall_model_traction():
     """壁面力积分：物理无滑移壁面的摩擦来自壁面模型牵引（物体受力 -sum A tau_w），与残差同一个；滑移镜像的
     粘性公共通量在壁面上没有切向分量。"""
-    from autoflowcfd.core.turbulence.wmles.model import WMLESModel
+    from autoflowcfd.core.turbulence.wall_model.model import EquilibriumWallModel
     from autoflowcfd.postprocess.wall_forces import sample_wall, wall_group_codes
 
     mesh, flat, provider = _channel(1)
     U = _linear_profile_U(mesh)
     codes = list(wall_group_codes(provider))
-    with_model = sample_wall(_host(mesh, provider, U, WMLESModel()), codes)
+    with_model = sample_wall(_host(mesh, provider, U, EquilibriumWallModel()), codes)
     without = sample_wall(_host(mesh, provider, U, None), codes)
-    m, tau = WMLESModel().traction(np, mesh, flat, provider, U, MU)
+    m, tau = EquilibriumWallModel().traction(np, mesh, flat, provider, U, MU)
     friction = with_model.force_viscous.sum(axis=0) - without.force_viscous.sum(axis=0)
     np.testing.assert_allclose(friction, -np.sum(m.area[:, None] * tau, axis=0), rtol=1e-12)
     assert abs(without.force_viscous[:, 0].sum()) < 1e-12 * abs(friction[0])

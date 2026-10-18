@@ -7,7 +7,7 @@
 
 范围更新（2026-09-02 续，"过时信息源"教训——见
 ProjectFiles/V2.0/19_重大问题修复-湍流模型跨后端逐项排查与完全分布式加载补齐.md）：
-本文件只覆盖输运湍流模型；WMLES 没有输运状态，它的壁面剪应力修正（`core/turbulence/wmles/`）在分布式粘性
+本文件只覆盖输运湍流模型；WMLES 没有输运状态，它的壁面剪应力修正（`core/turbulence/wall_model/`）在分布式粘性
 残差里于 compact 空间直接求值（`distributed_compute.py::distributed_compute_viscous_residual`），不经过本文件。
 LES（WALE）同样不经过本文件的 SST/DDES/IDDES 主函数（没有 ODE 状态，
 纯代数现算），走独立的 `distributed_compute_les_viscosity`——已在

@@ -197,15 +197,15 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         self.ddes_model_gpu = None  # GPU DDES/IDDES 长度尺度计算器（可选）
         self._iddes_h_max_gpu = self._iddes_h_wn_gpu = None  # DES 逐单元网格尺度（DDES/IDDES 时设置）
         self.sgs_model_gpu = None  # GPU WALE 亚格子模型（WMLES/LES 共用，可选）
-        # WMLES 壁面模型：与 CPU 同一个类（数组模块无关，残差里以 cupy 求值，`core/turbulence/wmles/`）。
+        # WMLES 壁面模型：与 CPU 同一个类（数组模块无关，残差里以 cupy 求值，`core/turbulence/wall_model/`）。
         # 必须在下面 _build_boundary_ghost_provider 之前构造：
-        # build_boundary_ghost_provider 用 getattr(solver,"wmles_model",
+        # build_boundary_ghost_provider 用 getattr(solver,"wall_model",
         # None) 判断 WALL 边界是否要切换成真滑移 ghost 态（is_no_slip=
         # False），见 fr_solver/boundary.py 文档。
-        self.wmles_model = None
+        self.wall_model = None
         if turb_model_upper == "WMLES":
-            from autoflowcfd.core.turbulence.wmles import WMLESModel
-            self.wmles_model = WMLESModel()
+            from autoflowcfd.core.turbulence.wall_model import EquilibriumWallModel
+            self.wall_model = EquilibriumWallModel()
         self.bc_overrides = bc_overrides or {}
         self.boundary_ghost_provider = (
             boundary_ghost_provider if boundary_ghost_provider is not None
@@ -400,7 +400,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         """构建边界幽灵态提供者 (BD-01)，与 CPU 版 FRSolver 复用同一套
         构建逻辑（fr_solver/boundary.py::build_boundary_ghost_provider
         只依赖 self.mesh/self.freestream/self.turb_model_name/
-        self.wmles_model，在这个调用点之前均已设置好）。"""
+        self.wall_model，在这个调用点之前均已设置好）。"""
         from autoflowcfd.core.fr_solver import boundary as fr_solver_boundary
         return fr_solver_boundary.build_boundary_ghost_provider(self, bc_overrides)
 

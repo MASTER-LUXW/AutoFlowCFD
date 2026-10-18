@@ -49,7 +49,7 @@ class TestCliEntry:
 
     @pytest.mark.parametrize("model", ["LES", "WMLES"])
     def test_algebraic_models_need_no_wall_distance(self, model):
-        """WALE 不读壁距，WMLES 的匹配点高度取自单元几何（`core/turbulence/wmles/matching.py`）。"""
+        """WALE 不读壁距，WMLES 的匹配点高度取自单元几何（`core/turbulence/wall_model/matching.py`）。"""
         solver = MagicMock()
         solver.turb_model_name = model
         with patch(_APPLY) as mock_apply:

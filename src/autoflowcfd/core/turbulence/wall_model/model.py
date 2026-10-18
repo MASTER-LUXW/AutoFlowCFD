@@ -20,7 +20,7 @@ def wall_model_codes(provider) -> list:
     return [code for code, cfg in provider.code_to_config.items() if is_physical_no_slip_wall(cfg)]
 
 
-class WMLESModel:
+class EquilibriumWallModel:
     """Spalding 壁面律的平衡壁面模型（kappa = 0.41、B = 5.2）。"""
 
     def __init__(self, kappa: float = KAPPA, B: float = B_LOG):

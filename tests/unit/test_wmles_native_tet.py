@@ -1,7 +1,7 @@
 """AutoFlowCFD V2.0 - native 四面体 + WMLES：坍缩坐标外插表不得复活。
 
 2026-09-02 曾查出 WMLES 壁面剪应力修正对四面体恒用坍缩坐标专属外插表（原生面上的 owner_axis/owner_side
-是哑值，查表或 KeyError、或取到语义不对的矩阵）。现行 WMLES（`core/turbulence/wmles/`）只用原生面外插与
+是哑值，查表或 KeyError、或取到语义不对的矩阵）。现行 WMLES（`core/turbulence/wall_model/`）只用原生面外插与
 提升；四面体 owner 的匹配点与残差修正由 `test_wmles_wall_model.py::test_native_tet_wall_face` 覆盖。
 """
 

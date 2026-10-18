@@ -100,7 +100,7 @@ def distributed_mesh_load_v2(
 
         # 边界幽灵态提供者只需要完整全局网格构建一次（root 独有）——用
         # 一个最小鸭子类型对象满足 build_boundary_ghost_provider 的接口
-        # 要求（`.mesh`/`.freestream`/`.turb_model_name`/`.wmles_model`，
+        # 要求（`.mesh`/`.freestream`/`.turb_model_name`/`.wall_model`，
         # 见该函数文档），不需要构造真正的 FRSolver。
         import types
         # 真实 bug 修复（2026-09-02，接入 SST/DDES/IDDES 时发现）：此前
@@ -110,19 +110,19 @@ def distributed_mesh_load_v2(
         # 文档），硬编码 "NONE" 会让"完全分布式加载"模式下的 DDES/IDDES
         # 永远拿不到 SEM 入口，与单机/CPU MPI 传统模式行为不一致。
         # 真实 bug 修复（2026-09-02，接入 WMLES 时发现，与上面 DDES/IDDES
-        # 的 turb_model_name 硬编码是同一类问题）：`wmles_model` 也硬编码
+        # 的 turb_model_name 硬编码是同一类问题）：`wall_model` 也硬编码
         # None——`build_boundary_ghost_provider` 用 `getattr(solver,
-        # "wmles_model",None) is None` 判断 WALL 组是否要切换
+        # "wall_model",None) is None` 判断 WALL 组是否要切换
         # `is_no_slip=False`（见该函数文档 #9 修复说明），WMLES 激活时
         # 若这里恒为 None 会让"完全分布式加载"模式下的 WMLES 恒得到
         # `is_no_slip=True`，与单机/CPU MPI 传统模式行为不一致（这里只
-        # 需要一个非 None 的哨兵值，不需要真正的 WMLESModel 实例——
+        # 需要一个非 None 的哨兵值，不需要真正的 EquilibriumWallModel 实例——
         # `build_boundary_ghost_provider` 只检查 is None）。
         # 合成湍流入口（SEM）在这里由 root 构造、随包下发：涡核数与来流湍流（湍流强度、涡粘比、分子粘度——
         # 定涡核尺度与雷诺应力）必须取用户设置（此前桩上缺这些属性，边界构造的兜底让它们静默变成默认值）
         root_solver_stub = types.SimpleNamespace(
             mesh=mesh, freestream=freestream, turb_model_name=turb_model_name,
-            wmles_model=(object() if turb_model_name == "WMLES" else None),
+            wall_model=(object() if turb_model_name == "WMLES" else None),
             _turbulence_intensity=turbulence_intensity, _viscosity_ratio=viscosity_ratio,
             mu_molecular=mu_molecular, _sem_num_eddies=sem_num_eddies,
         )
@@ -246,7 +246,7 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
        新包对应 partition 布局的 state，替换 `solver` 的全部 compact
        相关属性（partition/dist_flat_face/mesh/ops/wall_distance_
        compact/iddes 字段/boundary_ghost_provider），不重新构造
-       `solver` 实例本身（保留 `turb_model`/`sgs_model`/`wmles_model`
+       `solver` 实例本身（保留 `turb_model`/`sgs_model`/`wall_model`
        对象引用，只替换它们的 k_field/omega_field/nu_t 数组）。
 
     只支持通过 `root_context` 非 None 构造的实例（`DistributedFRSolver.
@@ -341,7 +341,7 @@ def redistribute_fully_distributed_for_new_order(solver, target_p: int) -> None:
         root_context if is_root_rank else None, target_p, solver.n_ranks, tags=(320, 321))
 
     # --- 3. 应用新包：替换 compact 相关属性，保留 turb_model/sgs_model/
-    # wmles_model 对象本身（只是上一步已经替换过它们的数组）---
+    # wall_model 对象本身（只是上一步已经替换过它们的数组）---
     solver.ops = generate_fr_operators(target_p)
     solver.mesh = my_package['precompacted_mesh']
     solver.partition = my_package['partition']
@@ -415,7 +415,7 @@ def exchange_packages_for_new_order(root_context, target_p: int, n_ranks: int, *
         turb_model_name = root_context['turb_model_name']
         root_solver_stub = types.SimpleNamespace(
             mesh=mesh, freestream=root_context['freestream'], turb_model_name=turb_model_name,
-            wmles_model=(object() if turb_model_name == "WMLES" else None),
+            wall_model=(object() if turb_model_name == "WMLES" else None),
             _turbulence_intensity=root_context['turbulence_intensity'],
             _viscosity_ratio=root_context['viscosity_ratio'], mu_molecular=root_context['mu_molecular'],
             _sem_num_eddies=root_context['sem_num_eddies'],

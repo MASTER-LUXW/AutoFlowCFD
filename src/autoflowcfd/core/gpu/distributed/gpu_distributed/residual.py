@@ -97,8 +97,8 @@ class _MultiGPUResidualMixin:
 
         # WMLES 壁面剪应力修正：与单机同一份实现，在 compact 空间（几何取 `_compact_mesh_view`、面几何取
         # `dist_flat_face.base_flat`，与粘性残差同一个索引空间）上直接以 cupy 求值
-        if self.wmles_model is not None:
-            correction_compact = self.wmles_model.residual_correction(
+        if self.wall_model is not None:
+            correction_compact = self.wall_model.residual_correction(
                 get_cupy(), self._compact_mesh_view, self.dist_flat_face.base_flat, self.boundary_ghost_provider,
                 U_compact, self.mu_molecular)
             if correction_compact is not None:
