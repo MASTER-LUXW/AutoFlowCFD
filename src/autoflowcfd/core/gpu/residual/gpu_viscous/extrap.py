@@ -45,6 +45,20 @@ def _add_src1_to_fp(cp, out, src1_idx, src1_cell, src1_mat, field):
     return out
 
 
+def _p0_cell_values(cp, cells, n_fp, Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu):
+    """P0 每单元一个常数态：单元 `cells` 的 `(Q, grad_vel, grad_T, mu_t)` 铺到 `n_fp` 个通量点（`cells` 为 -1 的
+    行是占位值，调用方覆盖或不读）。
+
+    P0 的"对侧"不用 `_extrap_side` 的跨单元查表（与 CPU `viscous_p0_kernel.py` 一致）：混合拆分面、真多源面上
+    唯一的通量点落在第二个半区时，查表给出的是边界半区的全零态或次源单元，而第一个半区的跳量需要的是第一个
+    来源单元的值（`interface.py::_side_jump_gpu`，I-181/I-182）。"""
+    c = cp.maximum(cells, 0)
+
+    def rep(a):
+        return cp.repeat(a[c], n_fp, axis=1)
+    return rep(Q_gpu), rep(grad_vel_gpu), rep(grad_T_gpu), rep(mu_t_gpu)[..., 0]
+
+
 def _extrap_side(cp, idx, src0_cell_all, src0_tpl_all, src0_tid_all, src1_idx_all, src1_cell_all, src1_mat_all,
                   Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu):
     """按 src0(+src1) 机制把某一侧（owner 或 neighbor）的 Q/grad_vel/

@@ -175,11 +175,11 @@ def build_distributed_flat_face(
     # 第四次评审修复：此前 FlatFaceGeometry 构造遗漏了 8 个必需字段
     # （owner_adj_row_exact/neighbor_adj_row_exact/mixed_nb_partner/
     # mixed_nb_mask/mixed_ow_partner/mixed_ow_mask/mixed_bnd_face/
-    # mixed_p0_bnd_frac）+ 2 个面图着色字段（color_face_indices/
+    # p0_second_half_frac）+ 2 个面图着色字段（color_face_indices/
     # n_colors）——FlatFaceGeometry 是 @dataclass 且这 10 个字段都无
     # 默认值，任何 `mpirun --n-ranks`/`--multi-gpu` 调用第一步就会抛
     # TypeError。owner_adj_row_exact/neighbor_adj_row_exact/
-    # mixed_nb_mask/mixed_ow_mask/mixed_bnd_face/mixed_p0_bnd_frac 是
+    # mixed_nb_mask/mixed_ow_mask/mixed_bnd_face/p0_second_half_frac 是
     # 逐面（可能再加 n_fp 维）的物理量，直接按 local_face_indices 切片
     # 即可；mixed_nb_partner/mixed_ow_partner/color_face_indices 里存的
     # 是*另一个面的全局索引*，必须重映射到本 rank 的局部面编号。
@@ -341,7 +341,7 @@ def build_distributed_flat_face(
         mixed_ow_partner=mixed_ow_partner_local,
         mixed_ow_mask=global_flat.mixed_ow_mask[local_face_indices],
         mixed_bnd_face=global_flat.mixed_bnd_face[local_face_indices],
-        mixed_p0_bnd_frac=global_flat.mixed_p0_bnd_frac[local_face_indices],
+        p0_second_half_frac=global_flat.p0_second_half_frac[local_face_indices],
         n1d=global_flat.n1d,
         color_face_indices=local_color_face_indices,
         n_colors=global_flat.n_colors,

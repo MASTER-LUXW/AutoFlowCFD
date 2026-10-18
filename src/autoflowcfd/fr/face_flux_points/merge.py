@@ -21,7 +21,7 @@ from .geometry import (
 )
 from .basis_inverses import build_basis_inverses
 from .face_metrics import build_face_metrics
-from .grouping import build_face_groups
+from .grouping import _second_half_frac, build_face_groups
 from .data import _KernelFaceData, _classify_half, prism_quad_local_idx
 from .validation import validate_face_flux_point_residuals
 from .templates import deduplicate_face_matrices
@@ -102,7 +102,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
     mixed_nb_mask = grp.mixed_nb_mask
     mixed_ow_mask = grp.mixed_ow_mask
     mixed_bnd_face = grp.mixed_bnd_face
-    mixed_p0_bnd_frac = grp.mixed_p0_bnd_frac
+    p0_second_half_frac = grp.p0_second_half_frac
 
     # ---- numba 并行 Newton + 插值矩阵预计算 ----
     logger.info("Running numba parallel Newton+interp kernel for FP geometry...")
@@ -259,6 +259,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
             _ms_nb_sec_cell[i] = face_conn.neighbor_cell[other]
             _ms_nb_sec_cf[i] = face_conn.neighbor_cube_face[other]
             _ms_nb_other_face[i] = other
+            p0_second_half_frac[f] = _second_half_frac(face_conn.area, f, other)
 
         _ms_ow_sec_cell = np.empty(len(_multi_ow_faces), dtype=np.int32)
         _ms_ow_sec_cf = np.empty(len(_multi_ow_faces), dtype=np.int32)
@@ -277,6 +278,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
             _ms_ow_sec_cell[i] = face_conn.owner_cell[other]
             _ms_ow_sec_cf[i] = face_conn.owner_cube_face[other]
             _ms_ow_other_face[i] = other
+            p0_second_half_frac[f] = _second_half_frac(face_conn.area, f, other)
 
         # 计算对角线掩码（primary half = 分组首条子面覆盖的半侧）
         nb_mask = np.zeros((n_faces, n_fp), dtype=bool)
@@ -459,7 +461,7 @@ def build_face_flux_points(face_conn: FRFaceConnectivity, mesh) -> List[FaceFlux
         mixed_ow_partner=mixed_ow_partner,
         mixed_ow_mask=mixed_ow_mask,
         mixed_bnd_face=mixed_bnd_face,
-        mixed_p0_bnd_frac=mixed_p0_bnd_frac,
+        p0_second_half_frac=p0_second_half_frac,
         owner_tri_slot=owner_tri_slot,
         neighbor_tri_slot=neighbor_tri_slot,
         _face_conn=face_conn,

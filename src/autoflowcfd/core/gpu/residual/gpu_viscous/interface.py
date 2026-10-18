@@ -12,7 +12,7 @@ from autoflowcfd.core.gpu.residual.gpu_inviscid import _lift_native_contrib
 from autoflowcfd.core.fr_operators.flux_kernels import (
     CP_AIR, R_AIR, VBC_DIRICHLET, VBC_INTERIOR, VBC_MIRROR, VBC_NEUMANN, VBC_NOSLIP_WALL,
 )
-from .extrap import _extrap_side, _self_extrap_side, _viscous_tilde_flux
+from .extrap import _extrap_side, _p0_cell_values, _self_extrap_side, _viscous_tilde_flux
 
 
 def _mirror_normal_gpu(cp, g, adjrow):
@@ -102,6 +102,50 @@ def _viscous_jump_gpu(cp, K, Q_s, gv_s, gT_s, mut_s, Q_x, gv_x, gT_x, mut_x, adj
     return jump + pen
 
 
+def _side_jump_gpu(cp, base_K, mp, mixed_mask, Q_s, gv_s, gT_s, mut_s, Q_x, gv_x, gT_x, mut_x, Q_ghost_gpu,
+                   vbc_kind_gpu, adjrow, h_ip, mu, Pr, Pr_t, c_ip_visc, second_frac, p0: bool, second_src=None):
+    """一侧的粘性跳量 `(n, n_fp, 5)`，含棱柱四边形侧面被拆成两个三角形半区的两种面。
+
+    - 混合拆分面（`mp >= 0`）：一半挨内部单元、一半在边界上；边界半区取配对边界面 `mp` 的幽灵态与边界种类。
+    - 真多源面（P0 才需要，`second_src = (has2, Q2, gv2, gT2, mut2)`）：两半各挨一个单元，第二半区的对侧是次源
+      单元的常数态。P>=1 由源插值矩阵逐通量点处理，不经这里。
+
+    `base_K` 为各点的粘性边界种类（边界面取本面种类，内部面 `VBC_INTERIOR`），`Q_x` 等为第一半区的对侧。P>=1
+    混合面逐通量点按 `mixed_mask` 落在哪个半区取值；P0 每面一个通量点、提升算子作用在整张四边形面上，跳量取
+    `(1-b) J_第一半区 + b J_第二半区`（`b = second_frac` 为第二半区面积占比），与 CPU `viscous_p0_kernel.py`
+    同一处理。2026-10-17 以前 GPU 的 P0 按那一个通量点落在哪个半区整张面二选一（混合面 CPU 已于 I-7 改正、GPU
+    漏改，I-181；真多源面 CPU/GPU 都只取了一个单元，I-182）。
+    """
+    mpc = cp.maximum(mp, 0)
+    has = mp >= 0
+    Q_g = Q_ghost_gpu[mpc]
+    K_g = vbc_kind_gpu[mpc][:, None]
+
+    def jump(sel):
+        Qx = cp.where(sel[..., None], Q_g, Q_x)
+        K = cp.where(sel, K_g, base_K)
+        K, gvx, gTx, mutx = _boundary_other_side_gpu(cp, K, Q_s, gv_s, gT_s, mut_s, Qx, gv_x, gT_x, mut_x, adjrow)
+        return _viscous_jump_gpu(cp, K, Q_s, gv_s, gT_s, mut_s, Qx, gvx, gTx, mutx, adjrow, h_ip,
+                                 mu, Pr, Pr_t, c_ip_visc, p0)
+
+    if not p0:
+        return jump(has[:, None] & mixed_mask)
+    j1 = jump(cp.zeros(mixed_mask.shape, dtype=bool))
+    has2 = cp.zeros_like(has) if second_src is None else second_src[0]
+    if not (bool(cp.any(has)) or bool(cp.any(has2))):
+        return j1
+    j2 = j1
+    if bool(cp.any(has)):
+        j2 = cp.where(has[:, None, None], jump(cp.broadcast_to(has[:, None], mixed_mask.shape)), j2)
+    if bool(cp.any(has2)):
+        _, Q2, gv2, gT2, mut2 = second_src
+        j_src = _viscous_jump_gpu(cp, base_K, Q_s, gv_s, gT_s, mut_s, Q2, gv2, gT2, mut2, adjrow, h_ip,
+                                  mu, Pr, Pr_t, c_ip_visc, p0)
+        j2 = cp.where(has2[:, None, None], j_src, j2)
+    b = cp.where(has | has2, second_frac, 0.0)[:, None, None]
+    return j1 + b * (j2 - j1)
+
+
 def _compute_viscous_interface_correction_gpu(
     Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu,
     det_jacs, mu, Pr, Pr_t,
@@ -181,21 +225,31 @@ def _compute_viscous_interface_correction_gpu(
                 ff.neighbor_src1_idx, ff.neighbor_src1_cell, ff.neighbor_src1_mat,
                 Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu,
             )
+            second_o = None
+            if n_sps == 1:
+                # P0：第一半区的对侧取来源单元的常数值（混合面为内部邻居），真多源面另带次源单元（`_side_jump_gpu`）
+                mp_o = ff.mixed_nb_partner[idx_o]
+                first = cp.where(mp_o >= 0, ff.neighbor_cell[idx_o], ff.neighbor_src0_cell[idx_o])
+                Q_n, gv_n, gT_n, mut_n = _p0_cell_values(cp, first, Q_o.shape[1], Q_gpu, grad_vel_gpu, grad_T_gpu,
+                                                         mu_t_gpu)
+                s1 = ff.neighbor_src1_idx[idx_o]
+                has2 = (s1 >= 0) & (mp_o < 0) & ~is_bnd_o
+                if bool(cp.any(has2)):
+                    second_o = (has2,) + _p0_cell_values(
+                        cp, cp.where(has2, ff.neighbor_src1_cell[cp.maximum(s1, 0)], -1), Q_o.shape[1],
+                        Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu)
             adjrow_o = ff.owner_adj_row_exact[idx_o]
 
-            # 边界面与混合拆分面边界半区（B-8）：状态取幽灵态（混合面取配对面的），
-            # "另一侧"梯度与罚项按粘性边界种类（CPU `flux_kernels/viscous_bc.py`）。
-            mp_o = ff.mixed_nb_partner[idx_o]
-            mixed_sel_o = (mp_o[:, None] >= 0) & ff.mixed_nb_mask[idx_o]  # (nO, n_fp)
+            # 边界面：状态取幽灵态，"另一侧"梯度与罚项按粘性边界种类（CPU `flux_kernels/viscous_bc.py`）；
+            # 混合拆分面的边界半区见 `_side_jump_gpu`
+            mixed_mask_o = ff.mixed_nb_mask[idx_o]
             Q_n = cp.where(is_bnd_o[:, None, None], Q_ghost_gpu[idx_o], Q_n)
-            Q_n = cp.where(mixed_sel_o[..., None], Q_ghost_gpu[cp.maximum(mp_o, 0)], Q_n)
-            K_o = cp.where(is_bnd_o[:, None], vbc_kind_gpu[idx_o][:, None],
-                           cp.where(mixed_sel_o, vbc_kind_gpu[cp.maximum(mp_o, 0)][:, None], VBC_INTERIOR))
-            K_o, gv_n, gT_n, mut_n = _boundary_other_side_gpu(
-                cp, K_o, Q_o, gv_o, gT_o, mut_o, Q_n, gv_n, gT_n, mut_n, adjrow_o)
-            jump_owner = _viscous_jump_gpu(
-                cp, K_o, Q_o, gv_o, gT_o, mut_o, Q_n, gv_n, gT_n, mut_n, adjrow_o,
-                ff.ip_length[idx_o], mu, Pr, Pr_t, c_ip_visc, n_sps == 1)
+            base_K_o = cp.broadcast_to(cp.where(is_bnd_o, vbc_kind_gpu[idx_o], VBC_INTERIOR)[:, None],
+                                       mixed_mask_o.shape)
+            jump_owner = _side_jump_gpu(
+                cp, base_K_o, ff.mixed_nb_partner[idx_o], mixed_mask_o, Q_o, gv_o, gT_o, mut_o,
+                Q_n, gv_n, gT_n, mut_n, Q_ghost_gpu, vbc_kind_gpu, adjrow_o, ff.ip_length[idx_o],
+                mu, Pr, Pr_t, c_ip_visc, ff.p0_second_half_frac[idx_o], n_sps == 1, second_o)
 
             # 面校正分配：DG 提升算子
             # `lift_native[op] @ (ref_area_weight ⊙ jump)`，与 CPU 版
@@ -227,21 +281,27 @@ def _compute_viscous_interface_correction_gpu(
                 ff.owner_src1_idx, ff.owner_src1_cell, ff.owner_src1_mat,
                 Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu,
             )
+            second_n = None
+            if n_sps == 1:
+                mp_n = ff.mixed_ow_partner[idx_n]
+                first = cp.where(mp_n >= 0, ff.owner_cell[idx_n], ff.owner_src0_cell[idx_n])
+                Q_o_at_n, gv_o_at_n, gT_o_at_n, mut_o_at_n = _p0_cell_values(
+                    cp, first, Q_n_native.shape[1], Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu)
+                s1 = ff.owner_src1_idx[idx_n]
+                has2 = (s1 >= 0) & (mp_n < 0)
+                if bool(cp.any(has2)):
+                    second_n = (has2,) + _p0_cell_values(
+                        cp, cp.where(has2, ff.owner_src1_cell[cp.maximum(s1, 0)], -1), Q_n_native.shape[1],
+                        Q_gpu, grad_vel_gpu, grad_T_gpu, mu_t_gpu)
             adjrow_n = ff.neighbor_adj_row_exact[idx_n]
 
-            # 混合拆分面（B-8）：neighbor 侧对称处理——边界半区对侧状态取配对面幽灵态，
-            # 梯度与罚项按该配对面的粘性边界种类。
-            mp_n = ff.mixed_ow_partner[idx_n]
-            mixed_sel_n = (mp_n[:, None] >= 0) & ff.mixed_ow_mask[idx_n]  # (nN, n_fp)
-            Q_o_at_n = cp.where(mixed_sel_n[..., None], Q_ghost_gpu[cp.maximum(mp_n, 0)], Q_o_at_n)
-            K_n = cp.where(mixed_sel_n, vbc_kind_gpu[cp.maximum(mp_n, 0)][:, None], VBC_INTERIOR)
-            K_n, gv_o_at_n, gT_o_at_n, mut_o_at_n = _boundary_other_side_gpu(
-                cp, K_n, Q_n_native, gv_n_native, gT_n_native, mut_n_native,
-                Q_o_at_n, gv_o_at_n, gT_o_at_n, mut_o_at_n, adjrow_n)
-            jump_neighbor = _viscous_jump_gpu(
-                cp, K_n, Q_n_native, gv_n_native, gT_n_native, mut_n_native,
-                Q_o_at_n, gv_o_at_n, gT_o_at_n, mut_o_at_n, adjrow_n,
-                ff.ip_length[idx_n], mu, Pr, Pr_t, c_ip_visc, n_sps == 1)
+            # 混合拆分面：neighbor 侧对称处理（`_side_jump_gpu`）
+            mixed_mask_n = ff.mixed_ow_mask[idx_n]
+            jump_neighbor = _side_jump_gpu(
+                cp, cp.full(mixed_mask_n.shape, VBC_INTERIOR), ff.mixed_ow_partner[idx_n], mixed_mask_n,
+                Q_n_native, gv_n_native, gT_n_native, mut_n_native, Q_o_at_n, gv_o_at_n, gT_o_at_n, mut_o_at_n,
+                Q_ghost_gpu, vbc_kind_gpu, adjrow_n, ff.ip_length[idx_n], mu, Pr, Pr_t, c_ip_visc,
+                ff.p0_second_half_frac[idx_n], n_sps == 1, second_n)
 
             contrib_n = _lift_native_contrib(
                 cp, nc_op_n, ff.lift_native, ff.ref_area_weight,

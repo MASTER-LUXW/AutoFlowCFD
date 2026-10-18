@@ -44,7 +44,14 @@ class FaceGroups:
     mixed_nb_mask: np.ndarray        # bool (n_faces, n_fp)
     mixed_ow_mask: np.ndarray        # bool (n_faces, n_fp)
     mixed_bnd_face: np.ndarray       # bool (n_faces,)
-    mixed_p0_bnd_frac: np.ndarray    # float64 (n_faces,)
+    p0_second_half_frac: np.ndarray    # float64 (n_faces,)
+
+
+def _second_half_frac(area, f, other) -> float:
+    """四边形面上第二条三角子面 `other` 占整张面的面积比（P0 粘性核按它加权两半的跳量，见
+    `core/fr_residual/viscous_p0_kernel.py`）。"""
+    total = float(area[f]) + float(area[other])
+    return float(area[other]) / max(total, 1e-300)
 
 
 def build_face_groups(
@@ -117,7 +124,7 @@ def build_face_groups(
     mixed_nb_mask = np.zeros((n_faces, n_fp), dtype=np.bool_)
     mixed_ow_mask = np.zeros((n_faces, n_fp), dtype=np.bool_)
     mixed_bnd_face = np.zeros(n_faces, dtype=np.bool_)
-    mixed_p0_bnd_frac = np.zeros(n_faces, dtype=np.float64)
+    p0_second_half_frac = np.zeros(n_faces, dtype=np.float64)
 
     def _register_mixed(key, int_faces, bnd_faces, partner_arr, mask_arr):
         """登记一个混合分组：f_int 为整张面 primary，bf 供幽灵态取用。"""
@@ -135,8 +142,7 @@ def build_face_groups(
         mask_arr[f_int] = ~interior_mask  # True = 边界半区（取幽灵态）
         # 边界半区的面积占比：P0 粘性核（DG 提升形式，提升算子作用在整张四边形面上）按它把内部半区与边界
         # 半区的跳量加权（viscous_p0_kernel.py）；P0 无粘把两半当作独立的面，不用它（inviscid_p0.py）
-        total_area = float(face_conn.area[f_int]) + float(face_conn.area[bf])
-        mixed_p0_bnd_frac[f_int] = float(face_conn.area[bf]) / max(total_area, 1e-300)
+        p0_second_half_frac[f_int] = _second_half_frac(face_conn.area, f_int, bf)
 
     for key in mixed_nb_keys:
         int_faces = sorted(owner_groups[key])
@@ -175,5 +181,5 @@ def build_face_groups(
         mixed_nb_mask=mixed_nb_mask,
         mixed_ow_mask=mixed_ow_mask,
         mixed_bnd_face=mixed_bnd_face,
-        mixed_p0_bnd_frac=mixed_p0_bnd_frac,
+        p0_second_half_frac=p0_second_half_frac,
     )

@@ -59,15 +59,15 @@ def compute_viscous_interface_correction_p0_kernel(
     # 逐 FP 精确度量伴随行（与 P>=1 kernel 同一个来源，见函数文档
     # "2026-09-23 修复的真实缺陷"）。
     owner_adj_row_exact: np.ndarray, neighbor_adj_row_exact: np.ndarray,
-    neighbor_src0_cell: np.ndarray, neighbor_src0_tpl: np.ndarray, neighbor_src0_tid: np.ndarray,
-    neighbor_src1_idx: np.ndarray, neighbor_src1_cell: np.ndarray, neighbor_src1_mat: np.ndarray,
-    owner_src0_cell: np.ndarray, owner_src0_tpl: np.ndarray, owner_src0_tid: np.ndarray,
-    owner_src1_idx: np.ndarray, owner_src1_cell: np.ndarray, owner_src1_mat: np.ndarray,
+    # 对侧来源单元：P0 每单元一个常数态，直接取单元值，不需要源插值矩阵
+    neighbor_src0_cell: np.ndarray, neighbor_src1_idx: np.ndarray, neighbor_src1_cell: np.ndarray,
+    owner_src0_cell: np.ndarray, owner_src1_idx: np.ndarray, owner_src1_cell: np.ndarray,
     mixed_nb_partner: np.ndarray, mixed_ow_partner: np.ndarray,
-    # 混合拆分面边界半区的面积占比 b（`FlatFaceGeometry.mixed_p0_bnd_frac`）。P0 每面一个通量点，提升算子作用
-    # 在棱柱的整张四边形面上：棱柱一侧的跳量取 (1-b) J_内 + b J_边界（两半各自的公共通量按面积加权）。
-    # 2026-10-17 以前按这一个通量点落在哪个半区整张面二选一，而另一侧单元照样施加内部贡献，不守恒（I-7）
-    mixed_p0_bnd_frac: np.ndarray,
+    # 四边形面第二个半区（混合面的边界半区、真多源面的次源半区）的面积占比 b
+    # （`FlatFaceGeometry.p0_second_half_frac`）。P0 每面一个通量点，提升算子作用在棱柱的整张四边形面上：棱柱
+    # 一侧的跳量取 (1-b) J_第一半区 + b J_第二半区。2026-10-17 以前按这一个通量点落在哪个半区整张面二选一，而
+    # 另一侧单元照样施加自己那一半的贡献，不守恒（混合面 I-7，真多源面 I-182）
+    p0_second_half_frac: np.ndarray,
     Q_ghost: np.ndarray,          # (n_boundary_faces, n_fp, 5)
     vbc_kind: np.ndarray,         # (n_faces,) 粘性边界种类，见 flux_kernels/viscous_bc.py
     n_threads: int,
@@ -167,6 +167,7 @@ def compute_viscous_interface_correction_p0_kernel(
             for i in range(n_fp):
                 # 混合拆分面（B-8，与通用 kernel 同步，见 viscous_flux_kernel.py 同名注释）。
                 mp = mixed_nb_partner[f]
+                sc = -1                  # 真多源面的次源单元
                 e_i = E_o[i, 0]  # 标量
                 adj_o_i = adjrow_o[i]  # (3,)，本 FP 的精确度量伴随行
 
@@ -193,36 +194,26 @@ def compute_viscous_interface_correction_p0_kernel(
                     bk = vbc_kind[f]
                     gv_n, gT_n = boundary_other_gradients(gv_o_i, gT_o_i, adj_o_i, bk)
                     mut_n = mut_o_i
+                elif mp >= 0:
+                    # 混合拆分面：内部半区的对侧就是唯一的内部邻居单元，P0 取其常数值。不能用源矩阵插值：唯一的
+                    # 通量点落在边界半区时那里没有内部来源（权重为 0，对侧成了全零态，2026-10-17 I-181 查出）
+                    nc0 = neighbor_cell[f]
+                    Q_n = Q[nc0, 0].copy()
+                    gv_n = grad_vel[nc0, 0].copy()
+                    gT_n = grad_T[nc0, 0].copy()
+                    mut_n = mu_t_field[nc0, 0]
                 else:
-                    Q_n = np.zeros(5)
-                    gv_n = np.zeros((3, 3))
-                    gT_n = np.zeros(3)
-                    mut_n = 0.0
+                    # 内部面：P0 每单元一个常数态，对侧直接取来源单元的值（单源面上源矩阵在唯一通量点的权重恒为
+                    # 1，二者相同）。真多源面（棱柱四边形侧面的两个半区各挨一个四面体）另取次源单元，下方按面积
+                    # 占比加权两半；此前只按源矩阵在唯一通量点上的权重取了一个单元，另一半被忽略（I-182）
                     c0 = neighbor_src0_cell[f]
-                    if c0 >= 0:
-                        mat0 = neighbor_src0_tpl[neighbor_src0_tid[f]]
-                        w = mat0[i, 0]  # n_sps=1，只有 s=0
-                        if w != 0.0:
-                            for v in range(5):
-                                Q_n[v] += w * Q[c0, 0, v]
-                            for a in range(3):
-                                for b in range(3):
-                                    gv_n[a, b] += w * grad_vel[c0, 0, a, b]
-                                gT_n[a] += w * grad_T[c0, 0, a]
-                            mut_n += w * mu_t_field[c0, 0]
+                    Q_n = Q[c0, 0].copy()
+                    gv_n = grad_vel[c0, 0].copy()
+                    gT_n = grad_T[c0, 0].copy()
+                    mut_n = mu_t_field[c0, 0]
                     idx1 = neighbor_src1_idx[f]
                     if idx1 >= 0:
-                        c1 = neighbor_src1_cell[idx1]
-                        mat1 = neighbor_src1_mat[idx1]
-                        w = mat1[i, 0]
-                        if w != 0.0:
-                            for v in range(5):
-                                Q_n[v] += w * Q[c1, 0, v]
-                            for a in range(3):
-                                for b in range(3):
-                                    gv_n[a, b] += w * grad_vel[c1, 0, a, b]
-                                gT_n[a] += w * grad_T[c1, 0, a]
-                            mut_n += w * mu_t_field[c1, 0]
+                        sc = neighbor_src1_cell[idx1]
                 # P0 没有体积算子可以并入本侧通量（P>=1 见 fr/face_flux_trace.py），这里直接减
                 self_flux = viscous_self_normal_flux_point(Q_o_i, gv_o_i, gT_o_i, mut_o_i, adj_o_i, mu, Pr, Pr_t)
                 common = viscous_common_flux_point(
@@ -235,9 +226,16 @@ def compute_viscous_interface_correction_p0_kernel(
                     common_b = viscous_common_flux_point(
                         Q_o_i, gv_o_i, gT_o_i, mut_o_i, Q_ghost[mp, i], gv_bnd, gT_bnd, mut_o_i,
                         adj_o_i, ip_length[f], bk_b, mu, Pr, Pr_t, c_ip)
-                    bfrac = mixed_p0_bnd_frac[f]
+                    bfrac = p0_second_half_frac[f]
                     for v in range(5):
                         common[v] = (1.0 - bfrac) * common[v] + bfrac * common_b[v]
+                elif sc >= 0:
+                    common_2 = viscous_common_flux_point(
+                        Q_o_i, gv_o_i, gT_o_i, mut_o_i, Q[sc, 0], grad_vel[sc, 0], grad_T[sc, 0], mu_t_field[sc, 0],
+                        adj_o_i, ip_length[f], VBC_INTERIOR, mu, Pr, Pr_t, c_ip)
+                    bfrac = p0_second_half_frac[f]
+                    for v in range(5):
+                        common[v] = (1.0 - bfrac) * common[v] + bfrac * common_2[v]
                 jump_owner[i] = common - self_flux
 
             dj = det_jacs[oc, 0]
@@ -281,52 +279,39 @@ def compute_viscous_interface_correction_p0_kernel(
                     gT_n_i[a] = e_i * gT_n_s0[a]
                 mut_n_i = e_i * mut_n_s0
 
-                # Owner 侧插值（n_sps=1 特化）
-                Q_o_at_n = np.zeros(5)
-                gv_o_at_n = np.zeros((3, 3))
-                gT_o_at_n = np.zeros(3)
-                mut_o_at_n = 0.0
-                c0 = owner_src0_cell[f]
-                if c0 >= 0:
-                    mat0 = owner_src0_tpl[owner_src0_tid[f]]
-                    w = mat0[i, 0]
-                    if w != 0.0:
-                        for v in range(5):
-                            Q_o_at_n[v] += w * Q[c0, 0, v]
-                        for a in range(3):
-                            for b in range(3):
-                                gv_o_at_n[a, b] += w * grad_vel[c0, 0, a, b]
-                            gT_o_at_n[a] += w * grad_T[c0, 0, a]
-                        mut_o_at_n += w * mu_t_field[c0, 0]
-                idx1 = owner_src1_idx[f]
-                if idx1 >= 0:
-                    c1 = owner_src1_cell[idx1]
-                    mat1 = owner_src1_mat[idx1]
-                    w = mat1[i, 0]
-                    if w != 0.0:
-                        for v in range(5):
-                            Q_o_at_n[v] += w * Q[c1, 0, v]
-                        for a in range(3):
-                            for b in range(3):
-                                gv_o_at_n[a, b] += w * grad_vel[c1, 0, a, b]
-                            gT_o_at_n[a] += w * grad_T[c1, 0, a]
-                        mut_o_at_n += w * mu_t_field[c1, 0]
+                # Owner 侧（n_sps=1）：对侧直接取来源单元的常数值；混合拆分面（棱柱是 neighbor）内部半区的对侧是唯一
+                # 的 owner 单元；真多源面另取次源单元、下方按面积占比加权（理由同上方 owner 侧）
+                mp_o = mixed_ow_partner[f]
+                c0 = oc if mp_o >= 0 else owner_src0_cell[f]
+                Q_o_at_n = Q[c0, 0].copy()
+                gv_o_at_n = grad_vel[c0, 0].copy()
+                gT_o_at_n = grad_T[c0, 0].copy()
+                mut_o_at_n = mu_t_field[c0, 0]
+                sc_n = -1
+                if mp_o < 0 and owner_src1_idx[f] >= 0:
+                    sc_n = owner_src1_cell[owner_src1_idx[f]]
                 self_flux_n = viscous_self_normal_flux_point(
                     Q_n_i, gv_n_i, gT_n_i, mut_n_i, adj_n_i, mu, Pr, Pr_t)
                 common_n = viscous_common_flux_point(
                     Q_n_i, gv_n_i, gT_n_i, mut_n_i, Q_o_at_n, gv_o_at_n, gT_o_at_n, mut_o_at_n,
                     adj_n_i, ip_length[f], VBC_INTERIOR, mu, Pr, Pr_t, c_ip)
                 # 混合拆分面（棱柱是 neighbor）：对称处理，按面积占比加权
-                mp_o = mixed_ow_partner[f]
                 if mp_o >= 0:
                     bk_n = vbc_kind[mp_o]
                     gv_bnd_n, gT_bnd_n = boundary_other_gradients(gv_n_i, gT_n_i, adj_n_i, bk_n)
                     common_nb = viscous_common_flux_point(
                         Q_n_i, gv_n_i, gT_n_i, mut_n_i, Q_ghost[mp_o, i], gv_bnd_n, gT_bnd_n, mut_n_i,
                         adj_n_i, ip_length[f], bk_n, mu, Pr, Pr_t, c_ip)
-                    bfrac = mixed_p0_bnd_frac[f]
+                    bfrac = p0_second_half_frac[f]
                     for v in range(5):
                         common_n[v] = (1.0 - bfrac) * common_n[v] + bfrac * common_nb[v]
+                elif sc_n >= 0:
+                    common_n2 = viscous_common_flux_point(
+                        Q_n_i, gv_n_i, gT_n_i, mut_n_i, Q[sc_n, 0], grad_vel[sc_n, 0], grad_T[sc_n, 0],
+                        mu_t_field[sc_n, 0], adj_n_i, ip_length[f], VBC_INTERIOR, mu, Pr, Pr_t, c_ip)
+                    bfrac = p0_second_half_frac[f]
+                    for v in range(5):
+                        common_n[v] = (1.0 - bfrac) * common_n[v] + bfrac * common_n2[v]
                 jump_neighbor[i] = common_n - self_flux_n
 
             dj = det_jacs[nc, 0]

@@ -197,8 +197,9 @@ class FlatFaceGeometry:
     # 这类面 owner_primary 已被置 False（不参与残差累加，整张面由配对的内部面记录），
     # 但幽灵态仍需计算（compute_boundary_ghost_states 据此保留）。
     mixed_bnd_face: np.ndarray     # bool (n_faces,)
-    # 混合面中边界子面的面积占比（P0 粘性核按它加权两半的跳量，见 viscous_p0_kernel.py），非混合面为 0。
-    mixed_p0_bnd_frac: np.ndarray  # float64 (n_faces,)
+    # 四边形面第二个半区（混合面的边界半区、真多源面的次源半区）的面积占比（P0 粘性核按它加权两半的跳量，
+    # 见 viscous_p0_kernel.py），其余面为 0。
+    p0_second_half_frac: np.ndarray  # float64 (n_faces,)
 
     # --- 原生基面算子：按面算子索引 `op = (code - 6) + 9 * slot` 排好的整表
     #     （`fr/operators/face_ops.py`；四面体面 6~9、棱柱面 10~14，三角形面再按坍缩
@@ -332,7 +333,7 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
     mixed_ow_partner = ffp_data.mixed_ow_partner
     mixed_ow_mask = ffp_data.mixed_ow_mask
     mixed_bnd_face = ffp_data.mixed_bnd_face
-    mixed_p0_bnd_frac = ffp_data.mixed_p0_bnd_frac
+    p0_second_half_frac = ffp_data.p0_second_half_frac
 
     # 原生面外插 / 提升整表与逐面算子索引（见 `FlatFaceGeometry.boundary_extrap_native`
     # 字段文档）。槽位由单元连接关系唯一决定（`fr/face_flux_points/merge.py`）。
@@ -412,7 +413,7 @@ def build_flat_face_geometry(mesh, ops) -> FlatFaceGeometry:
         owner_src1_mat=owner_src1_mat,
         mixed_nb_partner=mixed_nb_partner, mixed_nb_mask=mixed_nb_mask,
         mixed_ow_partner=mixed_ow_partner, mixed_ow_mask=mixed_ow_mask,
-        mixed_bnd_face=mixed_bnd_face, mixed_p0_bnd_frac=mixed_p0_bnd_frac,
+        mixed_bnd_face=mixed_bnd_face, p0_second_half_frac=p0_second_half_frac,
         boundary_extrap_native=boundary_extrap_native,
         lift_native=lift_native,
         owner_face_op=owner_face_op,

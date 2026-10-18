@@ -102,7 +102,7 @@ class GPUFlatFaceGeometry:
             self.mixed_ow_partner = cp.asarray(flat_face.mixed_ow_partner)
             self.mixed_ow_mask = cp.asarray(flat_face.mixed_ow_mask)
             self.mixed_bnd_face = cp.asarray(flat_face.mixed_bnd_face)
-            self.mixed_p0_bnd_frac = cp.asarray(flat_face.mixed_p0_bnd_frac)
+            self.p0_second_half_frac = cp.asarray(flat_face.p0_second_half_frac)
 
             # ── 原生基面算子 ──
             # `owner_face_op`/`neighbor_face_op` 是两侧的面算子索引（面编码 + 三角形面
