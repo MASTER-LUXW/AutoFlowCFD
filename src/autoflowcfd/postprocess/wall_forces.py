@@ -140,8 +140,9 @@ def wall_group_codes(provider, groups: Optional[Sequence[str]] = None) -> Dict[i
     names = dict(getattr(provider, "code_to_name", {}) or {})
     wall = {code: names.get(code, str(code)) for code, cfg in provider.code_to_config.items() if cfg.get("type") == "WALL"}
     if groups is None:
-        body = {code: name for code, name in wall.items()
-                if provider.code_to_config[code].get("physical_no_slip", True)}
+        from autoflowcfd.boundary.wall_kind import is_physical_no_slip_wall
+
+        body = {code: name for code, name in wall.items() if is_physical_no_slip_wall(provider.code_to_config[code])}
         if not body:
             raise RuntimeError("网格没有物理无滑移的 WALL 边界组，无法积分气动力（可按名字显式指定滑移壁组）")
         return body

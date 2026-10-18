@@ -3,7 +3,7 @@
 import click
 
 
-def build_wall_distance_source(volume_data):
+def build_wall_distance_source(volume_data, bc_overrides=None):
     """CLI 各后端分支共用：由体网格构造壁面距离来源（单机、分布式、GPU 同一份）。
 
     取 WALL 组边界面、按壁面三角形求精确最近距离，见 `core/utils/wall_distance`。没有壁面时的
@@ -12,7 +12,7 @@ def build_wall_distance_source(volume_data):
     from autoflowcfd.core.utils.wall_distance import WallDistanceSource
 
     try:
-        return WallDistanceSource.from_volume_data(volume_data)
+        return WallDistanceSource.from_volume_data(volume_data, bc_overrides)
     except ValueError as e:
         raise click.ClickException(str(e)) from e
 
@@ -54,7 +54,8 @@ def compute_wall_distance_for_solver(solver, volume_data):
             f"无法为湍流模型 '{turb_model}' 计算壁面距离场。")
     try:
         print("\n🔍 Computing wall distance field...")
-        source = build_wall_distance_source(volume_data)
+        # 壁面组按求解器自己的边界配置（含 bc_overrides）判断，与幽灵态同一个判据
+        source = build_wall_distance_source(volume_data, getattr(solver, "bc_overrides", None))
         from autoflowcfd.core.fr_solver.turbulence import apply_wall_distance_source
 
         apply_wall_distance_source(solver, source)

@@ -2,11 +2,13 @@
 
 **为什么用边界面而不是"WALL 组单元的全部节点"**（2026-09-15 修复的一阶物理错误，此前是
 "把单元索引当节点索引"）：`BoundaryMap` 存的是单元索引；边界层棱柱有 3 个节点在壁面上、
-3 个在第一层之外，按单元取会让壁面虚胖一层。这里取 WALL 组拥有的**边界面**本身。
+3 个在第一层之外，按单元取会让壁面虚胖一层。这里取壁面组的**边界面**本身。
 
-已知边际情形：`map_boundaries_by_geometry` 把逐面匹配结果折叠成 `{owner_cell: group}`，
-同一单元若同时拥有属于不同组的边界面（只发生在组交界棱上），会把它的全部边界面都计入
-——这些面与 WALL 面共享棱，过包含只影响交界棱附近、且偏向更短的距离。
+**逐面分组**（2026-10-17，I-92）：体网格带原始面网格（`surface_mesh`，生成、导入与 .nas 体网格求解路径都有）时，
+每个边界面按自身位置归入面网格的组（`match_points_to_surface_groups`，与边界条件的逐面标记同一个函数）；此前按
+"边界面的 owner 单元属于某个壁面组"选取，组交界单元（物面与对称面、出口相接处）的全部边界面都被算成壁面，对称面/
+出口上那几个面的壁距被置为 0 附近。没有面网格时（按单元定义组的合成网格）按单元选取，壁面单元同时属于别的组就
+无法判定、报错。壁面组的判据是"物理无滑移固壁"（`boundary/wall_kind.py`，认 `bc_overrides`）。
 """
 
 import numpy as np
@@ -14,28 +16,21 @@ import numpy as np
 #: 四边形壁面面片的非平面度容差（相对面片尺度）：判断"四点共面"的浮点重合判据。
 _QUAD_PLANARITY_RTOL = 1e-10
 
+#: 边界面中心到面网格三角形的匹配容差（与 `tag_boundary_groups_by_geometry` 同一取值）
+_SURFACE_MATCH_TOLERANCE = 0.75
 
-def wall_face_nodes(volume_data) -> np.ndarray:
-    """WALL 组的边界面节点表 `(n_faces, 3 或 4)`（-1 补位）。
+
+def wall_face_nodes(volume_data, bc_overrides=None) -> np.ndarray:
+    """物理无滑移固壁组的边界面节点表 `(n_faces, 3)`。
 
     Raises:
-        ValueError: BoundaryMap 与体网格不匹配，或面数据缺少节点连接。
+        ValueError: BoundaryMap 与体网格不匹配、面数据缺少节点连接，或（没有面网格时）壁面单元同时属于别的组。
     """
+    from autoflowcfd.boundary.wall_kind import physical_no_slip_wall_groups
+
     bm = volume_data.boundaries
-    n_cells = volume_data.cell_count
-    wall_cells = set()
-    for bc_name, bc_type in bm.bc_types.items():
-        if bc_type != 'WALL' or not bm.has_boundary(bc_name):
-            continue
-        idx = np.asarray(bm.get_cell_indices(bc_name))
-        if idx.size == 0:
-            continue
-        if int(idx.max()) >= n_cells:
-            raise ValueError(
-                f"边界组 '{bc_name}' 的单元索引最大值 {int(idx.max())} 超出体网格单元数 "
-                f"{n_cells}——BoundaryMap 与体网格不匹配（壁面距离场会整体错位）。")
-        wall_cells.update(int(c) for c in idx)
-    if not wall_cells:
+    wall_names = physical_no_slip_wall_groups(bm.bc_types, bc_overrides)
+    if not wall_names:
         return np.empty((0, 3), dtype=np.int64)
     faces = volume_data.ensure_faces_exist()
     if faces.node_connectivity is None:
@@ -45,9 +40,45 @@ def wall_face_nodes(volume_data) -> np.ndarray:
     bidx = faces.get_boundary_face_indices()
     if len(bidx) == 0:
         return np.empty((0, 3), dtype=np.int64)
-    owner = faces.connectivity[bidx, 0]
-    keep = np.fromiter((int(o) in wall_cells for o in owner), dtype=bool, count=len(owner))
-    return np.asarray(faces.node_connectivity[bidx[keep]], dtype=np.int64)
+    face_nodes = np.asarray(faces.node_connectivity[bidx], dtype=np.int64)
+    surface = getattr(volume_data, "surface_mesh", None)
+    if surface is not None:
+        keep = _wall_faces_by_surface(volume_data, surface, face_nodes, wall_names)
+    else:
+        keep = _wall_faces_by_cells(volume_data, bm, faces.connectivity[bidx, 0], wall_names)
+    return face_nodes[keep]
+
+
+def _wall_faces_by_surface(volume_data, surface, face_nodes, wall_names) -> np.ndarray:
+    """逐面：边界面中心归入面网格的组，取壁面组。"""
+    from autoflowcfd.grid.mesh_gen.utils.mesh_boundary import match_points_to_surface_groups
+
+    centers = volume_data.nodes.get_coordinates()[face_nodes].mean(axis=1)
+    names, group_index = match_points_to_surface_groups(
+        centers, surface["nodes"], surface["faces"], surface["boundaries"].groups, _SURFACE_MATCH_TOLERANCE)
+    is_wall = np.array([name in wall_names for name in names] + [False])
+    return is_wall[group_index]                       # 未匹配（-1）取末尾的 False
+
+
+def _wall_faces_by_cells(volume_data, bm, owner, wall_names) -> np.ndarray:
+    """按单元：owner 单元属于壁面组的边界面；壁面单元同时属于别的组时无法判定每个面属于哪个组，报错。"""
+    n_cells = volume_data.cell_count
+    wall_cells, other_cells = set(), set()
+    for bc_name in bm.bc_types:
+        if not bm.has_boundary(bc_name):
+            continue
+        idx = np.asarray(bm.get_cell_indices(bc_name))
+        if idx.size and int(idx.max()) >= n_cells:
+            raise ValueError(
+                f"边界组 '{bc_name}' 的单元索引最大值 {int(idx.max())} 超出体网格单元数 "
+                f"{n_cells}——BoundaryMap 与体网格不匹配（壁面距离场会整体错位）。")
+        (wall_cells if bc_name in wall_names else other_cells).update(int(c) for c in idx)
+    shared = sorted(wall_cells & other_cells)
+    if shared:
+        raise ValueError(
+            f"{len(shared)} 个壁面单元同时属于别的边界组（例如单元 {shared[:5]}），按单元无法判定其哪些边界面是壁面；"
+            "请提供原始面网格（体网格生成/导入的 .pkl 都带）。")
+    return np.fromiter((int(o) in wall_cells for o in owner), dtype=bool, count=len(owner))
 
 
 def triangles_from_faces(nodes: np.ndarray, face_nodes: np.ndarray) -> np.ndarray:
@@ -82,9 +113,9 @@ def triangles_from_faces(nodes: np.ndarray, face_nodes: np.ndarray) -> np.ndarra
     return np.ascontiguousarray(nodes[tri_nodes])
 
 
-def wall_triangles(volume_data) -> np.ndarray:
-    """体网格 WALL 组边界面 -> 壁面三角形 `(n_tri, 3, 3)`。"""
-    face_nodes = wall_face_nodes(volume_data)
+def wall_triangles(volume_data, bc_overrides=None) -> np.ndarray:
+    """体网格物理无滑移固壁组的边界面 -> 壁面三角形 `(n_tri, 3, 3)`。"""
+    face_nodes = wall_face_nodes(volume_data, bc_overrides)
     if face_nodes.shape[0] == 0:
         return np.empty((0, 3, 3))
     return triangles_from_faces(volume_data.nodes.get_coordinates(), face_nodes)

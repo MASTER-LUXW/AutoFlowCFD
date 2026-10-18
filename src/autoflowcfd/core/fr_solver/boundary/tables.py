@@ -6,6 +6,8 @@
 
 import numpy as np
 
+from autoflowcfd.boundary.wall_kind import is_physical_no_slip_wall
+
 from loguru import logger
 
 
@@ -108,11 +110,8 @@ def build_boundary_dirichlet_table(provider, n_faces: int, n_var: int = 5):
         # WMLES 激活时 `is_no_slip` 被关掉以免与壁面模型双重计权，但那面
         # 墙物理上仍然是静止的不可穿透固壁、动量剖面照样单调终止于
         # `rho*u = 0`。用 `is_no_slip` 判会让 WMLES 算例整张表变成 NaN。
-        #
-        # 回退到 `is_no_slip` 只是为了兼容直接构造 `code_to_config` 的
-        # 调用方（例如测试替身、`bc_overrides` 走底层名的算例）——它们
-        # 不经过 type_map，没有 `physical_no_slip` 这个键。
-        if not cfg.get("physical_no_slip", cfg.get("is_no_slip", True)):
+        # 判据见 `boundary/wall_kind.py`（全部"物理无滑移固壁"判断共用）
+        if not is_physical_no_slip_wall(cfg):
             # 真正的滑移壁：切向速度不为零，动量没有 Dirichlet 值。
             continue
         # 静止壁在配置里写作 `wall_velocity=[0,0,0]` 而不是 None
@@ -226,8 +225,7 @@ def build_boundary_mirror_normals(provider, face_normal, n_faces: int):
         elif btype == "WALL":
             # 与 Dirichlet 表用同一个判据（同一个事实来源）：物理滑移壁
             # 才是镜像面；物理无滑移壁由那张表负责，两者互斥。
-            is_mirror = not cfg.get(
-                "physical_no_slip", cfg.get("is_no_slip", True))
+            is_mirror = not is_physical_no_slip_wall(cfg)
         else:
             is_mirror = False
         if not is_mirror:

@@ -15,8 +15,9 @@ from .stress import wall_stress_residual, wall_traction
 
 def wall_model_codes(provider) -> list:
     """施加壁面模型的边界组编码：物理无滑移的 WALL 组。"""
-    return [code for code, cfg in provider.code_to_config.items()
-            if cfg.get("type") == "WALL" and cfg.get("physical_no_slip", True)]
+    from autoflowcfd.boundary.wall_kind import is_physical_no_slip_wall
+
+    return [code for code, cfg in provider.code_to_config.items() if is_physical_no_slip_wall(cfg)]
 
 
 class WMLESModel:

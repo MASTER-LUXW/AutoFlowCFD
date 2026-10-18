@@ -61,13 +61,14 @@ class WallDistanceSource:
         WallDistanceSource.__init__(self, state["triangles"])
 
     @classmethod
-    def from_volume_data(cls, volume_data) -> "WallDistanceSource":
-        """CLI 的唯一构造入口：WALL 组的边界面 -> 来源。
+    def from_volume_data(cls, volume_data, bc_overrides=None) -> "WallDistanceSource":
+        """CLI 的唯一构造入口：物理无滑移固壁组的边界面 -> 来源（`bc_overrides` 与求解器同一份，见
+        `boundary/wall_kind.py`）。
 
         Raises:
             ValueError: 网格里没有任何 WALL 边界面（湍流模型需要壁距时不能退化成估计值继续求解）。
         """
-        tri = wall_triangles(volume_data)
+        tri = wall_triangles(volume_data, bc_overrides)
         if tri.shape[0] == 0:
             raise ValueError(
                 "网格里没有任何 WALL 类型边界面（boundaries.bc_types 中无 WALL 项，或 WALL "

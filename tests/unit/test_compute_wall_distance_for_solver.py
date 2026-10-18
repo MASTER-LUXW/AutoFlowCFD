@@ -123,3 +123,49 @@ class TestWallFacesComeFromBoundaryFaces:
         from autoflowcfd.grid.structures import BoundaryMap as BM
         assert not hasattr(BM, 'get_node_indices')
         assert hasattr(BM, 'get_cell_indices')
+
+
+def _volume_mesh_with_surface():
+    """同一对四面体，带原始面网格：单元 0 的三个边界面里只有 z=0 的 [0,1,2] 是壁面，x=0、y=0 两面是对称面
+    （单元 0 同时属于壁面组与对称面组——组交界单元）。"""
+    vd = _volume_mesh_with_wall()
+    vd.boundaries = BoundaryMap(groups={'wall': np.array([0], dtype=np.int32), 'sym': np.array([0, 1], dtype=np.int32)},
+                                bc_types={'wall': 'WALL', 'sym': 'SYMMETRY'})
+    surf_tris = np.array([[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 4], [1, 3, 4], [2, 3, 4]])
+    vd.surface_mesh = {"nodes": vd.nodes.get_coordinates(), "faces": surf_tris,
+                       "boundaries": BoundaryMap(groups={'wall': np.array([0], dtype=np.int32),
+                                                         'sym': np.array([1, 2, 3, 4, 5], dtype=np.int32)},
+                                                 bc_types={'wall': 'WALL', 'sym': 'SYMMETRY'})}
+    return vd
+
+
+class TestWallFacesPerFace:
+    """壁面面片逐面归组 + 物理无滑移固壁判据认 bc_overrides（I-92）。"""
+
+    def test_boundary_cell_of_two_groups_contributes_only_its_wall_face(self):
+        """修复前按"owner 单元属于壁面组"选取，单元 0 的三个边界面（含两个对称面）全被算成壁面。"""
+        faces = wall_face_nodes(_volume_mesh_with_surface())
+        assert sorted(map(sorted, faces.tolist())) == [[0, 1, 2]]
+
+    def test_bc_overrides_decide_which_groups_are_walls(self):
+        vd = _volume_mesh_with_surface()
+        assert wall_face_nodes(vd, {'wall': {"type": "WALL", "is_no_slip": False}}).shape[0] == 0   # 覆盖成滑移壁
+        both = wall_face_nodes(vd, {'sym': {"type": "WALL", "is_no_slip": True}})                    # 覆盖成无滑移壁
+        assert both.shape[0] == 6
+
+    def test_cell_selection_refuses_a_wall_cell_shared_with_another_group(self):
+        vd = _volume_mesh_with_surface()
+        vd.surface_mesh = None
+        with pytest.raises(ValueError, match="同时属于别的边界组"):
+            wall_face_nodes(vd)
+
+
+def test_physical_no_slip_wall_criterion_is_shared():
+    from autoflowcfd.boundary.wall_kind import is_physical_no_slip_wall, physical_no_slip_wall_groups
+
+    assert is_physical_no_slip_wall({"type": "WALL", "is_no_slip": False, "physical_no_slip": True})   # WMLES 下的真壁
+    assert not is_physical_no_slip_wall({"type": "WALL", "is_no_slip": False, "physical_no_slip": False})
+    assert not is_physical_no_slip_wall({"type": "WALL", "is_no_slip": False})                          # 直接构造的滑移壁
+    assert not is_physical_no_slip_wall({"type": "SYMMETRY"})
+    assert physical_no_slip_wall_groups({"a": "WALL", "b": "SLIP_WALL", "c": "SYMMETRY"},
+                                        {"c": {"type": "WALL"}}) == {"a", "c"}
