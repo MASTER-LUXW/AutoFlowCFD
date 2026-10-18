@@ -37,4 +37,5 @@ def physics_metadata(solver) -> dict:
         # 的 div(nu grad U) 不为零），续算必须沿用，否则会静默换成另一个离散问题。
         "artificial_viscosity_enabled": bool(getattr(solver, "artificial_viscosity_enabled", False)),
         "artificial_viscosity_alpha": float(getattr(solver, "artificial_viscosity_alpha", 1.0)),
+        "wall_treatment": str(solver.wall_treatment),
     }

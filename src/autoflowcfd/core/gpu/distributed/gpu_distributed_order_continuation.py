@@ -178,7 +178,7 @@ def gpu_interpolate_to_new_order(solver, target_p: int) -> None:
         )
         wall_mask_np, open_mask_np = compute_turbulence_face_masks_gpu(compact_mesh_stub, solver.boundary_ghost_provider)
         with cp.cuda.Device(solver.device_id):
-            solver._wall_mask_k_gpu = cp.asarray(wall_mask_np)
+            solver._wall_mask_gpu = cp.asarray(wall_mask_np)
             solver._open_mask_gpu = cp.asarray(open_mask_np)
 
     # 壁面距离（compact 索引空间，y+/SST 输运需要）——复用 __init__ 同一个

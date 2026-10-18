@@ -22,13 +22,10 @@ Gauss-Legendre 解点在高阶时向单元边界聚集，于是这个口径让�
 会顶到 `omega_max`、被当时的显式步后松弛（2026-10-01 已删除）文档称作
 "1e6 量级的应急上限"——它被喂了一个小 2.4~7.2 倍的长度尺度。
 
-## 默认值没有改
+## 口径随近壁处理方式
 
-`AFCFD_OMEGA_WALL_D1 = min | mean`，**默认 `min`**（既有行为，逐位不变）。
-这是湍流模型的物理改动：降低近壁 omega 会抬高 nu_t，必须用真实长程数据
-验证过才能改默认值。本项目在 omega 壁面处理上已经有两次"数学上更对但被
-真实数据证伪"的先例（显式 SIPG 罚项、点隐式动态松弛系数；后者所在的显式
-步后松弛已于 2026-10-01 整体删除），所以这里只提供开关与判据。
+resolved 保持 `min`（放大式的既有标定，逐位不变）；auto 用 `mean`（与平衡壁面模型的匹配高度、Menter 混合式的
+标定口径一致）。2026-10-17 以前由环境变量 `AFCFD_OMEGA_WALL_D1` 选择。
 
 ## 判据
 
@@ -95,32 +92,22 @@ class TestSolutionPointClusteringQuantified:
                 f"Gauss-Legendre 点集应当关于中点对称")
 
 
-class TestSwitchSemantics:
-    """生产函数 `turbulence/sst/bounds.py::omega_wall_length_scale`（CPU/GPU 壁面目标值共用）。"""
+class TestTreatmentSelectsTheConvention:
+    """生产函数 `turbulence/sst/bounds.py::omega_wall_length_scale`（CPU/GPU 壁面目标值共用）：口径随近壁处理方式
+    （resolved -> min，auto -> mean；2026-10-17 以前由环境变量 `AFCFD_OMEGA_WALL_D1` 选择）。"""
 
-    @pytest.mark.parametrize("mode,expected", [("min", 1.0e-5), ("mean", 4.0e-5)])
-    def test_d1_selection_follows_the_switch(self, monkeypatch, mode, expected):
+    @pytest.mark.parametrize("treatment,expected", [("resolved", 1.0e-5), ("auto", 4.0e-5)])
+    def test_d1_follows_the_wall_treatment(self, treatment, expected):
         from autoflowcfd.core.turbulence.sst.bounds import omega_wall_length_scale
 
-        monkeypatch.setenv("AFCFD_OMEGA_WALL_D1", mode)
         wd = np.array([[1.0e-5, 3.0e-5, 5.0e-5, 7.0e-5]])
-        assert omega_wall_length_scale(wd, None, np)[0] == pytest.approx(expected, rel=1e-14)
+        assert omega_wall_length_scale(wd, None, np, treatment)[0] == pytest.approx(expected, rel=1e-14)
 
-    def test_default_is_min(self, monkeypatch):
-        """默认是既有行为 `min`（不改默认值，理由见模块文档）。"""
+    def test_rejects_unknown_treatment(self):
         from autoflowcfd.core.turbulence.sst.bounds import omega_wall_length_scale
 
-        monkeypatch.delenv("AFCFD_OMEGA_WALL_D1", raising=False)
-        assert omega_wall_length_scale(np.array([[2e-5, 9e-5]]), None, np)[0] == 2e-5
-
-    @pytest.mark.parametrize("bad", ["center", "cell", "", "MINIMUM"])
-    def test_rejects_unknown_values(self, monkeypatch, bad):
-        """不能静默退回默认——与本项目其余开关同一条约定。"""
-        from autoflowcfd.core.turbulence.sst.bounds import omega_wall_length_scale
-
-        monkeypatch.setenv("AFCFD_OMEGA_WALL_D1", bad)
-        with pytest.raises(ValueError, match="不是合法取值"):
-            omega_wall_length_scale(np.array([[1e-5, 2e-5]]), None, np)
+        with pytest.raises(ValueError, match="近壁处理方式"):
+            omega_wall_length_scale(np.array([[1e-5, 2e-5]]), None, np, "min")
 
 
 class TestRealOffWallPoints:
@@ -128,23 +115,21 @@ class TestRealOffWallPoints:
     原生四面体的零填充槽位坐标没有意义（壁距是任意值），壁面上的解点（顶点/棱点/面点）
     d = 0 会把 d1 压到 1e-8 下限、目标值直接顶到上界。"""
 
-    def test_wall_points_and_padding_are_excluded(self, monkeypatch):
+    def test_wall_points_and_padding_are_excluded(self):
         from autoflowcfd.core.turbulence.sst.bounds import omega_wall_length_scale
         from autoflowcfd.fr.native_padding import real_sps_per_cell
 
-        monkeypatch.delenv("AFCFD_OMEGA_WALL_D1", raising=False)
         n_sps = 8                                    # P1：棱柱 8 槽位，四面体 4 个真实解点
         n_tet = real_sps_per_cell(1)[1]
         wd = np.full((1, n_sps), 1e-9)               # 填充槽位：任意小的垃圾值
         wd[0, :n_tet] = [0.0, 0.0, 3e-4, 5e-4]       # 两个解点在壁面上
-        d1 = omega_wall_length_scale(wd, np.array([False]), np)
+        d1 = omega_wall_length_scale(wd, np.array([False]), np, "resolved")
         assert d1[0] == 3e-4
         # 旧做法（整行 min）给出 1e-8 下限
         assert max(wd.min(axis=1)[0], 1e-8) == 1e-8
 
-    def test_prism_rows_use_all_their_points(self, monkeypatch):
+    def test_prism_rows_use_all_their_points(self):
         from autoflowcfd.core.turbulence.sst.bounds import omega_wall_length_scale
 
-        monkeypatch.delenv("AFCFD_OMEGA_WALL_D1", raising=False)
         wd = np.linspace(1e-5, 8e-5, 8)[None, :]
-        assert omega_wall_length_scale(wd, np.array([True]), np)[0] == 1e-5
+        assert omega_wall_length_scale(wd, np.array([True]), np, "resolved")[0] == 1e-5

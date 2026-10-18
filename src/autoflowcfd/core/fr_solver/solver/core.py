@@ -28,6 +28,7 @@ from .solve_loop import _SolverSolveMixin
 from .threads import configure_numba_threads
 
 
+from autoflowcfd.core.turbulence.wall_model.treatment import DEFAULT_WALL_TREATMENT, validate_wall_treatment
 from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
 
 class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
@@ -70,7 +71,8 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
                  artificial_viscosity_enabled: bool = False,
                  artificial_viscosity_alpha: float = 1.0,
                  low_mach_precond: bool = True,
-                 time_accurate: bool = False):
+                 time_accurate: bool = False,
+                 wall_treatment: str = DEFAULT_WALL_TREATMENT):
         """
         初始化 FRSolver。
 
@@ -134,8 +136,11 @@ class FRSolver(_SolverSetupMixin, _SolverSolveMixin, _SolverResidualMixin,
                 涡核数量（默认 200，此前恒为硬编码常量，见
                 fr_solver/boundary.py 模块文档 2026-08-28 的修复说明）。
                 只在 turb_model_name 为 LES/DDES/IDDES 且未激活 WMLES 时生效。
+            wall_treatment: RANS 湍流模型的近壁处理方式（resolved | auto，见
+                `core/turbulence/wall_model/treatment.py`）
         """
         resolved_n_threads = configure_numba_threads(n_threads, mesh)
+        self.wall_treatment = validate_wall_treatment(wall_treatment)
 
         self._setup_options(mesh, order, artificial_viscosity_enabled, artificial_viscosity_alpha)
         # 安全地获取网格信息

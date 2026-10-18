@@ -160,7 +160,7 @@ def _build_standins(turb_model_name):
         _iddes_h_max_gpu=h_max, _iddes_h_wn_gpu=h_wn,
         wall_distance_gpu=d_wall,
         turb_model_name=turb_model_name, flat_face_gpu=flat,
-        _wall_mask_k_gpu=np.zeros(flat.n_faces, dtype=bool),
+        _wall_mask_gpu=np.zeros(flat.n_faces, dtype=bool),
         _open_mask_gpu=np.zeros(flat.n_faces, dtype=bool),
         time_integrator=types.SimpleNamespace(cfl=0.5),
         order=order,

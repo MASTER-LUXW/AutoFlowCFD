@@ -21,6 +21,7 @@ from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_
 from autoflowcfd.core.turbulence.transport import resolve_turb_overintegration
 from autoflowcfd.core.turbulence.transport.residual import turbulence_diffusivities
 from autoflowcfd.core.turbulence.transport.faces import boundary_diffusion_targets
+from autoflowcfd.core.turbulence.sst.bounds import k_wall_zero_mask
 from autoflowcfd.core.turbulence.sst.log_omega import log_omega, log_omega_gradient_source
 
 # 过积分上下文提取到 `core/gpu/gpu_overintegration.py`（2026-09-15，粘性
@@ -254,7 +255,9 @@ def compute_turbulence_transport_residual_gpu(
     ff = solver.flat_face_gpu
     n_prism = solver.mesh_data.get('n_prism', solver.mesh.n_prism_cells)
 
-    wall_mask_k = solver._wall_mask_k_gpu  # 见 gpu_solver_io.py 缓存点文档
+    wall_mask = solver._wall_mask_gpu    # 物理无滑移壁面（见 gpu_solver_io.py 缓存点文档）
+    # k：resolved 在壁面为 0，auto 为零通量（与 CPU 同一个函数 `sst/bounds.py::k_wall_zero_mask`）
+    wall_mask_k = k_wall_zero_mask(wall_mask, turb.wall_treatment, cp)
     open_mask = solver._open_mask_gpu      # 同上，来流条件（compute_turbulence_face_masks_gpu）
 
     # 对流形式体积项要减去的质量通量体积散度（k 与 omega 共用，CPU 版对应
@@ -275,9 +278,10 @@ def compute_turbulence_transport_residual_gpu(
     dk_dt_transport = (conv_k + diff_k) / cp.maximum(rho, 1e-10)
 
     omega_wall_value_face, has_omega_wall = compute_omega_wall_target_gpu(
-        cp, ff, wall_mask_k, d_wall, Q, mu, turb.beta1,
+        cp, ff, wall_mask, d_wall, Q, mu, turb.beta1,
         omega_max=turb.omega_max,
         turb_k_field=turb.k_field,
+        wall_treatment=turb.wall_treatment,
     )
 
     # w = ln(omega) 的边界值：壁面目标取对数（没有目标的面该值不被读取），来流取 ln(omega_inf)

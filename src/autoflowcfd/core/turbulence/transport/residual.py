@@ -13,6 +13,7 @@ from autoflowcfd.core.fr_operators.gradients import compute_physical_scalar_grad
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 
 from .faces import precompute_scalar_convection_geometry
+from ..sst.bounds import k_wall_zero_mask
 from ..sst.log_omega import log_omega, log_omega_gradient_source
 from .convection import compute_scalar_convection_residual
 from .diffusion import compute_scalar_diffusion_residual
@@ -110,7 +111,10 @@ def compute_turbulence_transport_residual(
     # 扩散项自 2026-08-25 校正改梯度差形式后该掩码不再有数值影响（奇镜像
     # 对梯度对称，见 compute_scalar_diffusion_residual 参数文档），仍传入
     # 以保持接口一致。
-    wall_mask_k = _compute_wall_dirichlet_face_mask(solver)
+    wall_mask = _compute_wall_dirichlet_face_mask(solver)
+    # k：resolved 在物理无滑移壁面为 0，auto 为零通量（`sst/bounds.py::k_wall_zero_mask`）；omega 的壁面目标值
+    # 两种方式都施加
+    wall_mask_k = k_wall_zero_mask(wall_mask, turb.wall_treatment, np)
 
     # 共享几何量（性能优化 2026-09-13，见 `ScalarConvectionGeometry` 文档）：
     # k 与 omega 的对流调用此前各自重复算了一遍与标量无关的逆变质量通量
@@ -146,7 +150,7 @@ def compute_turbulence_transport_residual(
     # np.min(solver.wall_distance[...]) 会直接因 wall_distance 为 None
     # 报错——这是有意的（没有壁面距离场，压根不该假装能算出解析壁面值）。
     omega_wall_value_face, has_omega_wall = _compute_omega_wall_target(
-        solver, wall_mask_k, mu, rho, flat_face_override=flat_face_override,
+        solver, wall_mask, mu, rho, flat_face_override=flat_face_override,
     )
     # w = ln(omega) 的边界值：壁面目标取对数（没有目标的面该值不被读取），来流取 ln(omega_inf）
     log_wall_value_face = log_omega(omega_wall_value_face, np)

@@ -14,6 +14,7 @@ from autoflowcfd.core.mpi import get_comm, get_rank
 from .package import build_fully_distributed_rank_package
 
 
+from autoflowcfd.core.turbulence.wall_model.treatment import DEFAULT_WALL_TREATMENT, needs_wall_model
 from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
 from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
@@ -41,6 +42,7 @@ def distributed_mesh_load_v2(
     sem_num_eddies: Optional[int] = _SEM_DEFAULT_NUM_EDDIES,
     time_accurate: bool = False,
     adaptive_cfl: bool = True,
+    wall_treatment: str = DEFAULT_WALL_TREATMENT,
 ):
     """真正的完全分布式网格加载（2026-09-02）——只有 root rank 加载
     完整网格并对每个 rank 分别调用 `build_fully_distributed_rank_
@@ -122,7 +124,7 @@ def distributed_mesh_load_v2(
         # 定涡核尺度与雷诺应力）必须取用户设置（此前桩上缺这些属性，边界构造的兜底让它们静默变成默认值）
         root_solver_stub = types.SimpleNamespace(
             mesh=mesh, freestream=freestream, turb_model_name=turb_model_name,
-            wall_model=(object() if turb_model_name == "WMLES" else None),
+            wall_model=(object() if needs_wall_model(turb_model_name, wall_treatment) else None),
             _turbulence_intensity=turbulence_intensity, _viscosity_ratio=viscosity_ratio,
             mu_molecular=mu_molecular, _sem_num_eddies=sem_num_eddies,
         )
@@ -172,6 +174,7 @@ def distributed_mesh_load_v2(
                 global_cell_colors_d2=global_cell_colors_d2,
                 artificial_viscosity_enabled=artificial_viscosity_enabled,
                 artificial_viscosity_alpha=artificial_viscosity_alpha,
+                wall_treatment=wall_treatment,
             )
             for r in range(n_ranks)
         ]
@@ -206,6 +209,7 @@ def distributed_mesh_load_v2(
             'time_accurate': time_accurate, 'adaptive_cfl': adaptive_cfl,
             'artificial_viscosity_enabled': artificial_viscosity_enabled,
             'artificial_viscosity_alpha': artificial_viscosity_alpha,
+            'wall_treatment': wall_treatment,
             'global_cell_colors': global_cell_colors,
             'global_cell_colors_d2': global_cell_colors_d2,
         }
@@ -415,7 +419,7 @@ def exchange_packages_for_new_order(root_context, target_p: int, n_ranks: int, *
         turb_model_name = root_context['turb_model_name']
         root_solver_stub = types.SimpleNamespace(
             mesh=mesh, freestream=root_context['freestream'], turb_model_name=turb_model_name,
-            wall_model=(object() if turb_model_name == "WMLES" else None),
+            wall_model=(object() if needs_wall_model(turb_model_name, root_context['wall_treatment']) else None),
             _turbulence_intensity=root_context['turbulence_intensity'],
             _viscosity_ratio=root_context['viscosity_ratio'], mu_molecular=root_context['mu_molecular'],
             _sem_num_eddies=root_context['sem_num_eddies'],
@@ -447,6 +451,7 @@ def exchange_packages_for_new_order(root_context, target_p: int, n_ranks: int, *
                 global_cell_colors_d2=root_context.get('global_cell_colors_d2'),
                 artificial_viscosity_enabled=root_context['artificial_viscosity_enabled'],
                 artificial_viscosity_alpha=root_context['artificial_viscosity_alpha'],
+                wall_treatment=root_context['wall_treatment'],
             )
             for r in range(n_ranks)
         ]

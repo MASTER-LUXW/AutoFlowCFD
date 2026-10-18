@@ -9,7 +9,6 @@ from contextlib import contextmanager
 from typing import Optional
 from loguru import logger
 from autoflowcfd.core.gpu import gpu_available, get_cupy
-from autoflowcfd.core.turbulence.sst.bounds import OMEGA_MAX_FLOOR
 from autoflowcfd.core.gpu.array_manager import GPUArrayManager
 from autoflowcfd.core.gpu.gpu_time_integration import GPUTimeIntegrator
 from autoflowcfd.core.gpu.solver.gpu_solver_init import _GPUSolverInitMixin
@@ -17,6 +16,9 @@ from autoflowcfd.core.gpu.solver.gpu_solver_io import _GPUSolverIOMixin
 from .residual import _GPUSolverResidualMixin
 from .timestep import _GPUSolverTimeStepMixin
 from .step import _GPUSolverStepMixin
+from autoflowcfd.core.turbulence.sst.bounds import configure_sst_model
+from autoflowcfd.core.turbulence.wall_model.treatment import (
+    DEFAULT_WALL_TREATMENT, build_wall_model, validate_wall_treatment)
 from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
 from autoflowcfd.core.fr_solver.state import N_MEAN_FLOW_VARS
 from autoflowcfd.core.fr_solver.solver.solve_loop import SolveLoopMixin
@@ -73,6 +75,7 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         artificial_viscosity_alpha: float = 1.0,
         dual_time_inner_iter: int = DEFAULT_DUAL_TIME_STEPS,
         n_threads: int = -1,
+        wall_treatment: str = DEFAULT_WALL_TREATMENT,
     ):
         """初始化 GPU FRSolver。
 
@@ -202,10 +205,8 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         # build_boundary_ghost_provider 用 getattr(solver,"wall_model",
         # None) 判断 WALL 边界是否要切换成真滑移 ghost 态（is_no_slip=
         # False），见 fr_solver/boundary.py 文档。
-        self.wall_model = None
-        if turb_model_upper == "WMLES":
-            from autoflowcfd.core.turbulence.wall_model import EquilibriumWallModel
-            self.wall_model = EquilibriumWallModel()
+        self.wall_treatment = validate_wall_treatment(wall_treatment)
+        self.wall_model = build_wall_model(turb_model_upper, self.wall_treatment)
         self.bc_overrides = bc_overrides or {}
         self.boundary_ghost_provider = (
             boundary_ghost_provider if boundary_ghost_provider is not None
@@ -279,11 +280,9 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
             self.turb_model_gpu = GPUTurbulenceSST(
                 n_cells, n_sps, device_id, k_inf=k_inf, omega_inf=omega_inf
             )
-            # 物理上界与 CPU 同一公式（fr_solver/turbulence/init.py::_set_turbulence_bounds）：
-            # k_max = 0.5·vel_inf²（湍动能 ≤ 平均流动能）；omega_max 先取下限，算出壁距后
-            # 按最近壁面解点重定（`_init_wall_distance_gpu`，`turbulence/sst/bounds.py`）。
-            self.turb_model_gpu.k_max = 0.5 * vel_inf ** 2
-            self.turb_model_gpu.omega_max = OMEGA_MAX_FLOOR
+            # 物理上界与近壁处理方式与 CPU 同一个函数（`turbulence/sst/bounds.py::configure_sst_model`）；
+            # omega_max 算出壁距后按最近壁面解点重定（`_init_wall_distance_gpu`）
+            configure_sst_model(self.turb_model_gpu, vel_inf, self.wall_treatment)
             logger.info(f"GPU SST k-omega model initialized on device {device_id} "
                        f"(k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
             print(f"   [OK] GPU SST k-omega model initialized "
@@ -315,13 +314,13 @@ class GPUFRSolver(_GPUSolverResidualMixin, _GPUSolverTimeStepMixin, _GPUSolverSt
         # 无关，一次性算好缓存，不是每步重算（见 gpu_scalar_transport.py::
         # compute_turbulence_face_masks_gpu 文档；同时缓存 k/omega 来流条件用的开放边界掩码）。只有 SST/DDES/IDDES 才
         # 会真正用到（k/omega 输运的 Dirichlet 面）。
-        self._wall_mask_k_gpu = None
+        self._wall_mask_gpu = None
         self._open_mask_gpu = None
         if self.turb_model_gpu is not None:
             from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_turbulence_face_masks_gpu
             wall_mask_np, open_mask_np = compute_turbulence_face_masks_gpu(mesh, self.boundary_ghost_provider)
             with cp.cuda.Device(device_id):
-                self._wall_mask_k_gpu = cp.asarray(wall_mask_np)
+                self._wall_mask_gpu = cp.asarray(wall_mask_np)
                 self._open_mask_gpu = cp.asarray(open_mask_np)
 
         # 初始化 GPU 模态滤波（抑制混叠噪声）

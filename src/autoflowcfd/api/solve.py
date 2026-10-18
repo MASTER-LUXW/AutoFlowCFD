@@ -112,7 +112,7 @@ class _APISolveMixin:
         residual_drop_threshold = residual_drop_threshold if residual_drop_threshold is not None else (config.residual_drop_threshold if config is not None else 1e2)
         if config is not None:
             for field in ("mu_molecular", "turbulence_intensity", "viscosity_ratio",
-                          "artificial_viscosity_enabled", "artificial_viscosity_alpha"):
+                          "artificial_viscosity_enabled", "artificial_viscosity_alpha", "wall_treatment"):
                 kwargs.setdefault(field, getattr(config, field))
             # SteadyConfig.cfl_init/cfl_max/cfl_min -> FRSolver.cfl_start/cfl_max/cfl_min，只转发给出的值
             # （默认 None：由 CFL 律按时间格式取默认，见 build_cfl_policy）。
@@ -239,7 +239,7 @@ class _APISolveMixin:
         residual_drop_threshold = residual_drop_threshold if residual_drop_threshold is not None else (config.residual_drop_threshold if config is not None else 1e2)
         if config is not None:
             for field in ("mu_molecular", "turbulence_intensity", "viscosity_ratio",
-                          "artificial_viscosity_enabled", "artificial_viscosity_alpha"):
+                          "artificial_viscosity_enabled", "artificial_viscosity_alpha", "wall_treatment"):
                 kwargs.setdefault(field, getattr(config, field))
             # CFL：字段名映射与 run_steady 一致，只转发给出的值
             if getattr(config, "cfl_init", None) is not None:

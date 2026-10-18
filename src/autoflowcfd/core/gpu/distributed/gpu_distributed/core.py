@@ -34,6 +34,7 @@ from .stepping import _MultiGPUSteppingMixin
 from .timestep import _MultiGPUTimeStepMixin
 
 
+from autoflowcfd.core.turbulence.wall_model.treatment import DEFAULT_WALL_TREATMENT, validate_wall_treatment
 from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
 from autoflowcfd.core.fr_solver.solver.solve_loop import DistributedSolveLoopMixin
 
@@ -83,6 +84,7 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
         artificial_viscosity_enabled: bool = False,
         artificial_viscosity_alpha: float = 1.0,
         sem_num_eddies: Optional[int] = _SEM_DEFAULT_NUM_EDDIES,
+        wall_treatment: str = DEFAULT_WALL_TREATMENT,
     ):
         """初始化多 GPU 分布式求解器（"传统模式"：每个 rank 持有完整全局网格，root 用 METIS 分区后广播）。
         只有 root 持有完整网格的"完全分布式加载"走 `from_fully_distributed_package`。
@@ -104,6 +106,7 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
             artificial_viscosity_enabled, artificial_viscosity_alpha: 问题单元人工
                 粘性（与单机 FRSolver 同名参数、同一实现）
             sem_num_eddies: 合成湍流入口（SEM）的涡核数（与单机同名参数；此前写死 200）
+            wall_treatment: RANS 近壁处理方式（与单机同名参数，`turbulence/wall_model/treatment.py`）
         """
         # 壁面距离来源（core/utils/wall_distance）：与单机 CPU 同一个，
         # CLI 由体网格 WALL 边界面构造后传入；湍流模型需要壁距时必须提供
@@ -111,6 +114,7 @@ class MultiGPUDistributedSolver(_MultiGPUSetupMixin, _MultiGPUSteppingMixin, _Mu
         self._sem_num_eddies = None if sem_num_eddies is None else int(sem_num_eddies)
         self.artificial_viscosity_enabled = bool(artificial_viscosity_enabled)
         self.artificial_viscosity_alpha = float(artificial_viscosity_alpha)
+        self.wall_treatment = validate_wall_treatment(wall_treatment)
         self._setup_identity_and_device(
             mesh, ops, n_ranks, rank, device_id, mu_molecular,
             rho_inf, vel_inf, p_inf, aoa_deg, aos_deg, turb_model)

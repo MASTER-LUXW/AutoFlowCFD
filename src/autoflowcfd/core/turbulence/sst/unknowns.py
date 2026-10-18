@@ -42,7 +42,7 @@ class _SSTTransportedMixin(TransportedTurbulence):
     #: 视图（`like`）从父模型复制的常数与全局量（`k_inf/omega_inf` 由构造参数给定：开边界来流
     #: ghost 取它们作为来流值，必须与真正的模型一致）
     _LIKE_ATTRS = ("sigma_k1", "sigma_k2", "sigma_w1", "sigma_w2", "beta1", "beta2",
-                   "a1", "kappa", "beta_star", "k_max", "omega_max", "production_factor")
+                   "a1", "kappa", "beta_star", "k_max", "omega_max", "production_factor", "wall_treatment")
 
     def _new_instance(self, n_cells: int, n_sps: int):
         """同类的空实例（CPU 与 GPU 两个类的构造参数不同，各自给出）。"""
@@ -73,9 +73,12 @@ class _SSTTransportedMixin(TransportedTurbulence):
         self.omega_field = admissible_omega(omega, self.omega_inf, xp=xp, source=source)
 
 
-def sst_dirichlet_spec(wall_zero_face, omega_wall_face, has_omega_wall):
+def sst_dirichlet_spec(wall_face, omega_wall_face, has_omega_wall, wall_treatment):
     """SST 两个 Newton 未知量的壁面 Dirichlet 规格 `(faces, values)`（主机数组，湍流解析块
-    Jacobian 的 `TurbulenceLinearization` 用）：k 在壁面为 0；`w = ln omega` 取壁面解析值的对数
-    （与残差 `transport/residual.py` 同一换算；没有目标的面该值不被读取）。"""
-    return ((np.asarray(wall_zero_face, dtype=bool), np.asarray(has_omega_wall, dtype=bool)),
+    Jacobian 的 `TurbulenceLinearization` 用）：k 在壁面为 0（resolved；auto 为零通量，`bounds.k_wall_zero_mask`）；
+    `w = ln omega` 取壁面目标值的对数（与残差 `transport/residual.py` 同一换算；没有目标的面该值不被读取）。"""
+    from .bounds import k_wall_zero_mask
+
+    k_zero = k_wall_zero_mask(np.asarray(wall_face, dtype=bool), wall_treatment, np)
+    return ((k_zero, np.asarray(has_omega_wall, dtype=bool)),
             (None, log_omega(np.asarray(omega_wall_face, dtype=np.float64), np)))

@@ -131,6 +131,7 @@ class TestGpuDistributedCheckpointRoundtrip:
         # 真实求解器恒有来流字典；checkpoint 必须记录它（2026-09-25 起分布式
         # 写入端与单机共用 core/utils/checkpoint_physics.py）。
         solver.freestream = {"rho_inf": 1.225, "vel_inf": 33.33, "p_inf": 101325.0}
+        solver.wall_treatment = "resolved"
         # 时间格式同样写进元数据（resume 默认沿用它）；多 GPU 的积分器属性名
         solver.time_integrator = types.SimpleNamespace(scheme=TimeIntegrationScheme.NEWTON_KRYLOV)
         # 产生项渐变计数器（真实求解器在构造时由同一个函数设置；checkpoint 记录渐变进度）

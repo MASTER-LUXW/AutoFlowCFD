@@ -65,7 +65,7 @@ class GpuTurbulenceBackend:
         Q_h = _host(s.Q_gpu)
         flat = get_flat_face_geometry(s.mesh, s.ops)
         faces, values, pointwise, strong_rows = gpu_linearization_parts(
-            cp, m, s.Q_gpu, grad_vel, d_wall, float(s.mu_molecular), s.flat_face_gpu, s._wall_mask_k_gpu,
+            cp, m, s.Q_gpu, grad_vel, d_wall, float(s.mu_molecular), s.flat_face_gpu, s._wall_mask_gpu,
             s.mesh_data, s.ops_data, des=des_length_for(s.ddes_model_gpu, s._iddes_h_max_gpu, s._iddes_h_wn_gpu))
         ctx = TurbulenceLinearization(
             mesh=s.mesh, ops=s.ops, flat=flat, turb=m, Q=Q_h, grad_vel=_host(grad_vel), d_wall=_host(d_wall),
@@ -192,8 +192,8 @@ def gpu_linearization_parts(cp, model, Q, grad_vel, d_wall, mu, flat_face_gpu, w
 
     omega_wall, has_wall = compute_omega_wall_target_gpu(
         cp, flat_face_gpu, wall_mask_gpu, d_wall, Q, mu, model.beta1, omega_max=model.omega_max,
-        turb_k_field=model.k_field)
-    faces, values = sst_dirichlet_spec(wall_zero, _host(omega_wall), _host(has_wall))
+        turb_k_field=model.k_field, wall_treatment=model.wall_treatment)
+    faces, values = sst_dirichlet_spec(wall_zero, _host(omega_wall), _host(has_wall), model.wall_treatment)
     return faces, values, gpu_turbulence_pointwise(cp, model, Q, grad_vel, d_wall, mu, des), None
 
 

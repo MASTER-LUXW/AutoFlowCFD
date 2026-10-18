@@ -9,7 +9,6 @@ SST 的 omega 在壁面上有解析值（Wilcox `omega_wall = 60*nu/(beta1*d1^2)
 finalize_turbulence_update` 文档）。
 """
 
-import os
 import numpy as np
 
 from typing import Tuple
@@ -17,7 +16,7 @@ from typing import Tuple
 
 from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from autoflowcfd.core.turbulence.sst.bounds import (
-    OMEGA_WALL_AMPLIFICATION, OMEGA_WALL_VISCOUS_COEFF, omega_wall_length_scale,
+    omega_wall_length_scale,
 )
 
 
@@ -132,96 +131,20 @@ def open_boundary_code_mask(provider, n_faces: int) -> np.ndarray:
     return mask
 
 
-#: omega 壁面目标值的公式族，由 `AFCFD_OMEGA_WALL_MODE` 选择：
-#:   "amplified"（默认，既有行为逐位不变）—— Menter 的放大式
-#:       omega_wall = 10 * 6*nu/(beta1*d1^2)
-#:   "blended"                          —— Menter 的二项混合式
-#:       omega_vis = 6*nu/(beta1*d1^2)
-#:       omega_log = sqrt(k)/(C_mu^0.25 * kappa * d1)
-#:       omega_wall = sqrt(omega_vis^2 + omega_log^2)
-#:
-#: **文献依据**（2026-09-15 联网核实，B-6）：混合式与两个渐近支的形式、
-#: 以及常数取值，与 OpenFOAM `omegaWallFunction` 的实现逐项一致——
-#: `omegaVis = 6*nuw/(beta1_*sqr(y))`、
-#: `omegaLog = sqrt(k)/(Cmu25*kappa_*y)`、
-#: `omega = sqrt(sqr(omegaVis) + sqr(omegaLog))`，其中 `Cmu25 = pow025(Cmu)`。
-#: 默认常数：`beta1_ = 0.075`（该类构造函数）、`Cmu = 0.09`、`kappa = 0.41`
-#: （`nutWallFunction` 的默认值，omegaWallFunction 经 nutw 取用）。较新
-#: 版本把二项混合换成了分数权重线性混合（`lamFrac*omegaVis +
-#: turbFrac*omegaLog`），本项目实现的是经典二项式——它是 Menter 原始
-#: 形式，且在两个极限下都渐近正确。
-#:
-#: **为什么混合式在原理上更可靠**：`amplified` 档那个 10 倍是 Menter 为
-#: **有限体积、近壁不解析** 的情形设计的数值手段（把 omega 抬得足够高，
-#: 以在粗近壁网格上强制出正确的渐近行为），不是一个物理值；混合式没有
-#: 任何这类自由因子，两个支各自是渐近精确解。注意在**壁面解析**（低 Re）
-#: 网格上粘性支占绝对主导，于是两档的差别基本就是那个 10 倍。
-#:
-#: **默认值没有改**：这是湍流模型的物理改动。本项目在 omega 壁面处理上
-#: 已经有两次"数学上更对但被真实数据证伪"的先例（显式 SIPG 罚项、点隐式
-#: 动态松弛系数；后者所在的显式步后松弛已于 2026-10-01 整体删除），所以这里
-#: 只提供开关与判据，改默认值必须有真实长程数据。
-#:
-#: 另注：本档与 `AFCFD_OMEGA_WALL_D1`（长度尺度口径 min|mean）是**两个
-#: 独立的维度**，且两者的偏差会**相乘**——`min` 口径在 order=1 上已经
-#: 高估 5.60 倍，叠加 10 倍放大就是约 56 倍。
-_OMEGA_WALL_MODES = ("amplified", "blended")
-
-
-#: 混合式的经验常数（来源见上）
-_OMEGA_WALL_CMU = 0.09
-
-
-_OMEGA_WALL_KAPPA = 0.41
-
-
-def resolve_omega_wall_mode() -> str:
-    """读取 `AFCFD_OMEGA_WALL_MODE` 并校验取值（非法值显式报错，不静默
-    退回默认——与本项目其余开关同一条约定）。"""
-    mode = os.environ.get("AFCFD_OMEGA_WALL_MODE", "amplified").lower()
-    if mode not in _OMEGA_WALL_MODES:
-        raise ValueError(
-            f"AFCFD_OMEGA_WALL_MODE={mode!r} 不是合法取值"
-            f"（{' | '.join(_OMEGA_WALL_MODES)}）。"
-            f"'amplified' 是既有行为（Menter 放大式 10*6nu/(beta1*d1^2)），"
-            f"'blended' 是 Menter 二项混合式 sqrt(omega_vis^2+omega_log^2)，"
-            f"见 transport.py 里 _OMEGA_WALL_MODES 一节的文献依据。")
-    return mode
-
-
 def _omega_wall_formula(solver, owner_cells, nu_owner, d1, beta1):
-    """按 `AFCFD_OMEGA_WALL_MODE` 算 omega 壁面目标值（未做 omega_max 钳制，
-    由调用方统一钳）。
+    """omega 壁面目标值（未做 omega_max 钳制，由调用方统一钳）：公式随近壁处理方式
+    （`turbulence/sst/bounds.py::omega_wall_value`，CPU 与 GPU 共用）。auto 用到贴壁单元 k 的**真实自由度**
+    均值（native 四面体的零填充槽位冻结在初值，混进来会带偏；见 fr/native_padding.py）。"""
+    from autoflowcfd.core.turbulence.sst.bounds import omega_wall_value
+    from autoflowcfd.fr.native_padding import order_from_n_sps, reduce_rows_over_real_sps
 
-    Args:
-        solver: 需要 `turb_model.k_field`（仅 blended 档用到）
-        owner_cells: (n_wall_faces,) 各 WALL 面的 owner 单元索引
-        nu_owner: (n_wall_faces,) 该单元的运动粘度 mu/rho
-        d1: (n_wall_faces,) 近壁特征长度（口径由 AFCFD_OMEGA_WALL_D1 决定）
-        beta1: SST 内层 beta 系数
-    """
-    omega_vis = OMEGA_WALL_VISCOUS_COEFF * nu_owner / (beta1 * d1 ** 2)
-    if resolve_omega_wall_mode() == "amplified":
-        return OMEGA_WALL_AMPLIFICATION * omega_vis
-    # blended：需要 owner 单元的 k。取该单元**真实自由度**上的均值，
-    # 与本文件 rho_owner 同一处理（native 四面体的零填充槽位冻结在初值，
-    # 混进来会带偏；见 fr/native_padding.py）。
-    from autoflowcfd.fr.native_padding import (
-        order_from_n_sps, reduce_rows_over_real_sps,
-    )
-    k_field = getattr(getattr(solver, "turb_model", None), "k_field", None)
-    if k_field is None:
-        raise RuntimeError(
-            "AFCFD_OMEGA_WALL_MODE=blended 需要 solver.turb_model.k_field "
-            "（对数支 omega_log = sqrt(k)/(Cmu^0.25*kappa*d1) 用到它），"
-            "但当前湍流模型没有这个场——不接受静默退回 amplified 档。")
-    k_rows = np.asarray(k_field)[owner_cells]
-    k_owner = reduce_rows_over_real_sps(
-        k_rows, owner_cells < solver.mesh.n_prism_cells,
-        order_from_n_sps(k_rows.shape[1]), 'mean')
-    omega_log = (np.sqrt(np.maximum(k_owner, 0.0))
-                 / (_OMEGA_WALL_CMU ** 0.25 * _OMEGA_WALL_KAPPA * d1))
-    return np.sqrt(omega_vis ** 2 + omega_log ** 2)
+    turb = solver.turb_model
+    k_owner = None
+    if turb.wall_treatment == "auto":
+        k_rows = np.asarray(turb.k_field)[owner_cells]
+        k_owner = reduce_rows_over_real_sps(
+            k_rows, owner_cells < solver.mesh.n_prism_cells, order_from_n_sps(k_rows.shape[1]), 'mean')
+    return omega_wall_value(np, nu_owner, d1, k_owner, beta1, turb.wall_treatment)
 
 
 def _compute_omega_wall_target(
@@ -309,7 +232,7 @@ def _compute_omega_wall_target(
     wall_face_idx = np.nonzero(wall_mask)[0]
     if len(wall_face_idx) > 0:
         owner_cells = flat.owner_cell[wall_face_idx]
-        # **长度尺度口径（2026-09-15 发现的系统性偏差，可切换）**
+        # **长度尺度口径（2026-09-15 发现的系统性偏差）**
         #
         # Menter 的 omega 壁面处理 `omega_wall = 10*6*nu/(beta1*Δy1^2)`
         # （这里的 60 就是 10x6）是按**第一层单元中心**的壁距标定的经验
@@ -328,14 +251,13 @@ def _compute_omega_wall_target(
         # 长度尺度。
         #
         # `mean`（单元内解点壁距的均值，≈ 形心壁距）与 Menter 的口径
-        # 一致，且对阶数是一阶无关的。**默认仍为 `min`**：这是湍流模型
-        # 的物理改动，降低近壁 omega 会抬高 nu_t，必须用真实长程数据
-        # 验证过才能改默认值——本项目在 omega 壁面处理上已经有两次
-        # "数学上更对但真实数据证伪"的先例。
+        # 一致，且对阶数是一阶无关的。口径随近壁处理方式：resolved 保持
+        # `min`（放大式的既有标定，降低近壁 omega 会抬高 nu_t，未经真实
+        # 长程数据验证不改），auto 用 `mean`（与壁面模型匹配高度一致）。
         # 口径判据、真实解点与壁面解点的处理见 `sst/bounds.py::omega_wall_length_scale`
         # （CPU/GPU 共用）。
         d1 = omega_wall_length_scale(solver.wall_distance[owner_cells],
-                                     owner_cells < solver.mesh.n_prism_cells, np)
+                                     owner_cells < solver.mesh.n_prism_cells, np, solver.turb_model.wall_treatment)
         # 只统计真实自由度（2026-09-15 审计）：`rho[owner_cells]` 的行
         # 单元类型任意混合，所以用逐行掩码版。native 四面体的零填充槽位
         # 冻结在初值、会变馊，混进 nu = mu/rho 会带进几个百分点的偏差。

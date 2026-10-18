@@ -131,7 +131,7 @@ def test_gpu_distributed_sst_matches_cpu_distributed_sst(rank, turb_model_name):
         turb_model_gpu=turb_gpu, turb_model_name=turb_model_name, gpu_halo=fake_halo_gpu,
         _perm_gpu=dist_fc.perm, _inv_perm_gpu=dist_fc.inv_perm, n_compact=n_compact,
         wall_distance_gpu=d_wall_compact,
-        _wall_mask_k_gpu=np.zeros(dist_fc.base_flat.n_faces, dtype=bool),
+        _wall_mask_gpu=np.zeros(dist_fc.base_flat.n_faces, dtype=bool),
         _open_mask_gpu=np.zeros(dist_fc.base_flat.n_faces, dtype=bool),
         U_gpu=U_local,
         ddes_model_gpu=_make_ddes_gpu(turb_model_name),

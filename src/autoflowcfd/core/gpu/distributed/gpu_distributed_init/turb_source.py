@@ -126,7 +126,7 @@ class _GPUDistributedTurbSourceMixin:
             Q_gpu=Q_compact, U_gpu=U_compact, mu_molecular=self.mu_molecular,
             mesh_data=self.mesh_data, ops_data=self.ops_data,
             flat_face_gpu=self.flat_face_gpu, wall_distance_gpu=d_wall,
-            _wall_mask_k_gpu=self._wall_mask_k_gpu, _open_mask_gpu=self._open_mask_gpu,
+            _wall_mask_gpu=self._wall_mask_gpu, _open_mask_gpu=self._open_mask_gpu,
         )
         return types.SimpleNamespace(view=view, Q=Q_compact, rho=Q_compact[:, :, 0],
                                      grad_vel=grad_vel, d_wall=d_wall, transport=transport,

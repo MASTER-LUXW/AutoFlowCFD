@@ -57,6 +57,9 @@ OMEGA_MAX_WALL_FACTOR = 10.0
 #: 壁面 omega 粘性底层解析式 `omega_vis = OMEGA_WALL_VISCOUS_COEFF * nu / (beta1 d1^2)`
 #: 的系数（Wilcox）；CPU/GPU 壁面目标值（`transport/omega_wall.py`、
 #: `gpu_scalar_transport/omega_wall.py`）与上界共用这一份。
+#: beta* = C_mu（k-omega 与 k-epsilon 的换算 epsilon = beta* k omega、omega 壁面函数的对数支都用它）
+BETA_STAR = 0.09
+
 OMEGA_WALL_VISCOUS_COEFF = 6.0
 
 #: Menter 放大式 `omega_wall = OMEGA_WALL_AMPLIFICATION * omega_vis`（壁面目标值默认档）。
@@ -66,29 +69,24 @@ OMEGA_WALL_AMPLIFICATION = 10.0
 OMEGA_WALL_D1_FLOOR = 1e-8
 
 
-def omega_wall_length_scale(wd_owner, row_is_prism, xp):
+def omega_wall_length_scale(wd_owner, row_is_prism, xp, wall_treatment: str):
     """壁面目标值公式里的 `d1`：壁面 owner 单元的逐行壁距 `wd_owner (n_rows, n_sps)` -> `(n_rows,)`。
 
-    口径由 `AFCFD_OMEGA_WALL_D1` 决定（`min` 默认 / `mean`，两者的含义与为什么默认仍是 `min`
-    见 `transport/omega_wall.py::_compute_omega_wall_target`）。两条约束（2026-10-04，CPU 与
-    GPU 此前各写一份、都没有）：
+    口径随近壁处理方式（`wall_model/treatment.py`）：``resolved`` 取离壁解点壁距的最小值（Menter 放大式的既有
+    标定，见 `transport/omega_wall.py::_compute_omega_wall_target` 关于阶数依赖的说明）；``auto`` 取解点壁距的
+    均值（约为形心壁距，与平衡壁面模型的匹配高度、Menter 混合式的标定口径一致）。2026-10-17 以前由环境变量
+    `AFCFD_OMEGA_WALL_D1` 选择。两条约束（2026-10-04，CPU 与 GPU 此前各写一份、都没有）：
 
-    * 只统计真实解点：原生四面体的零填充槽位坐标没有意义，查出的壁距是任意值，`min` 会
-      取到它；
+    * 只统计真实解点：原生四面体的零填充槽位坐标没有意义，查出的壁距是任意值；
     * `min` 排除壁面上的解点（`d == 0`，原生四面体的解点含顶点、棱点与面点）：Wilcox 的 d1
       是"第一个离壁点"的距离，取到 0 会让目标值落到 `OMEGA_WALL_D1_FLOOR`、直接顶到上界。
 
     `row_is_prism` 为 None 时整行都按真实解点处理（只有不带棱柱数的测试替身走这里）。
     """
-    import os
-
+    from autoflowcfd.core.turbulence.wall_model.treatment import validate_wall_treatment
     from autoflowcfd.fr.native_padding import order_from_n_sps, reduce_rows_over_real_sps
 
-    mode = os.environ.get("AFCFD_OMEGA_WALL_D1", "min").lower()
-    if mode not in ("min", "mean"):
-        raise ValueError(
-            f"AFCFD_OMEGA_WALL_D1={mode!r} 不是合法取值（min | mean）。'min' 是既有行为（单元内离壁"
-            f"解点壁距最小值），'mean' 是与 Menter 标定口径一致的形心壁距。")
+    mode = "min" if validate_wall_treatment(wall_treatment) == "resolved" else "mean"
     rows = xp.where(wd_owner > 0.0, wd_owner, xp.inf) if mode == "min" else wd_owner
     if row_is_prism is None:
         d1 = getattr(xp, mode)(rows, axis=1)
@@ -96,6 +94,45 @@ def omega_wall_length_scale(wd_owner, row_is_prism, xp):
         d1 = reduce_rows_over_real_sps(rows, row_is_prism, order_from_n_sps(rows.shape[1]), mode, xp=xp)
     return xp.maximum(d1, OMEGA_WALL_D1_FLOOR)
 
+
+def omega_wall_value(xp, nu, d1, k_owner, beta1: float, wall_treatment: str):
+    """omega 壁面目标值（未做 omega_max 钳制），CPU 与 GPU 共用：
+
+    * ``resolved``：Menter 放大式 `OMEGA_WALL_AMPLIFICATION * omega_vis`；
+    * ``auto``：Menter 二项混合式 `sqrt(omega_vis^2 + omega_log^2)`，`omega_log = sqrt(k)/(C_mu^0.25 kappa d1)`
+      （OpenFOAM `omegaWallFunction` 同式：`omegaVis = 6 nu/(beta1 y^2)`、`omegaLog = sqrt(k)/(Cmu25 kappa y)`），
+      两支分别是粘性底层与对数层的渐近精确解，没有自由因子。
+
+    `omega_vis = 6 nu / (beta1 d1^2)`；`k_owner` 只在 auto 下用（贴壁单元真实解点上的均值）。2026-10-17 以前由
+    环境变量 `AFCFD_OMEGA_WALL_MODE` 选择，且 CPU 与 GPU 各写一份。
+    """
+    from autoflowcfd.core.turbulence.wall_model.law import KAPPA
+    from autoflowcfd.core.turbulence.wall_model.treatment import validate_wall_treatment
+
+    omega_vis = OMEGA_WALL_VISCOUS_COEFF * nu / (beta1 * d1 ** 2)
+    if validate_wall_treatment(wall_treatment) == "resolved":
+        return OMEGA_WALL_AMPLIFICATION * omega_vis
+    omega_log = xp.sqrt(xp.maximum(k_owner, 0.0)) / (BETA_STAR ** 0.25 * KAPPA * d1)
+    return xp.sqrt(omega_vis ** 2 + omega_log ** 2)
+
+
+def configure_sst_model(model, vel_inf: float, wall_treatment: str) -> None:
+    """SST 模型构造后的全局设定（CPU、单 GPU、多 GPU 共用）：k_max = 0.5 vel_inf^2（湍动能不超过平均流动能）、
+    omega_max 取下限（壁距设定后按最近壁面解点重定）、近壁处理方式。"""
+    from autoflowcfd.core.turbulence.wall_model.treatment import validate_wall_treatment
+
+    model.k_max = 0.5 * float(vel_inf) ** 2
+    model.omega_max = OMEGA_MAX_FLOOR
+    model.wall_treatment = validate_wall_treatment(wall_treatment)
+
+
+def k_wall_zero_mask(wall_face, wall_treatment: str, xp):
+    """k 的壁面 Dirichlet（k = 0）面掩码：resolved 为物理无滑移壁面，auto 为空（壁面零通量）。"""
+    from autoflowcfd.core.turbulence.wall_model.treatment import validate_wall_treatment
+
+    if validate_wall_treatment(wall_treatment) == "resolved":
+        return wall_face
+    return xp.zeros_like(wall_face)
 
 
 def omega_realizability_floor(model, S_mag, xp):

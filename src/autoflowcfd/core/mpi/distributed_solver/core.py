@@ -7,6 +7,8 @@
 from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 from typing import Optional
 from loguru import logger
+from autoflowcfd.core.turbulence.wall_model.treatment import (
+    DEFAULT_WALL_TREATMENT, build_wall_model, validate_wall_treatment)
 from autoflowcfd.core.mpi import get_rank, is_root
 from autoflowcfd.core.mpi.partition import (
     partition_mesh,
@@ -228,11 +230,10 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         # core/mpi/distributed_artificial_viscosity.py）
         self.artificial_viscosity_enabled = bool(solver_kwargs.get('artificial_viscosity_enabled', False))
         self.artificial_viscosity_alpha = float(solver_kwargs.get('artificial_viscosity_alpha', 1.0))
+        self.wall_treatment = validate_wall_treatment(solver_kwargs.get('wall_treatment', DEFAULT_WALL_TREATMENT))
         from autoflowcfd.core.turbulence.registry import has_transport_equations
-        if turb_model_upper == 'WMLES':
-            # 壁面模型（与单机同一份，`core/turbulence/wall_model/`）：没有输运状态，不需要壁距
-            from autoflowcfd.core.turbulence.wall_model import EquilibriumWallModel
-            self.wall_model = EquilibriumWallModel()
+        # 壁面模型：WMLES 或 RANS 自动壁面处理（与单机同一个构造函数）
+        self.wall_model = build_wall_model(turb_model_upper, self.wall_treatment)
         if has_transport_equations(turb_model_upper):
             from autoflowcfd.core.fr_solver.turbulence import init_turbulence_models
             init_turbulence_models(self, n_local, n_sps)  # 设置 self.turb_model（SST 族或 SA-neg）；

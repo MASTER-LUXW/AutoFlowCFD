@@ -9,7 +9,6 @@
 from loguru import logger
 
 from autoflowcfd.core.gpu import get_cupy, gpu_available
-from autoflowcfd.core.turbulence.sst.bounds import OMEGA_MAX_FLOOR
 from autoflowcfd.core.turbulence.registry import is_sst_family, uses_algebraic_sgs
 from autoflowcfd.core.gpu.array_manager import GPUArrayManager
 from autoflowcfd.core.gpu.distributed.gpu_halo_exchange import GPUHaloExchange
@@ -267,8 +266,8 @@ class _MultiGPUSetupMixin:
             self.turb_model_gpu = GPUTurbulenceSST(
                 n_local_cells, n_sps, device_id, k_inf=k_inf, omega_inf=omega_inf
             )
-            self.turb_model_gpu.k_max = 0.5 * vel_inf ** 2
-            self.turb_model_gpu.omega_max = OMEGA_MAX_FLOOR   # 算出壁距后按它重定（sst/bounds.py）
+            from autoflowcfd.core.turbulence.sst.bounds import configure_sst_model
+            configure_sst_model(self.turb_model_gpu, vel_inf, self.wall_treatment)   # omega_max 算出壁距后重定
             logger.info(f"Rank {self.rank}: GPU SST model initialized "
                         f"(k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
 
@@ -296,11 +295,8 @@ class _MultiGPUSetupMixin:
 
         # WMLES：没有输运状态，只构造壁面模型（与单机同一份）。必须在下面 build_boundary_ghost_provider
         # 之前构造——该函数据 `wall_model` 是否为 None 决定物理无滑移壁面取滑移镜像幽灵态。
-        self.wall_model = None
-        if turb_model == "WMLES":
-            from autoflowcfd.core.turbulence.wall_model import EquilibriumWallModel
-            self.wall_model = EquilibriumWallModel()
-            logger.info(f"Rank {self.rank}: GPU-distributed WMLES model initialized")
+        from autoflowcfd.core.turbulence.wall_model import build_wall_model
+        self.wall_model = build_wall_model(turb_model, self.wall_treatment)
 
         # 预计算壁面距离（compact 索引空间，见 _init_wall_distance_
         # distributed 文档"真实 bug 修复"一节）
@@ -388,7 +384,7 @@ class _MultiGPUSetupMixin:
         # `mesh` 代替真正的全局网格，`n_faces` 直接取 `dist_flat_face.
         # base_flat.n_faces`（compact 索引空间的面数，与 group_code 长度
         # 一致）。
-        self._wall_mask_k_gpu = None
+        self._wall_mask_gpu = None
         self._open_mask_gpu = None
         if self.turb_model_gpu is not None:
             import types
@@ -398,5 +394,5 @@ class _MultiGPUSetupMixin:
             )
             wall_mask_np, open_mask_np = compute_turbulence_face_masks_gpu(compact_mesh_stub, self.boundary_ghost_provider)
             with cp.cuda.Device(device_id):
-                self._wall_mask_k_gpu = cp.asarray(wall_mask_np)
+                self._wall_mask_gpu = cp.asarray(wall_mask_np)
                 self._open_mask_gpu = cp.asarray(open_mask_np)

@@ -17,7 +17,7 @@ from autoflowcfd.core.time_integration.base import STEADY_DT
 
 def _run_cpu_mpi(
     *,
-    aoa_deg, aos_deg, artificial_viscosity_alpha, artificial_viscosity_enabled, cfl_max, cfl_min, cfl_start, checkpoint_interval,
+    aoa_deg, aos_deg, artificial_viscosity_alpha, artificial_viscosity_enabled, wall_treatment, cfl_max, cfl_min, cfl_start, checkpoint_interval,
     fully_distributed, init_checkpoint, input_file, max_iter, mu_molecular, n_ranks, order, reference_area,
     output_dir, p_inf, phase_max_iter, residual_drop_threshold, rho_inf,
     skip_quality_check, surface_mesh, threads, time_scheme, tol, turbulence_intensity,
@@ -66,6 +66,7 @@ def _run_cpu_mpi(
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
+            wall_treatment=wall_treatment,
             time_scheme=scheme_from_name(time_scheme),
         )
         solver = DistributedFRSolver.from_fully_distributed_package(
@@ -108,6 +109,7 @@ def _run_cpu_mpi(
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
+            wall_treatment=wall_treatment,
         )
 
         # 初始化状态

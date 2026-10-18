@@ -5,7 +5,7 @@
 
 
 def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, mu, beta1,
-                                 omega_max, turb_k_field=None):
+                                 omega_max, turb_k_field, wall_treatment):
     """CuPy 版 `_compute_omega_wall_target`：omega_wall = 60*nu/(beta1*d1^2)
     （Wilcox 解析式），逐字对应 CPU 版同名函数——全程 GPU 原生实现（不像
     边界幽灵态那样需要 CPU round-trip：wall_distance_gpu/Q_gpu/owner_cell
@@ -27,8 +27,9 @@ def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, m
     Args:
         wall_mask: (n_faces,) CuPy bool，WALL 边界面掩码（由
             `compute_wall_dirichlet_masks_gpu` 一次性算出并缓存）
-        omega_max: 湍流模型的应急安全上限（`solver.turb_model_gpu.omega_max`，
-            调用方未提供时退回 1e6，与 CPU 版同一个默认值）
+        omega_max: omega 上界（`turb_model_gpu.omega_max`，随最近壁面解点给定）
+        turb_k_field: k 场（auto 的对数支用到）
+        wall_treatment: 近壁处理方式（`turb_model_gpu.wall_treatment`）
 
     Returns:
         (omega_wall_value_face, has_value_face)，与 CPU 版返回语义一致
@@ -44,7 +45,7 @@ def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, m
 
         _np_prism = getattr(ff, 'n_prism', None)
         d1 = omega_wall_length_scale(wall_distance_gpu[owner_cells],
-                                     None if _np_prism is None else owner_cells < _np_prism, cp)
+                                     None if _np_prism is None else owner_cells < _np_prism, cp, wall_treatment)
         # 只统计真实自由度，与 CPU 端 transport.py::
         # _compute_omega_wall_target 同一处 2026-09-15 审计逐字对应。
         # 阶数从 SP 数反解（棱柱是张量积 n_sps=(order+1)^3），棱柱数从
@@ -66,31 +67,16 @@ def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, m
             rho_owner = reduce_rows_over_real_sps(
                 _rows, owner_cells < _np_prism, _order, 'mean', xp=cp)
         nu_owner = mu / cp.maximum(rho_owner, 1e-10)
-        # omega 壁面公式族可切换（2026-09-15，B-6），与 CPU 端
-        # transport.py::_omega_wall_formula 同一套判据与常数（文献依据见
-        # 那里的 _OMEGA_WALL_MODES 一节）。默认 amplified，逐位不变。
-        from autoflowcfd.core.turbulence.sst.bounds import OMEGA_WALL_AMPLIFICATION, OMEGA_WALL_VISCOUS_COEFF
-        from autoflowcfd.core.turbulence.transport import (
-            _OMEGA_WALL_CMU, _OMEGA_WALL_KAPPA, resolve_omega_wall_mode,
-        )
-        omega_vis = OMEGA_WALL_VISCOUS_COEFF * nu_owner / (beta1 * d1 ** 2)
-        if resolve_omega_wall_mode() == "amplified":
-            omega_wall = OMEGA_WALL_AMPLIFICATION * omega_vis
-        else:
-            if turb_k_field is None:
-                raise RuntimeError(
-                    "AFCFD_OMEGA_WALL_MODE=blended 需要 turb_k_field（对数支 "
-                    "omega_log = sqrt(k)/(Cmu^0.25*kappa*d1) 用到它）。调用方"
-                    "必须显式传入 k 场，不接受静默退回 amplified 档。")
+        # 公式随近壁处理方式，与 CPU 同一个函数（`turbulence/sst/bounds.py::omega_wall_value`）
+        from autoflowcfd.core.turbulence.sst.bounds import omega_wall_value
+        k_owner = None
+        if wall_treatment == "auto":
             k_rows = turb_k_field[owner_cells]
             if _np_prism is None:
                 k_owner = cp.mean(k_rows, axis=1)
             else:
-                k_owner = reduce_rows_over_real_sps(
-                    k_rows, owner_cells < _np_prism, _order, 'mean', xp=cp)
-            omega_log = (cp.sqrt(cp.maximum(k_owner, 0.0))
-                         / (_OMEGA_WALL_CMU ** 0.25 * _OMEGA_WALL_KAPPA * d1))
-            omega_wall = cp.sqrt(omega_vis ** 2 + omega_log ** 2)
+                k_owner = reduce_rows_over_real_sps(k_rows, owner_cells < _np_prism, _order, 'mean', xp=cp)
+        omega_wall = omega_wall_value(cp, nu_owner, d1, k_owner, beta1, wall_treatment)
         omega_wall = cp.minimum(omega_wall, omega_max)
         omega_wall_value_face[wall_idx, :] = omega_wall[:, None]
     return omega_wall_value_face, wall_mask

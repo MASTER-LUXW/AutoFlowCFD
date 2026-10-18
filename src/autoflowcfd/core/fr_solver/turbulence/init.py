@@ -14,7 +14,6 @@ from autoflowcfd.core.turbulence.sst import SSTModelFR
 from autoflowcfd.core.turbulence.des import DDESModel, IDDESModel, compute_h_max_and_h_wn
 from autoflowcfd.core.turbulence.registry import uses_algebraic_sgs
 from autoflowcfd.core.turbulence.sgs import WALEModel
-from autoflowcfd.core.turbulence.sst.bounds import OMEGA_MAX_FLOOR
 
 from .wall_distance import apply_wall_distance_to_model
 
@@ -118,9 +117,10 @@ def _set_turbulence_bounds(solver) -> None:
     if not hasattr(solver.turb_model, 'k_max'):
         return  # 不是 SST 模型，无上界属性
     # 直接取键，理由见 `_set_freestream_turbulence` 同名注释
+    from autoflowcfd.core.turbulence.sst.bounds import configure_sst_model
+
     vel_inf = solver.freestream["vel_inf"]
-    solver.turb_model.k_max = 0.5 * vel_inf ** 2  # 湍动能 ≤ 平均流动能
-    solver.turb_model.omega_max = OMEGA_MAX_FLOOR
+    configure_sst_model(solver.turb_model, vel_inf, solver.wall_treatment)
     if getattr(solver, "wall_distance", None) is not None:
         apply_wall_distance_to_model(solver)
     logger.debug(

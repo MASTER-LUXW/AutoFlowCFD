@@ -51,15 +51,11 @@ from .faces import (  # noqa: F401
 from .convection import compute_scalar_convection_residual, resolve_turb_overintegration  # noqa: F401
 from .diffusion import compute_scalar_diffusion_residual  # noqa: F401
 from .omega_wall import (  # noqa: F401
-    _OMEGA_WALL_CMU,
-    _OMEGA_WALL_KAPPA,
-    _OMEGA_WALL_MODES,
     _compute_omega_wall_target,
     _compute_wall_dirichlet_face_mask,
     _omega_wall_formula,
     open_boundary_code_mask,
     wall_dirichlet_face_mask,
-    resolve_omega_wall_mode,
 )
 from .residual import compute_turbulence_transport_residual, prepare_convection_geometry  # noqa: F401
 
@@ -71,6 +67,5 @@ __all__ = [
     "open_boundary_code_mask",
     "wall_dirichlet_face_mask",
     "precompute_scalar_convection_geometry",
-    "resolve_omega_wall_mode",
     "resolve_turb_overintegration",
 ]

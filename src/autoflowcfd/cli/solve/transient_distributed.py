@@ -15,6 +15,7 @@ core/mpi/distributed_mesh_loader.py 模块文档），此前的拒绝已放开�
 不再是"设计上不支持"，只是此前没人把这两个参数接上。
 """
 
+from autoflowcfd.core.turbulence.wall_model.treatment import DEFAULT_WALL_TREATMENT
 from typing import Optional
 
 import click
@@ -42,6 +43,7 @@ def _solve_transient_distributed(
     aos_deg: float = 0.0,
     artificial_viscosity_enabled: bool = False,
     artificial_viscosity_alpha: float = 1.0,
+    wall_treatment: str = DEFAULT_WALL_TREATMENT,
 ):
     """`solve transient` 的分布式分支实现。
 
@@ -70,6 +72,7 @@ def _solve_transient_distributed(
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, time_accurate=time_accurate,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
+            wall_treatment=wall_treatment,
             aoa_deg=aoa_deg, aos_deg=aos_deg, reference_area=reference_area,
         )
         return
@@ -86,6 +89,7 @@ def _solve_transient_distributed(
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, time_accurate=time_accurate,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
+            wall_treatment=wall_treatment,
             aoa_deg=aoa_deg, aos_deg=aos_deg, reference_area=reference_area,
         )
         return
@@ -100,6 +104,7 @@ def _solve_transient_distributed(
         cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, time_accurate=time_accurate,
         artificial_viscosity_enabled=artificial_viscosity_enabled,
         artificial_viscosity_alpha=artificial_viscosity_alpha,
+        wall_treatment=wall_treatment,
         aoa_deg=aoa_deg, aos_deg=aos_deg,
     )
 
@@ -120,6 +125,7 @@ def _solve_transient_cpu_traditional(
     aos_deg: float = 0.0,
     artificial_viscosity_enabled: bool = False,
     artificial_viscosity_alpha: float = 1.0,
+    wall_treatment: str = DEFAULT_WALL_TREATMENT,
 ):
     """CPU MPI"传统模式"：每个 rank 独立加载完整网格（与 `solve steady`
     的对应分支同一套构造方式，见该文件 `elif n_ranks > 1:` 分支文档）。"""
@@ -159,6 +165,7 @@ def _solve_transient_cpu_traditional(
         cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, time_accurate=time_accurate,
         artificial_viscosity_enabled=artificial_viscosity_enabled,
         artificial_viscosity_alpha=artificial_viscosity_alpha,
+        wall_treatment=wall_treatment,
         aoa_deg=aoa_deg, aos_deg=aos_deg,
     )
 
@@ -204,7 +211,7 @@ def _solve_transient_fully_distributed(
     init_checkpoint=None,
     cfl_start=None, cfl_max=None, cfl_min=None, time_accurate=False,
     aoa_deg=0.0, aos_deg=0.0,
-    artificial_viscosity_enabled=False, artificial_viscosity_alpha=1.0,
+    artificial_viscosity_enabled=False, artificial_viscosity_alpha=1.0, wall_treatment=DEFAULT_WALL_TREATMENT,
     reference_area=None,
 ):
     """"完全分布式加载"：只有 root rank 加载完整网格（与 `solve steady`
@@ -242,6 +249,7 @@ def _solve_transient_fully_distributed(
         cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, time_accurate=time_accurate,
         artificial_viscosity_enabled=artificial_viscosity_enabled,
         artificial_viscosity_alpha=artificial_viscosity_alpha,
+        wall_treatment=wall_treatment,
     )
     solver = DistributedFRSolver.from_fully_distributed_package(
         package, n_ranks=n_ranks, root_context=root_context,
@@ -289,7 +297,7 @@ def _solve_transient_multi_gpu(
     fully_distributed=False,
     cfl_start=None, cfl_max=None, cfl_min=None, time_accurate=False,
     aoa_deg=0.0, aos_deg=0.0,
-    artificial_viscosity_enabled=False, artificial_viscosity_alpha=1.0,
+    artificial_viscosity_enabled=False, artificial_viscosity_alpha=1.0, wall_treatment=DEFAULT_WALL_TREATMENT,
     reference_area=None,
 ):
     """多 GPU + MPI 分布式（与 `solve steady` 的 `--multi-gpu` 分支同一套
@@ -335,6 +343,7 @@ def _solve_transient_multi_gpu(
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, time_accurate=time_accurate,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
+            wall_treatment=wall_treatment,
         )
         solver = MultiGPUDistributedSolver.from_fully_distributed_package(
             package, n_ranks=n_ranks, device_id=gpu_device, root_context=root_context,
@@ -362,6 +371,7 @@ def _solve_transient_multi_gpu(
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, time_accurate=time_accurate,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
+            wall_treatment=wall_treatment,
         )
     solver.time_integrator.dual_time_steps = dual_time_inner_iter
 

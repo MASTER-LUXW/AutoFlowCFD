@@ -5,6 +5,7 @@
 """
 
 import click
+from autoflowcfd.core.turbulence.wall_model.treatment import DEFAULT_WALL_TREATMENT, WALL_TREATMENTS
 
 from autoflowcfd.cli.solve.option_help import PHASE_MAX_ITER_HELP, RESIDUAL_DROP_THRESHOLD_HELP, THREADS_HELP
 from autoflowcfd.cli.solve.solver_factory import validate_backend_options
@@ -136,9 +137,14 @@ from .single_node import _run_single_node
 @click.option('--av-alpha', 'artificial_viscosity_alpha', type=float, default=1.0,
               help='人工粘性强度标定常数（无量纲，默认1.0，ν = 斜坡·alpha·|u|·h/p），'
                    '只在 --artificial-viscosity 时有意义')
+@click.option('--wall-treatment', type=click.Choice(list(WALL_TREATMENTS)), default=DEFAULT_WALL_TREATMENT,
+              show_default=True,
+              help='RANS（sa/sst/ddes/iddes）的近壁处理：resolved=低雷诺数壁面处理（要求第一层 y+~1）；'
+                   'auto=自动壁面处理（Spalding 平衡壁面模型给壁面剪应力，第一层 y+ 从 1 到对数层都可用），'
+                   '见 core/turbulence/wall_model/treatment.py。设置写入 checkpoint，续算沿用')
 @config_file_overrides
 def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_scheme, cfl_start, cfl_max, cfl_min,
-                 aoa_deg, aos_deg, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, tol, artificial_viscosity_enabled, artificial_viscosity_alpha, init_checkpoint):
+                 aoa_deg, aos_deg, phase_max_iter, residual_drop_threshold, output_dir, checkpoint_interval, surface_mesh, skip_quality_check, reference_area, threads, n_ranks, fully_distributed, gpu_device, multi_gpu, turbulence_intensity, viscosity_ratio, sem_num_eddies, mu_molecular, rho_inf, vel_inf, p_inf, config_path, tol, artificial_viscosity_enabled, artificial_viscosity_alpha, init_checkpoint, wall_treatment):
     """执行稳态 FR 求解（P0~P3，全部湍流模型）。
 
     输入文件必须是体网格 - .pkl（`grid generate-volume`/`grid
@@ -164,6 +170,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
         _run_multi_gpu(
             aoa_deg=aoa_deg,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
+            wall_treatment=wall_treatment,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             aos_deg=aos_deg,
             cfl_max=cfl_max,
@@ -198,6 +205,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
         _run_cpu_mpi(
             aoa_deg=aoa_deg,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
+            wall_treatment=wall_treatment,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             aos_deg=aos_deg,
             cfl_max=cfl_max,
@@ -233,6 +241,7 @@ def solve_steady(input_file, backend, order, turbulence_model, max_iter, time_sc
             aoa_deg=aoa_deg,
             aos_deg=aos_deg,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
+            wall_treatment=wall_treatment,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             backend=backend,
             cfl_max=cfl_max,

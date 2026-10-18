@@ -148,6 +148,8 @@ class _DistributedFromPackageMixin:
         self._turbulence_intensity = package.get('turbulence_intensity', 0.01)
         self.artificial_viscosity_enabled = bool(package.get('artificial_viscosity_enabled', False))
         self.artificial_viscosity_alpha = float(package.get('artificial_viscosity_alpha', 1.0))
+        from autoflowcfd.core.turbulence.wall_model.treatment import build_wall_model, validate_wall_treatment
+        self.wall_treatment = validate_wall_treatment(package['wall_treatment'])
         self._viscosity_ratio = package.get('viscosity_ratio', 5.0)
         self.turb_model = None
         self.wall_distance_compact = package.get('wall_distance_compact')
@@ -166,10 +168,7 @@ class _DistributedFromPackageMixin:
             # LES / WMLES：WALE 纯代数 SGS 模型，不需要 root 预计算任何几何量
             from autoflowcfd.core.turbulence.sgs import WALEModel
             self.sgs_model = WALEModel()
-        if turb_model_name == 'WMLES':
-            # WMLES 另加壁面模型（与单机同一份，不需要壁距）
-            from autoflowcfd.core.turbulence.wall_model import EquilibriumWallModel
-            self.wall_model = EquilibriumWallModel()
+        self.wall_model = build_wall_model(turb_model_name, self.wall_treatment)
 
         if has_transport_equations(turb_model_name):
             n_local = self.partition.n_local_cells

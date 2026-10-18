@@ -69,7 +69,7 @@ def _multi_gpu_standin(single, dist):
         n_compact=n, device_id=0, rank=0, order=1, current_order=1,
         _perm_gpu=np.asarray(fc.perm), _inv_perm_gpu=np.asarray(fc.inv_perm),
         gpu_halo=types.SimpleNamespace(exchange=dist.halo_exchange.exchange), flat_face_gpu=fc.base_flat,
-        wall_distance_gpu=np.asarray(dist.wall_distance_compact), _wall_mask_k_gpu=wall, _open_mask_gpu=open_,
+        wall_distance_gpu=np.asarray(dist.wall_distance_compact), _wall_mask_gpu=wall, _open_mask_gpu=open_,
         turb_model_gpu=tg, ddes_model_gpu=None, iddes_h_max_compact=None, iddes_h_wn_compact=None,
         turb_model_name=single.turb_model_name, mu_molecular=single.mu_molecular,
         freestream=dist.local_solver.freestream,

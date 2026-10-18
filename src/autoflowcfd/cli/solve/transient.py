@@ -6,6 +6,7 @@
 from typing import Optional
 
 import click
+from autoflowcfd.core.turbulence.wall_model.treatment import DEFAULT_WALL_TREATMENT, WALL_TREATMENTS
 
 from autoflowcfd.core.fr_solver.boundary.constants import _SEM_DEFAULT_NUM_EDDIES
 from autoflowcfd.cli.solve.option_help import PHASE_MAX_ITER_HELP, RESIDUAL_DROP_THRESHOLD_HELP, THREADS_HELP
@@ -112,6 +113,11 @@ from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
                    '同一实现：熵残差判据定位数值熵产生的单元，只对它们叠加 div(ν∇U)')
 @click.option('--av-alpha', 'artificial_viscosity_alpha', type=float, default=1.0,
               help='人工粘性强度标定常数（无量纲，默认1.0），只在 --artificial-viscosity 时有意义')
+@click.option('--wall-treatment', type=click.Choice(list(WALL_TREATMENTS)), default=DEFAULT_WALL_TREATMENT,
+              show_default=True,
+              help='RANS（sa/sst/ddes/iddes）的近壁处理：resolved=低雷诺数壁面处理（要求第一层 y+~1）；'
+                   'auto=自动壁面处理（Spalding 平衡壁面模型给壁面剪应力，第一层 y+ 从 1 到对数层都可用），'
+                   '见 core/turbulence/wall_model/treatment.py。设置写入 checkpoint，续算沿用')
 @click.option('--checkpoint-interval', type=int, default=100,
               help='中间 checkpoint 保存间隔（步数，单机与分布式路径都生效），结束时另写一次')
 @config_file_overrides
@@ -127,7 +133,7 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
               mu_molecular: float, rho_inf: float, vel_inf: float, p_inf: float,
               config_path: Optional[str], n_ranks: int, multi_gpu: bool,
               fully_distributed: bool, gpu_device: Optional[int],
-              artificial_viscosity_enabled: bool, artificial_viscosity_alpha: float,
+              artificial_viscosity_enabled: bool, artificial_viscosity_alpha: float, wall_treatment: str,
               checkpoint_interval: int) -> None:
     """运行瞬态 FR 仿真 (DES/LES)。
 
@@ -204,6 +210,7 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
             cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, time_accurate=time_accurate,
             artificial_viscosity_enabled=artificial_viscosity_enabled,
             artificial_viscosity_alpha=artificial_viscosity_alpha,
+            wall_treatment=wall_treatment,
             aoa_deg=aoa_deg, aos_deg=aos_deg,
         )
         return
@@ -235,6 +242,7 @@ def transient(input_file: str, backend: str, order: int, time_method: str,
         cfl_start=cfl_start, cfl_max=cfl_max, cfl_min=cfl_min, time_accurate=time_accurate,
         artificial_viscosity_enabled=artificial_viscosity_enabled,
         artificial_viscosity_alpha=artificial_viscosity_alpha,
+        wall_treatment=wall_treatment,
     )
 
     # 4.5. 从 checkpoint 初始化（可选：以稳态结果为初场启动瞬态计算）

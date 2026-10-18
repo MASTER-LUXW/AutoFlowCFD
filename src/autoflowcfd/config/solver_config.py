@@ -17,6 +17,7 @@
     >>> transient = TransientConfig(dt=1e-4, total_time=0.3)
 """
 
+from autoflowcfd.core.turbulence.wall_model.treatment import DEFAULT_WALL_TREATMENT, validate_wall_treatment
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -127,6 +128,7 @@ class SolverConfig:
     mu_molecular: float = 1.8e-5  # 分子动力粘度 (Pa*s)，默认标准状态下空气
     artificial_viscosity_enabled: bool = False  # 问题单元人工粘性（熵残差判据），与 CLI --artificial-viscosity 对应
     artificial_viscosity_alpha: float = 1.0  # 人工粘性强度标定常数，与 CLI --av-alpha 对应
+    wall_treatment: str = DEFAULT_WALL_TREATMENT  # RANS 近壁处理（resolved | auto），与 CLI --wall-treatment 对应
     phase_max_iter: Optional[int] = None  # Order Continuation 非最终阶段最大步数上限，None=旧行为(按阶段数均分)
     residual_drop_threshold: float = 1e2  # Order Continuation 单阶段提前升阶所需的残差下降倍数
 
@@ -155,6 +157,7 @@ class SolverConfig:
             raise ValueError(f"粘性比 VR 必须为正数，得到 {self.viscosity_ratio}")
         if self.mu_molecular <= 0:
             raise ValueError(f"分子动力粘度 mu_molecular 必须为正数，得到 {self.mu_molecular}")
+        validate_wall_treatment(self.wall_treatment)
         if self.artificial_viscosity_alpha <= 0:
             raise ValueError(f"人工粘性强度 artificial_viscosity_alpha 必须为正数，得到 {self.artificial_viscosity_alpha}")
 

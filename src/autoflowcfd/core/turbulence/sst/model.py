@@ -7,16 +7,15 @@
 
 import numpy as np
 from .blending import _SSTBlendingMixin
-from .bounds import OMEGA_MAX_FLOOR
+from .bounds import BETA_STAR, OMEGA_MAX_FLOOR
 from .source import _SSTSourceMixin
 from .unknowns import _SSTTransportedMixin
 from .update import _SSTUpdateMixin
 
-#: beta* = C_mu（k-omega 与 k-epsilon 的换算 epsilon = beta* k omega 也用它，见 `boundary/synthetic_inlet.py`）
-BETA_STAR = 0.09
-
 
 class SSTModelFR(_SSTBlendingMixin, _SSTSourceMixin, _SSTUpdateMixin, _SSTTransportedMixin):
+    #: 近壁处理方式（`wall_model/treatment.py`）；构造点经 `bounds.configure_sst_model` 设定
+    wall_treatment = "resolved"
     """
     FR 框架下的 SST k-omega 模型处理器。
 

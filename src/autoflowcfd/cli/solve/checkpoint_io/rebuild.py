@@ -45,6 +45,8 @@ def physics_from_metadata(metadata: dict) -> dict:
         # CPU 以 CLI 开关启用、且不持久化，缺省按关闭恢复（与绝大多数运行一致）。
         "artificial_viscosity_enabled": bool(metadata.get("artificial_viscosity_enabled", False)),
         "artificial_viscosity_alpha": float(metadata.get("artificial_viscosity_alpha", 1.0)),
+        # 旧 checkpoint 没有这一项：它们都是 resolved（auto 是 2026-10-18 新增的）
+        "wall_treatment": str(metadata.get("wall_treatment", "resolved")),
     }
 
 

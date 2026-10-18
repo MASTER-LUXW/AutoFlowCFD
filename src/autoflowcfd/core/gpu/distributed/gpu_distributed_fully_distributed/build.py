@@ -11,7 +11,6 @@ import types
 from loguru import logger
 
 from autoflowcfd.core.gpu import get_cupy
-from autoflowcfd.core.turbulence.sst.bounds import OMEGA_MAX_FLOOR
 
 from autoflowcfd.core.mpi import get_rank
 
@@ -19,6 +18,7 @@ from autoflowcfd.core.mpi.comm import barrier
 
 from autoflowcfd.core.mpi.distributed_state import DistributedFRState
 
+from autoflowcfd.core.turbulence.wall_model.treatment import validate_wall_treatment
 from autoflowcfd.core.gpu.distributed.gpu_halo_exchange import GPUHaloExchange
 from .upload import _upload_wall_geometry_compact
 from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
@@ -147,6 +147,7 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     self.mu_molecular = package['mu_molecular']
     self.artificial_viscosity_enabled = bool(package.get('artificial_viscosity_enabled', False))
     self.artificial_viscosity_alpha = float(package.get('artificial_viscosity_alpha', 1.0))
+    self.wall_treatment = validate_wall_treatment(package['wall_treatment'])
     self._package_freestream = freestream_pkg
     self._turbulence_intensity = package.get('turbulence_intensity', 0.01)
     self._viscosity_ratio = package.get('viscosity_ratio', 5.0)
@@ -200,8 +201,8 @@ def build_multi_gpu_solver_from_fully_distributed_package(
         self.turb_model_gpu = GPUTurbulenceSST(
             n_local, n_sps, device_id, k_inf=k_inf, omega_inf=omega_inf
         )
-        self.turb_model_gpu.k_max = 0.5 * vel_inf ** 2
-        self.turb_model_gpu.omega_max = OMEGA_MAX_FLOOR   # 算出壁距后按它重定（sst/bounds.py）
+        from autoflowcfd.core.turbulence.sst.bounds import configure_sst_model
+        configure_sst_model(self.turb_model_gpu, vel_inf, self.wall_treatment)   # omega_max 算出壁距后重定
         logger.info(f"Rank {self.rank}: GPU SST model initialized (fully-distributed mode, "
                     f"k_inf={k_inf:.4e}, omega_inf={omega_inf:.4e})")
 
@@ -218,9 +219,8 @@ def build_multi_gpu_solver_from_fully_distributed_package(
         from autoflowcfd.core.turbulence.sgs import WALEModel
         self.sgs_model_gpu = WALEModel()
         logger.info(f"Rank {self.rank}: GPU {turb_model_name} with WALE SGS model initialized (fully-distributed mode)")
-    if turb_model_name == 'WMLES':
-        from autoflowcfd.core.turbulence.wall_model import EquilibriumWallModel
-        self.wall_model = EquilibriumWallModel()
+    from autoflowcfd.core.turbulence.wall_model import build_wall_model
+    self.wall_model = build_wall_model(turb_model_name, self.wall_treatment)
 
     self.filter_func_gpu = None
     self._init_modal_filter_distributed()
@@ -244,7 +244,7 @@ def build_multi_gpu_solver_from_fully_distributed_package(
     # provider`/重映射一次。
     self.boundary_ghost_provider = package['boundary_ghost_provider']
 
-    self._wall_mask_k_gpu = None
+    self._wall_mask_gpu = None
 
     self._open_mask_gpu = None
     if self.turb_model_gpu is not None:
@@ -254,7 +254,7 @@ def build_multi_gpu_solver_from_fully_distributed_package(
         )
         wall_mask_np, open_mask_np = compute_turbulence_face_masks_gpu(compact_mesh_stub, self.boundary_ghost_provider)
         with cp.cuda.Device(device_id):
-            self._wall_mask_k_gpu = cp.asarray(wall_mask_np)
+            self._wall_mask_gpu = cp.asarray(wall_mask_np)
             self._open_mask_gpu = cp.asarray(open_mask_np)
 
     self.residual_history = []

@@ -109,7 +109,7 @@ class MultiGpuTurbulenceBackend:
         Q_h = _host(ctx.Q)
         faces, values, pointwise, strong_rows = gpu_linearization_parts(
             cp, view, ctx.Q, ctx.grad_vel, ctx.d_wall, float(s.mu_molecular), s.flat_face_gpu,
-            tr._wall_mask_k_gpu, s.mesh_data, s.ops_data,
+            tr._wall_mask_gpu, s.mesh_data, s.ops_data,
             des=des_length_for(s.ddes_model_gpu, s.iddes_h_max_compact, s.iddes_h_wn_compact))
         lin = TurbulenceLinearization(
             mesh=mesh, ops=s.ops, flat=flat, turb=view, Q=Q_h, grad_vel=_host(ctx.grad_vel),

@@ -3,7 +3,7 @@
 CPU 版 `core/turbulence/transport/primitives.py::CpuScalarTransport` 的 GPU 对应，接口相同
 （`gradient` / `convection` / `diffusion` / `xp`）。`solver_like` 是单机 `GPUFRSolver` 或多 GPU 的
 紧凑空间桩（`ctx.transport`），需要的属性与 `compute_turbulence_transport_residual_gpu` 相同：
-`Q_gpu`、`mesh_data`、`ops_data`、`flat_face_gpu`、`mesh`、`_wall_mask_k_gpu`（无滑移壁面掩码）、
+`Q_gpu`、`mesh_data`、`ops_data`、`flat_face_gpu`、`mesh`、`_wall_mask_gpu`（无滑移壁面掩码）、
 `_open_mask_gpu`（开放边界掩码，`compute_turbulence_face_masks_gpu`）。
 """
 
@@ -44,11 +44,11 @@ class GpuScalarTransport:
         s = self.solver
         return compute_scalar_convection_residual_gpu(
             phi, self.rho, self.vel, s.mesh_data, s.ops_data, s.flat_face_gpu, self.n_cells, self.n_prism,
-            self.n_sps, self.mass_div, wall_dirichlet_zero_face=s._wall_mask_k_gpu,
+            self.n_sps, self.mass_div, wall_dirichlet_zero_face=s._wall_mask_gpu,
             open_boundary_face=s._open_mask_gpu, freestream_value=float(freestream_value))
 
     def diffusion(self, phi, gamma):
         s = self.solver
         return compute_scalar_diffusion_residual_gpu(
             phi, gamma, s.mesh_data, s.ops_data, s.flat_face_gpu, self.n_cells, self.n_prism, self.n_sps,
-            c_ip=self.c_ip, gamma_band=float(s.mu_molecular), wall_dirichlet_zero_face=s._wall_mask_k_gpu)
+            c_ip=self.c_ip, gamma_band=float(s.mu_molecular), wall_dirichlet_zero_face=s._wall_mask_gpu)

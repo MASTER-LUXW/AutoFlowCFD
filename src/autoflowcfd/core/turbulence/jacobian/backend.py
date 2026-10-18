@@ -82,7 +82,7 @@ def turbulence_linearization(solver_like, turb, inputs, conv_geom, flat):
 
         omega_wall, has_wall = _compute_omega_wall_target(solver_like, wall_zero, mu, Q[..., 0],
                                                           flat_face_override=flat)
-        faces, values = sst_dirichlet_spec(wall_zero, omega_wall, has_wall)
+        faces, values = sst_dirichlet_spec(wall_zero, omega_wall, has_wall, turb.wall_treatment)
     return TurbulenceLinearization(
         mesh=solver_like.mesh, ops=solver_like.ops, flat=flat, turb=turb, Q=Q, grad_vel=grad_vel,
         d_wall=d_wall, mu=float(mu), conv_geom=conv_geom, dirichlet_faces=faces, dirichlet_values=values,

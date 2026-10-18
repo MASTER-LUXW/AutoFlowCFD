@@ -106,10 +106,9 @@ class _SolverSetupMixin:
         # 第 5 步其余状态），下面第 5 步改为不再重复构造（见该处新增的
         # guard）。
         self.turb_model_name = turb_model_name.upper()
-        self.wall_model = None
-        if self.turb_model_name == "WMLES":
-            from autoflowcfd.core.turbulence.wall_model import EquilibriumWallModel
-            self.wall_model = EquilibriumWallModel()
+        # 壁面模型：WMLES，或 RANS 的自动壁面处理（`turbulence/wall_model/treatment.py`）
+        from autoflowcfd.core.turbulence.wall_model import build_wall_model
+        self.wall_model = build_wall_model(self.turb_model_name, self.wall_treatment)
         # mach_ref 的唯一来源（按 AUSM+up 预处理档钳下限，推导与标定见该函数）。
         mach_ref = resolve_mach_ref(rho_inf, vel_inf, p_inf)
         # aoa_deg/aos_deg 进 freestream 字典：下游的 Q_free 构造、SEM 入口

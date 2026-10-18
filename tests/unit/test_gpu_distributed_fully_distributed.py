@@ -330,7 +330,7 @@ class TestBuildFromFullyDistributedPackageSstTurbulence:
         assert solver.turb_model_gpu.k_max == pytest.approx(0.5 * vel_inf ** 2)
         assert solver.turb_model_gpu.omega_max == pytest.approx(1e6)
 
-        assert solver._wall_mask_k_gpu is not None
+        assert solver._wall_mask_gpu is not None
         assert solver._open_mask_gpu is not None
 
 
@@ -361,6 +361,7 @@ class TestRedistributeMultiGpuFullyDistributedForNewOrder:
             'bc_overrides': {}, 'n_ranks': 1,
             'time_scheme': None, 'dual_time_inner_iter': 20,
             'artificial_viscosity_enabled': False, 'artificial_viscosity_alpha': 1.0,
+        'wall_treatment': 'resolved',
         }
 
     def test_p0_to_p1_upgrade_interpolates_uniform_field_exactly(self, mesh_and_ops, gpu_shim):

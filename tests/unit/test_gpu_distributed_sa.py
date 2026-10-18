@@ -96,7 +96,7 @@ def test_gpu_distributed_sa_matches_cpu_distributed_sa(rank):
         dist_flat_face=dist_fc, mesh_data=mesh_data, ops_data=mesh_data, ops=ops, flat_face_gpu=dist_fc.base_flat,
         turb_model_gpu=turb_gpu, turb_model_name="SA", gpu_halo=halo_gpu, _perm_gpu=dist_fc.perm,
         _inv_perm_gpu=dist_fc.inv_perm, n_compact=len(compact_ids), wall_distance_gpu=d_compact,
-        _wall_mask_k_gpu=np.zeros(n_faces, dtype=bool), _open_mask_gpu=np.zeros(n_faces, dtype=bool),
+        _wall_mask_gpu=np.zeros(n_faces, dtype=bool), _open_mask_gpu=np.zeros(n_faces, dtype=bool),
         U_gpu=U[partition.local_cells], ddes_model_gpu=None, sgs_model_gpu=None,
         iddes_h_max_compact=None, iddes_h_wn_compact=None, _turb_ramp_step=10, _turb_production_ramp_steps=50,
         _turb_production_ramp_complete=False)

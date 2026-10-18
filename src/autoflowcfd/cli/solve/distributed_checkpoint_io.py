@@ -116,7 +116,8 @@ def rebuild_distributed_solver_from_checkpoint(
     turbulence_intensity = physics["turbulence_intensity"]
     viscosity_ratio = physics["viscosity_ratio"]
     av_kwargs = dict(artificial_viscosity_enabled=physics["artificial_viscosity_enabled"],
-                     artificial_viscosity_alpha=physics["artificial_viscosity_alpha"])
+                     artificial_viscosity_alpha=physics["artificial_viscosity_alpha"],
+                     wall_treatment=physics["wall_treatment"])
     from autoflowcfd.cli.solve.checkpoint_io.rebuild import resolve_resume_time_scheme
     scheme = resolve_resume_time_scheme(time_scheme, metadata)
 

@@ -109,7 +109,7 @@ def _gpu_standin(cpu, dt_cell, dt_phys_cell):
         boundary_ghost_provider=cpu.boundary_ghost_provider, mu_molecular=cpu.mu_molecular,
         wall_model=None, artificial_viscosity_enabled=False,
         wall_distance_gpu=np.asarray(cpu.wall_distance), _iddes_h_max_gpu=None, _iddes_h_wn_gpu=None,
-        _wall_mask_k_gpu=_compute_wall_dirichlet_face_mask(cpu),
+        _wall_mask_gpu=_compute_wall_dirichlet_face_mask(cpu),
         _open_mask_gpu=_compute_open_boundary_face_mask(cpu, flat),
         _turb_ramp_step=cpu._turb_ramp_step, _turb_production_ramp_steps=cpu._turb_production_ramp_steps,
         _turb_production_ramp_complete=cpu._turb_production_ramp_complete,

@@ -36,7 +36,7 @@ def _build_sem_inlet(solver, name: str, is_group_face: np.ndarray, flow_directio
     from autoflowcfd.boundary.synthetic_inlet import SyntheticEddyMethod, sem_length_scale, synthetic_inlet_seed
     from autoflowcfd.core.fr_solver.turbulence.init import _set_freestream_turbulence
     from autoflowcfd.core.turbulence.sgs import les_filter_width
-    from autoflowcfd.core.turbulence.sst.model import BETA_STAR
+    from autoflowcfd.core.turbulence.sst.bounds import BETA_STAR
 
     positions_by_face = _compute_inlet_fp_positions(solver, is_group_face)
     if not positions_by_face:
