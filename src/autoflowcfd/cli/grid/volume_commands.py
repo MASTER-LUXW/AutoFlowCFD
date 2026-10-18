@@ -26,6 +26,23 @@ _BC_TYPE_HELP = ("边界条件类型，组名=类型（可重复），覆盖按�
                  "类型取 WALL/SLIP_WALL/VELOCITY_INLET/PRESSURE_OUTLET/SYMMETRY/FARFIELD/PERIODIC")
 
 
+def _resolve_first_layer_height(first_layer_height, target_yplus, ref_velocity, ref_length, rho, mu):
+    """`--first-layer-height` 或 `--target-yplus`（二选一）-> 第一层高度；都不给时 None（生成器取默认）。"""
+    if target_yplus is None:
+        if ref_velocity is not None or ref_length is not None:
+            raise click.UsageError("--ref-velocity/--ref-length 只用于 --target-yplus")
+        return first_layer_height
+    if first_layer_height is not None:
+        raise click.UsageError("--first-layer-height 与 --target-yplus 只能给一个")
+    if ref_velocity is None or ref_length is None:
+        raise click.UsageError("--target-yplus 需要 --ref-velocity 与 --ref-length")
+    from autoflowcfd.grid.mesh_gen.extrusion.first_layer import first_layer_height_for_yplus
+
+    height = first_layer_height_for_yplus(target_yplus, ref_velocity, ref_length, rho, mu)
+    logger.info(f"目标 y+={target_yplus:g}（U={ref_velocity:g} m/s, L={ref_length:g} m）-> 第一层高度 {height:.4g} m")
+    return height
+
+
 @click.command(name="generate-volume")
 @click.argument("input_file", type=click.Path(exists=True))
 @click.option("--output", "-o", required=True, help="输出体网格 .nas 文件路径")
@@ -42,6 +59,14 @@ _BC_TYPE_HELP = ("边界条件类型，组名=类型（可重复），覆盖按�
     "边界层拼接）——跳过后续全部步骤",
 )
 @click.option("--bc-type", "bc_type", multiple=True, help=_BC_TYPE_HELP)
+@click.option("--first-layer-height", type=float, default=None,
+              help="边界层第一层高度 (m)；不给时取 min(--min-cell-size, 0.2% 域尺寸)。与 --target-yplus 二选一")
+@click.option("--target-yplus", type=float, default=None,
+              help="目标第一层 y+，按湍流平板关联式推出第一层高度（需 --ref-velocity 与 --ref-length）")
+@click.option("--ref-velocity", type=float, default=None, help="y+ 估计的参考速度 (m/s)")
+@click.option("--ref-length", type=float, default=None, help="y+ 估计的参考长度 (m)，例如车长/弦长")
+@click.option("--rho-inf", type=float, default=1.225, show_default=True, help="y+ 估计的密度 (kg/m^3)")
+@click.option("--mu-molecular", type=float, default=1.8e-5, show_default=True, help="y+ 估计的动力粘度 (Pa*s)")
 def generate_volume(
     input_file: str,
     output: str,
@@ -54,6 +79,12 @@ def generate_volume(
     bl_only: bool,
     core_only: bool,
     bc_type: tuple = (),
+    first_layer_height: Optional[float] = None,
+    target_yplus: Optional[float] = None,
+    ref_velocity: Optional[float] = None,
+    ref_length: Optional[float] = None,
+    rho_inf: float = 1.225,
+    mu_molecular: float = 1.8e-5,
 ) -> None:
     """从面网格 .nas 文件生成体网格并导出。
 
@@ -81,6 +112,8 @@ def generate_volume(
         core_only: 若设置，在核心区 tetgen 填充完成后立即导出（只有核心区
             四面体，未与边界层拼接）并停止。
         bc_type: `--bc-type 组名=类型`（可重复），见 `grid/nas_io/boundary_types.py`
+        first_layer_height / target_yplus / ref_velocity / ref_length / rho_inf / mu_molecular: 边界层第一层
+            高度，直接给出或由目标 y+ 推出（`grid/mesh_gen/extrusion/first_layer.py`）
     """
     from autoflowcfd.grid import (
         NASParser, GridValidator, MeshQualityValidator, export_volume_mesh_to_nas
@@ -122,6 +155,8 @@ def generate_volume(
                 'bl_layers': bl_layers,
                 'bl_only': bl_only,
                 'core_only': core_only,
+                'first_layer_height': _resolve_first_layer_height(
+                    first_layer_height, target_yplus, ref_velocity, ref_length, rho_inf, mu_molecular),
                 'output': output,
             }
         )

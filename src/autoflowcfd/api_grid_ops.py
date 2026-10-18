@@ -93,7 +93,7 @@ def api_generate_volume_mesh(self, grid_data: GridData, **kwargs) -> VolumeMeshD
     """由面网格生成体网格，与 CLI `grid generate-volume` 同一个入口
     （`grid/nas_io/parser_volume.py::generate_volume_mesh_from_surface`，含面网格数据的保存）。
 
-    kwargs：growth_rate / min_cell_size / max_cell_size / bl_layers / bl_only / core_only / output，
+    kwargs：growth_rate / min_cell_size / max_cell_size / bl_layers / bl_only / core_only / output / first_layer_height，
     含义与 CLI 同名选项一致；未知参数报错。
     """
     from autoflowcfd.grid.nas_io.parser_volume import generate_volume_mesh_from_surface

@@ -50,6 +50,7 @@ def _build_merged_mesh_with_bl(
     export_bl_only_path: Optional[str],
     export_core_only: bool,
     export_core_only_path: Optional[str],
+    first_layer_height: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """至少有一个曲面组适合挤出边界层时的主路径：挤出 BL 棱柱，再用
     tetgen 从 BL 的真实外表面直接填充剩余体积（不再有独立的"过渡"阶段）。
@@ -119,6 +120,7 @@ def _build_merged_mesh_with_bl(
         max_cell_size=max_cell_size,
         bl_layers=bl_layers,
         normal_faces=normal_faces,
+        first_layer_height=first_layer_height,
     )
     # extrude_layers 自身的 BL 层数——与实际生成数的裁剪无论如何都保留：
     # BL 阶段本身仍可能在达到请求的 bl_layers 之前提前停止（域边界/

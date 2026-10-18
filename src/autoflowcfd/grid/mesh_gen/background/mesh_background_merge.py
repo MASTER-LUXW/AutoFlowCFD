@@ -72,6 +72,7 @@ def _build_merged_mesh(
     export_bl_only_path: Optional[str] = None,
     export_core_only: bool = False,
     export_core_only_path: Optional[str] = None,
+    first_layer_height: Optional[float] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """构建合并网格（BL 棱柱 + TetGen 核心四面体）。
 
@@ -118,4 +119,5 @@ def _build_merged_mesh(
             hole_points,
             growth_rate, min_cell_size, max_cell_size, bl_layers,
             export_bl_only, export_bl_only_path, export_core_only, export_core_only_path,
+            first_layer_height=first_layer_height,
         )

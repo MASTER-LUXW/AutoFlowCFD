@@ -42,6 +42,7 @@ def extrude_layers(
     max_cell_size: 'Optional[float]' = None,
     bl_layers: 'Optional[int]' = None,
     normal_faces: 'Optional[np.ndarray]' = None,
+    first_layer_height: 'Optional[float]' = None,
 ) -> Tuple[np.ndarray, List[np.ndarray]]:
     """沿法向挤出表面以创建边界层 (BL) 网格。
 
@@ -81,6 +82,8 @@ def extrude_layers(
             很少真正绑定；核心 tetgen 填充通过自身的非结构化分级处理
             输出到 `max_cell_size` 的实际大小范围。
         bl_layers: 可选覆盖挤出多少层后停止。None（默认）使用 8。
+        first_layer_height: 第一层高度（米），由用户直接给出或由目标 y+ 推出（`first_layer.py`），原样使用。
+            None 时取 min(min_cell_size, 0.2% 域尺寸)。
         normal_faces: 可选 `surface_faces` 子集，用于确定每个节点偏移
             方向的每节点法向平均（mesh_layer_step.extrude_single_layer
             自己的平均）——None（默认，也是每个现有调用方）使用
@@ -103,23 +106,16 @@ def extrude_layers(
     )
     normal_faces = surface_faces if normal_faces is None else normal_faces
 
-    # 对于汽车 CFD（Re ~ 1e6 - 1e7），第一层高度应目标 y+ ~ 1-30
-    # 使用经验公式：delta_y1 ≈ L * Re^(-0.5) / 100
-    # 保守估计：第一层 0.002 * L_char
-
-    # 关键修复：min_cell_size 应该是第一层厚度的主要控制
-    # 之前的逻辑使用 domain_size * 0.002，对于紧密几何可能太大
-    # 现在我们使用 min_cell_size 作为基础，仅用 domain_size 作为上限
-    base_thickness_from_domain = domain_size * 0.002  # 域尺寸的 0.2%
-    base_thickness = min(min_cell_size, base_thickness_from_domain)
-
-    # 确保最小厚度合理（但尊重用户的 min_cell_size）
-    # 仅当 min_cell_size 不合理地小（< 0.1mm）时才应用硬地板
-    if base_thickness < 0.0001:
-        logger.warning(
-            f"min_cell_size={min_cell_size}m is extremely small, using 0.0001m as safety floor"
-        )
-        base_thickness = 0.0001
+    # 第一层高度：用户给定（或由目标 y+ 推出）时原样使用；否则取 min(min_cell_size, 0.2% 域尺寸)。
+    # 2026-10-17 以前没有按 y+ 给定的途径，且有 0.1 mm 硬下限（用户给更小值时静默覆盖，只打 warning）——
+    # SA-neg/SST 的低雷诺数壁面处理要求 y+ ~ 1（车辆尺度约 10~50 um），0.1 mm 对应 y+ ~ 10（I-137）
+    if first_layer_height is not None:
+        if not first_layer_height > 0.0:
+            raise ValueError(f"第一层高度必须为正（{first_layer_height}）")
+        base_thickness = float(first_layer_height)
+    else:
+        base_thickness = min(min_cell_size, domain_size * 0.002)
+    logger.info(f"边界层第一层高度 {base_thickness:.4g} m")
 
     bl_layers = 8 if bl_layers is None else max(0, int(bl_layers))
     bl_growth_rate = growth_rate

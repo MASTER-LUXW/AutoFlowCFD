@@ -51,7 +51,8 @@ def generate_volume_mesh_from_surface(
     #   max_cell_size（见 mesh_background_merge._build_merged_mesh；ProjectFiles Part13 P49——没有单独的
     #   结构化过渡段）
     # 只转发调用方给出的参数，未给出的取 VolumeMeshGenerator 构造参数的默认值（默认值只有那一份）
-    known = ('growth_rate', 'min_cell_size', 'max_cell_size', 'bl_layers', 'bl_only', 'output', 'core_only')
+    known = ('growth_rate', 'min_cell_size', 'max_cell_size', 'bl_layers', 'bl_only', 'output', 'core_only',
+             'first_layer_height')
     unknown = sorted(set(params) - set(known))
     if unknown:
         raise TypeError(f"未知的体网格生成参数 {unknown}（可用：{list(known)}）")

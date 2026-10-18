@@ -55,8 +55,9 @@ def generate_hybrid_mesh(
     export_bl_only_path: Optional[str] = None,
     export_core_only: bool = False,
     export_core_only_path: Optional[str] = None,
+    first_layer_height: Optional[float] = None,
 ) -> 'VolumeMeshData':
-    """生成精确贴合封闭输入表面的体网格。"""
+    """生成精确贴合封闭输入表面的体网格（`first_layer_height` 见 `extrusion/mesh_extrusion.py::extrude_layers`）。"""
     try:
         if surface_boundaries is None or not surface_boundaries.groups:
             raise ValueError(
@@ -74,6 +75,7 @@ def generate_hybrid_mesh(
             export_bl_only_path=export_bl_only_path,
             export_core_only=export_core_only,
             export_core_only_path=export_core_only_path,
+            first_layer_height=first_layer_height,
         )
 
         # 已核实（第四次评审）：export_bl_only/export_core_only=True 时，

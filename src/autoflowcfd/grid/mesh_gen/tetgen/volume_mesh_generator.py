@@ -38,6 +38,7 @@ class VolumeMeshGenerator:
         bl_only: bool = False,
         bl_only_output: Optional[str] = None,
         core_only: bool = False,
+        first_layer_height: Optional[float] = None,
     ):
         """初始化体积网格生成器。
 
@@ -56,6 +57,8 @@ class VolumeMeshGenerator:
             bl_only: 若为 True，只生成并导出 BL 棱柱层网格。
             bl_only_output: bl_only 为 True 时使用的输出 .nas 路径。
                 与 bl_only 一起必须提供。
+            first_layer_height: 边界层第一层高度（米），None 时取 min(min_cell_size, 0.2% 域尺寸)；由目标 y+
+                推出见 `extrusion/first_layer.py`
             core_only: 若为 True，在 core 区域 tetgen 填充后立即导出
                 （仅 core 四面体，不与 BL 拼接）并停止——与
                 bl_only_output 相同的输出路径复用。
@@ -67,6 +70,7 @@ class VolumeMeshGenerator:
         self.bl_only = bl_only
         self.bl_only_output = bl_only_output
         self.core_only = core_only
+        self.first_layer_height = first_layer_height
 
         logger.info(
             f"VolumeMeshGenerator initialized: growth_rate={growth_rate}, "
@@ -131,4 +135,5 @@ class VolumeMeshGenerator:
             export_bl_only_path=self.bl_only_output,
             export_core_only=self.core_only,
             export_core_only_path=self.bl_only_output,
+            first_layer_height=self.first_layer_height,
         )
