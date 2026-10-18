@@ -10,13 +10,13 @@ AutoFlowCFD V2.0 - P0 有限体积无粘残差 numba 并行 kernel
 算法与原 inviscid_p0.py 完全一致：
 - 每个面：AUSM+up 黎曼求解 → 面积加权通量 → scatter-add 到 owner/neighbor
 - 边界面：ghost_provider 在 kernel 外部预计算为 Q_ghost 数组
-- per-thread buffer 避免写冲突（同 P≥1 kernel 方案）
+- 按面着色：调用方逐颜色调用，每次只处理一个颜色组 `face_indices`（同色面的 owner/neighbor 单元互不重复，`fr_operators/face_kernels.py` 的面着色），组内 `prange` 直接累加进共享输出，没有写冲突、不需要每线程缓冲与归约。与 P>=1 界面核同一套颜色分组；2026-10-18 以前这里是每线程缓冲版（内存 n_threads*n_cells*5）。
 
 验证：与原 Python 路径逐位对比（残差 L∞ 差 < 1e-14，纯浮点重排误差）。
 """
 
 import numpy as np
-from numba import njit, prange, get_thread_id
+from numba import njit, prange
 
 from autoflowcfd.core.fr_operators.kernels import compute_ausm_up_flux
 
@@ -33,26 +33,18 @@ def _p0_inviscid_kernel(
                       # 不是按 owner 单元索引——见 inviscid_p0.py::
                       # _precompute_ghost_states 文档"真实 bug 修复"一节）
     cell_volumes,     # float64 (n_cells,)
-    n_cells,
-    n_threads,
+    face_indices,     # int64，本颜色组的面
+    residual,         # float64 (n_cells, 5)，就地累加
     mach_ref,         # float，见 kernels.py::compute_ausm_up_flux 文档
-):
+) -> None:
     """P0 有限体积无粘残差并行 kernel。
 
-    对每个面执行 AUSM+up 黎曼求解，将面积加权通量 scatter-add 到
-    owner/neighbor 单元的 per-thread buffer（避免写冲突），
-    最后由调用方归约得到最终残差。
+    对颜色组里的每个面执行 AUSM+up 黎曼求解，把面积加权通量累加到 owner/neighbor 单元的残差。
 
-    per-thread buffer 内存：n_threads × n_cells × 5 × 8 bytes
-    4 threads × 791K × 5 × 8 ≈ 126 MB（可接受）
+    按面着色：调用方逐颜色调用，每次只处理一个颜色组 `face_indices`（同色面的 owner/neighbor 单元互不重复，`fr_operators/face_kernels.py` 的面着色），组内 `prange` 直接累加进共享输出，没有写冲突、不需要每线程缓冲与归约。与 P>=1 界面核同一套颜色分组；2026-10-18 以前这里是每线程缓冲版（内存 n_threads*n_cells*5）。
     """
-    n_faces = owner_cell.shape[0]
-
-    # per-thread buffer，零初始化
-    residual_per_thread = np.zeros((n_threads, n_cells, 5), dtype=np.float64)
-
-    for f in prange(n_faces):
-        tid = get_thread_id()
+    for fi in prange(face_indices.shape[0]):
+        f = face_indices[fi]
         oc = owner_cell[f]
 
         # Owner 状态（5 个分量逐元素复制，避免 numba 对切片赋值的限制）
@@ -92,20 +84,19 @@ def _p0_inviscid_kernel(
 
         # Owner：通量流出为正（法向量由 owner 指向 neighbor）
         inv_vol_o = 1.0 / cell_volumes[oc]
-        residual_per_thread[tid, oc, 0] -= flux0 * inv_vol_o
-        residual_per_thread[tid, oc, 1] -= flux1 * inv_vol_o
-        residual_per_thread[tid, oc, 2] -= flux2 * inv_vol_o
-        residual_per_thread[tid, oc, 3] -= flux3 * inv_vol_o
-        residual_per_thread[tid, oc, 4] -= flux4 * inv_vol_o
+        residual[oc, 0] -= flux0 * inv_vol_o
+        residual[oc, 1] -= flux1 * inv_vol_o
+        residual[oc, 2] -= flux2 * inv_vol_o
+        residual[oc, 3] -= flux3 * inv_vol_o
+        residual[oc, 4] -= flux4 * inv_vol_o
 
         # Neighbor：通量流入（符号相反）
         if not is_boundary[f]:
             nc = neighbor_cell[f]
             inv_vol_n = 1.0 / cell_volumes[nc]
-            residual_per_thread[tid, nc, 0] += flux0 * inv_vol_n
-            residual_per_thread[tid, nc, 1] += flux1 * inv_vol_n
-            residual_per_thread[tid, nc, 2] += flux2 * inv_vol_n
-            residual_per_thread[tid, nc, 3] += flux3 * inv_vol_n
-            residual_per_thread[tid, nc, 4] += flux4 * inv_vol_n
+            residual[nc, 0] += flux0 * inv_vol_n
+            residual[nc, 1] += flux1 * inv_vol_n
+            residual[nc, 2] += flux2 * inv_vol_n
+            residual[nc, 3] += flux3 * inv_vol_n
+            residual[nc, 4] += flux4 * inv_vol_n
 
-    return residual_per_thread

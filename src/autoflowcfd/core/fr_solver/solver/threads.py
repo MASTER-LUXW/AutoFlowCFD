@@ -147,8 +147,10 @@ class blas_threads_limited:
 
 def configure_numba_threads(n_threads: int, mesh) -> int:
     """设置 numba 全局线程数（求解器生命周期内只设一次，必须在任何残差
-    kernel 被调用之前）并做界面 kernel 私有缓冲区的内存提醒；返回实际生效
-    的线程数。取值依据见函数体注释与 `FRSolver.__init__` 的 `n_threads` 文档。
+    kernel 被调用之前）；返回实际生效的线程数。取值依据见函数体注释与 `FRSolver.__init__` 的 `n_threads` 文档。
+
+    界面核全部按面着色累加（内存与线程数无关），2026-10-18 以前另有"每线程私有缓冲区超过总内存一半"的提醒，
+    随每线程缓冲版界面核一并删除。
     """
     # numba 全局线程数只在这里设置一次（求解器生命周期内不再修改），
     # 理由见本方法 n_threads 参数文档。必须在任何残差 kernel 被调用
@@ -195,37 +197,4 @@ def configure_numba_threads(n_threads: int, mesh) -> int:
     resolved_n_threads = max(1, resolved_n_threads)
     numba.set_num_threads(resolved_n_threads)
 
-    # 防御性内存检查：两个界面 kernel 各自的私有累加缓冲区峰值约
-    # n_threads * n_cells * n_sps * 5 vars * 8 bytes（无粘/粘性两次
-    # 调用不会同时存活，见 fr_residual_inviscid_kernel.py 模块文档
-    # "多核并行"一节），超过系统总内存一半就提醒用户，不静默跑到
-    # OOM。取不到总内存（非 Windows 平台没有对应 ctypes 调用）时
-    # 直接跳过，不影响求解——这只是个提醒，不是硬性门禁。
-    n_cells_est = getattr(mesh, 'n_cells', 0)
-    n_sps_est = getattr(mesh, 'n_sps_per_cell', 8)
-    buf_bytes = resolved_n_threads * n_cells_est * n_sps_est * 5 * 8
-    try:
-        import ctypes
-
-        class _MEMORYSTATUSEX(ctypes.Structure):
-            _fields_ = [
-                ("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
-                ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
-                ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
-                ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
-                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-            ]
-
-        stat = _MEMORYSTATUSEX()
-        stat.dwLength = ctypes.sizeof(_MEMORYSTATUSEX)
-        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
-        total_mem = stat.ullTotalPhys
-        if total_mem > 0 and buf_bytes > 0.5 * total_mem:
-            print(
-                f"⚠️  警告：n_threads={resolved_n_threads} 下界面 kernel 私有累加缓冲区峰值约 "
-                f"{buf_bytes / 1e9:.1f}GB，超过系统总内存（{total_mem / 1e9:.1f}GB）的一半，"
-                f"叠加其他计算环节的内存占用可能导致 OOM。建议用更小的 n_threads。"
-            )
-    except Exception:
-        pass
     return resolved_n_threads

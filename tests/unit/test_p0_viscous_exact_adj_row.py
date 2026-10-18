@@ -120,7 +120,7 @@ def test_p0_kernel_no_longer_accepts_the_sp_grid_metric():
     )
 
     src = inspect.getsource(k.py_func if hasattr(k, "py_func") else k)
-    sig = src[:src.index(") -> np.ndarray:")]
+    sig = src[:src.index(") -> None:")]
     for gone in ("adj_j", "owner_axis", "neighbor_axis",
                  "owner_side", "neighbor_side"):
         assert gone not in sig, (
@@ -166,29 +166,27 @@ def test_old_metric_source_changes_the_residual():
     from autoflowcfd.core.fr_operators.flux_kernels import VBC_INTERIOR, VBC_NEUMANN
     vbc_kind = np.where(flat.is_boundary, VBC_NEUMANN, VBC_INTERIOR).astype(np.int8)
     c_ip = resolve_viscous_ip_constant(0)
-    # `n_threads` 必须是紧邻调用前取的 `numba.get_num_threads()`：kernel
-    # 用 `get_thread_id()` 索引 `(n_threads, ...)` 的 per-thread buffer，
-    # 传小了就是越界写（第一版传了 1，numba 实际 8 线程 -> Windows
-    # access violation 直接崩进程，不是 Python 异常）。
-    import numba
-    n_threads = numba.get_num_threads()
 
     def run(owner_rows, neighbor_rows):
-        return kernel(
-            Q, grad_vel, grad_T, mu_t,
-            det_jacs, 1.8e-3, 0.72, 0.9,
-            flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
-            flat.owner_is_primary, flat.neighbor_is_primary,
-            owner_rows, neighbor_rows,
-            flat.neighbor_src0_cell, flat.neighbor_src1_idx, flat.neighbor_src1_cell,
-            flat.owner_src0_cell, flat.owner_src1_idx, flat.owner_src1_cell,
-            flat.mixed_nb_partner, flat.mixed_ow_partner, flat.p0_second_half_frac,
-            Q_ghost, vbc_kind, n_threads,
-            flat.owner_face_op, flat.neighbor_face_op,
-            flat.ref_area_weight,
-            flat.boundary_extrap_native, flat.lift_native,
-            flat.ip_length, c_ip,
-        )
+        correction = np.zeros((n_cells, 1, 5))
+        for face_indices in flat.color_face_indices:
+            kernel(
+                Q, grad_vel, grad_T, mu_t,
+                det_jacs, 1.8e-3, 0.72, 0.9,
+                flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
+                flat.owner_is_primary, flat.neighbor_is_primary,
+                owner_rows, neighbor_rows,
+                flat.neighbor_src0_cell, flat.neighbor_src1_idx, flat.neighbor_src1_cell,
+                flat.owner_src0_cell, flat.owner_src1_idx, flat.owner_src1_cell,
+                flat.mixed_nb_partner, flat.mixed_ow_partner, flat.p0_second_half_frac,
+                Q_ghost, vbc_kind,
+                flat.owner_face_op, flat.neighbor_face_op,
+                flat.ref_area_weight,
+                flat.boundary_extrap_native, flat.lift_native,
+                flat.ip_length, c_ip,
+                face_indices, correction,
+            )
+        return correction
 
     def old_style(cell_idx, axis_slots):
         """旧做法读到的量，逐 FP 广播成 (n_faces, n_fp, 3)。"""

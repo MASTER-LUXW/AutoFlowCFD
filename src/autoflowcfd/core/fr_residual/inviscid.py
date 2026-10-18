@@ -144,22 +144,6 @@ def mean_flow_primitives(U: np.ndarray, flat, ghost_provider=None) -> MeanFlowPr
     return MeanFlowPrimitives(Q, compute_boundary_ghost_states(flat, Q, provider))
 
 
-def _compute_inviscid_residual_fv_p0(
-    U: np.ndarray,
-    mesh,
-    boundary_ghost_provider: Optional[Callable[[int, np.ndarray, np.ndarray], np.ndarray]] = None,
-    mach_ref: float = 0.1,
-) -> np.ndarray:
-    """P0 专用有限体积无粘残差。实现见
-    inviscid_p0.py::compute_inviscid_residual_fv_p0（从本
-    文件拆出，控制单文件行数），文档字符串也在那里。"""
-    from .inviscid_p0 import compute_inviscid_residual_fv_p0
-
-    return compute_inviscid_residual_fv_p0(
-        U, mesh, boundary_ghost_provider, mach_ref
-    )
-
-
 @njit(cache=True, parallel=True)
 def _inviscid_volume_kernel(Q, lo, c2f, det_f, inv_f, K2, combo, out, n_blocks):
     """段内单元 `lo + i`：`out[c] = K2[combo[i]] : adj(J) F(Q_fine)`（`inviscid_volume_divergence`）。"""
@@ -242,11 +226,13 @@ def compute_inviscid_residual_fr(
     if mesh.n_points_1d == 1:
         # P0（Order Continuation 最低阶）：坍缩坐标单点度量方向在数学上
         # 无法代表单元各面各自的真实法向，完全绕开度量张量外插机制，走
-        # 独立的真实几何有限体积路径，见 _compute_inviscid_residual_fv_p0
-        # 文档。
-        return _compute_inviscid_residual_fv_p0(
-            U, mesh, boundary_ghost_provider, mach_ref
-        )
+        # 独立的真实几何有限体积路径，见 inviscid_p0.py::compute_inviscid_residual_fv_p0
+        # 文档。面着色取自与 P>=1 同一份面几何（CPU 分布式为 flat_face_override）。
+        from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+        from .inviscid_p0 import compute_inviscid_residual_fv_p0
+
+        flat = flat_face_override if flat_face_override is not None else get_flat_face_geometry(mesh, ops)
+        return compute_inviscid_residual_fv_p0(U, mesh, flat, boundary_ghost_provider, mach_ref)
 
     n_cells = mesh.n_cells
     n_sps = mesh.n_sps_per_cell

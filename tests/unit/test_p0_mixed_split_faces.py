@@ -49,7 +49,7 @@ def test_mesh_really_has_a_mixed_face(tri):
 def test_p0_inviscid_preserves_freestream_on_mixed_faces(tri):
     m = _mixed_mesh(0, tri)
     U = np.tile(primitive_to_conserved(np.array([1.2, 30.0, 0.0, 0.0, 1.0e5])), (m.n_cells, 1, 1))
-    R = compute_inviscid_residual_fv_p0(U, m, _provider(m), mach_ref=0.1)
+    R = compute_inviscid_residual_fv_p0(U, m, get_flat_face_geometry(m, m.operators), _provider(m), mach_ref=0.1)
     flux_scale = 1.0e5 * 30.0                   # p u 量级
     assert np.abs(R).max() < 1e-12 * flux_scale
 
@@ -64,7 +64,7 @@ def test_p0_inviscid_interior_exchange_is_conservative():
     prov = _provider(m)
     Qp = np.array([[1.25, 28.0, 3.0, -2.0, 1.02e5], [1.15, 33.0, -4.0, 1.0, 0.98e5]])
     U = np.stack([primitive_to_conserved(q) for q in Qp])[:, None, :]
-    R = compute_inviscid_residual_fv_p0(U, m, prov, mach_ref=0.1)
+    R = compute_inviscid_residual_fv_p0(U, m, get_flat_face_geometry(m, m.operators), prov, mach_ref=0.1)
     fc = m.face_connectivity
     normals, areas = _extract_p0_face_geometry(m.face_flux_points, fc, fc.n_faces)
     Q_all = conserved_to_primitive(U[:, 0, :5])

@@ -6,7 +6,7 @@
    否则漏掉"面A的owner是面B的neighbor"这类交叉冲突，见 face_coloring.py
    模块文档与本文件 test_owner_neighbor_cross_conflict_detected）
 2. 缓存机制正常工作
-3. 图着色 kernel 与 per-thread buffer kernel 数值等价
+3. 界面核只有按面着色这一种并行写法（2026-10-18 起每线程缓冲版全部删除，含 P0 无粘/粘性核）
 """
 
 import numpy as np
@@ -115,3 +115,18 @@ class TestFlatFaceColoringCache:
         fields = {f.name for f in FlatFaceGeometry.__dataclass_fields__.values()}
         assert "color_face_indices" in fields
         assert "n_colors" in fields
+
+
+def test_no_per_thread_buffer_kernels_remain():
+    """界面 scatter-add 只用面着色：src 里不应再出现 `get_thread_id`（每线程缓冲的标志）。
+
+    2026-10-18 以前 P>=1 有着色/每线程缓冲两份逐字同步的核（`AFCFD_USE_COLORING` 切换），P0 无粘/粘性核只有
+    每线程缓冲版；两类写法并存时只改一份的风险本项目已多次兑现。
+    """
+    import pathlib
+
+    import autoflowcfd
+
+    root = pathlib.Path(autoflowcfd.__file__).parent
+    hits = [str(p.relative_to(root)) for p in root.rglob("*.py") if "get_thread_id" in p.read_text(encoding="utf-8")]
+    assert hits == [], f"又出现了每线程缓冲写法：{hits}"

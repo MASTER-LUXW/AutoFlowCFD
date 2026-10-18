@@ -12,12 +12,12 @@ AutoFlowCFD V2.0 - P0 阶专用有限体积无粘残差 (S-02)
 from typing import Callable, Optional
 
 import numpy as np
-import numba
 
 
 def compute_inviscid_residual_fv_p0(
     U: np.ndarray,
     mesh,
+    flat,
     boundary_ghost_provider: Optional[Callable[[int, np.ndarray, np.ndarray], np.ndarray]] = None,
     mach_ref: float = 0.1,
 ) -> np.ndarray:
@@ -26,8 +26,8 @@ def compute_inviscid_residual_fv_p0(
     算法与原 Python 版本完全一致（逐位等价，仅浮点重排顺序不同）：
     1. 提取 flat 面几何数组（单位法向、面积权重、面连接关系）
     2. 预计算边界幽灵态（Python 端，仅 ~40K 边界面）
-    3. numba 并行 kernel 执行 AUSM+up 黎曼求解 + scatter-add
-    4. per-thread buffer 归约得到最终残差
+    3. numba 并行 kernel 执行 AUSM+up 黎曼求解，按面着色逐颜色组累加（颜色分组取自 `flat`，与 P>=1 界面核
+       同一份）
 
     关于棱柱四边形侧面拆分的处理（2026-08-23 修复，见下方
     `_extract_p0_face_geometry` 文档）：此前这里的说法——"按
@@ -52,6 +52,8 @@ def compute_inviscid_residual_fv_p0(
     Args:
         U: 守恒变量，形状 (n_cells, 1, n_vars)
         mesh: HighOrderMesh 实例（n_points_1d 必须为 1）
+        flat: 同一网格的面几何（`get_flat_face_geometry`；CPU 分布式为预先按 local+halo 压缩索引构造的
+            `flat_face_override`），这里只用它的面着色 `color_face_indices`，面索引与 `face_connectivity` 一致
         boundary_ghost_provider: 同 compute_inviscid_residual_fr
 
     Returns:
@@ -83,21 +85,22 @@ def compute_inviscid_residual_fv_p0(
     ghost_provider = boundary_ghost_provider if boundary_ghost_provider is not None else DefaultGhostProvider()
     Q_ghost = _precompute_ghost_states(ffp_list, fc, ghost_provider, Q_all, n_faces, unit_normals)
 
-    # --- numba 并行 kernel ---
-    n_threads = numba.get_num_threads()
+    # --- numba 并行 kernel：按面着色逐颜色组累加 ---
+    if flat.n_faces != n_faces:
+        raise ValueError(f"面着色所属的面几何有 {flat.n_faces} 个面，face_connectivity 有 {n_faces} 个（不是同一网格）")
     owner_cell = fc.owner_cell.astype(np.int64)
     neighbor_cell = fc.neighbor_cell.astype(np.int64)
     is_boundary = fc.is_boundary.astype(np.bool_)
-    residual_per_thread = _p0_inviscid_kernel(
-        owner_cell, neighbor_cell, is_boundary,
-        unit_normals, area_weights,
-        Q_all, Q_ghost, cell_volumes,
-        n_cells, n_threads, mach_ref,
-    )
-
-    # --- per-thread buffer 归约 ---
-    residual5 = residual_per_thread.sum(axis=0)
-
+    residual5 = np.zeros((n_cells, 5))
+    for face_indices in flat.color_face_indices:
+        if len(face_indices) == 0:
+            continue
+        _p0_inviscid_kernel(
+            owner_cell, neighbor_cell, is_boundary,
+            unit_normals, area_weights,
+            Q_all, Q_ghost, cell_volumes,
+            face_indices, residual5, mach_ref,
+        )
     return residual5[:, None, :]
 
 

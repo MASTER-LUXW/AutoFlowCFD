@@ -34,7 +34,7 @@ primary 门控，本 kernel 从一开始就没有这个问题，不需要改动�
 """
 
 import numpy as np
-from numba import njit, prange, get_thread_id
+from numba import njit, prange
 
 from autoflowcfd.core.fr_operators.small_dense import matmul_small
 from autoflowcfd.core.fr_operators.flux_kernels import (
@@ -70,7 +70,6 @@ def compute_viscous_interface_correction_p0_kernel(
     p0_second_half_frac: np.ndarray,
     Q_ghost: np.ndarray,          # (n_boundary_faces, n_fp, 5)
     vbc_kind: np.ndarray,         # (n_faces,) 粘性边界种类，见 flux_kernels/viscous_bc.py
-    n_threads: int,
     owner_face_op: np.ndarray, neighbor_face_op: np.ndarray,
     ref_area_weight: np.ndarray,
     boundary_extrap_native: np.ndarray, lift_native: np.ndarray,
@@ -86,8 +85,12 @@ def compute_viscous_interface_correction_p0_kernel(
     # `cache=True` 的磁盘缓存**不因全局值变化而失效**，那样
     # 扫参数必须隔离缓存目录重编译，极易误读成"改了没生效"。
     c_ip: float,
-) -> np.ndarray:
-    """P0 专用粘性界面校正 kernel。
+    face_indices: np.ndarray,     # int64，本颜色组的面
+    correction: np.ndarray,       # (n_cells, 1, 5)，就地累加
+) -> None:
+    """P0 专用粘性界面校正 kernel（颜色组 `face_indices` 的贡献累加进 `correction`）。
+
+    按面着色：调用方逐颜色调用，每次只处理一个颜色组 `face_indices`（同色面的 owner/neighbor 单元互不重复，`fr_operators/face_kernels.py` 的面着色），组内 `prange` 直接累加进共享输出，没有写冲突、不需要每线程缓冲与归约。与 P>=1 界面核同一套颜色分组；2026-10-18 以前这里是每线程缓冲版（内存 n_threads*n_cells*5）。
 
     与通用 compute_viscous_interface_correction_kernel 数学等价，
     但 n_sps=1 时：
@@ -128,14 +131,10 @@ def compute_viscous_interface_correction_p0_kernel(
     生产不可达，完整论证见 `inviscid_kernel.py::
     compute_inviscid_interface_correction_kernel` 文档。
     """
-    n_cells = Q.shape[0]
-    n_faces = owner_cell.shape[0]
     n_fp = Q_ghost.shape[1]
 
-    correction_per_thread = np.zeros((n_threads, n_cells, 1, 5))
-
-    for f in prange(n_faces):
-        tid = get_thread_id()
+    for fi in prange(face_indices.shape[0]):
+        f = face_indices[fi]
         oc = owner_cell[f]
         oc_op = owner_face_op[f]
         # **原生面的罚项 side 因子必须是 +1**（2026-09-22 修复真实缺陷）：
@@ -248,7 +247,7 @@ def compute_viscous_interface_correction_p0_kernel(
                     weighted_jump_o[i, v] = w_area * jump_owner[i, v]
             contrib_owner = matmul_small(lift_native[oc_op], weighted_jump_o)  # (1,5)
             for v in range(5):
-                correction_per_thread[tid, oc, 0, v] += contrib_owner[0, v] / dj
+                correction[oc, 0, v] += contrib_owner[0, v] / dj
 
         # Neighbor 侧（与通用 kernel 相同逻辑，n_sps=1 特化）
         if (not is_boundary[f]) and neighbor_is_primary[f]:
@@ -322,6 +321,5 @@ def compute_viscous_interface_correction_p0_kernel(
                     weighted_jump_n[i, v] = w_area * jump_neighbor[i, v]
             contrib_neighbor = matmul_small(lift_native[nc_op], weighted_jump_n)  # (1,5)
             for v in range(5):
-                correction_per_thread[tid, nc, 0, v] += contrib_neighbor[0, v] / dj
+                correction[nc, 0, v] += contrib_neighbor[0, v] / dj
 
-    return correction_per_thread.sum(axis=0)

@@ -315,7 +315,9 @@ class TestFreeStreamPreservation:
         U_inf = primitive_to_conserved(Q_inf)
         U = np.tile(U_inf, (mesh.n_cells, mesh.n_sps_per_cell, 1))
 
-        residual = compute_inviscid_residual_fv_p0(U, mesh)
+        from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
+
+        residual = compute_inviscid_residual_fv_p0(U, mesh, get_flat_face_geometry(mesh, mesh.operators))
         rel_res = np.max(np.abs(residual)) / p_inf
 
         assert rel_res < 1e-10, f"P0 free-stream preservation failed: rel={rel_res:.3e}"

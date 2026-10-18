@@ -18,13 +18,11 @@ INLET/OUTLET 等"幽灵态依赖各面自己法向/位置、因面而异"的场�
 import numpy as np
 import pytest
 
-from autoflowcfd.core.fr_residual.inviscid import (
-    _compute_inviscid_residual_fv_p0,
-    conserved_to_primitive,
-)
+from autoflowcfd.core.fr_operators.face_kernels import get_flat_face_geometry
 from autoflowcfd.core.fr_residual.inviscid_p0 import (
     _extract_p0_face_geometry,
     _precompute_ghost_states,
+    compute_inviscid_residual_fv_p0,
 )
 from autoflowcfd.boundary.fr_ghost_state import GhostStateProvider
 from tests.validation._channel_mesh import build_channel_mesh_prism
@@ -161,7 +159,8 @@ class TestFullResidualPipelineWithFaceVaryingGhostProvider:
         U[:, 0, 4] = P_INF / (GAMMA - 1.0) + 0.5 * RHO_INF * U_INF**2
 
         provider = _NormalEncodingGhostProvider()
-        residual = _compute_inviscid_residual_fv_p0(U, mesh, boundary_ghost_provider=provider)
+        residual = compute_inviscid_residual_fv_p0(
+            U, mesh, get_flat_face_geometry(mesh, mesh.operators), boundary_ghost_provider=provider)
 
         assert np.all(np.isfinite(residual))
         assert np.max(np.abs(residual)) > 0.0

@@ -153,25 +153,27 @@ def compute_viscous_residual_fr(U: np.ndarray, mesh, ops, mu: float, Pr: float,
         from autoflowcfd.core.fr_residual.viscous_p0_kernel import (
             compute_viscous_interface_correction_p0_kernel,
         )
-        import numba
-        n_threads = numba.get_num_threads()
-        correction = compute_viscous_interface_correction_p0_kernel(
-            Q, grad_vel, grad_T, mu_t_field,
-            det_jacs, mu, Pr, Pr_t,
-            flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
-            flat.owner_is_primary, flat.neighbor_is_primary,
-            flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
-            flat.neighbor_src0_cell, flat.neighbor_src1_idx, flat.neighbor_src1_cell,
-            flat.owner_src0_cell, flat.owner_src1_idx, flat.owner_src1_cell,
-            flat.mixed_nb_partner, flat.mixed_ow_partner, flat.p0_second_half_frac,
-            Q_ghost, vbc_kind,
-            n_threads,
-            flat.owner_face_op, flat.neighbor_face_op,
-            flat.ref_area_weight,
-            flat.boundary_extrap_native, flat.lift_native,
-            flat.ip_length,
-            _c_ip,
-        )
+        correction = np.zeros((n_cells, 1, 5))
+        for face_indices in flat.color_face_indices:
+            if len(face_indices) == 0:
+                continue
+            compute_viscous_interface_correction_p0_kernel(
+                Q, grad_vel, grad_T, mu_t_field,
+                det_jacs, mu, Pr, Pr_t,
+                flat.owner_cell, flat.neighbor_cell, flat.is_boundary,
+                flat.owner_is_primary, flat.neighbor_is_primary,
+                flat.owner_adj_row_exact, flat.neighbor_adj_row_exact,
+                flat.neighbor_src0_cell, flat.neighbor_src1_idx, flat.neighbor_src1_cell,
+                flat.owner_src0_cell, flat.owner_src1_idx, flat.owner_src1_cell,
+                flat.mixed_nb_partner, flat.mixed_ow_partner, flat.p0_second_half_frac,
+                Q_ghost, vbc_kind,
+                flat.owner_face_op, flat.neighbor_face_op,
+                flat.ref_area_weight,
+                flat.boundary_extrap_native, flat.lift_native,
+                flat.ip_length,
+                _c_ip,
+                face_indices, correction,
+            )
     else:
         # P≥1 通用路径：按面着色
         from autoflowcfd.core.fr_residual.viscous_flux_kernel import (
