@@ -34,7 +34,8 @@ def _sa_channel(kind, order, scheme=None, order_continuation=False):
         bc[n] = {"type": "FARFIELD", "Q_free": [RHO, U, 0.0, 0.0, P]}
     s = FRSolver(mesh=mesh, order=order, turb_model_name="SA",
                  time_scheme=scheme if scheme is not None else TimeIntegrationScheme.NEWTON_KRYLOV,
-                 rho_inf=RHO, vel_inf=U, p_inf=P, mu_molecular=1.8e-5, bc_overrides=bc)
+                 rho_inf=RHO, vel_inf=U, p_inf=P, mu_molecular=1.8e-5, bc_overrides=bc,
+                 wall_treatment="resolved")       # 本文件验低雷诺数壁面处理（壁面解点强 Dirichlet、无滑移幽灵态）
     s.order_continuation_enabled = order_continuation
     provider = build_face_exact_ghost_provider(mesh, LX, H, LZ, bc)
     s.boundary_ghost_provider = provider

@@ -1,7 +1,7 @@
 """RANS 自动壁面处理（`wall_treatment="auto"`，`core/turbulence/wall_model/treatment.py`，I-137）的接入。
 
 auto：平衡壁面模型给壁面剪应力、物理无滑移壁面取滑移镜像幽灵态；SST 的 omega 壁面值取 Menter 混合式、k 壁面
-零通量；SA-neg 只换动量壁面条件。resolved（默认）保持既有低雷诺数壁面处理。四个后端由同一组函数构造。
+零通量；SA-neg 只换动量壁面条件（auto 为默认，依据见 `treatment.py`）。resolved 保持低雷诺数壁面处理。四个后端由同一组函数构造。
 """
 
 import numpy as np
@@ -280,3 +280,26 @@ def test_moving_wall_uses_the_relative_velocity_and_does_work():
     F = wall_flux(np, m, tau)
     np.testing.assert_allclose(F[:, 3], m.area * (tau @ u_w) * bottom, rtol=1e-14, atol=0.0)
     assert np.abs(F[bottom, 3]).min() > 0.0
+
+
+@pytest.mark.parametrize("treatment", ["resolved", "auto"])
+def test_gpu_omega_wall_target_matches_cpu(treatment):
+    """GPU 的 omega 壁面目标值与 CPU 一致（P1 棱柱 8 个槽位里 2 个是填充槽位）。2026-10-18 以前 GPU 面几何
+    （`GPUFlatFaceGeometry`）没有上传 `n_prism`，GPU 恒按整行平均、把填充槽位的壁距/密度/k 混进去：auto 档
+    （d1 取均值）目标值差 17%，DUAL_TIME 三个物理步后 omega 场差 7e-5。"""
+    from autoflowcfd.core.gpu.turbulence.gpu_scalar_transport import compute_omega_wall_target_gpu
+    from autoflowcfd.core.turbulence.transport.omega_wall import (
+        _compute_omega_wall_target, _compute_wall_dirichlet_face_mask)
+
+    cpu, gpu = _cpu("SST", treatment), _gpu("SST", treatment)
+    rng = np.random.default_rng(3)
+    k = 0.5 * (1.0 + 0.3 * rng.standard_normal(cpu.turb_model.k_field.shape)) ** 2
+    cpu.turb_model.k_field = k.copy()
+    gpu.turb_model_gpu.k_field = k.copy()
+    assert gpu.flat_face_gpu.n_prism == cpu.mesh.n_prism_cells
+    wall = _compute_wall_dirichlet_face_mask(cpu)
+    ref, _ = _compute_omega_wall_target(cpu, wall, cpu.mu_molecular, cpu.state.Q[..., 0])
+    got, _ = compute_omega_wall_target_gpu(
+        np, gpu.flat_face_gpu, gpu._wall_mask_gpu, gpu.wall_distance_gpu, gpu.Q_gpu, gpu.mu_molecular,
+        gpu.turb_model_gpu.beta1, gpu.turb_model_gpu.omega_max, gpu.turb_model_gpu.k_field, treatment)
+    np.testing.assert_allclose(np.asarray(got), ref, rtol=1e-12, atol=0.0)

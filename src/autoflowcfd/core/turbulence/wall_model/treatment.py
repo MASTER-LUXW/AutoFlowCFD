@@ -18,8 +18,10 @@ auto 档 omega 壁面目标值对贴壁单元 k 的依赖（`turbulence/jacobian
 
 WALL_TREATMENTS = ("resolved", "auto")
 
-#: 默认近壁处理方式（全部求解器构造参数、CLI、配置的唯一来源）
-DEFAULT_WALL_TREATMENT = "resolved"
+#: 默认近壁处理方式（全部求解器构造参数、CLI、配置的唯一来源）。auto：湍流平板 P1 SST 在第一层形心 y+ 约
+#: 1.8 / 19 / 190 三档网格上摩阻对 White 关联式 -6.4% / +2.0% / +1.8%，resolved 为 -13.2% / -77.5% / -97.3%
+#: （`tests/validation/test_flat_plate_wall_treatment.py`，2026-10-18）——壁面解析网格上也不差于 resolved
+DEFAULT_WALL_TREATMENT = "auto"
 
 
 def validate_wall_treatment(value) -> str:

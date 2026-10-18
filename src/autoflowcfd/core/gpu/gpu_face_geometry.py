@@ -44,6 +44,9 @@ class GPUFlatFaceGeometry:
         with cp.cuda.Device(device_id):
             self.n_faces = flat_face.n_faces
             self.n_colors = flat_face.n_colors
+            # 棱柱单元数（单元下标 < n_prism 为棱柱）：按行区分单元类型、只统计真实解点时用（omega 壁面目标值、
+            # 湍流未知量滤波）。2026-10-18 以前没有上传，GPU 的 omega 壁面目标值一直把填充槽位混进均值
+            self.n_prism = int(flat_face.n_prism)
 
             # ── 面连接关系 ──
             self.owner_cell = cp.asarray(flat_face.owner_cell)

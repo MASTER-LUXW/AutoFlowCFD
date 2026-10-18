@@ -21,7 +21,7 @@ def _solver(order):
     for n in ("x_min", "x_max"):
         bc[n] = {"type": "FARFIELD", "Q_free": [RHO, 0.5 * U, 0.0, 0.0, P]}
     solver = FRSolver(mesh=mesh, order=order, rho_inf=RHO, vel_inf=0.5 * U, p_inf=P,
-                      mu_molecular=1.8e-5, bc_overrides=bc)
+                      mu_molecular=1.8e-5, bc_overrides=bc, wall_treatment="resolved")
     solver.boundary_ghost_provider = build_face_exact_ghost_provider(mesh, LX, H, LZ, bc)
     rng = np.random.default_rng(order)
     Uc = np.array(solver.state.U, copy=True)

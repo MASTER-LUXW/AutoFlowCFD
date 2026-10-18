@@ -100,14 +100,15 @@ class TestTreatmentSelectsTheConvention:
     def test_d1_follows_the_wall_treatment(self, treatment, expected):
         from autoflowcfd.core.turbulence.sst.bounds import omega_wall_length_scale
 
-        wd = np.array([[1.0e-5, 3.0e-5, 5.0e-5, 7.0e-5]])
-        assert omega_wall_length_scale(wd, None, np, treatment)[0] == pytest.approx(expected, rel=1e-14)
+        # P1 四面体：8 个槽位里前 4 个是真实解点，后 4 个填充槽位的值不得进入 min/mean
+        wd = np.array([[1.0e-5, 3.0e-5, 5.0e-5, 7.0e-5, 1e-9, 1e-9, 9.0, 9.0]])
+        assert omega_wall_length_scale(wd, np.array([False]), np, treatment)[0] == pytest.approx(expected, rel=1e-14)
 
     def test_rejects_unknown_treatment(self):
         from autoflowcfd.core.turbulence.sst.bounds import omega_wall_length_scale
 
         with pytest.raises(ValueError, match="近壁处理方式"):
-            omega_wall_length_scale(np.array([[1e-5, 2e-5]]), None, np, "min")
+            omega_wall_length_scale(np.full((1, 8), 1e-5), np.array([False]), np, "min")
 
 
 class TestRealOffWallPoints:

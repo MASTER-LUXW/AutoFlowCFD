@@ -122,15 +122,16 @@ class TestRealFRSolverWmlesConstructionOrder:
             assert cfg["is_no_slip"] is False
 
     def test_fr_solver_non_wmles_wall_is_no_slip_true(self):
-        """反向对照：同一构造路径，非 WMLES 时必须保持 is_no_slip=True
-        不变（排除"任何 FRSolver 构造都变成 False"这种更粗暴的误判）。"""
+        """反向对照：同一构造路径，非 WMLES、低雷诺数壁面处理（resolved）时必须保持 is_no_slip=True
+        不变（排除"任何 FRSolver 构造都变成 False"这种更粗暴的误判）。RANS 默认的 auto 档同样有壁面模型，
+        见 `test_wall_treatment_auto.py`。"""
         order = 2
         mesh = _build_synthetic_mixed_mesh(order)
         fc = mesh.face_connectivity
         tag_wall_cells(mesh, [int(fc.owner_cell[np.nonzero(fc.is_boundary)[0][0]])])
 
         from autoflowcfd.core.fr_solver.solver import FRSolver
-        solver = FRSolver(mesh, order=order, turb_model_name="sst")
+        solver = FRSolver(mesh, order=order, turb_model_name="sst", wall_treatment="resolved")
 
         assert solver.wall_model is None
         wall_configs = [

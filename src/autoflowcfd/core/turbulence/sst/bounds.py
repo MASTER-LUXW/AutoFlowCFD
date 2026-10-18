@@ -81,17 +81,13 @@ def omega_wall_length_scale(wd_owner, row_is_prism, xp, wall_treatment: str):
     * `min` 排除壁面上的解点（`d == 0`，原生四面体的解点含顶点、棱点与面点）：Wilcox 的 d1
       是"第一个离壁点"的距离，取到 0 会让目标值落到 `OMEGA_WALL_D1_FLOOR`、直接顶到上界。
 
-    `row_is_prism` 为 None 时整行都按真实解点处理（只有不带棱柱数的测试替身走这里）。
     """
     from autoflowcfd.core.turbulence.wall_model.treatment import validate_wall_treatment
     from autoflowcfd.fr.native_padding import order_from_n_sps, reduce_rows_over_real_sps
 
     mode = "min" if validate_wall_treatment(wall_treatment) == "resolved" else "mean"
     rows = xp.where(wd_owner > 0.0, wd_owner, xp.inf) if mode == "min" else wd_owner
-    if row_is_prism is None:
-        d1 = getattr(xp, mode)(rows, axis=1)
-    else:
-        d1 = reduce_rows_over_real_sps(rows, row_is_prism, order_from_n_sps(rows.shape[1]), mode, xp=xp)
+    d1 = reduce_rows_over_real_sps(rows, row_is_prism, order_from_n_sps(rows.shape[1]), mode, xp=xp)
     return xp.maximum(d1, OMEGA_WALL_D1_FLOOR)
 
 

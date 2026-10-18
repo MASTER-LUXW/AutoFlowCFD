@@ -44,39 +44,21 @@ def compute_omega_wall_target_gpu(cp, ff, wall_mask, wall_distance_gpu, Q_gpu, m
         # d1 口径与 CPU 端共用一个函数（`sst/bounds.py::omega_wall_length_scale`）
         from autoflowcfd.core.turbulence.sst.bounds import omega_wall_length_scale
 
-        _np_prism = getattr(ff, 'n_prism', None)
-        d1 = omega_wall_length_scale(wall_distance_gpu[owner_cells],
-                                     None if _np_prism is None else owner_cells < _np_prism, cp, wall_treatment)
-        # 只统计真实自由度，与 CPU 端 transport.py::
-        # _compute_omega_wall_target 同一处 2026-09-15 审计逐字对应。
-        # 阶数从 SP 数反解（棱柱是张量积 n_sps=(order+1)^3），棱柱数从
-        # flat face 几何取——都不需要改本函数签名。
-        # 用与 CPU 端**同一个**共享辅助（2026-09-15 统一）：原先这里是
-        # 一份手写的等价逻辑，等价性只能靠人工比对维护；共享版还附带
-        # "order 与 n_sps 必须自洽"的显式校验。
-        from autoflowcfd.fr.native_padding import (
-            order_from_n_sps, reduce_rows_over_real_sps,
-        )
+        # 只统计真实自由度（与 CPU `transport/omega_wall.py::_compute_omega_wall_target` 同一组共享辅助）：
+        # 阶数从解点数反解，棱柱数取自面几何（`GPUFlatFaceGeometry.n_prism`）
+        from autoflowcfd.fr.native_padding import order_from_n_sps, reduce_rows_over_real_sps
+
+        row_is_prism = owner_cells < ff.n_prism
+        d1 = omega_wall_length_scale(wall_distance_gpu[owner_cells], row_is_prism, cp, wall_treatment)
         _rows = Q_gpu[owner_cells, :, 0]
         _order = order_from_n_sps(_rows.shape[1])
-        if _np_prism is None:
-            # 拿不到棱柱数就不能判断行的单元类型；此时退回全场平均并
-            # 保持既有行为（flat face 几何一定带 n_prism，这条分支只在
-            # 测试替身缺字段时才会走到）。
-            rho_owner = cp.mean(_rows, axis=1)
-        else:
-            rho_owner = reduce_rows_over_real_sps(
-                _rows, owner_cells < _np_prism, _order, 'mean', xp=cp)
+        rho_owner = reduce_rows_over_real_sps(_rows, row_is_prism, _order, 'mean', xp=cp)
         nu_owner = mu / cp.maximum(rho_owner, 1e-10)
         # 公式随近壁处理方式，与 CPU 同一个函数（`turbulence/sst/bounds.py::omega_wall_value`）
         from autoflowcfd.core.turbulence.sst.bounds import omega_wall_value
         k_owner = None
         if wall_treatment == "auto":
-            k_rows = turb_k_field[owner_cells]
-            if _np_prism is None:
-                k_owner = cp.mean(k_rows, axis=1)
-            else:
-                k_owner = reduce_rows_over_real_sps(k_rows, owner_cells < _np_prism, _order, 'mean', xp=cp)
+            k_owner = reduce_rows_over_real_sps(turb_k_field[owner_cells], row_is_prism, _order, 'mean', xp=cp)
         omega_wall = omega_wall_value(cp, nu_owner, d1, k_owner, beta1, wall_treatment)
         omega_wall = cp.minimum(omega_wall, omega_max)
         omega_wall_value_face[wall_idx, :] = omega_wall[:, None]

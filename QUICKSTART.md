@@ -141,6 +141,13 @@ poetry run autoflowcfd solve steady examples/ahmed_demo/ahmed_volume.pkl \
 - `--max-iter 1000`：最大迭代次数
 - `--reference-area 1.0`：气动系数参考面积 (m²)
 
+**近壁处理与 y+**（RANS：`sa`/`sst`/`ddes`/`iddes`）：
+- `--wall-treatment auto`（默认）：自动壁面处理——Spalding 平衡壁面模型给壁面剪应力，贴壁单元从粘性底层到
+  对数律层（形心 y+ 约 1~300）都适用；`resolved`：低雷诺数壁面处理，要求贴壁单元落在粘性底层（y+ < 5）
+- 生成体网格时可按目标 y+ 给第一层高度：`grid generate-volume ... --target-yplus 1 --ref-velocity 40 --ref-length 4.5`
+  （或直接 `--first-layer-height 2e-5`）
+- 求解结束时打印壁面 y+ 统计（贴壁单元形心高度），超出所选近壁处理的适用范围时给出警告
+
 #### ⚡ GPU 加速仿真
 
 如果您的系统支持 GPU：
