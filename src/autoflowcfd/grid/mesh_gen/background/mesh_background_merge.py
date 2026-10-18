@@ -29,10 +29,10 @@ if TYPE_CHECKING:
 from ..utils.mesh_domain_classify import classify_boundary_groups
 
 # tetgen 自身缺乏按体积细化 oversized 单元的可靠机制时的确定性兜底阈值
-# （参见 subdivide_oversized_tetrahedra 的文档字符串了解原因以及
-# 为何使用重心细分）。乘以各调用点自身的区域目标 maxvol（并非精确
+# （参见 fill_without_oversized_tetrahedra 的文档字符串：超过阈值的四面体内部
+# 插点后交回 tetgen 重新四面体化）。乘以各调用点自身的区域目标 maxvol（并非精确
 # 按该目标施加），因此正常的粗而合理的梯度过渡不会被误触发——只有
-# 真正的离群值（实测达目标的 100x-16000x）才会被拆分。
+# 真正的离群值（实测达目标的 100x-16000x）才会被处理。
 OVERSIZED_TET_FACTOR = 5.0
 
 # 核心四面体允许增长到的最大尺寸（以 max_cell_size**3 的分数表示），

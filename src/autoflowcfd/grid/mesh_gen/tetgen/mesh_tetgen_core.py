@@ -25,7 +25,7 @@ from .mesh_tetgen_seam import (
 )
 from .mesh_tetgen_postprocess import (
     _dedupe_coincident_points,
-    subdivide_oversized_tetrahedra,
+    fill_without_oversized_tetrahedra,
     repair_nonmanifold_cells,
 )
 from .mesh_tetgen_seeding import (
@@ -42,7 +42,7 @@ __all__ = [
     'CORE_TETGEN_OPT_ITERATIONS',
     'build_seam_taper_scale',
     'compute_local_thickness_limit',
-    'subdivide_oversized_tetrahedra',
+    'fill_without_oversized_tetrahedra',
     'repair_nonmanifold_cells',
     'estimate_steinerleft',
     'generate_core_background_points',

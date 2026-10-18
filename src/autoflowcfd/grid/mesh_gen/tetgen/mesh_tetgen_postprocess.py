@@ -1,11 +1,11 @@
 """tetgen 核心域填充：填充后的清理与修复。
 
 从 mesh_tetgen_core.py 拆分出来，负责 fill_core_volume 产出的四面体在
-拼接/导出前需要做的收尾处理：重合点合并、超大四面体细分、非流形面修复、
+拼接/导出前需要做的收尾处理：重合点合并、超大四面体重填、非流形面修复、
 以及从 tetgen 自带的 facet marker 反推每个单元所属的边界分组。
 """
 
-from typing import List, Tuple
+from typing import Callable, Optional, Tuple
 
 import numpy as np
 from scipy.sparse import coo_matrix
@@ -91,120 +91,136 @@ def _tet_volumes(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:
     return np.abs(np.einsum('ij,ij->i', p1 - p0, np.cross(p2 - p0, p3 - p0))) / 6.0
 
 
-# subdivide_oversized_tetrahedra 自身深度限制的体积比安全上限：
-# 每次质心细分精确地将四面体体积分为四分之一（见该函数文档字符串
-# 中的证明），所以 8 层是 4**8 = 65,536 倍体积缩减——远超在 cube_demo
-# 上直接测量到的最严重的逃逸四面体情况（约 16,000 倍目标值）。
-_MAX_SUBDIVIDE_DEPTH = 8
+# fill_without_oversized_tetrahedra 的重填轮数上限：每轮在体内超大四面体的并集里插入目标间距的点阵点（放不下时
+# 取质心），tetgen 的 Delaunay 插入必然把它们拆开；离群的超大四面体一轮即消除，此后最大超限倍数不再下降即停止。
+_MAX_REFILL_ROUNDS = 6
 
 
-def subdivide_oversized_tetrahedra(
-    nodes: np.ndarray,
-    tets: np.ndarray,
-    max_volume: float,
-    max_depth: int = _MAX_SUBDIVIDE_DEPTH,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """递归细分每个体积超过 `max_volume` 的四面体，方法是插入其
-    自身质心作为新顶点，将其替换为以该质心和其 4 个原始面形成的
-    4 个子四面体。
+def interior_lattice_points(nodes: np.ndarray, tets: np.ndarray, spacing: float) -> np.ndarray:
+    """落在 `tets`（一组四面体，下标指向 `nodes`）并集内部的全域体心立方（BCC）点阵点 `(k, 3)`。
 
-    存在原因：tetgen 自身的基于体积的精化（fill_core_volume 的
-    `regions`/`varvolume`）不能可靠地覆盖每个单元：其精化队列是
-    形状质量优先、体积第二，一个形状完美但过大且所有 4 个顶点都
-    在 PLC 边界上的四面体（附近没有触发进一步插入的东西）可以
-    完全不被处理——在 cube_demo 上直接确认（一个 14.15 m^3 的
-    四面体从入口跨到出口，约 16,000 倍区域自身目标，无论
-    volume_cap_fraction 是收紧到 0.1 还是放松到 0.5，或者单区域
-    种子被替换为约 27 个分散种子都完全一样——见 mesh_background_merge.py
-    自身历史了解该调查过程），以及在更大规模上通过 mesh_overlap_check.py
-    在真实运行中记录到数千个异常大（0.1-3 m^2）的边界面的。
-    本函数是一个确定性的、不依赖 tetgen 的保底措施，不依赖 tetgen
-    的精化队列选择配合。
-
-    选择质心细分（而非例如最长边二分）是因为它不需要与邻居单元
-    协调：对于任意四面体 (A, B, C, D) 和质心 G = (A+B+C+D)/4，
-    4 个子四面体 (A,B,C,G)、(A,B,D,G)、(A,C,D,G)、(B,C,D,G) 各自
-    恰好有原始体积的 1/4，与原始四面体的形状无关（可直接证明：
-    令 u=B-A, v=C-A, w=D-A，则 det(u, v, (u+v+w)/4) = det(u,v,w)/4，
-    因为 (u+v+w)/4 的 u 和 v 分量在行列式中消去——所以
-    Volume(A,B,C,G) = Volume(A,B,C,D)/4 精确成立），每个子体恰好
-    保留原始四面体的 4 个面之一完全不变。共享该面的邻居看到的是
-    未受影响的、仍然保形的边界——没有悬挂节点，不需要也去细分
-    邻居，没有全局闭合/传播过程（不像最长边二分需要这些来保持
-    保形）。外表面不变，生成器最后的边界映射（map_generated_boundaries）
-    不受影响；绕向对本函数自身的（无符号）体积计算不重要——任何下游方向
-    要求都在稍后对整个合并网格统一归一化（mesh_background.py 的
-    orient_tetrahedra 调用）。
-
-    Args:
-        nodes: (n, 3) float64 节点坐标（仅 `tets` 实际引用的那些；
-            例如 fill_core_volume 的返回值，不是与其他无关单元共享
-            的数组——新质心顶点追加在末尾，所以任何指向同一原始
-            `nodes` 数组的其他索引数组仍然有效，但在此调用之前
-            不存在引用索引 >= len(nodes) 的东西）
-        tets: (m, 4) int64 四面体连接关系，索引指向 `nodes`
-        max_volume: 分裂阈值，单位与 `nodes` 坐标的立方相同
-            （例如 m^3）
-        max_depth: 每个原始超大四面体的递归分裂次数安全上限——
-            超过这个层数后仍然超过 `max_volume` 的四面体保持原样
-            （记录日志）而不是无限分裂
-
-    Returns:
-        (new_nodes, new_tets)：new_nodes 是 `nodes` 加上每插入一个
-        质心追加的一行；new_tets 与 `tets` 总体积相同（质心细分是
-        精确划分，不是近似），但长度不保持——每个分裂的四面体变成
-        4 行，所以行顺序/计数与输入不同，不能假设位置对应。
+    - BCC 而不是简单立方：简单立方点阵每个立方体 8 点共球，是 Delaunay 的退化情形，四面体化必然出薄片；BCC 点阵
+      的 Delaunay 是 Sommerville 四面体（二面角只有 60 与 90 度）。立方体边长 `2^(1/3) spacing`，点密度
+      1/spacing^3，最近点距 0.89 spacing。
+    - 点阵原点固定在坐标原点：相邻四面体、前后各轮取到的是同一套点阵，不会在共享面两侧或轮与轮之间出现几乎重合的点。
+    - 只对并集的**外表面**（不被两个所选四面体共享的面）留 `spacing / 2` 的间隙，并与已有节点保持 `spacing / 2`；
+      并集内部的共享面不需要间隙（2026-10-17 初版对每个四面体的四个面都留间隙，多数四面体只放得下质心，需要多轮
+      重填，各轮的点互不对齐，同样出薄片）。
+    - 一个点都放不下的四面体取其质心，保证每轮每个超大四面体至少被拆开。
     """
-    nodes_arr = np.asarray(nodes, dtype=np.float64)
-    pending = np.asarray(tets, dtype=np.int64)
-    finished_chunks: List[np.ndarray] = []
-    n_split_total = 0
-    worst_before = float(_tet_volumes(nodes_arr, pending).max()) if len(pending) else 0.0
+    from scipy.spatial import cKDTree
 
-    for _ in range(max_depth):
-        if len(pending) == 0:
+    nodes = np.asarray(nodes, dtype=np.float64)
+    tets = np.asarray(tets, dtype=np.int64)
+    s = float(spacing)
+    a = 2.0 ** (1.0 / 3.0) * s                                   # BCC 立方体边长
+    opp = np.array([(1, 2, 3), (0, 2, 3), (0, 1, 3), (0, 1, 2)])
+    face_key = np.sort(tets[:, opp], axis=2).reshape(-1, 3)      # (4m, 3)，第 4k+i 行为四面体 k 的第 i 个面
+    _, inv, cnt = np.unique(face_key, axis=0, return_inverse=True, return_counts=True)
+    outer = (cnt[inv.ravel()] == 1).reshape(-1, 4)
+    tree = cKDTree(nodes)
+    out = []
+    for k, cell in enumerate(tets):
+        P = nodes[cell]
+        T = (P[1:] - P[0]).T                                     # 列为三条棱
+        vol6 = abs(np.linalg.det(T))
+        areas = np.array([0.5 * np.linalg.norm(np.cross(P[j] - P[i], P[l] - P[i])) for i, j, l in opp])
+        # 顶点 i 到对面的高 h_i = 3V / A_i；离外表面 i >= s/2 等价于重心坐标 lambda_i >= s / (2 h_i) = s A_i / vol6
+        lam_min = np.where(outer[k], s * areas / vol6, 0.0)
+        lo = np.floor(P.min(axis=0) / a).astype(int) - 1
+        hi = np.ceil(P.max(axis=0) / a).astype(int) + 1
+        corner = np.stack(np.meshgrid(*[np.arange(lo[d], hi[d] + 1) * a for d in range(3)], indexing="ij"),
+                          axis=-1).reshape(-1, 3)
+        grid = np.vstack([corner, corner + 0.5 * a])
+        lam123 = np.linalg.solve(T, (grid - P[0]).T).T
+        lam = np.column_stack([1.0 - lam123.sum(axis=1), lam123])
+        # 内部共享面要求严格 > 0：恰好落在共享面上的点（测度为零）两侧都不收，避免同一点收两次
+        inside = np.all(np.where(outer[k], lam >= lam_min, lam > 0.0), axis=1)
+        pts = grid[inside]
+        if len(pts):
+            pts = pts[tree.query(pts)[0] >= 0.5 * s]
+        if not len(pts):
+            pts = P.mean(axis=0)[None]
+        out.append(pts)
+    return np.vstack(out) if out else np.zeros((0, 3))
+
+
+def boundary_limited_tetrahedra(nodes: np.ndarray, tets: np.ndarray, max_volume: float) -> np.ndarray:
+    """`(m,)` bool：贴在区域边界面上、且该边界面上的正四面体体积就已超过 `max_volume` 的四面体。
+
+    区域边界面 = 只属于一个四面体的面。面积 A 的面上最小的良态四面体是以它为底的正四面体，体积
+    (4A/sqrt(3))^1.5 / (6 sqrt(2))；超过上限时只有加密边界才能缩小它，在体内插点只会造出贴着该面的薄片。
+    """
+    nodes = np.asarray(nodes, dtype=np.float64)
+    tets = np.asarray(tets, dtype=np.int64)
+    opp = np.array([(1, 2, 3), (0, 2, 3), (0, 1, 3), (0, 1, 2)])
+    faces = tets[:, opp]                                          # (m, 4, 3)
+    key = np.sort(faces, axis=2).reshape(-1, 3)
+    _, inv, cnt = np.unique(key, axis=0, return_inverse=True, return_counts=True)
+    on_boundary = (cnt[inv.ravel()] == 1).reshape(-1, 4)
+    P = nodes[faces]                                              # (m, 4, 3, 3)
+    area = 0.5 * np.linalg.norm(np.cross(P[..., 1, :] - P[..., 0, :], P[..., 2, :] - P[..., 0, :]), axis=-1)
+    v_regular = (4.0 * area / np.sqrt(3.0)) ** 1.5 / (6.0 * np.sqrt(2.0))
+    return np.any(on_boundary & (v_regular > max_volume), axis=1)
+
+
+def fill_without_oversized_tetrahedra(
+    fill: Callable[[Optional[np.ndarray]], Tuple[np.ndarray, np.ndarray]],
+    background_points: Optional[np.ndarray],
+    max_volume: float,
+    target_edge_length: float,
+    max_rounds: int = _MAX_REFILL_ROUNDS,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """调用 `fill(背景点)`（`fill_core_volume` 的闭包）做四面体化；体内有体积超过 `max_volume` 的四面体时，在这些
+    四面体的并集内按目标边长插入点阵点（`interior_lattice_points`），并入背景点重新四面体化，直到全部达标。
+
+    存在原因：tetgen 的体积精化（`regions`/`varvolume`）队列是形状质量优先、体积其次，四个顶点都在 PLC 边界上、
+    附近没有任何触发插入的四面体可以完全不被处理（cube_demo 上一个 14.15 m^3 的四面体从入口跨到出口，约为区域
+    目标的 16000 倍）。新加的点与 `generate_core_background_points` 的背景点走同一条路径（tetgen 的初始 Delaunay
+    原样纳入自由点），重新四面体化时区域体积精化与质量精化照常进行。只要体内最大超限倍数还在下降就继续下一轮，
+    不再下降时退回最好的一轮、给出警告（每轮都要对整个核心区重跑 tetgen；nobisect 下边界比目标尺寸粗时，边界附近
+    tetgen 自然留下的偏大四面体靠体内插点消不掉，反复重跑只会此消彼长）。
+
+    贴在边界面上、尺寸由该边界面决定的超大四面体（`boundary_limited_tetrahedra`）不处理、给出警告：在体内插点
+    缩不小它们，只会造出薄片；要缩小只能加密边界（nobisect 下 tetgen 不能剖分边界面）。
+
+    2026-10-17 以前对全部超大四面体做质心 1 拆 4 细分：贴原四面体某面的子四面体底面不变、高度每层缩为 1/4，
+    k 层后纵横比约 4^k（8 层 65536），用必然制造薄片的方式修"体积过大"（I-145）。
+
+    """
+    extra = None if background_points is None else np.asarray(background_points, dtype=np.float64)
+    best = None                                   # (体内最大超限倍数, nodes, tets)
+    for rnd in range(max_rounds + 1):
+        nodes, tets = fill(extra)
+        vols = _tet_volumes(nodes, tets)
+        over = vols > max_volume
+        limited = np.zeros_like(over)
+        if np.any(over):
+            limited[over] = boundary_limited_tetrahedra(nodes, tets[over], max_volume)
+        interior = over & ~limited
+        worst = float(vols[interior].max()) / max_volume if np.any(interior) else 0.0
+        if best is not None and worst >= best[0]:
+            break                                 # 不再改善：退回上一轮的结果
+        best = (worst, nodes, tets, int(interior.sum()), limited, vols)
+        if worst == 0.0 or rnd == max_rounds:
             break
-        vols = _tet_volumes(nodes_arr, pending)
-        oversized = vols > max_volume
-        if not np.any(oversized):
-            finished_chunks.append(pending)
-            pending = np.empty((0, 4), dtype=np.int64)
-            break
-
-        finished_chunks.append(pending[~oversized])
-        to_split = pending[oversized]
-        n_split_total += len(to_split)
-
-        centroids = nodes_arr[to_split].mean(axis=1)
-        base_idx = len(nodes_arr)
-        centroid_idx = np.arange(base_idx, base_idx + len(to_split), dtype=np.int64)
-        nodes_arr = np.vstack([nodes_arr, centroids])
-
-        a, b, c, d = to_split[:, 0], to_split[:, 1], to_split[:, 2], to_split[:, 3]
-        pending = np.concatenate([
-            np.stack([a, b, c, centroid_idx], axis=1),
-            np.stack([a, b, d, centroid_idx], axis=1),
-            np.stack([a, c, d, centroid_idx], axis=1),
-            np.stack([b, c, d, centroid_idx], axis=1),
-        ], axis=0)
-
-    if len(pending):
-        logger.warning(
-            f"subdivide_oversized_tetrahedra: {len(pending)} cell(s) still "
-            f"exceed max_volume={max_volume:.4g} after {max_depth} levels "
-            f"(worst {float(_tet_volumes(nodes_arr, pending).max()):.4g}) - "
-            f"kept as-is rather than split indefinitely"
-        )
-        finished_chunks.append(pending)
-
-    new_tets = np.vstack(finished_chunks) if finished_chunks else np.asarray(tets, dtype=np.int64)
-    if n_split_total:
+        new_points = interior_lattice_points(nodes, tets[interior], target_edge_length)
         logger.info(
-            f"subdivide_oversized_tetrahedra: split {n_split_total} oversized "
-            f"cell(s) (worst {worst_before:.4g} -> target {max_volume:.4g}), "
-            f"{len(new_tets) - len(tets)} net new cells"
-        )
-    return nodes_arr, new_tets
+            f"体内超大四面体 {int(interior.sum())} 个（最大为上限的 {worst:.1f} 倍）："
+            f"插入 {len(new_points)} 个点阵点后重新四面体化（第 {rnd + 1} 轮）")
+        extra = new_points if extra is None else np.vstack([extra, new_points])
+    worst, nodes, tets, n_interior, limited, vols = best
+    if np.any(limited):
+        logger.warning(
+            f"{int(limited.sum())} 个贴边界面的四面体超过体积上限 {max_volume:.4g}（最大为上限的 "
+            f"{float(vols[limited].max()) / max_volume:.1f} 倍）：尺寸由所贴边界面决定，体内插点缩不小、只会"
+            f"造出薄片，保留原样；要缩小需加密该处边界")
+    if n_interior:
+        logger.warning(
+            f"重填不再改善后体内仍有 {n_interior} 个四面体超过体积上限 {max_volume:.4g}（最大为上限的 {worst:.1f} 倍）："
+            f"通常是 nobisect 下边界比目标尺寸粗、tetgen 不能在边界附近插点所致，保留原样（单元形状由 tetgen "
+            f"质量精化保证，网格质量门另行检查）")
+    return nodes, tets
 
 
 def repair_nonmanifold_cells(nodes: np.ndarray, cells: np.ndarray) -> np.ndarray:

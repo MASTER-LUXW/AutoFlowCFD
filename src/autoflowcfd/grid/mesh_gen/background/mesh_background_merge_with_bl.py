@@ -27,7 +27,7 @@ from ..tetgen.mesh_tetgen_core import (
     build_seam_taper_scale, fill_core_volume,
     compute_local_thickness_limit,
     generate_core_background_points,
-    subdivide_oversized_tetrahedra,
+    fill_without_oversized_tetrahedra,
     CORE_TETGEN_MINRATIO, CORE_TETGEN_MINDIHEDRAL,
 )
 
@@ -215,12 +215,19 @@ def _build_merged_mesh_with_bl(
         )
         logger.info(f"TetGen constraint: target_edge_length={target_edge_length:.4f}m, volume_cap={volume_cap_fraction}")
 
-    core_nodes, core_tets = fill_core_volume(
-        core_plc_points, core_plc_faces, holes=hole_points, regions=regions,
-        background_points=background_points,
-        minratio=CORE_TETGEN_MINRATIO, mindihedral=CORE_TETGEN_MINDIHEDRAL,
-        force_preserve_boundary=True,
-    )
+    def _fill(extra_points):
+        return fill_core_volume(
+            core_plc_points, core_plc_faces, holes=hole_points, regions=regions,
+            background_points=extra_points,
+            minratio=CORE_TETGEN_MINRATIO, mindihedral=CORE_TETGEN_MINDIHEDRAL,
+            force_preserve_boundary=True,
+        )
+
+    if regions:
+        core_nodes, core_tets = fill_without_oversized_tetrahedra(
+            _fill, background_points, regions[0][2] * OVERSIZED_TET_FACTOR, target_edge_length)
+    else:
+        core_nodes, core_tets = _fill(background_points)
     n_core_boundary = len(core_plc_points)
     if not (len(core_nodes) >= n_core_boundary and np.array_equal(core_nodes[:n_core_boundary], core_plc_points)):
         raise RuntimeError(
@@ -230,12 +237,6 @@ def _build_merged_mesh_with_bl(
             "assumes point-for-point preservation and cannot proceed "
             "safely"
         )
-    if regions:
-        oversized_max_volume = regions[0][2] * OVERSIZED_TET_FACTOR
-        core_nodes, core_tets = subdivide_oversized_tetrahedra(
-            core_nodes, core_tets, oversized_max_volume
-        )
-
     if export_core_only:
         path = export_core_only_path
         if not path:

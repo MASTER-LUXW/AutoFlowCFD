@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 from .mesh_background_merge_utils import _refine_large_boundary_faces, _export_partial_mesh_and_exit
 from ..tetgen.mesh_tetgen_core import (
     fill_core_volume, generate_core_background_points,
-    subdivide_oversized_tetrahedra,
+    fill_without_oversized_tetrahedra,
     CORE_TETGEN_MINRATIO, CORE_TETGEN_MINDIHEDRAL, CORE_VOLUME_CAP_FRACTION,
 )
 
@@ -72,17 +72,19 @@ def _build_merged_mesh_no_bl(
         proc_nodes, proc_faces = surface_nodes, surface_faces
         background_points = None
 
-    core_nodes, core_tets = fill_core_volume(
-        proc_nodes, proc_faces, holes=hole_points,
-        regions=regions,
-        background_points=background_points,
-        minratio=CORE_TETGEN_MINRATIO, mindihedral=CORE_TETGEN_MINDIHEDRAL,
-    )
-    if regions:
-        oversized_max_volume = regions[0][2] * OVERSIZED_TET_FACTOR
-        core_nodes, core_tets = subdivide_oversized_tetrahedra(
-            core_nodes, core_tets, oversized_max_volume
+    def _fill(extra_points):
+        return fill_core_volume(
+            proc_nodes, proc_faces, holes=hole_points,
+            regions=regions,
+            background_points=extra_points,
+            minratio=CORE_TETGEN_MINRATIO, mindihedral=CORE_TETGEN_MINDIHEDRAL,
         )
+
+    if regions:
+        core_nodes, core_tets = fill_without_oversized_tetrahedra(
+            _fill, background_points, regions[0][2] * OVERSIZED_TET_FACTOR, target_edge_length)
+    else:
+        core_nodes, core_tets = _fill(background_points)
     merged_nodes, tet_cells = core_nodes, core_tets
     prism_cells = np.zeros((0, 6), dtype=np.int64)
 
