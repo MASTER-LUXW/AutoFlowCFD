@@ -23,7 +23,7 @@ from loguru import logger
 
 #: `--bc-type`（体网格生成与导入共用）
 _BC_TYPE_HELP = ("边界条件类型，组名=类型（可重复），覆盖按属性名识别的结果；名字识别不了或有歧义的组必须给出。"
-                 "类型取 WALL/SLIP_WALL/VELOCITY_INLET/PRESSURE_OUTLET/SYMMETRY/FARFIELD/PERIODIC")
+                 "类型取 WALL/SLIP_WALL/VELOCITY_INLET/PRESSURE_OUTLET/SYMMETRY/FARFIELD")
 
 
 def _resolve_first_layer_height(first_layer_height, target_yplus, ref_velocity, ref_length, rho, mu):

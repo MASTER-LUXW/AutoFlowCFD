@@ -105,3 +105,15 @@ def test_import_reads_the_surface_mesh_in_the_same_units(monkeypatch, tmp_path):
     with pytest.raises(Stop):
         mod.import_external_volume_mesh("v.nas", "s.nas", units="m", bc_types={"x": "WALL"})
     assert seen == {"units": "m", "bc_types": {"x": "WALL"}}
+
+
+def test_periodic_is_not_an_assignable_type():
+    """周期边界还需要配对组与平移向量，"组名=类型"通道给不出：名字里的 periodic/周期 不识别为周期，
+    --bc-type 组=PERIODIC 报错（此前接受它、加载网格时才因缺 paired_with/translation 报错）。"""
+    from autoflowcfd.grid.nas_io.boundary_types import (
+        UNSPECIFIED, BoundaryTypeError, detect_boundary_type, parse_bc_type_options)
+
+    assert detect_boundary_type("periodic_x") == UNSPECIFIED
+    assert detect_boundary_type("周期面") == UNSPECIFIED
+    with pytest.raises(BoundaryTypeError, match="不受支持"):
+        parse_bc_type_options(["side=PERIODIC"])

@@ -15,8 +15,10 @@ from typing import Dict, Iterable, Optional
 
 from loguru import logger
 
-#: 求解器支持的边界条件类型（`core/fr_solver/boundary/ghost.py` 的类型表与周期边界）
-SOLVER_BC_TYPES = ("WALL", "SLIP_WALL", "VELOCITY_INLET", "PRESSURE_OUTLET", "SYMMETRY", "FARFIELD", "PERIODIC")
+#: 可按名字识别或用 --bc-type 指定的边界条件类型（`core/fr_solver/boundary/ghost.py` 的类型表）。
+#: 周期边界不在其中：它还需要配对组与平移向量（`BoundaryMap.parameters` 的 paired_with/translation，
+#: `grid/connectivity/face_connectivity_periodic.py`），"组名=类型"这条通道给不出这些参数
+SOLVER_BC_TYPES = ("WALL", "SLIP_WALL", "VELOCITY_INLET", "PRESSURE_OUTLET", "SYMMETRY", "FARFIELD")
 
 #: 名字无法确定类型的组
 UNSPECIFIED = "UNSPECIFIED"
@@ -30,8 +32,6 @@ _WORD_KEYWORDS = {
     "VELOCITY_INLET": ("inlet", "inflow", "entrance"),
     "PRESSURE_OUTLET": ("outlet", "outflow", "exit"),
     "SYMMETRY": ("symmetry", "sym", "symm"),
-    # 周期边界的配对组与平移/旋转参数无法从名字推出，见 `face_connectivity_periodic.py`
-    "PERIODIC": ("periodic",),
     "FARFIELD": ("farfield", "freestream", "far"),
     # 风洞/隧道壁按无摩擦壁处理，不挤出边界层（横跨计算域的隧道壁上挤出边界层会立即塌缩）
     "SLIP_WALL": ("slip", "tunnel"),
@@ -43,7 +43,6 @@ _CJK_KEYWORDS = {
     "VELOCITY_INLET": ("入口",),
     "PRESSURE_OUTLET": ("出口",),
     "SYMMETRY": ("对称",),
-    "PERIODIC": ("周期",),
     "FARFIELD": ("远场",),
     "SLIP_WALL": ("风洞", "洞壁"),
     "WALL": ("车体", "车身", "壁面", "地面"),
@@ -98,4 +97,5 @@ def require_specified_bc_types(boundaries) -> None:
         raise BoundaryTypeError(
             f"边界组 {missing} 的类型无法从名字确定（没有命中关键字或命中多种类型）。边界条件类型是物理输入，"
             f"请用 --bc-type 组名=类型 逐个给出（可重复；类型取 {', '.join(SOLVER_BC_TYPES)}），"
-            f"例如 --bc-type {missing[0]}=WALL")
+            f"例如 --bc-type {missing[0]}=WALL。周期边界不能这样指定（还需要配对组与平移向量，见 "
+            f"grid/connectivity/face_connectivity_periodic.py）")
