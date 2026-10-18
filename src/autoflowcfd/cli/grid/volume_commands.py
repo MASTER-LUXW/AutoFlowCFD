@@ -21,6 +21,11 @@ from typing import Optional
 from loguru import logger
 
 
+#: `--bc-type`（体网格生成与导入共用）
+_BC_TYPE_HELP = ("边界条件类型，组名=类型（可重复），覆盖按属性名识别的结果；名字识别不了或有歧义的组必须给出。"
+                 "类型取 WALL/SLIP_WALL/VELOCITY_INLET/PRESSURE_OUTLET/SYMMETRY/FARFIELD/PERIODIC")
+
+
 @click.command(name="generate-volume")
 @click.argument("input_file", type=click.Path(exists=True))
 @click.option("--output", "-o", required=True, help="输出体网格 .nas 文件路径")
@@ -36,6 +41,7 @@ from loguru import logger
     help="在核心区 tetgen 填充完成后立即导出网格（只有核心区四面体，未与"
     "边界层拼接）——跳过后续全部步骤",
 )
+@click.option("--bc-type", "bc_type", multiple=True, help=_BC_TYPE_HELP)
 def generate_volume(
     input_file: str,
     output: str,
@@ -47,6 +53,7 @@ def generate_volume(
     json_output: bool,
     bl_only: bool,
     core_only: bool,
+    bc_type: tuple = (),
 ) -> None:
     """从面网格 .nas 文件生成体网格并导出。
 
@@ -73,6 +80,7 @@ def generate_volume(
         bl_only: 若设置，只生成并导出边界层棱柱层网格。
         core_only: 若设置，在核心区 tetgen 填充完成后立即导出（只有核心区
             四面体，未与边界层拼接）并停止。
+        bc_type: `--bc-type 组名=类型`（可重复），见 `grid/nas_io/boundary_types.py`
     """
     from autoflowcfd.grid import (
         NASParser, GridValidator, MeshQualityValidator, export_volume_mesh_to_nas
@@ -87,7 +95,8 @@ def generate_volume(
     logger.info(f"Generating volume mesh: {input_file}")
 
     try:
-        parser = NASParser(input_file)
+        from autoflowcfd.grid.nas_io.boundary_types import parse_bc_type_options
+        parser = NASParser(input_file, bc_types=parse_bc_type_options(bc_type))
 
         logger.info("Step 1/4: Parsing surface mesh...")
         surface_grid = parser.parse()
@@ -218,6 +227,7 @@ def generate_volume(
               help="跳过物理重叠检查（大网格上单项开销最大的质量检查）——"
                    "用于快速预览")
 @click.option("--json", "-j", "json_output", is_flag=True, help="以 JSON 格式输出")
+@click.option("--bc-type", "bc_type", multiple=True, help=_BC_TYPE_HELP)
 def import_volume(
     volume_mesh_file: str,
     surface_mesh: str,
@@ -226,6 +236,7 @@ def import_volume(
     max_repair_passes: int,
     skip_overlap_check: bool,
     json_output: bool,
+    bc_type: tuple = (),
 ) -> None:
     """导入外部生成的体网格（例如 ANSA 自己导出的体网格），做质量检查、
     尽力修复、并准备求解。
@@ -247,6 +258,7 @@ def import_volume(
         max_repair_passes: Stage A 自身的最大迭代次数
         skip_overlap_check: 跳过（开销较大的）物理重叠检查
         json_output: 以 JSON 格式输出结果
+        bc_type: `--bc-type 组名=类型`（可重复），见 `grid/nas_io/boundary_types.py`
 
     Examples:
         # 导入、按需修复、并准备求解
@@ -256,6 +268,7 @@ def import_volume(
         $ autoflowcfd solve steady car_volume.pkl
     """
     from autoflowcfd.grid.mesh_gen.utils.mesh_external_import import import_external_volume_mesh
+    from autoflowcfd.grid.nas_io.boundary_types import parse_bc_type_options
 
     logger.info(f"Importing external volume mesh: {volume_mesh_file}")
 
@@ -265,6 +278,7 @@ def import_volume(
             repair=not skip_repair,
             max_repair_passes=max_repair_passes,
             check_overlap=not skip_overlap_check,
+            bc_types=parse_bc_type_options(bc_type),
         )
 
         output_path = Path(output)

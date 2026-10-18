@@ -20,7 +20,7 @@ VolumeMeshData 消费）提交给求解器。
 """
 
 import numpy as np
-from typing import Tuple, TYPE_CHECKING
+from typing import Dict, Optional, Tuple, TYPE_CHECKING
 from loguru import logger
 
 if TYPE_CHECKING:
@@ -90,6 +90,7 @@ def import_external_volume_mesh(
     max_repair_passes: int = 5,
     check_overlap: bool = True,
     units: str = 'mm',
+    bc_types: Optional[Dict[str, str]] = None,
 ) -> Tuple['VolumeMeshData', 'MeshQualityReport']:
     """完整的"自带体网格"管线：解析、从伴生面网格归属边界组、
     质量检查，以及（若请求且需要时）尽力修复。
@@ -107,12 +108,11 @@ def import_external_volume_mesh(
         check_overlap: 转发给 MeshQualityValidator——物理重叠
             检查是大规模网格上最昂贵的单个检查；仅为快速初步
             查看时禁用。
-        units: 转发给 parse_volume_mesh_nas——'mm'（默认，与
-            NASParser 自身的默认值一致）、'm' 或 'auto'。必须与
-            `surface_mesh_path` 实际使用的单位一致（NASParser 总是
-            在内部将其缩放到米，无论此值如何），否则下方的几何
-            边界匹配将静默失败——见 parse_volume_mesh_nas 自身的
-            文档字符串。
+        units: 体网格与伴生面网格共用的长度单位——'mm'（默认）、'm' 或 'auto'，同时转发给
+            parse_volume_mesh_nas 与面网格的 NASParser（两者都缩放到米；单位不一致时下方的几何
+            边界匹配整体错位）。
+        bc_types: 用户显式给出的边界条件类型 {组名: 类型}（`--bc-type`，见 `nas_io/boundary_types.py`）；
+            导入后每个组都必须有确定的类型
 
     Returns:
         (volume_mesh, quality_report)——最终网格（若修复运行且
@@ -129,7 +129,10 @@ def import_external_volume_mesh(
     volume_mesh = parse_volume_mesh_nas(volume_mesh_path, units=units)
 
     logger.info(f"Parsing companion surface mesh for boundary attribution: {surface_mesh_path}")
-    surface_grid = NASParser(surface_mesh_path).parse()
+    # 面网格与体网格必须按同一长度单位读入（此前面网格恒按默认 'mm'，units='m' 时边界几何归属整体错位）
+    surface_grid = NASParser(surface_mesh_path, units=units, bc_types=bc_types).parse()
+    from ...nas_io.boundary_types import require_specified_bc_types
+    require_specified_bc_types(surface_grid.boundaries)
 
     boundaries = map_boundaries_by_geometry(volume_mesh, surface_grid)
     volume_mesh.boundaries = boundaries

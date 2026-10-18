@@ -37,7 +37,10 @@ def generate_volume_mesh_from_surface(
         VolumeMeshData
     """
     from ..mesh_gen.tetgen.volume_mesh_generator import VolumeMeshGenerator
+    from .boundary_types import require_specified_bc_types
 
+    # 哪些组挤出边界层、哪些组是滑移/开放边界由类型决定：每个组都必须有确定的类型
+    require_specified_bc_types(surface_grid.boundaries)
     logger.info("Generating volume mesh from surface geometry...")
 
     params = volume_mesh_params or {}

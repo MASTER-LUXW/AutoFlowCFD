@@ -9,12 +9,13 @@ import numpy as np
 from loguru import logger
 
 from ..structures import BoundaryMap
+from .boundary_types import UNSPECIFIED, detect_boundary_type
 from .nas_parser_exceptions import NASParseError
 
 # 用于捕获所有属性 ID 无法解析为名称的单元的
 # "catch-all"分组名称（没有 $ANSA_NAME_COMMENT 也没有可解析的 PSHELL
 # 注释）。没有这个分组，这些单元会静默从每个边界组消失——它们仍然
-# 存在于网格中但完全没有分配边界条件。
+# 存在于网格中但完全没有分配边界条件。它的类型记为 UNSPECIFIED，必须由用户给出。
 _UNCLASSIFIED_GROUP = "UNCLASSIFIED"
 
 # Shell 类型的属性卡片类型，用于边界命名识别。PCOMP/
@@ -95,11 +96,11 @@ def parse_boundary_properties(
         )
         if unclassified:
             groups[_UNCLASSIFIED_GROUP] = unclassified
-            bc_types[_UNCLASSIFIED_GROUP] = 'WALL'
+            bc_types[_UNCLASSIFIED_GROUP] = UNSPECIFIED
             logger.warning(
                 f"{len(unclassified)} cells could not be mapped to a named "
                 f"Property (missing $ANSA_NAME_COMMENT/PSHELL name) and were "
-                f"placed in the '{_UNCLASSIFIED_GROUP}' group as WALL"
+                f"placed in the '{_UNCLASSIFIED_GROUP}' group (type unspecified, give it with --bc-type)"
             )
         if cell_count and len(cell_to_pid) < cell_count:
             logger.warning(
@@ -231,42 +232,14 @@ def _map_properties_to_boundaries(
     pid_to_name: Dict[int, str],
     pid_to_cells: Dict[int, List[int]]
 ) -> Tuple[Dict[str, List[int]], Dict[str, str], Dict[str, int]]:
-    """将属性名称映射到边界组并检测 BC 类型。"""
+    """将属性名称映射到边界组，类型按名字识别（`boundary_types.detect_boundary_type`，识别不了记为 UNSPECIFIED）。"""
     groups = {}
     bc_types = {}
     property_ids = {}
-    
-    # 边界关键字映射表，用于自动识别边界类型。顺序很重要：
-    # _detect_boundary_type 返回第一个匹配到的 bc_type，所以更具体的关键字
-    # 集合要排在通用的 'WALL' 分类之前——否则像 "TUNNEL_WALL" 这样的复合
-    # 名称会先匹配到 'wall' 这个子串，根本轮不到下面的 'tunnel' 关键字。
-    boundary_keywords = {
-        'VELOCITY_INLET': ['inlet', 'inflow', 'entrance', '入口'],
-        'PRESSURE_OUTLET': ['outlet', 'outflow', 'exit', '出口'],
-        'SYMMETRY': ['symmetry', 'sym', '对称'],
-        # 周期边界（见 grid/face_connectivity.py::pair_periodic_boundary_faces）
-        # 只能靠属性名关键字识别出"这是一对周期面"，无法从几何/NAS 文件本身
-        # 反推出配对的另一侧组名与平移向量——这两项必须通过 YAML 手动/混合
-        # 配置补齐（写入 BoundaryMap.parameters[name]['paired_with'/'translation']），
-        # 纯 NAS 自动模式无法单独完成周期边界的完整配置。
-        'PERIODIC': ['periodic', '周期'],
-        # "tunnel"（风洞/隧道壁）是无摩擦的管道壁面（见 bc_handler.py 的
-        # _classify：TUNNEL -> SYMMETRY/自由滑移），不是粘性无滑移壁面——
-        # 绝不能做边界层挤出（滑移壁面处没有需要解析的速度梯度）。此前
-        # "tunnel" 不匹配这里任何一个关键字，会静默落入下面的 'WALL' 默认
-        # 分类，从而变得"可挤出边界层"——在横跨整个计算域的隧道壁上挤出
-        # 边界层几乎立刻塌缩（1-2 层内就撞上对面的壁/车身），产生数百个
-        # 退化四面体和一个让 tetgen 崩溃的非流形曲面。
-        'SLIP_WALL': ['slip', 'farfield', 'freestream', 'tunnel', '风洞', '洞壁'],
-        'WALL': ['wall', 'body', 'surface', '车体', '车身', '壁面'],
-    }
-    
+
     for pid, name in pid_to_name.items():
         if pid not in pid_to_cells:
             continue
-
-        # 根据属性名称确定边界类型
-        bc_type = _detect_boundary_type(name, boundary_keywords)
 
         # ANSA 导出经常将一个逻辑边界（例如 "WALL"）拆分到
         # 多个共享相同属性名称的 PID。这里用扩展而不是替换，
@@ -282,21 +255,8 @@ def _map_properties_to_boundaries(
         else:
             groups[name] = list(pid_to_cells[pid])
             property_ids[name] = pid
-        bc_types[name] = bc_type
+        bc_types[name] = detect_boundary_type(name)
 
-        logger.debug(f"Mapped Property '{name}' (PID={pid}) to {bc_type}")
-    
+        logger.debug(f"Mapped Property '{name}' (PID={pid}) to {bc_types[name]}")
+
     return groups, bc_types, property_ids
-
-
-def _detect_boundary_type(name: str, keywords: Dict[str, List[str]]) -> str:
-    """使用关键字匹配从属性名称检测边界类型。"""
-    name_lower = name.lower()
-    
-    for bc_type, keyword_list in keywords.items():
-        for keyword in keyword_list:
-            if keyword.lower() in name_lower:
-                return bc_type
-    
-    # 默认到 WALL，如果没有匹配
-    return 'WALL'

@@ -91,7 +91,8 @@ def test_volume_mesh_to_all_formats(tmp_path):
         assert (det > 0).all()                                         # CGNS TETRA_4：N1N2N3 法向指向 N4
         families = {k: bytes(f["Base"][k]["FamilyBC/ data"][()]).decode() for k in f["Base"]
                     if isinstance(f["Base"][k], h5py.Group) and f["Base"][k].attrs["label"].startswith(b"Family_t")}
-        assert families == {name: "BCWall" for name in mesh.group_names}
+        # x_min..z_max 的类型无法从名字确定（boundary_types.py，此前默认 WALL）：如实导出为 BCTypeNull
+        assert families == {name: "BCTypeNull" for name in mesh.group_names}
 
     from vtkmodules.vtkIOCGNSReader import vtkCGNSReader
     r = vtkCGNSReader()

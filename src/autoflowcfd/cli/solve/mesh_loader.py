@@ -99,8 +99,13 @@ def load_mesh_for_solver(
             )
         from autoflowcfd.grid.mesh_gen.utils.mesh_external_import import import_external_volume_mesh
         print("Detected volume-mesh NAS format. Parsing and attributing boundaries...")
+        from autoflowcfd.grid.nas_io.boundary_types import BoundaryTypeError
         try:
             volume_data, report = import_external_volume_mesh(input_file, surface_mesh)
+        except BoundaryTypeError as e:
+            raise click.ClickException(
+                f"{e}\n边界条件类型在建立体网格时确定：请用 'autoflowcfd grid import-volume {input_file} "
+                f"-s {surface_mesh} -o <输出.pkl> --bc-type 组名=类型 ...' 生成 .pkl 后再提交计算。") from e
         except ValueError as e:
             raise click.ClickException(
                 f"无法把 '{input_file}' 当作体网格解析：{e}\n"

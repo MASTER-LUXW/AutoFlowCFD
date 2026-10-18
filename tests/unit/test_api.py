@@ -263,7 +263,7 @@ class TestApiGenerateVolumeMesh:
         nodes = SimpleNamespace(x=xyz[:, 0], y=xyz[:, 1], z=xyz[:, 2])
         return SimpleNamespace(
             nodes=nodes, cells=SimpleNamespace(connectivity=np.array([[0, 1, 2], [0, 1, 3], [0, 2, 3], [1, 2, 3]])),
-            boundaries=SimpleNamespace(groups={}), metadata=SimpleNamespace(bounding_box=[0, 1, 0, 1, 0, 1]))
+            boundaries=SimpleNamespace(groups={}, bc_types={}), metadata=SimpleNamespace(bounding_box=[0, 1, 0, 1, 0, 1]))
 
     def test_forwards_parameters_and_keeps_surface_mesh(self, monkeypatch):
         from types import SimpleNamespace

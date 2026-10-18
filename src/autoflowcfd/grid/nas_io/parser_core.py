@@ -34,7 +34,8 @@ class NASParser:
     # 通常是几米（车）到几十米（风洞/远场），同一几何以毫米表示会到几千，远在阈值另一侧。
     AUTO_UNITS_MM_THRESHOLD = 50.0
 
-    def __init__(self, file_path: str, encoding: str = 'UTF-8', units: str = 'mm'):
+    def __init__(self, file_path: str, encoding: str = 'UTF-8', units: str = 'mm',
+                 bc_types: Optional[Dict[str, str]] = None):
         """初始化解析器
 
         Args:
@@ -47,6 +48,8 @@ class NASParser:
                 因子是无条件硬编码的，没有办法覆盖或检测文件已经
                 是米，静默损坏几何（例如 1m 的车缩小到 1mm 的点，
                 或反之）对于任何非毫米的文件。
+            bc_types: 用户显式给出的边界条件类型 {组名: 类型}（`--bc-type`），覆盖按属性名识别的结果
+                （`boundary_types.py`）；组名必须存在
 
         Raises:
             FileNotFoundError: 文件不存在
@@ -59,6 +62,7 @@ class NASParser:
         if units not in ('mm', 'm', 'auto'):
             raise ValueError(f"units must be 'mm', 'm', or 'auto', got {units!r}")
         self.units = units
+        self.bc_types = dict(bc_types or {})
 
         if not self.file_path.exists():
             raise FileNotFoundError(f"NAS file not found: {file_path}")
@@ -216,6 +220,8 @@ class NASParser:
                 cell_count=surface_cells.count,
                 cells_data=cells_data
             )
+            from .boundary_types import apply_bc_types
+            apply_bc_types(boundaries, self.bc_types)
             logger.info(f"Parsed {len(boundaries.groups)} boundary groups")
 
             # Step 5: Compute bounding box
