@@ -61,8 +61,6 @@ _REPO_ROOT_SNIPPET = textwrap.dedent(
     out = compute_exact_adj_rows_fast(
         n_faces, n1d, s1, 0,
         cell_arr=np.array([0, 0, 0, 0, 1, 1, 1, 1], dtype=np.int64),
-        axis_arr=np.array([0, 1, 2, 3, 0, 1, 2, 3], dtype=np.int64),
-        side_arr=np.full(n_faces, -1.0),
         prism_conn=prism, tet_conn=tet, node_coords=nodes,
         code_arr=np.array([6, 7, 8, 9, 6, 7, 8, 9], dtype=np.int64),
     )

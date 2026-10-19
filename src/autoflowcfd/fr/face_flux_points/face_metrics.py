@@ -96,7 +96,6 @@ def build_face_metrics(
     _owner_adj_row_exact = compute_exact_adj_rows_fast(
         n_faces, n1d, sps_1d, n_prism,
         cell_arr=np.asarray(face_conn.owner_cell, dtype=np.int64),
-        axis_arr=o_axis_arr.astype(np.int64), side_arr=o_side_arr.astype(np.float64),
         prism_conn=(mesh._fixed_prism_conn if mesh._fixed_prism_conn is not None
                     else np.empty((0, 6), dtype=np.int64)),
         tet_conn=(mesh._fixed_tet_conn if mesh._fixed_tet_conn is not None
@@ -107,7 +106,6 @@ def build_face_metrics(
     _neighbor_adj_row_exact = compute_exact_adj_rows_fast(
         n_faces, n1d, sps_1d, n_prism,
         cell_arr=np.asarray(face_conn.neighbor_cell, dtype=np.int64),
-        axis_arr=n_axis_arr.astype(np.int64), side_arr=n_side_arr.astype(np.float64),
         prism_conn=(mesh._fixed_prism_conn if mesh._fixed_prism_conn is not None
                     else np.empty((0, 6), dtype=np.int64)),
         tet_conn=(mesh._fixed_tet_conn if mesh._fixed_tet_conn is not None

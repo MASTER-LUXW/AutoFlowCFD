@@ -14,8 +14,6 @@
     2. 手动 inline 3×3 det/inv/adj（numba 不支持 np.linalg.det/inv）
     3. 手动 inline tet/prism 精确 Jacobian 闭式公式（消除函数调用开销）
     4. 逐 (face, fp) 计算 → 无巨量中间数组，内存 O(n_faces × n_fp) 直接输出
-    5. 预计算所有 (axis, side) 组合的参考坐标网格（6 种 × n_fp × 3），
-       kernel 内通过查表访问，避免逐面重新构建
 
 与原版数值一致性：
     使用完全相同的数学公式（tet/prism 精确 Jacobian 闭式 + Duffy 变换），
@@ -24,7 +22,7 @@
 
 逐点的 Jacobian / adj 行原语已拆到 `exact_normal_primitives.py`
 （2026-09-19，项目"单文件不超 500 行"规范），本文件只留 prange kernel
-与它的 Python 封装（参考点表预计算 + dtype 归一化）。
+与它的 Python 封装（面编码检查 + dtype 归一化）。
 """
 
 import numpy as np
@@ -35,11 +33,8 @@ from autoflowcfd.grid.connectivity.face_connectivity import (
     NATIVE_TET_FACE_CODE_RANGE,
 )
 from .exact_normal_primitives import (
-    _adj3,
     _native_prism_adj_row_at,
     _native_tet_adj_row_at,
-    _prism_jac_at,
-    _tet_jac_at,
 )
 
 
@@ -53,13 +48,10 @@ def compute_exact_adj_rows_kernel(
     n_fp,
     n_prism,
     cell_arr,
-    axis_arr,
-    side_arr,
     prism_conn,
     tet_conn,
     node_coords,
     valid_mask,
-    ref_pts_table,
     adj_row_out,
     code_arr,
     n1d,
@@ -68,30 +60,17 @@ def compute_exact_adj_rows_kernel(
     np_cov,
     np_duffy,
 ):
-    """compute_exact_adj_rows 的 numba 并行 kernel。
+    """逐面精确 adj(J) 行（原生四面体面 [6,10)、原生棱柱面 [10,15)），每个线程处理一个面的全部通量点。
 
-    每个线程处理一个面，遍历该面全部 n_fp 个通量点，
-    内联计算 Jacobian → adj(J) → 提取 axis 行写入输出。
+    面编码必须全部是原生编码（`compute_exact_adj_rows_fast` 进 kernel 前检查）。2026-10-19 以前这里还有坍缩立方体面
+    （编码 0~5）一支：生产不可达，但 `parallel=True` 下 numba 对那一支里按单元类型条件定义的局部量生成了越界访问的
+    代码——全新编译时建网格段错误（单线程同样复现，改串行或删掉这一支即消失；旧编译缓存掩盖了它）。
 
     Args:
-        ref_pts_table: (6, n_fp, 3)，预计算的参考坐标网格。
-            索引 = axis * 2 + (0 if side < 0 else 1)
-        code_arr: (n_faces,) 原始 cube face 编码，>=6 即 native 四面体
-            真实面（excluded_vertex=code-6）——真实 bug 修复（见
-            `_native_tet_adj_row_at` 文档）：`axis_arr`/`side_arr` 对
-            native 面存的是复用的 excluded_vertex/哑值，**不能**像
-            此前那样直接当 (axis,side) 用于 `table_idx` 查表——
-            `excluded_vertex` 可以是 0~3，`table_idx=ax*2+sd_idx`
-            在 `excluded_vertex==3` 时越界读取只有 6 行的
-            `ref_pts_table`（numba 不做边界检查，读到未定义内存），
-            `excluded_vertex<3` 时也会被当成错误的坍缩坐标 (axis,side)
-            语义算出完全错误的 Jacobian，必须用这个原始编码分派到
-            `_native_tet_adj_row_at` 单独处理。
-        n1d, sps_1d: native 分支需要按 (a,b) 参考坐标（`flat=i*n1d+j`
-            约定，与 `native_tet_face_points_physical`/
-            `_native_tet_face_points_nb` 同一套采样顺序）算出每个
-            fp 的 (a,b)，不能复用 `ref_pts_table`（那是坍缩坐标 6 个
-            面专属，不含 native 面的参考坐标含义）。
+        code_arr: (n_faces,) 原生面编码
+        n1d, sps_1d: 原生四面体面按 (a,b) 参考坐标采样通量点（`flat=i*n1d+j`，与
+            `native_tet_face_points_physical` / `_native_tet_face_points_nb` 同一套采样顺序）
+        np_ref_pts_table, np_cov, np_duffy: 原生棱柱 5 个面的参考点、余向量与 Duffy 因子（`precompute_native_prism_face_tables`）
     """
     for f in prange(n_faces):
         if not valid_mask[f]:
@@ -150,45 +129,6 @@ def compute_exact_adj_rows_kernel(
                 adj_row_out[f, fp, 2] = r2
             continue
 
-        ax = axis_arr[f]
-        sd = side_arr[f]
-        is_prism = cell < n_prism
-
-        # 查表获取该面的参考坐标网格
-        sd_idx = 0 if sd < 0.0 else 1
-        table_idx = ax * 2 + sd_idx
-
-        # 获取角点物理坐标
-        if is_prism:
-            p0 = node_coords[prism_conn[cell, 0]]
-            p1 = node_coords[prism_conn[cell, 1]]
-            p2 = node_coords[prism_conn[cell, 2]]
-            p3 = node_coords[prism_conn[cell, 3]]
-            p4 = node_coords[prism_conn[cell, 4]]
-            p5 = node_coords[prism_conn[cell, 5]]
-        else:
-            tc = cell - n_prism
-            p0 = node_coords[tet_conn[tc, 0]]
-            p1 = node_coords[tet_conn[tc, 1]]
-            p2 = node_coords[tet_conn[tc, 2]]
-            p3 = node_coords[tet_conn[tc, 3]]
-
-        # 逐通量点计算 Jacobian → adj(J) → 提取 axis 行
-        for fp in range(n_fp):
-            a = ref_pts_table[table_idx, fp, 0]
-            b = ref_pts_table[table_idx, fp, 1]
-            c = ref_pts_table[table_idx, fp, 2]
-
-            if is_prism:
-                J = _prism_jac_at(a, b, c, p0, p1, p2, p3, p4, p5)
-            else:
-                J = _tet_jac_at(a, b, c, p0, p1, p2, p3)
-
-            adj = _adj3(J)
-            adj_row_out[f, fp, 0] = adj[ax, 0]
-            adj_row_out[f, fp, 1] = adj[ax, 1]
-            adj_row_out[f, fp, 2] = adj[ax, 2]
-
 
 # ======================================================================
 # Python 封装：预计算参考坐标表 + 调用 kernel
@@ -230,33 +170,11 @@ def precompute_native_prism_face_tables(order):
     return ref_pts, cov, duffy
 
 
-def precompute_ref_pts_table(n1d, sps_1d):
-    """预计算所有 (axis, side) 组合的参考坐标网格。
-
-    Returns:
-        ref_pts_table: (6, n_fp, 3) 数组。
-        索引方式: table[axis * 2 + (0 if side<0 else 1)]
-    """
-    n_fp = n1d * n1d
-    table = np.zeros((6, n_fp, 3), dtype=np.float64)
-    for axis in range(3):
-        for side_idx, side in enumerate([-1.0, 1.0]):
-            other_axes = [a for a in range(3) if a != axis]
-            g1, g2 = np.meshgrid(sps_1d, sps_1d, indexing="ij")
-            pts = np.zeros((n_fp, 3), dtype=np.float64)
-            pts[:, axis] = side
-            pts[:, other_axes[0]] = g1.ravel()
-            pts[:, other_axes[1]] = g2.ravel()
-            table[axis * 2 + side_idx] = pts
-    return table
-
-
 def compute_exact_adj_rows_fast(
     n_faces, n1d, sps_1d, n_prism,
-    cell_arr, axis_arr, side_arr,
+    cell_arr, code_arr,
     prism_conn, tet_conn, node_coords,
     valid_mask=None,
-    code_arr=None,
 ):
     """compute_exact_adj_rows 的 numba 加速版（接口与原版基本一致，
     新增可选 `code_arr` 供 native 四面体分派，见 `compute_exact_adj_rows_
@@ -267,17 +185,19 @@ def compute_exact_adj_rows_fast(
     降到 O(n_faces × n_fp × 3)（仅输出数组）。
 
     Args:
-        code_arr: (n_faces,) 或 None——原始 cube face 编码。None 时
-            （既有调用点未显式传入的情形）视为全部走坍缩坐标分支，
-            与本次修复前完全一致的行为（传一个全 -1 数组，恒小于 6，
-            `is_native` 恒为 False）。
+        code_arr: (n_faces,) 原生面编码；`valid_mask` 为真的面必须全部落在 [6,15)，否则报错
+
+    Raises:
+        ValueError: 有效面里出现非原生面编码
     """
     n_fp = n1d * n1d
     adj_row_out = np.zeros((n_faces, n_fp, 3), dtype=np.float64)
     if valid_mask is None:
         valid_mask = np.ones(n_faces, dtype=np.bool_)
-    if code_arr is None:
-        code_arr = np.full(n_faces, -1, dtype=np.int64)
+    code_arr = np.asarray(code_arr, dtype=np.int64)
+    bad = int(np.count_nonzero(valid_mask & ((code_arr < _NT_LO) | (code_arr >= NATIVE_PRISM_FACE_CODE_RANGE[1]))))
+    if bad:
+        raise ValueError(f"{bad} 个面的面编码不是原生面编码 [{_NT_LO},{NATIVE_PRISM_FACE_CODE_RANGE[1]})")
 
     # ===== 两张连接表必须**同一个**整数 dtype（真实段错误修复） =====
     #
@@ -300,16 +220,15 @@ def compute_exact_adj_rows_fast(
     prism_conn = np.ascontiguousarray(prism_conn, dtype=np.int64)
     tet_conn = np.ascontiguousarray(tet_conn, dtype=np.int64)
 
-    ref_pts_table = precompute_ref_pts_table(n1d, sps_1d)
     np_ref_pts_table, np_cov, np_duffy = precompute_native_prism_face_tables(
         n1d - 1)
 
     compute_exact_adj_rows_kernel(
         n_faces, n_fp, n_prism,
-        cell_arr, axis_arr, side_arr,
+        cell_arr,
         prism_conn, tet_conn, node_coords,
-        valid_mask, ref_pts_table, adj_row_out,
-        np.asarray(code_arr, dtype=np.int64),
+        valid_mask, adj_row_out,
+        code_arr,
         n1d, np.asarray(sps_1d, dtype=np.float64),
         np_ref_pts_table, np_cov, np_duffy,
     )
