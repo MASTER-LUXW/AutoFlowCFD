@@ -4,11 +4,9 @@
 这里只留构造与对外接口。
 """
 
-from autoflowcfd.core.time_integration.base import DEFAULT_DUAL_TIME_STEPS
 from typing import Optional
 from loguru import logger
-from autoflowcfd.core.turbulence.wall_model.treatment import (
-    DEFAULT_WALL_TREATMENT, build_wall_model, validate_wall_treatment)
+from autoflowcfd.core.turbulence.wall_model.treatment import build_wall_model, validate_wall_treatment
 from autoflowcfd.core.mpi import get_rank, is_root
 from autoflowcfd.core.mpi.partition import (
     partition_mesh,
@@ -30,6 +28,45 @@ from autoflowcfd.core.turbulence.dual_time import reset_dual_time_history
 
 #: 必需的构造参数（物理输入，与单机 FRSolver 的必需关键字参数一致）
 _REQUIRED_KWARGS = ('order', 'turb_model_name', 'time_scheme', 'rho_inf', 'vel_inf', 'p_inf', 'mu_molecular')
+
+
+def _frsolver_parameters():
+    """单机 FRSolver 构造的关键字参数（名字 -> inspect.Parameter）：`solver_kwargs` 的合法键与缺省值的唯一来源
+    （`solver_kwargs` 原样用于构造本地 FRSolver，见 `local_solver`）。"""
+    import inspect
+
+    from autoflowcfd.core.fr_solver.solver import FRSolver
+
+    params = dict(inspect.signature(FRSolver.__init__).parameters)
+    for name in ("self", "mesh", "initial_state"):
+        params.pop(name)
+    return params
+
+
+def _check_solver_kwargs(solver_kwargs: dict) -> None:
+    """`solver_kwargs` 必须是单机 FRSolver 的构造参数：未知键（拼错的名字）报错，必需参数缺失报错。
+
+    2026-10-19（I-109）以前以 `.get(键, 缺省)` 读取：键名拼错（如 'aoa' 而不是 'aoa_deg'）不报错，静默换成缺省值。
+    """
+    params = _frsolver_parameters()
+    unknown = sorted(set(solver_kwargs) - set(params))
+    if unknown:
+        raise TypeError(f"DistributedFRSolver 收到未知参数 {unknown}（solver_kwargs 是单机 FRSolver 的构造参数）")
+    for name in _REQUIRED_KWARGS:
+        if name not in solver_kwargs:
+            raise TypeError(f"DistributedFRSolver 缺少必需参数 {name!r}（物理输入必须显式给出，见 FRSolver 模块文档）")
+
+
+def _kwarg(solver_kwargs: dict, name: str):
+    """`solver_kwargs[name]`，缺省时取单机 FRSolver 签名里的缺省值（两条后端同一份缺省值）。"""
+    import inspect
+
+    if name in solver_kwargs:
+        return solver_kwargs[name]
+    default = _frsolver_parameters()[name].default
+    if default is inspect.Parameter.empty:
+        raise TypeError(f"DistributedFRSolver 缺少必需参数 {name!r}")
+    return default
 
 
 class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, DistributedSolveLoopMixin,
@@ -74,9 +111,7 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
             NotImplementedError: 湍流模型名无法识别（支持的模型见 `core/turbulence/registry.py`，
                 与单机相同）
         """
-        for name in _REQUIRED_KWARGS:
-            if name not in solver_kwargs:
-                raise TypeError(f"DistributedFRSolver 缺少必需参数 {name!r}（物理输入必须显式给出，见 FRSolver 模块文档）")
+        _check_solver_kwargs(solver_kwargs)
         turb_model_name = solver_kwargs['turb_model_name']
         turb_model_upper = str(turb_model_name).upper() if turb_model_name is not None else 'NONE'
         from autoflowcfd.core.turbulence.registry import require_supported
@@ -109,7 +144,7 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         # 在阶数爬升过程中的中间阶段不相等）。
         self.order = int(solver_kwargs['order'])
         self.current_order = self.order
-        self.order_continuation_enabled = solver_kwargs.get('order_continuation_enabled', True)
+        self.order_continuation_enabled = True      # 与单机 FRSolver 同一缺省，调用方构造后可关闭
         self._is_fully_distributed = False
 
         # root 用 METIS 分区，广播给全部 rank
@@ -171,8 +206,8 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         self.p_inf = solver_kwargs['p_inf']
         _v0 = freestream_velocity(
             self.vel_inf,
-            solver_kwargs.get('aoa_deg', 0.0) or 0.0,
-            solver_kwargs.get('aos_deg', 0.0) or 0.0)
+            _kwarg(solver_kwargs, 'aoa_deg'),
+            _kwarg(solver_kwargs, 'aos_deg'))
         self.state.initialize_uniform(
             rho=self.rho_inf,
             u=float(_v0[0]), v=float(_v0[1]), w=float(_v0[2]),
@@ -221,20 +256,20 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
             "p_inf": self.p_inf,
             "mach_ref": resolve_mach_ref(self.rho_inf, self.vel_inf, self.p_inf),
             # 见 gpu_solver.py 同一处说明（2026-09-17）
-            "aoa_deg": float(solver_kwargs.get("aoa_deg", 0.0) or 0.0),
-            "aos_deg": float(solver_kwargs.get("aos_deg", 0.0) or 0.0),
+            "aoa_deg": float(_kwarg(solver_kwargs, "aoa_deg")),
+            "aos_deg": float(_kwarg(solver_kwargs, "aos_deg")),
         }
         # 决定物理解的参数同样**无条件**设置（2026-09-25）：此前只在
         # SST/DDES/IDDES/WMLES 分支里设，于是 none/les 运行的分布式 checkpoint
         # 按替身缺省值写粘度与 Tu/VR（见 core/utils/checkpoint_physics.py）。
         self.mu_molecular = solver_kwargs['mu_molecular']
-        self._turbulence_intensity = solver_kwargs.get('turbulence_intensity', 0.01)
-        self._viscosity_ratio = solver_kwargs.get('viscosity_ratio', 5.0)
+        self._turbulence_intensity = _kwarg(solver_kwargs, 'turbulence_intensity')
+        self._viscosity_ratio = _kwarg(solver_kwargs, 'viscosity_ratio')
         # 问题单元人工粘性（与单机 FRSolver 同名参数、同一实现；见
         # core/mpi/distributed_artificial_viscosity.py）
-        self.artificial_viscosity_enabled = bool(solver_kwargs.get('artificial_viscosity_enabled', False))
-        self.artificial_viscosity_alpha = float(solver_kwargs.get('artificial_viscosity_alpha', 1.0))
-        self.wall_treatment = validate_wall_treatment(solver_kwargs.get('wall_treatment', DEFAULT_WALL_TREATMENT))
+        self.artificial_viscosity_enabled = bool(_kwarg(solver_kwargs, 'artificial_viscosity_enabled'))
+        self.artificial_viscosity_alpha = float(_kwarg(solver_kwargs, 'artificial_viscosity_alpha'))
+        self.wall_treatment = validate_wall_treatment(_kwarg(solver_kwargs, 'wall_treatment'))
         from autoflowcfd.core.turbulence.registry import has_transport_equations
         # 壁面模型：WMLES 或 RANS 自动壁面处理（与单机同一个构造函数）
         self.wall_model = build_wall_model(turb_model_upper, self.wall_treatment)
@@ -259,12 +294,10 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
             # `self._iddes_h_max/_iddes_h_wn`（"传统模式"下 self.mesh 是完整全局网格；两者是单元
             # 自身节点坐标的函数，与分区无关），按 compact_global_ids 切片即得 compact 空间版本。
             if turb_model_upper in ('DDES', 'IDDES'):
-                assert self.ddes_model is not None, (
-                    "init_turbulence_models 应该已经为 DDES/IDDES 设置了 "
-                    "self.ddes_model，这里是 None 说明该函数的对应分支"
-                    "被跳过或修改，需要检查 turbulence.py::init_turbulence_"
-                    "models 的 DDES/IDDES 分支是否还在。"
-                )
+                if self.ddes_model is None:
+                    raise RuntimeError(
+                        "init_turbulence_models 没有为 DDES/IDDES 设置 self.ddes_model（该函数的对应分支被跳过或"
+                        "修改），检查 fr_solver/turbulence/init.py::init_turbulence_models 的 DDES/IDDES 分支")
                 compact_global_ids = self.dist_flat_face.compact_global_ids
                 self.iddes_h_max_compact = self._iddes_h_max[compact_global_ids]
                 self.iddes_h_wn_compact = self._iddes_h_wn[compact_global_ids]
@@ -286,7 +319,7 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         # 现在真正读取 `time_scheme`/`dual_time_inner_iter`，`step()`
         # 相应按 scheme 分派（与单机 `fr_solver/step.py` 同一个设计）。
         time_scheme = require_distributed_scheme(solver_kwargs['time_scheme'])
-        dual_time_steps = solver_kwargs.get('dual_time_inner_iter', DEFAULT_DUAL_TIME_STEPS)
+        dual_time_steps = _kwarg(solver_kwargs, 'dual_time_inner_iter')
         self.time_integrator = TimeIntegrator(
             scheme=time_scheme, dt=1.0, dual_time_steps=dual_time_steps,
         )
@@ -321,10 +354,11 @@ class DistributedFRSolver(_DistributedFromPackageMixin, _DistributedStepMixin, D
         from autoflowcfd.core.time_integration.time_accurate import configure_time_stepping
 
         configure_time_stepping(
-            self, time_scheme, time_accurate=bool(solver_kwargs.get('time_accurate', False)),
-            adaptive_cfl=bool(solver_kwargs.get('adaptive_cfl', True)),
-            cfl_start=solver_kwargs.get('cfl_start'), cfl_max=solver_kwargs.get('cfl_max'), cfl_min=solver_kwargs.get('cfl_min'),
-            low_mach_precond=solver_kwargs.get('low_mach_precond', True))
+            self, time_scheme, time_accurate=bool(_kwarg(solver_kwargs, 'time_accurate')),
+            adaptive_cfl=bool(_kwarg(solver_kwargs, 'adaptive_cfl')),
+            cfl_start=_kwarg(solver_kwargs, 'cfl_start'), cfl_max=_kwarg(solver_kwargs, 'cfl_max'),
+            cfl_min=_kwarg(solver_kwargs, 'cfl_min'),
+            low_mach_precond=_kwarg(solver_kwargs, 'low_mach_precond'))
         # 上一步的涡粘场（local 排列），供下一步的粘性 CFL 限制使用——
         # 与单机 `_get_turbulent_viscosity_field` 读取湍流模型已存字段
         # （即上一步的结果）是同一个时序。
