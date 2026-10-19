@@ -114,11 +114,14 @@ def compute_local_cfl_step_gpu(
             f"并对结果取单元内最小值（见 gpu_solver.py/gpu_distributed.py 的"
             f"_compute_local_time_step_gpu）。传完整数组会静默只用 SP0、"
             f"让逐 SP 的几何/度量 CFL 保护失效。")
-    rho = cp.maximum(U[:, 0, 0], 1e-9)
-    vel = U[:, 0, 1:4] / rho[:, None]
-    ke = 0.5 * rho * cp.sum(vel**2, axis=1)
-    p = cp.maximum((GAMMA - 1.0) * (U[:, 0, 4] - ke), 1.0)
-    a = cp.sqrt(GAMMA * p / rho)
+    # 与 CPU 同一个原始变量换算与声速（`gpu_flux.conserved_to_primitive_gpu`、`thermo.sound_speed`）
+    from autoflowcfd.core.gpu.residual.gpu_flux import conserved_to_primitive_gpu
+    from autoflowcfd.core.thermo import sound_speed
+
+    Q = conserved_to_primitive_gpu(U[:, 0, :5])
+    rho = Q[:, 0]
+    vel = Q[:, 1:4]
+    a = sound_speed(cp, rho, Q[:, 4])
 
     # 阶数相关收紧（与 CPU 侧 cfl.py 同一公式）：显式 FR 格式的对流/
     # 粘性稳定极限随阶数衰减，对流 ~1/(2p+1)、粘性 ~1/(2p+1)^2。

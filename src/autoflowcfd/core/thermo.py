@@ -16,3 +16,13 @@ R_AIR = 287.0
 
 #: 定压比热 J/(kg*K)
 CP_AIR = GAMMA * R_AIR / (GAMMA - 1.0)
+
+
+def sound_speed(xp, rho, p):
+    """声速 `sqrt(GAMMA p / rho)`（`xp` 为数组模块，CPU 与 GPU 的 CFL 共用）。
+
+    不设量纲下限：可容许状态由 Zhang-Shu 正性限制器保证（`time_integration/positivity.py`），非物理状态在这里
+    产生 NaN、由发散检测报告。2026-10-19（I-116）以前 CPU CFL 按 `a^2 >= 1e-10` 兜底、GPU CFL 按 `p >= 1 Pa`、
+    `rho >= 1e-9` 兜底，两个后端对同一状态给出不同步长。
+    """
+    return xp.sqrt(GAMMA * p / rho)

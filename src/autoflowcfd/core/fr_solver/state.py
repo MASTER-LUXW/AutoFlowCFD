@@ -82,30 +82,13 @@ class FRState:
     def _update_primitives(self):
         """从守恒变量 U 更新原始变量 Q。
 
-        numba 并行实现（2026-09-25，算式与此前的 numpy 版本逐项相同：密度下限
-        1e-10、压力下限 1 Pa，下限都用比较实现以保证 NaN 照样传播）。此前每次约
-        85 ms、单线程，每次残差求值前都要调一次。
+        与残差同一个换算（`fr_residual/inviscid.py::conserved_to_primitive` 的 numba 核，密度下限 1e-10、压力不设
+        下限）。2026-10-19（I-116 / I-81）以前这里另有一份核，压力钳到 1 Pa：可容许状态已由 Zhang-Shu 正性限制器
+        保证，钳位只会掩盖非物理态，且无量纲算例（p_inf ~ 1/GAMMA）会被直接改写。
         """
-        _update_primitives_kernel(self.U, self.Q)
+        from autoflowcfd.core.fr_residual.inviscid import _conserved_to_primitive_rows
 
-
-
-@njit(cache=True, parallel=True)
-def _update_primitives_kernel(U, Q):
-    for c in prange(U.shape[0]):
-        for s in range(U.shape[1]):
-            rho = U[c, s, 0]
-            if rho < 1e-10:
-                rho = 1e-10
-            u = U[c, s, 1] / rho
-            v = U[c, s, 2] / rho
-            w = U[c, s, 3] / rho
-            ke = 0.5 * (u * u + v * v + w * w)
-            p = (U[c, s, 4] - rho * ke) * (GAMMA - 1.0)
-            if p < 1.0:
-                p = 1.0
-            Q[c, s, 0] = rho
-            Q[c, s, 1] = u
-            Q[c, s, 2] = v
-            Q[c, s, 3] = w
-            Q[c, s, 4] = p
+        n_vars = self.U.shape[-1]
+        U2 = np.ascontiguousarray(self.U).reshape(-1, n_vars)
+        Q2 = self.Q.reshape(-1, self.Q.shape[-1])
+        _conserved_to_primitive_rows(U2, Q2)
