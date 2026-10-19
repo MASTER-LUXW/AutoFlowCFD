@@ -49,7 +49,9 @@ class _GPUDistributedTurbSourceMixin:
         self._sync_turbulence_view(ctx)
         rates = self._evaluate_turbulence_rates_distributed(ctx)
         # 场更新（模型的点隐式阻尼 + 输运：SST 见 sst/update.py::advance_k_log_omega，SA 见 sa/model.py）
-        ctx.view.update_fields(dt, rates.source, rates.transport)
+        from autoflowcfd.core.turbulence.transported import advance_transported_fields
+
+        advance_transported_fields(ctx.view, dt, rates, get_cupy())
         self._write_back_turbulence_distributed(ctx, fields=True)
         return ctx.rho * ctx.view.nu_t
 
@@ -194,4 +196,6 @@ class _GPUDistributedTurbSourceMixin:
         if fields:
             model.set_transported_fields(
                 [self._unpermute_from_compact(f)[:n_local].copy() for f in view.transported_fields()])
+            # 显式更新这一步的残差（`advance_transported_fields`），本分区的行
+            model.last_update_rates = self._unpermute_from_compact(view.last_update_rates)[:n_local]
         model.nu_t = self._unpermute_from_compact(view.nu_t)[:n_local].copy()

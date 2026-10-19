@@ -12,6 +12,7 @@
 `_loop_monitor_suffix()` 与 `_divergence_hint()`（日志与发散报错的后端附注）。日志只在 root rank 打印。
 """
 
+import math
 from contextlib import contextmanager
 from typing import Optional
 
@@ -55,6 +56,11 @@ def format_step_line(solver, order: int, iteration: int, res: float, initial_res
     if ctrl is not None:
         msg += f" | CFL={ctrl.cfl_number:.3f}"
     msg += inner_iteration_suffix(solver) + newton_monitor_suffix(solver) + solver._loop_monitor_suffix()
+    info = getattr(solver, "_newton_last_info", None)
+    turb = solver.convergence_history.turbulence[-1] if solver.convergence_history.turbulence else math.nan
+    if not math.isnan(turb) and not (info and "res_norm_turbulence" in info):
+        # 显式湍流更新的速率 RMS（隐式紧耦合步的湍流残差已在 Newton 一栏里，|R_turb|）
+        msg += f" | R_turb={turb:.3e}"
     aero = solver.convergence_history.last_coefficients      # 本步 record_step 算好的那一份
     if aero is not None:
         msg += f" | Cd_p={aero['Cd_p']:.4f} Cl_p={aero['Cl_p']:.4f} Cs_p={aero['Cs_p']:.4f}"
@@ -62,13 +68,12 @@ def format_step_line(solver, order: int, iteration: int, res: float, initial_res
     field = solver._scaled_residual_field() if (iteration == 1 or iteration % 10 == 0) else None
     if freestream is not None and field is not None:
         from autoflowcfd.core.fr_solver.residual_diagnostics import (
-            compute_scaled_residuals, format_scaled_residual_line,
+            compute_scaled_residuals, format_scaled_residual_line, volume_percentile_of,
         )
         from autoflowcfd.core.fr_solver.pseudotime_budget import format_pseudo_time_budget
 
-        msg += " | " + format_scaled_residual_line(
-            compute_scaled_residuals(field, freestream),
-            cell_volumes=getattr(getattr(solver, "mesh", None), "cell_volumes", None))
+        msg += " | " + format_scaled_residual_line(compute_scaled_residuals(field, freestream),
+                                                   volume_percentile=volume_percentile_of(solver))
         budget = solver._pseudo_time_budget(n_steps=n_steps)
         if budget is not None:
             msg += " | " + format_pseudo_time_budget(budget, compact=True)
@@ -180,7 +185,7 @@ class SolveLoopMixin:
         执行稳态/瞬态求解循环。
 
         Args:
-            max_iter: 最大迭代次数
+            max_iter: 最大迭代次数（>= 1）
             dt: 时间步长
             tol: 相对收敛容差——残差需相对初始值下降 1/tol 倍才算收敛。
                 默认 1e-6 表示下降 6 个量级（与 Order Continuation 各阶段
@@ -210,6 +215,10 @@ class SolveLoopMixin:
         # 同一个 solver 对象上第二次全新 `solve()` 仍然会正常清零。
         # 旧版本 checkpoint 没有这个字段时标记不会被置上，行为与改动前
         # 完全一致。打印时始终标注步数（见 `pseudotime_budget.py`）。
+        # 至少推进一步：2026-10-19（I-80）以前 max_iter=0 时循环体不执行，收尾的 `i + 1` 抛 NameError，
+        # 最终残差是占位值 1e10
+        if int(max_iter) < 1:
+            raise ValueError(f"max_iter 必须 >= 1（收到 {max_iter}）")
         # 物理时间步长（dual-time 的 checkpoint 写出它，续算沿用；见 core/utils/checkpoint_time.py）
         self._physical_dt = float(dt)
         if getattr(self, "_tau_accum_seeded", False):
@@ -236,7 +245,6 @@ class SolveLoopMixin:
 
         import time
         converged = False
-        final_residual = 1e10
         # 残差下降基准：定阶循环就是单个阶段，与 Order Continuation 共用 `_phase_initial_residual`（随 checkpoint
         # 持久化，`order_continuation/checkpoint_state.py`）。续算时用恢复出的基准做种子——此前定阶循环不写它，
         # 定阶运行（例如 --init-from 起步的瞬态）的 checkpoint 续算时被报成"没有阶段起始残差记录"，相对收敛

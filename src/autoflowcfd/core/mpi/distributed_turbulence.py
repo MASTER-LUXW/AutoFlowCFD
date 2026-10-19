@@ -321,6 +321,8 @@ def distributed_compute_turbulence_source_and_viscosity(
     # 再切 [:n_local]，与平均流残差同一处理）。
     turb_model.set_transported_fields(
         [f[dist_fc.inv_perm][:n_local].copy() for f in turb_view.transported_fields()])
+    # 显式更新这一步的残差（`advance_transported_fields`），本分区的行
+    turb_model.last_update_rates = turb_view.last_update_rates[dist_fc.inv_perm][:n_local]
     turb_model.nu_t = turb_view.nu_t[dist_fc.inv_perm][:n_local].copy()
 
     # mu_t_field 保持 compact 排列（平均流粘性残差直接消费 compact 索引

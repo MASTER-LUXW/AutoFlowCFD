@@ -28,9 +28,13 @@ Fluent/STAR-CCM+ 里是 CLI 本该直接打印出来的信息：
    来流条件构造的参考量级（rho_inf/rho_inf*vel_inf/p_inf），得到
    量纲一致、可以互相比较的"scaled residual"，与 Fluent 的呈现方式
    对齐。
-2. `find_max_residual_location`：全场（含全部变量）绝对值最大的
-   dU_dt 分量所在的 (cell, sp, var)，供打印"Max: X at cell Y (var Z)"
-   这类诊断行——与 STAR-CCM+ 的 Max 监视器对齐。
+2. 同一个函数还给出全场（含全部变量）绝对值最大的 dU_dt 分量所在的
+   (cell, sp, var)，供打印"Max: X at cell Y (var Z)"这类诊断行——与
+   STAR-CCM+ 的 Max 监视器对齐。
+
+湍流方程的残差（显式更新的速率或紧耦合 Newton 的湍流子系统残差）由
+`time_integration/residual_norm.py::turbulence_monitor_residual` 给出，进每步
+监视行与收敛历史。
 """
 
 from typing import NamedTuple, Optional
@@ -114,12 +118,6 @@ def compute_scaled_residuals(dU_dt: np.ndarray, freestream: dict) -> "ResidualDi
     )
 
 
-#: `cell_volume_percentile` 的缓存：键是 `id(cell_volumes)` 与数组长度，
-#: 值是 0~100 的体积分位数组。分位数要对全部单元做一次 argsort（79 万
-#: 单元约 0.1s），逐步重算会白白拖慢每一步诊断。
-_VOL_PCT_CACHE: dict = {}
-
-
 def cell_volume_percentile(cell_volumes) -> Optional[np.ndarray]:
     """逐单元的体积分位（0 = 全场最小，100 = 最大）。
 
@@ -140,30 +138,39 @@ def cell_volume_percentile(cell_volumes) -> Optional[np.ndarray]:
             按"没有几何信息"处理，不报错——合成网格测试替身可能不带它）。
 
     Returns:
-        (n_cells,) 的 0~100 分位数组，或 None。
+        (n_cells,) 的 0~100 分位数组，或 None。分位要对全部单元做一次 argsort（79 万单元约 0.1 s），调用方按网格
+        缓存（`volume_percentile_of`）。
     """
     if cell_volumes is None:
         return None
     vols = np.asarray(cell_volumes)
     if vols.ndim != 1 or vols.size == 0:
         return None
-    key = (id(cell_volumes), vols.size)
-    cached = _VOL_PCT_CACHE.get(key)
-    if cached is not None and cached.size == vols.size:
-        return cached
-    pct = np.argsort(np.argsort(vols)) * (100.0 / max(vols.size - 1, 1))
-    _VOL_PCT_CACHE[key] = pct
-    return pct
+    return np.argsort(np.argsort(vols)) * (100.0 / max(vols.size - 1, 1))
+
+
+def volume_percentile_of(solver) -> Optional[np.ndarray]:
+    """`solver.mesh.cell_volumes` 的体积分位（`cell_volume_percentile`），按体积数组对象缓存在求解器上。
+
+    缓存持有体积数组本身、按对象身份比较，网格（阶数切换）换了体积数组即重算。2026-10-19（I-77）以前是模块级
+    字典、键为 `id(cell_volumes)` 且无上限：旧数组释放后 id 可被新数组复用，命中别的网格的分位。
+    """
+    vols = getattr(getattr(solver, "mesh", None), "cell_volumes", None)
+    cache = getattr(solver, "_volume_percentile_cache", None)
+    if cache is None or cache[0] is not vols:
+        cache = (vols, cell_volume_percentile(vols))
+        solver._volume_percentile_cache = cache
+    return cache[1]
 
 
 def format_scaled_residual_line(diag: "ResidualDiagnostics",
-                                cell_volumes=None) -> str:
+                                volume_percentile: Optional[np.ndarray] = None) -> str:
     """格式化成一行可读文本，供 CLI 打印（与 Fluent scaled residuals
     表格、STAR-CCM+ Max 监视器同一个信息量级，压缩成单行）。
 
     Args:
         diag: `compute_scaled_residuals` 的结果
-        cell_volumes: 可选的 (n_cells,) 单元体积。给出时在最大残差定位
+        volume_percentile: 可选的 (n_cells,) 体积分位（`cell_volume_percentile`）。给出时在最大残差定位
             后面附上该单元的体积分位（`vol 0.5%` 表示它属于全场体积最小
             的 0.5%）——见 `cell_volume_percentile` 文档里记录的那次
             排查：这个数字直接区分"退化单元机制"与"壁面处理机制"。
@@ -175,7 +182,7 @@ def format_scaled_residual_line(diag: "ResidualDiagnostics",
     scaled_str = " ".join(parts)
     var_name = MEAN_FLOW_EQUATIONS[diag.max_abs_var] if diag.max_abs_var < len(MEAN_FLOW_EQUATIONS) else f"var{diag.max_abs_var}"
     loc = f"{var_name}@cell{diag.max_abs_cell}"
-    pct = cell_volume_percentile(cell_volumes)
+    pct = volume_percentile
     if pct is not None and diag.max_abs_cell < pct.size:
         loc += f", vol {pct[diag.max_abs_cell]:.2f}%"
     return (f"Scaled[{scaled_str}] | Max={diag.max_abs:.3e} "
@@ -187,7 +194,7 @@ class SolverDivergedError(RuntimeError):
 
     为什么需要一个专门的异常而不是"打印警告后继续"（2026-09-16，真实
     事故驱动）：plate_demo_volume_les 上一条 AUSM+up 预处理档对照运行在
-    iter 103 катastrophic 发散（Cd 冲到 3.1e48）、iter 104 残差 inf、
+    iter 103 灾难性发散（Cd 冲到 3.1e48）、iter 104 残差 inf、
     iter 105 起全部 nan，而求解循环**毫不在意地继续迭代**——直到人工发现
     为止已经白烧了若干步机时，而且每一步都照常调用 `checkpoint_callback`，
     会把 NaN 状态写进 checkpoint、并在收尾时用 NaN 覆盖 `final_state.pkl`。
@@ -223,9 +230,11 @@ def check_residual_finite(res, iteration: int, order=None,
         f"  本步之后不再迭代、不再写 checkpoint（避免用 NaN 覆盖已有的\n"
         f"  正常 checkpoint 与 final_state）。\n"
         f"  常见成因（按本项目实测频率排序）：\n"
-        f"    1. CFL 超过该网格/阶数的真实稳定边界 —— 用 --cfl-start/\n"
-        f"       --cfl-max 下调；注意越界一次之后收缩救不回来（见\n"
-        f"       adaptive_cfl.py 模块文档第 12 条）\n"
+        f"    1. 伪时间步（CFL）过大 —— 用 --cfl-start/--cfl-max 下调：\n"
+        f"       显式推进（rk3）是超过了该网格/阶数的稳定边界，越界一次之后\n"
+        f"       收缩救不回来（adaptive_cfl 模块文档第 12 条）；隐式 Newton-Krylov\n"
+        f"       是 CFL 增长快过 Newton 线性化的适用范围（先看监视行 NK 一栏的\n"
+        f"       线性求解与步长接受情况）\n"
         f"    2. 网格质量门未通过而用 --skip-quality-check 强行求解 ——\n"
         f"       退化单元会把残差放大若干个量级\n"
         f"  先看日志里最后几行 `Max=...(var@cellN, vol X%)` 的 `vol X%`：\n"

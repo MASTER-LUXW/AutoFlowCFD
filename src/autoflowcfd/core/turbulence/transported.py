@@ -53,6 +53,16 @@ class TurbulenceRates(NamedTuple):
         return tuple(s if t is None else s + t for s, t in zip(self.source, self.transport))
 
 
+def advance_transported_fields(model, dt, rates: TurbulenceRates, xp) -> None:
+    """显式路径的一步场更新（`model.update_fields`，四个后端的唯一入口），并记下这一步的残差
+    `model.last_update_rates`：逐未知量的完整时间导数（源项 + 输运）除以该未知量的尺度（`unknown_scales`），
+    `(n_cells, n_sps, n_transported)`。各后端在算平均流监控残差的同一处把它归约成湍流监控残差
+    （`time_integration/residual_norm.py::explicit_turbulence_residual`）；分布式视图写回模型时一并写回本分区的行。
+    """
+    model.update_fields(dt, rates.source, rates.transport)
+    model.last_update_rates = xp.stack([r / s for r, s in zip(rates.total(), model.unknown_scales())], axis=-1)
+
+
 class TransportedTurbulence:
     """带输运方程的湍流模型的公共部分（只含方法，状态由具体模型的 `__init__` 建立）。"""
 

@@ -27,6 +27,9 @@ from autoflowcfd.core.fr_solver.residual_diagnostics import MEAN_FLOW_EQUATIONS
 #: 收敛历史里监控残差的名字（逐方程残差用 `MEAN_FLOW_EQUATIONS`）
 MONITOR_RESIDUAL = "rms"
 
+#: 收敛历史里湍流监控残差的名字（`time_integration/residual_norm.py::turbulence_monitor_residual`）
+TURBULENCE_RESIDUAL = "turbulence"
+
 #: 逐步压力积分力系数（只含无粘数值通量的壁面压力部分，`postprocess/fr_coefficients.py::pressure_force_coefficients`）
 COEFFICIENT_KEYS = ("Cd_p", "Cl_p", "Cs_p")
 
@@ -43,14 +46,17 @@ class ConvergenceHistory:
         self.iterations: List[int] = []
         self.residual: List[float] = []
         self.per_equation: Dict[str, List[float]] = {eq: [] for eq in MEAN_FLOW_EQUATIONS}
+        self.turbulence: List[float] = []
         self.cfl: List[float] = []
         self.coefficients: Dict[str, List[float]] = {key: [] for key in COEFFICIENT_KEYS}
 
     def append(self, residual: float, per_equation=None, cfl: float = math.nan,
-               coefficients: Optional[Dict[str, float]] = None) -> None:
-        """记一步。`per_equation` 为 5 个平均流方程的 RMS（None 记 nan），`coefficients` 键为 `COEFFICIENT_KEYS`。"""
+               coefficients: Optional[Dict[str, float]] = None, turbulence: Optional[float] = None) -> None:
+        """记一步。`per_equation` 为 5 个平均流方程的 RMS（None 记 nan），`coefficients` 键为 `COEFFICIENT_KEYS`，
+        `turbulence` 为湍流监控残差（None 记 nan）。"""
         self.iterations.append((self.iterations[-1] if self.iterations else self._start) + 1)
         self.residual.append(float(residual))
+        self.turbulence.append(math.nan if turbulence is None else float(turbulence))
         values = np.full(len(MEAN_FLOW_EQUATIONS), np.nan) if per_equation is None else np.asarray(per_equation)
         for eq, value in zip(MEAN_FLOW_EQUATIONS, values):
             self.per_equation[eq].append(float(value))
@@ -66,12 +72,14 @@ class ConvergenceHistory:
         return {key: self.coefficients[key][-1] for key in COEFFICIENT_KEYS}
 
     def to_checkpoint(self) -> dict:
-        """`CheckpointManager.save` 的 history 字典（全部步都没有算力系数时不写系数组）。"""
+        """`CheckpointManager.save` 的 history 字典（全部步都没有算力系数时不写系数组、都没有湍流残差时不写湍流列）。"""
         out = {
             "iterations": list(self.iterations),
             "residuals": {MONITOR_RESIDUAL: list(self.residual), **{eq: list(v) for eq, v in self.per_equation.items()}},
             "cfl_history": list(self.cfl),
         }
+        if any(not math.isnan(v) for v in self.turbulence):
+            out["residuals"][TURBULENCE_RESIDUAL] = list(self.turbulence)
         if any(not math.isnan(v) for v in self.coefficients[COEFFICIENT_KEYS[0]]):
             out["coefficients"] = {key: list(v) for key, v in self.coefficients.items()}
         return out
@@ -95,6 +103,7 @@ class ConvergenceHistory:
         out.iterations = iterations
         out.residual = column(residuals[MONITOR_RESIDUAL])
         out.per_equation = {eq: column(residuals.get(eq, [math.nan] * n)) for eq in MEAN_FLOW_EQUATIONS}
+        out.turbulence = column(residuals.get(TURBULENCE_RESIDUAL, [math.nan] * n))
         out.cfl = column(history.get("cfl_history", [math.nan] * n))
         coefficients = history.get("coefficients", {})
         out.coefficients = {key: column(coefficients.get(key, [math.nan] * n)) for key in COEFFICIENT_KEYS}
@@ -118,11 +127,13 @@ def checkpoint_history(solver, iteration: int) -> dict:
 def record_step(solver, residual: float) -> None:
     """求解循环每步调用一次：把这一步记进 `solver.convergence_history`。
 
-    逐方程 RMS 取单步里算好的 `solver._residual_per_equation`（`monitor_residuals`）；CFL 取当前值
+    逐方程 RMS 取单步里算好的 `solver._residual_per_equation`（`monitor_residuals`），湍流监控残差取
+    `turbulence_monitor_residual`（隐式紧耦合步的湍流子系统残差或显式更新的速率 RMS）；CFL 取当前值
     （`adaptive_cfl/policy.py::current_cfl_number`）；设置了 `_reference_area` 时算一次压力积分力系数（每步日志
     读的也是这一份，`format_step_line`）。
     """
     from autoflowcfd.core.time_integration.adaptive_cfl.policy import current_cfl_number
+    from autoflowcfd.core.time_integration.residual_norm import turbulence_monitor_residual
 
     coefficients = None
     ref_area = getattr(solver, "_reference_area", None)
@@ -132,4 +143,4 @@ def record_step(solver, residual: float) -> None:
         aero = pressure_force_coefficients(solver.host_view(), ref_area)
         coefficients = {"Cd_p": aero["Cd"], "Cl_p": aero["Cl"], "Cs_p": aero["Cs"]}
     solver.convergence_history.append(residual, getattr(solver, "_residual_per_equation", None),
-                                      current_cfl_number(solver), coefficients)
+                                      current_cfl_number(solver), coefficients, turbulence_monitor_residual(solver))

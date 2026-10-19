@@ -65,7 +65,9 @@ class _GPUSolverIOMixin:
         grad_vel, d_wall = self._prepare_turbulence_inputs_gpu()
         rates = self._evaluate_turbulence_rates_gpu(grad_vel, d_wall)
 
-        self.turb_model_gpu.update_fields(turb_dt, rates.source, rates.transport)
+        from autoflowcfd.core.turbulence.transported import advance_transported_fields
+
+        advance_transported_fields(self.turb_model_gpu, turb_dt, rates, get_cupy())
         return self._turbulent_mu_t_gpu()
 
     def _turbulence_velocity_gradient_gpu(self):

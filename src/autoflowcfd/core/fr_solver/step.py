@@ -298,13 +298,16 @@ def step(solver, dt: float) -> float:
         solver.apply_turbulence_corrections()
         solver.state._update_primitives()
 
-        from autoflowcfd.core.time_integration.residual_norm import monitor_residuals
+        from autoflowcfd.core.time_integration.residual_norm import explicit_turbulence_residual, monitor_residuals
         from autoflowcfd.fr.native_padding import order_from_n_sps
 
         # 逐方程 RMS 留给求解循环记进收敛历史（`convergence_history.py`，每个物理步一条）
+        red = LocalReductions(np)
+        is_prism = np.arange(n_cells) < int(solver.mesh.n_prism_cells)
         residual_norm, solver._residual_per_equation = monitor_residuals(
-            LocalReductions(np), solver.state.dU_dt, np.arange(n_cells) < int(solver.mesh.n_prism_cells),
-            order_from_n_sps(n_sps))
+            red, solver.state.dU_dt, is_prism, order_from_n_sps(n_sps))
+        solver._residual_turbulence = explicit_turbulence_residual(
+            red, solver.turb_model, is_prism, order_from_n_sps(n_sps))
 
         # 自适应 CFL 更新（2026-08-24）：根据本步残差调节下一步的 CFL 数。
         # 放在 step() 末尾（不是 solve() 循环里），这样 solve() 和

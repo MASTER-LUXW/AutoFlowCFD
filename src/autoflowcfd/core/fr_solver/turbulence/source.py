@@ -33,7 +33,9 @@ def compute_turbulence_source(solver, dt) -> Optional[tuple]:
     Q, grad_vel, d_wall, mu = prepare_turbulence_inputs(solver)
     rates = evaluate_turbulence_rates(solver, Q, grad_vel, d_wall, mu)
 
-    solver.turb_model.update_fields(dt, rates.source, rates.transport)
+    from autoflowcfd.core.turbulence.transported import advance_transported_fields
+
+    advance_transported_fields(solver.turb_model, dt, rates, np)
     return rates.raw
 
 

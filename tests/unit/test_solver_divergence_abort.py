@@ -71,8 +71,8 @@ class TestCheckResidualFinite:
         assert 'P2' in msg
         assert 'Iter 104' in msg
         assert '7.859027e+08' in msg
-        # 三条常见成因都要在场（CFL / 网格质量门 / AUSM+up 预处理档）
-        assert 'CFL' in msg
+        # 常见成因都要在场（CFL：显式与隐式两种推进各自的含义 / 网格质量门）
+        assert 'CFL' in msg and 'Newton-Krylov' in msg and 'rk3' in msg
         assert '--skip-quality-check' in msg
         # 必须明说不会再写 checkpoint，否则用户会怀疑磁盘上的残骸是否已被污染
         assert 'checkpoint' in msg
@@ -301,13 +301,14 @@ class TestCellVolumePercentileDiagnostic:
 
     def test_line_includes_volume_percentile(self):
         from autoflowcfd.core.fr_solver.residual_diagnostics import (
+            cell_volume_percentile,
             format_scaled_residual_line,
         )
 
         # 1000 个单元，第 7 个是全场最小 -> 分位 0.00%
         vols = np.linspace(1.0, 2.0, 1000)
         vols[7] = 1e-8
-        line = format_scaled_residual_line(self._diag(7), cell_volumes=vols)
+        line = format_scaled_residual_line(self._diag(7), volume_percentile=cell_volume_percentile(vols))
         assert 'cell7' in line
         assert 'vol 0.00%' in line
 
@@ -320,6 +321,19 @@ class TestCellVolumePercentileDiagnostic:
         line = format_scaled_residual_line(self._diag(7))
         assert 'cell7' in line
         assert 'vol' not in line
+
+    def test_percentile_is_cached_per_volume_array(self):
+        """分位按体积数组对象缓存在求解器上（I-77：此前模块级字典以 id 为键，旧数组释放后 id 可被新数组复用）。"""
+        from types import SimpleNamespace
+
+        from autoflowcfd.core.fr_solver.residual_diagnostics import volume_percentile_of
+
+        mesh = SimpleNamespace(cell_volumes=np.array([3.0, 1.0, 2.0]))
+        solver = SimpleNamespace(mesh=mesh)
+        first = volume_percentile_of(solver)
+        assert volume_percentile_of(solver) is first
+        mesh.cell_volumes = np.array([1.0, 3.0, 2.0])      # 换了网格体积（例如换阶后重建）
+        np.testing.assert_allclose(volume_percentile_of(solver), [0.0, 100.0, 50.0])
 
     def test_percentile_handles_degenerate_inputs(self):
         """合成网格/测试替身可能不带 cell_volumes，或带一个空数组、

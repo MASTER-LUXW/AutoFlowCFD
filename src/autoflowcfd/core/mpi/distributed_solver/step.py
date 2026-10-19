@@ -394,10 +394,12 @@ class _DistributedStepMixin:
             self._prev_mu_t_local = (
                 mu_t_field_compact[self.dist_flat_face.inv_perm][:n_local])
 
-        from autoflowcfd.core.time_integration.residual_norm import monitor_residuals
+        from autoflowcfd.core.time_integration.residual_norm import explicit_turbulence_residual, monitor_residuals
 
+        red = MPIReductions(np)
         residual_norm, self._residual_per_equation = monitor_residuals(
-            MPIReductions(np), self.state.dU_dt[:n_local], cell_is_prism, order_now)
+            red, self.state.dU_dt[:n_local], cell_is_prism, order_now)
+        self._residual_turbulence = explicit_turbulence_residual(red, self.turb_model, cell_is_prism, order_now)
         # 自适应 CFL 按**全局**残差范数更新：所有 rank 喂同一个值，因此
         # 得到同一个 CFL 数（按各自局部残差更新会让 rank 间 CFL 漂移）。
         # 双时间步的伪时间 CFL 在每个物理步的内迭代里更新（implicit/newton/physical_time.py）

@@ -9,7 +9,7 @@
 续算时不再使用。
 """
 
-from typing import Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -45,3 +45,31 @@ def monitor_residuals(red, residual, cell_is_prism, order: int) -> Tuple[float, 
     sums = red.sum_array(np.append(np.asarray(sq.get() if hasattr(sq, "get") else sq), float(real.shape[0])))
     per_equation = np.sqrt(sums[:-1] / sums[-1]) if sums[-1] > 0 else np.zeros(sums.size - 1)
     return total, per_equation
+
+
+def explicit_turbulence_residual(red, model, cell_is_prism, order: int) -> Optional[float]:
+    """显式湍流更新这一步的监控残差：`model.last_update_rates`（`turbulence/transported.py::
+    advance_transported_fields`，逐未知量除以尺度）在真实自由度上的全局 RMS，参数含义同 `monitor_residuals`。
+    取用后清空（下一步没有显式更新时不留旧值）；这一步没有显式更新（隐式路径、没有输运方程的模型）时 None。
+
+    2026-10-19（I-77）以前显式路径的湍流方程没有任何监控残差：监视行与收敛历史只有平均流 5 个方程。
+    """
+    rates = None if model is None else getattr(model, "last_update_rates", None)
+    if rates is None:
+        return None
+    model.last_update_rates = None
+    return float(monitor_residuals(red, rates, cell_is_prism, order)[0])
+
+
+def turbulence_monitor_residual(solver) -> Optional[float]:
+    """这一步的湍流监控残差（进监视行与收敛历史）：紧耦合 Newton 步的湍流子系统步前残差范数
+    （`_newton_last_info["res_norm_turbulence"]`），否则显式更新的速率 RMS（`explicit_turbulence_residual`，各后端
+    在单步里存进 `solver._residual_turbulence`）；都没有时 None。
+
+    只用于监视。显式路径的收敛判据仍只看平均流（`order_continuation/policy.py::PhaseGate` 的湍流条件只接隐式
+    子系统残差）：上界截断处的逐点速率在定常解上也不为零，纳入判据会让显式运行判不了收敛。
+    """
+    info = getattr(solver, "_newton_last_info", None)
+    if info and "res_norm_turbulence" in info:
+        return float(info["res_norm_turbulence"])
+    return getattr(solver, "_residual_turbulence", None)
