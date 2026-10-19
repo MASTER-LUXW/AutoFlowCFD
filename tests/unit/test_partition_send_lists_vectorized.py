@@ -192,27 +192,34 @@ class TestSendListsEquivalence:
 class TestSendListsPerformance:
     """把"这是一次性能修复"钉住：向量化必须远快于逐面循环参考实现。
 
-    不断言绝对耗时（本机负载会波动），只断言**比值**——原实现在这个规模
-    上是 O(n_ranks × n_faces) 迭代 + O(n_send^2) 列表查找，向量化后是若干
-    次 numpy 扫描，差距应当在一个数量级以上。取 3 倍作为阈值，远低于
-    实测差距、又足以在有人改回逐面循环时失败。
+    不断言绝对耗时，只断言**比值**：原实现在这个规模上是 O(n_ranks x n_faces) 迭代 + O(n_send^2) 列表查找。
+    向量化一侧计的是整个分区构造（发送列表在其中内联生成），参考一侧只有发送列表，所以比值偏保守；100x100 网格
+    上实测约 6 倍，阈值取 3 倍——足以在有人改回逐面循环时失败。
+
+    2026-10-19（I-185）：此前只计时一次，首次调用的预热（导入、内存分配）算进向量化一侧，全量测试中偶发失败；现在
+    先预热，再各取 3 次的最小值（排除偶发负载）。
     """
 
+    REPEATS = 3
+
     def test_vectorized_is_much_faster(self):
-        fc = _grid_mesh(60, 60)          # 3600 单元、约 7200 面
+        fc = _grid_mesh(100, 100)        # 1 万单元、约 2 万面
         n_ranks = 8
         cp_ = _partition_of("roundrobin", fc.n_cells, n_ranks)
 
-        t0 = time.perf_counter()
-        parts = [build_distributed_partition(fc, cp_, rank=r, n_ranks=n_ranks)
-                 for r in range(n_ranks)]
-        t_vec = time.perf_counter() - t0
+        def build():
+            return [build_distributed_partition(fc, cp_, rank=r, n_ranks=n_ranks) for r in range(n_ranks)]
 
-        t0 = time.perf_counter()
-        for r in range(n_ranks):
-            _reference_send_lists(fc, cp_, r, n_ranks,
-                                  parts[r].global_to_local, parts[r].local_cells)
-        t_ref = time.perf_counter() - t0
+        parts = build()                  # 预热
+        t_vec = t_ref = float("inf")
+        for _ in range(self.REPEATS):
+            t0 = time.perf_counter()
+            build()
+            t_vec = min(t_vec, time.perf_counter() - t0)
+            t0 = time.perf_counter()
+            for r in range(n_ranks):
+                _reference_send_lists(fc, cp_, r, n_ranks, parts[r].global_to_local, parts[r].local_cells)
+            t_ref = min(t_ref, time.perf_counter() - t0)
 
         assert t_ref > 3.0 * t_vec, (
             f"向量化实现没有明显更快（参考 {t_ref:.3f}s vs 向量化 "
