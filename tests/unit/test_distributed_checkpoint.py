@@ -21,13 +21,13 @@ class TestDistributedCheckpointImport:
         """验证模块可以正常导入。"""
         from autoflowcfd.core.mpi.distributed_checkpoint import (
             gather_global_state,
-            scatter_local_state,
+            distribute_from_root,
             distributed_save_checkpoint,
             distributed_load_checkpoint,
             distributed_save_results,
         )
         assert gather_global_state is not None
-        assert scatter_local_state is not None
+        assert distribute_from_root is not None
         assert distributed_save_checkpoint is not None
         assert distributed_load_checkpoint is not None
         assert distributed_save_results is not None
@@ -36,9 +36,9 @@ class TestDistributedCheckpointImport:
 class TestGatherScatter:
     """测试 gather/scatter 函数。"""
 
-    def test_scatter_local_state(self):
+    def test_distribute_from_root(self):
         """验证 scatter 从全局数组中提取 local cells。"""
-        from autoflowcfd.core.mpi.distributed_checkpoint import scatter_local_state
+        from autoflowcfd.core.mpi.distributed_checkpoint import distribute_from_root
 
         n_global = 10
         n_sps = 4
@@ -47,7 +47,7 @@ class TestGatherScatter:
         U_global = np.random.rand(n_global, n_sps, n_vars)
         local_cells = np.array([0, 2, 5, 7])  # 4 个 local cells
 
-        U_local = scatter_local_state(U_global, local_cells)
+        U_local = distribute_from_root(U_global, local_cells)
 
         assert U_local.shape == (4, n_sps, n_vars)
         np.testing.assert_array_equal(U_local, U_global[local_cells])
@@ -75,7 +75,7 @@ class TestGatherScatter:
         """验证 scatter(gather(U)) == U 的往返一致性。"""
         from autoflowcfd.core.mpi.distributed_checkpoint import (
             gather_global_state,
-            scatter_local_state,
+            distribute_from_root,
         )
 
         n_sps = 4
@@ -90,7 +90,7 @@ class TestGatherScatter:
         U_global = gather_global_state(U_local, local_cells, n_global)
 
         # scatter
-        U_recovered = scatter_local_state(U_global, local_cells)
+        U_recovered = distribute_from_root(U_global, local_cells)
 
         np.testing.assert_array_equal(U_recovered, U_local)
 

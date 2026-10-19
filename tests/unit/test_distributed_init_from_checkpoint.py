@@ -256,7 +256,10 @@ def test_distributed_resume_restores_turbulence(mesh_and_ops, tmp_path, model_na
     np.testing.assert_array_equal(solver_b.turb_model.nu_t, m.nu_t)
     # 后处理用的单元平均同样写出（VTK 导出读它，`core/turbulence/output.py`）
     from autoflowcfd.core.turbulence.output import turbulence_cell_means, turbulence_fields_from_checkpoint
-    cell = turbulence_fields_from_checkpoint(metadata["fields"])
+    from autoflowcfd.core.utils.checkpoint import CheckpointManager
+
+    # 单元平均是后处理读的（单机读取 checkpoint 文件），分布式加载不把整份数组带给各 rank
+    cell = turbulence_fields_from_checkpoint(CheckpointManager().load(path)[3]["fields"])
     from autoflowcfd.fr.native_padding import sp_integration_weights
     det_local, prism_local = solver_a.local_cell_geometry()
     ref = turbulence_cell_means(m, sp_integration_weights(det_local, prism_local, mesh.order))

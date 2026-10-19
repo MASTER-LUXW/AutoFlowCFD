@@ -75,14 +75,15 @@ def rebuild_distributed_solver_from_checkpoint(
         （状态已从 checkpoint 恢复）、checkpoint 记录的迭代数、以及
         重建所用的完整 metadata 字典
     """
-    from autoflowcfd.core.utils.checkpoint import CheckpointManager
+    from autoflowcfd.core.utils.checkpoint_load import load_checkpoint_header
     from autoflowcfd.cli.solve.mesh_loader import load_mesh_for_solver
     from autoflowcfd.core.fr_residual.inviscid import conserved_to_primitive
 
-    _solution, history, iteration, metadata = CheckpointManager().load(checkpoint_path)
+    # 每个 rank 只读头信息（属性、收敛历史、数据集形状）：数组由 root 在 distributed_load_checkpoint 里读取后按 rank
+    # 分发。2026-10-19 以前这里每个 rank 都把整个 checkpoint（全局 U_sps 与湍流场）读进内存（I-103）
+    history, iteration, metadata, field_shapes = load_checkpoint_header(checkpoint_path)
 
-    fields = metadata.get("fields", {})
-    if "U_sps" not in fields:
+    if "U_sps" not in field_shapes:
         raise click.ClickException(
             f"Checkpoint '{checkpoint_path}' 缺少 'U_sps' 字段（完整的 "
             f"(n_cells,n_sps,n_vars) 求解器状态）——不是本版本 write_checkpoint/"

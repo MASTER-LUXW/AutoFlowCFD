@@ -2,8 +2,8 @@
 
 写出端把本 rank 的输运场（模型声明的 `TRANSPORTED_FIELDS`，与单机 `write_checkpoint` 同一组字段名）
 与涡粘收集成全局数组，另写后处理用的单元平均（`turb_cell_*`，`core/turbulence/output.py`）；读回端
-（`solve resume` 与 `solve transient --init-from`）从全局字段切出本 rank 的 local 段交给
-`model.restore_transported`（SST 的 omega 可容许性投影、SA-neg 的壁面解点置零都在里面）。
+（`solve resume` 与 `solve transient --init-from`）由 root 按 rank 分发出本 rank 的 local 段（`state.py::
+distribute_from_root`）交给 `model.restore_transported`（SST 的 omega 可容许性投影、SA-neg 的壁面解点置零都在里面）。
 
 **2026-10-04 修复**：此前分布式 checkpoint 只写平均流 `U_sps`，分布式 resume 后湍流场从来流初值
 重新开始；`--init-from` 则从 `U_sps[...,5:7]/rho` 换算 k/omega——那是 SST 状态数组里从未更新的
@@ -70,10 +70,19 @@ def gather_turbulence_fields(solver, n_global: int, W_local):
     return out
 
 
-def restore_turbulence_fields(solver, fields: dict, metadata: dict, *, source: str) -> bool:
-    """由全局字段恢复本 rank 的输运场与涡粘，并按 `metadata` 记录的进度续接产生项渐变（与单机恢复端共用
-    `restore_production_ramp`）。字段缺失（层流、另一个湍流模型或旧版本 checkpoint）时保留构造时的来流初值
-    并返回 False。"""
+def checkpoint_turbulence_names(solver, available) -> tuple:
+    """要从 checkpoint 恢复的湍流字段名：模型的输运场（全部都在 `available` 里才恢复）加上有就恢复的 `nu_t`；
+    不是输运模型，或 checkpoint 缺输运场（层流、另一个湍流模型或旧版本）时为空。"""
+    model, _ = transported_model(solver)
+    if model is None or not all(name in available for name in model.TRANSPORTED_FIELDS):
+        return ()
+    return tuple(model.TRANSPORTED_FIELDS) + (("nu_t",) if "nu_t" in available else ())
+
+
+def restore_turbulence_fields(solver, local_fields: dict, metadata: dict, *, source: str) -> bool:
+    """由本 rank 的 local 段恢复输运场与涡粘，并按 `metadata` 记录的进度续接产生项渐变（与单机恢复端共用
+    `restore_production_ramp`）。`local_fields` 不含输运场（`checkpoint_turbulence_names` 为空）时保留构造时的
+    来流初值并返回 False。"""
     from autoflowcfd.core.fr_solver.turbulence.init import restore_production_ramp
     from autoflowcfd.core.mpi import is_root
 
@@ -81,20 +90,18 @@ def restore_turbulence_fields(solver, fields: dict, metadata: dict, *, source: s
     if model is None:
         return False
     names = model.TRANSPORTED_FIELDS
-    if not all(name in fields for name in names):
+    if not all(name in local_fields for name in names):
         if is_root():
             print(f"   ⚠️  Checkpoint 缺少湍流场 {'/'.join(names)}（层流、另一个湍流模型或旧版本）："
                   "湍流场从来流初值开始。")
         return False
-    local_cells = solver.partition.local_cells
-    n_sps = int(solver.state.n_sps)
+    expect = (int(solver.partition.n_local_cells), int(solver.state.n_sps))
     local = []
-    for name in names + (("nu_t",) if "nu_t" in fields else ()):
-        f = np.asarray(fields[name])
-        if f.shape != (int(solver.partition.n_global_cells), n_sps):
-            raise ValueError(f"Checkpoint 字段 {name} 形状 {f.shape} 与求解器的全局形状 "
-                             f"({solver.partition.n_global_cells}, {n_sps}) 不匹配")
-        local.append(f[local_cells].copy())
+    for name in names + (("nu_t",) if "nu_t" in local_fields else ()):
+        f = np.asarray(local_fields[name])
+        if f.shape != expect:
+            raise ValueError(f"Checkpoint 字段 {name} 的本 rank 段形状 {f.shape} 与求解器 {expect} 不匹配")
+        local.append(f)
     if is_gpu:
         from autoflowcfd.core.gpu import get_cupy
         cp = get_cupy()
