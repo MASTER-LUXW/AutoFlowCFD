@@ -111,7 +111,7 @@ def _gpu_standin(cpu, dt_cell, dt_phys_cell):
         wall_model=cpu.wall_model, artificial_viscosity_enabled=False,
         wall_distance_gpu=np.asarray(cpu.wall_distance), _iddes_h_max_gpu=None, _iddes_h_wn_gpu=None,
         _wall_mask_gpu=_compute_wall_dirichlet_face_mask(cpu),
-        _open_mask_gpu=_compute_open_boundary_face_mask(cpu, flat),
+        _open_mask_gpu=_compute_open_boundary_face_mask(cpu),
         _turb_ramp_step=cpu._turb_ramp_step, _turb_production_ramp_steps=cpu._turb_production_ramp_steps,
         _turb_production_ramp_complete=cpu._turb_production_ramp_complete,
     )

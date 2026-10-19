@@ -42,6 +42,7 @@ from .faces import (
     _extrapolate_scalar_to_faces,
     _extrapolate_scalar_to_faces_neighbor_frame,
     _lift_side_jumps,
+    inflow_points,
     precompute_scalar_convection_geometry,
 )
 
@@ -172,8 +173,9 @@ def compute_scalar_convection_residual(
             `mesh` 是 `DistributedMeshAdapter`，不能再调 `get_flat_face_geometry`）。
         conv_geom: 与标量无关的共享几何（k/omega 两次调用共用，隐式路径在 Newton
             步起点算一次），缺省时当场算。
-        open_boundary_face, freestream_value: 来流条件（2026-09-25）：开放边界面上
-            质量通量指向域内的通量点，外部态取来流值；指向域外保持外插（零梯度出流）。
+        open_boundary_face, freestream_value: 来流条件（2026-09-25）：开放边界组的逐面掩码（按组类型，
+            `omega_wall.py::open_boundary_code_mask`）与来流值。两侧坐标系的边界点（含混合拆分面的边界半区）上质量
+            通量指向域内的通量点，外部态取来流值；指向域外保持外插（零梯度出流），见 `faces.py::inflow_points`。
     """
     n_cells = mesh.n_cells
     n_sps = mesh.n_sps_per_cell
@@ -196,14 +198,16 @@ def compute_scalar_convection_residual(
     phi_o, phi_o_other = _extrapolate_scalar_to_faces(scalar_field, flat, ops, mesh, *masks)
     m_o = conv_geom.mass_flux
     if open_boundary_face is not None:
-        inflow = open_boundary_face[:, None] & (m_o < 0)
-        phi_o_other = np.where(inflow, freestream_value, phi_o_other)
+        phi_o_other = np.where(inflow_points(np, flat, "owner", open_boundary_face, m_o), freestream_value, phi_o_other)
     # 与 face_frames.convection_jump_point 同一规则（湍流解析 Jacobian 用那个点函数）
     jump_o = m_o * (np.where(m_o >= 0, phi_o, phi_o_other) - phi_o)
     del phi_o, phi_o_other
 
     phi_n, phi_n_other = _extrapolate_scalar_to_faces_neighbor_frame(scalar_field, flat, *masks)
     m_n = conv_geom.mass_flux_neighbor
+    if open_boundary_face is not None:
+        phi_n_other = np.where(inflow_points(np, flat, "neighbor", open_boundary_face, m_n), freestream_value,
+                               phi_n_other)
     jump_n = m_n * (np.where(m_n >= 0, phi_n, phi_n_other) - phi_n)
     del phi_n, phi_n_other
 

@@ -32,27 +32,21 @@ _CHUNK = 4096
 
 def convection_ghost_affine(flat, frame, m_side, dirichlet_faces, open_face):
     """某一侧坐标系下"另一侧是本侧迹的仿射函数"的点与系数 `(ghost (n_faces,n_fp), a (nv,n_faces,n_fp))`，
-    规则与 `face_frames.extrapolate_scalar_pair_kernel` + 对流来流覆盖一致。
+    规则与 `face_frames.extrapolate_scalar_pair_kernel` + 对流来流覆盖（`transport/faces.py::inflow_points`）一致。
 
-    `dirichlet_faces`：逐变量的壁面 Dirichlet 面掩码序列（目标值是常数，不影响导数）。"""
+    `dirichlet_faces`：逐变量的壁面 Dirichlet 面掩码序列（目标值是常数，不影响导数）；`open_face`：开放边界组的
+    逐面掩码（按组类型）。"""
+    from autoflowcfd.core.turbulence.transport.faces import frame_boundary_points, inflow_points
+
     n_faces, n_fp = flat.owner_adj_row_exact.shape[:2]
-    if frame == "owner":
-        true_bnd = (np.asarray(flat.neighbor_src0_cell) < 0) & (np.asarray(flat.neighbor_src1_idx) < 0)
-        partner, mask = np.asarray(flat.mixed_nb_partner), np.asarray(flat.mixed_nb_mask)
-    else:
-        true_bnd = np.zeros(n_faces, dtype=bool)
-        partner, mask = np.asarray(flat.mixed_ow_partner), np.asarray(flat.mixed_ow_mask)
-    mp = np.maximum(partner, 0)
-    in_mixed = (partner >= 0)[:, None] & mask
+    true_bnd, mp, in_mixed = frame_boundary_points(np, flat, frame)
     ghost = true_bnd[:, None] | in_mixed
     a = np.ones((len(dirichlet_faces), n_faces, n_fp))
     for v, dirichlet in enumerate(dirichlet_faces):
         dirichlet = np.asarray(dirichlet, dtype=bool)
         d = np.where(in_mixed, dirichlet[mp][:, None], dirichlet[:, None])
         a[v] = np.where(ghost & d, -1.0, 1.0)
-    if frame == "owner":
-        inflow = true_bnd[:, None] & open_face[:, None] & (m_side < 0)
-        a[:, inflow] = 0.0
+    a[:, inflow_points(np, flat, frame, open_face, m_side)] = 0.0
     return ghost, a
 
 

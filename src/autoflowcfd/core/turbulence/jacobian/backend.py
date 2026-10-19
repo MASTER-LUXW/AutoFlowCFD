@@ -88,7 +88,7 @@ def turbulence_linearization(solver_like, turb, inputs, conv_geom, flat):
     return TurbulenceLinearization(
         mesh=solver_like.mesh, ops=solver_like.ops, flat=flat, turb=turb, Q=Q, grad_vel=grad_vel,
         d_wall=d_wall, mu=float(mu), conv_geom=conv_geom, dirichlet_faces=faces, dirichlet_values=values,
-        open_face=_compute_open_boundary_face_mask(solver_like, flat), pointwise=pointwise,
+        open_face=_compute_open_boundary_face_mask(solver_like), pointwise=pointwise,
         strong_rows=strong_rows, wall_target_k_slope=k_slope,
         des=des_length_for(getattr(solver_like, "ddes_model", None), getattr(solver_like, "_iddes_h_max", None),
                            getattr(solver_like, "_iddes_h_wn", None)))

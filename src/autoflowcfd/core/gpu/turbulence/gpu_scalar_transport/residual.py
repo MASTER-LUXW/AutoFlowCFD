@@ -19,7 +19,7 @@ from autoflowcfd.core.gpu.residual.gpu_gradients import compute_physical_scalar_
 
 
 from autoflowcfd.core.turbulence.transport.residual import turbulence_diffusivities
-from autoflowcfd.core.turbulence.transport.faces import boundary_diffusion_targets
+from autoflowcfd.core.turbulence.transport.faces import boundary_diffusion_targets, inflow_points
 from autoflowcfd.core.turbulence.sst.bounds import k_wall_zero_mask
 from autoflowcfd.core.turbulence.sst.log_omega import log_omega, log_omega_gradient_source
 
@@ -104,9 +104,8 @@ def compute_scalar_convection_residual_gpu(
 ):
     """标量对流 FR 残差（对流形式体积项 + 界面上风校正），与 CPU 版
     `compute_scalar_convection_residual` 逐字对应（含来流条件
-    `open_boundary_face/freestream_value`，见 CPU 版参数文档）。
-    `open_boundary_face` 是按边界组类型的掩码，这里与面邻居源推出的真
-    边界面求与。`mass_divergence`：`scalar_convection_volume_divergence_gpu` 在
+    `open_boundary_face/freestream_value`，见 CPU 版参数文档；来流点与 CPU 共用
+    `turbulence/transport/faces.py::inflow_points`）。`mass_divergence`：`scalar_convection_volume_divergence_gpu` 在
     `phi = 1` 上的值（只依赖冻结平均流，k 与 omega 两次调用共用，CPU 版对应
     `ScalarConvectionGeometry.mass_divergence`）。"""
     cp = get_cupy()
@@ -121,11 +120,12 @@ def compute_scalar_convection_residual_gpu(
     m_o, m_n = _face_mass_flux_gpu(cp, ff, rho[..., None] * velocity)
     phi_o, phi_o_other = _extrapolate_scalar_pair_gpu(cp, ff, scalar_field, "owner", *masks)
     if open_boundary_face is not None:
-        is_true_boundary = (ff.neighbor_src0_cell < 0) & (ff.neighbor_src1_idx < 0)
-        inflow = (open_boundary_face & is_true_boundary)[:, None] & (m_o < 0)
-        phi_o_other = cp.where(inflow, freestream_value, phi_o_other)
+        phi_o_other = cp.where(inflow_points(cp, ff, "owner", open_boundary_face, m_o), freestream_value, phi_o_other)
     jump_o = m_o * (cp.where(m_o >= 0, phi_o, phi_o_other) - phi_o)
     phi_n, phi_n_other = _extrapolate_scalar_pair_gpu(cp, ff, scalar_field, "neighbor", *masks)
+    if open_boundary_face is not None:
+        phi_n_other = cp.where(inflow_points(cp, ff, "neighbor", open_boundary_face, m_n), freestream_value,
+                               phi_n_other)
     jump_n = m_n * (cp.where(m_n >= 0, phi_n, phi_n_other) - phi_n)
     return residual + _lift_side_jumps_gpu(cp, ff, jump_o, jump_n, -1.0, det_jacs, n_cells, n_sps)
 

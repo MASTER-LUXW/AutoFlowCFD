@@ -76,15 +76,43 @@ def _extrapolate_scalar_to_faces_neighbor_frame(
     )
 
 
+def frame_boundary_points(xp, flat, frame):
+    """某一侧坐标系下的边界点 `(true_boundary (n_faces,), partner (n_faces,), in_mixed (n_faces, n_fp))`。
+
+    边界点有两类：owner 坐标系下的真边界面（没有任何 neighbor 来源）全部通量点；混合拆分面（B-8）配对边界半区的
+    通量点（两个坐标系各自的 `mixed_*_mask`），它们的边界条件取配对边界面 `partner`（非混合面为 0，只在
+    `in_mixed` 处有意义）。扩散边界目标、对流来流覆盖与湍流解析 Jacobian 的 ghost 规则都按这一份分类。
+    """
+    if frame == "owner":
+        true_bnd = (flat.neighbor_src0_cell < 0) & (flat.neighbor_src1_idx < 0)
+        partner, mask = flat.mixed_nb_partner, flat.mixed_nb_mask
+    else:
+        true_bnd = xp.zeros(flat.mixed_ow_partner.shape[0], dtype=bool)
+        partner, mask = flat.mixed_ow_partner, flat.mixed_ow_mask
+    return true_bnd, xp.maximum(partner, 0), (partner >= 0)[:, None] & mask
+
+
+def inflow_points(xp, flat, frame, open_code_face, m_side):
+    """某一侧坐标系下取来流值的通量点 `(n_faces, n_fp)`：边界点（`frame_boundary_points`）所属边界面（混合面取
+    配对边界面）在开放边界组里、且该侧外法向质量通量 `m_side < 0`（指向域内）。
+
+    `open_code_face`：按边界组类型的逐面掩码（`omega_wall.py::open_boundary_code_mask`，内部面也可能为 True——
+    未匹配组的面按缺省配置），这里与边界点求与。2026-10-19（I-66）以前只覆盖 owner 坐标系的真边界面：混合拆分面
+    的边界半区若配对面是开放边界，ghost 取零梯度而平均流取配对面的来流幽灵态。
+    """
+    true_bnd, mp, in_mixed = frame_boundary_points(xp, flat, frame)
+    open_code_face = xp.asarray(open_code_face, dtype=bool)
+    is_open = xp.where(in_mixed, open_code_face[mp][:, None], (true_bnd & open_code_face)[:, None])
+    return is_open & (m_side < 0)
+
+
 def boundary_diffusion_targets(xp, flat, frame, wall_dirichlet_zero_face=None,
                                wall_dirichlet_value_face=None, has_wall_dirichlet_value=None):
     """某一侧坐标系下扩散界面项的边界点分类，返回 `(is_boundary, is_dirichlet, target)`，
     各 `(n_faces, n_fp)`；`xp` 为数组模块（CPU numpy / GPU cupy 共用这一份规则）。
 
-    边界点：owner 坐标系下的真边界面（没有任何 neighbor 来源）全部通量点，以及
-    混合拆分面（B-8）配对边界半区的通量点（两个坐标系各自的 `mixed_*_mask`）。
-    类型取该边界面（混合面取配对边界面）的壁面掩码：`wall_dirichlet_zero_face`
-    为 Dirichlet 目标 0（k），`has_wall_dirichlet_value` 为逐通量点目标值（omega
+    边界点见 `frame_boundary_points`。类型取该边界面（混合面取配对边界面）的壁面掩码：
+    `wall_dirichlet_zero_face` 为 Dirichlet 目标 0（k），`has_wall_dirichlet_value` 为逐通量点目标值（omega
     壁面解析值），其余为齐次 Neumann。
     """
     n_faces, n_fp = flat.owner_adj_row_exact.shape[:2]
@@ -94,14 +122,7 @@ def boundary_diffusion_targets(xp, flat, frame, wall_dirichlet_zero_face=None,
           else xp.asarray(has_wall_dirichlet_value, dtype=bool))
     wv = (xp.zeros((n_faces, n_fp)) if wall_dirichlet_value_face is None
           else xp.asarray(wall_dirichlet_value_face))
-    if frame == "owner":
-        true_bnd = (flat.neighbor_src0_cell < 0) & (flat.neighbor_src1_idx < 0)
-        partner, mask = flat.mixed_nb_partner, flat.mixed_nb_mask
-    else:
-        true_bnd = xp.zeros(n_faces, dtype=bool)
-        partner, mask = flat.mixed_ow_partner, flat.mixed_ow_mask
-    mp = xp.maximum(partner, 0)
-    in_mixed = (partner >= 0)[:, None] & mask
+    true_bnd, mp, in_mixed = frame_boundary_points(xp, flat, frame)
     is_bnd = true_bnd[:, None] | in_mixed
     zero = xp.where(in_mixed, wz[mp][:, None], wz[:, None])
     value = xp.where(in_mixed, hv[mp][:, None], hv[:, None]) & ~zero

@@ -67,21 +67,19 @@ def wall_dirichlet_face_mask(provider, n_faces: int) -> np.ndarray:
     return np.isin(group_code, wall_codes)
 
 
-def _compute_open_boundary_face_mask(solver, flat) -> np.ndarray:
+def _compute_open_boundary_face_mask(solver) -> np.ndarray:
     """**开放边界**（流入/流出：FARFIELD、INLET、OUTLET 等）面掩码，供 k/omega 对流的来流条件使用
-    （`compute_scalar_convection_residual` 的 `open_boundary_face` 参数）。
-
-    分类读平均流热边界条件那一份唯一来源 `boundary/fr_ghost_state.py::ADIABATIC_THERMAL_BC_TYPES`（WALL/SYMMETRY）
-    的补集，不另建 BC 类型表；分组要求见 `boundary_groups`。
-    """
-    is_boundary = np.asarray(flat.is_boundary, dtype=np.bool_)
-    return open_boundary_code_mask(solver.boundary_ghost_provider, is_boundary.shape[0]) & is_boundary
+    （`compute_scalar_convection_residual` 的 `open_boundary_face` 参数），见 `open_boundary_code_mask`。"""
+    return open_boundary_code_mask(solver.boundary_ghost_provider, solver.mesh.face_connectivity.n_faces)
 
 
 def open_boundary_code_mask(provider, n_faces: int) -> np.ndarray:
-    """按边界组类型逐面标记"开放边界"（未匹配任何组的面按 `default_config`）。**不含**"是否真边界面"这一条
-    （内部面的 `group_code` 也是 -1）：CPU 与调用方的 `is_boundary` 求与，GPU 与自己从面邻居源推出的真边界掩码
-    求与（`gpu_scalar_transport`）。
+    """按边界组类型逐面标记"开放边界"（未匹配任何组的面按 `default_config`）。
+
+    分类读平均流热边界条件那一份唯一来源 `boundary/fr_ghost_state.py::ADIABATIC_THERMAL_BC_TYPES`（WALL/SYMMETRY）
+    的补集，不另建 BC 类型表；分组要求见 `boundary_groups`。**不含**"是否边界点"这一条（内部面的 `group_code`
+    也是 -1）：消费方按 `transport/faces.py::inflow_points` 与两侧坐标系的边界点（含混合拆分面的边界半区）求与。
+    CPU 与 GPU 共用这一张。
     """
     from autoflowcfd.boundary.fr_ghost_state import ADIABATIC_THERMAL_BC_TYPES
 

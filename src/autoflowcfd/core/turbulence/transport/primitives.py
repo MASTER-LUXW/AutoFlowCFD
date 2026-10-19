@@ -56,7 +56,7 @@ class CpuScalarTransport:
         self.conv_geom = conv_geom if conv_geom is not None else prepare_convection_geometry(
             solver_like, flat_face_override)
         self.wall_zero = _compute_wall_dirichlet_face_mask(solver_like)
-        self.open_face = _compute_open_boundary_face_mask(solver_like, flat)
+        self.open_face = _compute_open_boundary_face_mask(solver_like)
         Q = solver_like.state.Q
         self.rho, self.vel = Q[:, :, 0], Q[:, :, 1:4]
 
